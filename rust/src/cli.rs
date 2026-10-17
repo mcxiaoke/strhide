@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::config::{self, FileConfig};
 use crate::engine::{
     inspect_carrier, read_carrier, remove_carrier, verify_carrier, write_carrier, WriteOptions, PayloadSource,
 };
@@ -13,6 +14,10 @@ use crate::router::{find_adapter, list_all_strategies};
 #[derive(Parser, Debug)]
 #[command(name = "strhide", version, about = "Smart multi-format lossless container data hiding tool")]
 pub struct Cli {
+    /// Path to TOML config file (default: ./strhide.toml, then ~/.strhide/config.toml)
+    #[arg(long, global = true, value_name = "FILE")]
+    pub config: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -68,8 +73,8 @@ pub struct WriteArgs {
     #[arg(short = 'H', long = "hint", alias = "password-hint")]
     pub hint: Option<String>,
 
-    #[arg(long = "strategy", default_value = "auto")]
-    pub strategy: String,
+    #[arg(long = "strategy", help = "Hiding strategy (auto|ask|<name>; default: auto or config file)")]
+    pub strategy: Option<String>,
 
     #[arg(long = "stealth")]
     pub stealth: bool,
@@ -175,6 +180,7 @@ pub fn prompt_password(confirm: bool) -> Result<String, StrHideError> {
 pub fn resolve_password(
     pwd_opt: Option<&str>,
     pwd_file: Option<&Path>,
+    cfg: &FileConfig,
     encrypt_flag: bool,
     confirm: bool,
 ) -> Result<Option<String>, StrHideError> {
@@ -191,6 +197,18 @@ pub fn resolve_password(
         && !env_pwd.is_empty() {
             return Ok(Some(env_pwd));
         }
+    // Config file sources come after CLI args and the environment variable.
+    if let Some(p) = cfg.password.as_deref()
+        && !p.is_empty() {
+            return Ok(Some(p.to_string()));
+        }
+    if let Some(pf) = cfg.password_file.as_deref() {
+        let mut s = std::fs::read_to_string(pf).map_err(|e| {
+            StrHideError::General(format!("Failed to read password file from config '{}': {e}", pf.display()))
+        })?;
+        s = s.trim_end_matches(&['\r', '\n'][..]).to_string();
+        return Ok(Some(s));
+    }
     if encrypt_flag {
         // Only prompt when a terminal is actually attached; both stdin and
         // stdout must be TTYs, since some environments report stdin as a TTY
@@ -211,36 +229,44 @@ pub fn resolve_password(
 pub fn run_cli() -> i32 {
     let cli = Cli::parse();
 
+    let cfg = match config::load(cli.config.as_deref()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[ERROR] {e}");
+            return 1;
+        }
+    };
+
     match cli.command {
-        Commands::Write(args) => match handle_write(args) {
+        Commands::Write(args) => match handle_write(args, &cfg) {
             Ok(_) => 0,
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 1
             }
         },
-        Commands::Read(args) => match handle_read(args) {
+        Commands::Read(args) => match handle_read(args, &cfg) {
             Ok(_) => 0,
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 1
             }
         },
-        Commands::Remove(args) => match handle_remove(args) {
+        Commands::Remove(args) => match handle_remove(args, &cfg) {
             Ok(_) => 0,
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 1
             }
         },
-        Commands::Inspect(args) => match handle_inspect(args) {
+        Commands::Inspect(args) => match handle_inspect(args, &cfg) {
             Ok(_) => 0,
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 1
             }
         },
-        Commands::Verify(args) => match handle_verify(args) {
+        Commands::Verify(args) => match handle_verify(args, &cfg) {
             Ok(code) => code,
             Err(e) => {
                 eprintln!("[ERROR] {e}");
@@ -257,17 +283,25 @@ pub fn run_cli() -> i32 {
     }
 }
 
-fn handle_write(args: WriteArgs) -> Result<(), StrHideError> {
-    // --stealth implies encryption (its magics are password-derived); prompt for
-    // a password when neither -p nor a password source was supplied.
+fn handle_write(args: WriteArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
+    // Config values act as defaults; explicit CLI flags win. --stealth implies
+    // encryption (its magics are password-derived); prompt for a password when
+    // neither -p nor a password source was supplied.
+    let stealth = args.stealth || cfg.stealth.unwrap_or(false);
+    let encrypt = args.encrypt || cfg.encrypt.unwrap_or(false);
     let password = resolve_password(
         args.password.as_deref(),
         args.password_file.as_deref(),
-        args.encrypt || args.stealth,
+        cfg,
+        encrypt || stealth,
         true,
     )?;
 
-    let mut strategy = args.strategy;
+    let mut strategy = args
+        .strategy
+        .clone()
+        .or_else(|| cfg.strategy.clone())
+        .unwrap_or_else(|| "auto".to_string());
     if strategy == "ask" {
         let mut cf = File::open(&args.carrier)?;
         let strats = list_all_strategies(&mut cf);
@@ -312,7 +346,7 @@ fn handle_write(args: WriteArgs) -> Result<(), StrHideError> {
             .map_err(|e| StrHideError::General(format!("Base64 content is not valid UTF-8: {e}")))?;
         payload_source = PayloadSource::Text(&text_buf);
     } else if let Some(ref t) = args.text {
-        if args.unescape {
+        if args.unescape || cfg.unescape.unwrap_or(false) {
             text_buf = unescape_string(t);
             payload_source = PayloadSource::Text(&text_buf);
         } else {
@@ -333,17 +367,18 @@ fn handle_write(args: WriteArgs) -> Result<(), StrHideError> {
         ));
     }
 
+    let hint = args.hint.clone().or_else(|| cfg.hint.clone());
     let res = write_carrier(
         &args.carrier,
         payload_source,
         &WriteOptions {
             output_path: args.output.as_deref(),
             password: password.as_deref(),
-            password_hint: args.hint.as_deref(),
+            password_hint: hint.as_deref(),
             strategy: &strategy,
-            stealth: args.stealth,
-            preserve_time: args.preserve_time,
-            backup: !args.no_backup,
+            stealth,
+            preserve_time: args.preserve_time && cfg.preserve_time.unwrap_or(true),
+            backup: !args.no_backup && cfg.backup.unwrap_or(true),
         },
     )?;
 
@@ -368,10 +403,11 @@ fn handle_write(args: WriteArgs) -> Result<(), StrHideError> {
     Ok(())
 }
 
-fn handle_read(args: ReadArgs) -> Result<(), StrHideError> {
+fn handle_read(args: ReadArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
     let mut password = resolve_password(
         args.password.as_deref(),
         args.password_file.as_deref(),
+        cfg,
         false,
         false,
     )?;
@@ -427,10 +463,11 @@ fn handle_read(args: ReadArgs) -> Result<(), StrHideError> {
     Ok(())
 }
 
-fn handle_remove(args: RemoveArgs) -> Result<(), StrHideError> {
+fn handle_remove(args: RemoveArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
     let password = resolve_password(
         args.password.as_deref(),
         args.password_file.as_deref(),
+        cfg,
         false,
         false,
     )?;
@@ -452,10 +489,11 @@ fn handle_remove(args: RemoveArgs) -> Result<(), StrHideError> {
     Ok(())
 }
 
-fn handle_inspect(args: InspectArgs) -> Result<(), StrHideError> {
+fn handle_inspect(args: InspectArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
     let password = resolve_password(
         args.password.as_deref(),
         args.password_file.as_deref(),
+        cfg,
         false,
         false,
     )?;
@@ -505,10 +543,11 @@ fn handle_inspect(args: InspectArgs) -> Result<(), StrHideError> {
     Ok(())
 }
 
-fn handle_verify(args: VerifyArgs) -> Result<i32, StrHideError> {
+fn handle_verify(args: VerifyArgs, cfg: &FileConfig) -> Result<i32, StrHideError> {
     let password = resolve_password(
         args.password.as_deref(),
         args.password_file.as_deref(),
+        cfg,
         false,
         false,
     )?;

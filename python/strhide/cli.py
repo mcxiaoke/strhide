@@ -10,6 +10,7 @@ import os
 import sys
 from typing import Optional
 
+from strhide.config import FileConfig, load_config
 from strhide.core.engine import (
     inspect_carrier,
     read_carrier,
@@ -34,8 +35,12 @@ def prompt_password(confirm: bool = False) -> str:
     return pwd
 
 
-def resolve_password(args: argparse.Namespace, confirm: bool = False) -> Optional[str]:
-    """Resolve password from CLI arg, password file, environment variable, or interactive prompt."""
+def resolve_password(
+    args: argparse.Namespace, confirm: bool = False, cfg: Optional[FileConfig] = None
+) -> Optional[str]:
+    """Resolve password from CLI arg, password file, environment variable,
+    config file, or interactive prompt (in that order)."""
+    cfg = cfg or FileConfig()
     if getattr(args, "password", None):
         return args.password
     if getattr(args, "password_file", None):
@@ -43,6 +48,12 @@ def resolve_password(args: argparse.Namespace, confirm: bool = False) -> Optiona
             return f.read().strip("\r\n")
     if os.environ.get("STRHIDE_PASSWORD"):
         return os.environ.get("STRHIDE_PASSWORD")
+    # Config file sources come after CLI args and the environment variable.
+    if cfg.password:
+        return cfg.password
+    if cfg.password_file:
+        with open(cfg.password_file, "r", encoding="utf-8") as f:
+            return f.read().strip("\r\n")
     if getattr(args, "encrypt", False):
         # Only prompt when a terminal is actually attached. Both stdin and
         # stdout must be TTYs: some environments (e.g. Git Bash with
@@ -166,11 +177,33 @@ def unescape_string(s: str) -> str:
     return "".join(out)
 
 
-def cmd_write(args: argparse.Namespace) -> int:
+def _apply_config_defaults(args: argparse.Namespace, cfg: FileConfig) -> None:
+    """Merge config file values into parsed args as defaults.
+
+    Explicit CLI flags already parsed into ``args`` always win; config values
+    only fill in where argparse left its built-in default untouched. Note:
+    a ``true`` value in the config for a store_true-style flag cannot be
+    disabled from the command line (remove it from the config instead).
+    """
+    # write-only keys
+    if getattr(args, "strategy", None) is None:
+        args.strategy = cfg.strategy or "auto"
+    for flag in ("stealth", "encrypt", "unescape"):
+        if hasattr(args, flag) and not getattr(args, flag) and getattr(cfg, flag):
+            setattr(args, flag, True)
+    if getattr(args, "preserve_time", True) and cfg.preserve_time is False:
+        args.preserve_time = False
+    if getattr(args, "backup", True) and cfg.backup is False:
+        args.backup = False
+    if getattr(args, "hint", None) is None and cfg.hint:
+        args.hint = cfg.hint
+
+
+def cmd_write(args: argparse.Namespace, cfg: FileConfig) -> int:
     # --stealth implies encryption (its magics are password-derived); prompt
     # for a password when neither -p nor a password source was supplied.
     args.encrypt = bool(getattr(args, "encrypt", False)) or bool(getattr(args, "stealth", False))
-    password = resolve_password(args, confirm=True)
+    password = resolve_password(args, confirm=True, cfg=cfg)
 
     strategy = args.strategy
     if strategy == "ask":
@@ -228,8 +261,8 @@ def cmd_write(args: argparse.Namespace) -> int:
         return 1
 
 
-def cmd_read(args: argparse.Namespace) -> int:
-    password = resolve_password(args, confirm=False)
+def cmd_read(args: argparse.Namespace, cfg: FileConfig) -> int:
+    password = resolve_password(args, confirm=False, cfg=cfg)
     try:
         res = read_carrier(
             carrier_path=args.carrier,
@@ -287,8 +320,8 @@ def cmd_read(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_remove(args: argparse.Namespace) -> int:
-    password = resolve_password(args, confirm=False)
+def cmd_remove(args: argparse.Namespace, cfg: FileConfig) -> int:
+    password = resolve_password(args, confirm=False, cfg=cfg)
     try:
         res = remove_carrier(
             carrier_path=args.carrier,
@@ -307,8 +340,8 @@ def cmd_remove(args: argparse.Namespace) -> int:
         return 1
 
 
-def cmd_inspect(args: argparse.Namespace) -> int:
-    password = resolve_password(args, confirm=False)
+def cmd_inspect(args: argparse.Namespace, cfg: FileConfig) -> int:
+    password = resolve_password(args, confirm=False, cfg=cfg)
     try:
         res = inspect_carrier(carrier_path=args.carrier, password=password)
         if args.json:
@@ -335,8 +368,8 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         return 1
 
 
-def cmd_verify(args: argparse.Namespace) -> int:
-    password = resolve_password(args, confirm=False)
+def cmd_verify(args: argparse.Namespace, cfg: FileConfig) -> int:
+    password = resolve_password(args, confirm=False, cfg=cfg)
     try:
         res = verify_carrier(carrier_path=args.carrier, password=password)
         if args.json:
@@ -352,7 +385,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         return 1
 
 
-def cmd_list_strategies(args: argparse.Namespace) -> int:
+def cmd_list_strategies(args: argparse.Namespace, cfg: FileConfig) -> int:
     try:
         with open(args.carrier, "rb") as f:
             adapter = find_adapter(f)
@@ -368,14 +401,25 @@ def cmd_list_strategies(args: argparse.Namespace) -> int:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    config_parent = argparse.ArgumentParser(add_help=False)
+    # SUPPRESS keeps a subcommand that omits --config from clobbering a value
+    # given before the subcommand (subparser results overwrite the namespace).
+    config_parent.add_argument(
+        "--config",
+        default=argparse.SUPPRESS,
+        help="Path to TOML config file (default: ./strhide.toml, then ~/.strhide/config.toml)",
+    )
     parser = argparse.ArgumentParser(
         prog="strhide",
         description="Smart format-preserving lossless data hiding CLI tool.",
+        parents=[config_parent],
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # write
-    p_write = subparsers.add_parser("write", help="Hide data inside a carrier file")
+    p_write = subparsers.add_parser(
+        "write", parents=[config_parent], help="Hide data inside a carrier file"
+    )
     p_write.add_argument("-c", "--carrier", required=True, help="Host carrier file")
     p_write.add_argument("-d", "--data", help="Secret file to hide")
     p_write.add_argument("-t", "--text", help="Secret text string to hide")
@@ -388,14 +432,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_write.add_argument("--password-file", help="Read password from UTF-8 file")
     p_write.add_argument("-H", "--hint", "--password-hint", dest="hint", help="Optional password hint (displayed if password is required/forgotten)")
     p_write.add_argument("-e", "--encrypt", action="store_true", help="Prompt password for encryption")
-    p_write.add_argument("-s", "--strategy", default="auto", help="Hiding strategy (auto|ask|<name>)")
+    p_write.add_argument(
+        "-s", "--strategy", default=None,
+        help="Hiding strategy (auto|ask|<name>; default: auto or config file)",
+    )
     p_write.add_argument("--stealth", action="store_true", help="Stealth mode (strip static signatures)")
     p_write.add_argument("--no-preserve-time", dest="preserve_time", action="store_false", help="Do not preserve original file timestamps")
     p_write.add_argument("--no-backup", dest="backup", action="store_false", help="Do not create .bak backup in in-place mode")
     p_write.set_defaults(func=cmd_write, preserve_time=True, backup=True)
 
     # read
-    p_read = subparsers.add_parser("read", help="Extract hidden data from a carrier file")
+    p_read = subparsers.add_parser(
+        "read", parents=[config_parent], help="Extract hidden data from a carrier file"
+    )
     p_read.add_argument("-c", "--carrier", required=True, help="Host carrier file")
     p_read.add_argument("-o", "--output", help="Output file or directory")
     p_read.add_argument("-p", "--password", help="Password for decryption")
@@ -404,7 +453,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_read.set_defaults(func=cmd_read)
 
     # remove
-    p_remove = subparsers.add_parser("remove", aliases=["strip"], help="100%% loss-free restore and stripping")
+    p_remove = subparsers.add_parser(
+        "remove", aliases=["strip"], parents=[config_parent], help="100%% loss-free restore and stripping"
+    )
     p_remove.add_argument("-c", "--carrier", required=True, help="Host carrier file")
     p_remove.add_argument("-o", "--output", help="Output file path (default: in-place)")
     p_remove.add_argument("-p", "--password", help="Password for stealth mode removal")
@@ -413,7 +464,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_remove.set_defaults(func=cmd_remove, backup=True)
 
     # inspect
-    p_inspect = subparsers.add_parser("inspect", help="Inspect carrier structure and hidden metadata")
+    p_inspect = subparsers.add_parser(
+        "inspect", parents=[config_parent], help="Inspect carrier structure and hidden metadata"
+    )
     p_inspect.add_argument("-c", "--carrier", required=True, help="Host carrier file")
     p_inspect.add_argument("-p", "--password", help="Password to decrypt metadata")
     p_inspect.add_argument("--password-file", help="Read password from UTF-8 file")
@@ -421,7 +474,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_inspect.set_defaults(func=cmd_inspect)
 
     # verify
-    p_verify = subparsers.add_parser("verify", help="Diagnose host integrity and envelope health")
+    p_verify = subparsers.add_parser(
+        "verify", parents=[config_parent], help="Diagnose host integrity and envelope health"
+    )
     p_verify.add_argument("-c", "--carrier", required=True, help="Host carrier file")
     p_verify.add_argument("-p", "--password", help="Password for level 3 payload check")
     p_verify.add_argument("--password-file", help="Read password from UTF-8 file")
@@ -429,12 +484,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_verify.set_defaults(func=cmd_verify)
 
     # list-strategies
-    p_list = subparsers.add_parser("list-strategies", help="List available strategies for a carrier")
+    p_list = subparsers.add_parser(
+        "list-strategies", parents=[config_parent], help="List available strategies for a carrier"
+    )
     p_list.add_argument("-c", "--carrier", required=True, help="Host carrier file")
     p_list.set_defaults(func=cmd_list_strategies)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        cfg = load_config(getattr(args, "config", None))
+    except StrHideError as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        return 1
+    _apply_config_defaults(args, cfg)
+    return args.func(args, cfg)
 
 
 if __name__ == "__main__":
