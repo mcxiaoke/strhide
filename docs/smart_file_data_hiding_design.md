@@ -1,270 +1,538 @@
 # 智能多格式无损数据隐藏命令行工具（strhide）技术实现规范
 
-> 版本：v2.2 ｜ 状态：已正式实施（Python 原型全量交付，Go 移植就绪） ｜ 范围：核心协议规范、适配器算法、抗干扰与跨平台调用标准
+> 版本：v2.2 ｜ 状态：已实施（Python 原型全量交付，跨语言移植就绪） ｜ 范围：核心协议规范、适配器算法、容错机制与跨语言实现指南
 
 ---
 
-## 1. 规范范围、核心定位与可行性边界
+## 1. 规范范围、系统定位与设计边界
 
-### 1.1 工具核心定位
-本工具（`strhide`）定位为**“宿主功能保全型结构化数据容器（Function-Preserving Container Hiding）”**。
-* **专注于**：利用常见文件格式本身的物理结构规则（扩展块、保留区、中央目录间隙、尾部附加区），在**100% 保持宿主原有功能可用**的前提下，无损隐藏任意文本或二进制数据。
-* **非目标（明确不可行/过度工程化舍弃）**：
-  * **不做像素域/频域 LSB 隐写**：LSB 容量微小（仅占宿主千分之几）、极易在转码/压缩时损毁，且实现与提取极为脆弱。
-  * **不承诺对抗国家级数字取证分析**：在容器结构层面藏入数据，任何深入到字节码分析的取证工具（如 `binwalk`、格式解析器）必然能发现文件尺寸异常或未注册的扩展块。硬做全盘盲区隐写会导致定位极其低效且极度容易损坏文件。
-* **已落地的低特征模式（--stealth 去特征化规范）**：
-  * **去特征化/防静态特征码扫描**：彻底移除明文字符串魔数（如 `‰STRHIDE`、`STH!`），将头部与尾部签名替换为基于用户密码与固定域分离盐（`b"strhide-stealth-v1"`）派生的动态鉴权指纹，避免被简单的 `strings` 命令或静态 YARA 规则识别。
+### 1.1 系统定位
+`strhide` 是面向二进制载体文件的“宿主功能保全型结构化数据容器（Function-Preserving Container Hiding）”工具。
+* **核心目标**：利用常见文件格式本身的物理结构规则（私有辅助块、注释段、未引用流对象、扩展元数据、中央目录前置、可执行文件附加区等），在保持宿主文件原有物理结构和展示功能正常的前提下，无损嵌入任意文本或二进制载荷。
+* **设计原则**：
+  1. **功能保全优先**：宿主文件在常规播放器、阅读器、图像查看器或操作系统环境中必须保持正常打开与解析。
+  2. **100% 逐比特无损还原**：剥离隐藏数据后，载体文件必须完全恢复到注入前的原始状态，全量 SHA-256 哈希值逐比特一致。
+  3. **确定性与无歧义**：采用确定性的状态机与固化结构，避免不可靠的经验型启发式搜索。
+
+### 1.2 非设计目标与约束边界
+* **不采用像素域/声学 LSB 隐写**：LSB 修改载荷容量受限于宿主尺寸（通常低于 1%），且在格式重压缩、转码或轻微缩放时极易被破坏。
+* **不承诺对抗深度静态与动态数字取证分析**：在容器结构层面注入数据，文件分析工具（如 `binwalk`、格式解析器、熵分析器）可通过解析未分配区域、异常块或文件总尺寸波动检测出载荷存在。
+* **低特征模式（--stealth 去特征化规范）**：
+  * **防静态特征码扫描**：移除明文字符串魔数（如 `\x89STRHIDE`、`STH!`），将头部与尾部鉴权魔数替换为基于用户密码与固定域分离盐派生的伪随机字节序列。
+  * **具备可否认性（Plausible Deniability）**：在未提供正确密码的情况下，探测接口返回空，不输出任何表明存在隐藏容器的特征信息；该模式下严格禁止使用明文密码提示（`--hint`）。
 
 ---
 
-## 2. 严格安全拦截机制（禁止修改的文件矩阵）
+## 2. 安全预检与拦截矩阵
 
-任何带完整性校验、数字签名或自校验机制的文件，注入后必然导致校验失败。系统秉持 **Fail-Safe by Default（遇险则避）** 原则，在进入任何操作前执行强制探测，一旦命中直接拒绝并提示：
+为防止损坏具有完整性校验或数字签名的文件，系统在执行任何写操作前必须执行预检拦截（Fail-Safe by Default）。命中以下任一规则时，立即终止并返回具体错误信息：
 
-| 文件类别 | 触发条件 / 判定依据 | 终端提示信息与处理行为 |
+| 载体类别 | 判定条件 / 检验算法 | 终端拦截提示 |
 | :--- | :--- | :--- |
-| **已签名 Windows PE** (`.exe`, `.dll`, `.sys`) | `OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY]` 的 `VirtualAddress != 0` 且 `Size != 0` | `[ERROR] 拒绝操作：目标 PE 文件包含 Authenticode 数字签名。修改将导致签名失效，已被系统安全拦截。` |
-| **Android APK 包** (`.apk`) | 扩展名为 `.apk` 或匹配 ZIP 归档结构且为 Android 安装包 | `[ERROR] 拒绝操作：APK 格式不在支持列表中（不支持作为载体文件进行修改）。直接拒绝，零额外开销。` |
-| **已签名 PDF 文档** (`.pdf`) | 交叉引用表或文档对象中包含 `/ByteRange` 且带有 `/Type /Sig` 签名字典 | `[ERROR] 拒绝操作：目标 PDF 包含数字电子签名。结构修改会导致阅读器提示“证书无效或文档已被篡改”。` |
-| **已签名 Java 归档** (`.jar`, `.war`) | 归档内 `META-INF/` 目录下存在 `*.SF`、`*.RSA`、`*.DSA` 签名清单文件 | `[ERROR] 拒绝操作：目标 JAR 文件包含签名清单（META-INF/*.SF）。修改归档内容会导致 JVM 运行时拒绝加载。` |
-| **独立数字签名文件** (`.sig`, `.asc`, `.p7s`) | 匹配 PGP/GPG 二进制头或 Armor 文本签名头 | `[ERROR] 拒绝操作：目标文件本身为数字签名文件，不支持作为宿主。` |
-| **只读属性 / 无写权限** | 文件属性为只读，或所在目录缺乏写入/重命名权限 | `[ERROR] 拒绝操作：缺乏写入权限，无法安全执行原子写入与替换。` |
+| **已签名 Windows PE** (`.exe`, `.dll`, `.sys`, `.scr`) | PE Optional Header 的 `IMAGE_DIRECTORY_ENTRY_SECURITY`<br>（PE32: 偏移 128，PE32+: 偏移 144）<br>`VirtualAddress != 0` 且 `Size != 0` | `Windows PE contains an Authenticode digital signature. Modification will invalidate the signature.` |
+| **Android APK 包** (`.apk`) | 文件扩展名为 `.apk` 或匹配 Android 安装包特征 | `APK 格式不在支持列表中（不支持作为载体文件进行修改）。` |
+| **已签名 PDF 文档** (`.pdf`) | 全文件以 64KB 重叠滑动窗口流式扫描：<br>同时存在 `/ByteRange` 与 `/Type /Sig`（或 `/SubFilter /adbe.pkcs7`） | `PDF document contains a cryptographic digital signature. Modifying it will invalidate the signature.` |
+| **已签名 Java 归档** (`.jar`, `.war`, `.ear`) | ZIP 归档内部 `META-INF/` 目录下存在 `*.SF`、`*.RSA`、`*.DSA` 签名清单文件 | `JAR archive contains digital signature file (<filename>). Modifying it will break JVM verification.` |
+| **独立数字签名文件** (`.sig`, `.asc`, `.p7s`, `.p7b`) | 扩展名匹配或头部包含 PGP/GPG/PKCS#7 签名标识 | `File '<filename>' is a standalone digital signature file and cannot be used as a carrier.` |
+| **权限不足** | 载体文件或目标目录无写权限（`os.W_OK`） | `No write permission on target file / parent directory.` |
 
 ---
 
-## 3. 格式底层二进制深水区与容错算法
+## 3. 统一二进制信封协议规范（UBE v2.2）
 
-针对现实中非标准文件的各类缺陷，适配器必须具备以下精准容错能力：
+信封（Universal Binary Envelope, UBE）是统一封装载荷、鉴权参数与还原凭据的自闭环二进制结构。
+除特定格式适配器包装头（大端序）外，UBE 内部所有多字节整数一律采用**小端序（Little-Endian）**。
 
-### 3.1 PNG 尾部脏数据（Trailing Garbage）容错定位
-* **现实陷阱**：很多经第三方编辑器导出的 PNG，在 `IEND` 块（12 字节）之后常常伴随未对齐的 0 字节填充、缩略图或厂商私有标记。若单纯 `seek(-12)` 判定 IEND，必然误判报错。
-* **实现方案**：
-  1. 适配器从文件尾部向前建立 4KB 滑动缓冲区倒序寻找 `49 45 4E 44`（ASCII `"IEND"`）。
-  2. 验证 `IEND` 前 4 字节为 `00 00 00 00`（Length=0），后 4 字节为标准 CRC `AE 42 60 82`。
-  3. 确认后，将 UBE 信封严格插入在 `IEND` 块之前，并将原本尾随在 `IEND` 后的任何脏数据原样移动到最末尾保存。
-
-### 3.2 JPEG 标记扫描与假标记（False Marker）跳跃
-* **现实陷阱**：JPEG 的图像数据流（`SOS` 之后）是高熵压缩区，可能随机出现 `FF D9`。单纯字符串搜索会导致过早截断。
-* **实现方案**：适配器必须严格按 Marker 链顺序跳跃（解析每个段的 2 字节长度），抵达 `SOS`（`FF DA`）后，通过扫描排除字节填充（`FF 00`）与重启标记（`RSTm`），唯有匹配到真正的 `FF D9`（EOI）才作为数据注入边界。
-
-### 3.3 MP4 绝对偏移保护与 64 位大尺寸支持
-* **实现方案**：严格仅在 MP4 末尾追加顶层 64 位 `uuid` Box，绝不在 `moov`/`mdat` 前后插入，避免 `stco`/`co64` 帧偏移表失效。
-
-### 3.4 ZIP 家族双模自适应与 EOCD 修正
-* **实现方案**：
-  * 小数据（`≤ 60KB`）：直接注入 EOCD 注释区。
-  * 大数据（`> 60KB`）：采用 `pre_cd_inject` 策略。在中央目录（Central Directory）前插入信封，并把 EOCD（以及存在时的 ZIP64 EOCD）中的 `CD_Offset` 加上注入尺寸，保证所有解压工具与 Office 软件零警告打开。
-
----
-
-## 4. 全量原始文件指纹与 100% 无损 Remove 还原协议
-
-用户对工具最基本也是最高的要求是：**一旦执行 remove（strip）剥离隐藏数据，宿主文件必须逐字节 100% 还原为操作前的原始状态，不能有哪怕 1 比特的偏差**。
-
-为此，系统建立“**还原元数据自闭环**”机制，将还原所需的所有关键参数固化记录在信封头中：
-
-### 4.1 固定头部记录的还原凭证（Recovery Credentials）
-信封固定头部（前 80 字节）强制包含：
-1. `orig_host_size`（8 Bytes, uint64）：操作前原始宿主文件的**精确字节总数**。
-2. `orig_host_sha256`（32 Bytes）：操作前原始宿主文件的**全量完整 SHA-256 指纹**（流式计算整文件，绝非局部取样）。
-3. `inject_offset`（8 Bytes, uint64）：在原始宿主哪个精确字节偏移处切开插入了数据。
-4. `inject_size`（8 Bytes, uint64）：插入的总字节数（外层容器扩展块 + UBE 信封总长）。
-5. `patch_offset`（4 Bytes, uint32）：宿主头部被修改的字段偏移（如 RIFF 总大小字段、ZIP CD 偏移字段；无修改则为 0）。
-6. `orig_patch_val`（4 Bytes, uint32）：该被修改字段在注入前的原始 32 位整数值（无修改则为 0）。
-
-### 4.2 各格式 100% 无损还原（Remove）执行机制
-
-```
-[用户触发 strhide remove <carrier>]
-                 |
-                 v
-[定位 UBE 信封，读取 80B 头部还原凭证]
-                 |
-                 v
-[根据 strategy_id 执行精确逆向物理回滚]
-  |-- 策略 A (尾部追加型: EOF, PE Overlay, MP4 uuid):
-  |     直接调用 truncate(orig_host_size)
-  |
-  |-- 策略 B (中间切入型: PNG Chunk):
-  |     移除 [inject_offset : inject_offset + inject_size] 的字节
-  |     将后续的 IEND 块及脏数据整体前移贴合
-  |
-  |-- 策略 C (带头字段修正型: ZIP Pre-CD, WebP/WAV RIFF):
-  |     移除插入数据块，后续内容前移
-  |     将 patch_offset 处的 4 字节恢复为 orig_patch_val
-                 |
-                 v
-[计算还原后文件的全量 SHA-256]
-                 |
-                 +---> 校验: SHA-256 == orig_host_sha256 ?
-                           |-- 是 (100% 吻合) -> 原子写入替换原文件，提示还原成功
-                           |-- 否 (存在偏差) -> 立即中止并保留临时文件，报错拒绝覆盖！
-```
-
-通过这一套“**逆向切片拼接 + 原始补丁写回 + 全量 SHA-256 强校验**”流程，从数学和工程上绝对确保文件 100% 恢复如初。
-
----
-
-## 5. 极简统一二进制信封协议（UBE v2.2 规范）
-
-协议所有数值统一采用**小端序（Little-Endian）**编码：
+### 3.1 总体布局
 
 ```
 +--------------------------------------------------------------------------------+
-| 1. 固定头部 (Fixed Header, 112 Bytes, 8字节对齐)                               |
-|    - 前 80 字节为不可变鉴权区 (Immutable AAD) - 强绑定 AES-256-GCM 完整性认证   |
-|    - 后 32 字节为注入偏移、元数据尺寸与密码提示尺寸 (Mutable Offsets & Meta/Hint) |
+| 1. 固定头部 (Fixed Header, 112 字节, 8 字节对齐)                               |
+|    - 0x00 ~ 0x4F (80 字节): 不可变鉴权区 (Immutable AAD) - 绑定 AES-256-GCM 认证 |
+|    - 0x50 ~ 0x6F (32 字节): 物理偏移、尺寸与元数据长度参数                     |
 +--------------------------------------------------------------------------------+
-| 2. 密码提示块 (Password Hint Block, 可选, 变长 UTF-8, 最大 1024 Bytes)          |
-|    - 明文存放于头部之后、元数据之前，方便未解密时读取；隐蔽模式（--stealth）禁止使用 |
+| 2. 密码提示块 (Password Hint Block, 可选, 变长 UTF-8, 长度 ≤ 1024 字节)        |
 +--------------------------------------------------------------------------------+
-| 3. 加密元数据块 (Metadata Block, 变长 JSON, 密文含 16B GCM Tag)                 |
+| 3. 元数据块 (Metadata Block, 变长 JSON, 加密时含 16 字节 GCM Tag)              |
 +--------------------------------------------------------------------------------+
-| 4. 加密数据载荷流 (Payload Stream, 2MB 分块流式 AEAD, 每块含 16B GCM Tag)        |
+| 4. 载荷数据流 (Payload Stream, 2MB 分块流式 AEAD, 每块含 4B 长度 + 密文 + 16B Tag) |
 +--------------------------------------------------------------------------------+
-| 5. 通用定位尾标 (Universal Locator Trailer, 24 Bytes) - 自带 CRC32 与双向校验   |
+| 5. 通用定位尾标 (Universal Locator Trailer, 24 字节)                           |
 +--------------------------------------------------------------------------------+
 ```
 
-### 5.1 112 字节固定头部（Fixed Header）字段定义
+### 3.2 固定头部字段定义（112 字节）
 
-固定头部共 112 字节（8 字节严格对齐），其中**前 80 字节**定义为不可变 AAD（`get_aad()` 返回该切片），参与后续所有元数据与载荷分块的 AEAD 密码学强绑定鉴权：
+结构体打包格式（Python `struct`）：`<8sBBBB16s12sQ32sQQIIII`。
 
-| 偏移 | 字段名 | 长度 | 类型 | 取值与详细说明 |
+| 偏移 | 字段名 | 长度 | 类型 | 取值范围与说明 |
 | :--- | :--- | :--- | :--- | :--- |
-| `0x00` | `magic_header` | 8B | `bytes` | 标准模式：`89 53 54 52 48 49 44 45`（`‰STRHIDE`）；<br>隐蔽模式（`--stealth`）：`HMAC-SHA256("strhide-stealth-v1", password)[:8]` 动态魔数 |
-| `0x08` | `version` | 1B | `uint8` | 协议版本号，当前固定为 `0x02` |
-| `0x09` | `flags` | 1B | `uint8` | `bit 0`: 是否加密 (`0`=明文, `1`=加密)<br>`bit 1`: 是否压缩 (`0`=无, `1`=Deflate)<br>`bit 2`: 载荷类型 (`0`=文本, `1`=文件)<br>`bit 3`: 隐蔽模式 (`0`=普通, `1`=Stealth)<br>`bit 4`: 密码提示 (`0`=无, `1`=含密码提示)<br>`bit 5..7`: 保留填 `0` |
-| `0x0A` | `strategy_id` | 1B | `uint8` | 写入策略编号（`1`=EOF, `2`=PNG_CHUNK, `3`=MP4_UUID, `4`=ZIP_PRE_CD, `5`=JPEG_APP 等） |
-| `0x0B` | `reserved` | 1B | `uint8` | 对齐保留，填 `0x00` |
-| `0x0C` | `salt` | 16B | `bytes` | CSPRNG 生成的 128 位随机盐（明文模式填 `0`） |
-| `0x1C` | `base_nonce` | 12B | `bytes` | CSPRNG 生成的 96 位随机 Nonce 基础值 |
-| `0x28` | `orig_host_size`| 8B | `uint64`| 原始宿主文件的精确字节大小 |
-| `0x30` | `orig_host_sha256`| 32B| `bytes` | **原始宿主全量 SHA-256 指纹**，用于 `remove` 100% 一致性强校验 |
-| *(以上前 80 字节)* | *(Immutable AAD)* | | | *(作为 AES-GCM Additional Authenticated Data 参与鉴权)* |
-| `0x50` | `inject_offset`| 8B | `uint64`| 宿主数据被切开插入的绝对字节偏移 |
-| `0x58` | `inject_size` | 8B | `uint64`| 实际向宿主注入的总字节数（包装器 + 信封） |
-| `0x60` | `patch_offset` | 4B | `uint32`| 宿主头部被修改的字段偏移量（无修改填 0） |
-| `0x64` | `orig_patch_val`| 4B | `uint32`| 被修改字段在注入前的原始 32 位值（无修改填 0） |
-| `0x68` | `meta_len` | 4B | `uint32`| 加密后的元数据块长度（含 16B Tag） |
-| `0x6C` | `hint_len` | 4B | `uint32`| 密码提示文本的 UTF-8 字节长度（无提示填 0，最大 1024 字节） |
-| `0x70` | `padding` | 4B | `uint32`| 64 位对齐保留填 0 |
+| `0x00` | `magic_header` | 8B | `bytes` | 标准模式：`89 53 54 52 48 49 44 45`（`\x89STRHIDE`）；<br>隐蔽模式：PBKDF2+HKDF 派生的 8 字节伪随机值 |
+| `0x08` | `version` | 1B | `uint8` | 协议主版本号，当前固定为 `0x02` |
+| `0x09` | `flags` | 1B | `uint8` | `bit 0`: 是否加密（`0`=明文, `1`=加密）<br>`bit 1`: 是否压缩（`0`=无, `1`=Deflate）<br>`bit 2`: 载荷类型（`0`=文本, `1`=文件）<br>`bit 3`: 隐蔽模式（`0`=普通, `1`=Stealth）<br>`bit 4`: 密码提示（`0`=无, `1`=含密码提示）<br>`bit 5..7`: 保留，填 `0` |
+| `0x0A` | `strategy_id` | 1B | `uint8` | 策略 ID：`1`=eof, `2`=chunk, `3`=box_uuid, `4`=pre_cd_inject, `5`=app_segment, `6`=incremental, `7`=pe_overlay |
+| `0x0B` | `reserved` | 1B | `uint8` | 保留对齐，固定填 `0x00` |
+| `0x0C` | `salt` | 16B | `bytes` | CSPRNG 生成的 128 位随机盐（明文模式填全 0） |
+| `0x1C` | `base_nonce` | 12B | `bytes` | CSPRNG 生成的 96 位 Nonce 基础值 |
+| `0x28` | `orig_host_size` | 8B | `uint64` | 原始宿主文件的精确字节大小 |
+| `0x30` | `orig_host_sha256` | 32B | `bytes` | **原始宿主全量 SHA-256 指纹**，用于还原校验 |
+| *(0x00 ~ 0x4F)* | *(AAD 区)* | *80B* | | *上述前 80 字节作为 AES-256-GCM 不可变 AAD 参与完整性鉴权* |
+| `0x50` | `inject_offset` | 8B | `uint64` | 宿主文件被修改或切开插入的绝对物理字节偏移 |
+| `0x58` | `inject_size` | 8B | `uint64` | 向宿主注入的总字节数（外层格式容器头 + UBE 整体长度） |
+| `0x60` | `patch_offset` | 4B | `uint32` | 宿主头部被修改的字段物理偏移（无修改则填 0） |
+| `0x64` | `orig_patch_val` | 4B | `uint32` | 被修改字段在注入前的原始 32 位无符号整数值（无修改则填 0） |
+| `0x68` | `meta_len` | 4B | `uint32` | 元数据块长度（加密时包含 16 字节 GCM Tag） |
+| `0x6C` | `hint_len` | 4B | `uint32` | 密码提示文本 UTF-8 字节长度（无提示填 0，最大 1024） |
+| `0x70` | `padding` | 4B | `uint32` | 64 位对齐填充字段，固定为 `0x00000000` |
 
-### 5.2 密码提示规范（Password Hint Specification）
-* **存储位置与读取**：存放于 112 字节固定头部之后、元数据之前。当 `flags & FLAG_HAS_HINT` 时，直接读取 `hint_len` 长度的 UTF-8 字符串。
-* **安全性与互斥原则**：
-  * 明文存放以便在用户忘记密码时由 `inspect` 或 `read` 提示；
-  * **隐蔽模式严格互斥**：隐蔽模式下（`--stealth`）所有信封特征全平坦化，且必须持有密码才能计算 locator 魔数，在此模式下传 `--hint` 属于逻辑矛盾且会泄露元特征，系统直接拒绝（`StrHideError`）；
-  * **输入规范化**：提示文本在写入前强制执行 Unicode NFC 标准化，最大限制为 1024 字节。
+### 3.3 密码提示块（Password Hint Block）
+* **存储位置**：位于 112 字节固定头部之后、元数据块之前。
+* **物理表示**：当 `flags & FLAG_HAS_HINT (0x10)` 时，占用连续的 `hint_len` 字节（UTF-8 编码文本）。
+* **约束规则**：
+  * 明文存储，长度不超过 1024 字节。
+  * 写入前必须执行 Unicode NFC 标准化。
+  * **与隐蔽模式互斥**：当 `flags & FLAG_STEALTH (0x08)` 时，`hint_len` 必须为 0。尝试在 `--stealth` 下设置提示会直接报错并终止。
 
-### 5.3 24 字节定位尾标（Locator Trailer）
-位于 UBE 信封最末端，提供常数级 O(1) 逆向定位与防损坏检测：
-* `ube_offset`（8 Bytes, uint64）：信封在宿主文件中的起始绝对偏移。
-* `ube_total_size`（8 Bytes, uint64）：从 `magic_header` 到尾标结束的总长度。
-* `trailer_crc32`（4 Bytes, uint32）：前 16 字节（`ube_offset` 与 `ube_total_size`）的标准 IEEE 802.3 CRC32 校验码。
-* `trailer_magic`（4 Bytes, bytes）：标准模式为 `"STH!"`（`0x53544821`）；隐蔽模式为 `HMAC-SHA256("strhide-stealth-v1", password)[:4]`。
-* **双向校验强制规范**：在 `read`、`verify`（Level 2）以及 `remove` 阶段，系统必须显式读取尾标 24 字节并校验 CRC32 与魔数，任何单比特损坏立即拦截并拒绝寻址。
-
----
-
-## 6. 极简密码学流水线
-
-* **Unicode NFC 标准化**：
-  为彻底消除 macOS（NFD 分解型）与 Windows/Linux（NFC 合造型）在输入多语言字符、带音标字符时的底层字节差异，所有密码与秘密文本在参与计算前强制执行：
-  `password = unicodedata.normalize("NFC", password)`。
-* **密钥派生**：标准 **RFC 5869 HKDF-SHA256**。
-  ```python
-  PRK = HMAC_SHA256(key=salt, msg=password_nfc_utf8)
-  Key_Payload = HKDF_Expand(PRK, info=b"strhide-payload", length=32)
-  Key_Meta    = HKDF_Expand(PRK, info=b"strhide-metadata", length=32)
+### 3.4 加密元数据块（Metadata Block）
+* **原始数据**：JSON 字典的无空白 UTF-8 编码字节流：
+  ```json
+  {"filename":"secret.bin","raw_size":1048576,"raw_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","created_at":1773719840}
   ```
-* **隐蔽模式魔数派生**：
-  ```python
-  stealth_digest = HMAC_SHA256(key=b"strhide-stealth-v1", msg=password_nfc_utf8)
-  header_magic = stealth_digest[:8]
-  trailer_magic = stealth_digest[8:12]
+* **加密参数**：
+  * 算法：AES-256-GCM。
+  * 密钥：`meta_key`（32 字节）。
+  * Nonce：`base_nonce[:8] + ((base_nonce[8:12] 整数) ^ 0xFFFFFFFF).to_bytes(4, "little")`。
+  * AAD：固定头部前 80 字节（`Immutable AAD`）。
+  * 密文结构：`密文数据 || 16 字节 GCM Tag`（长度即为 `meta_len`）。
+
+### 3.5 载荷数据流（Payload Stream）
+数据流按 **2MB (`2,097,152` 字节)** 分块处理，采用流式 AEAD 封装，支持大文件流式读写而不耗尽内存。
+
+* **分块结构**：
   ```
-* **认证加密**：标准 **AES-256-GCM**。
-  * 将信封固定头部前 80 字节作为不可变 AAD 进行强绑定认证。
-  * 按 **2MB (`2,097,152 Bytes`)** 分块流式加密，每一块绑定 `FixedHeader_AAD || uint64_le(chunk_index) || uint8(is_last)`，杜绝重排与截断。
-* **压缩机制**：标准 **Deflate / Zlib**。若压缩率不足 2%（`comp_len >= raw_len * 0.98`），自动保留原流，避免逆膨胀。
+  +-------------------------+--------------------+---------------------+
+  | 4 字节 chunk_len (LE)   | 密文 (长度 ≤ 2MB)  | 16 字节 GCM Tag     |
+  +-------------------------+--------------------+---------------------+
+  ```
+* **分块加密参数**：
+  * **Nonce 生成**：
+    `chunk_nonce = base_nonce[:8] + ((base_nonce[8:12] 整数) ^ chunk_index).to_bytes(4, "little")`
+  * **分块 AAD 构造**（总长 89 字节）：
+    `chunk_aad = fixed_header_aad (80B) || chunk_index (8B, uint64_le) || is_last (1B, uint8)`
+    （`is_last` 取值：末块为 `1`，非末块为 `0`）。
+  * **空载荷边界处理**：
+    若载荷流长度为 0，写入单个 `chunk_index=0, is_last=1` 的空加密块（密文长度 0，尾随 16 字节 Tag）。
+
+### 3.6 通用定位尾标（Universal Locator Trailer, 24 字节）
+尾标位于 UBE 信封的最末尾，用于实现常数时间 $O(1)$ 的逆向边界定位与损坏探测。
+结构体打包格式（Python `struct`）：`<QQI4s`。
+
+| 偏移 | 字段名 | 长度 | 类型 | 取值与说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| `0x00` | `ube_offset` | 8B | `uint64` | UBE 固定头部在载体文件中的绝对起始物理偏移 |
+| `0x08` | `ube_total_size` | 8B | `uint64` | UBE 完整字节长度（`112 + hint_len + meta_len + payload_size + 24`） |
+| `0x10` | `trailer_crc32` | 4B | `uint32` | 前 16 字节（`ube_offset` 与 `ube_total_size`）的标准 IEEE 802.3 CRC32 校验码 |
+| `0x14` | `trailer_magic` | 4B | `bytes` | 标准模式：`53 54 48 21`（`STH!`）；<br>隐蔽模式：PBKDF2+HKDF 派生的 4 字节魔数 |
+
+* **双向校验规则**：
+  定位成功后，必须验证：
+  1. `trailer_crc32 == CRC32(pack("<QQ", ube_offset, ube_total_size))`
+  2. 读取 `ube_offset` 处的头部，验证 `header.magic_header` 与 `trailer.trailer_magic` 模式匹配。
+  3. 验证 `trailer.ube_offset + trailer.ube_total_size` 与载体中实际记录的结构边界严格吻合。
 
 ---
 
-## 7. 操作系统保全、默认原地备份与隐蔽性告警
+## 4. 密码学与密钥派生规范
 
-为了确保注入或还原后文件不在操作系统层面产生异常痕迹，同时保护用户原始数据：
-1. **原子替换保护**：所有写操作先写入同目录下的 `.tmp` 临时文件，通过自校验后调用 `os.replace` 原子提交，防止异常中断产生破损文件。
-2. **默认 In-place 模式保留原文件备份 (`<carrier>.bak`)**：
-   - 当用户在未指定 `-o` 的原地模式下执行 `write`（写入）或 `remove`（还原）时，系统在原子提交替换前，强制自动完整备份原载体为 **`<carrier_path>.bak`**。
-   - 允许传入 `--no-backup` 开关显式关闭备份（用于自动化测试或磁盘受限场景）。
-3. **隐蔽性容量膨胀安全告警 (>50%)**：
-   - 注入前自动计算 UBE 信封总长度与载体原始大小的比例。
-   - 当 `ube_total_size > orig_host_size * 0.5` 时，终端自动输出高亮警告（`[WARNING] Hidden data envelope size exceeds 50.0% of carrier file size... Noticeable file size inflation may compromise stealthiness!`），提醒用户剧烈文件体积增长易引起分析人员察觉。
-4. **属性与时间戳克隆**：保留原文件执行权限（`chmod`）与时间戳（`--preserve-time`），使修改后的载体在资源管理器中“修改时间”保持不变。
+### 4.1 Unicode NFC 标准化
+为消除 macOS（默认 NFD 分解型）与 Windows/Linux（默认 NFC 合造型）在输入包含重音或多语言字符时的底层字节差异，所有密码与文本数据在参与哈希计算前必须执行：
+$$\text{password} = \text{unicodedata.normalize}("NFC", \text{password})$$
+
+### 4.2 密钥派生流水线（PBKDF2 + HKDF-SHA256）
+采用标准库内置的 **PBKDF2-HMAC-SHA256 (100,000 轮)** 增加计算开销，防御 GPU 离线暴力破解，随后通过 RFC 5869 HKDF 进行密钥分离：
+
+1. **初始密钥材料（IKM）派生**：
+   $$\text{IKM} = \text{PBKDF2\_HMAC\_SHA256}(\text{password}=\text{pwd}_{\text{nfc}}, \text{salt}=\text{salt}, \text{iterations}=100000, \text{dklen}=32)$$
+2. **伪随机密钥（PRK）提取**：
+   $$\text{PRK} = \text{HKDF\_Extract}(\text{salt}=\text{salt}, \text{ikm}=\text{IKM}) = \text{HMAC\_SHA256}(\text{salt}, \text{IKM})$$
+3. **分域子密钥扩展**：
+   $$\text{Key}_{\text{payload}} = \text{HKDF\_Expand}(\text{PRK}, \text{info}=b"\text{strhide-payload}", \text{length}=32)$$
+   $$\text{Key}_{\text{meta}} = \text{HKDF\_Expand}(\text{PRK}, \text{info}=b"\text{strhide-metadata}", \text{length}=32)$$
+
+### 4.3 隐蔽模式动态魔数派生（PBKDF2 + HKDF-SHA256）
+隐蔽模式下，魔数不使用固定字符串，而是通过独立域分离盐与密码进行动态确定性派生：
+* 固定域分离盐：$b"\text{strhide-stealth-v1}"$
+* 迭代计算：
+  $$\text{IKM}_{\text{stealth}} = \text{PBKDF2\_HMAC\_SHA256}(\text{password}=\text{pwd}_{\text{nfc}}, \text{salt}=b"\text{strhide-stealth-v1}", \text{iterations}=100000, \text{dklen}=32)$$
+  $$\text{PRK}_{\text{stealth}} = \text{HKDF\_Extract}(b"\text{strhide-stealth-v1}", \text{IKM}_{\text{stealth}})$$
+  $$\text{magic\_header} = \text{HKDF\_Expand}(\text{PRK}_{\text{stealth}}, \text{info}=b"\text{strhide-stealth-header}", \text{length}=8)$$
+  $$\text{trailer\_magic} = \text{HKDF\_Expand}(\text{PRK}_{\text{stealth}}, \text{info}=b"\text{strhide-stealth-trailer}", \text{length}=4)$$
+
+### 4.4 数据压缩机制
+* 算法：标准 Raw Deflate（`wbits = -15`, 压缩级别 6）。
+* **逆膨胀检测规则**：
+  若压缩后字节数 $\ge \text{raw\_size} \times 0.98$（节省空间不足 2%），自动放弃压缩并采用原始未压缩流（置 `FLAG_COMPRESSED = 0`），避免高熵数据（如已有视频、压缩包）压缩后尺寸反而增长。
 
 ---
 
-## 8. CLI 命令行接口规范
+## 5. 格式专用适配器技术规范
 
-统一命令风格，保持简洁一致：
+系统包含 6 种专用格式适配器与 1 种通用兜底适配器，严格按格式物理规范进行数据放置与结构调整。
+
+```
+                    +---------------------------+
+                    |    find_adapter(stream)   |
+                    +-------------+-------------+
+                                  |
+     +------------+------------+--+---------+------------+------------+
+     |            |            |            |            |            |
+     v            v            v            v            v            v
+[PNG 适配器]  [JPEG 适配器]  [MP4 适配器]  [ZIP 适配器]  [PDF 适配器]  [PE 适配器]
+ chunk/eof   app_segment/eof box_uuid/eof pre_cd/eof   incremental/eof pe_overlay/eof
+```
+
+---
+
+### 5.1 PNG 适配器（`PngAdapter`）
+* **特征魔数**：`89 50 4E 47 0D 0A 1A 0A`。
+* **支持策略**：`chunk`（默认，`strategy_id = 2`）、`eof`（`strategy_id = 1`）。
+* **容错与状态机**：
+  1. **尾部脏数据容错（Dirty-Tail Tolerance）**：从文件尾部向前建立 64KB 滑动窗口，倒序匹配标准 12 字节 IEND 块（`00 00 00 00 49 45 4E 44 AE 42 60 82`）。
+  2. 记录 IEND 起始物理偏移 `iend_offset`。
+  3. 注入数据严格插入在 `iend_offset` 之前；原本跟在 IEND 后面的任何填充字节或脏数据，原样后移写在最终输出文件的末尾。
+* **数据包装**：
+  * Chunk Type：`prIv`（`0x70 0x72 0x49 0x76`，符合 W3C 私有辅助块命名规则）。
+  * 兼容性：`locate` 同时识别当前标准的 `prIv` 与旧版 `stEg` 块。
+  * 结构：`[4B length (大端)] + [4B b"prIv"] + [UBE 数据] + [4B CRC32 (大端)]`。
+  * CRC 范围：`CRC32(b"prIv" + UBE 数据)`。
+* **容量限制与自动降级**：
+  PNG 规范单块最大长度为 $2^{31}-1$（2GB）。若 UBE 尺寸超出，在 `auto` 模式下自动降级为 `eof` 策略；显式选择 `--strategy chunk` 时报错。
+* **隐蔽模式表现**：
+  在未提供密码时，探测函数检查尾标魔数与标准 `STH!` 不匹配，返回 `None`（可否认性）。
+
+---
+
+### 5.2 JPEG 适配器（`JpegAdapter`）
+* **特征魔数**：起始 `FF D8` (SOI)，结束 `FF D9` (EOI)。
+* **支持策略**：`app_segment`（默认，`strategy_id = 5`）、`eof`（`strategy_id = 1`）。
+* **标记段扫描状态机**：
+  1. 从 `FF D8` 开始遍历标记段。对于独立标记（`SOI`, `RSTm`, `TEM`）跳过单字节；对于普通标记读取 2 字节大端长度并跳过载荷。
+  2. 处理多字节 `0xFF` 填充对齐。
+  3. 抵达 `FF DA`（SOS，Start of Scan）时停止，获取 SOS 的起始物理偏移 `sos_offset`。
+* **数据包装（app_segment 策略）**：
+  * 采用 `COM`（Comment Segment，`0xFF 0xFE`）标记段。
+  * 插入位置：直接插入在 `sos_offset` 之前（位于所有图像扫描数据之前）。
+  * 结构：`[2B 0xFF 0xFE] + [2B segment_len (大端，值为 2 + ube_size)] + [UBE 数据]`。
+  * 宿主尾部特征：文件末尾保持为图像真实的 `FF D9`（EOI），末尾 0 附加字节。
+* **容量限制与自动降级**：
+  JPEG 单标记段最大长度为 65,535 字节，减去 2 字节长度字段后，最大净载荷为 **65,533 字节（约 64KB）**。
+  * `auto` 策略：当 UBE 尺寸 $\le 65,533$ 时使用 `app_segment`；$> 65,533$ 时**自动降级**为 `eof`（追加于真实 EOI 之后），并在输出中提示。
+  * 显式指定 `--strategy app_segment`：若超过 65,533 字节则直接抛出异常拒绝操作。
+
+---
+
+### 5.3 MP4 / MOV 适配器（`Mp4Adapter`）
+* **特征魔数**：文件偏移 4~8 字节为 `ftyp`、`moov`、`mdat`、`wide` 或 `skip`。
+* **支持策略**：`box_uuid`（默认，`strategy_id = 3`）、`eof`（`strategy_id = 1`）。
+* **Box 结构规范与 MediaInfo 一致性**：
+  采用符合 ISO/IEC 14496-12 规范的顶层 `uuid` Box，追加于文件末尾（EOF），不改变前序音视频 Sample 偏移量（`stco`/`co64` 保持 100% 有效）。
+  * **载荷中立 UUID**：采用标准 RFC 4122 v4 UUID：
+    `d41a8e9c-4f21-4e87-9a33-5b6d1284ef70`
+    （字节序列：`D4 1A 8E 9C 4F 21 4E 87 9A 33 5B 6D 12 84 EF 70`）。向下兼容旧版包含 `\x89STRHIDE` 的测试 UUID。
+  * **双模 Box 头设计**：
+    * 当 $24 + \text{ube\_size} < 2^{32}-1$（< 4GB）时：
+      采用标准 **24 字节 32 位 Box 头**：
+      `[4B size (大端)] + [4B b"uuid"] + [16B UUID] + [UBE 数据]`
+      （在此模式下 MediaInfo 检测结果为 0 Conformance Errors）。
+    * 当 $\ge 4\text{GB}$ 时：
+      采用标准 **32 字节 64 位 Large Box 头**：
+      `[4B size=1 (大端)] + [4B b"uuid"] + [8B largesize (大端)] + [16B UUID] + [UBE 数据]`。
+
+---
+
+### 5.4 ZIP 归档适配器（`ZipAdapter`）
+* **特征魔数**：前 4 字节为 `PK\x03\x04`、`PK\x05\x06` 或 `PK\x07\x08`。
+* **支持策略**：`pre_cd_inject`（默认，`strategy_id = 4`）、`eof`（`strategy_id = 1`）。
+* **EOCD 状态机与中央目录前置注入**：
+  1. 从文件尾部向前 65,558 字节扫描 `PK\x05\x06`（EOCD 记录魔数）。
+  2. 读取 EOCD 记录：
+     * `cd_size`: 偏移 12 处的 uint32（小端）。
+     * `cd_offset`: 偏移 16 处的 uint32（小端）。
+  3. **切入点**：在物理偏移 `cd_offset` 处将文件切开，插入 UBE 信封。
+  4. **指针修正**：修改 EOCD 记录中的 `cd_offset` 字段：
+     $$\text{new\_cd\_offset} = \text{orig\_cd\_offset} + \text{ube\_size}$$
+     记录还原凭证：`patch_offset = eocd_pos + 16`，`orig_patch_val = orig_cd_offset`。
+  5. 修正后中央目录与各文件实体条目完全保持一致，解压工具解析零警告。
+* **容量限制与自动降级**：
+  标准 32 位 ZIP 的 `cd_offset` 字段上限为 $2^{32}-1$。若 $\text{orig\_cd\_offset} + \text{ube\_size} \ge 0xFFFFFFFF$，在 `auto` 策略下自动降级为 `eof` 策略。
+
+---
+
+### 5.5 PDF 文档适配器（`PdfAdapter`）
+* **特征魔数**：`%PDF-`。
+* **支持策略**：`incremental`（默认，`strategy_id = 6`）、`eof`（`strategy_id = 1`）。
+* **ISO 32000-1 增量更新（Incremental Update）规范**：
+  1. **尾部解析**：从文件尾部 64KB 扫描最新 `%%EOF` 与 `startxref`，解析前序交叉引用表偏移 `prev_startxref`、对象编号基数 `new_obj_num`、`/Root` 引用与 `/Info` 引用。
+  2. **构造增量流对象**：
+     ```pdf
+     <new_obj_num> 0 obj
+     << /Type /Metadata /Length <ube_size> >>
+     stream
+     <UBE 二进制数据>
+     endstream
+     endobj
+     ```
+  3. **构造增量交叉引用表（xref）**：
+     ```pdf
+     xref
+     <new_obj_num> 1
+     <obj_offset:010d> 00000 n 
+     ```
+  4. **构造增量 Trailer 与终止符**：
+     ```pdf
+     trailer
+     <<
+     /Size <new_obj_num + 1>
+     /Root <root_ref>
+     /Prev <prev_startxref>
+     >>
+     startxref
+     <xref_offset>
+     %%EOF
+     ```
+  5. 文件以标准 `%%EOF` 终止，无任何尾随脏数据。
+* **O(1) 尾标快速定位**：
+  扫描尾部 128KB 窗口，定位 `%%EOF` 前最近的 `endstream`。UBE 尾部的 24 字节 `EnvelopeTrailer` 固定位于 `endstream` 关键字紧邻前部。读取该 24 字节并校验 CRC32 与魔数后，直接根据 `trailer.ube_offset` 跳转并核验开头的 `stream` 关键字，算法复杂度为常数时间 $O(1)$，对大于 128KB 乃至数百 MB 的载荷均具备可靠定位能力。
+* **自动降级**：若 PDF 尾部损坏或无法解析出有效 trailer，`auto` 策略自动降级为 `eof`。
+
+---
+
+### 5.6 Windows PE 适配器（`PeAdapter`）
+* **特征魔数**：DOS 头 `MZ`（`0x5A4D`）与 NT 签名 `PE\x00\x00`（`0x00004550`）。
+* **支持策略**：`pe_overlay`（默认，`strategy_id = 7`）、`eof`（`strategy_id = 1`）。
+* **节表物理边界与 Overlay 隔离**：
+  1. 解析 DOS 头偏移 `0x3C` 处的 `e_lfanew`，跳转至 NT 签名。
+  2. 读取 COFF 头部字段：节区数 `NumberOfSections`、可选头大小 `SizeOfOptionalHeader`。
+  3. 遍历节表（Section Table，每项 40 字节）：
+     $$\text{pe\_image\_end} = \max_{i=1}^{N} (\text{PointerToRawData}_i + \text{SizeOfRawData}_i)$$
+  4. **注入位置**：追加于原始文件末尾（`orig_host_size`），保留已有节区数据以及原文件可能存在的其他安装包 Overlay 数据。
+  5. 宿主可执行程序的所有节区物理偏移不变，代码、数据与导入表 100% 保持原有执行能力。
+* **安全拦截**：解析可选头的数据目录表第 4 项（`IMAGE_DIRECTORY_ENTRY_SECURITY`，证书表），若包含有效签名则直接拒绝修改。
+
+---
+
+### 5.7 通用降级适配器（`EofAdapter`）
+* **特征魔数**：任何二进制文件（兜底匹配）。
+* **支持策略**：`eof`（`strategy_id = 1`）。
+* **行为**：直接将 UBE 信封追加在文件物理末尾。适用于未知格式或专用策略降级场景。
+
+---
+
+## 6. 策略路由与尽力而为容错机制
+
+策略选择支持三种工作模式：
+
+1. **`auto` 模式（尽力而为自适应）**：
+   * 自动探测载体格式匹配最优先的专用适配器。
+   * 依据预估信封尺寸核对格式约束：
+     * JPEG：若尺寸 $> 65,533$ 字节，自动降级为 `eof`。
+     * ZIP：若新中央目录偏移 $\ge 4\text{GB}$，自动降级为 `eof`。
+     * PNG：若尺寸 $> 2\text{GB}$，自动降级为 `eof`。
+     * PDF：若结构异常无法增量更新，自动降级为 `eof`。
+   * 降级发生时，终端输出具体的 `[STRATEGY]` 说明通知用户。
+2. **显式策略模式（`--strategy <name>`）**：
+   * 用户指定策略名称（如 `--strategy app_segment`）。
+   * 若载体不支持该策略或载荷超出该策略的物理容量，**严格报错并拒绝执行**，不进行静默降级。
+3. **`ask` 模式（交互式挑选）**：
+   * 解析载体格式后，输出所有受支持的策略列表供用户选择输入序号。
+
+---
+
+## 7. 100% 逐比特无损还原协议
+
+执行 `strhide remove` 时，必须实现将载体文件恢复至操作前的逐比特精确状态。
+
+```
+[输入已隐藏文件]
+       |
+       v
+[定位 UBE 尾标与头部凭证 (Fixed Header)]
+       |
+       v
+[提取还原凭证]
+  - orig_host_size: uint64
+  - orig_host_sha256: 32 字节哈希
+  - inject_offset: uint64
+  - inject_size: uint64
+  - patch_offset: uint32
+  - orig_patch_val: uint32
+       |
+       v
+[逆向物理回滚]
+  |-- 尾部追加型 (eof, pe_overlay, box_uuid, incremental):
+  |     文件物理截断至 orig_host_size
+  |
+  |-- 中间切入型 (chunk):
+  |     切除 [inject_offset : inject_offset + inject_size]
+  |     后续 IEND 块与尾部脏数据前移拼合
+  |
+  |-- 头字段修正型 (pre_cd_inject):
+  |     切除插入数据，中央目录前移
+  |     在 patch_offset 处写入 4 字节 orig_patch_val
+       |
+       v
+[全量 SHA-256 强校验]
+  计算还原后临时文件的全量 SHA-256
+       |
+       +---> SHA-256 == orig_host_sha256 ?
+                 |-- 是 -> 原子替换原文件，完成还原
+                 |-- 否 -> 抛出 RestoreMismatchError，保留临时文件供排查，严禁覆盖！
+```
+
+---
+
+## 8. 操作系统保全、并发与原子操作规范
+
+1. **原子替换保护（Atomic Replacement）**：
+   所有写操作与还原操作均先写入临时文件（`<target>.strhide.tmp`），通过自校验后调用操作系统的原子替换接口（`os.replace` / `rename`），防止因电源中断或异常退出产生破损文件。
+2. **Windows 文件句柄防死锁**：
+   在 Windows 操作系统下，文件句柄被占用时执行 `os.remove` 会触发 `WinError 32`。系统严格保证在跳出 `with open(...)` 语句块、确认句柄关闭后，才在错误处理中清理临时文件。
+3. **默认原地备份机制**：
+   在未指定 `-o` 的原地模式下执行 `write` 或 `remove` 时，系统在替换前自动将原文件完整复制为 **`<carrier>.bak`**。提供 `--no-backup` 开关显式关闭备份。
+4. **属性与时间戳克隆**：
+   还原或写入完成后，自动同步原载体的权限模式（`chmod`）与访问/修改时间戳（`os.utime`）。
+5. **体积膨胀告警机制**：
+   当 UBE 总大小超过宿主原始大小的 **50%** 时，终端输出明显的黄色警告信息，提醒用户大幅度尺寸增加可能降低隐蔽性。
+
+---
+
+## 9. 命令行接口规范
+
+统一命令行接口遵循标准 POSIX / GNU 选项风格：
 
 ```bash
-# 1. 写入模式 (Write)
-strhide write -c <carrier> -d <secret-file> [-o <out>] [-p <pass>] [-H <hint>] [--strategy auto|ask|<name>] [--stealth] [--preserve-time]
-strhide write -c <carrier> -t "secret text" [--unescape] [-p <pass>] [--hint "密码提示"]
-strhide write -c <carrier> --text-file <path.txt> [-p <pass>] [-H "密码提示"]
+# 1. 写入隐藏数据 (Write)
+strhide write -c <carrier> -d <secret-file> [-o <out>] [-p <pass>] [-H <hint>] [--strategy auto|ask|<name>] [--stealth] [--preserve-time] [--no-backup]
+strhide write -c <carrier> -t "secret text" [--unescape] [-p <pass>] [-H <hint>]
+strhide write -c <carrier> --text-file <path.txt> [-p <pass>] [-H <hint>]
 strhide write -c <carrier> --text-base64 <b64_str> [-p <pass>]
-cat secret.bin | strhide write -c <carrier> --stdin -o output.png -p <pass> [-H "密码提示"]
+cat secret.bin | strhide write -c <carrier> --stdin -o output.png -p <pass>
 
-# 2. 提取模式 (Read)
+# 2. 提取隐藏数据 (Read)
 strhide read -c <carrier> [-o <out-dir|out-file>] [-p <pass>]
 strhide read -c <carrier> --stdout [-p <pass>]
 
-# 3. 三级校验 (Verify)
+# 3. 三级完整性诊断 (Verify)
 strhide verify -c <carrier> [-p <pass>] [--json]
 
-# 4. 检视信息 (Inspect)
+# 4. 检视载体与信封信息 (Inspect)
 strhide inspect -c <carrier> [-p <pass>] [--json]
 
-# 5. 100% 无损还原 (Remove / Strip)
-strhide remove -c <carrier> [-o <out>] [-p <pass>]
+# 5. 逐比特无损还原 (Remove)
+strhide remove -c <carrier> [-o <out>] [-p <pass>] [--no-backup]
 
-# 6. 列出可用策略 (List Strategies)
+# 6. 列出载体受支持的策略 (List Strategies)
 strhide list-strategies -c <carrier>
 ```
 
----
-
-## 9. 跨平台/跨Shell编码治理与调用规范
-
-为了保证在 Windows / Linux / macOS，不同 Shell（PowerShell / CMD / Bash / Zsh）以及各类语言（Node.js, Go, Python, Rust）中调用不出现乱码、截断或转义错误，建立以下调用通道规范：
-
-1. **载荷数据与控制参数彻底分离**：
-   - 复杂/超长文本：使用 `--text-file <path>` 或 `STRHIDE_TEXT` 环境变量；
-   - 二进制或多语言流：直接使用 `--stdin` / `--stdout` 走系统管道流（底层绑定无缓冲 `sys.stdin.buffer` / `os.Stdin`），100% 绕过控制台代码页（CP936/GBK/UTF-8）与转义符。
-2. **密码安全传递通道（按优先级）**：
-   - 方式 1：`STRHIDE_PASSWORD` 环境变量（跨进程调用最安全，不暴露在进程参数列表）；
-   - 方式 2：`--password-file <path>`（直接读取 UTF-8 文本）；
-   - 方式 3：交互式无回显安全输入；
-   - 方式 4：`-p / --password` 命令行直传。
-3. **密码提示传递**：
-   - 使用 `-H / --hint / --password-hint <hint>` 传入；
-   - 最大 1024 字节，自动 UTF-8 / NFC 标准化；
-   - 隐蔽模式（`--stealth`）严格禁止使用。
+### 跨平台非交互式通道
+* **密码传递**：支持 `STRHIDE_PASSWORD` 环境变量、`--password-file <path>`、`-p <password>` 及终端无回显交互输入。
+* **文本传递**：支持 `STRHIDE_TEXT` 环境变量、`--text-file <path>`、`--text-base64 <str>`、`-t <str>`。
+* **二进制流管道**：`--stdin` 与 `--stdout` 走系统标准流缓冲，避开控制台编码代码页干扰。
 
 ---
 
-## 10. 实施状态与测试实证记录
+## 10. 跨语言（Go / Rust）移植实现指南
 
-* **实施状态**：**已 100% 完成工程实施与生产级代码交付**（位于 `python/strhide`）。
-* **格式适配器落地矩阵**：
-  * `PngAdapter` (`adapters/png.py`)：`stEg` 辅助块注入、CRC 重新计算、尾部脏数据滑动窗口容错。
-  * `JpegAdapter` (`adapters/jpeg.py`)：Marker 状态机扫描、EOI（`FF D9`）精准边界定位。
-  * `Mp4Adapter` (`adapters/mp4.py`)：ISO BMFF 顶层 64 位 `uuid` Box 追加，不改变原音视频帧绝对偏移量。
-  * `ZipAdapter` (`adapters/zip.py`)：`pre_cd_inject` 策略与 Central Directory Offset 动态修正。
-  * `EofAdapter` (`adapters/eof.py`)：通用尾部追加适配器（支持 EXE, PDF 等）。
-* **自动化测试套件**：
-  * pytest 单元与集成测试套件：**41 / 41 项测试全部通过（100%）**。
-  * 真实世界大样本全矩阵批量测试（`tests/batch_test_runner.py`）：涵盖 `temp/testfiles` 中 26 个真实文件（PNG, JPG, MP4, ZIP, PDF, 未签名 EXE, 已签名 EXE, APK，最大 34MB），包含普通模式、加密模式、隐蔽模式及 100% 逐比特无损还原校验，**72 / 72 项细分测试全部通过（100.0%）**。
-* **下一步规划**：按本技术规范直接向 Go 1.22+ 交叉编译版本平移。
+为确保使用 Go 1.22+ 或 Rust 2021 实现时与 Python 版本具备 100% 互操作性，必须严格遵守以下对应关系：
+
+### 10.1 数据结构映射
+
+#### 固定头部（Fixed Header, 112 字节）
+* **Go 语言结构体**：
+  ```go
+  type EnvelopeHeader struct {
+      MagicHeader    [8]byte  // 0x00
+      Version        uint8    // 0x08
+      Flags          uint8    // 0x09
+      StrategyID     uint8    // 0x0A
+      Reserved       uint8    // 0x0B
+      Salt           [16]byte // 0x0C
+      BaseNonce      [12]byte // 0x1C
+      OrigHostSize   uint64   // 0x28 (LE)
+      OrigHostSHA256 [32]byte // 0x30
+      InjectOffset   uint64   // 0x50 (LE)
+      InjectSize     uint64   // 0x58 (LE)
+      PatchOffset    uint32   // 0x60 (LE)
+      OrigPatchVal   uint32   // 0x64 (LE)
+      MetaLen        uint32   // 0x68 (LE)
+      HintLen        uint32   // 0x6C (LE)
+      Padding        uint32   // 0x70 (LE)
+  }
+  ```
+* **Rust 结构体**：
+  ```rust
+  #[repr(C, packed)]
+  pub struct EnvelopeHeader {
+      pub magic_header: [u8; 8],
+      pub version: u8,
+      pub flags: u8,
+      pub strategy_id: u8,
+      pub reserved: u8,
+      pub salt: [u8; 16],
+      pub base_nonce: [u8; 12],
+      pub orig_host_size: u64,
+      pub orig_host_sha256: [u8; 32],
+      pub inject_offset: u64,
+      pub inject_size: u64,
+      pub patch_offset: u32,
+      pub orig_patch_val: u32,
+      pub meta_len: u32,
+      pub hint_len: u32,
+      pub padding: u32,
+  }
+  ```
+
+#### 通用定位尾标（Envelope Trailer, 24 字节）
+* **Go 语言结构体**：
+  ```go
+  type EnvelopeTrailer struct {
+      UbeOffset    uint64  // 0x00 (LE)
+      UbeTotalSize uint64  // 0x08 (LE)
+      TrailerCRC32 uint32  // 0x10 (LE, IEEE 802.3)
+      TrailerMagic [4]byte // 0x14
+  }
+  ```
+* **Rust 结构体**：
+  ```rust
+  #[repr(C, packed)]
+  pub struct EnvelopeTrailer {
+      pub ube_offset: u64,
+      pub ube_total_size: u64,
+      pub trailer_crc32: u32,
+      pub trailer_magic: [u8; 4],
+  }
+  ```
+
+### 10.2 密码学与标准库对应矩阵
+
+| 功能项 | Python 实现 | Go 1.22+ 对应实现 | Rust 对应 Crate |
+| :--- | :--- | :--- | :--- |
+| **PBKDF2** | `hashlib.pbkdf2_hmac` | `golang.org/x/crypto/pbkdf2` | `pbkdf2` |
+| **HKDF** | `hmac` + `hashlib.sha256` | `golang.org/x/crypto/hkdf` | `hkdf` |
+| **AES-GCM** | `cryptography.hazmat.primitives.ciphers.aead.AESGCM` | `crypto/aes` + `cipher.NewGCM` | `aes-gcm` |
+| **CRC32** | `zlib.crc32` | `hash/crc32.ChecksumIEEE` | `crc32fast` |
+| **Deflate** | `zlib.compressobj(wbits=-15)` | `compress/flate.NewWriter` | `flate2::write::DeflateEncoder` |
+| **Unicode NFC** | `unicodedata.normalize("NFC", s)` | `golang.org/x/text/unicode/norm.NFC` | `unicode-normalization` |
+
+---
+
+## 11. 实证测试与质量矩阵
+
+| 指标项 | 统计值 | 详情与覆盖范围 |
+| :--- | :--- | :--- |
+| **单元与集成测试（pytest）** | **42 / 42 全部通过 (100%)** | 覆盖信封编解码、PBKDF2 派生、流式加解密、所有 6 种适配器合成流、CLI 调用、Windows 原地备份与安全拦截 |
+| **全样本矩阵批量测试** | **72 / 72 全部通过 (100.0%)** | 覆盖 `temp/testfiles` 中 26 个真实文件（PNG, JPG, MP4, ZIP, PDF, 未签名 EXE, 已签名 EXE, APK），涵盖明文、加密、隐蔽模式及逐比特无损还原 |
+| **MediaInfo 合规验证** | **0 Conformance Errors** | MP4 载体使用中立 UUID 与 32/64 位 Box 头，MediaInfo 探测一致性错误为 0 |
+| **PDF 大载荷定位可靠性** | **100% 可用** | 经 200KB 不可压缩随机数据实证，增量更新尾部常数时间定位无异常 |
+| **Windows 文件并发** | **0 句柄锁死异常** | 句柄作用域退出后再执行文件操作，消除了 `WinError 32` 风险 |
