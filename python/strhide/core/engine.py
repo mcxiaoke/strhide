@@ -300,7 +300,7 @@ def write_carrier(
     if adapter.format_name() == "PNG" and selected_strategy == "chunk":
         actual_ube_offset = inject_offset + 8
     elif adapter.format_name() == "MP4" and selected_strategy == "box_uuid":
-        actual_ube_offset = inject_offset + 32
+        actual_ube_offset = inject_offset + adapter.calc_prefix_len(ube_total_size)
     elif adapter.format_name() == "JPEG" and selected_strategy == "app_segment":
         actual_ube_offset = inject_offset + 4
     elif adapter.format_name() == "PDF" and selected_strategy == "incremental":

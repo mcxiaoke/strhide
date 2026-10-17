@@ -38,6 +38,12 @@ class Mp4Adapter(HostAdapter):
     def choose_auto_strategy(self, stream: BinaryIO, ube_size: int) -> str:
         return "box_uuid"
 
+    def calc_prefix_len(self, ube_size: int) -> int:
+        """Calculate box header prefix length: 24 bytes for standard 32-bit box, 32 bytes for 64-bit box."""
+        if 24 + ube_size < 0xFFFFFFFF:
+            return 24
+        return 32
+
     def inject(
         self,
         host_in: BinaryIO,
@@ -57,10 +63,17 @@ class Mp4Adapter(HostAdapter):
         ube_in.seek(0)
 
         if strategy == "box_uuid":
-            # 64-bit Large Box format:
-            # [Size = 1 (4B)] + [Type = 'uuid' (4B)] + [LargeSize = 32 + ube_size (8B)] + [UUID (16B)] + [UBE]
-            largesize = 32 + ube_size
-            box_header = struct.pack(">I4sQ16s", 1, b"uuid", largesize, MP4_UUID_NEUTRAL)
+            if 24 + ube_size < 0xFFFFFFFF:
+                # Standard 32-bit Box format (ISO/IEC 14496-12 compliant for < 4GB):
+                # [Size (4B)] + [Type = 'uuid' (4B)] + [UUID (16B)] + [UBE]
+                total_box_size = 24 + ube_size
+                box_header = struct.pack(">I4s16s", total_box_size, b"uuid", MP4_UUID_NEUTRAL)
+            else:
+                # 64-bit Large Box format (ISO/IEC 14496-12 for >= 4GB):
+                # [Size = 1 (4B)] + [Type = 'uuid' (4B)] + [LargeSize = 32 + ube_size (8B)] + [UUID (16B)] + [UBE]
+                largesize = 32 + ube_size
+                box_header = struct.pack(">I4sQ16s", 1, b"uuid", largesize, MP4_UUID_NEUTRAL)
+
             out.write(box_header)
             shutil.copyfileobj(ube_in, out)
             inject_size = len(box_header) + ube_size
@@ -80,12 +93,24 @@ class Mp4Adapter(HostAdapter):
             return None
 
         # Determine if it's box_uuid or eof
-        # For box_uuid: 32 bytes before trailer.ube_offset should be the box header
+        # 1. Check standard 32-bit uuid box (24-byte header before trailer.ube_offset)
+        if trailer.ube_offset >= 24:
+            stego_in.seek(trailer.ube_offset - 24)
+            hdr24 = stego_in.read(24)
+            if len(hdr24) == 24:
+                size, box_type, uuid_ns = struct.unpack(">I4s16s", hdr24)
+                if size != 1 and box_type == b"uuid" and (
+                    size == 24 + trailer.ube_total_size
+                    or uuid_ns in (MP4_UUID_NEUTRAL, LEGACY_UUID_NAMESPACE)
+                ):
+                    return trailer.ube_offset, trailer.ube_total_size, "box_uuid"
+
+        # 2. Check 64-bit large uuid box (32-byte header before trailer.ube_offset, for >=4GB & backward compat)
         if trailer.ube_offset >= 32:
             stego_in.seek(trailer.ube_offset - 32)
-            hdr = stego_in.read(32)
-            if len(hdr) == 32:
-                size, box_type, largesize, uuid_ns = struct.unpack(">I4sQ16s", hdr)
+            hdr32 = stego_in.read(32)
+            if len(hdr32) == 32:
+                size, box_type, largesize, uuid_ns = struct.unpack(">I4sQ16s", hdr32)
                 if size == 1 and box_type == b"uuid" and (
                     largesize == 32 + trailer.ube_total_size
                     or uuid_ns in (MP4_UUID_NEUTRAL, LEGACY_UUID_NAMESPACE)
