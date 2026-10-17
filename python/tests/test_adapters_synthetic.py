@@ -186,17 +186,33 @@ def test_jpeg_lifecycle():
         orig_sha = compute_file_sha256(carrier)
         secret_text = "Hidden in JPEG EOI trail!"
 
-        # 1. Write
+        # 1. Write (auto selects app_segment for small data)
         res_w = write_carrier(carrier, data_text=secret_text, password="Pass123!JPEG")
         assert res_w["format"] == "JPEG"
+        assert res_w["strategy"] == "app_segment"
 
-        # 2. Read
+        # 2. Verify structure
+        res_v = verify_carrier(carrier, password="Pass123!JPEG")
+        assert res_v["level1_host"]["ok"] is True
+        assert res_v["level2_envelope"]["ok"] is True
+        assert res_v["level3_crypto"]["ok"] is True
+
+        # 3. Read
         res_r = read_carrier(carrier, password="Pass123!JPEG")
         assert res_r["data"].decode("utf-8") == secret_text
 
-        # 3. Remove & check bit match
+        # 4. Remove & check bit match
         res_rm = remove_carrier(carrier)
         assert res_rm["verified_identical"] is True
+        assert compute_file_sha256(carrier) == orig_sha
+
+        # 5. Explicit eof strategy test
+        res_w2 = write_carrier(carrier, data_text=secret_text, password="Pass123!JPEG", strategy="eof")
+        assert res_w2["strategy"] == "eof"
+        res_r2 = read_carrier(carrier, password="Pass123!JPEG")
+        assert res_r2["data"].decode("utf-8") == secret_text
+        res_rm2 = remove_carrier(carrier)
+        assert res_rm2["verified_identical"] is True
         assert compute_file_sha256(carrier) == orig_sha
 
 

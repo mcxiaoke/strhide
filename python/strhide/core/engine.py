@@ -207,6 +207,16 @@ def write_carrier(
         }
         meta_raw = json.dumps(meta_dict, separators=(",", ":")).encode("utf-8")
 
+        # Estimate total UBE size before finalizing header & AAD
+        to_encrypt_len = comp_len if is_compressed else raw_len
+        est_meta_len = len(meta_raw) + (16 if is_encrypted else 0)
+        est_payload_len = to_encrypt_len + ((to_encrypt_len + 2097152 - 1) // 2097152 * 16 if is_encrypted else 0)
+        est_ube_size = HEADER_STRUCT.size + len(hint_bytes) + est_meta_len + est_payload_len + 24
+
+        if strategy == "auto":
+            with open(carrier_path, "rb") as cf:
+                selected_strategy = adapter.choose_auto_strategy(cf, est_ube_size)
+
         # 8. Create and populate Header structure
         strat_id = strategy_to_id(selected_strategy)
         header = EnvelopeHeader(
@@ -289,6 +299,8 @@ def write_carrier(
         actual_ube_offset = inject_offset + 8
     elif adapter.format_name() == "MP4" and selected_strategy == "box_uuid":
         actual_ube_offset = inject_offset + 32
+    elif adapter.format_name() == "JPEG" and selected_strategy == "app_segment":
+        actual_ube_offset = inject_offset + 4
 
     # Patch final Header & Trailer directly in tmp_target
     header.inject_offset = inject_offset
@@ -330,11 +342,21 @@ def write_carrier(
     except Exception:
         pass
 
+    strategy_note = None
+    if adapter.format_name() == "JPEG":
+        if selected_strategy == "app_segment":
+            strategy_note = "Embedded into compliant JPEG COM segment before SOS (clean EOI at EOF, 0 trailing bytes)."
+        elif selected_strategy == "eof" and strategy == "auto":
+            strategy_note = f"Payload ({ube_total_size:,} bytes) exceeded JPEG single segment limit (64KB); automatically fell back to EOF overlay."
+        elif selected_strategy == "eof":
+            strategy_note = "Appended after JPEG EOI marker (EOF overlay)."
+
     return {
         "status": "success",
         "carrier": target_path,
         "format": adapter.format_name(),
         "strategy": selected_strategy,
+        "strategy_note": strategy_note,
         "raw_size": raw_size,
         "ube_size": ube_total_size,
         "is_encrypted": is_encrypted,

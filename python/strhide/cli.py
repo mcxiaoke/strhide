@@ -96,6 +96,8 @@ def cmd_write(args: argparse.Namespace) -> int:
         )
         print(f"[OK] Successfully embedded into '{res['carrier']}' using strategy '{res['strategy']}'.")
         print(f"     Payload: {res['raw_size']} bytes -> UBE: {res['ube_size']} bytes.")
+        if res.get("strategy_note"):
+            print(f"     [STRATEGY] {res['strategy_note']}")
         if res.get("password_hint"):
             print(f"     Password Hint: '{res['password_hint']}'.")
         if res.get("backup_file"):
