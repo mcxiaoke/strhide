@@ -242,7 +242,7 @@ pub fn run_cli() -> i32 {
             }
         },
         Commands::Verify(args) => match handle_verify(args) {
-            Ok(_) => 0,
+            Ok(code) => code,
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 1
@@ -377,20 +377,29 @@ fn handle_read(args: ReadArgs) -> Result<(), StrHideError> {
 
     let res = match read_carrier(&args.carrier, args.output.as_deref(), password.as_deref()) {
         Ok(r) => r,
-        Err(e) => {
+        // Discriminate by error variant, not by message text. A password error
+        // with no password supplied means the envelope is encrypted: show the
+        // hint, then prompt (interactive terminals only) and retry once.
+        Err(e @ StrHideError::Password(_)) if password.is_none() => {
             let msg = e.to_string();
-            if msg.contains("Password required") && password.is_none() {
-                if msg.contains("Hint: '") {
-                    if let Some(hint_part) = msg.split("Hint: '").nth(1).and_then(|s| s.rsplit('\'').nth(1)) {
-                        println!("[INFO] Password hint: {hint_part}");
-                    }
-                }
-                password = Some(prompt_password(false)?);
-                read_carrier(&args.carrier, args.output.as_deref(), password.as_deref())?
-            } else {
-                return Err(e);
+            if let Some(hint_part) = msg
+                .split("Hint: '")
+                .nth(1)
+                .and_then(|s| s.rsplit('\'').nth(1))
+            {
+                println!("[INFO] Password hint: {hint_part}");
             }
+            if !(std::io::IsTerminal::is_terminal(&std::io::stdin())
+                && std::io::IsTerminal::is_terminal(&std::io::stdout()))
+            {
+                return Err(StrHideError::Password(
+                    "Password required but no interactive terminal is available. Use -p/--password, --password-file, or STRHIDE_PASSWORD.".into(),
+                ));
+            }
+            password = Some(prompt_password(false)?);
+            read_carrier(&args.carrier, args.output.as_deref(), password.as_deref())?
         }
+        Err(e) => return Err(e),
     };
 
     if let Some(wf) = res.written_file {
@@ -495,7 +504,7 @@ fn handle_inspect(args: InspectArgs) -> Result<(), StrHideError> {
     Ok(())
 }
 
-fn handle_verify(args: VerifyArgs) -> Result<(), StrHideError> {
+fn handle_verify(args: VerifyArgs) -> Result<i32, StrHideError> {
     let password = resolve_password(
         args.password.as_deref(),
         args.password_file.as_deref(),
@@ -528,7 +537,14 @@ fn handle_verify(args: VerifyArgs) -> Result<(), StrHideError> {
         );
     }
 
-    Ok(())
+    // Align with the Python CLI: a Level 1 or Level 2 failure exits non-zero so
+    // scripts can gate on it; Level 3 (crypto) failures are reported but do not
+    // change the exit code.
+    Ok(if res.level1_host.ok && res.level2_envelope.ok {
+        0
+    } else {
+        1
+    })
 }
 
 fn handle_list_strategies(args: ListStrategiesArgs) -> Result<(), StrHideError> {
@@ -548,31 +564,139 @@ fn handle_list_strategies(args: ListStrategiesArgs) -> Result<(), StrHideError> 
     Ok(())
 }
 
+/// Decode C-style escape sequences, mirroring the Python implementation
+/// character for character.
+///
+/// Supported: `\n \r \t \a \b \f \v \\ \' \"`, octal `\ooo` (1-3 digits, up to
+/// U+01FF), `\xHH` (exactly 2 hex digits), `\uHHHH` (exactly 4, surrogate
+/// pairs combined, lone surrogates become U+FFFD), `\UHHHHHHHH` (8 hex digits).
+/// Malformed or unknown escapes are preserved verbatim. Non-ASCII input is
+/// kept as UTF-8 text (the previous Python path re-decoded it through latin-1
+/// and mangled it).
 fn unescape_string(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(&next) = chars.peek() {
-                chars.next();
-                match next {
-                    'n' => out.push('\n'),
-                    'r' => out.push('\r'),
-                    't' => out.push('\t'),
-                    '\\' => out.push('\\'),
-                    '\"' => out.push('\"'),
-                    '\'' => out.push('\''),
-                    _ => {
-                        out.push('\\');
-                        out.push(next);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c != '\\' || i + 1 >= chars.len() {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let esc = chars[i + 1];
+        match esc {
+            'n' => {
+                out.push('\n');
+                i += 2;
+            }
+            'r' => {
+                out.push('\r');
+                i += 2;
+            }
+            't' => {
+                out.push('\t');
+                i += 2;
+            }
+            'a' => {
+                out.push('\u{07}');
+                i += 2;
+            }
+            'b' => {
+                out.push('\u{08}');
+                i += 2;
+            }
+            'f' => {
+                out.push('\u{0C}');
+                i += 2;
+            }
+            'v' => {
+                out.push('\u{0B}');
+                i += 2;
+            }
+            '\\' => {
+                out.push('\\');
+                i += 2;
+            }
+            '\'' => {
+                out.push('\'');
+                i += 2;
+            }
+            '"' => {
+                out.push('"');
+                i += 2;
+            }
+            '0'..='7' => {
+                let mut value = 0u32;
+                let mut consumed = 0;
+                while consumed < 3 {
+                    match chars.get(i + 1 + consumed).and_then(|c| c.to_digit(8)) {
+                        Some(d) => {
+                            value = value * 8 + d;
+                            consumed += 1;
+                        }
+                        None => break,
                     }
                 }
-            } else {
-                out.push('\\');
+                out.push(char::from_u32(value).unwrap_or('\u{FFFD}'));
+                i += 1 + consumed;
             }
-        } else {
-            out.push(c);
+            'x' => {
+                if let Some(v) = read_hex(&chars, i + 2, 2) {
+                    out.push(char::from_u32(v).unwrap_or('\u{FFFD}'));
+                    i += 4;
+                } else {
+                    out.push('\\');
+                    i += 1;
+                }
+            }
+            'u' => {
+                let Some(v) = read_hex(&chars, i + 2, 4) else {
+                    out.push('\\');
+                    i += 1;
+                    continue;
+                };
+                let mut code = v;
+                let mut consumed = 4;
+                // Combine a UTF-16 surrogate pair written as two \u escapes.
+                // `consumed` counts characters after the leading "\u": the
+                // second escape adds its own 6 characters ("\u" + 4 digits).
+                if (0xD800..=0xDBFF).contains(&code) {
+                    if let Some(low) = read_hex(&chars, i + 8, 4) {
+                        if (0xDC00..=0xDFFF).contains(&low) {
+                            code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                            consumed = 10;
+                        }
+                    }
+                }
+                out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
+                i += 2 + consumed;
+            }
+            'U' => {
+                if let Some(v) = read_hex(&chars, i + 2, 8) {
+                    out.push(char::from_u32(v).unwrap_or('\u{FFFD}'));
+                    i += 10;
+                } else {
+                    out.push('\\');
+                    i += 1;
+                }
+            }
+            _ => {
+                out.push('\\');
+                out.push(esc);
+                i += 2;
+            }
         }
     }
     out
+}
+
+/// Read exactly `count` hex digits starting at `start`, or `None`.
+fn read_hex(chars: &[char], start: usize, count: usize) -> Option<u32> {
+    let mut value = 0u32;
+    for k in 0..count {
+        let d = chars.get(start + k)?.to_digit(16)?;
+        value = value * 16 + d;
+    }
+    Some(value)
 }

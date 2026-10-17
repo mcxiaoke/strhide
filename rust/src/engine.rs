@@ -162,6 +162,38 @@ pub fn sanitize_filename(name: &str) -> String {
     }
 }
 
+/// Build the "no hidden data" error for a carrier that `locate` could not
+/// resolve. A stealth envelope written with a password we were not given is
+/// invisible to magic-based location by design; `suspicious_structures` gives
+/// a password-independent structural opinion, which turns the bare "not found"
+/// message into actionable guidance instead of a dead end.
+fn no_hidden_data_error(
+    carrier: &mut File,
+    adapter: &'static dyn HostAdapter,
+    carrier_path: &Path,
+    password_supplied: bool,
+) -> StrHideError {
+    let mut msg = format!(
+        "No hidden strhide data found in '{}'",
+        carrier_path.display()
+    );
+    let hints = adapter.suspicious_structures(carrier);
+    if !hints.is_empty() {
+        if password_supplied {
+            msg.push_str(&format!(
+                ". Note: the carrier shows envelope-shaped structures ({}); a stealth envelope may exist under a different password.",
+                hints.join("; ")
+            ));
+        } else {
+            msg.push_str(&format!(
+                ". Note: the carrier shows envelope-shaped structures ({}); it may contain a stealth envelope — provide the password used at write time with -p/--password to check.",
+                hints.join("; ")
+            ));
+        }
+    }
+    StrHideError::NoHiddenData(msg)
+}
+
 pub fn write_carrier(
     carrier_path: &Path,
     source: PayloadSource,
@@ -682,12 +714,17 @@ pub fn read_carrier(
         loc = adapter.locate(&mut f, None)?;
     }
 
-    let (ube_offset, ube_total_size, _strategy_name) = loc.ok_or_else(|| {
-        StrHideError::General(format!(
-            "No hidden strhide data found in '{}'",
-            carrier_path.display()
-        ))
-    })?;
+    let (ube_offset, ube_total_size, _strategy_name) = match loc {
+        Some(l) => l,
+        None => {
+            return Err(no_hidden_data_error(
+                &mut f,
+                adapter,
+                carrier_path,
+                password.is_some(),
+            ))
+        }
+    };
 
     // Read fixed header
     f.seek(SeekFrom::Start(ube_offset))?;
@@ -854,12 +891,17 @@ pub fn remove_carrier(
             loc = adapter.locate(&mut cf, None)?;
         }
 
-        let (ube_offset, ube_total_size, _) = loc.ok_or_else(|| {
-            StrHideError::General(format!(
-                "No hidden strhide data found in '{}'",
-                carrier_path.display()
-            ))
-        })?;
+        let (ube_offset, ube_total_size, _) = match loc {
+            Some(l) => l,
+            None => {
+                return Err(no_hidden_data_error(
+                    &mut cf,
+                    adapter,
+                    carrier_path,
+                    password.is_some(),
+                ))
+            }
+        };
 
         cf.seek(SeekFrom::Start(ube_offset))?;
         let mut header_bytes = [0u8; HEADER_SIZE];

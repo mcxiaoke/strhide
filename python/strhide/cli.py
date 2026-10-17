@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import codecs
 import getpass
 import json
 import os
@@ -20,7 +19,7 @@ from strhide.core.engine import (
     write_carrier,
 )
 from strhide.core.router import find_adapter, list_all_strategies
-from strhide.errors import StrHideError
+from strhide.errors import PasswordError, StrHideError
 
 
 def prompt_password(confirm: bool = False) -> str:
@@ -58,6 +57,115 @@ def resolve_password(args: argparse.Namespace, confirm: bool = False) -> Optiona
     return None
 
 
+def unescape_string(s: str) -> str:
+    """Decode C-style escape sequences, mirroring the Rust implementation
+    character for character.
+
+    Supported: ``\\n \\r \\t \\a \\b \\f \\v \\\\ \\' \\"``, octal ``\\ooo``
+    (1-3 digits, up to U+01FF), ``\\xHH`` (exactly 2 hex digits), ``\\uHHHH``
+    (exactly 4, surrogate pairs combined, lone surrogates become U+FFFD),
+    ``\\UHHHHHHHH`` (8 hex digits). Malformed or unknown escapes are preserved
+    verbatim. Non-ASCII input is kept as text (the previous ``unicode_escape``
+    path re-decoded it through latin-1 and mangled it).
+    """
+    chars = list(s)
+    n = len(chars)
+    out: list[str] = []
+
+    def read_hex(start: int, count: int) -> Optional[int]:
+        if start + count > n:
+            return None
+        value = 0
+        for k in range(count):
+            d = chars[start + k]
+            if d not in "0123456789abcdefABCDEF":
+                return None
+            value = value * 16 + int(d, 16)
+        return value
+
+    simple = {
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "a": "\a",
+        "b": "\b",
+        "f": "\f",
+        "v": "\v",
+        "\\": "\\",
+        "'": "'",
+        '"': '"',
+    }
+
+    i = 0
+    while i < n:
+        c = chars[i]
+        if c != "\\" or i + 1 >= n:
+            out.append(c)
+            i += 1
+            continue
+        esc = chars[i + 1]
+        if esc in simple:
+            out.append(simple[esc])
+            i += 2
+        elif esc in "01234567":
+            value = 0
+            consumed = 0
+            while consumed < 3:
+                idx = i + 1 + consumed
+                if idx < n and chars[idx] in "01234567":
+                    value = value * 8 + int(chars[idx], 8)
+                    consumed += 1
+                else:
+                    break
+            out.append(chr(value))
+            i += 1 + consumed
+        elif esc == "x":
+            v = read_hex(i + 2, 2)
+            if v is None:
+                out.append("\\")
+                i += 1
+            else:
+                out.append(chr(v))
+                i += 4
+        elif esc == "u":
+            v = read_hex(i + 2, 4)
+            if v is None:
+                out.append("\\")
+                i += 1
+                continue
+            consumed = 4
+            # Combine a UTF-16 surrogate pair written as two \u escapes.
+            # `consumed` counts characters after the leading "\u": the second
+            # escape adds its own 6 characters ("\u" + 4 digits). Its digits
+            # start at i + 8.
+            if 0xD800 <= v <= 0xDBFF:
+                low = read_hex(i + 8, 4)
+                if low is not None and 0xDC00 <= low <= 0xDFFF:
+                    v = 0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00)
+                    consumed = 10
+            if 0xD800 <= v <= 0xDFFF:
+                out.append("\ufffd")
+            else:
+                out.append(chr(v))
+            i += 2 + consumed
+        elif esc == "U":
+            v = read_hex(i + 2, 8)
+            if v is None:
+                out.append("\\")
+                i += 1
+            else:
+                try:
+                    out.append(chr(v))
+                except ValueError:
+                    out.append("\ufffd")
+                i += 10
+        else:
+            out.append("\\")
+            out.append(esc)
+            i += 2
+    return "".join(out)
+
+
 def cmd_write(args: argparse.Namespace) -> int:
     # --stealth implies encryption (its magics are password-derived); prompt
     # for a password when neither -p nor a password source was supplied.
@@ -88,10 +196,7 @@ def cmd_write(args: argparse.Namespace) -> int:
         text_data = os.environ.get("STRHIDE_TEXT")
 
     if text_data and getattr(args, "unescape", False):
-        try:
-            text_data = codecs.decode(text_data.encode("utf-8"), "unicode_escape")
-        except Exception:
-            pass
+        text_data = unescape_string(text_data)
 
     try:
         res = write_carrier(
@@ -131,31 +236,38 @@ def cmd_read(args: argparse.Namespace) -> int:
             output_path=args.output,
             password=password,
         )
-    except Exception as e:
-        err_msg = str(e)
-        if "Password required" in err_msg and not password:
-            if "Hint: '" in err_msg:
-                try:
-                    hint_part = err_msg.split("Hint: '", 1)[1].rsplit("'", 1)[0]
-                    print(f"[INFO] Password hint: {hint_part}")
-                except Exception:
-                    pass
-            if not (sys.stdin.isatty() and sys.stdout.isatty()):
-                print("[ERROR] Password required but no interactive terminal is available.", file=sys.stderr)
-                return 1
-            password = prompt_password(confirm=False)
-            try:
-                res = read_carrier(
-                    carrier_path=args.carrier,
-                    output_path=args.output,
-                    password=password,
-                )
-            except StrHideError as err:
-                print(f"[ERROR] {err}", file=sys.stderr)
-                return 1
-        else:
+    except PasswordError as e:
+        # Discriminate by exception type, not by message text.
+        if password:
             print(f"[ERROR] {e}", file=sys.stderr)
             return 1
+        err_msg = str(e)
+        if "Hint: '" in err_msg:
+            try:
+                hint_part = err_msg.split("Hint: '", 1)[1].rsplit("'", 1)[0]
+                print(f"[INFO] Password hint: {hint_part}")
+            except Exception:
+                pass
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            print(
+                "[ERROR] Password required but no interactive terminal is available. "
+                "Use -p/--password, --password-file, or STRHIDE_PASSWORD.",
+                file=sys.stderr,
+            )
+            return 1
+        password = prompt_password(confirm=False)
+        try:
+            res = read_carrier(
+                carrier_path=args.carrier,
+                output_path=args.output,
+                password=password,
+            )
+        except StrHideError as err:
+            print(f"[ERROR] {err}", file=sys.stderr)
+            return 1
+    except StrHideError as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        return 1
 
     if res.get("written_file"):
         print(f"[OK] Extracted payload to '{res['written_file']}' ({res['raw_size']} bytes).")

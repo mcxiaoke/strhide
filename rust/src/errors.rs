@@ -23,6 +23,9 @@ pub enum StrHideError {
     UnsupportedFormat(String),
 
     #[error("{0}")]
+    NoHiddenData(String),
+
+    #[error("{0}")]
     General(String),
 }
 

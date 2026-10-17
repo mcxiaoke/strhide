@@ -2,7 +2,7 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::errors::StrHideError;
 
@@ -178,18 +178,24 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 pub fn check_jar_signature<R: Read + Seek + ?Sized>(
     reader: &mut R,
-    filename: Option<&str>,
+    _filename: Option<&str>,
 ) -> Result<Option<String>, StrHideError> {
-    if let Some(name) = filename {
-        let lower = name.to_lowercase();
-        if !lower.ends_with(".jar") && !lower.ends_with(".war") && !lower.ends_with(".ear") {
-            return Ok(None);
-        }
-    } else {
+    // Content-based detection: any ZIP container may be a signed JAR/APK-style
+    // archive regardless of its extension. Extension-gated checks let a signed
+    // archive renamed to .zip bypass the signature guard, so detection is done
+    // on the ZIP magic instead.
+    let start_pos = reader.stream_position()?;
+    reader.seek(SeekFrom::Start(0))?;
+    let mut magic = [0u8; 4];
+    if reader.read_exact(&mut magic).is_err()
+        || (magic != *b"PK\x03\x04"
+            && magic != *b"PK\x05\x06"
+            && magic != *b"PK\x07\x08")
+    {
+        reader.seek(SeekFrom::Start(start_pos))?;
         return Ok(None);
     }
 
-    let start_pos = reader.stream_position()?;
     let file_size = reader.seek(SeekFrom::End(0))?;
     let scan_len = std::cmp::min(file_size, 65536 + 22);
     reader.seek(SeekFrom::End(-(scan_len as i64)))?;
@@ -234,7 +240,7 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
                             {
                                 reader.seek(SeekFrom::Start(start_pos))?;
                                 return Ok(Some(format!(
-                                    "JAR archive contains digital signature file ({name}). Modifying it will break JVM verification."
+                                    "ZIP/JAR archive contains digital signature file ({name}). Modifying it will break JVM/signature verification."
                                 )));
                             }
                         }
@@ -267,6 +273,28 @@ pub fn run_all_rejection_checks(path: &Path) -> Result<(), StrHideError> {
             "No write permission on target file '{}'.",
             path.display()
         )));
+    }
+
+    // Parent directory write probe: the engine creates "<target>.strhide.tmp"
+    // next to the target before the atomic rename, so a read-only directory
+    // must be rejected here with a clear message instead of failing later with
+    // a raw OS error. This mirrors Python's os.access(parent_dir, W_OK) check
+    // in a portable way (the permission bit is unreliable on Windows).
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let probe = parent.join(format!(".strhide_write_probe_{}", std::process::id()));
+    match File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+        }
+        Err(e) => {
+            return Err(StrHideError::Rejection(format!(
+                "No write permission on target directory '{}': {e}",
+                parent.display()
+            )));
+        }
     }
 
     let mut file = File::open(path)?;

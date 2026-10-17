@@ -117,18 +117,26 @@ def check_pdf_signature(stream: BinaryIO) -> Optional[str]:
 
 
 def check_jar_signature(stream: BinaryIO, filename: Optional[str] = None) -> Optional[str]:
-    """Check if JAR contains META-INF signature files (*.SF, *.RSA, *.DSA)."""
-    if filename and not filename.lower().endswith((".jar", ".war", ".ear")):
-        return None
+    """Check whether a ZIP container carries META-INF signature files
+    (*.SF, *.RSA, *.DSA).
 
+    Detection is content-based: any ZIP container may be a signed JAR/APK-style
+    archive regardless of its file name. Extension-gated checks let a signed
+    archive renamed to .zip bypass the signature guard, so the file name is
+    only used for the message and the ZIP structure decides.
+    """
     start_pos = stream.tell()
     try:
+        stream.seek(0)
+        magic = stream.read(4)
+        if magic not in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
+            return None
         stream.seek(0)
         with zipfile.ZipFile(stream, "r") as zf:
             for name in zf.namelist():
                 upper = name.upper()
                 if upper.startswith("META-INF/") and (upper.endswith(".SF") or upper.endswith(".RSA") or upper.endswith(".DSA")):
-                    return f"JAR archive contains digital signature file ({name}). Modifying it will break JVM verification."
+                    return f"ZIP/JAR archive contains digital signature file ({name}). Modifying it will break JVM/signature verification."
         return None
     except Exception:
         return None

@@ -29,3 +29,13 @@ class UnsupportedFormatError(StrHideError):
 class RestoreMismatchError(StrHideError):
     """Raised when restored file SHA-256 does not match original host SHA-256."""
     pass
+
+
+class NoHiddenDataError(StrHideError):
+    """Raised when a carrier carries no locatable strhide envelope.
+
+    Distinguished from generic errors so callers can react programmatically
+    (e.g. suggest supplying a password for a probable stealth envelope)
+    without matching on message text.
+    """
+    pass

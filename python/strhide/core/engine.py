@@ -42,6 +42,7 @@ from strhide.core.rejection import run_all_rejection_checks
 from strhide.core.router import find_adapter, id_to_strategy, strategy_to_id
 from strhide.errors import (
     CorruptedDataError,
+    NoHiddenDataError,
     PasswordError,
     RejectionError,
     RestoreMismatchError,
@@ -493,6 +494,36 @@ def write_carrier(
     }
 
 
+def _no_hidden_data_error(
+    adapter,
+    carrier: "BinaryIO",
+    carrier_path: str,
+    password_supplied: bool,
+) -> NoHiddenDataError:
+    """Build the "no hidden data" error for a carrier that ``locate`` could not
+    resolve. A stealth envelope written with a password we were not given is
+    invisible to magic-based location by design; ``suspicious_structures``
+    gives a password-independent structural opinion, which turns the bare
+    "not found" message into actionable guidance instead of a dead end.
+    Mirrors the Rust implementation."""
+    msg = f"No hidden strhide data found in '{carrier_path}'"
+    hints = adapter.suspicious_structures(carrier)
+    if hints:
+        joined = "; ".join(hints)
+        if password_supplied:
+            msg += (
+                f". Note: the carrier shows envelope-shaped structures ({joined}); "
+                "a stealth envelope may exist under a different password."
+            )
+        else:
+            msg += (
+                f". Note: the carrier shows envelope-shaped structures ({joined}); "
+                "it may contain a stealth envelope — provide the password used at "
+                "write time with -p/--password to check."
+            )
+    return NoHiddenDataError(msg)
+
+
 def read_carrier(
     carrier_path: str,
     output_path: Optional[str] = None,
@@ -516,7 +547,7 @@ def read_carrier(
             loc = adapter.locate(f)
 
         if loc is None:
-            raise StrHideError(f"No hidden strhide data found in '{carrier_path}'")
+            raise _no_hidden_data_error(adapter, f, carrier_path, bool(password))
 
         ube_offset, ube_total_size, strategy_name = loc
 
@@ -650,7 +681,7 @@ def remove_carrier(
             loc = adapter.locate(cf)
 
         if loc is None:
-            raise StrHideError(f"No hidden data found in '{carrier_path}'")
+            raise _no_hidden_data_error(adapter, cf, carrier_path, bool(password))
 
         ube_offset, ube_total_size, _ = loc
         cf.seek(ube_offset)
