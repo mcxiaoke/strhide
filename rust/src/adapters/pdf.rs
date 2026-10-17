@@ -183,8 +183,9 @@ impl HostAdapter for PdfAdapter {
         let actual_obj_offset = inject_offset + 1; // skips leading \n
         out.write_all(obj_header.as_bytes())?;
 
-        // 3. Write UBE data stream
-        while let Ok(n) = ube_in.read(&mut buf) {
+        // 3. Write UBE data stream (propagate read errors instead of treating them as EOF)
+        loop {
+            let n = ube_in.read(&mut buf)?;
             if n == 0 {
                 break;
             }

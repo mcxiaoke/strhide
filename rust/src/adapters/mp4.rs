@@ -105,8 +105,9 @@ impl HostAdapter for Mp4Adapter {
             ube_size
         };
 
-        // Write UBE stream
-        while let Ok(n) = ube_in.read(&mut buf) {
+        // Write UBE stream (propagate read errors instead of treating them as EOF)
+        loop {
+            let n = ube_in.read(&mut buf)?;
             if n == 0 {
                 break;
             }
@@ -185,25 +186,72 @@ impl HostAdapter for Mp4Adapter {
         &self,
         stego_in: &mut dyn SeekRead,
     ) -> Result<(bool, String), StrHideError> {
+        // Walk the entire top-level box tree (mirrors the Python adapter): every
+        // box header must be self-consistent, 32-bit and 64-bit sizes handled,
+        // size==0 means "extends to EOF", and an `ftyp` box must be present.
+        // Checking only the first box would let a truncated or damaged tree
+        // pass Level 1, defeating the purpose of the diagnostic.
+        let total_size = stego_in.seek(SeekFrom::End(0))?;
         stego_in.seek(SeekFrom::Start(0))?;
-        let mut prefix = [0u8; 8];
-        if stego_in.read_exact(&mut prefix).is_err() {
-            return Ok((false, "File too small to be an MP4/MOV container".into()));
+
+        let mut offset = 0u64;
+        let mut box_count = 0u64;
+        let mut has_ftyp = false;
+
+        while offset < total_size {
+            let mut hdr = [0u8; 8];
+            if stego_in.read_exact(&mut hdr).is_err() {
+                return Ok((false, format!("Truncated box header at offset {offset}")));
+            }
+            let size = u32::from_be_bytes(hdr[0..4].try_into().unwrap());
+            let box_type = &hdr[4..8];
+            if box_type == *b"ftyp" {
+                has_ftyp = true;
+            }
+
+            let (box_size, header_len) = if size == 1 {
+                // 64-bit largesize follows the 8-byte header
+                let mut large = [0u8; 8];
+                if stego_in.read_exact(&mut large).is_err() {
+                    return Ok((false, format!(
+                        "Truncated 64-bit size for box {}",
+                        String::from_utf8_lossy(&box_type)
+                    )));
+                }
+                (u64::from_be_bytes(large), 16u64)
+            } else if size == 0 {
+                // Box extends to end of file
+                (total_size - offset, 8u64)
+            } else {
+                (size as u64, 8u64)
+            };
+
+            if box_size < header_len {
+                return Ok((false, format!(
+                    "Invalid box size {box_size} for box {}",
+                    String::from_utf8_lossy(&box_type)
+                )));
+            }
+
+            let box_offset = offset;
+            offset += box_size;
+            box_count += 1;
+            if offset > total_size {
+                return Ok((false, format!(
+                    "Box {} at offset {box_offset} extends past end of file",
+                    String::from_utf8_lossy(&box_type)
+                )));
+            }
+            stego_in.seek(SeekFrom::Start(offset))?;
         }
-        let tag = &prefix[4..8];
-        if tag != b"ftyp" && tag != b"moov" && tag != b"mdat" && tag != b"wide" && tag != b"skip" {
-            return Ok((
-                false,
-                format!("Invalid ISO BMFF initial box type: {:?}", String::from_utf8_lossy(tag)),
-            ));
+
+        if !has_ftyp {
+            return Ok((false, "MP4 missing ftyp box".into()));
         }
 
         Ok((
             true,
-            format!(
-                "Valid ISO BMFF container (first box '{}')",
-                String::from_utf8_lossy(tag)
-            ),
+            format!("Valid ISO BMFF container ({box_count} top-level boxes)"),
         ))
     }
 

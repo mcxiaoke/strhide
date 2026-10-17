@@ -111,7 +111,10 @@ impl HostAdapter for PngAdapter {
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(&CHUNK_PRIV);
 
-        while let Ok(n) = ube_in.read(&mut buf) {
+        // CRC pass: an I/O error here must propagate, not be mistaken for EOF,
+        // otherwise a truncated read would yield a wrong CRC silently.
+        loop {
+            let n = ube_in.read(&mut buf)?;
             if n == 0 {
                 break;
             }
@@ -125,7 +128,8 @@ impl HostAdapter for PngAdapter {
 
         // Write UBE data
         ube_in.seek(SeekFrom::Start(0))?;
-        while let Ok(n) = ube_in.read(&mut buf) {
+        loop {
+            let n = ube_in.read(&mut buf)?;
             if n == 0 {
                 break;
             }
@@ -210,19 +214,70 @@ impl HostAdapter for PngAdapter {
         &self,
         stego_in: &mut dyn SeekRead,
     ) -> Result<(bool, String), StrHideError> {
+        // Walk every chunk (not just the tail): each 8-byte header and 4-byte
+        // CRC must be present, the CRC32 over type+data must match, and the
+        // chunk stream must terminate with IEND. Data is streamed through the
+        // hasher so multi-GB chunks never materialize in memory.
         stego_in.seek(SeekFrom::Start(0))?;
         let mut magic = [0u8; 8];
         if stego_in.read_exact(&mut magic).is_err() || magic != PNG_MAGIC {
             return Ok((false, "Invalid PNG magic header".into()));
         }
 
-        match find_iend_offset(stego_in) {
-            Ok((offset, total)) => Ok((
-                true,
-                format!("Valid PNG image (IEND chunk at {offset}, total {total} bytes)"),
-            )),
-            Err(e) => Ok((false, format!("Corrupted PNG structure: {e}"))),
+        let mut found_private: Option<String> = None;
+        loop {
+            let mut hdr = [0u8; 8];
+            if stego_in.read_exact(&mut hdr).is_err() {
+                return Ok((false, "Truncated PNG chunk header".into()));
+            }
+            let length = u32::from_be_bytes(hdr[0..4].try_into().unwrap());
+            let mut chunk_type = [0u8; 4];
+            chunk_type.copy_from_slice(&hdr[4..8]);
+            if chunk_type == CHUNK_PRIV || chunk_type == CHUNK_STEG {
+                found_private = Some(String::from_utf8_lossy(&chunk_type).to_string());
+            }
+
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(&chunk_type);
+            let mut remaining = length as u64;
+            let mut buf = [0u8; 64 * 1024];
+            while remaining > 0 {
+                let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
+                let n = stego_in.read(&mut buf[..to_read])?;
+                if n == 0 {
+                    return Ok((false, format!(
+                        "Truncated data for chunk {}",
+                        String::from_utf8_lossy(&chunk_type)
+                    )));
+                }
+                hasher.update(&buf[..n]);
+                remaining -= n as u64;
+            }
+
+            let mut crc_bytes = [0u8; 4];
+            if stego_in.read_exact(&mut crc_bytes).is_err() {
+                return Ok((false, format!(
+                    "Truncated CRC for chunk {}",
+                    String::from_utf8_lossy(&chunk_type)
+                )));
+            }
+            if u32::from_be_bytes(crc_bytes) != hasher.finalize() {
+                return Ok((false, format!(
+                    "CRC32 mismatch for chunk {}",
+                    String::from_utf8_lossy(&chunk_type)
+                )));
+            }
+
+            if chunk_type == *b"IEND" {
+                break;
+            }
         }
+
+        let detail = match found_private {
+            Some(c) => format!("private chunk '{c}' present"),
+            None => "clean standard chunks".to_string(),
+        };
+        Ok((true, format!("PNG structure valid ({detail})")))
     }
 
     fn suspicious_structures(&self, stego_in: &mut dyn SeekRead) -> Vec<String> {

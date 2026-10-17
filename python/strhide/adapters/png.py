@@ -202,24 +202,35 @@ class PngAdapter(HostAdapter):
     def verify_structure(self, stego_in: BinaryIO) -> Tuple[bool, str]:
         stego_in.seek(0)
         if stego_in.read(8) != PNG_MAGIC:
-            return False, "Not a valid PNG file"
+            return False, "Invalid PNG magic header"
 
         found_chunk = None
         has_iend = False
         while True:
             hdr = stego_in.read(8)
             if len(hdr) < 8:
-                break
+                return False, "Truncated PNG chunk header"
             length, chunk_type = struct.unpack(">I4s", hdr)
-            data_start = stego_in.tell()
 
             if chunk_type in SUPPORTED_CHUNKS:
                 found_chunk = chunk_type.decode("latin-1", errors="replace")
 
-            stego_in.seek(data_start + length)
+            # Stream chunk data through CRC32 (bounded memory), then verify
+            # the stored CRC over type + data matches.
+            crc = zlib.crc32(chunk_type)
+            remaining = length
+            while remaining > 0:
+                chunk = stego_in.read(min(64 * 1024, remaining))
+                if not chunk:
+                    return False, f"Truncated data for chunk {chunk_type.decode('ascii', errors='ignore')}"
+                crc = zlib.crc32(chunk, crc)
+                remaining -= len(chunk)
+
             crc_bytes = stego_in.read(4)
             if len(crc_bytes) < 4:
                 return False, f"Truncated CRC for chunk {chunk_type.decode('ascii', errors='ignore')}"
+            if struct.unpack(">I", crc_bytes)[0] != (crc & 0xFFFFFFFF):
+                return False, f"CRC32 mismatch for chunk {chunk_type.decode('ascii', errors='ignore')}"
 
             if chunk_type == b"IEND":
                 has_iend = True

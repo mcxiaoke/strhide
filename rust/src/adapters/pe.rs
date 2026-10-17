@@ -186,7 +186,8 @@ impl HostAdapter for PeAdapter {
         let ube_size = ube_in.seek(SeekFrom::End(0))?;
         ube_in.seek(SeekFrom::Start(0))?;
 
-        while let Ok(n) = ube_in.read(&mut buf) {
+        loop {
+            let n = ube_in.read(&mut buf)?;
             if n == 0 {
                 break;
             }

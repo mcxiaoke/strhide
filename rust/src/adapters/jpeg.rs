@@ -150,7 +150,8 @@ impl HostAdapter for JpegAdapter {
         out.write_all(&JPEG_COM)?;
         out.write_all(&seg_len.to_be_bytes())?;
 
-        while let Ok(n) = ube_in.read(&mut buf) {
+        loop {
+            let n = ube_in.read(&mut buf)?;
             if n == 0 {
                 break;
             }

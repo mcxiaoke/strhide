@@ -156,8 +156,9 @@ impl HostAdapter for ZipAdapter {
 
         let inject_offset = cd_offset;
 
-        // 2. Write UBE data stream
-        while let Ok(n) = ube_in.read(&mut buf) {
+        // 2. Write UBE data stream (propagate read errors instead of treating them as EOF)
+        loop {
+            let n = ube_in.read(&mut buf)?;
             if n == 0 {
                 break;
             }

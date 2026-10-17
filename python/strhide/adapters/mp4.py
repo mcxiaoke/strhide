@@ -146,7 +146,7 @@ class Mp4Adapter(HostAdapter):
         while offset < total_size:
             hdr = stego_in.read(8)
             if len(hdr) < 8:
-                break
+                return False, f"Truncated box header at offset {offset}"
             size, box_type = struct.unpack(">I4s", hdr)
             if box_type == b"ftyp":
                 has_ftyp = True
@@ -167,8 +167,11 @@ class Mp4Adapter(HostAdapter):
             if size < read_header:
                 return False, f"Invalid box size {size} for box {box_type}"
 
+            box_offset = offset
             offset += size
             box_count += 1
+            if offset > total_size:
+                return False, f"Box {box_type} at offset {box_offset} extends past end of file"
             stego_in.seek(offset)
 
         if not has_ftyp:
