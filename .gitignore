@@ -1,0 +1,108 @@
+# ============================================================
+# C 构建产物
+# ============================================================
+bin/
+release/
+*.exe
+*.o
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.dll
+*.so
+*.dylib
+*.dSYM/
+
+# ============================================================
+# .NET / C# 构建产物
+# ============================================================
+**/obj/
+**/bin/
+*.user
+*.suo
+*.cache
+*.log
+*.vspscc
+*.vssscc
+*.vsix
+*.nupkg
+*.snupkg
+project.assets.json
+project.nuget.cache
+*.nuget.dgspec.json
+*.nuget.g.props
+*.nuget.g.targets
+FodyWeavers.xsd
+
+# ============================================================
+# Node.js
+# ============================================================
+node_modules/
+.npm-cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+
+# ============================================================
+# Web
+# ============================================================
+dist/
+screenshots/
+
+# ============================================================
+# IDE / 编辑器
+# ============================================================
+# Visual Studio
+.vs/
+
+# Visual Studio Code
+.vscode/
+
+# JetBrains (Rider / CLion etc.)
+.idea/
+*.DotSettings.user
+
+# ============================================================
+# 操作系统生成文件
+# ============================================================
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+.directory
+
+**/__pycache__/
+
+# Agents
+.workbuddy/
+.box-agent/
+
+*.json
+
+# ============================================================
+# 项目特定
+# ============================================================
+lib/
+debug/
+target/
+build/
+build-win/
+build-linux/
+*.cfg
+*.log
+temp*
+.dumate/
+workbuddy/
+.trae/
