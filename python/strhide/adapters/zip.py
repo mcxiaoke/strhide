@@ -12,6 +12,8 @@ from strhide.errors import CorruptedDataError, UnsupportedFormatError
 
 ZIP_LOCAL_MAGIC = b"PK\x03\x04"
 ZIP_EOCD_MAGIC = b"PK\x05\x06"
+ZIP_SPAN_MAGIC = b"PK\x07\x08"
+ZIP_KNOWN_MAGICS = (ZIP_LOCAL_MAGIC, ZIP_EOCD_MAGIC, ZIP_SPAN_MAGIC)
 EOCD_SIGNATURE = 0x06054B50
 
 
@@ -51,7 +53,7 @@ class ZipAdapter(HostAdapter):
         try:
             stream.seek(0)
             prefix = stream.read(4)
-            return prefix in (ZIP_LOCAL_MAGIC, ZIP_EOCD_MAGIC)
+            return prefix in ZIP_KNOWN_MAGICS
         finally:
             stream.seek(start_pos)
 
@@ -59,7 +61,14 @@ class ZipAdapter(HostAdapter):
         return ["pre_cd_inject", "eof"]
 
     def choose_auto_strategy(self, stream: BinaryIO, ube_size: int) -> str:
-        return "pre_cd_inject"
+        # Best-effort: check if EOCD is valid and 32-bit CD offset won't overflow
+        try:
+            _, cd_offset, _ = find_eocd_offset(stream)
+            if cd_offset + ube_size >= 0xFFFFFFFF:
+                return "eof"
+            return "pre_cd_inject"
+        except Exception:
+            return "eof"
 
     def inject(
         self,
@@ -75,11 +84,22 @@ class ZipAdapter(HostAdapter):
         if strategy != "pre_cd_inject":
             raise UnsupportedFormatError(f"Strategy '{strategy}' not supported by ZIP adapter")
 
-        eocd_pos, cd_offset, cd_size = find_eocd_offset(host_in)
+        try:
+            eocd_pos, cd_offset, cd_size = find_eocd_offset(host_in)
+        except Exception as e:
+            raise UnsupportedFormatError(
+                f"Cannot use 'pre_cd_inject' strategy: {e}. Please use --strategy eof."
+            )
 
         ube_in.seek(0, 2)
         ube_size = ube_in.tell()
         ube_in.seek(0)
+
+        if cd_offset + ube_size >= 0xFFFFFFFF:
+            raise UnsupportedFormatError(
+                f"Adjusted Central Directory offset ({cd_offset + ube_size:,} bytes) exceeds 4GB limit for standard ZIP. "
+                f"Please use --strategy eof."
+            )
 
         # 1. Write everything before Central Directory [0 : cd_offset]
         host_in.seek(0)

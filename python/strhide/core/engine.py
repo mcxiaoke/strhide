@@ -382,6 +382,13 @@ def write_carrier(
             strategy_note = "Embedded into compliant ISO BMFF 64-bit uuid Box (preserves media frame offsets)."
         elif selected_strategy == "eof":
             strategy_note = "Appended after MP4 EOF (EOF overlay)."
+    elif adapter.format_name() == "ZIP":
+        if selected_strategy == "pre_cd_inject":
+            strategy_note = "Embedded before Central Directory with adjusted EOCD offset (all archive entries intact)."
+        elif selected_strategy == "eof" and strategy == "auto":
+            strategy_note = "ZIP Central Directory could not be safely adjusted; automatically fell back to EOF overlay."
+        elif selected_strategy == "eof":
+            strategy_note = "Appended after ZIP EOCD (EOF overlay)."
 
     return {
         "status": "success",
