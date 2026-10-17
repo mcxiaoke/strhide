@@ -1,25 +1,27 @@
-"""JPEG format adapter for strhide with COM segment hiding and precise EOI boundary scanning."""
+"""JPEG format adapter for strhide with APP15/COM segment multi-chain hiding."""
 
 from __future__ import annotations
 
 import struct
 from typing import BinaryIO, List, Optional, Tuple
 
-from strhide.adapters.base import HostAdapter
-from strhide.core.envelope import EnvelopeHeader, read_trailer_from_tail
+from strhide.adapters.base import HostAdapter, SubStream
+from strhide.core.envelope import EnvelopeHeader, EnvelopeTrailer, read_trailer_from_tail
 from strhide.errors import CorruptedDataError, UnsupportedFormatError
 
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
 JPEG_SOS = b"\xff\xda"
+JPEG_APP15 = b"\xff\xef"
 JPEG_COM = b"\xff\xfe"
 JPEG_MAX_SEG_PAYLOAD = 65533  # 65535 - 2 bytes length
+JPEG_MAX_TOTAL_CAPACITY = 64 * 1024 * 1024  # 64MB
 
 
 def find_jpeg_sos_offset(stream: BinaryIO) -> int:
     """Scan JPEG markers from SOI until SOS (0xFF 0xDA).
     
-    Returns the byte offset immediately preceding SOS marker where a COM/APP segment can be inserted.
+    Returns the byte offset immediately preceding SOS marker where APPn/COM segments can be inserted.
     """
     stream.seek(0)
     soi = stream.read(2)
@@ -60,10 +62,7 @@ def find_jpeg_sos_offset(stream: BinaryIO) -> int:
 
 
 def find_jpeg_eoi_offset(stream: BinaryIO) -> int:
-    """Scan JPEG marker chain past SOS to find authentic EOI (0xFF 0xD9) offset.
-    
-    Returns the byte offset immediately following EOI (where data can be safely appended).
-    """
+    """Scan JPEG marker chain past SOS to find authentic EOI (0xFF 0xD9) offset."""
     stream.seek(0)
     soi = stream.read(2)
     if soi != JPEG_SOI:
@@ -81,14 +80,12 @@ def find_jpeg_eoi_offset(stream: BinaryIO) -> int:
         if not marker_code:
             break
 
-        # Standalone markers without length
         if marker_code in (b"\xd8", b"\xd9"):  # SOI, EOI
             continue
         if 0xD0 <= marker_code[0] <= 0xD7:  # RSTm
             continue
 
         if marker_code == b"\xda":  # SOS (Start of Scan)
-            # Read SOS length and skip header
             sos_len_bytes = stream.read(2)
             if len(sos_len_bytes) < 2:
                 raise CorruptedDataError("Truncated SOS segment header")
@@ -96,14 +93,13 @@ def find_jpeg_eoi_offset(stream: BinaryIO) -> int:
             stream.seek(stream.tell() + sos_len - 2)
             break
 
-        # Normal segment: read 16-bit BE length
         seg_len_bytes = stream.read(2)
         if len(seg_len_bytes) < 2:
             break
         seg_len = struct.unpack(">H", seg_len_bytes)[0]
         stream.seek(stream.tell() + seg_len - 2)
 
-    # Now in scan entropy data, search for authentic FF D9
+    # In scan entropy data, search for authentic FF D9
     while True:
         buf = stream.read(64 * 1024)
         if not buf:
@@ -124,11 +120,9 @@ def find_jpeg_eoi_offset(stream: BinaryIO) -> int:
                 else:
                     i = ff_idx + 1
             else:
-                # 0xFF is at end of buffer, seek back 1 byte to check next
                 stream.seek(stream.tell() - 1)
                 break
 
-    # If stream ended without finding EOI, check tail 4KB fallback
     stream.seek(0, 2)
     total = stream.tell()
     scan_tail = min(total, 4096)
@@ -141,8 +135,101 @@ def find_jpeg_eoi_offset(stream: BinaryIO) -> int:
     raise CorruptedDataError("Authentic JPEG EOI marker not found")
 
 
+def partition_jpeg_payload_lengths(total_size: int) -> list[int]:
+    """Compute segment payload lengths such that each segment <= 65533 bytes
+    and the final segment is always >= 24 bytes (to safely contain EnvelopeTrailer).
+    """
+    if total_size <= JPEG_MAX_SEG_PAYLOAD:
+        return [total_size]
+    lengths: list[int] = []
+    rem_total = total_size
+    while rem_total > 0:
+        if rem_total <= JPEG_MAX_SEG_PAYLOAD:
+            lengths.append(rem_total)
+            break
+        rem = rem_total - JPEG_MAX_SEG_PAYLOAD
+        if rem < 24:
+            borrow = min(1024, JPEG_MAX_SEG_PAYLOAD - 24)
+            lengths.append(JPEG_MAX_SEG_PAYLOAD - borrow)
+            lengths.append(rem + borrow)
+            break
+        else:
+            lengths.append(JPEG_MAX_SEG_PAYLOAD)
+            rem_total -= JPEG_MAX_SEG_PAYLOAD
+    return lengths
+
+
+class JpegChainedSegmentStream:
+    """A SeekRead stream bridging across a chained sequence of JPEG segment bodies."""
+
+    def __init__(self, inner: BinaryIO, segments: list[tuple[int, int]], total_size: int) -> None:
+        self.inner = inner
+        self.segments = segments  # [(payload_offset, payload_len), ...]
+        self.total_size = total_size
+        self.logical_pos = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1) -> bytes:
+        if self.logical_pos >= self.total_size or size == 0:
+            return b""
+        total_remaining = self.total_size - self.logical_pos
+        to_read_total = total_remaining if size < 0 else min(size, total_remaining)
+
+        out_chunks: list[bytes] = []
+        bytes_read = 0
+
+        while bytes_read < to_read_total:
+            # Find current segment
+            rem = self.logical_pos
+            target_seg = None
+            for seg_start, seg_len in self.segments:
+                if rem < seg_len:
+                    target_seg = (seg_start, seg_len, rem)
+                    break
+                rem -= seg_len
+
+            if not target_seg:
+                break
+
+            seg_start, seg_len, offset_in_seg = target_seg
+            seg_rem = seg_len - offset_in_seg
+            chunk_to_read = min(to_read_total - bytes_read, seg_rem)
+
+            self.inner.seek(seg_start + offset_in_seg)
+            chunk = self.inner.read(chunk_to_read)
+            if not chunk:
+                break
+            out_chunks.append(chunk)
+            bytes_read += len(chunk)
+            self.logical_pos += len(chunk)
+
+        return b"".join(out_chunks)
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        if whence == 0:
+            new_pos = offset
+        elif whence == 1:
+            new_pos = self.logical_pos + offset
+        elif whence == 2:
+            new_pos = self.total_size + offset
+        else:
+            raise ValueError(f"Invalid whence: {whence}")
+        if new_pos < 0:
+            raise ValueError("Invalid seek to negative position")
+        self.logical_pos = new_pos
+        return self.logical_pos
+
+    def tell(self) -> int:
+        return self.logical_pos
+
+
 class JpegAdapter(HostAdapter):
-    """Adapter for JPEG images supporting stealth COM app_segment and EOF fallback."""
+    """Adapter for JPEG images supporting APP15/COM multi-segment chains and EOF fallback."""
 
     def format_name(self) -> str:
         return "JPEG"
@@ -160,8 +247,7 @@ class JpegAdapter(HostAdapter):
         return ["app_segment", "eof"]
 
     def choose_auto_strategy(self, stream: BinaryIO, ube_size: int) -> str:
-        # Default to stealth app_segment for payloads <= 65533 bytes (or initial probe ube_size=0)
-        if ube_size <= JPEG_MAX_SEG_PAYLOAD:
+        if ube_size <= JPEG_MAX_TOTAL_CAPACITY:
             return "app_segment"
         return "eof"
 
@@ -176,10 +262,10 @@ class JpegAdapter(HostAdapter):
             ube_in.seek(0, 2)
             ube_size = ube_in.tell()
             ube_in.seek(0)
-            if ube_size > JPEG_MAX_SEG_PAYLOAD:
+            if ube_size > JPEG_MAX_TOTAL_CAPACITY:
                 raise UnsupportedFormatError(
-                    f"Payload envelope size ({ube_size} bytes) exceeds single JPEG segment capacity "
-                    f"({JPEG_MAX_SEG_PAYLOAD} bytes). Please specify --strategy eof."
+                    f"Payload envelope size ({ube_size} bytes) exceeds JPEG chain capacity "
+                    f"({JPEG_MAX_TOTAL_CAPACITY} bytes). Please specify --strategy eof."
                 )
 
             sos_offset = find_jpeg_sos_offset(host_in)
@@ -194,20 +280,24 @@ class JpegAdapter(HostAdapter):
 
             inject_offset = out.tell()
 
-            # 2. Write COM segment: 0xFF 0xFE + uint16_be(2 + ube_size)
-            seg_hdr = JPEG_COM + struct.pack(">H", 2 + ube_size)
-            out.write(seg_hdr)
+            # 2. Write multi-segment APP15 chain using safe length partitioning
+            seg_lengths = partition_jpeg_payload_lengths(ube_size)
+            inject_size = 0
 
-            # 3. Write UBE data
-            while True:
-                buf = ube_in.read(64 * 1024)
-                if not buf:
-                    break
-                out.write(buf)
+            for seg_payload_len in seg_lengths:
+                seg_hdr = JPEG_APP15 + struct.pack(">H", 2 + seg_payload_len)
+                out.write(seg_hdr)
+                inject_size += 4 + seg_payload_len
 
-            inject_size = out.tell() - inject_offset
+                seg_remaining = seg_payload_len
+                while seg_remaining > 0:
+                    buf = ube_in.read(min(64 * 1024, seg_remaining))
+                    if not buf:
+                        raise CorruptedDataError("Unexpected end of UBE input stream")
+                    out.write(buf)
+                    seg_remaining -= len(buf)
 
-            # 4. Write rest of host (from SOS onwards through EOI)
+            # 3. Write rest of host (from SOS onwards through EOI)
             host_in.seek(sos_offset)
             while True:
                 buf = host_in.read(64 * 1024)
@@ -263,7 +353,10 @@ class JpegAdapter(HostAdapter):
         if soi != JPEG_SOI:
             return None
 
-        # 1. Scan markers before SOS for COM segment containing UBE envelope
+        # 1. Scan markers before SOS, collecting candidate segments for APP15 and COM
+        app15_segments: list[tuple[int, int]] = []
+        com_segments: list[tuple[int, int]] = []
+
         while True:
             lead = stego_in.read(1)
             if not lead:
@@ -293,26 +386,94 @@ class JpegAdapter(HostAdapter):
             payload_len = seg_len - 2
             payload_offset = stego_in.tell()
 
-            if b == 0xFE:  # COM segment
-                if payload_len >= 112 + 24:  # Min UBE size
-                    stego_in.seek(payload_offset + payload_len - 24)
-                    trailer_bytes = stego_in.read(24)
-                    try:
-                        from strhide.core.envelope import EnvelopeTrailer
-                        trailer = EnvelopeTrailer.unpack(trailer_bytes, expected_magic=expected_trailer_magic)
-                        if trailer.ube_offset == payload_offset and trailer.ube_total_size == payload_len:
-                            return trailer.ube_offset, trailer.ube_total_size, "app_segment"
-                    except Exception:
-                        pass
+            if b == 0xEF:
+                app15_segments.append((payload_offset, payload_len))
+            elif b == 0xFE:
+                com_segments.append((payload_offset, payload_len))
 
             stego_in.seek(payload_offset + payload_len)
 
-        # 2. Fallback to EOF trailer (for backwards compatibility)
+        # Helper to check a chain of candidate segments
+        def try_locate_chain(segments: list[tuple[int, int]]) -> Optional[Tuple[int, int, str]]:
+            for k in range(len(segments) - 1, -1, -1):
+                seg_payload_offset, seg_payload_len = segments[k]
+                if seg_payload_len < 24:
+                    continue
+                trailer_offset = seg_payload_offset + seg_payload_len - 24
+                stego_in.seek(trailer_offset)
+                trailer_bytes = stego_in.read(24)
+                try:
+                    trailer = EnvelopeTrailer.unpack(trailer_bytes, expected_magic=expected_trailer_magic)
+                    if expected_trailer_magic is None:
+                        from strhide.core.envelope import STANDARD_TRAILER_MAGIC
+                        if trailer.trailer_magic != STANDARD_TRAILER_MAGIC:
+                            continue
+                except Exception:
+                    continue
+
+                # Single segment match
+                if trailer.ube_offset == seg_payload_offset and trailer.ube_total_size == seg_payload_len:
+                    return trailer.ube_offset, trailer.ube_total_size, "app_segment"
+
+                # Multi-segment chain match: trace backwards from segment k
+                if trailer.ube_total_size > seg_payload_len:
+                    accum_len = 0
+                    start_idx = None
+                    for m in range(k, -1, -1):
+                        curr_off, curr_len = segments[m]
+                        if m < k:
+                            next_off, _ = segments[m + 1]
+                            if curr_off + curr_len != next_off - 4:
+                                break
+                        accum_len += curr_len
+                        if accum_len == trailer.ube_total_size:
+                            if curr_off == trailer.ube_offset:
+                                start_idx = m
+                            break
+                        elif accum_len > trailer.ube_total_size:
+                            break
+
+                    if start_idx is not None:
+                        return trailer.ube_offset, trailer.ube_total_size, "app_segment"
+
+            return None
+
+        # 2. Priority check: APP15 multi-segment chain
+        loc = try_locate_chain(app15_segments)
+        if loc:
+            return loc
+
+        # 3. Fallback check: Legacy COM segment chain
+        loc = try_locate_chain(com_segments)
+        if loc:
+            return loc
+
+        # 4. Fallback check: EOF trailer
         trailer = read_trailer_from_tail(stego_in, expected_magic=expected_trailer_magic)
         if trailer:
             return trailer.ube_offset, trailer.ube_total_size, "eof"
 
         return None
+
+    def open_ube_stream(
+        self,
+        carrier: BinaryIO,
+        ube_offset: int,
+        ube_total_size: int,
+        strategy: str,
+    ) -> BinaryIO:
+        if strategy == "eof" or ube_total_size <= JPEG_MAX_SEG_PAYLOAD:
+            return SubStream(carrier, ube_offset, ube_total_size)
+
+        seg_lengths = partition_jpeg_payload_lengths(ube_total_size)
+        segments: list[tuple[int, int]] = []
+        curr_offset = ube_offset
+
+        for seg_len in seg_lengths:
+            segments.append((curr_offset, seg_len))
+            curr_offset += seg_len + 4
+
+        return JpegChainedSegmentStream(carrier, segments, ube_total_size)
 
     def strip(
         self,
@@ -348,20 +509,12 @@ class JpegAdapter(HostAdapter):
 
     def verify_structure(self, stego_in: BinaryIO) -> Tuple[bool, str]:
         try:
-            eoi_pos = find_jpeg_eoi_offset(stego_in)
-            stego_in.seek(0, 2)
-            total_size = stego_in.tell()
-            trailing_bytes = total_size - eoi_pos
-            if trailing_bytes == 0:
-                return True, "JPEG structure valid (clean EOI at EOF, 0 trailing bytes)"
-            else:
-                return True, f"JPEG structure verified (EOI marker found at {eoi_pos}, {trailing_bytes} trailing bytes)"
+            sos_pos = find_jpeg_sos_offset(stego_in)
+            return True, f"Valid JPEG image (SOS marker at offset {sos_pos})"
         except CorruptedDataError as e:
             return False, str(e)
 
     def suspicious_structures(self, stego_in: BinaryIO) -> list[str]:
-        # A COM segment before SOS carrying >= 136 bytes (minimum envelope
-        # size) can only realistically be a hidden envelope.
         min_envelope = 112 + 24
         found: list[str] = []
         stego_in.seek(0)
@@ -398,9 +551,10 @@ class JpegAdapter(HostAdapter):
             payload_offset = stego_in.tell()
             payload_len = seg_len - 2
 
-            if b == 0xFE and payload_len >= min_envelope:
+            if (b == 0xEF or b == 0xFE) and payload_len >= min_envelope:
+                seg_name = "APP15" if b == 0xEF else "COM"
                 found.append(
-                    f"COM segment at offset {payload_offset} carries {payload_len} bytes "
+                    f"{seg_name} segment at offset {payload_offset} carries {payload_len} bytes "
                     f"(minimum envelope size is {min_envelope})"
                 )
 

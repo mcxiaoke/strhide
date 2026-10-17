@@ -84,3 +84,64 @@ class HostAdapter(ABC):
         opinion.
         """
         return []
+
+    def open_ube_stream(
+        self,
+        carrier: BinaryIO,
+        ube_offset: int,
+        ube_total_size: int,
+        strategy: str,
+    ) -> BinaryIO:
+        """Open a virtual SeekRead stream over the embedded UBE envelope data.
+        
+        For standard contiguous envelopes (PNG, ZIP, PDF, MP4, PE, EOF), this
+        is simply a bounded slice starting at `ube_offset` of `ube_total_size` bytes.
+        Format adapters with fragmented/chained segments (e.g. JPEG APPn/COM
+        multi-segment chains) override this to provide a continuous virtual UBE
+        stream that transparently bridges across segment boundaries.
+        """
+        return SubStream(carrier, ube_offset, ube_total_size)
+
+
+class SubStream:
+    """A zero-copy bounded slice of a binary stream implementing read/seek/tell."""
+
+    def __init__(self, inner: BinaryIO, base_offset: int, total_size: int) -> None:
+        self.inner = inner
+        self.base_offset = base_offset
+        self.total_size = total_size
+        self.pos = 0
+        inner.seek(base_offset)
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1) -> bytes:
+        if self.pos >= self.total_size or size == 0:
+            return b""
+        remaining = self.total_size - self.pos
+        to_read = remaining if size < 0 else min(size, remaining)
+        self.inner.seek(self.base_offset + self.pos)
+        chunk = self.inner.read(to_read)
+        self.pos += len(chunk)
+        return chunk
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        if whence == 0:
+            new_pos = offset
+        elif whence == 1:
+            new_pos = self.pos + offset
+        elif whence == 2:
+            new_pos = self.total_size + offset
+        else:
+            raise ValueError(f"Invalid whence: {whence}")
+        if new_pos < 0:
+            raise ValueError("Invalid seek to negative position")
+        self.pos = new_pos
+        return self.pos
+
+    def tell(self) -> int:
+        return self.pos

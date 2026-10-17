@@ -127,4 +127,82 @@ pub trait HostAdapter: Send + Sync {
     fn suspicious_structures(&self, _stego_in: &mut dyn SeekRead) -> Vec<String> {
         Vec::new()
     }
+
+    /// Opens a virtual SeekRead stream over the embedded UBE envelope data.
+    ///
+    /// For standard contiguous envelopes (PNG, ZIP, PDF, MP4, PE, EOF), this
+    /// is simply a bounded slice starting at `ube_offset` of `ube_total_size` bytes.
+    /// Format adapters with fragmented/chained segments (e.g. JPEG APPn/COM
+    /// multi-segment chains) override this to provide a continuous virtual UBE
+    /// stream that transparently bridges across segment boundaries.
+    fn open_ube_reader<'a>(
+        &self,
+        carrier: &'a mut dyn SeekRead,
+        ube_offset: u64,
+        ube_total_size: u64,
+        _strategy: &str,
+    ) -> Result<Box<dyn SeekRead + 'a>, StrHideError> {
+        Ok(Box::new(SubStream::new(carrier, ube_offset, ube_total_size)?))
+    }
 }
+
+/// A zero-copy bounded slice of a SeekRead stream.
+pub struct SubStream<'a> {
+    inner: &'a mut dyn SeekRead,
+    base_offset: u64,
+    total_size: u64,
+    pos: u64,
+}
+
+impl<'a> SubStream<'a> {
+    pub fn new(
+        inner: &'a mut dyn SeekRead,
+        base_offset: u64,
+        total_size: u64,
+    ) -> Result<Self, StrHideError> {
+        use std::io::SeekFrom;
+        inner.seek(SeekFrom::Start(base_offset))?;
+        Ok(Self {
+            inner,
+            base_offset,
+            total_size,
+            pos: 0,
+        })
+    }
+}
+
+impl Read for SubStream<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.total_size {
+            return Ok(0);
+        }
+        let remaining = self.total_size - self.pos;
+        let to_read = std::cmp::min(buf.len() as u64, remaining) as usize;
+        let n = self.inner.read(&mut buf[..to_read])?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for SubStream<'_> {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        use std::io::SeekFrom;
+        let new_pos = match pos {
+            SeekFrom::Start(p) => p as i64,
+            SeekFrom::Current(p) => self.pos as i64 + p,
+            SeekFrom::End(p) => self.total_size as i64 + p,
+        };
+        if new_pos < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Invalid seek to negative position",
+            ));
+        }
+        let new_pos = new_pos as u64;
+        self.inner
+            .seek(SeekFrom::Start(self.base_offset + new_pos))?;
+        self.pos = new_pos;
+        Ok(self.pos)
+    }
+}
+

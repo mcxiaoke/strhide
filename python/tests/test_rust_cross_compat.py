@@ -245,3 +245,58 @@ def test_rust_rejection_security(tmp_workspace):
         res = run_rust("write", "-c", apk_file, "-t", "secret")
         assert res.returncode != 0
         assert "APK 格式不在支持列表中" in res.stderr
+
+
+def test_cross_jpeg_multisegment_app15(tmp_workspace):
+    """Test bi-directional compatibility of JPEG APP15 multi-segment chaining (>64KB)."""
+    orig_src = os.path.join(TESTFILES_DIR, "file-06.jpg")
+    if not os.path.exists(orig_src):
+        pytest.skip(f"Sample {orig_src} not found")
+
+    # 70KB random payload
+    payload_file = os.path.join(tmp_workspace, "large_payload.bin")
+    payload_bytes = os.urandom(70 * 1024)
+    with open(payload_file, "wb") as f:
+        f.write(payload_bytes)
+    payload_sha = hashlib.sha256(payload_bytes).hexdigest()
+    password = "MultiSegCrossPassword999"
+
+    # --- Direction 1: Python writes 70KB APP15 -> Rust reads/verifies/removes ---
+    carrier1 = os.path.join(tmp_workspace, "py_multiseg.jpg")
+    shutil.copy2(orig_src, carrier1)
+    orig_sha1 = sha256_file(carrier1)
+
+    res = run_python("write", "-c", carrier1, "-d", payload_file, "-p", password, "--strategy", "app_segment")
+    assert res.returncode == 0, res.stderr
+
+    out_file1 = os.path.join(tmp_workspace, "rust_extracted.bin")
+    res = run_rust("read", "-c", carrier1, "-p", password, "-o", out_file1)
+    assert res.returncode == 0, res.stderr
+    assert sha256_file(out_file1) == payload_sha
+
+    res = run_rust("verify", "-c", carrier1, "-p", password)
+    assert res.returncode == 0, res.stderr
+
+    res = run_rust("remove", "-c", carrier1, "-p", password, "--no-backup")
+    assert res.returncode == 0, res.stderr
+    assert sha256_file(carrier1) == orig_sha1
+
+    # --- Direction 2: Rust writes 70KB APP15 -> Python reads/verifies/removes ---
+    carrier2 = os.path.join(tmp_workspace, "rs_multiseg.jpg")
+    shutil.copy2(orig_src, carrier2)
+    orig_sha2 = sha256_file(carrier2)
+
+    res = run_rust("write", "-c", carrier2, "-d", payload_file, "-p", password, "--strategy", "app_segment")
+    assert res.returncode == 0, res.stderr
+
+    out_file2 = os.path.join(tmp_workspace, "py_extracted.bin")
+    res = run_python("read", "-c", carrier2, "-p", password, "-o", out_file2)
+    assert res.returncode == 0, res.stderr
+    assert sha256_file(out_file2) == payload_sha
+
+    res = run_python("verify", "-c", carrier2, "-p", password)
+    assert res.returncode == 0, res.stderr
+
+    res = run_python("remove", "-c", carrier2, "-p", password, "--no-backup")
+    assert res.returncode == 0, res.stderr
+    assert sha256_file(carrier2) == orig_sha2

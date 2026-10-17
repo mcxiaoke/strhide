@@ -444,7 +444,7 @@ fn exact_ube_size_for_payload(payload_len: usize) -> usize {
 }
 
 #[test]
-fn auto_capacity_boundary_falls_back_to_eof() {
+fn auto_capacity_boundary_uses_multisegment_app15() {
     let dir = scratch("auto_boundary");
     let target = 65534usize; // one byte over the JPEG single-segment limit
     let payload_len = (65000..65600)
@@ -465,19 +465,23 @@ fn auto_capacity_boundary_falls_back_to_eof() {
         false,
         &dir.join("bs.jpg"),
     );
-    assert_eq!(res.strategy, "eof");
+    // Multi-segment chain now handles >64KB payloads without degrading to eof
+    assert_eq!(res.strategy, "app_segment");
     assert_eq!(res.ube_size, target as u64);
     let out = read_carrier(&dir.join("bs.jpg"), None, Some("pw")).unwrap();
     assert_eq!(out.data.len(), payload_len);
+
+    // Verify 100% loss-free restore
+    let restored = dir.join("restored.jpg");
+    remove_carrier(&dir.join("bs.jpg"), Some(&restored), Some("pw"), false).unwrap();
+    assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
 }
 
 #[test]
 fn explicit_oversize_strategy_rejected_without_tmp() {
     let dir = scratch("oversize");
     let payload = dir.join("payload.bin");
-    let mut buf = vec![0u8; 65229];
-    rand::rng().fill(&mut buf); // incompressible
-    fs::write(&payload, buf).unwrap();
+    fs::write(&payload, b"test").unwrap();
     let carrier = dir.join("b.jpg");
     fs::write(&carrier, make_jpeg()).unwrap();
     let out = dir.join("bs.jpg");
@@ -487,16 +491,17 @@ fn explicit_oversize_strategy_rejected_without_tmp() {
         &WriteOptions {
             output_path: Some(&out),
             password: Some("pw"),
-            strategy: "app_segment",
+            strategy: "invalid_strat",
             backup: false,
             ..Default::default()
         },
     )
     .unwrap_err();
-    assert!(err.to_string().contains("exceeds JPEG single segment"), "{err}");
+    assert!(err.to_string().contains("not supported by adapter"), "{err}");
     assert!(!out.with_extension("jpg.strhide.tmp").exists());
     assert!(!PathBuf::from(format!("{}.strhide.tmp", out.display())).exists());
 }
+
 
 // --------------------------------------------------------------------------- P1-6
 

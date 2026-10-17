@@ -422,7 +422,8 @@ def write_carrier(
         f.seek(actual_ube_offset)
         f.write(header.pack())
         # Patch trailer at end of UBE
-        f.seek(actual_ube_offset + ube_total_size - 24)
+        trailer_pos = (inject_offset + inject_size - 24) if (adapter.format_name() == "JPEG" and selected_strategy == "app_segment") else (actual_ube_offset + ube_total_size - 24)
+        f.seek(trailer_pos)
         f.write(final_trailer.pack())
 
         # For PNG chunk: recalculate chunk CRC over (chunk_type + patched_ube_data)
@@ -464,9 +465,9 @@ def write_carrier(
     strategy_note = None
     if adapter.format_name() == "JPEG":
         if selected_strategy == "app_segment":
-            strategy_note = "Embedded into compliant JPEG COM segment before SOS (clean EOI at EOF, 0 trailing bytes)."
+            strategy_note = "Embedded into compliant JPEG APP15 segment(s) before SOS (clean EOI at EOF, 0 trailing bytes)."
         elif selected_strategy == "eof" and strategy == "auto":
-            strategy_note = f"Payload ({ube_total_size:,} bytes) exceeded JPEG single segment limit (64KB); automatically fell back to EOF overlay."
+            strategy_note = f"Payload ({ube_total_size:,} bytes) exceeded JPEG maximum capacity; automatically fell back to EOF overlay."
         elif selected_strategy == "eof":
             strategy_note = "Appended after JPEG EOI marker (EOF overlay)."
     elif adapter.format_name() == "PNG":
@@ -574,17 +575,17 @@ def read_carrier(
             raise _no_hidden_data_error(adapter, f, carrier_path, bool(password))
 
         ube_offset, ube_total_size, strategy_name = loc
+        ube_stream = adapter.open_ube_stream(f, ube_offset, ube_total_size, strategy_name)
 
         # Read fixed header
-        f.seek(ube_offset)
-        header_bytes = f.read(HEADER_STRUCT.size)
+        header_bytes = ube_stream.read(HEADER_STRUCT.size)
         header = EnvelopeHeader.unpack(header_bytes)
         header.validate_against(ube_total_size)
 
         # Read password hint if present
         password_hint = None
         if header.hint_len > 0:
-            password_hint = f.read(header.hint_len).decode("utf-8", errors="replace")
+            password_hint = ube_stream.read(header.hint_len).decode("utf-8", errors="replace")
 
         # Derive keys
         if header.is_encrypted:
@@ -597,7 +598,7 @@ def read_carrier(
             meta_key = b""
 
         # Read & decrypt metadata
-        meta_raw_bytes = f.read(header.meta_len)
+        meta_raw_bytes = ube_stream.read(header.meta_len)
         fixed_header_aad = header.get_aad()
         if header.is_encrypted:
             meta_json_bytes = decrypt_metadata(meta_raw_bytes, meta_key, header.base_nonce, fixed_header_aad)
@@ -612,12 +613,12 @@ def read_carrier(
 
         if header.is_encrypted:
             decrypt_stream_from_chunks(
-                f, payload_decrypted_stream, payload_key, header.base_nonce, fixed_header_aad, payload_bytes_len
+                ube_stream, payload_decrypted_stream, payload_key, header.base_nonce, fixed_header_aad, payload_bytes_len
             )
         else:
             remaining = payload_bytes_len
             while remaining > 0:
-                chunk = f.read(min(64 * 1024, remaining))
+                chunk = ube_stream.read(min(64 * 1024, remaining))
                 if not chunk:
                     break
                 payload_decrypted_stream.write(chunk)
@@ -636,8 +637,8 @@ def read_carrier(
         extracted_bytes = final_stream.read()
 
         # Verify envelope trailer & CRC32 integrity
-        f.seek(ube_offset + ube_total_size - 24)
-        trailer_bytes = f.read(24)
+        ube_stream.seek(ube_total_size - 24)
+        trailer_bytes = ube_stream.read(24)
         if len(trailer_bytes) == 24:
             expected_trailer_magic = None
             if header.is_stealth and password:
@@ -798,23 +799,23 @@ def inspect_carrier(carrier_path: str, password: Optional[str] = None) -> Dict[s
             }
 
         ube_offset, ube_total_size, strategy_name = loc
-        cf.seek(ube_offset)
-        header = EnvelopeHeader.unpack(cf.read(HEADER_STRUCT.size))
+        ube_stream = adapter.open_ube_stream(cf, ube_offset, ube_total_size, strategy_name)
+        header = EnvelopeHeader.unpack(ube_stream.read(HEADER_STRUCT.size))
         header.validate_against(ube_total_size)
 
         password_hint = None
         if header.hint_len > 0:
-            password_hint = cf.read(header.hint_len).decode("utf-8", errors="replace")
+            password_hint = ube_stream.read(header.hint_len).decode("utf-8", errors="replace")
 
         meta_info = None
         if not header.is_encrypted:
-            meta_bytes = cf.read(header.meta_len)
+            meta_bytes = ube_stream.read(header.meta_len)
             try:
                 meta_info = json.loads(meta_bytes.decode("utf-8"))
             except Exception:
                 pass
         elif password:
-            meta_bytes = cf.read(header.meta_len)
+            meta_bytes = ube_stream.read(header.meta_len)
             try:
                 _, meta_key = derive_keys(password, header.salt)
                 dec_bytes = decrypt_metadata(meta_bytes, meta_key, header.base_nonce, header.get_aad())
@@ -868,18 +869,18 @@ def verify_carrier(carrier_path: str, password: Optional[str] = None) -> Dict[st
         ube_offset, ube_total_size, strategy = loc
         header = None
         try:
-            cf.seek(ube_offset)
-            header = EnvelopeHeader.unpack(cf.read(HEADER_STRUCT.size))
+            ube_stream = adapter.open_ube_stream(cf, ube_offset, ube_total_size, strategy)
+            header = EnvelopeHeader.unpack(ube_stream.read(HEADER_STRUCT.size))
             # Validate header field ranges against the located envelope size
             # (version / hint_len / meta_len consistency) before trusting any
             # downstream reads — a crafted or corrupted header must fail Level
             # 2 with a domain error instead of being silently accepted.
             header.validate_against(ube_total_size)
-            cf.seek(ube_offset + ube_total_size - 24)
+            ube_stream.seek(ube_total_size - 24)
             expected_trailer_magic = None
             if header.is_stealth and password:
                 _, expected_trailer_magic = derive_stealth_magics(password)
-            trailer = EnvelopeTrailer.unpack(cf.read(24), expected_magic=expected_trailer_magic)
+            trailer = EnvelopeTrailer.unpack(ube_stream.read(24), expected_magic=expected_trailer_magic)
             if trailer.ube_offset != ube_offset or trailer.ube_total_size != ube_total_size:
                 raise CorruptedDataError("Envelope trailer boundary parameters mismatch")
             l2_ok = True

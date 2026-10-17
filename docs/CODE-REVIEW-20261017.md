@@ -258,9 +258,9 @@ write  → 误判 "Central Directory could not be safely adjusted" 降级 eof（
 4. **内存优化（大载荷场景）**：write 路径存在 4 份全量拷贝（`to_encrypt_bytes` + `compressed_buf` + `payload_cipher_buf` + `tmp_ube`），100MB 载荷约 400MB 内存。可将 `tmp_ube` 组装与 inject 合并为流式管道（适配器接口已支持 `ube_in: &mut dyn SeekRead`，可扩展为双段流）。Python 侧同样问题，可作为跨语言共同优化项。
 5. **协议演进预留**：`patch_offset` u32→u64、chunk_len 上限校验、version 分发，建议在 v2.3 一次性升级并保持双向兼容。
 
-## 6. 后续功能演进（来自 docs/strhide_stealth_improvement_analysis.md，两语言均未实施）
+## 6. 后续功能演进（来自 docs/strhide_stealth_improvement_analysis.md）
 
-- P0：JPEG `APPn/COM` 多段链（>64KB 载荷合规化，消除 eof 降级的 Trailing-data 破绽）；
+- P0：JPEG `APPn/COM` 多段链（>64KB 载荷合规化，消除 eof 降级的 Trailing-data 破绽）—— ✅ **已于 2026-10-17 实施落地**：Rust 与 Python 双端引入流虚拟化（`SubStream` / `open_ube_reader` / `open_ube_stream`），采用规范合规的应用私有段 `APP15`（`0xFF 0xEF`，物理隔离原图 Comment 与 ExifTool 特征暴露），实现 65534B 借位切片防截断算法与 100% 逐比特无损还原，容量上限由 64KB 跃升至 64MB，读取端双模兼容历史 `COM` 段与 `EOF`；
 - P1：PNG `zTXt/iTXt` 标准文本块替换 `prIv`；MP4 `moov.udta.meta` 容器下沉；
 - P2：PE/ZIP Slack Hiding（<4KB 文本零膨胀）；
 - 新载体候选：RIFF（AVI/WAV/WebP）、GIF、ELF/Mach-O、SQLite、tar/gz（docs/file_format_hex_ascii_characteristics.md 已给出特征分析基础）。

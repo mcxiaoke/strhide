@@ -272,38 +272,43 @@ def _exact_ube_size_for_payload(payload_len: int) -> int:
     return HEADER_STRUCT.size + (meta_len + 16) + (payload_len + 20) + 24
 
 
-def test_auto_capacity_boundary_falls_back_to_eof(workspace):
-    # Find an incompressible payload whose exact UBE size is one byte over the
-    # JPEG single-segment limit (65533). The old estimator under-counted by 4
-    # bytes per chunk, so such a payload estimated at exactly 65533 was routed
-    # to app_segment and then hard-failed at 65537 instead of falling back.
+def test_auto_capacity_boundary_uses_multisegment_app15(workspace):
+    # Payload one byte over the JPEG single-segment limit (65533).
+    # With JPEG APP15 multi-segment chaining, it is seamlessly embedded
+    # via chained app_segment without degrading to eof trailing data.
     target = 65534
     payload_len = next(
         L for L in range(65000, 65600) if _exact_ube_size_for_payload(L) == target
     )
-    payload = workspace / "payload.bin"  # name must match the size helper below
+    payload = workspace / "payload.bin"
     payload.write_bytes(os.urandom(payload_len))
     carrier = str(workspace / "b.jpg")
     open(carrier, "wb").write(make_jpeg())
 
     res = write_carrier(carrier, data_file=str(payload), password="pw",
                         output_path=str(workspace / "bs.jpg"))
-    assert res["strategy"] == "eof"
+    assert res["strategy"] == "app_segment"
     assert res["ube_size"] == target
-    # Round-trip still works through the eof fallback.
+    # Round-trip still works through chained APP15 segments.
     out = read_carrier(str(workspace / "bs.jpg"), password="pw")
     assert len(out["data"]) == payload_len
+
+    # Verify 100% loss-free restore
+    from strhide.core.engine import remove_carrier
+    restored = str(workspace / "restored.jpg")
+    remove_carrier(str(workspace / "bs.jpg"), output_path=restored, password="pw")
+    assert open(restored, "rb").read() == open(carrier, "rb").read()
 
 
 def test_explicit_oversize_strategy_rejected_without_tmp(workspace):
     payload = workspace / "rand2.bin"
-    payload.write_bytes(os.urandom(65229))
+    payload.write_bytes(b"hello world")
     carrier = str(workspace / "b2.jpg")
     open(carrier, "wb").write(make_jpeg())
     out = str(workspace / "bs2.jpg")
-    with pytest.raises(StrHideError, match="exceeds single JPEG segment"):
+    with pytest.raises(StrHideError, match="not supported"):
         write_carrier(carrier, data_file=str(payload), password="pw",
-                      strategy="app_segment", output_path=out)
+                      strategy="invalid_strat", output_path=out)
     assert not os.path.exists(out + ".strhide.tmp")
 
 
