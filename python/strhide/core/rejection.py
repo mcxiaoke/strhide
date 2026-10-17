@@ -86,11 +86,29 @@ def check_pdf_signature(stream: BinaryIO) -> Optional[str]:
         if not header.startswith(b"%PDF-"):
             return None
 
-        # Quick scan stream in chunks for ByteRange and /Sig
+        # Scan full stream in 64KB overlapping chunks
         stream.seek(0)
-        content = stream.read(1024 * 1024)  # 1MB sample
-        if b"/ByteRange" in content and (b"/Sig" in content or b"/Type /Sig" in content or b"/Type/Sig" in content):
-            return "PDF document contains a cryptographic digital signature. Modifying it will invalidate the signature."
+        chunk_size = 64 * 1024
+        overlap = 1024
+        prev_tail = b""
+        has_byterange = False
+        has_sig = False
+
+        while True:
+            chunk = stream.read(chunk_size)
+            if not chunk:
+                break
+            window = prev_tail + chunk
+            if b"/ByteRange" in window:
+                has_byterange = True
+            if b"/Sig" in window or b"/Type /Sig" in window or b"/Type/Sig" in window:
+                has_sig = True
+
+            if has_byterange and has_sig:
+                return "PDF document contains a cryptographic digital signature. Modifying it will invalidate the signature."
+
+            prev_tail = chunk[-overlap:] if len(chunk) >= overlap else chunk
+
         return None
     except Exception:
         return None

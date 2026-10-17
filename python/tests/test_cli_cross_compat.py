@@ -86,13 +86,13 @@ def test_cli_env_var_password_and_password_file():
             f.write("EnvSecretPassword!2026_环境变量密码\n")
 
         cmd_r = [sys.executable, "-m", "strhide", "read", "-c", carrier, "--password-file", pwd_file, "--stdout"]
-        proc_r = subprocess.run(cmd_r, env=os.environ.copy(), capture_output=True, text=True, encoding="utf-8")
+        proc_r = subprocess.run(cmd_r, env=env, capture_output=True, text=True, encoding="utf-8")
         assert proc_r.returncode == 0, f"Read failed: {proc_r.stderr}"
         assert "Env Secret Message" in proc_r.stdout
 
         # 3. Test remove using --password-file
         cmd_rm = [sys.executable, "-m", "strhide", "remove", "-c", carrier, "--password-file", pwd_file]
-        proc_rm = subprocess.run(cmd_rm, env=os.environ.copy(), capture_output=True, text=True)
+        proc_rm = subprocess.run(cmd_rm, env=env, capture_output=True, text=True)
         assert proc_rm.returncode == 0, f"Remove failed: {proc_rm.stderr}"
         assert compute_file_sha256(carrier) == orig_sha
 

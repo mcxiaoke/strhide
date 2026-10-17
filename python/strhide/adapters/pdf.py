@@ -186,31 +186,31 @@ class PdfAdapter(HostAdapter):
         if eof_idx != -1:
             endstream_idx = tail.rfind(b"endstream", 0, eof_idx)
             if endstream_idx != -1:
-                stream_idx = tail.rfind(b"stream", 0, endstream_idx)
-                if stream_idx != -1:
-                    stream_prefix = tail[stream_idx:stream_idx + 8]
-                    if stream_prefix.startswith(b"stream\r\n"):
-                        stream_start = stream_idx + 8
-                    elif stream_prefix.startswith(b"stream\n"):
-                        stream_start = stream_idx + 7
-                    else:
-                        stream_start = stream_idx + 6
-
-                    # Check trailer right before endstream (accounting for \r\n or \n)
-                    stream_content_tail = tail[:endstream_idx].rstrip(b"\r\n")
-                    stream_end = len(stream_content_tail)
-                    payload_len = stream_end - stream_start
-
-                    if payload_len >= 112 + 24:
-                        trailer_bytes = stream_content_tail[stream_end - 24:stream_end]
-                        try:
-                            from strhide.core.envelope import EnvelopeTrailer
-                            trailer = EnvelopeTrailer.unpack(trailer_bytes, expected_magic=expected_trailer_magic)
-                            abs_ube_offset = (total_size - scan_len) + stream_start
-                            if trailer.ube_offset == abs_ube_offset and trailer.ube_total_size == payload_len:
-                                return trailer.ube_offset, trailer.ube_total_size, "incremental"
-                        except Exception:
-                            pass
+                # Trailer is the last 24 bytes of stream content right before endstream
+                stream_content_tail = tail[:endstream_idx].rstrip(b"\r\n")
+                stream_end_in_tail = len(stream_content_tail)
+                if stream_end_in_tail >= 24:
+                    trailer_bytes = stream_content_tail[stream_end_in_tail - 24:stream_end_in_tail]
+                    try:
+                        from strhide.core.envelope import EnvelopeTrailer
+                        trailer = EnvelopeTrailer.unpack(trailer_bytes, expected_magic=expected_trailer_magic)
+                        abs_stream_end = (total_size - scan_len) + stream_end_in_tail
+                        if (
+                            trailer.ube_offset + trailer.ube_total_size == abs_stream_end
+                            and trailer.ube_offset >= 0
+                        ):
+                            # Verify stream keyword precedes ube_offset
+                            if trailer.ube_offset >= 8:
+                                stego_in.seek(trailer.ube_offset - 8)
+                                prefix = stego_in.read(8)
+                                if (
+                                    prefix.endswith(b"stream\r\n")
+                                    or prefix.endswith(b"stream\n")
+                                    or prefix.endswith(b"stream")
+                                ):
+                                    return trailer.ube_offset, trailer.ube_total_size, "incremental"
+                    except Exception:
+                        pass
 
         # 2. Fallback to EOF trailer (for backwards compatibility with legacy PDF stego)
         trailer = read_trailer_from_tail(stego_in, expected_magic=expected_trailer_magic)

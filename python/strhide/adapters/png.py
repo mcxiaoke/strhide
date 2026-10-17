@@ -148,7 +148,18 @@ class PngAdapter(HostAdapter):
             chunk_data_offset = stego_in.tell()
 
             if chunk_type in SUPPORTED_CHUNKS:
-                return chunk_data_offset, length, "chunk"
+                if length >= 112 + 24:
+                    trailer_offset = chunk_data_offset + length - 24
+                    stego_in.seek(trailer_offset)
+                    trailer_bytes = stego_in.read(24)
+                    try:
+                        from strhide.core.envelope import EnvelopeTrailer, STANDARD_TRAILER_MAGIC
+                        trailer = EnvelopeTrailer.unpack(trailer_bytes, expected_magic=expected_trailer_magic)
+                        if expected_trailer_magic is None and trailer.trailer_magic != STANDARD_TRAILER_MAGIC:
+                            return None
+                        return chunk_data_offset, length, "chunk"
+                    except Exception:
+                        pass
 
             if chunk_type == b"IEND":
                 break

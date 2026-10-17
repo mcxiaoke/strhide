@@ -334,10 +334,14 @@ def write_carrier(
     # 11. Self-verification check
     with open(tmp_target, "rb") as f:
         loc = adapter.locate(f, expected_trailer_magic=trailer_magic if stealth else None)
-        if loc is None:
-            if os.path.exists(tmp_target):
+
+    if loc is None:
+        if os.path.exists(tmp_target):
+            try:
                 os.remove(tmp_target)
-            raise StrHideError("Self-verification failed: could not locate injected envelope")
+            except Exception:
+                pass
+        raise StrHideError("Self-verification failed: could not locate injected envelope")
 
     # 12. Inplace backup (if applicable) & Atomic commit & preserve attributes
     is_inplace = (os.path.abspath(target_path) == os.path.abspath(carrier_path))
