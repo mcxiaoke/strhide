@@ -41,12 +41,16 @@ def hkdf_expand(prk: bytes, info: bytes, length: int) -> bytes:
     return bytes(okm[:length])
 
 
+PBKDF2_ITERATIONS = 100_000
+
+
 def derive_keys(password: str, salt: bytes) -> Tuple[bytes, bytes]:
-    """Derive master payload key and metadata key from user password using HKDF-SHA256."""
+    """Derive master payload key and metadata key from user password using PBKDF2-HMAC-SHA256 (100k rounds) + HKDF-SHA256."""
     import unicodedata
     normalized_pwd = unicodedata.normalize("NFC", password)
     password_bytes = normalized_pwd.encode("utf-8")
-    prk = hkdf_extract(salt, password_bytes)
+    ikm = hashlib.pbkdf2_hmac("sha256", password_bytes, salt, PBKDF2_ITERATIONS, dklen=32)
+    prk = hkdf_extract(salt, ikm)
     payload_key = hkdf_expand(prk, b"strhide-payload", 32)
     meta_key = hkdf_expand(prk, b"strhide-metadata", 32)
     return payload_key, meta_key
@@ -57,10 +61,12 @@ def derive_stealth_magics(password: str, salt: bytes = b"strhide-stealth-v1") ->
     import unicodedata
     normalized_pwd = unicodedata.normalize("NFC", password)
     password_bytes = normalized_pwd.encode("utf-8")
-    prk = hkdf_extract(b"strhide-stealth-v1", password_bytes)
+    ikm = hashlib.pbkdf2_hmac("sha256", password_bytes, salt, PBKDF2_ITERATIONS, dklen=32)
+    prk = hkdf_extract(salt, ikm)
     header_magic = hkdf_expand(prk, b"strhide-stealth-header", 8)
     trailer_magic = hkdf_expand(prk, b"strhide-stealth-trailer", 4)
     return header_magic, trailer_magic
+
 
 
 def make_chunk_nonce(base_nonce: bytes, chunk_index: int) -> bytes:
