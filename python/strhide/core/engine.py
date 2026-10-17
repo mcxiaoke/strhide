@@ -303,6 +303,9 @@ def write_carrier(
         actual_ube_offset = inject_offset + 32
     elif adapter.format_name() == "JPEG" and selected_strategy == "app_segment":
         actual_ube_offset = inject_offset + 4
+    elif adapter.format_name() == "PDF" and selected_strategy == "incremental":
+        with open(carrier_path, "rb") as cf:
+            actual_ube_offset = inject_offset + adapter.calc_prefix_len(cf, ube_total_size)
 
     # Patch final Header & Trailer directly in tmp_target
     header.inject_offset = inject_offset
@@ -367,6 +370,13 @@ def write_carrier(
             strategy_note = f"Payload ({ube_total_size:,} bytes) exceeded PNG chunk limit (2GB); automatically fell back to EOF overlay."
         elif selected_strategy == "eof":
             strategy_note = "Appended after PNG IEND (EOF overlay)."
+    elif adapter.format_name() == "PDF":
+        if selected_strategy == "incremental":
+            strategy_note = "Embedded into compliant PDF Incremental Update stream ending with %%EOF (0 trailing garbage bytes)."
+        elif selected_strategy == "eof" and strategy == "auto":
+            strategy_note = "PDF trailer could not be incrementally parsed; automatically fell back to EOF overlay."
+        elif selected_strategy == "eof":
+            strategy_note = "Appended after PDF %%EOF (EOF overlay)."
 
     return {
         "status": "success",

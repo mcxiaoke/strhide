@@ -207,7 +207,8 @@ def test_real_pdf_full_lifecycle():
 
         # 1. Write
         res_w = write_carrier(carrier, data_text=secret, password="RealPass!PDF")
-        
+        assert res_w["format"] == "PDF"
+        assert res_w["strategy"] == "incremental"
         # 2. Verify
         res_v = verify_carrier(carrier, password="RealPass!PDF")
         assert res_v["level1_host"]["ok"] is True

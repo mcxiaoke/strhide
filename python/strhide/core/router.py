@@ -12,6 +12,7 @@ STRATEGY_MAP = {
     "box_uuid": 3,
     "pre_cd_inject": 4,
     "app_segment": 5,
+    "incremental": 6,
 }
 
 REVERSE_STRATEGY_MAP = {v: k for k, v in STRATEGY_MAP.items()}
