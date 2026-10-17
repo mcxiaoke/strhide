@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 from typing import BinaryIO, List, Optional, Tuple
 
 from strhide.adapters.base import HostAdapter
@@ -164,6 +165,14 @@ class PdfAdapter(HostAdapter):
         out.write("".join(trailer_lines).encode("latin-1"))
 
         inject_size = out.tell() - inject_offset
+
+        # 7. Preserve any bytes the original host carried after its final
+        # %%EOF (non-standard "dirty tail"). Dropping them would silently
+        # damage the carrier and break the 100% bit-exact restore guarantee,
+        # so they are copied verbatim after the new %%EOF.
+        host_in.seek(eof_offset)
+        shutil.copyfileobj(host_in, out)
+
         return inject_offset, inject_size, 0, 0
 
     def locate(
@@ -225,16 +234,23 @@ class PdfAdapter(HostAdapter):
         out: BinaryIO,
         header: EnvelopeHeader,
     ) -> None:
-        # Both incremental and eof append data at or past orig_host_size.
-        # Copying exactly orig_host_size bytes completely and losslessly restores the original PDF!
+        # The incremental block is inserted at inject_offset; any original
+        # trailing bytes follow it. Copying [0, inject_offset), skipping
+        # inject_size, then copying the remainder restores the original PDF
+        # bit-exactly (including a preserved dirty tail). Legacy eof-mode
+        # carriers have inject_offset == orig_host_size, so the same slicing
+        # reproduces the old truncation behaviour.
         stego_in.seek(0)
-        remaining = header.orig_host_size
+        remaining = header.inject_offset
         while remaining > 0:
             chunk = stego_in.read(min(64 * 1024, remaining))
             if not chunk:
                 break
             out.write(chunk)
             remaining -= len(chunk)
+
+        stego_in.seek(header.inject_offset + header.inject_size)
+        shutil.copyfileobj(stego_in, out)
 
     def verify_structure(self, stego_in: BinaryIO) -> Tuple[bool, str]:
         stego_in.seek(0)

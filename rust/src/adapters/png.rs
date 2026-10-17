@@ -224,4 +224,46 @@ impl HostAdapter for PngAdapter {
             Err(e) => Ok((false, format!("Corrupted PNG structure: {e}"))),
         }
     }
+
+    fn suspicious_structures(&self, stego_in: &mut dyn SeekRead) -> Vec<String> {
+        // A prIv/stEg chunk carrying >= 136 bytes (minimum envelope size) can
+        // only realistically be a hidden envelope.
+        const MIN_ENVELOPE: u64 = 112 + 24;
+        let mut found = Vec::new();
+        stego_in.seek(SeekFrom::Start(0)).ok();
+        let mut magic = [0u8; 8];
+        if stego_in.read_exact(&mut magic).is_err() || magic != PNG_MAGIC {
+            return found;
+        }
+        loop {
+            let mut hdr = [0u8; 8];
+            if stego_in.read_exact(&mut hdr).is_err() {
+                break;
+            }
+            let length = u32::from_be_bytes(hdr[0..4].try_into().unwrap()) as u64;
+            let mut chunk_type = [0u8; 4];
+            chunk_type.copy_from_slice(&hdr[4..8]);
+            let data_offset = match stego_in.stream_position() {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+            if (chunk_type == CHUNK_PRIV || chunk_type == CHUNK_STEG) && length >= MIN_ENVELOPE {
+                found.push(format!(
+                    "private chunk '{}' at offset {} carries {length} bytes (minimum envelope size is {MIN_ENVELOPE})",
+                    String::from_utf8_lossy(&chunk_type),
+                    data_offset - 8
+                ));
+            }
+            if chunk_type == *b"IEND" {
+                break;
+            }
+            if stego_in
+                .seek(SeekFrom::Start(data_offset + length + 4))
+                .is_err()
+            {
+                break;
+            }
+        }
+        found
+    }
 }

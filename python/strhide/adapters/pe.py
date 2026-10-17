@@ -217,3 +217,19 @@ class PeAdapter(HostAdapter):
                 f"Trailer boundary mismatch: offset({trailer.ube_offset}) + size({trailer.ube_total_size}) != total({total_size})",
             )
         return True, "PE overlay envelope structure verified successfully"
+
+    def suspicious_structures(self, stego_in: BinaryIO) -> list[str]:
+        # Data appended beyond the PE image boundary is an overlay; anything
+        # past the minimum envelope size is a probable hidden envelope.
+        min_envelope = 112 + 24
+        found: list[str] = []
+        try:
+            arch, num_sections, pe_image_end, host_size, has_authenticode = parse_pe_headers(stego_in)
+            if host_size > pe_image_end + min_envelope:
+                found.append(
+                    f"overlay of {host_size - pe_image_end} bytes beyond PE image boundary "
+                    f"(minimum envelope size is {min_envelope})"
+                )
+        except Exception:
+            pass
+        return found

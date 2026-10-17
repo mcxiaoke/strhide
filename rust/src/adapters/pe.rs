@@ -239,4 +239,20 @@ impl HostAdapter for PeAdapter {
             Err(e) => Ok((false, format!("Corrupted PE executable: {e}"))),
         }
     }
+
+    fn suspicious_structures(&self, stego_in: &mut dyn SeekRead) -> Vec<String> {
+        // Data appended beyond the PE image boundary is an overlay; anything
+        // past the minimum envelope size is a probable hidden envelope.
+        const MIN_ENVELOPE: u64 = 112 + 24;
+        let mut found = Vec::new();
+        if let Ok(info) = parse_pe_headers(stego_in) {
+            if info.host_size > info.pe_image_end + MIN_ENVELOPE {
+                found.push(format!(
+                    "overlay of {} bytes beyond PE image boundary (minimum envelope size is {MIN_ENVELOPE})",
+                    info.host_size - info.pe_image_end
+                ));
+            }
+        }
+        found
+    }
 }

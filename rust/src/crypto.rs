@@ -232,6 +232,16 @@ pub fn decrypt_stream_from_chunks<R: Read, W: Write>(
         bytes_consumed += 4;
         let chunk_len = u32::from_le_bytes(header_data) as usize;
 
+        // Upper bound: a legit chunk holds at most CHUNK_SIZE plaintext bytes
+        // plus the 16-byte GCM tag. Anything larger means corruption or a
+        // crafted envelope; reject before allocating.
+        if chunk_len > CHUNK_SIZE + 16 {
+            return Err(StrHideError::CorruptedData(format!(
+                "Chunk length {chunk_len} exceeds maximum {} at chunk {chunk_index}",
+                CHUNK_SIZE + 16
+            )));
+        }
+
         let mut cipher_chunk = vec![0u8; chunk_len];
         reader.read_exact(&mut cipher_chunk).map_err(|_| {
             StrHideError::CorruptedData("Unexpected EOF reading ciphertext chunk".into())

@@ -16,6 +16,7 @@ pub const FLAG_HAS_HINT: u8 = 0x10;
 pub const HEADER_SIZE: usize = 112;
 pub const AAD_SIZE: usize = 80;
 pub const TRAILER_SIZE: usize = 24;
+pub const MAX_HINT_LEN: u32 = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvelopeHeader {
@@ -77,6 +78,35 @@ impl EnvelopeHeader {
 
     pub fn has_hint(&self) -> bool {
         (self.flags & FLAG_HAS_HINT) != 0
+    }
+
+    /// Validate header field ranges against the known envelope total size.
+    ///
+    /// Envelope metadata is untrusted input: a corrupted or crafted header must
+    /// never drive huge allocations or unsigned underflow downstream. Callers
+    /// must invoke this before sizing any buffer from `hint_len` / `meta_len`.
+    pub fn validate_against(&self, ube_total_size: u64) -> Result<(), StrHideError> {
+        if self.version != CURRENT_VERSION {
+            return Err(StrHideError::CorruptedData(format!(
+                "Unsupported envelope version {:#04x} (expected {:#04x})",
+                self.version, CURRENT_VERSION
+            )));
+        }
+        if self.hint_len > MAX_HINT_LEN {
+            return Err(StrHideError::CorruptedData(format!(
+                "Password hint length {} exceeds maximum {}",
+                self.hint_len, MAX_HINT_LEN
+            )));
+        }
+        let fixed = HEADER_SIZE as u64 + 24; // header + trailer
+        let variable = self.hint_len as u64 + self.meta_len as u64;
+        if variable + fixed > ube_total_size {
+            return Err(StrHideError::CorruptedData(format!(
+                "Envelope field sizes inconsistent: hint({}) + meta({}) + {} exceed total size {}",
+                self.hint_len, self.meta_len, fixed, ube_total_size
+            )));
+        }
+        Ok(())
     }
 
     /// Return the immutable 80-byte AAD binding header fields for AEAD.

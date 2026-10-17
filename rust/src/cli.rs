@@ -74,7 +74,7 @@ pub struct WriteArgs {
     #[arg(long = "stealth")]
     pub stealth: bool,
 
-    #[arg(long = "preserve-time", default_value_t = true, action = clap::ArgAction::Set)]
+    #[arg(long = "no-preserve-time", default_value_t = true, action = clap::ArgAction::SetFalse, help = "Do not preserve original carrier timestamps (default: preserve)")]
     pub preserve_time: bool,
 
     #[arg(long = "no-backup")]
@@ -193,7 +193,18 @@ pub fn resolve_password(
         }
     }
     if encrypt_flag {
-        return Ok(Some(prompt_password(confirm)?));
+        // Only prompt when a terminal is actually attached; both stdin and
+        // stdout must be TTYs, since some environments report stdin as a TTY
+        // while no console exists (e.g. Git Bash with `< /dev/null`), which
+        // would make the password prompt block forever.
+        if std::io::IsTerminal::is_terminal(&std::io::stdin())
+            && std::io::IsTerminal::is_terminal(&std::io::stdout())
+        {
+            return Ok(Some(prompt_password(confirm)?));
+        }
+        return Err(StrHideError::General(
+            "Password required but no interactive terminal is available. Use -p/--password, --password-file, or STRHIDE_PASSWORD.".into(),
+        ));
     }
     Ok(None)
 }
@@ -248,10 +259,12 @@ pub fn run_cli() -> i32 {
 }
 
 fn handle_write(args: WriteArgs) -> Result<(), StrHideError> {
+    // --stealth implies encryption (its magics are password-derived); prompt for
+    // a password when neither -p nor a password source was supplied.
     let password = resolve_password(
         args.password.as_deref(),
         args.password_file.as_deref(),
-        args.encrypt,
+        args.encrypt || args.stealth,
         true,
     )?;
 
@@ -389,12 +402,14 @@ fn handle_read(args: ReadArgs) -> Result<(), StrHideError> {
             std::io::stdout().write_all(&res.data)?;
         }
     } else {
-        let fn_to_use = if !res.filename.is_empty() {
-            res.filename.as_str()
+        // Default filename in current dir; the metadata filename is untrusted
+        // input, so sanitize it to a bare name (no traversal, no absolute path).
+        let fn_to_use = if res.filename.is_empty() {
+            "extracted.bin".to_string()
         } else {
-            "extracted.bin"
+            crate::engine::sanitize_filename(&res.filename)
         };
-        let mut f = File::create(fn_to_use)?;
+        let mut f = File::create(&fn_to_use)?;
         f.write_all(&res.data)?;
         println!("[OK] Extracted payload to '{fn_to_use}' ({} bytes).", res.raw_size);
     }

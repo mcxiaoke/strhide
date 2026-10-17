@@ -358,3 +358,52 @@ class JpegAdapter(HostAdapter):
                 return True, f"JPEG structure verified (EOI marker found at {eoi_pos}, {trailing_bytes} trailing bytes)"
         except CorruptedDataError as e:
             return False, str(e)
+
+    def suspicious_structures(self, stego_in: BinaryIO) -> list[str]:
+        # A COM segment before SOS carrying >= 136 bytes (minimum envelope
+        # size) can only realistically be a hidden envelope.
+        min_envelope = 112 + 24
+        found: list[str] = []
+        stego_in.seek(0)
+        soi = stego_in.read(2)
+        if soi != JPEG_SOI:
+            return found
+
+        while True:
+            lead = stego_in.read(1)
+            if not lead:
+                break
+            if lead != b"\xff":
+                continue
+
+            code = stego_in.read(1)
+            while code == b"\xff":
+                code = stego_in.read(1)
+            if not code:
+                break
+
+            b = code[0]
+            if b in (0xD8, 0xD9, 0x01) or (0xD0 <= b <= 0xD7):
+                continue
+            if b == 0xDA:  # Reached SOS
+                break
+
+            len_bytes = stego_in.read(2)
+            if len(len_bytes) < 2:
+                break
+            seg_len = struct.unpack(">H", len_bytes)[0]
+            if seg_len < 2:
+                break
+
+            payload_offset = stego_in.tell()
+            payload_len = seg_len - 2
+
+            if b == 0xFE and payload_len >= min_envelope:
+                found.append(
+                    f"COM segment at offset {payload_offset} carries {payload_len} bytes "
+                    f"(minimum envelope size is {min_envelope})"
+                )
+
+            stego_in.seek(payload_offset + payload_len)
+
+        return found

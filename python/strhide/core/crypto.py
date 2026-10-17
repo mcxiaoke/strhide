@@ -95,44 +95,6 @@ def decrypt_metadata(meta_ciphertext: bytes, meta_key: bytes, base_nonce: bytes,
         raise PasswordError("Invalid password or corrupted metadata") from e
 
 
-def encrypt_stream_chunked(
-    in_stream: BinaryIO,
-    out_stream: BinaryIO,
-    payload_key: bytes,
-    base_nonce: bytes,
-    fixed_header_aad: bytes,
-) -> int:
-    """Encrypt in_stream into out_stream in 2MB chunks using AES-256-GCM.
-    
-    Returns total written bytes.
-    Format per chunk: [chunk_len (4B LE)] + [ciphertext + 16B tag].
-    """
-    aesgcm = AESGCM(payload_key)
-    chunk_index = 0
-    total_written = 0
-
-    while True:
-        chunk = in_stream.read(CHUNK_SIZE)
-        if not chunk:
-            break
-
-        # Peek to see if this is the last chunk
-        peek = in_stream.read(1)
-        if not peek:
-            is_last = True
-        else:
-            is_last = False
-            # Reconstruct stream state: we need to include peek in next chunk or put it back
-            # To handle clean streaming, we prepend peek to chunk in next loop.
-            # A cleaner approach: buffer next chunk.
-        
-        # Buffer-ahead pattern:
-        # Let's read first chunk before loop, then loop while buffering next chunk.
-        break  # Handled below
-
-    return 0
-
-
 def encrypt_stream_to_chunks(
     in_stream: BinaryIO,
     out_stream: BinaryIO,
@@ -199,6 +161,14 @@ def decrypt_stream_from_chunks(
             raise CorruptedDataError("Unexpected EOF reading chunk header")
         bytes_consumed += 4
         chunk_len = struct.unpack("<I", header_data)[0]
+
+        # Upper bound: a legit chunk holds at most CHUNK_SIZE plaintext bytes
+        # plus the 16-byte GCM tag. Anything larger means corruption or a
+        # crafted envelope; reject before reading.
+        if chunk_len > CHUNK_SIZE + 16:
+            raise CorruptedDataError(
+                f"Chunk length {chunk_len} exceeds maximum {CHUNK_SIZE + 16} at chunk {chunk_index}"
+            )
 
         cipher = in_stream.read(chunk_len)
         if len(cipher) < chunk_len:

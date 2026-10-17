@@ -16,21 +16,49 @@ pub fn find_eocd_offset<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<(u64,
     let mut tail = vec![0u8; scan_len as usize];
     reader.read_exact(&mut tail)?;
 
-    let idx = tail
-        .windows(4)
-        .rposition(|w| w == ZIP_EOCD_MAGIC)
-        .ok_or_else(|| {
-            StrHideError::CorruptedData("Valid ZIP EOCD (End of Central Directory) record not found".into())
-        })?;
+    // Walk EOCD magic candidates from the end backwards. A naive rposition()
+    // can be fooled by comment bytes that happen to contain "PK\x05\x06",
+    // which would misplace the injection point and corrupt the archive.
+    // Two passes: first require the record to end exactly at EOF (the shape of
+    // a clean archive); if none qualifies, accept a record that merely fits
+    // inside the file (the shape left by an EOF-strategy envelope appended
+    // past the EOCD). Both passes additionally require the declared central
+    // directory to lie before the record.
+    for require_exact_eof in [true, false] {
+        let mut search_end = tail.len();
+        while search_end >= 4 {
+            let idx = match tail[..search_end]
+                .windows(4)
+                .rposition(|w| w == ZIP_EOCD_MAGIC)
+            {
+                Some(i) => i,
+                None => break,
+            };
+            let eocd_pos = (file_size - scan_len) + idx as u64;
 
-    let eocd_pos = (file_size - scan_len) + idx as u64;
-    reader.seek(SeekFrom::Start(eocd_pos + 12))?;
-    let mut cd_info = [0u8; 8];
-    reader.read_exact(&mut cd_info)?;
-    let cd_size = u32::from_le_bytes(cd_info[0..4].try_into().unwrap()) as u64;
-    let cd_offset = u32::from_le_bytes(cd_info[4..8].try_into().unwrap()) as u64;
+            if idx + 22 <= tail.len() {
+                let comment_len = u16::from_le_bytes(tail[idx + 20..idx + 22].try_into().unwrap()) as u64;
+                let record_end = eocd_pos + 22 + comment_len;
+                let fits = if require_exact_eof {
+                    record_end == file_size
+                } else {
+                    record_end <= file_size
+                };
+                if fits {
+                    let cd_size = u32::from_le_bytes(tail[idx + 12..idx + 16].try_into().unwrap()) as u64;
+                    let cd_offset = u32::from_le_bytes(tail[idx + 16..idx + 20].try_into().unwrap()) as u64;
+                    if cd_offset + cd_size <= eocd_pos || (cd_offset == 0 && cd_size == 0) {
+                        return Ok((eocd_pos, cd_offset, cd_size));
+                    }
+                }
+            }
+            search_end = idx;
+        }
+    }
 
-    Ok((eocd_pos, cd_offset, cd_size))
+    Err(StrHideError::CorruptedData(
+        "Valid ZIP EOCD (End of Central Directory) record not found".into(),
+    ))
 }
 
 pub struct ZipAdapter;
@@ -64,8 +92,13 @@ impl HostAdapter for ZipAdapter {
 
     fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, ube_size: u64) -> &'static str {
         match find_eocd_offset(reader) {
-            Ok((_, cd_offset, _)) => {
-                if cd_offset + ube_size >= 0xFFFFFFFF {
+            Ok((eocd_pos, cd_offset, _)) => {
+                // The EOCD cd_offset field AND the patch position
+                // (eocd_pos + 16, shifted by ube_size) must both stay inside
+                // the 32-bit range, otherwise removal would restore a
+                // truncated offset.
+                let patch_limit = std::cmp::max(cd_offset, eocd_pos + 16);
+                if patch_limit + ube_size >= 0xFFFFFFFF {
                     "eof"
                 } else {
                     "pre_cd_inject"
@@ -97,9 +130,12 @@ impl HostAdapter for ZipAdapter {
         let ube_size = ube_in.seek(SeekFrom::End(0))?;
         ube_in.seek(SeekFrom::Start(0))?;
 
-        if cd_offset + ube_size >= 0xFFFFFFFF {
+        // Both the adjusted cd_offset and the patch position
+        // (eocd_pos + 16 + ube_size) must fit in uint32.
+        let patch_limit = std::cmp::max(cd_offset, eocd_pos + 16);
+        if patch_limit + ube_size >= 0xFFFFFFFF {
             return Err(StrHideError::UnsupportedFormat(
-                "Central directory offset overflow (>4GB) for standard ZIP. Please specify --strategy eof.".into(),
+                "Central directory or EOCD patch offset overflow (>4GB) for standard ZIP. Please specify --strategy eof.".into(),
             ));
         }
 

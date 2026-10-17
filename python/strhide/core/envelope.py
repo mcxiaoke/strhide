@@ -16,6 +16,7 @@ from strhide.errors import CorruptedDataError
 STANDARD_HEADER_MAGIC = b"\x89STRHIDE"
 STANDARD_TRAILER_MAGIC = b"STH!"
 CURRENT_VERSION = 0x02
+MAX_HINT_LEN = 1024
 
 # Flags bitmasks
 FLAG_ENCRYPTED = 0x01
@@ -113,7 +114,7 @@ class EnvelopeHeader:
         if len(data) < HEADER_STRUCT.size:
             raise CorruptedDataError(f"Insufficient bytes for header: {len(data)} < {HEADER_STRUCT.size}")
         unpacked = HEADER_STRUCT.unpack(data[:HEADER_STRUCT.size])
-        return cls(
+        header = cls(
             magic_header=unpacked[0],
             version=unpacked[1],
             flags=unpacked[2],
@@ -130,6 +131,28 @@ class EnvelopeHeader:
             meta_len=unpacked[13],
             hint_len=unpacked[14],
         )
+        # Envelope metadata is untrusted input: reject versions and field
+        # ranges that cannot have been produced by this implementation before
+        # any caller sizes a buffer from hint_len / meta_len.
+        if header.version != CURRENT_VERSION:
+            raise CorruptedDataError(
+                f"Unsupported envelope version {header.version:#04x} (expected {CURRENT_VERSION:#04x})"
+            )
+        if header.hint_len > MAX_HINT_LEN:
+            raise CorruptedDataError(
+                f"Password hint length {header.hint_len} exceeds maximum {MAX_HINT_LEN}"
+            )
+        return header
+
+    def validate_against(self, ube_total_size: int) -> None:
+        """Validate field ranges against the known envelope total size."""
+        fixed = HEADER_STRUCT.size + TRAILER_STRUCT.size  # header + trailer
+        variable = self.hint_len + self.meta_len
+        if variable + fixed > ube_total_size:
+            raise CorruptedDataError(
+                f"Envelope field sizes inconsistent: hint({self.hint_len}) + meta({self.meta_len}) "
+                f"+ {fixed} exceed total size {ube_total_size}"
+            )
 
 
 @dataclasses.dataclass

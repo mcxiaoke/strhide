@@ -227,6 +227,35 @@ class PngAdapter(HostAdapter):
 
         if not has_iend:
             return False, "PNG missing IEND chunk"
-        
+
         detail = f"private chunk '{found_chunk}' present" if found_chunk else "clean standard chunks"
         return True, f"PNG structure valid ({detail})"
+
+    def suspicious_structures(self, stego_in: BinaryIO) -> list[str]:
+        # A prIv/stEg chunk carrying >= 136 bytes (minimum envelope size) can
+        # only realistically be a hidden envelope.
+        min_envelope = 112 + 24
+        found: list[str] = []
+        stego_in.seek(0)
+        if stego_in.read(8) != PNG_MAGIC:
+            return found
+
+        while True:
+            hdr = stego_in.read(8)
+            if len(hdr) < 8:
+                break
+            length, chunk_type = struct.unpack(">I4s", hdr)
+            chunk_offset = stego_in.tell() - 8
+
+            if chunk_type in SUPPORTED_CHUNKS and length >= min_envelope:
+                found.append(
+                    f"private chunk '{chunk_type.decode('latin-1', errors='replace')}' at offset "
+                    f"{chunk_offset} carries {length} bytes (minimum envelope size is {min_envelope})"
+                )
+
+            if chunk_type == b"IEND":
+                break
+
+            stego_in.seek(stego_in.tell() + length + 4)
+
+        return found

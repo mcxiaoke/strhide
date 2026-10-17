@@ -121,6 +121,47 @@ pub struct RemoveResult {
     pub backup_file: Option<String>,
 }
 
+/// RAII guard removing an uncommitted temporary file on drop.
+///
+/// Any error return between creating the temp file and the successful atomic
+/// rename leaves a half-written `*.strhide.tmp` behind without this guard.
+/// Call `commit()` once the rename succeeded; afterwards the guard is inert.
+struct TmpGuard {
+    path: Option<PathBuf>,
+}
+
+impl TmpGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn commit(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TmpGuard {
+    fn drop(&mut self) {
+        if let Some(p) = &self.path {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// Sanitize an untrusted metadata filename down to a safe bare file name.
+///
+/// Envelope metadata (especially in unencrypted envelopes) is attacker-controlled
+/// input: `../../etc/passwd` style values must never escape the output directory.
+/// Only the final path component is kept; empty results and reserved names fall
+/// back to "extracted.bin".
+pub fn sanitize_filename(name: &str) -> String {
+    let candidate = Path::new(name).file_name().and_then(|s| s.to_str());
+    match candidate {
+        Some(n) if !n.is_empty() && n != "." && n != ".." => n.to_string(),
+        _ => "extracted.bin".to_string(),
+    }
+}
+
 pub fn write_carrier(
     carrier_path: &Path,
     source: PayloadSource,
@@ -145,6 +186,15 @@ pub fn write_carrier(
         ));
     }
 
+    // Stealth mode derives its magics from the password; without a password the
+    // envelope would silently degrade to the standard (plaintext-magic) mode,
+    // which contradicts the user's stealth expectation. Fail fast instead.
+    if stealth && password.is_none() {
+        return Err(StrHideError::General(
+            "Stealth mode requires a password (provide -p/--password, --password-file, or STRHIDE_PASSWORD).".into(),
+        ));
+    }
+
     let hint_bytes = if let Some(hint) = password_hint {
         let norm_hint = normalize_nfc(hint.trim());
         let bytes = norm_hint.into_bytes();
@@ -164,35 +214,43 @@ pub fn write_carrier(
     // 2. Capture carrier metadata (stats, permissions, timestamps, full SHA-256)
     let meta = std::fs::metadata(carrier_path)?;
     let orig_host_size = meta.len();
+    let orig_permissions = meta.permissions();
     let orig_atime = filetime::FileTime::from_last_access_time(&meta);
     let orig_mtime = filetime::FileTime::from_last_modification_time(&meta);
     let orig_host_sha256 = compute_file_sha256(carrier_path)?;
 
     // 3. Detect adapter & check existing envelope
     let adapter: &'static dyn HostAdapter;
-    let mut selected_strategy: String;
+    let selected_strategy: String;
+    let structural_warnings: Vec<String>;
 
     {
         let mut cf = File::open(carrier_path)?;
         adapter = find_adapter(&mut cf);
 
-        if strategy == "auto" {
-            selected_strategy = adapter.choose_auto_strategy(&mut cf, 0).to_string();
-        } else {
-            if !adapter.supported_strategies().contains(&strategy) {
-                return Err(StrHideError::General(format!(
-                    "Strategy '{strategy}' not supported by adapter '{}'",
-                    adapter.format_name()
-                )));
-            }
-            selected_strategy = strategy.to_string();
-        }
-
+        // Reject carriers that already contain an envelope. A standard-magic
+        // scan catches plain/standard-encrypted envelopes; when a password is
+        // available, a second scan with the derived stealth magic also catches
+        // stealth envelopes (which are intentionally invisible without it).
         if adapter.locate(&mut cf, None)?.is_some() {
             return Err(StrHideError::General(
                 "Carrier already contains hidden data. Use remove first or specify another file.".into(),
             ));
         }
+        if let Some(pwd) = password {
+            let magics = derive_stealth_magics(pwd, b"strhide-stealth-v1")?;
+            if adapter.locate(&mut cf, Some(&magics.1))?.is_some() {
+                return Err(StrHideError::General(
+                    "Carrier already contains hidden data (stealth envelope). Use remove first or specify another file.".into(),
+                ));
+            }
+        }
+
+        // Neither magic scan matched. A stealth envelope written with an
+        // unknown password is undetectable by magic; scan structurally and
+        // warn (not refuse) when the carrier shows an envelope-shaped
+        // container, so the user learns a second envelope would stack on top.
+        structural_warnings = adapter.suspicious_structures(&mut cf);
     }
 
     // 4. Prepare data payload stream
@@ -226,13 +284,20 @@ pub fn write_carrier(
         h.iter().map(|b| format!("{b:02x}")).collect::<String>()
     };
 
-    // 5. Compress data with Deflate
+    // 5. Compress data with Deflate (integer criterion, cross-language identical:
+    // keep compression only when it saves at least 2%: comp_len * 100 < raw_size * 98)
     let mut compressed_buf = Vec::new();
     let (_, comp_len) = compress_stream(&mut Cursor::new(&payload_raw_bytes), &mut compressed_buf)?;
 
-    let (to_encrypt_bytes, is_compressed) = if comp_len < (raw_size as f64 * 0.98) as u64 {
+    let (to_encrypt_bytes, is_compressed) = if (comp_len as u128) * 100 < (raw_size as u128) * 98 {
+        // Keep the compressed stream and release the raw payload buffer early.
+        let mut raw = payload_raw_bytes;
+        raw.clear();
+        raw.shrink_to_fit();
         (compressed_buf, true)
     } else {
+        // Keep the raw payload and release the compressed buffer early.
+        drop(compressed_buf);
         (payload_raw_bytes, false)
     };
 
@@ -296,20 +361,39 @@ pub fn write_carrier(
     };
     let meta_raw = serde_json::to_vec(&meta_obj)?;
 
-    // Estimate UBE size for auto strategy selection
+    // Exact UBE size, computed before any strategy decision. All components are
+    // deterministic at this point:
+    //   meta_len      = len(meta_raw) + (16 if encrypted else 0)
+    //   payload_len   = to_encrypt_len + chunks * 20 if encrypted else to_encrypt_len
+    //                    (each encrypted chunk is 4B length + ciphertext + 16B tag;
+    //                     an empty payload still emits one empty final chunk)
+    // This eliminates the previous under-estimate (4B per chunk) that made the
+    // JPEG/PNG/ZIP `auto` capacity checks select a strategy the injector then
+    // rejected instead of gracefully falling back to `eof`.
     let to_encrypt_len = to_encrypt_bytes.len() as u64;
-    let est_meta_len = meta_raw.len() as u64 + if is_encrypted { 16 } else { 0 };
-    let est_payload_len = to_encrypt_len
-        + if is_encrypted {
-            ((to_encrypt_len + 2097152 - 1) / 2097152) * 16
-        } else {
-            0
-        };
-    let est_ube_size = HEADER_SIZE as u64 + hint_bytes.len() as u64 + est_meta_len + est_payload_len + 24;
+    let exact_meta_len = meta_raw.len() as u64 + if is_encrypted { 16 } else { 0 };
+    let chunk_count = if is_encrypted {
+        to_encrypt_len.div_ceil(crate::crypto::CHUNK_SIZE as u64).max(1)
+    } else {
+        0
+    };
+    let exact_payload_len = to_encrypt_len + chunk_count * 20;
+    let exact_ube_size =
+        HEADER_SIZE as u64 + hint_bytes.len() as u64 + exact_meta_len + exact_payload_len + 24;
 
     if strategy == "auto" {
         let mut cf = File::open(carrier_path)?;
-        selected_strategy = adapter.choose_auto_strategy(&mut cf, est_ube_size).to_string();
+        selected_strategy = adapter
+            .choose_auto_strategy(&mut cf, exact_ube_size)
+            .to_string();
+    } else {
+        if !adapter.supported_strategies().contains(&strategy) {
+            return Err(StrHideError::General(format!(
+                "Strategy '{strategy}' not supported by adapter '{}'",
+                adapter.format_name()
+            )));
+        }
+        selected_strategy = strategy.to_string();
     }
 
     // 8. Populate Header structure
@@ -359,6 +443,14 @@ pub fn write_carrier(
         + payload_written
         + 24;
 
+    // Defensive cross-check: the exact pre-computation above must match reality.
+    // A mismatch would indicate a protocol drift between crypto and engine.
+    if ube_total_size != exact_ube_size {
+        return Err(StrHideError::General(format!(
+            "Internal envelope size mismatch: computed {ube_total_size}, expected {exact_ube_size}"
+        )));
+    }
+
     // Check size inflation warning (> 50%)
     let mut warning_msg = None;
     if orig_host_size > 0 && ube_total_size > (orig_host_size / 2) {
@@ -368,19 +460,34 @@ pub fn write_carrier(
         ));
     }
 
-    // Assemble full UBE
+    // Merge structural warnings (probable pre-existing stealth envelope).
+    if !structural_warnings.is_empty() {
+        let extra = format!(
+            "Carrier shows structures that only a hidden envelope would produce ({}). It may already contain a stealth envelope written with a different password; injecting now would stack a second envelope on top.",
+            structural_warnings.join("; ")
+        );
+        warning_msg = Some(match warning_msg {
+            Some(w) => format!("{w} {extra}"),
+            None => extra,
+        });
+    }
+
+    // Assemble full UBE (payload buffer is moved in, not copied)
     let mut tmp_ube = Vec::with_capacity(ube_total_size as usize);
     tmp_ube.extend_from_slice(&header.pack());
     if !hint_bytes.is_empty() {
         tmp_ube.extend_from_slice(&hint_bytes);
     }
     tmp_ube.extend_from_slice(&meta_block);
-    tmp_ube.extend_from_slice(&payload_cipher_buf);
+    tmp_ube.append(&mut payload_cipher_buf); // move bytes, no copy
     let dummy_trailer = EnvelopeTrailer::create(0, ube_total_size, trailer_magic);
     tmp_ube.extend_from_slice(&dummy_trailer.pack());
 
-    // 9. Inject into temporary target file
+    // 9. Inject into temporary target file.
+    // TmpGuard removes the half-written temp file on any early return unless
+    // commit() is called after the atomic rename succeeded.
     let tmp_target = PathBuf::from(format!("{}.strhide.tmp", target_path.display()));
+    let mut tmp_guard = TmpGuard::new(tmp_target.clone());
     let (inject_offset, inject_size, patch_offset, orig_patch_val) = {
         let mut host_in = File::open(carrier_path)?;
         let mut out_file = File::create(&tmp_target)?;
@@ -433,22 +540,36 @@ pub fn write_carrier(
         }
     }
 
-    // 11. Self-verification check
-    let loc_ok = {
+    // 11. Self-verification: precisely verify the envelope just written at
+    // actual_ube_offset (not merely "some envelope exists somewhere"), so a
+    // stale envelope from a previous injection cannot satisfy the check.
+    {
         let mut f = File::open(&tmp_target)?;
-        adapter
-            .locate(
-                &mut f,
-                if stealth { Some(&trailer_magic) } else { None },
-            )?
-            .is_some()
-    };
-
-    if !loc_ok {
-        let _ = std::fs::remove_file(&tmp_target);
-        return Err(StrHideError::General(
-            "Self-verification failed: could not locate injected envelope".into(),
-        ));
+        let mut hdr_bytes = [0u8; HEADER_SIZE];
+        f.seek(SeekFrom::Start(actual_ube_offset))?;
+        f.read_exact(&mut hdr_bytes)?;
+        let written_header = EnvelopeHeader::unpack(&hdr_bytes)?;
+        if written_header.magic_header != header_magic
+            || written_header.inject_offset != inject_offset
+            || written_header.inject_size != inject_size
+            || written_header.patch_offset != patch_offset
+            || written_header.orig_patch_val != orig_patch_val
+        {
+            return Err(StrHideError::General(
+                "Self-verification failed: header at injection offset does not match written parameters".into(),
+            ));
+        }
+        f.seek(SeekFrom::Start(actual_ube_offset + ube_total_size - 24))?;
+        let mut tr_bytes = [0u8; 24];
+        f.read_exact(&mut tr_bytes)?;
+        let written_trailer = EnvelopeTrailer::unpack(&tr_bytes, Some(&trailer_magic))?;
+        if written_trailer.ube_offset != actual_ube_offset
+            || written_trailer.ube_total_size != ube_total_size
+        {
+            return Err(StrHideError::General(
+                "Self-verification failed: trailer boundary parameters mismatch".into(),
+            ));
+        }
     }
 
     // 12. In-place backup (if applicable) & Atomic commit
@@ -461,6 +582,10 @@ pub fn write_carrier(
     }
 
     std::fs::rename(&tmp_target, target_path)?;
+    tmp_guard.commit();
+
+    // Restore original carrier permissions (mode/readonly) alongside timestamps.
+    let _ = std::fs::set_permissions(target_path, orig_permissions);
 
     if preserve_time {
         let _ = filetime::set_file_times(target_path, orig_atime, orig_mtime);
@@ -485,7 +610,7 @@ pub fn write_carrier(
         }
     } else if adapter.format_name() == "PDF" {
         if selected_strategy == "incremental" {
-            strategy_note = Some("Embedded into compliant PDF Incremental Update stream ending with %%EOF (0 trailing garbage bytes).".into());
+            strategy_note = Some("Embedded into compliant PDF Incremental Update stream ending with %%EOF (original trailing bytes, if any, preserved after the final %%EOF).".into());
         } else if selected_strategy == "eof" && strategy == "auto" {
             strategy_note = Some("PDF trailer could not be incrementally parsed; automatically fell back to EOF overlay.".into());
         } else if selected_strategy == "eof" {
@@ -493,7 +618,7 @@ pub fn write_carrier(
         }
     } else if adapter.format_name() == "MP4" {
         if selected_strategy == "box_uuid" {
-            strategy_note = Some("Embedded into compliant ISO BMFF 64-bit uuid Box (preserves media frame offsets).".into());
+            strategy_note = Some("Embedded into compliant ISO BMFF uuid Box (32-bit header below 4GB, 64-bit large header at or above 4GB; preserves media frame offsets).".into());
         } else if selected_strategy == "eof" {
             strategy_note = Some("Appended after MP4 EOF (EOF overlay).".into());
         }
@@ -522,7 +647,7 @@ pub fn write_carrier(
         raw_size,
         ube_size: ube_total_size,
         is_encrypted,
-        is_stealth: stealth,
+        is_stealth: (flags & FLAG_STEALTH) != 0,
         password_hint: password_hint.map(|s| s.to_string()),
         backup_file,
         warning: warning_msg,
@@ -544,13 +669,20 @@ pub fn read_carrier(
     let mut f = File::open(carrier_path)?;
     let adapter = find_adapter(&mut f);
 
-    let mut loc = adapter.locate(&mut f, None)?;
-    if loc.is_none() && password.is_some() {
-        let magics = derive_stealth_magics(password.unwrap(), b"strhide-stealth-v1")?;
+    // Locate with password priority: when a password is supplied, the derived
+    // stealth magic is tried first so stealth envelopes are found even when a
+    // standard-magic envelope also exists; a wrong password still yields
+    // "no hidden data" (plausible deniability preserved).
+    let mut loc = None;
+    if let Some(pwd) = password {
+        let magics = derive_stealth_magics(pwd, b"strhide-stealth-v1")?;
         loc = adapter.locate(&mut f, Some(&magics.1))?;
     }
+    if loc.is_none() {
+        loc = adapter.locate(&mut f, None)?;
+    }
 
-    let (ube_offset, _ube_total_size, _strategy_name) = loc.ok_or_else(|| {
+    let (ube_offset, ube_total_size, _strategy_name) = loc.ok_or_else(|| {
         StrHideError::General(format!(
             "No hidden strhide data found in '{}'",
             carrier_path.display()
@@ -562,6 +694,7 @@ pub fn read_carrier(
     let mut header_bytes = [0u8; HEADER_SIZE];
     f.read_exact(&mut header_bytes)?;
     let header = EnvelopeHeader::unpack(&header_bytes)?;
+    header.validate_against(ube_total_size)?;
 
     // Read hint if present
     let mut hint_str = None;
@@ -603,12 +736,18 @@ pub fn read_carrier(
         StrHideError::CorruptedData(format!("Corrupted metadata block: {e}"))
     })?;
 
-    // Read payload
-    let total_payload_bytes = _ube_total_size
-        - HEADER_SIZE as u64
-        - header.hint_len as u64
-        - header.meta_len as u64
-        - 24;
+    // Read payload (checked_sub: validate_against already bounds the fields,
+    // but keep the arithmetic defensive against corrupted envelopes)
+    let total_payload_bytes = ube_total_size
+        .checked_sub(HEADER_SIZE as u64)
+        .and_then(|v| v.checked_sub(header.hint_len as u64))
+        .and_then(|v| v.checked_sub(header.meta_len as u64))
+        .and_then(|v| v.checked_sub(24))
+        .ok_or_else(|| {
+            StrHideError::CorruptedData(
+                "Envelope size fields inconsistent: payload region underflow".into(),
+            )
+        })?;
 
     let mut decrypted_payload = Vec::new();
     if header.is_encrypted() {
@@ -650,10 +789,12 @@ pub fn read_carrier(
     let mut written_file = None;
     if let Some(out_p) = output_path {
         let final_dest = if out_p.is_dir() {
-            let fn_to_use = if !meta_obj.filename.is_empty() {
-                meta_obj.filename.as_str()
+            // Metadata filename is untrusted input: sanitize to a bare name so
+            // crafted carriers cannot write outside the output directory.
+            let fn_to_use = if meta_obj.filename.is_empty() {
+                "extracted.bin".to_string()
             } else {
-                "extracted.bin"
+                sanitize_filename(&meta_obj.filename)
             };
             out_p.join(fn_to_use)
         } else {
@@ -690,23 +831,30 @@ pub fn remove_carrier(
 
     let target_path = output_path.unwrap_or(carrier_path);
     let meta = std::fs::metadata(carrier_path)?;
+    let orig_permissions = meta.permissions();
     let orig_atime = filetime::FileTime::from_last_access_time(&meta);
     let orig_mtime = filetime::FileTime::from_last_modification_time(&meta);
 
     let header: EnvelopeHeader;
     let tmp_target = PathBuf::from(format!("{}.strhide.restoring.tmp", target_path.display()));
+    let mut tmp_guard = TmpGuard::new(tmp_target.clone());
 
     {
         let mut cf = File::open(carrier_path)?;
         let adapter = find_adapter(&mut cf);
 
-        let mut loc = adapter.locate(&mut cf, None)?;
-        if loc.is_none() && password.is_some() {
-            let magics = derive_stealth_magics(password.unwrap(), b"strhide-stealth-v1")?;
+        // Password-priority locate (see read_carrier): stealth envelopes are
+        // found even when a standard-magic envelope also exists.
+        let mut loc = None;
+        if let Some(pwd) = password {
+            let magics = derive_stealth_magics(pwd, b"strhide-stealth-v1")?;
             loc = adapter.locate(&mut cf, Some(&magics.1))?;
         }
+        if loc.is_none() {
+            loc = adapter.locate(&mut cf, None)?;
+        }
 
-        let (ube_offset, _, _) = loc.ok_or_else(|| {
+        let (ube_offset, ube_total_size, _) = loc.ok_or_else(|| {
             StrHideError::General(format!(
                 "No hidden strhide data found in '{}'",
                 carrier_path.display()
@@ -717,6 +865,7 @@ pub fn remove_carrier(
         let mut header_bytes = [0u8; HEADER_SIZE];
         cf.read_exact(&mut header_bytes)?;
         header = EnvelopeHeader::unpack(&header_bytes)?;
+        header.validate_against(ube_total_size)?;
 
         let mut out_f = OpenOptions::new()
             .read(true)
@@ -733,12 +882,34 @@ pub fn remove_carrier(
     let restored_sha256 = compute_file_sha256(&tmp_target)?;
 
     if restored_size != header.orig_host_size || restored_sha256 != header.orig_host_sha256 {
-        let _ = std::fs::remove_file(&tmp_target);
+        // Diagnose the common cause: the carrier carried a second envelope
+        // (e.g. a stealth envelope underneath), so stripping this one cannot
+        // reproduce the recorded original. Envelopes must be removed in
+        // reverse order of injection.
+        let mut diagnosis = String::new();
+        if let Ok(mut rf) = File::open(&tmp_target) {
+            let r_adapter = find_adapter(&mut rf);
+            let remaining = r_adapter
+                .locate(&mut rf, None)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    password.and_then(|pwd| {
+                        derive_stealth_magics(pwd, b"strhide-stealth-v1")
+                            .ok()
+                            .and_then(|m| r_adapter.locate(&mut rf, Some(&m.1)).ok().flatten())
+                    })
+                });
+            if remaining.is_some() {
+                diagnosis = "\nDiagnosis: the restored file still contains another hidden envelope. Remove envelopes in reverse order of injection (most recently written first).".to_string();
+            }
+        }
         return Err(StrHideError::RestoreMismatch(format!(
-            "Restored size: {restored_size} (expected {})\nRestored SHA256: {}\nExpected SHA256: {}",
+            "Restored size: {restored_size} (expected {})\nRestored SHA256: {}\nExpected SHA256: {}{}",
             header.orig_host_size,
             restored_sha256.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-            header.orig_host_sha256.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            header.orig_host_sha256.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            diagnosis
         )));
     }
 
@@ -751,6 +922,8 @@ pub fn remove_carrier(
     }
 
     std::fs::rename(&tmp_target, target_path)?;
+    tmp_guard.commit();
+    let _ = std::fs::set_permissions(target_path, orig_permissions);
     let _ = filetime::set_file_times(target_path, orig_atime, orig_mtime);
 
     Ok(RemoveResult {
@@ -777,10 +950,14 @@ pub fn inspect_carrier(
     let mut cf = File::open(carrier_path)?;
     let adapter = find_adapter(&mut cf);
 
-    let mut loc = adapter.locate(&mut cf, None)?;
-    if loc.is_none() && password.is_some() {
-        let magics = derive_stealth_magics(password.unwrap(), b"strhide-stealth-v1")?;
+    // Password-priority locate (see read_carrier).
+    let mut loc = None;
+    if let Some(pwd) = password {
+        let magics = derive_stealth_magics(pwd, b"strhide-stealth-v1")?;
         loc = adapter.locate(&mut cf, Some(&magics.1))?;
+    }
+    if loc.is_none() {
+        loc = adapter.locate(&mut cf, None)?;
     }
 
     let (ube_offset, ube_total_size, strategy_name) = match loc {
@@ -815,6 +992,7 @@ pub fn inspect_carrier(
     let mut header_bytes = [0u8; HEADER_SIZE];
     cf.read_exact(&mut header_bytes)?;
     let header = EnvelopeHeader::unpack(&header_bytes)?;
+    header.validate_against(ube_total_size)?;
 
     let mut hint_str = None;
     if header.hint_len > 0 {
@@ -887,11 +1065,14 @@ pub fn verify_carrier(
     // Level 1: Host format integrity
     let (l1_ok, l1_msg) = adapter.verify_structure(&mut cf)?;
 
-    // Level 2: Envelope boundary & CRC
-    let mut loc = adapter.locate(&mut cf, None)?;
-    if loc.is_none() && password.is_some() {
-        let magics = derive_stealth_magics(password.unwrap(), b"strhide-stealth-v1")?;
+    // Level 2: Envelope boundary & CRC (password-priority locate, see read_carrier)
+    let mut loc = None;
+    if let Some(pwd) = password {
+        let magics = derive_stealth_magics(pwd, b"strhide-stealth-v1")?;
         loc = adapter.locate(&mut cf, Some(&magics.1))?;
+    }
+    if loc.is_none() {
+        loc = adapter.locate(&mut cf, None)?;
     }
 
     let (ube_offset, ube_total_size, _) = match loc {

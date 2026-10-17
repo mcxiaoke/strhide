@@ -49,6 +49,20 @@ from strhide.errors import (
 )
 
 
+def sanitize_filename(name: str) -> str:
+    """Sanitize an untrusted metadata filename down to a safe bare file name.
+
+    Envelope metadata (especially in unencrypted envelopes) is attacker-controlled
+    input: ``../../etc/passwd`` style values must never escape the output
+    directory. Only the final path component is kept; empty results and
+    reserved names fall back to "extracted.bin".
+    """
+    candidate = os.path.basename(name or "")
+    if not candidate or candidate in (".", ".."):
+        return "extracted.bin"
+    return candidate
+
+
 def write_carrier(
     carrier_path: str,
     data_bytes: Optional[bytes] = None,
@@ -70,6 +84,14 @@ def write_carrier(
 
     if password_hint and stealth:
         raise StrHideError("Password hint is not supported in --stealth mode (stealth mode requires password to locate envelope).")
+
+    # Stealth mode derives its magics from the password; without a password the
+    # envelope would silently degrade to the standard (plaintext-magic) mode,
+    # which contradicts the user's stealth expectation. Fail fast instead.
+    if stealth and not password:
+        raise StrHideError(
+            "Stealth mode requires a password (provide -p/--password, --password-file, or STRHIDE_PASSWORD)."
+        )
 
     hint_bytes = b""
     if password_hint:
@@ -95,19 +117,29 @@ def write_carrier(
     orig_host_sha256 = compute_file_sha256(carrier_path)
 
     # 3. Detect adapter & choose strategy
+    structural_warnings: list[str] = []
     with open(carrier_path, "rb") as cf:
         adapter = find_adapter(cf)
-        if strategy == "auto":
-            selected_strategy = adapter.choose_auto_strategy(cf, 0)
-        else:
-            if strategy not in adapter.supported_strategies():
-                raise StrHideError(f"Strategy '{strategy}' not supported by adapter '{adapter.format_name()}'")
-            selected_strategy = strategy
 
-        # Check if already has an envelope
+        # Reject carriers that already contain an envelope. A standard-magic
+        # scan catches plain/standard-encrypted envelopes; when a password is
+        # available, a second scan with the derived stealth magic also catches
+        # stealth envelopes (which are intentionally invisible without it).
         existing = adapter.locate(cf)
         if existing is not None:
             raise StrHideError("Carrier already contains hidden data. Use remove first or specify another file.")
+        if password:
+            _, trailer_magic_expected = derive_stealth_magics(password)
+            if adapter.locate(cf, expected_trailer_magic=trailer_magic_expected) is not None:
+                raise StrHideError(
+                    "Carrier already contains hidden data (stealth envelope). Use remove first or specify another file."
+                )
+
+        # Neither magic scan matched. A stealth envelope written with an
+        # unknown password is undetectable by magic; scan structurally and
+        # warn (not refuse) when the carrier shows an envelope-shaped
+        # container, so the user learns a second envelope would stack on top.
+        structural_warnings = adapter.suspicious_structures(cf)
 
     # 4. Prepare data payload stream
     if data_stdin:
@@ -160,8 +192,10 @@ def write_carrier(
         raw_len, comp_len = compress_stream(payload_source_stream, compressed_stream)
         compressed_stream.seek(0)
 
-        # Decide whether to keep compression (skip if negligible gain)
-        if comp_len < raw_len * 0.98:
+        # Decide whether to keep compression (skip if negligible gain).
+        # Integer criterion, cross-language identical with the Rust engine:
+        # comp_len * 100 < raw_len * 98 (at least 2% saved).
+        if comp_len * 100 < raw_len * 98:
             is_compressed = True
             to_encrypt_stream = compressed_stream
         else:
@@ -209,15 +243,31 @@ def write_carrier(
         }
         meta_raw = json.dumps(meta_dict, separators=(",", ":")).encode("utf-8")
 
-        # Estimate total UBE size before finalizing header & AAD
+        # Exact UBE size, computed before any strategy decision. All components
+        # are deterministic at this point:
+        #   meta_len      = len(meta_raw) + (16 if encrypted else 0)
+        #   payload_len   = to_encrypt_len + chunks * 20 if encrypted else to_encrypt_len
+        #                    (each encrypted chunk is 4B length + ciphertext + 16B tag;
+        #                     an empty payload still emits one empty final chunk)
+        # This eliminates the previous under-estimate (4B per chunk) that made
+        # the JPEG/PNG/ZIP `auto` capacity checks select a strategy the injector
+        # then rejected instead of gracefully falling back to `eof`.
         to_encrypt_len = comp_len if is_compressed else raw_len
-        est_meta_len = len(meta_raw) + (16 if is_encrypted else 0)
-        est_payload_len = to_encrypt_len + ((to_encrypt_len + 2097152 - 1) // 2097152 * 16 if is_encrypted else 0)
-        est_ube_size = HEADER_STRUCT.size + len(hint_bytes) + est_meta_len + est_payload_len + 24
+        exact_meta_len = len(meta_raw) + (16 if is_encrypted else 0)
+        if is_encrypted:
+            chunk_count = max(1, -(-to_encrypt_len // 2097152))  # ceil, at least one chunk
+            exact_payload_len = to_encrypt_len + chunk_count * 20
+        else:
+            exact_payload_len = to_encrypt_len
+        exact_ube_size = HEADER_STRUCT.size + len(hint_bytes) + exact_meta_len + exact_payload_len + 24
 
         if strategy == "auto":
             with open(carrier_path, "rb") as cf:
-                selected_strategy = adapter.choose_auto_strategy(cf, est_ube_size)
+                selected_strategy = adapter.choose_auto_strategy(cf, exact_ube_size)
+        else:
+            if strategy not in adapter.supported_strategies():
+                raise StrHideError(f"Strategy '{strategy}' not supported by adapter '{adapter.format_name()}'")
+            selected_strategy = strategy
 
         # 8. Create and populate Header structure
         strat_id = strategy_to_id(selected_strategy)
@@ -258,6 +308,14 @@ def write_carrier(
         # Header (112B) + Hint + Meta + Payload + Trailer (24B)
         ube_total_size = HEADER_STRUCT.size + len(hint_bytes) + header.meta_len + payload_written + 24
 
+        # Defensive cross-check: the exact pre-computation above must match
+        # reality. A mismatch would indicate a protocol drift between crypto
+        # and engine.
+        if ube_total_size != exact_ube_size:
+            raise StrHideError(
+                f"Internal envelope size mismatch: computed {ube_total_size}, expected {exact_ube_size}"
+            )
+
         # Check payload size inflation warning (> 50% of carrier original size)
         warning_msg = None
         if orig_host_size > 0 and ube_total_size > (orig_host_size * 0.5):
@@ -267,6 +325,16 @@ def write_carrier(
                 f"file size ({orig_host_size:,} bytes, {ratio_pct:.1f}%). "
                 f"Noticeable file size inflation may compromise stealthiness!"
             )
+
+        # Merge structural warnings (probable pre-existing stealth envelope).
+        if structural_warnings:
+            extra = (
+                "Carrier shows structures that only a hidden envelope would produce ("
+                + "; ".join(structural_warnings)
+                + "). It may already contain a stealth envelope written with a different "
+                "password; injecting now would stack a second envelope on top."
+            )
+            warning_msg = f"{warning_msg} {extra}" if warning_msg else extra
 
         # Assemble full UBE
         tmp_ube.write(header.pack())
@@ -282,13 +350,22 @@ def write_carrier(
     finally:
         payload_source_stream.close()
 
-    # 9. Inject into temporary target file
+    # 9. Inject into temporary target file. Any failure here must not leave a
+    # half-written *.strhide.tmp behind (RAII equivalent: try/except cleanup).
     tmp_target = target_path + ".strhide.tmp"
-    with open(carrier_path, "rb") as host_in, open(tmp_target, "wb") as out_file:
-        tmp_ube.seek(0)
-        inject_offset, inject_size, patch_offset, orig_patch_val = adapter.inject(
-            host_in, tmp_ube, out_file, selected_strategy
-        )
+    try:
+        with open(carrier_path, "rb") as host_in, open(tmp_target, "wb") as out_file:
+            tmp_ube.seek(0)
+            inject_offset, inject_size, patch_offset, orig_patch_val = adapter.inject(
+                host_in, tmp_ube, out_file, selected_strategy
+            )
+    except BaseException:
+        if os.path.exists(tmp_target):
+            try:
+                os.remove(tmp_target)
+            except OSError:
+                pass
+        raise
 
     # 10. Update real ube_offset in Header and Trailer
     # Injected file now has UBE starting at inject_offset (or wrapper offset)
@@ -376,14 +453,14 @@ def write_carrier(
             strategy_note = "Appended after PNG IEND (EOF overlay)."
     elif adapter.format_name() == "PDF":
         if selected_strategy == "incremental":
-            strategy_note = "Embedded into compliant PDF Incremental Update stream ending with %%EOF (0 trailing garbage bytes)."
+            strategy_note = "Embedded into compliant PDF Incremental Update stream ending with %%EOF (original trailing bytes, if any, preserved after the final %%EOF)."
         elif selected_strategy == "eof" and strategy == "auto":
             strategy_note = "PDF trailer could not be incrementally parsed; automatically fell back to EOF overlay."
         elif selected_strategy == "eof":
             strategy_note = "Appended after PDF %%EOF (EOF overlay)."
     elif adapter.format_name() == "MP4":
         if selected_strategy == "box_uuid":
-            strategy_note = "Embedded into compliant ISO BMFF 64-bit uuid Box (preserves media frame offsets)."
+            strategy_note = "Embedded into compliant ISO BMFF uuid Box (32-bit header below 4GB, 64-bit large header at or above 4GB; preserves media frame offsets)."
         elif selected_strategy == "eof":
             strategy_note = "Appended after MP4 EOF (EOF overlay)."
     elif adapter.format_name() == "ZIP":
@@ -409,7 +486,7 @@ def write_carrier(
         "raw_size": raw_size,
         "ube_size": ube_total_size,
         "is_encrypted": is_encrypted,
-        "is_stealth": stealth,
+        "is_stealth": bool(flags & FLAG_STEALTH),
         "password_hint": password_hint if password_hint else None,
         "backup_file": backup_file,
         "warning": warning_msg,
@@ -427,10 +504,16 @@ def read_carrier(
 
     with open(carrier_path, "rb") as f:
         adapter = find_adapter(f)
-        loc = adapter.locate(f)
-        if loc is None and password:
-            _, trailer_magic = derive_stealth_magics(password)
-            loc = adapter.locate(f, expected_trailer_magic=trailer_magic)
+        # Locate with password priority: when a password is supplied, the
+        # derived stealth magic is tried first so stealth envelopes are found
+        # even when a standard-magic envelope also exists; a wrong password
+        # still yields "no hidden data" (plausible deniability preserved).
+        loc = None
+        if password:
+            _, trailer_magic_expected = derive_stealth_magics(password)
+            loc = adapter.locate(f, expected_trailer_magic=trailer_magic_expected)
+        if loc is None:
+            loc = adapter.locate(f)
 
         if loc is None:
             raise StrHideError(f"No hidden strhide data found in '{carrier_path}'")
@@ -441,6 +524,7 @@ def read_carrier(
         f.seek(ube_offset)
         header_bytes = f.read(HEADER_STRUCT.size)
         header = EnvelopeHeader.unpack(header_bytes)
+        header.validate_against(ube_total_size)
 
         # Read password hint if present
         password_hint = None
@@ -519,7 +603,7 @@ def read_carrier(
         if os.path.isdir(output_path):
             filename = meta_dict.get("filename") or "extracted.bin"
             # Sanitize filename against path traversal
-            filename = os.path.basename(filename)
+            filename = sanitize_filename(filename)
             out_target = os.path.join(output_path, filename)
         else:
             out_target = output_path
@@ -556,10 +640,14 @@ def remove_carrier(
 
     with open(carrier_path, "rb") as cf:
         adapter = find_adapter(cf)
-        loc = adapter.locate(cf)
-        if loc is None and password:
-            _, trailer_magic = derive_stealth_magics(password)
-            loc = adapter.locate(cf, expected_trailer_magic=trailer_magic)
+        # Password-priority locate (see read_carrier): stealth envelopes are
+        # found even when a standard-magic envelope also exists.
+        loc = None
+        if password:
+            _, trailer_magic_expected = derive_stealth_magics(password)
+            loc = adapter.locate(cf, expected_trailer_magic=trailer_magic_expected)
+        if loc is None:
+            loc = adapter.locate(cf)
 
         if loc is None:
             raise StrHideError(f"No hidden data found in '{carrier_path}'")
@@ -567,6 +655,7 @@ def remove_carrier(
         ube_offset, ube_total_size, _ = loc
         cf.seek(ube_offset)
         header = EnvelopeHeader.unpack(cf.read(HEADER_STRUCT.size))
+        header.validate_against(ube_total_size)
 
         # Perform strip into temporary file
         tmp_target = target_path + ".strhide.restoring.tmp"
@@ -578,13 +667,31 @@ def remove_carrier(
     restored_sha256 = compute_file_sha256(tmp_target)
 
     if restored_size != header.orig_host_size or restored_sha256 != header.orig_host_sha256:
+        # Diagnose the common cause before discarding evidence: does the
+        # restored file still contain another envelope? Envelopes must be
+        # removed in reverse order of injection.
+        diagnosis = ""
+        try:
+            with open(tmp_target, "rb") as rf:
+                r_adapter = find_adapter(rf)
+                remaining = r_adapter.locate(rf)
+                if remaining is None and password:
+                    _, trailer_magic_expected = derive_stealth_magics(password)
+                    remaining = r_adapter.locate(rf, expected_trailer_magic=trailer_magic_expected)
+                if remaining is not None:
+                    diagnosis = (
+                        "\nDiagnosis: the restored file still contains another hidden envelope. "
+                        "Remove envelopes in reverse order of injection (most recently written first)."
+                    )
+        except OSError:
+            pass
         if os.path.exists(tmp_target):
             os.remove(tmp_target)
         raise RestoreMismatchError(
             f"100% restore verification failed!\n"
             f"Restored size: {restored_size} (expected {header.orig_host_size})\n"
             f"Restored SHA256: {restored_sha256.hex()}\n"
-            f"Expected SHA256: {header.orig_host_sha256.hex()}"
+            f"Expected SHA256: {header.orig_host_sha256.hex()}{diagnosis}"
         )
 
     # Inplace backup (if applicable) & Atomic commit & preserve attributes
@@ -619,10 +726,13 @@ def inspect_carrier(carrier_path: str, password: Optional[str] = None) -> Dict[s
 
     with open(carrier_path, "rb") as cf:
         adapter = find_adapter(cf)
-        loc = adapter.locate(cf)
-        if loc is None and password:
-            _, trailer_magic = derive_stealth_magics(password)
-            loc = adapter.locate(cf, expected_trailer_magic=trailer_magic)
+        # Password-priority locate (see read_carrier).
+        loc = None
+        if password:
+            _, trailer_magic_expected = derive_stealth_magics(password)
+            loc = adapter.locate(cf, expected_trailer_magic=trailer_magic_expected)
+        if loc is None:
+            loc = adapter.locate(cf)
 
         if loc is None:
             return {
@@ -635,6 +745,7 @@ def inspect_carrier(carrier_path: str, password: Optional[str] = None) -> Dict[s
         ube_offset, ube_total_size, strategy_name = loc
         cf.seek(ube_offset)
         header = EnvelopeHeader.unpack(cf.read(HEADER_STRUCT.size))
+        header.validate_against(ube_total_size)
 
         password_hint = None
         if header.hint_len > 0:
@@ -683,11 +794,13 @@ def verify_carrier(carrier_path: str, password: Optional[str] = None) -> Dict[st
         # Level 1: Host format integrity
         l1_ok, l1_msg = adapter.verify_structure(cf)
 
-        # Level 2: Envelope boundary & CRC
-        loc = adapter.locate(cf)
-        if loc is None and password:
-            _, trailer_magic = derive_stealth_magics(password)
-            loc = adapter.locate(cf, expected_trailer_magic=trailer_magic)
+        # Level 2: Envelope boundary & CRC (password-priority locate, see read_carrier)
+        loc = None
+        if password:
+            _, trailer_magic_expected = derive_stealth_magics(password)
+            loc = adapter.locate(cf, expected_trailer_magic=trailer_magic_expected)
+        if loc is None:
+            loc = adapter.locate(cf)
 
         if loc is None:
             return {

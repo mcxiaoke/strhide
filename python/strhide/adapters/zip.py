@@ -19,7 +19,13 @@ EOCD_SIGNATURE = 0x06054B50
 
 def find_eocd_offset(stream: BinaryIO) -> Tuple[int, int, int]:
     """Find EOCD in stream by searching backward from EOF.
-    
+
+    Walks EOCD magic candidates from the end backwards in two passes and
+    accepts the first self-consistent record (exact-EOF shape preferred,
+    fits-inside shape as fallback). A naive rfind() can be fooled by comment
+    bytes that happen to contain "PK\x05\x06", which would misplace the
+    injection point and corrupt the archive.
+
     Returns (eocd_pos, cd_offset, cd_size).
     """
     stream.seek(0, 2)
@@ -28,18 +34,34 @@ def find_eocd_offset(stream: BinaryIO) -> Tuple[int, int, int]:
     stream.seek(file_size - scan_len)
     tail = stream.read(scan_len)
 
-    idx = tail.rfind(ZIP_EOCD_MAGIC)
-    if idx == -1:
-        raise CorruptedDataError("Valid ZIP EOCD (End of Central Directory) record not found")
+    # Walk EOCD magic candidates from the end backwards. A naive rfind() can
+    # be fooled by comment bytes that happen to contain "PK\x05\x06", which
+    # would misplace the injection point and corrupt the archive.
+    # Two passes: first require the record to end exactly at EOF (the shape of
+    # a clean archive); if none qualifies, accept a record that merely fits
+    # inside the file (the shape left by an EOF-strategy envelope appended
+    # past the EOCD). Both passes additionally require the declared central
+    # directory to lie before the record.
+    for require_exact_eof in (True, False):
+        search_end = len(tail)
+        while search_end >= 4:
+            idx = tail.rfind(ZIP_EOCD_MAGIC, 0, search_end)
+            if idx == -1:
+                break
+            eocd_pos = (file_size - scan_len) + idx
 
-    eocd_pos = (file_size - scan_len) + idx
-    stream.seek(eocd_pos + 12)
-    cd_size_bytes = stream.read(4)
-    cd_offset_bytes = stream.read(4)
-    cd_size = struct.unpack("<I", cd_size_bytes)[0]
-    cd_offset = struct.unpack("<I", cd_offset_bytes)[0]
+            if idx + 22 <= len(tail):
+                comment_len = struct.unpack_from("<H", tail, idx + 20)[0]
+                record_end = eocd_pos + 22 + comment_len
+                fits = (record_end == file_size) if require_exact_eof else (record_end <= file_size)
+                if fits:
+                    # Central directory must lie before the EOCD record.
+                    cd_size, cd_offset = struct.unpack_from("<II", tail, idx + 12)
+                    if cd_offset + cd_size <= eocd_pos or (cd_offset == 0 and cd_size == 0):
+                        return eocd_pos, cd_offset, cd_size
+            search_end = idx
 
-    return eocd_pos, cd_offset, cd_size
+    raise CorruptedDataError("Valid ZIP EOCD (End of Central Directory) record not found")
 
 
 class ZipAdapter(HostAdapter):
@@ -63,8 +85,13 @@ class ZipAdapter(HostAdapter):
     def choose_auto_strategy(self, stream: BinaryIO, ube_size: int) -> str:
         # Best-effort: check if EOCD is valid and 32-bit CD offset won't overflow
         try:
-            _, cd_offset, _ = find_eocd_offset(stream)
-            if cd_offset + ube_size >= 0xFFFFFFFF:
+            eocd_pos, cd_offset, _ = find_eocd_offset(stream)
+            # The EOCD cd_offset field AND the patch position
+            # (eocd_pos + 16, shifted by ube_size) must both stay inside
+            # the 32-bit range, otherwise removal would restore a
+            # truncated offset.
+            patch_limit = max(cd_offset, eocd_pos + 16)
+            if patch_limit + ube_size >= 0xFFFFFFFF:
                 return "eof"
             return "pre_cd_inject"
         except Exception:
@@ -95,9 +122,12 @@ class ZipAdapter(HostAdapter):
         ube_size = ube_in.tell()
         ube_in.seek(0)
 
-        if cd_offset + ube_size >= 0xFFFFFFFF:
+        # Both the adjusted cd_offset and the patch position
+        # (eocd_pos + 16 + ube_size) must fit in uint32.
+        patch_limit = max(cd_offset, eocd_pos + 16)
+        if patch_limit + ube_size >= 0xFFFFFFFF:
             raise UnsupportedFormatError(
-                f"Adjusted Central Directory offset ({cd_offset + ube_size:,} bytes) exceeds 4GB limit for standard ZIP. "
+                f"Central directory or EOCD patch offset overflow (>4GB) for standard ZIP. "
                 f"Please use --strategy eof."
             )
 
@@ -148,11 +178,11 @@ class ZipAdapter(HostAdapter):
         try:
             eocd_pos, cd_offset, cd_size = find_eocd_offset(stego_in)
         except CorruptedDataError:
-            return None
+            eocd_pos = cd_offset = cd_size = None
 
         # In pre_cd_inject, UBE is located immediately before Central Directory.
         # So the last 24 bytes of UBE are at [cd_offset - 24 : cd_offset].
-        if cd_offset >= 24:
+        if cd_offset is not None and cd_offset >= 24:
             stego_in.seek(cd_offset - 24)
             tail_bytes = stego_in.read(24)
             try:

@@ -15,6 +15,7 @@ from strhide.core.engine import (
     inspect_carrier,
     read_carrier,
     remove_carrier,
+    sanitize_filename,
     verify_carrier,
     write_carrier,
 )
@@ -44,11 +45,23 @@ def resolve_password(args: argparse.Namespace, confirm: bool = False) -> Optiona
     if os.environ.get("STRHIDE_PASSWORD"):
         return os.environ.get("STRHIDE_PASSWORD")
     if getattr(args, "encrypt", False):
-        return prompt_password(confirm=confirm)
+        # Only prompt when a terminal is actually attached. Both stdin and
+        # stdout must be TTYs: some environments (e.g. Git Bash with
+        # `< /dev/null`) report stdin as a TTY while no console exists, which
+        # would make getpass block forever.
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            return prompt_password(confirm=confirm)
+        raise StrHideError(
+            "Password required but no interactive terminal is available. "
+            "Use -p/--password, --password-file, or STRHIDE_PASSWORD."
+        )
     return None
 
 
 def cmd_write(args: argparse.Namespace) -> int:
+    # --stealth implies encryption (its magics are password-derived); prompt
+    # for a password when neither -p nor a password source was supplied.
+    args.encrypt = bool(getattr(args, "encrypt", False)) or bool(getattr(args, "stealth", False))
     password = resolve_password(args, confirm=True)
 
     strategy = args.strategy
@@ -127,6 +140,9 @@ def cmd_read(args: argparse.Namespace) -> int:
                     print(f"[INFO] Password hint: {hint_part}")
                 except Exception:
                     pass
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                print("[ERROR] Password required but no interactive terminal is available.", file=sys.stderr)
+                return 1
             password = prompt_password(confirm=False)
             try:
                 res = read_carrier(
@@ -149,8 +165,9 @@ def cmd_read(args: argparse.Namespace) -> int:
         except UnicodeDecodeError:
             sys.stdout.buffer.write(res["data"])
     else:
-        # Default filename in current dir
-        fn = res.get("filename") or "extracted.bin"
+        # Default filename in current dir; the metadata filename is untrusted
+        # input, so sanitize it to a bare name (no traversal, no absolute path).
+        fn = sanitize_filename(res.get("filename") or "extracted.bin")
         with open(fn, "wb") as f:
             f.write(res["data"])
         print(f"[OK] Extracted payload to '{fn}' ({res['raw_size']} bytes).")

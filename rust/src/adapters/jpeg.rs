@@ -265,4 +265,66 @@ impl HostAdapter for JpegAdapter {
             Err(e) => Ok((false, format!("Corrupted JPEG structure: {e}"))),
         }
     }
+
+    fn suspicious_structures(&self, stego_in: &mut dyn SeekRead) -> Vec<String> {
+        // A COM segment before SOS carrying >= 136 bytes (minimum envelope
+        // size) can only realistically be a hidden envelope.
+        const MIN_ENVELOPE: u64 = 112 + 24;
+        let mut found = Vec::new();
+        stego_in.seek(SeekFrom::Start(0)).ok();
+        let mut soi = [0u8; 2];
+        if stego_in.read_exact(&mut soi).is_err() || soi != JPEG_SOI {
+            return found;
+        }
+        loop {
+            let mut lead = [0u8; 1];
+            if stego_in.read_exact(&mut lead).is_err() {
+                break;
+            }
+            if lead[0] != 0xFF {
+                continue;
+            }
+            let mut code = [0u8; 1];
+            if stego_in.read_exact(&mut code).is_err() {
+                break;
+            }
+            while code[0] == 0xFF {
+                if stego_in.read_exact(&mut code).is_err() {
+                    return found;
+                }
+            }
+            let b = code[0];
+            if b == 0xD8 || b == 0xD9 || b == 0x01 || (0xD0..=0xD7).contains(&b) {
+                continue;
+            }
+            if b == 0xDA {
+                break;
+            }
+            let mut len_bytes = [0u8; 2];
+            if stego_in.read_exact(&mut len_bytes).is_err() {
+                break;
+            }
+            let seg_len = u16::from_be_bytes(len_bytes) as u64;
+            if seg_len < 2 {
+                break;
+            }
+            let payload_offset = match stego_in.stream_position() {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+            let payload_len = seg_len - 2;
+            if b == 0xFE && payload_len >= MIN_ENVELOPE {
+                found.push(format!(
+                    "COM segment at offset {payload_offset} carries {payload_len} bytes (minimum envelope size is {MIN_ENVELOPE})"
+                ));
+            }
+            if stego_in
+                .seek(SeekFrom::Start(payload_offset + payload_len))
+                .is_err()
+            {
+                break;
+            }
+        }
+        found
+    }
 }

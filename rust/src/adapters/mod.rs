@@ -90,4 +90,14 @@ pub trait HostAdapter: Send + Sync {
         &self,
         stego_in: &mut dyn SeekRead,
     ) -> Result<(bool, String), StrHideError>;
+
+    /// Password-independent structural scan for containers that only a strhide
+    /// envelope would produce (oversized private chunks, COM segments, uuid
+    /// boxes, PE overlays). Stealth envelopes written with an unknown password
+    /// are invisible to magic-based `locate`; this heuristic lets the engine
+    /// warn about a probable pre-existing envelope before a second injection
+    /// stacks another one on top. Default: no opinion.
+    fn suspicious_structures(&self, _stego_in: &mut dyn SeekRead) -> Vec<String> {
+        Vec::new()
+    }
 }

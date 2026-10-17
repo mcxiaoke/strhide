@@ -223,6 +223,19 @@ impl HostAdapter for PdfAdapter {
             + xref_str.len() as u64
             + trailer_str.len() as u64;
 
+        // 7. Preserve any bytes the original host carried after its final
+        // %%EOF (non-standard "dirty tail"). Dropping them would silently
+        // damage the carrier and break the 100% bit-exact restore guarantee,
+        // so they are copied verbatim after the new %%EOF.
+        host_in.seek(SeekFrom::Start(info.eof_offset))?;
+        loop {
+            let n = host_in.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&buf[..n])?;
+        }
+
         Ok((inject_offset, inject_size, 0, 0))
     }
 

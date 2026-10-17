@@ -206,4 +206,48 @@ impl HostAdapter for Mp4Adapter {
             ),
         ))
     }
+
+    fn suspicious_structures(&self, stego_in: &mut dyn SeekRead) -> Vec<String> {
+        // A trailing top-level uuid box using the strhide namespaces can only
+        // be a hidden envelope (checked without the magic, so stealth
+        // envelopes with an unknown password are still detected structurally).
+        let mut found = Vec::new();
+        let file_size = match stego_in.seek(SeekFrom::End(0)) {
+            Ok(s) => s,
+            Err(_) => return found,
+        };
+        if file_size < 24 {
+            return found;
+        }
+        if stego_in.seek(SeekFrom::End(-24)).is_err() {
+            return found;
+        }
+        let mut tail = [0u8; 24];
+        if stego_in.read_exact(&mut tail).is_err() {
+            return found;
+        }
+        let ube_offset = u64::from_le_bytes(tail[0..8].try_into().unwrap());
+        let ube_total_size = u64::from_le_bytes(tail[8..16].try_into().unwrap());
+        let crc = u32::from_le_bytes(tail[16..20].try_into().unwrap());
+        let mut prefix = [0u8; 16];
+        prefix.copy_from_slice(&tail[0..16]);
+        if crc32fast::hash(&prefix) != crc || ube_offset + ube_total_size != file_size {
+            return found;
+        }
+        if ube_offset >= 24 {
+            if stego_in.seek(SeekFrom::Start(ube_offset - 24)).is_ok() {
+                let mut hdr = [0u8; 24];
+                if stego_in.read_exact(&mut hdr).is_ok() && &hdr[4..8] == b"uuid" {
+                    let uuid = &hdr[8..24];
+                    if uuid == MP4_UUID_NEUTRAL || uuid == LEGACY_UUID_NAMESPACE {
+                        found.push(format!(
+                            "trailing uuid box at offset {} carries {ube_total_size} bytes",
+                            ube_offset - 24
+                        ));
+                    }
+                }
+            }
+        }
+        found
+    }
 }

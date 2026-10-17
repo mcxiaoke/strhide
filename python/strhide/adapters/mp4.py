@@ -174,3 +174,34 @@ class Mp4Adapter(HostAdapter):
         if not has_ftyp:
             return False, "MP4 missing ftyp box"
         return True, f"MP4 box tree valid ({box_count} top-level boxes)"
+
+    def suspicious_structures(self, stego_in: BinaryIO) -> list[str]:
+        # A trailing top-level uuid box using the strhide namespaces can only
+        # be a hidden envelope (checked without the magic, so stealth
+        # envelopes with an unknown password are still detected structurally).
+        import zlib
+
+        found: list[str] = []
+        stego_in.seek(0, 2)
+        file_size = stego_in.tell()
+        if file_size < 24:
+            return found
+        stego_in.seek(file_size - 24)
+        tail = stego_in.read(24)
+        if len(tail) < 24:
+            return found
+        ube_offset, ube_total_size, crc = struct.unpack_from("<QQI", tail, 0)
+        if (zlib.crc32(tail[:16]) & 0xFFFFFFFF) != crc:
+            return found
+        if ube_offset + ube_total_size != file_size:
+            return found
+        if ube_offset >= 24:
+            stego_in.seek(ube_offset - 24)
+            hdr = stego_in.read(24)
+            if len(hdr) == 24:
+                _, box_type, uuid_ns = struct.unpack(">I4s16s", hdr)
+                if box_type == b"uuid" and uuid_ns in (MP4_UUID_NEUTRAL, LEGACY_UUID_NAMESPACE):
+                    found.append(
+                        f"trailing uuid box at offset {ube_offset - 24} carries {ube_total_size} bytes"
+                    )
+        return found

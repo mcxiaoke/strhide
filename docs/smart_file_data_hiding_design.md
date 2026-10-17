@@ -106,7 +106,7 @@
   * 密文结构：`密文数据 || 16 字节 GCM Tag`（长度即为 `meta_len`）。
 
 ### 3.5 载荷数据流（Payload Stream）
-数据流按 **2MB (`2,097,152` 字节)** 分块处理，采用流式 AEAD 封装，支持大文件流式读写而不耗尽内存。
+数据流按 **2MB (`2,097,152` 字节)** 分块处理，采用分块 AEAD 封装：I/O 以 64KB 缓冲逐块推进，单块内存占用有界。当前引擎实现在内存中完整缓存载荷（写路径峰值约为载荷的 2~3 倍：压缩/加密缓冲 + 信封组装；读路径为密文缓冲 + 明文缓冲），百 MB 级以上载荷建议关注内存占用，后续版本将演进为全流式管道。
 
 * **分块结构**：
   ```
@@ -300,7 +300,7 @@ $$\text{password} = \text{unicodedata.normalize}("NFC", \text{password})$$
      <xref_offset>
      %%EOF
      ```
-  5. 文件以标准 `%%EOF` 终止，无任何尾随脏数据。
+  5. 文件以标准 `%%EOF` 终止；若原宿主在最后一个 `%%EOF` 之后携带非标准尾部字节（脏数据），这些字节在最终 `%%EOF` 之后原样保留，确保 100% 逐比特无损还原。
 * **O(1) 尾标快速定位**：
   扫描尾部 128KB 窗口，定位 `%%EOF` 前最近的 `endstream`。UBE 尾部的 24 字节 `EnvelopeTrailer` 固定位于 `endstream` 关键字紧邻前部。读取该 24 字节并校验 CRC32 与魔数后，直接根据 `trailer.ube_offset` 跳转并核验开头的 `stream` 关键字，算法复杂度为常数时间 $O(1)$，对大于 128KB 乃至数百 MB 的载荷均具备可靠定位能力。
 * **自动降级**：若 PDF 尾部损坏或无法解析出有效 trailer，`auto` 策略自动降级为 `eof`。
@@ -412,7 +412,7 @@ $$\text{password} = \text{unicodedata.normalize}("NFC", \text{password})$$
 
 ```bash
 # 1. 写入隐藏数据 (Write)
-strhide write -c <carrier> -d <secret-file> [-o <out>] [-p <pass>] [-H <hint>] [--strategy auto|ask|<name>] [--stealth] [--preserve-time] [--no-backup]
+strhide write -c <carrier> -d <secret-file> [-o <out>] [-p <pass>] [-H <hint>] [--strategy auto|ask|<name>] [--stealth] [--no-preserve-time] [--no-backup]
 strhide write -c <carrier> -t "secret text" [--unescape] [-p <pass>] [-H <hint>]
 strhide write -c <carrier> --text-file <path.txt> [-p <pass>] [-H <hint>]
 strhide write -c <carrier> --text-base64 <b64_str> [-p <pass>]
@@ -436,15 +436,27 @@ strhide list-strategies -c <carrier>
 ```
 
 ### 跨平台非交互式通道
-* **密码传递**：支持 `STRHIDE_PASSWORD` 环境变量、`--password-file <path>`、`-p <password>` 及终端无回显交互输入。
+* **密码传递**：支持 `STRHIDE_PASSWORD` 环境变量、`--password-file <path>`、`-p <password>` 及终端无回显交互输入。仅当 stdin 与 stdout 同时为 TTY 时才触发交互式提示；非交互环境（管道、CI、重定向）直接报错并提示改用上述非交互通道，避免阻塞。
 * **文本传递**：支持 `STRHIDE_TEXT` 环境变量、`--text-file <path>`、`--text-base64 <str>`、`-t <str>`。
 * **二进制流管道**：`--stdin` 与 `--stdout` 走系统标准流缓冲，避开控制台编码代码页干扰。
+
+### 提取路径安全（防目录穿越）
+信封元数据中的 `filename` 属于**不可信输入**（未加密信封可被任意篡改）。所有提取落盘路径（`-o <目录>` 与默认当前目录两种模式）必须先将该值净化取末级文件名组件（拒绝空值、`.`、`..` 与绝对路径，非法时回退 `extracted.bin`），确保载荷不可能写出目标目录之外。
+
+### 隐蔽模式强制加密约束
+`--stealth` 必须与密码同时提供：其动态魔数由密码派生，无密码时工具**直接报错终止**，不得静默降级为标准明文魔数模式。
+
+### 重复注入防护
+写入前执行双层存在性检测：标准魔数扫描 + （提供密码时）派生魔数扫描，两者任一命中即拒绝。对使用未知密码写入的隐蔽信封（魔数不可见），增加结构启发式扫描（过大的私有块 / COM 段 / uuid Box / PE Overlay），命中时输出醒目警告后继续。
+
+### 多信封移除顺序
+同一载体允许叠加多个信封时，`remove` 按定位结果剥离单个信封，并以该信封记录的原宿主 SHA-256 强校验。若还原结果仍含其他信封导致校验失败，错误信息中明确提示"按注入逆序移除"。
 
 ---
 
 ## 10. 跨语言（Go / Rust）移植实现指南
 
-为确保使用 Go 1.22+ 或 Rust 2021 实现时与 Python 版本具备 100% 互操作性，必须严格遵守以下对应关系：
+为确保使用 Go 1.22+ 或 Rust 2024 edition 实现时与 Python 版本具备 100% 互操作性，必须严格遵守以下对应关系：
 
 ### 10.1 数据结构映射
 
@@ -531,7 +543,9 @@ strhide list-strategies -c <carrier>
 
 | 指标项 | 统计值 | 详情与覆盖范围 |
 | :--- | :--- | :--- |
-| **单元与集成测试（pytest）** | **42 / 42 全部通过 (100%)** | 覆盖信封编解码、PBKDF2 派生、流式加解密、所有 6 种适配器合成流、CLI 调用、Windows 原地备份与安全拦截 |
+| **Python 单元与集成测试（pytest）** | **81 / 81 全部通过 (100%)** | 覆盖信封编解码、PBKDF2 派生、分块加解密、全部 7 种适配器合成流、CLI 调用、Windows 原地备份、安全拦截，以及 2026-10-17 安全修复回归套件（`test_security_fixes.py`：stealth 强制密码、路径穿越净化、重复注入防护、PDF 尾部垃圾、EOCD 校验、头部/chunk 边界校验等 22 项） |
+| **Rust 测试（cargo test）** | **24 / 24 全部通过 (100%)** | 2 项密码学跨语言向量单测 + 22 项集成回归（`rust/tests/fixes_regression.rs`，与 Python 回归套件逐条对应） |
+| **跨语言双向互操作套件** | **17 / 17 全部通过 (100%)** | Python 写入 → Rust 读取/验证/移除还原与反向路径，覆盖全格式全策略、加密、隐蔽模式、CJK/重音字符 |
 | **全样本矩阵批量测试** | **72 / 72 全部通过 (100.0%)** | 覆盖 `temp/testfiles` 中 26 个真实文件（PNG, JPG, MP4, ZIP, PDF, 未签名 EXE, 已签名 EXE, APK），涵盖明文、加密、隐蔽模式及逐比特无损还原 |
 | **MediaInfo 合规验证** | **0 Conformance Errors** | MP4 载体使用中立 UUID 与 32/64 位 Box 头，MediaInfo 探测一致性错误为 0 |
 | **PDF 大载荷定位可靠性** | **100% 可用** | 经 200KB 不可压缩随机数据实证，增量更新尾部常数时间定位无异常 |
