@@ -27,9 +27,10 @@ def test_header_pack_unpack():
         patch_offset=100,
         orig_patch_val=200,
         meta_len=512,
+        hint_len=42,
     )
     packed = hdr.pack()
-    assert len(packed) == 108
+    assert len(packed) == 112
 
     restored = EnvelopeHeader.unpack(packed)
     assert restored.magic_header == hdr.magic_header
@@ -45,6 +46,7 @@ def test_header_pack_unpack():
     assert restored.patch_offset == 100
     assert restored.orig_patch_val == 200
     assert restored.meta_len == 512
+    assert restored.hint_len == 42
 
 
 def test_trailer_pack_unpack():

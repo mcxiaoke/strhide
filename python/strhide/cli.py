@@ -88,6 +88,7 @@ def cmd_write(args: argparse.Namespace) -> int:
             data_stdin=getattr(args, "stdin", False),
             output_path=args.output,
             password=password,
+            password_hint=getattr(args, "hint", None),
             strategy=strategy,
             stealth=args.stealth,
             preserve_time=args.preserve_time,
@@ -95,6 +96,8 @@ def cmd_write(args: argparse.Namespace) -> int:
         )
         print(f"[OK] Successfully embedded into '{res['carrier']}' using strategy '{res['strategy']}'.")
         print(f"     Payload: {res['raw_size']} bytes -> UBE: {res['ube_size']} bytes.")
+        if res.get("password_hint"):
+            print(f"     Password Hint: '{res['password_hint']}'.")
         if res.get("backup_file"):
             print(f"     [BACKUP] Original carrier backed up to '{res['backup_file']}'.")
         if res.get("warning"):
@@ -114,7 +117,14 @@ def cmd_read(args: argparse.Namespace) -> int:
             password=password,
         )
     except Exception as e:
-        if "Password required" in str(e) and not password:
+        err_msg = str(e)
+        if "Password required" in err_msg and not password:
+            if "Hint: '" in err_msg:
+                try:
+                    hint_part = err_msg.split("Hint: '", 1)[1].rsplit("'", 1)[0]
+                    print(f"[INFO] Password hint: {hint_part}")
+                except Exception:
+                    pass
             password = prompt_password(confirm=False)
             try:
                 res = read_carrier(
@@ -171,7 +181,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     try:
         res = inspect_carrier(carrier_path=args.carrier, password=password)
         if args.json:
-            print(json.dumps(res, indent=2))
+            print(json.dumps(res, indent=2, ensure_ascii=False))
         else:
             print(f"Carrier: {res['carrier']}")
             print(f"Format:  {res['format']}")
@@ -182,10 +192,12 @@ def cmd_inspect(args: argparse.Namespace) -> int:
                 print(f"UBE Total Size:  {res['ube_total_size']} bytes")
                 print(f"Encrypted:       {res['is_encrypted']}")
                 print(f"Stealth Mode:    {res['is_stealth']}")
+                if res.get("password_hint"):
+                    print(f"Password Hint:   {res['password_hint']}")
                 print(f"Original Size:   {res['orig_host_size']} bytes")
                 print(f"Original SHA256: {res['orig_host_sha256']}")
                 if res.get("metadata"):
-                    print(f"Metadata:        {json.dumps(res['metadata'])}")
+                    print(f"Metadata:        {json.dumps(res['metadata'], ensure_ascii=False)}")
         return 0
     except StrHideError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
@@ -197,7 +209,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     try:
         res = verify_carrier(carrier_path=args.carrier, password=password)
         if args.json:
-            print(json.dumps(res, indent=2))
+            print(json.dumps(res, indent=2, ensure_ascii=False))
         else:
             print(f"Carrier: {res['carrier']} ({res['format']})")
             print(f"  Level 1 (Host Structure):    {'[PASS]' if res['level1_host']['ok'] else '[FAIL]'} {res['level1_host']['detail']}")
@@ -243,6 +255,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_write.add_argument("-o", "--output", help="Output carrier file path (default: in-place)")
     p_write.add_argument("-p", "--password", help="Password for encryption")
     p_write.add_argument("--password-file", help="Read password from UTF-8 file")
+    p_write.add_argument("-H", "--hint", "--password-hint", dest="hint", help="Optional password hint (displayed if password is required/forgotten)")
     p_write.add_argument("-e", "--encrypt", action="store_true", help="Prompt password for encryption")
     p_write.add_argument("-s", "--strategy", default="auto", help="Hiding strategy (auto|ask|<name>)")
     p_write.add_argument("--stealth", action="store_true", help="Stealth mode (strip static signatures)")

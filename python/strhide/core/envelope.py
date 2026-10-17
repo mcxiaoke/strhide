@@ -22,20 +22,21 @@ FLAG_ENCRYPTED = 0x01
 FLAG_COMPRESSED = 0x02
 FLAG_IS_FILE = 0x04
 FLAG_STEALTH = 0x08
+FLAG_HAS_HINT = 0x10
 
 # AAD is the first 80 bytes of the fixed header
 AAD_STRUCT = struct.Struct("<8sBBBB16s12sQ32s")
-HEADER_STRUCT = struct.Struct("<8sBBBB16s12sQ32sQQIII")
+HEADER_STRUCT = struct.Struct("<8sBBBB16s12sQ32sQQIIII")
 TRAILER_STRUCT = struct.Struct("<QQI4s")
 
 assert AAD_STRUCT.size == 80, f"AAD size mismatch: {AAD_STRUCT.size} != 80"
-assert HEADER_STRUCT.size == 108, f"Header size mismatch: {HEADER_STRUCT.size} != 108"
+assert HEADER_STRUCT.size == 112, f"Header size mismatch: {HEADER_STRUCT.size} != 112"
 assert TRAILER_STRUCT.size == 24, f"Trailer size mismatch: {TRAILER_STRUCT.size} != 24"
 
 
 @dataclasses.dataclass
 class EnvelopeHeader:
-    """Fixed 108-byte UBE v2.1 Header."""
+    """Fixed 112-byte UBE v2.2 Header."""
     magic_header: bytes = STANDARD_HEADER_MAGIC
     version: int = CURRENT_VERSION
     flags: int = 0
@@ -50,6 +51,7 @@ class EnvelopeHeader:
     patch_offset: int = 0
     orig_patch_val: int = 0
     meta_len: int = 0
+    hint_len: int = 0
 
     @property
     def is_encrypted(self) -> bool:
@@ -67,6 +69,10 @@ class EnvelopeHeader:
     def is_stealth(self) -> bool:
         return bool(self.flags & FLAG_STEALTH)
 
+    @property
+    def has_hint(self) -> bool:
+        return bool(self.flags & FLAG_HAS_HINT)
+
     def get_aad(self) -> bytes:
         """Return the immutable 80-byte AAD binding header fields for AEAD."""
         return AAD_STRUCT.pack(
@@ -82,7 +88,7 @@ class EnvelopeHeader:
         )
 
     def pack(self) -> bytes:
-        """Pack fixed header into 108 bytes."""
+        """Pack fixed header into 112 bytes."""
         return HEADER_STRUCT.pack(
             self.magic_header,
             self.version,
@@ -98,11 +104,12 @@ class EnvelopeHeader:
             self.patch_offset,
             self.orig_patch_val,
             self.meta_len,
+            self.hint_len,
         )
 
     @classmethod
     def unpack(cls, data: bytes) -> EnvelopeHeader:
-        """Unpack 108-byte fixed header."""
+        """Unpack 112-byte fixed header."""
         if len(data) < HEADER_STRUCT.size:
             raise CorruptedDataError(f"Insufficient bytes for header: {len(data)} < {HEADER_STRUCT.size}")
         unpacked = HEADER_STRUCT.unpack(data[:HEADER_STRUCT.size])
@@ -121,6 +128,7 @@ class EnvelopeHeader:
             patch_offset=unpacked[11],
             orig_patch_val=unpacked[12],
             meta_len=unpacked[13],
+            hint_len=unpacked[14],
         )
 
 

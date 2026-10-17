@@ -111,27 +111,30 @@
 
 ```
 +--------------------------------------------------------------------------------+
-| 1. 固定头部 (Fixed Header, 108 Bytes)                                          |
+| 1. 固定头部 (Fixed Header, 112 Bytes, 8字节对齐)                               |
 |    - 前 80 字节为不可变鉴权区 (Immutable AAD) - 强绑定 AES-256-GCM 完整性认证   |
-|    - 后 28 字节为注入偏移与元数据尺寸 (Mutable Offsets & MetaLen)                 |
+|    - 后 32 字节为注入偏移、元数据尺寸与密码提示尺寸 (Mutable Offsets & Meta/Hint) |
 +--------------------------------------------------------------------------------+
-| 2. 加密元数据块 (Metadata Block, 变长 JSON, 密文含 16B GCM Tag)                 |
+| 2. 密码提示块 (Password Hint Block, 可选, 变长 UTF-8, 最大 1024 Bytes)          |
+|    - 明文存放于头部之后、元数据之前，方便未解密时读取；隐蔽模式（--stealth）禁止使用 |
 +--------------------------------------------------------------------------------+
-| 3. 加密数据载荷流 (Payload Stream, 2MB 分块流式 AEAD, 每块含 16B GCM Tag)        |
+| 3. 加密元数据块 (Metadata Block, 变长 JSON, 密文含 16B GCM Tag)                 |
 +--------------------------------------------------------------------------------+
-| 4. 通用定位尾标 (Universal Locator Trailer, 24 Bytes) - 自带 CRC32 与双向校验   |
+| 4. 加密数据载荷流 (Payload Stream, 2MB 分块流式 AEAD, 每块含 16B GCM Tag)        |
++--------------------------------------------------------------------------------+
+| 5. 通用定位尾标 (Universal Locator Trailer, 24 Bytes) - 自带 CRC32 与双向校验   |
 +--------------------------------------------------------------------------------+
 ```
 
-### 5.1 108 字节固定头部（Fixed Header）字段定义
+### 5.1 112 字节固定头部（Fixed Header）字段定义
 
-固定头部共 108 字节，其中**前 80 字节**定义为不可变 AAD（`get_aad()` 返回该切片），参与后续所有元数据与载荷分块的 AEAD 密码学强绑定鉴权：
+固定头部共 112 字节（8 字节严格对齐），其中**前 80 字节**定义为不可变 AAD（`get_aad()` 返回该切片），参与后续所有元数据与载荷分块的 AEAD 密码学强绑定鉴权：
 
 | 偏移 | 字段名 | 长度 | 类型 | 取值与详细说明 |
 | :--- | :--- | :--- | :--- | :--- |
 | `0x00` | `magic_header` | 8B | `bytes` | 标准模式：`89 53 54 52 48 49 44 45`（`‰STRHIDE`）；<br>隐蔽模式（`--stealth`）：`HMAC-SHA256("strhide-stealth-v1", password)[:8]` 动态魔数 |
 | `0x08` | `version` | 1B | `uint8` | 协议版本号，当前固定为 `0x02` |
-| `0x09` | `flags` | 1B | `uint8` | `bit 0`: 是否加密 (`0`=明文, `1`=加密)<br>`bit 1`: 是否压缩 (`0`=无, `1`=Deflate)<br>`bit 2`: 载荷类型 (`0`=文本, `1`=文件)<br>`bit 3`: 隐蔽模式 (`0`=普通, `1`=Stealth)<br>`bit 4..7`: 保留填 `0` |
+| `0x09` | `flags` | 1B | `uint8` | `bit 0`: 是否加密 (`0`=明文, `1`=加密)<br>`bit 1`: 是否压缩 (`0`=无, `1`=Deflate)<br>`bit 2`: 载荷类型 (`0`=文本, `1`=文件)<br>`bit 3`: 隐蔽模式 (`0`=普通, `1`=Stealth)<br>`bit 4`: 密码提示 (`0`=无, `1`=含密码提示)<br>`bit 5..7`: 保留填 `0` |
 | `0x0A` | `strategy_id` | 1B | `uint8` | 写入策略编号（`1`=EOF, `2`=PNG_CHUNK, `3`=MP4_UUID, `4`=ZIP_PRE_CD, `5`=JPEG_APP 等） |
 | `0x0B` | `reserved` | 1B | `uint8` | 对齐保留，填 `0x00` |
 | `0x0C` | `salt` | 16B | `bytes` | CSPRNG 生成的 128 位随机盐（明文模式填 `0`） |
@@ -144,9 +147,17 @@
 | `0x60` | `patch_offset` | 4B | `uint32`| 宿主头部被修改的字段偏移量（无修改填 0） |
 | `0x64` | `orig_patch_val`| 4B | `uint32`| 被修改字段在注入前的原始 32 位值（无修改填 0） |
 | `0x68` | `meta_len` | 4B | `uint32`| 加密后的元数据块长度（含 16B Tag） |
-| `0x6C` | `padding` | 4B | `uint32`| 64 位对齐保留填 0 |
+| `0x6C` | `hint_len` | 4B | `uint32`| 密码提示文本的 UTF-8 字节长度（无提示填 0，最大 1024 字节） |
+| `0x70` | `padding` | 4B | `uint32`| 64 位对齐保留填 0 |
 
-### 5.2 24 字节定位尾标（Locator Trailer）
+### 5.2 密码提示规范（Password Hint Specification）
+* **存储位置与读取**：存放于 112 字节固定头部之后、元数据之前。当 `flags & FLAG_HAS_HINT` 时，直接读取 `hint_len` 长度的 UTF-8 字符串。
+* **安全性与互斥原则**：
+  * 明文存放以便在用户忘记密码时由 `inspect` 或 `read` 提示；
+  * **隐蔽模式严格互斥**：隐蔽模式下（`--stealth`）所有信封特征全平坦化，且必须持有密码才能计算 locator 魔数，在此模式下传 `--hint` 属于逻辑矛盾且会泄露元特征，系统直接拒绝（`StrHideError`）；
+  * **输入规范化**：提示文本在写入前强制执行 Unicode NFC 标准化，最大限制为 1024 字节。
+
+### 5.3 24 字节定位尾标（Locator Trailer）
 位于 UBE 信封最末端，提供常数级 O(1) 逆向定位与防损坏检测：
 * `ube_offset`（8 Bytes, uint64）：信封在宿主文件中的起始绝对偏移。
 * `ube_total_size`（8 Bytes, uint64）：从 `magic_header` 到尾标结束的总长度。
@@ -200,11 +211,11 @@
 
 ```bash
 # 1. 写入模式 (Write)
-strhide write -c <carrier> -d <secret-file> [-o <out>] [-p <pass>] [--strategy auto|ask|<name>] [--stealth] [--preserve-time]
-strhide write -c <carrier> -t "secret text" [--unescape] [-p <pass>]
-strhide write -c <carrier> --text-file <path.txt> [-p <pass>]
+strhide write -c <carrier> -d <secret-file> [-o <out>] [-p <pass>] [-H <hint>] [--strategy auto|ask|<name>] [--stealth] [--preserve-time]
+strhide write -c <carrier> -t "secret text" [--unescape] [-p <pass>] [--hint "密码提示"]
+strhide write -c <carrier> --text-file <path.txt> [-p <pass>] [-H "密码提示"]
 strhide write -c <carrier> --text-base64 <b64_str> [-p <pass>]
-cat secret.bin | strhide write -c <carrier> --stdin -o output.png -p <pass>
+cat secret.bin | strhide write -c <carrier> --stdin -o output.png -p <pass> [-H "密码提示"]
 
 # 2. 提取模式 (Read)
 strhide read -c <carrier> [-o <out-dir|out-file>] [-p <pass>]
@@ -237,6 +248,10 @@ strhide list-strategies -c <carrier>
    - 方式 2：`--password-file <path>`（直接读取 UTF-8 文本）；
    - 方式 3：交互式无回显安全输入；
    - 方式 4：`-p / --password` 命令行直传。
+3. **密码提示传递**：
+   - 使用 `-H / --hint / --password-hint <hint>` 传入；
+   - 最大 1024 字节，自动 UTF-8 / NFC 标准化；
+   - 隐蔽模式（`--stealth`）严格禁止使用。
 
 ---
 
@@ -250,6 +265,6 @@ strhide list-strategies -c <carrier>
   * `ZipAdapter` (`adapters/zip.py`)：`pre_cd_inject` 策略与 Central Directory Offset 动态修正。
   * `EofAdapter` (`adapters/eof.py`)：通用尾部追加适配器（支持 EXE, PDF 等）。
 * **自动化测试套件**：
-  * pytest 单元与集成测试套件：**36 / 36 项测试全部通过（100%）**。
+  * pytest 单元与集成测试套件：**41 / 41 项测试全部通过（100%）**。
   * 真实世界大样本全矩阵批量测试（`tests/batch_test_runner.py`）：涵盖 `temp/testfiles` 中 26 个真实文件（PNG, JPG, MP4, ZIP, PDF, 未签名 EXE, 已签名 EXE, APK，最大 34MB），包含普通模式、加密模式、隐蔽模式及 100% 逐比特无损还原校验，**72 / 72 项细分测试全部通过（100.0%）**。
 * **下一步规划**：按本技术规范直接向 Go 1.22+ 交叉编译版本平移。

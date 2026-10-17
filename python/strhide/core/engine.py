@@ -27,8 +27,10 @@ from strhide.core.crypto import (
 from strhide.core.envelope import (
     FLAG_COMPRESSED,
     FLAG_ENCRYPTED,
+    FLAG_HAS_HINT,
     FLAG_IS_FILE,
     FLAG_STEALTH,
+    HEADER_STRUCT,
     STANDARD_HEADER_MAGIC,
     STANDARD_TRAILER_MAGIC,
     EnvelopeHeader,
@@ -54,6 +56,7 @@ def write_carrier(
     data_stdin: bool = False,
     output_path: Optional[str] = None,
     password: Optional[str] = None,
+    password_hint: Optional[str] = None,
     strategy: str = "auto",
     stealth: bool = False,
     preserve_time: bool = True,
@@ -62,6 +65,16 @@ def write_carrier(
     """Hide data inside carrier file with 100% loss-free reversibility."""
     if not os.path.exists(carrier_path):
         raise FileNotFoundError(f"Carrier file '{carrier_path}' not found")
+
+    if password_hint and stealth:
+        raise StrHideError("Password hint is not supported in --stealth mode (stealth mode requires password to locate envelope).")
+
+    hint_bytes = b""
+    if password_hint:
+        hint_clean = unicodedata.normalize("NFC", password_hint.strip())
+        hint_bytes = hint_clean.encode("utf-8")
+        if len(hint_bytes) > 1024:
+            raise ValueError("Password hint cannot exceed 1024 bytes")
 
     target_path = output_path or carrier_path
 
@@ -163,6 +176,8 @@ def write_carrier(
             flags |= FLAG_COMPRESSED
         if is_file:
             flags |= FLAG_IS_FILE
+        if hint_bytes:
+            flags |= FLAG_HAS_HINT
         if stealth and password:
             flags |= FLAG_STEALTH
             salt = os.urandom(16)
@@ -202,6 +217,7 @@ def write_carrier(
             base_nonce=base_nonce,
             orig_host_size=orig_host_size,
             orig_host_sha256=orig_host_sha256,
+            hint_len=len(hint_bytes),
         )
 
         # Encrypt metadata
@@ -227,8 +243,8 @@ def write_carrier(
         payload_cipher_stream.seek(0)
 
         # Compute preliminary UBE size
-        # Header (108B) + Meta + Payload + Trailer (24B)
-        ube_total_size = 108 + header.meta_len + payload_written + 24
+        # Header (112B) + Hint + Meta + Payload + Trailer (24B)
+        ube_total_size = HEADER_STRUCT.size + len(hint_bytes) + header.meta_len + payload_written + 24
 
         # Check payload size inflation warning (> 50% of carrier original size)
         warning_msg = None
@@ -242,6 +258,8 @@ def write_carrier(
 
         # Assemble full UBE
         tmp_ube.write(header.pack())
+        if hint_bytes:
+            tmp_ube.write(hint_bytes)
         tmp_ube.write(meta_block)
         shutil.copyfileobj(payload_cipher_stream, tmp_ube)
 
@@ -321,6 +339,7 @@ def write_carrier(
         "ube_size": ube_total_size,
         "is_encrypted": is_encrypted,
         "is_stealth": stealth,
+        "password_hint": password_hint if password_hint else None,
         "backup_file": backup_file,
         "warning": warning_msg,
     }
@@ -349,13 +368,19 @@ def read_carrier(
 
         # Read fixed header
         f.seek(ube_offset)
-        header_bytes = f.read(108)
+        header_bytes = f.read(HEADER_STRUCT.size)
         header = EnvelopeHeader.unpack(header_bytes)
+
+        # Read password hint if present
+        password_hint = None
+        if header.hint_len > 0:
+            password_hint = f.read(header.hint_len).decode("utf-8", errors="replace")
 
         # Derive keys
         if header.is_encrypted:
             if not password:
-                raise PasswordError("File is encrypted. Password required.")
+                hint_str = f" Hint: '{password_hint}'" if password_hint else ""
+                raise PasswordError(f"File is encrypted. Password required.{hint_str}")
             payload_key, meta_key = derive_keys(password, header.salt)
         else:
             payload_key = b""
@@ -372,7 +397,7 @@ def read_carrier(
         meta_dict = json.loads(meta_json_bytes.decode("utf-8"))
 
         # Read payload stream
-        payload_bytes_len = ube_total_size - 108 - header.meta_len - 24
+        payload_bytes_len = ube_total_size - HEADER_STRUCT.size - header.hint_len - header.meta_len - 24
         payload_decrypted_stream = io.BytesIO()
 
         if header.is_encrypted:
@@ -438,6 +463,7 @@ def read_carrier(
         "data": extracted_bytes,
         "written_file": out_file_written,
         "is_file": header.is_file,
+        "password_hint": password_hint,
     }
 
 
@@ -469,7 +495,7 @@ def remove_carrier(
 
         ube_offset, ube_total_size, _ = loc
         cf.seek(ube_offset)
-        header = EnvelopeHeader.unpack(cf.read(108))
+        header = EnvelopeHeader.unpack(cf.read(HEADER_STRUCT.size))
 
         # Perform strip into temporary file
         tmp_target = target_path + ".strhide.restoring.tmp"
@@ -537,7 +563,11 @@ def inspect_carrier(carrier_path: str, password: Optional[str] = None) -> Dict[s
 
         ube_offset, ube_total_size, strategy_name = loc
         cf.seek(ube_offset)
-        header = EnvelopeHeader.unpack(cf.read(108))
+        header = EnvelopeHeader.unpack(cf.read(HEADER_STRUCT.size))
+
+        password_hint = None
+        if header.hint_len > 0:
+            password_hint = cf.read(header.hint_len).decode("utf-8", errors="replace")
 
         meta_info = None
         if not header.is_encrypted:
@@ -565,6 +595,7 @@ def inspect_carrier(carrier_path: str, password: Optional[str] = None) -> Dict[s
             "is_encrypted": header.is_encrypted,
             "is_compressed": header.is_compressed,
             "is_stealth": header.is_stealth,
+            "password_hint": password_hint,
             "orig_host_size": header.orig_host_size,
             "orig_host_sha256": header.orig_host_sha256.hex(),
             "metadata": meta_info,
@@ -598,7 +629,7 @@ def verify_carrier(carrier_path: str, password: Optional[str] = None) -> Dict[st
         ube_offset, ube_total_size, strategy = loc
         try:
             cf.seek(ube_offset)
-            header = EnvelopeHeader.unpack(cf.read(108))
+            header = EnvelopeHeader.unpack(cf.read(HEADER_STRUCT.size))
             cf.seek(ube_offset + ube_total_size - 24)
             expected_trailer_magic = None
             if header.is_stealth and password:
