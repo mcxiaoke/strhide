@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Parser, Subcommand};
 
 use crate::engine::{
-    inspect_carrier, read_carrier, remove_carrier, verify_carrier, write_carrier, PayloadSource,
+    inspect_carrier, read_carrier, remove_carrier, verify_carrier, write_carrier, WriteOptions, PayloadSource,
 };
 use crate::errors::StrHideError;
 use crate::router::{find_adapter, list_all_strategies};
@@ -187,11 +187,10 @@ pub fn resolve_password(
         s = s.trim_end_matches(&['\r', '\n'][..]).to_string();
         return Ok(Some(s));
     }
-    if let Ok(env_pwd) = std::env::var("STRHIDE_PASSWORD") {
-        if !env_pwd.is_empty() {
+    if let Ok(env_pwd) = std::env::var("STRHIDE_PASSWORD")
+        && !env_pwd.is_empty() {
             return Ok(Some(env_pwd));
         }
-    }
     if encrypt_flag {
         // Only prompt when a terminal is actually attached; both stdin and
         // stdout must be TTYs, since some environments report stdin as a TTY
@@ -337,13 +336,15 @@ fn handle_write(args: WriteArgs) -> Result<(), StrHideError> {
     let res = write_carrier(
         &args.carrier,
         payload_source,
-        args.output.as_deref(),
-        password.as_deref(),
-        args.hint.as_deref(),
-        &strategy,
-        args.stealth,
-        args.preserve_time,
-        !args.no_backup,
+        &WriteOptions {
+            output_path: args.output.as_deref(),
+            password: password.as_deref(),
+            password_hint: args.hint.as_deref(),
+            strategy: &strategy,
+            stealth: args.stealth,
+            preserve_time: args.preserve_time,
+            backup: !args.no_backup,
+        },
     )?;
 
     println!(
@@ -661,14 +662,12 @@ fn unescape_string(s: &str) -> String {
                 // Combine a UTF-16 surrogate pair written as two \u escapes.
                 // `consumed` counts characters after the leading "\u": the
                 // second escape adds its own 6 characters ("\u" + 4 digits).
-                if (0xD800..=0xDBFF).contains(&code) {
-                    if let Some(low) = read_hex(&chars, i + 8, 4) {
-                        if (0xDC00..=0xDFFF).contains(&low) {
+                if (0xD800..=0xDBFF).contains(&code)
+                    && let Some(low) = read_hex(&chars, i + 8, 4)
+                        && (0xDC00..=0xDFFF).contains(&low) {
                             code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
                             consumed = 10;
                         }
-                    }
-                }
                 out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
                 i += 2 + consumed;
             }

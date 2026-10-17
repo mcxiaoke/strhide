@@ -274,3 +274,32 @@ def test_verify_exit_code_zero_for_valid_carrier(tmp_path):
         text=True,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+# --------------------------------------------------------------------------- #20 .bak collision protection
+
+
+def test_backup_collision_uses_timestamped_name(tmp_path):
+    from strhide.core.engine import remove_carrier
+
+    carrier = str(tmp_path / "c.png")
+    with open(carrier, "wb") as f:
+        f.write(make_png())
+    with open(carrier, "rb") as f:
+        original = f.read()
+
+    # First in-place write creates the plain .bak
+    w1 = write_carrier(carrier, data_text="first")
+    bak1 = w1["backup_file"]
+    assert bak1.endswith(".bak"), bak1
+    with open(bak1, "rb") as f:
+        assert f.read() == original
+
+    # Removing in place would previously overwrite that .bak, destroying the
+    # only pre-write copy of the carrier.
+    r1 = remove_carrier(carrier)
+    bak2 = r1["backup_file"]
+    assert bak1 != bak2, "backup path was reused"
+    assert ".bak-" in bak2, bak2
+    assert os.path.exists(bak1), "first backup must be preserved"
+    assert os.path.exists(bak2), "second backup must exist"

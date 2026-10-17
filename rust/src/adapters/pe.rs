@@ -74,8 +74,8 @@ pub fn parse_pe_headers<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<PeInf
             None
         };
 
-        if let Some(offset) = sec_dir_offset {
-            if size_of_opt_header >= offset + 8 {
+        if let Some(offset) = sec_dir_offset
+            && size_of_opt_header >= offset + 8 {
                 reader.seek(SeekFrom::Start(opt_pos + offset))?;
                 let mut sec_bytes = [0u8; 8];
                 if reader.read_exact(&mut sec_bytes).is_ok() {
@@ -86,7 +86,6 @@ pub fn parse_pe_headers<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<PeInf
                     }
                 }
             }
-        }
     }
 
     // Read sections to determine pe_image_end
@@ -207,15 +206,14 @@ impl HostAdapter for PeAdapter {
             None => return Ok(None),
         };
 
-        if let Ok(pe_info) = parse_pe_headers(stego_in) {
-            if trailer.ube_offset >= pe_info.pe_image_end {
+        if let Ok(pe_info) = parse_pe_headers(stego_in)
+            && trailer.ube_offset >= pe_info.pe_image_end {
                 return Ok(Some((
                     trailer.ube_offset,
                     trailer.ube_total_size,
                     "pe_overlay".into(),
                 )));
             }
-        }
 
         let file_size = stego_in.seek(SeekFrom::End(0))?;
         if trailer.ube_offset + trailer.ube_total_size == file_size {
@@ -246,14 +244,13 @@ impl HostAdapter for PeAdapter {
         // past the minimum envelope size is a probable hidden envelope.
         const MIN_ENVELOPE: u64 = 112 + 24;
         let mut found = Vec::new();
-        if let Ok(info) = parse_pe_headers(stego_in) {
-            if info.host_size > info.pe_image_end + MIN_ENVELOPE {
+        if let Ok(info) = parse_pe_headers(stego_in)
+            && info.host_size > info.pe_image_end + MIN_ENVELOPE {
                 found.push(format!(
                     "overlay of {} bytes beyond PE image boundary (minimum envelope size is {MIN_ENVELOPE})",
                     info.host_size - info.pe_image_end
                 ));
             }
-        }
         found
     }
 }

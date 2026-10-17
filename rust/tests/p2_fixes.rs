@@ -18,7 +18,7 @@ use strhide::adapters::pe::PeAdapter;
 use strhide::adapters::png::PngAdapter;
 use strhide::adapters::zip::ZipAdapter;
 use strhide::adapters::HostAdapter;
-use strhide::engine::{verify_carrier, write_carrier, PayloadSource};
+use strhide::engine::{verify_carrier, write_carrier, WriteOptions, PayloadSource};
 
 // --------------------------------------------------------------------------- helpers
 
@@ -315,13 +315,11 @@ fn png_verify_accepts_valid_carrier_with_envelope() {
     write_carrier(
         &carrier,
         PayloadSource::Text("batch1 png"),
-        Some(&out),
-        None,
-        None,
-        "auto",
-        false,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&out),
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -404,13 +402,11 @@ fn mp4_verify_accepts_valid_carrier_with_envelope() {
     write_carrier(
         &carrier,
         PayloadSource::Text("batch1 mp4"),
-        Some(&out),
-        None,
-        None,
-        "auto",
-        false,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&out),
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap();
 

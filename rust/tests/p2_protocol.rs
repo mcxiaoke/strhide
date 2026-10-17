@@ -12,7 +12,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use strhide::adapters::pdf::parse_pdf_trailer_info;
-use strhide::engine::{read_carrier, remove_carrier, verify_carrier, write_carrier, PayloadSource};
+use strhide::engine::{read_carrier, remove_carrier, verify_carrier, write_carrier, WriteOptions, PayloadSource};
 
 // --------------------------------------------------------------------------- helpers
 
@@ -51,13 +51,12 @@ fn write_eof_envelope(dir: &Path, name: &str) -> (PathBuf, u64) {
     write_carrier(
         &carrier,
         PayloadSource::Text("x"),
-        Some(&out),
-        None,
-        None,
-        "eof",
-        false,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&out),
+            strategy: "eof",
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     // EOF strategy appends at the end of the host, so the envelope starts at
@@ -93,13 +92,11 @@ fn pdf_xref_stream_incremental_write_roundtrip() {
     let res = write_carrier(
         &carrier,
         PayloadSource::Text("xref stream secret"),
-        Some(&out),
-        None,
-        None,
-        "auto",
-        false,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&out),
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     assert_eq!(res.strategy, "incremental");
@@ -136,13 +133,11 @@ fn pdf_without_root_is_rejected_for_incremental() {
     let res = write_carrier(
         &carrier,
         PayloadSource::Text("noroot"),
-        Some(&out),
-        None,
-        None,
-        "auto",
-        false,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&out),
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     assert_eq!(res.strategy, "eof");
@@ -151,13 +146,12 @@ fn pdf_without_root_is_rejected_for_incremental() {
     let err = write_carrier(
         &carrier,
         PayloadSource::Text("noroot"),
-        Some(&out),
-        None,
-        None,
-        "incremental",
-        false,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&out),
+            strategy: "incremental",
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap_err();
     assert!(err.to_string().contains("/Root"), "{err}");

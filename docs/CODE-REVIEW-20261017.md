@@ -27,7 +27,30 @@
 | R12（部分） | 死代码 | ✅ 已删除 Python `crypto.py` 的半成品桩 `encrypt_stream_chunked`；Rust 死分支与 mod.rs patch 陷阱列为后续清理项 |
 | R7（内存部分） | 全内存缓冲与 §3.5 声明矛盾 | ◐ 部分完成：Rust 写路径消除一份冗余拷贝（压缩/原始二选一及时释放、信封组装 move 语义）、读路径压缩时单缓冲；文档 §3.5 已改为诚实声明；全流式管道列为后续演进 |
 
-**未纳入本轮（P2/低危，排期待定）**：clippy 存量 21 条 lib 警告清零、Rust 死分支清理（png.rs/jpeg.rs/mod.rs）、MP4/PNG `verify_structure` 深度补齐、`verify` 退出码对齐、JAR 内容检测与扩展名解耦、`unescape` 补全转义、`.bak` 重名保护、Rust 单测扩充至适配器损坏输入全矩阵、真流式管道改造。
+**P2 级问题（#9–#24）：已于 2026-10-17 分 4 批全部实施**（每批单独提交，逐批全量回归）
+
+| 编号 | 问题 | 状态 |
+| :--- | :--- | :--- |
+| #9 | 大 `chunk_len` 内存分配 | ✅ 此前已在 R6 修复中闭环（`chunk_len ≤ CHUNK_SIZE+16`） |
+| #10 | IO 错误被 `while let Ok(n)` 静默吞掉 | ✅ 双侧修复：Rust 6 个适配器注入路径显式传播 `Err`（含评审漏列的 `pdf.rs`） |
+| #11 | `unpack` 不校验 version/字段区间 | ✅ `validate_against()` 已校验；本轮补齐 `verify_carrier` L2 调用（此前仅 read/remove/inspect 调用），并修复 Python `header` 未绑定致 L3 崩溃的存量缺陷 |
+| #12 | 默认 strip 的 `patch_offset > 0` 陷阱 | ✅ 按输出流坐标 `patch_offset - inject_size` 回写，坐标系与哨兵语义写入 trait 文档，越界返回 `CorruptedData`（不改线上协议） |
+| #13 | ZIP `patch_offset` u32 截断 | ✅ R11 已拒绝 >4GB 场景，截断路径已堵死；本轮补齐协议状态说明 |
+| #14 | xref-stream PDF 对象号默认 9999 撞号 | ✅ 双侧尾部扫描 `N G obj` 取最大对象号 + 1，`/Root` 全尾回退查找，找不到即拒绝 incremental；**并修复存量跨语言分歧**（紧凑 trailer 下真实样本 file-11.pdf 现双侧字节一致） |
+| #15 | `verify` 恒返回退出码 0 | ✅ 与 Python 对齐：L1/L2 失败返回 1 |
+| #16 | 密码重试依赖字符串匹配 | ✅ 新增 `NoHiddenData`/`NoHiddenDataError` 变体，双侧按变体判别；隐蔽载体无密码时给出可执行引导（结构启发式提示提供写入密码），TTY 守卫对齐 |
+| #17 | 未检查父目录写权限 | ✅ Rust 补便携写探测（临时探针文件，无 libc 依赖），与 Python `os.access(parent_dir, W_OK)` 对齐 |
+| #18 | JAR 签名检查仅认扩展名 | ✅ 双侧改为按 ZIP 魔数 + 中央目录扫描识别，改名 `.zip` 不再绕过 |
+| #19 | `unescape` 转义集不全 | ✅ 双侧重写为字符级解码，补全 `\xHH`/`\uXXXX`/代理对/`\UXXXXXXXX`/八进制/`\a\b\f\v`；**并修复 Python 非 ASCII 被 latin-1 破坏的存量缺陷** |
+| #20 | `.bak` 静默覆盖 | ✅ 双侧重名时追加 UTC 时间戳（再重名加序号），不再覆盖既有备份 |
+| #21 | edition 与文档不符 | ✅ 此前已对齐（文档改为 Rust 2024） |
+| #22 | clippy 21 条警告 | ✅ 清零：`cargo clippy --all-targets -- -D warnings` 通过；`write_carrier` 9 参重构为 `WriteOptions` 结构体（含 `Default`），CLI 与 17 处测试调用点同步迁移 |
+| #23 | MP4/PNG `verify_structure` 深度不足 | ✅ 双侧遍历完整 box 树 / 全部 chunk，PNG 增加逐 chunk CRC32 验值（此前双侧均不验值），MP4 增加末 box 越界与 ftyp 校验 |
+| #24 | `choose_auto_strategy(cf, 0)` 死计算 | ✅ 此前已随 P1-5 精确尺寸重构消除 |
+
+> 验证矩阵（批次 4 收官）：`cargo clippy -D warnings` 0 警告、cargo test 55/55、pytest 105/105、跨语言 17/17、26 样本批量 72/72 全绿。新增回归资产：`rust/tests/p2_fixes.rs`(13)、`rust/tests/p2_protocol.rs`(7)、`rust/tests/p2_cli.rs`(11)、`python/tests/test_p2_engineering_fixes.py`(13)、`python/tests/test_p2_cli_security.py`(11)。
+>
+> 仍列为后续演进项（不在 P2 范围）：patch_offset u32→u64 协议升级（需双语言同步改二进制布局，留待 v2.3）、全流式管道改造（§5.4）、CI 门禁落地（仓库暂无 `.github/workflows`）。
 
 ---
 

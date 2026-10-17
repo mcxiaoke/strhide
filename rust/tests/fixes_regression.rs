@@ -12,7 +12,7 @@ use rand::RngExt;
 
 use strhide::adapters::zip::find_eocd_offset;
 use strhide::engine::{
-    read_carrier, remove_carrier, sanitize_filename, verify_carrier, write_carrier, CarrierMetadata,
+    read_carrier, remove_carrier, sanitize_filename, verify_carrier, write_carrier, WriteOptions, CarrierMetadata,
     PayloadSource,
 };
 use strhide::envelope::{EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE, MAX_HINT_LEN};
@@ -184,13 +184,14 @@ fn write_carrier_file(
     write_carrier(
         carrier,
         payload,
-        Some(out),
-        password,
-        None,
-        strategy,
-        stealth,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(out),
+            password,
+            strategy,
+            stealth,
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap()
 }
@@ -205,13 +206,12 @@ fn stealth_requires_password() {
     let err = write_carrier(
         &carrier,
         PayloadSource::Text("x"),
-        Some(&dir.join("o.png")),
-        None,
-        None,
-        "auto",
-        true,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&dir.join("o.png")),
+            stealth: true,
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap_err();
     assert!(err.to_string().contains("requires a password"), "{err}");
@@ -337,13 +337,13 @@ fn double_injection_rejected_same_password() {
     let err = write_carrier(
         &stego,
         PayloadSource::Text("second"),
-        Some(&stego),
-        Some("pw1"),
-        None,
-        "auto",
-        true,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&stego),
+            password: Some("pw1"),
+            stealth: true,
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap_err();
     assert!(err.to_string().contains("already contains hidden data"), "{err}");
@@ -484,13 +484,13 @@ fn explicit_oversize_strategy_rejected_without_tmp() {
     let err = write_carrier(
         &carrier,
         PayloadSource::File(&payload),
-        Some(&out),
-        Some("pw"),
-        None,
-        "app_segment",
-        false,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&out),
+            password: Some("pw"),
+            strategy: "app_segment",
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap_err();
     assert!(err.to_string().contains("exceeds JPEG single segment"), "{err}");
@@ -648,13 +648,13 @@ fn tmp_guard_removes_uncommitted_temp() {
     let _ = write_carrier(
         &carrier,
         PayloadSource::File(&payload),
-        Some(&out),
-        Some("pw"),
-        None,
-        "app_segment",
-        false,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&out),
+            password: Some("pw"),
+            strategy: "app_segment",
+            backup: false,
+            ..Default::default()
+        },
     );
     for entry in fs::read_dir(&dir).unwrap() {
         let name = entry.unwrap().file_name();

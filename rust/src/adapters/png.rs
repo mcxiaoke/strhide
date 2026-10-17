@@ -176,21 +176,19 @@ impl HostAdapter for PngAdapter {
             chunk_type.copy_from_slice(&hdr[4..8]);
             let chunk_data_offset = stego_in.stream_position()?;
 
-            if chunk_type == CHUNK_PRIV || chunk_type == CHUNK_STEG {
-                if length >= 112 + 24 {
+            if (chunk_type == CHUNK_PRIV || chunk_type == CHUNK_STEG)
+                && length >= 112 + 24 {
                     let trailer_offset = chunk_data_offset + length - 24;
                     stego_in.seek(SeekFrom::Start(trailer_offset))?;
                     let mut trailer_bytes = [0u8; 24];
-                    if stego_in.read_exact(&mut trailer_bytes).is_ok() {
-                        if let Ok(trailer) = EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic) {
+                    if stego_in.read_exact(&mut trailer_bytes).is_ok()
+                        && let Ok(trailer) = EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic) {
                             if expected_trailer_magic.is_none() && trailer.trailer_magic != STANDARD_TRAILER_MAGIC {
                                 return Ok(None);
                             }
                             return Ok(Some((chunk_data_offset, length, "chunk".into())));
                         }
-                    }
                 }
-            }
 
             if chunk_type == *b"IEND" {
                 break;

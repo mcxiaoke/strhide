@@ -207,23 +207,20 @@ impl HostAdapter for ZipAdapter {
         expected_trailer_magic: Option<&[u8; 4]>,
     ) -> Result<Option<(u64, u64, String)>, StrHideError> {
         // 1. Try finding UBE before Central Directory
-        if let Ok((_, cd_offset, _)) = find_eocd_offset(stego_in) {
-            if cd_offset >= 112 + 24 {
+        if let Ok((_, cd_offset, _)) = find_eocd_offset(stego_in)
+            && cd_offset >= 112 + 24 {
                 stego_in.seek(SeekFrom::Start(cd_offset - 24))?;
                 let mut trailer_bytes = [0u8; 24];
-                if stego_in.read_exact(&mut trailer_bytes).is_ok() {
-                    if let Ok(trailer) = EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic) {
-                        if trailer.ube_offset + trailer.ube_total_size == cd_offset {
+                if stego_in.read_exact(&mut trailer_bytes).is_ok()
+                    && let Ok(trailer) = EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic)
+                        && trailer.ube_offset + trailer.ube_total_size == cd_offset {
                             return Ok(Some((
                                 trailer.ube_offset,
                                 trailer.ube_total_size,
                                 "pre_cd_inject".into(),
                             )));
                         }
-                    }
-                }
             }
-        }
 
         // 2. Fallback to EOF
         if let Some(t) = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {

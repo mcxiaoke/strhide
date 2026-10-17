@@ -401,8 +401,8 @@ impl HostAdapter for PdfAdapter {
         let mut tail = vec![0u8; scan_len as usize];
         stego_in.read_exact(&mut tail)?;
 
-        if let Some(eof_idx) = tail.windows(5).rposition(|w| w == b"%%EOF") {
-            if let Some(endstream_idx) = tail[..eof_idx].windows(9).rposition(|w| w == b"endstream") {
+        if let Some(eof_idx) = tail.windows(5).rposition(|w| w == b"%%EOF")
+            && let Some(endstream_idx) = tail[..eof_idx].windows(9).rposition(|w| w == b"endstream") {
                 let stream_content_tail = &tail[..endstream_idx];
                 let mut stream_end_in_tail = stream_content_tail.len();
                 while stream_end_in_tail > 0
@@ -416,8 +416,8 @@ impl HostAdapter for PdfAdapter {
                     let trailer_bytes = &stream_content_tail[stream_end_in_tail - 24..stream_end_in_tail];
                     if let Ok(trailer) = EnvelopeTrailer::unpack(trailer_bytes, expected_trailer_magic) {
                         let abs_stream_end = (total_size - scan_len) + stream_end_in_tail as u64;
-                        if trailer.ube_offset + trailer.ube_total_size == abs_stream_end {
-                            if trailer.ube_offset >= 8 {
+                        if trailer.ube_offset + trailer.ube_total_size == abs_stream_end
+                            && trailer.ube_offset >= 8 {
                                 stego_in.seek(SeekFrom::Start(trailer.ube_offset - 8))?;
                                 let mut prefix = [0u8; 8];
                                 if stego_in.read_exact(&mut prefix).is_ok()
@@ -432,11 +432,9 @@ impl HostAdapter for PdfAdapter {
                                     )));
                                 }
                             }
-                        }
                     }
                 }
             }
-        }
 
         // 2. Fallback to EOF
         if let Some(t) = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {

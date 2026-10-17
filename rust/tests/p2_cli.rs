@@ -15,7 +15,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use strhide::engine::{read_carrier, write_carrier, PayloadSource};
+use strhide::engine::{read_carrier, write_carrier, WriteOptions, PayloadSource};
 use strhide::errors::StrHideError;
 
 // --------------------------------------------------------------------------- helpers
@@ -117,13 +117,11 @@ fn verify_exit_code_zero_for_valid_carrier() {
     write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
-        Some(&out),
-        None,
-        None,
-        "auto",
-        false,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&out),
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -146,13 +144,12 @@ fn verify_exit_code_one_when_envelope_header_invalid() {
     write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
-        Some(&out),
-        None,
-        None,
-        "eof",
-        false,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&out),
+            strategy: "eof",
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     let ube_offset = fs::metadata(&carrier).unwrap().len();
@@ -178,13 +175,11 @@ fn verify_exit_code_one_when_host_structure_broken() {
     write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
-        Some(&out),
-        None,
-        None,
-        "auto",
-        false,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&out),
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     // Flip a byte inside the injected IHDR-like region of the host: simplest
@@ -216,13 +211,13 @@ fn read_stealth_without_password_reports_guidance() {
     write_carrier(
         &carrier,
         PayloadSource::Text("stealth secret"),
-        Some(&out),
-        Some("pw12345"),
-        None,
-        "auto",
-        true,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&out),
+            password: Some("pw12345"),
+            stealth: true,
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -263,13 +258,13 @@ fn read_encrypted_without_password_raises_password_variant() {
     write_carrier(
         &carrier,
         PayloadSource::Text("encrypted secret"),
-        Some(&out),
-        Some("pw12345"),
-        Some("the hint"),
-        "auto",
-        false,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&out),
+            password: Some("pw12345"),
+            password_hint: Some("the hint"),
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -297,13 +292,11 @@ fn signed_zip_renamed_to_zip_is_rejected() {
     let err = write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
-        Some(&dir.join("o.zip")),
-        None,
-        None,
-        "auto",
-        false,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&dir.join("o.zip")),
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap_err();
     assert!(
@@ -328,13 +321,11 @@ fn clean_zip_is_still_accepted() {
     let res = write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
-        Some(&out),
-        None,
-        None,
-        "auto",
-        false,
-        true,
-        false,
+        &WriteOptions {
+            output_path: Some(&out),
+            backup: false,
+            ..Default::default()
+        },
     )
     .unwrap();
     assert_eq!(res.strategy, "pre_cd_inject");
@@ -473,13 +464,10 @@ fn readonly_parent_directory_is_rejected() {
     let res = write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
-        None,
-        None,
-        None,
-        "auto",
-        false,
-        true,
-        false,
+        &WriteOptions {
+            backup: false,
+            ..Default::default()
+        },
     );
     // Restore permissions so the scratch dir can be cleaned up.
     fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
@@ -489,4 +477,36 @@ fn readonly_parent_directory_is_rejected() {
         err.to_string().contains("directory"),
         "expected a parent-directory rejection, got: {err}"
     );
+}
+
+// --------------------------------------------------------------------------- #20 .bak collision protection
+
+#[test]
+fn backup_collision_uses_timestamped_name() {
+    use strhide::engine::remove_carrier;
+
+    let dir = scratch("bak_collision");
+    let carrier = dir.join("c.png");
+    fs::write(&carrier, make_png()).unwrap();
+    let original = fs::read(&carrier).unwrap();
+
+    // First in-place write creates the plain .bak
+    let w1 = write_carrier(
+        &carrier,
+        PayloadSource::Text("first"),
+        &WriteOptions::default(),
+    )
+    .unwrap();
+    let bak1 = w1.backup_file.expect("backup created");
+    assert!(bak1.ends_with(".bak"), "{bak1}");
+    assert_eq!(fs::read(&bak1).unwrap(), original);
+
+    // Removing in place would previously overwrite that .bak, destroying the
+    // only pre-write copy of the carrier.
+    let r1 = remove_carrier(&carrier, None, None, true).unwrap();
+    let bak2 = r1.backup_file.expect("backup created");
+    assert_ne!(bak1, bak2, "backup path was reused");
+    assert!(bak2.contains(".bak-"), "{bak2}");
+    assert!(fs::metadata(&bak1).is_ok(), "first backup must be preserved");
+    assert!(fs::metadata(&bak2).is_ok(), "second backup must exist");
 }

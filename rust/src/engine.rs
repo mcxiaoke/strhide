@@ -194,17 +194,113 @@ fn no_hidden_data_error(
     StrHideError::NoHiddenData(msg)
 }
 
+/// Options controlling an injection. Bundled into a struct so the public API
+/// stays readable and extensible as features grow (replaces a nine-parameter
+/// positional signature that clippy flagged as `too_many_arguments`).
+///
+/// The `Default` values match the CLI defaults: `auto` strategy, timestamps and
+/// in-place backup preserved, no encryption, no stealth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteOptions<'a> {
+    /// Write the stego carrier here instead of overwriting the carrier.
+    pub output_path: Option<&'a Path>,
+    /// Password for encryption; required for `--stealth`.
+    pub password: Option<&'a str>,
+    /// Password hint (mutually exclusive with `stealth`, max 1024 bytes).
+    pub password_hint: Option<&'a str>,
+    /// Injection strategy name or `auto`.
+    pub strategy: &'a str,
+    /// Hide the envelope with password-derived magics (requires `password`).
+    pub stealth: bool,
+    /// Clone the carrier's original timestamps onto the result.
+    pub preserve_time: bool,
+    /// Keep a `<carrier>.bak` backup for in-place writes.
+    pub backup: bool,
+}
+
+impl Default for WriteOptions<'_> {
+    fn default() -> Self {
+        Self {
+            output_path: None,
+            password: None,
+            password_hint: None,
+            strategy: "auto",
+            stealth: false,
+            preserve_time: true,
+            backup: true,
+        }
+    }
+}
+
+/// Format a Unix timestamp (seconds) as `YYYYMMDD-HHMMSS` in UTC.
+///
+/// Days-to-civil conversion (Howard Hinnant's algorithm); avoids pulling in a
+/// date-time dependency for a backup file name.
+fn utc_stamp(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{y:04}{m:02}{d:02}-{hour:02}{minute:02}{second:02}")
+}
+
+/// Pick a backup path that never overwrites an existing backup.
+///
+/// In-place writes create `<carrier>.bak`; writing again would silently replace
+/// the previous backup (and with it the only pre-write copy of the carrier).
+/// Collisions fall back to `<carrier>.bak-<UTC timestamp>` and then a counter.
+/// Mirrors the Python implementation.
+fn next_backup_path(carrier: &Path) -> PathBuf {
+    let base = PathBuf::from(format!("{}.bak", carrier.display()));
+    if !base.exists() {
+        return base;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let stamp = utc_stamp(now);
+    for suffix in 0..1000u32 {
+        let candidate = if suffix == 0 {
+            PathBuf::from(format!("{}.bak-{stamp}", carrier.display()))
+        } else {
+            PathBuf::from(format!("{}.bak-{stamp}-{suffix}", carrier.display()))
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    PathBuf::from(format!(
+        "{}.bak-{stamp}-{}",
+        carrier.display(),
+        std::process::id()
+    ))
+}
+
 pub fn write_carrier(
     carrier_path: &Path,
     source: PayloadSource,
-    output_path: Option<&Path>,
-    password: Option<&str>,
-    password_hint: Option<&str>,
-    strategy: &str,
-    stealth: bool,
-    preserve_time: bool,
-    backup: bool,
+    options: &WriteOptions<'_>,
 ) -> Result<WriteResult, StrHideError> {
+    let output_path = options.output_path;
+    let password = options.password;
+    let password_hint = options.password_hint;
+    let strategy = options.strategy;
+    let stealth = options.stealth;
+    let preserve_time = options.preserve_time;
+    let backup = options.backup;
+
     if !carrier_path.exists() {
         return Err(StrHideError::General(format!(
             "Carrier file '{}' not found",
@@ -252,13 +348,9 @@ pub fn write_carrier(
     let orig_host_sha256 = compute_file_sha256(carrier_path)?;
 
     // 3. Detect adapter & check existing envelope
-    let adapter: &'static dyn HostAdapter;
-    let selected_strategy: String;
-    let structural_warnings: Vec<String>;
-
-    {
+    let (adapter, structural_warnings) = {
         let mut cf = File::open(carrier_path)?;
-        adapter = find_adapter(&mut cf);
+        let adapter = find_adapter(&mut cf);
 
         // Reject carriers that already contain an envelope. A standard-magic
         // scan catches plain/standard-encrypted envelopes; when a password is
@@ -282,8 +374,9 @@ pub fn write_carrier(
         // unknown password is undetectable by magic; scan structurally and
         // warn (not refuse) when the carrier shows an envelope-shaped
         // container, so the user learns a second envelope would stack on top.
-        structural_warnings = adapter.suspicious_structures(&mut cf);
-    }
+        let warnings = adapter.suspicious_structures(&mut cf);
+        (adapter, warnings)
+    };
 
     // 4. Prepare data payload stream
     let (payload_raw_bytes, filename, is_file) = match source {
@@ -413,11 +506,11 @@ pub fn write_carrier(
     let exact_ube_size =
         HEADER_SIZE as u64 + hint_bytes.len() as u64 + exact_meta_len + exact_payload_len + 24;
 
-    if strategy == "auto" {
+    let selected_strategy: String = if strategy == "auto" {
         let mut cf = File::open(carrier_path)?;
-        selected_strategy = adapter
+        adapter
             .choose_auto_strategy(&mut cf, exact_ube_size)
-            .to_string();
+            .to_string()
     } else {
         if !adapter.supported_strategies().contains(&strategy) {
             return Err(StrHideError::General(format!(
@@ -425,8 +518,8 @@ pub fn write_carrier(
                 adapter.format_name()
             )));
         }
-        selected_strategy = strategy.to_string();
-    }
+        strategy.to_string()
+    };
 
     // 8. Populate Header structure
     let strat_id = strategy_to_id(&selected_strategy);
@@ -608,7 +701,7 @@ pub fn write_carrier(
     let is_inplace = std::path::absolute(target_path)? == std::path::absolute(carrier_path)?;
     let mut backup_file = None;
     if is_inplace && backup {
-        let bak = PathBuf::from(format!("{}.bak", carrier_path.display()));
+        let bak = next_backup_path(carrier_path);
         std::fs::copy(carrier_path, &bak)?;
         backup_file = Some(bak.display().to_string());
     }
@@ -958,7 +1051,7 @@ pub fn remove_carrier(
     let is_inplace = std::path::absolute(target_path)? == std::path::absolute(carrier_path)?;
     let mut backup_file = None;
     if is_inplace && backup {
-        let bak = PathBuf::from(format!("{}.bak", carrier_path.display()));
+        let bak = next_backup_path(carrier_path);
         std::fs::copy(carrier_path, &bak)?;
         backup_file = Some(bak.display().to_string());
     }
@@ -1046,15 +1139,14 @@ pub fn inspect_carrier(
     let mut meta_val = None;
     if !header.is_encrypted() {
         let mut meta_bytes = vec![0u8; header.meta_len as usize];
-        if cf.read_exact(&mut meta_bytes).is_ok() {
-            if let Ok(val) = serde_json::from_slice(&meta_bytes) {
+        if cf.read_exact(&mut meta_bytes).is_ok()
+            && let Ok(val) = serde_json::from_slice(&meta_bytes) {
                 meta_val = Some(val);
             }
-        }
     } else if let Some(pwd) = password {
         let mut meta_bytes = vec![0u8; header.meta_len as usize];
-        if cf.read_exact(&mut meta_bytes).is_ok() {
-            if let Ok((_, meta_key)) = derive_keys(pwd, &header.salt) {
+        if cf.read_exact(&mut meta_bytes).is_ok()
+            && let Ok((_, meta_key)) = derive_keys(pwd, &header.salt) {
                 if let Ok(dec) = decrypt_metadata(&meta_bytes, &meta_key, &header.base_nonce, &header.get_aad()) {
                     if let Ok(val) = serde_json::from_slice(&dec) {
                         meta_val = Some(val);
@@ -1063,7 +1155,6 @@ pub fn inspect_carrier(
                     meta_val = Some(serde_json::json!({"error": "Invalid password"}));
                 }
             }
-        }
     }
 
     Ok(InspectResult {
@@ -1154,11 +1245,12 @@ pub fn verify_carrier(
             } else {
             cf.seek(SeekFrom::Start(ube_offset + ube_total_size - 24))?;
             let mut trailer_bytes = [0u8; 24];
-            let expected_trailer_magic = if header.is_stealth() && password.is_some() {
-                let magics = derive_stealth_magics(password.unwrap(), b"strhide-stealth-v1")?;
-                Some(magics.1)
-            } else {
-                None
+            let expected_trailer_magic = match (header.is_stealth(), password) {
+                (true, Some(pwd)) => {
+                    let magics = derive_stealth_magics(pwd, b"strhide-stealth-v1")?;
+                    Some(magics.1)
+                }
+                _ => None,
             };
 
             if cf.read_exact(&mut trailer_bytes).is_err() {

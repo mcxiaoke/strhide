@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import io
 import json
 import os
@@ -48,6 +49,29 @@ from strhide.errors import (
     RestoreMismatchError,
     StrHideError,
 )
+
+
+def _next_backup_path(carrier_path: str) -> str:
+    """Pick a backup path that never overwrites an existing backup.
+
+    In-place writes create ``<carrier>.bak``; writing again would silently
+    replace the previous backup (and with it the only pre-write copy of the
+    carrier). Collisions fall back to ``<carrier>.bak-<UTC timestamp>`` and then
+    a counter. Mirrors the Rust implementation.
+    """
+    base = carrier_path + ".bak"
+    if not os.path.exists(base):
+        return base
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    for suffix in range(1000):
+        candidate = (
+            f"{carrier_path}.bak-{stamp}"
+            if suffix == 0
+            else f"{carrier_path}.bak-{stamp}-{suffix}"
+        )
+        if not os.path.exists(candidate):
+            return candidate
+    return f"{carrier_path}.bak-{stamp}-{os.getpid()}"
 
 
 def sanitize_filename(name: str) -> str:
@@ -425,7 +449,7 @@ def write_carrier(
     is_inplace = (os.path.abspath(target_path) == os.path.abspath(carrier_path))
     backup_file = None
     if is_inplace and backup:
-        backup_file = carrier_path + ".bak"
+        backup_file = _next_backup_path(carrier_path)
         shutil.copy2(carrier_path, backup_file)
 
     os.replace(tmp_target, target_path)
@@ -729,7 +753,7 @@ def remove_carrier(
     is_inplace = (os.path.abspath(target_path) == os.path.abspath(carrier_path))
     backup_file = None
     if is_inplace and backup:
-        backup_file = carrier_path + ".bak"
+        backup_file = _next_backup_path(carrier_path)
         shutil.copy2(carrier_path, backup_file)
 
     os.replace(tmp_target, target_path)

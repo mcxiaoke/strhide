@@ -230,14 +230,13 @@ impl HostAdapter for JpegAdapter {
                 let trailer_offset = payload_offset + payload_len - 24;
                 stego_in.seek(SeekFrom::Start(trailer_offset))?;
                 let mut trailer_bytes = [0u8; 24];
-                if stego_in.read_exact(&mut trailer_bytes).is_ok() {
-                    if let Ok(trailer) = EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic) {
+                if stego_in.read_exact(&mut trailer_bytes).is_ok()
+                    && let Ok(trailer) = EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic) {
                         if expected_trailer_magic.is_none() && trailer.trailer_magic != crate::envelope::STANDARD_TRAILER_MAGIC {
                             return Ok(None);
                         }
                         return Ok(Some((payload_offset, payload_len, "app_segment".into())));
                     }
-                }
             }
 
             stego_in.seek(SeekFrom::Start(payload_offset + payload_len))?;

@@ -46,23 +46,31 @@ def test_inplace_backup_creation_and_content():
 
         # 1. In-place write with default backup=True
         res = write_carrier(carrier_path, data_text="Secret message 2026", password="pass")
-        assert res["backup_file"] == carrier_path + ".bak"
-        assert os.path.exists(carrier_path + ".bak")
+        write_bak = res["backup_file"]
+        assert write_bak == carrier_path + ".bak"
+        assert os.path.exists(write_bak)
 
         # The backup file must match the original carrier SHA-256
-        bak_sha256 = compute_file_sha256(carrier_path + ".bak").hex()
+        bak_sha256 = compute_file_sha256(write_bak).hex()
         assert bak_sha256 == orig_sha256
 
         # 2. In-place remove with backup=True
         # Carrier currently contains hidden data
         modified_sha256 = compute_file_sha256(carrier_path).hex()
         res_rm = remove_carrier(carrier_path, password="pass")
-        assert res_rm["backup_file"] == carrier_path + ".bak"
+        remove_bak = res_rm["backup_file"]
+        # The plain .bak already exists, so the restore backup must NOT
+        # overwrite it (that would destroy the only pre-write copy); it gets a
+        # UTC timestamp suffix instead.
+        assert remove_bak != write_bak
+        assert remove_bak.startswith(carrier_path + ".bak-")
 
         # Carrier is now restored to original
         assert compute_file_sha256(carrier_path).hex() == orig_sha256
-        # .bak contains the pre-restoration modified carrier
-        assert compute_file_sha256(carrier_path + ".bak").hex() == modified_sha256
+        # The first .bak still holds the pristine original...
+        assert compute_file_sha256(write_bak).hex() == orig_sha256
+        # ...while the timestamped backup holds the pre-restoration carrier.
+        assert compute_file_sha256(remove_bak).hex() == modified_sha256
 
 
 def test_inplace_no_backup_flag():
