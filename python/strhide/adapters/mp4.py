@@ -1,4 +1,4 @@
-"""MP4 / MOV ISO BMFF container adapter for strhide with 64-bit uuid Box."""
+"""MP4 / MOV ISO BMFF container adapter for strhide with neutral 64-bit uuid Box."""
 
 from __future__ import annotations
 
@@ -10,7 +10,9 @@ from strhide.adapters.base import HostAdapter
 from strhide.core.envelope import EnvelopeHeader, read_trailer_from_tail
 from strhide.errors import CorruptedDataError, UnsupportedFormatError
 
-MP4_UUID_NAMESPACE = b"\x89STRHIDE\x00\x00\x00\x00\x00\x00\x00\x01"
+# Neutral RFC 4122 UUID namespace (avoids leaking STRHIDE in WinHex ASCII view)
+MP4_UUID_NEUTRAL = b"\xd4\x1a\x8e\x9c\x4f\x21\x4e\x87\x9a\x33\x5b\x6d\x12\x84\xef\x70"
+LEGACY_UUID_NAMESPACE = b"\x89STRHIDE\x00\x00\x00\x00\x00\x00\x00\x01"
 
 
 class Mp4Adapter(HostAdapter):
@@ -58,7 +60,7 @@ class Mp4Adapter(HostAdapter):
             # 64-bit Large Box format:
             # [Size = 1 (4B)] + [Type = 'uuid' (4B)] + [LargeSize = 32 + ube_size (8B)] + [UUID (16B)] + [UBE]
             largesize = 32 + ube_size
-            box_header = struct.pack(">I4sQ16s", 1, b"uuid", largesize, MP4_UUID_NAMESPACE)
+            box_header = struct.pack(">I4sQ16s", 1, b"uuid", largesize, MP4_UUID_NEUTRAL)
             out.write(box_header)
             shutil.copyfileobj(ube_in, out)
             inject_size = len(box_header) + ube_size
@@ -84,7 +86,10 @@ class Mp4Adapter(HostAdapter):
             hdr = stego_in.read(32)
             if len(hdr) == 32:
                 size, box_type, largesize, uuid_ns = struct.unpack(">I4sQ16s", hdr)
-                if size == 1 and box_type == b"uuid" and uuid_ns == MP4_UUID_NAMESPACE:
+                if size == 1 and box_type == b"uuid" and (
+                    largesize == 32 + trailer.ube_total_size
+                    or uuid_ns in (MP4_UUID_NEUTRAL, LEGACY_UUID_NAMESPACE)
+                ):
                     return trailer.ube_offset, trailer.ube_total_size, "box_uuid"
 
         return trailer.ube_offset, trailer.ube_total_size, "eof"

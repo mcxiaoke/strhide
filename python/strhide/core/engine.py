@@ -377,6 +377,11 @@ def write_carrier(
             strategy_note = "PDF trailer could not be incrementally parsed; automatically fell back to EOF overlay."
         elif selected_strategy == "eof":
             strategy_note = "Appended after PDF %%EOF (EOF overlay)."
+    elif adapter.format_name() == "MP4":
+        if selected_strategy == "box_uuid":
+            strategy_note = "Embedded into compliant ISO BMFF 64-bit uuid Box (preserves media frame offsets)."
+        elif selected_strategy == "eof":
+            strategy_note = "Appended after MP4 EOF (EOF overlay)."
 
     return {
         "status": "success",
