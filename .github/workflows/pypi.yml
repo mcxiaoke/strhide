@@ -43,7 +43,20 @@ jobs:
           name: dist
           path: dist/
 
+      - name: Check if version already published
+        id: check
+        run: |
+          VERSION=$(ls dist/ | grep -oP '(?<=^strhide-)[^-]+' | head -1)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if curl -sf "https://pypi.org/pypi/strhide/json" | jq -e --arg v "$VERSION" '.releases | has($v)' > /dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::strhide@$VERSION already exists on PyPI, skipping publish (bump python/strhide/__init__.py __version__ to release)"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to PyPI
+        if: steps.check.outputs.exists != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
