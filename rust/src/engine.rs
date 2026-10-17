@@ -1103,6 +1103,13 @@ pub fn verify_carrier(
         if cf.read_exact(&mut header_bytes).is_err() {
             (false, "Cannot read header".into(), false, false)
         } else if let Ok(header) = EnvelopeHeader::unpack(&header_bytes) {
+            // Validate header field ranges against the located envelope size
+            // (version / hint_len / meta_len consistency) before trusting any
+            // downstream reads — a crafted or corrupted header must fail Level
+            // 2 with a domain error instead of being silently accepted.
+            if let Err(e) = header.validate_against(ube_total_size) {
+                (false, format!("Envelope header validation failed: {e}"), false, false)
+            } else {
             cf.seek(SeekFrom::Start(ube_offset + ube_total_size - 24))?;
             let mut trailer_bytes = [0u8; 24];
             let expected_trailer_magic = if header.is_stealth() && password.is_some() {
@@ -1127,6 +1134,7 @@ pub fn verify_carrier(
                 }
             } else {
                 (false, "Envelope trailer unpacking failed".into(), header.is_encrypted(), header.is_stealth())
+            }
             }
         } else {
             (false, "Envelope header unpacking failed".into(), false, false)

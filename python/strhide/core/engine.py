@@ -811,9 +811,15 @@ def verify_carrier(carrier_path: str, password: Optional[str] = None) -> Dict[st
             }
 
         ube_offset, ube_total_size, strategy = loc
+        header = None
         try:
             cf.seek(ube_offset)
             header = EnvelopeHeader.unpack(cf.read(HEADER_STRUCT.size))
+            # Validate header field ranges against the located envelope size
+            # (version / hint_len / meta_len consistency) before trusting any
+            # downstream reads — a crafted or corrupted header must fail Level
+            # 2 with a domain error instead of being silently accepted.
+            header.validate_against(ube_total_size)
             cf.seek(ube_offset + ube_total_size - 24)
             expected_trailer_magic = None
             if header.is_stealth and password:
@@ -830,7 +836,11 @@ def verify_carrier(carrier_path: str, password: Optional[str] = None) -> Dict[st
     # Level 3: Crypto & payload SHA-256
     l3_ok = False
     l3_msg = "Password required for cryptographic verification"
-    if not header.is_encrypted or password:
+    if header is None:
+        # The header itself was unreadable/invalid; read_carrier would fail
+        # with a less precise message, so skip with a clear reason.
+        l3_msg = "Skipped (envelope header unreadable)"
+    elif not header.is_encrypted or password:
         try:
             res = read_carrier(carrier_path, password=password)
             l3_ok = True

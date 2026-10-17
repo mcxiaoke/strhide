@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import shutil
 from typing import BinaryIO, List, Optional, Tuple
 
@@ -11,6 +10,129 @@ from strhide.core.envelope import EnvelopeHeader, read_trailer_from_tail
 from strhide.errors import CorruptedDataError, UnsupportedFormatError
 
 PDF_MAGIC = b"%PDF-"
+
+# ASCII whitespace set shared with the Rust implementation (`is_pdf_ws`):
+# space, TAB, LF, VT, FF, CR — the same class `\s` matches on bytes.
+_WS_BYTES = frozenset(b" \t\n\r\x0b\x0c")
+_U64_MAX = 0xFFFFFFFFFFFFFFFF
+
+
+def _read_digits_after_ws(text: bytes, i: int) -> Tuple[Optional[int], int]:
+    """Read an optional whitespace run followed by a decimal digit run starting
+    at ``i``; returns ``(value, new_position)``. The digit run stops at the
+    first non-digit, so compact dictionaries such as ``/Size 90/Root`` yield
+    90. ``value`` is ``None`` when no digits are present or the value exceeds
+    u64 (mirroring the Rust implementation's parse semantics)."""
+    n = len(text)
+    while i < n and text[i] in _WS_BYTES:
+        i += 1
+    start = i
+    while i < n and 0x30 <= text[i] <= 0x39:
+        i += 1
+    if i == start:
+        return None, i
+    val = int(text[start:i])
+    if val > _U64_MAX:
+        return None, i
+    return val, i
+
+
+def _find_int_after(text: bytes, key: bytes) -> Optional[int]:
+    """Decimal number that directly follows ``key`` (after optional
+    whitespace), if any."""
+    rel = text.find(key)
+    if rel == -1:
+        return None
+    val, _ = _read_digits_after_ws(text, rel + len(key))
+    return val
+
+
+def _parse_indirect_ref_after(text: bytes, pos: int) -> Optional[Tuple[int, int]]:
+    """Parse ``<digits> <ws+> <digits> <ws+> R`` starting at ``pos`` (the end of
+    a dictionary key such as ``/Root``). The trailing ``R`` only needs to start
+    the next token, so compact forms like ``/Root 1 0 R/Info`` parse
+    correctly."""
+    num1, i = _read_digits_after_ws(text, pos)
+    if num1 is None:
+        return None
+    num2, i = _read_digits_after_ws(text, i)
+    if num2 is None:
+        return None
+    n = len(text)
+    while i < n and text[i] in _WS_BYTES:
+        i += 1
+    if i < n and text[i : i + 1] == b"R":
+        return num1, num2
+    return None
+
+
+def _find_indirect_ref(text: bytes, key: bytes, take_last: bool) -> Optional[str]:
+    """Find an indirect reference such as ``/Root 12 0 R`` and return its
+    normalized ``"12 0 R"`` body. ``take_last`` selects the final valid match
+    (most recent incremental update); otherwise the first match wins."""
+    found: Optional[str] = None
+    search_from = 0
+    while True:
+        rel = text.find(key, search_from)
+        if rel == -1:
+            break
+        after_key = rel + len(key)
+        ref = _parse_indirect_ref_after(text, after_key)
+        if ref is not None:
+            found = f"{ref[0]} {ref[1]} R"
+            if not take_last:
+                return found
+        search_from = after_key
+    return found
+
+
+def _scan_max_object_number(text: bytes) -> Optional[int]:
+    """Highest object number among ``N G obj`` definitions in ``text``.
+
+    The accepted shape is exactly ``<digits> <ws+> <digits> <ws+> obj``,
+    matching the Rust implementation. Used for xref-stream PDFs that have no
+    ``trailer`` keyword.
+    """
+    max_obj: Optional[int] = None
+    search_from = 0
+    n = len(text)
+    while True:
+        rel = text.find(b"obj", search_from)
+        if rel == -1:
+            break
+        obj_end = rel + 3
+        j = rel
+        obj_num: Optional[int] = None
+
+        # whitespace before "obj" (at least one byte)
+        ws1 = j
+        while j > 0 and text[j - 1] in _WS_BYTES:
+            j -= 1
+        if j < ws1:
+            # generation digits (at least one)
+            gen_end = j
+            while j > 0 and 0x30 <= text[j - 1] <= 0x39:
+                j -= 1
+            if j < gen_end:
+                # whitespace before generation (at least one byte)
+                ws2 = j
+                while j > 0 and text[j - 1] in _WS_BYTES:
+                    j -= 1
+                if j < ws2:
+                    # object number digits (at least one)
+                    num_end = j
+                    while j > 0 and 0x30 <= text[j - 1] <= 0x39:
+                        j -= 1
+                    if j < num_end:
+                        tok = text[j:num_end]
+                        if len(tok) <= 20:
+                            val = int(tok)
+                            if val <= _U64_MAX:
+                                obj_num = val
+        if obj_num is not None and (max_obj is None or obj_num > max_obj):
+            max_obj = obj_num
+        search_from = obj_end
+    return max_obj
 
 
 def parse_pdf_trailer_info(stream: BinaryIO) -> Tuple[int, int, int, Optional[str], Optional[str]]:
@@ -50,23 +172,56 @@ def parse_pdf_trailer_info(stream: BinaryIO) -> Tuple[int, int, int, Optional[st
     prev_startxref = int(sx_lines[0])
 
     trailer_idx = text_before_eof.rfind(b"trailer")
-    size_val = 9999
-    root_ref = None
-    info_ref = None
+
+    # Next free object number. Classic PDFs expose /Size in a `trailer`
+    # dictionary, where Size is defined as one past the highest object number
+    # in use, so /Size itself is the next free number. xref-stream PDFs
+    # (PDF 1.5+) carry their trailer dictionary inside the XRef stream object
+    # and have no `trailer` keyword; for those, scan the tail window for
+    # `N G obj` definitions and use max(N) + 1. The previous hardcoded 9999
+    # fallback could collide with a real object number and silently corrupt
+    # the incremental update.
+    new_obj_num: Optional[int] = None
+    root_ref: Optional[str] = None
+    info_ref: Optional[str] = None
 
     if trailer_idx != -1:
-        trailer_str = text_before_eof[trailer_idx:sx_idx].decode("latin-1", errors="ignore")
-        size_m = re.search(r"/Size\s+(\d+)", trailer_str)
-        if size_m:
-            size_val = int(size_m.group(1))
-        root_m = re.search(r"/Root\s+(\d+\s+\d+\s+R)", trailer_str)
-        if root_m:
-            root_ref = root_m.group(1)
-        info_m = re.search(r"/Info\s+(\d+\s+\d+\s+R)", trailer_str)
-        if info_m:
-            info_ref = info_m.group(1)
+        trailer_str = text_before_eof[trailer_idx:sx_idx]
+        new_obj_num = _find_int_after(trailer_str, b"/Size")
+        root_ref = _find_indirect_ref(trailer_str, b"/Root", take_last=False)
+        info_ref = _find_indirect_ref(trailer_str, b"/Info", take_last=False)
 
-    return eof_offset, prev_startxref, size_val, root_ref, info_ref
+    # No classic trailer dictionary (xref-stream PDF): derive the next object
+    # number from the highest `N G obj` definition in the tail window.
+    if new_obj_num is None:
+        max_obj = _scan_max_object_number(text_before_eof)
+        if max_obj is not None:
+            new_obj_num = max_obj + 1
+
+    # /Root and /Info may live inside an xref-stream trailer dict (or an older
+    # incremental trailer) even when the newest trailer omits them; the last
+    # valid reference in the tail is the currently effective one.
+    if root_ref is None:
+        root_ref = _find_indirect_ref(text_before_eof, b"/Root", take_last=True)
+    if info_ref is None:
+        info_ref = _find_indirect_ref(text_before_eof, b"/Info", take_last=True)
+
+    if new_obj_num is None:
+        raise CorruptedDataError(
+            "cannot determine next PDF object number "
+            "(no /Size and no 'N G obj' definitions in tail window)"
+        )
+
+    # An incremental trailer without /Root breaks the document tree for every
+    # conforming reader; refuse instead of writing a damaged carrier (auto
+    # strategy falls back to the lossless EOF overlay).
+    if root_ref is None:
+        raise CorruptedDataError(
+            "cannot locate /Root reference in PDF tail; "
+            "incremental update would break the document tree"
+        )
+
+    return eof_offset, prev_startxref, new_obj_num, root_ref, info_ref
 
 
 class PdfAdapter(HostAdapter):

@@ -43,6 +43,14 @@ pub trait HostAdapter: Send + Sync {
     ) -> Result<Option<(u64, u64, String)>, StrHideError>;
 
     /// Strips embedded data and restores original carrier bits.
+    ///
+    /// Coordinate convention: `header.patch_offset` (when non-zero) is an
+    /// offset in the **stego** stream (post-injection). The default
+    /// implementation writes the restored patch value at
+    /// `patch_offset - inject_size` in `out`, i.e. translated into the
+    /// stripped stream's coordinates. Adapters that emit a non-zero
+    /// `patch_offset` (currently only ZIP) may override this with an
+    /// equivalent streaming implementation.
     fn strip(
         &self,
         stego_in: &mut dyn SeekRead,
@@ -76,9 +84,28 @@ pub trait HostAdapter: Send + Sync {
             out.write_all(&buf[..n])?;
         }
 
-        // Restore original patched value if applicable
-        if header.patch_offset > 0 {
-            out.seek(SeekFrom::Start(header.patch_offset as u64))?;
+        // Restore original patched value if applicable.
+        //
+        // `out` is the stripped stream (stego minus the `inject_size` bytes at
+        // `inject_offset`), so a stego-coordinate `patch_offset` maps to
+        // `patch_offset - inject_size` here — the same translation the
+        // ZIP-specific override performs. Sentinel: 0 means "no patch"; a
+        // genuine patch offset is always >= 16 (ZIP writes it at
+        // eocd_pos + 16 + ube_size), so a patch at absolute offset 0 is
+        // unreachable in the protocol.
+        if header.patch_offset != 0 {
+            debug_assert!(
+                header.patch_offset as u64 >= header.inject_offset + header.inject_size,
+                "patch_offset must point past the injected region"
+            );
+            let out_patch_pos = (header.patch_offset as u64)
+                .checked_sub(header.inject_size)
+                .ok_or_else(|| {
+                    StrHideError::CorruptedData(
+                        "patch_offset precedes the injected region".into(),
+                    )
+                })?;
+            out.seek(SeekFrom::Start(out_patch_pos))?;
             out.write_all(&header.orig_patch_val.to_le_bytes())?;
         }
 

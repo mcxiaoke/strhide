@@ -49,43 +49,186 @@ pub fn parse_pdf_trailer_info<R: Read + Seek + ?Sized>(reader: &mut R) -> Result
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| StrHideError::CorruptedData("Could not parse startxref offset integer".into()))?;
 
-    let mut size_val: u64 = 9999;
+    // Next free object number. Classic PDFs expose /Size in a `trailer`
+    // dictionary, where Size is defined as one past the highest object number
+    // in use, so /Size itself is the next free number. xref-stream PDFs
+    // (PDF 1.5+) carry their trailer dictionary inside the XRef stream object
+    // and have no `trailer` keyword; for those, scan the tail window for
+    // `N G obj` definitions and use max(N) + 1. The previous hardcoded 9999
+    // fallback could collide with a real object number and silently corrupt
+    // the incremental update.
+    let mut new_obj_num: Option<u64> = None;
     let mut root_ref = None;
     let mut info_ref = None;
 
     if let Some(trailer_idx) = text_before_eof.rfind("trailer") {
         let trailer_str = &text_before_eof[trailer_idx..sx_idx];
-        if let Some(pos) = trailer_str.find("/Size") {
-            let after = trailer_str[pos + 5..].trim_start();
-            if let Some(num_str) = after.split_whitespace().next() {
-                if let Ok(v) = num_str.parse::<u64>() {
-                    size_val = v;
-                }
-            }
-        }
-        if let Some(pos) = trailer_str.find("/Root") {
-            let after = trailer_str[pos + 5..].trim_start();
-            let parts: Vec<&str> = after.split_whitespace().take(3).collect();
-            if parts.len() == 3 && parts[2] == "R" {
-                root_ref = Some(format!("{} {} R", parts[0], parts[1]));
-            }
-        }
-        if let Some(pos) = trailer_str.find("/Info") {
-            let after = trailer_str[pos + 5..].trim_start();
-            let parts: Vec<&str> = after.split_whitespace().take(3).collect();
-            if parts.len() == 3 && parts[2] == "R" {
-                info_ref = Some(format!("{} {} R", parts[0], parts[1]));
-            }
-        }
+        new_obj_num = find_int_after(trailer_str, "/Size");
+        root_ref = find_indirect_ref(trailer_str, "/Root", false);
+        info_ref = find_indirect_ref(trailer_str, "/Info", false);
+    }
+
+    // No classic trailer dictionary (xref-stream PDF): derive the next object
+    // number from the highest `N G obj` definition in the tail window.
+    if new_obj_num.is_none() {
+        new_obj_num = scan_max_object_number(&text_before_eof).map(|n| n + 1);
+    }
+
+    // /Root and /Info may live inside an xref-stream trailer dict (or an older
+    // incremental trailer) even when the newest trailer omits them; the last
+    // valid reference in the tail is the currently effective one.
+    if root_ref.is_none() {
+        root_ref = find_indirect_ref(&text_before_eof, "/Root", true);
+    }
+    if info_ref.is_none() {
+        info_ref = find_indirect_ref(&text_before_eof, "/Info", true);
+    }
+
+    let new_obj_num = new_obj_num.ok_or_else(|| {
+        StrHideError::CorruptedData(
+            "cannot determine next PDF object number (no /Size and no 'N G obj' definitions in tail window)".into(),
+        )
+    })?;
+
+    // An incremental trailer without /Root breaks the document tree for every
+    // conforming reader; refuse instead of writing a damaged carrier (auto
+    // strategy falls back to the lossless EOF overlay).
+    if root_ref.is_none() {
+        return Err(StrHideError::CorruptedData(
+            "cannot locate /Root reference in PDF tail; incremental update would break the document tree".into(),
+        ));
     }
 
     Ok(PdfTrailerInfo {
         eof_offset,
         prev_startxref,
-        new_obj_num: size_val,
+        new_obj_num,
         root_ref,
         info_ref,
     })
+}
+
+/// ASCII whitespace set shared with the Python implementation (`\s` in a
+/// bytes regex / `bytes.split()`): space, TAB, LF, VT, FF, CR.
+#[inline]
+fn is_pdf_ws(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C)
+}
+
+/// Read an optional whitespace run followed by a decimal digit run starting at
+/// `i`; returns the parsed u64 and the new position. The digit run stops at
+/// the first non-digit, so compact dictionaries such as `/Size 90/Root`
+/// yield 90. Returns `None` when no digits are present or the value exceeds
+/// u64 (mirroring the Python implementation's bound check).
+fn read_digits_after_ws(text: &str, i: &mut usize) -> Option<u64> {
+    let bytes = text.as_bytes();
+    while *i < bytes.len() && is_pdf_ws(bytes[*i]) {
+        *i += 1;
+    }
+    let start = *i;
+    while *i < bytes.len() && bytes[*i].is_ascii_digit() {
+        *i += 1;
+    }
+    if *i == start {
+        return None;
+    }
+    text[start..*i].parse::<u64>().ok()
+}
+
+/// Return the decimal number that directly follows `key` (after optional
+/// whitespace), if any.
+fn find_int_after(text: &str, key: &str) -> Option<u64> {
+    let mut pos = text.find(key)? + key.len();
+    read_digits_after_ws(text, &mut pos)
+}
+
+/// Parse `<digits> <ws+> <digits> <ws+> R` starting at `pos` (the end of a
+/// dictionary key such as `/Root`). The trailing `R` only needs to start the
+/// next token, so compact forms like `/Root 1 0 R/Info` parse correctly.
+fn parse_indirect_ref_after(text: &str, pos: usize) -> Option<(u64, u64)> {
+    let bytes = text.as_bytes();
+    let mut i = pos;
+    let num1 = read_digits_after_ws(text, &mut i)?;
+    let num2 = read_digits_after_ws(text, &mut i)?;
+    while i < bytes.len() && is_pdf_ws(bytes[i]) {
+        i += 1;
+    }
+    if i < bytes.len() && bytes[i] == b'R' {
+        Some((num1, num2))
+    } else {
+        None
+    }
+}
+
+/// Find an indirect reference such as `/Root 12 0 R` in PDF text and return
+/// its normalized `"12 0 R"` body. `take_last` selects the final valid match
+/// (the most recent incremental update carries the effective reference);
+/// otherwise the first match wins (single trailer dictionary).
+fn find_indirect_ref(text: &str, key: &str, take_last: bool) -> Option<String> {
+    let key_len = key.len();
+    let mut found = None;
+    let mut search_from = 0;
+    while let Some(rel) = text[search_from..].find(key) {
+        let after_key = search_from + rel + key_len;
+        if let Some((num1, num2)) = parse_indirect_ref_after(text, after_key) {
+            found = Some(format!("{num1} {num2} R"));
+            if !take_last {
+                return found;
+            }
+        }
+        search_from = after_key;
+    }
+    found
+}
+
+/// Scan PDF text for `N G obj` definitions and return the highest object
+/// number found. Used for xref-stream PDFs that have no `trailer` keyword.
+/// The accepted shape is exactly `<digits> <ws+> <digits> <ws+> obj`, matching
+/// the Python implementation.
+fn scan_max_object_number(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    let mut max_obj: Option<u64> = None;
+    let mut search_from = 0;
+    while let Some(rel) = text[search_from..].find("obj") {
+        let obj_end = search_from + rel + 3;
+        let mut j = search_from + rel;
+        let mut obj_num: Option<u64> = None;
+
+        // whitespace before "obj" (at least one byte)
+        let ws1 = j;
+        while j > 0 && is_pdf_ws(bytes[j - 1]) {
+            j -= 1;
+        }
+        if j < ws1 {
+            // generation digits (at least one)
+            let gen_end = j;
+            while j > 0 && bytes[j - 1].is_ascii_digit() {
+                j -= 1;
+            }
+            if j < gen_end {
+                // whitespace before generation (at least one byte)
+                let ws2 = j;
+                while j > 0 && is_pdf_ws(bytes[j - 1]) {
+                    j -= 1;
+                }
+                if j < ws2 {
+                    // object number digits (at least one)
+                    let num_end = j;
+                    while j > 0 && bytes[j - 1].is_ascii_digit() {
+                        j -= 1;
+                    }
+                    if j < num_end {
+                        obj_num = text[j..num_end].parse::<u64>().ok();
+                    }
+                }
+            }
+        }
+        if let Some(n) = obj_num {
+            max_obj = Some(max_obj.map_or(n, |m: u64| m.max(n)));
+        }
+        search_from = obj_end;
+    }
+    max_obj
 }
 
 pub struct PdfAdapter;
