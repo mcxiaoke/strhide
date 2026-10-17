@@ -7,9 +7,11 @@ import json
 import os
 import shutil
 import stat
+import struct
 import sys
 import time
 import unicodedata
+import zlib
 from typing import Any, BinaryIO, Dict, Optional, Tuple
 
 from strhide.core.crypto import (
@@ -318,6 +320,14 @@ def write_carrier(
         f.seek(actual_ube_offset + ube_total_size - 24)
         f.write(final_trailer.pack())
 
+        # For PNG chunk: recalculate chunk CRC over (chunk_type + patched_ube_data)
+        if adapter.format_name() == "PNG" and selected_strategy == "chunk":
+            f.seek(actual_ube_offset - 4)
+            chunk_type_and_data = f.read(4 + ube_total_size)
+            new_crc = zlib.crc32(chunk_type_and_data) & 0xFFFFFFFF
+            f.seek(actual_ube_offset + ube_total_size)
+            f.write(struct.pack(">I", new_crc))
+
     # 11. Self-verification check
     with open(tmp_target, "rb") as f:
         loc = adapter.locate(f, expected_trailer_magic=trailer_magic if stealth else None)
@@ -350,6 +360,13 @@ def write_carrier(
             strategy_note = f"Payload ({ube_total_size:,} bytes) exceeded JPEG single segment limit (64KB); automatically fell back to EOF overlay."
         elif selected_strategy == "eof":
             strategy_note = "Appended after JPEG EOI marker (EOF overlay)."
+    elif adapter.format_name() == "PNG":
+        if selected_strategy == "chunk":
+            strategy_note = "Embedded into compliant PNG private ancillary chunk 'prIv' before IEND (0 trailing bytes)."
+        elif selected_strategy == "eof" and strategy == "auto":
+            strategy_note = f"Payload ({ube_total_size:,} bytes) exceeded PNG chunk limit (2GB); automatically fell back to EOF overlay."
+        elif selected_strategy == "eof":
+            strategy_note = "Appended after PNG IEND (EOF overlay)."
 
     return {
         "status": "success",

@@ -1,4 +1,4 @@
-"""PNG format adapter for strhide with ancillary chunk and dirty-tail tolerance."""
+"""PNG format adapter for strhide with neutral ancillary chunk and dirty-tail tolerance."""
 
 from __future__ import annotations
 
@@ -12,7 +12,9 @@ from strhide.errors import CorruptedDataError, UnsupportedFormatError
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 IEND_FULL = b"\x00\x00\x00\x00IEND\xaeB`\x82"
-CHUNK_STEG = b"stEg"
+CHUNK_PRIV = b"prIv"  # Standard-compliant neutral private ancillary chunk
+SUPPORTED_CHUNKS = (b"prIv", b"stEg")  # Supports both new prIv and legacy stEg
+PNG_MAX_CHUNK_LEN = 0x7FFFFFFF  # 2GB
 
 
 def find_iend_offset(stream: BinaryIO) -> Tuple[int, int]:
@@ -35,7 +37,7 @@ def find_iend_offset(stream: BinaryIO) -> Tuple[int, int]:
 
 
 class PngAdapter(HostAdapter):
-    """Adapter for PNG images injecting private ancillary 'stEg' chunk."""
+    """Adapter for PNG images injecting private ancillary 'prIv' (or legacy 'stEg') chunk."""
 
     def format_name(self) -> str:
         return "PNG"
@@ -53,6 +55,9 @@ class PngAdapter(HostAdapter):
         return ["chunk", "eof"]
 
     def choose_auto_strategy(self, stream: BinaryIO, ube_size: int) -> str:
+        # Best-effort: use chunk for <= 2GB, fallback to eof if exceeded
+        if ube_size > PNG_MAX_CHUNK_LEN:
+            return "eof"
         return "chunk"
 
     def inject(
@@ -69,6 +74,16 @@ class PngAdapter(HostAdapter):
         if strategy != "chunk":
             raise UnsupportedFormatError(f"Strategy '{strategy}' not supported by PNG adapter")
 
+        ube_in.seek(0, 2)
+        ube_size = ube_in.tell()
+        ube_in.seek(0)
+
+        if ube_size > PNG_MAX_CHUNK_LEN:
+            raise UnsupportedFormatError(
+                f"Payload size ({ube_size:,} bytes) exceeds PNG chunk maximum capacity (2GB). "
+                f"Please specify --strategy eof."
+            )
+
         iend_offset, total_size = find_iend_offset(host_in)
 
         # 1. Write everything before IEND
@@ -81,13 +96,8 @@ class PngAdapter(HostAdapter):
 
         inject_offset = out.tell()
 
-        # 2. Prepare stEg chunk
-        ube_in.seek(0, 2)
-        ube_size = ube_in.tell()
-        ube_in.seek(0)
-
-        # Calculate CRC over chunk_type + chunk_data
-        crc_val = zlib.crc32(CHUNK_STEG)
+        # 2. Prepare prIv chunk
+        crc_val = zlib.crc32(CHUNK_PRIV)
         while True:
             chunk = ube_in.read(64 * 1024)
             if not chunk:
@@ -95,8 +105,8 @@ class PngAdapter(HostAdapter):
             crc_val = zlib.crc32(chunk, crc_val)
         crc_val &= 0xFFFFFFFF
 
-        # Write chunk length and type
-        out.write(struct.pack(">I4s", ube_size, CHUNK_STEG))
+        # Write chunk length and type (prIv)
+        out.write(struct.pack(">I4s", ube_size, CHUNK_PRIV))
         # Write chunk data (UBE)
         ube_in.seek(0)
         while True:
@@ -129,7 +139,7 @@ class PngAdapter(HostAdapter):
         if magic != PNG_MAGIC:
             return None
 
-        # Check chunk strategy first
+        # Check chunk strategy first (supporting both prIv and legacy stEg)
         while True:
             hdr = stego_in.read(8)
             if len(hdr) < 8:
@@ -137,7 +147,7 @@ class PngAdapter(HostAdapter):
             length, chunk_type = struct.unpack(">I4s", hdr)
             chunk_data_offset = stego_in.tell()
 
-            if chunk_type == CHUNK_STEG:
+            if chunk_type in SUPPORTED_CHUNKS:
                 return chunk_data_offset, length, "chunk"
 
             if chunk_type == b"IEND":
@@ -183,7 +193,7 @@ class PngAdapter(HostAdapter):
         if stego_in.read(8) != PNG_MAGIC:
             return False, "Not a valid PNG file"
 
-        has_steg = False
+        found_chunk = None
         has_iend = False
         while True:
             hdr = stego_in.read(8)
@@ -192,8 +202,8 @@ class PngAdapter(HostAdapter):
             length, chunk_type = struct.unpack(">I4s", hdr)
             data_start = stego_in.tell()
 
-            if chunk_type == CHUNK_STEG:
-                has_steg = True
+            if chunk_type in SUPPORTED_CHUNKS:
+                found_chunk = chunk_type.decode("latin-1", errors="replace")
 
             stego_in.seek(data_start + length)
             crc_bytes = stego_in.read(4)
@@ -206,4 +216,6 @@ class PngAdapter(HostAdapter):
 
         if not has_iend:
             return False, "PNG missing IEND chunk"
-        return True, f"PNG structure valid (stEg chunk present: {has_steg})"
+        
+        detail = f"private chunk '{found_chunk}' present" if found_chunk else "clean standard chunks"
+        return True, f"PNG structure valid ({detail})"
