@@ -13,6 +13,7 @@ STRATEGY_MAP = {
     "pre_cd_inject": 4,
     "app_segment": 5,
     "incremental": 6,
+    "pe_overlay": 7,
 }
 
 REVERSE_STRATEGY_MAP = {v: k for k, v in STRATEGY_MAP.items()}

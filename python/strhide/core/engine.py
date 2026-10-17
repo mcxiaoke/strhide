@@ -389,6 +389,12 @@ def write_carrier(
             strategy_note = "ZIP Central Directory could not be safely adjusted; automatically fell back to EOF overlay."
         elif selected_strategy == "eof":
             strategy_note = "Appended after ZIP EOCD (EOF overlay)."
+    elif adapter.format_name() == "PE":
+        if selected_strategy == "pe_overlay":
+            strategy_note = "Embedded into Windows PE image overlay (executable code and PE sections remain 100% intact)."
+        elif selected_strategy == "eof":
+            strategy_note = "Appended after PE executable EOF (EOF overlay)."
+
 
     return {
         "status": "success",

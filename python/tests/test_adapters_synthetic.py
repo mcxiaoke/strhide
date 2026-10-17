@@ -236,3 +236,92 @@ def test_generic_eof_lifecycle():
         res_rm = remove_carrier(carrier)
         assert res_rm["verified_identical"] is True
         assert compute_file_sha256(carrier) == orig_sha
+
+
+def create_minimal_pe() -> bytes:
+    """Create a minimal valid unsigned PE32+ (x64) executable."""
+    dos = bytearray(64)
+    dos[0:2] = b"MZ"
+    dos[0x3C:0x40] = struct.pack("<I", 64)
+    pe_sig = b"PE\x00\x00"
+    coff = struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, 240, 0x0022)
+    opt_std = struct.pack("<HBBIIIII", 0x20B, 1, 0, 512, 0, 0, 0x1000, 0x1000)
+    opt_win = struct.pack(
+        "<QIIHHHHHHIIIIHHQQQQII",
+        0x140000000,
+        4096,
+        512,
+        6,
+        0,
+        0,
+        0,
+        6,
+        0,
+        0,
+        8192,
+        512,
+        0,
+        3,
+        0,
+        0x100000,
+        0x1000,
+        0x100000,
+        0x1000,
+        0,
+        16,
+    )
+    data_dirs = b"\x00" * 128
+    opt = opt_std + opt_win + data_dirs
+    sec = struct.pack("<8sIIIIIIHHI", b".text\x00\x00\x00", 64, 0x1000, 512, 512, 0, 0, 0, 0, 0x60000020)
+    headers = bytes(dos) + pe_sig + coff + opt + sec
+    pad = b"\x00" * (512 - len(headers))
+    headers_padded = headers + pad
+    raw_data = b"\x90" * 64 + b"\x00" * (512 - 64)
+    return headers_padded + raw_data
+
+
+def test_pe_lifecycle():
+    pe_bytes = create_minimal_pe()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        carrier = os.path.join(tmpdir, "test.exe")
+        with open(carrier, "wb") as f:
+            f.write(pe_bytes)
+
+        orig_sha = compute_file_sha256(carrier)
+        secret_text = "Top Secret inside Windows PE overlay!"
+
+        # 1. Write (auto selects pe_overlay)
+        res_w = write_carrier(carrier, data_text=secret_text, password="Pass123!PE")
+        assert res_w["format"] == "PE"
+        assert res_w["strategy"] == "pe_overlay"
+        assert "PE image overlay" in res_w["strategy_note"]
+
+        # 2. Inspect
+        res_i = inspect_carrier(carrier, password="Pass123!PE")
+        assert res_i["has_hidden_data"] is True
+        assert res_i["format"] == "PE"
+
+        # 3. Verify
+        res_v = verify_carrier(carrier, password="Pass123!PE")
+        assert res_v["level1_host"]["ok"] is True
+        assert res_v["level2_envelope"]["ok"] is True
+        assert res_v["level3_crypto"]["ok"] is True
+
+        # 4. Read
+        res_r = read_carrier(carrier, password="Pass123!PE")
+        assert res_r["data"].decode("utf-8") == secret_text
+
+        # 5. Remove & verify 100% bit match
+        res_rm = remove_carrier(carrier)
+        assert res_rm["verified_identical"] is True
+        assert compute_file_sha256(carrier) == orig_sha
+
+        # 6. Explicit eof strategy test
+        res_w2 = write_carrier(carrier, data_text=secret_text, password="Pass123!PE", strategy="eof")
+        assert res_w2["strategy"] == "eof"
+        res_r2 = read_carrier(carrier, password="Pass123!PE")
+        assert res_r2["data"].decode("utf-8") == secret_text
+        res_rm2 = remove_carrier(carrier)
+        assert res_rm2["verified_identical"] is True
+        assert compute_file_sha256(carrier) == orig_sha
+

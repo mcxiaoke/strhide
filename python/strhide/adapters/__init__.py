@@ -5,6 +5,7 @@ from strhide.adapters.eof import EofAdapter
 from strhide.adapters.jpeg import JpegAdapter
 from strhide.adapters.mp4 import Mp4Adapter
 from strhide.adapters.pdf import PdfAdapter
+from strhide.adapters.pe import PeAdapter
 from strhide.adapters.png import PngAdapter
 from strhide.adapters.zip import ZipAdapter
 
@@ -15,6 +16,7 @@ ADAPTERS: list[HostAdapter] = [
     Mp4Adapter(),
     ZipAdapter(),
     PdfAdapter(),
+    PeAdapter(),
     EofAdapter(),
 ]
 
@@ -25,6 +27,8 @@ __all__ = [
     "Mp4Adapter",
     "ZipAdapter",
     "PdfAdapter",
+    "PeAdapter",
     "EofAdapter",
     "ADAPTERS",
 ]
+
