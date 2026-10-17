@@ -2,6 +2,16 @@
 name = "strhide"
 version = "0.1.0"
 edition = "2024"
+description = "Smart format-preserving lossless data hiding library and CLI (PNG/JPEG/MP4/ZIP/PDF/PE carriers, AES-256-GCM, stealth mode)"
+license = "Apache-2.0"
+authors = ["mcxiaoke <mcxiaoke@live.com>"]
+repository = "https://github.com/mcxiaoke/strhide"
+homepage = "https://github.com/mcxiaoke/strhide"
+documentation = "https://docs.rs/strhide"
+readme = "README.md"
+keywords = ["steganography", "stego", "data-hiding", "security", "lossless"]
+categories = ["cryptography", "multimedia", "command-line-utilities"]
+exclude = ["tests/"]
 
 [lib]
 name = "strhide"
