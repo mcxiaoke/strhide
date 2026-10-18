@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -6,8 +7,8 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::config::{self, FileConfig};
 use crate::engine::{
-    PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
-    write_carrier,
+    PayloadSource, RemoveResult, WriteOptions, WriteResult, inspect_carrier, read_carrier,
+    remove_carrier, verify_carrier, write_carrier,
 };
 use crate::errors::StrHideError;
 use crate::router::{ADAPTERS, find_adapter_or_reject};
@@ -45,8 +46,15 @@ pub enum Commands {
 
 #[derive(Args, Debug)]
 pub struct WriteArgs {
-    #[arg(short = 'c', long = "carrier", required = true)]
-    pub carrier: PathBuf,
+    #[arg(
+        short = 'c',
+        long = "carrier",
+        required = true,
+        num_args = 1..,
+        value_name = "CARRIER",
+        help = "Carrier file(s). List several to embed the same payload into each."
+    )]
+    pub carrier: Vec<PathBuf>,
 
     #[arg(short = 'd', long = "data")]
     pub data: Option<PathBuf>,
@@ -79,6 +87,7 @@ pub struct WriteArgs {
     pub hint: Option<String>,
 
     #[arg(
+        short = 's',
         long = "strategy",
         help = "Hiding strategy (auto|ask|<name>; default: auto or config file)"
     )]
@@ -117,8 +126,15 @@ pub struct ReadArgs {
 
 #[derive(Args, Debug)]
 pub struct RemoveArgs {
-    #[arg(short = 'c', long = "carrier", required = true)]
-    pub carrier: PathBuf,
+    #[arg(
+        short = 'c',
+        long = "carrier",
+        required = true,
+        num_args = 1..,
+        value_name = "CARRIER",
+        help = "Carrier file(s). List several to strip each one."
+    )]
+    pub carrier: Vec<PathBuf>,
 
     #[arg(short = 'o', long = "output")]
     pub output: Option<PathBuf>,
@@ -308,16 +324,30 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
         true,
     )?;
 
+    let multi = args.carrier.len() > 1;
+    // A single file path cannot name every output, so with several carriers
+    // -o must be an existing directory.
+    let output_dir = batch_output_dir(args.output.as_deref(), multi, "writing to")?;
+
     let mut strategy = args
         .strategy
         .clone()
         .or_else(|| cfg.strategy.clone())
         .unwrap_or_else(|| "auto".to_string());
     if strategy == "ask" {
-        let mut cf = File::open(&args.carrier)?;
-        let adapter = find_adapter_or_reject(&mut cf, &args.carrier.display().to_string())?;
+        if multi {
+            // The prompt answers for one carrier; asking once per file is
+            // almost never what a batch user means, so refuse up front rather
+            // than interleaving prompts with writes.
+            return Err(StrHideError::General(
+                "Interactive strategy selection (--strategy ask) cannot be combined with multiple carriers. Use --strategy auto or name a strategy explicitly.".into(),
+            ));
+        }
+        let carrier = &args.carrier[0];
+        let mut cf = File::open(carrier)?;
+        let adapter = find_adapter_or_reject(&mut cf, &carrier.display().to_string())?;
         let strats = adapter.supported_strategies();
-        println!("Available strategies for '{}':", args.carrier.display());
+        println!("Available strategies for '{}':", carrier.display());
         for (idx, s) in strats.iter().enumerate() {
             println!("  [{}] {s}", idx + 1);
         }
@@ -382,43 +412,43 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
         ));
     }
 
+    // Buffer the payload once. Sources are resolved here rather than per
+    // carrier because --stdin can only be read once, and because this keeps the
+    // stored filename / is_file flags byte-identical to single-carrier writes.
+    let (payload, payload_name, payload_is_file) = payload_source.into_buffered()?;
+
+    // Fail before the first carrier is modified when a batch is obviously bad
+    // (missing/unrecognized files, duplicate targets).
+    if multi {
+        preflight_batch(&args.carrier, output_dir)?;
+    }
+
     let hint = args.hint.clone().or_else(|| cfg.hint.clone());
-    let res = write_carrier(
-        &args.carrier,
-        payload_source,
-        &WriteOptions {
-            output_path: args.output.as_deref(),
-            password: password.as_deref(),
-            password_hint: hint.as_deref(),
-            strategy: &strategy,
-            stealth,
-            preserve_time: args.preserve_time && cfg.preserve_time.unwrap_or(true),
-            backup: !args.no_backup && cfg.backup.unwrap_or(true),
-        },
-    )?;
+    let preserve_time = args.preserve_time && cfg.preserve_time.unwrap_or(true);
+    let backup = !args.no_backup && cfg.backup.unwrap_or(true);
 
-    println!(
-        "[OK] Successfully embedded into '{}' using strategy '{}'.",
-        res.carrier, res.strategy
-    );
-    println!(
-        "     Payload: {} bytes -> UBE: {} bytes.",
-        res.raw_size, res.ube_size
-    );
-    if let Some(note) = res.strategy_note {
-        println!("     [STRATEGY] {note}");
-    }
-    if let Some(hint) = res.password_hint {
-        println!("     Password Hint: '{hint}'.");
-    }
-    if let Some(bak) = res.backup_file {
-        println!("     [BACKUP] Original carrier backed up to '{bak}'.");
-    }
-    if let Some(warn) = res.warning {
-        eprintln!("[WARNING] {warn}");
-    }
-
-    Ok(())
+    for_each_carrier(&args.carrier, |carrier| {
+        let output = carrier_output_path(carrier, args.output.as_deref(), output_dir)?;
+        let res = write_carrier(
+            carrier,
+            PayloadSource::Buffered {
+                data: &payload,
+                filename: &payload_name,
+                is_file: payload_is_file,
+            },
+            &WriteOptions {
+                output_path: output.as_deref(),
+                password: password.as_deref(),
+                password_hint: hint.as_deref(),
+                strategy: &strategy,
+                stealth,
+                preserve_time,
+                backup,
+            },
+        )?;
+        print_write_result(&res);
+        Ok(())
+    })
 }
 
 fn handle_read(args: ReadArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
@@ -493,27 +523,19 @@ fn handle_remove(args: RemoveArgs, cfg: &FileConfig) -> Result<(), StrHideError>
         false,
     )?;
 
-    let res = remove_carrier(
-        &args.carrier,
-        args.output.as_deref(),
-        password.as_deref(),
-        !args.no_backup,
-    )?;
-
-    println!(
-        "[OK] Successfully stripped hidden data from '{}'.",
-        res.carrier
-    );
-    println!("     Restored size: {} bytes.", res.restored_size);
-    println!(
-        "     SHA-256: {} (100% verified identical to original).",
-        res.restored_sha256
-    );
-    if let Some(bak) = res.backup_file {
-        println!("     [BACKUP] Prior carrier backed up to '{bak}'.");
+    let multi = args.carrier.len() > 1;
+    let output_dir = batch_output_dir(args.output.as_deref(), multi, "removing hidden data from")?;
+    if multi {
+        preflight_batch(&args.carrier, output_dir)?;
     }
+    let backup = !args.no_backup;
 
-    Ok(())
+    for_each_carrier(&args.carrier, |carrier| {
+        let output = carrier_output_path(carrier, args.output.as_deref(), output_dir)?;
+        let res = remove_carrier(carrier, output.as_deref(), password.as_deref(), backup)?;
+        print_remove_result(&res);
+        Ok(())
+    })
 }
 
 fn handle_inspect(args: InspectArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
@@ -655,6 +677,167 @@ fn handle_list_strategies(_args: ListStrategiesArgs) -> Result<(), StrHideError>
     println!("Carrier-dependent limits are measured by `strhide inspect -c <carrier>`.");
 
     Ok(())
+}
+
+/// Run `action` over every carrier.
+///
+/// Single-carrier runs keep the previous output and error reporting exactly:
+/// no summary line, and the caller still prints `[ERROR]` once. Multi-carrier
+/// runs stop at the first failure and report how far they got — each
+/// write/remove is atomic per carrier, so "N succeeded, M not attempted" is
+/// accurate, but earlier carriers stay modified.
+fn for_each_carrier<F>(carriers: &[PathBuf], mut action: F) -> Result<(), StrHideError>
+where
+    F: FnMut(&Path) -> Result<(), StrHideError>,
+{
+    let total = carriers.len();
+    let mut done = 0usize;
+    for carrier in carriers {
+        match action(carrier) {
+            Ok(()) => done += 1,
+            Err(e) => {
+                if total > 1 {
+                    eprintln!("[FAIL] {}", carrier.display());
+                    println!(
+                        "[SUMMARY] {done}/{total} carriers succeeded; {} not attempted.",
+                        total - done - 1
+                    );
+                }
+                return Err(e);
+            }
+        }
+    }
+    if total > 1 {
+        println!("[SUMMARY] {done}/{total} carriers succeeded.");
+    }
+    Ok(())
+}
+
+/// Batch `-o` rule: with more than one carrier the target must be an existing
+/// directory, because one file path cannot name several outputs. Single-carrier
+/// runs return `None` so `-o <file>` keeps its original meaning.
+fn batch_output_dir<'a>(
+    output: Option<&'a Path>,
+    multi: bool,
+    action: &str,
+) -> Result<Option<&'a Path>, StrHideError> {
+    let Some(path) = output else {
+        return Ok(None);
+    };
+    if !multi {
+        return Ok(None);
+    }
+    if !path.is_dir() {
+        return Err(StrHideError::General(format!(
+            "'-o {}' must be an existing directory when {action} multiple carriers",
+            path.display()
+        )));
+    }
+    Ok(Some(path))
+}
+
+/// Where one carrier's result goes: inside the batch directory (keeping the
+/// carrier's filename) or to the explicit single-file target.
+fn carrier_output_path(
+    carrier: &Path,
+    output: Option<&Path>,
+    output_dir: Option<&Path>,
+) -> Result<Option<PathBuf>, StrHideError> {
+    if let Some(dir) = output_dir {
+        let name = carrier.file_name().ok_or_else(|| {
+            StrHideError::General(format!(
+                "Cannot derive an output filename from '{}'",
+                carrier.display()
+            ))
+        })?;
+        return Ok(Some(dir.join(name)));
+    }
+    Ok(output.map(Path::to_path_buf))
+}
+
+/// Validate a whole batch before the first carrier is modified: every carrier
+/// must exist, be a regular file, be a supported format, and resolve to a unique
+/// output. Capacity limits and "already contains hidden data" can only be judged
+/// by the engine per carrier, so those still surface mid-run.
+fn preflight_batch(carriers: &[PathBuf], output_dir: Option<&Path>) -> Result<(), StrHideError> {
+    let mut seen_carriers = HashSet::new();
+    let mut seen_targets = HashSet::new();
+    for carrier in carriers {
+        if !carrier.exists() {
+            return Err(StrHideError::General(format!(
+                "Carrier file '{}' not found",
+                carrier.display()
+            )));
+        }
+        if carrier.is_dir() {
+            return Err(StrHideError::General(format!(
+                "'{}' is a directory, not a carrier file",
+                carrier.display()
+            )));
+        }
+        {
+            let mut f = File::open(carrier)?;
+            find_adapter_or_reject(&mut f, &carrier.display().to_string())?;
+        }
+        // canonicalize() only fails for paths that vanished after the existence
+        // check; falling back to the raw path is good enough for dedup.
+        let identity = std::fs::canonicalize(carrier).unwrap_or_else(|_| carrier.clone());
+        if !seen_carriers.insert(identity.clone()) {
+            return Err(StrHideError::General(format!(
+                "Carrier '{}' is listed more than once",
+                carrier.display()
+            )));
+        }
+        let target = match output_dir {
+            Some(dir) => carrier_output_path(carrier, None, Some(dir))?.unwrap_or(identity),
+            None => identity,
+        };
+        if !seen_targets.insert(target.clone()) {
+            return Err(StrHideError::General(format!(
+                "Two carriers would write to the same file '{}'. Rename one of them or keep them in separate directories.",
+                target.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn print_write_result(res: &WriteResult) {
+    println!(
+        "[OK] Successfully embedded into '{}' using strategy '{}'.",
+        res.carrier, res.strategy
+    );
+    println!(
+        "     Payload: {} bytes -> UBE: {} bytes.",
+        res.raw_size, res.ube_size
+    );
+    if let Some(note) = &res.strategy_note {
+        println!("     [STRATEGY] {note}");
+    }
+    if let Some(hint) = &res.password_hint {
+        println!("     Password Hint: '{hint}'.");
+    }
+    if let Some(bak) = &res.backup_file {
+        println!("     [BACKUP] Original carrier backed up to '{bak}'.");
+    }
+    if let Some(warn) = &res.warning {
+        eprintln!("[WARNING] {warn}");
+    }
+}
+
+fn print_remove_result(res: &RemoveResult) {
+    println!(
+        "[OK] Successfully stripped hidden data from '{}'.",
+        res.carrier
+    );
+    println!("     Restored size: {} bytes.", res.restored_size);
+    println!(
+        "     SHA-256: {} (100% verified identical to original).",
+        res.restored_sha256
+    );
+    if let Some(bak) = &res.backup_file {
+        println!("     [BACKUP] Prior carrier backed up to '{bak}'.");
+    }
 }
 
 /// Decode C-style escape sequences, mirroring the Python implementation

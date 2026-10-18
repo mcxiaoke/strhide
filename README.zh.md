@@ -22,6 +22,7 @@
 - **密码提示**——可选（≤ 1 KiB）的提示信息随信封存储，在需要输入密码时展示。
 - **默认安全**——完整性/签名拒绝检查会拒绝修改不宜触碰的文件（如签名二进制）；原地写入自动创建 `.bak` 备份；保留原始文件时间戳。
 - **TOML 配置**——`./strhide.toml` 或 `~/.strhide/config.toml` 提供默认值，显式命令行参数始终优先。
+- **批量载体**——`write` 与 `remove` 可一次处理多个文件：`write` 把同一份载荷分别写入每个载体，`remove` 逐个剥离，并打印本次运行的汇总（`read`/`inspect`/`verify` 仍只接受单个载体）。
 
 ## 安装
 
@@ -82,6 +83,10 @@ strhide verify -c report.pdf
 # 移除隐藏数据，还原原始宿主文件
 strhide remove -c photo.png
 
+# 批量：把同一份载荷分别写入多个载体（带 -o 时写入已存在的目录而非原地改写），再逐个剥离
+strhide write -c a.png b.png c.png -t "meet me at 7"
+strhide remove -c a.png b.png c.png
+
 # 列出全部格式、策略及其容量上限（静态参考表）
 strhide list-strategies
 ```
@@ -122,7 +127,7 @@ meta = inspect_carrier("carrier.png", password="pw")
 
 无法识别的格式将**被拒绝**：strhide 只修改显式支持的载体——向任意文件追加数据可能损坏该文件。`eof` 策略仍作为受支持格式内部的降级选项存在（如超大 PNG 载荷）。
 
-`strhide list -c <文件>` 可查看某载体实际支持的策略；`-s auto`（默认）自动选择，`-s ask` 交互式选择。
+`strhide inspect -c <文件>` 可查看某载体实际支持的策略及其容量上限；`-s auto`（默认）自动选择，`-s ask` 交互式选择（仅限单个载体）。
 
 ## 仓库结构
 

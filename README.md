@@ -22,6 +22,7 @@ Both implement the same envelope format, so a file written by one can be read, v
 - **Password hint** — an optional (≤ 1 KiB) hint is stored with the envelope and shown when the password is required.
 - **Safe by default** — integrity/signature rejection checks refuse to modify files that should not be touched (e.g. signed binaries), in-place writes create a `.bak` backup, and original file timestamps are preserved.
 - **TOML configuration** — `./strhide.toml` or `~/.strhide/config.toml` provides defaults; explicit CLI flags always win.
+- **Batch carriers** — `write` and `remove` accept several files at once: `write` embeds the same payload into each, `remove` strips each one, printing a per-run summary (`read`/`inspect`/`verify` still take exactly one carrier).
 
 ## Install
 
@@ -83,6 +84,11 @@ strhide verify -c report.pdf
 # Remove the hidden data, restoring the original host file
 strhide remove -c photo.png
 
+# Batch: embed the same payload into several carriers (with -o they are written
+# to an existing directory instead of in place), then strip them all again
+strhide write -c a.png b.png c.png -t "meet me at 7"
+strhide remove -c a.png b.png c.png
+
 # List every format, strategy, and its capacity limit (static reference)
 strhide list-strategies
 ```
@@ -123,7 +129,7 @@ All functions return a result dict and raise `StrHideError` subclasses on failur
 
 Unrecognized formats are **rejected**: strhide only modifies explicitly supported carriers, because appending data to an arbitrary file can corrupt it. The `eof` strategy remains available as a fallback *within* supported formats (e.g. oversized PNG payloads).
 
-`strhide list -c <file>` shows the exact strategies available for a given carrier; `-s auto` (default) picks a suitable one, and `-s ask` lists them interactively.
+`strhide inspect -c <file>` shows the exact strategies available for a given carrier along with their capacity limits; `-s auto` (default) picks a suitable one, and `-s ask` lists them interactively (single carrier only).
 
 ## Repository layout
 

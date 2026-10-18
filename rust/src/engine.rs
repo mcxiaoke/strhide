@@ -30,11 +30,60 @@ pub struct CarrierMetadata {
     pub created_at: u64,
 }
 
+/// Where the payload to hide comes from.
 pub enum PayloadSource<'a> {
+    /// Raw bytes, stored as a file named `payload.bin`.
     Bytes(&'a [u8]),
+    /// A file to read; its basename becomes the stored payload filename.
     File(&'a Path),
+    /// Text, NFC-normalized before being stored as a text payload.
     Text(&'a str),
+    /// Read to EOF from stdin. Only the first read yields data.
     Stdin,
+    /// Already-materialized bytes plus the exact metadata another source would
+    /// have produced, obtained from [`PayloadSource::into_buffered`]. Batched
+    /// writes buffer the payload once and reuse it for every carrier.
+    Buffered {
+        data: &'a [u8],
+        filename: &'a str,
+        is_file: bool,
+    },
+}
+
+impl<'a> PayloadSource<'a> {
+    /// Materialize this source into `(bytes, stored filename, is_file)`.
+    ///
+    /// This is the single place where a source turns into bytes, so `Text`
+    /// NFC normalization and `Stdin`'s read-once behavior cannot drift between
+    /// the one-carrier and many-carrier paths. `Stdin` is consumed by the first
+    /// call: buffer it once, then pass [`PayloadSource::Buffered`] per carrier.
+    pub fn into_buffered(self) -> Result<(Vec<u8>, String, bool), StrHideError> {
+        Ok(match self {
+            PayloadSource::Bytes(b) => (b.to_vec(), "payload.bin".to_string(), true),
+            PayloadSource::File(p) => {
+                let mut f = File::open(p)?;
+                let mut b = Vec::new();
+                f.read_to_end(&mut b)?;
+                let name = p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("payload.bin")
+                    .to_string();
+                (b, name, true)
+            }
+            PayloadSource::Text(t) => (normalize_nfc(t).into_bytes(), String::new(), false),
+            PayloadSource::Stdin => {
+                let mut b = Vec::new();
+                std::io::stdin().read_to_end(&mut b)?;
+                (b, String::new(), false)
+            }
+            PayloadSource::Buffered {
+                data,
+                filename,
+                is_file,
+            } => (data.to_vec(), filename.to_string(), is_file),
+        })
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -380,29 +429,7 @@ pub fn write_carrier(
     };
 
     // 4. Prepare data payload stream
-    let (payload_raw_bytes, filename, is_file) = match source {
-        PayloadSource::Bytes(b) => (b.to_vec(), "payload.bin".to_string(), true),
-        PayloadSource::File(p) => {
-            let mut f = File::open(p)?;
-            let mut b = Vec::new();
-            f.read_to_end(&mut b)?;
-            let name = p
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("payload.bin")
-                .to_string();
-            (b, name, true)
-        }
-        PayloadSource::Text(t) => {
-            let norm = normalize_nfc(t);
-            (norm.into_bytes(), String::new(), false)
-        }
-        PayloadSource::Stdin => {
-            let mut b = Vec::new();
-            std::io::stdin().read_to_end(&mut b)?;
-            (b, String::new(), false)
-        }
-    };
+    let (payload_raw_bytes, filename, is_file) = source.into_buffered()?;
 
     let raw_size = payload_raw_bytes.len() as u64;
     let raw_sha256 = {
