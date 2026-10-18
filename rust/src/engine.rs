@@ -20,7 +20,7 @@ use crate::envelope::{
 };
 use crate::errors::StrHideError;
 use crate::rejection::run_all_rejection_checks;
-use crate::router::{find_adapter, strategy_to_id};
+use crate::router::{find_adapter, find_adapter_or_reject, strategy_to_id};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CarrierMetadata {
@@ -348,7 +348,7 @@ pub fn write_carrier(
     // 3. Detect adapter & check existing envelope
     let (adapter, structural_warnings) = {
         let mut cf = File::open(carrier_path)?;
-        let adapter = find_adapter(&mut cf);
+        let adapter = find_adapter_or_reject(&mut cf, &carrier_path.display().to_string())?;
 
         // Reject carriers that already contain an envelope. A standard-magic
         // scan catches plain/standard-encrypted envelopes; when a password is
@@ -828,7 +828,7 @@ pub fn read_carrier(
     }
 
     let mut f = File::open(carrier_path)?;
-    let adapter = find_adapter(&mut f);
+    let adapter = find_adapter_or_reject(&mut f, &carrier_path.display().to_string())?;
 
     // Locate with password priority: when a password is supplied, the derived
     // stealth magic is tried first so stealth envelopes are found even when a
@@ -1013,7 +1013,7 @@ pub fn remove_carrier(
 
     {
         let mut cf = File::open(carrier_path)?;
-        let adapter = find_adapter(&mut cf);
+        let adapter = find_adapter_or_reject(&mut cf, &carrier_path.display().to_string())?;
 
         // Password-priority locate (see read_carrier): stealth envelopes are
         // found even when a standard-magic envelope also exists.
@@ -1071,8 +1071,9 @@ pub fn remove_carrier(
         // reproduce the recorded original. Envelopes must be removed in
         // reverse order of injection.
         let mut diagnosis = String::new();
-        if let Ok(mut rf) = File::open(&tmp_target) {
-            let r_adapter = find_adapter(&mut rf);
+        if let Ok(mut rf) = File::open(&tmp_target)
+            && let Some(r_adapter) = find_adapter(&mut rf)
+        {
             let remaining = r_adapter.locate(&mut rf, None).ok().flatten().or_else(|| {
                 password.and_then(|pwd| {
                     derive_stealth_magics(pwd, b"strhide-stealth-v1")
@@ -1138,7 +1139,7 @@ pub fn inspect_carrier(
     }
 
     let mut cf = File::open(carrier_path)?;
-    let adapter = find_adapter(&mut cf);
+    let adapter = find_adapter_or_reject(&mut cf, &carrier_path.display().to_string())?;
 
     // Password-priority locate (see read_carrier).
     let mut loc = None;
@@ -1257,7 +1258,7 @@ pub fn verify_carrier(
     }
 
     let mut cf = File::open(carrier_path)?;
-    let adapter = find_adapter(&mut cf);
+    let adapter = find_adapter_or_reject(&mut cf, &carrier_path.display().to_string())?;
 
     // Level 1: Host format integrity
     let (l1_ok, l1_msg) = adapter.verify_structure(&mut cf)?;

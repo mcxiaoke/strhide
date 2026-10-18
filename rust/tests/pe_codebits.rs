@@ -14,6 +14,7 @@ use strhide::engine::{
     PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
     write_carrier,
 };
+use strhide::errors::StrHideError;
 
 // --------------------------------------------------------------------------- helpers
 
@@ -405,25 +406,91 @@ fn strategy_registry_roundtrip() {
     assert_eq!(id_to_strategy(8), "pe_codebits");
 }
 
-/// Guard: a plain (non-PE) file is unaffected by the PE adapter changes.
+/// Unrecognized files must be rejected outright (no silent EOF fallback):
+/// appending an envelope to an arbitrary file can corrupt it.
 #[test]
-fn non_pe_carrier_unaffected() {
-    let dir = scratch("nonpe");
-    let carrier = dir.join("plain.bin");
-    let original = b"just some generic host bytes, not a PE at all".to_vec();
+fn unrecognized_carriers_are_rejected() {
+    let dir = scratch("reject_unknown");
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("generic.bin", b"just some generic host bytes, not a PE at all".to_vec()),
+        ("empty.bin", Vec::new()),
+        ("text.txt", b"plain text file
+with two lines
+".to_vec()),
+        ("gzip.gz", vec![0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03]),
+        ("elf.bin", vec![0x7F, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00]),
+    ];
+    for (name, bytes) in cases {
+        let carrier = dir.join(name);
+        fs::write(&carrier, &bytes).unwrap();
+        let out = dir.join(format!("{name}.steg"));
+
+        let write_err =
+            write_carrier(&carrier, PayloadSource::Text("x"), &write_opts(&out, "auto"))
+                .unwrap_err();
+        assert!(
+            matches!(write_err, StrHideError::UnsupportedFormat(_)),
+            "{name}: write should reject, got {write_err:?}"
+        );
+        assert!(
+            write_err.to_string().contains("not a supported carrier"),
+            "{name}: {write_err}"
+        );
+
+        // Explicit eof must not bypass the format check either.
+        let eof_err =
+            write_carrier(&carrier, PayloadSource::Text("x"), &write_opts(&out, "eof"))
+                .unwrap_err();
+        assert!(
+            matches!(eof_err, StrHideError::UnsupportedFormat(_)),
+            "{name}: explicit eof should still reject, got {eof_err:?}"
+        );
+
+        assert!(matches!(
+            read_carrier(&carrier, None, None).unwrap_err(),
+            StrHideError::UnsupportedFormat(_)
+        ), "{name}: read should reject");
+        assert!(matches!(
+            remove_carrier(&carrier, Some(&out), None, false).unwrap_err(),
+            StrHideError::UnsupportedFormat(_)
+        ), "{name}: remove should reject");
+        assert!(matches!(
+            inspect_carrier(&carrier, None).unwrap_err(),
+            StrHideError::UnsupportedFormat(_)
+        ), "{name}: inspect should reject");
+        assert!(matches!(
+            verify_carrier(&carrier, None).unwrap_err(),
+            StrHideError::UnsupportedFormat(_)
+        ), "{name}: verify should reject");
+
+        // The carrier must be left untouched.
+        assert_eq!(fs::read(&carrier).unwrap(), bytes, "{name}: carrier modified!");
+    }
+}
+
+/// The `eof` *strategy* still works on supported formats (only the format
+/// catch-all was removed; adapters keep delegating eof to EofAdapter).
+#[test]
+fn eof_strategy_still_works_on_supported_formats() {
+    let dir = scratch("eof_strategy");
+    let carrier = dir.join("c.png");
+    let original = include_bytes!("assets/minimal.png").to_vec();
     fs::write(&carrier, &original).unwrap();
 
-    let out = dir.join("plain.steg.bin");
+    let out = dir.join("c.steg.png");
     let result = write_carrier(
         &carrier,
-        PayloadSource::Text("eof"),
-        &write_opts(&out, "auto"),
+        PayloadSource::Text("eof on png"),
+        &write_opts(&out, "eof"),
     )
-    .expect("write");
-    assert_eq!(result.format, "GENERIC");
+    .expect("eof strategy on a supported carrier");
+    assert_eq!(result.strategy, "eof");
+    assert_eq!(result.format, "PNG");
+    assert!(fs::metadata(&out).unwrap().len() > original.len() as u64);
+
     let read = read_carrier(&out, None, None).expect("read");
-    assert_eq!(read.data, b"eof");
-    let restored = dir.join("plain.restored.bin");
+    assert_eq!(read.data, b"eof on png");
+    let restored = dir.join("c.restored.png");
     let rem = remove_carrier(&out, Some(&restored), None, false).expect("remove");
     assert!(rem.verified_identical);
     assert_eq!(fs::read(&restored).unwrap(), original);

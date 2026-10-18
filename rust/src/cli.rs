@@ -9,7 +9,7 @@ use crate::engine::{
     inspect_carrier, read_carrier, remove_carrier, verify_carrier, write_carrier, WriteOptions, PayloadSource,
 };
 use crate::errors::StrHideError;
-use crate::router::{find_adapter, list_all_strategies};
+use crate::router::find_adapter_or_reject;
 
 #[derive(Parser, Debug)]
 #[command(name = "strhide", version, about = "Smart multi-format lossless container data hiding tool")]
@@ -304,7 +304,8 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
         .unwrap_or_else(|| "auto".to_string());
     if strategy == "ask" {
         let mut cf = File::open(&args.carrier)?;
-        let strats = list_all_strategies(&mut cf);
+        let adapter = find_adapter_or_reject(&mut cf, &args.carrier.display().to_string())?;
+        let strats = adapter.supported_strategies();
         println!("Available strategies for '{}':", args.carrier.display());
         for (idx, s) in strats.iter().enumerate() {
             println!("  [{}] {s}", idx + 1);
@@ -589,7 +590,7 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig) -> Result<i32, StrHideError
 
 fn handle_list_strategies(args: ListStrategiesArgs) -> Result<(), StrHideError> {
     let mut cf = File::open(&args.carrier)?;
-    let adapter = find_adapter(&mut cf);
+    let adapter = find_adapter_or_reject(&mut cf, &args.carrier.display().to_string())?;
     let strats = adapter.supported_strategies();
 
     println!(

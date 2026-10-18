@@ -94,8 +94,9 @@ meta = inspect_carrier("carrier.png", password="pw")
 | MP4 | ✓ | free/uuid box 注入 |
 | ZIP | ✓ | 中央目录之前插入条目 |
 | PDF | ✓ | 增量更新 / 对象注入 |
-| Windows PE（exe/dll） | ✓ | overlay 数据 |
-| 其他任意文件 | EOF 兜底 | 追加在宿主内容之后 |
+| Windows PE（exe/dll） | ✓ | `pe_codebits` 指令编码信道（文件尺寸不变）或 overlay 数据 |
+
+无法识别的格式将**被拒绝**：strhide 只修改显式支持的载体——向任意文件追加数据可能损坏该文件。`eof` 策略仍作为受支持格式内部的降级选项存在（如超大 PNG 载荷）。
 
 `strhide list -c <文件>` 可查看某载体实际支持的策略；`-s auto`（默认）自动选择，`-s ask` 交互式选择。
 

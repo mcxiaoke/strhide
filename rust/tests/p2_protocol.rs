@@ -43,11 +43,18 @@ fn make_pdf_without_root() -> Vec<u8> {
     b"%PDF-1.5\n1 0 obj\n<< /Type /Foo >>\nendobj\nstartxref\n9\n%%EOF\n".to_vec()
 }
 
+/// Minimal valid 1x1 PNG (IHDR + IDAT + IEND, CRCs valid). Used wherever a
+/// test needs a *supported* carrier for the eof strategy: unrecognized files
+/// are rejected by design, so generic byte strings are no longer carriers.
+fn make_minimal_png() -> Vec<u8> {
+    include_bytes!("assets/minimal.png").to_vec()
+}
+
 /// Write a plaintext EOF-strategy envelope and return (output path, ube offset).
 fn write_eof_envelope(dir: &Path, name: &str) -> (PathBuf, u64) {
-    let carrier = dir.join(format!("{name}.bin"));
+    let carrier = dir.join(format!("{name}.png"));
     let out = dir.join(format!("{name}.out"));
-    fs::write(&carrier, b"generic host file contents for eof strategy").unwrap();
+    fs::write(&carrier, make_minimal_png()).unwrap();
     write_carrier(
         &carrier,
         PayloadSource::Text("x"),

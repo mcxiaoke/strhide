@@ -1,10 +1,19 @@
 //! Format sniffing and strategy routing module.
 
 use crate::adapters::{
-    HostAdapter, SeekRead, eof::EofAdapter, jpeg::JpegAdapter, mp4::Mp4Adapter, pdf::PdfAdapter,
-    pe::PeAdapter, png::PngAdapter, zip::ZipAdapter,
+    HostAdapter, SeekRead, jpeg::JpegAdapter, mp4::Mp4Adapter, pdf::PdfAdapter, pe::PeAdapter,
+    png::PngAdapter, zip::ZipAdapter,
 };
+use crate::errors::StrHideError;
 
+/// Formats strhide explicitly recognizes as carriers.
+///
+/// `EofAdapter` is deliberately NOT in this list: it remains the strategy
+/// provider that PNG/JPEG/MP4/ZIP/PDF/PE delegate their `eof` strategy to,
+/// but it is no longer a format catch-all. Unrecognized files are rejected
+/// instead of being silently appended to, because appending an envelope to
+/// an arbitrary file can corrupt it (trailing checksums, embedded offsets,
+/// signed containers, ...).
 pub static ADAPTERS: &[&dyn HostAdapter] = &[
     &PngAdapter,
     &JpegAdapter,
@@ -12,8 +21,58 @@ pub static ADAPTERS: &[&dyn HostAdapter] = &[
     &ZipAdapter,
     &PdfAdapter,
     &PeAdapter,
-    &EofAdapter,
 ];
+
+/// Detects the carrier format, or `None` when the stream is not a supported
+/// format. Each adapter's `detect` restores the stream position.
+pub fn find_adapter(reader: &mut dyn SeekRead) -> Option<&'static dyn HostAdapter> {
+    for adapter in ADAPTERS {
+        if adapter.detect(reader) {
+            return Some(*adapter);
+        }
+    }
+    None
+}
+
+/// Like [`find_adapter`], but produces a user-facing rejection error for
+/// unrecognized files. `carrier_display` is used in the message only.
+pub fn find_adapter_or_reject(
+    reader: &mut dyn SeekRead,
+    carrier_display: &str,
+) -> Result<&'static dyn HostAdapter, StrHideError> {
+    if let Some(adapter) = find_adapter(reader) {
+        return Ok(adapter);
+    }
+    // Best-effort magic hint: the first bytes make "why was my file rejected?"
+    // answerable without a hex editor.
+    let start = reader.stream_position().unwrap_or(0);
+    let mut magic = [0u8; 4];
+    let hint = if reader.seek(std::io::SeekFrom::Start(0)).is_ok()
+        && reader.read_exact(&mut magic).is_ok()
+    {
+        format!(
+            " (file starts with {})",
+            magic
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    } else {
+        String::new()
+    };
+    let _ = reader.seek(std::io::SeekFrom::Start(start));
+    let supported = ADAPTERS
+        .iter()
+        .map(|a| a.format_name())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(StrHideError::UnsupportedFormat(format!(
+        "'{carrier_display}' is not a supported carrier format{hint}. Supported formats: \
+         {supported}. strhide only modifies explicitly supported formats and refuses to \
+         alter unrecognized files."
+    )))
+}
 
 pub fn strategy_to_id(strategy: &str) -> u8 {
     match strategy {
@@ -41,18 +100,4 @@ pub fn id_to_strategy(id: u8) -> &'static str {
         8 => "pe_codebits",
         _ => "eof",
     }
-}
-
-pub fn find_adapter(reader: &mut dyn SeekRead) -> &'static dyn HostAdapter {
-    for adapter in ADAPTERS {
-        if adapter.detect(reader) {
-            return *adapter;
-        }
-    }
-    &EofAdapter
-}
-
-pub fn list_all_strategies(reader: &mut dyn SeekRead) -> Vec<&'static str> {
-    let adapter = find_adapter(reader);
-    adapter.supported_strategies()
 }

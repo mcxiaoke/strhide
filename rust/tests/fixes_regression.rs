@@ -8,6 +8,14 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// Minimal valid 1x1 PNG (IHDR + IDAT + IEND, CRCs valid). Used wherever a
+/// test needs a *supported* carrier for the eof strategy: unrecognized files
+/// are rejected by design, so generic byte strings are no longer carriers.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn make_minimal_png() -> Vec<u8> {
+    include_bytes!("assets/minimal.png").to_vec()
+}
+
 use rand::RngExt;
 
 use strhide::adapters::zip::find_eocd_offset;
@@ -629,8 +637,8 @@ fn chunk_len_upper_bound_enforced() {
 fn permissions_preserved_on_write() {
     use std::os::unix::fs::PermissionsExt;
     let dir = scratch("perm");
-    let carrier = dir.join("c.bin");
-    fs::write(&carrier, b"payload-carrier").unwrap();
+    let carrier = dir.join("c.png");
+    fs::write(&carrier, make_minimal_png()).unwrap();
     fs::set_permissions(&carrier, fs::Permissions::from_mode(0o755)).unwrap();
     let stego = dir.join("s.bin");
     write_carrier_file(&carrier, PayloadSource::Text("x"), None, "auto", false, &stego);

@@ -100,6 +100,13 @@ fn make_zip_with_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
     out
 }
 
+/// Minimal valid 1x1 PNG (IHDR + IDAT + IEND, CRCs valid). Used wherever a
+/// test needs a *supported* carrier for the eof strategy: unrecognized files
+/// are rejected by design, so generic byte strings are no longer carriers.
+fn make_minimal_png() -> Vec<u8> {
+    include_bytes!("assets/minimal.png").to_vec()
+}
+
 fn patch_header_field(out: &std::path::Path, ube_offset: u64, field_offset: u64, bytes: &[u8]) {
     let mut f = fs::OpenOptions::new().read(true).write(true).open(out).unwrap();
     f.seek(SeekFrom::Start(ube_offset + field_offset)).unwrap();
@@ -138,9 +145,9 @@ fn verify_exit_code_zero_for_valid_carrier() {
 #[test]
 fn verify_exit_code_one_when_envelope_header_invalid() {
     let dir = scratch("verify_exit_l2");
-    let carrier = dir.join("c.bin");
-    let out = dir.join("o.bin");
-    fs::write(&carrier, b"generic host file contents for eof strategy").unwrap();
+    let carrier = dir.join("c.png");
+    let out = dir.join("o.png");
+    fs::write(&carrier, make_minimal_png()).unwrap();
     write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
