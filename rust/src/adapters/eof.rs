@@ -1,5 +1,5 @@
 use std::io::{SeekFrom, Write};
-use crate::adapters::{HostAdapter, SeekRead, SeekWrite};
+use crate::adapters::{HostAdapter, SeekRead, SeekWrite, StrategyCapacity};
 use crate::envelope::{EnvelopeHeader, EnvelopeTrailer};
 use crate::errors::StrHideError;
 
@@ -20,6 +20,16 @@ impl HostAdapter for EofAdapter {
 
     fn choose_auto_strategy(&self, _reader: &mut dyn SeekRead, _ube_size: u64) -> &'static str {
         "eof"
+    }
+
+    fn strategy_capacities(&self, _reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
+        vec![StrategyCapacity {
+            strategy: "eof".into(),
+            capacity_bytes: None,
+            available: true,
+            limit: "unlimited (file grows)".into(),
+            note: Some("appended at file EOF".into()),
+        }]
     }
 
     fn inject(

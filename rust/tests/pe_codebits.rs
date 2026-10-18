@@ -506,3 +506,123 @@ fn synthetic_carrier_shape() {
     // .text starts at 0x400 with the instrumentable pattern.
     assert_eq!(&img[0x400..0x400 + 4], &[0x89, 0xD8, 0x89, 0xCA]);
 }
+
+// --------------------------------------------------------------------------- capacity reporting
+
+/// `inspect` reports an exact `pe_codebits` capacity for a capable carrier and
+/// keeps the strategies in recommended priority order.
+#[test]
+fn inspect_reports_exact_codebits_capacity() {
+    let dir = scratch("capacity_pe");
+    let carrier = dir.join("cap.exe");
+    fs::write(&carrier, make_pe(0x8664, 0x20B, 0x3000, false)).unwrap();
+
+    let res = inspect_carrier(&carrier, None).expect("inspect");
+    assert_eq!(res.format, "PE");
+    assert!(!res.has_hidden_data);
+
+    assert_eq!(
+        res.strategies
+            .iter()
+            .map(|c| c.strategy.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pe_codebits", "pe_overlay", "eof"],
+        "priority order must match supported_strategies"
+    );
+    let codebits = &res.strategies[0];
+    assert!(codebits.available);
+    let cap = codebits.capacity_bytes.expect("measured capacity");
+    assert!(cap >= 136, "capable carrier must hold at least a bare envelope");
+    assert!(codebits.limit.contains("file size unchanged"));
+
+    // The reported bound must admit an actual write: a short payload goes
+    // through pe_codebits and its envelope stays inside the reported capacity.
+    let out = dir.join("cap.steg.exe");
+    let written = write_carrier(
+        &carrier,
+        PayloadSource::Text("fits"),
+        &write_opts(&out, "auto"),
+    )
+    .expect("write");
+    assert_eq!(written.strategy, "pe_codebits");
+    assert!(
+        written.ube_size <= cap,
+        "envelope {} B exceeded reported capacity {} B",
+        written.ube_size,
+        cap
+    );
+}
+
+/// A PE whose `.text` is too small (and has no usable slack) reports
+/// `pe_codebits` as unavailable, and the auto preference falls to the first
+/// available strategy (`pe_overlay`).
+#[test]
+fn inspect_marks_codebits_unavailable_on_tiny_text() {
+    let dir = scratch("capacity_tiny");
+    let carrier = dir.join("tiny.exe");
+    fs::write(&carrier, make_pe(0x8664, 0x20B, 0x100, true)).unwrap();
+
+    let res = inspect_carrier(&carrier, None).expect("inspect");
+    let codebits = &res.strategies[0];
+    assert_eq!(codebits.strategy, "pe_codebits");
+    assert!(!codebits.available, "tiny .text cannot host a channel");
+    assert!(codebits.capacity_bytes.is_some(), "capacity is still reported");
+
+    let first_available = res.strategies.iter().find(|c| c.available).unwrap();
+    assert_eq!(first_available.strategy, "pe_overlay");
+}
+
+/// Static capacities of formats with fixed limits survive without a carrier,
+/// and the JSON schema exposes the `strategies` array.
+#[test]
+fn inspect_reports_png_capacity_and_json_schema() {
+    let dir = scratch("capacity_png");
+    let carrier = dir.join("c.png");
+    fs::write(&carrier, include_bytes!("assets/minimal.png")).unwrap();
+
+    let res = inspect_carrier(&carrier, None).expect("inspect");
+    assert_eq!(res.format, "PNG");
+    assert_eq!(res.strategies[0].strategy, "chunk");
+    assert_eq!(res.strategies[0].capacity_bytes, Some(0x7FFF_FFFF));
+    assert!(res.strategies[0].available);
+
+    let json = serde_json::to_value(&res).expect("serialize");
+    assert!(json.get("strategies").is_some());
+    assert!(json.get("supported_strategies").is_none());
+    assert_eq!(json["strategies"][0]["capacity_bytes"], 0x7FFF_FFFFu64);
+}
+
+/// The static `list` table is generated from the adapters, not hard-coded:
+/// every registered format must report at least one strategy with a non-empty
+/// limit, and carrier-dependent strategies must not claim an exact number.
+#[test]
+fn static_capacity_table_covers_all_adapters() {
+    let mut formats = Vec::new();
+    for adapter in strhide::router::ADAPTERS {
+        let name = adapter.format_name();
+        formats.push(name);
+        let caps = adapter.strategy_capacities(None);
+        assert!(!caps.is_empty(), "{name} must list at least one strategy");
+        assert_eq!(
+            caps.iter().map(|c| c.strategy.as_str()).collect::<Vec<_>>(),
+            adapter.supported_strategies(),
+            "{name}: capacity order must match supported_strategies"
+        );
+        for c in caps {
+            assert!(!c.limit.is_empty(), "{name}/{}: empty limit", c.strategy);
+            assert!(c.available, "{name}/{}: static mode must be available", c.strategy);
+            if c.limit.starts_with("carrier-dependent") {
+                assert!(
+                    c.capacity_bytes.is_none(),
+                    "{name}/{}: carrier-dependent limit must not carry a number",
+                    c.strategy
+                );
+            }
+        }
+    }
+    for expected in ["PNG", "JPEG", "MP4", "ZIP", "PDF", "PE"] {
+        assert!(formats.contains(&expected), "missing format {expected}");
+    }
+    // Unrecognized files are not a format: no catch-all adapter may appear.
+    assert!(!formats.contains(&"GENERIC"), "GENERIC must not be registered");
+}

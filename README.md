@@ -51,7 +51,8 @@ strhide write -c report.pdf -d secret.zip -p "S3cret!" -H "my usual one"
 # Extract the hidden data
 strhide read -c photo.png -o out/
 
-# Show envelope metadata (what was hidden, when, strategy used)
+# Show envelope metadata and per-strategy capacity for a carrier (what was
+# hidden, when, which strategy, and how much more could fit); --json supported
 strhide inspect -c report.pdf --json
 
 # Verify host + envelope integrity (3 levels; --json supported)
@@ -60,8 +61,8 @@ strhide verify -c report.pdf
 # Remove the hidden data, restoring the original host file
 strhide remove -c photo.png
 
-# List the hiding strategies supported by a carrier
-strhide list -c report.pdf
+# List every format, strategy, and its capacity limit (static reference)
+strhide list-strategies
 ```
 
 Password sources (checked in order): `-p/--password` → `--password-file` → `STRHIDE_PASSWORD` env var → config file → interactive prompt (`-e/--encrypt`).

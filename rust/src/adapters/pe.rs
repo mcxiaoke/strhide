@@ -1,7 +1,9 @@
 //! Windows Portable Executable (PE) adapter for strhide.
 
 use crate::adapters::pe_codebits;
-use crate::adapters::{HostAdapter, SeekRead, SeekWrite, SubStream};
+use crate::adapters::{
+    HostAdapter, SeekRead, SeekWrite, StrategyCapacity, SubStream, format_bytes,
+};
 use crate::envelope::EnvelopeTrailer;
 use crate::errors::StrHideError;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
@@ -162,6 +164,111 @@ impl HostAdapter for PeAdapter {
             }
         }
         "pe_overlay"
+    }
+
+    fn strategy_capacities(&self, reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
+        // Static answer first; `Some(reader)` replaces it with a measurement of
+        // THIS carrier's `.text` and zero-value slack.
+        let mut codebits = StrategyCapacity {
+            strategy: "pe_codebits".into(),
+            capacity_bytes: None,
+            available: true,
+            limit: "carrier-dependent (.text density + zero slack)".into(),
+            note: Some(
+                "x86/x64 instruction-encoding channel; file size unchanged; run `inspect -c <carrier>` for the exact limit"
+                    .into(),
+            ),
+        };
+        let mut signed = false;
+
+        if let Some(r) = reader {
+            let start = r.stream_position().ok();
+            if let Ok(info) = parse_pe_headers(r) {
+                signed = info.has_authenticode;
+            }
+            match pe_codebits::parse_pe_code_layout_streaming(r) {
+                Ok(layout) => match pe_codebits::read_text_range(r, &layout) {
+                    Ok(text) => {
+                        let bits = pe_codebits::profile(&text, layout.bitness).len();
+                        let slack = pe_codebits::max_zero_run_streaming(r, &layout.slack_ranges)
+                            .unwrap_or(0);
+                        // bits:   (14 + ube) * 8 <= usable positions
+                        // slack:  14 + ube <= longest contiguous zero run
+                        let cap_bits = (bits / 8).saturating_sub(pe_codebits::CHANNEL_HEADER_LEN);
+                        let cap_slack = slack.saturating_sub(pe_codebits::CHANNEL_HEADER_LEN);
+                        let cap = cap_bits.min(cap_slack);
+                        codebits.capacity_bytes = Some(cap as u64);
+                        codebits.available = cap >= pe_codebits::MIN_UBE_LEN as usize;
+                        codebits.limit =
+                            format!("≤ {} B (file size unchanged)", format_bytes(cap as u64));
+                        codebits.note = Some(if codebits.available {
+                            format!(
+                                "instruction-encoding channel; needs {} B of contiguous zero slack for the restore diff",
+                                format_bytes(cap_slack as u64)
+                            )
+                        } else {
+                            format!(
+                                "not usable on this .text: at most {} B (needs ≥ {} B)",
+                                format_bytes(cap as u64),
+                                pe_codebits::MIN_UBE_LEN
+                            )
+                        });
+                    }
+                    Err(_) => {
+                        codebits.available = false;
+                        codebits.note = Some(".text could not be read".into());
+                    }
+                },
+                Err(e) => {
+                    codebits.available = false;
+                    codebits.limit = "unavailable".into();
+                    codebits.note = Some(match e {
+                        pe_codebits::CodebitsError::UnsupportedMachine(_) => {
+                            "carrier PE is not x86/x64; code-bit channel unsupported".into()
+                        }
+                        pe_codebits::CodebitsError::NoText => {
+                            "carrier PE has no usable .text section".into()
+                        }
+                        pe_codebits::CodebitsError::NotPe => "not a PE executable".into(),
+                        _ => "PE code layout could not be parsed".into(),
+                    });
+                }
+            }
+            if let Some(p) = start {
+                let _ = r.seek(SeekFrom::Start(p));
+            }
+        }
+
+        let mut caps = vec![
+            codebits,
+            StrategyCapacity {
+                strategy: "pe_overlay".into(),
+                capacity_bytes: None,
+                available: true,
+                limit: "unlimited (file grows)".into(),
+                note: Some("appended beyond the PE image boundary".into()),
+            },
+            StrategyCapacity {
+                strategy: "eof".into(),
+                capacity_bytes: None,
+                available: true,
+                limit: "unlimited (file grows)".into(),
+                note: Some("appended at file EOF".into()),
+            },
+        ];
+
+        if signed {
+            // run_all_rejection_checks refuses Authenticode-signed PEs for every
+            // strategy; surface that here instead of reporting a usable carrier.
+            for c in &mut caps {
+                c.available = false;
+                c.note = Some(
+                    "carrier is Authenticode-signed: strhide refuses to modify it (the signature would be invalidated)"
+                        .into(),
+                );
+            }
+        }
+        caps
     }
 
     fn inject(

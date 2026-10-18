@@ -51,7 +51,7 @@ strhide write -c report.pdf -d secret.zip -p "S3cret!" -H "my usual one"
 # 提取隐藏数据
 strhide read -c photo.png -o out/
 
-# 查看信封元数据（隐藏了什么、何时、使用何种策略）
+# 查看信封元数据与各策略容量（隐藏了什么、何时、何种策略、还能再藏多少）；支持 --json
 strhide inspect -c report.pdf --json
 
 # 校验宿主与信封完整性（3 级检查，支持 --json）
@@ -60,8 +60,8 @@ strhide verify -c report.pdf
 # 移除隐藏数据，还原原始宿主文件
 strhide remove -c photo.png
 
-# 列出某个载体支持的隐藏策略
-strhide list -c report.pdf
+# 列出全部格式、策略及其容量上限（静态参考表）
+strhide list-strategies
 ```
 
 密码来源（按顺序检查）：`-p/--password` → `--password-file` → 环境变量 `STRHIDE_PASSWORD` → 配置文件 → 交互式输入（`-e/--encrypt`）。

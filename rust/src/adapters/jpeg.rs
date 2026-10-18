@@ -1,7 +1,9 @@
 //! JPEG format adapter for strhide with APP15/COM segment multi-chain hiding.
 
 use std::io::{Read, Seek, SeekFrom, Write};
-use crate::adapters::{HostAdapter, SeekRead, SubStream, eof::EofAdapter};
+use crate::adapters::{
+    HostAdapter, SeekRead, StrategyCapacity, SubStream, eof::EofAdapter, format_bytes,
+};
 use crate::envelope::EnvelopeTrailer;
 use crate::errors::StrHideError;
 
@@ -224,6 +226,28 @@ impl HostAdapter for JpegAdapter {
         } else {
             "app_segment"
         }
+    }
+
+    fn strategy_capacities(&self, _reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
+        vec![
+            StrategyCapacity {
+                strategy: "app_segment".into(),
+                capacity_bytes: Some(JPEG_MAX_TOTAL_CAPACITY),
+                available: true,
+                limit: format!("≤ {} B (64 MiB)", format_bytes(JPEG_MAX_TOTAL_CAPACITY)),
+                note: Some(
+                    "APP15 segment chain before SOS; per-segment payload capped at 65,533 B; file grows"
+                        .into(),
+                ),
+            },
+            StrategyCapacity {
+                strategy: "eof".into(),
+                capacity_bytes: None,
+                available: true,
+                limit: "unlimited (file grows)".into(),
+                note: Some("appended after EOI".into()),
+            },
+        ]
     }
 
     fn inject(

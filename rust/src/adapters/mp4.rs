@@ -1,5 +1,5 @@
 use std::io::{SeekFrom, Write};
-use crate::adapters::{HostAdapter, SeekRead};
+use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity};
 use crate::envelope::EnvelopeTrailer;
 use crate::errors::StrHideError;
 
@@ -52,6 +52,28 @@ impl HostAdapter for Mp4Adapter {
 
     fn choose_auto_strategy(&self, _reader: &mut dyn SeekRead, _ube_size: u64) -> &'static str {
         "box_uuid"
+    }
+
+    fn strategy_capacities(&self, _reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
+        vec![
+            StrategyCapacity {
+                strategy: "box_uuid".into(),
+                capacity_bytes: None,
+                available: true,
+                limit: "unlimited (file grows)".into(),
+                note: Some(
+                    "uuid box with a 32-bit header below 4 GiB and a 64-bit large header at or above it; media frame offsets preserved"
+                        .into(),
+                ),
+            },
+            StrategyCapacity {
+                strategy: "eof".into(),
+                capacity_bytes: None,
+                available: true,
+                limit: "unlimited (file grows)".into(),
+                note: Some("appended at EOF".into()),
+            },
+        ]
     }
 
     fn inject(

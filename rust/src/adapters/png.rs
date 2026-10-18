@@ -1,7 +1,7 @@
 //! PNG format adapter for strhide with neutral ancillary chunk and dirty-tail tolerance.
 
 use std::io::{Read, Seek, SeekFrom, Write};
-use crate::adapters::{HostAdapter, SeekRead, eof::EofAdapter};
+use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity, eof::EofAdapter, format_bytes};
 use crate::envelope::{EnvelopeTrailer, STANDARD_TRAILER_MAGIC};
 use crate::errors::StrHideError;
 
@@ -60,6 +60,25 @@ impl HostAdapter for PngAdapter {
         } else {
             "chunk"
         }
+    }
+
+    fn strategy_capacities(&self, _reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
+        vec![
+            StrategyCapacity {
+                strategy: "chunk".into(),
+                capacity_bytes: Some(PNG_MAX_CHUNK_LEN),
+                available: true,
+                limit: format!("≤ {} B (2 GiB - 1)", format_bytes(PNG_MAX_CHUNK_LEN)),
+                note: Some("private ancillary chunk 'prIv' before IEND; file grows slightly".into()),
+            },
+            StrategyCapacity {
+                strategy: "eof".into(),
+                capacity_bytes: None,
+                available: true,
+                limit: "unlimited (file grows)".into(),
+                note: Some("appended after IEND".into()),
+            },
+        ]
     }
 
     fn inject(

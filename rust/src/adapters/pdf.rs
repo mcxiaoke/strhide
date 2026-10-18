@@ -1,7 +1,7 @@
 //! PDF format adapter for strhide with compliant Incremental Update object stream hiding.
 
 use std::io::{Read, Seek, SeekFrom, Write};
-use crate::adapters::{HostAdapter, SeekRead, eof::EofAdapter};
+use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity, eof::EofAdapter};
 use crate::envelope::EnvelopeTrailer;
 use crate::errors::StrHideError;
 
@@ -273,6 +273,37 @@ impl HostAdapter for PdfAdapter {
         } else {
             "eof"
         }
+    }
+
+    fn strategy_capacities(&self, reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
+        let mut incremental = StrategyCapacity {
+            strategy: "incremental".into(),
+            capacity_bytes: None,
+            available: true,
+            limit: "unlimited (file grows)".into(),
+            note: Some("incremental update ending in %%EOF; requires a parseable trailer".into()),
+        };
+        if let Some(r) = reader {
+            let start = r.stream_position().ok();
+            if parse_pdf_trailer_info(r).is_err() {
+                incremental.available = false;
+                incremental.note =
+                    Some("PDF trailer / %%EOF could not be parsed; auto falls back to eof".into());
+            }
+            if let Some(p) = start {
+                let _ = r.seek(SeekFrom::Start(p));
+            }
+        }
+        vec![
+            incremental,
+            StrategyCapacity {
+                strategy: "eof".into(),
+                capacity_bytes: None,
+                available: true,
+                limit: "unlimited (file grows)".into(),
+                note: Some("appended after %%EOF".into()),
+            },
+        ]
     }
 
     fn inject(

@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
-use crate::adapters::{HostAdapter, mp4::Mp4Adapter, pdf::PdfAdapter};
+use crate::adapters::{HostAdapter, StrategyCapacity, mp4::Mp4Adapter, pdf::PdfAdapter};
 use crate::crypto::{
     compress_stream, compute_file_sha256, decompress_stream, decrypt_metadata,
     decrypt_stream_from_chunks, derive_keys, derive_stealth_magics, encrypt_metadata,
@@ -88,8 +88,10 @@ pub struct InspectResult {
     pub orig_host_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supported_strategies: Option<Vec<String>>,
+    /// Capacity of every supported strategy for this carrier, in recommended
+    /// priority order. Always present (also when an envelope already exists,
+    /// answering "how much more could fit").
+    pub strategies: Vec<StrategyCapacity>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1141,6 +1143,11 @@ pub fn inspect_carrier(
     let mut cf = File::open(carrier_path)?;
     let adapter = find_adapter_or_reject(&mut cf, &carrier_path.display().to_string())?;
 
+    // Measured strategy capacities (design: folds the former `check` command
+    // into `inspect`). Adapters that can answer statically ignore the reader;
+    // PE measures `.text` density and zero slack, ZIP measures the EOCD offset.
+    let strategies = adapter.strategy_capacities(Some(&mut cf));
+
     // Password-priority locate (see read_carrier).
     let mut loc = None;
     if let Some(pwd) = password {
@@ -1168,13 +1175,7 @@ pub fn inspect_carrier(
                 orig_host_size: None,
                 orig_host_sha256: None,
                 metadata: None,
-                supported_strategies: Some(
-                    adapter
-                        .supported_strategies()
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect(),
-                ),
+                strategies,
             });
         }
     };
@@ -1242,7 +1243,7 @@ pub fn inspect_carrier(
                 .collect::<String>(),
         ),
         metadata: meta_val,
-        supported_strategies: None,
+        strategies,
     })
 }
 

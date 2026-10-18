@@ -9,7 +9,7 @@ use crate::engine::{
     inspect_carrier, read_carrier, remove_carrier, verify_carrier, write_carrier, WriteOptions, PayloadSource,
 };
 use crate::errors::StrHideError;
-use crate::router::find_adapter_or_reject;
+use crate::router::{ADAPTERS, find_adapter_or_reject};
 
 #[derive(Parser, Debug)]
 #[command(name = "strhide", version, about = "Smart multi-format lossless container data hiding tool")]
@@ -34,7 +34,7 @@ pub enum Commands {
     Inspect(InspectArgs),
     /// Diagnostic verification of host, envelope, and crypto
     Verify(VerifyArgs),
-    /// List supported injection strategies for a carrier
+    /// List all supported formats, strategies, and their capacity limits
     ListStrategies(ListStrategiesArgs),
 }
 
@@ -156,10 +156,7 @@ pub struct VerifyArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct ListStrategiesArgs {
-    #[arg(short = 'c', long = "carrier", required = true)]
-    pub carrier: PathBuf,
-}
+pub struct ListStrategiesArgs {}
 
 pub fn prompt_password(confirm: bool) -> Result<String, StrHideError> {
     let pwd = rpassword::prompt_password("Enter password: ")
@@ -504,42 +501,60 @@ fn handle_inspect(args: InspectArgs, cfg: &FileConfig) -> Result<(), StrHideErro
     if args.json {
         let json_str = serde_json::to_string_pretty(&res)?;
         println!("{json_str}");
-    } else {
-        println!("Carrier: {}", res.carrier);
-        println!("Format:  {}", res.format);
-        println!("Has Hidden Data: {}", res.has_hidden_data);
-        if res.has_hidden_data {
-            if let Some(s) = res.strategy {
-                println!("Strategy:        {s}");
+        } else {
+            println!("Carrier: {}", res.carrier);
+            println!("Format:  {}", res.format);
+            println!("Has Hidden Data: {}", res.has_hidden_data);
+            if res.has_hidden_data {
+                if let Some(s) = res.strategy {
+                    println!("Strategy:        {s}");
+                }
+                if let Some(off) = res.ube_offset {
+                    println!("UBE Offset:      {off}");
+                }
+                if let Some(sz) = res.ube_total_size {
+                    println!("UBE Total Size:  {sz} bytes");
+                }
+                if let Some(enc) = res.is_encrypted {
+                    println!("Encrypted:       {enc}");
+                }
+                if let Some(stl) = res.is_stealth {
+                    println!("Stealth Mode:    {stl}");
+                }
+                if let Some(h) = res.password_hint {
+                    println!("Password Hint:   {h}");
+                }
+                if let Some(sz) = res.orig_host_size {
+                    println!("Original Size:   {sz} bytes");
+                }
+                if let Some(sha) = res.orig_host_sha256 {
+                    println!("Original SHA256: {sha}");
+                }
+                if let Some(meta) = res.metadata {
+                    println!("Metadata:        {meta}");
+                }
             }
-            if let Some(off) = res.ube_offset {
-                println!("UBE Offset:      {off}");
+
+            // Capacity report (available whether or not an envelope exists).
+            // The first available strategy is what `-s auto` would pick for a
+            // payload that fits.
+            let auto_idx = res.strategies.iter().position(|c| c.available);
+            println!("Strategy capacities (max payload size):");
+            for (idx, c) in res.strategies.iter().enumerate() {
+                let auto = if Some(idx) == auto_idx {
+                    " [auto preference]"
+                } else {
+                    ""
+                };
+                let state = if c.available { "" } else { " (unavailable)" };
+                let detail = c.note.as_deref().unwrap_or("");
+                if detail.is_empty() {
+                    println!("  - {}{}{}: {}", c.strategy, auto, state, c.limit);
+                } else {
+                    println!("  - {}{}{}: {} — {}", c.strategy, auto, state, c.limit, detail);
+                }
             }
-            if let Some(sz) = res.ube_total_size {
-                println!("UBE Total Size:  {sz} bytes");
-            }
-            if let Some(enc) = res.is_encrypted {
-                println!("Encrypted:       {enc}");
-            }
-            if let Some(stl) = res.is_stealth {
-                println!("Stealth Mode:    {stl}");
-            }
-            if let Some(h) = res.password_hint {
-                println!("Password Hint:   {h}");
-            }
-            if let Some(sz) = res.orig_host_size {
-                println!("Original Size:   {sz} bytes");
-            }
-            if let Some(sha) = res.orig_host_sha256 {
-                println!("Original SHA256: {sha}");
-            }
-            if let Some(meta) = res.metadata {
-                println!("Metadata:        {meta}");
-            }
-        } else if let Some(strats) = res.supported_strategies {
-            println!("Supported Strategies: {}", strats.join(", "));
         }
-    }
 
     Ok(())
 }
@@ -588,19 +603,20 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig) -> Result<i32, StrHideError
     })
 }
 
-fn handle_list_strategies(args: ListStrategiesArgs) -> Result<(), StrHideError> {
-    let mut cf = File::open(&args.carrier)?;
-    let adapter = find_adapter_or_reject(&mut cf, &args.carrier.display().to_string())?;
-    let strats = adapter.supported_strategies();
-
-    println!(
-        "Supported strategies for '{}' (Format: {}):",
-        args.carrier.display(),
-        adapter.format_name()
-    );
-    for s in strats {
-        println!("  - {s}");
+fn handle_list_strategies(_args: ListStrategiesArgs) -> Result<(), StrHideError> {
+    // Static reference table: constants come from the adapters themselves (via
+    // `strategy_capacities(None)`), so the table cannot drift from the code.
+    // Carrier-specific limits are answered by `inspect -c <carrier>`.
+    println!("{:<8} {:<15} Limit", "Format", "Strategy");
+    println!("{:-<8} {:-<15} {:-<48}", "", "", "");
+    for adapter in ADAPTERS {
+        let format = adapter.format_name();
+        for cap in adapter.strategy_capacities(None) {
+            println!("{format:<8} {:<15} {}", cap.strategy, cap.limit);
+        }
     }
+    println!();
+    println!("Carrier-dependent limits are measured by `strhide inspect -c <carrier>`.");
 
     Ok(())
 }

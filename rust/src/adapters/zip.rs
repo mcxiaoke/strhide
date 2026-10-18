@@ -1,7 +1,9 @@
 //! ZIP format adapter for strhide using pre-CD injection and EOCD CD Offset adjustment.
 
 use std::io::{Read, Seek, SeekFrom, Write};
-use crate::adapters::{HostAdapter, SeekRead, SeekWrite, eof::EofAdapter};
+use crate::adapters::{
+    HostAdapter, SeekRead, SeekWrite, StrategyCapacity, eof::EofAdapter, format_bytes,
+};
 use crate::envelope::{EnvelopeHeader, EnvelopeTrailer};
 use crate::errors::StrHideError;
 
@@ -106,6 +108,57 @@ impl HostAdapter for ZipAdapter {
             }
             Err(_) => "eof",
         }
+    }
+
+    fn strategy_capacities(&self, reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
+        // EOCD position determines the 32-bit headroom, so the limit is only
+        // known once the carrier is known.
+        let mut pre_cd = StrategyCapacity {
+            strategy: "pre_cd_inject".into(),
+            capacity_bytes: None,
+            available: true,
+            limit: "carrier-dependent (4 GiB - EOCD offset)".into(),
+            note: Some(
+                "before Central Directory; file grows; run `inspect -c <carrier>` for the exact limit"
+                    .into(),
+            ),
+        };
+        if let Some(r) = reader {
+            let start = r.stream_position().ok();
+            match find_eocd_offset(r) {
+                Ok((eocd_pos, cd_offset, _)) => {
+                    let patch_limit = std::cmp::max(cd_offset, eocd_pos + 16);
+                    // Mirrors choose_auto_strategy: patch_limit + ube must stay
+                    // strictly below 0xFFFFFFFF.
+                    let cap = 0xFFFF_FFFEu64.saturating_sub(patch_limit);
+                    pre_cd.capacity_bytes = Some(cap);
+                    pre_cd.limit = format!(
+                        "≤ {} B (4 GiB - EOCD offset {})",
+                        format_bytes(cap),
+                        format_bytes(patch_limit)
+                    );
+                    pre_cd.note = Some("before Central Directory; file grows".into());
+                }
+                Err(_) => {
+                    pre_cd.available = false;
+                    pre_cd.note =
+                        Some("Central Directory / EOCD not found; auto falls back to eof".into());
+                }
+            }
+            if let Some(p) = start {
+                let _ = r.seek(SeekFrom::Start(p));
+            }
+        }
+        vec![
+            pre_cd,
+            StrategyCapacity {
+                strategy: "eof".into(),
+                capacity_bytes: None,
+                available: true,
+                limit: "unlimited (file grows)".into(),
+                note: Some("appended after EOCD".into()),
+            },
+        ]
     }
 
     fn inject(

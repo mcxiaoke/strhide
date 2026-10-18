@@ -47,7 +47,7 @@ const CHANNEL_HEADER_BITS: usize = CHANNEL_HEADER_LEN * 8;
 
 /// Smallest possible UBE (header 112 + trailer 24, no hint/meta/payload).
 /// Used as a sanity bound when reading an untrusted channel header.
-const MIN_UBE_LEN: u32 = 136;
+pub const MIN_UBE_LEN: u32 = 136;
 
 /// Errors raised by the code-bit channel. Mapped onto [`StrHideError`] at the
 /// adapter boundary; `ChannelNotFound` is *not* an error for `locate` (it
@@ -918,6 +918,56 @@ pub fn find_slack_run_streaming<R: Read + Seek + ?Sized>(
 
     reader.seek(SeekFrom::Start(start_pos)).ok();
     Ok(best.map(|(_, off)| off))
+}
+
+/// Longest all-zero run across the slack candidate ranges (streaming).
+///
+/// Used only for capacity reporting: the writer instead asks
+/// [`find_slack_run_streaming`] for the shortest sufficient run. Runs never
+/// span two ranges, mirroring the writer's selection rule.
+pub fn max_zero_run_streaming<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+    ranges: &[(u64, u64)],
+) -> Result<usize, CodebitsError> {
+    let start_pos = reader
+        .stream_position()
+        .map_err(|e| CodebitsError::Iced(e.to_string()))?;
+    let mut best = 0usize;
+    let mut buf = vec![0u8; 64 * 1024];
+
+    for &(start, end) in ranges {
+        if end <= start {
+            continue;
+        }
+        reader
+            .seek(SeekFrom::Start(start))
+            .map_err(|e| CodebitsError::Iced(e.to_string()))?;
+        let mut remaining = end - start;
+        let mut run = 0usize;
+        while remaining > 0 {
+            let want = remaining.min(buf.len() as u64) as usize;
+            let n = reader
+                .read(&mut buf[..want])
+                .map_err(|e| CodebitsError::Iced(e.to_string()))?;
+            if n == 0 {
+                break;
+            }
+            for &b in &buf[..n] {
+                if b == 0 {
+                    run += 1;
+                    if run > best {
+                        best = run;
+                    }
+                } else {
+                    run = 0;
+                }
+            }
+            remaining -= n as u64;
+        }
+    }
+
+    reader.seek(SeekFrom::Start(start_pos)).ok();
+    Ok(best)
 }
 
 /// Reads `len` bytes at `offset` from a `Read + Seek` stream.

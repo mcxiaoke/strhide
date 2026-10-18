@@ -11,6 +11,7 @@ pub mod zip;
 
 use crate::envelope::EnvelopeHeader;
 use crate::errors::StrHideError;
+use serde::Serialize;
 use std::io::{Read, Seek, Write};
 
 pub trait SeekRead: Read + Seek {}
@@ -19,11 +20,72 @@ impl<T: Read + Seek> SeekRead for T {}
 pub trait SeekWrite: Write + Seek {}
 impl<T: Write + Seek> SeekWrite for T {}
 
+/// Capacity and availability of one injection strategy for a carrier.
+///
+/// Produced by [`HostAdapter::strategy_capacities`]. The vector returned by an
+/// adapter is ordered by **recommended priority**, matching the order in which
+/// the auto strategy prefers them.
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyCapacity {
+    pub strategy: String,
+    /// Exact maximum UBE envelope size in bytes, when it can be stated as a
+    /// single number. `None` means the strategy is unbounded (the file grows)
+    /// or the limit is carrier-dependent (see [`limit`](Self::limit)).
+    pub capacity_bytes: Option<u64>,
+    /// Whether the strategy is structurally usable for the carrier right now.
+    /// For a static query (`reader == None`) this is the format's capability,
+    /// not the current carrier's.
+    pub available: bool,
+    /// Concise human-readable limit, e.g. `≤ 2,147,483,647 B (2 GiB - 1)` or
+    /// `carrier-dependent (.text density + zero slack)`.
+    pub limit: String,
+    /// Optional detail: channel behavior, retry/fallback hints, slack needs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Formats a byte count with thousands separators (`2147483647` →
+/// `2,147,483,647`). Shared by the adapters' `limit` strings and the CLI.
+pub fn format_bytes(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 pub trait HostAdapter: Send + Sync {
     fn format_name(&self) -> &'static str;
     fn detect(&self, reader: &mut dyn SeekRead) -> bool;
     fn supported_strategies(&self) -> Vec<&'static str>;
     fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, ube_size: u64) -> &'static str;
+
+    /// Reports the capacity of each supported strategy, in recommended
+    /// priority order.
+    ///
+    /// `reader == None` answers "what does this format support?" (used by the
+    /// static `list` table): constants only, carrier-dependent limits stay
+    /// unspecified. `reader == Some(_)` answers "what can THIS carrier hold?"
+    /// (used by `inspect`): carrier-dependent strategies are measured.
+    ///
+    /// The default implementation reports every strategy as available with an
+    /// unknown capacity; adapters override it with their real limits.
+    fn strategy_capacities(&self, _reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
+        self.supported_strategies()
+            .into_iter()
+            .map(|s| StrategyCapacity {
+                strategy: s.to_string(),
+                capacity_bytes: None,
+                available: true,
+                limit: "unknown".into(),
+                note: None,
+            })
+            .collect()
+    }
 
     /// Injects UBE data into host stream, writing the resulting container to out.
     /// Returns (inject_offset, inject_size, patch_offset, orig_patch_val).
