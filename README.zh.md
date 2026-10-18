@@ -25,13 +25,35 @@
 
 ## 安装
 
-**Python（库 + CLI）：**
+**预编译二进制（推荐，无需 Python 或 Rust 工具链）：**
+
+从 [GitHub Releases](https://github.com/mcxiaoke/strhide/releases/latest) 下载：
+
+| 平台 | 文件 |
+| --- | --- |
+| Windows x64 | `strhide-windows-x86_64.exe` |
+| Windows ARM64 | `strhide-windows-aarch64.exe` |
+| macOS（Intel + Apple Silicon） | `strhide-macos-universal2` |
+| Linux x64（全静态） | `strhide-linux-x86_64` |
+| Linux ARM64（全静态） | `strhide-linux-aarch64` |
+
+```bash
+chmod +x strhide-macos-universal2          # macOS / Linux
+./strhide-macos-universal2 --help
+sha256sum -c SHA256SUMS.txt                # 校验下载文件
+```
+
+> **macOS（未公证）：** Gatekeeper 会拦截未公证的下载二进制。可右键文件 → **打开**，或执行 `xattr -d com.apple.quarantine ./strhide-macos-universal2`。
+>
+> **Windows：** SmartScreen 可能提示未签名程序——选择 **更多信息 → 仍要运行**。
+
+**Python（已弃用，冻结在 0.2.0）：**
 
 ```bash
 pip install strhide
 ```
 
-**Rust（CLI）：**
+**从源码构建：**
 
 ```bash
 cd rust

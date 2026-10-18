@@ -25,13 +25,35 @@ Both implement the same envelope format, so a file written by one can be read, v
 
 ## Install
 
-**Python (library + CLI):**
+**Prebuilt binaries (recommended — no Python or Rust toolchain required):**
+
+Download from [GitHub Releases](https://github.com/mcxiaoke/strhide/releases/latest):
+
+| Platform | File |
+| --- | --- |
+| Windows x64 | `strhide-windows-x86_64.exe` |
+| Windows ARM64 | `strhide-windows-aarch64.exe` |
+| macOS (Intel + Apple Silicon) | `strhide-macos-universal2` |
+| Linux x64 (fully static) | `strhide-linux-x86_64` |
+| Linux ARM64 (fully static) | `strhide-linux-aarch64` |
+
+```bash
+chmod +x strhide-macos-universal2          # macOS / Linux
+./strhide-macos-universal2 --help
+sha256sum -c SHA256SUMS.txt                # verify the download
+```
+
+> **macOS (unsigned build):** Gatekeeper quarantines downloaded binaries that are not notarized. Either right-click the file → **Open**, or run `xattr -d com.apple.quarantine ./strhide-macos-universal2`.
+>
+> **Windows:** SmartScreen may warn about an unsigned executable — choose **More info → Run anyway**.
+
+**Python (deprecated, frozen at 0.2.0):**
 
 ```bash
 pip install strhide
 ```
 
-**Rust (CLI):**
+**Build from source:**
 
 ```bash
 cd rust
