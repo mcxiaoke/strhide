@@ -57,7 +57,11 @@ fn explicit_missing_config_is_a_hard_error() {
     fs::write(dir.join("c.png"), make_png()).unwrap();
     let out = run(&dir, &["--config", "nope.toml", "list-strategies"], None);
     assert_eq!(code(&out), 1);
-    assert!(stderr(&out).contains("Failed to read config file"), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Failed to read config file"),
+        "stderr: {}",
+        stderr(&out)
+    );
 }
 
 #[test]
@@ -67,7 +71,11 @@ fn invalid_toml_is_a_hard_error() {
     fs::write(dir.join("strhide.toml"), "strategy = [broken\n").unwrap();
     let out = run(&dir, &["list-strategies"], None);
     assert_eq!(code(&out), 1);
-    assert!(stderr(&out).contains("Invalid TOML"), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Invalid TOML"),
+        "stderr: {}",
+        stderr(&out)
+    );
 }
 
 #[test]
@@ -90,7 +98,11 @@ fn unknown_key_warns_but_does_not_fail() {
 fn config_password_and_encrypt_apply_on_write_and_read() {
     let dir = scratch("write_read");
     fs::write(dir.join("c.png"), make_png()).unwrap();
-    fs::write(dir.join("strhide.toml"), "encrypt = true\npassword = \"cfg-pass-1\"\n").unwrap();
+    fs::write(
+        dir.join("strhide.toml"),
+        "encrypt = true\npassword = \"cfg-pass-1\"\n",
+    )
+    .unwrap();
 
     // Write with no CLI password/encrypt flags: both come from the config.
     let out = run(&dir, &["write", "-c", "c.png", "-t", "hello"], None);
@@ -102,11 +114,19 @@ fn config_password_and_encrypt_apply_on_write_and_read() {
     assert_eq!(fs::read_to_string(dir.join("out1.bin")).unwrap(), "hello");
 
     // An explicit CLI password equal to the config one still works.
-    let out = run(&dir, &["read", "-c", "c.png", "-p", "cfg-pass-1", "-o", "out2.bin"], None);
+    let out = run(
+        &dir,
+        &["read", "-c", "c.png", "-p", "cfg-pass-1", "-o", "out2.bin"],
+        None,
+    );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
 
     // A wrong CLI password fails even though the config holds the right one.
-    let out = run(&dir, &["read", "-c", "c.png", "-p", "wrong", "-o", "out3.bin"], None);
+    let out = run(
+        &dir,
+        &["read", "-c", "c.png", "-p", "wrong", "-o", "out3.bin"],
+        None,
+    );
     assert_eq!(code(&out), 1);
     assert!(stderr(&out).contains("assword"), "stderr: {}", stderr(&out));
 }
@@ -115,10 +135,18 @@ fn config_password_and_encrypt_apply_on_write_and_read() {
 fn env_password_overrides_config_password() {
     let dir = scratch("env");
     fs::write(dir.join("c.png"), make_png()).unwrap();
-    fs::write(dir.join("strhide.toml"), "encrypt = true\npassword = \"cfg-pass-1\"\n").unwrap();
+    fs::write(
+        dir.join("strhide.toml"),
+        "encrypt = true\npassword = \"cfg-pass-1\"\n",
+    )
+    .unwrap();
 
     // Write with the env password (wins over the config password).
-    let out = run(&dir, &["write", "-c", "c.png", "-t", "hello"], Some("env-pass-2"));
+    let out = run(
+        &dir,
+        &["write", "-c", "c.png", "-t", "hello"],
+        Some("env-pass-2"),
+    );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
 
     // Reading with only the config password fails (it is the wrong password).
@@ -126,7 +154,11 @@ fn env_password_overrides_config_password() {
     assert_eq!(code(&out), 1);
 
     // Reading with the env password succeeds.
-    let out = run(&dir, &["read", "-c", "c.png", "-o", "o2.bin"], Some("env-pass-2"));
+    let out = run(
+        &dir,
+        &["read", "-c", "c.png", "-o", "o2.bin"],
+        Some("env-pass-2"),
+    );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
     assert_eq!(fs::read_to_string(dir.join("o2.bin")).unwrap(), "hello");
 }

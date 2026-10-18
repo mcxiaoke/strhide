@@ -82,8 +82,9 @@ fn parse_config(text: &str, origin: &Path) -> Result<FileConfig, StrHideError> {
             );
         }
     }
-    toml::from_str(text)
-        .map_err(|e| StrHideError::General(format!("Invalid config file '{}': {e}", origin.display())))
+    toml::from_str(text).map_err(|e| {
+        StrHideError::General(format!("Invalid config file '{}': {e}", origin.display()))
+    })
 }
 
 /// Load the effective configuration. When `explicit` is given (the global

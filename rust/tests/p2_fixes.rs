@@ -11,14 +11,14 @@ use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
+use strhide::adapters::HostAdapter;
 use strhide::adapters::jpeg::JpegAdapter;
 use strhide::adapters::mp4::Mp4Adapter;
 use strhide::adapters::pdf::PdfAdapter;
 use strhide::adapters::pe::PeAdapter;
 use strhide::adapters::png::PngAdapter;
 use strhide::adapters::zip::ZipAdapter;
-use strhide::adapters::HostAdapter;
-use strhide::engine::{verify_carrier, write_carrier, WriteOptions, PayloadSource};
+use strhide::engine::{PayloadSource, WriteOptions, verify_carrier, write_carrier};
 
 // --------------------------------------------------------------------------- helpers
 
@@ -168,7 +168,11 @@ struct FailingReader {
 
 impl FailingReader {
     fn new(data: Vec<u8>, fail_after: u64) -> Self {
-        Self { data, pos: 0, fail_after }
+        Self {
+            data,
+            pos: 0,
+            fail_after,
+        }
     }
 }
 

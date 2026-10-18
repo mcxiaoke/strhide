@@ -412,22 +412,38 @@ fn strategy_registry_roundtrip() {
 fn unrecognized_carriers_are_rejected() {
     let dir = scratch("reject_unknown");
     let cases: Vec<(&str, Vec<u8>)> = vec![
-        ("generic.bin", b"just some generic host bytes, not a PE at all".to_vec()),
+        (
+            "generic.bin",
+            b"just some generic host bytes, not a PE at all".to_vec(),
+        ),
         ("empty.bin", Vec::new()),
-        ("text.txt", b"plain text file
+        (
+            "text.txt",
+            b"plain text file
 with two lines
-".to_vec()),
-        ("gzip.gz", vec![0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03]),
-        ("elf.bin", vec![0x7F, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00]),
+"
+            .to_vec(),
+        ),
+        (
+            "gzip.gz",
+            vec![0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03],
+        ),
+        (
+            "elf.bin",
+            vec![0x7F, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00],
+        ),
     ];
     for (name, bytes) in cases {
         let carrier = dir.join(name);
         fs::write(&carrier, &bytes).unwrap();
         let out = dir.join(format!("{name}.steg"));
 
-        let write_err =
-            write_carrier(&carrier, PayloadSource::Text("x"), &write_opts(&out, "auto"))
-                .unwrap_err();
+        let write_err = write_carrier(
+            &carrier,
+            PayloadSource::Text("x"),
+            &write_opts(&out, "auto"),
+        )
+        .unwrap_err();
         assert!(
             matches!(write_err, StrHideError::UnsupportedFormat(_)),
             "{name}: write should reject, got {write_err:?}"
@@ -438,33 +454,48 @@ with two lines
         );
 
         // Explicit eof must not bypass the format check either.
-        let eof_err =
-            write_carrier(&carrier, PayloadSource::Text("x"), &write_opts(&out, "eof"))
-                .unwrap_err();
+        let eof_err = write_carrier(&carrier, PayloadSource::Text("x"), &write_opts(&out, "eof"))
+            .unwrap_err();
         assert!(
             matches!(eof_err, StrHideError::UnsupportedFormat(_)),
             "{name}: explicit eof should still reject, got {eof_err:?}"
         );
 
-        assert!(matches!(
-            read_carrier(&carrier, None, None).unwrap_err(),
-            StrHideError::UnsupportedFormat(_)
-        ), "{name}: read should reject");
-        assert!(matches!(
-            remove_carrier(&carrier, Some(&out), None, false).unwrap_err(),
-            StrHideError::UnsupportedFormat(_)
-        ), "{name}: remove should reject");
-        assert!(matches!(
-            inspect_carrier(&carrier, None).unwrap_err(),
-            StrHideError::UnsupportedFormat(_)
-        ), "{name}: inspect should reject");
-        assert!(matches!(
-            verify_carrier(&carrier, None).unwrap_err(),
-            StrHideError::UnsupportedFormat(_)
-        ), "{name}: verify should reject");
+        assert!(
+            matches!(
+                read_carrier(&carrier, None, None).unwrap_err(),
+                StrHideError::UnsupportedFormat(_)
+            ),
+            "{name}: read should reject"
+        );
+        assert!(
+            matches!(
+                remove_carrier(&carrier, Some(&out), None, false).unwrap_err(),
+                StrHideError::UnsupportedFormat(_)
+            ),
+            "{name}: remove should reject"
+        );
+        assert!(
+            matches!(
+                inspect_carrier(&carrier, None).unwrap_err(),
+                StrHideError::UnsupportedFormat(_)
+            ),
+            "{name}: inspect should reject"
+        );
+        assert!(
+            matches!(
+                verify_carrier(&carrier, None).unwrap_err(),
+                StrHideError::UnsupportedFormat(_)
+            ),
+            "{name}: verify should reject"
+        );
 
         // The carrier must be left untouched.
-        assert_eq!(fs::read(&carrier).unwrap(), bytes, "{name}: carrier modified!");
+        assert_eq!(
+            fs::read(&carrier).unwrap(),
+            bytes,
+            "{name}: carrier modified!"
+        );
     }
 }
 
@@ -532,7 +563,10 @@ fn inspect_reports_exact_codebits_capacity() {
     let codebits = &res.strategies[0];
     assert!(codebits.available);
     let cap = codebits.capacity_bytes.expect("measured capacity");
-    assert!(cap >= 136, "capable carrier must hold at least a bare envelope");
+    assert!(
+        cap >= 136,
+        "capable carrier must hold at least a bare envelope"
+    );
     assert!(codebits.limit.contains("file size unchanged"));
 
     // The reported bound must admit an actual write: a short payload goes
@@ -566,7 +600,10 @@ fn inspect_marks_codebits_unavailable_on_tiny_text() {
     let codebits = &res.strategies[0];
     assert_eq!(codebits.strategy, "pe_codebits");
     assert!(!codebits.available, "tiny .text cannot host a channel");
-    assert!(codebits.capacity_bytes.is_some(), "capacity is still reported");
+    assert!(
+        codebits.capacity_bytes.is_some(),
+        "capacity is still reported"
+    );
 
     let first_available = res.strategies.iter().find(|c| c.available).unwrap();
     assert_eq!(first_available.strategy, "pe_overlay");
@@ -610,7 +647,11 @@ fn static_capacity_table_covers_all_adapters() {
         );
         for c in caps {
             assert!(!c.limit.is_empty(), "{name}/{}: empty limit", c.strategy);
-            assert!(c.available, "{name}/{}: static mode must be available", c.strategy);
+            assert!(
+                c.available,
+                "{name}/{}: static mode must be available",
+                c.strategy
+            );
             if c.limit.starts_with("carrier-dependent") {
                 assert!(
                     c.capacity_bytes.is_none(),
@@ -624,5 +665,8 @@ fn static_capacity_table_covers_all_adapters() {
         assert!(formats.contains(&expected), "missing format {expected}");
     }
     // Unrecognized files are not a format: no catch-all adapter may appear.
-    assert!(!formats.contains(&"GENERIC"), "GENERIC must not be registered");
+    assert!(
+        !formats.contains(&"GENERIC"),
+        "GENERIC must not be registered"
+    );
 }

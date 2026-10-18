@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 
 use crate::errors::StrHideError;
 
-pub fn check_pe_authenticode<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<Option<String>, StrHideError> {
+pub fn check_pe_authenticode<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+) -> Result<Option<String>, StrHideError> {
     let start_pos = reader.stream_position()?;
     let mut mz = [0u8; 2];
     if reader.read_exact(&mut mz).is_err() || &mz != b"MZ" {
@@ -92,9 +94,10 @@ pub fn check_pe_authenticode<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<
 
 pub fn check_unsupported_apk(filename: Option<&str>) -> Option<String> {
     if let Some(name) = filename
-        && name.to_lowercase().ends_with(".apk") {
-            return Some("APK 格式不在支持列表中（不支持作为载体文件进行修改）。".into());
-        }
+        && name.to_lowercase().ends_with(".apk")
+    {
+        return Some("APK 格式不在支持列表中（不支持作为载体文件进行修改）。".into());
+    }
     None
 }
 
@@ -114,7 +117,9 @@ pub fn check_signature_file(filename: Option<&str>) -> Option<String> {
     None
 }
 
-pub fn check_pdf_signature<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<Option<String>, StrHideError> {
+pub fn check_pdf_signature<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+) -> Result<Option<String>, StrHideError> {
     let start_pos = reader.stream_position()?;
     let mut header = [0u8; 1024];
     let n = reader.read(&mut header)?;
@@ -172,7 +177,9 @@ pub fn check_pdf_signature<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<Op
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 pub fn check_jar_signature<R: Read + Seek + ?Sized>(
@@ -187,9 +194,7 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
     reader.seek(SeekFrom::Start(0))?;
     let mut magic = [0u8; 4];
     if reader.read_exact(&mut magic).is_err()
-        || (magic != *b"PK\x03\x04"
-            && magic != *b"PK\x05\x06"
-            && magic != *b"PK\x07\x08")
+        || (magic != *b"PK\x03\x04" && magic != *b"PK\x05\x06" && magic != *b"PK\x07\x08")
     {
         reader.seek(SeekFrom::Start(start_pos))?;
         return Ok(None);
@@ -218,19 +223,20 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
                         if &cd_buf[offset..offset + 4] != b"PK\x01\x02" {
                             break;
                         }
-                        let name_len =
-                            u16::from_le_bytes(cd_buf[offset + 28..offset + 30].try_into().unwrap())
-                                as usize;
-                        let extra_len =
-                            u16::from_le_bytes(cd_buf[offset + 30..offset + 32].try_into().unwrap())
-                                as usize;
-                        let comment_len =
-                            u16::from_le_bytes(cd_buf[offset + 32..offset + 34].try_into().unwrap())
-                                as usize;
+                        let name_len = u16::from_le_bytes(
+                            cd_buf[offset + 28..offset + 30].try_into().unwrap(),
+                        ) as usize;
+                        let extra_len = u16::from_le_bytes(
+                            cd_buf[offset + 30..offset + 32].try_into().unwrap(),
+                        ) as usize;
+                        let comment_len = u16::from_le_bytes(
+                            cd_buf[offset + 32..offset + 34].try_into().unwrap(),
+                        ) as usize;
 
                         let name_start = offset + 46;
                         if name_start + name_len <= cd_buf.len() {
-                            let name = String::from_utf8_lossy(&cd_buf[name_start..name_start + name_len]);
+                            let name =
+                                String::from_utf8_lossy(&cd_buf[name_start..name_start + name_len]);
                             let upper = name.to_uppercase();
                             if upper.starts_with("META-INF/")
                                 && (upper.ends_with(".SF")

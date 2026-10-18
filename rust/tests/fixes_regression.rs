@@ -20,8 +20,8 @@ use rand::RngExt;
 
 use strhide::adapters::zip::find_eocd_offset;
 use strhide::engine::{
-    read_carrier, remove_carrier, sanitize_filename, verify_carrier, write_carrier, WriteOptions, CarrierMetadata,
-    PayloadSource,
+    CarrierMetadata, PayloadSource, WriteOptions, read_carrier, remove_carrier, sanitize_filename,
+    verify_carrier, write_carrier,
 };
 use strhide::envelope::{EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE, MAX_HINT_LEN};
 use strhide::errors::StrHideError;
@@ -83,7 +83,14 @@ fn make_jpeg() -> Vec<u8> {
     v.extend_from_slice(&(2u16 + dqt_data.len() as u16).to_be_bytes());
     v.extend_from_slice(&dqt_data);
     // SOF0
-    let sof_body = [b"\x08".as_slice(), &1u16.to_be_bytes()[..], &1u16.to_be_bytes()[..], &[1u8][..], &[0x01, 0x11, 0x00][..]].concat();
+    let sof_body = [
+        b"\x08".as_slice(),
+        &1u16.to_be_bytes()[..],
+        &1u16.to_be_bytes()[..],
+        &[1u8][..],
+        &[0x01, 0x11, 0x00][..],
+    ]
+    .concat();
     v.extend_from_slice(b"\xff\xc0");
     v.extend_from_slice(&(2u16 + sof_body.len() as u16).to_be_bytes());
     v.extend_from_slice(&sof_body);
@@ -274,7 +281,11 @@ fn cli_no_preserve_time_flag_accepted() {
         .stderr(Stdio::piped())
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 // --------------------------------------------------------------------------- R2 / P0-2
@@ -354,7 +365,10 @@ fn double_injection_rejected_same_password() {
         },
     )
     .unwrap_err();
-    assert!(err.to_string().contains("already contains hidden data"), "{err}");
+    assert!(
+        err.to_string().contains("already contains hidden data"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -371,12 +385,20 @@ fn structural_warning_for_unknown_password_envelope() {
         true,
         &stego,
     );
-    let res = write_carrier_file(&stego, PayloadSource::Text("second"), None, "auto", false, &dir.join("w2.png"));
-    assert!(res
-        .warning
-        .as_deref()
-        .unwrap_or("")
-        .contains("only a hidden envelope would produce"));
+    let res = write_carrier_file(
+        &stego,
+        PayloadSource::Text("second"),
+        None,
+        "auto",
+        false,
+        &dir.join("w2.png"),
+    );
+    assert!(
+        res.warning
+            .as_deref()
+            .unwrap_or("")
+            .contains("only a hidden envelope would produce")
+    );
 }
 
 #[test]
@@ -394,7 +416,14 @@ fn double_envelope_reverse_order_removal() {
         true,
         &stego,
     );
-    write_carrier_file(&stego, PayloadSource::Text("outer"), None, "auto", false, &stego);
+    write_carrier_file(
+        &stego,
+        PayloadSource::Text("outer"),
+        None,
+        "auto",
+        false,
+        &stego,
+    );
 
     let s1 = dir.join("s1.png");
     remove_carrier(&stego, Some(&s1), None, false).unwrap();
@@ -417,9 +446,19 @@ fn double_envelope_inner_first_removal_diagnosed() {
         true,
         &stego,
     );
-    write_carrier_file(&stego, PayloadSource::Text("outer"), None, "auto", false, &stego);
+    write_carrier_file(
+        &stego,
+        PayloadSource::Text("outer"),
+        None,
+        "auto",
+        false,
+        &stego,
+    );
     let err = remove_carrier(&stego, Some(&dir.join("x.png")), Some("pw1"), false).unwrap_err();
-    assert!(err.to_string().contains("reverse order of injection"), "{err}");
+    assert!(
+        err.to_string().contains("reverse order of injection"),
+        "{err}"
+    );
 }
 
 // --------------------------------------------------------------------------- P0-1
@@ -430,7 +469,14 @@ fn pdf_dirty_tail_lossless() {
     let carrier = dir.join("dirty.pdf");
     fs::write(&carrier, make_pdf_with_dirty_tail()).unwrap();
     let stego = dir.join("s.pdf");
-    write_carrier_file(&carrier, PayloadSource::Text("hello secret"), None, "auto", false, &stego);
+    write_carrier_file(
+        &carrier,
+        PayloadSource::Text("hello secret"),
+        None,
+        "auto",
+        false,
+        &stego,
+    );
     let res = read_carrier(&stego, None, None).unwrap();
     assert_eq!(res.data, b"hello secret");
     let restored = dir.join("r.pdf");
@@ -505,11 +551,13 @@ fn explicit_oversize_strategy_rejected_without_tmp() {
         },
     )
     .unwrap_err();
-    assert!(err.to_string().contains("not supported by adapter"), "{err}");
+    assert!(
+        err.to_string().contains("not supported by adapter"),
+        "{err}"
+    );
     assert!(!out.with_extension("jpg.strhide.tmp").exists());
     assert!(!PathBuf::from(format!("{}.strhide.tmp", out.display())).exists());
 }
-
 
 // --------------------------------------------------------------------------- P1-6
 
@@ -535,7 +583,14 @@ fn zip_fake_eocd_comment_lifecycle() {
     let carrier = dir.join("fc.zip");
     fs::write(&carrier, make_zip_with_fake_eocd_comment()).unwrap();
     let stego = dir.join("fcs.zip");
-    let res = write_carrier_file(&carrier, PayloadSource::Text("test"), None, "auto", false, &stego);
+    let res = write_carrier_file(
+        &carrier,
+        PayloadSource::Text("test"),
+        None,
+        "auto",
+        false,
+        &stego,
+    );
     assert_eq!(res.strategy, "pre_cd_inject");
     let v = verify_carrier(&stego, None).unwrap();
     assert!(v.level2_envelope.ok);
@@ -550,7 +605,14 @@ fn zip_eof_stego_still_locatable() {
     let carrier = dir.join("c.zip");
     fs::write(&carrier, make_zip()).unwrap();
     let stego = dir.join("e.zip");
-    write_carrier_file(&carrier, PayloadSource::Text("x"), None, "eof", false, &stego);
+    write_carrier_file(
+        &carrier,
+        PayloadSource::Text("x"),
+        None,
+        "eof",
+        false,
+        &stego,
+    );
     let res = read_carrier(&stego, None, None).unwrap();
     assert_eq!(res.data, b"x");
     let restored = dir.join("er.zip");
@@ -565,7 +627,14 @@ fn stego_with_trailer(name: &str) -> (PathBuf, Vec<u8>, u64) {
     let carrier = dir.join("c.zip");
     fs::write(&carrier, make_zip()).unwrap();
     let stego = dir.join("t.zip");
-    write_carrier_file(&carrier, PayloadSource::Text("t"), None, "eof", false, &stego);
+    write_carrier_file(
+        &carrier,
+        PayloadSource::Text("t"),
+        None,
+        "eof",
+        false,
+        &stego,
+    );
     let mut f = fs::File::open(&stego).unwrap();
     let trailer = EnvelopeTrailer::read_from_tail(&mut f, None)
         .unwrap()
@@ -641,7 +710,14 @@ fn permissions_preserved_on_write() {
     fs::write(&carrier, make_minimal_png()).unwrap();
     fs::set_permissions(&carrier, fs::Permissions::from_mode(0o755)).unwrap();
     let stego = dir.join("s.bin");
-    write_carrier_file(&carrier, PayloadSource::Text("x"), None, "auto", false, &stego);
+    write_carrier_file(
+        &carrier,
+        PayloadSource::Text("x"),
+        None,
+        "auto",
+        false,
+        &stego,
+    );
     let mode = fs::metadata(&stego).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o755);
 }

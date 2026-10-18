@@ -15,7 +15,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use strhide::engine::{read_carrier, write_carrier, WriteOptions, PayloadSource};
+use strhide::engine::{PayloadSource, WriteOptions, read_carrier, write_carrier};
 use strhide::errors::StrHideError;
 
 // --------------------------------------------------------------------------- helpers
@@ -108,7 +108,11 @@ fn make_minimal_png() -> Vec<u8> {
 }
 
 fn patch_header_field(out: &std::path::Path, ube_offset: u64, field_offset: u64, bytes: &[u8]) {
-    let mut f = fs::OpenOptions::new().read(true).write(true).open(out).unwrap();
+    let mut f = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(out)
+        .unwrap();
     f.seek(SeekFrom::Start(ube_offset + field_offset)).unwrap();
     f.write_all(bytes).unwrap();
 }
@@ -514,6 +518,9 @@ fn backup_collision_uses_timestamped_name() {
     let bak2 = r1.backup_file.expect("backup created");
     assert_ne!(bak1, bak2, "backup path was reused");
     assert!(bak2.contains(".bak-"), "{bak2}");
-    assert!(fs::metadata(&bak1).is_ok(), "first backup must be preserved");
+    assert!(
+        fs::metadata(&bak1).is_ok(),
+        "first backup must be preserved"
+    );
     assert!(fs::metadata(&bak2).is_ok(), "second backup must exist");
 }

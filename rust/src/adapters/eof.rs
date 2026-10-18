@@ -1,7 +1,7 @@
-use std::io::{SeekFrom, Write};
 use crate::adapters::{HostAdapter, SeekRead, SeekWrite, StrategyCapacity};
 use crate::envelope::{EnvelopeHeader, EnvelopeTrailer};
 use crate::errors::StrHideError;
+use std::io::{SeekFrom, Write};
 
 pub struct EofAdapter;
 
@@ -86,7 +86,11 @@ impl HostAdapter for EofAdapter {
 
         let file_size = stego_in.seek(SeekFrom::End(0))?;
         if trailer.ube_offset + trailer.ube_total_size == file_size {
-            Ok(Some((trailer.ube_offset, trailer.ube_total_size, "eof".into())))
+            Ok(Some((
+                trailer.ube_offset,
+                trailer.ube_total_size,
+                "eof".into(),
+            )))
         } else {
             Ok(None)
         }

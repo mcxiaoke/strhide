@@ -1,7 +1,7 @@
 //! Binary envelope structures and serialization for strhide UBE v2.2.
 
-use std::io::{Read, Seek, SeekFrom};
 use crate::errors::StrHideError;
+use std::io::{Read, Seek, SeekFrom};
 
 pub const STANDARD_HEADER_MAGIC: [u8; 8] = *b"\x89STRHIDE";
 pub const STANDARD_TRAILER_MAGIC: [u8; 4] = *b"STH!";

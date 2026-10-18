@@ -1,7 +1,7 @@
-use std::io::{SeekFrom, Write};
 use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity};
 use crate::envelope::EnvelopeTrailer;
 use crate::errors::StrHideError;
+use std::io::{SeekFrom, Write};
 
 pub const MP4_UUID_NEUTRAL: [u8; 16] = [
     0xd4, 0x1a, 0x8e, 0x9c, 0x4f, 0x21, 0x4e, 0x87, 0x9a, 0x33, 0x5b, 0x6d, 0x12, 0x84, 0xef, 0x70,
@@ -14,11 +14,7 @@ pub struct Mp4Adapter;
 
 impl Mp4Adapter {
     pub fn calc_prefix_len(ube_size: u64) -> u64 {
-        if 24 + ube_size < 0xFFFFFFFF {
-            24
-        } else {
-            32
-        }
+        if 24 + ube_size < 0xFFFFFFFF { 24 } else { 32 }
     }
 }
 
@@ -198,7 +194,11 @@ impl HostAdapter for Mp4Adapter {
         // 3. Fallback to EOF
         let file_size = stego_in.seek(SeekFrom::End(0))?;
         if trailer.ube_offset + trailer.ube_total_size == file_size {
-            return Ok(Some((trailer.ube_offset, trailer.ube_total_size, "eof".into())));
+            return Ok(Some((
+                trailer.ube_offset,
+                trailer.ube_total_size,
+                "eof".into(),
+            )));
         }
 
         Ok(None)
@@ -235,10 +235,13 @@ impl HostAdapter for Mp4Adapter {
                 // 64-bit largesize follows the 8-byte header
                 let mut large = [0u8; 8];
                 if stego_in.read_exact(&mut large).is_err() {
-                    return Ok((false, format!(
-                        "Truncated 64-bit size for box {}",
-                        String::from_utf8_lossy(box_type)
-                    )));
+                    return Ok((
+                        false,
+                        format!(
+                            "Truncated 64-bit size for box {}",
+                            String::from_utf8_lossy(box_type)
+                        ),
+                    ));
                 }
                 (u64::from_be_bytes(large), 16u64)
             } else if size == 0 {
@@ -249,20 +252,26 @@ impl HostAdapter for Mp4Adapter {
             };
 
             if box_size < header_len {
-                return Ok((false, format!(
-                    "Invalid box size {box_size} for box {}",
-                    String::from_utf8_lossy(box_type)
-                )));
+                return Ok((
+                    false,
+                    format!(
+                        "Invalid box size {box_size} for box {}",
+                        String::from_utf8_lossy(box_type)
+                    ),
+                ));
             }
 
             let box_offset = offset;
             offset += box_size;
             box_count += 1;
             if offset > total_size {
-                return Ok((false, format!(
-                    "Box {} at offset {box_offset} extends past end of file",
-                    String::from_utf8_lossy(box_type)
-                )));
+                return Ok((
+                    false,
+                    format!(
+                        "Box {} at offset {box_offset} extends past end of file",
+                        String::from_utf8_lossy(box_type)
+                    ),
+                ));
             }
             stego_in.seek(SeekFrom::Start(offset))?;
         }
@@ -304,19 +313,18 @@ impl HostAdapter for Mp4Adapter {
         if crc32fast::hash(&prefix) != crc || ube_offset + ube_total_size != file_size {
             return found;
         }
-        if ube_offset >= 24
-            && stego_in.seek(SeekFrom::Start(ube_offset - 24)).is_ok() {
-                let mut hdr = [0u8; 24];
-                if stego_in.read_exact(&mut hdr).is_ok() && &hdr[4..8] == b"uuid" {
-                    let uuid = &hdr[8..24];
-                    if uuid == MP4_UUID_NEUTRAL || uuid == LEGACY_UUID_NAMESPACE {
-                        found.push(format!(
-                            "trailing uuid box at offset {} carries {ube_total_size} bytes",
-                            ube_offset - 24
-                        ));
-                    }
+        if ube_offset >= 24 && stego_in.seek(SeekFrom::Start(ube_offset - 24)).is_ok() {
+            let mut hdr = [0u8; 24];
+            if stego_in.read_exact(&mut hdr).is_ok() && &hdr[4..8] == b"uuid" {
+                let uuid = &hdr[8..24];
+                if uuid == MP4_UUID_NEUTRAL || uuid == LEGACY_UUID_NAMESPACE {
+                    found.push(format!(
+                        "trailing uuid box at offset {} carries {ube_total_size} bytes",
+                        ube_offset - 24
+                    ));
                 }
             }
+        }
         found
     }
 }

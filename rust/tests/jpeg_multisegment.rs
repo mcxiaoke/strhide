@@ -1,11 +1,11 @@
 //! Integration tests for JPEG APP15 multi-segment chain hiding.
 
+use rand::RngExt;
 use std::fs;
 use std::path::PathBuf;
-use rand::RngExt;
-use strhide::adapters::jpeg::{find_jpeg_sos_offset, JPEG_COM, JPEG_EOI, JPEG_SOI};
+use strhide::adapters::jpeg::{JPEG_COM, JPEG_EOI, JPEG_SOI, find_jpeg_sos_offset};
 use strhide::engine::{
-    read_carrier, remove_carrier, verify_carrier, write_carrier, PayloadSource, WriteOptions,
+    PayloadSource, WriteOptions, read_carrier, remove_carrier, verify_carrier, write_carrier,
 };
 
 fn scratch_dir(name: &str) -> PathBuf {
@@ -23,7 +23,9 @@ fn make_sample_jpeg_with_comment(comment_text: &[u8]) -> Vec<u8> {
     d.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, 0x00]);
     d.extend_from_slice(&[16u8; 64]);
     // SOF0 (baseline 8x8)
-    d.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x08, 0x00, 0x08, 0x01, 0x01, 0x11, 0x00]);
+    d.extend_from_slice(&[
+        0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x08, 0x00, 0x08, 0x01, 0x01, 0x11, 0x00,
+    ]);
     // Existing original comment
     let com_len = (2 + comment_text.len()) as u16;
     d.extend_from_slice(&JPEG_COM);
@@ -72,7 +74,10 @@ fn test_jpeg_multisegment_chain_boundary_and_lossless_restore() {
     // 2. Scan markers in stego file:
     // Ensure multiple APP15 segments exist before SOS, and NO trailing data after EOI
     let stego_bytes = fs::read(&stego).unwrap();
-    assert!(stego_bytes.ends_with(&JPEG_EOI), "Stego must end exactly at EOI with 0 trailing bytes");
+    assert!(
+        stego_bytes.ends_with(&JPEG_EOI),
+        "Stego must end exactly at EOI with 0 trailing bytes"
+    );
 
     let mut app15_count = 0;
     let mut found_orig_com = false;
@@ -103,14 +108,32 @@ fn test_jpeg_multisegment_chain_boundary_and_lossless_restore() {
         pos += 2 + seg_len;
     }
 
-    assert!(app15_count >= 2, "Expected multiple APP15 segments for 150KB, found {app15_count}");
-    assert!(found_orig_com, "Original comment must remain intact before SOS");
+    assert!(
+        app15_count >= 2,
+        "Expected multiple APP15 segments for 150KB, found {app15_count}"
+    );
+    assert!(
+        found_orig_com,
+        "Original comment must remain intact before SOS"
+    );
 
     // 3. Verify carrier integrity (Level 1, Level 2, Level 3)
     let v = verify_carrier(&stego, Some("secret123")).unwrap();
-    assert!(v.level1_host.ok, "L1 host check failed: {}", v.level1_host.detail);
-    assert!(v.level2_envelope.ok, "L2 envelope check failed: {}", v.level2_envelope.detail);
-    assert!(v.level3_crypto.ok, "L3 crypto check failed: {}", v.level3_crypto.detail);
+    assert!(
+        v.level1_host.ok,
+        "L1 host check failed: {}",
+        v.level1_host.detail
+    );
+    assert!(
+        v.level2_envelope.ok,
+        "L2 envelope check failed: {}",
+        v.level2_envelope.detail
+    );
+    assert!(
+        v.level3_crypto.ok,
+        "L3 crypto check failed: {}",
+        v.level3_crypto.detail
+    );
 
     // 4. Read back payload
     let read_res = read_carrier(&stego, None, Some("secret123")).unwrap();

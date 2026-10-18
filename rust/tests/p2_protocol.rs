@@ -12,7 +12,9 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use strhide::adapters::pdf::parse_pdf_trailer_info;
-use strhide::engine::{read_carrier, remove_carrier, verify_carrier, write_carrier, WriteOptions, PayloadSource};
+use strhide::engine::{
+    PayloadSource, WriteOptions, read_carrier, remove_carrier, verify_carrier, write_carrier,
+};
 
 // --------------------------------------------------------------------------- helpers
 
@@ -74,7 +76,11 @@ fn write_eof_envelope(dir: &Path, name: &str) -> (PathBuf, u64) {
 
 /// Patch `len` bytes at `ube_offset + field_offset` inside a written carrier.
 fn patch_header_field(out: &Path, ube_offset: u64, field_offset: u64, bytes: &[u8]) {
-    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(out).unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(out)
+        .unwrap();
     f.seek(SeekFrom::Start(ube_offset + field_offset)).unwrap();
     f.write_all(bytes).unwrap();
 }
@@ -175,7 +181,10 @@ fn verify_detects_unsupported_envelope_version() {
     patch_header_field(&out, ube_offset, 8, &[0x09]);
 
     let res = verify_carrier(&out, None).unwrap();
-    assert!(!res.level2_envelope.ok, "unsupported version passed Level 2");
+    assert!(
+        !res.level2_envelope.ok,
+        "unsupported version passed Level 2"
+    );
     assert!(
         res.level2_envelope.detail.contains("version"),
         "unexpected detail: {}",
@@ -193,7 +202,10 @@ fn verify_detects_inconsistent_meta_len() {
     patch_header_field(&out, ube_offset, 104, &0xFFFFFFF0u32.to_le_bytes());
 
     let res = verify_carrier(&out, None).unwrap();
-    assert!(!res.level2_envelope.ok, "inconsistent meta_len passed Level 2");
+    assert!(
+        !res.level2_envelope.ok,
+        "inconsistent meta_len passed Level 2"
+    );
     assert!(
         res.level2_envelope.detail.contains("inconsistent"),
         "unexpected detail: {}",
@@ -221,8 +233,8 @@ fn verify_accepts_untampered_carrier() {
 #[test]
 fn default_strip_restores_patch_in_stripped_coordinates() {
     use std::io::Cursor;
-    use strhide::adapters::png::PngAdapter;
     use strhide::adapters::HostAdapter;
+    use strhide::adapters::png::PngAdapter;
     use strhide::envelope::EnvelopeHeader;
 
     // Host with a 4-byte patchable field at offset 60.
@@ -241,8 +253,8 @@ fn default_strip_restores_patch_in_stripped_coordinates() {
     let header = EnvelopeHeader {
         inject_offset: 30,
         inject_size: 10,
-        patch_offset: 70,             // stego coordinates
-        orig_patch_val: 0x11223344,   // value to restore
+        patch_offset: 70,           // stego coordinates
+        orig_patch_val: 0x11223344, // value to restore
         ..Default::default()
     };
 
@@ -252,5 +264,8 @@ fn default_strip_restores_patch_in_stripped_coordinates() {
 
     let restored = out.into_inner();
     assert_eq!(restored.len(), host.len(), "stripped size mismatch");
-    assert_eq!(restored, host, "patch was not restored in stripped coordinates");
+    assert_eq!(
+        restored, host,
+        "patch was not restored in stripped coordinates"
+    );
 }

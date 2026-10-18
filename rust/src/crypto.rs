@@ -1,12 +1,12 @@
 //! Cryptographic and compression primitives for strhide.
 
-use std::io::{Read, Write};
 use aes_gcm::{
-    aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit, Payload},
 };
-use flate2::{read::DeflateDecoder, write::DeflateEncoder, Compression};
+use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::envelope::AAD_SIZE;

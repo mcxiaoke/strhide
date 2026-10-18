@@ -1,9 +1,9 @@
 //! PNG format adapter for strhide with neutral ancillary chunk and dirty-tail tolerance.
 
-use std::io::{Read, Seek, SeekFrom, Write};
 use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity, eof::EofAdapter, format_bytes};
 use crate::envelope::{EnvelopeTrailer, STANDARD_TRAILER_MAGIC};
 use crate::errors::StrHideError;
+use std::io::{Read, Seek, SeekFrom, Write};
 
 pub const PNG_MAGIC: [u8; 8] = *b"\x89PNG\r\n\x1a\n";
 pub const IEND_FULL: [u8; 12] = *b"\x00\x00\x00\x00IEND\xaeB`\x82";
@@ -11,7 +11,9 @@ pub const CHUNK_PRIV: [u8; 4] = *b"prIv";
 pub const CHUNK_STEG: [u8; 4] = *b"stEg";
 pub const PNG_MAX_CHUNK_LEN: u64 = 0x7FFFFFFF; // 2GB
 
-pub fn find_iend_offset<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<(u64, u64), StrHideError> {
+pub fn find_iend_offset<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+) -> Result<(u64, u64), StrHideError> {
     let total_size = reader.seek(SeekFrom::End(0))?;
     let scan_len = std::cmp::min(total_size, 64 * 1024);
     reader.seek(SeekFrom::End(-(scan_len as i64)))?;
@@ -22,7 +24,9 @@ pub fn find_iend_offset<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<(u64,
         .windows(12)
         .rposition(|w| w == IEND_FULL)
         .ok_or_else(|| {
-            StrHideError::CorruptedData("Valid PNG IEND chunk not found within tail scan window".into())
+            StrHideError::CorruptedData(
+                "Valid PNG IEND chunk not found within tail scan window".into(),
+            )
         })?;
 
     let iend_offset = (total_size - scan_len) + idx as u64;
@@ -69,7 +73,9 @@ impl HostAdapter for PngAdapter {
                 capacity_bytes: Some(PNG_MAX_CHUNK_LEN),
                 available: true,
                 limit: format!("≤ {} B (2 GiB - 1)", format_bytes(PNG_MAX_CHUNK_LEN)),
-                note: Some("private ancillary chunk 'prIv' before IEND; file grows slightly".into()),
+                note: Some(
+                    "private ancillary chunk 'prIv' before IEND; file grows slightly".into(),
+                ),
             },
             StrategyCapacity {
                 strategy: "eof".into(),
@@ -195,19 +201,22 @@ impl HostAdapter for PngAdapter {
             chunk_type.copy_from_slice(&hdr[4..8]);
             let chunk_data_offset = stego_in.stream_position()?;
 
-            if (chunk_type == CHUNK_PRIV || chunk_type == CHUNK_STEG)
-                && length >= 112 + 24 {
-                    let trailer_offset = chunk_data_offset + length - 24;
-                    stego_in.seek(SeekFrom::Start(trailer_offset))?;
-                    let mut trailer_bytes = [0u8; 24];
-                    if stego_in.read_exact(&mut trailer_bytes).is_ok()
-                        && let Ok(trailer) = EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic) {
-                            if expected_trailer_magic.is_none() && trailer.trailer_magic != STANDARD_TRAILER_MAGIC {
-                                return Ok(None);
-                            }
-                            return Ok(Some((chunk_data_offset, length, "chunk".into())));
-                        }
+            if (chunk_type == CHUNK_PRIV || chunk_type == CHUNK_STEG) && length >= 112 + 24 {
+                let trailer_offset = chunk_data_offset + length - 24;
+                stego_in.seek(SeekFrom::Start(trailer_offset))?;
+                let mut trailer_bytes = [0u8; 24];
+                if stego_in.read_exact(&mut trailer_bytes).is_ok()
+                    && let Ok(trailer) =
+                        EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic)
+                {
+                    if expected_trailer_magic.is_none()
+                        && trailer.trailer_magic != STANDARD_TRAILER_MAGIC
+                    {
+                        return Ok(None);
+                    }
+                    return Ok(Some((chunk_data_offset, length, "chunk".into())));
                 }
+            }
 
             if chunk_type == *b"IEND" {
                 break;
@@ -262,10 +271,13 @@ impl HostAdapter for PngAdapter {
                 let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
                 let n = stego_in.read(&mut buf[..to_read])?;
                 if n == 0 {
-                    return Ok((false, format!(
-                        "Truncated data for chunk {}",
-                        String::from_utf8_lossy(&chunk_type)
-                    )));
+                    return Ok((
+                        false,
+                        format!(
+                            "Truncated data for chunk {}",
+                            String::from_utf8_lossy(&chunk_type)
+                        ),
+                    ));
                 }
                 hasher.update(&buf[..n]);
                 remaining -= n as u64;
@@ -273,16 +285,22 @@ impl HostAdapter for PngAdapter {
 
             let mut crc_bytes = [0u8; 4];
             if stego_in.read_exact(&mut crc_bytes).is_err() {
-                return Ok((false, format!(
-                    "Truncated CRC for chunk {}",
-                    String::from_utf8_lossy(&chunk_type)
-                )));
+                return Ok((
+                    false,
+                    format!(
+                        "Truncated CRC for chunk {}",
+                        String::from_utf8_lossy(&chunk_type)
+                    ),
+                ));
             }
             if u32::from_be_bytes(crc_bytes) != hasher.finalize() {
-                return Ok((false, format!(
-                    "CRC32 mismatch for chunk {}",
-                    String::from_utf8_lossy(&chunk_type)
-                )));
+                return Ok((
+                    false,
+                    format!(
+                        "CRC32 mismatch for chunk {}",
+                        String::from_utf8_lossy(&chunk_type)
+                    ),
+                ));
             }
 
             if chunk_type == *b"IEND" {

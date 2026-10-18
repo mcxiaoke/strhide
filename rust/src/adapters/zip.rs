@@ -1,17 +1,19 @@
 //! ZIP format adapter for strhide using pre-CD injection and EOCD CD Offset adjustment.
 
-use std::io::{Read, Seek, SeekFrom, Write};
 use crate::adapters::{
     HostAdapter, SeekRead, SeekWrite, StrategyCapacity, eof::EofAdapter, format_bytes,
 };
 use crate::envelope::{EnvelopeHeader, EnvelopeTrailer};
 use crate::errors::StrHideError;
+use std::io::{Read, Seek, SeekFrom, Write};
 
 pub const ZIP_LOCAL_MAGIC: [u8; 4] = *b"PK\x03\x04";
 pub const ZIP_EOCD_MAGIC: [u8; 4] = *b"PK\x05\x06";
 pub const ZIP_SPAN_MAGIC: [u8; 4] = *b"PK\x07\x08";
 
-pub fn find_eocd_offset<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<(u64, u64, u64), StrHideError> {
+pub fn find_eocd_offset<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+) -> Result<(u64, u64, u64), StrHideError> {
     let file_size = reader.seek(SeekFrom::End(0))?;
     let scan_len = std::cmp::min(file_size, 65536 + 22);
     reader.seek(SeekFrom::End(-(scan_len as i64)))?;
@@ -39,7 +41,8 @@ pub fn find_eocd_offset<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<(u64,
             let eocd_pos = (file_size - scan_len) + idx as u64;
 
             if idx + 22 <= tail.len() {
-                let comment_len = u16::from_le_bytes(tail[idx + 20..idx + 22].try_into().unwrap()) as u64;
+                let comment_len =
+                    u16::from_le_bytes(tail[idx + 20..idx + 22].try_into().unwrap()) as u64;
                 let record_end = eocd_pos + 22 + comment_len;
                 let fits = if require_exact_eof {
                     record_end == file_size
@@ -47,8 +50,10 @@ pub fn find_eocd_offset<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<(u64,
                     record_end <= file_size
                 };
                 if fits {
-                    let cd_size = u32::from_le_bytes(tail[idx + 12..idx + 16].try_into().unwrap()) as u64;
-                    let cd_offset = u32::from_le_bytes(tail[idx + 16..idx + 20].try_into().unwrap()) as u64;
+                    let cd_size =
+                        u32::from_le_bytes(tail[idx + 12..idx + 16].try_into().unwrap()) as u64;
+                    let cd_offset =
+                        u32::from_le_bytes(tail[idx + 16..idx + 20].try_into().unwrap()) as u64;
                     if cd_offset + cd_size <= eocd_pos || (cd_offset == 0 && cd_size == 0) {
                         return Ok((eocd_pos, cd_offset, cd_size));
                     }
@@ -261,19 +266,21 @@ impl HostAdapter for ZipAdapter {
     ) -> Result<Option<(u64, u64, String)>, StrHideError> {
         // 1. Try finding UBE before Central Directory
         if let Ok((_, cd_offset, _)) = find_eocd_offset(stego_in)
-            && cd_offset >= 112 + 24 {
-                stego_in.seek(SeekFrom::Start(cd_offset - 24))?;
-                let mut trailer_bytes = [0u8; 24];
-                if stego_in.read_exact(&mut trailer_bytes).is_ok()
-                    && let Ok(trailer) = EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic)
-                        && trailer.ube_offset + trailer.ube_total_size == cd_offset {
-                            return Ok(Some((
-                                trailer.ube_offset,
-                                trailer.ube_total_size,
-                                "pre_cd_inject".into(),
-                            )));
-                        }
+            && cd_offset >= 112 + 24
+        {
+            stego_in.seek(SeekFrom::Start(cd_offset - 24))?;
+            let mut trailer_bytes = [0u8; 24];
+            if stego_in.read_exact(&mut trailer_bytes).is_ok()
+                && let Ok(trailer) = EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic)
+                && trailer.ube_offset + trailer.ube_total_size == cd_offset
+            {
+                return Ok(Some((
+                    trailer.ube_offset,
+                    trailer.ube_total_size,
+                    "pre_cd_inject".into(),
+                )));
             }
+        }
 
         // 2. Fallback to EOF
         if let Some(t) = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {
@@ -313,7 +320,8 @@ impl HostAdapter for ZipAdapter {
 
         // Copy Central Directory and EOCD up to patch_offset
         stego_in.seek(SeekFrom::Start(header.inject_offset + header.inject_size))?;
-        let mut bytes_before_patch = (header.patch_offset as u64) - (header.inject_offset + header.inject_size);
+        let mut bytes_before_patch =
+            (header.patch_offset as u64) - (header.inject_offset + header.inject_size);
         while bytes_before_patch > 0 {
             let to_read = std::cmp::min(bytes_before_patch, buf.len() as u64) as usize;
             let n = stego_in.read(&mut buf[..to_read])?;
@@ -349,7 +357,9 @@ impl HostAdapter for ZipAdapter {
         match find_eocd_offset(stego_in) {
             Ok((eocd_pos, cd_offset, cd_size)) => Ok((
                 true,
-                format!("Valid ZIP archive (EOCD at {eocd_pos}, Central Directory at {cd_offset}, size {cd_size})"),
+                format!(
+                    "Valid ZIP archive (EOCD at {eocd_pos}, Central Directory at {cd_offset}, size {cd_size})"
+                ),
             )),
             Err(e) => Ok((false, format!("Corrupted ZIP archive: {e}"))),
         }

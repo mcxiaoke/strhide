@@ -6,13 +6,18 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::config::{self, FileConfig};
 use crate::engine::{
-    inspect_carrier, read_carrier, remove_carrier, verify_carrier, write_carrier, WriteOptions, PayloadSource,
+    PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
+    write_carrier,
 };
 use crate::errors::StrHideError;
 use crate::router::{ADAPTERS, find_adapter_or_reject};
 
 #[derive(Parser, Debug)]
-#[command(name = "strhide", version, about = "Smart multi-format lossless container data hiding tool")]
+#[command(
+    name = "strhide",
+    version,
+    about = "Smart multi-format lossless container data hiding tool"
+)]
 pub struct Cli {
     /// Path to TOML config file (default: ./strhide.toml, then ~/.strhide/config.toml)
     #[arg(long, global = true, value_name = "FILE")]
@@ -73,7 +78,10 @@ pub struct WriteArgs {
     #[arg(short = 'H', long = "hint", alias = "password-hint")]
     pub hint: Option<String>,
 
-    #[arg(long = "strategy", help = "Hiding strategy (auto|ask|<name>; default: auto or config file)")]
+    #[arg(
+        long = "strategy",
+        help = "Hiding strategy (auto|ask|<name>; default: auto or config file)"
+    )]
     pub strategy: Option<String>,
 
     #[arg(long = "stealth")]
@@ -165,8 +173,9 @@ pub fn prompt_password(confirm: bool) -> Result<String, StrHideError> {
         return Err(StrHideError::Password("Password cannot be empty".into()));
     }
     if confirm {
-        let pwd2 = rpassword::prompt_password("Confirm password: ")
-            .map_err(|e| StrHideError::General(format!("Failed to read password confirmation: {e}")))?;
+        let pwd2 = rpassword::prompt_password("Confirm password: ").map_err(|e| {
+            StrHideError::General(format!("Failed to read password confirmation: {e}"))
+        })?;
         if pwd != pwd2 {
             return Err(StrHideError::Password("Passwords do not match".into()));
         }
@@ -191,17 +200,22 @@ pub fn resolve_password(
         return Ok(Some(s));
     }
     if let Ok(env_pwd) = std::env::var("STRHIDE_PASSWORD")
-        && !env_pwd.is_empty() {
-            return Ok(Some(env_pwd));
-        }
+        && !env_pwd.is_empty()
+    {
+        return Ok(Some(env_pwd));
+    }
     // Config file sources come after CLI args and the environment variable.
     if let Some(p) = cfg.password.as_deref()
-        && !p.is_empty() {
-            return Ok(Some(p.to_string()));
-        }
+        && !p.is_empty()
+    {
+        return Ok(Some(p.to_string()));
+    }
     if let Some(pf) = cfg.password_file.as_deref() {
         let mut s = std::fs::read_to_string(pf).map_err(|e| {
-            StrHideError::General(format!("Failed to read password file from config '{}': {e}", pf.display()))
+            StrHideError::General(format!(
+                "Failed to read password file from config '{}': {e}",
+                pf.display()
+            ))
         })?;
         s = s.trim_end_matches(&['\r', '\n'][..]).to_string();
         return Ok(Some(s));
@@ -340,8 +354,9 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
         b64_buf = base64::engine::general_purpose::STANDARD
             .decode(b64_str.trim())
             .map_err(|e| StrHideError::General(format!("Invalid base64 string: {e}")))?;
-        text_buf = String::from_utf8(b64_buf)
-            .map_err(|e| StrHideError::General(format!("Base64 content is not valid UTF-8: {e}")))?;
+        text_buf = String::from_utf8(b64_buf).map_err(|e| {
+            StrHideError::General(format!("Base64 content is not valid UTF-8: {e}"))
+        })?;
         payload_source = PayloadSource::Text(&text_buf);
     } else if let Some(ref t) = args.text {
         if args.unescape || cfg.unescape.unwrap_or(false) {
@@ -356,12 +371,14 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
             payload_source = PayloadSource::Text(&text_buf);
         } else {
             return Err(StrHideError::General(
-                "Must provide either -d/--data, -t/--text, --text-file, --text-base64, or --stdin".into(),
+                "Must provide either -d/--data, -t/--text, --text-file, --text-base64, or --stdin"
+                    .into(),
             ));
         }
     } else {
         return Err(StrHideError::General(
-            "Must provide either -d/--data, -t/--text, --text-file, --text-base64, or --stdin".into(),
+            "Must provide either -d/--data, -t/--text, --text-file, --text-base64, or --stdin"
+                .into(),
         ));
     }
 
@@ -384,7 +401,10 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
         "[OK] Successfully embedded into '{}' using strategy '{}'.",
         res.carrier, res.strategy
     );
-    println!("     Payload: {} bytes -> UBE: {} bytes.", res.raw_size, res.ube_size);
+    println!(
+        "     Payload: {} bytes -> UBE: {} bytes.",
+        res.raw_size, res.ube_size
+    );
     if let Some(note) = res.strategy_note {
         println!("     [STRATEGY] {note}");
     }
@@ -455,7 +475,10 @@ fn handle_read(args: ReadArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
         };
         let mut f = File::create(&fn_to_use)?;
         f.write_all(&res.data)?;
-        println!("[OK] Extracted payload to '{fn_to_use}' ({} bytes).", res.raw_size);
+        println!(
+            "[OK] Extracted payload to '{fn_to_use}' ({} bytes).",
+            res.raw_size
+        );
     }
 
     Ok(())
@@ -477,9 +500,15 @@ fn handle_remove(args: RemoveArgs, cfg: &FileConfig) -> Result<(), StrHideError>
         !args.no_backup,
     )?;
 
-    println!("[OK] Successfully stripped hidden data from '{}'.", res.carrier);
+    println!(
+        "[OK] Successfully stripped hidden data from '{}'.",
+        res.carrier
+    );
     println!("     Restored size: {} bytes.", res.restored_size);
-    println!("     SHA-256: {} (100% verified identical to original).", res.restored_sha256);
+    println!(
+        "     SHA-256: {} (100% verified identical to original).",
+        res.restored_sha256
+    );
     if let Some(bak) = res.backup_file {
         println!("     [BACKUP] Prior carrier backed up to '{bak}'.");
     }
@@ -501,60 +530,63 @@ fn handle_inspect(args: InspectArgs, cfg: &FileConfig) -> Result<(), StrHideErro
     if args.json {
         let json_str = serde_json::to_string_pretty(&res)?;
         println!("{json_str}");
-        } else {
-            println!("Carrier: {}", res.carrier);
-            println!("Format:  {}", res.format);
-            println!("Has Hidden Data: {}", res.has_hidden_data);
-            if res.has_hidden_data {
-                if let Some(s) = res.strategy {
-                    println!("Strategy:        {s}");
-                }
-                if let Some(off) = res.ube_offset {
-                    println!("UBE Offset:      {off}");
-                }
-                if let Some(sz) = res.ube_total_size {
-                    println!("UBE Total Size:  {sz} bytes");
-                }
-                if let Some(enc) = res.is_encrypted {
-                    println!("Encrypted:       {enc}");
-                }
-                if let Some(stl) = res.is_stealth {
-                    println!("Stealth Mode:    {stl}");
-                }
-                if let Some(h) = res.password_hint {
-                    println!("Password Hint:   {h}");
-                }
-                if let Some(sz) = res.orig_host_size {
-                    println!("Original Size:   {sz} bytes");
-                }
-                if let Some(sha) = res.orig_host_sha256 {
-                    println!("Original SHA256: {sha}");
-                }
-                if let Some(meta) = res.metadata {
-                    println!("Metadata:        {meta}");
-                }
+    } else {
+        println!("Carrier: {}", res.carrier);
+        println!("Format:  {}", res.format);
+        println!("Has Hidden Data: {}", res.has_hidden_data);
+        if res.has_hidden_data {
+            if let Some(s) = res.strategy {
+                println!("Strategy:        {s}");
             }
-
-            // Capacity report (available whether or not an envelope exists).
-            // The first available strategy is what `-s auto` would pick for a
-            // payload that fits.
-            let auto_idx = res.strategies.iter().position(|c| c.available);
-            println!("Strategy capacities (max payload size):");
-            for (idx, c) in res.strategies.iter().enumerate() {
-                let auto = if Some(idx) == auto_idx {
-                    " [auto preference]"
-                } else {
-                    ""
-                };
-                let state = if c.available { "" } else { " (unavailable)" };
-                let detail = c.note.as_deref().unwrap_or("");
-                if detail.is_empty() {
-                    println!("  - {}{}{}: {}", c.strategy, auto, state, c.limit);
-                } else {
-                    println!("  - {}{}{}: {} — {}", c.strategy, auto, state, c.limit, detail);
-                }
+            if let Some(off) = res.ube_offset {
+                println!("UBE Offset:      {off}");
+            }
+            if let Some(sz) = res.ube_total_size {
+                println!("UBE Total Size:  {sz} bytes");
+            }
+            if let Some(enc) = res.is_encrypted {
+                println!("Encrypted:       {enc}");
+            }
+            if let Some(stl) = res.is_stealth {
+                println!("Stealth Mode:    {stl}");
+            }
+            if let Some(h) = res.password_hint {
+                println!("Password Hint:   {h}");
+            }
+            if let Some(sz) = res.orig_host_size {
+                println!("Original Size:   {sz} bytes");
+            }
+            if let Some(sha) = res.orig_host_sha256 {
+                println!("Original SHA256: {sha}");
+            }
+            if let Some(meta) = res.metadata {
+                println!("Metadata:        {meta}");
             }
         }
+
+        // Capacity report (available whether or not an envelope exists).
+        // The first available strategy is what `-s auto` would pick for a
+        // payload that fits.
+        let auto_idx = res.strategies.iter().position(|c| c.available);
+        println!("Strategy capacities (max payload size):");
+        for (idx, c) in res.strategies.iter().enumerate() {
+            let auto = if Some(idx) == auto_idx {
+                " [auto preference]"
+            } else {
+                ""
+            };
+            let state = if c.available { "" } else { " (unavailable)" };
+            let detail = c.note.as_deref().unwrap_or("");
+            if detail.is_empty() {
+                println!("  - {}{}{}: {}", c.strategy, auto, state, c.limit);
+            } else {
+                println!(
+                    "  - {}{}{}: {} — {}",
+                    c.strategy, auto, state, c.limit, detail
+                );
+            }
+        }
+    }
 
     Ok(())
 }
@@ -583,7 +615,11 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig) -> Result<i32, StrHideError
         );
         println!(
             "Level 2 (Envelope Boundary): [{}] {}",
-            if res.level2_envelope.ok { "PASS" } else { "FAIL" },
+            if res.level2_envelope.ok {
+                "PASS"
+            } else {
+                "FAIL"
+            },
             res.level2_envelope.detail
         );
         println!(
@@ -720,10 +756,11 @@ fn unescape_string(s: &str) -> String {
                 // second escape adds its own 6 characters ("\u" + 4 digits).
                 if (0xD800..=0xDBFF).contains(&code)
                     && let Some(low) = read_hex(&chars, i + 8, 4)
-                        && (0xDC00..=0xDFFF).contains(&low) {
-                            code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-                            consumed = 10;
-                        }
+                    && (0xDC00..=0xDFFF).contains(&low)
+                {
+                    code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                    consumed = 10;
+                }
                 out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
                 i += 2 + consumed;
             }

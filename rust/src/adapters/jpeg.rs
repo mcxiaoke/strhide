@@ -1,11 +1,11 @@
 //! JPEG format adapter for strhide with APP15/COM segment multi-chain hiding.
 
-use std::io::{Read, Seek, SeekFrom, Write};
 use crate::adapters::{
     HostAdapter, SeekRead, StrategyCapacity, SubStream, eof::EofAdapter, format_bytes,
 };
 use crate::envelope::EnvelopeTrailer;
 use crate::errors::StrHideError;
+use std::io::{Read, Seek, SeekFrom, Write};
 
 pub const JPEG_SOI: [u8; 2] = [0xFF, 0xD8];
 pub const JPEG_SOS: [u8; 2] = [0xFF, 0xDA];
@@ -20,7 +20,9 @@ pub fn find_jpeg_sos_offset<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<u
     let mut soi = [0u8; 2];
     reader.read_exact(&mut soi)?;
     if soi != JPEG_SOI {
-        return Err(StrHideError::CorruptedData("Invalid JPEG SOI marker".into()));
+        return Err(StrHideError::CorruptedData(
+            "Invalid JPEG SOI marker".into(),
+        ));
     }
 
     loop {
@@ -413,7 +415,8 @@ impl HostAdapter for JpegAdapter {
                 if stego_in.read_exact(&mut trailer_bytes).is_err() {
                     continue;
                 }
-                let trailer = match EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic) {
+                let trailer = match EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic)
+                {
                     Ok(t) => t,
                     Err(_) => continue,
                 };
@@ -500,7 +503,11 @@ impl HostAdapter for JpegAdapter {
         strategy: &str,
     ) -> Result<Box<dyn SeekRead + 'a>, StrHideError> {
         if strategy == "eof" || ube_total_size <= JPEG_MAX_SEG_PAYLOAD {
-            return Ok(Box::new(SubStream::new(carrier, ube_offset, ube_total_size)?));
+            return Ok(Box::new(SubStream::new(
+                carrier,
+                ube_offset,
+                ube_total_size,
+            )?));
         }
 
         // Construct multi-segment intervals using the deterministic partition function

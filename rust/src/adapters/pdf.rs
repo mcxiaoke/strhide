@@ -1,9 +1,9 @@
 //! PDF format adapter for strhide with compliant Incremental Update object stream hiding.
 
-use std::io::{Read, Seek, SeekFrom, Write};
 use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity, eof::EofAdapter};
 use crate::envelope::EnvelopeTrailer;
 use crate::errors::StrHideError;
+use std::io::{Read, Seek, SeekFrom, Write};
 
 pub const PDF_MAGIC: [u8; 5] = *b"%PDF-";
 
@@ -15,7 +15,9 @@ pub struct PdfTrailerInfo {
     pub info_ref: Option<String>,
 }
 
-pub fn parse_pdf_trailer_info<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<PdfTrailerInfo, StrHideError> {
+pub fn parse_pdf_trailer_info<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+) -> Result<PdfTrailerInfo, StrHideError> {
     let file_size = reader.seek(SeekFrom::End(0))?;
     let scan_len = std::cmp::min(file_size, 64 * 1024);
     reader.seek(SeekFrom::End(-(scan_len as i64)))?;
@@ -25,7 +27,11 @@ pub fn parse_pdf_trailer_info<R: Read + Seek + ?Sized>(reader: &mut R) -> Result
     let eof_idx = tail
         .windows(5)
         .rposition(|w| w == b"%%EOF")
-        .ok_or_else(|| StrHideError::CorruptedData("Valid PDF %%EOF marker not found within tail window".into()))?;
+        .ok_or_else(|| {
+            StrHideError::CorruptedData(
+                "Valid PDF %%EOF marker not found within tail window".into(),
+            )
+        })?;
 
     let abs_eof_pos = (file_size - scan_len) + eof_idx as u64 + 5;
     reader.seek(SeekFrom::Start(abs_eof_pos))?;
@@ -38,16 +44,18 @@ pub fn parse_pdf_trailer_info<R: Read + Seek + ?Sized>(reader: &mut R) -> Result
     let eof_offset = abs_eof_pos + idx_nl as u64;
 
     let text_before_eof = String::from_utf8_lossy(&tail[..eof_idx]);
-    let sx_idx = text_before_eof
-        .rfind("startxref")
-        .ok_or_else(|| StrHideError::CorruptedData("PDF startxref marker not found before %%EOF".into()))?;
+    let sx_idx = text_before_eof.rfind("startxref").ok_or_else(|| {
+        StrHideError::CorruptedData("PDF startxref marker not found before %%EOF".into())
+    })?;
 
     let sx_part = text_before_eof[sx_idx + "startxref".len()..].trim();
     let prev_startxref: u64 = sx_part
         .split_whitespace()
         .next()
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| StrHideError::CorruptedData("Could not parse startxref offset integer".into()))?;
+        .ok_or_else(|| {
+            StrHideError::CorruptedData("Could not parse startxref offset integer".into())
+        })?;
 
     // Next free object number. Classic PDFs expose /Size in a `trailer`
     // dictionary, where Size is defined as one past the highest object number
@@ -234,7 +242,10 @@ fn scan_max_object_number(text: &str) -> Option<u64> {
 pub struct PdfAdapter;
 
 impl PdfAdapter {
-    pub fn calc_prefix_len<R: Read + Seek + ?Sized>(reader: &mut R, ube_size: u64) -> Result<u64, StrHideError> {
+    pub fn calc_prefix_len<R: Read + Seek + ?Sized>(
+        reader: &mut R,
+        ube_size: u64,
+    ) -> Result<u64, StrHideError> {
         let info = parse_pdf_trailer_info(reader)?;
         let obj_header = format!(
             "\n{} 0 obj\n<< /Type /Metadata /Length {} >>\nstream\n",
@@ -375,7 +386,10 @@ impl HostAdapter for PdfAdapter {
             + ube_size
             + b"\nendstream\nendobj\n".len() as u64;
 
-        let xref_str = format!("xref\n{} 1\n{:010} 00000 n \n", info.new_obj_num, actual_obj_offset);
+        let xref_str = format!(
+            "xref\n{} 1\n{:010} 00000 n \n",
+            info.new_obj_num, actual_obj_offset
+        );
         out.write_all(xref_str.as_bytes())?;
 
         // 6. Write incremental trailer
@@ -433,39 +447,43 @@ impl HostAdapter for PdfAdapter {
         stego_in.read_exact(&mut tail)?;
 
         if let Some(eof_idx) = tail.windows(5).rposition(|w| w == b"%%EOF")
-            && let Some(endstream_idx) = tail[..eof_idx].windows(9).rposition(|w| w == b"endstream") {
-                let stream_content_tail = &tail[..endstream_idx];
-                let mut stream_end_in_tail = stream_content_tail.len();
-                while stream_end_in_tail > 0
-                    && (stream_content_tail[stream_end_in_tail - 1] == b'\r'
-                        || stream_content_tail[stream_end_in_tail - 1] == b'\n')
-                {
-                    stream_end_in_tail -= 1;
-                }
+            && let Some(endstream_idx) = tail[..eof_idx].windows(9).rposition(|w| w == b"endstream")
+        {
+            let stream_content_tail = &tail[..endstream_idx];
+            let mut stream_end_in_tail = stream_content_tail.len();
+            while stream_end_in_tail > 0
+                && (stream_content_tail[stream_end_in_tail - 1] == b'\r'
+                    || stream_content_tail[stream_end_in_tail - 1] == b'\n')
+            {
+                stream_end_in_tail -= 1;
+            }
 
-                if stream_end_in_tail >= 24 {
-                    let trailer_bytes = &stream_content_tail[stream_end_in_tail - 24..stream_end_in_tail];
-                    if let Ok(trailer) = EnvelopeTrailer::unpack(trailer_bytes, expected_trailer_magic) {
-                        let abs_stream_end = (total_size - scan_len) + stream_end_in_tail as u64;
-                        if trailer.ube_offset + trailer.ube_total_size == abs_stream_end
-                            && trailer.ube_offset >= 8 {
-                                stego_in.seek(SeekFrom::Start(trailer.ube_offset - 8))?;
-                                let mut prefix = [0u8; 8];
-                                if stego_in.read_exact(&mut prefix).is_ok()
-                                    && (prefix.ends_with(b"stream\r\n")
-                                        || prefix.ends_with(b"stream\n")
-                                        || prefix.ends_with(b"stream"))
-                                {
-                                    return Ok(Some((
-                                        trailer.ube_offset,
-                                        trailer.ube_total_size,
-                                        "incremental".into(),
-                                    )));
-                                }
-                            }
+            if stream_end_in_tail >= 24 {
+                let trailer_bytes =
+                    &stream_content_tail[stream_end_in_tail - 24..stream_end_in_tail];
+                if let Ok(trailer) = EnvelopeTrailer::unpack(trailer_bytes, expected_trailer_magic)
+                {
+                    let abs_stream_end = (total_size - scan_len) + stream_end_in_tail as u64;
+                    if trailer.ube_offset + trailer.ube_total_size == abs_stream_end
+                        && trailer.ube_offset >= 8
+                    {
+                        stego_in.seek(SeekFrom::Start(trailer.ube_offset - 8))?;
+                        let mut prefix = [0u8; 8];
+                        if stego_in.read_exact(&mut prefix).is_ok()
+                            && (prefix.ends_with(b"stream\r\n")
+                                || prefix.ends_with(b"stream\n")
+                                || prefix.ends_with(b"stream"))
+                        {
+                            return Ok(Some((
+                                trailer.ube_offset,
+                                trailer.ube_total_size,
+                                "incremental".into(),
+                            )));
+                        }
                     }
                 }
             }
+        }
 
         // 2. Fallback to EOF
         if let Some(t) = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {
