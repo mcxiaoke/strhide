@@ -20,10 +20,10 @@ use rand::RngExt;
 
 use strhide::adapters::zip::find_eocd_offset;
 use strhide::engine::{
-    CarrierMetadata, PayloadSource, WriteOptions, read_carrier, remove_carrier, sanitize_filename,
-    verify_carrier, write_carrier,
+    PayloadSource, WriteOptions, read_carrier, remove_carrier, sanitize_filename, verify_carrier,
+    write_carrier,
 };
-use strhide::envelope::{EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE, MAX_HINT_LEN};
+use strhide::envelope::{EnvelopeHeader, EnvelopeTrailer, MAX_HINT_LEN};
 use strhide::errors::StrHideError;
 
 // --------------------------------------------------------------------------- helpers
@@ -318,14 +318,22 @@ fn path_traversal_sanitized() {
         &stego,
     );
 
-    // Equal-length tamper of the plaintext metadata filename.
+    // Equal-length tamper of the plaintext metadata filename. The metadata
+    // block uses the compact binary layout (FLAG_COMPACT_META):
+    //   u8 version | u16 name_len | filename
+    // so patch the name in place with a same-length traversal payload.
     let mut data = fs::read(&stego).unwrap();
-    let old = b"\"filename\":\"payload.bin\"";
-    let new = b"\"filename\":\"../EVIL.txt\"";
-    let pos = data
+    let old = b"\x01\x0b\x00payload.bin";
+    let new = b"\x01\x0b\x00../EVIL.txt";
+    assert_eq!(old.len(), new.len());
+    let hits: Vec<usize> = data
         .windows(old.len())
-        .position(|w| w == old)
-        .expect("filename field");
+        .enumerate()
+        .filter(|(_, w)| *w == old)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(hits.len(), 1, "expected exactly one compact metadata block");
+    let pos = hits[0];
     data[pos..pos + new.len()].copy_from_slice(new);
     fs::write(&stego, &data).unwrap();
 
@@ -486,30 +494,53 @@ fn pdf_dirty_tail_lossless() {
 
 // --------------------------------------------------------------------------- R4 / P1-5
 
-fn exact_ube_size_for_payload(payload_len: usize) -> usize {
-    let meta = CarrierMetadata {
-        filename: "payload.bin".to_string(),
-        raw_size: payload_len as u64,
-        raw_sha256: "0".repeat(64),
-        created_at: 1773719840,
-    };
-    let meta_len = serde_json::to_vec(&meta).unwrap().len();
-    HEADER_SIZE + (meta_len + 16) + (payload_len + 20) + 24
+/// Envelope size for an encrypted write of `payload_len` incompressible bytes,
+/// measured against the *current* writer. The metadata block is now the compact
+/// binary layout (46 bytes) instead of the 137-byte JSON form, so capacity
+/// boundary tests must calibrate against reality instead of predicting the size
+/// from a formula. The payload is written as `payload.bin` in both the probe
+/// and the real run so the metadata length (filename included) stays identical.
+fn measured_encrypted_ube_size(carrier: &Path, payload_len: usize, out: &Path) -> u64 {
+    let dir = carrier.parent().unwrap();
+    let payload = dir.join("payload.bin");
+    let mut buf = vec![0u8; payload_len];
+    rand::rng().fill(&mut buf); // incompressible: payload passes through
+    fs::write(&payload, &buf).unwrap();
+    let res = write_carrier_file(
+        carrier,
+        PayloadSource::File(&payload),
+        Some("pw"),
+        "auto",
+        false,
+        out,
+    );
+    res.ube_size
 }
 
 #[test]
 fn auto_capacity_boundary_uses_multisegment_app15() {
     let dir = scratch("auto_boundary");
-    let target = 65534usize; // one byte over the JPEG single-segment limit
-    let payload_len = (65000..65600)
-        .find(|l| exact_ube_size_for_payload(*l) == target)
-        .expect("no payload length hits the boundary");
+    let target = 65534u64; // one byte over the JPEG single-segment limit
+    let carrier = dir.join("b.jpg");
+    fs::write(&carrier, make_jpeg()).unwrap();
+
+    // Calibrate the fixed overhead of an encrypted envelope with one real write.
+    let probe_len: usize = 65_000;
+    let probe_ube = measured_encrypted_ube_size(&carrier, probe_len, &dir.join("cal.jpg"));
+    let overhead = probe_ube - probe_len as u64;
+    let payload_len = (target - overhead) as usize;
+    // The only way the calibration can drift is a change in the LEB128 width of
+    // `raw_size` (16384..2097151 share the 3-byte form), so a generous bound is
+    // enough; the exact value is asserted right after the real write.
+    assert!(
+        payload_len.abs_diff(probe_len) < 1024,
+        "calibration drifted: probe {probe_len} -> payload {payload_len}"
+    );
+
     let payload = dir.join("payload.bin");
     let mut buf = vec![0u8; payload_len];
     rand::rng().fill(&mut buf); // incompressible
     fs::write(&payload, &buf).unwrap();
-    let carrier = dir.join("b.jpg");
-    fs::write(&carrier, make_jpeg()).unwrap();
 
     let res = write_carrier_file(
         &carrier,
@@ -521,7 +552,7 @@ fn auto_capacity_boundary_uses_multisegment_app15() {
     );
     // Multi-segment chain now handles >64KB payloads without degrading to eof
     assert_eq!(res.strategy, "app_segment");
-    assert_eq!(res.ube_size, target as u64);
+    assert_eq!(res.ube_size, target);
     let out = read_carrier(&dir.join("bs.jpg"), None, Some("pw")).unwrap();
     assert_eq!(out.data.len(), payload_len);
 

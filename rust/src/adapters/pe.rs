@@ -198,19 +198,33 @@ impl HostAdapter for PeAdapter {
                         let cap_slack = slack.saturating_sub(pe_codebits::CHANNEL_HEADER_LEN);
                         let cap = cap_bits.min(cap_slack);
                         codebits.capacity_bytes = Some(cap as u64);
-                        codebits.available = cap >= pe_codebits::MIN_UBE_LEN as usize;
+                        // Report against the *real* smallest envelope the writer
+                        // emits, not the 136-byte structural bound: otherwise
+                        // `inspect` advertises a capacity that every `write`
+                        // rejects.
+                        let plain_ok = cap >= crate::envelope::MIN_UBE_PLAIN as usize;
+                        let encrypted_ok = cap >= crate::envelope::MIN_UBE_ENCRYPTED as usize;
+                        codebits.available = plain_ok;
                         codebits.limit =
                             format!("≤ {} B (file size unchanged)", format_bytes(cap as u64));
-                        codebits.note = Some(if codebits.available {
+                        codebits.note = Some(if encrypted_ok {
                             format!(
-                                "instruction-encoding channel; needs {} B of contiguous zero slack for the restore diff",
-                                format_bytes(cap_slack as u64)
+                                "instruction-encoding channel; fits an encrypted envelope (smallest {} B); longest zero-value slack run is {} B, which caps the restore diff",
+                                format_bytes(crate::envelope::MIN_UBE_ENCRYPTED as u64),
+                                format_bytes(slack as u64)
+                            )
+                        } else if plain_ok {
+                            format!(
+                                "instruction-encoding channel; fits an unencrypted envelope only (encrypted needs ≥ {} B); longest zero-value slack run is {} B, which caps the restore diff",
+                                format_bytes(crate::envelope::MIN_UBE_ENCRYPTED as u64),
+                                format_bytes(slack as u64)
                             )
                         } else {
                             format!(
-                                "not usable on this .text: at most {} B (needs ≥ {} B)",
+                                "not usable on this .text: at most {} B (unencrypted needs ≥ {} B, encrypted ≥ {} B)",
                                 format_bytes(cap as u64),
-                                pe_codebits::MIN_UBE_LEN
+                                format_bytes(crate::envelope::MIN_UBE_PLAIN as u64),
+                                format_bytes(crate::envelope::MIN_UBE_ENCRYPTED as u64)
                             )
                         });
                     }

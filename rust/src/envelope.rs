@@ -12,11 +12,29 @@ pub const FLAG_COMPRESSED: u8 = 0x02;
 pub const FLAG_IS_FILE: u8 = 0x04;
 pub const FLAG_STEALTH: u8 = 0x08;
 pub const FLAG_HAS_HINT: u8 = 0x10;
+/// Metadata block uses the compact binary layout instead of JSON. Readers must
+/// branch on this flag; writers set it whenever the block is encodable, so the
+/// envelope shrinks by ~93 bytes (the JSON form spends 64 bytes on the SHA-256
+/// hex string alone). Older readers that predate this flag still parse the
+/// JSON form (flag clear) and fail cleanly — never silently — on the compact
+/// form.
+pub const FLAG_COMPACT_META: u8 = 0x20;
 
 pub const HEADER_SIZE: usize = 112;
 pub const AAD_SIZE: usize = 80;
 pub const TRAILER_SIZE: usize = 24;
 pub const MAX_HINT_LEN: u32 = 1024;
+
+/// Smallest envelope the writer can currently produce with compact metadata,
+/// an empty filename and a 1-byte payload:
+/// `header 112 + meta 41 + payload 1 + trailer 24`.
+///
+/// Used by capacity reporting (`pe_codebits`) so `inspect` stops advertising a
+/// capacity that cannot hold even the smallest real envelope (`MIN_UBE_LEN` of
+/// 136 only covers header + trailer, which no writer ever emits).
+pub const MIN_UBE_PLAIN: u32 = 178;
+/// Same, encrypted: `112 + (meta 41 + 16 tag) + (1 + 4 length + 16 tag) + 24`.
+pub const MIN_UBE_ENCRYPTED: u32 = 214;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvelopeHeader {
@@ -78,6 +96,11 @@ impl EnvelopeHeader {
 
     pub fn has_hint(&self) -> bool {
         (self.flags & FLAG_HAS_HINT) != 0
+    }
+
+    /// Metadata block is the compact binary layout rather than JSON.
+    pub fn is_compact_meta(&self) -> bool {
+        (self.flags & FLAG_COMPACT_META) != 0
     }
 
     /// Validate header field ranges against the known envelope total size.

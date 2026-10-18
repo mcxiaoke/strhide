@@ -1,6 +1,6 @@
 [package]
 name = "strhide"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Smart format-preserving lossless data hiding library and CLI (PNG/JPEG/MP4/ZIP/PDF/PE carriers, AES-256-GCM, stealth mode)"
 license = "Apache-2.0"

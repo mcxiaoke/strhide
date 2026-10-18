@@ -15,8 +15,9 @@ use crate::crypto::{
     encrypt_stream_to_chunks, normalize_nfc,
 };
 use crate::envelope::{
-    EnvelopeHeader, EnvelopeTrailer, FLAG_COMPRESSED, FLAG_ENCRYPTED, FLAG_HAS_HINT, FLAG_IS_FILE,
-    FLAG_STEALTH, HEADER_SIZE, STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC,
+    EnvelopeHeader, EnvelopeTrailer, FLAG_COMPACT_META, FLAG_COMPRESSED, FLAG_ENCRYPTED,
+    FLAG_HAS_HINT, FLAG_IS_FILE, FLAG_STEALTH, HEADER_SIZE, STANDARD_HEADER_MAGIC,
+    STANDARD_TRAILER_MAGIC,
 };
 use crate::errors::StrHideError;
 use crate::rejection::run_all_rejection_checks;
@@ -28,6 +29,137 @@ pub struct CarrierMetadata {
     pub raw_size: u64,
     pub raw_sha256: String,
     pub created_at: u64,
+}
+
+/// Version of the compact (binary) metadata block. The JSON form carries no
+/// version; a reader only reaches this layout when `FLAG_COMPACT_META` is set.
+const COMPACT_META_VERSION: u8 = 0x01;
+/// Compact layout: `u8 version | u16 name_len | name | varint raw_size |
+/// 32-byte digest | varint created_at`. The JSON form spends 64 bytes on the
+/// SHA-256 hex string alone plus ~60 bytes of key names, so this shrinks a
+/// 1-byte payload's metadata from 137 to ~46 bytes.
+const COMPACT_META_MAX_NAME: usize = u16::MAX as usize;
+
+fn put_varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn take_varint(input: &[u8], pos: &mut usize) -> Result<u64, StrHideError> {
+    let mut value: u64 = 0;
+    let mut shift: u32 = 0;
+    for _ in 0..10 {
+        let byte = *input.get(*pos).ok_or_else(|| {
+            StrHideError::CorruptedData("Corrupted compact metadata block: truncated varint".into())
+        })?;
+        *pos += 1;
+        value |= ((byte & 0x7f) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+        shift += 7;
+    }
+    Err(StrHideError::CorruptedData(
+        "Corrupted compact metadata block: varint too long".into(),
+    ))
+}
+
+fn hex_to_digest32(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        out[i] = ((hi << 4) | lo) as u8;
+    }
+    Some(out)
+}
+
+impl CarrierMetadata {
+    /// Compact encoding, or `None` when this metadata cannot be represented
+    /// (over-long filename, malformed digest). Callers fall back to JSON in
+    /// that case and leave `FLAG_COMPACT_META` clear.
+    fn encode_compact(&self) -> Option<Vec<u8>> {
+        let name = self.filename.as_bytes();
+        if name.len() > COMPACT_META_MAX_NAME {
+            return None;
+        }
+        let digest = hex_to_digest32(&self.raw_sha256)?;
+        let mut out = Vec::with_capacity(3 + name.len() + 1 + 32 + 1);
+        out.push(COMPACT_META_VERSION);
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(name);
+        put_varint(&mut out, self.raw_size);
+        out.extend_from_slice(&digest);
+        put_varint(&mut out, self.created_at);
+        Some(out)
+    }
+
+    fn decode_compact(bytes: &[u8]) -> Result<Self, StrHideError> {
+        let bad = |msg: &str| {
+            StrHideError::CorruptedData(format!("Corrupted compact metadata block: {msg}"))
+        };
+        if bytes.len() < 3 {
+            return Err(bad("truncated header"));
+        }
+        if bytes[0] != COMPACT_META_VERSION {
+            return Err(StrHideError::CorruptedData(format!(
+                "Unsupported compact metadata version {:#04x} (expected {:#04x})",
+                bytes[0], COMPACT_META_VERSION
+            )));
+        }
+        let name_len = u16::from_le_bytes([bytes[1], bytes[2]]) as usize;
+        let mut pos = 3usize;
+        let name_end = pos
+            .checked_add(name_len)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| bad("truncated filename"))?;
+        let filename = String::from_utf8(bytes[pos..name_end].to_vec())
+            .map_err(|_| bad("filename is not valid UTF-8"))?;
+        pos = name_end;
+        let raw_size = take_varint(bytes, &mut pos)?;
+        let digest_end = pos
+            .checked_add(32)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| bad("truncated SHA-256 digest"))?;
+        let raw_sha256 = bytes[pos..digest_end]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        pos = digest_end;
+        let created_at = take_varint(bytes, &mut pos)?;
+        Ok(Self {
+            filename,
+            raw_size,
+            raw_sha256,
+            created_at,
+        })
+    }
+}
+
+/// Encode the metadata block, preferring the compact layout. Returns the bytes
+/// plus whether the compact layout was used (the caller sets
+/// `FLAG_COMPACT_META` accordingly, and the flag feeds the AEAD AAD).
+fn encode_metadata(meta: &CarrierMetadata) -> Result<(Vec<u8>, bool), StrHideError> {
+    match meta.encode_compact() {
+        Some(bytes) => Ok((bytes, true)),
+        None => Ok((serde_json::to_vec(meta)?, false)),
+    }
+}
+
+/// Decode either layout, driven by `FLAG_COMPACT_META`.
+fn decode_metadata(bytes: &[u8], compact: bool) -> Result<CarrierMetadata, StrHideError> {
+    if compact {
+        CarrierMetadata::decode_compact(bytes)
+    } else {
+        serde_json::from_slice(bytes)
+            .map_err(|e| StrHideError::CorruptedData(format!("Corrupted metadata block: {e}")))
+    }
 }
 
 /// Where the payload to hide comes from.
@@ -512,7 +644,13 @@ pub fn write_carrier(
         raw_sha256,
         created_at,
     };
-    let meta_raw = serde_json::to_vec(&meta_obj)?;
+    // Compact binary block when representable (the normal case); the JSON form
+    // stays as a fallback for pathological metadata and as the legacy reader
+    // path. `FLAG_COMPACT_META` must be set before the AAD is captured.
+    let (meta_raw, compact_meta) = encode_metadata(&meta_obj)?;
+    if compact_meta {
+        flags |= FLAG_COMPACT_META;
+    }
 
     // Exact UBE size, computed before any strategy decision. All components are
     // deterministic at this point:
@@ -934,8 +1072,7 @@ pub fn read_carrier(
         meta_bytes
     };
 
-    let meta_obj: CarrierMetadata = serde_json::from_slice(&meta_plain)
-        .map_err(|e| StrHideError::CorruptedData(format!("Corrupted metadata block: {e}")))?;
+    let meta_obj = decode_metadata(&meta_plain, header.is_compact_meta())?;
 
     // Read payload (checked_sub: validate_against already bounds the fields,
     // but keep the arithmetic defensive against corrupted envelopes)
@@ -1226,7 +1363,8 @@ pub fn inspect_carrier(
     if !header.is_encrypted() {
         let mut meta_bytes = vec![0u8; header.meta_len as usize];
         if ube_stream.read_exact(&mut meta_bytes).is_ok()
-            && let Ok(val) = serde_json::from_slice(&meta_bytes)
+            && let Ok(meta_obj) = decode_metadata(&meta_bytes, header.is_compact_meta())
+            && let Ok(val) = serde_json::to_value(&meta_obj)
         {
             meta_val = Some(val);
         }
@@ -1241,7 +1379,9 @@ pub fn inspect_carrier(
                 &header.base_nonce,
                 &header.get_aad(),
             ) {
-                if let Ok(val) = serde_json::from_slice(&dec) {
+                if let Ok(meta_obj) = decode_metadata(&dec, header.is_compact_meta())
+                    && let Ok(val) = serde_json::to_value(&meta_obj)
+                {
                     meta_val = Some(val);
                 }
             } else {
@@ -1452,4 +1592,103 @@ pub fn verify_carrier(
             detail: l3_msg,
         },
     })
+}
+
+#[cfg(test)]
+mod compact_meta_tests {
+    use super::*;
+
+    fn meta(name: &str, size: u64, ts: u64) -> CarrierMetadata {
+        CarrierMetadata {
+            filename: name.to_string(),
+            raw_size: size,
+            raw_sha256: "ab".repeat(32),
+            created_at: ts,
+        }
+    }
+
+    fn assert_same(actual: &CarrierMetadata, expected: &CarrierMetadata) {
+        assert_eq!(actual.filename, expected.filename);
+        assert_eq!(actual.raw_size, expected.raw_size);
+        assert_eq!(actual.raw_sha256, expected.raw_sha256);
+        assert_eq!(actual.created_at, expected.created_at);
+    }
+
+    #[test]
+    fn compact_roundtrip_covers_width_and_text_edges() {
+        let cases = [
+            ("a", 0u64, 0u64),
+            ("x.txt", 1, 1_700_000_000),
+            ("目录/长文件名-测试.bin", u32::MAX as u64, u64::MAX / 2),
+            ("n", u64::MAX, 127),
+        ];
+        for (name, size, ts) in cases {
+            let original = meta(name, size, ts);
+            let encoded = original.encode_compact().expect("encodable");
+            let decoded = CarrierMetadata::decode_compact(&encoded).expect("decodable");
+            assert_same(&decoded, &original);
+        }
+        // 300-byte name still fits the u16 length field
+        let long = meta(&"n".repeat(300), 7, 7);
+        let encoded = long.encode_compact().expect("encodable");
+        assert_same(&CarrierMetadata::decode_compact(&encoded).unwrap(), &long);
+    }
+
+    #[test]
+    fn compact_block_is_much_smaller_than_json() {
+        let m = meta("s.txt", 1, 1_700_000_000);
+        let compact = m.encode_compact().unwrap();
+        let json = serde_json::to_vec(&m).unwrap();
+        assert!(
+            compact.len() + 80 < json.len(),
+            "compact {} json {}",
+            compact.len(),
+            json.len()
+        );
+        // 1 version + 2 name_len + 5 name + 1 size + 32 digest + 5 timestamp
+        assert_eq!(compact.len(), 46);
+    }
+
+    #[test]
+    fn compact_rejects_corrupt_input() {
+        assert!(CarrierMetadata::decode_compact(&[]).is_err());
+        assert!(CarrierMetadata::decode_compact(&[0x01]).is_err());
+        // unsupported version
+        assert!(CarrierMetadata::decode_compact(&[0x02, 0x00, 0x00]).is_err());
+        // truncated filename
+        assert!(CarrierMetadata::decode_compact(&[0x01, 0x05, 0x00, b'a']).is_err());
+        // truncated digest
+        let mut v = vec![0x01, 0x01, 0x00, b'a'];
+        put_varint(&mut v, 1);
+        v.extend_from_slice(&[0u8; 10]);
+        assert!(CarrierMetadata::decode_compact(&v).is_err());
+        // invalid UTF-8 filename
+        assert!(CarrierMetadata::decode_compact(&[0x01, 0x01, 0x00, 0xff]).is_err());
+    }
+
+    #[test]
+    fn json_path_still_decodes_and_never_reads_compact() {
+        let m = meta("legacy.bin", 42, 1_600_000_000);
+        let json = serde_json::to_vec(&m).unwrap();
+        assert_same(&decode_metadata(&json, false).unwrap(), &m);
+        // A compact block read through the legacy (JSON) path must fail, not
+        // silently produce garbage: that is what keeps old readers safe.
+        let compact = m.encode_compact().unwrap();
+        assert!(decode_metadata(&compact, false).is_err());
+        // ...and the compact path must not accept JSON.
+        assert!(decode_metadata(&json, true).is_err());
+    }
+
+    #[test]
+    fn unencodable_metadata_falls_back_to_json() {
+        let long_name = meta(&"n".repeat(COMPACT_META_MAX_NAME + 1), 1, 1);
+        assert!(long_name.encode_compact().is_none());
+        let (bytes, compact) = encode_metadata(&long_name).unwrap();
+        assert!(!compact);
+        assert_same(&decode_metadata(&bytes, compact).unwrap(), &long_name);
+
+        let mut bad_digest = meta("x", 1, 1);
+        bad_digest.raw_sha256 = "zz".repeat(32);
+        assert!(bad_digest.encode_compact().is_none());
+    }
 }

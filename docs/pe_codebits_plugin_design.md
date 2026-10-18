@@ -10,7 +10,7 @@
 
 strhide 现有的 Windows PE 支持只有 `pe_overlay` 一个策略：把 UBE 信封追加到 PE 镜像边界之后。该策略可靠但有两个固有缺陷：
 
-1. **文件尺寸增大**——追加的信封（最小约 270 字节，实测见 §10.2）立即可见于文件长度，是对抗尺寸分析时的明显破绽；
+1. **文件尺寸增大**——追加的信封（最小 183 字节明文 / 219 字节加密，实测见 §10.2）立即可见于文件长度，是对抗尺寸分析时的明显破绽；
 2. **结构异常**——镜像边界之后出现的数据块是 `binwalk`、PE 解析器的标准检测目标。
 
 steg86（github.com/woodruffw/steg86，本地分支 v0.2.1）展示了另一条路径：利用 x86 ModR/M 字节的编码冗余，把信息藏进 `.text` 段**既有指令的等价编码形态**里，不改变文件尺寸、不改变指令语义。本设计将该方法移植为 strhide 的 PE 策略插件。
@@ -328,6 +328,8 @@ Python write 自检本就是 `locate`（约 L438-447），无需改动。
 | # | 偏差 | 原因 |
 | --- | --- | --- |
 | D1 | 标准模式信道魔数由 `STHC` 改为 `STH!`（即 UBE trailer 魔数） | 隐身模式下信道魔数必须是口令派生值才能保住可否认性；让适配器从 UBE 载荷末尾 4 字节取魔数，引擎零新增参数、适配器零隐身感知，且标准/隐身两种模式自动正确。原 `STHC` 仅是占位符，未进入任何已发布格式 |
+| D2 | `parse_pe_code_layout_streaming` 曾把 64 KiB 头窗口当成完整宿主：`.text` 扫描被截断到 `0x10000 - text_offset`，且 `rawptr+rawsize > 64 KiB` 的节尾 padding 整段被丢弃 | §4.2/§6.3 的区间计算全部以"整文件"为前提，streaming 包装层却把 `pe_code_layout(&head)` 内 `data.len()` 当 `host_size`。实测 HxD64 的 5.4 MiB `.text` 只扫了 63 KiB、容量报 90 B（真实 458 B）。修复方式：抽出 `pe_code_layout_with_host(data, host_size)`，所有区间按显式宿主大小钳位 |
+| D3 | 元数据块由 JSON（137 B）改为紧凑二进制（46 B），信封 274/310 → 183/219 B | 打散策略的容量受 `.text` 位数与连续零 slack 双重限制，而多数 PE 只有 220-490 B；137 B 里 64 B 是 SHA-256 的十六进制文本。用 `FLAG_COMPACT_META` 隔离，读取端两种布局并存，旧信封不受影响（详见 `smart_file_data_hiding_design.md` §3.4） |
 
 ---
 
@@ -341,7 +343,7 @@ N_max        = (usable - 112) / 8    该宿主可容纳的最大 UBE
 slack_need   = 14 + N                所需连续零值 slack 字节数
 ```
 
-UBE 构成（实测）：固定头 112 + 元数据约 130-160（JSON）+ 尾 24 ≈ **270 字节起**（2 字符文本、无口令）；加密追加 nonce/tag 与分块开销约 +20 字节。
+UBE 构成（实测，2026-10-18 起使用紧凑二进制元数据）：固定头 112 + 元数据约 46（`u8 version + u16 name_len + filename + varint raw_size + 32B SHA-256 + varint created_at`）+ 尾 24 ≈ **183 字节起**（1 字节载荷、无口令）；加密追加 16 字节元数据 tag、4 字节分块长度与 16 字节载荷 tag ≈ **+36 → 219 字节起**。旧版 JSON 元数据为 137 字节（总 274/310），读取端按 `FLAG_COMPACT_META` 分支，两种格式都支持。
 
 ### 10.2 实测数据（iced-x86 Python 1.21.0，与本机 steg86 Rust 版 profile 输出逐位一致）
 
@@ -359,9 +361,10 @@ UBE 构成（实测）：固定头 112 + 元数据约 130-160（JSON）+ 尾 24 
 结论：
 
 - **可改造指令密度约 30-50 条/KB .text**；信道容量约 4-6 UBE 字节/KB .text；
-- 隐藏一条 270 字节的最小信封约需 2,272 个可改造位置 + 284 字节连续零 slack——**约 100KB 以上的典型 PE 才够**，更小的（where.exe）自动回退 `pe_overlay`；
+- 隐藏一条 219 字节的最小加密信封约需 1,864 个可改造位置 + 233 字节连续零 slack——**约 50-100 KB 以上的典型 PE 才够**，更小的自动回退 `pe_overlay`；
 - 过滤器 F4/F5 在全部 8 个样本上零淘汰；
-- wininit.exe 类紧凑 PE（最大零 run 仅 240 B）在 v1 会回退 overlay——这是方案 G（分块 diff）要解决的问题。
+- wininit.exe 类紧凑 PE（最大零 run 仅 240 B）在 v1 会回退 overlay——这是方案 G（分块 diff）要解决的问题；
+- **上表的 `N_max` 只反映 `.text` 侧，实际容量是 `min(usable/8-14, max_zero_run-14)`**：本例 8 个样本的 slack 都在 240-504 B，所以真实上限约 226-490 B，加密信封（219 B）刚好落在可用区间内，明文（183 B）余量更大。
 
 ### 10.3 原型验证结果
 
@@ -379,8 +382,9 @@ UBE 构成（实测）：固定头 112 + 元数据约 130-160（JSON）+ 尾 24 
 
 ### 10.4 性能
 
-- Python 原型对 635KB `.text`（mspaint，23,692 位置）完整 profile 耗时 **92ms**；Rust 预计快一个量级；
-- read 流程会 profile 两次（locate + open_ube_reader），大 PE 上约 0.2s（Python），可接受；如需优化可加 (path, size, mtime) 键的缓存，列为后续项（§16）。
+- Python 原型对 635KB `.text`（mspaint，23,692 位置）完整 profile 耗时 **92ms**；Rust 快一个量级；
+- Rust 实测：9.8 MiB `.text`（WindTerm.exe，391,484 位置）的 `inspect`（完整 profile + slack 扫描）**0.29 s**，5.4 MiB（HxD64）0.11 s——修正 64 KiB 截断后扫描范围扩大到真实 `.text`，仍在交互可接受范围；
+- read 流程会 profile 两次（locate + open_ube_reader），大 PE 上约 0.5 s；如需优化可加 (path, size, mtime) 键的缓存，列为后续项（§16）。
 
 ---
 

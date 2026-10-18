@@ -670,3 +670,55 @@ fn static_capacity_table_covers_all_adapters() {
         "GENERIC must not be registered"
     );
 }
+
+/// Compact-metadata regression (2026-10-18): a carrier whose `.text` only holds
+/// ~238 bytes of channel was unusable while the envelope carried a 137-byte JSON
+/// metadata block (310-byte encrypted envelope). The 46-byte compact block
+/// (219-byte encrypted envelope) makes exactly this band usable, so the test
+/// pins both the reported capacity and the end-to-end flow.
+#[test]
+fn compact_metadata_makes_marginal_carriers_usable() {
+    let dir = scratch("compact_marginal");
+    let original = make_pe(0x8664, 0x20B, 0x1A00, false);
+    let carrier = dir.join("marginal.exe");
+    fs::write(&carrier, &original).unwrap();
+
+    let report = inspect_carrier(&carrier, None).expect("inspect");
+    let cap = report
+        .strategies
+        .iter()
+        .find(|c| c.strategy == "pe_codebits")
+        .and_then(|c| c.capacity_bytes)
+        .expect("capacity");
+    assert!(
+        (219..310).contains(&cap),
+        "capacity {cap} must sit between the compact (219) and JSON (310) envelope sizes"
+    );
+
+    let out = dir.join("marginal.steg.exe");
+    let opts = WriteOptions {
+        output_path: Some(&out),
+        strategy: "pe_codebits",
+        password: Some("pw"),
+        backup: false,
+        ..Default::default()
+    };
+    let res = write_carrier(&carrier, PayloadSource::Text("hi"), &opts).expect("write must fit");
+    assert!(
+        res.ube_size <= cap as u64,
+        "envelope {} exceeds capacity {cap}",
+        res.ube_size
+    );
+    assert!(res.ube_size < 310);
+    assert_eq!(
+        fs::metadata(&out).unwrap().len(),
+        fs::metadata(&carrier).unwrap().len()
+    );
+
+    let read = read_carrier(&out, None, Some("pw")).expect("read");
+    assert_eq!(read.data, b"hi");
+
+    let restored = dir.join("marginal.restored.exe");
+    remove_carrier(&out, Some(&restored), Some("pw"), false).expect("remove");
+    assert_eq!(fs::read(&restored).unwrap(), original);
+}

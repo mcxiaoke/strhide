@@ -45,9 +45,14 @@ pub const CHANNEL_HEADER_LEN: usize = 14;
 
 const CHANNEL_HEADER_BITS: usize = CHANNEL_HEADER_LEN * 8;
 
-/// Smallest possible UBE (header 112 + trailer 24, no hint/meta/payload).
-/// Used as a sanity bound when reading an untrusted channel header.
-pub const MIN_UBE_LEN: u32 = 136;
+/// Structural lower bound for a channel payload: a bare envelope is a 112-byte
+/// header plus a 24-byte trailer, so anything smaller means a corrupt header
+/// rather than a real envelope. Writer-side minimums (which depend on the
+/// metadata layout and on whether the payload is encrypted) live in
+/// [`crate::envelope::MIN_UBE_PLAIN`] and [`crate::envelope::MIN_UBE_ENCRYPTED`];
+/// capacity reporting must use those, not this.
+pub const MIN_UBE_LEN: u32 =
+    crate::envelope::HEADER_SIZE as u32 + crate::envelope::TRAILER_SIZE as u32;
 
 /// Errors raised by the code-bit channel. Mapped onto [`StrHideError`] at the
 /// adapter boundary; `ChannelNotFound` is *not* an error for `locate` (it
@@ -677,6 +682,20 @@ pub struct PeCodeLayout {
 
 /// Reads a PE's code layout from an in-memory image.
 pub fn pe_code_layout(data: &[u8]) -> Result<PeCodeLayout, CodebitsError> {
+    pe_code_layout_with_host(data, data.len() as u64)
+}
+
+/// Reads a PE's code layout from an in-memory *header window*, clamped against
+/// an explicit `host_size`.
+///
+/// `data` only has to contain the DOS/COFF/optional headers and the section
+/// table (a few KB). Every derived range (`text_scan_len`, slack bounds) is
+/// clamped against `host_size` — the real file size — and **not** against
+/// `data.len()`. The streaming caller reads a 64 KiB header window while
+/// `.text` and the section-tail padding usually live far beyond it, so
+/// clamping to the window would silently truncate both the scan range and the
+/// zero-slack candidates (see `parse_pe_code_layout_streaming`).
+fn pe_code_layout_with_host(data: &[u8], host_size: u64) -> Result<PeCodeLayout, CodebitsError> {
     if data.len() < 0x40 || &data[0..2] != b"MZ" {
         return Err(CodebitsError::NotPe);
     }
@@ -725,13 +744,12 @@ pub fn pe_code_layout(data: &[u8]) -> Result<PeCodeLayout, CodebitsError> {
         .find(|(name, ..)| name == ".text")
         .ok_or(CodebitsError::NoText)?;
     let text_offset = text.3 as u64;
-    let scan_len = (text.1.min(text.2) as u64).min(data.len() as u64 - text_offset);
+    let scan_len = (text.1.min(text.2) as u64).min(host_size.saturating_sub(text_offset));
 
     // Slack candidates: header padding between the section table and the
     // first section's raw data, plus each section's tail padding beyond
     // min(vsize, rawsize). The file-tail overlay region is deliberately
     // excluded (design doc §6.3).
-    let host_size = data.len() as u64;
     let mut slack_ranges = Vec::new();
     let sec_table_end = (sec_table + sections.len() * 40) as u64;
     let first_raw = sections
@@ -815,10 +833,16 @@ pub fn parse_pe_code_layout_streaming<R: Read + Seek + ?Sized>(
         .read_exact(&mut head)
         .map_err(|e| CodebitsError::Iced(e.to_string()))?;
 
-    let layout = pe_code_layout(&head).inspect_err(|_| {
+    // Parse against the *real* host size: the 64 KiB `head` window only holds
+    // the headers, while `.text` and the section-tail padding normally extend
+    // far beyond it. Passing `head.len()` here would clamp `text_scan_len` and
+    // drop every slack candidate outside the window (the pre-fix behaviour:
+    // e.g. a 5.4 MiB `.text` was scanned as 63 KiB, reporting 90 B of capacity
+    // instead of 458 B).
+    let layout = pe_code_layout_with_host(&head, host_size).inspect_err(|_| {
         reader.seek(SeekFrom::Start(start_pos)).ok();
     })?;
-    // Recompute fields that depend on the true host size.
+    // Defensive re-clamp; `layout` is already computed against `host_size`.
     let text_scan_len = layout
         .text_scan_len
         .min(host_size.saturating_sub(layout.text_offset));
