@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 from typing import BinaryIO, List, Optional, Tuple
 
-from strhide.adapters.base import HostAdapter
+from strhide.adapters.base import HostAdapter, StrategyCapacity
 from strhide.core.envelope import EnvelopeHeader, read_trailer_from_tail
 from strhide.errors import UnsupportedFormatError
 
@@ -25,6 +25,13 @@ class EofAdapter(HostAdapter):
 
     def choose_auto_strategy(self, stream: BinaryIO, ube_size: int) -> str:
         return "eof"
+
+    def strategy_capacities(self, stream=None) -> List[StrategyCapacity]:
+        return [
+            StrategyCapacity(
+                "eof", None, True, "unlimited (file grows)", "appended at file EOF"
+            )
+        ]
 
     def inject(
         self,

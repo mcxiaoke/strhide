@@ -6,7 +6,7 @@ import shutil
 import struct
 from typing import BinaryIO, List, Optional, Tuple
 
-from strhide.adapters.base import HostAdapter
+from strhide.adapters.base import HostAdapter, StrategyCapacity
 from strhide.core.envelope import EnvelopeHeader, read_trailer_from_tail
 from strhide.errors import CorruptedDataError, UnsupportedFormatError
 
@@ -37,6 +37,20 @@ class Mp4Adapter(HostAdapter):
 
     def choose_auto_strategy(self, stream: BinaryIO, ube_size: int) -> str:
         return "box_uuid"
+
+    def strategy_capacities(self, stream=None) -> List[StrategyCapacity]:
+        return [
+            StrategyCapacity(
+                "box_uuid",
+                None,
+                True,
+                "unlimited (file grows)",
+                "uuid box with a 32-bit header below 4 GiB and a 64-bit large header at or above it; media frame offsets preserved",
+            ),
+            StrategyCapacity(
+                "eof", None, True, "unlimited (file grows)", "appended at EOF"
+            ),
+        ]
 
     def calc_prefix_len(self, ube_size: int) -> int:
         """Calculate box header prefix length: 24 bytes for standard 32-bit box, 32 bytes for 64-bit box."""

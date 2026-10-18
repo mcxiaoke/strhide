@@ -239,10 +239,10 @@ def test_stealth_read_without_password_cli_reports_guidance(tmp_path):
 
 
 def test_verify_exit_code_nonzero_when_envelope_invalid(tmp_path):
-    carrier = str(tmp_path / "c.bin")
+    carrier = str(tmp_path / "c.png")
     out = str(tmp_path / "o.bin")
     with open(carrier, "wb") as f:
-        f.write(b"generic host file contents for eof strategy")
+        f.write(make_png())
     write_carrier(carrier, data_text="x", output_path=out, strategy="eof")
 
     # Patch the version byte (header offset 8) to an unsupported value.

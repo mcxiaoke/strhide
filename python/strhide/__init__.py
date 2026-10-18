@@ -1,9 +1,13 @@
 """strhide: Smart format-preserving lossless data hiding package.
 
 Hide text or files inside ordinary host files (PNG, JPEG, MP4, ZIP, PDF,
-Windows PE, or any file) without changing the host's visible format, and
-restore the original host bit-for-bit afterwards. Fully cross-compatible
-with the Rust implementation.
+Windows PE) without changing the host's visible format, and restore the
+original host bit-for-bit afterwards. Unrecognized files are rejected.
+
+.. deprecated::
+   Version 0.2.0 is the final release of the pure-Python implementation.
+   Use the prebuilt Rust binary for the full feature set; in particular the
+   ``pe_codebits`` PE strategy is not implemented here.
 
 Typical usage::
 
@@ -37,7 +41,7 @@ from strhide.errors import (
     UnsupportedFormatError,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     # Engine operations

@@ -6,7 +6,7 @@ import shutil
 import struct
 from typing import BinaryIO, List, Optional, Tuple
 
-from strhide.adapters.base import HostAdapter
+from strhide.adapters.base import HostAdapter, StrategyCapacity, format_bytes
 from strhide.core.envelope import EnvelopeHeader, EnvelopeTrailer, read_trailer_from_tail
 from strhide.errors import CorruptedDataError, UnsupportedFormatError
 
@@ -96,6 +96,39 @@ class ZipAdapter(HostAdapter):
             return "pre_cd_inject"
         except Exception:
             return "eof"
+
+    def strategy_capacities(self, stream=None) -> List[StrategyCapacity]:
+        pre_cd = StrategyCapacity(
+            "pre_cd_inject",
+            None,
+            True,
+            "carrier-dependent (4 GiB - EOCD offset)",
+            "before Central Directory; file grows; run `inspect -c <carrier>` for the exact limit",
+        )
+        if stream is not None:
+            start = stream.tell()
+            try:
+                eocd_pos, cd_offset, _ = find_eocd_offset(stream)
+                patch_limit = max(cd_offset, eocd_pos + 16)
+                cap = max(0, 0xFFFFFFFE - patch_limit)
+                pre_cd.capacity_bytes = cap
+                pre_cd.limit = (
+                    f"≤ {format_bytes(cap)} B (4 GiB - EOCD offset {format_bytes(patch_limit)})"
+                )
+                pre_cd.note = "before Central Directory; file grows"
+            except Exception:
+                pre_cd.available = False
+                pre_cd.note = (
+                    "Central Directory / EOCD not found; auto falls back to eof"
+                )
+            finally:
+                stream.seek(start)
+        return [
+            pre_cd,
+            StrategyCapacity(
+                "eof", None, True, "unlimited (file grows)", "appended after EOCD"
+            ),
+        ]
 
     def inject(
         self,

@@ -15,6 +15,7 @@ from strhide.core.engine import (
     verify_carrier,
     write_carrier,
 )
+from strhide.errors import UnsupportedFormatError
 
 
 def create_minimal_png() -> bytes:
@@ -216,26 +217,39 @@ def test_jpeg_lifecycle():
         assert compute_file_sha256(carrier) == orig_sha
 
 
-def test_generic_eof_lifecycle():
+def test_unrecognized_carrier_is_rejected():
+    """Unrecognized files must be refused, not silently appended to.
+
+    There is no generic EOF fallback: appending an envelope to an arbitrary
+    file can corrupt it (trailing checksums, embedded offsets, signed
+    containers, ...). Every entry point must reject the carrier and leave it
+    untouched.
+    """
     random_bytes = b"MY-CUSTOM-BINARY-FILE-HEADER" + os.urandom(2048)
     with tempfile.TemporaryDirectory() as tmpdir:
         carrier = os.path.join(tmpdir, "test.bin")
         with open(carrier, "wb") as f:
             f.write(random_bytes)
 
-        orig_sha = compute_file_sha256(carrier)
-        secret_text = "Secret in EOF binary!"
+        with pytest.raises(UnsupportedFormatError, match="not a supported carrier"):
+            write_carrier(carrier, data_text="x")
 
-        res_w = write_carrier(carrier, data_text=secret_text, password="Pass123!EOF")
-        assert res_w["format"] == "GENERIC"
-        assert res_w["strategy"] == "eof"
+        # Explicit eof must not bypass the format check either.
+        with pytest.raises(UnsupportedFormatError):
+            write_carrier(carrier, data_text="x", strategy="eof")
 
-        res_r = read_carrier(carrier, password="Pass123!EOF")
-        assert res_r["data"].decode("utf-8") == secret_text
+        with pytest.raises(UnsupportedFormatError):
+            read_carrier(carrier)
+        with pytest.raises(UnsupportedFormatError):
+            remove_carrier(carrier)
+        with pytest.raises(UnsupportedFormatError):
+            inspect_carrier(carrier)
+        with pytest.raises(UnsupportedFormatError):
+            verify_carrier(carrier)
 
-        res_rm = remove_carrier(carrier)
-        assert res_rm["verified_identical"] is True
-        assert compute_file_sha256(carrier) == orig_sha
+        # The carrier must be left untouched.
+        with open(carrier, "rb") as f:
+            assert f.read() == random_bytes
 
 
 def create_minimal_pe() -> bytes:

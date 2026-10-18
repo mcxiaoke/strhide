@@ -71,6 +71,8 @@ Password sources (checked in order): `-p/--password` → `--password-file` → `
 
 ## Python API
 
+> **Deprecation notice (2026-10-18):** the pure-Python implementation is frozen at **0.2.0** and will no longer receive new features. Use the prebuilt Rust binary for the full feature set. In particular, Python does **not** implement the `pe_codebits` PE strategy and cannot read carriers written with it. The Python package remains available for existing users; its behavior is aligned with Rust except for that strategy.
+
 ```python
 from strhide import write_carrier, read_carrier, inspect_carrier
 

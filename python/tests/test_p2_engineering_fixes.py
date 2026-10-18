@@ -227,10 +227,10 @@ def test_pdf_without_root_is_rejected_for_incremental(tmp_path):
 
 
 def _write_eof_envelope(tmp_path, name: str):
-    carrier = str(tmp_path / f"{name}.bin")
+    carrier = str(tmp_path / f"{name}.png")
     out = str(tmp_path / f"{name}.out")
     with open(carrier, "wb") as f:
-        f.write(b"generic host file contents for eof strategy")
+        f.write(make_png())
     write_carrier(carrier, data_text="x", output_path=out, strategy="eof")
 
     # EOF strategy appends at the end of the host, so the envelope starts at

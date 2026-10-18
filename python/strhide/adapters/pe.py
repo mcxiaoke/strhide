@@ -17,7 +17,7 @@ import shutil
 import struct
 from typing import BinaryIO, List, Optional, Tuple
 
-from strhide.adapters.base import HostAdapter
+from strhide.adapters.base import HostAdapter, StrategyCapacity
 from strhide.core.envelope import EnvelopeHeader, read_trailer_from_tail
 from strhide.errors import UnsupportedFormatError
 
@@ -135,6 +135,36 @@ class PeAdapter(HostAdapter):
 
     def choose_auto_strategy(self, stream: BinaryIO, ube_size: int) -> str:
         return "pe_overlay"
+
+    def strategy_capacities(self, stream=None) -> List[StrategyCapacity]:
+        caps = [
+            StrategyCapacity(
+                "pe_overlay",
+                None,
+                True,
+                "unlimited (file grows)",
+                "appended beyond the PE image boundary",
+            ),
+            StrategyCapacity(
+                "eof", None, True, "unlimited (file grows)", "appended at file EOF"
+            ),
+        ]
+        if stream is not None:
+            start = stream.tell()
+            try:
+                _, _, _, _, has_authenticode = parse_pe_headers(stream)
+                if has_authenticode:
+                    for c in caps:
+                        c.available = False
+                        c.note = (
+                            "carrier is Authenticode-signed: strhide refuses to modify it "
+                            "(the signature would be invalidated)"
+                        )
+            except Exception:
+                pass
+            finally:
+                stream.seek(start)
+        return caps
 
     def inject(
         self,

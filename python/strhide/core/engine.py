@@ -40,7 +40,7 @@ from strhide.core.envelope import (
     EnvelopeTrailer,
 )
 from strhide.core.rejection import run_all_rejection_checks
-from strhide.core.router import find_adapter, id_to_strategy, strategy_to_id
+from strhide.core.router import find_adapter, find_adapter_or_reject, id_to_strategy, strategy_to_id
 from strhide.errors import (
     CorruptedDataError,
     NoHiddenDataError,
@@ -144,7 +144,7 @@ def write_carrier(
     # 3. Detect adapter & choose strategy
     structural_warnings: list[str] = []
     with open(carrier_path, "rb") as cf:
-        adapter = find_adapter(cf)
+        adapter = find_adapter_or_reject(cf, carrier_path)
 
         # Reject carriers that already contain an envelope. A standard-magic
         # scan catches plain/standard-encrypted envelopes; when a password is
@@ -559,7 +559,7 @@ def read_carrier(
         raise FileNotFoundError(f"Carrier file '{carrier_path}' not found")
 
     with open(carrier_path, "rb") as f:
-        adapter = find_adapter(f)
+        adapter = find_adapter_or_reject(f, carrier_path)
         # Locate with password priority: when a password is supplied, the
         # derived stealth magic is tried first so stealth envelopes are found
         # even when a standard-magic envelope also exists; a wrong password
@@ -695,7 +695,7 @@ def remove_carrier(
     orig_atime = st.st_atime
 
     with open(carrier_path, "rb") as cf:
-        adapter = find_adapter(cf)
+        adapter = find_adapter_or_reject(cf, carrier_path)
         # Password-priority locate (see read_carrier): stealth envelopes are
         # found even when a standard-magic envelope also exists.
         loc = None
@@ -730,15 +730,16 @@ def remove_carrier(
         try:
             with open(tmp_target, "rb") as rf:
                 r_adapter = find_adapter(rf)
-                remaining = r_adapter.locate(rf)
-                if remaining is None and password:
-                    _, trailer_magic_expected = derive_stealth_magics(password)
-                    remaining = r_adapter.locate(rf, expected_trailer_magic=trailer_magic_expected)
-                if remaining is not None:
-                    diagnosis = (
-                        "\nDiagnosis: the restored file still contains another hidden envelope. "
-                        "Remove envelopes in reverse order of injection (most recently written first)."
-                    )
+                if r_adapter is not None:
+                    remaining = r_adapter.locate(rf)
+                    if remaining is None and password:
+                        _, trailer_magic_expected = derive_stealth_magics(password)
+                        remaining = r_adapter.locate(rf, expected_trailer_magic=trailer_magic_expected)
+                    if remaining is not None:
+                        diagnosis = (
+                            "\nDiagnosis: the restored file still contains another hidden envelope. "
+                            "Remove envelopes in reverse order of injection (most recently written first)."
+                        )
         except OSError:
             pass
         if os.path.exists(tmp_target):
@@ -781,7 +782,10 @@ def inspect_carrier(carrier_path: str, password: Optional[str] = None) -> Dict[s
         raise FileNotFoundError(f"Carrier file '{carrier_path}' not found")
 
     with open(carrier_path, "rb") as cf:
-        adapter = find_adapter(cf)
+        adapter = find_adapter_or_reject(cf, carrier_path)
+        # Measured strategy capacities (static formats report constants; ZIP/PE
+        # report carrier-dependent or policy-gated availability).
+        strategies = [c.to_dict() for c in adapter.strategy_capacities(cf)]
         # Password-priority locate (see read_carrier).
         loc = None
         if password:
@@ -795,7 +799,7 @@ def inspect_carrier(carrier_path: str, password: Optional[str] = None) -> Dict[s
                 "carrier": carrier_path,
                 "format": adapter.format_name(),
                 "has_hidden_data": False,
-                "supported_strategies": adapter.supported_strategies(),
+                "strategies": strategies,
             }
 
         ube_offset, ube_total_size, strategy_name = loc
@@ -837,6 +841,7 @@ def inspect_carrier(carrier_path: str, password: Optional[str] = None) -> Dict[s
             "orig_host_size": header.orig_host_size,
             "orig_host_sha256": header.orig_host_sha256.hex(),
             "metadata": meta_info,
+            "strategies": strategies,
         }
 
 
@@ -846,7 +851,7 @@ def verify_carrier(carrier_path: str, password: Optional[str] = None) -> Dict[st
         raise FileNotFoundError(f"Carrier file '{carrier_path}' not found")
 
     with open(carrier_path, "rb") as cf:
-        adapter = find_adapter(cf)
+        adapter = find_adapter_or_reject(cf, carrier_path)
         # Level 1: Host format integrity
         l1_ok, l1_msg = adapter.verify_structure(cf)
 

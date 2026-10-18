@@ -70,6 +70,8 @@ strhide list-strategies
 
 ## Python API
 
+> **弃用说明（2026-10-18）**：纯 Python 实现冻结在 **0.2.0**，不再新增功能。请使用预编译的 Rust 二进制以获得完整能力。特别是 Python **未实现** `pe_codebits` PE 策略，无法读取用它写入的载体。Python 包仍保留给现有用户；除该策略外，行为已与 Rust 对齐。
+
 ```python
 from strhide import write_carrier, read_carrier, inspect_carrier
 

@@ -10,6 +10,7 @@ import os
 import sys
 from typing import Optional
 
+from strhide.adapters import ADAPTERS
 from strhide.config import FileConfig, load_config
 from strhide.core.engine import (
     inspect_carrier,
@@ -19,7 +20,7 @@ from strhide.core.engine import (
     verify_carrier,
     write_carrier,
 )
-from strhide.core.router import find_adapter, list_all_strategies
+from strhide.core.router import find_adapter_or_reject
 from strhide.errors import PasswordError, StrHideError
 
 
@@ -208,7 +209,8 @@ def cmd_write(args: argparse.Namespace, cfg: FileConfig) -> int:
     strategy = args.strategy
     if strategy == "ask":
         with open(args.carrier, "rb") as f:
-            strats = list_all_strategies(f)
+            adapter = find_adapter_or_reject(f, args.carrier)
+            strats = adapter.supported_strategies()
         print(f"Available strategies for '{args.carrier}':")
         for idx, s in enumerate(strats, 1):
             print(f"  [{idx}] {s}")
@@ -362,6 +364,23 @@ def cmd_inspect(args: argparse.Namespace, cfg: FileConfig) -> int:
                 print(f"Original SHA256: {res['orig_host_sha256']}")
                 if res.get("metadata"):
                     print(f"Metadata:        {json.dumps(res['metadata'], ensure_ascii=False)}")
+
+            # Capacity report (available whether or not an envelope exists).
+            # The first available strategy is what `-s auto` would pick for a
+            # payload that fits.
+            strategies = res.get("strategies", [])
+            auto_idx = next(
+                (i for i, c in enumerate(strategies) if c.get("available")), None
+            )
+            print("Strategy capacities (max payload size):")
+            for idx, c in enumerate(strategies):
+                auto = " [auto preference]" if idx == auto_idx else ""
+                state = "" if c.get("available") else " (unavailable)"
+                detail = c.get("note") or ""
+                line = f"  - {c['strategy']}{auto}{state}: {c['limit']}"
+                if detail:
+                    line += f" — {detail}"
+                print(line)
         return 0
     except StrHideError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
@@ -386,18 +405,17 @@ def cmd_verify(args: argparse.Namespace, cfg: FileConfig) -> int:
 
 
 def cmd_list_strategies(args: argparse.Namespace, cfg: FileConfig) -> int:
-    try:
-        with open(args.carrier, "rb") as f:
-            adapter = find_adapter(f)
-            strats = adapter.supported_strategies()
-        print(f"Format: {adapter.format_name()}")
-        print("Supported strategies:")
-        for s in strats:
-            print(f"  - {s}")
-        return 0
-    except Exception as e:
-        print(f"[ERROR] {e}", file=sys.stderr)
-        return 1
+    # Static reference table: constants come from the adapters themselves, so
+    # the table cannot drift from the code. Carrier-specific limits are
+    # answered by `strhide inspect -c <carrier>`.
+    print(f"{'Format':<8} {'Strategy':<15} Limit")
+    print(f"{'-' * 8} {'-' * 15} {'-' * 48}")
+    for adapter in ADAPTERS:
+        for cap in adapter.strategy_capacities(None):
+            print(f"{adapter.format_name():<8} {cap.strategy:<15} {cap.limit}")
+    print()
+    print("Carrier-dependent limits are measured by `strhide inspect -c <carrier>`.")
+    return 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -485,9 +503,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # list-strategies
     p_list = subparsers.add_parser(
-        "list-strategies", parents=[config_parent], help="List available strategies for a carrier"
+        "list-strategies",
+        parents=[config_parent],
+        help="List all supported formats, strategies, and their capacity limits",
     )
-    p_list.add_argument("-c", "--carrier", required=True, help="Host carrier file")
     p_list.set_defaults(func=cmd_list_strategies)
 
     args = parser.parse_args(argv)

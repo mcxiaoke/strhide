@@ -181,6 +181,6 @@ def test_strategy_from_config_is_used_by_write(tmp_path):
 
 def test_explicit_missing_config_is_a_hard_error(tmp_path):
     (tmp_path / "c.png").write_bytes(make_png())
-    r = run_cli(["--config", "nope.toml", "list-strategies", "-c", "c.png"], tmp_path)
+    r = run_cli(["--config", "nope.toml", "list-strategies"], tmp_path)
     assert r.returncode == 1
     assert "Failed to read config file" in r.stderr

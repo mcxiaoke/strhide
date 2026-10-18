@@ -3,9 +3,36 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import asdict, dataclass
 from typing import BinaryIO, List, Optional, Tuple
 
 from strhide.core.envelope import EnvelopeHeader
+
+
+@dataclass
+class StrategyCapacity:
+    """Capacity and availability of one injection strategy for a carrier.
+
+    ``capacity_bytes`` is the exact maximum UBE envelope size when it can be
+    stated as a single number; ``None`` means the strategy is unbounded (the
+    file grows) or the limit is carrier-dependent (see ``limit``).
+    ``available`` is whether the strategy is structurally usable for the
+    carrier right now (in static mode, whether the format supports it).
+    """
+
+    strategy: str
+    capacity_bytes: Optional[int]
+    available: bool
+    limit: str
+    note: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def format_bytes(n: int) -> str:
+    """Format a byte count with thousands separators (2147483647 -> 2,147,483,647)."""
+    return f"{n:,}"
 
 
 class HostAdapter(ABC):
@@ -30,6 +57,22 @@ class HostAdapter(ABC):
     def choose_auto_strategy(self, stream: BinaryIO, ube_size: int) -> str:
         """Choose the optimal strategy based on host features and payload size."""
         pass
+
+    def strategy_capacities(
+        self, stream: Optional[BinaryIO] = None
+    ) -> List[StrategyCapacity]:
+        """Report the capacity of each supported strategy, in priority order.
+
+        ``stream is None`` answers "what does this format support?" (static
+        table, constants only); a stream answers "what can THIS carrier hold?"
+        (carrier-dependent limits are measured). The default implementation
+        reports every strategy as available with an unknown capacity; format
+        adapters override it with their real limits.
+        """
+        return [
+            StrategyCapacity(s, None, True, "unknown", None)
+            for s in self.supported_strategies()
+        ]
 
     @abstractmethod
     def inject(

@@ -6,7 +6,7 @@ import struct
 import zlib
 from typing import BinaryIO, List, Optional, Tuple
 
-from strhide.adapters.base import HostAdapter
+from strhide.adapters.base import HostAdapter, StrategyCapacity, format_bytes
 from strhide.core.envelope import EnvelopeHeader, read_trailer_from_tail
 from strhide.errors import CorruptedDataError, UnsupportedFormatError
 
@@ -59,6 +59,20 @@ class PngAdapter(HostAdapter):
         if ube_size > PNG_MAX_CHUNK_LEN:
             return "eof"
         return "chunk"
+
+    def strategy_capacities(self, stream=None) -> List[StrategyCapacity]:
+        return [
+            StrategyCapacity(
+                "chunk",
+                PNG_MAX_CHUNK_LEN,
+                True,
+                f"≤ {format_bytes(PNG_MAX_CHUNK_LEN)} B (2 GiB - 1)",
+                "private ancillary chunk 'prIv' before IEND; file grows slightly",
+            ),
+            StrategyCapacity(
+                "eof", None, True, "unlimited (file grows)", "appended after IEND"
+            ),
+        ]
 
     def inject(
         self,

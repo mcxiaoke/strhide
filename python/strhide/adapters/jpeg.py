@@ -5,7 +5,7 @@ from __future__ import annotations
 import struct
 from typing import BinaryIO, List, Optional, Tuple
 
-from strhide.adapters.base import HostAdapter, SubStream
+from strhide.adapters.base import HostAdapter, StrategyCapacity, SubStream, format_bytes
 from strhide.core.envelope import EnvelopeHeader, EnvelopeTrailer, read_trailer_from_tail
 from strhide.errors import CorruptedDataError, UnsupportedFormatError
 
@@ -250,6 +250,20 @@ class JpegAdapter(HostAdapter):
         if ube_size <= JPEG_MAX_TOTAL_CAPACITY:
             return "app_segment"
         return "eof"
+
+    def strategy_capacities(self, stream=None) -> List[StrategyCapacity]:
+        return [
+            StrategyCapacity(
+                "app_segment",
+                JPEG_MAX_TOTAL_CAPACITY,
+                True,
+                f"≤ {format_bytes(JPEG_MAX_TOTAL_CAPACITY)} B (64 MiB)",
+                "APP15 segment chain before SOS; per-segment payload capped at 65,533 B; file grows",
+            ),
+            StrategyCapacity(
+                "eof", None, True, "unlimited (file grows)", "appended after EOI"
+            ),
+        ]
 
     def inject(
         self,

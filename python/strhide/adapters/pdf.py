@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 from typing import BinaryIO, List, Optional, Tuple
 
-from strhide.adapters.base import HostAdapter
+from strhide.adapters.base import HostAdapter, StrategyCapacity
 from strhide.core.envelope import EnvelopeHeader, read_trailer_from_tail
 from strhide.errors import CorruptedDataError, UnsupportedFormatError
 
@@ -249,6 +249,32 @@ class PdfAdapter(HostAdapter):
             return "incremental"
         except Exception:
             return "eof"
+
+    def strategy_capacities(self, stream=None) -> List[StrategyCapacity]:
+        incremental = StrategyCapacity(
+            "incremental",
+            None,
+            True,
+            "unlimited (file grows)",
+            "incremental update ending in %%EOF; requires a parseable trailer",
+        )
+        if stream is not None:
+            start = stream.tell()
+            try:
+                parse_pdf_trailer_info(stream)
+            except Exception:
+                incremental.available = False
+                incremental.note = (
+                    "PDF trailer / %%EOF could not be parsed; auto falls back to eof"
+                )
+            finally:
+                stream.seek(start)
+        return [
+            incremental,
+            StrategyCapacity(
+                "eof", None, True, "unlimited (file grows)", "appended after %%EOF"
+            ),
+        ]
 
     def calc_prefix_len(self, stream: BinaryIO, ube_size: int) -> int:
         _, _, new_obj_num, _, _ = parse_pdf_trailer_info(stream)
