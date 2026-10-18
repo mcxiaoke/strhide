@@ -9,9 +9,9 @@ pub mod pe_codebits;
 pub mod png;
 pub mod zip;
 
-use std::io::{Read, Seek, Write};
 use crate::envelope::EnvelopeHeader;
 use crate::errors::StrHideError;
+use std::io::{Read, Seek, Write};
 
 pub trait SeekRead: Read + Seek {}
 impl<T: Read + Seek> SeekRead for T {}
@@ -34,6 +34,15 @@ pub trait HostAdapter: Send + Sync {
         out: &mut dyn Write,
         strategy: &str,
     ) -> Result<(u64, u64, u32, u32), StrHideError>;
+
+    /// Whether `strategy` embeds the envelope in a scattered (non-contiguous)
+    /// form. For scattered strategies (currently only `pe_codebits`), `inject`
+    /// has already written the final envelope bytes, so the engine must not
+    /// patch the header/trailer at file offsets; the envelope is read back
+    /// through `open_ube_reader` instead.
+    fn is_scattered_strategy(&self, _strategy: &str) -> bool {
+        false
+    }
 
     /// Locates embedded UBE envelope in the carrier stream.
     /// Returns (ube_offset, ube_total_size, strategy_name).
@@ -102,9 +111,7 @@ pub trait HostAdapter: Send + Sync {
             let out_patch_pos = (header.patch_offset as u64)
                 .checked_sub(header.inject_size)
                 .ok_or_else(|| {
-                    StrHideError::CorruptedData(
-                        "patch_offset precedes the injected region".into(),
-                    )
+                    StrHideError::CorruptedData("patch_offset precedes the injected region".into())
                 })?;
             out.seek(SeekFrom::Start(out_patch_pos))?;
             out.write_all(&header.orig_patch_val.to_le_bytes())?;
@@ -114,10 +121,8 @@ pub trait HostAdapter: Send + Sync {
     }
 
     /// Verifies host container structure integrity.
-    fn verify_structure(
-        &self,
-        stego_in: &mut dyn SeekRead,
-    ) -> Result<(bool, String), StrHideError>;
+    fn verify_structure(&self, stego_in: &mut dyn SeekRead)
+    -> Result<(bool, String), StrHideError>;
 
     /// Password-independent structural scan for containers that only a strhide
     /// envelope would produce (oversized private chunks, COM segments, uuid
@@ -143,7 +148,11 @@ pub trait HostAdapter: Send + Sync {
         ube_total_size: u64,
         _strategy: &str,
     ) -> Result<Box<dyn SeekRead + 'a>, StrHideError> {
-        Ok(Box::new(SubStream::new(carrier, ube_offset, ube_total_size)?))
+        Ok(Box::new(SubStream::new(
+            carrier,
+            ube_offset,
+            ube_total_size,
+        )?))
     }
 }
 
@@ -206,4 +215,3 @@ impl Seek for SubStream<'_> {
         Ok(self.pos)
     }
 }
-

@@ -8,19 +8,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
-use crate::adapters::{
-    mp4::Mp4Adapter,
-    pdf::PdfAdapter,
-    HostAdapter,
-};
+use crate::adapters::{HostAdapter, mp4::Mp4Adapter, pdf::PdfAdapter};
 use crate::crypto::{
-    compress_stream, compute_file_sha256, decompress_stream,
-    decrypt_metadata, decrypt_stream_from_chunks, derive_keys, derive_stealth_magics,
-    encrypt_metadata, encrypt_stream_to_chunks, normalize_nfc,
+    compress_stream, compute_file_sha256, decompress_stream, decrypt_metadata,
+    decrypt_stream_from_chunks, derive_keys, derive_stealth_magics, encrypt_metadata,
+    encrypt_stream_to_chunks, normalize_nfc,
 };
 use crate::envelope::{
-    EnvelopeHeader, EnvelopeTrailer, FLAG_COMPRESSED, FLAG_ENCRYPTED, FLAG_HAS_HINT,
-    FLAG_IS_FILE, FLAG_STEALTH, HEADER_SIZE, STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC,
+    EnvelopeHeader, EnvelopeTrailer, FLAG_COMPRESSED, FLAG_ENCRYPTED, FLAG_HAS_HINT, FLAG_IS_FILE,
+    FLAG_STEALTH, HEADER_SIZE, STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC,
 };
 use crate::errors::StrHideError;
 use crate::rejection::run_all_rejection_checks;
@@ -327,7 +323,9 @@ pub fn write_carrier(
         let norm_hint = normalize_nfc(hint.trim());
         let bytes = norm_hint.into_bytes();
         if bytes.len() > 1024 {
-            return Err(StrHideError::General("Password hint cannot exceed 1024 bytes".into()));
+            return Err(StrHideError::General(
+                "Password hint cannot exceed 1024 bytes".into(),
+            ));
         }
         bytes
     } else {
@@ -358,7 +356,8 @@ pub fn write_carrier(
         // stealth envelopes (which are intentionally invisible without it).
         if adapter.locate(&mut cf, None)?.is_some() {
             return Err(StrHideError::General(
-                "Carrier already contains hidden data. Use remove first or specify another file.".into(),
+                "Carrier already contains hidden data. Use remove first or specify another file."
+                    .into(),
             ));
         }
         if let Some(pwd) = password {
@@ -498,7 +497,9 @@ pub fn write_carrier(
     let to_encrypt_len = to_encrypt_bytes.len() as u64;
     let exact_meta_len = meta_raw.len() as u64 + if is_encrypted { 16 } else { 0 };
     let chunk_count = if is_encrypted {
-        to_encrypt_len.div_ceil(crate::crypto::CHUNK_SIZE as u64).max(1)
+        to_encrypt_len
+            .div_ceil(crate::crypto::CHUNK_SIZE as u64)
+            .max(1)
     } else {
         0
     };
@@ -617,7 +618,12 @@ pub fn write_carrier(
         let mut host_in = File::open(carrier_path)?;
         let mut out_file = File::create(&tmp_target)?;
         let mut ube_cursor = Cursor::new(&tmp_ube);
-        adapter.inject(&mut host_in, &mut ube_cursor, &mut out_file, &selected_strategy)?
+        adapter.inject(
+            &mut host_in,
+            &mut ube_cursor,
+            &mut out_file,
+            &selected_strategy,
+        )?
     };
 
     // 10. Update real ube_offset in Header and Trailer
@@ -640,44 +646,63 @@ pub fn write_carrier(
 
     let final_trailer = EnvelopeTrailer::create(actual_ube_offset, ube_total_size, trailer_magic);
 
-    {
-        let mut f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&tmp_target)?;
+    // Scattered strategies (pe_codebits) embed the final envelope bytes during
+    // inject(): inject_offset/inject_size are 0 by definition and the trailer
+    // was assembled with ube_offset = 0, so there is nothing to patch at file
+    // offsets. Patching anyway would overwrite host bytes (offset 0 is the MZ
+    // header of a PE).
+    let scattered = adapter.is_scattered_strategy(&selected_strategy);
+    if !scattered {
+        {
+            let mut f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&tmp_target)?;
 
-        // Patch header
-        f.seek(SeekFrom::Start(actual_ube_offset))?;
-        f.write_all(&header.pack())?;
+            // Patch header
+            f.seek(SeekFrom::Start(actual_ube_offset))?;
+            f.write_all(&header.pack())?;
 
-        // Patch trailer at end of UBE
-        let trailer_pos = if adapter.format_name() == "JPEG" && selected_strategy == "app_segment" {
-            inject_offset + inject_size - 24
-        } else {
-            actual_ube_offset + ube_total_size - 24
-        };
-        f.seek(SeekFrom::Start(trailer_pos))?;
-        f.write_all(&final_trailer.pack())?;
+            // Patch trailer at end of UBE
+            let trailer_pos =
+                if adapter.format_name() == "JPEG" && selected_strategy == "app_segment" {
+                    inject_offset + inject_size - 24
+                } else {
+                    actual_ube_offset + ube_total_size - 24
+                };
+            f.seek(SeekFrom::Start(trailer_pos))?;
+            f.write_all(&final_trailer.pack())?;
 
-        // For PNG chunk: recalculate chunk CRC
-        if adapter.format_name() == "PNG" && selected_strategy == "chunk" {
-            f.seek(SeekFrom::Start(actual_ube_offset - 4))?;
-            let mut chunk_type_and_data = vec![0u8; 4 + ube_total_size as usize];
-            f.read_exact(&mut chunk_type_and_data)?;
-            let new_crc = crc32fast::hash(&chunk_type_and_data);
-            f.seek(SeekFrom::Start(actual_ube_offset + ube_total_size))?;
-            f.write_all(&new_crc.to_be_bytes())?;
+            // For PNG chunk: recalculate chunk CRC
+            if adapter.format_name() == "PNG" && selected_strategy == "chunk" {
+                f.seek(SeekFrom::Start(actual_ube_offset - 4))?;
+                let mut chunk_type_and_data = vec![0u8; 4 + ube_total_size as usize];
+                f.read_exact(&mut chunk_type_and_data)?;
+                let new_crc = crc32fast::hash(&chunk_type_and_data);
+                f.seek(SeekFrom::Start(actual_ube_offset + ube_total_size))?;
+                f.write_all(&new_crc.to_be_bytes())?;
+            }
         }
     }
 
     // 11. Self-verification: precisely verify the envelope just written at
     // actual_ube_offset (not merely "some envelope exists somewhere"), so a
     // stale envelope from a previous injection cannot satisfy the check.
+    //
+    // The envelope is read back through `open_ube_reader` rather than at raw
+    // file offsets: for contiguous envelopes the virtual stream is a bounded
+    // slice of the very same bytes, and for scattered strategies (pe_codebits)
+    // there are no file offsets to read at all.
     {
         let mut f = File::open(&tmp_target)?;
+        let mut ube_stream = adapter.open_ube_reader(
+            &mut f,
+            actual_ube_offset,
+            ube_total_size,
+            &selected_strategy,
+        )?;
         let mut hdr_bytes = [0u8; HEADER_SIZE];
-        f.seek(SeekFrom::Start(actual_ube_offset))?;
-        f.read_exact(&mut hdr_bytes)?;
+        ube_stream.read_exact(&mut hdr_bytes)?;
         let written_header = EnvelopeHeader::unpack(&hdr_bytes)?;
         if written_header.magic_header != header_magic
             || written_header.inject_offset != inject_offset
@@ -689,14 +714,9 @@ pub fn write_carrier(
                 "Self-verification failed: header at injection offset does not match written parameters".into(),
             ));
         }
-        let trailer_pos = if adapter.format_name() == "JPEG" && selected_strategy == "app_segment" {
-            inject_offset + inject_size - 24
-        } else {
-            actual_ube_offset + ube_total_size - 24
-        };
-        f.seek(SeekFrom::Start(trailer_pos))?;
+        ube_stream.seek(SeekFrom::Start(ube_total_size - 24))?;
         let mut tr_bytes = [0u8; 24];
-        f.read_exact(&mut tr_bytes)?;
+        ube_stream.read_exact(&mut tr_bytes)?;
         let written_trailer = EnvelopeTrailer::unpack(&tr_bytes, Some(&trailer_magic))?;
         if written_trailer.ube_offset != actual_ube_offset
             || written_trailer.ube_total_size != ube_total_size
@@ -731,7 +751,9 @@ pub fn write_carrier(
         if selected_strategy == "app_segment" {
             strategy_note = Some("Embedded into compliant JPEG APP15 segment(s) before SOS (clean EOI at EOF, 0 trailing bytes).".into());
         } else if selected_strategy == "eof" && strategy == "auto" {
-            strategy_note = Some(format!("Payload ({ube_total_size} bytes) exceeded JPEG maximum capacity; automatically fell back to EOF overlay."));
+            strategy_note = Some(format!(
+                "Payload ({ube_total_size} bytes) exceeded JPEG maximum capacity; automatically fell back to EOF overlay."
+            ));
         } else if selected_strategy == "eof" {
             strategy_note = Some("Appended after JPEG EOI marker (EOF overlay).".into());
         }
@@ -739,7 +761,9 @@ pub fn write_carrier(
         if selected_strategy == "chunk" {
             strategy_note = Some("Embedded into compliant PNG private ancillary chunk 'prIv' before IEND (0 trailing bytes).".into());
         } else if selected_strategy == "eof" && strategy == "auto" {
-            strategy_note = Some(format!("Payload ({ube_total_size} bytes) exceeded PNG chunk limit (2GB); automatically fell back to EOF overlay."));
+            strategy_note = Some(format!(
+                "Payload ({ube_total_size} bytes) exceeded PNG chunk limit (2GB); automatically fell back to EOF overlay."
+            ));
         } else if selected_strategy == "eof" {
             strategy_note = Some("Appended after PNG IEND (EOF overlay).".into());
         }
@@ -766,7 +790,9 @@ pub fn write_carrier(
             strategy_note = Some("Appended after ZIP EOCD (EOF overlay).".into());
         }
     } else if adapter.format_name() == "PE" {
-        if selected_strategy == "pe_overlay" {
+        if selected_strategy == "pe_codebits" {
+            strategy_note = Some("Embedded into x86/x64 instruction encodings (ModR/M semantic pairs) in .text; carrier file size unchanged (restore diff stored in zero-value PE padding).".into());
+        } else if selected_strategy == "pe_overlay" {
             strategy_note = Some("Embedded into Windows PE image overlay (executable code and PE sections remain 100% intact).".into());
         } else if selected_strategy == "eof" {
             strategy_note = Some("Appended after PE executable EOF (EOF overlay).".into());
@@ -825,11 +851,12 @@ pub fn read_carrier(
                 adapter,
                 carrier_path,
                 password.is_some(),
-            ))
+            ));
         }
     };
 
-    let mut ube_stream = adapter.open_ube_reader(&mut f, ube_offset, ube_total_size, &strategy_name)?;
+    let mut ube_stream =
+        adapter.open_ube_reader(&mut f, ube_offset, ube_total_size, &strategy_name)?;
 
     // Read fixed header
     let mut header_bytes = [0u8; HEADER_SIZE];
@@ -868,14 +895,18 @@ pub fn read_carrier(
     ube_stream.read_exact(&mut meta_bytes)?;
 
     let meta_plain = if header.is_encrypted() {
-        decrypt_metadata(&meta_bytes, &meta_key, &header.base_nonce, &fixed_header_aad)?
+        decrypt_metadata(
+            &meta_bytes,
+            &meta_key,
+            &header.base_nonce,
+            &fixed_header_aad,
+        )?
     } else {
         meta_bytes
     };
 
-    let meta_obj: CarrierMetadata = serde_json::from_slice(&meta_plain).map_err(|e| {
-        StrHideError::CorruptedData(format!("Corrupted metadata block: {e}"))
-    })?;
+    let meta_obj: CarrierMetadata = serde_json::from_slice(&meta_plain)
+        .map_err(|e| StrHideError::CorruptedData(format!("Corrupted metadata block: {e}")))?;
 
     // Read payload (checked_sub: validate_against already bounds the fields,
     // but keep the arithmetic defensive against corrupted envelopes)
@@ -995,7 +1026,7 @@ pub fn remove_carrier(
             loc = adapter.locate(&mut cf, None)?;
         }
 
-        let (ube_offset, ube_total_size, _) = match loc {
+        let (ube_offset, ube_total_size, strategy_name) = match loc {
             Some(l) => l,
             None => {
                 return Err(no_hidden_data_error(
@@ -1003,15 +1034,22 @@ pub fn remove_carrier(
                     adapter,
                     carrier_path,
                     password.is_some(),
-                ))
+                ));
             }
         };
 
-        cf.seek(SeekFrom::Start(ube_offset))?;
-        let mut header_bytes = [0u8; HEADER_SIZE];
-        cf.read_exact(&mut header_bytes)?;
-        header = EnvelopeHeader::unpack(&header_bytes)?;
-        header.validate_against(ube_total_size)?;
+        // Read the header through the adapter's virtual envelope stream: for
+        // contiguous envelopes this is a bounded slice of the same bytes the
+        // old seek+read produced; for scattered strategies (pe_codebits) the
+        // envelope has no file offset to seek to.
+        {
+            let mut header_bytes = [0u8; HEADER_SIZE];
+            let mut ube_stream =
+                adapter.open_ube_reader(&mut cf, ube_offset, ube_total_size, &strategy_name)?;
+            ube_stream.read_exact(&mut header_bytes)?;
+            header = EnvelopeHeader::unpack(&header_bytes)?;
+            header.validate_against(ube_total_size)?;
+        }
 
         let mut out_f = OpenOptions::new()
             .read(true)
@@ -1035,17 +1073,13 @@ pub fn remove_carrier(
         let mut diagnosis = String::new();
         if let Ok(mut rf) = File::open(&tmp_target) {
             let r_adapter = find_adapter(&mut rf);
-            let remaining = r_adapter
-                .locate(&mut rf, None)
-                .ok()
-                .flatten()
-                .or_else(|| {
-                    password.and_then(|pwd| {
-                        derive_stealth_magics(pwd, b"strhide-stealth-v1")
-                            .ok()
-                            .and_then(|m| r_adapter.locate(&mut rf, Some(&m.1)).ok().flatten())
-                    })
-                });
+            let remaining = r_adapter.locate(&mut rf, None).ok().flatten().or_else(|| {
+                password.and_then(|pwd| {
+                    derive_stealth_magics(pwd, b"strhide-stealth-v1")
+                        .ok()
+                        .and_then(|m| r_adapter.locate(&mut rf, Some(&m.1)).ok().flatten())
+                })
+            });
             if remaining.is_some() {
                 diagnosis = "\nDiagnosis: the restored file still contains another hidden envelope. Remove envelopes in reverse order of injection (most recently written first).".to_string();
             }
@@ -1053,8 +1087,15 @@ pub fn remove_carrier(
         return Err(StrHideError::RestoreMismatch(format!(
             "Restored size: {restored_size} (expected {})\nRestored SHA256: {}\nExpected SHA256: {}{}",
             header.orig_host_size,
-            restored_sha256.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-            header.orig_host_sha256.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            restored_sha256
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+            header
+                .orig_host_sha256
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
             diagnosis
         )));
     }
@@ -1076,7 +1117,10 @@ pub fn remove_carrier(
         status: "success".into(),
         carrier: target_path.display().to_string(),
         restored_size,
-        restored_sha256: restored_sha256.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        restored_sha256: restored_sha256
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
         verified_identical: true,
         backup_file,
     })
@@ -1130,11 +1174,12 @@ pub fn inspect_carrier(
                         .map(|s| s.to_string())
                         .collect(),
                 ),
-            })
+            });
         }
     };
 
-    let mut ube_stream = adapter.open_ube_reader(&mut cf, ube_offset, ube_total_size, &strategy_name)?;
+    let mut ube_stream =
+        adapter.open_ube_reader(&mut cf, ube_offset, ube_total_size, &strategy_name)?;
 
     let mut header_bytes = [0u8; HEADER_SIZE];
     ube_stream.read_exact(&mut header_bytes)?;
@@ -1152,21 +1197,28 @@ pub fn inspect_carrier(
     if !header.is_encrypted() {
         let mut meta_bytes = vec![0u8; header.meta_len as usize];
         if ube_stream.read_exact(&mut meta_bytes).is_ok()
-            && let Ok(val) = serde_json::from_slice(&meta_bytes) {
-                meta_val = Some(val);
-            }
+            && let Ok(val) = serde_json::from_slice(&meta_bytes)
+        {
+            meta_val = Some(val);
+        }
     } else if let Some(pwd) = password {
         let mut meta_bytes = vec![0u8; header.meta_len as usize];
         if ube_stream.read_exact(&mut meta_bytes).is_ok()
-            && let Ok((_, meta_key)) = derive_keys(pwd, &header.salt) {
-                if let Ok(dec) = decrypt_metadata(&meta_bytes, &meta_key, &header.base_nonce, &header.get_aad()) {
-                    if let Ok(val) = serde_json::from_slice(&dec) {
-                        meta_val = Some(val);
-                    }
-                } else {
-                    meta_val = Some(serde_json::json!({"error": "Invalid password"}));
+            && let Ok((_, meta_key)) = derive_keys(pwd, &header.salt)
+        {
+            if let Ok(dec) = decrypt_metadata(
+                &meta_bytes,
+                &meta_key,
+                &header.base_nonce,
+                &header.get_aad(),
+            ) {
+                if let Ok(val) = serde_json::from_slice(&dec) {
+                    meta_val = Some(val);
                 }
+            } else {
+                meta_val = Some(serde_json::json!({"error": "Invalid password"}));
             }
+        }
     }
 
     Ok(InspectResult {
@@ -1238,13 +1290,18 @@ pub fn verify_carrier(
                     ok: false,
                     detail: "Skipped (no envelope)".into(),
                 },
-            })
+            });
         }
     };
 
     let (l2_ok, l2_msg, is_encrypted, _is_stealth) = {
         match adapter.open_ube_reader(&mut cf, ube_offset, ube_total_size, &strategy_name) {
-            Err(e) => (false, format!("Cannot open envelope reader: {e}"), false, false),
+            Err(e) => (
+                false,
+                format!("Cannot open envelope reader: {e}"),
+                false,
+                false,
+            ),
             Ok(mut ube_stream) => {
                 let mut header_bytes = [0u8; HEADER_SIZE];
                 if ube_stream.read_exact(&mut header_bytes).is_err() {
@@ -1255,9 +1312,22 @@ pub fn verify_carrier(
                     // downstream reads — a crafted or corrupted header must fail Level
                     // 2 with a domain error instead of being silently accepted.
                     if let Err(e) = header.validate_against(ube_total_size) {
-                        (false, format!("Envelope header validation failed: {e}"), false, false)
-                    } else if ube_stream.seek(SeekFrom::Start(ube_total_size - 24)).is_err() {
-                        (false, "Cannot seek to trailer".into(), header.is_encrypted(), header.is_stealth())
+                        (
+                            false,
+                            format!("Envelope header validation failed: {e}"),
+                            false,
+                            false,
+                        )
+                    } else if ube_stream
+                        .seek(SeekFrom::Start(ube_total_size - 24))
+                        .is_err()
+                    {
+                        (
+                            false,
+                            "Cannot seek to trailer".into(),
+                            header.is_encrypted(),
+                            header.is_stealth(),
+                        )
                     } else {
                         let mut trailer_bytes = [0u8; 24];
                         let expected_trailer_magic = match (header.is_stealth(), password) {
@@ -1269,24 +1339,50 @@ pub fn verify_carrier(
                         };
 
                         if ube_stream.read_exact(&mut trailer_bytes).is_err() {
-                            (false, "Cannot read trailer".into(), header.is_encrypted(), header.is_stealth())
-                        } else if let Ok(trailer) = EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic.as_ref()) {
-                            if trailer.ube_offset != ube_offset || trailer.ube_total_size != ube_total_size {
-                                (false, "Envelope trailer boundary parameters mismatch".into(), header.is_encrypted(), header.is_stealth())
+                            (
+                                false,
+                                "Cannot read trailer".into(),
+                                header.is_encrypted(),
+                                header.is_stealth(),
+                            )
+                        } else if let Ok(trailer) =
+                            EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic.as_ref())
+                        {
+                            if trailer.ube_offset != ube_offset
+                                || trailer.ube_total_size != ube_total_size
+                            {
+                                (
+                                    false,
+                                    "Envelope trailer boundary parameters mismatch".into(),
+                                    header.is_encrypted(),
+                                    header.is_stealth(),
+                                )
                             } else {
                                 (
                                     true,
-                                    format!("Envelope valid at offset {ube_offset}, size {ube_total_size}B (CRC32 OK)"),
+                                    format!(
+                                        "Envelope valid at offset {ube_offset}, size {ube_total_size}B (CRC32 OK)"
+                                    ),
                                     header.is_encrypted(),
                                     header.is_stealth(),
                                 )
                             }
                         } else {
-                            (false, "Envelope trailer unpacking failed".into(), header.is_encrypted(), header.is_stealth())
+                            (
+                                false,
+                                "Envelope trailer unpacking failed".into(),
+                                header.is_encrypted(),
+                                header.is_stealth(),
+                            )
                         }
                     }
                 } else {
-                    (false, "Envelope header unpacking failed".into(), false, false)
+                    (
+                        false,
+                        "Envelope header unpacking failed".into(),
+                        false,
+                        false,
+                    )
                 }
             }
         }
@@ -1305,7 +1401,10 @@ pub fn verify_carrier(
             Err(e) => (false, e.to_string()),
         }
     } else {
-        (false, "Password required for cryptographic verification".into())
+        (
+            false,
+            "Password required for cryptographic verification".into(),
+        )
     };
 
     Ok(VerifyResult {

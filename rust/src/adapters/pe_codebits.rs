@@ -27,9 +27,15 @@ use iced_x86::{Code, Decoder, DecoderOptions, Encoder, Instruction, OpKind, Regi
 
 use crate::errors::StrHideError;
 
-/// Channel magic, standard mode. Stealth mode uses the password-derived
-/// 4-byte magic that the engine passes to `locate` as `expected_trailer_magic`.
-pub const CHANNEL_MAGIC: [u8; 4] = *b"STHC";
+/// The channel magic in standard mode. In stealth mode the magic is the
+/// password-derived value that the engine bakes into the UBE trailer, and the
+/// channel simply reuses it: [`embed`] takes the magic from the last four
+/// bytes of the UBE blob (its trailer magic), so a stealth channel is
+/// invisible to `locate(None)` and findable only with the right password.
+/// This is a deliberate deviation from design doc §5.2's `STHC` placeholder:
+/// deriving the magic from the UBE trailer keeps the adapter free of any
+/// stealth/password knowledge while preserving deniability.
+pub const CHANNEL_MAGIC: [u8; 4] = crate::envelope::STANDARD_TRAILER_MAGIC;
 
 /// Channel container version (see design doc §5).
 pub const CHANNEL_VERSION: u8 = 1;
@@ -432,14 +438,12 @@ impl ChannelHeader {
     }
 }
 
-/// Reads and validates the channel header from an instrumented code range.
-/// `expected_magic` selects the standard (`STHC`) or stealth-derived magic.
-pub fn read_channel_header(
-    text: &[u8],
-    bitness: u32,
-    expected_magic: Option<[u8; 4]>,
-) -> Result<ChannelHeader, CodebitsError> {
-    let prof = profile(text, bitness);
+/// Unpacks the raw 14-byte channel header from the first channel positions,
+/// without any validation. Callers must apply the magic check *before* the
+/// version/capacity checks: on a carrier with no channel the first 112 bits
+/// are arbitrary host instruction bits, and a repetitive code pattern can
+/// otherwise produce a plausible-looking but bogus header.
+fn header_from_positions(prof: &[CodePosition]) -> Result<ChannelHeader, CodebitsError> {
     if prof.len() < CHANNEL_HEADER_BITS {
         return Err(CodebitsError::ChannelNotFound);
     }
@@ -448,34 +452,58 @@ pub fn read_channel_header(
         .take(CHANNEL_HEADER_BITS)
         .map(|p| p.bit)
         .collect();
-    let header = ChannelHeader::unpack(&bits_to_bytes(&header_bits))?;
+    ChannelHeader::unpack(&bits_to_bytes(&header_bits))
+}
 
-    let want = expected_magic.unwrap_or(CHANNEL_MAGIC);
-    if header.magic != want {
-        return Err(CodebitsError::ChannelNotFound);
-    }
+/// Version + capacity sanity for an already magic-verified header.
+fn validate_header(header: &ChannelHeader, positions: usize) -> Result<(), CodebitsError> {
     if header.version != CHANNEL_VERSION {
         return Err(CodebitsError::Corrupted(format!(
             "unsupported channel version {} (expected {CHANNEL_VERSION})",
             header.version
         )));
     }
-    if header.ube_len < MIN_UBE_LEN || prof.len() < header.total_bits() {
+    if header.ube_len < MIN_UBE_LEN || positions < header.total_bits() {
         return Err(CodebitsError::Corrupted(
             "channel header payload length inconsistent with .text capacity".into(),
         ));
     }
+    Ok(())
+}
+
+/// Parses the channel header **without** any magic filter: only the version
+/// and capacity sanity checks are applied. Used by [`extract_ube`] and
+/// [`apply_diff`], which run after a successful magic-checked `locate`.
+pub fn parse_channel_header(text: &[u8], bitness: u32) -> Result<ChannelHeader, CodebitsError> {
+    let prof = profile(text, bitness);
+    let header = header_from_positions(&prof)?;
+    validate_header(&header, prof.len())?;
+    Ok(header)
+}
+
+/// Reads and validates the channel header, requiring the magic to equal
+/// `expected_magic` (or [`CHANNEL_MAGIC`] when `None`). This is the `locate`
+/// entry point: a magic mismatch is a clean "no channel here", never an error.
+pub fn read_channel_header(
+    text: &[u8],
+    bitness: u32,
+    expected_magic: Option<[u8; 4]>,
+) -> Result<ChannelHeader, CodebitsError> {
+    let prof = profile(text, bitness);
+    let header = header_from_positions(&prof)?;
+    let want = expected_magic.unwrap_or(CHANNEL_MAGIC);
+    if header.magic != want {
+        return Err(CodebitsError::ChannelNotFound);
+    }
+    validate_header(&header, prof.len())?;
     Ok(header)
 }
 
 /// Reads the full channel (header + UBE payload) from an instrumented code
-/// range. The returned `Vec<u8>` is the opaque UBE byte stream.
-pub fn extract_ube(
-    text: &[u8],
-    bitness: u32,
-    expected_magic: Option<[u8; 4]>,
-) -> Result<(ChannelHeader, Vec<u8>), CodebitsError> {
-    let header = read_channel_header(text, bitness, expected_magic)?;
+/// range. The returned `Vec<u8>` is the opaque UBE byte stream. Does not
+/// filter by magic — callers must have located the channel first.
+pub fn extract_ube(text: &[u8], bitness: u32) -> Result<(ChannelHeader, Vec<u8>), CodebitsError> {
+    let header = parse_channel_header(text, bitness)?;
     let prof = profile(text, bitness);
     let bits: Vec<bool> = prof
         .iter()
@@ -507,8 +535,19 @@ pub fn embed(
     debug_assert_eq!(need_slack, CHANNEL_HEADER_LEN + ube.len());
 
     let mut channel = Vec::with_capacity(CHANNEL_HEADER_LEN + ube.len());
+    // The channel magic mirrors the UBE trailer magic (standard `STH!`, or the
+    // password-derived stealth magic): the engine has already finalized the
+    // trailer by the time it hands the UBE to `inject`, so the last four bytes
+    // of the blob are exactly the magic `locate` will expect.
+    debug_assert!(ube.len() >= 4, "UBE is at least the 24-byte trailer");
+    let magic = [
+        ube[ube.len() - 4],
+        ube[ube.len() - 3],
+        ube[ube.len() - 2],
+        ube[ube.len() - 1],
+    ];
     let header = ChannelHeader {
-        magic: CHANNEL_MAGIC,
+        magic,
         version: CHANNEL_VERSION,
         flags: 0,
         ube_len: ube.len() as u32,
@@ -566,20 +605,7 @@ pub fn apply_diff(
 ) -> Result<ChannelHeader, CodebitsError> {
     // The header rides inside the diff-covered region; read it from the text
     // itself so that a stale/short diff is caught by the length check below.
-    let header = {
-        let prof = profile(text, bitness);
-        if prof.len() < CHANNEL_HEADER_BITS {
-            return Err(CodebitsError::Corrupted(
-                "no channel header in .text".into(),
-            ));
-        }
-        let header_bits: Vec<bool> = prof
-            .iter()
-            .take(CHANNEL_HEADER_BITS)
-            .map(|p| p.bit)
-            .collect();
-        ChannelHeader::unpack(&bits_to_bytes(&header_bits))?
-    };
+    let header = parse_channel_header(text, bitness)?;
 
     let total_bits = header.total_bits();
     if diff.len() != header.diff_len() {
@@ -1027,22 +1053,28 @@ mod tests {
             full.extend_from_slice(&synthetic_text());
         }
         full.truncate(8192);
-        let ube: Vec<u8> = (0..200u32).map(|i| (i * 31 + 7) as u8).collect();
+        // The UBE blob ends with its trailer magic; the channel reuses it.
+        let mut ube: Vec<u8> = (0..200u32).map(|i| (i * 31 + 7) as u8).collect();
+        let n = ube.len();
+        ube[n - 4..].copy_from_slice(&CHANNEL_MAGIC);
         let original = full.clone();
 
         let diff = embed(&mut full, 64, &ube, 0x2222).expect("embed");
 
-        let (header, got) = extract_ube(&full, 64, None).expect("extract");
+        let (header, got) = extract_ube(&full, 64).expect("extract");
         assert_eq!(header.magic, CHANNEL_MAGIC);
         assert_eq!(header.version, CHANNEL_VERSION);
         assert_eq!(header.ube_len, ube.len() as u32);
         assert_eq!(header.slack_off, 0x2222);
         assert_eq!(got, ube, "extracted UBE must round-trip byte-exactly");
 
-        // Stealth magic: a wrong expected magic must read as "not found".
-        let err = read_channel_header(&full, 64, Some(*b"XXXX"));
-        assert!(matches!(err, Err(CodebitsError::ChannelNotFound)));
-        let _ = read_channel_header(&full, 64, Some(CHANNEL_MAGIC)).expect("standard magic");
+        // Stealth magic: a channel written with a derived magic is invisible to
+        // the standard expectation and readable with the right one.
+        assert!(matches!(
+            read_channel_header(&full, 64, Some(*b"XXXX")),
+            Err(CodebitsError::ChannelNotFound)
+        ));
+        read_channel_header(&full, 64, Some(CHANNEL_MAGIC)).expect("standard magic");
 
         // Restore: apply the diff, then the text must equal the original.
         apply_diff(&mut full, 64, &diff).expect("apply_diff");

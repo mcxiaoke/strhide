@@ -1,14 +1,8 @@
 //! Format sniffing and strategy routing module.
 
 use crate::adapters::{
-    HostAdapter, SeekRead,
-    eof::EofAdapter,
-    jpeg::JpegAdapter,
-    mp4::Mp4Adapter,
-    pdf::PdfAdapter,
-    pe::PeAdapter,
-    png::PngAdapter,
-    zip::ZipAdapter,
+    HostAdapter, SeekRead, eof::EofAdapter, jpeg::JpegAdapter, mp4::Mp4Adapter, pdf::PdfAdapter,
+    pe::PeAdapter, png::PngAdapter, zip::ZipAdapter,
 };
 
 pub static ADAPTERS: &[&dyn HostAdapter] = &[
@@ -30,6 +24,7 @@ pub fn strategy_to_id(strategy: &str) -> u8 {
         "app_segment" => 5,
         "incremental" => 6,
         "pe_overlay" => 7,
+        "pe_codebits" => 8,
         _ => 1,
     }
 }
@@ -43,6 +38,7 @@ pub fn id_to_strategy(id: u8) -> &'static str {
         5 => "app_segment",
         6 => "incremental",
         7 => "pe_overlay",
+        8 => "pe_codebits",
         _ => "eof",
     }
 }
