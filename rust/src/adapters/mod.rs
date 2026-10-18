@@ -5,6 +5,7 @@ pub mod jpeg;
 pub mod mp4;
 pub mod pdf;
 pub mod pe;
+pub mod pe_codebits;
 pub mod png;
 pub mod zip;
 

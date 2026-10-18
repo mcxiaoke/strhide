@@ -30,6 +30,9 @@ filetime = "0.2.29"
 flate2 = "1.1.10"
 hkdf = "0.13.0"
 hmac = "0.13.0"
+# pe_codebits 策略：x86/x64 指令编解码（与 Python 侧 PyPI iced-x86 1.21 同源代码生成，
+# 保证跨语言位信道一致）。仅需 decoder/encoder，关闭格式化器等重代码。
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "encoder"] }
 pbkdf2 = "0.13.0"
 rand = "0.10.3"
 rpassword = "7.5.4"
