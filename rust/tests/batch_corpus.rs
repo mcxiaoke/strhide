@@ -13,8 +13,18 @@
 //! 4. **stealth** — same, plus `inspect` must report `is_stealth`, and removal
 //!    needs the password (the magic is derived from it).
 //!
+//! Every mode is swept over [`SIZE_CASES`], four payload sizes at the boundaries
+//! that matter to strategy selection and envelope framing: `<100 B` (an
+//! envelope dominated by its own header/trailer), `>512 B`, `>4 KiB` (beyond
+//! the few-KB zero-value padding runs `pe_slack` can use) and `>100 KiB`
+//! (beyond what `pe_codebits` and small slack runs can absorb, so `auto` must
+//! fall back instead of failing). The injected bytes are a deterministic
+//! pseudo-random stream, so a truncation or block swap in the payload path
+//! cannot pass the byte-for-byte comparison.
+//!
 //! Ignored by default: the corpus (`temp/testfiles`, ~135 MB) is local and
-//! uncommitted, and a full sweep rewrites a copy of every file four times.
+//! uncommitted, and a full sweep rewrites a copy of every file once per mode
+//! and per payload size.
 //!
 //! ```text
 //! cargo test --release --test batch_corpus -- --ignored --nocapture
@@ -36,11 +46,53 @@ use strhide::engine::{
 use strhide::errors::StrHideError;
 use strhide::rejection::run_all_rejection_checks;
 
-const PLAIN_SECRET: &str = "Batch corpus plaintext payload 2026";
 const ENC_PASSWORD: &str = "P@ssw0rd!Secure_2026";
-const ENC_SECRET: &str = "Batch corpus encrypted payload 2026";
 const STEALTH_PASSWORD: &str = "StealthPassword!2026";
-const STEALTH_SECRET: &str = "Batch corpus stealth payload 2026";
+
+/// One payload size in the sweep. `label` is only used in output and scratch
+/// file names; `bytes` is the exact payload length.
+#[derive(Clone, Copy)]
+struct SizeCase {
+    label: &'static str,
+    bytes: usize,
+}
+
+/// The four required buckets: `<100 B`, `>512 B`, `>4 KiB`, `>100 KiB`.
+const SIZE_CASES: [SizeCase; 4] = [
+    SizeCase {
+        label: "64B",
+        bytes: 64,
+    },
+    SizeCase {
+        label: "1K",
+        bytes: 1024,
+    },
+    SizeCase {
+        label: "8K",
+        bytes: 8192,
+    },
+    SizeCase {
+        label: "128K",
+        bytes: 128 * 1024,
+    },
+];
+
+/// Deterministic payload of exactly `size` bytes.
+///
+/// xorshift64 rather than a repeating byte pattern: identical bytes would make
+/// a swapped or duplicated 8-byte block invisible to the payload comparison.
+fn payload_bytes(size: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size + 8);
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15 ^ size as u64;
+    while out.len() < size {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    out.truncate(size);
+    out
+}
 
 // --------------------------------------------------------------------------- harness
 
@@ -65,10 +117,10 @@ impl Report {
         match outcome {
             Ok(detail) => {
                 self.passed += 1;
-                println!("  [PASS] [{mode:<7}] {file}  {detail}  ({elapsed:.2}s)");
+                println!("  [PASS] [{mode:<12}] {file}  {detail}  ({elapsed:.2}s)");
             }
             Err(detail) => {
-                println!("  [FAIL] [{mode:<7}] {file}  {detail}");
+                println!("  [FAIL] [{mode:<12}] {file}  {detail}");
                 self.failures.push(format!("{file} [{mode}]: {detail}"));
             }
         }
@@ -133,6 +185,17 @@ fn assert_restored(carrier: &Path, expected: &[u8; 32], mode: &str) -> Result<()
     Ok(())
 }
 
+fn assert_payload(actual: &[u8], expected: &[u8], mode: &str) -> Result<(), String> {
+    if actual != expected {
+        return Err(format!(
+            "{mode} payload mismatch: got {} bytes, expected {}",
+            actual.len(),
+            expected.len()
+        ));
+    }
+    Ok(())
+}
+
 // --------------------------------------------------------------------------- modes
 
 /// Carriers the policy must refuse, and which must stay untouched.
@@ -160,36 +223,49 @@ fn rejection_case(src: &Path, dir: &Path, reason: &str) -> Result<String, String
     }
 }
 
-fn plain_mode(src: &Path, dir: &Path, orig_sha: &[u8; 32]) -> Result<String, String> {
-    let carrier = copy_carrier(src, dir, "plain")?;
+fn plain_mode(
+    src: &Path,
+    dir: &Path,
+    orig_sha: &[u8; 32],
+    case: SizeCase,
+    payload: &[u8],
+) -> Result<String, String> {
+    let carrier = copy_carrier(src, dir, &format!("plain{}", case.label))?;
     let opts = WriteOptions {
         password: None,
         backup: false,
         ..Default::default()
     };
-    let w = write_carrier(&carrier, PayloadSource::Text(PLAIN_SECRET), &opts)
+    let w = write_carrier(&carrier, PayloadSource::Bytes(payload), &opts)
         .map_err(|e| format!("write: {e}"))?;
 
     verify_all_levels(&carrier, None)?;
 
     let r = read_carrier(&carrier, None, None).map_err(|e| format!("read: {e}"))?;
-    if r.data != PLAIN_SECRET.as_bytes() {
-        return Err("plaintext payload mismatch".into());
-    }
+    assert_payload(&r.data, payload, "plaintext")?;
 
     remove_carrier(&carrier, None, None, false).map_err(|e| format!("remove: {e}"))?;
     assert_restored(&carrier, orig_sha, "remove")?;
-    Ok(format!("format={:<5} strategy={}", w.format, w.strategy))
+    Ok(format!(
+        "format={:<5} strategy={:<14} ube={}B",
+        w.format, w.strategy, w.ube_size
+    ))
 }
 
-fn encrypted_mode(src: &Path, dir: &Path, orig_sha: &[u8; 32]) -> Result<String, String> {
-    let carrier = copy_carrier(src, dir, "enc")?;
+fn encrypted_mode(
+    src: &Path,
+    dir: &Path,
+    orig_sha: &[u8; 32],
+    case: SizeCase,
+    payload: &[u8],
+) -> Result<String, String> {
+    let carrier = copy_carrier(src, dir, &format!("enc{}", case.label))?;
     let opts = WriteOptions {
         password: Some(ENC_PASSWORD),
         backup: false,
         ..Default::default()
     };
-    let w = write_carrier(&carrier, PayloadSource::Text(ENC_SECRET), &opts)
+    let w = write_carrier(&carrier, PayloadSource::Bytes(payload), &opts)
         .map_err(|e| format!("write: {e}"))?;
 
     verify_all_levels(&carrier, Some(ENC_PASSWORD))?;
@@ -205,26 +281,33 @@ fn encrypted_mode(src: &Path, dir: &Path, orig_sha: &[u8; 32]) -> Result<String,
     }
 
     let r = read_carrier(&carrier, None, Some(ENC_PASSWORD)).map_err(|e| format!("read: {e}"))?;
-    if r.data != ENC_SECRET.as_bytes() {
-        return Err("encrypted payload mismatch".into());
-    }
+    assert_payload(&r.data, payload, "encrypted")?;
 
     // Structural restore needs no password: the envelope header carries the
     // boundaries and the payload itself is never decrypted.
     remove_carrier(&carrier, None, None, false).map_err(|e| format!("remove: {e}"))?;
     assert_restored(&carrier, orig_sha, "remove")?;
-    Ok(format!("format={:<5} strategy={}", w.format, w.strategy))
+    Ok(format!(
+        "format={:<5} strategy={:<14} ube={}B",
+        w.format, w.strategy, w.ube_size
+    ))
 }
 
-fn stealth_mode(src: &Path, dir: &Path, orig_sha: &[u8; 32]) -> Result<String, String> {
-    let carrier = copy_carrier(src, dir, "stl")?;
+fn stealth_mode(
+    src: &Path,
+    dir: &Path,
+    orig_sha: &[u8; 32],
+    case: SizeCase,
+    payload: &[u8],
+) -> Result<String, String> {
+    let carrier = copy_carrier(src, dir, &format!("stl{}", case.label))?;
     let opts = WriteOptions {
         password: Some(STEALTH_PASSWORD),
         stealth: true,
         backup: false,
         ..Default::default()
     };
-    let w = write_carrier(&carrier, PayloadSource::Text(STEALTH_SECRET), &opts)
+    let w = write_carrier(&carrier, PayloadSource::Bytes(payload), &opts)
         .map_err(|e| format!("write: {e}"))?;
 
     let inspected =
@@ -238,14 +321,15 @@ fn stealth_mode(src: &Path, dir: &Path, orig_sha: &[u8; 32]) -> Result<String, S
 
     let r =
         read_carrier(&carrier, None, Some(STEALTH_PASSWORD)).map_err(|e| format!("read: {e}"))?;
-    if r.data != STEALTH_SECRET.as_bytes() {
-        return Err("stealth payload mismatch".into());
-    }
+    assert_payload(&r.data, payload, "stealth")?;
 
     remove_carrier(&carrier, None, Some(STEALTH_PASSWORD), false)
         .map_err(|e| format!("remove: {e}"))?;
     assert_restored(&carrier, orig_sha, "remove")?;
-    Ok(format!("format={:<5} strategy={}", w.format, w.strategy))
+    Ok(format!(
+        "format={:<5} strategy={:<14} ube={}B",
+        w.format, w.strategy, w.ube_size
+    ))
 }
 
 fn first_line(msg: &str) -> String {
@@ -279,7 +363,17 @@ fn batch_corpus_all_modes() {
         files.len(),
         corpus.display()
     );
+    println!(
+        "Payload sizes: {}",
+        SIZE_CASES
+            .iter()
+            .map(|c| format!("{} ({}B)", c.label, c.bytes))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     println!("=======================================================\n");
+
+    let payloads: Vec<Vec<u8>> = SIZE_CASES.iter().map(|c| payload_bytes(c.bytes)).collect();
 
     let dir = scratch("run");
     let mut report = Report::new();
@@ -298,6 +392,7 @@ fn batch_corpus_all_modes() {
 
         // 1. Policy rejection (APK, signed PE, ...). Checked exactly like the
         //    writer does, so the expectation can never drift from the code.
+        //    The policy is payload-size independent, so one case is enough.
         if let Err(e) = run_all_rejection_checks(src) {
             let reason = match e {
                 StrHideError::Rejection(m) => m,
@@ -309,7 +404,8 @@ fn batch_corpus_all_modes() {
             continue;
         }
 
-        // 2..4. Full lifecycle in the three supported secrecy modes.
+        // 2..4. Full lifecycle in the three supported secrecy modes, at every
+        //       payload size.
         let orig_sha = match compute_file_sha256(src) {
             Ok(sha) => sha,
             Err(e) => {
@@ -318,23 +414,18 @@ fn batch_corpus_all_modes() {
             }
         };
 
+        type ModeFn = fn(&Path, &Path, &[u8; 32], SizeCase, &[u8]) -> Result<String, String>;
         for (mode, run) in [
-            (
-                "plain",
-                plain_mode as fn(&Path, &Path, &[u8; 32]) -> Result<String, String>,
-            ),
-            (
-                "encrypt",
-                encrypted_mode as fn(&Path, &Path, &[u8; 32]) -> Result<String, String>,
-            ),
-            (
-                "stealth",
-                stealth_mode as fn(&Path, &Path, &[u8; 32]) -> Result<String, String>,
-            ),
+            ("plain", plain_mode as ModeFn),
+            ("encrypt", encrypted_mode as ModeFn),
+            ("stealth", stealth_mode as ModeFn),
         ] {
-            let t0 = Instant::now();
-            let outcome = run(src, &dir, &orig_sha);
-            report.record(&name, mode, t0.elapsed().as_secs_f32(), outcome);
+            for (case, payload) in SIZE_CASES.iter().zip(payloads.iter()) {
+                let t0 = Instant::now();
+                let outcome = run(src, &dir, &orig_sha, *case, payload);
+                let label = format!("{mode}:{}", case.label);
+                report.record(&name, &label, t0.elapsed().as_secs_f32(), outcome);
+            }
         }
     }
 
