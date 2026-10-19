@@ -19,6 +19,7 @@
 //! keyword reference of each function.
 
 pub mod adapters;
+pub mod analysis;
 pub mod cli;
 pub mod config;
 pub mod crypto;

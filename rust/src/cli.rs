@@ -40,6 +40,8 @@ pub enum Commands {
     Inspect(InspectArgs),
     /// Diagnostic verification of host, envelope, and crypto
     Verify(VerifyArgs),
+    /// Black-box steganalysis: scan file(s) for hidden content, known or unknown
+    Scan(ScanArgs),
     /// List all supported formats, strategies, and their capacity limits
     ListStrategies(ListStrategiesArgs),
 }
@@ -182,6 +184,31 @@ pub struct VerifyArgs {
 #[derive(Args, Debug)]
 pub struct ListStrategiesArgs {}
 
+/// Black-box steganalysis options. Unlike inspect/verify (which assume a
+/// strhide envelope exists and check it), scan treats every input as unknown
+/// and reports structural + statistical signs of hidden data from any tool.
+#[derive(Args, Debug)]
+pub struct ScanArgs {
+    #[arg(
+        short = 'c',
+        long = "carrier",
+        required = true,
+        num_args = 1..,
+        value_name = "FILE",
+        help = "File(s) or directory(ies) to scan. Directories are scanned \
+                non-recursively unless --recursive is given."
+    )]
+    pub carrier: Vec<PathBuf>,
+
+    /// Recursively descend into directories.
+    #[arg(long = "recursive", short = 'r')]
+    pub recursive: bool,
+
+    /// Emit a JSON array of per-file reports (machine-readable).
+    #[arg(long = "json")]
+    pub json: bool,
+}
+
 pub fn prompt_password(confirm: bool) -> Result<String, StrHideError> {
     let pwd = rpassword::prompt_password("Enter password: ")
         .map_err(|e| StrHideError::General(format!("Failed to read password: {e}")))?;
@@ -302,6 +329,13 @@ pub fn run_cli() -> i32 {
         },
         Commands::Verify(args) => match handle_verify(args, &cfg) {
             Ok(code) => code,
+            Err(e) => {
+                eprintln!("[ERROR] {e}");
+                1
+            }
+        },
+        Commands::Scan(args) => match handle_scan(args) {
+            Ok(_) => 0,
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 1
@@ -666,6 +700,106 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig) -> Result<i32, StrHideError
     } else {
         1
     })
+}
+
+fn handle_scan(args: ScanArgs) -> Result<(), StrHideError> {
+    use crate::analysis::scan_file;
+
+    // Expand inputs: directories become file lists.
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in &args.carrier {
+        if entry.is_dir() {
+            let walker: Box<dyn Iterator<Item = PathBuf>> = if args.recursive {
+                Box::new(walkdir_recursive(entry)?)
+            } else {
+                Box::new(walkdir_flat(entry)?)
+            };
+            files.extend(walker);
+        } else if entry.is_file() {
+            files.push(entry.clone());
+        } else {
+            eprintln!("[WARN] '{}' does not exist, skipping", entry.display());
+        }
+    }
+
+    if files.is_empty() {
+        return Err(StrHideError::General(
+            "No files to scan (empty input or empty directory)".into(),
+        ));
+    }
+
+    let mut reports = Vec::with_capacity(files.len());
+    let mut failures = 0usize;
+    for f in &files {
+        match scan_file(f) {
+            Ok(r) => reports.push(r),
+            Err(e) => {
+                failures += 1;
+                eprintln!("[WARN] failed to scan '{}': {e}", f.display());
+            }
+        }
+    }
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&reports)?);
+    } else {
+        for r in &reports {
+            let format_label = r.format.as_deref().unwrap_or("unknown");
+            println!(
+                "[{}] {} ({} · {} bytes) — risk {}/100",
+                r.verdict.to_uppercase(),
+                r.carrier,
+                format_label,
+                r.file_size,
+                r.risk_score,
+            );
+            for finding in &r.findings {
+                let tag = match finding.severity {
+                    crate::analysis::Severity::Info => "·",
+                    crate::analysis::Severity::Suspicious => "!",
+                    crate::analysis::Severity::Likely => "!!",
+                };
+                println!("    {tag} [{}] {}", finding.detector, finding.detail);
+            }
+        }
+        println!(
+            "\nScanned {} file(s), {} with findings, {} failed.",
+            reports.len(),
+            reports.iter().filter(|r| !r.findings.is_empty()).count(),
+            failures,
+        );
+    }
+    Ok(())
+}
+
+fn walkdir_flat(dir: &Path) -> Result<impl Iterator<Item = PathBuf>, StrHideError> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            out.push(entry.path());
+        }
+    }
+    Ok(out.into_iter())
+}
+
+fn walkdir_recursive(dir: &Path) -> Result<impl Iterator<Item = PathBuf>, StrHideError> {
+    let mut out = Vec::new();
+    push_files_recursive(dir, &mut out)?;
+    Ok(out.into_iter())
+}
+
+fn push_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), StrHideError> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            push_files_recursive(&path, out)?;
+        } else {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn handle_list_strategies(_args: ListStrategiesArgs) -> Result<(), StrHideError> {
