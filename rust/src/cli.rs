@@ -464,7 +464,17 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
         preflight_batch(&args.carrier, output_dir)?;
     }
 
-    let hint = args.hint.clone().or_else(|| cfg.hint.clone());
+    // A password hint is incompatible with --stealth: stealth mode requires the
+    // password to locate the envelope, so nothing can be left in the clear.
+    // A hint that only comes from the config file is a default the user did not
+    // ask for on this run — drop it instead of failing the write with an error
+    // that blames `--stealth`. An explicit `-H` is still passed through so the
+    // engine can report the conflict.
+    let hint = if stealth && args.hint.is_none() {
+        None
+    } else {
+        args.hint.clone().or_else(|| cfg.hint.clone())
+    };
     let preserve_time = args.preserve_time && cfg.preserve_time.unwrap_or(true);
     let backup = !args.no_backup && cfg.backup.unwrap_or(true);
 
@@ -506,13 +516,14 @@ fn handle_read(args: ReadArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
         // Discriminate by error variant, not by message text. A password error
         // with no password supplied means the envelope is encrypted: show the
         // hint, then prompt (interactive terminals only) and retry once.
+        //
+        // The engine renders the hint as ` Hint: '<hint>'.` (engine.rs). The
+        // hint itself is arbitrary user text and may contain quotes, so strip
+        // the exact trailing terminator instead of splitting on `'`.
         Err(e @ StrHideError::Password(_)) if password.is_none() => {
             let msg = e.to_string();
-            if let Some(hint_part) = msg
-                .split("Hint: '")
-                .nth(1)
-                .and_then(|s| s.rsplit('\'').nth(1))
-            {
+            if let Some((_, rest)) = msg.split_once("Hint: '") {
+                let hint_part = rest.strip_suffix("'.").unwrap_or(rest);
                 println!("[INFO] Password hint: {hint_part}");
             }
             if !(std::io::IsTerminal::is_terminal(&std::io::stdin())
@@ -569,7 +580,9 @@ fn handle_remove(args: RemoveArgs, cfg: &FileConfig) -> Result<(), StrHideError>
     if multi {
         preflight_batch(&args.carrier, output_dir)?;
     }
-    let backup = !args.no_backup;
+    // Mirror `write`: `remove` also honours the configured backup default
+    // (`config.rs` documents `backup` as covering both commands).
+    let backup = !args.no_backup && cfg.backup.unwrap_or(true);
 
     for_each_carrier(&args.carrier, |carrier| {
         let output = carrier_output_path(carrier, args.output.as_deref(), output_dir)?;
@@ -644,7 +657,7 @@ fn handle_inspect(args: InspectArgs, cfg: &FileConfig) -> Result<(), StrHideErro
                 println!("  - {}{}{}: {}", c.strategy, auto, state, c.limit);
             } else {
                 println!(
-                    "  - {}{}{}: {} — {}",
+                    "  - {}{}{}: {} - {}",
                     c.strategy, auto, state, c.limit, detail
                 );
             }
@@ -746,7 +759,7 @@ fn handle_scan(args: ScanArgs) -> Result<(), StrHideError> {
         for r in &reports {
             let format_label = r.format.as_deref().unwrap_or("unknown");
             println!(
-                "[{}] {} ({} · {} bytes) — risk {}/100",
+                "[{}] {} ({} - {} bytes) - risk {}/100",
                 r.verdict.to_uppercase(),
                 r.carrier,
                 format_label,
@@ -755,7 +768,7 @@ fn handle_scan(args: ScanArgs) -> Result<(), StrHideError> {
             );
             for finding in &r.findings {
                 let tag = match finding.severity {
-                    crate::analysis::Severity::Info => "·",
+                    crate::analysis::Severity::Info => "-",
                     crate::analysis::Severity::Suspicious => "!",
                     crate::analysis::Severity::Likely => "!!",
                 };

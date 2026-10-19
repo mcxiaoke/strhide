@@ -138,7 +138,7 @@ impl HostAdapter for ZipAdapter {
                     let cap = 0xFFFF_FFFEu64.saturating_sub(patch_limit);
                     pre_cd.capacity_bytes = Some(cap);
                     pre_cd.limit = format!(
-                        "≤ {} B (4 GiB - EOCD offset {})",
+                        "<= {} B (4 GiB - EOCD offset {})",
                         format_bytes(cap),
                         format_bytes(patch_limit)
                     );
@@ -318,10 +318,30 @@ impl HostAdapter for ZipAdapter {
             remaining -= n as u64;
         }
 
-        // Copy Central Directory and EOCD up to patch_offset
-        stego_in.seek(SeekFrom::Start(header.inject_offset + header.inject_size))?;
-        let mut bytes_before_patch =
-            (header.patch_offset as u64) - (header.inject_offset + header.inject_size);
+        // Copy Central Directory and EOCD up to patch_offset.
+        //
+        // Every offset below comes from the envelope header, which is not
+        // covered by the AEAD (see `EnvelopeHeader::get_aad`): a corrupted or
+        // tampered header must fail as `CorruptedData`, never panic in a debug
+        // build or wrap around into a bogus seek in release.
+        let inject_end = header
+            .inject_offset
+            .checked_add(header.inject_size)
+            .ok_or_else(|| {
+                StrHideError::CorruptedData(format!(
+                    "Injected region [{}, {}] overflows u64 offsets",
+                    header.inject_offset, header.inject_size
+                ))
+            })?;
+        stego_in.seek(SeekFrom::Start(inject_end))?;
+        let mut bytes_before_patch = (header.patch_offset as u64)
+            .checked_sub(inject_end)
+            .ok_or_else(|| {
+                StrHideError::CorruptedData(format!(
+                    "patch_offset {} precedes the end of the injected region ({inject_end})",
+                    header.patch_offset
+                ))
+            })?;
         while bytes_before_patch > 0 {
             let to_read = std::cmp::min(bytes_before_patch, buf.len() as u64) as usize;
             let n = stego_in.read(&mut buf[..to_read])?;
@@ -336,7 +356,13 @@ impl HostAdapter for ZipAdapter {
         out.write_all(&header.orig_patch_val.to_le_bytes())?;
 
         // Skip the modified patch field in stego_in (4 bytes)
-        stego_in.seek(SeekFrom::Start((header.patch_offset + 4) as u64))?;
+        let patch_field_end = header.patch_offset.checked_add(4).ok_or_else(|| {
+            StrHideError::CorruptedData(format!(
+                "patch_offset {} leaves no room for the patch field",
+                header.patch_offset
+            ))
+        })?;
+        stego_in.seek(SeekFrom::Start(patch_field_end as u64))?;
 
         // Copy remaining EOCD bytes (comment len + comment)
         loop {

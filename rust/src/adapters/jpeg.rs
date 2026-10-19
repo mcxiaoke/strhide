@@ -236,7 +236,7 @@ impl HostAdapter for JpegAdapter {
                 strategy: "app_segment".into(),
                 capacity_bytes: Some(JPEG_MAX_TOTAL_CAPACITY),
                 available: true,
-                limit: format!("≤ {} B (64 MiB)", format_bytes(JPEG_MAX_TOTAL_CAPACITY)),
+                limit: format!("<= {} B (64 MiB)", format_bytes(JPEG_MAX_TOTAL_CAPACITY)),
                 note: Some(
                     "APP15 segment chain before SOS; per-segment payload capped at 65,533 B; file grows"
                         .into(),

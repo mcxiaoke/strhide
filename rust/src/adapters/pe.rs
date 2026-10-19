@@ -235,7 +235,7 @@ impl HostAdapter for PeAdapter {
                         let encrypted_ok = cap >= crate::envelope::MIN_UBE_ENCRYPTED as usize;
                         codebits.available = plain_ok;
                         codebits.limit =
-                            format!("≤ {} B (file size unchanged)", format_bytes(cap as u64));
+                            format!("<= {} B (file size unchanged)", format_bytes(cap as u64));
                         codebits.note = Some(if encrypted_ok {
                             format!(
                                 "instruction-encoding channel; fits an encrypted envelope (smallest {} B); longest zero-value slack run is {} B, which caps the restore diff",
@@ -244,13 +244,13 @@ impl HostAdapter for PeAdapter {
                             )
                         } else if plain_ok {
                             format!(
-                                "instruction-encoding channel; fits an unencrypted envelope only (encrypted needs ≥ {} B); longest zero-value slack run is {} B, which caps the restore diff",
+                                "instruction-encoding channel; fits an unencrypted envelope only (encrypted needs >= {} B); longest zero-value slack run is {} B, which caps the restore diff",
                                 format_bytes(crate::envelope::MIN_UBE_ENCRYPTED as u64),
                                 format_bytes(slack as u64)
                             )
                         } else {
                             format!(
-                                "not usable on this .text: at most {} B (unencrypted needs ≥ {} B, encrypted ≥ {} B)",
+                                "not usable on this .text: at most {} B (unencrypted needs >= {} B, encrypted >= {} B)",
                                 format_bytes(cap as u64),
                                 format_bytes(crate::envelope::MIN_UBE_PLAIN as u64),
                                 format_bytes(crate::envelope::MIN_UBE_ENCRYPTED as u64)
@@ -287,7 +287,7 @@ impl HostAdapter for PeAdapter {
                     pad.capacity_bytes = Some(run as u64);
                     let plain_ok = run >= crate::envelope::MIN_UBE_PLAIN as usize;
                     pad.available = plain_ok;
-                    pad.limit = format!("≤ {} B (file size unchanged)", format_bytes(run as u64));
+                    pad.limit = format!("<= {} B (file size unchanged)", format_bytes(run as u64));
                     pad.note = Some(if plain_ok {
                         format!(
                             "envelope written into PE alignment padding (largest zero run {} B over {} padding range(s)); file size unchanged, nothing appended",

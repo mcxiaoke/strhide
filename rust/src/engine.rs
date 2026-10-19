@@ -365,7 +365,7 @@ fn no_hidden_data_error(
             ));
         } else {
             msg.push_str(&format!(
-                ". Note: the carrier shows envelope-shaped structures ({}); it may contain a stealth envelope — provide the password used at write time with -p/--password to check.",
+                ". Note: the carrier shows envelope-shaped structures ({}); it may contain a stealth envelope - provide the password used at write time with -p/--password to check.",
                 hints.join("; ")
             ));
         }
@@ -441,7 +441,16 @@ fn utc_stamp(secs: u64) -> String {
 /// Collisions fall back to `<carrier>.bak-<UTC timestamp>` and then a counter.
 /// Mirrors the Python implementation.
 fn next_backup_path(carrier: &Path) -> PathBuf {
-    let base = PathBuf::from(format!("{}.bak", carrier.display()));
+    // Build the path by appending to the OsString: `Path::display()` is lossy
+    // for non-UTF-8 paths (unpaired surrogates on Windows, arbitrary bytes on
+    // Unix) and would turn a valid carrier path into a non-existent one.
+    let with_suffix = |suffix: &str| {
+        let mut os = carrier.as_os_str().to_os_string();
+        os.push(suffix);
+        PathBuf::from(os)
+    };
+
+    let base = with_suffix(".bak");
     if !base.exists() {
         return base;
     }
@@ -452,19 +461,15 @@ fn next_backup_path(carrier: &Path) -> PathBuf {
     let stamp = utc_stamp(now);
     for suffix in 0..1000u32 {
         let candidate = if suffix == 0 {
-            PathBuf::from(format!("{}.bak-{stamp}", carrier.display()))
+            with_suffix(&format!(".bak-{stamp}"))
         } else {
-            PathBuf::from(format!("{}.bak-{stamp}-{suffix}", carrier.display()))
+            with_suffix(&format!(".bak-{stamp}-{suffix}"))
         };
         if !candidate.exists() {
             return candidate;
         }
     }
-    PathBuf::from(format!(
-        "{}.bak-{stamp}-{}",
-        carrier.display(),
-        std::process::id()
-    ))
+    with_suffix(&format!(".bak-{stamp}-{}", std::process::id()))
 }
 
 pub fn write_carrier(
@@ -723,8 +728,12 @@ pub fn write_carrier(
     let mut warning_msg = None;
     if orig_host_size > 0 && ube_total_size > (orig_host_size / 2) {
         let ratio_pct = (ube_total_size as f64 / orig_host_size as f64) * 100.0;
+        // State the measured ratio and refer to the threshold separately. The
+        // old text hard-coded "exceeds 50.0%" next to the real percentage,
+        // which read like a contradiction for tiny carriers (e.g. "50.0% ...
+        // 319.4%").
         warning_msg = Some(format!(
-            "Hidden data envelope size ({ube_total_size} bytes) exceeds 50.0% of carrier file size ({orig_host_size} bytes, {ratio_pct:.1}%). Noticeable file size inflation may compromise stealthiness!"
+            "Hidden data envelope ({ube_total_size} bytes) is {ratio_pct:.1}% of the carrier file size ({orig_host_size} bytes), above the 50% inflation warning threshold. Noticeable file size inflation may compromise stealthiness!"
         ));
     }
 

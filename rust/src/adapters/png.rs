@@ -72,7 +72,7 @@ impl HostAdapter for PngAdapter {
                 strategy: "chunk".into(),
                 capacity_bytes: Some(PNG_MAX_CHUNK_LEN),
                 available: true,
-                limit: format!("≤ {} B (2 GiB - 1)", format_bytes(PNG_MAX_CHUNK_LEN)),
+                limit: format!("<= {} B (2 GiB - 1)", format_bytes(PNG_MAX_CHUNK_LEN)),
                 note: Some(
                     "private ancillary chunk 'prIv' before IEND; file grows slightly".into(),
                 ),

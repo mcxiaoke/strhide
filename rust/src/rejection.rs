@@ -96,7 +96,9 @@ pub fn check_unsupported_apk(filename: Option<&str>) -> Option<String> {
     if let Some(name) = filename
         && name.to_lowercase().ends_with(".apk")
     {
-        return Some("APK 格式不在支持列表中（不支持作为载体文件进行修改）。".into());
+        return Some(
+            "APK carriers are not supported (modifying the container would break it).".into(),
+        );
     }
     None
 }

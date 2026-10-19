@@ -20,10 +20,14 @@ impl Mp4Adapter {
     /// Length of the appended envelope when `[offset, total_size)` is exactly
     /// one strhide envelope, else `None`.
     ///
-    /// Requires no password: the trailer's boundary parameters must add up to
-    /// the file size *and* its CRC32 over its own 16-byte prefix must check
-    /// out, which is what distinguishes a genuine appended envelope from
-    /// arbitrary trailing bytes (including a damaged box header).
+    /// Requires no password. In stealth mode both the trailer magic and its
+    /// CRC32 are password-derived (see `EnvelopeTrailer::create_stealth`), so
+    /// `verify_structure` — which has no password — cannot check the CRC. The
+    /// boundary equality below is the password-independent evidence instead:
+    /// the region must start exactly where the box tree ended and end exactly
+    /// at EOF, which arbitrary trailing bytes (including a damaged box header)
+    /// do not satisfy. This mirrors `suspicious_structures`, which uses the
+    /// same boundary rule for the same reason.
     fn trailing_envelope_len(
         &self,
         stego_in: &mut dyn SeekRead,
@@ -48,13 +52,16 @@ impl Mp4Adapter {
         }
         let ube_offset = u64::from_le_bytes(tail[0..8].try_into().ok()?);
         let ube_total_size = u64::from_le_bytes(tail[8..16].try_into().ok()?);
-        let crc = u32::from_le_bytes(tail[16..20].try_into().ok()?);
-        if crc32fast::hash(&tail[0..16]) != crc {
-            return None;
-        }
         // The envelope must start exactly where the box tree ended and reach
         // exactly to EOF; anything else means the tail is not our envelope.
-        if ube_offset != offset || ube_offset + ube_total_size != total_size {
+        //
+        // Deliberately no CRC32 check: stealth trailers carry a password-masked
+        // CRC *and* a password-derived magic, and this function runs without a
+        // password, so a raw CRC comparison can never succeed there. The
+        // boundary equality is the password-independent evidence (the same rule
+        // `suspicious_structures` relies on). `checked_add` keeps crafted
+        // offsets from overflowing in debug builds.
+        if ube_offset != offset || ube_offset.checked_add(ube_total_size) != Some(total_size) {
             return None;
         }
         Some(ube_total_size)
@@ -77,7 +84,25 @@ impl HostAdapter for Mp4Adapter {
         let mut prefix = [0u8; 8];
         let ok = if reader.read_exact(&mut prefix).is_ok() {
             let tag = &prefix[4..8];
-            tag == b"ftyp" || tag == b"moov" || tag == b"mdat" || tag == b"wide" || tag == b"skip"
+            // Top-level ISO-BMFF box types. The list covers classic files
+            // (`ftyp`/`moov`/`mdat`), fragmented/CMAF media whose first box is
+            // `styp`, `moof` or `sidx` (ISO/IEC 14496-12 allows a fragmented
+            // stream without a leading `ftyp`), and the neutral filler boxes
+            // `free`/`skip`/`wide`/`uuid`/`pdin`/`emsg`. Kept as an explicit
+            // whitelist: "size + any 4CC" would classify arbitrary binaries as
+            // MP4 and defeat the router's explicit-rejection policy.
+            tag == b"ftyp"
+                || tag == b"styp"
+                || tag == b"moov"
+                || tag == b"moof"
+                || tag == b"mdat"
+                || tag == b"sidx"
+                || tag == b"emsg"
+                || tag == b"free"
+                || tag == b"skip"
+                || tag == b"wide"
+                || tag == b"uuid"
+                || tag == b"pdin"
         } else {
             false
         };

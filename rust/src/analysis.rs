@@ -319,7 +319,7 @@ fn track_png_structure(data: &[u8], out: &mut Vec<Finding>) {
             detector: "png:private-chunk".into(),
             severity: Severity::Likely,
             detail: format!(
-                "Private ancillary chunk '{name}' ({len} bytes) — non-standard metadata injection"
+                "Private ancillary chunk '{name}' ({len} bytes) - non-standard metadata injection"
             ),
         });
     }
@@ -809,7 +809,7 @@ fn track_content_domain(pixels: &[u8], width: u32, channels: usize, out: &mut Ve
             severity: Severity::Suspicious,
             detail: format!(
                 "Chi-square LSB attack: pair histogram looks uniform (suspicion {chi2_score:.2}) \
-                 — consistent with LSB embedding"
+                 - consistent with LSB embedding"
             ),
         });
     }
@@ -820,7 +820,7 @@ fn track_content_domain(pixels: &[u8], width: u32, channels: usize, out: &mut Ve
         out.push(Finding {
             detector: "rs-analysis".into(),
             severity: Severity::Suspicious,
-            detail: format!("RS analysis estimates LSB embedding rate ≈ {p:.2}"),
+            detail: format!("RS analysis estimates LSB embedding rate ~{p:.2}"),
         });
     }
 
@@ -829,7 +829,7 @@ fn track_content_domain(pixels: &[u8], width: u32, channels: usize, out: &mut Ve
         out.push(Finding {
             detector: "spa".into(),
             severity: Severity::Suspicious,
-            detail: format!("Sample Pair Analysis (DWW) estimates embedding rate ≈ {spa_p:.2}"),
+            detail: format!("Sample Pair Analysis (DWW) estimates embedding rate ~{spa_p:.2}"),
         });
     }
 }

@@ -229,7 +229,7 @@ fn size_inflation_warning_is_raised_above_fifty_percent() {
         .as_deref()
         .expect("a payload this large relative to the carrier must warn");
     assert!(
-        warning.contains("exceeds 50.0% of carrier file size"),
+        warning.contains("above the 50% inflation warning threshold"),
         "warning: {warning}"
     );
     assert!(
@@ -323,7 +323,7 @@ fn inflation_and_structural_warnings_are_merged() {
         "structural part missing: {warning}"
     );
     assert!(
-        warning.contains("exceeds 50.0% of carrier file size"),
+        warning.contains("above the 50% inflation warning threshold"),
         "inflation part missing: {warning}"
     );
 }
