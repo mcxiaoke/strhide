@@ -230,7 +230,8 @@ pub struct FinalizeCtx<'a> {
 2. `router.rs` 新增单一真源：
    ```rust
    pub static STRATEGY_REGISTRY: &[(&str, u8)] = &[("eof",1),("chunk",2),("box_uuid",3),
-       ("pre_cd_inject",4),("app_segment",5),("incremental",6),("pe_overlay",7),("pe_codebits",8)];
+       ("pre_cd_inject",4),("app_segment",5),("incremental",6),("pe_overlay",7),("pe_codebits",8),
+       ("pe_slack",9)];
    ```
    `strategy_to_id` 改返回 `Result<u8, StrHideError>`，删掉 `_ => 1`；
    `id_to_strategy` 保留 `_ => "unknown"`，让上层能给出明确错误而不是假装是 eof。

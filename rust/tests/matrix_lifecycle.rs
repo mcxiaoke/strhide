@@ -451,6 +451,7 @@ fn explicit_non_default_strategies_roundtrip() {
         false,
         "pe_overlay",
     );
+    run_cell(Fmt::Pe, "pe_slack", Some("slack-pw"), false, "pe_slack");
     run_cell(
         Fmt::Pe,
         "pe_codebits",
@@ -739,7 +740,7 @@ fn inspect_reports_all_strategies_for_every_format() {
             Fmt::Mp4 => vec!["box_uuid", "eof"],
             Fmt::Zip => vec!["pre_cd_inject", "eof"],
             Fmt::Pdf => vec!["incremental", "eof"],
-            Fmt::Pe => vec!["pe_codebits", "pe_overlay", "eof"],
+            Fmt::Pe => vec!["pe_codebits", "pe_slack", "pe_overlay", "eof"],
         };
         assert_eq!(names, expected, "{}: strategy order", fmt.name());
         for c in &insp.strategies {

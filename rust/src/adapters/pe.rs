@@ -1,6 +1,7 @@
 //! Windows Portable Executable (PE) adapter for strhide.
 
 use crate::adapters::pe_codebits;
+use crate::adapters::pe_slack;
 use crate::adapters::{
     HostAdapter, SeekRead, SeekWrite, StrategyCapacity, SubStream, format_bytes,
 };
@@ -141,7 +142,7 @@ impl HostAdapter for PeAdapter {
     }
 
     fn supported_strategies(&self) -> Vec<&'static str> {
-        vec!["pe_codebits", "pe_overlay", "eof"]
+        vec!["pe_codebits", "pe_slack", "pe_overlay", "eof"]
     }
 
     fn is_scattered_strategy(&self, strategy: &str) -> bool {
@@ -149,9 +150,18 @@ impl HostAdapter for PeAdapter {
     }
 
     fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, ube_size: u64) -> &'static str {
-        // pe_codebits needs (a) an x86/x64 .text with enough instrumentable
+        // Priority: instruction channel -> section padding -> overlay.
+        //
+        // Both zero-growth strategies are tried first because `pe_overlay`
+        // grows the file and leaves the single most obvious PE stego trace
+        // (data past the last section).
+        //
+        // `pe_codebits` needs (a) an x86/x64 `.text` with enough instrumentable
         // positions and (b) a contiguous zero-value slack run for the restore
-        // diff. Any failure falls through to the always-available pe_overlay.
+        // diff. `pe_slack` needs only a zero run, and a *smaller* one: the
+        // envelope is written in place, while the code-bit channel must park
+        // its `14 + ube` restore diff in padding. So any carrier that fits
+        // `pe_codebits` also fits `pe_slack` — the reverse is not true.
         if let Ok(layout) = pe_codebits::parse_pe_code_layout_streaming(reader)
             && let Ok(text) = pe_codebits::read_text_range(reader, &layout)
         {
@@ -162,6 +172,15 @@ impl HostAdapter for PeAdapter {
             {
                 return "pe_codebits";
             }
+        }
+        if let Ok(layout) = pe_codebits::parse_slack_layout_streaming(reader)
+            && let Ok(Some(_)) = pe_slack::find_slack_run(
+                reader,
+                &layout.slack_ranges,
+                usize::try_from(ube_size).unwrap_or(usize::MAX),
+            )
+        {
+            return "pe_slack";
         }
         "pe_overlay"
     }
@@ -176,6 +195,16 @@ impl HostAdapter for PeAdapter {
             limit: "carrier-dependent (.text density + zero slack)".into(),
             note: Some(
                 "x86/x64 instruction-encoding channel; file size unchanged; run `inspect -c <carrier>` for the exact limit"
+                    .into(),
+            ),
+        };
+        let mut pad = StrategyCapacity {
+            strategy: "pe_slack".into(),
+            capacity_bytes: None,
+            available: true,
+            limit: "carrier-dependent (section padding)".into(),
+            note: Some(
+                "envelope written into PE alignment padding; file size unchanged; run `inspect -c <carrier>` for the exact limit"
                     .into(),
             ),
         };
@@ -248,6 +277,37 @@ impl HostAdapter for PeAdapter {
                     });
                 }
             }
+            // Padding capacity is measured independently of `.text`: it works
+            // on any architecture, and the limit is the longest single zero run
+            // (the envelope is contiguous and self-contained).
+            match pe_codebits::parse_slack_layout_streaming(r) {
+                Ok(layout) => {
+                    let run =
+                        pe_codebits::max_zero_run_streaming(r, &layout.slack_ranges).unwrap_or(0);
+                    pad.capacity_bytes = Some(run as u64);
+                    let plain_ok = run >= crate::envelope::MIN_UBE_PLAIN as usize;
+                    pad.available = plain_ok;
+                    pad.limit = format!("≤ {} B (file size unchanged)", format_bytes(run as u64));
+                    pad.note = Some(if plain_ok {
+                        format!(
+                            "envelope written into PE alignment padding (largest zero run {} B over {} padding range(s)); file size unchanged, nothing appended",
+                            format_bytes(run as u64),
+                            layout.slack_ranges.len()
+                        )
+                    } else {
+                        format!(
+                            "not usable on this carrier: largest zero run is {} B (smallest envelope is {} B)",
+                            format_bytes(run as u64),
+                            format_bytes(crate::envelope::MIN_UBE_PLAIN as u64)
+                        )
+                    });
+                }
+                Err(_) => {
+                    pad.available = false;
+                    pad.limit = "unavailable".into();
+                    pad.note = Some("PE section table could not be parsed".into());
+                }
+            }
             if let Some(p) = start {
                 let _ = r.seek(SeekFrom::Start(p));
             }
@@ -255,6 +315,7 @@ impl HostAdapter for PeAdapter {
 
         let mut caps = vec![
             codebits,
+            pad,
             StrategyCapacity {
                 strategy: "pe_overlay".into(),
                 capacity_bytes: None,
@@ -295,7 +356,7 @@ impl HostAdapter for PeAdapter {
         if strategy == "pe_codebits" {
             return inject_codebits(host_in, ube_in, out);
         }
-        if strategy != "pe_overlay" && strategy != "eof" {
+        if !matches!(strategy, "pe_slack" | "pe_overlay" | "eof") {
             return Err(StrHideError::UnsupportedFormat(format!(
                 "Strategy '{strategy}' not supported by PE adapter"
             )));
@@ -314,6 +375,13 @@ impl HostAdapter for PeAdapter {
                 "Corrupted PE executable: file size ({} bytes) is smaller than PE section headers dictate ({} bytes).",
                 pe_info.host_size, pe_info.pe_image_end
             )));
+        }
+
+        if strategy == "pe_slack" {
+            // The envelope overwrites zero-value padding in place; the host is
+            // otherwise reproduced byte-for-byte, so `inject_size` describes an
+            // overwrite rather than an insertion.
+            return pe_slack::inject(host_in, ube_in, out);
         }
 
         host_in.seek(SeekFrom::Start(0))?;
@@ -356,12 +424,13 @@ impl HostAdapter for PeAdapter {
             return Ok(Some(loc));
         }
 
-        let trailer = match EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {
-            Some(t) => t,
-            None => return Ok(None),
-        };
+        // A trailing envelope comes before a padding envelope so that stacked
+        // envelopes unwrap outermost-first: whatever was appended sits after
+        // everything else and can be removed without touching the padding.
+        let trailer = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)?;
 
-        if let Ok(pe_info) = parse_pe_headers(stego_in)
+        if let Some(trailer) = &trailer
+            && let Ok(pe_info) = parse_pe_headers(stego_in)
             && trailer.ube_offset >= pe_info.pe_image_end
         {
             return Ok(Some((
@@ -371,13 +440,25 @@ impl HostAdapter for PeAdapter {
             )));
         }
 
-        let file_size = stego_in.seek(SeekFrom::End(0))?;
-        if trailer.ube_offset + trailer.ube_total_size == file_size {
-            return Ok(Some((
-                trailer.ube_offset,
-                trailer.ube_total_size,
-                "eof".into(),
-            )));
+        // Envelope inside the section alignment padding (file size unchanged).
+        // Checked before the generic EOF fallback: an envelope placed in the
+        // *last* section's padding also ends at EOF, and must still be reported
+        // as `pe_slack`.
+        if let Some((ube_offset, ube_total_size)) =
+            pe_slack::locate(stego_in, expected_trailer_magic)?
+        {
+            return Ok(Some((ube_offset, ube_total_size, "pe_slack".into())));
+        }
+
+        if let Some(trailer) = &trailer {
+            let file_size = stego_in.seek(SeekFrom::End(0))?;
+            if trailer.ube_offset + trailer.ube_total_size == file_size {
+                return Ok(Some((
+                    trailer.ube_offset,
+                    trailer.ube_total_size,
+                    "eof".into(),
+                )));
+            }
         }
 
         Ok(None)
@@ -418,6 +499,12 @@ impl HostAdapter for PeAdapter {
     ) -> Result<(), StrHideError> {
         if crate::router::id_to_strategy(header.strategy_id) == "pe_codebits" {
             return strip_codebits(stego_in, out);
+        }
+        if crate::router::id_to_strategy(header.strategy_id) == "pe_slack" {
+            // The envelope overwrote padding in place: restore = zero-fill that
+            // exact region, which reproduces the original bytes because the
+            // writer verified the region was all-zero before overwriting it.
+            return pe_slack::strip(stego_in, out, header);
         }
         // pe_overlay / eof: the envelope was appended at the end of the host,
         // so restoring means keeping the first `inject_offset` bytes. This
@@ -467,6 +554,18 @@ impl HostAdapter for PeAdapter {
                     "overlay of {} bytes beyond PE image boundary (minimum envelope size is {MIN_ENVELOPE})",
                     info.host_size - info.pe_image_end
                 ));
+        }
+        // A pristine linker leaves section padding zero-filled, so any non-zero
+        // byte there is the password-independent trace of a `pe_slack` envelope
+        // (or of a code cave). Only report a substantial amount: a stray byte is
+        // not an envelope.
+        if let Ok((nonzero, ranges)) = pe_slack::nonzero_padding_bytes(stego_in)
+            && nonzero >= crate::envelope::MIN_UBE_PLAIN as u64
+        {
+            found.push(format!(
+                "{nonzero} non-zero bytes in PE section padding ({} padding range(s) scanned); a pe_slack envelope leaves its ciphertext there",
+                ranges
+            ));
         }
         found
     }

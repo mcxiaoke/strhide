@@ -743,17 +743,19 @@ pub fn pe_code_layout(data: &[u8]) -> Result<PeCodeLayout, CodebitsError> {
     pe_code_layout_with_host(data, data.len() as u64)
 }
 
-/// Reads a PE's code layout from an in-memory *header window*, clamped against
-/// an explicit `host_size`.
+/// PE section-table geometry, independent of architecture and of `.text`.
 ///
-/// `data` only has to contain the DOS/COFF/optional headers and the section
-/// table (a few KB). Every derived range (`text_scan_len`, slack bounds) is
-/// clamped against `host_size` — the real file size — and **not** against
-/// `data.len()`. The streaming caller reads a 64 KiB header window while
-/// `.text` and the section-tail padding usually live far beyond it, so
-/// clamping to the window would silently truncate both the scan range and the
-/// zero-slack candidates (see `parse_pe_code_layout_streaming`).
-fn pe_code_layout_with_host(data: &[u8], host_size: u64) -> Result<PeCodeLayout, CodebitsError> {
+/// Shared by the code-bit layout (which additionally requires an x86/x64
+/// `.text`) and by the `pe_slack` strategy (which only needs the alignment
+/// padding, so it must also work for ARM64 / .NET / any other machine type).
+struct PeGeometry {
+    machine: u16,
+    /// `(name, virtual_size, size_of_raw_data, pointer_to_raw_data)`.
+    sections: Vec<(String, u32, u32, u32)>,
+    sec_table_end: u64,
+}
+
+fn pe_geometry(data: &[u8]) -> Result<PeGeometry, CodebitsError> {
     if data.len() < 0x40 || &data[0..2] != b"MZ" {
         return Err(CodebitsError::NotPe);
     }
@@ -765,12 +767,6 @@ fn pe_code_layout_with_host(data: &[u8], host_size: u64) -> Result<PeCodeLayout,
     let machine = u16::from_le_bytes(data[coff..coff + 2].try_into().unwrap());
     let num_sections = u16::from_le_bytes(data[coff + 2..coff + 4].try_into().unwrap()) as usize;
     let size_of_opt = u16::from_le_bytes(data[coff + 16..coff + 18].try_into().unwrap()) as usize;
-
-    let bitness = match machine {
-        0x14C => 32,
-        0x8664 => 64,
-        other => return Err(CodebitsError::UnsupportedMachine(other)),
-    };
 
     let opt = coff + 20;
     if opt + 2 > data.len() {
@@ -797,43 +793,127 @@ fn pe_code_layout_with_host(data: &[u8], host_size: u64) -> Result<PeCodeLayout,
         sections.push((name, vsize, rawsize, rawptr));
     }
 
-    let text = sections
+    Ok(PeGeometry {
+        machine,
+        sec_table_end: (sec_table + sections.len() * 40) as u64,
+        sections,
+    })
+}
+
+/// Alignment padding candidates `(start, end)` of a PE, in file order:
+/// the gap between the section table and the first section's raw data, plus
+/// each section's tail padding beyond `min(vsize, rawsize)`. The file-tail
+/// overlay region is deliberately excluded (design doc §6.3).
+///
+/// Two safety rules keep a malformed or packed image from being damaged:
+/// every section's file-backed span `[raw_ptr, raw_ptr + min(vsize, rawsize))`
+/// is subtracted from the candidates (overlapping section tables exist in the
+/// wild), and sections with `VirtualSize == 0` — where loaders disagree on how
+/// much raw data is mapped — are never offered as padding at all.
+fn slack_ranges(geo: &PeGeometry, host_size: u64) -> Vec<(u64, u64)> {
+    // File-backed bytes of every section: `[raw_ptr, raw_ptr + min(vsize,
+    // rawsize))`. The loader maps exactly that span, so nothing in it may ever
+    // be treated as padding — even when a malformed/packed image lets one
+    // section's declared raw range run into the next section's data.
+    let used: Vec<(u64, u64)> = geo
+        .sections
+        .iter()
+        .map(|(_, vsize, rawsize, rawptr)| {
+            let start = *rawptr as u64;
+            (start, start + (*vsize).min(*rawsize) as u64)
+        })
+        .filter(|(a, b)| b > a && *a < host_size)
+        .collect();
+
+    let mut candidates = Vec::new();
+    let first_raw = geo
+        .sections
+        .iter()
+        .map(|(.., rawptr)| *rawptr as u64)
+        .filter(|p| *p > 0)
+        .min();
+    if let Some(first_raw) = first_raw
+        && first_raw > geo.sec_table_end
+    {
+        candidates.push((geo.sec_table_end, first_raw.min(host_size)));
+    }
+    for (_, vsize, rawsize, rawptr) in &geo.sections {
+        // `VirtualSize == 0` is ambiguous: the spec says nothing of the raw
+        // data is mapped, but several loaders fall back to `SizeOfRawData`.
+        // Overwriting such a section's bytes could change program data, so it
+        // is never offered as padding.
+        if *vsize == 0 {
+            continue;
+        }
+        let a = *rawptr as u64 + (*vsize).min(*rawsize) as u64;
+        let b = (*rawptr as u64 + *rawsize as u64).min(host_size);
+        if b > a {
+            candidates.push((a, b));
+        }
+    }
+
+    let mut ranges = Vec::new();
+    for (start, end) in candidates {
+        subtract_intervals(start, end, &used, &mut ranges);
+    }
+    ranges
+}
+
+/// Appends `[start, end)` minus every interval in `mask` to `out`, in order.
+fn subtract_intervals(start: u64, end: u64, mask: &[(u64, u64)], out: &mut Vec<(u64, u64)>) {
+    let mut overlapping: Vec<(u64, u64)> = mask
+        .iter()
+        .copied()
+        .filter(|(s, e)| *e > start && *s < end)
+        .collect();
+    overlapping.sort_by_key(|(s, _)| *s);
+    let mut cur = start;
+    for (s, e) in overlapping {
+        if s > cur {
+            out.push((cur, s.min(end)));
+        }
+        cur = cur.max(e);
+        if cur >= end {
+            return;
+        }
+    }
+    if cur < end {
+        out.push((cur, end));
+    }
+}
+
+/// Reads a PE's code layout from an in-memory *header window*, clamped against
+/// an explicit `host_size`.
+///
+/// `data` only has to contain the DOS/COFF/optional headers and the section
+/// table (a few KB). Every derived range (`text_scan_len`, slack bounds) is
+/// clamped against `host_size` — the real file size — and **not** against
+/// `data.len()`. The streaming caller reads a 64 KiB header window while
+/// `.text` and the section-tail padding usually live far beyond it, so
+/// clamping to the window would silently truncate both the scan range and the
+/// zero-slack candidates (see `parse_pe_code_layout_streaming`).
+fn pe_code_layout_with_host(data: &[u8], host_size: u64) -> Result<PeCodeLayout, CodebitsError> {
+    let geo = pe_geometry(data)?;
+    let bitness = match geo.machine {
+        0x14C => 32,
+        0x8664 => 64,
+        other => return Err(CodebitsError::UnsupportedMachine(other)),
+    };
+
+    let text = geo
+        .sections
         .iter()
         .find(|(name, ..)| name == ".text")
         .ok_or(CodebitsError::NoText)?;
     let text_offset = text.3 as u64;
     let scan_len = (text.1.min(text.2) as u64).min(host_size.saturating_sub(text_offset));
 
-    // Slack candidates: header padding between the section table and the
-    // first section's raw data, plus each section's tail padding beyond
-    // min(vsize, rawsize). The file-tail overlay region is deliberately
-    // excluded (design doc §6.3).
-    let mut slack_ranges = Vec::new();
-    let sec_table_end = (sec_table + sections.len() * 40) as u64;
-    let first_raw = sections
-        .iter()
-        .map(|(.., rawptr)| *rawptr as u64)
-        .filter(|p| *p > 0)
-        .min();
-    if let Some(first_raw) = first_raw
-        && first_raw > sec_table_end
-    {
-        slack_ranges.push((sec_table_end, first_raw.min(host_size)));
-    }
-    for (_, vsize, rawsize, rawptr) in &sections {
-        let a = *rawptr as u64 + (*vsize).min(*rawsize) as u64;
-        let b = (*rawptr as u64 + *rawsize as u64).min(host_size);
-        if b > a {
-            slack_ranges.push((a, b));
-        }
-    }
-
     Ok(PeCodeLayout {
         bitness,
         text_offset,
         text_scan_len: scan_len,
         host_size,
-        slack_ranges,
+        slack_ranges: slack_ranges(&geo, host_size),
     })
 }
 
@@ -917,6 +997,74 @@ pub fn parse_pe_code_layout_streaming<R: Read + Seek + ?Sized>(
         text_scan_len,
         host_size,
         slack_ranges,
+    })
+}
+
+/// Padding geometry of a PE, for the `pe_slack` strategy.
+///
+/// Unlike [`PeCodeLayout`] this needs neither `.text` nor an x86/x64 machine:
+/// every PE has alignment padding.
+#[derive(Debug, Clone)]
+pub struct PeSlackLayout {
+    /// Total file size.
+    pub host_size: u64,
+    /// Candidate zero-value padding ranges `(start, end)`, file order.
+    pub slack_ranges: Vec<(u64, u64)>,
+}
+
+/// Reads a PE's padding ranges from a complete in-memory image.
+pub fn pe_slack_layout(data: &[u8]) -> Result<PeSlackLayout, CodebitsError> {
+    let geo = pe_geometry(data)?;
+    let host_size = data.len() as u64;
+    Ok(PeSlackLayout {
+        host_size,
+        slack_ranges: slack_ranges(&geo, host_size)
+            .into_iter()
+            .filter(|(a, b)| b > a)
+            .collect(),
+    })
+}
+
+/// Reads a PE's padding ranges without loading the whole file: only the
+/// headers are parsed, and every range is clamped against the real EOF.
+pub fn parse_slack_layout_streaming<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+) -> Result<PeSlackLayout, CodebitsError> {
+    let start_pos = reader
+        .stream_position()
+        .map_err(|e| CodebitsError::Iced(e.to_string()))?;
+    let host_size = reader
+        .seek(SeekFrom::End(0))
+        .map_err(|e| CodebitsError::Iced(e.to_string()))?;
+    if host_size < 0x40 {
+        reader.seek(SeekFrom::Start(start_pos)).ok();
+        return Err(CodebitsError::NotPe);
+    }
+    // The section table normally ends well inside 64 KiB; a PE with more
+    // sections than that cannot be parsed from a bounded window, and is
+    // rejected as NotPe by `pe_geometry` (a clean "unsupported carrier").
+    let header_window = (host_size.min(0x10000)) as usize;
+    reader.seek(SeekFrom::Start(0)).ok();
+    let mut head = vec![0u8; header_window];
+    reader
+        .read_exact(&mut head)
+        .map_err(|e| CodebitsError::Iced(e.to_string()))?;
+
+    let geo = match pe_geometry(&head) {
+        Ok(geo) => geo,
+        Err(e) => {
+            reader.seek(SeekFrom::Start(start_pos)).ok();
+            return Err(e);
+        }
+    };
+    let ranges = slack_ranges(&geo, host_size)
+        .into_iter()
+        .filter(|(a, b)| b > a)
+        .collect();
+    reader.seek(SeekFrom::Start(start_pos)).ok();
+    Ok(PeSlackLayout {
+        host_size,
+        slack_ranges: ranges,
     })
 }
 

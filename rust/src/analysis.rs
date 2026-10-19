@@ -31,6 +31,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::adapters::pe_codebits;
 use crate::errors::StrHideError;
 
 /// Hard cap on file size we fully load for scanning. Larger files still get
@@ -116,6 +117,10 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
     match format.as_deref() {
         Some("PNG") => track_png_structure(&data, &mut findings),
         Some("JPEG") => track_jpeg_structure(&data, &mut findings),
+        // PE padding can only be measured on a complete image; for oversized
+        // files `data` is a prefix+tail window and the section table alone
+        // would not be enough to read the padding.
+        Some("PE") if file_size <= MAX_FULL_SCAN => track_pe_structure(&data, &mut findings),
         _ => {}
     }
     track_trailing_entropy(&data, format.as_deref(), &mut findings);
@@ -494,6 +499,49 @@ fn find_next_jpeg_marker(data: &[u8], start: usize) -> usize {
         i += 1;
     }
     data.len()
+}
+
+/// PE-specific structural check: non-zero section padding.
+///
+/// A linker zero-fills the alignment padding after every section, so padding
+/// that is not zero is the password-independent trace of `pe_slack` — and of
+/// any other code-cave embedder. (Appended overlay data is covered separately
+/// by the trailing-entropy and `overlay:high-entropy` checks.)
+fn track_pe_structure(data: &[u8], out: &mut Vec<Finding>) {
+    let Ok(layout) = pe_codebits::pe_slack_layout(data) else {
+        return;
+    };
+    let mut nonzero = 0u64;
+    let mut longest = 0usize;
+    let mut ranges = 0usize;
+    for &(start, end) in &layout.slack_ranges {
+        let (a, b) = (start as usize, (end as usize).min(data.len()));
+        if a >= b {
+            continue;
+        }
+        ranges += 1;
+        let mut run = 0usize;
+        for &byte in &data[a..b] {
+            if byte == 0 {
+                run = 0;
+            } else {
+                nonzero += 1;
+                run += 1;
+                longest = longest.max(run);
+            }
+        }
+    }
+    if nonzero >= crate::envelope::MIN_UBE_PLAIN as u64 {
+        out.push(Finding {
+            detector: "pe:nonzero-padding".into(),
+            severity: Severity::Suspicious,
+            detail: format!(
+                "{nonzero} non-zero bytes in PE section padding ({ranges} range(s), longest \
+                 non-zero run {longest} B); linker padding is zero-filled, so this is an \
+                 embedded payload or a code cave"
+            ),
+        });
+    }
 }
 
 /// Shannon entropy of the last `TAIL_WINDOW` bytes, and whether it sits in

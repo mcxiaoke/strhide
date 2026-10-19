@@ -1,8 +1,8 @@
 # PE 节填充直接隐写（pe_slack）方案设计与可行性分析
 
 > 文档编号：STRHIDE-DOC-20261019-02  
-> 状态：独立方案论证 / 留存评估  
-> 涉及模块：PE 适配器（`pe.rs` / `pe_slack.rs`）、策略路由（`router.rs`）  
+> 状态：**已落地（2026-10-19 20:31，`strategy_id = 9`，仅实现 Mode 1 单段自包含信封；Mode 2 分块表未实现）**  
+> 涉及模块：PE 适配器（`pe.rs` / `pe_slack.rs` / `pe_codebits.rs`）、策略路由（`router.rs`）  
 > 关联文档：`pe_codebits_plugin_design.md`、`pe_codebits_chunked_diff_design.md`、`smart_file_data_hiding_design.md`
 
 ---

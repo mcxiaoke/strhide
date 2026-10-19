@@ -942,6 +942,8 @@ pub fn write_carrier(
     } else if adapter.format_name() == "PE" {
         if selected_strategy == "pe_codebits" {
             strategy_note = Some("Embedded into x86/x64 instruction encodings (ModR/M semantic pairs) in .text; carrier file size unchanged (restore diff stored in zero-value PE padding).".into());
+        } else if selected_strategy == "pe_slack" {
+            strategy_note = Some("Embedded into Windows PE section alignment padding (file size unchanged; no overlaying data past the last section, executable code untouched).".into());
         } else if selected_strategy == "pe_overlay" {
             strategy_note = Some("Embedded into Windows PE image overlay (executable code and PE sections remain 100% intact).".into());
         } else if selected_strategy == "eof" {

@@ -84,6 +84,7 @@ pub fn strategy_to_id(strategy: &str) -> u8 {
         "incremental" => 6,
         "pe_overlay" => 7,
         "pe_codebits" => 8,
+        "pe_slack" => 9,
         _ => 1,
     }
 }
@@ -98,6 +99,7 @@ pub fn id_to_strategy(id: u8) -> &'static str {
         6 => "incremental",
         7 => "pe_overlay",
         8 => "pe_codebits",
+        9 => "pe_slack",
         _ => "eof",
     }
 }

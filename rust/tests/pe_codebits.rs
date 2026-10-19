@@ -244,13 +244,16 @@ fn codebits_stealth_denies_without_password() {
     );
 }
 
-/// T8: a `.text` too small for the channel makes auto fall back to
-/// pe_overlay, which still round-trips normally.
+/// T8: a `.text` too small for the channel *and* zero padding makes auto fall
+/// back to pe_overlay, which still round-trips normally.
 #[test]
 fn auto_falls_back_to_overlay_on_tiny_text() {
     let dir = scratch("fallback");
     let carrier = dir.join("tiny.exe");
-    let original = make_pe(0x8664, 0x20B, 0x40, false); // ~19 positions
+    // Tight layout (.text starts right after the section table, raw size ==
+    // virtual size) so neither pe_codebits nor pe_slack has a zero run, and
+    // `.text` is too small for the instruction channel.
+    let original = make_pe(0x8664, 0x20B, 0x200, true);
     fs::write(&carrier, &original).unwrap();
     let orig_sha = sha256_hex(&original);
 
@@ -263,7 +266,7 @@ fn auto_falls_back_to_overlay_on_tiny_text() {
     .expect("write");
     assert_eq!(
         result.strategy, "pe_overlay",
-        "tiny .text must fall back to overlay"
+        "a slack-free tiny .text must fall back to overlay"
     );
 
     let read = read_carrier(&out, None, None).expect("read");
@@ -557,7 +560,7 @@ fn inspect_reports_exact_codebits_capacity() {
             .iter()
             .map(|c| c.strategy.as_str())
             .collect::<Vec<_>>(),
-        vec!["pe_codebits", "pe_overlay", "eof"],
+        vec!["pe_codebits", "pe_slack", "pe_overlay", "eof"],
         "priority order must match supported_strategies"
     );
     let codebits = &res.strategies[0];
@@ -594,7 +597,8 @@ fn inspect_reports_exact_codebits_capacity() {
 fn inspect_marks_codebits_unavailable_on_tiny_text() {
     let dir = scratch("capacity_tiny");
     let carrier = dir.join("tiny.exe");
-    fs::write(&carrier, make_pe(0x8664, 0x20B, 0x100, true)).unwrap();
+    // Tight layout: no header padding, no section-tail padding.
+    fs::write(&carrier, make_pe(0x8664, 0x20B, 0x200, true)).unwrap();
 
     let res = inspect_carrier(&carrier, None).expect("inspect");
     let codebits = &res.strategies[0];
@@ -604,6 +608,14 @@ fn inspect_marks_codebits_unavailable_on_tiny_text() {
         codebits.capacity_bytes.is_some(),
         "capacity is still reported"
     );
+
+    let slack = res
+        .strategies
+        .iter()
+        .find(|c| c.strategy == "pe_slack")
+        .expect("pe_slack is listed");
+    assert_eq!(slack.capacity_bytes, Some(0), "no padding to measure");
+    assert!(!slack.available);
 
     let first_available = res.strategies.iter().find(|c| c.available).unwrap();
     assert_eq!(first_available.strategy, "pe_overlay");

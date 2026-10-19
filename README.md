@@ -125,7 +125,7 @@ All functions return a result dict and raise `StrHideError` subclasses on failur
 | MP4 | ✓ | free/uuid box injection |
 | ZIP | ✓ | entries before the central directory |
 | PDF | ✓ | incremental update / object injection |
-| Windows PE (exe/dll) | ✓ | `pe_codebits` instruction-encoding channel (file size unchanged) or overlay data |
+| Windows PE (exe/dll) | ✓ | `pe_slack` section-padding envelope (file size unchanged), `pe_codebits` instruction-encoding channel, or overlay data |
 
 Unrecognized formats are **rejected**: strhide only modifies explicitly supported carriers, because appending data to an arbitrary file can corrupt it. The `eof` strategy remains available as a fallback *within* supported formats (e.g. oversized PNG payloads).
 

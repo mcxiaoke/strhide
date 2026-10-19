@@ -123,7 +123,7 @@ meta = inspect_carrier("carrier.png", password="pw")
 | MP4 | ✓ | free/uuid box 注入 |
 | ZIP | ✓ | 中央目录之前插入条目 |
 | PDF | ✓ | 增量更新 / 对象注入 |
-| Windows PE（exe/dll） | ✓ | `pe_codebits` 指令编码信道（文件尺寸不变）或 overlay 数据 |
+| Windows PE（exe/dll） | ✓ | `pe_slack` 节填充信封（文件尺寸不变）、`pe_codebits` 指令编码信道，或 overlay 数据 |
 
 无法识别的格式将**被拒绝**：strhide 只修改显式支持的载体——向任意文件追加数据可能损坏该文件。`eof` 策略仍作为受支持格式内部的降级选项存在（如超大 PNG 载荷）。
 
