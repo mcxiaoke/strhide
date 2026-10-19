@@ -71,11 +71,15 @@ fn hex_to_digest32(hex: &str) -> Option<[u8; 32]> {
     if hex.len() != 64 {
         return None;
     }
+    let bytes = hex.as_bytes();
     let mut out = [0u8; 32];
-    for (i, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
-        let hi = (pair[0] as char).to_digit(16)?;
-        let lo = (pair[1] as char).to_digit(16)?;
-        out[i] = ((hi << 4) | lo) as u8;
+    // Explicit indexing over 64 known bytes: avoids `chunks_exact(2)`, which
+    // newer clippy lints push towards `as_chunks` (an API newer than this
+    // crate's minimum toolchain).
+    for (i, slot) in out.iter_mut().enumerate() {
+        let hi = (bytes[2 * i] as char).to_digit(16)?;
+        let lo = (bytes[2 * i + 1] as char).to_digit(16)?;
+        *slot = ((hi << 4) | lo) as u8;
     }
     Some(out)
 }
@@ -335,12 +339,18 @@ impl Drop for TmpGuard {
 ///
 /// Envelope metadata (especially in unencrypted envelopes) is attacker-controlled
 /// input: `../../etc/passwd` style values must never escape the output directory.
-/// Only the final path component is kept; empty results and reserved names fall
-/// back to "extracted.bin".
+/// Only the final path component is kept; empty results and `.`/`..` fall back to
+/// "extracted.bin".
+///
+/// Both `/` and `\` are treated as separators on every platform: the envelope may
+/// be written on one OS and read on another, so the sanitized name must not depend
+/// on the host's path rules (a Windows-style name read on Unix would otherwise
+/// keep its backslashes verbatim). Names carrying a `:` (drive prefix like `C:`) are
+/// rejected as well, so they cannot turn into uncreatable files on Windows.
 pub fn sanitize_filename(name: &str) -> String {
-    let candidate = Path::new(name).file_name().and_then(|s| s.to_str());
+    let candidate = name.rsplit(['/', '\\']).find(|seg| !seg.is_empty());
     match candidate {
-        Some(n) if !n.is_empty() && n != "." && n != ".." => n.to_string(),
+        Some(n) if n != "." && n != ".." && !n.contains(':') => n.to_string(),
         _ => "extracted.bin".to_string(),
     }
 }

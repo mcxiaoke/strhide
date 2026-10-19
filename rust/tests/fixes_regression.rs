@@ -299,6 +299,15 @@ fn sanitize_filename_unit() {
     assert_eq!(sanitize_filename(".."), "extracted.bin");
     assert_eq!(sanitize_filename("."), "extracted.bin");
     assert_eq!(sanitize_filename("..\\..\\evil.exe"), "evil.exe");
+    // Cross-platform determinism: separators are sanitized identically on every host.
+    assert_eq!(
+        sanitize_filename("C:\\Windows\\System32\\evil.dll"),
+        "evil.dll"
+    );
+    assert_eq!(sanitize_filename("mixed/dir\\evil.txt"), "evil.txt");
+    assert_eq!(sanitize_filename("/"), "extracted.bin");
+    assert_eq!(sanitize_filename("..\\"), "extracted.bin");
+    assert_eq!(sanitize_filename("C:"), "extracted.bin");
 }
 
 #[test]
