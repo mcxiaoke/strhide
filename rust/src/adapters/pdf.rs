@@ -59,25 +59,56 @@ pub fn parse_pdf_trailer_info<R: Read + Seek + ?Sized>(
     })
 }
 
+/// Offset of the last `%%EOF` marker in the file.
+///
+/// The marker is not required to sit inside a fixed tail window: PDFs may
+/// legally be followed by arbitrary bytes (appended data, and for strhide
+/// specifically an EOF-overlay envelope). A 64 KiB tail window made `verify`
+/// report a carrier strhide itself had just written as "corrupted" as soon as
+/// the envelope exceeded the window. The scan walks backwards in 64 KiB chunks
+/// with a 4-byte overlap (so a marker straddling a chunk boundary is still
+/// seen) and stops at the first hit, i.e. the last marker in file order — the
+/// one a reader following `startxref` from the end would use.
+fn find_last_eof<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+    file_size: u64,
+) -> Result<u64, StrHideError> {
+    const CHUNK: u64 = 64 * 1024;
+    const MARKER: &[u8] = b"%%EOF";
+
+    let mut end = file_size;
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK);
+        let read_start = start.saturating_sub(MARKER.len() as u64 - 1);
+        let mut buf = vec![0u8; (end - read_start) as usize];
+        reader.seek(SeekFrom::Start(read_start))?;
+        reader.read_exact(&mut buf)?;
+        if let Some(idx) = buf.windows(MARKER.len()).rposition(|w| w == MARKER) {
+            return Ok(read_start + idx as u64);
+        }
+        end = start;
+    }
+
+    Err(StrHideError::CorruptedData(
+        "Valid PDF %%EOF marker not found".into(),
+    ))
+}
+
 pub fn parse_pdf_tail_info<R: Read + Seek + ?Sized>(
     reader: &mut R,
 ) -> Result<PdfTailInfo, StrHideError> {
     let file_size = reader.seek(SeekFrom::End(0))?;
-    let scan_len = std::cmp::min(file_size, 64 * 1024);
-    reader.seek(SeekFrom::End(-(scan_len as i64)))?;
-    let mut tail = vec![0u8; scan_len as usize];
-    reader.read_exact(&mut tail)?;
+    let eof_idx = find_last_eof(reader, file_size)?;
+    let abs_eof_pos = eof_idx + 5;
 
-    let eof_idx = tail
-        .windows(5)
-        .rposition(|w| w == b"%%EOF")
-        .ok_or_else(|| {
-            StrHideError::CorruptedData(
-                "Valid PDF %%EOF marker not found within tail window".into(),
-            )
-        })?;
+    // Trailer facts live *before* the marker, so the window ends at it instead
+    // of at EOF: trailing data after `%%EOF` (a stego EOF overlay, appended
+    // garbage) must not shrink the amount of trailer text available.
+    let window_start = eof_idx.saturating_sub(64 * 1024);
+    let mut before = vec![0u8; (eof_idx - window_start) as usize];
+    reader.seek(SeekFrom::Start(window_start))?;
+    reader.read_exact(&mut before)?;
 
-    let abs_eof_pos = (file_size - scan_len) + eof_idx as u64 + 5;
     reader.seek(SeekFrom::Start(abs_eof_pos))?;
     let mut trailing = [0u8; 16];
     let n = reader.read(&mut trailing)?;
@@ -87,7 +118,7 @@ pub fn parse_pdf_tail_info<R: Read + Seek + ?Sized>(
     }
     let eof_offset = abs_eof_pos + idx_nl as u64;
 
-    let text_before_eof = String::from_utf8_lossy(&tail[..eof_idx]);
+    let text_before_eof = String::from_utf8_lossy(&before);
     let sx_idx = text_before_eof.rfind("startxref").ok_or_else(|| {
         StrHideError::CorruptedData("PDF startxref marker not found before %%EOF".into())
     })?;

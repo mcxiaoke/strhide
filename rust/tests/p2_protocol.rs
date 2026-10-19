@@ -185,6 +185,52 @@ fn pdf_without_root_is_rejected_for_incremental() {
     assert!(err.to_string().contains("/Root"), "{err}");
 }
 
+// --------------------------------------------------------------------------- large EOF overlay vs. the tail window
+
+/// `verify` used to look for `%%EOF` only in the last 64 KiB, so an EOF-overlay
+/// envelope bigger than that pushed the host's marker out of the window and L1
+/// reported a carrier strhide had just written as corrupted. The corpus size
+/// sweep (`batch_corpus`) hit this at 128 KiB.
+#[test]
+fn pdf_l1_survives_an_overlay_larger_than_the_tail_window() {
+    let dir = scratch("pdf_big_overlay");
+    let carrier = dir.join("c.pdf");
+    let out = dir.join("o.pdf");
+    let restored = dir.join("r.pdf");
+    // No `/Root` in the newest trailer, so `auto` falls back to EOF overlay.
+    fs::write(&carrier, make_pdf_without_root()).unwrap();
+
+    // 200 KiB: three backwards scan chunks, marker far outside the old window.
+    let payload: Vec<u8> = (0..200 * 1024).map(|i| (i % 251) as u8).collect();
+    let res = write_carrier(
+        &carrier,
+        PayloadSource::Bytes(&payload),
+        &WriteOptions {
+            output_path: Some(&out),
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res.strategy, "eof");
+
+    let v = verify_carrier(&out, None).unwrap();
+    assert!(
+        v.level1_host.ok,
+        "L1 must find %%EOF behind the envelope: {}",
+        v.level1_host.detail
+    );
+    assert!(
+        v.level2_envelope.ok,
+        "L2 must locate the envelope: {}",
+        v.level2_envelope.detail
+    );
+
+    assert_eq!(read_carrier(&out, None, None).unwrap().data, payload);
+    remove_carrier(&out, Some(&restored), None, false).unwrap();
+    assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
+}
+
 // --------------------------------------------------------------------------- #11: verify L2 header validation
 
 #[test]
