@@ -722,3 +722,166 @@ fn compact_metadata_makes_marginal_carriers_usable() {
     remove_carrier(&out, Some(&restored), Some("pw"), false).expect("remove");
     assert_eq!(fs::read(&restored).unwrap(), original);
 }
+
+#[test]
+fn codebits_channel_header_keystream_masking_verified() {
+    let dir = scratch("header_masking");
+    let original = make_pe(0x8664, 0x20B, 0x2000, false);
+    let carrier = dir.join("masked_sample.exe");
+    fs::write(&carrier, &original).unwrap();
+
+    let out = dir.join("masked_sample.steg.exe");
+    let opts = WriteOptions {
+        output_path: Some(&out),
+        strategy: "pe_codebits",
+        backup: false,
+        ..Default::default()
+    };
+    write_carrier(
+        &carrier,
+        PayloadSource::Text("secret codebits payload"),
+        &opts,
+    )
+    .expect("write must succeed");
+
+    // Inspect the generated carrier at the codebits bitstream layer
+    let steg_data = fs::read(&out).unwrap();
+    let layout = strhide::adapters::pe_codebits::pe_code_layout(&steg_data).expect("pe layout");
+    let text = &steg_data
+        [layout.text_offset as usize..(layout.text_offset + layout.text_scan_len) as usize];
+    let prof = strhide::adapters::pe_codebits::profile(text, layout.bitness);
+
+    // Extract the 112 bits (14 bytes) of ChannelHeader directly from the code positions
+    let mut header_bytes = Vec::new();
+    for chunk in prof
+        .iter()
+        .take(112)
+        .map(|p| p.bit)
+        .collect::<Vec<_>>()
+        .chunks(8)
+    {
+        let mut b = 0u8;
+        for (i, &bit) in chunk.iter().enumerate() {
+            if bit {
+                b |= 1 << (7 - i);
+            }
+        }
+        header_bytes.push(b);
+    }
+    assert_eq!(header_bytes.len(), 14);
+
+    // 1. Magic must match CHANNEL_MAGIC
+    let magic: [u8; 4] = header_bytes[0..4].try_into().unwrap();
+    assert_eq!(magic, strhide::adapters::pe_codebits::CHANNEL_MAGIC);
+
+    // 2. Version byte at index 4 must be keystream-masked (NOT raw 0x01)
+    let mask = strhide::crypto::derive_channel_header_mask(&magic);
+    assert_ne!(
+        header_bytes[4],
+        strhide::adapters::pe_codebits::CHANNEL_VERSION
+    );
+    assert_eq!(
+        header_bytes[4] ^ mask[0],
+        strhide::adapters::pe_codebits::CHANNEL_VERSION
+    );
+
+    // 3. Flags byte at index 5 must unmask to 0
+    assert_eq!(header_bytes[5] ^ mask[1], 0);
+
+    // 4. Engine lifecycle (read, verify, strip) must succeed 100% and be bit-exact
+    let read = read_carrier(&out, None, None).expect("read");
+    assert_eq!(read.data, b"secret codebits payload");
+
+    let v = verify_carrier(&out, None).expect("verify");
+    assert!(v.level1_host.ok, "L1: {}", v.level1_host.detail);
+    assert!(v.level2_envelope.ok, "L2: {}", v.level2_envelope.detail);
+    assert!(v.level3_crypto.ok, "L3: {}", v.level3_crypto.detail);
+
+    let restored = dir.join("masked_sample.restored.exe");
+    remove_carrier(&out, Some(&restored), None, false).expect("remove");
+    assert_eq!(
+        fs::read(&restored).unwrap(),
+        original,
+        "restored PE must be bit-for-bit identical"
+    );
+}
+
+#[test]
+fn codebits_legacy_sthc_unmasked_header_backward_compatibility() {
+    let _dir = scratch("legacy_sthc");
+    let original = make_pe(0x8664, 0x20B, 0x2000, false);
+
+    let steg_data = original.clone();
+    let layout = strhide::adapters::pe_codebits::pe_code_layout(&steg_data).expect("layout");
+    let mut text = steg_data
+        [layout.text_offset as usize..(layout.text_offset + layout.text_scan_len) as usize]
+        .to_vec();
+
+    // Craft a synthetic legacy unmasked channel with b"STHC" magic
+    let ube_mock = vec![0x33u8; 180];
+    let header = strhide::adapters::pe_codebits::ChannelHeader {
+        magic: strhide::adapters::pe_codebits::LEGACY_STHC_MAGIC, // b"STHC"
+        version: strhide::adapters::pe_codebits::CHANNEL_VERSION,
+        flags: 0,
+        ube_len: ube_mock.len() as u32,
+        slack_off: 0x1200,
+    };
+    let unmasked_header = header.pack_unmasked();
+    assert_eq!(
+        unmasked_header[4], 1,
+        "legacy header has raw 0x01 version byte"
+    );
+
+    let mut channel_bytes = Vec::new();
+    channel_bytes.extend_from_slice(&unmasked_header);
+    channel_bytes.extend_from_slice(&ube_mock);
+
+    // Embed into text
+    let mut bits = Vec::new();
+    for &b in &channel_bytes {
+        for k in (0..8).rev() {
+            bits.push((b >> k) & 1 == 1);
+        }
+    }
+    let prof = strhide::adapters::pe_codebits::profile(&text, layout.bitness);
+    let mut encoder = iced_x86::Encoder::new(layout.bitness);
+    for (&want, pos) in bits.iter().zip(prof.iter()) {
+        if pos.bit == want {
+            continue;
+        }
+        let other = if pos.commutative {
+            iced_x86::Instruction::with2(pos.code, pos.r1, pos.r0).unwrap()
+        } else {
+            let dual = match pos.code {
+                iced_x86::Code::Mov_rm32_r32 => iced_x86::Code::Mov_r32_rm32,
+                iced_x86::Code::Mov_r32_rm32 => iced_x86::Code::Mov_rm32_r32,
+                iced_x86::Code::Add_rm32_r32 => iced_x86::Code::Add_r32_rm32,
+                iced_x86::Code::Add_r32_rm32 => iced_x86::Code::Add_rm32_r32,
+                iced_x86::Code::Cmp_rm32_r32 => iced_x86::Code::Cmp_r32_rm32,
+                iced_x86::Code::Cmp_r32_rm32 => iced_x86::Code::Cmp_rm32_r32,
+                other => panic!("unexpected opcode {other:?}"),
+            };
+            iced_x86::Instruction::with2(dual, pos.r0, pos.r1).unwrap()
+        };
+        encoder.encode(&other, pos.offset as u64).unwrap();
+        let enc = encoder.take_buffer();
+        text[pos.offset..pos.offset + pos.len].copy_from_slice(&enc);
+    }
+
+    // Now verify that read_channel_header locates this legacy STHC channel without any error
+    let read_header =
+        strhide::adapters::pe_codebits::read_channel_header(&text, layout.bitness, None)
+            .expect("must read legacy STHC channel header");
+    assert_eq!(
+        read_header.magic,
+        strhide::adapters::pe_codebits::LEGACY_STHC_MAGIC
+    );
+    assert_eq!(read_header.version, 1);
+    assert_eq!(read_header.ube_len, 180);
+
+    let (extracted_header, extracted_ube) =
+        strhide::adapters::pe_codebits::extract_ube(&text, layout.bitness)
+            .expect("must extract payload");
+    assert_eq!(extracted_header, header);
+    assert_eq!(extracted_ube, ube_mock);
+}

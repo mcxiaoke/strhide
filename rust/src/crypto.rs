@@ -91,6 +91,17 @@ pub fn derive_trailer_crc_mask(trailer_magic: &[u8; 4]) -> u32 {
     ])
 }
 
+/// Derive a 10-byte deterministic keystream from the 4-byte channel magic to mask
+/// the remaining fields of ChannelHeader (version, flags, ube_len, slack_off).
+/// This eliminates raw version numbers and zero-filled padding integers in PE codebits.
+pub fn derive_channel_header_mask(magic: &[u8; 4]) -> [u8; 10] {
+    let hk = hkdf::Hkdf::<Sha256>::new(None, magic);
+    let mut mask = [0u8; 10];
+    hk.expand(b"strhide-pe-channel-mask-v1", &mut mask)
+        .expect("HKDF-Expand for 10-byte channel mask never fails");
+    mask
+}
+
 pub fn make_chunk_nonce(base_nonce: &[u8; 12], chunk_index: usize) -> [u8; 12] {
     let counter_bytes: [u8; 4] = base_nonce[8..12].try_into().unwrap();
     let counter = u32::from_le_bytes(counter_bytes) ^ (chunk_index as u32);

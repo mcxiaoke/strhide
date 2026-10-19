@@ -567,8 +567,9 @@ fn inject_codebits(
 }
 
 /// `pe_codebits` location: read the channel header from `.text` and validate
-/// the magic (standard `STHC` or the password-derived stealth magic passed in
-/// as `expected_trailer_magic`). A magic mismatch is "no channel here".
+/// the magic (standard `CHANNEL_MAGIC`, legacy `STH!` / `STHC`, or the
+/// password-derived stealth magic passed in as `expected_trailer_magic`).
+/// A magic mismatch is "no channel here".
 fn locate_codebits(
     stego_in: &mut dyn SeekRead,
     expected_trailer_magic: Option<&[u8; 4]>,

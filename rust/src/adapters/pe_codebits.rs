@@ -37,6 +37,9 @@ use crate::errors::StrHideError;
 /// stealth/password knowledge while preserving deniability.
 pub const CHANNEL_MAGIC: [u8; 4] = crate::envelope::STANDARD_TRAILER_MAGIC;
 
+/// Legacy channel magic from initial design doc specifications (v1.0 placeholder `STHC`).
+pub const LEGACY_STHC_MAGIC: [u8; 4] = *b"STHC";
+
 /// Channel container version (see design doc §5).
 pub const CHANNEL_VERSION: u8 = 1;
 
@@ -409,7 +412,8 @@ pub struct ChannelHeader {
 }
 
 impl ChannelHeader {
-    fn pack(&self) -> [u8; CHANNEL_HEADER_LEN] {
+    /// Serializes the channel header in unmasked format (legacy representation).
+    pub fn pack_unmasked(&self) -> [u8; CHANNEL_HEADER_LEN] {
         let mut buf = [0u8; CHANNEL_HEADER_LEN];
         buf[0..4].copy_from_slice(&self.magic);
         buf[4] = self.version;
@@ -419,16 +423,66 @@ impl ChannelHeader {
         buf
     }
 
-    fn unpack(bytes: &[u8]) -> Result<Self, CodebitsError> {
+    /// Serializes the channel header with deterministic keystream masking on
+    /// bytes [4..14] (version, flags, ube_len, slack_off) derived from `magic`.
+    pub fn pack_masked(&self) -> [u8; CHANNEL_HEADER_LEN] {
+        let mut buf = self.pack_unmasked();
+        let mask = crate::crypto::derive_channel_header_mask(&self.magic);
+        for i in 0..10 {
+            buf[4 + i] ^= mask[i];
+        }
+        buf
+    }
+
+    /// Default pack method uses masked encoding.
+    pub fn pack(&self) -> [u8; CHANNEL_HEADER_LEN] {
+        self.pack_masked()
+    }
+
+    /// Unpacks a 14-byte slice, automatically handling masked headers and
+    /// falling back to legacy unmasked headers for 100% backward compatibility.
+    pub fn unpack(bytes: &[u8]) -> Result<Self, CodebitsError> {
+        Self::unpack_masked(bytes)
+    }
+
+    pub fn unpack_masked(bytes: &[u8]) -> Result<Self, CodebitsError> {
         if bytes.len() < CHANNEL_HEADER_LEN {
             return Err(CodebitsError::Corrupted("short channel header".into()));
         }
+        let magic: [u8; 4] = bytes[0..4].try_into().unwrap();
+        let mask = crate::crypto::derive_channel_header_mask(&magic);
+        let mut unmasked = [0u8; 10];
+        for i in 0..10 {
+            unmasked[i] = bytes[4 + i] ^ mask[i];
+        }
+
+        if unmasked[0] == CHANNEL_VERSION {
+            return Ok(Self {
+                magic,
+                version: unmasked[0],
+                flags: unmasked[1],
+                ube_len: u32::from_le_bytes(unmasked[2..6].try_into().unwrap()),
+                slack_off: u32::from_le_bytes(unmasked[6..10].try_into().unwrap()),
+            });
+        }
+
+        // Backward compatibility fallback: check legacy unmasked version byte
+        if bytes[4] == CHANNEL_VERSION {
+            return Ok(Self {
+                magic,
+                version: bytes[4],
+                flags: bytes[5],
+                ube_len: u32::from_le_bytes(bytes[6..10].try_into().unwrap()),
+                slack_off: u32::from_le_bytes(bytes[10..14].try_into().unwrap()),
+            });
+        }
+
         Ok(Self {
-            magic: bytes[0..4].try_into().unwrap(),
-            version: bytes[4],
-            flags: bytes[5],
-            ube_len: u32::from_le_bytes(bytes[6..10].try_into().unwrap()),
-            slack_off: u32::from_le_bytes(bytes[10..14].try_into().unwrap()),
+            magic,
+            version: unmasked[0],
+            flags: unmasked[1],
+            ube_len: u32::from_le_bytes(unmasked[2..6].try_into().unwrap()),
+            slack_off: u32::from_le_bytes(unmasked[6..10].try_into().unwrap()),
         })
     }
 
@@ -498,7 +552,9 @@ pub fn read_channel_header(
     let header = header_from_positions(&prof)?;
     let want = expected_magic.unwrap_or(CHANNEL_MAGIC);
     if header.magic != want
-        && (expected_magic.is_some() || header.magic != crate::envelope::LEGACY_TRAILER_MAGIC)
+        && (expected_magic.is_some()
+            || (header.magic != crate::envelope::LEGACY_TRAILER_MAGIC
+                && header.magic != LEGACY_STHC_MAGIC))
     {
         return Err(CodebitsError::ChannelNotFound);
     }
@@ -1155,6 +1211,94 @@ mod tests {
         // Restore: apply the diff, then the text must equal the original.
         apply_diff(&mut full, 64, &diff).expect("apply_diff");
         assert_eq!(full, original, "strip must restore .text byte-exactly");
+    }
+
+    #[test]
+    fn channel_header_masking_and_legacy_compatibility() {
+        let magic = CHANNEL_MAGIC;
+        let header = ChannelHeader {
+            magic,
+            version: CHANNEL_VERSION,
+            flags: 0,
+            ube_len: 256,
+            slack_off: 0x1000,
+        };
+
+        // 1. Masked packing
+        let masked_bytes = header.pack_masked();
+        assert_eq!(&masked_bytes[0..4], &magic);
+        let mask = crate::crypto::derive_channel_header_mask(&magic);
+        assert_eq!(masked_bytes[4], CHANNEL_VERSION ^ mask[0]);
+        assert_ne!(masked_bytes[4], CHANNEL_VERSION);
+
+        // Unpack masked bytes
+        let unpacked = ChannelHeader::unpack_masked(&masked_bytes).expect("unpack masked");
+        assert_eq!(unpacked, header);
+
+        // 2. Legacy unmasked packing
+        let unmasked_bytes = header.pack_unmasked();
+        assert_eq!(unmasked_bytes[4], CHANNEL_VERSION);
+        let unpacked_legacy =
+            ChannelHeader::unpack_masked(&unmasked_bytes).expect("unpack unmasked");
+        assert_eq!(unpacked_legacy, header);
+
+        // 3. Legacy STHC magic
+        let sthc_header = ChannelHeader {
+            magic: LEGACY_STHC_MAGIC,
+            version: CHANNEL_VERSION,
+            flags: 0,
+            ube_len: 200,
+            slack_off: 0x2000,
+        };
+        let sthc_unmasked_bytes = sthc_header.pack_unmasked();
+        let unpacked_sthc =
+            ChannelHeader::unpack_masked(&sthc_unmasked_bytes).expect("unpack legacy sthc");
+        assert_eq!(unpacked_sthc, sthc_header);
+    }
+
+    #[test]
+    fn read_channel_header_accepts_legacy_sthc() {
+        let mut full = Vec::new();
+        while full.len() < 8192 {
+            full.extend_from_slice(&synthetic_text());
+        }
+        full.truncate(8192);
+
+        // Craft a channel bitstream with LEGACY_STHC_MAGIC and unmasked header
+        let sthc_header = ChannelHeader {
+            magic: LEGACY_STHC_MAGIC,
+            version: CHANNEL_VERSION,
+            flags: 0,
+            ube_len: 200,
+            slack_off: 0x1000,
+        };
+        let mut channel = Vec::new();
+        channel.extend_from_slice(&sthc_header.pack_unmasked());
+        channel.extend_from_slice(&[0x42u8; 200]);
+
+        let bits = bytes_to_bits(&channel);
+        let prof = profile(&full, 64);
+        let mut encoder = iced_x86::Encoder::new(64);
+        for (&want, pos) in bits.iter().zip(prof.iter()) {
+            if pos.bit == want {
+                continue;
+            }
+            let other = if pos.commutative {
+                iced_x86::Instruction::with2(pos.code, pos.r1, pos.r0)
+            } else {
+                let dual = dual_and_bit(pos.code).unwrap().0;
+                iced_x86::Instruction::with2(dual, pos.r0, pos.r1)
+            }
+            .unwrap();
+            encoder.encode(&other, pos.offset as u64).unwrap();
+            let enc = encoder.take_buffer();
+            full[pos.offset..pos.offset + pos.len].copy_from_slice(&enc);
+        }
+
+        // When expected_magic is None (standard locate), it should accept LEGACY_STHC_MAGIC!
+        let read = read_channel_header(&full, 64, None).expect("legacy STHC magic accepted");
+        assert_eq!(read.magic, LEGACY_STHC_MAGIC);
+        assert_eq!(read.ube_len, 200);
     }
 
     #[test]
