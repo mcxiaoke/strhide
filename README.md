@@ -90,7 +90,7 @@ strhide write -c a.png b.png c.png -t "meet me at 7"
 strhide remove -c a.png b.png c.png
 
 # List every format, strategy, and its capacity limit (static reference)
-strhide list-strategies
+strhide list
 ```
 
 Password sources (checked in order): `-p/--password` → `--password-file` → `STRHIDE_PASSWORD` env var → config file → interactive prompt (`-e/--encrypt`).

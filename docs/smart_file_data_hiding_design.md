@@ -456,13 +456,13 @@ strhide inspect -c <carrier> [-p <pass>] [--json]
 # 5. 逐比特无损还原 (Remove)
 strhide remove -c <carrier> [-o <out>] [-p <pass>] [--no-backup]
 
-# 6. 列出全部格式与策略的静态容量参考表 (List Strategies)
+# 6. 列出全部格式与策略的静态容量参考表 (List)
 #    数据由各适配器的 strategy_capacities(None) 生成；载体相关限制用 inspect 实测
-strhide list-strategies
+strhide list
 ```
 
 ### 策略容量报告（2026-10-18 起）
-`HostAdapter::strategy_capacities(Option<&mut dyn SeekRead>)` 是 `inspect` 容量表与 `list-strategies` 静态表的唯一数据源，避免两处容量判定漂移：
+`HostAdapter::strategy_capacities(Option<&mut dyn SeekRead>)` 是 `inspect` 容量表与 `list` 静态表的唯一数据源，避免两处容量判定漂移：
 * `None`：静态能力——常量上限，载体相关项标注 `carrier-dependent` 且不给出具体数字；
 * `Some(reader)`：按当前载体实测——PE 实测 `.text` 可改造位数与最长连续零 slack，ZIP 实测 EOCD 偏移，PDF 实测 trailer 可解析性。
 返回顺序即推荐优先级（与 `choose_auto_strategy` 的偏好一致）；`available` 表示当前载体结构上是否可用（Authenticode 签名 PE 的全部策略标为不可用，因为写入会使签名失效）。容量统一为"最大 UBE 信封字节数"，与 PNG/JPEG 的固定上限同一把尺子。`choose_auto_strategy` 本轮保持不变（方案 A：零回归），两处共用常量与判定函数。

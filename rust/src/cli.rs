@@ -43,7 +43,7 @@ pub enum Commands {
     /// Black-box steganalysis: scan file(s) for hidden content, known or unknown
     Scan(ScanArgs),
     /// List all supported formats, strategies, and their capacity limits
-    ListStrategies(ListStrategiesArgs),
+    List(ListArgs),
 }
 
 #[derive(Args, Debug)]
@@ -182,7 +182,7 @@ pub struct VerifyArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct ListStrategiesArgs {}
+pub struct ListArgs {}
 
 /// Black-box steganalysis options. Unlike inspect/verify (which assume a
 /// strhide envelope exists and check it), scan treats every input as unknown
@@ -341,7 +341,7 @@ pub fn run_cli() -> i32 {
                 1
             }
         },
-        Commands::ListStrategies(args) => match handle_list_strategies(args) {
+        Commands::List(args) => match handle_list(args) {
             Ok(_) => 0,
             Err(e) => {
                 eprintln!("[ERROR] {e}");
@@ -802,7 +802,7 @@ fn push_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), StrHid
     Ok(())
 }
 
-fn handle_list_strategies(_args: ListStrategiesArgs) -> Result<(), StrHideError> {
+fn handle_list(_args: ListArgs) -> Result<(), StrHideError> {
     // Static reference table: constants come from the adapters themselves (via
     // `strategy_capacities(None)`), so the table cannot drift from the code.
     // Carrier-specific limits are answered by `inspect -c <carrier>`.

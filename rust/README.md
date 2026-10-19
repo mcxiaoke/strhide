@@ -22,7 +22,7 @@ strhide inspect -c report.pdf --json             # envelope metadata + capacity
 strhide verify -c report.pdf                     # verify host + envelope integrity
 strhide remove -c photo.png                      # remove hidden data, restore host
 strhide remove -c a.png b.png c.png              # strip several carriers at once
-strhide list-strategies                          # static format/strategy/limit table
+strhide list                          # static format/strategy/limit table
 ```
 
 `write` and `remove` accept one or more carriers (`read`, `inspect`, and

@@ -445,8 +445,8 @@ fn config_valid_keys_print_no_unknown_key_warning() {
         "strategy = \"auto\"\nstealth = false\nencrypt = false\npassword = \"p\"\nhint = \"h\"\npreserve_time = true\nbackup = false\nunescape = false\npassword_file = \"pwd.txt\"\n",
     );
     fs::write(dir.join("pwd.txt"), "p\n").unwrap();
-    let out = run(&dir, &["list-strategies"]);
-    assert_ok(&out, &["list-strategies"]);
+    let out = run(&dir, &["list"]);
+    assert_ok(&out, &["list"]);
     assert!(
         !stderr(&out).contains("[WARNING] Unknown key"),
         "recognized keys must not warn, stderr: {}",
@@ -525,7 +525,7 @@ fn config_file_that_cannot_be_read_is_a_hard_error() {
     // Make ./strhide.toml a directory: read_to_string fails with an error that
     // is not NotFound, so it must surface as a hard error.
     fs::create_dir(dir.join("strhide.toml")).unwrap();
-    let out = run(&dir, &["list-strategies"]);
+    let out = run(&dir, &["list"]);
     assert_eq!(code(&out), 1);
     assert!(
         stderr(&out).contains("Failed to read config file"),

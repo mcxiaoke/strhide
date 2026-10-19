@@ -88,7 +88,7 @@ strhide write -c a.png b.png c.png -t "meet me at 7"
 strhide remove -c a.png b.png c.png
 
 # 列出全部格式、策略及其容量上限（静态参考表）
-strhide list-strategies
+strhide list
 ```
 
 密码来源（按顺序检查）：`-p/--password` → `--password-file` → 环境变量 `STRHIDE_PASSWORD` → 配置文件 → 交互式输入（`-e/--encrypt`）。

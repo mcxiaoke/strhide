@@ -55,7 +55,7 @@ fn stderr(out: &Output) -> String {
 fn explicit_missing_config_is_a_hard_error() {
     let dir = scratch("missing");
     fs::write(dir.join("c.png"), make_png()).unwrap();
-    let out = run(&dir, &["--config", "nope.toml", "list-strategies"], None);
+    let out = run(&dir, &["--config", "nope.toml", "list"], None);
     assert_eq!(code(&out), 1);
     assert!(
         stderr(&out).contains("Failed to read config file"),
@@ -69,7 +69,7 @@ fn invalid_toml_is_a_hard_error() {
     let dir = scratch("invalid");
     fs::write(dir.join("c.png"), make_png()).unwrap();
     fs::write(dir.join("strhide.toml"), "strategy = [broken\n").unwrap();
-    let out = run(&dir, &["list-strategies"], None);
+    let out = run(&dir, &["list"], None);
     assert_eq!(code(&out), 1);
     assert!(
         stderr(&out).contains("Invalid TOML"),
@@ -83,7 +83,7 @@ fn unknown_key_warns_but_does_not_fail() {
     let dir = scratch("unknown");
     fs::write(dir.join("c.png"), make_png()).unwrap();
     fs::write(dir.join("strhide.toml"), "pasword = \"x\"\n").unwrap();
-    let out = run(&dir, &["list-strategies"], None);
+    let out = run(&dir, &["list"], None);
     assert_eq!(code(&out), 0);
     assert!(
         stderr(&out).contains("Unknown key 'pasword'"),
