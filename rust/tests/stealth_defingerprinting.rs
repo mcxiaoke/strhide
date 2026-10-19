@@ -314,7 +314,7 @@ fn test_default_carrier_uniform_encryption_and_zero_plaintext() {
 fn test_legacy_unencrypted_carrier_backward_compatibility() {
     use strhide::engine::CarrierMetadata;
     use strhide::envelope::{
-        EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE, STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC,
+        EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE, LEGACY_HEADER_MAGIC, LEGACY_TRAILER_MAGIC,
     };
 
     let dir = scratch("legacy_plain_compat");
@@ -337,7 +337,7 @@ fn test_legacy_unencrypted_carrier_backward_compatibility() {
 
     let ube_total_size = HEADER_SIZE as u64 + meta_raw.len() as u64 + payload.len() as u64 + 24;
     let header = EnvelopeHeader {
-        magic_header: STANDARD_HEADER_MAGIC,
+        magic_header: LEGACY_HEADER_MAGIC,
         version: 2,
         flags: strhide::envelope::FLAG_COMPACT_META, // unencrypted, compact meta
         strategy_id: 2,                              // PNG chunk
@@ -350,9 +350,9 @@ fn test_legacy_unencrypted_carrier_backward_compatibility() {
         ..Default::default()
     };
 
-    // Pack raw unmasked header
+    // Pack raw unmasked header with legacy magic
     let raw_header = header.pack();
-    let trailer = EnvelopeTrailer::create(57 + 8, ube_total_size, STANDARD_TRAILER_MAGIC);
+    let trailer = EnvelopeTrailer::create(57 + 8, ube_total_size, LEGACY_TRAILER_MAGIC);
 
     let mut ube = Vec::new();
     ube.extend_from_slice(&raw_header);
@@ -387,4 +387,60 @@ fn test_legacy_unencrypted_carrier_backward_compatibility() {
     let rem_res = remove_carrier(&carrier_path, None, None, false).unwrap();
     assert!(rem_res.verified_identical);
     assert_eq!(fs::read(&carrier_path).unwrap(), raw_png);
+}
+
+#[test]
+fn test_standard_carrier_has_zero_ascii_magics() {
+    let dir = scratch("zero_ascii_magics");
+    let carrier_path = dir.join("carrier.png");
+    let out_path = dir.join("out.png");
+
+    let raw_png = sample_png();
+    fs::write(&carrier_path, &raw_png).unwrap();
+
+    let secret = "Standard mode payload with binary non-ASCII magics";
+
+    // Write in default standard mode (zero password)
+    write_carrier(
+        &carrier_path,
+        PayloadSource::Text(secret),
+        &WriteOptions {
+            output_path: Some(&out_path),
+            password: None,
+            stealth: false,
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let stego_bytes = fs::read(&out_path).unwrap();
+
+    // 1. Static ASCII magic strings MUST NOT appear anywhere in the output file
+    let found_header_ascii = stego_bytes.windows(7).any(|w| w == b"STRHIDE");
+    assert!(
+        !found_header_ascii,
+        "Standard carrier MUST NOT contain 'STRHIDE' ASCII magic!"
+    );
+
+    let found_trailer_ascii = stego_bytes.windows(4).any(|w| w == b"STH!");
+    assert!(
+        !found_trailer_ascii,
+        "Standard carrier MUST NOT contain 'STH!' ASCII trailer magic!"
+    );
+
+    // 2. Read extracts payload 100% deterministically
+    let read_res = read_carrier(&out_path, None, None).unwrap();
+    assert_eq!(read_res.data, secret.as_bytes());
+
+    // 3. Verify carrier passes all checks
+    let verify_res = verify_carrier(&out_path, None).unwrap();
+    assert!(verify_res.level1_host.ok);
+    assert!(verify_res.level2_envelope.ok);
+    assert!(verify_res.level3_crypto.ok);
+
+    // 4. Remove restores original carrier byte-for-byte
+    let rem_res = remove_carrier(&out_path, None, None, false).unwrap();
+    assert!(rem_res.verified_identical);
+    assert_eq!(fs::read(&out_path).unwrap(), raw_png);
 }

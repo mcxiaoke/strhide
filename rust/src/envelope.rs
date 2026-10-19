@@ -3,8 +3,20 @@
 use crate::errors::StrHideError;
 use std::io::{Read, Seek, SeekFrom};
 
-pub const STANDARD_HEADER_MAGIC: [u8; 8] = *b"\x89STRHIDE";
-pub const STANDARD_TRAILER_MAGIC: [u8; 4] = *b"STH!";
+/// Standard high-entropy binary header magic (8 bytes): SHA-256("strhide-standard-header-v2")[..8]
+/// Pure pseudorandom binary bytes: eliminates all static ASCII strings ("STRHIDE") from forensic scans.
+pub const STANDARD_HEADER_MAGIC: [u8; 8] = [0xb7, 0x54, 0x2c, 0x82, 0x7e, 0x31, 0x1d, 0x6e];
+
+/// Standard high-entropy binary trailer magic (4 bytes): SHA-256("strhide-standard-trailer-v2")[..4]
+/// Pure pseudorandom binary bytes: eliminates all static ASCII strings ("STH!") from forensic scans.
+pub const STANDARD_TRAILER_MAGIC: [u8; 4] = [0x78, 0xe6, 0x66, 0xd2];
+
+/// Legacy header magic used in v0.2/v0.3 for backward compatibility.
+pub const LEGACY_HEADER_MAGIC: [u8; 8] = *b"\x89STRHIDE";
+
+/// Legacy trailer magic used in v0.2/v0.3 for backward compatibility.
+pub const LEGACY_TRAILER_MAGIC: [u8; 4] = *b"STH!";
+
 pub const CURRENT_VERSION: u8 = 0x02;
 
 pub const FLAG_ENCRYPTED: u8 = 0x01;
@@ -369,11 +381,16 @@ impl EnvelopeTrailer {
         let mut trailer_magic = [0u8; 4];
         trailer_magic.copy_from_slice(&data[20..24]);
 
-        let target_magic = expected_magic.unwrap_or(&STANDARD_TRAILER_MAGIC);
-        if &trailer_magic != target_magic {
+        let is_valid_magic = if let Some(target) = expected_magic {
+            &trailer_magic == target
+        } else {
+            trailer_magic == STANDARD_TRAILER_MAGIC || trailer_magic == LEGACY_TRAILER_MAGIC
+        };
+
+        if !is_valid_magic {
             return Err(StrHideError::CorruptedData(format!(
-                "Trailer magic mismatch: {:?} != {:?}",
-                trailer_magic, target_magic
+                "Trailer magic mismatch: {:?} is not a recognized magic",
+                trailer_magic
             )));
         }
 

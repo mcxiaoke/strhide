@@ -211,6 +211,7 @@ impl HostAdapter for PngAdapter {
                 {
                     if expected_trailer_magic.is_none()
                         && trailer.trailer_magic != STANDARD_TRAILER_MAGIC
+                        && trailer.trailer_magic != crate::envelope::LEGACY_TRAILER_MAGIC
                     {
                         return Ok(None);
                     }

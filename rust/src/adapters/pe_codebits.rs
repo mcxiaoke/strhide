@@ -497,7 +497,9 @@ pub fn read_channel_header(
     let prof = profile(text, bitness);
     let header = header_from_positions(&prof)?;
     let want = expected_magic.unwrap_or(CHANNEL_MAGIC);
-    if header.magic != want {
+    if header.magic != want
+        && (expected_magic.is_some() || header.magic != crate::envelope::LEGACY_TRAILER_MAGIC)
+    {
         return Err(CodebitsError::ChannelNotFound);
     }
     validate_header(&header, prof.len())?;
