@@ -454,4 +454,82 @@ mod tests {
         assert_eq!(decomp_len, data.len() as u64);
         assert_eq!(decomp, data);
     }
+
+    #[test]
+    fn test_metadata_encryption_roundtrip_and_tamper() {
+        let salt = b"1234567890123456";
+        let base_nonce = [7u8; 12];
+        let (_, meta_key) = derive_keys("SafePassword", salt).unwrap();
+        let aad = [0x55u8; AAD_SIZE];
+        let plain = b"{\"filename\":\"test.txt\",\"raw_size\":42}";
+
+        // Encrypt
+        let cipher = encrypt_metadata(plain, &meta_key, &base_nonce, &aad).unwrap();
+        assert_ne!(cipher, plain);
+        assert_eq!(cipher.len(), plain.len() + 16); // 16-byte Poly/GCM tag
+
+        // Decrypt successfully
+        let decrypted = decrypt_metadata(&cipher, &meta_key, &base_nonce, &aad).unwrap();
+        assert_eq!(decrypted, plain);
+
+        // Wrong password / key
+        let (_, wrong_meta_key) = derive_keys("WrongPassword", salt).unwrap();
+        assert!(matches!(
+            decrypt_metadata(&cipher, &wrong_meta_key, &base_nonce, &aad),
+            Err(StrHideError::Password(_))
+        ));
+
+        // Tampered AAD
+        let mut tampered_aad = aad;
+        tampered_aad[0] ^= 0xFF;
+        assert!(matches!(
+            decrypt_metadata(&cipher, &meta_key, &base_nonce, &tampered_aad),
+            Err(StrHideError::Password(_))
+        ));
+    }
+
+    #[test]
+    fn test_chunked_stream_roundtrip_multi_megabytes() {
+        let salt = b"salt_for_stream!";
+        let base_nonce = [3u8; 12];
+        let (payload_key, _) = derive_keys("StreamPassword", salt).unwrap();
+        let aad = [0xAAu8; AAD_SIZE];
+
+        // 5MB data across multiple 2MB chunks
+        let orig_size = 5 * 1024 * 1024 + 12345;
+        let mut original_data = Vec::with_capacity(orig_size);
+        for i in 0..orig_size {
+            original_data.push(((i * 61 + 17) & 0xFF) as u8);
+        }
+
+        let mut in_stream = std::io::Cursor::new(&original_data);
+        let mut cipher_stream = std::io::Cursor::new(Vec::new());
+
+        let total_cipher_len = encrypt_stream_to_chunks(
+            &mut in_stream,
+            &mut cipher_stream,
+            &payload_key,
+            &base_nonce,
+            &aad,
+        )
+        .unwrap();
+
+        assert!(total_cipher_len > orig_size as u64);
+
+        // Decrypt
+        cipher_stream.set_position(0);
+        let mut plain_stream = std::io::Cursor::new(Vec::new());
+        let total_plain_len = decrypt_stream_from_chunks(
+            &mut cipher_stream,
+            &mut plain_stream,
+            &payload_key,
+            &base_nonce,
+            &aad,
+            total_cipher_len,
+        )
+        .unwrap();
+
+        assert_eq!(total_plain_len, orig_size as u64);
+        assert_eq!(plain_stream.into_inner(), original_data);
+    }
 }
