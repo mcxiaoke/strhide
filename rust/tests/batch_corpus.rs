@@ -60,20 +60,20 @@ struct SizeCase {
 /// The four required buckets: `<100 B`, `>512 B`, `>4 KiB`, `>100 KiB`.
 const SIZE_CASES: [SizeCase; 4] = [
     SizeCase {
-        label: "64B",
-        bytes: 64,
+        label: "101B",
+        bytes: 101,
     },
     SizeCase {
-        label: "1K",
-        bytes: 1024,
+        label: "603B",
+        bytes: 603,
     },
     SizeCase {
-        label: "8K",
-        bytes: 8192,
+        label: "4K",
+        bytes: 4005,
     },
     SizeCase {
         label: "128K",
-        bytes: 128 * 1024,
+        bytes: 128 * 1024 + 5,
     },
 ];
 
@@ -393,7 +393,7 @@ fn batch_corpus_all_modes() {
         // 1. Policy rejection (APK, signed PE, ...). Checked exactly like the
         //    writer does, so the expectation can never drift from the code.
         //    The policy is payload-size independent, so one case is enough.
-        if let Err(e) = run_all_rejection_checks(src) {
+        if let Err(e) = run_all_rejection_checks(src, src) {
             let reason = match e {
                 StrHideError::Rejection(m) => m,
                 other => other.to_string(),

@@ -13,8 +13,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Gate: fmt + clippy + tests must pass before any binary is built.
+  quality:
+    uses: ./.github/workflows/ci.yml
+
   windows:
     name: windows (${{ matrix.arch }})
+    needs: quality
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -53,6 +58,7 @@ jobs:
 
   linux:
     name: linux (${{ matrix.arch }}, static musl)
+    needs: quality
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -110,6 +116,7 @@ jobs:
 
   macos:
     name: macos (universal2)
+    needs: quality
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

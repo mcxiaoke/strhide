@@ -555,17 +555,26 @@ impl HostAdapter for PeAdapter {
                     info.host_size - info.pe_image_end
                 ));
         }
-        // A pristine linker leaves section padding zero-filled, so any non-zero
-        // byte there is the password-independent trace of a `pe_slack` envelope
-        // (or of a code cave). Only report a substantial amount: a stray byte is
-        // not an envelope.
-        if let Ok((nonzero, ranges)) = pe_slack::nonzero_padding_bytes(stego_in)
-            && nonzero >= crate::envelope::MIN_UBE_PLAIN as u64
-        {
-            found.push(format!(
-                "{nonzero} non-zero bytes in PE section padding ({} padding range(s) scanned); a pe_slack envelope leaves its ciphertext there",
-                ranges
-            ));
+        // Hard evidence first: a strhide header magic inside padding can only be
+        // a `pe_slack` envelope (standard and legacy magic are both checked).
+        // Without a magic the evidence is statistical: ciphertext fills most of
+        // the 0..=255 alphabet, while ordinary non-zero padding is repetitive
+        // (one corpus executable has a 224-byte block with only 7 distinct
+        // values), so require both a plausible size and byte diversity.
+        if let Ok(scan) = pe_slack::scan_slack(stego_in) {
+            if let Some(offset) = scan.header_offset {
+                found.push(format!(
+                    "strhide envelope header at offset {offset} inside PE section padding ({} padding range(s) scanned)",
+                    scan.ranges
+                ));
+            } else if scan.nonzero >= crate::envelope::MIN_UBE_PLAIN as u64
+                && scan.distinct >= pe_slack::MIN_CIPHERTEXT_DISTINCT
+            {
+                found.push(format!(
+                    "{} non-zero bytes ({} distinct byte values) in PE section padding ({} padding range(s) scanned); this looks like ciphertext, i.e. a stealth envelope whose password is unknown",
+                    scan.nonzero, scan.distinct, scan.ranges
+                ));
+            }
         }
         found
     }

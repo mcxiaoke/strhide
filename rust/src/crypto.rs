@@ -360,10 +360,16 @@ pub fn compress_stream<R: Read, W: Write>(
 }
 
 /// Decompress in_stream using raw deflate.
+///
+/// `limit` bounds the decompressed size: the declared `raw_size` from the
+/// (AEAD-protected) metadata. A crafted carrier could otherwise expand a few
+/// kilobytes into gigabytes — an 8 MiB run of zeros compresses to ~8 KiB —
+/// and make `read` allocate far more memory than the carrier size suggests.
 /// Returns total decompressed size.
 pub fn decompress_stream<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
+    limit: u64,
 ) -> Result<u64, StrHideError> {
     let mut decoder = DeflateDecoder::new(reader);
     let mut buf = [0u8; 64 * 1024];
@@ -376,8 +382,14 @@ pub fn decompress_stream<R: Read, W: Write>(
         if n == 0 {
             break;
         }
+        let next_total = total_decompressed.saturating_add(n as u64);
+        if next_total > limit {
+            return Err(StrHideError::CorruptedData(format!(
+                "Decompressed payload exceeds the declared size ({limit} bytes); refusing to expand further"
+            )));
+        }
         writer.write_all(&buf[..n])?;
-        total_decompressed += n as u64;
+        total_decompressed = next_total;
     }
 
     Ok(total_decompressed)
@@ -450,7 +462,7 @@ mod tests {
         assert_eq!(comp_len, comp.len() as u64);
 
         let mut decomp = Vec::new();
-        let decomp_len = decompress_stream(&mut &comp[..], &mut decomp).unwrap();
+        let decomp_len = decompress_stream(&mut &comp[..], &mut decomp, data.len() as u64).unwrap();
         assert_eq!(decomp_len, data.len() as u64);
         assert_eq!(decomp, data);
     }

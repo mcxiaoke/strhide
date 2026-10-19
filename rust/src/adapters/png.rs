@@ -11,26 +11,41 @@ pub const CHUNK_PRIV: [u8; 4] = *b"prIv";
 pub const CHUNK_STEG: [u8; 4] = *b"stEg";
 pub const PNG_MAX_CHUNK_LEN: u64 = 0x7FFFFFFF; // 2GB
 
+/// Offset of the last IEND chunk and the total file size.
+///
+/// IEND is not required to sit inside a fixed tail window: PNGs are commonly
+/// followed by arbitrary bytes (watermarks, vendor metadata, anti-scraping
+/// padding, and for strhide specifically an EOF-overlay envelope). A 64 KiB
+/// tail window made `write -s chunk` — and `auto` for small payloads — fail on
+/// otherwise valid PNGs.
+///
+/// The scan walks backwards in 64 KiB chunks with an `IEND_FULL.len() - 1`
+/// byte overlap (so a marker straddling a chunk boundary is still seen) and
+/// stops at the first hit, i.e. the last marker in file order — the one that
+/// terminates the chunk stream. Matching the full 12-byte chunk
+/// (`length = 0`, `IEND`, CRC `AE 42 60 82`) instead of a short magic keeps
+/// accidental hits inside compressed image data negligible (~2^-96).
 pub fn find_iend_offset<R: Read + Seek + ?Sized>(
     reader: &mut R,
 ) -> Result<(u64, u64), StrHideError> {
+    const CHUNK: u64 = 64 * 1024;
     let total_size = reader.seek(SeekFrom::End(0))?;
-    let scan_len = std::cmp::min(total_size, 64 * 1024);
-    reader.seek(SeekFrom::End(-(scan_len as i64)))?;
-    let mut tail = vec![0u8; scan_len as usize];
-    reader.read_exact(&mut tail)?;
+    let mut end = total_size;
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK);
+        let read_start = start.saturating_sub(IEND_FULL.len() as u64 - 1);
+        let mut buf = vec![0u8; (end - read_start) as usize];
+        reader.seek(SeekFrom::Start(read_start))?;
+        reader.read_exact(&mut buf)?;
+        if let Some(idx) = buf.windows(IEND_FULL.len()).rposition(|w| w == IEND_FULL) {
+            return Ok((read_start + idx as u64, total_size));
+        }
+        end = start;
+    }
 
-    let idx = tail
-        .windows(12)
-        .rposition(|w| w == IEND_FULL)
-        .ok_or_else(|| {
-            StrHideError::CorruptedData(
-                "Valid PNG IEND chunk not found within tail scan window".into(),
-            )
-        })?;
-
-    let iend_offset = (total_size - scan_len) + idx as u64;
-    Ok((iend_offset, total_size))
+    Err(StrHideError::CorruptedData(
+        "Valid PNG IEND chunk not found".into(),
+    ))
 }
 
 pub struct PngAdapter;

@@ -450,3 +450,189 @@ fn backup_path_handles_non_utf8_names() {
     bak.push(".bak");
     assert!(PathBuf::from(bak).exists(), "backup for a non-UTF-8 name");
 }
+
+// --------------------------------------------------------------------------- P1-2
+
+/// PNGs may carry more than 64 KiB after IEND; `chunk` and `auto` must still
+/// find the real terminator instead of failing.
+#[test]
+fn png_dirty_tail_beyond_64k_is_supported() {
+    let dir = scratch("png_dirty_tail");
+    let mut data = make_png();
+    data.extend_from_slice(&vec![0x00u8; 200 * 1024]);
+    let carrier = dir.join("dirty.png");
+    fs::write(&carrier, &data).unwrap();
+    let stego = dir.join("s.png");
+    let res = write_carrier_file(
+        &carrier,
+        PayloadSource::Text("tail"),
+        None,
+        "chunk",
+        false,
+        &stego,
+    );
+    assert_eq!(res.strategy, "chunk");
+    assert_eq!(read_carrier(&stego, None, None).unwrap().data, b"tail");
+    let restored = dir.join("r.png");
+    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    assert_eq!(fs::read(&restored).unwrap(), data);
+}
+
+/// `auto` must pick the chunk strategy for a small payload even with a large
+/// dirty tail (it used to fail the IEND lookup).
+#[test]
+fn png_dirty_tail_auto_strategy() {
+    let dir = scratch("png_dirty_auto");
+    let mut data = make_png();
+    data.extend_from_slice(&vec![0xA5u8; 128 * 1024]);
+    let carrier = dir.join("dirty.png");
+    fs::write(&carrier, &data).unwrap();
+    let stego = dir.join("s.png");
+    let res = write_carrier_file(
+        &carrier,
+        PayloadSource::Text("auto"),
+        None,
+        "auto",
+        false,
+        &stego,
+    );
+    assert_eq!(res.strategy, "chunk");
+    assert_eq!(read_carrier(&stego, None, None).unwrap().data, b"auto");
+}
+
+// --------------------------------------------------------------------------- P2-3
+
+/// Extraction must never truncate an existing file unless `--overwrite` is
+/// given.
+#[test]
+fn extract_refuses_to_overwrite_existing_file() {
+    let dir = scratch("extract_no_overwrite");
+    let carrier = dir.join("c.png");
+    fs::write(&carrier, make_png()).unwrap();
+    let payload = dir.join("important.txt");
+    fs::write(&payload, b"PAYLOAD").unwrap();
+    let stego = dir.join("s.png");
+    write_carrier_file(
+        &carrier,
+        PayloadSource::File(&payload),
+        None,
+        "auto",
+        false,
+        &stego,
+    );
+
+    let outdir = dir.join("out");
+    fs::create_dir_all(&outdir).unwrap();
+    fs::write(outdir.join("important.txt"), b"KEEP-ME").unwrap();
+
+    let err = read_carrier(&stego, Some(&outdir), None).unwrap_err();
+    assert!(matches!(err, StrHideError::Rejection(_)), "{err}");
+    assert_eq!(
+        fs::read(outdir.join("important.txt")).unwrap(),
+        b"KEEP-ME",
+        "existing file was modified"
+    );
+
+    let res = strhide::engine::read_carrier_with(&stego, Some(&outdir), None, true).unwrap();
+    assert!(res.written_file.is_some());
+    assert_eq!(fs::read(outdir.join("important.txt")).unwrap(), b"PAYLOAD");
+}
+
+// --------------------------------------------------------------------------- A-9
+
+/// Decompression is bounded by the declared raw size: a crafted carrier cannot
+/// expand a few kilobytes into an arbitrary amount of memory.
+#[test]
+fn decompression_limit_is_enforced() {
+    let mut raw = vec![0u8; 4 * 1024 * 1024];
+    raw.extend_from_slice(b"tail");
+    let mut comp = Vec::new();
+    strhide::crypto::compress_stream(&mut &raw[..], &mut comp).unwrap();
+
+    // Exact limit passes.
+    let mut out = Vec::new();
+    let n = strhide::crypto::decompress_stream(&mut &comp[..], &mut out, raw.len() as u64).unwrap();
+    assert_eq!(n, raw.len() as u64);
+
+    // One byte short is rejected instead of expanding the whole stream.
+    let mut out = Vec::new();
+    let err = strhide::crypto::decompress_stream(&mut &comp[..], &mut out, raw.len() as u64 - 1)
+        .unwrap_err();
+    assert!(matches!(err, StrHideError::CorruptedData(_)), "{err}");
+}
+
+// --------------------------------------------------------------------------- A-8
+
+/// A single carrier with `-o <dir>` writes into the directory, like batch mode
+/// and like `read -o <dir>`; previously it failed with a bare OS error.
+#[test]
+fn single_carrier_output_directory() {
+    let dir = scratch("single_outdir");
+    let carrier = dir.join("c.png");
+    fs::write(&carrier, make_png()).unwrap();
+    let outdir = dir.join("out");
+    fs::create_dir_all(&outdir).unwrap();
+    let out = Command::new(bin())
+        .args([
+            "write",
+            "-c",
+            carrier.to_str().unwrap(),
+            "-t",
+            "x",
+            "-o",
+            outdir.to_str().unwrap(),
+            "--no-backup",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        outdir.join("c.png").exists(),
+        "result not written into -o dir"
+    );
+}
+
+// --------------------------------------------------------------------------- P2-4
+
+/// Reading a no-password envelope with `-p` must warn that the password was
+/// not used (the envelope is masked with the public built-in key).
+#[test]
+fn read_warns_when_password_is_unused() {
+    let dir = scratch("pw_unused_warning");
+    let carrier = dir.join("c.png");
+    fs::write(&carrier, make_png()).unwrap();
+    let stego = dir.join("s.png");
+    write_carrier_file(
+        &carrier,
+        PayloadSource::Text("plain"),
+        None,
+        "auto",
+        false,
+        &stego,
+    );
+    let out = Command::new(bin())
+        .args([
+            "read",
+            "-c",
+            stego.to_str().unwrap(),
+            "--stdout",
+            "-p",
+            "whatever",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not encrypted"), "stderr: {stderr}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "plain");
+}

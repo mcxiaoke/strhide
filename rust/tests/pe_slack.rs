@@ -449,8 +449,8 @@ fn slack_stealth_denies_without_password() {
         "expected NoHiddenData, got {err:?}"
     );
     assert!(
-        err.to_string()
-            .contains("non-zero bytes in PE section padding"),
+        err.to_string().contains("non-zero bytes")
+            && err.to_string().contains("PE section padding"),
         "the padding trace should be reported: {err}"
     );
     assert!(read_carrier(&out, None, Some("nope")).is_err());

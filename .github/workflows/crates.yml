@@ -7,7 +7,12 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Gate: fmt + clippy + tests must pass before anything is published.
+  quality:
+    uses: ./.github/workflows/ci.yml
+
   publish:
+    needs: quality
     runs-on: ubuntu-latest
     permissions:
       # Required for crates.io Trusted Publishing (OIDC), no API token needed

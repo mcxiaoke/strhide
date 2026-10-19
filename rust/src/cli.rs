@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::config::{self, FileConfig};
 use crate::engine::{
-    PayloadSource, RemoveResult, WriteOptions, WriteResult, inspect_carrier, read_carrier,
+    PayloadSource, RemoveResult, WriteOptions, WriteResult, inspect_carrier, read_carrier_with,
     remove_carrier, verify_carrier, write_carrier,
 };
 use crate::errors::StrHideError;
@@ -124,6 +124,12 @@ pub struct ReadArgs {
 
     #[arg(long = "stdout")]
     pub stdout: bool,
+
+    #[arg(
+        long = "overwrite",
+        help = "Allow overwriting an existing file when extracting a payload"
+    )]
+    pub overwrite: bool,
 }
 
 #[derive(Args, Debug)]
@@ -511,7 +517,12 @@ fn handle_read(args: ReadArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
         false,
     )?;
 
-    let res = match read_carrier(&args.carrier, args.output.as_deref(), password.as_deref()) {
+    let res = match read_carrier_with(
+        &args.carrier,
+        args.output.as_deref(),
+        password.as_deref(),
+        args.overwrite,
+    ) {
         Ok(r) => r,
         // Discriminate by error variant, not by message text. A password error
         // with no password supplied means the envelope is encrypted: show the
@@ -534,10 +545,24 @@ fn handle_read(args: ReadArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
                 ));
             }
             password = Some(prompt_password(false)?);
-            read_carrier(&args.carrier, args.output.as_deref(), password.as_deref())?
+            read_carrier_with(
+                &args.carrier,
+                args.output.as_deref(),
+                password.as_deref(),
+                args.overwrite,
+            )?
         }
         Err(e) => return Err(e),
     };
+
+    // A password was supplied but the envelope is not encrypted: the built-in
+    // public key masked it, so the password had no effect. Say so instead of
+    // letting the user believe `-p` protected this payload.
+    if password.is_some() && !res.is_encrypted {
+        eprintln!(
+            "[WARNING] This envelope is not encrypted: it was written without a password, so the supplied password was ignored. Re-write the carrier with -p to protect it."
+        );
+    }
 
     if let Some(wf) = res.written_file {
         println!("[OK] Extracted payload to '{wf}' ({} bytes).", res.raw_size);
@@ -555,7 +580,20 @@ fn handle_read(args: ReadArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
         } else {
             crate::engine::sanitize_filename(&res.filename)
         };
-        let mut f = File::create(&fn_to_use)?;
+        // Same overwrite protection as the explicit-output path: never truncate
+        // a file the user did not name.
+        if Path::new(&fn_to_use).exists() && !args.overwrite {
+            return Err(StrHideError::Rejection(format!(
+                "Refusing to overwrite existing file '{fn_to_use}'. Choose another -o path or pass --overwrite."
+            )));
+        }
+        let mut f = File::create(&fn_to_use).map_err(|e| {
+            let reason = match e.kind() {
+                std::io::ErrorKind::PermissionDenied => "permission denied",
+                _ => "the file could not be created",
+            };
+            StrHideError::General(format!("Cannot create '{fn_to_use}': {reason} [{e}]"))
+        })?;
         f.write_all(&res.data)?;
         println!(
             "[OK] Extracted payload to '{fn_to_use}' ({} bytes).",
@@ -868,8 +906,12 @@ where
 }
 
 /// Batch `-o` rule: with more than one carrier the target must be an existing
-/// directory, because one file path cannot name several outputs. Single-carrier
-/// runs return `None` so `-o <file>` keeps its original meaning.
+/// directory, because one file path cannot name several outputs.
+///
+/// An existing directory is accepted for a *single* carrier too and means "put
+/// the result inside it, keeping the carrier's name" — the same semantics
+/// `read -o <dir>` already had. Previously single-carrier `-o <dir>` fell
+/// through to the rename and failed with a bare OS error.
 fn batch_output_dir<'a>(
     output: Option<&'a Path>,
     multi: bool,
@@ -878,16 +920,16 @@ fn batch_output_dir<'a>(
     let Some(path) = output else {
         return Ok(None);
     };
-    if !multi {
-        return Ok(None);
+    if path.is_dir() {
+        return Ok(Some(path));
     }
-    if !path.is_dir() {
+    if multi {
         return Err(StrHideError::General(format!(
             "'-o {}' must be an existing directory when {action} multiple carriers",
             path.display()
         )));
     }
-    Ok(Some(path))
+    Ok(None)
 }
 
 /// Where one carrier's result goes: inside the batch directory (keeping the

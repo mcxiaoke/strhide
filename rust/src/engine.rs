@@ -239,6 +239,10 @@ pub struct ReadResult {
     pub carrier: String,
     pub data: Vec<u8>,
     pub is_file: bool,
+    /// Whether the envelope was encrypted with a user password. False for
+    /// no-password envelopes (which use the public built-in key), so the CLI
+    /// can warn when a supplied password had no effect.
+    pub is_encrypted: bool,
     pub filename: String,
     pub raw_size: u64,
     pub written_file: Option<String>,
@@ -522,8 +526,8 @@ pub fn write_carrier(
 
     let target_path = output_path.unwrap_or(carrier_path);
 
-    // 1. Run security rejection checks
-    run_all_rejection_checks(carrier_path)?;
+    // 1. Run security rejection checks (carrier policy + target permissions)
+    run_all_rejection_checks(carrier_path, target_path)?;
 
     // 2. Capture carrier metadata (stats, permissions, timestamps, full SHA-256)
     let meta = std::fs::metadata(carrier_path)?;
@@ -740,7 +744,7 @@ pub fn write_carrier(
     // Merge structural warnings (probable pre-existing stealth envelope).
     if !structural_warnings.is_empty() {
         let extra = format!(
-            "Carrier shows structures that only a hidden envelope would produce ({}). It may already contain a stealth envelope written with a different password; injecting now would stack a second envelope on top.",
+            "Carrier shows structures consistent with a hidden envelope ({}). It may already contain a stealth envelope written with a different password; injecting now would stack a second envelope on top.",
             structural_warnings.join("; ")
         );
         warning_msg = Some(match warning_msg {
@@ -766,12 +770,30 @@ pub fn write_carrier(
 
     // 9. Inject into temporary target file.
     // TmpGuard removes the half-written temp file on any early return unless
-    // commit() is called after the atomic rename succeeded.
-    let tmp_target = PathBuf::from(format!("{}.strhide.tmp", target_path.display()));
+    // commit() is called after the atomic rename succeeded. The name is built
+    // from the OsString: `display()` is lossy for non-UTF-8 targets.
+    let mut tmp_os = target_path.as_os_str().to_os_string();
+    tmp_os.push(".strhide.tmp");
+    let tmp_target = PathBuf::from(tmp_os);
     let mut tmp_guard = TmpGuard::new(tmp_target.clone());
     let (inject_offset, inject_size, patch_offset, orig_patch_val) = {
         let mut host_in = File::open(carrier_path)?;
-        let mut out_file = File::create(&tmp_target)?;
+        let mut out_file = File::create(&tmp_target).map_err(|e| {
+            let dir = match target_path.parent() {
+                Some(p) if !p.as_os_str().is_empty() => p,
+                _ => Path::new("."),
+            };
+            let reason = match e.kind() {
+                std::io::ErrorKind::NotFound => "the output directory does not exist",
+                std::io::ErrorKind::PermissionDenied => "the output directory is not writable",
+                _ => "the output file could not be created",
+            };
+            StrHideError::General(format!(
+                "Cannot create '{}' in '{}': {reason} [{e}]",
+                target_path.display(),
+                dir.display()
+            ))
+        })?;
         let mut ube_cursor = Cursor::new(&tmp_ube);
         adapter.inject(
             &mut host_in,
@@ -976,10 +998,28 @@ pub fn write_carrier(
     })
 }
 
+/// Extract the payload of a carrier.
+///
+/// Refuses to overwrite an existing output file; use [`read_carrier_with`] with
+/// `overwrite = true` (CLI: `--overwrite`) to allow it.
 pub fn read_carrier(
     carrier_path: &Path,
     output_path: Option<&Path>,
     password: Option<&str>,
+) -> Result<ReadResult, StrHideError> {
+    read_carrier_with(carrier_path, output_path, password, false)
+}
+
+/// Extract the payload of a carrier, optionally replacing an existing output.
+///
+/// Without `overwrite`, an existing destination is an error: silently
+/// truncating it would lose a user file, which contradicts the tool's
+/// "lossless, restorable" contract.
+pub fn read_carrier_with(
+    carrier_path: &Path,
+    output_path: Option<&Path>,
+    password: Option<&str>,
+    overwrite: bool,
 ) -> Result<ReadResult, StrHideError> {
     if !carrier_path.exists() {
         return Err(StrHideError::General(format!(
@@ -1109,10 +1149,16 @@ pub fn read_carrier(
         taken.read_to_end(&mut decrypted_payload)?;
     }
 
-    // Decompress if needed
+    // Decompress if needed. `meta_obj.raw_size` is the declared uncompressed
+    // size (inside the AEAD-protected metadata), so it doubles as a hard
+    // expansion bound for untrusted carriers.
     let final_data = if header.is_compressed() {
         let mut decomp = Vec::new();
-        decompress_stream(&mut Cursor::new(&decrypted_payload), &mut decomp)?;
+        decompress_stream(
+            &mut Cursor::new(&decrypted_payload),
+            &mut decomp,
+            meta_obj.raw_size,
+        )?;
         decomp
     } else {
         decrypted_payload
@@ -1146,7 +1192,27 @@ pub fn read_carrier(
             out_p.to_path_buf()
         };
 
-        let mut out_f = File::create(&final_dest)?;
+        // Never truncate an existing file by accident: extracting several
+        // carriers that contain the same payload name (or reading into a busy
+        // directory) used to replace user files silently.
+        if final_dest.exists() && !overwrite {
+            return Err(StrHideError::Rejection(format!(
+                "Refusing to overwrite existing file '{}'. Choose another -o path or pass --overwrite.",
+                final_dest.display()
+            )));
+        }
+
+        let mut out_f = File::create(&final_dest).map_err(|e| {
+            let reason = match e.kind() {
+                std::io::ErrorKind::NotFound => "the output directory does not exist",
+                std::io::ErrorKind::PermissionDenied => "the output directory is not writable",
+                _ => "the output file could not be created",
+            };
+            StrHideError::General(format!(
+                "Cannot create '{}': {reason} [{e}]",
+                final_dest.display()
+            ))
+        })?;
         out_f.write_all(&final_data)?;
         written_file = Some(final_dest.display().to_string());
     }
@@ -1155,6 +1221,7 @@ pub fn read_carrier(
         carrier: carrier_path.display().to_string(),
         data: final_data,
         is_file: header.is_file(),
+        is_encrypted: header.is_encrypted(),
         filename: meta_obj.filename,
         raw_size: meta_obj.raw_size,
         written_file,

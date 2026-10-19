@@ -319,7 +319,7 @@ fn inflation_and_structural_warnings_are_merged() {
         .as_deref()
         .expect("expected a structural warning at minimum");
     assert!(
-        warning.contains("only a hidden envelope would produce"),
+        warning.contains("consistent with a hidden envelope"),
         "structural part missing: {warning}"
     );
     assert!(

@@ -1,0 +1,67 @@
+name: CI
+
+# Quality gate shared by pull requests, branch pushes, and the two release
+# workflows (which call it through `workflow_call`). Before this existed a tag
+# push went straight to `cargo publish` / `cargo build --release`, so a
+# regression could ship without ever being compiled by the test suite.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    name: quality (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      # `--all-targets` compiles the integration tests but does not run the
+      # #[ignore]d corpus sweep (`batch_corpus`), which needs external files.
+      - name: Test
+        run: cargo test --locked --all-targets
+
+  audit:
+    name: audit (advisory)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@cargo-audit
+
+      # Advisories are reported but never block: a dependency advisory should
+      # not stop a functional fix from shipping.
+      - name: cargo audit
+        continue-on-error: true
+        run: cargo audit

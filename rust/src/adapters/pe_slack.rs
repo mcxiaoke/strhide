@@ -256,20 +256,53 @@ pub fn strip(
     Ok(())
 }
 
-/// Counts non-zero bytes inside the carrier's padding ranges.
+/// Result of scanning the carrier's section-alignment padding.
+#[derive(Debug, Default)]
+pub struct SlackScan {
+    /// Non-zero bytes anywhere in the padding ranges.
+    pub nonzero: u64,
+    /// Number of distinct byte values across the padding ranges.
+    ///
+    /// Ciphertext fills almost the whole 0..=255 alphabet (~139 values in 200
+    /// bytes), while compiler-generated padding that is not zero-filled is
+    /// highly repetitive: one ordinary executable in the corpus has a 224-byte
+    /// non-zero block using only **7** distinct values. This separates a
+    /// stealth envelope from ordinary padding far better than a byte count.
+    pub distinct: usize,
+    /// Number of padding ranges that were scanned.
+    pub ranges: usize,
+    /// Offset of a strhide envelope header (standard or legacy magic) found in
+    /// the padding. This is hard evidence; `nonzero` alone is not.
+    pub header_offset: Option<u64>,
+}
+
+/// Minimum number of distinct byte values for padding to look like ciphertext.
 ///
-/// A pristine carrier's padding is all zeros, so a non-zero count is the
-/// password-independent trace of a `pe_slack` envelope (or of any other use of
-/// the padding, e.g. a code cave).
-pub fn nonzero_padding_bytes(stego_in: &mut dyn SeekRead) -> Result<(u64, usize), StrHideError> {
+/// 178 uniformly random bytes fill ~129 distinct values on average; the
+/// smallest envelope is 178 bytes. Repetitive compiler padding stays far below
+/// (7 in the corpus sample), so this separates "encrypted payload" from
+/// "leftover data" without needing the password.
+pub const MIN_CIPHERTEXT_DISTINCT: usize = 100;
+
+/// Scans the carrier's padding ranges once, reporting both the non-zero count
+/// and whether a strhide header magic is present.
+pub fn scan_slack(stego_in: &mut dyn SeekRead) -> Result<SlackScan, StrHideError> {
     let layout = match pe_codebits::parse_slack_layout_streaming(stego_in) {
         Ok(layout) => layout,
-        Err(_) => return Ok((0, 0)),
+        Err(_) => return Ok(SlackScan::default()),
     };
+    const MAGICS: [&[u8; 8]; 2] = [&STANDARD_HEADER_MAGIC, &LEGACY_HEADER_MAGIC];
     let mut buf = vec![0u8; SCAN_CHUNK];
-    let mut count = 0u64;
+    let mut seen = [false; 256];
+    let mut scan = SlackScan {
+        ranges: layout.slack_ranges.len(),
+        ..Default::default()
+    };
     for &(start, end) in &layout.slack_ranges {
         let mut pos = start;
+        // Bytes carried over from the previous chunk so a magic straddling a
+        // chunk boundary is still found.
+        let mut carry: Vec<u8> = Vec::new();
         while pos < end {
             let want = ((end - pos) as usize).min(SCAN_CHUNK);
             stego_in.seek(SeekFrom::Start(pos))?;
@@ -277,11 +310,31 @@ pub fn nonzero_padding_bytes(stego_in: &mut dyn SeekRead) -> Result<(u64, usize)
             if n == 0 {
                 break;
             }
-            count += buf[..n].iter().filter(|&&b| b != 0).count() as u64;
+            for &b in &buf[..n] {
+                if b != 0 {
+                    scan.nonzero += 1;
+                }
+                seen[b as usize] = true;
+            }
+            if scan.header_offset.is_none() {
+                let mut window = Vec::with_capacity(carry.len() + n);
+                window.extend_from_slice(&carry);
+                window.extend_from_slice(&buf[..n]);
+                'magic: for magic in MAGICS {
+                    if let Some(idx) = window.windows(magic.len()).position(|w| w == magic) {
+                        scan.header_offset = Some(pos - carry.len() as u64 + idx as u64);
+                        break 'magic;
+                    }
+                }
+                let keep = window.len().min(7);
+                carry.clear();
+                carry.extend_from_slice(&window[window.len() - keep..]);
+            }
             pos += n as u64;
         }
     }
-    Ok((count, layout.slack_ranges.len()))
+    scan.distinct = seen.iter().filter(|s| **s).count();
+    Ok(scan)
 }
 
 fn read_exact_at<R: Read + Seek + ?Sized>(

@@ -31,7 +31,8 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::adapters::pe_codebits;
+use crate::adapters::{pe_codebits, pe_slack};
+use crate::envelope::{LEGACY_HEADER_MAGIC, MIN_UBE_PLAIN, STANDARD_HEADER_MAGIC};
 use crate::errors::StrHideError;
 
 /// Hard cap on file size we fully load for scanning. Larger files still get
@@ -531,14 +532,49 @@ fn track_pe_structure(data: &[u8], out: &mut Vec<Finding>) {
             }
         }
     }
-    if nonzero >= crate::envelope::MIN_UBE_PLAIN as u64 {
+    // A strhide header magic inside padding is hard evidence. A non-zero count
+    // alone is not: some linkers leave real bytes after a section's mapped span
+    // and packed binaries contain code caves, so ordinary executables trip it.
+    // Ciphertext, however, also fills most of the byte alphabet, which
+    // repetitive compiler padding does not — require both signals.
+    let mut header_offset = None;
+    let mut distinct = [false; 256];
+    'ranges: for &(start, end) in &layout.slack_ranges {
+        let a = start as usize;
+        let b = (end as usize).min(data.len());
+        if a >= b {
+            continue;
+        }
+        let range = &data[a..b];
+        for &byte in range {
+            distinct[byte as usize] = true;
+        }
+        for magic in [&STANDARD_HEADER_MAGIC[..], &LEGACY_HEADER_MAGIC[..]] {
+            if let Some(idx) = range.windows(magic.len()).position(|w| w == magic) {
+                header_offset = Some(a + idx);
+                break 'ranges;
+            }
+        }
+    }
+    let distinct = distinct.iter().filter(|s| **s).count();
+
+    if let Some(offset) = header_offset {
+        out.push(Finding {
+            detector: "pe:envelope-header".into(),
+            severity: Severity::Likely,
+            detail: format!(
+                "strhide envelope header (magic) at offset {offset} inside PE section padding; \
+                 this is a pe_slack payload"
+            ),
+        });
+    } else if nonzero >= MIN_UBE_PLAIN as u64 && distinct >= pe_slack::MIN_CIPHERTEXT_DISTINCT {
         out.push(Finding {
             detector: "pe:nonzero-padding".into(),
             severity: Severity::Suspicious,
             detail: format!(
-                "{nonzero} non-zero bytes in PE section padding ({ranges} range(s), longest \
-                 non-zero run {longest} B); linker padding is zero-filled, so this is an \
-                 embedded payload or a code cave"
+                "{nonzero} non-zero bytes ({distinct} distinct byte values) in PE section padding \
+                 ({ranges} range(s), longest non-zero run {longest} B); consistent with a stealth \
+                 envelope written with an unknown password"
             ),
         });
     }

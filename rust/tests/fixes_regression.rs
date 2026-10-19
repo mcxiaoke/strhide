@@ -422,7 +422,7 @@ fn structural_warning_for_unknown_password_envelope() {
         res.warning
             .as_deref()
             .unwrap_or("")
-            .contains("only a hidden envelope would produce")
+            .contains("consistent with a hidden envelope")
     );
 }
 
