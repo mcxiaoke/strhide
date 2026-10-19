@@ -767,13 +767,17 @@ pub fn write_carrier(
 
     // Assemble full UBE (payload buffer is moved in, not copied)
     let mut tmp_ube = Vec::with_capacity(ube_total_size as usize);
-    tmp_ube.extend_from_slice(&header.pack());
+    tmp_ube.extend_from_slice(&header.pack_with_stealth_mask(password)?);
     if !hint_bytes.is_empty() {
         tmp_ube.extend_from_slice(&hint_bytes);
     }
     tmp_ube.extend_from_slice(&meta_block);
     tmp_ube.append(&mut payload_cipher_buf); // move bytes, no copy
-    let dummy_trailer = EnvelopeTrailer::create(0, ube_total_size, trailer_magic);
+    let dummy_trailer = if stealth && is_encrypted {
+        EnvelopeTrailer::create_stealth(0, ube_total_size, trailer_magic)
+    } else {
+        EnvelopeTrailer::create(0, ube_total_size, trailer_magic)
+    };
     tmp_ube.extend_from_slice(&dummy_trailer.pack());
 
     // 9. Inject into temporary target file.
@@ -811,7 +815,11 @@ pub fn write_carrier(
     header.patch_offset = patch_offset;
     header.orig_patch_val = orig_patch_val;
 
-    let final_trailer = EnvelopeTrailer::create(actual_ube_offset, ube_total_size, trailer_magic);
+    let final_trailer = if stealth && is_encrypted {
+        EnvelopeTrailer::create_stealth(actual_ube_offset, ube_total_size, trailer_magic)
+    } else {
+        EnvelopeTrailer::create(actual_ube_offset, ube_total_size, trailer_magic)
+    };
 
     // Scattered strategies (pe_codebits) embed the final envelope bytes during
     // inject(): inject_offset/inject_size are 0 by definition and the trailer
@@ -828,7 +836,7 @@ pub fn write_carrier(
 
             // Patch header
             f.seek(SeekFrom::Start(actual_ube_offset))?;
-            f.write_all(&header.pack())?;
+            f.write_all(&header.pack_with_stealth_mask(password)?)?;
 
             // Patch trailer at end of UBE
             let trailer_pos =
@@ -870,7 +878,7 @@ pub fn write_carrier(
         )?;
         let mut hdr_bytes = [0u8; HEADER_SIZE];
         ube_stream.read_exact(&mut hdr_bytes)?;
-        let written_header = EnvelopeHeader::unpack(&hdr_bytes)?;
+        let written_header = EnvelopeHeader::unpack_with_password(&hdr_bytes, password)?;
         if written_header.magic_header != header_magic
             || written_header.inject_offset != inject_offset
             || written_header.inject_size != inject_size
@@ -1028,7 +1036,7 @@ pub fn read_carrier(
     // Read fixed header
     let mut header_bytes = [0u8; HEADER_SIZE];
     ube_stream.read_exact(&mut header_bytes)?;
-    let header = EnvelopeHeader::unpack(&header_bytes)?;
+    let header = EnvelopeHeader::unpack_with_password(&header_bytes, password)?;
     header.validate_against(ube_total_size)?;
 
     // Read hint if present
@@ -1213,7 +1221,7 @@ pub fn remove_carrier(
             let mut ube_stream =
                 adapter.open_ube_reader(&mut cf, ube_offset, ube_total_size, &strategy_name)?;
             ube_stream.read_exact(&mut header_bytes)?;
-            header = EnvelopeHeader::unpack(&header_bytes)?;
+            header = EnvelopeHeader::unpack_with_password(&header_bytes, password)?;
             header.validate_against(ube_total_size)?;
         }
 
@@ -1349,7 +1357,7 @@ pub fn inspect_carrier(
 
     let mut header_bytes = [0u8; HEADER_SIZE];
     ube_stream.read_exact(&mut header_bytes)?;
-    let header = EnvelopeHeader::unpack(&header_bytes)?;
+    let header = EnvelopeHeader::unpack_with_password(&header_bytes, password)?;
     header.validate_against(ube_total_size)?;
 
     let mut hint_str = None;
@@ -1475,7 +1483,9 @@ pub fn verify_carrier(
                 let mut header_bytes = [0u8; HEADER_SIZE];
                 if ube_stream.read_exact(&mut header_bytes).is_err() {
                     (false, "Cannot read header".into(), false, false)
-                } else if let Ok(header) = EnvelopeHeader::unpack(&header_bytes) {
+                } else if let Ok(header) =
+                    EnvelopeHeader::unpack_with_password(&header_bytes, password)
+                {
                     // Validate header field ranges against the located envelope size
                     // (version / hint_len / meta_len consistency) before trusting any
                     // downstream reads — a crafted or corrupted header must fail Level

@@ -56,6 +56,36 @@ pub fn derive_stealth_magics(
     Ok((header_magic, trailer_magic))
 }
 
+/// Derive a 76-byte deterministic keystream from password and salt to mask
+/// the sensitive fields of EnvelopeHeader in stealth mode.
+pub fn derive_header_mask(password: &str, salt: &[u8]) -> Result<[u8; 76], StrHideError> {
+    let norm_pwd = normalize_nfc(password);
+    let mut ikm = [0u8; 32];
+    pbkdf2::pbkdf2_hmac::<Sha256>(norm_pwd.as_bytes(), salt, PBKDF2_ITERATIONS, &mut ikm);
+
+    let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm);
+    let mut mask = [0u8; 76];
+    hk.expand(b"strhide-header-mask-v1", &mut mask)
+        .map_err(|e| StrHideError::General(format!("HKDF expand header mask error: {e}")))?;
+    Ok(mask)
+}
+
+/// Derive a 4-byte CRC mask from trailer magic in stealth mode.
+/// This prevents public IEEE 802.3 CRC32 scanning from detecting the trailer
+/// without knowledge of the password.
+pub fn derive_trailer_crc_mask(trailer_magic: &[u8; 4]) -> u32 {
+    crc32fast::hash(&[
+        trailer_magic[0],
+        trailer_magic[1],
+        trailer_magic[2],
+        trailer_magic[3],
+        0x53,
+        0x54,
+        0x45,
+        0x41, // b"STEA"
+    ])
+}
+
 pub fn make_chunk_nonce(base_nonce: &[u8; 12], chunk_index: usize) -> [u8; 12] {
     let counter_bytes: [u8; 4] = base_nonce[8..12].try_into().unwrap();
     let counter = u32::from_le_bytes(counter_bytes) ^ (chunk_index as u32);

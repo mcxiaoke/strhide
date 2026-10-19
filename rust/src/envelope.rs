@@ -160,6 +160,28 @@ impl EnvelopeHeader {
         buf
     }
 
+    /// Pack fixed header into 112 bytes with stealth masking applied if stealth mode is enabled.
+    /// In stealth mode, sensitive fields (version, flags, strategy_id, host SHA-256, sizes and offsets)
+    /// are XOR-masked with a deterministic keystream derived from (password, salt).
+    pub fn pack_with_stealth_mask(
+        &self,
+        password: Option<&str>,
+    ) -> Result<[u8; HEADER_SIZE], StrHideError> {
+        let mut buf = self.pack();
+        if self.is_stealth()
+            && let Some(pwd) = password
+        {
+            let mask = crate::crypto::derive_header_mask(pwd, &self.salt)?;
+            for i in 0..4 {
+                buf[8 + i] ^= mask[i];
+            }
+            for i in 0..72 {
+                buf[40 + i] ^= mask[4 + i];
+            }
+        }
+        Ok(buf)
+    }
+
     /// Unpack 112-byte fixed header.
     pub fn unpack(data: &[u8]) -> Result<Self, StrHideError> {
         if data.len() < HEADER_SIZE {
@@ -214,6 +236,40 @@ impl EnvelopeHeader {
             hint_len,
         })
     }
+
+    /// Unpack 112-byte fixed header, handling stealth de-masking when password is provided.
+    pub fn unpack_with_password(data: &[u8], password: Option<&str>) -> Result<Self, StrHideError> {
+        if data.len() < HEADER_SIZE {
+            return Err(StrHideError::CorruptedData(format!(
+                "Insufficient bytes for header: {} < {}",
+                data.len(),
+                HEADER_SIZE
+            )));
+        }
+
+        if let Some(pwd) = password {
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&data[12..28]);
+            if let Ok(mask) = crate::crypto::derive_header_mask(pwd, &salt) {
+                let mut unmasked = [0u8; HEADER_SIZE];
+                unmasked.copy_from_slice(&data[..HEADER_SIZE]);
+                for i in 0..4 {
+                    unmasked[8 + i] ^= mask[i];
+                }
+                for i in 0..72 {
+                    unmasked[40 + i] ^= mask[4 + i];
+                }
+                if unmasked[8] == CURRENT_VERSION
+                    && (unmasked[9] & FLAG_STEALTH) != 0
+                    && let Ok(hdr) = Self::unpack(&unmasked)
+                {
+                    return Ok(hdr);
+                }
+            }
+        }
+
+        Self::unpack(data)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +291,23 @@ impl EnvelopeTrailer {
             ube_offset,
             ube_total_size,
             trailer_crc32: crc,
+            trailer_magic,
+        }
+    }
+
+    /// Create trailer with password-derived CRC mask in stealth mode.
+    /// This prevents scanning for standard IEEE 802.3 CRC32 to find the trailer without the password.
+    pub fn create_stealth(ube_offset: u64, ube_total_size: u64, trailer_magic: [u8; 4]) -> Self {
+        let mut prefix = [0u8; 16];
+        prefix[0..8].copy_from_slice(&ube_offset.to_le_bytes());
+        prefix[8..16].copy_from_slice(&ube_total_size.to_le_bytes());
+        let raw_crc = crc32fast::hash(&prefix);
+        let mask = crate::crypto::derive_trailer_crc_mask(&trailer_magic);
+
+        Self {
+            ube_offset,
+            ube_total_size,
+            trailer_crc32: raw_crc ^ mask,
             trailer_magic,
         }
     }
@@ -275,7 +348,17 @@ impl EnvelopeTrailer {
         prefix[0..8].copy_from_slice(&ube_offset.to_le_bytes());
         prefix[8..16].copy_from_slice(&ube_total_size.to_le_bytes());
         let expected_crc = crc32fast::hash(&prefix);
-        if trailer_crc32 != expected_crc {
+
+        let crc_matches = if trailer_crc32 == expected_crc {
+            true
+        } else if expected_magic.is_some() {
+            let mask = crate::crypto::derive_trailer_crc_mask(&trailer_magic);
+            (trailer_crc32 ^ mask) == expected_crc
+        } else {
+            false
+        };
+
+        if !crc_matches {
             return Err(StrHideError::CorruptedData(format!(
                 "Trailer CRC32 mismatch: {:#x} != {:#x}",
                 trailer_crc32, expected_crc
