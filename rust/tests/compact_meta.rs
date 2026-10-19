@@ -55,8 +55,9 @@ fn smallest_envelopes_match_the_documented_minimums() {
     let payload = dir.join("s.txt");
     fs::write(&payload, b"A").unwrap();
 
-    // 112 header + 46 meta + 1 payload + 24 trailer. Was 274 before the compact
-    // block (the JSON form spent 64 bytes on the SHA-256 hex string alone).
+    // With uniform encryption (builtin default key for zero-password mode),
+    // both default and custom-password modes produce the same encrypted envelope size:
+    // 112 header + (46 meta + 16 tag) + (1 payload + 4 chunk len + 16 tag) + 24 trailer = 219.
     let plain = write(
         &carrier,
         &payload,
@@ -65,7 +66,7 @@ fn smallest_envelopes_match_the_documented_minimums() {
         None,
         &dir.join("plain.png"),
     );
-    assert_eq!(plain, 183, "unencrypted envelope size changed: {plain}");
+    assert_eq!(plain, 219, "default envelope size changed: {plain}");
 
     // +16 meta tag, +4 chunk length, +16 chunk tag over the plain envelope.
     let enc = write(

@@ -318,23 +318,40 @@ fn path_traversal_sanitized() {
         &stego,
     );
 
-    // Equal-length tamper of the plaintext metadata filename. The metadata
-    // block uses the compact binary layout (FLAG_COMPACT_META):
-    //   u8 version | u16 name_len | filename
-    // so patch the name in place with a same-length traversal payload.
+    // Re-encrypt evil metadata filename under BUILTIN_DEFAULT_KEY.
+    // The metadata block uses the compact binary layout (FLAG_COMPACT_META).
+    use strhide::adapters::HostAdapter;
     let mut data = fs::read(&stego).unwrap();
-    let old = b"\x01\x0b\x00payload.bin";
-    let new = b"\x01\x0b\x00../EVIL.txt";
-    assert_eq!(old.len(), new.len());
-    let hits: Vec<usize> = data
-        .windows(old.len())
-        .enumerate()
-        .filter(|(_, w)| *w == old)
-        .map(|(i, _)| i)
-        .collect();
-    assert_eq!(hits.len(), 1, "expected exactly one compact metadata block");
-    let pos = hits[0];
-    data[pos..pos + new.len()].copy_from_slice(new);
+    let mut cf = std::io::Cursor::new(&data);
+    let adapter = strhide::adapters::zip::ZipAdapter;
+    let (offset, _, _) = adapter.locate(&mut cf, None).unwrap().unwrap();
+    let hdr_bytes = &data[offset as usize..offset as usize + strhide::envelope::HEADER_SIZE];
+    let header = EnvelopeHeader::unpack_with_password(hdr_bytes, None).unwrap();
+
+    let (_, meta_key) =
+        strhide::crypto::derive_keys(strhide::crypto::BUILTIN_DEFAULT_KEY, &header.salt).unwrap();
+    let sha_hex = strhide::crypto::compute_sha256(b"poc-data")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let evil_meta = strhide::engine::CarrierMetadata {
+        filename: "../EVIL.txt".into(),
+        raw_size: b"poc-data".len() as u64,
+        raw_sha256: sha_hex,
+        created_at: 1_700_000_000,
+    };
+    let evil_compact = evil_meta.encode_compact().unwrap();
+    let enc_meta = strhide::crypto::encrypt_metadata(
+        &evil_compact,
+        &meta_key,
+        &header.base_nonce,
+        &header.get_aad(),
+    )
+    .unwrap();
+    assert_eq!(enc_meta.len(), header.meta_len as usize);
+
+    let meta_pos = offset as usize + strhide::envelope::HEADER_SIZE + header.hint_len as usize;
+    data[meta_pos..meta_pos + enc_meta.len()].copy_from_slice(&enc_meta);
     fs::write(&stego, &data).unwrap();
 
     let outdir = dir.join("out");

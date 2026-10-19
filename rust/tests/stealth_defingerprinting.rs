@@ -232,3 +232,159 @@ fn test_stealth_legacy_unmasked_backward_compatibility() {
     assert!(rem_res.verified_identical);
     assert_eq!(fs::read(&carrier_path).unwrap(), raw_png);
 }
+
+#[test]
+fn test_default_carrier_uniform_encryption_and_zero_plaintext() {
+    let dir = scratch("default_uniform_enc");
+    let carrier_path = dir.join("carrier.png");
+    let out_path = dir.join("out.png");
+
+    let raw_png = sample_png();
+    fs::write(&carrier_path, &raw_png).unwrap();
+    let host_sha = compute_sha256(&raw_png);
+
+    let filename = "my_sensitive_filename.txt";
+    let payload_file = dir.join(filename);
+    let secret = b"Hello Public Message With Zero Plaintext On Disk 1234567890";
+    fs::write(&payload_file, secret).unwrap();
+
+    // Write with ZERO password
+    write_carrier(
+        &carrier_path,
+        PayloadSource::File(&payload_file),
+        &WriteOptions {
+            output_path: Some(&out_path),
+            password: None,
+            stealth: false,
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let stego_bytes = fs::read(&out_path).unwrap();
+
+    // 1. Host SHA-256 MUST NOT appear anywhere in the stego file (masked with BUILTIN_DEFAULT_KEY)
+    let found_host_sha = stego_bytes.windows(32).any(|w| w == host_sha);
+    assert!(
+        !found_host_sha,
+        "Default carrier MUST NOT leak original host SHA-256 in plaintext!"
+    );
+
+    // 2. Sensitive payload string MUST NOT appear anywhere in the stego file (encrypted with BUILTIN_DEFAULT_KEY)
+    let found_secret = stego_bytes.windows(secret.len()).any(|w| w == secret);
+    assert!(
+        !found_secret,
+        "Default carrier MUST NOT leak plaintext payload bytes!"
+    );
+
+    // 3. Filename MUST NOT appear anywhere in the stego file (metadata is encrypted)
+    let found_name = stego_bytes
+        .windows(filename.len())
+        .any(|w| w == filename.as_bytes());
+    assert!(
+        !found_name,
+        "Default carrier MUST NOT leak metadata filename in plaintext!"
+    );
+
+    // 4. Read without password extracts seamlessly and 100% deterministically
+    let read_res = read_carrier(&out_path, None, None).unwrap();
+    assert_eq!(read_res.data, secret);
+    assert_eq!(read_res.filename, filename);
+
+    // 5. Inspect without password shows hidden data and extracts metadata
+    let inspect_res = strhide::engine::inspect_carrier(&out_path, None).unwrap();
+    assert!(inspect_res.has_hidden_data);
+    assert_eq!(inspect_res.is_encrypted, Some(false));
+    assert!(inspect_res.metadata.is_some());
+
+    // 6. Verify passes Level 1, Level 2, Level 3
+    let verify_res = verify_carrier(&out_path, None).unwrap();
+    assert!(verify_res.level1_host.ok);
+    assert!(verify_res.level2_envelope.ok);
+    assert!(verify_res.level3_crypto.ok);
+
+    // 7. Remove carrier restores 100% byte-for-byte exact host
+    let rem_res = remove_carrier(&out_path, None, None, false).unwrap();
+    assert!(rem_res.verified_identical);
+    assert_eq!(fs::read(&out_path).unwrap(), raw_png);
+}
+
+#[test]
+fn test_legacy_unencrypted_carrier_backward_compatibility() {
+    use strhide::engine::CarrierMetadata;
+    use strhide::envelope::{
+        EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE, STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC,
+    };
+
+    let dir = scratch("legacy_plain_compat");
+    let carrier_path = dir.join("carrier.png");
+    let raw_png = sample_png();
+    let host_sha = compute_sha256(&raw_png);
+    let host_size = raw_png.len() as u64;
+
+    let payload = b"Legacy unencrypted plaintext payload 9876543210";
+    let meta_obj = CarrierMetadata {
+        filename: "legacy.txt".into(),
+        raw_size: payload.len() as u64,
+        raw_sha256: strhide::crypto::compute_sha256(payload)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+        created_at: 1770000000,
+    };
+    let meta_raw = meta_obj.encode_compact().unwrap();
+
+    let ube_total_size = HEADER_SIZE as u64 + meta_raw.len() as u64 + payload.len() as u64 + 24;
+    let header = EnvelopeHeader {
+        magic_header: STANDARD_HEADER_MAGIC,
+        version: 2,
+        flags: strhide::envelope::FLAG_COMPACT_META, // unencrypted, compact meta
+        strategy_id: 2,                              // PNG chunk
+        orig_host_size: host_size,
+        orig_host_sha256: host_sha,
+        inject_offset: 57,
+        inject_size: ube_total_size + 12,
+        meta_len: meta_raw.len() as u32,
+        hint_len: 0,
+        ..Default::default()
+    };
+
+    // Pack raw unmasked header
+    let raw_header = header.pack();
+    let trailer = EnvelopeTrailer::create(57 + 8, ube_total_size, STANDARD_TRAILER_MAGIC);
+
+    let mut ube = Vec::new();
+    ube.extend_from_slice(&raw_header);
+    ube.extend_from_slice(&meta_raw);
+    ube.extend_from_slice(payload);
+    ube.extend_from_slice(&trailer.pack());
+
+    // Inject into PNG before IEND
+    let mut stego_png = Vec::new();
+    stego_png.extend_from_slice(&raw_png[..57]);
+    stego_png.extend_from_slice(&(ube.len() as u32).to_be_bytes());
+    stego_png.extend_from_slice(b"prIv");
+    stego_png.extend_from_slice(&ube);
+    let mut chunk_crc = crc32fast::Hasher::new();
+    chunk_crc.update(b"prIv");
+    chunk_crc.update(&ube);
+    stego_png.extend_from_slice(&chunk_crc.finalize().to_be_bytes());
+    stego_png.extend_from_slice(&raw_png[57..]);
+    fs::write(&carrier_path, &stego_png).unwrap();
+
+    // Verify read extracts legacy payload seamlessly
+    let read_res = read_carrier(&carrier_path, None, None).unwrap();
+    assert_eq!(read_res.data, payload);
+    assert_eq!(read_res.filename, "legacy.txt");
+
+    // Verify inspect decodes metadata
+    let inspect_res = strhide::engine::inspect_carrier(&carrier_path, None).unwrap();
+    assert!(inspect_res.has_hidden_data);
+    assert_eq!(inspect_res.is_encrypted, Some(false));
+
+    // Verify remove restores exact host bytes
+    let rem_res = remove_carrier(&carrier_path, None, None, false).unwrap();
+    assert!(rem_res.verified_identical);
+    assert_eq!(fs::read(&carrier_path).unwrap(), raw_png);
+}

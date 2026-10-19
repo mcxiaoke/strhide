@@ -84,7 +84,7 @@ impl CarrierMetadata {
     /// Compact encoding, or `None` when this metadata cannot be represented
     /// (over-long filename, malformed digest). Callers fall back to JSON in
     /// that case and leave `FLAG_COMPACT_META` clear.
-    fn encode_compact(&self) -> Option<Vec<u8>> {
+    pub fn encode_compact(&self) -> Option<Vec<u8>> {
         let name = self.filename.as_bytes();
         if name.len() > COMPACT_META_MAX_NAME {
             return None;
@@ -100,7 +100,7 @@ impl CarrierMetadata {
         Some(out)
     }
 
-    fn decode_compact(bytes: &[u8]) -> Result<Self, StrHideError> {
+    pub fn decode_compact(bytes: &[u8]) -> Result<Self, StrHideError> {
         let bad = |msg: &str| {
             StrHideError::CorruptedData(format!("Corrupted compact metadata block: {msg}"))
         };
@@ -587,9 +587,10 @@ pub fn write_carrier(
     };
 
     // 6. Keys and Magics
-    let is_encrypted = password.is_some();
+    let has_custom_password = password.is_some();
+    let effective_password = password.unwrap_or(crate::crypto::BUILTIN_DEFAULT_KEY);
     let mut flags: u8 = 0;
-    if is_encrypted {
+    if has_custom_password {
         flags |= FLAG_ENCRYPTED;
     }
     if is_compressed {
@@ -604,29 +605,18 @@ pub fn write_carrier(
 
     let mut salt = [0u8; 16];
     let mut base_nonce = [0u8; 12];
-    let mut payload_key = [0u8; 32];
-    let mut meta_key = [0u8; 32];
+    rand::rng().fill(&mut salt);
+    rand::rng().fill(&mut base_nonce);
+    let (payload_key, meta_key) = derive_keys(effective_password, &salt)?;
+
     let header_magic: [u8; 8];
     let trailer_magic: [u8; 4];
 
-    if stealth && is_encrypted {
+    if stealth && has_custom_password {
         flags |= FLAG_STEALTH;
-        rand::rng().fill(&mut salt);
-        rand::rng().fill(&mut base_nonce);
-        let keys = derive_keys(password.unwrap(), &salt)?;
-        payload_key = keys.0;
-        meta_key = keys.1;
-        let magics = derive_stealth_magics(password.unwrap(), b"strhide-stealth-v1")?;
+        let magics = derive_stealth_magics(effective_password, b"strhide-stealth-v1")?;
         header_magic = magics.0;
         trailer_magic = magics.1;
-    } else if is_encrypted {
-        rand::rng().fill(&mut salt);
-        rand::rng().fill(&mut base_nonce);
-        let keys = derive_keys(password.unwrap(), &salt)?;
-        payload_key = keys.0;
-        meta_key = keys.1;
-        header_magic = STANDARD_HEADER_MAGIC;
-        trailer_magic = STANDARD_TRAILER_MAGIC;
     } else {
         header_magic = STANDARD_HEADER_MAGIC;
         trailer_magic = STANDARD_TRAILER_MAGIC;
@@ -662,14 +652,10 @@ pub fn write_carrier(
     // JPEG/PNG/ZIP `auto` capacity checks select a strategy the injector then
     // rejected instead of gracefully falling back to `eof`.
     let to_encrypt_len = to_encrypt_bytes.len() as u64;
-    let exact_meta_len = meta_raw.len() as u64 + if is_encrypted { 16 } else { 0 };
-    let chunk_count = if is_encrypted {
-        to_encrypt_len
-            .div_ceil(crate::crypto::CHUNK_SIZE as u64)
-            .max(1)
-    } else {
-        0
-    };
+    let exact_meta_len = meta_raw.len() as u64 + 16;
+    let chunk_count = to_encrypt_len
+        .div_ceil(crate::crypto::CHUNK_SIZE as u64)
+        .max(1);
     let exact_payload_len = to_encrypt_len + chunk_count * 20;
     let exact_ube_size =
         HEADER_SIZE as u64 + hint_bytes.len() as u64 + exact_meta_len + exact_payload_len + 24;
@@ -706,29 +692,18 @@ pub fn write_carrier(
     let fixed_header_aad = header.get_aad();
 
     // Encrypt metadata
-    let meta_block = if is_encrypted {
-        let enc = encrypt_metadata(&meta_raw, &meta_key, &base_nonce, &fixed_header_aad)?;
-        header.meta_len = enc.len() as u32;
-        enc
-    } else {
-        header.meta_len = meta_raw.len() as u32;
-        meta_raw
-    };
+    let meta_block = encrypt_metadata(&meta_raw, &meta_key, &base_nonce, &fixed_header_aad)?;
+    header.meta_len = meta_block.len() as u32;
 
     // Encrypt payload stream
     let mut payload_cipher_buf = Vec::new();
-    let payload_written = if is_encrypted {
-        encrypt_stream_to_chunks(
-            &mut Cursor::new(&to_encrypt_bytes),
-            &mut payload_cipher_buf,
-            &payload_key,
-            &base_nonce,
-            &fixed_header_aad,
-        )?
-    } else {
-        payload_cipher_buf = to_encrypt_bytes;
-        payload_cipher_buf.len() as u64
-    };
+    let payload_written = encrypt_stream_to_chunks(
+        &mut Cursor::new(&to_encrypt_bytes),
+        &mut payload_cipher_buf,
+        &payload_key,
+        &base_nonce,
+        &fixed_header_aad,
+    )?;
 
     let ube_total_size = HEADER_SIZE as u64
         + hint_bytes.len() as u64
@@ -773,7 +748,7 @@ pub fn write_carrier(
     }
     tmp_ube.extend_from_slice(&meta_block);
     tmp_ube.append(&mut payload_cipher_buf); // move bytes, no copy
-    let dummy_trailer = if stealth && is_encrypted {
+    let dummy_trailer = if stealth && has_custom_password {
         EnvelopeTrailer::create_stealth(0, ube_total_size, trailer_magic)
     } else {
         EnvelopeTrailer::create(0, ube_total_size, trailer_magic)
@@ -815,7 +790,7 @@ pub fn write_carrier(
     header.patch_offset = patch_offset;
     header.orig_patch_val = orig_patch_val;
 
-    let final_trailer = if stealth && is_encrypted {
+    let final_trailer = if stealth && has_custom_password {
         EnvelopeTrailer::create_stealth(actual_ube_offset, ube_total_size, trailer_magic)
     } else {
         EnvelopeTrailer::create(actual_ube_offset, ube_total_size, trailer_magic)
@@ -982,7 +957,7 @@ pub fn write_carrier(
         strategy_note,
         raw_size,
         ube_size: ube_total_size,
-        is_encrypted,
+        is_encrypted: has_custom_password,
         is_stealth: (flags & FLAG_STEALTH) != 0,
         password_hint: password_hint.map(|s| s.to_string()),
         backup_file,
@@ -1062,25 +1037,38 @@ pub fn read_carrier(
         }
         derive_keys(password.unwrap(), &header.salt)?
     } else {
-        ([0u8; 32], [0u8; 32])
+        derive_keys(crate::crypto::BUILTIN_DEFAULT_KEY, &header.salt)?
     };
 
     // Read metadata
     let mut meta_bytes = vec![0u8; header.meta_len as usize];
     ube_stream.read_exact(&mut meta_bytes)?;
 
-    let meta_plain = if header.is_encrypted() {
-        decrypt_metadata(
+    let (meta_obj, is_legacy_plaintext) = if header.is_encrypted() {
+        let meta_plain = decrypt_metadata(
             &meta_bytes,
             &meta_key,
             &header.base_nonce,
             &fixed_header_aad,
-        )?
+        )?;
+        let meta_obj = decode_metadata(&meta_plain, header.is_compact_meta())?;
+        (meta_obj, false)
     } else {
-        meta_bytes
+        match decrypt_metadata(
+            &meta_bytes,
+            &meta_key,
+            &header.base_nonce,
+            &fixed_header_aad,
+        )
+        .and_then(|plain| decode_metadata(&plain, header.is_compact_meta()))
+        {
+            Ok(obj) => (obj, false),
+            Err(_) => {
+                let obj = decode_metadata(&meta_bytes, header.is_compact_meta())?;
+                (obj, true)
+            }
+        }
     };
-
-    let meta_obj = decode_metadata(&meta_plain, header.is_compact_meta())?;
 
     // Read payload (checked_sub: validate_against already bounds the fields,
     // but keep the arithmetic defensive against corrupted envelopes)
@@ -1096,7 +1084,7 @@ pub fn read_carrier(
         })?;
 
     let mut decrypted_payload = Vec::new();
-    if header.is_encrypted() {
+    if header.is_encrypted() || !is_legacy_plaintext {
         decrypt_stream_from_chunks(
             &mut ube_stream,
             &mut decrypted_payload,
@@ -1370,11 +1358,26 @@ pub fn inspect_carrier(
     let mut meta_val = None;
     if !header.is_encrypted() {
         let mut meta_bytes = vec![0u8; header.meta_len as usize];
-        if ube_stream.read_exact(&mut meta_bytes).is_ok()
-            && let Ok(meta_obj) = decode_metadata(&meta_bytes, header.is_compact_meta())
-            && let Ok(val) = serde_json::to_value(&meta_obj)
-        {
-            meta_val = Some(val);
+        if ube_stream.read_exact(&mut meta_bytes).is_ok() {
+            let decoded = if let Ok((_, meta_key)) =
+                derive_keys(crate::crypto::BUILTIN_DEFAULT_KEY, &header.salt)
+                && let Ok(dec) = decrypt_metadata(
+                    &meta_bytes,
+                    &meta_key,
+                    &header.base_nonce,
+                    &header.get_aad(),
+                )
+                && let Ok(meta_obj) = decode_metadata(&dec, header.is_compact_meta())
+            {
+                Some(meta_obj)
+            } else {
+                decode_metadata(&meta_bytes, header.is_compact_meta()).ok()
+            };
+            if let Some(meta_obj) = decoded
+                && let Ok(val) = serde_json::to_value(&meta_obj)
+            {
+                meta_val = Some(val);
+            }
         }
     } else if let Some(pwd) = password {
         let mut meta_bytes = vec![0u8; header.meta_len as usize];

@@ -162,15 +162,23 @@ impl EnvelopeHeader {
 
     /// Pack fixed header into 112 bytes with stealth masking applied if stealth mode is enabled.
     /// In stealth mode, sensitive fields (version, flags, strategy_id, host SHA-256, sizes and offsets)
-    /// are XOR-masked with a deterministic keystream derived from (password, salt).
+    /// Pack fixed header into 112 bytes with masking applied:
+    /// - In stealth mode: sensitive fields are masked with user's password.
+    /// - In default mode (no custom password): sensitive fields are masked with BUILTIN_DEFAULT_KEY.
     pub fn pack_with_stealth_mask(
         &self,
         password: Option<&str>,
     ) -> Result<[u8; HEADER_SIZE], StrHideError> {
         let mut buf = self.pack();
-        if self.is_stealth()
-            && let Some(pwd) = password
-        {
+        let effective_pwd = if self.is_stealth() {
+            password
+        } else if !self.is_encrypted() {
+            Some(crate::crypto::BUILTIN_DEFAULT_KEY)
+        } else {
+            None
+        };
+
+        if let Some(pwd) = effective_pwd {
             let mask = crate::crypto::derive_header_mask(pwd, &self.salt)?;
             for i in 0..4 {
                 buf[8 + i] ^= mask[i];
@@ -237,7 +245,7 @@ impl EnvelopeHeader {
         })
     }
 
-    /// Unpack 112-byte fixed header, handling stealth de-masking when password is provided.
+    /// Unpack 112-byte fixed header, handling stealth and default de-masking when applicable.
     pub fn unpack_with_password(data: &[u8], password: Option<&str>) -> Result<Self, StrHideError> {
         if data.len() < HEADER_SIZE {
             return Err(StrHideError::CorruptedData(format!(
@@ -264,6 +272,31 @@ impl EnvelopeHeader {
                     && let Ok(hdr) = Self::unpack(&unmasked)
                 {
                     return Ok(hdr);
+                }
+            }
+        }
+
+        // Try de-masking with BUILTIN_DEFAULT_KEY for default mode
+        {
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&data[12..28]);
+            if let Ok(mask) =
+                crate::crypto::derive_header_mask(crate::crypto::BUILTIN_DEFAULT_KEY, &salt)
+            {
+                let mut unmasked = [0u8; HEADER_SIZE];
+                unmasked.copy_from_slice(&data[..HEADER_SIZE]);
+                for i in 0..4 {
+                    unmasked[8 + i] ^= mask[i];
+                }
+                for i in 0..72 {
+                    unmasked[40 + i] ^= mask[4 + i];
+                }
+                if unmasked[8] == CURRENT_VERSION
+                    && (unmasked[9] & FLAG_ENCRYPTED) == 0
+                    && unmasked[10] <= 10
+                    && unmasked[11] == 0
+                {
+                    return Self::unpack(&unmasked);
                 }
             }
         }

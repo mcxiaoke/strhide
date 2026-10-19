@@ -15,6 +15,11 @@ use crate::errors::StrHideError;
 pub const CHUNK_SIZE: usize = 2 * 1024 * 1024; // 2MB
 pub const PBKDF2_ITERATIONS: u32 = 100_000;
 
+/// Default internal secret used when the user does not specify a password.
+/// All envelopes are uniformly encrypted with AES-256-GCM and Deflate-compressed,
+/// eliminating plaintext leakage (no plaintext payload, metadata, or host SHA-256 in hex view).
+pub const BUILTIN_DEFAULT_KEY: &str = "strhide::envelope::v2::default::builtin::public::secret";
+
 pub fn normalize_nfc(s: &str) -> String {
     s.nfc().collect::<String>()
 }
