@@ -16,6 +16,49 @@ impl Mp4Adapter {
     pub fn calc_prefix_len(ube_size: u64) -> u64 {
         if 24 + ube_size < 0xFFFFFFFF { 24 } else { 32 }
     }
+
+    /// Length of the appended envelope when `[offset, total_size)` is exactly
+    /// one strhide envelope, else `None`.
+    ///
+    /// Requires no password: the trailer's boundary parameters must add up to
+    /// the file size *and* its CRC32 over its own 16-byte prefix must check
+    /// out, which is what distinguishes a genuine appended envelope from
+    /// arbitrary trailing bytes (including a damaged box header).
+    fn trailing_envelope_len(
+        &self,
+        stego_in: &mut dyn SeekRead,
+        offset: u64,
+        total_size: u64,
+    ) -> Option<u64> {
+        let remaining = total_size.checked_sub(offset)?;
+        if remaining < 24 {
+            return None;
+        }
+        if stego_in.seek(SeekFrom::End(-24)).is_err() {
+            return None;
+        }
+        let mut tail = [0u8; 24];
+        if stego_in.read_exact(&mut tail).is_err() {
+            return None;
+        }
+        // Restore the stream position: the caller walks boxes sequentially and
+        // expects to continue reading from `offset`.
+        if stego_in.seek(SeekFrom::Start(offset)).is_err() {
+            return None;
+        }
+        let ube_offset = u64::from_le_bytes(tail[0..8].try_into().ok()?);
+        let ube_total_size = u64::from_le_bytes(tail[8..16].try_into().ok()?);
+        let crc = u32::from_le_bytes(tail[16..20].try_into().ok()?);
+        if crc32fast::hash(&tail[0..16]) != crc {
+            return None;
+        }
+        // The envelope must start exactly where the box tree ended and reach
+        // exactly to EOF; anything else means the tail is not our envelope.
+        if ube_offset != offset || ube_offset + ube_total_size != total_size {
+            return None;
+        }
+        Some(ube_total_size)
+    }
 }
 
 impl HostAdapter for Mp4Adapter {
@@ -221,6 +264,22 @@ impl HostAdapter for Mp4Adapter {
         let mut has_ftyp = false;
 
         while offset < total_size {
+            // The `eof` strategy appends the raw UBE stream after the last box,
+            // which by construction violates the ISO-BMFF box grammar: the
+            // envelope's leading bytes are not a box header. Stop the walk at a
+            // trailing region that is *exactly* an envelope (verified through
+            // its trailer + boundary, no password needed), the same way PNG
+            // stops at IEND. A box that merely claims to run past EOF is still
+            // reported as damage, because it does not match this predicate.
+            if let Some(envelope_len) = self.trailing_envelope_len(stego_in, offset, total_size) {
+                return Ok((
+                    true,
+                    format!(
+                        "Valid ISO BMFF container ({box_count} top-level boxes, {envelope_len} bytes appended after the last box)"
+                    ),
+                ));
+            }
+
             let mut hdr = [0u8; 8];
             if stego_in.read_exact(&mut hdr).is_err() {
                 return Ok((false, format!("Truncated box header at offset {offset}")));
@@ -290,6 +349,13 @@ impl HostAdapter for Mp4Adapter {
         // A trailing top-level uuid box using the strhide namespaces can only
         // be a hidden envelope (checked without the magic, so stealth
         // envelopes with an unknown password are still detected structurally).
+        //
+        // Deliberately does NOT validate the trailer CRC32: in stealth mode the
+        // CRC is XOR-masked with a password-derived value (see
+        // `EnvelopeTrailer::create_stealth`), so a raw CRC32 check would always
+        // fail there and silently suppress the guidance this scan exists to
+        // provide. The uuid namespace + exact file boundary are the structural
+        // evidence, and they hold regardless of the password.
         let mut found = Vec::new();
         let file_size = match stego_in.seek(SeekFrom::End(0)) {
             Ok(s) => s,
@@ -307,10 +373,8 @@ impl HostAdapter for Mp4Adapter {
         }
         let ube_offset = u64::from_le_bytes(tail[0..8].try_into().unwrap());
         let ube_total_size = u64::from_le_bytes(tail[8..16].try_into().unwrap());
-        let crc = u32::from_le_bytes(tail[16..20].try_into().unwrap());
-        let mut prefix = [0u8; 16];
-        prefix.copy_from_slice(&tail[0..16]);
-        if crc32fast::hash(&prefix) != crc || ube_offset + ube_total_size != file_size {
+        // Boundary check only: the envelope must reach exactly to EOF.
+        if ube_offset + ube_total_size != file_size {
             return found;
         }
         if ube_offset >= 24 && stego_in.seek(SeekFrom::Start(ube_offset - 24)).is_ok() {

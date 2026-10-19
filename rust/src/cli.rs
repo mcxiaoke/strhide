@@ -210,8 +210,15 @@ pub fn resolve_password(
         return Ok(Some(p.to_string()));
     }
     if let Some(pf) = pwd_file {
-        let mut s = std::fs::read_to_string(pf)
-            .map_err(|e| StrHideError::General(format!("Failed to read password file: {e}")))?;
+        // Name the file in the error: the bare OS message ("file not found")
+        // does not tell the user WHICH password file failed, and several
+        // commands accept one. Mirrors the config branch below.
+        let mut s = std::fs::read_to_string(pf).map_err(|e| {
+            StrHideError::General(format!(
+                "Failed to read password file '{}': {e}",
+                pf.display()
+            ))
+        })?;
         s = s.trim_end_matches(&['\r', '\n'][..]).to_string();
         return Ok(Some(s));
     }
