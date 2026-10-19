@@ -270,7 +270,19 @@ impl EnvelopeHeader {
         if let Some(pwd) = password {
             let mut salt = [0u8; 16];
             salt.copy_from_slice(&data[12..28]);
-            if let Ok(mask) = crate::crypto::derive_header_mask(pwd, &salt) {
+            // A stealth envelope's header magic is derived from the password
+            // itself, so matching it authenticates the password *before* any
+            // masked field is trusted. Doing this first makes "wrong password"
+            // deterministic: without it, a wrong password would scramble the
+            // masked bytes into values that occasionally satisfy the
+            // version/FLAG_STEALTH gate below and surface as a bogus field
+            // error instead of a password error.
+            let stealth_magic = crate::crypto::derive_stealth_magics(pwd, b"strhide-stealth-v1")
+                .ok()
+                .map(|m| m.0);
+            if stealth_magic.is_none_or(|m| data[..8] == m[..])
+                && let Ok(mask) = crate::crypto::derive_header_mask(pwd, &salt)
+            {
                 let mut unmasked = [0u8; HEADER_SIZE];
                 unmasked.copy_from_slice(&data[..HEADER_SIZE]);
                 for i in 0..4 {

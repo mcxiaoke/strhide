@@ -13,8 +13,19 @@
 ```bash
 cd rust
 cargo build --release          # 编译，产物在 target/release/strhide
-cargo test                     # 运行测试套件
+cargo test --release           # 运行release测试套件
 cargo fmt && cargo clippy      # 提交前格式化并修复所有 lint
+```
+
+### 语料批量回归（不随 `cargo test` 运行）
+
+`rust/tests/batch_corpus.rs` 是 Python `tests/batch_test_runner.py` 的 Rust 对应物：对 `temp/testfiles` 全语料依次跑 拒绝 / 明文 / 加密 / stealth 场景，逐项校验 100% 还原。
+
+```bash
+cd rust
+cargo test --release --test batch_corpus -- --ignored --nocapture
+# 语料在别处时：
+STRHIDE_CORPUS=/path/to/corpus cargo test --release --test batch_corpus -- --ignored --nocapture
 ```
 
 ### 通用约定

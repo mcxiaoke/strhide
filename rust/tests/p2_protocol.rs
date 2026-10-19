@@ -142,6 +142,21 @@ fn pdf_without_root_is_rejected_for_incremental() {
     let out = dir.join("o.pdf");
     fs::write(&carrier, &broken).unwrap();
 
+    // The document is structurally valid: a newest trailer may inherit `/Root`
+    // from an earlier revision through `/Prev`. Only the incremental-update
+    // *writer* needs the local reference, so L1 must not call this corruption.
+    let v = verify_carrier(&carrier, None).unwrap();
+    assert!(
+        v.level1_host.ok,
+        "L1 must accept a /Root-less newest trailer: {}",
+        v.level1_host.detail
+    );
+    assert!(
+        v.level1_host.detail.contains("inherited"),
+        "detail should explain why: {}",
+        v.level1_host.detail
+    );
+
     // auto falls back to the lossless EOF overlay
     let res = write_carrier(
         &carrier,

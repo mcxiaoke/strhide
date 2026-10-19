@@ -15,9 +15,53 @@ pub struct PdfTrailerInfo {
     pub info_ref: Option<String>,
 }
 
+/// Raw tail facts of a PDF, before the two "can we write an incremental
+/// update?" requirements (`/Root` and a next object number) are enforced.
+///
+/// `%PDF` incremental updates are allowed to omit `/Root` and inherit it from
+/// an earlier revision through the `/Prev` chain, so a document whose newest
+/// trailer is just `<</Size N>>` is perfectly valid — it simply cannot be
+/// extended without walking that chain. Structural verification needs the raw
+/// facts; the *writer* needs them plus the two requirements.
+pub struct PdfTailInfo {
+    pub eof_offset: u64,
+    pub prev_startxref: u64,
+    pub new_obj_num: Option<u64>,
+    pub root_ref: Option<String>,
+    pub info_ref: Option<String>,
+}
+
 pub fn parse_pdf_trailer_info<R: Read + Seek + ?Sized>(
     reader: &mut R,
 ) -> Result<PdfTrailerInfo, StrHideError> {
+    let tail = parse_pdf_tail_info(reader)?;
+    let new_obj_num = tail.new_obj_num.ok_or_else(|| {
+        StrHideError::CorruptedData(
+            "cannot determine next PDF object number (no /Size and no 'N G obj' definitions in tail window)".into(),
+        )
+    })?;
+
+    // An incremental trailer without /Root breaks the document tree for every
+    // conforming reader; refuse instead of writing a damaged carrier (auto
+    // strategy falls back to the lossless EOF overlay).
+    let root_ref = tail.root_ref.ok_or_else(|| {
+        StrHideError::CorruptedData(
+            "cannot locate /Root reference in PDF tail; incremental update would break the document tree".into(),
+        )
+    })?;
+
+    Ok(PdfTrailerInfo {
+        eof_offset: tail.eof_offset,
+        prev_startxref: tail.prev_startxref,
+        new_obj_num,
+        root_ref: Some(root_ref),
+        info_ref: tail.info_ref,
+    })
+}
+
+pub fn parse_pdf_tail_info<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+) -> Result<PdfTailInfo, StrHideError> {
     let file_size = reader.seek(SeekFrom::End(0))?;
     let scan_len = std::cmp::min(file_size, 64 * 1024);
     reader.seek(SeekFrom::End(-(scan_len as i64)))?;
@@ -92,22 +136,7 @@ pub fn parse_pdf_trailer_info<R: Read + Seek + ?Sized>(
         info_ref = find_indirect_ref(&text_before_eof, "/Info", true);
     }
 
-    let new_obj_num = new_obj_num.ok_or_else(|| {
-        StrHideError::CorruptedData(
-            "cannot determine next PDF object number (no /Size and no 'N G obj' definitions in tail window)".into(),
-        )
-    })?;
-
-    // An incremental trailer without /Root breaks the document tree for every
-    // conforming reader; refuse instead of writing a damaged carrier (auto
-    // strategy falls back to the lossless EOF overlay).
-    if root_ref.is_none() {
-        return Err(StrHideError::CorruptedData(
-            "cannot locate /Root reference in PDF tail; incremental update would break the document tree".into(),
-        ));
-    }
-
-    Ok(PdfTrailerInfo {
+    Ok(PdfTailInfo {
         eof_offset,
         prev_startxref,
         new_obj_num,
@@ -500,14 +529,26 @@ impl HostAdapter for PdfAdapter {
         &self,
         stego_in: &mut dyn SeekRead,
     ) -> Result<(bool, String), StrHideError> {
-        match parse_pdf_trailer_info(stego_in) {
-            Ok(info) => Ok((
-                true,
-                format!(
-                    "Valid PDF document (%%EOF at {}, prev_startxref at {})",
-                    info.eof_offset, info.prev_startxref
-                ),
-            )),
+        // Structural validity only: `%%EOF`/`startxref` must be intact. A
+        // newest trailer without `/Root` is legal (it inherits the reference
+        // from an earlier revision via `/Prev`), it merely rules out an
+        // incremental update — so it must not be reported as corruption.
+        match parse_pdf_tail_info(stego_in) {
+            Ok(info) => {
+                let root = match info.root_ref {
+                    Some(_) => "trailer /Root resolved",
+                    None => {
+                        "/Root inherited from an earlier revision (incremental update disabled for this carrier)"
+                    }
+                };
+                Ok((
+                    true,
+                    format!(
+                        "Valid PDF document (%%EOF at {}, prev_startxref at {}; {root})",
+                        info.eof_offset, info.prev_startxref
+                    ),
+                ))
+            }
             Err(e) => Ok((false, format!("Corrupted PDF structure: {e}"))),
         }
     }
