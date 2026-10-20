@@ -196,3 +196,95 @@ fn sample_config_file_parses_without_warnings_or_errors() {
         stderr(&out)
     );
 }
+
+#[test]
+fn cli_version_flag_contains_git_hash_and_build_time() {
+    let dir = scratch("version_test");
+    let out = run(&dir, &["--version"], None);
+    assert_eq!(code(&out), 0);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("strhide"), "version output: {s}");
+    assert!(s.contains("commit:"), "must contain commit hash: {s}");
+    assert!(s.contains("built:"), "must contain built time: {s}");
+}
+
+#[test]
+fn cli_normal_run_prints_banner_and_quiet_suppresses_it() {
+    let dir = scratch("banner_test");
+    fs::write(dir.join("c.png"), make_png()).unwrap();
+
+    // 1. Normal run (e.g. list or inspect) prints banner
+    let out_list = run(&dir, &["list"], None);
+    assert_eq!(code(&out_list), 0);
+    let s_list = String::from_utf8_lossy(&out_list.stdout);
+    assert!(
+        s_list.starts_with("strhide ") && s_list.contains("commit:") && s_list.contains("built:"),
+        "list output must start with banner: {s_list}"
+    );
+
+    let out_inspect = run(&dir, &["inspect", "c.png"], None);
+    assert_eq!(code(&out_inspect), 0);
+    let s_inspect = String::from_utf8_lossy(&out_inspect.stdout);
+    assert!(
+        s_inspect.starts_with("strhide ") && s_inspect.contains("commit:"),
+        "inspect output must start with banner: {s_inspect}"
+    );
+
+    // 2. Quiet run (-q) must completely suppress banner and status output
+    let out_quiet = run(&dir, &["inspect", "c.png", "-q"], None);
+    assert_eq!(code(&out_quiet), 0);
+    assert!(
+        out_quiet.stdout.is_empty(),
+        "quiet inspect must not print anything on stdout: {}",
+        String::from_utf8_lossy(&out_quiet.stdout)
+    );
+    assert!(
+        out_quiet.stderr.is_empty(),
+        "quiet inspect must not print anything on stderr: {}",
+        String::from_utf8_lossy(&out_quiet.stderr)
+    );
+}
+
+#[test]
+fn cli_json_run_embeds_banner_as_field_and_emits_valid_json() {
+    let dir = scratch("banner_json_test");
+    fs::write(dir.join("c.png"), make_png()).unwrap();
+
+    // Inspect --json
+    let out_inspect = run(&dir, &["inspect", "c.png", "--json"], None);
+    assert_eq!(code(&out_inspect), 0);
+    let raw_inspect = String::from_utf8_lossy(&out_inspect.stdout);
+    let v_inspect: serde_json::Value = serde_json::from_str(&raw_inspect)
+        .unwrap_or_else(|e| panic!("stdout must be valid JSON: {e}\n{raw_inspect}"));
+    let banner_inspect = v_inspect["banner"]
+        .as_str()
+        .expect("inspect json must contain banner string");
+    assert!(
+        banner_inspect.starts_with("strhide ")
+            && banner_inspect.contains("commit:")
+            && banner_inspect.contains("built:"),
+        "banner format: {banner_inspect}"
+    );
+
+    // Verify --json
+    let out_verify = run(&dir, &["verify", "c.png", "--json"], None);
+    let raw_verify = String::from_utf8_lossy(&out_verify.stdout);
+    let v_verify: serde_json::Value = serde_json::from_str(&raw_verify)
+        .unwrap_or_else(|e| panic!("stdout must be valid JSON: {e}\n{raw_verify}"));
+    let banner_verify = v_verify["banner"]
+        .as_str()
+        .expect("verify json must contain banner string");
+    assert_eq!(banner_verify, banner_inspect);
+
+    // Scan --json
+    let out_scan = run(&dir, &["scan", "c.png", "--json"], None);
+    assert_eq!(code(&out_scan), 0);
+    let raw_scan = String::from_utf8_lossy(&out_scan.stdout);
+    let v_scan: serde_json::Value = serde_json::from_str(&raw_scan)
+        .unwrap_or_else(|e| panic!("stdout must be valid JSON: {e}\n{raw_scan}"));
+    assert!(v_scan.is_array());
+    let banner_scan = v_scan[0]["banner"]
+        .as_str()
+        .expect("scan json item must contain banner string");
+    assert_eq!(banner_scan, banner_inspect);
+}

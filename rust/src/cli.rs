@@ -13,10 +13,15 @@ use crate::engine::{
 use crate::errors::StrHideError;
 use crate::router::{ADAPTERS, find_adapter_or_reject};
 
+pub const STRHIDE_VERSION_INFO: &str = env!("STRHIDE_VERSION_INFO");
+pub const STRHIDE_GIT_HASH: &str = env!("STRHIDE_GIT_HASH");
+pub const STRHIDE_BUILD_TIME: &str = env!("STRHIDE_BUILD_TIME");
+pub const BANNER: &str = concat!("strhide ", env!("STRHIDE_VERSION_INFO"));
+
 #[derive(Parser, Debug)]
 #[command(
     name = "strhide",
-    version,
+    version = STRHIDE_VERSION_INFO,
     about = "Smart multi-format lossless container data hiding tool"
 )]
 pub struct Cli {
@@ -651,6 +656,20 @@ pub fn resolve_password(
     Ok(None)
 }
 
+fn should_print_banner(cli: &Cli) -> bool {
+    if cli.quiet {
+        return false;
+    }
+    match &cli.command {
+        Commands::Inspect(args) if args.json => false,
+        Commands::Verify(args) if args.json => false,
+        Commands::Scan(args) if args.json => false,
+        Commands::Read(args) if args.stdout || args.output.is_none() => false,
+        Commands::Extract(args) if args.output.is_none() => false,
+        _ => true,
+    }
+}
+
 pub fn run_cli() -> i32 {
     let cli = Cli::parse();
 
@@ -661,6 +680,10 @@ pub fn run_cli() -> i32 {
             return 1;
         }
     };
+
+    if should_print_banner(&cli) {
+        println!("{BANNER}");
+    }
 
     match cli.command {
         Commands::Write(args) => match handle_write(args, &cfg, cli.quiet) {
@@ -1022,7 +1045,14 @@ fn handle_inspect(args: InspectArgs, cfg: &FileConfig, quiet: bool) -> Result<()
     let res = inspect_carrier(&args.carrier, password.as_deref())?;
 
     if args.json {
-        let json_str = serde_json::to_string_pretty(&res)?;
+        let mut val = serde_json::to_value(&res)?;
+        if let serde_json::Value::Object(map) = &mut val {
+            map.insert(
+                "banner".to_string(),
+                serde_json::Value::String(BANNER.to_string()),
+            );
+        }
+        let json_str = serde_json::to_string_pretty(&val)?;
         println!("{json_str}");
     } else if quiet {
         // Nothing to print: the JSON form is the machine-readable equivalent.
@@ -1116,7 +1146,14 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig, quiet: bool) -> Result<i32,
     let res = verify_carrier(&args.carrier, password.as_deref())?;
 
     if args.json {
-        let json_str = serde_json::to_string_pretty(&res)?;
+        let mut val = serde_json::to_value(&res)?;
+        if let serde_json::Value::Object(map) = &mut val {
+            map.insert(
+                "banner".to_string(),
+                serde_json::Value::String(BANNER.to_string()),
+            );
+        }
+        let json_str = serde_json::to_string_pretty(&val)?;
         println!("{json_str}");
     } else if quiet {
         // Result is carried entirely by the exit code below.
@@ -1191,7 +1228,18 @@ fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideError> {
     }
 
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&reports)?);
+        let mut val = serde_json::to_value(&reports)?;
+        if let serde_json::Value::Array(arr) = &mut val {
+            for item in arr {
+                if let serde_json::Value::Object(map) = item {
+                    map.insert(
+                        "banner".to_string(),
+                        serde_json::Value::String(BANNER.to_string()),
+                    );
+                }
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&val)?);
     } else if quiet {
         // The exit code below is the entire quiet output: 1 when any report
         // reached "likely-hidden", 0 otherwise.

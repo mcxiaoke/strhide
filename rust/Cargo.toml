@@ -2,6 +2,7 @@
 name = "strhide"
 version = "0.4.0"
 edition = "2024"
+build = "build.rs"
 description = "Smart format-preserving lossless data hiding library and CLI (PNG/JPEG/MP4/ZIP/PDF/PE carriers, AES-256-GCM, stealth mode)"
 license = "Apache-2.0"
 authors = ["mcxiaoke <mcxiaoke@live.com>"]
@@ -31,8 +32,6 @@ filetime = "0.2.29"
 flate2 = "1.1.10"
 hkdf = "0.13.0"
 hmac = "0.13.0"
-# pe_codebits 策略：x86/x64 指令编解码（与 Python 侧 PyPI iced-x86 1.21 同源代码生成，
-# 保证跨语言位信道一致）。仅需 decoder/encoder，关闭格式化器等重代码。
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "encoder"] }
 jpeg-decoder = "0.3.2"
 pbkdf2 = "0.13.0"
@@ -49,9 +48,9 @@ unicode-normalization = "0.1.25"
 rayon = "1.10"
 
 [profile.test]
-opt-level = 2           # 保证加密和 stego 计算足够快
-debug = 1              # 减少调试符号大小
-codegen-units = 12     # 并行 codegen，大幅加快测试编译和链接
+opt-level = 2
+debug = 1
+codegen-units = 12
 
 [profile.release]
 opt-level = 3
