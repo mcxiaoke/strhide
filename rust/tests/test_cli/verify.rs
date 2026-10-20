@@ -14,9 +14,10 @@
 //! - `--strategy ask` interactive selection for a single carrier, including
 //!   out-of-range and non-numeric answers falling back to the first strategy.
 
+use crate::common::*;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use strhide::engine::{
@@ -24,32 +25,6 @@ use strhide::engine::{
     write_carrier,
 };
 use strhide::errors::StrHideError;
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("strhide_ver_{}_{}", std::process::id(), name));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_strhide")
-}
-
-fn make_png() -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-    let ihdr_data: [u8; 13] = [1, 0, 0, 0, 1, 0, 0, 0, 8, 2, 0, 0, 0];
-    let mut chunk = Vec::new();
-    chunk.extend_from_slice(&(ihdr_data.len() as u32).to_be_bytes());
-    chunk.extend_from_slice(b"IHDR");
-    chunk.extend_from_slice(&ihdr_data);
-    let crc = crc32fast::hash(&chunk[4..]);
-    chunk.extend_from_slice(&crc.to_be_bytes());
-    out.extend_from_slice(&chunk);
-    out.extend_from_slice(b"\x00\x00\x00\x00IEND\xaeB`\x82");
-    out
-}
 
 fn run(dir: &Path, args: &[&str]) -> Output {
     Command::new(bin())
@@ -200,7 +175,7 @@ fn verify_level3_failure_is_reported_but_exit_code_stays_zero() {
 fn size_inflation_warning_is_raised_above_fifty_percent() {
     let dir = scratch("inflate");
     // A deliberately tiny carrier with a payload whose envelope dwarfs it.
-    let tiny = include_bytes!("assets/minimal.png").to_vec();
+    let tiny = include_bytes!("../assets/minimal.png").to_vec();
     let carrier = dir.join("tiny.png");
     fs::write(&carrier, &tiny).unwrap();
     let out = dir.join("tiny.steg.png");
@@ -244,7 +219,7 @@ fn small_payload_in_large_carrier_does_not_warn() {
     let dir = scratch("no_inflate");
     // The real sample PNG is far larger than a tiny text envelope.
     let carrier = dir.join("big.png");
-    fs::write(&carrier, include_bytes!("assets/minimal.png")).unwrap();
+    fs::write(&carrier, include_bytes!("../assets/minimal.png")).unwrap();
     // Pad the carrier with a large ancillary chunk so the ratio stays low.
     // The chunk name must NOT be `prIv`: that is strhide's own chunk type, so
     // a `prIv` chunk is by design reported as an envelope-shaped structure.

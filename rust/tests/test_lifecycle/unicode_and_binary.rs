@@ -1,6 +1,7 @@
 //! Integration tests for Unicode text, binary payloads of various sizes,
 //! and Unicode/Chinese passwords (ported from Python `test_unicode_and_binary.py`).
 
+use crate::common::*;
 use std::fs;
 use std::path::PathBuf;
 
@@ -11,13 +12,6 @@ use strhide::engine::{
 };
 use strhide::errors::StrHideError;
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("strhide_uab_{}_{}", std::process::id(), name));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
 fn testfiles_dir() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let candidate = manifest_dir.parent()?.join("temp").join("testfiles");
@@ -26,132 +20,6 @@ fn testfiles_dir() -> Option<PathBuf> {
     } else {
         None
     }
-}
-
-fn make_png() -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-    let ihdr_data: [u8; 13] = [1, 0, 0, 0, 1, 0, 0, 0, 8, 2, 0, 0, 0];
-    let mut chunk = Vec::new();
-    chunk.extend_from_slice(&(ihdr_data.len() as u32).to_be_bytes());
-    chunk.extend_from_slice(b"IHDR");
-    chunk.extend_from_slice(&ihdr_data);
-    let crc = crc32fast::hash(&chunk[4..]);
-    chunk.extend_from_slice(&crc.to_be_bytes());
-    out.extend_from_slice(&chunk);
-    out.extend_from_slice(b"\x00\x00\x00\x00IEND\xaeB`\x82");
-    out
-}
-
-fn make_mp4() -> Vec<u8> {
-    let mut out = Vec::new();
-    let ftyp_data = b"isom\0\0\x02\0isomiso2";
-    out.extend_from_slice(&((8 + ftyp_data.len()) as u32).to_be_bytes());
-    out.extend_from_slice(b"ftyp");
-    out.extend_from_slice(ftyp_data);
-    let mdat_payload = b"DUMMYVIDEODATA";
-    out.extend_from_slice(&((8 + mdat_payload.len()) as u32).to_be_bytes());
-    out.extend_from_slice(b"mdat");
-    out.extend_from_slice(mdat_payload);
-    out
-}
-
-fn make_jpeg() -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"\xff\xd8");
-    let app0_data = b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0";
-    out.extend_from_slice(b"\xff\xe0");
-    out.extend_from_slice(&((2 + app0_data.len()) as u16).to_be_bytes());
-    out.extend_from_slice(app0_data);
-    out.extend_from_slice(b"\xff\xdb\0C\0");
-    out.extend_from_slice(&[16u8; 64]);
-    out.extend_from_slice(b"\xff\xc0\0\x0b\x08\0\x01\0\x01\x01\x01\x11\0");
-    out.extend_from_slice(b"\xff\xc4\0\x1f\0");
-    out.extend_from_slice(&[0u8; 16]);
-    out.extend_from_slice(&[0u8; 12]);
-    out.extend_from_slice(b"\xff\xda\0\x08\x01\x01\0\0?\0");
-    out.extend_from_slice(b"\0\xff\0U");
-    out.extend_from_slice(b"\xff\xd9");
-    out
-}
-
-fn make_pe() -> Vec<u8> {
-    let mut out = vec![0u8; 512];
-    out[0..2].copy_from_slice(b"MZ");
-    out[0x3C..0x40].copy_from_slice(&64u32.to_le_bytes());
-    let e_lfanew = 64;
-    out[e_lfanew..e_lfanew + 4].copy_from_slice(b"PE\0\0");
-    out[e_lfanew + 4..e_lfanew + 6].copy_from_slice(&0x8664u16.to_le_bytes());
-    out[e_lfanew + 6..e_lfanew + 8].copy_from_slice(&1u16.to_le_bytes());
-    out[e_lfanew + 20..e_lfanew + 22].copy_from_slice(&240u16.to_le_bytes());
-    out[e_lfanew + 22..e_lfanew + 24].copy_from_slice(&0x0022u16.to_le_bytes());
-    let opt = e_lfanew + 24;
-    out[opt..opt + 2].copy_from_slice(&0x20Bu16.to_le_bytes());
-    let sec = opt + 240;
-    out[sec..sec + 8].copy_from_slice(b".text\0\0\0");
-    out[sec + 8..sec + 12].copy_from_slice(&64u32.to_le_bytes());
-    out[sec + 12..sec + 16].copy_from_slice(&0x1000u32.to_le_bytes());
-    out[sec + 16..sec + 20].copy_from_slice(&512u32.to_le_bytes());
-    out[sec + 20..sec + 24].copy_from_slice(&512u32.to_le_bytes());
-    out[sec + 36..sec + 40].copy_from_slice(&0x60000020u32.to_le_bytes());
-    out.resize(1024, 0x90);
-    out
-}
-
-fn make_zip() -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut cd = Vec::new();
-    let name = "hello.txt";
-    let data = b"hello in zip payload";
-    let crc = crc32fast::hash(data);
-    let local_off = out.len() as u32;
-
-    out.extend_from_slice(b"PK\x03\x04");
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(name.as_bytes());
-    out.extend_from_slice(data);
-
-    cd.extend_from_slice(b"PK\x01\x02");
-    cd.extend_from_slice(&20u16.to_le_bytes());
-    cd.extend_from_slice(&20u16.to_le_bytes());
-    cd.extend_from_slice(&0u16.to_le_bytes());
-    cd.extend_from_slice(&0u16.to_le_bytes());
-    cd.extend_from_slice(&0u16.to_le_bytes());
-    cd.extend_from_slice(&0u16.to_le_bytes());
-    cd.extend_from_slice(&crc.to_le_bytes());
-    cd.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    cd.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    cd.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    cd.extend_from_slice(&0u16.to_le_bytes());
-    cd.extend_from_slice(&0u16.to_le_bytes());
-    cd.extend_from_slice(&0u16.to_le_bytes());
-    cd.extend_from_slice(&0u16.to_le_bytes());
-    cd.extend_from_slice(&0u32.to_le_bytes());
-    cd.extend_from_slice(&local_off.to_le_bytes());
-    cd.extend_from_slice(name.as_bytes());
-
-    let cd_off = out.len() as u32;
-    let cd_size = cd.len() as u32;
-    out.extend_from_slice(&cd);
-
-    out.extend_from_slice(b"PK\x05\x06");
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&cd_size.to_le_bytes());
-    out.extend_from_slice(&cd_off.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out
 }
 
 #[test]
@@ -417,7 +285,7 @@ fn test_tiny_and_empty_payloads() {
         fs::copy(p, &carrier1).unwrap();
         fs::copy(p, &carrier2).unwrap();
     } else {
-        let pe_data = make_pe();
+        let pe_data = make_pe(64);
         fs::write(&carrier1, &pe_data).unwrap();
         fs::write(&carrier2, &pe_data).unwrap();
     }

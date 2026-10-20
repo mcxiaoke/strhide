@@ -6,9 +6,10 @@
 //! Carriers are synthetic PE images built in memory (hermetic: no dependency on
 //! host binaries) with configurable padding, section count and machine type.
 
+use crate::common::scratch;
 use std::fs;
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use strhide::adapters::pe_codebits;
 use strhide::engine::{
@@ -19,13 +20,6 @@ use strhide::envelope::EnvelopeHeader;
 use strhide::errors::StrHideError;
 
 // --------------------------------------------------------------------------- helpers
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("strhide_pes_{}_{}", std::process::id(), name));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 fn align_up(n: usize, a: usize) -> usize {
     n.div_ceil(a) * a

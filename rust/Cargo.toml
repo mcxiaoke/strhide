@@ -45,10 +45,17 @@ thiserror = "2.0.21"
 toml = "0.9"
 unicode-normalization = "0.1.25"
 
+[dev-dependencies]
+rayon = "1.10"
+
+[profile.test]
+opt-level = 2           # 保证加密和 stego 计算足够快
+debug = 1              # 减少调试符号大小
+codegen-units = 12     # 并行 codegen，大幅加快测试编译和链接
+
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
-

@@ -1,15 +1,8 @@
+use crate::common::*;
 use std::fs;
-use std::path::PathBuf;
 use strhide::engine::{
     PayloadSource, WriteOptions, read_carrier, remove_carrier, verify_carrier, write_carrier,
 };
-
-fn scratch(sub: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("strhide_stealth_test_{sub}"));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 fn sample_png() -> Vec<u8> {
     // Minimal valid PNG (1x1 red pixel)

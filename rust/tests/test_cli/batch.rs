@@ -5,38 +5,13 @@
 //! directory rule, preflight refusal that leaves every carrier untouched, the
 //! per-run `[SUMMARY]` line, and byte-exact batch restore.
 
+use crate::common::*;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 // --------------------------------------------------------------------------- helpers
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("strhide_batch_{}_{}", std::process::id(), name));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_strhide")
-}
-
-fn make_png() -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-    let ihdr_data: [u8; 13] = [1, 0, 0, 0, 1, 0, 0, 0, 8, 2, 0, 0, 0];
-    let mut chunk = Vec::new();
-    chunk.extend_from_slice(&(ihdr_data.len() as u32).to_be_bytes());
-    chunk.extend_from_slice(b"IHDR");
-    chunk.extend_from_slice(&ihdr_data);
-    let crc = crc32fast::hash(&chunk[4..]);
-    chunk.extend_from_slice(&crc.to_be_bytes());
-    out.extend_from_slice(&chunk);
-    out.extend_from_slice(b"\x00\x00\x00\x00IEND\xaeB`\x82");
-    out
-}
 
 /// Seed `dir` with identical minimal PNG carriers.
 fn seed(dir: &Path, names: &[&str]) {

@@ -38,6 +38,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use rayon::prelude::*;
 use strhide::crypto::compute_file_sha256;
 use strhide::engine::{
     PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
@@ -375,57 +376,125 @@ fn batch_corpus_all_modes() {
 
     let payloads: Vec<Vec<u8>> = SIZE_CASES.iter().map(|c| payload_bytes(c.bytes)).collect();
 
+    let threads = std::env::var("STRHIDE_BATCH_THREADS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+    println!("Rayon parallel threads: {threads}");
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .expect("build thread pool");
+
+    struct FileOutcome {
+        idx: usize,
+        name: String,
+        size_mb: f64,
+        records: Vec<(&'static str, f32, Result<String, String>)>,
+    }
+
     let dir = scratch("run");
+
+    let file_outcomes: Vec<FileOutcome> = pool.install(|| {
+        files
+            .par_iter()
+            .enumerate()
+            .map(|(idx, src)| {
+                let name = src
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let size_mb =
+                    fs::metadata(src).map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0);
+                let file_scratch = dir.join(format!("file_{idx}"));
+                let _ = fs::create_dir_all(&file_scratch);
+
+                let mut records = Vec::new();
+
+                // 1. Policy rejection
+                if let Err(e) = run_all_rejection_checks(src, src) {
+                    let reason = match e {
+                        StrHideError::Rejection(m) => m,
+                        other => other.to_string(),
+                    };
+                    let t0 = Instant::now();
+                    let outcome = rejection_case(src, &file_scratch, &first_line(&reason));
+                    records.push(("reject", t0.elapsed().as_secs_f32(), outcome));
+                    let _ = fs::remove_dir_all(&file_scratch);
+                    return FileOutcome {
+                        idx,
+                        name,
+                        size_mb,
+                        records,
+                    };
+                }
+
+                // 2..4. Full lifecycle in the three supported secrecy modes
+                let orig_sha = match compute_file_sha256(src) {
+                    Ok(sha) => sha,
+                    Err(e) => {
+                        records.push(("hash", 0.0, Err(format!("source hash: {e}"))));
+                        let _ = fs::remove_dir_all(&file_scratch);
+                        return FileOutcome {
+                            idx,
+                            name,
+                            size_mb,
+                            records,
+                        };
+                    }
+                };
+
+                type ModeFn =
+                    fn(&Path, &Path, &[u8; 32], SizeCase, &[u8]) -> Result<String, String>;
+                for (mode, run) in [
+                    ("plain", plain_mode as ModeFn),
+                    ("encrypt", encrypted_mode as ModeFn),
+                    ("stealth", stealth_mode as ModeFn),
+                ] {
+                    for (case, payload) in SIZE_CASES.iter().zip(payloads.iter()) {
+                        let t0 = Instant::now();
+                        let outcome = run(src, &file_scratch, &orig_sha, *case, payload);
+                        let label: &'static str = match (mode, case.label) {
+                            ("plain", "101B") => "plain:101B",
+                            ("plain", "603B") => "plain:603B",
+                            ("plain", "4K") => "plain:4K",
+                            ("plain", "128K") => "plain:128K",
+                            ("encrypt", "101B") => "encrypt:101B",
+                            ("encrypt", "603B") => "encrypt:603B",
+                            ("encrypt", "4K") => "encrypt:4K",
+                            ("encrypt", "128K") => "encrypt:128K",
+                            ("stealth", "101B") => "stealth:101B",
+                            ("stealth", "603B") => "stealth:603B",
+                            ("stealth", "4K") => "stealth:4K",
+                            ("stealth", "128K") => "stealth:128K",
+                            _ => "unknown",
+                        };
+                        records.push((label, t0.elapsed().as_secs_f32(), outcome));
+                    }
+                }
+
+                let _ = fs::remove_dir_all(&file_scratch);
+                FileOutcome {
+                    idx,
+                    name,
+                    size_mb,
+                    records,
+                }
+            })
+            .collect()
+    });
+
     let mut report = Report::new();
-
-    for (idx, src) in files.iter().enumerate() {
-        let name = src
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let size_mb = fs::metadata(src).map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0);
+    for outcome in file_outcomes {
         println!(
-            "[{:02}/{:02}] {name} ({size_mb:.2} MB)",
-            idx + 1,
-            files.len()
+            "[{:02}/{:02}] {} ({:.2} MB)",
+            outcome.idx + 1,
+            files.len(),
+            outcome.name,
+            outcome.size_mb
         );
-
-        // 1. Policy rejection (APK, signed PE, ...). Checked exactly like the
-        //    writer does, so the expectation can never drift from the code.
-        //    The policy is payload-size independent, so one case is enough.
-        if let Err(e) = run_all_rejection_checks(src, src) {
-            let reason = match e {
-                StrHideError::Rejection(m) => m,
-                other => other.to_string(),
-            };
-            let t0 = Instant::now();
-            let outcome = rejection_case(src, &dir, &first_line(&reason));
-            report.record(&name, "reject", t0.elapsed().as_secs_f32(), outcome);
-            continue;
-        }
-
-        // 2..4. Full lifecycle in the three supported secrecy modes, at every
-        //       payload size.
-        let orig_sha = match compute_file_sha256(src) {
-            Ok(sha) => sha,
-            Err(e) => {
-                report.record(&name, "hash", 0.0, Err(format!("source hash: {e}")));
-                continue;
-            }
-        };
-
-        type ModeFn = fn(&Path, &Path, &[u8; 32], SizeCase, &[u8]) -> Result<String, String>;
-        for (mode, run) in [
-            ("plain", plain_mode as ModeFn),
-            ("encrypt", encrypted_mode as ModeFn),
-            ("stealth", stealth_mode as ModeFn),
-        ] {
-            for (case, payload) in SIZE_CASES.iter().zip(payloads.iter()) {
-                let t0 = Instant::now();
-                let outcome = run(src, &dir, &orig_sha, *case, payload);
-                let label = format!("{mode}:{}", case.label);
-                report.record(&name, &label, t0.elapsed().as_secs_f32(), outcome);
-            }
+        for (label, elapsed, res) in outcome.records {
+            report.record(&outcome.name, label, elapsed, res);
         }
     }
 

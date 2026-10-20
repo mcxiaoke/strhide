@@ -1,6 +1,7 @@
-//! Integration tests using real-world files from `temp/real_samples`
-//! (ported from Python `test_real_samples.py`).
+// Integration tests using real-world files from `temp/real_samples`
+// (ported from Python `test_real_samples.py`).
 
+use crate::common::*;
 use std::fs;
 use std::path::PathBuf;
 
@@ -10,13 +11,6 @@ use strhide::engine::{
     write_carrier,
 };
 use strhide::errors::StrHideError;
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("strhide_real_{}_{}", std::process::id(), name));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 fn samples_dir() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

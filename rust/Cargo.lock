@@ -591,6 +591,7 @@ dependencies = [
  "jpeg-decoder",
  "pbkdf2",
  "rand",
+ "rayon",
  "rpassword",
  "serde",
  "serde_json",

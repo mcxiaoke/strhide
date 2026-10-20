@@ -31,6 +31,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use rayon::prelude::*;
 use strhide::analysis::scan_file;
 use strhide::errors::StrHideError;
 use strhide::stego::{
@@ -143,174 +144,239 @@ fn test_batch_stego_corpus() {
         return;
     }
 
+    let threads = std::env::var("STRHIDE_BATCH_THREADS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+    println!("Rayon parallel threads: {threads}");
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .expect("build rayon thread pool");
+
+    enum Outcome {
+        Reject {
+            filename: String,
+            orig_len: usize,
+            msg: String,
+            row: ReportRow,
+        },
+        Pass {
+            filename: String,
+            orig_len: usize,
+            detail: String,
+            row: ReportRow,
+        },
+    }
+
+    let total_start = Instant::now();
+
+    let outcomes: Vec<Outcome> = pool.install(|| {
+        entries
+            .par_iter()
+            .enumerate()
+            .map(|(idx, path)| {
+                let filename = path.file_name().unwrap().to_string_lossy().to_string();
+                let file_bytes = fs::read(path).expect("read carrier file");
+                let orig_len = file_bytes.len();
+
+                // 1. Check if this is a known rejection candidate
+                let is_apng = filename.contains("s_hair_gre_3_mo1");
+                let is_indexed = filename.contains("Blueberry-Flat");
+                let is_progressive_jpg = filename.contains("flip2");
+                let is_interlaced_png = filename.contains("shop5");
+
+                if is_apng || is_indexed || is_progressive_jpg || is_interlaced_png {
+                    let payload = b"Test rejection payload";
+                    let opt = StegoOptions::default();
+                    let res = embed_carrier(&file_bytes, payload, &opt);
+                    match res {
+                        Err(StrHideError::UnsupportedFormat(msg)) => {
+                            let format = if is_apng {
+                                "APNG"
+                            } else if is_indexed {
+                                "PNG-P"
+                            } else if is_progressive_jpg {
+                                "JPEG-Prog"
+                            } else {
+                                "PNG-Adam7"
+                            };
+                            let row = ReportRow {
+                                filename: filename.clone(),
+                                format: format.into(),
+                                capacity: "N/A (rejected)".into(),
+                                embed_ms: 0,
+                                extract_ms: 0,
+                                scan_score: 0,
+                                scan_verdict: "safe-reject".into(),
+                                status: "REJECT_OK",
+                            };
+                            return Outcome::Reject {
+                                filename,
+                                orig_len,
+                                msg,
+                                row,
+                            };
+                        }
+                        other => {
+                            panic!(
+                                "File {filename} should be rejected with UnsupportedFormat, but got: {other:?}"
+                            );
+                        }
+                    }
+                }
+
+                // 2. Normal valid carrier: probe capacity
+                let opt_probe = StegoOptions::default();
+                let cap: StegoCapacityInfo = match probe_carrier_capacity(&file_bytes, &opt_probe) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        panic!("Failed to probe capacity for {filename}: {e:?}");
+                    }
+                };
+
+                assert!(
+                    cap.available_slots > 500,
+                    "Carrier {} has insufficient slots: {}",
+                    filename,
+                    cap.available_slots
+                );
+
+                // 3. Roundtrip Test 1: Small payload (64 bytes) with password
+                let payload1 = deterministic_bytes(64, 1001);
+                let mut opt_enc = StegoOptions {
+                    password: Some(TEST_PASSWORD.to_string()),
+                    ..Default::default()
+                };
+
+                let t_embed_start = Instant::now();
+                let stego_bytes = embed_carrier(&file_bytes, &payload1, &opt_enc)
+                    .unwrap_or_else(|e| panic!("Embedding 64B failed on {filename}: {e:?}"));
+                let embed_ms = t_embed_start.elapsed().as_millis();
+
+                // Save stego image to isolated sandbox path for scan
+                let stego_path = sandbox.join(format!("{idx}_{filename}"));
+                fs::write(&stego_path, &stego_bytes).expect("write stego image to sandbox");
+
+                // Extract with correct password
+                let t_ext_start = Instant::now();
+                let extracted1 = extract_carrier(&stego_bytes, &opt_enc)
+                    .unwrap_or_else(|e| panic!("Extraction failed on {filename}: {e:?}"));
+                let extract_ms = t_ext_start.elapsed().as_millis();
+
+                assert_eq!(
+                    payload1, extracted1,
+                    "Payload mismatch on 64B roundtrip for {filename}"
+                );
+
+                // Denial on wrong password
+                opt_enc.password = Some(WRONG_PASSWORD.to_string());
+                let wrong_res = extract_carrier(&stego_bytes, &opt_enc);
+                assert!(
+                    matches!(wrong_res, Err(StrHideError::NoHiddenData(_))),
+                    "Wrong password should return NoHiddenData on {filename}, got: {wrong_res:?}"
+                );
+
+                // 4. Roundtrip Test 2: Medium payload without password
+                let medium_size = 1024.min(cap.recommended_max_bytes.max(64));
+                let payload2 = deterministic_bytes(medium_size, 2002);
+                let opt_plain = StegoOptions::default();
+                let stego_bytes2 = embed_carrier(&file_bytes, &payload2, &opt_plain).unwrap_or_else(|e| {
+                    panic!("Embedding medium {medium_size}B failed on {filename}: {e:?}")
+                });
+                let extracted2 = extract_carrier(&stego_bytes2, &opt_plain).unwrap_or_else(|e| {
+                    panic!("Extracting medium {medium_size}B failed on {filename}: {e:?}")
+                });
+                assert_eq!(
+                    payload2, extracted2,
+                    "Medium payload mismatch on {filename}"
+                );
+
+                // 5. Oversize rejection test
+                let oversize_len = cap.max_raw_payload_bytes + 20_000;
+                let oversize_payload = deterministic_bytes(oversize_len, 3003);
+                let oversize_res = embed_carrier(&file_bytes, &oversize_payload, &opt_plain);
+                assert!(
+                    matches!(oversize_res, Err(StrHideError::General(ref msg)) if msg.contains("Carrier capacity exceeded")),
+                    "Oversize payload should be rejected with 'Carrier capacity exceeded', got: {oversize_res:?}"
+                );
+
+                // 6. Steganalysis Scan: compare cover vs stego delta
+                let orig_scan = scan_file(path).expect("scan original file");
+                let scan_report = scan_file(&stego_path).expect("scan stego file");
+                let score_growth = scan_report.risk_score.saturating_sub(orig_scan.risk_score);
+                assert!(
+                    score_growth <= 35,
+                    "Stego embedding on {} caused abnormal risk inflation: orig={}, stego={}, growth={}",
+                    filename,
+                    orig_scan.risk_score,
+                    scan_report.risk_score,
+                    score_growth
+                );
+
+                let detail = format!(
+                    "slots={} | cap={:.1}KB | embed={}ms | ext={}ms | scan={}/{} (orig={})",
+                    cap.available_slots,
+                    cap.max_raw_payload_bytes as f64 / 1024.0,
+                    embed_ms,
+                    extract_ms,
+                    scan_report.risk_score,
+                    scan_report.verdict,
+                    orig_scan.risk_score
+                );
+
+                let row = ReportRow {
+                    filename: filename.clone(),
+                    format: cap.format,
+                    capacity: format!("{:.1} KB", cap.max_raw_payload_bytes as f64 / 1024.0),
+                    embed_ms,
+                    extract_ms,
+                    scan_score: scan_report.risk_score,
+                    scan_verdict: scan_report.verdict,
+                    status: "PASS",
+                };
+
+                let _ = fs::remove_file(&stego_path);
+                Outcome::Pass {
+                    filename,
+                    orig_len,
+                    detail,
+                    row,
+                }
+            })
+            .collect()
+    });
+
     let mut report = BatchReport {
         total: entries.len(),
         ..Default::default()
     };
 
-    let total_start = Instant::now();
-
-    for path in entries {
-        let filename = path.file_name().unwrap().to_string_lossy().to_string();
-        let file_bytes = fs::read(&path).expect("read carrier file");
-        let orig_len = file_bytes.len();
-
-        print!("-> Testing {:<38} ({} KB)... ", filename, orig_len / 1024);
-
-        // 1. Check if this is a known rejection candidate
-        let is_apng = filename.contains("s_hair_gre_3_mo1");
-        let is_indexed = filename.contains("Blueberry-Flat");
-        let is_progressive_jpg = filename.contains("flip2");
-        let is_interlaced_png = filename.contains("shop5");
-
-        if is_apng || is_indexed || is_progressive_jpg || is_interlaced_png {
-            // Rejection case: embed should fail cleanly with UnsupportedFormat
-            let payload = b"Test rejection payload";
-            let opt = StegoOptions::default();
-            let res = embed_carrier(&file_bytes, payload, &opt);
-            match res {
-                Err(StrHideError::UnsupportedFormat(msg)) => {
-                    println!("[REJECT OK] Gracefully rejected: {msg}");
-                    report.passed_rejection += 1;
-                    report.rows.push(ReportRow {
-                        filename,
-                        format: if is_apng {
-                            "APNG"
-                        } else if is_indexed {
-                            "PNG-P"
-                        } else if is_progressive_jpg {
-                            "JPEG-Prog"
-                        } else {
-                            "PNG-Adam7"
-                        }
-                        .into(),
-                        capacity: "N/A (rejected)".into(),
-                        embed_ms: 0,
-                        extract_ms: 0,
-                        scan_score: 0,
-                        scan_verdict: "safe-reject".into(),
-                        status: "REJECT_OK",
-                    });
-                }
-                other => {
-                    panic!(
-                        "File {filename} should be rejected with UnsupportedFormat, but got: {other:?}"
-                    );
-                }
+    for outcome in outcomes {
+        match outcome {
+            Outcome::Reject {
+                filename,
+                orig_len,
+                msg,
+                row,
+            } => {
+                print!("-> Testing {:<38} ({} KB)... ", filename, orig_len / 1024);
+                println!("[REJECT OK] Gracefully rejected: {msg}");
+                report.passed_rejection += 1;
+                report.rows.push(row);
             }
-            continue;
+            Outcome::Pass {
+                filename,
+                orig_len,
+                detail,
+                row,
+            } => {
+                print!("-> Testing {:<38} ({} KB)... ", filename, orig_len / 1024);
+                println!("[PASS] {detail}");
+                report.passed_lifecycle += 1;
+                report.rows.push(row);
+            }
         }
-
-        // 2. Normal valid carrier: probe capacity
-        let opt_probe = StegoOptions::default();
-        let cap: StegoCapacityInfo = match probe_carrier_capacity(&file_bytes, &opt_probe) {
-            Ok(c) => c,
-            Err(e) => {
-                panic!("Failed to probe capacity for {filename}: {e:?}");
-            }
-        };
-
-        assert!(
-            cap.available_slots > 500,
-            "Carrier {} has insufficient slots: {}",
-            filename,
-            cap.available_slots
-        );
-
-        // 3. Roundtrip Test 1: Small payload (64 bytes) with password
-        let payload1 = deterministic_bytes(64, 1001);
-        let mut opt_enc = StegoOptions {
-            password: Some(TEST_PASSWORD.to_string()),
-            ..Default::default()
-        };
-
-        let t_embed_start = Instant::now();
-        let stego_bytes = embed_carrier(&file_bytes, &payload1, &opt_enc)
-            .unwrap_or_else(|e| panic!("Embedding 64B failed on {filename}: {e:?}"));
-        let embed_ms = t_embed_start.elapsed().as_millis();
-
-        // Save stego image to sandbox for scan
-        let stego_path = sandbox.join(&filename);
-        fs::write(&stego_path, &stego_bytes).expect("write stego image to sandbox");
-
-        // Extract with correct password
-        let t_ext_start = Instant::now();
-        let extracted1 = extract_carrier(&stego_bytes, &opt_enc)
-            .unwrap_or_else(|e| panic!("Extraction failed on {filename}: {e:?}"));
-        let extract_ms = t_ext_start.elapsed().as_millis();
-
-        assert_eq!(
-            payload1, extracted1,
-            "Payload mismatch on 64B roundtrip for {filename}"
-        );
-
-        // Denial on wrong password
-        opt_enc.password = Some(WRONG_PASSWORD.to_string());
-        let wrong_res = extract_carrier(&stego_bytes, &opt_enc);
-        assert!(
-            matches!(wrong_res, Err(StrHideError::NoHiddenData(_))),
-            "Wrong password should return NoHiddenData on {filename}, got: {wrong_res:?}"
-        );
-
-        // 4. Roundtrip Test 2: Medium payload without password
-        let medium_size = 1024.min(cap.recommended_max_bytes.max(64));
-        let payload2 = deterministic_bytes(medium_size, 2002);
-        let opt_plain = StegoOptions::default();
-        let stego_bytes2 = embed_carrier(&file_bytes, &payload2, &opt_plain).unwrap_or_else(|e| {
-            panic!("Embedding medium {medium_size}B failed on {filename}: {e:?}")
-        });
-        let extracted2 = extract_carrier(&stego_bytes2, &opt_plain).unwrap_or_else(|e| {
-            panic!("Extracting medium {medium_size}B failed on {filename}: {e:?}")
-        });
-        assert_eq!(
-            payload2, extracted2,
-            "Medium payload mismatch on {filename}"
-        );
-
-        // 5. Oversize rejection test
-        let oversize_len = cap.max_raw_payload_bytes + 20_000;
-        let oversize_payload = deterministic_bytes(oversize_len, 3003);
-        let oversize_res = embed_carrier(&file_bytes, &oversize_payload, &opt_plain);
-        assert!(
-            matches!(oversize_res, Err(StrHideError::General(ref msg)) if msg.contains("Carrier capacity exceeded")),
-            "Oversize payload should be rejected with 'Carrier capacity exceeded', got: {oversize_res:?}"
-        );
-
-        // 6. Steganalysis Scan: compare cover vs stego delta
-        let orig_scan = scan_file(&path).expect("scan original file");
-        let scan_report = scan_file(&stego_path).expect("scan stego file");
-        let score_growth = scan_report.risk_score.saturating_sub(orig_scan.risk_score);
-        assert!(
-            score_growth <= 35,
-            "Stego embedding on {} caused abnormal risk inflation: orig={}, stego={}, growth={}",
-            filename,
-            orig_scan.risk_score,
-            scan_report.risk_score,
-            score_growth
-        );
-
-        println!(
-            "[PASS] slots={} | cap={:.1}KB | embed={}ms | ext={}ms | scan={}/{} (orig={})",
-            cap.available_slots,
-            cap.max_raw_payload_bytes as f64 / 1024.0,
-            embed_ms,
-            extract_ms,
-            scan_report.risk_score,
-            scan_report.verdict,
-            orig_scan.risk_score
-        );
-
-        report.passed_lifecycle += 1;
-        report.rows.push(ReportRow {
-            filename,
-            format: cap.format,
-            capacity: format!("{:.1} KB", cap.max_raw_payload_bytes as f64 / 1024.0),
-            embed_ms,
-            extract_ms,
-            scan_score: scan_report.risk_score,
-            scan_verdict: scan_report.verdict,
-            status: "PASS",
-        });
     }
 
     let _ = fs::remove_dir_all(&sandbox);

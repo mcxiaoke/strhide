@@ -1,20 +1,13 @@
-//! Integration tests for password hint functionality (ported from Python `test_password_hint.py`).
+use crate::common::*;
+// Integration tests for password hint functionality (ported from Python `test_password_hint.py`).
 
 use std::fs;
-use std::path::PathBuf;
 
 use strhide::crypto::compute_file_sha256;
 use strhide::engine::{
     PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, write_carrier,
 };
 use strhide::errors::StrHideError;
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("strhide_hint_{}_{}", std::process::id(), name));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 fn make_dummy_png() -> Vec<u8> {
     let mut out = Vec::new();

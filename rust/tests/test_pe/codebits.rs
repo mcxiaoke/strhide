@@ -7,8 +7,9 @@
 //! exercising the real engine flow: write -> read -> inspect -> verify ->
 //! remove, with byte-exact restore assertions.
 
+use crate::common::{make_pe_custom as make_pe, scratch};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use strhide::engine::{
     PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
@@ -17,72 +18,6 @@ use strhide::engine::{
 use strhide::errors::StrHideError;
 
 // --------------------------------------------------------------------------- helpers
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("strhide_pcb_{}_{}", std::process::id(), name));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-/// 23-byte pattern yielding 7 instrumentable positions (verified against the
-/// module unit tests): mov/mov/mov-store-load pair, a memory-operand mov and
-/// an equal-register TEST that the profile filters out, TEST both orders,
-/// add and cmp.
-const TEXT_PATTERN: &[u8] = &[
-    0x89, 0xD8, // mov eax, ebx      (pair, bit 0)
-    0x89, 0xCA, // mov ecx, edx      (pair, bit 0)
-    0x8B, 0xD1, // mov edx, ecx      (pair, bit 1)
-    0x89, 0x18, // mov [eax], ebx    (memory -> filtered)
-    0x85, 0xC3, // test eax, ebx     (commutative, bit 0)
-    0x85, 0xD8, // test ebx, eax     (commutative, bit 1)
-    0x85, 0xC0, // test eax, eax     (equal regs -> filtered)
-    0x01, 0xD8, // add eax, ebx      (pair, bit 0)
-    0x3B, 0xC3, // cmp ebx, eax      (pair, bit 1)
-    0x90, 0x90, 0x48, 0x89, 0x00, // padding + memory mov (filtered)
-];
-
-/// Builds a minimal PE image. `machine`/`opt_magic` select 32/64-bit,
-/// `text_len` sizes the `.text` virtual size, and `tight` removes all slack
-/// (section starts right after the section table, raw size == virtual size).
-fn make_pe(machine: u16, opt_magic: u16, text_len: usize, tight: bool) -> Vec<u8> {
-    let is_pe32p = opt_magic == 0x20B;
-    let opt_size: u16 = if is_pe32p { 240 } else { 224 };
-    let e_lfanew: u32 = 0x80;
-    let sec_table = e_lfanew as usize + 24 + opt_size as usize; // 0x98+240=0x188 / 0x98+224=0x178
-    let sec_table_end = sec_table + 40;
-    let raw_ptr: u32 = if tight { sec_table_end as u32 } else { 0x400 };
-    let raw_size = (text_len as u32).div_ceil(0x200) * 0x200;
-
-    let mut img = vec![0u8; raw_ptr as usize];
-    img[0..2].copy_from_slice(b"MZ");
-    img[0x3C..0x40].copy_from_slice(&e_lfanew.to_le_bytes());
-    img[0x80..0x84].copy_from_slice(b"PE\0\0");
-    img[0x84..0x86].copy_from_slice(&machine.to_le_bytes());
-    img[0x86..0x88].copy_from_slice(&1u16.to_le_bytes()); // 1 section
-    img[0x94..0x96].copy_from_slice(&opt_size.to_le_bytes()); // SizeOfOptionalHeader
-    img[0x96..0x98].copy_from_slice(&0x0022u16.to_le_bytes()); // executable
-    let opt = 0x98;
-    img[opt..opt + 2].copy_from_slice(&opt_magic.to_le_bytes());
-
-    let sec = sec_table;
-    img[sec..sec + 8].copy_from_slice(b".text\0\0\0");
-    img[sec + 8..sec + 12].copy_from_slice(&(text_len as u32).to_le_bytes()); // VirtualSize
-    img[sec + 12..sec + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualAddress
-    img[sec + 16..sec + 20].copy_from_slice(&raw_size.to_le_bytes()); // SizeOfRawData
-    img[sec + 20..sec + 24].copy_from_slice(&raw_ptr.to_le_bytes()); // PointerToRawData
-    img[sec + 36..sec + 40].copy_from_slice(&0x6000_0020u32.to_le_bytes()); // code|exec|read
-
-    // .text body: repeat the instrumentable pattern.
-    let mut text = Vec::with_capacity(text_len);
-    while text.len() < text_len {
-        text.extend_from_slice(TEXT_PATTERN);
-    }
-    text.truncate(text_len);
-    img.extend_from_slice(&text);
-    img.resize(raw_ptr as usize + raw_size as usize, 0); // tail padding
-    img
-}
 
 fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -525,7 +460,7 @@ with two lines
 fn eof_strategy_still_works_on_supported_formats() {
     let dir = scratch("eof_strategy");
     let carrier = dir.join("c.png");
-    let original = include_bytes!("assets/minimal.png").to_vec();
+    let original = include_bytes!("../assets/minimal.png").to_vec();
     fs::write(&carrier, &original).unwrap();
 
     let out = dir.join("c.steg.png");
@@ -644,7 +579,7 @@ fn inspect_marks_codebits_unavailable_on_tiny_text() {
 fn inspect_reports_png_capacity_and_json_schema() {
     let dir = scratch("capacity_png");
     let carrier = dir.join("c.png");
-    fs::write(&carrier, include_bytes!("assets/minimal.png")).unwrap();
+    fs::write(&carrier, include_bytes!("../assets/minimal.png")).unwrap();
 
     let res = inspect_carrier(&carrier, None).expect("inspect");
     assert_eq!(res.format, "PNG");

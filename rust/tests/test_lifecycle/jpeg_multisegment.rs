@@ -1,19 +1,12 @@
 //! Integration tests for JPEG APP15 multi-segment chain hiding.
 
+use crate::common::*;
 use rand::RngExt;
 use std::fs;
-use std::path::PathBuf;
 use strhide::adapters::jpeg::{JPEG_COM, JPEG_EOI, JPEG_SOI, find_jpeg_sos_offset};
 use strhide::engine::{
     PayloadSource, WriteOptions, read_carrier, remove_carrier, verify_carrier, write_carrier,
 };
-
-fn scratch_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("strhide_jpeg_test_{name}"));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 fn make_sample_jpeg_with_comment(comment_text: &[u8]) -> Vec<u8> {
     let mut d = Vec::new();
@@ -42,7 +35,7 @@ fn make_sample_jpeg_with_comment(comment_text: &[u8]) -> Vec<u8> {
 
 #[test]
 fn test_jpeg_multisegment_chain_boundary_and_lossless_restore() {
-    let dir = scratch_dir("multi_boundary");
+    let dir = scratch("multi_boundary");
     let carrier = dir.join("carrier.jpg");
     let orig_comment = b"Original Photographer Copyright 2024";
     fs::write(&carrier, make_sample_jpeg_with_comment(orig_comment)).unwrap();
@@ -148,7 +141,7 @@ fn test_jpeg_multisegment_chain_boundary_and_lossless_restore() {
 
 #[test]
 fn test_jpeg_legacy_com_backward_compatibility() {
-    let dir = scratch_dir("legacy_com");
+    let dir = scratch("legacy_com");
     let carrier = dir.join("carrier.jpg");
     fs::write(&carrier, make_sample_jpeg_with_comment(b"none")).unwrap();
 

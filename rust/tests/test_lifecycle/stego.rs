@@ -1,5 +1,6 @@
 //! Integration tests for content-adaptive steganography (HILL, UERD, LSB/DCT Matching).
 
+use crate::common::*;
 use std::fs;
 use std::path::PathBuf;
 
@@ -8,17 +9,6 @@ use strhide::stego::{
     StegoOptions, embed_carrier, extract_carrier,
     spatial::{RawImage, encode_png},
 };
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "strhide_stego_test_{}_{}",
-        std::process::id(),
-        name
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 /// Generate a synthetic texture PNG image with gradients and noise (128x128).
 fn generate_texture_png(w: u32, h: u32) -> Vec<u8> {

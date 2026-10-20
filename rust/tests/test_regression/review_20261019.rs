@@ -1,9 +1,10 @@
-//! Regression tests for the fixes made after the 2026-10-19 reviews
-//! (`docs/VERIFY-REVIEWS-AND-FIX-PLAN-20261019.md`, P0 items).
-//!
-//! Every test names the finding it locks down. CLI invocations use piped/null
-//! stdio so a password prompt can never block the run.
+// Regression tests for the fixes made after the 2026-10-19 reviews
+// (`docs/VERIFY-REVIEWS-AND-FIX-PLAN-20261019.md`, P0 items).
+//
+// Every test names the finding it locks down. CLI invocations use piped/null
+// stdio so a password prompt can never block the run.
 
+use crate::common::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -16,113 +17,6 @@ use strhide::engine::{
 use strhide::errors::StrHideError;
 
 // --------------------------------------------------------------------------- helpers
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("strhide_review_{}_{}", std::process::id(), name));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_strhide")
-}
-
-/// Minimal valid 1x1 PNG (IHDR + IDAT + IEND, CRCs valid).
-fn make_png() -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-    let ihdr_data: [u8; 13] = [1, 0, 0, 0, 1, 0, 0, 0, 8, 2, 0, 0, 0];
-    let mut chunk = Vec::new();
-    chunk.extend_from_slice(&(ihdr_data.len() as u32).to_be_bytes());
-    chunk.extend_from_slice(b"IHDR");
-    chunk.extend_from_slice(&ihdr_data);
-    let crc = crc32fast::hash(&chunk[4..]);
-    chunk.extend_from_slice(&crc.to_be_bytes());
-    out.extend_from_slice(&chunk);
-
-    let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
-    use std::io::Write as _;
-    enc.write_all(b"\x00\xff\x00\x00").unwrap();
-    let idat_data = enc.finish().unwrap();
-    let mut chunk = Vec::new();
-    chunk.extend_from_slice(&(idat_data.len() as u32).to_be_bytes());
-    chunk.extend_from_slice(b"IDAT");
-    chunk.extend_from_slice(&idat_data);
-    let crc = crc32fast::hash(&chunk[4..]);
-    chunk.extend_from_slice(&crc.to_be_bytes());
-    out.extend_from_slice(&chunk);
-
-    out.extend_from_slice(b"\x00\x00\x00\x00IEND\xaeB`\x82");
-    out
-}
-
-/// Minimal ISO-BMFF file: `ftyp` followed by a `mdat` box.
-fn make_mp4() -> Vec<u8> {
-    let mut v = Vec::new();
-    v.extend_from_slice(&24u32.to_be_bytes());
-    v.extend_from_slice(b"ftyp");
-    v.extend_from_slice(b"isom");
-    v.extend_from_slice(&0u32.to_be_bytes());
-    v.extend_from_slice(b"isomiso2");
-    v.extend_from_slice(&(8u32 + 64).to_be_bytes());
-    v.extend_from_slice(b"mdat");
-    v.extend_from_slice(&[0xAAu8; 64]);
-    v
-}
-
-/// Single-entry stored ZIP with a valid EOCD.
-fn make_zip() -> Vec<u8> {
-    let name = b"hello.txt";
-    let data: Vec<u8> = b"hello world".repeat(50);
-    let crc = crc32fast::hash(&data);
-    let mut out = Vec::new();
-
-    out.extend_from_slice(b"PK\x03\x04");
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(name);
-    out.extend_from_slice(&data);
-
-    let cd_offset = out.len() as u32;
-    out.extend_from_slice(b"PK\x01\x02");
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(name);
-    let cd_size = out.len() as u32 - cd_offset;
-
-    out.extend_from_slice(b"PK\x05\x06");
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&cd_size.to_le_bytes());
-    out.extend_from_slice(&cd_offset.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out
-}
 
 fn write_carrier_file(
     carrier: &Path,
@@ -632,38 +526,6 @@ fn read_warns_when_password_is_unused() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "plain");
 }
 
-fn make_pe() -> Vec<u8> {
-    let mut v = vec![0u8; 0x40];
-    v[0] = b'M';
-    v[1] = b'Z';
-    v[0x3C..0x40].copy_from_slice(&0x40u32.to_le_bytes());
-    v.extend_from_slice(b"PE\x00\x00");
-    v.extend_from_slice(&0x014Cu16.to_le_bytes());
-    v.extend_from_slice(&1u16.to_le_bytes());
-    v.extend_from_slice(&0u32.to_le_bytes());
-    v.extend_from_slice(&0u32.to_le_bytes());
-    v.extend_from_slice(&0u32.to_le_bytes());
-    v.extend_from_slice(&2u16.to_le_bytes());
-    v.extend_from_slice(&0x0102u16.to_le_bytes());
-    v.extend_from_slice(&0x010Bu16.to_le_bytes());
-    let mut sec = [0u8; 40];
-    sec[0..5].copy_from_slice(b".text");
-    sec[8..12].copy_from_slice(&0x100u32.to_le_bytes());
-    sec[12..16].copy_from_slice(&0x1000u32.to_le_bytes());
-    sec[16..20].copy_from_slice(&0x100u32.to_le_bytes());
-    sec[20..24].copy_from_slice(&0x200u32.to_le_bytes());
-    v.extend_from_slice(&sec);
-    v.resize(0x400, 0);
-    v
-}
-
-fn make_pdf() -> Vec<u8> {
-    b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
-      xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
-      trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n9\n%%EOF\n"
-        .to_vec()
-}
-
 // --------------------------------------------------------------------------- P2-1
 
 /// PE written with `-s eof` must be attributed as "eof" in inspect_carrier,
@@ -671,7 +533,7 @@ fn make_pdf() -> Vec<u8> {
 #[test]
 fn pe_eof_strategy_inspect_attribution() {
     let dir = scratch("pe_strategy_attr");
-    let pe_bytes = make_pe();
+    let pe_bytes = make_pe(64);
 
     // 1. Write with eof
     let carrier_eof = dir.join("c_eof.exe");

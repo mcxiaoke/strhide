@@ -10,9 +10,9 @@
 //! - #19: `--unescape` must support the full escape set (\xHH, \uXXXX, \U...,
 //!   octal, \a\b\f\v) identically in both implementations.
 
+use crate::common::*;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use strhide::engine::{PayloadSource, WriteOptions, read_carrier, write_carrier};
@@ -20,33 +20,6 @@ use strhide::errors::StrHideError;
 
 // --------------------------------------------------------------------------- helpers
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("strhide_p2c_{}_{}", std::process::id(), name));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_strhide")
-}
-
-fn make_png() -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-    let ihdr_data: [u8; 13] = [1, 0, 0, 0, 1, 0, 0, 0, 8, 2, 0, 0, 0];
-    let mut chunk = Vec::new();
-    chunk.extend_from_slice(&(ihdr_data.len() as u32).to_be_bytes());
-    chunk.extend_from_slice(b"IHDR");
-    chunk.extend_from_slice(&ihdr_data);
-    let crc = crc32fast::hash(&chunk[4..]);
-    chunk.extend_from_slice(&crc.to_be_bytes());
-    out.extend_from_slice(&chunk);
-    out.extend_from_slice(b"\x00\x00\x00\x00IEND\xaeB`\x82");
-    out
-}
-
-/// Minimal stored-entry ZIP builder (no external crates available in tests).
 fn make_zip_with_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut cd = Vec::new();
@@ -100,11 +73,8 @@ fn make_zip_with_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
     out
 }
 
-/// Minimal valid 1x1 PNG (IHDR + IDAT + IEND, CRCs valid). Used wherever a
-/// test needs a *supported* carrier for the eof strategy: unrecognized files
-/// are rejected by design, so generic byte strings are no longer carriers.
 fn make_minimal_png() -> Vec<u8> {
-    include_bytes!("assets/minimal.png").to_vec()
+    include_bytes!("../assets/minimal.png").to_vec()
 }
 
 fn patch_header_field(out: &std::path::Path, ube_offset: u64, field_offset: u64, bytes: &[u8]) {

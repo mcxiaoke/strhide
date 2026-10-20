@@ -1,15 +1,15 @@
-//! Regression tests for P2 engineering-quality fixes (2026-10-17).
-//!
-//! Batch 1:
-//! - #10: adapter inject must propagate I/O errors instead of silently
-//!   treating a failed read as EOF (which produced truncated envelopes).
-//! - #23: MP4/PNG `verify_structure` must walk the full container (box tree /
-//!   all chunks with CRC verification), not just the first box or the tail
-//!   IEND. Mirrors the Python adapter behavior.
+// Regression tests for P2 engineering-quality fixes (2026-10-17).
+//
+// Batch 1:
+// - #10: adapter inject must propagate I/O errors instead of silently
+//   treating a failed read as EOF (which produced truncated envelopes).
+// - #23: MP4/PNG `verify_structure` must walk the full container (box tree /
+//   all chunks with CRC verification), not just the first box or the tail
+//   IEND. Mirrors the Python adapter behavior.
 
+use crate::common::*;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
 
 use strhide::adapters::HostAdapter;
 use strhide::adapters::jpeg::JpegAdapter;
@@ -21,141 +21,6 @@ use strhide::adapters::zip::ZipAdapter;
 use strhide::engine::{PayloadSource, WriteOptions, verify_carrier, write_carrier};
 
 // --------------------------------------------------------------------------- helpers
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("strhide_p2_{}_{}", std::process::id(), name));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn make_png() -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-    let ihdr_data: [u8; 13] = [1, 0, 0, 0, 1, 0, 0, 0, 8, 2, 0, 0, 0];
-    let mut chunk = Vec::new();
-    chunk.extend_from_slice(&(ihdr_data.len() as u32).to_be_bytes());
-    chunk.extend_from_slice(b"IHDR");
-    chunk.extend_from_slice(&ihdr_data);
-    let crc = crc32fast::hash(&chunk[4..]);
-    chunk.extend_from_slice(&crc.to_be_bytes());
-    out.extend_from_slice(&chunk);
-    out.extend_from_slice(b"\x00\x00\x00\x00IEND\xaeB`\x82");
-    out
-}
-
-fn make_jpeg() -> Vec<u8> {
-    let mut v = Vec::new();
-    v.extend_from_slice(b"\xff\xd8");
-    let app0_data = b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00";
-    v.extend_from_slice(b"\xff\xe0");
-    v.extend_from_slice(&(2u16 + app0_data.len() as u16).to_be_bytes());
-    v.extend_from_slice(app0_data);
-    v.extend_from_slice(b"\xff\xda");
-    v.extend_from_slice(&3u16.to_be_bytes());
-    v.extend_from_slice(&[1u8]);
-    v.extend_from_slice(&[0u8; 16]);
-    v.extend_from_slice(b"\xff\xd9");
-    v
-}
-
-fn make_zip() -> Vec<u8> {
-    let name = b"hello.txt";
-    let data: Vec<u8> = b"hello world".repeat(20);
-    let crc = crc32fast::hash(&data);
-    let mut out = Vec::new();
-    out.extend_from_slice(b"PK\x03\x04");
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(name);
-    out.extend_from_slice(&data);
-
-    let cd_offset = out.len() as u32;
-    out.extend_from_slice(b"PK\x01\x02");
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(name);
-    let cd_size = out.len() as u32 - cd_offset;
-
-    out.extend_from_slice(b"PK\x05\x06");
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&cd_size.to_le_bytes());
-    out.extend_from_slice(&cd_offset.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out
-}
-
-/// Minimal ISO BMFF file: one ftyp box plus a trailing free box.
-fn make_mp4() -> Vec<u8> {
-    let mut v = Vec::new();
-    let ftyp_body = b"isom\x00\x00\x02\x00isom";
-    v.extend_from_slice(&(8u32 + ftyp_body.len() as u32).to_be_bytes());
-    v.extend_from_slice(b"ftyp");
-    v.extend_from_slice(ftyp_body);
-    v.extend_from_slice(&8u32.to_be_bytes());
-    v.extend_from_slice(b"free");
-    v
-}
-
-/// Minimal PE32 image: MZ stub, PE signature, COFF + 2-byte optional header,
-/// one section whose raw data ends at 0x300, padded to 0x400.
-fn make_pe() -> Vec<u8> {
-    let mut v = vec![0u8; 0x40];
-    v[0] = b'M';
-    v[1] = b'Z';
-    v[0x3C..0x40].copy_from_slice(&0x40u32.to_le_bytes());
-    v.extend_from_slice(b"PE\x00\x00");
-    v.extend_from_slice(&0x014Cu16.to_le_bytes()); // machine: i386
-    v.extend_from_slice(&1u16.to_le_bytes()); // number of sections
-    v.extend_from_slice(&0u32.to_le_bytes()); // timestamp
-    v.extend_from_slice(&0u32.to_le_bytes()); // symbol table ptr
-    v.extend_from_slice(&0u32.to_le_bytes()); // symbol count
-    v.extend_from_slice(&2u16.to_le_bytes()); // optional header size
-    v.extend_from_slice(&0x0102u16.to_le_bytes()); // characteristics
-    v.extend_from_slice(&0x010Bu16.to_le_bytes()); // PE32 magic
-    let mut sec = [0u8; 40];
-    sec[0..5].copy_from_slice(b".text");
-    sec[8..12].copy_from_slice(&0x100u32.to_le_bytes()); // virtual size
-    sec[12..16].copy_from_slice(&0x1000u32.to_le_bytes()); // virtual address
-    sec[16..20].copy_from_slice(&0x100u32.to_le_bytes()); // size of raw data
-    sec[20..24].copy_from_slice(&0x200u32.to_le_bytes()); // pointer to raw data
-    v.extend_from_slice(&sec);
-    v.resize(0x400, 0);
-    v
-}
-
-fn make_pdf() -> Vec<u8> {
-    b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
-      xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
-      trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n9\n%%EOF\n"
-        .to_vec()
-}
 
 /// A `Read + Seek` source that yields `fail_after` bytes and then fails with
 /// an I/O error. The pre-fix `while let Ok(n) = read(..)` loops treated this
@@ -265,7 +130,7 @@ fn inject_propagates_ube_read_errors_mp4() {
 
 #[test]
 fn inject_propagates_ube_read_errors_pe() {
-    assert_inject_propagates_ube_read_error("io_pe", make_pe(), |h, u, o| {
+    assert_inject_propagates_ube_read_error("io_pe", make_pe(64), |h, u, o| {
         PeAdapter.inject(h, u, o, "pe_overlay").map(|_| ())
     });
 }

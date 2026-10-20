@@ -5,22 +5,16 @@
 //! and re-check the full write → read → verify → remove chain, including the
 //! `pe_codebits` strategy whose capacity is the reason the change exists.
 
+use crate::common::*;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use strhide::engine::{
     PayloadSource, WriteOptions, read_carrier, remove_carrier, verify_carrier, write_carrier,
 };
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("strhide_compact_{}_{}", std::process::id(), name));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
 fn png() -> Vec<u8> {
-    include_bytes!("assets/minimal.png").to_vec()
+    include_bytes!("../assets/minimal.png").to_vec()
 }
 
 fn write(

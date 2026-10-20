@@ -1,19 +1,17 @@
-//! Regression tests for the P0/P1 security and correctness fixes (2026-10-17).
-//!
-//! Mirrors `python/tests/test_security_fixes.py`. All CLI invocations use
-//! piped/null stdio so a password prompt can never block the test run.
+// Regression tests for the P0/P1 security and correctness fixes (2026-10-17).
+//
+// Mirrors `python/tests/test_security_fixes.py`. All CLI invocations use
+// piped/null stdio so a password prompt can never block the test run.
 
+use crate::common::*;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Minimal valid 1x1 PNG (IHDR + IDAT + IEND, CRCs valid). Used wherever a
-/// test needs a *supported* carrier for the eof strategy: unrecognized files
-/// are rejected by design, so generic byte strings are no longer carriers.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn make_minimal_png() -> Vec<u8> {
-    include_bytes!("assets/minimal.png").to_vec()
+    include_bytes!("../assets/minimal.png").to_vec()
 }
 
 use rand::RngExt;
@@ -27,166 +25,6 @@ use strhide::envelope::{EnvelopeHeader, EnvelopeTrailer, MAX_HINT_LEN};
 use strhide::errors::StrHideError;
 
 // --------------------------------------------------------------------------- helpers
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("strhide_regress_{}_{}", std::process::id(), name));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn make_png() -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-    let ihdr_data: [u8; 13] = [1, 0, 0, 0, 1, 0, 0, 0, 8, 2, 0, 0, 0];
-    let ihdr_crc = crc32fast::hash(b"IHDR");
-    let _ = ihdr_crc;
-    let mut chunk = Vec::new();
-    chunk.extend_from_slice(&(ihdr_data.len() as u32).to_be_bytes());
-    chunk.extend_from_slice(b"IHDR");
-    chunk.extend_from_slice(&ihdr_data);
-    let crc = crc32fast::hash(&chunk[4..]);
-    chunk.extend_from_slice(&crc.to_be_bytes());
-    out.extend_from_slice(&chunk);
-    let idat_data = zlib_stored();
-    let mut chunk = Vec::new();
-    chunk.extend_from_slice(&(idat_data.len() as u32).to_be_bytes());
-    chunk.extend_from_slice(b"IDAT");
-    chunk.extend_from_slice(&idat_data);
-    let crc = crc32fast::hash(&chunk[4..]);
-    chunk.extend_from_slice(&crc.to_be_bytes());
-    out.extend_from_slice(&chunk);
-    out.extend_from_slice(b"\x00\x00\x00\x00IEND\xaeB`\x82");
-    out
-}
-
-/// A valid raw-deflate empty-stored stream stand-in is not needed for PNG
-/// parsing; a small zlib blob is fine for structural walking.
-fn zlib_stored() -> Vec<u8> {
-    // Raw deflate of a single filter byte + padding, produced via flate2.
-    let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
-    enc.write_all(b"\x00\xff\x00\x00").unwrap();
-    enc.finish().unwrap()
-}
-
-fn make_jpeg() -> Vec<u8> {
-    let soi = b"\xff\xd8";
-    let app0_data = b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00";
-    let mut v = Vec::new();
-    v.extend_from_slice(soi);
-    v.extend_from_slice(b"\xff\xe0");
-    v.extend_from_slice(&(2u16 + app0_data.len() as u16).to_be_bytes());
-    v.extend_from_slice(app0_data);
-    // DQT
-    let dqt_data = [b"\x00".as_slice(), &[0x10u8; 64][..]].concat();
-    v.extend_from_slice(b"\xff\xdb");
-    v.extend_from_slice(&(2u16 + dqt_data.len() as u16).to_be_bytes());
-    v.extend_from_slice(&dqt_data);
-    // SOF0
-    let sof_body = [
-        b"\x08".as_slice(),
-        &1u16.to_be_bytes()[..],
-        &1u16.to_be_bytes()[..],
-        &[1u8][..],
-        &[0x01, 0x11, 0x00][..],
-    ]
-    .concat();
-    v.extend_from_slice(b"\xff\xc0");
-    v.extend_from_slice(&(2u16 + sof_body.len() as u16).to_be_bytes());
-    v.extend_from_slice(&sof_body);
-    // SOS
-    v.extend_from_slice(b"\xff\xda");
-    v.extend_from_slice(&3u16.to_be_bytes());
-    v.extend_from_slice(&[1u8]);
-    // entropy data + EOI
-    v.extend_from_slice(&[0u8; 32]);
-    for _ in 0..8 {
-        v.extend_from_slice(b"\xff\x00");
-    }
-    v.extend_from_slice(b"\xff\xd9");
-    v
-}
-
-fn make_zip() -> Vec<u8> {
-    let name = b"hello.txt";
-    let data: Vec<u8> = b"hello world".repeat(50);
-    let crc = crc32fast::hash(&data);
-    let mut out = Vec::new();
-
-    // Local file header (stored, no compression)
-    out.extend_from_slice(b"PK\x03\x04");
-    out.extend_from_slice(&20u16.to_le_bytes()); // version needed
-    out.extend_from_slice(&0u16.to_le_bytes()); // flags
-    out.extend_from_slice(&0u16.to_le_bytes()); // method: stored
-    out.extend_from_slice(&0u16.to_le_bytes()); // time
-    out.extend_from_slice(&0u16.to_le_bytes()); // date
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes()); // extra len
-    out.extend_from_slice(name);
-    out.extend_from_slice(&data);
-
-    let cd_offset = out.len() as u32;
-    // Central directory header
-    out.extend_from_slice(b"PK\x01\x02");
-    out.extend_from_slice(&20u16.to_le_bytes()); // version made by
-    out.extend_from_slice(&20u16.to_le_bytes()); // version needed
-    out.extend_from_slice(&0u16.to_le_bytes()); // flags
-    out.extend_from_slice(&0u16.to_le_bytes()); // method
-    out.extend_from_slice(&0u16.to_le_bytes()); // time
-    out.extend_from_slice(&0u16.to_le_bytes()); // date
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes()); // extra
-    out.extend_from_slice(&0u16.to_le_bytes()); // comment
-    out.extend_from_slice(&0u16.to_le_bytes()); // disk
-    out.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
-    out.extend_from_slice(&0u32.to_le_bytes()); // external attrs
-    out.extend_from_slice(&0u32.to_le_bytes()); // local header offset
-    out.extend_from_slice(name);
-    let cd_size = out.len() as u32 - cd_offset;
-
-    // EOCD
-    out.extend_from_slice(b"PK\x05\x06");
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&cd_size.to_le_bytes());
-    out.extend_from_slice(&cd_offset.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes()); // comment len
-    out
-}
-
-fn make_zip_with_fake_eocd_comment() -> Vec<u8> {
-    let mut data = make_zip();
-    let eocd = data
-        .windows(4)
-        .rposition(|w| w == b"PK\x05\x06")
-        .expect("EOCD");
-    let comment = b"PREFIX-PK\x05\x06-MIDDLE-SUFFIX";
-    let clen_pos = eocd + 20;
-    data[clen_pos..clen_pos + 2].copy_from_slice(&(comment.len() as u16).to_le_bytes());
-    data.extend_from_slice(comment);
-    data
-}
-
-fn make_pdf_with_dirty_tail() -> Vec<u8> {
-    let mut body = Vec::new();
-    body.extend_from_slice(
-        b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
-          xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
-          trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n9\n%%EOF\n",
-    );
-    for _ in 0..8 {
-        body.extend_from_slice(b"DIRTY-TAIL-GARBAGE");
-    }
-    body
-}
 
 fn write_carrier_file(
     carrier: &Path,

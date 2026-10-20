@@ -1,12 +1,13 @@
-//! Regression tests for P2 protocol/diagnostic fixes (2026-10-17), batch 2.
-//!
-//! - #11: `verify_carrier` Level 2 must validate the envelope header (version
-//!   / hint_len / meta_len consistency) instead of only checking the trailer.
-//! - #14: xref-stream PDFs (no `trailer` keyword) must derive the next object
-//!   number from the tail's `N G obj` definitions instead of a hardcoded 9999,
-//!   must recover `/Root` from the tail, and must be refused when no `/Root`
-//!   exists at all (incremental would break the document tree).
+// Regression tests for P2 protocol/diagnostic fixes (2026-10-17), batch 2.
+//
+// - #11: `verify_carrier` Level 2 must validate the envelope header (version
+//   / hint_len / meta_len consistency) instead of only checking the trailer.
+// - #14: xref-stream PDFs (no `trailer` keyword) must derive the next object
+//   number from the tail's `N G obj` definitions instead of a hardcoded 9999,
+//   must recover `/Root` from the tail, and must be refused when no `/Root`
+//   exists at all (incremental would break the document tree).
 
+use crate::common::*;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -17,13 +18,6 @@ use strhide::engine::{
 };
 
 // --------------------------------------------------------------------------- helpers
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("strhide_p2b_{}_{}", std::process::id(), name));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 /// xref-stream PDF (PDF 1.5+): no `trailer` keyword; the trailer dict lives
 /// inside the XRef stream object. Highest object number is 4, so the next free
@@ -40,16 +34,8 @@ fn make_xref_stream_pdf() -> Vec<u8> {
         .to_vec()
 }
 
-/// PDF with neither a `trailer` keyword nor any `/Root` reference.
-fn make_pdf_without_root() -> Vec<u8> {
-    b"%PDF-1.5\n1 0 obj\n<< /Type /Foo >>\nendobj\nstartxref\n9\n%%EOF\n".to_vec()
-}
-
-/// Minimal valid 1x1 PNG (IHDR + IDAT + IEND, CRCs valid). Used wherever a
-/// test needs a *supported* carrier for the eof strategy: unrecognized files
-/// are rejected by design, so generic byte strings are no longer carriers.
 fn make_minimal_png() -> Vec<u8> {
-    include_bytes!("assets/minimal.png").to_vec()
+    include_bytes!("../assets/minimal.png").to_vec()
 }
 
 /// Write a plaintext EOF-strategy envelope and return (output path, ube offset).
