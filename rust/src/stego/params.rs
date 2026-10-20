@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::errors::StrHideError;
+
 /// Fine-tuning parameters for spatial-domain steganography (e.g. HILL, WOW).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpatialParams {
@@ -36,6 +38,56 @@ impl Default for SpatialParams {
     }
 }
 
+impl SpatialParams {
+    /// Reject parameter combinations that the HILL pipeline cannot serve.
+    ///
+    /// Both low-pass windows must be **positive odd** numbers: the symmetric
+    /// padding is derived as `1 + (p1 - 1) / 2 + (p2 - 1) / 2`, which is only
+    /// exact for odd windows, and the separable stage-3 convolution indexes
+    /// whole samples.
+    ///
+    /// This is what turns the previous hard failure into a readable error.
+    /// Before the padding was derived, `pad` was a constant 9 and any
+    /// `p1 + p2 > 18` combination panicked with a slice range overflow inside
+    /// the stage-3 pass (`range end index ... out of range`), reachable from
+    /// the CLI via `--p1-window 5` or `--p2-window 31`.
+    pub fn validate(&self) -> Result<(), StrHideError> {
+        for (name, window) in [("p1_window", self.p1_window), ("p2_window", self.p2_window)] {
+            if window == 0 || window % 2 == 0 {
+                return Err(StrHideError::General(format!(
+                    "HILL parameter '{name}' must be a positive odd number, got {window}"
+                )));
+            }
+            // Upper bound keeps the padding (and the intermediate buffers)
+            // bounded; anything larger is a configuration mistake, not a
+            // tuning choice.
+            if window > 63 {
+                return Err(StrHideError::General(format!(
+                    "HILL parameter '{name}' must be <= 63, got {window}"
+                )));
+            }
+        }
+        if self.high_pass_kernel.iter().any(|v| !v.is_finite()) {
+            return Err(StrHideError::General(
+                "HILL parameter 'high_pass_kernel' must contain only finite values".into(),
+            ));
+        }
+        if !self.epsilon.is_finite() || self.epsilon <= 0.0 {
+            return Err(StrHideError::General(format!(
+                "HILL parameter 'epsilon' must be a finite positive number, got {}",
+                self.epsilon
+            )));
+        }
+        if !self.wet_cost.is_finite() || self.wet_cost <= 0.0 {
+            return Err(StrHideError::General(format!(
+                "HILL parameter 'wet_cost' must be a finite positive number, got {}",
+                self.wet_cost
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Fine-tuning parameters for JPEG-domain DCT steganography (e.g. UERD).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JpegParams {
@@ -60,6 +112,43 @@ impl Default for JpegParams {
             block_exclusion_percentile: 0.20,
             wet_cost: 1e13,
         }
+    }
+}
+
+impl JpegParams {
+    /// Reject parameter values that would produce a NaN/Inf cost map or an
+    /// empty candidate set (both surface later as an opaque "no capacity" or
+    /// "no hidden data" error instead of a configuration error).
+    pub fn validate(&self) -> Result<(), StrHideError> {
+        for (name, value) in [
+            ("neighbor_weight", self.neighbor_weight),
+            ("mode_dc_weight", self.mode_dc_weight),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(StrHideError::General(format!(
+                    "UERD parameter '{name}' must be a finite non-negative number, got {value}"
+                )));
+            }
+        }
+        if self.min_abs_coeff < 0 {
+            return Err(StrHideError::General(format!(
+                "UERD parameter 'min_abs_coeff' must be >= 0, got {}",
+                self.min_abs_coeff
+            )));
+        }
+        if !(0.0..1.0).contains(&self.block_exclusion_percentile) {
+            return Err(StrHideError::General(format!(
+                "UERD parameter 'block_exclusion_percentile' must be in [0, 1), got {}",
+                self.block_exclusion_percentile
+            )));
+        }
+        if !self.wet_cost.is_finite() || self.wet_cost <= 0.0 {
+            return Err(StrHideError::General(format!(
+                "UERD parameter 'wet_cost' must be a finite positive number, got {}",
+                self.wet_cost
+            )));
+        }
+        Ok(())
     }
 }
 

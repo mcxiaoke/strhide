@@ -61,8 +61,20 @@ impl SpatialCostModel for HillCostModel {
             }
         }
 
-        // Symmetric padding: pad by (p1 + p2) / 2 = (3 + 15) / 2 = 9
-        let pad = 9usize;
+        // Symmetric padding must absorb every stage's row/column loss so the
+        // final cost map is exactly h x w (composition of scipy `mode='same'`
+        // convolutions). Losses: high-pass 2, stage-2 (p1 - 1), stage-3 (p2 - 1),
+        // hence `2 * pad = 2 + (p1 - 1) + (p2 - 1)`.
+        //
+        // For the default windows (p1 = 3, p2 = 15) this is 1 + 1 + 7 = 9, i.e.
+        // bit-for-bit identical to the previously hard-coded constant. Any
+        // other window pair needs the derived value; the old constant 9 made
+        // every p1 + p2 > 18 combination index out of bounds.
+        // `p1`/`p2` are validated as positive odd numbers by
+        // `SpatialParams::validate`, so the halving below is exact.
+        let p1 = params.p1_window.max(1);
+        let p2 = params.p2_window.max(1);
+        let pad = 1 + (p1 - 1) / 2 + (p2 - 1) / 2;
         let (x_pad, hp, wp) = pad_symmetric(&gray, h, w, pad);
 
         // Stage 1: High-pass filtering (KB 3x3 kernel)
@@ -88,8 +100,7 @@ impl SpatialCostModel for HillCostModel {
             }
         }
 
-        // Stage 2: Low-pass filtering (3x3 average), followed by reciprocal
-        let p1 = params.p1_window.max(1);
+        // Stage 2: Low-pass filtering (p1 x p1 box average), followed by reciprocal
         let l1 = 1.0f64 / (p1 * p1) as f64;
         let (h2, w2) = (h1 - (p1 - 1), w1 - (p1 - 1));
         let mut i2 = vec![0.0f64; h2 * w2];
@@ -107,8 +118,7 @@ impl SpatialCostModel for HillCostModel {
             }
         }
 
-        // Stage 3: Low-pass filtering (15x15 average), separable convolution
-        let p2 = params.p2_window.max(1);
+        // Stage 3: Low-pass filtering (p2 x p2 average), separable convolution
         let l2 = 1.0f64 / p2 as f64;
 
         // Vertical pass

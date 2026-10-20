@@ -126,7 +126,7 @@ pub fn embed_jpeg(
             let target_bit = (b >> (7 - bit_i)) & 1;
             let (bi, k) = header_slots[byte_i * 8 + bit_i];
             let coeff = &mut coeffs.components[0].blocks[bi][k];
-            apply_dct_matching(coeff, target_bit, perm_seed[bit_i], bi ^ k);
+            embed_dct_lsb(coeff, target_bit);
         }
     }
 
@@ -136,7 +136,7 @@ pub fn embed_jpeg(
             let target_bit = (b >> (7 - bit_i)) & 1;
             let (bi, k) = body_slots[byte_i * 8 + bit_i];
             let coeff = &mut coeffs.components[0].blocks[bi][k];
-            apply_dct_matching(coeff, target_bit, perm_seed[bit_i], bi ^ k);
+            embed_dct_lsb(coeff, target_bit);
         }
     }
 
@@ -144,9 +144,12 @@ pub fn embed_jpeg(
     dct_io::write_coefficients(carrier_bytes, &coeffs).map_err(map_dct_error)
 }
 
-/// Modify an eligible AC coefficient's LSB using DCT matching (+-1).
-/// Strict protection: never allows |coeff| to drop below 2 (prevents run-length changes).
-fn apply_dct_matching(coeff: &mut i16, target_bit: u8, _seed_byte: u8, _slot: usize) {
+/// Write `target_bit` into an eligible AC coefficient's LSB by replacement.
+///
+/// Strict protection: never allows |coeff| to drop below 2 (prevents run-length
+/// changes). Replacement (not `±1` matching) keeps `|coeff| & !1` invariant,
+/// which is what makes the UERD cost map reproducible at extraction time.
+fn embed_dct_lsb(coeff: &mut i16, target_bit: u8) {
     let current_lsb = ((*coeff as i32) & 1) as u8;
     if current_lsb != target_bit {
         let v = *coeff;

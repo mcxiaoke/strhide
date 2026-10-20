@@ -1,9 +1,25 @@
 //! Spatial domain steganographic embedding and extraction engine (PNG).
 //!
 //! Uses content-adaptive distortion costs (e.g. HILL) to isolate complex texture
-//! and noisy regions, completely avoiding smooth areas. Implements LSB Matching
-//! (+-1 adjustment) rather than classic LSB replacement, ensuring immunity to
-//! Chi-square and sample-pair (SPA) steganalysis.
+//! and noisy regions, completely avoiding smooth areas.
+//!
+//! # Embedding operation
+//!
+//! Bits are written by **LSB replacement** (`val & 0xFE | bit`, i.e. `val ^= 1`
+//! when the bit differs), *not* LSB matching. This is a deliberate constraint,
+//! not an oversight: the extractor rebuilds the slot ranking from a cost map
+//! computed on the stego image, so every modification must leave that cost map
+//! bit-identical. Replacement keeps `val & 0xFE` invariant, which makes the
+//! masked-value cost map reproducible at extraction time; a random `±1` choice
+//! (true LSB matching) would change `val & 0xFE` for half of the modified
+//! pixels and desynchronise the ranking.
+//!
+//! Consequence, stated plainly: replacement is the operation that chi-square
+//! and sample-pair (SPA) detectors target. Detection resistance here comes only
+//! from the low modification rate of content-adaptive placement, never from the
+//! modification rule. A true `±1` rule requires first making slot selection
+//! independent of the exact cost ordering (e.g. block-level selection), which
+//! this engine does not do.
 
 use std::io::{Cursor, Read, Write};
 
@@ -328,12 +344,7 @@ pub fn embed_spatial(
             let target_bit = (b >> (7 - bit_i)) & 1;
             let slot = header_slots[byte_i * 8 + bit_i];
             let byte_idx = slot * image.channels + channel_offset;
-            apply_lsb_matching(
-                &mut image.pixels[byte_idx],
-                target_bit,
-                perm_seed[bit_i],
-                slot,
-            );
+            embed_lsb(&mut image.pixels[byte_idx], target_bit);
         }
     }
 
@@ -343,24 +354,19 @@ pub fn embed_spatial(
             let target_bit = (b >> (7 - bit_i)) & 1;
             let slot = body_slots[byte_i * 8 + bit_i];
             let byte_idx = slot * image.channels + channel_offset;
-            apply_lsb_matching(
-                &mut image.pixels[byte_idx],
-                target_bit,
-                perm_seed[bit_i],
-                slot,
-            );
+            embed_lsb(&mut image.pixels[byte_idx], target_bit);
         }
     }
 
     encode_png(&image)
 }
 
-fn apply_lsb_matching(val: &mut u8, target_bit: u8, _seed_byte: u8, _slot: usize) {
-    let current_lsb = *val & 1;
-    if current_lsb != target_bit {
-        // Toggling LSB flips between 2k and 2k+1, which is a delta of +-1 and
-        // strictly preserves the high 7 bits (val & 0xFE), ensuring 100% stable
-        // cost map computation across embed and extract.
+/// Write `target_bit` into the LSB of `val` by replacement.
+///
+/// `val & 0xFE` is preserved by construction, which is what keeps the HILL cost
+/// map (computed on `val & 0xFE`) identical between embed and extract.
+fn embed_lsb(val: &mut u8, target_bit: u8) {
+    if (*val & 1) != target_bit {
         *val ^= 1;
     }
 }

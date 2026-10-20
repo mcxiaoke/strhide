@@ -23,6 +23,12 @@ pub fn embed_carrier(
     payload: &[u8],
     options: &StegoOptions,
 ) -> Result<Vec<u8>, StrHideError> {
+    // Validate the whole option set up front: a bad window size must surface as
+    // a configuration error, not as a panic deep inside the HILL convolution or
+    // as an opaque "no capacity" later.
+    options.spatial_params.validate()?;
+    options.jpeg_params.validate()?;
+
     if carrier_bytes.len() >= 2 && &carrier_bytes[..2] == b"\xFF\xD8" {
         // JPEG format
         let model =
@@ -68,6 +74,9 @@ pub fn extract_carrier(
     carrier_bytes: &[u8],
     options: &StegoOptions,
 ) -> Result<Vec<u8>, StrHideError> {
+    options.spatial_params.validate()?;
+    options.jpeg_params.validate()?;
+
     if carrier_bytes.len() >= 2 && &carrier_bytes[..2] == b"\xFF\xD8" {
         // JPEG format
         let model =
@@ -122,6 +131,9 @@ pub fn probe_carrier_capacity(
     carrier_bytes: &[u8],
     options: &StegoOptions,
 ) -> Result<StegoCapacityInfo, StrHideError> {
+    options.spatial_params.validate()?;
+    options.jpeg_params.validate()?;
+
     if carrier_bytes.len() >= 2 && &carrier_bytes[..2] == b"\xFF\xD8" {
         let model =
             CostModelRegistry::get_jpeg_model(options.algorithm.as_deref()).ok_or_else(|| {

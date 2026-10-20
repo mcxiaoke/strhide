@@ -24,7 +24,7 @@
 - **默认安全**——完整性/签名拒绝检查会拒绝修改不宜触碰的文件（如签名二进制）；`write`、`restore` 与 `embed` 默认输出至 `<stem>-out.<ext>` 新文件，原始宿主 100% 保持干净；提供显式 `--in-place` 选项进行原地修改（自动创建 `.bak` 备份）；`read`、`extract`、`write` 和 `restore` 默认拒绝覆盖已存在的输出文件（需 `--overwrite` 才允许）；保留原始文件时间戳。
 - **TOML 配置**——`./strhide.toml` 或 `~/.strhide/config.toml` 提供默认值，显式命令行参数（`-c, --config`）始终优先（详见注解模板 [`strhide.sample.toml`](strhide.sample.toml)）。
 - **批量与递归载体**——`write`、`restore`、`scan`、`inspect`、`verify`、`embed` 均支持一次处理多个文件或目录递归扫描（`-r, --recursive`）；`read` 针对单个载体。
-- **内容自适应隐写（HILL & UERD）**——`embed` 与 `extract` 命令直接在图像像素（PNG，通过 HILL 成本模型进行 LSB Matching）或 DCT 频域系数（JPEG，通过 UERD 成本模型）中嵌入数据。与结构层注入不同，内容隐写修改的是最小失真纹理区，天然免疫元数据剥离清洗，且抗统计隐写分析。
+- **内容自适应隐写（HILL & UERD）**——`embed` 与 `extract` 命令直接在图像像素（PNG，按 HILL 成本模型选位、以 LSB 替换写入）或 DCT 频域系数（JPEG，通过 UERD 成本模型）中嵌入数据。与结构层注入不同，内容隐写修改的是最小失真纹理区，可抵御元数据剥离清洗；抗检测性来自内容自适应选位带来的低改动率，**不来自位写入规则**——实际写入方式是 LSB 替换（`val & 0xFE | bit`），这正是卡方/SPA 检测器的攻击目标。
 
 ## 安装
 
@@ -172,7 +172,7 @@ meta = inspect_carrier("carrier.png", password="pw")
 
 | 隐写域 | 支持格式 | 算法 | 机制特点 |
 | --- | --- | --- | --- |
-| 空间域 | PNG（RGB/RGBA/灰度） | **HILL**（High-Low-Low） | 最小失真 KB 高通 + 双级均值平滑，LSB Matching（±1）与确定性掩码 |
+| 空间域 | PNG（RGB/RGBA/灰度） | **HILL**（High-Low-Low） | 最小失真 KB 高通 + 双级均值平滑；LSB 替换写入，成本图按 `val & 0xFE` 掩码以保证嵌入/提取槽位排序一致 |
 | DCT 频域 | JPEG / JPG（基线编码） | **UERD** | 量化表加权能量与 8 邻域扩散，通过 `dct-io` 实现无损重编 |
 
 *安全拦截防护*：APNG 动图（`acTL`）、调色板索引图（`PLTE`）、隔行扫描图（Adam7）与渐进式 JPEG（SOF2）会被自动检测并优雅拦截，保护原图功能与外观不受破坏。
