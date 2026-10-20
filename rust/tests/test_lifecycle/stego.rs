@@ -613,25 +613,33 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
 
     // The model matches the engine: the header read from those slots must parse
     // as the real envelope length (payload + 49 for an incompressible body).
+    // The header word also carries the codec/h flags in its top bits, so the
+    // length has to be decoded rather than read as a bare u32.
     let header = read_header(&first, &slots_a);
-    let total_len = u32::from_be_bytes([header[28], header[29], header[30], header[31]]) as usize;
+    let word = u32::from_be_bytes([header[28], header[29], header[30], header[31]]);
+    let (total_len, codec_id, stc_h) = strhide::stego::spatial::engine::decode_header_word(word);
     assert_eq!(
-        total_len,
+        total_len as usize,
         payload.len() + 49,
         "header at the computed slots must carry the real envelope length"
     );
+    assert_eq!(codec_id, 0, "default embed must declare the Hamming codec");
+    assert_eq!(stc_h, 0, "Hamming leaves the stc-h field empty");
     let header2 = read_header(&second, &slots_a);
-    let total_len2 =
-        u32::from_be_bytes([header2[28], header2[29], header2[30], header2[31]]) as usize;
-    assert_eq!(total_len2, total_len, "header position is salt independent");
+    let word2 = u32::from_be_bytes([header2[28], header2[29], header2[30], header2[31]]);
+    assert_eq!(
+        word2 & strhide::stego::spatial::engine::HEADER_LEN_MASK,
+        total_len,
+        "header position is salt independent"
+    );
 
     // A different secret moves the header: parsing the same carrier as if the
     // other secret had been used yields garbage.
     let slots_b = header_slots_of(&png_bytes, Some("another-secret-2026"));
     assert_ne!(slots_a, slots_b, "header slots must be keyed");
     let foreign = read_header(&first, &slots_b);
-    let foreign_len =
-        u32::from_be_bytes([foreign[28], foreign[29], foreign[30], foreign[31]]) as usize;
+    let foreign_word = u32::from_be_bytes([foreign[28], foreign[29], foreign[30], foreign[31]]);
+    let (foreign_len, _, _) = strhide::stego::spatial::engine::decode_header_word(foreign_word);
     assert!(
         foreign_len != total_len,
         "a foreign secret must not land on the real header"

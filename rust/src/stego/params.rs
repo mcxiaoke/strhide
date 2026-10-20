@@ -8,6 +8,65 @@ use serde::{Deserialize, Serialize};
 use crate::errors::StrHideError;
 use crate::params::Profile;
 
+/// Matrix-coding layer used to place payload bits into candidate slots.
+///
+/// Both variants write "a slot's LSB equals a payload bit"; they differ only in
+/// *which* slots get changed, and therefore in distortion:
+///
+/// - [`Hamming`](Self::Hamming): fixed blocks of seven slots carry three bits,
+///   at most one slot per block is touched (0.2917 changes/bit). Block-local,
+///   so a block may have to flip an expensive slot even though a cheap one is
+///   available elsewhere.
+/// - [`Stc`](Self::Stc): one global trellis (Viterbi) over the whole slot
+///   sequence, minimising the *cost-weighted* distortion subject to
+///   `H x = message`. Change count is higher (~0.5/bit) but every change lands
+///   on the cheapest slots.
+///
+/// The choice is **not** self-describing: it is recorded in two spare bits of
+/// the envelope header (see `spatial::engine`), so extraction never needs to be
+/// told which one was used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StegoCodec {
+    /// `(7,3)` Hamming matrix embedding (default, unchanged behaviour).
+    #[default]
+    Hamming,
+    /// Syndrome-trellis codes.
+    Stc,
+}
+
+impl StegoCodec {
+    /// Stable identifier written into the envelope header.
+    pub fn id(self) -> u32 {
+        match self {
+            StegoCodec::Hamming => 0,
+            StegoCodec::Stc => 1,
+        }
+    }
+
+    /// Decode a header identifier; unknown values are an error rather than a
+    /// silent fallback, because a wrong guess can only ever fail downstream.
+    pub fn from_id(id: u32) -> Result<Self, StrHideError> {
+        match id {
+            0 => Ok(StegoCodec::Hamming),
+            1 => Ok(StegoCodec::Stc),
+            other => Err(StrHideError::CorruptedData(format!(
+                "Unknown matrix-coding identifier {other} in envelope header"
+            ))),
+        }
+    }
+
+    /// Human-readable form for diagnostics ("Hamming k=3", "STC h=8").
+    pub fn describe(self, stc_h: u8) -> String {
+        match self {
+            StegoCodec::Hamming => {
+                format!("Hamming k={}", crate::stego::coding::DEFAULT_HAMMING_K)
+            }
+            StegoCodec::Stc => format!("STC h={stc_h}"),
+        }
+    }
+}
+
 /// Fine-tuning parameters for spatial-domain steganography (e.g. HILL, WOW).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpatialParams {
@@ -21,6 +80,16 @@ pub struct SpatialParams {
     pub epsilon: f64,
     /// Fraction of smoothest pixels to completely exclude from embedding (0.0 .. 0.9, default 0.30).
     pub exclusion_percentile: f64,
+    /// Matrix-coding layer (default Hamming; STC is opt-in).
+    #[serde(default)]
+    pub codec: StegoCodec,
+    /// STC constraint height, used only when `codec == Stc` (default 8).
+    #[serde(default = "default_stc_h")]
+    pub stc_h: u8,
+}
+
+fn default_stc_h() -> u8 {
+    crate::stego::coding::DEFAULT_STC_H
 }
 
 impl Default for SpatialParams {
@@ -32,6 +101,8 @@ impl Default for SpatialParams {
             p2_window: 15,
             epsilon: f32::EPSILON as f64,
             exclusion_percentile: 0.30,
+            codec: StegoCodec::Hamming,
+            stc_h: default_stc_h(),
         }
     }
 }
@@ -75,6 +146,9 @@ impl SpatialParams {
                 "HILL parameter 'epsilon' must be a finite positive number, got {}",
                 self.epsilon
             )));
+        }
+        if self.codec == StegoCodec::Stc {
+            crate::stego::coding::validate_stc_h(self.stc_h)?;
         }
         Ok(())
     }

@@ -182,6 +182,16 @@ Unrecognized formats are **rejected**: strhide only modifies explicitly supporte
 is evaluated on a `ceil(sqrt(block_count))` grid instead of the real image grid. Both sides compute the same
 approximation, so embed/extract stay symmetric; only the cost model is slightly less faithful to the paper.
 
+*Matrix coding layer (`--codec`)*: PNG payload bits are placed by `(7,3)` Hamming matrix embedding by default.
+`--codec stc` switches to **syndrome-trellis codes** (Viterbi over the whole slot sequence, `--stc-h 4..10`,
+default 8), which minimises *cost-weighted* distortion instead of per-block change count. The choice is recorded
+in the carrier header, so `extract` never needs the flag. Measured on the bundled corpus (33 KB incompressible
+payload): weighted distortion `Σρ` dropped 408x and 2.0x on two textured carriers but rose 12% on a near-uniform
+one; change count rose 71% throughout (0.5 vs 0.2917 per bit); self-scan was never worse (25/100 → 0/100 on the
+reference carrier); time is 1.2–1.3x. Because STC needs ~1 slot per bit against Hamming's 2.33, its capacity
+ceiling is 2.33x higher, which is reported as such — filling it raises detectability, so the recommended payload
+stays at half the ceiling. Default remains Hamming: the change-count cost is user-visible and the corpus is small.
+
 *What the self-check can and cannot see*: `scan` is triage, not proof. JPEG carriers go through a **calibrated DCT
 test** (`dct:calibration`): the image is decoded, cropped 4 px so the 8x8 grid lands half a block off the embedding
 grid, re-quantised with the file's own table, and the even/odd pair imbalance is compared against that reference.

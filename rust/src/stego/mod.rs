@@ -13,7 +13,7 @@ pub mod registry;
 pub mod spatial;
 pub mod traits;
 
-pub use params::{JpegParams, SpatialParams, StegoOptions};
+pub use params::{JpegParams, SpatialParams, StegoCodec, StegoOptions};
 pub use registry::CostModelRegistry;
 
 use crate::errors::StrHideError;

@@ -90,6 +90,23 @@ pub fn derive_header_perm_seed(password: Option<&str>) -> [u8; 32] {
     header_seed
 }
 
+/// Derive the STC trellis seed from the body permutation seed.
+///
+/// Takes the already-derived `perm_seed` instead of the password so the caller
+/// does not pay a second 100k-iteration PBKDF2 per embed: both ends call
+/// [`derive_keys`] exactly once and domain-separate from it here.
+///
+/// The trellis (`ĥ`, i.e. the parity-check matrix) must stay as secret as the
+/// payload key -- a public `H` lets an attacker compute the syndrome of any
+/// candidate change set, which is exactly the detector we are trying to deny.
+pub fn derive_stc_seed(perm_seed: &[u8; 32], salt: &[u8]) -> u64 {
+    let hk = Hkdf::<Sha256>::new(Some(salt), perm_seed);
+    let mut out = [0u8; 8];
+    hk.expand(b"strhide-stc-trellis-v1", &mut out)
+        .expect("HKDF expand stc trellis seed");
+    u64::from_be_bytes(out)
+}
+
 /// Fallback built-in key when no password is provided.
 fn default_builtin_key(salt: &[u8]) -> ([u8; 32], [u8; 32]) {
     derive_keys(PUBLIC_DEFAULT_SECRET, salt)

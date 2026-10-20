@@ -35,8 +35,11 @@ use flate2::write::ZlibEncoder;
 
 use crate::errors::StrHideError;
 use crate::stego::StegoCapacityInfo;
+use crate::stego::coding::{
+    Move, StcTrellis, hamming_embed_ternary, hamming_extract_bytes, spatial_move, write_bit_ternary,
+};
 use crate::stego::envelope::{pack_envelope, unpack_envelope};
-use crate::stego::params::SpatialParams;
+use crate::stego::params::{SpatialParams, StegoCodec};
 use crate::stego::prng::permute_indices;
 use crate::stego::traits::SpatialCostModel;
 
@@ -49,6 +52,89 @@ use crate::stego::traits::SpatialCostModel;
 /// instead of re-typing the bounds.
 pub const SPATIAL_ELIGIBLE_MIN: u8 = 8;
 pub const SPATIAL_ELIGIBLE_MAX: u8 = 247;
+
+/// Expected modified slots per embedded payload bit under STC when the trellis
+/// is driven at one syndrome row per element (`n = m + h - 1`, alpha ~ 1).
+///
+/// Nearly every row constrains the solution, so about half of the used slots
+/// change -- roughly 1.7x the Hamming k=3 rate of 0.2917. The mitigating factor
+/// is *which* slots: the trellis is free to spend its changes on the cheapest
+/// ones instead of an arbitrary slot inside each fixed 7-slot block.
+pub const STC_EXPECTED_CHANGE_RATE: f64 = 0.5;
+
+// ---------------------------------------------------------------------------
+// Envelope header layout (32 bytes = 256 slots)
+// ---------------------------------------------------------------------------
+//
+// [0..16) salt, [16..28) nonce, [28..32) a big-endian `u32`.
+//
+// That word used to be the bare envelope length. An envelope is capped at
+// 64 MiB = 2^26 (see the validation in `extract_spatial`), so bits 26..32 are
+// always zero for a real envelope -- six spare bits. They now carry the
+// matrix-coding parameters, which keeps the header exactly 32 bytes and needs
+// no format-version bump: a carrier written before this change has zeros there
+// and therefore decodes as `Hamming` / no `h`, i.e. the behaviour it was
+// written with.
+
+/// Bits of the header word that hold the envelope length.
+const HEADER_LEN_BITS: u32 = 26;
+/// Mask of the length field inside the header word. Exported because tests and
+/// diagnostics need to read the length back out of a carrier without
+/// re-deriving the whole engine.
+pub const HEADER_LEN_MASK: u32 = (1 << HEADER_LEN_BITS) - 1;
+const HEADER_CODEC_SHIFT: u32 = HEADER_LEN_BITS;
+const HEADER_CODEC_BITS: u32 = 2;
+const HEADER_STC_H_SHIFT: u32 = 28;
+const HEADER_STC_H_BITS: u32 = 4;
+
+/// Largest envelope the 26-bit length field can express.
+pub const HEADER_LEN_MAX: u32 = HEADER_LEN_MASK;
+
+fn encode_header_word(len: u32, codec: StegoCodec, stc_h: u8) -> u32 {
+    debug_assert_eq!(len & !HEADER_LEN_MASK, 0, "envelope length exceeds 26 bits");
+    // Canonical form: the `h` field is only meaningful for STC, so a Hamming
+    // carrier always writes zero there. That keeps the header word a pure
+    // function of what actually matters and keeps the field free for a future
+    // codec that wants it.
+    let stc_h = match codec {
+        StegoCodec::Stc => stc_h,
+        StegoCodec::Hamming => 0,
+    };
+    (len & HEADER_LEN_MASK)
+        | ((codec.id() & ((1 << HEADER_CODEC_BITS) - 1)) << HEADER_CODEC_SHIFT)
+        | (((stc_h as u32) & ((1 << HEADER_STC_H_BITS) - 1)) << HEADER_STC_H_SHIFT)
+}
+
+/// Split a header word into `(envelope length, codec id, stc h)`.
+///
+/// The codec id is returned raw: validation against [`StegoCodec::from_id`] is
+/// the caller's job, because the extract path must fold an unknown id into the
+/// generic "no payload here" error instead of reporting it.
+pub fn decode_header_word(word: u32) -> (u32, u32, u8) {
+    let len = word & HEADER_LEN_MASK;
+    let codec_id = (word >> HEADER_CODEC_SHIFT) & ((1 << HEADER_CODEC_BITS) - 1);
+    let stc_h = ((word >> HEADER_STC_H_SHIFT) & ((1 << HEADER_STC_H_BITS) - 1)) as u8;
+    (len, codec_id, stc_h)
+}
+
+/// Slots needed to carry `bits` payload bits under `codec`.
+///
+/// STC needs `bits + h - 1` slots (one element per syndrome row plus the
+/// trellis warm-up), i.e. roughly one slot per bit. Hamming k=3 needs 2.33.
+/// Using fewer slots is **not** a capacity gain: the encoder flips a much
+/// larger fraction of the slots it does use, so the change budget is the same.
+fn slots_for(bits: usize, codec: StegoCodec, stc_h: u8) -> Result<usize, StrHideError> {
+    match codec {
+        StegoCodec::Hamming => Ok(crate::stego::coding::required_slots(
+            bits,
+            crate::stego::coding::DEFAULT_HAMMING_K,
+        )),
+        StegoCodec::Stc => {
+            let t = StcTrellis::from_seed(0, stc_h)?;
+            Ok(t.slots_for(bits))
+        }
+    }
+}
 
 /// Decoded raw image representation.
 #[derive(Debug, Clone)]
@@ -527,22 +613,27 @@ pub fn embed_spatial(
         .filter(|&s| !is_header[s])
         .collect();
 
-    // Header is 32 bytes = 256 bits: [16B Salt][12B Nonce][4B Total Envelope Len]
+    // Header is 32 bytes = 256 bits: [16B Salt][12B Nonce][4B flags+len]
     let total_len = envelope.len() as u32;
+    if total_len > HEADER_LEN_MAX {
+        return Err(StrHideError::General(format!(
+            "Envelope of {total_len} bytes exceeds the {HEADER_LEN_MAX}-byte header length field"
+        )));
+    }
+    let header_word = encode_header_word(total_len, params.codec, params.stc_h);
     let mut header_bytes = Vec::with_capacity(32);
     header_bytes.extend_from_slice(&envelope[..28]); // Salt (16B) + Nonce (12B)
-    header_bytes.extend_from_slice(&total_len.to_be_bytes());
+    header_bytes.extend_from_slice(&header_word.to_be_bytes());
 
     let ciphertext_body = &envelope[28..];
     let ciphertext_bits = ciphertext_body.len() * 8;
-    let hamming_k = crate::stego::coding::DEFAULT_HAMMING_K;
-    let needed_body_slots = crate::stego::coding::required_slots(ciphertext_bits, hamming_k);
+    let needed_body_slots = slots_for(ciphertext_bits, params.codec, params.stc_h)?;
 
     if needed_body_slots > body_candidates.len() {
         return Err(StrHideError::General(format!(
-            "Carrier capacity exceeded: needed {} body slots (Hamming k={}), available {} slots (strategy: spatial-{})",
+            "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{})",
             needed_body_slots,
-            hamming_k,
+            params.codec.describe(params.stc_h),
             body_candidates.len(),
             cost_model.id(),
         )));
@@ -554,6 +645,7 @@ pub fn embed_spatial(
         password.unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
         salt,
     );
+    let stc_seed = crate::stego::envelope::derive_stc_seed(&perm_seed, salt);
 
     let mut body_slots = body_candidates[..needed_body_slots].to_vec();
     permute_indices(&mut body_slots, &perm_seed);
@@ -574,7 +666,7 @@ pub fn embed_spatial(
             let target_bit = (b >> (7 - bit_i)) & 1;
             let slot = header_slots[byte_i * 8 + bit_i];
             let byte_idx = slot * image.channels + channel_offset;
-            crate::stego::coding::write_bit_ternary(
+            write_bit_ternary(
                 &mut image.pixels[byte_idx],
                 target_bit,
                 rho_plus[slot],
@@ -583,28 +675,32 @@ pub fn embed_spatial(
         }
     }
 
-    // Embed Phase 2: Ciphertext body using (7, 3) Hamming matrix embedding with
-    // ternary ±1 writes. Hamming decides *which* slot to flip (syndrome), the
-    // direction costs decide only *which way* — a slot is never flipped twice,
-    // so recording the legality once up front is enough.
+    // Embed Phase 2: Ciphertext body. The matrix code decides *which* slots are
+    // flipped; the direction costs decide only *which way*, and a slot is never
+    // flipped twice, so recording the legality once up front is enough.
     let mut slot_vals: Vec<u8> = body_slots
         .iter()
         .map(|&slot| image.pixels[slot * image.channels + channel_offset])
         .collect();
-    let moves: Vec<crate::stego::coding::Move> = slot_vals
-        .iter()
-        .map(|&v| crate::stego::coding::spatial_move(v))
-        .collect();
+    let moves: Vec<Move> = slot_vals.iter().map(|&v| spatial_move(v)).collect();
     let rp: Vec<f64> = body_slots.iter().map(|&s| rho_plus[s]).collect();
     let rm: Vec<f64> = body_slots.iter().map(|&s| rho_minus[s]).collect();
-    crate::stego::coding::hamming_embed_ternary(
-        &mut slot_vals,
-        &moves,
-        &rp,
-        &rm,
-        ciphertext_body,
-        hamming_k,
-    )?;
+    match params.codec {
+        StegoCodec::Hamming => {
+            hamming_embed_ternary(
+                &mut slot_vals,
+                &moves,
+                &rp,
+                &rm,
+                ciphertext_body,
+                crate::stego::coding::DEFAULT_HAMMING_K,
+            )?;
+        }
+        StegoCodec::Stc => {
+            let trellis = StcTrellis::from_seed(stc_seed, params.stc_h)?;
+            trellis.embed(&mut slot_vals, &moves, &rp, &rm, ciphertext_body)?;
+        }
+    }
 
     for (i, &slot) in body_slots.iter().enumerate() {
         image.pixels[slot * image.channels + channel_offset] = slot_vals[i];
@@ -701,14 +797,27 @@ pub fn extract_spatial(
     }
 
     let salt = &header_bytes[..16];
-    let total_len = u32::from_be_bytes([
-        header_bytes[28],
-        header_bytes[29],
-        header_bytes[30],
-        header_bytes[31],
-    ]) as usize;
+    let (total_len, codec, stc_h) = {
+        let word = u32::from_be_bytes([
+            header_bytes[28],
+            header_bytes[29],
+            header_bytes[30],
+            header_bytes[31],
+        ]);
+        let (len, codec_id, stc_h) = decode_header_word(word);
+        // Every decode failure below must look identical to "no envelope
+        // here": a wrong secret lands the header on the wrong slots, and a
+        // distinct message would tell an attacker that an envelope exists but
+        // the layout is wrong -- an oracle the AEAD path deliberately denies.
+        let no_hidden = || StrHideError::NoHiddenData("No valid payload found".into());
+        let codec = StegoCodec::from_id(codec_id).map_err(|_| no_hidden())?;
+        if codec == StegoCodec::Stc {
+            crate::stego::coding::validate_stc_h(stc_h).map_err(|_| no_hidden())?;
+        }
+        (len as usize, codec, stc_h)
+    };
 
-    if !(49..=64 * 1024 * 1024).contains(&total_len) {
+    if !(49..=HEADER_LEN_MAX as usize).contains(&total_len) {
         // Deliberately generic: a wrong secret lands the header on the wrong
         // slots, and a distinct message ("invalid size") would tell an attacker
         // that *an envelope exists here but the layout is wrong*, which is an
@@ -718,8 +827,7 @@ pub fn extract_spatial(
 
     let ciphertext_len = total_len - 28;
     let ciphertext_bits = ciphertext_len * 8;
-    let hamming_k = crate::stego::coding::DEFAULT_HAMMING_K;
-    let needed_body_slots = crate::stego::coding::required_slots(ciphertext_bits, hamming_k);
+    let needed_body_slots = slots_for(ciphertext_bits, codec, stc_h)?;
 
     if needed_body_slots > body_candidates.len() {
         return Err(StrHideError::NoHiddenData("No valid payload found".into()));
@@ -739,8 +847,18 @@ pub fn extract_spatial(
         .map(|&slot| image.pixels[slot * image.channels + channel_offset])
         .collect();
 
-    let ciphertext_body =
-        crate::stego::coding::hamming_extract_bytes(&slot_vals, ciphertext_len, hamming_k)?;
+    let ciphertext_body = match codec {
+        StegoCodec::Hamming => hamming_extract_bytes(
+            &slot_vals,
+            ciphertext_len,
+            crate::stego::coding::DEFAULT_HAMMING_K,
+        )?,
+        StegoCodec::Stc => {
+            let stc_seed = crate::stego::envelope::derive_stc_seed(&perm_seed, salt);
+            let trellis = StcTrellis::from_seed(stc_seed, stc_h)?;
+            trellis.extract(&slot_vals, ciphertext_bits)
+        }
+    };
 
     let mut full_envelope = Vec::with_capacity(total_len);
     full_envelope.extend_from_slice(&header_bytes[..28]); // Salt + Nonce
@@ -779,13 +897,29 @@ pub fn probe_spatial_capacity(
     let header_slots = 256;
     let available_body_slots = allowed_count.saturating_sub(header_slots);
     let hamming_k = crate::stego::coding::DEFAULT_HAMMING_K;
-    let max_ciphertext_bytes =
-        crate::stego::coding::max_payload_bytes(available_body_slots, hamming_k);
+    // The two codecs buy different payload per slot, and the difference is
+    // real (measured: a carrier that cannot hold 33 KB under Hamming holds it
+    // under STC). Reporting one codec's figure for the other would misstate the
+    // capability in whichever direction the user is asking about, so the number
+    // follows `params.codec`.
+    let max_ciphertext_bytes = match params.codec {
+        StegoCodec::Hamming => {
+            crate::stego::coding::max_payload_bytes(available_body_slots, hamming_k)
+        }
+        StegoCodec::Stc => {
+            // `bits + h - 1 = slots` -> `bits = slots - (h - 1)`.
+            let trellis = StcTrellis::from_seed(0, params.stc_h)?;
+            available_body_slots.saturating_sub(trellis.h() as usize - 1) / 8
+        }
+    };
     // Only the body-borne overhead comes off here: salt/nonce already paid for
     // by the 256 header slots. Subtracting MIN_ENVELOPE_LEN under-reported the
     // capacity by exactly 28 bytes (measured on real carriers).
     let max_raw_payload_bytes =
         max_ciphertext_bytes.saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
+    // The recommendation stays at half the ceiling for both codecs: STC's
+    // larger ceiling does not make a full-rate STC carrier less detectable
+    // (flip count rises with payload), it only removes an artificial limit.
     let recommended_max_bytes = max_raw_payload_bytes / 2;
 
     Ok(StegoCapacityInfo {
@@ -795,7 +929,13 @@ pub fn probe_spatial_capacity(
         available_slots: available_body_slots,
         max_raw_payload_bytes,
         recommended_max_bytes,
-        estimated_change_rate: crate::stego::coding::expected_change_rate(hamming_k),
+        estimated_change_rate: match params.codec {
+            StegoCodec::Hamming => crate::stego::coding::expected_change_rate(hamming_k),
+            // STC at one syndrome row per element (alpha ~ 1) must satisfy
+            // nearly all rows, so half the used slots change. Reported as-is:
+            // it is the number that decides whether STC ever becomes default.
+            StegoCodec::Stc => STC_EXPECTED_CHANGE_RATE,
+        },
     })
 }
 
@@ -1030,6 +1170,73 @@ mod tests {
                 "a write must stay inside the eight-value class: {a} -> {b}"
             );
         }
+    }
+
+    #[test]
+    fn stc_codec_roundtrips_and_stays_in_class() {
+        let (w, h) = (96usize, 96usize);
+        let pixels = row_correlated_pixels(w, h);
+        let png = craft_png(
+            w as u32,
+            h as u32,
+            &pixels,
+            &vec![2u8; h],
+            &[(b"tEXt", b"Comment\x00stc".as_slice())],
+            1,
+        );
+
+        let payload = b"stc-roundtrip-payload";
+        let params = SpatialParams {
+            codec: StegoCodec::Stc,
+            stc_h: 8,
+            ..SpatialParams::default()
+        };
+        let stego =
+            embed_spatial(&png, payload, Some("pw"), &HillCostModel, &params).expect("embed");
+
+        // The codec travels in the header, so an extractor that still defaults
+        // to Hamming must read the carrier correctly.
+        let extract_params = SpatialParams::default();
+        assert_eq!(extract_params.codec, StegoCodec::Hamming);
+        let extracted =
+            extract_spatial(&stego, Some("pw"), &HillCostModel, &extract_params).expect("extract");
+        assert_eq!(extracted, payload, "STC must be self-describing");
+
+        // Same selftest as the Hamming path: +/-1 inside the class, never more.
+        let before = decode_png(&png).expect("decode");
+        let after = decode_png(&stego).expect("decode stego");
+        assert!(
+            before.chunks == after.chunks,
+            "container must survive STC embedding"
+        );
+        let changed = before
+            .pixels
+            .iter()
+            .zip(after.pixels.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(changed > 0, "embedding must modify the carrier");
+        for (a, b) in before.pixels.iter().zip(after.pixels.iter()) {
+            assert!(a.abs_diff(*b) <= 1, "move too large: {a} -> {b}");
+            assert_eq!(a & 0xF8, b & 0xF8, "class left: {a} -> {b}");
+        }
+    }
+
+    #[test]
+    fn hamming_and_stc_headers_differ_only_in_the_flag_bits() {
+        // The length field is shared by both codecs, so a reader that ignores
+        // the flags still sees the right length -- that is what makes the
+        // change backwards compatible with pre-existing carriers.
+        for (codec, stc_h) in [(StegoCodec::Hamming, 0u8), (StegoCodec::Stc, 8)] {
+            let word = encode_header_word(1234, codec, stc_h);
+            let (len, codec_id, h) = decode_header_word(word);
+            assert_eq!(len, 1234, "{codec:?}: length must round-trip");
+            assert_eq!(codec_id, codec.id());
+            assert_eq!(h, if codec == StegoCodec::Hamming { 0 } else { 8 });
+        }
+        // Pre-existing carriers have zeros in every flag bit.
+        let legacy = encode_header_word(1234, StegoCodec::Hamming, 0);
+        assert_eq!(legacy, 1234, "a legacy header is the bare length");
     }
 
     #[test]

@@ -24,6 +24,10 @@
 
 use crate::errors::StrHideError;
 
+mod stc;
+
+pub use stc::{DEFAULT_STC_H, MAX_STC_H, MIN_STC_H, StcTrellis, validate_h as validate_stc_h};
+
 /// Default Hamming parameter k (7 slots carry 3 bits).
 pub const DEFAULT_HAMMING_K: usize = 3;
 
