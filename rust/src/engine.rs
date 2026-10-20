@@ -27,11 +27,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::RngExt;
 use serde::Serialize;
 
-use crate::adapters::{FinalizeCtx, HostAdapter, SeekRead, StrategyCapacity, TrailerCtx};
+use crate::adapters::{
+    FinalizeCtx, HostAdapter, SeekRead, SeekWrite, StrategyCapacity, TrailerCtx,
+};
 use crate::crypto::{
-    compress_stream, compute_file_sha256, decompress_stream, decrypt_metadata,
-    decrypt_stream_from_chunks, derive_keys, derive_stealth_magics, encrypt_metadata,
-    encrypt_stream_to_chunks, normalize_nfc,
+    compress_stream, decompress_stream, decrypt_metadata, decrypt_stream_from_chunks, derive_keys,
+    derive_stealth_magics, encrypt_metadata, encrypt_stream_to_chunks, normalize_nfc,
 };
 use crate::envelope::{
     EnvelopeHeader, EnvelopeTrailer, FLAG_COMPACT_META, FLAG_COMPRESSED, FLAG_ENCRYPTED,
@@ -482,15 +483,12 @@ pub fn sanitize_filename(name: &str) -> String {
 /// a password-independent structural opinion, which turns the bare "not found"
 /// message into actionable guidance instead of a dead end.
 fn no_hidden_data_error(
-    carrier: &mut File,
+    carrier: &mut dyn SeekRead,
     adapter: &'static dyn HostAdapter,
-    carrier_path: &Path,
+    label: &str,
     password_supplied: bool,
 ) -> StrHideError {
-    let mut msg = format!(
-        "No hidden strhide data found in '{}'",
-        carrier_path.display()
-    );
+    let mut msg = format!("No hidden strhide data found in '{label}'");
     let hints = adapter.suspicious_structures(carrier);
     if !hints.is_empty() {
         if password_supplied {
@@ -676,28 +674,108 @@ pub fn write_carrier(
 /// )?;
 /// # Ok(()) }
 /// ```
-pub fn write_carrier_with(
-    carrier_path: &Path,
+/// Parameters a re-read of the written output needs in order to confirm the
+/// envelope landed where it claims to.
+struct VerifyParams {
+    ube_offset: u64,
+    ube_size: u64,
+    inject_offset: u64,
+    inject_size: u64,
+    patch_offset: u32,
+    orig_patch_val: u32,
+    header_magic: [u8; 8],
+    trailer_magic: [u8; 4],
+    strategy: String,
+}
+
+/// Everything a write produces that does not depend on a path.
+struct WriteCoreResult {
+    format: &'static str,
+    strategy: String,
+    strategy_note: Option<String>,
+    raw_size: u64,
+    ube_size: u64,
+    is_encrypted: bool,
+    is_stealth: bool,
+    warning: Option<String>,
+    verify: VerifyParams,
+}
+
+/// Read the freshly written envelope back and confirm it matches the parameters
+/// that were used to write it.
+///
+/// Deliberately takes its own reader: the writer's output is a `File` or an
+/// in-memory cursor depending on the entry point, and both can produce a
+/// `&mut dyn SeekRead` fresh view without trait-object upcasting.
+fn verify_written(
+    reader: &mut dyn SeekRead,
+    p: &VerifyParams,
+    password: Option<&str>,
+    profile: &Profile,
+) -> Result<(), StrHideError> {
+    // Precisely verify the envelope just written at `p.ube_offset` (not merely
+    // "some envelope exists somewhere"), so a stale envelope from a previous
+    // injection cannot satisfy the check.
+    //
+    // The envelope is read back through `open_ube_reader` rather than at raw
+    // file offsets: for contiguous envelopes the virtual stream is a bounded
+    // slice of the very same bytes, and for scattered strategies (pe_codebits)
+    // there are no file offsets to read at all.
+    let adapter = find_adapter_or_reject(reader, "<written envelope>")?;
+    let mut ube_stream = adapter.open_ube_reader(reader, p.ube_offset, p.ube_size, &p.strategy)?;
+    let mut hdr_bytes = [0u8; HEADER_SIZE];
+    ube_stream.read_exact(&mut hdr_bytes)?;
+    let written_header = EnvelopeHeader::unpack_with_profile(&hdr_bytes, password, profile)?;
+    if written_header.magic_header != p.header_magic
+        || written_header.inject_offset != p.inject_offset
+        || written_header.inject_size != p.inject_size
+        || written_header.patch_offset != p.patch_offset
+        || written_header.orig_patch_val != p.orig_patch_val
+    {
+        return Err(StrHideError::General(
+            "Self-verification failed: header at injection offset does not match written parameters".into(),
+        ));
+    }
+    ube_stream.seek(SeekFrom::Start(p.ube_size - 24))?;
+    let mut tr_bytes = [0u8; 24];
+    ube_stream.read_exact(&mut tr_bytes)?;
+    let written_trailer = EnvelopeTrailer::unpack(&tr_bytes, Some(&p.trailer_magic))?;
+    if written_trailer.ube_offset != p.ube_offset || written_trailer.ube_total_size != p.ube_size {
+        return Err(StrHideError::General(
+            "Self-verification failed: trailer boundary parameters mismatch".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Build and inject an envelope from `host` into `out`.
+///
+/// This is the whole protocol, with no filesystem opinions: no existence check,
+/// no permission probe, no `.bak`, no atomic rename, no timestamp cloning, and
+/// no rejection checks (the caller owns those, because two of them are
+/// path-based). [`write_carrier_with`] and [`write_carrier_bytes`] differ only
+/// in the I/O objects they hand in and the side effects they add around it.
+///
+/// `H`/`W` are sized generics rather than `&mut dyn ...`: the adapters take
+/// `&mut dyn Write` / `&mut dyn SeekRead`, and passing a concrete type through
+/// avoids relying on trait-object upcasting.
+fn write_core<H, W>(
+    host: &mut H,
+    out: &mut W,
     source: PayloadSource,
     options: &WriteOptions<'_>,
     local: &LocalParams,
     profile: &Profile,
-) -> Result<WriteResult, StrHideError> {
+) -> Result<WriteCoreResult, StrHideError>
+where
+    H: Read + Seek,
+    W: Read + Write + Seek,
+{
     local.validate()?;
-    let output_path = options.output_path;
     let password = options.password;
     let password_hint = options.password_hint;
     let strategy = options.strategy;
     let stealth = options.stealth;
-    let preserve_time = options.preserve_time;
-    let backup = options.backup;
-
-    if !carrier_path.exists() {
-        return Err(StrHideError::General(format!(
-            "Carrier file '{}' not found",
-            carrier_path.display()
-        )));
-    }
 
     if password_hint.is_some() && stealth {
         return Err(StrHideError::General(
@@ -727,63 +805,58 @@ pub fn write_carrier_with(
         Vec::new()
     };
 
-    let target_path = output_path.unwrap_or(carrier_path);
-
-    // 1. Run security rejection checks (carrier policy + target permissions)
-    run_rejection_checks(carrier_path, target_path, local.rejection)?;
-
-    // 2. Capture carrier metadata (stats, permissions, timestamps, full SHA-256)
-    let meta = std::fs::metadata(carrier_path)?;
-    let orig_host_size = meta.len();
-    let orig_permissions = meta.permissions();
-    let orig_atime = filetime::FileTime::from_last_access_time(&meta);
-    let orig_mtime = filetime::FileTime::from_last_modification_time(&meta);
-    let orig_host_sha256 = compute_file_sha256(carrier_path)?;
+    // 2. Capture carrier facts that live in the envelope: size and full SHA-256.
+    // The file variant cannot get these from fs::metadata alone (the hash needs
+    // a read pass anyway), so both variants derive them from the stream.
+    host.seek(SeekFrom::End(0))?;
+    let orig_host_size = host.stream_position()?;
+    host.seek(SeekFrom::Start(0))?;
+    let orig_host_sha256 = crate::crypto::compute_stream_sha256(host)?;
 
     // 3. Detect adapter & check existing envelope
-    let (adapter, structural_warnings) = {
-        let mut cf = File::open(carrier_path)?;
-        let adapter = find_adapter_or_reject(&mut cf, &carrier_path.display().to_string())?;
+    host.seek(SeekFrom::Start(0))?;
+    let adapter = find_adapter_or_reject(host, "<carrier>")?;
 
-        // Reject carriers that already contain an envelope. A standard-magic
-        // scan catches plain/standard-encrypted envelopes; when a password is
-        // available, a second scan with the derived stealth magic also catches
-        // stealth envelopes (which are intentionally invisible without it).
-        //
-        // Under a private magic both scans matter: one for the dialect's own
-        // envelopes, one for official ones (a second envelope would stack on
-        // top regardless of dialect). With the official profile there is only
-        // one scan, exactly as before.
-        let mut occupied = {
-            cf.seek(SeekFrom::Start(0))?;
-            adapter.locate(&mut cf, profile.locator_magic())?.is_some()
-        };
-        if !occupied && profile.locator_magic().is_some() {
-            cf.seek(SeekFrom::Start(0))?;
-            occupied = adapter.locate(&mut cf, None)?.is_some();
-        }
-        if occupied {
+    // Reject carriers that already contain an envelope. A standard-magic
+    // scan catches plain/standard-encrypted envelopes; when a password is
+    // available, a second scan with the derived stealth magic also catches
+    // stealth envelopes (which are intentionally invisible without it).
+    //
+    // Under a private magic both scans matter: one for the dialect's own
+    // envelopes, one for official ones (a second envelope would stack on
+    // top regardless of dialect). With the official profile there is only
+    // one scan, exactly as before.
+    let mut occupied = {
+        host.seek(SeekFrom::Start(0))?;
+        adapter.locate(host, profile.locator_magic())?.is_some()
+    };
+    if !occupied && profile.locator_magic().is_some() {
+        host.seek(SeekFrom::Start(0))?;
+        occupied = adapter.locate(host, None)?.is_some();
+    }
+    if occupied {
+        return Err(StrHideError::General(
+            "Carrier already contains hidden data. Use remove first or specify another file."
+                .into(),
+        ));
+    }
+    if let Some(pwd) = password {
+        let magics = derive_stealth_magics(pwd, profile.domain())?;
+        host.seek(SeekFrom::Start(0))?;
+        if adapter.locate(host, Some(&magics.1))?.is_some() {
             return Err(StrHideError::General(
-                "Carrier already contains hidden data. Use remove first or specify another file."
-                    .into(),
+                "Carrier already contains hidden data (stealth envelope). Use remove first or specify another file.".into(),
             ));
         }
-        if let Some(pwd) = password {
-            let magics = derive_stealth_magics(pwd, profile.domain())?;
-            cf.seek(SeekFrom::Start(0))?;
-            if adapter.locate(&mut cf, Some(&magics.1))?.is_some() {
-                return Err(StrHideError::General(
-                    "Carrier already contains hidden data (stealth envelope). Use remove first or specify another file.".into(),
-                ));
-            }
-        }
+    }
 
-        // Neither magic scan matched. A stealth envelope written with an
-        // unknown password is undetectable by magic; scan structurally and
-        // warn (not refuse) when the carrier shows an envelope-shaped
-        // container, so the user learns a second envelope would stack on top.
-        let warnings = adapter.suspicious_structures(&mut cf);
-        (adapter, warnings)
+    // Neither magic scan matched. A stealth envelope written with an unknown
+    // password is undetectable by magic; scan structurally and warn (not
+    // refuse) when the carrier shows an envelope-shaped container, so the user
+    // learns a second envelope would stack on top.
+    let structural_warnings = {
+        host.seek(SeekFrom::Start(0))?;
+        adapter.suspicious_structures(host)
     };
 
     // 4. Prepare data payload stream
@@ -898,9 +971,9 @@ pub fn write_carrier_with(
         HEADER_SIZE as u64 + hint_bytes.len() as u64 + exact_meta_len + exact_payload_len + 24;
 
     let selected_strategy: String = if strategy == "auto" {
-        let mut cf = File::open(carrier_path)?;
+        host.seek(SeekFrom::Start(0))?;
         adapter
-            .choose_auto_strategy(&mut cf, exact_ube_size)
+            .choose_auto_strategy(host, exact_ube_size)
             .to_string()
     } else {
         if !adapter.supported_strategies().contains(&strategy) {
@@ -997,45 +1070,18 @@ pub fn write_carrier_with(
     };
     tmp_ube.extend_from_slice(&dummy_trailer.pack());
 
-    // 9. Inject into temporary target file.
-    // TmpGuard removes the half-written temp file on any early return unless
-    // commit() is called after the atomic rename succeeded. The name is built
-    // from the OsString: `display()` is lossy for non-UTF-8 targets.
-    let mut tmp_os = target_path.as_os_str().to_os_string();
-    tmp_os.push(".strhide.tmp");
-    let tmp_target = PathBuf::from(tmp_os);
-    let mut tmp_guard = TmpGuard::new(tmp_target.clone());
+    // 9. Inject into `out`. Where that is (temp file vs memory buffer, and the
+    // atomic-rename dance around it) is the caller's business.
     let (inject_offset, inject_size, patch_offset, orig_patch_val) = {
-        let mut host_in = File::open(carrier_path)?;
-        let mut out_file = File::create(&tmp_target).map_err(|e| {
-            let dir = match target_path.parent() {
-                Some(p) if !p.as_os_str().is_empty() => p,
-                _ => Path::new("."),
-            };
-            let reason = match e.kind() {
-                std::io::ErrorKind::NotFound => "the output directory does not exist",
-                std::io::ErrorKind::PermissionDenied => "the output directory is not writable",
-                _ => "the output file could not be created",
-            };
-            StrHideError::General(format!(
-                "Cannot create '{}' in '{}': {reason} [{e}]",
-                target_path.display(),
-                dir.display()
-            ))
-        })?;
+        host.seek(SeekFrom::Start(0))?;
         let mut ube_cursor = Cursor::new(&tmp_ube);
-        adapter.inject(
-            &mut host_in,
-            &mut ube_cursor,
-            &mut out_file,
-            &selected_strategy,
-        )?
+        adapter.inject(host, &mut ube_cursor, out, &selected_strategy)?
     };
 
     // 10. Update real ube_offset in Header and Trailer
     let delta = {
-        let mut cf = File::open(carrier_path)?;
-        adapter.envelope_offset_delta(&mut cf, &selected_strategy, ube_total_size)?
+        host.seek(SeekFrom::Start(0))?;
+        adapter.envelope_offset_delta(host, &selected_strategy, ube_total_size)?
     };
     let actual_ube_offset = inject_offset + delta;
 
@@ -1057,86 +1103,142 @@ pub fn write_carrier_with(
     // header of a PE).
     let scattered = adapter.is_scattered_strategy(&selected_strategy);
     if !scattered {
-        {
-            let mut f = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&tmp_target)?;
+        // Patch header
+        out.seek(SeekFrom::Start(actual_ube_offset))?;
+        out.write_all(&header.pack_with_profile(password, profile)?)?;
 
-            // Patch header
-            f.seek(SeekFrom::Start(actual_ube_offset))?;
-            f.write_all(&header.pack_with_profile(password, profile)?)?;
-
-            // Patch trailer at end of UBE
-            let trailer_ctx = TrailerCtx {
-                actual_ube_offset,
-                ube_total_size,
-                inject_offset,
-                inject_size,
-                strategy: &selected_strategy,
-            };
-            let trailer_pos = adapter.trailer_offset(&trailer_ctx);
-            f.seek(SeekFrom::Start(trailer_pos))?;
-            f.write_all(&final_trailer.pack())?;
-
-            // Post-write finalization (e.g. recalculating chunk CRCs)
-            let fin_ctx = FinalizeCtx {
-                ube_offset: actual_ube_offset,
-                ube_total_size,
-                inject_offset,
-                inject_size,
-                strategy: &selected_strategy,
-            };
-            adapter.finalize(&mut f, &fin_ctx)?;
-        }
-    }
-
-    // 11. Self-verification: precisely verify the envelope just written at
-    // actual_ube_offset (not merely "some envelope exists somewhere"), so a
-    // stale envelope from a previous injection cannot satisfy the check.
-    //
-    // The envelope is read back through `open_ube_reader` rather than at raw
-    // file offsets: for contiguous envelopes the virtual stream is a bounded
-    // slice of the very same bytes, and for scattered strategies (pe_codebits)
-    // there are no file offsets to read at all.
-    {
-        let mut f = File::open(&tmp_target)?;
-        let mut ube_stream = adapter.open_ube_reader(
-            &mut f,
+        // Patch trailer at end of UBE
+        let trailer_ctx = TrailerCtx {
             actual_ube_offset,
             ube_total_size,
-            &selected_strategy,
-        )?;
-        let mut hdr_bytes = [0u8; HEADER_SIZE];
-        ube_stream.read_exact(&mut hdr_bytes)?;
-        let written_header = EnvelopeHeader::unpack_with_profile(&hdr_bytes, password, profile)?;
-        if written_header.magic_header != header_magic
-            || written_header.inject_offset != inject_offset
-            || written_header.inject_size != inject_size
-            || written_header.patch_offset != patch_offset
-            || written_header.orig_patch_val != orig_patch_val
-        {
-            return Err(StrHideError::General(
-                "Self-verification failed: header at injection offset does not match written parameters".into(),
-            ));
-        }
-        ube_stream.seek(SeekFrom::Start(ube_total_size - 24))?;
-        let mut tr_bytes = [0u8; 24];
-        ube_stream.read_exact(&mut tr_bytes)?;
-        let written_trailer = EnvelopeTrailer::unpack(&tr_bytes, Some(&trailer_magic))?;
-        if written_trailer.ube_offset != actual_ube_offset
-            || written_trailer.ube_total_size != ube_total_size
-        {
-            return Err(StrHideError::General(
-                "Self-verification failed: trailer boundary parameters mismatch".into(),
-            ));
-        }
+            inject_offset,
+            inject_size,
+            strategy: &selected_strategy,
+        };
+        let trailer_pos = adapter.trailer_offset(&trailer_ctx);
+        out.seek(SeekFrom::Start(trailer_pos))?;
+        out.write_all(&final_trailer.pack())?;
+
+        // Post-write finalization (e.g. recalculating chunk CRCs)
+        let fin_ctx = FinalizeCtx {
+            ube_offset: actual_ube_offset,
+            ube_total_size,
+            inject_offset,
+            inject_size,
+            strategy: &selected_strategy,
+        };
+        adapter.finalize(out, &fin_ctx)?;
     }
 
-    // 12. In-place backup (if applicable) & Atomic commit
+    // 11. Hand the verification parameters back to the caller, which owns the
+    // `&mut dyn SeekRead` view of whatever it just wrote (a reopened temp file,
+    // or a cursor over the returned bytes).
+    let strategy_note = adapter.strategy_note(&selected_strategy, strategy == "auto");
+
+    Ok(WriteCoreResult {
+        format: adapter.format_name(),
+        strategy: selected_strategy.clone(),
+        strategy_note,
+        raw_size,
+        ube_size: ube_total_size,
+        is_encrypted: has_custom_password,
+        is_stealth: (flags & FLAG_STEALTH) != 0,
+        warning: warning_msg,
+        verify: VerifyParams {
+            ube_offset: actual_ube_offset,
+            ube_size: ube_total_size,
+            inject_offset,
+            inject_size,
+            patch_offset,
+            orig_patch_val,
+            header_magic,
+            trailer_magic,
+            strategy: selected_strategy,
+        },
+    })
+}
+
+/// Inject `source` into `carrier_path`, staging through a temp file and an
+/// atomic rename.
+///
+/// Everything path-shaped lives here: rejection checks, permission probing, the
+/// `.bak` backup, the rename, and timestamp cloning. The protocol itself is in
+/// [`write_core`], which is why [`write_carrier_bytes`] can offer the same
+/// guarantees minus the filesystem ones.
+pub fn write_carrier_with(
+    carrier_path: &Path,
+    source: PayloadSource,
+    options: &WriteOptions<'_>,
+    local: &LocalParams,
+    profile: &Profile,
+) -> Result<WriteResult, StrHideError> {
+    if !carrier_path.exists() {
+        return Err(StrHideError::General(format!(
+            "Carrier file '{}' not found",
+            carrier_path.display()
+        )));
+    }
+
+    let target_path = options.output_path.unwrap_or(carrier_path);
+
+    // 1. Run security rejection checks (carrier policy + target permissions)
+    run_rejection_checks(carrier_path, target_path, local.rejection)?;
+
+    let meta = std::fs::metadata(carrier_path)?;
+    let orig_permissions = meta.permissions();
+    let orig_atime = filetime::FileTime::from_last_access_time(&meta);
+    let orig_mtime = filetime::FileTime::from_last_modification_time(&meta);
+
+    // The temp name is built from the OsString: `display()` is lossy for
+    // non-UTF-8 targets. TmpGuard removes the half-written file on any early
+    // return unless `commit()` runs after the rename succeeded.
+    let mut tmp_os = target_path.as_os_str().to_os_string();
+    tmp_os.push(".strhide.tmp");
+    let tmp_target = PathBuf::from(tmp_os);
+    let mut tmp_guard = TmpGuard::new(tmp_target.clone());
+
+    let core = {
+        let mut host = File::open(carrier_path)?;
+        // Read+write, not `File::create`: the patch/finalize step seeks back
+        // into the staged output and adapter `finalize` implementations may
+        // read what they just wrote (a write-only handle fails with
+        // "access denied" on Windows).
+        let mut out_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_target)
+            .map_err(|e| {
+                let dir = match target_path.parent() {
+                    Some(p) if !p.as_os_str().is_empty() => p,
+                    _ => Path::new("."),
+                };
+                let reason = match e.kind() {
+                    std::io::ErrorKind::NotFound => "the output directory does not exist",
+                    std::io::ErrorKind::PermissionDenied => "the output directory is not writable",
+                    _ => "the output file could not be created",
+                };
+                StrHideError::General(format!(
+                    "Cannot create '{}' in '{}': {reason} [{e}]",
+                    target_path.display(),
+                    dir.display()
+                ))
+            })?;
+        write_core(&mut host, &mut out_file, source, options, local, profile)?
+    };
+
+    // Self-verification re-reads what was just written, so a stale envelope
+    // from an earlier injection cannot satisfy the check.
+    {
+        let mut written = File::open(&tmp_target)?;
+        verify_written(&mut written, &core.verify, options.password, profile)?;
+    }
+
+    // 2. In-place backup (if applicable) & Atomic commit
     let is_inplace = std::path::absolute(target_path)? == std::path::absolute(carrier_path)?;
     let mut backup_file = None;
-    if is_inplace && backup {
+    if is_inplace && options.backup {
         let bak = next_backup_path(carrier_path);
         std::fs::copy(carrier_path, &bak)?;
         backup_file = Some(bak.display().to_string());
@@ -1148,26 +1250,95 @@ pub fn write_carrier_with(
     // Restore original carrier permissions (mode/readonly) alongside timestamps.
     let _ = std::fs::set_permissions(target_path, orig_permissions);
 
-    if preserve_time {
+    if options.preserve_time {
         let _ = filetime::set_file_times(target_path, orig_atime, orig_mtime);
     }
-
-    let strategy_note = adapter.strategy_note(&selected_strategy, strategy == "auto");
 
     Ok(WriteResult {
         status: "success".into(),
         carrier: target_path.display().to_string(),
-        format: adapter.format_name().into(),
-        strategy: selected_strategy,
-        strategy_note,
-        raw_size,
-        ube_size: ube_total_size,
-        is_encrypted: has_custom_password,
-        is_stealth: (flags & FLAG_STEALTH) != 0,
-        password_hint: password_hint.map(|s| s.to_string()),
+        format: core.format.into(),
+        strategy: core.strategy,
+        strategy_note: core.strategy_note,
+        raw_size: core.raw_size,
+        ube_size: core.ube_size,
+        is_encrypted: core.is_encrypted,
+        is_stealth: core.is_stealth,
+        password_hint: options.password_hint.map(|s| s.to_string()),
         backup_file,
-        warning: warning_msg,
+        warning: core.warning,
     })
+}
+
+/// Inject `source` into an in-memory carrier, returning the stego bytes.
+///
+/// Same protocol and same self-verification as [`write_carrier_with`], minus
+/// everything that only makes sense for a file. Three capabilities are
+/// deliberately *not* provided, and the absence is the reason this entry point
+/// exists for services that have no writable filesystem:
+///
+/// - **no atomic commit** — the caller owns the buffer it gets back; there is no
+///   half-written state to roll back because nothing is written until it
+///   decides to;
+/// - **no `<carrier>.bak`** — the original bytes are still in the caller's
+///   hands (`options.backup` is ignored);
+/// - **no timestamp cloning** — there is no inode to stamp
+///   (`options.preserve_time` is ignored).
+///
+/// Rejection checks are content-only: the path-based ones (read-only carrier,
+/// target-directory write probe, `.apk`/signature-file name checks) describe
+/// the filesystem, not the carrier. [`crate::rejection::check_content`] still
+/// refuses Authenticode/PDF/JAR-signed carriers, which is the part that matters
+/// for "do not break someone's signature".
+///
+/// `options.output_path` must be `None`: honouring it here would silently write
+/// a file from a function whose contract is "give me bytes".
+pub fn write_carrier_bytes(
+    carrier: &[u8],
+    source: PayloadSource,
+    options: &WriteOptions<'_>,
+    local: &LocalParams,
+    profile: &Profile,
+) -> Result<(Vec<u8>, WriteResult), StrHideError> {
+    if let Some(p) = options.output_path {
+        return Err(StrHideError::General(format!(
+            "write_carrier_bytes returns the stego bytes instead of writing a file; \
+             output_path '{}' is not honoured (use write_carrier_with for file output)",
+            p.display()
+        )));
+    }
+
+    let mut host = Cursor::new(carrier);
+    if local.rejection != crate::params::RejectionPolicy::Skip {
+        host.seek(SeekFrom::Start(0))?;
+        crate::rejection::check_content(&mut host, None)?;
+    }
+
+    let mut out = Cursor::new(Vec::new());
+    let core = write_core(&mut host, &mut out, source, options, local, profile)?;
+    let bytes = out.into_inner();
+    verify_written(
+        &mut Cursor::new(&bytes),
+        &core.verify,
+        options.password,
+        profile,
+    )?;
+
+    let result = WriteResult {
+        status: "success".into(),
+        carrier: "<memory>".into(),
+        format: core.format.into(),
+        strategy: core.strategy,
+        strategy_note: core.strategy_note,
+        raw_size: core.raw_size,
+        ube_size: core.ube_size,
+        is_encrypted: core.is_encrypted,
+        is_stealth: core.is_stealth,
+        password_hint: options.password_hint.map(|s| s.to_string()),
+        backup_file: None,
+        warning: core.warning,
+    };
+    Ok((bytes, result))
 }
 
 /// Extract the payload of a carrier.
@@ -1202,46 +1373,46 @@ pub fn read_carrier_with(
     )
 }
 
-/// Extract the payload of a carrier written under `profile`.
+/// Everything a successful read produces before any file is written.
 ///
-/// The profile must be the same one used at write time. For the official
-/// profile this is identical to [`read_carrier_with`]; for a private dialect a
-/// mismatched profile cannot return payload bytes — the envelope is either not
-/// found at all (stealth, or a custom trailer magic) or fails header/`AEAD`
-/// validation (custom `default_secret` with the standard magics).
-pub fn read_carrier_with_profile(
-    carrier_path: &Path,
-    output_path: Option<&Path>,
+/// Deliberately I/O-free: the same core serves [`read_carrier_with_profile`]
+/// (path in, path out) and [`read_carrier_bytes`] (bytes in, bytes out), so the
+/// two can never drift apart on envelope parsing.
+struct ReadCore {
+    data: Vec<u8>,
+    is_file: bool,
+    is_encrypted: bool,
+    filename: String,
+    raw_size: u64,
+}
+
+/// Locate, authenticate and decrypt the envelope in `host`.
+///
+/// `label` only appears in error messages ("'photo.png'" vs "'<memory>'").
+fn read_core(
+    host: &mut dyn SeekRead,
+    label: &str,
     password: Option<&str>,
-    overwrite: bool,
     profile: &Profile,
-) -> Result<ReadResult, StrHideError> {
-    if !carrier_path.exists() {
-        return Err(StrHideError::General(format!(
-            "Carrier file '{}' not found",
-            carrier_path.display()
-        )));
-    }
+) -> Result<ReadCore, StrHideError> {
+    let adapter = find_adapter_or_reject(host, label)?;
 
-    let mut f = File::open(carrier_path)?;
-    let adapter = find_adapter_or_reject(&mut f, &carrier_path.display().to_string())?;
-
-    let loc = locate_envelope(&mut f, adapter, password, profile)?;
+    let loc = locate_envelope(host, adapter, password, profile)?;
 
     let (ube_offset, ube_total_size, strategy_name) = match loc {
         Some(l) => l,
         None => {
             return Err(no_hidden_data_error(
-                &mut f,
+                host,
                 adapter,
-                carrier_path,
+                label,
                 password.is_some(),
             ));
         }
     };
 
     let mut ube_stream =
-        adapter.open_ube_reader(&mut f, ube_offset, ube_total_size, &strategy_name)?;
+        adapter.open_ube_reader(host, ube_offset, ube_total_size, &strategy_name)?;
 
     // Read fixed header
     let mut header_bytes = [0u8; HEADER_SIZE];
@@ -1317,7 +1488,7 @@ pub fn read_carrier_with_profile(
     // Decompress if needed. `meta_obj.raw_size` is the declared uncompressed
     // size (inside the AEAD-protected metadata), so it doubles as a hard
     // expansion bound for untrusted carriers.
-    let final_data = if header.is_compressed() {
+    let data = if header.is_compressed() {
         let mut decomp = Vec::new();
         decompress_stream(
             &mut Cursor::new(&decrypted_payload),
@@ -1331,7 +1502,7 @@ pub fn read_carrier_with_profile(
 
     // Verify SHA-256
     let actual_sha256 = {
-        let h = crate::crypto::compute_sha256(&final_data);
+        let h = crate::crypto::compute_sha256(&data);
         h.iter().map(|b| format!("{b:02x}")).collect::<String>()
     };
 
@@ -1342,54 +1513,121 @@ pub fn read_carrier_with_profile(
         )));
     }
 
-    let mut written_file = None;
-    if let Some(out_p) = output_path {
-        let final_dest = if out_p.is_dir() {
-            // Metadata filename is untrusted input: sanitize to a bare name so
-            // crafted carriers cannot write outside the output directory.
-            let fn_to_use = if meta_obj.filename.is_empty() {
-                "extracted.bin".to_string()
-            } else {
-                sanitize_filename(&meta_obj.filename)
-            };
-            out_p.join(fn_to_use)
-        } else {
-            out_p.to_path_buf()
-        };
-
-        // Never truncate an existing file by accident: extracting several
-        // carriers that contain the same payload name (or reading into a busy
-        // directory) used to replace user files silently.
-        if final_dest.exists() && !overwrite {
-            return Err(StrHideError::Rejection(format!(
-                "Refusing to overwrite existing file '{}'. Choose another -o path or pass --overwrite.",
-                final_dest.display()
-            )));
-        }
-
-        let mut out_f = File::create(&final_dest).map_err(|e| {
-            let reason = match e.kind() {
-                std::io::ErrorKind::NotFound => "the output directory does not exist",
-                std::io::ErrorKind::PermissionDenied => "the output directory is not writable",
-                _ => "the output file could not be created",
-            };
-            StrHideError::General(format!(
-                "Cannot create '{}': {reason} [{e}]",
-                final_dest.display()
-            ))
-        })?;
-        out_f.write_all(&final_data)?;
-        written_file = Some(final_dest.display().to_string());
-    }
-
-    Ok(ReadResult {
-        carrier: carrier_path.display().to_string(),
-        data: final_data,
+    Ok(ReadCore {
+        data,
         is_file: header.is_file(),
         is_encrypted: header.is_encrypted(),
         filename: meta_obj.filename,
         raw_size: meta_obj.raw_size,
+    })
+}
+
+/// Write the recovered payload to `out_p`, returning the path actually used.
+///
+/// `out_p` may name a file or an existing directory; in the latter case the
+/// untrusted metadata filename is sanitised down to a bare name so a crafted
+/// carrier cannot write outside that directory.
+fn write_payload_to(
+    out_p: &Path,
+    core: &ReadCore,
+    overwrite: bool,
+) -> Result<String, StrHideError> {
+    let final_dest = if out_p.is_dir() {
+        let fn_to_use = if core.filename.is_empty() {
+            "extracted.bin".to_string()
+        } else {
+            sanitize_filename(&core.filename)
+        };
+        out_p.join(fn_to_use)
+    } else {
+        out_p.to_path_buf()
+    };
+
+    // Never truncate an existing file by accident: extracting several
+    // carriers that contain the same payload name (or reading into a busy
+    // directory) used to replace user files silently.
+    if final_dest.exists() && !overwrite {
+        return Err(StrHideError::Rejection(format!(
+            "Refusing to overwrite existing file '{}'. Choose another -o path or pass --overwrite.",
+            final_dest.display()
+        )));
+    }
+
+    let mut out_f = File::create(&final_dest).map_err(|e| {
+        let reason = match e.kind() {
+            std::io::ErrorKind::NotFound => "the output directory does not exist",
+            std::io::ErrorKind::PermissionDenied => "the output directory is not writable",
+            _ => "the output file could not be created",
+        };
+        StrHideError::General(format!(
+            "Cannot create '{}': {reason} [{e}]",
+            final_dest.display()
+        ))
+    })?;
+    out_f.write_all(&core.data)?;
+    Ok(final_dest.display().to_string())
+}
+
+/// Extract the payload of a carrier written under `profile`.
+///
+/// The profile must be the same one used at write time. For the official
+/// profile this is identical to [`read_carrier_with`]; for a private dialect a
+/// mismatched profile cannot return payload bytes — the envelope is either not
+/// found at all (stealth, or a custom trailer magic) or fails header/`AEAD`
+/// validation (custom `default_secret` with the standard magics).
+pub fn read_carrier_with_profile(
+    carrier_path: &Path,
+    output_path: Option<&Path>,
+    password: Option<&str>,
+    overwrite: bool,
+    profile: &Profile,
+) -> Result<ReadResult, StrHideError> {
+    if !carrier_path.exists() {
+        return Err(StrHideError::General(format!(
+            "Carrier file '{}' not found",
+            carrier_path.display()
+        )));
+    }
+
+    let label = carrier_path.display().to_string();
+    let mut f = File::open(carrier_path)?;
+    let core = read_core(&mut f, &label, password, profile)?;
+    let written_file = match output_path {
+        Some(out_p) => Some(write_payload_to(out_p, &core, overwrite)?),
+        None => None,
+    };
+
+    Ok(ReadResult {
+        carrier: label,
+        data: core.data,
+        is_file: core.is_file,
+        is_encrypted: core.is_encrypted,
+        filename: core.filename,
+        raw_size: core.raw_size,
         written_file,
+    })
+}
+
+/// Extract the payload of an in-memory carrier.
+///
+/// Identical validation to [`read_carrier_with_profile`] (format detection,
+/// AEAD authentication, SHA-256 check); `written_file` is always `None` because
+/// nothing is written — the caller already has the bytes.
+pub fn read_carrier_bytes(
+    carrier: &[u8],
+    password: Option<&str>,
+    profile: &Profile,
+) -> Result<ReadResult, StrHideError> {
+    let mut host = Cursor::new(carrier);
+    let core = read_core(&mut host, "<memory>", password, profile)?;
+    Ok(ReadResult {
+        carrier: "<memory>".into(),
+        data: core.data,
+        is_file: core.is_file,
+        is_encrypted: core.is_encrypted,
+        filename: core.filename,
+        raw_size: core.raw_size,
+        written_file: None,
     })
 }
 
@@ -1429,6 +1667,107 @@ pub fn remove_carrier(
 /// The profile must be the one used at write time: it drives envelope location
 /// (custom magic), the stealth domain, and the `default_secret` used to decode
 /// a non-password envelope.
+/// Strip the envelope from `host` into `out`, returning the envelope header.
+///
+/// I/O-free core shared by [`remove_carrier_with`] and
+/// [`remove_carrier_bytes`]. Verification is a separate step
+/// ([`verify_restored`]) because the caller owns the restored stream: the file
+/// wrapper reopens the temp file, the in-memory wrapper rewinds its cursor.
+fn remove_core(
+    host: &mut dyn SeekRead,
+    out: &mut dyn SeekWrite,
+    label: &str,
+    password: Option<&str>,
+    profile: &Profile,
+) -> Result<EnvelopeHeader, StrHideError> {
+    let adapter = find_adapter_or_reject(host, label)?;
+    let loc = locate_envelope(host, adapter, password, profile)?;
+    let (ube_offset, ube_total_size, strategy_name) = match loc {
+        Some(l) => l,
+        None => {
+            return Err(no_hidden_data_error(
+                host,
+                adapter,
+                label,
+                password.is_some(),
+            ));
+        }
+    };
+
+    // Read the header through the adapter's virtual envelope stream: for
+    // contiguous envelopes this is a bounded slice of the same bytes the old
+    // seek+read produced; for scattered strategies (pe_codebits) the envelope
+    // has no file offset to seek to.
+    let header = {
+        let mut header_bytes = [0u8; HEADER_SIZE];
+        let mut ube_stream =
+            adapter.open_ube_reader(host, ube_offset, ube_total_size, &strategy_name)?;
+        ube_stream.read_exact(&mut header_bytes)?;
+        let header = EnvelopeHeader::unpack_with_profile(&header_bytes, password, profile)?;
+        header.validate_against(ube_total_size)?;
+        header
+    };
+
+    adapter.strip(host, out, &header)?;
+    Ok(header)
+}
+
+/// Check the restored carrier against the hashes recorded in the envelope.
+fn verify_restored(
+    restored: &mut dyn SeekRead,
+    header: &EnvelopeHeader,
+    password: Option<&str>,
+    profile: &Profile,
+) -> Result<(u64, [u8; 32]), StrHideError> {
+    restored.seek(SeekFrom::Start(0))?;
+    let restored_size = restored.seek(SeekFrom::End(0))?;
+    restored.seek(SeekFrom::Start(0))?;
+    let restored_sha256 = crate::crypto::compute_stream_sha256(restored)?;
+
+    if restored_size == header.orig_host_size && restored_sha256 == header.orig_host_sha256 {
+        return Ok((restored_size, restored_sha256));
+    }
+
+    // Diagnose the common cause: the carrier carried a second envelope (e.g. a
+    // stealth envelope underneath), so stripping this one cannot reproduce the
+    // recorded original. Envelopes must be removed in reverse order of
+    // injection.
+    let mut diagnosis = String::new();
+    restored.seek(SeekFrom::Start(0))?;
+    if let Some(r_adapter) = find_adapter(restored) {
+        let remaining = r_adapter
+            .locate(restored, profile.locator_magic())
+            .ok()
+            .flatten()
+            .or_else(|| r_adapter.locate(restored, None).ok().flatten())
+            .or_else(|| {
+                password.and_then(|pwd| {
+                    derive_stealth_magics(pwd, profile.domain())
+                        .ok()
+                        .and_then(|m| r_adapter.locate(restored, Some(&m.1)).ok().flatten())
+                })
+            });
+        if remaining.is_some() {
+            diagnosis = "\nDiagnosis: the restored file still contains another hidden envelope. Remove envelopes in reverse order of injection (most recently written first).".to_string();
+        }
+    }
+
+    Err(StrHideError::RestoreMismatch(format!(
+        "Restored size: {restored_size} (expected {})\nRestored SHA256: {}\nExpected SHA256: {}{}",
+        header.orig_host_size,
+        restored_sha256
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+        header
+            .orig_host_sha256
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+        diagnosis
+    )))
+}
+
 pub fn remove_carrier_with(
     carrier_path: &Path,
     output_path: Option<&Path>,
@@ -1449,95 +1788,26 @@ pub fn remove_carrier_with(
     let orig_atime = filetime::FileTime::from_last_access_time(&meta);
     let orig_mtime = filetime::FileTime::from_last_modification_time(&meta);
 
-    let header: EnvelopeHeader;
+    let label = carrier_path.display().to_string();
     let tmp_target = PathBuf::from(format!("{}.strhide.restoring.tmp", target_path.display()));
     let mut tmp_guard = TmpGuard::new(tmp_target.clone());
 
-    {
+    let header = {
         let mut cf = File::open(carrier_path)?;
-        let adapter = find_adapter_or_reject(&mut cf, &carrier_path.display().to_string())?;
-
-        let loc = locate_envelope(&mut cf, adapter, password, profile)?;
-
-        let (ube_offset, ube_total_size, strategy_name) = match loc {
-            Some(l) => l,
-            None => {
-                return Err(no_hidden_data_error(
-                    &mut cf,
-                    adapter,
-                    carrier_path,
-                    password.is_some(),
-                ));
-            }
-        };
-
-        // Read the header through the adapter's virtual envelope stream: for
-        // contiguous envelopes this is a bounded slice of the same bytes the
-        // old seek+read produced; for scattered strategies (pe_codebits) the
-        // envelope has no file offset to seek to.
-        {
-            let mut header_bytes = [0u8; HEADER_SIZE];
-            let mut ube_stream =
-                adapter.open_ube_reader(&mut cf, ube_offset, ube_total_size, &strategy_name)?;
-            ube_stream.read_exact(&mut header_bytes)?;
-            header = EnvelopeHeader::unpack_with_profile(&header_bytes, password, profile)?;
-            header.validate_against(ube_total_size)?;
-        }
-
         let mut out_f = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(true)
             .open(&tmp_target)?;
-
-        adapter.strip(&mut cf, &mut out_f, &header)?;
-    }
+        remove_core(&mut cf, &mut out_f, &label, password, profile)?
+    };
 
     // Verify restored file
-    let restored_size = std::fs::metadata(&tmp_target)?.len();
-    let restored_sha256 = compute_file_sha256(&tmp_target)?;
-
-    if restored_size != header.orig_host_size || restored_sha256 != header.orig_host_sha256 {
-        // Diagnose the common cause: the carrier carried a second envelope
-        // (e.g. a stealth envelope underneath), so stripping this one cannot
-        // reproduce the recorded original. Envelopes must be removed in
-        // reverse order of injection.
-        let mut diagnosis = String::new();
-        if let Ok(mut rf) = File::open(&tmp_target)
-            && let Some(r_adapter) = find_adapter(&mut rf)
-        {
-            let remaining = r_adapter
-                .locate(&mut rf, profile.locator_magic())
-                .ok()
-                .flatten()
-                .or_else(|| r_adapter.locate(&mut rf, None).ok().flatten())
-                .or_else(|| {
-                    password.and_then(|pwd| {
-                        derive_stealth_magics(pwd, profile.domain())
-                            .ok()
-                            .and_then(|m| r_adapter.locate(&mut rf, Some(&m.1)).ok().flatten())
-                    })
-                });
-            if remaining.is_some() {
-                diagnosis = "\nDiagnosis: the restored file still contains another hidden envelope. Remove envelopes in reverse order of injection (most recently written first).".to_string();
-            }
-        }
-        return Err(StrHideError::RestoreMismatch(format!(
-            "Restored size: {restored_size} (expected {})\nRestored SHA256: {}\nExpected SHA256: {}{}",
-            header.orig_host_size,
-            restored_sha256
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>(),
-            header
-                .orig_host_sha256
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>(),
-            diagnosis
-        )));
-    }
+    let (restored_size, restored_sha256) = {
+        let mut rf = File::open(&tmp_target)?;
+        verify_restored(&mut rf, &header, password, profile)?
+    };
 
     let is_inplace = std::path::absolute(target_path)? == std::path::absolute(carrier_path)?;
     let mut backup_file = None;
@@ -1563,6 +1833,42 @@ pub fn remove_carrier_with(
         verified_identical: true,
         backup_file,
     })
+}
+
+/// Strip the envelope from an in-memory carrier, returning the restored bytes.
+///
+/// The restored buffer is checked against the `orig_host_size` /
+/// `orig_host_sha256` recorded in the envelope exactly like the file variant,
+/// so a carrier that actually held two stacked envelopes fails with
+/// [`StrHideError::RestoreMismatch`] instead of returning half-restored bytes.
+/// No backup is produced (`backup` only exists for in-place file writes).
+pub fn remove_carrier_bytes(
+    carrier: &[u8],
+    password: Option<&str>,
+    profile: &Profile,
+) -> Result<(Vec<u8>, RemoveResult), StrHideError> {
+    let mut host = Cursor::new(carrier);
+    let mut out = Cursor::new(Vec::new());
+    let header = remove_core(&mut host, &mut out, "<memory>", password, profile)?;
+    let bytes = out.into_inner();
+
+    let (restored_size, restored_sha256) = {
+        let mut restored = Cursor::new(&bytes);
+        verify_restored(&mut restored, &header, password, profile)?
+    };
+
+    let result = RemoveResult {
+        status: "success".into(),
+        carrier: "<memory>".into(),
+        restored_size,
+        restored_sha256: restored_sha256
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+        verified_identical: true,
+        backup_file: None,
+    };
+    Ok((bytes, result))
 }
 
 /// Inspect a carrier: report its format, any envelope found, decrypted

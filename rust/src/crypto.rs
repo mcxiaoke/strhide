@@ -509,7 +509,10 @@ pub fn compute_sha256(data: &[u8]) -> [u8; 32] {
 
 /// Streamed SHA-256: reads `reader` to EOF in 64 KiB blocks, never
 /// materializing the whole input. Used for hashing large carriers.
-pub fn compute_stream_sha256<R: Read>(reader: &mut R) -> Result<[u8; 32], StrHideError> {
+///
+/// `R: ?Sized` so a `&mut dyn Read`/`&mut dyn SeekRead` can be passed straight
+/// through (the in-memory engine hands it a trait object).
+pub fn compute_stream_sha256<R: Read + ?Sized>(reader: &mut R) -> Result<[u8; 32], StrHideError> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {

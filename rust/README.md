@@ -54,6 +54,44 @@ and quality-100 carriers (all quantization steps == 1) are out of scope.
 Supported carriers: PNG, JPEG, MP4, ZIP, PDF, and Windows PE. Unrecognized files
 are rejected rather than appended to.
 
+## Library
+
+Two entry-point families, same protocol underneath:
+
+| | in/out | atomic commit | `.bak` | timestamps |
+|---|---|---|---|---|
+| `write_carrier_with` / `read_carrier_with_profile` / `remove_carrier_with` | paths | yes | yes | cloned |
+| `write_carrier_bytes` / `read_carrier_bytes` / `remove_carrier_bytes` | `&[u8]` → `Vec<u8>` | n/a (you own the buffer) | no | n/a |
+
+```rust
+use strhide::engine::{PayloadSource, WriteOptions, read_carrier_bytes, write_carrier_bytes};
+use strhide::params::{LocalParams, Profile};
+
+let options = WriteOptions { password: Some("hunter2"), ..WriteOptions::default() };
+let (stego, _) = write_carrier_bytes(
+    &cover_png,                                  // bytes in
+    PayloadSource::Bytes(b"payload"),            // or ::File(path) / ::Text(str)
+    &options,
+    &LocalParams::default(),
+    &Profile::default(),                         // private dialect knob
+)?;
+let read = read_carrier_bytes(&stego, options.password, &Profile::default())?;
+assert_eq!(read.data, b"payload");
+```
+
+The byte API runs the same rejection content checks (Authenticode / PDF / JAR
+signatures) but skips the path-based ones — read-only carrier, target-directory
+write probe, `.apk`/signature-file name checks — which describe a filesystem the
+caller may not have. It also refuses `options.output_path`: a function whose
+contract is "return bytes" must not write files.
+
+Payloads are buffered in memory by both families; there is no streaming API. A
+multi-GB payload therefore needs that much RAM (the plan's alternative — spilling
+the payload to a temporary file — is not implemented).
+
+Examples: `cargo run --example in_memory`, `cargo run --example private_profile`,
+`cargo run --release --example codec_bench -- <carrier.png> <payload>`.
+
 ## Compatibility
 
 The Python package is frozen at 0.2.0 and its envelope format is not
