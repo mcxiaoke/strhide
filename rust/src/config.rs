@@ -18,6 +18,7 @@
 //! preserve_time = true          # write: timestamp preservation default
 //! backup        = true          # write/remove: .bak backup default
 //! unescape      = false         # write: escape-sequence decoding default
+//! stego_secret  = "..."         # embed/extract: private default secret
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -38,6 +39,7 @@ const KNOWN_KEYS: &[&str] = &[
     "preserve_time",
     "backup",
     "unescape",
+    "stego_secret",
 ];
 
 /// Parsed configuration file. Every field is optional; `None` means "not
@@ -53,6 +55,10 @@ pub struct FileConfig {
     pub preserve_time: Option<bool>,
     pub backup: Option<bool>,
     pub unescape: Option<bool>,
+    /// Private default secret for content-adaptive steganography. Replaces the
+    /// public built-in constant when no user password is given. Read/write must
+    /// agree, so this belongs with the password, not with the tuning knobs.
+    pub stego_secret: Option<String>,
 }
 
 /// Candidate paths in lookup order, excluding an explicit `--config` path.

@@ -4,6 +4,7 @@
 //! Provides unified `embed_carrier` and `extract_carrier` entry points with automatic
 //! format sniffing and extensible algorithm selection.
 
+pub mod coding;
 pub mod envelope;
 pub mod jpeg;
 pub mod params;
@@ -29,6 +30,11 @@ pub fn embed_carrier(
     options.spatial_params.validate()?;
     options.jpeg_params.validate()?;
 
+    // Private dialect resolution happens exactly once, here: a configured
+    // `default_secret` is indistinguishable from a user password downstream,
+    // which is what keeps the two engine families byte-compatible.
+    let secret = options.effective_secret();
+
     if carrier_bytes.len() >= 2 && &carrier_bytes[..2] == b"\xFF\xD8" {
         // JPEG format
         let model =
@@ -41,7 +47,7 @@ pub fn embed_carrier(
         jpeg::embed_jpeg(
             carrier_bytes,
             payload,
-            options.password.as_deref(),
+            secret,
             &*model,
             &options.jpeg_params,
         )
@@ -58,7 +64,7 @@ pub fn embed_carrier(
         spatial::embed_spatial(
             carrier_bytes,
             payload,
-            options.password.as_deref(),
+            secret,
             &*model,
             &options.spatial_params,
         )
@@ -77,6 +83,8 @@ pub fn extract_carrier(
     options.spatial_params.validate()?;
     options.jpeg_params.validate()?;
 
+    let secret = options.effective_secret();
+
     if carrier_bytes.len() >= 2 && &carrier_bytes[..2] == b"\xFF\xD8" {
         // JPEG format
         let model =
@@ -86,12 +94,7 @@ pub fn extract_carrier(
                     options.algorithm
                 ))
             })?;
-        jpeg::extract_jpeg(
-            carrier_bytes,
-            options.password.as_deref(),
-            &*model,
-            &options.jpeg_params,
-        )
+        jpeg::extract_jpeg(carrier_bytes, secret, &*model, &options.jpeg_params)
     } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
         // PNG format
         let model = CostModelRegistry::get_spatial_model(options.algorithm.as_deref()).ok_or_else(
@@ -102,12 +105,7 @@ pub fn extract_carrier(
                 ))
             },
         )?;
-        spatial::extract_spatial(
-            carrier_bytes,
-            options.password.as_deref(),
-            &*model,
-            &options.spatial_params,
-        )
+        spatial::extract_spatial(carrier_bytes, secret, &*model, &options.spatial_params)
     } else {
         Err(StrHideError::UnsupportedFormat(
             "Content-adaptive steganography requires a PNG or JPEG image carrier".into(),
@@ -120,7 +118,13 @@ pub fn extract_carrier(
 pub struct StegoCapacityInfo {
     pub format: String,
     pub algorithm: String,
+    /// Total cover elements (pixels for PNG, coefficients for JPEG), header
+    /// slots included. Useful as a "how big is the cover" number only.
     pub total_elements: usize,
+    /// Slots actually available to the payload: candidate slots minus the 256
+    /// slots consumed by the envelope header. This is the number a user should
+    /// compare against a payload size -- before it was reported inclusive of the
+    /// header, which made "available slots" and "max payload" look inconsistent.
     pub available_slots: usize,
     pub max_raw_payload_bytes: usize,
     pub recommended_max_bytes: usize,

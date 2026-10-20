@@ -19,13 +19,23 @@ impl Default for UerdCostModel {
     }
 }
 
-// Standard baseline JPEG luminance quantization table (zigzag order 0..63)
+// Standard baseline JPEG luminance quantization table, in **natural**
+// (row-major) order.
+//
+// `dct-io` says it returns coefficients "in zigzag order", but its decoder
+// writes `block[ZIGZAG[k]] = value`, i.e. blocks are in natural order. Indexing
+// this table with a natural-order coefficient (as this file does) therefore
+// requires the table in natural order too; keeping it in zigzag order silently
+// weighted each frequency with the quantization step of a *different* frequency.
 const STANDARD_LUMA_QT: [f64; 64] = [
-    16.0, 11.0, 12.0, 14.0, 12.0, 10.0, 16.0, 14.0, 13.0, 14.0, 18.0, 17.0, 16.0, 19.0, 24.0, 40.0,
-    26.0, 24.0, 22.0, 22.0, 24.0, 49.0, 35.0, 37.0, 29.0, 40.0, 58.0, 51.0, 61.0, 60.0, 57.0, 51.0,
-    56.0, 55.0, 64.0, 72.0, 92.0, 78.0, 64.0, 68.0, 87.0, 69.0, 55.0, 56.0, 80.0, 109.0, 81.0,
-    87.0, 95.0, 98.0, 103.0, 104.0, 103.0, 62.0, 77.0, 113.0, 121.0, 112.0, 100.0, 120.0, 92.0,
-    101.0, 103.0, 99.0,
+    16.0, 11.0, 10.0, 16.0, 24.0, 40.0, 51.0, 61.0, //
+    12.0, 12.0, 14.0, 19.0, 26.0, 58.0, 60.0, 55.0, //
+    14.0, 13.0, 16.0, 24.0, 40.0, 57.0, 69.0, 56.0, //
+    14.0, 17.0, 22.0, 29.0, 51.0, 87.0, 80.0, 62.0, //
+    18.0, 22.0, 37.0, 56.0, 68.0, 109.0, 103.0, 77.0, //
+    24.0, 35.0, 55.0, 64.0, 81.0, 104.0, 113.0, 92.0, //
+    49.0, 64.0, 78.0, 87.0, 103.0, 121.0, 120.0, 101.0, //
+    72.0, 92.0, 95.0, 98.0, 112.0, 100.0, 103.0, 99.0, //
 ];
 
 impl JpegCostModel for UerdCostModel {

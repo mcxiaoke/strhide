@@ -351,6 +351,13 @@ pub struct EmbedArgs {
     pub algorithm: Option<String>,
 
     #[arg(
+        long = "stego-secret",
+        value_name = "SECRET",
+        help = "Private stand-in secret for no-password stego envelopes; enables a private dialect that the public built-in key cannot read. Extract must use the same value."
+    )]
+    pub stego_secret: Option<String>,
+
+    #[arg(
         long = "unescape",
         help = "Decode C-style escape sequences (\\n, \\r, \\t, ...) in the -t/--text payload before embedding"
     )]
@@ -448,6 +455,13 @@ pub struct ExtractArgs {
         help = "Distortion cost algorithm (auto|hill|uerd; default: auto)"
     )]
     pub algorithm: Option<String>,
+
+    #[arg(
+        long = "stego-secret",
+        value_name = "SECRET",
+        help = "Private stand-in secret for no-password stego envelopes; must equal the value used at embed time."
+    )]
+    pub stego_secret: Option<String>,
 
     // Fine-tuning parameters matching custom embedding parameters
     #[arg(long = "exclusion-rate", value_name = "FLOAT")]
@@ -735,6 +749,26 @@ pub fn resolve_password(
         ));
     }
     Ok(None)
+}
+
+/// Resolve the private stego default secret.
+///
+/// Precedence mirrors `resolve_password`: CLI flag, then
+/// `STRHIDE_STEGO_SECRET`, then the config file. An empty value means "not
+/// configured" rather than "empty secret" -- an empty secret would silently
+/// fall back to the public constant and defeat the purpose.
+fn resolve_stego_secret(explicit: Option<&str>, cfg: &FileConfig) -> Option<String> {
+    if let Some(s) = explicit
+        && !s.is_empty()
+    {
+        return Some(s.to_string());
+    }
+    if let Ok(env_secret) = std::env::var("STRHIDE_STEGO_SECRET")
+        && !env_secret.is_empty()
+    {
+        return Some(env_secret);
+    }
+    cfg.stego_secret.as_ref().filter(|s| !s.is_empty()).cloned()
 }
 
 fn should_print_banner(cli: &Cli) -> bool {
@@ -1491,6 +1525,9 @@ fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideError> {
                 };
                 println!("    {tag} [{}] {}", finding.detector, finding.detail);
             }
+            for note in &r.notes {
+                println!("    ? {note}");
+            }
         }
         println!(
             "\nScanned {} file(s), {} with findings, {} failed.",
@@ -1675,7 +1712,10 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
             println!("  Format:          {}", cap.format);
             println!("  Algorithm:       {}", cap.algorithm);
             println!("  Total elements:  {}", cap.total_elements);
-            println!("  Available slots: {} bits", cap.available_slots);
+            println!(
+                "  Payload slots:   {} bits (body only; header slots excluded)",
+                cap.available_slots
+            );
             println!(
                 "  Max raw payload: {} bytes ({:.1} KiB)",
                 cap.max_raw_payload_bytes,
@@ -1699,6 +1739,7 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         encrypt,
         true,
     )?;
+    let stego_secret = resolve_stego_secret(args.stego_secret.as_deref(), cfg);
 
     // 2. Resolve payload bytes
     let payload_bytes = if args.payload.stdin {
@@ -1762,6 +1803,7 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         let mut options = crate::stego::StegoOptions {
             algorithm: args.algorithm.clone(),
             password: password.clone(),
+            default_secret: stego_secret.clone(),
             ..Default::default()
         };
 
@@ -1832,9 +1874,11 @@ fn handle_extract(args: ExtractArgs, cfg: &FileConfig, quiet: bool) -> Result<()
 
     let carrier_bytes = std::fs::read(&args.carrier)?;
 
+    let stego_secret = resolve_stego_secret(args.stego_secret.as_deref(), cfg);
     let mut options = crate::stego::StegoOptions {
         algorithm: args.algorithm,
         password,
+        default_secret: stego_secret,
         ..Default::default()
     };
 

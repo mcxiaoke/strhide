@@ -1,0 +1,365 @@
+// Reimplemented from the published algorithm (no code copied).
+//
+//! Calibrated JPEG steganalysis (Fridrich / Goljan / Hogea).
+//!
+//! LSB-style embedding equalises the `(|c| = i, |c| = i+1)` bin pairs of the
+//! quantized DCT histogram, so an absolute chi-square test needs to know what
+//! the *clean* histogram of this particular image would look like. Calibration
+//! produces that reference: decode the image, crop 4 pixels so the 8x8 grid
+//! lands half a block off the embedding grid, re-quantise with the file's own
+//! luminance table. The embedding does not survive the grid shift, the image
+//! statistics largely do.
+//!
+//! The estimator is `beta_kl` from "Steganalysis of JPEG Images: Breaking the
+//! F5 Algorithm" (Fridrich, Goljan, Hogea, 2002), averaged over the three
+//! lowest AC modes `(0,1) (1,0) (1,1)`:
+//!
+//! ```text
+//! beta = ( h1*(b0-h0) + (b1-h1)*(h2-h1) ) / ( h1^2 + (h2-h1)^2 )
+//! ```
+//!
+//! with `h*` the calibrated counts and `b*` the actual counts of `|coeff| = 0,
+//! 1, 2` for one mode. `beta ~ 0` means "nothing detected", `beta > 0` estimates
+//! the embedding rate.
+//!
+//! # Coefficient layout
+//!
+//! `dct-io` documents "zigzag order" but stores blocks in **natural**
+//! (row-major) order: its decoder writes `block[ZIGZAG[k]] = value`. Everything
+//! here is therefore done in natural order, and the DQT (which the file really
+//! does store in zigzag order) is reordered once at parse time.
+//!
+//! # Validation note
+//!
+//! `temp/github/stegolab/calibration/calibration.py` (MIT) implements the same
+//! formula and is kept as an offline cross-check only (it needs ImageMagick and
+//! `jpeg_toolbox`). Our calibrated reference is produced in-process by a
+//! forward DCT + quantisation with the file's own table instead of an
+//! ImageMagick re-encode, which is closer to the paper: same table, same
+//! colour transform, no extra encoder in the dependency tree.
+
+use crate::analysis::decode_jpeg_pixels;
+
+/// Natural-order indices of the modes the estimator uses: `(0,1) -> 1`,
+/// `(1,0) -> 8`, `(1,1) -> 9`.
+const CALIBRATION_MODES: [usize; 3] = [1, 8, 9];
+
+/// Upper bound on the number of calibrated blocks to transform. Calibration is
+/// a statistic, not a per-block decision, so striding over a large image costs
+/// nothing in accuracy and keeps `scan` interactive on 20 MP files. The same
+/// stride is applied to the actual coefficient counts, otherwise the two
+/// histograms would be on different scales and `beta` would explode.
+const MAX_CALIBRATION_BLOCKS: usize = 120_000;
+
+/// Result of the calibrated analysis.
+#[derive(Debug, Clone)]
+pub struct CalibrationEstimate {
+    /// Estimated LSB-replacement rate in `0.0..=1.0`, from the pair-imbalance
+    /// ratio against the calibrated reference. This is the number to threshold:
+    /// it is the statistic that is sensitive to what an LSB-replacement
+    /// embedder actually does.
+    pub rate: f64,
+    /// Ratio `sum|even-odd|_actual / sum|even-odd|_calibrated`; `1.0` means
+    /// "indistinguishable from the calibrated reference", `0.0` means "pairs
+    /// fully equalised".
+    pub imbalance_ratio: f64,
+    /// F5 `beta` (Fridrich et al.). Kept for reference only: it is sensitive to
+    /// F5's shrinkage (which moves the `|c| = 0` and `|c| = 1` counts), and LSB
+    /// replacement never touches `|c| < 2`, so this number stays flat by
+    /// construction -- measured, not assumed.
+    pub f5_beta: f64,
+    /// Calibrated blocks actually transformed.
+    pub blocks: usize,
+}
+
+/// Highest `|coeff|` pair the imbalance statistic looks at: pairs
+/// `(2,3) (4,5) (6,7) (8,9) (10,11)`.
+const MAX_PAIR_ABS: i16 = 11;
+
+/// Zigzag scan order: zigzag position -> natural `row*8 + col`.
+const ZIGZAG: [usize; 64] = [
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
+    13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
+    52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+];
+
+/// DCT basis: `COS[x][u] = C(u)/2 * cos((2x+1) u pi / 16)`.
+fn dct_basis() -> [[f64; 8]; 8] {
+    let mut m = [[0.0f64; 8]; 8];
+    for (x, row) in m.iter_mut().enumerate() {
+        for (u, v) in row.iter_mut().enumerate() {
+            let cu = if u == 0 {
+                std::f64::consts::FRAC_1_SQRT_2
+            } else {
+                1.0
+            };
+            *v = 0.5 * cu * (((2 * x + 1) as f64) * (u as f64) * std::f64::consts::PI / 16.0).cos();
+        }
+    }
+    m
+}
+
+/// Forward 8x8 DCT of a level-shifted block, in natural (row-major) order.
+fn forward_dct(block: &[[f64; 8]; 8], basis: &[[f64; 8]; 8]) -> [f64; 64] {
+    // F = C * block * C^T, done as two separable passes.
+    let mut tmp = [[0.0f64; 8]; 8];
+    for y in 0..8 {
+        for u in 0..8 {
+            let mut sum = 0.0;
+            for x in 0..8 {
+                sum += block[y][x] * basis[x][u];
+            }
+            tmp[y][u] = sum;
+        }
+    }
+    let mut natural = [0.0f64; 64];
+    for v in 0..8 {
+        for u in 0..8 {
+            let mut sum = 0.0;
+            for y in 0..8 {
+                sum += tmp[y][u] * basis[y][v];
+            }
+            natural[v * 8 + u] = sum;
+        }
+    }
+    natural
+}
+
+/// Parse the first (luminance) DQT segment, returned in **natural** order.
+fn parse_luma_dqt(data: &[u8]) -> Option<[u16; 64]> {
+    let mut i = 2; // skip SOI
+    while i + 4 <= data.len() {
+        if data[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = data[i + 1];
+        if marker == 0xD8 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            i += 2;
+            continue;
+        }
+        if marker == 0xDA || marker == 0xD9 {
+            return None; // scan started / image ended: no DQT found
+        }
+        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+        if len < 2 || i + 2 + len > data.len() {
+            return None;
+        }
+        if marker == 0xDB {
+            let mut p = i + 4;
+            let end = i + 2 + len;
+            while p < end {
+                let pq_tq = data[p];
+                let precision = pq_tq >> 4;
+                let id = pq_tq & 0x0F;
+                let bytes_per = if precision == 0 { 1 } else { 2 };
+                if p + 1 + 64 * bytes_per > end {
+                    return None;
+                }
+                if id == 0 {
+                    let mut table = [0u16; 64];
+                    for (z, slot) in table.iter_mut().enumerate() {
+                        let off = p + 1 + z * bytes_per;
+                        let value = if precision == 0 {
+                            data[off] as u16
+                        } else {
+                            u16::from_be_bytes([data[off], data[off + 1]])
+                        };
+                        // The file stores DQT in zigzag order; keep the table in
+                        // natural order so it lines up with the coefficients.
+                        *slot = value;
+                    }
+                    let mut natural = [0u16; 64];
+                    for (z, &nat) in ZIGZAG.iter().enumerate() {
+                        natural[nat] = table[z];
+                    }
+                    return Some(natural);
+                }
+                p += 1 + 64 * bytes_per;
+            }
+            return None;
+        }
+        i += 2 + len;
+    }
+    None
+}
+
+/// Luminance plane from decoded pixels (BT.601, matching the JPEG Y channel).
+fn luma_plane(pixels: &[u8], width: usize, height: usize, channels: usize) -> Option<Vec<f64>> {
+    if channels == 0 || width == 0 || height == 0 || pixels.len() < width * height * channels {
+        return None;
+    }
+    let mut out = Vec::with_capacity(width * height);
+    for i in 0..width * height {
+        let base = i * channels;
+        let y = if channels >= 3 {
+            0.299 * pixels[base] as f64
+                + 0.587 * pixels[base + 1] as f64
+                + 0.114 * pixels[base + 2] as f64
+        } else {
+            pixels[base] as f64
+        };
+        out.push(y - 128.0);
+    }
+    Some(out)
+}
+
+/// `count(|c| == value)` for one mode, taking every `stride`-th block.
+fn count_abs(blocks: &[[i16; 64]], mode: usize, value: i16, stride: usize) -> f64 {
+    blocks
+        .iter()
+        .step_by(stride)
+        .filter(|b| b[mode].abs() == value)
+        .count() as f64
+}
+
+/// Run the calibrated estimator on a JPEG.
+///
+/// Returns `None` when the file cannot be analysed (progressive JPEG, missing
+/// DQT, unreadable pixels) or when the image is too small for the estimate to
+/// mean anything.
+pub fn estimate(data: &[u8]) -> Option<CalibrationEstimate> {
+    let actual = dct_io::read_coefficients(data).ok()?;
+    let luma_blocks: &[[i16; 64]] = &actual.components.first()?.blocks;
+    if luma_blocks.is_empty() {
+        return None;
+    }
+    let qt = parse_luma_dqt(data)?;
+
+    // Applicability gate: calibration re-quantises *decoded* pixels, so it needs
+    // quantization steps that are large compared with the IDCT round-trip error
+    // (~1). With a quality-100 style table (all steps == 1) the reference is
+    // dominated by that rounding and the estimator reports nonsense: measured
+    // 0.659 ("66% embedded") on a clean 911x582 sample with an all-ones table.
+    // Such carriers stay with the pixel-domain detectors and the "clean is not
+    // proof" caveat.
+    // Applicability boundary: calibration re-quantises *decoded* pixels, so it
+    // needs quantization steps that are large compared with the IDCT round-trip
+    // error (~1). With an all-ones table (quality-100 style) the reference is
+    // dominated by that rounding: measured 0.659 ("66% embedded") on a clean
+    // 911x582 sample whose luma table is entirely 1. Such carriers fall back to
+    // the pixel-domain detectors plus the explicit "clean is not proof" caveat
+    // instead of producing a bogus finding.
+    let mean_step = qt.iter().map(|&v| v.max(1) as f64).sum::<f64>() / 64.0;
+    if mean_step < 2.0 {
+        return None;
+    }
+
+    // `jpeg_decoder` yields RGB for colour JPEGs and 1 byte per pixel for
+    // grayscale; the component count from the coefficient stream tells us which.
+    let channels = if actual.components.len() == 1 { 1 } else { 3 };
+    let (pixels, width, _reported_channels) = decode_jpeg_pixels(data)?;
+    let width = width as usize;
+    if width == 0 || pixels.len() % (width * channels) != 0 {
+        return None;
+    }
+    let height = pixels.len() / (width * channels);
+    if height == 0 {
+        return None;
+    }
+    let plane = luma_plane(&pixels, width, height, channels)?;
+
+    // Calibrated grid: shifted by half a block (4 px) from the embedding grid.
+    let bx_count = width.saturating_sub(4) / 8;
+    let by_count = height.saturating_sub(4) / 8;
+    if bx_count < 8 || by_count < 8 {
+        return None; // too small to calibrate
+    }
+    let total_blocks = bx_count * by_count;
+    let stride = total_blocks.div_ceil(MAX_CALIBRATION_BLOCKS).max(1);
+
+    let basis = dct_basis();
+    let mut calib: Vec<[i16; 64]> = Vec::with_capacity(total_blocks.min(MAX_CALIBRATION_BLOCKS));
+    for by in 0..by_count {
+        for bx in 0..bx_count {
+            if !(by * bx_count + bx).is_multiple_of(stride) {
+                continue;
+            }
+            let x0 = 4 + bx * 8;
+            let y0 = 4 + by * 8;
+            let mut block = [[0.0f64; 8]; 8];
+            for (dy, row) in block.iter_mut().enumerate() {
+                for (dx, cell) in row.iter_mut().enumerate() {
+                    *cell = plane[(y0 + dy) * width + x0 + dx];
+                }
+            }
+            let freq = forward_dct(&block, &basis);
+            let mut quantized = [0i16; 64];
+            for (z, q) in quantized.iter_mut().enumerate() {
+                let table = qt[z].max(1) as f64;
+                *q = (freq[z] / table).round().clamp(-1024.0, 1023.0) as i16;
+            }
+            calib.push(quantized);
+        }
+    }
+    if calib.len() < 64 {
+        return None;
+    }
+
+    // Pair-imbalance statistic.
+    //
+    // LSB replacement moves counts inside an even/odd magnitude pair
+    // (`2i <-> 2i+1`, `|c| >= 2`), so the *pair imbalance* `|A_even - A_odd|`
+    // shrinks by roughly `(1 - rate)` while the calibrated reference keeps the
+    // clean imbalance. Summing over pairs and AC modes gives a rate estimate
+    // that is both image-relative and insensitive to how many coefficients a
+    // particular image happens to have.
+    // Per-pair ratios, then the median: a handful of pairs calibrate badly on
+    // any given image, and summing raw counts lets those few swamp the signal.
+    // The median makes the statistic "what the typical pair looks like", which
+    // is what the calibration argument is actually about.
+    let mut ratios: Vec<f64> = Vec::new();
+    for mode in 1..64usize {
+        let mut value = 2i16;
+        while value <= MAX_PAIR_ABS {
+            let ae = count_abs(luma_blocks, mode, value, stride);
+            let ao = count_abs(luma_blocks, mode, value + 1, stride);
+            let ce = count_abs(&calib, mode, value, 1);
+            let co = count_abs(&calib, mode, value + 1, 1);
+            // Skip pairs whose counts are too small to carry information.
+            if (ae + ao) < 20.0 || (ce + co) < 20.0 {
+                value += 2;
+                continue;
+            }
+            let a = (ae - ao).abs();
+            let c = (ce - co).abs();
+            ratios.push((a + 1.0) / (c + 1.0));
+            value += 2;
+        }
+    }
+    let imbalance_ratio = if ratios.is_empty() {
+        1.0
+    } else {
+        ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mid = ratios.len() / 2;
+        if ratios.len().is_multiple_of(2) {
+            (ratios[mid - 1] + ratios[mid]) / 2.0
+        } else {
+            ratios[mid]
+        }
+    };
+    let rate = (1.0 - imbalance_ratio).clamp(0.0, 1.0);
+
+    // F5 beta (reference only; see the field docs for why it stays flat here).
+    let mut f5_modes = [0.0f64; 3];
+    for (mi, &mode) in CALIBRATION_MODES.iter().enumerate() {
+        let h0 = count_abs(&calib, mode, 0, 1);
+        let h1 = count_abs(&calib, mode, 1, 1);
+        let h2 = count_abs(&calib, mode, 2, 1);
+        let b0 = count_abs(luma_blocks, mode, 0, stride);
+        let b1 = count_abs(luma_blocks, mode, 1, stride);
+        let denom = h1 * h1 + (h2 - h1) * (h2 - h1);
+        f5_modes[mi] = if denom <= 1.0 {
+            0.0
+        } else {
+            ((h1 * (b0 - h0) + (b1 - h1) * (h2 - h1)) / denom).max(0.0)
+        };
+    }
+
+    Some(CalibrationEstimate {
+        rate,
+        imbalance_ratio,
+        f5_beta: f5_modes.iter().sum::<f64>() / 3.0,
+        blocks: calib.len(),
+    })
+}

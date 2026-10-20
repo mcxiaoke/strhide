@@ -472,3 +472,152 @@ fn global_config_short_option() {
     let json: serde_json::Value = serde_json::from_str(&stdout(&insp)).expect("valid json");
     assert_eq!(json["password_hint"], "custom_short_cfg_hint");
 }
+
+/// `--stego-secret` creates a private dialect for content steganography: the
+/// public built-in key (no secret) and any other secret must both fail.
+#[test]
+fn embed_extract_private_stego_secret_isolation() {
+    let dir = scratch("unify_stego_secret");
+    seed_stego(&dir, &["carrier.png"]);
+    let payload = "private dialect payload 2026";
+    fs::write(dir.join("data.txt"), payload).unwrap();
+
+    let embed = run(
+        &dir,
+        &[
+            "embed",
+            "carrier.png",
+            "-d",
+            "data.txt",
+            "--stego-secret",
+            "acme-private-dialect-2026",
+            "--in-place",
+            "--no-backup",
+        ],
+    );
+    assert_eq!(code(&embed), 0, "stderr: {}", stderr(&embed));
+
+    // The same secret reads the payload back.
+    let ok = run(
+        &dir,
+        &[
+            "extract",
+            "carrier.png",
+            "--stdout",
+            "--stego-secret",
+            "acme-private-dialect-2026",
+        ],
+    );
+    assert_eq!(code(&ok), 0, "stderr: {}", stderr(&ok));
+    assert_eq!(stdout(&ok), payload);
+
+    // The official public constant must not: no garbage on stdout either.
+    let public = run(&dir, &["extract", "carrier.png", "--stdout"]);
+    assert_eq!(code(&public), 1, "stdout: {}", stdout(&public));
+    assert_eq!(
+        stdout(&public),
+        "",
+        "failed extract must not print payloads"
+    );
+    // Wrong secret must be indistinguishable from "nothing hidden": one
+    // generic message, no "the envelope is here but the layout is wrong" hint.
+    assert!(
+        stderr(&public).contains("No valid payload found"),
+        "stderr: {}",
+        stderr(&public)
+    );
+
+    // A different private secret must not either.
+    let other = run(
+        &dir,
+        &[
+            "extract",
+            "carrier.png",
+            "--stdout",
+            "--stego-secret",
+            "someone-elses-dialect-2026",
+        ],
+    );
+    assert_eq!(code(&other), 1);
+}
+
+/// Precedence for the stego secret: CLI flag > `STRHIDE_STEGO_SECRET` > config.
+#[test]
+fn stego_secret_precedence_flag_env_config() {
+    let dir = scratch("unify_stego_secret_precedence");
+    seed_stego(&dir, &["carrier.png"]);
+    let payload = "config dialect payload";
+    fs::write(dir.join("data.txt"), payload).unwrap();
+    // Implicitly loaded because the test runs with cwd + HOME = dir.
+    fs::write(
+        dir.join("strhide.toml"),
+        "stego_secret = \"config-dialect-2026\"\n",
+    )
+    .unwrap();
+
+    let embed = run(
+        &dir,
+        &[
+            "embed",
+            "carrier.png",
+            "-d",
+            "data.txt",
+            "--in-place",
+            "--no-backup",
+        ],
+    );
+    assert_eq!(code(&embed), 0, "stderr: {}", stderr(&embed));
+
+    // Config value decrypts.
+    let cfg_ok = run(&dir, &["extract", "carrier.png", "--stdout"]);
+    assert_eq!(code(&cfg_ok), 0, "stderr: {}", stderr(&cfg_ok));
+    assert_eq!(stdout(&cfg_ok), payload);
+
+    let run_env = |secret: Option<&str>| -> Output {
+        let mut cmd = Command::new(bin());
+        cmd.args(["extract", "carrier.png", "--stdout"])
+            .current_dir(&dir)
+            .env("USERPROFILE", &dir)
+            .env("HOME", &dir)
+            .env("STRHIDE_PASSWORD", "");
+        match secret {
+            Some(s) => cmd.env("STRHIDE_STEGO_SECRET", s),
+            None => cmd.env_remove("STRHIDE_STEGO_SECRET"),
+        };
+        cmd.output().expect("failed to run strhide binary")
+    };
+
+    // Env mirrors the config value -> still readable.
+    let env_ok = run_env(Some("config-dialect-2026"));
+    assert_eq!(code(&env_ok), 0, "stderr: {}", stderr(&env_ok));
+
+    // Env overrides the config file -> unreadable.
+    let env_bad = run_env(Some("env-dialect-2026"));
+    assert_eq!(code(&env_bad), 1, "env must override the config file");
+
+    // The CLI flag overrides both.
+    let flag_bad = run(
+        &dir,
+        &[
+            "extract",
+            "carrier.png",
+            "--stdout",
+            "--stego-secret",
+            "flag-dialect-2026",
+        ],
+    );
+    assert_eq!(code(&flag_bad), 1, "flag must override env and config");
+
+    let flag_ok = run(
+        &dir,
+        &[
+            "extract",
+            "carrier.png",
+            "--stdout",
+            "--stego-secret",
+            "config-dialect-2026",
+        ],
+    );
+    assert_eq!(code(&flag_ok), 0, "stderr: {}", stderr(&flag_ok));
+    assert_eq!(stdout(&flag_ok), payload);
+}

@@ -95,32 +95,59 @@ pub fn embed_jpeg(
 
     let ciphertext_body = &envelope[28..];
     let ciphertext_bits = ciphertext_body.len() * 8;
-    let total_required_bits = 32 * 8 + ciphertext_bits;
+    let hamming_k = crate::stego::coding::DEFAULT_HAMMING_K;
+    let needed_body_slots = crate::stego::coding::required_slots(ciphertext_bits, hamming_k);
 
-    if total_required_bits > candidate_slots.len() {
+    if candidate_slots.len() < 256 {
         return Err(StrHideError::General(format!(
-            "Carrier capacity exceeded: needed {} bits, available {} bits (strategy: jpeg-{})",
-            total_required_bits,
-            candidate_slots.len(),
+            "Carrier capacity insufficient: available {} slots, minimum header requires 256 slots",
+            candidate_slots.len()
+        )));
+    }
+
+    // Phase 1: Keyed full candidate set permutation for header slots
+    let header_seed = crate::stego::envelope::derive_header_perm_seed(password);
+    let mut permuted_candidates = candidate_slots.to_vec();
+    permute_indices(&mut permuted_candidates, &header_seed);
+
+    let header_slots = &permuted_candidates[..256];
+
+    // See `spatial::engine`: the header is a keyed random 256-slot subset, the
+    // body keeps UERD's cost ordering so the cheapest slots are used first.
+    let is_header = {
+        let mut v = vec![false; total_coeffs];
+        for &(bi, k) in header_slots {
+            v[bi * 64 + k] = true;
+        }
+        v
+    };
+    let body_candidates: Vec<(usize, usize)> = candidate_slots
+        .iter()
+        .copied()
+        .filter(|&(bi, k)| !is_header[bi * 64 + k])
+        .collect();
+
+    if needed_body_slots > body_candidates.len() {
+        return Err(StrHideError::General(format!(
+            "Carrier capacity exceeded: needed {} body slots (Hamming k={}), available {} slots (strategy: jpeg-{})",
+            needed_body_slots,
+            hamming_k,
+            body_candidates.len(),
             cost_model.id(),
         )));
     }
 
-    // Phase 1: Header slots are top 256 lowest-cost candidate slots
-    let header_slots = &candidate_slots[..256];
-
-    // Phase 2: Ciphertext slots permuted using password-derived seed
+    // Phase 2: Keyed permutation of body slots using PBKDF2 salt-derived seed
     let salt = &envelope[..16];
-    let (_, perm_seed) = match password {
-        Some(p) => crate::stego::envelope::derive_keys(p, salt),
-        None => crate::stego::envelope::derive_keys("strhide-default-content-stego-key-2026", salt),
-    };
+    let (_, perm_seed) = crate::stego::envelope::derive_keys(
+        password.unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
+        salt,
+    );
 
-    let remaining_candidates = &candidate_slots[256..256 + ciphertext_bits];
-    let mut body_slots = remaining_candidates.to_vec();
+    let mut body_slots = body_candidates[..needed_body_slots].to_vec();
     permute_indices(&mut body_slots, &perm_seed);
 
-    // Embed Phase 1: Header
+    // Embed Phase 1: Header (256 bits direct LSB replacement)
     for (byte_i, &b) in header_bytes.iter().enumerate() {
         for bit_i in 0..8 {
             let target_bit = (b >> (7 - bit_i)) & 1;
@@ -130,14 +157,21 @@ pub fn embed_jpeg(
         }
     }
 
-    // Embed Phase 2: Ciphertext body
-    for (byte_i, &b) in ciphertext_body.iter().enumerate() {
-        for bit_i in 0..8 {
-            let target_bit = (b >> (7 - bit_i)) & 1;
-            let (bi, k) = body_slots[byte_i * 8 + bit_i];
-            let coeff = &mut coeffs.components[0].blocks[bi][k];
-            embed_dct_lsb(coeff, target_bit);
-        }
+    // Embed Phase 2: Ciphertext body using (7, 3) Hamming matrix embedding
+    let mut slot_vals: Vec<u8> = body_slots
+        .iter()
+        .map(|&(bi, k)| {
+            let val = coeffs.components[0].blocks[bi][k];
+            ((val as i32) & 1) as u8
+        })
+        .collect();
+    let mut slot_refs: Vec<&mut u8> = slot_vals.iter_mut().collect();
+    crate::stego::coding::hamming_embed_bytes(&mut slot_refs, ciphertext_body, hamming_k)?;
+
+    for (i, &(bi, k)) in body_slots.iter().enumerate() {
+        let target_bit = slot_vals[i];
+        let coeff = &mut coeffs.components[0].blocks[bi][k];
+        embed_dct_lsb(coeff, target_bit);
     }
 
     // Re-encode Huffman bitstream without generation loss
@@ -208,14 +242,35 @@ pub fn extract_jpeg(
         as usize;
     let candidate_slots = &eligible_slots[..allowed_count];
 
-    if candidate_slots.len() < 32 * 8 {
+    if candidate_slots.len() < 256 {
         return Err(StrHideError::NoHiddenData(
             "Carrier has insufficient capacity for stego header".into(),
         ));
     }
 
+    // Phase 1: Keyed full candidate set permutation for header slots
+    let header_seed = crate::stego::envelope::derive_header_perm_seed(password);
+    let mut permuted_candidates = candidate_slots.to_vec();
+    permute_indices(&mut permuted_candidates, &header_seed);
+
+    let header_slots = &permuted_candidates[..256];
+
+    // See `spatial::engine`: the header is a keyed random 256-slot subset, the
+    // body keeps UERD's cost ordering so the cheapest slots are used first.
+    let is_header = {
+        let mut v = vec![false; total_coeffs];
+        for &(bi, k) in header_slots {
+            v[bi * 64 + k] = true;
+        }
+        v
+    };
+    let body_candidates: Vec<(usize, usize)> = candidate_slots
+        .iter()
+        .copied()
+        .filter(|&(bi, k)| !is_header[bi * 64 + k])
+        .collect();
+
     // Read Phase 1: 32-byte Header
-    let header_slots = &candidate_slots[..256];
     let mut header_bytes = [0u8; 32];
     for byte_i in 0..32 {
         let mut b = 0u8;
@@ -237,42 +292,45 @@ pub fn extract_jpeg(
     ]) as usize;
 
     if !(49..=64 * 1024 * 1024).contains(&total_len) {
-        return Err(StrHideError::NoHiddenData(
-            "Invalid stego envelope size".into(),
-        ));
+        // Deliberately generic: a wrong secret lands the header on the wrong
+        // slots, and a distinct message ("invalid size") would tell an attacker
+        // that *an envelope exists here but the layout is wrong*, which is an
+        // oracle the AEAD path deliberately does not provide.
+        return Err(StrHideError::NoHiddenData("No valid payload found".into()));
     }
 
     let ciphertext_len = total_len - 28;
     let ciphertext_bits = ciphertext_len * 8;
-    if 256 + ciphertext_bits > candidate_slots.len() {
-        return Err(StrHideError::NoHiddenData(
-            "Truncated stego envelope".into(),
-        ));
+    let hamming_k = crate::stego::coding::DEFAULT_HAMMING_K;
+    let needed_body_slots = crate::stego::coding::required_slots(ciphertext_bits, hamming_k);
+
+    if needed_body_slots > body_candidates.len() {
+        return Err(StrHideError::NoHiddenData("No valid payload found".into()));
     }
 
-    // Phase 2: Permute remaining candidate slots using derived perm_seed
-    let (_, perm_seed) = match password {
-        Some(p) => crate::stego::envelope::derive_keys(p, salt),
-        None => crate::stego::envelope::derive_keys("strhide-default-content-stego-key-2026", salt),
-    };
+    // Phase 2: Keyed permutation of body slots using PBKDF2 salt-derived seed
+    let (_, perm_seed) = crate::stego::envelope::derive_keys(
+        password.unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
+        salt,
+    );
 
-    let remaining_candidates = &candidate_slots[256..256 + ciphertext_bits];
-    let mut body_slots = remaining_candidates.to_vec();
+    let mut body_slots = body_candidates[..needed_body_slots].to_vec();
     permute_indices(&mut body_slots, &perm_seed);
+
+    let slot_vals: Vec<u8> = body_slots
+        .iter()
+        .map(|&(bi, k)| {
+            let val = coeffs.components[0].blocks[bi][k];
+            ((val as i32) & 1) as u8
+        })
+        .collect();
+
+    let ciphertext_body =
+        crate::stego::coding::hamming_extract_bytes(&slot_vals, ciphertext_len, hamming_k)?;
 
     let mut full_envelope = Vec::with_capacity(total_len);
     full_envelope.extend_from_slice(&header_bytes[..28]); // Salt + Nonce
-
-    for byte_i in 0..ciphertext_len {
-        let mut b = 0u8;
-        for bit_i in 0..8 {
-            let (bi, k) = body_slots[byte_i * 8 + bit_i];
-            let val = coeffs.components[0].blocks[bi][k];
-            let lsb = ((val as i32) & 1) as u8;
-            b = (b << 1) | lsb;
-        }
-        full_envelope.push(b);
-    }
+    full_envelope.extend_from_slice(&ciphertext_body);
 
     unpack_envelope(&full_envelope, password)
 }
@@ -313,16 +371,23 @@ pub fn probe_jpeg_capacity(
         * (1.0 - params.block_exclusion_percentile.clamp(0.0, 0.8)))
         as usize;
 
-    let fixed_overhead_bits = 416; // 32B header (256 bits) + 20B envelope overhead (160 bits)
-    let available_bits = allowed_count.saturating_sub(fixed_overhead_bits);
-    let max_raw_payload_bytes = available_bits / 8;
+    let header_slots = 256;
+    let available_body_slots = allowed_count.saturating_sub(header_slots);
+    let hamming_k = crate::stego::coding::DEFAULT_HAMMING_K;
+    let max_ciphertext_bytes =
+        crate::stego::coding::max_payload_bytes(available_body_slots, hamming_k);
+    // Only the body-borne overhead comes off here: salt/nonce already paid for
+    // by the 256 header slots. Subtracting MIN_ENVELOPE_LEN under-reported the
+    // capacity by exactly 28 bytes (measured on real carriers).
+    let max_raw_payload_bytes =
+        max_ciphertext_bytes.saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
     let recommended_max_bytes = max_raw_payload_bytes / 2;
 
     Ok(StegoCapacityInfo {
         format: "JPEG".into(),
         algorithm: cost_model.id().into(),
         total_elements: total_coeffs,
-        available_slots: allowed_count,
+        available_slots: available_body_slots,
         max_raw_payload_bytes,
         recommended_max_bytes,
     })

@@ -31,6 +31,8 @@ use std::path::Path;
 
 use serde::Serialize;
 
+pub mod calibration;
+
 use crate::adapters::{pe_codebits, pe_slack};
 use crate::envelope::{LEGACY_HEADER_MAGIC, MIN_UBE_PLAIN, STANDARD_HEADER_MAGIC};
 use crate::errors::StrHideError;
@@ -41,6 +43,17 @@ use crate::errors::StrHideError;
 const MAX_FULL_SCAN: u64 = 64 * 1024 * 1024; // 64 MiB
 /// Tail window for entropy / trailing-data heuristics.
 const TAIL_WINDOW: usize = 4096;
+
+/// Calibrated DCT estimate at which a JPEG is reported as suspicious.
+///
+/// Calibrated on the bundled 15-carrier corpus: clean carriers stay at or below
+/// 0.062, full-capacity UERD embedding reaches 0.129-0.228. The threshold sits
+/// in the empty band between them. This is a heuristic with a measured false
+/// negative rate, not a proof procedure -- see `docs/stego_keyed_parameters_plan_20261020.md` §13.
+const CALIBRATION_FLAG_RATE: f64 = 0.09;
+/// Estimate above which the finding is raised to `Likely` (2.4x the highest
+/// clean value measured on the corpus).
+const CALIBRATION_STRONG_RATE: f64 = 0.15;
 
 /// How strongly a single finding points at embedded data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -75,6 +88,11 @@ pub struct ScanReport {
     pub risk_score: u32,
     /// One of `clean` / `low` / `suspicious` / `likely-hidden`.
     pub verdict: String,
+    /// Scanner-level caveats about what the verdict does NOT prove. Emitted for
+    /// formats where the available detectors have a known blind spot, so a
+    /// `clean` result is not read as evidence of absence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +144,10 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
     }
     track_trailing_entropy(&data, format.as_deref(), &mut findings);
 
+    // Set when the calibrated DCT test fired; used to decide whether the
+    // "clean is not proof" caveat still applies to this report.
+    let mut calibrated_signal = false;
+
     // Content-domain track (PNG + JPEG, and only when we have the full image).
     if file_size <= MAX_FULL_SCAN {
         let decoded: Option<(Vec<u8>, u32, usize)> = match format.as_deref() {
@@ -140,10 +162,33 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
         }
         // DCT-domain JSteg detection (JPEG only): operates on quantized AC
         // coefficients directly, where JPEG steganography actually lives.
-        if format.as_deref() == Some("JPEG")
-            && let Some(f) = jsteg_dct_test(&data)
-        {
-            findings.push(f);
+        if format.as_deref() == Some("JPEG") {
+            // Calibrated analysis. This replaced an absolute pair chi-square
+            // test (`dct:jsteg-chi2`) that was measured to be dead code on real
+            // images: its gate needed `chi2/df < 0.5` while real clean JPEGs
+            // sit at 200-2000, so it could never fire at any embedding rate.
+            // The calibrated test is relative to the image's own re-quantised
+            // reference, which is what makes it work without a clean original.
+            if let Some(est) = calibration::estimate(&data)
+                && est.rate >= CALIBRATION_FLAG_RATE
+            {
+                calibrated_signal = true;
+                findings.push(Finding {
+                    detector: "dct:calibration".into(),
+                    severity: if est.rate >= CALIBRATION_STRONG_RATE {
+                        Severity::Likely
+                    } else {
+                        Severity::Suspicious
+                    },
+                    detail: format!(
+                        "Calibrated DCT estimate: ~{:.0}% of coefficients look LSB-replaced (rate {:.3}, imbalance ratio {:.2} vs calibrated reference, {} blocks)",
+                        est.rate * 100.0,
+                        est.rate,
+                        est.imbalance_ratio,
+                        est.blocks
+                    ),
+                });
+            }
         }
     }
 
@@ -155,6 +200,18 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
         _ => "likely-hidden",
     };
 
+    // Don't let a low score masquerade as proof of absence. JPEG content
+    // steganography (UERD/DCT LSB) is the known weak spot: measured on a
+    // 15-carrier corpus at full capacity, 4 JPEG carriers stay below the
+    // detection threshold of every statistical detector available here.
+    let mut notes = Vec::new();
+    if format.as_deref() == Some("JPEG") && matches!(verdict, "clean" | "low") && !calibrated_signal
+    {
+        notes.push(
+            "JPEG statistical detectors are weak against low-rate DCT embedding: a clean/low verdict is NOT evidence that nothing is hidden".to_string(),
+        );
+    }
+
     Ok(ScanReport {
         carrier,
         format,
@@ -162,6 +219,7 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
         findings,
         risk_score,
         verdict: verdict.into(),
+        notes,
     })
 }
 
@@ -751,79 +809,6 @@ fn decode_jpeg_pixels(data: &[u8]) -> Option<(Vec<u8>, u32, usize)> {
     } else {
         Some((pixels, width, 3))
     }
-}
-
-/// JSteg-style steganalysis on quantized DCT coefficients.
-///
-/// JSteg flips the LSB of AC coefficients whose |v| >= 2.
-/// We apply the chi-square pair-uniformity test across non-overlapping
-/// PoVs (2v, 2v+1) on the coefficient histogram.
-fn jsteg_dct_test(data: &[u8]) -> Option<Finding> {
-    use dct_io::read_coefficients;
-    let coeffs = read_coefficients(data).ok()?;
-
-    // Histogram over signed AC coefficient values (range -1024..1024 for 8-bit).
-    const RANGE: usize = 2049;
-    const OFFSET: i32 = 1024;
-    let mut hist = vec![0u64; RANGE];
-    let mut eligible = 0u64;
-    for comp in &coeffs.components {
-        for block in &comp.blocks {
-            for (k, &v) in block.iter().enumerate() {
-                if k == 0 {
-                    continue; // skip DC
-                }
-                let av = v.abs();
-                if av >= 2 {
-                    let idx = v as i32 + OFFSET;
-                    if idx >= 0 && (idx as usize) < RANGE {
-                        hist[idx as usize] += 1;
-                        eligible += 1;
-                    }
-                }
-            }
-        }
-    }
-    if eligible < 100 {
-        return None; // too few coefficients to make a call
-    }
-
-    // Chi-square on non-overlapping paired bins (2k, 2k+1) across the central range.
-    let mut chi2 = 0.0;
-    let mut df = 0.0;
-    for v in (2i32..=64).step_by(2) {
-        let i0 = (v + OFFSET) as usize;
-        let i1 = (v + 1 + OFFSET) as usize;
-        let expected = (hist[i0] + hist[i1]) as f64 / 2.0;
-        if expected > 0.0 {
-            chi2 += (hist[i0] as f64 - expected).powi(2) / expected;
-            df += 1.0;
-        }
-        // negative side: (-v-1, -v) e.g. (-3, -2), (-5, -4)
-        let n0 = (-v - 1 + OFFSET) as usize;
-        let n1 = (-v + OFFSET) as usize;
-        let expected = (hist[n0] + hist[n1]) as f64 / 2.0;
-        if expected > 0.0 {
-            chi2 += (hist[n0] as f64 - expected).powi(2) / expected;
-            df += 1.0;
-        }
-    }
-    if df == 0.0 {
-        return None;
-    }
-    let suspicion = ((df - chi2) / df).clamp(0.0, 1.0);
-    if suspicion < 0.5 {
-        return None;
-    }
-    Some(Finding {
-        detector: "dct:jsteg-chi2".into(),
-        severity: Severity::Suspicious,
-        detail: format!(
-            "DCT coefficient chi-square: {eligible} eligible AC coefficients, \
-             pair-histogram uniformity suspicion {suspicion:.2} \
-             (consistent with JSteg/F5-style LSB embedding on DCT coefficients)"
-        ),
-    })
 }
 
 // ---------------------------------------------------------------------------

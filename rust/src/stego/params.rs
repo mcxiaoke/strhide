@@ -159,8 +159,37 @@ pub struct StegoOptions {
     pub algorithm: Option<String>,
     /// Password for cryptographic key derivation and PRNG scattering.
     pub password: Option<String>,
+    /// Private stand-in secret used when [`password`](Self::password) is `None`.
+    ///
+    /// **Parameter class: P (read and write must agree).** Both the AEAD key and
+    /// the header-slot permutation are derived from it, so an envelope embedded
+    /// with one secret is unreadable with another -- and unreadable with the
+    /// official public constant. Mismatch surfaces as `NoHiddenData`, i.e. it
+    /// fails silently by design, so keep this value with the password, not
+    /// with the tuning knobs.
+    ///
+    /// `None` keeps the historical behaviour: the public
+    /// [`PUBLIC_DEFAULT_SECRET`](crate::stego::envelope::PUBLIC_DEFAULT_SECRET)
+    /// is used, which means any strhide binary can read no-password carriers.
+    pub default_secret: Option<String>,
     /// Fine-tuning parameters for spatial domain algorithms.
     pub spatial_params: SpatialParams,
     /// Fine-tuning parameters for JPEG DCT domain algorithms.
     pub jpeg_params: JpegParams,
+}
+
+impl StegoOptions {
+    /// Secret actually used for key derivation: the explicit password wins, the
+    /// private default secret is the fallback, `None` means "official public
+    /// constant" (resolved inside the envelope layer).
+    ///
+    /// Resolving here keeps the two engine families byte-identical: a private
+    /// default secret is not special-cased anywhere downstream, it simply
+    /// travels the same path as a user password.
+    pub fn effective_secret(&self) -> Option<&str> {
+        self.password
+            .as_deref()
+            .or(self.default_secret.as_deref())
+            .filter(|s| !s.is_empty())
+    }
 }

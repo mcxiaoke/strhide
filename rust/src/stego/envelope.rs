@@ -24,11 +24,36 @@ use sha2::Sha256;
 
 use crate::errors::StrHideError;
 
+/// Official public fallback secret.
+///
+/// Used only when neither a user password nor a private
+/// [`StegoOptions::default_secret`](crate::stego::StegoOptions::default_secret)
+/// is supplied. The value is public by design: it keeps payloads off
+/// plaintext-on-disk, but it gives **no** confidentiality against anyone who
+/// has this source tree -- they can reproduce the exact key derivation and
+/// read every no-password envelope (both the AEAD key and the header slot
+/// permutation become known).
+///
+/// Replace it with a private value via `--stego-secret` / `stego_secret` in the
+/// config file. Note the parameter class: it must be identical on embed and
+/// extract, otherwise the carrier reads back as `NoHiddenData`.
+pub const PUBLIC_DEFAULT_SECRET: &str = "strhide-default-content-stego-key-2026";
+
 pub const SALT_LEN: usize = 16;
 pub const NONCE_LEN: usize = 12;
 pub const TAG_LEN: usize = 16;
 pub const HEADER_OVERHEAD: usize = SALT_LEN + NONCE_LEN; // 28 bytes
 pub const MIN_ENVELOPE_LEN: usize = HEADER_OVERHEAD + 4 + 1 + TAG_LEN; // 49 bytes
+
+/// Bytes the **ciphertext body** spends on things that are not payload:
+/// `[4-byte original length][1-byte flags]` inside the plaintext plus the
+/// 16-byte AEAD tag.
+///
+/// The 28-byte salt/nonce is deliberately NOT part of this number: it is
+/// carried by the 256 header slots, not by the body slots. Capacity probes must
+/// subtract this from the body ciphertext budget, otherwise they under-report by
+/// 28 bytes (they used to subtract `MIN_ENVELOPE_LEN`).
+pub const BODY_OVERHEAD: usize = 4 + 1 + TAG_LEN; // 21 bytes
 
 /// Flag bit indicating Deflate compression.
 const FLAG_COMPRESSED: u8 = 0x01;
@@ -51,9 +76,21 @@ pub fn derive_keys(password: &str, salt: &[u8]) -> ([u8; 32], [u8; 32]) {
     (enc_key_bytes, perm_seed)
 }
 
+/// Derive header permutation seed from password (or default builtin key) WITHOUT salt.
+/// This breaks the circular dependency ("chicken-and-egg") so the header location
+/// can be pseudo-randomized across the carrier without knowing the salt upfront.
+pub fn derive_header_perm_seed(password: Option<&str>) -> [u8; 32] {
+    let pw = password.unwrap_or(PUBLIC_DEFAULT_SECRET);
+    let mut header_seed = [0u8; 32];
+    let hk = Hkdf::<Sha256>::new(Some(b"strhide-stego-hpos-salt-v2"), pw.as_bytes());
+    hk.expand(b"strhide-stego-hpos-v2", &mut header_seed)
+        .expect("HKDF expand header perm seed");
+    header_seed
+}
+
 /// Fallback built-in key when no password is provided.
 fn default_builtin_key(salt: &[u8]) -> ([u8; 32], [u8; 32]) {
-    derive_keys("strhide-default-content-stego-key-2026", salt)
+    derive_keys(PUBLIC_DEFAULT_SECRET, salt)
 }
 
 /// Pack and encrypt payload into micro-envelope byte stream.
