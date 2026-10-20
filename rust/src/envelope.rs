@@ -28,13 +28,17 @@
 //! mode, password-derived values produced by
 //! [`crate::crypto::derive_stealth_magics`]. Sensitive header fields are
 //! XOR-masked with a keystream derived from the password (or, for the default
-//! non-encrypted envelope, from [`crate::crypto::BUILTIN_DEFAULT_KEY`]).
+//! non-encrypted envelope, from the profile's default secret —
+//! [`crate::crypto::BUILTIN_DEFAULT_KEY`] unless a private
+//! [`Profile`] overrides it).
 //!
-//! Readers should prefer [`EnvelopeHeader::unpack_with_password`] and
+//! Readers should prefer [`EnvelopeHeader::unpack_with_password`] (official
+//! dialect) or [`EnvelopeHeader::unpack_with_profile`] (any dialect) and
 //! [`EnvelopeTrailer::unpack`]; the bare `unpack` calls assume an already
 //! de-masked header.
 
 use crate::errors::StrHideError;
+use crate::params::Profile;
 use std::io::{Read, Seek, SeekFrom};
 
 /// Standard high-entropy binary header magic (8 bytes): SHA-256("strhide-standard-header-v2")[..8]
@@ -228,20 +232,36 @@ impl EnvelopeHeader {
         buf
     }
 
-    /// Pack fixed header into 112 bytes with stealth masking applied if stealth mode is enabled.
-    /// In stealth mode, sensitive fields (version, flags, strategy_id, host SHA-256, sizes and offsets)
-    /// Pack fixed header into 112 bytes with masking applied:
-    /// - In stealth mode: sensitive fields are masked with user's password.
-    /// - In default mode (no custom password): sensitive fields are masked with BUILTIN_DEFAULT_KEY.
+    /// Pack fixed header into 112 bytes with the official dialect's masking.
+    ///
+    /// Wrapper over [`Self::pack_with_profile`] with `Profile::default()`.
     pub fn pack_with_stealth_mask(
         &self,
         password: Option<&str>,
+    ) -> Result<[u8; HEADER_SIZE], StrHideError> {
+        self.pack_with_profile(password, &Profile::default())
+    }
+
+    /// Pack fixed header into 112 bytes with masking applied:
+    /// - In stealth mode: sensitive fields are masked with the user's password.
+    /// - In default mode (no custom password): sensitive fields are masked with
+    ///   the profile's default secret (`BUILTIN_DEFAULT_KEY` for the official
+    ///   profile).
+    ///
+    /// The masking secret must match on both sides — this is the write half of
+    /// the pair whose read half is [`Self::unpack_with_profile`]. A private
+    /// `Profile::default_secret` therefore has to be supplied to both calls or
+    /// the header becomes unreadable.
+    pub fn pack_with_profile(
+        &self,
+        password: Option<&str>,
+        profile: &Profile,
     ) -> Result<[u8; HEADER_SIZE], StrHideError> {
         let mut buf = self.pack();
         let effective_pwd = if self.is_stealth() {
             password
         } else if !self.is_encrypted() {
-            Some(crate::crypto::BUILTIN_DEFAULT_KEY)
+            Some(profile.secret())
         } else {
             None
         };
@@ -313,8 +333,32 @@ impl EnvelopeHeader {
         })
     }
 
-    /// Unpack 112-byte fixed header, handling stealth and default de-masking when applicable.
+    /// Unpack 112-byte fixed header, handling stealth and default de-masking
+    /// for the official dialect.
+    ///
+    /// Wrapper over [`Self::unpack_with_profile`] with `Profile::default()`.
     pub fn unpack_with_password(data: &[u8], password: Option<&str>) -> Result<Self, StrHideError> {
+        Self::unpack_with_profile(data, password, &Profile::default())
+    }
+
+    /// Unpack 112-byte fixed header, handling stealth and default de-masking.
+    ///
+    /// Three-tier identification, in order:
+    ///
+    /// 1. **Stealth + password**: the header magic is itself derived from the
+    ///    password, so a match authenticates the password before any masked
+    ///    field is trusted.
+    /// 2. **Default mode**: unmask with the profile's default secret and accept
+    ///    only if the unmasked `version` / `flags` / `strategy_id` / `reserved`
+    ///    bytes form a plausible header. This gate is what makes a wrong
+    ///    profile fail deterministically instead of yielding garbage fields.
+    /// 3. **Bare header**: an already-plain header (encrypted mode is *not*
+    ///    masked at all — the AEAD authenticates it).
+    pub fn unpack_with_profile(
+        data: &[u8],
+        password: Option<&str>,
+        profile: &Profile,
+    ) -> Result<Self, StrHideError> {
         if data.len() < HEADER_SIZE {
             return Err(StrHideError::CorruptedData(format!(
                 "Insufficient bytes for header: {} < {}",
@@ -333,7 +377,7 @@ impl EnvelopeHeader {
             // masked bytes into values that occasionally satisfy the
             // version/FLAG_STEALTH gate below and surface as a bogus field
             // error instead of a password error.
-            let stealth_magic = crate::crypto::derive_stealth_magics(pwd, b"strhide-stealth-v1")
+            let stealth_magic = crate::crypto::derive_stealth_magics(pwd, profile.domain())
                 .ok()
                 .map(|m| m.0);
             if stealth_magic.is_none_or(|m| data[..8] == m[..])
@@ -356,13 +400,12 @@ impl EnvelopeHeader {
             }
         }
 
-        // Try de-masking with BUILTIN_DEFAULT_KEY for default mode
+        // Try de-masking with the profile's default secret (the public built-in
+        // key for the official dialect).
         {
             let mut salt = [0u8; 16];
             salt.copy_from_slice(&data[12..28]);
-            if let Ok(mask) =
-                crate::crypto::derive_header_mask(crate::crypto::BUILTIN_DEFAULT_KEY, &salt)
-            {
+            if let Ok(mask) = crate::crypto::derive_header_mask(profile.secret(), &salt) {
                 let mut unmasked = [0u8; HEADER_SIZE];
                 unmasked.copy_from_slice(&data[..HEADER_SIZE]);
                 for i in 0..4 {

@@ -182,6 +182,7 @@ fn test_stealth_legacy_unmasked_backward_compatibility() {
         &payload_key,
         &base_nonce,
         &aad,
+        strhide::crypto::CHUNK_SIZE,
     )
     .unwrap();
 

@@ -43,9 +43,18 @@ use unicode_normalization::UnicodeNormalization;
 use crate::envelope::AAD_SIZE;
 use crate::errors::StrHideError;
 
-/// Plaintext payload chunk size. Each chunk is independently sealed with
-/// AES-256-GCM and prefixed by its own u32 length on the wire.
+/// Default plaintext payload chunk size. Each chunk is independently sealed
+/// with AES-256-GCM and prefixed by its own u32 length on the wire.
+///
+/// The reader never needs this value: chunk framing is self-describing, so
+/// [`crate::params::LocalParams::chunk_size`] can pick anything up to
+/// [`MAX_CHUNK_SIZE`] without making an envelope unreadable.
 pub const CHUNK_SIZE: usize = 2 * 1024 * 1024; // 2MB
+
+/// Hard ceiling on a single plaintext chunk, enforced on both sides: the writer
+/// refuses a larger `chunk_size` and the reader refuses a chunk length above
+/// it, so a crafted envelope cannot request a 4 GiB allocation.
+pub const MAX_CHUNK_SIZE: usize = 64 * 1024 * 1024; // 64MB
 
 /// PBKDF2-HMAC-SHA256 iteration count. Raising this invalidates envelopes
 /// written with older versions, so it is treated as a wire-format constant.
@@ -217,8 +226,13 @@ pub fn decrypt_metadata(
         .map_err(|_| StrHideError::CorruptedData("Metadata authentication failed".into()))
 }
 
-/// Read `reader` to EOF, seal it in [`CHUNK_SIZE`]-byte AES-256-GCM chunks,
+/// Read `reader` to EOF, seal it in `chunk_size`-byte AES-256-GCM chunks,
 /// and write the length-prefixed chunk stream to `writer`.
+///
+/// `chunk_size` is a writer-only knob ([`crate::params::LocalParams::chunk_size`]):
+/// it never has to be communicated, because each chunk carries its own length
+/// and the final chunk is identified by the byte budget recorded in the header
+/// (see [`decrypt_stream_from_chunks`]).
 ///
 /// Returns the total number of ciphertext bytes written (chunk lengths +
 /// ciphertext + GCM tags). An empty input still produces one empty final
@@ -229,16 +243,18 @@ pub fn encrypt_stream_to_chunks<R: Read, W: Write>(
     payload_key: &[u8; 32],
     base_nonce: &[u8; 12],
     fixed_header_aad: &[u8; AAD_SIZE],
+    chunk_size: usize,
 ) -> Result<u64, StrHideError> {
+    debug_assert!(chunk_size > 0 && chunk_size <= MAX_CHUNK_SIZE);
     let cipher = Aes256Gcm::new_from_slice(payload_key)
         .map_err(|e| StrHideError::General(format!("Invalid key for AES-GCM: {e}")))?;
 
-    let mut current_chunk = Vec::with_capacity(CHUNK_SIZE);
+    let mut current_chunk = Vec::with_capacity(chunk_size);
     let mut buf = [0u8; 64 * 1024];
 
     // Read first chunk
-    while current_chunk.len() < CHUNK_SIZE {
-        let to_read = std::cmp::min(CHUNK_SIZE - current_chunk.len(), buf.len());
+    while current_chunk.len() < chunk_size {
+        let to_read = std::cmp::min(chunk_size - current_chunk.len(), buf.len());
         let n = reader.read(&mut buf[..to_read])?;
         if n == 0 {
             break;
@@ -273,13 +289,13 @@ pub fn encrypt_stream_to_chunks<R: Read, W: Write>(
         return Ok(4 + encrypted.len() as u64);
     }
 
-    let mut next_chunk = Vec::with_capacity(CHUNK_SIZE);
+    let mut next_chunk = Vec::with_capacity(chunk_size);
 
     loop {
         // Read next chunk to determine if current_chunk is last
         next_chunk.clear();
-        while next_chunk.len() < CHUNK_SIZE {
-            let to_read = std::cmp::min(CHUNK_SIZE - next_chunk.len(), buf.len());
+        while next_chunk.len() < chunk_size {
+            let to_read = std::cmp::min(chunk_size - next_chunk.len(), buf.len());
             let n = reader.read(&mut buf[..to_read])?;
             if n == 0 {
                 break;
@@ -326,9 +342,14 @@ pub fn encrypt_stream_to_chunks<R: Read, W: Write>(
 /// verify each chunk, and write the plaintext to `writer`.
 ///
 /// `total_payload_bytes` comes from the AEAD-protected header, so it is
-/// trusted; individual chunk lengths are still capped at
-/// `CHUNK_SIZE + 16` to reject a forged envelope that asks for a giant
-/// allocation.
+/// trusted; individual chunk lengths are still capped at the remaining budget
+/// (and at [`MAX_CHUNK_SIZE`]) to reject a forged envelope that asks for a
+/// giant allocation.
+///
+/// **Read-side decoupling:** no chunk size is negotiated or assumed. The upper
+/// bound is `min(bytes left in the payload region, MAX_CHUNK_SIZE)`, which
+/// accepts any chunk size the writer chose and still bounds allocation by the
+/// (authenticated) total size.
 pub fn decrypt_stream_from_chunks<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -353,13 +374,16 @@ pub fn decrypt_stream_from_chunks<R: Read, W: Write>(
         bytes_consumed += 4;
         let chunk_len = u32::from_le_bytes(header_data) as usize;
 
-        // Upper bound: a legit chunk holds at most CHUNK_SIZE plaintext bytes
-        // plus the 16-byte GCM tag. Anything larger means corruption or a
-        // crafted envelope; reject before allocating.
-        if chunk_len > CHUNK_SIZE + 16 {
+        // Upper bound: the declared payload region is authenticated, so whatever
+        // is left in it is the true ceiling for this chunk (the last chunk ends
+        // exactly at the region boundary). MAX_CHUNK_SIZE additionally bounds a
+        // single allocation. Compute *after* consuming the 4-byte prefix, or a
+        // legitimate final chunk would look oversized.
+        let remaining = total_payload_bytes.saturating_sub(bytes_consumed);
+        let max_chunk = remaining.min(MAX_CHUNK_SIZE as u64) as usize;
+        if chunk_len > max_chunk {
             return Err(StrHideError::CorruptedData(format!(
-                "Chunk length {chunk_len} exceeds maximum {} at chunk {chunk_index}",
-                CHUNK_SIZE + 16
+                "Chunk length {chunk_len} exceeds maximum {max_chunk} at chunk {chunk_index}"
             )));
         }
 
@@ -408,13 +432,19 @@ pub fn decrypt_stream_from_chunks<R: Read, W: Write>(
     Ok(total_plain_written)
 }
 
-/// Compress in_stream using raw deflate.
+/// Compress in_stream using raw deflate at `level` (0..=9).
+///
+/// The level is writer-only: the decoder always inflates raw deflate and never
+/// consults it, so envelopes produced at different levels are mutually
+/// readable. `level` is validated by the caller
+/// ([`crate::params::LocalParams::validate`]).
 /// Returns (raw_size, compressed_size).
 pub fn compress_stream<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
+    level: u32,
 ) -> Result<(u64, u64), StrHideError> {
-    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(6));
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(level));
     let mut buf = [0u8; 64 * 1024];
     let mut raw_size: u64 = 0;
 
@@ -536,7 +566,7 @@ mod tests {
     fn test_deflate_compatibility() {
         let data = b"Hello World! This is a test of raw deflate compression.";
         let mut comp = Vec::new();
-        let (raw_len, comp_len) = compress_stream(&mut &data[..], &mut comp).unwrap();
+        let (raw_len, comp_len) = compress_stream(&mut &data[..], &mut comp, 6).unwrap();
         assert_eq!(raw_len, data.len() as u64);
         assert_eq!(comp_len, comp.len() as u64);
 
@@ -602,6 +632,7 @@ mod tests {
             &payload_key,
             &base_nonce,
             &aad,
+            crate::crypto::CHUNK_SIZE,
         )
         .unwrap();
 

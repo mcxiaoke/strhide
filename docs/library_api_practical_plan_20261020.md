@@ -4,7 +4,8 @@
 > **定位**：本文**取代** `library_extensibility_and_public_api_audit_20261020.md` 第 4 节的改造范围。
 > 原文档的诊断（哪里写死）基本准确，但**范围判断（哪些被 UBE v2.2 卡死）有明显偏差**，导致蓝图
 > 大而全、含大量不必做的项。本文按"库使用者真实需求 + 代码实证"重新划定范围。
-> **尚未改动任何代码**，本文为方案稿。
+> **进展（2026-10-20 21:53）**：M1 已落地（无协议改动），实施中的三处纠偏见 §10；
+> M2 / M3 / CLI 暴露 / stego 密钥归并均未开工。
 
 ---
 
@@ -271,3 +272,52 @@ M2 是 `decode_compact` 尾部解析 + 写侧编码，改动面最小但**兼容
 > `StegoOptions::default_secret`（P 类参数，`--stego-secret` / `stego_secret` / `STRHIDE_STEGO_SECRET`），
 > 尚未并入统一 `Profile`——因为 `Profile` 本身在 M1 里才存在。M1 落地时把该字段迁入
 > `StegoProfile.default_secret` 即可，语义与优先级保持一致（显式 password 压过 default_secret）。
+
+---
+
+## 10. M1 实施记录与三处纠偏（2026-10-20 21:53）
+
+M1 已全部落地，线格式零改动。实施中核对代码，发现本文前述 §4/§5 有三处需要修正，
+下面按"文档原判断 → 实际"列出，供 M2/M3 参考。
+
+### 10.1 跨 profile 的失败形态不是 `NoHiddenData`
+
+§5 M1 验收原文写"官方 profile 读自定义信封要报 `NoHiddenData`，不能解出垃圾"。实测不成立：
+
+| 场景 | 实际错误 |
+|---|---|
+| 仅 `default_secret` 不同（魔数仍为官方） | `CorruptedData`——标准 magic 能定位到，头掩码/密钥不对导致版本门与 AEAD 失败 |
+| 自定义 trailer magic | `NoHiddenData`——`locate` 根本搜不到 |
+| 自定义 stealth 域（带正确密码） | `NoHiddenData`——派生 magic 不同，信封不可见 |
+
+验收应表述为"**必须失败且不得返回任何字节**"，不要钉死错误类型。测试
+`tests/test_lifecycle/profile.rs::assert_unreadable` 即按此断言。
+
+### 10.2 自定义魔数不需要改适配器，成本只在 engine 的定位入口
+
+本文 §3 表格把第 4 项记为"需对称配置"，但没有指出真正的耦合点。核对结论：
+
+- `HostAdapter::locate(&mut dyn SeekRead, Option<&[u8;4]>)` 的第二参数本来就是魔数入口；
+- `png.rs:231`、`jpeg.rs:330`、`pe_slack.rs:212` 的"必须是标准/LEGACY"判断**只在 `None` 时生效**，
+  传 `Some` 则走精确匹配；
+- `pe_codebits` 的通道头魔数直接取 UBE 尾部 4 字节（`pe_codebits.rs:30-38`），自动继承自定义值。
+
+因此改动限于 engine 的 4 个定位点 + 写侧预检；`analysis.rs:610` 的扫描仍只认标准/LEGACY，
+即"自定义魔数的信封对 `scan` 不可见"——这是可接受的边界，已在代码注释与本文档记录。
+
+### 10.3 头部掩码的**写侧**同样硬编码，只改读侧会自锁
+
+§5 M1 表格只列了 `envelope.rs:359-382`（读侧解掩码用 `BUILTIN_DEFAULT_KEY`）。
+`pack_with_stealth_mask`（`envelope.rs:235-255`）在无密码模式下**也用**同一个常量派生掩码，
+只改读侧会导致私有 `default_secret` 写出的信封自己都读不回来。已两侧同时改为 `profile.secret()`。
+
+### 10.4 与本文的其他差异
+
+- `LocalParams` **未**包含 `preserve_time` / `backup`：这两项已在 `WriteOptions` 中且已 CLI 化，
+  再放一份会产生双份事实源。仍然满足 L 类语义。
+- 公开结构体带 `#[non_exhaustive]` 后下游**无法**用结构体字面量或 `..Default::default()` 构造，
+  因此补了 builder（`with_chunk_size` / `with_default_secret` / ...）。原 §4.1 的示例写法
+  在 crate 外不可编译，已修正 `engine::write_carrier_with` 的文档示例。
+- `stego` 侧 `StegoOptions::default_secret` **尚未**并入 `Profile`：`Profile` 现在存在了，但归并需要
+  stego 侧 API 接受 `Profile`（`embed_carrier` / `extract_carrier` / `probe_carrier_capacity`），
+  属独立改动，单列 M1b，避免和 UBE 侧混在一批。

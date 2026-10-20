@@ -86,6 +86,20 @@
 //! After `remove_carrier`, `photo.png` is byte-for-byte identical to the file
 //! before the write.
 //!
+//! ## Tuning and private dialects
+//!
+//! The plain entry points use the historical defaults. To change writer-only
+//! behaviour without touching the wire format, pass [`params::LocalParams`] to
+//! [`engine::write_carrier_with`]; to key envelopes with your own secret (so
+//! that an official binary cannot read them), pass a [`params::Profile`] to the
+//! `*_with` entry points of [`engine`]:
+//!
+//! - [`params::LocalParams`] — chunk size, compression policy, rejection
+//!   policy. The reader never needs these, so varying them is always safe.
+//! - [`params::Profile`] — private default secret, stealth derivation domain,
+//!   custom magic pair. Read and write must use the **same** profile;
+//!   `Profile::default()` is the official dialect.
+//!
 //! ## Crate layout
 //!
 //! - [`engine`] — the high-level write / read / inspect / verify / remove API.
@@ -99,6 +113,8 @@
 //! - [`rejection`] — pre-write safety checks (signed files, read-only targets,
 //!   APK, signature containers).
 //! - [`errors`] — the single [`errors::StrHideError`] error enum.
+//! - [`params`] — library tuning knobs ([`params::LocalParams`]) and private
+//!   dialect profiles ([`params::Profile`]).
 //! - [`config`] / [`cli`] / [`analysis`] — internal plumbing for the binary.
 
 pub mod adapters;
@@ -109,6 +125,7 @@ pub mod crypto;
 pub mod engine;
 pub mod envelope;
 pub mod errors;
+pub mod params;
 pub mod rejection;
 pub mod router;
 pub mod stego;

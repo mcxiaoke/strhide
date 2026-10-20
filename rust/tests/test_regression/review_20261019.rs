@@ -438,7 +438,7 @@ fn decompression_limit_is_enforced() {
     let mut raw = vec![0u8; 4 * 1024 * 1024];
     raw.extend_from_slice(b"tail");
     let mut comp = Vec::new();
-    strhide::crypto::compress_stream(&mut &raw[..], &mut comp).unwrap();
+    strhide::crypto::compress_stream(&mut &raw[..], &mut comp, 6).unwrap();
 
     // Exact limit passes.
     let mut out = Vec::new();

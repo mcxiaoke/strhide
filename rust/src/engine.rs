@@ -35,11 +35,11 @@ use crate::crypto::{
 };
 use crate::envelope::{
     EnvelopeHeader, EnvelopeTrailer, FLAG_COMPACT_META, FLAG_COMPRESSED, FLAG_ENCRYPTED,
-    FLAG_HAS_HINT, FLAG_IS_FILE, FLAG_STEALTH, HEADER_SIZE, STANDARD_HEADER_MAGIC,
-    STANDARD_TRAILER_MAGIC,
+    FLAG_HAS_HINT, FLAG_IS_FILE, FLAG_STEALTH, HEADER_SIZE,
 };
 use crate::errors::StrHideError;
-use crate::rejection::run_all_rejection_checks;
+use crate::params::{LocalParams, Profile};
+use crate::rejection::run_rejection_checks;
 use crate::router::{find_adapter, find_adapter_or_reject, id_to_strategy, strategy_to_id};
 
 /// Metadata about the payload being hidden, stored inside the encrypted
@@ -57,22 +57,33 @@ pub struct CarrierMetadata {
 }
 
 /// Stealth mode password derivation domain separation string.
-pub const STEALTH_DOMAIN: &[u8] = b"strhide-stealth-v1";
+///
+/// Re-exported from [`crate::params`] for the public API: the constant lives
+/// next to [`Profile::stealth_domain`], which is what actually drives
+/// derivation.
+pub use crate::params::STEALTH_DOMAIN;
 
-/// Locate an envelope with password priority: when a password is supplied, the derived
-/// stealth magic is tried first; fallback to standard magic if not found.
+/// Locate an envelope: password-derived stealth magic first, then the profile's
+/// dialect magic.
+///
+/// The official profile passes `None` to `locate`, which lets adapters also
+/// accept the legacy magics. A private dialect passes its own trailer magic and
+/// deliberately does **not** fall back to the standard scan: an official
+/// envelope must look like "no hidden data" to a private-profile reader (and
+/// vice versa), otherwise the two dialects would silently cross-read.
 fn locate_envelope(
     carrier: &mut dyn SeekRead,
     adapter: &dyn HostAdapter,
     password: Option<&str>,
+    profile: &Profile,
 ) -> Result<Option<(u64, u64, String)>, StrHideError> {
     if let Some(pwd) = password {
-        let magics = derive_stealth_magics(pwd, STEALTH_DOMAIN)?;
+        let magics = derive_stealth_magics(pwd, profile.domain())?;
         if let Some(loc) = adapter.locate(carrier, Some(&magics.1))? {
             return Ok(Some(loc));
         }
     }
-    adapter.locate(carrier, None)
+    adapter.locate(carrier, profile.locator_magic())
 }
 
 /// Version of the compact (binary) metadata block. The JSON form carries no
@@ -620,6 +631,50 @@ pub fn write_carrier(
     source: PayloadSource,
     options: &WriteOptions<'_>,
 ) -> Result<WriteResult, StrHideError> {
+    write_carrier_with(
+        carrier_path,
+        source,
+        options,
+        &LocalParams::default(),
+        &Profile::default(),
+    )
+}
+
+/// Inject `source` into `carrier_path` with library-level tuning.
+///
+/// Same as [`write_carrier`], plus:
+///
+/// - `local`: writer-only knobs ([`LocalParams`]) that the reader never needs.
+///   Passing different values than the reader uses is safe.
+/// - `profile`: the private dialect ([`Profile`]). The reader must be given the
+///   same profile; `Profile::default()` is the official dialect.
+///
+/// ```no_run
+/// use strhide::engine::{write_carrier_with, PayloadSource, WriteOptions};
+/// use strhide::params::{CompressionStrategy, LocalParams, Profile};
+/// # fn main() -> Result<(), strhide::errors::StrHideError> {
+/// // Both types are `#[non_exhaustive]`: build from `default()` with setters.
+/// let profile = Profile::default().with_default_secret("my-private-dialect");
+/// let local = LocalParams::default()
+///     .with_chunk_size(64 * 1024)
+///     .with_compression(CompressionStrategy::Never);
+/// write_carrier_with(
+///     std::path::Path::new("photo.png"),
+///     PayloadSource::Text("secret"),
+///     &WriteOptions::default(),
+///     &local,
+///     &profile,
+/// )?;
+/// # Ok(()) }
+/// ```
+pub fn write_carrier_with(
+    carrier_path: &Path,
+    source: PayloadSource,
+    options: &WriteOptions<'_>,
+    local: &LocalParams,
+    profile: &Profile,
+) -> Result<WriteResult, StrHideError> {
+    local.validate()?;
     let output_path = options.output_path;
     let password = options.password;
     let password_hint = options.password_hint;
@@ -666,7 +721,7 @@ pub fn write_carrier(
     let target_path = output_path.unwrap_or(carrier_path);
 
     // 1. Run security rejection checks (carrier policy + target permissions)
-    run_all_rejection_checks(carrier_path, target_path)?;
+    run_rejection_checks(carrier_path, target_path, local.rejection)?;
 
     // 2. Capture carrier metadata (stats, permissions, timestamps, full SHA-256)
     let meta = std::fs::metadata(carrier_path)?;
@@ -685,14 +740,28 @@ pub fn write_carrier(
         // scan catches plain/standard-encrypted envelopes; when a password is
         // available, a second scan with the derived stealth magic also catches
         // stealth envelopes (which are intentionally invisible without it).
-        if adapter.locate(&mut cf, None)?.is_some() {
+        //
+        // Under a private magic both scans matter: one for the dialect's own
+        // envelopes, one for official ones (a second envelope would stack on
+        // top regardless of dialect). With the official profile there is only
+        // one scan, exactly as before.
+        let mut occupied = {
+            cf.seek(SeekFrom::Start(0))?;
+            adapter.locate(&mut cf, profile.locator_magic())?.is_some()
+        };
+        if !occupied && profile.locator_magic().is_some() {
+            cf.seek(SeekFrom::Start(0))?;
+            occupied = adapter.locate(&mut cf, None)?.is_some();
+        }
+        if occupied {
             return Err(StrHideError::General(
                 "Carrier already contains hidden data. Use remove first or specify another file."
                     .into(),
             ));
         }
         if let Some(pwd) = password {
-            let magics = derive_stealth_magics(pwd, b"strhide-stealth-v1")?;
+            let magics = derive_stealth_magics(pwd, profile.domain())?;
+            cf.seek(SeekFrom::Start(0))?;
             if adapter.locate(&mut cf, Some(&magics.1))?.is_some() {
                 return Err(StrHideError::General(
                     "Carrier already contains hidden data (stealth envelope). Use remove first or specify another file.".into(),
@@ -717,12 +786,20 @@ pub fn write_carrier(
         h.iter().map(|b| format!("{b:02x}")).collect::<String>()
     };
 
-    // 5. Compress data with Deflate (integer criterion, cross-language identical:
-    // keep compression only when it saves at least 2%: comp_len * 100 < raw_size * 98)
+    // 5. Compress data with Deflate. `CompressionStrategy::Auto` keeps the
+    // historical integer criterion (cross-language identical: keep compression
+    // only when it saves at least 2%: comp_len * 100 < raw_size * 98). The
+    // level and the decision are writer-only; the reader just inflates raw
+    // deflate when FLAG_COMPRESSED is set.
     let mut compressed_buf = Vec::new();
-    let (_, comp_len) = compress_stream(&mut Cursor::new(&payload_raw_bytes), &mut compressed_buf)?;
+    let (_, comp_len) = compress_stream(
+        &mut Cursor::new(&payload_raw_bytes),
+        &mut compressed_buf,
+        local.compression.level(),
+    )?;
 
-    let (to_encrypt_bytes, is_compressed) = if (comp_len as u128) * 100 < (raw_size as u128) * 98 {
+    let (to_encrypt_bytes, is_compressed) = if local.compression.should_compress(raw_size, comp_len)
+    {
         // Keep the compressed stream and release the raw payload buffer early.
         let mut raw = payload_raw_bytes;
         raw.clear();
@@ -735,8 +812,12 @@ pub fn write_carrier(
     };
 
     // 6. Keys and Magics
+    // `FLAG_ENCRYPTED` means "a user password is required", not "the payload is
+    // encrypted": with a private `default_secret` the payload is still sealed
+    // (under that secret) but the flag stays clear, so the reader knows not to
+    // demand a password and instead uses the profile's secret.
     let has_custom_password = password.is_some();
-    let effective_password = password.unwrap_or(crate::crypto::BUILTIN_DEFAULT_KEY);
+    let effective_password = password.unwrap_or(profile.secret());
     let mut flags: u8 = 0;
     if has_custom_password {
         flags |= FLAG_ENCRYPTED;
@@ -762,12 +843,14 @@ pub fn write_carrier(
 
     if stealth && has_custom_password {
         flags |= FLAG_STEALTH;
-        let magics = derive_stealth_magics(effective_password, b"strhide-stealth-v1")?;
+        let magics = derive_stealth_magics(effective_password, profile.domain())?;
         header_magic = magics.0;
         trailer_magic = magics.1;
     } else {
-        header_magic = STANDARD_HEADER_MAGIC;
-        trailer_magic = STANDARD_TRAILER_MAGIC;
+        // The profile decides the dialect; `Profile::default()` yields the
+        // standard magics, byte-identical to every earlier release.
+        header_magic = profile.header_magic();
+        trailer_magic = profile.trailer_magic();
     }
 
     // 7. Metadata Block
@@ -801,9 +884,9 @@ pub fn write_carrier(
     // rejected instead of gracefully falling back to `eof`.
     let to_encrypt_len = to_encrypt_bytes.len() as u64;
     let exact_meta_len = meta_raw.len() as u64 + 16;
-    let chunk_count = to_encrypt_len
-        .div_ceil(crate::crypto::CHUNK_SIZE as u64)
-        .max(1);
+    // Must use the *configured* chunk size: `exact_ube_size` is cross-checked
+    // against the real ciphertext length, so a mismatch here would fail-fast.
+    let chunk_count = to_encrypt_len.div_ceil(local.chunk_size as u64).max(1);
     let exact_payload_len = to_encrypt_len + chunk_count * 20;
     let exact_ube_size =
         HEADER_SIZE as u64 + hint_bytes.len() as u64 + exact_meta_len + exact_payload_len + 24;
@@ -851,6 +934,7 @@ pub fn write_carrier(
         &payload_key,
         &base_nonce,
         &fixed_header_aad,
+        local.chunk_size,
     )?;
 
     let ube_total_size = HEADER_SIZE as u64
@@ -894,7 +978,7 @@ pub fn write_carrier(
 
     // Assemble full UBE (payload buffer is moved in, not copied)
     let mut tmp_ube = Vec::with_capacity(ube_total_size as usize);
-    tmp_ube.extend_from_slice(&header.pack_with_stealth_mask(password)?);
+    tmp_ube.extend_from_slice(&header.pack_with_profile(password, profile)?);
     if !hint_bytes.is_empty() {
         tmp_ube.extend_from_slice(&hint_bytes);
     }
@@ -975,7 +1059,7 @@ pub fn write_carrier(
 
             // Patch header
             f.seek(SeekFrom::Start(actual_ube_offset))?;
-            f.write_all(&header.pack_with_stealth_mask(password)?)?;
+            f.write_all(&header.pack_with_profile(password, profile)?)?;
 
             // Patch trailer at end of UBE
             let trailer_ctx = TrailerCtx {
@@ -1019,7 +1103,7 @@ pub fn write_carrier(
         )?;
         let mut hdr_bytes = [0u8; HEADER_SIZE];
         ube_stream.read_exact(&mut hdr_bytes)?;
-        let written_header = EnvelopeHeader::unpack_with_password(&hdr_bytes, password)?;
+        let written_header = EnvelopeHeader::unpack_with_profile(&hdr_bytes, password, profile)?;
         if written_header.magic_header != header_magic
             || written_header.inject_offset != inject_offset
             || written_header.inject_size != inject_size
@@ -1103,6 +1187,29 @@ pub fn read_carrier_with(
     password: Option<&str>,
     overwrite: bool,
 ) -> Result<ReadResult, StrHideError> {
+    read_carrier_with_profile(
+        carrier_path,
+        output_path,
+        password,
+        overwrite,
+        &Profile::default(),
+    )
+}
+
+/// Extract the payload of a carrier written under `profile`.
+///
+/// The profile must be the same one used at write time. For the official
+/// profile this is identical to [`read_carrier_with`]; for a private dialect a
+/// mismatched profile cannot return payload bytes — the envelope is either not
+/// found at all (stealth, or a custom trailer magic) or fails header/`AEAD`
+/// validation (custom `default_secret` with the standard magics).
+pub fn read_carrier_with_profile(
+    carrier_path: &Path,
+    output_path: Option<&Path>,
+    password: Option<&str>,
+    overwrite: bool,
+    profile: &Profile,
+) -> Result<ReadResult, StrHideError> {
     if !carrier_path.exists() {
         return Err(StrHideError::General(format!(
             "Carrier file '{}' not found",
@@ -1113,7 +1220,7 @@ pub fn read_carrier_with(
     let mut f = File::open(carrier_path)?;
     let adapter = find_adapter_or_reject(&mut f, &carrier_path.display().to_string())?;
 
-    let loc = locate_envelope(&mut f, adapter, password)?;
+    let loc = locate_envelope(&mut f, adapter, password, profile)?;
 
     let (ube_offset, ube_total_size, strategy_name) = match loc {
         Some(l) => l,
@@ -1133,7 +1240,7 @@ pub fn read_carrier_with(
     // Read fixed header
     let mut header_bytes = [0u8; HEADER_SIZE];
     ube_stream.read_exact(&mut header_bytes)?;
-    let header = EnvelopeHeader::unpack_with_password(&header_bytes, password)?;
+    let header = EnvelopeHeader::unpack_with_profile(&header_bytes, password, profile)?;
     header.validate_against(ube_total_size)?;
 
     // Read hint if present
@@ -1159,7 +1266,7 @@ pub fn read_carrier_with(
         }
         derive_keys(password.unwrap(), &header.salt)?
     } else {
-        derive_keys(crate::crypto::BUILTIN_DEFAULT_KEY, &header.salt)?
+        derive_keys(profile.secret(), &header.salt)?
     };
 
     // Read metadata
@@ -1322,6 +1429,27 @@ pub fn remove_carrier(
     password: Option<&str>,
     backup: bool,
 ) -> Result<RemoveResult, StrHideError> {
+    remove_carrier_with(
+        carrier_path,
+        output_path,
+        password,
+        backup,
+        &Profile::default(),
+    )
+}
+
+/// Strip the envelope of a carrier written under `profile`.
+///
+/// The profile must be the one used at write time: it drives envelope location
+/// (custom magic), the stealth domain, and the `default_secret` used to decode
+/// a non-password envelope.
+pub fn remove_carrier_with(
+    carrier_path: &Path,
+    output_path: Option<&Path>,
+    password: Option<&str>,
+    backup: bool,
+    profile: &Profile,
+) -> Result<RemoveResult, StrHideError> {
     if !carrier_path.exists() {
         return Err(StrHideError::General(format!(
             "Carrier file '{}' not found",
@@ -1343,7 +1471,7 @@ pub fn remove_carrier(
         let mut cf = File::open(carrier_path)?;
         let adapter = find_adapter_or_reject(&mut cf, &carrier_path.display().to_string())?;
 
-        let loc = locate_envelope(&mut cf, adapter, password)?;
+        let loc = locate_envelope(&mut cf, adapter, password, profile)?;
 
         let (ube_offset, ube_total_size, strategy_name) = match loc {
             Some(l) => l,
@@ -1366,7 +1494,7 @@ pub fn remove_carrier(
             let mut ube_stream =
                 adapter.open_ube_reader(&mut cf, ube_offset, ube_total_size, &strategy_name)?;
             ube_stream.read_exact(&mut header_bytes)?;
-            header = EnvelopeHeader::unpack_with_password(&header_bytes, password)?;
+            header = EnvelopeHeader::unpack_with_profile(&header_bytes, password, profile)?;
             header.validate_against(ube_total_size)?;
         }
 
@@ -1393,13 +1521,18 @@ pub fn remove_carrier(
         if let Ok(mut rf) = File::open(&tmp_target)
             && let Some(r_adapter) = find_adapter(&mut rf)
         {
-            let remaining = r_adapter.locate(&mut rf, None).ok().flatten().or_else(|| {
-                password.and_then(|pwd| {
-                    derive_stealth_magics(pwd, b"strhide-stealth-v1")
-                        .ok()
-                        .and_then(|m| r_adapter.locate(&mut rf, Some(&m.1)).ok().flatten())
-                })
-            });
+            let remaining = r_adapter
+                .locate(&mut rf, profile.locator_magic())
+                .ok()
+                .flatten()
+                .or_else(|| r_adapter.locate(&mut rf, None).ok().flatten())
+                .or_else(|| {
+                    password.and_then(|pwd| {
+                        derive_stealth_magics(pwd, profile.domain())
+                            .ok()
+                            .and_then(|m| r_adapter.locate(&mut rf, Some(&m.1)).ok().flatten())
+                    })
+                });
             if remaining.is_some() {
                 diagnosis = "\nDiagnosis: the restored file still contains another hidden envelope. Remove envelopes in reverse order of injection (most recently written first).".to_string();
             }
@@ -1455,6 +1588,19 @@ pub fn inspect_carrier(
     carrier_path: &Path,
     password: Option<&str>,
 ) -> Result<InspectResult, StrHideError> {
+    inspect_carrier_with(carrier_path, password, &Profile::default())
+}
+
+/// Inspect a carrier written under `profile`.
+///
+/// A carrier whose envelope belongs to a different dialect reports
+/// `has_hidden_data == false`: a private dialect is meant to be invisible to
+/// readers that do not know it.
+pub fn inspect_carrier_with(
+    carrier_path: &Path,
+    password: Option<&str>,
+    profile: &Profile,
+) -> Result<InspectResult, StrHideError> {
     if !carrier_path.exists() {
         return Err(StrHideError::General(format!(
             "Carrier file '{}' not found",
@@ -1485,7 +1631,7 @@ pub fn inspect_carrier(
         None
     };
 
-    let loc = locate_envelope(&mut cf, adapter, password)?;
+    let loc = locate_envelope(&mut cf, adapter, password, profile)?;
 
     let (ube_offset, ube_total_size, strategy_name) = match loc {
         Some(l) => l,
@@ -1515,7 +1661,7 @@ pub fn inspect_carrier(
 
     let mut header_bytes = [0u8; HEADER_SIZE];
     ube_stream.read_exact(&mut header_bytes)?;
-    let header = EnvelopeHeader::unpack_with_password(&header_bytes, password)?;
+    let header = EnvelopeHeader::unpack_with_profile(&header_bytes, password, profile)?;
     header.validate_against(ube_total_size)?;
 
     let mut hint_str = None;
@@ -1529,8 +1675,7 @@ pub fn inspect_carrier(
     if !header.is_encrypted() {
         let mut meta_bytes = vec![0u8; header.meta_len as usize];
         if ube_stream.read_exact(&mut meta_bytes).is_ok() {
-            let decoded = if let Ok((_, meta_key)) =
-                derive_keys(crate::crypto::BUILTIN_DEFAULT_KEY, &header.salt)
+            let decoded = if let Ok((_, meta_key)) = derive_keys(profile.secret(), &header.salt)
                 && let Ok(dec) = decrypt_metadata(
                     &meta_bytes,
                     &meta_key,
@@ -1612,6 +1757,18 @@ pub fn verify_carrier(
     carrier_path: &Path,
     password: Option<&str>,
 ) -> Result<VerifyResult, StrHideError> {
+    verify_carrier_with(carrier_path, password, &Profile::default())
+}
+
+/// Verify a carrier written under `profile`.
+///
+/// Level 1 (host structure) is dialect-independent; levels 2 and 3 need the
+/// same profile used at write time.
+pub fn verify_carrier_with(
+    carrier_path: &Path,
+    password: Option<&str>,
+    profile: &Profile,
+) -> Result<VerifyResult, StrHideError> {
     if !carrier_path.exists() {
         return Err(StrHideError::General(format!(
             "Carrier file '{}' not found",
@@ -1625,7 +1782,7 @@ pub fn verify_carrier(
     // Level 1: Host format integrity
     let (l1_ok, l1_msg) = adapter.verify_structure(&mut cf)?;
 
-    let loc = locate_envelope(&mut cf, adapter, password)?;
+    let loc = locate_envelope(&mut cf, adapter, password, profile)?;
 
     let (ube_offset, ube_total_size, strategy_name) = match loc {
         Some(l) => l,
@@ -1662,7 +1819,7 @@ pub fn verify_carrier(
                 if ube_stream.read_exact(&mut header_bytes).is_err() {
                     (false, "Cannot read header".into(), false, false)
                 } else if let Ok(header) =
-                    EnvelopeHeader::unpack_with_password(&header_bytes, password)
+                    EnvelopeHeader::unpack_with_profile(&header_bytes, password, profile)
                 {
                     // Validate header field ranges against the located envelope size
                     // (version / hint_len / meta_len consistency) before trusting any
@@ -1689,10 +1846,12 @@ pub fn verify_carrier(
                         let mut trailer_bytes = [0u8; 24];
                         let expected_trailer_magic = match (header.is_stealth(), password) {
                             (true, Some(pwd)) => {
-                                let magics = derive_stealth_magics(pwd, b"strhide-stealth-v1")?;
+                                let magics = derive_stealth_magics(pwd, profile.domain())?;
                                 Some(magics.1)
                             }
-                            _ => None,
+                            // Official dialect: `None` keeps the legacy magics
+                            // acceptable. Private dialect: only its own magic.
+                            _ => profile.locator_magic().copied(),
                         };
 
                         if ube_stream.read_exact(&mut trailer_bytes).is_err() {
@@ -1747,7 +1906,7 @@ pub fn verify_carrier(
 
     // Level 3: Crypto & payload SHA-256
     let (l3_ok, l3_msg) = if !is_encrypted || password.is_some() {
-        match read_carrier(carrier_path, None, password) {
+        match read_carrier_with_profile(carrier_path, None, password, false, profile) {
             Ok(res) => (
                 true,
                 format!(

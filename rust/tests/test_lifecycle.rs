@@ -6,6 +6,7 @@
 //! - `compact_meta`: compact metadata envelope encoding on marginal carriers.
 //! - `jpeg_multisegment`: multi-segment JPEG APP15 payload splitting.
 //! - `unicode_and_binary`: UTF-8/Unicode and arbitrary binary payloads.
+//! - `profile`: `LocalParams` / `Profile` plumbing and dialect isolation (M1).
 
 #[path = "common/mod.rs"]
 pub mod common;
@@ -16,6 +17,8 @@ mod compact_meta;
 mod jpeg_multisegment;
 #[path = "test_lifecycle/matrix.rs"]
 mod matrix;
+#[path = "test_lifecycle/profile.rs"]
+mod profile;
 #[path = "test_lifecycle/stego.rs"]
 mod stego;
 #[path = "test_lifecycle/unicode_and_binary.rs"]

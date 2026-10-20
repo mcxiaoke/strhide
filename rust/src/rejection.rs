@@ -21,6 +21,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::errors::StrHideError;
+use crate::params::RejectionPolicy;
 
 /// Inspect a PE reader for an Authenticode certificate table.
 ///
@@ -294,89 +295,124 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
     Ok(None)
 }
 
-/// Run every pre-write check in order. Called by
-/// [`crate::engine::write_carrier`] before any output is created.
+/// Structure checks only: signed PE Authenticode block, PDF incremental-update
+/// signature, JAR signature entries.
 ///
-/// The carrier itself is only opened for read; a write probe is created (and
-/// immediately deleted) next to `target`, because the engine stages its
-/// output as `<target>.strhide.tmp` before an atomic rename.
-pub fn run_all_rejection_checks(carrier: &Path, target: &Path) -> Result<(), StrHideError> {
-    let filename = carrier.file_name().and_then(|s| s.to_str());
-
-    if let Some(err) = check_signature_file(filename) {
+/// These are the checks that need nothing but the carrier bytes, so an
+/// in-memory carrier can run them from a cursor. `filename` is passed through
+/// because JAR signature detection reports the offending entry by file name.
+pub fn check_content<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+    filename: Option<&str>,
+) -> Result<(), StrHideError> {
+    if let Some(err) = check_pe_authenticode(reader)? {
         return Err(StrHideError::Rejection(err));
     }
 
-    if let Some(err) = check_unsupported_apk(filename) {
+    if let Some(err) = check_pdf_signature(reader)? {
         return Err(StrHideError::Rejection(err));
     }
 
-    // The carrier is only written to in place. When `-o` names a different
-    // file the carrier stays read-only on purpose (read-only media, mounted
-    // images, C:\Program Files\...), so only reject a read-only carrier for
-    // in-place writes.
-    let in_place = match (std::path::absolute(carrier), std::path::absolute(target)) {
-        (Ok(c), Ok(t)) => c == t,
-        _ => carrier == target,
-    };
-    let metadata = std::fs::metadata(carrier)?;
-    if in_place && metadata.permissions().readonly() {
-        return Err(StrHideError::Rejection(format!(
-            "No write permission on target file '{}'.",
-            carrier.display()
-        )));
-    }
-
-    // Write probe: the engine creates "<target>.strhide.tmp" next to the
-    // *target* before the atomic rename, so the probe must live in the target's
-    // directory — probing the carrier's directory rejects legal "read from
-    // read-only media, write elsewhere" workflows and says nothing about the
-    // directory actually being written.
-    //
-    // The probe carries a PID and a monotonic suffix: a fixed PID-only name is
-    // shared by threads of one process and can collide or be left behind.
-    let parent = match target.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    let probe = parent.join(format!(
-        ".strhide_write_probe_{}_{nonce}",
-        std::process::id()
-    ));
-    match File::create(&probe) {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&probe);
-        }
-        Err(e) => {
-            let reason = match e.kind() {
-                std::io::ErrorKind::NotFound => "the directory does not exist",
-                std::io::ErrorKind::PermissionDenied => "the directory is not writable",
-                _ => "the directory cannot be written to",
-            };
-            return Err(StrHideError::Rejection(format!(
-                "Cannot write to target directory '{}': {reason} [{e}]",
-                parent.display()
-            )));
-        }
-    }
-
-    let mut file = File::open(carrier)?;
-
-    if let Some(err) = check_pe_authenticode(&mut file)? {
-        return Err(StrHideError::Rejection(err));
-    }
-
-    if let Some(err) = check_pdf_signature(&mut file)? {
-        return Err(StrHideError::Rejection(err));
-    }
-
-    if let Some(err) = check_jar_signature(&mut file, filename)? {
+    if let Some(err) = check_jar_signature(reader, filename)? {
         return Err(StrHideError::Rejection(err));
     }
 
     Ok(())
+}
+
+/// Run every pre-write check in order (the historical, strict behaviour).
+///
+/// Kept as a stable entry point; [`run_rejection_checks`] adds the
+/// [`RejectionPolicy`] knob.
+pub fn run_all_rejection_checks(carrier: &Path, target: &Path) -> Result<(), StrHideError> {
+    run_rejection_checks(carrier, target, RejectionPolicy::Strict)
+}
+
+/// Run pre-write checks at the granularity selected by `policy`.
+///
+/// [`RejectionPolicy::Strict`] runs everything; [`RejectionPolicy::ContentOnly`]
+/// skips the filesystem-dependent checks (read-only carrier, target-directory
+/// write probe) but still refuses signed containers;
+/// [`RejectionPolicy::Skip`] runs nothing.
+///
+/// The carrier itself is only opened for read; a write probe is created (and
+/// immediately deleted) next to `target`, because the engine stages its
+/// output as `<target>.strhide.tmp` before an atomic rename.
+pub fn run_rejection_checks(
+    carrier: &Path,
+    target: &Path,
+    policy: RejectionPolicy,
+) -> Result<(), StrHideError> {
+    if policy == RejectionPolicy::Skip {
+        return Ok(());
+    }
+
+    let filename = carrier.file_name().and_then(|s| s.to_str());
+
+    if policy == RejectionPolicy::Strict {
+        if let Some(err) = check_signature_file(filename) {
+            return Err(StrHideError::Rejection(err));
+        }
+
+        if let Some(err) = check_unsupported_apk(filename) {
+            return Err(StrHideError::Rejection(err));
+        }
+
+        // The carrier is only written to in place. When `-o` names a different
+        // file the carrier stays read-only on purpose (read-only media, mounted
+        // images, C:\Program Files\...), so only reject a read-only carrier for
+        // in-place writes.
+        let in_place = match (std::path::absolute(carrier), std::path::absolute(target)) {
+            (Ok(c), Ok(t)) => c == t,
+            _ => carrier == target,
+        };
+        let metadata = std::fs::metadata(carrier)?;
+        if in_place && metadata.permissions().readonly() {
+            return Err(StrHideError::Rejection(format!(
+                "No write permission on target file '{}'.",
+                carrier.display()
+            )));
+        }
+
+        // Write probe: the engine creates "<target>.strhide.tmp" next to the
+        // *target* before the atomic rename, so the probe must live in the
+        // target's directory — probing the carrier's directory rejects legal
+        // "read from read-only media, write elsewhere" workflows and says
+        // nothing about the directory actually being written.
+        //
+        // The probe carries a PID and a monotonic suffix: a fixed PID-only name
+        // is shared by threads of one process and can collide or be left
+        // behind.
+        let parent = match target.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let probe = parent.join(format!(
+            ".strhide_write_probe_{}_{nonce}",
+            std::process::id()
+        ));
+        match File::create(&probe) {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+            }
+            Err(e) => {
+                let reason = match e.kind() {
+                    std::io::ErrorKind::NotFound => "the directory does not exist",
+                    std::io::ErrorKind::PermissionDenied => "the directory is not writable",
+                    _ => "the directory cannot be written to",
+                };
+                return Err(StrHideError::Rejection(format!(
+                    "Cannot write to target directory '{}': {reason} [{e}]",
+                    parent.display()
+                )));
+            }
+        }
+    }
+
+    let mut file = File::open(carrier)?;
+    check_content(&mut file, filename)
 }
