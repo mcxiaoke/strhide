@@ -13,7 +13,8 @@
 ```bash
 cd rust
 cargo build --release          # 编译，产物在 target/release/strhide
-cargo test --release           # 运行release测试套件
+# test必须加 --release 快十倍，默认debug版本特别慢，浪费时间
+cargo test --release           # 运行测试套件
 cargo fmt && cargo clippy      # 提交前格式化并修复所有 lint
 ```
 
@@ -26,6 +27,11 @@ cd rust
 cargo test --release --test batch_corpus -- --ignored --nocapture
 # 语料在别处时：
 STRHIDE_CORPUS=/path/to/corpus cargo test --release --test batch_corpus -- --ignored --nocapture
+
+# 内容自适应图像隐写批测（针对 temp/teststego 全量真实大图及抗检扫描评估）：
+cargo test --release --test batch_stego -- --ignored --nocapture
+# 隐写语料在别处时：
+STRHIDE_STEGO_CORPUS=/path/to/stego_corpus cargo test --release --test batch_stego -- --ignored --nocapture
 ```
 
 ### 通用约定

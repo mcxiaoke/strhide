@@ -361,6 +361,9 @@ pub struct InspectResult {
     /// priority order. Always present (also when an envelope already exists,
     /// answering "how much more could fit").
     pub strategies: Vec<StrategyCapacity>,
+    /// Content-adaptive pixel/DCT steganography capacity for PNG/JPEG carriers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_stego_capacity: Option<crate::stego::StegoCapacityInfo>,
 }
 
 /// Result of one verification level.
@@ -1467,6 +1470,21 @@ pub fn inspect_carrier(
     // PE measures `.text` density and zero slack, ZIP measures the EOCD offset.
     let strategies = adapter.strategy_capacities(Some(&mut cf));
 
+    let content_stego_capacity = if adapter.format_name() == "PNG"
+        || adapter.format_name() == "JPEG"
+    {
+        cf.rewind().ok();
+        let mut buf = Vec::new();
+        if cf.read_to_end(&mut buf).is_ok() {
+            cf.rewind().ok();
+            crate::stego::probe_carrier_capacity(&buf, &crate::stego::StegoOptions::default()).ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let loc = locate_envelope(&mut cf, adapter, password)?;
 
     let (ube_offset, ube_total_size, strategy_name) = match loc {
@@ -1487,6 +1505,7 @@ pub fn inspect_carrier(
                 orig_host_sha256: None,
                 metadata: None,
                 strategies,
+                content_stego_capacity,
             });
         }
     };
@@ -1579,6 +1598,7 @@ pub fn inspect_carrier(
         ),
         metadata: meta_val,
         strategies,
+        content_stego_capacity,
     })
 }
 

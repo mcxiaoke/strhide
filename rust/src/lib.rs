@@ -111,3 +111,4 @@ pub mod envelope;
 pub mod errors;
 pub mod rejection;
 pub mod router;
+pub mod stego;

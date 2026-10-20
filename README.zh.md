@@ -24,6 +24,7 @@
 - **默认安全**——完整性/签名拒绝检查会拒绝修改不宜触碰的文件（如签名二进制）；`read` 默认拒绝覆盖已存在的输出文件（需 `--overwrite`）；原地写入自动创建 `.bak` 备份；保留原始文件时间戳。
 - **TOML 配置**——`./strhide.toml` 或 `~/.strhide/config.toml` 提供默认值，显式命令行参数始终优先。
 - **批量载体**——`write`、`restore`、`scan` 可一次处理多个文件（及目录）；`read`/`inspect`/`verify` 只接受单个载体。
+- **内容自适应隐写（HILL & UERD）**——`embed` 与 `extract` 命令直接在图像像素（PNG，通过 HILL 成本模型进行 LSB Matching）或 DCT 频域系数（JPEG，通过 UERD 成本模型）中嵌入数据。与结构层注入不同，内容隐写修改的是最小失真纹理区，天然免疫元数据剥离清洗，且抗统计隐写分析。
 
 ## 安装
 
@@ -95,6 +96,19 @@ strhide verify report.pdf
 # 移除隐藏数据，还原原始宿主文件
 strhide restore photo.png
 
+# --- 内容自适应像素/DCT隐写（免疫第三方元数据与chunk清洗）---
+
+# 探测图片的最大安全隐写容量（不修改原图）
+strhide embed photo.png --capacity
+
+# 将文本或文件嵌入复杂高频纹理中（PNG 默认 HILL，JPEG 默认 UERD）
+strhide embed photo.png -t "机密信息" -p "P@ss123" -o stego.png
+strhide embed cover.jpg -d secret.zip -p "P@ss123" --in-place
+
+# 提取内容自适应隐藏数据
+strhide extract stego.png -p "P@ss123" --stdout
+strhide extract stego.jpg -p "P@ss123" -o recovered.zip
+
 # 批量：把同一份载荷分别写入多个载体（带 -o 时写入已存在的目录而非原地改写），再逐个剥离
 strhide write a.png b.png c.png -t "meet me at 7"
 strhide restore a.png b.png c.png
@@ -146,6 +160,15 @@ meta = inspect_carrier("carrier.png", password="pw")
 无法识别的格式将**被拒绝**：strhide 只修改显式支持的载体——向任意文件追加数据可能损坏该文件。`eof` 策略仍作为受支持格式内部的降级选项存在（如超大 PNG 载荷）。
 
 `strhide inspect <文件>` 可查看某载体实际支持的策略及其容量上限；`-s auto`（默认）自动选择，`-s ask` 交互式选择（仅限单个载体）。
+
+### 内容自适应像素/DCT隐写（`embed` / `extract`）
+
+| 隐写域 | 支持格式 | 算法 | 机制特点 |
+| --- | --- | --- | --- |
+| 空间域 | PNG（RGB/RGBA/灰度） | **HILL**（High-Low-Low） | 最小失真 KB 高通 + 双级均值平滑，LSB Matching（±1）与确定性掩码 |
+| DCT 频域 | JPEG / JPG（基线编码） | **UERD** | 量化表加权能量与 8 邻域扩散，通过 `dct-io` 实现无损重编 |
+
+*安全拦截防护*：APNG 动图（`acTL`）、调色板索引图（`PLTE`）、隔行扫描图（Adam7）与渐进式 JPEG（SOF2）会被自动检测并优雅拦截，保护原图功能与外观不受破坏。
 
 ## 仓库结构
 

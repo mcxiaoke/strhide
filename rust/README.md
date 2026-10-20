@@ -22,6 +22,9 @@ strhide inspect report.pdf --json             # envelope metadata + capacity
 strhide verify report.pdf                     # verify host + envelope integrity
 strhide restore photo.png                      # strip hidden data, restore the original host
 strhide restore a.png b.png c.png              # strip several carriers at once
+strhide embed photo.png -t "secret" -o out.png # content-adaptive stego (HILL for PNG, UERD for JPEG)
+strhide embed photo.png --capacity             # probe image stego capacity without embedding
+strhide extract out.png --stdout               # extract content-adaptive payload
 strhide list                          # static format/strategy/limit table
 strhide scan suspicious.bin dir/ -r # black-box steganalysis (any tool)
 ```

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
@@ -50,6 +50,10 @@ pub enum Commands {
     Verify(VerifyArgs),
     /// Black-box steganalysis: scan file(s) for hidden content, known or unknown
     Scan(ScanArgs),
+    /// Content-adaptive steganography: embed payload into image pixels or DCT coefficients (HILL/UERD)
+    Embed(EmbedArgs),
+    /// Content-adaptive steganography: extract payload from image pixels or DCT coefficients
+    Extract(ExtractArgs),
     /// List all supported formats, strategies, and their capacity limits
     List(ListArgs),
 }
@@ -260,6 +264,167 @@ Examples:
   strhide read photo.png -o recovered.zip  # extraction to an explicit path
   strhide read photo.png --stdout          # always print to standard output
   strhide read locked.png                  # shows the stored hint before prompting
+";
+
+#[derive(Args, Debug)]
+#[command(after_help = EMBED_AFTER_HELP)]
+pub struct EmbedArgs {
+    #[arg(
+        value_name = "CARRIER",
+        required = true,
+        help = "Carrier image file (PNG or JPEG). Use `--` before a filename that starts with '-'."
+    )]
+    pub carrier: PathBuf,
+
+    #[command(flatten)]
+    pub payload: PayloadSourceArgs,
+
+    #[arg(
+        short = 'o',
+        long = "output",
+        value_name = "PATH",
+        help = "Write modified carrier to this path. Default: requires -o/--output unless --in-place is specified."
+    )]
+    pub output: Option<PathBuf>,
+
+    #[arg(
+        long = "in-place",
+        help = "Modify carrier image in place (creates .bak backup by default unless --no-backup). Note: content steganography modifies pixels/coefficients and cannot be restored to original bit-for-bit."
+    )]
+    pub in_place: bool,
+
+    #[arg(
+        long = "no-backup",
+        help = "Do not create a '<carrier>.bak' backup copy when modifying in place."
+    )]
+    pub no_backup: bool,
+
+    #[arg(
+        long = "capacity",
+        help = "Probe and display maximum embedding capacity for the carrier image, then exit without modifying the carrier"
+    )]
+    pub capacity: bool,
+
+    #[command(flatten)]
+    pub passwords: PasswordArgs,
+
+    #[arg(
+        short = 'a',
+        long = "algorithm",
+        value_name = "NAME",
+        help = "Distortion cost algorithm (auto|hill|uerd; default: auto - hill for PNG, uerd for JPEG)"
+    )]
+    pub algorithm: Option<String>,
+
+    #[arg(
+        long = "unescape",
+        help = "Decode C-style escape sequences (\\n, \\r, \\t, ...) in the -t/--text payload before embedding"
+    )]
+    pub unescape: bool,
+
+    // --- Fine-tuning parameters for custom obfuscation and anti-detection ---
+    #[arg(
+        long = "exclusion-rate",
+        value_name = "FLOAT",
+        help = "Fine-tune: fraction of smoothest regions excluded from embedding (0.0 .. 0.8; default 0.30 for PNG, 0.20 for JPEG)"
+    )]
+    pub exclusion_rate: Option<f64>,
+
+    #[arg(
+        long = "neighbor-weight",
+        value_name = "FLOAT",
+        help = "Fine-tune (JPEG UERD): weight applied to 8-neighborhood block energies (default: 0.25)"
+    )]
+    pub neighbor_weight: Option<f64>,
+
+    #[arg(
+        long = "min-abs-coeff",
+        value_name = "INT",
+        help = "Fine-tune (JPEG UERD): minimum absolute AC coefficient eligible for embedding (default: 2)"
+    )]
+    pub min_abs_coeff: Option<i16>,
+
+    #[arg(
+        long = "p1-window",
+        value_name = "INT",
+        help = "Fine-tune (Spatial HILL): first-stage low-pass filter window size (odd, default: 3)"
+    )]
+    pub p1_window: Option<usize>,
+
+    #[arg(
+        long = "p2-window",
+        value_name = "INT",
+        help = "Fine-tune (Spatial HILL): second-stage low-pass filter window size (odd, default: 15)"
+    )]
+    pub p2_window: Option<usize>,
+}
+
+const EMBED_AFTER_HELP: &str = "\
+Content-adaptive steganography (HILL for PNG, UERD for JPEG) embeds data directly
+into image texture/coefficients, making it immune to container metadata stripping.
+Because pixel/coefficient values are modified, this operation cannot be reversed
+to the original carrier bit-for-bit.
+
+Examples:
+  strhide embed photo.jpg -t \"secret message\" -o out.jpg
+  strhide embed graphic.png -d secret.zip -p \"P@ss!\" -o out.png
+  strhide embed photo.jpg -t \"hello\" --in-place
+  strhide embed photo.png -t \"custom tuning\" --exclusion-rate 0.40 -o out.png
+";
+
+#[derive(Args, Debug)]
+#[command(after_help = EXTRACT_AFTER_HELP)]
+pub struct ExtractArgs {
+    #[arg(
+        value_name = "CARRIER",
+        required = true,
+        help = "Stego image file to extract hidden payload from (PNG or JPEG)."
+    )]
+    pub carrier: PathBuf,
+
+    #[arg(
+        short = 'o',
+        long = "output",
+        value_name = "PATH",
+        help = "Write extracted payload to a file. If omitted, text payloads are printed to stdout."
+    )]
+    pub output: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub passwords: PasswordArgs,
+
+    #[arg(
+        short = 'a',
+        long = "algorithm",
+        value_name = "NAME",
+        help = "Distortion cost algorithm (auto|hill|uerd; default: auto)"
+    )]
+    pub algorithm: Option<String>,
+
+    // Fine-tuning parameters matching custom embedding parameters
+    #[arg(long = "exclusion-rate", value_name = "FLOAT")]
+    pub exclusion_rate: Option<f64>,
+
+    #[arg(long = "neighbor-weight", value_name = "FLOAT")]
+    pub neighbor_weight: Option<f64>,
+
+    #[arg(long = "min-abs-coeff", value_name = "INT")]
+    pub min_abs_coeff: Option<i16>,
+
+    #[arg(long = "p1-window", value_name = "INT")]
+    pub p1_window: Option<usize>,
+
+    #[arg(long = "p2-window", value_name = "INT")]
+    pub p2_window: Option<usize>,
+}
+
+const EXTRACT_AFTER_HELP: &str = "\
+Extracts payload embedded via content-adaptive steganography (embed).
+Format is automatically detected (PNG or JPEG).
+
+Examples:
+  strhide extract out.jpg -p \"P@ss!\"               # text prints to stdout
+  strhide extract out.png -p \"P@ss!\" -o secret.zip   # extracts to file
 ";
 
 #[derive(Args, Debug)]
@@ -537,6 +702,20 @@ pub fn run_cli() -> i32 {
         // "likely-hidden" (see handle_scan), 0 otherwise, regardless of quiet.
         Commands::Scan(args) => match handle_scan(args, cli.quiet) {
             Ok(code) => code,
+            Err(e) => {
+                eprintln!("[ERROR] {e}");
+                1
+            }
+        },
+        Commands::Embed(args) => match handle_embed(args, &cfg, cli.quiet) {
+            Ok(_) => 0,
+            Err(e) => {
+                eprintln!("[ERROR] {e}");
+                1
+            }
+        },
+        Commands::Extract(args) => match handle_extract(args, &cfg, cli.quiet) {
+            Ok(_) => 0,
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 1
@@ -903,6 +1082,23 @@ fn handle_inspect(args: InspectArgs, cfg: &FileConfig, quiet: bool) -> Result<()
                 );
             }
         }
+
+        if let Some(cap) = &res.content_stego_capacity {
+            println!();
+            println!("Content-Adaptive Steganography Capacity (embed):");
+            println!("  Algorithm:       {}", cap.algorithm);
+            println!("  Available Slots: {} bits", cap.available_slots);
+            println!(
+                "  Max Raw:         {} bytes ({:.1} KiB)",
+                cap.max_raw_payload_bytes,
+                cap.max_raw_payload_bytes as f64 / 1024.0
+            );
+            println!(
+                "  Safe Max:        {} bytes ({:.1} KiB) (high stealth)",
+                cap.recommended_max_bytes,
+                cap.recommended_max_bytes as f64 / 1024.0
+            );
+        }
     }
 
     Ok(())
@@ -1079,6 +1275,241 @@ fn handle_list(_args: ListArgs) -> Result<(), StrHideError> {
     }
     println!();
     println!("Carrier-dependent limits are measured by `strhide inspect -c <carrier>`.");
+
+    println!("\nContent-Adaptive Steganography Algorithms (embed / extract):");
+    println!("{:<8} {:<15} Description", "Algorithm", "Target Domain");
+    println!("{:-<8} {:-<15} {:-<48}", "", "", "");
+    for (id, domain, desc) in crate::stego::CostModelRegistry::list_algorithms() {
+        println!("{id:<8} {:<15} {desc}", domain);
+    }
+    println!();
+
+    Ok(())
+}
+
+fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
+    if args.capacity {
+        let carrier_bytes = std::fs::read(&args.carrier)?;
+        let mut options = crate::stego::StegoOptions {
+            algorithm: args.algorithm,
+            ..Default::default()
+        };
+        if let Some(er) = args.exclusion_rate {
+            options.spatial_params.exclusion_percentile = er;
+            options.jpeg_params.block_exclusion_percentile = er;
+        }
+        if let Some(nw) = args.neighbor_weight {
+            options.jpeg_params.neighbor_weight = nw;
+        }
+        if let Some(min_ac) = args.min_abs_coeff {
+            options.jpeg_params.min_abs_coeff = min_ac;
+        }
+        if let Some(p1) = args.p1_window {
+            options.spatial_params.p1_window = p1;
+        }
+        if let Some(p2) = args.p2_window {
+            options.spatial_params.p2_window = p2;
+        }
+        let cap = crate::stego::probe_carrier_capacity(&carrier_bytes, &options)?;
+        println!(
+            "Content-Adaptive Steganography Capacity for '{}':",
+            args.carrier.display()
+        );
+        println!("  Format:          {}", cap.format);
+        println!("  Algorithm:       {}", cap.algorithm);
+        println!("  Total elements:  {}", cap.total_elements);
+        println!("  Available slots: {} bits", cap.available_slots);
+        println!(
+            "  Max raw payload: {} bytes ({:.1} KiB)",
+            cap.max_raw_payload_bytes,
+            cap.max_raw_payload_bytes as f64 / 1024.0
+        );
+        println!(
+            "  Recommended max: {} bytes ({:.1} KiB) (high stealth)",
+            cap.recommended_max_bytes,
+            cap.recommended_max_bytes as f64 / 1024.0
+        );
+        return Ok(());
+    }
+
+    // 1. Resolve password
+    let password = resolve_password(
+        args.passwords.password.as_deref(),
+        args.passwords.password_file.as_deref(),
+        cfg,
+        false,
+        false,
+    )?;
+
+    // 2. Resolve payload bytes
+    let payload_bytes = if args.payload.stdin {
+        let mut buf = Vec::new();
+        std::io::stdin().read_to_end(&mut buf)?;
+        buf
+    } else if let Some(ref df) = args.payload.data {
+        std::fs::read(df)?
+    } else if let Some(ref t) = args.payload.text {
+        if args.unescape || cfg.unescape.unwrap_or(false) {
+            unescape_string(t).into_bytes()
+        } else {
+            t.as_bytes().to_vec()
+        }
+    } else if let Some(ref tf) = args.payload.text_file {
+        std::fs::read(tf)?
+    } else if let Some(ref b64_str) = args.payload.text_base64 {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(b64_str.trim())
+            .map_err(|e| StrHideError::General(format!("Invalid base64 string: {e}")))?
+    } else if let Ok(env_text) = std::env::var("STRHIDE_TEXT") {
+        if !env_text.is_empty() {
+            env_text.into_bytes()
+        } else {
+            return Err(StrHideError::General(
+                "Must provide either -d/--data, -t/--text, --text-file, --text-base64, or --stdin (or use --capacity to probe capacity)"
+                    .into(),
+            ));
+        }
+    } else {
+        return Err(StrHideError::General(
+            "Must provide either -d/--data, -t/--text, --text-file, --text-base64, or --stdin (or use --capacity to probe capacity)"
+                .into(),
+        ));
+    };
+
+    if payload_bytes.is_empty() {
+        return Err(StrHideError::General("Payload cannot be empty".into()));
+    }
+
+    // 3. Read carrier bytes
+    let carrier_bytes = std::fs::read(&args.carrier)?;
+
+    // 4. Construct StegoOptions with fine-tuning parameters
+    let mut options = crate::stego::StegoOptions {
+        algorithm: args.algorithm,
+        password,
+        ..Default::default()
+    };
+
+    if let Some(er) = args.exclusion_rate {
+        options.spatial_params.exclusion_percentile = er;
+        options.jpeg_params.block_exclusion_percentile = er;
+    }
+    if let Some(nw) = args.neighbor_weight {
+        options.jpeg_params.neighbor_weight = nw;
+    }
+    if let Some(min_ac) = args.min_abs_coeff {
+        options.jpeg_params.min_abs_coeff = min_ac;
+    }
+    if let Some(p1) = args.p1_window {
+        options.spatial_params.p1_window = p1;
+    }
+    if let Some(p2) = args.p2_window {
+        options.spatial_params.p2_window = p2;
+    }
+
+    // 5. Execute content-adaptive embedding
+    let stego_bytes = crate::stego::embed_carrier(&carrier_bytes, &payload_bytes, &options)?;
+
+    // 6. Handle output
+    if let Some(ref out_path) = args.output {
+        std::fs::write(out_path, &stego_bytes)?;
+        if !quiet {
+            println!(
+                "[OK] Embedded {} payload bytes into '{}' -> '{}'",
+                payload_bytes.len(),
+                args.carrier.display(),
+                out_path.display()
+            );
+        }
+    } else if args.in_place {
+        if !args.no_backup {
+            let bak_path = args.carrier.with_extension(format!(
+                "{}.bak",
+                args.carrier
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+            ));
+            std::fs::write(&bak_path, &carrier_bytes)?;
+            if !quiet {
+                println!("[INFO] Backup created at '{}'", bak_path.display());
+            }
+        }
+        std::fs::write(&args.carrier, &stego_bytes)?;
+        if !quiet {
+            println!(
+                "[OK] Embedded {} payload bytes in-place into '{}'",
+                payload_bytes.len(),
+                args.carrier.display()
+            );
+        }
+    } else {
+        return Err(StrHideError::General(
+            "Content steganography modifies carrier pixels/coefficients and cannot be restored bit-for-bit. \
+            Please specify an output path (-o/--output <PATH>), or explicitly allow in-place modification (--in-place).".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn handle_extract(args: ExtractArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
+    let password = resolve_password(
+        args.passwords.password.as_deref(),
+        args.passwords.password_file.as_deref(),
+        cfg,
+        false,
+        false,
+    )?;
+
+    let carrier_bytes = std::fs::read(&args.carrier)?;
+
+    let mut options = crate::stego::StegoOptions {
+        algorithm: args.algorithm,
+        password,
+        ..Default::default()
+    };
+
+    if let Some(er) = args.exclusion_rate {
+        options.spatial_params.exclusion_percentile = er;
+        options.jpeg_params.block_exclusion_percentile = er;
+    }
+    if let Some(nw) = args.neighbor_weight {
+        options.jpeg_params.neighbor_weight = nw;
+    }
+    if let Some(min_ac) = args.min_abs_coeff {
+        options.jpeg_params.min_abs_coeff = min_ac;
+    }
+    if let Some(p1) = args.p1_window {
+        options.spatial_params.p1_window = p1;
+    }
+    if let Some(p2) = args.p2_window {
+        options.spatial_params.p2_window = p2;
+    }
+
+    let payload = crate::stego::extract_carrier(&carrier_bytes, &options)?;
+
+    if let Some(ref out_path) = args.output {
+        std::fs::write(out_path, &payload)?;
+        if !quiet {
+            println!(
+                "[OK] Extracted {} bytes to '{}'",
+                payload.len(),
+                out_path.display()
+            );
+        }
+    } else {
+        // Output to stdout
+        if let Ok(text) = std::str::from_utf8(&payload) {
+            print!("{text}");
+            if !text.ends_with('\n') {
+                println!();
+            }
+        } else {
+            std::io::stdout().write_all(&payload)?;
+        }
+    }
 
     Ok(())
 }

@@ -24,6 +24,7 @@ Compatibility is one-directional: the Rust build can still read envelopes writte
 - **Safe by default** — integrity/signature rejection checks refuse to modify files that should not be touched (e.g. signed binaries); `read` refuses to overwrite an existing output file unless `--overwrite` is given; in-place writes create a `.bak` backup; original file timestamps are preserved.
 - **TOML configuration** — `./strhide.toml` or `~/.strhide/config.toml` provides defaults; explicit CLI flags always win.
 - **Batch carriers** — `write`, `restore`, and `scan` accept several files (and directories) at once; `read`/`inspect`/`verify` take exactly one carrier.
+- **Content-adaptive steganography (HILL & UERD)** — `embed` and `extract` hide data directly in image pixels (PNG, LSB Matching via HILL cost model) or DCT frequency coefficients (JPEG, via UERD cost model). Unlike structure-domain injection, content steganography modifies minimal-distortion texture regions and is immune to metadata stripping.
 
 ## Install
 
@@ -97,6 +98,19 @@ strhide verify report.pdf
 # Remove the hidden data, restoring the original host file
 strhide restore photo.png
 
+# --- Content-adaptive pixel/DCT steganography (immune to metadata stripping) ---
+
+# Probe maximum steganographic capacity of an image without modifying it
+strhide embed photo.png --capacity
+
+# Embed text or file into complex textures (HILL for PNG, UERD for JPEG)
+strhide embed photo.png -t "classified message" -p "P@ss123" -o stego.png
+strhide embed cover.jpg -d secret.zip -p "P@ss123" --in-place
+
+# Extract content-adaptive hidden data
+strhide extract stego.png -p "P@ss123" --stdout
+strhide extract stego.jpg -p "P@ss123" -o recovered.zip
+
 # Batch: embed the same payload into several carriers (with -o they are written
 # to an existing directory instead of in place), then strip them all again
 strhide write a.png b.png c.png -t "meet me at 7"
@@ -149,6 +163,15 @@ All functions return a result dict and raise `StrHideError` subclasses on failur
 Unrecognized formats are **rejected**: strhide only modifies explicitly supported carriers, because appending data to an arbitrary file can corrupt it. The `eof` strategy remains available as a fallback *within* supported formats (e.g. oversized PNG payloads).
 
 `strhide inspect <file>` shows the exact strategies available for a given carrier along with their capacity limits; `-s auto` (default) picks a suitable one, and `-s ask` lists them interactively (single carrier only).
+
+### Content-adaptive pixel/DCT steganography (`embed` / `extract`)
+
+| Domain | Supported formats | Algorithm | Mechanism |
+| --- | --- | --- | --- |
+| Spatial domain | PNG (RGB/RGBA/Grayscale) | **HILL** (High-Low-Low) | LSB Matching (±1) in high-pass texture regions, deterministic LSB masking |
+| DCT frequency domain | JPEG / JPG (Baseline) | **UERD** | Quantization-weighted energy smoothing via `dct-io` lossless re-encoding |
+
+*Safety protections:* Animated PNGs (APNG `acTL`), palette-indexed PNGs (`PLTE`), interlaced PNGs (Adam7), and progressive JPEGs (SOF2) are safely rejected with actionable guidance.
 
 ## Repository layout
 
