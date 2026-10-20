@@ -5,21 +5,26 @@
 //!
 //! # Embedding operation
 //!
-//! Bits are written by **LSB replacement** (`val & 0xFE | bit`, i.e. `val ^= 1`
-//! when the bit differs), *not* LSB matching. This is a deliberate constraint,
-//! not an oversight: the extractor rebuilds the slot ranking from a cost map
-//! computed on the stego image, so every modification must leave that cost map
-//! bit-identical. Replacement keeps `val & 0xFE` invariant, which makes the
-//! masked-value cost map reproducible at extraction time; a random `±1` choice
-//! (true LSB matching) would change `val & 0xFE` for half of the modified
-//! pixels and desynchronise the ranking.
+//! Bits are written by **ternary `±1` matching**: a slot whose LSB must change
+//! moves to `val + 1` or `val - 1`, whichever is cheaper and legal, instead of
+//! having its LSB replaced. Both directions flip the LSB, so the payload bit is
+//! still the slot's parity and extraction is unchanged.
 //!
-//! Consequence, stated plainly: replacement is the operation that chi-square
-//! and sample-pair (SPA) detectors target. Detection resistance here comes only
-//! from the low modification rate of content-adaptive placement, never from the
-//! modification rule. A true `±1` rule requires first making slot selection
-//! independent of the exact cost ordering (e.g. block-level selection), which
-//! this engine does not do.
+//! The move is constrained to the pixel's **eight-value class** (`val & 0xF8`):
+//! from the class floor only `+1` is legal, from the ceiling only `-1`, in
+//! between both are. That constraint exists because the extractor rebuilds the
+//! slot ranking from a cost map computed on the *stego* image, so the ranking
+//! must be reproducible: HILL masks its input with `0xF8`, and a class-internal
+//! `±1` leaves that masked value untouched. Unrestricted matching would change
+//! it and desynchronise the ranking.
+//!
+//! Why this is not just LSB replacement with extra steps: replacement always
+//! moves a slot in the direction of the target bit, so every value pair
+//! `(2k, 2k+1)` is equalised — the exact signature chi-square and SPA look for.
+//! Here six of every eight values can move either way, so probability mass
+//! crosses pair boundaries and the pairs are no longer individually flat.
+//! Direction choice is further biased towards the local mean by
+//! [`crate::stego::traits::SpatialCostModel::direction_costs`].
 
 use std::io::{Cursor, Read, Write};
 
@@ -34,6 +39,16 @@ use crate::stego::envelope::{pack_envelope, unpack_envelope};
 use crate::stego::params::SpatialParams;
 use crate::stego::prng::permute_indices;
 use crate::stego::traits::SpatialCostModel;
+
+/// Inclusive range of pixel values the spatial engine may embed into.
+///
+/// The bounds are the class-interior rule: from a value in `[8, 247]` at least
+/// one of `val ± 1` stays inside the same eight-value class, and no move can
+/// reach 0 or 255. Both the writer and the extractor must use this range
+/// verbatim; it is exported so tests can assert against the same constant
+/// instead of re-typing the bounds.
+pub const SPATIAL_ELIGIBLE_MIN: u8 = 8;
+pub const SPATIAL_ELIGIBLE_MAX: u8 = 247;
 
 /// Decoded raw image representation.
 #[derive(Debug, Clone)]
@@ -450,15 +465,16 @@ pub fn embed_spatial(
     // Channel to embed in (Green channel for RGB, channel 0 for grayscale/RGBA luminance)
     let channel_offset = if image.channels >= 3 { 1 } else { 0 };
 
-    // Filter eligible pixels: exclude boundary/saturation pixels (0 and 255).
-    // In LSB replacement, restricting to [2, 253] ensures:
-    // 1. Modified values remain in [2, 253], never hitting 0 or 255.
-    // 2. High 7 bits (val & 0xFE) remain in [2, 252], strictly invariant under LSB flips.
-    // 3. Extractor generates the identical candidate set without synchronization issues.
+    // Eligible pixels: the class must be interior, i.e. `val` must sit in
+    // [8, 247] so that at least one of `val ± 1` stays inside the same
+    // eight-value class. That keeps three invariants the extractor relies on:
+    // 1. `val & 0xF8` never changes, so the HILL cost map is bit-identical;
+    // 2. modified values stay in [7, 248], never reaching 0/255 (no clipping);
+    // 3. eligibility itself is class-based, so both ends derive the same set.
     let mut eligible_pixels: Vec<usize> = (0..total_pixels)
         .filter(|&idx| {
             let val = image.pixels[idx * image.channels + channel_offset];
-            (2..=253).contains(&val)
+            (SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&val)
         })
         .collect();
 
@@ -542,39 +558,59 @@ pub fn embed_spatial(
     let mut body_slots = body_candidates[..needed_body_slots].to_vec();
     permute_indices(&mut body_slots, &perm_seed);
 
-    // Embed Phase 1: 32-byte header using direct LSB replacement
+    // Asymmetric per-direction costs. Embed-side only: ranking never sees them.
+    let (rho_plus, rho_minus) =
+        cost_model.direction_costs(&costs, &image.pixels, w, h, image.channels, channel_offset);
+    if rho_plus.len() != total_pixels || rho_minus.len() != total_pixels {
+        return Err(StrHideError::General(
+            "Direction cost map dimension mismatch".into(),
+        ));
+    }
+
+    // Embed Phase 1: 32-byte header. No coding here, so each bit may pick
+    // whichever direction is cheaper.
     for (byte_i, &b) in header_bytes.iter().enumerate() {
         for bit_i in 0..8 {
             let target_bit = (b >> (7 - bit_i)) & 1;
             let slot = header_slots[byte_i * 8 + bit_i];
             let byte_idx = slot * image.channels + channel_offset;
-            embed_lsb(&mut image.pixels[byte_idx], target_bit);
+            crate::stego::coding::write_bit_ternary(
+                &mut image.pixels[byte_idx],
+                target_bit,
+                rho_plus[slot],
+                rho_minus[slot],
+            );
         }
     }
 
-    // Embed Phase 2: Ciphertext body using (7, 3) Hamming matrix embedding
+    // Embed Phase 2: Ciphertext body using (7, 3) Hamming matrix embedding with
+    // ternary ±1 writes. Hamming decides *which* slot to flip (syndrome), the
+    // direction costs decide only *which way* — a slot is never flipped twice,
+    // so recording the legality once up front is enough.
     let mut slot_vals: Vec<u8> = body_slots
         .iter()
         .map(|&slot| image.pixels[slot * image.channels + channel_offset])
         .collect();
-    let mut slot_refs: Vec<&mut u8> = slot_vals.iter_mut().collect();
-    crate::stego::coding::hamming_embed_bytes(&mut slot_refs, ciphertext_body, hamming_k)?;
+    let moves: Vec<crate::stego::coding::Move> = slot_vals
+        .iter()
+        .map(|&v| crate::stego::coding::spatial_move(v))
+        .collect();
+    let rp: Vec<f64> = body_slots.iter().map(|&s| rho_plus[s]).collect();
+    let rm: Vec<f64> = body_slots.iter().map(|&s| rho_minus[s]).collect();
+    crate::stego::coding::hamming_embed_ternary(
+        &mut slot_vals,
+        &moves,
+        &rp,
+        &rm,
+        ciphertext_body,
+        hamming_k,
+    )?;
 
     for (i, &slot) in body_slots.iter().enumerate() {
         image.pixels[slot * image.channels + channel_offset] = slot_vals[i];
     }
 
     encode_png(&image)
-}
-
-/// Write `target_bit` into the LSB of `val` by replacement.
-///
-/// `val & 0xFE` is preserved by construction, which is what keeps the HILL cost
-/// map (computed on `val & 0xFE`) identical between embed and extract.
-fn embed_lsb(val: &mut u8, target_bit: u8) {
-    if (*val & 1) != target_bit {
-        *val ^= 1;
-    }
 }
 
 /// Extract secret payload from PNG carrier using content-adaptive spatial steganography.
@@ -597,11 +633,11 @@ pub fn extract_spatial(
 
     let channel_offset = if image.channels >= 3 { 1 } else { 0 };
 
-    // Filter eligible pixels with identical boundary condition [2, 253]
+    // Filter eligible pixels with the identical class-interior condition
     let mut eligible_pixels: Vec<usize> = (0..total_pixels)
         .filter(|&idx| {
             let val = image.pixels[idx * image.channels + channel_offset];
-            (2..=253).contains(&val)
+            (SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&val)
         })
         .collect();
 
@@ -733,7 +769,7 @@ pub fn probe_spatial_capacity(
     let eligible_count = (0..total_pixels)
         .filter(|&idx| {
             let val = image.pixels[idx * image.channels + channel_offset];
-            (2..=253).contains(&val)
+            (SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&val)
         })
         .count();
 
@@ -984,7 +1020,15 @@ mod tests {
             .count();
         assert!(changed > 0, "embedding must modify the carrier");
         for (a, b) in before.pixels.iter().zip(after.pixels.iter()) {
-            assert!(a ^ b <= 1, "only LSBs may change: {a} -> {b}");
+            assert!(
+                a.abs_diff(*b) <= 1,
+                "a write moves a pixel by at most one: {a} -> {b}"
+            );
+            assert_eq!(
+                a & 0xF8,
+                b & 0xF8,
+                "a write must stay inside the eight-value class: {a} -> {b}"
+            );
         }
     }
 

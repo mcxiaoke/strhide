@@ -216,6 +216,160 @@ pub fn hamming_embed_bytes(
     Ok(flips)
 }
 
+/// Stops a slot from moving outside its value-invariant class.
+///
+/// The spatial engine only modifies pixels inside a class of eight consecutive
+/// values (`val & 0xF8`); `+1` from the class floor and `-1` from the class
+/// ceiling would leave it. Direction legality is a property of the *current*
+/// value, and every legal move keeps the class unchanged — which is what makes
+/// the cost map reproducible at extraction time (see
+/// [`crate::stego::spatial::engine`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Move {
+    /// `+1` and `-1` both stay in the class.
+    Both,
+    /// Only `+1` stays in the class (slot sits on the class floor).
+    PlusOnly,
+    /// Only `-1` stays in the class (slot sits on the class ceiling).
+    MinusOnly,
+}
+
+/// Class of eight consecutive values used by the spatial engine.
+pub const SPATIAL_CLASS: u8 = 8;
+
+/// Direction legality for a spatial slot holding `val`.
+#[inline]
+pub fn spatial_move(val: u8) -> Move {
+    match val % SPATIAL_CLASS {
+        0 => Move::PlusOnly,
+        r if r == SPATIAL_CLASS - 1 => Move::MinusOnly,
+        _ => Move::Both,
+    }
+}
+
+/// Flip the parity of `val` using the cheapest legal direction.
+///
+/// `+1` and `-1` both flip the LSB, so the embedded bit is the value's parity;
+/// the choice between them is pure distortion optimisation.
+#[inline]
+pub fn flip_with_cost(val: &mut u8, mv: Move, rho_plus: f64, rho_minus: f64) -> Move {
+    match mv {
+        Move::PlusOnly => {
+            *val += 1;
+            Move::PlusOnly
+        }
+        Move::MinusOnly => {
+            *val -= 1;
+            Move::MinusOnly
+        }
+        Move::Both => {
+            if rho_plus <= rho_minus {
+                *val += 1;
+                Move::PlusOnly
+            } else {
+                *val -= 1;
+                Move::MinusOnly
+            }
+        }
+    }
+}
+
+/// Set the parity of `val` to `target_bit`, choosing the cheaper legal direction.
+#[inline]
+pub fn write_bit_ternary(val: &mut u8, target_bit: u8, rho_plus: f64, rho_minus: f64) {
+    if (*val & 1) == target_bit {
+        return;
+    }
+    flip_with_cost(val, spatial_move(*val), rho_plus, rho_minus);
+}
+
+/// Embed bytes into slots using ternary `±1` matching under Hamming coding.
+///
+/// Identical to [`hamming_embed_bytes`] except that a slot whose parity must
+/// change is moved by `+1` or `-1` (whichever is cheaper and legal) instead of
+/// having its LSB replaced. Extraction is unchanged: the payload bit is still
+/// the slot's LSB, and a `±1` move always flips it.
+pub fn hamming_embed_ternary(
+    vals: &mut [u8],
+    moves: &[Move],
+    rho_plus: &[f64],
+    rho_minus: &[f64],
+    payload: &[u8],
+    k: usize,
+) -> Result<usize, StrHideError> {
+    validate_k(k)?;
+
+    let total_bits = payload.len() * 8;
+    let needed = required_slots(total_bits, k);
+    if vals.len() < needed || moves.len() < needed || rho_plus.len() < needed {
+        return Err(StrHideError::General(format!(
+            "Insufficient slots for Hamming embedding: needed {}, available {}",
+            needed,
+            vals.len()
+        )));
+    }
+    if rho_minus.len() < needed {
+        return Err(StrHideError::General(
+            "Direction cost arrays disagree in length".into(),
+        ));
+    }
+
+    if k <= 1 {
+        let mut flips = 0;
+        for i in 0..total_bits {
+            if (vals[i] & 1) != bit_at(payload, i) {
+                flip_with_cost(&mut vals[i], moves[i], rho_plus[i], rho_minus[i]);
+                flips += 1;
+            }
+        }
+        return Ok(flips);
+    }
+
+    let n = (1usize << k) - 1;
+    let mut slot_cursor = 0;
+    let mut flips = 0;
+
+    let full_blocks = total_bits / k;
+    for b in 0..full_blocks {
+        let mut msg = 0u32;
+        for i in 0..k {
+            msg = (msg << 1) | (bit_at(payload, b * k + i) as u32);
+        }
+
+        let base = slot_cursor;
+        let mut syndrome = 0u32;
+        for j in 1..=n {
+            if (vals[base + j - 1] & 1) != 0 {
+                syndrome ^= j as u32;
+            }
+        }
+
+        let diff = syndrome ^ msg;
+        if diff != 0 {
+            let idx = base + (diff as usize) - 1;
+            flip_with_cost(&mut vals[idx], moves[idx], rho_plus[idx], rho_minus[idx]);
+            flips += 1;
+        }
+        slot_cursor = base + n;
+    }
+
+    let tail_start = full_blocks * k;
+    for bit_idx in tail_start..total_bits {
+        if (vals[slot_cursor] & 1) != bit_at(payload, bit_idx) {
+            flip_with_cost(
+                &mut vals[slot_cursor],
+                moves[slot_cursor],
+                rho_plus[slot_cursor],
+                rho_minus[slot_cursor],
+            );
+            flips += 1;
+        }
+        slot_cursor += 1;
+    }
+
+    Ok(flips)
+}
+
 /// Extract an arbitrary byte payload of length `payload_len` from candidate slots.
 pub fn hamming_extract_bytes(
     slots: &[u8],
@@ -400,6 +554,84 @@ mod tests {
             "Expected flip rate near 0.2917, got {:.4}",
             flip_rate
         );
+    }
+
+    #[test]
+    fn ternary_moves_stay_inside_the_class_and_roundtrip() {
+        for k in [1usize, 3] {
+            let payload = pseudo_random_bytes(11, 0x5151_2323);
+            let total_bits = payload.len() * 8;
+            let needed = required_slots(total_bits, k);
+
+            // Cover values spread over every residue of the class so the
+            // floor/ceiling/centre cases are all exercised.
+            let mut vals: Vec<u8> = (0..needed + 8)
+                .map(|i| 40u8.wrapping_add((i % 8) as u8))
+                .collect();
+            let before = vals.clone();
+            let moves: Vec<Move> = vals.iter().map(|&v| spatial_move(v)).collect();
+            // Deliberately asymmetric costs: the model must prefer +1 here.
+            let rp = vec![1.0f64; vals.len()];
+            let rm = vec![2.0f64; vals.len()];
+
+            let flips =
+                hamming_embed_ternary(&mut vals, &moves, &rp, &rm, &payload, k).expect("embed");
+            assert!(
+                flips > 0,
+                "k={k}: a random cover must need at least one move"
+            );
+
+            for (i, (&a, &b)) in before.iter().zip(vals.iter()).enumerate() {
+                assert_eq!(
+                    a & 0xF8,
+                    b & 0xF8,
+                    "k={k}, slot {i}: {a} -> {b} left its eight-value class"
+                );
+                assert_eq!(
+                    (a & 1) ^ (b & 1),
+                    u8::from(a != b),
+                    "k={k}, slot {i}: a move must flip exactly one parity bit"
+                );
+                if a != b {
+                    // +1 is cheaper, so it must be chosen whenever legal.
+                    if moves[i] == Move::Both {
+                        assert_eq!(b, a + 1, "k={k}, slot {i}: cheaper direction ignored");
+                    }
+                }
+            }
+
+            let extracted = hamming_extract_bytes(&vals, payload.len(), k).expect("extract");
+            assert_eq!(extracted, payload, "k={k}: ternary roundtrip mismatch");
+        }
+    }
+
+    #[test]
+    fn ternary_write_bit_prefers_the_legal_direction() {
+        // Centre of a class: both directions legal -> cheaper one wins.
+        let mut v = 42u8;
+        write_bit_ternary(&mut v, 1, 3.0, 1.0);
+        assert_eq!(v, 41, "cheaper -1 must win");
+
+        let mut v = 42u8;
+        write_bit_ternary(&mut v, 1, 1.0, 3.0);
+        assert_eq!(v, 43, "cheaper +1 must win");
+
+        // Already correct parity: never moved.
+        let mut v = 42u8;
+        write_bit_ternary(&mut v, 0, 1.0, 1.0);
+        assert_eq!(v, 42);
+
+        // Class floor: only +1 is legal even when -1 is "cheaper".
+        let mut v = 40u8;
+        assert_eq!(spatial_move(v), Move::PlusOnly);
+        write_bit_ternary(&mut v, 1, 9.0, 0.1);
+        assert_eq!(v, 41);
+
+        // Class ceiling: only -1 is legal.
+        let mut v = 47u8;
+        assert_eq!(spatial_move(v), Move::MinusOnly);
+        write_bit_ternary(&mut v, 0, 0.1, 9.0);
+        assert_eq!(v, 46);
     }
 
     #[test]

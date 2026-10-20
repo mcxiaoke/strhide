@@ -33,6 +33,28 @@ pub trait SpatialCostModel: Send + Sync {
         channels: usize,
         params: &SpatialParams,
     ) -> Vec<f64>;
+
+    /// Split the symmetric cost map into `(rho_plus, rho_minus)`.
+    ///
+    /// `rho_plus[i]` / `rho_minus[i]` cost raising / lowering pixel `i` by one.
+    /// Only the *direction* choice inside a Hamming/STC block uses these; slot
+    /// ranking always uses `base`, so an asymmetric model can never change
+    /// which slots the extractor picks. The default is symmetric.
+    ///
+    /// `channel` is the byte offset the engine embeds into, so a model that
+    /// wants a local reference (e.g. the neighborhood mean) reads the same
+    /// plane the writer modifies.
+    fn direction_costs(
+        &self,
+        base: &[f64],
+        _pixels: &[u8],
+        _width: usize,
+        _height: usize,
+        _channels: usize,
+        _channel: usize,
+    ) -> (Vec<f64>, Vec<f64>) {
+        (base.to_vec(), base.to_vec())
+    }
 }
 
 /// Trait implemented by JPEG DCT domain distortion cost models (e.g. UERD, J-UNIWARD).

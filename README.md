@@ -24,7 +24,7 @@ Compatibility is one-directional: the Rust build can still read envelopes writte
 - **Safe by default** — integrity/signature rejection checks refuse to modify files that should not be touched (e.g. signed binaries); `write`, `restore`, and `embed` default to writing a new `<stem>-out.<ext>` file, leaving original carriers untouched; explicit `--in-place` modifies carriers directly (creating a `.bak` backup copy); `read`, `extract`, `write`, and `restore` refuse to overwrite existing output files unless `--overwrite` is explicitly specified; original file timestamps are preserved.
 - **TOML configuration** — `./strhide.toml` or `~/.strhide/config.toml` provides defaults; explicit CLI flags (`-c, --config`) always win (see [`strhide.sample.toml`](strhide.sample.toml) for an annotated template).
 - **Batch & recursive carriers** — `write`, `restore`, `scan`, `inspect`, `verify`, and `embed` accept several files (and directories with `-r, --recursive`) at once; `read` takes exactly one carrier.
-- **Content-adaptive steganography (HILL & UERD)** — `embed` and `extract` hide data directly in image pixels (PNG, LSB replacement placed by a HILL cost model) or DCT frequency coefficients (JPEG, via UERD cost model). Unlike structure-domain injection, content steganography modifies minimal-distortion texture regions and survives metadata stripping. Detection resistance comes from the low modification rate of content-adaptive placement, not from the bit-writing rule: the payload is written by LSB replacement (`val & 0xFE | bit`), which is what chi-square/SPA detectors target.
+- **Content-adaptive steganography (HILL & UERD)** — `embed` and `extract` hide data directly in image pixels (PNG, HILL cost model) or DCT frequency coefficients (JPEG, via UERD cost model). Unlike structure-domain injection, content steganography modifies minimal-distortion texture regions and survives metadata stripping. Pixels are written by **ternary ±1 matching** inside the pixel's eight-value class (`val & 0xF8`), so probability mass crosses value-pair boundaries instead of flattening each pair — the specific pattern chi-square and SPA look for. Measured on the bundled corpus at full capacity the self-scan dropped from 50/100 (SUSPICIOUS, RS+SPA) to 25/100 (LOW, SPA only).
 
 ## Install
 
@@ -175,7 +175,7 @@ Unrecognized formats are **rejected**: strhide only modifies explicitly supporte
 
 | Domain | Supported formats | Algorithm | Mechanism |
 | --- | --- | --- | --- |
-| Spatial domain | PNG (RGB/RGBA/Grayscale) | **HILL** (High-Low-Low) | LSB replacement in high-pass texture regions, cost map masked to `val & 0xFE` so embed/extract rank slots identically |
+| Spatial domain | PNG (RGB/RGBA/Grayscale) | **HILL** (High-Low-Low) + asymmetric ±1 | Ternary ±1 matching in high-pass texture regions; the move stays inside the pixel's eight-value class so the `val & 0xF8` cost map — and hence the slot ranking — is identical on both ends |
 | DCT frequency domain | JPEG / JPG (Baseline) | **UERD** | Quantization-weighted energy smoothing via `dct-io` lossless re-encoding |
 
 *UERD neighbourhood is approximate*: the coefficient stream carries no block geometry, so the "8-neighbourhood"

@@ -40,24 +40,26 @@ impl SpatialCostModel for HillCostModel {
             return Vec::new();
         }
 
-        // Convert pixels to grayscale luminance using high 7 bits (pixel & 0xFE).
-        // Masking the LSB guarantees 100% deterministic, bit-for-bit identical
-        // cost calculation and candidate slot ranking on both embed and extract.
+        // Convert pixels to grayscale luminance using the invariant class bits
+        // (`pixel & 0xF8`). The spatial engine only moves pixels inside their
+        // eight-value class, so masking the low three bits keeps the cost map
+        // bit-for-bit identical between embed and extract — which is what makes
+        // the cost-sorted slot ranking reproducible on the stego image.
         let mut gray = vec![0.0f64; h * w];
         if channels == 1 {
             for (dst, &src) in gray.iter_mut().zip(pixels.iter()) {
-                *dst = (src & 0xFE) as f64;
+                *dst = class_value(src) as f64;
             }
         } else if channels >= 3 {
             for i in 0..h * w {
-                let r = (pixels[i * channels] & 0xFE) as f64;
-                let g = (pixels[i * channels + 1] & 0xFE) as f64;
-                let b = (pixels[i * channels + 2] & 0xFE) as f64;
+                let r = class_value(pixels[i * channels]) as f64;
+                let g = class_value(pixels[i * channels + 1]) as f64;
+                let b = class_value(pixels[i * channels + 2]) as f64;
                 gray[i] = 0.299 * r + 0.587 * g + 0.114 * b;
             }
         } else {
             for (dst, chunk) in gray.iter_mut().zip(pixels.chunks(channels)) {
-                *dst = (chunk[0] & 0xFE) as f64;
+                *dst = class_value(chunk[0]) as f64;
             }
         }
 
@@ -144,6 +146,77 @@ impl SpatialCostModel for HillCostModel {
 
         cost
     }
+
+    /// Asymmetric HILL costs: a `±1` move that brings the pixel *towards* its
+    /// neighbourhood mean costs less than one that pushes it further away.
+    ///
+    /// HILL measures local high-pass energy, so a move that reduces the local
+    /// residual is the less visible of the two. The exact per-direction energy
+    /// cannot be evaluated per slot at a sane cost, so this uses the squared
+    /// residual to the mean of the eight class-masked neighbours as a proxy.
+    /// It only ever decides *which way* a slot moves, never *which slot* is
+    /// used: ranking stays on the symmetric `base` map, so extraction does not
+    /// see this term at all.
+    fn direction_costs(
+        &self,
+        base: &[f64],
+        pixels: &[u8],
+        width: usize,
+        height: usize,
+        channels: usize,
+        channel: usize,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let mut plus = Vec::with_capacity(base.len());
+        let mut minus = Vec::with_capacity(base.len());
+        if width == 0 || height == 0 || base.is_empty() {
+            return (plus, minus);
+        }
+        for i in 0..height {
+            for j in 0..width {
+                let idx = i * width + j;
+                let mean = neighbor_class_mean(pixels, width, height, channels, channel, i, j);
+                let v = class_value(pixels[idx * channels + channel]) as f64;
+                let rp = ((v + 1.0 - mean) / 255.0).powi(2);
+                let rm = ((v - 1.0 - mean) / 255.0).powi(2);
+                plus.push(base[idx] * (1.0 + 4.0 * rp));
+                minus.push(base[idx] * (1.0 + 4.0 * rm));
+            }
+        }
+        (plus, minus)
+    }
+}
+
+/// Class representative used by every HILL stage: the low three bits of a
+/// pixel are invisible to the cost map because the writer never leaves the
+/// pixel's eight-value class.
+#[inline]
+fn class_value(v: u8) -> u8 {
+    v & 0xF8
+}
+
+/// Mean of the eight class-masked neighbours of `(i, j)` (centre excluded),
+/// with edge clamping. Used only by [`HillCostModel::direction_costs`].
+fn neighbor_class_mean(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    channels: usize,
+    channel: usize,
+    i: usize,
+    j: usize,
+) -> f64 {
+    let mut sum = 0.0f64;
+    for di in -1i32..=1 {
+        for dj in -1i32..=1 {
+            if di == 0 && dj == 0 {
+                continue;
+            }
+            let ni = (i as i32 + di).clamp(0, height as i32 - 1) as usize;
+            let nj = (j as i32 + dj).clamp(0, width as i32 - 1) as usize;
+            sum += class_value(pixels[(ni * width + nj) * channels + channel]) as f64;
+        }
+    }
+    sum / 8.0
 }
 
 /// Mirror index into [0, n), edge included (SciPy boundary='symm').
@@ -175,4 +248,108 @@ fn pad_symmetric(input: &[f64], h: usize, w: usize, pad: usize) -> (Vec<f64>, us
         }
     }
     (output, hp, wp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deterministic texture: a smooth gradient plus a pseudo-random component,
+    /// so both flat and busy regions exist.
+    fn texture_rgb(w: usize, h: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(w * h * 3);
+        let mut state = 0x1234_5678u32;
+        for i in 0..h {
+            for j in 0..w {
+                for c in 0..3 {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    let base = ((i * 255 / h.max(1)) + (j * 255 / w.max(1))) / 2;
+                    let noise = ((state >> 24) & 0x0F) as usize;
+                    out.push((base + noise + c * 3).min(255) as u8);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn cost_map_is_invariant_under_class_internal_moves() {
+        let (w, h) = (64usize, 48usize);
+        let cover = texture_rgb(w, h);
+        let params = SpatialParams::default();
+        let model = HillCostModel;
+
+        let base_cover = model.compute_cost(&cover, w, h, 3, &params);
+
+        // Move every third embeddable pixel by ±1, staying inside its class.
+        let mut stego = cover.clone();
+        let mut moved = 0usize;
+        for i in 0..w * h {
+            let idx = i * 3 + 1;
+            let v = stego[idx];
+            if !(8..=247).contains(&v) || i % 3 != 0 {
+                continue;
+            }
+            let r = v % 8;
+            let next = if r == 0 {
+                v + 1
+            } else if r == 7 {
+                v - 1
+            } else if i % 2 == 0 {
+                v + 1
+            } else {
+                v - 1
+            };
+            assert_eq!(v & 0xF8, next & 0xF8, "test setup must stay in class");
+            stego[idx] = next;
+            moved += 1;
+        }
+        assert!(moved > 100, "test needs a meaningful number of moves");
+
+        let base_stego = model.compute_cost(&stego, w, h, 3, &params);
+        assert_eq!(base_cover.len(), base_stego.len());
+        for (i, (a, b)) in base_cover.iter().zip(base_stego.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "pixel {i}: cost map changed after a class-internal move"
+            );
+        }
+    }
+
+    #[test]
+    fn direction_costs_follow_the_local_mean() {
+        // A dark pixel in a bright neighbourhood should be cheaper to raise
+        // than to lower, and vice versa.
+        let (w, h) = (8usize, 8usize);
+        let mut pixels = vec![200u8; w * h * 3];
+        let centre = (3 * w + 3) * 3 + 1;
+        pixels[centre] = 96;
+
+        let params = SpatialParams::default();
+        let model = HillCostModel;
+        let base = model.compute_cost(&pixels, w, h, 3, &params);
+        let (plus, minus) = model.direction_costs(&base, &pixels, w, h, 3, 1);
+
+        let idx = 3 * w + 3;
+        assert!(
+            plus[idx] < minus[idx],
+            "raising a dark pixel towards a bright neighbourhood must be cheaper              (plus {:.6} vs minus {:.6})",
+            plus[idx],
+            minus[idx]
+        );
+
+        pixels[centre] = 240;
+        pixels[0] = 100;
+        let base = model.compute_cost(&pixels, w, h, 3, &params);
+        let (plus, minus) = model.direction_costs(&base, &pixels, w, h, 3, 1);
+        assert!(
+            minus[idx] < plus[idx],
+            "lowering a bright pixel towards a dark neighbourhood must be cheaper              (plus {:.6} vs minus {:.6})",
+            plus[idx],
+            minus[idx]
+        );
+    }
 }

@@ -81,7 +81,11 @@ fn header_slots_of(png: &[u8], password: Option<&str>) -> Vec<usize> {
     let costs = HillCostModel.compute_cost(&img.pixels, w, h, ch, &params);
     let off = if ch >= 3 { 1 } else { 0 };
     let mut eligible: Vec<usize> = (0..w * h)
-        .filter(|&i| (2..=253).contains(&img.pixels[i * ch + off]))
+        .filter(|&i| {
+            (strhide::stego::spatial::engine::SPATIAL_ELIGIBLE_MIN
+                ..=strhide::stego::spatial::engine::SPATIAL_ELIGIBLE_MAX)
+                .contains(&img.pixels[i * ch + off])
+        })
         .collect();
     eligible.sort_by(|&a, &b| {
         costs[a]
@@ -559,7 +563,11 @@ fn test_stego_body_slots_follow_cost_order() {
     let params = SpatialParams::default();
     let costs = HillCostModel.compute_cost(&before.pixels, w, n / w, ch, &params);
     let mut eligible: Vec<usize> = (0..n)
-        .filter(|&i| (2..=253).contains(&before.pixels[i * ch + off]))
+        .filter(|&i| {
+            (strhide::stego::spatial::engine::SPATIAL_ELIGIBLE_MIN
+                ..=strhide::stego::spatial::engine::SPATIAL_ELIGIBLE_MAX)
+                .contains(&before.pixels[i * ch + off])
+        })
         .collect();
     eligible.sort_by(|&a, &b| {
         costs[a]
