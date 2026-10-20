@@ -1,4 +1,25 @@
-//! Host file format adapters for strhide.
+//! Host file format adapters: one [`HostAdapter`] implementation per carrier.
+//!
+//! Each adapter knows how to:
+//!
+//! - recognize its container format ([`HostAdapter::detect`]);
+//! - list the injection strategies it supports;
+//! - **inject** a UBE envelope into a fresh copy of the carrier
+//!   ([`HostAdapter::inject`]);
+//! - **locate** an envelope in an existing carrier ([`HostAdapter::locate`]);
+//! - **strip** the envelope and restore the original bytes
+//!   ([`HostAdapter::strip`]);
+//! - answer how much data each strategy can hold
+//!   ([`HostAdapter::strategy_capacities`]).
+//!
+//! The [`crate::engine`] never parses a container itself — it calls into the
+//! adapter trait. Adapters live in submodules:
+//!
+//! - [`png`], [`jpeg`], [`mp4`], [`zip`], [`pdf`], [`pe`] — the six supported
+//!   carriers.
+//! - [`eof`] — the universal fallback strategy (append after EOF) shared by
+//!   every carrier when its primary strategy does not fit.
+//! - [`pe_codebits`], [`pe_slack`] — sub-strategies of the PE adapter.
 
 pub mod eof;
 pub mod jpeg;
@@ -15,9 +36,12 @@ use crate::errors::StrHideError;
 use serde::Serialize;
 use std::io::{Read, Seek, Write};
 
+/// Combination trait: anything that is both [`Read`] and [`Seek`]. Auto-implemented
+/// for all types that satisfy both bounds.
 pub trait SeekRead: Read + Seek {}
 impl<T: Read + Seek> SeekRead for T {}
 
+/// Combination trait: anything that is both [`Write`] and [`Seek`].
 pub trait SeekWrite: Write + Seek {}
 impl<T: Write + Seek> SeekWrite for T {}
 
@@ -219,7 +243,9 @@ pub trait HostAdapter: Send + Sync {
     }
 }
 
-/// A zero-copy bounded slice of a SeekRead stream.
+/// A zero-copy bounded slice of a [`SeekRead`] stream. Used to present a
+/// contiguous view over a scattered envelope (e.g. PE codebits) or a bounded
+/// window over a carrier's bytes without copying them.
 pub struct SubStream<'a> {
     inner: &'a mut dyn SeekRead,
     base_offset: u64,

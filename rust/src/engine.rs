@@ -1,4 +1,23 @@
-//! Core engine orchestrating write, read, verify, inspect, and remove operations.
+//! High-level engine: write, read, inspect, verify, and remove operations.
+//!
+//! This is the module library callers should use. The flow for each operation
+//! is:
+//!
+//! 1. Run rejection checks ([`crate::rejection`]).
+//! 2. Snapshot the carrier's metadata (size, SHA-256, permissions, mtime/atime).
+//! 3. Detect the carrier format via [`crate::router`] and locate any existing
+//!    envelope.
+//! 4. Build the UBE (header + optional hint + encrypted metadata + chunked
+//!    encrypted payload + trailer) in a staging buffer.
+//! 5. Inject it into a `<target>.strhide.tmp` file, patch the header/trailer
+//!    back with the real offsets, and self-verify the written envelope.
+//! 6. On success: optional in-place `.bak` backup, atomic rename, restore
+//!    permissions/timestamps.
+//!
+//! [`remove_carrier`] performs the inverse: it locates the envelope, strips
+//! the injected bytes, restores any patched fields, and then **verifies the
+//! result against the SHA-256 recorded in the header** before committing. Any
+//! mismatch leaves the original carrier untouched.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
@@ -23,6 +42,12 @@ use crate::errors::StrHideError;
 use crate::rejection::run_all_rejection_checks;
 use crate::router::{find_adapter, find_adapter_or_reject, id_to_strategy, strategy_to_id};
 
+/// Metadata about the payload being hidden, stored inside the encrypted
+/// envelope metadata block.
+///
+/// This is the metadata that survives `read`: the original filename, the
+/// uncompressed payload size, its SHA-256, and a write timestamp. On extract,
+/// `raw_sha256` is re-computed over the decrypted payload and must match.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CarrierMetadata {
     pub filename: String,
@@ -222,26 +247,47 @@ impl<'a> PayloadSource<'a> {
     }
 }
 
+/// Outcome of a successful [`write_carrier`]. Serialized to JSON by the CLI.
 #[derive(Debug, Serialize)]
 pub struct WriteResult {
+    /// Always `"success"` when the call returns `Ok`.
     pub status: String,
+    /// Path the (possibly stego) carrier was written to.
     pub carrier: String,
+    /// Detected carrier format: `"PNG"`, `"JPEG"`, `"MP4"`, `"ZIP"`,
+    /// `"PDF"`, or `"PE"`.
     pub format: String,
+    /// Strategy actually chosen (e.g. `"chunk"`, `"app_segment"`,
+    /// `"pe_codebits"`).
     pub strategy: String,
+    /// Human-readable explanation of what the chosen strategy did, when
+    /// non-trivial (e.g. automatic fallback to `eof`).
     pub strategy_note: Option<String>,
+    /// Uncompressed payload size in bytes.
     pub raw_size: u64,
+    /// On-disk size of the injected UBE envelope in bytes.
     pub ube_size: u64,
+    /// True when a user password was supplied (FLAG_ENCRYPTED).
     pub is_encrypted: bool,
+    /// True when stealth mode was enabled.
     pub is_stealth: bool,
+    /// Echo of the password hint, when one was set.
     pub password_hint: Option<String>,
+    /// Path of the `<carrier>.bak` file kept for an in-place write, if any.
     pub backup_file: Option<String>,
+    /// Non-fatal warnings (e.g. envelope > 50% of carrier size, probable
+    /// pre-existing stealth envelope).
     pub warning: Option<String>,
 }
 
+/// Outcome of a successful [`read_carrier`] / [`read_carrier_with`].
 #[derive(Debug)]
 pub struct ReadResult {
+    /// Path the carrier was read from.
     pub carrier: String,
+    /// Decrypted, decompressed payload bytes.
     pub data: Vec<u8>,
+    /// Whether the envelope declared the payload to be a file (vs inline text).
     pub is_file: bool,
     /// Whether the envelope was encrypted with a user password. False for
     /// no-password envelopes (which use the public built-in key), so the CLI
@@ -252,15 +298,28 @@ pub struct ReadResult {
     pub written_file: Option<String>,
 }
 
+/// Outcome of [`inspect_carrier`].
+///
+/// Every field is `Option`-wrapped so the same type can describe a carrier
+/// with no envelope: `has_hidden_data == false`, and all envelope-derived
+/// fields are `None`. `strategies` is always populated.
 #[derive(Debug, Serialize)]
 pub struct InspectResult {
+    /// Path inspected.
     pub carrier: String,
+    /// Detected carrier format.
     pub format: String,
+    /// Whether an envelope (standard, or stealth-with-the-supplied-password)
+    /// was located.
     pub has_hidden_data: bool,
+    /// Strategy the envelope was written with.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strategy: Option<String>,
+    /// File offset of the envelope start (virtual offset for scattered
+    /// strategies).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ube_offset: Option<u64>,
+    /// Total envelope size in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ube_total_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,6 +334,8 @@ pub struct InspectResult {
     pub orig_host_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub orig_host_sha256: Option<String>,
+    /// Decrypted metadata (payload filename, size, sha256, created_at),
+    /// when it could be decrypted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     /// Capacity of every supported strategy for this carrier, in recommended
@@ -283,28 +344,46 @@ pub struct InspectResult {
     pub strategies: Vec<StrategyCapacity>,
 }
 
+/// Result of one verification level.
 #[derive(Debug, Serialize)]
 pub struct LevelStatus {
+    /// Whether the level passed.
     pub ok: bool,
+    /// Human-readable detail.
     pub detail: String,
 }
 
+/// Outcome of [`verify_carrier`]: three independent checks.
 #[derive(Debug, Serialize)]
 pub struct VerifyResult {
     pub carrier: String,
     pub format: String,
+    /// Level 1: host container structure still parses (e.g. PNG CRCs, ZIP
+    /// central directory, PE headers).
     pub level1_host: LevelStatus,
+    /// Level 2: envelope header/trailer found and internally consistent
+    /// (version, lengths, CRC, offsets).
     pub level2_envelope: LevelStatus,
+    /// Level 3: payload actually decrypts and its SHA-256 matches metadata.
     pub level3_crypto: LevelStatus,
 }
 
+/// Outcome of a successful [`remove_carrier`].
 #[derive(Debug, Serialize)]
 pub struct RemoveResult {
+    /// Always `"success"` when the call returns `Ok`.
     pub status: String,
+    /// Path the restored carrier was written to.
     pub carrier: String,
+    /// Size of the restored file (must equal `orig_host_size` recorded in the
+    /// envelope).
     pub restored_size: u64,
+    /// SHA-256 of the restored file, as a hex string.
     pub restored_sha256: String,
+    /// Always `true` on the success path; kept so callers can assert on the
+    /// struct rather than just on `Result::is_ok`.
     pub verified_identical: bool,
+    /// Path of the backup kept for an in-place removal, if any.
     pub backup_file: Option<String>,
 }
 
@@ -486,6 +565,34 @@ fn next_backup_path(carrier: &Path) -> PathBuf {
     with_suffix(&format!(".bak-{stamp}-{}", std::process::id()))
 }
 
+/// Inject `source` into `carrier_path`, returning a [`WriteResult`].
+///
+/// # Parameters
+///
+/// - `carrier_path`: an existing supported carrier (PNG/JPEG/MP4/ZIP/PDF/PE).
+/// - `source`: where the payload comes from (bytes, file, text, or stdin) —
+///   see [`PayloadSource`].
+/// - `options`: see [`WriteOptions`]. The defaults match the CLI defaults.
+///
+/// # Errors
+///
+/// Returns [`StrHideError::Rejection`] for pre-write safety failures
+/// (signed carrier, read-only target), [`StrHideError::General`] for bad
+/// arguments or an already-populated carrier, and [`StrHideError::Io`] for
+/// filesystem problems. On any error the carrier is left untouched.
+///
+/// # Examples
+///
+/// ```no_run
+/// use strhide::engine::{write_carrier, PayloadSource, WriteOptions};
+/// # fn main() -> Result<(), strhide::errors::StrHideError> {
+/// write_carrier(
+///     std::path::Path::new("photo.png"),
+///     PayloadSource::Text("secret"),
+///     &WriteOptions { password: Some("pw"), ..WriteOptions::default() },
+/// )?;
+/// # Ok(()) }
+/// ```
 pub fn write_carrier(
     carrier_path: &Path,
     source: PayloadSource,
@@ -1239,6 +1346,22 @@ pub fn read_carrier_with(
     })
 }
 
+/// Strip the envelope from `carrier_path` and restore the original carrier
+/// bit-for-bit.
+///
+/// When `output_path` is `None` the carrier is rewritten in place; otherwise
+/// the restored bytes are written there (the original carrier is untouched).
+///
+/// The restored file is hashed and compared to the `orig_host_size` /
+/// `orig_host_sha256` recorded in the envelope. On mismatch the new file is
+/// discarded and [`StrHideError::RestoreMismatch`] is returned — usually
+/// because a second envelope was layered on top and must be removed first.
+///
+/// `password` is required only when the envelope was written in stealth mode;
+/// a non-stealth envelope is stripped regardless of password.
+///
+/// When `backup` is true and the write is in place, a `<carrier>.bak` file is
+/// kept before overwriting.
 pub fn remove_carrier(
     carrier_path: &Path,
     output_path: Option<&Path>,
@@ -1378,6 +1501,11 @@ pub fn remove_carrier(
     })
 }
 
+/// Inspect a carrier: report its format, any envelope found, decrypted
+/// metadata, and the capacity of every available strategy.
+///
+/// This function never modifies the carrier. A carrier with no envelope
+/// returns `Ok` with `has_hidden_data == false` rather than an error.
 pub fn inspect_carrier(
     carrier_path: &Path,
     password: Option<&str>,
@@ -1520,6 +1648,12 @@ pub fn inspect_carrier(
     })
 }
 
+/// Run three independent checks against a carrier: host structure integrity,
+/// envelope boundary/CRC validity, and payload decrypt + SHA-256 match.
+///
+/// Does not modify the carrier. The returned [`VerifyResult`] reports each
+/// level separately so a caller can distinguish "the file is structurally
+/// fine" from "the payload does not decrypt".
 pub fn verify_carrier(
     carrier_path: &Path,
     password: Option<&str>,

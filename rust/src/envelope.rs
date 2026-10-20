@@ -1,4 +1,38 @@
 //! Binary envelope structures and serialization for strhide UBE v2.2.
+//!
+//! The "Universal Byte Envelope" (UBE) is the self-contained container strhide
+//! injects into a carrier. It is laid out as:
+//!
+//! ```text
+//! +----------------------+  HEADER_SIZE = 112 bytes
+//! | magic (8)            |
+//! | version/flags/...    |
+//! | salt (16)            |
+//! | base_nonce (12)      |
+//! | orig_host_size (8)   |
+//! | orig_host_sha256 (32)|
+//! | inject offsets       |
+//! +----------------------+
+//! | password hint        |  hint_len bytes (optional)
+//! +----------------------+
+//! | encrypted metadata   |  meta_len bytes (AES-GCM sealed)
+//! +----------------------+
+//! | encrypted payload    |  chunk-framed AES-GCM stream
+//! +----------------------+
+//! | trailer (24)         |  TRAILER_SIZE = 24 bytes
+//! +----------------------+
+//! ```
+//!
+//! The header/trailer magics are either the standard high-entropy constants
+//! ([`STANDARD_HEADER_MAGIC`] / [`STANDARD_TRAILER_MAGIC`]) or, in stealth
+//! mode, password-derived values produced by
+//! [`crate::crypto::derive_stealth_magics`]. Sensitive header fields are
+//! XOR-masked with a keystream derived from the password (or, for the default
+//! non-encrypted envelope, from [`crate::crypto::BUILTIN_DEFAULT_KEY`]).
+//!
+//! Readers should prefer [`EnvelopeHeader::unpack_with_password`] and
+//! [`EnvelopeTrailer::unpack`]; the bare `unpack` calls assume an already
+//! de-masked header.
 
 use crate::errors::StrHideError;
 use std::io::{Read, Seek, SeekFrom};
@@ -48,6 +82,14 @@ pub const MIN_UBE_PLAIN: u32 = 178;
 /// Same, encrypted: `112 + (meta 41 + 16 tag) + (1 + 4 length + 16 tag) + 24`.
 pub const MIN_UBE_ENCRYPTED: u32 = 214;
 
+/// Fixed 112-byte envelope header, serialized little-endian.
+///
+/// The first 80 bytes are exactly the AAD ([`Self::get_aad`]) bound into the
+/// AEAD seals of both the metadata block and every payload chunk — tampering
+/// with any of them breaks authentication. The trailing 32 bytes
+/// (`inject_offset` / `inject_size` / `patch_offset` / `orig_patch_val` /
+/// `meta_len` / `hint_len`) are stored after injection because the injector
+/// does not know the final offset until it has placed the envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvelopeHeader {
     pub magic_header: [u8; 8],
@@ -90,22 +132,31 @@ impl Default for EnvelopeHeader {
 }
 
 impl EnvelopeHeader {
+    /// True when the envelope was sealed with a user password (FLAG_ENCRYPTED).
+    ///
+    /// Note: even when this is false, the payload is still encrypted with the
+    /// built-in public key — "encrypted" here means "a user password was
+    /// required".
     pub fn is_encrypted(&self) -> bool {
         (self.flags & FLAG_ENCRYPTED) != 0
     }
 
+    /// True when the payload was deflate-compressed before sealing.
     pub fn is_compressed(&self) -> bool {
         (self.flags & FLAG_COMPRESSED) != 0
     }
 
+    /// True when the payload was a file (rather than inline bytes/text).
     pub fn is_file(&self) -> bool {
         (self.flags & FLAG_IS_FILE) != 0
     }
 
+    /// True when stealth mode is on (password-derived magics + masked fields).
     pub fn is_stealth(&self) -> bool {
         (self.flags & FLAG_STEALTH) != 0
     }
 
+    /// True when a password hint follows the header.
     pub fn has_hint(&self) -> bool {
         (self.flags & FLAG_HAS_HINT) != 0
     }
@@ -329,6 +380,8 @@ impl EnvelopeHeader {
     }
 }
 
+/// 24-byte trailer at the end of the envelope, giving readers a way to find
+/// the envelope backwards from the carrier's EOF.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvelopeTrailer {
     pub ube_offset: u64,
@@ -338,6 +391,8 @@ pub struct EnvelopeTrailer {
 }
 
 impl EnvelopeTrailer {
+    /// Build a standard trailer. `trailer_magic` is normally
+    /// [`STANDARD_TRAILER_MAGIC`], or the password-derived magic in stealth.
     pub fn create(ube_offset: u64, ube_total_size: u64, trailer_magic: [u8; 4]) -> Self {
         let mut prefix = [0u8; 16];
         prefix[0..8].copy_from_slice(&ube_offset.to_le_bytes());
@@ -369,6 +424,7 @@ impl EnvelopeTrailer {
         }
     }
 
+    /// Serialize to the 24-byte on-disk form.
     pub fn pack(&self) -> [u8; TRAILER_SIZE] {
         let mut buf = [0u8; TRAILER_SIZE];
         buf[0..8].copy_from_slice(&self.ube_offset.to_le_bytes());
@@ -378,6 +434,12 @@ impl EnvelopeTrailer {
         buf
     }
 
+    /// Parse a 24-byte trailer, optionally requiring a specific magic.
+    ///
+    /// When `expected_magic` is `None`, both the standard and legacy magics
+    /// are accepted and the CRC is checked against the unmasked value. When
+    /// it is `Some(..)` (the stealth case), the password-derived CRC mask is
+    /// also accepted.
     pub fn unpack(data: &[u8], expected_magic: Option<&[u8; 4]>) -> Result<Self, StrHideError> {
         if data.len() < TRAILER_SIZE {
             return Err(StrHideError::CorruptedData(format!(
@@ -435,6 +497,10 @@ impl EnvelopeTrailer {
         })
     }
 
+    /// Read and parse the last 24 bytes of `reader`. Returns `Ok(None)` when
+    /// the file is too short or the trailing bytes do not form a valid
+    /// trailer — this is the normal "no envelope here" outcome and is not an
+    /// error.
     pub fn read_from_tail<R: Read + Seek + ?Sized>(
         reader: &mut R,
         expected_magic: Option<&[u8; 4]>,

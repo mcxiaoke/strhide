@@ -1,4 +1,20 @@
-//! Security pre-check and rejection rules for strhide.
+//! Pre-write safety checks and rejection rules.
+//!
+//! Before [`crate::engine::write_carrier`] opens the target for writing, it
+//! runs every check here. The goal is to refuse operations that would
+//! silently break something the user did not ask to break:
+//!
+//! - signed Windows PE files (Authenticode)
+//! - signed PDF documents (ByteRange / `/Sig`)
+//! - signed JAR / APK archives (`META-INF/*.SF|RSA|DSA`)
+//! - standalone signature files (`.sig` / `.asc` / `.p7s` / `.p7b`)
+//! - APK carriers (unsupported container)
+//! - read-only carriers being written in place
+//! - target directories that are not writable
+//!
+//! Each check returns `Ok(None)` when the carrier is safe, or
+//! `Ok(Some(reason))` / `Err(..)` describing why the write must be refused.
+//! [`run_all_rejection_checks`] composes them in the order the engine uses.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -6,6 +22,11 @@ use std::path::{Path, PathBuf};
 
 use crate::errors::StrHideError;
 
+/// Inspect a PE reader for an Authenticode certificate table.
+///
+/// Returns `Ok(Some(reason))` when the PE has a non-empty security directory;
+/// `Ok(None)` when the file is not a PE or is unsigned. The reader's
+/// position is always restored.
 pub fn check_pe_authenticode<R: Read + Seek + ?Sized>(
     reader: &mut R,
 ) -> Result<Option<String>, StrHideError> {
@@ -92,6 +113,8 @@ pub fn check_pe_authenticode<R: Read + Seek + ?Sized>(
     Ok(None)
 }
 
+/// Reject `.apk` carriers outright: the APK container carries its own
+/// signature and alignment that strhide does not preserve.
 pub fn check_unsupported_apk(filename: Option<&str>) -> Option<String> {
     if let Some(name) = filename
         && name.to_lowercase().ends_with(".apk")
@@ -103,6 +126,8 @@ pub fn check_unsupported_apk(filename: Option<&str>) -> Option<String> {
     None
 }
 
+/// Reject standalone signature files as carriers — hiding data inside a
+/// detached signature would corrupt the signature itself.
 pub fn check_signature_file(filename: Option<&str>) -> Option<String> {
     if let Some(name) = filename {
         let lower = name.to_lowercase();
@@ -119,6 +144,8 @@ pub fn check_signature_file(filename: Option<&str>) -> Option<String> {
     None
 }
 
+/// Scan a PDF reader for a `/ByteRange` + `/Sig` pair (the CMS/PKCS#7
+/// signature pattern). Returns `Ok(Some(reason))` when found.
 pub fn check_pdf_signature<R: Read + Seek + ?Sized>(
     reader: &mut R,
 ) -> Result<Option<String>, StrHideError> {
@@ -184,6 +211,11 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// Content-based JAR signature detection: scans the central directory of any
+/// ZIP container for `META-INF/*.SF|.RSA|.DSA`.
+///
+/// Detection is magic-based, not extension-based, so a signed JAR renamed to
+/// `.zip` is still caught. The reader's position is restored on return.
 pub fn check_jar_signature<R: Read + Seek + ?Sized>(
     reader: &mut R,
     _filename: Option<&str>,
@@ -262,6 +294,12 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
     Ok(None)
 }
 
+/// Run every pre-write check in order. Called by
+/// [`crate::engine::write_carrier`] before any output is created.
+///
+/// The carrier itself is only opened for read; a write probe is created (and
+/// immediately deleted) next to `target`, because the engine stages its
+/// output as `<target>.strhide.tmp` before an atomic rename.
 pub fn run_all_rejection_checks(carrier: &Path, target: &Path) -> Result<(), StrHideError> {
     let filename = carrier.file_name().and_then(|s| s.to_str());
 

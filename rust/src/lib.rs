@@ -1,22 +1,105 @@
-//! strhide: Smart format-preserving lossless data hiding package.
+//! # strhide
 //!
-//! Hide text or files inside ordinary host files (PNG, JPEG, MP4, ZIP, PDF,
-//! Windows PE) without changing the host's visible format, and
-//! restore the original host bit-for-bit afterwards. Single static binary
-//! built from source.
+//! `strhide` is a smart, format-preserving, lossless data-hiding library and
+//! CLI. It hides text or a file inside an ordinary host ("carrier") file —
+//! PNG, JPEG, MP4, ZIP, PDF, or a Windows PE executable — without changing the
+//! host's visible format, rendering, or behavior, and restores the original
+//! host **bit-for-bit** afterwards.
 //!
-//! Typical usage (via the CLI):
+//! ## Features
+//!
+//! - **Format-preserving injection** for six carrier families:
+//!   PNG (`prIv` ancillary chunk), JPEG (APP15 segment), MP4 (`uuid` box),
+//!   ZIP (pre-central-directory), PDF (incremental update), and Windows PE
+//!   (section slack, x86/x64 instruction encoding, or overlay).
+//! - **AES-256-GCM authenticated encryption** for both the payload and the
+//!   metadata; keys derived with PBKDF2-HMAC-SHA256 (100 000 iterations) +
+//!   HKDF-SHA256. Even without a password, envelopes are uniformly encrypted
+//!   under a built-in public key so no plaintext leaks into a hex dump.
+//! - **Stealth mode**: header/trailer magics, header sensitive fields, and
+//!   trailer CRC are all derived from the password, so an envelope is
+//!   indistinguishable from random bytes without it (plausible deniability).
+//! - **Lossless restoration**: [`engine::remove_carrier`] verifies the
+//!   restored carrier against the SHA-256 and size recorded in the envelope
+//!   before committing, and refuses to commit on any mismatch.
+//! - **Rejection-first design**: signed PE/PDF/JAR files, read-only targets,
+//!   and unsupported containers are refused before any write happens.
+//!
+//! ## Supported carriers and strategies
+//!
+//! | Format | Primary strategy | Fallback |
+//! |---|---|---|
+//! | PNG | `chunk` (private ancillary chunk before IEND) | `eof` |
+//! | JPEG | `app_segment` (APP15 before SOS) | `eof` |
+//! | MP4 | `box_uuid` (ISO BMFF uuid box) | `eof` |
+//! | ZIP | `pre_cd_inject` (before central directory) | `eof` |
+//! | PDF | `incremental` (append updates) | `eof` |
+//! | PE | `pe_codebits` / `pe_slack` / `pe_overlay` | `eof` |
+//!
+//! `strategy = "auto"` (the [`crate::engine::WriteOptions`] default) picks
+//! the primary strategy when it fits and falls back to `eof` transparently.
+//!
+//! ## CLI quick start
 //!
 //! ```text
 //! strhide write carrier.png --data-text "hello" --password pw
-//! strhide read carrier.png --output out.txt --password pw
+//! strhide read  carrier.png --output out.txt --password pw
 //! strhide inspect carrier.png --password pw
+//! strhide verify carrier.png --password pw
+//! strhide remove carrier.png --password pw
 //! ```
 //!
-//! Library users can call [`engine`](crate::engine) functions directly;
-//! all functions return a result type and return [`StrHideError`](crate::errors)
-//! subclasses of errors on failure. See [`engine`](crate::engine) for the full
-//! keyword reference of each function.
+//! ## Library usage
+//!
+//! The library entry points live in [`engine`]: [`engine::write_carrier`]
+//! injects a payload, [`engine::read_carrier_with`] extracts it, and
+//! [`engine::remove_carrier`] strips the envelope and restores the carrier.
+//! Every fallible call returns a [`std::result::Result`] whose error type is
+//! [`errors::StrHideError`].
+//!
+//! ```no_run
+//! # fn main() -> Result<(), strhide::errors::StrHideError> {
+//! use strhide::engine::{write_carrier, read_carrier_with, PayloadSource, WriteOptions};
+//!
+//! // Write a text payload into an existing PNG carrier, in place.
+//! write_carrier(
+//!     std::path::Path::new("photo.png"),
+//!     PayloadSource::Text("hello from strhide"),
+//!     &WriteOptions {
+//!         password: Some("s3cret"),
+//!         ..WriteOptions::default()
+//!     },
+//! )?;
+//!
+//! // Extract it back.
+//! let extracted = read_carrier_with(
+//!     std::path::Path::new("photo.png"),
+//!     None,            // write to a Vec, not a file
+//!     Some("s3cret"),
+//!     false,
+//! )?;
+//! assert_eq!(extracted.data, b"hello from strhide");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! After `remove_carrier`, `photo.png` is byte-for-byte identical to the file
+//! before the write.
+//!
+//! ## Crate layout
+//!
+//! - [`engine`] — the high-level write / read / inspect / verify / remove API.
+//! - [`envelope`] — binary serialization of the 112-byte header and 24-byte
+//!   trailer (UBE v2.2 wire format).
+//! - [`crypto`] — AES-256-GCM chunked encryption, PBKDF2/HKDF key derivation,
+//!   raw-deflate compression, SHA-256 helpers.
+//! - [`adapters`] — the [`adapters::HostAdapter`] trait and one implementation
+//!   per carrier format (PNG, JPEG, MP4, ZIP, PDF, PE).
+//! - [`router`] — format sniffing and strategy name ↔ ID mapping.
+//! - [`rejection`] — pre-write safety checks (signed files, read-only targets,
+//!   APK, signature containers).
+//! - [`errors`] — the single [`errors::StrHideError`] error enum.
+//! - [`config`] / [`cli`] / [`analysis`] — internal plumbing for the binary.
 
 pub mod adapters;
 pub mod analysis;

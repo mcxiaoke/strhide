@@ -1,4 +1,35 @@
 //! Cryptographic and compression primitives for strhide.
+//!
+//! This module is the single source of truth for the envelope's crypto
+//! contract: key derivation, AEAD encryption, chunk framing, and the
+//! decompression bomb bound. It is **not** a general-purpose crypto library —
+//! every function assumes it is being driven by [`crate::engine`] and the wire
+//! format in [`crate::envelope`].
+//!
+//! # Cryptographic layout
+//!
+//! - **KDF**: PBKDF2-HMAC-SHA256 with a 16-byte random salt,
+//!   [`PBKDF2_ITERATIONS`] iterations, followed by HKDF-SHA256-Expand into
+//!   separate subkeys: `strhide-payload` (payload key), `strhide-metadata`
+//!   (metadata key), and `strhide-stealth-*` (stealth magics / header mask).
+//! - **AEAD**: AES-256-GCM. The 80-byte immutable header fields are the AAD;
+//!   per-chunk nonces are derived from a single random 12-byte base nonce by
+//!   XOR-ing the chunk index into the low 32 bits (see [`make_chunk_nonce`]).
+//! - **Framing**: payload is encrypted in [`CHUNK_SIZE`]-byte chunks, each
+//!   prefixed by a little-endian u32 length. The final chunk carries
+//!   `is_last = 1` in its AAD.
+//! - **Compression**: raw deflate (no zlib header). The writer keeps the
+//!   compressed form only when it saves at least 2%; the reader enforces the
+//!   AEAD-protected `raw_size` as a hard decompression bound.
+//!
+//! # Stealth mode
+//!
+//! When a password is supplied with `stealth = true`, the header/trailer
+//! magics are derived from the password ([`derive_stealth_magics`]), the
+//! header's sensitive fields are masked with a keystream from
+//! [`derive_header_mask`], and the trailer CRC is XOR-masked via
+//! [`derive_trailer_crc_mask`]. Without the password, the envelope looks like
+//! high-entropy random data.
 
 use aes_gcm::{
     Aes256Gcm, Nonce,
@@ -12,7 +43,12 @@ use unicode_normalization::UnicodeNormalization;
 use crate::envelope::AAD_SIZE;
 use crate::errors::StrHideError;
 
+/// Plaintext payload chunk size. Each chunk is independently sealed with
+/// AES-256-GCM and prefixed by its own u32 length on the wire.
 pub const CHUNK_SIZE: usize = 2 * 1024 * 1024; // 2MB
+
+/// PBKDF2-HMAC-SHA256 iteration count. Raising this invalidates envelopes
+/// written with older versions, so it is treated as a wire-format constant.
 pub const PBKDF2_ITERATIONS: u32 = 100_000;
 
 /// Default internal secret used when the user does not specify a password.
@@ -20,10 +56,19 @@ pub const PBKDF2_ITERATIONS: u32 = 100_000;
 /// eliminating plaintext leakage (no plaintext payload, metadata, or host SHA-256 in hex view).
 pub const BUILTIN_DEFAULT_KEY: &str = "strhide::envelope::v2::default::builtin::public::secret";
 
+/// NFC-normalize a user-supplied string (password, hint, filename).
+///
+/// Passwords typed on macOS / iOS may arrive as NFD decomposed form; deriving
+/// keys from the raw bytes would silently produce different envelopes on
+/// different platforms. All password-bearing call sites funnel through here.
 pub fn normalize_nfc(s: &str) -> String {
     s.nfc().collect::<String>()
 }
 
+/// Derive the 32-byte payload and metadata keys from a password and salt.
+///
+/// The password is NFC-normalized, run through PBKDF2, then HKDF-Expand'd
+/// twice with distinct info labels so the two keys are independent.
 pub fn derive_keys(password: &str, salt: &[u8]) -> Result<([u8; 32], [u8; 32]), StrHideError> {
     let norm_pwd = normalize_nfc(password);
     let mut ikm = [0u8; 32];
@@ -41,6 +86,11 @@ pub fn derive_keys(password: &str, salt: &[u8]) -> Result<([u8; 32], [u8; 32]), 
     Ok((payload_key, meta_key))
 }
 
+/// Derive the 8-byte header magic and 4-byte trailer magic used in stealth
+/// mode.
+///
+/// Without the password these bytes look like random data, so a forensic scan
+/// for the standard ASCII/binary magics finds nothing.
 pub fn derive_stealth_magics(
     password: &str,
     salt: &[u8],
@@ -102,6 +152,9 @@ pub fn derive_channel_header_mask(magic: &[u8; 4]) -> [u8; 10] {
     mask
 }
 
+/// Per-chunk nonce: the 8-byte prefix of `base_nonce` is preserved, and the
+/// low 4 bytes are XOR-ed with `chunk_index`. Reusing `base_nonce` across
+/// chunks is safe because every resulting nonce is distinct.
 pub fn make_chunk_nonce(base_nonce: &[u8; 12], chunk_index: usize) -> [u8; 12] {
     let counter_bytes: [u8; 4] = base_nonce[8..12].try_into().unwrap();
     let counter = u32::from_le_bytes(counter_bytes) ^ (chunk_index as u32);
@@ -111,6 +164,8 @@ pub fn make_chunk_nonce(base_nonce: &[u8; 12], chunk_index: usize) -> [u8; 12] {
     nonce
 }
 
+/// Metadata nonce: same scheme as [`make_chunk_nonce`] but XOR-ed with
+/// `0xFFFF_FFFF` so the metadata seal never shares a nonce with chunk 0.
 pub fn make_meta_nonce(base_nonce: &[u8; 12]) -> [u8; 12] {
     let counter_bytes: [u8; 4] = base_nonce[8..12].try_into().unwrap();
     let counter = u32::from_le_bytes(counter_bytes) ^ 0xFFFFFFFF;
@@ -120,6 +175,9 @@ pub fn make_meta_nonce(base_nonce: &[u8; 12]) -> [u8; 12] {
     nonce
 }
 
+/// Seal the (compact or JSON) metadata block with the metadata subkey.
+/// The 80-byte header fields are bound as AAD so any later tamper of the
+/// header that survives this decrypt also breaks the metadata tag.
 pub fn encrypt_metadata(
     meta_bytes: &[u8],
     meta_key: &[u8; 32],
@@ -138,6 +196,9 @@ pub fn encrypt_metadata(
         .map_err(|e| StrHideError::General(format!("Metadata encryption failed: {e}")))
 }
 
+/// Open the metadata block. A failed tag is reported as
+/// [`StrHideError::CorruptedData`]; callers that want to distinguish "wrong
+/// password" from "corrupted" must match on this at the engine layer.
 pub fn decrypt_metadata(
     meta_ciphertext: &[u8],
     meta_key: &[u8; 32],
@@ -156,6 +217,12 @@ pub fn decrypt_metadata(
         .map_err(|_| StrHideError::CorruptedData("Metadata authentication failed".into()))
 }
 
+/// Read `reader` to EOF, seal it in [`CHUNK_SIZE`]-byte AES-256-GCM chunks,
+/// and write the length-prefixed chunk stream to `writer`.
+///
+/// Returns the total number of ciphertext bytes written (chunk lengths +
+/// ciphertext + GCM tags). An empty input still produces one empty final
+/// chunk so the reader can distinguish "no payload" from "truncated stream".
 pub fn encrypt_stream_to_chunks<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -254,6 +321,14 @@ pub fn encrypt_stream_to_chunks<R: Read, W: Write>(
     Ok(total_written)
 }
 
+/// Reverse of [`encrypt_stream_to_chunks`]: read exactly
+/// `total_payload_bytes` of framed ciphertext from `reader`, decrypt and
+/// verify each chunk, and write the plaintext to `writer`.
+///
+/// `total_payload_bytes` comes from the AEAD-protected header, so it is
+/// trusted; individual chunk lengths are still capped at
+/// `CHUNK_SIZE + 16` to reject a forged envelope that asks for a giant
+/// allocation.
 pub fn decrypt_stream_from_chunks<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -395,12 +470,15 @@ pub fn decompress_stream<R: Read, W: Write>(
     Ok(total_decompressed)
 }
 
+/// One-shot SHA-256 of an in-memory buffer.
 pub fn compute_sha256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().into()
 }
 
+/// Streamed SHA-256: reads `reader` to EOF in 64 KiB blocks, never
+/// materializing the whole input. Used for hashing large carriers.
 pub fn compute_stream_sha256<R: Read>(reader: &mut R) -> Result<[u8; 32], StrHideError> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
@@ -414,6 +492,7 @@ pub fn compute_stream_sha256<R: Read>(reader: &mut R) -> Result<[u8; 32], StrHid
     Ok(hasher.finalize().into())
 }
 
+/// Streamed SHA-256 of a file on disk.
 pub fn compute_file_sha256(path: &std::path::Path) -> Result<[u8; 32], StrHideError> {
     let mut file = std::fs::File::open(path)?;
     compute_stream_sha256(&mut file)

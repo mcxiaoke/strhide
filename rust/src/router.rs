@@ -1,4 +1,11 @@
-//! Format sniffing and strategy routing module.
+//! Format sniffing and strategy routing.
+//!
+//! This module is the bridge between a raw file and the [`crate::adapters`]
+//! trait: given an open stream, [`find_adapter`] walks the supported formats
+//! in priority order and returns the adapter whose `detect` accepts it. It
+//! also converts between the human-readable strategy names (`"chunk"`,
+//! `"pe_codebits"`, ...) and the single-byte `strategy_id` stored in the
+//! envelope header.
 
 use crate::adapters::{
     HostAdapter, SeekRead, jpeg::JpegAdapter, mp4::Mp4Adapter, pdf::PdfAdapter, pe::PeAdapter,
@@ -74,6 +81,8 @@ pub fn find_adapter_or_reject(
     )))
 }
 
+/// Map a strategy name to the on-wire `strategy_id` byte stored in the
+/// envelope header. Unknown names default to `1` (`"eof"`).
 pub fn strategy_to_id(strategy: &str) -> u8 {
     match strategy {
         "eof" => 1,
@@ -89,6 +98,8 @@ pub fn strategy_to_id(strategy: &str) -> u8 {
     }
 }
 
+/// Inverse of [`strategy_to_id`]: map a `strategy_id` byte back to its name.
+/// Unknown IDs map to `"eof"` for forward compatibility.
 pub fn id_to_strategy(id: u8) -> &'static str {
     match id {
         1 => "eof",

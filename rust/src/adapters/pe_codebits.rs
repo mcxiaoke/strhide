@@ -13,7 +13,7 @@
 //! - [`profile`], [`embed`], [`extract_ube`], [`apply_diff`] are format
 //!   agnostic: they operate on a code byte range plus a bitness, so future
 //!   ELF/Mach-O support only needs a new section locator.
-//! - [`parse_pe_code_layout`] and [`find_slack_run`] are the PE-specific
+//! - `parse_pe_code_layout` and `find_slack_run` are the PE-specific
 //!   locator (`.text` discovery, bitness, zero-value slack scan).
 //!
 //! The UBE bytes are an opaque payload to this module; they are never parsed
@@ -957,7 +957,7 @@ pub fn find_slack_run(data: &[u8], ranges: &[(u64, u64)], needed: usize) -> Opti
 
 /// Reads a `Read + Seek` stream's PE code layout without loading the whole
 /// file: only the headers are parsed here; `.text` and slack are read by the
-/// caller through [`read_text_range`] / [`read_slack_candidates`].
+/// caller through `read_text_range` / `read_slack_candidates`.
 pub fn parse_pe_code_layout_streaming<R: Read + Seek + ?Sized>(
     reader: &mut R,
 ) -> Result<PeCodeLayout, CodebitsError> {
