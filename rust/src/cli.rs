@@ -24,6 +24,14 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
+    #[arg(
+        short = 'q',
+        long = "quiet",
+        global = true,
+        help = "Suppress normal status output: [OK]/[INFO] progress, notices, and human-readable reports. Payload data (read), --json/table output, and [ERROR] messages always print; the exit code tells scripts whether the command succeeded."
+    )]
+    pub quiet: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -34,8 +42,8 @@ pub enum Commands {
     Write(WriteArgs),
     /// Read and extract hidden payload from carrier
     Read(ReadArgs),
-    /// 100% loss-free restoration by removing hidden envelope
-    Remove(RemoveArgs),
+    /// 100% loss-free restoration of the original host file
+    Restore(RestoreArgs),
     /// Inspect carrier structure and envelope metadata
     Inspect(InspectArgs),
     /// Diagnostic verification of host, envelope, and crypto
@@ -46,83 +54,191 @@ pub enum Commands {
     List(ListArgs),
 }
 
+/// Password arguments shared by all commands that accept one. Declared once
+/// and flattened everywhere so `-p` and `--password-file` are mutually
+/// exclusive: `resolve_password` would otherwise silently prefer `-p`.
 #[derive(Args, Debug)]
+#[group(required = false, multiple = false)]
+pub struct PasswordArgs {
+    #[arg(
+        short = 'p',
+        long = "password",
+        value_name = "PASSWORD",
+        help = "Password in plain text (it stays visible in shell history and process listings). Prefer --password-file, STRHIDE_PASSWORD, or the interactive prompt."
+    )]
+    pub password: Option<String>,
+
+    #[arg(
+        long = "password-file",
+        value_name = "FILE",
+        help = "Read the password from this file (first line; trailing CR/LF is trimmed). Mutually exclusive with -p/--password."
+    )]
+    pub password_file: Option<PathBuf>,
+}
+
+/// `write` payload sources, isolated in their own ArgGroup so clap rejects two
+/// sources at once with a parse error. The lookup chain in `handle_write` used
+/// to pick the first match silently, which hid one of two supplied sources.
+/// The `STRHIDE_TEXT` environment variable is deliberately NOT part of this
+/// group: it is only a fallback when no CLI source is given, so the group must
+/// stay non-required and the "Must provide either ..." error remains a
+/// runtime check.
+#[derive(Args, Debug)]
+#[group(required = false, multiple = false)]
+pub struct PayloadSourceArgs {
+    #[arg(
+        short = 'd',
+        long = "data",
+        value_name = "FILE",
+        help = "Hide this file as the payload (any content, binary or text). Mutually exclusive with the other payload sources."
+    )]
+    pub data: Option<PathBuf>,
+
+    #[arg(
+        short = 't',
+        long = "text",
+        value_name = "TEXT",
+        help = "Hide this text as the payload; combine with --unescape for C-style escapes. Mutually exclusive with the other payload sources."
+    )]
+    pub text: Option<String>,
+
+    #[arg(
+        long = "text-file",
+        value_name = "FILE",
+        help = "Hide the text read from this file (must be UTF-8). Mutually exclusive with the other payload sources."
+    )]
+    pub text_file: Option<PathBuf>,
+
+    #[arg(
+        long = "text-base64",
+        value_name = "BASE64",
+        help = "Hide this base64-encoded text; it must decode to valid UTF-8 (arbitrary binary belongs in -d/--data). Mutually exclusive with the other payload sources."
+    )]
+    pub text_base64: Option<String>,
+
+    #[arg(
+        long = "stdin",
+        help = "Read the payload from standard input, e.g. `cat secret.txt | strhide write -c photo.png --stdin`. Mutually exclusive with the other payload sources."
+    )]
+    pub stdin: bool,
+}
+
+#[derive(Args, Debug)]
+#[command(after_help = WRITE_AFTER_HELP)]
 pub struct WriteArgs {
     #[arg(
-        short = 'c',
-        long = "carrier",
+        value_name = "CARRIER",
         required = true,
         num_args = 1..,
-        value_name = "CARRIER",
-        help = "Carrier file(s). List several to embed the same payload into each."
+        help = "Carrier file(s) to hide the payload in; give several to embed the same payload into each. Use `--` before a filename that starts with '-'."
     )]
     pub carrier: Vec<PathBuf>,
 
-    #[arg(short = 'd', long = "data")]
-    pub data: Option<PathBuf>,
+    #[command(flatten)]
+    pub payload: PayloadSourceArgs,
 
-    #[arg(short = 't', long = "text")]
-    pub text: Option<String>,
-
-    #[arg(long = "text-file")]
-    pub text_file: Option<PathBuf>,
-
-    #[arg(long = "text-base64")]
-    pub text_base64: Option<String>,
-
-    #[arg(long = "stdin")]
-    pub stdin: bool,
-
-    #[arg(short = 'o', long = "output")]
+    #[arg(
+        short = 'o',
+        long = "output",
+        value_name = "PATH",
+        help = "Write the modified carrier to this path. A single path names the result for one carrier; with several carriers it must be an existing directory and each output keeps its carrier's name. Default: modify the carrier in place."
+    )]
     pub output: Option<PathBuf>,
 
-    #[arg(short = 'p', long = "password")]
-    pub password: Option<String>,
+    #[command(flatten)]
+    pub passwords: PasswordArgs,
 
-    #[arg(long = "password-file")]
-    pub password_file: Option<PathBuf>,
-
-    #[arg(short = 'e', long = "encrypt")]
+    #[arg(
+        short = 'e',
+        long = "encrypt",
+        help = "Ask for an encryption password when no password source is given (interactive prompt; fails without a TTY). Note: the payload is always encrypted - without a password a built-in key is used."
+    )]
     pub encrypt: bool,
 
-    #[arg(short = 'H', long = "hint", alias = "password-hint")]
+    #[arg(
+        short = 'H',
+        long = "hint",
+        alias = "password-hint",
+        value_name = "TEXT",
+        help = "Store this password hint inside the envelope (shown to whoever reads the payload later; not secret). Incompatible with --stealth."
+    )]
     pub hint: Option<String>,
 
     #[arg(
         short = 's',
         long = "strategy",
+        value_name = "STRATEGY",
         help = "Hiding strategy (auto|ask|<name>; default: auto or config file)"
     )]
     pub strategy: Option<String>,
 
-    #[arg(long = "stealth")]
+    #[arg(
+        long = "stealth",
+        help = "Stealth mode: hide without detectable markers - the envelope signature derives from the password, so this implies password protection and requires one (-p/--password, --password-file, or STRHIDE_PASSWORD). Incompatible with a password hint."
+    )]
     pub stealth: bool,
 
     #[arg(long = "no-preserve-time", default_value_t = true, action = clap::ArgAction::SetFalse, help = "Do not preserve original carrier timestamps (default: preserve)")]
     pub preserve_time: bool,
 
-    #[arg(long = "no-backup")]
+    #[arg(
+        long = "no-backup",
+        help = "Do not create a '<carrier>.bak' backup next to a modified carrier (default: a .bak copy is kept)."
+    )]
     pub no_backup: bool,
 
-    #[arg(long = "unescape")]
+    #[arg(
+        long = "unescape",
+        help = "Decode C-style escape sequences (\\n, \\r, \\t, \\xHH, \\uNNNN, ...) in the -t/--text payload before hiding; malformed escapes are kept literally."
+    )]
     pub unescape: bool,
 }
 
+const WRITE_AFTER_HELP: &str = "\
+Payload sources are mutually exclusive: -d/--data, -t/--text, --text-file,
+--text-base64, and --stdin. When none is given, the STRHIDE_TEXT environment
+variable is used as a last-resort fallback.
+
+--stealth implies password protection: provide -p/--password, --password-file,
+or STRHIDE_PASSWORD; a password hint (-H) is rejected in stealth mode.
+The payload is always encrypted in the envelope; -e/--encrypt only controls
+what happens when no password source is present (prompt or fail).
+
+Examples:
+  strhide write photo.png -t \"meet me at 7\"
+  strhide write report.pdf -d secret.zip -p \"S3cret!\" -H \"my usual one\"
+  strhide write photo.png -t \"line1\\nline2\" --unescape
+  cat secret.txt | strhide write image.jpg --stdin
+  strhide write a.png b.png c.png -t \"secret\" -o done/
+  strhide read done/a.png                  # extract the payload again
+";
+
 #[derive(Args, Debug)]
+#[command(after_help = READ_AFTER_HELP)]
 pub struct ReadArgs {
-    #[arg(short = 'c', long = "carrier", required = true)]
+    #[arg(
+        value_name = "CARRIER",
+        required = true,
+        help = "Carrier file to extract the hidden payload from. Use `--` before a filename that starts with '-'."
+    )]
     pub carrier: PathBuf,
 
-    #[arg(short = 'o', long = "output")]
+    #[arg(
+        short = 'o',
+        long = "output",
+        value_name = "PATH",
+        help = "Write the extracted payload to a file, or into an existing directory keeping the filename stored in the envelope."
+    )]
     pub output: Option<PathBuf>,
 
-    #[arg(short = 'p', long = "password")]
-    pub password: Option<String>,
+    #[command(flatten)]
+    pub passwords: PasswordArgs,
 
-    #[arg(long = "password-file")]
-    pub password_file: Option<PathBuf>,
-
-    #[arg(long = "stdout")]
+    #[arg(
+        long = "stdout",
+        conflicts_with = "output",
+        help = "Print the payload to standard output instead of writing a file (mutually exclusive with -o/--output)."
+    )]
     pub stdout: bool,
 
     #[arg(
@@ -132,60 +248,118 @@ pub struct ReadArgs {
     pub overwrite: bool,
 }
 
+const READ_AFTER_HELP: &str = "\
+With neither -o/--output nor --stdout:
+  * file payloads are written into the current directory under the filename
+    stored inside the envelope (reduced to a bare name; an existing file is
+    never overwritten without --overwrite);
+  * text payloads are printed to standard output.
+
+Examples:
+  strhide read photo.png                   # file -> ./<stored name>, text -> stdout
+  strhide read photo.png -o recovered.zip  # extraction to an explicit path
+  strhide read photo.png --stdout          # always print to standard output
+  strhide read locked.png                  # shows the stored hint before prompting
+";
+
 #[derive(Args, Debug)]
-pub struct RemoveArgs {
+#[command(after_help = RESTORE_AFTER_HELP)]
+pub struct RestoreArgs {
     #[arg(
-        short = 'c',
-        long = "carrier",
+        value_name = "CARRIER",
         required = true,
         num_args = 1..,
-        value_name = "CARRIER",
-        help = "Carrier file(s). List several to strip each one."
+        help = "Carrier file(s) to restore; give several to strip each one. Use `--` before a filename that starts with '-'."
     )]
     pub carrier: Vec<PathBuf>,
 
-    #[arg(short = 'o', long = "output")]
+    #[arg(
+        short = 'o',
+        long = "output",
+        value_name = "PATH",
+        help = "Write the restored carrier to this path instead of restoring in place (the original carrier then stays untouched). A single path names the result for one carrier; with several carriers it must be an existing directory keeping each carrier's name."
+    )]
     pub output: Option<PathBuf>,
 
-    #[arg(short = 'p', long = "password")]
-    pub password: Option<String>,
+    #[command(flatten)]
+    pub passwords: PasswordArgs,
 
-    #[arg(long = "password-file")]
-    pub password_file: Option<PathBuf>,
-
-    #[arg(long = "no-backup")]
+    #[arg(
+        long = "no-backup",
+        help = "Do not create a '<carrier>.bak' backup for in-place restoration (default: a .bak copy is kept; backups only apply to in-place restoration)."
+    )]
     pub no_backup: bool,
 }
 
+const RESTORE_AFTER_HELP: &str = "\
+Examples:
+  strhide restore photo.png               # restore in place, keeping photo.png.bak
+  strhide restore photo.png -o clean.png  # write the restored copy to 'clean.png'
+  strhide restore a.png b.png c.png       # batch restoration in one run
+
+Restoration is verified loss-free: the restored SHA-256 must match the
+original host recorded in the envelope, or the command fails loudly.
+";
+
 #[derive(Args, Debug)]
+#[command(after_help = INSPECT_AFTER_HELP)]
 pub struct InspectArgs {
-    #[arg(short = 'c', long = "carrier", required = true)]
+    #[arg(
+        value_name = "CARRIER",
+        required = true,
+        help = "Carrier file to inspect; reports the host format, any envelope metadata, and per-strategy capacity. Use `--` before a filename that starts with '-'."
+    )]
     pub carrier: PathBuf,
 
-    #[arg(short = 'p', long = "password")]
-    pub password: Option<String>,
+    #[command(flatten)]
+    pub passwords: PasswordArgs,
 
-    #[arg(long = "password-file")]
-    pub password_file: Option<PathBuf>,
-
-    #[arg(long = "json")]
+    #[arg(
+        long = "json",
+        help = "Print a machine-readable JSON report instead of the aligned key/value summary."
+    )]
     pub json: bool,
 }
+
+const INSPECT_AFTER_HELP: &str = "\
+Examples:
+  strhide inspect photo.png             # metadata summary + strategy capacities
+  strhide inspect photo.png --json      # the same report as JSON
+";
 
 #[derive(Args, Debug)]
+#[command(after_help = VERIFY_AFTER_HELP)]
 pub struct VerifyArgs {
-    #[arg(short = 'c', long = "carrier", required = true)]
+    #[arg(
+        value_name = "CARRIER",
+        required = true,
+        help = "Carrier file to verify. Use `--` before a filename that starts with '-'."
+    )]
     pub carrier: PathBuf,
 
-    #[arg(short = 'p', long = "password")]
-    pub password: Option<String>,
+    #[command(flatten)]
+    pub passwords: PasswordArgs,
 
-    #[arg(long = "password-file")]
-    pub password_file: Option<PathBuf>,
-
-    #[arg(long = "json")]
+    #[arg(
+        long = "json",
+        help = "Print a machine-readable JSON report instead of one line per level."
+    )]
     pub json: bool,
 }
+
+const VERIFY_AFTER_HELP: &str = "\
+Levels:
+  Level 1 - host container format is intact (PNG/JPEG/... structure)
+  Level 2 - hidden envelope boundary found and correctly bounded
+  Level 3 - envelope contents (crypto + payload) verified; needs a password
+
+Exit codes: 0 when Level 1 and Level 2 pass, 1 otherwise. Level 3 failures are
+reported but do not change the exit code, matching the Python CLI.
+
+Examples:
+  strhide verify photo.png              # readable three-level report
+  strhide verify photo.png --json       # machine-readable report
+";
 
 #[derive(Args, Debug)]
 pub struct ListArgs {}
@@ -194,17 +368,18 @@ pub struct ListArgs {}
 /// strhide envelope exists and check it), scan treats every input as unknown
 /// and reports structural + statistical signs of hidden data from any tool.
 #[derive(Args, Debug)]
+#[command(after_help = SCAN_AFTER_HELP)]
 pub struct ScanArgs {
+    /// File(s) or directory(ies) to scan, given positionally: the inputs are
+    /// suspects, not necessarily strhide carriers, and directories are walked
+    /// according to --recursive.
     #[arg(
-        short = 'c',
-        long = "carrier",
+        value_name = "FILE",
         required = true,
         num_args = 1..,
-        value_name = "FILE",
-        help = "File(s) or directory(ies) to scan. Directories are scanned \
-                non-recursively unless --recursive is given."
+        help = "File(s) or directory(ies) to scan. Directories are scanned non-recursively unless --recursive is given. Use `--` before a filename that starts with '-'."
     )]
-    pub carrier: Vec<PathBuf>,
+    pub input: Vec<PathBuf>,
 
     /// Recursively descend into directories.
     #[arg(long = "recursive", short = 'r')]
@@ -214,6 +389,24 @@ pub struct ScanArgs {
     #[arg(long = "json")]
     pub json: bool,
 }
+
+const SCAN_AFTER_HELP: &str = "\
+Examples:
+  strhide scan photo.png               # one file
+  strhide scan dir/ -r                 # a whole directory tree
+  strhide scan dir1/ dir2/ --json      # every report as JSON
+
+Exit codes: 0 when no report reaches \"likely-hidden\"; 1 when at least one
+does. Lower-confidence findings (\"low\"/\"suspicious\") and per-file scan
+failures stay at exit 0 - they show up in the report/--json instead, so use
+--json (which includes verdict and risk_score) to gate on them.
+
+Combine with the global -q/--quiet to scan silently and act on the exit code:
+  strhide scan downloads/ -r -q || echo suspicious files found
+
+Inputs are treated as unknown suspects, not strhide carriers: findings cover
+structural and statistical anomalies from any tool, known or unknown.
+";
 
 pub fn prompt_password(confirm: bool) -> Result<String, StrHideError> {
     let pwd = rpassword::prompt_password("Enter password: ")
@@ -305,48 +498,52 @@ pub fn run_cli() -> i32 {
     };
 
     match cli.command {
-        Commands::Write(args) => match handle_write(args, &cfg) {
+        Commands::Write(args) => match handle_write(args, &cfg, cli.quiet) {
             Ok(_) => 0,
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 1
             }
         },
-        Commands::Read(args) => match handle_read(args, &cfg) {
+        Commands::Read(args) => match handle_read(args, &cfg, cli.quiet) {
             Ok(_) => 0,
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 1
             }
         },
-        Commands::Remove(args) => match handle_remove(args, &cfg) {
+        Commands::Restore(args) => match handle_restore(args, &cfg, cli.quiet) {
             Ok(_) => 0,
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 1
             }
         },
-        Commands::Inspect(args) => match handle_inspect(args, &cfg) {
+        Commands::Inspect(args) => match handle_inspect(args, &cfg, cli.quiet) {
             Ok(_) => 0,
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 1
             }
         },
-        Commands::Verify(args) => match handle_verify(args, &cfg) {
+        Commands::Verify(args) => match handle_verify(args, &cfg, cli.quiet) {
             Ok(code) => code,
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 1
             }
         },
-        Commands::Scan(args) => match handle_scan(args) {
-            Ok(_) => 0,
+        // Like verify, scan owns its exit code: 1 when a scan verdict reaches
+        // "likely-hidden" (see handle_scan), 0 otherwise, regardless of quiet.
+        Commands::Scan(args) => match handle_scan(args, cli.quiet) {
+            Ok(code) => code,
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 1
             }
         },
+        // `list` prints a data table, not status lines, so quiet does not
+        // apply; the global flag is accepted but ignored here.
         Commands::List(args) => match handle_list(args) {
             Ok(_) => 0,
             Err(e) => {
@@ -357,15 +554,15 @@ pub fn run_cli() -> i32 {
     }
 }
 
-fn handle_write(args: WriteArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
+fn handle_write(args: WriteArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
     // Config values act as defaults; explicit CLI flags win. --stealth implies
     // encryption (its magics are password-derived); prompt for a password when
     // neither -p nor a password source was supplied.
     let stealth = args.stealth || cfg.stealth.unwrap_or(false);
     let encrypt = args.encrypt || cfg.encrypt.unwrap_or(false);
     let password = resolve_password(
-        args.password.as_deref(),
-        args.password_file.as_deref(),
+        args.passwords.password.as_deref(),
+        args.passwords.password_file.as_deref(),
         cfg,
         encrypt || stealth,
         true,
@@ -419,14 +616,14 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
     let text_buf: String;
     let b64_buf: Vec<u8>;
 
-    if args.stdin {
+    if args.payload.stdin {
         payload_source = PayloadSource::Stdin;
-    } else if let Some(ref df) = args.data {
+    } else if let Some(ref df) = args.payload.data {
         payload_source = PayloadSource::File(df);
-    } else if let Some(ref tf) = args.text_file {
+    } else if let Some(ref tf) = args.payload.text_file {
         text_buf = std::fs::read_to_string(tf)?;
         payload_source = PayloadSource::Text(&text_buf);
-    } else if let Some(ref b64_str) = args.text_base64 {
+    } else if let Some(ref b64_str) = args.payload.text_base64 {
         use base64::Engine;
         b64_buf = base64::engine::general_purpose::STANDARD
             .decode(b64_str.trim())
@@ -435,7 +632,7 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
             StrHideError::General(format!("Base64 content is not valid UTF-8: {e}"))
         })?;
         payload_source = PayloadSource::Text(&text_buf);
-    } else if let Some(ref t) = args.text {
+    } else if let Some(ref t) = args.payload.text {
         if args.unescape || cfg.unescape.unwrap_or(false) {
             text_buf = unescape_string(t);
             payload_source = PayloadSource::Text(&text_buf);
@@ -484,7 +681,7 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
     let preserve_time = args.preserve_time && cfg.preserve_time.unwrap_or(true);
     let backup = !args.no_backup && cfg.backup.unwrap_or(true);
 
-    for_each_carrier(&args.carrier, |carrier| {
+    for_each_carrier(&args.carrier, quiet, |carrier| {
         let output = carrier_output_path(carrier, args.output.as_deref(), output_dir)?;
         let res = write_carrier(
             carrier,
@@ -503,15 +700,15 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
                 backup,
             },
         )?;
-        print_write_result(&res);
+        print_write_result(&res, quiet);
         Ok(())
     })
 }
 
-fn handle_read(args: ReadArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
+fn handle_read(args: ReadArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
     let mut password = resolve_password(
-        args.password.as_deref(),
-        args.password_file.as_deref(),
+        args.passwords.password.as_deref(),
+        args.passwords.password_file.as_deref(),
         cfg,
         false,
         false,
@@ -533,7 +730,7 @@ fn handle_read(args: ReadArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
         // the exact trailing terminator instead of splitting on `'`.
         Err(e @ StrHideError::Password(_)) if password.is_none() => {
             let msg = e.to_string();
-            if let Some((_, rest)) = msg.split_once("Hint: '") {
+            if !quiet && let Some((_, rest)) = msg.split_once("Hint: '") {
                 let hint_part = rest.strip_suffix("'.").unwrap_or(rest);
                 println!("[INFO] Password hint: {hint_part}");
             }
@@ -558,14 +755,16 @@ fn handle_read(args: ReadArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
     // A password was supplied but the envelope is not encrypted: the built-in
     // public key masked it, so the password had no effect. Say so instead of
     // letting the user believe `-p` protected this payload.
-    if password.is_some() && !res.is_encrypted {
+    if password.is_some() && !res.is_encrypted && !quiet {
         eprintln!(
             "[WARNING] This envelope is not encrypted: it was written without a password, so the supplied password was ignored. Re-write the carrier with -p to protect it."
         );
     }
 
     if let Some(wf) = res.written_file {
-        println!("[OK] Extracted payload to '{wf}' ({} bytes).", res.raw_size);
+        if !quiet {
+            println!("[OK] Extracted payload to '{wf}' ({} bytes).", res.raw_size);
+        }
     } else if args.stdout || !res.is_file {
         if let Ok(text) = std::str::from_utf8(&res.data) {
             print!("{text}");
@@ -595,19 +794,21 @@ fn handle_read(args: ReadArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
             StrHideError::General(format!("Cannot create '{fn_to_use}': {reason} [{e}]"))
         })?;
         f.write_all(&res.data)?;
-        println!(
-            "[OK] Extracted payload to '{fn_to_use}' ({} bytes).",
-            res.raw_size
-        );
+        if !quiet {
+            println!(
+                "[OK] Extracted payload to '{fn_to_use}' ({} bytes).",
+                res.raw_size
+            );
+        }
     }
 
     Ok(())
 }
 
-fn handle_remove(args: RemoveArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
+fn handle_restore(args: RestoreArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
     let password = resolve_password(
-        args.password.as_deref(),
-        args.password_file.as_deref(),
+        args.passwords.password.as_deref(),
+        args.passwords.password_file.as_deref(),
         cfg,
         false,
         false,
@@ -622,18 +823,18 @@ fn handle_remove(args: RemoveArgs, cfg: &FileConfig) -> Result<(), StrHideError>
     // (`config.rs` documents `backup` as covering both commands).
     let backup = !args.no_backup && cfg.backup.unwrap_or(true);
 
-    for_each_carrier(&args.carrier, |carrier| {
+    for_each_carrier(&args.carrier, quiet, |carrier| {
         let output = carrier_output_path(carrier, args.output.as_deref(), output_dir)?;
         let res = remove_carrier(carrier, output.as_deref(), password.as_deref(), backup)?;
-        print_remove_result(&res);
+        print_remove_result(&res, quiet);
         Ok(())
     })
 }
 
-fn handle_inspect(args: InspectArgs, cfg: &FileConfig) -> Result<(), StrHideError> {
+fn handle_inspect(args: InspectArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
     let password = resolve_password(
-        args.password.as_deref(),
-        args.password_file.as_deref(),
+        args.passwords.password.as_deref(),
+        args.passwords.password_file.as_deref(),
         cfg,
         false,
         false,
@@ -644,6 +845,8 @@ fn handle_inspect(args: InspectArgs, cfg: &FileConfig) -> Result<(), StrHideErro
     if args.json {
         let json_str = serde_json::to_string_pretty(&res)?;
         println!("{json_str}");
+    } else if quiet {
+        // Nothing to print: the JSON form is the machine-readable equivalent.
     } else {
         println!("Carrier: {}", res.carrier);
         println!("Format:  {}", res.format);
@@ -705,10 +908,10 @@ fn handle_inspect(args: InspectArgs, cfg: &FileConfig) -> Result<(), StrHideErro
     Ok(())
 }
 
-fn handle_verify(args: VerifyArgs, cfg: &FileConfig) -> Result<i32, StrHideError> {
+fn handle_verify(args: VerifyArgs, cfg: &FileConfig, quiet: bool) -> Result<i32, StrHideError> {
     let password = resolve_password(
-        args.password.as_deref(),
-        args.password_file.as_deref(),
+        args.passwords.password.as_deref(),
+        args.passwords.password_file.as_deref(),
         cfg,
         false,
         false,
@@ -719,26 +922,24 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig) -> Result<i32, StrHideError
     if args.json {
         let json_str = serde_json::to_string_pretty(&res)?;
         println!("{json_str}");
+    } else if quiet {
+        // Result is carried entirely by the exit code below.
     } else {
         println!("Carrier: {}", res.carrier);
         println!("Format:  {}", res.format);
         println!(
             "Level 1 (Host Format):      [{}] {}",
-            if res.level1_host.ok { "PASS" } else { "FAIL" },
+            if res.level1_host.ok { "OK" } else { "FAIL" },
             res.level1_host.detail
         );
         println!(
             "Level 2 (Envelope Boundary): [{}] {}",
-            if res.level2_envelope.ok {
-                "PASS"
-            } else {
-                "FAIL"
-            },
+            if res.level2_envelope.ok { "OK" } else { "FAIL" },
             res.level2_envelope.detail
         );
         println!(
             "Level 3 (Crypto & Payload):  [{}] {}",
-            if res.level3_crypto.ok { "PASS" } else { "FAIL" },
+            if res.level3_crypto.ok { "OK" } else { "FAIL" },
             res.level3_crypto.detail
         );
     }
@@ -753,12 +954,12 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig) -> Result<i32, StrHideError
     })
 }
 
-fn handle_scan(args: ScanArgs) -> Result<(), StrHideError> {
+fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideError> {
     use crate::analysis::scan_file;
 
     // Expand inputs: directories become file lists.
     let mut files: Vec<PathBuf> = Vec::new();
-    for entry in &args.carrier {
+    for entry in &args.input {
         if entry.is_dir() {
             let walker: Box<dyn Iterator<Item = PathBuf>> = if args.recursive {
                 Box::new(walkdir_recursive(entry)?)
@@ -768,7 +969,7 @@ fn handle_scan(args: ScanArgs) -> Result<(), StrHideError> {
             files.extend(walker);
         } else if entry.is_file() {
             files.push(entry.clone());
-        } else {
+        } else if !quiet {
             eprintln!("[WARN] '{}' does not exist, skipping", entry.display());
         }
     }
@@ -786,13 +987,18 @@ fn handle_scan(args: ScanArgs) -> Result<(), StrHideError> {
             Ok(r) => reports.push(r),
             Err(e) => {
                 failures += 1;
-                eprintln!("[WARN] failed to scan '{}': {e}", f.display());
+                if !quiet {
+                    eprintln!("[WARN] failed to scan '{}': {e}", f.display());
+                }
             }
         }
     }
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&reports)?);
+    } else if quiet {
+        // The exit code below is the entire quiet output: 1 when any report
+        // reached "likely-hidden", 0 otherwise.
     } else {
         for r in &reports {
             let format_label = r.format.as_deref().unwrap_or("unknown");
@@ -820,7 +1026,13 @@ fn handle_scan(args: ScanArgs) -> Result<(), StrHideError> {
             failures,
         );
     }
-    Ok(())
+
+    // Gate-style exit code, independent of quiet: a "likely-hidden" verdict on
+    // any report fails the scan (exit 1); lower confidence ("low"/"suspicious")
+    // and per-file scan failures stay at 0 — they are reported in the JSON or
+    // in the human summary line instead.
+    let likely_hidden = reports.iter().any(|r| r.verdict == "likely-hidden");
+    Ok(if likely_hidden { 1 } else { 0 })
 }
 
 fn walkdir_flat(dir: &Path) -> Result<impl Iterator<Item = PathBuf>, StrHideError> {
@@ -878,7 +1090,7 @@ fn handle_list(_args: ListArgs) -> Result<(), StrHideError> {
 /// runs stop at the first failure and report how far they got — each
 /// write/remove is atomic per carrier, so "N succeeded, M not attempted" is
 /// accurate, but earlier carriers stay modified.
-fn for_each_carrier<F>(carriers: &[PathBuf], mut action: F) -> Result<(), StrHideError>
+fn for_each_carrier<F>(carriers: &[PathBuf], quiet: bool, mut action: F) -> Result<(), StrHideError>
 where
     F: FnMut(&Path) -> Result<(), StrHideError>,
 {
@@ -888,7 +1100,7 @@ where
         match action(carrier) {
             Ok(()) => done += 1,
             Err(e) => {
-                if total > 1 {
+                if total > 1 && !quiet {
                     eprintln!("[FAIL] {}", carrier.display());
                     println!(
                         "[SUMMARY] {done}/{total} carriers succeeded; {} not attempted.",
@@ -899,7 +1111,7 @@ where
             }
         }
     }
-    if total > 1 {
+    if total > 1 && !quiet {
         println!("[SUMMARY] {done}/{total} carriers succeeded.");
     }
     Ok(())
@@ -998,7 +1210,10 @@ fn preflight_batch(carriers: &[PathBuf], output_dir: Option<&Path>) -> Result<()
     Ok(())
 }
 
-fn print_write_result(res: &WriteResult) {
+fn print_write_result(res: &WriteResult, quiet: bool) {
+    if quiet {
+        return;
+    }
     println!(
         "[OK] Successfully embedded into '{}' using strategy '{}'.",
         res.carrier, res.strategy
@@ -1021,7 +1236,10 @@ fn print_write_result(res: &WriteResult) {
     }
 }
 
-fn print_remove_result(res: &RemoveResult) {
+fn print_remove_result(res: &RemoveResult, quiet: bool) {
+    if quiet {
+        return;
+    }
     println!(
         "[OK] Successfully stripped hidden data from '{}'.",
         res.carrier

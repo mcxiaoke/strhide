@@ -117,7 +117,7 @@ fn verify_on_clean_carrier_cli_exits_one() {
     let dir = scratch("verify_none_cli");
     fs::write(dir.join("clean.png"), make_png()).unwrap();
 
-    let out = run(&dir, &["verify", "-c", "clean.png"]);
+    let out = run(&dir, &["verify", "clean.png"]);
     assert_eq!(
         code(&out),
         1,
@@ -181,10 +181,10 @@ fn verify_level3_failure_is_reported_but_exit_code_stays_zero() {
     // crypto failure is only reported. Wrong password => L3 fails, L1/L2 pass.
     let dir = scratch("verify_l3_exit");
     fs::write(dir.join("c.png"), make_png()).unwrap();
-    let write = run(&dir, &["write", "-c", "c.png", "-t", "s", "-p", "right-pw"]);
+    let write = run(&dir, &["write", "c.png", "-t", "s", "-p", "right-pw"]);
     assert_eq!(code(&write), 0, "stderr: {}", stderr(&write));
 
-    let out = run(&dir, &["verify", "-c", "c.png", "-p", "wrong-pw"]);
+    let out = run(&dir, &["verify", "c.png", "-p", "wrong-pw"]);
     assert_eq!(
         code(&out),
         0,
@@ -336,11 +336,11 @@ fn cli_inspect_json_is_valid_and_complete() {
     fs::write(dir.join("c.png"), make_png()).unwrap();
     let write = run(
         &dir,
-        &["write", "-c", "c.png", "-t", "json secret", "-p", "json-pw"],
+        &["write", "c.png", "-t", "json secret", "-p", "json-pw"],
     );
     assert_eq!(code(&write), 0, "stderr: {}", stderr(&write));
 
-    let out = run(&dir, &["inspect", "-c", "c.png", "-p", "json-pw", "--json"]);
+    let out = run(&dir, &["inspect", "c.png", "-p", "json-pw", "--json"]);
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
 
     let json: serde_json::Value = serde_json::from_str(&stdout(&out))
@@ -377,7 +377,7 @@ fn cli_inspect_json_is_valid_and_complete() {
 fn cli_inspect_human_output_marks_auto_preference() {
     let dir = scratch("inspect_auto_mark");
     fs::write(dir.join("c.png"), make_png()).unwrap();
-    let out = run(&dir, &["inspect", "-c", "c.png"]);
+    let out = run(&dir, &["inspect", "c.png"]);
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("Has Hidden Data: false"), "{text}");
@@ -391,7 +391,7 @@ fn cli_inspect_human_output_marks_auto_preference() {
 fn cli_inspect_json_on_clean_carrier_reports_no_hidden_data() {
     let dir = scratch("inspect_json_clean");
     fs::write(dir.join("clean.png"), make_png()).unwrap();
-    let out = run(&dir, &["inspect", "-c", "clean.png", "--json"]);
+    let out = run(&dir, &["inspect", "clean.png", "--json"]);
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
 
     let json: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
@@ -410,11 +410,11 @@ fn cli_verify_json_is_valid_and_complete() {
     fs::write(dir.join("c.png"), make_png()).unwrap();
     let write = run(
         &dir,
-        &["write", "-c", "c.png", "-t", "json secret", "-p", "json-pw"],
+        &["write", "c.png", "-t", "json secret", "-p", "json-pw"],
     );
     assert_eq!(code(&write), 0, "stderr: {}", stderr(&write));
 
-    let out = run(&dir, &["verify", "-c", "c.png", "-p", "json-pw", "--json"]);
+    let out = run(&dir, &["verify", "c.png", "-p", "json-pw", "--json"]);
     assert_eq!(code(&out), 0, "stdout: {}", stdout(&out));
 
     let json: serde_json::Value = serde_json::from_str(&stdout(&out))
@@ -439,10 +439,10 @@ fn cli_verify_json_is_valid_and_complete() {
 fn cli_verify_json_on_encrypted_envelope_without_password() {
     let dir = scratch("verify_json_l3");
     fs::write(dir.join("c.png"), make_png()).unwrap();
-    let write = run(&dir, &["write", "-c", "c.png", "-t", "s", "-p", "json-pw"]);
+    let write = run(&dir, &["write", "c.png", "-t", "s", "-p", "json-pw"]);
     assert_eq!(code(&write), 0, "stderr: {}", stderr(&write));
 
-    let out = run(&dir, &["verify", "-c", "c.png", "--json"]);
+    let out = run(&dir, &["verify", "c.png", "--json"]);
     assert_eq!(code(&out), 0, "stdout: {}", stdout(&out));
     let json: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
     assert_eq!(json["level2_envelope"]["ok"], true);
@@ -464,15 +464,7 @@ fn strategy_ask_selects_the_chosen_entry() {
     // PNG offers [1] chunk, [2] eof -> pick 2.
     let out = run_with_stdin(
         &dir,
-        &[
-            "write",
-            "-c",
-            "c.png",
-            "-t",
-            "asked payload",
-            "--strategy",
-            "ask",
-        ],
+        &["write", "c.png", "-t", "asked payload", "--strategy", "ask"],
         b"2\n",
     );
     assert_eq!(
@@ -520,15 +512,7 @@ fn strategy_ask_out_of_range_and_non_numeric_fall_back_to_first() {
 
         let out = run_with_stdin(
             &dir,
-            &[
-                "write",
-                "-c",
-                "c.png",
-                "-t",
-                "fallback",
-                "--strategy",
-                "ask",
-            ],
+            &["write", "c.png", "-t", "fallback", "--strategy", "ask"],
             answer,
         );
         assert_eq!(code(&out), 0, "{label}: stderr: {}", stderr(&out));
@@ -553,7 +537,7 @@ fn strategy_ask_empty_answer_defaults_to_first() {
 
     let out = run_with_stdin(
         &dir,
-        &["write", "-c", "c.png", "-t", "x", "--strategy", "ask"],
+        &["write", "c.png", "-t", "x", "--strategy", "ask"],
         b"\n",
     );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));

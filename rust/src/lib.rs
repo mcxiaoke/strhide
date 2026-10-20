@@ -46,7 +46,7 @@
 //! strhide read  carrier.png --output out.txt --password pw
 //! strhide inspect carrier.png --password pw
 //! strhide verify carrier.png --password pw
-//! strhide remove carrier.png --password pw
+//! strhide restore carrier.png --password pw
 //! ```
 //!
 //! ## Library usage

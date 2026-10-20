@@ -105,18 +105,18 @@ fn config_password_and_encrypt_apply_on_write_and_read() {
     .unwrap();
 
     // Write with no CLI password/encrypt flags: both come from the config.
-    let out = run(&dir, &["write", "-c", "c.png", "-t", "hello"], None);
+    let out = run(&dir, &["write", "c.png", "-t", "hello"], None);
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
 
     // Read without any password: the config supplies it.
-    let out = run(&dir, &["read", "-c", "c.png", "-o", "out1.bin"], None);
+    let out = run(&dir, &["read", "c.png", "-o", "out1.bin"], None);
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
     assert_eq!(fs::read_to_string(dir.join("out1.bin")).unwrap(), "hello");
 
     // An explicit CLI password equal to the config one still works.
     let out = run(
         &dir,
-        &["read", "-c", "c.png", "-p", "cfg-pass-1", "-o", "out2.bin"],
+        &["read", "c.png", "-p", "cfg-pass-1", "-o", "out2.bin"],
         None,
     );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
@@ -124,7 +124,7 @@ fn config_password_and_encrypt_apply_on_write_and_read() {
     // A wrong CLI password fails even though the config holds the right one.
     let out = run(
         &dir,
-        &["read", "-c", "c.png", "-p", "wrong", "-o", "out3.bin"],
+        &["read", "c.png", "-p", "wrong", "-o", "out3.bin"],
         None,
     );
     assert_eq!(code(&out), 1);
@@ -142,23 +142,15 @@ fn env_password_overrides_config_password() {
     .unwrap();
 
     // Write with the env password (wins over the config password).
-    let out = run(
-        &dir,
-        &["write", "-c", "c.png", "-t", "hello"],
-        Some("env-pass-2"),
-    );
+    let out = run(&dir, &["write", "c.png", "-t", "hello"], Some("env-pass-2"));
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
 
     // Reading with only the config password fails (it is the wrong password).
-    let out = run(&dir, &["read", "-c", "c.png", "-o", "o1.bin"], None);
+    let out = run(&dir, &["read", "c.png", "-o", "o1.bin"], None);
     assert_eq!(code(&out), 1);
 
     // Reading with the env password succeeds.
-    let out = run(
-        &dir,
-        &["read", "-c", "c.png", "-o", "o2.bin"],
-        Some("env-pass-2"),
-    );
+    let out = run(&dir, &["read", "c.png", "-o", "o2.bin"], Some("env-pass-2"));
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
     assert_eq!(fs::read_to_string(dir.join("o2.bin")).unwrap(), "hello");
 }
@@ -177,14 +169,14 @@ fn explicit_config_path_applies() {
     let cfg_arg = cfg_dir.join("custom.toml").to_str().unwrap().to_string();
     let out = run(
         &dir,
-        &["--config", &cfg_arg, "write", "-c", "c.png", "-t", "hello"],
+        &["--config", &cfg_arg, "write", "c.png", "-t", "hello"],
         None,
     );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
 
     let out = run(
         &dir,
-        &["--config", &cfg_arg, "read", "-c", "c.png", "-o", "out.bin"],
+        &["--config", &cfg_arg, "read", "c.png", "-o", "out.bin"],
         None,
     );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
@@ -196,7 +188,7 @@ fn strategy_from_config_is_used_by_write() {
     let dir = scratch("strategy");
     fs::write(dir.join("c.png"), make_png()).unwrap();
     fs::write(dir.join("strhide.toml"), "strategy = \"bogus-strategy\"\n").unwrap();
-    let out = run(&dir, &["write", "-c", "c.png", "-t", "hello"], None);
+    let out = run(&dir, &["write", "c.png", "-t", "hello"], None);
     assert_eq!(code(&out), 1);
     assert!(
         stderr(&out).contains("bogus-strategy"),

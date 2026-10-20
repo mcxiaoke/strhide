@@ -240,7 +240,6 @@ fn cli_stealth_without_password_fails_fast() {
     let out = Command::new(env!("CARGO_BIN_EXE_strhide"))
         .args([
             "write",
-            "-c",
             carrier.to_str().unwrap(),
             "-t",
             "x",
@@ -267,7 +266,6 @@ fn cli_no_preserve_time_flag_accepted() {
     let out = Command::new(env!("CARGO_BIN_EXE_strhide"))
         .args([
             "write",
-            "-c",
             carrier.to_str().unwrap(),
             "-t",
             "x",

@@ -14,25 +14,30 @@ cargo build --release
 ## Usage
 
 ```bash
-strhide write -c photo.png -t "secret"           # hide text (in-place, .bak backup)
-strhide write -c report.pdf -d file.zip -p pw    # hide a file, encrypted
-strhide write -c a.png b.png c.png -t "secret"   # same payload into several carriers
-strhide read -c photo.png -o out/                # extract hidden data
-strhide inspect -c report.pdf --json             # envelope metadata + capacity
-strhide verify -c report.pdf                     # verify host + envelope integrity
-strhide remove -c photo.png                      # remove hidden data, restore host
-strhide remove -c a.png b.png c.png              # strip several carriers at once
+strhide write photo.png -t "secret"           # hide text (in-place, .bak backup)
+strhide write report.pdf -d file.zip -p pw    # hide a file, encrypted
+strhide write a.png b.png c.png -t "secret"   # same payload into several carriers
+strhide read photo.png -o out/                # extract hidden data
+strhide inspect report.pdf --json             # envelope metadata + capacity
+strhide verify report.pdf                     # verify host + envelope integrity
+strhide restore photo.png                      # strip hidden data, restore the original host
+strhide restore a.png b.png c.png              # strip several carriers at once
 strhide list                          # static format/strategy/limit table
-strhide scan -c suspicious.bin dir/ -r # black-box steganalysis (any tool)
+strhide scan suspicious.bin dir/ -r # black-box steganalysis (any tool)
 ```
 
-`write` and `remove` accept one or more carriers (`read`, `inspect`, and
+`write` and `restore` accept one or more carriers (`read`, `inspect`, and
 `verify` still take exactly one). `write` embeds the same payload into each
 carrier; when more than one is given, `-o` must name an existing directory and a
 `[SUMMARY] n/m carriers succeeded` line is printed. Runs stop at the first
-failure; every write/remove is atomic per carrier, so carriers already handled
+failure; every write/restore is atomic per carrier, so carriers already handled
 stay modified and the rest are untouched. `read` refuses to overwrite an
 existing output file unless `--overwrite` is passed.
+
+The global `-q/--quiet` suppresses status lines and human-readable reports
+(payload data from `read`, `--json`/table output, and `[ERROR]` lines always
+print), so scripts can act on exit codes alone. `scan` also owns its exit code:
+it exits 1 when any report reaches a `likely-hidden` verdict, 0 otherwise.
 
 Supported carriers: PNG, JPEG, MP4, ZIP, PDF, and Windows PE. Unrecognized files
 are rejected rather than appended to.

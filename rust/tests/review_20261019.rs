@@ -259,8 +259,7 @@ fn remove_honours_config_backup_false() {
     fs::write(&cfg, "backup = false\n").unwrap();
     let out = Command::new(bin())
         .args([
-            "remove",
-            "-c",
+            "restore",
             stego.to_str().unwrap(),
             "--config",
             cfg.to_str().unwrap(),
@@ -295,7 +294,6 @@ fn cli_password_hint_with_apostrophe_is_shown_verbatim() {
     let write = Command::new(bin())
         .args([
             "write",
-            "-c",
             carrier.to_str().unwrap(),
             "-t",
             "secret",
@@ -319,7 +317,7 @@ fn cli_password_hint_with_apostrophe_is_shown_verbatim() {
     );
 
     let read = Command::new(bin())
-        .args(["read", "-c", hinted.to_str().unwrap(), "--stdout"])
+        .args(["read", hinted.to_str().unwrap(), "--stdout"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -345,7 +343,6 @@ fn cli_stealth_ignores_configured_hint() {
     let out = Command::new(bin())
         .args([
             "write",
-            "-c",
             carrier.to_str().unwrap(),
             "-t",
             "x",
@@ -379,7 +376,6 @@ fn cli_stealth_rejects_explicit_hint() {
     let out = Command::new(bin())
         .args([
             "write",
-            "-c",
             carrier.to_str().unwrap(),
             "-t",
             "x",
@@ -576,7 +572,6 @@ fn single_carrier_output_directory() {
     let out = Command::new(bin())
         .args([
             "write",
-            "-c",
             carrier.to_str().unwrap(),
             "-t",
             "x",
@@ -621,7 +616,6 @@ fn read_warns_when_password_is_unused() {
     let out = Command::new(bin())
         .args([
             "read",
-            "-c",
             stego.to_str().unwrap(),
             "--stdout",
             "-p",

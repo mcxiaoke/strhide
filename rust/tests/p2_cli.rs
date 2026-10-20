@@ -137,7 +137,7 @@ fn verify_exit_code_zero_for_valid_carrier() {
     .unwrap();
 
     let status = Command::new(bin())
-        .args(["verify", "-c", out.to_str().unwrap()])
+        .args(["verify", out.to_str().unwrap()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -168,7 +168,7 @@ fn verify_exit_code_one_when_envelope_header_invalid() {
     patch_header_field(&out, ube_offset, 8, &[0x09]);
 
     let status = Command::new(bin())
-        .args(["verify", "-c", out.to_str().unwrap()])
+        .args(["verify", out.to_str().unwrap()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -202,7 +202,7 @@ fn verify_exit_code_one_when_host_structure_broken() {
     fs::write(&out, &data).unwrap();
 
     let status = Command::new(bin())
-        .args(["verify", "-c", out.to_str().unwrap()])
+        .args(["verify", out.to_str().unwrap()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -246,7 +246,7 @@ fn read_stealth_without_password_reports_guidance() {
     // CLI level: non-TTY run must fail fast with the guidance in stderr and
     // exit code 1 (no hang, no bare "not found").
     let res = Command::new(bin())
-        .args(["read", "-c", out.to_str().unwrap(), "--stdout"])
+        .args(["read", out.to_str().unwrap(), "--stdout"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -358,7 +358,6 @@ fn cli_unescape_supports_full_escape_set() {
     let res = Command::new(bin())
         .args([
             "write",
-            "-c",
             carrier.to_str().unwrap(),
             "-t",
             payload,
@@ -401,7 +400,6 @@ fn cli_unescape_combines_surrogate_pair() {
     let res = Command::new(bin())
         .args([
             "write",
-            "-c",
             carrier.to_str().unwrap(),
             "-t",
             r"P\uD83D\uDE80Q\uD83D\uZZZZ",
@@ -436,7 +434,6 @@ fn cli_unescape_keeps_non_ascii_input_intact() {
     let res = Command::new(bin())
         .args([
             "write",
-            "-c",
             carrier.to_str().unwrap(),
             "-t",
             "中文\\n行",
