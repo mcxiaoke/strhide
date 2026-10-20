@@ -28,10 +28,17 @@ jobs:
           - arch: x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
+            rustflags: ""
             out: strhide-windows-x86_64.exe
+          - arch: x86_64-avx2
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rustflags: "-C target-cpu=x86-64-v3"
+            out: strhide-windows-x86_64-avx2.exe
           - arch: aarch64
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
+            rustflags: ""
             out: strhide-windows-aarch64.exe
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +49,8 @@ jobs:
 
       - name: Build
         working-directory: rust
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Stage artifact
@@ -67,10 +76,17 @@ jobs:
           - arch: x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            rustflags: ""
             out: strhide-linux-x86_64
+          - arch: x86_64-avx2
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            rustflags: "-C target-cpu=x86-64-v3"
+            out: strhide-linux-x86_64-avx2
           - arch: aarch64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+            rustflags: ""
             out: strhide-linux-aarch64
     steps:
       - uses: actions/checkout@v4
@@ -91,6 +107,7 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Verify static linking
