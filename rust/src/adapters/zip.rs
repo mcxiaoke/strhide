@@ -450,4 +450,16 @@ impl HostAdapter for ZipAdapter {
 
         found
     }
+
+    fn strategy_note(&self, strategy: &str, fallback: bool) -> Option<String> {
+        if strategy == "pre_cd_inject" {
+            Some("Embedded before Central Directory with adjusted EOCD offset (all archive entries intact).".into())
+        } else if strategy == "eof" && fallback {
+            Some("ZIP Central Directory could not be safely adjusted; automatically fell back to EOF overlay.".into())
+        } else if strategy == "eof" {
+            Some("Appended after ZIP EOCD (EOF overlay).".into())
+        } else {
+            None
+        }
+    }
 }

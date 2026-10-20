@@ -578,6 +578,20 @@ impl HostAdapter for PeAdapter {
         }
         found
     }
+
+    fn strategy_note(&self, strategy: &str, _fallback: bool) -> Option<String> {
+        if strategy == "pe_codebits" {
+            Some("Embedded into x86/x64 instruction encodings (ModR/M semantic pairs) in .text; carrier file size unchanged (restore diff stored in zero-value PE padding).".into())
+        } else if strategy == "pe_slack" {
+            Some("Embedded into Windows PE section alignment padding (file size unchanged; no overlaying data past the last section, executable code untouched).".into())
+        } else if strategy == "pe_overlay" {
+            Some("Embedded into Windows PE image overlay (executable code and PE sections remain 100% intact).".into())
+        } else if strategy == "eof" {
+            Some("Appended after PE executable EOF (EOF overlay).".into())
+        } else {
+            None
+        }
+    }
 }
 
 /// Copies `[0, EOF)` from `reader` to `writer`, substituting each patch region

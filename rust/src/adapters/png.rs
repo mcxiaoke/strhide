@@ -1,6 +1,9 @@
 //! PNG format adapter for strhide with neutral ancillary chunk and dirty-tail tolerance.
 
-use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity, eof::EofAdapter, format_bytes};
+use crate::adapters::{
+    FinalizeCtx, HostAdapter, SeekRead, SeekReadWrite, StrategyCapacity, eof::EofAdapter,
+    format_bytes,
+};
 use crate::envelope::{EnvelopeTrailer, STANDARD_TRAILER_MAGIC};
 use crate::errors::StrHideError;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -371,5 +374,46 @@ impl HostAdapter for PngAdapter {
             }
         }
         found
+    }
+
+    fn envelope_offset_delta(
+        &self,
+        _carrier: &mut dyn SeekRead,
+        strategy: &str,
+        _ube_size: u64,
+    ) -> Result<u64, StrHideError> {
+        if strategy == "chunk" { Ok(8) } else { Ok(0) }
+    }
+
+    fn finalize(
+        &self,
+        carrier: &mut dyn SeekReadWrite,
+        ctx: &FinalizeCtx,
+    ) -> Result<(), StrHideError> {
+        if ctx.strategy == "chunk" {
+            // PNG chunk: recalculate chunk CRC over chunk_type + data
+            carrier.seek(SeekFrom::Start(ctx.ube_offset - 4))?;
+            let mut chunk_type_and_data = vec![0u8; 4 + ctx.ube_total_size as usize];
+            carrier.read_exact(&mut chunk_type_and_data)?;
+            let new_crc = crc32fast::hash(&chunk_type_and_data);
+            carrier.seek(SeekFrom::Start(ctx.ube_offset + ctx.ube_total_size))?;
+            carrier.write_all(&new_crc.to_be_bytes())?;
+        }
+        Ok(())
+    }
+
+    fn strategy_note(&self, strategy: &str, fallback: bool) -> Option<String> {
+        if strategy == "chunk" {
+            Some("Embedded into compliant PNG private ancillary chunk 'prIv' before IEND (0 trailing bytes).".into())
+        } else if strategy == "eof" && fallback {
+            Some(
+                "Payload exceeded PNG chunk limit (2GB); automatically fell back to EOF overlay."
+                    .into(),
+            )
+        } else if strategy == "eof" {
+            Some("Appended after PNG IEND (EOF overlay).".into())
+        } else {
+            None
+        }
     }
 }

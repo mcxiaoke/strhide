@@ -1,70 +1,19 @@
-use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity};
-use crate::envelope::EnvelopeTrailer;
-use crate::errors::StrHideError;
-use std::io::{SeekFrom, Write};
+use std::io::Write;
 
-pub const MP4_UUID_NEUTRAL: [u8; 16] = [
-    0xd4, 0x1a, 0x8e, 0x9c, 0x4f, 0x21, 0x4e, 0x87, 0x9a, 0x33, 0x5b, 0x6d, 0x12, 0x84, 0xef, 0x70,
-];
-pub const LEGACY_UUID_NAMESPACE: [u8; 16] = [
-    0x89, b'S', b'T', b'R', b'H', b'I', b'D', b'E', 0, 0, 0, 0, 0, 0, 0, 1,
-];
+pub use crate::adapters::isobmff::{LEGACY_UUID_NAMESPACE, MP4_UUID_NEUTRAL};
+use crate::adapters::isobmff::{
+    calc_prefix_len, isobmff_inject, isobmff_locate, isobmff_strategy_capacities,
+    isobmff_suspicious_structures, isobmff_verify_structure,
+};
+use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity};
+use crate::errors::StrHideError;
+use std::io::SeekFrom;
 
 pub struct Mp4Adapter;
 
 impl Mp4Adapter {
     pub fn calc_prefix_len(ube_size: u64) -> u64 {
-        if 24 + ube_size < 0xFFFFFFFF { 24 } else { 32 }
-    }
-
-    /// Length of the appended envelope when `[offset, total_size)` is exactly
-    /// one strhide envelope, else `None`.
-    ///
-    /// Requires no password. In stealth mode both the trailer magic and its
-    /// CRC32 are password-derived (see `EnvelopeTrailer::create_stealth`), so
-    /// `verify_structure` — which has no password — cannot check the CRC. The
-    /// boundary equality below is the password-independent evidence instead:
-    /// the region must start exactly where the box tree ended and end exactly
-    /// at EOF, which arbitrary trailing bytes (including a damaged box header)
-    /// do not satisfy. This mirrors `suspicious_structures`, which uses the
-    /// same boundary rule for the same reason.
-    fn trailing_envelope_len(
-        &self,
-        stego_in: &mut dyn SeekRead,
-        offset: u64,
-        total_size: u64,
-    ) -> Option<u64> {
-        let remaining = total_size.checked_sub(offset)?;
-        if remaining < 24 {
-            return None;
-        }
-        if stego_in.seek(SeekFrom::End(-24)).is_err() {
-            return None;
-        }
-        let mut tail = [0u8; 24];
-        if stego_in.read_exact(&mut tail).is_err() {
-            return None;
-        }
-        // Restore the stream position: the caller walks boxes sequentially and
-        // expects to continue reading from `offset`.
-        if stego_in.seek(SeekFrom::Start(offset)).is_err() {
-            return None;
-        }
-        let ube_offset = u64::from_le_bytes(tail[0..8].try_into().ok()?);
-        let ube_total_size = u64::from_le_bytes(tail[8..16].try_into().ok()?);
-        // The envelope must start exactly where the box tree ended and reach
-        // exactly to EOF; anything else means the tail is not our envelope.
-        //
-        // Deliberately no CRC32 check: stealth trailers carry a password-masked
-        // CRC *and* a password-derived magic, and this function runs without a
-        // password, so a raw CRC comparison can never succeed there. The
-        // boundary equality is the password-independent evidence (the same rule
-        // `suspicious_structures` relies on). `checked_add` keeps crafted
-        // offsets from overflowing in debug builds.
-        if ube_offset != offset || ube_offset.checked_add(ube_total_size) != Some(total_size) {
-            return None;
-        }
-        Some(ube_total_size)
+        calc_prefix_len(ube_size)
     }
 }
 
@@ -119,25 +68,7 @@ impl HostAdapter for Mp4Adapter {
     }
 
     fn strategy_capacities(&self, _reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
-        vec![
-            StrategyCapacity {
-                strategy: "box_uuid".into(),
-                capacity_bytes: None,
-                available: true,
-                limit: "unlimited (file grows)".into(),
-                note: Some(
-                    "uuid box with a 32-bit header below 4 GiB and a 64-bit large header at or above it; media frame offsets preserved"
-                        .into(),
-                ),
-            },
-            StrategyCapacity {
-                strategy: "eof".into(),
-                capacity_bytes: None,
-                available: true,
-                limit: "unlimited (file grows)".into(),
-                note: Some("appended at EOF".into()),
-            },
-        ]
+        isobmff_strategy_capacities()
     }
 
     fn inject(
@@ -147,60 +78,7 @@ impl HostAdapter for Mp4Adapter {
         out: &mut dyn Write,
         strategy: &str,
     ) -> Result<(u64, u64, u32, u32), StrHideError> {
-        if strategy != "box_uuid" && strategy != "eof" {
-            return Err(StrHideError::UnsupportedFormat(format!(
-                "Strategy '{strategy}' not supported by MP4 adapter"
-            )));
-        }
-
-        host_in.seek(SeekFrom::Start(0))?;
-        let mut buf = [0u8; 64 * 1024];
-        let mut host_len = 0u64;
-
-        loop {
-            let n = host_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-            host_len += n as u64;
-        }
-
-        let inject_offset = host_len;
-        let ube_size = ube_in.seek(SeekFrom::End(0))?;
-        ube_in.seek(SeekFrom::Start(0))?;
-
-        let inject_size = if strategy == "box_uuid" {
-            if 24 + ube_size < 0xFFFFFFFF {
-                // Standard 32-bit Box header (24 bytes)
-                let total_box_size = (24 + ube_size) as u32;
-                out.write_all(&total_box_size.to_be_bytes())?;
-                out.write_all(b"uuid")?;
-                out.write_all(&MP4_UUID_NEUTRAL)?;
-                24 + ube_size
-            } else {
-                // 64-bit Large Box header (32 bytes)
-                let total_box_size = 32 + ube_size;
-                out.write_all(&(1u32).to_be_bytes())?;
-                out.write_all(b"uuid")?;
-                out.write_all(&total_box_size.to_be_bytes())?;
-                out.write_all(&MP4_UUID_NEUTRAL)?;
-                32 + ube_size
-            }
-        } else {
-            ube_size
-        };
-
-        // Write UBE stream (propagate read errors instead of treating them as EOF)
-        loop {
-            let n = ube_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-        }
-
-        Ok((inject_offset, inject_size, 0, 0))
+        isobmff_inject(self.format_name(), host_in, ube_in, out, strategy)
     }
 
     fn locate(
@@ -208,212 +86,40 @@ impl HostAdapter for Mp4Adapter {
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
     ) -> Result<Option<(u64, u64, String)>, StrHideError> {
-        let trailer = match EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {
-            Some(t) => t,
-            None => return Ok(None),
-        };
-
-        // 1. Check standard 32-bit uuid box (24-byte header before trailer.ube_offset)
-        if trailer.ube_offset >= 24 {
-            stego_in.seek(SeekFrom::Start(trailer.ube_offset - 24))?;
-            let mut hdr24 = [0u8; 24];
-            if stego_in.read_exact(&mut hdr24).is_ok() {
-                let box_type = &hdr24[4..8];
-                let box_uuid = &hdr24[8..24];
-                let box_size = u32::from_be_bytes(hdr24[0..4].try_into().unwrap()) as u64;
-
-                if box_type == b"uuid"
-                    && (box_uuid == MP4_UUID_NEUTRAL || box_uuid == LEGACY_UUID_NAMESPACE)
-                    && box_size == 24 + trailer.ube_total_size
-                {
-                    return Ok(Some((
-                        trailer.ube_offset,
-                        trailer.ube_total_size,
-                        "box_uuid".into(),
-                    )));
-                }
-            }
-        }
-
-        // 2. Check 64-bit uuid box (32-byte header before trailer.ube_offset)
-        if trailer.ube_offset >= 32 {
-            stego_in.seek(SeekFrom::Start(trailer.ube_offset - 32))?;
-            let mut hdr32 = [0u8; 32];
-            if stego_in.read_exact(&mut hdr32).is_ok() {
-                let box_size = u32::from_be_bytes(hdr32[0..4].try_into().unwrap());
-                let box_type = &hdr32[4..8];
-                let large_size = u64::from_be_bytes(hdr32[8..16].try_into().unwrap());
-                let box_uuid = &hdr32[16..32];
-
-                if box_size == 1
-                    && box_type == b"uuid"
-                    && (box_uuid == MP4_UUID_NEUTRAL || box_uuid == LEGACY_UUID_NAMESPACE)
-                    && large_size == 32 + trailer.ube_total_size
-                {
-                    return Ok(Some((
-                        trailer.ube_offset,
-                        trailer.ube_total_size,
-                        "box_uuid".into(),
-                    )));
-                }
-            }
-        }
-
-        // 3. Fallback to EOF
-        let file_size = stego_in.seek(SeekFrom::End(0))?;
-        if trailer.ube_offset + trailer.ube_total_size == file_size {
-            return Ok(Some((
-                trailer.ube_offset,
-                trailer.ube_total_size,
-                "eof".into(),
-            )));
-        }
-
-        Ok(None)
+        isobmff_locate(stego_in, expected_trailer_magic)
     }
 
     fn verify_structure(
         &self,
         stego_in: &mut dyn SeekRead,
     ) -> Result<(bool, String), StrHideError> {
-        // Walk the entire top-level box tree (mirrors the Python adapter): every
-        // box header must be self-consistent, 32-bit and 64-bit sizes handled,
-        // size==0 means "extends to EOF", and an `ftyp` box must be present.
-        // Checking only the first box would let a truncated or damaged tree
-        // pass Level 1, defeating the purpose of the diagnostic.
-        let total_size = stego_in.seek(SeekFrom::End(0))?;
-        stego_in.seek(SeekFrom::Start(0))?;
-
-        let mut offset = 0u64;
-        let mut box_count = 0u64;
-        let mut has_ftyp = false;
-
-        while offset < total_size {
-            // The `eof` strategy appends the raw UBE stream after the last box,
-            // which by construction violates the ISO-BMFF box grammar: the
-            // envelope's leading bytes are not a box header. Stop the walk at a
-            // trailing region that is *exactly* an envelope (verified through
-            // its trailer + boundary, no password needed), the same way PNG
-            // stops at IEND. A box that merely claims to run past EOF is still
-            // reported as damage, because it does not match this predicate.
-            if let Some(envelope_len) = self.trailing_envelope_len(stego_in, offset, total_size) {
-                return Ok((
-                    true,
-                    format!(
-                        "Valid ISO BMFF container ({box_count} top-level boxes, {envelope_len} bytes appended after the last box)"
-                    ),
-                ));
-            }
-
-            let mut hdr = [0u8; 8];
-            if stego_in.read_exact(&mut hdr).is_err() {
-                return Ok((false, format!("Truncated box header at offset {offset}")));
-            }
-            let size = u32::from_be_bytes(hdr[0..4].try_into().unwrap());
-            let box_type = &hdr[4..8];
-            if box_type == *b"ftyp" {
-                has_ftyp = true;
-            }
-
-            let (box_size, header_len) = if size == 1 {
-                // 64-bit largesize follows the 8-byte header
-                let mut large = [0u8; 8];
-                if stego_in.read_exact(&mut large).is_err() {
-                    return Ok((
-                        false,
-                        format!(
-                            "Truncated 64-bit size for box {}",
-                            String::from_utf8_lossy(box_type)
-                        ),
-                    ));
-                }
-                (u64::from_be_bytes(large), 16u64)
-            } else if size == 0 {
-                // Box extends to end of file
-                (total_size - offset, 8u64)
-            } else {
-                (size as u64, 8u64)
-            };
-
-            if box_size < header_len {
-                return Ok((
-                    false,
-                    format!(
-                        "Invalid box size {box_size} for box {}",
-                        String::from_utf8_lossy(box_type)
-                    ),
-                ));
-            }
-
-            let box_offset = offset;
-            offset += box_size;
-            box_count += 1;
-            if offset > total_size {
-                return Ok((
-                    false,
-                    format!(
-                        "Box {} at offset {box_offset} extends past end of file",
-                        String::from_utf8_lossy(box_type)
-                    ),
-                ));
-            }
-            stego_in.seek(SeekFrom::Start(offset))?;
-        }
-
-        if !has_ftyp {
-            return Ok((false, "MP4 missing ftyp box".into()));
-        }
-
-        Ok((
-            true,
-            format!("Valid ISO BMFF container ({box_count} top-level boxes)"),
-        ))
+        isobmff_verify_structure(self.format_name(), stego_in)
     }
 
     fn suspicious_structures(&self, stego_in: &mut dyn SeekRead) -> Vec<String> {
-        // A trailing top-level uuid box using the strhide namespaces can only
-        // be a hidden envelope (checked without the magic, so stealth
-        // envelopes with an unknown password are still detected structurally).
-        //
-        // Deliberately does NOT validate the trailer CRC32: in stealth mode the
-        // CRC is XOR-masked with a password-derived value (see
-        // `EnvelopeTrailer::create_stealth`), so a raw CRC32 check would always
-        // fail there and silently suppress the guidance this scan exists to
-        // provide. The uuid namespace + exact file boundary are the structural
-        // evidence, and they hold regardless of the password.
-        let mut found = Vec::new();
-        let file_size = match stego_in.seek(SeekFrom::End(0)) {
-            Ok(s) => s,
-            Err(_) => return found,
-        };
-        if file_size < 24 {
-            return found;
+        isobmff_suspicious_structures(stego_in)
+    }
+
+    fn envelope_offset_delta(
+        &self,
+        _carrier: &mut dyn SeekRead,
+        strategy: &str,
+        ube_size: u64,
+    ) -> Result<u64, StrHideError> {
+        if strategy == "box_uuid" {
+            Ok(calc_prefix_len(ube_size))
+        } else {
+            Ok(0)
         }
-        if stego_in.seek(SeekFrom::End(-24)).is_err() {
-            return found;
+    }
+
+    fn strategy_note(&self, strategy: &str, _fallback: bool) -> Option<String> {
+        if strategy == "box_uuid" {
+            Some("Embedded into compliant ISO BMFF uuid Box (32-bit header below 4GB, 64-bit large header at or above 4GB; preserves media frame offsets).".into())
+        } else if strategy == "eof" {
+            Some("Appended after MP4 EOF (EOF overlay).".into())
+        } else {
+            None
         }
-        let mut tail = [0u8; 24];
-        if stego_in.read_exact(&mut tail).is_err() {
-            return found;
-        }
-        let ube_offset = u64::from_le_bytes(tail[0..8].try_into().unwrap());
-        let ube_total_size = u64::from_le_bytes(tail[8..16].try_into().unwrap());
-        // Boundary check only: the envelope must reach exactly to EOF.
-        if ube_offset.checked_add(ube_total_size) != Some(file_size) {
-            return found;
-        }
-        if ube_offset >= 24 && stego_in.seek(SeekFrom::Start(ube_offset - 24)).is_ok() {
-            let mut hdr = [0u8; 24];
-            if stego_in.read_exact(&mut hdr).is_ok() && &hdr[4..8] == b"uuid" {
-                let uuid = &hdr[8..24];
-                if uuid == MP4_UUID_NEUTRAL || uuid == LEGACY_UUID_NAMESPACE {
-                    found.push(format!(
-                        "trailing uuid box at offset {} carries {ube_total_size} bytes",
-                        ube_offset - 24
-                    ));
-                }
-            }
-        }
-        found
     }
 }

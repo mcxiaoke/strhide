@@ -45,6 +45,11 @@ pub const STANDARD_HEADER_MAGIC: [u8; 8] = [0xb7, 0x54, 0x2c, 0x82, 0x7e, 0x31, 
 /// Pure pseudorandom binary bytes: eliminates all static ASCII strings ("STH!") from forensic scans.
 pub const STANDARD_TRAILER_MAGIC: [u8; 4] = [0x78, 0xe6, 0x66, 0xd2];
 
+/// Maximum known strategy ID in the protocol registry.
+/// Used in the unencrypted envelope de-mask heuristic to eliminate false positives
+/// while allowing all valid registered strategy IDs.
+pub const MAX_KNOWN_STRATEGY_ID: u8 = 11;
+
 /// Legacy header magic used in v0.2/v0.3 for backward compatibility.
 pub const LEGACY_HEADER_MAGIC: [u8; 8] = *b"\x89STRHIDE";
 
@@ -368,7 +373,7 @@ impl EnvelopeHeader {
                 }
                 if unmasked[8] == CURRENT_VERSION
                     && (unmasked[9] & FLAG_ENCRYPTED) == 0
-                    && unmasked[10] <= 10
+                    && unmasked[10] <= MAX_KNOWN_STRATEGY_ID
                     && unmasked[11] == 0
                 {
                     return Self::unpack(&unmasked);

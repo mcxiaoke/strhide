@@ -1,7 +1,8 @@
 //! JPEG format adapter for strhide with APP15/COM segment multi-chain hiding.
 
 use crate::adapters::{
-    HostAdapter, SeekRead, StrategyCapacity, SubStream, eof::EofAdapter, format_bytes,
+    HostAdapter, SeekRead, SegmentedSubStream, StrategyCapacity, SubStream, TrailerCtx,
+    eof::EofAdapter, format_bytes,
 };
 use crate::envelope::EnvelopeTrailer;
 use crate::errors::StrHideError;
@@ -99,102 +100,6 @@ pub fn partition_jpeg_payload_lengths(mut total_size: u64) -> Vec<u64> {
         }
     }
     lengths
-}
-
-/// A SeekRead stream bridging across a chained sequence of JPEG segment bodies.
-pub struct JpegChainedSegmentReader<'a> {
-    inner: &'a mut dyn SeekRead,
-    segments: Vec<(u64, u64)>, // (payload_offset, payload_len)
-    total_size: u64,
-    logical_pos: u64,
-}
-
-impl<'a> JpegChainedSegmentReader<'a> {
-    pub fn new(
-        inner: &'a mut dyn SeekRead,
-        segments: Vec<(u64, u64)>,
-        total_size: u64,
-    ) -> Result<Self, StrHideError> {
-        let mut r = Self {
-            inner,
-            segments,
-            total_size,
-            logical_pos: 0,
-        };
-        r.sync_inner_seek()?;
-        Ok(r)
-    }
-
-    fn sync_inner_seek(&mut self) -> Result<(), StrHideError> {
-        if self.logical_pos >= self.total_size {
-            return Ok(());
-        }
-        let mut rem = self.logical_pos;
-        for &(start, len) in &self.segments {
-            if rem < len {
-                self.inner.seek(SeekFrom::Start(start + rem))?;
-                return Ok(());
-            }
-            rem -= len;
-        }
-        Ok(())
-    }
-}
-
-impl Read for JpegChainedSegmentReader<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.logical_pos >= self.total_size || buf.is_empty() {
-            return Ok(0);
-        }
-
-        let mut rem = self.logical_pos;
-        let mut target_seg = None;
-        for &(start, len) in &self.segments {
-            if rem < len {
-                target_seg = Some((start, len, rem));
-                break;
-            }
-            rem -= len;
-        }
-
-        let (seg_start, seg_len, offset_in_seg) = match target_seg {
-            Some(s) => s,
-            None => return Ok(0),
-        };
-
-        let seg_remaining = seg_len - offset_in_seg;
-        let total_remaining = self.total_size - self.logical_pos;
-        let to_read = std::cmp::min(
-            buf.len() as u64,
-            std::cmp::min(seg_remaining, total_remaining),
-        ) as usize;
-
-        self.inner
-            .seek(SeekFrom::Start(seg_start + offset_in_seg))?;
-        let n = self.inner.read(&mut buf[..to_read])?;
-        self.logical_pos += n as u64;
-        Ok(n)
-    }
-}
-
-impl Seek for JpegChainedSegmentReader<'_> {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        let new_pos = match pos {
-            SeekFrom::Start(p) => p as i64,
-            SeekFrom::Current(p) => self.logical_pos as i64 + p,
-            SeekFrom::End(p) => self.total_size as i64 + p,
-        };
-        if new_pos < 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Invalid seek to negative position",
-            ));
-        }
-        self.logical_pos = new_pos as u64;
-        self.sync_inner_seek()
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        Ok(self.logical_pos)
-    }
 }
 
 pub struct JpegAdapter;
@@ -521,7 +426,7 @@ impl HostAdapter for JpegAdapter {
             curr_offset += seg_len + 4;
         }
 
-        Ok(Box::new(JpegChainedSegmentReader::new(
+        Ok(Box::new(SegmentedSubStream::from_segments(
             carrier,
             segments,
             ube_total_size,
@@ -600,5 +505,41 @@ impl HostAdapter for JpegAdapter {
             }
         }
         found
+    }
+
+    fn envelope_offset_delta(
+        &self,
+        _carrier: &mut dyn SeekRead,
+        strategy: &str,
+        _ube_size: u64,
+    ) -> Result<u64, StrHideError> {
+        if strategy == "app_segment" {
+            Ok(4)
+        } else {
+            Ok(0)
+        }
+    }
+
+    fn trailer_offset(&self, ctx: &TrailerCtx) -> u64 {
+        if ctx.strategy == "app_segment" {
+            ctx.inject_offset + ctx.inject_size - 24
+        } else {
+            ctx.actual_ube_offset + ctx.ube_total_size - 24
+        }
+    }
+
+    fn strategy_note(&self, strategy: &str, fallback: bool) -> Option<String> {
+        if strategy == "app_segment" {
+            Some("Embedded into compliant JPEG APP15 segment(s) before SOS (clean EOI at EOF, 0 trailing bytes).".into())
+        } else if strategy == "eof" && fallback {
+            Some(
+                "Payload exceeded JPEG maximum capacity; automatically fell back to EOF overlay."
+                    .into(),
+            )
+        } else if strategy == "eof" {
+            Some("Appended after JPEG EOI marker (EOF overlay).".into())
+        } else {
+            None
+        }
     }
 }

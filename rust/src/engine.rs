@@ -27,7 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
-use crate::adapters::{HostAdapter, StrategyCapacity, mp4::Mp4Adapter, pdf::PdfAdapter};
+use crate::adapters::{FinalizeCtx, HostAdapter, SeekRead, StrategyCapacity, TrailerCtx};
 use crate::crypto::{
     compress_stream, compute_file_sha256, decompress_stream, decrypt_metadata,
     decrypt_stream_from_chunks, derive_keys, derive_stealth_magics, encrypt_metadata,
@@ -54,6 +54,25 @@ pub struct CarrierMetadata {
     pub raw_size: u64,
     pub raw_sha256: String,
     pub created_at: u64,
+}
+
+/// Stealth mode password derivation domain separation string.
+pub const STEALTH_DOMAIN: &[u8] = b"strhide-stealth-v1";
+
+/// Locate an envelope with password priority: when a password is supplied, the derived
+/// stealth magic is tried first; fallback to standard magic if not found.
+fn locate_envelope(
+    carrier: &mut dyn SeekRead,
+    adapter: &dyn HostAdapter,
+    password: Option<&str>,
+) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    if let Some(pwd) = password {
+        let magics = derive_stealth_magics(pwd, STEALTH_DOMAIN)?;
+        if let Some(loc) = adapter.locate(carrier, Some(&magics.1))? {
+            return Ok(Some(loc));
+        }
+    }
+    adapter.locate(carrier, None)
 }
 
 /// Version of the compact (binary) metadata block. The JSON form carries no
@@ -802,7 +821,7 @@ pub fn write_carrier(
     };
 
     // 8. Populate Header structure
-    let strat_id = strategy_to_id(&selected_strategy);
+    let strat_id = strategy_to_id(&selected_strategy)?;
     let mut header = EnvelopeHeader {
         magic_header: header_magic,
         flags,
@@ -921,17 +940,11 @@ pub fn write_carrier(
     };
 
     // 10. Update real ube_offset in Header and Trailer
-    let mut actual_ube_offset = inject_offset;
-    if adapter.format_name() == "PNG" && selected_strategy == "chunk" {
-        actual_ube_offset = inject_offset + 8;
-    } else if adapter.format_name() == "MP4" && selected_strategy == "box_uuid" {
-        actual_ube_offset = inject_offset + Mp4Adapter::calc_prefix_len(ube_total_size);
-    } else if adapter.format_name() == "JPEG" && selected_strategy == "app_segment" {
-        actual_ube_offset = inject_offset + 4;
-    } else if adapter.format_name() == "PDF" && selected_strategy == "incremental" {
+    let delta = {
         let mut cf = File::open(carrier_path)?;
-        actual_ube_offset = inject_offset + PdfAdapter::calc_prefix_len(&mut cf, ube_total_size)?;
-    }
+        adapter.envelope_offset_delta(&mut cf, &selected_strategy, ube_total_size)?
+    };
+    let actual_ube_offset = inject_offset + delta;
 
     header.inject_offset = inject_offset;
     header.inject_size = inject_size;
@@ -962,24 +975,26 @@ pub fn write_carrier(
             f.write_all(&header.pack_with_stealth_mask(password)?)?;
 
             // Patch trailer at end of UBE
-            let trailer_pos =
-                if adapter.format_name() == "JPEG" && selected_strategy == "app_segment" {
-                    inject_offset + inject_size - 24
-                } else {
-                    actual_ube_offset + ube_total_size - 24
-                };
+            let trailer_ctx = TrailerCtx {
+                actual_ube_offset,
+                ube_total_size,
+                inject_offset,
+                inject_size,
+                strategy: &selected_strategy,
+            };
+            let trailer_pos = adapter.trailer_offset(&trailer_ctx);
             f.seek(SeekFrom::Start(trailer_pos))?;
             f.write_all(&final_trailer.pack())?;
 
-            // For PNG chunk: recalculate chunk CRC
-            if adapter.format_name() == "PNG" && selected_strategy == "chunk" {
-                f.seek(SeekFrom::Start(actual_ube_offset - 4))?;
-                let mut chunk_type_and_data = vec![0u8; 4 + ube_total_size as usize];
-                f.read_exact(&mut chunk_type_and_data)?;
-                let new_crc = crc32fast::hash(&chunk_type_and_data);
-                f.seek(SeekFrom::Start(actual_ube_offset + ube_total_size))?;
-                f.write_all(&new_crc.to_be_bytes())?;
-            }
+            // Post-write finalization (e.g. recalculating chunk CRCs)
+            let fin_ctx = FinalizeCtx {
+                ube_offset: actual_ube_offset,
+                ube_total_size,
+                inject_offset,
+                inject_size,
+                strategy: &selected_strategy,
+            };
+            adapter.finalize(&mut f, &fin_ctx)?;
         }
     }
 
@@ -1044,60 +1059,7 @@ pub fn write_carrier(
         let _ = filetime::set_file_times(target_path, orig_atime, orig_mtime);
     }
 
-    let mut strategy_note = None;
-    if adapter.format_name() == "JPEG" {
-        if selected_strategy == "app_segment" {
-            strategy_note = Some("Embedded into compliant JPEG APP15 segment(s) before SOS (clean EOI at EOF, 0 trailing bytes).".into());
-        } else if selected_strategy == "eof" && strategy == "auto" {
-            strategy_note = Some(format!(
-                "Payload ({ube_total_size} bytes) exceeded JPEG maximum capacity; automatically fell back to EOF overlay."
-            ));
-        } else if selected_strategy == "eof" {
-            strategy_note = Some("Appended after JPEG EOI marker (EOF overlay).".into());
-        }
-    } else if adapter.format_name() == "PNG" {
-        if selected_strategy == "chunk" {
-            strategy_note = Some("Embedded into compliant PNG private ancillary chunk 'prIv' before IEND (0 trailing bytes).".into());
-        } else if selected_strategy == "eof" && strategy == "auto" {
-            strategy_note = Some(format!(
-                "Payload ({ube_total_size} bytes) exceeded PNG chunk limit (2GB); automatically fell back to EOF overlay."
-            ));
-        } else if selected_strategy == "eof" {
-            strategy_note = Some("Appended after PNG IEND (EOF overlay).".into());
-        }
-    } else if adapter.format_name() == "PDF" {
-        if selected_strategy == "incremental" {
-            strategy_note = Some("Embedded into compliant PDF Incremental Update stream ending with %%EOF (original trailing bytes, if any, preserved after the final %%EOF).".into());
-        } else if selected_strategy == "eof" && strategy == "auto" {
-            strategy_note = Some("PDF trailer could not be incrementally parsed; automatically fell back to EOF overlay.".into());
-        } else if selected_strategy == "eof" {
-            strategy_note = Some("Appended after PDF %%EOF (EOF overlay).".into());
-        }
-    } else if adapter.format_name() == "MP4" {
-        if selected_strategy == "box_uuid" {
-            strategy_note = Some("Embedded into compliant ISO BMFF uuid Box (32-bit header below 4GB, 64-bit large header at or above 4GB; preserves media frame offsets).".into());
-        } else if selected_strategy == "eof" {
-            strategy_note = Some("Appended after MP4 EOF (EOF overlay).".into());
-        }
-    } else if adapter.format_name() == "ZIP" {
-        if selected_strategy == "pre_cd_inject" {
-            strategy_note = Some("Embedded before Central Directory with adjusted EOCD offset (all archive entries intact).".into());
-        } else if selected_strategy == "eof" && strategy == "auto" {
-            strategy_note = Some("ZIP Central Directory could not be safely adjusted; automatically fell back to EOF overlay.".into());
-        } else if selected_strategy == "eof" {
-            strategy_note = Some("Appended after ZIP EOCD (EOF overlay).".into());
-        }
-    } else if adapter.format_name() == "PE" {
-        if selected_strategy == "pe_codebits" {
-            strategy_note = Some("Embedded into x86/x64 instruction encodings (ModR/M semantic pairs) in .text; carrier file size unchanged (restore diff stored in zero-value PE padding).".into());
-        } else if selected_strategy == "pe_slack" {
-            strategy_note = Some("Embedded into Windows PE section alignment padding (file size unchanged; no overlaying data past the last section, executable code untouched).".into());
-        } else if selected_strategy == "pe_overlay" {
-            strategy_note = Some("Embedded into Windows PE image overlay (executable code and PE sections remain 100% intact).".into());
-        } else if selected_strategy == "eof" {
-            strategy_note = Some("Appended after PE executable EOF (EOF overlay).".into());
-        }
-    }
+    let strategy_note = adapter.strategy_note(&selected_strategy, strategy == "auto");
 
     Ok(WriteResult {
         status: "success".into(),
@@ -1148,18 +1110,7 @@ pub fn read_carrier_with(
     let mut f = File::open(carrier_path)?;
     let adapter = find_adapter_or_reject(&mut f, &carrier_path.display().to_string())?;
 
-    // Locate with password priority: when a password is supplied, the derived
-    // stealth magic is tried first so stealth envelopes are found even when a
-    // standard-magic envelope also exists; a wrong password still yields
-    // "no hidden data" (plausible deniability preserved).
-    let mut loc = None;
-    if let Some(pwd) = password {
-        let magics = derive_stealth_magics(pwd, b"strhide-stealth-v1")?;
-        loc = adapter.locate(&mut f, Some(&magics.1))?;
-    }
-    if loc.is_none() {
-        loc = adapter.locate(&mut f, None)?;
-    }
+    let loc = locate_envelope(&mut f, adapter, password)?;
 
     let (ube_offset, ube_total_size, strategy_name) = match loc {
         Some(l) => l,
@@ -1389,16 +1340,7 @@ pub fn remove_carrier(
         let mut cf = File::open(carrier_path)?;
         let adapter = find_adapter_or_reject(&mut cf, &carrier_path.display().to_string())?;
 
-        // Password-priority locate (see read_carrier): stealth envelopes are
-        // found even when a standard-magic envelope also exists.
-        let mut loc = None;
-        if let Some(pwd) = password {
-            let magics = derive_stealth_magics(pwd, b"strhide-stealth-v1")?;
-            loc = adapter.locate(&mut cf, Some(&magics.1))?;
-        }
-        if loc.is_none() {
-            loc = adapter.locate(&mut cf, None)?;
-        }
+        let loc = locate_envelope(&mut cf, adapter, password)?;
 
         let (ube_offset, ube_total_size, strategy_name) = match loc {
             Some(l) => l,
@@ -1525,15 +1467,7 @@ pub fn inspect_carrier(
     // PE measures `.text` density and zero slack, ZIP measures the EOCD offset.
     let strategies = adapter.strategy_capacities(Some(&mut cf));
 
-    // Password-priority locate (see read_carrier).
-    let mut loc = None;
-    if let Some(pwd) = password {
-        let magics = derive_stealth_magics(pwd, b"strhide-stealth-v1")?;
-        loc = adapter.locate(&mut cf, Some(&magics.1))?;
-    }
-    if loc.is_none() {
-        loc = adapter.locate(&mut cf, None)?;
-    }
+    let loc = locate_envelope(&mut cf, adapter, password)?;
 
     let (ube_offset, ube_total_size, strategy_name) = match loc {
         Some(l) => l,
@@ -1671,15 +1605,7 @@ pub fn verify_carrier(
     // Level 1: Host format integrity
     let (l1_ok, l1_msg) = adapter.verify_structure(&mut cf)?;
 
-    // Level 2: Envelope boundary & CRC (password-priority locate, see read_carrier)
-    let mut loc = None;
-    if let Some(pwd) = password {
-        let magics = derive_stealth_magics(pwd, b"strhide-stealth-v1")?;
-        loc = adapter.locate(&mut cf, Some(&magics.1))?;
-    }
-    if loc.is_none() {
-        loc = adapter.locate(&mut cf, None)?;
-    }
+    let loc = locate_envelope(&mut cf, adapter, password)?;
 
     let (ube_offset, ube_total_size, strategy_name) = match loc {
         Some(l) => l,

@@ -1,6 +1,6 @@
 # strhide 多格式扩展方案：HEIC / HEIF / WEBP / WAV / MKV
 
-> 版本：v1.1　状态：**第 0 步实测已完成，方案三条主路径全部成立**　日期：2026-10-19
+> 版本：v1.2　状态：**方案修订完成（补正 Trait 签名、ID 冲突与 RIFF 补丁机制），进入实施阶段**　日期：2026-10-20
 > 范围：Rust 实现（`rust/`）。`python/` 已冻结，不同步。
 > 实测报告：`docs/compat_experiment_results_20261019.md`
 > 前置阅读：`docs/smart_file_data_hiding_design.md`、`docs/pe_codebits_plugin_design.md`
@@ -9,7 +9,7 @@
 
 ## 1. 背景与目标
 
-当前 strhide 支持 6 种载体（PNG / JPEG / MP4 / ZIP / PDF / Windows PE），8 个策略。目标是再接入
+当前 strhide 支持 6 种载体（PNG / JPEG / MP4 / ZIP / PDF / Windows PE），9 个策略（当前已包含 `pe_slack` = 9）。目标是再接入
 **HEIC、HEIF、WEBP、WAV、MKV**，并且保证：**后续再扩展新格式或新策略时，不需要修改
 `engine.rs` 里的中心化分支**。
 
@@ -34,10 +34,10 @@
 | 项 | 结论 | 实测 |
 | --- | --- | --- |
 | HEIC / HEIF | **能力已存在**，只是被 MP4 适配器"误收"。核心工作是收窄检测 + 抽出 ISO-BMFF 共享模块 | ✅ 通过（libheif 完整解析 + ffmpeg 像素级 SHA-256 一致 + 还原逐比特） |
-| WEBP / WAV | 同属 RIFF，一次开发两个。**被现有 `strip` 默认实现阻塞**，需各自 override `strip` | ✅ 通过（含 VP8X+ALPH 扩展格式；libwebp / ffprobe / Pillow / Python `wave` 四方验证） |
+| WEBP / WAV | 同属 RIFF，一次开发两个。在 Phase 0 中修复默认 `strip` 支持前置补丁，RIFF 记录真实 `orig_patch_val`，解除阻塞且避免自定义 `strip` | ✅ 通过（含 VP8X+ALPH 扩展格式；libwebp / ffprobe / Pillow / Python `wave` 四方验证） |
 | MKV | EBML，比想象的简单。关键发现：**"加法型"补丁不需要在 header 里存原值**（见 §6.4） | ✅ 通过（ffprobe / mkvmerge 识别 / 重封装 / 完整解码 / Seek 抽帧全通过） |
 | AAC | **移出本次范围**。原定的 `eof` 方案已被实测否决，见下方说明 | ❌ `eof` 否决 |
-| 架构最大风险 | `engine.rs` 12 处 `format_name() == "XXX"` 字符串分派；`envelope.rs:308` 的 `strategy_id <= 10` 隐形地雷 | — |
+| 架构最大风险 | `engine.rs` 12 处 `format_name() == "XXX"` 字符串分派；`envelope.rs:371` 的 `strategy_id <= 10` 隐形地雷（当前已有 1..9，新增必定冲破 10，必须先修）；Trait 签名缺少 Reader/Read 支持 | — |
 
 ### AAC 为什么被移出范围（实测否决，2026-10-19）
 
@@ -67,19 +67,19 @@
 #### P0-1　`engine.rs` 用字符串分派格式逻辑（12 处）
 
 ```
-engine.rs:777   format_name()=="PNG"  && strategy=="chunk"    → actual_ube_offset += 8
-engine.rs:779   format_name()=="MP4"  && strategy=="box_uuid" → += calc_prefix_len()
-engine.rs:781   format_name()=="JPEG" && strategy=="app_segment" → += 4
-engine.rs:783   format_name()=="PDF"  && strategy=="incremental"  → += calc_prefix_len()
-engine.rs:818   format_name()=="JPEG" && strategy=="app_segment" → trailer 定位特例
-engine.rs:827   format_name()=="PNG"  && strategy=="chunk"    → 写回后重算 chunk CRC
-engine.rs:900-950  6 段 format_name() if-else 生成 strategy_note
+engine.rs:925   format_name()=="PNG"  && strategy=="chunk"    → actual_ube_offset += 8
+engine.rs:927   format_name()=="MP4"  && strategy=="box_uuid" → += calc_prefix_len()
+engine.rs:929   format_name()=="JPEG" && strategy=="app_segment" → += 4
+engine.rs:931   format_name()=="PDF"  && strategy=="incremental"  → += calc_prefix_len()
+engine.rs:966   format_name()=="JPEG" && strategy=="app_segment" → trailer 定位特例
+engine.rs:975   format_name()=="PNG"  && strategy=="chunk"    → 写回后重算 chunk CRC
+engine.rs:1048-1100  6 段 format_name() if-else 生成 strategy_note
 ```
 
-危害：这些是**编译期不可检的字符串比较**。新格式漏掉 `engine.rs:777` 那一支不会报错，只会算出
+危害：这些是**编译期不可检的字符串比较**。新格式漏掉 `engine.rs:925` 那一支不会报错，只会算出
 错误的 `ube_offset`，直到 `remove` 时才以 `RestoreMismatch` 暴露，而用户已经拿到一个坏掉的载体。
 
-反例（现状）：`engine.rs:783` 为 PDF 做了偏移校正，ZIP 用的是另一种语义（`inject_offset` 直接就是
+反例（现状）：`engine.rs:931` 为 PDF 做了偏移校正，ZIP 用的是另一种语义（`inject_offset` 直接就是
 UBE 起点，`zip.rs:215`），所以 ZIP 没有对应分支。**同一个字段在不同 adapter 里含义不同，
 靠 if-else 逐个补齐，这是不变量没有被类型表达的典型症状。**
 
@@ -97,7 +97,7 @@ UBE 起点，`zip.rs:215`），所以 ZIP 没有对应分支。**同一个字段
 
 #### P0-3　`strip()` 默认实现无法处理"补丁点在注入点之前"
 
-`mod.rs:168-172`：
+`mod.rs:194-205`：
 
 ```rust
 debug_assert!(header.patch_offset as u64 >= header.inject_offset + header.inject_size);
@@ -110,7 +110,16 @@ let out_patch_pos = (header.patch_offset as u64).checked_sub(header.inject_size)
   → debug 构建直接 panic；release 下 `checked_sub` 返回 `CorruptedData`，**remove 100% 失败**。
 - **MKV**：`Segment` 的 size 在所有 Cluster 之前，同样在注入点之前。
 
-这是 WEBP / WAV / MKV 的**硬阻塞**，无法通过"写一个新 adapter"绕过。
+**根治方案**：当 `patch_offset < inject_offset` 时，输出文件中该补丁点的坐标根本不受注入区剔除的影响，**位置就是 `patch_offset` 本身**！
+修复默认 `strip` 中的坐标计算：
+```rust
+let out_patch_pos = if (header.patch_offset as u64) < header.inject_offset {
+    header.patch_offset as u64
+} else {
+    (header.patch_offset as u64).checked_sub(header.inject_size)...
+};
+```
+修复后，RIFF（WEBP / WAV）可直接使用 `patch_offset = 4` 和 `orig_patch_val = 原真实 riff_size`，完美支持含尾部垃圾的宿主且无需各自 override 40 行 `strip`。
 
 #### P0-4　`patch_offset: u32` + 单点补丁
 
@@ -119,25 +128,25 @@ let out_patch_pos = (header.patch_offset as u64).checked_sub(header.inject_size)
 根因就是这个 u32。
 
 需要多点补丁的格式（未来）：ZIP64（EOCD64 + locator + EOCD 三处）、ISO-BMFF 改 `stco`/`co64`
-（成百上千个条目）、PNG 的 chunk CRC（**现在靠 `engine.rs:827` 硬编码绕过**）。
+（成百上千个条目）、PNG 的 chunk CRC（**现在靠 `engine.rs:975` 硬编码绕过**）。
 
-#### P0-5　`envelope.rs:308` 的 `strategy_id <= 10` 是隐形地雷
+#### P0-5　`envelope.rs:371` 的 `strategy_id <= 10` 是隐形地雷
 
 ```rust
 if unmasked[8] == CURRENT_VERSION && (unmasked[9] & FLAG_ENCRYPTED) == 0
     && unmasked[10] <= 10 && unmasked[11] == 0
 ```
 
-这个 10 是"排除随机字节被误解码"的启发式。当前只用 1..8，**安全余量只剩 2 个 ID**。
-MKV 需要新增 `ebml_void`（ID 9），再用两个就到顶。届时未加密信封的默认密钥路径会静默失效，
-退化成不解掩码的 `Self::unpack(data)`（`envelope.rs:316`），**读出错误字段且不报错**。
-且没有任何测试守护。
+这个 10 是"排除随机字节被误解码"的启发式。**当前已有策略 1..9（含 `pe_slack = 9`），安全余量仅剩 1 个 ID（ID 10）**。
+新增 `riff_chunk`（ID 10）与 `ebml_void`（ID 11）将立即冲破该上限。届时未加密信封的默认密钥路径会静默失效，
+退化成不解掩码的 `Self::unpack(data)`（`envelope.rs:379`），**读出错误字段且不报错**。
+因此常量修复是 Phase 0 的最高优先级任务。
 
 #### P0-6　`router.rs` 两处 `_ =>` 静默降级
 
 ```rust
-router.rs:87    "pe_codebits" => 8,  _ => 1,      // 未注册策略 → 编码成 eof
-router.rs:101   8 => "pe_codebits",  _ => "eof",  // 未知 ID → 报告成 eof
+router.rs:97    "pe_slack" => 9,     _ => 1,      // 未注册策略 → 编码成 eof
+router.rs:114   9 => "pe_slack",     _ => "eof",  // 未知 ID → 报告成 eof
 ```
 
 `strategy_id` 参与 AEAD 的 AAD（`envelope.rs:153`），**映射错误会一路污染到解密**；
@@ -198,16 +207,25 @@ router.rs:101   8 => "pe_codebits",  _ => "eof",  // 未知 ID → 报告成 eof
 
 给 `HostAdapter` 增加三个**带默认实现**的方法：
 
-| 新方法 | 默认值 | 取代 |
+| 新方法 | 默认实现 | 说明 |
 | --- | --- | --- |
-| `fn envelope_offset_delta(&self, strategy: &str, ube_size: u64) -> u64` | `0` | `engine.rs:777-786` |
-| `fn trailer_anchor(&self, strategy: &str) -> TrailerAnchor` | `EndOfEnvelope` | `engine.rs:818-822`（JPEG → `EndOfInjection`） |
-| `fn finalize(&self, carrier: &mut dyn SeekWrite, ctx: &FinalizeCtx) -> Result<()>` | no-op | `engine.rs:827-834`（PNG CRC） |
+| `fn envelope_offset_delta(&self, carrier: &mut dyn SeekRead, strategy: &str, ube_size: u64) -> Result<u64, StrHideError>` | `Ok(0)` | 支持 PDF incremental 动态解析 trailer 编号，替代 `engine.rs:925-934` |
+| `fn trailer_offset(&self, ctx: &TrailerCtx) -> u64` | `ctx.actual_ube_offset + ctx.ube_total_size - 24` | 替代 `engine.rs:966`，JPEG 重写为 `inject_offset + inject_size - 24` |
+| `fn finalize(&self, carrier: &mut dyn SeekReadWrite, ctx: &FinalizeCtx) -> Result<(), StrHideError>` | `Ok(())` | 替代 `engine.rs:975-982`（PNG CRC 需要先读出 chunk 数据再写回） |
 
 配套新增：
 
 ```rust
-pub enum TrailerAnchor { EndOfEnvelope, EndOfInjection }
+pub trait SeekReadWrite: Read + Write + Seek {}
+impl<T: Read + Write + Seek> SeekReadWrite for T {}
+
+pub struct TrailerCtx {
+    pub actual_ube_offset: u64,
+    pub ube_total_size: u64,
+    pub inject_offset: u64,
+    pub inject_size: u64,
+    pub strategy: &'static str, // 或 &str
+}
 
 pub struct FinalizeCtx<'a> {
     pub ube_offset: u64,
@@ -218,20 +236,23 @@ pub struct FinalizeCtx<'a> {
 }
 ```
 
-`strategy_note`（`engine.rs:899-950`）同样下沉为 `fn strategy_note(&self, strategy: &str, fallback: bool) -> Option<String>`，
+`strategy_note`（`engine.rs:1048-1100`）同样下沉为 `fn strategy_note(&self, strategy: &str, fallback: bool) -> Option<String>`，
 默认 `None`，各 adapter 自行实现（文案本来就属于格式知识，不属于引擎）。
 
 改完后 `engine.rs` 减少约 70 行，且**新增格式不再需要碰 engine**。
 
 ### 4.2 修掉三处静默降级
 
-1. `envelope.rs` 新增 `pub const MAX_KNOWN_STRATEGY_ID: u8`，`envelope.rs:308` 的 `<= 10` 改为引用该常量；
-   新增测试断言 `MAX_KNOWN_STRATEGY_ID == STRATEGY_REGISTRY 的最大 id`。
+1. `envelope.rs` 新增 `pub const MAX_KNOWN_STRATEGY_ID: u8 = 11;`，`envelope.rs:371` 的 `<= 10` 改为引用该常量；
+   新增测试断言 `MAX_KNOWN_STRATEGY_ID >= STRATEGY_REGISTRY 的最大 id`。
 2. `router.rs` 新增单一真源：
    ```rust
-   pub static STRATEGY_REGISTRY: &[(&str, u8)] = &[("eof",1),("chunk",2),("box_uuid",3),
-       ("pre_cd_inject",4),("app_segment",5),("incremental",6),("pe_overlay",7),("pe_codebits",8),
-       ("pe_slack",9)];
+   pub static STRATEGY_REGISTRY: &[(&str, u8)] = &[
+       ("eof", 1), ("chunk", 2), ("box_uuid", 3),
+       ("pre_cd_inject", 4), ("app_segment", 5), ("incremental", 6),
+       ("pe_overlay", 7), ("pe_codebits", 8), ("pe_slack", 9),
+       ("riff_chunk", 10), ("ebml_void", 11),
+   ];
    ```
    `strategy_to_id` 改返回 `Result<u8, StrHideError>`，删掉 `_ => 1`；
    `id_to_strategy` 保留 `_ => "unknown"`，让上层能给出明确错误而不是假装是 eof。
@@ -239,8 +260,9 @@ pub struct FinalizeCtx<'a> {
 
 **兼容性**：ID 只增不改、只追加到末尾，已写出的载体不受影响。
 
-### 4.3 抽公共工具（消除 P1-9 / P1-5 / P1-6）
+### 4.3 抽公共工具与修好默认 `strip`（消除 P0-3 / P1-9 / P1-5 / P1-6）
 
+- `adapters/mod.rs` 默认 `strip`：增加 `if (header.patch_offset as u64) < header.inject_offset` 分支，原生支持前置补丁，使 RIFF（WEBP/WAV）无需自定义 `strip`。
 - `adapters/io.rs`：`copy_exact(r, w, n)`（流泵，替换 `adapters/` 下 23 处 `loop { read; write_all; break }`）、
   `with_restored_position(r, |r| ...)`（RAII 位置守卫，替换 38 处手工 save/restore）、
   `copy_stream(r, w)`。
@@ -364,37 +386,21 @@ pub struct RiffAdapter { pub format_name: &'static str, pub form_type: [u8;4] }
 // WebpAdapter { "WEBP", *b"WEBP" },  WavAdapter { "WAV", *b"WAVE" }
 ```
 
-**注入策略 `riff_chunk`**（新策略名 → **strategy_id = 9**，触发 §4.2 的常量修复）：
+**注入策略 `riff_chunk`**（新策略名 → **strategy_id = 10**，触发 §4.2 的常量修复）：
 在文件末尾追加一个 chunk：
 
 ```
 'SHRD' | payload_len(u32 LE) | UBE 字节流 | [1 字节 0x00 补齐]
 ```
 
-**关键设计：不需要通用补丁机制。**
-`inject` 的 `host_in` 是 `SeekRead`，可以先 `seek(End(0))` 拿到宿主长度，
-**直接把正确的 RIFF size 一次写对**：
+**补丁机制设计（使用修复后的默认 `strip`）**：
+- `patch_offset = 4`（RIFF size 偏移）。
+- `orig_patch_val = 原宿主真实的 RIFF size`（4 字节 u32 LE，记录在 header 中）。
+- `inject` 时直接写出新的 RIFF size：
+  `new_riff_size = cur_riff_size + inject_size`
+- 还原时复用 §4.3 修复后的 trait 默认 `strip`：由于 `patch_offset < inject_offset`，默认实现直接将 `orig_patch_val` 原样写回 offset 4，**彻底杜绝了因原文件尾随垃圾导致 `orig_host_size - 8` 算错的风险**，并且 WEBP 与 WAV **均无需重写自定义 `strip`**。
 
-```
-new_riff_size = host_len + 8 (chunk 头) + ube_size + pad - 8
-```
-
-于是 `patch_offset = 0`（无补丁），**完全绕开 P0-3 的阻塞**。
-
-**`strip` override**（每个 RIFF adapter 约 40 行）：
-默认实现会原样复制 `[0, inject_offset)`，其中包含**已被改大的** RIFF size。必须自己实现：
-
-```
-copy [0,4)
-write (orig_host_size - 8) as u32 LE      // 从 EnvelopeHeader 派生，无需存原值
-copy [4, inject_offset)
-skip [inject_offset, inject_offset + inject_size)
-copy 其余全部
-```
-
-`orig_host_size` 已在 header 里（`envelope.rs:60`），**不需要协议变更**。
-
-**`envelope_offset_delta("riff_chunk", _) = 8`**（UBE 起点 = chunk 头之后 8 字节）。
+**`envelope_offset_delta("riff_chunk", _) = Ok(8)`**（UBE 起点 = chunk 头之后 8 字节）。
 
 **`locate`**：走 chunk 链，找到 fourcc == `SHRD` 且 payload 尾部 trailer 校验通过；
 回退到 eof 尾部检查（复用 §4.3 的公共 helper）。
@@ -451,9 +457,7 @@ copy 其余全部
 | `read_id(r) -> u32` | ID 是**保留 marker** 的 VINT（1～4 字节） |
 | `walk_segment(r) -> Vec<Element>` | 顶层遍历 + Segment 子元素遍历 |
 
-**注入策略 `ebml_void`**（新策略名 → **strategy_id = 10**，用满 `MAX_KNOWN_STRATEGY_ID` 的余量，
-再次印证 §4.2 那个常量必须先修）。
-
+**注入策略 `ebml_void`**（新策略名 → **strategy_id = 11**，已要求 §4.2 常量设为 11）：
 Segment 内部追加一个 **Void 元素**（ID `0xEC`）——Void 是 Matroska 规范里专门用于填充/保留的元素，
 **所有合规解析器都会跳过它**，比在顶层追加未知元素干净得多：
 
@@ -461,17 +465,20 @@ Segment 内部追加一个 **Void 元素**（ID `0xEC`）——Void 是 Matroska
 0xEC | size_vint | UBE 字节流 | ...
 ```
 
+**格式边界与注入点约定**：
+- **WebM 兼容**：EBML Header 相同，`DocType` 可以是 `matroska` 或 `webm`，二者均规范支持 Void 元素。
+- **注入点位置**：追加在 **Segment 最后一个有效子元素末尾**（若末尾有尾随垃圾或非 EBML 附加字节，保持在注入区后）。
+
 **Segment size 处理（三种情况）**：
 
 | 情况 | 处理 | `patch_offset` | `strip` |
 | --- | --- | --- | --- |
 | Segment size 是 **unknown**（VINT data 全 1，流式录制常见） | 无需改，Segment 本身声明"延伸到 EOF" | `0` | 用 trait 默认实现 |
-| size **已知**且 VINT 宽度 ≥ 4 字节 | 原地改值：`new = old + inject_size` | 需要 | 覆盖：`orig = cur - inject_size` |
+| size **已知**且 VINT 宽度 ≥ 4 字节 | 原地改值：`new = old + inject_size` | 需要 | 覆盖：`orig = cur - inject_size`（因为 8 字节 VINT 无法存入 u32 `orig_patch_val`，故 MKV 仍需 override `strip`） |
 | size **已知**但 VINT 太窄、加完会溢出 | **拒绝 `ebml_void`**，回退 `eof` | — | — |
 
 **加法型补丁的可逆性**：`new = old + Δ` ⟹ `old = new - Δ`，而 `Δ = inject_size` 就在 header 里
-（`envelope.rs:62`）。**原值永远不需要存进 header**——这是 RIFF 和 MKV 能共用同一套 strip 逻辑的根本原因，
-也让 P0-4（单点 u32 补丁）暂时不需要协议升级。
+（`envelope.rs:62`）。**原值不需要存进 header**——这让 8 字节 VINT 的 MKV 在 header 只有 u32 `orig_patch_val` 的情况下依然能完美还原。
 
 > ⚠️ **`inject_size` 必须是元素总长，含容器头。**
 > 实测中原型第一版按"载荷长度"（4019）回算，Segment size 差 5 字节（`1` 字节 Void ID + `4` 字节 size VINT），
@@ -593,18 +600,18 @@ sampling_frequency_index(4) | private(1) | channel_config(3) | ...
 | 变更 | 是否改协议 | 影响 |
 | --- | --- | --- |
 | HEIC/HEIF 复用 `box_uuid`(3) | 否 | 完全向后兼容 |
-| WEBP/WAV 用 `riff_chunk`(9) | 否（策略名不是协议字段） | 新策略占新 ID |
-| MKV 用 `ebml_void`(10) | 否 | 新策略占新 ID |
-| RIFF/MKV 的 strip 派生原值 | 否 | `orig_host_size` / `inject_size` 已在 header 里 |
+| WEBP/WAV 用 `riff_chunk`(10) | 否（策略名不是协议字段） | 新策略占新 ID（已有 `pe_slack` 为 9） |
+| MKV 用 `ebml_void`(11) | 否 | 新策略占新 ID |
+| 修复默认 strip 支持前置 patch | 否 | 修复 trait 默认实现的坐标平移，向后兼容 |
 | 删除 `router.rs` 的 `_ =>` 降级 | 否 | 只让错误变响，不改变已有 ID |
-| `envelope.rs` 的 `<= 10` 改为常量 | 否 | 值随注册表增长 |
-| `MAX_KNOWN_STRATEGY_ID` | 否 | 纯常量 |
+| `envelope.rs` 的 `<= 10` 改为常量 11 | 否 | 随注册表增长，消除静默错误 |
+| `MAX_KNOWN_STRATEGY_ID = 11` | 否 | 纯常量 |
 
 **结论：本次全部改动不动 envelope 二进制布局（`HEADER_SIZE = 112` 不变），
 所有已写出的载体继续可读。**
 
 新增策略 ID 分配（只追加，永不重排）：
-`9 = riff_chunk`，`10 = ebml_void`。
+`10 = riff_chunk`，`11 = ebml_void`。
 
 ---
 
@@ -708,17 +715,17 @@ sampling_frequency_index(4) | private(1) | channel_config(3) | ...
 
 | 文件 | 改动 | 行数估计 |
 | --- | --- | --- |
-| `adapters/mod.rs` | +3 个默认方法、+2 个类型、`SubStream` → `SegmentedSubStream` | +90 / -50 |
+| `adapters/mod.rs` | +3 个默认方法、+SeekReadWrite/TrailerCtx、修复默认 strip 前置 patch、`SubStream` → `SegmentedSubStream` | +90 / -50 |
 | `adapters/io.rs` | **新建**：`copy_exact` / `with_restored_position` / `copy_stream` | +80 |
 | `adapters/png.rs` | 实现 `envelope_offset_delta`(8) / `finalize`(CRC) / `strategy_note`；用 `io` 工具 | ±60 |
-| `adapters/jpeg.rs` | 实现 `trailer_anchor`(EndOfInjection) / `strategy_note`；删 87 行私有 reader | -87 / +15 |
+| `adapters/jpeg.rs` | 实现 `trailer_offset` / `strategy_note`；删 87 行私有 reader | -87 / +15 |
 | `adapters/mp4.rs` | 实现 `envelope_offset_delta` / `strategy_note`；eof 改委托；mdat size==0 检查 | -30 / +25 |
 | `adapters/pdf.rs` | 实现 `envelope_offset_delta` / `strategy_note` | +25 |
 | `adapters/zip.rs` | 实现 `strategy_note` | +10 |
 | `adapters/pe.rs` | 实现 `strategy_note`；eof 改委托 | +10 |
 | `engine.rs` | **删 12 处格式分派 + 抽 3 个 helper**；Level 3 改为复用已定位流 | **-150 / +40** |
 | `router.rs` | `STRATEGY_REGISTRY` 单一真源；`strategy_to_id` 改 `Result` | +20 |
-| `envelope.rs` | `MAX_KNOWN_STRATEGY_ID`；`:308` 改引用常量 | +5 |
+| `envelope.rs` | `MAX_KNOWN_STRATEGY_ID = 11`；`:371` 改引用常量 | +5 |
 | `tests/matrix_lifecycle.rs` | `FORMATS` 表驱动，11 处数组 → 1 处 | -60 / +50 |
 | `tests/pe_codebits.rs` | 白名单改从 `ADAPTERS` 派生 | ±10 |
 

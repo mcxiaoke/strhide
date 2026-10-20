@@ -667,4 +667,29 @@ impl HostAdapter for PdfAdapter {
 
         found
     }
+
+    fn envelope_offset_delta(
+        &self,
+        carrier: &mut dyn SeekRead,
+        strategy: &str,
+        ube_size: u64,
+    ) -> Result<u64, StrHideError> {
+        if strategy == "incremental" {
+            PdfAdapter::calc_prefix_len(carrier, ube_size)
+        } else {
+            Ok(0)
+        }
+    }
+
+    fn strategy_note(&self, strategy: &str, fallback: bool) -> Option<String> {
+        if strategy == "incremental" {
+            Some("Embedded into compliant PDF Incremental Update stream ending with %%EOF (original trailing bytes, if any, preserved after the final %%EOF).".into())
+        } else if strategy == "eof" && fallback {
+            Some("PDF trailer could not be incrementally parsed; automatically fell back to EOF overlay.".into())
+        } else if strategy == "eof" {
+            Some("Appended after PDF %%EOF (EOF overlay).".into())
+        } else {
+            None
+        }
+    }
 }

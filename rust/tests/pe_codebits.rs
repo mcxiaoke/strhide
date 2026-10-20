@@ -401,12 +401,29 @@ fn codebits_32bit_pe_roundtrip() {
     assert_eq!(sha256_hex(&fs::read(&restored).unwrap()), orig_sha);
 }
 
-/// Guard: the strategy registry knows pe_codebits (id 8) in both directions.
+/// Guard: the strategy registry knows pe_codebits (id 8) and all registered entries roundtrip.
 #[test]
 fn strategy_registry_roundtrip() {
-    use strhide::router::{id_to_strategy, strategy_to_id};
-    assert_eq!(strategy_to_id("pe_codebits"), 8);
+    use strhide::envelope::MAX_KNOWN_STRATEGY_ID;
+    use strhide::router::{STRATEGY_REGISTRY, id_to_strategy, strategy_to_id};
+
+    assert_eq!(strategy_to_id("pe_codebits").unwrap(), 8);
     assert_eq!(id_to_strategy(8), "pe_codebits");
+
+    let mut max_id = 0u8;
+    for &(name, id) in STRATEGY_REGISTRY {
+        assert_eq!(strategy_to_id(name).unwrap(), id);
+        assert_eq!(id_to_strategy(id), name);
+        if id > max_id {
+            max_id = id;
+        }
+    }
+    assert!(
+        MAX_KNOWN_STRATEGY_ID >= max_id,
+        "MAX_KNOWN_STRATEGY_ID ({MAX_KNOWN_STRATEGY_ID}) must be >= maximum registered id ({max_id})"
+    );
+    assert_eq!(id_to_strategy(255), "unknown");
+    assert!(strategy_to_id("non_existent_strategy").is_err());
 }
 
 /// Unrecognized files must be rejected outright (no silent EOF fallback):
@@ -673,8 +690,12 @@ fn static_capacity_table_covers_all_adapters() {
             }
         }
     }
-    for expected in ["PNG", "JPEG", "MP4", "ZIP", "PDF", "PE"] {
-        assert!(formats.contains(&expected), "missing format {expected}");
+    let expected_names: Vec<&str> = strhide::router::ADAPTERS
+        .iter()
+        .map(|a| a.format_name())
+        .collect();
+    for expected in &expected_names {
+        assert!(formats.contains(expected), "missing format {expected}");
     }
     // Unrecognized files are not a format: no catch-all adapter may appear.
     assert!(

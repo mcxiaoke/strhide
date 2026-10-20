@@ -666,7 +666,7 @@ fn zero_virtual_size_section_is_not_padding() {
 #[test]
 fn strategy_registry_roundtrip() {
     use strhide::router::{id_to_strategy, strategy_to_id};
-    assert_eq!(strategy_to_id("pe_slack"), 9);
+    assert_eq!(strategy_to_id("pe_slack").unwrap(), 9);
     assert_eq!(id_to_strategy(9), "pe_slack");
 }
 

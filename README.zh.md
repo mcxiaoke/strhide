@@ -1,6 +1,6 @@
 # strhide
 
-**智能格式保持、无损数据隐藏工具。** 将文本或文件隐藏到普通宿主文件（PNG、JPEG、MP4、ZIP、PDF、Windows PE 可执行文件）中，不改变宿主的可见格式、外观和功能，事后可逐比特还原原始宿主文件。
+**智能格式保持、无损数据隐藏工具。** 将文本或文件隐藏到普通宿主文件（PNG、JPEG、WebP、HEIC/HEIF、MP4、WAV、MKV、ZIP、PDF、Windows PE 可执行文件）中，不改变宿主的可见格式、外观和功能，事后可逐比特还原原始宿主文件。
 
 本仓库提供两套实现：
 
@@ -15,7 +15,7 @@
 
 ## 特性
 
-- **格式保持**——宿主文件仍是合法的 PNG/JPEG/MP4/ZIP/PDF/PE，可正常显示或运行。
+- **格式保持**——宿主文件仍是合法的 PNG/JPEG/WebP/HEIF/MP4/WAV/MKV/ZIP/PDF/PE，可正常显示、播放或运行。
 - **100% 可逆**——信封中嵌入原始宿主的 SHA-256，`read`/`restore` 输出保证与原文件逐比特一致。
 - **落盘即加密**——每个信封在写入载体前都经 Deflate 压缩与 AES-256-GCM 加密。不设密码时使用内置密钥，载体中不会泄露明文载荷、宿主哈希或文件名；设置密码则获得真正的密钥分离（PBKDF2-HMAC-SHA256 10 万轮 + HKDF-SHA256，分块 GCM）。
 - **隐写模式（Stealth）**——设置密码后，信封签名与头部字段均由密码派生，没有密码就无从发现隐藏数据。即使在默认（非 stealth）模式下也没有静态 ASCII 魔数：不存在 `STRHIDE` / `STH!` 这类字符串，只有高熵二进制签名（读取时仍兼容旧版魔数）。
@@ -134,7 +134,11 @@ meta = inspect_carrier("carrier.png", password="pw")
 | --- | --- | --- |
 | PNG | ✓ | IDAT 块之间注入 chunk |
 | JPEG | ✓ | APPn 段注入、多段链式 |
-| MP4 | ✓ | free/uuid box 注入 |
+| WebP | ✓ | `riff_chunk` 私有 `SHRD` chunk 注入 |
+| HEIC / HEIF | ✓ | `box_uuid` 规范 ISO BMFF uuid box 注入 |
+| MP4 | ✓ | `box_uuid` free/uuid box 注入 |
+| WAV | ✓ | `riff_chunk` 私有 `SHRD` chunk 注入 |
+| MKV | ✓ | `ebml_void` 规范 EBML Void 元素注入 |
 | ZIP | ✓ | 中央目录之前插入条目 |
 | PDF | ✓ | 增量更新 / 对象注入 |
 | Windows PE（exe/dll） | ✓ | `pe_slack` 节填充信封（文件尺寸不变）、`pe_codebits` 指令编码信道，或 overlay 数据 |

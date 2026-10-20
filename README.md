@@ -1,6 +1,6 @@
 # strhide
 
-**Smart format-preserving, lossless data hiding.** Hide text or files inside ordinary host files (PNG, JPEG, MP4, ZIP, PDF, Windows PE executables) without changing the host's visible format, appearance, or functionality — and restore the original host file bit-for-bit afterwards.
+**Smart format-preserving, lossless data hiding.** Hide text or files inside ordinary host files (PNG, JPEG, WebP, HEIC/HEIF, MP4, WAV, MKV, ZIP, PDF, Windows PE executables) without changing the host's visible format, appearance, or functionality — and restore the original host file bit-for-bit afterwards.
 
 This repository ships two implementations:
 
@@ -15,7 +15,7 @@ Compatibility is one-directional: the Rust build can still read envelopes writte
 
 ## Features
 
-- **Format preserving** — the carrier file stays a valid PNG/JPEG/MP4/ZIP/PDF/PE and renders or runs normally.
+- **Format preserving** — the carrier file stays a valid PNG/JPEG/WebP/HEIF/MP4/WAV/MKV/ZIP/PDF/PE and renders, plays, or runs normally.
 - **100% reversible** — an embedded SHA-256 of the original host guarantees the `read`/`restore` output matches the original bit-for-bit.
 - **Always encrypted on disk** — every envelope is Deflate-compressed and AES-256-GCM-encrypted before it touches the carrier. With no password a built-in key is used, so the carrier never leaks plaintext payload, host hash, or filenames; supplying a password adds real key separation (PBKDF2-HMAC-SHA256, 100,000 rounds + HKDF-SHA256, chunked GCM).
 - **Stealth mode** — with a password, envelope signatures and header fields are derived from the password, so there is nothing to find without it. Even in the default (non-stealth) mode there are no static ASCII magics: no `STRHIDE` / `STH!` strings, only high-entropy binary signatures (legacy magics still recognized for reading).
@@ -137,7 +137,11 @@ All functions return a result dict and raise `StrHideError` subclasses on failur
 | --- | --- | --- |
 | PNG | ✓ | chunk injection between IDAT chunks |
 | JPEG | ✓ | APPn segment injection, multi-segment chaining |
-| MP4 | ✓ | free/uuid box injection |
+| WebP | ✓ | `riff_chunk` private `SHRD` chunk injection |
+| HEIC / HEIF | ✓ | `box_uuid` compliant ISO BMFF uuid box injection |
+| MP4 | ✓ | `box_uuid` free/uuid box injection |
+| WAV | ✓ | `riff_chunk` private `SHRD` chunk injection |
+| MKV | ✓ | `ebml_void` compliant EBML Void element injection |
 | ZIP | ✓ | entries before the central directory |
 | PDF | ✓ | incremental update / object injection |
 | Windows PE (exe/dll) | ✓ | `pe_slack` section-padding envelope (file size unchanged), `pe_codebits` instruction-encoding channel, or overlay data |

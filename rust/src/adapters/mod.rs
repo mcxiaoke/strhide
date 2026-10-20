@@ -21,15 +21,34 @@
 //!   every carrier when its primary strategy does not fit.
 //! - [`pe_codebits`], [`pe_slack`] — sub-strategies of the PE adapter.
 
+pub mod ebml;
 pub mod eof;
+pub mod heif;
+pub mod io;
+pub mod isobmff;
 pub mod jpeg;
+pub mod mkv;
 pub mod mp4;
 pub mod pdf;
 pub mod pe;
 pub mod pe_codebits;
 pub mod pe_slack;
 pub mod png;
+pub mod riff;
+pub mod wav;
+pub mod webp;
 pub mod zip;
+
+pub use heif::HeifAdapter;
+pub use jpeg::JpegAdapter;
+pub use mkv::MkvAdapter;
+pub use mp4::Mp4Adapter;
+pub use pdf::PdfAdapter;
+pub use pe::PeAdapter;
+pub use png::PngAdapter;
+pub use wav::WavAdapter;
+pub use webp::WebpAdapter;
+pub use zip::ZipAdapter;
 
 use crate::envelope::EnvelopeHeader;
 use crate::errors::StrHideError;
@@ -44,6 +63,28 @@ impl<T: Read + Seek> SeekRead for T {}
 /// Combination trait: anything that is both [`Write`] and [`Seek`].
 pub trait SeekWrite: Write + Seek {}
 impl<T: Write + Seek> SeekWrite for T {}
+
+/// Combination trait: anything that is [`Read`], [`Write`], and [`Seek`].
+pub trait SeekReadWrite: Read + Write + Seek {}
+impl<T: Read + Write + Seek> SeekReadWrite for T {}
+
+/// Context for determining the physical trailer offset in the carrier.
+pub struct TrailerCtx<'a> {
+    pub actual_ube_offset: u64,
+    pub ube_total_size: u64,
+    pub inject_offset: u64,
+    pub inject_size: u64,
+    pub strategy: &'a str,
+}
+
+/// Context passed to [`HostAdapter::finalize`] for carrier-specific post-write adjustments.
+pub struct FinalizeCtx<'a> {
+    pub ube_offset: u64,
+    pub ube_total_size: u64,
+    pub inject_offset: u64,
+    pub inject_size: u64,
+    pub strategy: &'a str,
+}
 
 /// Capacity and availability of one injection strategy for a carrier.
 ///
@@ -67,6 +108,19 @@ pub struct StrategyCapacity {
     /// Optional detail: channel behavior, retry/fallback hints, slack needs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+impl StrategyCapacity {
+    /// Helper constructor for strategies that append data and grow the file without an architectural upper bound.
+    pub fn unbounded_growth(strategy: &str, note: &str) -> Self {
+        Self {
+            strategy: strategy.into(),
+            capacity_bytes: None,
+            available: true,
+            limit: "unlimited (file grows)".into(),
+            note: Some(note.into()),
+        }
+    }
 }
 
 /// Formats a byte count with thousands separators (`2147483647` →
@@ -191,15 +245,17 @@ pub trait HostAdapter: Send + Sync {
         // eocd_pos + 16 + ube_size), so a patch at absolute offset 0 is
         // unreachable in the protocol.
         if header.patch_offset != 0 {
-            debug_assert!(
-                header.patch_offset as u64 >= header.inject_offset + header.inject_size,
-                "patch_offset must point past the injected region"
-            );
-            let out_patch_pos = (header.patch_offset as u64)
-                .checked_sub(header.inject_size)
-                .ok_or_else(|| {
-                    StrHideError::CorruptedData("patch_offset precedes the injected region".into())
-                })?;
+            let out_patch_pos = if (header.patch_offset as u64) < header.inject_offset {
+                header.patch_offset as u64
+            } else if (header.patch_offset as u64) >= header.inject_offset + header.inject_size {
+                (header.patch_offset as u64)
+                    .checked_sub(header.inject_size)
+                    .ok_or_else(|| StrHideError::CorruptedData("patch_offset underflow".into()))?
+            } else {
+                return Err(StrHideError::CorruptedData(
+                    "patch_offset falls inside the injected region".into(),
+                ));
+            };
             out.seek(SeekFrom::Start(out_patch_pos))?;
             out.write_all(&header.orig_patch_val.to_le_bytes())?;
         }
@@ -241,54 +297,145 @@ pub trait HostAdapter: Send + Sync {
             ube_total_size,
         )?))
     }
+
+    /// Format-specific offset adjustment between `inject_offset` and the real start of the UBE.
+    ///
+    /// For formats where the UBE is wrapped in a container header (PNG private chunk header,
+    /// ISO-BMFF uuid box header, JPEG APP marker, PDF object header), this returns the header length.
+    /// Default: `0` (contiguous injection starting immediately at `inject_offset`).
+    fn envelope_offset_delta(
+        &self,
+        _carrier: &mut dyn SeekRead,
+        _strategy: &str,
+        _ube_size: u64,
+    ) -> Result<u64, StrHideError> {
+        Ok(0)
+    }
+
+    /// Calculate the physical carrier offset where the 24-byte envelope trailer should be written.
+    ///
+    /// Default: contiguous trailer at `actual_ube_offset + ube_total_size - 24`.
+    fn trailer_offset(&self, ctx: &TrailerCtx) -> u64 {
+        ctx.actual_ube_offset + ctx.ube_total_size - 24
+    }
+
+    /// Format-specific post-write finalization (e.g. updating chunk CRCs).
+    ///
+    /// Called after the envelope header and trailer have been written into the carrier.
+    fn finalize(
+        &self,
+        _carrier: &mut dyn SeekReadWrite,
+        _ctx: &FinalizeCtx,
+    ) -> Result<(), StrHideError> {
+        Ok(())
+    }
+
+    /// Format-specific note describing how and where the hidden data was embedded.
+    ///
+    /// Default: `None`.
+    fn strategy_note(&self, _strategy: &str, _fallback: bool) -> Option<String> {
+        None
+    }
 }
 
-/// A zero-copy bounded slice of a [`SeekRead`] stream. Used to present a
-/// contiguous view over a scattered envelope (e.g. PE codebits) or a bounded
-/// window over a carrier's bytes without copying them.
-pub struct SubStream<'a> {
+/// A zero-copy segmented bounded slice of a [`SeekRead`] stream.
+/// Can represent either a single contiguous slice or a chain of segments
+/// (e.g. JPEG APPn multi-segment chains).
+pub struct SegmentedSubStream<'a> {
     inner: &'a mut dyn SeekRead,
-    base_offset: u64,
+    segments: Vec<(u64, u64)>,
     total_size: u64,
-    pos: u64,
+    logical_pos: u64,
 }
 
-impl<'a> SubStream<'a> {
+pub type SubStream<'a> = SegmentedSubStream<'a>;
+
+impl<'a> SegmentedSubStream<'a> {
+    /// Create a single-segment bounded sub-stream starting at `base_offset`.
     pub fn new(
         inner: &'a mut dyn SeekRead,
         base_offset: u64,
         total_size: u64,
     ) -> Result<Self, StrHideError> {
-        use std::io::SeekFrom;
-        inner.seek(SeekFrom::Start(base_offset))?;
-        Ok(Self {
+        Self::from_segments(inner, vec![(base_offset, total_size)], total_size)
+    }
+
+    /// Create a multi-segment chained virtual sub-stream across multiple `(start, len)` segment slices.
+    pub fn from_segments(
+        inner: &'a mut dyn SeekRead,
+        segments: Vec<(u64, u64)>,
+        total_size: u64,
+    ) -> Result<Self, StrHideError> {
+        let mut stream = Self {
             inner,
-            base_offset,
+            segments,
             total_size,
-            pos: 0,
-        })
+            logical_pos: 0,
+        };
+        stream.sync_inner_seek()?;
+        Ok(stream)
+    }
+
+    fn sync_inner_seek(&mut self) -> Result<(), StrHideError> {
+        use std::io::SeekFrom;
+        if self.logical_pos >= self.total_size {
+            return Ok(());
+        }
+        let mut rem = self.logical_pos;
+        for &(start, len) in &self.segments {
+            if rem < len {
+                self.inner.seek(SeekFrom::Start(start + rem))?;
+                return Ok(());
+            }
+            rem -= len;
+        }
+        Ok(())
     }
 }
 
-impl Read for SubStream<'_> {
+impl Read for SegmentedSubStream<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.pos >= self.total_size {
+        use std::io::SeekFrom;
+        if self.logical_pos >= self.total_size || buf.is_empty() {
             return Ok(0);
         }
-        let remaining = self.total_size - self.pos;
-        let to_read = std::cmp::min(buf.len() as u64, remaining) as usize;
+
+        let mut rem = self.logical_pos;
+        let mut target_seg = None;
+        for &(start, len) in &self.segments {
+            if rem < len {
+                target_seg = Some((start, len, rem));
+                break;
+            }
+            rem -= len;
+        }
+
+        let (seg_start, seg_len, offset_in_seg) = match target_seg {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        let seg_remaining = seg_len - offset_in_seg;
+        let total_remaining = self.total_size - self.logical_pos;
+        let to_read = std::cmp::min(
+            buf.len() as u64,
+            std::cmp::min(seg_remaining, total_remaining),
+        ) as usize;
+
+        self.inner
+            .seek(SeekFrom::Start(seg_start + offset_in_seg))?;
         let n = self.inner.read(&mut buf[..to_read])?;
-        self.pos += n as u64;
+        self.logical_pos += n as u64;
         Ok(n)
     }
 }
 
-impl Seek for SubStream<'_> {
+impl Seek for SegmentedSubStream<'_> {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         use std::io::SeekFrom;
         let new_pos = match pos {
             SeekFrom::Start(p) => p as i64,
-            SeekFrom::Current(p) => self.pos as i64 + p,
+            SeekFrom::Current(p) => self.logical_pos as i64 + p,
             SeekFrom::End(p) => self.total_size as i64 + p,
         };
         if new_pos < 0 {
@@ -297,10 +444,9 @@ impl Seek for SubStream<'_> {
                 "Invalid seek to negative position",
             ));
         }
-        let new_pos = new_pos as u64;
-        self.inner
-            .seek(SeekFrom::Start(self.base_offset + new_pos))?;
-        self.pos = new_pos;
-        Ok(self.pos)
+        self.logical_pos = new_pos as u64;
+        self.sync_inner_seek()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(self.logical_pos)
     }
 }

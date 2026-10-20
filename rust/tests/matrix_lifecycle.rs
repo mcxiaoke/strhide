@@ -71,6 +71,68 @@ fn make_mp4() -> Vec<u8> {
     out
 }
 
+/// Minimal HEIF: ftyp box with 'heic' major brand followed by a 'free' box.
+fn make_heif() -> Vec<u8> {
+    let mut out = Vec::new();
+    let ftyp = b"heic\0\0\0\0mif1heic";
+    out.extend_from_slice(&(8u32 + ftyp.len() as u32).to_be_bytes());
+    out.extend_from_slice(b"ftyp");
+    out.extend_from_slice(ftyp);
+    out.extend_from_slice(&8u32.to_be_bytes());
+    out.extend_from_slice(b"free");
+    out
+}
+
+/// Minimal valid WebP: RIFF header with 'WEBP' and a minimal 'VP8 ' chunk.
+fn make_webp() -> Vec<u8> {
+    let mut out = Vec::new();
+    let vp8_data = b"\x00\x00\x00\x9d\x01\x2a\x01\x00\x01\x00";
+    let file_size = 12 + 8 + vp8_data.len();
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&((file_size - 8) as u32).to_le_bytes());
+    out.extend_from_slice(b"WEBP");
+    out.extend_from_slice(b"VP8 ");
+    out.extend_from_slice(&(vp8_data.len() as u32).to_le_bytes());
+    out.extend_from_slice(vp8_data);
+    out
+}
+
+/// Minimal valid WAV: RIFF header with 'WAVE', 'fmt ' chunk, and 'data' chunk.
+fn make_wav() -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut fmt_chunk = Vec::new();
+    fmt_chunk.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    fmt_chunk.extend_from_slice(&1u16.to_le_bytes()); // 1 channel
+    fmt_chunk.extend_from_slice(&8000u32.to_le_bytes()); // 8000 Hz
+    fmt_chunk.extend_from_slice(&16000u32.to_le_bytes()); // 16000 bytes/sec
+    fmt_chunk.extend_from_slice(&2u16.to_le_bytes()); // block align 2
+    fmt_chunk.extend_from_slice(&16u16.to_le_bytes()); // 16 bits per sample
+
+    let data_chunk = vec![0u8; 16];
+    let file_size = 12 + (8 + fmt_chunk.len()) + (8 + data_chunk.len());
+
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&((file_size - 8) as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&(fmt_chunk.len() as u32).to_le_bytes());
+    out.extend_from_slice(&fmt_chunk);
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(data_chunk.len() as u32).to_le_bytes());
+    out.extend_from_slice(&data_chunk);
+    out
+}
+
+/// Minimal valid Matroska (MKV): EBML header + Segment element.
+fn make_mkv() -> Vec<u8> {
+    let mut out = Vec::new();
+    // EBML Header: ID 0x1A45DFA3, size 15, payload: EBMLVersion 1 (4 bytes) + DocType "matroska" (11 bytes)
+    out.extend_from_slice(b"\x1A\x45\xDF\xA3\x8F\x42\x86\x81\x01\x42\x82\x88matroska");
+    // Matroska Segment: ID 0x18538067, size 0 (0x80)
+    out.extend_from_slice(b"\x18\x53\x80\x67\x80");
+    out
+}
+
 /// Minimal stored-entry ZIP: local header, central directory, EOCD.
 fn make_zip() -> Vec<u8> {
     let mut out = Vec::new();
@@ -187,18 +249,39 @@ fn make_pe(text_len: usize) -> Vec<u8> {
 enum Fmt {
     Png,
     Jpeg,
+    Webp,
+    Heif,
     Mp4,
+    Wav,
+    Mkv,
     Zip,
     Pdf,
     Pe,
 }
+
+const ALL_FMTS: &[Fmt] = &[
+    Fmt::Png,
+    Fmt::Jpeg,
+    Fmt::Webp,
+    Fmt::Heif,
+    Fmt::Mp4,
+    Fmt::Wav,
+    Fmt::Mkv,
+    Fmt::Zip,
+    Fmt::Pdf,
+    Fmt::Pe,
+];
 
 impl Fmt {
     fn name(self) -> &'static str {
         match self {
             Fmt::Png => "PNG",
             Fmt::Jpeg => "JPEG",
+            Fmt::Webp => "WEBP",
+            Fmt::Heif => "HEIF",
             Fmt::Mp4 => "MP4",
+            Fmt::Wav => "WAV",
+            Fmt::Mkv => "MKV",
             Fmt::Zip => "ZIP",
             Fmt::Pdf => "PDF",
             Fmt::Pe => "PE",
@@ -209,7 +292,11 @@ impl Fmt {
         match self {
             Fmt::Png => "png",
             Fmt::Jpeg => "jpg",
+            Fmt::Webp => "webp",
+            Fmt::Heif => "heic",
             Fmt::Mp4 => "mp4",
+            Fmt::Wav => "wav",
+            Fmt::Mkv => "mkv",
             Fmt::Zip => "zip",
             Fmt::Pdf => "pdf",
             Fmt::Pe => "exe",
@@ -221,11 +308,61 @@ impl Fmt {
         match self {
             Fmt::Png => make_png(),
             Fmt::Jpeg => make_jpeg(),
+            Fmt::Webp => make_webp(),
+            Fmt::Heif => make_heif(),
             Fmt::Mp4 => make_mp4(),
+            Fmt::Wav => make_wav(),
+            Fmt::Mkv => make_mkv(),
             Fmt::Zip => make_zip(),
             Fmt::Pdf => make_pdf(),
             // ~12 kB of code: enough for the smallest envelope even encrypted.
             Fmt::Pe => make_pe(0x3000),
+        }
+    }
+
+    fn default_strategy(self) -> &'static str {
+        match self {
+            Fmt::Png => "chunk",
+            Fmt::Jpeg => "app_segment",
+            Fmt::Webp => "riff_chunk",
+            Fmt::Heif => "box_uuid",
+            Fmt::Mp4 => "box_uuid",
+            Fmt::Wav => "riff_chunk",
+            Fmt::Mkv => "ebml_void",
+            Fmt::Zip => "pre_cd_inject",
+            Fmt::Pdf => "incremental",
+            Fmt::Pe => "pe_codebits",
+        }
+    }
+
+    fn expected_strategies(self) -> &'static [&'static str] {
+        match self {
+            Fmt::Png => &["chunk", "eof"],
+            Fmt::Jpeg => &["app_segment", "eof"],
+            Fmt::Webp => &["riff_chunk", "eof"],
+            Fmt::Heif => &["box_uuid", "eof"],
+            Fmt::Mp4 => &["box_uuid", "eof"],
+            Fmt::Wav => &["riff_chunk", "eof"],
+            Fmt::Mkv => &["ebml_void", "eof"],
+            Fmt::Zip => &["pre_cd_inject", "eof"],
+            Fmt::Pdf => &["incremental", "eof"],
+            Fmt::Pe => &["pe_codebits", "pe_slack", "pe_overlay", "eof"],
+        }
+    }
+
+    fn has_guided_stealth(self) -> bool {
+        matches!(
+            self,
+            Fmt::Png | Fmt::Jpeg | Fmt::Webp | Fmt::Heif | Fmt::Mp4 | Fmt::Wav | Fmt::Mkv
+        )
+    }
+
+    /// Whether this format reports a strategy other than `eof` when `eof` strategy is written.
+    /// PE's PeAdapter::locate reports any envelope at/after pe_image_end as `pe_overlay`.
+    fn eof_reported_strategy(self) -> Option<&'static str> {
+        match self {
+            Fmt::Pe => Some("pe_overlay"),
+            _ => None,
         }
     }
 }
@@ -401,19 +538,25 @@ fn run_cell_any_reported_strategy(
 
 #[test]
 fn eof_strategy_roundtrips_on_every_format() {
-    for fmt in [Fmt::Png, Fmt::Jpeg, Fmt::Mp4, Fmt::Zip, Fmt::Pdf] {
-        run_cell(fmt, "eof", Some("eof-pw"), false, "eof");
+    for &fmt in ALL_FMTS {
+        if fmt.eof_reported_strategy().is_some() {
+            // PE eof is reported as pe_overlay on locate (see helper doc).
+            run_cell_any_reported_strategy(fmt, "eof", Some("eof-pw"), false);
+        } else {
+            run_cell(fmt, "eof", Some("eof-pw"), false, "eof");
+        }
     }
-    // PE eof is reported as pe_overlay on locate (see helper doc).
-    run_cell_any_reported_strategy(Fmt::Pe, "eof", Some("eof-pw"), false);
 }
 
 #[test]
 fn eof_strategy_without_password_roundtrips() {
-    for fmt in [Fmt::Png, Fmt::Jpeg, Fmt::Mp4, Fmt::Zip, Fmt::Pdf] {
-        run_cell(fmt, "eof", None, false, "eof");
+    for &fmt in ALL_FMTS {
+        if fmt.eof_reported_strategy().is_some() {
+            run_cell_any_reported_strategy(fmt, "eof", None, false);
+        } else {
+            run_cell(fmt, "eof", None, false, "eof");
+        }
     }
-    run_cell_any_reported_strategy(Fmt::Pe, "eof", None, false);
 }
 
 // --------------------------------------------------------------------------- explicitly named strategies
@@ -429,7 +572,16 @@ fn explicit_non_default_strategies_roundtrip() {
         false,
         "app_segment",
     );
+    run_cell(
+        Fmt::Webp,
+        "riff_chunk",
+        Some("webp-pw"),
+        false,
+        "riff_chunk",
+    );
+    run_cell(Fmt::Heif, "box_uuid", Some("heif-pw"), false, "box_uuid");
     run_cell(Fmt::Mp4, "box_uuid", Some("uuid-pw"), false, "box_uuid");
+    run_cell(Fmt::Wav, "riff_chunk", Some("wav-pw"), false, "riff_chunk");
     run_cell(
         Fmt::Zip,
         "pre_cd_inject",
@@ -444,6 +596,7 @@ fn explicit_non_default_strategies_roundtrip() {
         false,
         "incremental",
     );
+    run_cell(Fmt::Mkv, "ebml_void", Some("mkv-pw"), false, "ebml_void");
     run_cell(
         Fmt::Pe,
         "pe_overlay",
@@ -465,7 +618,11 @@ fn explicit_non_default_strategies_roundtrip() {
 fn explicit_strategies_without_password_roundtrip() {
     run_cell(Fmt::Png, "chunk", None, false, "chunk");
     run_cell(Fmt::Jpeg, "app_segment", None, false, "app_segment");
+    run_cell(Fmt::Webp, "riff_chunk", None, false, "riff_chunk");
+    run_cell(Fmt::Heif, "box_uuid", None, false, "box_uuid");
     run_cell(Fmt::Mp4, "box_uuid", None, false, "box_uuid");
+    run_cell(Fmt::Wav, "riff_chunk", None, false, "riff_chunk");
+    run_cell(Fmt::Mkv, "ebml_void", None, false, "ebml_void");
     run_cell(Fmt::Zip, "pre_cd_inject", None, false, "pre_cd_inject");
     run_cell(Fmt::Pdf, "incremental", None, false, "incremental");
 }
@@ -474,20 +631,13 @@ fn explicit_strategies_without_password_roundtrip() {
 
 #[test]
 fn stealth_roundtrips_on_every_format() {
-    for fmt in [Fmt::Png, Fmt::Jpeg, Fmt::Mp4, Fmt::Zip, Fmt::Pdf, Fmt::Pe] {
+    for &fmt in ALL_FMTS {
         run_cell(
             fmt,
             "auto",
             Some("stealth-pw"),
             true,
-            match fmt {
-                Fmt::Png => "chunk",
-                Fmt::Jpeg => "app_segment",
-                Fmt::Mp4 => "box_uuid",
-                Fmt::Zip => "pre_cd_inject",
-                Fmt::Pdf => "incremental",
-                Fmt::Pe => "pe_codebits",
-            },
+            fmt.default_strategy(),
         );
     }
 }
@@ -510,8 +660,7 @@ fn stealth_envelope_is_invisible_without_its_password() {
     // the plain "no hidden data" message. PE's scan only recognizes a *trailing
     // overlay*; stealth `pe_codebits` writes no overlay (the channel lives in
     // .text), so it has nothing to report either.
-    let guided = [Fmt::Png, Fmt::Jpeg, Fmt::Mp4];
-    for fmt in [Fmt::Png, Fmt::Jpeg, Fmt::Mp4, Fmt::Zip, Fmt::Pdf, Fmt::Pe] {
+    for &fmt in ALL_FMTS {
         let label = format!("invisible_{}", fmt.name().to_lowercase());
         let dir = scratch(&label);
         let carrier = dir.join(format!("c.{}", fmt.ext()));
@@ -540,7 +689,7 @@ fn stealth_envelope_is_invisible_without_its_password() {
             err.to_string().contains("No hidden strhide data found"),
             "{label}: base message missing: {err}"
         );
-        if guided.contains(&fmt) {
+        if fmt.has_guided_stealth() {
             assert!(
                 err.to_string().contains("stealth envelope"),
                 "{label}: guidance missing: {err}"
@@ -558,7 +707,7 @@ fn stealth_envelope_is_invisible_without_its_password() {
 
 #[test]
 fn stealth_requires_a_password_on_every_format() {
-    for fmt in [Fmt::Png, Fmt::Jpeg, Fmt::Mp4, Fmt::Zip, Fmt::Pdf, Fmt::Pe] {
+    for &fmt in ALL_FMTS {
         let dir = scratch(&format!("stealth_guard_{}", fmt.name().to_lowercase()));
         let carrier = dir.join(format!("c.{}", fmt.ext()));
         fs::write(&carrier, fmt.carrier()).unwrap();
@@ -586,7 +735,7 @@ fn stealth_requires_a_password_on_every_format() {
 
 #[test]
 fn stealth_and_password_hint_are_mutually_exclusive_on_every_format() {
-    for fmt in [Fmt::Png, Fmt::Jpeg, Fmt::Mp4, Fmt::Zip, Fmt::Pdf, Fmt::Pe] {
+    for &fmt in ALL_FMTS {
         let dir = scratch(&format!("hint_guard_{}", fmt.name().to_lowercase()));
         let carrier = dir.join(format!("c.{}", fmt.ext()));
         fs::write(&carrier, fmt.carrier()).unwrap();
@@ -617,7 +766,7 @@ fn stealth_and_password_hint_are_mutually_exclusive_on_every_format() {
 
 #[test]
 fn password_hint_roundtrips_on_every_format() {
-    for fmt in [Fmt::Png, Fmt::Jpeg, Fmt::Mp4, Fmt::Zip, Fmt::Pdf, Fmt::Pe] {
+    for &fmt in ALL_FMTS {
         let label = format!("hint_{}", fmt.name().to_lowercase());
         let dir = scratch(&label);
         let carrier = dir.join(format!("c.{}", fmt.ext()));
@@ -665,21 +814,8 @@ fn password_hint_roundtrips_on_every_format() {
 
 #[test]
 fn password_less_roundtrips_on_every_format() {
-    for fmt in [Fmt::Png, Fmt::Jpeg, Fmt::Mp4, Fmt::Zip, Fmt::Pdf, Fmt::Pe] {
-        run_cell(
-            fmt,
-            "auto",
-            None,
-            false,
-            match fmt {
-                Fmt::Png => "chunk",
-                Fmt::Jpeg => "app_segment",
-                Fmt::Mp4 => "box_uuid",
-                Fmt::Zip => "pre_cd_inject",
-                Fmt::Pdf => "incremental",
-                Fmt::Pe => "pe_codebits",
-            },
-        );
+    for &fmt in ALL_FMTS {
+        run_cell(fmt, "auto", None, false, fmt.default_strategy());
     }
 }
 
@@ -687,7 +823,7 @@ fn password_less_roundtrips_on_every_format() {
 
 #[test]
 fn second_write_into_a_filled_carrier_is_refused_on_every_format() {
-    for fmt in [Fmt::Png, Fmt::Jpeg, Fmt::Mp4, Fmt::Zip, Fmt::Pdf, Fmt::Pe] {
+    for &fmt in ALL_FMTS {
         let label = format!("double_{}", fmt.name().to_lowercase());
         let dir = scratch(&label);
         let carrier = dir.join(format!("c.{}", fmt.ext()));
@@ -723,7 +859,7 @@ fn second_write_into_a_filled_carrier_is_refused_on_every_format() {
 
 #[test]
 fn inspect_reports_all_strategies_for_every_format() {
-    for fmt in [Fmt::Png, Fmt::Jpeg, Fmt::Mp4, Fmt::Zip, Fmt::Pdf, Fmt::Pe] {
+    for &fmt in ALL_FMTS {
         let dir = scratch(&format!("caps_{}", fmt.name().to_lowercase()));
         let carrier = dir.join(format!("c.{}", fmt.ext()));
         fs::write(&carrier, fmt.carrier()).unwrap();
@@ -734,15 +870,12 @@ fn inspect_reports_all_strategies_for_every_format() {
             .iter()
             .map(|c| c.strategy.as_str())
             .collect();
-        let expected: Vec<&str> = match fmt {
-            Fmt::Png => vec!["chunk", "eof"],
-            Fmt::Jpeg => vec!["app_segment", "eof"],
-            Fmt::Mp4 => vec!["box_uuid", "eof"],
-            Fmt::Zip => vec!["pre_cd_inject", "eof"],
-            Fmt::Pdf => vec!["incremental", "eof"],
-            Fmt::Pe => vec!["pe_codebits", "pe_slack", "pe_overlay", "eof"],
-        };
-        assert_eq!(names, expected, "{}: strategy order", fmt.name());
+        assert_eq!(
+            names,
+            fmt.expected_strategies(),
+            "{}: strategy order",
+            fmt.name()
+        );
         for c in &insp.strategies {
             assert!(!c.limit.is_empty(), "{}: empty limit", fmt.name());
         }
@@ -757,7 +890,7 @@ fn inspect_reports_all_strategies_for_every_format() {
 
 #[test]
 fn verify_structure_passes_for_a_pristine_carrier_of_every_format() {
-    for fmt in [Fmt::Png, Fmt::Jpeg, Fmt::Mp4, Fmt::Zip, Fmt::Pdf, Fmt::Pe] {
+    for &fmt in ALL_FMTS {
         let dir = scratch(&format!("verify_clean_{}", fmt.name().to_lowercase()));
         let carrier = dir.join(format!("c.{}", fmt.ext()));
         fs::write(&carrier, fmt.carrier()).unwrap();
