@@ -5,11 +5,19 @@ use std::fs;
 use std::path::PathBuf;
 
 use strhide::analysis::scan_file;
+use strhide::params::Profile;
 use strhide::stego::{
-    SpatialParams, StegoOptions, embed_carrier, extract_carrier, probe_carrier_capacity,
+    SpatialParams, StegoOptions, embed_carrier, embed_carrier_with_profile, extract_carrier,
+    extract_carrier_with_profile, probe_carrier_capacity,
     spatial::{HillCostModel, RawImage, decode_png, encode_png},
     traits::SpatialCostModel,
 };
+
+/// Private content-domain dialect: the secret now lives in the shared
+/// `Profile`, not in `StegoOptions`.
+fn stego_profile(secret: &'static str) -> Profile {
+    Profile::default().with_stego_secret(secret)
+}
 
 /// Generate a synthetic texture PNG image with gradients and noise (128x128).
 fn generate_texture_png(w: u32, h: u32) -> Vec<u8> {
@@ -616,36 +624,35 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
     );
 }
 
-/// A private `default_secret` must create a private dialect: the official
+/// A private `Profile::stego` secret must create a private dialect: the official
 /// public constant, or any other secret, must not be able to read it.
 ///
 /// This is the regression guard for the "public code can decode every
 /// no-password carrier" flaw: before it, the key and the header-slot
 /// permutation were both derived from a constant in the source tree.
+///
+/// The secret is carried by `Profile` (M1b), so the *profile* is what has to
+/// match — `StegoOptions` no longer has a `default_secret` field at all.
 #[test]
 fn test_stego_private_default_secret_isolation() {
     let png_bytes = generate_texture_png(128, 128);
     let secret = b"Private dialect payload, 2026-10-20";
 
-    let private = StegoOptions {
-        default_secret: Some("acme-private-dialect-2026".into()),
-        ..Default::default()
-    };
-    let other = StegoOptions {
-        default_secret: Some("someone-elses-dialect-2026".into()),
-        ..Default::default()
-    };
-    let official = StegoOptions::default();
+    let official = Profile::default();
+    let private = stego_profile("acme-private-dialect-2026");
+    let other = stego_profile("someone-elses-dialect-2026");
+    let opts = StegoOptions::default();
 
     // 1. Round trip with the private secret and no password.
-    let stego = embed_carrier(&png_bytes, secret, &private).expect("embed with private secret");
+    let stego = embed_carrier_with_profile(&png_bytes, secret, &opts, &private)
+        .expect("embed with private secret");
     assert_eq!(
-        extract_carrier(&stego, &private).expect("private extract"),
+        extract_carrier_with_profile(&stego, &opts, &private).expect("private extract"),
         secret
     );
 
     // 2. The official public constant must NOT read it.
-    let res_official = extract_carrier(&stego, &official);
+    let res_official = extract_carrier_with_profile(&stego, &opts, &official);
     assert!(
         matches!(
             res_official,
@@ -655,7 +662,7 @@ fn test_stego_private_default_secret_isolation() {
     );
 
     // 3. A different private secret must NOT read it.
-    let res_other = extract_carrier(&stego, &other);
+    let res_other = extract_carrier_with_profile(&stego, &opts, &other);
     assert!(
         matches!(
             res_other,
@@ -665,35 +672,65 @@ fn test_stego_private_default_secret_isolation() {
     );
 
     // 4. Symmetry: an official carrier stays readable only with official opts.
-    let official_stego = embed_carrier(&png_bytes, secret, &official).expect("embed official");
+    let official_stego =
+        embed_carrier_with_profile(&png_bytes, secret, &opts, &official).expect("embed official");
     assert_eq!(
-        extract_carrier(&official_stego, &official).expect("official extract"),
+        extract_carrier_with_profile(&official_stego, &opts, &official).expect("official extract"),
         secret
     );
     assert!(
         matches!(
-            extract_carrier(&official_stego, &private),
+            extract_carrier_with_profile(&official_stego, &opts, &private),
             Err(strhide::errors::StrHideError::NoHiddenData(_))
         ),
         "private secret must not read an official carrier"
     );
 
     // 5. An explicit password outranks the private default secret.
-    let mut with_password = private.clone();
-    with_password.password = Some("UserChosenPassword1".into());
-    let pw_stego = embed_carrier(&png_bytes, secret, &with_password).expect("embed with password");
+    let with_password = StegoOptions {
+        password: Some("UserChosenPassword1".into()),
+        ..Default::default()
+    };
+    let pw_stego = embed_carrier_with_profile(&png_bytes, secret, &with_password, &private)
+        .expect("embed with password");
     assert_ne!(
         pw_stego, stego,
-        "password must take precedence over default_secret"
+        "password must take precedence over the profile secret"
     );
     assert_eq!(
-        extract_carrier(&pw_stego, &with_password).expect("password extract"),
+        extract_carrier_with_profile(&pw_stego, &with_password, &private)
+            .expect("password extract"),
         secret
     );
     // Neither the private default secret alone nor the official constant may
     // stand in for the password.
-    assert!(extract_carrier(&pw_stego, &private).is_err());
-    assert!(extract_carrier(&pw_stego, &official).is_err());
+    assert!(extract_carrier_with_profile(&pw_stego, &opts, &private).is_err());
+    assert!(extract_carrier_with_profile(&pw_stego, &opts, &other).is_err());
+    assert!(extract_carrier_with_profile(&pw_stego, &opts, &official).is_err());
+}
+
+/// The legacy `embed_carrier` / `extract_carrier` entries are the official
+/// dialect: they must keep working for official carriers and must stay unable
+/// to read a private-dialect one.
+#[test]
+fn test_stego_legacy_entries_use_the_official_profile() {
+    let png_bytes = generate_texture_png(96, 96);
+    let secret = b"Legacy entry points stay official";
+    let opts = StegoOptions::default();
+
+    let official_stego = embed_carrier(&png_bytes, secret, &opts).expect("embed legacy");
+    assert_eq!(
+        extract_carrier(&official_stego, &opts).expect("extract legacy"),
+        secret
+    );
+
+    let private = stego_profile("acme-private-dialect-2026");
+    let private_stego =
+        embed_carrier_with_profile(&png_bytes, secret, &opts, &private).expect("embed private");
+    assert!(
+        extract_carrier(&private_stego, &opts).is_err(),
+        "the legacy entry must not pick up a private dialect implicitly"
+    );
 }
 
 /// The JPEG (UERD) engine must honour the private secret too. Skipped when the
@@ -713,24 +750,22 @@ fn test_jpeg_private_default_secret_isolation() {
     let jpeg_bytes = fs::read(&candidate).expect("read sample jpeg");
     let secret = b"Private JPEG dialect payload";
 
-    let private = StegoOptions {
-        algorithm: Some("uerd".into()),
-        default_secret: Some("acme-jpeg-dialect-2026".into()),
-        ..Default::default()
-    };
-    let official = StegoOptions {
+    let opts = StegoOptions {
         algorithm: Some("uerd".into()),
         ..Default::default()
     };
+    let official = Profile::default();
+    let private = stego_profile("acme-jpeg-dialect-2026");
 
-    let stego = embed_carrier(&jpeg_bytes, secret, &private).expect("embed jpeg private");
+    let stego = embed_carrier_with_profile(&jpeg_bytes, secret, &opts, &private)
+        .expect("embed jpeg private");
     assert_eq!(
-        extract_carrier(&stego, &private).expect("private jpeg extract"),
+        extract_carrier_with_profile(&stego, &opts, &private).expect("private jpeg extract"),
         secret
     );
     assert!(
         matches!(
-            extract_carrier(&stego, &official),
+            extract_carrier_with_profile(&stego, &opts, &official),
             Err(strhide::errors::StrHideError::NoHiddenData(_))
         ),
         "official secret must fail on a private-dialect JPEG carrier"

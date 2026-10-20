@@ -9,7 +9,9 @@
 //! - [`Profile`] — **P class**: defines *which private dialect* an envelope is
 //!   written in. The same profile must be supplied on both sides; a mismatch
 //!   makes the carrier unreadable **by design** (and, in the stealth case,
-//!   invisible). An all-default profile is the official dialect.
+//!   invisible). An all-default profile is the official dialect. It carries
+//!   both domains: the structure-domain fields and the content-domain
+//!   [`StegoProfile`].
 //!
 //! Splitting this way (instead of the earlier `EngineConfig` / `ReadConfig`
 //! pair) removes the "set on write, forgot on read" failure mode from the type
@@ -208,12 +210,61 @@ impl LocalParams {
     }
 }
 
+/// Content-domain (image steganography) half of a [`Profile`].
+///
+/// **P class**, like the structure-domain fields next to it: it does not travel
+/// in the carrier, so embed and extract must be given the same value. A
+/// mismatch surfaces as `NoHiddenData` -- the same "silently unreadable" shape
+/// as a wrong password, which is why this lives with the secret and not with
+/// the tuning knobs in [`StegoOptions`](crate::stego::StegoOptions).
+///
+/// The secret is deliberately **not** the structure-domain
+/// [`Profile::default_secret`]: the two subsystems derive keys in different
+/// domains ([`crate::envelope`] vs [`crate::stego::envelope`]), so sharing one
+/// string would couple two independent dialects. Both are carried by the same
+/// `Profile`, so there is still exactly one object to store and pass around.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct StegoProfile {
+    /// Private stand-in secret for no-password image steganography, replacing
+    /// the public [`crate::stego::envelope::PUBLIC_DEFAULT_SECRET`].
+    ///
+    /// Both the AEAD key and the header-slot permutation are derived from it.
+    /// An explicit password always wins over this value.
+    pub default_secret: Option<Cow<'static, str>>,
+}
+
+impl StegoProfile {
+    /// Set [`default_secret`](Self::default_secret).
+    ///
+    /// Builder form because the struct is `#[non_exhaustive]`.
+    pub fn with_default_secret<S: Into<Cow<'static, str>>>(mut self, secret: S) -> Self {
+        self.default_secret = Some(secret.into());
+        self
+    }
+
+    /// Private secret, or `None` when the official public constant must be
+    /// used. An empty string counts as "not configured", so a blank config
+    /// value cannot silently *disable* confidentiality by looking configured.
+    pub fn secret(&self) -> Option<&str> {
+        self.default_secret.as_deref().filter(|s| !s.is_empty())
+    }
+
+    /// True when no private secret is set (official behaviour).
+    pub fn is_official(&self) -> bool {
+        self.secret().is_none()
+    }
+}
+
 /// The private dialect an envelope is written in: everything read and write
 /// must agree on, and that deliberately does not live in the wire format.
 ///
 /// `Profile::default()` is the official dialect — byte-compatible with every
 /// strhide release. Setting any field opts into a private dialect that the
 /// official binary cannot read.
+///
+/// One `Profile` covers both domains: the structure-domain fields below and
+/// [`stego`](Self::stego) for content-domain image steganography.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct Profile {
@@ -237,6 +288,12 @@ pub struct Profile {
     /// Ignored in stealth mode, where both magics are derived from the
     /// password instead (a fixed magic would defeat plausible deniability).
     pub magic: Option<MagicPair>,
+    /// Content-domain (image steganography) settings.
+    ///
+    /// Separate from the fields above because `embed` / `extract` do not use
+    /// the UBE envelope at all: only [`StegoProfile::default_secret`] is shared
+    /// conceptually (a private no-password dialect).
+    pub stego: StegoProfile,
 }
 
 impl Profile {
@@ -259,6 +316,30 @@ impl Profile {
     pub fn with_magic(mut self, magic: MagicPair) -> Self {
         self.magic = Some(magic);
         self
+    }
+
+    /// Replace the whole content-domain half.
+    pub fn with_stego_profile(mut self, stego: StegoProfile) -> Self {
+        self.stego = stego;
+        self
+    }
+
+    /// Set the private no-password secret used by image steganography.
+    ///
+    /// Sugar for `with_stego_profile(StegoProfile::default().with_default_secret(..))`;
+    /// it does **not** touch [`default_secret`](Self::default_secret), which
+    /// keys the structure-domain envelope.
+    pub fn with_stego_secret<S: Into<Cow<'static, str>>>(mut self, secret: S) -> Self {
+        self.stego = self.stego.with_default_secret(secret);
+        self
+    }
+
+    /// Private content-domain secret, if any.
+    ///
+    /// `None` means the stego envelope layer falls back to the public
+    /// constant; an explicit password always overrides this value.
+    pub fn stego_secret(&self) -> Option<&str> {
+        self.stego.secret()
     }
 
     /// Secret used when no user password is supplied.
@@ -291,10 +372,15 @@ impl Profile {
     }
 
     /// True when every field is default, i.e. the official dialect.
+    ///
+    /// Both domains are checked: a private *image* secret also makes the
+    /// profile non-official, because carriers embedded under it are just as
+    /// unreadable with the official binary.
     pub fn is_official(&self) -> bool {
         self.default_secret.as_deref().is_none_or(|s| s.is_empty())
             && self.stealth_domain.is_none()
             && self.magic.is_none()
+            && self.stego.is_official()
     }
 }
 
@@ -341,6 +427,42 @@ mod tests {
         };
         assert_eq!(p.secret(), BUILTIN_DEFAULT_KEY);
         assert!(p.is_official());
+    }
+
+    #[test]
+    fn stego_profile_is_off_by_default() {
+        let p = Profile::default();
+        assert!(p.stego.is_official());
+        assert_eq!(p.stego_secret(), None);
+        // The two domains stay independent: the stego half must not inherit
+        // the structure-domain secret, nor vice versa.
+        assert_eq!(p.secret(), BUILTIN_DEFAULT_KEY);
+    }
+
+    #[test]
+    fn stego_secret_makes_the_profile_private() {
+        let p = Profile::default().with_stego_secret("acme-stego-2026");
+        assert!(!p.is_official(), "a private image secret is not official");
+        assert_eq!(p.stego_secret(), Some("acme-stego-2026"));
+        assert_eq!(
+            p.default_secret, None,
+            "with_stego_secret must not touch the UBE secret"
+        );
+        assert_eq!(p.secret(), BUILTIN_DEFAULT_KEY);
+
+        let stego = StegoProfile::default().with_default_secret("acme-stego-2026");
+        assert_eq!(
+            Profile::default().with_stego_profile(stego).stego_secret(),
+            Some("acme-stego-2026")
+        );
+    }
+
+    #[test]
+    fn empty_stego_secret_counts_as_unset() {
+        let p = Profile::default().with_stego_secret("");
+        assert_eq!(p.stego_secret(), None);
+        assert!(p.stego.is_official());
+        assert!(p.is_official(), "an empty secret must not privatise");
     }
 
     #[test]

@@ -771,6 +771,19 @@ fn resolve_stego_secret(explicit: Option<&str>, cfg: &FileConfig) -> Option<Stri
     cfg.stego_secret.as_ref().filter(|s| !s.is_empty()).cloned()
 }
 
+/// Package the resolved private stego secret as a stego-only
+/// [`Profile`](crate::params::Profile).
+///
+/// Only the content-domain half is populated: the CLI does not expose the
+/// structure-domain dialect knobs yet, so those stay at their official
+/// defaults (an all-default profile is byte-compatible with every release).
+fn stego_profile(secret: Option<String>) -> crate::params::Profile {
+    match secret {
+        Some(secret) => crate::params::Profile::default().with_stego_secret(secret),
+        None => crate::params::Profile::default(),
+    }
+}
+
 fn should_print_banner(cli: &Cli) -> bool {
     if cli.quiet {
         return false;
@@ -1740,6 +1753,7 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         true,
     )?;
     let stego_secret = resolve_stego_secret(args.stego_secret.as_deref(), cfg);
+    let profile = stego_profile(stego_secret);
 
     // 2. Resolve payload bytes
     let payload_bytes = if args.payload.stdin {
@@ -1803,7 +1817,6 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         let mut options = crate::stego::StegoOptions {
             algorithm: args.algorithm.clone(),
             password: password.clone(),
-            default_secret: stego_secret.clone(),
             ..Default::default()
         };
 
@@ -1824,7 +1837,12 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
             options.spatial_params.p2_window = p2;
         }
 
-        let stego_bytes = crate::stego::embed_carrier(&carrier_bytes, &payload_bytes, &options)?;
+        let stego_bytes = crate::stego::embed_carrier_with_profile(
+            &carrier_bytes,
+            &payload_bytes,
+            &options,
+            &profile,
+        )?;
 
         let target =
             resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;
@@ -1875,10 +1893,10 @@ fn handle_extract(args: ExtractArgs, cfg: &FileConfig, quiet: bool) -> Result<()
     let carrier_bytes = std::fs::read(&args.carrier)?;
 
     let stego_secret = resolve_stego_secret(args.stego_secret.as_deref(), cfg);
+    let profile = stego_profile(stego_secret);
     let mut options = crate::stego::StegoOptions {
         algorithm: args.algorithm,
         password,
-        default_secret: stego_secret,
         ..Default::default()
     };
 
@@ -1899,7 +1917,7 @@ fn handle_extract(args: ExtractArgs, cfg: &FileConfig, quiet: bool) -> Result<()
         options.spatial_params.p2_window = p2;
     }
 
-    let payload = crate::stego::extract_carrier(&carrier_bytes, &options)?;
+    let payload = crate::stego::extract_carrier_with_profile(&carrier_bytes, &options, &profile)?;
 
     if let Some(ref out_path) = args.output {
         let dest = if out_path.is_dir() {

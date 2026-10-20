@@ -27,16 +27,18 @@ use crate::errors::StrHideError;
 /// Official public fallback secret.
 ///
 /// Used only when neither a user password nor a private
-/// [`StegoOptions::default_secret`](crate::stego::StegoOptions::default_secret)
+/// [`StegoProfile::default_secret`](crate::params::StegoProfile::default_secret)
 /// is supplied. The value is public by design: it keeps payloads off
 /// plaintext-on-disk, but it gives **no** confidentiality against anyone who
 /// has this source tree -- they can reproduce the exact key derivation and
 /// read every no-password envelope (both the AEAD key and the header slot
 /// permutation become known).
 ///
-/// Replace it with a private value via `--stego-secret` / `stego_secret` in the
-/// config file. Note the parameter class: it must be identical on embed and
-/// extract, otherwise the carrier reads back as `NoHiddenData`.
+/// Replace it with a private value through
+/// [`Profile::with_stego_secret`](crate::params::Profile::with_stego_secret)
+/// (CLI: `--stego-secret`, config: `stego_secret`). Note the parameter class: it
+/// must be identical on embed and extract, otherwise the carrier reads back as
+/// `NoHiddenData`.
 pub const PUBLIC_DEFAULT_SECRET: &str = "strhide-default-content-stego-key-2026";
 
 pub const SALT_LEN: usize = 16;

@@ -563,5 +563,7 @@ stc embedding cost matrix parity check
 **仍然成立的限制**：校准是启发式，不是证明；50% 容量下 5/15 不可见；阈值与这条边界都来自本语料 15 张的实测，
 换图源/换编码器需重新标定。硬编码特征算法无法覆盖所有情况，这一点不打算靠调参掩盖。
 
-**另**：`Eof`/structure 域与内容域的 `default_secret` 尚未统一到同一个 `Profile`（UBE 侧仍用 `BUILTIN_DEFAULT_KEY`），
-属 `docs/library_api_practical_plan_20261020.md` 的 M1。
+**另**：`Eof`/structure 域与内容域的 `default_secret` 已统一到同一个 `Profile`
+（`Profile::stego.default_secret`，2026-10-20 M1b；UBE 侧 `Profile::default_secret` 仍走
+`BUILTIN_DEFAULT_KEY`，两侧派生域不同故字段独立）。实施记录见
+`docs/library_api_practical_plan_20261020.md` §10.5。

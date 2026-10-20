@@ -5,7 +5,9 @@
 > 原文档的诊断（哪里写死）基本准确，但**范围判断（哪些被 UBE v2.2 卡死）有明显偏差**，导致蓝图
 > 大而全、含大量不必做的项。本文按"库使用者真实需求 + 代码实证"重新划定范围。
 > **进展（2026-10-20 21:53）**：M1 已落地（无协议改动），实施中的三处纠偏见 §10；
-> M2 / M3 / CLI 暴露 / stego 密钥归并均未开工。
+> M2 / M3 / CLI 暴露均未开工。
+> **进展（2026-10-20 22:08）**：M1b 已落地——stego 的私有密钥收进同一个 `Profile`（§10.5），
+> 线格式与密钥派生零改动。M2 / M3 / CLI 暴露仍未开工。
 
 ---
 
@@ -272,6 +274,10 @@ M2 是 `decode_compact` 尾部解析 + 写侧编码，改动面最小但**兼容
 > `StegoOptions::default_secret`（P 类参数，`--stego-secret` / `stego_secret` / `STRHIDE_STEGO_SECRET`），
 > 尚未并入统一 `Profile`——因为 `Profile` 本身在 M1 里才存在。M1 落地时把该字段迁入
 > `StegoProfile.default_secret` 即可，语义与优先级保持一致（显式 password 压过 default_secret）。
+>
+> **已落地（2026-10-20 22:08，M1b）**：按上面的路径完成迁移，`StegoOptions::default_secret`
+> 已删除，密钥唯一来源是 `Profile::stego.default_secret`；`embed_carrier` / `extract_carrier`
+> 增加 `*_with_profile` 变体，旧签名委托 `Profile::default()`。两条偏差见 §10.4。
 
 ---
 
@@ -318,6 +324,40 @@ M1 已全部落地，线格式零改动。实施中核对代码，发现本文�
 - 公开结构体带 `#[non_exhaustive]` 后下游**无法**用结构体字面量或 `..Default::default()` 构造，
   因此补了 builder（`with_chunk_size` / `with_default_secret` / ...）。原 §4.1 的示例写法
   在 crate 外不可编译，已修正 `engine::write_carrier_with` 的文档示例。
-- `stego` 侧 `StegoOptions::default_secret` **尚未**并入 `Profile`：`Profile` 现在存在了，但归并需要
-  stego 侧 API 接受 `Profile`（`embed_carrier` / `extract_carrier` / `probe_carrier_capacity`），
-  属独立改动，单列 M1b，避免和 UBE 侧混在一批。
+- `stego` 侧 `StegoOptions::default_secret` 归并进 `Profile` 属独立改动，单列 M1b——
+  **已于 2026-10-20 22:08 完成**，见 §10.5。
+
+### 10.5 M1b 实施记录：stego 密钥收进同一个 `Profile`（2026-10-20 22:08）
+
+改动前：`StegoOptions` 自带 `default_secret: Option<String>`，与 `Profile` 里的
+`default_secret: Option<Cow<'static,str>>` 是**同义不同源**的两份事实源，CLI 只填前者、
+库使用者只填后者，两边都可能漏。
+
+改动后（线格式与密钥派生零改动）：
+
+| 位置 | 改动 |
+|---|---|
+| `params.rs` | 新增 `StegoProfile { default_secret }` + `secret()` / `is_official()` / builder；`Profile` 增加 `stego` 字段、`with_stego_profile` / `with_stego_secret` / `stego_secret()`；`is_official()` 覆盖两个域 |
+| `stego/params.rs` | `StegoOptions` 删除 `default_secret`；`effective_secret()` → `secret(&self, profile)` |
+| `stego/mod.rs` | 新增 `embed_carrier_with_profile` / `extract_carrier_with_profile`；旧入口委托 `Profile::default()` |
+| `cli.rs` | `embed` / `extract` 由 `resolve_stego_secret` 结果构造 stego-only `Profile` 后走新入口 |
+
+**两条与 §9 建议的偏差，都是核对代码后的取舍：**
+
+1. **两个 `default_secret` 没有合并成一个字符串**。§9 写的是"避免出现两套默认密钥"，本意是
+   "一个 `Profile` 实例"，不是"一个字符串"：UBE 的密钥走 `envelope` 域派生（`BUILTIN_DEFAULT_KEY`），
+   stego 走 `stego::envelope` 域派生（`PUBLIC_DEFAULT_SECRET`），两者本来就是独立方言。
+   共用一个字符串会让"换掉图片侧密钥"被迫连带改掉结构域方言，反过来也一样。
+   因此保留 `Profile.default_secret` 与 `Profile.stego.default_secret` 两个字段，但**只有一份 `Profile`**。
+2. **`probe_carrier_capacity` 不加 `profile` 参数**。容量 = 固定 256 头部槽 + 候选槽数量，
+   与密钥无关（密钥只决定*选哪些*槽，不决定*有多少*）。加一个恒不被使用的参数会误导使用者
+   以为容量随方言变化；注释里写明"若将来槽位布局变成代价相关，再重新评估"。
+
+**顺带修掉的静默降级**：旧 `effective_secret()` 是
+`password.as_deref().or(default_secret).filter(non-empty)`——`password = Some("")` 会先命中 `Some("")`
+再被 filter 清成 `None`，于是**丢掉私有密钥、回落到公开常量**。新实现先过滤空口令再回退，
+空口令不再遮蔽 profile 密钥（CLI 层本就拒绝空口令，故对外无行为变化，但库层不再是陷阱）。
+
+**验收**：`Profile::default()` / 私有 profile × 正确/错误/缺失口令 × PNG(HILL)/JPEG(UERD) 交叉；
+新增断言"旧入口 `embed_carrier` / `extract_carrier` 不得隐式吃到私有方言"，
+以及 `StegoOptions::secret()` 的 4 条解析规则单测。

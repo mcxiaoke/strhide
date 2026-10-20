@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::errors::StrHideError;
+use crate::params::Profile;
 
 /// Fine-tuning parameters for spatial-domain steganography (e.g. HILL, WOW).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -153,25 +154,19 @@ impl JpegParams {
 }
 
 /// Unified configuration options passed to embed and extract pipelines.
+///
+/// Everything here is either a per-call choice ([`algorithm`](Self::algorithm))
+/// or a user-supplied credential ([`password`](Self::password)), plus **L-class**
+/// tuning knobs that only the writer's cost map depends on. The **P-class**
+/// part -- the private no-password secret -- deliberately lives in
+/// [`StegoProfile`](crate::params::StegoProfile), next to the structure-domain
+/// dialect fields, so there is exactly one object to store and pass around.
 #[derive(Debug, Clone, Default)]
 pub struct StegoOptions {
     /// Requested algorithm name (e.g. "hill", "uerd", "auto").
     pub algorithm: Option<String>,
     /// Password for cryptographic key derivation and PRNG scattering.
     pub password: Option<String>,
-    /// Private stand-in secret used when [`password`](Self::password) is `None`.
-    ///
-    /// **Parameter class: P (read and write must agree).** Both the AEAD key and
-    /// the header-slot permutation are derived from it, so an envelope embedded
-    /// with one secret is unreadable with another -- and unreadable with the
-    /// official public constant. Mismatch surfaces as `NoHiddenData`, i.e. it
-    /// fails silently by design, so keep this value with the password, not
-    /// with the tuning knobs.
-    ///
-    /// `None` keeps the historical behaviour: the public
-    /// [`PUBLIC_DEFAULT_SECRET`](crate::stego::envelope::PUBLIC_DEFAULT_SECRET)
-    /// is used, which means any strhide binary can read no-password carriers.
-    pub default_secret: Option<String>,
     /// Fine-tuning parameters for spatial domain algorithms.
     pub spatial_params: SpatialParams,
     /// Fine-tuning parameters for JPEG DCT domain algorithms.
@@ -180,16 +175,58 @@ pub struct StegoOptions {
 
 impl StegoOptions {
     /// Secret actually used for key derivation: the explicit password wins, the
-    /// private default secret is the fallback, `None` means "official public
-    /// constant" (resolved inside the envelope layer).
+    /// profile's private stego secret is the fallback, `None` means "official
+    /// public constant" (resolved inside the envelope layer).
     ///
     /// Resolving here keeps the two engine families byte-identical: a private
     /// default secret is not special-cased anywhere downstream, it simply
     /// travels the same path as a user password.
-    pub fn effective_secret(&self) -> Option<&str> {
+    ///
+    /// An empty password is treated as "not supplied" and does **not** mask the
+    /// profile secret. The previous implementation joined the two options with
+    /// `or` and filtered afterwards, so `password = Some("")` silently dropped
+    /// the private secret and fell back to the public constant -- a quiet
+    /// downgrade of exactly the knob that exists to prevent it.
+    pub fn secret<'a>(&'a self, profile: &'a Profile) -> Option<&'a str> {
         self.password
             .as_deref()
-            .or(self.default_secret.as_deref())
             .filter(|s| !s.is_empty())
+            .or_else(|| profile.stego_secret())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_password_wins_over_profile_secret() {
+        let opts = StegoOptions {
+            password: Some("user-password".into()),
+            ..Default::default()
+        };
+        let profile = Profile::default().with_stego_secret("private-dialect");
+        assert_eq!(opts.secret(&profile), Some("user-password"));
+    }
+
+    #[test]
+    fn profile_secret_fills_in_without_a_password() {
+        let profile = Profile::default().with_stego_secret("private-dialect");
+        assert_eq!(
+            StegoOptions::default().secret(&profile),
+            Some("private-dialect")
+        );
+        // Official profile -> public constant, resolved downstream.
+        assert_eq!(StegoOptions::default().secret(&Profile::default()), None);
+    }
+
+    #[test]
+    fn empty_password_does_not_mask_the_profile_secret() {
+        let opts = StegoOptions {
+            password: Some(String::new()),
+            ..Default::default()
+        };
+        let profile = Profile::default().with_stego_secret("private-dialect");
+        assert_eq!(opts.secret(&profile), Some("private-dialect"));
     }
 }
