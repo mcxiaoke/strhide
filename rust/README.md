@@ -56,9 +56,11 @@ are rejected rather than appended to.
 
 ## Compatibility
 
-The Python package is frozen at 0.2.0. Rust can read legacy envelopes written by
-it, but Python cannot read Rust's default fully-encrypted envelopes or
-`pe_slack` / `pe_codebits` PE carriers.
+The Python package is frozen at 0.2.0 and its envelope format is not
+interoperable in either direction: Python cannot read Rust's fully-encrypted
+envelopes or `pe_slack` / `pe_codebits` PE carriers, and Rust no longer reads
+0.2.0-era envelopes (the pre-v2 ASCII magics, JSON metadata and plaintext
+sealing were removed on 2026-10-21).
 
 ## License
 

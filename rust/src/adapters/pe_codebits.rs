@@ -37,9 +37,6 @@ use crate::errors::StrHideError;
 /// stealth/password knowledge while preserving deniability.
 pub const CHANNEL_MAGIC: [u8; 4] = crate::envelope::STANDARD_TRAILER_MAGIC;
 
-/// Legacy channel magic from initial design doc specifications (v1.0 placeholder `STHC`).
-pub const LEGACY_STHC_MAGIC: [u8; 4] = *b"STHC";
-
 /// Channel container version (see design doc §5).
 pub const CHANNEL_VERSION: u8 = 1;
 
@@ -412,7 +409,9 @@ pub struct ChannelHeader {
 }
 
 impl ChannelHeader {
-    /// Serializes the channel header in unmasked format (legacy representation).
+    /// Serializes the channel header in unmasked format. Only [`Self::pack_masked`]
+    /// writes this to a carrier; this helper exists so the masking can be built
+    /// and tested field by field.
     pub fn pack_unmasked(&self) -> [u8; CHANNEL_HEADER_LEN] {
         let mut buf = [0u8; CHANNEL_HEADER_LEN];
         buf[0..4].copy_from_slice(&self.magic);
@@ -439,8 +438,9 @@ impl ChannelHeader {
         self.pack_masked()
     }
 
-    /// Unpacks a 14-byte slice, automatically handling masked headers and
-    /// falling back to legacy unmasked headers for 100% backward compatibility.
+    /// Unpacks a 14-byte slice. The version/flags/lengths fields are always
+    /// masked with the keystream derived from `magic`; there is no unmasked
+    /// (pre-v1) layout any more.
     pub fn unpack(bytes: &[u8]) -> Result<Self, CodebitsError> {
         Self::unpack_masked(bytes)
     }
@@ -455,28 +455,8 @@ impl ChannelHeader {
         for i in 0..10 {
             unmasked[i] = bytes[4 + i] ^ mask[i];
         }
-
-        if unmasked[0] == CHANNEL_VERSION {
-            return Ok(Self {
-                magic,
-                version: unmasked[0],
-                flags: unmasked[1],
-                ube_len: u32::from_le_bytes(unmasked[2..6].try_into().unwrap()),
-                slack_off: u32::from_le_bytes(unmasked[6..10].try_into().unwrap()),
-            });
-        }
-
-        // Backward compatibility fallback: check legacy unmasked version byte
-        if bytes[4] == CHANNEL_VERSION {
-            return Ok(Self {
-                magic,
-                version: bytes[4],
-                flags: bytes[5],
-                ube_len: u32::from_le_bytes(bytes[6..10].try_into().unwrap()),
-                slack_off: u32::from_le_bytes(bytes[10..14].try_into().unwrap()),
-            });
-        }
-
+        // `validate_header` owns the version check; returning the de-masked view
+        // unconditionally keeps the error path identical for masked garbage.
         Ok(Self {
             magic,
             version: unmasked[0],
@@ -559,11 +539,7 @@ pub fn read_channel_header(
     let prof = profile(text, bitness);
     let header = header_from_positions(&prof)?;
     let want = expected_magic.unwrap_or(CHANNEL_MAGIC);
-    if header.magic != want
-        && (expected_magic.is_some()
-            || (header.magic != crate::envelope::LEGACY_TRAILER_MAGIC
-                && header.magic != LEGACY_STHC_MAGIC))
-    {
+    if header.magic != want {
         return Err(CodebitsError::ChannelNotFound);
     }
     validate_header(&header, prof.len())?;
@@ -1370,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_header_masking_and_legacy_compatibility() {
+    fn channel_header_masking_roundtrip_only() {
         let magic = CHANNEL_MAGIC;
         let header = ChannelHeader {
             magic,
@@ -1391,45 +1367,33 @@ mod tests {
         let unpacked = ChannelHeader::unpack_masked(&masked_bytes).expect("unpack masked");
         assert_eq!(unpacked, header);
 
-        // 2. Legacy unmasked packing
+        // 2. An unmasked (pre-v1) header no longer parses: the version byte is
+        //    read straight out of the ciphertext stream instead of being
+        //    accepted verbatim.
         let unmasked_bytes = header.pack_unmasked();
         assert_eq!(unmasked_bytes[4], CHANNEL_VERSION);
-        let unpacked_legacy =
-            ChannelHeader::unpack_masked(&unmasked_bytes).expect("unpack unmasked");
-        assert_eq!(unpacked_legacy, header);
-
-        // 3. Legacy STHC magic
-        let sthc_header = ChannelHeader {
-            magic: LEGACY_STHC_MAGIC,
-            version: CHANNEL_VERSION,
-            flags: 0,
-            ube_len: 200,
-            slack_off: 0x2000,
-        };
-        let sthc_unmasked_bytes = sthc_header.pack_unmasked();
-        let unpacked_sthc =
-            ChannelHeader::unpack_masked(&sthc_unmasked_bytes).expect("unpack legacy sthc");
-        assert_eq!(unpacked_sthc, sthc_header);
+        let bogus = ChannelHeader::unpack_masked(&unmasked_bytes).expect("still 14 bytes");
+        assert_ne!(bogus.version, CHANNEL_VERSION);
     }
 
     #[test]
-    fn read_channel_header_accepts_legacy_sthc() {
+    fn read_channel_header_rejects_foreign_magic() {
         let mut full = Vec::new();
         while full.len() < 8192 {
             full.extend_from_slice(&synthetic_text());
         }
         full.truncate(8192);
 
-        // Craft a channel bitstream with LEGACY_STHC_MAGIC and unmasked header
-        let sthc_header = ChannelHeader {
-            magic: LEGACY_STHC_MAGIC,
+        // Craft a channel bitstream with a foreign magic and a valid masked header
+        let foreign_header = ChannelHeader {
+            magic: *b"STHC",
             version: CHANNEL_VERSION,
             flags: 0,
             ube_len: 200,
             slack_off: 0x1000,
         };
         let mut channel = Vec::new();
-        channel.extend_from_slice(&sthc_header.pack_unmasked());
+        channel.extend_from_slice(&foreign_header.pack_masked());
         channel.extend_from_slice(&[0x42u8; 200]);
 
         let bits = bytes_to_bits(&channel);
@@ -1451,10 +1415,11 @@ mod tests {
             full[pos.offset..pos.offset + pos.len].copy_from_slice(&enc);
         }
 
-        // When expected_magic is None (standard locate), it should accept LEGACY_STHC_MAGIC!
-        let read = read_channel_header(&full, 64, None).expect("legacy STHC magic accepted");
-        assert_eq!(read.magic, LEGACY_STHC_MAGIC);
-        assert_eq!(read.ube_len, 200);
+        // The pre-v1 `STHC` placeholder magic is gone: only CHANNEL_MAGIC locates.
+        assert!(matches!(
+            read_channel_header(&full, 64, None),
+            Err(CodebitsError::ChannelNotFound)
+        ));
     }
 
     #[test]

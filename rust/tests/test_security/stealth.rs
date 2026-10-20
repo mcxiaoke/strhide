@@ -123,7 +123,7 @@ fn test_stealth_trailer_breaks_public_crc32_scan() {
 }
 
 #[test]
-fn test_stealth_legacy_unmasked_backward_compatibility() {
+fn test_pre_v2_stealth_unmasked_envelope_is_rejected() {
     use rand::RngExt;
     use strhide::crypto::{
         derive_keys, derive_stealth_magics, encrypt_metadata, encrypt_stream_to_chunks,
@@ -217,14 +217,13 @@ fn test_stealth_legacy_unmasked_backward_compatibility() {
     stego_png.extend_from_slice(&raw_png[57..]); // IEND chunk
     fs::write(&carrier_path, &stego_png).unwrap();
 
-    // Verify that new strhide can read this legacy stealth envelope!
-    let read_res = read_carrier(&carrier_path, None, Some(password)).unwrap();
-    assert_eq!(read_res.data, secret_payload);
-
-    // Verify that remove restores byte-for-byte exact host
-    let rem_res = remove_carrier(&carrier_path, None, Some(password), false).unwrap();
-    assert!(rem_res.verified_identical);
-    assert_eq!(fs::read(&carrier_path).unwrap(), raw_png);
+    // Pre-v2 stealth envelopes packed the header unmasked and stored JSON
+    // metadata. Both layouts are gone: the read must fail rather than return
+    // partially-parsed data, and the carrier must be left untouched.
+    let read_err = read_carrier(&carrier_path, None, Some(password))
+        .expect_err("pre-v2 unmasked stealth envelope must not be readable");
+    let _ = read_err;
+    assert_eq!(fs::read(&carrier_path).unwrap(), stego_png);
 }
 
 #[test]
@@ -305,13 +304,13 @@ fn test_default_carrier_uniform_encryption_and_zero_plaintext() {
 }
 
 #[test]
-fn test_legacy_unencrypted_carrier_backward_compatibility() {
+fn test_pre_v2_plaintext_metadata_envelope_is_rejected() {
     use strhide::engine::CarrierMetadata;
     use strhide::envelope::{
-        EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE, LEGACY_HEADER_MAGIC, LEGACY_TRAILER_MAGIC,
+        EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE, STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC,
     };
 
-    let dir = scratch("legacy_plain_compat");
+    let dir = scratch("pre_v2_plain_meta");
     let carrier_path = dir.join("carrier.png");
     let raw_png = sample_png();
     let host_sha = compute_sha256(&raw_png);
@@ -331,7 +330,7 @@ fn test_legacy_unencrypted_carrier_backward_compatibility() {
 
     let ube_total_size = HEADER_SIZE as u64 + meta_raw.len() as u64 + payload.len() as u64 + 24;
     let header = EnvelopeHeader {
-        magic_header: LEGACY_HEADER_MAGIC,
+        magic_header: STANDARD_HEADER_MAGIC,
         version: 2,
         flags: strhide::envelope::FLAG_COMPACT_META, // unencrypted, compact meta
         strategy_id: 2,                              // PNG chunk
@@ -344,9 +343,10 @@ fn test_legacy_unencrypted_carrier_backward_compatibility() {
         ..Default::default()
     };
 
-    // Pack raw unmasked header with legacy magic
+    // Raw unmasked header + plaintext metadata + plaintext payload: exactly
+    // what a pre-v2 unencrypted carrier looked like.
     let raw_header = header.pack();
-    let trailer = EnvelopeTrailer::create(57 + 8, ube_total_size, LEGACY_TRAILER_MAGIC);
+    let trailer = EnvelopeTrailer::create(57 + 8, ube_total_size, STANDARD_TRAILER_MAGIC);
 
     let mut ube = Vec::new();
     ube.extend_from_slice(&raw_header);
@@ -367,20 +367,11 @@ fn test_legacy_unencrypted_carrier_backward_compatibility() {
     stego_png.extend_from_slice(&raw_png[57..]);
     fs::write(&carrier_path, &stego_png).unwrap();
 
-    // Verify read extracts legacy payload seamlessly
-    let read_res = read_carrier(&carrier_path, None, None).unwrap();
-    assert_eq!(read_res.data, payload);
-    assert_eq!(read_res.filename, "legacy.txt");
-
-    // Verify inspect decodes metadata
-    let inspect_res = strhide::engine::inspect_carrier(&carrier_path, None).unwrap();
-    assert!(inspect_res.has_hidden_data);
-    assert_eq!(inspect_res.is_encrypted, Some(false));
-
-    // Verify remove restores exact host bytes
-    let rem_res = remove_carrier(&carrier_path, None, None, false).unwrap();
-    assert!(rem_res.verified_identical);
-    assert_eq!(fs::read(&carrier_path).unwrap(), raw_png);
+    // Metadata is AEAD-sealed in every current envelope; a plaintext block is
+    // no longer accepted, so `read` fails and the carrier stays byte-identical.
+    read_carrier(&carrier_path, None, None)
+        .expect_err("pre-v2 plaintext metadata must not be readable");
+    assert_eq!(fs::read(&carrier_path).unwrap(), stego_png);
 }
 
 #[test]

@@ -140,7 +140,7 @@ fn test_jpeg_multisegment_chain_boundary_and_lossless_restore() {
 }
 
 #[test]
-fn test_jpeg_legacy_com_backward_compatibility() {
+fn test_jpeg_com_segments_are_not_envelope_channels() {
     let dir = scratch("legacy_com");
     let carrier = dir.join("carrier.jpg");
     fs::write(&carrier, make_sample_jpeg_with_comment(b"none")).unwrap();
@@ -163,11 +163,12 @@ fn test_jpeg_legacy_com_backward_compatibility() {
     let stego = dir.join("legacy_stego.jpg");
     fs::write(&stego, &stego_bytes).unwrap();
 
-    // Locate on legacy stego should scan COM segments without crash
+    // COM segments are ordinary JPEG comments: the pre-v2 "COM chain" channel
+    // is gone, so `locate` only looks at APP15 (and the EOF trailer) and must
+    // report "no envelope" for a payload parked in a comment.
     let mut f = fs::File::open(&stego).unwrap();
     let adapter = strhide::adapters::jpeg::JpegAdapter;
     use strhide::adapters::HostAdapter;
     let loc = adapter.locate(&mut f, None).unwrap();
-    // Since mock UBE doesn't have a valid trailer, loc is None (safe rejection)
     assert!(loc.is_none());
 }

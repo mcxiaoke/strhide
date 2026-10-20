@@ -11,9 +11,6 @@ use crate::errors::StrHideError;
 pub const MP4_UUID_NEUTRAL: [u8; 16] = [
     0xd4, 0x1a, 0x8e, 0x9c, 0x4f, 0x21, 0x4e, 0x87, 0x9a, 0x33, 0x5b, 0x6d, 0x12, 0x84, 0xef, 0x70,
 ];
-pub const LEGACY_UUID_NAMESPACE: [u8; 16] = [
-    0x89, b'S', b'T', b'R', b'H', b'I', b'D', b'E', 0, 0, 0, 0, 0, 0, 0, 1,
-];
 
 pub fn calc_prefix_len(ube_size: u64) -> u64 {
     if 24 + ube_size < 0xFFFFFFFF { 24 } else { 32 }
@@ -127,7 +124,7 @@ pub fn isobmff_locate(
             let box_size = u32::from_be_bytes(hdr24[0..4].try_into().unwrap()) as u64;
 
             if box_type == b"uuid"
-                && (box_uuid == MP4_UUID_NEUTRAL || box_uuid == LEGACY_UUID_NAMESPACE)
+                && box_uuid == MP4_UUID_NEUTRAL
                 && box_size == 24 + trailer.ube_total_size
             {
                 return Ok(Some((
@@ -151,7 +148,7 @@ pub fn isobmff_locate(
 
             if box_size == 1
                 && box_type == b"uuid"
-                && (box_uuid == MP4_UUID_NEUTRAL || box_uuid == LEGACY_UUID_NAMESPACE)
+                && box_uuid == MP4_UUID_NEUTRAL
                 && large_size == 32 + trailer.ube_total_size
             {
                 return Ok(Some((
@@ -285,7 +282,7 @@ pub fn isobmff_suspicious_structures(stego_in: &mut dyn SeekRead) -> Vec<String>
         let mut hdr = [0u8; 24];
         if stego_in.read_exact(&mut hdr).is_ok() && &hdr[4..8] == b"uuid" {
             let uuid = &hdr[8..24];
-            if uuid == MP4_UUID_NEUTRAL || uuid == LEGACY_UUID_NAMESPACE {
+            if uuid == MP4_UUID_NEUTRAL {
                 found.push(format!(
                     "trailing uuid box at offset {} carries {ube_total_size} bytes",
                     ube_offset - 24

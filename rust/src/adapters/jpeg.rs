@@ -250,9 +250,8 @@ impl HostAdapter for JpegAdapter {
             return Ok(None);
         }
 
-        // 1. Scan markers before SOS, collecting candidate segments for APP15 and COM
+        // 1. Scan markers before SOS, collecting candidate APP15 segments
         let mut app15_segments: Vec<(u64, u64)> = Vec::new();
-        let mut com_segments: Vec<(u64, u64)> = Vec::new();
 
         loop {
             let mut lead = [0u8; 1];
@@ -298,9 +297,6 @@ impl HostAdapter for JpegAdapter {
             if b == 0xEF {
                 // APP15
                 app15_segments.push((payload_offset, payload_len));
-            } else if b == 0xFE {
-                // COM
-                com_segments.push((payload_offset, payload_len));
             }
 
             stego_in.seek(SeekFrom::Start(payload_offset + payload_len))?;
@@ -325,13 +321,6 @@ impl HostAdapter for JpegAdapter {
                     Ok(t) => t,
                     Err(_) => continue,
                 };
-
-                if expected_trailer_magic.is_none()
-                    && trailer.trailer_magic != crate::envelope::STANDARD_TRAILER_MAGIC
-                    && trailer.trailer_magic != crate::envelope::LEGACY_TRAILER_MAGIC
-                {
-                    continue;
-                }
 
                 // Single segment match
                 if trailer.ube_offset == seg_payload_offset
@@ -385,12 +374,7 @@ impl HostAdapter for JpegAdapter {
             return Ok(Some(res));
         }
 
-        // 3. Fallback check: Legacy COM segment chain
-        if let Some(res) = try_locate_chain(&com_segments, stego_in)? {
-            return Ok(Some(res));
-        }
-
-        // 4. Fallback check: EOF trailer
+        // 3. Fallback check: EOF trailer
         if let Some(t) = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {
             let file_size = stego_in.seek(SeekFrom::End(0))?;
             if t.ube_offset + t.ube_total_size == file_size {

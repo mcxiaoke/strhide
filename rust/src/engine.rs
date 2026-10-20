@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rand::RngExt;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::adapters::{FinalizeCtx, HostAdapter, SeekRead, StrategyCapacity, TrailerCtx};
 use crate::crypto::{
@@ -48,7 +48,7 @@ use crate::router::{find_adapter, find_adapter_or_reject, id_to_strategy, strate
 /// This is the metadata that survives `read`: the original filename, the
 /// uncompressed payload size, its SHA-256, and a write timestamp. On extract,
 /// `raw_sha256` is re-computed over the decrypted payload and must match.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct CarrierMetadata {
     pub filename: String,
     pub raw_size: u64,
@@ -141,8 +141,9 @@ fn hex_to_digest32(hex: &str) -> Option<[u8; 32]> {
 
 impl CarrierMetadata {
     /// Compact encoding, or `None` when this metadata cannot be represented
-    /// (over-long filename, malformed digest). Callers fall back to JSON in
-    /// that case and leave `FLAG_COMPACT_META` clear.
+    /// (over-long filename, malformed digest). This is the only metadata
+    /// layout in the wire format; a `None` is a writer-side error, not a
+    /// reason to fall back to another encoding.
     pub fn encode_compact(&self) -> Option<Vec<u8>> {
         let name = self.filename.as_bytes();
         if name.len() > COMPACT_META_MAX_NAME {
@@ -201,23 +202,31 @@ impl CarrierMetadata {
     }
 }
 
-/// Encode the metadata block, preferring the compact layout. Returns the bytes
-/// plus whether the compact layout was used (the caller sets
-/// `FLAG_COMPACT_META` accordingly, and the flag feeds the AEAD AAD).
-fn encode_metadata(meta: &CarrierMetadata) -> Result<(Vec<u8>, bool), StrHideError> {
-    match meta.encode_compact() {
-        Some(bytes) => Ok((bytes, true)),
-        None => Ok((serde_json::to_vec(meta)?, false)),
-    }
+/// Encode the metadata block (compact layout only).
+///
+/// The former JSON fallback was removed with the rest of the pre-v2 read
+/// compatibility layer: a filename that does not fit the u16 length field, or
+/// a digest that is not 64 hex characters, is a programming error at the
+/// writer, so it fails loudly instead of silently switching layouts.
+fn encode_metadata(meta: &CarrierMetadata) -> Result<Vec<u8>, StrHideError> {
+    meta.encode_compact().ok_or_else(|| {
+        StrHideError::General(
+            "Payload filename exceeds 65535 bytes or its SHA-256 is malformed;              cannot encode envelope metadata"
+                .into(),
+        )
+    })
 }
 
-/// Decode either layout, driven by `FLAG_COMPACT_META`.
+/// Decode the metadata block. `compact` is the wire flag the writer set; any
+/// other value is a pre-v2 JSON block this build no longer reads.
 fn decode_metadata(bytes: &[u8], compact: bool) -> Result<CarrierMetadata, StrHideError> {
     if compact {
         CarrierMetadata::decode_compact(bytes)
     } else {
-        serde_json::from_slice(bytes)
-            .map_err(|e| StrHideError::CorruptedData(format!("Corrupted metadata block: {e}")))
+        Err(StrHideError::CorruptedData(
+            "Unsupported metadata layout: pre-v2 JSON metadata blocks are no longer readable"
+                .into(),
+        ))
     }
 }
 
@@ -865,13 +874,10 @@ pub fn write_carrier_with(
         raw_sha256,
         created_at,
     };
-    // Compact binary block when representable (the normal case); the JSON form
-    // stays as a fallback for pathological metadata and as the legacy reader
-    // path. `FLAG_COMPACT_META` must be set before the AAD is captured.
-    let (meta_raw, compact_meta) = encode_metadata(&meta_obj)?;
-    if compact_meta {
-        flags |= FLAG_COMPACT_META;
-    }
+    // The compact binary block is the only metadata layout; `FLAG_COMPACT_META`
+    // is therefore always set and must be in place before the AAD is captured.
+    let meta_raw = encode_metadata(&meta_obj)?;
+    flags |= FLAG_COMPACT_META;
 
     // Exact UBE size, computed before any strategy decision. All components are
     // deterministic at this point:
@@ -1273,32 +1279,17 @@ pub fn read_carrier_with_profile(
     let mut meta_bytes = vec![0u8; header.meta_len as usize];
     ube_stream.read_exact(&mut meta_bytes)?;
 
-    let (meta_obj, is_legacy_plaintext) = if header.is_encrypted() {
-        let meta_plain = decrypt_metadata(
-            &meta_bytes,
-            &meta_key,
-            &header.base_nonce,
-            &fixed_header_aad,
-        )
-        .map_err(|_| StrHideError::Password("Invalid password or corrupted metadata".into()))?;
-        let meta_obj = decode_metadata(&meta_plain, header.is_compact_meta())?;
-        (meta_obj, false)
-    } else {
-        match decrypt_metadata(
-            &meta_bytes,
-            &meta_key,
-            &header.base_nonce,
-            &fixed_header_aad,
-        )
-        .and_then(|plain| decode_metadata(&plain, header.is_compact_meta()))
-        {
-            Ok(obj) => (obj, false),
-            Err(_) => {
-                let obj = decode_metadata(&meta_bytes, header.is_compact_meta())?;
-                (obj, true)
-            }
-        }
-    };
+    // Metadata is always AEAD-sealed, even in an unencrypted envelope (the key
+    // is then the profile's default secret). There is no plaintext fallback:
+    // pre-v2 carriers stored metadata in the clear and are no longer readable.
+    let meta_obj = decrypt_metadata(
+        &meta_bytes,
+        &meta_key,
+        &header.base_nonce,
+        &fixed_header_aad,
+    )
+    .map_err(|_| StrHideError::Password("Invalid password or corrupted metadata".into()))
+    .and_then(|plain| decode_metadata(&plain, header.is_compact_meta()))?;
 
     // Read payload (checked_sub: validate_against already bounds the fields,
     // but keep the arithmetic defensive against corrupted envelopes)
@@ -1314,19 +1305,14 @@ pub fn read_carrier_with_profile(
         })?;
 
     let mut decrypted_payload = Vec::new();
-    if header.is_encrypted() || !is_legacy_plaintext {
-        decrypt_stream_from_chunks(
-            &mut ube_stream,
-            &mut decrypted_payload,
-            &payload_key,
-            &header.base_nonce,
-            &fixed_header_aad,
-            total_payload_bytes,
-        )?;
-    } else {
-        let mut taken = (&mut ube_stream).take(total_payload_bytes);
-        taken.read_to_end(&mut decrypted_payload)?;
-    }
+    decrypt_stream_from_chunks(
+        &mut ube_stream,
+        &mut decrypted_payload,
+        &payload_key,
+        &header.base_nonce,
+        &fixed_header_aad,
+        total_payload_bytes,
+    )?;
 
     // Decompress if needed. `meta_obj.raw_size` is the declared uncompressed
     // size (inside the AEAD-protected metadata), so it doubles as a hard
@@ -1681,12 +1667,10 @@ pub fn inspect_carrier_with(
                     &meta_key,
                     &header.base_nonce,
                     &header.get_aad(),
-                )
-                && let Ok(meta_obj) = decode_metadata(&dec, header.is_compact_meta())
-            {
-                Some(meta_obj)
+                ) {
+                decode_metadata(&dec, header.is_compact_meta()).ok()
             } else {
-                decode_metadata(&meta_bytes, header.is_compact_meta()).ok()
+                None
             };
             if let Some(meta_obj) = decoded
                 && let Ok(val) = serde_json::to_value(&meta_obj)
@@ -2014,28 +1998,28 @@ mod compact_meta_tests {
     }
 
     #[test]
-    fn json_path_still_decodes_and_never_reads_compact() {
+    fn pre_v2_json_metadata_is_rejected() {
         let m = meta("legacy.bin", 42, 1_600_000_000);
         let json = serde_json::to_vec(&m).unwrap();
-        assert_same(&decode_metadata(&json, false).unwrap(), &m);
-        // A compact block read through the legacy (JSON) path must fail, not
-        // silently produce garbage: that is what keeps old readers safe.
-        let compact = m.encode_compact().unwrap();
-        assert!(decode_metadata(&compact, false).is_err());
-        // ...and the compact path must not accept JSON.
+        // A pre-v2 carrier stores JSON with FLAG_COMPACT_META clear. That
+        // combination is now a hard error rather than a second decode path.
+        assert!(decode_metadata(&json, false).is_err());
+        // The compact path must not accept JSON either.
         assert!(decode_metadata(&json, true).is_err());
+        // And the compact layout still round-trips.
+        let compact = m.encode_compact().unwrap();
+        assert_same(&decode_metadata(&compact, true).unwrap(), &m);
     }
 
     #[test]
-    fn unencodable_metadata_falls_back_to_json() {
+    fn unencodable_metadata_is_a_writer_error() {
         let long_name = meta(&"n".repeat(COMPACT_META_MAX_NAME + 1), 1, 1);
         assert!(long_name.encode_compact().is_none());
-        let (bytes, compact) = encode_metadata(&long_name).unwrap();
-        assert!(!compact);
-        assert_same(&decode_metadata(&bytes, compact).unwrap(), &long_name);
+        assert!(encode_metadata(&long_name).is_err());
 
         let mut bad_digest = meta("x", 1, 1);
         bad_digest.raw_sha256 = "zz".repeat(32);
         assert!(bad_digest.encode_compact().is_none());
+        assert!(encode_metadata(&bad_digest).is_err());
     }
 }

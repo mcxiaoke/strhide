@@ -1,6 +1,6 @@
 use std::io::Write;
 
-pub use crate::adapters::isobmff::{LEGACY_UUID_NAMESPACE, MP4_UUID_NEUTRAL};
+pub use crate::adapters::isobmff::MP4_UUID_NEUTRAL;
 use crate::adapters::isobmff::{
     calc_prefix_len, isobmff_inject, isobmff_locate, isobmff_strategy_capacities,
     isobmff_suspicious_structures, isobmff_verify_structure,

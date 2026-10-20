@@ -4,7 +4,7 @@ use crate::adapters::{
     FinalizeCtx, HostAdapter, SeekRead, SeekReadWrite, StrategyCapacity, eof::EofAdapter,
     format_bytes,
 };
-use crate::envelope::{EnvelopeTrailer, STANDARD_TRAILER_MAGIC};
+use crate::envelope::EnvelopeTrailer;
 use crate::errors::StrHideError;
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -224,15 +224,8 @@ impl HostAdapter for PngAdapter {
                 stego_in.seek(SeekFrom::Start(trailer_offset))?;
                 let mut trailer_bytes = [0u8; 24];
                 if stego_in.read_exact(&mut trailer_bytes).is_ok()
-                    && let Ok(trailer) =
-                        EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic)
+                    && EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic).is_ok()
                 {
-                    if expected_trailer_magic.is_none()
-                        && trailer.trailer_magic != STANDARD_TRAILER_MAGIC
-                        && trailer.trailer_magic != crate::envelope::LEGACY_TRAILER_MAGIC
-                    {
-                        return Ok(None);
-                    }
                     return Ok(Some((chunk_data_offset, length, "chunk".into())));
                 }
             }

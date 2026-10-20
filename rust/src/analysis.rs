@@ -34,7 +34,7 @@ use serde::Serialize;
 pub mod calibration;
 
 use crate::adapters::{pe_codebits, pe_slack};
-use crate::envelope::{LEGACY_HEADER_MAGIC, MIN_UBE_PLAIN, STANDARD_HEADER_MAGIC};
+use crate::envelope::{MIN_UBE_PLAIN, STANDARD_HEADER_MAGIC};
 use crate::errors::StrHideError;
 
 /// Hard cap on file size we fully load for scanning. Larger files still get
@@ -607,11 +607,10 @@ fn track_pe_structure(data: &[u8], out: &mut Vec<Finding>) {
         for &byte in range {
             distinct[byte as usize] = true;
         }
-        for magic in [&STANDARD_HEADER_MAGIC[..], &LEGACY_HEADER_MAGIC[..]] {
-            if let Some(idx) = range.windows(magic.len()).position(|w| w == magic) {
-                header_offset = Some(a + idx);
-                break 'ranges;
-            }
+        let magic = &STANDARD_HEADER_MAGIC[..];
+        if let Some(idx) = range.windows(magic.len()).position(|w| w == magic) {
+            header_offset = Some(a + idx);
+            break 'ranges;
         }
     }
     let distinct = distinct.iter().filter(|s| **s).count();

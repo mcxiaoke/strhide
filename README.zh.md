@@ -9,7 +9,7 @@
 | [`rust/`](rust/) | Rust (edition 2024) | **主力维护中（0.3.x）**——单文件静态二进制，从源码构建 |
 | [`python/`](python/) | Python ≥ 3.10 | **已冻结在 0.2.0，弃用**——`pip install strhide`，库 + CLI |
 
-兼容性是**单向**的：Rust 仍可读取旧版 Python 包写入的信封，但 Python 读不了 Rust 新默认的全加密信封，也读不了用 `pe_slack` / `pe_codebits` 策略写入的 PE 载体。请一律使用 Rust 二进制。
+两个实现的信封格式**互不兼容**：Python 读不了 Rust 的全加密信封与 `pe_slack` / `pe_codebits` 策略载体；Rust 自 2026-10-21 起也**不再读取** 0.2.0 时代的旧信封（旧 ASCII 魔数 `STRHIDE` / `STH!`、JSON 元数据与明文封装已删除）。跨版本迁移请先用 0.3.x 的 Rust 二进制读取并重新写入。
 
 > [English documentation (README.md)](README.md)
 
@@ -18,7 +18,7 @@
 - **格式保持**——宿主文件仍是合法的 PNG/JPEG/WebP/HEIF/MP4/WAV/MKV/ZIP/PDF/PE，可正常显示、播放或运行。
 - **100% 可逆**——信封中嵌入原始宿主的 SHA-256，`read`/`restore` 输出保证与原文件逐比特一致。
 - **落盘即加密**——每个信封在写入载体前都经 Deflate 压缩与 AES-256-GCM 加密。不设密码时使用内置密钥，载体中不会泄露明文载荷、宿主哈希或文件名；设置密码则获得真正的密钥分离（PBKDF2-HMAC-SHA256 10 万轮 + HKDF-SHA256，分块 GCM）。
-- **隐写模式（Stealth）**——设置密码后，信封签名与头部字段均由密码派生，没有密码就无从发现隐藏数据。即使在默认（非 stealth）模式下也没有静态 ASCII 魔数：不存在 `STRHIDE` / `STH!` 这类字符串，只有高熵二进制签名（读取时仍兼容旧版魔数）。
+- **隐写模式（Stealth）**——设置密码后，信封签名与头部字段均由密码派生，没有密码就无从发现隐藏数据。即使在默认（非 stealth）模式下也没有静态 ASCII 魔数：不存在 `STRHIDE` / `STH!` 这类字符串，只有高熵二进制签名（旧版 ASCII 魔数已不再被识别）。
 - **黑盒隐写分析**——`scan` 把文件视为未知对象，报告来自**任意工具**（不只是 strhide）的结构与统计特征异常；JPEG 额外走**校准式 DCT 检验**（`dct:calibration`），并明确标注 `clean` 不构成「无隐藏数据」的证据。
 - **密码提示**——可选（≤ 1 KiB）的提示信息随信封存储，在需要输入密码时展示。
 - **默认安全**——完整性/签名拒绝检查会拒绝修改不宜触碰的文件（如签名二进制）；`write`、`restore` 与 `embed` 默认输出至 `<stem>-out.<ext>` 新文件，原始宿主 100% 保持干净；提供显式 `--in-place` 选项进行原地修改（自动创建 `.bak` 备份）；`read`、`extract`、`write` 和 `restore` 默认拒绝覆盖已存在的输出文件（需 `--overwrite` 才允许）；保留原始文件时间戳。

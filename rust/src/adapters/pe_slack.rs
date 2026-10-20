@@ -19,8 +19,8 @@
 
 use crate::adapters::{SeekRead, SeekWrite, format_bytes, pe_codebits};
 use crate::envelope::{
-    EnvelopeHeader, EnvelopeTrailer, LEGACY_HEADER_MAGIC, MIN_UBE_PLAIN, STANDARD_HEADER_MAGIC,
-    STANDARD_TRAILER_MAGIC, TRAILER_SIZE,
+    EnvelopeHeader, EnvelopeTrailer, MIN_UBE_PLAIN, STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC,
+    TRAILER_SIZE,
 };
 use crate::errors::StrHideError;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -119,10 +119,7 @@ pub fn locate(
 
     let magics: Vec<[u8; 4]> = match expected_trailer_magic {
         Some(m) => vec![*m],
-        None => vec![
-            STANDARD_TRAILER_MAGIC,
-            crate::envelope::LEGACY_TRAILER_MAGIC,
-        ],
+        None => vec![STANDARD_TRAILER_MAGIC],
     };
 
     for &(start, end) in &layout.slack_ranges {
@@ -209,7 +206,7 @@ fn validate_trailer_at(
     // evidence available for them.
     if expected_magic.is_none() {
         let header = read_exact_at(reader, trailer.ube_offset, 8)?;
-        if header != STANDARD_HEADER_MAGIC.as_slice() && header != LEGACY_HEADER_MAGIC.as_slice() {
+        if header != STANDARD_HEADER_MAGIC.as_slice() {
             return Ok(None);
         }
     }
@@ -271,8 +268,8 @@ pub struct SlackScan {
     pub distinct: usize,
     /// Number of padding ranges that were scanned.
     pub ranges: usize,
-    /// Offset of a strhide envelope header (standard or legacy magic) found in
-    /// the padding. This is hard evidence; `nonzero` alone is not.
+    /// Offset of a strhide envelope header (standard magic) found in the
+    /// padding. This is hard evidence; `nonzero` alone is not.
     pub header_offset: Option<u64>,
 }
 
@@ -291,7 +288,7 @@ pub fn scan_slack(stego_in: &mut dyn SeekRead) -> Result<SlackScan, StrHideError
         Ok(layout) => layout,
         Err(_) => return Ok(SlackScan::default()),
     };
-    const MAGICS: [&[u8; 8]; 2] = [&STANDARD_HEADER_MAGIC, &LEGACY_HEADER_MAGIC];
+    const MAGICS: [&[u8; 8]; 1] = [&STANDARD_HEADER_MAGIC];
     let mut buf = vec![0u8; SCAN_CHUNK];
     let mut seen = [false; 256];
     let mut scan = SlackScan {

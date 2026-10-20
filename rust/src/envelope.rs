@@ -54,12 +54,11 @@ pub const STANDARD_TRAILER_MAGIC: [u8; 4] = [0x78, 0xe6, 0x66, 0xd2];
 /// while allowing all valid registered strategy IDs.
 pub const MAX_KNOWN_STRATEGY_ID: u8 = 11;
 
-/// Legacy header magic used in v0.2/v0.3 for backward compatibility.
-pub const LEGACY_HEADER_MAGIC: [u8; 8] = *b"\x89STRHIDE";
-
-/// Legacy trailer magic used in v0.2/v0.3 for backward compatibility.
-pub const LEGACY_TRAILER_MAGIC: [u8; 4] = *b"STH!";
-
+/// Envelope version written and accepted by this build.
+///
+/// Only this value parses: the v0.2/v0.3 ASCII magics (`\x89STRHIDE` / `STH!`)
+/// and their plaintext metadata layout were dropped on 2026-10-21, so a
+/// pre-v2 carrier now reports "no hidden data" instead of being read.
 pub const CURRENT_VERSION: u8 = 0x02;
 
 pub const FLAG_ENCRYPTED: u8 = 0x01;
@@ -484,10 +483,10 @@ impl EnvelopeTrailer {
 
     /// Parse a 24-byte trailer, optionally requiring a specific magic.
     ///
-    /// When `expected_magic` is `None`, both the standard and legacy magics
-    /// are accepted and the CRC is checked against the unmasked value. When
-    /// it is `Some(..)` (the stealth case), the password-derived CRC mask is
-    /// also accepted.
+    /// When `expected_magic` is `None` (the official dialect) only
+    /// [`STANDARD_TRAILER_MAGIC`] is accepted and the CRC is checked against
+    /// the unmasked value. When it is `Some(..)` (stealth or a private
+    /// dialect), the password-derived CRC mask is also accepted.
     pub fn unpack(data: &[u8], expected_magic: Option<&[u8; 4]>) -> Result<Self, StrHideError> {
         if data.len() < TRAILER_SIZE {
             return Err(StrHideError::CorruptedData(format!(
@@ -503,10 +502,9 @@ impl EnvelopeTrailer {
         let mut trailer_magic = [0u8; 4];
         trailer_magic.copy_from_slice(&data[20..24]);
 
-        let is_valid_magic = if let Some(target) = expected_magic {
-            &trailer_magic == target
-        } else {
-            trailer_magic == STANDARD_TRAILER_MAGIC || trailer_magic == LEGACY_TRAILER_MAGIC
+        let is_valid_magic = match expected_magic {
+            Some(target) => &trailer_magic == target,
+            None => trailer_magic == STANDARD_TRAILER_MAGIC,
         };
 
         if !is_valid_magic {
