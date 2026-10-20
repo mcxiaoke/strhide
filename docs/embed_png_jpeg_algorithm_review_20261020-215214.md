@@ -1,5 +1,12 @@
 # embed 对 PNG / JPEG 的算法现状、优缺点与改进建议
 
+> ⚠️ **本文已被 `embed_png_jpeg_algorithm_review_20261020_db.md`（db 版）取代**（2026-10-20 深夜）。
+> 保留仅作历史记录。两点注意：
+> 1. 本文 §4.5 关于 `dct-io` 块序是 **MCU 交错顺序**的说法，经 2026-10-20 合成梯度 JPEG 实证**是正确的**；
+>    db 版初稿曾"勘误"为行优先栅格，该勘误本身不成立，已在 db 版 §6.2 修正并以实验数据佐证。
+> 2. 本文建议的 P0 项（PNG chunk/滤波、JPEG 网格/DQT）已全部落地，实现细节与实测见 db 版修订记录
+>    及 `docs/CHANGES-20261020.md`。
+
 > **编制时间**：2026-10-20 21:52:14
 > **核对对象**：`rust/src/stego/`（`strhide 0.4.0`，commit `55637b1`）
 > **实测环境**：Windows 10，`rust/target/release/strhide.exe`，语料 `temp/teststego`

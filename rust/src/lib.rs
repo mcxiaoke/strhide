@@ -125,6 +125,7 @@ pub mod crypto;
 pub mod engine;
 pub mod envelope;
 pub mod errors;
+pub mod jpeg;
 pub mod params;
 pub mod rejection;
 pub mod router;

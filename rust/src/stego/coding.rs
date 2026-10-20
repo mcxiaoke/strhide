@@ -75,6 +75,22 @@ pub fn max_payload_bytes(available_slots: usize, k: usize) -> usize {
     total_bits / 8
 }
 
+/// Expected number of modified slots per embedded message bit for parameter
+/// `k` (Hamming block coding).
+///
+/// Per block of `n = 2^k - 1` slots carrying `k` bits, at most one slot is
+/// flipped, and only when the block syndrome already differs from the
+/// message -- probability `n / (n + 1)` for a random cover. `k <= 1` is
+/// plain 1:1 LSB replacement (0.5 changes per bit). Tail bits embedded 1:1
+/// make the true rate marginally higher; this is the block-dominated value.
+pub fn expected_change_rate(k: usize) -> f64 {
+    if k <= 1 {
+        return 0.5;
+    }
+    let n = (1usize << k) - 1;
+    (n as f64 / (n as f64 + 1.0)) / k as f64
+}
+
 /// Read bit `idx` (MSB-first within each byte) of `payload`.
 #[inline]
 fn bit_at(payload: &[u8], idx: usize) -> u8 {

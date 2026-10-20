@@ -150,7 +150,7 @@ pub fn extract_carrier_with_profile(
 }
 
 /// Capacity information for content-adaptive steganography.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StegoCapacityInfo {
     pub format: String,
     pub algorithm: String,
@@ -164,6 +164,11 @@ pub struct StegoCapacityInfo {
     pub available_slots: usize,
     pub max_raw_payload_bytes: usize,
     pub recommended_max_bytes: usize,
+    /// Expected modified slots per embedded payload bit under the matrix
+    /// coding in use (0.2917 for the default Hamming k=3, 0.5 for plain LSB
+    /// replacement). Tail bits embedded 1:1 push the true rate slightly
+    /// higher.
+    pub estimated_change_rate: f64,
 }
 
 /// Automatically sniff carrier format and probe embedding capacity.

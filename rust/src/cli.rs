@@ -1693,6 +1693,51 @@ fn handle_list(args: ListArgs) -> Result<(), StrHideError> {
     Ok(())
 }
 
+/// Warn when the caller tuned stego parameters away from their defaults.
+///
+/// Slot selection depends on the cost map, which depends on these
+/// parameters, so extraction only succeeds when they match the embed-time
+/// values. The envelope deliberately carries no parameter fingerprint (the
+/// salt lives inside the header slots, which are themselves cost-map
+/// dependent), so a mismatch is indistinguishable from a wrong password --
+/// this warning is the mitigation. It is printed unconditionally, never
+/// keyed on the extraction outcome, so the message cannot be used as a
+/// detection oracle.
+fn warn_nondefault_stego_params(options: &crate::stego::StegoOptions, quiet: bool) {
+    if quiet {
+        return;
+    }
+    let sp = &options.spatial_params;
+    let jp = &options.jpeg_params;
+    let d_sp = crate::stego::SpatialParams::default();
+    let d_jp = crate::stego::JpegParams::default();
+    let mut flags: Vec<String> = Vec::new();
+    if sp.p1_window != d_sp.p1_window {
+        flags.push(format!("--p1-window {}", sp.p1_window));
+    }
+    if sp.p2_window != d_sp.p2_window {
+        flags.push(format!("--p2-window {}", sp.p2_window));
+    }
+    if sp.exclusion_percentile != d_sp.exclusion_percentile
+        || jp.block_exclusion_percentile != d_jp.block_exclusion_percentile
+    {
+        flags.push(format!("--exclusion-rate {}", sp.exclusion_percentile));
+    }
+    if jp.neighbor_weight != d_jp.neighbor_weight {
+        flags.push(format!("--neighbor-weight {}", jp.neighbor_weight));
+    }
+    if jp.min_abs_coeff != d_jp.min_abs_coeff {
+        flags.push(format!("--min-abs-coeff {}", jp.min_abs_coeff));
+    }
+    if flags.is_empty() {
+        return;
+    }
+    eprintln!(
+        "[WARN] Non-default stego parameters: {}. Extraction succeeds only with the same values; a mismatch fails as 'No valid payload found'.",
+        flags.join(" ")
+    );
+}
+
 fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
     if args.capacity {
         for carrier in &args.carrier {
@@ -1738,6 +1783,11 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
                 "  Recommended max: {} bytes ({:.1} KiB) (high stealth)",
                 cap.recommended_max_bytes,
                 cap.recommended_max_bytes as f64 / 1024.0
+            );
+            println!(
+                "  Est. changes:   ~{:.3} per payload bit (matrix coding); \
+                 recommended max is half of max for statistical stealth",
+                cap.estimated_change_rate
             );
         }
         return Ok(());
@@ -1836,6 +1886,7 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         if let Some(p2) = args.p2_window {
             options.spatial_params.p2_window = p2;
         }
+        warn_nondefault_stego_params(&options, quiet);
 
         let stego_bytes = crate::stego::embed_carrier_with_profile(
             &carrier_bytes,
@@ -1916,6 +1967,7 @@ fn handle_extract(args: ExtractArgs, cfg: &FileConfig, quiet: bool) -> Result<()
     if let Some(p2) = args.p2_window {
         options.spatial_params.p2_window = p2;
     }
+    warn_nondefault_stego_params(&options, quiet);
 
     let payload = crate::stego::extract_carrier_with_profile(&carrier_bytes, &options, &profile)?;
 

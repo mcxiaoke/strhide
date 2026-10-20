@@ -49,8 +49,15 @@ pub fn embed_jpeg(
         ));
     }
 
-    // Compute distortion cost map
-    let costs = cost_model.compute_cost(&coeffs, params);
+    // Compute distortion cost map on the component's true block grid,
+    // weighted by the file's own luminance quantization table.
+    let geometry = crate::stego::jpeg::geometry::geometry_for_carrier(
+        carrier_bytes,
+        0,
+        coeffs.components[0].blocks.len(),
+    )
+    .map_err(map_dct_error)?;
+    let costs = cost_model.compute_cost(&coeffs, &geometry, params);
     let total_coeffs = coeffs.components[0].blocks.len() * 64;
     if costs.len() != total_coeffs {
         return Err(StrHideError::General("JPEG cost dimension mismatch".into()));
@@ -210,7 +217,13 @@ pub fn extract_jpeg(
         return Err(StrHideError::NoHiddenData("JPEG has no components".into()));
     }
 
-    let costs = cost_model.compute_cost(&coeffs, params);
+    let geometry = crate::stego::jpeg::geometry::geometry_for_carrier(
+        carrier_bytes,
+        0,
+        coeffs.components[0].blocks.len(),
+    )
+    .map_err(map_dct_error)?;
+    let costs = cost_model.compute_cost(&coeffs, &geometry, params);
     let total_coeffs = coeffs.components[0].blocks.len() * 64;
     if costs.len() != total_coeffs {
         return Err(StrHideError::NoHiddenData(
@@ -348,7 +361,13 @@ pub fn probe_jpeg_capacity(
         ));
     }
 
-    let costs = cost_model.compute_cost(&coeffs, params);
+    let geometry = crate::stego::jpeg::geometry::geometry_for_carrier(
+        carrier_bytes,
+        0,
+        coeffs.components[0].blocks.len(),
+    )
+    .map_err(map_dct_error)?;
+    let costs = cost_model.compute_cost(&coeffs, &geometry, params);
     let total_coeffs = coeffs.components[0].blocks.len() * 64;
     if costs.len() != total_coeffs {
         return Err(StrHideError::General("JPEG cost dimension mismatch".into()));
@@ -390,5 +409,6 @@ pub fn probe_jpeg_capacity(
         available_slots: available_body_slots,
         max_raw_payload_bytes,
         recommended_max_bytes,
+        estimated_change_rate: crate::stego::coding::expected_change_rate(hamming_k),
     })
 }

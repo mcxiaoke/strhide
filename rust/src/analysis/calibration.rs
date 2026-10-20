@@ -39,6 +39,7 @@
 //! colour transform, no extra encoder in the dependency tree.
 
 use crate::analysis::decode_jpeg_pixels;
+use crate::jpeg::dqt::parse_luma_dqt;
 
 /// Natural-order indices of the modes the estimator uses: `(0,1) -> 1`,
 /// `(1,0) -> 8`, `(1,1) -> 9`.
@@ -75,13 +76,6 @@ pub struct CalibrationEstimate {
 /// Highest `|coeff|` pair the imbalance statistic looks at: pairs
 /// `(2,3) (4,5) (6,7) (8,9) (10,11)`.
 const MAX_PAIR_ABS: i16 = 11;
-
-/// Zigzag scan order: zigzag position -> natural `row*8 + col`.
-const ZIGZAG: [usize; 64] = [
-    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
-    13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
-    52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
-];
 
 /// DCT basis: `COS[x][u] = C(u)/2 * cos((2x+1) u pi / 16)`.
 fn dct_basis() -> [[f64; 8]; 8] {
@@ -123,65 +117,6 @@ fn forward_dct(block: &[[f64; 8]; 8], basis: &[[f64; 8]; 8]) -> [f64; 64] {
         }
     }
     natural
-}
-
-/// Parse the first (luminance) DQT segment, returned in **natural** order.
-fn parse_luma_dqt(data: &[u8]) -> Option<[u16; 64]> {
-    let mut i = 2; // skip SOI
-    while i + 4 <= data.len() {
-        if data[i] != 0xFF {
-            i += 1;
-            continue;
-        }
-        let marker = data[i + 1];
-        if marker == 0xD8 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
-            i += 2;
-            continue;
-        }
-        if marker == 0xDA || marker == 0xD9 {
-            return None; // scan started / image ended: no DQT found
-        }
-        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-        if len < 2 || i + 2 + len > data.len() {
-            return None;
-        }
-        if marker == 0xDB {
-            let mut p = i + 4;
-            let end = i + 2 + len;
-            while p < end {
-                let pq_tq = data[p];
-                let precision = pq_tq >> 4;
-                let id = pq_tq & 0x0F;
-                let bytes_per = if precision == 0 { 1 } else { 2 };
-                if p + 1 + 64 * bytes_per > end {
-                    return None;
-                }
-                if id == 0 {
-                    let mut table = [0u16; 64];
-                    for (z, slot) in table.iter_mut().enumerate() {
-                        let off = p + 1 + z * bytes_per;
-                        let value = if precision == 0 {
-                            data[off] as u16
-                        } else {
-                            u16::from_be_bytes([data[off], data[off + 1]])
-                        };
-                        // The file stores DQT in zigzag order; keep the table in
-                        // natural order so it lines up with the coefficients.
-                        *slot = value;
-                    }
-                    let mut natural = [0u16; 64];
-                    for (z, &nat) in ZIGZAG.iter().enumerate() {
-                        natural[nat] = table[z];
-                    }
-                    return Some(natural);
-                }
-                p += 1 + 64 * bytes_per;
-            }
-            return None;
-        }
-        i += 2 + len;
-    }
-    None
 }
 
 /// Luminance plane from decoded pixels (BT.601, matching the JPEG Y channel).

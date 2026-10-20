@@ -21,8 +21,6 @@ pub struct SpatialParams {
     pub epsilon: f64,
     /// Fraction of smoothest pixels to completely exclude from embedding (0.0 .. 0.9, default 0.30).
     pub exclusion_percentile: f64,
-    /// Cost assigned to unembeddable or excluded pixels.
-    pub wet_cost: f64,
 }
 
 impl Default for SpatialParams {
@@ -34,7 +32,6 @@ impl Default for SpatialParams {
             p2_window: 15,
             epsilon: f32::EPSILON as f64,
             exclusion_percentile: 0.30,
-            wet_cost: 1e13,
         }
     }
 }
@@ -79,12 +76,6 @@ impl SpatialParams {
                 self.epsilon
             )));
         }
-        if !self.wet_cost.is_finite() || self.wet_cost <= 0.0 {
-            return Err(StrHideError::General(format!(
-                "HILL parameter 'wet_cost' must be a finite positive number, got {}",
-                self.wet_cost
-            )));
-        }
         Ok(())
     }
 }
@@ -94,8 +85,6 @@ impl SpatialParams {
 pub struct JpegParams {
     /// Weight applied to the 8-neighborhood block energies (default 0.25).
     pub neighbor_weight: f64,
-    /// Weight applied to DC mode quantization step (default 0.5).
-    pub mode_dc_weight: f64,
     /// Minimum absolute coefficient value eligible for embedding (default 1 to skip zero AC).
     pub min_abs_coeff: i16,
     /// Fraction of lowest-energy DCT blocks to completely exclude from embedding (default 0.20).
@@ -108,7 +97,6 @@ impl Default for JpegParams {
     fn default() -> Self {
         Self {
             neighbor_weight: 0.25,
-            mode_dc_weight: 0.5,
             min_abs_coeff: 1,
             block_exclusion_percentile: 0.20,
             wet_cost: 1e13,
@@ -121,15 +109,11 @@ impl JpegParams {
     /// empty candidate set (both surface later as an opaque "no capacity" or
     /// "no hidden data" error instead of a configuration error).
     pub fn validate(&self) -> Result<(), StrHideError> {
-        for (name, value) in [
-            ("neighbor_weight", self.neighbor_weight),
-            ("mode_dc_weight", self.mode_dc_weight),
-        ] {
-            if !value.is_finite() || value < 0.0 {
-                return Err(StrHideError::General(format!(
-                    "UERD parameter '{name}' must be a finite non-negative number, got {value}"
-                )));
-            }
+        if !self.neighbor_weight.is_finite() || self.neighbor_weight < 0.0 {
+            return Err(StrHideError::General(format!(
+                "UERD parameter 'neighbor_weight' must be a finite non-negative number, got {}",
+                self.neighbor_weight
+            )));
         }
         if self.min_abs_coeff < 0 {
             return Err(StrHideError::General(format!(
