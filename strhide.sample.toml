@@ -16,14 +16,14 @@
 #      - Windows:       %USERPROFILE%\.strhide\config.toml
 #
 # 3. Explicit path:
-#    Specify any configuration file on the command line using --config:
-#      strhide --config /path/to/custom-config.toml write carrier.png -t "secret"
+#    Specify any configuration file on the command line using -c or --config:
+#      strhide -c /path/to/custom-config.toml write carrier.png -t "secret"
 #
 # CONFIGURATION PRECEDENCE (Highest to Lowest):
 # ---------------------------------------------
 # 1. Explicit CLI arguments & flags (e.g. -p, -s, --no-backup, --stealth)
 # 2. Environment variables (STRHIDE_PASSWORD, STRHIDE_TEXT)
-# 3. Configuration file (CLI --config > ./strhide.toml > ~/.strhide/config.toml)
+# 3. Configuration file (CLI -c / --config > ./strhide.toml > ~/.strhide/config.toml)
 # 4. Built-in application defaults
 #
 # FORMAT RULES:
@@ -66,15 +66,17 @@
 # ------------------------------------------------------------------------------
 # 2. Backup Creation
 # ------------------------------------------------------------------------------
-# Controls whether a backup file (<carrier>.bak) is created before modifying
-# a carrier file in place.
+# Controls whether a backup file (<carrier>.bak) is created when modifying
+# a carrier file in place with `--in-place`. (Note: when writing to default
+# <carrier>-out.<ext> or an output path, the original carrier is untouched and
+# no .bak is created).
 #
-# Applies to: `write`, `restore`
+# Applies to: `write`, `restore` (with `--in-place`)
 # Type: boolean (true | false)
 # Default: true
 # CLI override: --no-backup
 #
-# Setting this to false disables creating .bak files when carriers are modified.
+# Setting this to false disables creating .bak files when carriers are modified in place.
 #
 # backup = true
 

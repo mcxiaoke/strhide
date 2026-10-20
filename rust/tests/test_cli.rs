@@ -5,6 +5,8 @@ pub mod common;
 
 #[path = "test_cli/batch.rs"]
 mod batch;
+#[path = "test_cli/cli_unification.rs"]
+mod cli_unification;
 #[path = "test_cli/config.rs"]
 mod config;
 #[path = "test_cli/p2.rs"]

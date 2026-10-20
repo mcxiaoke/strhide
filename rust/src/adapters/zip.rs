@@ -124,7 +124,7 @@ impl HostAdapter for ZipAdapter {
             available: true,
             limit: "carrier-dependent (4 GiB - EOCD offset)".into(),
             note: Some(
-                "before Central Directory; file grows; run `inspect -c <carrier>` for the exact limit"
+                "before Central Directory; file grows; run `inspect <carrier>` for the exact limit"
                     .into(),
             ),
         };

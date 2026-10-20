@@ -49,6 +49,7 @@ fn normal_write_is_detected_by_scan() {
             "-p",
             "pw",
             "--no-backup",
+            "--in-place",
         ],
     );
     let out = run(&dir, &["scan", "a.png", "--json"]);
@@ -82,6 +83,7 @@ fn stealth_write_masks_magic_but_chunk_remains() {
             "pw",
             "--stealth",
             "--no-backup",
+            "--in-place",
         ],
     );
     let out = run(&dir, &["scan", "a.png", "--json"]);
@@ -151,7 +153,10 @@ fn scan_quiet_clean_file_is_silent_and_zero() {
 fn scan_quiet_gates_on_hidden_carrier() {
     let dir = scratch("quiet_hidden");
     fs::write(dir.join("a.png"), make_png()).unwrap();
-    let (text, code) = run_with_code(&dir, &["write", "a.png", "-t", "hush", "--no-backup"]);
+    let (text, code) = run_with_code(
+        &dir,
+        &["write", "a.png", "-t", "hush", "--no-backup", "--in-place"],
+    );
     assert_eq!(code, 0, "write failed: {text}");
 
     // Grep-like gating: an actual strhide envelope is "likely-hidden" on every
@@ -168,7 +173,17 @@ fn scan_quiet_gates_on_hidden_carrier() {
 fn scan_exit_code_does_not_depend_on_quiet() {
     let dir = scratch("gate_loud");
     fs::write(dir.join("a.png"), make_png()).unwrap();
-    let (text, code) = run_with_code(&dir, &["write", "a.png", "-t", "loud gate", "--no-backup"]);
+    let (text, code) = run_with_code(
+        &dir,
+        &[
+            "write",
+            "a.png",
+            "-t",
+            "loud gate",
+            "--no-backup",
+            "--in-place",
+        ],
+    );
     assert_eq!(code, 0, "write failed: {text}");
 
     // Non-quiet runs share the same semantics: exit 1 with the report printed.

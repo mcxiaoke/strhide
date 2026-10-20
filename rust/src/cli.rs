@@ -26,7 +26,7 @@ pub const BANNER: &str = concat!("strhide ", env!("STRHIDE_VERSION_INFO"));
 )]
 pub struct Cli {
     /// Path to TOML config file (default: ./strhide.toml, then ~/.strhide/config.toml)
-    #[arg(long, global = true, value_name = "FILE")]
+    #[arg(short = 'c', long, global = true, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
     #[arg(
@@ -127,7 +127,7 @@ pub struct PayloadSourceArgs {
 
     #[arg(
         long = "stdin",
-        help = "Read the payload from standard input, e.g. `cat secret.txt | strhide write -c photo.png --stdin`. Mutually exclusive with the other payload sources."
+        help = "Read the payload from standard input, e.g. `cat secret.txt | strhide write photo.png --stdin`. Mutually exclusive with the other payload sources."
     )]
     pub stdin: bool,
 }
@@ -150,9 +150,22 @@ pub struct WriteArgs {
         short = 'o',
         long = "output",
         value_name = "PATH",
-        help = "Write the modified carrier to this path. A single path names the result for one carrier; with several carriers it must be an existing directory and each output keeps its carrier's name. Default: modify the carrier in place."
+        help = "Write the modified carrier to this path. A single path names the result for one carrier; with several carriers it must be an existing directory and each output keeps its carrier's name. Default: write to <carrier>-out.<ext>."
     )]
     pub output: Option<PathBuf>,
+
+    #[arg(
+        long = "in-place",
+        conflicts_with = "output",
+        help = "Modify carrier file(s) in place (creates .bak backup by default unless --no-backup). Default: write to <carrier>-out.<ext>."
+    )]
+    pub in_place: bool,
+
+    #[arg(
+        long = "overwrite",
+        help = "Allow overwriting existing output file(s) without prompt"
+    )]
+    pub overwrite: bool,
 
     #[command(flatten)]
     pub passwords: PasswordArgs,
@@ -192,7 +205,7 @@ pub struct WriteArgs {
 
     #[arg(
         long = "no-backup",
-        help = "Do not create a '<carrier>.bak' backup next to a modified carrier (default: a .bak copy is kept)."
+        help = "Do not create a '<carrier>.bak' backup next to a modified carrier (default: a .bak copy is kept; backups only apply to in-place modification)."
     )]
     pub no_backup: bool,
 
@@ -214,7 +227,8 @@ The payload is always encrypted in the envelope; -e/--encrypt only controls
 what happens when no password source is present (prompt or fail).
 
 Examples:
-  strhide write photo.png -t \"meet me at 7\"
+  strhide write photo.png -t \"meet me at 7\"                 # writes to photo-out.png
+  strhide write photo.png -t \"meet me at 7\" --in-place      # writes to photo.png in place
   strhide write report.pdf -d secret.zip -p \"S3cret!\" -H \"my usual one\"
   strhide write photo.png -t \"line1\\nline2\" --unescape
   cat secret.txt | strhide write image.jpg --stdin
@@ -277,9 +291,10 @@ pub struct EmbedArgs {
     #[arg(
         value_name = "CARRIER",
         required = true,
-        help = "Carrier image file (PNG or JPEG). Use `--` before a filename that starts with '-'."
+        num_args = 1..,
+        help = "Carrier image file(s) (PNG or JPEG). Use `--` before a filename that starts with '-'."
     )]
-    pub carrier: PathBuf,
+    pub carrier: Vec<PathBuf>,
 
     #[command(flatten)]
     pub payload: PayloadSourceArgs,
@@ -288,15 +303,22 @@ pub struct EmbedArgs {
         short = 'o',
         long = "output",
         value_name = "PATH",
-        help = "Write modified carrier to this path. Default: requires -o/--output unless --in-place is specified."
+        help = "Write modified carrier to this path (or into an existing directory for multiple carriers). Default: write to <carrier>-out.<ext>."
     )]
     pub output: Option<PathBuf>,
 
     #[arg(
         long = "in-place",
-        help = "Modify carrier image in place (creates .bak backup by default unless --no-backup). Note: content steganography modifies pixels/coefficients and cannot be restored to original bit-for-bit."
+        conflicts_with = "output",
+        help = "Modify carrier image(s) in place (creates .bak backup by default unless --no-backup). Note: content steganography modifies pixels/coefficients and cannot be restored to original bit-for-bit."
     )]
     pub in_place: bool,
+
+    #[arg(
+        long = "overwrite",
+        help = "Allow overwriting existing output file(s) without prompt"
+    )]
+    pub overwrite: bool,
 
     #[arg(
         long = "no-backup",
@@ -312,6 +334,13 @@ pub struct EmbedArgs {
 
     #[command(flatten)]
     pub passwords: PasswordArgs,
+
+    #[arg(
+        short = 'e',
+        long = "encrypt",
+        help = "Ask for an encryption password when no password source is given (interactive prompt; fails without a TTY)."
+    )]
+    pub encrypt: bool,
 
     #[arg(
         short = 'a',
@@ -371,10 +400,11 @@ Because pixel/coefficient values are modified, this operation cannot be reversed
 to the original carrier bit-for-bit.
 
 Examples:
+  strhide embed photo.jpg -t \"secret message\"                 # writes to photo-out.jpg
+  strhide embed photo.jpg -t \"secret message\" --in-place      # writes to photo.jpg in place
   strhide embed photo.jpg -t \"secret message\" -o out.jpg
   strhide embed graphic.png -d secret.zip -p \"P@ss!\" -o out.png
-  strhide embed photo.jpg -t \"hello\" --in-place
-  strhide embed photo.png -t \"custom tuning\" --exclusion-rate 0.40 -o out.png
+  strhide embed photo.jpg -t \"custom tuning\" --exclusion-rate 0.40 -o out.png
 ";
 
 #[derive(Args, Debug)]
@@ -391,9 +421,22 @@ pub struct ExtractArgs {
         short = 'o',
         long = "output",
         value_name = "PATH",
-        help = "Write extracted payload to a file. If omitted, text payloads are printed to stdout."
+        help = "Write extracted payload to a file (or into an existing directory). If omitted, text payloads are printed to stdout."
     )]
     pub output: Option<PathBuf>,
+
+    #[arg(
+        long = "stdout",
+        conflicts_with = "output",
+        help = "Print the payload to standard output instead of writing a file (mutually exclusive with -o/--output)."
+    )]
+    pub stdout: bool,
+
+    #[arg(
+        long = "overwrite",
+        help = "Allow overwriting an existing file when extracting a payload"
+    )]
+    pub overwrite: bool,
 
     #[command(flatten)]
     pub passwords: PasswordArgs,
@@ -429,7 +472,8 @@ Format is automatically detected (PNG or JPEG).
 
 Examples:
   strhide extract out.jpg -p \"P@ss!\"               # text prints to stdout
-  strhide extract out.png -p \"P@ss!\" -o secret.zip   # extracts to file
+  strhide extract out.jpg -p \"P@ss!\" --stdout      # force stdout
+  strhide extract out.png -p \"P@ss!\" -o secret.zip # extracts to file
 ";
 
 #[derive(Args, Debug)]
@@ -447,9 +491,22 @@ pub struct RestoreArgs {
         short = 'o',
         long = "output",
         value_name = "PATH",
-        help = "Write the restored carrier to this path instead of restoring in place (the original carrier then stays untouched). A single path names the result for one carrier; with several carriers it must be an existing directory keeping each carrier's name."
+        help = "Write the restored carrier to this path. A single path names the result for one carrier; with several carriers it must be an existing directory. Default: write to <carrier>-out.<ext>."
     )]
     pub output: Option<PathBuf>,
+
+    #[arg(
+        long = "in-place",
+        conflicts_with = "output",
+        help = "Restore carrier file(s) in place (creates .bak backup by default unless --no-backup). Default: write to <carrier>-out.<ext>."
+    )]
+    pub in_place: bool,
+
+    #[arg(
+        long = "overwrite",
+        help = "Allow overwriting existing output file(s) without prompt"
+    )]
+    pub overwrite: bool,
 
     #[command(flatten)]
     pub passwords: PasswordArgs,
@@ -463,9 +520,11 @@ pub struct RestoreArgs {
 
 const RESTORE_AFTER_HELP: &str = "\
 Examples:
-  strhide restore photo.png               # restore in place, keeping photo.png.bak
-  strhide restore photo.png -o clean.png  # write the restored copy to 'clean.png'
-  strhide restore a.png b.png c.png       # batch restoration in one run
+  strhide restore photo.png                 # writes clean copy to photo-out.png
+  strhide restore photo.png --in-place      # restore in place, keeping photo.png.bak
+  strhide restore photo.png -o clean.png    # write the restored copy to 'clean.png'
+  strhide restore a.png b.png c.png         # batch restoration to *-out.png
+  strhide restore a.png b.png -o clean_dir/ # batch restoration into directory
 
 Restoration is verified loss-free: the restored SHA-256 must match the
 original host recorded in the envelope, or the command fails loudly.
@@ -477,24 +536,32 @@ pub struct InspectArgs {
     #[arg(
         value_name = "CARRIER",
         required = true,
-        help = "Carrier file to inspect; reports the host format, any envelope metadata, and per-strategy capacity. Use `--` before a filename that starts with '-'."
+        num_args = 1..,
+        help = "Carrier file(s) or directory(ies) to inspect; reports host format, envelope metadata, and per-strategy capacity. Use `--` before a filename that starts with '-'."
     )]
-    pub carrier: PathBuf,
+    pub carrier: Vec<PathBuf>,
 
     #[command(flatten)]
     pub passwords: PasswordArgs,
 
+    /// Recursively descend into directories.
+    #[arg(short = 'r', long = "recursive")]
+    pub recursive: bool,
+
     #[arg(
         long = "json",
-        help = "Print a machine-readable JSON report instead of the aligned key/value summary."
+        help = "Print machine-readable JSON report (single object for one file, array for multiple files/directories)."
     )]
     pub json: bool,
 }
 
 const INSPECT_AFTER_HELP: &str = "\
 Examples:
-  strhide inspect photo.png             # metadata summary + strategy capacities
-  strhide inspect photo.png --json      # the same report as JSON
+  strhide inspect photo.png             # inspect one carrier
+  strhide inspect a.png b.png c.png     # inspect multiple carriers
+  strhide inspect dir/ -r               # inspect directory tree recursively
+  strhide inspect photo.png --json      # report as JSON object
+  strhide inspect a.png b.png --json    # report as JSON array
 ";
 
 #[derive(Args, Debug)]
@@ -503,16 +570,21 @@ pub struct VerifyArgs {
     #[arg(
         value_name = "CARRIER",
         required = true,
-        help = "Carrier file to verify. Use `--` before a filename that starts with '-'."
+        num_args = 1..,
+        help = "Carrier file(s) or directory(ies) to verify. Use `--` before a filename that starts with '-'."
     )]
-    pub carrier: PathBuf,
+    pub carrier: Vec<PathBuf>,
 
     #[command(flatten)]
     pub passwords: PasswordArgs,
 
+    /// Recursively descend into directories.
+    #[arg(short = 'r', long = "recursive")]
+    pub recursive: bool,
+
     #[arg(
         long = "json",
-        help = "Print a machine-readable JSON report instead of one line per level."
+        help = "Print machine-readable JSON report (single object for one file, array for multiple files/directories)."
     )]
     pub json: bool,
 }
@@ -527,12 +599,21 @@ Exit codes: 0 when Level 1 and Level 2 pass, 1 otherwise. Level 3 failures are
 reported but do not change the exit code, matching the Python CLI.
 
 Examples:
-  strhide verify photo.png              # readable three-level report
-  strhide verify photo.png --json       # machine-readable report
+  strhide verify photo.png              # verify one carrier
+  strhide verify a.png b.png c.png      # verify multiple carriers
+  strhide verify dir/ -r                # verify directory tree recursively
+  strhide verify photo.png --json       # report as JSON object
+  strhide verify a.png b.png --json     # report as JSON array
 ";
 
 #[derive(Args, Debug)]
-pub struct ListArgs {}
+pub struct ListArgs {
+    #[arg(
+        long = "json",
+        help = "Emit structured JSON output containing formats, strategies, and algorithms"
+    )]
+    pub json: bool,
+}
 
 /// Black-box steganalysis options. Unlike inspect/verify (which assume a
 /// strhide envelope exists and check it), scan treats every input as unknown
@@ -664,8 +745,9 @@ fn should_print_banner(cli: &Cli) -> bool {
         Commands::Inspect(args) if args.json => false,
         Commands::Verify(args) if args.json => false,
         Commands::Scan(args) if args.json => false,
+        Commands::List(args) if args.json => false,
         Commands::Read(args) if args.stdout || args.output.is_none() => false,
-        Commands::Extract(args) if args.output.is_none() => false,
+        Commands::Extract(args) if args.stdout || args.output.is_none() => false,
         _ => true,
     }
 }
@@ -864,9 +946,22 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
     let (payload, payload_name, payload_is_file) = payload_source.into_buffered()?;
 
     // Fail before the first carrier is modified when a batch is obviously bad
-    // (missing/unrecognized files, duplicate targets).
+    // (missing/unrecognized files, duplicate targets, unpermitted overwrites).
     if multi {
-        preflight_batch(&args.carrier, output_dir)?;
+        preflight_batch(
+            &args.carrier,
+            args.in_place,
+            args.output.as_deref(),
+            output_dir,
+            args.overwrite,
+        )?;
+    } else {
+        let carrier = &args.carrier[0];
+        let target =
+            resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;
+        if let Some(ref t) = target {
+            check_overwrite(t, args.overwrite)?;
+        }
     }
 
     // A password hint is incompatible with --stealth: stealth mode requires the
@@ -884,7 +979,11 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
     let backup = !args.no_backup && cfg.backup.unwrap_or(true);
 
     for_each_carrier(&args.carrier, quiet, |carrier| {
-        let output = carrier_output_path(carrier, args.output.as_deref(), output_dir)?;
+        let output =
+            resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;
+        if let Some(ref t) = output {
+            check_overwrite(t, args.overwrite)?;
+        }
         let res = write_carrier(
             carrier,
             PayloadSource::Buffered {
@@ -1019,18 +1118,107 @@ fn handle_restore(args: RestoreArgs, cfg: &FileConfig, quiet: bool) -> Result<()
     let multi = args.carrier.len() > 1;
     let output_dir = batch_output_dir(args.output.as_deref(), multi, "removing hidden data from")?;
     if multi {
-        preflight_batch(&args.carrier, output_dir)?;
+        preflight_batch(
+            &args.carrier,
+            args.in_place,
+            args.output.as_deref(),
+            output_dir,
+            args.overwrite,
+        )?;
+    } else {
+        let carrier = &args.carrier[0];
+        let target =
+            resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;
+        if let Some(ref t) = target {
+            check_overwrite(t, args.overwrite)?;
+        }
     }
     // Mirror `write`: `remove` also honours the configured backup default
     // (`config.rs` documents `backup` as covering both commands).
     let backup = !args.no_backup && cfg.backup.unwrap_or(true);
 
     for_each_carrier(&args.carrier, quiet, |carrier| {
-        let output = carrier_output_path(carrier, args.output.as_deref(), output_dir)?;
+        let output =
+            resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;
+        if let Some(ref t) = output {
+            check_overwrite(t, args.overwrite)?;
+        }
         let res = remove_carrier(carrier, output.as_deref(), password.as_deref(), backup)?;
         print_remove_result(&res, quiet);
         Ok(())
     })
+}
+
+fn print_inspect_result(res: &crate::engine::InspectResult) {
+    println!("Carrier: {}", res.carrier);
+    println!("Format:  {}", res.format);
+    println!("Has Hidden Data: {}", res.has_hidden_data);
+    if res.has_hidden_data {
+        if let Some(s) = &res.strategy {
+            println!("Strategy:        {s}");
+        }
+        if let Some(off) = res.ube_offset {
+            println!("UBE Offset:      {off}");
+        }
+        if let Some(sz) = res.ube_total_size {
+            println!("UBE Total Size:  {sz} bytes");
+        }
+        if let Some(enc) = res.is_encrypted {
+            println!("Encrypted:       {enc}");
+        }
+        if let Some(stl) = res.is_stealth {
+            println!("Stealth Mode:    {stl}");
+        }
+        if let Some(h) = &res.password_hint {
+            println!("Password Hint:   {h}");
+        }
+        if let Some(sz) = res.orig_host_size {
+            println!("Original Size:   {sz} bytes");
+        }
+        if let Some(sha) = &res.orig_host_sha256 {
+            println!("Original SHA256: {sha}");
+        }
+        if let Some(meta) = &res.metadata {
+            println!("Metadata:        {meta}");
+        }
+    }
+
+    let auto_idx = res.strategies.iter().position(|c| c.available);
+    println!("Strategy capacities (max payload size):");
+    for (idx, c) in res.strategies.iter().enumerate() {
+        let auto = if Some(idx) == auto_idx {
+            " [auto preference]"
+        } else {
+            ""
+        };
+        let state = if c.available { "" } else { " (unavailable)" };
+        let detail = c.note.as_deref().unwrap_or("");
+        if detail.is_empty() {
+            println!("  - {}{}{}: {}", c.strategy, auto, state, c.limit);
+        } else {
+            println!(
+                "  - {}{}{}: {} - {}",
+                c.strategy, auto, state, c.limit, detail
+            );
+        }
+    }
+
+    if let Some(cap) = &res.content_stego_capacity {
+        println!();
+        println!("Content-Adaptive Steganography Capacity (embed):");
+        println!("  Algorithm:       {}", cap.algorithm);
+        println!("  Available Slots: {} bits", cap.available_slots);
+        println!(
+            "  Max Raw:         {} bytes ({:.1} KiB)",
+            cap.max_raw_payload_bytes,
+            cap.max_raw_payload_bytes as f64 / 1024.0
+        );
+        println!(
+            "  Safe Max:        {} bytes ({:.1} KiB) (high stealth)",
+            cap.recommended_max_bytes,
+            cap.recommended_max_bytes as f64 / 1024.0
+        );
+    }
 }
 
 fn handle_inspect(args: InspectArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
@@ -1042,96 +1230,102 @@ fn handle_inspect(args: InspectArgs, cfg: &FileConfig, quiet: bool) -> Result<()
         false,
     )?;
 
-    let res = inspect_carrier(&args.carrier, password.as_deref())?;
+    let is_batch = args.carrier.len() > 1 || args.carrier.iter().any(|p| p.is_dir());
+    let files = expand_input_paths(&args.carrier, args.recursive, quiet)?;
+    if files.is_empty() {
+        return Err(StrHideError::General(
+            "No files to inspect (empty input or empty directory)".into(),
+        ));
+    }
 
-    if args.json {
-        let mut val = serde_json::to_value(&res)?;
-        if let serde_json::Value::Object(map) = &mut val {
-            map.insert(
-                "banner".to_string(),
-                serde_json::Value::String(BANNER.to_string()),
-            );
-        }
-        let json_str = serde_json::to_string_pretty(&val)?;
-        println!("{json_str}");
-    } else if quiet {
-        // Nothing to print: the JSON form is the machine-readable equivalent.
-    } else {
-        println!("Carrier: {}", res.carrier);
-        println!("Format:  {}", res.format);
-        println!("Has Hidden Data: {}", res.has_hidden_data);
-        if res.has_hidden_data {
-            if let Some(s) = res.strategy {
-                println!("Strategy:        {s}");
-            }
-            if let Some(off) = res.ube_offset {
-                println!("UBE Offset:      {off}");
-            }
-            if let Some(sz) = res.ube_total_size {
-                println!("UBE Total Size:  {sz} bytes");
-            }
-            if let Some(enc) = res.is_encrypted {
-                println!("Encrypted:       {enc}");
-            }
-            if let Some(stl) = res.is_stealth {
-                println!("Stealth Mode:    {stl}");
-            }
-            if let Some(h) = res.password_hint {
-                println!("Password Hint:   {h}");
-            }
-            if let Some(sz) = res.orig_host_size {
-                println!("Original Size:   {sz} bytes");
-            }
-            if let Some(sha) = res.orig_host_sha256 {
-                println!("Original SHA256: {sha}");
-            }
-            if let Some(meta) = res.metadata {
-                println!("Metadata:        {meta}");
-            }
-        }
-
-        // Capacity report (available whether or not an envelope exists).
-        // The first available strategy is what `-s auto` would pick for a
-        // payload that fits.
-        let auto_idx = res.strategies.iter().position(|c| c.available);
-        println!("Strategy capacities (max payload size):");
-        for (idx, c) in res.strategies.iter().enumerate() {
-            let auto = if Some(idx) == auto_idx {
-                " [auto preference]"
-            } else {
-                ""
-            };
-            let state = if c.available { "" } else { " (unavailable)" };
-            let detail = c.note.as_deref().unwrap_or("");
-            if detail.is_empty() {
-                println!("  - {}{}{}: {}", c.strategy, auto, state, c.limit);
-            } else {
-                println!(
-                    "  - {}{}{}: {} - {}",
-                    c.strategy, auto, state, c.limit, detail
+    if !is_batch && files.len() == 1 {
+        let carrier = &files[0];
+        let res = inspect_carrier(carrier, password.as_deref())?;
+        if args.json {
+            let mut val = serde_json::to_value(&res)?;
+            if let serde_json::Value::Object(map) = &mut val {
+                map.insert(
+                    "banner".to_string(),
+                    serde_json::Value::String(BANNER.to_string()),
                 );
             }
+            let json_str = serde_json::to_string_pretty(&val)?;
+            println!("{json_str}");
+        } else if !quiet {
+            print_inspect_result(&res);
         }
+        return Ok(());
+    }
 
-        if let Some(cap) = &res.content_stego_capacity {
-            println!();
-            println!("Content-Adaptive Steganography Capacity (embed):");
-            println!("  Algorithm:       {}", cap.algorithm);
-            println!("  Available Slots: {} bits", cap.available_slots);
-            println!(
-                "  Max Raw:         {} bytes ({:.1} KiB)",
-                cap.max_raw_payload_bytes,
-                cap.max_raw_payload_bytes as f64 / 1024.0
-            );
-            println!(
-                "  Safe Max:        {} bytes ({:.1} KiB) (high stealth)",
-                cap.recommended_max_bytes,
-                cap.recommended_max_bytes as f64 / 1024.0
-            );
+    let mut reports = Vec::with_capacity(files.len());
+    let mut failures = 0usize;
+    for carrier in &files {
+        match inspect_carrier(carrier, password.as_deref()) {
+            Ok(res) => {
+                if !args.json && !quiet {
+                    println!(
+                        "=== [{}/{}] {} ===",
+                        reports.len() + 1,
+                        files.len(),
+                        carrier.display()
+                    );
+                    print_inspect_result(&res);
+                    println!();
+                }
+                reports.push(res);
+            }
+            Err(e) => {
+                failures += 1;
+                if !quiet {
+                    eprintln!("[WARN] failed to inspect '{}': {e}", carrier.display());
+                }
+            }
         }
     }
 
+    if args.json {
+        let mut val = serde_json::to_value(&reports)?;
+        if let serde_json::Value::Array(arr) = &mut val {
+            for item in arr {
+                if let serde_json::Value::Object(map) = item {
+                    map.insert(
+                        "banner".to_string(),
+                        serde_json::Value::String(BANNER.to_string()),
+                    );
+                }
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&val)?);
+    } else if !quiet {
+        println!(
+            "Inspected {} file(s), {} with hidden data, {} failed.",
+            reports.len(),
+            reports.iter().filter(|r| r.has_hidden_data).count(),
+            failures
+        );
+    }
+
     Ok(())
+}
+
+fn print_verify_result(res: &crate::engine::VerifyResult) {
+    println!("Carrier: {}", res.carrier);
+    println!("Format:  {}", res.format);
+    println!(
+        "Level 1 (Host Format):      [{}] {}",
+        if res.level1_host.ok { "OK" } else { "FAIL" },
+        res.level1_host.detail
+    );
+    println!(
+        "Level 2 (Envelope Boundary): [{}] {}",
+        if res.level2_envelope.ok { "OK" } else { "FAIL" },
+        res.level2_envelope.detail
+    );
+    println!(
+        "Level 3 (Crypto & Payload):  [{}] {}",
+        if res.level3_crypto.ok { "OK" } else { "FAIL" },
+        res.level3_crypto.detail
+    );
 }
 
 fn handle_verify(args: VerifyArgs, cfg: &FileConfig, quiet: bool) -> Result<i32, StrHideError> {
@@ -1143,69 +1337,104 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig, quiet: bool) -> Result<i32,
         false,
     )?;
 
-    let res = verify_carrier(&args.carrier, password.as_deref())?;
+    let is_batch = args.carrier.len() > 1 || args.carrier.iter().any(|p| p.is_dir());
+    let files = expand_input_paths(&args.carrier, args.recursive, quiet)?;
+    if files.is_empty() {
+        return Err(StrHideError::General(
+            "No files to verify (empty input or empty directory)".into(),
+        ));
+    }
+
+    if !is_batch && files.len() == 1 {
+        let carrier = &files[0];
+        let res = verify_carrier(carrier, password.as_deref())?;
+        if args.json {
+            let mut val = serde_json::to_value(&res)?;
+            if let serde_json::Value::Object(map) = &mut val {
+                map.insert(
+                    "banner".to_string(),
+                    serde_json::Value::String(BANNER.to_string()),
+                );
+            }
+            let json_str = serde_json::to_string_pretty(&val)?;
+            println!("{json_str}");
+        } else if !quiet {
+            print_verify_result(&res);
+        }
+        return Ok(if res.level1_host.ok && res.level2_envelope.ok {
+            0
+        } else {
+            1
+        });
+    }
+
+    let mut reports = Vec::with_capacity(files.len());
+    let mut failures = 0usize;
+    let mut any_failed = false;
+    for carrier in &files {
+        match verify_carrier(carrier, password.as_deref()) {
+            Ok(res) => {
+                let ok = res.level1_host.ok && res.level2_envelope.ok;
+                if !ok {
+                    any_failed = true;
+                }
+                if !args.json && !quiet {
+                    println!(
+                        "=== [{}/{}] {} ===",
+                        reports.len() + 1,
+                        files.len(),
+                        carrier.display()
+                    );
+                    print_verify_result(&res);
+                    println!();
+                }
+                reports.push(res);
+            }
+            Err(e) => {
+                failures += 1;
+                any_failed = true;
+                if !quiet {
+                    eprintln!("[WARN] failed to verify '{}': {e}", carrier.display());
+                }
+            }
+        }
+    }
 
     if args.json {
-        let mut val = serde_json::to_value(&res)?;
-        if let serde_json::Value::Object(map) = &mut val {
-            map.insert(
-                "banner".to_string(),
-                serde_json::Value::String(BANNER.to_string()),
-            );
+        let mut val = serde_json::to_value(&reports)?;
+        if let serde_json::Value::Array(arr) = &mut val {
+            for item in arr {
+                if let serde_json::Value::Object(map) = item {
+                    map.insert(
+                        "banner".to_string(),
+                        serde_json::Value::String(BANNER.to_string()),
+                    );
+                }
+            }
         }
-        let json_str = serde_json::to_string_pretty(&val)?;
-        println!("{json_str}");
-    } else if quiet {
-        // Result is carried entirely by the exit code below.
-    } else {
-        println!("Carrier: {}", res.carrier);
-        println!("Format:  {}", res.format);
+        println!("{}", serde_json::to_string_pretty(&val)?);
+    } else if !quiet {
+        let passed = reports
+            .iter()
+            .filter(|r| r.level1_host.ok && r.level2_envelope.ok)
+            .count();
         println!(
-            "Level 1 (Host Format):      [{}] {}",
-            if res.level1_host.ok { "OK" } else { "FAIL" },
-            res.level1_host.detail
-        );
-        println!(
-            "Level 2 (Envelope Boundary): [{}] {}",
-            if res.level2_envelope.ok { "OK" } else { "FAIL" },
-            res.level2_envelope.detail
-        );
-        println!(
-            "Level 3 (Crypto & Payload):  [{}] {}",
-            if res.level3_crypto.ok { "OK" } else { "FAIL" },
-            res.level3_crypto.detail
+            "Verified {} file(s): {} passed, {} with verification failures, {} unreadable.",
+            reports.len(),
+            passed,
+            reports.len() - passed,
+            failures
         );
     }
 
-    // Align with the Python CLI: a Level 1 or Level 2 failure exits non-zero so
-    // scripts can gate on it; Level 3 (crypto) failures are reported but do not
-    // change the exit code.
-    Ok(if res.level1_host.ok && res.level2_envelope.ok {
-        0
-    } else {
-        1
-    })
+    Ok(if any_failed { 1 } else { 0 })
 }
 
 fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideError> {
     use crate::analysis::scan_file;
 
     // Expand inputs: directories become file lists.
-    let mut files: Vec<PathBuf> = Vec::new();
-    for entry in &args.input {
-        if entry.is_dir() {
-            let walker: Box<dyn Iterator<Item = PathBuf>> = if args.recursive {
-                Box::new(walkdir_recursive(entry)?)
-            } else {
-                Box::new(walkdir_flat(entry)?)
-            };
-            files.extend(walker);
-        } else if entry.is_file() {
-            files.push(entry.clone());
-        } else if !quiet {
-            eprintln!("[WARN] '{}' does not exist, skipping", entry.display());
-        }
-    }
+    let files = expand_input_paths(&args.input, args.recursive, quiet)?;
 
     if files.is_empty() {
         return Err(StrHideError::General(
@@ -1309,10 +1538,89 @@ fn push_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), StrHid
     Ok(())
 }
 
-fn handle_list(_args: ListArgs) -> Result<(), StrHideError> {
+fn expand_input_paths(
+    inputs: &[PathBuf],
+    recursive: bool,
+    quiet: bool,
+) -> Result<Vec<PathBuf>, StrHideError> {
+    let mut files = Vec::new();
+    for entry in inputs {
+        if entry.is_dir() {
+            let walker: Box<dyn Iterator<Item = PathBuf>> = if recursive {
+                Box::new(walkdir_recursive(entry)?)
+            } else {
+                Box::new(walkdir_flat(entry)?)
+            };
+            files.extend(walker);
+        } else if entry.is_file() {
+            files.push(entry.clone());
+        } else if !quiet {
+            eprintln!("[WARN] '{}' does not exist, skipping", entry.display());
+        }
+    }
+    Ok(files)
+}
+
+fn handle_list(args: ListArgs) -> Result<(), StrHideError> {
+    if args.json {
+        #[derive(serde::Serialize)]
+        struct ListStrategyItem {
+            strategy: String,
+            limit: String,
+        }
+        #[derive(serde::Serialize)]
+        struct ListFormatItem {
+            format: String,
+            strategies: Vec<ListStrategyItem>,
+        }
+        #[derive(serde::Serialize)]
+        struct ListAlgorithmItem {
+            algorithm: String,
+            domain: String,
+            description: String,
+        }
+        #[derive(serde::Serialize)]
+        struct ListReport {
+            banner: String,
+            formats: Vec<ListFormatItem>,
+            stego_algorithms: Vec<ListAlgorithmItem>,
+        }
+
+        let mut formats = Vec::new();
+        for adapter in ADAPTERS {
+            let format = adapter.format_name().to_string();
+            let mut strategies = Vec::new();
+            for cap in adapter.strategy_capacities(None) {
+                strategies.push(ListStrategyItem {
+                    strategy: cap.strategy.to_string(),
+                    limit: cap.limit.to_string(),
+                });
+            }
+            formats.push(ListFormatItem { format, strategies });
+        }
+
+        let mut stego_algorithms = Vec::new();
+        for (id, domain, desc) in crate::stego::CostModelRegistry::list_algorithms() {
+            stego_algorithms.push(ListAlgorithmItem {
+                algorithm: id.to_string(),
+                domain: domain.to_string(),
+                description: desc.to_string(),
+            });
+        }
+
+        let report = ListReport {
+            banner: BANNER.to_string(),
+            formats,
+            stego_algorithms,
+        };
+
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
     // Static reference table: constants come from the adapters themselves (via
     // `strategy_capacities(None)`), so the table cannot drift from the code.
-    // Carrier-specific limits are answered by `inspect -c <carrier>`.
+    // Carrier-specific limits are answered by `inspect <carrier>`.
     println!("{:<8} {:<15} Limit", "Format", "Strategy");
     println!("{:-<8} {:-<15} {:-<48}", "", "", "");
     for adapter in ADAPTERS {
@@ -1322,7 +1630,7 @@ fn handle_list(_args: ListArgs) -> Result<(), StrHideError> {
         }
     }
     println!();
-    println!("Carrier-dependent limits are measured by `strhide inspect -c <carrier>`.");
+    println!("Carrier-dependent limits are measured by `strhide inspect <carrier>`.");
 
     println!("\nContent-Adaptive Steganography Algorithms (embed / extract):");
     println!("{:<8} {:<15} Description", "Algorithm", "Target Domain");
@@ -1337,56 +1645,59 @@ fn handle_list(_args: ListArgs) -> Result<(), StrHideError> {
 
 fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
     if args.capacity {
-        let carrier_bytes = std::fs::read(&args.carrier)?;
-        let mut options = crate::stego::StegoOptions {
-            algorithm: args.algorithm,
-            ..Default::default()
-        };
-        if let Some(er) = args.exclusion_rate {
-            options.spatial_params.exclusion_percentile = er;
-            options.jpeg_params.block_exclusion_percentile = er;
+        for carrier in &args.carrier {
+            let carrier_bytes = std::fs::read(carrier)?;
+            let mut options = crate::stego::StegoOptions {
+                algorithm: args.algorithm.clone(),
+                ..Default::default()
+            };
+            if let Some(er) = args.exclusion_rate {
+                options.spatial_params.exclusion_percentile = er;
+                options.jpeg_params.block_exclusion_percentile = er;
+            }
+            if let Some(nw) = args.neighbor_weight {
+                options.jpeg_params.neighbor_weight = nw;
+            }
+            if let Some(min_ac) = args.min_abs_coeff {
+                options.jpeg_params.min_abs_coeff = min_ac;
+            }
+            if let Some(p1) = args.p1_window {
+                options.spatial_params.p1_window = p1;
+            }
+            if let Some(p2) = args.p2_window {
+                options.spatial_params.p2_window = p2;
+            }
+            let cap = crate::stego::probe_carrier_capacity(&carrier_bytes, &options)?;
+            println!(
+                "Content-Adaptive Steganography Capacity for '{}':",
+                carrier.display()
+            );
+            println!("  Format:          {}", cap.format);
+            println!("  Algorithm:       {}", cap.algorithm);
+            println!("  Total elements:  {}", cap.total_elements);
+            println!("  Available slots: {} bits", cap.available_slots);
+            println!(
+                "  Max raw payload: {} bytes ({:.1} KiB)",
+                cap.max_raw_payload_bytes,
+                cap.max_raw_payload_bytes as f64 / 1024.0
+            );
+            println!(
+                "  Recommended max: {} bytes ({:.1} KiB) (high stealth)",
+                cap.recommended_max_bytes,
+                cap.recommended_max_bytes as f64 / 1024.0
+            );
         }
-        if let Some(nw) = args.neighbor_weight {
-            options.jpeg_params.neighbor_weight = nw;
-        }
-        if let Some(min_ac) = args.min_abs_coeff {
-            options.jpeg_params.min_abs_coeff = min_ac;
-        }
-        if let Some(p1) = args.p1_window {
-            options.spatial_params.p1_window = p1;
-        }
-        if let Some(p2) = args.p2_window {
-            options.spatial_params.p2_window = p2;
-        }
-        let cap = crate::stego::probe_carrier_capacity(&carrier_bytes, &options)?;
-        println!(
-            "Content-Adaptive Steganography Capacity for '{}':",
-            args.carrier.display()
-        );
-        println!("  Format:          {}", cap.format);
-        println!("  Algorithm:       {}", cap.algorithm);
-        println!("  Total elements:  {}", cap.total_elements);
-        println!("  Available slots: {} bits", cap.available_slots);
-        println!(
-            "  Max raw payload: {} bytes ({:.1} KiB)",
-            cap.max_raw_payload_bytes,
-            cap.max_raw_payload_bytes as f64 / 1024.0
-        );
-        println!(
-            "  Recommended max: {} bytes ({:.1} KiB) (high stealth)",
-            cap.recommended_max_bytes,
-            cap.recommended_max_bytes as f64 / 1024.0
-        );
         return Ok(());
     }
 
     // 1. Resolve password
+    let encrypt = args.encrypt || cfg.encrypt.unwrap_or(false);
     let password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
         cfg,
-        false,
-        false,
+        encrypt,
+        true,
     )?;
 
     // 2. Resolve payload bytes
@@ -1429,77 +1740,85 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         return Err(StrHideError::General("Payload cannot be empty".into()));
     }
 
-    // 3. Read carrier bytes
-    let carrier_bytes = std::fs::read(&args.carrier)?;
-
-    // 4. Construct StegoOptions with fine-tuning parameters
-    let mut options = crate::stego::StegoOptions {
-        algorithm: args.algorithm,
-        password,
-        ..Default::default()
-    };
-
-    if let Some(er) = args.exclusion_rate {
-        options.spatial_params.exclusion_percentile = er;
-        options.jpeg_params.block_exclusion_percentile = er;
-    }
-    if let Some(nw) = args.neighbor_weight {
-        options.jpeg_params.neighbor_weight = nw;
-    }
-    if let Some(min_ac) = args.min_abs_coeff {
-        options.jpeg_params.min_abs_coeff = min_ac;
-    }
-    if let Some(p1) = args.p1_window {
-        options.spatial_params.p1_window = p1;
-    }
-    if let Some(p2) = args.p2_window {
-        options.spatial_params.p2_window = p2;
-    }
-
-    // 5. Execute content-adaptive embedding
-    let stego_bytes = crate::stego::embed_carrier(&carrier_bytes, &payload_bytes, &options)?;
-
-    // 6. Handle output
-    if let Some(ref out_path) = args.output {
-        std::fs::write(out_path, &stego_bytes)?;
-        if !quiet {
-            println!(
-                "[OK] Embedded {} payload bytes into '{}' -> '{}'",
-                payload_bytes.len(),
-                args.carrier.display(),
-                out_path.display()
-            );
+    let multi = args.carrier.len() > 1;
+    let output_dir = batch_output_dir(args.output.as_deref(), multi, "embedding into")?;
+    for carrier in &args.carrier {
+        if !carrier.exists() {
+            return Err(StrHideError::General(format!(
+                "Carrier file '{}' not found",
+                carrier.display()
+            )));
         }
-    } else if args.in_place {
-        if !args.no_backup {
-            let bak_path = args.carrier.with_extension(format!(
-                "{}.bak",
-                args.carrier
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-            ));
-            std::fs::write(&bak_path, &carrier_bytes)?;
+        let target =
+            resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;
+        if let Some(ref t) = target {
+            check_overwrite(t, args.overwrite)?;
+        }
+    }
+
+    for_each_carrier(&args.carrier, quiet, |carrier| {
+        let carrier_bytes = std::fs::read(carrier)?;
+
+        let mut options = crate::stego::StegoOptions {
+            algorithm: args.algorithm.clone(),
+            password: password.clone(),
+            ..Default::default()
+        };
+
+        if let Some(er) = args.exclusion_rate {
+            options.spatial_params.exclusion_percentile = er;
+            options.jpeg_params.block_exclusion_percentile = er;
+        }
+        if let Some(nw) = args.neighbor_weight {
+            options.jpeg_params.neighbor_weight = nw;
+        }
+        if let Some(min_ac) = args.min_abs_coeff {
+            options.jpeg_params.min_abs_coeff = min_ac;
+        }
+        if let Some(p1) = args.p1_window {
+            options.spatial_params.p1_window = p1;
+        }
+        if let Some(p2) = args.p2_window {
+            options.spatial_params.p2_window = p2;
+        }
+
+        let stego_bytes = crate::stego::embed_carrier(&carrier_bytes, &payload_bytes, &options)?;
+
+        let target =
+            resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;
+        if let Some(dest) = target {
+            check_overwrite(&dest, args.overwrite)?;
+            std::fs::write(&dest, &stego_bytes)?;
             if !quiet {
-                println!("[INFO] Backup created at '{}'", bak_path.display());
+                println!(
+                    "[OK] Embedded {} payload bytes into '{}' -> '{}'",
+                    payload_bytes.len(),
+                    carrier.display(),
+                    dest.display()
+                );
+            }
+        } else {
+            if !args.no_backup {
+                let bak_path = carrier.with_extension(format!(
+                    "{}.bak",
+                    carrier.extension().and_then(|s| s.to_str()).unwrap_or("")
+                ));
+                std::fs::write(&bak_path, &carrier_bytes)?;
+                if !quiet {
+                    println!("[INFO] Backup created at '{}'", bak_path.display());
+                }
+            }
+            std::fs::write(carrier, &stego_bytes)?;
+            if !quiet {
+                println!(
+                    "[OK] Embedded {} payload bytes in-place into '{}'",
+                    payload_bytes.len(),
+                    carrier.display()
+                );
             }
         }
-        std::fs::write(&args.carrier, &stego_bytes)?;
-        if !quiet {
-            println!(
-                "[OK] Embedded {} payload bytes in-place into '{}'",
-                payload_bytes.len(),
-                args.carrier.display()
-            );
-        }
-    } else {
-        return Err(StrHideError::General(
-            "Content steganography modifies carrier pixels/coefficients and cannot be restored bit-for-bit. \
-            Please specify an output path (-o/--output <PATH>), or explicitly allow in-place modification (--in-place).".into(),
-        ));
-    }
-
-    Ok(())
+        Ok(())
+    })
 }
 
 fn handle_extract(args: ExtractArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
@@ -1539,23 +1858,39 @@ fn handle_extract(args: ExtractArgs, cfg: &FileConfig, quiet: bool) -> Result<()
     let payload = crate::stego::extract_carrier(&carrier_bytes, &options)?;
 
     if let Some(ref out_path) = args.output {
-        std::fs::write(out_path, &payload)?;
+        let dest = if out_path.is_dir() {
+            out_path.join("extracted.bin")
+        } else {
+            out_path.clone()
+        };
+        check_overwrite(&dest, args.overwrite)?;
+        std::fs::write(&dest, &payload)?;
         if !quiet {
             println!(
                 "[OK] Extracted {} bytes to '{}'",
                 payload.len(),
-                out_path.display()
+                dest.display()
             );
         }
+    } else if args.stdout {
+        std::io::stdout().write_all(&payload)?;
     } else {
-        // Output to stdout
+        // Output to stdout or default file
         if let Ok(text) = std::str::from_utf8(&payload) {
             print!("{text}");
             if !text.ends_with('\n') {
                 println!();
             }
         } else {
-            std::io::stdout().write_all(&payload)?;
+            let dest = PathBuf::from("extracted.bin");
+            check_overwrite(&dest, args.overwrite)?;
+            std::fs::write(&dest, &payload)?;
+            if !quiet {
+                println!(
+                    "[OK] Binary payload detected ({} bytes). Extracted to 'extracted.bin'.",
+                    payload.len()
+                );
+            }
         }
     }
 
@@ -1601,8 +1936,7 @@ where
 ///
 /// An existing directory is accepted for a *single* carrier too and means "put
 /// the result inside it, keeping the carrier's name" — the same semantics
-/// `read -o <dir>` already had. Previously single-carrier `-o <dir>` fell
-/// through to the rename and failed with a bare OS error.
+/// `read -o <dir>` already had.
 fn batch_output_dir<'a>(
     output: Option<&'a Path>,
     multi: bool,
@@ -1623,13 +1957,57 @@ fn batch_output_dir<'a>(
     Ok(None)
 }
 
-/// Where one carrier's result goes: inside the batch directory (keeping the
-/// carrier's filename) or to the explicit single-file target.
-fn carrier_output_path(
+/// Derive default output path by appending suffix before extension, e.g. "photo.png" -> "photo-out.png"
+pub fn derive_default_output_path(carrier: &Path, suffix: &str) -> PathBuf {
+    let parent = carrier.parent();
+    let file_name = carrier
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let (stem, ext) = match carrier.extension().and_then(|s| s.to_str()) {
+        Some(ext) if !ext.is_empty() => {
+            let stem = carrier
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(file_name);
+            (stem, Some(ext))
+        }
+        _ => (file_name, None),
+    };
+    let new_name = match ext {
+        Some(ext) => format!("{stem}{suffix}.{ext}"),
+        None => format!("{stem}{suffix}"),
+    };
+    match parent {
+        Some(p) if !p.as_os_str().is_empty() => p.join(new_name),
+        _ => PathBuf::from(new_name),
+    }
+}
+
+pub fn check_overwrite(target: &Path, overwrite: bool) -> Result<(), StrHideError> {
+    if target.exists() && !overwrite {
+        return Err(StrHideError::Rejection(format!(
+            "Refusing to overwrite existing file '{}'. Choose another -o path or pass --overwrite.",
+            target.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Determine where the carrier's output should be written:
+/// - If `in_place`: returns `None` (meaning in-place modification).
+/// - If `output_dir`: returns `Some(dir.join(carrier.file_name()))`.
+/// - If `output`: returns `Some(output.to_path_buf())`.
+/// - Default (not in-place, no explicit output): returns `Some(derive_default_output_path(carrier, "-out"))`.
+fn resolve_carrier_target(
     carrier: &Path,
+    in_place: bool,
     output: Option<&Path>,
     output_dir: Option<&Path>,
 ) -> Result<Option<PathBuf>, StrHideError> {
+    if in_place {
+        return Ok(None);
+    }
     if let Some(dir) = output_dir {
         let name = carrier.file_name().ok_or_else(|| {
             StrHideError::General(format!(
@@ -1639,14 +2017,22 @@ fn carrier_output_path(
         })?;
         return Ok(Some(dir.join(name)));
     }
-    Ok(output.map(Path::to_path_buf))
+    if let Some(out) = output {
+        return Ok(Some(out.to_path_buf()));
+    }
+    Ok(Some(derive_default_output_path(carrier, "-out")))
 }
 
 /// Validate a whole batch before the first carrier is modified: every carrier
 /// must exist, be a regular file, be a supported format, and resolve to a unique
-/// output. Capacity limits and "already contains hidden data" can only be judged
-/// by the engine per carrier, so those still surface mid-run.
-fn preflight_batch(carriers: &[PathBuf], output_dir: Option<&Path>) -> Result<(), StrHideError> {
+/// output.
+fn preflight_batch(
+    carriers: &[PathBuf],
+    in_place: bool,
+    output: Option<&Path>,
+    output_dir: Option<&Path>,
+    overwrite: bool,
+) -> Result<(), StrHideError> {
     let mut seen_carriers = HashSet::new();
     let mut seen_targets = HashSet::new();
     for carrier in carriers {
@@ -1666,8 +2052,6 @@ fn preflight_batch(carriers: &[PathBuf], output_dir: Option<&Path>) -> Result<()
             let mut f = File::open(carrier)?;
             find_adapter_or_reject(&mut f, &carrier.display().to_string())?;
         }
-        // canonicalize() only fails for paths that vanished after the existence
-        // check; falling back to the raw path is good enough for dedup.
         let identity = std::fs::canonicalize(carrier).unwrap_or_else(|_| carrier.clone());
         if !seen_carriers.insert(identity.clone()) {
             return Err(StrHideError::General(format!(
@@ -1675,10 +2059,16 @@ fn preflight_batch(carriers: &[PathBuf], output_dir: Option<&Path>) -> Result<()
                 carrier.display()
             )));
         }
-        let target = match output_dir {
-            Some(dir) => carrier_output_path(carrier, None, Some(dir))?.unwrap_or(identity),
+        let target = match resolve_carrier_target(carrier, in_place, output, output_dir)? {
+            Some(t) => t,
             None => identity,
         };
+        if target.exists() && !in_place && !overwrite {
+            return Err(StrHideError::Rejection(format!(
+                "Refusing to overwrite existing file '{}'. Choose another -o path or pass --overwrite.",
+                target.display()
+            )));
+        }
         if !seen_targets.insert(target.clone()) {
             return Err(StrHideError::General(format!(
                 "Two carriers would write to the same file '{}'. Rename one of them or keep them in separate directories.",

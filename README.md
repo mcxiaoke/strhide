@@ -21,9 +21,9 @@ Compatibility is one-directional: the Rust build can still read envelopes writte
 - **Stealth mode** — with a password, envelope signatures and header fields are derived from the password, so there is nothing to find without it. Even in the default (non-stealth) mode there are no static ASCII magics: no `STRHIDE` / `STH!` strings, only high-entropy binary signatures (legacy magics still recognized for reading).
 - **Black-box steganalysis** — `scan` treats files as unknown and reports structural + statistical signs of hidden data from *any* tool, not just strhide.
 - **Password hint** — an optional (≤ 1 KiB) hint is stored with the envelope and shown when the password is required.
-- **Safe by default** — integrity/signature rejection checks refuse to modify files that should not be touched (e.g. signed binaries); `read` refuses to overwrite an existing output file unless `--overwrite` is given; in-place writes create a `.bak` backup; original file timestamps are preserved.
-- **TOML configuration** — `./strhide.toml` or `~/.strhide/config.toml` provides defaults; explicit CLI flags always win (see [`strhide.sample.toml`](strhide.sample.toml) for an annotated template).
-- **Batch carriers** — `write`, `restore`, and `scan` accept several files (and directories) at once; `read`/`inspect`/`verify` take exactly one carrier.
+- **Safe by default** — integrity/signature rejection checks refuse to modify files that should not be touched (e.g. signed binaries); `write`, `restore`, and `embed` default to writing a new `<stem>-out.<ext>` file, leaving original carriers untouched; explicit `--in-place` modifies carriers directly (creating a `.bak` backup copy); `read`, `extract`, `write`, and `restore` refuse to overwrite existing output files unless `--overwrite` is explicitly specified; original file timestamps are preserved.
+- **TOML configuration** — `./strhide.toml` or `~/.strhide/config.toml` provides defaults; explicit CLI flags (`-c, --config`) always win (see [`strhide.sample.toml`](strhide.sample.toml) for an annotated template).
+- **Batch & recursive carriers** — `write`, `restore`, `scan`, `inspect`, `verify`, and `embed` accept several files (and directories with `-r, --recursive`) at once; `read` takes exactly one carrier.
 - **Content-adaptive steganography (HILL & UERD)** — `embed` and `extract` hide data directly in image pixels (PNG, LSB Matching via HILL cost model) or DCT frequency coefficients (JPEG, via UERD cost model). Unlike structure-domain injection, content steganography modifies minimal-distortion texture regions and is immune to metadata stripping.
 
 ## Install
@@ -67,8 +67,11 @@ cargo build --release
 ## CLI quick start
 
 ```bash
-# Hide text in an image (in-place, with a .bak backup)
+# Hide text in an image (default writes to photo-out.png, leaving photo.png untouched)
 strhide write photo.png -t "meet me at 7"
+
+# Or modify carrier in-place (creates photo.png.bak backup)
+strhide write photo.png -t "meet me at 7" --in-place
 
 # Hide text streamed from a pipe (other payload sources: -d file, --text-file, --text-base64)
 cat secret.txt | strhide write image.jpg --stdin
@@ -77,7 +80,8 @@ cat secret.txt | strhide write image.jpg --stdin
 strhide write report.pdf -d secret.zip -p "S3cret!" -H "my usual one"
 
 # Extract the hidden data (refuses to overwrite an existing file unless --overwrite)
-strhide read photo.png -o out/
+strhide read photo-out.png -o out/
+strhide read photo-out.png --stdout
 
 # Black-box steganalysis: scan files or a whole directory recursively for hidden
 # content from any tool (structural + statistical signs, no strhide knowledge);
@@ -88,15 +92,18 @@ strhide scan suspicious.bin ./downloads -r
 # "likely-hidden", 0 otherwise (suspicious/low findings stay at 0)
 strhide scan suspicious.bin ./downloads -r -q
 
-# Show envelope metadata and per-strategy capacity for a carrier (what was
-# hidden, when, which strategy, and how much more could fit); --json supported
+# Show envelope metadata and per-strategy capacity for carriers (supports multi-carrier
+# and recursive directory scan with -r); --json supported
 strhide inspect report.pdf --json
+strhide inspect ./photos -r --json
 
-# Verify host + envelope integrity (3 levels; --json supported)
-strhide verify report.pdf
+# Verify host + envelope integrity (3 levels; supports multi-carrier and -r; --json supported)
+strhide verify report.pdf ./photos -r
 
-# Remove the hidden data, restoring the original host file
-strhide restore photo.png
+# Remove the hidden data, restoring the original host file (default writes to <carrier>-out.<ext>)
+strhide restore photo-out.png -o restored.png
+# Or restore in-place:
+strhide restore photo.png --in-place
 
 # --- Content-adaptive pixel/DCT steganography (immune to metadata stripping) ---
 
@@ -107,17 +114,17 @@ strhide embed photo.png --capacity
 strhide embed photo.png -t "classified message" -p "P@ss123" -o stego.png
 strhide embed cover.jpg -d secret.zip -p "P@ss123" --in-place
 
-# Extract content-adaptive hidden data
+# Extract content-adaptive hidden data (--stdout or -o, with --overwrite protection)
 strhide extract stego.png -p "P@ss123" --stdout
-strhide extract stego.jpg -p "P@ss123" -o recovered.zip
+strhide extract stego.jpg -p "P@ss123" -o recovered.zip --overwrite
 
-# Batch: embed the same payload into several carriers (with -o they are written
-# to an existing directory instead of in place), then strip them all again
-strhide write a.png b.png c.png -t "meet me at 7"
-strhide restore a.png b.png c.png
+# Batch: embed the same payload into several carriers (written to an existing directory
+# or as <stem>-out.<ext>), then restore them
+strhide write a.png b.png c.png -t "meet me at 7" -o done/
+strhide restore done/a.png done/b.png done/c.png -o restored/
 
-# List every format, strategy, and its capacity limit (static reference)
-strhide list
+# List every format, strategy, and its capacity limit (supports --json for automation)
+strhide list --json
 ```
 
 Password sources (checked in order): `-p/--password` → `--password-file` → `STRHIDE_PASSWORD` env var → config file → interactive prompt (`-e/--encrypt`). `-p` and `--password-file` are mutually exclusive.

@@ -80,7 +80,7 @@ fn config_password_and_encrypt_apply_on_write_and_read() {
     .unwrap();
 
     // Write with no CLI password/encrypt flags: both come from the config.
-    let out = run(&dir, &["write", "c.png", "-t", "hello"], None);
+    let out = run(&dir, &["write", "c.png", "-t", "hello", "--in-place"], None);
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
 
     // Read without any password: the config supplies it.
@@ -117,7 +117,11 @@ fn env_password_overrides_config_password() {
     .unwrap();
 
     // Write with the env password (wins over the config password).
-    let out = run(&dir, &["write", "c.png", "-t", "hello"], Some("env-pass-2"));
+    let out = run(
+        &dir,
+        &["write", "c.png", "-t", "hello", "--in-place"],
+        Some("env-pass-2"),
+    );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
 
     // Reading with only the config password fails (it is the wrong password).
@@ -144,7 +148,15 @@ fn explicit_config_path_applies() {
     let cfg_arg = cfg_dir.join("custom.toml").to_str().unwrap().to_string();
     let out = run(
         &dir,
-        &["--config", &cfg_arg, "write", "c.png", "-t", "hello"],
+        &[
+            "--config",
+            &cfg_arg,
+            "write",
+            "c.png",
+            "-t",
+            "hello",
+            "--in-place",
+        ],
         None,
     );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));

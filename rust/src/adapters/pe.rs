@@ -194,7 +194,7 @@ impl HostAdapter for PeAdapter {
             available: true,
             limit: "carrier-dependent (.text density + zero slack)".into(),
             note: Some(
-                "x86/x64 instruction-encoding channel; file size unchanged; run `inspect -c <carrier>` for the exact limit"
+                "x86/x64 instruction-encoding channel; file size unchanged; run `inspect <carrier>` for the exact limit"
                     .into(),
             ),
         };
@@ -204,7 +204,7 @@ impl HostAdapter for PeAdapter {
             available: true,
             limit: "carrier-dependent (section padding)".into(),
             note: Some(
-                "envelope written into PE alignment padding; file size unchanged; run `inspect -c <carrier>` for the exact limit"
+                "envelope written into PE alignment padding; file size unchanged; run `inspect <carrier>` for the exact limit"
                     .into(),
             ),
         };

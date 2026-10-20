@@ -21,9 +21,9 @@
 - **隐写模式（Stealth）**——设置密码后，信封签名与头部字段均由密码派生，没有密码就无从发现隐藏数据。即使在默认（非 stealth）模式下也没有静态 ASCII 魔数：不存在 `STRHIDE` / `STH!` 这类字符串，只有高熵二进制签名（读取时仍兼容旧版魔数）。
 - **黑盒隐写分析**——`scan` 把文件视为未知对象，报告来自**任意工具**（不只是 strhide）的结构与统计特征异常。
 - **密码提示**——可选（≤ 1 KiB）的提示信息随信封存储，在需要输入密码时展示。
-- **默认安全**——完整性/签名拒绝检查会拒绝修改不宜触碰的文件（如签名二进制）；`read` 默认拒绝覆盖已存在的输出文件（需 `--overwrite`）；原地写入自动创建 `.bak` 备份；保留原始文件时间戳。
-- **TOML 配置**——`./strhide.toml` 或 `~/.strhide/config.toml` 提供默认值，显式命令行参数始终优先（详见注解模板 [`strhide.sample.toml`](strhide.sample.toml)）。
-- **批量载体**——`write`、`restore`、`scan` 可一次处理多个文件（及目录）；`read`/`inspect`/`verify` 只接受单个载体。
+- **默认安全**——完整性/签名拒绝检查会拒绝修改不宜触碰的文件（如签名二进制）；`write`、`restore` 与 `embed` 默认输出至 `<stem>-out.<ext>` 新文件，原始宿主 100% 保持干净；提供显式 `--in-place` 选项进行原地修改（自动创建 `.bak` 备份）；`read`、`extract`、`write` 和 `restore` 默认拒绝覆盖已存在的输出文件（需 `--overwrite` 才允许）；保留原始文件时间戳。
+- **TOML 配置**——`./strhide.toml` 或 `~/.strhide/config.toml` 提供默认值，显式命令行参数（`-c, --config`）始终优先（详见注解模板 [`strhide.sample.toml`](strhide.sample.toml)）。
+- **批量与递归载体**——`write`、`restore`、`scan`、`inspect`、`verify`、`embed` 均支持一次处理多个文件或目录递归扫描（`-r, --recursive`）；`read` 针对单个载体。
 - **内容自适应隐写（HILL & UERD）**——`embed` 与 `extract` 命令直接在图像像素（PNG，通过 HILL 成本模型进行 LSB Matching）或 DCT 频域系数（JPEG，通过 UERD 成本模型）中嵌入数据。与结构层注入不同，内容隐写修改的是最小失真纹理区，天然免疫元数据剥离清洗，且抗统计隐写分析。
 
 ## 安装
@@ -67,8 +67,11 @@ cargo build --release
 ## 命令行快速上手
 
 ```bash
-# 在图片中隐藏文本（原地写入，自动创建 .bak 备份）
+# 在图片中隐藏文本（默认写入 photo-out.png，原始 photo.png 保持未修改）
 strhide write photo.png -t "meet me at 7"
+
+# 或显式进行原地写入（修改原图并创建 photo.png.bak 备份）
+strhide write photo.png -t "meet me at 7" --in-place
 
 # 通过管道隐藏文本（其他载荷源：-d 文件、--text-file、--text-base64）
 cat secret.txt | strhide write image.jpg --stdin
@@ -77,7 +80,8 @@ cat secret.txt | strhide write image.jpg --stdin
 strhide write report.pdf -d secret.zip -p "S3cret!" -H "my usual one"
 
 # 提取隐藏数据（默认拒绝覆盖已存在文件，需 --overwrite 才允许）
-strhide read photo.png -o out/
+strhide read photo-out.png -o out/
+strhide read photo-out.png --stdout
 
 # 黑盒隐写分析：递归扫描文件或整个目录，检测来自任意工具的隐藏内容
 # （结构 + 统计特征，不依赖 strhide 内部知识）；支持 --json
@@ -87,14 +91,17 @@ strhide scan suspicious.bin ./downloads -r
 # 否则 0（suspicious/low 级发现不影响退出码）
 strhide scan suspicious.bin ./downloads -r -q
 
-# 查看信封元数据与各策略容量（隐藏了什么、何时、何种策略、还能再藏多少）；支持 --json
+# 查看信封元数据与各策略容量（支持多载体及 -r 递归扫描目录）；支持 --json
 strhide inspect report.pdf --json
+strhide inspect ./photos -r --json
 
-# 校验宿主与信封完整性（3 级检查，支持 --json）
-strhide verify report.pdf
+# 校验宿主与信封完整性（3 级检查，支持多载体与 -r 递归；支持 --json）
+strhide verify report.pdf ./photos -r
 
-# 移除隐藏数据，还原原始宿主文件
-strhide restore photo.png
+# 移除隐藏数据，还原原始宿主文件（默认输出为 <carrier>-out.<ext>）
+strhide restore photo-out.png -o restored.png
+# 或原地还原载体：
+strhide restore photo.png --in-place
 
 # --- 内容自适应像素/DCT隐写（免疫第三方元数据与chunk清洗）---
 
@@ -105,16 +112,16 @@ strhide embed photo.png --capacity
 strhide embed photo.png -t "机密信息" -p "P@ss123" -o stego.png
 strhide embed cover.jpg -d secret.zip -p "P@ss123" --in-place
 
-# 提取内容自适应隐藏数据
+# 提取内容自适应隐藏数据（支持 --stdout 与 --overwrite 防护）
 strhide extract stego.png -p "P@ss123" --stdout
-strhide extract stego.jpg -p "P@ss123" -o recovered.zip
+strhide extract stego.jpg -p "P@ss123" -o recovered.zip --overwrite
 
-# 批量：把同一份载荷分别写入多个载体（带 -o 时写入已存在的目录而非原地改写），再逐个剥离
-strhide write a.png b.png c.png -t "meet me at 7"
-strhide restore a.png b.png c.png
+# 批量：把同一份载荷写入多个载体（输出到目录或默认各自输出为 <stem>-out.<ext>），再批量还原
+strhide write a.png b.png c.png -t "meet me at 7" -o done/
+strhide restore done/a.png done/b.png done/c.png -o restored/
 
-# 列出全部格式、策略及其容量上限（静态参考表）
-strhide list
+# 列出全部格式、策略及其容量上限（支持 --json 格式化输出）
+strhide list --json
 ```
 
 密码来源（按顺序检查）：`-p/--password` → `--password-file` → 环境变量 `STRHIDE_PASSWORD` → 配置文件 → 交互式输入（`-e/--encrypt`）。`-p` 与 `--password-file` 互斥。

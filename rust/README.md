@@ -14,31 +14,33 @@ cargo build --release
 ## Usage
 
 ```bash
-strhide write photo.png -t "secret"           # hide text (in-place, .bak backup)
+strhide write photo.png -t "secret"           # hide text (writes to photo-out.png, leaves photo.png untouched)
+strhide write photo.png -t "secret" --in-place # modify in-place (creates photo.png.bak backup)
 strhide write report.pdf -d file.zip -p pw    # hide a file, encrypted
-strhide write a.png b.png c.png -t "secret"   # same payload into several carriers
-strhide read photo.png -o out/                # extract hidden data
-strhide inspect report.pdf --json             # envelope metadata + capacity
-strhide verify report.pdf                     # verify host + envelope integrity
-strhide restore photo.png                      # strip hidden data, restore the original host
-strhide restore a.png b.png c.png              # strip several carriers at once
+strhide write a.png b.png -t "secret" -o out/ # batch write into an existing directory
+strhide read photo-out.png -o out/            # extract hidden data to directory/file
+strhide read photo-out.png --stdout           # print hidden data directly to stdout
+strhide inspect report.pdf dir/ -r --json     # envelope metadata + capacity (multi-carrier & recursive)
+strhide verify report.pdf dir/ -r             # verify host + envelope integrity (multi-carrier & recursive)
+strhide restore photo-out.png -o clean.png    # strip hidden data to clean.png
+strhide restore photo.png --in-place          # restore carrier in-place
 strhide embed photo.png -t "secret" -o out.png # content-adaptive stego (HILL for PNG, UERD for JPEG)
 strhide embed photo.png --capacity             # probe image stego capacity without embedding
 strhide extract out.png --stdout               # extract content-adaptive payload
-strhide list                          # static format/strategy/limit table
-strhide scan suspicious.bin dir/ -r # black-box steganalysis (any tool)
+strhide list --json                           # format/strategy/limit table (human or --json)
+strhide scan suspicious.bin dir/ -r           # black-box steganalysis (any tool)
 ```
 
-`write` and `restore` accept one or more carriers (`read`, `inspect`, and
-`verify` still take exactly one). `write` embeds the same payload into each
-carrier; when more than one is given, `-o` must name an existing directory and a
-`[SUMMARY] n/m carriers succeeded` line is printed. Runs stop at the first
-failure; every write/restore is atomic per carrier, so carriers already handled
-stay modified and the rest are untouched. `read` refuses to overwrite an
-existing output file unless `--overwrite` is passed.
+`write`, `restore`, `inspect`, `verify`, `embed`, and `scan` accept one or more
+carriers (and directories with `-r/--recursive`). `read` and `extract` take
+exactly one carrier. By default, `write`, `restore`, and `embed` write to safe
+`<stem>-out.<ext>` target files (or into a `-o` directory for multiple carriers),
+leaving input files untouched; pass `--in-place` for in-place modifications.
+`read`, `extract`, `write`, and `restore` refuse to overwrite existing files
+unless `--overwrite` is explicitly specified.
 
 The global `-q/--quiet` suppresses status lines and human-readable reports
-(payload data from `read`, `--json`/table output, and `[ERROR]` lines always
+(payload data from `read --stdout`, `--json` output, and `[ERROR]` lines always
 print), so scripts can act on exit codes alone. `scan` also owns its exit code:
 it exits 1 when any report reaches a `likely-hidden` verdict, 0 otherwise.
 

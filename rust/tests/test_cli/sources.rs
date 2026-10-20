@@ -81,7 +81,10 @@ fn cli_text_file_source_roundtrip() {
     let secret = "秘密文件载荷 secret.txt line 2 with Emoji 🚀";
     fs::write(dir.join("secret.txt"), secret).unwrap();
 
-    let out = run(&dir, &["write", "c.png", "--text-file", "secret.txt"]);
+    let out = run(
+        &dir,
+        &["write", "c.png", "--text-file", "secret.txt", "--in-place"],
+    );
     assert_ok(&out, &["write", "--text-file"]);
 
     assert_eq!(read_stdout(&dir, "c.png"), secret);
@@ -94,7 +97,10 @@ fn cli_text_base64_valid_roundtrip() {
     // base64("用户可见的真实内容") — valid UTF-8 after decoding.
     let b64 = "55So5oi35Y+v6KeB55qE55yf5a6e5YaF5a65";
 
-    let out = run(&dir, &["write", "c.png", "--text-base64", b64]);
+    let out = run(
+        &dir,
+        &["write", "c.png", "--text-base64", b64, "--in-place"],
+    );
     assert_ok(&out, &["write", "--text-base64"]);
 
     assert_eq!(read_stdout(&dir, "c.png"), "用户可见的真实内容");
@@ -140,7 +146,7 @@ fn env_text_is_used_as_payload_source() {
     let secret = "来自 STRHIDE_TEXT 环境变量的载荷";
 
     let out = Command::new(bin())
-        .args(["write", "c.png"])
+        .args(["write", "c.png", "--in-place"])
         .current_dir(&dir)
         .env("USERPROFILE", &dir)
         .env("HOME", &dir)
@@ -159,7 +165,7 @@ fn cli_text_wins_over_env_text() {
     fs::write(dir.join("c.png"), make_png()).unwrap();
 
     let out = Command::new(bin())
-        .args(["write", "c.png", "-t", "来自 -t"])
+        .args(["write", "c.png", "-t", "来自 -t", "--in-place"])
         .current_dir(&dir)
         .env("USERPROFILE", &dir)
         .env("HOME", &dir)
@@ -212,6 +218,7 @@ fn password_file_write_and_read_roundtrip() {
             "encrypted via password file",
             "--password-file",
             "pwd.txt",
+            "--in-place",
         ],
     );
     assert_ok(&write, &["write", "--password-file"]);
@@ -268,7 +275,7 @@ fn config_password_file_key_is_used() {
     fs::write(dir.join("pwd.txt"), "cfg-wd\n").unwrap();
     fs::write(dir.join("strhide.toml"), "password_file = \"pwd.txt\"\n").unwrap();
 
-    let write = run(&dir, &["write", "c.png", "-t", "secret"]);
+    let write = run(&dir, &["write", "c.png", "-t", "secret", "--in-place"]);
     assert_ok(&write, &["write config_password_file"]);
 
     // No CLI password anywhere: the config's password_file supplies it on read.
@@ -290,7 +297,19 @@ fn cli_password_beats_config_password_file() {
 
     // -e with an explicit CLI password: the CLI argument must win over the
     // config password_file (precedence: -p > --password-file > env > config).
-    let out = run(&dir, &["write", "c.png", "-t", "s", "-e", "-p", "cli-pass"]);
+    let out = run(
+        &dir,
+        &[
+            "write",
+            "c.png",
+            "-t",
+            "s",
+            "-e",
+            "-p",
+            "cli-pass",
+            "--in-place",
+        ],
+    );
     assert_ok(&out, &["write"]);
 
     let read = run(&dir, &["read", "c.png", "--stdout", "-p", "cli-pass"]);
@@ -402,7 +421,7 @@ fn env_text_fallback_after_mutex_introduced() {
     let secret = "mutex 互斥组不影响 STRHIDE_TEXT 兜底";
 
     let out = Command::new(bin())
-        .args(["write", "c.png"])
+        .args(["write", "c.png", "--in-place"])
         .current_dir(&dir)
         .env("USERPROFILE", &dir)
         .env("HOME", &dir)
@@ -441,7 +460,7 @@ fn write_quiet_is_silent_and_still_writes() {
     fs::write(dir.join("c.png"), make_png()).unwrap();
     let secret = "静默写入的载荷 quiet write";
 
-    let out = run(&dir, &["write", "c.png", "-t", secret, "-q"]);
+    let out = run(&dir, &["write", "c.png", "-t", secret, "-q", "--in-place"]);
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
     assert!(
         stdout(&out).is_empty(),
@@ -466,7 +485,17 @@ fn read_quiet_stdout_prints_payload_only() {
     let dir = scratch("quiet_read");
     fs::write(dir.join("c.png"), make_png()).unwrap();
 
-    let write = run(&dir, &["write", "c.png", "-t", "data only", "--no-backup"]);
+    let write = run(
+        &dir,
+        &[
+            "write",
+            "c.png",
+            "-t",
+            "data only",
+            "--no-backup",
+            "--in-place",
+        ],
+    );
     assert_ok(&write, &["write"]);
 
     let out = run(&dir, &["read", "c.png", "--stdout", "-q"]);
@@ -482,7 +511,14 @@ fn read_quiet_to_file_suppresses_status_only() {
 
     let write = run(
         &dir,
-        &["write", "c.png", "-t", "into a file", "--no-backup"],
+        &[
+            "write",
+            "c.png",
+            "-t",
+            "into a file",
+            "--no-backup",
+            "--in-place",
+        ],
     );
     assert_ok(&write, &["write"]);
 
@@ -500,10 +536,13 @@ fn read_quiet_to_file_suppresses_status_only() {
 fn restore_quiet_is_silent_and_restores() {
     let dir = scratch("quiet_restore");
     fs::write(dir.join("c.png"), make_png()).unwrap();
-    let write = run(&dir, &["write", "c.png", "-t", "x", "--no-backup"]);
+    let write = run(
+        &dir,
+        &["write", "c.png", "-t", "x", "--no-backup", "--in-place"],
+    );
     assert_ok(&write, &["write"]);
 
-    let out = run(&dir, &["restore", "c.png", "-q"]);
+    let out = run(&dir, &["restore", "c.png", "-q", "--in-place"]);
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
     assert!(
         stdout(&out).is_empty() && stderr(&out).is_empty(),
@@ -543,7 +582,10 @@ fn verify_quiet_suppresses_report_keeps_exit_code() {
     let dir = scratch("quiet_verify");
     fs::write(dir.join("c.png"), make_png()).unwrap();
 
-    let write = run(&dir, &["write", "c.png", "-t", "x", "--no-backup"]);
+    let write = run(
+        &dir,
+        &["write", "c.png", "-t", "x", "--no-backup", "--in-place"],
+    );
     assert_ok(&write, &["write"]);
 
     let loud = run(&dir, &["verify", "c.png"]);
@@ -577,7 +619,18 @@ fn config_hint_key_applies_on_write() {
     // command line so that a later password-less read has no source at all and
     // must surface the hint in its error.
     let dir = seeded_dir("cfg_hint", "hint = \"配置里的提示 3班1975\"\n");
-    let write = run(&dir, &["write", "c.png", "-t", "secret", "-p", "hint-pw"]);
+    let write = run(
+        &dir,
+        &[
+            "write",
+            "c.png",
+            "-t",
+            "secret",
+            "-p",
+            "hint-pw",
+            "--in-place",
+        ],
+    );
     assert_ok(&write, &["write hint config"]);
     assert!(
         stdout(&write).contains("Password Hint: '配置里的提示 3班1975'"),
@@ -605,7 +658,10 @@ fn config_hint_key_applies_on_write() {
 fn config_unescape_key_applies() {
     let dir = seeded_dir("cfg_unescape", "unescape = true\n");
     // \u escapes decode to UTF-8 content before embedding.
-    let write = run(&dir, &["write", "c.png", "-t", r"\u4e2d\u6587ABC"]);
+    let write = run(
+        &dir,
+        &["write", "c.png", "-t", r"\u4e2d\u6587ABC", "--in-place"],
+    );
     assert_ok(&write, &["write unescape config"]);
     assert_eq!(read_stdout(&dir, "c.png"), "中文ABC");
 }
@@ -613,7 +669,7 @@ fn config_unescape_key_applies() {
 #[test]
 fn config_backup_false_keeps_no_bak_file() {
     let dir = seeded_dir("cfg_backup", "backup = false\n");
-    let write = run(&dir, &["write", "c.png", "-t", "x"]);
+    let write = run(&dir, &["write", "c.png", "-t", "x", "--in-place"]);
     assert_ok(&write, &["write backup=false"]);
     assert!(
         !dir.join("c.png.bak").exists(),
@@ -624,7 +680,10 @@ fn config_backup_false_keeps_no_bak_file() {
 #[test]
 fn config_backup_false_is_overridden_by_no_cli_flag() {
     let dir = seeded_dir("cfg_backup_pre", "backup = true\n");
-    let write = run(&dir, &["write", "c.png", "-t", "x", "--no-backup"]);
+    let write = run(
+        &dir,
+        &["write", "c.png", "-t", "x", "--no-backup", "--in-place"],
+    );
     assert_ok(&write, &["write --no-backup"]);
     assert!(!dir.join("c.png.bak").exists());
 }
@@ -632,7 +691,7 @@ fn config_backup_false_is_overridden_by_no_cli_flag() {
 #[test]
 fn config_backup_true_creates_bak_file() {
     let dir = seeded_dir("cfg_backup_on", "backup = true\n");
-    let write = run(&dir, &["write", "c.png", "-t", "x"]);
+    let write = run(&dir, &["write", "c.png", "-t", "x", "--in-place"]);
     assert_ok(&write, &["write backup=true"]);
     assert!(
         dir.join("c.png.bak").exists(),
@@ -669,7 +728,11 @@ fn home_config_toml_is_discovered() {
     .unwrap();
 
     // cwd holds no strhide.toml, so the home config must supply the password.
-    let write = run_with_home(&dir, &home, &["write", "c.png", "-t", "home secret"]);
+    let write = run_with_home(
+        &dir,
+        &home,
+        &["write", "c.png", "-t", "home secret", "--in-place"],
+    );
     assert_ok(&write, &["write home config"]);
 
     let read = run_with_home(&dir, &home, &["read", "c.png", "--stdout"]);
@@ -699,7 +762,11 @@ fn cwd_strhide_toml_wins_over_home_config() {
     )
     .unwrap();
 
-    let write = run_with_home(&dir, &home, &["write", "c.png", "-t", "secret"]);
+    let write = run_with_home(
+        &dir,
+        &home,
+        &["write", "c.png", "-t", "secret", "--in-place"],
+    );
     assert_ok(&write, &["write cwd vs home"]);
 
     // The cwd config's password is the one that must be applied: reading with

@@ -61,7 +61,15 @@ fn batch_write_embeds_the_same_payload_into_every_carrier() {
 
     let out = run(
         &dir,
-        &["write", "a.png", "b.png", "c.png", "-t", "shared secret"],
+        &[
+            "write",
+            "a.png",
+            "b.png",
+            "c.png",
+            "-t",
+            "shared secret",
+            "--in-place",
+        ],
     );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
     assert!(
@@ -87,7 +95,7 @@ fn batch_write_reads_stdin_once_for_all_carriers() {
     // A second stdin read would yield an empty payload; the old single-carrier
     // code path would have embedded "" into the second carrier.
     let mut child = Command::new(bin())
-        .args(["write", "a.png", "b.png", "--stdin"])
+        .args(["write", "a.png", "b.png", "--stdin", "--in-place"])
         .current_dir(&dir)
         .env("USERPROFILE", &dir)
         .env("HOME", &dir)
@@ -118,7 +126,10 @@ fn batch_write_keeps_the_data_filename_for_every_carrier() {
     seed(&dir, &["a.png", "b.png"]);
     fs::write(dir.join("vault.dat"), b"file payload").unwrap();
 
-    let out = run(&dir, &["write", "a.png", "b.png", "-d", "vault.dat"]);
+    let out = run(
+        &dir,
+        &["write", "a.png", "b.png", "-d", "vault.dat", "--in-place"],
+    );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
 
     fs::create_dir_all(dir.join("got")).unwrap();
@@ -253,11 +264,19 @@ fn batch_remove_restores_every_carrier_byte_exactly() {
 
     let out = run(
         &dir,
-        &["write", "a.png", "b.png", "c.png", "-t", "round trip"],
+        &[
+            "write",
+            "a.png",
+            "b.png",
+            "c.png",
+            "-t",
+            "round trip",
+            "--in-place",
+        ],
     );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
 
-    let out = run(&dir, &["restore", "a.png", "b.png", "c.png"]);
+    let out = run(&dir, &["restore", "a.png", "b.png", "c.png", "--in-place"]);
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
     assert!(
         stdout(&out).contains("[SUMMARY] 3/3 carriers succeeded."),
@@ -278,11 +297,14 @@ fn batch_remove_reports_how_far_it_got_before_failing() {
     let dir = scratch("remove_partial");
     seed(&dir, &["a.png", "clean.png", "c.png"]);
 
-    let out = run(&dir, &["write", "a.png", "c.png", "-t", "x"]);
+    let out = run(&dir, &["write", "a.png", "c.png", "-t", "x", "--in-place"]);
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
 
     // clean.png never held an envelope, so the batch stops there.
-    let out = run(&dir, &["restore", "a.png", "clean.png", "c.png"]);
+    let out = run(
+        &dir,
+        &["restore", "a.png", "clean.png", "c.png", "--in-place"],
+    );
     assert_eq!(code(&out), 1);
     assert!(
         stderr(&out).contains("[FAIL] clean.png"),

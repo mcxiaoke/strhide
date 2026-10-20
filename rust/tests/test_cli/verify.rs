@@ -156,7 +156,10 @@ fn verify_level3_failure_is_reported_but_exit_code_stays_zero() {
     // crypto failure is only reported. Wrong password => L3 fails, L1/L2 pass.
     let dir = scratch("verify_l3_exit");
     fs::write(dir.join("c.png"), make_png()).unwrap();
-    let write = run(&dir, &["write", "c.png", "-t", "s", "-p", "right-pw"]);
+    let write = run(
+        &dir,
+        &["write", "c.png", "-t", "s", "-p", "right-pw", "--in-place"],
+    );
     assert_eq!(code(&write), 0, "stderr: {}", stderr(&write));
 
     let out = run(&dir, &["verify", "c.png", "-p", "wrong-pw"]);
@@ -311,7 +314,15 @@ fn cli_inspect_json_is_valid_and_complete() {
     fs::write(dir.join("c.png"), make_png()).unwrap();
     let write = run(
         &dir,
-        &["write", "c.png", "-t", "json secret", "-p", "json-pw"],
+        &[
+            "write",
+            "c.png",
+            "-t",
+            "json secret",
+            "-p",
+            "json-pw",
+            "--in-place",
+        ],
     );
     assert_eq!(code(&write), 0, "stderr: {}", stderr(&write));
 
@@ -385,7 +396,15 @@ fn cli_verify_json_is_valid_and_complete() {
     fs::write(dir.join("c.png"), make_png()).unwrap();
     let write = run(
         &dir,
-        &["write", "c.png", "-t", "json secret", "-p", "json-pw"],
+        &[
+            "write",
+            "c.png",
+            "-t",
+            "json secret",
+            "-p",
+            "json-pw",
+            "--in-place",
+        ],
     );
     assert_eq!(code(&write), 0, "stderr: {}", stderr(&write));
 
@@ -414,7 +433,10 @@ fn cli_verify_json_is_valid_and_complete() {
 fn cli_verify_json_on_encrypted_envelope_without_password() {
     let dir = scratch("verify_json_l3");
     fs::write(dir.join("c.png"), make_png()).unwrap();
-    let write = run(&dir, &["write", "c.png", "-t", "s", "-p", "json-pw"]);
+    let write = run(
+        &dir,
+        &["write", "c.png", "-t", "s", "-p", "json-pw", "--in-place"],
+    );
     assert_eq!(code(&write), 0, "stderr: {}", stderr(&write));
 
     let out = run(&dir, &["verify", "c.png", "--json"]);
@@ -439,7 +461,15 @@ fn strategy_ask_selects_the_chosen_entry() {
     // PNG offers [1] chunk, [2] eof -> pick 2.
     let out = run_with_stdin(
         &dir,
-        &["write", "c.png", "-t", "asked payload", "--strategy", "ask"],
+        &[
+            "write",
+            "c.png",
+            "-t",
+            "asked payload",
+            "--strategy",
+            "ask",
+            "--in-place",
+        ],
         b"2\n",
     );
     assert_eq!(
@@ -487,7 +517,15 @@ fn strategy_ask_out_of_range_and_non_numeric_fall_back_to_first() {
 
         let out = run_with_stdin(
             &dir,
-            &["write", "c.png", "-t", "fallback", "--strategy", "ask"],
+            &[
+                "write",
+                "c.png",
+                "-t",
+                "fallback",
+                "--strategy",
+                "ask",
+                "--in-place",
+            ],
             answer,
         );
         assert_eq!(code(&out), 0, "{label}: stderr: {}", stderr(&out));
@@ -512,7 +550,15 @@ fn strategy_ask_empty_answer_defaults_to_first() {
 
     let out = run_with_stdin(
         &dir,
-        &["write", "c.png", "-t", "x", "--strategy", "ask"],
+        &[
+            "write",
+            "c.png",
+            "-t",
+            "x",
+            "--strategy",
+            "ask",
+            "--in-place",
+        ],
         b"\n",
     );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
