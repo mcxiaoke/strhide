@@ -2,14 +2,14 @@
 
 **智能格式保持、无损数据隐藏工具。** 将文本或文件隐藏到普通宿主文件（PNG、JPEG、MP4、ZIP、PDF、Windows PE 可执行文件或任意文件）中，不改变宿主的可见格式、外观和功能，事后可逐比特还原原始宿主文件。
 
-本仓库提供两套完全跨兼容的实现：
+本仓库提供两套实现：
 
-| 实现 | 语言 | 分发方式 |
+| 实现 | 语言 | 状态 |
 | --- | --- | --- |
-| [`python/`](python/) | Python ≥ 3.10 | `pip install strhide` —— 库 + CLI |
-| [`rust/`](rust/) | Rust (edition 2024) | 单文件静态二进制，从源码构建 |
+| [`rust/`](rust/) | Rust (edition 2024) | **主力维护中（0.3.x）**——单文件静态二进制，从源码构建 |
+| [`python/`](python/) | Python ≥ 3.10 | **已冻结在 0.2.0，弃用**——`pip install strhide`，库 + CLI |
 
-两者实现相同的信封（envelope）格式：一方写入的数据可以由另一方读取、校验和清除。
+兼容性是**单向**的：Rust 仍可读取旧版 Python 包写入的信封，但 Python 读不了 Rust 新默认的全加密信封，也读不了用 `pe_slack` / `pe_codebits` 策略写入的 PE 载体。请一律使用 Rust 二进制。
 
 > [English documentation (README.md)](README.md)
 
@@ -17,12 +17,13 @@
 
 - **格式保持**——宿主文件仍是合法的 PNG/JPEG/MP4/ZIP/PDF/PE，可正常显示或运行。
 - **100% 可逆**——信封中嵌入原始宿主的 SHA-256，`read`/`remove` 输出保证与原文件逐比特一致。
-- **强加密（可选）**——PBKDF2-HMAC-SHA256（10 万轮）+ HKDF-SHA256 密钥派生，分块 AES-256-GCM 加密，Deflate 压缩。
-- **隐写模式（Stealth）**——设置密码后，信封签名由密码派生并去除静态魔数，没有密码就无从发现隐藏数据。
+- **落盘即加密**——每个信封在写入载体前都经 Deflate 压缩与 AES-256-GCM 加密。不设密码时使用内置密钥，载体中不会泄露明文载荷、宿主哈希或文件名；设置密码则获得真正的密钥分离（PBKDF2-HMAC-SHA256 10 万轮 + HKDF-SHA256，分块 GCM）。
+- **隐写模式（Stealth）**——设置密码后，信封签名与头部字段均由密码派生，没有密码就无从发现隐藏数据。即使在默认（非 stealth）模式下也没有静态 ASCII 魔数：不存在 `STRHIDE` / `STH!` 这类字符串，只有高熵二进制签名（读取时仍兼容旧版魔数）。
+- **黑盒隐写分析**——`scan` 把文件视为未知对象，报告来自**任意工具**（不只是 strhide）的结构与统计特征异常。
 - **密码提示**——可选（≤ 1 KiB）的提示信息随信封存储，在需要输入密码时展示。
-- **默认安全**——完整性/签名拒绝检查会拒绝修改不宜触碰的文件（如签名二进制）；原地写入自动创建 `.bak` 备份；保留原始文件时间戳。
+- **默认安全**——完整性/签名拒绝检查会拒绝修改不宜触碰的文件（如签名二进制）；`read` 默认拒绝覆盖已存在的输出文件（需 `--overwrite`）；原地写入自动创建 `.bak` 备份；保留原始文件时间戳。
 - **TOML 配置**——`./strhide.toml` 或 `~/.strhide/config.toml` 提供默认值，显式命令行参数始终优先。
-- **批量载体**——`write` 与 `remove` 可一次处理多个文件：`write` 把同一份载荷分别写入每个载体，`remove` 逐个剥离，并打印本次运行的汇总（`read`/`inspect`/`verify` 仍只接受单个载体）。
+- **批量载体**——`write`、`remove`、`scan` 可一次处理多个文件（及目录）；`read`/`inspect`/`verify` 只接受单个载体。
 
 ## 安装
 
@@ -71,8 +72,12 @@ strhide write -c photo.png -t "meet me at 7"
 # 隐藏文件，加密并附加密码提示
 strhide write -c report.pdf -d secret.zip -p "S3cret!" -H "my usual one"
 
-# 提取隐藏数据
+# 提取隐藏数据（默认拒绝覆盖已存在文件，需 --overwrite 才允许）
 strhide read -c photo.png -o out/
+
+# 黑盒隐写分析：递归扫描文件或整个目录，检测来自任意工具的隐藏内容
+# （结构 + 统计特征，不依赖 strhide 内部知识）；支持 --json
+strhide scan -c suspicious.bin ./downloads -r
 
 # 查看信封元数据与各策略容量（隐藏了什么、何时、何种策略、还能再藏多少）；支持 --json
 strhide inspect -c report.pdf --json
@@ -97,7 +102,7 @@ strhide list
 
 ## Python API
 
-> **弃用说明（2026-10-18）**：纯 Python 实现冻结在 **0.2.0**，不再新增功能。请使用预编译的 Rust 二进制以获得完整能力。特别是 Python **未实现** `pe_codebits` PE 策略，无法读取用它写入的载体。Python 包仍保留给现有用户；除该策略外，行为已与 Rust 对齐。
+> **弃用说明（2026-10-18）**：纯 Python 实现冻结在 **0.2.0**，不再新增功能。请使用预编译的 Rust 二进制以获得完整能力。特别是 Python **未实现** `pe_slack` / `pe_codebits` PE 策略，且早于 Rust 默认的全加密信封（内置密钥模式），因此读不了当前 Rust 写入的载体。Python 包仍保留给现有用户及读取 0.2.0 时代的旧文件。
 
 ```python
 from strhide import write_carrier, read_carrier, inspect_carrier

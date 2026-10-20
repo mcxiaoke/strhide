@@ -2,14 +2,14 @@
 
 **Smart format-preserving, lossless data hiding.** Hide text or files inside ordinary host files (PNG, JPEG, MP4, ZIP, PDF, Windows PE executables, or any file) without changing the host's visible format, appearance, or functionality — and restore the original host file bit-for-bit afterwards.
 
-Two fully cross-compatible implementations ship in this repository:
+This repository ships two implementations:
 
-| Implementation | Language | Distribution |
+| Implementation | Language | Status |
 | --- | --- | --- |
-| [`python/`](python/) | Python ≥ 3.10 | `pip install strhide` — library **and** CLI |
-| [`rust/`](rust/) | Rust (edition 2024) | Single static binary, built from source |
+| [`rust/`](rust/) | Rust (edition 2024) | **Maintained (0.3.x)** — single static binary, built from source |
+| [`python/`](python/) | Python ≥ 3.10 | **Frozen at 0.2.0, deprecated** — `pip install strhide`, library + CLI |
 
-Both implement the same envelope format, so a file written by one can be read, verified, and cleaned by the other.
+Compatibility is one-directional: the Rust build can still read envelopes written by the old Python package, but Python cannot read Rust's new default fully-encrypted envelopes, nor PE carriers written with the `pe_slack` / `pe_codebits` strategies. Use the Rust binary for everything.
 
 > [中文说明（README.zh.md）](README.zh.md)
 
@@ -17,12 +17,13 @@ Both implement the same envelope format, so a file written by one can be read, v
 
 - **Format preserving** — the carrier file stays a valid PNG/JPEG/MP4/ZIP/PDF/PE and renders or runs normally.
 - **100% reversible** — an embedded SHA-256 of the original host guarantees the `read`/`remove` output matches the original bit-for-bit.
-- **Strong crypto (optional)** — PBKDF2-HMAC-SHA256 (100,000 rounds) + HKDF-SHA256 key derivation, chunked AES-256-GCM encryption, Deflate compression.
-- **Stealth mode** — with a password, envelope signatures are derived from the password and static magic bytes are stripped, so there is nothing to find without the password.
+- **Always encrypted on disk** — every envelope is Deflate-compressed and AES-256-GCM-encrypted before it touches the carrier. With no password a built-in key is used, so the carrier never leaks plaintext payload, host hash, or filenames; supplying a password adds real key separation (PBKDF2-HMAC-SHA256, 100,000 rounds + HKDF-SHA256, chunked GCM).
+- **Stealth mode** — with a password, envelope signatures and header fields are derived from the password, so there is nothing to find without it. Even in the default (non-stealth) mode there are no static ASCII magics: no `STRHIDE` / `STH!` strings, only high-entropy binary signatures (legacy magics still recognized for reading).
+- **Black-box steganalysis** — `scan` treats files as unknown and reports structural + statistical signs of hidden data from *any* tool, not just strhide.
 - **Password hint** — an optional (≤ 1 KiB) hint is stored with the envelope and shown when the password is required.
-- **Safe by default** — integrity/signature rejection checks refuse to modify files that should not be touched (e.g. signed binaries), in-place writes create a `.bak` backup, and original file timestamps are preserved.
+- **Safe by default** — integrity/signature rejection checks refuse to modify files that should not be touched (e.g. signed binaries); `read` refuses to overwrite an existing output file unless `--overwrite` is given; in-place writes create a `.bak` backup; original file timestamps are preserved.
 - **TOML configuration** — `./strhide.toml` or `~/.strhide/config.toml` provides defaults; explicit CLI flags always win.
-- **Batch carriers** — `write` and `remove` accept several files at once: `write` embeds the same payload into each, `remove` strips each one, printing a per-run summary (`read`/`inspect`/`verify` still take exactly one carrier).
+- **Batch carriers** — `write`, `remove`, and `scan` accept several files (and directories) at once; `read`/`inspect`/`verify` take exactly one carrier.
 
 ## Install
 
@@ -71,8 +72,13 @@ strhide write -c photo.png -t "meet me at 7"
 # Hide a file, encrypted, with a password hint
 strhide write -c report.pdf -d secret.zip -p "S3cret!" -H "my usual one"
 
-# Extract the hidden data
+# Extract the hidden data (refuses to overwrite an existing file unless --overwrite)
 strhide read -c photo.png -o out/
+
+# Black-box steganalysis: scan files or a whole directory recursively for hidden
+# content from any tool (structural + statistical signs, no strhide knowledge);
+# --json supported
+strhide scan -c suspicious.bin ./downloads -r
 
 # Show envelope metadata and per-strategy capacity for a carrier (what was
 # hidden, when, which strategy, and how much more could fit); --json supported
@@ -99,7 +105,7 @@ Password sources (checked in order): `-p/--password` → `--password-file` → `
 
 ## Python API
 
-> **Deprecation notice (2026-10-18):** the pure-Python implementation is frozen at **0.2.0** and will no longer receive new features. Use the prebuilt Rust binary for the full feature set. In particular, Python does **not** implement the `pe_codebits` PE strategy and cannot read carriers written with it. The Python package remains available for existing users; its behavior is aligned with Rust except for that strategy.
+> **Deprecation notice (2026-10-18):** the pure-Python implementation is frozen at **0.2.0** and will no longer receive new features. Use the prebuilt Rust binary for the full feature set. In particular, Python does **not** implement the `pe_slack` / `pe_codebits` PE strategies, and it predates Rust's default fully-encrypted envelope (built-in-key mode), so it cannot read carriers written by current Rust builds. It remains available for existing users and for reading legacy 0.2.0-era files.
 
 ```python
 from strhide import write_carrier, read_carrier, inspect_carrier

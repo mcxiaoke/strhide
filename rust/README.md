@@ -23,6 +23,7 @@ strhide verify -c report.pdf                     # verify host + envelope integr
 strhide remove -c photo.png                      # remove hidden data, restore host
 strhide remove -c a.png b.png c.png              # strip several carriers at once
 strhide list                          # static format/strategy/limit table
+strhide scan -c suspicious.bin dir/ -r # black-box steganalysis (any tool)
 ```
 
 `write` and `remove` accept one or more carriers (`read`, `inspect`, and
@@ -30,14 +31,17 @@ strhide list                          # static format/strategy/limit table
 carrier; when more than one is given, `-o` must name an existing directory and a
 `[SUMMARY] n/m carriers succeeded` line is printed. Runs stop at the first
 failure; every write/remove is atomic per carrier, so carriers already handled
-stay modified and the rest are untouched.
+stay modified and the rest are untouched. `read` refuses to overwrite an
+existing output file unless `--overwrite` is passed.
 
 Supported carriers: PNG, JPEG, MP4, ZIP, PDF, and Windows PE. Unrecognized files
 are rejected rather than appended to.
 
 ## Compatibility
 
-Envelope format is identical to the [Python implementation](../python/): files written by one can be read, verified, and cleaned by the other.
+The Python package is frozen at 0.2.0. Rust can read legacy envelopes written by
+it, but Python cannot read Rust's default fully-encrypted envelopes or
+`pe_slack` / `pe_codebits` PE carriers.
 
 ## License
 
