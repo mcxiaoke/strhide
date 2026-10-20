@@ -22,7 +22,7 @@
 - **黑盒隐写分析**——`scan` 把文件视为未知对象，报告来自**任意工具**（不只是 strhide）的结构与统计特征异常。
 - **密码提示**——可选（≤ 1 KiB）的提示信息随信封存储，在需要输入密码时展示。
 - **默认安全**——完整性/签名拒绝检查会拒绝修改不宜触碰的文件（如签名二进制）；`read` 默认拒绝覆盖已存在的输出文件（需 `--overwrite`）；原地写入自动创建 `.bak` 备份；保留原始文件时间戳。
-- **TOML 配置**——`./strhide.toml` 或 `~/.strhide/config.toml` 提供默认值，显式命令行参数始终优先。
+- **TOML 配置**——`./strhide.toml` 或 `~/.strhide/config.toml` 提供默认值，显式命令行参数始终优先（详见注解模板 [`strhide.sample.toml`](strhide.sample.toml)）。
 - **批量载体**——`write`、`restore`、`scan` 可一次处理多个文件（及目录）；`read`/`inspect`/`verify` 只接受单个载体。
 - **内容自适应隐写（HILL & UERD）**——`embed` 与 `extract` 命令直接在图像像素（PNG，通过 HILL 成本模型进行 LSB Matching）或 DCT 频域系数（JPEG，通过 UERD 成本模型）中嵌入数据。与结构层注入不同，内容隐写修改的是最小失真纹理区，天然免疫元数据剥离清洗，且抗统计隐写分析。
 

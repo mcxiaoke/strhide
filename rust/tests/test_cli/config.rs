@@ -171,3 +171,28 @@ fn strategy_from_config_is_used_by_write() {
         stderr(&out)
     );
 }
+
+#[test]
+fn sample_config_file_parses_without_warnings_or_errors() {
+    let sample_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("strhide.sample.toml");
+    assert!(
+        sample_path.exists(),
+        "strhide.sample.toml must exist at repo root: {}",
+        sample_path.display()
+    );
+    let dir = scratch("sample_cfg");
+    let out = run(
+        &dir,
+        &["--config", sample_path.to_str().unwrap(), "list"],
+        None,
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("[WARNING]"),
+        "strhide.sample.toml must not trigger warnings, stderr: {}",
+        stderr(&out)
+    );
+}

@@ -1,0 +1,255 @@
+# ==============================================================================
+# strhide - Sample Configuration File
+# ==============================================================================
+# This is an annotated configuration template for strhide: a smart,
+# format-preserving, lossless data hiding tool.
+#
+# HOW TO USE THIS FILE:
+# ---------------------
+# 1. Local (per-project/directory) configuration:
+#    Copy this file to `strhide.toml` in your current working directory:
+#      cp strhide.sample.toml strhide.toml
+#
+# 2. Global (per-user) configuration:
+#    Copy this file to your user profile directory:
+#      - Linux / macOS: ~/.strhide/config.toml
+#      - Windows:       %USERPROFILE%\.strhide\config.toml
+#
+# 3. Explicit path:
+#    Specify any configuration file on the command line using --config:
+#      strhide --config /path/to/custom-config.toml write carrier.png -t "secret"
+#
+# CONFIGURATION PRECEDENCE (Highest to Lowest):
+# ---------------------------------------------
+# 1. Explicit CLI arguments & flags (e.g. -p, -s, --no-backup, --stealth)
+# 2. Environment variables (STRHIDE_PASSWORD, STRHIDE_TEXT)
+# 3. Configuration file (CLI --config > ./strhide.toml > ~/.strhide/config.toml)
+# 4. Built-in application defaults
+#
+# FORMAT RULES:
+# -------------
+# - All keys are OPTIONAL. Unset or commented-out keys use built-in defaults.
+# - Keys must be flat at the top level. Do NOT use section headers (no [tables]).
+# - Unrecognized keys will trigger a warning:
+#     [WARNING] Unknown key '...' in config file '...' (ignored).
+# ==============================================================================
+
+
+# ------------------------------------------------------------------------------
+# 1. Hiding Strategy
+# ------------------------------------------------------------------------------
+# Default hiding strategy for the `write` command.
+#
+# Options:
+#   "auto"  - (Default) Automatically selects the cleanest, least detectable,
+#             and format-compliant strategy based on payload size and carrier.
+#   "ask"   - Prompt interactively to choose among supported strategies
+#             (single carrier only; incompatible with multiple batch carriers).
+#   "<name>"- Explicit strategy name. Examples:
+#               PNG:  "chunk" (IDAT/ancillary chunk injection), "eof" (appended)
+#               JPEG: "app_segment" (APP marker segment), "eof"
+#               WebP: "riff_chunk", "eof"
+#               HEIF: "box_uuid", "eof"
+#               MP4:  "box_uuid", "eof"
+#               WAV:  "riff_chunk", "eof"
+#               ZIP:  "pre_cd_inject" (central directory injection), "eof"
+#               PDF:  "incremental" (revision update), "eof"
+#               PE:   "pe_codebits" (code padding/slack), "pe_slack", "pe_overlay", "eof"
+#               MKV:  "ebml_void", "eof"
+#
+# Run `strhide list` to see all supported strategies and their static limits.
+# Run `strhide inspect <carrier>` to see capacity limits for a specific file.
+#
+# strategy = "auto"
+
+
+# ------------------------------------------------------------------------------
+# 2. Backup Creation
+# ------------------------------------------------------------------------------
+# Controls whether a backup file (<carrier>.bak) is created before modifying
+# a carrier file in place.
+#
+# Applies to: `write`, `restore`
+# Type: boolean (true | false)
+# Default: true
+# CLI override: --no-backup
+#
+# Setting this to false disables creating .bak files when carriers are modified.
+#
+# backup = true
+
+
+# ------------------------------------------------------------------------------
+# 3. Timestamp Preservation
+# ------------------------------------------------------------------------------
+# Controls whether original carrier file modification timestamps (mtime)
+# are preserved when writing payloads.
+#
+# Applies to: `write`
+# Type: boolean (true | false)
+# Default: true
+# CLI override: --no-preserve-time
+#
+# Preserving timestamps helps prevent basic forensic detection based on file
+# modification time changes.
+#
+# preserve_time = true
+
+
+# ------------------------------------------------------------------------------
+# 4. Interactive Encryption Prompt
+# ------------------------------------------------------------------------------
+# Determines whether strhide prompts for a password when writing a carrier
+# without any password supplied.
+#
+# Applies to: `write`
+# Type: boolean (true | false)
+# Default: false
+# CLI override: -e, --encrypt
+#
+# NOTE ON ENCRYPTION:
+# In strhide, every payload envelope is Deflate-compressed and AES-256-GCM
+# encrypted on disk. When no password is provided, a built-in key mask is used
+# so carriers never leak plaintext payloads, hashes, or filenames.
+# Setting `encrypt = true` treats lack of a password as an interactive prompt
+# request, asking for password confirmation on interactive terminals (TTY).
+#
+# encrypt = false
+
+
+# ------------------------------------------------------------------------------
+# 5. Stealth Mode
+# ------------------------------------------------------------------------------
+# Enables stealth mode by default.
+#
+# Applies to: `write`
+# Type: boolean (true | false)
+# Default: false
+# CLI override: --stealth
+#
+# In stealth mode, all static envelope signatures and structural markers are
+# replaced with values derived from the encryption password via PBKDF2/HKDF.
+# A file hidden in stealth mode cannot be detected as containing a strhide
+# envelope without knowledge of the password.
+#
+# REQUIREMENTS:
+# - Stealth mode REQUIRES a password (via `password`, `password_file`, -p,
+#   or STRHIDE_PASSWORD).
+# - Stealth mode is INCOMPATIBLE with a password hint (`hint`).
+#
+# stealth = false
+
+
+# ------------------------------------------------------------------------------
+# 6. Default Password (Plaintext)
+# ------------------------------------------------------------------------------
+# Default password used for encryption and decryption.
+#
+# Applies to: `write`, `read`, `restore`, `inspect`, `verify`, `embed`, `extract`
+# Type: string
+# Default: not set (None)
+# CLI override: -p <PASSWORD>, --password <PASSWORD>
+#
+# SECURITY WARNING:
+# Storing passwords in plain text inside a configuration file on disk is
+# inherently insecure. Anyone with read access to this file can decrypt your
+# hidden envelopes.
+# PREFERRED ALTERNATIVES:
+# - Use `password_file` below pointing to a restricted-permission file.
+# - Use the `STRHIDE_PASSWORD` environment variable.
+# - Use the interactive prompt (`-e/--encrypt`).
+#
+# password = "example-password-change-me"
+
+
+# ------------------------------------------------------------------------------
+# 7. Password File
+# ------------------------------------------------------------------------------
+# Path to a file containing the password.
+#
+# Applies to: `write`, `read`, `restore`, `inspect`, `verify`, `embed`, `extract`
+# Type: string (relative or absolute file path)
+# Default: not set (None)
+# CLI override: --password-file <FILE>
+#
+# strhide reads the password from the first line of the specified file,
+# stripping trailing CR and LF characters. This allows you to store the secret
+# in a file with strict filesystem permissions (e.g. chmod 600 / NTFS ACLs).
+#
+# Precedence: CLI -p > CLI --password-file > STRHIDE_PASSWORD > config password
+#             > config password_file.
+#
+# password_file = "~/.strhide/master.key"
+
+
+# ------------------------------------------------------------------------------
+# 8. Password Hint
+# ------------------------------------------------------------------------------
+# Default hint stored alongside the encrypted envelope.
+#
+# Applies to: `write`
+# Type: string (maximum length: 1024 bytes)
+# Default: not set (None)
+# CLI override: -H <TEXT>, --hint <TEXT>
+#
+# The hint is stored in cleartext inside the envelope header and is displayed
+# to whoever tries to read or extract the payload without providing the correct
+# password.
+#
+# NOTE: Incompatible with `stealth = true`. If stealth mode is enabled, the hint
+# is automatically suppressed.
+#
+# hint = "Personal vault - usual phrase with exclamation mark"
+
+
+# ------------------------------------------------------------------------------
+# 9. Escape Sequence Decoding
+# ------------------------------------------------------------------------------
+# Controls whether C-style escape sequences are decoded in -t/--text payloads.
+#
+# Applies to: `write`, `embed`
+# Type: boolean (true | false)
+# Default: false
+# CLI override: --unescape
+#
+# When enabled, escape sequences such as:
+#   \n (newline), \r (carriage return), \t (tab),
+#   \xHH (hex byte), \uXXXX / \u{XXXXXX} (Unicode code points)
+# in `-t/--text` strings will be decoded before embedding. Unrecognized or
+# malformed escape sequences are left unchanged.
+#
+# unescape = false
+
+
+# ==============================================================================
+# COMMON CONFIGURATION PROFILES (Examples)
+# ==============================================================================
+# Below are ready-to-use profiles for different scenarios. Uncomment the lines
+# in the profile that fits your workflow.
+#
+# Profile A: High Stealth & Security
+# ----------------------------------
+# Maximum deniability, derived stealth signatures, password from a secure file:
+#
+# stealth = true
+# password_file = "~/.strhide/stealth.key"
+# preserve_time = true
+# backup = true
+#
+# Profile B: CI/CD & Automated Scripting
+# ---------------------------------------
+# Non-interactive, no backup file clutter, C-style escapes decoded:
+#
+# strategy = "auto"
+# backup = false
+# unescape = true
+# password_file = "/etc/strhide/ci.key"
+#
+# Profile C: General Personal Vault
+# ----------------------------------
+# Safe defaults, auto backup, helpful hint for recovery:
+#
+# backup = true
+# preserve_time = true
+# hint = "Remember: childhood pet name + birthday year"
+# ==============================================================================

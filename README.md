@@ -22,7 +22,7 @@ Compatibility is one-directional: the Rust build can still read envelopes writte
 - **Black-box steganalysis** — `scan` treats files as unknown and reports structural + statistical signs of hidden data from *any* tool, not just strhide.
 - **Password hint** — an optional (≤ 1 KiB) hint is stored with the envelope and shown when the password is required.
 - **Safe by default** — integrity/signature rejection checks refuse to modify files that should not be touched (e.g. signed binaries); `read` refuses to overwrite an existing output file unless `--overwrite` is given; in-place writes create a `.bak` backup; original file timestamps are preserved.
-- **TOML configuration** — `./strhide.toml` or `~/.strhide/config.toml` provides defaults; explicit CLI flags always win.
+- **TOML configuration** — `./strhide.toml` or `~/.strhide/config.toml` provides defaults; explicit CLI flags always win (see [`strhide.sample.toml`](strhide.sample.toml) for an annotated template).
 - **Batch carriers** — `write`, `restore`, and `scan` accept several files (and directories) at once; `read`/`inspect`/`verify` take exactly one carrier.
 - **Content-adaptive steganography (HILL & UERD)** — `embed` and `extract` hide data directly in image pixels (PNG, LSB Matching via HILL cost model) or DCT frequency coefficients (JPEG, via UERD cost model). Unlike structure-domain injection, content steganography modifies minimal-distortion texture regions and is immune to metadata stripping.
 
