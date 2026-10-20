@@ -21,7 +21,7 @@ use crate::envelope::{
 };
 use crate::errors::StrHideError;
 use crate::rejection::run_all_rejection_checks;
-use crate::router::{find_adapter, find_adapter_or_reject, strategy_to_id};
+use crate::router::{find_adapter, find_adapter_or_reject, id_to_strategy, strategy_to_id};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CarrierMetadata {
@@ -1111,7 +1111,8 @@ pub fn read_carrier_with(
             &meta_key,
             &header.base_nonce,
             &fixed_header_aad,
-        )?;
+        )
+        .map_err(|_| StrHideError::Password("Invalid password or corrupted metadata".into()))?;
         let meta_obj = decode_metadata(&meta_plain, header.is_compact_meta())?;
         (meta_obj, false)
     } else {
@@ -1489,11 +1490,17 @@ pub fn inspect_carrier(
         }
     }
 
+    let reported_strategy = if header.strategy_id > 0 {
+        id_to_strategy(header.strategy_id).to_string()
+    } else {
+        strategy_name
+    };
+
     Ok(InspectResult {
         carrier: carrier_path.display().to_string(),
         format: adapter.format_name().into(),
         has_hidden_data: true,
-        strategy: Some(strategy_name),
+        strategy: Some(reported_strategy),
         ube_offset: Some(ube_offset),
         ube_total_size: Some(ube_total_size),
         is_encrypted: Some(header.is_encrypted()),

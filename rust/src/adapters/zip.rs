@@ -390,4 +390,64 @@ impl HostAdapter for ZipAdapter {
             Err(e) => Ok((false, format!("Corrupted ZIP archive: {e}"))),
         }
     }
+
+    fn suspicious_structures(&self, stego_in: &mut dyn SeekRead) -> Vec<String> {
+        let mut found = Vec::new();
+        let file_size = match stego_in.seek(SeekFrom::End(0)) {
+            Ok(s) => s,
+            Err(_) => return found,
+        };
+
+        const MIN_UBE_SIZE: u64 = 112 + 24;
+
+        if let Ok((eocd_pos, cd_offset, _cd_size)) = find_eocd_offset(stego_in) {
+            // 1. Inspect pre_cd_inject candidate before Central Directory.
+            if cd_offset >= MIN_UBE_SIZE
+                && cd_offset <= eocd_pos
+                && stego_in.seek(SeekFrom::Start(cd_offset - 24)).is_ok()
+            {
+                let mut tail = [0u8; 24];
+                if stego_in.read_exact(&mut tail).is_ok() {
+                    let ube_offset = u64::from_le_bytes(tail[0..8].try_into().unwrap());
+                    let ube_total_size = u64::from_le_bytes(tail[8..16].try_into().unwrap());
+                    if ube_offset.checked_add(ube_total_size) == Some(cd_offset)
+                        && ube_total_size >= MIN_UBE_SIZE
+                        && ube_offset < cd_offset
+                    {
+                        found.push(format!(
+                            "pre-Central Directory region carries an envelope-shaped structure at offset {ube_offset} (size {ube_total_size} B)"
+                        ));
+                    }
+                }
+            }
+
+            // 2. Inspect eof candidate after EOCD.
+            if stego_in.seek(SeekFrom::Start(eocd_pos)).is_ok() {
+                let mut eocd_hdr = [0u8; 22];
+                if stego_in.read_exact(&mut eocd_hdr).is_ok() {
+                    let comment_len =
+                        u16::from_le_bytes(eocd_hdr[20..22].try_into().unwrap()) as u64;
+                    let eocd_end = eocd_pos + 22 + comment_len;
+                    if file_size >= eocd_end + 24 && stego_in.seek(SeekFrom::End(-24)).is_ok() {
+                        let mut tail = [0u8; 24];
+                        if stego_in.read_exact(&mut tail).is_ok() {
+                            let ube_offset = u64::from_le_bytes(tail[0..8].try_into().unwrap());
+                            let ube_total_size =
+                                u64::from_le_bytes(tail[8..16].try_into().unwrap());
+                            if ube_offset.checked_add(ube_total_size) == Some(file_size)
+                                && ube_total_size >= MIN_UBE_SIZE
+                                && ube_offset >= eocd_end
+                            {
+                                found.push(format!(
+                                    "trailing data past EOCD carries an envelope-shaped structure at offset {ube_offset} (size {ube_total_size} B)"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        found
+    }
 }

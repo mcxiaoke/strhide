@@ -399,7 +399,7 @@ impl HostAdapter for Mp4Adapter {
         let ube_offset = u64::from_le_bytes(tail[0..8].try_into().unwrap());
         let ube_total_size = u64::from_le_bytes(tail[8..16].try_into().unwrap());
         // Boundary check only: the envelope must reach exactly to EOF.
-        if ube_offset + ube_total_size != file_size {
+        if ube_offset.checked_add(ube_total_size) != Some(file_size) {
             return found;
         }
         if ube_offset >= 24 && stego_in.seek(SeekFrom::Start(ube_offset - 24)).is_ok() {

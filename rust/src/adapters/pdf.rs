@@ -583,4 +583,88 @@ impl HostAdapter for PdfAdapter {
             Err(e) => Ok((false, format!("Corrupted PDF structure: {e}"))),
         }
     }
+
+    fn suspicious_structures(&self, stego_in: &mut dyn SeekRead) -> Vec<String> {
+        const MIN_UBE_SIZE: u64 = 112 + 24;
+        let mut found = Vec::new();
+
+        stego_in.seek(SeekFrom::Start(0)).ok();
+        let mut magic = [0u8; 5];
+        if stego_in.read_exact(&mut magic).is_err() || magic != PDF_MAGIC {
+            return found;
+        }
+
+        let total_size = match stego_in.seek(SeekFrom::End(0)) {
+            Ok(s) => s,
+            Err(_) => return found,
+        };
+
+        // 1. Inspect incremental update object stream candidate
+        let scan_len = std::cmp::min(total_size, 128 * 1024);
+        if scan_len >= 24 && stego_in.seek(SeekFrom::End(-(scan_len as i64))).is_ok() {
+            let mut tail = vec![0u8; scan_len as usize];
+            if stego_in.read_exact(&mut tail).is_ok()
+                && let Some(eof_idx) = tail.windows(5).rposition(|w| w == b"%%EOF")
+                && let Some(endstream_idx) =
+                    tail[..eof_idx].windows(9).rposition(|w| w == b"endstream")
+            {
+                let stream_content_tail = &tail[..endstream_idx];
+                let mut stream_end_in_tail = stream_content_tail.len();
+                while stream_end_in_tail > 0
+                    && (stream_content_tail[stream_end_in_tail - 1] == b'\r'
+                        || stream_content_tail[stream_end_in_tail - 1] == b'\n')
+                {
+                    stream_end_in_tail -= 1;
+                }
+
+                if stream_end_in_tail >= 24 {
+                    let trailer_bytes =
+                        &stream_content_tail[stream_end_in_tail - 24..stream_end_in_tail];
+                    let ube_offset = u64::from_le_bytes(trailer_bytes[0..8].try_into().unwrap());
+                    let ube_total_size =
+                        u64::from_le_bytes(trailer_bytes[8..16].try_into().unwrap());
+                    let abs_stream_end = (total_size - scan_len) + stream_end_in_tail as u64;
+
+                    if ube_offset.checked_add(ube_total_size) == Some(abs_stream_end)
+                        && ube_total_size >= MIN_UBE_SIZE
+                        && ube_offset >= 8
+                        && stego_in.seek(SeekFrom::Start(ube_offset - 8)).is_ok()
+                    {
+                        let mut prefix = [0u8; 8];
+                        if stego_in.read_exact(&mut prefix).is_ok()
+                            && (prefix.ends_with(b"stream\r\n")
+                                || prefix.ends_with(b"stream\n")
+                                || prefix.ends_with(b"stream"))
+                        {
+                            found.push(format!(
+                                "incremental update object stream carries an envelope-shaped structure at offset {ube_offset} (size {ube_total_size} B)"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Inspect eof candidate after final %%EOF
+        if let Ok(eof_offset) = find_last_eof(stego_in, total_size) {
+            let eof_marker_end = eof_offset + 5;
+            if total_size >= eof_marker_end + 24 && stego_in.seek(SeekFrom::End(-24)).is_ok() {
+                let mut tail = [0u8; 24];
+                if stego_in.read_exact(&mut tail).is_ok() {
+                    let ube_offset = u64::from_le_bytes(tail[0..8].try_into().unwrap());
+                    let ube_total_size = u64::from_le_bytes(tail[8..16].try_into().unwrap());
+                    if ube_offset.checked_add(ube_total_size) == Some(total_size)
+                        && ube_total_size >= MIN_UBE_SIZE
+                        && ube_offset >= eof_marker_end
+                    {
+                        found.push(format!(
+                            "trailing data past %%EOF carries an envelope-shaped structure at offset {ube_offset} (size {ube_total_size} B)"
+                        ));
+                    }
+                }
+            }
+        }
+
+        found
+    }
 }

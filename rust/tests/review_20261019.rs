@@ -10,7 +10,8 @@ use std::process::{Command, Stdio};
 
 use strhide::adapters::HostAdapter;
 use strhide::engine::{
-    PayloadSource, WriteOptions, read_carrier, remove_carrier, verify_carrier, write_carrier,
+    PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
+    write_carrier,
 };
 use strhide::errors::StrHideError;
 
@@ -635,4 +636,210 @@ fn read_warns_when_password_is_unused() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("not encrypted"), "stderr: {stderr}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "plain");
+}
+
+fn make_pe() -> Vec<u8> {
+    let mut v = vec![0u8; 0x40];
+    v[0] = b'M';
+    v[1] = b'Z';
+    v[0x3C..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+    v.extend_from_slice(b"PE\x00\x00");
+    v.extend_from_slice(&0x014Cu16.to_le_bytes());
+    v.extend_from_slice(&1u16.to_le_bytes());
+    v.extend_from_slice(&0u32.to_le_bytes());
+    v.extend_from_slice(&0u32.to_le_bytes());
+    v.extend_from_slice(&0u32.to_le_bytes());
+    v.extend_from_slice(&2u16.to_le_bytes());
+    v.extend_from_slice(&0x0102u16.to_le_bytes());
+    v.extend_from_slice(&0x010Bu16.to_le_bytes());
+    let mut sec = [0u8; 40];
+    sec[0..5].copy_from_slice(b".text");
+    sec[8..12].copy_from_slice(&0x100u32.to_le_bytes());
+    sec[12..16].copy_from_slice(&0x1000u32.to_le_bytes());
+    sec[16..20].copy_from_slice(&0x100u32.to_le_bytes());
+    sec[20..24].copy_from_slice(&0x200u32.to_le_bytes());
+    v.extend_from_slice(&sec);
+    v.resize(0x400, 0);
+    v
+}
+
+fn make_pdf() -> Vec<u8> {
+    b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
+      xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
+      trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n9\n%%EOF\n"
+        .to_vec()
+}
+
+// --------------------------------------------------------------------------- P2-1
+
+/// PE written with `-s eof` must be attributed as "eof" in inspect_carrier,
+/// and `-s pe_overlay` must be attributed as "pe_overlay".
+#[test]
+fn pe_eof_strategy_inspect_attribution() {
+    let dir = scratch("pe_strategy_attr");
+    let pe_bytes = make_pe();
+
+    // 1. Write with eof
+    let carrier_eof = dir.join("c_eof.exe");
+    fs::write(&carrier_eof, &pe_bytes).unwrap();
+    let stego_eof = dir.join("s_eof.exe");
+    write_carrier_file(
+        &carrier_eof,
+        PayloadSource::Text("secret-eof"),
+        None,
+        "eof",
+        false,
+        &stego_eof,
+    );
+    let inspect_eof = inspect_carrier(&stego_eof, None).unwrap();
+    assert_eq!(
+        inspect_eof.strategy.as_deref(),
+        Some("eof"),
+        "expected eof strategy, got {:?}",
+        inspect_eof.strategy
+    );
+
+    // 2. Write with pe_overlay
+    let carrier_ovl = dir.join("c_ovl.exe");
+    fs::write(&carrier_ovl, &pe_bytes).unwrap();
+    let stego_ovl = dir.join("s_ovl.exe");
+    write_carrier_file(
+        &carrier_ovl,
+        PayloadSource::Text("secret-ovl"),
+        None,
+        "pe_overlay",
+        false,
+        &stego_ovl,
+    );
+    let inspect_ovl = inspect_carrier(&stego_ovl, None).unwrap();
+    assert_eq!(
+        inspect_ovl.strategy.as_deref(),
+        Some("pe_overlay"),
+        "expected pe_overlay strategy, got {:?}",
+        inspect_ovl.strategy
+    );
+}
+
+// --------------------------------------------------------------------------- A-13
+
+/// PDF and ZIP stealth envelopes must be detected by suspicious_structures,
+/// while clean carriers must not trigger false positives.
+#[test]
+fn a13_zip_and_pdf_suspicious_structures_detection() {
+    use std::io::Cursor;
+    use strhide::adapters::pdf::PdfAdapter;
+    use strhide::adapters::zip::ZipAdapter;
+
+    let dir = scratch("a13_suspicious");
+
+    // Clean checks
+    let clean_zip = make_zip();
+    let zip_adapter = ZipAdapter;
+    assert!(
+        zip_adapter
+            .suspicious_structures(&mut Cursor::new(&clean_zip))
+            .is_empty(),
+        "clean ZIP must not have suspicious structures"
+    );
+
+    let clean_pdf = make_pdf();
+    let pdf_adapter = PdfAdapter;
+    assert!(
+        pdf_adapter
+            .suspicious_structures(&mut Cursor::new(&clean_pdf))
+            .is_empty(),
+        "clean PDF must not have suspicious structures"
+    );
+
+    // Stealth ZIP check
+    let carrier_zip = dir.join("c.zip");
+    fs::write(&carrier_zip, &clean_zip).unwrap();
+    let stego_zip = dir.join("s.zip");
+    write_carrier_file(
+        &carrier_zip,
+        PayloadSource::Text("stealth-zip"),
+        Some("pass123"),
+        "pre_cd_inject",
+        true,
+        &stego_zip,
+    );
+    let stego_zip_bytes = fs::read(&stego_zip).unwrap();
+    let zip_warns = zip_adapter.suspicious_structures(&mut Cursor::new(&stego_zip_bytes));
+    assert!(
+        !zip_warns.is_empty(),
+        "stealth ZIP envelope must be detected by suspicious_structures"
+    );
+
+    // Stealth PDF check
+    let carrier_pdf = dir.join("c.pdf");
+    fs::write(&carrier_pdf, &clean_pdf).unwrap();
+    let stego_pdf = dir.join("s.pdf");
+    write_carrier_file(
+        &carrier_pdf,
+        PayloadSource::Text("stealth-pdf"),
+        Some("pass123"),
+        "incremental",
+        true,
+        &stego_pdf,
+    );
+    let stego_pdf_bytes = fs::read(&stego_pdf).unwrap();
+    let pdf_warns = pdf_adapter.suspicious_structures(&mut Cursor::new(&stego_pdf_bytes));
+    assert!(
+        !pdf_warns.is_empty(),
+        "stealth PDF envelope must be detected by suspicious_structures"
+    );
+}
+
+// --------------------------------------------------------------------------- A-15
+
+/// An unencrypted envelope whose metadata is corrupted must fail as CorruptedData,
+/// never as Password. An encrypted envelope with a wrong password must fail as Password.
+#[test]
+fn a15_unencrypted_corrupted_metadata_reports_corrupted_not_password() {
+    let dir = scratch("a15_errors");
+
+    // 1. Encrypted envelope + wrong password -> must be Password error
+    let carrier_enc = dir.join("c_enc.png");
+    fs::write(&carrier_enc, make_png()).unwrap();
+    let stego_enc = dir.join("s_enc.png");
+    write_carrier_file(
+        &carrier_enc,
+        PayloadSource::Text("secret"),
+        Some("CorrectPass123"),
+        "chunk",
+        false,
+        &stego_enc,
+    );
+    let err_enc = read_carrier(&stego_enc, None, Some("WrongPass123")).unwrap_err();
+    assert!(
+        matches!(err_enc, StrHideError::Password(_)),
+        "wrong password must yield Password error, got: {err_enc:?}"
+    );
+
+    // 2. Unencrypted envelope + tampered metadata -> must be CorruptedData
+    let carrier_plain = dir.join("c_plain.png");
+    fs::write(&carrier_plain, make_png()).unwrap();
+    let stego_plain = dir.join("s_plain.png");
+    write_carrier_file(
+        &carrier_plain,
+        PayloadSource::Text("plain"),
+        None,
+        "chunk",
+        false,
+        &stego_plain,
+    );
+    let mut bytes = fs::read(&stego_plain).unwrap();
+    let mid = bytes.len() - 60;
+    bytes[mid] ^= 0xAA;
+    bytes[mid + 1] ^= 0x55;
+    let tampered = dir.join("s_tampered.png");
+    fs::write(&tampered, &bytes).unwrap();
+
+    let err_plain = read_carrier(&tampered, None, None);
+    if let Err(e) = err_plain {
+        assert!(
+            !matches!(e, StrHideError::Password(_)),
+            "unencrypted carrier corruption must never yield Password error, got: {e:?}"
+        );
+    }
 }

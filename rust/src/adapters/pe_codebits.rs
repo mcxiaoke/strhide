@@ -532,12 +532,20 @@ fn validate_header(header: &ChannelHeader, positions: usize) -> Result<(), Codeb
 
 /// Parses the channel header **without** any magic filter: only the version
 /// and capacity sanity checks are applied. Used by [`extract_ube`] and
+/// Decodes and validates the channel header from an already-computed profile.
+pub fn parse_channel_header_from_profile(
+    prof: &[CodePosition],
+) -> Result<ChannelHeader, CodebitsError> {
+    let header = header_from_positions(prof)?;
+    validate_header(&header, prof.len())?;
+    Ok(header)
+}
+
+/// Reads the channel header from a code range. Used by [`extract_ube`] and
 /// [`apply_diff`], which run after a successful magic-checked `locate`.
 pub fn parse_channel_header(text: &[u8], bitness: u32) -> Result<ChannelHeader, CodebitsError> {
     let prof = profile(text, bitness);
-    let header = header_from_positions(&prof)?;
-    validate_header(&header, prof.len())?;
-    Ok(header)
+    parse_channel_header_from_profile(&prof)
 }
 
 /// Reads and validates the channel header, requiring the magic to equal
@@ -566,8 +574,8 @@ pub fn read_channel_header(
 /// range. The returned `Vec<u8>` is the opaque UBE byte stream. Does not
 /// filter by magic — callers must have located the channel first.
 pub fn extract_ube(text: &[u8], bitness: u32) -> Result<(ChannelHeader, Vec<u8>), CodebitsError> {
-    let header = parse_channel_header(text, bitness)?;
     let prof = profile(text, bitness);
+    let header = parse_channel_header_from_profile(&prof)?;
     let bits: Vec<bool> = prof
         .iter()
         .take(header.total_bits())
@@ -668,7 +676,8 @@ pub fn apply_diff(
 ) -> Result<ChannelHeader, CodebitsError> {
     // The header rides inside the diff-covered region; read it from the text
     // itself so that a stale/short diff is caught by the length check below.
-    let header = parse_channel_header(text, bitness)?;
+    let prof = profile(text, bitness);
+    let header = parse_channel_header_from_profile(&prof)?;
 
     let total_bits = header.total_bits();
     if diff.len() != header.diff_len() {
@@ -679,7 +688,6 @@ pub fn apply_diff(
         )));
     }
 
-    let prof = profile(text, bitness);
     if prof.len() < total_bits {
         return Err(CodebitsError::Corrupted(
             ".text capacity shrank below channel size".into(),

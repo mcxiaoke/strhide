@@ -1,9 +1,9 @@
 //! strhide: Smart format-preserving lossless data hiding package.
 //!
 //! Hide text or files inside ordinary host files (PNG, JPEG, MP4, ZIP, PDF,
-//! Windows PE, or any file) without changing the host's visible format, and
-//! restore the original host bit-for-bit afterwards. Fully cross-compatible
-//! with the Python implementation.
+//! Windows PE) without changing the host's visible format, and
+//! restore the original host bit-for-bit afterwards. Single static binary
+//! built from source.
 //!
 //! Typical usage (via the CLI):
 //!

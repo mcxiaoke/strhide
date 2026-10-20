@@ -1,6 +1,6 @@
 # strhide
 
-**Smart format-preserving, lossless data hiding.** Hide text or files inside ordinary host files (PNG, JPEG, MP4, ZIP, PDF, Windows PE executables, or any file) without changing the host's visible format, appearance, or functionality — and restore the original host file bit-for-bit afterwards.
+**Smart format-preserving, lossless data hiding.** Hide text or files inside ordinary host files (PNG, JPEG, MP4, ZIP, PDF, Windows PE executables) without changing the host's visible format, appearance, or functionality — and restore the original host file bit-for-bit afterwards.
 
 This repository ships two implementations:
 

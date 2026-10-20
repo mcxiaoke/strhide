@@ -153,7 +153,7 @@ pub fn decrypt_metadata(
     };
     cipher
         .decrypt(&Nonce::from(nonce), payload)
-        .map_err(|_| StrHideError::Password("Invalid password or corrupted metadata".into()))
+        .map_err(|_| StrHideError::CorruptedData("Metadata authentication failed".into()))
 }
 
 pub fn encrypt_stream_to_chunks<R: Read, W: Write>(
@@ -488,7 +488,7 @@ mod tests {
         let (_, wrong_meta_key) = derive_keys("WrongPassword", salt).unwrap();
         assert!(matches!(
             decrypt_metadata(&cipher, &wrong_meta_key, &base_nonce, &aad),
-            Err(StrHideError::Password(_))
+            Err(StrHideError::CorruptedData(_))
         ));
 
         // Tampered AAD
@@ -496,7 +496,7 @@ mod tests {
         tampered_aad[0] ^= 0xFF;
         assert!(matches!(
             decrypt_metadata(&cipher, &meta_key, &base_nonce, &tampered_aad),
-            Err(StrHideError::Password(_))
+            Err(StrHideError::CorruptedData(_))
         ));
     }
 
