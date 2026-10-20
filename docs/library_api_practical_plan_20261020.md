@@ -257,3 +257,17 @@ pub fn remove_carrier_bytes(carrier: &[u8], password: Option<&str>, profile: &Pr
 工作量粗估（不含测试设计讨论）：M1 主体集中在 `engine.rs` / `envelope.rs` / `crypto.rs`
 约 15 处签名与调用点；M3 是把 `write_carrier` 主体抽成 `write_core` 并换 I/O 类型；
 M2 是 `decode_compact` 尾部解析 + 写侧编码，改动面最小但**兼容性契约要单独守护**。
+
+---
+
+## 9. 内容域隐写（embed / extract）的参数化
+
+本文只覆盖结构域（UBE）。内容域隐写（`stego`）的参数化是独立议题，且**泄漏面更严重**
+（无密码模式用公开常量密钥、头部槽位完全确定）、难度与顺序也不同，见
+`docs/stego_keyed_parameters_plan_20261020.md`。两者的 `default_secret` 概念应对齐，
+建议统一收敛到同一个 `Profile`（UBE 字段 + `stego: StegoProfile` 子结构），避免出现两套"默认密钥"。
+
+> **进展（2026-10-20 20:21）**：内容域侧的私有默认密钥已落地，但形态是
+> `StegoOptions::default_secret`（P 类参数，`--stego-secret` / `stego_secret` / `STRHIDE_STEGO_SECRET`），
+> 尚未并入统一 `Profile`——因为 `Profile` 本身在 M1 里才存在。M1 落地时把该字段迁入
+> `StegoProfile.default_secret` 即可，语义与优先级保持一致（显式 password 压过 default_secret）。

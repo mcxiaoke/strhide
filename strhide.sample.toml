@@ -223,6 +223,33 @@
 # unescape = false
 
 
+# ------------------------------------------------------------------------------
+# 10. Stego Private Default Secret
+# ------------------------------------------------------------------------------
+# Private stand-in secret for content-adaptive steganography (`embed`/`extract`)
+# when NO password is supplied.
+#
+# Applies to: `embed`, `extract`
+# Type: string
+# Default: not set (None) — the public built-in constant is used
+# CLI override: --stego-secret <SECRET>
+# Env override: STRHIDE_STEGO_SECRET
+#
+# WHY THIS MATTERS:
+# With no password, the envelope key AND the header-slot permutation are both
+# derived from a constant that ships in the source tree. Anyone with the source
+# can therefore decode every no-password stego carrier. Setting this key
+# replaces that constant, so only builds configured with the same value can
+# read the payload.
+#
+# PARAMETER CLASS: read/write must agree. A mismatch is NOT detectable up
+# front — extraction just reports "NoHiddenData", exactly as if nothing had
+# been embedded. Keep this value together with your password, never with the
+# tuning knobs. Precedence: CLI flag > env var > this key.
+#
+# stego_secret = "example-private-stego-secret-change-me"
+
+
 # ==============================================================================
 # COMMON CONFIGURATION PROFILES (Examples)
 # ==============================================================================

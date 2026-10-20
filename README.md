@@ -19,7 +19,7 @@ Compatibility is one-directional: the Rust build can still read envelopes writte
 - **100% reversible** — an embedded SHA-256 of the original host guarantees the `read`/`restore` output matches the original bit-for-bit.
 - **Always encrypted on disk** — every envelope is Deflate-compressed and AES-256-GCM-encrypted before it touches the carrier. With no password a built-in key is used, so the carrier never leaks plaintext payload, host hash, or filenames; supplying a password adds real key separation (PBKDF2-HMAC-SHA256, 100,000 rounds + HKDF-SHA256, chunked GCM).
 - **Stealth mode** — with a password, envelope signatures and header fields are derived from the password, so there is nothing to find without it. Even in the default (non-stealth) mode there are no static ASCII magics: no `STRHIDE` / `STH!` strings, only high-entropy binary signatures (legacy magics still recognized for reading).
-- **Black-box steganalysis** — `scan` treats files as unknown and reports structural + statistical signs of hidden data from *any* tool, not just strhide.
+- **Black-box steganalysis** — `scan` treats files as unknown and reports structural + statistical signs of hidden data from *any* tool, not just strhide; JPEG carriers additionally go through a **calibrated DCT test** (`dct:calibration`), and a `clean` verdict is explicitly labelled as not being evidence of absence.
 - **Password hint** — an optional (≤ 1 KiB) hint is stored with the envelope and shown when the password is required.
 - **Safe by default** — integrity/signature rejection checks refuse to modify files that should not be touched (e.g. signed binaries); `write`, `restore`, and `embed` default to writing a new `<stem>-out.<ext>` file, leaving original carriers untouched; explicit `--in-place` modifies carriers directly (creating a `.bak` backup copy); `read`, `extract`, `write`, and `restore` refuse to overwrite existing output files unless `--overwrite` is explicitly specified; original file timestamps are preserved.
 - **TOML configuration** — `./strhide.toml` or `~/.strhide/config.toml` provides defaults; explicit CLI flags (`-c, --config`) always win (see [`strhide.sample.toml`](strhide.sample.toml) for an annotated template).
@@ -177,6 +177,21 @@ Unrecognized formats are **rejected**: strhide only modifies explicitly supporte
 | --- | --- | --- | --- |
 | Spatial domain | PNG (RGB/RGBA/Grayscale) | **HILL** (High-Low-Low) | LSB replacement in high-pass texture regions, cost map masked to `val & 0xFE` so embed/extract rank slots identically |
 | DCT frequency domain | JPEG / JPG (Baseline) | **UERD** | Quantization-weighted energy smoothing via `dct-io` lossless re-encoding |
+
+*UERD neighbourhood is approximate*: the coefficient stream carries no block geometry, so the "8-neighbourhood"
+is evaluated on a `ceil(sqrt(block_count))` grid instead of the real image grid. Both sides compute the same
+approximation, so embed/extract stay symmetric; only the cost model is slightly less faithful to the paper.
+
+*What the self-check can and cannot see*: `scan` is triage, not proof. JPEG carriers go through a **calibrated DCT
+test** (`dct:calibration`): the image is decoded, cropped 4 px so the 8x8 grid lands half a block off the embedding
+grid, re-quantised with the file's own table, and the even/odd pair imbalance is compared against that reference.
+Measured on a 15-carrier corpus with an incompressible payload: **0 false positives** on the clean carriers,
+**14/15 flagged at full capacity**, 10/15 at 50% load. The single miss is a quality-100 carrier (all quantization
+steps are 1), where calibration is not applicable by design: re-quantising decoded pixels is dominated by IDCT
+rounding at that scale. **A `clean` verdict still does not mean a carrier holds no hidden data** — a clean or low
+JPEG result carries an explicit note saying so.
+
+*Private dialect*: with no password, both the envelope key and the header-slot permutation are derived from a constant that lives in the source tree, so any strhide build can read a no-password carrier. Replace that constant with `--stego-secret <SECRET>` (or the `stego_secret` config key, or the `STRHIDE_STEGO_SECRET` environment variable, in that precedence order) to define a private dialect: embed and extract must use the same value, otherwise extraction reports `NoHiddenData`. Treat it as a read/write-must-agree parameter and keep it with the password, not with the tuning knobs.
 
 *Safety protections:* Animated PNGs (APNG `acTL`), palette-indexed PNGs (`PLTE`), interlaced PNGs (Adam7), and progressive JPEGs (SOF2) are safely rejected with actionable guidance.
 
