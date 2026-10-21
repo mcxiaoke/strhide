@@ -361,6 +361,150 @@ fn v3_payload_matrix_twenty_images() {
     assert!(done >= 30, "expected at least 30 roundtrips, got {done}");
 }
 
+/// The cover digest must be identical before and after embedding: it salts the
+/// KDF that locates the header, so any drift would make the carrier unreadable
+/// by its own writer.
+#[test]
+fn v3_cover_digest_is_stable_across_embedding() {
+    let cover = fs::read(fixture("carrier_photo.jpg")).expect("read carrier");
+    let password = "DigestStability#1";
+    let stego = embed_carrier(&cover, b"digest stability", &extract_opts(password)).expect("embed");
+
+    let before = dct_io::read_coefficients(&cover).expect("cover coefficients");
+    let after = dct_io::read_coefficients(&stego).expect("stego coefficients");
+    assert_eq!(
+        cover_digest(&DEFAULT_FORMAT, &before),
+        cover_digest(&DEFAULT_FORMAT, &after),
+        "the DC-based digest changed"
+    );
+    // And the digest really covers the DC values: changing one must move it.
+    let mut tampered = before.clone();
+    tampered.components[0].blocks[0][0] = tampered.components[0].blocks[0][0].wrapping_add(1);
+    assert_ne!(
+        cover_digest(&DEFAULT_FORMAT, &before),
+        cover_digest(&DEFAULT_FORMAT, &tampered)
+    );
+}
+
+/// `body_grid` must keep the grid's ascending order and drop exactly the header
+/// slots -- a golden check, because a hashed container here would silently
+/// reorder the sequence between two processes.
+#[test]
+fn v3_body_grid_is_an_ordered_set_difference() {
+    let grid = grid_indices(4, DEFAULT_FORMAT.grid_rule);
+    let hdr = vec![3u32, 0, 63, 100];
+    let body = strhide::stego::jpeg::v3_layout::body_grid(&grid, &hdr, 4);
+    assert_eq!(&body[..4], &[1, 2, 4, 5]);
+    assert_eq!(*body.last().unwrap(), grid[grid.len() - 1]);
+    assert_eq!(body.len(), grid.len() - hdr.len());
+    assert_eq!(
+        body,
+        strhide::stego::jpeg::v3_layout::body_grid(&grid, &hdr, 4)
+    );
+}
+
+/// A carrier whose Huffman table is over-optimised must either write the
+/// carrier or refuse with a diagnostic that names the missing symbol -- never a
+/// bare `CorruptEntropy`, and never a silently broken file.
+#[test]
+fn v3_sparse_huffman_table_never_fails_silently() {
+    // `carrier.jpg` is a synthetic cover whose luma AC table defines only the
+    // symbols its own coefficients needed (34 of 162).
+    let cover = fs::read(fixture("carrier.jpg")).expect("read carrier");
+    let symbols = strhide::stego::jpeg::dht::luma_ac_symbols(&cover).expect("parse DHT");
+    assert!(
+        !symbols.is_complete(),
+        "fixture must be a sparse-table carrier"
+    );
+
+    let password = "SparseTable#1";
+    let mut written = 0usize;
+    for size in [32usize, 256, 1024, 3000] {
+        let payload = incompressible(size, size as u64);
+        match embed_carrier(&cover, &payload, &extract_opts(password)) {
+            Ok(stego) => {
+                let recovered = extract_carrier(&stego, &extract_opts(password)).expect("extract");
+                assert_eq!(recovered, payload, "{size} B roundtrip");
+                written += 1;
+            }
+            Err(StrHideError::UnsupportedFormat(message)) => {
+                assert!(
+                    message.contains("Huffman table is over-optimised"),
+                    "{size} B: unexpected diagnostic: {message}"
+                );
+            }
+            Err(e) => panic!("{size} B: unexpected error: {e:?}"),
+        }
+    }
+    assert!(
+        written > 0,
+        "the fixture can carry at least a small payload"
+    );
+}
+
+/// The over-optimised-Huffman corpus gate: `std` tables take the fast path,
+/// `opt` tables take the symbol-checked path, and both round-trip at 4 KiB.
+///
+/// Ignored by default: the corpus lives in `temp/` (or `$STRHIDE_STEGO_CORPUS`).
+#[test]
+#[ignore]
+fn v3_huffman_corpus_roundtrips() {
+    let Some(std_dir) = corpus("jpeg_huffman/std") else {
+        return;
+    };
+    let Some(opt_dir) = corpus("jpeg_huffman/opt") else {
+        return;
+    };
+    let payload = incompressible(4096, 0xC0FFEE);
+    let password = "HuffmanCorpus#1";
+
+    let mut checked = 0usize;
+    let mut groups: Vec<(Vec<PathBuf>, Option<bool>)> = Vec::new();
+    for (dir, expect_complete) in [(std_dir, true), (opt_dir, false)] {
+        let mut files: Vec<PathBuf> = fs::read_dir(&dir)
+            .expect("read dir")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg")))
+            .collect();
+        files.sort();
+        assert!(!files.is_empty(), "no JPEGs in {}", dir.display());
+        groups.push((files, Some(expect_complete)));
+    }
+    // The real-world sparse-table samples: a 24 MP camera-and-ffmpeg export and
+    // a small web sample. Their table completeness differs, so it is not
+    // asserted -- only that they round-trip.
+    let extras: Vec<PathBuf> = ["testfiles/file-08.jpg", "real_samples/sample.jpg"]
+        .iter()
+        .filter_map(|rel| corpus(rel))
+        .collect();
+    if !extras.is_empty() {
+        groups.push((extras, None));
+    }
+
+    for (files, expect_complete) in groups {
+        for path in files {
+            let cover = fs::read(&path).expect("read");
+            let symbols = strhide::stego::jpeg::dht::luma_ac_symbols(&cover).expect("parse DHT");
+            if let Some(expected) = expect_complete {
+                assert_eq!(
+                    symbols.is_complete(),
+                    expected,
+                    "{}: table completeness",
+                    path.display()
+                );
+            }
+            let stego = embed_carrier(&cover, &payload, &extract_opts(password))
+                .unwrap_or_else(|e| panic!("{}: embed failed: {e}", path.display()));
+            let recovered = extract_carrier(&stego, &extract_opts(password))
+                .unwrap_or_else(|e| panic!("{}: extract failed: {e}", path.display()));
+            assert_eq!(recovered, payload, "{}", path.display());
+            checked += 1;
+        }
+    }
+    println!("{checked} over-optimised/standard table carriers round-tripped");
+}
+
 /// `BodyGrid = Grid \ HdrSlots`: the two sets must be disjoint and their union
 /// must be the whole grid, for every extension size.
 #[test]

@@ -101,7 +101,17 @@
 
 ---
 
-## 五、复现方式
+## 五、未做的部分（如实说明）
+
+计划 §Phase 3 第一条是"80 图 DCTR-8000：V3 vs 现有 V2 的特征漂移净下降"。本次**没有**跑 DCTR-8000，原因：
+
+1. 仓库内没有 DCTR-8000 实现（`scripts/stego_eval` 是另一套探测框架：结构/LSB 统计/残差/JPEG 域启发式 + 现成 DL 模型桥接），要实现 DCTR 需要新写 8000 维特征提取 + 训练/评估流水线，属于独立工程量；
+2. V2 路径已按计划整体删除，无法在同一代码基线上做"V3 vs V2"的对照；
+3. 已有的替代证据：① 项目自带标定检测器（§三）在有/无载荷两端的分离度；② `batch_stego` 的满容量自检（10/15）；③ 改动数/PSNR/体积三项客观指标（§一、§二）。
+
+结论：**抗检上限是否优于 V2 尚无直接测量证据**，只有"同一载荷下改动数更少、改动落在更便宜的槽位"这一间接论证。补测 DCTR（或直接用 SRNet 类模型做 AUC 对比）应作为后续独立任务，参考 `scripts/stego_eval` 的 `dl_detector` 桥接方式接一条批处理即可。
+
+## 六、复现方式
 
 ```bash
 cd rust
@@ -111,6 +121,12 @@ cargo run --release --example v3_eval -- 8 65536
 
 # 语料回归
 cargo test --release --test batch_stego -- --ignored --nocapture
+
+# Huffman 表语料门禁（std/opt 各 3 张 + file-08 + sample）
+cargo test --release --test test_lifecycle v3_huffman_corpus -- --ignored --nocapture
+
+# 20 图 × 4/16/64 KiB 载荷矩阵门禁
+cargo test --release --test test_lifecycle v3_payload_matrix -- --ignored --nocapture
 
 # 标定分布（临时脚本，可参照 src/analysis/calibration.rs 自行拼装）
 ```
