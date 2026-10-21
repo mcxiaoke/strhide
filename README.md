@@ -133,6 +133,32 @@ Payload sources on `write` are mutually exclusive too: `-d/--data`, `-t/--text`,
 
 > **Security note:** a password passed via `-p` may leak through shell history and the process list. Prefer `--password-file`, `STRHIDE_PASSWORD`, or the interactive prompt.
 
+## Rust library API
+
+The `strhide` crate can be used as a library. Every operation has file-path and in-memory (`&[u8]` -> `Vec<u8>`) entry points, and a `Profile` lets a deployment build a private dialect (custom default key / magics) that other builds cannot read.
+
+```rust
+use strhide::engine::{PayloadSource, WriteOptions, read_carrier_bytes, write_carrier_bytes};
+use strhide::params::{LocalParams, Profile};
+
+let (stego, _) = write_carrier_bytes(
+    &cover,
+    PayloadSource::Bytes(b"secret"),
+    &WriteOptions { password: Some("pw"), ..WriteOptions::default() },
+    &LocalParams::default(),
+    &Profile::default(),
+)?;
+let read = read_carrier_bytes(&stego, Some("pw"), &Profile::default())?;
+assert_eq!(read.data, b"secret");
+```
+
+Library documentation:
+
+- [`docs/api/ARCHITECTURE.md`](docs/api/ARCHITECTURE.md) — module topology, public API surface, data flow, extension points;
+- [`docs/api/WIRE_SPEC.md`](docs/api/WIRE_SPEC.md) — UBE v2.2 binary wire format, key derivation, compatibility matrix.
+
+Runnable examples: `cargo run --example in_memory`, `cargo run --example private_profile`, `cargo run --example codec_bench`.
+
 ## Python API
 
 > **Deprecation notice (2026-10-18):** the pure-Python implementation is frozen at **0.2.0** and will no longer receive new features. Use the prebuilt Rust binary for the full feature set. In particular, Python does **not** implement the `pe_slack` / `pe_codebits` PE strategies, and it predates Rust's default fully-encrypted envelope (built-in-key mode), so it cannot read carriers written by current Rust builds. It remains available for existing users, and it can still read 0.2.0-era carriers — but current Rust builds cannot, because the pre-v2 read compatibility layer was removed on 2026-10-21.
