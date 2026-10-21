@@ -287,6 +287,30 @@ struct EmbedContext<'a> {
     domain: Option<&'a str>,
 }
 
+/// Number of salt values tried when a Huffman-limited block cannot be encoded.
+///
+/// Only the *missing symbol* failure is retried, and retrying is invisible to the
+/// extractor: the salt and nonce live in the (AAD-protected) superblock and are
+/// read back from it, so a new salt is simply a different valid carrier. The
+/// trellis seed and the slot set are re-derived from that salt, which is what
+/// changes the outcome.
+const EMBED_ATTEMPTS: usize = 3;
+
+/// A failed attempt: the error, plus whether a fresh salt could change it.
+struct Attempt {
+    error: StrHideError,
+    retryable: bool,
+}
+
+impl From<StrHideError> for Attempt {
+    fn from(error: StrHideError) -> Self {
+        Self {
+            error,
+            retryable: false,
+        }
+    }
+}
+
 /// Embed a payload into a JPEG carrier with V3 ternary STC.
 ///
 /// # Over-optimised Huffman tables
@@ -300,9 +324,10 @@ struct EmbedContext<'a> {
 ///    closed, and cross-zero moves are priced at the wet cost so the trellis only
 ///    uses them when a whole group window has nothing else;
 /// 2. [`first_missing_symbol`](dht::first_missing_symbol) replays every touched
-///    block after the fact. If that finds a symbol the table lacks, the embed
-///    fails with a diagnostic that names the symbol and says what to do, instead
-///    of letting `dct-io` raise a bare `CorruptEntropy`.
+///    block after the fact. A failure there is retried with a fresh salt (which
+///    re-draws the slot order and the header bits); if every attempt fails, the
+///    embed reports the symbol and says what to do, instead of letting `dct-io`
+///    raise a bare `CorruptEntropy`.
 #[allow(clippy::too_many_arguments)]
 pub fn embed_jpeg(
     carrier_bytes: &[u8],
@@ -356,7 +381,19 @@ pub fn embed_jpeg(
         password: password.unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
         domain,
     };
-    embed_once(carrier_bytes, &coeffs, payload, &ctx)
+    let mut last_error = None;
+    for _ in 0..EMBED_ATTEMPTS {
+        match embed_once(carrier_bytes, &coeffs, payload, &ctx) {
+            Ok(bytes) => return Ok(bytes),
+            Err(attempt) => {
+                last_error = Some(attempt.error);
+                if !attempt.retryable {
+                    break;
+                }
+            }
+        }
+    }
+    Err(last_error.expect("embed_jpeg always runs at least one attempt"))
 }
 
 /// One full embedding pass over `coeffs` (which are re-serialised against
@@ -366,7 +403,7 @@ fn embed_once(
     coeffs: &JpegCoefficients,
     payload: &[u8],
     ctx: &EmbedContext<'_>,
-) -> Result<Vec<u8>, StrHideError> {
+) -> Result<Vec<u8>, Attempt> {
     let mut work = coeffs.clone();
     let fmt = ctx.fmt;
     let params = ctx.params;
@@ -379,15 +416,15 @@ fn embed_once(
     let extension_area = encode_extension(&params.extensions)?;
     let ext_bytes = extension_area.len();
     if ext_bytes > u16::MAX as usize {
-        return Err(StrHideError::General(format!(
+        return Err(Attempt::from(StrHideError::General(format!(
             "Extension area of {ext_bytes} bytes exceeds the 16-bit header field"
-        )));
+        ))));
     }
     let hdr_n = fmt.header_slots(ext_bytes);
     if n_total <= hdr_n {
-        return Err(StrHideError::General(format!(
+        return Err(Attempt::from(StrHideError::General(format!(
             "Capacity exceeded: header needs {hdr_n} slots, the carrier grid has {n_total}"
-        )));
+        ))));
     }
 
     // Envelope: the plaintext length fixes the header field, which in turn is
@@ -396,9 +433,9 @@ fn embed_once(
     let ciphertext_len = plaintext.len() + suite.tag_len();
     let envelope_len = HEADER_OVERHEAD + ciphertext_len;
     if envelope_len as u64 > ENVELOPE_LEN_MAX as u64 {
-        return Err(StrHideError::General(format!(
+        return Err(Attempt::from(StrHideError::General(format!(
             "Envelope of {envelope_len} bytes exceeds the 26-bit header length field"
-        )));
+        ))));
     }
     let bits = ciphertext_len * 8;
 
@@ -416,14 +453,14 @@ fn embed_once(
         let max = enforced_payload_limit(n_total, body_grid.len(), params);
         if payload.len() > max {
             let bpp = (payload.len() * 8) as f64 / (cover.block_count * 64) as f64;
-            return Err(StrHideError::General(format!(
+            return Err(Attempt::from(StrHideError::General(format!(
                 "Payload ({} bytes, bpp {:.4}) exceeds safety threshold ({} bytes, bpp <= {:.2}) for tier '{}'",
                 payload.len(),
                 bpp,
                 max,
                 params.safety_level.bpp_limit(),
                 params.safety_level.as_str(),
-            )));
+            ))));
         }
     }
 
@@ -504,10 +541,15 @@ fn embed_once(
     if let Some(table) = ctx.table
         && let Some(symbol) = first_missing_symbol(&work, &touched, table)
     {
-        return Err(dht::missing_symbol_error(symbol));
+        return Err(Attempt {
+            error: dht::missing_symbol_error(symbol),
+            retryable: true,
+        });
     }
 
-    dct_io::write_coefficients(carrier_bytes, &work).map_err(map_dct_error)
+    dct_io::write_coefficients(carrier_bytes, &work)
+        .map_err(map_dct_error)
+        .map_err(Into::into)
 }
 
 /// First missing symbol among the touched blocks, if any.
@@ -648,11 +690,8 @@ pub fn extract_jpeg(
         }
         hdr_slots.truncate(hdr_n);
 
-        // Extension TLV area. An unknown critical record is *not* a "no payload
-        // here" condition: the header authenticated, this build is just older
-        // than the carrier.
-        if ext_bytes > 0 {
-            let ext_slots = &hdr_slots[sb_n..hdr_n];
+        let ext_slots = &hdr_slots[sb_n..hdr_n];
+        let extension_area = if ext_bytes > 0 {
             let Some(area) = read_bits(
                 &coeffs,
                 ext_slots,
@@ -664,17 +703,10 @@ pub fn extract_jpeg(
             ) else {
                 continue;
             };
-            let Ok(records) = parse_extension(&area) else {
-                continue;
-            };
-            for (type_id, _) in &records {
-                if type_id & TLV_CRITICAL != 0 {
-                    return Err(StrHideError::UnsupportedVersion(format!(
-                        "Carrier uses critical extension type {type_id:#04x}, which this build does not implement"
-                    )));
-                }
-            }
-        }
+            area
+        } else {
+            Vec::new()
+        };
 
         let ciphertext_len = superblock.ciphertext_len();
         let bits = ciphertext_len * 8;
@@ -704,15 +736,33 @@ pub fn extract_jpeg(
         }
 
         let aad = superblock.encode();
-        match unpack_envelope_parts(suite, &enc_key, &superblock.nonce, &aad, &ciphertext) {
-            Ok(payload) => return Ok(payload),
-            Err(StrHideError::CorruptedData(message)) => {
-                // The AEAD passed, so this really is our carrier; a bad field
-                // inside the plaintext is a genuine defect, not a wrong guess.
-                return Err(StrHideError::CorruptedData(message));
+        let payload =
+            match unpack_envelope_parts(suite, &enc_key, &superblock.nonce, &aad, &ciphertext) {
+                Ok(payload) => payload,
+                Err(StrHideError::CorruptedData(message)) => {
+                    // The AEAD passed, so this really is our carrier; a bad
+                    // field inside the plaintext is a genuine defect, not a
+                    // wrong guess.
+                    return Err(StrHideError::CorruptedData(message));
+                }
+                Err(_) => continue,
+            };
+
+        // The payload decrypted, so this carrier is ours with certainty. Only
+        // now is it safe to report precise problems with the extension area
+        // instead of folding them into "no payload here" -- doing it earlier
+        // would turn structural checks into a cheap password oracle.
+        if ext_bytes > 0 {
+            let records = parse_extension(&extension_area)?;
+            for (type_id, _) in &records {
+                if type_id & TLV_CRITICAL != 0 {
+                    return Err(StrHideError::UnsupportedVersion(format!(
+                        "Carrier uses critical extension type {type_id:#04x}, which this build does not implement"
+                    )));
+                }
             }
-            Err(_) => continue,
         }
+        return Ok(payload);
     }
 
     Err(no_hidden())
