@@ -280,6 +280,8 @@ pub struct StegoOptions {
     pub algorithm: Option<String>,
     /// Password for cryptographic key derivation and PRNG scattering.
     pub password: Option<String>,
+    /// Custom domain tag for isolating the HKDF key derivation domain.
+    pub stego_domain: Option<String>,
     /// Fine-tuning parameters for spatial domain algorithms.
     pub spatial_params: SpatialParams,
     /// Fine-tuning parameters for JPEG DCT domain algorithms.
@@ -305,6 +307,16 @@ impl StegoOptions {
             .as_deref()
             .filter(|s| !s.is_empty())
             .or_else(|| profile.stego_secret())
+    }
+
+    /// Custom domain tag used for isolating the HKDF key derivation domain:
+    /// the explicit `stego_domain` wins, the profile's `stego_domain` is the fallback,
+    /// `None` means official default derivation.
+    pub fn domain<'a>(&'a self, profile: &'a Profile) -> Option<&'a str> {
+        self.stego_domain
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| profile.stego_domain())
     }
 }
 

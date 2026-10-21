@@ -134,6 +134,7 @@ fn eval_png(png_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::er
                     &carrier_bytes,
                     &payload,
                     Some(TEST_PASSWORD),
+                    None,
                     &HillCostModel,
                     &params,
                 );
@@ -168,6 +169,7 @@ fn eval_png(png_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::er
                         let ext_res = extract_spatial(
                             &stego_bytes,
                             Some(TEST_PASSWORD),
+                            None,
                             &HillCostModel,
                             &SpatialParams::default(),
                         );
@@ -316,6 +318,7 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
                     &carrier_bytes,
                     &payload,
                     Some(TEST_PASSWORD),
+                    None,
                     &UerdCostModel,
                     &params,
                 );
@@ -348,6 +351,7 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
                         let ext_res = extract_jpeg(
                             &stego_bytes,
                             Some(TEST_PASSWORD),
+                            None,
                             &UerdCostModel,
                             &JpegParams::default(),
                         );

@@ -41,6 +41,7 @@ const KNOWN_KEYS: &[&str] = &[
     "backup",
     "unescape",
     "stego_secret",
+    "stego_domain",
     "lang",
 ];
 
@@ -63,6 +64,8 @@ pub struct FileConfig {
     /// public built-in constant when no user password is given. Read/write must
     /// agree, so this belongs with the password, not with the tuning knobs.
     pub stego_secret: Option<String>,
+    /// Custom stego domain tag for isolating the HKDF key derivation domain.
+    pub stego_domain: Option<String>,
 }
 
 /// Candidate paths in lookup order, excluding an explicit `--config` path.
@@ -154,6 +157,7 @@ mod tests {
             strategy = "pe_slack"
             password = "test_injected_pwd"
             stego_secret = "test_secret"
+            stego_domain = "org.acme.domain"
             backup = true
         "#;
         let cfg = parse_config(toml_str, Path::new("strhide.toml"), true).unwrap();
@@ -161,6 +165,7 @@ mod tests {
         assert_eq!(cfg.backup, Some(true));
         assert_eq!(cfg.password.as_deref(), Some("test_injected_pwd"));
         assert_eq!(cfg.stego_secret.as_deref(), Some("test_secret"));
+        assert_eq!(cfg.stego_domain.as_deref(), Some("org.acme.domain"));
     }
 
     #[test]

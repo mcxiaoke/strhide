@@ -56,6 +56,7 @@ pub fn embed_carrier_with_profile(
     // secret is indistinguishable from a user password downstream, which is
     // what keeps the two engine families byte-compatible.
     let secret = options.secret(profile);
+    let domain = options.domain(profile);
 
     if carrier_bytes.len() >= 2 && &carrier_bytes[..2] == b"\xFF\xD8" {
         // JPEG format
@@ -70,6 +71,7 @@ pub fn embed_carrier_with_profile(
             carrier_bytes,
             payload,
             secret,
+            domain,
             &*model,
             &options.jpeg_params,
         )
@@ -87,6 +89,7 @@ pub fn embed_carrier_with_profile(
             carrier_bytes,
             payload,
             secret,
+            domain,
             &*model,
             &options.spatial_params,
         )
@@ -121,6 +124,7 @@ pub fn extract_carrier_with_profile(
     options.jpeg_params.validate()?;
 
     let secret = options.secret(profile);
+    let domain = options.domain(profile);
 
     if carrier_bytes.len() >= 2 && &carrier_bytes[..2] == b"\xFF\xD8" {
         // JPEG format
@@ -131,7 +135,7 @@ pub fn extract_carrier_with_profile(
                     options.algorithm
                 ))
             })?;
-        jpeg::extract_jpeg(carrier_bytes, secret, &*model, &options.jpeg_params)
+        jpeg::extract_jpeg(carrier_bytes, secret, domain, &*model, &options.jpeg_params)
     } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
         // PNG format
         let model = CostModelRegistry::get_spatial_model(options.algorithm.as_deref()).ok_or_else(
@@ -142,7 +146,13 @@ pub fn extract_carrier_with_profile(
                 ))
             },
         )?;
-        spatial::extract_spatial(carrier_bytes, secret, &*model, &options.spatial_params)
+        spatial::extract_spatial(
+            carrier_bytes,
+            secret,
+            domain,
+            &*model,
+            &options.spatial_params,
+        )
     } else {
         Err(StrHideError::UnsupportedFormat(
             "Content-adaptive steganography requires a PNG or JPEG image carrier".into(),

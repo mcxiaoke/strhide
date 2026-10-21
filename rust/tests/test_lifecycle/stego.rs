@@ -137,7 +137,7 @@ fn header_slots_of(png: &[u8], password: Option<&str>) -> Vec<usize> {
     let mut candidates = eligible[..allowed].to_vec();
     strhide::stego::prng::permute_indices(
         &mut candidates,
-        &strhide::stego::envelope::derive_header_perm_seed(password),
+        &strhide::stego::envelope::derive_header_perm_seed(password, None),
     );
     candidates[..strhide::stego::header::V2_TOTAL_HEADER_SLOTS].to_vec()
 }
@@ -1096,7 +1096,7 @@ fn test_stego_v1_legacy_compatibility_fallback() {
     let allowed = ((eligible.len() as f64) * (1.0 - params.exclusion_percentile)) as usize;
     let candidates = &eligible[..allowed];
 
-    let header_seed = strhide::stego::envelope::derive_header_perm_seed(None);
+    let header_seed = strhide::stego::envelope::derive_header_perm_seed(None, None);
     let mut permuted = candidates.to_vec();
     strhide::stego::prng::permute_indices(&mut permuted, &header_seed);
     let header_slots = &permuted[..256];
@@ -1115,7 +1115,8 @@ fn test_stego_v1_legacy_compatibility_fallback() {
         .collect();
 
     let secret = b"hello v1 legacy stego compatibility";
-    let (envelope, perm_seed) = strhide::stego::envelope::pack_envelope_ext(secret, None).unwrap();
+    let (envelope, perm_seed) =
+        strhide::stego::envelope::pack_envelope_ext(secret, None, None).unwrap();
     let total_len = envelope.len() as u32;
 
     // v1 header word: codec_id = 1 (STC u=1), stc_h = 8 (NOT 15!)
@@ -1180,5 +1181,76 @@ fn test_stego_v1_legacy_compatibility_fallback() {
     assert_eq!(
         extracted, secret,
         "v1 carrier must extract losslessly via v1 fallback"
+    );
+}
+
+#[test]
+fn stego_domain_isolation_lifecycle() {
+    let png = generate_texture_png(128, 128);
+    let payload = b"cross-domain-isolation-integration-test";
+
+    // 1. Profile domain isolation
+    let prof_a = Profile::default().with_stego_domain("org.enterprise.vault-a");
+    let prof_b = Profile::default().with_stego_domain("org.enterprise.vault-b");
+    let prof_default = Profile::default();
+
+    let opts = StegoOptions::default();
+    let stego_a = embed_carrier_with_profile(&png, payload, &opts, &prof_a)
+        .expect("embed with profile domain-a");
+
+    // Matching profile extracts losslessly
+    let rec_a = extract_carrier_with_profile(&stego_a, &opts, &prof_a)
+        .expect("extract with matching profile domain-a");
+    assert_eq!(rec_a, payload);
+
+    // Mismatched profile (domain-b) fails with NoHiddenData
+    let err_b = extract_carrier_with_profile(&stego_a, &opts, &prof_b);
+    assert!(
+        matches!(err_b, Err(strhide::errors::StrHideError::NoHiddenData(_))),
+        "mismatched profile domain must fail"
+    );
+
+    // Default profile (no domain) fails with NoHiddenData
+    let err_def = extract_carrier_with_profile(&stego_a, &opts, &prof_default);
+    assert!(
+        matches!(err_def, Err(strhide::errors::StrHideError::NoHiddenData(_))),
+        "default profile on domain-isolated carrier must fail"
+    );
+
+    // 2. Options stego_domain overrides profile stego_domain
+    let opts_override = StegoOptions {
+        stego_domain: Some("org.enterprise.vault-a".into()),
+        ..Default::default()
+    };
+    // Even if prof_b is passed, opts_override wins
+    let rec_override = extract_carrier_with_profile(&stego_a, &opts_override, &prof_b)
+        .expect("options domain must override profile domain");
+    assert_eq!(rec_override, payload);
+
+    // 3. Password + domain isolation
+    let opts_pwd_a = StegoOptions {
+        password: Some("SharedPassword123".into()),
+        stego_domain: Some("org.enterprise.vault-a".into()),
+        ..Default::default()
+    };
+    let stego_pwd_a =
+        embed_carrier(&png, payload, &opts_pwd_a).expect("embed with password + domain");
+
+    let rec_pwd_a =
+        extract_carrier(&stego_pwd_a, &opts_pwd_a).expect("extract with same password + domain");
+    assert_eq!(rec_pwd_a, payload);
+
+    let opts_pwd_b = StegoOptions {
+        password: Some("SharedPassword123".into()),
+        stego_domain: Some("org.enterprise.vault-b".into()),
+        ..Default::default()
+    };
+    let err_pwd_b = extract_carrier(&stego_pwd_a, &opts_pwd_b);
+    assert!(
+        matches!(
+            err_pwd_b,
+            Err(strhide::errors::StrHideError::NoHiddenData(_))
+        ),
+        "same password with mismatched domain must fail"
     );
 }

@@ -338,6 +338,13 @@ pub struct EmbedArgs {
     pub stego_secret: Option<String>,
 
     #[arg(
+        long = "stego-domain",
+        value_name = "DOMAIN",
+        help = "Custom domain tag to isolate the HKDF key derivation from the public dialect. Extract must use the same domain."
+    )]
+    pub stego_domain: Option<String>,
+
+    #[arg(
         long = "unescape",
         help = "Decode C-style escape sequences (\\n, \\r, \\t, ...) in the -t/--text payload before embedding"
     )]
@@ -454,6 +461,13 @@ pub struct ExtractArgs {
         help = "Private stand-in secret for no-password stego envelopes; must equal the value used at embed time."
     )]
     pub stego_secret: Option<String>,
+
+    #[arg(
+        long = "stego-domain",
+        value_name = "DOMAIN",
+        help = "Custom domain tag to isolate the HKDF key derivation from the public dialect; must equal the value used at embed time."
+    )]
+    pub stego_domain: Option<String>,
 
     // Fine-tuning parameters matching custom embedding parameters
     #[arg(long = "exclusion-rate", value_name = "FLOAT")]
@@ -709,17 +723,39 @@ fn resolve_stego_secret(explicit: Option<&str>, cfg: &FileConfig) -> Option<Stri
     cfg.stego_secret.as_ref().filter(|s| !s.is_empty()).cloned()
 }
 
-/// Package the resolved private stego secret as a stego-only
+/// Resolve the custom stego domain tag.
+///
+/// Precedence mirrors `resolve_stego_secret`: CLI flag, then
+/// `STRHIDE_STEGO_DOMAIN`, then the config file. An empty value means "not configured".
+fn resolve_stego_domain(explicit: Option<&str>, cfg: &FileConfig) -> Option<String> {
+    if let Some(d) = explicit
+        && !d.is_empty()
+    {
+        return Some(d.to_string());
+    }
+    if let Ok(env_domain) = std::env::var("STRHIDE_STEGO_DOMAIN")
+        && !env_domain.is_empty()
+    {
+        return Some(env_domain);
+    }
+    cfg.stego_domain.as_ref().filter(|d| !d.is_empty()).cloned()
+}
+
+/// Package the resolved private stego secret and domain as a stego-only
 /// [`Profile`](crate::params::Profile).
 ///
 /// Only the content-domain half is populated: the CLI does not expose the
 /// structure-domain dialect knobs yet, so those stay at their official
 /// defaults (an all-default profile is byte-compatible with every release).
-fn stego_profile(secret: Option<String>) -> crate::params::Profile {
-    match secret {
-        Some(secret) => crate::params::Profile::default().with_stego_secret(secret),
-        None => crate::params::Profile::default(),
+fn stego_profile(secret: Option<String>, domain: Option<String>) -> crate::params::Profile {
+    let mut profile = crate::params::Profile::default();
+    if let Some(secret) = secret {
+        profile = profile.with_stego_secret(secret);
     }
+    if let Some(domain) = domain {
+        profile = profile.with_stego_domain(domain);
+    }
+    profile
 }
 
 fn should_print_banner(cli: &Cli) -> bool {
@@ -1972,7 +2008,8 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         true,
     )?;
     let stego_secret = resolve_stego_secret(args.stego_secret.as_deref(), cfg);
-    let profile = stego_profile(stego_secret);
+    let stego_domain = resolve_stego_domain(args.stego_domain.as_deref(), cfg);
+    let profile = stego_profile(stego_secret, stego_domain);
 
     // 2. Resolve payload bytes
     let payload_bytes = if args.payload.stdin {
@@ -2120,7 +2157,8 @@ fn handle_extract(args: ExtractArgs, cfg: &FileConfig, quiet: bool) -> Result<()
     let carrier_bytes = std::fs::read(&args.carrier)?;
 
     let stego_secret = resolve_stego_secret(args.stego_secret.as_deref(), cfg);
-    let profile = stego_profile(stego_secret);
+    let stego_domain = resolve_stego_domain(args.stego_domain.as_deref(), cfg);
+    let profile = stego_profile(stego_secret, stego_domain);
     let mut options = crate::stego::StegoOptions {
         algorithm: args.algorithm,
         password,

@@ -624,3 +624,141 @@ fn stego_secret_precedence_flag_env_config() {
     assert_eq!(code(&flag_ok), 0, "stderr: {}", stderr(&flag_ok));
     assert_eq!(stdout(&flag_ok), payload);
 }
+
+/// A carrier embedded with an explicit --stego-domain tag can only be extracted
+/// with the exact same domain tag. Default domain and other domains must fail.
+#[test]
+fn embed_extract_stego_domain_isolation() {
+    let dir = scratch("unify_stego_domain");
+    seed_stego(&dir, &["carrier.png"]);
+    let payload = "domain isolated payload 2026";
+    fs::write(dir.join("data.txt"), payload).unwrap();
+
+    let embed = run(
+        &dir,
+        &[
+            "embed",
+            "carrier.png",
+            "-d",
+            "data.txt",
+            "--stego-domain",
+            "org.vault.security",
+            "--in-place",
+            "--no-backup",
+        ],
+    );
+    assert_eq!(code(&embed), 0, "stderr: {}", stderr(&embed));
+
+    // The same domain tag reads the payload back.
+    let ok = run(
+        &dir,
+        &[
+            "extract",
+            "carrier.png",
+            "--stdout",
+            "--stego-domain",
+            "org.vault.security",
+        ],
+    );
+    assert_eq!(code(&ok), 0, "stderr: {}", stderr(&ok));
+    assert_eq!(stdout(&ok), payload);
+
+    // Default domain (no --stego-domain flag) must fail.
+    let default_dom = run(&dir, &["extract", "carrier.png", "--stdout"]);
+    assert_eq!(code(&default_dom), 1);
+    assert_eq!(stdout(&default_dom), "");
+
+    // Different domain tag must fail.
+    let other_dom = run(
+        &dir,
+        &[
+            "extract",
+            "carrier.png",
+            "--stdout",
+            "--stego-domain",
+            "org.other.security",
+        ],
+    );
+    assert_eq!(code(&other_dom), 1);
+    assert_eq!(stdout(&other_dom), "");
+}
+
+/// Precedence for the stego domain: CLI flag > `STRHIDE_STEGO_DOMAIN` > config.
+#[test]
+fn stego_domain_precedence_flag_env_config() {
+    let dir = scratch("unify_stego_domain_precedence");
+    seed_stego(&dir, &["carrier.png"]);
+    let payload = "config domain payload";
+    fs::write(dir.join("data.txt"), payload).unwrap();
+    fs::write(
+        dir.join("strhide.toml"),
+        "stego_domain = \"config-domain-2026\"\n",
+    )
+    .unwrap();
+
+    let embed = run(
+        &dir,
+        &[
+            "embed",
+            "carrier.png",
+            "-d",
+            "data.txt",
+            "--in-place",
+            "--no-backup",
+        ],
+    );
+    assert_eq!(code(&embed), 0, "stderr: {}", stderr(&embed));
+
+    // Config value decrypts.
+    let cfg_ok = run(&dir, &["extract", "carrier.png", "--stdout"]);
+    assert_eq!(code(&cfg_ok), 0, "stderr: {}", stderr(&cfg_ok));
+    assert_eq!(stdout(&cfg_ok), payload);
+
+    let run_env = |domain: Option<&str>| -> Output {
+        let mut cmd = base_cmd();
+        cmd.args(["extract", "carrier.png", "--stdout"])
+            .current_dir(&dir)
+            .env("USERPROFILE", &dir)
+            .env("HOME", &dir)
+            .env("STRHIDE_PASSWORD", "");
+        match domain {
+            Some(d) => cmd.env("STRHIDE_STEGO_DOMAIN", d),
+            None => cmd.env_remove("STRHIDE_STEGO_DOMAIN"),
+        };
+        cmd.output().expect("failed to run strhide binary")
+    };
+
+    // Env mirrors the config value -> still readable.
+    let env_ok = run_env(Some("config-domain-2026"));
+    assert_eq!(code(&env_ok), 0, "stderr: {}", stderr(&env_ok));
+
+    // Env overrides the config file -> unreadable.
+    let env_bad = run_env(Some("env-domain-2026"));
+    assert_eq!(code(&env_bad), 1, "env must override the config file");
+
+    // The CLI flag overrides both.
+    let flag_bad = run(
+        &dir,
+        &[
+            "extract",
+            "carrier.png",
+            "--stdout",
+            "--stego-domain",
+            "flag-domain-2026",
+        ],
+    );
+    assert_eq!(code(&flag_bad), 1, "flag must override env and config");
+
+    let flag_ok = run(
+        &dir,
+        &[
+            "extract",
+            "carrier.png",
+            "--stdout",
+            "--stego-domain",
+            "config-domain-2026",
+        ],
+    );
+    assert_eq!(code(&flag_ok), 0, "stderr: {}", stderr(&flag_ok));
+    assert_eq!(stdout(&flag_ok), payload);
+}

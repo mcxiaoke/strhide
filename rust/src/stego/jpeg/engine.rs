@@ -68,6 +68,7 @@ fn plan_slots(
     cost_model: &dyn JpegCostModel,
     params: &JpegParams,
     password: Option<&str>,
+    domain: Option<&str>,
 ) -> Result<(SlotPlan, Vec<f64>), (StrHideError, bool)> {
     // The bool in the error tuple marks "no usable layout" (reported as
     // `NoHiddenData` on extract, as a hard error on embed).
@@ -123,7 +124,7 @@ fn plan_slots(
 
     // Header slots: keyed permutation of the whole candidate set, so their
     // position is not a public "top-cheapest" fingerprint.
-    let header_seed = crate::stego::envelope::derive_header_perm_seed(password);
+    let header_seed = crate::stego::envelope::derive_header_perm_seed(password, domain);
     let mut permuted_candidates = candidate_slots.to_vec();
     permute_indices(&mut permuted_candidates, &header_seed);
 
@@ -142,6 +143,7 @@ pub fn embed_jpeg(
     carrier_bytes: &[u8],
     payload: &[u8],
     password: Option<&str>,
+    domain: Option<&str>,
     cost_model: &dyn JpegCostModel,
     params: &JpegParams,
 ) -> Result<Vec<u8>, StrHideError> {
@@ -152,8 +154,8 @@ pub fn embed_jpeg(
         ));
     }
 
-    let (plan, costs) =
-        plan_slots(carrier_bytes, &coeffs, cost_model, params, password).map_err(|(e, _)| e)?;
+    let (plan, costs) = plan_slots(carrier_bytes, &coeffs, cost_model, params, password, domain)
+        .map_err(|(e, _)| e)?;
 
     if plan.permuted_candidates.len() < V2_TOTAL_HEADER_SLOTS {
         return Err(StrHideError::General(format!(
@@ -179,7 +181,7 @@ pub fn embed_jpeg(
         .collect();
 
     // Pack payload into micro-envelope.
-    let (envelope, perm_seed) = pack_envelope_ext(payload, password)?;
+    let (envelope, perm_seed) = pack_envelope_ext(payload, password, domain)?;
     let total_len = envelope.len() as u32;
     if total_len > HEADER_LEN_MAX {
         return Err(StrHideError::General(format!(
@@ -342,6 +344,7 @@ fn embed_dct_lsb(coeff: &mut i16, target_bit: u8) {
 pub fn extract_jpeg(
     carrier_bytes: &[u8],
     password: Option<&str>,
+    domain: Option<&str>,
     cost_model: &dyn JpegCostModel,
     params: &JpegParams,
 ) -> Result<Vec<u8>, StrHideError> {
@@ -352,11 +355,8 @@ pub fn extract_jpeg(
 
     let no_hidden = || StrHideError::NoHiddenData("No valid payload found".into());
 
-    let (plan, _costs) = plan_slots(carrier_bytes, &coeffs, cost_model, params, password).map_err(
-        |(e, is_layout)| {
-            if is_layout { no_hidden() } else { e }
-        },
-    )?;
+    let (plan, _costs) = plan_slots(carrier_bytes, &coeffs, cost_model, params, password, domain)
+        .map_err(|(e, is_layout)| if is_layout { no_hidden() } else { e })?;
 
     // Phase 1: 32-byte header.
     let header_slots = &plan.permuted_candidates[..256];
@@ -450,6 +450,7 @@ pub fn extract_jpeg(
     let (key_bytes, perm_seed) = crate::stego::envelope::derive_keys(
         password.unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
         salt,
+        domain,
     );
     let mut body_slots = body_candidates[..needed_body_slots].to_vec();
     permute_indices(&mut body_slots, &perm_seed);
@@ -496,7 +497,7 @@ pub fn probe_jpeg_capacity(
     // The header subset is keyed, but the *count* is not: capacity is the same
     // for every password. Pass `None` so the probe never needs one.
     let (plan, _costs) =
-        plan_slots(carrier_bytes, &coeffs, cost_model, params, None).map_err(|(e, _)| e)?;
+        plan_slots(carrier_bytes, &coeffs, cost_model, params, None, None).map_err(|(e, _)| e)?;
 
     let available_body_slots = plan
         .candidate_slots

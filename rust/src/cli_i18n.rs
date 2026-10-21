@@ -92,6 +92,7 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         // Stego options shared across embed / extract
         (_, "algorithm") => Msg::HelpStegoAlgorithm,
         (_, "stego-secret") => Msg::HelpEmbedStegoSecret,
+        (_, "stego-domain") => Msg::HelpEmbedStegoDomain,
         (_, "exclusion-rate") => Msg::HelpEmbedExclusionRate,
         (_, "neighbor-weight") => Msg::HelpStegoNeighborWeight,
         (_, "min-abs-coeff") => Msg::HelpStegoMinAbsCoeff,

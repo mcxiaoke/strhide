@@ -82,7 +82,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..SpatialParams::default()
         };
         let started = Instant::now();
-        let stego = match embed_spatial(&carrier, &payload, password, &HillCostModel, &params) {
+        let stego = match embed_spatial(&carrier, &payload, password, None, &HillCostModel, &params)
+        {
             Ok(s) => s,
             Err(e) => {
                 println!("{codec:<10} {u:>3}   -- {e}");
@@ -104,8 +105,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let recovered =
-            extract_spatial(&stego, password, &HillCostModel, &SpatialParams::default())?;
+        let recovered = extract_spatial(
+            &stego,
+            password,
+            None,
+            &HillCostModel,
+            &SpatialParams::default(),
+        )?;
         let ok = recovered == payload;
         let bits = payload.len() * 8;
 

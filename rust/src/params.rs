@@ -232,6 +232,8 @@ pub struct StegoProfile {
     /// Both the AEAD key and the header-slot permutation are derived from it.
     /// An explicit password always wins over this value.
     pub default_secret: Option<Cow<'static, str>>,
+    /// Custom stego domain tag for isolating the HKDF key derivation domain.
+    pub stego_domain: Option<Cow<'static, str>>,
 }
 
 impl StegoProfile {
@@ -243,6 +245,12 @@ impl StegoProfile {
         self
     }
 
+    /// Set [`stego_domain`](Self::stego_domain).
+    pub fn with_stego_domain<S: Into<Cow<'static, str>>>(mut self, domain: S) -> Self {
+        self.stego_domain = Some(domain.into());
+        self
+    }
+
     /// Private secret, or `None` when the official public constant must be
     /// used. An empty string counts as "not configured", so a blank config
     /// value cannot silently *disable* confidentiality by looking configured.
@@ -250,9 +258,14 @@ impl StegoProfile {
         self.default_secret.as_deref().filter(|s| !s.is_empty())
     }
 
-    /// True when no private secret is set (official behaviour).
+    /// Custom stego domain tag, or `None` when the official default derivation is used.
+    pub fn stego_domain(&self) -> Option<&str> {
+        self.stego_domain.as_deref().filter(|s| !s.is_empty())
+    }
+
+    /// True when no private secret or custom domain is set (official behaviour).
     pub fn is_official(&self) -> bool {
-        self.secret().is_none()
+        self.secret().is_none() && self.stego_domain().is_none()
     }
 }
 
@@ -340,6 +353,17 @@ impl Profile {
     /// constant; an explicit password always overrides this value.
     pub fn stego_secret(&self) -> Option<&str> {
         self.stego.secret()
+    }
+
+    /// Set the custom stego domain tag used to isolate the HKDF key derivation.
+    pub fn with_stego_domain<S: Into<Cow<'static, str>>>(mut self, domain: S) -> Self {
+        self.stego = self.stego.with_stego_domain(domain);
+        self
+    }
+
+    /// Custom stego domain tag, if any.
+    pub fn stego_domain(&self) -> Option<&str> {
+        self.stego.stego_domain()
     }
 
     /// Secret used when no user password is supplied.
@@ -463,6 +487,29 @@ mod tests {
         assert_eq!(p.stego_secret(), None);
         assert!(p.stego.is_official());
         assert!(p.is_official(), "an empty secret must not privatise");
+    }
+
+    #[test]
+    fn stego_domain_makes_the_profile_private() {
+        let p = Profile::default().with_stego_domain("org.acme.vault");
+        assert!(!p.is_official(), "a custom stego domain is not official");
+        assert_eq!(p.stego_domain(), Some("org.acme.vault"));
+        assert_eq!(p.stego_secret(), None);
+        assert_eq!(p.secret(), BUILTIN_DEFAULT_KEY);
+
+        let stego = StegoProfile::default().with_stego_domain("org.acme.vault");
+        assert_eq!(
+            Profile::default().with_stego_profile(stego).stego_domain(),
+            Some("org.acme.vault")
+        );
+    }
+
+    #[test]
+    fn empty_stego_domain_counts_as_unset() {
+        let p = Profile::default().with_stego_domain("");
+        assert_eq!(p.stego_domain(), None);
+        assert!(p.stego.is_official());
+        assert!(p.is_official(), "an empty domain must not privatise");
     }
 
     #[test]

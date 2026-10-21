@@ -61,15 +61,40 @@ pub const BODY_OVERHEAD: usize = 4 + 1 + TAG_LEN; // 21 bytes
 /// Flag bit indicating Deflate compression.
 const FLAG_COMPRESSED: u8 = 0x01;
 
-/// Derive AES-256-GCM key and PRNG seed from password and salt.
-pub fn derive_keys(password: &str, salt: &[u8]) -> ([u8; 32], [u8; 32]) {
+/// Derive a subkey from `ikm` when a custom `domain` is specified, applying
+/// NFC normalization and an 8-byte big-endian length prefix to prevent collision.
+///
+/// If `domain` is `None` or empty, returns `None`, indicating that caller should use `ikm` directly.
+pub fn derive_domain_subkey(ikm: &[u8], domain: Option<&str>) -> Option<[u8; 32]> {
+    let d = domain.filter(|s| !s.is_empty())?;
+    let norm_d = normalize_nfc(d);
+    let len_bytes = (norm_d.len() as u64).to_be_bytes();
+    let mut info = Vec::with_capacity(23 + 8 + norm_d.len());
+    info.extend_from_slice(b"strhide-stego-domain-v1");
+    info.extend_from_slice(&len_bytes);
+    info.extend_from_slice(norm_d.as_bytes());
+
+    let hk = Hkdf::<Sha256>::new(None, ikm);
+    let mut subkey = [0u8; 32];
+    hk.expand(&info, &mut subkey)
+        .expect("HKDF expand domain subkey");
+    Some(subkey)
+}
+
+/// Derive AES-256-GCM key and PRNG seed from password and salt, optionally isolated by domain.
+pub fn derive_keys(password: &str, salt: &[u8], domain: Option<&str>) -> ([u8; 32], [u8; 32]) {
     let norm_pwd = normalize_nfc(password);
     // PBKDF2-HMAC-SHA256 with 100,000 iterations
     let mut pbkdf2_key = [0u8; 32];
     pbkdf2::pbkdf2_hmac::<Sha256>(norm_pwd.as_bytes(), salt, 100_000, &mut pbkdf2_key);
 
+    let effective_ikm = match derive_domain_subkey(&pbkdf2_key, domain) {
+        Some(subkey) => subkey,
+        None => pbkdf2_key,
+    };
+
     // HKDF expand into encryption key (32 bytes) and permutation seed (32 bytes)
-    let hk = Hkdf::<Sha256>::new(Some(salt), &pbkdf2_key);
+    let hk = Hkdf::<Sha256>::new(Some(salt), &effective_ikm);
     let mut enc_key_bytes = [0u8; 32];
     let mut perm_seed = [0u8; 32];
     hk.expand(b"strhide-stego-enc-v1", &mut enc_key_bytes)
@@ -80,14 +105,23 @@ pub fn derive_keys(password: &str, salt: &[u8]) -> ([u8; 32], [u8; 32]) {
     (enc_key_bytes, perm_seed)
 }
 
-/// Derive header permutation seed from password (or default builtin key) WITHOUT salt.
+/// Derive header permutation seed from password (or default builtin key) WITHOUT salt,
+/// optionally isolated by domain.
 /// This breaks the circular dependency ("chicken-and-egg") so the header location
 /// can be pseudo-randomized across the carrier without knowing the salt upfront.
-pub fn derive_header_perm_seed(password: Option<&str>) -> [u8; 32] {
+pub fn derive_header_perm_seed(password: Option<&str>, domain: Option<&str>) -> [u8; 32] {
     let pw = password.unwrap_or(PUBLIC_DEFAULT_SECRET);
     let norm_pw = normalize_nfc(pw);
+    let subkey_buf;
+    let effective_ikm: &[u8] = match derive_domain_subkey(norm_pw.as_bytes(), domain) {
+        Some(subkey) => {
+            subkey_buf = subkey;
+            &subkey_buf
+        }
+        None => norm_pw.as_bytes(),
+    };
     let mut header_seed = [0u8; 32];
-    let hk = Hkdf::<Sha256>::new(Some(b"strhide-stego-hpos-salt-v2"), norm_pw.as_bytes());
+    let hk = Hkdf::<Sha256>::new(Some(b"strhide-stego-hpos-salt-v2"), effective_ikm);
     hk.expand(b"strhide-stego-hpos-v2", &mut header_seed)
         .expect("HKDF expand header perm seed");
     header_seed
@@ -111,14 +145,15 @@ pub fn derive_stc_seed(perm_seed: &[u8; 32], salt: &[u8]) -> u64 {
 }
 
 /// Fallback built-in key when no password is provided.
-fn default_builtin_key(salt: &[u8]) -> ([u8; 32], [u8; 32]) {
-    derive_keys(PUBLIC_DEFAULT_SECRET, salt)
+fn default_builtin_key(salt: &[u8], domain: Option<&str>) -> ([u8; 32], [u8; 32]) {
+    derive_keys(PUBLIC_DEFAULT_SECRET, salt, domain)
 }
 
 /// Pack and encrypt payload into micro-envelope byte stream, also returning the derived `perm_seed`.
 pub fn pack_envelope_ext(
     payload: &[u8],
     password: Option<&str>,
+    domain: Option<&str>,
 ) -> Result<(Vec<u8>, [u8; 32]), StrHideError> {
     let mut salt = [0u8; SALT_LEN];
     let mut nonce_bytes = [0u8; NONCE_LEN];
@@ -127,8 +162,8 @@ pub fn pack_envelope_ext(
     rng.fill(&mut nonce_bytes);
 
     let (key_bytes, perm_seed) = match password {
-        Some(p) => derive_keys(p, &salt),
-        None => default_builtin_key(&salt),
+        Some(p) => derive_keys(p, &salt, domain),
+        None => default_builtin_key(&salt, domain),
     };
 
     // Compress payload with Deflate
@@ -175,8 +210,12 @@ pub fn pack_envelope_ext(
 }
 
 /// Pack and encrypt payload into micro-envelope byte stream.
-pub fn pack_envelope(payload: &[u8], password: Option<&str>) -> Result<Vec<u8>, StrHideError> {
-    pack_envelope_ext(payload, password).map(|(env, _)| env)
+pub fn pack_envelope(
+    payload: &[u8],
+    password: Option<&str>,
+    domain: Option<&str>,
+) -> Result<Vec<u8>, StrHideError> {
+    pack_envelope_ext(payload, password, domain).map(|(env, _)| env)
 }
 
 /// Unpack and decrypt micro-envelope from raw extracted bytes using a pre-derived AES key.
@@ -244,15 +283,19 @@ pub fn unpack_envelope_with_key(
 }
 
 /// Unpack and decrypt micro-envelope from raw extracted bytes.
-pub fn unpack_envelope(data: &[u8], password: Option<&str>) -> Result<Vec<u8>, StrHideError> {
+pub fn unpack_envelope(
+    data: &[u8],
+    password: Option<&str>,
+    domain: Option<&str>,
+) -> Result<Vec<u8>, StrHideError> {
     if data.len() < MIN_ENVELOPE_LEN {
         return Err(StrHideError::NoHiddenData("No valid payload found".into()));
     }
 
     let salt = &data[..SALT_LEN];
     let (key_bytes, _) = match password {
-        Some(p) => derive_keys(p, salt),
-        None => default_builtin_key(salt),
+        Some(p) => derive_keys(p, salt, domain),
+        None => default_builtin_key(salt, domain),
     };
 
     unpack_envelope_with_key(data, &key_bytes)
@@ -270,20 +313,84 @@ mod tests {
         assert_ne!(pwd_nfc.as_bytes(), pwd_nfd.as_bytes());
 
         let salt = [42u8; 16];
-        let (key_nfc, perm_nfc) = derive_keys(pwd_nfc, &salt);
-        let (key_nfd, perm_nfd) = derive_keys(pwd_nfd, &salt);
+        let (key_nfc, perm_nfc) = derive_keys(pwd_nfc, &salt, None);
+        let (key_nfd, perm_nfd) = derive_keys(pwd_nfd, &salt, None);
 
         assert_eq!(key_nfc, key_nfd);
         assert_eq!(perm_nfc, perm_nfd);
 
-        let hseed_nfc = derive_header_perm_seed(Some(pwd_nfc));
-        let hseed_nfd = derive_header_perm_seed(Some(pwd_nfd));
+        let hseed_nfc = derive_header_perm_seed(Some(pwd_nfc), None);
+        let hseed_nfd = derive_header_perm_seed(Some(pwd_nfd), None);
         assert_eq!(hseed_nfc, hseed_nfd);
 
         // Cross pack/unpack
         let payload = b"secret stego message";
-        let packed = pack_envelope(payload, Some(pwd_nfd)).expect("pack with NFD password");
-        let unpacked = unpack_envelope(&packed, Some(pwd_nfc)).expect("unpack with NFC password");
+        let packed = pack_envelope(payload, Some(pwd_nfd), None).expect("pack with NFD password");
+        let unpacked =
+            unpack_envelope(&packed, Some(pwd_nfc), None).expect("unpack with NFC password");
         assert_eq!(unpacked, payload);
+    }
+
+    #[test]
+    fn domain_isolation_keys_and_seeds() {
+        let salt = [17u8; 16];
+        let pwd = "MyStrongPassword123";
+
+        let (key_default, perm_default) = derive_keys(pwd, &salt, None);
+        let (key_a, perm_a) = derive_keys(pwd, &salt, Some("org.corp.alpha"));
+        let (key_b, perm_b) = derive_keys(pwd, &salt, Some("org.corp.beta"));
+
+        assert_ne!(key_default, key_a);
+        assert_ne!(key_a, key_b);
+        assert_ne!(perm_default, perm_a);
+        assert_ne!(perm_a, perm_b);
+
+        let hseed_default = derive_header_perm_seed(Some(pwd), None);
+        let hseed_a = derive_header_perm_seed(Some(pwd), Some("org.corp.alpha"));
+        let hseed_b = derive_header_perm_seed(Some(pwd), Some("org.corp.beta"));
+
+        assert_ne!(hseed_default, hseed_a);
+        assert_ne!(hseed_a, hseed_b);
+
+        // Default builtin key also isolates by domain
+        let (dkey_default, _) = derive_keys(PUBLIC_DEFAULT_SECRET, &salt, None);
+        let (dkey_a, _) = derive_keys(PUBLIC_DEFAULT_SECRET, &salt, Some("org.corp.alpha"));
+        assert_ne!(dkey_default, dkey_a);
+    }
+
+    #[test]
+    fn domain_nfc_normalization_and_empty_equivalence() {
+        let salt = [77u8; 16];
+        let pwd = "password";
+
+        // NFC vs NFD domain tag
+        let domain_nfc = "resum\u{00E9}.vault";
+        let domain_nfd = "resume\u{0301}.vault";
+        assert_ne!(domain_nfc.as_bytes(), domain_nfd.as_bytes());
+
+        let (key_nfc, perm_nfc) = derive_keys(pwd, &salt, Some(domain_nfc));
+        let (key_nfd, perm_nfd) = derive_keys(pwd, &salt, Some(domain_nfd));
+        assert_eq!(key_nfc, key_nfd);
+        assert_eq!(perm_nfc, perm_nfd);
+
+        let hseed_nfc = derive_header_perm_seed(Some(pwd), Some(domain_nfc));
+        let hseed_nfd = derive_header_perm_seed(Some(pwd), Some(domain_nfd));
+        assert_eq!(hseed_nfc, hseed_nfd);
+
+        // Empty domain is equivalent to None
+        let (key_empty, perm_empty) = derive_keys(pwd, &salt, Some(""));
+        let (key_none, perm_none) = derive_keys(pwd, &salt, None);
+        assert_eq!(key_empty, key_none);
+        assert_eq!(perm_empty, perm_none);
+
+        let hseed_empty = derive_header_perm_seed(Some(pwd), Some(""));
+        let hseed_none = derive_header_perm_seed(Some(pwd), None);
+        assert_eq!(hseed_empty, hseed_none);
+
+        // Cross-domain unpack failure
+        let payload = b"classified corporate data";
+        let packed = pack_envelope(payload, Some(pwd), Some("domain-A")).expect("pack domain-A");
+        let err = unpack_envelope(&packed, Some(pwd), Some("domain-B"));
+        assert!(err.is_err(), "unpacking with mismatched domain must fail");
     }
 }

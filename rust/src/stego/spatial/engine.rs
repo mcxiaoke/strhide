@@ -479,6 +479,7 @@ pub fn embed_spatial(
     carrier_bytes: &[u8],
     payload: &[u8],
     password: Option<&str>,
+    domain: Option<&str>,
     cost_model: &dyn SpatialCostModel,
     params: &SpatialParams,
 ) -> Result<Vec<u8>, StrHideError> {
@@ -488,7 +489,7 @@ pub fn embed_spatial(
     let total_pixels = w * h;
 
     // Pack payload into stealth micro-envelope
-    let (envelope, perm_seed) = pack_envelope_ext(payload, password)?;
+    let (envelope, perm_seed) = pack_envelope_ext(payload, password, domain)?;
 
     // Compute distortion cost map
     let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, params);
@@ -533,7 +534,7 @@ pub fn embed_spatial(
     }
 
     // Phase 1: Keyed candidate set permutation for header slots (Legacy rule: [8, 247], 30% exclusion)
-    let header_seed = crate::stego::envelope::derive_header_perm_seed(password);
+    let header_seed = crate::stego::envelope::derive_header_perm_seed(password, domain);
     let mut permuted_candidates = candidate_pixels.to_vec();
     permute_indices(&mut permuted_candidates, &header_seed);
 
@@ -694,6 +695,7 @@ pub fn embed_spatial(
 pub fn extract_spatial(
     carrier_bytes: &[u8],
     password: Option<&str>,
+    domain: Option<&str>,
     cost_model: &dyn SpatialCostModel,
     params: &SpatialParams,
 ) -> Result<Vec<u8>, StrHideError> {
@@ -736,7 +738,7 @@ pub fn extract_spatial(
     }
 
     // Phase 1: Keyed full candidate set permutation for header slots
-    let header_seed = crate::stego::envelope::derive_header_perm_seed(password);
+    let header_seed = crate::stego::envelope::derive_header_perm_seed(password, domain);
     let mut permuted_candidates = candidate_pixels.to_vec();
     permute_indices(&mut permuted_candidates, &header_seed);
 
@@ -857,6 +859,7 @@ pub fn extract_spatial(
     let (key_bytes, perm_seed) = crate::stego::envelope::derive_keys(
         password.unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
         salt,
+        domain,
     );
 
     let mut body_slots = body_candidates[..needed_body_slots].to_vec();
@@ -924,7 +927,7 @@ pub fn probe_spatial_capacity(
     let available_body_slots = if candidate_pixels.len() < V2_TOTAL_HEADER_SLOTS {
         0
     } else {
-        let header_seed = crate::stego::envelope::derive_header_perm_seed(None);
+        let header_seed = crate::stego::envelope::derive_header_perm_seed(None, None);
         let mut permuted_candidates = candidate_pixels.to_vec();
         permute_indices(&mut permuted_candidates, &header_seed);
 
@@ -1195,9 +1198,9 @@ mod tests {
         let payload = b"container-fidelity-payload";
         let params = SpatialParams::default();
         let stego =
-            embed_spatial(&png, payload, Some("pw"), &HillCostModel, &params).expect("embed");
+            embed_spatial(&png, payload, Some("pw"), None, &HillCostModel, &params).expect("embed");
         let extracted =
-            extract_spatial(&stego, Some("pw"), &HillCostModel, &params).expect("extract");
+            extract_spatial(&stego, Some("pw"), None, &HillCostModel, &params).expect("extract");
         assert_eq!(extracted, payload);
 
         let before = decode_png(&png).expect("decode");
@@ -1248,7 +1251,7 @@ mod tests {
             ..SpatialParams::default()
         };
         let stego =
-            embed_spatial(&png, payload, Some("pw"), &HillCostModel, &params).expect("embed");
+            embed_spatial(&png, payload, Some("pw"), None, &HillCostModel, &params).expect("embed");
 
         // The codec travels in the header, so an extractor configured with Hamming
         // must still read the carrier correctly via header self-description.
@@ -1256,8 +1259,8 @@ mod tests {
             codec: StegoCodec::Hamming,
             ..SpatialParams::default()
         };
-        let extracted =
-            extract_spatial(&stego, Some("pw"), &HillCostModel, &extract_params).expect("extract");
+        let extracted = extract_spatial(&stego, Some("pw"), None, &HillCostModel, &extract_params)
+            .expect("extract");
         assert_eq!(extracted, payload, "STC must be self-describing");
 
         // Same selftest as the Hamming path: +/-1 inside the class, never more.
@@ -1347,8 +1350,15 @@ mod tests {
 
         // And through a full embed/extract round-trip.
         let params = SpatialParams::default();
-        let stego =
-            embed_spatial(&png, b"split-idat", Some("pw"), &HillCostModel, &params).expect("embed");
+        let stego = embed_spatial(
+            &png,
+            b"split-idat",
+            Some("pw"),
+            None,
+            &HillCostModel,
+            &params,
+        )
+        .expect("embed");
         let after = decode_png(&stego).expect("decode stego");
         assert_eq!(
             after.idat_sizes.len(),
@@ -1356,7 +1366,7 @@ mod tests {
             "embedding must not collapse the IDAT run"
         );
         let extracted =
-            extract_spatial(&stego, Some("pw"), &HillCostModel, &params).expect("extract");
+            extract_spatial(&stego, Some("pw"), None, &HillCostModel, &params).expect("extract");
         assert_eq!(extracted, b"split-idat");
     }
 
@@ -1387,7 +1397,7 @@ mod tests {
                 stc_u,
                 ..SpatialParams::default()
             };
-            let stego = embed_spatial(&png, payload, Some("pw"), &HillCostModel, &params)
+            let stego = embed_spatial(&png, payload, Some("pw"), None, &HillCostModel, &params)
                 .unwrap_or_else(|e| panic!("u={stc_u}: embed failed: {e}"));
 
             // The extractor still defaults to Hamming: `u` and `h` must arrive
@@ -1395,6 +1405,7 @@ mod tests {
             let extracted = extract_spatial(
                 &stego,
                 Some("pw"),
+                None,
                 &HillCostModel,
                 &SpatialParams::default(),
             )
@@ -1454,6 +1465,7 @@ mod tests {
             &png,
             light_payload,
             Some("pw"),
+            None,
             &HillCostModel,
             &auto_params,
         )
@@ -1461,6 +1473,7 @@ mod tests {
         let rec_light = extract_spatial(
             &stego_light,
             Some("pw"),
+            None,
             &HillCostModel,
             &SpatialParams::default(),
         )
@@ -1471,5 +1484,58 @@ mod tests {
         let cap = probe_spatial_capacity(&png, &HillCostModel, &auto_params).expect("probe");
         assert!(cap.recommended_max_bytes > 0);
         assert!(cap.recommended_max_bytes <= cap.max_raw_payload_bytes / 2);
+    }
+
+    #[test]
+    fn spatial_stego_domain_isolation_e2e() {
+        let (w, h) = (128usize, 128usize);
+        let pixels = row_correlated_pixels(w, h);
+        let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
+
+        let params = SpatialParams::default();
+        let payload = b"cross-domain-isolation-test";
+
+        // Embed under domain "finance.sec"
+        let stego = embed_spatial(
+            &png,
+            payload,
+            Some("shared-pwd"),
+            Some("finance.sec"),
+            &HillCostModel,
+            &params,
+        )
+        .expect("embed with domain");
+
+        // Extract with matching domain succeeds
+        let recovered = extract_spatial(
+            &stego,
+            Some("shared-pwd"),
+            Some("finance.sec"),
+            &HillCostModel,
+            &params,
+        )
+        .expect("extract with same domain");
+        assert_eq!(recovered, payload);
+
+        // Extract with default domain (None) fails
+        let err_default =
+            extract_spatial(&stego, Some("shared-pwd"), None, &HillCostModel, &params);
+        assert!(
+            matches!(err_default, Err(StrHideError::NoHiddenData(_))),
+            "extracting with default domain must fail as NoHiddenData"
+        );
+
+        // Extract with different domain fails
+        let err_other = extract_spatial(
+            &stego,
+            Some("shared-pwd"),
+            Some("hr.records"),
+            &HillCostModel,
+            &params,
+        );
+        assert!(
+            matches!(err_other, Err(StrHideError::NoHiddenData(_))),
+            "extracting with different domain must fail as NoHiddenData"
+        );
     }
 }

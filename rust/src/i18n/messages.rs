@@ -497,6 +497,9 @@ crate::i18n_messages! {
     HelpEmbedStegoSecret:
         en = "Private default secret for adaptive stego (read/write must agree)",
         zh = "自适应隐写私有默认密钥（嵌入与提取两端必须一致）";
+    HelpEmbedStegoDomain:
+        en = "Custom domain tag for HKDF key derivation isolation (read/write must agree)",
+        zh = "自适应隐写域隔离标签（用于隔离 HKDF 密钥派生，嵌入与提取两端必须一致）";
     HelpEmbedExclusionRate:
         en = "Fraction of smoothest regions excluded from embedding (0.00-0.80, default: 0.20)",
         zh = "排除在嵌入之外的最平滑区域比例（0.00-0.80，默认: 0.20；越高越抗检，但容量越低）";
