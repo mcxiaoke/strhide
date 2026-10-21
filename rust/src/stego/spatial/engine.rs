@@ -53,84 +53,31 @@ use crate::stego::traits::SpatialCostModel;
 pub const SPATIAL_ELIGIBLE_MIN: u8 = 8;
 pub const SPATIAL_ELIGIBLE_MAX: u8 = 247;
 
-/// Expected modified slots per embedded payload bit under STC when the trellis
-/// is driven at one syndrome row per element (`n = m + h - 1`, alpha ~ 1).
-///
-/// Nearly every row constrains the solution, so about half of the used slots
-/// change -- roughly 1.7x the Hamming k=3 rate of 0.2917. The mitigating factor
-/// is *which* slots: the trellis is free to spend its changes on the cheapest
-/// ones instead of an arbitrary slot inside each fixed 7-slot block.
-pub const STC_EXPECTED_CHANGE_RATE: f64 = 0.5;
-
 // ---------------------------------------------------------------------------
 // Envelope header layout (32 bytes = 256 slots)
 // ---------------------------------------------------------------------------
 //
-// [0..16) salt, [16..28) nonce, [28..32) a big-endian `u32`.
-//
-// That word used to be the bare envelope length. An envelope is capped at
-// 64 MiB = 2^26 (see the validation in `extract_spatial`), so bits 26..32 are
-// always zero for a real envelope -- six spare bits. They now carry the
-// matrix-coding parameters, which keeps the header exactly 32 bytes and needs
-// no format-version bump: a carrier written before this change has zeros there
-// and therefore decodes as `Hamming` / no `h`, i.e. the behaviour it was
-// written with.
+// [0..16) salt, [16..28) nonce, [28..32) the flags+length word. The layout and
+// its bit allocation live in [`crate::stego::header`], shared with the JPEG
+// engine so both carriers describe their codec identically.
 
-/// Bits of the header word that hold the envelope length.
-const HEADER_LEN_BITS: u32 = 26;
-/// Mask of the length field inside the header word. Exported because tests and
-/// diagnostics need to read the length back out of a carrier without
-/// re-deriving the whole engine.
-pub const HEADER_LEN_MASK: u32 = (1 << HEADER_LEN_BITS) - 1;
-const HEADER_CODEC_SHIFT: u32 = HEADER_LEN_BITS;
-const HEADER_CODEC_BITS: u32 = 2;
-const HEADER_STC_H_SHIFT: u32 = 28;
-const HEADER_STC_H_BITS: u32 = 4;
-
-/// Largest envelope the 26-bit length field can express.
-pub const HEADER_LEN_MAX: u32 = HEADER_LEN_MASK;
-
-fn encode_header_word(len: u32, codec: StegoCodec, stc_h: u8) -> u32 {
-    debug_assert_eq!(len & !HEADER_LEN_MASK, 0, "envelope length exceeds 26 bits");
-    // Canonical form: the `h` field is only meaningful for STC, so a Hamming
-    // carrier always writes zero there. That keeps the header word a pure
-    // function of what actually matters and keeps the field free for a future
-    // codec that wants it.
-    let stc_h = match codec {
-        StegoCodec::Stc => stc_h,
-        StegoCodec::Hamming => 0,
-    };
-    (len & HEADER_LEN_MASK)
-        | ((codec.id() & ((1 << HEADER_CODEC_BITS) - 1)) << HEADER_CODEC_SHIFT)
-        | (((stc_h as u32) & ((1 << HEADER_STC_H_BITS) - 1)) << HEADER_STC_H_SHIFT)
-}
-
-/// Split a header word into `(envelope length, codec id, stc h)`.
-///
-/// The codec id is returned raw: validation against [`StegoCodec::from_id`] is
-/// the caller's job, because the extract path must fold an unknown id into the
-/// generic "no payload here" error instead of reporting it.
-pub fn decode_header_word(word: u32) -> (u32, u32, u8) {
-    let len = word & HEADER_LEN_MASK;
-    let codec_id = (word >> HEADER_CODEC_SHIFT) & ((1 << HEADER_CODEC_BITS) - 1);
-    let stc_h = ((word >> HEADER_STC_H_SHIFT) & ((1 << HEADER_STC_H_BITS) - 1)) as u8;
-    (len, codec_id, stc_h)
-}
+pub use crate::stego::header::{
+    HEADER_LEN_MASK, HEADER_LEN_MAX, decode_header_word, encode_header_word,
+};
 
 /// Slots needed to carry `bits` payload bits under `codec`.
 ///
-/// STC needs `bits + h - 1` slots (one element per syndrome row plus the
-/// trellis warm-up), i.e. roughly one slot per bit. Hamming k=3 needs 2.33.
-/// Using fewer slots is **not** a capacity gain: the encoder flips a much
-/// larger fraction of the slots it does use, so the change budget is the same.
-fn slots_for(bits: usize, codec: StegoCodec, stc_h: u8) -> Result<usize, StrHideError> {
+/// STC with group size `u` needs `u * (bits + h - 1)` slots: `bits + h - 1`
+/// syndrome rows, each fed by `u` elements, plus the trellis warm-up. `u = 1`
+/// is roughly one slot per bit; Hamming k=3 needs 2.33.
+fn slots_for(bits: usize, codec: StegoCodec, stc_h: u8, stc_u: u8) -> Result<usize, StrHideError> {
     match codec {
         StegoCodec::Hamming => Ok(crate::stego::coding::required_slots(
             bits,
             crate::stego::coding::DEFAULT_HAMMING_K,
         )),
         StegoCodec::Stc => {
-            let t = StcTrellis::from_seed(0, stc_h)?;
+            let t = StcTrellis::from_seed_grouped(0, stc_h, stc_u)?;
             Ok(t.slots_for(bits))
         }
     }
@@ -620,20 +567,20 @@ pub fn embed_spatial(
             "Envelope of {total_len} bytes exceeds the {HEADER_LEN_MAX}-byte header length field"
         )));
     }
-    let header_word = encode_header_word(total_len, params.codec, params.stc_h);
+    let header_word = encode_header_word(total_len, params.codec, params.stc_h, params.stc_u);
     let mut header_bytes = Vec::with_capacity(32);
     header_bytes.extend_from_slice(&envelope[..28]); // Salt (16B) + Nonce (12B)
     header_bytes.extend_from_slice(&header_word.to_be_bytes());
 
     let ciphertext_body = &envelope[28..];
     let ciphertext_bits = ciphertext_body.len() * 8;
-    let needed_body_slots = slots_for(ciphertext_bits, params.codec, params.stc_h)?;
+    let needed_body_slots = slots_for(ciphertext_bits, params.codec, params.stc_h, params.stc_u)?;
 
     if needed_body_slots > body_candidates.len() {
         return Err(StrHideError::General(format!(
             "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{})",
             needed_body_slots,
-            params.codec.describe(params.stc_h),
+            params.codec.describe(params.stc_h, params.stc_u),
             body_candidates.len(),
             cost_model.id(),
         )));
@@ -697,7 +644,7 @@ pub fn embed_spatial(
             )?;
         }
         StegoCodec::Stc => {
-            let trellis = StcTrellis::from_seed(stc_seed, params.stc_h)?;
+            let trellis = StcTrellis::from_seed_grouped(stc_seed, params.stc_h, params.stc_u)?;
             trellis.embed(&mut slot_vals, &moves, &rp, &rm, ciphertext_body)?;
         }
     }
@@ -797,7 +744,7 @@ pub fn extract_spatial(
     }
 
     let salt = &header_bytes[..16];
-    let (total_len, codec, stc_h) = {
+    let (total_len, codec, stc_h, stc_u) = {
         let word = u32::from_be_bytes([
             header_bytes[28],
             header_bytes[29],
@@ -810,11 +757,13 @@ pub fn extract_spatial(
         // distinct message would tell an attacker that an envelope exists but
         // the layout is wrong -- an oracle the AEAD path deliberately denies.
         let no_hidden = || StrHideError::NoHiddenData("No valid payload found".into());
-        let codec = StegoCodec::from_id(codec_id).map_err(|_| no_hidden())?;
+        let (codec, stc_u) =
+            crate::stego::header::codec_from_header_id(codec_id).map_err(|_| no_hidden())?;
         if codec == StegoCodec::Stc {
             crate::stego::coding::validate_stc_h(stc_h).map_err(|_| no_hidden())?;
+            crate::stego::coding::validate_stc_u(stc_u).map_err(|_| no_hidden())?;
         }
-        (len as usize, codec, stc_h)
+        (len as usize, codec, stc_h, stc_u)
     };
 
     if !(49..=HEADER_LEN_MAX as usize).contains(&total_len) {
@@ -827,7 +776,7 @@ pub fn extract_spatial(
 
     let ciphertext_len = total_len - 28;
     let ciphertext_bits = ciphertext_len * 8;
-    let needed_body_slots = slots_for(ciphertext_bits, codec, stc_h)?;
+    let needed_body_slots = slots_for(ciphertext_bits, codec, stc_h, stc_u)?;
 
     if needed_body_slots > body_candidates.len() {
         return Err(StrHideError::NoHiddenData("No valid payload found".into()));
@@ -855,7 +804,7 @@ pub fn extract_spatial(
         )?,
         StegoCodec::Stc => {
             let stc_seed = crate::stego::envelope::derive_stc_seed(&perm_seed, salt);
-            let trellis = StcTrellis::from_seed(stc_seed, stc_h)?;
+            let trellis = StcTrellis::from_seed_grouped(stc_seed, stc_h, stc_u)?;
             trellis.extract(&slot_vals, ciphertext_bits)
         }
     };
@@ -907,9 +856,9 @@ pub fn probe_spatial_capacity(
             crate::stego::coding::max_payload_bytes(available_body_slots, hamming_k)
         }
         StegoCodec::Stc => {
-            // `bits + h - 1 = slots` -> `bits = slots - (h - 1)`.
-            let trellis = StcTrellis::from_seed(0, params.stc_h)?;
-            available_body_slots.saturating_sub(trellis.h() as usize - 1) / 8
+            // `u * (bits + h - 1) = slots` -> `bits = slots/u - (h - 1)`.
+            let trellis = StcTrellis::from_seed_grouped(0, params.stc_h, params.stc_u)?;
+            trellis.message_bits(available_body_slots) / 8
         }
     };
     // Only the body-borne overhead comes off here: salt/nonce already paid for
@@ -932,9 +881,10 @@ pub fn probe_spatial_capacity(
         estimated_change_rate: match params.codec {
             StegoCodec::Hamming => crate::stego::coding::expected_change_rate(hamming_k),
             // STC at one syndrome row per element (alpha ~ 1) must satisfy
-            // nearly all rows, so half the used slots change. Reported as-is:
-            // it is the number that decides whether STC ever becomes default.
-            StegoCodec::Stc => STC_EXPECTED_CHANGE_RATE,
+            // nearly all rows, so half the used slots change; grouping several
+            // elements per row lowers it. Reported as-is: it is the number that
+            // decides whether STC ever becomes default.
+            StegoCodec::Stc => crate::stego::coding::expected_stc_change_rate(params.stc_u),
         },
     })
 }
@@ -1228,14 +1178,14 @@ mod tests {
         // the flags still sees the right length -- that is what makes the
         // change backwards compatible with pre-existing carriers.
         for (codec, stc_h) in [(StegoCodec::Hamming, 0u8), (StegoCodec::Stc, 8)] {
-            let word = encode_header_word(1234, codec, stc_h);
+            let word = encode_header_word(1234, codec, stc_h, 1);
             let (len, codec_id, h) = decode_header_word(word);
             assert_eq!(len, 1234, "{codec:?}: length must round-trip");
             assert_eq!(codec_id, codec.id());
             assert_eq!(h, if codec == StegoCodec::Hamming { 0 } else { 8 });
         }
         // Pre-existing carriers have zeros in every flag bit.
-        let legacy = encode_header_word(1234, StegoCodec::Hamming, 0);
+        let legacy = encode_header_word(1234, StegoCodec::Hamming, 0, 1);
         assert_eq!(legacy, 1234, "a legacy header is the bare length");
     }
 
@@ -1300,5 +1250,84 @@ mod tests {
         let extracted =
             extract_spatial(&stego, Some("pw"), &HillCostModel, &params).expect("extract");
         assert_eq!(extracted, b"split-idat");
+    }
+
+    /// Group size `u` must be self-describing and must actually change fewer
+    /// pixels per bit: two independent properties that a whole-matrix change can
+    /// break in opposite directions.
+    #[test]
+    fn stc_group_sizes_roundtrip_and_trade_capacity_for_fewer_changes() {
+        let (w, h) = (128usize, 128usize);
+        let pixels = row_correlated_pixels(w, h);
+        let png = craft_png(
+            w as u32,
+            h as u32,
+            &pixels,
+            &vec![2u8; h],
+            &[(b"tEXt", b"Comment\x00stc-groups".as_slice())],
+            1,
+        );
+        let payload = b"stc-group-roundtrip-payload-2026";
+        let bits = payload.len() * 8;
+
+        let mut change_rates = Vec::new();
+        let mut capacities = Vec::new();
+        for stc_u in [1u8, 2, 3] {
+            let params = SpatialParams {
+                codec: StegoCodec::Stc,
+                stc_h: 8,
+                stc_u,
+                ..SpatialParams::default()
+            };
+            let stego = embed_spatial(&png, payload, Some("pw"), &HillCostModel, &params)
+                .unwrap_or_else(|e| panic!("u={stc_u}: embed failed: {e}"));
+
+            // The extractor still defaults to Hamming: `u` and `h` must arrive
+            // through the header.
+            let extracted = extract_spatial(
+                &stego,
+                Some("pw"),
+                &HillCostModel,
+                &SpatialParams::default(),
+            )
+            .unwrap_or_else(|e| panic!("u={stc_u}: extract failed: {e}"));
+            assert_eq!(extracted, payload, "u={stc_u}: must be self-describing");
+
+            let before = decode_png(&png).expect("decode");
+            let after = decode_png(&stego).expect("decode stego");
+            let changed = before
+                .pixels
+                .iter()
+                .zip(after.pixels.iter())
+                .filter(|(a, b)| a != b)
+                .count();
+            for (a, b) in before.pixels.iter().zip(after.pixels.iter()) {
+                assert!(a.abs_diff(*b) <= 1, "u={stc_u}: move too large: {a} -> {b}");
+                assert_eq!(a & 0xF8, b & 0xF8, "u={stc_u}: class left: {a} -> {b}");
+            }
+            change_rates.push(changed as f64 / bits as f64);
+
+            let cap =
+                probe_spatial_capacity(&png, &HillCostModel, &params).expect("capacity probe");
+            capacities.push(cap.max_raw_payload_bytes);
+        }
+
+        // Only the large gap is asserted here: the salt is random per embed, so
+        // the trellis seed (and therefore the exact change count) differs run
+        // to run. u=2 vs u=3 differ by ~6% on this payload, which a single
+        // sample cannot resolve -- that comparison lives in the deterministic
+        // trellis test (`coding::stc::tests::larger_groups_lower_the_change_rate`).
+        assert!(
+            change_rates[1] < change_rates[0] * 0.85,
+            "u=2 must cut the change count per bit: {change_rates:?}"
+        );
+        assert!(
+            change_rates[2] < change_rates[0] * 0.85,
+            "u=3 must cut the change count per bit: {change_rates:?}"
+        );
+        assert!(
+            capacities[0] > capacities[1] && capacities[1] > capacities[2],
+            "capacity must fall as u grows: {capacities:?}"
+        );
     }
 }

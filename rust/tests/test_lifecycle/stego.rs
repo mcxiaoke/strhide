@@ -915,3 +915,82 @@ fn test_jpeg_calibration_skips_unquantized_carrier() {
         report.findings
     );
 }
+
+/// STC over UERD coefficients, including group sizes > 1.
+///
+/// Two things have to hold at once: the codec must be self-describing (the
+/// extractor is given default options and still succeeds), and a group size of
+/// `u` must trade capacity for fewer changed coefficients -- that is the whole
+/// point of the grouping, and a silent regression to `u = 1` would still pass a
+/// plain roundtrip.
+#[test]
+fn test_jpeg_stc_group_coding_roundtrip() {
+    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("temp")
+        .join("testfiles")
+        .join("file-08.jpg");
+    if !candidate.exists() {
+        eprintln!("[SKIP] temp/testfiles/file-08.jpg not found");
+        return;
+    }
+
+    let jpeg_bytes = fs::read(&candidate).expect("read sample jpeg");
+    let payload = b"JPEG STC group-coded payload 2026!";
+    let password = "JpegStcPassword#2026";
+
+    let extract_opts = StegoOptions {
+        algorithm: Some("uerd".into()),
+        password: Some(password.into()),
+        ..Default::default()
+    };
+
+    let mut changed_counts = Vec::new();
+    let mut capacities = Vec::new();
+    for stc_u in [1u8, 2] {
+        let mut opts = StegoOptions {
+            algorithm: Some("uerd".into()),
+            password: Some(password.into()),
+            ..Default::default()
+        };
+        opts.jpeg_params.codec = strhide::stego::StegoCodec::Stc;
+        opts.jpeg_params.stc_h = 8;
+        opts.jpeg_params.stc_u = stc_u;
+
+        let stego = embed_carrier(&jpeg_bytes, payload, &opts)
+            .unwrap_or_else(|e| panic!("u={stc_u}: embed failed: {e}"));
+        assert_ne!(stego, jpeg_bytes, "u={stc_u}: stego must differ");
+
+        // Extraction is told nothing about the codec: it reads it from the
+        // header, exactly like the PNG path.
+        let extracted = extract_carrier(&stego, &extract_opts)
+            .unwrap_or_else(|e| panic!("u={stc_u}: extract failed: {e}"));
+        assert_eq!(extracted, payload, "u={stc_u}: payload mismatch");
+
+        let before = dct_io::read_coefficients(&jpeg_bytes).expect("cover coefficients");
+        let after = dct_io::read_coefficients(&stego).expect("stego coefficients");
+        let mut changed = 0usize;
+        for (cb, ca) in before.components[0]
+            .blocks
+            .iter()
+            .zip(after.components[0].blocks.iter())
+        {
+            changed += cb.iter().zip(ca.iter()).filter(|(x, y)| x != y).count();
+        }
+        assert!(changed > 0, "u={stc_u}: nothing was modified");
+        changed_counts.push(changed);
+
+        let cap = probe_carrier_capacity(&jpeg_bytes, &opts).expect("capacity probe");
+        capacities.push(cap.max_raw_payload_bytes);
+    }
+
+    assert!(
+        changed_counts[1] < changed_counts[0],
+        "u=2 must change fewer coefficients for the same payload: {changed_counts:?}"
+    );
+    assert!(
+        capacities[1] < capacities[0],
+        "u=2 must report a smaller capacity: {capacities:?}"
+    );
+}

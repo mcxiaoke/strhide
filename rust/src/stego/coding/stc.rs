@@ -12,18 +12,26 @@
 //!
 //! # Matrix layout
 //!
-//! `H` has `m = n - h + 1` rows and `n` columns; column `j` contributes the
-//! `h`-bit pattern `ĥ` to rows `j-h+1 ..= j`, i.e. `H[i][j] = ĥ[j-i]` for
-//! `0 <= j-i < h`. The syndrome of a bit vector `x` is therefore
+//! Elements are split into consecutive **groups** of `u`, and group `g` owns
+//! one syndrome row. An element `j` (`g = j/u`, `s = j%u`) contributes the
+//! `h`-bit column vector `cols[s]` to rows `g .. g+h-1`, so rows overlap `h`
+//! groups deep:
 //!
 //! ```text
-//! s[i] = XOR over d in 0..h of (h_hat[d] & x[i + d])
+//! s[g] = XOR over d in 0..h of (cols[s][d] & x[g*u + s])
 //! ```
 //!
-//! `ĥ` must have its lowest and highest bits set: the highest bit is the
-//! current column's influence on the row being finalised (without it some
-//! syndrome values are unreachable), and the lowest keeps the newest state bit
-//! meaningful.
+//! `u = 1` reduces to the classic one-row-per-element code (`m = n-h+1`), the
+//! form the module shipped with. `u > 1` gives `m = n/u - h + 1` message bits
+//! per `n` elements, i.e. a relative payload of about `1/u`, at the cost of a
+//! proportional capacity loss. Decoding is still a single forward pass.
+//!
+//! Every column vector has its lowest and highest bits set: the highest bit is
+//! that element's influence on the row the group is about to finalise (without
+//! it some parities are unreachable), and the lowest keeps the newest state bit
+//! meaningful. Within a group the `u` vectors are linearly independent, so the
+//! group's `u` elements can steer the syndrome independently instead of
+//! collapsing into a single XOR.
 //!
 //! # Cost model
 //!
@@ -31,18 +39,22 @@
 //! additive over a ternary alphabet with **asymmetric** `rho_plus` /
 //! `rho_minus`. Legality is supplied by the caller through [`Move`]: the
 //! spatial engine forbids the move that would leave the pixel's eight-value
-//! class, the JPEG engine forbids the move that would create a zero
-//! coefficient. An illegal direction is simply not offered to the trellis.
+//! class, the JPEG engine forbids the move that would leave the coefficient's
+//! `(|c| & !1)` bucket. An illegal direction is simply not offered.
 //!
 //! # Extraction
 //!
 //! No cost map and no trellis are needed: the receiver recomputes `s = H x`
-//! over the stego LSBs. Only the element ordering and `ĥ` have to match.
+//! over the stego LSBs. Only the element ordering, `u`, `h` and the column
+//! vectors have to match.
 //!
 //! # Complexity
 //!
-//! `O(n · 2^(h-1) · 2)` time and `n · 2^(h-1)` bits of backtracking memory.
-//! `h = 8` (128 states) is the default: `h = 10` is ~4x slower and ~4x larger.
+//! `O(n · 2^(h-1+[u>1]) · 2)` time and `n · 2^(h-1+[u>1])` bits of
+//! backtracking memory. `u > 1` needs one extra state bit (the row the group
+//! is still accumulating), i.e. twice the states of `u = 1`. `h = 8`, `u = 1`
+//! remains the default: 128 states, ~2·10^8 transitions for a 600k-slot
+//! carrier.
 
 use crate::errors::StrHideError;
 use crate::stego::coding::Move;
@@ -56,7 +68,14 @@ pub const DEFAULT_STC_H: u8 = 8;
 pub const MIN_STC_H: u8 = 4;
 pub const MAX_STC_H: u8 = 10;
 
-/// One embedding trellis: `h` plus the `h`-bit generator row `ĥ`.
+/// Largest supported group size. `u = 1` is the classic code; `u > 1` trades
+/// capacity for a lower change rate. Three is the practical ceiling: the
+/// envelope header carries the codec id in two bits, and the marginal gain per
+/// extra state bit shrinks quickly.
+pub const MAX_STC_U: u8 = 3;
+
+/// One embedding trellis: `h`, the group size `u`, and the per-position column
+/// vectors `cols[0..u]`.
 ///
 /// Both ends must build the identical trellis; it is derived from the stego
 /// secret and is deliberately *not* public — a known `H` lets an attacker
@@ -64,11 +83,10 @@ pub const MAX_STC_H: u8 = 10;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StcTrellis {
     h: u8,
-    /// `ĥ` in the low `h` bits, bit `d` == `ĥ[d]`.
-    pattern: u32,
-    /// `ĥ` with the bit order reversed inside the low `h` bits: column `j`'s
-    /// contribution mask when `x_j` is odd.
-    reversed: u32,
+    u: u8,
+    /// `cols[s]` holds, in its low `h` bits, the column vector of position `s`
+    /// inside a group: bit `d` is that element's contribution to row `g+d`.
+    cols: [u32; MAX_STC_U as usize],
 }
 
 /// What a column did with its element, packed into 2 bits for backtracking.
@@ -134,38 +152,104 @@ fn message_bit(message: &[u8], idx: usize) -> usize {
     ((message[idx / 8] >> (7 - (idx % 8))) & 1) as usize
 }
 
+/// splitmix64: a tiny deterministic mixer, so the column vectors depend only on
+/// the caller's seed and never on a platform RNG.
+#[inline]
+fn splitmix64(state: u64) -> u64 {
+    let mut z = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Reverse the low `h` bits of `x`.
+#[inline]
+fn reverse_low_bits(x: u32, h: u8) -> u32 {
+    let mut out = 0u32;
+    for d in 0..h {
+        if (x >> d) & 1 == 1 {
+            out |= 1 << (h - 1 - d);
+        }
+    }
+    out
+}
+
+/// Insert `x` into a GF(2) row-echelon basis; `false` if it is dependent.
+fn add_to_basis(basis: &mut [u32; 32], x: u32) -> bool {
+    let mut v = x;
+    while v != 0 {
+        let top = 31 - v.leading_zeros();
+        if basis[top as usize] == 0 {
+            basis[top as usize] = v;
+            return true;
+        }
+        v ^= basis[top as usize];
+    }
+    false
+}
+
 impl StcTrellis {
-    /// Build a trellis from a 64-bit key seed.
+    /// Build a single-row-per-element trellis (`u = 1`) from a 64-bit seed.
     ///
     /// The caller derives `seed` from the stego secret and the per-embed salt,
-    /// so two embeds with the same password use different matrices. The lowest
-    /// and highest pattern bits are forced to 1; see the module docs for why.
+    /// so two embeds with the same password use different matrices.
     pub fn from_seed(seed: u64, h: u8) -> Result<Self, StrHideError> {
+        Self::from_seed_grouped(seed, h, 1)
+    }
+
+    /// Build a trellis whose `u` columns share one syndrome row (`u = 1` is the
+    /// classic form). The caller must pass the same `u` on both ends — it
+    /// travels in the envelope header next to the codec id.
+    pub fn from_seed_grouped(seed: u64, h: u8, u: u8) -> Result<Self, StrHideError> {
         validate_h(h)?;
+        validate_u(u)?;
+        if u > h {
+            return Err(StrHideError::General(format!(
+                "STC group size u={u} needs u <= h to give each element an independent column, got h={h}"
+            )));
+        }
+
         let mask = (1u32 << h) - 1;
-        let mut pattern = (seed as u32) & mask;
-        pattern |= 1;
-        pattern |= 1 << (h - 1);
-        let mut reversed = 0u32;
-        for d in 0..h {
-            if (pattern >> d) & 1 == 1 {
-                reversed |= 1 << (h - 1 - d);
+        let mut cols = [0u32; MAX_STC_U as usize];
+        let mut basis = [0u32; 32];
+        let mut taken = 0usize;
+        let mut counter = 0u64;
+        while taken < u as usize {
+            // The low and high bits are forced: see the module docs. The
+            // linear-independence check rejects the (rare) draws that would
+            // collapse two of the group's elements onto the same direction.
+            let mut x = (splitmix64(seed.wrapping_add(counter)) as u32) & mask;
+            counter += 1;
+            if counter > 4096 {
+                return Err(StrHideError::General(format!(
+                    "STC cannot derive {u} independent column vectors for h={h}"
+                )));
+            }
+            x |= 1;
+            x |= 1 << (h - 1);
+            if add_to_basis(&mut basis, x) {
+                cols[taken] = reverse_low_bits(x, h);
+                taken += 1;
             }
         }
-        Ok(Self {
-            h,
-            pattern,
-            reversed,
-        })
+
+        Ok(Self { h, u, cols })
     }
 
     pub fn h(&self) -> u8 {
         self.h
     }
 
+    pub fn u(&self) -> u8 {
+        self.u
+    }
+
     /// Number of message bits carried by `n` elements.
+    ///
+    /// `n` is expected to be a multiple of `u`; a remainder is rounded down, so
+    /// callers that ask for `slots_for(bits)` back always get the exact value.
     pub fn message_bits(&self, n: usize) -> usize {
-        n.saturating_sub(self.h as usize - 1)
+        (n / self.u as usize).saturating_sub(self.h as usize - 1)
     }
 
     /// Number of elements needed to carry `bits` message bits.
@@ -173,41 +257,62 @@ impl StcTrellis {
         if bits == 0 {
             0
         } else {
-            bits + self.h as usize - 1
+            self.u as usize * (bits + self.h as usize - 1)
         }
     }
 
     /// Recompute the syndrome of the element LSBs (`H x`), MSB-first packed.
     ///
-    /// `bits_out` is clamped to `n - h + 1`; padded bits in the last byte are 0.
+    /// `bits_out` is clamped to `n/u - h + 1`; padded bits in the last byte
+    /// are 0.
     pub fn extract(&self, vals: &[u8], bits_out: usize) -> Vec<u8> {
-        let bits = bits_out.min(self.message_bits(vals.len()));
+        let n = vals.len();
+        let h = self.h as usize;
+        let bits = bits_out.min(self.message_bits(n));
         let mut out = vec![0u8; bits.div_ceil(8)];
-        for (i, byte) in out.iter_mut().enumerate() {
-            let first = i * 8;
-            let last = (first + 8).min(bits);
-            for bit in first..last {
-                let mut s = 0u8;
-                for d in 0..self.h as usize {
-                    if (self.pattern >> d) & 1 == 1 {
-                        s ^= vals[bit + d] & 1;
-                    }
-                }
-                if s != 0 {
-                    *byte |= 1 << (7 - (bit % 8));
-                }
+        if bits == 0 {
+            return out;
+        }
+
+        for b in 0..bits {
+            // Byte b of the message is row b + (h-1): the first h-1 rows are
+            // the trellis warm-up and carry no message bit.
+            if self.row_syndrome(vals, b + (h - 1)) != 0 {
+                out[b / 8] |= 1 << (7 - (b % 8));
             }
         }
         out
     }
 
+    /// Syndrome value of one matrix row: the XOR of every element whose column
+    /// vector sets the bit for that row.
+    ///
+    /// Row `r` is owned by group `r` and is also touched by the `h-1` groups
+    /// before it, so the element window is `[(r-h+1)*u, (r+1)*u)`.
+    #[inline]
+    fn row_syndrome(&self, vals: &[u8], row: usize) -> u8 {
+        let u = self.u as usize;
+        let h = self.h as usize;
+        let mut s = 0u8;
+        for g in row.saturating_sub(h - 1)..=row {
+            let d = row - g;
+            for (si, &col) in self.cols.iter().enumerate().take(u) {
+                if (col >> d) & 1 == 1 {
+                    s ^= vals[g * u + si] & 1;
+                }
+            }
+        }
+        s
+    }
+
     /// Embed `message` (MSB-first packed) into `vals`, returning the number of
     /// modified elements.
     ///
-    /// `vals.len()` must equal `message_bits + h - 1`. The message is a byte
-    /// slice, so its bit count can exceed the matrix's row count by up to 7
-    /// padding bits; those trailing bits are ignored (they are not covered by
-    /// `H`). Anything more is a caller error rather than silent truncation.
+    /// `vals.len()` must equal `slots_for(message bits)`, i.e. a multiple of
+    /// `u`. The message is a byte slice, so its bit count can exceed the
+    /// matrix's row count by up to 7 padding bits; those trailing bits are
+    /// ignored (they are not covered by `H`). Anything more is a caller error
+    /// rather than silent truncation.
     pub fn embed(
         &self,
         vals: &mut [u8],
@@ -217,12 +322,14 @@ impl StcTrellis {
         message: &[u8],
     ) -> Result<usize, StrHideError> {
         let n = vals.len();
+        let u = self.u as usize;
+        let h = self.h as usize;
         let m = self.message_bits(n);
         let bits = message.len() * 8;
         if bits < m || bits - m >= 8 {
             return Err(StrHideError::General(format!(
-                "STC message size mismatch: {bits} bits for {n} elements (h={}), expected {m}",
-                self.h
+                "STC message size mismatch: {bits} bits for {n} elements (h={}, u={}), expected {m}",
+                self.h, self.u
             )));
         }
         if moves.len() < n || rho_plus.len() < n || rho_minus.len() < n {
@@ -233,54 +340,85 @@ impl StcTrellis {
         if n == 0 {
             return Ok(0);
         }
+        if !n.is_multiple_of(u) {
+            return Err(StrHideError::General(format!(
+                "STC element count {n} is not a multiple of the group size u={u}"
+            )));
+        }
 
-        let h = self.h as usize;
-        let states = 1usize << (h - 1);
+        // State: `h-1` bits covering rows `g .. g+h-2`, plus — only when a group
+        // spans several elements — one extra bit for row `g+h-1`, which the
+        // rest of the group is still adding to.
+        let store_extra = u > 1;
+        let state_bits = (h - 1) + usize::from(store_extra);
+        let states = 1usize << state_bits;
         let low_mask = (1usize << (h - 1)) - 1;
-        let shift_mask = (1usize << (h - 2)) - 1;
+        let extra_shift = h - 1;
         let inf = f64::INFINITY;
-        // Column `j`'s contribution to row `j-h+1+d` is `ĥ[h-1-d] & x_j`, so the
-        // low `h-1` bits of the mask are `ĥ` reversed and the top bit (row `j`)
-        // is `ĥ[0]`.
-        let rev = self.reversed as usize;
-        let rev_top = (rev >> (h - 1)) & 1;
 
-        let mut cost = vec![0.0f64; states];
+        let mut cost = vec![inf; states];
+        cost[0] = 0.0;
         let mut next = vec![inf; states];
         // Two bits per (column, state): 4 decisions per byte.
         let mut back = vec![0u8; (n * states).div_ceil(4)];
 
         for j in 0..n {
             next.iter_mut().for_each(|c| *c = inf);
-            let opts = parity_options(vals[j], moves[j], rho_plus[j], rho_minus[j]);
+            let g = j / u;
+            let s = j % u;
+            let col = self.cols[s] as usize;
+            let col_low = col & low_mask;
+            let col_top = (col >> (h - 1)) & 1;
+            let decide = s == u - 1;
 
-            // The row finalised by this column, or None before the first one.
-            let row = j as isize - (h as isize - 1);
+            // The row finalised when this element closes its group, or None
+            // while the trellis is still warming up.
+            let row = g as isize - (h as isize - 1);
             let want = if row >= 0 {
                 message_bit(message, row as usize)
             } else {
                 0
             };
+            let opts = parity_options(vals[j], moves[j], rho_plus[j], rho_minus[j]);
 
             for (state, &base) in cost.iter().enumerate().take(states) {
                 if base.is_infinite() {
                     continue;
                 }
+                let st = state & low_mask;
+                let extra = if store_extra { state >> extra_shift } else { 0 };
+
                 for (parity, opt) in opts.iter().enumerate() {
                     let Some((dcost, kind)) = opt.best else {
                         continue;
                     };
-                    let c_low = if parity == 1 { rev & low_mask } else { 0 };
-                    let c_top = if parity == 1 { rev_top } else { 0 };
-                    let combined = state ^ c_low;
-                    if row >= 0 && (combined & 1) != want {
-                        continue;
-                    }
-                    let new_state = (combined >> 1) | (c_top << (h - 2));
+                    let (st1, ex1) = if parity == 1 {
+                        (st ^ col_low, extra ^ col_top)
+                    } else {
+                        (st, extra)
+                    };
+                    let (nst, nex) = if decide {
+                        // Warm-up rows (`row < 0`) are finalised against
+                        // `want == 0` as well. The backtracker rebuilds the
+                        // previous state from `want`, so a row that is left
+                        // unconstrained here would desynchronise the replay the
+                        // moment a warm-up column flips.
+                        if (st1 & 1) != want {
+                            continue;
+                        }
+                        ((st1 >> 1) | (ex1 << (h - 2)), 0)
+                    } else {
+                        (st1, ex1)
+                    };
+                    let ns = if store_extra {
+                        nst | (nex << extra_shift)
+                    } else {
+                        nst
+                    };
                     let nc = base + dcost;
-                    if nc < next[new_state] {
-                        next[new_state] = nc;
-                        let idx = j * states + new_state;
+                    if nc < next[ns] {
+                        next[ns] = nc;
+                        let idx = j * states + ns;
                         let shift = (idx & 3) * 2;
                         back[idx >> 2] =
                             (back[idx >> 2] & !(0b11 << shift)) | ((kind as u8) << shift);
@@ -291,8 +429,9 @@ impl StcTrellis {
             std::mem::swap(&mut cost, &mut next);
         }
 
-        // Every matrix row is finalised; the trailing `h-1` state bits describe
-        // rows past the matrix and are unconstrained, so take the cheapest.
+        // Every matrix row is finalised; a trailing partial group leaves the
+        // remaining state bits describing rows past the matrix, so take the
+        // cheapest.
         let mut best_state = usize::MAX;
         let mut best_cost = inf;
         for (state, &c) in cost.iter().enumerate() {
@@ -323,20 +462,37 @@ impl StcTrellis {
             }
             vals[j] = new_val;
 
-            // Invert the forward transition.
-            let row = j as isize - (h as isize - 1);
-            let want = if row >= 0 {
-                message_bit(message, row as usize)
+            // Invert the forward transition: undo the group shift first, then
+            // the column XOR.
+            let g = j / u;
+            let s = j % u;
+            let col = self.cols[s] as usize;
+            let col_low = col & low_mask;
+            let col_top = (col >> (h - 1)) & 1;
+            let parity = (new_val & 1) == 1;
+
+            let nst = state & low_mask;
+            let nex = if store_extra { state >> extra_shift } else { 0 };
+            let (st1, ex1) = if s == u - 1 {
+                let row = g as isize - (h as isize - 1);
+                let want = if row >= 0 {
+                    message_bit(message, row as usize)
+                } else {
+                    0
+                };
+                let st1 = ((nst & ((1usize << (h - 2)) - 1)) << 1) | want;
+                let ex1 = (nst >> (h - 2)) & 1;
+                (st1, ex1)
             } else {
-                0
+                (nst, nex)
             };
-            let c_low = if (new_val & 1) == 1 {
-                rev & low_mask
+            let st = if parity { st1 ^ col_low } else { st1 };
+            let extra = if parity { ex1 ^ col_top } else { ex1 };
+            state = if store_extra {
+                st | (extra << extra_shift)
             } else {
-                0
+                st
             };
-            let combined = ((state & shift_mask) << 1) | want;
-            state = combined ^ c_low;
         }
 
         Ok(flips)
@@ -349,6 +505,16 @@ pub fn validate_h(h: u8) -> Result<(), StrHideError> {
         return Err(StrHideError::General(format!(
             "STC constraint height must be in {}..={}, got {h}",
             MIN_STC_H, MAX_STC_H
+        )));
+    }
+    Ok(())
+}
+
+/// Validate an STC group size at the API boundary.
+pub fn validate_u(u: u8) -> Result<(), StrHideError> {
+    if !(1..=MAX_STC_U).contains(&u) {
+        return Err(StrHideError::General(format!(
+            "STC group size must be in 1..={MAX_STC_U}, got {u}"
         )));
     }
     Ok(())
@@ -379,10 +545,24 @@ mod tests {
         rp: &'a [f64],
         rm: &'a [f64],
         message: &'a [u8],
-        bits: usize,
     }
 
     impl Oracle<'_> {
+        /// Every row of `H` must hold: the warm-up rows decode as zero (the
+        /// encoder constrains them too) and the rest carry the message.
+        fn matches(&self, cur: &[u8]) -> bool {
+            let groups = self.vals.len() / self.t.u() as usize;
+            let h = self.t.h() as usize;
+            (0..groups).all(|row| {
+                let want = if row + 1 > h {
+                    message_bit(self.message, row - (h - 1))
+                } else {
+                    0
+                };
+                self.t.row_syndrome(cur, row) as usize == want
+            })
+        }
+
         /// Enumerate every legal candidate from slot `i` onward, keeping the
         /// cheapest one whose syndrome matches the message.
         fn walk(&self, i: usize, cur: &mut [u8], cost: f64, best: &mut f64) {
@@ -390,8 +570,7 @@ mod tests {
                 if cost >= *best {
                     return; // prune: additive costs only grow
                 }
-                let syn = self.t.extract(cur, self.bits);
-                if bits_equal(&syn, self.message, self.bits) {
+                if self.matches(cur) {
                     *best = cost;
                 }
                 return;
@@ -432,12 +611,24 @@ mod tests {
             rp,
             rm,
             message,
-            bits: t.message_bits(vals.len()),
         };
         let mut best = f64::INFINITY;
         let mut cur = vals.to_vec();
         oracle.walk(0, &mut cur, 0.0, &mut best);
         best
+    }
+
+    /// Achieved cost of a concrete cover/stego pair.
+    fn achieved_cost(vals: &[u8], stego: &[u8], rp: &[f64], rm: &[f64]) -> f64 {
+        vals.iter()
+            .zip(stego.iter())
+            .enumerate()
+            .map(|(i, (&a, &b))| match b.cmp(&a) {
+                std::cmp::Ordering::Equal => 0.0,
+                std::cmp::Ordering::Greater => rp[i],
+                std::cmp::Ordering::Less => rm[i],
+            })
+            .sum()
     }
 
     #[test]
@@ -448,22 +639,65 @@ mod tests {
         assert_eq!(t.slots_for(9), 12);
 
         let vals: Vec<u8> = (0..n).map(|i| if i % 3 == 0 { 1 } else { 0 }).collect();
+        // `extract` clamps to `n/u - h + 1` bits, so ask for the maximum and
+        // compare every bit against the documented formula.
         let got = t.extract(&vals, t.message_bits(n));
-        for i in 0..t.message_bits(n) {
+        for b in 0..t.message_bits(n) {
+            let row = b + 3;
             let mut want = 0u8;
-            for d in 0..4 {
-                if (t.pattern >> d) & 1 == 1 {
-                    want ^= vals[i + d] & 1;
+            for g in (row - 3)..=row {
+                let d = row - g;
+                for si in 0..t.u() as usize {
+                    if (t.cols[si] >> d) & 1 == 1 {
+                        want ^= vals[g * t.u() as usize + si] & 1;
+                    }
                 }
             }
-            assert_eq!(message_bit(&got, i) as u8, want, "syndrome bit {i}");
+            assert_eq!(message_bit(&got, b) as u8, want, "syndrome bit {b}");
+        }
+    }
+
+    /// `u > 1` must reproduce the same syndrome formula: group `g` owns row
+    /// `g`, and the message bit `b` is read from row `b + h - 1`.
+    #[test]
+    fn grouped_trellis_shape_and_syndrome_match_the_formula() {
+        for (u, h) in [(2u8, 4u8), (3, 4), (2, 6), (3, 8)] {
+            let t = StcTrellis::from_seed_grouped(0x1234_ABCD, h, u).unwrap();
+            assert_eq!(t.u(), u);
+            let groups = 24usize;
+            let n = groups * u as usize;
+            assert_eq!(t.message_bits(n), groups - (h as usize - 1));
+            assert_eq!(t.slots_for(t.message_bits(n)), n);
+
+            let vals: Vec<u8> = (0..n).map(|i| (i * 5 % 8) as u8).collect();
+            let got = t.extract(&vals, t.message_bits(n));
+            for b in 0..t.message_bits(n) {
+                let row = b + (h as usize - 1);
+                let mut want = 0u8;
+                for g in (row - (h as usize - 1))..=row {
+                    let d = row - g;
+                    for si in 0..u as usize {
+                        if (t.cols[si] >> d) & 1 == 1 {
+                            want ^= vals[g * u as usize + si] & 1;
+                        }
+                    }
+                }
+                assert_eq!(message_bit(&got, b) as u8, want, "u={u} h={h} bit {b}");
+            }
         }
     }
 
     #[test]
     fn embed_matches_exhaustive_optimum_and_round_trips() {
-        for (seed, h) in [(1u64, 4u8), (0x1234_5678, 4), (0xABCD, 5)] {
-            let t = StcTrellis::from_seed(seed, h).unwrap();
+        for (seed, h, u) in [
+            (1u64, 4u8, 1u8),
+            (0x1234_5678, 4, 1),
+            (0xABCD, 5, 1),
+            (7, 4, 2),
+            (0xFEED, 4, 2),
+            (0x9999, 4, 3),
+        ] {
+            let t = StcTrellis::from_seed_grouped(seed, h, u).unwrap();
             let n = if h == 4 { 12 } else { 10 };
             let vals: Vec<u8> = (0..n).map(|i| 40 + (i % 8) as u8).collect();
             let moves: Vec<Move> = vals.iter().map(|&v| spatial_move(v)).collect();
@@ -477,7 +711,7 @@ mod tests {
             let flips = t.embed(&mut stego, &moves, &rp, &rm, &message).unwrap();
             assert!(
                 bits_equal(&t.extract(&stego, bits), &message, bits),
-                "h={h}: roundtrip mismatch"
+                "h={h} u={u}: roundtrip mismatch"
             );
 
             for (&a, &b) in vals.iter().zip(stego.iter()) {
@@ -489,20 +723,11 @@ mod tests {
                 );
             }
 
-            let achieved: f64 = vals
-                .iter()
-                .zip(stego.iter())
-                .enumerate()
-                .map(|(i, (&a, &b))| match b.cmp(&a) {
-                    std::cmp::Ordering::Equal => 0.0,
-                    std::cmp::Ordering::Greater => rp[i],
-                    std::cmp::Ordering::Less => rm[i],
-                })
-                .sum();
+            let achieved = achieved_cost(&vals, &stego, &rp, &rm);
             let optimum = brute_force_min_cost(&t, &vals, &moves, &rp, &rm, &message);
             assert!(
                 (achieved - optimum).abs() < 1e-9,
-                "h={h}, seed={seed}: STC cost {achieved} != exhaustive optimum {optimum}"
+                "h={h} u={u} seed={seed}: STC cost {achieved} != exhaustive optimum {optimum}"
             );
             assert_eq!(
                 flips,
@@ -516,26 +741,62 @@ mod tests {
 
     #[test]
     fn wet_direction_is_never_used() {
-        let t = StcTrellis::from_seed(7, 4).unwrap();
-        let n = 24;
-        // Every element sits in the middle of its class, so both directions are
-        // legal and `rho_minus = inf` can only be honoured by choosing `+1`.
-        // (A class-ceiling value here would freeze that column entirely and the
-        // trellis could legitimately report "no feasible solution".)
-        let vals: Vec<u8> = (0..n).map(|i| 41 + (i % 6) as u8).collect();
-        let moves: Vec<Move> = vals.iter().map(|&v| spatial_move(v)).collect();
-        assert!(moves.iter().all(|&m| m == Move::Both));
-        let rp = vec![1.0f64; n];
-        let rm = vec![f64::INFINITY; n];
-        let bits = t.message_bits(n);
-        let message: Vec<u8> = (0..bits.div_ceil(8)).map(|i| 0xA5u8 ^ i as u8).collect();
+        for u in [1u8, 2] {
+            let t = StcTrellis::from_seed_grouped(7, 4, u).unwrap();
+            let n = 24;
+            // Every element sits in the middle of its class, so both directions
+            // are legal and `rho_minus = inf` can only be honoured by choosing
+            // `+1`.
+            let vals: Vec<u8> = (0..n).map(|i| 41 + (i % 6) as u8).collect();
+            let moves: Vec<Move> = vals.iter().map(|&v| spatial_move(v)).collect();
+            assert!(moves.iter().all(|&m| m == Move::Both));
+            let rp = vec![1.0f64; n];
+            let rm = vec![f64::INFINITY; n];
+            let bits = t.message_bits(n);
+            let message: Vec<u8> = (0..bits.div_ceil(8)).map(|i| 0xA5u8 ^ i as u8).collect();
 
-        let mut stego = vals.clone();
-        t.embed(&mut stego, &moves, &rp, &rm, &message).unwrap();
-        for (&a, &b) in vals.iter().zip(stego.iter()) {
-            assert!(b >= a, "wet direction was used: {a} -> {b}");
+            let mut stego = vals.clone();
+            t.embed(&mut stego, &moves, &rp, &rm, &message).unwrap();
+            for (&a, &b) in vals.iter().zip(stego.iter()) {
+                assert!(b >= a, "u={u}: wet direction was used: {a} -> {b}");
+            }
+            assert!(bits_equal(&t.extract(&stego, bits), &message, bits));
         }
-        assert!(bits_equal(&t.extract(&stego, bits), &message, bits));
+    }
+
+    /// The whole point of `u > 1`: at the same number of elements it changes
+    /// strictly fewer of them than the `u = 1` code, because each change is
+    /// amortised over `u` elements.
+    #[test]
+    fn larger_groups_lower_the_change_rate() {
+        let n = 960;
+        let mut rates = Vec::new();
+        for u in [1u8, 2, 3] {
+            let t = StcTrellis::from_seed_grouped(0x5EED, 8, u).unwrap();
+            let vals: Vec<u8> = (0..n).map(|i| 40 + (i % 8) as u8).collect();
+            let moves: Vec<Move> = vals.iter().map(|&v| spatial_move(v)).collect();
+            let rp = vec![1.0f64; n];
+            let rm = vec![1.0f64; n];
+            let bits = t.message_bits(n);
+            let message: Vec<u8> = (0..bits.div_ceil(8)).map(|i| (i * 37) as u8).collect();
+
+            let mut stego = vals.clone();
+            t.embed(&mut stego, &moves, &rp, &rm, &message).unwrap();
+            let flips = vals
+                .iter()
+                .zip(stego.iter())
+                .filter(|(a, b)| a != b)
+                .count();
+            rates.push(flips as f64 / n as f64);
+        }
+        assert!(
+            rates[1] < rates[0] * 0.85,
+            "u=2 must cut the change rate by >15%: {rates:?}"
+        );
+        assert!(
+            rates[2] < rates[1],
+            "u=3 must beat u=2 on the same element budget: {rates:?}"
+        );
     }
 
     #[test]
@@ -548,5 +809,23 @@ mod tests {
         assert!(t.embed(&mut vals, &moves, &rp, &rm, b"toolong!!").is_err());
         assert!(StcTrellis::from_seed(1, MAX_STC_H + 1).is_err());
         assert!(StcTrellis::from_seed(1, MIN_STC_H - 1).is_err());
+        assert!(StcTrellis::from_seed_grouped(1, 8, 0).is_err());
+        assert!(StcTrellis::from_seed_grouped(1, 8, MAX_STC_U + 1).is_err());
+        // u > h cannot give every element an independent column.
+        assert!(StcTrellis::from_seed_grouped(1, 4, 5).is_err());
+        assert!(validate_u(0).is_err());
+        assert!(validate_u(MAX_STC_U + 1).is_err());
+    }
+
+    /// A group whose elements cannot be laid out (n not a multiple of u) is a
+    /// caller error, not a silent truncation.
+    #[test]
+    fn non_multiple_element_count_is_rejected() {
+        let t = StcTrellis::from_seed_grouped(5, 4, 2).unwrap();
+        let mut vals = vec![40u8; 11];
+        let moves = vec![Move::Both; 11];
+        let rp = vec![1.0; 11];
+        let rm = vec![1.0; 11];
+        assert!(t.embed(&mut vals, &moves, &rp, &rm, &[0u8; 4]).is_err());
     }
 }

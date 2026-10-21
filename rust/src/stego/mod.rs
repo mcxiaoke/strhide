@@ -6,6 +6,7 @@
 
 pub mod coding;
 pub mod envelope;
+pub mod header;
 pub mod jpeg;
 pub mod params;
 pub mod prng;

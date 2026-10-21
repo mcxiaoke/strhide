@@ -1,21 +1,22 @@
 // Copyright (c) 2026 strhide developers
 // SPDX-License-Identifier: Apache-2.0
 
-//! Compare the two matrix-coding layers on a real carrier.
+//! Compare the matrix-coding layers on a real carrier.
 //!
 //! The review asked for four numbers before STC is ever allowed to become the
-//! default (see `docs/stc_coding_design_20261021.md` §8.5): change count,
+//! default (see `docs/stc_coding_design_20261021.md`): change count,
 //! cost-weighted distortion, detection score and wall-clock time. This binary
 //! produces the first two and the timing; the detection score comes from
 //! `strhide scan` on the files it writes.
 //!
 //! ```text
-//! cargo run --release --example codec_bench -- carrier.png payload.bin
+//! cargo run --release --example codec_bench -- carrier.png payload.bin [password]
 //! ```
 //!
-//! Both embeds use the same payload, password and carrier, so the only
-//! difference is the coding layer. The Hamming run is what production does
-//! today, which makes it the baseline the STC numbers have to beat.
+//! Every run uses the same payload, password and carrier, so the only
+//! difference is the coding layer. Hamming is what production does today, which
+//! makes it the baseline the STC rows have to beat. The STC rows differ only in
+//! the group size `u` (elements per syndrome row).
 
 use std::time::Instant;
 
@@ -41,8 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let h = image.height as usize;
     let channel_offset = if image.channels >= 3 { 1 } else { 0 };
 
-    // The cost map is the one HILL assigns to the *cover*; it is what both
-    // codecs use, so summing it over the modified slots is an apples-to-apples
+    // The cost map is the one HILL assigns to the *cover*; it is what every
+    // codec uses, so summing it over the modified slots is an apples-to-apples
     // distortion number.
     let costs = HillCostModel.compute_cost(
         &image.pixels,
@@ -53,24 +54,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!(
-        "carrier: {carrier_path} ({}x{}, {} channels), payload: {} bytes",
+        "carrier: {carrier_path} ({}x{}, {} channels), payload: {} bytes ({} bits)",
         image.width,
         image.height,
         image.channels,
-        payload.len()
+        payload.len(),
+        payload.len() * 8
     );
     println!(
-        "{:<8} {:>8} {:>10} {:>14} {:>10} {:>6}",
-        "codec", "flips", "ok", "sum(rho)", "ms", "bytes"
+        "{:<10} {:>3} {:>8} {:>10} {:>14} {:>8} {:>7} {:>5}",
+        "codec", "u", "flips", "flips/bit", "sum(rho)", "rho/bit", "ms", "bytes"
     );
 
-    for codec in [StegoCodec::Hamming, StegoCodec::Stc] {
+    let mut runs: Vec<(String, u8)> = vec![("Hamming".into(), 0)];
+    for u in 1..=3u8 {
+        runs.push(("Stc".into(), u));
+    }
+
+    for (codec, u) in runs {
         let params = SpatialParams {
-            codec,
+            codec: if codec == "Stc" {
+                StegoCodec::Stc
+            } else {
+                StegoCodec::Hamming
+            },
+            stc_u: u.max(1),
             ..SpatialParams::default()
         };
         let started = Instant::now();
-        let stego = embed_spatial(&carrier, &payload, password, &HillCostModel, &params)?;
+        let stego = match embed_spatial(&carrier, &payload, password, &HillCostModel, &params) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("{codec:<10} {u:>3}   -- {e}");
+                continue;
+            }
+        };
         let elapsed = started.elapsed();
 
         let after = decode_png(&stego)?;
@@ -89,20 +107,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let recovered =
             extract_spatial(&stego, password, &HillCostModel, &SpatialParams::default())?;
         let ok = recovered == payload;
+        let bits = payload.len() * 8;
 
         println!(
-            "{:<8} {:>8} {:>10} {:>14.2} {:>10} {:>6}",
-            format!("{codec:?}"),
+            "{:<10} {:>3} {:>8} {:>10.4} {:>14.3e} {:>8.4} {:>7} {:>5}{}",
+            codec,
+            u,
             flips,
-            if ok { "yes" } else { "NO" },
+            flips as f64 / bits as f64,
             weighted,
+            weighted / bits as f64,
             elapsed.as_millis(),
-            stego.len()
+            stego.len(),
+            if ok { "" } else { "  EXTRACT FAILED" }
         );
 
-        let out = format!("codec-bench-{}.png", format!("{codec:?}").to_lowercase());
+        let out = format!("codec-bench-{}-u{u}.png", codec.to_lowercase());
         std::fs::write(&out, &stego)?;
-        println!("         -> {out}");
+        println!("           -> {out}");
     }
 
     Ok(())

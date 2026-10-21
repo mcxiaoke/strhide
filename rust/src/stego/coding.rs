@@ -26,7 +26,10 @@ use crate::errors::StrHideError;
 
 mod stc;
 
-pub use stc::{DEFAULT_STC_H, MAX_STC_H, MIN_STC_H, StcTrellis, validate_h as validate_stc_h};
+pub use stc::{
+    DEFAULT_STC_H, MAX_STC_H, MAX_STC_U, MIN_STC_H, StcTrellis, validate_h as validate_stc_h,
+    validate_u as validate_stc_u,
+};
 
 /// Default Hamming parameter k (7 slots carry 3 bits).
 pub const DEFAULT_HAMMING_K: usize = 3;
@@ -218,6 +221,77 @@ pub fn hamming_embed_bytes(
     }
 
     Ok(flips)
+}
+
+/// Element count needed to carry `bits` payload bits under `codec`.
+///
+/// Hamming k=3 needs `2.33` slots per bit. STC with group size `u` needs
+/// `u * (bits + h - 1)`: `bits + h - 1` syndrome rows, each fed by `u`
+/// elements, plus the `h - 1` warm-up rows. `u = 1` is therefore ~1 slot per
+/// bit; larger `u` trades capacity for a lower change rate.
+///
+/// Both image engines call this so a carrier built by one is measured the same
+/// way as one built by the other.
+pub fn slots_for_codec(
+    bits: usize,
+    codec: crate::stego::params::StegoCodec,
+    stc_h: u8,
+    stc_u: u8,
+) -> Result<usize, StrHideError> {
+    use crate::stego::params::StegoCodec;
+    match codec {
+        StegoCodec::Hamming => Ok(required_slots(bits, DEFAULT_HAMMING_K)),
+        StegoCodec::Stc => {
+            let t = StcTrellis::from_seed_grouped(0, stc_h, stc_u)?;
+            Ok(t.slots_for(bits))
+        }
+    }
+}
+
+/// Change *count* per embedded bit for STC at group size `u`, as measured by
+/// `tests/batch_stego.rs` and the offline trellis simulation (2026-10-21).
+///
+/// Values are changes per message bit, not per slot: with `u` slots per bit the
+/// per-slot rate is `rate / u`. Larger `u` is cheaper per bit but strictly
+/// lower capacity, so the two numbers only make sense together.
+pub fn expected_stc_change_rate(stc_u: u8) -> f64 {
+    match stc_u {
+        0 | 1 => 0.50,
+        2 => 0.357,
+        _ => 0.335,
+    }
+}
+
+/// Direction legality for a JPEG DCT coefficient.
+///
+/// A `±1` move must stay inside the coefficient's `(2k, 2k+1)` bucket, i.e.
+/// keep `|c| & !1` unchanged: UERD builds its cost map from exactly that masked
+/// magnitude, so a move that crossed the bucket boundary would change the cost
+/// map the extractor recomputes and desynchronise the slot ranking.
+///
+/// From the even side of a positive coefficient only `+1` preserves the bucket,
+/// from the odd side only `-1`; negative coefficients mirror the same rule.
+/// Zero is never eligible (the engines require `|c| >= 2`), so it returns
+/// [`Move::Both`] purely as a defensive value.
+#[inline]
+pub fn dct_move(coeff: i16) -> Move {
+    match coeff.cmp(&0) {
+        std::cmp::Ordering::Greater => {
+            if coeff % 2 == 0 {
+                Move::PlusOnly
+            } else {
+                Move::MinusOnly
+            }
+        }
+        std::cmp::Ordering::Less => {
+            if (-coeff) % 2 == 0 {
+                Move::MinusOnly
+            } else {
+                Move::PlusOnly
+            }
+        }
+        std::cmp::Ordering::Equal => Move::Both,
+    }
 }
 
 /// Stops a slot from moving outside its value-invariant class.

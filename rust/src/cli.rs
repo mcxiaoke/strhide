@@ -402,7 +402,7 @@ pub struct EmbedArgs {
     #[arg(
         long = "codec",
         value_name = "NAME",
-        help = "Matrix-coding layer for the payload bits: hamming (default) or stc. \
+        help = "Matrix-coding layer for the payload bits, PNG and JPEG alike: hamming (default) or stc. \
                 The choice is recorded in the carrier, so extract never needs this flag."
     )]
     pub codec: Option<String>,
@@ -410,9 +410,18 @@ pub struct EmbedArgs {
     #[arg(
         long = "stc-h",
         value_name = "INT",
-        help = "Fine-tune (PNG STC): trellis constraint height, 4..10 (default: 8). Larger is slower and slightly better."
+        help = "Fine-tune (STC): trellis constraint height, 4..10 (default: 8). Larger is slower and slightly better."
     )]
     pub stc_h: Option<u8>,
+
+    #[arg(
+        long = "stc-u",
+        value_name = "INT",
+        help = "Fine-tune (STC): elements per syndrome row, 1..3 (default: 1). \
+                Larger spreads the message over more slots: fewer changed slots and lower weighted \
+                distortion, but roughly 1/u of the capacity."
+    )]
+    pub stc_u: Option<u8>,
 }
 
 const EMBED_AFTER_HELP: &str = "\
@@ -1753,19 +1762,24 @@ fn warn_nondefault_stego_params(options: &crate::stego::StegoOptions, quiet: boo
     );
 }
 
-/// Apply `--codec` / `--stc-h` to the option set.
+/// Apply `--codec` / `--stc-h` / `--stc-u` to the option set.
 ///
-/// Unlike the cost-model knobs, these two do **not** need to be repeated at
-/// extraction: the codec and its `h` are recorded in two spare bits of the
-/// envelope header (see `stego::spatial::engine`), so `extract` recovers them
-/// from the carrier itself. The flag exists on `embed` only.
+/// Unlike the cost-model knobs, these do **not** need to be repeated at
+/// extraction: the codec, its `h` and its `u` are recorded in six spare bits of
+/// the envelope header (see `stego::header`), so `extract` recovers them from
+/// the carrier itself. The flags exist on `embed` only.
+///
+/// The same values are applied to both engine families: `--codec` does not
+/// depend on whether the carrier turns out to be a PNG or a JPEG, and the
+/// caller does not know before the router has sniffed it.
 fn apply_codec_options(
     options: &mut crate::stego::StegoOptions,
     codec: Option<&str>,
     stc_h: Option<u8>,
+    stc_u: Option<u8>,
 ) -> Result<(), StrHideError> {
-    if let Some(name) = codec {
-        options.spatial_params.codec = match name.to_ascii_lowercase().as_str() {
+    let parsed = match codec {
+        Some(name) => Some(match name.to_ascii_lowercase().as_str() {
             "hamming" => crate::stego::StegoCodec::Hamming,
             "stc" => crate::stego::StegoCodec::Stc,
             other => {
@@ -1773,14 +1787,37 @@ fn apply_codec_options(
                     "Unknown codec '{other}': expected 'hamming' or 'stc'"
                 )));
             }
-        };
+        }),
+        None => None,
+    };
+    {
+        let params = &mut options.spatial_params;
+        if let Some(codec) = parsed {
+            params.codec = codec;
+        }
+        if let Some(h) = stc_h {
+            params.stc_h = h;
+        }
+        if let Some(u) = stc_u {
+            params.stc_u = u;
+        }
     }
-    if let Some(h) = stc_h {
-        options.spatial_params.stc_h = h;
+    {
+        let params = &mut options.jpeg_params;
+        if let Some(codec) = parsed {
+            params.codec = codec;
+        }
+        if let Some(h) = stc_h {
+            params.stc_h = h;
+        }
+        if let Some(u) = stc_u {
+            params.stc_u = u;
+        }
     }
-    // Reject an out-of-range height here rather than as an opaque capacity
-    // failure later.
+    // Reject out-of-range values here rather than as an opaque capacity failure
+    // later.
     options.spatial_params.validate()?;
+    options.jpeg_params.validate()?;
     Ok(())
 }
 
@@ -1792,7 +1829,7 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
                 algorithm: args.algorithm.clone(),
                 ..Default::default()
             };
-            apply_codec_options(&mut options, args.codec.as_deref(), args.stc_h)?;
+            apply_codec_options(&mut options, args.codec.as_deref(), args.stc_h, args.stc_u)?;
             if let Some(er) = args.exclusion_rate {
                 options.spatial_params.exclusion_percentile = er;
                 options.jpeg_params.block_exclusion_percentile = er;
@@ -1933,7 +1970,7 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         if let Some(p2) = args.p2_window {
             options.spatial_params.p2_window = p2;
         }
-        apply_codec_options(&mut options, args.codec.as_deref(), args.stc_h)?;
+        apply_codec_options(&mut options, args.codec.as_deref(), args.stc_h, args.stc_u)?;
         warn_nondefault_stego_params(&options, quiet);
 
         let stego_bytes = crate::stego::embed_carrier_with_profile(

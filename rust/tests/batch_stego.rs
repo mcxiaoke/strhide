@@ -43,13 +43,39 @@ use rayon::prelude::*;
 use strhide::analysis::scan_file;
 use strhide::errors::StrHideError;
 use strhide::stego::{
-    StegoCapacityInfo, StegoOptions, embed_carrier, extract_carrier, probe_carrier_capacity,
+    StegoCapacityInfo, StegoCodec, StegoOptions, embed_carrier, extract_carrier,
+    probe_carrier_capacity,
 };
 
 const CORPUS_DEFAULT: &str = "temp/teststego";
 const CORPUS_ALT: &str = "../temp/teststego";
 const TEST_PASSWORD: &str = "BatchStegoP@ssword2026!";
 const WRONG_PASSWORD: &str = "IncorrectPassword999!";
+
+/// Matrix-coding layer for the whole sweep, from `STRHIDE_STEGO_CODEC`:
+/// `hamming` (default), `stc`, `stc2` or `stc3`.
+///
+/// The knob is applied to both engines so PNG and JPEG carriers in the same run
+/// are exercised under the same code, which is the point of a corpus sweep:
+/// `--codec stc --stc-u 2` must still round-trip 100% of the accepted files,
+/// even though its capacity is lower and some carriers will legitimately refuse
+/// the larger payloads.
+fn codec_options() -> StegoOptions {
+    let raw = std::env::var("STRHIDE_STEGO_CODEC").unwrap_or_default();
+    let (codec, u) = match raw.to_ascii_lowercase().as_str() {
+        "" | "hamming" => (StegoCodec::Hamming, 1u8),
+        "stc" | "stc1" => (StegoCodec::Stc, 1),
+        "stc2" => (StegoCodec::Stc, 2),
+        "stc3" => (StegoCodec::Stc, 3),
+        other => panic!("STRHIDE_STEGO_CODEC must be hamming|stc|stc1|stc2|stc3, got {other}"),
+    };
+    let mut opts = StegoOptions::default();
+    opts.spatial_params.codec = codec;
+    opts.spatial_params.stc_u = u;
+    opts.jpeg_params.codec = codec;
+    opts.jpeg_params.stc_u = u;
+    opts
+}
 
 /// Resolve the test corpus directory.
 fn find_corpus_dir() -> Option<PathBuf> {
@@ -205,7 +231,7 @@ fn test_batch_stego_corpus() {
 
                 if is_apng || is_indexed || is_progressive_jpg || is_interlaced_png {
                     let payload = b"Test rejection payload";
-                    let opt = StegoOptions::default();
+                    let opt = codec_options();
                     let res = embed_carrier(&file_bytes, payload, &opt);
                     match res {
                         Err(StrHideError::UnsupportedFormat(msg)) => {
@@ -246,7 +272,7 @@ fn test_batch_stego_corpus() {
                 }
 
                 // 2. Normal valid carrier: probe capacity
-                let opt_probe = StegoOptions::default();
+                let opt_probe = codec_options();
                 let cap: StegoCapacityInfo = match probe_carrier_capacity(&file_bytes, &opt_probe) {
                     Ok(c) => c,
                     Err(e) => {
@@ -263,10 +289,8 @@ fn test_batch_stego_corpus() {
 
                 // 3. Roundtrip Test 1: Small payload (64 bytes) with password
                 let payload1 = deterministic_bytes(64, 1001);
-                let mut opt_enc = StegoOptions {
-                    password: Some(TEST_PASSWORD.to_string()),
-                    ..Default::default()
-                };
+                let mut opt_enc = codec_options();
+                opt_enc.password = Some(TEST_PASSWORD.to_string());
 
                 let t_embed_start = Instant::now();
                 let stego_bytes = embed_carrier(&file_bytes, &payload1, &opt_enc)
@@ -299,7 +323,7 @@ fn test_batch_stego_corpus() {
                 // 4. Roundtrip Test 2: Medium payload without password
                 let medium_size = 1024.min(cap.recommended_max_bytes.max(64));
                 let payload2 = deterministic_bytes(medium_size, 2002);
-                let opt_plain = StegoOptions::default();
+                let opt_plain = codec_options();
                 let stego_bytes2 = embed_carrier(&file_bytes, &payload2, &opt_plain).unwrap_or_else(|e| {
                     panic!("Embedding medium {medium_size}B failed on {filename}: {e:?}")
                 });
@@ -535,14 +559,35 @@ fn test_batch_stego_corpus() {
         if !report.undetected.is_empty() {
             println!("  undetected at full load: {:?}", report.undetected);
         }
-        assert!(
-            ratio >= 0.80,
-            "Self-check must flag at least 80% of carriers at full load, measured {:.0}% ({}/{}); undetected: {:?}",
-            ratio * 100.0,
-            report.high_flagged,
-            report.high_measured,
-            report.undetected
-        );
+        // The floor is calibrated for the default Hamming codec. It exists to
+        // catch a *broken analyser* (a collapse toward zero), not to assert
+        // invisibility, and it assumes Hamming's change distribution. STC with
+        // a group size above 1 deliberately changes fewer slots per bit, so its
+        // full-load detection rate drops (measured: u=2 -> 80%, u=3 -> 67%);
+        // that is the feature, not a regression. Keep the number visible, but
+        // only hold the default codec to it.
+        let default_codec = std::env::var("STRHIDE_STEGO_CODEC")
+            .map(|v| v.is_empty() || v.eq_ignore_ascii_case("hamming"))
+            .unwrap_or(true);
+        if default_codec {
+            assert!(
+                ratio >= 0.80,
+                "Self-check must flag at least 80% of carriers at full load, measured {:.0}% ({}/{}); undetected: {:?}",
+                ratio * 100.0,
+                report.high_flagged,
+                report.high_measured,
+                report.undetected
+            );
+        } else {
+            assert!(
+                ratio >= 0.50,
+                "Even a low-change codec must not collapse the detector, measured {:.0}% ({}/{}); undetected: {:?}",
+                ratio * 100.0,
+                report.high_flagged,
+                report.high_measured,
+                report.undetected
+            );
+        }
     }
 
     assert_eq!(report.failed, 0, "All stego batch tests must pass");

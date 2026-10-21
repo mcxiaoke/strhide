@@ -56,13 +56,14 @@ impl StegoCodec {
         }
     }
 
-    /// Human-readable form for diagnostics ("Hamming k=3", "STC h=8").
-    pub fn describe(self, stc_h: u8) -> String {
+    /// Human-readable form for diagnostics ("Hamming k=3", "STC h=8 u=2").
+    pub fn describe(self, stc_h: u8, stc_u: u8) -> String {
         match self {
             StegoCodec::Hamming => {
                 format!("Hamming k={}", crate::stego::coding::DEFAULT_HAMMING_K)
             }
-            StegoCodec::Stc => format!("STC h={stc_h}"),
+            StegoCodec::Stc if stc_u <= 1 => format!("STC h={stc_h}"),
+            StegoCodec::Stc => format!("STC h={stc_h} u={stc_u}"),
         }
     }
 }
@@ -86,10 +87,25 @@ pub struct SpatialParams {
     /// STC constraint height, used only when `codec == Stc` (default 8).
     #[serde(default = "default_stc_h")]
     pub stc_h: u8,
+    /// STC group size: how many elements share one syndrome row (default 1).
+    ///
+    /// `1` is the classic one-row-per-element code (one slot per bit). `2` and
+    /// `3` carry one bit per 2 or 3 slots instead, which spreads the same
+    /// message over more elements: the change *count* drops, and because every
+    /// change still lands on the cheapest available slot the weighted
+    /// distortion drops further. The trade is capacity -- a group of `u` buys
+    /// roughly `1/u` bit per slot. Extraction reads `u` from the envelope
+    /// header, so it never needs to be repeated.
+    #[serde(default = "default_stc_u")]
+    pub stc_u: u8,
 }
 
 fn default_stc_h() -> u8 {
     crate::stego::coding::DEFAULT_STC_H
+}
+
+fn default_stc_u() -> u8 {
+    1
 }
 
 impl Default for SpatialParams {
@@ -103,6 +119,7 @@ impl Default for SpatialParams {
             exclusion_percentile: 0.30,
             codec: StegoCodec::Hamming,
             stc_h: default_stc_h(),
+            stc_u: default_stc_u(),
         }
     }
 }
@@ -149,6 +166,13 @@ impl SpatialParams {
         }
         if self.codec == StegoCodec::Stc {
             crate::stego::coding::validate_stc_h(self.stc_h)?;
+            crate::stego::coding::validate_stc_u(self.stc_u)?;
+            if self.stc_u > self.stc_h {
+                return Err(StrHideError::General(format!(
+                    "STC parameter 'stc_u' must be <= 'stc_h' (got u={}, h={})",
+                    self.stc_u, self.stc_h
+                )));
+            }
         }
         Ok(())
     }
@@ -165,6 +189,15 @@ pub struct JpegParams {
     pub block_exclusion_percentile: f64,
     /// Cost assigned to unembeddable or excluded coefficients.
     pub wet_cost: f64,
+    /// Matrix-coding layer (default Hamming; STC is opt-in).
+    #[serde(default)]
+    pub codec: StegoCodec,
+    /// STC constraint height, used only when `codec == Stc` (default 8).
+    #[serde(default = "default_stc_h")]
+    pub stc_h: u8,
+    /// STC group size (default 1); see [`SpatialParams::stc_u`].
+    #[serde(default = "default_stc_u")]
+    pub stc_u: u8,
 }
 
 impl Default for JpegParams {
@@ -174,6 +207,9 @@ impl Default for JpegParams {
             min_abs_coeff: 1,
             block_exclusion_percentile: 0.20,
             wet_cost: 1e13,
+            codec: StegoCodec::Hamming,
+            stc_h: default_stc_h(),
+            stc_u: default_stc_u(),
         }
     }
 }
@@ -206,6 +242,16 @@ impl JpegParams {
                 "UERD parameter 'wet_cost' must be a finite positive number, got {}",
                 self.wet_cost
             )));
+        }
+        if self.codec == StegoCodec::Stc {
+            crate::stego::coding::validate_stc_h(self.stc_h)?;
+            crate::stego::coding::validate_stc_u(self.stc_u)?;
+            if self.stc_u > self.stc_h {
+                return Err(StrHideError::General(format!(
+                    "STC parameter 'stc_u' must be <= 'stc_h' (got u={}, h={})",
+                    self.stc_u, self.stc_h
+                )));
+            }
         }
         Ok(())
     }
