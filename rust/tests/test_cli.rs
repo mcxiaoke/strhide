@@ -9,6 +9,8 @@ mod batch;
 mod cli_unification;
 #[path = "test_cli/config.rs"]
 mod config;
+#[path = "test_cli/i18n.rs"]
+mod i18n;
 #[path = "test_cli/p2.rs"]
 mod p2;
 #[path = "test_cli/scan.rs"]

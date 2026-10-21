@@ -320,10 +320,8 @@ fn test_cli_embed_and_extract_roundtrip() {
     let png_bytes = generate_texture_png(128, 128);
     fs::write(&carrier_png, &png_bytes).unwrap();
 
-    let bin = env!("CARGO_BIN_EXE_strhide");
-
     // 1. Embed via CLI: strhide embed carrier.png -t "CLI Test Message" -p "TestPW123" -o stego.png
-    let embed_status = std::process::Command::new(bin)
+    let embed_status = base_cmd()
         .arg("embed")
         .arg(&carrier_png)
         .arg("-t")
@@ -338,7 +336,7 @@ fn test_cli_embed_and_extract_roundtrip() {
     assert!(stego_png.exists(), "stego file must be created");
 
     // 2. Extract via CLI: strhide extract stego.png -p "TestPW123" -o out.txt
-    let extract_status = std::process::Command::new(bin)
+    let extract_status = base_cmd()
         .arg("extract")
         .arg(&stego_png)
         .arg("-p")
@@ -353,7 +351,7 @@ fn test_cli_embed_and_extract_roundtrip() {
     assert_eq!(read_back, "CLI Test Message");
 
     // 3. Scan the stego file: strhide scan stego.png
-    let scan_status = std::process::Command::new(bin)
+    let scan_status = base_cmd()
         .arg("scan")
         .arg(&stego_png)
         .status()

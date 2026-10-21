@@ -9,7 +9,7 @@ use crate::common::*;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 // --------------------------------------------------------------------------- helpers
 
@@ -23,7 +23,7 @@ fn seed(dir: &Path, names: &[&str]) {
 /// Run the binary inside `dir`, isolated from the caller's config file and
 /// payload environment variables.
 fn run(dir: &Path, args: &[&str]) -> Output {
-    Command::new(bin())
+    base_cmd()
         .args(args)
         .current_dir(dir)
         .env("USERPROFILE", dir)
@@ -94,7 +94,7 @@ fn batch_write_reads_stdin_once_for_all_carriers() {
 
     // A second stdin read would yield an empty payload; the old single-carrier
     // code path would have embedded "" into the second carrier.
-    let mut child = Command::new(bin())
+    let mut child = base_cmd()
         .args(["write", "a.png", "b.png", "--stdin", "--in-place"])
         .current_dir(&dir)
         .env("USERPROFILE", &dir)

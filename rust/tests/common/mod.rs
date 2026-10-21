@@ -10,6 +10,14 @@ pub fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_strhide")
 }
 
+/// Standard Command builder for CLI integration tests.
+/// Injects `STRHIDE_LANG=en` to guarantee consistent baseline output on all developer machines.
+pub fn base_cmd() -> std::process::Command {
+    let mut c = std::process::Command::new(bin());
+    c.env("STRHIDE_LANG", "en");
+    c
+}
+
 pub fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "strhide_test_{}_{}_{}",

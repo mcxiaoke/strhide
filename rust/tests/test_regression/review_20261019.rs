@@ -7,7 +7,7 @@
 use crate::common::*;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use strhide::adapters::HostAdapter;
 use strhide::engine::{
@@ -151,7 +151,7 @@ fn remove_honours_config_backup_false() {
     );
     let cfg = dir.join("strhide.toml");
     fs::write(&cfg, "backup = false\n").unwrap();
-    let out = Command::new(bin())
+    let out = base_cmd()
         .args([
             "restore",
             stego.to_str().unwrap(),
@@ -185,7 +185,7 @@ fn cli_password_hint_with_apostrophe_is_shown_verbatim() {
     let carrier = dir.join("c.png");
     fs::write(&carrier, make_png()).unwrap();
     let hinted = dir.join("h.png");
-    let write = Command::new(bin())
+    let write = base_cmd()
         .args([
             "write",
             carrier.to_str().unwrap(),
@@ -210,7 +210,7 @@ fn cli_password_hint_with_apostrophe_is_shown_verbatim() {
         String::from_utf8_lossy(&write.stderr)
     );
 
-    let read = Command::new(bin())
+    let read = base_cmd()
         .args(["read", hinted.to_str().unwrap(), "--stdout"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -234,7 +234,7 @@ fn cli_stealth_ignores_configured_hint() {
     fs::write(&carrier, make_png()).unwrap();
     let cfg = dir.join("strhide.toml");
     fs::write(&cfg, "hint = \"my usual one\"\n").unwrap();
-    let out = Command::new(bin())
+    let out = base_cmd()
         .args([
             "write",
             carrier.to_str().unwrap(),
@@ -267,7 +267,7 @@ fn cli_stealth_rejects_explicit_hint() {
     let dir = scratch("stealth_explicit_hint");
     let carrier = dir.join("c.png");
     fs::write(&carrier, make_png()).unwrap();
-    let out = Command::new(bin())
+    let out = base_cmd()
         .args([
             "write",
             carrier.to_str().unwrap(),
@@ -300,7 +300,7 @@ fn cli_stealth_rejects_explicit_hint() {
 /// Console output must be pure ASCII so it survives a CP936 console.
 #[test]
 fn list_output_is_pure_ascii() {
-    let out = Command::new(bin())
+    let out = base_cmd()
         .arg("list")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -463,7 +463,7 @@ fn single_carrier_output_directory() {
     fs::write(&carrier, make_png()).unwrap();
     let outdir = dir.join("out");
     fs::create_dir_all(&outdir).unwrap();
-    let out = Command::new(bin())
+    let out = base_cmd()
         .args([
             "write",
             carrier.to_str().unwrap(),
@@ -507,7 +507,7 @@ fn read_warns_when_password_is_unused() {
         false,
         &stego,
     );
-    let out = Command::new(bin())
+    let out = base_cmd()
         .args([
             "read",
             stego.to_str().unwrap(),

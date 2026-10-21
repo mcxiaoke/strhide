@@ -10,10 +10,9 @@
 use crate::common::*;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn run(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new(bin())
+    let out = base_cmd()
         .args(args)
         .current_dir(dir)
         .env("USERPROFILE", dir)
@@ -128,7 +127,7 @@ fn scan_real_jpeg_sample_does_not_panic() {
 /// Like `run`, but also reports the exit code for the scan gate semantics
 /// (0 = clean/low/suspicious, 1 = at least one "likely-hidden" verdict).
 fn run_with_code(dir: &Path, args: &[&str]) -> (String, i32) {
-    let out = Command::new(bin())
+    let out = base_cmd()
         .args(args)
         .current_dir(dir)
         .env("USERPROFILE", dir)

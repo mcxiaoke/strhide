@@ -120,11 +120,13 @@
 pub mod adapters;
 pub mod analysis;
 pub mod cli;
+pub mod cli_i18n;
 pub mod config;
 pub mod crypto;
 pub mod engine;
 pub mod envelope;
 pub mod errors;
+pub mod i18n;
 pub mod jpeg;
 pub mod params;
 pub mod rejection;

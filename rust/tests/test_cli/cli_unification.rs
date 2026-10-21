@@ -11,7 +11,7 @@
 use crate::common::*;
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn seed(dir: &Path, names: &[&str]) {
     for name in names {
@@ -53,7 +53,7 @@ fn seed_stego(dir: &Path, names: &[&str]) {
 }
 
 fn run(dir: &Path, args: &[&str]) -> Output {
-    Command::new(bin())
+    base_cmd()
         .args(args)
         .current_dir(dir)
         .env("USERPROFILE", dir)
@@ -577,7 +577,7 @@ fn stego_secret_precedence_flag_env_config() {
     assert_eq!(stdout(&cfg_ok), payload);
 
     let run_env = |secret: Option<&str>| -> Output {
-        let mut cmd = Command::new(bin());
+        let mut cmd = base_cmd();
         cmd.args(["extract", "carrier.png", "--stdout"])
             .current_dir(&dir)
             .env("USERPROFILE", &dir)

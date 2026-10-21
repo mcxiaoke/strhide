@@ -7,7 +7,7 @@ use crate::common::*;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[cfg_attr(not(unix), allow(dead_code))]
 fn make_minimal_png() -> Vec<u8> {
@@ -75,7 +75,7 @@ fn cli_stealth_without_password_fails_fast() {
     let dir = scratch("cli_stealth");
     let carrier = dir.join("c.png");
     fs::write(&carrier, make_png()).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_strhide"))
+    let out = base_cmd()
         .args([
             "write",
             carrier.to_str().unwrap(),
@@ -101,7 +101,7 @@ fn cli_no_preserve_time_flag_accepted() {
     let dir = scratch("cli_npt");
     let carrier = dir.join("c.png");
     fs::write(&carrier, make_png()).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_strhide"))
+    let out = base_cmd()
         .args([
             "write",
             carrier.to_str().unwrap(),

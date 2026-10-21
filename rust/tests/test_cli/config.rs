@@ -4,12 +4,12 @@
 use crate::common::*;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// Run the binary inside `dir` with STRHIDE_PASSWORD cleared unless
 /// `env_password` says otherwise.
 fn run(dir: &PathBuf, args: &[&str], env_password: Option<&str>) -> Output {
-    let mut cmd = Command::new(bin());
+    let mut cmd = base_cmd();
     cmd.args(args)
         .current_dir(dir)
         .env("STRHIDE_PASSWORD", env_password.unwrap_or(""));

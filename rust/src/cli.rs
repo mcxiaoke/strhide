@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::config::{self, FileConfig};
 use crate::engine::{
@@ -11,6 +11,7 @@ use crate::engine::{
     remove_carrier, verify_carrier, write_carrier,
 };
 use crate::errors::StrHideError;
+use crate::i18n::{self, Msg, t};
 use crate::router::{ADAPTERS, find_adapter_or_reject};
 
 pub const STRHIDE_VERSION_INFO: &str = env!("STRHIDE_VERSION_INFO");
@@ -22,7 +23,7 @@ pub const BANNER: &str = concat!("strhide ", env!("STRHIDE_VERSION_INFO"));
 #[command(
     name = "strhide",
     version = STRHIDE_VERSION_INFO,
-    about = "Smart multi-format lossless container data hiding tool"
+    about = "Format-preserving lossless data hiding and steganography tool"
 )]
 pub struct Cli {
     /// Path to TOML config file (default: ./strhide.toml, then ~/.strhide/config.toml)
@@ -36,6 +37,15 @@ pub struct Cli {
         help = "Suppress normal status output: [OK]/[INFO] progress, notices, and human-readable reports. Payload data (read), --json/table output, and [ERROR] messages always print; the exit code tells scripts whether the command succeeded."
     )]
     pub quiet: bool,
+
+    #[arg(
+        long = "lang",
+        global = true,
+        value_name = "LANG",
+        value_parser = ["en", "zh"],
+        help = "Interface language: en or zh (default: STRHIDE_LANG / config / system locale)"
+    )]
+    pub lang: Option<String>,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -216,25 +226,7 @@ pub struct WriteArgs {
     pub unescape: bool,
 }
 
-const WRITE_AFTER_HELP: &str = "\
-Payload sources are mutually exclusive: -d/--data, -t/--text, --text-file,
---text-base64, and --stdin. When none is given, the STRHIDE_TEXT environment
-variable is used as a last-resort fallback.
-
---stealth implies password protection: provide -p/--password, --password-file,
-or STRHIDE_PASSWORD; a password hint (-H) is rejected in stealth mode.
-The payload is always encrypted in the envelope; -e/--encrypt only controls
-what happens when no password source is present (prompt or fail).
-
-Examples:
-  strhide write photo.png -t \"meet me at 7\"                 # writes to photo-out.png
-  strhide write photo.png -t \"meet me at 7\" --in-place      # writes to photo.png in place
-  strhide write report.pdf -d secret.zip -p \"S3cret!\" -H \"my usual one\"
-  strhide write photo.png -t \"line1\\nline2\" --unescape
-  cat secret.txt | strhide write image.jpg --stdin
-  strhide write a.png b.png c.png -t \"secret\" -o done/
-  strhide read done/a.png                  # extract the payload again
-";
+const WRITE_AFTER_HELP: &str = crate::i18n::messages::WRITE_AFTER_HELP_EN;
 
 #[derive(Args, Debug)]
 #[command(after_help = READ_AFTER_HELP)]
@@ -271,19 +263,7 @@ pub struct ReadArgs {
     pub overwrite: bool,
 }
 
-const READ_AFTER_HELP: &str = "\
-With neither -o/--output nor --stdout:
-  * file payloads are written into the current directory under the filename
-    stored inside the envelope (reduced to a bare name; an existing file is
-    never overwritten without --overwrite);
-  * text payloads are printed to standard output.
-
-Examples:
-  strhide read photo.png                   # file -> ./<stored name>, text -> stdout
-  strhide read photo.png -o recovered.zip  # extraction to an explicit path
-  strhide read photo.png --stdout          # always print to standard output
-  strhide read locked.png                  # shows the stored hint before prompting
-";
+const READ_AFTER_HELP: &str = crate::i18n::messages::READ_AFTER_HELP_EN;
 
 #[derive(Args, Debug)]
 #[command(after_help = EMBED_AFTER_HELP)]
@@ -424,19 +404,7 @@ pub struct EmbedArgs {
     pub stc_u: Option<u8>,
 }
 
-const EMBED_AFTER_HELP: &str = "\
-Content-adaptive steganography (HILL for PNG, UERD for JPEG) embeds data directly
-into image texture/coefficients, making it immune to container metadata stripping.
-Because pixel/coefficient values are modified, this operation cannot be reversed
-to the original carrier bit-for-bit.
-
-Examples:
-  strhide embed photo.jpg -t \"secret message\"                 # writes to photo-out.jpg
-  strhide embed photo.jpg -t \"secret message\" --in-place      # writes to photo.jpg in place
-  strhide embed photo.jpg -t \"secret message\" -o out.jpg
-  strhide embed graphic.png -d secret.zip -p \"P@ss!\" -o out.png
-  strhide embed photo.jpg -t \"custom tuning\" --exclusion-rate 0.40 -o out.png
-";
+const EMBED_AFTER_HELP: &str = crate::i18n::messages::EMBED_AFTER_HELP_EN;
 
 #[derive(Args, Debug)]
 #[command(after_help = EXTRACT_AFTER_HELP)]
@@ -504,15 +472,7 @@ pub struct ExtractArgs {
     pub p2_window: Option<usize>,
 }
 
-const EXTRACT_AFTER_HELP: &str = "\
-Extracts payload embedded via content-adaptive steganography (embed).
-Format is automatically detected (PNG or JPEG).
-
-Examples:
-  strhide extract out.jpg -p \"P@ss!\"               # text prints to stdout
-  strhide extract out.jpg -p \"P@ss!\" --stdout      # force stdout
-  strhide extract out.png -p \"P@ss!\" -o secret.zip # extracts to file
-";
+const EXTRACT_AFTER_HELP: &str = crate::i18n::messages::EXTRACT_AFTER_HELP_EN;
 
 #[derive(Args, Debug)]
 #[command(after_help = RESTORE_AFTER_HELP)]
@@ -556,17 +516,7 @@ pub struct RestoreArgs {
     pub no_backup: bool,
 }
 
-const RESTORE_AFTER_HELP: &str = "\
-Examples:
-  strhide restore photo.png                 # writes clean copy to photo-out.png
-  strhide restore photo.png --in-place      # restore in place, keeping photo.png.bak
-  strhide restore photo.png -o clean.png    # write the restored copy to 'clean.png'
-  strhide restore a.png b.png c.png         # batch restoration to *-out.png
-  strhide restore a.png b.png -o clean_dir/ # batch restoration into directory
-
-Restoration is verified loss-free: the restored SHA-256 must match the
-original host recorded in the envelope, or the command fails loudly.
-";
+const RESTORE_AFTER_HELP: &str = crate::i18n::messages::RESTORE_AFTER_HELP_EN;
 
 #[derive(Args, Debug)]
 #[command(after_help = INSPECT_AFTER_HELP)]
@@ -593,14 +543,7 @@ pub struct InspectArgs {
     pub json: bool,
 }
 
-const INSPECT_AFTER_HELP: &str = "\
-Examples:
-  strhide inspect photo.png             # inspect one carrier
-  strhide inspect a.png b.png c.png     # inspect multiple carriers
-  strhide inspect dir/ -r               # inspect directory tree recursively
-  strhide inspect photo.png --json      # report as JSON object
-  strhide inspect a.png b.png --json    # report as JSON array
-";
+const INSPECT_AFTER_HELP: &str = crate::i18n::messages::INSPECT_AFTER_HELP_EN;
 
 #[derive(Args, Debug)]
 #[command(after_help = VERIFY_AFTER_HELP)]
@@ -627,22 +570,7 @@ pub struct VerifyArgs {
     pub json: bool,
 }
 
-const VERIFY_AFTER_HELP: &str = "\
-Levels:
-  Level 1 - host container format is intact (PNG/JPEG/... structure)
-  Level 2 - hidden envelope boundary found and correctly bounded
-  Level 3 - envelope contents (crypto + payload) verified; needs a password
-
-Exit codes: 0 when Level 1 and Level 2 pass, 1 otherwise. Level 3 failures are
-reported but do not change the exit code, matching the Python CLI.
-
-Examples:
-  strhide verify photo.png              # verify one carrier
-  strhide verify a.png b.png c.png      # verify multiple carriers
-  strhide verify dir/ -r                # verify directory tree recursively
-  strhide verify photo.png --json       # report as JSON object
-  strhide verify a.png b.png --json     # report as JSON array
-";
+const VERIFY_AFTER_HELP: &str = crate::i18n::messages::VERIFY_AFTER_HELP_EN;
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
@@ -679,36 +607,22 @@ pub struct ScanArgs {
     pub json: bool,
 }
 
-const SCAN_AFTER_HELP: &str = "\
-Examples:
-  strhide scan photo.png               # one file
-  strhide scan dir/ -r                 # a whole directory tree
-  strhide scan dir1/ dir2/ --json      # every report as JSON
-
-Exit codes: 0 when no report reaches \"likely-hidden\"; 1 when at least one
-does. Lower-confidence findings (\"low\"/\"suspicious\") and per-file scan
-failures stay at exit 0 - they show up in the report/--json instead, so use
---json (which includes verdict and risk_score) to gate on them.
-
-Combine with the global -q/--quiet to scan silently and act on the exit code:
-  strhide scan downloads/ -r -q || echo suspicious files found
-
-Inputs are treated as unknown suspects, not strhide carriers: findings cover
-structural and statistical anomalies from any tool, known or unknown.
-";
+const SCAN_AFTER_HELP: &str = crate::i18n::messages::SCAN_AFTER_HELP_EN;
 
 pub fn prompt_password(confirm: bool) -> Result<String, StrHideError> {
-    let pwd = rpassword::prompt_password("Enter password: ")
+    let p1 = t!(Msg::PromptEnterPassword);
+    let pwd = rpassword::prompt_password(&p1)
         .map_err(|e| StrHideError::General(format!("Failed to read password: {e}")))?;
     if pwd.is_empty() {
         return Err(StrHideError::Password("Password cannot be empty".into()));
     }
     if confirm {
-        let pwd2 = rpassword::prompt_password("Confirm password: ").map_err(|e| {
+        let p2 = t!(Msg::PromptConfirmPassword);
+        let pwd2 = rpassword::prompt_password(&p2).map_err(|e| {
             StrHideError::General(format!("Failed to read password confirmation: {e}"))
         })?;
         if pwd != pwd2 {
-            return Err(StrHideError::Password("Passwords do not match".into()));
+            return Err(StrHideError::Password(t!(Msg::PasswordMismatch)));
         }
     }
     Ok(pwd)
@@ -823,14 +737,134 @@ fn should_print_banner(cli: &Cli) -> bool {
     }
 }
 
-pub fn run_cli() -> i32 {
-    let cli = Cli::parse();
+pub fn print_error(e: &StrHideError) {
+    let line = match e.category() {
+        Some(cat) => t!(
+            Msg::ErrorLine,
+            prefix = cat.text(i18n::lang()),
+            detail = e.detail()
+        ),
+        None => t!(Msg::ErrorLinePlain, detail = e.detail()),
+    };
+    eprintln!("{line}");
+}
 
-    let cfg = match config::load(cli.config.as_deref()) {
+fn scan_lang_flag(argv: &[std::ffi::OsString]) -> Option<&str> {
+    let mut iter = argv.iter();
+    while let Some(arg) = iter.next() {
+        let Some(s) = arg.to_str() else { continue };
+        if s == "--" {
+            break;
+        }
+        if s == "--lang" {
+            if let Some(val) = iter.next() {
+                return val.to_str();
+            }
+        } else if let Some(val) = s.strip_prefix("--lang=") {
+            return Some(val);
+        }
+    }
+    None
+}
+
+fn scan_subcommand(argv: &[std::ffi::OsString]) -> Option<&str> {
+    const SUBCOMMANDS: &[&str] = &[
+        "write", "read", "restore", "inspect", "verify", "scan", "embed", "extract", "list",
+    ];
+    let mut skip_next = false;
+    for arg in argv.iter().skip(1) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let Some(s) = arg.to_str() else { continue };
+        if s == "--" {
+            break;
+        }
+        if s == "-c" || s == "--config" || s == "--lang" {
+            skip_next = true;
+            continue;
+        }
+        if s.starts_with('-') {
+            continue;
+        }
+        if SUBCOMMANDS.contains(&s) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+fn render_early_error(e: clap::Error, argv: &[std::ffi::OsString]) -> i32 {
+    use clap::error::ErrorKind::*;
+    let lang = i18n::locale::detect(scan_lang_flag(argv), &FileConfig::default());
+    i18n::set_lang(lang);
+
+    match e.kind() {
+        DisplayHelp | DisplayHelpOnMissingArgumentOrSubcommand | MissingSubcommand => {
+            let mut cmd = crate::cli_i18n::localize(Cli::command(), lang);
+            if let Some(target) = scan_subcommand(argv)
+                && let Some(sub) = cmd.find_subcommand_mut(target)
+            {
+                let _ = sub.print_help();
+                println!();
+                return e.exit_code();
+            }
+            let _ = cmd.print_help();
+            println!();
+            e.exit_code()
+        }
+        DisplayVersion => {
+            println!("{BANNER}");
+            0
+        }
+        _ => {
+            let mut cmd = crate::cli_i18n::localize(Cli::command(), lang);
+            if let Err(loc_err) = cmd.try_get_matches_from_mut(argv.to_vec()) {
+                let _ = loc_err.print();
+                loc_err.exit_code()
+            } else {
+                let _ = e.print();
+                e.exit_code()
+            }
+        }
+    }
+}
+
+pub fn run_cli() -> i32 {
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+
+    // 1) 预解析（英文模板，仅用于取得 matches；不触发任何输出）
+    let pre = match Cli::command().try_get_matches_from(argv.clone()) {
+        Ok(m) => m,
+        Err(e) => return render_early_error(e, &argv),
+    };
+
+    // 2) 加载配置（失败也要按最终语言报错）
+    let cfg_path = pre.get_one::<PathBuf>("config");
+    let cfg = match config::load(cfg_path.map(|p| p.as_ref())) {
+        Ok(c) => c,
+        Err(e) => {
+            let lang = i18n::locale::detect(
+                pre.get_one::<String>("lang").map(String::as_str),
+                &FileConfig::default(),
+            );
+            i18n::set_lang(lang);
+            print_error(&e);
+            return 1;
+        }
+    };
+
+    // 3) 确定语言并全局生效
+    let lang = i18n::locale::detect(pre.get_one::<String>("lang").map(String::as_str), &cfg);
+    i18n::set_lang(lang);
+
+    // 4) 从 matches 构造 Cli
+    let cli = match Cli::from_arg_matches(&pre) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[ERROR] {e}");
-            return 1;
+            return 2;
         }
     };
 
@@ -842,35 +876,35 @@ pub fn run_cli() -> i32 {
         Commands::Write(args) => match handle_write(args, &cfg, cli.quiet) {
             Ok(_) => 0,
             Err(e) => {
-                eprintln!("[ERROR] {e}");
+                print_error(&e);
                 1
             }
         },
         Commands::Read(args) => match handle_read(args, &cfg, cli.quiet) {
             Ok(_) => 0,
             Err(e) => {
-                eprintln!("[ERROR] {e}");
+                print_error(&e);
                 1
             }
         },
         Commands::Restore(args) => match handle_restore(args, &cfg, cli.quiet) {
             Ok(_) => 0,
             Err(e) => {
-                eprintln!("[ERROR] {e}");
+                print_error(&e);
                 1
             }
         },
         Commands::Inspect(args) => match handle_inspect(args, &cfg, cli.quiet) {
             Ok(_) => 0,
             Err(e) => {
-                eprintln!("[ERROR] {e}");
+                print_error(&e);
                 1
             }
         },
         Commands::Verify(args) => match handle_verify(args, &cfg, cli.quiet) {
             Ok(code) => code,
             Err(e) => {
-                eprintln!("[ERROR] {e}");
+                print_error(&e);
                 1
             }
         },
@@ -879,21 +913,21 @@ pub fn run_cli() -> i32 {
         Commands::Scan(args) => match handle_scan(args, cli.quiet) {
             Ok(code) => code,
             Err(e) => {
-                eprintln!("[ERROR] {e}");
+                print_error(&e);
                 1
             }
         },
         Commands::Embed(args) => match handle_embed(args, &cfg, cli.quiet) {
             Ok(_) => 0,
             Err(e) => {
-                eprintln!("[ERROR] {e}");
+                print_error(&e);
                 1
             }
         },
         Commands::Extract(args) => match handle_extract(args, &cfg, cli.quiet) {
             Ok(_) => 0,
             Err(e) => {
-                eprintln!("[ERROR] {e}");
+                print_error(&e);
                 1
             }
         },
@@ -902,7 +936,7 @@ pub fn run_cli() -> i32 {
         Commands::List(args) => match handle_list(args) {
             Ok(_) => 0,
             Err(e) => {
-                eprintln!("[ERROR] {e}");
+                print_error(&e);
                 1
             }
         },
@@ -946,11 +980,14 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         let mut cf = File::open(carrier)?;
         let adapter = find_adapter_or_reject(&mut cf, &carrier.display().to_string())?;
         let strats = adapter.supported_strategies();
-        println!("Available strategies for '{}':", carrier.display());
+        println!(
+            "{}",
+            t!(Msg::PromptAvailableStrategies, path = carrier.display())
+        );
         for (idx, s) in strats.iter().enumerate() {
             println!("  [{}] {s}", idx + 1);
         }
-        print!("Select strategy [1-{}] (default 1): ", strats.len());
+        print!("{}", t!(Msg::PromptSelectStrategy, max = strats.len()));
         std::io::stdout().flush()?;
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
@@ -1104,7 +1141,7 @@ fn handle_read(args: ReadArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrH
             let msg = e.to_string();
             if !quiet && let Some((_, rest)) = msg.split_once("Hint: '") {
                 let hint_part = rest.strip_suffix("'.").unwrap_or(rest);
-                println!("[INFO] Password hint: {hint_part}");
+                println!("{}", t!(Msg::InfoPasswordHint, hint = hint_part));
             }
             if !(std::io::IsTerminal::is_terminal(&std::io::stdin())
                 && std::io::IsTerminal::is_terminal(&std::io::stdout()))
@@ -1128,14 +1165,15 @@ fn handle_read(args: ReadArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrH
     // public key masked it, so the password had no effect. Say so instead of
     // letting the user believe `-p` protected this payload.
     if password.is_some() && !res.is_encrypted && !quiet {
-        eprintln!(
-            "[WARNING] This envelope is not encrypted: it was written without a password, so the supplied password was ignored. Re-write the carrier with -p to protect it."
-        );
+        eprintln!("{}", t!(Msg::WarnEnvelopeNotEncrypted));
     }
 
     if let Some(wf) = res.written_file {
         if !quiet {
-            println!("[OK] Extracted payload to '{wf}' ({} bytes).", res.raw_size);
+            println!(
+                "{}",
+                t!(Msg::ReadOkExtracted, path = wf, bytes = res.raw_size)
+            );
         }
     } else if args.stdout || !res.is_file {
         if let Ok(text) = std::str::from_utf8(&res.data) {
@@ -1168,8 +1206,8 @@ fn handle_read(args: ReadArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrH
         f.write_all(&res.data)?;
         if !quiet {
             println!(
-                "[OK] Extracted payload to '{fn_to_use}' ({} bytes).",
-                res.raw_size
+                "{}",
+                t!(Msg::ReadOkExtracted, path = fn_to_use, bytes = res.raw_size)
             );
         }
     }
@@ -1221,48 +1259,52 @@ fn handle_restore(args: RestoreArgs, cfg: &FileConfig, quiet: bool) -> Result<()
 }
 
 fn print_inspect_result(res: &crate::engine::InspectResult) {
-    println!("Carrier: {}", res.carrier);
-    println!("Format:  {}", res.format);
-    println!("Has Hidden Data: {}", res.has_hidden_data);
+    println!("{}", t!(Msg::InspectCarrier, val = res.carrier));
+    println!("{}", t!(Msg::InspectFormat, val = res.format));
+    println!("{}", t!(Msg::InspectHasHidden, val = res.has_hidden_data));
     if res.has_hidden_data {
         if let Some(s) = &res.strategy {
-            println!("Strategy:        {s}");
+            println!("{}", t!(Msg::InspectStrategy, val = s));
         }
         if let Some(off) = res.ube_offset {
-            println!("UBE Offset:      {off}");
+            println!("{}", t!(Msg::InspectUbeOffset, val = off));
         }
         if let Some(sz) = res.ube_total_size {
-            println!("UBE Total Size:  {sz} bytes");
+            println!("{}", t!(Msg::InspectUbeTotalSize, val = sz));
         }
         if let Some(enc) = res.is_encrypted {
-            println!("Encrypted:       {enc}");
+            println!("{}", t!(Msg::InspectEncrypted, val = enc));
         }
         if let Some(stl) = res.is_stealth {
-            println!("Stealth Mode:    {stl}");
+            println!("{}", t!(Msg::InspectStealth, val = stl));
         }
         if let Some(h) = &res.password_hint {
-            println!("Password Hint:   {h}");
+            println!("{}", t!(Msg::InspectPasswordHint, val = h));
         }
         if let Some(sz) = res.orig_host_size {
-            println!("Original Size:   {sz} bytes");
+            println!("{}", t!(Msg::InspectOrigSize, val = sz));
         }
         if let Some(sha) = &res.orig_host_sha256 {
-            println!("Original SHA256: {sha}");
+            println!("{}", t!(Msg::InspectOrigSha256, val = sha));
         }
         if let Some(meta) = &res.metadata {
-            println!("Metadata:        {meta}");
+            println!("{}", t!(Msg::InspectMetadata, val = meta));
         }
     }
 
     let auto_idx = res.strategies.iter().position(|c| c.available);
-    println!("Strategy capacities (max payload size):");
+    println!("{}", t!(Msg::InspectCapacitiesHeader));
     for (idx, c) in res.strategies.iter().enumerate() {
         let auto = if Some(idx) == auto_idx {
-            " [auto preference]"
+            t!(Msg::InspectAutoPreference)
         } else {
-            ""
+            String::new()
         };
-        let state = if c.available { "" } else { " (unavailable)" };
+        let state = if c.available {
+            String::new()
+        } else {
+            t!(Msg::InspectUnavailable)
+        };
         let detail = c.note.as_deref().unwrap_or("");
         if detail.is_empty() {
             println!("  - {}{}{}: {}", c.strategy, auto, state, c.limit);
@@ -1276,18 +1318,26 @@ fn print_inspect_result(res: &crate::engine::InspectResult) {
 
     if let Some(cap) = &res.content_stego_capacity {
         println!();
-        println!("Content-Adaptive Steganography Capacity (embed):");
-        println!("  Algorithm:       {}", cap.algorithm);
-        println!("  Available Slots: {} bits", cap.available_slots);
+        println!("{}", t!(Msg::InspectStegoHeader));
+        println!("{}", t!(Msg::InspectStegoAlgorithm, val = cap.algorithm));
+        println!("{}", t!(Msg::InspectStegoSlots, val = cap.available_slots));
+        let kib = cap.max_raw_payload_bytes as f64 / 1024.0;
         println!(
-            "  Max Raw:         {} bytes ({:.1} KiB)",
-            cap.max_raw_payload_bytes,
-            cap.max_raw_payload_bytes as f64 / 1024.0
+            "{}",
+            t!(
+                Msg::InspectStegoMaxRaw,
+                bytes = cap.max_raw_payload_bytes,
+                kib = format_args!("{kib:.1}")
+            )
         );
+        let safe_kib = cap.recommended_max_bytes as f64 / 1024.0;
         println!(
-            "  Safe Max:        {} bytes ({:.1} KiB) (high stealth)",
-            cap.recommended_max_bytes,
-            cap.recommended_max_bytes as f64 / 1024.0
+            "{}",
+            t!(
+                Msg::InspectStegoSafeMax,
+                bytes = cap.recommended_max_bytes,
+                kib = format_args!("{safe_kib:.1}")
+            )
         );
     }
 }
@@ -1348,7 +1398,10 @@ fn handle_inspect(args: InspectArgs, cfg: &FileConfig, quiet: bool) -> Result<()
             Err(e) => {
                 failures += 1;
                 if !quiet {
-                    eprintln!("[WARN] failed to inspect '{}': {e}", carrier.display());
+                    eprintln!(
+                        "{}",
+                        t!(Msg::WarnInspectFailed, path = carrier.display(), err = e)
+                    );
                 }
             }
         }
@@ -1368,11 +1421,15 @@ fn handle_inspect(args: InspectArgs, cfg: &FileConfig, quiet: bool) -> Result<()
         }
         println!("{}", serde_json::to_string_pretty(&val)?);
     } else if !quiet {
+        let hidden = reports.iter().filter(|r| r.has_hidden_data).count();
         println!(
-            "Inspected {} file(s), {} with hidden data, {} failed.",
-            reports.len(),
-            reports.iter().filter(|r| r.has_hidden_data).count(),
-            failures
+            "{}",
+            t!(
+                Msg::InspectSummary,
+                total = reports.len(),
+                hidden = hidden,
+                failed = failures
+            )
         );
     }
 
@@ -1380,22 +1437,31 @@ fn handle_inspect(args: InspectArgs, cfg: &FileConfig, quiet: bool) -> Result<()
 }
 
 fn print_verify_result(res: &crate::engine::VerifyResult) {
-    println!("Carrier: {}", res.carrier);
-    println!("Format:  {}", res.format);
+    println!("{}", t!(Msg::InspectCarrier, val = res.carrier));
+    println!("{}", t!(Msg::InspectFormat, val = res.format));
     println!(
-        "Level 1 (Host Format):      [{}] {}",
-        if res.level1_host.ok { "OK" } else { "FAIL" },
-        res.level1_host.detail
+        "{}",
+        t!(
+            Msg::VerifyL1,
+            status = if res.level1_host.ok { "OK" } else { "FAIL" },
+            detail = res.level1_host.detail
+        )
     );
     println!(
-        "Level 2 (Envelope Boundary): [{}] {}",
-        if res.level2_envelope.ok { "OK" } else { "FAIL" },
-        res.level2_envelope.detail
+        "{}",
+        t!(
+            Msg::VerifyL2,
+            status = if res.level2_envelope.ok { "OK" } else { "FAIL" },
+            detail = res.level2_envelope.detail
+        )
     );
     println!(
-        "Level 3 (Crypto & Payload):  [{}] {}",
-        if res.level3_crypto.ok { "OK" } else { "FAIL" },
-        res.level3_crypto.detail
+        "{}",
+        t!(
+            Msg::VerifyL3,
+            status = if res.level3_crypto.ok { "OK" } else { "FAIL" },
+            detail = res.level3_crypto.detail
+        )
     );
 }
 
@@ -1465,7 +1531,10 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig, quiet: bool) -> Result<i32,
                 failures += 1;
                 any_failed = true;
                 if !quiet {
-                    eprintln!("[WARN] failed to verify '{}': {e}", carrier.display());
+                    eprintln!(
+                        "{}",
+                        t!(Msg::WarnVerifyFailed, path = carrier.display(), err = e)
+                    );
                 }
             }
         }
@@ -1489,12 +1558,16 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig, quiet: bool) -> Result<i32,
             .iter()
             .filter(|r| r.level1_host.ok && r.level2_envelope.ok)
             .count();
+        let failed_cnt = reports.len() - passed;
         println!(
-            "Verified {} file(s): {} passed, {} with verification failures, {} unreadable.",
-            reports.len(),
-            passed,
-            reports.len() - passed,
-            failures
+            "{}",
+            t!(
+                Msg::VerifySummary,
+                total = reports.len(),
+                passed = passed,
+                failed = failed_cnt,
+                unreadable = failures
+            )
         );
     }
 
@@ -1521,7 +1594,7 @@ fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideError> {
             Err(e) => {
                 failures += 1;
                 if !quiet {
-                    eprintln!("[WARN] failed to scan '{}': {e}", f.display());
+                    eprintln!("{}", t!(Msg::WarnScanFailed, path = f.display(), err = e));
                 }
             }
         }
@@ -1566,11 +1639,15 @@ fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideError> {
                 println!("    ? {note}");
             }
         }
+        let findings_cnt = reports.iter().filter(|r| !r.findings.is_empty()).count();
         println!(
-            "\nScanned {} file(s), {} with findings, {} failed.",
-            reports.len(),
-            reports.iter().filter(|r| !r.findings.is_empty()).count(),
-            failures,
+            "{}",
+            t!(
+                Msg::ScanSummary,
+                total = reports.len(),
+                findings = findings_cnt,
+                failed = failures
+            )
         );
     }
 
@@ -1629,7 +1706,7 @@ fn expand_input_paths(
         } else if entry.is_file() {
             files.push(entry.clone());
         } else if !quiet {
-            eprintln!("[WARN] '{}' does not exist, skipping", entry.display());
+            eprintln!("{}", t!(Msg::WarnSkippedMissing, path = entry.display()));
         }
     }
     Ok(files)
@@ -1704,9 +1781,9 @@ fn handle_list(args: ListArgs) -> Result<(), StrHideError> {
         }
     }
     println!();
-    println!("Carrier-dependent limits are measured by `strhide inspect <carrier>`.");
+    println!("{}", t!(Msg::ListCarrierDependentNotice));
 
-    println!("\nContent-Adaptive Steganography Algorithms (embed / extract):");
+    println!("{}", t!(Msg::ListStegoAlgorithmsHeader));
     println!("{:<8} {:<15} Description", "Algorithm", "Target Domain");
     println!("{:-<8} {:-<15} {:-<48}", "", "", "");
     for (id, domain, desc) in crate::stego::CostModelRegistry::list_algorithms() {
@@ -1848,31 +1925,38 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
                 options.spatial_params.p2_window = p2;
             }
             let cap = crate::stego::probe_carrier_capacity(&carrier_bytes, &options)?;
+            println!("{}", t!(Msg::StegoProbeHeader, path = carrier.display()));
+            println!("{}", t!(Msg::StegoProbeFormat, val = cap.format));
+            println!("{}", t!(Msg::StegoProbeAlgorithm, val = cap.algorithm));
             println!(
-                "Content-Adaptive Steganography Capacity for '{}':",
-                carrier.display()
-            );
-            println!("  Format:          {}", cap.format);
-            println!("  Algorithm:       {}", cap.algorithm);
-            println!("  Total elements:  {}", cap.total_elements);
-            println!(
-                "  Payload slots:   {} bits (body only; header slots excluded)",
-                cap.available_slots
+                "{}",
+                t!(Msg::StegoProbeTotalElements, val = cap.total_elements)
             );
             println!(
-                "  Max raw payload: {} bytes ({:.1} KiB)",
-                cap.max_raw_payload_bytes,
-                cap.max_raw_payload_bytes as f64 / 1024.0
+                "{}",
+                t!(Msg::StegoProbePayloadSlots, val = cap.available_slots)
+            );
+            let kib = cap.max_raw_payload_bytes as f64 / 1024.0;
+            println!(
+                "{}",
+                t!(
+                    Msg::StegoProbeMaxRaw,
+                    bytes = cap.max_raw_payload_bytes,
+                    kib = format_args!("{kib:.1}")
+                )
+            );
+            let safe_kib = cap.recommended_max_bytes as f64 / 1024.0;
+            println!(
+                "{}",
+                t!(
+                    Msg::StegoProbeRecommended,
+                    bytes = cap.recommended_max_bytes,
+                    kib = format_args!("{safe_kib:.1}")
+                )
             );
             println!(
-                "  Recommended max: {} bytes ({:.1} KiB) (high stealth)",
-                cap.recommended_max_bytes,
-                cap.recommended_max_bytes as f64 / 1024.0
-            );
-            println!(
-                "  Est. changes:   ~{:.3} per payload bit (matrix coding); \
-                 recommended max is half of max for statistical stealth",
-                cap.estimated_change_rate
+                "{}",
+                t!(Msg::StegoProbeEstChanges, rate = cap.estimated_change_rate)
             );
         }
         return Ok(());
@@ -1988,10 +2072,13 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
             std::fs::write(&dest, &stego_bytes)?;
             if !quiet {
                 println!(
-                    "[OK] Embedded {} payload bytes into '{}' -> '{}'",
-                    payload_bytes.len(),
-                    carrier.display(),
-                    dest.display()
+                    "{}",
+                    t!(
+                        Msg::EmbedOkDest,
+                        bytes = payload_bytes.len(),
+                        carrier = carrier.display(),
+                        dest = dest.display()
+                    )
                 );
             }
         } else {
@@ -2002,15 +2089,18 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
                 ));
                 std::fs::write(&bak_path, &carrier_bytes)?;
                 if !quiet {
-                    println!("[INFO] Backup created at '{}'", bak_path.display());
+                    println!("{}", t!(Msg::InfoBackupCreated, path = bak_path.display()));
                 }
             }
             std::fs::write(carrier, &stego_bytes)?;
             if !quiet {
                 println!(
-                    "[OK] Embedded {} payload bytes in-place into '{}'",
-                    payload_bytes.len(),
-                    carrier.display()
+                    "{}",
+                    t!(
+                        Msg::EmbedOkInPlace,
+                        bytes = payload_bytes.len(),
+                        carrier = carrier.display()
+                    )
                 );
             }
         }
@@ -2067,9 +2157,8 @@ fn handle_extract(args: ExtractArgs, cfg: &FileConfig, quiet: bool) -> Result<()
         std::fs::write(&dest, &payload)?;
         if !quiet {
             println!(
-                "[OK] Extracted {} bytes to '{}'",
-                payload.len(),
-                dest.display()
+                "{}",
+                t!(Msg::ExtractOk, bytes = payload.len(), path = dest.display())
             );
         }
     } else if args.stdout {
@@ -2086,10 +2175,7 @@ fn handle_extract(args: ExtractArgs, cfg: &FileConfig, quiet: bool) -> Result<()
             check_overwrite(&dest, args.overwrite)?;
             std::fs::write(&dest, &payload)?;
             if !quiet {
-                println!(
-                    "[OK] Binary payload detected ({} bytes). Extracted to 'extracted.bin'.",
-                    payload.len()
-                );
+                println!("{}", t!(Msg::ExtractBinaryDetected, bytes = payload.len()));
             }
         }
     }
@@ -2115,10 +2201,16 @@ where
             Ok(()) => done += 1,
             Err(e) => {
                 if total > 1 && !quiet {
-                    eprintln!("[FAIL] {}", carrier.display());
+                    eprintln!("{}", t!(Msg::FailCarrier, path = carrier.display()));
+                    let unattempted = total - done - 1;
                     println!(
-                        "[SUMMARY] {done}/{total} carriers succeeded; {} not attempted.",
-                        total - done - 1
+                        "{}",
+                        t!(
+                            Msg::SummaryBatchPartial,
+                            done = done,
+                            total = total,
+                            unattempted = unattempted
+                        )
                     );
                 }
                 return Err(e);
@@ -2126,7 +2218,7 @@ where
         }
     }
     if total > 1 && !quiet {
-        println!("[SUMMARY] {done}/{total} carriers succeeded.");
+        println!("{}", t!(Msg::SummaryBatchAll, done = done, total = total));
     }
     Ok(())
 }
@@ -2284,24 +2376,24 @@ fn print_write_result(res: &WriteResult, quiet: bool) {
         return;
     }
     println!(
-        "[OK] Successfully embedded into '{}' using strategy '{}'.",
-        res.carrier, res.strategy
+        "{}",
+        t!(Msg::WriteOk, carrier = res.carrier, strategy = res.strategy)
     );
     println!(
-        "     Payload: {} bytes -> UBE: {} bytes.",
-        res.raw_size, res.ube_size
+        "{}",
+        t!(Msg::WritePayloadUbe, raw = res.raw_size, ube = res.ube_size)
     );
     if let Some(note) = &res.strategy_note {
-        println!("     [STRATEGY] {note}");
+        println!("{}", t!(Msg::WriteStrategyNote, note = note));
     }
     if let Some(hint) = &res.password_hint {
-        println!("     Password Hint: '{hint}'.");
+        println!("{}", t!(Msg::WritePasswordHint, hint = hint));
     }
     if let Some(bak) = &res.backup_file {
-        println!("     [BACKUP] Original carrier backed up to '{bak}'.");
+        println!("{}", t!(Msg::WriteBackupNote, path = bak));
     }
     if let Some(warn) = &res.warning {
-        eprintln!("[WARNING] {warn}");
+        eprintln!("{}", t!(Msg::WriteWarningNote, warn = warn));
     }
 }
 
@@ -2309,17 +2401,11 @@ fn print_remove_result(res: &RemoveResult, quiet: bool) {
     if quiet {
         return;
     }
-    println!(
-        "[OK] Successfully stripped hidden data from '{}'.",
-        res.carrier
-    );
-    println!("     Restored size: {} bytes.", res.restored_size);
-    println!(
-        "     SHA-256: {} (100% verified identical to original).",
-        res.restored_sha256
-    );
+    println!("{}", t!(Msg::RestoreOk, carrier = res.carrier));
+    println!("{}", t!(Msg::RestoreSize, bytes = res.restored_size));
+    println!("{}", t!(Msg::RestoreSha256, sha = res.restored_sha256));
     if let Some(bak) = &res.backup_file {
-        println!("     [BACKUP] Prior carrier backed up to '{bak}'.");
+        println!("{}", t!(Msg::RestoreBackupNote, path = bak));
     }
 }
 

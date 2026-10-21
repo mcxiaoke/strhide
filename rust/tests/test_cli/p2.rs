@@ -13,7 +13,7 @@
 use crate::common::*;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use strhide::engine::{PayloadSource, WriteOptions, read_carrier, write_carrier};
 use strhide::errors::StrHideError;
@@ -106,7 +106,7 @@ fn verify_exit_code_zero_for_valid_carrier() {
     )
     .unwrap();
 
-    let status = Command::new(bin())
+    let status = base_cmd()
         .args(["verify", out.to_str().unwrap()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -137,7 +137,7 @@ fn verify_exit_code_one_when_envelope_header_invalid() {
     // Unsupported version -> Level 2 fails.
     patch_header_field(&out, ube_offset, 8, &[0x09]);
 
-    let status = Command::new(bin())
+    let status = base_cmd()
         .args(["verify", out.to_str().unwrap()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -171,7 +171,7 @@ fn verify_exit_code_one_when_host_structure_broken() {
     data[len - 8..len - 4].copy_from_slice(b"XXXX"); // break IEND type
     fs::write(&out, &data).unwrap();
 
-    let status = Command::new(bin())
+    let status = base_cmd()
         .args(["verify", out.to_str().unwrap()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -215,7 +215,7 @@ fn read_stealth_without_password_reports_guidance() {
 
     // CLI level: non-TTY run must fail fast with the guidance in stderr and
     // exit code 1 (no hang, no bare "not found").
-    let res = Command::new(bin())
+    let res = base_cmd()
         .args(["read", out.to_str().unwrap(), "--stdout"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -325,7 +325,7 @@ fn cli_unescape_supports_full_escape_set() {
 
     // Raw string: the CLI receives literal backslash sequences.
     let payload = r"A\x42C\u4E2D\101\tD\U0001F680E\q\a\x4b\xz\g";
-    let res = Command::new(bin())
+    let res = base_cmd()
         .args([
             "write",
             carrier.to_str().unwrap(),
@@ -367,7 +367,7 @@ fn cli_unescape_combines_surrogate_pair() {
 
     // UTF-16 surrogate pair written as two \u escapes must combine into one
     // scalar (and must not leave the trailing digits behind).
-    let res = Command::new(bin())
+    let res = base_cmd()
         .args([
             "write",
             carrier.to_str().unwrap(),
@@ -401,7 +401,7 @@ fn cli_unescape_keeps_non_ascii_input_intact() {
     let out = dir.join("o.png");
     fs::write(&carrier, make_png()).unwrap();
 
-    let res = Command::new(bin())
+    let res = base_cmd()
         .args([
             "write",
             carrier.to_str().unwrap(),

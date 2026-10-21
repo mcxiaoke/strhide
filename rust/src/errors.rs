@@ -69,3 +69,33 @@ impl From<serde_json::Error> for StrHideError {
         StrHideError::CorruptedData(format!("JSON serialization error: {err}"))
     }
 }
+
+impl StrHideError {
+    /// Error category (used to translate category prefixes during CLI rendering).
+    /// `NoHiddenData` and `General` do not carry a prefix and return `None`.
+    pub fn category(&self) -> Option<crate::i18n::Msg> {
+        match self {
+            StrHideError::Io(_) => Some(crate::i18n::Msg::ErrIo),
+            StrHideError::CorruptedData(_) => Some(crate::i18n::Msg::ErrCorrupted),
+            StrHideError::Password(_) => Some(crate::i18n::Msg::ErrPassword),
+            StrHideError::Rejection(_) => Some(crate::i18n::Msg::ErrRejection),
+            StrHideError::RestoreMismatch(_) => Some(crate::i18n::Msg::ErrRestoreMismatch),
+            StrHideError::UnsupportedFormat(_) => Some(crate::i18n::Msg::ErrUnsupported),
+            StrHideError::NoHiddenData(_) | StrHideError::General(_) => None,
+        }
+    }
+
+    /// Extracted detail text without the English category prefix.
+    pub fn detail(&self) -> String {
+        match self {
+            StrHideError::Io(e) => e.to_string(),
+            StrHideError::CorruptedData(s)
+            | StrHideError::Password(s)
+            | StrHideError::Rejection(s)
+            | StrHideError::RestoreMismatch(s)
+            | StrHideError::UnsupportedFormat(s)
+            | StrHideError::NoHiddenData(s)
+            | StrHideError::General(s) => s.clone(),
+        }
+    }
+}

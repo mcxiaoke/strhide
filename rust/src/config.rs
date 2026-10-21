@@ -19,6 +19,7 @@
 //! backup        = true          # write/remove: .bak backup default
 //! unescape      = false         # write: escape-sequence decoding default
 //! stego_secret  = "..."         # embed/extract: private default secret
+//! lang          = "zh"         # all: interface language (en|zh), default: auto-detect
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -40,6 +41,7 @@ const KNOWN_KEYS: &[&str] = &[
     "backup",
     "unescape",
     "stego_secret",
+    "lang",
 ];
 
 /// Parsed configuration file. Every field is optional; `None` means "not
@@ -55,6 +57,8 @@ pub struct FileConfig {
     pub preserve_time: Option<bool>,
     pub backup: Option<bool>,
     pub unescape: Option<bool>,
+    /// Interface language ("en" | "zh"); unset or invalid falls back to environment/system/English.
+    pub lang: Option<String>,
     /// Private default secret for content-adaptive steganography. Replaces the
     /// public built-in constant when no user password is given. Read/write must
     /// agree, so this belongs with the password, not with the tuning knobs.
@@ -87,8 +91,12 @@ fn parse_config(
     for key in table.keys() {
         if !KNOWN_KEYS.contains(&key.as_str()) {
             eprintln!(
-                "[WARNING] Unknown key '{key}' in config file '{}' (ignored).",
-                origin.display()
+                "{}",
+                crate::t!(
+                    crate::i18n::Msg::WarnConfigUnknownKey,
+                    key = key,
+                    path = origin.display()
+                )
             );
         }
     }

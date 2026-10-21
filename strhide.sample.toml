@@ -250,6 +250,20 @@
 # stego_secret = "example-private-stego-secret-change-me"
 
 
+# ------------------------------------------------------------------------------
+# 11. Interface Language
+# ------------------------------------------------------------------------------
+# User interface language for CLI help, status reports, and diagnostics.
+#
+# Applies to: all commands
+# Type: string ("en" | "zh")
+# Default: auto-detect from environment (STRHIDE_LANG/LANG) or system OS locale
+# CLI override: --lang <en|zh>
+# Env override: STRHIDE_LANG
+#
+# lang = "zh"
+
+
 # ==============================================================================
 # COMMON CONFIGURATION PROFILES (Examples)
 # ==============================================================================

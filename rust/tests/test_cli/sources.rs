@@ -14,13 +14,13 @@
 use crate::common::*;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// Config factors: STRHIDE_PASSWORD cleared, STRHIDE_TEXT removed, config
 /// candidates (cwd strhide.toml + home config.toml) hidden unless a test
 /// re-exports them explicitly.
 fn run(dir: &Path, args: &[&str]) -> Output {
-    Command::new(bin())
+    base_cmd()
         .args(args)
         .current_dir(dir)
         .env("USERPROFILE", dir)
@@ -33,7 +33,7 @@ fn run(dir: &Path, args: &[&str]) -> Output {
 
 /// Override the config home (tests `~/.strhide/config.toml` discovery).
 fn run_with_home(dir: &Path, home: &Path, args: &[&str]) -> Output {
-    Command::new(bin())
+    base_cmd()
         .args(args)
         .current_dir(dir)
         .env("USERPROFILE", home)
@@ -145,7 +145,7 @@ fn env_text_is_used_as_payload_source() {
     fs::write(dir.join("c.png"), make_png()).unwrap();
     let secret = "来自 STRHIDE_TEXT 环境变量的载荷";
 
-    let out = Command::new(bin())
+    let out = base_cmd()
         .args(["write", "c.png", "--in-place"])
         .current_dir(&dir)
         .env("USERPROFILE", &dir)
@@ -164,7 +164,7 @@ fn cli_text_wins_over_env_text() {
     let dir = scratch("env_priority");
     fs::write(dir.join("c.png"), make_png()).unwrap();
 
-    let out = Command::new(bin())
+    let out = base_cmd()
         .args(["write", "c.png", "-t", "来自 -t", "--in-place"])
         .current_dir(&dir)
         .env("USERPROFILE", &dir)
@@ -183,7 +183,7 @@ fn empty_env_text_still_rejected() {
     let dir = scratch("env_empty");
     fs::write(dir.join("c.png"), make_png()).unwrap();
 
-    let out = Command::new(bin())
+    let out = base_cmd()
         .args(["write", "c.png"])
         .current_dir(&dir)
         .env("USERPROFILE", &dir)
@@ -420,7 +420,7 @@ fn env_text_fallback_after_mutex_introduced() {
     fs::write(dir.join("c.png"), make_png()).unwrap();
     let secret = "mutex 互斥组不影响 STRHIDE_TEXT 兜底";
 
-    let out = Command::new(bin())
+    let out = base_cmd()
         .args(["write", "c.png", "--in-place"])
         .current_dir(&dir)
         .env("USERPROFILE", &dir)

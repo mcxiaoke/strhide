@@ -18,7 +18,7 @@ use crate::common::*;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use strhide::engine::{
     PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
@@ -27,7 +27,7 @@ use strhide::engine::{
 use strhide::errors::StrHideError;
 
 fn run(dir: &Path, args: &[&str]) -> Output {
-    Command::new(bin())
+    base_cmd()
         .args(args)
         .current_dir(dir)
         .env("USERPROFILE", dir)
@@ -39,7 +39,7 @@ fn run(dir: &Path, args: &[&str]) -> Output {
 }
 
 fn run_with_stdin(dir: &Path, args: &[&str], stdin_data: &[u8]) -> Output {
-    let mut child = Command::new(bin())
+    let mut child = base_cmd()
         .args(args)
         .current_dir(dir)
         .env("USERPROFILE", dir)
