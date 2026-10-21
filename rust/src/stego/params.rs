@@ -258,25 +258,41 @@ impl SpatialParams {
 }
 
 /// Fine-tuning parameters for JPEG-domain DCT steganography (e.g. UERD).
+///
+/// Everything here changes either the offer (which slots are cheap) or the
+/// embed-side search. None of it changes what the extractor must know: the
+/// superblock carries `h` and `u`, and the slot set is derived from the key.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JpegParams {
     /// Weight applied to the 8-neighborhood block energies (default 0.25).
     pub neighbor_weight: f64,
-    /// Minimum absolute coefficient value eligible for embedding (default 2 to preserve AC zero-runlength and pair symmetry).
-    pub min_abs_coeff: i16,
-    /// Fraction of lowest-energy DCT blocks to completely exclude from embedding (default 0.20).
-    pub block_exclusion_percentile: f64,
-    /// Cost assigned to unembeddable or excluded coefficients.
+    /// Cost assigned to coefficients the model cannot rank (default 1e13).
     pub wet_cost: f64,
-    /// Matrix-coding layer (default Hamming; STC is opt-in).
-    #[serde(default)]
-    pub codec: StegoCodec,
-    /// STC constraint height, used only when `codec == Stc` (default 8).
+    /// STC constraint height written into the superblock (default 8).
     #[serde(default = "default_stc_h")]
     pub stc_h: u8,
-    /// STC group size (default 1); see [`SpatialParams::stc_u`].
-    #[serde(default = "default_stc_u")]
-    pub stc_u: u8,
+    /// Trellis-size budget: `u` is chosen so `u * (bits + h - 1) <= slot_budget`.
+    ///
+    /// Embed-side performance knob only (roughly `slot_budget * 2^h / 2` state
+    /// transitions, and `slot_budget * 2^h / 32` bytes of backtracking bitmap).
+    /// It is **not** part of the wire format: the extractor trusts the `u` in
+    /// the superblock, so carriers written with a different budget still decode.
+    #[serde(default = "default_slot_budget")]
+    pub slot_budget: usize,
+    /// Cipher suite written into the superblock (default: the profile's default).
+    #[serde(default = "default_cipher_suite")]
+    pub cipher_suite: u16,
+    /// Directional cost weight: `rho_minus *= polarize_weight`.
+    ///
+    /// `1.0` (default) means "disabled", i.e. a symmetric cost map, which is the
+    /// only setting with a measured track record. Values below 1 make shrinking
+    /// `|c|` cheaper; the plan treats that as a Phase 3 experiment that has to
+    /// win an A/B before it becomes a default.
+    #[serde(default = "default_polarize_weight")]
+    pub polarize_weight: f64,
+    /// Extension records written into the TLV area (default: none).
+    #[serde(default)]
+    pub extensions: Vec<crate::stego::jpeg::header_v3::Tlv>,
     /// Capacity safety tier (default High).
     #[serde(default)]
     pub safety_level: SafetyLevel,
@@ -285,16 +301,31 @@ pub struct JpegParams {
     pub safety_enforcement: SafetyEnforcement,
 }
 
+/// Default trellis budget: 800k slots, i.e. ~4x10^8 transitions at `h = 8`.
+pub const DEFAULT_SLOT_BUDGET: usize = 800_000;
+
+fn default_slot_budget() -> usize {
+    DEFAULT_SLOT_BUDGET
+}
+
+fn default_cipher_suite() -> u16 {
+    crate::stego::format::DEFAULT_SUITE_ID
+}
+
+fn default_polarize_weight() -> f64 {
+    1.0
+}
+
 impl Default for JpegParams {
     fn default() -> Self {
         Self {
             neighbor_weight: 0.25,
-            min_abs_coeff: 2,
-            block_exclusion_percentile: 0.20,
             wet_cost: 1e13,
-            codec: StegoCodec::Auto,
             stc_h: default_stc_h(),
-            stc_u: default_stc_u(),
+            slot_budget: DEFAULT_SLOT_BUDGET,
+            cipher_suite: default_cipher_suite(),
+            polarize_weight: default_polarize_weight(),
+            extensions: Vec::new(),
             safety_level: SafetyLevel::default(),
             safety_enforcement: SafetyEnforcement::default(),
         }
@@ -302,26 +333,13 @@ impl Default for JpegParams {
 }
 
 impl JpegParams {
-    /// Reject parameter values that would produce a NaN/Inf cost map or an
-    /// empty candidate set (both surface later as an opaque "no capacity" or
-    /// "no hidden data" error instead of a configuration error).
+    /// Reject parameter values that would produce a NaN/Inf cost map, an empty
+    /// search or a header field the decoder rejects.
     pub fn validate(&self) -> Result<(), StrHideError> {
         if !self.neighbor_weight.is_finite() || self.neighbor_weight < 0.0 {
             return Err(StrHideError::General(format!(
                 "UERD parameter 'neighbor_weight' must be a finite non-negative number, got {}",
                 self.neighbor_weight
-            )));
-        }
-        if self.min_abs_coeff < 2 {
-            return Err(StrHideError::General(format!(
-                "UERD parameter 'min_abs_coeff' must be >= 2, got {}",
-                self.min_abs_coeff
-            )));
-        }
-        if !(0.0..1.0).contains(&self.block_exclusion_percentile) {
-            return Err(StrHideError::General(format!(
-                "UERD parameter 'block_exclusion_percentile' must be in [0, 1), got {}",
-                self.block_exclusion_percentile
             )));
         }
         if !self.wet_cost.is_finite() || self.wet_cost <= 0.0 {
@@ -330,19 +348,34 @@ impl JpegParams {
                 self.wet_cost
             )));
         }
-        if self.codec == StegoCodec::Stc || self.codec == StegoCodec::Auto {
-            crate::stego::coding::validate_stc_h(self.stc_h)?;
-            if self.stc_u != 0 {
-                crate::stego::coding::validate_stc_u(self.stc_u)?;
-                if self.stc_u > self.stc_h {
-                    return Err(StrHideError::General(format!(
-                        "STC parameter 'stc_u' must be <= 'stc_h' (got u={}, h={})",
-                        self.stc_u, self.stc_h
-                    )));
-                }
-            }
+        crate::stego::coding::validate_stc_h(self.stc_h)?;
+        if self.slot_budget < 8 {
+            return Err(StrHideError::General(format!(
+                "JPEG parameter 'slot_budget' must be >= 8, got {}",
+                self.slot_budget
+            )));
+        }
+        if !self.polarize_weight.is_finite() || self.polarize_weight <= 0.0 {
+            return Err(StrHideError::General(format!(
+                "JPEG parameter 'polarize_weight' must be a finite positive number, got {}",
+                self.polarize_weight
+            )));
+        }
+        if self.cipher_suite == 0 {
+            return Err(StrHideError::General(
+                "Cipher suite id 0 is reserved for 'unset'".into(),
+            ));
         }
         Ok(())
+    }
+
+    /// Warn (not fail) when the budget is too small to spread the payload.
+    ///
+    /// A tiny budget still produces a valid carrier, it just selects `u = 1`,
+    /// which is the most detectable end of the trade-off. The caller decides
+    /// whether to print this.
+    pub fn slot_budget_is_narrow(&self, bits: usize, h: u8) -> bool {
+        self.slot_budget < 8 * (bits + h as usize - 1)
     }
 }
 
@@ -408,6 +441,8 @@ pub struct StegoOptions {
     pub spatial_params: SpatialParams,
     /// Fine-tuning parameters for JPEG DCT domain algorithms.
     pub jpeg_params: JpegParams,
+    /// Extraction policy: which suites to try and how much KDF work to allow.
+    pub extract_params: ExtractParams,
 }
 
 impl StegoOptions {

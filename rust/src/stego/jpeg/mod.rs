@@ -1,4 +1,5 @@
 pub mod cost;
+pub mod dht;
 pub mod engine;
 pub mod geometry;
 pub mod header_v3;

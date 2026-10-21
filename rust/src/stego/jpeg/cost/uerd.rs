@@ -140,23 +140,28 @@ impl JpegCostModel for UerdCostModel {
             smoothed_energies[bi] = cur_e + nw * neighbor_avg;
         }
 
-        // Step 3: Compute coefficient cost rho for each eligible AC coefficient
-        // Total flattened coefficients = total_blocks * 64
+        // Step 3: Compute the cost of one `±1` move for every AC coefficient.
+        //
+        // Every position is priced, including zero coefficients: the V3 code is
+        // ternary and may legally create a coefficient, so `|c| >= 2` is no
+        // longer a gate. The block energy is masked with `|c| & !1`, which is
+        // invariant under `±1`, so the price of a move is the same in both
+        // directions and never depends on a value the embedder could change.
         let mut costs = vec![params.wet_cost; total_blocks * 64];
-        let min_abs = params.min_abs_coeff.max(2);
 
-        for (bi, block) in comp.blocks.iter().enumerate() {
-            let block_rho = smoothed_energies[bi];
+        for (bi, &block_rho) in smoothed_energies.iter().enumerate() {
+            debug_assert!(bi < total_blocks);
             if block_rho <= 0.0 {
+                // A completely flat block (all AC zero): nothing to hide in, so
+                // every position keeps the wet cost.
                 continue;
             }
 
             for k in 1..64 {
-                let coeff = block[k];
-                if coeff.abs() >= min_abs {
-                    let cost = q[k] / block_rho;
-                    costs[bi * 64 + k] = cost;
-                }
+                let cost = q[k] / block_rho;
+                // A saturation cap keeps the search numerically sane on
+                // degenerate carriers without changing the ordering.
+                costs[bi * 64 + k] = cost.min(params.wet_cost);
             }
         }
 

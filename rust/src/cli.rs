@@ -367,7 +367,7 @@ pub struct EmbedArgs {
     #[arg(
         long = "exclusion-rate",
         value_name = "FLOAT",
-        help = "Fine-tune: fraction of smoothest regions excluded from embedding (0.0 .. 0.8; default 0.30 for PNG, 0.20 for JPEG)"
+        help = "Fine-tune (Spatial HILL): fraction of smoothest regions excluded from embedding (0.0 .. 0.8; default: 0.30)"
     )]
     pub exclusion_rate: Option<f64>,
 
@@ -379,11 +379,21 @@ pub struct EmbedArgs {
     pub neighbor_weight: Option<f64>,
 
     #[arg(
-        long = "min-abs-coeff",
+        long = "slot-budget",
         value_name = "INT",
-        help = "Fine-tune (JPEG UERD): minimum absolute AC coefficient eligible for embedding (default: 2)"
+        help = "Fine-tune (JPEG V3): trellis slot budget; a larger budget spreads each payload bit over more \
+                coefficients (fewer changes per coefficient), at the cost of time and memory. Default: 800000. \
+                Extraction does not need this value."
     )]
-    pub min_abs_coeff: Option<i16>,
+    pub slot_budget: Option<usize>,
+
+    #[arg(
+        long = "cipher-suite",
+        value_name = "ID",
+        help = "Fine-tune (JPEG V3): cipher suite written into the carrier header. 1 = pbkdf2-sha256-200k \
+                (default), 2 = pbkdf2-sha256-600k (slower, stronger). Extraction identifies it automatically."
+    )]
+    pub cipher_suite: Option<u16>,
 
     #[arg(
         long = "p1-window",
@@ -488,9 +498,6 @@ pub struct ExtractArgs {
 
     #[arg(long = "neighbor-weight", value_name = "FLOAT")]
     pub neighbor_weight: Option<f64>,
-
-    #[arg(long = "min-abs-coeff", value_name = "INT")]
-    pub min_abs_coeff: Option<i16>,
 
     #[arg(long = "p1-window", value_name = "INT")]
     pub p1_window: Option<usize>,
@@ -1858,9 +1865,7 @@ fn warn_nondefault_stego_params(options: &crate::stego::StegoOptions, quiet: boo
         return;
     }
     let sp = &options.spatial_params;
-    let jp = &options.jpeg_params;
     let d_sp = crate::stego::SpatialParams::default();
-    let d_jp = crate::stego::JpegParams::default();
     let mut flags: Vec<String> = Vec::new();
     if sp.p1_window != d_sp.p1_window {
         flags.push(format!("--p1-window {}", sp.p1_window));
@@ -1868,16 +1873,8 @@ fn warn_nondefault_stego_params(options: &crate::stego::StegoOptions, quiet: boo
     if sp.p2_window != d_sp.p2_window {
         flags.push(format!("--p2-window {}", sp.p2_window));
     }
-    if sp.exclusion_percentile != d_sp.exclusion_percentile
-        || jp.block_exclusion_percentile != d_jp.block_exclusion_percentile
-    {
+    if sp.exclusion_percentile != d_sp.exclusion_percentile {
         flags.push(format!("--exclusion-rate {}", sp.exclusion_percentile));
-    }
-    if jp.neighbor_weight != d_jp.neighbor_weight {
-        flags.push(format!("--neighbor-weight {}", jp.neighbor_weight));
-    }
-    if jp.min_abs_coeff != d_jp.min_abs_coeff {
-        flags.push(format!("--min-abs-coeff {}", jp.min_abs_coeff));
     }
     if flags.is_empty() {
         return;
@@ -1930,15 +1927,10 @@ fn apply_codec_options(
         }
     }
     {
-        let params = &mut options.jpeg_params;
-        if let Some(codec) = parsed {
-            params.codec = codec;
-        }
+        // JPEG is STC-only in V3 and derives its own group size, so only the
+        // constraint height carries over.
         if let Some(h) = stc_h {
-            params.stc_h = h;
-        }
-        if let Some(u) = stc_u {
-            params.stc_u = u;
+            options.jpeg_params.stc_h = h;
         }
     }
     // Reject out-of-range values here rather than as an opaque capacity failure
@@ -1959,13 +1951,15 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
             apply_codec_options(&mut options, args.codec.as_deref(), args.stc_h, args.stc_u)?;
             if let Some(er) = args.exclusion_rate {
                 options.spatial_params.exclusion_percentile = er;
-                options.jpeg_params.block_exclusion_percentile = er;
             }
             if let Some(nw) = args.neighbor_weight {
                 options.jpeg_params.neighbor_weight = nw;
             }
-            if let Some(min_ac) = args.min_abs_coeff {
-                options.jpeg_params.min_abs_coeff = min_ac;
+            if let Some(budget) = args.slot_budget {
+                options.jpeg_params.slot_budget = budget;
+            }
+            if let Some(suite) = args.cipher_suite {
+                options.jpeg_params.cipher_suite = suite;
             }
             if let Some(p1) = args.p1_window {
                 options.spatial_params.p1_window = p1;
@@ -2125,13 +2119,15 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
 
         if let Some(er) = args.exclusion_rate {
             options.spatial_params.exclusion_percentile = er;
-            options.jpeg_params.block_exclusion_percentile = er;
         }
         if let Some(nw) = args.neighbor_weight {
             options.jpeg_params.neighbor_weight = nw;
         }
-        if let Some(min_ac) = args.min_abs_coeff {
-            options.jpeg_params.min_abs_coeff = min_ac;
+        if let Some(budget) = args.slot_budget {
+            options.jpeg_params.slot_budget = budget;
+        }
+        if let Some(suite) = args.cipher_suite {
+            options.jpeg_params.cipher_suite = suite;
         }
         if let Some(p1) = args.p1_window {
             options.spatial_params.p1_window = p1;
@@ -2230,13 +2226,9 @@ fn handle_extract(args: ExtractArgs, cfg: &FileConfig, quiet: bool) -> Result<()
 
     if let Some(er) = args.exclusion_rate {
         options.spatial_params.exclusion_percentile = er;
-        options.jpeg_params.block_exclusion_percentile = er;
     }
     if let Some(nw) = args.neighbor_weight {
         options.jpeg_params.neighbor_weight = nw;
-    }
-    if let Some(min_ac) = args.min_abs_coeff {
-        options.jpeg_params.min_abs_coeff = min_ac;
     }
     if let Some(p1) = args.p1_window {
         options.spatial_params.p1_window = p1;

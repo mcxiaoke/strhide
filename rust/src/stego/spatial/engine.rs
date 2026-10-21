@@ -38,7 +38,11 @@ use crate::stego::coding::{
     Move, StcTrellis, hamming_embed_ternary, hamming_extract_bytes, spatial_move_safe,
     write_bit_ternary,
 };
-use crate::stego::envelope::{pack_envelope_ext, unpack_envelope_with_key};
+use crate::stego::envelope::{
+    PUBLIC_DEFAULT_SECRET, build_plaintext, encrypt_with_aad, random_nonce, random_salt,
+    unpack_envelope_parts,
+};
+use crate::stego::format::{DEFAULT_FORMAT, body_keys, derive_master};
 pub use crate::stego::header::{
     FeatureWord, HEADER_LEN_MASK, HEADER_LEN_MAX, HEADER_V2_ESCAPE_H, V2_TOTAL_HEADER_SLOTS,
     decode_header_word, encode_header_word,
@@ -488,8 +492,16 @@ pub fn embed_spatial(
     let h = image.height as usize;
     let total_pixels = w * h;
 
-    // Pack payload into stealth micro-envelope
-    let (envelope, perm_seed) = pack_envelope_ext(payload, password, domain)?;
+    // Frame the payload and derive the per-carrier keys. The ciphertext itself
+    // is produced further down: the finished 64-byte header is its associated
+    // data, so it cannot exist until codec/h/u are settled.
+    let suite = DEFAULT_FORMAT.default_suite();
+    let plaintext = build_plaintext(payload)?;
+    let salt = random_salt();
+    let nonce = random_nonce();
+    let master = derive_master(suite, password.unwrap_or(PUBLIC_DEFAULT_SECRET), &salt)?;
+    let (enc_key, perm_seed) = body_keys(&DEFAULT_FORMAT, &master, &salt, domain);
+    let ciphertext_len = plaintext.len() + suite.tag_len();
 
     // Compute distortion cost map
     let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, params);
@@ -560,8 +572,7 @@ pub fn embed_spatial(
         })
         .collect();
 
-    let ciphertext_body = &envelope[28..];
-    let ciphertext_bits = ciphertext_body.len() * 8;
+    let ciphertext_bits = ciphertext_len * 8;
 
     // Safety enforcement policy check
     if params.safety_enforcement == crate::stego::params::SafetyEnforcement::Enforced {
@@ -610,7 +621,7 @@ pub fn embed_spatial(
     }
 
     // Header word1 encodes total_len with HEADER_V2_ESCAPE_H (15) for stc_h
-    let total_len = envelope.len() as u32;
+    let total_len = (crate::stego::envelope::HEADER_OVERHEAD + ciphertext_len) as u32;
     if total_len > HEADER_LEN_MAX {
         return Err(StrHideError::General(format!(
             "Envelope of {total_len} bytes exceeds the {HEADER_LEN_MAX}-byte header length field"
@@ -618,7 +629,8 @@ pub fn embed_spatial(
     }
     let header_word = encode_header_word(total_len, resolved_codec, HEADER_V2_ESCAPE_H, resolved_u);
     let mut header_bytes = Vec::with_capacity(32);
-    header_bytes.extend_from_slice(&envelope[..28]); // Salt (16B) + Nonce (12B)
+    header_bytes.extend_from_slice(&salt); // Salt (16B)
+    header_bytes.extend_from_slice(&nonce); // Nonce (12B)
     header_bytes.extend_from_slice(&header_word.to_be_bytes());
 
     let fw = FeatureWord {
@@ -635,9 +647,16 @@ pub fn embed_spatial(
     };
     let feature_bytes = fw.encode();
 
-    // Phase 2: Keyed permutation of body slots using PBKDF2 salt-derived seed from pack_envelope_ext
-    let salt = &envelope[..16];
-    let stc_seed = crate::stego::envelope::derive_stc_seed(&perm_seed, salt);
+    // Encrypt last: the whole 64-byte header (32B base header + 32B feature
+    // word) is the AEAD's associated data, so a tampered codec/h/u fails the
+    // tag instead of steering the decoder somewhere else.
+    let mut aad = Vec::with_capacity(64);
+    aad.extend_from_slice(&header_bytes);
+    aad.extend_from_slice(&feature_bytes);
+    let ciphertext_body = encrypt_with_aad(suite, &enc_key, &nonce, &aad, &plaintext)?;
+
+    // Phase 2: Keyed permutation of body slots.
+    let stc_seed = crate::stego::envelope::derive_stc_seed(&perm_seed, &salt);
 
     let mut body_slots = body_candidates[..needed_body_slots].to_vec();
     permute_indices(&mut body_slots, &perm_seed);
@@ -696,13 +715,13 @@ pub fn embed_spatial(
                 &moves,
                 &rp,
                 &rm,
-                ciphertext_body,
+                &ciphertext_body,
                 crate::stego::coding::DEFAULT_HAMMING_K,
             )?;
         }
         StegoCodec::Stc | StegoCodec::Auto => {
             let trellis = StcTrellis::from_seed_grouped(stc_seed, params.stc_h, resolved_u)?;
-            trellis.embed(&mut slot_vals, &moves, &rp, &rm, ciphertext_body)?;
+            trellis.embed(&mut slot_vals, &moves, &rp, &rm, &ciphertext_body)?;
         }
     }
 
@@ -779,7 +798,7 @@ pub fn extract_spatial(
     }
 
     let salt = &header_bytes[..16];
-    let (total_len, raw_codec_id, raw_stc_h) = {
+    let (total_len, _raw_codec_id, raw_stc_h) = {
         let word = u32::from_be_bytes([
             header_bytes[28],
             header_bytes[29],
@@ -796,93 +815,63 @@ pub fn extract_spatial(
 
     let no_hidden = || StrHideError::NoHiddenData("No valid payload found".into());
 
-    let (codec, stc_h, stc_u, body_candidates) = if raw_stc_h == HEADER_V2_ESCAPE_H {
-        // v2 branch
-        if permuted_candidates.len() < V2_TOTAL_HEADER_SLOTS {
-            return Err(no_hidden());
-        }
-        let feature_slots = &permuted_candidates[256..V2_TOTAL_HEADER_SLOTS];
-        let mut feature_bytes = [0u8; 32];
-        for byte_i in 0..32 {
-            let mut b = 0u8;
-            for bit_i in 0..8 {
-                let slot = feature_slots[byte_i * 8 + bit_i];
-                let val = image.pixels[slot * image.channels + channel_offset];
-                b = (b << 1) | (val & 1);
-            }
-            feature_bytes[byte_i] = b;
-        }
+    // Every carrier this build writes uses the v2 header. A different `h` field
+    // means the header landed on the wrong slots, i.e. wrong password or no
+    // payload -- report it exactly like an AEAD failure.
+    if raw_stc_h != HEADER_V2_ESCAPE_H || permuted_candidates.len() < V2_TOTAL_HEADER_SLOTS {
+        return Err(no_hidden());
+    }
 
-        let fw = FeatureWord::decode(&feature_bytes).map_err(|_| no_hidden())?;
-        let is_header = {
-            let mut v = vec![false; total_pixels];
-            for &s in &permuted_candidates[..V2_TOTAL_HEADER_SLOTS] {
-                v[s] = true;
-            }
-            v
-        };
-        let body_cands: Vec<usize> = if fw.class_rule == 1 {
-            candidate_pixels
-                .iter()
-                .copied()
-                .filter(|&s| {
-                    let val = image.pixels[s * image.channels + channel_offset];
-                    (1..=6).contains(&(val % 8)) && !is_header[s]
-                })
-                .collect()
-        } else {
-            candidate_pixels
-                .iter()
-                .copied()
-                .filter(|&s| !is_header[s])
-                .collect()
-        };
-        (fw.codec, fw.h, fw.u, body_cands)
-    } else {
-        // v1 legacy branch
-        let (codec, stc_u) =
-            crate::stego::header::codec_from_header_id(raw_codec_id).map_err(|_| no_hidden())?;
-        if codec == StegoCodec::Stc {
-            crate::stego::coding::validate_stc_h(raw_stc_h).map_err(|_| no_hidden())?;
-            crate::stego::coding::validate_stc_u(stc_u).map_err(|_| no_hidden())?;
+    let feature_slots = &permuted_candidates[256..V2_TOTAL_HEADER_SLOTS];
+    let mut feature_bytes = [0u8; 32];
+    for byte_i in 0..32 {
+        let mut b = 0u8;
+        for bit_i in 0..8 {
+            let slot = feature_slots[byte_i * 8 + bit_i];
+            let val = image.pixels[slot * image.channels + channel_offset];
+            b = (b << 1) | (val & 1);
         }
-        let is_header = {
-            let mut v = vec![false; total_pixels];
-            for &s in header_slots {
-                v[s] = true;
-            }
-            v
-        };
-        let body_cands: Vec<usize> = candidate_pixels
+        feature_bytes[byte_i] = b;
+    }
+
+    let fw = FeatureWord::decode(&feature_bytes).map_err(|_| no_hidden())?;
+    let is_header = {
+        let mut v = vec![false; total_pixels];
+        for &s in &permuted_candidates[..V2_TOTAL_HEADER_SLOTS] {
+            v[s] = true;
+        }
+        v
+    };
+    let body_candidates: Vec<usize> = if fw.class_rule == 1 {
+        candidate_pixels
+            .iter()
+            .copied()
+            .filter(|&s| {
+                let val = image.pixels[s * image.channels + channel_offset];
+                (1..=6).contains(&(val % 8)) && !is_header[s]
+            })
+            .collect()
+    } else {
+        candidate_pixels
             .iter()
             .copied()
             .filter(|&s| !is_header[s])
-            .collect();
-        (codec, raw_stc_h, stc_u, body_cands)
+            .collect()
     };
-
-    if !(49..=HEADER_LEN_MAX as usize).contains(&total_len) {
-        // Deliberately generic: a wrong secret lands the header on the wrong
-        // slots, and a distinct message ("invalid size") would tell an attacker
-        // that *an envelope exists here but the layout is wrong*, which is an
-        // oracle the AEAD path deliberately does not provide.
-        return Err(StrHideError::NoHiddenData("No valid payload found".into()));
-    }
 
     let ciphertext_len = total_len - 28;
     let ciphertext_bits = ciphertext_len * 8;
-    let needed_body_slots = slots_for(ciphertext_bits, codec, stc_h, stc_u)?;
-
+    let needed_body_slots = slots_for(ciphertext_bits, fw.codec, fw.h, fw.u)?;
     if needed_body_slots > body_candidates.len() {
-        return Err(StrHideError::NoHiddenData("No valid payload found".into()));
+        return Err(no_hidden());
     }
 
-    // Phase 2: Keyed permutation of body slots using PBKDF2 salt-derived seed
-    let (key_bytes, perm_seed) = crate::stego::envelope::derive_keys(
-        password.unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
+    let master = derive_master(
+        DEFAULT_FORMAT.default_suite(),
+        password.unwrap_or(PUBLIC_DEFAULT_SECRET),
         salt,
-        domain,
-    );
+    )?;
+    let (enc_key, perm_seed) = body_keys(&DEFAULT_FORMAT, &master, salt, domain);
 
     let mut body_slots = body_candidates[..needed_body_slots].to_vec();
     permute_indices(&mut body_slots, &perm_seed);
@@ -892,7 +881,7 @@ pub fn extract_spatial(
         .map(|&slot| image.pixels[slot * image.channels + channel_offset])
         .collect();
 
-    let ciphertext_body = match codec {
+    let ciphertext = match fw.codec {
         StegoCodec::Hamming => hamming_extract_bytes(
             &slot_vals,
             ciphertext_len,
@@ -900,16 +889,25 @@ pub fn extract_spatial(
         )?,
         StegoCodec::Stc | StegoCodec::Auto => {
             let stc_seed = crate::stego::envelope::derive_stc_seed(&perm_seed, salt);
-            let trellis = StcTrellis::from_seed_grouped(stc_seed, stc_h, stc_u)?;
+            let trellis = StcTrellis::from_seed_grouped(stc_seed, fw.h, fw.u)?;
             trellis.extract(&slot_vals, ciphertext_bits)
         }
     };
 
-    let mut full_envelope = Vec::with_capacity(total_len);
-    full_envelope.extend_from_slice(&header_bytes[..28]); // Salt + Nonce
-    full_envelope.extend_from_slice(&ciphertext_body);
-
-    unpack_envelope_with_key(&full_envelope, &key_bytes)
+    let nonce: [u8; crate::stego::envelope::NONCE_LEN] = header_bytes
+        [crate::stego::envelope::SALT_LEN..crate::stego::envelope::HEADER_OVERHEAD]
+        .try_into()
+        .map_err(|_| no_hidden())?;
+    let mut aad = Vec::with_capacity(64);
+    aad.extend_from_slice(&header_bytes);
+    aad.extend_from_slice(&feature_bytes);
+    unpack_envelope_parts(
+        DEFAULT_FORMAT.default_suite(),
+        &enc_key,
+        &nonce,
+        &aad,
+        &ciphertext,
+    )
 }
 
 /// Probe capacity of PNG carrier for spatial content-adaptive steganography.

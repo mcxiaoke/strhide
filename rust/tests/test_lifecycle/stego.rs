@@ -299,7 +299,9 @@ fn test_jpeg_uerd_fine_tuning() {
         ..Default::default()
     };
     opts.jpeg_params.neighbor_weight = 0.35;
-    opts.jpeg_params.block_exclusion_percentile = 0.25;
+    // The V3 knob that replaces the old pool/truncation parameters: a larger
+    // slot budget spreads the payload over more coefficients.
+    opts.jpeg_params.slot_budget = 200_000;
 
     let stego_jpeg = embed_carrier(&jpeg_bytes, secret, &opts).unwrap();
     let extracted = extract_carrier(&stego_jpeg, &opts).unwrap();
@@ -852,7 +854,16 @@ fn test_jpeg_private_default_secret_isolation() {
 /// Skipped when the sample corpus is absent, like the other JPEG tests.
 #[test]
 fn test_jpeg_calibration_detector_clean_vs_loaded() {
-    let candidate = fixture_file("carrier.jpg");
+    // The calibrated estimator is fitted on camera photos; the bundled fixture
+    // is a 256x256 synthetic gradient whose quantization table makes the
+    // reference dominated by IDCT rounding.
+    //
+    // `0003.jpg` is used because its full-capacity signal is unambiguous
+    // (measured 0.70 against a 0.05 threshold); `0001.jpg` sits at 0.07, i.e.
+    // just above the gate, and the random salt would make the test flaky.
+    let Some(candidate) = find_corpus_file("images/jpg/0003.jpg") else {
+        return;
+    };
     let jpeg_bytes = fs::read(&candidate).expect("read carrier");
     let dir = scratch("calibration_detector");
     let clean_path = dir.join("clean.jpg");
@@ -938,18 +949,17 @@ fn test_jpeg_calibration_skips_unquantized_carrier() {
     );
 }
 
-/// STC over UERD coefficients, including group sizes > 1.
+/// V3 JPEG: the group size is derived from the embed-side slot budget and
+/// travels in the superblock, so extraction needs no parameters at all -- and a
+/// wider budget really does spread the same payload over more coefficients.
 ///
-/// Two things have to hold at once: the codec must be self-describing (the
-/// extractor is given default options and still succeeds), and a group size of
-/// `u` must trade capacity for fewer changed coefficients -- that is the whole
-/// point of the grouping, and a silent regression to `u = 1` would still pass a
-/// plain roundtrip.
+/// This is the contract that replaced "the extractor must repeat `--stc-u`":
+/// the extractor is handed default options and still succeeds.
 #[test]
-fn test_jpeg_stc_group_coding_roundtrip() {
-    let candidate = fixture_file("carrier.jpg");
+fn test_jpeg_v3_slot_budget_controls_the_change_rate() {
+    let candidate = fixture_file("carrier_photo.jpg");
     let jpeg_bytes = fs::read(&candidate).expect("read carrier jpeg");
-    let payload = b"JPEG STC group-coded payload 2026!";
+    let payload = b"JPEG V3 ternary STC payload 2026!";
     let password = "JpegStcPassword#2026";
 
     let extract_opts = StegoOptions {
@@ -959,26 +969,23 @@ fn test_jpeg_stc_group_coding_roundtrip() {
     };
 
     let mut changed_counts = Vec::new();
-    let mut capacities = Vec::new();
-    for stc_u in [1u8, 2] {
+    let mut group_sizes = Vec::new();
+    for budget in [2_000usize, 800_000] {
         let mut opts = StegoOptions {
             algorithm: Some("uerd".into()),
             password: Some(password.into()),
             ..Default::default()
         };
-        opts.jpeg_params.codec = strhide::stego::StegoCodec::Stc;
         opts.jpeg_params.stc_h = 8;
-        opts.jpeg_params.stc_u = stc_u;
+        opts.jpeg_params.slot_budget = budget;
 
         let stego = embed_carrier(&jpeg_bytes, payload, &opts)
-            .unwrap_or_else(|e| panic!("u={stc_u}: embed failed: {e}"));
-        assert_ne!(stego, jpeg_bytes, "u={stc_u}: stego must differ");
+            .unwrap_or_else(|e| panic!("budget={budget}: embed failed: {e}"));
+        assert_ne!(stego, jpeg_bytes, "budget={budget}: stego must differ");
 
-        // Extraction is told nothing about the codec: it reads it from the
-        // header, exactly like the PNG path.
         let extracted = extract_carrier(&stego, &extract_opts)
-            .unwrap_or_else(|e| panic!("u={stc_u}: extract failed: {e}"));
-        assert_eq!(extracted, payload, "u={stc_u}: payload mismatch");
+            .unwrap_or_else(|e| panic!("budget={budget}: extract failed: {e}"));
+        assert_eq!(extracted, payload, "budget={budget}: payload mismatch");
 
         let before = dct_io::read_coefficients(&jpeg_bytes).expect("cover coefficients");
         let after = dct_io::read_coefficients(&stego).expect("stego coefficients");
@@ -990,20 +997,34 @@ fn test_jpeg_stc_group_coding_roundtrip() {
         {
             changed += cb.iter().zip(ca.iter()).filter(|(x, y)| x != y).count();
         }
-        assert!(changed > 0, "u={stc_u}: nothing was modified");
+        assert!(changed > 0, "budget={budget}: nothing was modified");
+        // DC is never a target: the header digest depends on it.
+        for (cb, ca) in before.components[0]
+            .blocks
+            .iter()
+            .zip(after.components[0].blocks.iter())
+        {
+            assert_eq!(cb[0], ca[0], "budget={budget}: DC coefficient changed");
+        }
         changed_counts.push(changed);
 
-        let cap = probe_carrier_capacity(&jpeg_bytes, &opts).expect("capacity probe");
-        capacities.push(cap.max_raw_payload_bytes);
+        let layout = strhide::stego::jpeg::engine::layout_for_payload(
+            &jpeg_bytes,
+            payload.len(),
+            &opts.jpeg_params,
+            &strhide::stego::format::DEFAULT_FORMAT,
+        )
+        .expect("layout");
+        group_sizes.push(layout.u);
     }
 
     assert!(
-        changed_counts[1] < changed_counts[0],
-        "u=2 must change fewer coefficients for the same payload: {changed_counts:?}"
+        group_sizes[0] < group_sizes[1],
+        "the slot budget must control the group size: {group_sizes:?}"
     );
     assert!(
-        capacities[1] < capacities[0],
-        "u=2 must report a smaller capacity: {capacities:?}"
+        changed_counts[1] < changed_counts[0],
+        "a wider budget must change fewer coefficients: {changed_counts:?}"
     );
 }
 
@@ -1031,122 +1052,6 @@ fn test_stego_v2_feature_word_tamper_fails_safely() {
     assert!(
         matches!(res, Err(strhide::errors::StrHideError::NoHiddenData(_))),
         "Tampered FeatureWord must yield NoHiddenData, got: {res:?}"
-    );
-}
-
-/// An envelope written under the v1 header layout (h=8, no escape, 256 slots)
-/// must seamlessly extract via the v1 compatibility fallback.
-#[test]
-fn test_stego_v1_legacy_compatibility_fallback() {
-    use strhide::stego::coding::{StcTrellis, spatial_move};
-
-    let png_bytes = generate_texture_png(128, 128);
-    let mut img = decode_png(&png_bytes).expect("decode");
-    let ch = img.channels;
-    let off = if ch >= 3 { 1 } else { 0 };
-    let params = SpatialParams::default();
-
-    let costs = HillCostModel.compute_cost(&img.pixels, 128, 128, ch, &params);
-    let mut eligible: Vec<usize> = (0..128 * 128)
-        .filter(|&i| {
-            (strhide::stego::spatial::engine::SPATIAL_ELIGIBLE_MIN
-                ..=strhide::stego::spatial::engine::SPATIAL_ELIGIBLE_MAX)
-                .contains(&img.pixels[i * ch + off])
-        })
-        .collect();
-    eligible.sort_by(|&a, &b| {
-        costs[a]
-            .partial_cmp(&costs[b])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let allowed = ((eligible.len() as f64) * (1.0 - params.exclusion_percentile)) as usize;
-    let candidates = &eligible[..allowed];
-
-    let header_seed = strhide::stego::envelope::derive_header_perm_seed(None, None);
-    let mut permuted = candidates.to_vec();
-    strhide::stego::prng::permute_indices(&mut permuted, &header_seed);
-    let header_slots = &permuted[..256];
-
-    let is_header = {
-        let mut v = vec![false; 128 * 128];
-        for &s in header_slots {
-            v[s] = true;
-        }
-        v
-    };
-    let body_candidates: Vec<usize> = candidates
-        .iter()
-        .copied()
-        .filter(|&s| !is_header[s])
-        .collect();
-
-    let secret = b"hello v1 legacy stego compatibility";
-    let (envelope, perm_seed) =
-        strhide::stego::envelope::pack_envelope_ext(secret, None, None).unwrap();
-    let total_len = envelope.len() as u32;
-
-    // v1 header word: codec_id = 1 (STC u=1), stc_h = 8 (NOT 15!)
-    let header_word = strhide::stego::header::encode_header_word(
-        total_len,
-        strhide::stego::StegoCodec::Stc,
-        8,
-        1,
-    );
-    let mut header_bytes = Vec::with_capacity(32);
-    header_bytes.extend_from_slice(&envelope[..28]);
-    header_bytes.extend_from_slice(&header_word.to_be_bytes());
-
-    // Write v1 header into first 256 slots
-    for (byte_i, &b) in header_bytes.iter().enumerate() {
-        for bit_i in 0..8 {
-            let target_bit = (b >> (7 - bit_i)) & 1;
-            let slot = header_slots[byte_i * 8 + bit_i];
-            let byte_idx = slot * ch + off;
-            strhide::stego::coding::write_bit_ternary(
-                &mut img.pixels[byte_idx],
-                target_bit,
-                1.0,
-                1.0,
-            );
-        }
-    }
-
-    // Embed body with STC u=1, h=8
-    let ciphertext_body = &envelope[28..];
-    let ciphertext_bits = ciphertext_body.len() * 8;
-    let trellis = StcTrellis::from_seed_grouped(0, 8, 1).unwrap();
-    let needed = trellis.slots_for(ciphertext_bits);
-
-    let mut body_slots = body_candidates[..needed].to_vec();
-    strhide::stego::prng::permute_indices(&mut body_slots, &perm_seed);
-
-    let salt = &envelope[..16];
-    let stc_seed = strhide::stego::envelope::derive_stc_seed(&perm_seed, salt);
-    let trellis_keyed = StcTrellis::from_seed_grouped(stc_seed, 8, 1).unwrap();
-
-    let mut slot_vals: Vec<u8> = body_slots
-        .iter()
-        .map(|&s| img.pixels[s * ch + off])
-        .collect();
-    let moves: Vec<_> = slot_vals.iter().map(|&v| spatial_move(v)).collect();
-    let rp = vec![1.0; needed];
-    let rm = vec![1.0; needed];
-    trellis_keyed
-        .embed(&mut slot_vals, &moves, &rp, &rm, ciphertext_body)
-        .unwrap();
-
-    for (i, &s) in body_slots.iter().enumerate() {
-        img.pixels[s * ch + off] = slot_vals[i];
-    }
-
-    let v1_carrier_bytes = encode_png(&img).unwrap();
-
-    // Now extract using the v2-enabled extractor!
-    let opts = StegoOptions::default();
-    let extracted = extract_carrier(&v1_carrier_bytes, &opts).expect("extract v1 carrier");
-    assert_eq!(
-        extracted, secret,
-        "v1 carrier must extract losslessly via v1 fallback"
     );
 }
 

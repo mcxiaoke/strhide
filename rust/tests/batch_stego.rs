@@ -72,8 +72,8 @@ fn codec_options() -> StegoOptions {
     let mut opts = StegoOptions::default();
     opts.spatial_params.codec = codec;
     opts.spatial_params.stc_u = u;
-    opts.jpeg_params.codec = codec;
-    opts.jpeg_params.stc_u = u;
+    // JPEG V3 is STC-only and derives its group size from the slot budget, so
+    // the codec knob only applies to the spatial engine.
     opts
 }
 

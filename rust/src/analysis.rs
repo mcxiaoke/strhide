@@ -46,13 +46,22 @@ const TAIL_WINDOW: usize = 4096;
 
 /// Calibrated DCT estimate at which a JPEG is reported as suspicious.
 ///
-/// Calibrated on the bundled 15-carrier corpus: clean carriers stay at or below
-/// 0.062, full-capacity UERD embedding reaches 0.129-0.228. The threshold sits
-/// in the empty band between them. This is a heuristic with a measured false
-/// negative rate, not a proof procedure -- see `docs/stego_keyed_parameters_plan_20261020.md` §13.
-const CALIBRATION_FLAG_RATE: f64 = 0.09;
-/// Estimate above which the finding is raised to `Likely` (2.4x the highest
-/// clean value measured on the corpus).
+/// Recalibrated for the ternary (V3) embedding model on the 80-carrier corpus
+/// (2026-10-21): the statistic now also looks at the `(0, 1)` pair, which is
+/// where `0 <-> ±1` moves land. Measured on that corpus:
+///
+/// | population | median | max |
+/// | :--- | ---: | ---: |
+/// | clean | 0.000 | 0.011 |
+/// | recommended load (bpp <= 0.10) | 0.000 | 0.007 |
+/// | full capacity | 0.141 | 0.741 |
+///
+/// `0.05` is 4.5x above the highest clean value and detects 85% of
+/// full-capacity carriers; the recommended load stays undetected by design.
+/// This is a heuristic with a measured false-negative rate, not a proof
+/// procedure -- see `docs/stego_keyed_parameters_plan_20261020.md` §13.
+const CALIBRATION_FLAG_RATE: f64 = 0.05;
+/// Estimate above which the finding is raised to `Likely`.
 const CALIBRATION_STRONG_RATE: f64 = 0.15;
 
 /// How strongly a single finding points at embedded data.

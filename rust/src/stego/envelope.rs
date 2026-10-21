@@ -1,15 +1,30 @@
 //! Stealth micro-envelope for content-domain steganography.
 //!
-//! Unlike structure-domain UBE envelopes which have structured headers, the content-domain
-//! envelope is strictly minimal and pseudo-random:
+//! Inside the AEAD ciphertext:
 //!
-//! `[16-byte random Salt][12-byte random Nonce][AEAD ciphertext + 16-byte Tag]`
+//! ```text
+//! [4-byte big-endian uncompressed length][1-byte flags][payload bytes]
+//! ```
 //!
-//! Inside the ciphertext:
-//! `[4-byte big-endian uncompressed length][1-byte flags (compression)][compressed payload]`
+//! There are no magic bytes, no plaintext markers and no field that is not
+//! covered by the tag: a carrier without the password is indistinguishable from
+//! an untouched image.
 //!
-//! Without the password, every single bit resembles high-entropy physical sensor noise or
-//! PRNG output; there are no static magic bytes, headers, or plaintext markers.
+//! # Where salt and nonce live
+//!
+//! They no longer travel inside the envelope buffer: the carrier's own header
+//! carries them (a 44-byte superblock for JPEG, a 32-byte header for the spatial
+//! codec), and the *whole header* is the AEAD's associated data. That is a
+//! deliberate change from the previous `salt || nonce` AAD:
+//!
+//! * any header field the decoder acts on (trellis height, group size, suite id,
+//!   extension length) is authenticated, so tampering fails the tag instead of
+//!   producing a different-but-plausible decode;
+//! * the caller no longer concatenates `[salt | nonce]` and the ciphertext into
+//!   a fresh `Vec` on the extract path.
+//!
+//! The pieces are therefore split into three steps: [`build_plaintext`],
+//! [`encrypt_with_aad`] and [`unpack_envelope_parts`].
 
 use std::io::{Read, Write};
 
@@ -24,6 +39,7 @@ use sha2::Sha256;
 
 use crate::crypto::normalize_nfc;
 use crate::errors::StrHideError;
+use crate::stego::format::{Aead as SuiteAead, CipherSuite};
 
 /// Official public fallback secret.
 ///
@@ -48,18 +64,29 @@ pub const TAG_LEN: usize = 16;
 pub const HEADER_OVERHEAD: usize = SALT_LEN + NONCE_LEN; // 28 bytes
 pub const MIN_ENVELOPE_LEN: usize = HEADER_OVERHEAD + 4 + 1 + TAG_LEN; // 49 bytes
 
-/// Bytes the **ciphertext body** spends on things that are not payload:
+/// Bytes the **ciphertext** spends on things that are not payload:
 /// `[4-byte original length][1-byte flags]` inside the plaintext plus the
 /// 16-byte AEAD tag.
 ///
 /// The 28-byte salt/nonce is deliberately NOT part of this number: it is
-/// carried by the 256 header slots, not by the body slots. Capacity probes must
+/// carried by the carrier header, not by the body slots. Capacity probes must
 /// subtract this from the body ciphertext budget, otherwise they under-report by
 /// 28 bytes (they used to subtract `MIN_ENVELOPE_LEN`).
 pub const BODY_OVERHEAD: usize = 4 + 1 + TAG_LEN; // 21 bytes
 
-/// Flag bit indicating Deflate compression.
+/// Largest payload a decoded envelope may expand to (matches the header's
+/// 26-bit length field).
+pub const MAX_PLAINTEXT_LEN: usize = 1 << 26;
+
+/// Flag bit 0: the payload is compressed.
 const FLAG_COMPRESSED: u8 = 0x01;
+
+/// Bits 1..3 hold the compression algorithm id.
+const COMPRESSION_SHIFT: u32 = 1;
+const COMPRESSION_MASK: u8 = 0x07;
+
+/// Compression algorithm id 0: Deflate (the only one implemented).
+const COMPRESSION_DEFLATE: u8 = 0;
 
 /// Derive a subkey from `ikm` when a custom `domain` is specified, applying
 /// NFC normalization and an 8-byte big-endian length prefix to prevent collision.
@@ -81,34 +108,13 @@ pub fn derive_domain_subkey(ikm: &[u8], domain: Option<&str>) -> Option<[u8; 32]
     Some(subkey)
 }
 
-/// Derive AES-256-GCM key and PRNG seed from password and salt, optionally isolated by domain.
-pub fn derive_keys(password: &str, salt: &[u8], domain: Option<&str>) -> ([u8; 32], [u8; 32]) {
-    let norm_pwd = normalize_nfc(password);
-    // PBKDF2-HMAC-SHA256 with 100,000 iterations
-    let mut pbkdf2_key = [0u8; 32];
-    pbkdf2::pbkdf2_hmac::<Sha256>(norm_pwd.as_bytes(), salt, 100_000, &mut pbkdf2_key);
-
-    let effective_ikm = match derive_domain_subkey(&pbkdf2_key, domain) {
-        Some(subkey) => subkey,
-        None => pbkdf2_key,
-    };
-
-    // HKDF expand into encryption key (32 bytes) and permutation seed (32 bytes)
-    let hk = Hkdf::<Sha256>::new(Some(salt), &effective_ikm);
-    let mut enc_key_bytes = [0u8; 32];
-    let mut perm_seed = [0u8; 32];
-    hk.expand(b"strhide-stego-enc-v1", &mut enc_key_bytes)
-        .expect("HKDF expand enc key");
-    hk.expand(b"strhide-stego-perm-v1", &mut perm_seed)
-        .expect("HKDF expand perm seed");
-
-    (enc_key_bytes, perm_seed)
-}
-
 /// Derive header permutation seed from password (or default builtin key) WITHOUT salt,
 /// optionally isolated by domain.
-/// This breaks the circular dependency ("chicken-and-egg") so the header location
-/// can be pseudo-randomized across the carrier without knowing the salt upfront.
+///
+/// Used by the spatial codec, whose header position must be resolvable before
+/// the header (and therefore its salt) can be read. The JPEG codec does not use
+/// this: its header seed comes from the suite KDF over the cover digest, so an
+/// attacker cannot trial a password without paying a full KDF.
 pub fn derive_header_perm_seed(password: Option<&str>, domain: Option<&str>) -> [u8; 32] {
     let pw = password.unwrap_or(PUBLIC_DEFAULT_SECRET);
     let norm_pw = normalize_nfc(pw);
@@ -129,13 +135,9 @@ pub fn derive_header_perm_seed(password: Option<&str>, domain: Option<&str>) -> 
 
 /// Derive the STC trellis seed from the body permutation seed.
 ///
-/// Takes the already-derived `perm_seed` instead of the password so the caller
-/// does not pay a second 100k-iteration PBKDF2 per embed: both ends call
-/// [`derive_keys`] exactly once and domain-separate from it here.
-///
-/// The trellis (`ĥ`, i.e. the parity-check matrix) must stay as secret as the
-/// payload key -- a public `H` lets an attacker compute the syndrome of any
-/// candidate change set, which is exactly the detector we are trying to deny.
+/// Kept for the spatial codec; the JPEG codec uses
+/// [`crate::stego::format::stc_seed`] so the label and salt layering follow the
+/// format profile.
 pub fn derive_stc_seed(perm_seed: &[u8; 32], salt: &[u8]) -> u64 {
     let hk = Hkdf::<Sha256>::new(Some(salt), perm_seed);
     let mut out = [0u8; 8];
@@ -144,253 +146,277 @@ pub fn derive_stc_seed(perm_seed: &[u8; 32], salt: &[u8]) -> u64 {
     u64::from_be_bytes(out)
 }
 
-/// Fallback built-in key when no password is provided.
-fn default_builtin_key(salt: &[u8], domain: Option<&str>) -> ([u8; 32], [u8; 32]) {
-    derive_keys(PUBLIC_DEFAULT_SECRET, salt, domain)
+/// Random salt for the payload-key layering.
+pub fn random_salt() -> [u8; SALT_LEN] {
+    let mut salt = [0u8; SALT_LEN];
+    rand::rng().fill(&mut salt);
+    salt
 }
 
-/// Pack and encrypt payload into micro-envelope byte stream, also returning the derived `perm_seed`.
-pub fn pack_envelope_ext(
-    payload: &[u8],
-    password: Option<&str>,
-    domain: Option<&str>,
-) -> Result<(Vec<u8>, [u8; 32]), StrHideError> {
-    let mut salt = [0u8; SALT_LEN];
-    let mut nonce_bytes = [0u8; NONCE_LEN];
-    let mut rng = rand::rng();
-    rng.fill(&mut salt);
-    rng.fill(&mut nonce_bytes);
+/// Random AEAD nonce.
+pub fn random_nonce() -> [u8; NONCE_LEN] {
+    let mut nonce = [0u8; NONCE_LEN];
+    rand::rng().fill(&mut nonce);
+    nonce
+}
 
-    let (key_bytes, perm_seed) = match password {
-        Some(p) => derive_keys(p, &salt, domain),
-        None => default_builtin_key(&salt, domain),
-    };
-
-    // Compress payload with Deflate
+/// Compress (when profitable) and frame the payload as AEAD plaintext.
+///
+/// `[4B original length][1B flags][body]`. The length is known before
+/// encryption, which is what lets the caller size the header field first and
+/// only then encrypt with the finished header as associated data.
+pub fn build_plaintext(payload: &[u8]) -> Result<Vec<u8>, StrHideError> {
+    if payload.len() > MAX_PLAINTEXT_LEN {
+        return Err(StrHideError::General(format!(
+            "Payload of {} bytes exceeds the {MAX_PLAINTEXT_LEN}-byte envelope limit",
+            payload.len()
+        )));
+    }
     let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(payload)?;
     let compressed = encoder.finish()?;
 
-    let (payload_bytes, flags) = if compressed.len() < payload.len() {
-        (compressed, FLAG_COMPRESSED)
+    let (body, flags) = if compressed.len() < payload.len() {
+        (
+            compressed,
+            FLAG_COMPRESSED | (COMPRESSION_DEFLATE << COMPRESSION_SHIFT),
+        )
     } else {
         (payload.to_vec(), 0u8)
     };
 
-    // Plaintext format: [4B original len][1B flags][payload bytes]
-    let mut plaintext = Vec::with_capacity(5 + payload_bytes.len());
+    let mut plaintext = Vec::with_capacity(5 + body.len());
     plaintext.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     plaintext.push(flags);
-    plaintext.extend_from_slice(&payload_bytes);
-
-    // AES-256-GCM encryption with Salt+Nonce as AAD
-    let cipher = Aes256Gcm::new_from_slice(&key_bytes)
-        .map_err(|e| StrHideError::Password(format!("Cipher init failed: {e}")))?;
-    let nonce = Nonce::from(nonce_bytes);
-    let mut aad = Vec::with_capacity(HEADER_OVERHEAD);
-    aad.extend_from_slice(&salt);
-    aad.extend_from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(
-            &nonce,
-            aes_gcm::aead::Payload {
-                msg: &plaintext,
-                aad: &aad,
-            },
-        )
-        .map_err(|e| StrHideError::Password(format!("Encryption failed: {e}")))?;
-
-    let mut out = Vec::with_capacity(HEADER_OVERHEAD + ciphertext.len());
-    out.extend_from_slice(&salt);
-    out.extend_from_slice(&nonce_bytes);
-    out.extend_from_slice(&ciphertext);
-
-    Ok((out, perm_seed))
+    plaintext.extend_from_slice(&body);
+    Ok(plaintext)
 }
 
-/// Pack and encrypt payload into micro-envelope byte stream.
-pub fn pack_envelope(
-    payload: &[u8],
-    password: Option<&str>,
-    domain: Option<&str>,
+/// Encrypt the framed plaintext, authenticating `aad` (the carrier header).
+pub fn encrypt_with_aad(
+    suite: &CipherSuite,
+    key: &[u8; 32],
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    plaintext: &[u8],
 ) -> Result<Vec<u8>, StrHideError> {
-    pack_envelope_ext(payload, password, domain).map(|(env, _)| env)
+    match suite.aead {
+        SuiteAead::Aes256Gcm => {
+            let cipher = Aes256Gcm::new_from_slice(key)
+                .map_err(|e| StrHideError::Password(format!("Cipher init failed: {e}")))?;
+            let nonce = Nonce::from(*nonce);
+            cipher
+                .encrypt(
+                    &nonce,
+                    aes_gcm::aead::Payload {
+                        msg: plaintext,
+                        aad,
+                    },
+                )
+                .map_err(|e| StrHideError::Password(format!("Encryption failed: {e}")))
+        }
+    }
 }
 
-/// Unpack and decrypt micro-envelope from raw extracted bytes using a pre-derived AES key.
-pub fn unpack_envelope_with_key(
-    data: &[u8],
-    key_bytes: &[u8; 32],
+/// Decrypt and unframe a ciphertext, without building a combined envelope
+/// buffer. A tag failure is reported as `NoHiddenData`, identical to "there is
+/// nothing here", so the two cases cannot be told apart.
+pub fn unpack_envelope_parts(
+    suite: &CipherSuite,
+    key: &[u8; 32],
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    ciphertext: &[u8],
 ) -> Result<Vec<u8>, StrHideError> {
-    if data.len() < MIN_ENVELOPE_LEN {
+    if ciphertext.len() < 5 + suite.tag_len() {
         return Err(StrHideError::NoHiddenData("No valid payload found".into()));
     }
 
-    let salt = &data[..SALT_LEN];
-    let nonce_bytes = &data[SALT_LEN..HEADER_OVERHEAD];
-    let ciphertext = &data[HEADER_OVERHEAD..];
-
-    let cipher = Aes256Gcm::new_from_slice(key_bytes)
-        .map_err(|_| StrHideError::NoHiddenData("No valid payload found".into()))?;
-    let nonce = Nonce::try_from(nonce_bytes)
-        .map_err(|_| StrHideError::NoHiddenData("Invalid nonce size".into()))?;
-    let mut aad = Vec::with_capacity(HEADER_OVERHEAD);
-    aad.extend_from_slice(salt);
-    aad.extend_from_slice(nonce_bytes);
-
-    let plaintext = cipher
-        .decrypt(
-            &nonce,
-            aes_gcm::aead::Payload {
-                msg: ciphertext,
-                aad: &aad,
-            },
-        )
-        .map_err(|_| {
-            StrHideError::NoHiddenData("No valid payload found or incorrect password".into())
-        })?; // Oracle resistance
+    let plaintext = match suite.aead {
+        SuiteAead::Aes256Gcm => {
+            let cipher = Aes256Gcm::new_from_slice(key)
+                .map_err(|_| StrHideError::NoHiddenData("No valid payload found".into()))?;
+            let nonce = Nonce::from(*nonce);
+            cipher
+                .decrypt(
+                    &nonce,
+                    aes_gcm::aead::Payload {
+                        msg: ciphertext,
+                        aad,
+                    },
+                )
+                .map_err(|_| {
+                    StrHideError::NoHiddenData(
+                        "No valid payload found or incorrect password".into(),
+                    )
+                })? // Oracle resistance
+        }
+    };
 
     if plaintext.len() < 5 {
         return Err(StrHideError::NoHiddenData("No valid payload found".into()));
     }
-
     let orig_len =
         u32::from_be_bytes([plaintext[0], plaintext[1], plaintext[2], plaintext[3]]) as usize;
     let flags = plaintext[4];
     let body = &plaintext[5..];
 
-    if flags & FLAG_COMPRESSED != 0 {
-        let mut decoder = DeflateDecoder::new(body);
-        let mut decompressed = Vec::with_capacity(orig_len);
-        decoder
-            .read_to_end(&mut decompressed)
-            .map_err(|_| StrHideError::NoHiddenData("Decompression failed".into()))?;
-        if decompressed.len() != orig_len {
-            return Err(StrHideError::NoHiddenData(
-                "Decompressed length mismatch".into(),
-            ));
+    if flags & !(FLAG_COMPRESSED | (COMPRESSION_MASK << COMPRESSION_SHIFT)) != 0 {
+        return Err(StrHideError::CorruptedData(format!(
+            "Envelope flags {flags:#04x} use reserved bits"
+        )));
+    }
+    let algorithm = (flags >> COMPRESSION_SHIFT) & COMPRESSION_MASK;
+    if flags & FLAG_COMPRESSED == 0 {
+        if algorithm != 0 {
+            return Err(StrHideError::CorruptedData(format!(
+                "Envelope declares compression algorithm {algorithm} but is not compressed"
+            )));
         }
-        Ok(decompressed)
-    } else {
         if body.len() != orig_len {
             return Err(StrHideError::NoHiddenData(
                 "Plaintext length mismatch".into(),
             ));
         }
-        Ok(body.to_vec())
-    }
-}
-
-/// Unpack and decrypt micro-envelope from raw extracted bytes.
-pub fn unpack_envelope(
-    data: &[u8],
-    password: Option<&str>,
-    domain: Option<&str>,
-) -> Result<Vec<u8>, StrHideError> {
-    if data.len() < MIN_ENVELOPE_LEN {
-        return Err(StrHideError::NoHiddenData("No valid payload found".into()));
+        return Ok(body.to_vec());
     }
 
-    let salt = &data[..SALT_LEN];
-    let (key_bytes, _) = match password {
-        Some(p) => derive_keys(p, salt, domain),
-        None => default_builtin_key(salt, domain),
-    };
+    if algorithm != COMPRESSION_DEFLATE {
+        return Err(StrHideError::UnsupportedVersion(format!(
+            "Envelope uses unsupported compression algorithm {algorithm}"
+        )));
+    }
+    if orig_len > MAX_PLAINTEXT_LEN {
+        return Err(StrHideError::CorruptedData(format!(
+            "Envelope claims a {orig_len}-byte payload, above the {MAX_PLAINTEXT_LEN}-byte limit"
+        )));
+    }
 
-    unpack_envelope_with_key(data, &key_bytes)
+    let mut decoder = DeflateDecoder::new(body);
+    let mut decompressed = Vec::with_capacity(orig_len);
+    decoder
+        .read_to_end(&mut decompressed)
+        .map_err(|_| StrHideError::NoHiddenData("Decompression failed".into()))?;
+    if decompressed.len() != orig_len {
+        return Err(StrHideError::NoHiddenData(
+            "Decompressed length mismatch".into(),
+        ));
+    }
+    Ok(decompressed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stego::format::{DEFAULT_FORMAT, SUITE_PBKDF2_200K, body_keys, derive_master};
 
-    #[test]
-    fn nfc_normalization_produces_identical_keys_and_seeds() {
-        // "café" in NFC (precomposed: \u{00E9}) vs NFD (decomposed: e + \u{0301})
-        let pwd_nfc = "caf\u{00E9}";
-        let pwd_nfd = "cafe\u{0301}";
-        assert_ne!(pwd_nfc.as_bytes(), pwd_nfd.as_bytes());
-
-        let salt = [42u8; 16];
-        let (key_nfc, perm_nfc) = derive_keys(pwd_nfc, &salt, None);
-        let (key_nfd, perm_nfd) = derive_keys(pwd_nfd, &salt, None);
-
-        assert_eq!(key_nfc, key_nfd);
-        assert_eq!(perm_nfc, perm_nfd);
-
-        let hseed_nfc = derive_header_perm_seed(Some(pwd_nfc), None);
-        let hseed_nfd = derive_header_perm_seed(Some(pwd_nfd), None);
-        assert_eq!(hseed_nfc, hseed_nfd);
-
-        // Cross pack/unpack
-        let payload = b"secret stego message";
-        let packed = pack_envelope(payload, Some(pwd_nfd), None).expect("pack with NFD password");
-        let unpacked =
-            unpack_envelope(&packed, Some(pwd_nfc), None).expect("unpack with NFC password");
-        assert_eq!(unpacked, payload);
+    fn keys(password: &str, salt: &[u8]) -> [u8; 32] {
+        let master = derive_master(&SUITE_PBKDF2_200K, password, salt).unwrap();
+        let (enc_key, _) = body_keys(&DEFAULT_FORMAT, &master, salt, None);
+        enc_key
     }
 
     #[test]
-    fn domain_isolation_keys_and_seeds() {
-        let salt = [17u8; 16];
-        let pwd = "MyStrongPassword123";
+    fn roundtrip_with_and_without_compression() {
+        let salt = [42u8; SALT_LEN];
+        let key = keys("password", &salt);
+        let nonce = [7u8; NONCE_LEN];
+        let aad = b"header bytes";
 
-        let (key_default, perm_default) = derive_keys(pwd, &salt, None);
-        let (key_a, perm_a) = derive_keys(pwd, &salt, Some("org.corp.alpha"));
-        let (key_b, perm_b) = derive_keys(pwd, &salt, Some("org.corp.beta"));
+        // Compressible payload takes the Deflate path.
+        let repetitive = vec![0x21u8; 4096];
+        let plaintext = build_plaintext(&repetitive).unwrap();
+        assert_eq!(plaintext[4] & FLAG_COMPRESSED, FLAG_COMPRESSED);
+        let ct = encrypt_with_aad(&SUITE_PBKDF2_200K, &key, &nonce, aad, &plaintext).unwrap();
+        let out = unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, aad, &ct).unwrap();
+        assert_eq!(out, repetitive);
 
-        assert_ne!(key_default, key_a);
-        assert_ne!(key_a, key_b);
-        assert_ne!(perm_default, perm_a);
-        assert_ne!(perm_a, perm_b);
-
-        let hseed_default = derive_header_perm_seed(Some(pwd), None);
-        let hseed_a = derive_header_perm_seed(Some(pwd), Some("org.corp.alpha"));
-        let hseed_b = derive_header_perm_seed(Some(pwd), Some("org.corp.beta"));
-
-        assert_ne!(hseed_default, hseed_a);
-        assert_ne!(hseed_a, hseed_b);
-
-        // Default builtin key also isolates by domain
-        let (dkey_default, _) = derive_keys(PUBLIC_DEFAULT_SECRET, &salt, None);
-        let (dkey_a, _) = derive_keys(PUBLIC_DEFAULT_SECRET, &salt, Some("org.corp.alpha"));
-        assert_ne!(dkey_default, dkey_a);
+        // Incompressible payload stays raw.
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let random: Vec<u8> = (0..512)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        let plaintext = build_plaintext(&random).unwrap();
+        assert_eq!(plaintext[4] & FLAG_COMPRESSED, 0);
+        let ct = encrypt_with_aad(&SUITE_PBKDF2_200K, &key, &nonce, aad, &plaintext).unwrap();
+        let out = unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, aad, &ct).unwrap();
+        assert_eq!(out, random);
     }
 
     #[test]
-    fn domain_nfc_normalization_and_empty_equivalence() {
-        let salt = [77u8; 16];
-        let pwd = "password";
+    fn aad_and_nonce_and_key_are_all_bound() {
+        let salt = [1u8; SALT_LEN];
+        let key = keys("password", &salt);
+        let nonce = [2u8; NONCE_LEN];
+        let plaintext = build_plaintext(b"bound payload").unwrap();
+        let ct =
+            encrypt_with_aad(&SUITE_PBKDF2_200K, &key, &nonce, b"header-a", &plaintext).unwrap();
 
-        // NFC vs NFD domain tag
-        let domain_nfc = "resum\u{00E9}.vault";
-        let domain_nfd = "resume\u{0301}.vault";
-        assert_ne!(domain_nfc.as_bytes(), domain_nfd.as_bytes());
+        assert!(matches!(
+            unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, b"header-b", &ct),
+            Err(StrHideError::NoHiddenData(_))
+        ));
+        let wrong_nonce = [3u8; NONCE_LEN];
+        assert!(
+            unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &wrong_nonce, b"header-a", &ct)
+                .is_err()
+        );
+        let wrong_key = keys("password2", &salt);
+        assert!(
+            unpack_envelope_parts(&SUITE_PBKDF2_200K, &wrong_key, &nonce, b"header-a", &ct)
+                .is_err()
+        );
+    }
 
-        let (key_nfc, perm_nfc) = derive_keys(pwd, &salt, Some(domain_nfc));
-        let (key_nfd, perm_nfd) = derive_keys(pwd, &salt, Some(domain_nfd));
-        assert_eq!(key_nfc, key_nfd);
-        assert_eq!(perm_nfc, perm_nfd);
+    #[test]
+    fn reserved_flag_bits_and_unknown_algorithms_are_rejected() {
+        let salt = [9u8; SALT_LEN];
+        let key = keys("pw", &salt);
+        let nonce = [4u8; NONCE_LEN];
 
-        let hseed_nfc = derive_header_perm_seed(Some(pwd), Some(domain_nfc));
-        let hseed_nfd = derive_header_perm_seed(Some(pwd), Some(domain_nfd));
-        assert_eq!(hseed_nfc, hseed_nfd);
+        // Hand-build a plaintext with reserved bits set.
+        let mut plaintext = Vec::new();
+        plaintext.extend_from_slice(&3u32.to_be_bytes());
+        plaintext.push(0x80);
+        plaintext.extend_from_slice(b"abc");
+        let ct = encrypt_with_aad(&SUITE_PBKDF2_200K, &key, &nonce, b"aad", &plaintext).unwrap();
+        assert!(matches!(
+            unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, b"aad", &ct),
+            Err(StrHideError::CorruptedData(_))
+        ));
 
-        // Empty domain is equivalent to None
-        let (key_empty, perm_empty) = derive_keys(pwd, &salt, Some(""));
-        let (key_none, perm_none) = derive_keys(pwd, &salt, None);
-        assert_eq!(key_empty, key_none);
-        assert_eq!(perm_empty, perm_none);
+        // Compressed flag with an unknown algorithm id.
+        let mut plaintext = Vec::new();
+        plaintext.extend_from_slice(&3u32.to_be_bytes());
+        plaintext.push(FLAG_COMPRESSED | (2 << COMPRESSION_SHIFT));
+        plaintext.extend_from_slice(b"abc");
+        let ct = encrypt_with_aad(&SUITE_PBKDF2_200K, &key, &nonce, b"aad", &plaintext).unwrap();
+        let err = unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, b"aad", &ct).unwrap_err();
+        assert!(
+            matches!(err, StrHideError::UnsupportedVersion(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("compression algorithm"), "{err}");
+    }
 
-        let hseed_empty = derive_header_perm_seed(Some(pwd), Some(""));
-        let hseed_none = derive_header_perm_seed(Some(pwd), None);
-        assert_eq!(hseed_empty, hseed_none);
+    #[test]
+    fn empty_and_oversized_payloads_are_handled() {
+        let salt = [5u8; SALT_LEN];
+        let key = keys("pw", &salt);
+        let nonce = [6u8; NONCE_LEN];
+        let plaintext = build_plaintext(b"").unwrap();
+        let ct = encrypt_with_aad(&SUITE_PBKDF2_200K, &key, &nonce, b"aad", &plaintext).unwrap();
+        assert_eq!(
+            unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, b"aad", &ct).unwrap(),
+            Vec::<u8>::new()
+        );
 
-        // Cross-domain unpack failure
-        let payload = b"classified corporate data";
-        let packed = pack_envelope(payload, Some(pwd), Some("domain-A")).expect("pack domain-A");
-        let err = unpack_envelope(&packed, Some(pwd), Some("domain-B"));
-        assert!(err.is_err(), "unpacking with mismatched domain must fail");
+        // A ciphertext shorter than the tag cannot be a valid envelope.
+        assert!(unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, b"aad", &ct[..4]).is_err());
     }
 }

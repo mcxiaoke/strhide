@@ -465,14 +465,28 @@ pub fn stc_seed(fmt: &FormatProfile, perm_seed: &[u8; 32], salt: &[u8]) -> u64 {
 /// Domain-separated from the body trellis by the header salt material
 /// (`"hpos"`-derived seed), so header and body never share a matrix.
 pub fn header_stc_seed(fmt: &FormatProfile, header_seed: &[u8; 32], domain: Option<&str>) -> u64 {
-    let mut info = Vec::with_capacity(fmt.stc_label.len() + 5);
-    info.extend_from_slice(fmt.stc_label);
-    info.extend_from_slice(b"-hdr");
-    let info = info_with_domain(&info, domain);
-    let hk = Hkdf::<Sha256>::new(None, header_seed);
+    let mut label = Vec::with_capacity(fmt.stc_label.len() + 4);
+    label.extend_from_slice(fmt.stc_label);
+    label.extend_from_slice(b"-hdr");
+    seed_u64(header_seed, &info_with_domain(&label, domain))
+}
+
+/// Seed of the extension-area trellis (separate from the superblock's).
+pub fn extension_stc_seed(
+    fmt: &FormatProfile,
+    header_seed: &[u8; 32],
+    domain: Option<&str>,
+) -> u64 {
+    let mut label = Vec::with_capacity(fmt.stc_label.len() + 4);
+    label.extend_from_slice(fmt.stc_label);
+    label.extend_from_slice(b"-ext");
+    seed_u64(header_seed, &info_with_domain(&label, domain))
+}
+
+fn seed_u64(ikm: &[u8; 32], info: &[u8]) -> u64 {
+    let hk = Hkdf::<Sha256>::new(None, ikm);
     let mut out = [0u8; 8];
-    hk.expand(&info, &mut out)
-        .expect("HKDF expand header trellis seed");
+    hk.expand(info, &mut out).expect("HKDF expand trellis seed");
     u64::from_be_bytes(out)
 }
 

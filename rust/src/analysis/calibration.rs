@@ -245,7 +245,12 @@ pub fn estimate(data: &[u8]) -> Option<CalibrationEstimate> {
     // is what the calibration argument is actually about.
     let mut ratios: Vec<f64> = Vec::new();
     for mode in 1..64usize {
-        let mut value = 2i16;
+        // The (0, 1) pair is included on purpose: the ternary JPEG code changes
+        // `0 <-> ±1` as often as it changes `±1 <-> ±2`, and an LSB-flipping
+        // embedder equalises the zero/first-bin counts just like any other pair.
+        // Skipping it (the original F5 statistic) makes the estimator blind to
+        // exactly the half of the change traffic this tool produces.
+        let mut value = 0i16;
         while value <= MAX_PAIR_ABS {
             let ae = count_abs(luma_blocks, mode, value, stride);
             let ao = count_abs(luma_blocks, mode, value + 1, stride);

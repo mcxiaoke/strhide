@@ -1,8 +1,9 @@
 // Copyright (c) 2026 strhide developers
 // SPDX-License-Identifier: Apache-2.0
 
-//! Comprehensive batch evaluation of matrix coding layers (Hamming vs STC u=1,2,3)
-//! across carrier capacities, payload ratios, distortion, and detection risk.
+//! Comprehensive batch evaluation of the matrix-coding layers (spatial Hamming vs
+//! STC u=1,2,3; JPEG V3 ternary STC at several slot budgets) across carrier
+//! capacities, payload ratios, distortion, and detection risk.
 //!
 //! Output is written to CSV files for statistical analysis and threshold discovery:
 //! - `temp/stc_eval_results_png.csv`
@@ -20,9 +21,13 @@ use rand::{RngExt, SeedableRng};
 use rayon::prelude::*;
 
 use strhide::analysis::scan_file;
+use strhide::stego::format::DEFAULT_FORMAT;
 use strhide::stego::jpeg::cost::UerdCostModel;
-use strhide::stego::jpeg::engine::{embed_jpeg, extract_jpeg, probe_jpeg_capacity};
+use strhide::stego::jpeg::engine::{
+    embed_jpeg, extract_jpeg, layout_for_payload, probe_jpeg_capacity,
+};
 use strhide::stego::jpeg::geometry::geometry_for_carrier;
+use strhide::stego::params::ExtractParams;
 use strhide::stego::params::{JpegParams, SpatialParams, StegoCodec};
 use strhide::stego::spatial::cost::HillCostModel;
 use strhide::stego::spatial::engine::{
@@ -36,6 +41,14 @@ const CODECS: [(&str, StegoCodec, u8); 4] = [
     ("stc_u1", StegoCodec::Stc, 1),
     ("stc_u2", StegoCodec::Stc, 2),
     ("stc_u3", StegoCodec::Stc, 3),
+];
+
+/// JPEG V3 exposes the same trade-off through the embed-side slot budget: a
+/// larger budget spreads one payload bit over more coefficients.
+const JPEG_VARIANTS: [(&str, usize); 3] = [
+    ("budget_tight", 40_000),
+    ("budget_default", 800_000),
+    ("budget_wide", 2_000_000),
 ];
 const TEST_PASSWORD: &str = "StcEvalPassw0rd!";
 
@@ -148,7 +161,7 @@ fn eval_png(png_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::er
                 match embed_res {
                     Err(e) => {
                         let err_str = e.to_string();
-                        let status = if err_str.contains("Carrier capacity exceeded") {
+                        let status = if err_str.contains("Capacity exceeded") {
                             "CAPACITY_EXCEEDED"
                         } else {
                             "ERROR"
@@ -244,7 +257,7 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
     }
 
     let progress = AtomicUsize::new(0);
-    let total_tasks = jpg_paths.len() * RATIOS.len() * CODECS.len();
+    let total_tasks = jpg_paths.len() * RATIOS.len() * JPEG_VARIANTS.len();
     let task_id_counter = AtomicUsize::new(0);
 
     jpg_paths.par_iter().for_each(|path| {
@@ -312,16 +325,18 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
             let needed_bits = payload_len * 8;
             let slot_ratio = available_slots as f64 / needed_bits as f64;
 
-            for &(codec_name, codec, u) in &CODECS {
+            for &(codec_name, budget) in &JPEG_VARIANTS {
                 let curr_prog = progress.fetch_add(1, Ordering::Relaxed) + 1;
                 let tid = task_id_counter.fetch_add(1, Ordering::Relaxed);
                 let tmp_stego_path = std::env::temp_dir().join(format!("eval_stego_{tid}.jpg"));
 
                 let params = JpegParams {
-                    codec,
-                    stc_u: u.max(1),
+                    slot_budget: budget,
                     ..JpegParams::default()
                 };
+                let u = layout_for_payload(&carrier_bytes, payload_len, &params, &DEFAULT_FORMAT)
+                    .map(|layout| layout.u)
+                    .unwrap_or(0);
 
                 let started_embed = Instant::now();
                 let embed_res = embed_jpeg(
@@ -329,15 +344,16 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
                     &payload,
                     Some(TEST_PASSWORD),
                     None,
-                    &UerdCostModel,
+                    &DEFAULT_FORMAT,
                     &params,
+                    &UerdCostModel,
                 );
                 let embed_ms = started_embed.elapsed().as_millis();
 
                 match embed_res {
                     Err(e) => {
                         let err_str = e.to_string();
-                        let status = if err_str.contains("Carrier capacity exceeded") {
+                        let status = if err_str.contains("Capacity exceeded") {
                             "CAPACITY_EXCEEDED"
                         } else {
                             "ERROR"
@@ -362,8 +378,8 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
                             &stego_bytes,
                             Some(TEST_PASSWORD),
                             None,
-                            &UerdCostModel,
-                            &JpegParams::default(),
+                            &DEFAULT_FORMAT,
+                            &ExtractParams::default(),
                         );
                         let extract_ms = started_ext.elapsed().as_millis();
                         let verify_ok = match ext_res {

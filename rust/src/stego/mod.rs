@@ -85,8 +85,9 @@ pub fn embed_carrier_with_profile(
             payload,
             secret,
             domain,
-            &*model,
+            &format::DEFAULT_FORMAT,
             &jpeg_params,
+            &*model,
         )
     } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
         // PNG format
@@ -140,15 +141,16 @@ pub fn extract_carrier_with_profile(
     let domain = options.domain(profile);
 
     if carrier_bytes.len() >= 2 && &carrier_bytes[..2] == b"\xFF\xD8" {
-        // JPEG format
-        let model =
-            CostModelRegistry::get_jpeg_model(options.algorithm.as_deref()).ok_or_else(|| {
-                StrHideError::General(format!(
-                    "Unknown or incompatible JPEG stego algorithm: {:?}",
-                    options.algorithm
-                ))
-            })?;
-        jpeg::extract_jpeg(carrier_bytes, secret, domain, &*model, &options.jpeg_params)
+        // JPEG format. No cost model is looked up on purpose: the V3 slot set
+        // is geometric, so extraction must not depend on the embedder's cost
+        // function (or on `--algorithm`).
+        jpeg::extract_jpeg(
+            carrier_bytes,
+            secret,
+            domain,
+            &format::DEFAULT_FORMAT,
+            &options.extract_params,
+        )
     } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
         // PNG format
         let model = CostModelRegistry::get_spatial_model(options.algorithm.as_deref()).ok_or_else(
