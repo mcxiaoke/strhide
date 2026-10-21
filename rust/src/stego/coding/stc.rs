@@ -63,7 +63,7 @@
 //! its top bit forced to 1, so *each* element can steer the row its group is
 //! about to finalise, and correlated columns only reduce the number of distinct
 //! state transitions, not their reachability. Dropping both lets the JPEG engine
-//! spread one payload bit over up to [`KERNEL_MAX_U`](KERNEL_MAX_U) = 64
+//! spread one payload bit over up to `KERNEL_MAX_U` = 64
 //! elements, which is where the change-rate win comes from.
 
 use crate::errors::StrHideError;
@@ -83,7 +83,7 @@ pub const MAX_STC_H: u8 = 10;
 /// `u = 1` is the classic code; `u > 1` trades capacity for a lower change
 /// rate. The spatial codec id has room for three values, so that engine stays
 /// at `u <= 3`; the JPEG V3 superblock carries `u` in a full byte and uses
-/// [`KERNEL_MAX_U`](KERNEL_MAX_U) instead.
+/// `KERNEL_MAX_U` instead.
 pub const MAX_STC_U: u8 = 3;
 
 /// Largest group size the kernel supports (the JPEG superblock field width).

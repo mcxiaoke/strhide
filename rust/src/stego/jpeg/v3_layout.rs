@@ -60,7 +60,7 @@ pub struct Layout {
 /// `u` is the largest group size that keeps the trellis within `slot_budget`
 /// transitions *and* inside the body grid. Larger `u` spreads one bit over more
 /// slots, which lowers the change rate; the ceiling is
-/// [`KERNEL_MAX_U`](KERNEL_MAX_U) because beyond that the extra states only add
+/// `KERNEL_MAX_U` because beyond that the extra states only add
 /// search cost.
 ///
 /// `slot_budget` is an embed-side performance knob, never part of the wire

@@ -115,6 +115,12 @@
 //! - [`errors`] — the single [`errors::StrHideError`] error enum.
 //! - [`params`] — library tuning knobs ([`params::LocalParams`]) and private
 //!   dialect profiles ([`params::Profile`]).
+//! - [`stego`] — content-adaptive image steganography (PNG HILL, JPEG UERD +
+//!   ternary STC). Its public surface is re-exported at the crate root:
+//!   [`FormatProfile`] / [`DEFAULT_FORMAT`] (wire-format identity),
+//!   [`JpegParams`] / [`ExtractParams`] (per-call tuning), and
+//!   [`embed`] / [`extract`] (the JPEG entry points a private build calls with
+//!   its own profile).
 //! - [`config`] / [`cli`] / [`analysis`] — internal plumbing for the binary.
 
 pub mod adapters;
@@ -132,3 +138,13 @@ pub mod params;
 pub mod rejection;
 pub mod router;
 pub mod stego;
+
+// Content-domain steganography surface.
+//
+// A private build only needs these: construct a `FormatProfile` with its own
+// derivation labels, then call `embed` / `extract` with it. Nothing in the
+// library has to be edited, and there is no CLI switch for the format identity
+// (a switchable format is an enumerable format).
+pub use stego::format::{DEFAULT_FORMAT, FormatProfile, GridRule};
+pub use stego::jpeg::engine::{embed_jpeg as embed, extract_jpeg as extract};
+pub use stego::params::{ExtractParams, JpegParams};

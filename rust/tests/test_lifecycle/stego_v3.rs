@@ -303,6 +303,64 @@ fn v3_payload_sizes_roundtrip_on_a_photo() {
     }
 }
 
+/// The full Phase 2 gate: 4 KiB / 16 KiB / 64 KiB across 20 corpus photos,
+/// bit-for-bit roundtrip. Ignored by default because it embeds 60 carriers.
+///
+/// ```text
+/// cargo test --release --test test_lifecycle v3_payload_matrix -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn v3_payload_matrix_twenty_images() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("temp")
+        .join("images")
+        .join("jpg");
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(&root) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg")))
+            .collect(),
+        Err(_) => return,
+    };
+    files.sort();
+    files.truncate(20);
+    if files.is_empty() {
+        return;
+    }
+
+    let password = "MatrixGate#2026";
+    let opts = StegoOptions {
+        algorithm: Some("uerd".into()),
+        password: Some(password.into()),
+        ..Default::default()
+    };
+    let mut done = 0usize;
+    for path in &files {
+        let cover = std::fs::read(path).expect("read cover");
+        for size in [4096usize, 16384, 65536] {
+            let payload = incompressible(size, (size as u64) ^ 0x5EED);
+            let stego = match embed_carrier(&cover, &payload, &opts) {
+                Ok(stego) => stego,
+                // A 64 KiB payload legitimately exceeds small carriers.
+                Err(StrHideError::General(message)) if message.contains("Capacity exceeded") => {
+                    continue;
+                }
+                Err(e) => panic!("{}: {size} B: embed failed: {e}", path.display()),
+            };
+            let recovered = extract_carrier(&stego, &opts)
+                .unwrap_or_else(|e| panic!("{}: {size} B: extract failed: {e}", path.display()));
+            assert_eq!(recovered, payload, "{}: {size} B", path.display());
+            done += 1;
+        }
+    }
+    println!("{done} roundtrips across {} carriers", files.len());
+    assert!(done >= 30, "expected at least 30 roundtrips, got {done}");
+}
+
 /// `BodyGrid = Grid \ HdrSlots`: the two sets must be disjoint and their union
 /// must be the whole grid, for every extension size.
 #[test]

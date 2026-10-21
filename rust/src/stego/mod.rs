@@ -183,8 +183,8 @@ pub struct StegoCapacityInfo {
     /// Total cover elements (pixels for PNG, coefficients for JPEG), header
     /// slots included. Useful as a "how big is the cover" number only.
     pub total_elements: usize,
-    /// Slots actually available to the payload: candidate slots minus the 512
-    /// slots consumed by the v2 envelope header and FeatureWord.
+    /// Slots actually available to the payload: the slot grid minus the header
+    /// slots (718 + extension area for JPEG V3, 512 for the spatial codec).
     pub available_slots: usize,
     pub max_raw_payload_bytes: usize,
     pub recommended_max_bytes: usize,
@@ -211,10 +211,10 @@ fn default_safety_bpp_limit() -> f64 {
 
 /// Automatically sniff carrier format and probe embedding capacity.
 ///
-/// Takes neither a [`Profile`] nor a password on purpose: the header budget is a
-/// fixed 256 slots and the body budget is the candidate count, so the answer is
-/// the same for every dialect. (Revisit this if the slot layout ever becomes
-/// cost-dependent rather than secret-dependent.)
+/// Takes neither a [`Profile`] nor a password on purpose: for JPEG V3 the header
+/// budget is the fixed superblock + extension area and the body budget is the
+/// geometric grid, both independent of the key; for the spatial codec it is the
+/// candidate count. The answer is therefore the same for every dialect.
 pub fn probe_carrier_capacity(
     carrier_bytes: &[u8],
     options: &StegoOptions,

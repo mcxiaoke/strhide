@@ -1163,7 +1163,7 @@ where
 ///
 /// Everything path-shaped lives here: rejection checks, permission probing, the
 /// `.bak` backup, the rename, and timestamp cloning. The protocol itself is in
-/// [`write_core`], which is why [`write_carrier_bytes`] can offer the same
+/// `write_core`, which is why [`write_carrier_bytes`] can offer the same
 /// guarantees minus the filesystem ones.
 pub fn write_carrier_with(
     carrier_path: &Path,
