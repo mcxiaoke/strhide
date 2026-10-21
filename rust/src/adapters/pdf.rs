@@ -144,7 +144,7 @@ pub fn parse_pdf_tail_info<R: Read + Seek + ?Sized>(
     let mut root_ref = None;
     let mut info_ref = None;
 
-    if let Some(trailer_idx) = text_before_eof.rfind("trailer") {
+    if let Some(trailer_idx) = text_before_eof[..sx_idx].rfind("trailer") {
         let trailer_str = &text_before_eof[trailer_idx..sx_idx];
         new_obj_num = find_int_after(trailer_str, "/Size");
         root_ref = find_indirect_ref(trailer_str, "/Root", false);
@@ -529,7 +529,8 @@ impl HostAdapter for PdfAdapter {
                 if let Ok(trailer) = EnvelopeTrailer::unpack(trailer_bytes, expected_trailer_magic)
                 {
                     let abs_stream_end = (total_size - scan_len) + stream_end_in_tail as u64;
-                    if trailer.ube_offset + trailer.ube_total_size == abs_stream_end
+                    if trailer.ube_offset.checked_add(trailer.ube_total_size)
+                        == Some(abs_stream_end)
                         && trailer.ube_offset >= 8
                     {
                         stego_in.seek(SeekFrom::Start(trailer.ube_offset - 8))?;
@@ -823,5 +824,22 @@ mod tests {
             assert_eq!(info.new_obj_num, expected_obj + 1);
             prev = out;
         }
+    }
+
+    #[test]
+    fn parse_pdf_tail_info_with_trailer_comment_after_startxref() {
+        let pdf_data = b"%PDF-1.7\n\
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+trailer\n\
+<< /Size 4 /Root 1 0 R >>\n\
+startxref\n\
+9\n\
+% appended comment mentioning trailer written here\n\
+%%EOF\n";
+        let mut cur = Cursor::new(pdf_data.to_vec());
+        let info = parse_pdf_tail_info(&mut cur).expect("must not panic and succeed");
+        assert_eq!(info.new_obj_num, Some(4));
+        assert_eq!(info.root_ref.as_deref(), Some("1 0 R"));
     }
 }

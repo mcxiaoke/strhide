@@ -353,10 +353,7 @@ impl HostAdapter for PeAdapter {
         out: &mut dyn Write,
         strategy: &str,
     ) -> Result<(u64, u64, u32, u32), StrHideError> {
-        if strategy == "pe_codebits" {
-            return inject_codebits(host_in, ube_in, out);
-        }
-        if !matches!(strategy, "pe_slack" | "pe_overlay" | "eof") {
+        if !matches!(strategy, "pe_codebits" | "pe_slack" | "pe_overlay" | "eof") {
             return Err(StrHideError::UnsupportedFormat(format!(
                 "Strategy '{strategy}' not supported by PE adapter"
             )));
@@ -375,6 +372,10 @@ impl HostAdapter for PeAdapter {
                 "Corrupted PE executable: file size ({} bytes) is smaller than PE section headers dictate ({} bytes).",
                 pe_info.host_size, pe_info.pe_image_end
             )));
+        }
+
+        if strategy == "pe_codebits" {
+            return inject_codebits(host_in, ube_in, out);
         }
 
         if strategy == "pe_slack" {
@@ -452,7 +453,7 @@ impl HostAdapter for PeAdapter {
 
         if let Some(trailer) = &trailer {
             let file_size = stego_in.seek(SeekFrom::End(0))?;
-            if trailer.ube_offset + trailer.ube_total_size == file_size {
+            if trailer.ube_offset.checked_add(trailer.ube_total_size) == Some(file_size) {
                 return Ok(Some((
                     trailer.ube_offset,
                     trailer.ube_total_size,

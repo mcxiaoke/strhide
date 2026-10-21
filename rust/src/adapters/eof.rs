@@ -85,7 +85,7 @@ impl HostAdapter for EofAdapter {
         };
 
         let file_size = stego_in.seek(SeekFrom::End(0))?;
-        if trailer.ube_offset + trailer.ube_total_size == file_size {
+        if trailer.ube_offset.checked_add(trailer.ube_total_size) == Some(file_size) {
             Ok(Some((
                 trailer.ube_offset,
                 trailer.ube_total_size,
@@ -129,7 +129,7 @@ impl HostAdapter for EofAdapter {
             None => return Ok((false, "Locator trailer not found at end of file".into())),
         };
 
-        if trailer.ube_offset + trailer.ube_total_size != file_size {
+        if trailer.ube_offset.checked_add(trailer.ube_total_size) != Some(file_size) {
             return Ok((
                 false,
                 format!(

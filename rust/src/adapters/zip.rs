@@ -272,7 +272,7 @@ impl HostAdapter for ZipAdapter {
             let mut trailer_bytes = [0u8; 24];
             if stego_in.read_exact(&mut trailer_bytes).is_ok()
                 && let Ok(trailer) = EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic)
-                && trailer.ube_offset + trailer.ube_total_size == cd_offset
+                && trailer.ube_offset.checked_add(trailer.ube_total_size) == Some(cd_offset)
             {
                 return Ok(Some((
                     trailer.ube_offset,

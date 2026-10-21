@@ -226,7 +226,16 @@ pub trait HostAdapter: Send + Sync {
         }
 
         // Skip injected bytes
-        stego_in.seek(SeekFrom::Start(header.inject_offset + header.inject_size))?;
+        let inject_end = header
+            .inject_offset
+            .checked_add(header.inject_size)
+            .ok_or_else(|| {
+                StrHideError::CorruptedData(format!(
+                    "Injected region [{}, {}] overflows u64 offsets",
+                    header.inject_offset, header.inject_size
+                ))
+            })?;
+        stego_in.seek(SeekFrom::Start(inject_end))?;
         loop {
             let n = stego_in.read(&mut buf)?;
             if n == 0 {
@@ -247,7 +256,7 @@ pub trait HostAdapter: Send + Sync {
         if header.patch_offset != 0 {
             let out_patch_pos = if (header.patch_offset as u64) < header.inject_offset {
                 header.patch_offset as u64
-            } else if (header.patch_offset as u64) >= header.inject_offset + header.inject_size {
+            } else if (header.patch_offset as u64) >= inject_end {
                 (header.patch_offset as u64)
                     .checked_sub(header.inject_size)
                     .ok_or_else(|| StrHideError::CorruptedData("patch_offset underflow".into()))?

@@ -766,7 +766,7 @@ fn pe_geometry(data: &[u8]) -> Result<PeGeometry, CodebitsError> {
     for i in 0..num_sections {
         let off = sec_table + i * 40;
         if off + 40 > data.len() {
-            break;
+            return Err(CodebitsError::NotPe);
         }
         let name = String::from_utf8_lossy(&data[off..off + 8])
             .trim_end_matches('\0')
@@ -1524,5 +1524,15 @@ mod tests {
         // Tail padding up to rawsize (0x100 bytes of zeros) then EOF.
         img.resize(rawptr as usize + rawsize as usize, 0);
         img
+    }
+
+    #[test]
+    fn truncated_section_table_returns_not_pe() {
+        let mut img = synthetic_pe();
+        // Section table starts at 0x98 + 240 = 0x188.
+        // Truncate img so the section header is cut in half (< 40 bytes).
+        img.truncate(0x188 + 20);
+        let res = pe_geometry(&img);
+        assert!(matches!(res, Err(CodebitsError::NotPe)));
     }
 }

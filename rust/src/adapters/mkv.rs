@@ -143,7 +143,7 @@ impl HostAdapter for MkvAdapter {
         }
 
         // 2. Fallback to EOF
-        if trailer.ube_offset + trailer.ube_total_size == file_size {
+        if trailer.ube_offset.checked_add(trailer.ube_total_size) == Some(file_size) {
             return Ok(Some((
                 trailer.ube_offset,
                 trailer.ube_total_size,

@@ -384,11 +384,20 @@ impl HostAdapter for PngAdapter {
         ctx: &FinalizeCtx,
     ) -> Result<(), StrHideError> {
         if ctx.strategy == "chunk" {
-            // PNG chunk: recalculate chunk CRC over chunk_type + data
+            // PNG chunk: recalculate chunk CRC over chunk_type + data (streaming to avoid large allocations)
             carrier.seek(SeekFrom::Start(ctx.ube_offset - 4))?;
-            let mut chunk_type_and_data = vec![0u8; 4 + ctx.ube_total_size as usize];
-            carrier.read_exact(&mut chunk_type_and_data)?;
-            let new_crc = crc32fast::hash(&chunk_type_and_data);
+            let mut hasher = crc32fast::Hasher::new();
+            let mut buf = [0u8; 64 * 1024];
+            let mut remaining = 4 + ctx.ube_total_size;
+
+            while remaining > 0 {
+                let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
+                carrier.read_exact(&mut buf[..to_read])?;
+                hasher.update(&buf[..to_read]);
+                remaining -= to_read as u64;
+            }
+
+            let new_crc = hasher.finalize();
             carrier.seek(SeekFrom::Start(ctx.ube_offset + ctx.ube_total_size))?;
             carrier.write_all(&new_crc.to_be_bytes())?;
         }

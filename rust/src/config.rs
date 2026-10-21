@@ -73,7 +73,11 @@ fn default_candidates() -> Vec<PathBuf> {
     out
 }
 
-fn parse_config(text: &str, origin: &Path) -> Result<FileConfig, StrHideError> {
+fn parse_config(
+    text: &str,
+    origin: &Path,
+    is_cwd_implicit: bool,
+) -> Result<FileConfig, StrHideError> {
     let table: toml::Table = toml::from_str(text).map_err(|e| {
         StrHideError::General(format!(
             "Invalid TOML in config file '{}': {e}",
@@ -88,9 +92,20 @@ fn parse_config(text: &str, origin: &Path) -> Result<FileConfig, StrHideError> {
             );
         }
     }
-    toml::from_str(text).map_err(|e| {
+    let cfg: FileConfig = toml::from_str(text).map_err(|e| {
         StrHideError::General(format!("Invalid config file '{}': {e}", origin.display()))
-    })
+    })?;
+
+    if is_cwd_implicit
+        && (cfg.password.is_some() || cfg.password_file.is_some() || cfg.stego_secret.is_some())
+    {
+        eprintln!(
+            "[WARNING] Loaded sensitive password/secret keys from local CWD config '{}'. Ensure this file is trusted.",
+            origin.display()
+        );
+    }
+
+    Ok(cfg)
 }
 
 /// Load the effective configuration. When `explicit` is given (the global
@@ -101,11 +116,14 @@ pub fn load(explicit: Option<&Path>) -> Result<FileConfig, StrHideError> {
         let text = std::fs::read_to_string(p).map_err(|e| {
             StrHideError::General(format!("Failed to read config file '{}': {e}", p.display()))
         })?;
-        return parse_config(&text, p);
+        return parse_config(&text, p, false);
     }
-    for cand in default_candidates() {
-        match std::fs::read_to_string(&cand) {
-            Ok(text) => return parse_config(&text, &cand),
+    for (i, cand) in default_candidates().iter().enumerate() {
+        match std::fs::read_to_string(cand) {
+            Ok(text) => {
+                let is_cwd_implicit = i == 0;
+                return parse_config(&text, cand, is_cwd_implicit);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
                 return Err(StrHideError::General(format!(
@@ -116,4 +134,35 @@ pub fn load(explicit: Option<&Path>) -> Result<FileConfig, StrHideError> {
         }
     }
     Ok(FileConfig::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cwd_implicit_loads_password_and_secret() {
+        let toml_str = r#"
+            strategy = "pe_slack"
+            password = "test_injected_pwd"
+            stego_secret = "test_secret"
+            backup = true
+        "#;
+        let cfg = parse_config(toml_str, Path::new("strhide.toml"), true).unwrap();
+        assert_eq!(cfg.strategy.as_deref(), Some("pe_slack"));
+        assert_eq!(cfg.backup, Some(true));
+        assert_eq!(cfg.password.as_deref(), Some("test_injected_pwd"));
+        assert_eq!(cfg.stego_secret.as_deref(), Some("test_secret"));
+    }
+
+    #[test]
+    fn explicit_config_keeps_password_and_secret() {
+        let toml_str = r#"
+            password = "valid_user_pwd"
+            stego_secret = "valid_secret"
+        "#;
+        let cfg = parse_config(toml_str, Path::new("explicit.toml"), false).unwrap();
+        assert_eq!(cfg.password.as_deref(), Some("valid_user_pwd"));
+        assert_eq!(cfg.stego_secret.as_deref(), Some("valid_secret"));
+    }
 }

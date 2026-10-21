@@ -773,3 +773,59 @@ fn codebits_channel_header_keystream_masking_verified() {
         "restored PE must be bit-for-bit identical"
     );
 }
+
+#[test]
+fn codebits_rejects_authenticode_signed_pe() {
+    let dir = scratch("signed_reject");
+    let carrier = dir.join("signed.exe");
+    let mut original = make_pe(0x8664, 0x20B, 0x3000, false);
+
+    // Patch Security Data Directory (entry 4) in PE32+:
+    // e_lfanew = 0x80 (from make_pe), opt_offset = 0x80 + 24 = 0x98.
+    // data_dirs_offset = 0x98 + 112 = 0x108.
+    // entry 4 offset = 0x108 + 4 * 8 = 0x128.
+    // Set VirtualAddress = 0x5000, Size = 0x200.
+    let sec_dir_offset = 0x128;
+    assert!(original.len() > sec_dir_offset + 8);
+    original[sec_dir_offset..sec_dir_offset + 4].copy_from_slice(&0x5000u32.to_le_bytes());
+    original[sec_dir_offset + 4..sec_dir_offset + 8].copy_from_slice(&0x200u32.to_le_bytes());
+
+    // 1. Direct adapter.inject must reject with UnsupportedFormat (was previously bypassed)
+    let mut cur = std::io::Cursor::new(original.clone());
+    let mut ube = std::io::Cursor::new(vec![1u8; 100]);
+    let mut sink = Vec::new();
+    let direct_err = strhide::adapters::HostAdapter::inject(
+        &strhide::adapters::pe::PeAdapter,
+        &mut cur,
+        &mut ube,
+        &mut sink,
+        "pe_codebits",
+    )
+    .unwrap_err();
+    match direct_err {
+        StrHideError::UnsupportedFormat(msg) => {
+            assert!(msg.contains("Authenticode"));
+        }
+        other => panic!("expected UnsupportedFormat from direct inject, got {other:?}"),
+    }
+
+    // 2. High-level write_carrier also rejects
+    fs::write(&carrier, &original).unwrap();
+    let out = dir.join("signed.steg.exe");
+    let err = write_carrier(
+        &carrier,
+        PayloadSource::Text("should fail"),
+        &write_opts(&out, "pe_codebits"),
+    )
+    .unwrap_err();
+
+    match err {
+        StrHideError::Rejection(msg) | StrHideError::UnsupportedFormat(msg) => {
+            assert!(
+                msg.contains("Authenticode") || msg.contains("signature"),
+                "error must mention Authenticode, got: {msg}"
+            );
+        }
+        other => panic!("expected Rejection or UnsupportedFormat, got {other:?}"),
+    }
+}
