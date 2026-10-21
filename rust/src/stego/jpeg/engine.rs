@@ -21,7 +21,8 @@ use crate::stego::StegoCapacityInfo;
 use crate::stego::coding::{Move, dct_move, hamming_embed_ternary, slots_for_codec};
 use crate::stego::envelope::{pack_envelope_ext, unpack_envelope_with_key};
 use crate::stego::header::{
-    HEADER_LEN_MAX, codec_from_header_id, decode_header_word, encode_header_word,
+    FeatureWord, HEADER_LEN_MAX, HEADER_V2_ESCAPE_H, V2_TOTAL_HEADER_SLOTS, codec_from_header_id,
+    decode_header_word, encode_header_word,
 };
 use crate::stego::params::{JpegParams, StegoCodec};
 use crate::stego::prng::permute_indices;
@@ -56,11 +57,8 @@ fn map_dct_error(e: dct_io::DctError) -> StrHideError {
 /// password -- nothing that embedding changes.
 struct SlotPlan {
     total_coeffs: usize,
-    /// Header slots: a keyed random 256-slot subset of the candidates.
-    header_slots: Vec<(usize, usize)>,
-    /// Body candidates: the remaining slots, cheapest first. The body takes a
-    /// prefix of this list so every change lands on the cheapest coefficients.
-    body_candidates: Vec<(usize, usize)>,
+    candidate_slots: Vec<(usize, usize)>,
+    permuted_candidates: Vec<(usize, usize)>,
 }
 
 /// Build the slot plan for a carrier.
@@ -124,30 +122,16 @@ fn plan_slots(
     }
 
     // Header slots: keyed permutation of the whole candidate set, so their
-    // position is not a public "top-256 cheapest" fingerprint.
+    // position is not a public "top-cheapest" fingerprint.
     let header_seed = crate::stego::envelope::derive_header_perm_seed(password);
     let mut permuted_candidates = candidate_slots.to_vec();
     permute_indices(&mut permuted_candidates, &header_seed);
-    let header_slots = permuted_candidates[..256].to_vec();
-
-    let is_header = {
-        let mut v = vec![false; total_coeffs];
-        for &(bi, k) in &header_slots {
-            v[bi * 64 + k] = true;
-        }
-        v
-    };
-    let body_candidates: Vec<(usize, usize)> = candidate_slots
-        .iter()
-        .copied()
-        .filter(|&(bi, k)| !is_header[bi * 64 + k])
-        .collect();
 
     Ok((
         SlotPlan {
             total_coeffs,
-            header_slots,
-            body_candidates,
+            candidate_slots: candidate_slots.to_vec(),
+            permuted_candidates,
         },
         costs,
     ))
@@ -171,6 +155,29 @@ pub fn embed_jpeg(
     let (plan, costs) =
         plan_slots(carrier_bytes, &coeffs, cost_model, params, password).map_err(|(e, _)| e)?;
 
+    if plan.permuted_candidates.len() < V2_TOTAL_HEADER_SLOTS {
+        return Err(StrHideError::General(format!(
+            "Carrier capacity insufficient: available {} slots, minimum header requires {} slots",
+            plan.permuted_candidates.len(),
+            V2_TOTAL_HEADER_SLOTS
+        )));
+    }
+    let header_slots = &plan.permuted_candidates[..256];
+    let feature_slots = &plan.permuted_candidates[256..V2_TOTAL_HEADER_SLOTS];
+    let is_header = {
+        let mut v = vec![false; plan.total_coeffs];
+        for &(bi, k) in &plan.permuted_candidates[..V2_TOTAL_HEADER_SLOTS] {
+            v[bi * 64 + k] = true;
+        }
+        v
+    };
+    let body_candidates: Vec<(usize, usize)> = plan
+        .candidate_slots
+        .iter()
+        .copied()
+        .filter(|&(bi, k)| !is_header[bi * 64 + k])
+        .collect();
+
     // Pack payload into micro-envelope.
     let (envelope, perm_seed) = pack_envelope_ext(payload, password)?;
     let total_len = envelope.len() as u32;
@@ -186,10 +193,10 @@ pub fn embed_jpeg(
     // Resolve matrix-coding strategy: Auto adaptively picks STC group size (u=3, 2, or 1)
     let (resolved_codec, resolved_u) = match params.codec {
         StegoCodec::Auto => {
-            crate::stego::coding::auto_select_codec(plan.body_candidates.len(), ciphertext_bits)
+            crate::stego::coding::auto_select_codec(body_candidates.len(), ciphertext_bits)
         }
         StegoCodec::Stc if params.stc_u == 0 => {
-            crate::stego::coding::auto_select_codec(plan.body_candidates.len(), ciphertext_bits)
+            crate::stego::coding::auto_select_codec(body_candidates.len(), ciphertext_bits)
         }
         StegoCodec::Stc => (StegoCodec::Stc, params.stc_u),
         StegoCodec::Hamming => (StegoCodec::Hamming, 0),
@@ -197,32 +204,55 @@ pub fn embed_jpeg(
 
     let needed_body_slots =
         slots_for_codec(ciphertext_bits, resolved_codec, params.stc_h, resolved_u)?;
-    if needed_body_slots > plan.body_candidates.len() {
+    if needed_body_slots > body_candidates.len() {
         return Err(StrHideError::General(format!(
             "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: jpeg-{})",
             needed_body_slots,
             resolved_codec.describe(params.stc_h, resolved_u),
-            plan.body_candidates.len(),
+            body_candidates.len(),
             cost_model.id(),
         )));
     }
 
     // Header: 32 bytes = 256 bits ([16B Salt][12B Nonce][4B flags+len]).
-    let header_word = encode_header_word(total_len, resolved_codec, params.stc_h, resolved_u);
+    let header_word = encode_header_word(total_len, resolved_codec, HEADER_V2_ESCAPE_H, resolved_u);
     let mut header_bytes = [0u8; 32];
     header_bytes[..28].copy_from_slice(&envelope[..28]);
     header_bytes[28..].copy_from_slice(&header_word.to_be_bytes());
 
+    let fw = FeatureWord {
+        version: 2,
+        codec: resolved_codec,
+        u: resolved_u,
+        h: params.stc_h,
+        channel_mode: 0,
+        class_rule: 0,
+        kdf_id: 0,
+        eligible_min: 0,
+        eligible_max: 0,
+        exclusion_permille: (params.block_exclusion_percentile.clamp(0.0, 0.8) * 1000.0) as u16,
+    };
+    let feature_bytes = fw.encode();
+
     // Body slot order: a keyed permutation of the cheapest `needed` slots.
     let salt = &envelope[..16];
-    let mut body_slots = plan.body_candidates[..needed_body_slots].to_vec();
+    let mut body_slots = body_candidates[..needed_body_slots].to_vec();
     permute_indices(&mut body_slots, &perm_seed);
 
-    // Phase 1: header, direct LSB matching (no coding across those 256 bits).
+    // Phase 1a: header word1, direct LSB matching (256 bits).
     for (byte_i, &b) in header_bytes.iter().enumerate() {
         for bit_i in 0..8 {
             let target_bit = (b >> (7 - bit_i)) & 1;
-            let (bi, k) = plan.header_slots[byte_i * 8 + bit_i];
+            let (bi, k) = header_slots[byte_i * 8 + bit_i];
+            embed_dct_lsb(&mut coeffs.components[0].blocks[bi][k], target_bit);
+        }
+    }
+
+    // Phase 1b: feature word, direct LSB matching (256 bits).
+    for (byte_i, &b) in feature_bytes.iter().enumerate() {
+        for bit_i in 0..8 {
+            let target_bit = (b >> (7 - bit_i)) & 1;
+            let (bi, k) = feature_slots[byte_i * 8 + bit_i];
             embed_dct_lsb(&mut coeffs.components[0].blocks[bi][k], target_bit);
         }
     }
@@ -329,11 +359,12 @@ pub fn extract_jpeg(
     )?;
 
     // Phase 1: 32-byte header.
+    let header_slots = &plan.permuted_candidates[..256];
     let mut header_bytes = [0u8; 32];
     for (byte_i, slot_byte) in header_bytes.iter_mut().enumerate() {
         let mut b = 0u8;
         for bit_i in 0..8 {
-            let (bi, k) = plan.header_slots[byte_i * 8 + bit_i];
+            let (bi, k) = header_slots[byte_i * 8 + bit_i];
             let lsb = ((coeffs.components[0].blocks[bi][k] as i32) & 1) as u8;
             b = (b << 1) | lsb;
         }
@@ -341,7 +372,7 @@ pub fn extract_jpeg(
     }
 
     let salt = &header_bytes[..16];
-    let (total_len, codec, stc_h, stc_u) = {
+    let (total_len, raw_codec_id, raw_stc_h) = {
         let word = u32::from_be_bytes([
             header_bytes[28],
             header_bytes[29],
@@ -349,26 +380,69 @@ pub fn extract_jpeg(
             header_bytes[31],
         ]);
         let (len, codec_id, stc_h) = decode_header_word(word);
-        // Every decode failure below must look identical to "no envelope
-        // here": a wrong secret lands the header on the wrong slots, and a
-        // distinct message would tell an attacker that an envelope exists but
-        // the layout is wrong -- an oracle the AEAD path deliberately denies.
-        let (codec, stc_u) = codec_from_header_id(codec_id).map_err(|_| no_hidden())?;
-        if codec == StegoCodec::Stc {
-            crate::stego::coding::validate_stc_h(stc_h).map_err(|_| no_hidden())?;
-            crate::stego::coding::validate_stc_u(stc_u).map_err(|_| no_hidden())?;
-        }
-        (len as usize, codec, stc_h, stc_u)
+        (len as usize, codec_id, stc_h)
     };
 
     if !(49..=HEADER_LEN_MAX as usize).contains(&total_len) {
         return Err(no_hidden());
     }
 
+    let (codec, stc_h, stc_u, body_candidates) = if raw_stc_h == HEADER_V2_ESCAPE_H {
+        if plan.permuted_candidates.len() < V2_TOTAL_HEADER_SLOTS {
+            return Err(no_hidden());
+        }
+        let feature_slots = &plan.permuted_candidates[256..V2_TOTAL_HEADER_SLOTS];
+        let mut feature_bytes = [0u8; 32];
+        for (byte_i, slot_byte) in feature_bytes.iter_mut().enumerate() {
+            let mut b = 0u8;
+            for bit_i in 0..8 {
+                let (bi, k) = feature_slots[byte_i * 8 + bit_i];
+                let lsb = ((coeffs.components[0].blocks[bi][k] as i32) & 1) as u8;
+                b = (b << 1) | lsb;
+            }
+            *slot_byte = b;
+        }
+        let fw = FeatureWord::decode(&feature_bytes).map_err(|_| no_hidden())?;
+        let is_header = {
+            let mut v = vec![false; plan.total_coeffs];
+            for &(bi, k) in &plan.permuted_candidates[..V2_TOTAL_HEADER_SLOTS] {
+                v[bi * 64 + k] = true;
+            }
+            v
+        };
+        let body_cands: Vec<(usize, usize)> = plan
+            .candidate_slots
+            .iter()
+            .copied()
+            .filter(|&(bi, k)| !is_header[bi * 64 + k])
+            .collect();
+        (fw.codec, fw.h, fw.u, body_cands)
+    } else {
+        let (codec, stc_u) = codec_from_header_id(raw_codec_id).map_err(|_| no_hidden())?;
+        if codec == StegoCodec::Stc {
+            crate::stego::coding::validate_stc_h(raw_stc_h).map_err(|_| no_hidden())?;
+            crate::stego::coding::validate_stc_u(stc_u).map_err(|_| no_hidden())?;
+        }
+        let is_header = {
+            let mut v = vec![false; plan.total_coeffs];
+            for &(bi, k) in header_slots {
+                v[bi * 64 + k] = true;
+            }
+            v
+        };
+        let body_cands: Vec<(usize, usize)> = plan
+            .candidate_slots
+            .iter()
+            .copied()
+            .filter(|&(bi, k)| !is_header[bi * 64 + k])
+            .collect();
+        (codec, raw_stc_h, stc_u, body_cands)
+    };
+
     let ciphertext_len = total_len - 28;
     let ciphertext_bits = ciphertext_len * 8;
     let needed_body_slots = slots_for_codec(ciphertext_bits, codec, stc_h, stc_u)?;
-    if needed_body_slots > plan.body_candidates.len() {
+    if needed_body_slots > body_candidates.len() {
         return Err(no_hidden());
     }
 
@@ -377,7 +451,7 @@ pub fn extract_jpeg(
         password.unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
         salt,
     );
-    let mut body_slots = plan.body_candidates[..needed_body_slots].to_vec();
+    let mut body_slots = body_candidates[..needed_body_slots].to_vec();
     permute_indices(&mut body_slots, &perm_seed);
 
     let slot_vals: Vec<u8> = body_slots
@@ -424,7 +498,10 @@ pub fn probe_jpeg_capacity(
     let (plan, _costs) =
         plan_slots(carrier_bytes, &coeffs, cost_model, params, None).map_err(|(e, _)| e)?;
 
-    let available_body_slots = plan.body_candidates.len();
+    let available_body_slots = plan
+        .candidate_slots
+        .len()
+        .saturating_sub(V2_TOTAL_HEADER_SLOTS);
     // The two codecs buy different payload per slot; the difference is real,
     // so the number follows `params.codec`.
     let max_ciphertext_bytes = match params.codec {

@@ -128,7 +128,11 @@ pub fn format_msg(tpl: &str, args: &[(&str, &dyn std::fmt::Display)]) -> String 
                 out.push('{');
                 rest = stripped;
             } else if let Some(end) = after.find('}') {
-                let key = after[..end].trim();
+                let raw_key = after[..end].trim();
+                let key = raw_key
+                    .split_once(':')
+                    .map(|(k, _)| k.trim())
+                    .unwrap_or(raw_key);
                 match args.iter().find(|(k, _)| *k == key) {
                     Some((_, v)) => {
                         let _ = write!(out, "{v}");
@@ -190,5 +194,12 @@ mod tests {
         let malicious_val = "foo}}bar{{baz}";
         let res = format_msg(tpl, &[("path", &malicious_val)]);
         assert_eq!(res, "Path: foo}}bar{{baz}");
+    }
+
+    #[test]
+    fn test_format_msg_spec_prefix_stripped() {
+        let tpl = "Size: {kib:.1} KiB";
+        let res = format_msg(tpl, &[("kib", &"12.3")]);
+        assert_eq!(res, "Size: 12.3 KiB");
     }
 }

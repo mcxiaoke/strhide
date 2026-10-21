@@ -697,8 +697,8 @@ crate::i18n_messages! {
         en = "  Recommended max: {bytes} bytes ({kib:.1} KiB) (high stealth)",
         zh = "  推荐安全容量: {bytes} 字节 ({kib:.1} KiB)（高抗检隐蔽）";
     StegoProbeEstChanges:
-        en = "  Est. changes:   ~{rate:.3} per payload bit (matrix coding); recommended max is half of max for statistical stealth",
-        zh = "  预估修改率:   ~{rate:.3} 每有效比特（矩阵编码）；建议将载荷控制在上限一半以内以确保统计隐蔽";
+        en = "  Est. changes:   ~{rate:.3} per payload bit (matrix coding); recommended payload is anchored to low-risk region",
+        zh = "  预估修改率:   ~{rate:.3} 每有效比特（矩阵编码）；推荐载荷已锚定至统计低风险区";
 
     // ---- Embed execution ----
     EmbedOkDest:

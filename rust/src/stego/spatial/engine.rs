@@ -34,14 +34,18 @@ use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 
 use crate::errors::StrHideError;
-use crate::stego::StegoCapacityInfo;
 use crate::stego::coding::{
-    Move, StcTrellis, hamming_embed_ternary, hamming_extract_bytes, spatial_move, write_bit_ternary,
+    Move, StcTrellis, hamming_embed_ternary, hamming_extract_bytes, spatial_move_safe,
+    write_bit_ternary,
 };
 use crate::stego::envelope::{pack_envelope_ext, unpack_envelope_with_key};
-use crate::stego::params::{SpatialParams, StegoCodec};
+pub use crate::stego::header::{
+    FeatureWord, HEADER_LEN_MASK, HEADER_LEN_MAX, HEADER_V2_ESCAPE_H, V2_TOTAL_HEADER_SLOTS,
+    decode_header_word, encode_header_word,
+};
 use crate::stego::prng::permute_indices;
 use crate::stego::traits::SpatialCostModel;
+use crate::stego::{SpatialParams, StegoCapacityInfo, StegoCodec};
 
 /// Inclusive range of pixel values the spatial engine may embed into.
 ///
@@ -60,10 +64,6 @@ pub const SPATIAL_ELIGIBLE_MAX: u8 = 247;
 // [0..16) salt, [16..28) nonce, [28..32) the flags+length word. The layout and
 // its bit allocation live in [`crate::stego::header`], shared with the JPEG
 // engine so both carriers describe their codec identically.
-
-pub use crate::stego::header::{
-    HEADER_LEN_MASK, HEADER_LEN_MAX, decode_header_word, encode_header_word,
-};
 
 /// Slots needed to carry `bits` payload bits under `codec`.
 ///
@@ -524,41 +524,39 @@ pub fn embed_spatial(
         * (1.0 - params.exclusion_percentile.clamp(0.0, 0.9))) as usize;
     let candidate_pixels = &eligible_pixels[..allowed_count];
 
-    if candidate_pixels.len() < 256 {
+    if candidate_pixels.len() < V2_TOTAL_HEADER_SLOTS {
         return Err(StrHideError::General(format!(
-            "Carrier capacity insufficient: available {} slots, minimum header requires 256 slots",
-            candidate_pixels.len()
+            "Carrier capacity insufficient: available {} slots, minimum header requires {} slots",
+            candidate_pixels.len(),
+            V2_TOTAL_HEADER_SLOTS
         )));
     }
 
-    // Phase 1: Keyed full candidate set permutation for header slots
+    // Phase 1: Keyed candidate set permutation for header slots (Legacy rule: [8, 247], 30% exclusion)
     let header_seed = crate::stego::envelope::derive_header_perm_seed(password);
     let mut permuted_candidates = candidate_pixels.to_vec();
     permute_indices(&mut permuted_candidates, &header_seed);
 
     let header_slots = &permuted_candidates[..256];
+    let feature_slots = &permuted_candidates[256..V2_TOTAL_HEADER_SLOTS];
 
-    // Body slots must keep HILL's cost ordering. The header takes a keyed
-    // random 256 slots out of the candidate set (so the header position is not
-    // a public "top-256 cheapest" fingerprint), and the body then uses the
-    // cheapest slots that remain `needed_body_slots` of them, in cost order.
-    //
-    // Selecting the body as `permuted_candidates[256..]` (as an earlier version
-    // did) was equivalent to a random subset of the candidate set, which threw
-    // away the minimal-distortion premise of HILL: measured at 50% load, the
-    // median HILL cost of modified pixels was ~4.3x the cost of the cheapest
-    // equivalent slots.
     let is_header = {
         let mut v = vec![false; total_pixels];
-        for &s in header_slots {
+        for &s in &permuted_candidates[..V2_TOTAL_HEADER_SLOTS] {
             v[s] = true;
         }
         v
     };
+
+    // Body slots: under safe non-boundary rule (class_rule=1), restrict candidates to
+    // val % 8 in [1, 6] to completely eliminate the r=0/7 boundary deficit (P0-B).
     let body_candidates: Vec<usize> = candidate_pixels
         .iter()
         .copied()
-        .filter(|&s| !is_header[s])
+        .filter(|&s| {
+            let val = image.pixels[s * image.channels + channel_offset];
+            (1..=6).contains(&(val % 8)) && !is_header[s]
+        })
         .collect();
 
     let ciphertext_body = &envelope[28..];
@@ -588,17 +586,31 @@ pub fn embed_spatial(
         )));
     }
 
-    // Header is 32 bytes = 256 bits: [16B Salt][12B Nonce][4B flags+len]
+    // Header word1 encodes total_len with HEADER_V2_ESCAPE_H (15) for stc_h
     let total_len = envelope.len() as u32;
     if total_len > HEADER_LEN_MAX {
         return Err(StrHideError::General(format!(
             "Envelope of {total_len} bytes exceeds the {HEADER_LEN_MAX}-byte header length field"
         )));
     }
-    let header_word = encode_header_word(total_len, resolved_codec, params.stc_h, resolved_u);
+    let header_word = encode_header_word(total_len, resolved_codec, HEADER_V2_ESCAPE_H, resolved_u);
     let mut header_bytes = Vec::with_capacity(32);
     header_bytes.extend_from_slice(&envelope[..28]); // Salt (16B) + Nonce (12B)
     header_bytes.extend_from_slice(&header_word.to_be_bytes());
+
+    let fw = FeatureWord {
+        version: 2,
+        codec: resolved_codec,
+        u: resolved_u,
+        h: params.stc_h,
+        channel_mode: 0,
+        class_rule: 1, // Safe [1, 6] non-boundary
+        kdf_id: 0,     // PBKDF2 100k
+        eligible_min: SPATIAL_ELIGIBLE_MIN,
+        eligible_max: SPATIAL_ELIGIBLE_MAX,
+        exclusion_permille: (params.exclusion_percentile.clamp(0.0, 0.9) * 1000.0) as u16,
+    };
+    let feature_bytes = fw.encode();
 
     // Phase 2: Keyed permutation of body slots using PBKDF2 salt-derived seed from pack_envelope_ext
     let salt = &envelope[..16];
@@ -616,8 +628,7 @@ pub fn embed_spatial(
         ));
     }
 
-    // Embed Phase 1: 32-byte header. No coding here, so each bit may pick
-    // whichever direction is cheaper.
+    // Embed Phase 1a: 32-byte header word1 (256 slots)
     for (byte_i, &b) in header_bytes.iter().enumerate() {
         for bit_i in 0..8 {
             let target_bit = (b >> (7 - bit_i)) & 1;
@@ -632,14 +643,27 @@ pub fn embed_spatial(
         }
     }
 
-    // Embed Phase 2: Ciphertext body. The matrix code decides *which* slots are
-    // flipped; the direction costs decide only *which way*, and a slot is never
-    // flipped twice, so recording the legality once up front is enough.
+    // Embed Phase 1b: 32-byte feature word (256 slots)
+    for (byte_i, &b) in feature_bytes.iter().enumerate() {
+        for bit_i in 0..8 {
+            let target_bit = (b >> (7 - bit_i)) & 1;
+            let slot = feature_slots[byte_i * 8 + bit_i];
+            let byte_idx = slot * image.channels + channel_offset;
+            write_bit_ternary(
+                &mut image.pixels[byte_idx],
+                target_bit,
+                rho_plus[slot],
+                rho_minus[slot],
+            );
+        }
+    }
+
+    // Embed Phase 2: Ciphertext body.
     let mut slot_vals: Vec<u8> = body_slots
         .iter()
         .map(|&slot| image.pixels[slot * image.channels + channel_offset])
         .collect();
-    let moves: Vec<Move> = slot_vals.iter().map(|&v| spatial_move(v)).collect();
+    let moves: Vec<Move> = slot_vals.iter().map(|&v| spatial_move_safe(v)).collect();
     let rp: Vec<f64> = body_slots.iter().map(|&s| rho_plus[s]).collect();
     let rm: Vec<f64> = body_slots.iter().map(|&s| rho_minus[s]).collect();
     match resolved_codec {
@@ -718,29 +742,6 @@ pub fn extract_spatial(
 
     let header_slots = &permuted_candidates[..256];
 
-    // Body slots must keep HILL's cost ordering. The header takes a keyed
-    // random 256 slots out of the candidate set (so the header position is not
-    // a public "top-256 cheapest" fingerprint), and the body then uses the
-    // cheapest slots that remain `needed_body_slots` of them, in cost order.
-    //
-    // Selecting the body as `permuted_candidates[256..]` (as an earlier version
-    // did) was equivalent to a random subset of the candidate set, which threw
-    // away the minimal-distortion premise of HILL: measured at 50% load, the
-    // median HILL cost of modified pixels was ~4.3x the cost of the cheapest
-    // equivalent slots.
-    let is_header = {
-        let mut v = vec![false; total_pixels];
-        for &s in header_slots {
-            v[s] = true;
-        }
-        v
-    };
-    let body_candidates: Vec<usize> = candidate_pixels
-        .iter()
-        .copied()
-        .filter(|&s| !is_header[s])
-        .collect();
-
     // Read Phase 1: 32-byte Header ([16B Salt][12B Nonce][4B Total Len])
     let mut header_bytes = [0u8; 32];
     for byte_i in 0..32 {
@@ -754,7 +755,7 @@ pub fn extract_spatial(
     }
 
     let salt = &header_bytes[..16];
-    let (total_len, codec, stc_h, stc_u) = {
+    let (total_len, raw_codec_id, raw_stc_h) = {
         let word = u32::from_be_bytes([
             header_bytes[28],
             header_bytes[29],
@@ -762,18 +763,78 @@ pub fn extract_spatial(
             header_bytes[31],
         ]);
         let (len, codec_id, stc_h) = decode_header_word(word);
-        // Every decode failure below must look identical to "no envelope
-        // here": a wrong secret lands the header on the wrong slots, and a
-        // distinct message would tell an attacker that an envelope exists but
-        // the layout is wrong -- an oracle the AEAD path deliberately denies.
-        let no_hidden = || StrHideError::NoHiddenData("No valid payload found".into());
+        (len as usize, codec_id, stc_h)
+    };
+
+    if !(49..=HEADER_LEN_MAX as usize).contains(&total_len) {
+        return Err(StrHideError::NoHiddenData("No valid payload found".into()));
+    }
+
+    let no_hidden = || StrHideError::NoHiddenData("No valid payload found".into());
+
+    let (codec, stc_h, stc_u, body_candidates) = if raw_stc_h == HEADER_V2_ESCAPE_H {
+        // v2 branch
+        if permuted_candidates.len() < V2_TOTAL_HEADER_SLOTS {
+            return Err(no_hidden());
+        }
+        let feature_slots = &permuted_candidates[256..V2_TOTAL_HEADER_SLOTS];
+        let mut feature_bytes = [0u8; 32];
+        for byte_i in 0..32 {
+            let mut b = 0u8;
+            for bit_i in 0..8 {
+                let slot = feature_slots[byte_i * 8 + bit_i];
+                let val = image.pixels[slot * image.channels + channel_offset];
+                b = (b << 1) | (val & 1);
+            }
+            feature_bytes[byte_i] = b;
+        }
+
+        let fw = FeatureWord::decode(&feature_bytes).map_err(|_| no_hidden())?;
+        let is_header = {
+            let mut v = vec![false; total_pixels];
+            for &s in &permuted_candidates[..V2_TOTAL_HEADER_SLOTS] {
+                v[s] = true;
+            }
+            v
+        };
+        let body_cands: Vec<usize> = if fw.class_rule == 1 {
+            candidate_pixels
+                .iter()
+                .copied()
+                .filter(|&s| {
+                    let val = image.pixels[s * image.channels + channel_offset];
+                    (1..=6).contains(&(val % 8)) && !is_header[s]
+                })
+                .collect()
+        } else {
+            candidate_pixels
+                .iter()
+                .copied()
+                .filter(|&s| !is_header[s])
+                .collect()
+        };
+        (fw.codec, fw.h, fw.u, body_cands)
+    } else {
+        // v1 legacy branch
         let (codec, stc_u) =
-            crate::stego::header::codec_from_header_id(codec_id).map_err(|_| no_hidden())?;
+            crate::stego::header::codec_from_header_id(raw_codec_id).map_err(|_| no_hidden())?;
         if codec == StegoCodec::Stc {
-            crate::stego::coding::validate_stc_h(stc_h).map_err(|_| no_hidden())?;
+            crate::stego::coding::validate_stc_h(raw_stc_h).map_err(|_| no_hidden())?;
             crate::stego::coding::validate_stc_u(stc_u).map_err(|_| no_hidden())?;
         }
-        (len as usize, codec, stc_h, stc_u)
+        let is_header = {
+            let mut v = vec![false; total_pixels];
+            for &s in header_slots {
+                v[s] = true;
+            }
+            v
+        };
+        let body_cands: Vec<usize> = candidate_pixels
+            .iter()
+            .copied()
+            .filter(|&s| !is_header[s])
+            .collect();
+        (codec, raw_stc_h, stc_u, body_cands)
     };
 
     if !(49..=HEADER_LEN_MAX as usize).contains(&total_len) {
@@ -843,18 +904,47 @@ pub fn probe_spatial_capacity(
     }
 
     let channel_offset = if image.channels >= 3 { 1 } else { 0 };
-    let eligible_count = (0..total_pixels)
+    let mut eligible_pixels: Vec<usize> = (0..total_pixels)
         .filter(|&idx| {
             let val = image.pixels[idx * image.channels + channel_offset];
             (SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&val)
         })
-        .count();
+        .collect();
 
-    let allowed_count =
-        ((eligible_count as f64) * (1.0 - params.exclusion_percentile.clamp(0.0, 0.9))) as usize;
+    eligible_pixels.sort_by(|&a, &b| {
+        costs[a]
+            .partial_cmp(&costs[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
-    let header_slots = 256;
-    let available_body_slots = allowed_count.saturating_sub(header_slots);
+    let allowed_count = ((eligible_pixels.len() as f64)
+        * (1.0 - params.exclusion_percentile.clamp(0.0, 0.9))) as usize;
+    let candidate_pixels = &eligible_pixels[..allowed_count];
+
+    let available_body_slots = if candidate_pixels.len() < V2_TOTAL_HEADER_SLOTS {
+        0
+    } else {
+        let header_seed = crate::stego::envelope::derive_header_perm_seed(None);
+        let mut permuted_candidates = candidate_pixels.to_vec();
+        permute_indices(&mut permuted_candidates, &header_seed);
+
+        let is_header = {
+            let mut v = vec![false; total_pixels];
+            for &s in &permuted_candidates[..V2_TOTAL_HEADER_SLOTS] {
+                v[s] = true;
+            }
+            v
+        };
+
+        candidate_pixels
+            .iter()
+            .copied()
+            .filter(|&s| {
+                let val = image.pixels[s * image.channels + channel_offset];
+                (1..=6).contains(&(val % 8)) && !is_header[s]
+            })
+            .count()
+    };
     let hamming_k = crate::stego::coding::DEFAULT_HAMMING_K;
     // The two codecs buy different payload per slot, and the difference is
     // real (measured: a carrier that cannot hold 33 KB under Hamming holds it

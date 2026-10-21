@@ -371,6 +371,24 @@ pub fn spatial_move(val: u8) -> Move {
     }
 }
 
+/// Direction legality for a spatial slot under safe non-boundary rule (r in [1, 6]).
+///
+/// Under this rule, slots with r=0 or r=7 are strictly excluded from candidates.
+/// For r=1, only +1 is legal (to 2, never down to 0).
+/// For r=6, only -1 is legal (to 5, never up to 7).
+/// For r in 2..=5, both +1 and -1 stay strictly inside [1, 6].
+/// As a result, all modified pixels stay strictly within [1, 6], zero modified
+/// pixels enter {0, 7}, and the delta histogram at r=0 and r=7 stays exactly zero,
+/// completely eliminating the boundary deficit vulnerability (P0-B).
+#[inline]
+pub fn spatial_move_safe(val: u8) -> Move {
+    match val % SPATIAL_CLASS {
+        1 => Move::PlusOnly,
+        6 => Move::MinusOnly,
+        _ => Move::Both,
+    }
+}
+
 /// Flip the parity of `val` using the cheapest legal direction.
 ///
 /// `+1` and `-1` both flip the LSB, so the embedded bit is the value's parity;
@@ -756,6 +774,19 @@ mod tests {
         assert_eq!(spatial_move(v), Move::MinusOnly);
         write_bit_ternary(&mut v, 0, 0.1, 9.0);
         assert_eq!(v, 46);
+
+        // Safe move rules: r in [1, 6] never steps into 0 or 7
+        for r in 1..=6 {
+            let val = 40 + r; // 41..=46
+            let mv = spatial_move_safe(val);
+            if r == 1 {
+                assert_eq!(mv, Move::PlusOnly);
+            } else if r == 6 {
+                assert_eq!(mv, Move::MinusOnly);
+            } else {
+                assert_eq!(mv, Move::Both);
+            }
+        }
     }
 
     #[test]
