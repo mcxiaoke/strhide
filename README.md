@@ -182,15 +182,25 @@ Unrecognized formats are **rejected**: strhide only modifies explicitly supporte
 is evaluated on a `ceil(sqrt(block_count))` grid instead of the real image grid. Both sides compute the same
 approximation, so embed/extract stay symmetric; only the cost model is slightly less faithful to the paper.
 
-*Matrix coding layer (`--codec`)*: PNG payload bits are placed by `(7,3)` Hamming matrix embedding by default.
-`--codec stc` switches to **syndrome-trellis codes** (Viterbi over the whole slot sequence, `--stc-h 4..10`,
-default 8), which minimises *cost-weighted* distortion instead of per-block change count. The choice is recorded
-in the carrier header, so `extract` never needs the flag. Measured on the bundled corpus (33 KB incompressible
-payload): weighted distortion `Σρ` dropped 408x and 2.0x on two textured carriers but rose 12% on a near-uniform
-one; change count rose 71% throughout (0.5 vs 0.2917 per bit); self-scan was never worse (25/100 → 0/100 on the
-reference carrier); time is 1.2–1.3x. Because STC needs ~1 slot per bit against Hamming's 2.33, its capacity
-ceiling is 2.33x higher, which is reported as such — filling it raises detectability, so the recommended payload
-stays at half the ceiling. Default remains Hamming: the change-count cost is user-visible and the corpus is small.
+*Matrix coding layer (`--codec`)*: PNG and JPEG payload bits are placed by `(7,3)` Hamming matrix embedding by
+default. `--codec stc` switches to **syndrome-trellis codes** (Viterbi over the whole slot sequence, `--stc-h 4..10`
+default 8, `--stc-u 1..3` default 1), which minimises *cost-weighted* distortion instead of per-block change count.
+The codec, `h` and `u` are all recorded in the carrier header, so `extract` never needs the flags.
+
+`--stc-u` is how many slots share one syndrome row: `u=1` is one bit per slot (0.50 changes/bit), while `u=2/3`
+spreads the same message over 2x/3x the slots — fewer changed slots and lower weighted distortion, at `1/u` of the
+capacity. Measured on the bundled corpus (33 KB incompressible payload): `u=2` reaches **0.2758** changes/bit and
+`u=3` **0.2276** on a 1920x1920 carrier whose slot pool is only 16% used, both below Hamming's 0.2925; on a
+960x960 carrier where `u=2` already consumes 82% of the pool it is 0.3063, slightly *above* Hamming. STC's entire
+advantage comes from picking the cheapest slots, and a saturated pool has no cheap slots left — so `--stc-u 2/3`
+pays off when the carrier is comfortably larger than the payload.
+
+Weighted distortion `Σρ`: `u=1` dropped 408x and 2.0x on two textured carriers but rose 12% on a near-uniform one
+(measured on the same carriers as before); `u=2` brings the 960x960 carrier down to 2.85e7 against Hamming's
+1.12e10. Self-scan was never worse (25/100 → 0/100). `u=2` costs about 1.2-2.4x the time (1.5 s on the largest
+carrier). The capacity ceiling is 2.33x Hamming's at `u=1` and falls with `u`; the recommendation stays at half the
+ceiling. **The default is still Hamming with `u=1`**: change count is a user-visible side effect, and three usable
+PNG carriers are not enough evidence to flip it.
 
 *What the self-check can and cannot see*: `scan` is triage, not proof. JPEG carriers go through a **calibrated DCT
 test** (`dct:calibration`): the image is decoded, cropped 4 px so the 8x8 grid lands half a block off the embedding

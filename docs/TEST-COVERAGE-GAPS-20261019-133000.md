@@ -1,5 +1,17 @@
 # strhide (Rust) 测试覆盖缺口分析报告
 
+> **补测状态更新（2026-10-21 08:56）**
+> 本文是 2026-10-19 的静态分析快照，结论按当时代码成立，未回改。
+> 其中第 **#8（MP4 64-bit large-size box）** 与第 **#11 的 PDF `calc_prefix_len`** 两项已补齐：
+> - #8：`isobmff.rs` 新增 4 项单元测试（`calc_prefix_len` 在 `0xFFFFFFE7` 处切换、`inject` 前缀长度与之一致、
+>   合成 64-bit `uuid` box 可被 `locate`/`verify_structure`/`suspicious_structures` 识别、两种头形状互不误判）；
+>   同时把 `inject` 里重复的阈值判断改为调用 `calc_prefix_len`，并给 `suspicious_structures` 补上 64-bit 头识别。
+> - #11：抽出 `pdf_obj_header()` 供 `calc_prefix_len` 与 `inject` 共用，新增 2 项单元测试（9 种 `/Length` 位宽下
+>   前缀长度与实际注入偏移严格相等；连续两次增量更新时对象号与前缀长度同步变化）。
+>
+> 详见 `docs/CHANGES-20261021.md` 同日条目第 1、2 条。
+
+
 - 生成时间：2026-10-19 13:29:58
 - 分析范围：`rust/src/`（engine / cli / config / envelope / crypto / rejection / adapters）对照 `rust/tests/` 与 `rust/src/**` 内置单元测试
 - 现状基线：`cargo test` 实测 **138 项全部 PASS，0 失败**（16 个测试目标：库单测 + 15 个集成测试文件）
