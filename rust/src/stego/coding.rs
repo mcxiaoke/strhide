@@ -297,47 +297,19 @@ pub fn slots_for_codec(
 /// 80 high-resolution camera images (4,480 evaluation points, 2026-10-21).
 ///
 /// Values are changes per message bit, not per slot: with `u` slots per bit the
-/// per-slot rate is `rate / u`. Measured empirical means:
+/// per-slot rate is `rate / u`. Measured empirical means at low load:
 /// - `u=1`: 0.501 flips/bit
 /// - `u=2`: 0.265 flips/bit
 /// - `u=3`: 0.230 flips/bit
+/// - `u >= 4`: about 0.22 (measured 0.222 at `u = 36` on the 4 KiB/1920x1280 case)
+///
+/// This is a *low-load* estimate: a payload that nearly saturates the grid forces
+/// changes onto expensive slots and the measured rate rises towards 0.5.
 pub fn expected_stc_change_rate(stc_u: u8) -> f64 {
     match stc_u {
         0 | 1 => 0.50,
         2 => 0.265,
         _ => 0.230,
-    }
-}
-
-/// Direction legality for a JPEG DCT coefficient.
-///
-/// A `±1` move must stay inside the coefficient's `(2k, 2k+1)` bucket, i.e.
-/// keep `|c| & !1` unchanged: UERD builds its cost map from exactly that masked
-/// magnitude, so a move that crossed the bucket boundary would change the cost
-/// map the extractor recomputes and desynchronise the slot ranking.
-///
-/// From the even side of a positive coefficient only `+1` preserves the bucket,
-/// from the odd side only `-1`; negative coefficients mirror the same rule.
-/// Zero is never eligible (the engines require `|c| >= 2`), so it returns
-/// [`Move::Both`] purely as a defensive value.
-#[inline]
-pub fn dct_move(coeff: i16) -> Move {
-    match coeff.cmp(&0) {
-        std::cmp::Ordering::Greater => {
-            if coeff % 2 == 0 {
-                Move::PlusOnly
-            } else {
-                Move::MinusOnly
-            }
-        }
-        std::cmp::Ordering::Less => {
-            if (-coeff) % 2 == 0 {
-                Move::MinusOnly
-            } else {
-                Move::PlusOnly
-            }
-        }
-        std::cmp::Ordering::Equal => Move::Both,
     }
 }
 
