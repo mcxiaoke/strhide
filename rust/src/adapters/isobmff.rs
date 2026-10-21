@@ -66,17 +66,7 @@ pub fn isobmff_inject(
     }
 
     host_in.seek(SeekFrom::Start(0))?;
-    let mut buf = [0u8; 64 * 1024];
-    let mut host_len = 0u64;
-
-    loop {
-        let n = host_in.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        out.write_all(&buf[..n])?;
-        host_len += n as u64;
-    }
+    let host_len = crate::adapters::io::copy_stream(host_in, out)?;
 
     let inject_offset = host_len;
     let ube_size = ube_in.seek(SeekFrom::End(0))?;
@@ -106,13 +96,7 @@ pub fn isobmff_inject(
         ube_size
     };
 
-    loop {
-        let n = ube_in.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        out.write_all(&buf[..n])?;
-    }
+    crate::adapters::io::copy_stream(ube_in, out)?;
 
     Ok((inject_offset, inject_size, 0, 0))
 }

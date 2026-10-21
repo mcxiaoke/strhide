@@ -112,15 +112,18 @@ fn default_builtin_key(salt: &[u8]) -> ([u8; 32], [u8; 32]) {
     derive_keys(PUBLIC_DEFAULT_SECRET, salt)
 }
 
-/// Pack and encrypt payload into micro-envelope byte stream.
-pub fn pack_envelope(payload: &[u8], password: Option<&str>) -> Result<Vec<u8>, StrHideError> {
+/// Pack and encrypt payload into micro-envelope byte stream, also returning the derived `perm_seed`.
+pub fn pack_envelope_ext(
+    payload: &[u8],
+    password: Option<&str>,
+) -> Result<(Vec<u8>, [u8; 32]), StrHideError> {
     let mut salt = [0u8; SALT_LEN];
     let mut nonce_bytes = [0u8; NONCE_LEN];
     let mut rng = rand::rng();
     rng.fill(&mut salt);
     rng.fill(&mut nonce_bytes);
 
-    let (key_bytes, _) = match password {
+    let (key_bytes, perm_seed) = match password {
         Some(p) => derive_keys(p, &salt),
         None => default_builtin_key(&salt),
     };
@@ -165,11 +168,19 @@ pub fn pack_envelope(payload: &[u8], password: Option<&str>) -> Result<Vec<u8>, 
     out.extend_from_slice(&nonce_bytes);
     out.extend_from_slice(&ciphertext);
 
-    Ok(out)
+    Ok((out, perm_seed))
 }
 
-/// Unpack and decrypt micro-envelope from raw extracted bytes.
-pub fn unpack_envelope(data: &[u8], password: Option<&str>) -> Result<Vec<u8>, StrHideError> {
+/// Pack and encrypt payload into micro-envelope byte stream.
+pub fn pack_envelope(payload: &[u8], password: Option<&str>) -> Result<Vec<u8>, StrHideError> {
+    pack_envelope_ext(payload, password).map(|(env, _)| env)
+}
+
+/// Unpack and decrypt micro-envelope from raw extracted bytes using a pre-derived AES key.
+pub fn unpack_envelope_with_key(
+    data: &[u8],
+    key_bytes: &[u8; 32],
+) -> Result<Vec<u8>, StrHideError> {
     if data.len() < MIN_ENVELOPE_LEN {
         return Err(StrHideError::NoHiddenData("No valid payload found".into()));
     }
@@ -178,12 +189,7 @@ pub fn unpack_envelope(data: &[u8], password: Option<&str>) -> Result<Vec<u8>, S
     let nonce_bytes = &data[SALT_LEN..HEADER_OVERHEAD];
     let ciphertext = &data[HEADER_OVERHEAD..];
 
-    let (key_bytes, _) = match password {
-        Some(p) => derive_keys(p, salt),
-        None => default_builtin_key(salt),
-    };
-
-    let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+    let cipher = Aes256Gcm::new_from_slice(key_bytes)
         .map_err(|_| StrHideError::NoHiddenData("No valid payload found".into()))?;
     let nonce = Nonce::try_from(nonce_bytes)
         .map_err(|_| StrHideError::NoHiddenData("Invalid nonce size".into()))?;
@@ -232,4 +238,19 @@ pub fn unpack_envelope(data: &[u8], password: Option<&str>) -> Result<Vec<u8>, S
         }
         Ok(body.to_vec())
     }
+}
+
+/// Unpack and decrypt micro-envelope from raw extracted bytes.
+pub fn unpack_envelope(data: &[u8], password: Option<&str>) -> Result<Vec<u8>, StrHideError> {
+    if data.len() < MIN_ENVELOPE_LEN {
+        return Err(StrHideError::NoHiddenData("No valid payload found".into()));
+    }
+
+    let salt = &data[..SALT_LEN];
+    let (key_bytes, _) = match password {
+        Some(p) => derive_keys(p, salt),
+        None => default_builtin_key(salt),
+    };
+
+    unpack_envelope_with_key(data, &key_bytes)
 }

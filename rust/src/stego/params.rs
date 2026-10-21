@@ -190,7 +190,7 @@ impl SpatialParams {
 pub struct JpegParams {
     /// Weight applied to the 8-neighborhood block energies (default 0.25).
     pub neighbor_weight: f64,
-    /// Minimum absolute coefficient value eligible for embedding (default 1 to skip zero AC).
+    /// Minimum absolute coefficient value eligible for embedding (default 2 to preserve AC zero-runlength and pair symmetry).
     pub min_abs_coeff: i16,
     /// Fraction of lowest-energy DCT blocks to completely exclude from embedding (default 0.20).
     pub block_exclusion_percentile: f64,
@@ -211,7 +211,7 @@ impl Default for JpegParams {
     fn default() -> Self {
         Self {
             neighbor_weight: 0.25,
-            min_abs_coeff: 1,
+            min_abs_coeff: 2,
             block_exclusion_percentile: 0.20,
             wet_cost: 1e13,
             codec: StegoCodec::Auto,
@@ -232,9 +232,9 @@ impl JpegParams {
                 self.neighbor_weight
             )));
         }
-        if self.min_abs_coeff < 0 {
+        if self.min_abs_coeff < 2 {
             return Err(StrHideError::General(format!(
-                "UERD parameter 'min_abs_coeff' must be >= 0, got {}",
+                "UERD parameter 'min_abs_coeff' must be >= 2, got {}",
                 self.min_abs_coeff
             )));
         }

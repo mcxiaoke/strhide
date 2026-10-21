@@ -46,30 +46,11 @@ impl HostAdapter for EofAdapter {
         }
 
         host_in.seek(SeekFrom::Start(0))?;
-        let mut buf = [0u8; 64 * 1024];
-        let mut host_len = 0u64;
-
-        loop {
-            let n = host_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-            host_len += n as u64;
-        }
+        let host_len = crate::adapters::io::copy_stream(host_in, out)?;
 
         let inject_offset = host_len;
         ube_in.seek(SeekFrom::Start(0))?;
-        let mut ube_len = 0u64;
-
-        loop {
-            let n = ube_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-            ube_len += n as u64;
-        }
+        let ube_len = crate::adapters::io::copy_stream(ube_in, out)?;
 
         Ok((inject_offset, ube_len, 0, 0))
     }
@@ -103,19 +84,7 @@ impl HostAdapter for EofAdapter {
         header: &EnvelopeHeader,
     ) -> Result<(), StrHideError> {
         stego_in.seek(SeekFrom::Start(0))?;
-        let mut remaining = header.orig_host_size;
-        let mut buf = [0u8; 64 * 1024];
-
-        while remaining > 0 {
-            let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
-            let n = stego_in.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-            remaining -= n as u64;
-        }
-
+        crate::adapters::io::copy_exact(stego_in, out, header.orig_host_size)?;
         Ok(())
     }
 

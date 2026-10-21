@@ -38,7 +38,7 @@ use crate::stego::StegoCapacityInfo;
 use crate::stego::coding::{
     Move, StcTrellis, hamming_embed_ternary, hamming_extract_bytes, spatial_move, write_bit_ternary,
 };
-use crate::stego::envelope::{pack_envelope, unpack_envelope};
+use crate::stego::envelope::{pack_envelope_ext, unpack_envelope_with_key};
 use crate::stego::params::{SpatialParams, StegoCodec};
 use crate::stego::prng::permute_indices;
 use crate::stego::traits::SpatialCostModel;
@@ -488,7 +488,7 @@ pub fn embed_spatial(
     let total_pixels = w * h;
 
     // Pack payload into stealth micro-envelope
-    let envelope = pack_envelope(payload, password)?;
+    let (envelope, perm_seed) = pack_envelope_ext(payload, password)?;
 
     // Compute distortion cost map
     let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, params);
@@ -600,12 +600,8 @@ pub fn embed_spatial(
     header_bytes.extend_from_slice(&envelope[..28]); // Salt (16B) + Nonce (12B)
     header_bytes.extend_from_slice(&header_word.to_be_bytes());
 
-    // Phase 2: Keyed permutation of body slots using PBKDF2 salt-derived seed
+    // Phase 2: Keyed permutation of body slots using PBKDF2 salt-derived seed from pack_envelope_ext
     let salt = &envelope[..16];
-    let (_, perm_seed) = crate::stego::envelope::derive_keys(
-        password.unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
-        salt,
-    );
     let stc_seed = crate::stego::envelope::derive_stc_seed(&perm_seed, salt);
 
     let mut body_slots = body_candidates[..needed_body_slots].to_vec();
@@ -797,7 +793,7 @@ pub fn extract_spatial(
     }
 
     // Phase 2: Keyed permutation of body slots using PBKDF2 salt-derived seed
-    let (_, perm_seed) = crate::stego::envelope::derive_keys(
+    let (key_bytes, perm_seed) = crate::stego::envelope::derive_keys(
         password.unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
         salt,
     );
@@ -827,7 +823,7 @@ pub fn extract_spatial(
     full_envelope.extend_from_slice(&header_bytes[..28]); // Salt + Nonce
     full_envelope.extend_from_slice(&ciphertext_body);
 
-    unpack_envelope(&full_envelope, password)
+    unpack_envelope_with_key(&full_envelope, &key_bytes)
 }
 
 /// Probe capacity of PNG carrier for spatial content-adaptive steganography.

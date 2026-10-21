@@ -15,6 +15,8 @@ pub const JPEG_APP15: [u8; 2] = [0xFF, 0xEF];
 pub const JPEG_COM: [u8; 2] = [0xFF, 0xFE];
 pub const JPEG_MAX_SEG_PAYLOAD: u64 = 65533; // 65535 - 2 bytes length
 pub const JPEG_MAX_TOTAL_CAPACITY: u64 = 64 * 1024 * 1024; // 64MB
+pub const MAX_JPEG_HEADER_SCAN: u64 = 16 * 1024 * 1024; // 16MB max scan for JPEG header
+pub const MAX_JPEG_NON_MARKER_SKIP: usize = 4096; // Max stray non-marker bytes before SOS
 
 pub fn find_jpeg_sos_offset<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<u64, StrHideError> {
     reader.seek(SeekFrom::Start(0))?;
@@ -26,15 +28,24 @@ pub fn find_jpeg_sos_offset<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<u
         ));
     }
 
+    let mut non_marker_skip = 0usize;
     loop {
         let marker_start = reader.stream_position()?;
+        if marker_start > MAX_JPEG_HEADER_SCAN {
+            break;
+        }
         let mut lead = [0u8; 1];
         if reader.read_exact(&mut lead).is_err() {
             break;
         }
         if lead[0] != 0xFF {
+            non_marker_skip += 1;
+            if non_marker_skip > MAX_JPEG_NON_MARKER_SKIP {
+                break;
+            }
             continue;
         }
+        non_marker_skip = 0;
 
         let mut code = [0u8; 1];
         if reader.read_exact(&mut code).is_err() {
@@ -253,14 +264,24 @@ impl HostAdapter for JpegAdapter {
         // 1. Scan markers before SOS, collecting candidate APP15 segments
         let mut app15_segments: Vec<(u64, u64)> = Vec::new();
 
+        let mut non_marker_skip = 0usize;
         loop {
+            let marker_start = stego_in.stream_position().unwrap_or(0);
+            if marker_start > MAX_JPEG_HEADER_SCAN {
+                break;
+            }
             let mut lead = [0u8; 1];
             if stego_in.read_exact(&mut lead).is_err() {
                 break;
             }
             if lead[0] != 0xFF {
+                non_marker_skip += 1;
+                if non_marker_skip > MAX_JPEG_NON_MARKER_SKIP {
+                    break;
+                }
                 continue;
             }
+            non_marker_skip = 0;
 
             let mut code = [0u8; 1];
             if stego_in.read_exact(&mut code).is_err() {
@@ -438,14 +459,24 @@ impl HostAdapter for JpegAdapter {
         if stego_in.read_exact(&mut soi).is_err() || soi != JPEG_SOI {
             return found;
         }
+        let mut non_marker_skip = 0usize;
         loop {
+            let marker_start = stego_in.stream_position().unwrap_or(0);
+            if marker_start > MAX_JPEG_HEADER_SCAN {
+                break;
+            }
             let mut lead = [0u8; 1];
             if stego_in.read_exact(&mut lead).is_err() {
                 break;
             }
             if lead[0] != 0xFF {
+                non_marker_skip += 1;
+                if non_marker_skip > MAX_JPEG_NON_MARKER_SKIP {
+                    break;
+                }
                 continue;
             }
+            non_marker_skip = 0;
             let mut code = [0u8; 1];
             if stego_in.read_exact(&mut code).is_err() {
                 break;

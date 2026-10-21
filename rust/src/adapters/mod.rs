@@ -212,18 +212,7 @@ pub trait HostAdapter: Send + Sync {
         use std::io::SeekFrom;
 
         stego_in.seek(SeekFrom::Start(0))?;
-        let mut remaining = header.inject_offset;
-        let mut buf = [0u8; 64 * 1024];
-
-        while remaining > 0 {
-            let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
-            let n = stego_in.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-            remaining -= n as u64;
-        }
+        crate::adapters::io::copy_exact(stego_in, out, header.inject_offset)?;
 
         // Skip injected bytes
         let inject_end = header
@@ -236,13 +225,7 @@ pub trait HostAdapter: Send + Sync {
                 ))
             })?;
         stego_in.seek(SeekFrom::Start(inject_end))?;
-        loop {
-            let n = stego_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-        }
+        crate::adapters::io::copy_stream(stego_in, out)?;
 
         // Restore original patched value if applicable.
         //

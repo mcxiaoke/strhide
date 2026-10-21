@@ -869,3 +869,34 @@ fn codebits_double_injection_stealth_fails_safely_and_preserves_carrier() {
         "first envelope must be removed and carrier restored bit-for-bit"
     );
 }
+
+/// Contract lock: ensure `iced_x86::Register` enum ordinals retain their expected order.
+///
+/// In `pe_codebits.rs`, commutative instructions (TEST r0, r1) assign bit values
+/// using `(r0 as usize) < (r1 as usize)` and persist them into carrier bytecode.
+/// If an upstream iced-x86 release reorders the Register enum, existing carriers
+/// would fail bit extraction. This test locks down key canonical register relationships.
+#[test]
+fn codebits_iced_register_ordinal_contract_locked() {
+    use iced_x86::Register;
+
+    // 32-bit GPR order
+    assert!((Register::EAX as usize) < (Register::ECX as usize));
+    assert!((Register::ECX as usize) < (Register::EDX as usize));
+    assert!((Register::EDX as usize) < (Register::EBX as usize));
+    assert!((Register::EBX as usize) < (Register::ESP as usize));
+    assert!((Register::ESP as usize) < (Register::EBP as usize));
+    assert!((Register::EBP as usize) < (Register::ESI as usize));
+    assert!((Register::ESI as usize) < (Register::EDI as usize));
+
+    // 64-bit GPR order
+    assert!((Register::RAX as usize) < (Register::RCX as usize));
+    assert!((Register::RCX as usize) < (Register::RDX as usize));
+    assert!((Register::RDX as usize) < (Register::RBX as usize));
+    assert!((Register::RBX as usize) < (Register::RSP as usize));
+    assert!((Register::RSP as usize) < (Register::RBP as usize));
+    assert!((Register::RBP as usize) < (Register::RSI as usize));
+    assert!((Register::RSI as usize) < (Register::RDI as usize));
+    assert!((Register::RDI as usize) < (Register::R8 as usize));
+    assert!((Register::R8 as usize) < (Register::R15 as usize));
+}

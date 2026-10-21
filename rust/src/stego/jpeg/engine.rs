@@ -19,7 +19,7 @@
 use crate::errors::StrHideError;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::coding::{Move, dct_move, hamming_embed_ternary, slots_for_codec};
-use crate::stego::envelope::{pack_envelope, unpack_envelope};
+use crate::stego::envelope::{pack_envelope_ext, unpack_envelope_with_key};
 use crate::stego::header::{
     HEADER_LEN_MAX, codec_from_header_id, decode_header_word, encode_header_word,
 };
@@ -172,7 +172,7 @@ pub fn embed_jpeg(
         plan_slots(carrier_bytes, &coeffs, cost_model, params, password).map_err(|(e, _)| e)?;
 
     // Pack payload into micro-envelope.
-    let envelope = pack_envelope(payload, password)?;
+    let (envelope, perm_seed) = pack_envelope_ext(payload, password)?;
     let total_len = envelope.len() as u32;
     if total_len > HEADER_LEN_MAX {
         return Err(StrHideError::General(format!(
@@ -215,10 +215,6 @@ pub fn embed_jpeg(
 
     // Body slot order: a keyed permutation of the cheapest `needed` slots.
     let salt = &envelope[..16];
-    let (_, perm_seed) = crate::stego::envelope::derive_keys(
-        password.unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
-        salt,
-    );
     let mut body_slots = plan.body_candidates[..needed_body_slots].to_vec();
     permute_indices(&mut body_slots, &perm_seed);
 
@@ -377,7 +373,7 @@ pub fn extract_jpeg(
     }
 
     // Phase 2: keyed permutation of body slots using the salt-derived seed.
-    let (_, perm_seed) = crate::stego::envelope::derive_keys(
+    let (key_bytes, perm_seed) = crate::stego::envelope::derive_keys(
         password.unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
         salt,
     );
@@ -407,7 +403,7 @@ pub fn extract_jpeg(
     full_envelope.extend_from_slice(&header_bytes[..28]); // Salt + Nonce
     full_envelope.extend_from_slice(&ciphertext_body);
 
-    unpack_envelope(&full_envelope, password)
+    unpack_envelope_with_key(&full_envelope, &key_bytes)
 }
 
 /// Probe capacity of JPEG carrier for DCT content-adaptive steganography.

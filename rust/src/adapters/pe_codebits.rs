@@ -424,6 +424,12 @@ impl ChannelHeader {
 
     /// Serializes the channel header with deterministic keystream masking on
     /// bytes [4..14] (version, flags, ube_len, slack_off) derived from `magic`.
+    ///
+    /// NOTE: Under standard mode where `magic` is a public constant, this masking serves
+    /// as format/heuristic obfuscation to prevent naive byte-signature scanners, NOT
+    /// cryptographic secrecy of header lengths. In stealth mode (`--stealth`), `magic` is
+    /// derived from the user's password HMAC, achieving cryptographic blinding. True secrecy
+    /// of the hidden payload is always provided by AEAD encryption of the payload itself.
     pub fn pack_masked(&self) -> [u8; CHANNEL_HEADER_LEN] {
         let mut buf = self.pack_unmasked();
         let mask = crate::crypto::derive_channel_header_mask(&self.magic);

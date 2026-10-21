@@ -143,7 +143,7 @@ impl JpegCostModel for UerdCostModel {
         // Step 3: Compute coefficient cost rho for each eligible AC coefficient
         // Total flattened coefficients = total_blocks * 64
         let mut costs = vec![params.wet_cost; total_blocks * 64];
-        let min_abs = params.min_abs_coeff;
+        let min_abs = params.min_abs_coeff.max(2);
 
         for (bi, block) in comp.blocks.iter().enumerate() {
             let block_rho = smoothed_energies[bi];
