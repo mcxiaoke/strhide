@@ -55,14 +55,17 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
 └──────┬───────┘                        │  envelope / header / prng │
        ▼                                └───────────┬───────────────┘
 ┌──────────────────────────────┐                     │
-│  adapters（HostAdapter）      │                     │ 共用
-│  PNG/JPEG/WEBP/HEIF/MP4/WAV/  │                     ▼
-│  ZIP/PDF/PE/MKV + eof 等      │        ┌───────────────────────────┐
-└───────┬──────────────────────┘        │  envelope（UBE v2.2 结构） │
-        │                               │  crypto（AEAD/KDF/压缩）    │
-        └──────────────────────────────▶│  params（LocalParams/     │
-                                        │  Profile）/ errors         │
-                                        └───────────────────────────┘
+│  adapters（HostAdapter）      │                     │
+│  PNG/JPEG/WEBP/HEIF/MP4/WAV/  │                     │
+│  ZIP/PDF/PE/MKV + eof 等      │                     │
+└───────┬──────────────────────┘                     │
+        │                                            │ 共用底层原语
+        ▼                                            ▼
+┌──────────────────────────────┐        ┌───────────────────────────┐
+│  envelope（UBE v2.2 结构）    │        │  crypto（AEAD/KDF/压缩）    │
+└───────┬──────────────────────┘        │  params（Local/Profile）   │
+        │                               │  errors（StrHideError）    │
+        └──────────────────────────────▶└───────────────────────────┘
 ```
 
 两个域彼此独立：
@@ -121,10 +124,10 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
 | 写入 | `write_carrier(path, source, options)` | 官方方言、默认本地参数 |
 |  | `write_carrier_with(path, source, options, local, profile)` | 完整配置；temp 文件 + 原子 rename |
 |  | `write_carrier_bytes(carrier, source, options, local, profile)` | 内存写入，返回 `(Vec<u8>, WriteResult)` |
-| 读取 | `read_carrier(path, out, password)` | 提取载荷 |
-|  | `read_carrier_with(path, out, password, overwrite)` | 允许覆盖已存在输出 |
+| 读取 | `read_carrier(path, out, password)` | 提取载荷（out 为 None 时在内存返回 ReadResult.data，为 Some 时写入文件） |
+|  | `read_carrier_with(path, out, password, overwrite)` | 允许覆盖已存在输出文件 |
 |  | `read_carrier_with_profile(path, out, password, overwrite, profile)` | 指定方言 |
-|  | `read_carrier_bytes(carrier, password, profile)` | 内存读取 |
+|  | `read_carrier_bytes(carrier, password, profile)` | 内存读取，返回 ReadResult |
 | 剥离 | `remove_carrier(path, out, password, backup)` | 剥离信封并还原载体 |
 |  | `remove_carrier_with(path, out, password, backup, profile)` | 指定方言 |
 |  | `remove_carrier_bytes(carrier, password, profile)` | 内存剥离，返回 `(Vec<u8>, RemoveResult)` |
@@ -170,8 +173,8 @@ pub struct WriteOptions<'a> {
 pub struct StegoOptions {
     pub algorithm: Option<String>,     // "hill" / "uerd" / "auto"
     pub password: Option<String>,
-    pub spatial_params: SpatialParams,
-    pub jpeg_params: JpegParams,
+    pub spatial_params: SpatialParams, // 空间域调优（含 codec/stc_h/stc_u）
+    pub jpeg_params: JpegParams,       // JPEG DCT 调优（含 codec/stc_h/stc_u）
 }
 ```
 
@@ -265,7 +268,7 @@ pub struct StegoOptions {
 
 ### 5.4 检查与验证
 
-- **inspect**（只读，不修改载体）：报告格式、是否找到信封、策略、偏移、标志、密码提示、原始尺寸/哈希、解密后的元数据，以及**每个策略在当前载体上的容量**（`strategy_capacities`）；PNG/JPEG 还附内容域容量 `content_stego_capacity`。没有信封时返回 `has_hidden_data = false`，不视为错误。
+- **inspect**（只读，不修改载体）：报告格式、是否找到信封、策略、偏移、标志、密码提示、原始尺寸/哈希、解密后的元数据，以及**每个策略在当前载体上的容量**（字段 `strategies: Vec<StrategyCapacity>`）；PNG/JPEG 还附内容域容量 `content_stego_capacity`。没有信封时返回 `has_hidden_data = false`，不视为错误。
 - **verify**（三级相互独立）：
   - Level 1 宿主结构完整性（如 PNG CRC、ZIP 中央目录、PE 头），与方言无关；
   - Level 2 信封头/尾定位与内部一致性（版本、长度、CRC、偏移）；
@@ -373,7 +376,7 @@ pub struct Profile {
 ### 7.3 内容域隐写
 
 - 算法由 `CostModelRegistry` 按名称解析：空间域（PNG）默认/`hill` → `HillCostModel`；JPEG 域默认/`uerd` → `UerdCostModel`。未知名（如旧的 `wow`/`nsf5` 别名）**明确拒绝**，不静默映射。
-- 矩阵编码 `StegoCodec`：`Hamming`（(7,3)，每块至多动 1 槽）或 `Stc`（全局 Viterbi 网格，最小化代价加权失真，支持分组 u）；`Auto` 按容量/载荷自适应。codec 与 h/u 记录在内容域 header 的空闲位中，提取无需调用方告知。
+- 矩阵编码 `StegoCodec`：`Hamming`（(7,3)，每块至多动 1 槽）或 `Stc`（全局 Viterbi 网格，最小化代价加权失真，支持分组 u）；`Auto`（默认）按容量/载荷自适应选择 STC 分组或回退。编码选项直接在 `SpatialParams.codec` 或 `JpegParams.codec` 中配置（连同 `stc_h` 约束高度与 `stc_u` 分组大小）。codec 与 h/u 记录在内容域 header 的空闲位中，提取无需调用方告知。
 - 空间域嵌入限制在像素值 `[8, 247]`，并采用 ternary ±1 匹配与八值类（`val & 0xF8`）约束，保证提取侧代价排序可复现。
 
 ---
@@ -408,6 +411,7 @@ pub struct Profile {
 ## 9. 稳定性约定
 
 - 所有 fallible 入口统一返回 `StrHideError`，变体按失败类别粗粒度划分，便于按判别式分支而非字符串匹配。
+- 错误信息与国际化：`StrHideError::detail()` 与 `Display` 始终提供稳定的英文底层诊断；CLI 层通过 `StrHideError::category()`（返回 `Option<crate::i18n::Msg>`）挂接中/英双语本地化前缀。库调用者无需关心 i18n 内部机制。
 - 多个公开枚举/结构体（`LocalParams`、`Profile`、`CompressionStrategy`、`RejectionPolicy` 等）标注 `#[non_exhaustive]`：下游应使用 `default()` + setter 构建，避免结构体字面量；未来新增字段/变体不构成破坏性变更。
 - 线格式（UBE v2.2）的稳定性与读写兼容关系见 [WIRE_SPEC.md](./WIRE_SPEC.md) 的兼容矩阵。
 - 可运行示例：`rust/examples/`（`in_memory`、`private_profile`、`codec_bench`）；公共 API 文档中的代码块由 `cargo test --doc` 守护，示例由 `cargo build --examples` 守护。

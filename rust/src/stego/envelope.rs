@@ -22,6 +22,7 @@ use hkdf::Hkdf;
 use rand::RngExt;
 use sha2::Sha256;
 
+use crate::crypto::normalize_nfc;
 use crate::errors::StrHideError;
 
 /// Official public fallback secret.
@@ -62,9 +63,10 @@ const FLAG_COMPRESSED: u8 = 0x01;
 
 /// Derive AES-256-GCM key and PRNG seed from password and salt.
 pub fn derive_keys(password: &str, salt: &[u8]) -> ([u8; 32], [u8; 32]) {
+    let norm_pwd = normalize_nfc(password);
     // PBKDF2-HMAC-SHA256 with 100,000 iterations
     let mut pbkdf2_key = [0u8; 32];
-    pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, 100_000, &mut pbkdf2_key);
+    pbkdf2::pbkdf2_hmac::<Sha256>(norm_pwd.as_bytes(), salt, 100_000, &mut pbkdf2_key);
 
     // HKDF expand into encryption key (32 bytes) and permutation seed (32 bytes)
     let hk = Hkdf::<Sha256>::new(Some(salt), &pbkdf2_key);
@@ -83,8 +85,9 @@ pub fn derive_keys(password: &str, salt: &[u8]) -> ([u8; 32], [u8; 32]) {
 /// can be pseudo-randomized across the carrier without knowing the salt upfront.
 pub fn derive_header_perm_seed(password: Option<&str>) -> [u8; 32] {
     let pw = password.unwrap_or(PUBLIC_DEFAULT_SECRET);
+    let norm_pw = normalize_nfc(pw);
     let mut header_seed = [0u8; 32];
-    let hk = Hkdf::<Sha256>::new(Some(b"strhide-stego-hpos-salt-v2"), pw.as_bytes());
+    let hk = Hkdf::<Sha256>::new(Some(b"strhide-stego-hpos-salt-v2"), norm_pw.as_bytes());
     hk.expand(b"strhide-stego-hpos-v2", &mut header_seed)
         .expect("HKDF expand header perm seed");
     header_seed
@@ -253,4 +256,34 @@ pub fn unpack_envelope(data: &[u8], password: Option<&str>) -> Result<Vec<u8>, S
     };
 
     unpack_envelope_with_key(data, &key_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nfc_normalization_produces_identical_keys_and_seeds() {
+        // "café" in NFC (precomposed: \u{00E9}) vs NFD (decomposed: e + \u{0301})
+        let pwd_nfc = "caf\u{00E9}";
+        let pwd_nfd = "cafe\u{0301}";
+        assert_ne!(pwd_nfc.as_bytes(), pwd_nfd.as_bytes());
+
+        let salt = [42u8; 16];
+        let (key_nfc, perm_nfc) = derive_keys(pwd_nfc, &salt);
+        let (key_nfd, perm_nfd) = derive_keys(pwd_nfd, &salt);
+
+        assert_eq!(key_nfc, key_nfd);
+        assert_eq!(perm_nfc, perm_nfd);
+
+        let hseed_nfc = derive_header_perm_seed(Some(pwd_nfc));
+        let hseed_nfd = derive_header_perm_seed(Some(pwd_nfd));
+        assert_eq!(hseed_nfc, hseed_nfd);
+
+        // Cross pack/unpack
+        let payload = b"secret stego message";
+        let packed = pack_envelope(payload, Some(pwd_nfd)).expect("pack with NFD password");
+        let unpacked = unpack_envelope(&packed, Some(pwd_nfc)).expect("unpack with NFC password");
+        assert_eq!(unpacked, payload);
+    }
 }

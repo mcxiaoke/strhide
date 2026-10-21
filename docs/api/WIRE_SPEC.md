@@ -19,9 +19,10 @@
 9. [Envelope Trailer（24 字节）](#9-envelope-trailer24-字节)
 10. [密钥派生与加密细节](#10-密钥派生与加密细节)
 11. [Stealth（隐蔽）模式](#11-stealth隐蔽模式)
-12. [内容域：微信封（Micro-Envelope）](#12-内容域微信封micro-envelope)
-13. [常量速查表](#13-常量速查表)
-14. [兼容矩阵](#14-兼容矩阵)
+12. [散落策略信道头：PE Codebits ChannelHeader（14 字节）](#12-散落策略信道头pe-codebits-channelheader14-字节)
+13. [内容域：微信封（Micro-Envelope）](#13-内容域微信封micro-envelope)
+14. [常量速查表](#14-常量速查表)
+15. [兼容矩阵](#15-兼容矩阵)
 
 ---
 
@@ -31,8 +32,8 @@ strhide 有两个相互独立的隐写域，各自有不同的字节布局：
 
 | 域 | 承载内容 | 字节布局 | 入口 |
 |---|---|---|---|
-| **结构域（structure）** | 一个自包含的 **UBE**（Universal Byte Envelope），有头、有尾、有魔数 | 本规范 §2–§11 | `engine` |
-| **内容域（content）** | 嵌入图像像素 / DCT 系数 LSB 的**微信封**，无静态魔数 | 本规范 §12 | `stego` |
+| **结构域（structure）** | 一个自包含的 **UBE**（Universal Byte Envelope，连续或经散落信道编码），有头、有尾、有魔数 | 本规范 §2–§12 | `engine` |
+| **内容域（content）** | 嵌入图像像素 / DCT 系数 LSB 的**微信封**，无静态魔数 | 本规范 §13 | `stego` |
 
 ### 1.1 两种信封格式对比（重要）
 
@@ -40,8 +41,8 @@ strhide 有两个相互独立的隐写域，各自有不同的字节布局：
 
 | 维度 | 结构域信封（`write`，UBE） | 内容域微信封（`embed`） |
 |---|---|---|
-| 代码 | `envelope.rs` + `engine.rs` | `stego/envelope.rs` |
-| 总体结构 | `112B header` + 可选 hint + 元数据块 + 分块载荷 + `24B trailer` | `16B salt` + `12B nonce` + 单个密文块 |
+| 代码 | `envelope.rs` + `engine.rs` + `pe_codebits.rs` | `stego/envelope.rs` |
+| 总体结构 | `112B header` + 可选 hint + 元数据块 + 分块载荷 + `24B trailer`（散落策略外包 `14B ChannelHeader`） | `16B salt` + `12B nonce` + 单个密文块 |
 | 静态魔数 | 有：8B 头魔数 + 4B 尾魔数 | **无**，整体呈高熵随机数据 |
 | 定位尾标（trailer） | 有 24B（offset/size/CRC/magic） | 无 |
 | 元数据 | 文件名、原始大小、原始 SHA-256、创建时间（独立 AEAD 块） | 无文件名/时间戳；仅密文内 4B 长度 + 1B 标志 |
@@ -49,11 +50,12 @@ strhide 有两个相互独立的隐写域，各自有不同的字节布局：
 | 字节序 | 小端 | 外层无整数；密文内部长度为**大端** |
 | AEAD AAD | 前 80B header；分块再追加 `chunk_index/is_last` | `salt ‖ nonce`（28B） |
 | 无密码默认密钥 | `BUILTIN_DEFAULT_KEY` | `PUBLIC_DEFAULT_SECRET` |
-| HKDF 子密钥标签 | `strhide-payload`、`strhide-metadata` | `strhide-stego-enc-v1`、`strhide-stego-perm-v1` |
-| 额外派生 | stealth 魔数与 76B 字段掩码 | header 槽位置换种子（无 salt）、STC 网格种子 |
-| 宿主还原 | 记录宿主 size + SHA-256，支持 bit-for-bit 还原 | **无宿主还原**：像素/系数被改即不可逆，只能重嵌或覆盖 |
-| 最终承载 | 注入容器结构空隙（chunk/段/box/overlay 等） | 矩阵编码分散到像素 / DCT 系数的 LSB |
+| HKDF 子密钥标签 | `strhide-payload`、`strhide-metadata`（掩码：`strhide-header-mask-v1`、`strhide-pe-channel-mask-v1`） | `strhide-stego-enc-v1`、`strhide-stego-perm-v1`、`strhide-stego-hpos-v2`、`strhide-stc-trellis-v1` |
+| 额外派生 | stealth 魔数与 76B/10B 字段掩码 | header 槽位置换种子（无 salt）、STC 网格种子 |
+| 宿主还原 | 记录宿主 size + SHA-256，支持 bit-for-bit 还原（散落策略依赖 slack diff） | **无宿主还原**：像素/系数被改即不可逆，只能重嵌或覆盖 |
+| 最终承载 | 注入容器结构空隙（chunk/段/box/overlay 等）或指令编码散落 | 矩阵编码分散到像素 / DCT 系数的 LSB |
 | 压缩 | raw deflate；`Auto` 需节省 ≥2% 才保留 | raw deflate；`compressed.len() < raw.len()` 才保留 |
+| 密码 NFC 归一化 | 统一做 Unicode NFC 归一化 | 统一做 Unicode NFC 归一化 |
 
 > 旧设计文档 §1.2 曾把"像素域 LSB"列为非目标；内容域是在该边界调整后新增的，因此其信封格式没有沿用 UBE，而是独立设计的极简伪随机结构。
 
@@ -65,7 +67,7 @@ strhide 有两个相互独立的隐写域，各自有不同的字节布局：
 - **AAD**：AEAD 认证但不加密的附加数据（见 §5）。
 - **Profile / Dialect（方言）**：读写必须一致、但不写入线格式的私有参数（见 [ARCHITECTURE §6](./ARCHITECTURE.md#6-参数分级模型l-class-与-p-class)）。
 
-**字节序**：结构域所有多字节整数一律**小端（little-endian）**；内容域微信封内部长度为大端（见 §12）。
+**字节序**：结构域所有多字节整数一律**小端（little-endian）**；内容域微信封内部长度为大端（见 §13）。
 
 **版本**：结构域 `CURRENT_VERSION = 0x02`。
 
@@ -379,11 +381,62 @@ trailer_crc32(stealth) = raw_crc XOR mask
 
 ---
 
-## 12. 内容域：微信封（Micro-Envelope）
+## 12. 散落策略信道头：PE Codebits ChannelHeader（14 字节）
+
+### 12.1 产生背景与角色
+
+结构域的大多数策略（如 `chunk`、`app_segment`、`box_uuid`、`pre_cd_inject`）均在载体的结构性空隙中连续存放完整的 UBE 信封（含 112B Header 与 24B Trailer）。
+
+但**散落策略（scattered strategy，当前为 `pe_codebits`）**不同：它将 UBE 字节流逐比特编码进 PE 文件 `.text` 代码节中 x86/x64 指令的等价编码中（如 ModR/M 寻址形式、SIB 字节变换、TEST 指令等），在载体中**没有连续的文件偏移**。
+
+为使读侧定位器（`locate`）与提取器（`open_ube_reader`）能够在不反汇编整段代码的前提下快速确定嵌入 UBE 的字节数、版本以及 100% 还原所需的原指令差异信息，`pe_codebits` 在代码流的前 112 个可用指令槽位中承载了一个定长 14 字节的信道头（`ChannelHeader`，14 字节 = 112 比特）。
+
+### 12.2 信道头布局（14 字节，小端）
+
+```text
+┌──────────────┬──────────┬──────────┬──────────────┬──────────────┐
+│ magic        │ version  │ flags    │ ube_len      │ slack_off    │
+│ [u8; 4] (4)  │ u8 (1)   │ u8 (1)   │ u32 LE (4)   │ u32 LE (4)   │
+└──────────────┴──────────┴──────────┴──────────────┴──────────────┘
+```
+
+| 相对偏移 | 长度 | 字段 | 类型 | 说明 |
+|---|---|---|---|---|
+| 0 | 4 | `magic` | `[u8; 4]` | 信道魔数（见下） |
+| 4 | 1 | `version` | `u8` | 信道版本，当前固定为 `0x01`（`CHANNEL_VERSION`） |
+| 5 | 1 | `flags` | `u8` | 标志位，保留，当前为 0 |
+| 6 | 4 | `ube_len` | `u32` | 散落嵌入的代码段 UBE 信封总字节数 |
+| 10 | 4 | `slack_off` | `u32` | 存放原指令还原差异（instruction diff）的 PE Slack 区域绝对文件偏移 |
+
+- **信道魔数**：
+  - 标准模式：`CHANNEL_MAGIC = STANDARD_TRAILER_MAGIC = [0x78, 0xe6, 0x66, 0xd2]`。
+  - Stealth 模式：采用用户密码派生的 trailer magic。
+
+### 12.3 确定性掩码混淆（Masking）
+
+为避免明文版本号、标志与零填充长度成为特征扫描器的指纹，`ChannelHeader` 的**字节 4..14**（共 10 字节）始终经过确定性密钥流掩码异或混淆：
+
+```text
+derive_channel_header_mask(magic):
+  HKDF-SHA256(salt = None, ikm = magic)
+  expand info = b"strhide-pe-channel-mask-v1" → mask (10 字节)
+
+channel_bytes[4..14] = unmasked[4..14] XOR mask[0..10]
+```
+
+- **混淆效果**：在标准模式下，消除了 `0x01` 版本号和高位为 0 的整数填充；在 Stealth 模式下，因 `magic` 由密码派生，实现了对信道头的密码学盲化。
+
+### 12.4 宿主 100% 还原机制（Slack Diff）
+
+指令编码替换属于载体代码层面的微调。剥离（`remove`）时，`PeAdapter` 读取 `slack_off` 处的紧凑二进制指令差异列表，精确将受影响指令回滚为原始机器码，结合 UBE Header 中记录的原文件 SHA-256 进行双重核验，确保 PE 可执行文件还原后哈希完全吻合。
+
+---
+
+## 13. 内容域：微信封（Micro-Envelope）
 
 内容域没有结构化信封与静态魔数。载荷先被封成一个**微信封**，再通过矩阵编码把微信封比特分散到图像候选元素的 LSB。
 
-### 12.1 微信封字节布局
+### 13.1 微信封字节布局
 
 ```text
 ┌──────────────┬──────────────┬──────────────────────────────┐
@@ -395,7 +448,7 @@ trailer_crc32(stealth) = raw_crc XOR mask
 - AEAD：AES-256-GCM；**AAD = salt ‖ nonce**（28 字节）。
 - 常量：`SALT_LEN = 16`、`NONCE_LEN = 12`、`TAG_LEN = 16`、`HEADER_OVERHEAD = 28`、`MIN_ENVELOPE_LEN = 49`、`BODY_OVERHEAD = 21`（4 长度 + 1 标志 + 16 tag；28 字节 salt/nonce 由 header 槽位承载，不计入 body 开销）。
 
-### 12.2 密文明文内部结构
+### 13.2 密文明文内部结构
 
 ```text
 ┌────────────────────┬─────────────┬───────────────────┐
@@ -406,18 +459,20 @@ trailer_crc32(stealth) = raw_crc XOR mask
 - `orig_len`：**大端** u32，未压缩载荷长度。
 - `flags`：bit 0（`0x01`）表示载荷经 raw deflate 压缩；当 `compressed.len() < payload.len()` 时才压缩。
 
-### 12.3 内容域密钥派生
+### 13.3 内容域密钥派生
 
 ```text
 derive_keys(password, salt):
-  PBKDF2-HMAC-SHA256(password, salt, 100_000) → IKM
+  norm_pwd = normalize_nfc(password)
+  PBKDF2-HMAC-SHA256(norm_pwd, salt, 100_000) → IKM
   HKDF(salt = Some(salt), IKM):
     info = b"strhide-stego-enc-v1"  → enc key  (32)
     info = b"strhide-stego-perm-v1" → perm seed (32)
 
 derive_header_perm_seed(password):
   // 无 salt，打破"先有 salt 才能定位 header"的循环依赖
-  HKDF(salt = Some(b"strhide-stego-hpos-salt-v2"), ikm = password_bytes):
+  norm_pw = normalize_nfc(password.unwrap_or(PUBLIC_DEFAULT_SECRET))
+  HKDF(salt = Some(b"strhide-stego-hpos-salt-v2"), ikm = norm_pw):
     info = b"strhide-stego-hpos-v2" → header seed (32)
 
 derive_stc_seed(perm_seed, salt):
@@ -428,7 +483,7 @@ derive_stc_seed(perm_seed, salt):
 - 密钥来源：显式密码优先，否则 `Profile::stego_secret()`，再否则为公开常量 `PUBLIC_DEFAULT_SECRET = "strhide-default-content-stego-key-2026"`。
 - 内容域与结构域的派生域相互独立（info 标签、默认密钥均不同），即使同一 `Profile` 承载，也不会耦合两套方言。
 
-### 12.4 256 个 Header 槽位与 Header Word
+### 13.4 256 个 Header 槽位与 Header Word
 
 微信封的前 28 字节（salt ‖ nonce）加上一个 4 字节控制字，共 **32 字节 = 256 比特**，由候选元素中经密钥置换选出的**前 256 个槽位**承载（header 槽位）：
 
@@ -447,7 +502,7 @@ header（32 字节）= salt (16) ‖ nonce (12) ‖ word (4)
 - 编解码为自描述：提取侧从 word 读出长度、codec、`h`、`u`，无需调用方告知。
 - 未知 codec 标识在提取侧被折叠为通用的"此处无载荷"，不产生可区分错误。
 
-### 12.5 槽位置换与嵌入
+### 13.5 槽位置换与嵌入
 
 - 候选元素集合先做**密钥置换**：前 256 个承载 header（避免"最便宜的 256 槽位"成为公开指纹）；body 按代价顺序取剩余槽位。
 - Header 比特直接 LSB 匹配；body 经矩阵编码（Hamming (7,3) 或 STC）。
@@ -455,9 +510,9 @@ header（32 字节）= salt (16) ‖ nonce (12) ‖ word (4)
 
 ---
 
-## 13. 常量速查表
+## 14. 常量速查表
 
-### 13.1 结构域
+### 14.1 结构域
 
 | 常量 | 值 |
 |---|---|
@@ -470,16 +525,17 @@ header（32 字节）= salt (16) ‖ nonce (12) ‖ word (4)
 | `FLAG_STEALTH` / `FLAG_HAS_HINT` / `FLAG_COMPACT_META` | `0x08` / `0x10` / `0x20` |
 | `STANDARD_HEADER_MAGIC` | `b7 54 2c 82 7e 31 1d 6e` |
 | `STANDARD_TRAILER_MAGIC` | `78 e6 66 d2` |
+| `CHANNEL_HEADER_LEN` / `CHANNEL_VERSION` | `14` / `1`（散落策略） |
 | `STEALTH_DOMAIN` | `b"strhide-stealth-v1"` |
 | `PBKDF2_ITERATIONS` | `100_000` |
 | `CHUNK_SIZE`（默认） | `2 MiB = 2,097,152` |
 | `MAX_CHUNK_SIZE` | `64 MiB = 67,108,864` |
 | `MAX_KNOWN_STRATEGY_ID` | `11` |
 | `BUILTIN_DEFAULT_KEY` | `"strhide::envelope::v2::default::builtin::public::secret"` |
-| `MIN_UBE_PLAIN` | `178`（见 §13.3） |
-| `MIN_UBE_ENCRYPTED` | `214`（见 §13.3） |
+| `MIN_UBE_PLAIN` | `178`（见 §14.3） |
+| `MIN_UBE_ENCRYPTED` | `214`（见 §14.3） |
 
-### 13.2 内容域
+### 14.2 内容域
 
 | 常量 | 值 |
 |---|---|
@@ -489,18 +545,21 @@ header（32 字节）= salt (16) ‖ nonce (12) ‖ word (4)
 | `MIN_ENVELOPE_LEN` | `49` |
 | Header 槽位数 | `256`（= 32 字节） |
 | `HEADER_LEN_MAX` | `67,108,863`（2²⁶ − 1） |
+| `PBKDF2_ITERATIONS` | `100_000` |
+| `DEFAULT_HAMMING_K` | `3`（Hamming (7,3)） |
+| `DEFAULT_STC_H` / `MAX_STC_U` | `8` / `3`（STC 参数范围 h: 2..=14） |
 | 空间域可嵌入像素范围 | `[8, 247]` |
 
-### 13.3 最小信封口径
+### 14.3 最小信封口径
 
 - `MIN_UBE_PLAIN = 178 = 112 + 41(raw meta) + 1(raw payload) + 24`：**未计入 AEAD tag**，是容量报告（如 `pe_codebits`）使用的保守门槛，而非实际可产出的信封。
 - `MIN_UBE_ENCRYPTED = 214 = 112 + (41+16) + (1+4+16) + 24`：含元数据与载荷 tag，是实际可产出的最小信封口径。
 
 ---
 
-## 14. 兼容矩阵
+## 15. 兼容矩阵
 
-### 14.1 版本与布局兼容
+### 15.1 版本与布局兼容
 
 | 读侧能力 \ 写侧产物 | 是否可读 | 结果 |
 |---|---|---|
@@ -509,7 +568,7 @@ header（32 字节）= salt (16) ‖ nonce (12) ‖ word (4)
 | pre-v2（v0.2/v0.3，ASCII 魔数、明文/JSON 元数据） | ❌ | 报告"无隐藏数据"（旧 ASCII 魔数与明文布局已移除） |
 | 版本号 ≠ `0x02` | ❌ | 报不支持的信封版本 |
 
-### 14.2 方言（Profile）兼容
+### 15.2 方言（Profile）兼容
 
 | 配置组合 | 官方读侧 | 同方言读侧 | 备注 |
 |---|---|---|---|
@@ -520,7 +579,7 @@ header（32 字节）= salt (16) ‖ nonce (12) ‖ word (4)
 | Stealth + 密码 | 仅持有同密码可读 | 持有同密码可读 | 域（domain）也必须一致 |
 | 内容域自定义 `stego_secret` | ❌ | ✅ | 错误密钥表现为 `NoHiddenData`（与错误密码不可区分） |
 
-### 14.3 写侧本地参数（L class）兼容
+### 15.3 写侧本地参数（L class）兼容
 
 | 参数 | 是否影响互读 | 说明 |
 |---|---|---|
@@ -529,11 +588,11 @@ header（32 字节）= salt (16) ‖ nonce (12) ‖ word (4)
 | `CompressionStrategy`（Auto/Never/Always） | ❌ 不影响 | 仅决定是否置 `FLAG_COMPRESSED` |
 | `RejectionPolicy` | ❌ 不影响 | 纯写侧安全检查，不进入信封 |
 
-### 14.4 策略 ID 兼容
+### 15.4 策略 ID 兼容
 
 - 策略 ID `1–11` 为官方保留段（见 [ARCHITECTURE §7](./ARCHITECTURE.md#7-适配器与策略体系)）。
 - 解掩码启发式（`MAX_KNOWN_STRATEGY_ID = 11`）会把未知 ID 视为噪声；使用未注册策略 ID 的信封在默认模式下不可读。
 
 ---
 
-> 本规范随线格式相关改动更新。任何新增标志位、扩展字段或派生路径，都必须同步更新本文件与对应测试（`cargo test`、`cargo test --doc`），并在 §14 兼容矩阵中注明影响。
+> 本规范随线格式相关改动更新。任何新增标志位、扩展字段或派生路径，都必须同步更新本文件与对应测试（`cargo test`、`cargo test --doc`），并在 §15 兼容矩阵中注明影响。
