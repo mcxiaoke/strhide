@@ -1,5 +1,9 @@
 # 学术标准“全图三元置换 STC 模式”可行性落地实现方案
 
+> ⚠️ **本文已废止（2026-10-21 21:25），仅作历史记录保留。**
+> 定稿方案见 `docs/stc_v3_final_plan_20261021.md`；逐条问题定位见 `docs/review_verification_standard_ternary_stc_proposal_20261021.md`。
+> 废止原因：§三.1 的 `|c|≥2` 值相关候选池导致 §三.3 单向锁（实测 24% 槽位被锁死、4σ~9σ 赤字）、§三.4 头部算术与 `stc.rs:327` 精确填充冲突且漏 224 比特 Salt/Nonce、§四“0 赤字”结论不成立。
+
 > **编制时间**：2026-10-21 20:15:00  
 > **方案代号**：STC-V3 (Standard Ternary Permuted Syndrome-Trellis Coding)  
 > **基准实现参考**：`temp/github/pySTC`（Fridrich 实验室官方 C++ 原型）、`temp/github/hstego`  

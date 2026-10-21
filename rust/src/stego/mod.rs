@@ -6,6 +6,7 @@
 
 pub mod coding;
 pub mod envelope;
+pub mod format;
 pub mod header;
 pub mod jpeg;
 pub mod params;
@@ -14,8 +15,10 @@ pub mod registry;
 pub mod spatial;
 pub mod traits;
 
+pub use format::{CipherSuite, DEFAULT_FORMAT, FormatProfile, GridRule};
 pub use params::{
-    JpegParams, SafetyEnforcement, SafetyLevel, SpatialParams, StegoCodec, StegoOptions,
+    ExtractParams, JpegParams, SafetyEnforcement, SafetyLevel, SpatialParams, StegoCodec,
+    StegoOptions,
 };
 pub use registry::CostModelRegistry;
 

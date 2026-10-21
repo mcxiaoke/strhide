@@ -58,6 +58,13 @@ pub enum StrHideError {
     #[error("{0}")]
     NoHiddenData(String),
 
+    /// The payload declares a format version, a critical extension, or a
+    /// cipher suite this build does not implement. Distinct from
+    /// [`CorruptedData`](Self::CorruptedData) on purpose: the bytes are
+    /// well-formed, the binary is simply too old (or too private) to read them.
+    #[error("Unsupported version: {0}")]
+    UnsupportedVersion(String),
+
     /// Any other user-facing failure: internal invariants, invalid arguments,
     /// unsupported strategy for the detected format, output path problems.
     #[error("{0}")]
@@ -80,7 +87,9 @@ impl StrHideError {
             StrHideError::Password(_) => Some(crate::i18n::Msg::ErrPassword),
             StrHideError::Rejection(_) => Some(crate::i18n::Msg::ErrRejection),
             StrHideError::RestoreMismatch(_) => Some(crate::i18n::Msg::ErrRestoreMismatch),
-            StrHideError::UnsupportedFormat(_) => Some(crate::i18n::Msg::ErrUnsupported),
+            StrHideError::UnsupportedFormat(_) | StrHideError::UnsupportedVersion(_) => {
+                Some(crate::i18n::Msg::ErrUnsupported)
+            }
             StrHideError::NoHiddenData(_) | StrHideError::General(_) => None,
         }
     }
@@ -94,6 +103,7 @@ impl StrHideError {
             | StrHideError::Rejection(s)
             | StrHideError::RestoreMismatch(s)
             | StrHideError::UnsupportedFormat(s)
+            | StrHideError::UnsupportedVersion(s)
             | StrHideError::NoHiddenData(s)
             | StrHideError::General(s) => s.clone(),
         }

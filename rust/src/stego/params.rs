@@ -346,6 +346,44 @@ impl JpegParams {
     }
 }
 
+/// Extraction policy.
+///
+/// Unlike [`JpegParams`] this is **not** part of the offer: it only says how
+/// much work this call is willing to spend and which suites it trusts. Two
+/// extractors with different policies still read the same carrier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractParams {
+    /// Suites to try, ascending. `None` means "every suite in the profile".
+    ///
+    /// A private build may narrow this to keep a slow suite from being probed;
+    /// dropping a suite only makes carriers written with it unreadable.
+    pub allowed_suites: Option<Vec<u16>>,
+    /// Ceiling on PBKDF2 iterations the decoder will execute for one attempt.
+    ///
+    /// A forged `suite_id` must not be able to turn the extractor into a space
+    /// heater, so the cost is checked before the KDF runs.
+    pub max_pbkdf2_iterations: u32,
+}
+
+impl Default for ExtractParams {
+    fn default() -> Self {
+        Self {
+            allowed_suites: None,
+            max_pbkdf2_iterations: crate::stego::format::MAX_PBKDF2_ITERATIONS,
+        }
+    }
+}
+
+impl ExtractParams {
+    /// Whether `suite_id` may be tried under this policy.
+    pub fn allows_suite(&self, suite_id: u16) -> bool {
+        match &self.allowed_suites {
+            Some(ids) => ids.contains(&suite_id),
+            None => true,
+        }
+    }
+}
+
 /// Unified configuration options passed to embed and extract pipelines.
 ///
 /// Everything here is either a per-call choice ([`algorithm`](Self::algorithm))
