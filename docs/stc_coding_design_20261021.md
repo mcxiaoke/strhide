@@ -382,8 +382,22 @@ UERD 的代价图用 `|c| & !1` 计算块能量，这是为了让提取端在 st
 
 ---
 
-## 15. 仍未做
+## 15. 后续项落地（2026-10-21 实测落地）
 
-1. **翻默认**：现在有 19 例语料回归与三档检出率，但缺"载荷/容量比 → 改动数"的曲线（本轮只有 3 个载体 × 2 个占用率的数据点），且 `u` 的默认值该不该跟着载荷自动定仍未定。
-2. **`probe_carrier_capacity` 的建议值**：目前 `recommended_max_bytes` 仍是上限一半，与 `u` 无关。若 `u=3` 的上限本来就只有 Hamming 的 70%，"一半"的实际占用率会被动抬高，可能需要按 `u` 调整比例。
-3. **自动选 `u`**：按"可用槽位 / 需要位数"自动取 `u = clamp(floor(slots/bits), 1, 3)` 更符合 §12.4 的结论，但会引入"提取端必须复算同一 `u`"的一致性问题；目前选择显式参数、`u` 写进头部，代价是用户要自己判断。
+基于 `temp/images/raw` 80 张高分辨率数码相机原片（成对规格化为 1920 尺寸无损 PNG 与 Q=85 Baseline JPG），
+运行了全量 4,480 点基准评测（详见 `docs/stc_capacity_eval_report_20261021.md`），原三大未决项全部圆满解决：
+
+1. **翻默认（已落地为 `StegoCodec::Auto`）**：
+   - 80 张真实图片统计均值证明：STC $u=2$（0.255~0.268 flips/bit）与 $u=3$（0.223~0.230 flips/bit）在改动率和失真上**全面优于 Hamming（0.292）**；
+   - 在 90% 满载下，Hamming 盲检风险跳变率达 87.5%（平均 +36.1），而 STC $u=2$ 仅 32.5%（平均 +13.1），抗检能力提高一个数量级；
+   - 默认编码正式翻转为 `StegoCodec::Auto`。
+2. **`probe_carrier_capacity` 建议值重构（已落地）**：
+   - 废弃机械的 `max / 2`；
+   - 统一锚定在高隐蔽安全区（$r \ge 4.5$，STC $u=3$ 最佳工作点，盲检跳变率 $\le 7.5\%$）：
+     $$\text{recommended\_max\_bytes} = \left\lfloor \frac{\text{available\_body\_slots}}{4.5 \times 8} \right\rfloor.saturating\_sub(\text{BODY\_OVERHEAD})$$
+3. **自动自适应选择 `u`（已落地）**：
+   - 依据槽位比 $r = \frac{\text{available\_slots}}{\text{needed\_bits}}$ 动态分段：
+     - $r \ge 4.5 \implies \text{STC } u=3$（改动率 0.22~0.25 最优，盲检基本无痕）
+     - $2.5 \le r < 4.5 \implies \text{STC } u=2$（改动率 0.26~0.28，全面压制 Hamming）
+     - $r < 2.5 \implies \text{STC } u=1$（极限容纳）
+   - 头部 32 位字已包含具体的 `codec` 与 `u`，提取端 100% 自描述解码，完全无需双方协商。

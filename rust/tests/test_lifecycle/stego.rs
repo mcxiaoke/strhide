@@ -623,8 +623,33 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
         payload.len() + 49,
         "header at the computed slots must carry the real envelope length"
     );
-    assert_eq!(codec_id, 0, "default embed must declare the Hamming codec");
-    assert_eq!(stc_h, 0, "Hamming leaves the stc-h field empty");
+    // Default Auto codec adaptively selects an STC configuration (codec_id 1..=3, stc_h == 8).
+    assert!(
+        (1..=3).contains(&codec_id),
+        "default embed must declare an STC codec (got {codec_id})"
+    );
+    assert_eq!(stc_h, 8, "STC writes its constraint height h=8");
+
+    // Explicit Hamming embed must declare codec 0 and stc_h 0.
+    let hamming_opts = StegoOptions {
+        spatial_params: SpatialParams {
+            codec: strhide::stego::StegoCodec::Hamming,
+            ..SpatialParams::default()
+        },
+        ..StegoOptions::default()
+    };
+    let hamming_stego = embed_carrier(&png_bytes, &payload, &hamming_opts).unwrap();
+    let hamming_hdr = read_header(&hamming_stego, &slots_a);
+    let hamming_word = u32::from_be_bytes([
+        hamming_hdr[28],
+        hamming_hdr[29],
+        hamming_hdr[30],
+        hamming_hdr[31],
+    ]);
+    let (_, h_codec, h_h) = strhide::stego::spatial::engine::decode_header_word(hamming_word);
+    assert_eq!(h_codec, 0, "explicit Hamming embed must declare codec 0");
+    assert_eq!(h_h, 0, "Hamming leaves stc_h empty");
+
     let header2 = read_header(&second, &slots_a);
     let word2 = u32::from_be_bytes([header2[28], header2[29], header2[30], header2[31]]);
     assert_eq!(

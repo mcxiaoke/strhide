@@ -180,25 +180,38 @@ pub fn embed_jpeg(
         )));
     }
 
-    // Header: 32 bytes = 256 bits ([16B Salt][12B Nonce][4B flags+len]).
-    let header_word = encode_header_word(total_len, params.codec, params.stc_h, params.stc_u);
-    let mut header_bytes = [0u8; 32];
-    header_bytes[..28].copy_from_slice(&envelope[..28]);
-    header_bytes[28..].copy_from_slice(&header_word.to_be_bytes());
-
     let ciphertext_body = &envelope[28..];
     let ciphertext_bits = ciphertext_body.len() * 8;
+
+    // Resolve matrix-coding strategy: Auto adaptively picks STC group size (u=3, 2, or 1)
+    let (resolved_codec, resolved_u) = match params.codec {
+        StegoCodec::Auto => {
+            crate::stego::coding::auto_select_codec(plan.body_candidates.len(), ciphertext_bits)
+        }
+        StegoCodec::Stc if params.stc_u == 0 => {
+            crate::stego::coding::auto_select_codec(plan.body_candidates.len(), ciphertext_bits)
+        }
+        StegoCodec::Stc => (StegoCodec::Stc, params.stc_u),
+        StegoCodec::Hamming => (StegoCodec::Hamming, 0),
+    };
+
     let needed_body_slots =
-        slots_for_codec(ciphertext_bits, params.codec, params.stc_h, params.stc_u)?;
+        slots_for_codec(ciphertext_bits, resolved_codec, params.stc_h, resolved_u)?;
     if needed_body_slots > plan.body_candidates.len() {
         return Err(StrHideError::General(format!(
             "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: jpeg-{})",
             needed_body_slots,
-            params.codec.describe(params.stc_h, params.stc_u),
+            resolved_codec.describe(params.stc_h, resolved_u),
             plan.body_candidates.len(),
             cost_model.id(),
         )));
     }
+
+    // Header: 32 bytes = 256 bits ([16B Salt][12B Nonce][4B flags+len]).
+    let header_word = encode_header_word(total_len, resolved_codec, params.stc_h, resolved_u);
+    let mut header_bytes = [0u8; 32];
+    header_bytes[..28].copy_from_slice(&envelope[..28]);
+    header_bytes[28..].copy_from_slice(&header_word.to_be_bytes());
 
     // Body slot order: a keyed permutation of the cheapest `needed` slots.
     let salt = &envelope[..16];
@@ -240,7 +253,7 @@ pub fn embed_jpeg(
         .collect();
     let rm = vec![f64::INFINITY; count];
 
-    match params.codec {
+    match resolved_codec {
         StegoCodec::Hamming => {
             hamming_embed_ternary(
                 &mut slot_vals,
@@ -251,12 +264,12 @@ pub fn embed_jpeg(
                 crate::stego::coding::DEFAULT_HAMMING_K,
             )?;
         }
-        StegoCodec::Stc => {
+        StegoCodec::Stc | StegoCodec::Auto => {
             let stc_seed = crate::stego::envelope::derive_stc_seed(&perm_seed, salt);
             let trellis = crate::stego::coding::StcTrellis::from_seed_grouped(
                 stc_seed,
                 params.stc_h,
-                params.stc_u,
+                resolved_u,
             )?;
             trellis.embed(&mut slot_vals, &moves, &rp, &rm, ciphertext_body)?;
         }
@@ -382,7 +395,7 @@ pub fn extract_jpeg(
             ciphertext_len,
             crate::stego::coding::DEFAULT_HAMMING_K,
         )?,
-        StegoCodec::Stc => {
+        StegoCodec::Stc | StegoCodec::Auto => {
             let stc_seed = crate::stego::envelope::derive_stc_seed(&perm_seed, salt);
             let trellis =
                 crate::stego::coding::StcTrellis::from_seed_grouped(stc_seed, stc_h, stc_u)?;
@@ -423,9 +436,13 @@ pub fn probe_jpeg_capacity(
             available_body_slots,
             crate::stego::coding::DEFAULT_HAMMING_K,
         ),
-        StegoCodec::Stc => {
+        StegoCodec::Stc if params.stc_u > 0 => {
             let trellis =
                 crate::stego::coding::StcTrellis::from_seed_grouped(0, params.stc_h, params.stc_u)?;
+            trellis.message_bits(available_body_slots) / 8
+        }
+        StegoCodec::Stc | StegoCodec::Auto => {
+            let trellis = crate::stego::coding::StcTrellis::from_seed_grouped(0, params.stc_h, 1)?;
             trellis.message_bits(available_body_slots) / 8
         }
     };
@@ -433,7 +450,8 @@ pub fn probe_jpeg_capacity(
     // by the 256 header slots.
     let max_raw_payload_bytes =
         max_ciphertext_bytes.saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
-    let recommended_max_bytes = max_raw_payload_bytes / 2;
+    let recommended_max_bytes =
+        crate::stego::coding::recommended_payload_bytes(available_body_slots);
 
     Ok(StegoCapacityInfo {
         format: "JPEG".into(),
@@ -446,7 +464,10 @@ pub fn probe_jpeg_capacity(
             StegoCodec::Hamming => {
                 crate::stego::coding::expected_change_rate(crate::stego::coding::DEFAULT_HAMMING_K)
             }
-            StegoCodec::Stc => crate::stego::coding::expected_stc_change_rate(params.stc_u),
+            StegoCodec::Stc if params.stc_u > 0 => {
+                crate::stego::coding::expected_stc_change_rate(params.stc_u)
+            }
+            StegoCodec::Stc | StegoCodec::Auto => crate::stego::coding::expected_stc_change_rate(3),
         },
     })
 }

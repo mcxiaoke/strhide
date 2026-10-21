@@ -46,7 +46,7 @@ const HEADER_STC_H_BITS: u32 = 4;
 pub fn codec_header_id(codec: StegoCodec, stc_u: u8) -> u32 {
     match codec {
         StegoCodec::Hamming => 0,
-        StegoCodec::Stc => 1 + (stc_u.clamp(1, MAX_STC_U) as u32 - 1),
+        StegoCodec::Stc | StegoCodec::Auto => 1 + (stc_u.clamp(1, MAX_STC_U) as u32 - 1),
     }
 }
 
@@ -72,7 +72,7 @@ pub fn encode_header_word(len: u32, codec: StegoCodec, stc_h: u8, stc_u: u8) -> 
     // carrier always writes zero there. That keeps the header word a pure
     // function of what actually matters.
     let stc_h = match codec {
-        StegoCodec::Stc => stc_h,
+        StegoCodec::Stc | StegoCodec::Auto => stc_h,
         StegoCodec::Hamming => 0,
     };
     (len & HEADER_LEN_MASK)

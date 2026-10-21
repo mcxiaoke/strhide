@@ -28,10 +28,13 @@ use crate::params::Profile;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StegoCodec {
-    /// `(7,3)` Hamming matrix embedding (default, unchanged behaviour).
+    /// Automatic adaptive selection (default): dynamically chooses optimal STC group
+    /// size (u=3, u=2, or u=1) based on carrier slot availability and payload size.
     #[default]
+    Auto,
+    /// `(7,3)` Hamming matrix embedding.
     Hamming,
-    /// Syndrome-trellis codes.
+    /// Syndrome-trellis codes (explicit).
     Stc,
 }
 
@@ -40,7 +43,7 @@ impl StegoCodec {
     pub fn id(self) -> u32 {
         match self {
             StegoCodec::Hamming => 0,
-            StegoCodec::Stc => 1,
+            StegoCodec::Stc | StegoCodec::Auto => 1,
         }
     }
 
@@ -56,13 +59,15 @@ impl StegoCodec {
         }
     }
 
-    /// Human-readable form for diagnostics ("Hamming k=3", "STC h=8 u=2").
+    /// Human-readable form for diagnostics ("Auto (STC-adaptive)", "Hamming k=3", "STC h=8 u=2").
     pub fn describe(self, stc_h: u8, stc_u: u8) -> String {
         match self {
+            StegoCodec::Auto => "Auto (STC-adaptive)".into(),
             StegoCodec::Hamming => {
                 format!("Hamming k={}", crate::stego::coding::DEFAULT_HAMMING_K)
             }
-            StegoCodec::Stc if stc_u <= 1 => format!("STC h={stc_h}"),
+            StegoCodec::Stc if stc_u == 0 => format!("STC h={stc_h} (auto u)"),
+            StegoCodec::Stc if stc_u == 1 => format!("STC h={stc_h}"),
             StegoCodec::Stc => format!("STC h={stc_h} u={stc_u}"),
         }
     }
@@ -105,7 +110,7 @@ fn default_stc_h() -> u8 {
 }
 
 fn default_stc_u() -> u8 {
-    1
+    0
 }
 
 impl Default for SpatialParams {
@@ -117,7 +122,7 @@ impl Default for SpatialParams {
             p2_window: 15,
             epsilon: f32::EPSILON as f64,
             exclusion_percentile: 0.30,
-            codec: StegoCodec::Hamming,
+            codec: StegoCodec::Auto,
             stc_h: default_stc_h(),
             stc_u: default_stc_u(),
         }
@@ -164,14 +169,16 @@ impl SpatialParams {
                 self.epsilon
             )));
         }
-        if self.codec == StegoCodec::Stc {
+        if self.codec == StegoCodec::Stc || self.codec == StegoCodec::Auto {
             crate::stego::coding::validate_stc_h(self.stc_h)?;
-            crate::stego::coding::validate_stc_u(self.stc_u)?;
-            if self.stc_u > self.stc_h {
-                return Err(StrHideError::General(format!(
-                    "STC parameter 'stc_u' must be <= 'stc_h' (got u={}, h={})",
-                    self.stc_u, self.stc_h
-                )));
+            if self.stc_u != 0 {
+                crate::stego::coding::validate_stc_u(self.stc_u)?;
+                if self.stc_u > self.stc_h {
+                    return Err(StrHideError::General(format!(
+                        "STC parameter 'stc_u' must be <= 'stc_h' (got u={}, h={})",
+                        self.stc_u, self.stc_h
+                    )));
+                }
             }
         }
         Ok(())
@@ -207,7 +214,7 @@ impl Default for JpegParams {
             min_abs_coeff: 1,
             block_exclusion_percentile: 0.20,
             wet_cost: 1e13,
-            codec: StegoCodec::Hamming,
+            codec: StegoCodec::Auto,
             stc_h: default_stc_h(),
             stc_u: default_stc_u(),
         }
@@ -243,14 +250,16 @@ impl JpegParams {
                 self.wet_cost
             )));
         }
-        if self.codec == StegoCodec::Stc {
+        if self.codec == StegoCodec::Stc || self.codec == StegoCodec::Auto {
             crate::stego::coding::validate_stc_h(self.stc_h)?;
-            crate::stego::coding::validate_stc_u(self.stc_u)?;
-            if self.stc_u > self.stc_h {
-                return Err(StrHideError::General(format!(
-                    "STC parameter 'stc_u' must be <= 'stc_h' (got u={}, h={})",
-                    self.stc_u, self.stc_h
-                )));
+            if self.stc_u != 0 {
+                crate::stego::coding::validate_stc_u(self.stc_u)?;
+                if self.stc_u > self.stc_h {
+                    return Err(StrHideError::General(format!(
+                        "STC parameter 'stc_u' must be <= 'stc_h' (got u={}, h={})",
+                        self.stc_u, self.stc_h
+                    )));
+                }
             }
         }
         Ok(())

@@ -82,6 +82,49 @@ pub fn max_payload_bytes(available_slots: usize, k: usize) -> usize {
     total_bits / 8
 }
 
+/// Slot-to-bit ratio divisor used to compute `recommended_max_bytes`.
+///
+/// Anchored to the clean-detection boundary (r >= 4.5, flips/bit ~0.23, risk spike <= 7.5%)
+/// measured across 80 high-resolution camera images (4,480 evaluation points).
+pub const RECOMMENDED_CAPACITY_SLOT_RATIO: f64 = 4.5;
+
+/// Thresholds for automatic codec and STC group size selection based on slot-to-bit ratio.
+pub const STC_AUTO_U3_SLOT_RATIO: f64 = 4.5;
+pub const STC_AUTO_U2_SLOT_RATIO: f64 = 2.5;
+
+/// Compute recommended maximum payload bytes given available body slots.
+///
+/// Unlike the raw maximum capacity (which permits α ~ 1.0 at high detection risk),
+/// the recommended capacity guarantees that the payload fits comfortably within
+/// the optimal STC u=3 high-stealth regime.
+pub fn recommended_payload_bytes(available_slots: usize) -> usize {
+    let bits = (available_slots as f64 / RECOMMENDED_CAPACITY_SLOT_RATIO).floor() as usize;
+    (bits / 8).saturating_sub(crate::stego::envelope::BODY_OVERHEAD)
+}
+
+/// Automatically select the optimal matrix-coding layer and group size `u`
+/// based on carrier slot abundance `available_slots / needed_bits`.
+///
+/// - `r >= 4.5`: `STC u=3` (lowest distortion, ~0.22 flips/bit, clean detection)
+/// - `2.5 <= r < 4.5`: `STC u=2` (high stealth, ~0.26 flips/bit, beats Hamming)
+/// - `r < 2.5`: `STC u=1` (extreme capacity expansion, beats Hamming capacity limit)
+pub fn auto_select_codec(
+    available_slots: usize,
+    needed_bits: usize,
+) -> (crate::stego::StegoCodec, u8) {
+    if needed_bits == 0 {
+        return (crate::stego::StegoCodec::Stc, 3);
+    }
+    let r = available_slots as f64 / needed_bits as f64;
+    if r >= STC_AUTO_U3_SLOT_RATIO {
+        (crate::stego::StegoCodec::Stc, 3)
+    } else if r >= STC_AUTO_U2_SLOT_RATIO {
+        (crate::stego::StegoCodec::Stc, 2)
+    } else {
+        (crate::stego::StegoCodec::Stc, 1)
+    }
+}
+
 /// Expected number of modified slots per embedded message bit for parameter
 /// `k` (Hamming block coding).
 ///
@@ -241,24 +284,27 @@ pub fn slots_for_codec(
     use crate::stego::params::StegoCodec;
     match codec {
         StegoCodec::Hamming => Ok(required_slots(bits, DEFAULT_HAMMING_K)),
-        StegoCodec::Stc => {
-            let t = StcTrellis::from_seed_grouped(0, stc_h, stc_u)?;
+        StegoCodec::Stc | StegoCodec::Auto => {
+            let u = if stc_u == 0 { 1 } else { stc_u };
+            let t = StcTrellis::from_seed_grouped(0, stc_h, u)?;
             Ok(t.slots_for(bits))
         }
     }
 }
 
-/// Change *count* per embedded bit for STC at group size `u`, as measured by
-/// `tests/batch_stego.rs` and the offline trellis simulation (2026-10-21).
+/// Change *count* per embedded bit for STC at group size `u`, calibrated against
+/// 80 high-resolution camera images (4,480 evaluation points, 2026-10-21).
 ///
 /// Values are changes per message bit, not per slot: with `u` slots per bit the
-/// per-slot rate is `rate / u`. Larger `u` is cheaper per bit but strictly
-/// lower capacity, so the two numbers only make sense together.
+/// per-slot rate is `rate / u`. Measured empirical means:
+/// - `u=1`: 0.501 flips/bit
+/// - `u=2`: 0.265 flips/bit
+/// - `u=3`: 0.230 flips/bit
 pub fn expected_stc_change_rate(stc_u: u8) -> f64 {
     match stc_u {
         0 | 1 => 0.50,
-        2 => 0.357,
-        _ => 0.335,
+        2 => 0.265,
+        _ => 0.230,
     }
 }
 

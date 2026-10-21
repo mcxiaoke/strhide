@@ -402,7 +402,7 @@ pub struct EmbedArgs {
     #[arg(
         long = "codec",
         value_name = "NAME",
-        help = "Matrix-coding layer for the payload bits, PNG and JPEG alike: hamming (default) or stc. \
+        help = "Matrix-coding layer for the payload bits, PNG and JPEG alike: auto (default), stc, or hamming. \
                 The choice is recorded in the carrier, so extract never needs this flag."
     )]
     pub codec: Option<String>,
@@ -417,7 +417,7 @@ pub struct EmbedArgs {
     #[arg(
         long = "stc-u",
         value_name = "INT",
-        help = "Fine-tune (STC): elements per syndrome row, 1..3 (default: 1). \
+        help = "Fine-tune (STC): elements per syndrome row, 1..3 (default: 0 for auto). \
                 Larger spreads the message over more slots: fewer changed slots and lower weighted \
                 distortion, but roughly 1/u of the capacity."
     )]
@@ -1780,11 +1780,12 @@ fn apply_codec_options(
 ) -> Result<(), StrHideError> {
     let parsed = match codec {
         Some(name) => Some(match name.to_ascii_lowercase().as_str() {
+            "auto" => crate::stego::StegoCodec::Auto,
             "hamming" => crate::stego::StegoCodec::Hamming,
             "stc" => crate::stego::StegoCodec::Stc,
             other => {
                 return Err(StrHideError::General(format!(
-                    "Unknown codec '{other}': expected 'hamming' or 'stc'"
+                    "Unknown codec '{other}': expected 'auto', 'stc', or 'hamming'"
                 )));
             }
         }),

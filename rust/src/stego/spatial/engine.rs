@@ -76,8 +76,9 @@ fn slots_for(bits: usize, codec: StegoCodec, stc_h: u8, stc_u: u8) -> Result<usi
             bits,
             crate::stego::coding::DEFAULT_HAMMING_K,
         )),
-        StegoCodec::Stc => {
-            let t = StcTrellis::from_seed_grouped(0, stc_h, stc_u)?;
+        StegoCodec::Stc | StegoCodec::Auto => {
+            let u = if stc_u == 0 { 1 } else { stc_u };
+            let t = StcTrellis::from_seed_grouped(0, stc_h, u)?;
             Ok(t.slots_for(bits))
         }
     }
@@ -560,6 +561,33 @@ pub fn embed_spatial(
         .filter(|&s| !is_header[s])
         .collect();
 
+    let ciphertext_body = &envelope[28..];
+    let ciphertext_bits = ciphertext_body.len() * 8;
+
+    // Resolve matrix-coding strategy: Auto adaptively picks STC group size (u=3, 2, or 1)
+    let (resolved_codec, resolved_u) = match params.codec {
+        StegoCodec::Auto => {
+            crate::stego::coding::auto_select_codec(body_candidates.len(), ciphertext_bits)
+        }
+        StegoCodec::Stc if params.stc_u == 0 => {
+            crate::stego::coding::auto_select_codec(body_candidates.len(), ciphertext_bits)
+        }
+        StegoCodec::Stc => (StegoCodec::Stc, params.stc_u),
+        StegoCodec::Hamming => (StegoCodec::Hamming, 0),
+    };
+
+    let needed_body_slots = slots_for(ciphertext_bits, resolved_codec, params.stc_h, resolved_u)?;
+
+    if needed_body_slots > body_candidates.len() {
+        return Err(StrHideError::General(format!(
+            "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{})",
+            needed_body_slots,
+            resolved_codec.describe(params.stc_h, resolved_u),
+            body_candidates.len(),
+            cost_model.id(),
+        )));
+    }
+
     // Header is 32 bytes = 256 bits: [16B Salt][12B Nonce][4B flags+len]
     let total_len = envelope.len() as u32;
     if total_len > HEADER_LEN_MAX {
@@ -567,24 +595,10 @@ pub fn embed_spatial(
             "Envelope of {total_len} bytes exceeds the {HEADER_LEN_MAX}-byte header length field"
         )));
     }
-    let header_word = encode_header_word(total_len, params.codec, params.stc_h, params.stc_u);
+    let header_word = encode_header_word(total_len, resolved_codec, params.stc_h, resolved_u);
     let mut header_bytes = Vec::with_capacity(32);
     header_bytes.extend_from_slice(&envelope[..28]); // Salt (16B) + Nonce (12B)
     header_bytes.extend_from_slice(&header_word.to_be_bytes());
-
-    let ciphertext_body = &envelope[28..];
-    let ciphertext_bits = ciphertext_body.len() * 8;
-    let needed_body_slots = slots_for(ciphertext_bits, params.codec, params.stc_h, params.stc_u)?;
-
-    if needed_body_slots > body_candidates.len() {
-        return Err(StrHideError::General(format!(
-            "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{})",
-            needed_body_slots,
-            params.codec.describe(params.stc_h, params.stc_u),
-            body_candidates.len(),
-            cost_model.id(),
-        )));
-    }
 
     // Phase 2: Keyed permutation of body slots using PBKDF2 salt-derived seed
     let salt = &envelope[..16];
@@ -632,7 +646,7 @@ pub fn embed_spatial(
     let moves: Vec<Move> = slot_vals.iter().map(|&v| spatial_move(v)).collect();
     let rp: Vec<f64> = body_slots.iter().map(|&s| rho_plus[s]).collect();
     let rm: Vec<f64> = body_slots.iter().map(|&s| rho_minus[s]).collect();
-    match params.codec {
+    match resolved_codec {
         StegoCodec::Hamming => {
             hamming_embed_ternary(
                 &mut slot_vals,
@@ -643,8 +657,8 @@ pub fn embed_spatial(
                 crate::stego::coding::DEFAULT_HAMMING_K,
             )?;
         }
-        StegoCodec::Stc => {
-            let trellis = StcTrellis::from_seed_grouped(stc_seed, params.stc_h, params.stc_u)?;
+        StegoCodec::Stc | StegoCodec::Auto => {
+            let trellis = StcTrellis::from_seed_grouped(stc_seed, params.stc_h, resolved_u)?;
             trellis.embed(&mut slot_vals, &moves, &rp, &rm, ciphertext_body)?;
         }
     }
@@ -802,7 +816,7 @@ pub fn extract_spatial(
             ciphertext_len,
             crate::stego::coding::DEFAULT_HAMMING_K,
         )?,
-        StegoCodec::Stc => {
+        StegoCodec::Stc | StegoCodec::Auto => {
             let stc_seed = crate::stego::envelope::derive_stc_seed(&perm_seed, salt);
             let trellis = StcTrellis::from_seed_grouped(stc_seed, stc_h, stc_u)?;
             trellis.extract(&slot_vals, ciphertext_bits)
@@ -855,9 +869,15 @@ pub fn probe_spatial_capacity(
         StegoCodec::Hamming => {
             crate::stego::coding::max_payload_bytes(available_body_slots, hamming_k)
         }
-        StegoCodec::Stc => {
+        StegoCodec::Stc if params.stc_u > 0 => {
             // `u * (bits + h - 1) = slots` -> `bits = slots/u - (h - 1)`.
             let trellis = StcTrellis::from_seed_grouped(0, params.stc_h, params.stc_u)?;
+            trellis.message_bits(available_body_slots) / 8
+        }
+        StegoCodec::Stc | StegoCodec::Auto => {
+            // In Auto mode (or STC with auto u), maximum raw capacity reaches up to STC u=1,
+            // as the encoder adaptively drops to u=1 when large payloads are embedded.
+            let trellis = StcTrellis::from_seed_grouped(0, params.stc_h, 1)?;
             trellis.message_bits(available_body_slots) / 8
         }
     };
@@ -866,10 +886,11 @@ pub fn probe_spatial_capacity(
     // capacity by exactly 28 bytes (measured on real carriers).
     let max_raw_payload_bytes =
         max_ciphertext_bytes.saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
-    // The recommendation stays at half the ceiling for both codecs: STC's
-    // larger ceiling does not make a full-rate STC carrier less detectable
-    // (flip count rises with payload), it only removes an artificial limit.
-    let recommended_max_bytes = max_raw_payload_bytes / 2;
+    // The recommendation is anchored to the high-stealth regime (r >= 4.5, flips/bit ~0.23,
+    // risk spike <= 7.5%), ensuring the payload lands in the clean STC u=3 / Hamming-clean band
+    // rather than naive max/2.
+    let recommended_max_bytes =
+        crate::stego::coding::recommended_payload_bytes(available_body_slots);
 
     Ok(StegoCapacityInfo {
         format: "PNG".into(),
@@ -880,11 +901,10 @@ pub fn probe_spatial_capacity(
         recommended_max_bytes,
         estimated_change_rate: match params.codec {
             StegoCodec::Hamming => crate::stego::coding::expected_change_rate(hamming_k),
-            // STC at one syndrome row per element (alpha ~ 1) must satisfy
-            // nearly all rows, so half the used slots change; grouping several
-            // elements per row lowers it. Reported as-is: it is the number that
-            // decides whether STC ever becomes default.
-            StegoCodec::Stc => crate::stego::coding::expected_stc_change_rate(params.stc_u),
+            StegoCodec::Stc if params.stc_u > 0 => {
+                crate::stego::coding::expected_stc_change_rate(params.stc_u)
+            }
+            StegoCodec::Stc | StegoCodec::Auto => crate::stego::coding::expected_stc_change_rate(3),
         },
     })
 }
@@ -1144,10 +1164,12 @@ mod tests {
         let stego =
             embed_spatial(&png, payload, Some("pw"), &HillCostModel, &params).expect("embed");
 
-        // The codec travels in the header, so an extractor that still defaults
-        // to Hamming must read the carrier correctly.
-        let extract_params = SpatialParams::default();
-        assert_eq!(extract_params.codec, StegoCodec::Hamming);
+        // The codec travels in the header, so an extractor configured with Hamming
+        // must still read the carrier correctly via header self-description.
+        let extract_params = SpatialParams {
+            codec: StegoCodec::Hamming,
+            ..SpatialParams::default()
+        };
         let extracted =
             extract_spatial(&stego, Some("pw"), &HillCostModel, &extract_params).expect("extract");
         assert_eq!(extracted, payload, "STC must be self-describing");
@@ -1329,5 +1351,39 @@ mod tests {
             capacities[0] > capacities[1] && capacities[1] > capacities[2],
             "capacity must fall as u grows: {capacities:?}"
         );
+    }
+
+    #[test]
+    fn auto_codec_adaptive_selection_roundtrips() {
+        let (w, h) = (128usize, 128usize);
+        let pixels = row_correlated_pixels(w, h);
+        let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
+
+        let auto_params = SpatialParams::default();
+        assert_eq!(auto_params.codec, StegoCodec::Auto);
+
+        // Light payload: automatically selects STC u=3
+        let light_payload = b"short-auto-payload";
+        let stego_light = embed_spatial(
+            &png,
+            light_payload,
+            Some("pw"),
+            &HillCostModel,
+            &auto_params,
+        )
+        .expect("embed light");
+        let rec_light = extract_spatial(
+            &stego_light,
+            Some("pw"),
+            &HillCostModel,
+            &SpatialParams::default(),
+        )
+        .expect("extract light");
+        assert_eq!(rec_light, light_payload);
+
+        // Verify that capacity probe reports recommended bytes anchored to high-stealth
+        let cap = probe_spatial_capacity(&png, &HillCostModel, &auto_params).expect("probe");
+        assert!(cap.recommended_max_bytes > 0);
+        assert!(cap.recommended_max_bytes <= cap.max_raw_payload_bytes / 2);
     }
 }
