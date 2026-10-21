@@ -662,13 +662,23 @@ fn inject_codebits(
 
     let (_need_bits, need_slack) = pe_codebits::channel_requirement(ube.len());
 
-    // Defensive check: all candidate slack ranges must be clean (all zero).
-    // If any slack range contains non-zero bytes, another channel diff or foreign
-    // payload may already occupy the padding, risking irreversible corruption (P1-1).
-    if !pe_codebits::check_all_slack_ranges_zero(host_in, &layout.slack_ranges)? {
-        return Err(StrHideError::UnsupportedFormat(
-            "PE section alignment padding contains non-zero data; cannot safely host pe_codebits without risking host corruption (try pe_overlay)".into(),
-        ));
+    // Defensive check: carrier must not already contain a pe_codebits channel.
+    // A second codebits injection would overwrite the first channel's header in .text,
+    // permanently orphaning the first restore diff in slack (P1-1).
+    if let Ok(existing) = pe_codebits::parse_channel_header(&text, layout.bitness) {
+        let diff_len = pe_codebits::CHANNEL_HEADER_LEN + existing.ube_len as usize;
+        let in_slack = layout.slack_ranges.iter().any(|&(s, e)| {
+            (existing.slack_off as u64) >= s && (existing.slack_off as u64 + diff_len as u64) <= e
+        });
+        if in_slack
+            && let Ok(sample) =
+                pe_codebits::read_at(host_in, existing.slack_off as u64, diff_len.min(64))
+            && sample.iter().any(|&b| b != 0)
+        {
+            return Err(StrHideError::General(
+                "Carrier already contains hidden data (pe_codebits channel). Use remove first or specify another file.".into(),
+            ));
+        }
     }
 
     let slack_off = pe_codebits::find_slack_run_streaming(host_in, &layout.slack_ranges, need_slack)?

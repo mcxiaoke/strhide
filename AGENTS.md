@@ -10,10 +10,14 @@
 
 ### 主要开发目标：`rust/`
 
+提交代码前要确保以下流程全部通过没有任何警告和错误！
+
 ```bash
 cd rust
 cargo build --release       # 编译，产物在 target/release/strhide
 cargo test          		# 运行测试套件
+cargo test --test batch_corpus -- --ignored
+cargo test --test batch_stego -- --ignored
 cargo fmt && cargo clippy   # 提交前格式化并修复所有 lint
 ```
 
@@ -23,14 +27,14 @@ cargo fmt && cargo clippy   # 提交前格式化并修复所有 lint
 
 ```bash
 cd rust
-cargo test --release --test batch_corpus -- --ignored --nocapture
+cargo test --test batch_corpus -- --ignored --nocapture
 # 语料在别处时：
 STRHIDE_CORPUS=/path/to/corpus cargo test --release --test batch_corpus -- --ignored --nocapture
 
 # 内容自适应图像隐写批测（针对 temp/teststego 全量真实大图及抗检扫描评估）：
-cargo test --release --test batch_stego -- --ignored --nocapture
+cargo test --test batch_stego -- --ignored --nocapture
 # 隐写语料在别处时：
-STRHIDE_STEGO_CORPUS=/path/to/stego_corpus cargo test --release --test batch_stego -- --ignored --nocapture
+STRHIDE_STEGO_CORPUS=/path/to/stego_corpus cargo test --test batch_stego -- --ignored --nocapture
 ```
 
 ### 通用约定
