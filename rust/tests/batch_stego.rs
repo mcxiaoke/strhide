@@ -131,6 +131,8 @@ struct ReportRow {
     capacity: String,
     embed_ms: u128,
     extract_ms: u128,
+    orig_score: u32,
+    orig_verdict: String,
     scan_score: u32,
     scan_verdict: String,
     high_score: u32,
@@ -250,6 +252,8 @@ fn test_batch_stego_corpus() {
                                 capacity: "N/A (rejected)".into(),
                                 embed_ms: 0,
                                 extract_ms: 0,
+                                orig_score: 0,
+                                orig_verdict: "n/a".into(),
                                 scan_score: 0,
                                 scan_verdict: "safe-reject".into(),
                                 high_score: 0,
@@ -406,11 +410,13 @@ fn test_batch_stego_corpus() {
                 }
 
                 let detail = format!(
-                    "slots={} | cap={:.1}KB | embed={}ms | ext={}ms | scan(low={}/{}, high={}/{})",
+                    "slots={} | cap={:.1}KB | embed={}ms | ext={}ms | scan(orig={}/{}, low={}/{}, high={}/{})",
                     cap.available_slots,
                     cap.max_raw_payload_bytes as f64 / 1024.0,
                     embed_ms,
                     extract_ms,
+                    orig_scan.risk_score,
+                    orig_scan.verdict,
                     low_scan.risk_score,
                     low_scan.verdict,
                     high_scan_score,
@@ -423,6 +429,8 @@ fn test_batch_stego_corpus() {
                     capacity: format!("{:.1} KB", cap.max_raw_payload_bytes as f64 / 1024.0),
                     embed_ms,
                     extract_ms,
+                    orig_score: orig_scan.risk_score,
+                    orig_verdict: orig_scan.verdict,
                     scan_score: low_scan.risk_score,
                     scan_verdict: low_scan.verdict,
                     high_score: high_scan_score,
@@ -497,18 +505,27 @@ fn test_batch_stego_corpus() {
         "=========================================================================================="
     );
     println!(
-        "{:<36} {:<10} {:<12} {:<10} {:<10} {:<14} {:<14} {:<10}",
-        "File", "Format", "Capacity", "Embed(ms)", "Ext(ms)", "Scan(64B)", "Scan(max)", "Status"
+        "{:<36} {:<10} {:<12} {:<10} {:<10} {:<14} {:<14} {:<14} {:<10}",
+        "File",
+        "Format",
+        "Capacity",
+        "Embed(ms)",
+        "Ext(ms)",
+        "Scan(0)",
+        "Scan(64B)",
+        "Scan(max)",
+        "Status"
     );
-    println!("{:-<120}", "");
+    println!("{:-<135}", "");
     for r in &report.rows {
         println!(
-            "{:<36} {:<10} {:<12} {:<10} {:<10} {:<14} {:<14} {:<10}",
+            "{:<36} {:<10} {:<12} {:<10} {:<10} {:<14} {:<14} {:<14} {:<10}",
             r.filename,
             r.format,
             r.capacity,
             r.embed_ms,
             r.extract_ms,
+            format!("{}/{}", r.orig_score, r.orig_verdict),
             format!("{}/{}", r.scan_score, r.scan_verdict),
             format!("{}/{}", r.high_score, r.high_verdict),
             r.status

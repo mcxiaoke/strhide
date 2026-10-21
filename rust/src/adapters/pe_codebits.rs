@@ -1184,6 +1184,45 @@ pub fn max_zero_run_streaming<R: Read + Seek + ?Sized>(
     Ok(best)
 }
 
+/// Returns `Ok(true)` if every candidate slack range consists entirely of zero bytes.
+/// If any byte is non-zero, returns `Ok(false)`.
+pub fn check_all_slack_ranges_zero<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+    ranges: &[(u64, u64)],
+) -> Result<bool, CodebitsError> {
+    let start_pos = reader
+        .stream_position()
+        .map_err(|e| CodebitsError::Iced(e.to_string()))?;
+    let mut buf = [0u8; 64 * 1024];
+
+    for &(start, end) in ranges {
+        if start >= end {
+            continue;
+        }
+        reader
+            .seek(SeekFrom::Start(start))
+            .map_err(|e| CodebitsError::Iced(e.to_string()))?;
+        let mut remaining = end - start;
+        while remaining > 0 {
+            let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
+            let n = reader
+                .read(&mut buf[..to_read])
+                .map_err(|e| CodebitsError::Iced(e.to_string()))?;
+            if n == 0 {
+                break;
+            }
+            if buf[..n].iter().any(|&b| b != 0) {
+                reader.seek(SeekFrom::Start(start_pos)).ok();
+                return Ok(false);
+            }
+            remaining -= n as u64;
+        }
+    }
+
+    reader.seek(SeekFrom::Start(start_pos)).ok();
+    Ok(true)
+}
+
 /// Reads `len` bytes at `offset` from a `Read + Seek` stream.
 pub fn read_at<R: Read + Seek + ?Sized>(
     reader: &mut R,

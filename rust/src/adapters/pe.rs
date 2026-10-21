@@ -661,6 +661,16 @@ fn inject_codebits(
     }
 
     let (_need_bits, need_slack) = pe_codebits::channel_requirement(ube.len());
+
+    // Defensive check: all candidate slack ranges must be clean (all zero).
+    // If any slack range contains non-zero bytes, another channel diff or foreign
+    // payload may already occupy the padding, risking irreversible corruption (P1-1).
+    if !pe_codebits::check_all_slack_ranges_zero(host_in, &layout.slack_ranges)? {
+        return Err(StrHideError::UnsupportedFormat(
+            "PE section alignment padding contains non-zero data; cannot safely host pe_codebits without risking host corruption (try pe_overlay)".into(),
+        ));
+    }
+
     let slack_off = pe_codebits::find_slack_run_streaming(host_in, &layout.slack_ranges, need_slack)?
         .ok_or_else(|| {
             StrHideError::UnsupportedFormat(format!(

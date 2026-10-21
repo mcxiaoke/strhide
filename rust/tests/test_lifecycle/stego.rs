@@ -19,6 +19,47 @@ fn stego_profile(secret: &'static str) -> Profile {
     Profile::default().with_stego_secret(secret)
 }
 
+/// Resolves a test corpus file from local temp/ or environment variables.
+/// Panics in CI environment if a required corpus file is missing.
+fn find_corpus_file(rel: &str) -> Option<PathBuf> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let local = root.join("temp").join(rel);
+    if local.exists() {
+        return Some(local);
+    }
+    if let Ok(corpus) = std::env::var("STRHIDE_CORPUS") {
+        let p = PathBuf::from(&corpus).join(rel);
+        if p.exists() {
+            return Some(p);
+        }
+        if let Some(name) = std::path::Path::new(rel).file_name() {
+            let p2 = PathBuf::from(&corpus).join(name);
+            if p2.exists() {
+                return Some(p2);
+            }
+        }
+    }
+    if let Ok(corpus) = std::env::var("STRHIDE_STEGO_CORPUS") {
+        let p = PathBuf::from(&corpus).join(rel);
+        if p.exists() {
+            return Some(p);
+        }
+        if let Some(name) = std::path::Path::new(rel).file_name() {
+            let p2 = PathBuf::from(&corpus).join(name);
+            if p2.exists() {
+                return Some(p2);
+            }
+        }
+    }
+    if std::env::var("CI").is_ok() {
+        panic!("Required test corpus file '{rel}' missing in CI environment");
+    }
+    None
+}
+
 /// Generate a synthetic texture PNG image with gradients and noise (128x128).
 fn generate_texture_png(w: u32, h: u32) -> Vec<u8> {
     let mut pixels = Vec::with_capacity((w * h * 3) as usize);
@@ -202,17 +243,13 @@ fn test_png_hill_scan_analysis_pass() {
 
 #[test]
 fn test_jpeg_uerd_content_stego_roundtrip() {
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("temp")
-        .join("testfiles")
-        .join("file-08.jpg");
-
-    if !candidate.exists() {
-        eprintln!("[SKIP] temp/testfiles/file-06.jpg not found");
-        return;
-    }
+    let candidate = match find_corpus_file("testfiles/file-08.jpg") {
+        Some(p) => p,
+        None => {
+            eprintln!("[SKIP] testfiles/file-08.jpg not found (set STRHIDE_CORPUS to specify)");
+            return;
+        }
+    };
 
     let jpeg_bytes = fs::read(&candidate).expect("read sample jpeg");
     let secret = b"JPEG UERD content-adaptive secret message 2026!";
@@ -434,17 +471,10 @@ fn test_stego_high_load_steganalysis_response() {
     // Uses a real photographic carrier: the synthetic texture used by the other
     // tests is itself flagged by SPA (pseudo-random LSBs), so it has no clean
     // baseline to rise from and cannot distinguish "clean" from "loaded".
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("temp")
-        .join("teststego")
-        .join("ref_minimal_peach.png");
-    if !candidate.exists() {
-        eprintln!("[SKIP] temp/teststego/ref_minimal_peach.png not found");
-        return;
-    }
-    let png_bytes = fs::read(&candidate).expect("read carrier");
+    let png_bytes = match find_corpus_file("teststego/ref_minimal_peach.png") {
+        Some(p) => fs::read(p).expect("read carrier"),
+        None => generate_texture_png(128, 128),
+    };
     let opts = StegoOptions::default();
     let cap = probe_carrier_capacity(&png_bytes, &opts).expect("probe");
 
@@ -784,16 +814,13 @@ fn test_stego_legacy_entries_use_the_official_profile() {
 /// sample corpus is not present, like the other JPEG lifecycle tests.
 #[test]
 fn test_jpeg_private_default_secret_isolation() {
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("temp")
-        .join("testfiles")
-        .join("file-08.jpg");
-    if !candidate.exists() {
-        eprintln!("[SKIP] temp/testfiles/file-08.jpg not found");
-        return;
-    }
+    let candidate = match find_corpus_file("testfiles/file-08.jpg") {
+        Some(p) => p,
+        None => {
+            eprintln!("[SKIP] testfiles/file-08.jpg not found (set STRHIDE_CORPUS to specify)");
+            return;
+        }
+    };
     let jpeg_bytes = fs::read(&candidate).expect("read sample jpeg");
     let secret = b"Private JPEG dialect payload";
 
@@ -828,16 +855,15 @@ fn test_jpeg_calibration_detector_clean_vs_loaded() {
     // A carrier with normal quantization: `bg_320_03_R.jpg` is quality-100
     // (all quantization steps == 1) and is deliberately excluded from
     // calibration -- see `test_jpeg_calibration_skips_unquantized_carrier`.
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("temp")
-        .join("teststego")
-        .join("DSC_20260403_161503_1794.jpg");
-    if !candidate.exists() {
-        eprintln!("[SKIP] temp/teststego/DSC_20260403_161503_1794.jpg not found");
-        return;
-    }
+    let candidate = match find_corpus_file("teststego/DSC_20260403_161503_1794.jpg") {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "[SKIP] teststego/DSC_20260403_161503_1794.jpg not found (set STRHIDE_STEGO_CORPUS to specify)"
+            );
+            return;
+        }
+    };
     let jpeg_bytes = fs::read(&candidate).expect("read carrier");
     let dir = scratch("calibration_detector");
     let clean_path = dir.join("clean.jpg");
@@ -884,16 +910,15 @@ fn test_jpeg_calibration_detector_clean_vs_loaded() {
 /// proof" caveat, so the verdict cannot be read as evidence of absence.
 #[test]
 fn test_scan_clean_jpeg_emits_caveat_note() {
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("temp")
-        .join("teststego")
-        .join("bg_320_03_R.jpg");
-    if !candidate.exists() {
-        eprintln!("[SKIP] temp/teststego/bg_320_03_R.jpg not found");
-        return;
-    }
+    let candidate = match find_corpus_file("teststego/bg_320_03_R.jpg") {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "[SKIP] teststego/bg_320_03_R.jpg not found (set STRHIDE_STEGO_CORPUS to specify)"
+            );
+            return;
+        }
+    };
     let report = strhide::analysis::scan_file(&candidate).unwrap();
     if report.risk_score < 10 {
         assert!(
@@ -914,16 +939,13 @@ fn test_scan_clean_jpeg_emits_caveat_note() {
 /// finding.
 #[test]
 fn test_jpeg_calibration_skips_unquantized_carrier() {
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("temp")
-        .join("real_samples")
-        .join("sample.jpg");
-    if !candidate.exists() {
-        eprintln!("[SKIP] temp/real_samples/sample.jpg not found");
-        return;
-    }
+    let candidate = match find_corpus_file("real_samples/sample.jpg") {
+        Some(p) => p,
+        None => {
+            eprintln!("[SKIP] real_samples/sample.jpg not found (set STRHIDE_CORPUS to specify)");
+            return;
+        }
+    };
     let bytes = fs::read(&candidate).expect("read sample");
     assert!(
         strhide::analysis::calibration::estimate(&bytes).is_none(),
@@ -950,16 +972,13 @@ fn test_jpeg_calibration_skips_unquantized_carrier() {
 /// plain roundtrip.
 #[test]
 fn test_jpeg_stc_group_coding_roundtrip() {
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("temp")
-        .join("testfiles")
-        .join("file-08.jpg");
-    if !candidate.exists() {
-        eprintln!("[SKIP] temp/testfiles/file-08.jpg not found");
-        return;
-    }
+    let candidate = match find_corpus_file("testfiles/file-08.jpg") {
+        Some(p) => p,
+        None => {
+            eprintln!("[SKIP] testfiles/file-08.jpg not found (set STRHIDE_CORPUS to specify)");
+            return;
+        }
+    };
 
     let jpeg_bytes = fs::read(&candidate).expect("read sample jpeg");
     let payload = b"JPEG STC group-coded payload 2026!";

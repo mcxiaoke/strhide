@@ -829,3 +829,43 @@ fn codebits_rejects_authenticode_signed_pe() {
         other => panic!("expected Rejection or UnsupportedFormat, got {other:?}"),
     }
 }
+
+#[test]
+fn codebits_double_injection_stealth_fails_safely_and_preserves_carrier() {
+    let dir = scratch("double_stealth");
+    let carrier = dir.join("clean.exe");
+    let original = make_pe(0x8664, 0x20B, 0x3000, false);
+    fs::write(&carrier, &original).unwrap();
+
+    // 1. First injection: stealth mode with password
+    let steg1 = dir.join("steg1.exe");
+    let mut opts1 = write_opts(&steg1, "pe_codebits");
+    opts1.stealth = true;
+    opts1.password = Some("stealth_pass_1");
+    write_carrier(&carrier, PayloadSource::Text("first secret"), &opts1).unwrap();
+
+    // 2. Second injection without knowledge of first password (explicit pe_codebits)
+    // Must be rejected because slack ranges contain non-zero data (P1-1 protection)
+    let steg2 = dir.join("steg2.exe");
+    let mut opts2 = write_opts(&steg2, "pe_codebits");
+    opts2.stealth = true;
+    opts2.password = Some("different_pass_2");
+    let err = write_carrier(&steg1, PayloadSource::Text("second secret"), &opts2).unwrap_err();
+    assert!(
+        err.to_string().contains("already contains hidden data")
+            || err.to_string().contains("padding contains non-zero data"),
+        "expected double injection rejection, got: {err}"
+    );
+
+    // 3. First payload is intact and carrier can be bit-exactly restored
+    let read = read_carrier(&steg1, None, Some("stealth_pass_1")).unwrap();
+    assert_eq!(read.data, b"first secret");
+
+    let restored = dir.join("restored.exe");
+    remove_carrier(&steg1, Some(&restored), Some("stealth_pass_1"), false).unwrap();
+    assert_eq!(
+        fs::read(&restored).unwrap(),
+        original,
+        "first envelope must be removed and carrier restored bit-for-bit"
+    );
+}
