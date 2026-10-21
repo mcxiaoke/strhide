@@ -19,8 +19,15 @@ fn stego_profile(secret: &'static str) -> Profile {
     Profile::default().with_stego_secret(secret)
 }
 
+/// Resolves a fixture file bundled in `tests/fixtures/`.
+fn fixture_file(rel: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(rel)
+}
+
 /// Resolves a test corpus file from local temp/ or environment variables.
-/// Panics in CI environment if a required corpus file is missing.
 fn find_corpus_file(rel: &str) -> Option<PathBuf> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -53,9 +60,6 @@ fn find_corpus_file(rel: &str) -> Option<PathBuf> {
                 return Some(p2);
             }
         }
-    }
-    if std::env::var("CI").is_ok() {
-        panic!("Required test corpus file '{rel}' missing in CI environment");
     }
     None
 }
@@ -243,15 +247,8 @@ fn test_png_hill_scan_analysis_pass() {
 
 #[test]
 fn test_jpeg_uerd_content_stego_roundtrip() {
-    let candidate = match find_corpus_file("testfiles/file-08.jpg") {
-        Some(p) => p,
-        None => {
-            eprintln!("[SKIP] testfiles/file-08.jpg not found (set STRHIDE_CORPUS to specify)");
-            return;
-        }
-    };
-
-    let jpeg_bytes = fs::read(&candidate).expect("read sample jpeg");
+    let candidate = fixture_file("carrier.jpg");
+    let jpeg_bytes = fs::read(&candidate).expect("read carrier jpeg");
     let secret = b"JPEG UERD content-adaptive secret message 2026!";
     let password = "JpegPassword2026#";
 
@@ -469,9 +466,16 @@ fn test_stego_high_load_steganalysis_response() {
     // Uses a real photographic carrier: the synthetic texture used by the other
     // tests is itself flagged by SPA (pseudo-random LSBs), so it has no clean
     // baseline to rise from and cannot distinguish "clean" from "loaded".
-    let png_bytes = match find_corpus_file("teststego/ref_minimal_peach.png") {
-        Some(p) => fs::read(p).expect("read carrier"),
-        None => generate_texture_png(128, 128),
+    let png_bytes = {
+        let fix = fixture_file("carrier.png");
+        if fix.exists() {
+            fs::read(fix).expect("read fixture carrier png")
+        } else {
+            match find_corpus_file("teststego/ref_minimal_peach.png") {
+                Some(p) => fs::read(p).expect("read carrier"),
+                None => generate_texture_png(128, 128),
+            }
+        }
     };
     let opts = StegoOptions::default();
     let cap = probe_carrier_capacity(&png_bytes, &opts).expect("probe");
@@ -816,14 +820,8 @@ fn test_stego_legacy_entries_use_the_official_profile() {
 /// sample corpus is not present, like the other JPEG lifecycle tests.
 #[test]
 fn test_jpeg_private_default_secret_isolation() {
-    let candidate = match find_corpus_file("testfiles/file-08.jpg") {
-        Some(p) => p,
-        None => {
-            eprintln!("[SKIP] testfiles/file-08.jpg not found (set STRHIDE_CORPUS to specify)");
-            return;
-        }
-    };
-    let jpeg_bytes = fs::read(&candidate).expect("read sample jpeg");
+    let candidate = fixture_file("carrier.jpg");
+    let jpeg_bytes = fs::read(&candidate).expect("read carrier jpeg");
     let secret = b"Private JPEG dialect payload";
 
     let opts = StegoOptions {
@@ -854,18 +852,7 @@ fn test_jpeg_private_default_secret_isolation() {
 /// Skipped when the sample corpus is absent, like the other JPEG tests.
 #[test]
 fn test_jpeg_calibration_detector_clean_vs_loaded() {
-    // A carrier with normal quantization: `bg_320_03_R.jpg` is quality-100
-    // (all quantization steps == 1) and is deliberately excluded from
-    // calibration -- see `test_jpeg_calibration_skips_unquantized_carrier`.
-    let candidate = match find_corpus_file("teststego/DSC_20260403_161503_1794.jpg") {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "[SKIP] teststego/DSC_20260403_161503_1794.jpg not found (set STRHIDE_STEGO_CORPUS to specify)"
-            );
-            return;
-        }
-    };
+    let candidate = fixture_file("carrier.jpg");
     let jpeg_bytes = fs::read(&candidate).expect("read carrier");
     let dir = scratch("calibration_detector");
     let clean_path = dir.join("clean.jpg");
@@ -912,15 +899,7 @@ fn test_jpeg_calibration_detector_clean_vs_loaded() {
 /// proof" caveat, so the verdict cannot be read as evidence of absence.
 #[test]
 fn test_scan_clean_jpeg_emits_caveat_note() {
-    let candidate = match find_corpus_file("teststego/bg_320_03_R.jpg") {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "[SKIP] teststego/bg_320_03_R.jpg not found (set STRHIDE_STEGO_CORPUS to specify)"
-            );
-            return;
-        }
-    };
+    let candidate = fixture_file("carrier.jpg");
     let report = strhide::analysis::scan_file(&candidate).unwrap();
     if report.risk_score < 10 {
         assert!(
@@ -941,13 +920,7 @@ fn test_scan_clean_jpeg_emits_caveat_note() {
 /// finding.
 #[test]
 fn test_jpeg_calibration_skips_unquantized_carrier() {
-    let candidate = match find_corpus_file("real_samples/sample.jpg") {
-        Some(p) => p,
-        None => {
-            eprintln!("[SKIP] real_samples/sample.jpg not found (set STRHIDE_CORPUS to specify)");
-            return;
-        }
-    };
+    let candidate = fixture_file("carrier_q100.jpg");
     let bytes = fs::read(&candidate).expect("read sample");
     assert!(
         strhide::analysis::calibration::estimate(&bytes).is_none(),
@@ -974,15 +947,8 @@ fn test_jpeg_calibration_skips_unquantized_carrier() {
 /// plain roundtrip.
 #[test]
 fn test_jpeg_stc_group_coding_roundtrip() {
-    let candidate = match find_corpus_file("testfiles/file-08.jpg") {
-        Some(p) => p,
-        None => {
-            eprintln!("[SKIP] testfiles/file-08.jpg not found (set STRHIDE_CORPUS to specify)");
-            return;
-        }
-    };
-
-    let jpeg_bytes = fs::read(&candidate).expect("read sample jpeg");
+    let candidate = fixture_file("carrier.jpg");
+    let jpeg_bytes = fs::read(&candidate).expect("read carrier jpeg");
     let payload = b"JPEG STC group-coded payload 2026!";
     let password = "JpegStcPassword#2026";
 
@@ -1253,4 +1219,73 @@ fn stego_domain_isolation_lifecycle() {
         ),
         "same password with mismatched domain must fail"
     );
+}
+
+#[test]
+fn stego_safety_level_and_enforcement_lifecycle() {
+    use strhide::stego::{SafetyEnforcement, SafetyLevel};
+
+    let png = generate_texture_png(128, 128); // 16,384 pixels
+
+    let cap_paranoid = probe_carrier_capacity(
+        &png,
+        &StegoOptions {
+            safety_level: SafetyLevel::Paranoid,
+            ..Default::default()
+        },
+    )
+    .expect("probe paranoid");
+
+    let cap_high = probe_carrier_capacity(
+        &png,
+        &StegoOptions {
+            safety_level: SafetyLevel::High,
+            ..Default::default()
+        },
+    )
+    .expect("probe high");
+
+    let cap_balanced = probe_carrier_capacity(
+        &png,
+        &StegoOptions {
+            safety_level: SafetyLevel::Balanced,
+            ..Default::default()
+        },
+    )
+    .expect("probe balanced");
+
+    assert!(cap_paranoid.recommended_max_bytes <= cap_high.recommended_max_bytes);
+    assert!(cap_high.recommended_max_bytes <= cap_balanced.recommended_max_bytes);
+    assert_eq!(cap_high.safety_level, "high");
+    assert_eq!(cap_high.safety_bpp_limit, 0.10);
+
+    // Payload exceeding Paranoid tier
+    let payload = vec![0x33; cap_balanced.recommended_max_bytes];
+
+    // Enforced mode on Paranoid tier MUST reject
+    let opts_enforced = StegoOptions {
+        safety_level: SafetyLevel::Paranoid,
+        safety_enforcement: SafetyEnforcement::Enforced,
+        ..Default::default()
+    };
+    let res_enforced = embed_carrier(&png, &payload, &opts_enforced);
+    assert!(
+        res_enforced.is_err(),
+        "Enforced mode must reject payload exceeding safety tier"
+    );
+
+    // Advisory mode on Paranoid tier MUST succeed
+    let opts_advisory = StegoOptions {
+        safety_level: SafetyLevel::Paranoid,
+        safety_enforcement: SafetyEnforcement::Advisory,
+        ..Default::default()
+    };
+    let res_advisory = embed_carrier(&png, &payload, &opts_advisory);
+    assert!(
+        res_advisory.is_ok(),
+        "Advisory mode must not reject payload within physical capacity"
+    );
+    let stego = res_advisory.unwrap();
+    let extracted = extract_carrier(&stego, &opts_advisory).expect("extract");
+    assert_eq!(extracted, payload);
 }

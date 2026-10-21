@@ -345,6 +345,19 @@ pub struct EmbedArgs {
     pub stego_domain: Option<String>,
 
     #[arg(
+        long = "safety",
+        value_name = "LEVEL",
+        help = "Stego capacity safety tier: 'paranoid' (bpp<=0.06), 'high' (bpp<=0.10, default), or 'balanced' (bpp<=0.15)"
+    )]
+    pub safety: Option<String>,
+
+    #[arg(
+        long = "enforce-safety",
+        help = "Strictly reject payloads exceeding recommended safety tier instead of advisory warning"
+    )]
+    pub enforce_safety: bool,
+
+    #[arg(
         long = "unescape",
         help = "Decode C-style escape sequences (\\n, \\r, \\t, ...) in the -t/--text payload before embedding"
     )]
@@ -1960,6 +1973,21 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
             if let Some(p2) = args.p2_window {
                 options.spatial_params.p2_window = p2;
             }
+            let safety_level = match args.safety.as_deref() {
+                Some(s) => match crate::stego::SafetyLevel::parse(s) {
+                    Some(lvl) => lvl,
+                    None => {
+                        return Err(StrHideError::General(format!(
+                            "Invalid safety level '{s}'. Supported: 'paranoid', 'high', 'balanced'"
+                        )));
+                    }
+                },
+                None => crate::stego::SafetyLevel::High,
+            };
+            options.safety_level = safety_level;
+            if args.enforce_safety {
+                options.safety_enforcement = crate::stego::SafetyEnforcement::Enforced;
+            }
             let cap = crate::stego::probe_carrier_capacity(&carrier_bytes, &options)?;
             println!("{}", t!(Msg::StegoProbeHeader, path = carrier.display()));
             println!("{}", t!(Msg::StegoProbeFormat, val = cap.format));
@@ -1987,7 +2015,9 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
                 t!(
                     Msg::StegoProbeRecommended,
                     bytes = cap.recommended_max_bytes,
-                    kib = format_args!("{safe_kib:.1}")
+                    kib = format_args!("{safe_kib:.1}"),
+                    level = cap.safety_level,
+                    bpp = format_args!("{:.2}", cap.safety_bpp_limit)
                 )
             );
             println!(
@@ -2073,8 +2103,25 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         let mut options = crate::stego::StegoOptions {
             algorithm: args.algorithm.clone(),
             password: password.clone(),
+            stego_domain: args.stego_domain.clone(),
             ..Default::default()
         };
+
+        let safety_level = match args.safety.as_deref() {
+            Some(s) => match crate::stego::SafetyLevel::parse(s) {
+                Some(lvl) => lvl,
+                None => {
+                    return Err(StrHideError::General(format!(
+                        "Invalid safety level '{s}'. Supported: 'paranoid', 'high', 'balanced'"
+                    )));
+                }
+            },
+            None => crate::stego::SafetyLevel::High,
+        };
+        options.safety_level = safety_level;
+        if args.enforce_safety {
+            options.safety_enforcement = crate::stego::SafetyEnforcement::Enforced;
+        }
 
         if let Some(er) = args.exclusion_rate {
             options.spatial_params.exclusion_percentile = er;
@@ -2094,6 +2141,22 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         }
         apply_codec_options(&mut options, args.codec.as_deref(), args.stc_h, args.stc_u)?;
         warn_nondefault_stego_params(&options, quiet);
+
+        if !quiet
+            && options.safety_enforcement == crate::stego::SafetyEnforcement::Advisory
+            && let Ok(cap) = crate::stego::probe_carrier_capacity(&carrier_bytes, &options)
+            && payload_bytes.len() > cap.recommended_max_bytes
+        {
+            let bpp = (payload_bytes.len() * 8) as f64 / cap.total_elements as f64;
+            eprintln!(
+                "[WARN] Payload ({} bytes, bpp {:.4}) exceeds recommended safety threshold ({} bytes, tier: '{}', bpp <= {:.2}). Detection risk is elevated.",
+                payload_bytes.len(),
+                bpp,
+                cap.recommended_max_bytes,
+                options.safety_level.as_str(),
+                options.safety_level.bpp_limit()
+            );
+        }
 
         let stego_bytes = crate::stego::embed_carrier_with_profile(
             &carrier_bytes,

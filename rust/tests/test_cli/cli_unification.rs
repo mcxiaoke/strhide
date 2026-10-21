@@ -762,3 +762,83 @@ fn stego_domain_precedence_flag_env_config() {
     assert_eq!(code(&flag_ok), 0, "stderr: {}", stderr(&flag_ok));
     assert_eq!(stdout(&flag_ok), payload);
 }
+
+/// Test CLI --safety and --enforce-safety flags on probe and embed.
+#[test]
+fn embed_safety_tiers_probe_and_enforcement() {
+    let dir = scratch("unify_stego_safety");
+    seed_stego(&dir, &["carrier.png"]);
+
+    // 1. Capacity probe outputs selected safety tier and bpp
+    let probe = run(
+        &dir,
+        &["embed", "carrier.png", "--capacity", "--safety", "paranoid"],
+    );
+    assert_eq!(code(&probe), 0, "stderr: {}", stderr(&probe));
+    let out = stdout(&probe);
+    assert!(
+        out.contains("paranoid") && out.contains("0.06"),
+        "probe output should reflect paranoid tier: {out}"
+    );
+
+    // 2. Large payload under paranoid with --enforce-safety is rejected
+    let payload = vec![0x41u8; 800]; // exceeds paranoid capacity for small 128x128 carrier
+    fs::write(dir.join("data.txt"), &payload).unwrap();
+
+    let reject = run(
+        &dir,
+        &[
+            "embed",
+            "carrier.png",
+            "-d",
+            "data.txt",
+            "--safety",
+            "paranoid",
+            "--enforce-safety",
+            "--in-place",
+            "--no-backup",
+        ],
+    );
+    assert_eq!(
+        code(&reject),
+        1,
+        "Enforced safety must reject oversized payload"
+    );
+    assert!(
+        stderr(&reject).contains("safety threshold"),
+        "stderr: {}",
+        stderr(&reject)
+    );
+
+    // 3. Same payload without --enforce-safety (Advisory) succeeds with warning
+    let advise = run(
+        &dir,
+        &[
+            "embed",
+            "carrier.png",
+            "-d",
+            "data.txt",
+            "--safety",
+            "paranoid",
+            "--in-place",
+            "--no-backup",
+        ],
+    );
+    assert_eq!(
+        code(&advise),
+        0,
+        "Advisory safety must succeed, stderr: {}",
+        stderr(&advise)
+    );
+    assert!(
+        stderr(&advise).contains("exceeds recommended safety threshold"),
+        "stderr should warn: {}",
+        stderr(&advise)
+    );
+
+    // 4. Extraction succeeds
+    let ext = run(&dir, &["extract", "carrier.png", "-o", "extracted.bin"]);
+    assert_eq!(code(&ext), 0, "stderr: {}", stderr(&ext));
+    let extracted = fs::read(dir.join("extracted.bin")).unwrap();
+    assert_eq!(extracted, payload);
+}

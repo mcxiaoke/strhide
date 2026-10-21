@@ -500,6 +500,12 @@ crate::i18n_messages! {
     HelpEmbedStegoDomain:
         en = "Custom domain tag for HKDF key derivation isolation (read/write must agree)",
         zh = "自适应隐写域隔离标签（用于隔离 HKDF 密钥派生，嵌入与提取两端必须一致）";
+    HelpEmbedSafety:
+        en = "Stego capacity safety tier ('paranoid': bpp<=0.06, 'high': bpp<=0.10 [default], 'balanced': bpp<=0.15)",
+        zh = "自适应隐写安全容量档位（'paranoid': bpp<=0.06, 'high': bpp<=0.10 [默认], 'balanced': bpp<=0.15）";
+    HelpEmbedEnforceSafety:
+        en = "Strictly reject payloads exceeding recommended safety tier instead of advisory warning",
+        zh = "严格拒绝超出推荐安全档位容量的载荷（默认仅给出警告提示）";
     HelpEmbedExclusionRate:
         en = "Fraction of smoothest regions excluded from embedding (0.00-0.80, default: 0.20)",
         zh = "排除在嵌入之外的最平滑区域比例（0.00-0.80，默认: 0.20；越高越抗检，但容量越低）";
@@ -697,8 +703,8 @@ crate::i18n_messages! {
         en = "  Max raw payload: {bytes} bytes ({kib:.1} KiB)",
         zh = "  最大原始载荷: {bytes} 字节 ({kib:.1} KiB)";
     StegoProbeRecommended:
-        en = "  Recommended max: {bytes} bytes ({kib:.1} KiB) (high stealth)",
-        zh = "  推荐安全容量: {bytes} 字节 ({kib:.1} KiB)（高抗检隐蔽）";
+        en = "  Recommended max: {bytes} bytes ({kib:.1} KiB) (tier: {level}, bpp <= {bpp})",
+        zh = "  推荐安全容量: {bytes} 字节 ({kib:.1} KiB)（档位: {level}, bpp <= {bpp}）";
     StegoProbeEstChanges:
         en = "  Est. changes:   ~{rate:.3} per payload bit (matrix coding); recommended payload is anchored to low-risk region",
         zh = "  预估修改率:   ~{rate:.3} 每有效比特（矩阵编码）；推荐载荷已锚定至统计低风险区";

@@ -563,6 +563,28 @@ pub fn embed_spatial(
     let ciphertext_body = &envelope[28..];
     let ciphertext_bits = ciphertext_body.len() * 8;
 
+    // Safety enforcement policy check
+    if params.safety_enforcement == crate::stego::params::SafetyEnforcement::Enforced {
+        let bpp_limit = params.safety_level.bpp_limit();
+        let bpp_bits = (total_pixels as f64 * bpp_limit).floor() as usize;
+        let ratio_bits =
+            (body_candidates.len() as f64 / params.safety_level.target_ratio()).floor() as usize;
+        let recommended_max_bytes =
+            (bpp_bits.min(ratio_bits) / 8).saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
+
+        if payload.len() > recommended_max_bytes {
+            let payload_bpp = (payload.len() * 8) as f64 / total_pixels as f64;
+            return Err(StrHideError::General(format!(
+                "Payload ({} bytes, bpp {:.4}) exceeds safety threshold ({} bytes, bpp <= {:.2}) for tier '{}'",
+                payload.len(),
+                payload_bpp,
+                recommended_max_bytes,
+                bpp_limit,
+                params.safety_level.as_str(),
+            )));
+        }
+    }
+
     // Resolve matrix-coding strategy: Auto adaptively picks STC group size (u=3, 2, or 1)
     let (resolved_codec, resolved_u) = match params.codec {
         StegoCodec::Auto => {
@@ -895,6 +917,7 @@ pub fn probe_spatial_capacity(
     carrier_bytes: &[u8],
     cost_model: &dyn SpatialCostModel,
     params: &SpatialParams,
+    safety_level: crate::stego::SafetyLevel,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let image = decode_png(carrier_bytes)?;
     let w = image.width as usize;
@@ -975,11 +998,13 @@ pub fn probe_spatial_capacity(
     // capacity by exactly 28 bytes (measured on real carriers).
     let max_raw_payload_bytes =
         max_ciphertext_bytes.saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
-    // The recommendation is anchored to the high-stealth regime (r >= 4.5, flips/bit ~0.23,
-    // risk spike <= 7.5%), ensuring the payload lands in the clean STC u=3 / Hamming-clean band
-    // rather than naive max/2.
+
+    // Recommended capacity bounded by safety tier bpp budget and candidate slot ratio r
+    let bpp_bits = (total_pixels as f64 * safety_level.bpp_limit()).floor() as usize;
+    let ratio_bits = (available_body_slots as f64 / safety_level.target_ratio()).floor() as usize;
+    let target_bits = bpp_bits.min(ratio_bits);
     let recommended_max_bytes =
-        crate::stego::coding::recommended_payload_bytes(available_body_slots);
+        (target_bits / 8).saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
 
     Ok(StegoCapacityInfo {
         format: "PNG".into(),
@@ -995,6 +1020,8 @@ pub fn probe_spatial_capacity(
             }
             StegoCodec::Stc | StegoCodec::Auto => crate::stego::coding::expected_stc_change_rate(3),
         },
+        safety_level: safety_level.as_str().into(),
+        safety_bpp_limit: safety_level.bpp_limit(),
     })
 }
 
@@ -1426,8 +1453,13 @@ mod tests {
             }
             change_rates.push(changed as f64 / bits as f64);
 
-            let cap =
-                probe_spatial_capacity(&png, &HillCostModel, &params).expect("capacity probe");
+            let cap = probe_spatial_capacity(
+                &png,
+                &HillCostModel,
+                &params,
+                crate::stego::SafetyLevel::High,
+            )
+            .expect("capacity probe");
             capacities.push(cap.max_raw_payload_bytes);
         }
 
@@ -1481,7 +1513,9 @@ mod tests {
         assert_eq!(rec_light, light_payload);
 
         // Verify that capacity probe reports recommended bytes anchored to high-stealth
-        let cap = probe_spatial_capacity(&png, &HillCostModel, &auto_params).expect("probe");
+        let cap =
+            probe_spatial_capacity(&png, &HillCostModel, &auto_params, auto_params.safety_level)
+                .expect("probe");
         assert!(cap.recommended_max_bytes > 0);
         assert!(cap.recommended_max_bytes <= cap.max_raw_payload_bytes / 2);
     }
@@ -1536,6 +1570,83 @@ mod tests {
         assert!(
             matches!(err_other, Err(StrHideError::NoHiddenData(_))),
             "extracting with different domain must fail as NoHiddenData"
+        );
+    }
+
+    #[test]
+    fn safety_tier_probe_and_enforcement() {
+        use crate::stego::params::{SafetyEnforcement, SafetyLevel};
+
+        let (w, h) = (128usize, 128usize);
+        let pixels = row_correlated_pixels(w, h);
+        let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
+
+        let cap_paranoid = probe_spatial_capacity(
+            &png,
+            &HillCostModel,
+            &SpatialParams::default(),
+            SafetyLevel::Paranoid,
+        )
+        .expect("probe paranoid");
+        let cap_high = probe_spatial_capacity(
+            &png,
+            &HillCostModel,
+            &SpatialParams::default(),
+            SafetyLevel::High,
+        )
+        .expect("probe high");
+        let cap_balanced = probe_spatial_capacity(
+            &png,
+            &HillCostModel,
+            &SpatialParams::default(),
+            SafetyLevel::Balanced,
+        )
+        .expect("probe balanced");
+
+        assert!(
+            cap_paranoid.recommended_max_bytes <= cap_high.recommended_max_bytes,
+            "Paranoid <= High"
+        );
+        assert!(
+            cap_high.recommended_max_bytes <= cap_balanced.recommended_max_bytes,
+            "High <= Balanced"
+        );
+
+        // Test enforcement
+        let mut enforced_params = SpatialParams {
+            safety_level: SafetyLevel::Paranoid,
+            safety_enforcement: SafetyEnforcement::Enforced,
+            ..SpatialParams::default()
+        };
+
+        // Oversize for Paranoid
+        let large_payload = vec![0x42; cap_balanced.recommended_max_bytes];
+        let res = embed_spatial(
+            &png,
+            &large_payload,
+            Some("test-pw"),
+            None,
+            &HillCostModel,
+            &enforced_params,
+        );
+        assert!(
+            res.is_err(),
+            "Enforced safety policy must reject oversized payload"
+        );
+
+        // Same payload with Advisory succeeds
+        enforced_params.safety_enforcement = SafetyEnforcement::Advisory;
+        let ok_res = embed_spatial(
+            &png,
+            &large_payload,
+            Some("test-pw"),
+            None,
+            &HillCostModel,
+            &enforced_params,
+        );
+        assert!(
+            ok_res.is_ok(),
+            "Advisory safety policy must not block embedding"
         );
     }
 }

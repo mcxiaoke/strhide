@@ -459,20 +459,28 @@ channel_bytes[4..14] = unmasked[4..14] XOR mask[0..10]
 - `orig_len`：**大端** u32，未压缩载荷长度。
 - `flags`：bit 0（`0x01`）表示载荷经 raw deflate 压缩；当 `compressed.len() < payload.len()` 时才压缩。
 
-### 13.3 内容域密钥派生
+### 13.3 内容域密钥派生与域隔离
 
 ```text
-derive_keys(password, salt):
+derive_domain_subkey(ikm, domain):
+  norm_d = normalize_nfc(domain)
+  len_bytes = (norm_d.len() as u64).to_be_bytes()
+  info = b"strhide-stego-domain-v1" || len_bytes || norm_d
+  HKDF(salt = None, IKM = ikm).expand(info) → subkey (32)
+
+derive_keys(password, salt, domain):
   norm_pwd = normalize_nfc(password)
-  PBKDF2-HMAC-SHA256(norm_pwd, salt, 100_000) → IKM
-  HKDF(salt = Some(salt), IKM):
+  PBKDF2-HMAC-SHA256(norm_pwd, salt, 100_000) → pbkdf2_key
+  effective_ikm = derive_domain_subkey(pbkdf2_key, domain) // None 时直接使用 pbkdf2_key
+  HKDF(salt = Some(salt), effective_ikm):
     info = b"strhide-stego-enc-v1"  → enc key  (32)
     info = b"strhide-stego-perm-v1" → perm seed (32)
 
-derive_header_perm_seed(password):
+derive_header_perm_seed(password, domain):
   // 无 salt，打破"先有 salt 才能定位 header"的循环依赖
   norm_pw = normalize_nfc(password.unwrap_or(PUBLIC_DEFAULT_SECRET))
-  HKDF(salt = Some(b"strhide-stego-hpos-salt-v2"), ikm = norm_pw):
+  effective_ikm = derive_domain_subkey(norm_pw, domain) // None 时直接使用 norm_pw
+  HKDF(salt = Some(b"strhide-stego-hpos-salt-v2"), ikm = effective_ikm):
     info = b"strhide-stego-hpos-v2" → header seed (32)
 
 derive_stc_seed(perm_seed, salt):
@@ -481,32 +489,63 @@ derive_stc_seed(perm_seed, salt):
 ```
 
 - 密钥来源：显式密码优先，否则 `Profile::stego_secret()`，再否则为公开常量 `PUBLIC_DEFAULT_SECRET = "strhide-default-content-stego-key-2026"`。
+- 域隔离标签（`stego_domain`）：启用时通过 `derive_domain_subkey` 注入大端长度前缀与 NFC 规范化字符，相同密码在不同 domain 下派生的密钥和置换种子完全正交，提取端异域即在头部槽位阶段直接失配并折叠为 `NoHiddenData`。
 - 内容域与结构域的派生域相互独立（info 标签、默认密钥均不同），即使同一 `Profile` 承载，也不会耦合两套方言。
 
-### 13.4 256 个 Header 槽位与 Header Word
+### 13.4 Header 槽位与 v2 FeatureWord 自描述
 
-微信封的前 28 字节（salt ‖ nonce）加上一个 4 字节控制字，共 **32 字节 = 256 比特**，由候选元素中经密钥置换选出的**前 256 个槽位**承载（header 槽位）：
+线格式头部占据由 `derive_header_perm_seed` 置换选出的**前 512 个槽位**（永远采用 legacy `[8, 247]` 及默认排除率规则选取，确保头部定位与自描述参数解耦）：
 
 ```text
-header（32 字节）= salt (16) ‖ nonce (12) ‖ word (4)
+header_slots[0..256]    = salt (16B) ‖ nonce (12B) ‖ word1 (4B)
+header_slots[256..512]  = FeatureWord (32B / 256 bits)  [当 word1.stc_h == 15 时]
 ```
 
-4 字节 `word`（按 u32 解读）的位分配：
-
+#### 4 字节 Word1 控制字
 | 位 | 宽度 | 内容 |
 |---|---|---|
 | bit 0..26 | 26 | 微信封总长度（`HEADER_LEN_MAX = 2^26 − 1 = 67,108,863`，约 64 MiB − 1） |
-| bit 26..28 | 2 | 矩阵编码标识：`0 = Hamming`；`1..3 = STC`，其值即分组大小 `u`（u = id） |
-| bit 28..32 | 4 | STC 约束高度 `h`（Hamming 时为 0） |
+| bit 26..28 | 2 | 矩阵编码标识：`0 = Hamming`；`1..3 = STC u`（v1 历史文件） |
+| bit 28..32 | 4 | STC 约束高度 `h`：`15`（`0x0F`）表示 **v2 逃逸标记**；`4..10` 为 v1 历史文件高度 |
 
-- 编解码为自描述：提取侧从 word 读出长度、codec、`h`、`u`，无需调用方告知。
-- 未知 codec 标识在提取侧被折叠为通用的"此处无载荷"，不产生可区分错误。
+#### 32 字节 FeatureWord 自描述字
+当 `raw_stc_h == 15` 时，从槽位 `[256..512]` 解码 32 字节自描述控制块：
+- `bit 0..8`：版本号 `version = 2`
+- `bit 8..11`：矩阵编码 `codec`（0=Hamming, 1=STC）
+- `bit 11..14`：STC 分组大小 `u`（1..3）
+- `bit 14..17`：STC 约束高度 `h`（4..10，实际存储偏移后数值）
+- `bit 17..19`：密钥派生标识 `kdf_id`（0=PBKDF2 100k [兼容], 1=600k [预留], 2=Argon2id [预留]）
+- `bit 19..22`：通道模式 `channel_mode`（0=Green, 1=Blue, 2=RgbSpread [预留]）
+- `bit 22..25`：类边界规则 `class_rule`（1=Safe non-boundary `val % 8 in [1, 6]`）
+- `bit 25..32`：保留零位
+- `bit 32..40`：合格像素下界 `eligible_min`（8）
+- `bit 40..48`：合格像素上界 `eligible_max`（247）
+- `bit 48..64`：排除千分比 `exclusion_permille`（如 300 = 30%）
+- `bit 64..256`：保留高 192 位零位
 
-### 13.5 槽位置换与嵌入
+提取端根据 `raw_stc_h == 15` 自动分发：v2 走 FeatureWord 解析，v1 逐位无损回退。未知版本或非零保留位折叠为 `NoHiddenData`。
 
-- 候选元素集合先做**密钥置换**：前 256 个承载 header（避免"最便宜的 256 槽位"成为公开指纹）；body 按代价顺序取剩余槽位。
-- Header 比特直接 LSB 匹配；body 经矩阵编码（Hamming (7,3) 或 STC）。
-- 空间域（PNG）采用 ternary ±1 匹配，像素限制在 `[8, 247]`，并遵守八值类（`val & 0xF8`）约束以保证提取侧代价排序可复现。
+### 13.5 空间域残差赤字消除与嵌入安全 (P0-B)
+
+- **前 512 槽（头部池）**：按 Legacy 规则 `val in [8, 247]` 且未被 30% 平滑排除的候选像素，经 `derive_header_perm_seed` 置换选出。
+- **正文候选池（Body Pool）**：在排除头部 512 槽后，像素严格收敛至模 8 余数 `val % 8 in [1, 6]`。
+- **单向门赤字消除（`spatial_move_safe`）**：
+  - 余数 $r = 1$：仅允许 $+1$ 转移至 $r=2$（绝不 $-1$ 越界至 $0$）；
+  - 余数 $r = 6$：仅允许 $-1$ 转移至 $r=5$（绝不 $+1$ 越界至 $7$）；
+  - 余数 $r \in [2, 5]$：允许双向 $\pm 1$ 转移；
+  - 边界频数变动量严格保持 $\Delta H[0] = 0, \Delta H[7] = 0$，彻底清零类残差单向门赤字泄露（$Z_0$ 保持在 $[-0.04, 0.00]\sigma \ll 3.0\sigma$）。
+
+### 13.6 容量安全档位（SafetyLevel）与执行模式
+
+| 档位 | bpp 预算（bits/pixel） | 目标比例 $r = \text{slots}/\text{bits}$ | 定位 |
+|---|---:|---:|---|
+| `Paranoid` | $\le 0.06$ | $\ge 11.5$ | 极限高抗检，微统计指纹完全浸润在物理传感器底噪中 |
+| `High` | $\le 0.10$ | $\ge 6.9$ | **新默认推荐档**，STC u=3 最优低改动区间（~0.22 flips/bit） |
+| `Balanced` | $\le 0.15$ | $\ge 4.6$ | 边界档位，STC u=2/3 临界线 |
+
+- **执行模式**：
+  - `Advisory`（默认）：当载荷超过当前安全档位推荐容量时，在 stderr 打印黄色警示信息与实际 bpp/r，不中断流程；
+  - `Enforced`（显式 `--enforce-safety`）：超限时硬性拒绝嵌入并报错，提示换用更大载体或分卷存储。
 
 ---
 

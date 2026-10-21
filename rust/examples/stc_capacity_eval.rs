@@ -84,7 +84,12 @@ fn eval_png(png_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::er
 
         // Probe capacity and decode cover
         let default_spatial = SpatialParams::default();
-        let cap = match probe_spatial_capacity(&carrier_bytes, &HillCostModel, &default_spatial) {
+        let cap = match probe_spatial_capacity(
+            &carrier_bytes,
+            &HillCostModel,
+            &default_spatial,
+            strhide::stego::SafetyLevel::High,
+        ) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[SKIP] Capacity probe failed on {}: {e}", carrier_name);
@@ -253,7 +258,12 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
         };
 
         let default_jpeg = JpegParams::default();
-        let cap = match probe_jpeg_capacity(&carrier_bytes, &UerdCostModel, &default_jpeg) {
+        let cap = match probe_jpeg_capacity(
+            &carrier_bytes,
+            &UerdCostModel,
+            &default_jpeg,
+            strhide::stego::SafetyLevel::High,
+        ) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[SKIP] JPEG capacity probe failed on {}: {e}", carrier_name);

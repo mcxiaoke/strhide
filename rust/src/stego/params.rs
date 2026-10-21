@@ -73,6 +73,70 @@ impl StegoCodec {
     }
 }
 
+/// Capacity safety tier controlling the maximum recommended bits per pixel (bpp).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SafetyLevel {
+    /// Paranoid security tier: bpp <= 0.06 bits/pixel (approx r >= 11.5), ultra-low detection risk.
+    Paranoid,
+    /// High security tier (recommended default): bpp <= 0.10 bits/pixel (approx r >= 6.9).
+    #[default]
+    High,
+    /// Balanced tier: bpp <= 0.15 bits/pixel (approx r >= 4.6). Legacy boundary, not claimed undetectable.
+    Balanced,
+}
+
+impl SafetyLevel {
+    /// Maximum bits per pixel (bpp) allowed under this safety level.
+    pub fn bpp_limit(self) -> f64 {
+        match self {
+            SafetyLevel::Paranoid => 0.06,
+            SafetyLevel::High => 0.10,
+            SafetyLevel::Balanced => 0.15,
+        }
+    }
+
+    /// Target candidate-to-message ratio `r = slots / bits`.
+    /// Calibrated against the DIV2K natural image dataset in Phase 0 (c_density ≈ 0.69).
+    pub fn target_ratio(self) -> f64 {
+        match self {
+            SafetyLevel::Paranoid => 11.5,
+            SafetyLevel::High => 6.9,
+            SafetyLevel::Balanced => 4.6,
+        }
+    }
+
+    /// Parse from case-insensitive string ("high", "balanced", "paranoid").
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "paranoid" => Some(SafetyLevel::Paranoid),
+            "high" => Some(SafetyLevel::High),
+            "balanced" => Some(SafetyLevel::Balanced),
+            _ => None,
+        }
+    }
+
+    /// Display string for diagnostics and CLI output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SafetyLevel::Paranoid => "paranoid",
+            SafetyLevel::High => "high",
+            SafetyLevel::Balanced => "balanced",
+        }
+    }
+}
+
+/// Safety policy enforcement mode for embedding operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SafetyEnforcement {
+    /// Advisory (default): warn when exceeding safety threshold, but do not block embedding.
+    #[default]
+    Advisory,
+    /// Enforced: strictly reject embedding if payload exceeds safety threshold.
+    Enforced,
+}
+
 /// Fine-tuning parameters for spatial-domain steganography (e.g. HILL, WOW).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpatialParams {
@@ -103,6 +167,12 @@ pub struct SpatialParams {
     /// header, so it never needs to be repeated.
     #[serde(default = "default_stc_u")]
     pub stc_u: u8,
+    /// Capacity safety tier (default High).
+    #[serde(default)]
+    pub safety_level: SafetyLevel,
+    /// Safety policy enforcement mode (default Advisory).
+    #[serde(default)]
+    pub safety_enforcement: SafetyEnforcement,
 }
 
 fn default_stc_h() -> u8 {
@@ -125,6 +195,8 @@ impl Default for SpatialParams {
             codec: StegoCodec::Auto,
             stc_h: default_stc_h(),
             stc_u: default_stc_u(),
+            safety_level: SafetyLevel::default(),
+            safety_enforcement: SafetyEnforcement::default(),
         }
     }
 }
@@ -205,6 +277,12 @@ pub struct JpegParams {
     /// STC group size (default 1); see [`SpatialParams::stc_u`].
     #[serde(default = "default_stc_u")]
     pub stc_u: u8,
+    /// Capacity safety tier (default High).
+    #[serde(default)]
+    pub safety_level: SafetyLevel,
+    /// Safety policy enforcement mode (default Advisory).
+    #[serde(default)]
+    pub safety_enforcement: SafetyEnforcement,
 }
 
 impl Default for JpegParams {
@@ -217,6 +295,8 @@ impl Default for JpegParams {
             codec: StegoCodec::Auto,
             stc_h: default_stc_h(),
             stc_u: default_stc_u(),
+            safety_level: SafetyLevel::default(),
+            safety_enforcement: SafetyEnforcement::default(),
         }
     }
 }
@@ -282,6 +362,10 @@ pub struct StegoOptions {
     pub password: Option<String>,
     /// Custom domain tag for isolating the HKDF key derivation domain.
     pub stego_domain: Option<String>,
+    /// Capacity safety tier (default High: bpp <= 0.10).
+    pub safety_level: SafetyLevel,
+    /// Safety policy enforcement mode (default Advisory).
+    pub safety_enforcement: SafetyEnforcement,
     /// Fine-tuning parameters for spatial domain algorithms.
     pub spatial_params: SpatialParams,
     /// Fine-tuning parameters for JPEG DCT domain algorithms.
@@ -353,5 +437,20 @@ mod tests {
         };
         let profile = Profile::default().with_stego_secret("private-dialect");
         assert_eq!(opts.secret(&profile), Some("private-dialect"));
+    }
+
+    #[test]
+    fn safety_level_parse_and_bpp_limits() {
+        assert_eq!(SafetyLevel::parse("paranoid"), Some(SafetyLevel::Paranoid));
+        assert_eq!(SafetyLevel::parse("High"), Some(SafetyLevel::High));
+        assert_eq!(SafetyLevel::parse("BALANCED"), Some(SafetyLevel::Balanced));
+        assert_eq!(SafetyLevel::parse("unknown"), None);
+
+        assert_eq!(SafetyLevel::Paranoid.bpp_limit(), 0.06);
+        assert_eq!(SafetyLevel::High.bpp_limit(), 0.10);
+        assert_eq!(SafetyLevel::Balanced.bpp_limit(), 0.15);
+
+        assert_eq!(SafetyLevel::default(), SafetyLevel::High);
+        assert_eq!(SafetyEnforcement::default(), SafetyEnforcement::Advisory);
     }
 }

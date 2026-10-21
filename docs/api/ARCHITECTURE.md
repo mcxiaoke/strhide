@@ -171,10 +171,13 @@ pub struct WriteOptions<'a> {
 
 // 内容域选项（stego）
 pub struct StegoOptions {
-    pub algorithm: Option<String>,     // "hill" / "uerd" / "auto"
+    pub algorithm: Option<String>,         // "hill" / "uerd" / "auto"
     pub password: Option<String>,
-    pub spatial_params: SpatialParams, // 空间域调优（含 codec/stc_h/stc_u）
-    pub jpeg_params: JpegParams,       // JPEG DCT 调优（含 codec/stc_h/stc_u）
+    pub stego_domain: Option<String>,      // 派生隔离域标签（与 Profile::stego_domain 级联）
+    pub safety_level: SafetyLevel,         // 容量安全档位（High [默认], Balanced, Paranoid）
+    pub safety_enforcement: SafetyEnforcement, // 安全执行模式（Advisory [默认], Enforced）
+    pub spatial_params: SpatialParams,     // 空间域调优（含 codec/stc_h/stc_u/safety）
+    pub jpeg_params: JpegParams,           // JPEG DCT 调优（含 codec/stc_h/stc_u/safety）
 }
 ```
 
@@ -324,17 +327,22 @@ pub struct Profile {
     pub default_secret: Option<Cow<'static, str>>,   // 无密码时的结构域信封密钥
     pub stealth_domain: Option<Cow<'static, [u8]>>,  // stealth 魔数派生域
     pub magic: Option<MagicPair>,                    // 自定义头/尾魔数
-    pub stego: StegoProfile,                         // 内容域（stego.default_secret）
+    pub stego: StegoProfile,                         // 内容域（stego.default_secret, stego.stego_domain）
 }
 ```
 
-- **`default_secret` 是对库使用者价值最高的旋钮**：使用公开内置常量时，任何人持任何 strhide 都能读无密码信封；替换为私钥后，线格式一个字节都不变，但没有私钥读不出来。显式密码始终优先于此值。
+- **`default_secret` 与 `stego_domain` 是对库使用者价值最高的旋钮**：
+  - 使用公开内置常量时，任何人持任何 strhide 都能读无密码信封；替换为私钥后，线格式一个字节都不变，但没有私钥读不出来。显式密码始终优先于此值。
+  - `stego_domain` 实现 HKDF 子密钥化域隔离（NFC 规范化 + 8 字节长度前缀防拼接），不同团队或系统即使密码相同也无法互读，杜绝开源共享指纹暴露。
 - 自定义 `magic` 在 stealth 下被忽略（stealth 的魔数由密码派生，固定魔数会破坏可否认性）。
-- `Profile::is_official()` 同时检查两个域：设置了内容域私钥同样算非官方。
+- `Profile::is_official()` 同时检查结构域与内容域：设置了内容域私钥或自定义 `stego_domain` 均算非官方。
 
-### 6.3 内容域密钥解析
+### 6.3 内容域密钥与域解析
 
-`StegoOptions::secret(profile)`：显式密码（非空）优先，否则取 `profile.stego_secret()`，都没有则在微信封层回落到公开常量。空字符串密码被视为"未提供"，不会掩盖 profile 私钥。
+- `StegoOptions::secret(profile)`：显式密码（非空）优先，否则取 `profile.stego_secret()`，都没有则在微信封层回落到公开常量。空字符串密码被视为"未提供"，不会掩盖 profile 私钥。
+- `StegoOptions::domain(profile)`：显式 `stego_domain` 优先，否则取 `profile.stego_domain()`，未配置则走官方默认派生分支。
+- `SafetyLevel`：容量安全三档（`High` 默认 $\le 0.10$ bpp / $r \ge 6.9$；`Balanced` $\le 0.15$ bpp / $r \ge 4.6$；`Paranoid` $\le 0.06$ bpp / $r \ge 11.5$）。
+- `SafetyEnforcement`：默认 `Advisory`（超限报警不阻断）；指定 `Enforced` 时若载荷超标则安全拒绝。
 
 ---
 

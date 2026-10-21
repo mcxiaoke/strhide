@@ -237,7 +237,16 @@ steps are 1), where calibration is not applicable by design: re-quantising decod
 rounding at that scale. **A `clean` verdict still does not mean a carrier holds no hidden data** — a clean or low
 JPEG result carries an explicit note saying so.
 
-*Private dialect*: with no password, both the envelope key and the header-slot permutation are derived from a constant that lives in the source tree, so any strhide build can read a no-password carrier. Replace that constant with `--stego-secret <SECRET>` (or the `stego_secret` config key, or the `STRHIDE_STEGO_SECRET` environment variable, in that precedence order) to define a private dialect: embed and extract must use the same value, otherwise extraction reports `NoHiddenData`. Treat it as a read/write-must-agree parameter and keep it with the password, not with the tuning knobs.
+*Private dialect & domain isolation*: with no password, both the envelope key and the header-slot permutation are derived from a constant that lives in the source tree, so any strhide build can read a no-password carrier. Replace that constant with `--stego-secret <SECRET>` (or the `stego_secret` config key, or `STRHIDE_STEGO_SECRET`) to define a private secret dialect. To isolate key derivation across teams or environments without changing passwords, specify `--stego-domain <DOMAIN>` (or `stego_domain` in config, or `STRHIDE_STEGO_DOMAIN`): keys and header permutations are subkeyed via HKDF with NFC normalization and length prefixing. Embed and extract must agree on secret and domain; any mismatch safely fails as `NoHiddenData`.
+
+*Safety capacity tiers (`--safety` & `--enforce-safety`)*: Content steganography supports three calibrated safety capacity tiers:
+- `high` (default recommended): payload budget $\le 0.10$ bpp (approx. slot ratio $r \ge 6.9$). Minimal distortion, optimal for anti-steganalysis.
+- `balanced`: payload budget $\le 0.15$ bpp ($r \ge 4.6$). Legacy capacity threshold.
+- `paranoid`: payload budget $\le 0.06$ bpp ($r \ge 11.5$). Ultra-low footprint for extreme evasion requirements.
+
+By default, exceeding the recommended safety tier prints an advisory warning with exact bpp and change rate metrics. Specifying `--enforce-safety` strictly rejects oversized payloads to prevent unintentional detection exposure.
+
+*Self-describing v2 Header*: The carrier header uses a 32-byte `FeatureWord` following the 32-byte header word (`h=15` escape). The first 512 candidate slots carry self-describing metadata (codec, parameters, safety rules) without requiring CLI flags at extraction, while remaining 100% backward-compatible with legacy v1 carriers.
 
 *Safety protections:* Animated PNGs (APNG `acTL`), palette-indexed PNGs (`PLTE`), interlaced PNGs (Adam7), and progressive JPEGs (SOF2) are safely rejected with actionable guidance.
 

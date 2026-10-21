@@ -93,6 +93,8 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         (_, "algorithm") => Msg::HelpStegoAlgorithm,
         (_, "stego-secret") => Msg::HelpEmbedStegoSecret,
         (_, "stego-domain") => Msg::HelpEmbedStegoDomain,
+        (_, "safety") => Msg::HelpEmbedSafety,
+        (_, "enforce-safety") => Msg::HelpEmbedEnforceSafety,
         (_, "exclusion-rate") => Msg::HelpEmbedExclusionRate,
         (_, "neighbor-weight") => Msg::HelpStegoNeighborWeight,
         (_, "min-abs-coeff") => Msg::HelpStegoMinAbsCoeff,

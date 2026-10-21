@@ -14,7 +14,9 @@ pub mod registry;
 pub mod spatial;
 pub mod traits;
 
-pub use params::{JpegParams, SpatialParams, StegoCodec, StegoOptions};
+pub use params::{
+    JpegParams, SafetyEnforcement, SafetyLevel, SpatialParams, StegoCodec, StegoOptions,
+};
 pub use registry::CostModelRegistry;
 
 use crate::errors::StrHideError;
@@ -58,6 +60,14 @@ pub fn embed_carrier_with_profile(
     let secret = options.secret(profile);
     let domain = options.domain(profile);
 
+    let mut spatial_params = options.spatial_params.clone();
+    spatial_params.safety_level = options.safety_level;
+    spatial_params.safety_enforcement = options.safety_enforcement;
+
+    let mut jpeg_params = options.jpeg_params.clone();
+    jpeg_params.safety_level = options.safety_level;
+    jpeg_params.safety_enforcement = options.safety_enforcement;
+
     if carrier_bytes.len() >= 2 && &carrier_bytes[..2] == b"\xFF\xD8" {
         // JPEG format
         let model =
@@ -73,7 +83,7 @@ pub fn embed_carrier_with_profile(
             secret,
             domain,
             &*model,
-            &options.jpeg_params,
+            &jpeg_params,
         )
     } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
         // PNG format
@@ -91,7 +101,7 @@ pub fn embed_carrier_with_profile(
             secret,
             domain,
             &*model,
-            &options.spatial_params,
+            &spatial_params,
         )
     } else {
         Err(StrHideError::UnsupportedFormat(
@@ -168,10 +178,8 @@ pub struct StegoCapacityInfo {
     /// Total cover elements (pixels for PNG, coefficients for JPEG), header
     /// slots included. Useful as a "how big is the cover" number only.
     pub total_elements: usize,
-    /// Slots actually available to the payload: candidate slots minus the 256
-    /// slots consumed by the envelope header. This is the number a user should
-    /// compare against a payload size -- before it was reported inclusive of the
-    /// header, which made "available slots" and "max payload" look inconsistent.
+    /// Slots actually available to the payload: candidate slots minus the 512
+    /// slots consumed by the v2 envelope header and FeatureWord.
     pub available_slots: usize,
     pub max_raw_payload_bytes: usize,
     pub recommended_max_bytes: usize,
@@ -180,6 +188,20 @@ pub struct StegoCapacityInfo {
     /// replacement). Tail bits embedded 1:1 push the true rate slightly
     /// higher.
     pub estimated_change_rate: f64,
+    /// Target safety capacity tier used to calculate `recommended_max_bytes`.
+    #[serde(default = "default_safety_tier_str")]
+    pub safety_level: String,
+    /// Target bits-per-pixel (bpp) limit for the safety tier.
+    #[serde(default = "default_safety_bpp_limit")]
+    pub safety_bpp_limit: f64,
+}
+
+fn default_safety_tier_str() -> String {
+    "high".into()
+}
+
+fn default_safety_bpp_limit() -> f64 {
+    0.10
 }
 
 /// Automatically sniff carrier format and probe embedding capacity.
@@ -203,7 +225,12 @@ pub fn probe_carrier_capacity(
                     options.algorithm
                 ))
             })?;
-        jpeg::probe_jpeg_capacity(carrier_bytes, &*model, &options.jpeg_params)
+        jpeg::probe_jpeg_capacity(
+            carrier_bytes,
+            &*model,
+            &options.jpeg_params,
+            options.safety_level,
+        )
     } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
         let model = CostModelRegistry::get_spatial_model(options.algorithm.as_deref()).ok_or_else(
             || {
@@ -213,7 +240,12 @@ pub fn probe_carrier_capacity(
                 ))
             },
         )?;
-        spatial::probe_spatial_capacity(carrier_bytes, &*model, &options.spatial_params)
+        spatial::probe_spatial_capacity(
+            carrier_bytes,
+            &*model,
+            &options.spatial_params,
+            options.safety_level,
+        )
     } else {
         Err(StrHideError::UnsupportedFormat(
             "Content-adaptive steganography requires a PNG or JPEG image carrier".into(),

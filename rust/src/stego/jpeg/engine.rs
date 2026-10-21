@@ -180,6 +180,28 @@ pub fn embed_jpeg(
         .filter(|&(bi, k)| !is_header[bi * 64 + k])
         .collect();
 
+    // Safety enforcement policy check
+    if params.safety_enforcement == crate::stego::params::SafetyEnforcement::Enforced {
+        let bpp_limit = params.safety_level.bpp_limit();
+        let bpp_bits = (plan.total_coeffs as f64 * bpp_limit).floor() as usize;
+        let ratio_bits =
+            (body_candidates.len() as f64 / params.safety_level.target_ratio()).floor() as usize;
+        let recommended_max_bytes =
+            (bpp_bits.min(ratio_bits) / 8).saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
+
+        if payload.len() > recommended_max_bytes {
+            let payload_bpp = (payload.len() * 8) as f64 / plan.total_coeffs as f64;
+            return Err(StrHideError::General(format!(
+                "Payload ({} bytes, bpp {:.4}) exceeds safety threshold ({} bytes, bpp <= {:.2}) for tier '{}'",
+                payload.len(),
+                payload_bpp,
+                recommended_max_bytes,
+                bpp_limit,
+                params.safety_level.as_str(),
+            )));
+        }
+    }
+
     // Pack payload into micro-envelope.
     let (envelope, perm_seed) = pack_envelope_ext(payload, password, domain)?;
     let total_len = envelope.len() as u32;
@@ -486,6 +508,7 @@ pub fn probe_jpeg_capacity(
     carrier_bytes: &[u8],
     cost_model: &dyn JpegCostModel,
     params: &JpegParams,
+    safety_level: crate::stego::SafetyLevel,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let coeffs = dct_io::read_coefficients(carrier_bytes).map_err(map_dct_error)?;
     if coeffs.components.is_empty() {
@@ -524,8 +547,12 @@ pub fn probe_jpeg_capacity(
     // by the 256 header slots.
     let max_raw_payload_bytes =
         max_ciphertext_bytes.saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
+
+    let bpp_bits = (plan.total_coeffs as f64 * safety_level.bpp_limit()).floor() as usize;
+    let ratio_bits = (available_body_slots as f64 / safety_level.target_ratio()).floor() as usize;
+    let target_bits = bpp_bits.min(ratio_bits);
     let recommended_max_bytes =
-        crate::stego::coding::recommended_payload_bytes(available_body_slots);
+        (target_bits / 8).saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
 
     Ok(StegoCapacityInfo {
         format: "JPEG".into(),
@@ -543,5 +570,7 @@ pub fn probe_jpeg_capacity(
             }
             StegoCodec::Stc | StegoCodec::Auto => crate::stego::coding::expected_stc_change_rate(3),
         },
+        safety_level: safety_level.as_str().into(),
+        safety_bpp_limit: safety_level.bpp_limit(),
     })
 }
