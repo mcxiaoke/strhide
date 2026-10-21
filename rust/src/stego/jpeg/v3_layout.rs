@@ -34,11 +34,8 @@
 //! * Any function in this module is a pure function of its arguments.
 
 use crate::errors::StrHideError;
-use crate::stego::coding::{MAX_STC_H, MIN_STC_H};
+use crate::stego::coding::{KERNEL_MAX_U, MAX_STC_H, MIN_STC_H};
 use crate::stego::format::GridRule;
-
-/// Maximum group size the STC kernel accepts.
-pub const KERNEL_MAX_U: u8 = 64;
 
 /// Resolved layout of one embedding: how many slots the header takes, which
 /// group size the body uses, and how many body slots are written.

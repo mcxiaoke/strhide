@@ -27,8 +27,9 @@ use crate::errors::StrHideError;
 mod stc;
 
 pub use stc::{
-    DEFAULT_STC_H, MAX_STC_H, MAX_STC_U, MIN_STC_H, StcTrellis, validate_h as validate_stc_h,
-    validate_u as validate_stc_u,
+    DEFAULT_STC_H, KERNEL_MAX_U, MAX_STC_H, MAX_STC_U, MIN_STC_H, StcTrellis,
+    validate_h as validate_stc_h, validate_u as validate_stc_u,
+    validate_u_wide as validate_stc_u_wide,
 };
 
 /// Default Hamming parameter k (7 slots carry 3 bits).
