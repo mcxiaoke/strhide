@@ -12,6 +12,15 @@ pub const MP4_UUID_NEUTRAL: [u8; 16] = [
     0xd4, 0x1a, 0x8e, 0x9c, 0x4f, 0x21, 0x4e, 0x87, 0x9a, 0x33, 0x5b, 0x6d, 0x12, 0x84, 0xef, 0x70,
 ];
 
+/// Bytes of Box header written before the envelope for the `box_uuid`
+/// strategy: 24 for the standard 32-bit header (`size` + `uuid` + usertype),
+/// 32 for the 64-bit large header (`size == 1` + `uuid` + `largesize` +
+/// usertype).
+///
+/// The 32-bit form can only express a box size below `0xFFFFFFFF`, and that
+/// value is where the 64-bit form takes over. Both the writer and the
+/// `envelope_offset_delta` accounting must agree on the switchover point, so
+/// the decision lives here and nowhere else.
 pub fn calc_prefix_len(ube_size: u64) -> u64 {
     if 24 + ube_size < 0xFFFFFFFF { 24 } else { 32 }
 }
@@ -74,22 +83,25 @@ pub fn isobmff_inject(
     ube_in.seek(SeekFrom::Start(0))?;
 
     let inject_size = if strategy == "box_uuid" {
-        if 24 + ube_size < 0xFFFFFFFF {
-            // Standard 32-bit Box header (24 bytes)
-            let total_box_size = (24 + ube_size) as u32;
-            out.write_all(&total_box_size.to_be_bytes())?;
+        // The switchover lives in `calc_prefix_len`, which the envelope-offset
+        // accounting also uses; duplicating the threshold here is how the two
+        // silently drift apart.
+        let header_len = calc_prefix_len(ube_size);
+        let total_box_size = header_len + ube_size;
+        if header_len == 24 {
+            // Standard 32-bit Box header.
+            out.write_all(&(total_box_size as u32).to_be_bytes())?;
             out.write_all(b"uuid")?;
             out.write_all(&MP4_UUID_NEUTRAL)?;
-            24 + ube_size
         } else {
-            // 64-bit Large Box header (32 bytes)
-            let total_box_size = 32 + ube_size;
+            // 64-bit Large Box header: `size == 1` plus an explicit 64-bit
+            // `largesize` that counts the whole box, header included.
             out.write_all(&(1u32).to_be_bytes())?;
             out.write_all(b"uuid")?;
             out.write_all(&total_box_size.to_be_bytes())?;
             out.write_all(&MP4_UUID_NEUTRAL)?;
-            32 + ube_size
         }
+        total_box_size
     } else {
         ube_size
     };
@@ -290,6 +302,24 @@ pub fn isobmff_suspicious_structures(stego_in: &mut dyn SeekRead) -> Vec<String>
             }
         }
     }
+
+    // The 64-bit large-size form (`size == 1` + largesize + usertype) is only
+    // produced for envelopes at or above 4 GiB, so it will not show up in a
+    // scan of typical carriers -- but a carrier that has one is exactly the
+    // case a structural scan must not miss.
+    if ube_offset >= 32 && stego_in.seek(SeekFrom::Start(ube_offset - 32)).is_ok() {
+        let mut hdr = [0u8; 32];
+        if stego_in.read_exact(&mut hdr).is_ok()
+            && u32::from_be_bytes(hdr[0..4].try_into().unwrap()) == 1
+            && &hdr[4..8] == b"uuid"
+            && hdr[16..32] == MP4_UUID_NEUTRAL
+        {
+            found.push(format!(
+                "trailing 64-bit uuid box at offset {} carries {ube_total_size} bytes",
+                ube_offset - 32
+            ));
+        }
+    }
     found
 }
 
@@ -313,4 +343,140 @@ pub fn isobmff_strategy_capacities() -> Vec<StrategyCapacity> {
             note: Some("appended at EOF".into()),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::envelope::{STANDARD_TRAILER_MAGIC, TRAILER_SIZE};
+    use std::io::Cursor;
+
+    /// The 32-bit form tops out at `0xFFFFFFFF`; the value that exactly reaches
+    /// that bound must already use the 64-bit header, so no truncated size is
+    /// ever written.
+    #[test]
+    fn prefix_len_switches_to_the_large_header_at_the_u32_bound() {
+        assert_eq!(calc_prefix_len(0), 24);
+        assert_eq!(calc_prefix_len(1), 24);
+        assert_eq!(calc_prefix_len(0xFFFF_FFE6), 24, "24 + it == 0xFFFFFFFE");
+        assert_eq!(calc_prefix_len(0xFFFF_FFE7), 32, "24 + it == 0xFFFFFFFF");
+        assert_eq!(calc_prefix_len(0xFFFF_FFE8), 32);
+        assert_eq!(calc_prefix_len(u32::MAX as u64), 32);
+        assert_eq!(calc_prefix_len(5 * 1024 * 1024 * 1024), 32);
+    }
+
+    /// `inject` and `envelope_offset_delta` must agree on the header length:
+    /// the writer places the envelope after `calc_prefix_len` bytes, and this
+    /// test pins the two together for both header forms.
+    #[test]
+    fn inject_writes_exactly_calc_prefix_len_header_bytes() {
+        for ube_size in [0usize, 100, 4096] {
+            let host = b"....ftypisom....mdat".to_vec();
+            let ube = vec![0x5Au8; ube_size];
+            let mut out = Vec::new();
+            let (offset, size, _, _) = isobmff_inject(
+                "MP4",
+                &mut Cursor::new(host.clone()),
+                &mut Cursor::new(ube.clone()),
+                &mut out,
+                "box_uuid",
+            )
+            .unwrap();
+
+            let prefix = calc_prefix_len(ube_size as u64) as usize;
+            assert_eq!(offset, host.len() as u64);
+            assert_eq!(size, prefix as u64 + ube_size as u64);
+            assert_eq!(out.len(), host.len() + prefix + ube_size);
+            assert_eq!(
+                &out[host.len() + prefix..],
+                &ube[..],
+                "envelope must start exactly after the header"
+            );
+            // 32-bit form: size field, 'uuid', usertype.
+            assert_eq!(
+                u32::from_be_bytes(out[host.len()..host.len() + 4].try_into().unwrap()) as usize,
+                prefix + ube_size
+            );
+            assert_eq!(&out[host.len() + 4..host.len() + 8], b"uuid");
+            assert_eq!(&out[host.len() + 8..host.len() + 24], &MP4_UUID_NEUTRAL);
+        }
+    }
+
+    /// Build `host + 64-bit uuid box + envelope` by hand. The 64-bit form is
+    /// unreachable through `inject` without a 4 GiB payload, so the reader path
+    /// is exercised with a synthesised container whose declared `largesize`
+    /// matches the (small) envelope it actually carries.
+    ///
+    /// `ube_data` is the envelope body without its 24-byte trailer; the trailer
+    /// emitted here records the same total size the large header declares.
+    fn synthesise_large_box_stego(host: &[u8], ube_data: &[u8]) -> Vec<u8> {
+        let ube_offset = host.len() as u64 + 32;
+        let ube_total = ube_data.len() as u64 + TRAILER_SIZE as u64;
+        let mut out = host.to_vec();
+        out.extend_from_slice(&1u32.to_be_bytes()); // size == 1
+        out.extend_from_slice(b"uuid");
+        out.extend_from_slice(&(32 + ube_total).to_be_bytes());
+        out.extend_from_slice(&MP4_UUID_NEUTRAL);
+        out.extend_from_slice(ube_data);
+        out.extend_from_slice(
+            &EnvelopeTrailer::create(ube_offset, ube_total, STANDARD_TRAILER_MAGIC).pack(),
+        );
+        out
+    }
+
+    #[test]
+    fn locate_and_verify_accept_a_64_bit_box() {
+        let host = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomiso2".to_vec();
+        let ube = vec![0xA5u8; 128];
+        let stego = synthesise_large_box_stego(&host, &ube);
+
+        let mut cursor = Cursor::new(stego.clone());
+        let found = isobmff_locate(&mut cursor, None).unwrap();
+        let (offset, size, strategy) = found.expect("64-bit box must be located");
+        assert_eq!(strategy, "box_uuid");
+        assert_eq!(offset, host.len() as u64 + 32);
+        assert_eq!(size, ube.len() as u64 + 24);
+
+        let mut cursor = Cursor::new(stego.clone());
+        let (ok, detail) = isobmff_verify_structure("MP4", &mut cursor).unwrap();
+        assert!(ok, "64-bit box container must verify: {detail}");
+
+        let mut cursor = Cursor::new(stego);
+        let warnings = isobmff_suspicious_structures(&mut cursor);
+        assert!(
+            warnings.iter().any(|w| w.contains("64-bit uuid box")),
+            "structural scan must report the 64-bit box, got {warnings:?}"
+        );
+    }
+
+    /// A 32-bit box in the same position must NOT be reported as 64-bit, and
+    /// vice versa: the two header shapes overlap in their first 24 bytes.
+    #[test]
+    fn suspicious_structures_distinguishes_the_two_header_forms() {
+        let host = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomiso2".to_vec();
+        let ube = vec![0x11u8; 96];
+
+        // 32-bit form
+        let ube_offset = host.len() as u64 + 24;
+        let ube_total = ube.len() as u64 + TRAILER_SIZE as u64;
+        let mut stego = host.clone();
+        stego.extend_from_slice(&((24 + ube_total) as u32).to_be_bytes());
+        stego.extend_from_slice(b"uuid");
+        stego.extend_from_slice(&MP4_UUID_NEUTRAL);
+        stego.extend_from_slice(&ube);
+        stego.extend_from_slice(
+            &EnvelopeTrailer::create(ube_offset, ube_total, STANDARD_TRAILER_MAGIC).pack(),
+        );
+
+        let mut cursor = Cursor::new(stego.clone());
+        let warnings = isobmff_suspicious_structures(&mut cursor);
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(warnings[0].contains("trailing uuid box"));
+        assert!(!warnings[0].contains("64-bit"));
+
+        let mut cursor = Cursor::new(stego);
+        let (offset, _, strategy) = isobmff_locate(&mut cursor, None).unwrap().unwrap();
+        assert_eq!(strategy, "box_uuid");
+        assert_eq!(offset, ube_offset);
+    }
 }

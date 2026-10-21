@@ -299,6 +299,18 @@ fn scan_max_object_number(text: &str) -> Option<u64> {
     max_obj
 }
 
+/// Header of the incremental-update object that carries the envelope stream.
+///
+/// The leading `\n` separates the new object from the previous `%%EOF`, and
+/// its length is exactly what [`PdfAdapter::calc_prefix_len`] reports so the
+/// engine can point the trailer at the stream instead of at the object
+/// keyword. Writer and accounting must use this one function: two hand-written
+/// format strings drifting apart would put `ube_offset` a few bytes off, which
+/// reads back as "no hidden data" rather than as a visible error.
+pub fn pdf_obj_header(new_obj_num: u64, ube_size: u64) -> String {
+    format!("\n{new_obj_num} 0 obj\n<< /Type /Metadata /Length {ube_size} >>\nstream\n")
+}
+
 pub struct PdfAdapter;
 
 impl PdfAdapter {
@@ -307,11 +319,7 @@ impl PdfAdapter {
         ube_size: u64,
     ) -> Result<u64, StrHideError> {
         let info = parse_pdf_trailer_info(reader)?;
-        let obj_header = format!(
-            "\n{} 0 obj\n<< /Type /Metadata /Length {} >>\nstream\n",
-            info.new_obj_num, ube_size
-        );
-        Ok(obj_header.len() as u64)
+        Ok(pdf_obj_header(info.new_obj_num, ube_size).len() as u64)
     }
 }
 
@@ -421,10 +429,7 @@ impl HostAdapter for PdfAdapter {
         let inject_offset = info.eof_offset;
 
         // 2. Construct object header
-        let obj_header = format!(
-            "\n{} 0 obj\n<< /Type /Metadata /Length {} >>\nstream\n",
-            info.new_obj_num, ube_size
-        );
+        let obj_header = pdf_obj_header(info.new_obj_num, ube_size);
         let actual_obj_offset = inject_offset + 1; // skips leading \n
         out.write_all(obj_header.as_bytes())?;
 
@@ -690,6 +695,133 @@ impl HostAdapter for PdfAdapter {
             Some("Appended after PDF %%EOF (EOF overlay).".into())
         } else {
             None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::HostAdapter;
+    use crate::envelope::{STANDARD_TRAILER_MAGIC, TRAILER_SIZE};
+    use std::io::Cursor;
+
+    /// Classic PDF with `/Size 2` and `/Root`: the smallest carrier the
+    /// incremental strategy accepts.
+    fn minimal_pdf() -> Vec<u8> {
+        b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
+          xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
+          trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n9\n%%EOF\n"
+            .to_vec()
+    }
+
+    /// Full UBE (payload + trailer) for `payload_len` bytes of body.
+    fn ube_of(payload_len: usize, ube_offset: u64) -> Vec<u8> {
+        let mut ube = vec![0x7Bu8; payload_len];
+        let total = payload_len as u64 + TRAILER_SIZE as u64;
+        ube.extend_from_slice(
+            &EnvelopeTrailer::create(ube_offset, total, STANDARD_TRAILER_MAGIC).pack(),
+        );
+        ube
+    }
+
+    /// `calc_prefix_len` is the writer's own offset accounting: it must equal
+    /// the number of bytes `inject` writes between `%%EOF` and the envelope,
+    /// for every payload length (the `/Length` digits change the width).
+    #[test]
+    fn calc_prefix_len_matches_the_injected_offset() {
+        for payload_len in [0usize, 1, 9, 10, 99, 100, 9_999, 10_000, 123_456] {
+            let host = minimal_pdf();
+            let ube = ube_of(payload_len, 0); // offset ignored by the carrier
+            let ube_size = ube.len() as u64;
+
+            let prefix = PdfAdapter::calc_prefix_len(&mut Cursor::new(&host), ube_size).unwrap();
+            assert_eq!(
+                prefix,
+                pdf_obj_header(2, ube_size).len() as u64,
+                "prefix must be the object header for /Size 2 and {ube_size} bytes"
+            );
+
+            let mut out = Vec::new();
+            let (inject_offset, inject_size, _, _) = PdfAdapter
+                .inject(
+                    &mut Cursor::new(host.clone()),
+                    &mut Cursor::new(ube.clone()),
+                    &mut out,
+                    "incremental",
+                )
+                .unwrap();
+
+            assert_eq!(inject_offset, host.len() as u64);
+            assert_eq!(
+                &out[inject_offset as usize..(inject_offset + prefix) as usize],
+                pdf_obj_header(2, ube_size).as_bytes(),
+                "bytes before the envelope must be exactly the object header"
+            );
+            assert_eq!(
+                &out[(inject_offset + prefix) as usize
+                    ..(inject_offset + prefix) as usize + ube.len()],
+                &ube[..],
+                "envelope must start at inject_offset + calc_prefix_len"
+            );
+            assert!(
+                out[(inject_offset + prefix + ube_size) as usize..]
+                    .starts_with(b"\nendstream\nendobj\n"),
+                "the envelope stream must be closed right after the envelope bytes"
+            );
+            assert_eq!(
+                inject_size,
+                (out.len() as u64) - inject_offset,
+                "inject_size must cover the object, the xref section and the new trailer"
+            );
+        }
+    }
+
+    /// Two consecutive incremental updates: the second carrier's `/Size` has
+    /// grown, so its object number (and therefore the prefix length) changes.
+    /// Reading back the first envelope must still work afterwards.
+    #[test]
+    fn prefix_len_follows_successive_incremental_updates() {
+        let host = minimal_pdf();
+        let mut prev = host.clone();
+
+        for round in 0..2 {
+            let expected_obj = 2 + round as u64;
+            let ube = ube_of(64, 0);
+            let ube_size = ube.len() as u64;
+
+            let prefix = PdfAdapter::calc_prefix_len(&mut Cursor::new(&prev), ube_size).unwrap();
+            assert_eq!(
+                prefix,
+                pdf_obj_header(expected_obj, ube_size).len() as u64,
+                "round {round}: next object number must follow /Size"
+            );
+
+            let mut out = Vec::new();
+            let (inject_offset, _, _, _) = PdfAdapter
+                .inject(
+                    &mut Cursor::new(prev.clone()),
+                    &mut Cursor::new(ube.clone()),
+                    &mut out,
+                    "incremental",
+                )
+                .unwrap();
+            assert_eq!(
+                &out[(inject_offset + prefix) as usize
+                    ..(inject_offset + prefix) as usize + ube.len()],
+                &ube[..],
+                "round {round}: envelope offset drifted"
+            );
+            assert!(
+                out.windows(9)
+                    .any(|w| w == format!("\n{expected_obj} 0 obj\n").as_bytes()),
+                "round {round}: injected object number missing"
+            );
+
+            // The newest trailer must still declare a /Root and a larger /Size.
+            let info = parse_pdf_trailer_info(&mut Cursor::new(out.clone())).unwrap();
+            assert_eq!(info.new_obj_num, expected_obj + 1);
+            prev = out;
         }
     }
 }
