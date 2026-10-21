@@ -106,3 +106,10 @@ temp*
 .dumate/
 workbuddy/
 .trae/
+*.pt
+*.npz
+.venv/
+*.pyc
+.NO_DELETE*
+
+
