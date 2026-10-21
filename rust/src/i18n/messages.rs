@@ -546,14 +546,14 @@ crate::i18n_messages! {
         en = "Fine-tune (Spatial HILL): second-stage low-pass filter window size (odd, default: 15)",
         zh = "微调参数（空域 HILL）：第二级低通滤波器窗口尺寸（奇数，默认: 15）";
     HelpStegoCodec:
-        en = "Matrix-coding layer for payload bits: auto (default), stc, or hamming",
-        zh = "载荷比特矩阵编码层：auto（默认）、stc 或 hamming";
+        en = "Matrix-coding layer for PNG payload bits: auto (default), stc, or hamming. JPEG always uses ternary STC",
+        zh = "PNG 载荷比特矩阵编码层：auto（默认）、stc 或 hamming；JPEG 固定使用三元 STC";
     HelpStegoStcH:
         en = "Fine-tune (STC): trellis constraint height, 4..10 (default: 8)",
         zh = "微调参数（STC）：网格约束高度，4..10（默认: 8）";
     HelpStegoStcU:
-        en = "Fine-tune (STC): elements per syndrome row, 1..3 (default: 0 for auto)",
-        zh = "微调参数（STC）：每个校验子行的元素数，1..3（默认: 0 自动）";
+        en = "Fine-tune (PNG STC): elements per syndrome row, 1..3 (default: 0 for auto); JPEG derives it from --slot-budget",
+        zh = "微调参数（PNG STC）：每个校验子行的元素数，1..3（默认: 0 自动）；JPEG 由 --slot-budget 推导";
 
     // ---- Config warnings ----
     WarnConfigUnknownKey:

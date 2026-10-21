@@ -301,8 +301,14 @@ pub struct JpegParams {
     pub safety_enforcement: SafetyEnforcement,
 }
 
-/// Default trellis budget: 800k slots, i.e. ~4x10^8 transitions at `h = 8`.
-pub const DEFAULT_SLOT_BUDGET: usize = 800_000;
+/// Default trellis budget: 1.2M slots.
+///
+/// Chosen by the Phase 3 grid (`h` x budget, 8 photos, 4/16/64 KiB): 1.2M has the
+/// lowest distortion and file growth of every configuration that stays under the
+/// 3 s embed gate, at ~77 MB of backtracking bitmap (`n * 2^h / 4`, `h = 8`).
+/// 800k is 40% faster and 26 MB lighter for ~6% more changes; 2M+ only adds
+/// memory. See `docs/stc_v3_phase3_eval_20261021.md`.
+pub const DEFAULT_SLOT_BUDGET: usize = 1_200_000;
 
 fn default_slot_budget() -> usize {
     DEFAULT_SLOT_BUDGET

@@ -382,7 +382,7 @@ pub struct EmbedArgs {
         long = "slot-budget",
         value_name = "INT",
         help = "Fine-tune (JPEG V3): trellis slot budget; a larger budget spreads each payload bit over more \
-                coefficients (fewer changes per coefficient), at the cost of time and memory. Default: 800000. \
+                coefficients (fewer changes per coefficient), at the cost of time and memory. Default: 1200000. \
                 Extraction does not need this value."
     )]
     pub slot_budget: Option<usize>,
@@ -1887,14 +1887,14 @@ fn warn_nondefault_stego_params(options: &crate::stego::StegoOptions, quiet: boo
 
 /// Apply `--codec` / `--stc-h` / `--stc-u` to the option set.
 ///
-/// Unlike the cost-model knobs, these do **not** need to be repeated at
-/// extraction: the codec, its `h` and its `u` are recorded in six spare bits of
-/// the envelope header (see `stego::header`), so `extract` recovers them from
-/// the carrier itself. The flags exist on `embed` only.
+/// None of these has to be repeated at extraction: the PNG header records
+/// codec/`h`/`u`, and the JPEG superblock records `h` as well as the resolved
+/// group size, so `extract` recovers everything from the carrier itself.
 ///
-/// The same values are applied to both engine families: `--codec` does not
-/// depend on whether the carrier turns out to be a PNG or a JPEG, and the
-/// caller does not know before the router has sniffed it.
+/// `--codec` and `--stc-u` are spatial-only: JPEG V3 is always ternary STC and
+/// derives `u` from `--slot-budget`. The caller does not know the carrier format
+/// before the router has sniffed it, so the values are applied to both engines
+/// and the JPEG engine simply ignores the two it does not use.
 fn apply_codec_options(
     options: &mut crate::stego::StegoOptions,
     codec: Option<&str>,

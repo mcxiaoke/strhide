@@ -218,9 +218,13 @@ fn plan_slots(
             // everywhere else).
             (false, false) => Move::Both,
         };
-        // On an over-optimised table a cross-zero move is priced at the wet cost
-        // rather than banned: banning it dead-ends any group window that has no
-        // non-zero coefficient at all, which is common on sparse carriers.
+        // A cross-zero move stays legal but is priced at the wet cost when the
+        // Huffman table is over-optimised: it may not even be encodable, since it
+        // shifts the run of every following coefficient in the block. Banning it
+        // instead dead-ends group windows on sparse carriers, so it is priced.
+        // With a complete table the ordinary UERD cost applies: the objective
+        // stays "minimise weighted distortion", and a size penalty would trade
+        // detectability for file size, which is the wrong trade.
         let plus_cost = if !allow_plus {
             f64::INFINITY
         } else if table.is_some() && crosses_zero_plus {
