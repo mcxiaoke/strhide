@@ -44,8 +44,10 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::envelope::AAD_SIZE;
 use crate::errors::StrHideError;
+
+/// Associated data size for the envelope fixed header.
+pub const AAD_SIZE: usize = 80;
 
 /// Length of an AES-GCM authentication tag.
 pub const AEAD_TAG_LEN: usize = 16;

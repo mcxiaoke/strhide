@@ -96,6 +96,7 @@ pub enum StrHideError {
     General(String),
 }
 
+#[cfg(feature = "engine")]
 impl From<serde_json::Error> for StrHideError {
     fn from(err: serde_json::Error) -> Self {
         StrHideError::CorruptedData(format!("JSON serialization error: {err}"))
@@ -105,6 +106,7 @@ impl From<serde_json::Error> for StrHideError {
 impl StrHideError {
     /// Error category (used to translate category prefixes during CLI rendering).
     /// `NoHiddenData` and `General` do not carry a prefix and return `None`.
+    #[cfg(feature = "cli")]
     pub fn category(&self) -> Option<crate::i18n::Msg> {
         match self {
             StrHideError::Io(_) => Some(crate::i18n::Msg::ErrIo),

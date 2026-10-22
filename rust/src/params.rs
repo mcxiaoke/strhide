@@ -41,8 +41,14 @@
 //! already stored in (or recoverable from) the envelope.
 
 use crate::crypto::{BUILTIN_DEFAULT_KEY, CHUNK_SIZE, MAX_CHUNK_SIZE};
-use crate::envelope::{STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC};
-use crate::stego::format::{DEFAULT_FORMAT, FormatProfile};
+#[cfg(feature = "stego")]
+use crate::stego::format::{DEFAULT_FORMAT, FormatProfile, OFFICIAL_SPATIAL, SpatialFormatProfile};
+
+/// Standard high-entropy binary header magic (8 bytes): SHA-256("strhide-standard-header-v2")[..8]
+pub const STANDARD_HEADER_MAGIC: [u8; 8] = [0xb7, 0x54, 0x2c, 0x82, 0x7e, 0x31, 0x1d, 0x6e];
+
+/// Standard high-entropy binary trailer magic (4 bytes): SHA-256("strhide-standard-trailer-v2")[..4]
+pub const STANDARD_TRAILER_MAGIC: [u8; 4] = [0x78, 0xe6, 0x66, 0xd2];
 
 /// Domain separator mixed into stealth magic derivation.
 ///
@@ -249,6 +255,7 @@ impl LocalParams {
 /// domains ([`crate::envelope`] vs [`crate::stego::envelope`]), so sharing one
 /// string would couple two independent dialects. Both are carried by the same
 /// `Profile`, so there is still exactly one object to store and pass around.
+#[cfg(feature = "stego")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct StegoProfile {
@@ -267,8 +274,12 @@ pub struct StegoProfile {
     /// slot grid, a private format makes the carrier unreadable with an
     /// official binary -- exactly like a private secret.
     pub format: Option<FormatProfile>,
+    /// Private spatial (PNG) wire-format identity. `None` means the official
+    /// [`OFFICIAL_SPATIAL`].
+    pub spatial: Option<SpatialFormatProfile>,
 }
 
+#[cfg(feature = "stego")]
 impl StegoProfile {
     /// Official content-domain defaults (no private secret, official format).
     pub const fn new() -> Self {
@@ -276,6 +287,7 @@ impl StegoProfile {
             default_secret: None,
             stego_domain: None,
             format: None,
+            spatial: None,
         }
     }
 
@@ -296,6 +308,12 @@ impl StegoProfile {
     /// Set [`format`](Self::format).
     pub const fn with_format(mut self, format: FormatProfile) -> Self {
         self.format = Some(format);
+        self
+    }
+
+    /// Set [`spatial`](Self::spatial).
+    pub const fn with_spatial(mut self, spatial: SpatialFormatProfile) -> Self {
+        self.spatial = Some(spatial);
         self
     }
 
@@ -320,10 +338,36 @@ impl StegoProfile {
         }
     }
 
-    /// True when no private secret, domain, or format is set (official
+    /// Spatial wire-format identity to use: the private [`spatial`](Self::spatial) when
+    /// set, otherwise the official [`OFFICIAL_SPATIAL`].
+    pub fn spatial_profile(&self) -> &SpatialFormatProfile {
+        match self.spatial.as_ref() {
+            Some(spatial) => spatial,
+            None => &OFFICIAL_SPATIAL,
+        }
+    }
+
+    /// True when no private secret, domain, format, or spatial profile is set (official
     /// behaviour).
     pub fn is_official(&self) -> bool {
-        self.secret().is_none() && self.stego_domain().is_none() && self.format.is_none()
+        self.secret().is_none()
+            && self.stego_domain().is_none()
+            && self.format.is_none()
+            && self.spatial.is_none()
+    }
+}
+
+#[cfg(not(feature = "stego"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StegoProfile;
+
+#[cfg(not(feature = "stego"))]
+impl StegoProfile {
+    pub const fn new() -> Self {
+        Self
+    }
+    pub fn is_official(&self) -> bool {
+        true
     }
 }
 
@@ -428,6 +472,17 @@ impl Profile {
         self
     }
 
+    /// Set the private spatial (PNG) wire-format identity.
+    pub const fn with_spatial_profile(mut self, spatial: SpatialFormatProfile) -> Self {
+        self.stego = self.stego.with_spatial(spatial);
+        self
+    }
+
+    /// Spatial wire-format identity (private if set, else official).
+    pub fn spatial_profile(&self) -> &SpatialFormatProfile {
+        self.stego.spatial_profile()
+    }
+
     /// Private content-domain secret, if any.
     ///
     /// `None` means the stego envelope layer falls back to the public
@@ -470,6 +525,7 @@ impl Profile {
 
     /// Trailer magic to hand to `HostAdapter::locate`: `None` for the official
     /// dialect (which also accepts legacy magics), the custom magic otherwise.
+    #[cfg(any(feature = "engine", test))]
     pub(crate) fn locator_magic(&self) -> Option<&[u8; 4]> {
         self.magic.as_ref().map(|m| &m.trailer)
     }

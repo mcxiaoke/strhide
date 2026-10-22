@@ -366,6 +366,32 @@ pub const DEFAULT_FORMAT: FormatProfile = FormatProfile {
     suites: SUITES,
 };
 
+/// Identity and KDF derivation labels for spatial (PNG) steganography.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpatialFormatProfile {
+    /// Stand-in secret used when neither a user password nor a private secret is provided.
+    pub fallback_secret: &'static str,
+    /// HKDF info label for domain subkey derivation.
+    pub domain_label: &'static [u8],
+    /// HKDF salt for header position permutation seed derivation.
+    pub hpos_salt: &'static [u8],
+    /// HKDF info label for header position permutation seed derivation.
+    pub hpos_label: &'static [u8],
+    /// HKDF info label for STC trellis seed derivation.
+    pub stc_label: &'static [u8],
+    /// Format settings for cipher suite and payload keys.
+    pub body: &'static FormatProfile,
+}
+
+pub const OFFICIAL_SPATIAL: SpatialFormatProfile = SpatialFormatProfile {
+    fallback_secret: "strhide-default-content-stego-key-2026",
+    domain_label: b"strhide-stego-domain-v1",
+    hpos_salt: b"strhide-stego-hpos-salt-v2",
+    hpos_label: b"strhide-stego-hpos-v2",
+    stc_label: b"strhide-stc-trellis-v1",
+    body: &DEFAULT_FORMAT,
+};
+
 /// Domain-separated HKDF info string: `label || u64be(len) || domain`.
 ///
 /// The length prefix keeps `("ab", "c")` and `("a", "bc")` from colliding.

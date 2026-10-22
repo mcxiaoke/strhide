@@ -15,7 +15,9 @@ pub mod registry;
 pub mod spatial;
 pub mod traits;
 
-pub use format::{CipherSuite, DEFAULT_FORMAT, FormatProfile, GridRule};
+pub use format::{
+    CipherSuite, DEFAULT_FORMAT, FormatProfile, GridRule, OFFICIAL_SPATIAL, SpatialFormatProfile,
+};
 pub use params::{
     ExtractParams, JpegParams, SafetyEnforcement, SafetyLevel, SpatialParams, StegoCodec,
     StegoOptions,
@@ -99,11 +101,12 @@ pub fn embed_carrier_with_profile(
                 ))
             },
         )?;
-        spatial::embed_spatial(
+        spatial::embed_spatial_with_profile(
             carrier_bytes,
             payload,
             secret,
             domain,
+            profile.spatial_profile(),
             &*model,
             &spatial_params,
         )
@@ -161,10 +164,11 @@ pub fn extract_carrier_with_profile(
                 ))
             },
         )?;
-        spatial::extract_spatial(
+        spatial::extract_spatial_with_profile(
             carrier_bytes,
             secret,
             domain,
+            profile.spatial_profile(),
             &*model,
             &options.spatial_params,
         )
@@ -269,13 +273,14 @@ pub fn probe_carrier_capacity_with_profile(
                 ))
             },
         )?;
-        spatial::probe_spatial_capacity(
+        spatial::probe_spatial_capacity_with_profile(
             carrier_bytes,
             &*model,
             &options.spatial_params,
             options.safety_level,
             secret,
             domain,
+            profile.spatial_profile(),
         )
     } else {
         Err(StrHideError::UnsupportedFormat(

@@ -39,10 +39,9 @@ use crate::stego::coding::{
     write_bit_ternary,
 };
 use crate::stego::envelope::{
-    PUBLIC_DEFAULT_SECRET, build_plaintext, encrypt_with_aad, random_nonce, random_salt,
-    unpack_envelope_parts,
+    build_plaintext, encrypt_with_aad, random_nonce, random_salt, unpack_envelope_parts,
 };
-use crate::stego::format::{DEFAULT_FORMAT, body_keys, derive_master};
+use crate::stego::format::{body_keys, derive_master};
 pub use crate::stego::header::{
     FeatureWord, HEADER_LEN_MASK, HEADER_LEN_MAX, HEADER_V2_ESCAPE_H, V2_TOTAL_HEADER_SLOTS,
     decode_header_word, encode_header_word,
@@ -514,6 +513,7 @@ impl SlotPlan {
         params: &SpatialParams,
         password: Option<&str>,
         domain: Option<&str>,
+        spatial: &crate::stego::format::SpatialFormatProfile,
     ) -> Result<Self, StrHideError> {
         let total_pixels = image.width as usize * image.height as usize;
         if costs.len() != total_pixels {
@@ -549,7 +549,8 @@ impl SlotPlan {
 
         // Keyed candidate-set permutation for the header slots (legacy rule:
         // [8, 247] eligibility, 30% exclusion).
-        let header_seed = crate::stego::envelope::derive_header_perm_seed(password, domain);
+        let header_seed =
+            crate::stego::envelope::derive_header_perm_seed_with_profile(password, domain, spatial);
         let mut permuted = candidates.clone();
         permute_indices(&mut permuted, &header_seed);
 
@@ -619,6 +620,27 @@ pub fn embed_spatial(
     cost_model: &dyn SpatialCostModel,
     params: &SpatialParams,
 ) -> Result<Vec<u8>, StrHideError> {
+    embed_spatial_with_profile(
+        carrier_bytes,
+        payload,
+        password,
+        domain,
+        &crate::stego::format::OFFICIAL_SPATIAL,
+        cost_model,
+        params,
+    )
+}
+
+/// [`embed_spatial`] with an explicit [`SpatialFormatProfile`].
+pub fn embed_spatial_with_profile(
+    carrier_bytes: &[u8],
+    payload: &[u8],
+    password: Option<&str>,
+    domain: Option<&str>,
+    spatial: &crate::stego::format::SpatialFormatProfile,
+    cost_model: &dyn SpatialCostModel,
+    params: &SpatialParams,
+) -> Result<Vec<u8>, StrHideError> {
     let mut image = decode_png(carrier_bytes)?;
     let w = image.width as usize;
     let h = image.height as usize;
@@ -627,12 +649,12 @@ pub fn embed_spatial(
     // Frame the payload and derive the per-carrier keys. The ciphertext itself
     // is produced further down: the finished 64-byte header is its associated
     // data, so it cannot exist until codec/h/u are settled.
-    let suite = DEFAULT_FORMAT.default_suite();
+    let suite = spatial.body.default_suite();
     let plaintext = build_plaintext(payload)?;
     let salt = random_salt();
     let nonce = random_nonce();
-    let master = derive_master(suite, password.unwrap_or(PUBLIC_DEFAULT_SECRET), &salt)?;
-    let (enc_key, perm_seed) = body_keys(&DEFAULT_FORMAT, &master, &salt, domain);
+    let master = derive_master(suite, password.unwrap_or(spatial.fallback_secret), &salt)?;
+    let (enc_key, perm_seed) = body_keys(spatial.body, &master, &salt, domain);
     let ciphertext_len = plaintext.len() + suite.tag_len();
 
     // Compute distortion cost map
@@ -640,7 +662,7 @@ pub fn embed_spatial(
 
     let channel_offset = embed_channel(&image);
 
-    let plan = SlotPlan::build(&image, &costs, params, password, domain)?;
+    let plan = SlotPlan::build(&image, &costs, params, password, domain, spatial)?;
     if !plan.header_fits() {
         return Err(StrHideError::General(format!(
             "Carrier capacity insufficient: available {} slots, minimum header requires {} slots",
@@ -741,7 +763,8 @@ pub fn embed_spatial(
     let ciphertext_body = encrypt_with_aad(suite, &enc_key, &nonce, &aad, &plaintext)?;
 
     // Phase 2: Keyed permutation of body slots.
-    let stc_seed = crate::stego::envelope::derive_stc_seed(&perm_seed, &salt);
+    let stc_seed =
+        crate::stego::envelope::derive_stc_seed_with_label(&perm_seed, &salt, spatial.stc_label);
 
     let mut body_slots = body_candidates[..needed_body_slots].to_vec();
     permute_indices(&mut body_slots, &perm_seed);
@@ -825,6 +848,25 @@ pub fn extract_spatial(
     cost_model: &dyn SpatialCostModel,
     params: &SpatialParams,
 ) -> Result<Vec<u8>, StrHideError> {
+    extract_spatial_with_profile(
+        carrier_bytes,
+        password,
+        domain,
+        &crate::stego::format::OFFICIAL_SPATIAL,
+        cost_model,
+        params,
+    )
+}
+
+/// [`extract_spatial`] with an explicit [`SpatialFormatProfile`].
+pub fn extract_spatial_with_profile(
+    carrier_bytes: &[u8],
+    password: Option<&str>,
+    domain: Option<&str>,
+    spatial: &crate::stego::format::SpatialFormatProfile,
+    cost_model: &dyn SpatialCostModel,
+    params: &SpatialParams,
+) -> Result<Vec<u8>, StrHideError> {
     let image = decode_png(carrier_bytes)?;
     let w = image.width as usize;
     let h = image.height as usize;
@@ -836,7 +878,7 @@ pub fn extract_spatial(
 
     // The header permutation must be the one the embedder used: same password,
     // same domain, same ranking rule.
-    let plan = SlotPlan::build(&image, &costs, params, password, domain)?;
+    let plan = SlotPlan::build(&image, &costs, params, password, domain, spatial)?;
     if plan.permuted.len() < HEADER_SLOTS {
         return Err(StrHideError::NoHiddenData(
             "Carrier has insufficient capacity for stego header".into(),
@@ -908,11 +950,11 @@ pub fn extract_spatial(
     }
 
     let master = derive_master(
-        DEFAULT_FORMAT.default_suite(),
-        password.unwrap_or(PUBLIC_DEFAULT_SECRET),
+        spatial.body.default_suite(),
+        password.unwrap_or(spatial.fallback_secret),
         salt,
     )?;
-    let (enc_key, perm_seed) = body_keys(&DEFAULT_FORMAT, &master, salt, domain);
+    let (enc_key, perm_seed) = body_keys(spatial.body, &master, salt, domain);
 
     let mut body_slots = body_candidates[..needed_body_slots].to_vec();
     permute_indices(&mut body_slots, &perm_seed);
@@ -929,7 +971,11 @@ pub fn extract_spatial(
             crate::stego::coding::DEFAULT_HAMMING_K,
         )?,
         StegoCodec::Stc | StegoCodec::Auto => {
-            let stc_seed = crate::stego::envelope::derive_stc_seed(&perm_seed, salt);
+            let stc_seed = crate::stego::envelope::derive_stc_seed_with_label(
+                &perm_seed,
+                salt,
+                spatial.stc_label,
+            );
             let trellis = StcTrellis::from_seed_grouped(stc_seed, fw.h, fw.u)?;
             trellis.extract(&slot_vals, ciphertext_bits)
         }
@@ -943,7 +989,7 @@ pub fn extract_spatial(
     aad.extend_from_slice(&header_bytes);
     aad.extend_from_slice(&feature_bytes);
     unpack_envelope_parts(
-        DEFAULT_FORMAT.default_suite(),
+        spatial.body.default_suite(),
         &enc_key,
         &nonce,
         &aad,
@@ -952,11 +998,6 @@ pub fn extract_spatial(
 }
 
 /// Probe capacity of PNG carrier for spatial content-adaptive steganography.
-///
-/// `password` / `domain` must be the credentials an embed will use: they key
-/// the header permutation, and the 512 header/feature slots are removed from
-/// the body pool. Probing without them (as this function used to do
-/// internally) reports the capacity of a *different* slot assignment.
 pub fn probe_spatial_capacity(
     carrier_bytes: &[u8],
     cost_model: &dyn SpatialCostModel,
@@ -965,6 +1006,27 @@ pub fn probe_spatial_capacity(
     password: Option<&str>,
     domain: Option<&str>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
+    probe_spatial_capacity_with_profile(
+        carrier_bytes,
+        cost_model,
+        params,
+        safety_level,
+        password,
+        domain,
+        &crate::stego::format::OFFICIAL_SPATIAL,
+    )
+}
+
+/// [`probe_spatial_capacity`] with an explicit [`SpatialFormatProfile`].
+pub fn probe_spatial_capacity_with_profile(
+    carrier_bytes: &[u8],
+    cost_model: &dyn SpatialCostModel,
+    params: &SpatialParams,
+    safety_level: crate::stego::SafetyLevel,
+    password: Option<&str>,
+    domain: Option<&str>,
+    spatial: &crate::stego::format::SpatialFormatProfile,
+) -> Result<StegoCapacityInfo, StrHideError> {
     let image = decode_png(carrier_bytes)?;
     let w = image.width as usize;
     let h = image.height as usize;
@@ -972,7 +1034,7 @@ pub fn probe_spatial_capacity(
 
     let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, params);
 
-    let plan = SlotPlan::build(&image, &costs, params, password, domain)?;
+    let plan = SlotPlan::build(&image, &costs, params, password, domain, spatial)?;
 
     let available_body_slots = if plan.header_fits() {
         // The embedder always writes `class_rule = 1`, so the capacity it can
@@ -1704,6 +1766,72 @@ mod tests {
         assert!(
             ok_res.is_ok(),
             "Advisory safety policy must not block embedding"
+        );
+    }
+
+    #[test]
+    fn private_spatial_profile_bidirectional_isolation() {
+        let (w, h) = (128usize, 128usize);
+        let pixels = row_correlated_pixels(w, h);
+        let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
+        let payload = b"private-spatial-dialect-content-2026";
+        let params = SpatialParams::default();
+
+        let private_spatial = crate::stego::format::SpatialFormatProfile {
+            fallback_secret: "private-secret-key-12345",
+            domain_label: b"private-domain-label",
+            hpos_salt: b"private-hpos-salt-xyz",
+            hpos_label: b"private-hpos-label-xyz",
+            stc_label: b"private-stc-label-xyz",
+            body: &crate::stego::format::DEFAULT_FORMAT,
+        };
+
+        // 1. Embed with private dialect
+        let stego_bytes = embed_spatial_with_profile(
+            &png,
+            payload,
+            None,
+            None,
+            &private_spatial,
+            &HillCostModel,
+            &params,
+        )
+        .expect("embed with private profile");
+
+        // 2. Extract with same private dialect -> Success
+        let extracted = extract_spatial_with_profile(
+            &stego_bytes,
+            None,
+            None,
+            &private_spatial,
+            &HillCostModel,
+            &params,
+        )
+        .expect("extract with matching private profile");
+        assert_eq!(extracted, payload);
+
+        // 3. Extract with official dialect -> Fail with NoHiddenData
+        let official_err = extract_spatial(&stego_bytes, None, None, &HillCostModel, &params);
+        assert!(
+            matches!(official_err, Err(StrHideError::NoHiddenData(_))),
+            "official reader must see private stego as NoHiddenData, got {official_err:?}"
+        );
+
+        // 4. Official embed read by private reader -> Fail
+        let official_stego = embed_spatial(&png, payload, None, None, &HillCostModel, &params)
+            .expect("official embed");
+
+        let private_err = extract_spatial_with_profile(
+            &official_stego,
+            None,
+            None,
+            &private_spatial,
+            &HillCostModel,
+            &params,
+        );
+        assert!(
+            matches!(private_err, Err(StrHideError::NoHiddenData(_))),
+            "private reader must see official stego as NoHiddenData, got {private_err:?}"
         );
     }
 }

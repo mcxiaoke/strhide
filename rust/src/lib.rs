@@ -123,31 +123,50 @@
 //!   its own profile).
 //! - [`config`] / [`cli`] / [`analysis`] — internal plumbing for the binary.
 
-pub mod adapters;
-pub mod analysis;
-pub mod cli;
-pub mod cli_i18n;
-pub mod config;
 pub mod crypto;
-pub mod engine;
-pub mod envelope;
 pub mod errors;
-pub mod facade;
-pub mod i18n;
-pub mod jpeg;
 pub mod params;
+
+#[cfg(feature = "engine")]
+pub mod adapters;
+#[cfg(feature = "engine")]
+pub mod engine;
+#[cfg(feature = "engine")]
+pub mod envelope;
+#[cfg(feature = "engine")]
 pub mod rejection;
+#[cfg(feature = "engine")]
 pub mod router;
+
+#[cfg(feature = "stego")]
+pub mod jpeg;
+#[cfg(feature = "stego")]
 pub mod stego;
 
+#[cfg(feature = "cli")]
+pub mod analysis;
+#[cfg(feature = "cli")]
+pub mod cli;
+#[cfg(feature = "cli")]
+pub mod cli_i18n;
+#[cfg(feature = "cli")]
+pub mod config;
+#[cfg(feature = "cli")]
+pub mod i18n;
+
+#[cfg(feature = "engine")]
+pub mod facade;
+
 // Content-domain steganography surface.
-//
-// A private build only needs these: construct a `FormatProfile` with its own
-// derivation labels, then call `embed` / `extract` with it. Nothing in the
-// library has to be edited, and there is no CLI switch for the format identity
-// (a switchable format is an enumerable format).
-pub use stego::format::{CipherSuite, DEFAULT_FORMAT, FormatProfile, GridRule};
+#[cfg(feature = "stego")]
+pub use stego::format::{
+    CipherSuite, DEFAULT_FORMAT, FormatProfile, GridRule, OFFICIAL_SPATIAL, SpatialFormatProfile,
+};
+#[cfg(feature = "stego")]
 pub use stego::jpeg::cost::UerdCostModel;
+#[cfg(feature = "stego")]
 pub use stego::jpeg::engine::{embed_jpeg as embed, extract_jpeg as extract};
+#[cfg(feature = "stego")]
 pub use stego::params::{ExtractParams, JpegParams};
+#[cfg(feature = "stego")]
 pub use stego::traits::JpegCostModel;

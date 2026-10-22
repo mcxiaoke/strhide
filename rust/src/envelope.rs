@@ -39,15 +39,8 @@
 
 use crate::errors::StrHideError;
 use crate::params::Profile;
+pub use crate::params::{STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC};
 use std::io::{Read, Seek, SeekFrom};
-
-/// Standard high-entropy binary header magic (8 bytes): SHA-256("strhide-standard-header-v2")[..8]
-/// Pure pseudorandom binary bytes: eliminates all static ASCII strings ("STRHIDE") from forensic scans.
-pub const STANDARD_HEADER_MAGIC: [u8; 8] = [0xb7, 0x54, 0x2c, 0x82, 0x7e, 0x31, 0x1d, 0x6e];
-
-/// Standard high-entropy binary trailer magic (4 bytes): SHA-256("strhide-standard-trailer-v2")[..4]
-/// Pure pseudorandom binary bytes: eliminates all static ASCII strings ("STH!") from forensic scans.
-pub const STANDARD_TRAILER_MAGIC: [u8; 4] = [0x78, 0xe6, 0x66, 0xd2];
 
 /// Largest strategy ID in [`crate::router::STRATEGY_REGISTRY`].
 ///

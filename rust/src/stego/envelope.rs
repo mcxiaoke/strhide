@@ -93,11 +93,20 @@ const COMPRESSION_DEFLATE: u8 = 0;
 ///
 /// If `domain` is `None` or empty, returns `None`, indicating that caller should use `ikm` directly.
 pub fn derive_domain_subkey(ikm: &[u8], domain: Option<&str>) -> Option<[u8; 32]> {
+    derive_domain_subkey_with_label(ikm, domain, b"strhide-stego-domain-v1")
+}
+
+/// Derive a domain subkey using an explicit domain separation label.
+pub fn derive_domain_subkey_with_label(
+    ikm: &[u8],
+    domain: Option<&str>,
+    label: &[u8],
+) -> Option<[u8; 32]> {
     let d = domain.filter(|s| !s.is_empty())?;
     let norm_d = normalize_nfc(d);
     let len_bytes = (norm_d.len() as u64).to_be_bytes();
-    let mut info = Vec::with_capacity(23 + 8 + norm_d.len());
-    info.extend_from_slice(b"strhide-stego-domain-v1");
+    let mut info = Vec::with_capacity(label.len() + 8 + norm_d.len());
+    info.extend_from_slice(label);
     info.extend_from_slice(&len_bytes);
     info.extend_from_slice(norm_d.as_bytes());
 
@@ -116,19 +125,29 @@ pub fn derive_domain_subkey(ikm: &[u8], domain: Option<&str>) -> Option<[u8; 32]
 /// this: its header seed comes from the suite KDF over the cover digest, so an
 /// attacker cannot trial a password without paying a full KDF.
 pub fn derive_header_perm_seed(password: Option<&str>, domain: Option<&str>) -> [u8; 32] {
-    let pw = password.unwrap_or(PUBLIC_DEFAULT_SECRET);
+    derive_header_perm_seed_with_profile(password, domain, &crate::stego::format::OFFICIAL_SPATIAL)
+}
+
+/// [`derive_header_perm_seed`] with explicit spatial profile settings.
+pub fn derive_header_perm_seed_with_profile(
+    password: Option<&str>,
+    domain: Option<&str>,
+    spatial: &crate::stego::format::SpatialFormatProfile,
+) -> [u8; 32] {
+    let pw = password.unwrap_or(spatial.fallback_secret);
     let norm_pw = normalize_nfc(pw);
     let subkey_buf;
-    let effective_ikm: &[u8] = match derive_domain_subkey(norm_pw.as_bytes(), domain) {
-        Some(subkey) => {
-            subkey_buf = subkey;
-            &subkey_buf
-        }
-        None => norm_pw.as_bytes(),
-    };
+    let effective_ikm: &[u8] =
+        match derive_domain_subkey_with_label(norm_pw.as_bytes(), domain, spatial.domain_label) {
+            Some(subkey) => {
+                subkey_buf = subkey;
+                &subkey_buf
+            }
+            None => norm_pw.as_bytes(),
+        };
     let mut header_seed = [0u8; 32];
-    let hk = Hkdf::<Sha256>::new(Some(b"strhide-stego-hpos-salt-v2"), effective_ikm);
-    hk.expand(b"strhide-stego-hpos-v2", &mut header_seed)
+    let hk = Hkdf::<Sha256>::new(Some(spatial.hpos_salt), effective_ikm);
+    hk.expand(spatial.hpos_label, &mut header_seed)
         .expect("HKDF expand header perm seed");
     header_seed
 }
@@ -139,9 +158,14 @@ pub fn derive_header_perm_seed(password: Option<&str>, domain: Option<&str>) -> 
 /// [`crate::stego::format::stc_seed`] so the label and salt layering follow the
 /// format profile.
 pub fn derive_stc_seed(perm_seed: &[u8; 32], salt: &[u8]) -> u64 {
+    derive_stc_seed_with_label(perm_seed, salt, b"strhide-stc-trellis-v1")
+}
+
+/// [`derive_stc_seed`] with an explicit label.
+pub fn derive_stc_seed_with_label(perm_seed: &[u8; 32], salt: &[u8], stc_label: &[u8]) -> u64 {
     let hk = Hkdf::<Sha256>::new(Some(salt), perm_seed);
     let mut out = [0u8; 8];
-    hk.expand(b"strhide-stc-trellis-v1", &mut out)
+    hk.expand(stc_label, &mut out)
         .expect("HKDF expand stc trellis seed");
     u64::from_be_bytes(out)
 }

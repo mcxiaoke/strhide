@@ -14,6 +14,12 @@ keywords = ["steganography", "stego", "data-hiding", "security", "lossless"]
 categories = ["cryptography", "multimedia", "command-line-utilities"]
 exclude = ["tests/"]
 
+[features]
+default = ["engine", "stego", "cli"]
+engine  = ["dep:filetime", "dep:iced-x86", "dep:serde_json"]
+stego   = ["dep:dct-io"]
+cli     = ["engine", "stego", "dep:clap", "dep:rpassword", "dep:toml", "dep:base64", "dep:jpeg-decoder", "dep:serde_json"]
+
 [lib]
 name = "strhide"
 path = "src/lib.rs"
@@ -21,28 +27,30 @@ path = "src/lib.rs"
 [[bin]]
 name = "strhide"
 path = "src/main.rs"
+required-features = ["cli"]
 
 [dependencies]
 aes-gcm = "0.11.1"
-base64 = "0.23.1"
-clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 crc32fast = "1.5.2"
-dct-io = "0.1"
-filetime = "0.2.29"
 flate2 = "1.1.10"
 hkdf = "0.13.0"
 hmac = "0.13.0"
-iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "encoder"] }
-jpeg-decoder = "0.3.2"
 pbkdf2 = "0.13.0"
 rand = "0.10.3"
-rpassword = "7.5.4"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
 sha2 = "0.11.1"
 thiserror = "2.0.21"
-toml = "0.9"
 unicode-normalization = "0.1.25"
+
+base64 = { version = "0.23.1", optional = true }
+clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context"], optional = true }
+dct-io = { version = "0.1", optional = true }
+filetime = { version = "0.2.29", optional = true }
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "encoder"], optional = true }
+jpeg-decoder = { version = "0.3.2", optional = true }
+rpassword = { version = "7.5.4", optional = true }
+serde_json = { version = "1.0.154", optional = true }
+toml = { version = "0.9", optional = true }
 
 [dev-dependencies]
 rayon = "1.10"
