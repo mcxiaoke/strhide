@@ -16,6 +16,9 @@ use strhide::engine::{
 use strhide::errors::StrHideError;
 use strhide::params::{LocalParams, Profile};
 
+mod common;
+use common::scratch;
+
 const PNG: &[u8] = include_bytes!("assets/minimal.png");
 const PASSWORD: &str = "ByteApiP@ssw0rd2026!";
 
@@ -418,14 +421,7 @@ fn profile_compatibility_matrix() {
 // --- helpers ---------------------------------------------------------------
 
 fn tempdir() -> std::path::PathBuf {
-    let mut p = std::env::temp_dir();
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    p.push(format!("strhide-bytes-api-{}-{nonce}", std::process::id()));
-    std::fs::create_dir_all(&p).expect("create temp dir");
-    p
+    scratch("bytes_api")
 }
 
 fn cleanup(dir: std::path::PathBuf) {

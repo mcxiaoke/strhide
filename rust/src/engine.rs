@@ -1432,6 +1432,47 @@ pub fn write_carrier_with(
     })
 }
 
+/// Safely commit stego bytes to `target_path` with an atomic rename, a
+/// crash-safe temporary file guard, collision-free `.bak` backup on in-place
+/// writes, and preservation of the original carrier's permissions and timestamps.
+pub fn commit_carrier_bytes(
+    carrier_path: &Path,
+    target_path: &Path,
+    stego_bytes: &[u8],
+    backup: bool,
+    preserve_time: bool,
+) -> Result<Option<PathBuf>, StrHideError> {
+    let meta = std::fs::metadata(carrier_path)?;
+    let orig_permissions = meta.permissions();
+    let orig_atime = filetime::FileTime::from_last_access_time(&meta);
+    let orig_mtime = filetime::FileTime::from_last_modification_time(&meta);
+
+    let is_inplace = same_file(target_path, carrier_path);
+    let mut backup_path = None;
+    if is_inplace && backup {
+        let bak = next_backup_path(carrier_path);
+        std::fs::copy(carrier_path, &bak)?;
+        backup_path = Some(bak);
+    }
+
+    let mut tmp_os = target_path.as_os_str().to_os_string();
+    tmp_os.push(".strhide.tmp");
+    let tmp_target = PathBuf::from(tmp_os);
+    let mut tmp_guard = TmpGuard::new(tmp_target.clone());
+
+    std::fs::write(&tmp_target, stego_bytes)?;
+
+    std::fs::rename(&tmp_target, target_path)?;
+    tmp_guard.commit();
+
+    let _ = std::fs::set_permissions(target_path, orig_permissions);
+    if preserve_time {
+        let _ = filetime::set_file_times(target_path, orig_atime, orig_mtime);
+    }
+
+    Ok(backup_path)
+}
+
 /// Inject `source` into an in-memory carrier, returning the stego bytes.
 ///
 /// Same protocol and same self-verification as [`write_carrier_with`], minus
@@ -1717,6 +1758,117 @@ fn read_core(
         filename: meta_obj.filename,
         raw_size: meta_obj.raw_size,
     })
+}
+
+/// Streamingly verify Level 3 payload decryption and SHA-256 for `host`,
+/// enforcing a 1 GiB limit and using minimal memory (~4 MiB chunk buffer).
+fn verify_l3_stream(
+    host: &mut dyn SeekRead,
+    label: &str,
+    password: Option<&str>,
+    profile: &Profile,
+) -> Result<u64, StrHideError> {
+    host.seek(SeekFrom::Start(0))?;
+    let adapter = find_adapter_or_reject(host, label)?;
+
+    let Located {
+        location,
+        stealth_header_magic,
+    } = locate_envelope_with_magic(host, adapter, password, profile)?;
+
+    let (ube_offset, ube_total_size, strategy_name) = match location {
+        Some(l) => l,
+        None => {
+            return Err(no_hidden_data_error(
+                host,
+                adapter,
+                label,
+                password.is_some(),
+            ));
+        }
+    };
+
+    let mut ube_stream =
+        adapter.open_ube_reader(host, ube_offset, ube_total_size, &strategy_name)?;
+
+    let mut header_bytes = [0u8; HEADER_SIZE];
+    ube_stream.read_exact(&mut header_bytes)?;
+
+    let mut salt = [0u8; 16];
+    salt.copy_from_slice(&header_bytes[12..28]);
+    let secrets = UnpackSecrets {
+        password: match password {
+            Some(pwd) => Some(derive_all(pwd, &salt)?),
+            None => None,
+        },
+        default: if password.is_none() {
+            Some(derive_all(profile.secret(), &salt)?)
+        } else {
+            None
+        },
+        stealth_header_magic,
+    };
+    let header = EnvelopeHeader::unpack_with_secrets(&header_bytes, password, profile, &secrets)?;
+    header.validate_against(ube_total_size)?;
+
+    // Skip hint if present
+    if header.hint_len > 0 {
+        ube_stream.seek(SeekFrom::Current(header.hint_len as i64))?;
+    }
+
+    let fixed_header_aad = header.get_aad();
+
+    let (payload_key, meta_key) = if header.is_encrypted() {
+        secrets.password.as_ref().map_or_else(
+            || {
+                Err(StrHideError::Password(
+                    "Password required to extract hidden data".into(),
+                ))
+            },
+            |s| Ok((s.payload_key, s.meta_key)),
+        )?
+    } else {
+        match &secrets.default {
+            Some(s) => (s.payload_key, s.meta_key),
+            None => derive_keys(profile.secret(), &header.salt)?,
+        }
+    };
+
+    // Read metadata
+    let mut meta_bytes = vec![0u8; header.meta_len as usize];
+    ube_stream.read_exact(&mut meta_bytes)?;
+
+    let meta_obj = decrypt_metadata(
+        &meta_bytes,
+        &meta_key,
+        &header.base_nonce,
+        &fixed_header_aad,
+    )
+    .map_err(|_| StrHideError::Password("Invalid password or corrupted metadata".into()))
+    .and_then(|plain| decode_metadata(&plain, header.is_compact_meta()))?;
+
+    let total_payload_bytes = ube_total_size
+        .checked_sub(HEADER_SIZE as u64)
+        .and_then(|v| v.checked_sub(header.hint_len as u64))
+        .and_then(|v| v.checked_sub(header.meta_len as u64))
+        .and_then(|v| v.checked_sub(24))
+        .ok_or_else(|| {
+            StrHideError::CorruptedData(
+                "Envelope size fields inconsistent: payload region underflow".into(),
+            )
+        })?;
+
+    crate::crypto::verify_payload_stream(
+        &mut ube_stream,
+        &payload_key,
+        &header.base_nonce,
+        &fixed_header_aad,
+        total_payload_bytes,
+        header.is_compressed(),
+        meta_obj.raw_size,
+        &meta_obj.raw_sha256,
+        crate::crypto::MAX_VERIFY_PAYLOAD_SIZE,
+    )
 }
 
 /// Write the recovered payload to `out_p`, returning the path actually used.
@@ -2440,10 +2592,14 @@ pub fn verify_carrier_with(
     // *did* run and failed (wrong password, corrupted payload) behind the same
     // boolean as this one.
     let l3 = if !is_encrypted || password.is_some() {
-        match read_carrier_with_profile(carrier_path, None, password, false, profile) {
-            Ok(res) => LevelStatus::pass(format!(
-                "Decryption and SHA-256 verified successfully (payload {} bytes)",
-                res.raw_size
+        match verify_l3_stream(
+            &mut cf,
+            &carrier_path.display().to_string(),
+            password,
+            profile,
+        ) {
+            Ok(raw_size) => LevelStatus::pass(format!(
+                "Decryption and SHA-256 verified successfully (payload {raw_size} bytes)"
             )),
             Err(e) => LevelStatus::fail(e.to_string()),
         }

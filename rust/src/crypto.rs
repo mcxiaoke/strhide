@@ -35,7 +35,11 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit, Payload},
 };
-use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
+use flate2::{
+    Compression,
+    read::DeflateDecoder,
+    write::{DeflateDecoder as WriteDeflateDecoder, DeflateEncoder},
+};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use unicode_normalization::UnicodeNormalization;
@@ -594,6 +598,111 @@ pub fn compute_stream_sha256<R: Read + ?Sized>(reader: &mut R) -> Result<[u8; 32
         hasher.update(&buf[..n]);
     }
     Ok(hasher.finalize().into())
+}
+
+/// Maximum payload size allowed during verification (1 GiB) to prevent OOM
+/// and zip-bomb style resource exhaustion from untrusted/crafted carriers.
+pub const MAX_VERIFY_PAYLOAD_SIZE: u64 = 1024 * 1024 * 1024;
+
+struct VerifySha256Writer {
+    hasher: Sha256,
+    total_bytes: u64,
+    limit: u64,
+}
+
+impl Write for VerifySha256Writer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.total_bytes = self.total_bytes.saturating_add(buf.len() as u64);
+        if self.total_bytes > self.limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Decompressed payload exceeds maximum verification limit ({} bytes)",
+                    self.limit
+                ),
+            ));
+        }
+        self.hasher.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Streamingly decrypt and verify payload against `expected_sha256` and `expected_raw_size`,
+/// enforcing a hard memory/byte limit of [`MAX_VERIFY_PAYLOAD_SIZE`] (1 GiB) without
+/// allocating the full payload in memory.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_payload_stream<R: Read>(
+    reader: &mut R,
+    payload_key: &[u8; 32],
+    base_nonce: &[u8; 12],
+    fixed_header_aad: &[u8; AAD_SIZE],
+    total_payload_bytes: u64,
+    is_compressed: bool,
+    expected_raw_size: u64,
+    expected_sha256: &str,
+    limit: u64,
+) -> Result<u64, StrHideError> {
+    if total_payload_bytes > limit || expected_raw_size > limit {
+        return Err(StrHideError::General(format!(
+            "Payload size (declared raw: {expected_raw_size}B, encrypted: {total_payload_bytes}B) exceeds verification limit ({limit}B)"
+        )));
+    }
+
+    let sha_writer = VerifySha256Writer {
+        hasher: Sha256::new(),
+        total_bytes: 0,
+        limit,
+    };
+
+    let final_writer = if is_compressed {
+        let mut deflate_decoder = WriteDeflateDecoder::new(sha_writer);
+        decrypt_stream_from_chunks(
+            reader,
+            &mut deflate_decoder,
+            payload_key,
+            base_nonce,
+            fixed_header_aad,
+            total_payload_bytes,
+        )?;
+        deflate_decoder
+            .finish()
+            .map_err(|e| StrHideError::CorruptedData(format!("Deflate decompression error: {e}")))?
+    } else {
+        let mut writer = sha_writer;
+        decrypt_stream_from_chunks(
+            reader,
+            &mut writer,
+            payload_key,
+            base_nonce,
+            fixed_header_aad,
+            total_payload_bytes,
+        )?;
+        writer
+    };
+
+    if final_writer.total_bytes != expected_raw_size {
+        return Err(StrHideError::CorruptedData(format!(
+            "Payload size mismatch: recovered {} bytes, metadata declared {}",
+            final_writer.total_bytes, expected_raw_size
+        )));
+    }
+
+    let digest = final_writer.hasher.finalize();
+    let actual_sha256 = digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    if actual_sha256 != expected_sha256 {
+        return Err(StrHideError::CorruptedData(format!(
+            "Payload SHA-256 mismatch: {actual_sha256} != {expected_sha256}"
+        )));
+    }
+
+    Ok(final_writer.total_bytes)
 }
 
 /// Streamed SHA-256 of a file on disk.

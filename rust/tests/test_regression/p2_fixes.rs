@@ -287,3 +287,83 @@ fn mp4_verify_accepts_valid_carrier_with_envelope() {
         res.level1_host.detail
     );
 }
+
+#[test]
+fn test_verify_payload_stream_limit_rejection() {
+    let payload = b"hello streaming verification world";
+    let key = [0x42u8; 32];
+    let nonce = [0x11u8; 12];
+    let aad = [0xaau8; 80];
+
+    let mut cipher = Vec::new();
+    let cipher_len = strhide::crypto::encrypt_stream_to_chunks(
+        &mut std::io::Cursor::new(payload),
+        &mut cipher,
+        &key,
+        &nonce,
+        &aad,
+        4096,
+    )
+    .unwrap();
+
+    let sha = strhide::crypto::compute_sha256(payload);
+    let sha_str = sha.iter().map(|b| format!("{b:02x}")).collect::<String>();
+
+    // Normal verification under ample limit succeeds
+    let verified_len = strhide::crypto::verify_payload_stream(
+        &mut std::io::Cursor::new(&cipher),
+        &key,
+        &nonce,
+        &aad,
+        cipher_len,
+        false,
+        payload.len() as u64,
+        &sha_str,
+        1024,
+    )
+    .expect("verify succeeds within limit");
+    assert_eq!(verified_len, payload.len() as u64);
+
+    // Limit exceeded: declared raw size > limit rejects immediately
+    let err = strhide::crypto::verify_payload_stream(
+        &mut std::io::Cursor::new(&cipher),
+        &key,
+        &nonce,
+        &aad,
+        cipher_len,
+        false,
+        payload.len() as u64,
+        &sha_str,
+        payload.len() as u64 - 1,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("exceeds verification limit"));
+}
+
+#[test]
+fn test_commit_carrier_bytes_atomic_and_backup() {
+    let dir = scratch("commit_carrier");
+    let carrier = dir.join("carrier.png");
+    let target = dir.join("carrier.png"); // in-place
+    fs::write(&carrier, make_png()).unwrap();
+
+    let stego_bytes = b"new stego content";
+    let bak1 = strhide::engine::commit_carrier_bytes(&carrier, &target, stego_bytes, true, true)
+        .unwrap()
+        .expect("in-place backup created");
+
+    assert!(bak1.exists());
+    assert_eq!(fs::read(&bak1).unwrap(), make_png());
+    assert_eq!(fs::read(&target).unwrap(), stego_bytes);
+
+    // Second commit: backup must not overwrite existing bak1
+    let bak2 =
+        strhide::engine::commit_carrier_bytes(&carrier, &target, b"another round", true, true)
+            .unwrap()
+            .expect("second backup created");
+
+    assert!(bak2.exists());
+    assert_ne!(bak1, bak2);
+    assert_eq!(fs::read(&bak1).unwrap(), make_png());
+    assert_eq!(fs::read(&bak2).unwrap(), stego_bytes);
+}

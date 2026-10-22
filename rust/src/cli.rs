@@ -2186,10 +2186,33 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
 
         let target =
             resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;
-        if let Some(dest) = target {
-            check_overwrite(&dest, args.overwrite)?;
-            std::fs::write(&dest, &stego_bytes)?;
-            if !quiet {
+        if let Some(ref dest) = target {
+            check_overwrite(dest, args.overwrite)?;
+        }
+        let dest = target.unwrap_or_else(|| carrier.to_path_buf());
+
+        let backup = !args.no_backup && cfg.backup.unwrap_or(true);
+        let backup_created =
+            crate::engine::commit_carrier_bytes(carrier, &dest, &stego_bytes, backup, true)?;
+
+        if let Some(ref bak) = backup_created
+            && !quiet
+        {
+            println!("{}", t!(Msg::InfoBackupCreated, path = bak.display()));
+        }
+
+        if !quiet {
+            let is_inplace = crate::engine::same_file(carrier, &dest);
+            if is_inplace {
+                println!(
+                    "{}",
+                    t!(
+                        Msg::EmbedOkInPlace,
+                        bytes = payload_bytes.len(),
+                        carrier = carrier.display()
+                    )
+                );
+            } else {
                 println!(
                     "{}",
                     t!(
@@ -2197,28 +2220,6 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
                         bytes = payload_bytes.len(),
                         carrier = carrier.display(),
                         dest = dest.display()
-                    )
-                );
-            }
-        } else {
-            if !args.no_backup {
-                let bak_path = carrier.with_extension(format!(
-                    "{}.bak",
-                    carrier.extension().and_then(|s| s.to_str()).unwrap_or("")
-                ));
-                std::fs::write(&bak_path, &carrier_bytes)?;
-                if !quiet {
-                    println!("{}", t!(Msg::InfoBackupCreated, path = bak_path.display()));
-                }
-            }
-            std::fs::write(carrier, &stego_bytes)?;
-            if !quiet {
-                println!(
-                    "{}",
-                    t!(
-                        Msg::EmbedOkInPlace,
-                        bytes = payload_bytes.len(),
-                        carrier = carrier.display()
                     )
                 );
             }

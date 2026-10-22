@@ -436,8 +436,9 @@ P0 / P1 全部完成；P2 完成绝大部分；§5（过度防御）与 §7（�
 | F1 | ✅ 已修 | `crypto::framed_len` / `chunk_count` / `AEAD_TAG_LEN` + 一致性测试 |
 | D2 | ✅ 已修 | `coding::slots_for_codec` 两引擎共用 |
 | D10 | ✅ 已修 | 删除 `has_hint`、`pack_with_stealth_mask`、`validate_stc_u_wide` 别名 |
-| P2-5 | ⏸ 未做 | `verify` L3 仍整条重读载荷（性能项，改动面涉读取主路径，留待单独评估） |
-| P2-13 | ⏸ 未做 | CLI `embed` 落盘仍为直接 `fs::write`（无 temp+rename / 权限时间戳保留） |
+| P2-5 | ✅ 已修 | crypto::verify_payload_stream 流式解密校验 + 1 GiB 上限，消除全量驻留 |
+| P2-13 | ✅ 已修 | ngine::commit_carrier_bytes 原子重命名 + TmpGuard + next_backup_path 防碰撞 + 权限时间戳保留 |
+| gmf#1 | ✅ 已修 | pi_bytes.rs tempdir 统一改用 common::scratch |
 | §5 过度防御 | ⏸ 未做 | 均为"多一层无害检查"，改动收益低于风险，保留 |
 | §7 安全观察 | 📝 已记录 | S1/S2 属已知取舍，建议在 `docs/` 单独成文，未在代码层改动 |
 
