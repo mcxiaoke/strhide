@@ -145,6 +145,8 @@ pub mod stego;
 // derivation labels, then call `embed` / `extract` with it. Nothing in the
 // library has to be edited, and there is no CLI switch for the format identity
 // (a switchable format is an enumerable format).
-pub use stego::format::{DEFAULT_FORMAT, FormatProfile, GridRule};
+pub use stego::format::{CipherSuite, DEFAULT_FORMAT, FormatProfile, GridRule};
+pub use stego::jpeg::cost::UerdCostModel;
 pub use stego::jpeg::engine::{embed_jpeg as embed, extract_jpeg as extract};
 pub use stego::params::{ExtractParams, JpegParams};
+pub use stego::traits::JpegCostModel;

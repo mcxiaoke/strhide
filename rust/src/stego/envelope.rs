@@ -274,7 +274,7 @@ pub fn unpack_envelope_parts(
             )));
         }
         if body.len() != orig_len {
-            return Err(StrHideError::NoHiddenData(
+            return Err(StrHideError::CorruptedData(
                 "Plaintext length mismatch".into(),
             ));
         }
@@ -296,9 +296,9 @@ pub fn unpack_envelope_parts(
     let mut decompressed = Vec::with_capacity(orig_len);
     decoder
         .read_to_end(&mut decompressed)
-        .map_err(|_| StrHideError::NoHiddenData("Decompression failed".into()))?;
+        .map_err(|_| StrHideError::CorruptedData("Decompression failed".into()))?;
     if decompressed.len() != orig_len {
-        return Err(StrHideError::NoHiddenData(
+        return Err(StrHideError::CorruptedData(
             "Decompressed length mismatch".into(),
         ));
     }

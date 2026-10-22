@@ -234,7 +234,7 @@ pub fn estimate(data: &[u8]) -> Option<CalibrationEstimate> {
     // Pair-imbalance statistic.
     //
     // LSB replacement moves counts inside an even/odd magnitude pair
-    // (`2i <-> 2i+1`, `|c| >= 2`), so the *pair imbalance* `|A_even - A_odd|`
+    // (`2i <-> 2i+1`, `|c| >= 0`, including `(0, 1)`), so the *pair imbalance* `|A_even - A_odd|`
     // shrinks by roughly `(1 - rate)` while the calibrated reference keeps the
     // clean imbalance. Summing over pairs and AC modes gives a rate estimate
     // that is both image-relative and insensitive to how many coefficients a

@@ -536,24 +536,21 @@ crate::i18n_messages! {
     HelpStegoNeighborWeight:
         en = "Fine-tune (JPEG UERD): weight applied to 8-neighborhood block energies (default: 0.25)",
         zh = "微调参数（JPEG UERD）：8 邻域块能量权重（默认: 0.25）";
-    HelpStegoMinAbsCoeff:
-        en = "Fine-tune (JPEG UERD): minimum absolute AC coefficient eligible for embedding (default: 2)",
-        zh = "微调参数（JPEG UERD）：允许修改的最小绝对值 AC 系数（默认: 2）";
     HelpStegoP1Window:
         en = "Fine-tune (Spatial HILL): first-stage low-pass filter window size (odd, default: 3)",
         zh = "微调参数（空域 HILL）：第一级低通滤波器窗口尺寸（奇数，默认: 3）";
     HelpStegoP2Window:
         en = "Fine-tune (Spatial HILL): second-stage low-pass filter window size (odd, default: 15)",
         zh = "微调参数（空域 HILL）：第二级低通滤波器窗口尺寸（奇数，默认: 15）";
-    HelpStegoCodec:
-        en = "Matrix-coding layer for PNG payload bits: auto (default), stc, or hamming. JPEG always uses ternary STC",
-        zh = "PNG 载荷比特矩阵编码层：auto（默认）、stc 或 hamming；JPEG 固定使用三元 STC";
     HelpStegoStcH:
-        en = "Fine-tune (STC): trellis constraint height, 4..10 (default: 8)",
-        zh = "微调参数（STC）：网格约束高度，4..10（默认: 8）";
-    HelpStegoStcU:
-        en = "Fine-tune (PNG STC): elements per syndrome row, 1..3 (default: 0 for auto); JPEG derives it from --slot-budget",
-        zh = "微调参数（PNG STC）：每个校验子行的元素数，1..3（默认: 0 自动）；JPEG 由 --slot-budget 推导";
+        en = "Fine-tune (STC): trellis constraint height, 4..=10 (default: 8)",
+        zh = "微调参数（STC）：网格约束高度，4..=10（默认: 8）";
+    HelpStegoSlotBudget:
+        en = "Fine-tune (JPEG STC): slot budget for group size auto-derivation (default: 1200000; dynamically scaled for large carriers)",
+        zh = "微调参数（JPEG STC）：组宽自推导的槽位预算（默认: 1200000；大图自适应伸缩）";
+    HelpStegoCipherSuite:
+        en = "Cipher suite id (1 = PBKDF2-200k / AES-256-GCM, 2 = PBKDF2-600k / AES-256-GCM; default: 1)",
+        zh = "密码套件编号（1 = PBKDF2-200k / AES-256-GCM, 2 = PBKDF2-600k / AES-256-GCM；默认: 1）";
 
     // ---- Config warnings ----
     WarnConfigUnknownKey:
@@ -697,8 +694,8 @@ crate::i18n_messages! {
         en = "  Total elements:  {val}",
         zh = "  总元素数:     {val}";
     StegoProbePayloadSlots:
-        en = "  Payload slots:   {val} bits (body only; header slots excluded)",
-        zh = "  载荷槽位:     {val} 比特（仅主体；已排除头部槽位）";
+        en = "  Payload slots:   {val} slots (body only; header slots excluded)",
+        zh = "  载荷槽位:     {val} 个（仅主体；已排除头部槽位）";
     StegoProbeMaxRaw:
         en = "  Max raw payload: {bytes} bytes ({kib:.1} KiB)",
         zh = "  最大原始载荷: {bytes} 字节 ({kib:.1} KiB)";

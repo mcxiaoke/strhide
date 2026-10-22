@@ -11,8 +11,8 @@
 //!
 //! * [`luma_ac_symbols`] — the AC symbol set of the table the first scan
 //!   component uses (the luminance table in every baseline file);
-//! * [`zero_run_before`] — the `r` part of a symbol for a coefficient position,
-//!   from the cover block;
+//! * [`can_encode_move`] — check whether a candidate coefficient move leaves
+//!   the block encodable;
 //! * [`first_missing_symbol`] — replay the AC symbol sequence of a *stego* block
 //!   and report the first symbol the table cannot encode.
 //!
@@ -90,7 +90,7 @@ impl AcSymbolSet {
 
     /// Whether no symbol is defined at all.
     pub fn is_empty(&self) -> bool {
-        self.present.iter().all(|&p| !p)
+        self.len() == 0
     }
 }
 
@@ -141,8 +141,8 @@ pub fn luma_ac_symbols(jpeg: &[u8]) -> Option<AcSymbolSet> {
                 if payload.len() < 4 {
                     return None;
                 }
-                let ta = payload[2] & 0x0F;
-                return ac_tables[ta as usize];
+                let ta = (payload[2] & 0x0F) as usize;
+                return ac_tables.get(ta).copied().flatten();
             }
             0xDB | 0xC0 | 0xC1 | 0xC2 | 0xDD | 0xE0..=0xEF | 0xFE => {}
             _ => return None,
@@ -187,32 +187,7 @@ pub fn category(v: i16) -> u8 {
 }
 
 /// Zero run in front of zigzag position `zz` (`1..=63`) of a block.
-///
-/// Both the encoder in `dct-io` and this function reset the counter at every 16
-/// zeros (a ZRL is emitted), so the run a symbol carries is `zeros % 16`, not the
-/// raw zero count.
-pub fn zero_run_before(block: &[i16; 64], zz: usize) -> u8 {
-    let mut run = 0usize;
-    let mut i = zz;
-    while i > 1 {
-        i -= 1;
-        if block[ZIGZAG[i] as usize] == 0 {
-            run += 1;
-            if run == 16 {
-                return 0;
-            }
-        } else {
-            break;
-        }
-    }
-    run as u8
-}
-
 /// Zero run in front of every natural coefficient index, in one zigzag pass.
-///
-/// `runs[k]` is what [`zero_run_before`] would return for `k`'s zigzag position,
-/// so a caller that checks many positions of the same block pays for one pass
-/// instead of one backward scan per position.
 pub fn zero_runs(block: &[i16; 64]) -> [u8; 64] {
     let mut runs = [0u8; 64];
     let mut run = 0u8;
@@ -228,19 +203,11 @@ pub fn zero_runs(block: &[i16; 64]) -> [u8; 64] {
     runs
 }
 
-/// The symbol a coefficient at natural index `k` would be encoded with, if it
-/// held `value`.
-///
-/// `None` means the move is *structural*: the coefficient appears or disappears,
-/// so it changes the run of every later coefficient in the block and cannot be
-/// judged slot by slot. Those moves are left to the post-write replay.
-pub fn symbol_for_value(block: &[i16; 64], k: usize, value: i16) -> Option<u8> {
-    let cat = category(value);
-    if cat == 0 {
-        return None;
-    }
-    let run = zero_run_before(block, ZZ_POS[k] as usize);
-    Some((run << 4) | cat)
+/// Check whether writing `new_val` at natural index `k` leaves the block encodable by `table`.
+pub fn can_encode_move(block: &[i16; 64], k: usize, new_val: i16, table: &AcSymbolSet) -> bool {
+    let mut modified = *block;
+    modified[k] = new_val;
+    first_missing_symbol(&modified, table).is_none()
 }
 
 /// Replay the AC symbol sequence of a block and report the first symbol the
@@ -407,34 +374,27 @@ mod tests {
     }
 
     #[test]
-    fn zero_run_counts_backwards_and_resets_at_16() {
-        let mut block = [0i16; 64];
-        // Zigzag positions 1..=3 zero, position 4 non-zero.
-        block[ZIGZAG[4] as usize] = 5;
-        assert_eq!(zero_run_before(&block, 4), 3);
-        assert_eq!(zero_run_before(&block, 5), 0);
+    fn test_can_encode_move() {
+        let mut full = AcSymbolSet::EMPTY;
+        for s in full_symbol_set() {
+            full.insert(s);
+        }
+        let block = [0i16; 64];
+        assert!(can_encode_move(&block, 1, 1, &full));
 
-        // 16 zeros in a row means a ZRL is emitted, so the run restarts.
-        let mut block = [0i16; 64];
-        block[ZIGZAG[17] as usize] = 1;
-        assert_eq!(zero_run_before(&block, 17), 0);
-        // 15 zeros do not.
-        let mut block = [0i16; 64];
-        block[ZIGZAG[16] as usize] = 1;
-        assert_eq!(zero_run_before(&block, 16), 15);
+        let mut sparse = full;
+        sparse.present[0x01] = false; // run 0, cat 1
+        assert!(!can_encode_move(&block, 1, 1, &sparse));
     }
 
     #[test]
-    fn symbol_for_value_reports_structural_moves_as_none() {
-        let mut block = [0i16; 64];
-        block[ZIGZAG[2] as usize] = -3;
-        // Grown to 2 at the same position: run 1 (one zero in front), category 2.
-        assert_eq!(
-            symbol_for_value(&block, ZIGZAG[2] as usize, -4),
-            Some((1 << 4) | 3)
-        );
-        // Collapsing to zero changes the structure of the block.
-        assert_eq!(symbol_for_value(&block, ZIGZAG[2] as usize, 0), None);
+    fn test_luma_ac_symbols_out_of_bounds_ta() {
+        // Construct minimal JPEG segment with SOS having Ta = 15 (>= 4).
+        let mut jpeg = vec![0xFF, 0xD8]; // SOI
+        // SOS with Ta = 15
+        jpeg.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x0F, 0x00, 0x3F, 0x00]);
+        jpeg.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        assert_eq!(luma_ac_symbols(&jpeg), None);
     }
 
     #[test]

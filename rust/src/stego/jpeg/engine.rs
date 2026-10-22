@@ -177,8 +177,11 @@ fn plan_slots(
         sparse_overrides: table.map(|_| Vec::with_capacity(slots.len())),
     };
 
-    let mut last_block = usize::MAX;
-    let mut runs = [0u8; 64];
+    let mut block_runs: Vec<Option<[u8; 64]>> = if table.is_some() {
+        vec![None; blocks.len()]
+    } else {
+        Vec::new()
+    };
 
     for &idx in slots {
         let (bi, k) = v3_layout::slot_to_coeff(idx, rule);
@@ -188,22 +191,33 @@ fn plan_slots(
         let mut allow_minus = matches!(legal, Move::Both | Move::MinusOnly);
 
         // A move that crosses zero (`0 <-> ±1`) changes the zero pattern of the
-        // block, hence the run of later coefficients: no slot-level test can
-        // predict it, only the block-level replay in `first_missing_symbol`.
+        // block, hence the run of later coefficients: checked via `can_encode_move`.
         let crosses_zero_plus = coeff == 0 || coeff == -1;
         let crosses_zero_minus = coeff == 0 || coeff == 1;
 
         if let Some(table) = table {
-            if last_block != bi {
-                runs = dht::zero_runs(&blocks[bi]);
-                last_block = bi;
-            }
-            // Crossing zero moves are left to the replay; a move within the
-            // non-zero range has a symbol that can be checked here and now.
-            if !crosses_zero_plus && !direction_encodable(table, &runs, k, coeff + 1) {
+            let runs = match block_runs[bi] {
+                Some(r) => r,
+                None => {
+                    let r = dht::zero_runs(&blocks[bi]);
+                    block_runs[bi] = Some(r);
+                    r
+                }
+            };
+
+            if crosses_zero_plus {
+                if allow_plus && !dht::can_encode_move(&blocks[bi], k, coeff + 1, table) {
+                    allow_plus = false;
+                }
+            } else if allow_plus && !direction_encodable(table, &runs, k, coeff + 1) {
                 allow_plus = false;
             }
-            if !crosses_zero_minus && !direction_encodable(table, &runs, k, coeff - 1) {
+
+            if crosses_zero_minus {
+                if allow_minus && !dht::can_encode_move(&blocks[bi], k, coeff - 1, table) {
+                    allow_minus = false;
+                }
+            } else if allow_minus && !direction_encodable(table, &runs, k, coeff - 1) {
                 allow_minus = false;
             }
         }
@@ -222,14 +236,14 @@ fn plan_slots(
         if let Some(ref mut overrides) = plan.sparse_overrides {
             let plus_cost = if !allow_plus {
                 f64::INFINITY
-            } else if table.is_some() && crosses_zero_plus {
+            } else if crosses_zero_plus {
                 wet_cost
             } else {
                 base
             };
             let minus_cost = if !allow_minus {
                 f64::INFINITY
-            } else if table.is_some() && crosses_zero_minus {
+            } else if crosses_zero_minus {
                 wet_cost
             } else {
                 base * polarize_weight
@@ -378,7 +392,9 @@ pub fn embed_jpeg(
         cover: &cover,
         costs: &costs,
         table: table.as_ref(),
-        password: password.unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
+        password: password
+            .filter(|s| !s.is_empty())
+            .unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
         domain,
     };
     let mut last_error = None;
@@ -497,7 +513,7 @@ fn embed_once(
     let mut touched = vec![false; cover.block_count];
 
     // 1) Superblock: 352 bits through STC(sb_h, sb_u).
-    embed_slots(
+    if let Err(e) = embed_slots(
         &mut work,
         &hdr_slots[..fmt.superblock_slots()],
         fmt,
@@ -509,7 +525,17 @@ fn embed_once(
         fmt.sb_u,
         &superblock_bytes,
         &mut touched,
-    )?;
+    ) {
+        if ctx.table.is_some() && e.to_string().contains("no legal element") {
+            return Err(Attempt {
+                error: StrHideError::UnsupportedFormat(
+                    "This JPEG's Huffman table is over-optimised: it cannot encode the modifications required for this carrier. Please re-save the carrier with a standard (Annex K) table.".into(),
+                ),
+                retryable: false,
+            });
+        }
+        return Err(Attempt::from(e));
+    }
 
     // 2) Extension area: 8 bits per declared byte through STC(ext_h, ext_u).
     if ext_bytes > 0 {
@@ -531,7 +557,7 @@ fn embed_once(
     // 3) Body: the ciphertext, over a keyed permutation of the body grid.
     permute_indices(&mut slots_buf, &perm_seed);
     slots_buf.truncate(layout.body_n);
-    embed_slots(
+    if let Err(e) = embed_slots(
         &mut work,
         &slots_buf,
         fmt,
@@ -543,7 +569,17 @@ fn embed_once(
         layout.u,
         &ciphertext,
         &mut touched,
-    )?;
+    ) {
+        if ctx.table.is_some() && e.to_string().contains("no legal element") {
+            return Err(Attempt {
+                error: StrHideError::UnsupportedFormat(
+                    "This JPEG's Huffman table is over-optimised: it cannot encode the modifications required for this payload size. Please reduce payload or re-save the carrier with a standard (Annex K) table.".into(),
+                ),
+                retryable: false,
+            });
+        }
+        return Err(Attempt::from(e));
+    }
 
     if let Some(table) = ctx.table
         && let Some(symbol) = first_missing_symbol(&work, &touched, table)
@@ -666,7 +702,9 @@ pub fn extract_jpeg(
     let n_total = cover.n_total();
     let no_hidden = || StrHideError::NoHiddenData("No valid payload found".into());
 
-    let password = password.unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET);
+    let password = password
+        .filter(|s| !s.is_empty())
+        .unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET);
 
     let mut slots_buf = v3_layout::grid_indices(cover.block_count, fmt.grid_rule);
 
@@ -776,6 +814,9 @@ pub fn extract_jpeg(
                     // field inside the plaintext is a genuine defect, not a
                     // wrong guess.
                     return Err(StrHideError::CorruptedData(message));
+                }
+                Err(StrHideError::UnsupportedVersion(message)) => {
+                    return Err(StrHideError::UnsupportedVersion(message));
                 }
                 Err(_) => continue,
             };
@@ -943,6 +984,8 @@ pub fn layout_for_payload(
     params: &JpegParams,
     fmt: &FormatProfile,
 ) -> Result<Layout, StrHideError> {
+    fmt.validate()?;
+    params.validate()?;
     let coeffs = dct_io::read_coefficients(carrier_bytes).map_err(map_dct_error)?;
     if coeffs.components.is_empty() {
         return Err(StrHideError::UnsupportedFormat(

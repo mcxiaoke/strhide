@@ -97,12 +97,11 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         (_, "enforce-safety") => Msg::HelpEmbedEnforceSafety,
         (_, "exclusion-rate") => Msg::HelpEmbedExclusionRate,
         (_, "neighbor-weight") => Msg::HelpStegoNeighborWeight,
-        (_, "min-abs-coeff") => Msg::HelpStegoMinAbsCoeff,
         (_, "p1-window") => Msg::HelpStegoP1Window,
         (_, "p2-window") => Msg::HelpStegoP2Window,
-        (_, "codec") => Msg::HelpStegoCodec,
         (_, "stc-h") => Msg::HelpStegoStcH,
-        (_, "stc-u") => Msg::HelpStegoStcU,
+        (_, "slot-budget") => Msg::HelpStegoSlotBudget,
+        (_, "cipher-suite") => Msg::HelpStegoCipherSuite,
 
         // write
         ("write", "carrier") => Msg::HelpWriteCarrier,

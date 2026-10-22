@@ -39,8 +39,6 @@ pub const ENVELOPE_LEN_MAX: u32 = (1 << 26) - 1;
 
 /// Codec id: ternary syndrome-trellis codes.
 pub const CODEC_TERNARY_STC: u8 = 0;
-/// Codec id: reserved for Hamming matrix embedding.
-pub const CODEC_HAMMING: u8 = 1;
 
 /// Byte offsets and widths of every superblock field, in wire order.
 ///
@@ -158,30 +156,29 @@ impl Superblock {
                 self.envelope_len
             )));
         }
-        if self.codec_id != CODEC_TERNARY_STC && self.codec_id != CODEC_HAMMING {
+        if self.codec_id != CODEC_TERNARY_STC {
             return Err(StrHideError::UnsupportedVersion(format!(
-                "Unknown matrix-coding id {} in superblock",
+                "Superblock codec_id {} is not supported by this build (expected {CODEC_TERNARY_STC})",
                 self.codec_id
             )));
         }
-        if self.codec_id == CODEC_TERNARY_STC {
-            if !(4..=10).contains(&self.h) {
-                return Err(StrHideError::CorruptedData(format!(
-                    "Superblock STC height {} is outside 4..=10",
-                    self.h
-                )));
-            }
-            if !(1..=64).contains(&self.u) {
-                return Err(StrHideError::CorruptedData(format!(
-                    "Superblock STC group size {} is outside 1..=64",
-                    self.u
-                )));
-            }
+        if !(4..=10).contains(&self.h) {
+            return Err(StrHideError::CorruptedData(format!(
+                "Superblock STC height {} is outside 4..=10",
+                self.h
+            )));
         }
-        if self.components_mask & COMPONENT_Y == 0 {
-            return Err(StrHideError::CorruptedData(
-                "Superblock declares no luminance payload component".into(),
-            ));
+        if !(1..=64).contains(&self.u) {
+            return Err(StrHideError::CorruptedData(format!(
+                "Superblock STC group size {} is outside 1..=64",
+                self.u
+            )));
+        }
+        if self.components_mask != COMPONENT_Y {
+            return Err(StrHideError::UnsupportedVersion(format!(
+                "Superblock components_mask {:#04x} uses unsupported channels",
+                self.components_mask
+            )));
         }
         Ok(())
     }

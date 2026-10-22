@@ -387,15 +387,6 @@ impl JpegParams {
             self.slot_budget
         }
     }
-
-    /// Warn (not fail) when the budget is too small to spread the payload.
-    ///
-    /// A tiny budget still produces a valid carrier, it just selects `u = 1`,
-    /// which is the most detectable end of the trade-off. The caller decides
-    /// whether to print this.
-    pub fn slot_budget_is_narrow(&self, bits: usize, h: u8) -> bool {
-        self.slot_budget < 8 * (bits + h as usize - 1)
-    }
 }
 
 /// Extraction policy.

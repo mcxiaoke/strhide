@@ -489,7 +489,7 @@ cover_digest = SHA-256("strhide-cover-v1" ‖ u32(block_count) ‖ u32(component
 master            = SuiteKDF_i(password, salt = cover_digest)      // 每个候选套件一次
 header_perm_seed  = HKDF(master, info = "hpos"   ‖ domain)         // 定位头部槽位
 enc_key,perm_seed = HKDF(master, salt = 超块 salt, info = "enc" / "perm" ‖ domain)
-body_stc_seed     = HKDF(perm_seed, salt = 超块 salt, info = "stc-trellis" ‖ domain)
+body_stc_seed     = HKDF(perm_seed, salt = 超块 salt, info = "stc-trellis")  // perm_seed 已包含 domain
 hdr_stc_seed      = HKDF(header_perm_seed, info = "stc-trellis-hdr" ‖ domain)
 ext_stc_seed      = HKDF(header_perm_seed, info = "stc-trellis-ext" ‖ domain)
 ```

@@ -410,28 +410,11 @@ pub struct EmbedArgs {
     pub p2_window: Option<usize>,
 
     #[arg(
-        long = "codec",
-        value_name = "NAME",
-        help = "Matrix-coding layer for the payload bits, PNG and JPEG alike: auto (default), stc, or hamming. \
-                The choice is recorded in the carrier, so extract never needs this flag."
-    )]
-    pub codec: Option<String>,
-
-    #[arg(
         long = "stc-h",
         value_name = "INT",
-        help = "Fine-tune (STC): trellis constraint height, 4..10 (default: 8). Larger is slower and slightly better."
+        help = "Fine-tune (STC): trellis constraint height, 4..=10 (default: 8). Larger is slower and slightly better."
     )]
     pub stc_h: Option<u8>,
-
-    #[arg(
-        long = "stc-u",
-        value_name = "INT",
-        help = "Fine-tune (STC): elements per syndrome row, 1..3 (default: 0 for auto). \
-                Larger spreads the message over more slots: fewer changed slots and lower weighted \
-                distortion, but roughly 1/u of the capacity."
-    )]
-    pub stc_u: Option<u8>,
 }
 
 const EMBED_AFTER_HELP: &str = crate::i18n::messages::EMBED_AFTER_HELP_EN;
@@ -1885,56 +1868,15 @@ fn warn_nondefault_stego_params(options: &crate::stego::StegoOptions, quiet: boo
     );
 }
 
-/// Apply `--codec` / `--stc-h` / `--stc-u` to the option set.
-///
-/// None of these has to be repeated at extraction: the PNG header records
-/// codec/`h`/`u`, and the JPEG superblock records `h` as well as the resolved
-/// group size, so `extract` recovers everything from the carrier itself.
-///
-/// `--codec` and `--stc-u` are spatial-only: JPEG V3 is always ternary STC and
-/// derives `u` from `--slot-budget`. The caller does not know the carrier format
-/// before the router has sniffed it, so the values are applied to both engines
-/// and the JPEG engine simply ignores the two it does not use.
-fn apply_codec_options(
+/// Apply `--stc-h` to the option set.
+fn apply_stc_h(
     options: &mut crate::stego::StegoOptions,
-    codec: Option<&str>,
     stc_h: Option<u8>,
-    stc_u: Option<u8>,
 ) -> Result<(), StrHideError> {
-    let parsed = match codec {
-        Some(name) => Some(match name.to_ascii_lowercase().as_str() {
-            "auto" => crate::stego::StegoCodec::Auto,
-            "hamming" => crate::stego::StegoCodec::Hamming,
-            "stc" => crate::stego::StegoCodec::Stc,
-            other => {
-                return Err(StrHideError::General(format!(
-                    "Unknown codec '{other}': expected 'auto', 'stc', or 'hamming'"
-                )));
-            }
-        }),
-        None => None,
-    };
-    {
-        let params = &mut options.spatial_params;
-        if let Some(codec) = parsed {
-            params.codec = codec;
-        }
-        if let Some(h) = stc_h {
-            params.stc_h = h;
-        }
-        if let Some(u) = stc_u {
-            params.stc_u = u;
-        }
+    if let Some(h) = stc_h {
+        options.spatial_params.stc_h = h;
+        options.jpeg_params.stc_h = h;
     }
-    {
-        // JPEG is STC-only in V3 and derives its own group size, so only the
-        // constraint height carries over.
-        if let Some(h) = stc_h {
-            options.jpeg_params.stc_h = h;
-        }
-    }
-    // Reject out-of-range values here rather than as an opaque capacity failure
-    // later.
     options.spatial_params.validate()?;
     options.jpeg_params.validate()?;
     Ok(())
@@ -1948,7 +1890,7 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
                 algorithm: args.algorithm.clone(),
                 ..Default::default()
             };
-            apply_codec_options(&mut options, args.codec.as_deref(), args.stc_h, args.stc_u)?;
+            apply_stc_h(&mut options, args.stc_h)?;
             if let Some(er) = args.exclusion_rate {
                 options.spatial_params.exclusion_percentile = er;
             }
@@ -2135,7 +2077,7 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         if let Some(p2) = args.p2_window {
             options.spatial_params.p2_window = p2;
         }
-        apply_codec_options(&mut options, args.codec.as_deref(), args.stc_h, args.stc_u)?;
+        apply_stc_h(&mut options, args.stc_h)?;
         warn_nondefault_stego_params(&options, quiet);
 
         if !quiet

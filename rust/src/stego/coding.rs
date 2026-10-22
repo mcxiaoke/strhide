@@ -83,25 +83,9 @@ pub fn max_payload_bytes(available_slots: usize, k: usize) -> usize {
     total_bits / 8
 }
 
-/// Slot-to-bit ratio divisor used to compute `recommended_max_bytes`.
-///
-/// Anchored to the clean-detection boundary (r >= 4.5, flips/bit ~0.23, risk spike <= 7.5%)
-/// measured across 80 high-resolution camera images (4,480 evaluation points).
-pub const RECOMMENDED_CAPACITY_SLOT_RATIO: f64 = 4.5;
-
 /// Thresholds for automatic codec and STC group size selection based on slot-to-bit ratio.
 pub const STC_AUTO_U3_SLOT_RATIO: f64 = 4.5;
 pub const STC_AUTO_U2_SLOT_RATIO: f64 = 2.5;
-
-/// Compute recommended maximum payload bytes given available body slots.
-///
-/// Unlike the raw maximum capacity (which permits α ~ 1.0 at high detection risk),
-/// the recommended capacity guarantees that the payload fits comfortably within
-/// the optimal STC u=3 high-stealth regime.
-pub fn recommended_payload_bytes(available_slots: usize) -> usize {
-    let bits = (available_slots as f64 / RECOMMENDED_CAPACITY_SLOT_RATIO).floor() as usize;
-    (bits / 8).saturating_sub(crate::stego::envelope::BODY_OVERHEAD)
-}
 
 /// Automatically select the optimal matrix-coding layer and group size `u`
 /// based on carrier slot abundance `available_slots / needed_bits`.
