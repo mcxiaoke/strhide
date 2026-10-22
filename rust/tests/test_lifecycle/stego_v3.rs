@@ -12,8 +12,10 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use strhide::errors::StrHideError;
@@ -338,8 +340,8 @@ fn v3_payload_matrix_twenty_images() {
         password: Some(password.into()),
         ..Default::default()
     };
-    let mut done = 0usize;
-    for path in &files {
+    let done = AtomicUsize::new(0);
+    files.par_iter().for_each(|path| {
         let cover = std::fs::read(path).expect("read cover");
         for size in [4096usize, 16384, 65536] {
             let payload = incompressible(size, (size as u64) ^ 0x5EED);
@@ -354,11 +356,15 @@ fn v3_payload_matrix_twenty_images() {
             let recovered = extract_carrier(&stego, &opts)
                 .unwrap_or_else(|e| panic!("{}: {size} B: extract failed: {e}", path.display()));
             assert_eq!(recovered, payload, "{}: {size} B", path.display());
-            done += 1;
+            done.fetch_add(1, Ordering::Relaxed);
         }
-    }
-    println!("{done} roundtrips across {} carriers", files.len());
-    assert!(done >= 30, "expected at least 30 roundtrips, got {done}");
+    });
+    let done_count = done.load(Ordering::Relaxed);
+    println!("{done_count} roundtrips across {} carriers", files.len());
+    assert!(
+        done_count >= 30,
+        "expected at least 30 roundtrips, got {done_count}"
+    );
 }
 
 /// The cover digest must be identical before and after embedding: it salts the
