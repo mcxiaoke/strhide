@@ -303,3 +303,53 @@ pub fn estimate(data: &[u8]) -> Option<CalibrationEstimate> {
         blocks: calib.len(),
     })
 }
+
+/// PoVs (Pairs of Values) Chi-square attack on quantized DCT AC coefficients (Westfeld 2001).
+///
+/// In clean natural JPEGs, DCT AC coefficients follow a Laplacian distribution where
+/// lower-magnitude bins significantly outnumber higher-magnitude bins (`|c|=2k` > `|c|=2k+1`).
+/// Classic J-Steg style embedding equalizes pair counts.
+///
+/// Returns a suspicion score in 0.0..=1.0 (1.0 = heavily equalized/LSB embedded, 0.0 = natural decay).
+pub fn dct_chi2_suspicion(data: &[u8]) -> Option<f64> {
+    let actual = dct_io::read_coefficients(data).ok()?;
+    let luma_blocks = &actual.components.first()?.blocks;
+    if luma_blocks.len() < 64 {
+        return None;
+    }
+
+    // Count AC coefficient absolute frequencies (|c| in 2..=31)
+    let mut hist = [0u64; 32];
+    for b in luma_blocks {
+        for &c in &b[1..64] {
+            let abs_c = c.unsigned_abs() as usize;
+            if abs_c < 32 {
+                hist[abs_c] += 1;
+            }
+        }
+    }
+
+    let mut chi2 = 0.0;
+    let mut df = 0.0;
+    // Inspect pairs (2, 3), (4, 5), (6, 7), ..., (14, 15)
+    for k in (2..16).step_by(2) {
+        let count_even = hist[k];
+        let count_odd = hist[k + 1];
+        let total = count_even + count_odd;
+        if total >= 20 {
+            let expected = total as f64 / 2.0;
+            chi2 += (count_even as f64 - expected).powi(2) / expected;
+            df += 1.0;
+        }
+    }
+
+    if df < 3.0 {
+        return None;
+    }
+
+    // Clean JPEG has chi2 >> df (huge chi2 due to sharp natural Laplacian slope).
+    // An LSB-equalized carrier has chi2 << df (counts equalized).
+    // Normalized suspicion: 0.0 when chi2 >= df, up to 1.0 when chi2 -> 0.
+    let suspicion = ((df - chi2) / df).clamp(0.0, 1.0);
+    Some(suspicion)
+}

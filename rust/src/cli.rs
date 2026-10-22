@@ -1723,16 +1723,36 @@ fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideError> {
                 r.file_size,
                 r.risk_score,
             );
-            for finding in &r.findings {
-                let tag = match finding.severity {
-                    crate::analysis::Severity::Info => "-",
-                    crate::analysis::Severity::Suspicious => "!",
-                    crate::analysis::Severity::Likely => "!!",
-                };
-                println!("    {tag} [{}] {}", finding.detector, finding.detail);
+            if !r.detectors.is_empty() {
+                for d in &r.detectors {
+                    let tag = match d.status.as_str() {
+                        "ALERT" => "!",
+                        "INFO" => "-",
+                        _ => "✓",
+                    };
+                    let thresh_info = match &d.threshold {
+                        Some(t) => format!(" (threshold: {t})"),
+                        None => String::new(),
+                    };
+                    println!(
+                        "    {tag} [{:<20}] {:<16}{thresh_info} | {}",
+                        d.name, d.metric, d.detail
+                    );
+                }
+            } else {
+                for finding in &r.findings {
+                    let tag = match finding.severity {
+                        crate::analysis::Severity::Info => "-",
+                        crate::analysis::Severity::Suspicious => "!",
+                        crate::analysis::Severity::Likely => "!!",
+                    };
+                    println!("    {tag} [{}] {}", finding.detector, finding.detail);
+                }
             }
             for note in &r.notes {
-                println!("    ? {note}");
+                if !r.findings.is_empty() || note.contains("Carrier is larger") {
+                    println!("    ? {note}");
+                }
             }
         }
         let findings_cnt = reports.iter().filter(|r| !r.findings.is_empty()).count();

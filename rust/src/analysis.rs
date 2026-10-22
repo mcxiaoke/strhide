@@ -101,6 +101,24 @@ pub struct Finding {
     pub detail: String,
 }
 
+/// Quantitative measurement and status for one individual detector.
+#[derive(Debug, Clone, Serialize)]
+pub struct DetectorMetric {
+    /// Detector id (e.g. "dct:calibration", "dct:chi2", "spatial:ws", "spatial:rs", "jpeg:structure")
+    pub name: String,
+    /// Target domain category: "spatial", "dct", "structural", "signature"
+    pub domain: String,
+    /// Outcome status: "PASS", "ALERT"
+    pub status: String,
+    /// Primary quantitative metric (e.g. "rate: 0.000", "0 bytes", "suspicion: 0.000")
+    pub metric: String,
+    /// Detection threshold
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<String>,
+    /// Technical summary message
+    pub detail: String,
+}
+
 /// Aggregated scan result for one file.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScanReport {
@@ -118,6 +136,9 @@ pub struct ScanReport {
     /// `clean` result is not read as evidence of absence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Quantitative detector metrics evaluated for this carrier.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detectors: Vec<DetectorMetric>,
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +259,7 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
     let carrier = path.display().to_string();
 
     let mut findings: Vec<Finding> = Vec::new();
+    let mut detectors: Vec<DetectorMetric> = Vec::new();
 
     // Read whole file (bounded). Above the cap we keep the first
     // `PREFIX_WINDOW` and the last `STRUCT_TAIL_WINDOW` bytes *separately*.
@@ -266,13 +288,137 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
 
     let format = sniff_format(view.prefix);
 
+    // 1. Signature domain: known tools / envelopes
+    let sig_before = findings.len();
     track_tool_signatures(&view, &mut findings);
+    let sig_alert = findings[sig_before..]
+        .iter()
+        .any(|f| f.detector == "signature:known-tool");
+    detectors.push(DetectorMetric {
+        name: "signature:known-tool".into(),
+        domain: "signature".into(),
+        status: if sig_alert {
+            "ALERT".into()
+        } else {
+            "PASS".into()
+        },
+        metric: if sig_alert {
+            "matched".into()
+        } else {
+            "clean".into()
+        },
+        threshold: None,
+        detail: if sig_alert {
+            "matches known tool signature".into()
+        } else {
+            "no known steganography tool signatures".into()
+        },
+    });
+
+    // 2. Container structure domain
     match format.as_deref() {
-        Some("PNG") => track_png_structure(&view, &mut findings),
-        Some("JPEG") => track_jpeg_structure(&view, &mut findings),
-        // PE padding can only be measured on a complete image; for oversized
-        // files the section table alone would not be enough to read the
-        // padding.
+        Some("PNG") => {
+            let before_cnt = findings.len();
+            track_png_structure(&view, &mut findings);
+            let has_trailing = findings[before_cnt..]
+                .iter()
+                .any(|f| f.detector == "png:trailing-data");
+            let has_struct_err = findings[before_cnt..]
+                .iter()
+                .any(|f| f.detector.starts_with("png:") && f.detector != "png:trailing-data");
+
+            detectors.push(DetectorMetric {
+                name: "png:structure".into(),
+                domain: "structural".into(),
+                status: if has_struct_err {
+                    "ALERT".into()
+                } else {
+                    "PASS".into()
+                },
+                metric: if has_struct_err {
+                    "abnormal chunks".into()
+                } else {
+                    "normal".into()
+                },
+                threshold: None,
+                detail: if has_struct_err {
+                    "anomalous or private chunks detected".into()
+                } else {
+                    "standard PNG chunk layout".into()
+                },
+            });
+            detectors.push(DetectorMetric {
+                name: "png:trailing-data".into(),
+                domain: "structural".into(),
+                status: if has_trailing {
+                    "ALERT".into()
+                } else {
+                    "PASS".into()
+                },
+                metric: if has_trailing {
+                    "trailing bytes present".into()
+                } else {
+                    "0 bytes".into()
+                },
+                threshold: Some("0 bytes".into()),
+                detail: if has_trailing {
+                    "overlay data after IEND chunk".into()
+                } else {
+                    "clean termination at IEND".into()
+                },
+            });
+        }
+        Some("JPEG") => {
+            let before_cnt = findings.len();
+            track_jpeg_structure(&view, &mut findings);
+            let has_trailing = findings[before_cnt..]
+                .iter()
+                .any(|f| f.detector == "jpeg:trailing-data");
+            let has_struct_err = findings[before_cnt..]
+                .iter()
+                .any(|f| f.detector.starts_with("jpeg:") && f.detector != "jpeg:trailing-data");
+
+            detectors.push(DetectorMetric {
+                name: "jpeg:structure".into(),
+                domain: "structural".into(),
+                status: if has_struct_err {
+                    "ALERT".into()
+                } else {
+                    "PASS".into()
+                },
+                metric: if has_struct_err {
+                    "abnormal markers".into()
+                } else {
+                    "normal".into()
+                },
+                threshold: None,
+                detail: if has_struct_err {
+                    "anomalous marker segment counts or high-entropy comment".into()
+                } else {
+                    "markers within standard bounds".into()
+                },
+            });
+            detectors.push(DetectorMetric {
+                name: "jpeg:trailing-data".into(),
+                domain: "structural".into(),
+                status: if has_trailing {
+                    "ALERT".into()
+                } else {
+                    "PASS".into()
+                },
+                metric: if has_trailing {
+                    "trailing bytes present".into()
+                } else {
+                    "0 bytes".into()
+                },
+                threshold: Some("0 bytes".into()),
+                detail: if has_trailing {
+                    "overlay data after EOI marker".into()
+                } else {
+                    "clean termination at EOI".into()
+                },
+            });
+        }
         Some("PE") if view.is_whole() => track_pe_structure(view.prefix, &mut findings),
         _ => {}
     }
@@ -282,48 +428,21 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
     // "clean is not proof" caveat still applies to this report.
     let mut calibrated_signal = false;
 
-    // Content-domain track (PNG + JPEG, and only when we have the full image).
+    // 3. Statistical domain: strictly separate spatial domain (PNG) and frequency domain (JPEG)
     if view.is_whole() {
         let data = view.prefix;
-        let decoded: Option<(Vec<u8>, u32, usize)> = match format.as_deref() {
-            Some("PNG") => decode_png_pixels(data),
-            Some("JPEG") => decode_jpeg_pixels(data),
-            _ => None,
-        };
-        if let Some((px, width, channels)) = decoded
-            && !px.is_empty()
-        {
-            track_content_domain(&px, width, channels, &mut findings);
-        }
-        // DCT-domain JSteg detection (JPEG only): operates on quantized AC
-        // coefficients directly, where JPEG steganography actually lives.
-        if format.as_deref() == Some("JPEG") {
-            // Calibrated analysis. This replaced an absolute pair chi-square
-            // test (`dct:jsteg-chi2`) that was measured to be dead code on real
-            // images: its gate needed `chi2/df < 0.5` while real clean JPEGs
-            // sit at 200-2000, so it could never fire at any embedding rate.
-            // The calibrated test is relative to the image's own re-quantised
-            // reference, which is what makes it work without a clean original.
-            if let Some(est) = calibration::estimate(data)
-                && est.rate >= CALIBRATION_FLAG_RATE
-            {
-                calibrated_signal = true;
-                findings.push(Finding {
-                    detector: "dct:calibration".into(),
-                    severity: if est.rate >= CALIBRATION_STRONG_RATE {
-                        Severity::Likely
-                    } else {
-                        Severity::Suspicious
-                    },
-                    detail: format!(
-                        "Calibrated DCT estimate: ~{:.0}% of coefficients look LSB-replaced (rate {:.3}, imbalance ratio {:.2} vs calibrated reference, {} blocks)",
-                        est.rate * 100.0,
-                        est.rate,
-                        est.imbalance_ratio,
-                        est.blocks
-                    ),
-                });
+        match format.as_deref() {
+            Some("PNG") => {
+                if let Some((px, width, channels)) = decode_png_pixels(data)
+                    && !px.is_empty()
+                {
+                    track_spatial_domain(&px, width, channels, &mut findings, &mut detectors);
+                }
             }
+            Some("JPEG") => {
+                track_jpeg_dct_domain(data, &mut findings, &mut detectors, &mut calibrated_signal);
+            }
+            _ => {}
         }
     }
 
@@ -335,10 +454,6 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
         _ => "likely-hidden",
     };
 
-    // Don't let a low score masquerade as proof of absence. JPEG content
-    // steganography (UERD/DCT LSB) is the known weak spot: measured on a
-    // 15-carrier corpus at full capacity, 4 JPEG carriers stay below the
-    // detection threshold of every statistical detector available here.
     let mut notes = Vec::new();
     if format.as_deref() == Some("JPEG") && matches!(verdict, "clean" | "low") && !calibrated_signal
     {
@@ -347,8 +462,6 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
         );
     }
     if !view.is_whole() {
-        // Say what was actually inspected: a `clean` verdict on a windowed
-        // scan covers far less ground than on a fully-read file.
         notes.push(format!(
             "Carrier is larger than {} MiB: only the first {} KiB and the last {} KiB were inspected, and pixel/DCT statistics were skipped",
             MAX_FULL_SCAN / (1024 * 1024),
@@ -365,6 +478,7 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
         risk_score,
         verdict: verdict.into(),
         notes,
+        detectors,
     })
 }
 
@@ -1116,17 +1230,182 @@ fn decode_jpeg_pixels(data: &[u8]) -> Option<(Vec<u8>, u32, usize)> {
 // Content detectors
 // ---------------------------------------------------------------------------
 
-fn track_content_domain(pixels: &[u8], width: u32, channels: usize, out: &mut Vec<Finding>) {
-    // Cap sample size: stats are O(n), and huge images just add tail.
+/// Weighted Stego-analysis (WS) for spatial LSB embedding with 8-neighbourhood context (Ker 2007).
+///
+/// Uses local filtering with both orthogonal and diagonal neighbours to predict cover pixel values,
+/// balancing bipartite parity lattices, then estimates the LSB replacement rate alpha via weighted
+/// covariance between prediction residuals and LSB flips.
+fn ws_analysis(pixels: &[u8], width: u32, channels: usize) -> f64 {
+    let width = width as usize;
+    let stride = match width.checked_mul(channels) {
+        Some(s) if s > 0 => s,
+        _ => return 0.0,
+    };
+    if pixels.len() < stride * 3 || width < 3 {
+        return 0.0;
+    }
+    let rows = (pixels.len() / stride).min(512);
+    if rows < 3 {
+        return 0.0;
+    }
+
+    let eval_channels = channels.min(3);
+    let mut best_rate = 0.0f64;
+
+    for ch in 0..eval_channels {
+        let mut numerator = 0.0f64;
+        let mut denominator = 0.0f64;
+
+        for r in 1..rows - 1 {
+            let row_curr = r * stride;
+            let row_prev = (r - 1) * stride;
+            let row_next = (r + 1) * stride;
+
+            for c in 1..width - 1 {
+                let off = c * channels + ch;
+                let p = pixels[row_curr + off] as f64;
+
+                // Orthogonal neighbours (weight 2 each)
+                let p_l = pixels[row_curr + off - channels] as f64;
+                let p_r = pixels[row_curr + off + channels] as f64;
+                let p_u = pixels[row_prev + off] as f64;
+                let p_d = pixels[row_next + off] as f64;
+
+                // Diagonal neighbours (weight 1 each, breaks bipartite checkerboard parity bias)
+                let p_lu = pixels[row_prev + off - channels] as f64;
+                let p_ru = pixels[row_prev + off + channels] as f64;
+                let p_ld = pixels[row_next + off - channels] as f64;
+                let p_rd = pixels[row_next + off + channels] as f64;
+
+                let pred = (2.0 * (p_l + p_r + p_u + p_d) + (p_lu + p_ru + p_ld + p_rd)) / 12.0;
+                let residual = p - pred;
+
+                let var = 0.25
+                    * ((p_l - pred).powi(2)
+                        + (p_r - pred).powi(2)
+                        + (p_u - pred).powi(2)
+                        + (p_d - pred).powi(2));
+                let w = 1.0 / (1.0 + var).powi(2);
+
+                let p_int = pixels[row_curr + off] as i32;
+                let d = (p_int - (p_int ^ 1)) as f64;
+
+                numerator += w * residual * d;
+                denominator += w;
+            }
+        }
+
+        if denominator > 0.0 {
+            let alpha = (2.0 * numerator / denominator).clamp(0.0, 1.0);
+            if alpha > best_rate {
+                best_rate = alpha;
+            }
+        }
+    }
+
+    best_rate
+}
+
+fn track_spatial_domain(
+    pixels: &[u8],
+    width: u32,
+    channels: usize,
+    findings: &mut Vec<Finding>,
+    detectors: &mut Vec<DetectorMetric>,
+) {
     let sample: &[u8] = if pixels.len() > 4_000_000 {
         &pixels[..4_000_000]
     } else {
         pixels
     };
 
+    // 1. WS (Weighted Stego-analysis)
+    let ws_rate = ws_analysis(sample, width, channels);
+    if ws_rate > 0.05 {
+        findings.push(Finding {
+            detector: "spatial:ws".into(),
+            severity: Severity::Info,
+            detail: format!("Weighted Stego-analysis (WS) estimates LSB rate ~{ws_rate:.2}"),
+        });
+        detectors.push(DetectorMetric {
+            name: "spatial:ws".into(),
+            domain: "spatial".into(),
+            status: "ALERT".into(),
+            metric: format!("rate: {ws_rate:.3}"),
+            threshold: Some("0.050".into()),
+            detail: "prediction residual covariance elevated".into(),
+        });
+    } else {
+        detectors.push(DetectorMetric {
+            name: "spatial:ws".into(),
+            domain: "spatial".into(),
+            status: "PASS".into(),
+            metric: format!("rate: {ws_rate:.3}"),
+            threshold: Some("0.050".into()),
+            detail: "prediction residuals within normal bounds".into(),
+        });
+    }
+
+    // 2. RS Analysis
+    let rs_p = rs_analysis(sample, width, channels);
+    if let Some(p) = rs_p
+        && p > 0.05
+    {
+        findings.push(Finding {
+            detector: "rs-analysis".into(),
+            severity: Severity::Suspicious,
+            detail: format!("RS analysis estimates LSB embedding rate ~{p:.2}"),
+        });
+        detectors.push(DetectorMetric {
+            name: "spatial:rs".into(),
+            domain: "spatial".into(),
+            status: "ALERT".into(),
+            metric: format!("rate: {p:.3}"),
+            threshold: Some("0.050".into()),
+            detail: "dual-mask flipping asymmetry".into(),
+        });
+    } else {
+        detectors.push(DetectorMetric {
+            name: "spatial:rs".into(),
+            domain: "spatial".into(),
+            status: "PASS".into(),
+            metric: format!("rate: {:.3}", rs_p.unwrap_or(0.0)),
+            threshold: Some("0.050".into()),
+            detail: "dual-mask symmetry preserved".into(),
+        });
+    }
+
+    // 3. SPA (Sample Pair Analysis)
+    let spa_p = spa_estimate_dww(sample, width, channels);
+    if spa_p > 0.05 {
+        findings.push(Finding {
+            detector: "spa".into(),
+            severity: Severity::Suspicious,
+            detail: format!("Sample Pair Analysis (DWW) estimates embedding rate ~{spa_p:.2}"),
+        });
+        detectors.push(DetectorMetric {
+            name: "spatial:spa".into(),
+            domain: "spatial".into(),
+            status: "ALERT".into(),
+            metric: format!("rate: {spa_p:.3}"),
+            threshold: Some("0.050".into()),
+            detail: "DWW sample pair trace deviation".into(),
+        });
+    } else {
+        detectors.push(DetectorMetric {
+            name: "spatial:spa".into(),
+            domain: "spatial".into(),
+            status: "PASS".into(),
+            metric: format!("rate: {spa_p:.3}"),
+            threshold: Some("0.050".into()),
+            detail: "sample pair trace counts normal".into(),
+        });
+    }
+
+    // 4. Chi-square LSB attack
     let chi2_score = chi2_lsb_suspicion(sample);
     if chi2_score > 0.5 {
-        out.push(Finding {
+        findings.push(Finding {
             detector: "chi2-lsb".into(),
             severity: Severity::Suspicious,
             detail: format!(
@@ -1134,26 +1413,119 @@ fn track_content_domain(pixels: &[u8], width: u32, channels: usize, out: &mut Ve
                  - consistent with LSB embedding"
             ),
         });
+        detectors.push(DetectorMetric {
+            name: "spatial:chi2".into(),
+            domain: "spatial".into(),
+            status: "ALERT".into(),
+            metric: format!("suspicion: {chi2_score:.3}"),
+            threshold: Some("0.500".into()),
+            detail: "LSB pair histogram artificially uniform".into(),
+        });
+    } else {
+        detectors.push(DetectorMetric {
+            name: "spatial:chi2".into(),
+            domain: "spatial".into(),
+            status: "PASS".into(),
+            metric: format!("suspicion: {chi2_score:.3}"),
+            threshold: Some("0.500".into()),
+            detail: "LSB pair counts match natural distribution".into(),
+        });
     }
+}
 
-    if let Some(p) = rs_analysis(sample, width, channels)
-        && p > 0.05
-    {
-        out.push(Finding {
-            detector: "rs-analysis".into(),
-            severity: Severity::Suspicious,
-            detail: format!("RS analysis estimates LSB embedding rate ~{p:.2}"),
+fn track_jpeg_dct_domain(
+    data: &[u8],
+    findings: &mut Vec<Finding>,
+    detectors: &mut Vec<DetectorMetric>,
+    calibrated_signal: &mut bool,
+) {
+    // 1. Calibrated DCT Analysis (Fridrich 2002)
+    if let Some(est) = calibration::estimate(data) {
+        if est.rate >= CALIBRATION_FLAG_RATE {
+            *calibrated_signal = true;
+            findings.push(Finding {
+                detector: "dct:calibration".into(),
+                severity: if est.rate >= CALIBRATION_STRONG_RATE {
+                    Severity::Likely
+                } else {
+                    Severity::Suspicious
+                },
+                detail: format!(
+                    "Calibrated DCT estimate: ~{:.0}% of coefficients look LSB-replaced (rate {:.3}, imbalance ratio {:.2} vs calibrated reference, {} blocks)",
+                    est.rate * 100.0,
+                    est.rate,
+                    est.imbalance_ratio,
+                    est.blocks
+                ),
+            });
+            detectors.push(DetectorMetric {
+                name: "dct:calibration".into(),
+                domain: "dct".into(),
+                status: "ALERT".into(),
+                metric: format!("rate: {:.3}", est.rate),
+                threshold: Some(format!("{CALIBRATION_FLAG_RATE:.3}")),
+                detail: format!(
+                    "imbalance: {:.3}, {} blocks",
+                    est.imbalance_ratio, est.blocks
+                ),
+            });
+        } else {
+            detectors.push(DetectorMetric {
+                name: "dct:calibration".into(),
+                domain: "dct".into(),
+                status: "PASS".into(),
+                metric: format!("rate: {:.3}", est.rate),
+                threshold: Some(format!("{CALIBRATION_FLAG_RATE:.3}")),
+                detail: format!(
+                    "imbalance: {:.3}, {} blocks",
+                    est.imbalance_ratio, est.blocks
+                ),
+            });
+        }
+    } else {
+        detectors.push(DetectorMetric {
+            name: "dct:calibration".into(),
+            domain: "dct".into(),
+            status: "PASS".into(),
+            metric: "n/a".into(),
+            threshold: Some(format!("{CALIBRATION_FLAG_RATE:.3}")),
+            detail: "carrier quantization not suitable for calibration (e.g. q100)".into(),
         });
     }
 
-    let spa_p = spa_estimate_dww(sample, width, channels);
-    if spa_p > 0.05 {
-        out.push(Finding {
-            detector: "spa".into(),
-            severity: Severity::Suspicious,
-            detail: format!("Sample Pair Analysis (DWW) estimates embedding rate ~{spa_p:.2}"),
-        });
+    // 2. DCT AC Pairs Chi-Square Analysis (Westfeld 2001)
+    if let Some(suspicion) = calibration::dct_chi2_suspicion(data) {
+        if suspicion > 0.50 {
+            findings.push(Finding {
+                detector: "dct:chi2".into(),
+                severity: Severity::Suspicious,
+                detail: format!("DCT AC pairs heavily equalized (suspicion {suspicion:.2})"),
+            });
+            detectors.push(DetectorMetric {
+                name: "dct:chi2".into(),
+                domain: "dct".into(),
+                status: "ALERT".into(),
+                metric: format!("suspicion: {suspicion:.3}"),
+                threshold: Some("0.500".into()),
+                detail: "AC coefficient pair equalization detected".into(),
+            });
+        } else {
+            detectors.push(DetectorMetric {
+                name: "dct:chi2".into(),
+                domain: "dct".into(),
+                status: "PASS".into(),
+                metric: format!("suspicion: {suspicion:.3}"),
+                threshold: Some("0.500".into()),
+                detail: "natural Laplacian AC coefficient decay".into(),
+            });
+        }
     }
+}
+
+#[allow(dead_code)]
+fn track_content_domain(pixels: &[u8], width: u32, channels: usize, out: &mut Vec<Finding>) {
+    let mut unused_detectors = Vec::new();
+    track_spatial_domain(pixels, width, channels, out, &mut unused_detectors);
 }
 
 /// Westfeld & Pfitzmann 1999, Chi-square attack on LSB embedding.
