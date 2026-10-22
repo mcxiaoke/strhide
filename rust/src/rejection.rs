@@ -18,7 +18,7 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::errors::StrHideError;
 use crate::params::RejectionPolicy;
@@ -378,44 +378,6 @@ pub fn run_rejection_checks(
                 "No write permission on target file '{}'.",
                 carrier.display()
             )));
-        }
-
-        // Write probe: the engine creates "<target>.strhide.tmp" next to the
-        // *target* before the atomic rename, so the probe must live in the
-        // target's directory — probing the carrier's directory rejects legal
-        // "read from read-only media, write elsewhere" workflows and says
-        // nothing about the directory actually being written.
-        //
-        // The probe carries a PID and a monotonic suffix: a fixed PID-only name
-        // is shared by threads of one process and can collide or be left
-        // behind.
-        let parent = match target.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-            _ => PathBuf::from("."),
-        };
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos();
-        let probe = parent.join(format!(
-            ".strhide_write_probe_{}_{nonce}",
-            std::process::id()
-        ));
-        match File::create(&probe) {
-            Ok(_) => {
-                let _ = std::fs::remove_file(&probe);
-            }
-            Err(e) => {
-                let reason = match e.kind() {
-                    std::io::ErrorKind::NotFound => "the directory does not exist",
-                    std::io::ErrorKind::PermissionDenied => "the directory is not writable",
-                    _ => "the directory cannot be written to",
-                };
-                return Err(StrHideError::Rejection(format!(
-                    "Cannot write to target directory '{}': {reason} [{e}]",
-                    parent.display()
-                )));
-            }
         }
     }
 

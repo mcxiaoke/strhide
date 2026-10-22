@@ -1445,6 +1445,31 @@ fn print_inspect_result(res: &crate::engine::InspectResult) {
     }
 }
 
+fn print_json<T: serde::Serialize>(val: &T) -> Result<(), StrHideError> {
+    let mut v = serde_json::to_value(val)?;
+    match &mut v {
+        serde_json::Value::Object(map) => {
+            map.insert(
+                "banner".to_string(),
+                serde_json::Value::String(BANNER.to_string()),
+            );
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                if let serde_json::Value::Object(map) = item {
+                    map.insert(
+                        "banner".to_string(),
+                        serde_json::Value::String(BANNER.to_string()),
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+    println!("{}", serde_json::to_string_pretty(&v)?);
+    Ok(())
+}
+
 fn handle_inspect(args: InspectArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
     let password = resolve_password(
         args.passwords.password.as_deref(),
@@ -1466,15 +1491,7 @@ fn handle_inspect(args: InspectArgs, cfg: &FileConfig, quiet: bool) -> Result<()
         let carrier = &files[0];
         let res = inspect_carrier(carrier, password.as_deref())?;
         if args.json {
-            let mut val = serde_json::to_value(&res)?;
-            if let serde_json::Value::Object(map) = &mut val {
-                map.insert(
-                    "banner".to_string(),
-                    serde_json::Value::String(BANNER.to_string()),
-                );
-            }
-            let json_str = serde_json::to_string_pretty(&val)?;
-            println!("{json_str}");
+            print_json(&res)?;
         } else if !quiet {
             print_inspect_result(&res);
         }
@@ -1511,18 +1528,7 @@ fn handle_inspect(args: InspectArgs, cfg: &FileConfig, quiet: bool) -> Result<()
     }
 
     if args.json {
-        let mut val = serde_json::to_value(&reports)?;
-        if let serde_json::Value::Array(arr) = &mut val {
-            for item in arr {
-                if let serde_json::Value::Object(map) = item {
-                    map.insert(
-                        "banner".to_string(),
-                        serde_json::Value::String(BANNER.to_string()),
-                    );
-                }
-            }
-        }
-        println!("{}", serde_json::to_string_pretty(&val)?);
+        print_json(&reports)?;
     } else if !quiet {
         let hidden = reports.iter().filter(|r| r.has_hidden_data).count();
         println!(
@@ -1589,15 +1595,7 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig, quiet: bool) -> Result<i32,
         let carrier = &files[0];
         let res = verify_carrier(carrier, password.as_deref())?;
         if args.json {
-            let mut val = serde_json::to_value(&res)?;
-            if let serde_json::Value::Object(map) = &mut val {
-                map.insert(
-                    "banner".to_string(),
-                    serde_json::Value::String(BANNER.to_string()),
-                );
-            }
-            let json_str = serde_json::to_string_pretty(&val)?;
-            println!("{json_str}");
+            print_json(&res)?;
         } else if !quiet {
             print_verify_result(&res);
         }
@@ -1644,18 +1642,7 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig, quiet: bool) -> Result<i32,
     }
 
     if args.json {
-        let mut val = serde_json::to_value(&reports)?;
-        if let serde_json::Value::Array(arr) = &mut val {
-            for item in arr {
-                if let serde_json::Value::Object(map) = item {
-                    map.insert(
-                        "banner".to_string(),
-                        serde_json::Value::String(BANNER.to_string()),
-                    );
-                }
-            }
-        }
-        println!("{}", serde_json::to_string_pretty(&val)?);
+        print_json(&reports)?;
     } else if !quiet {
         let passed = reports
             .iter()
@@ -1704,18 +1691,7 @@ fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideError> {
     }
 
     if args.json {
-        let mut val = serde_json::to_value(&reports)?;
-        if let serde_json::Value::Array(arr) = &mut val {
-            for item in arr {
-                if let serde_json::Value::Object(map) = item {
-                    map.insert(
-                        "banner".to_string(),
-                        serde_json::Value::String(BANNER.to_string()),
-                    );
-                }
-            }
-        }
-        println!("{}", serde_json::to_string_pretty(&val)?);
+        print_json(&reports)?;
     } else if quiet {
         // The exit code below is the entire quiet output: 1 when any report
         // reached "likely-hidden", 0 otherwise.

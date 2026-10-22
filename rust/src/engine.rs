@@ -681,39 +681,11 @@ impl Default for WriteOptions<'_> {
     }
 }
 
-/// Format a Unix timestamp (seconds) as `YYYYMMDD-HHMMSS` in UTC.
-///
-/// Days-to-civil conversion (Howard Hinnant's algorithm); avoids pulling in a
-/// date-time dependency for a backup file name.
-fn utc_stamp(secs: u64) -> String {
-    let days = (secs / 86_400) as i64;
-    let rem = secs % 86_400;
-    let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-
-    format!("{y:04}{m:02}{d:02}-{hour:02}{minute:02}{second:02}")
-}
-
 /// Pick a backup path that never overwrites an existing backup.
 ///
 /// In-place writes create `<carrier>.bak`; writing again would silently replace
-/// the previous backup (and with it the only pre-write copy of the carrier).
-/// Collisions fall back to `<carrier>.bak-<UTC timestamp>` and then a counter.
-/// Mirrors the Python implementation.
+/// the previous backup. Collisions fall back to `<carrier>.bak-<timestamp>` and a suffix.
 fn next_backup_path(carrier: &Path) -> PathBuf {
-    // Build the path by appending to the OsString: `Path::display()` is lossy
-    // for non-UTF-8 paths (unpaired surrogates on Windows, arbitrary bytes on
-    // Unix) and would turn a valid carrier path into a non-existent one.
     let with_suffix = |suffix: &str| {
         let mut os = carrier.as_os_str().to_os_string();
         os.push(suffix);
@@ -728,29 +700,18 @@ fn next_backup_path(carrier: &Path) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let stamp = utc_stamp(now);
-    for suffix in 0..1000u32 {
-        let candidate = if suffix == 0 {
-            with_suffix(&format!(".bak-{stamp}"))
-        } else {
-            with_suffix(&format!(".bak-{stamp}-{suffix}"))
-        };
-        if !candidate.exists() {
-            return candidate;
-        }
+    let candidate = with_suffix(&format!(".bak-{now}"));
+    if !candidate.exists() {
+        return candidate;
     }
-    // 1000 collisions inside one second is not a real scenario; it means either
-    // a clock that does not advance or a pathological directory. Append the pid
-    // *and* keep probing, because `fs::copy` would otherwise silently replace
-    // an existing backup.
     let pid = std::process::id();
-    for suffix in 0..1000u32 {
-        let candidate = with_suffix(&format!(".bak-{stamp}-{pid}-{suffix}"));
+    for suffix in 1..=10u32 {
+        let candidate = with_suffix(&format!(".bak-{now}-{pid}-{suffix}"));
         if !candidate.exists() {
             return candidate;
         }
     }
-    with_suffix(&format!(".bak-{stamp}-{pid}-overflow"))
+    with_suffix(&format!(".bak-{now}-{pid}-{}", rand::rng().random::<u32>()))
 }
 
 /// Inject `source` into `carrier_path`, returning a [`WriteResult`].
@@ -822,20 +783,6 @@ pub fn write_carrier(
 /// )?;
 /// # Ok(()) }
 /// ```
-/// Parameters a re-read of the written output needs in order to confirm the
-/// envelope landed where it claims to.
-struct VerifyParams {
-    ube_offset: u64,
-    ube_size: u64,
-    inject_offset: u64,
-    inject_size: u64,
-    patch_offset: u32,
-    orig_patch_val: u32,
-    header_magic: [u8; 8],
-    trailer_magic: [u8; 4],
-    strategy: String,
-}
-
 /// Everything a write produces that does not depend on a path.
 struct WriteCoreResult {
     format: &'static str,
@@ -846,54 +793,6 @@ struct WriteCoreResult {
     is_encrypted: bool,
     is_stealth: bool,
     warning: Option<String>,
-    verify: VerifyParams,
-}
-
-/// Read the freshly written envelope back and confirm it matches the parameters
-/// that were used to write it.
-///
-/// Deliberately takes its own reader: the writer's output is a `File` or an
-/// in-memory cursor depending on the entry point, and both can produce a
-/// `&mut dyn SeekRead` fresh view without trait-object upcasting.
-fn verify_written(
-    reader: &mut dyn SeekRead,
-    p: &VerifyParams,
-    password: Option<&str>,
-    profile: &Profile,
-) -> Result<(), StrHideError> {
-    // Precisely verify the envelope just written at `p.ube_offset` (not merely
-    // "some envelope exists somewhere"), so a stale envelope from a previous
-    // injection cannot satisfy the check.
-    //
-    // The envelope is read back through `open_ube_reader` rather than at raw
-    // file offsets: for contiguous envelopes the virtual stream is a bounded
-    // slice of the very same bytes, and for scattered strategies (pe_codebits)
-    // there are no file offsets to read at all.
-    let adapter = find_adapter_or_reject(reader, "<written envelope>")?;
-    let mut ube_stream = adapter.open_ube_reader(reader, p.ube_offset, p.ube_size, &p.strategy)?;
-    let mut hdr_bytes = [0u8; HEADER_SIZE];
-    ube_stream.read_exact(&mut hdr_bytes)?;
-    let written_header = EnvelopeHeader::unpack_with_profile(&hdr_bytes, password, profile)?;
-    if written_header.magic_header != p.header_magic
-        || written_header.inject_offset != p.inject_offset
-        || written_header.inject_size != p.inject_size
-        || written_header.patch_offset != p.patch_offset
-        || written_header.orig_patch_val != p.orig_patch_val
-    {
-        return Err(StrHideError::General(
-            "Self-verification failed: header at injection offset does not match written parameters".into(),
-        ));
-    }
-    ube_stream.seek(SeekFrom::Start(p.ube_size - 24))?;
-    let mut tr_bytes = [0u8; 24];
-    ube_stream.read_exact(&mut tr_bytes)?;
-    let written_trailer = EnvelopeTrailer::unpack(&tr_bytes, Some(&p.trailer_magic))?;
-    if written_trailer.ube_offset != p.ube_offset || written_trailer.ube_total_size != p.ube_size {
-        return Err(StrHideError::General(
-            "Self-verification failed: trailer boundary parameters mismatch".into(),
-        ));
-    }
-    Ok(())
 }
 
 /// Build and inject an envelope from `host` into `out`.
@@ -988,10 +887,13 @@ where
                 .into(),
         ));
     }
-    if let Some(pwd) = password {
-        let magics = derive_stealth_magics(pwd, profile.domain())?;
+    let stealth_magics = match password {
+        Some(pwd) => Some(derive_stealth_magics(pwd, profile.domain())?),
+        None => None,
+    };
+    if let Some((_, ref tr_magic)) = stealth_magics {
         host.seek(SeekFrom::Start(0))?;
-        if adapter.locate(host, Some(&magics.1))?.is_some() {
+        if adapter.locate(host, Some(tr_magic))?.is_some() {
             return Err(StrHideError::General(
                 "Carrier already contains hidden data (stealth envelope). Use remove first or specify another file.".into(),
             ));
@@ -1085,7 +987,7 @@ where
 
     if stealth && has_custom_password {
         flags |= FLAG_STEALTH;
-        let magics = derive_stealth_magics(effective_password, profile.domain())?;
+        let magics = stealth_magics.expect("stealth requires password");
         header_magic = magics.0;
         trailer_magic = magics.1;
     } else {
@@ -1267,7 +1169,7 @@ where
     if !scattered {
         // Patch header
         out.seek(SeekFrom::Start(actual_ube_offset))?;
-        out.write_all(&header.pack_with_profile(password, profile)?)?;
+        out.write_all(&header.pack_masked(header_mask.as_ref()))?;
 
         // Patch trailer at end of UBE
         let trailer_ctx = TrailerCtx {
@@ -1292,9 +1194,6 @@ where
         adapter.finalize(out, &fin_ctx)?;
     }
 
-    // 11. Hand the verification parameters back to the caller, which owns the
-    // `&mut dyn SeekRead` view of whatever it just wrote (a reopened temp file,
-    // or a cursor over the returned bytes).
     let strategy_note = adapter.strategy_note(&selected_strategy, strategy == "auto");
 
     Ok(WriteCoreResult {
@@ -1306,17 +1205,6 @@ where
         is_encrypted: has_custom_password,
         is_stealth: (flags & FLAG_STEALTH) != 0,
         warning: warning_msg,
-        verify: VerifyParams {
-            ube_offset: actual_ube_offset,
-            ube_size: ube_total_size,
-            inject_offset,
-            inject_size,
-            patch_offset,
-            orig_patch_val,
-            header_magic,
-            trailer_magic,
-            strategy: selected_strategy,
-        },
     })
 }
 
@@ -1389,13 +1277,6 @@ pub fn write_carrier_with(
             })?;
         write_core(&mut host, &mut out_file, source, options, local, profile)?
     };
-
-    // Self-verification re-reads what was just written, so a stale envelope
-    // from an earlier injection cannot satisfy the check.
-    {
-        let mut written = File::open(&tmp_target)?;
-        verify_written(&mut written, &core.verify, options.password, profile)?;
-    }
 
     // 2. In-place backup (if applicable) & Atomic commit
     let is_inplace = same_file(target_path, carrier_path);
@@ -1520,12 +1401,6 @@ pub fn write_carrier_bytes(
     let mut out = Cursor::new(Vec::new());
     let core = write_core(&mut host, &mut out, source, options, local, profile)?;
     let bytes = out.into_inner();
-    verify_written(
-        &mut Cursor::new(&bytes),
-        &core.verify,
-        options.password,
-        profile,
-    )?;
 
     let result = WriteResult {
         status: "success".into(),
@@ -1589,19 +1464,24 @@ struct ReadCore {
     raw_size: u64,
 }
 
-/// Locate, authenticate and decrypt the envelope in `host`.
-///
-/// `label` only appears in error messages ("'photo.png'" vs "'<memory>'").
-fn read_core(
-    host: &mut dyn SeekRead,
+struct AuthenticatedEnvelope<'a> {
+    ube_stream: Box<dyn SeekRead + 'a>,
+    header: EnvelopeHeader,
+    meta_obj: CarrierMetadata,
+    payload_key: [u8; 32],
+    fixed_header_aad: [u8; crate::envelope::AAD_SIZE],
+    total_payload_bytes: u64,
+}
+
+/// Locate, unpack and authenticate envelope metadata and derive crypto keys.
+fn open_and_authenticate_envelope<'a>(
+    host: &'a mut dyn SeekRead,
     label: &str,
     password: Option<&str>,
     profile: &Profile,
-) -> Result<ReadCore, StrHideError> {
+) -> Result<AuthenticatedEnvelope<'a>, StrHideError> {
     let adapter = find_adapter_or_reject(host, label)?;
 
-    // The locator already derived the stealth magics it needed; keep them so
-    // the header unpack does not pay for a second PBKDF2 over the same pair.
     let Located {
         location,
         stealth_header_magic,
@@ -1622,14 +1502,9 @@ fn read_core(
     let mut ube_stream =
         adapter.open_ube_reader(host, ube_offset, ube_total_size, &strategy_name)?;
 
-    // Read fixed header
     let mut header_bytes = [0u8; HEADER_SIZE];
     ube_stream.read_exact(&mut header_bytes)?;
 
-    // Derive everything this header needs from its (unmasked) salt once. The
-    // password branch is derived when a password was supplied; the profile
-    // default branch is derived when none was (it is the only one that can
-    // match then), and lazily inside `unpack_with_secrets` otherwise.
     let salt = EnvelopeHeader::salt_of(&header_bytes).unwrap_or([0u8; 16]);
     let secrets = UnpackSecrets {
         password: match password {
@@ -1646,7 +1521,6 @@ fn read_core(
     let header = EnvelopeHeader::unpack_with_secrets(&header_bytes, password, profile, &secrets)?;
     header.validate_against(ube_total_size)?;
 
-    // Read hint if present
     let mut hint_str = None;
     if header.hint_len > 0 {
         let mut hint_buf = vec![0u8; header.hint_len as usize];
@@ -1656,13 +1530,9 @@ fn read_core(
 
     let fixed_header_aad = header.get_aad();
 
-    // Derive keys from the material the header unpack already produced.
     let (payload_key, meta_key) = if header.is_encrypted() {
         secrets.password.as_ref().map_or_else(
             || {
-                // The hint is carried as a structured field *and* kept in the
-                // message, so the rendered error is unchanged for anyone reading
-                // it (the CLI prints the hint from the field before prompting).
                 let message = match &hint_str {
                     Some(h) => format!("Password required to extract hidden data. Hint: '{h}'."),
                     None => "Password required to extract hidden data".into(),
@@ -1675,22 +1545,15 @@ fn read_core(
             |s| Ok((s.payload_key, s.meta_key)),
         )?
     } else {
-        // No user password: the profile default secret keys the envelope. It was
-        // derived above when no password was supplied; otherwise derive it now
-        // (one PBKDF2) — the alternative would be a second header unpack.
         match &secrets.default {
             Some(s) => (s.payload_key, s.meta_key),
             None => derive_keys(profile.secret(), &header.salt)?,
         }
     };
 
-    // Read metadata
     let mut meta_bytes = vec![0u8; header.meta_len as usize];
     ube_stream.read_exact(&mut meta_bytes)?;
 
-    // Metadata is always AEAD-sealed, even in an unencrypted envelope (the key
-    // is then the profile's default secret). There is no plaintext fallback:
-    // pre-v2 carriers stored metadata in the clear and are no longer readable.
     let meta_obj = decrypt_metadata(
         &meta_bytes,
         &meta_key,
@@ -1700,63 +1563,73 @@ fn read_core(
     .map_err(|_| StrHideError::Password("Invalid password or corrupted metadata".into()))
     .and_then(|plain| decode_metadata(&plain, header.is_compact_meta()))?;
 
-    // Read payload (checked_sub: validate_against already bounds the fields,
-    // but keep the arithmetic defensive against corrupted envelopes)
     let total_payload_bytes = ube_total_size
-        .checked_sub(HEADER_SIZE as u64)
-        .and_then(|v| v.checked_sub(header.hint_len as u64))
-        .and_then(|v| v.checked_sub(header.meta_len as u64))
-        .and_then(|v| v.checked_sub(24))
-        .ok_or_else(|| {
-            StrHideError::CorruptedData(
-                "Envelope size fields inconsistent: payload region underflow".into(),
-            )
-        })?;
+        - (HEADER_SIZE as u64
+            + TRAILER_SIZE as u64
+            + header.hint_len as u64
+            + header.meta_len as u64);
+
+    Ok(AuthenticatedEnvelope {
+        ube_stream,
+        header,
+        meta_obj,
+        payload_key,
+        fixed_header_aad,
+        total_payload_bytes,
+    })
+}
+
+/// Locate, authenticate and decrypt the envelope in `host`.
+///
+/// `label` only appears in error messages ("'photo.png'" vs "'<memory>'").
+fn read_core(
+    host: &mut dyn SeekRead,
+    label: &str,
+    password: Option<&str>,
+    profile: &Profile,
+) -> Result<ReadCore, StrHideError> {
+    let mut env = open_and_authenticate_envelope(host, label, password, profile)?;
 
     let mut decrypted_payload = Vec::new();
     decrypt_stream_from_chunks(
-        &mut ube_stream,
+        &mut env.ube_stream,
         &mut decrypted_payload,
-        &payload_key,
-        &header.base_nonce,
-        &fixed_header_aad,
-        total_payload_bytes,
+        &env.payload_key,
+        &env.header.base_nonce,
+        &env.fixed_header_aad,
+        env.total_payload_bytes,
     )?;
 
-    // Decompress if needed. `meta_obj.raw_size` is the declared uncompressed
-    // size (inside the AEAD-protected metadata), so it doubles as a hard
-    // expansion bound for untrusted carriers.
-    let data = if header.is_compressed() {
+    let data = if env.header.is_compressed() {
         let mut decomp = Vec::new();
         decompress_stream(
             &mut Cursor::new(&decrypted_payload),
             &mut decomp,
-            meta_obj.raw_size,
+            env.meta_obj.raw_size,
         )?;
         decomp
     } else {
         decrypted_payload
     };
 
-    // Verify SHA-256
     let actual_sha256 = {
         let h = crate::crypto::compute_sha256(&data);
         h.iter().map(|b| format!("{b:02x}")).collect::<String>()
     };
 
-    if actual_sha256 != meta_obj.raw_sha256 {
+    if actual_sha256 != env.meta_obj.raw_sha256 {
         return Err(StrHideError::CorruptedData(format!(
             "Payload SHA-256 mismatch: {actual_sha256} != {}",
-            meta_obj.raw_sha256
+            env.meta_obj.raw_sha256
         )));
     }
 
     Ok(ReadCore {
         data,
-        is_file: header.is_file(),
-        is_encrypted: header.is_encrypted(),
-        filename: meta_obj.filename,
-        raw_size: meta_obj.raw_size,
+        is_file: env.header.is_file(),
+        is_encrypted: env.header.is_encrypted(),
+        filename: env.meta_obj.filename,
+        raw_size: env.meta_obj.raw_size,
     })
 }
 
@@ -1769,104 +1642,17 @@ fn verify_l3_stream(
     profile: &Profile,
 ) -> Result<u64, StrHideError> {
     host.seek(SeekFrom::Start(0))?;
-    let adapter = find_adapter_or_reject(host, label)?;
-
-    let Located {
-        location,
-        stealth_header_magic,
-    } = locate_envelope_with_magic(host, adapter, password, profile)?;
-
-    let (ube_offset, ube_total_size, strategy_name) = match location {
-        Some(l) => l,
-        None => {
-            return Err(no_hidden_data_error(
-                host,
-                adapter,
-                label,
-                password.is_some(),
-            ));
-        }
-    };
-
-    let mut ube_stream =
-        adapter.open_ube_reader(host, ube_offset, ube_total_size, &strategy_name)?;
-
-    let mut header_bytes = [0u8; HEADER_SIZE];
-    ube_stream.read_exact(&mut header_bytes)?;
-
-    let mut salt = [0u8; 16];
-    salt.copy_from_slice(&header_bytes[12..28]);
-    let secrets = UnpackSecrets {
-        password: match password {
-            Some(pwd) => Some(derive_all(pwd, &salt)?),
-            None => None,
-        },
-        default: if password.is_none() {
-            Some(derive_all(profile.secret(), &salt)?)
-        } else {
-            None
-        },
-        stealth_header_magic,
-    };
-    let header = EnvelopeHeader::unpack_with_secrets(&header_bytes, password, profile, &secrets)?;
-    header.validate_against(ube_total_size)?;
-
-    // Skip hint if present
-    if header.hint_len > 0 {
-        ube_stream.seek(SeekFrom::Current(header.hint_len as i64))?;
-    }
-
-    let fixed_header_aad = header.get_aad();
-
-    let (payload_key, meta_key) = if header.is_encrypted() {
-        secrets.password.as_ref().map_or_else(
-            || {
-                Err(StrHideError::Password(
-                    "Password required to extract hidden data".into(),
-                ))
-            },
-            |s| Ok((s.payload_key, s.meta_key)),
-        )?
-    } else {
-        match &secrets.default {
-            Some(s) => (s.payload_key, s.meta_key),
-            None => derive_keys(profile.secret(), &header.salt)?,
-        }
-    };
-
-    // Read metadata
-    let mut meta_bytes = vec![0u8; header.meta_len as usize];
-    ube_stream.read_exact(&mut meta_bytes)?;
-
-    let meta_obj = decrypt_metadata(
-        &meta_bytes,
-        &meta_key,
-        &header.base_nonce,
-        &fixed_header_aad,
-    )
-    .map_err(|_| StrHideError::Password("Invalid password or corrupted metadata".into()))
-    .and_then(|plain| decode_metadata(&plain, header.is_compact_meta()))?;
-
-    let total_payload_bytes = ube_total_size
-        .checked_sub(HEADER_SIZE as u64)
-        .and_then(|v| v.checked_sub(header.hint_len as u64))
-        .and_then(|v| v.checked_sub(header.meta_len as u64))
-        .and_then(|v| v.checked_sub(24))
-        .ok_or_else(|| {
-            StrHideError::CorruptedData(
-                "Envelope size fields inconsistent: payload region underflow".into(),
-            )
-        })?;
+    let mut env = open_and_authenticate_envelope(host, label, password, profile)?;
 
     crate::crypto::verify_payload_stream(
-        &mut ube_stream,
-        &payload_key,
-        &header.base_nonce,
-        &fixed_header_aad,
-        total_payload_bytes,
-        header.is_compressed(),
-        meta_obj.raw_size,
-        &meta_obj.raw_sha256,
+        &mut env.ube_stream,
+        &env.payload_key,
+        &env.header.base_nonce,
+        &env.fixed_header_aad,
+        env.total_payload_bytes,
+        env.header.is_compressed(),
+        env.meta_obj.raw_size,
+        &env.meta_obj.raw_sha256,
         crate::crypto::MAX_VERIFY_PAYLOAD_SIZE,
     )
 }
