@@ -13,6 +13,25 @@
 //!   both domains: the structure-domain fields and the content-domain
 //!   [`StegoProfile`].
 //!
+//! # `const` dialect construction
+//!
+//! Every profile field is a `'static` borrow (or a [`Copy`] value), so a host
+//! can declare its whole private dialect — including the image
+//! [`FormatProfile`] — as a `const` item with zero runtime cost:
+//!
+//! ```rust
+//! use strhide::params::Profile;
+//!
+//! const MY_PROFILE: Profile = Profile::new()
+//!     .with_default_secret("my-structure-secret")
+//!     .with_stego_secret("my-stego-secret");
+//! ```
+//!
+//! Runtime credentials (CLI flags, config files, environment variables) do
+//! **not** belong here: they are per-operation and are carried by
+//! [`crate::engine::WriteOptions`] / [`crate::stego::StegoOptions`], whose
+//! explicit value always wins over the profile's static default.
+//!
 //! Splitting this way (instead of the earlier `EngineConfig` / `ReadConfig`
 //! pair) removes the "set on write, forgot on read" failure mode from the type
 //! system's reach: there is only one `Profile` to pass.
@@ -21,10 +40,9 @@
 //! writer-only behaviour or an input to key/magic derivation whose result is
 //! already stored in (or recoverable from) the envelope.
 
-use std::borrow::Cow;
-
 use crate::crypto::{BUILTIN_DEFAULT_KEY, CHUNK_SIZE, MAX_CHUNK_SIZE};
 use crate::envelope::{STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC};
+use crate::stego::format::{DEFAULT_FORMAT, FormatProfile};
 
 /// Domain separator mixed into stealth magic derivation.
 ///
@@ -134,7 +152,7 @@ pub enum RejectionPolicy {
 /// carrier unreadable: the reader derives everything it needs from the
 /// envelope (chunk lengths are self-framing, compression is flagged, and
 /// neither is negotiated).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LocalParams {
     /// Plaintext bytes per AEAD chunk. Default 2 MiB, maximum 64 MiB.
@@ -153,33 +171,41 @@ pub struct LocalParams {
 
 impl Default for LocalParams {
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LocalParams {
+    /// Official defaults (2 MiB chunks, auto compression, strict rejection).
+    ///
+    /// `const` so a host can build an engine with tuned [`LocalParams`] at
+    /// compile time.
+    pub const fn new() -> Self {
         Self {
             chunk_size: CHUNK_SIZE,
             compression: CompressionStrategy::Auto,
             rejection: RejectionPolicy::Strict,
         }
     }
-}
 
-impl LocalParams {
     /// Set [`chunk_size`](Self::chunk_size).
     ///
     /// Builder form because the struct is `#[non_exhaustive]`: downstream
     /// crates cannot use struct-literal or `..Default::default()` syntax, only
     /// field assignment or these helpers.
-    pub fn with_chunk_size(mut self, chunk_size: usize) -> Self {
+    pub const fn with_chunk_size(mut self, chunk_size: usize) -> Self {
         self.chunk_size = chunk_size;
         self
     }
 
     /// Set [`compression`](Self::compression).
-    pub fn with_compression(mut self, compression: CompressionStrategy) -> Self {
+    pub const fn with_compression(mut self, compression: CompressionStrategy) -> Self {
         self.compression = compression;
         self
     }
 
     /// Set [`rejection`](Self::rejection).
-    pub fn with_rejection(mut self, rejection: RejectionPolicy) -> Self {
+    pub const fn with_rejection(mut self, rejection: RejectionPolicy) -> Self {
         self.rejection = rejection;
         self
     }
@@ -223,7 +249,7 @@ impl LocalParams {
 /// domains ([`crate::envelope`] vs [`crate::stego::envelope`]), so sharing one
 /// string would couple two independent dialects. Both are carried by the same
 /// `Profile`, so there is still exactly one object to store and pass around.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct StegoProfile {
     /// Private stand-in secret for no-password image steganography, replacing
@@ -231,23 +257,45 @@ pub struct StegoProfile {
     ///
     /// Both the AEAD key and the header-slot permutation are derived from it.
     /// An explicit password always wins over this value.
-    pub default_secret: Option<Cow<'static, str>>,
+    pub default_secret: Option<&'static str>,
     /// Custom stego domain tag for isolating the HKDF key derivation domain.
-    pub stego_domain: Option<Cow<'static, str>>,
+    pub stego_domain: Option<&'static str>,
+    /// Private JPEG V3 wire-format identity. `None` means the official
+    /// [`DEFAULT_FORMAT`].
+    ///
+    /// Because the format decides the superblock/extension geometry and the
+    /// slot grid, a private format makes the carrier unreadable with an
+    /// official binary -- exactly like a private secret.
+    pub format: Option<FormatProfile>,
 }
 
 impl StegoProfile {
+    /// Official content-domain defaults (no private secret, official format).
+    pub const fn new() -> Self {
+        Self {
+            default_secret: None,
+            stego_domain: None,
+            format: None,
+        }
+    }
+
     /// Set [`default_secret`](Self::default_secret).
     ///
-    /// Builder form because the struct is `#[non_exhaustive]`.
-    pub fn with_default_secret<S: Into<Cow<'static, str>>>(mut self, secret: S) -> Self {
-        self.default_secret = Some(secret.into());
+    /// `const` builder form because the struct is `#[non_exhaustive]`.
+    pub const fn with_default_secret(mut self, secret: &'static str) -> Self {
+        self.default_secret = Some(secret);
         self
     }
 
     /// Set [`stego_domain`](Self::stego_domain).
-    pub fn with_stego_domain<S: Into<Cow<'static, str>>>(mut self, domain: S) -> Self {
-        self.stego_domain = Some(domain.into());
+    pub const fn with_stego_domain(mut self, domain: &'static str) -> Self {
+        self.stego_domain = Some(domain);
+        self
+    }
+
+    /// Set [`format`](Self::format).
+    pub const fn with_format(mut self, format: FormatProfile) -> Self {
+        self.format = Some(format);
         self
     }
 
@@ -255,17 +303,27 @@ impl StegoProfile {
     /// used. An empty string counts as "not configured", so a blank config
     /// value cannot silently *disable* confidentiality by looking configured.
     pub fn secret(&self) -> Option<&str> {
-        self.default_secret.as_deref().filter(|s| !s.is_empty())
+        self.default_secret.filter(|s| !s.is_empty())
     }
 
     /// Custom stego domain tag, or `None` when the official default derivation is used.
     pub fn stego_domain(&self) -> Option<&str> {
-        self.stego_domain.as_deref().filter(|s| !s.is_empty())
+        self.stego_domain.filter(|s| !s.is_empty())
     }
 
-    /// True when no private secret or custom domain is set (official behaviour).
+    /// Wire-format identity to use: the private [`format`](Self::format) when
+    /// set, otherwise the official [`DEFAULT_FORMAT`].
+    pub fn format_profile(&self) -> &FormatProfile {
+        match self.format.as_ref() {
+            Some(format) => format,
+            None => &DEFAULT_FORMAT,
+        }
+    }
+
+    /// True when no private secret, domain, or format is set (official
+    /// behaviour).
     pub fn is_official(&self) -> bool {
-        self.secret().is_none() && self.stego_domain().is_none()
+        self.secret().is_none() && self.stego_domain().is_none() && self.format.is_none()
     }
 }
 
@@ -278,7 +336,7 @@ impl StegoProfile {
 ///
 /// One `Profile` covers both domains: the structure-domain fields below and
 /// [`stego`](Self::stego) for content-domain image steganography.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Profile {
     /// Secret keying every "no user password" envelope, replacing the public
@@ -290,9 +348,9 @@ pub struct Profile {
     /// it — and the wire format does not change by a single byte.
     ///
     /// An explicit password always wins over this value.
-    pub default_secret: Option<Cow<'static, str>>,
+    pub default_secret: Option<&'static str>,
     /// Domain separator for stealth magic derivation. `None` = [`STEALTH_DOMAIN`].
-    pub stealth_domain: Option<Cow<'static, [u8]>>,
+    pub stealth_domain: Option<&'static [u8]>,
     /// Custom header/trailer magic pair. `None` = the standard magics.
     ///
     /// A custom *trailer* magic is what the reader searches for, so envelopes
@@ -310,40 +368,63 @@ pub struct Profile {
 }
 
 impl Profile {
+    /// Official dialect: every field at its default.
+    pub const fn new() -> Self {
+        Self {
+            default_secret: None,
+            stealth_domain: None,
+            magic: None,
+            stego: StegoProfile::new(),
+        }
+    }
+
     /// Set [`default_secret`](Self::default_secret).
     ///
-    /// Builder form because the struct is `#[non_exhaustive]`: downstream
-    /// crates cannot use struct-literal or `..Default::default()` syntax.
-    pub fn with_default_secret<S: Into<Cow<'static, str>>>(mut self, secret: S) -> Self {
-        self.default_secret = Some(secret.into());
+    /// `const` builder form because the struct is `#[non_exhaustive]`:
+    /// downstream crates cannot use struct-literal or `..Default::default()`
+    /// syntax.
+    pub const fn with_default_secret(mut self, secret: &'static str) -> Self {
+        self.default_secret = Some(secret);
         self
     }
 
     /// Set [`stealth_domain`](Self::stealth_domain).
-    pub fn with_stealth_domain<D: Into<Cow<'static, [u8]>>>(mut self, domain: D) -> Self {
-        self.stealth_domain = Some(domain.into());
+    pub const fn with_stealth_domain(mut self, domain: &'static [u8]) -> Self {
+        self.stealth_domain = Some(domain);
         self
     }
 
     /// Set [`magic`](Self::magic).
-    pub fn with_magic(mut self, magic: MagicPair) -> Self {
+    pub const fn with_magic(mut self, magic: MagicPair) -> Self {
         self.magic = Some(magic);
         self
     }
 
     /// Replace the whole content-domain half.
-    pub fn with_stego_profile(mut self, stego: StegoProfile) -> Self {
+    pub const fn with_stego_profile(mut self, stego: StegoProfile) -> Self {
         self.stego = stego;
         self
     }
 
     /// Set the private no-password secret used by image steganography.
     ///
-    /// Sugar for `with_stego_profile(StegoProfile::default().with_default_secret(..))`;
+    /// Sugar for `with_stego_profile(StegoProfile::new().with_default_secret(..))`;
     /// it does **not** touch [`default_secret`](Self::default_secret), which
     /// keys the structure-domain envelope.
-    pub fn with_stego_secret<S: Into<Cow<'static, str>>>(mut self, secret: S) -> Self {
+    pub const fn with_stego_secret(mut self, secret: &'static str) -> Self {
         self.stego = self.stego.with_default_secret(secret);
+        self
+    }
+
+    /// Set the custom stego domain tag used to isolate the HKDF key derivation.
+    pub const fn with_stego_domain(mut self, domain: &'static str) -> Self {
+        self.stego = self.stego.with_stego_domain(domain);
+        self
+    }
+
+    /// Set the private image wire-format identity.
+    pub const fn with_format_profile(mut self, format: FormatProfile) -> Self {
+        self.stego = self.stego.with_format(format);
         self
     }
 
@@ -355,28 +436,26 @@ impl Profile {
         self.stego.secret()
     }
 
-    /// Set the custom stego domain tag used to isolate the HKDF key derivation.
-    pub fn with_stego_domain<S: Into<Cow<'static, str>>>(mut self, domain: S) -> Self {
-        self.stego = self.stego.with_stego_domain(domain);
-        self
-    }
-
     /// Custom stego domain tag, if any.
     pub fn stego_domain(&self) -> Option<&str> {
         self.stego.stego_domain()
     }
 
+    /// Image wire-format identity (private if set, else official).
+    pub fn format_profile(&self) -> &FormatProfile {
+        self.stego.format_profile()
+    }
+
     /// Secret used when no user password is supplied.
     pub fn secret(&self) -> &str {
         self.default_secret
-            .as_deref()
             .filter(|s| !s.is_empty())
             .unwrap_or(BUILTIN_DEFAULT_KEY)
     }
 
     /// Domain separator mixed into stealth magic derivation.
     pub fn domain(&self) -> &[u8] {
-        self.stealth_domain.as_deref().unwrap_or(STEALTH_DOMAIN)
+        self.stealth_domain.unwrap_or(STEALTH_DOMAIN)
     }
 
     /// Header magic this dialect writes.
@@ -397,11 +476,11 @@ impl Profile {
 
     /// True when every field is default, i.e. the official dialect.
     ///
-    /// Both domains are checked: a private *image* secret also makes the
-    /// profile non-official, because carriers embedded under it are just as
-    /// unreadable with the official binary.
+    /// Both domains are checked: a private *image* secret, domain, or format
+    /// also makes the profile non-official, because carriers embedded under it
+    /// are just as unreadable with the official binary.
     pub fn is_official(&self) -> bool {
-        self.default_secret.as_deref().is_none_or(|s| s.is_empty())
+        self.default_secret.is_none_or(|s| s.is_empty())
             && self.stealth_domain.is_none()
             && self.magic.is_none()
             && self.stego.is_official()
@@ -421,12 +500,24 @@ mod tests {
         assert_eq!(p.header_magic(), STANDARD_HEADER_MAGIC);
         assert_eq!(p.trailer_magic(), STANDARD_TRAILER_MAGIC);
         assert!(p.locator_magic().is_none());
+        assert_eq!(p.format_profile(), &DEFAULT_FORMAT);
+    }
+
+    #[test]
+    fn const_constructors_build_official_defaults() {
+        // The const chain must be usable in a const context.
+        const LOCAL: LocalParams = LocalParams::new().with_rejection(RejectionPolicy::ContentOnly);
+        assert_eq!(LOCAL.rejection, RejectionPolicy::ContentOnly);
+        assert_eq!(LOCAL.chunk_size, CHUNK_SIZE);
+
+        const PROFILE: Profile = Profile::new();
+        assert!(PROFILE.is_official());
     }
 
     #[test]
     fn custom_profile_is_not_official() {
         let p = Profile {
-            default_secret: Some(Cow::Borrowed("private")),
+            default_secret: Some("private"),
             ..Profile::default()
         };
         assert!(!p.is_official());
@@ -446,7 +537,7 @@ mod tests {
     #[test]
     fn empty_secret_falls_back_to_builtin() {
         let p = Profile {
-            default_secret: Some(Cow::Borrowed("")),
+            default_secret: Some(""),
             ..Profile::default()
         };
         assert_eq!(p.secret(), BUILTIN_DEFAULT_KEY);
@@ -510,6 +601,31 @@ mod tests {
         assert_eq!(p.stego_domain(), None);
         assert!(p.stego.is_official());
         assert!(p.is_official(), "an empty domain must not privatise");
+    }
+
+    #[test]
+    fn private_format_makes_the_profile_private() {
+        // A private FormatProfile is a non-official dialect, and it is the
+        // identity returned by format_profile().
+        let mut custom = DEFAULT_FORMAT;
+        custom.format_minor = 1;
+        let p = Profile::new().with_format_profile(custom);
+        assert!(!p.is_official(), "a private format is not official");
+        assert_eq!(p.format_profile(), &custom);
+        assert_eq!(p.stego.format, Some(custom));
+    }
+
+    #[test]
+    fn full_private_dialect_as_const() {
+        // The whole dialect for both domains, declared in one const chain.
+        const DIALECT: Profile = Profile::new()
+            .with_default_secret("structure-secret")
+            .with_stealth_domain(b"stealth-domain")
+            .with_stego_secret("stego-secret")
+            .with_stego_domain("org.acme.stego");
+        assert!(!DIALECT.is_official());
+        assert_eq!(DIALECT.secret(), "structure-secret");
+        assert_eq!(DIALECT.stego_secret(), Some("stego-secret"));
     }
 
     #[test]

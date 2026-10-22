@@ -85,7 +85,7 @@ pub fn embed_carrier_with_profile(
             payload,
             secret,
             domain,
-            &format::DEFAULT_FORMAT,
+            profile.format_profile(),
             &jpeg_params,
             &*model,
         )
@@ -148,7 +148,7 @@ pub fn extract_carrier_with_profile(
             carrier_bytes,
             secret,
             domain,
-            &format::DEFAULT_FORMAT,
+            profile.format_profile(),
             &options.extract_params,
         )
     } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
@@ -253,11 +253,12 @@ pub fn probe_carrier_capacity_with_profile(
                     options.algorithm
                 ))
             })?;
-        jpeg::probe_jpeg_capacity(
+        jpeg::probe_capacity_with_format(
             carrier_bytes,
             &*model,
             &options.jpeg_params,
             options.safety_level,
+            profile.format_profile(),
         )
     } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
         let model = CostModelRegistry::get_spatial_model(options.algorithm.as_deref()).ok_or_else(

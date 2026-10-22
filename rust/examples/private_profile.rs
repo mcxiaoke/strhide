@@ -35,9 +35,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Application-specific magics: the first eight bytes no longer read
     // "\x89STRHIDE", so a scanner that greps for the public signature finds
     // nothing. Trailer magic is four bytes.
-    let private = Profile::default()
+    //
+    // The whole dialect is declared `const` (zero runtime cost) because every
+    // field is a `'static` borrow.
+    const PRIVATE: Profile = Profile::new()
         .with_default_secret("acme-deployment-envelope-key-2026")
-        .with_stealth_domain(b"acme-stealth-domain-v1".to_vec())
+        .with_stealth_domain(b"acme-stealth-domain-v1")
         .with_magic(MagicPair {
             header: *b"\xAC\x4D\x45\x00\x01\x02\x03\x04",
             trailer: *b"\xAC\x4D\x54\x01",
@@ -49,11 +52,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PayloadSource::Bytes(b"intended for acme only"),
         &WriteOptions::default(),
         &LocalParams::default(),
-        &private,
+        &PRIVATE,
     )?;
 
     // Same profile: works.
-    let read = read_carrier_bytes(&stego, None, &private)?;
+    let read = read_carrier_bytes(&stego, None, &PRIVATE)?;
     assert_eq!(read.data, b"intended for acme only");
     println!("private profile read back {} bytes", read.data.len());
 

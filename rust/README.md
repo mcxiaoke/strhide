@@ -56,28 +56,42 @@ are rejected rather than appended to.
 
 ## Library
 
-Two entry-point families, same protocol underneath:
+The recommended entry point is a **`StrHide`** instance (the facade). It binds one private dialect (`Profile`) and one writer-behaviour baseline (`LocalParams`), then exposes every verb as an ordinary method. The whole dialect can be declared `const` at compile time (zero runtime cost), and both path and in-memory variants are provided.
+
+```rust
+use strhide::engine::{PayloadSource, WriteOptions};
+use strhide::facade::StrHide;
+use strhide::params::Profile;
+
+// The whole private dialect is declared at compile time.
+const ENGINE: StrHide = StrHide::new()
+    .with_profile(Profile::new().with_default_secret("my-deployment-key"));
+
+// Structure domain, in-memory:
+let (stego, _) = ENGINE.write_bytes(
+    &cover_png,
+    PayloadSource::Bytes(b"payload"),
+    &WriteOptions::default(),
+)?;
+let read = ENGINE.read_bytes(&stego, None)?;
+assert_eq!(read.data, b"payload");
+
+// Content domain (image steganography), in-memory:
+let stego = ENGINE.embed(&cover_jpg, b"payload", &Default::default())?;
+let payload = ENGINE.extract(&stego, &Default::default())?;
+assert_eq!(payload, b"payload");
+```
+
+A host can also drive its own command line: `ENGINE.run_cli_from(std::env::args_os())` returns the exit code without calling `process::exit` (argv must include the program name as its first element).
+
+### Free-function entry points
+
+The facade is a thin forwarder; the underlying free functions stay public and are handy when a single call is all you need. Both families run the same protocol:
 
 | | in/out | atomic commit | `.bak` | timestamps |
 |---|---|---|---|---|
-| `write_carrier_with` / `read_carrier_with_profile` / `remove_carrier_with` | paths | yes | yes | cloned |
+| `write_carrier_with` / `read_carrier_with_profile` / `remove_carrier_with_options` | paths | yes | yes | cloned |
 | `write_carrier_bytes` / `read_carrier_bytes` / `remove_carrier_bytes` | `&[u8]` → `Vec<u8>` | n/a (you own the buffer) | no | n/a |
-
-```rust
-use strhide::engine::{PayloadSource, WriteOptions, read_carrier_bytes, write_carrier_bytes};
-use strhide::params::{LocalParams, Profile};
-
-let options = WriteOptions { password: Some("hunter2"), ..WriteOptions::default() };
-let (stego, _) = write_carrier_bytes(
-    &cover_png,                                  // bytes in
-    PayloadSource::Bytes(b"payload"),            // or ::File(path) / ::Text(str)
-    &options,
-    &LocalParams::default(),
-    &Profile::default(),                         // private dialect knob
-)?;
-let read = read_carrier_bytes(&stego, options.password, &Profile::default())?;
-assert_eq!(read.data, b"payload");
-```
 
 The byte API runs the same rejection content checks (Authenticode / PDF / JAR
 signatures) but skips the path-based ones — read-only carrier, target-directory
@@ -89,8 +103,11 @@ Payloads are buffered in memory by both families; there is no streaming API. A
 multi-GB payload therefore needs that much RAM (the plan's alternative — spilling
 the payload to a temporary file — is not implemented).
 
-Examples: `cargo run --example in_memory`, `cargo run --example private_profile`,
-`cargo run --release --example codec_bench -- <carrier.png> <payload>`.
+See [`docs/api/ARCHITECTURE.md`](../docs/api/ARCHITECTURE.md) for the full module
+topology and API surface, and [`docs/api/WIRE_SPEC.md`](../docs/api/WIRE_SPEC.md)
+for the wire format. Examples: `cargo run --example in_memory`, `cargo run
+--example private_profile`, `cargo run --release --example codec_bench --
+<carrier.png> <payload>`.
 
 ## Compatibility
 

@@ -223,7 +223,7 @@ fn chunk_size_is_a_writer_only_knob() {
     let payload = vec![0x5Au8; 5_000];
 
     let never = LocalParams::default().with_compression(CompressionStrategy::Never);
-    let small = never.clone().with_chunk_size(512);
+    let small = never.with_chunk_size(512);
 
     let baseline = dir.join("baseline.png");
     let base_size = write(

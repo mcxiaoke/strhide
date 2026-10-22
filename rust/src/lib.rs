@@ -132,6 +132,7 @@ pub mod crypto;
 pub mod engine;
 pub mod envelope;
 pub mod errors;
+pub mod facade;
 pub mod i18n;
 pub mod jpeg;
 pub mod params;

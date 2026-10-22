@@ -2073,23 +2073,50 @@ pub fn inspect_carrier_with(
     }
 
     let mut cf = File::open(carrier_path)?;
-    let adapter = find_adapter_or_reject(&mut cf, &carrier_path.display().to_string())?;
+    inspect_core(
+        &mut cf,
+        &carrier_path.display().to_string(),
+        password,
+        profile,
+    )
+}
+
+/// Inspect an in-memory carrier, using the same dialect resolution as
+/// [`inspect_carrier_with`].
+pub fn inspect_carrier_bytes(
+    carrier: &[u8],
+    password: Option<&str>,
+    profile: &Profile,
+) -> Result<InspectResult, StrHideError> {
+    let mut host = Cursor::new(carrier);
+    inspect_core(&mut host, "<memory>", password, profile)
+}
+
+/// Shared inspect logic over any seekable reader (a `File` on the path path, a
+/// `Cursor` on the bytes path).
+fn inspect_core(
+    host: &mut dyn SeekRead,
+    label: &str,
+    password: Option<&str>,
+    profile: &Profile,
+) -> Result<InspectResult, StrHideError> {
+    host.seek(SeekFrom::Start(0))?;
+    let adapter = find_adapter_or_reject(host, label)?;
 
     // Measured strategy capacities (design: folds the former `check` command
     // into `inspect`). Adapters that can answer statically ignore the reader;
     // PE measures `.text` density and zero slack, ZIP measures the EOCD offset.
-    let strategies = adapter.strategy_capacities(Some(&mut cf));
+    let strategies = adapter.strategy_capacities(Some(host));
 
-    // Content-domain capacity needs the whole image decoded, so the file is
-    // read back into memory. Bounded on purpose: `inspect` also runs on files
-    // it was merely pointed at, and a 4 GiB "PNG" must not become a 4 GiB
+    // Content-domain capacity needs the whole image decoded, so the carrier is
+    // read back into memory. Bounded on purpose: `inspect` also runs on data it
+    // was merely pointed at, and a 4 GiB "PNG" must not become a 4 GiB
     // allocation. Above the cap the field is simply absent.
     let content_stego_capacity = if adapter.supports_content_stego() {
-        cf.seek(SeekFrom::Start(0))?;
+        host.seek(SeekFrom::Start(0))?;
         let mut buf = Vec::new();
-        let reader: &mut dyn Read = &mut cf;
-        reader.take(MAX_CONTENT_STEGO_BYTES).read_to_end(&mut buf)?;
-        cf.seek(SeekFrom::Start(0))?;
+        host.take(MAX_CONTENT_STEGO_BYTES).read_to_end(&mut buf)?;
+        host.seek(SeekFrom::Start(0))?;
         if (buf.len() as u64) < MAX_CONTENT_STEGO_BYTES {
             // Same credentials an `embed` would use for the profile's dialect.
             crate::stego::probe_carrier_capacity_with_profile(
@@ -2105,13 +2132,13 @@ pub fn inspect_carrier_with(
         None
     };
 
-    let loc = locate_envelope(&mut cf, adapter, password, profile)?;
+    let loc = locate_envelope(host, adapter, password, profile)?;
 
     let (ube_offset, ube_total_size, strategy_name) = match loc {
         Some(l) => l,
         None => {
             return Ok(InspectResult {
-                carrier: carrier_path.display().to_string(),
+                carrier: label.to_string(),
                 format: adapter.format_name().into(),
                 has_hidden_data: false,
                 strategy: None,
@@ -2131,7 +2158,7 @@ pub fn inspect_carrier_with(
     };
 
     let mut ube_stream =
-        adapter.open_ube_reader(&mut cf, ube_offset, ube_total_size, &strategy_name)?;
+        adapter.open_ube_reader(host, ube_offset, ube_total_size, &strategy_name)?;
 
     let mut header_bytes = [0u8; HEADER_SIZE];
     ube_stream.read_exact(&mut header_bytes)?;
@@ -2195,7 +2222,7 @@ pub fn inspect_carrier_with(
     };
 
     Ok(InspectResult {
-        carrier: carrier_path.display().to_string(),
+        carrier: label.to_string(),
         format: adapter.format_name().into(),
         has_hidden_data: true,
         strategy: Some(reported_strategy),
@@ -2249,18 +2276,46 @@ pub fn verify_carrier_with(
     }
 
     let mut cf = File::open(carrier_path)?;
-    let adapter = find_adapter_or_reject(&mut cf, &carrier_path.display().to_string())?;
+    verify_core(
+        &mut cf,
+        &carrier_path.display().to_string(),
+        password,
+        profile,
+    )
+}
+
+/// Verify an in-memory carrier, using the same dialect resolution as
+/// [`verify_carrier_with`].
+pub fn verify_carrier_bytes(
+    carrier: &[u8],
+    password: Option<&str>,
+    profile: &Profile,
+) -> Result<VerifyResult, StrHideError> {
+    let mut host = Cursor::new(carrier);
+    verify_core(&mut host, "<memory>", password, profile)
+}
+
+/// Shared verify logic over any seekable reader (a `File` on the path path, a
+/// `Cursor` on the bytes path).
+fn verify_core(
+    host: &mut dyn SeekRead,
+    label: &str,
+    password: Option<&str>,
+    profile: &Profile,
+) -> Result<VerifyResult, StrHideError> {
+    host.seek(SeekFrom::Start(0))?;
+    let adapter = find_adapter_or_reject(host, label)?;
 
     // Level 1: Host format integrity
-    let (l1_ok, l1_msg) = adapter.verify_structure(&mut cf)?;
+    let (l1_ok, l1_msg) = adapter.verify_structure(host)?;
 
-    let loc = locate_envelope(&mut cf, adapter, password, profile)?;
+    let loc = locate_envelope(host, adapter, password, profile)?;
 
     let (ube_offset, ube_total_size, strategy_name) = match loc {
         Some(l) => l,
         None => {
             return Ok(VerifyResult {
-                carrier: carrier_path.display().to_string(),
+                carrier: label.to_string(),
                 format: adapter.format_name().into(),
                 level1_host: LevelStatus {
                     ok: l1_ok,
@@ -2274,7 +2329,7 @@ pub fn verify_carrier_with(
     };
 
     let (l2_ok, l2_msg, is_encrypted, _is_stealth) = {
-        match adapter.open_ube_reader(&mut cf, ube_offset, ube_total_size, &strategy_name) {
+        match adapter.open_ube_reader(host, ube_offset, ube_total_size, &strategy_name) {
             Err(e) => (
                 false,
                 format!("Cannot open envelope reader: {e}"),
@@ -2378,12 +2433,7 @@ pub fn verify_carrier_with(
     // *did* run and failed (wrong password, corrupted payload) behind the same
     // boolean as this one.
     let l3 = if !is_encrypted || password.is_some() {
-        match verify_l3_stream(
-            &mut cf,
-            &carrier_path.display().to_string(),
-            password,
-            profile,
-        ) {
+        match verify_l3_stream(host, label, password, profile) {
             Ok(raw_size) => LevelStatus::pass(format!(
                 "Decryption and SHA-256 verified successfully (payload {raw_size} bytes)"
             )),
@@ -2394,7 +2444,7 @@ pub fn verify_carrier_with(
     };
 
     Ok(VerifyResult {
-        carrier: carrier_path.display().to_string(),
+        carrier: label.to_string(),
         format: adapter.format_name().into(),
         level1_host: LevelStatus {
             ok: l1_ok,

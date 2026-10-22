@@ -6,10 +6,8 @@ This repository ships two implementations:
 
 | Implementation | Language | Status |
 | --- | --- | --- |
-| [`rust/`](rust/) | Rust (edition 2024) | **Maintained (0.3.x)** — single static binary, built from source |
-| [`python/`](python/) | Python ≥ 3.10 | **Frozen at 0.2.0, deprecated** — `pip install strhide`, library + CLI |
+| [`rust/`](rust/) | Rust (edition 2024) | **Maintained (0.6.x)** — single static binary, built from source |
 
-Compatibility is one-directional: the Rust build can still read envelopes written by the old Python package, but Python cannot read Rust's new default fully-encrypted envelopes, nor PE carriers written with the `pe_slack` / `pe_codebits` strategies. Use the Rust binary for everything.
 
 > [中文说明（README.zh.md）](README.zh.md)
 
@@ -49,12 +47,6 @@ sha256sum -c SHA256SUMS.txt                # verify the download
 > **macOS (unsigned build):** Gatekeeper quarantines downloaded binaries that are not notarized. Either right-click the file → **Open**, or run `xattr -d com.apple.quarantine ./strhide-macos-universal2`.
 >
 > **Windows:** SmartScreen may warn about an unsigned executable — choose **More info → Run anyway**.
-
-**Python (deprecated, frozen at 0.2.0):**
-
-```bash
-pip install strhide
-```
 
 **Build from source:**
 
@@ -135,22 +127,33 @@ Payload sources on `write` are mutually exclusive too: `-d/--data`, `-t/--text`,
 
 ## Rust library API
 
-The `strhide` crate can be used as a library. Every operation has file-path and in-memory (`&[u8]` -> `Vec<u8>`) entry points, and a `Profile` lets a deployment build a private dialect (custom default key / magics) that other builds cannot read.
+The `strhide` crate can be used as a library. The recommended entry point is a **`StrHide`** instance: it binds one private dialect (`Profile`) and one writer-behaviour baseline (`LocalParams`), then exposes every verb as an ordinary method. The whole dialect can be declared `const` at compile time (zero runtime cost), and both file-path and in-memory (`&[u8]` -> `Vec<u8>`) variants are provided.
 
 ```rust
-use strhide::engine::{PayloadSource, WriteOptions, read_carrier_bytes, write_carrier_bytes};
-use strhide::params::{LocalParams, Profile};
+use strhide::engine::{PayloadSource, WriteOptions};
+use strhide::facade::StrHide;
+use strhide::params::Profile;
 
-let (stego, _) = write_carrier_bytes(
+// The whole private dialect is declared at compile time.
+const ENGINE: StrHide = StrHide::new()
+    .with_profile(Profile::new().with_default_secret("my-deployment-key"));
+
+// Structure domain, in-memory:
+let (stego, _) = ENGINE.write_bytes(
     &cover,
     PayloadSource::Bytes(b"secret"),
-    &WriteOptions { password: Some("pw"), ..WriteOptions::default() },
-    &LocalParams::default(),
-    &Profile::default(),
+    &WriteOptions::default(),
 )?;
-let read = read_carrier_bytes(&stego, Some("pw"), &Profile::default())?;
+let read = ENGINE.read_bytes(&stego, None)?;
 assert_eq!(read.data, b"secret");
+
+// Content domain (image steganography), in-memory:
+let stego = ENGINE.embed(&jpeg, b"secret", &Default::default())?;
+let payload = ENGINE.extract(&stego, &Default::default())?;
+assert_eq!(payload, b"secret");
 ```
+
+A host can also drive its own command line with the bound dialect: `ENGINE.run_cli_from(std::env::args_os())` returns the exit code without calling `process::exit`. The underlying free functions (`write_carrier_bytes`, etc.) remain available for callers that prefer them.
 
 Library documentation:
 
@@ -158,23 +161,6 @@ Library documentation:
 - [`docs/api/WIRE_SPEC.md`](docs/api/WIRE_SPEC.md) — UBE v2.2 binary wire format, key derivation, compatibility matrix.
 
 Runnable examples: `cargo run --example in_memory`, `cargo run --example private_profile`, `cargo run --example codec_bench`.
-
-## Python API
-
-> **Deprecation notice (2026-10-18):** the pure-Python implementation is frozen at **0.2.0** and will no longer receive new features. Use the prebuilt Rust binary for the full feature set. In particular, Python does **not** implement the `pe_slack` / `pe_codebits` PE strategies, and it predates Rust's default fully-encrypted envelope (built-in-key mode), so it cannot read carriers written by current Rust builds. It remains available for existing users, and it can still read 0.2.0-era carriers — but current Rust builds cannot, because the pre-v2 read compatibility layer was removed on 2026-10-21.
-
-```python
-from strhide import write_carrier, read_carrier, inspect_carrier
-
-# Hide text in a carrier (writes carrier.png in-place by default)
-result = write_carrier("carrier.png", data_text="hello", password="pw")
-
-# Extract it again
-result = read_carrier("carrier.png", output_path="restored.txt", password="pw")
-
-# Metadata without extracting
-meta = inspect_carrier("carrier.png", password="pw")
-```
 
 All functions return a result dict and raise `StrHideError` subclasses on failure (`RejectionError`, `CorruptedDataError`, `PasswordError`, `UnsupportedFormatError`, `NoHiddenDataError`, `RestoreMismatchError`). The package ships type annotations (`py.typed`).
 
@@ -282,7 +268,6 @@ of changing ~10% of all coefficients. At the recommended tier (<= 0.10 bpp) grow
 
 ```
 strhide/
-├── python/     # Python package (library + CLI), published to PyPI
 ├── rust/       # Rust implementation (library + CLI binary)
 ├── docs/       # design notes and change logs
 └── LICENSE     # Apache-2.0

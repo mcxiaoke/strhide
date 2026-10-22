@@ -1,10 +1,10 @@
 # strhide 架构与公开 API 说明
 
-> 适用版本：crate `strhide` 0.5.x（Rust 实现，`rust/`）。
+> 适用版本：crate `strhide` 0.6.x（Rust 实现，`rust/`）。
 > 本文描述模块职责、分层关系、公开 API 与内部数据流转，所有结论均按当前源码核对。
 > 配套文档：
 > - [WIRE_SPEC.md](./WIRE_SPEC.md) — UBE v2.2 二进制线格式规范；
-> - 上层背景：`docs/library_extensibility_and_public_api_audit_20261020.md`、`docs/library_api_practical_plan_20261020.md`。
+> - 上层背景：`docs/strhide_facade_api_evaluation_and_industry_standards_20261022.md`（Facade 方案评估与业界标准）、`docs/library_extensibility_and_public_api_audit_20261020.md`、`docs/library_api_practical_plan_20261020.md`。
 
 ---
 
@@ -38,6 +38,11 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
 │  调用方：CLI（main.rs → cli.rs）  /  外部库使用者（your crate）   │
+└───────────────┬──────────────────────────────────────────────────┘
+                ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  facade：StrHide（推荐入口，绑定一个 Profile + LocalParams）       │
+│  普通方法转发到 engine / stego；run_cli_from 驱动私有 CLI          │
 └───────────────┬──────────────────────────────────┬───────────────┘
                 │ 结构域（structure domain）         │ 内容域（content domain）
                 ▼                                   ▼
@@ -75,6 +80,8 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
 
 两域共用底层 [`crypto`]、[`errors`]、[`params`]，但**密钥派生域相互隔离，且信封格式本身就是两套不同结构**（结构域 UBE 有头/尾/元数据，内容域是极简伪随机微信封），互不可读。差异清单见 [WIRE_SPEC §1.1](./WIRE_SPEC.md#11-两种信封格式对比重要)，内容域机制见 [§7.3](#73-内容域隐写)。
 
+**Facade（[`facade`]）是推荐入口，位于调用方与 engine/stego 之间。** 一个 `StrHide` 实例在构造时绑定一个方言 [`Profile`] 和一个写侧基线 [`LocalParams`]，然后把每个动词（write/read/restore/inspect/verify、embed/extract/probe）作为普通方法转发到现有自由函数，每个方法 1–3 行。它不引入新的协议、不持有可变状态，且 `StrHide` 是 `Copy`。这与业界成熟库的形态一致（OpenStego 构造时绑定 config 后调用普通 `embedData`/`extractData`；reqwest 构造持有配置的 `Client` 后调用方法）。需要直接使用自由函数的调用方仍可绕过 facade，两套入口长期共存。
+
 ---
 
 ## 3. Crate 模块拓扑
@@ -85,6 +92,7 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
 
 | 模块 | 职责 | 关键类型 / 入口 |
 |---|---|---|
+| [`facade`] | 推荐入口：绑定一个方言 + 写侧基线，动词作为普通方法 | `StrHide`、`new`/`with_profile`/`with_local_params`、`run_cli_from` |
 | [`engine`] | 结构域高层编排：写入、读取、剥离、检查、验证 | `write_carrier*`、`read_carrier*`、`remove_carrier*`、`inspect_carrier*`、`verify_carrier*`、`PayloadSource`、`WriteOptions`、各 `*Result` |
 | [`stego`] | 内容域自适应隐写：嵌入、提取、容量探测 | `embed_carrier*`、`extract_carrier*`、`probe_carrier_capacity`、`StegoOptions`、`SpatialParams`、`JpegParams`、`StegoCapacityInfo` |
 | [`params`] | 调参旋钮与私有方言 | `LocalParams`、`Profile`、`StegoProfile`、`MagicPair`、`CompressionStrategy`、`RejectionPolicy` |
@@ -117,6 +125,36 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
 - **`_with` / `_with_profile`**：文件路径 + 完整配置（`LocalParams` + `Profile`）；
 - **`_bytes`**：内存字节（`&[u8]` → `Vec<u8>`），服务 Web/微服务场景。
 
+### 4.0 推荐入口：StrHide（facade）
+
+新接入的库使用者应优先使用 `StrHide`：构造一次（整个方言可在编译期声明为 `const`），然后在实例上调用动词。它把绑定的 `Profile`/`LocalParams` 自动转发给底层自由函数，无需在每个调用点重复传参。
+
+```rust
+use strhide::engine::{PayloadSource, WriteOptions};
+use strhide::facade::StrHide;
+use strhide::params::Profile;
+
+// 整个私有方言在编译期声明，零运行时开销。
+const ENGINE: StrHide = StrHide::new()
+    .with_profile(Profile::new().with_default_secret("my-deployment-key"));
+
+// 结构域（bytes 形态）：
+let (stego, _) = ENGINE.write_bytes(
+    &cover,
+    PayloadSource::Bytes(b"secret"),
+    &WriteOptions::default(),
+)?;
+let read = ENGINE.read_bytes(&stego, None)?;
+assert_eq!(read.data, b"secret");
+
+// 内容域（bytes 形态）：
+let stego = ENGINE.embed(&jpeg, b"secret", &Default::default())?;
+let payload = ENGINE.extract(&stego, &Default::default())?;
+assert_eq!(payload, b"secret");
+```
+
+`StrHide` 还提供 `run_cli_from(argv)`，用绑定的方言驱动一套私有命令行，返回退出码而不调用 `std::process::exit`（见 [§4.4](#44-命令行入口run_cli_from)）。下表 §4.1–§4.2 列出 facade 转发的全部自由函数，需要绕开 facade 直接调用时可参考。
+
 ### 4.1 结构域（engine）
 
 | 操作 | 入口 | 说明 |
@@ -145,6 +183,7 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
 | 提取 | `extract_carrier(carrier_bytes, options)` |
 |  | `extract_carrier_with_profile(carrier_bytes, options, profile)` |
 | 容量 | `probe_carrier_capacity(carrier_bytes, options)` |
+|  | `probe_carrier_capacity_with_profile(carrier_bytes, options, profile)` |
 
 ### 4.3 核心配置类型
 
@@ -183,6 +222,26 @@ pub struct StegoOptions {
 
 返回类型：`WriteResult`、`ReadResult`、`InspectResult`、`VerifyResult`（含三级 `LevelStatus`）、`RemoveResult`、`StegoCapacityInfo`。各字段含义见源码 doc 注释与 [WIRE_SPEC.md](./WIRE_SPEC.md)。
 
+### 4.4 命令行入口（run_cli_from）
+
+`StrHide::run_cli_from(argv)` 让一个嵌入式宿主用绑定的方言驱动完整的 strhide 命令行：
+
+- 接收任意可迭代的参数（元素可转为 `OsString`），**第一个元素必须是程序名**（与 `std::env::args_os()` 一致，clap 用它生成帮助与错误输出）；
+- 返回进程退出码（`i32`），**不调用 `std::process::exit`**，宿主自行决定如何处理退出码；
+- 绑在 engine 上的 `Profile`/`LocalParams` 替换 CLI 内部原本硬编码的官方默认；显式 CLI 参数仍优先于绑定配置。
+
+```rust
+use strhide::facade::StrHide;
+
+const ENGINE: StrHide = StrHide::new(); // 或绑定私有方言
+
+// 宿主自己的 main：
+let exit_code = ENGINE.run_cli_from(std::env::args_os());
+std::process::exit(exit_code);
+```
+
+官方二进制的 `main.rs` 正是这样委托：`cli::run_cli()` 内部等价于 `StrHide::new().run_cli_from(std::env::args_os())`。
+
 ---
 
 ## 5. 核心数据流转
@@ -199,10 +258,9 @@ pub struct StegoOptions {
 3. 记录原权限 / atime / mtime
 4. 创建 <target>.strhide.tmp（TmpGuard 负责异常时清理）
 5. write_core(host, out_file, ...)                          ← 协议
-6. verify_written(重读 tmp)                                  ← 写后自检
-7. （原地写入且 backup）复制 <carrier>.bak
-8. rename(tmp → target)（原子提交）
-9. 还原权限；preserve_time 时还原时间戳
+6. （原地写入且 backup）复制 <carrier>.bak
+7. rename(tmp → target)（原子提交）
+8. 还原权限；preserve_time 时还原时间戳
 ```
 
 **`write_core`（协议层，I/O 无关）：**
@@ -224,7 +282,7 @@ pub struct StegoOptions {
 10. adapter.inject(...) → (inject_offset, inject_size, patch_offset, orig_patch_val)
     envelope_offset_delta 修正实际 UBE 起点
 11. 非散落策略：回写最终 header、trailer；adapter.finalize（如重算 CRC）
-    返回 WriteCoreResult（含自检参数 VerifyParams）
+    返回 WriteCoreResult
 ```
 
 关键事实：
@@ -324,18 +382,37 @@ pub struct LocalParams {
 
 ```rust
 pub struct Profile {
-    pub default_secret: Option<Cow<'static, str>>,   // 无密码时的结构域信封密钥
-    pub stealth_domain: Option<Cow<'static, [u8]>>,  // stealth 魔数派生域
+    pub default_secret: Option<&'static str>,       // 无密码时的结构域信封密钥
+    pub stealth_domain: Option<&'static [u8]>,      // stealth 魔数派生域
     pub magic: Option<MagicPair>,                    // 自定义头/尾魔数
-    pub stego: StegoProfile,                         // 内容域（stego.default_secret, stego.stego_domain）
+    pub stego: StegoProfile,                         // 内容域（见下）
+}
+
+pub struct StegoProfile {
+    pub default_secret: Option<&'static str>,        // 无密码时的图像隐写私钥
+    pub stego_domain: Option<&'static str>,          // 图像隐写 HKDF 域标签
+    pub format: Option<FormatProfile>,               // 私有 JPEG V3 线格式身份（None=官方）
 }
 ```
 
+**所有字段都是 `'static` 借用或 `Copy` 值，因此整个方言可以在编译期用 `const fn` 链式构造，零运行时开销：**
+
+```rust
+const MY_DIALECT: Profile = Profile::new()
+    .with_default_secret("my-structure-secret")
+    .with_stealth_domain(b"my-stealth-domain")
+    .with_stego_secret("my-stego-secret")
+    .with_stego_domain("my-stego-domain");
+```
+
+之所以用 `&'static` 而非 `Cow<'static, _>`，是因为 `const fn` 中对 `Cow` 字段做 `mut self` 赋值会触发 E0493（`Cow` 析构无法在编译期求值，跟踪 rust-lang/rust#133214）；`&'static` 是 `Copy`，链式赋值可在编译期完成。代价是方言不能在运行时用 `String`/`Vec` 动态构造——运行时凭据（CLI/env/config）应通过 `WriteOptions`/`StegoOptions` 传入，不进 Profile。
+
 - **`default_secret` 与 `stego_domain` 是对库使用者价值最高的旋钮**：
   - 使用公开内置常量时，任何人持任何 strhide 都能读无密码信封；替换为私钥后，线格式一个字节都不变，但没有私钥读不出来。显式密码始终优先于此值。
-  - `stego_domain` 实现 HKDF 子密钥化域隔离（NFC 规范化 + 8 字节长度前缀防拼接），不同团队或系统即使密码相同也无法互读，杜绝开源共享指纹暴露。
+  - `stego_domain` 实现 HKDF 子密钥化域隔离（NFC 规范化 + 长度前缀防拼接），不同团队或系统即使密码相同也无法互读，杜绝开源共享指纹暴露。
 - 自定义 `magic` 在 stealth 下被忽略（stealth 的魔数由密码派生，固定魔数会破坏可否认性）。
-- `Profile::is_official()` 同时检查结构域与内容域：设置了内容域私钥或自定义 `stego_domain` 均算非官方。
+- 私有 `FormatProfile`（`stego.format`）决定超块/扩展几何与槽位网格，设置后官方二进制无法读取，与私钥等效；`format_profile()` 在未设置时回退 `DEFAULT_FORMAT`。
+- `Profile::is_official()` 同时检查两个域：结构域字段（`default_secret`/`stealth_domain`/`magic`）与内容域的私钥、`stego_domain`、`format`，任一设置即非官方。
 
 ### 6.3 内容域密钥与域解析
 
@@ -402,6 +479,10 @@ pub struct Profile {
 | stealth 派生域 | `Profile::with_stealth_domain` | P |
 | 自定义头/尾魔数 | `Profile::with_magic` | P |
 | 内容域无密码私钥 | `Profile::with_stego_secret` | P |
+| 内容域 HKDF 域标签 | `Profile::with_stego_domain` | P |
+| 私有图像线格式身份 | `Profile::with_format_profile` | P |
+| 统一门面（绑定方言 + 基线） | `StrHide::new` / `with_profile` / `with_local_params` | Facade |
+| 私有命令行 | `StrHide::run_cli_from` | Facade |
 | 内存（免落盘）处理 | `*_carrier_bytes` | I/O |
 | 实现代价模型 trait | `SpatialCostModel` / `JpegCostModel` | 扩展 |
 
@@ -423,10 +504,13 @@ pub struct Profile {
 - 多个公开枚举/结构体（`LocalParams`、`Profile`、`CompressionStrategy`、`RejectionPolicy` 等）标注 `#[non_exhaustive]`：下游应使用 `default()` + setter 构建，避免结构体字面量；未来新增字段/变体不构成破坏性变更。
 - 线格式（UBE v2.2）的稳定性与读写兼容关系见 [WIRE_SPEC.md](./WIRE_SPEC.md) 的兼容矩阵。
 - 可运行示例：`rust/examples/`（`in_memory`、`private_profile`、`codec_bench`）；公共 API 文档中的代码块由 `cargo test --doc` 守护，示例由 `cargo build --examples` 守护。
+- **推荐入口是 `StrHide`（facade）**：新接入的库使用者应构造 `StrHide` 并调用其方法，而非直接调用多个自由函数；facade 是薄转发层，底层自由函数仍公开并长期维护，二者不构成两套互斥的 API。
+- 方言字段使用 `'static` 借用以支持 `const fn` 编译期构造；不提供运行时 `String`/`Vec` 构造方言的能力，运行时凭据走 `WriteOptions`/`StegoOptions`。
 
 ---
 
 [`engine`]: ../../rust/src/engine.rs
+[`facade`]: ../../rust/src/facade.rs
 [`stego`]: ../../rust/src/stego/mod.rs
 [`params`]: ../../rust/src/params.rs
 [`adapters`]: ../../rust/src/adapters/mod.rs

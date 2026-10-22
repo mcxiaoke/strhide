@@ -186,7 +186,7 @@ impl GridRule {
 ///
 /// A mismatch on any of the derivation labels behaves exactly like a wrong
 /// password (`NoHiddenData`), which is the point.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FormatProfile {
     /// Major version; a different value is a different format.
     pub format_major: u8,

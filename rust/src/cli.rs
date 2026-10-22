@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -7,10 +8,12 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::config::{self, FileConfig};
 use crate::engine::{
-    PayloadSource, RemoveResult, WriteOptions, WriteResult, inspect_carrier, read_carrier_with,
-    remove_carrier_with_options, verify_carrier, write_carrier,
+    PayloadSource, RemoveResult, WriteOptions, WriteResult, inspect_carrier_with,
+    read_carrier_with_profile, remove_carrier_with_options, verify_carrier_with,
+    write_carrier_with,
 };
 use crate::errors::StrHideError;
+use crate::facade::StrHide;
 use crate::i18n::{self, Msg, t};
 use crate::router::{ADAPTERS, find_adapter_or_reject};
 
@@ -744,23 +747,6 @@ fn resolve_stego_domain(explicit: Option<&str>, cfg: &FileConfig) -> Option<Stri
     cfg.stego_domain.as_ref().filter(|d| !d.is_empty()).cloned()
 }
 
-/// Package the resolved private stego secret and domain as a stego-only
-/// [`Profile`](crate::params::Profile).
-///
-/// Only the content-domain half is populated: the CLI does not expose the
-/// structure-domain dialect knobs yet, so those stay at their official
-/// defaults (an all-default profile is byte-compatible with every release).
-fn stego_profile(secret: Option<String>, domain: Option<String>) -> crate::params::Profile {
-    let mut profile = crate::params::Profile::default();
-    if let Some(secret) = secret {
-        profile = profile.with_stego_secret(secret);
-    }
-    if let Some(domain) = domain {
-        profile = profile.with_stego_domain(domain);
-    }
-    profile
-}
-
 fn should_print_banner(cli: &Cli) -> bool {
     if cli.quiet {
         return false;
@@ -871,8 +857,10 @@ fn render_early_error(e: clap::Error, argv: &[std::ffi::OsString]) -> i32 {
 }
 
 pub fn run_cli() -> i32 {
-    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    StrHide::new().run_cli_from(std::env::args_os())
+}
 
+pub(crate) fn run_cli_with(engine: &StrHide, argv: Vec<OsString>) -> i32 {
     // 1) 预解析（英文模板，仅用于取得 matches；不触发任何输出）
     let pre = match Cli::command().try_get_matches_from(argv.clone()) {
         Ok(m) => m,
@@ -912,35 +900,35 @@ pub fn run_cli() -> i32 {
     }
 
     match cli.command {
-        Commands::Write(args) => match handle_write(args, &cfg, cli.quiet) {
+        Commands::Write(args) => match handle_write(args, &cfg, cli.quiet, engine) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);
                 1
             }
         },
-        Commands::Read(args) => match handle_read(args, &cfg, cli.quiet) {
+        Commands::Read(args) => match handle_read(args, &cfg, cli.quiet, engine) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);
                 1
             }
         },
-        Commands::Restore(args) => match handle_restore(args, &cfg, cli.quiet) {
+        Commands::Restore(args) => match handle_restore(args, &cfg, cli.quiet, engine) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);
                 1
             }
         },
-        Commands::Inspect(args) => match handle_inspect(args, &cfg, cli.quiet) {
+        Commands::Inspect(args) => match handle_inspect(args, &cfg, cli.quiet, engine) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);
                 1
             }
         },
-        Commands::Verify(args) => match handle_verify(args, &cfg, cli.quiet) {
+        Commands::Verify(args) => match handle_verify(args, &cfg, cli.quiet, engine) {
             Ok(code) => code,
             Err(e) => {
                 print_error(&e);
@@ -956,14 +944,14 @@ pub fn run_cli() -> i32 {
                 1
             }
         },
-        Commands::Embed(args) => match handle_embed(args, &cfg, cli.quiet) {
+        Commands::Embed(args) => match handle_embed(args, &cfg, cli.quiet, engine) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);
                 1
             }
         },
-        Commands::Extract(args) => match handle_extract(args, &cfg, cli.quiet) {
+        Commands::Extract(args) => match handle_extract(args, &cfg, cli.quiet, engine) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);
@@ -1061,7 +1049,12 @@ fn resolve_payload(
     Err(StrHideError::General(MISSING.to_string()))
 }
 
-fn handle_write(args: WriteArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
+fn handle_write(
+    args: WriteArgs,
+    cfg: &FileConfig,
+    quiet: bool,
+    engine: &StrHide,
+) -> Result<(), StrHideError> {
     // Config values act as defaults; explicit CLI flags win. --stealth implies
     // encryption (its magics are password-derived); prompt for a password when
     // neither -p nor a password source was supplied.
@@ -1191,7 +1184,7 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         if let Some(ref t) = output {
             check_overwrite(t, args.overwrite)?;
         }
-        let res = write_carrier(
+        let res = write_carrier_with(
             carrier,
             PayloadSource::Buffered {
                 data: &payload,
@@ -1207,13 +1200,20 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
                 preserve_time,
                 backup,
             },
+            engine.local_params(),
+            engine.profile(),
         )?;
         print_write_result(&res, quiet);
         Ok(())
     })
 }
 
-fn handle_read(args: ReadArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
+fn handle_read(
+    args: ReadArgs,
+    cfg: &FileConfig,
+    quiet: bool,
+    engine: &StrHide,
+) -> Result<(), StrHideError> {
     let mut password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
@@ -1222,11 +1222,12 @@ fn handle_read(args: ReadArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrH
         false,
     )?;
 
-    let res = match read_carrier_with(
+    let res = match read_carrier_with_profile(
         &args.carrier,
         args.output.as_deref(),
         password.as_deref(),
         args.overwrite,
+        engine.profile(),
     ) {
         Ok(r) => r,
         // Discriminate by error variant, not by message text. A password error
@@ -1245,11 +1246,12 @@ fn handle_read(args: ReadArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrH
                 ));
             }
             password = Some(prompt_password(false)?);
-            read_carrier_with(
+            read_carrier_with_profile(
                 &args.carrier,
                 args.output.as_deref(),
                 password.as_deref(),
                 args.overwrite,
+                engine.profile(),
             )?
         }
         Err(e) => return Err(e),
@@ -1309,7 +1311,12 @@ fn handle_read(args: ReadArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrH
     Ok(())
 }
 
-fn handle_restore(args: RestoreArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
+fn handle_restore(
+    args: RestoreArgs,
+    cfg: &FileConfig,
+    quiet: bool,
+    engine: &StrHide,
+) -> Result<(), StrHideError> {
     let password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
@@ -1353,7 +1360,7 @@ fn handle_restore(args: RestoreArgs, cfg: &FileConfig, quiet: bool) -> Result<()
             output.as_deref(),
             password.as_deref(),
             backup,
-            &crate::params::Profile::default(),
+            engine.profile(),
             args.overwrite,
         )?;
         print_remove_result(&res, quiet);
@@ -1470,7 +1477,12 @@ fn print_json<T: serde::Serialize>(val: &T) -> Result<(), StrHideError> {
     Ok(())
 }
 
-fn handle_inspect(args: InspectArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
+fn handle_inspect(
+    args: InspectArgs,
+    cfg: &FileConfig,
+    quiet: bool,
+    engine: &StrHide,
+) -> Result<(), StrHideError> {
     let password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
@@ -1489,7 +1501,7 @@ fn handle_inspect(args: InspectArgs, cfg: &FileConfig, quiet: bool) -> Result<()
 
     if !is_batch && files.len() == 1 {
         let carrier = &files[0];
-        let res = inspect_carrier(carrier, password.as_deref())?;
+        let res = inspect_carrier_with(carrier, password.as_deref(), engine.profile())?;
         if args.json {
             print_json(&res)?;
         } else if !quiet {
@@ -1501,7 +1513,7 @@ fn handle_inspect(args: InspectArgs, cfg: &FileConfig, quiet: bool) -> Result<()
     let mut reports = Vec::with_capacity(files.len());
     let mut failures = 0usize;
     for carrier in &files {
-        match inspect_carrier(carrier, password.as_deref()) {
+        match inspect_carrier_with(carrier, password.as_deref(), engine.profile()) {
             Ok(res) => {
                 if !args.json && !quiet {
                     println!(
@@ -1574,7 +1586,12 @@ fn print_verify_result(res: &crate::engine::VerifyResult) {
     );
 }
 
-fn handle_verify(args: VerifyArgs, cfg: &FileConfig, quiet: bool) -> Result<i32, StrHideError> {
+fn handle_verify(
+    args: VerifyArgs,
+    cfg: &FileConfig,
+    quiet: bool,
+    engine: &StrHide,
+) -> Result<i32, StrHideError> {
     let password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
@@ -1593,7 +1610,7 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig, quiet: bool) -> Result<i32,
 
     if !is_batch && files.len() == 1 {
         let carrier = &files[0];
-        let res = verify_carrier(carrier, password.as_deref())?;
+        let res = verify_carrier_with(carrier, password.as_deref(), engine.profile())?;
         if args.json {
             print_json(&res)?;
         } else if !quiet {
@@ -1610,7 +1627,7 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig, quiet: bool) -> Result<i32,
     let mut failures = 0usize;
     let mut any_failed = false;
     for carrier in &files {
-        match verify_carrier(carrier, password.as_deref()) {
+        match verify_carrier_with(carrier, password.as_deref(), engine.profile()) {
             Ok(res) => {
                 let ok = crate::engine::verify_passed(&res);
                 if !ok {
@@ -2022,7 +2039,18 @@ fn embed_stego_options(
     Ok(options)
 }
 
-fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
+fn handle_embed(
+    args: EmbedArgs,
+    cfg: &FileConfig,
+    quiet: bool,
+    engine: &StrHide,
+) -> Result<(), StrHideError> {
+    // Runtime credentials (CLI flag, env, config) are resolved once and
+    // carried on StegoOptions; the static Profile dialect is not populated
+    // from runtime data.
+    let stego_secret = resolve_stego_secret(args.stego_secret.as_deref(), cfg);
+    let stego_domain = resolve_stego_domain(args.stego_domain.as_deref(), cfg);
+
     if args.capacity {
         // The probe uses the same credentials the embed would: they key the
         // spatial header permutation, which changes which pixels are available
@@ -2036,11 +2064,18 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         )?;
         for carrier in &args.carrier {
             let carrier_bytes = std::fs::read(carrier)?;
-            let options = embed_stego_options(&args, capacity_password.as_deref(), true, false)?;
+            let mut options =
+                embed_stego_options(&args, capacity_password.as_deref(), true, false)?;
+            if options.password.is_none() {
+                options.password = stego_secret.clone();
+            }
+            if options.stego_domain.is_none() {
+                options.stego_domain = stego_domain.clone();
+            }
             let cap = crate::stego::probe_carrier_capacity_with_profile(
                 &carrier_bytes,
                 &options,
-                &crate::params::Profile::default(),
+                engine.profile(),
             )?;
             println!("{}", t!(Msg::StegoProbeHeader, path = carrier.display()));
             println!("{}", t!(Msg::StegoProbeFormat, val = cap.format));
@@ -2090,9 +2125,10 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         encrypt,
         true,
     )?;
-    let stego_secret = resolve_stego_secret(args.stego_secret.as_deref(), cfg);
-    let stego_domain = resolve_stego_domain(args.stego_domain.as_deref(), cfg);
-    let profile = stego_profile(stego_secret, stego_domain);
+    // stego_secret / stego_domain were resolved at the top of the command.
+    // The dialect profile is bound on the engine; copy it out (Profile is Copy)
+    // so the existing `&profile` call sites below are unchanged.
+    let profile = *engine.profile();
 
     // 2. Resolve payload bytes (shared with `write`).
     let payload_bytes =
@@ -2131,7 +2167,13 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
     for_each_carrier(&args.carrier, quiet, |carrier| {
         let carrier_bytes = std::fs::read(carrier)?;
 
-        let options = embed_stego_options(&args, password.as_deref(), quiet, true)?;
+        let mut options = embed_stego_options(&args, password.as_deref(), quiet, true)?;
+        if options.password.is_none() {
+            options.password = stego_secret.clone();
+        }
+        if options.stego_domain.is_none() {
+            options.stego_domain = stego_domain.clone();
+        }
 
         if !quiet
             && options.safety_enforcement == crate::stego::SafetyEnforcement::Advisory
@@ -2204,7 +2246,12 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
     })
 }
 
-fn handle_extract(args: ExtractArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
+fn handle_extract(
+    args: ExtractArgs,
+    cfg: &FileConfig,
+    quiet: bool,
+    engine: &StrHide,
+) -> Result<(), StrHideError> {
     let password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
@@ -2217,10 +2264,11 @@ fn handle_extract(args: ExtractArgs, cfg: &FileConfig, quiet: bool) -> Result<()
 
     let stego_secret = resolve_stego_secret(args.stego_secret.as_deref(), cfg);
     let stego_domain = resolve_stego_domain(args.stego_domain.as_deref(), cfg);
-    let profile = stego_profile(stego_secret, stego_domain);
+    let profile = *engine.profile();
     let mut options = crate::stego::StegoOptions {
         algorithm: args.algorithm,
-        password,
+        password: password.or(stego_secret),
+        stego_domain,
         ..Default::default()
     };
 

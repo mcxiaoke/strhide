@@ -6,10 +6,7 @@
 
 | 实现 | 语言 | 状态 |
 | --- | --- | --- |
-| [`rust/`](rust/) | Rust (edition 2024) | **主力维护中（0.3.x）**——单文件静态二进制，从源码构建 |
-| [`python/`](python/) | Python ≥ 3.10 | **已冻结在 0.2.0，弃用**——`pip install strhide`，库 + CLI |
-
-两个实现的信封格式**互不兼容**：Python 读不了 Rust 的全加密信封与 `pe_slack` / `pe_codebits` 策略载体；Rust 自 2026-10-21 起也**不再读取** 0.2.0 时代的旧信封（旧 ASCII 魔数 `STRHIDE` / `STH!`、JSON 元数据与明文封装已删除）。跨版本迁移请先用 0.3.x 的 Rust 二进制读取并重新写入。
+| [`rust/`](rust/) | Rust (edition 2024) | **主力维护中（0.6.x）**——单文件静态二进制，从源码构建 |
 
 > [English documentation (README.md)](README.md)
 
@@ -49,12 +46,6 @@ sha256sum -c SHA256SUMS.txt                # 校验下载文件
 > **macOS（未公证）：** Gatekeeper 会拦截未公证的下载二进制。可右键文件 → **打开**，或执行 `xattr -d com.apple.quarantine ./strhide-macos-universal2`。
 >
 > **Windows：** SmartScreen 可能提示未签名程序——选择 **更多信息 → 仍要运行**。
-
-**Python（已弃用，冻结在 0.2.0）：**
-
-```bash
-pip install strhide
-```
 
 **从源码构建：**
 
@@ -130,24 +121,42 @@ strhide list --json
 
 > **安全提示**：通过 `-p` 传入的密码可能经 shell 历史和进程列表泄露，建议优先使用 `--password-file`、`STRHIDE_PASSWORD` 或交互式输入。
 
-## Python API
+## Rust 库 API
 
-> **弃用说明（2026-10-18）**：纯 Python 实现冻结在 **0.2.0**，不再新增功能。请使用预编译的 Rust 二进制以获得完整能力。特别是 Python **未实现** `pe_slack` / `pe_codebits` PE 策略，且早于 Rust 默认的全加密信封（内置密钥模式），因此读不了当前 Rust 写入的载体。Python 包仍保留给现有用户及读取 0.2.0 时代的旧文件。
+`strhide` 也可作为库使用。推荐入口是一个 **`StrHide`** 实例：构造时绑定一个私有方言（`Profile`）和一个写侧行为基线（`LocalParams`），然后把每个动词作为普通方法调用。整个方言可以在编译期声明为 `const`（零运行时开销），并同时提供文件路径与内存（`&[u8]` → `Vec<u8>`）两种形态。
 
-```python
-from strhide import write_carrier, read_carrier, inspect_carrier
+```rust
+use strhide::engine::{PayloadSource, WriteOptions};
+use strhide::facade::StrHide;
+use strhide::params::Profile;
 
-# 在载体中隐藏文本（默认原地写入 carrier.png）
-result = write_carrier("carrier.png", data_text="hello", password="pw")
+// 整个私有方言在编译期声明。
+const ENGINE: StrHide = StrHide::new()
+    .with_profile(Profile::new().with_default_secret("my-deployment-key"));
 
-# 再次提取
-result = read_carrier("carrier.png", output_path="restored.txt", password="pw")
+// 结构域（内存形态）：
+let (stego, _) = ENGINE.write_bytes(
+    &cover,
+    PayloadSource::Bytes(b"secret"),
+    &WriteOptions::default(),
+)?;
+let read = ENGINE.read_bytes(&stego, None)?;
+assert_eq!(read.data, b"secret");
 
-# 只读元数据，不提取
-meta = inspect_carrier("carrier.png", password="pw")
+// 内容域（图像隐写，内存形态）：
+let stego = ENGINE.embed(&jpeg, b"secret", &Default::default())?;
+let payload = ENGINE.extract(&stego, &Default::default())?;
+assert_eq!(payload, b"secret");
 ```
 
-所有函数返回结果字典，失败时抛出 `StrHideError` 子类（`RejectionError`、`CorruptedDataError`、`PasswordError`、`UnsupportedFormatError`、`NoHiddenDataError`、`RestoreMismatchError`）。包自带类型注解（`py.typed`）。
+宿主还可以用绑定的方言驱动自己的命令行：`ENGINE.run_cli_from(std::env::args_os())` 返回退出码而不调用 `process::exit`。底层自由函数（`write_carrier_bytes` 等）仍对偏好直接调用的用户开放。
+
+库文档：
+
+- [`docs/api/ARCHITECTURE.md`](docs/api/ARCHITECTURE.md) — 模块拓扑、公开 API、数据流转、扩展点；
+- [`docs/api/WIRE_SPEC.md`](docs/api/WIRE_SPEC.md) — UBE v2.2 二进制线格式、密钥派生、兼容矩阵。
+
+可运行示例：`cargo run --example in_memory`、`cargo run --example private_profile`、`cargo run --example codec_bench`。
 
 ## 支持的载体与策略
 
@@ -215,7 +224,6 @@ u = max(1, min(64, floor(budget / (bits + h - 1)), floor(|正文网格| / (bits 
 
 ```
 strhide/
-├── python/     # Python 包（库 + CLI），已发布至 PyPI
 ├── rust/       # Rust 实现（库 + CLI 二进制）
 ├── docs/       # 设计文档与变更日志
 └── LICENSE     # Apache-2.0

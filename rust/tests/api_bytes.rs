@@ -368,10 +368,7 @@ fn profile_compatibility_matrix() {
         });
 
     // Row 1 + 2: official<->official and private<->private.
-    for (label, profile) in [
-        ("official", Profile::default()),
-        ("private", private.clone()),
-    ] {
+    for (label, profile) in [("official", Profile::default()), ("private", private)] {
         let (stego, _) = write_carrier_bytes(
             PNG,
             payload(b"matrix"),
