@@ -129,6 +129,47 @@ fn remove_returns_the_original_bytes() {
     assert_eq!(result.carrier, "<memory>");
 }
 
+/// The file-level restore must refuse to replace an existing output file:
+/// `read_carrier_with(output_path)` already refuses, and restore silently
+/// `rename`-ing over a user's file loses it with no way back.
+#[test]
+fn file_restore_refuses_to_overwrite_an_existing_output() {
+    let dir = tempdir();
+    let carrier = dir.join("c.png");
+    let out = dir.join("restored.png");
+    std::fs::write(&carrier, PNG).unwrap();
+
+    write_carrier_with(
+        &carrier,
+        PayloadSource::Bytes(b"keep me"),
+        &WriteOptions {
+            output_path: Some(&carrier),
+            backup: false,
+            ..Default::default()
+        },
+        &LocalParams::default(),
+        &Profile::default(),
+    )
+    .expect("write");
+
+    // An unrelated file already occupies the output path.
+    std::fs::write(&out, b"precious user data").unwrap();
+
+    let err = remove_carrier_with(&carrier, Some(&out), None, false, &Profile::default())
+        .expect_err("restore must refuse an occupied output path");
+    assert!(
+        matches!(err, StrHideError::Rejection(_)),
+        "expected a Rejection, got {err:?}"
+    );
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        b"precious user data",
+        "the existing file must be left untouched"
+    );
+
+    cleanup(dir);
+}
+
 /// A wrong password must fail the same way it does on the file path: a
 /// `Password`/`NoHiddenData` error, never payload bytes.
 #[test]
@@ -158,9 +199,17 @@ fn wrong_password_is_rejected() {
     );
 
     // No password at all: the envelope declares FLAG_ENCRYPTED, so the reader
-    // must ask for one instead of trying the profile secret.
+    // must ask for one instead of trying the profile secret. The hint travels as
+    // a field on the error rather than inside the message.
     let err = read_carrier_bytes(&stego, None, &Profile::default()).expect_err("password required");
-    assert!(matches!(err, StrHideError::Password(_)));
+    assert!(
+        matches!(
+            err,
+            StrHideError::Password(_) | StrHideError::PasswordWithHint { .. }
+        ),
+        "unexpected error variant: {err:?}"
+    );
+    assert_eq!(err.hint(), None);
 }
 
 /// `output_path` is meaningless here; silently ignoring it would write files

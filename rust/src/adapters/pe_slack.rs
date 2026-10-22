@@ -305,7 +305,7 @@ pub fn scan_slack(stego_in: &mut dyn SeekRead) -> Result<SlackScan, StrHideError
             stego_in.seek(SeekFrom::Start(pos))?;
             let n = stego_in.read(&mut buf[..want])?;
             if n == 0 {
-                break;
+                break; // scan window ends here; the run is measured as-is
             }
             for &b in &buf[..n] {
                 if b != 0 {

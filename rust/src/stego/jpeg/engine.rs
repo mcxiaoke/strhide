@@ -64,15 +64,11 @@ fn map_dct_error(e: dct_io::DctError) -> StrHideError {
             "Progressive JPEG (SOF2) is not supported for content-adaptive DCT steganography; please convert to baseline JPEG or use 'strhide write' for structural hiding".into(),
         );
     }
+    // The progressive check above already covers this arm's SOF2/progressive
+    // test; repeating it here was a dead branch.
     match e {
         dct_io::DctError::Unsupported(msg) => {
-            if msg.contains("SOF2") || msg.to_lowercase().contains("progressive") {
-                StrHideError::UnsupportedFormat(
-                    "Progressive JPEG (SOF2) is not supported for content-adaptive DCT steganography; please convert to baseline JPEG or use 'strhide write' for structural hiding".into(),
-                )
-            } else {
-                StrHideError::UnsupportedFormat(format!("Unsupported JPEG variant: {msg}"))
-            }
+            StrHideError::UnsupportedFormat(format!("Unsupported JPEG variant: {msg}"))
         }
         _ => StrHideError::CorruptedData(format!("Corrupt JPEG coefficient stream: {e}")),
     }
@@ -526,7 +522,7 @@ fn embed_once(
         &superblock_bytes,
         &mut touched,
     ) {
-        if ctx.table.is_some() && e.to_string().contains("no legal element") {
+        if ctx.table.is_some() && matches!(e, StrHideError::TrellisInfeasible(_)) {
             return Err(Attempt {
                 error: StrHideError::UnsupportedFormat(
                     "This JPEG's Huffman table is over-optimised: it cannot encode the modifications required for this carrier. Please re-save the carrier with a standard (Annex K) table.".into(),
@@ -706,7 +702,12 @@ pub fn extract_jpeg(
         .filter(|s| !s.is_empty())
         .unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET);
 
-    let mut slots_buf = v3_layout::grid_indices(cover.block_count, fmt.grid_rule);
+    // The slot grid depends on the cover alone, so it is built once and copied
+    // back into the working buffer for every trial suite. Rebuilding it per
+    // trial (as this loop used to) re-ran the same double loop for a buffer that
+    // is immediately permuted in place anyway.
+    let grid_template = v3_layout::grid_indices(cover.block_count, fmt.grid_rule);
+    let mut slots_buf = grid_template.clone();
 
     // Trial enumeration: ascending suite id, one KDF per attempt. A wrong
     // password and a non-carrier both end here, with the same error.
@@ -722,15 +723,10 @@ pub fn extract_jpeg(
         };
         let hdr_seed = header_perm_seed(fmt, &master, domain);
 
-        // Reset and reuse the single preallocated working buffer
-        let per_block = fmt.grid_rule.slots_per_block();
+        // Reset and reuse the single preallocated working buffer: `clear` keeps
+        // the capacity, so this is a memcpy rather than a rebuild.
         slots_buf.clear();
-        for bi in 0..cover.block_count {
-            let base = (bi * per_block) as u32;
-            for s in 0..per_block {
-                slots_buf.push(base + s as u32);
-            }
-        }
+        slots_buf.extend_from_slice(&grid_template);
         permute_indices(&mut slots_buf, &hdr_seed);
 
         let sb_n = fmt.superblock_slots();

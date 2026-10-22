@@ -1025,7 +1025,7 @@ fn v3_extraction_ignores_the_embed_side_budget() {
     let password = "BudgetIndependence#1";
     let payload = b"budget independence";
     let params = JpegParams {
-        slot_budget: 1_000,
+        slot_budget: Some(1_000),
         ..JpegParams::default()
     };
     let stego = embed_jpeg(
@@ -1040,7 +1040,7 @@ fn v3_extraction_ignores_the_embed_side_budget() {
     .expect("embed with a tiny budget");
 
     let other = JpegParams {
-        slot_budget: 4_000_000,
+        slot_budget: Some(4_000_000),
         ..JpegParams::default()
     };
     assert_ne!(other, params);

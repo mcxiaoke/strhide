@@ -211,16 +211,39 @@ fn default_safety_bpp_limit() -> f64 {
 
 /// Automatically sniff carrier format and probe embedding capacity.
 ///
-/// Takes neither a [`Profile`] nor a password on purpose: for JPEG V3 the header
-/// budget is the fixed superblock + extension area and the body budget is the
-/// geometric grid, both independent of the key; for the spatial codec it is the
-/// candidate count. The answer is therefore the same for every dialect.
+/// Credentials matter, and they are taken from `options` exactly like
+/// [`embed_carrier`] does:
+///
+/// - **JPEG V3** ignores them: the header budget is the fixed superblock +
+///   extension area and the body budget is the geometric grid, both
+///   independent of the key.
+/// - **The spatial codec does not**: the 512 header/feature slots are chosen by
+///   a permutation keyed on password + domain and are excluded from the body
+///   pool, so a different credential assigns different pixels to the header
+///   and yields a different capacity.
+///
+/// Use [`probe_carrier_capacity_with_profile`] when a private
+/// [`Profile`](crate::params::Profile) supplies the no-password stego secret.
 pub fn probe_carrier_capacity(
     carrier_bytes: &[u8],
     options: &StegoOptions,
 ) -> Result<StegoCapacityInfo, StrHideError> {
+    probe_carrier_capacity_with_profile(carrier_bytes, options, &Profile::default())
+}
+
+/// [`probe_carrier_capacity`] with an explicit private-dialect [`Profile`].
+pub fn probe_carrier_capacity_with_profile(
+    carrier_bytes: &[u8],
+    options: &StegoOptions,
+    profile: &Profile,
+) -> Result<StegoCapacityInfo, StrHideError> {
     options.spatial_params.validate()?;
     options.jpeg_params.validate()?;
+
+    // Same resolution as embed: an explicit password wins, the profile's stego
+    // secret is the fallback, `None` means the public constant downstream.
+    let secret = options.secret(profile);
+    let domain = options.domain(profile);
 
     if carrier_bytes.len() >= 2 && &carrier_bytes[..2] == b"\xFF\xD8" {
         let model =
@@ -250,6 +273,8 @@ pub fn probe_carrier_capacity(
             &*model,
             &options.spatial_params,
             options.safety_level,
+            secret,
+            domain,
         )
     } else {
         Err(StrHideError::UnsupportedFormat(

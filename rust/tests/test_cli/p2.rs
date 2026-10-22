@@ -251,9 +251,10 @@ fn read_encrypted_without_password_raises_password_variant() {
 
     let err = read_carrier(&out, None, None).unwrap_err();
     assert!(
-        matches!(err, StrHideError::Password(_)),
-        "expected Password variant, got {err:?}"
+        matches!(err, StrHideError::PasswordWithHint { .. }),
+        "expected PasswordWithHint variant, got {err:?}"
     );
+    assert_eq!(err.hint(), Some("the hint"));
     assert!(err.to_string().contains("the hint"), "{err}");
 }
 

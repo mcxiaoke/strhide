@@ -74,17 +74,14 @@ fn test_password_hint_lifecycle() {
     assert_eq!(res_insp.is_encrypted, Some(true));
     assert_eq!(res_insp.password_hint.as_deref(), Some(hint_text));
 
-    // 3. Read carrier without password: must return StrHideError::Password with hint text!
+    // 3. Read carrier without password: the error carries the hint as a
+    // structured field (and still renders it into the message).
     let err = read_carrier(&carrier, None, None).unwrap_err();
-    match err {
-        StrHideError::Password(msg) => {
-            assert!(
-                msg.contains(hint_text),
-                "error message must contain hint: '{msg}'"
-            );
-        }
-        other => panic!("expected PasswordError containing hint, got {other:?}"),
-    }
+    assert_eq!(err.hint(), Some(hint_text), "structured hint: {err:?}");
+    assert!(
+        err.to_string().contains(hint_text),
+        "error message must contain hint: '{err}'"
+    );
 
     // 4. Read carrier with correct password: must extract successfully!
     let res_r = read_carrier(&carrier, None, Some(pwd)).expect("read");
@@ -142,15 +139,11 @@ fn test_no_hint_behavior() {
 
     // Read without password: fails with password required, but NO hint
     let err = read_carrier(&carrier, None, None).unwrap_err();
-    match err {
-        StrHideError::Password(msg) => {
-            assert!(
-                !msg.contains("Hint:"),
-                "no hint should be present in message: '{msg}'"
-            );
-        }
-        other => panic!("expected PasswordError without hint, got {other:?}"),
-    }
+    assert_eq!(err.hint(), None, "no hint should be present: {err:?}");
+    assert!(
+        !err.to_string().contains("Hint:"),
+        "no hint should be present in message: '{err}'"
+    );
 
     // Read with password
     let res_r = read_carrier(&carrier, None, Some("pwd123")).expect("read");

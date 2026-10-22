@@ -6,7 +6,7 @@ use crate::adapters::{
 };
 use crate::envelope::EnvelopeTrailer;
 use crate::errors::StrHideError;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 
 pub const JPEG_SOI: [u8; 2] = [0xFF, 0xD8];
 pub const JPEG_SOS: [u8; 2] = [0xFF, 0xDA];
@@ -18,6 +18,129 @@ pub const JPEG_MAX_TOTAL_CAPACITY: u64 = 64 * 1024 * 1024; // 64MB
 pub const MAX_JPEG_HEADER_SCAN: u64 = 16 * 1024 * 1024; // 16MB max scan for JPEG header
 pub const MAX_JPEG_NON_MARKER_SKIP: usize = 4096; // Max stray non-marker bytes before SOS
 
+/// One marker segment encountered while walking a JPEG marker stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JpegSegment {
+    /// File offset of the segment's `0xFF` lead byte.
+    pub marker_offset: u64,
+    /// Marker code byte: `0xEF` for APP15, `0xFE` for COM, `0xDA` for SOS, ...
+    pub code: u8,
+    /// `None` for standalone markers (SOI / EOI / TEM / RSTn); otherwise the
+    /// payload's `(offset, length)` — the length excludes the 2 bytes that
+    /// encode it, per the JPEG spec.
+    pub payload: Option<(u64, u64)>,
+}
+
+/// Why a marker walk finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JpegScanEnd {
+    /// The callback returned `false`, or the walk reached SOS.
+    Stopped,
+    /// End of the available bytes.
+    Eof,
+    /// A segment declared a length below 2 (the minimum legal value).
+    MalformedLength(u64),
+    /// More than [`MAX_JPEG_NON_MARKER_SKIP`] consecutive non-marker bytes.
+    NonMarkerRun,
+    /// The walk passed [`MAX_JPEG_HEADER_SCAN`] without reaching SOS.
+    HeaderScanLimit,
+}
+
+/// Walk JPEG marker segments starting at the current stream position.
+///
+/// Three callers used to carry their own copy of this state machine — finding
+/// the SOS offset, enumerating APP15 segments, and flagging oversized
+/// APP15/COM — all of them reading one byte at a time from an unbuffered file.
+/// This is the single copy, buffered, with the caller supplying only what it
+/// collects.
+///
+/// The walk stops at SOS: everything after it is entropy-coded data, where a
+/// `0xFF` is either byte-stuffed or the start of a real marker, and none of the
+/// callers wants to guess. The callback returns `false` to stop early.
+///
+/// Read failures end the walk (that is how EOF shows up here); only seek
+/// failures are propagated as errors.
+pub fn scan_jpeg_markers<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+    mut on_segment: impl FnMut(&JpegSegment) -> bool,
+) -> Result<JpegScanEnd, StrHideError> {
+    // The walk reads one or two bytes and then seeks forward, which is exactly
+    // the pattern an unbuffered `File` turns into one syscall per byte.
+    let mut in_reader = BufReader::with_capacity(64 * 1024, reader);
+    let mut non_marker_skip = 0usize;
+    loop {
+        let marker_offset = in_reader.stream_position()?;
+        if marker_offset > MAX_JPEG_HEADER_SCAN {
+            return Ok(JpegScanEnd::HeaderScanLimit);
+        }
+        let mut lead = [0u8; 1];
+        if in_reader.read_exact(&mut lead).is_err() {
+            return Ok(JpegScanEnd::Eof);
+        }
+        if lead[0] != 0xFF {
+            non_marker_skip += 1;
+            if non_marker_skip > MAX_JPEG_NON_MARKER_SKIP {
+                return Ok(JpegScanEnd::NonMarkerRun);
+            }
+            continue;
+        }
+        non_marker_skip = 0;
+
+        let mut code = [0u8; 1];
+        if in_reader.read_exact(&mut code).is_err() {
+            return Ok(JpegScanEnd::Eof);
+        }
+        // 0xFF fill bytes may precede the code byte.
+        while code[0] == 0xFF && in_reader.read_exact(&mut code).is_ok() {}
+
+        let b = code[0];
+        // Standalone markers without a length field.
+        if matches!(b, 0xD8 | 0xD9 | 0x01 | 0xD0..=0xD7) {
+            if !on_segment(&JpegSegment {
+                marker_offset,
+                code: b,
+                payload: None,
+            }) {
+                return Ok(JpegScanEnd::Stopped);
+            }
+            continue;
+        }
+        if b == 0xDA {
+            // SOS: the entropy-coded scan follows, so the marker stream is over.
+            let _ = on_segment(&JpegSegment {
+                marker_offset,
+                code: b,
+                payload: None,
+            });
+            return Ok(JpegScanEnd::Stopped);
+        }
+
+        let mut len_bytes = [0u8; 2];
+        if in_reader.read_exact(&mut len_bytes).is_err() {
+            return Ok(JpegScanEnd::Eof);
+        }
+        let seg_len = u16::from_be_bytes(len_bytes) as u64;
+        if seg_len < 2 {
+            return Ok(JpegScanEnd::MalformedLength(seg_len));
+        }
+        let payload_offset = in_reader.stream_position()?;
+        let payload_len = seg_len - 2;
+        if !on_segment(&JpegSegment {
+            marker_offset,
+            code: b,
+            payload: Some((payload_offset, payload_len)),
+        }) {
+            return Ok(JpegScanEnd::Stopped);
+        }
+        if in_reader
+            .seek(SeekFrom::Start(payload_offset + payload_len))
+            .is_err()
+        {
+            return Ok(JpegScanEnd::Eof);
+        }
+    }
+}
+
 pub fn find_jpeg_sos_offset<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<u64, StrHideError> {
     reader.seek(SeekFrom::Start(0))?;
     let mut soi = [0u8; 2];
@@ -28,62 +151,20 @@ pub fn find_jpeg_sos_offset<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<u
         ));
     }
 
-    let mut non_marker_skip = 0usize;
-    loop {
-        let marker_start = reader.stream_position()?;
-        if marker_start > MAX_JPEG_HEADER_SCAN {
-            break;
+    let mut sos_offset = None;
+    let end = scan_jpeg_markers(reader, |seg| {
+        if seg.code == 0xDA {
+            sos_offset = Some(seg.marker_offset);
+            return false;
         }
-        let mut lead = [0u8; 1];
-        if reader.read_exact(&mut lead).is_err() {
-            break;
+        true
+    })?;
+    sos_offset.ok_or_else(|| match end {
+        JpegScanEnd::MalformedLength(len) => {
+            StrHideError::CorruptedData(format!("Invalid JPEG segment length: {len}"))
         }
-        if lead[0] != 0xFF {
-            non_marker_skip += 1;
-            if non_marker_skip > MAX_JPEG_NON_MARKER_SKIP {
-                break;
-            }
-            continue;
-        }
-        non_marker_skip = 0;
-
-        let mut code = [0u8; 1];
-        if reader.read_exact(&mut code).is_err() {
-            break;
-        }
-        while code[0] == 0xFF {
-            if reader.read_exact(&mut code).is_err() {
-                break;
-            }
-        }
-
-        let b = code[0];
-        // Standalone markers without length: SOI, EOI, TEM, RSTm
-        if b == 0xD8 || b == 0xD9 || b == 0x01 || (0xD0..=0xD7).contains(&b) {
-            continue;
-        }
-
-        if b == 0xDA {
-            // SOS (Start of Scan)
-            return Ok(marker_start);
-        }
-
-        let mut len_bytes = [0u8; 2];
-        if reader.read_exact(&mut len_bytes).is_err() {
-            break;
-        }
-        let seg_len = u16::from_be_bytes(len_bytes) as u64;
-        if seg_len < 2 {
-            return Err(StrHideError::CorruptedData(format!(
-                "Invalid JPEG segment length: {seg_len}"
-            )));
-        }
-        reader.seek(SeekFrom::Current((seg_len - 2) as i64))?;
-    }
-
-    Err(StrHideError::CorruptedData(
-        "JPEG SOS (Start of Scan) marker not found".into(),
-    ))
+        _ => StrHideError::CorruptedData("JPEG SOS (Start of Scan) marker not found".into()),
+    })
 }
 
 /// Compute segment payload lengths such that each segment <= 65533 bytes
@@ -118,6 +199,10 @@ pub struct JpegAdapter;
 impl HostAdapter for JpegAdapter {
     fn format_name(&self) -> &'static str {
         "JPEG"
+    }
+
+    fn supports_content_stego(&self) -> bool {
+        true
     }
 
     fn detect(&self, reader: &mut dyn SeekRead) -> bool {
@@ -198,18 +283,7 @@ impl HostAdapter for JpegAdapter {
 
         // 1. Write host before SOS
         host_in.seek(SeekFrom::Start(0))?;
-        let mut remaining = sos_offset;
-        let mut buf = [0u8; 64 * 1024];
-
-        while remaining > 0 {
-            let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
-            let n = host_in.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-            remaining -= n as u64;
-        }
+        crate::adapters::io::copy_exact(host_in, out, sos_offset)?;
 
         let inject_offset = sos_offset;
 
@@ -223,29 +297,14 @@ impl HostAdapter for JpegAdapter {
             out.write_all(&seg_len.to_be_bytes())?;
             inject_size += 4 + seg_payload_len;
 
-            let mut seg_to_write = seg_payload_len;
-            while seg_to_write > 0 {
-                let to_read = std::cmp::min(seg_to_write, buf.len() as u64) as usize;
-                let n = ube_in.read(&mut buf[..to_read])?;
-                if n == 0 {
-                    return Err(StrHideError::CorruptedData(
-                        "Unexpected end of UBE input stream".into(),
-                    ));
-                }
-                out.write_all(&buf[..n])?;
-                seg_to_write -= n as u64;
-            }
+            // The segment length was computed from `ube_size` on this same
+            // stream, so a short read means the envelope was truncated.
+            crate::adapters::io::copy_exact(ube_in, out, seg_payload_len)?;
         }
 
         // 3. Write host from SOS onwards through EOI
         host_in.seek(SeekFrom::Start(sos_offset))?;
-        loop {
-            let n = host_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-        }
+        crate::adapters::io::copy_stream(host_in, out)?;
 
         Ok((inject_offset, inject_size, 0, 0))
     }
@@ -261,67 +320,16 @@ impl HostAdapter for JpegAdapter {
             return Ok(None);
         }
 
-        // 1. Scan markers before SOS, collecting candidate APP15 segments
+        // 1. Scan markers before SOS, collecting candidate APP15 segments.
         let mut app15_segments: Vec<(u64, u64)> = Vec::new();
-
-        let mut non_marker_skip = 0usize;
-        loop {
-            let marker_start = stego_in.stream_position().unwrap_or(0);
-            if marker_start > MAX_JPEG_HEADER_SCAN {
-                break;
-            }
-            let mut lead = [0u8; 1];
-            if stego_in.read_exact(&mut lead).is_err() {
-                break;
-            }
-            if lead[0] != 0xFF {
-                non_marker_skip += 1;
-                if non_marker_skip > MAX_JPEG_NON_MARKER_SKIP {
-                    break;
-                }
-                continue;
-            }
-            non_marker_skip = 0;
-
-            let mut code = [0u8; 1];
-            if stego_in.read_exact(&mut code).is_err() {
-                break;
-            }
-            while code[0] == 0xFF {
-                if stego_in.read_exact(&mut code).is_err() {
-                    break;
-                }
-            }
-
-            let b = code[0];
-            if b == 0xD8 || b == 0xD9 || b == 0x01 || (0xD0..=0xD7).contains(&b) {
-                continue;
-            }
-
-            if b == 0xDA {
-                // SOS reached
-                break;
-            }
-
-            let mut len_bytes = [0u8; 2];
-            if stego_in.read_exact(&mut len_bytes).is_err() {
-                break;
-            }
-            let seg_len = u16::from_be_bytes(len_bytes) as u64;
-            if seg_len < 2 {
-                break;
-            }
-
-            let payload_len = seg_len - 2;
-            let payload_offset = stego_in.stream_position()?;
-
-            if b == 0xEF {
-                // APP15
+        let _ = scan_jpeg_markers(stego_in, |seg| {
+            if let Some((payload_offset, payload_len)) = seg.payload
+                && seg.code == 0xEF
+            {
                 app15_segments.push((payload_offset, payload_len));
             }
-
-            stego_in.seek(SeekFrom::Start(payload_offset + payload_len))?;
-        }
+            true
+        });
 
         // Helper to check a chain of candidate segments
         let try_locate_chain = |segments: &[(u64, u64)],
@@ -459,66 +467,18 @@ impl HostAdapter for JpegAdapter {
         if stego_in.read_exact(&mut soi).is_err() || soi != JPEG_SOI {
             return found;
         }
-        let mut non_marker_skip = 0usize;
-        loop {
-            let marker_start = stego_in.stream_position().unwrap_or(0);
-            if marker_start > MAX_JPEG_HEADER_SCAN {
-                break;
-            }
-            let mut lead = [0u8; 1];
-            if stego_in.read_exact(&mut lead).is_err() {
-                break;
-            }
-            if lead[0] != 0xFF {
-                non_marker_skip += 1;
-                if non_marker_skip > MAX_JPEG_NON_MARKER_SKIP {
-                    break;
-                }
-                continue;
-            }
-            non_marker_skip = 0;
-            let mut code = [0u8; 1];
-            if stego_in.read_exact(&mut code).is_err() {
-                break;
-            }
-            while code[0] == 0xFF {
-                if stego_in.read_exact(&mut code).is_err() {
-                    return found;
-                }
-            }
-            let b = code[0];
-            if b == 0xD8 || b == 0xD9 || b == 0x01 || (0xD0..=0xD7).contains(&b) {
-                continue;
-            }
-            if b == 0xDA {
-                break;
-            }
-            let mut len_bytes = [0u8; 2];
-            if stego_in.read_exact(&mut len_bytes).is_err() {
-                break;
-            }
-            let seg_len = u16::from_be_bytes(len_bytes) as u64;
-            if seg_len < 2 {
-                break;
-            }
-            let payload_offset = match stego_in.stream_position() {
-                Ok(p) => p,
-                Err(_) => break,
+        let _ = scan_jpeg_markers(stego_in, |seg| {
+            let Some((payload_offset, payload_len)) = seg.payload else {
+                return true;
             };
-            let payload_len = seg_len - 2;
-            if (b == 0xEF || b == 0xFE) && payload_len >= MIN_ENVELOPE {
-                let seg_name = if b == 0xEF { "APP15" } else { "COM" };
+            if (seg.code == 0xEF || seg.code == 0xFE) && payload_len >= MIN_ENVELOPE {
+                let seg_name = if seg.code == 0xEF { "APP15" } else { "COM" };
                 found.push(format!(
                     "{seg_name} segment at offset {payload_offset} carries {payload_len} bytes (minimum envelope size is {MIN_ENVELOPE})"
                 ));
             }
-            if stego_in
-                .seek(SeekFrom::Start(payload_offset + payload_len))
-                .is_err()
-            {
-                break;
-            }
-        }
+            true
+        });
         found
     }
 

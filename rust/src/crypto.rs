@@ -43,6 +43,31 @@ use unicode_normalization::UnicodeNormalization;
 use crate::envelope::AAD_SIZE;
 use crate::errors::StrHideError;
 
+/// Length of an AES-GCM authentication tag.
+pub const AEAD_TAG_LEN: usize = 16;
+
+/// Wire overhead of one framed payload chunk: the 4-byte length prefix plus the
+/// AES-GCM tag.
+pub const CHUNK_OVERHEAD: usize = 4 + AEAD_TAG_LEN;
+
+/// Number of chunks `plain_len` bytes occupy at `chunk_size`.
+///
+/// At least one, even for an empty payload: [`encrypt_stream_to_chunks`] always
+/// emits a final chunk so the reader can tell "no payload" from "truncated".
+pub fn chunk_count(plain_len: u64, chunk_size: usize) -> u64 {
+    plain_len.div_ceil(chunk_size as u64).max(1)
+}
+
+/// Ciphertext length of the framed payload for `plain_len` bytes of plaintext.
+///
+/// This is the single source of truth for the framing overhead. The engine
+/// needs it *before* writing anything, to size the envelope and pick a strategy;
+/// when it spelled the constants out itself, any change to the framing would
+/// have made `auto` choose a strategy the injector then rejected.
+pub fn framed_len(plain_len: u64, chunk_size: usize) -> u64 {
+    plain_len + chunk_count(plain_len, chunk_size) * CHUNK_OVERHEAD as u64
+}
+
 /// Default plaintext payload chunk size. Each chunk is independently sealed
 /// with AES-256-GCM and prefixed by its own u32 length on the wire.
 ///
@@ -74,15 +99,42 @@ pub fn normalize_nfc(s: &str) -> String {
     s.nfc().collect::<String>()
 }
 
+/// PBKDF2 over the NFC-normalised password, followed by HKDF-SHA256 with the
+/// salt as the HKDF salt.
+///
+/// This is the one expensive step of the whole envelope (100k HMAC-SHA256
+/// iterations, 30–60 ms), and every consumer below shares the same
+/// (password, salt) pair — so it is computed exactly once per pair.
+fn derive_ikm(password: &str, salt: &[u8]) -> [u8; 32] {
+    let norm_pwd = normalize_nfc(password);
+    let mut ikm = [0u8; 32];
+    pbkdf2::pbkdf2_hmac::<Sha256>(norm_pwd.as_bytes(), salt, PBKDF2_ITERATIONS, &mut ikm);
+    ikm
+}
+
+/// Everything one (password, salt) pair derives.
+///
+/// Payload key, metadata key and header mask are three HKDF expansions of the
+/// *same* IKM, so they are produced together. Before this existed a single
+/// `read` ran PBKDF2 four to five times over the same pair (twice for the
+/// stealth magics, once for the keys, twice for the header mask), which is
+/// 100–250 ms of pure waste per operation.
+#[derive(Clone, Copy)]
+pub struct PasswordSecrets {
+    /// AES-256-GCM key for the chunked payload.
+    pub payload_key: [u8; 32],
+    /// AES-256-GCM key for the metadata block.
+    pub meta_key: [u8; 32],
+    /// 76-byte keystream masking the sensitive header fields.
+    pub header_mask: [u8; 76],
+}
+
 /// Derive the 32-byte payload and metadata keys from a password and salt.
 ///
 /// The password is NFC-normalized, run through PBKDF2, then HKDF-Expand'd
 /// twice with distinct info labels so the two keys are independent.
 pub fn derive_keys(password: &str, salt: &[u8]) -> Result<([u8; 32], [u8; 32]), StrHideError> {
-    let norm_pwd = normalize_nfc(password);
-    let mut ikm = [0u8; 32];
-    pbkdf2::pbkdf2_hmac::<Sha256>(norm_pwd.as_bytes(), salt, PBKDF2_ITERATIONS, &mut ikm);
-
+    let ikm = derive_ikm(password, salt);
     let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm);
     let mut payload_key = [0u8; 32];
     let mut meta_key = [0u8; 32];
@@ -95,19 +147,41 @@ pub fn derive_keys(password: &str, salt: &[u8]) -> Result<([u8; 32], [u8; 32]), 
     Ok((payload_key, meta_key))
 }
 
+/// Derive every secret one (password, salt) pair yields, with a single PBKDF2.
+pub fn derive_all(password: &str, salt: &[u8]) -> Result<PasswordSecrets, StrHideError> {
+    let ikm = derive_ikm(password, salt);
+    let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm);
+    let mut secrets = PasswordSecrets {
+        payload_key: [0u8; 32],
+        meta_key: [0u8; 32],
+        header_mask: [0u8; 76],
+    };
+
+    hk.expand(b"strhide-payload", &mut secrets.payload_key)
+        .map_err(|e| StrHideError::General(format!("HKDF expand payload error: {e}")))?;
+    hk.expand(b"strhide-metadata", &mut secrets.meta_key)
+        .map_err(|e| StrHideError::General(format!("HKDF expand metadata error: {e}")))?;
+    hk.expand(b"strhide-header-mask-v1", &mut secrets.header_mask)
+        .map_err(|e| StrHideError::General(format!("HKDF expand header mask error: {e}")))?;
+
+    Ok(secrets)
+}
+
 /// Derive the 8-byte header magic and 4-byte trailer magic used in stealth
 /// mode.
 ///
 /// Without the password these bytes look like random data, so a forensic scan
 /// for the standard ASCII/binary magics finds nothing.
+///
+/// Note the salt here is the profile's *domain*, not the envelope salt: the
+/// magics have to be reproducible before any header (and therefore its salt)
+/// has been read. That makes this a separate PBKDF2 run from
+/// [`derive_all`], not a shared one.
 pub fn derive_stealth_magics(
     password: &str,
     salt: &[u8],
 ) -> Result<([u8; 8], [u8; 4]), StrHideError> {
-    let norm_pwd = normalize_nfc(password);
-    let mut ikm = [0u8; 32];
-    pbkdf2::pbkdf2_hmac::<Sha256>(norm_pwd.as_bytes(), salt, PBKDF2_ITERATIONS, &mut ikm);
-
+    let ikm = derive_ikm(password, salt);
     let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm);
     let mut header_magic = [0u8; 8];
     let mut trailer_magic = [0u8; 4];
@@ -123,10 +197,7 @@ pub fn derive_stealth_magics(
 /// Derive a 76-byte deterministic keystream from password and salt to mask
 /// the sensitive fields of EnvelopeHeader in stealth mode.
 pub fn derive_header_mask(password: &str, salt: &[u8]) -> Result<[u8; 76], StrHideError> {
-    let norm_pwd = normalize_nfc(password);
-    let mut ikm = [0u8; 32];
-    pbkdf2::pbkdf2_hmac::<Sha256>(norm_pwd.as_bytes(), salt, PBKDF2_ITERATIONS, &mut ikm);
-
+    let ikm = derive_ikm(password, salt);
     let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm);
     let mut mask = [0u8; 76];
     hk.expand(b"strhide-header-mask-v1", &mut mask)
@@ -563,6 +634,39 @@ mod tests {
             tm.iter().map(|b| format!("{b:02x}")).collect::<String>(),
             expected_tm
         );
+    }
+
+    #[test]
+    fn framed_len_matches_the_framer() {
+        // The engine sizes the envelope with `framed_len` before anything is
+        // written, so it must agree with `encrypt_stream_to_chunks` byte for
+        // byte — including the empty payload, which still emits one chunk.
+        for (plain_len, chunk_size) in [
+            (0u64, CHUNK_SIZE),
+            (1, CHUNK_SIZE),
+            (CHUNK_SIZE as u64, CHUNK_SIZE),
+            (CHUNK_SIZE as u64 + 1, CHUNK_SIZE),
+            (5 * CHUNK_SIZE as u64 + 7, CHUNK_SIZE),
+            (1234, 64),
+        ] {
+            let plain = vec![0u8; plain_len as usize];
+            let mut cipher = Vec::new();
+            let written = encrypt_stream_to_chunks(
+                &mut &plain[..],
+                &mut cipher,
+                &[0x11u8; 32],
+                &[0x22u8; 12],
+                &[0x33u8; AAD_SIZE],
+                chunk_size,
+            )
+            .unwrap();
+            assert_eq!(
+                written,
+                framed_len(plain_len, chunk_size),
+                "framing overhead drift for {plain_len} bytes at chunk_size {chunk_size}"
+            );
+            assert_eq!(cipher.len() as u64, written);
+        }
     }
 
     #[test]

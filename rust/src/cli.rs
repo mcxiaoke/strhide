@@ -8,7 +8,7 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use crate::config::{self, FileConfig};
 use crate::engine::{
     PayloadSource, RemoveResult, WriteOptions, WriteResult, inspect_carrier, read_carrier_with,
-    remove_carrier, verify_carrier, write_carrier,
+    remove_carrier_with_options, verify_carrier, write_carrier,
 };
 use crate::errors::StrHideError;
 use crate::i18n::{self, Msg, t};
@@ -982,6 +982,85 @@ pub fn run_cli() -> i32 {
     }
 }
 
+/// How a payload source is materialised.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PayloadFlavor {
+    /// Text payload: every source must be valid UTF-8 and is stored as text.
+    Text,
+    /// Raw bytes: any source is accepted exactly as it is.
+    Bytes,
+}
+
+/// A payload source resolved from the CLI.
+enum ResolvedPayload {
+    /// Read the payload from standard input.
+    Stdin,
+    /// A payload file (`-d`/`--data`): read as raw bytes.
+    File(PathBuf),
+    /// A text file (`--text-file`): UTF-8 for [`PayloadFlavor::Text`], raw
+    /// bytes for [`PayloadFlavor::Bytes`].
+    TextFile(PathBuf),
+    /// Text payload, already materialised (`-t`, `STRHIDE_TEXT`).
+    Text(String),
+    /// Raw bytes, already materialised (`--text-base64`).
+    Bytes(Vec<u8>),
+}
+
+/// Resolve the payload source shared by `write` and `embed`.
+///
+/// `write` and `embed` used to carry two copies of the same 40-line resolution
+/// chain (`--stdin` / `-d` / `-t` + `--unescape` / `--text-file` /
+/// `--text-base64` / `STRHIDE_TEXT`), and they had already drifted: only one of
+/// them validated that base64 content decodes to UTF-8, and they disagreed on
+/// whether `--text-file` may hold binary data. Both now funnel through here;
+/// the difference between them is the explicit [`PayloadFlavor`], not an
+/// accidental divergence.
+fn resolve_payload(
+    payload: &PayloadSourceArgs,
+    unescape: bool,
+    cfg: &FileConfig,
+    flavor: PayloadFlavor,
+) -> Result<ResolvedPayload, StrHideError> {
+    const MISSING: &str = "Must provide either -d/--data, -t/--text, --text-file, --text-base64, or --stdin (or use --capacity to probe capacity)";
+
+    if payload.stdin {
+        return Ok(ResolvedPayload::Stdin);
+    }
+    if let Some(ref df) = payload.data {
+        return Ok(ResolvedPayload::File(df.clone()));
+    }
+    if let Some(ref tf) = payload.text_file {
+        return Ok(ResolvedPayload::TextFile(tf.clone()));
+    }
+    if let Some(ref b64_str) = payload.text_base64 {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64_str.trim())
+            .map_err(|e| StrHideError::General(format!("Invalid base64 string: {e}")))?;
+        return Ok(match flavor {
+            PayloadFlavor::Text => {
+                let text = String::from_utf8(bytes).map_err(|e| {
+                    StrHideError::General(format!("Base64 content is not valid UTF-8: {e}"))
+                })?;
+                ResolvedPayload::Text(text)
+            }
+            PayloadFlavor::Bytes => ResolvedPayload::Bytes(bytes),
+        });
+    }
+    if let Some(ref t) = payload.text {
+        if unescape || cfg.unescape.unwrap_or(false) {
+            return Ok(ResolvedPayload::Text(unescape_string(t)));
+        }
+        return Ok(ResolvedPayload::Text(t.clone()));
+    }
+    if let Ok(env_text) = std::env::var("STRHIDE_TEXT")
+        && !env_text.is_empty()
+    {
+        return Ok(ResolvedPayload::Text(env_text));
+    }
+    Err(StrHideError::General(MISSING.to_string()))
+}
+
 fn handle_write(args: WriteArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
     // Config values act as defaults; explicit CLI flags win. --stealth implies
     // encryption (its magics are password-derived); prompt for a password when
@@ -1042,50 +1121,31 @@ fn handle_write(args: WriteArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
         }
     }
 
-    // Resolve payload source
-    let payload_source: PayloadSource;
+    // Resolve payload source (shared with `embed`).
     let text_buf: String;
-    let b64_buf: Vec<u8>;
-
-    if args.payload.stdin {
-        payload_source = PayloadSource::Stdin;
-    } else if let Some(ref df) = args.payload.data {
-        payload_source = PayloadSource::File(df);
-    } else if let Some(ref tf) = args.payload.text_file {
-        text_buf = std::fs::read_to_string(tf)?;
-        payload_source = PayloadSource::Text(&text_buf);
-    } else if let Some(ref b64_str) = args.payload.text_base64 {
-        use base64::Engine;
-        b64_buf = base64::engine::general_purpose::STANDARD
-            .decode(b64_str.trim())
-            .map_err(|e| StrHideError::General(format!("Invalid base64 string: {e}")))?;
-        text_buf = String::from_utf8(b64_buf).map_err(|e| {
-            StrHideError::General(format!("Base64 content is not valid UTF-8: {e}"))
-        })?;
-        payload_source = PayloadSource::Text(&text_buf);
-    } else if let Some(ref t) = args.payload.text {
-        if args.unescape || cfg.unescape.unwrap_or(false) {
-            text_buf = unescape_string(t);
-            payload_source = PayloadSource::Text(&text_buf);
-        } else {
-            payload_source = PayloadSource::Text(t);
-        }
-    } else if let Ok(env_text) = std::env::var("STRHIDE_TEXT") {
-        if !env_text.is_empty() {
-            text_buf = env_text;
-            payload_source = PayloadSource::Text(&text_buf);
-        } else {
-            return Err(StrHideError::General(
-                "Must provide either -d/--data, -t/--text, --text-file, --text-base64, or --stdin"
-                    .into(),
-            ));
-        }
-    } else {
-        return Err(StrHideError::General(
-            "Must provide either -d/--data, -t/--text, --text-file, --text-base64, or --stdin"
-                .into(),
-        ));
-    }
+    let payload_path: PathBuf;
+    let payload_source: PayloadSource =
+        match resolve_payload(&args.payload, args.unescape, cfg, PayloadFlavor::Text)? {
+            ResolvedPayload::Stdin => PayloadSource::Stdin,
+            ResolvedPayload::File(f) => {
+                payload_path = f;
+                PayloadSource::File(&payload_path)
+            }
+            ResolvedPayload::TextFile(p) => {
+                text_buf = std::fs::read_to_string(p)?;
+                PayloadSource::Text(&text_buf)
+            }
+            ResolvedPayload::Text(t) => {
+                text_buf = t;
+                PayloadSource::Text(&text_buf)
+            }
+            ResolvedPayload::Bytes(b) => {
+                text_buf = String::from_utf8(b).map_err(|e| {
+                    StrHideError::General(format!("Base64 content is not valid UTF-8: {e}"))
+                })?;
+                PayloadSource::Text(&text_buf)
+            }
+        };
 
     // Buffer the payload once. Sources are resolved here rather than per
     // carrier because --stdin can only be read once, and because this keeps the
@@ -1171,16 +1231,11 @@ fn handle_read(args: ReadArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrH
         Ok(r) => r,
         // Discriminate by error variant, not by message text. A password error
         // with no password supplied means the envelope is encrypted: show the
-        // hint, then prompt (interactive terminals only) and retry once.
-        //
-        // The engine renders the hint as ` Hint: '<hint>'.` (engine.rs). The
-        // hint itself is arbitrary user text and may contain quotes, so strip
-        // the exact trailing terminator instead of splitting on `'`.
-        Err(e @ StrHideError::Password(_)) if password.is_none() => {
-            let msg = e.to_string();
-            if !quiet && let Some((_, rest)) = msg.split_once("Hint: '") {
-                let hint_part = rest.strip_suffix("'.").unwrap_or(rest);
-                println!("{}", t!(Msg::InfoPasswordHint, hint = hint_part));
+        // hint (a structured field on the error), then prompt (interactive
+        // terminals only) and retry once.
+        Err(e @ StrHideError::PasswordWithHint { .. }) if password.is_none() => {
+            if !quiet && let Some(hint) = e.hint() {
+                println!("{}", t!(Msg::InfoPasswordHint, hint = hint));
             }
             if !(std::io::IsTerminal::is_terminal(&std::io::stdin())
                 && std::io::IsTerminal::is_terminal(&std::io::stdout()))
@@ -1291,7 +1346,16 @@ fn handle_restore(args: RestoreArgs, cfg: &FileConfig, quiet: bool) -> Result<()
         if let Some(ref t) = output {
             check_overwrite(t, args.overwrite)?;
         }
-        let res = remove_carrier(carrier, output.as_deref(), password.as_deref(), backup)?;
+        // The user has already answered the overwrite question above, so the
+        // library-level refusal is bypassed deliberately.
+        let res = remove_carrier_with_options(
+            carrier,
+            output.as_deref(),
+            password.as_deref(),
+            backup,
+            &crate::params::Profile::default(),
+            args.overwrite,
+        )?;
         print_remove_result(&res, quiet);
         Ok(())
     })
@@ -1537,7 +1601,7 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig, quiet: bool) -> Result<i32,
         } else if !quiet {
             print_verify_result(&res);
         }
-        return Ok(if res.level1_host.ok && res.level2_envelope.ok {
+        return Ok(if crate::engine::verify_passed(&res) {
             0
         } else {
             1
@@ -1550,7 +1614,7 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig, quiet: bool) -> Result<i32,
     for carrier in &files {
         match verify_carrier(carrier, password.as_deref()) {
             Ok(res) => {
-                let ok = res.level1_host.ok && res.level2_envelope.ok;
+                let ok = crate::engine::verify_passed(&res);
                 if !ok {
                     any_failed = true;
                 }
@@ -1595,7 +1659,7 @@ fn handle_verify(args: VerifyArgs, cfg: &FileConfig, quiet: bool) -> Result<i32,
     } else if !quiet {
         let passed = reports
             .iter()
-            .filter(|r| r.level1_host.ok && r.level2_envelope.ok)
+            .filter(|r| crate::engine::verify_passed(r))
             .count();
         let failed_cnt = reports.len() - passed;
         println!(
@@ -1698,31 +1762,70 @@ fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideError> {
     Ok(if likely_hidden { 1 } else { 0 })
 }
 
-fn walkdir_flat(dir: &Path) -> Result<impl Iterator<Item = PathBuf>, StrHideError> {
+/// Walk a directory non-recursively.
+///
+/// Individual entries that cannot be read (permissions, a broken symlink, a
+/// device that vanished mid-walk) are skipped with a warning instead of
+/// aborting the whole batch: one unreadable file must not cost the user every
+/// other report. Same policy as [`expand_input_paths`] for missing paths.
+fn walkdir_flat(dir: &Path, quiet: bool) -> Result<Vec<PathBuf>, StrHideError> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            out.push(entry.path());
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                if !quiet {
+                    eprintln!("[WARN] Cannot read an entry in {}: {e}", dir.display());
+                }
+                continue;
+            }
+        };
+        match entry.file_type() {
+            Ok(ft) if ft.is_file() => out.push(entry.path()),
+            Ok(_) => {}
+            Err(e) => {
+                if !quiet {
+                    eprintln!("[WARN] Cannot stat {}: {e}", entry.path().display());
+                }
+            }
         }
     }
-    Ok(out.into_iter())
+    Ok(out)
 }
 
-fn walkdir_recursive(dir: &Path) -> Result<impl Iterator<Item = PathBuf>, StrHideError> {
+fn walkdir_recursive(dir: &Path, quiet: bool) -> Result<Vec<PathBuf>, StrHideError> {
     let mut out = Vec::new();
-    push_files_recursive(dir, &mut out)?;
-    Ok(out.into_iter())
+    push_files_recursive(dir, &mut out, quiet)?;
+    Ok(out)
 }
 
-fn push_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), StrHideError> {
+fn push_files_recursive(
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    quiet: bool,
+) -> Result<(), StrHideError> {
+    // `entry.file_type()` does not follow symlinks, so a link to a directory is
+    // reported as a file here and is never recursed into: no visited set is
+    // needed to rule out cycles.
     for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                if !quiet {
+                    eprintln!("[WARN] Cannot read an entry in {}: {e}", dir.display());
+                }
+                continue;
+            }
+        };
         let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            push_files_recursive(&path, out)?;
-        } else {
-            out.push(path);
+        match entry.file_type() {
+            Ok(ft) if ft.is_dir() => push_files_recursive(&path, out, quiet)?,
+            Ok(_) => out.push(path),
+            Err(e) => {
+                if !quiet {
+                    eprintln!("[WARN] Cannot stat {}: {e}", path.display());
+                }
+            }
         }
     }
     Ok(())
@@ -1736,12 +1839,11 @@ fn expand_input_paths(
     let mut files = Vec::new();
     for entry in inputs {
         if entry.is_dir() {
-            let walker: Box<dyn Iterator<Item = PathBuf>> = if recursive {
-                Box::new(walkdir_recursive(entry)?)
+            files.extend(if recursive {
+                walkdir_recursive(entry, quiet)?
             } else {
-                Box::new(walkdir_flat(entry)?)
-            };
-            files.extend(walker);
+                walkdir_flat(entry, quiet)?
+            });
         } else if entry.is_file() {
             files.push(entry.clone());
         } else if !quiet {
@@ -1882,49 +1984,88 @@ fn apply_stc_h(
     Ok(())
 }
 
+/// Assemble the stego option set for `embed`.
+///
+/// The `--capacity` probe and the real embed used to build this list twice, and
+/// the two copies had drifted: only the embed path applied `--stc-h` and warned
+/// about non-default parameters, so a probe could report a capacity for a
+/// different configuration than the one that was about to be used. One builder,
+/// with the embed-only extras behind `embed_extras`.
+fn embed_stego_options(
+    args: &EmbedArgs,
+    password: Option<&str>,
+    quiet: bool,
+    embed_extras: bool,
+) -> Result<crate::stego::StegoOptions, StrHideError> {
+    let mut options = crate::stego::StegoOptions {
+        algorithm: args.algorithm.clone(),
+        password: password.map(str::to_string),
+        stego_domain: args.stego_domain.clone(),
+        ..Default::default()
+    };
+
+    if let Some(er) = args.exclusion_rate {
+        options.spatial_params.exclusion_percentile = er;
+    }
+    if let Some(nw) = args.neighbor_weight {
+        options.jpeg_params.neighbor_weight = nw;
+    }
+    if let Some(budget) = args.slot_budget {
+        options.jpeg_params.slot_budget = Some(budget);
+    }
+    if let Some(suite) = args.cipher_suite {
+        options.jpeg_params.cipher_suite = suite;
+    }
+    if let Some(p1) = args.p1_window {
+        options.spatial_params.p1_window = p1;
+    }
+    if let Some(p2) = args.p2_window {
+        options.spatial_params.p2_window = p2;
+    }
+
+    let safety_level = match args.safety.as_deref() {
+        Some(s) => match crate::stego::SafetyLevel::parse(s) {
+            Some(lvl) => lvl,
+            None => {
+                return Err(StrHideError::General(format!(
+                    "Invalid safety level '{s}'. Supported: 'paranoid', 'high', 'balanced'"
+                )));
+            }
+        },
+        None => crate::stego::SafetyLevel::High,
+    };
+    options.safety_level = safety_level;
+    if args.enforce_safety {
+        options.safety_enforcement = crate::stego::SafetyEnforcement::Enforced;
+    }
+
+    apply_stc_h(&mut options, args.stc_h)?;
+    if embed_extras {
+        warn_nondefault_stego_params(&options, quiet);
+    }
+    Ok(options)
+}
+
 fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), StrHideError> {
     if args.capacity {
+        // The probe uses the same credentials the embed would: they key the
+        // spatial header permutation, which changes which pixels are available
+        // to the payload.
+        let capacity_password = resolve_password(
+            args.passwords.password.as_deref(),
+            args.passwords.password_file.as_deref(),
+            cfg,
+            false,
+            false,
+        )?;
         for carrier in &args.carrier {
             let carrier_bytes = std::fs::read(carrier)?;
-            let mut options = crate::stego::StegoOptions {
-                algorithm: args.algorithm.clone(),
-                ..Default::default()
-            };
-            apply_stc_h(&mut options, args.stc_h)?;
-            if let Some(er) = args.exclusion_rate {
-                options.spatial_params.exclusion_percentile = er;
-            }
-            if let Some(nw) = args.neighbor_weight {
-                options.jpeg_params.neighbor_weight = nw;
-            }
-            if let Some(budget) = args.slot_budget {
-                options.jpeg_params.slot_budget = budget;
-            }
-            if let Some(suite) = args.cipher_suite {
-                options.jpeg_params.cipher_suite = suite;
-            }
-            if let Some(p1) = args.p1_window {
-                options.spatial_params.p1_window = p1;
-            }
-            if let Some(p2) = args.p2_window {
-                options.spatial_params.p2_window = p2;
-            }
-            let safety_level = match args.safety.as_deref() {
-                Some(s) => match crate::stego::SafetyLevel::parse(s) {
-                    Some(lvl) => lvl,
-                    None => {
-                        return Err(StrHideError::General(format!(
-                            "Invalid safety level '{s}'. Supported: 'paranoid', 'high', 'balanced'"
-                        )));
-                    }
-                },
-                None => crate::stego::SafetyLevel::High,
-            };
-            options.safety_level = safety_level;
-            if args.enforce_safety {
-                options.safety_enforcement = crate::stego::SafetyEnforcement::Enforced;
-            }
-            let cap = crate::stego::probe_carrier_capacity(&carrier_bytes, &options)?;
+            let options = embed_stego_options(&args, capacity_password.as_deref(), true, false)?;
+            let cap = crate::stego::probe_carrier_capacity_with_profile(
+                &carrier_bytes,
+                &options,
+                &crate::params::Profile::default(),
+            )?;
             println!("{}", t!(Msg::StegoProbeHeader, path = carrier.display()));
             println!("{}", t!(Msg::StegoProbeFormat, val = cap.format));
             println!("{}", t!(Msg::StegoProbeAlgorithm, val = cap.algorithm));
@@ -1977,41 +2118,19 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
     let stego_domain = resolve_stego_domain(args.stego_domain.as_deref(), cfg);
     let profile = stego_profile(stego_secret, stego_domain);
 
-    // 2. Resolve payload bytes
-    let payload_bytes = if args.payload.stdin {
-        let mut buf = Vec::new();
-        std::io::stdin().read_to_end(&mut buf)?;
-        buf
-    } else if let Some(ref df) = args.payload.data {
-        std::fs::read(df)?
-    } else if let Some(ref t) = args.payload.text {
-        if args.unescape || cfg.unescape.unwrap_or(false) {
-            unescape_string(t).into_bytes()
-        } else {
-            t.as_bytes().to_vec()
-        }
-    } else if let Some(ref tf) = args.payload.text_file {
-        std::fs::read(tf)?
-    } else if let Some(ref b64_str) = args.payload.text_base64 {
-        use base64::Engine;
-        base64::engine::general_purpose::STANDARD
-            .decode(b64_str.trim())
-            .map_err(|e| StrHideError::General(format!("Invalid base64 string: {e}")))?
-    } else if let Ok(env_text) = std::env::var("STRHIDE_TEXT") {
-        if !env_text.is_empty() {
-            env_text.into_bytes()
-        } else {
-            return Err(StrHideError::General(
-                "Must provide either -d/--data, -t/--text, --text-file, --text-base64, or --stdin (or use --capacity to probe capacity)"
-                    .into(),
-            ));
-        }
-    } else {
-        return Err(StrHideError::General(
-            "Must provide either -d/--data, -t/--text, --text-file, --text-base64, or --stdin (or use --capacity to probe capacity)"
-                .into(),
-        ));
-    };
+    // 2. Resolve payload bytes (shared with `write`).
+    let payload_bytes =
+        match resolve_payload(&args.payload, args.unescape, cfg, PayloadFlavor::Bytes)? {
+            ResolvedPayload::Stdin => {
+                let mut buf = Vec::new();
+                std::io::stdin().read_to_end(&mut buf)?;
+                buf
+            }
+            ResolvedPayload::File(f) => std::fs::read(f)?,
+            ResolvedPayload::TextFile(p) => std::fs::read(p)?,
+            ResolvedPayload::Text(t) => t.into_bytes(),
+            ResolvedPayload::Bytes(b) => b,
+        };
 
     if payload_bytes.is_empty() {
         return Err(StrHideError::General("Payload cannot be empty".into()));
@@ -2036,53 +2155,15 @@ fn handle_embed(args: EmbedArgs, cfg: &FileConfig, quiet: bool) -> Result<(), St
     for_each_carrier(&args.carrier, quiet, |carrier| {
         let carrier_bytes = std::fs::read(carrier)?;
 
-        let mut options = crate::stego::StegoOptions {
-            algorithm: args.algorithm.clone(),
-            password: password.clone(),
-            stego_domain: args.stego_domain.clone(),
-            ..Default::default()
-        };
-
-        let safety_level = match args.safety.as_deref() {
-            Some(s) => match crate::stego::SafetyLevel::parse(s) {
-                Some(lvl) => lvl,
-                None => {
-                    return Err(StrHideError::General(format!(
-                        "Invalid safety level '{s}'. Supported: 'paranoid', 'high', 'balanced'"
-                    )));
-                }
-            },
-            None => crate::stego::SafetyLevel::High,
-        };
-        options.safety_level = safety_level;
-        if args.enforce_safety {
-            options.safety_enforcement = crate::stego::SafetyEnforcement::Enforced;
-        }
-
-        if let Some(er) = args.exclusion_rate {
-            options.spatial_params.exclusion_percentile = er;
-        }
-        if let Some(nw) = args.neighbor_weight {
-            options.jpeg_params.neighbor_weight = nw;
-        }
-        if let Some(budget) = args.slot_budget {
-            options.jpeg_params.slot_budget = budget;
-        }
-        if let Some(suite) = args.cipher_suite {
-            options.jpeg_params.cipher_suite = suite;
-        }
-        if let Some(p1) = args.p1_window {
-            options.spatial_params.p1_window = p1;
-        }
-        if let Some(p2) = args.p2_window {
-            options.spatial_params.p2_window = p2;
-        }
-        apply_stc_h(&mut options, args.stc_h)?;
-        warn_nondefault_stego_params(&options, quiet);
+        let options = embed_stego_options(&args, password.as_deref(), quiet, true)?;
 
         if !quiet
             && options.safety_enforcement == crate::stego::SafetyEnforcement::Advisory
-            && let Ok(cap) = crate::stego::probe_carrier_capacity(&carrier_bytes, &options)
+            && let Ok(cap) = crate::stego::probe_carrier_capacity_with_profile(
+                &carrier_bytes,
+                &options,
+                &profile,
+            )
             && payload_bytes.len() > cap.recommended_max_bytes
         {
             let bpp = (payload_bytes.len() * 8) as f64 / cap.total_elements as f64;

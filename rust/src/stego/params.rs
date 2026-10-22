@@ -277,8 +277,14 @@ pub struct JpegParams {
     /// transitions, and `slot_budget * 2^h / 32` bytes of backtracking bitmap).
     /// It is **not** part of the wire format: the extractor trusts the `u` in
     /// the superblock, so carriers written with a different budget still decode.
-    #[serde(default = "default_slot_budget")]
-    pub slot_budget: usize,
+    ///
+    /// `None` means "not configured", which is **not** the same as configuring
+    /// [`DEFAULT_SLOT_BUDGET`]: the default scales with the carrier, an explicit
+    /// value is used as given. Comparing by value made `--slot-budget 1200000`
+    /// (exactly the default number) behave as "unset" and silently rescale,
+    /// contradicting the documented meaning of the flag.
+    #[serde(default)]
+    pub slot_budget: Option<usize>,
     /// Cipher suite written into the superblock (default: the profile's default).
     #[serde(default = "default_cipher_suite")]
     pub cipher_suite: u16,
@@ -310,10 +316,6 @@ pub struct JpegParams {
 /// memory. See `docs/stc_v3_phase3_eval_20261021.md`.
 pub const DEFAULT_SLOT_BUDGET: usize = 1_200_000;
 
-fn default_slot_budget() -> usize {
-    DEFAULT_SLOT_BUDGET
-}
-
 fn default_cipher_suite() -> u16 {
     crate::stego::format::DEFAULT_SUITE_ID
 }
@@ -328,7 +330,7 @@ impl Default for JpegParams {
             neighbor_weight: 0.25,
             wet_cost: 1e13,
             stc_h: default_stc_h(),
-            slot_budget: DEFAULT_SLOT_BUDGET,
+            slot_budget: None,
             cipher_suite: default_cipher_suite(),
             polarize_weight: default_polarize_weight(),
             extensions: Vec::new(),
@@ -355,10 +357,11 @@ impl JpegParams {
             )));
         }
         crate::stego::coding::validate_stc_h(self.stc_h)?;
-        if self.slot_budget < 8 {
+        if let Some(budget) = self.slot_budget
+            && budget < 8
+        {
             return Err(StrHideError::General(format!(
-                "JPEG parameter 'slot_budget' must be >= 8, got {}",
-                self.slot_budget
+                "JPEG parameter 'slot_budget' must be >= 8, got {budget}"
             )));
         }
         if !self.polarize_weight.is_finite() || self.polarize_weight <= 0.0 {
@@ -377,14 +380,14 @@ impl JpegParams {
 
     /// Compute the effective slot budget for layout optimization.
     ///
-    /// For the default budget setting, scales dynamically with carrier capacity (`body_slots / 4`)
-    /// so large carriers (e.g. 24 MP+) maintain optimal low-distortion group sizes (u >= 2) without
-    /// excessive memory footprint. If the caller explicitly supplied a custom budget, it is respected.
+    /// Unset (`None`) scales dynamically with carrier capacity (`body_slots / 4`)
+    /// so large carriers (e.g. 24 MP+) keep optimal low-distortion group sizes
+    /// (`u >= 2`) without an excessive memory footprint. An explicit value is
+    /// respected exactly, even when it happens to equal [`DEFAULT_SLOT_BUDGET`].
     pub fn effective_slot_budget(&self, body_slots: usize) -> usize {
-        if self.slot_budget == DEFAULT_SLOT_BUDGET {
-            self.slot_budget.max(body_slots / 4)
-        } else {
-            self.slot_budget
+        match self.slot_budget {
+            Some(budget) => budget,
+            None => DEFAULT_SLOT_BUDGET.max(body_slots / 4),
         }
     }
 }
@@ -520,6 +523,32 @@ mod tests {
         };
         let profile = Profile::default().with_stego_secret("private-dialect");
         assert_eq!(opts.secret(&profile), Some("private-dialect"));
+    }
+
+    #[test]
+    fn explicit_slot_budget_is_honoured_even_when_it_equals_the_default() {
+        // "Explicitly configured" and "unset" must be distinguishable: an
+        // unset budget scales with the carrier, an explicit one does not.
+        // Comparing the value to `DEFAULT_SLOT_BUDGET` conflated the two, so
+        // `--slot-budget 1200000` silently rescaled like the default.
+        let body_slots = 8_000_000; // body/4 = 2M, above the default
+        let explicit = JpegParams {
+            slot_budget: Some(DEFAULT_SLOT_BUDGET),
+            ..JpegParams::default()
+        };
+        assert_eq!(
+            explicit.effective_slot_budget(body_slots),
+            DEFAULT_SLOT_BUDGET
+        );
+        assert_eq!(
+            JpegParams::default().effective_slot_budget(body_slots),
+            body_slots / 4
+        );
+        // A small carrier never gets a budget below the default.
+        assert_eq!(
+            JpegParams::default().effective_slot_budget(100),
+            DEFAULT_SLOT_BUDGET
+        );
     }
 
     #[test]

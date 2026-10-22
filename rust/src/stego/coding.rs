@@ -29,7 +29,6 @@ mod stc;
 pub use stc::{
     DEFAULT_STC_H, KERNEL_MAX_U, MAX_STC_H, MAX_STC_U, MIN_STC_H, StcTrellis,
     validate_h as validate_stc_h, validate_u as validate_stc_u,
-    validate_u_wide as validate_stc_u_wide,
 };
 
 /// Default Hamming parameter k (7 slots carry 3 bits).
@@ -258,8 +257,9 @@ pub fn hamming_embed_bytes(
 /// elements, plus the `h - 1` warm-up rows. `u = 1` is therefore ~1 slot per
 /// bit; larger `u` trades capacity for a lower change rate.
 ///
-/// Both image engines call this so a carrier built by one is measured the same
-/// way as one built by the other.
+/// Both image engines call this, so a carrier built by one is measured exactly
+/// like one built by the other. (The spatial engine kept a private copy of this
+/// function for a while; it now shares this one.)
 pub fn slots_for_codec(
     bits: usize,
     codec: crate::stego::params::StegoCodec,

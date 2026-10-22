@@ -58,6 +58,10 @@ impl HostAdapter for PngAdapter {
         "PNG"
     }
 
+    fn supports_content_stego(&self) -> bool {
+        true
+    }
+
     fn detect(&self, reader: &mut dyn SeekRead) -> bool {
         let start_pos = match reader.stream_position() {
             Ok(pos) => pos,
@@ -135,64 +139,41 @@ impl HostAdapter for PngAdapter {
 
         // 1. Write everything before IEND
         host_in.seek(SeekFrom::Start(0))?;
-        let mut remaining = iend_offset;
-        let mut buf = [0u8; 64 * 1024];
-
-        while remaining > 0 {
-            let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
-            let n = host_in.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-            remaining -= n as u64;
-        }
+        crate::adapters::io::copy_exact(host_in, out, iend_offset)?;
 
         let inject_offset = iend_offset;
 
-        // 2. Prepare and write prIv chunk
+        // 2. Write the prIv chunk: `[u32 length][type][data][u32 crc]`.
+        // The CRC sits *after* the data, so it can be accumulated while the
+        // same bytes are being written — the previous two-pass version read the
+        // whole envelope twice (once for the CRC, once to copy).
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(&CHUNK_PRIV);
 
-        // CRC pass: an I/O error here must propagate, not be mistaken for EOF,
-        // otherwise a truncated read would yield a wrong CRC silently.
-        loop {
-            let n = ube_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-        }
-        let crc_val = hasher.finalize();
-
-        // Write length and chunk type
         out.write_all(&(ube_size as u32).to_be_bytes())?;
         out.write_all(&CHUNK_PRIV)?;
 
-        // Write UBE data
-        ube_in.seek(SeekFrom::Start(0))?;
-        loop {
-            let n = ube_in.read(&mut buf)?;
+        let mut buf = [0u8; 64 * 1024];
+        let mut remaining = ube_size;
+        while remaining > 0 {
+            let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
+            let n = ube_in.read(&mut buf[..to_read])?;
             if n == 0 {
-                break;
+                return Err(StrHideError::CorruptedData(
+                    "Envelope stream ended before its declared size".into(),
+                ));
             }
+            hasher.update(&buf[..n]);
             out.write_all(&buf[..n])?;
+            remaining -= n as u64;
         }
-
-        // Write CRC
-        out.write_all(&crc_val.to_be_bytes())?;
+        out.write_all(&hasher.finalize().to_be_bytes())?;
 
         let inject_size = 4 + 4 + ube_size + 4;
 
         // 3. Write IEND chunk and any trailing dirty data
         host_in.seek(SeekFrom::Start(iend_offset))?;
-        loop {
-            let n = host_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-        }
+        crate::adapters::io::copy_stream(host_in, out)?;
 
         Ok((inject_offset, inject_size, 0, 0))
     }

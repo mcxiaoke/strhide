@@ -33,6 +33,31 @@ pub enum StrHideError {
     #[error("Password error: {0}")]
     Password(String),
 
+    /// A password was required but missing, and the envelope carries a hint
+    /// that may help the user supply one.
+    ///
+    /// The hint is a **field**, not part of the message: the CLI prints it and
+    /// then prompts. Extracting it from the rendered text (`split_once("Hint: '")`)
+    /// meant any wording change in the engine silently broke the feature.
+    #[error("Password error: {message}")]
+    PasswordWithHint {
+        /// What went wrong, without the hint appended.
+        message: String,
+        /// Free-form hint text stored in the envelope, if any.
+        hint: Option<String>,
+    },
+
+    /// The STC trellis has no feasible path: some group contains only elements
+    /// whose both directions are illegal (infinite cost). Not a retryable
+    /// condition — re-seeding would leave the extractor unable to tell which
+    /// round was used.
+    ///
+    /// Structured so the JPEG engine can recognise "this carrier's Huffman
+    /// table cannot encode the required modifications" without matching on
+    /// message text.
+    #[error("Embedding infeasible: {0}")]
+    TrellisInfeasible(String),
+
     /// Pre-write safety rejection: the carrier is signed (PE Authenticode,
     /// PDF ByteRange, JAR signature), read-only, an unsupported APK, or the
     /// target directory is not writable.
@@ -84,12 +109,15 @@ impl StrHideError {
         match self {
             StrHideError::Io(_) => Some(crate::i18n::Msg::ErrIo),
             StrHideError::CorruptedData(_) => Some(crate::i18n::Msg::ErrCorrupted),
-            StrHideError::Password(_) => Some(crate::i18n::Msg::ErrPassword),
+            StrHideError::Password(_) | StrHideError::PasswordWithHint { .. } => {
+                Some(crate::i18n::Msg::ErrPassword)
+            }
             StrHideError::Rejection(_) => Some(crate::i18n::Msg::ErrRejection),
             StrHideError::RestoreMismatch(_) => Some(crate::i18n::Msg::ErrRestoreMismatch),
             StrHideError::UnsupportedFormat(_) | StrHideError::UnsupportedVersion(_) => {
                 Some(crate::i18n::Msg::ErrUnsupported)
             }
+            StrHideError::TrellisInfeasible(_) => Some(crate::i18n::Msg::ErrUnsupported),
             StrHideError::NoHiddenData(_) | StrHideError::General(_) => None,
         }
     }
@@ -105,7 +133,24 @@ impl StrHideError {
             | StrHideError::UnsupportedFormat(s)
             | StrHideError::UnsupportedVersion(s)
             | StrHideError::NoHiddenData(s)
-            | StrHideError::General(s) => s.clone(),
+            | StrHideError::General(s)
+            | StrHideError::TrellisInfeasible(s) => s.clone(),
+            StrHideError::PasswordWithHint { message, hint } => match hint {
+                Some(h) => format!("{message}. Hint: '{h}'."),
+                None => message.clone(),
+            },
+        }
+    }
+
+    /// The envelope's password hint, when the error carries one.
+    ///
+    /// A field rather than text to parse: the hint is arbitrary user input and
+    /// may itself contain quotes, so any string-splitting scheme was fragile by
+    /// construction.
+    pub fn hint(&self) -> Option<&str> {
+        match self {
+            StrHideError::PasswordWithHint { hint, .. } => hint.as_deref(),
+            _ => None,
         }
     }
 }

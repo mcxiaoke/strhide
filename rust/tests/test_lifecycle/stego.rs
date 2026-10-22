@@ -301,7 +301,7 @@ fn test_jpeg_uerd_fine_tuning() {
     opts.jpeg_params.neighbor_weight = 0.35;
     // The V3 knob that replaces the old pool/truncation parameters: a larger
     // slot budget spreads the payload over more coefficients.
-    opts.jpeg_params.slot_budget = 200_000;
+    opts.jpeg_params.slot_budget = Some(200_000);
 
     let stego_jpeg = embed_carrier(&jpeg_bytes, secret, &opts).unwrap();
     let extracted = extract_carrier(&stego_jpeg, &opts).unwrap();
@@ -977,7 +977,7 @@ fn test_jpeg_v3_slot_budget_controls_the_change_rate() {
             ..Default::default()
         };
         opts.jpeg_params.stc_h = 8;
-        opts.jpeg_params.slot_budget = budget;
+        opts.jpeg_params.slot_budget = Some(budget);
 
         let stego = embed_carrier(&jpeg_bytes, payload, &opts)
             .unwrap_or_else(|e| panic!("budget={budget}: embed failed: {e}"));

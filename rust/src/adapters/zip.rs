@@ -199,44 +199,20 @@ impl HostAdapter for ZipAdapter {
 
         // 1. Write everything before Central Directory
         host_in.seek(SeekFrom::Start(0))?;
-        let mut remaining = cd_offset;
-        let mut buf = [0u8; 64 * 1024];
-
-        while remaining > 0 {
-            let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
-            let n = host_in.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-            remaining -= n as u64;
-        }
+        crate::adapters::io::copy_exact(host_in, out, cd_offset)?;
 
         let inject_offset = cd_offset;
 
-        // 2. Write UBE data stream (propagate read errors instead of treating them as EOF)
-        loop {
-            let n = ube_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-        }
+        // 2. Write UBE data stream. `ube_size` was read from the same stream, so
+        // a short read here means the input was truncated: say so rather than
+        // writing a silently shortened envelope.
+        crate::adapters::io::copy_exact(ube_in, out, ube_size)?;
 
         let inject_size = ube_size;
 
         // 3. Write Central Directory and EOCD up to cd_offset field (offset 16 of EOCD)
         let cd_and_eocd_prefix_len = (eocd_pos + 16) - cd_offset;
-        let mut rem_cd = cd_and_eocd_prefix_len;
-        while rem_cd > 0 {
-            let to_read = std::cmp::min(rem_cd, buf.len() as u64) as usize;
-            let n = host_in.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-            rem_cd -= n as u64;
-        }
+        crate::adapters::io::copy_exact(host_in, out, cd_and_eocd_prefix_len)?;
 
         // 4. Write updated Central Directory offset
         let new_cd_offset = (cd_offset + ube_size) as u32;
@@ -248,13 +224,7 @@ impl HostAdapter for ZipAdapter {
         host_in.seek(SeekFrom::Current(4))?;
 
         // 5. Write remaining part of EOCD (comment length and comment data)
-        loop {
-            let n = host_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-        }
+        crate::adapters::io::copy_stream(host_in, out)?;
 
         Ok((inject_offset, inject_size, patch_offset, orig_patch_val))
     }
@@ -334,7 +304,7 @@ impl HostAdapter for ZipAdapter {
                 ))
             })?;
         stego_in.seek(SeekFrom::Start(inject_end))?;
-        let mut bytes_before_patch = (header.patch_offset as u64)
+        let bytes_before_patch = (header.patch_offset as u64)
             .checked_sub(inject_end)
             .ok_or_else(|| {
                 StrHideError::CorruptedData(format!(
@@ -342,15 +312,7 @@ impl HostAdapter for ZipAdapter {
                     header.patch_offset
                 ))
             })?;
-        while bytes_before_patch > 0 {
-            let to_read = std::cmp::min(bytes_before_patch, buf.len() as u64) as usize;
-            let n = stego_in.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-            bytes_before_patch -= n as u64;
-        }
+        crate::adapters::io::copy_exact(stego_in, out, bytes_before_patch)?;
 
         // Write original patch value (original cd_offset)
         out.write_all(&header.orig_patch_val.to_le_bytes())?;
@@ -365,13 +327,7 @@ impl HostAdapter for ZipAdapter {
         stego_in.seek(SeekFrom::Start(patch_field_end as u64))?;
 
         // Copy remaining EOCD bytes (comment len + comment)
-        loop {
-            let n = stego_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-        }
+        crate::adapters::io::copy_stream(stego_in, out)?;
 
         Ok(())
     }

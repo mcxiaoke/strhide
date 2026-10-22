@@ -69,25 +69,6 @@ pub const SPATIAL_ELIGIBLE_MAX: u8 = 247;
 // its bit allocation live in [`crate::stego::header`], shared with the JPEG
 // engine so both carriers describe their codec identically.
 
-/// Slots needed to carry `bits` payload bits under `codec`.
-///
-/// STC with group size `u` needs `u * (bits + h - 1)` slots: `bits + h - 1`
-/// syndrome rows, each fed by `u` elements, plus the trellis warm-up. `u = 1`
-/// is roughly one slot per bit; Hamming k=3 needs 2.33.
-fn slots_for(bits: usize, codec: StegoCodec, stc_h: u8, stc_u: u8) -> Result<usize, StrHideError> {
-    match codec {
-        StegoCodec::Hamming => Ok(crate::stego::coding::required_slots(
-            bits,
-            crate::stego::coding::DEFAULT_HAMMING_K,
-        )),
-        StegoCodec::Stc | StegoCodec::Auto => {
-            let u = if stc_u == 0 { 1 } else { stc_u };
-            let t = StcTrellis::from_seed_grouped(0, stc_h, u)?;
-            Ok(t.slots_for(bits))
-        }
-    }
-}
-
 /// Decoded raw image representation.
 #[derive(Debug, Clone)]
 pub struct RawImage {
@@ -235,16 +216,32 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
     let bpp = channels;
     let stride = width as usize * bpp;
 
-    // Decompress IDAT stream
-    let mut z = ZlibDecoder::new(Cursor::new(&idat));
-    let mut raw = Vec::new();
-    z.read_to_end(&mut raw)?;
+    // A carrier is untrusted input and `stride * height` is exactly how many
+    // bytes a valid image produces, so bound the inflate by IHDR instead of
+    // letting flate2 fill a Vec with however much the stream expands to
+    // (a few hundred KiB of IDAT can decode to gigabytes).
+    let expected = stride
+        .checked_mul(height as usize)
+        .and_then(|v| v.checked_add(height as usize))
+        .ok_or_else(|| StrHideError::CorruptedData("PNG dimensions overflow usize".into()))?;
 
-    let expected = stride * height as usize + height as usize;
+    // Decompress IDAT stream
+    let mut z = ZlibDecoder::new(Cursor::new(&idat)).take(expected as u64 + 1);
+    let mut raw = Vec::new();
+    z.read_to_end(&mut raw)
+        .map_err(|e| StrHideError::CorruptedData(format!("Invalid IDAT stream: {e}")))?;
+
     if raw.len() < expected {
         return Err(StrHideError::CorruptedData(
             "Decompressed IDAT is truncated".into(),
         ));
+    }
+    if raw.len() != expected {
+        return Err(StrHideError::CorruptedData(format!(
+            "Decompressed IDAT is {} bytes, but IHDR declares {}; refusing to expand further",
+            raw.len(),
+            expected
+        )));
     }
 
     // Unfilter rows
@@ -475,6 +472,141 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 }
 
 // ---------------------------------------------------------------------------
+// Slot plan: the single source of truth for "which pixels carry what"
+// ---------------------------------------------------------------------------
+
+/// Slots reserved for the 32-byte base header (salt | nonce | length word).
+const HEADER_SLOTS: usize = 256;
+
+/// Channel the spatial codec writes into: green for colour images (least
+/// visible), channel 0 for grayscale / gray+alpha.
+fn embed_channel(image: &RawImage) -> usize {
+    if image.channels >= 3 { 1 } else { 0 }
+}
+
+/// The carrier's slot layout: candidates, header assignment, body pool.
+///
+/// Embed, extract and capacity-probe all need exactly this decision, and three
+/// hand-copied versions of it had already drifted: the probe derived its header
+/// permutation from `(None, None)` while the embedder used the caller's
+/// password and domain. Since the 512 header/feature slots are removed from the
+/// body pool, a probe with different credentials excludes *different* pixels and
+/// reports a capacity the writer cannot reach.
+struct SlotPlan {
+    /// Cost-ranked candidates after the smooth-pixel exclusion, in ranking order.
+    candidates: Vec<usize>,
+    /// `candidates` in keyed header order; the first 512 entries are the header
+    /// (256) and feature-word (256) slots.
+    permuted: Vec<usize>,
+    /// `used_by_header[px]`: the pixel is one of those 512 slots.
+    used_by_header: Vec<bool>,
+}
+
+impl SlotPlan {
+    /// Rank the candidates and apply the keyed header permutation.
+    ///
+    /// `password` / `domain` key the permutation, so they must be the
+    /// credentials the embedder will use — they change which pixels the header
+    /// occupies and therefore the body capacity.
+    fn build(
+        image: &RawImage,
+        costs: &[f64],
+        params: &SpatialParams,
+        password: Option<&str>,
+        domain: Option<&str>,
+    ) -> Result<Self, StrHideError> {
+        let total_pixels = image.width as usize * image.height as usize;
+        if costs.len() != total_pixels {
+            return Err(StrHideError::General("Cost map dimension mismatch".into()));
+        }
+        let channel_offset = embed_channel(image);
+
+        // Eligible pixels: the class must be interior, i.e. `val` must sit in
+        // [8, 247] so that at least one of `val ± 1` stays inside the same
+        // eight-value class. That keeps three invariants the extractor relies on:
+        // 1. `val & 0xF8` never changes, so the HILL cost map is bit-identical;
+        // 2. modified values stay in [7, 248], never reaching 0/255 (no clipping);
+        // 3. eligibility itself is class-based, so both ends derive the same set.
+        let mut candidates: Vec<usize> = (0..total_pixels)
+            .filter(|&idx| {
+                let val = image.pixels[idx * image.channels + channel_offset];
+                (SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&val)
+            })
+            .collect();
+
+        // Rank pixels by cost: lowest cost (most complex/noisy) first
+        candidates.sort_by(|&a, &b| {
+            costs[a]
+                .partial_cmp(&costs[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Exclude the smoothest fraction (e.g. 30%)
+        let allowed_count = ((candidates.len() as f64)
+            * (1.0 - params.exclusion_percentile.clamp(0.0, 0.9)))
+            as usize;
+        candidates.truncate(allowed_count);
+
+        // Keyed candidate-set permutation for the header slots (legacy rule:
+        // [8, 247] eligibility, 30% exclusion).
+        let header_seed = crate::stego::envelope::derive_header_perm_seed(password, domain);
+        let mut permuted = candidates.clone();
+        permute_indices(&mut permuted, &header_seed);
+
+        let mut used_by_header = vec![false; total_pixels];
+        for &s in permuted.iter().take(V2_TOTAL_HEADER_SLOTS) {
+            used_by_header[s] = true;
+        }
+
+        Ok(Self {
+            candidates,
+            permuted,
+            used_by_header,
+        })
+    }
+
+    /// True when there are enough candidates for the header *and* the feature
+    /// word.
+    fn header_fits(&self) -> bool {
+        self.permuted.len() >= V2_TOTAL_HEADER_SLOTS
+    }
+
+    /// The 256 slots carrying salt | nonce | length word.
+    ///
+    /// Callers must have checked [`Self::header_fits`] (or, for the extractor's
+    /// first read, that there are at least [`HEADER_SLOTS`]).
+    fn header_slots(&self) -> &[usize] {
+        &self.permuted[..HEADER_SLOTS]
+    }
+
+    /// The 256 slots carrying the [`FeatureWord`].
+    fn feature_slots(&self) -> &[usize] {
+        &self.permuted[HEADER_SLOTS..V2_TOTAL_HEADER_SLOTS]
+    }
+
+    /// Pixels left for the payload body: candidates outside the header set,
+    /// further restricted by the wire `class_rule`.
+    ///
+    /// Under the safe non-boundary rule (`class_rule == 1`) only `val % 8` in
+    /// [1, 6] may move, which eliminates the r=0/7 boundary deficit (P0-B).
+    fn body_candidates(&self, image: &RawImage, class_rule: u8) -> Vec<usize> {
+        let channel_offset = embed_channel(image);
+        self.candidates
+            .iter()
+            .copied()
+            .filter(|&s| !self.used_by_header[s])
+            .filter(|&s| {
+                if class_rule != 1 {
+                    return true;
+                }
+                let val = image.pixels[s * image.channels + channel_offset];
+                (1..=6).contains(&(val % 8))
+            })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Embedding & Extraction
 // ---------------------------------------------------------------------------
 
@@ -505,72 +637,20 @@ pub fn embed_spatial(
 
     // Compute distortion cost map
     let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, params);
-    if costs.len() != total_pixels {
-        return Err(StrHideError::General("Cost map dimension mismatch".into()));
-    }
 
-    // Channel to embed in (Green channel for RGB, channel 0 for grayscale/RGBA luminance)
-    let channel_offset = if image.channels >= 3 { 1 } else { 0 };
+    let channel_offset = embed_channel(&image);
 
-    // Eligible pixels: the class must be interior, i.e. `val` must sit in
-    // [8, 247] so that at least one of `val ± 1` stays inside the same
-    // eight-value class. That keeps three invariants the extractor relies on:
-    // 1. `val & 0xF8` never changes, so the HILL cost map is bit-identical;
-    // 2. modified values stay in [7, 248], never reaching 0/255 (no clipping);
-    // 3. eligibility itself is class-based, so both ends derive the same set.
-    let mut eligible_pixels: Vec<usize> = (0..total_pixels)
-        .filter(|&idx| {
-            let val = image.pixels[idx * image.channels + channel_offset];
-            (SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&val)
-        })
-        .collect();
-
-    // Rank pixels by cost: lowest cost (most complex/noisy) first
-    eligible_pixels.sort_by(|&a, &b| {
-        costs[a]
-            .partial_cmp(&costs[b])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    // Exclude the smoothest fraction (e.g. 30%)
-    let allowed_count = ((eligible_pixels.len() as f64)
-        * (1.0 - params.exclusion_percentile.clamp(0.0, 0.9))) as usize;
-    let candidate_pixels = &eligible_pixels[..allowed_count];
-
-    if candidate_pixels.len() < V2_TOTAL_HEADER_SLOTS {
+    let plan = SlotPlan::build(&image, &costs, params, password, domain)?;
+    if !plan.header_fits() {
         return Err(StrHideError::General(format!(
             "Carrier capacity insufficient: available {} slots, minimum header requires {} slots",
-            candidate_pixels.len(),
+            plan.permuted.len(),
             V2_TOTAL_HEADER_SLOTS
         )));
     }
-
-    // Phase 1: Keyed candidate set permutation for header slots (Legacy rule: [8, 247], 30% exclusion)
-    let header_seed = crate::stego::envelope::derive_header_perm_seed(password, domain);
-    let mut permuted_candidates = candidate_pixels.to_vec();
-    permute_indices(&mut permuted_candidates, &header_seed);
-
-    let header_slots = &permuted_candidates[..256];
-    let feature_slots = &permuted_candidates[256..V2_TOTAL_HEADER_SLOTS];
-
-    let is_header = {
-        let mut v = vec![false; total_pixels];
-        for &s in &permuted_candidates[..V2_TOTAL_HEADER_SLOTS] {
-            v[s] = true;
-        }
-        v
-    };
-
-    // Body slots: under safe non-boundary rule (class_rule=1), restrict candidates to
-    // val % 8 in [1, 6] to completely eliminate the r=0/7 boundary deficit (P0-B).
-    let body_candidates: Vec<usize> = candidate_pixels
-        .iter()
-        .copied()
-        .filter(|&s| {
-            let val = image.pixels[s * image.channels + channel_offset];
-            (1..=6).contains(&(val % 8)) && !is_header[s]
-        })
-        .collect();
+    let header_slots = plan.header_slots();
+    let feature_slots = plan.feature_slots();
+    let body_candidates = plan.body_candidates(&image, 1);
 
     let ciphertext_bits = ciphertext_len * 8;
 
@@ -608,7 +688,12 @@ pub fn embed_spatial(
         StegoCodec::Hamming => (StegoCodec::Hamming, 0),
     };
 
-    let needed_body_slots = slots_for(ciphertext_bits, resolved_codec, params.stc_h, resolved_u)?;
+    let needed_body_slots = crate::stego::coding::slots_for_codec(
+        ciphertext_bits,
+        resolved_codec,
+        params.stc_h,
+        resolved_u,
+    )?;
 
     if needed_body_slots > body_candidates.len() {
         return Err(StrHideError::General(format!(
@@ -743,47 +828,21 @@ pub fn extract_spatial(
     let image = decode_png(carrier_bytes)?;
     let w = image.width as usize;
     let h = image.height as usize;
-    let total_pixels = w * h;
 
     // Compute distortion cost map (identical to embedding)
     let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, params);
-    if costs.len() != total_pixels {
-        return Err(StrHideError::General("Cost map dimension mismatch".into()));
-    }
 
-    let channel_offset = if image.channels >= 3 { 1 } else { 0 };
+    let channel_offset = embed_channel(&image);
 
-    // Filter eligible pixels with the identical class-interior condition
-    let mut eligible_pixels: Vec<usize> = (0..total_pixels)
-        .filter(|&idx| {
-            let val = image.pixels[idx * image.channels + channel_offset];
-            (SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&val)
-        })
-        .collect();
-
-    // Rank pixels by cost: lowest cost first
-    eligible_pixels.sort_by(|&a, &b| {
-        costs[a]
-            .partial_cmp(&costs[b])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let allowed_count = ((eligible_pixels.len() as f64)
-        * (1.0 - params.exclusion_percentile.clamp(0.0, 0.9))) as usize;
-    let candidate_pixels = &eligible_pixels[..allowed_count];
-
-    if candidate_pixels.len() < 256 {
+    // The header permutation must be the one the embedder used: same password,
+    // same domain, same ranking rule.
+    let plan = SlotPlan::build(&image, &costs, params, password, domain)?;
+    if plan.permuted.len() < HEADER_SLOTS {
         return Err(StrHideError::NoHiddenData(
             "Carrier has insufficient capacity for stego header".into(),
         ));
     }
-
-    // Phase 1: Keyed full candidate set permutation for header slots
-    let header_seed = crate::stego::envelope::derive_header_perm_seed(password, domain);
-    let mut permuted_candidates = candidate_pixels.to_vec();
-    permute_indices(&mut permuted_candidates, &header_seed);
-
-    let header_slots = &permuted_candidates[..256];
+    let header_slots = plan.header_slots();
 
     // Read Phase 1: 32-byte Header ([16B Salt][12B Nonce][4B Total Len])
     let mut header_bytes = [0u8; 32];
@@ -809,7 +868,10 @@ pub fn extract_spatial(
         (len as usize, codec_id, stc_h)
     };
 
-    if !(49..=HEADER_LEN_MAX as usize).contains(&total_len) {
+    // A total length below the smallest envelope the writer can produce is
+    // indistinguishable from noise, so it is rejected here rather than
+    // allocating for a payload that cannot exist.
+    if !(crate::stego::envelope::MIN_ENVELOPE_LEN..=HEADER_LEN_MAX as usize).contains(&total_len) {
         return Err(StrHideError::NoHiddenData("No valid payload found".into()));
     }
 
@@ -818,11 +880,11 @@ pub fn extract_spatial(
     // Every carrier this build writes uses the v2 header. A different `h` field
     // means the header landed on the wrong slots, i.e. wrong password or no
     // payload -- report it exactly like an AEAD failure.
-    if raw_stc_h != HEADER_V2_ESCAPE_H || permuted_candidates.len() < V2_TOTAL_HEADER_SLOTS {
+    if raw_stc_h != HEADER_V2_ESCAPE_H || !plan.header_fits() {
         return Err(no_hidden());
     }
 
-    let feature_slots = &permuted_candidates[256..V2_TOTAL_HEADER_SLOTS];
+    let feature_slots = plan.feature_slots();
     let mut feature_bytes = [0u8; 32];
     for byte_i in 0..32 {
         let mut b = 0u8;
@@ -835,33 +897,12 @@ pub fn extract_spatial(
     }
 
     let fw = FeatureWord::decode(&feature_bytes).map_err(|_| no_hidden())?;
-    let is_header = {
-        let mut v = vec![false; total_pixels];
-        for &s in &permuted_candidates[..V2_TOTAL_HEADER_SLOTS] {
-            v[s] = true;
-        }
-        v
-    };
-    let body_candidates: Vec<usize> = if fw.class_rule == 1 {
-        candidate_pixels
-            .iter()
-            .copied()
-            .filter(|&s| {
-                let val = image.pixels[s * image.channels + channel_offset];
-                (1..=6).contains(&(val % 8)) && !is_header[s]
-            })
-            .collect()
-    } else {
-        candidate_pixels
-            .iter()
-            .copied()
-            .filter(|&s| !is_header[s])
-            .collect()
-    };
+    let body_candidates = plan.body_candidates(&image, fw.class_rule);
 
-    let ciphertext_len = total_len - 28;
+    let ciphertext_len = total_len - crate::stego::envelope::HEADER_OVERHEAD;
     let ciphertext_bits = ciphertext_len * 8;
-    let needed_body_slots = slots_for(ciphertext_bits, fw.codec, fw.h, fw.u)?;
+    let needed_body_slots =
+        crate::stego::coding::slots_for_codec(ciphertext_bits, fw.codec, fw.h, fw.u)?;
     if needed_body_slots > body_candidates.len() {
         return Err(no_hidden());
     }
@@ -911,11 +952,18 @@ pub fn extract_spatial(
 }
 
 /// Probe capacity of PNG carrier for spatial content-adaptive steganography.
+///
+/// `password` / `domain` must be the credentials an embed will use: they key
+/// the header permutation, and the 512 header/feature slots are removed from
+/// the body pool. Probing without them (as this function used to do
+/// internally) reports the capacity of a *different* slot assignment.
 pub fn probe_spatial_capacity(
     carrier_bytes: &[u8],
     cost_model: &dyn SpatialCostModel,
     params: &SpatialParams,
     safety_level: crate::stego::SafetyLevel,
+    password: Option<&str>,
+    domain: Option<&str>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let image = decode_png(carrier_bytes)?;
     let w = image.width as usize;
@@ -923,51 +971,15 @@ pub fn probe_spatial_capacity(
     let total_pixels = w * h;
 
     let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, params);
-    if costs.len() != total_pixels {
-        return Err(StrHideError::General("Cost map dimension mismatch".into()));
-    }
 
-    let channel_offset = if image.channels >= 3 { 1 } else { 0 };
-    let mut eligible_pixels: Vec<usize> = (0..total_pixels)
-        .filter(|&idx| {
-            let val = image.pixels[idx * image.channels + channel_offset];
-            (SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&val)
-        })
-        .collect();
+    let plan = SlotPlan::build(&image, &costs, params, password, domain)?;
 
-    eligible_pixels.sort_by(|&a, &b| {
-        costs[a]
-            .partial_cmp(&costs[b])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let allowed_count = ((eligible_pixels.len() as f64)
-        * (1.0 - params.exclusion_percentile.clamp(0.0, 0.9))) as usize;
-    let candidate_pixels = &eligible_pixels[..allowed_count];
-
-    let available_body_slots = if candidate_pixels.len() < V2_TOTAL_HEADER_SLOTS {
-        0
+    let available_body_slots = if plan.header_fits() {
+        // The embedder always writes `class_rule = 1`, so the capacity it can
+        // actually reach is the rule-1 body pool.
+        plan.body_candidates(&image, 1).len()
     } else {
-        let header_seed = crate::stego::envelope::derive_header_perm_seed(None, None);
-        let mut permuted_candidates = candidate_pixels.to_vec();
-        permute_indices(&mut permuted_candidates, &header_seed);
-
-        let is_header = {
-            let mut v = vec![false; total_pixels];
-            for &s in &permuted_candidates[..V2_TOTAL_HEADER_SLOTS] {
-                v[s] = true;
-            }
-            v
-        };
-
-        candidate_pixels
-            .iter()
-            .copied()
-            .filter(|&s| {
-                let val = image.pixels[s * image.channels + channel_offset];
-                (1..=6).contains(&(val % 8)) && !is_header[s]
-            })
-            .count()
+        0
     };
     let hamming_k = crate::stego::coding::DEFAULT_HAMMING_K;
     // The two codecs buy different payload per slot, and the difference is
@@ -1456,6 +1468,8 @@ mod tests {
                 &HillCostModel,
                 &params,
                 crate::stego::SafetyLevel::High,
+                Some("pw"),
+                None,
             )
             .expect("capacity probe");
             capacities.push(cap.max_raw_payload_bytes);
@@ -1511,11 +1525,50 @@ mod tests {
         assert_eq!(rec_light, light_payload);
 
         // Verify that capacity probe reports recommended bytes anchored to high-stealth
-        let cap =
-            probe_spatial_capacity(&png, &HillCostModel, &auto_params, auto_params.safety_level)
-                .expect("probe");
+        let cap = probe_spatial_capacity(
+            &png,
+            &HillCostModel,
+            &auto_params,
+            auto_params.safety_level,
+            Some("pw"),
+            None,
+        )
+        .expect("probe");
         assert!(cap.recommended_max_bytes > 0);
         assert!(cap.recommended_max_bytes <= cap.max_raw_payload_bytes / 2);
+    }
+
+    /// The probe's answer must be reachable by the embedder: they have to agree
+    /// on the slot plan, including the credential-keyed header permutation.
+    /// This is the regression guard for the drift between the two.
+    #[test]
+    fn probe_capacity_is_reachable_by_embed() {
+        let (w, h) = (128usize, 128usize);
+        let pixels = row_correlated_pixels(w, h);
+        let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
+        let params = SpatialParams::default();
+
+        for password in [None, Some("pw"), Some("a-completely-different-password")] {
+            let cap = probe_spatial_capacity(
+                &png,
+                &HillCostModel,
+                &params,
+                crate::stego::SafetyLevel::Balanced,
+                password,
+                None,
+            )
+            .expect("probe");
+            assert!(cap.max_raw_payload_bytes > 0);
+            let payload = vec![0x5Au8; cap.max_raw_payload_bytes];
+            embed_spatial(&png, &payload, password, None, &HillCostModel, &params).unwrap_or_else(
+                |e| {
+                    panic!(
+                        "password {password:?}: probe reported {} bytes fit but embed failed: {e}",
+                        payload.len()
+                    )
+                },
+            );
+        }
     }
 
     #[test]
@@ -1584,6 +1637,8 @@ mod tests {
             &HillCostModel,
             &SpatialParams::default(),
             SafetyLevel::Paranoid,
+            Some("test-pw"),
+            None,
         )
         .expect("probe paranoid");
         let cap_high = probe_spatial_capacity(
@@ -1591,6 +1646,8 @@ mod tests {
             &HillCostModel,
             &SpatialParams::default(),
             SafetyLevel::High,
+            Some("test-pw"),
+            None,
         )
         .expect("probe high");
         let cap_balanced = probe_spatial_capacity(
@@ -1598,6 +1655,8 @@ mod tests {
             &HillCostModel,
             &SpatialParams::default(),
             SafetyLevel::Balanced,
+            Some("test-pw"),
+            None,
         )
         .expect("probe balanced");
 

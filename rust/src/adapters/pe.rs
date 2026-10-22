@@ -386,29 +386,10 @@ impl HostAdapter for PeAdapter {
         }
 
         host_in.seek(SeekFrom::Start(0))?;
-        let mut buf = [0u8; 64 * 1024];
-        let mut host_len = 0u64;
-
-        loop {
-            let n = host_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-            host_len += n as u64;
-        }
-
-        let inject_offset = host_len;
+        let inject_offset = crate::adapters::io::copy_stream(host_in, out)?;
         let ube_size = ube_in.seek(SeekFrom::End(0))?;
         ube_in.seek(SeekFrom::Start(0))?;
-
-        loop {
-            let n = ube_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-        }
+        crate::adapters::io::copy_exact(ube_in, out, ube_size)?;
 
         Ok((inject_offset, ube_size, 0, 0))
     }
@@ -513,17 +494,7 @@ impl HostAdapter for PeAdapter {
         // because the codebits dispatch needs a strategy hook that the header
         // provides (PE never emits a non-zero patch_offset).
         stego_in.seek(SeekFrom::Start(0))?;
-        let mut remaining = header.inject_offset;
-        let mut buf = [0u8; 64 * 1024];
-        while remaining > 0 {
-            let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
-            let n = stego_in.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-            remaining -= n as u64;
-        }
+        crate::adapters::io::copy_exact(stego_in, out, header.inject_offset)?;
         Ok(())
     }
 

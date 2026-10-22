@@ -49,10 +49,14 @@ pub const STANDARD_HEADER_MAGIC: [u8; 8] = [0xb7, 0x54, 0x2c, 0x82, 0x7e, 0x31, 
 /// Pure pseudorandom binary bytes: eliminates all static ASCII strings ("STH!") from forensic scans.
 pub const STANDARD_TRAILER_MAGIC: [u8; 4] = [0x78, 0xe6, 0x66, 0xd2];
 
-/// Maximum known strategy ID in the protocol registry.
-/// Used in the unencrypted envelope de-mask heuristic to eliminate false positives
-/// while allowing all valid registered strategy IDs.
-pub const MAX_KNOWN_STRATEGY_ID: u8 = 11;
+/// Largest strategy ID in [`crate::router::STRATEGY_REGISTRY`].
+///
+/// Used in the unencrypted envelope de-mask heuristic to eliminate false
+/// positives while allowing all valid registered strategy IDs. Derived from the
+/// registry rather than hand-maintained: a strategy added without updating this
+/// constant would make a *new* carrier fail the "is this an envelope at all?"
+/// gate and read back as "no hidden data".
+pub const MAX_KNOWN_STRATEGY_ID: u8 = crate::router::MAX_STRATEGY_ID;
 
 /// Envelope version written and accepted by this build.
 ///
@@ -149,6 +153,21 @@ impl EnvelopeHeader {
         (self.flags & FLAG_ENCRYPTED) != 0
     }
 
+    /// The 16-byte salt field of a raw (possibly masked) header.
+    ///
+    /// The mask only covers bytes 8..12 and 40..112, so the salt can be read
+    /// *before* the header is unmasked — which is what lets a caller derive the
+    /// mask (and the payload keys) once and hand them in, instead of every
+    /// consumer running its own PBKDF2.
+    pub fn salt_of(data: &[u8]) -> Option<[u8; 16]> {
+        if data.len() < HEADER_SIZE {
+            return None;
+        }
+        let mut salt = [0u8; 16];
+        salt.copy_from_slice(&data[12..28]);
+        Some(salt)
+    }
+
     /// True when the payload was deflate-compressed before sealing.
     pub fn is_compressed(&self) -> bool {
         (self.flags & FLAG_COMPRESSED) != 0
@@ -162,11 +181,6 @@ impl EnvelopeHeader {
     /// True when stealth mode is on (password-derived magics + masked fields).
     pub fn is_stealth(&self) -> bool {
         (self.flags & FLAG_STEALTH) != 0
-    }
-
-    /// True when a password hint follows the header.
-    pub fn has_hint(&self) -> bool {
-        (self.flags & FLAG_HAS_HINT) != 0
     }
 
     /// Metadata block is the compact binary layout rather than JSON.
@@ -231,14 +245,22 @@ impl EnvelopeHeader {
         buf
     }
 
-    /// Pack fixed header into 112 bytes with the official dialect's masking.
+    /// Pack fixed header into 112 bytes with masking applied from a mask the
+    /// caller already derived.
     ///
-    /// Wrapper over [`Self::pack_with_profile`] with `Profile::default()`.
-    pub fn pack_with_stealth_mask(
-        &self,
-        password: Option<&str>,
-    ) -> Result<[u8; HEADER_SIZE], StrHideError> {
-        self.pack_with_profile(password, &Profile::default())
+    /// `None` means "no masking" — the encrypted non-stealth case, where the
+    /// AEAD authenticates the header instead.
+    pub fn pack_masked(&self, mask: Option<&[u8; 76]>) -> [u8; HEADER_SIZE] {
+        let mut buf = self.pack();
+        if let Some(mask) = mask {
+            for i in 0..4 {
+                buf[8 + i] ^= mask[i];
+            }
+            for i in 0..72 {
+                buf[40 + i] ^= mask[4 + i];
+            }
+        }
+        buf
     }
 
     /// Pack fixed header into 112 bytes with masking applied:
@@ -251,30 +273,27 @@ impl EnvelopeHeader {
     /// the pair whose read half is [`Self::unpack_with_profile`]. A private
     /// `Profile::default_secret` therefore has to be supplied to both calls or
     /// the header becomes unreadable.
+    ///
+    /// Callers that already hold a [`crate::crypto::PasswordSecrets`] (the
+    /// writer derives the payload keys from the same pair) should use
+    /// [`Self::pack_masked`] instead, so the PBKDF2 runs once per write.
     pub fn pack_with_profile(
         &self,
         password: Option<&str>,
         profile: &Profile,
     ) -> Result<[u8; HEADER_SIZE], StrHideError> {
-        let mut buf = self.pack();
-        let effective_pwd = if self.is_stealth() {
+        let mask_secret = if self.is_stealth() {
             password
         } else if !self.is_encrypted() {
             Some(profile.secret())
         } else {
             None
         };
-
-        if let Some(pwd) = effective_pwd {
-            let mask = crate::crypto::derive_header_mask(pwd, &self.salt)?;
-            for i in 0..4 {
-                buf[8 + i] ^= mask[i];
-            }
-            for i in 0..72 {
-                buf[40 + i] ^= mask[4 + i];
-            }
-        }
-        Ok(buf)
+        let mask = match mask_secret {
+            Some(pwd) => Some(crate::crypto::derive_header_mask(pwd, &self.salt)?),
+            None => None,
+        };
+        Ok(self.pack_masked(mask.as_ref()))
     }
 
     /// Unpack 112-byte fixed header.
@@ -358,6 +377,19 @@ impl EnvelopeHeader {
         password: Option<&str>,
         profile: &Profile,
     ) -> Result<Self, StrHideError> {
+        Self::unpack_with_secrets(data, password, profile, &UnpackSecrets::default())
+    }
+
+    /// [`Self::unpack_with_profile`] with the expensive derivations already done.
+    ///
+    /// See [`UnpackSecrets`]: this exists so a single read does not pay for
+    /// PBKDF2 once per consumer of the same (password, salt) pair.
+    pub fn unpack_with_secrets(
+        data: &[u8],
+        password: Option<&str>,
+        profile: &Profile,
+        secrets: &UnpackSecrets,
+    ) -> Result<Self, StrHideError> {
         if data.len() < HEADER_SIZE {
             return Err(StrHideError::CorruptedData(format!(
                 "Insufficient bytes for header: {} < {}",
@@ -365,23 +397,27 @@ impl EnvelopeHeader {
                 HEADER_SIZE
             )));
         }
+        let mut salt = [0u8; 16];
+        salt.copy_from_slice(&data[12..28]);
 
+        // 1. Stealth + password: the header magic is itself derived from the
+        //    password, so a match authenticates the password before any masked
+        //    field is trusted. `secrets.stealth_header_magic` is the magic the
+        //    locator already derived; `None` means "not derived yet", in which
+        //    case it is computed here (one PBKDF2).
         if let Some(pwd) = password {
-            let mut salt = [0u8; 16];
-            salt.copy_from_slice(&data[12..28]);
-            // A stealth envelope's header magic is derived from the password
-            // itself, so matching it authenticates the password *before* any
-            // masked field is trusted. Doing this first makes "wrong password"
-            // deterministic: without it, a wrong password would scramble the
-            // masked bytes into values that occasionally satisfy the
-            // version/FLAG_STEALTH gate below and surface as a bogus field
-            // error instead of a password error.
-            let stealth_magic = crate::crypto::derive_stealth_magics(pwd, profile.domain())
-                .ok()
-                .map(|m| m.0);
-            if stealth_magic.is_none_or(|m| data[..8] == m[..])
-                && let Ok(mask) = crate::crypto::derive_header_mask(pwd, &salt)
-            {
+            let magic_matches = match secrets.stealth_header_magic {
+                Some(m) => data[..8] == m[..],
+                None => crate::crypto::derive_stealth_magics(pwd, profile.domain())
+                    .ok()
+                    .is_none_or(|m| data[..8] == m.0[..]),
+            };
+            let mask = match &secrets.password {
+                Some(s) => Some(s.header_mask),
+                None if magic_matches => Some(crate::crypto::derive_header_mask(pwd, &salt)?),
+                None => None,
+            };
+            if magic_matches && let Some(mask) = mask {
                 let mut unmasked = [0u8; HEADER_SIZE];
                 unmasked.copy_from_slice(&data[..HEADER_SIZE]);
                 for i in 0..4 {
@@ -399,32 +435,53 @@ impl EnvelopeHeader {
             }
         }
 
-        // Try de-masking with the profile's default secret (the public built-in
-        // key for the official dialect).
-        {
-            let mut salt = [0u8; 16];
-            salt.copy_from_slice(&data[12..28]);
-            if let Ok(mask) = crate::crypto::derive_header_mask(profile.secret(), &salt) {
-                let mut unmasked = [0u8; HEADER_SIZE];
-                unmasked.copy_from_slice(&data[..HEADER_SIZE]);
-                for i in 0..4 {
-                    unmasked[8 + i] ^= mask[i];
-                }
-                for i in 0..72 {
-                    unmasked[40 + i] ^= mask[4 + i];
-                }
-                if unmasked[8] == CURRENT_VERSION
-                    && (unmasked[9] & FLAG_ENCRYPTED) == 0
-                    && unmasked[10] <= MAX_KNOWN_STRATEGY_ID
-                    && unmasked[11] == 0
-                {
-                    return Self::unpack(&unmasked);
-                }
+        // 2. De-mask with the profile's default secret (the public built-in key
+        //    for the official dialect).
+        let default_mask = match &secrets.default {
+            Some(s) => Some(s.header_mask),
+            None => Some(crate::crypto::derive_header_mask(profile.secret(), &salt)?),
+        };
+        if let Some(mask) = default_mask {
+            let mut unmasked = [0u8; HEADER_SIZE];
+            unmasked.copy_from_slice(&data[..HEADER_SIZE]);
+            for i in 0..4 {
+                unmasked[8 + i] ^= mask[i];
+            }
+            for i in 0..72 {
+                unmasked[40 + i] ^= mask[4 + i];
+            }
+            if unmasked[8] == CURRENT_VERSION
+                && (unmasked[9] & FLAG_ENCRYPTED) == 0
+                && unmasked[10] <= MAX_KNOWN_STRATEGY_ID
+                && unmasked[11] == 0
+            {
+                return Self::unpack(&unmasked);
             }
         }
 
+        // 3. Bare header: an already-plain header (encrypted mode is *not*
+        //    masked at all — the AEAD authenticates it).
         Self::unpack(data)
     }
+}
+
+/// Key material pre-derived for one header, so a single read does not run
+/// PBKDF2 once per consumer of the same (password, salt) pair.
+///
+/// `read_carrier` used to derive: the stealth magics (in `locate_envelope`),
+/// the same magics again (inside `unpack_with_profile`), the header mask for
+/// the password, the header mask for the profile default — which is derived
+/// even when the password branch already matched — and the payload/metadata
+/// keys. That is four to five PBKDF2 runs where one or two suffice.
+#[derive(Clone, Copy, Default)]
+pub struct UnpackSecrets {
+    /// Material for the caller's password, when one was supplied.
+    pub password: Option<crate::crypto::PasswordSecrets>,
+    /// Material for the profile's default secret.
+    pub default: Option<crate::crypto::PasswordSecrets>,
+    /// Header magic derived from password + domain. The locator already
+    /// computed it to find the envelope; passing it in avoids doing it twice.
+    pub stealth_header_magic: Option<[u8; 8]>,
 }
 
 /// 24-byte trailer at the end of the envelope, giving readers a way to find

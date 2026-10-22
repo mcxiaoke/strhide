@@ -31,12 +31,12 @@ use crate::adapters::{
     FinalizeCtx, HostAdapter, SeekRead, SeekWrite, StrategyCapacity, TrailerCtx,
 };
 use crate::crypto::{
-    compress_stream, decompress_stream, decrypt_metadata, decrypt_stream_from_chunks, derive_keys,
-    derive_stealth_magics, encrypt_metadata, encrypt_stream_to_chunks, normalize_nfc,
+    compress_stream, decompress_stream, decrypt_metadata, decrypt_stream_from_chunks, derive_all,
+    derive_keys, derive_stealth_magics, encrypt_metadata, encrypt_stream_to_chunks, normalize_nfc,
 };
 use crate::envelope::{
     EnvelopeHeader, EnvelopeTrailer, FLAG_COMPACT_META, FLAG_COMPRESSED, FLAG_ENCRYPTED,
-    FLAG_HAS_HINT, FLAG_IS_FILE, FLAG_STEALTH, HEADER_SIZE,
+    FLAG_HAS_HINT, FLAG_IS_FILE, FLAG_STEALTH, HEADER_SIZE, TRAILER_SIZE, UnpackSecrets,
 };
 use crate::errors::StrHideError;
 use crate::params::{LocalParams, Profile};
@@ -78,13 +78,51 @@ fn locate_envelope(
     password: Option<&str>,
     profile: &Profile,
 ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    Ok(locate_envelope_with_magic(carrier, adapter, password, profile)?.location)
+}
+
+/// Outcome of a locate scan: where the envelope is, plus the stealth header
+/// magic the scan derived on the way (if a password was supplied).
+struct Located {
+    location: Option<(u64, u64, String)>,
+    /// Header magic derived from password + profile domain.
+    stealth_header_magic: Option<[u8; 8]>,
+}
+
+/// [`locate_envelope`], also returning the stealth header magic it had to derive
+/// on the way.
+///
+/// `unpack_with_profile` needs exactly that magic to decide whether the header
+/// is a stealth one, and deriving it twice costs a full PBKDF2 (100k HMAC-SHA256
+/// iterations) — so the locator hands its result over instead of recomputing it.
+fn locate_envelope_with_magic(
+    carrier: &mut dyn SeekRead,
+    adapter: &dyn HostAdapter,
+    password: Option<&str>,
+    profile: &Profile,
+) -> Result<Located, StrHideError> {
     if let Some(pwd) = password {
         let magics = derive_stealth_magics(pwd, profile.domain())?;
-        if let Some(loc) = adapter.locate(carrier, Some(&magics.1))? {
-            return Ok(Some(loc));
+        if let Some(location) = adapter.locate(carrier, Some(&magics.1))? {
+            return Ok(Located {
+                location: Some(location),
+                stealth_header_magic: Some(magics.0),
+            });
         }
+        // The stealth magic did not match, so this is an official-dialect
+        // envelope. The derived magic is still returned: the header unpack needs
+        // it to rule out the stealth branch, and dropping it here would cost a
+        // second PBKDF2.
+        let location = adapter.locate(carrier, profile.locator_magic())?;
+        return Ok(Located {
+            location,
+            stealth_header_magic: Some(magics.0),
+        });
     }
-    adapter.locate(carrier, profile.locator_magic())
+    Ok(Located {
+        location: adapter.locate(carrier, profile.locator_magic())?,
+        stealth_header_magic: None,
+    })
 }
 
 /// Version of the compact (binary) metadata block. The JSON form carries no
@@ -95,6 +133,67 @@ const COMPACT_META_VERSION: u8 = 0x01;
 /// SHA-256 hex string alone plus ~60 bytes of key names, so this shrinks a
 /// 1-byte payload's metadata from 137 to ~46 bytes.
 const COMPACT_META_MAX_NAME: usize = u16::MAX as usize;
+
+/// Did `target` and `carrier` resolve to the same *file*, not just to
+/// path-equal names?
+///
+/// `std::path::absolute` only lexicalises: it does not resolve symlinks and does
+/// not fold case on Windows, so `-o PHOTO.PNG` next to `photo.png` used to be
+/// classified as "not in place" and the `.bak` backup was silently skipped.
+///
+/// Identity is answered as precisely as each platform allows:
+///
+/// - **Unix**: device + inode from `stat` — exact.
+/// - **Windows**: `canonicalize` (resolves symlinks, junctions and 8.3 names)
+///   plus a case-folded comparison, because Windows paths are case-insensitive
+///   and `canonicalize` does not fold case.
+///
+/// The lexical comparison stays as the last resort, so a missing file still
+/// gets the old answer instead of a guess.
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let identity = |p: &Path| {
+            let m = std::fs::metadata(p).ok()?;
+            Some((m.dev(), m.ino()))
+        };
+        if let (Some(x), Some(y)) = (identity(a), identity(b)) {
+            return x == y;
+        }
+    }
+
+    let resolved = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (ra, rb) = (resolved(a), resolved(b));
+    if ra == rb {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        // Same file, different letter case: `C:\dir\PHOTO.PNG` and
+        // `C:\dir\photo.png` are one file on NTFS.
+        let ka = ra.as_os_str().to_string_lossy().to_lowercase();
+        let kb = rb.as_os_str().to_string_lossy().to_lowercase();
+        if ka == kb {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Largest carrier `inspect` will read into memory to measure content-domain
+/// (pixel/DCT) capacity.
+///
+/// The probe needs the whole image decoded, which rules out streaming, so the
+/// read is bounded: above this size the field is reported as absent instead of
+/// allocating whatever the file happens to claim.
+const MAX_CONTENT_STEGO_BYTES: u64 = 512 * 1024 * 1024;
 
 fn put_varint(out: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
@@ -394,6 +493,44 @@ pub struct LevelStatus {
     pub ok: bool,
     /// Human-readable detail.
     pub detail: String,
+    /// Whether the level could not be attempted at all (for Level 3: a password
+    /// is needed but none was supplied).
+    ///
+    /// A skipped level is **not** a pass, but it is not a failure either: the
+    /// caller could not have known either way. [`verify_passed`](crate::engine::verify_passed)
+    /// counts it as "not disproven", while a level that ran and failed counts
+    /// as a failure.
+    #[serde(default)]
+    pub skipped: bool,
+}
+
+impl LevelStatus {
+    /// A level that ran and passed.
+    fn pass(detail: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            detail: detail.into(),
+            skipped: false,
+        }
+    }
+
+    /// A level that ran and failed.
+    fn fail(detail: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            detail: detail.into(),
+            skipped: false,
+        }
+    }
+
+    /// A level that could not be attempted.
+    fn skipped(detail: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            detail: detail.into(),
+            skipped: true,
+        }
+    }
 }
 
 /// Outcome of [`verify_carrier`]: three independent checks.
@@ -602,7 +739,18 @@ fn next_backup_path(carrier: &Path) -> PathBuf {
             return candidate;
         }
     }
-    with_suffix(&format!(".bak-{stamp}-{}", std::process::id()))
+    // 1000 collisions inside one second is not a real scenario; it means either
+    // a clock that does not advance or a pathological directory. Append the pid
+    // *and* keep probing, because `fs::copy` would otherwise silently replace
+    // an existing backup.
+    let pid = std::process::id();
+    for suffix in 0..1000u32 {
+        let candidate = with_suffix(&format!(".bak-{stamp}-{pid}-{suffix}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    with_suffix(&format!(".bak-{stamp}-{pid}-overflow"))
 }
 
 /// Inject `source` into `carrier_path`, returning a [`WriteResult`].
@@ -918,7 +1066,19 @@ where
     let mut base_nonce = [0u8; 12];
     rand::rng().fill(&mut salt);
     rand::rng().fill(&mut base_nonce);
-    let (payload_key, meta_key) = derive_keys(effective_password, &salt)?;
+    // Payload key, metadata key and header mask are three HKDF expansions of
+    // one PBKDF2 output, so they are derived together: a write used to run
+    // PBKDF2 twice for the same (password, salt) pair.
+    let secrets = derive_all(effective_password, &salt)?;
+    let (payload_key, meta_key) = (secrets.payload_key, secrets.meta_key);
+    // The mask only applies when the keying secret is the profile default
+    // (no user password) or when stealth mode uses the user password. A
+    // non-stealth encrypted header is *not* masked: the AEAD authenticates it.
+    let header_mask = if !has_custom_password || stealth {
+        Some(secrets.header_mask)
+    } else {
+        None
+    };
 
     let header_magic: [u8; 8];
     let trailer_magic: [u8; 4];
@@ -962,13 +1122,15 @@ where
     // JPEG/PNG/ZIP `auto` capacity checks select a strategy the injector then
     // rejected instead of gracefully falling back to `eof`.
     let to_encrypt_len = to_encrypt_bytes.len() as u64;
-    let exact_meta_len = meta_raw.len() as u64 + 16;
+    let exact_meta_len = meta_raw.len() as u64 + crate::crypto::AEAD_TAG_LEN as u64;
     // Must use the *configured* chunk size: `exact_ube_size` is cross-checked
     // against the real ciphertext length, so a mismatch here would fail-fast.
-    let chunk_count = to_encrypt_len.div_ceil(local.chunk_size as u64).max(1);
-    let exact_payload_len = to_encrypt_len + chunk_count * 20;
-    let exact_ube_size =
-        HEADER_SIZE as u64 + hint_bytes.len() as u64 + exact_meta_len + exact_payload_len + 24;
+    let exact_payload_len = crate::crypto::framed_len(to_encrypt_len, local.chunk_size);
+    let exact_ube_size = HEADER_SIZE as u64
+        + hint_bytes.len() as u64
+        + exact_meta_len
+        + exact_payload_len
+        + TRAILER_SIZE as u64;
 
     let selected_strategy: String = if strategy == "auto" {
         host.seek(SeekFrom::Start(0))?;
@@ -1020,7 +1182,7 @@ where
         + hint_bytes.len() as u64
         + header.meta_len as u64
         + payload_written
-        + 24;
+        + TRAILER_SIZE as u64;
 
     // Defensive cross-check: the exact pre-computation above must match reality.
     // A mismatch would indicate a protocol drift between crypto and engine.
@@ -1057,7 +1219,7 @@ where
 
     // Assemble full UBE (payload buffer is moved in, not copied)
     let mut tmp_ube = Vec::with_capacity(ube_total_size as usize);
-    tmp_ube.extend_from_slice(&header.pack_with_profile(password, profile)?);
+    tmp_ube.extend_from_slice(&header.pack_masked(header_mask.as_ref()));
     if !hint_bytes.is_empty() {
         tmp_ube.extend_from_slice(&hint_bytes);
     }
@@ -1236,7 +1398,7 @@ pub fn write_carrier_with(
     }
 
     // 2. In-place backup (if applicable) & Atomic commit
-    let is_inplace = std::path::absolute(target_path)? == std::path::absolute(carrier_path)?;
+    let is_inplace = same_file(target_path, carrier_path);
     let mut backup_file = None;
     if is_inplace && options.backup {
         let bak = next_backup_path(carrier_path);
@@ -1397,9 +1559,14 @@ fn read_core(
 ) -> Result<ReadCore, StrHideError> {
     let adapter = find_adapter_or_reject(host, label)?;
 
-    let loc = locate_envelope(host, adapter, password, profile)?;
+    // The locator already derived the stealth magics it needed; keep them so
+    // the header unpack does not pay for a second PBKDF2 over the same pair.
+    let Located {
+        location,
+        stealth_header_magic,
+    } = locate_envelope_with_magic(host, adapter, password, profile)?;
 
-    let (ube_offset, ube_total_size, strategy_name) = match loc {
+    let (ube_offset, ube_total_size, strategy_name) = match location {
         Some(l) => l,
         None => {
             return Err(no_hidden_data_error(
@@ -1417,7 +1584,25 @@ fn read_core(
     // Read fixed header
     let mut header_bytes = [0u8; HEADER_SIZE];
     ube_stream.read_exact(&mut header_bytes)?;
-    let header = EnvelopeHeader::unpack_with_profile(&header_bytes, password, profile)?;
+
+    // Derive everything this header needs from its (unmasked) salt once. The
+    // password branch is derived when a password was supplied; the profile
+    // default branch is derived when none was (it is the only one that can
+    // match then), and lazily inside `unpack_with_secrets` otherwise.
+    let salt = EnvelopeHeader::salt_of(&header_bytes).unwrap_or([0u8; 16]);
+    let secrets = UnpackSecrets {
+        password: match password {
+            Some(pwd) => Some(derive_all(pwd, &salt)?),
+            None => None,
+        },
+        default: if password.is_none() {
+            Some(derive_all(profile.secret(), &salt)?)
+        } else {
+            None
+        },
+        stealth_header_magic,
+    };
+    let header = EnvelopeHeader::unpack_with_secrets(&header_bytes, password, profile, &secrets)?;
     header.validate_against(ube_total_size)?;
 
     // Read hint if present
@@ -1430,20 +1615,32 @@ fn read_core(
 
     let fixed_header_aad = header.get_aad();
 
-    // Derive keys
+    // Derive keys from the material the header unpack already produced.
     let (payload_key, meta_key) = if header.is_encrypted() {
-        if password.is_none() {
-            let hint_msg = match &hint_str {
-                Some(h) => format!(" Hint: '{h}'."),
-                None => String::new(),
-            };
-            return Err(StrHideError::Password(format!(
-                "Password required to extract hidden data.{hint_msg}"
-            )));
-        }
-        derive_keys(password.unwrap(), &header.salt)?
+        secrets.password.as_ref().map_or_else(
+            || {
+                // The hint is carried as a structured field *and* kept in the
+                // message, so the rendered error is unchanged for anyone reading
+                // it (the CLI prints the hint from the field before prompting).
+                let message = match &hint_str {
+                    Some(h) => format!("Password required to extract hidden data. Hint: '{h}'."),
+                    None => "Password required to extract hidden data".into(),
+                };
+                Err(StrHideError::PasswordWithHint {
+                    message,
+                    hint: hint_str.clone(),
+                })
+            },
+            |s| Ok((s.payload_key, s.meta_key)),
+        )?
     } else {
-        derive_keys(profile.secret(), &header.salt)?
+        // No user password: the profile default secret keys the envelope. It was
+        // derived above when no password was supplied; otherwise derive it now
+        // (one PBKDF2) — the alternative would be a second header unpack.
+        match &secrets.default {
+            Some(s) => (s.payload_key, s.meta_key),
+            None => derive_keys(profile.secret(), &header.salt)?,
+        }
     };
 
     // Read metadata
@@ -1667,6 +1864,11 @@ pub fn remove_carrier(
 /// The profile must be the one used at write time: it drives envelope location
 /// (custom magic), the stealth domain, and the `default_secret` used to decode
 /// a non-password envelope.
+///
+/// `overwrite` decides what happens when `output_path` names a file that
+/// already exists. It defaults to refusing (see [`remove_carrier_with_options`]
+/// for why), which is the safe answer for a library call; the CLI resolves the
+/// user's choice first and passes `true` only after they have confirmed.
 /// Strip the envelope from `host` into `out`, returning the envelope header.
 ///
 /// I/O-free core shared by [`remove_carrier_with`] and
@@ -1775,6 +1977,25 @@ pub fn remove_carrier_with(
     backup: bool,
     profile: &Profile,
 ) -> Result<RemoveResult, StrHideError> {
+    remove_carrier_with_options(carrier_path, output_path, password, backup, profile, false)
+}
+
+/// [`remove_carrier_with`] with an explicit `overwrite` decision.
+///
+/// When `overwrite` is false and `output_path` names a different, existing file
+/// the call is refused: restoring replaces the file with the pre-envelope host,
+/// and `rename`-ing over a user's file loses it with no way back. The CLI asks
+/// the user first (via `check_overwrite`) and passes `true` only after they have
+/// confirmed. In-place restoration — the default when no output path is given —
+/// is the one case where overwriting is the whole point.
+pub fn remove_carrier_with_options(
+    carrier_path: &Path,
+    output_path: Option<&Path>,
+    password: Option<&str>,
+    backup: bool,
+    profile: &Profile,
+    overwrite: bool,
+) -> Result<RemoveResult, StrHideError> {
     if !carrier_path.exists() {
         return Err(StrHideError::General(format!(
             "Carrier file '{}' not found",
@@ -1788,8 +2009,21 @@ pub fn remove_carrier_with(
     let orig_atime = filetime::FileTime::from_last_access_time(&meta);
     let orig_mtime = filetime::FileTime::from_last_modification_time(&meta);
 
+    if !overwrite && !same_file(target_path, carrier_path) && target_path.exists() {
+        return Err(StrHideError::Rejection(format!(
+            "Refusing to overwrite existing file '{}'. Choose another output path.",
+            target_path.display()
+        )));
+    }
+
     let label = carrier_path.display().to_string();
-    let tmp_target = PathBuf::from(format!("{}.strhide.restoring.tmp", target_path.display()));
+    // Build the temp name from the OsString, exactly like the write path above:
+    // `display()` is lossy for non-UTF-8 paths (unpaired surrogates on Windows,
+    // arbitrary bytes on Unix), and a lossy name would send the restored bytes
+    // to a file nobody asked for.
+    let mut tmp_os = target_path.as_os_str().to_os_string();
+    tmp_os.push(".strhide.restoring.tmp");
+    let tmp_target = PathBuf::from(tmp_os);
     let mut tmp_guard = TmpGuard::new(tmp_target.clone());
 
     let header = {
@@ -1809,7 +2043,7 @@ pub fn remove_carrier_with(
         verify_restored(&mut rf, &header, password, profile)?
     };
 
-    let is_inplace = std::path::absolute(target_path)? == std::path::absolute(carrier_path)?;
+    let is_inplace = same_file(target_path, carrier_path);
     let mut backup_file = None;
     if is_inplace && backup {
         let bak = next_backup_path(carrier_path);
@@ -1908,14 +2142,24 @@ pub fn inspect_carrier_with(
     // PE measures `.text` density and zero slack, ZIP measures the EOCD offset.
     let strategies = adapter.strategy_capacities(Some(&mut cf));
 
-    let content_stego_capacity = if adapter.format_name() == "PNG"
-        || adapter.format_name() == "JPEG"
-    {
-        cf.rewind().ok();
+    // Content-domain capacity needs the whole image decoded, so the file is
+    // read back into memory. Bounded on purpose: `inspect` also runs on files
+    // it was merely pointed at, and a 4 GiB "PNG" must not become a 4 GiB
+    // allocation. Above the cap the field is simply absent.
+    let content_stego_capacity = if adapter.supports_content_stego() {
+        cf.seek(SeekFrom::Start(0))?;
         let mut buf = Vec::new();
-        if cf.read_to_end(&mut buf).is_ok() {
-            cf.rewind().ok();
-            crate::stego::probe_carrier_capacity(&buf, &crate::stego::StegoOptions::default()).ok()
+        let reader: &mut dyn Read = &mut cf;
+        reader.take(MAX_CONTENT_STEGO_BYTES).read_to_end(&mut buf)?;
+        cf.seek(SeekFrom::Start(0))?;
+        if (buf.len() as u64) < MAX_CONTENT_STEGO_BYTES {
+            // Same credentials an `embed` would use for the profile's dialect.
+            crate::stego::probe_carrier_capacity_with_profile(
+                &buf,
+                &crate::stego::StegoOptions::default(),
+                profile,
+            )
+            .ok()
         } else {
             None
         }
@@ -2083,15 +2327,10 @@ pub fn verify_carrier_with(
                 level1_host: LevelStatus {
                     ok: l1_ok,
                     detail: l1_msg,
+                    skipped: false,
                 },
-                level2_envelope: LevelStatus {
-                    ok: false,
-                    detail: "No envelope found".into(),
-                },
-                level3_crypto: LevelStatus {
-                    ok: false,
-                    detail: "Skipped (no envelope)".into(),
-                },
+                level2_envelope: LevelStatus::fail("No envelope found"),
+                level3_crypto: LevelStatus::skipped("Skipped (no envelope)"),
             });
         }
     };
@@ -2194,23 +2433,22 @@ pub fn verify_carrier_with(
         }
     };
 
-    // Level 3: Crypto & payload SHA-256
-    let (l3_ok, l3_msg) = if !is_encrypted || password.is_some() {
+    // Level 3: Crypto & payload SHA-256.
+    //
+    // "No password was supplied" is a *skipped* level, not a failure: the
+    // caller could not have checked, and exit code 0 used to hide the case that
+    // *did* run and failed (wrong password, corrupted payload) behind the same
+    // boolean as this one.
+    let l3 = if !is_encrypted || password.is_some() {
         match read_carrier_with_profile(carrier_path, None, password, false, profile) {
-            Ok(res) => (
-                true,
-                format!(
-                    "Decryption and SHA-256 verified successfully (payload {} bytes)",
-                    res.raw_size
-                ),
-            ),
-            Err(e) => (false, e.to_string()),
+            Ok(res) => LevelStatus::pass(format!(
+                "Decryption and SHA-256 verified successfully (payload {} bytes)",
+                res.raw_size
+            )),
+            Err(e) => LevelStatus::fail(e.to_string()),
         }
     } else {
-        (
-            false,
-            "Password required for cryptographic verification".into(),
-        )
+        LevelStatus::skipped("Password required for cryptographic verification")
     };
 
     Ok(VerifyResult {
@@ -2219,16 +2457,27 @@ pub fn verify_carrier_with(
         level1_host: LevelStatus {
             ok: l1_ok,
             detail: l1_msg,
+            skipped: false,
         },
         level2_envelope: LevelStatus {
             ok: l2_ok,
             detail: l2_msg,
+            skipped: false,
         },
-        level3_crypto: LevelStatus {
-            ok: l3_ok,
-            detail: l3_msg,
-        },
+        level3_crypto: l3,
     })
+}
+
+/// Did a [`VerifyResult` pass every level it was able to check?
+///
+/// Levels 1 and 2 must pass outright. Level 3 must either pass or have been
+/// skipped for want of a password: a level that *ran* and failed (wrong
+/// password, corrupted payload, SHA-256 mismatch) is a failure, which is what
+/// makes `verify` usable as a gate.
+pub fn verify_passed(res: &VerifyResult) -> bool {
+    res.level1_host.ok
+        && res.level2_envelope.ok
+        && (res.level3_crypto.ok || res.level3_crypto.skipped)
 }
 
 #[cfg(test)]

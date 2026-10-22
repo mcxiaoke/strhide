@@ -103,7 +103,10 @@ fn parse_config(
             );
         }
     }
-    let cfg: FileConfig = toml::from_str(text).map_err(|e| {
+    // Deserialise from the table that was already validated, instead of
+    // parsing the same text a second time: two independent parses can disagree
+    // (and used to report two different messages for one syntax error).
+    let cfg: FileConfig = table.try_into().map_err(|e| {
         StrHideError::General(format!("Invalid config file '{}': {e}", origin.display()))
     })?;
 

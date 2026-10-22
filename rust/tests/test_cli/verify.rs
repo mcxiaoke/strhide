@@ -151,9 +151,11 @@ fn verify_encrypted_envelope_without_password_skips_level3() {
 }
 
 #[test]
-fn verify_level3_failure_is_reported_but_exit_code_stays_zero() {
-    // The CLI contract (p2_cli #15): Level 1/2 failures exit 1, a Level 3
-    // crypto failure is only reported. Wrong password => L3 fails, L1/L2 pass.
+fn verify_level3_failure_changes_the_exit_code() {
+    // A Level 3 crypto failure is a verification failure. It used to be reported
+    // only: the human output printed `L3 FAIL` while the exit code stayed 0, so
+    // a script gating on `verify` accepted a carrier whose payload does not
+    // decrypt. Wrong password => L3 fails, L1/L2 pass.
     let dir = scratch("verify_l3_exit");
     fs::write(dir.join("c.png"), make_png()).unwrap();
     let write = run(
@@ -165,8 +167,8 @@ fn verify_level3_failure_is_reported_but_exit_code_stays_zero() {
     let out = run(&dir, &["verify", "c.png", "-p", "wrong-pw"]);
     assert_eq!(
         code(&out),
-        0,
-        "Level 3 failure must not change the exit code, stdout: {}",
+        1,
+        "Level 3 failure must fail the command, stdout: {}",
         stdout(&out)
     );
     assert!(stdout(&out).contains("[FAIL]"), "stdout: {}", stdout(&out));
@@ -592,9 +594,10 @@ fn read_encrypted_without_password_returns_password_variant_with_hint() {
 
     let err = read_carrier(&out, None, None).unwrap_err();
     assert!(
-        matches!(err, StrHideError::Password(_)),
-        "expected Password variant, got {err:?}"
+        matches!(err, StrHideError::PasswordWithHint { .. }),
+        "expected PasswordWithHint variant, got {err:?}"
     );
+    assert_eq!(err.hint(), Some("3班1975"));
     assert!(err.to_string().contains("3班1975"), "{err}");
 
     // inspect without the password still shows the hint (metadata encrypted).

@@ -41,8 +41,24 @@ use crate::errors::StrHideError;
 /// magic-byte and structural scanning on a prefix+tail window, but pixel
 /// decoding is skipped (it needs the whole compressed image).
 const MAX_FULL_SCAN: u64 = 64 * 1024 * 1024; // 64 MiB
+/// Prefix read from a carrier too large to load whole: its container header
+/// (and, for small containers, the whole chunk/segment table) lives here.
+const PREFIX_WINDOW: usize = 1 << 20; // 1 MiB
 /// Tail window for entropy / trailing-data heuristics.
 const TAIL_WINDOW: usize = 4096;
+/// Tail window used to find a container end marker (PNG `IEND`, JPEG `EOI`)
+/// in a file too large to read whole.
+///
+/// Deliberately much larger than [`TAIL_WINDOW`]: an appended payload of a few
+/// KiB would otherwise push the marker that proves the container ended out of
+/// view, and the trailing-data detectors would go blind for exactly the files
+/// they matter most for.
+const STRUCT_TAIL_WINDOW: usize = 64 * 1024;
+
+/// PNG `IEND` in full: `length = 0`, type, CRC `AE 42 60 82`.
+const PNG_IEND_FULL: [u8; 12] = *b"\x00\x00\x00\x00IEND\xaeB`\x82";
+/// JPEG end-of-image marker.
+const JPEG_EOI: [u8; 2] = [0xFF, 0xD9];
 
 /// Calibrated DCT estimate at which a JPEG is reported as suspicious.
 ///
@@ -105,6 +121,112 @@ pub struct ScanReport {
 }
 
 // ---------------------------------------------------------------------------
+// Scan view: what a detector is allowed to look at
+// ---------------------------------------------------------------------------
+
+/// The bytes available to the structural detectors, and where they sit.
+///
+/// Small carriers are scanned whole. Larger ones only yield a prefix and a
+/// tail, and the two must stay **separate**: the previous implementation
+/// spliced them into one buffer with a fake `"\n..<truncated>..\n"` marker.
+/// Every walker then decoded the marker as chunk/segment bytes, tripped its own
+/// bounds check and stopped — before ever reaching the real tail. The only
+/// detectors that can see an appended payload (`png:trailing-data`,
+/// `jpeg:trailing-data`) could therefore never fire on a carrier above
+/// [`MAX_FULL_SCAN`], leaving just the known-signature scan.
+struct ScanView<'a> {
+    /// Bytes starting at file offset 0.
+    prefix: &'a [u8],
+    /// `Some((file offset, bytes))` when the file was too large to read whole.
+    tail: Option<(u64, &'a [u8])>,
+    file_size: u64,
+}
+
+impl<'a> ScanView<'a> {
+    fn whole(data: &'a [u8]) -> Self {
+        Self {
+            prefix: data,
+            tail: None,
+            file_size: data.len() as u64,
+        }
+    }
+
+    fn windowed(prefix: &'a [u8], tail_offset: u64, tail: &'a [u8], file_size: u64) -> Self {
+        Self {
+            prefix,
+            tail: Some((tail_offset, tail)),
+            file_size,
+        }
+    }
+
+    fn is_whole(&self) -> bool {
+        self.tail.is_none()
+    }
+
+    /// Number of bytes between `offset` and EOF.
+    fn bytes_after(&self, offset: u64) -> u64 {
+        self.file_size.saturating_sub(offset)
+    }
+
+    /// Entropy of the data that follows `offset`.
+    ///
+    /// Measured on at most [`TAIL_WINDOW`] bytes: an overlay is homogeneous
+    /// enough that a longer sample only costs time.
+    fn trailing_entropy(&self, offset: u64) -> f64 {
+        match self.tail {
+            // Windowed: the last `TAIL_WINDOW` bytes of the file. Whenever the
+            // overlay is at least that long this is exactly overlay bytes.
+            Some(_) => shannon_entropy(self.entropy_tail()),
+            None => {
+                let region = self.prefix.get(offset as usize..).unwrap_or(&[]);
+                let region = if region.len() > TAIL_WINDOW {
+                    &region[region.len() - TAIL_WINDOW..]
+                } else {
+                    region
+                };
+                shannon_entropy(region)
+            }
+        }
+    }
+
+    /// The last [`TAIL_WINDOW`] bytes of the file.
+    fn entropy_tail(&self) -> &'a [u8] {
+        let buf = match self.tail {
+            Some((_, t)) => t,
+            None => self.prefix,
+        };
+        &buf[buf.len().saturating_sub(TAIL_WINDOW)..]
+    }
+}
+
+/// Emit the "bytes after the container end marker" finding, if any.
+fn report_trailing(
+    view: &ScanView,
+    end_offset: u64,
+    detector: &str,
+    marker: &str,
+    out: &mut Vec<Finding>,
+) {
+    let trailing = view.bytes_after(end_offset);
+    if trailing == 0 {
+        return;
+    }
+    let ent = view.trailing_entropy(end_offset);
+    let severity = if ent >= 7.0 && trailing >= 32 {
+        Severity::Likely
+    } else {
+        Severity::Suspicious
+    };
+    out.push(Finding {
+        detector: detector.into(),
+        severity,
+        detail: format!(
+            "{trailing} trailing bytes present after {marker} (entropy {ent:.2} bits/byte)"
+        ),
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -117,51 +239,55 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
 
     let mut findings: Vec<Finding> = Vec::new();
 
-    // Read whole file (bounded). For very large files we still pull a prefix and
-    // the tail, enough for magic bytes and structural heuristics.
-    let data: Vec<u8> = if file_size <= MAX_FULL_SCAN {
+    // Read whole file (bounded). Above the cap we keep the first
+    // `PREFIX_WINDOW` and the last `STRUCT_TAIL_WINDOW` bytes *separately*.
+    let (prefix, tail): (Vec<u8>, Option<(u64, Vec<u8>)>) = if file_size <= MAX_FULL_SCAN {
         let mut f = File::open(path)?;
         let mut buf = Vec::with_capacity(file_size as usize);
         f.read_to_end(&mut buf)?;
-        buf
+        (buf, None)
     } else {
         let mut f = File::open(path)?;
-        let mut prefix = vec![0u8; 1 << 20]; // 1 MiB
-        let n = f.read(&mut prefix)?;
-        prefix.truncate(n);
-        let mut tail = Vec::new();
-        if f.seek(SeekFrom::End(-(TAIL_WINDOW as i64))).is_ok() {
-            f.read_to_end(&mut tail)?;
-        }
-        let mut combined = prefix;
-        combined.extend_from_slice(b"\n..<truncated>..\n");
-        combined.extend_from_slice(&tail);
-        combined
+        let mut head = vec![0u8; PREFIX_WINDOW];
+        let n = f.read(&mut head)?;
+        head.truncate(n);
+        // `file_size > MAX_FULL_SCAN` guarantees the seek target is >= 0.
+        let tail_offset = file_size.saturating_sub(STRUCT_TAIL_WINDOW as u64);
+        f.seek(SeekFrom::Start(tail_offset))?;
+        let mut tail = Vec::with_capacity(STRUCT_TAIL_WINDOW);
+        f.read_to_end(&mut tail)?;
+        (head, Some((tail_offset, tail)))
     };
 
-    let format = sniff_format(&data);
+    let view = match &tail {
+        Some((off, t)) => ScanView::windowed(&prefix, *off, t, file_size),
+        None => ScanView::whole(&prefix),
+    };
 
-    track_tool_signatures(&data, &mut findings);
+    let format = sniff_format(view.prefix);
+
+    track_tool_signatures(&view, &mut findings);
     match format.as_deref() {
-        Some("PNG") => track_png_structure(&data, &mut findings),
-        Some("JPEG") => track_jpeg_structure(&data, &mut findings),
+        Some("PNG") => track_png_structure(&view, &mut findings),
+        Some("JPEG") => track_jpeg_structure(&view, &mut findings),
         // PE padding can only be measured on a complete image; for oversized
-        // files `data` is a prefix+tail window and the section table alone
-        // would not be enough to read the padding.
-        Some("PE") if file_size <= MAX_FULL_SCAN => track_pe_structure(&data, &mut findings),
+        // files the section table alone would not be enough to read the
+        // padding.
+        Some("PE") if view.is_whole() => track_pe_structure(view.prefix, &mut findings),
         _ => {}
     }
-    track_trailing_entropy(&data, format.as_deref(), &mut findings);
+    track_trailing_entropy(&view, format.as_deref(), &mut findings);
 
     // Set when the calibrated DCT test fired; used to decide whether the
     // "clean is not proof" caveat still applies to this report.
     let mut calibrated_signal = false;
 
     // Content-domain track (PNG + JPEG, and only when we have the full image).
-    if file_size <= MAX_FULL_SCAN {
+    if view.is_whole() {
+        let data = view.prefix;
         let decoded: Option<(Vec<u8>, u32, usize)> = match format.as_deref() {
-            Some("PNG") => decode_png_pixels(&data),
-            Some("JPEG") => decode_jpeg_pixels(&data),
+            Some("PNG") => decode_png_pixels(data),
+            Some("JPEG") => decode_jpeg_pixels(data),
             _ => None,
         };
         if let Some((px, width, channels)) = decoded
@@ -178,7 +304,7 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
             // sit at 200-2000, so it could never fire at any embedding rate.
             // The calibrated test is relative to the image's own re-quantised
             // reference, which is what makes it work without a clean original.
-            if let Some(est) = calibration::estimate(&data)
+            if let Some(est) = calibration::estimate(data)
                 && est.rate >= CALIBRATION_FLAG_RATE
             {
                 calibrated_signal = true;
@@ -219,6 +345,16 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
         notes.push(
             "JPEG statistical detectors are weak against low-rate DCT embedding: a clean/low verdict is NOT evidence that nothing is hidden".to_string(),
         );
+    }
+    if !view.is_whole() {
+        // Say what was actually inspected: a `clean` verdict on a windowed
+        // scan covers far less ground than on a fully-read file.
+        notes.push(format!(
+            "Carrier is larger than {} MiB: only the first {} KiB and the last {} KiB were inspected, and pixel/DCT statistics were skipped",
+            MAX_FULL_SCAN / (1024 * 1024),
+            PREFIX_WINDOW / 1024,
+            STRUCT_TAIL_WINDOW / 1024
+        ));
     }
 
     Ok(ScanReport {
@@ -311,9 +447,15 @@ const KNOWN_TOOL_SIGNATURES: &[KnownSignature] = &[
     },
 ];
 
-fn track_tool_signatures(data: &[u8], out: &mut Vec<Finding>) {
+fn track_tool_signatures(view: &ScanView, out: &mut Vec<Finding>) {
     for sig in KNOWN_TOOL_SIGNATURES {
-        if !find_all(data, sig.pattern).is_empty() {
+        // An appended envelope lives in the tail of an oversized carrier, so
+        // both windows have to be searched.
+        let in_prefix = !find_all(view.prefix, sig.pattern).is_empty();
+        let in_tail = view
+            .tail
+            .is_some_and(|(_, t)| !find_all(t, sig.pattern).is_empty());
+        if in_prefix || in_tail {
             out.push(Finding {
                 detector: "signature:known-tool".into(),
                 severity: Severity::Likely,
@@ -335,18 +477,66 @@ const PNG_STANDARD_CHUNKS: &[&[u8]] = &[
     b"fcTL", b"fdAT",
 ];
 
-fn track_png_structure(data: &[u8], out: &mut Vec<Finding>) {
+/// Cap on how many private / non-standard chunk names one scan reports.
+const MAX_CHUNK_FINDINGS: usize = 64;
+
+/// Result of walking as much of a PNG chunk stream as the available bytes
+/// allow.
+struct PngWalk {
+    /// File offset just past `IEND`, when the walk reached it.
+    iend_end: Option<u64>,
+    /// Private ancillary chunks, with their declared body length.
+    private: Vec<(String, u32)>,
+    /// Non-standard public chunks, with their declared body length.
+    unknown: Vec<(String, u32)>,
+}
+
+impl PngWalk {
+    fn emit(self, out: &mut Vec<Finding>) {
+        for (name, len) in self.private {
+            out.push(Finding {
+                detector: "png:private-chunk".into(),
+                severity: Severity::Likely,
+                detail: format!(
+                    "Private ancillary chunk '{name}' ({len} bytes) - non-standard metadata injection"
+                ),
+            });
+        }
+        for (name, len) in self.unknown {
+            out.push(Finding {
+                detector: "png:unknown-chunk".into(),
+                severity: Severity::Info,
+                detail: format!("Non-standard public chunk '{name}' ({len} bytes)"),
+            });
+        }
+    }
+}
+
+/// Walk PNG chunks in `data` (which starts at file offset 0).
+fn walk_png_chunks(data: &[u8]) -> PngWalk {
     // Walk chunks: 8-byte PNG signature, then [u32 length][4-byte type][data][u32 crc].
     let mut pos = 8usize;
-    let mut unknown: Vec<(String, u32)> = Vec::new();
-    let mut private: Vec<(String, u32)> = Vec::new();
+    let mut walk = PngWalk {
+        iend_end: None,
+        private: Vec::new(),
+        unknown: Vec::new(),
+    };
     while pos + 8 <= data.len() {
         let len = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
         let ty = &data[pos + 4..pos + 8];
+        // Chunk types are four ASCII letters (RFC 2083 §3.3). Anything else
+        // means the chunk stream has ended and the rest is padding or garbage
+        // — continuing would decode zero fill as an endless run of empty chunks.
+        if !ty.iter().all(|b| b.is_ascii_alphabetic()) {
+            break;
+        }
         let ty_str = String::from_utf8_lossy(ty).to_string();
         let total = 12u64.saturating_add(len as u64);
         let next = match (pos as u64).checked_add(total) {
             Some(n) if n <= data.len() as u64 => n as usize,
+            // A length that runs past the available bytes means the walk
+            // cannot continue: either a truncated file or the end of the
+            // prefix window.
             _ => break,
         };
 
@@ -355,59 +545,91 @@ fn track_png_structure(data: &[u8], out: &mut Vec<Finding>) {
         let is_private = (ty[1] & 0x20) != 0;
         let is_standard = PNG_STANDARD_CHUNKS.contains(&ty);
 
+        // Cap the collected list: a crafted file can repeat one chunk type
+        // (or use thousands of distinct types) at no cost, and every entry
+        // becomes a finding. 64 is well past what a real image carries.
         if is_private {
-            private.push((ty_str, len));
-        } else if !is_standard && ty != b"IEND" {
-            unknown.push((ty_str, len));
+            if walk.private.len() < MAX_CHUNK_FINDINGS {
+                walk.private.push((ty_str, len));
+            }
+        } else if !is_standard && ty != b"IEND" && walk.unknown.len() < MAX_CHUNK_FINDINGS {
+            walk.unknown.push((ty_str, len));
         }
 
         if ty == b"IEND" {
-            let trailing = data.len() - next;
-            if trailing > 0 {
-                let ent = shannon_entropy(&data[next..]);
-                let severity = if ent >= 7.0 && trailing >= 32 {
-                    Severity::Likely
-                } else {
-                    Severity::Suspicious
-                };
-                out.push(Finding {
-                    detector: "png:trailing-data".into(),
-                    severity,
-                    detail: format!(
-                        "{trailing} trailing bytes present after IEND (entropy {ent:.2} bits/byte)"
-                    ),
-                });
-            }
-            break;
+            walk.iend_end = Some(next as u64);
+            return walk;
         }
         pos = next;
     }
-    for (name, len) in private {
-        out.push(Finding {
-            detector: "png:private-chunk".into(),
-            severity: Severity::Likely,
-            detail: format!(
-                "Private ancillary chunk '{name}' ({len} bytes) - non-standard metadata injection"
-            ),
-        });
-    }
-    for (name, len) in unknown {
-        out.push(Finding {
-            detector: "png:unknown-chunk".into(),
-            severity: Severity::Info,
-            detail: format!("Non-standard public chunk '{name}' ({len} bytes)"),
-        });
-    }
+    walk
 }
 
-fn track_jpeg_structure(data: &[u8], out: &mut Vec<Finding>) {
+fn track_png_structure(view: &ScanView, out: &mut Vec<Finding>) {
+    let walk = walk_png_chunks(view.prefix);
+    match walk.iend_end {
+        // The whole chunk stream was inside the bytes we have.
+        Some(end) => report_trailing(view, end, "png:trailing-data", "IEND", out),
+        None => {
+            let Some((tail_offset, tail)) = view.tail else {
+                // Whole file without a terminating IEND: a truncated PNG. Not
+                // evidence of hidden data, so say nothing (as before).
+                walk.emit(out);
+                return;
+            };
+            match tail
+                .windows(PNG_IEND_FULL.len())
+                .rposition(|w| w == PNG_IEND_FULL)
+            {
+                Some(idx) => {
+                    let end = tail_offset + idx as u64 + PNG_IEND_FULL.len() as u64;
+                    report_trailing(view, end, "png:trailing-data", "IEND", out);
+                }
+                None => {
+                    // IEND is a fixed 12-byte pattern with a fixed CRC, so
+                    // "not in the last 64 KiB" means at least that much data
+                    // follows the chunk stream: the container does not end
+                    // where a PNG ends it.
+                    out.push(Finding {
+                        detector: "png:trailing-data".into(),
+                        severity: Severity::Suspicious,
+                        detail: format!(
+                            "no IEND chunk in the last {} bytes; at least {} bytes follow the chunk stream (tail entropy {:.2} bits/byte)",
+                            STRUCT_TAIL_WINDOW,
+                            view.bytes_after(tail_offset),
+                            view.trailing_entropy(tail_offset)
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    walk.emit(out);
+}
+
+/// Result of walking as much of a JPEG marker stream as the available bytes
+/// allow.
+struct JpegWalk {
+    /// File offset just past `EOI`, when the walk reached it.
+    eoi_end: Option<u64>,
+    app_segments: Vec<(u8, u32)>,
+    com_segments: Vec<(u32, f64)>,
+    dqt_count: u32,
+    dht_count: u32,
+    sos_count: u32,
+}
+
+fn walk_jpeg_markers(data: &[u8]) -> JpegWalk {
     // Walk markers: 0xFF 0xM[arker]; markers with payload carry a u16 length.
     let mut pos = 2usize; // skip SOI
-    let mut app_segments: Vec<(u8, u32)> = Vec::new();
-    let mut com_segments: Vec<(u32, f64)> = Vec::new();
-    let mut dqt_count = 0u32;
-    let mut dht_count = 0u32;
-    let mut sos_count = 0u32;
+    let mut walk = JpegWalk {
+        eoi_end: None,
+        app_segments: Vec::new(),
+        com_segments: Vec::new(),
+        dqt_count: 0,
+        dht_count: 0,
+        sos_count: 0,
+    };
     while pos + 1 < data.len() {
         if data[pos] != 0xFF {
             break;
@@ -427,23 +649,8 @@ fn track_jpeg_structure(data: &[u8], out: &mut Vec<Finding>) {
         if standalone {
             if marker == 0xD9 {
                 // EOI: legitimate JPEG ends here.
-                let trailing = data.len() - pos;
-                if trailing > 0 {
-                    let ent = shannon_entropy(&data[pos..]);
-                    let severity = if ent >= 7.0 && trailing >= 32 {
-                        Severity::Likely
-                    } else {
-                        Severity::Suspicious
-                    };
-                    out.push(Finding {
-                        detector: "jpeg:trailing-data".into(),
-                        severity,
-                        detail: format!(
-                            "{trailing} trailing bytes present after EOI (entropy {ent:.2} bits/byte)"
-                        ),
-                    });
-                }
-                break;
+                walk.eoi_end = Some(pos as u64);
+                return walk;
             }
             continue;
         }
@@ -455,7 +662,7 @@ fn track_jpeg_structure(data: &[u8], out: &mut Vec<Finding>) {
             break;
         }
         if (0xE0..=0xEF).contains(&marker) {
-            app_segments.push((marker & 0x0F, seg_len as u32));
+            walk.app_segments.push((marker & 0x0F, seg_len as u32));
         } else if marker == 0xFE {
             let payload_start = pos + 2;
             let payload_end = (pos + seg_len).min(data.len());
@@ -464,16 +671,16 @@ fn track_jpeg_structure(data: &[u8], out: &mut Vec<Finding>) {
             } else {
                 0.0
             };
-            com_segments.push((seg_len as u32, ent));
+            walk.com_segments.push((seg_len as u32, ent));
         }
 
         // SOS: entropy-coded image data follows until the next non-stuffed
         // marker; skip past it so we can still see trailing markers.
         match marker {
-            0xDB => dqt_count += 1,
-            0xC4 => dht_count += 1,
+            0xDB => walk.dqt_count += 1,
+            0xC4 => walk.dht_count += 1,
             0xDA => {
-                sos_count += 1;
+                walk.sos_count += 1;
                 let scan_start = pos.saturating_add(seg_len);
                 pos = find_next_jpeg_marker(data, scan_start);
                 continue;
@@ -486,8 +693,70 @@ fn track_jpeg_structure(data: &[u8], out: &mut Vec<Finding>) {
         }
         pos = next;
     }
+    walk
+}
+
+fn track_jpeg_structure(view: &ScanView, out: &mut Vec<Finding>) {
+    let walk = walk_jpeg_markers(view.prefix);
+    match walk.eoi_end {
+        Some(end) => report_trailing(view, end, "jpeg:trailing-data", "EOI", out),
+        None => {
+            if !view.is_whole() {
+                report_jpeg_tail(view, out);
+            }
+            // A whole file without EOI is a truncated JPEG, not evidence of
+            // hidden data.
+        }
+    }
+    emit_jpeg_findings(walk, out);
+}
+
+/// Trailing-data check for a JPEG too large to walk to its end.
+///
+/// The marker walk stops inside the entropy-coded scan data, which has no
+/// marker structure to follow. The file's own end is the evidence: `EOI` is
+/// literally the last two bytes of a JPEG with nothing appended, so anything
+/// else means bytes follow the image.
+fn report_jpeg_tail(view: &ScanView, out: &mut Vec<Finding>) {
+    let Some((tail_offset, tail)) = view.tail else {
+        return;
+    };
+    if tail.ends_with(&JPEG_EOI) {
+        return;
+    }
+    let ent = view.trailing_entropy(tail_offset);
+    let (trailing, detail) = match tail.windows(2).rposition(|w| w == JPEG_EOI) {
+        Some(idx) => {
+            let trailing = view.bytes_after(tail_offset + idx as u64 + 2);
+            let detail = format!(
+                "file does not end with EOI; {trailing} trailing bytes present after the last EOI marker (entropy {ent:.2} bits/byte)"
+            );
+            (trailing, detail)
+        }
+        None => {
+            let trailing = view.bytes_after(tail_offset);
+            let detail = format!(
+                "file does not end with EOI; no EOI marker in the last {} bytes, so at least {trailing} bytes follow the image data (entropy {ent:.2} bits/byte)",
+                STRUCT_TAIL_WINDOW
+            );
+            (trailing, detail)
+        }
+    };
+    let severity = if ent >= 7.0 && trailing >= 32 {
+        Severity::Likely
+    } else {
+        Severity::Suspicious
+    };
+    out.push(Finding {
+        detector: "jpeg:trailing-data".into(),
+        severity,
+        detail,
+    });
+}
+
+fn emit_jpeg_findings(walk: JpegWalk, out: &mut Vec<Finding>) {
     // Flag oversized or anomalous APP segments
-    for (id, len) in &app_segments {
+    for (id, len) in &walk.app_segments {
         if *len > 32 * 1024 {
             out.push(Finding {
                 detector: "jpeg:oversized-app".into(),
@@ -503,7 +772,7 @@ fn track_jpeg_structure(data: &[u8], out: &mut Vec<Finding>) {
             });
         }
     }
-    for (len, ent) in &com_segments {
+    for (len, ent) in &walk.com_segments {
         if *ent >= 7.0 && *len > 64 {
             out.push(Finding {
                 detector: "jpeg:high-entropy-com".into(),
@@ -520,33 +789,36 @@ fn track_jpeg_structure(data: &[u8], out: &mut Vec<Finding>) {
             });
         }
     }
-    if app_segments.len() > 6 {
+    if walk.app_segments.len() > 6 {
         out.push(Finding {
             detector: "jpeg:many-appn".into(),
             severity: Severity::Info,
-            detail: format!("{} APPn segments present", app_segments.len()),
+            detail: format!("{} APPn segments present", walk.app_segments.len()),
         });
     }
     // More than 4 DQT tables is highly unusual (baseline uses 1-2).
-    if dqt_count > 4 {
+    if walk.dqt_count > 4 {
         out.push(Finding {
             detector: "jpeg:many-dqt".into(),
             severity: Severity::Info,
-            detail: format!("{dqt_count} DQT tables (baseline JPEG uses 1-2)"),
+            detail: format!("{} DQT tables (baseline JPEG uses 1-2)", walk.dqt_count),
         });
     }
-    if dht_count > 8 {
+    if walk.dht_count > 8 {
         out.push(Finding {
             detector: "jpeg:many-dht".into(),
             severity: Severity::Info,
-            detail: format!("{dht_count} DHT tables present"),
+            detail: format!("{} DHT tables present", walk.dht_count),
         });
     }
-    if sos_count > 1 {
+    if walk.sos_count > 1 {
         out.push(Finding {
             detector: "jpeg:multi-scan".into(),
             severity: Severity::Info,
-            detail: format!("{sos_count} SOS scans (progressive JPEG; suspicious if unexpected)"),
+            detail: format!(
+                "{} SOS scans (progressive JPEG; suspicious if unexpected)",
+                walk.sos_count
+            ),
         });
     }
 }
@@ -646,13 +918,13 @@ fn track_pe_structure(data: &[u8], out: &mut Vec<Finding>) {
     }
 }
 
-/// Shannon entropy of the last `TAIL_WINDOW` bytes, and whether it sits in
+/// Shannon entropy of the last [`TAIL_WINDOW`] bytes, and whether it sits in
 /// the "looks like compressed/encrypted payload" band.
-fn track_trailing_entropy(data: &[u8], format: Option<&str>, out: &mut Vec<Finding>) {
-    if data.len() < TAIL_WINDOW {
+fn track_trailing_entropy(view: &ScanView, format: Option<&str>, out: &mut Vec<Finding>) {
+    if view.file_size < TAIL_WINDOW as u64 {
         return;
     }
-    let tail = &data[data.len() - TAIL_WINDOW..];
+    let tail = view.entropy_tail();
     let entropy = shannon_entropy(tail);
     // A legitimate container (PNG/JPEG/MP4) has already ended where its parser
     // stops. High-entropy bytes after that are either compressed payload or
@@ -750,15 +1022,25 @@ fn decode_png_pixels(data: &[u8]) -> Option<(Vec<u8>, u32, usize)> {
     let bpp = channels; // 8-bit
     let stride = width as usize * bpp;
 
+    // The scan input is by definition untrusted, and a few hundred KiB of IDAT
+    // can inflate to tens of gigabytes. IHDR states exactly how many bytes a
+    // valid image produces, so bound the inflate by that and treat an overrun
+    // as corruption instead of letting flate2 grow a Vec without limit.
+    let expected = stride
+        .checked_mul(height as usize)
+        .and_then(|v| v.checked_add(height as usize))?; // +1 filter byte per row
+
     // Inflate.
-    let mut z = flate2::read::ZlibDecoder::new(Cursor::new(&idat));
+    let mut z = flate2::read::ZlibDecoder::new(Cursor::new(&idat)).take(expected as u64 + 1);
     let mut raw = Vec::new();
     if z.read_to_end(&mut raw).is_err() {
         return None;
     }
-    let expected = stride * height as usize + height as usize; // +1 filter byte per row
     if raw.len() < expected {
-        return None;
+        return None; // truncated
+    }
+    if raw.len() != expected {
+        return None; // declared geometry does not match the stream: bomb or corrupt
     }
 
     // Undo filtering row by row.
@@ -806,16 +1088,27 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
     }
 }
 
-/// Decode a JPEG to a flat RGB pixel buffer via `jpeg-decoder`.
+/// Decode a JPEG to a flat pixel buffer via `jpeg-decoder`.
+///
+/// The channel count comes from the decoder's own `PixelFormat`: hard-coding 3
+/// assumed RGB and mis-scaled every downstream detector on a grayscale image
+/// (the row width `width * 3` pointed past each real row, so the statistics were
+/// computed on scrambled pixels and silently reported "clean").
 fn decode_jpeg_pixels(data: &[u8]) -> Option<(Vec<u8>, u32, usize)> {
-    use jpeg_decoder::Decoder;
+    use jpeg_decoder::{Decoder, PixelFormat};
     let mut decoder = Decoder::new(std::io::Cursor::new(data));
     let pixels = decoder.decode().ok()?;
-    let width = decoder.info()?.width as u32;
+    let info = decoder.info()?;
+    let channels = match info.pixel_format {
+        PixelFormat::L8 => 1,
+        PixelFormat::L16 => 2,
+        PixelFormat::RGB24 => 3,
+        PixelFormat::CMYK32 => 4,
+    };
     if pixels.is_empty() {
         None
     } else {
-        Some((pixels, width, 3))
+        Some((pixels, info.width as u32, channels))
     }
 }
 
@@ -1172,7 +1465,7 @@ mod tests {
         let mut blob = vec![0u8; 100];
         blob[40..48].copy_from_slice(&[0xb7, 0x54, 0x2c, 0x82, 0x7e, 0x31, 0x1d, 0x6e]);
         let mut f = Vec::new();
-        track_tool_signatures(&blob, &mut f);
+        track_tool_signatures(&ScanView::whole(&blob), &mut f);
         assert!(f.iter().any(|x| x.detector == "signature:known-tool"));
     }
 
@@ -1193,7 +1486,7 @@ mod tests {
         png.splice(iend_pos..iend_pos, injection);
 
         let mut findings = Vec::new();
-        track_png_structure(&png, &mut findings);
+        track_png_structure(&ScanView::whole(&png), &mut findings);
         assert!(
             findings.iter().any(|f| f.detector == "png:private-chunk"),
             "findings: {findings:?}"
@@ -1240,6 +1533,66 @@ mod tests {
         assert!(decode_jpeg_pixels(&garbage).is_none());
     }
 
+    /// A grayscale JPEG must be reported as 1 channel. Reporting 3 for it (as
+    /// this used to) made `chi2_lsb_suspicion` read rows three times too wide.
+    ///
+    /// The fixture is hand-built so the assertion is meaningful: a broken
+    /// fixture would decode to `None` and the test would pass for the wrong
+    /// reason, so the decode itself is asserted first.
+    #[test]
+    fn grayscale_jpeg_reports_one_channel() {
+        // Smallest legal baseline grayscale JPEG: one 16x16 MCU, flat
+        // quantisation table, and DC + AC Huffman tables with two 1-bit codes
+        // (`0` -> symbol 0x00, `1` -> symbol 0x01). Symbol 0x00 is both
+        // "DC diff category 0" and "AC end-of-block", so each MCU costs two
+        // zero bits: DC diff, then EOB.
+        let mut counts = [0u8; 16];
+        counts[0] = 2;
+        // DHT segment: [class<<4 | table] [16 code counts] [symbols].
+        let dht_payload: Vec<u8> = [&[0x00u8], &counts[..], &[0x00u8, 0x01u8][..]].concat();
+        let mut d = Vec::new();
+        d.extend_from_slice(&[0xFF, 0xD8]); // SOI
+        d.extend_from_slice(&[0xFF, 0xDB]); // DQT
+        let dqt_len = 2u16 + 1 + 64;
+        d.extend_from_slice(&dqt_len.to_be_bytes());
+        d.push(0x00); // 8-bit table 0
+        d.extend_from_slice(&[0x10u8; 64]); // flat quantisation values
+        d.extend_from_slice(&[0xFF, 0xC0]); // SOF0
+        d.extend_from_slice(&(2u16 + 6 + 3).to_be_bytes());
+        d.push(8); // 8-bit precision
+        d.extend_from_slice(&16u16.to_be_bytes()); // width
+        d.extend_from_slice(&16u16.to_be_bytes()); // height
+        d.push(1); // one component
+        d.push(1); // component id 1
+        d.push(0x11); // sampling factors 1x1
+        d.push(0x00); // quantisation table 0
+        d.extend_from_slice(&[0xFF, 0xC4]); // DHT: DC table 0
+        d.extend_from_slice(&(dht_payload.len() as u16 + 2).to_be_bytes());
+        d.extend_from_slice(&dht_payload);
+        // The scan references an AC table as well, and a scan component may not
+        // leave one unset -- so define AC table 0 with the same two codes.
+        let ac_payload: Vec<u8> = [&[0x10u8], &counts[..], &[0x00u8, 0x01u8][..]].concat();
+        d.extend_from_slice(&[0xFF, 0xC4]); // DHT: AC table 0
+        d.extend_from_slice(&(ac_payload.len() as u16 + 2).to_be_bytes());
+        d.extend_from_slice(&ac_payload);
+        d.extend_from_slice(&[0xFF, 0xDA]); // SOS
+        // `read_length` in jpeg-decoder subtracts itself, so the on-wire value is
+        // `4 + 2 * component_count + 2` for a 1-component scan.
+        d.extend_from_slice(&8u16.to_be_bytes());
+        d.push(1); // one component in scan
+        d.push(1); // component selector 1
+        d.push(0x00); // DC table 0, AC table 0
+        d.extend_from_slice(&[0x00, 0x3F, 0x00]); // spectral 0..63, successive approx 0
+        d.push(0b0000_0000); // DC diff 0
+        d.push(0b0000_0000); // AC EOB
+        d.extend_from_slice(&[0xFF, 0xD9]); // EOI
+
+        let (pixels, width, channels) = decode_jpeg_pixels(&d).expect("fixture must decode");
+        assert_eq!(channels, 1, "grayscale JPEG must decode to 1 channel");
+        assert_eq!(pixels.len(), 16 * 16);
+        assert_eq!(width, 16);
+    }
+
     #[test]
     fn jpeg_eoi_tail_detected() {
         // Synthesize a minimal JPEG structure: SOI, DQT, EOI, then extra bytes.
@@ -1250,7 +1603,7 @@ mod tests {
         data.extend_from_slice(&[0xFF, 0xD9]); // EOI
         data.extend_from_slice(b"extra-tail-data"); // appended after EOI
         let mut findings = Vec::new();
-        track_jpeg_structure(&data, &mut findings);
+        track_jpeg_structure(&ScanView::whole(&data), &mut findings);
         assert!(
             findings.iter().any(|f| f.detector == "jpeg:trailing-data"),
             "findings: {findings:?}"
@@ -1266,16 +1619,150 @@ mod tests {
         }
         data.extend_from_slice(&[0xFF, 0xD9]);
         let mut findings = Vec::new();
-        track_jpeg_structure(&data, &mut findings);
+        track_jpeg_structure(&ScanView::whole(&data), &mut findings);
         assert!(
             findings.iter().any(|f| f.detector == "jpeg:many-dqt"),
             "findings: {findings:?}"
         );
     }
 
+    /// Chunk sequence with a caller-supplied IHDR body and IDAT payload.
+    fn raw_png(ihdr_body: &[u8], idat: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        let mut chunk = |ty: &[u8], body: &[u8]| {
+            out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            out.extend_from_slice(ty);
+            out.extend_from_slice(body);
+            let mut crc = crc32fast::Hasher::new();
+            crc.update(ty);
+            crc.update(body);
+            out.extend_from_slice(&crc.finalize().to_be_bytes());
+        };
+        chunk(b"IHDR", ihdr_body);
+        chunk(b"IDAT", idat);
+        chunk(b"IEND", &[]);
+        out
+    }
+
+    fn zlib(data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        z.write_all(data).unwrap();
+        z.finish().unwrap()
+    }
+
+    /// Write a file above [`MAX_FULL_SCAN`] with `prefix` at offset 0 and
+    /// `suffix` at the very end. The gap is created by seeking, so the file
+    /// costs almost no disk space.
+    fn write_windowed_file(path: &Path, prefix: &[u8], suffix: &[u8]) {
+        use std::io::Write;
+        let mut f = File::create(path).unwrap();
+        f.write_all(prefix).unwrap();
+        f.seek(SeekFrom::Start(MAX_FULL_SCAN + 1)).unwrap();
+        f.write_all(suffix).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    /// Payload bytes for the windowed tests: every value 0..=250 cycling, so
+    /// no `FF D9` can occur by accident. Entropy is ~7.9 bits/byte.
+    fn filler(n: usize) -> Vec<u8> {
+        (0..n).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// B1 acceptance: a PNG above the full-scan cap with data appended after
+    /// IEND must be flagged. Before the prefix/tail split this reported clean.
+    #[test]
+    fn oversized_png_with_appended_payload_is_detected() {
+        let tmp = std::env::temp_dir().join("strhide_scan_big_appended.png");
+        // A chunk stream that ends before the padding: signature + IHDR + IDAT.
+        let mut head = fake_png(4, 4, 2, |x, y| vec![(x * 50 + y * 10) as u8, 128, 200]);
+        let iend_pos = head.windows(4).rposition(|w| w == b"IEND").unwrap() - 4;
+        head.truncate(iend_pos);
+
+        let mut suffix = PNG_IEND_FULL.to_vec();
+        suffix.extend_from_slice(&filler(4096));
+        write_windowed_file(&tmp, &head, &suffix);
+
+        let rep = scan_file(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+        assert!(
+            rep.findings
+                .iter()
+                .any(|f| f.detector == "png:trailing-data"),
+            "report: {rep:?}"
+        );
+        assert!(rep.risk_score >= 30, "report: {rep:?}");
+        assert!(
+            rep.notes.iter().any(|n| n.contains("larger than")),
+            "a windowed scan must say so: {rep:?}"
+        );
+    }
+
+    /// The same oversized PNG with *nothing* appended must stay clean: the
+    /// trailing-data detector must key on real bytes after IEND, not on the
+    /// window boundary.
+    #[test]
+    fn oversized_png_without_trailing_data_stays_clean() {
+        let tmp = std::env::temp_dir().join("strhide_scan_big_clean.png");
+        let mut head = fake_png(4, 4, 2, |x, _| vec![(x * 60) as u8, 128, 200]);
+        let iend_pos = head.windows(4).rposition(|w| w == b"IEND").unwrap() - 4;
+        head.truncate(iend_pos);
+        write_windowed_file(&tmp, &head, &PNG_IEND_FULL);
+
+        let rep = scan_file(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+        assert!(
+            !rep.findings
+                .iter()
+                .any(|f| f.detector == "png:trailing-data"),
+            "report: {rep:?}"
+        );
+    }
+
+    /// B7 acceptance: same for JPEG. The marker walk cannot reach EOI in a
+    /// windowed view, so the file's own tail is the evidence.
+    #[test]
+    fn oversized_jpeg_with_appended_payload_is_detected() {
+        let tmp = std::env::temp_dir().join("strhide_scan_big_appended.jpg");
+        let mut head = vec![0xFF, 0xD8]; // SOI
+        head.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x04, 0x00, 0x10]); // DQT
+        head.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]); // SOS header
+
+        let mut suffix = JPEG_EOI.to_vec();
+        suffix.extend_from_slice(&filler(4096));
+        write_windowed_file(&tmp, &head, &suffix);
+
+        let rep = scan_file(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+        assert!(
+            rep.findings
+                .iter()
+                .any(|f| f.detector == "jpeg:trailing-data"),
+            "report: {rep:?}"
+        );
+        assert!(rep.risk_score >= 30, "report: {rep:?}");
+    }
+
+    /// B4: IHDR states how many scanline bytes the image must produce, so a
+    /// small IDAT that inflates far past that is a bomb, not an image.
+    #[test]
+    fn png_inflate_is_bounded_by_declared_geometry() {
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&4u32.to_be_bytes()); // width
+        ihdr.extend_from_slice(&4u32.to_be_bytes()); // height
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8-bit RGB, non-interlaced
+        // 1 MiB of zeros compresses to ~1 KiB but decodes to 20k times the
+        // 52 bytes the header promises.
+        let png = raw_png(&ihdr, &zlib(&vec![0u8; 1024 * 1024]));
+        assert!(
+            decode_png_pixels(&png).is_none(),
+            "an inflate that overshoots the declared geometry must be rejected"
+        );
+    }
+
     #[test]
     fn rs_smooth_plane_estimates_near_zero() {
-        // Flat smooth gradient: RS estimate must stay 0.0 or low
         let mut plane = vec![128u8; 16 * 16 * 3];
         for y in 0..16 {
             for x in 0..16 {

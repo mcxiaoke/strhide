@@ -129,7 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let payload = incompressible(payload_len, 17 + i as u64);
             let params = JpegParams {
                 stc_h: h,
-                slot_budget: budget,
+                slot_budget: Some(budget),
                 ..JpegParams::default()
             };
             if let Ok(layout) = layout_for_payload(&cover, payload_len, &params, &DEFAULT_FORMAT) {

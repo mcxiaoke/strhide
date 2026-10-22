@@ -54,25 +54,11 @@ pub fn riff_inject(
     let ube_size = ube_in.seek(SeekFrom::End(0))?;
     ube_in.seek(SeekFrom::Start(0))?;
 
-    let mut buf = [0u8; 64 * 1024];
-
     if strategy == "eof" {
         // Simple EOF overlay
-        loop {
-            let n = host_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-        }
+        let host_len = crate::adapters::io::copy_stream(host_in, out)?;
         let inject_offset = host_len;
-        loop {
-            let n = ube_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-        }
+        crate::adapters::io::copy_exact(ube_in, out, ube_size)?;
         return Ok((inject_offset, ube_size, 0, 0));
     }
 
@@ -99,13 +85,7 @@ pub fn riff_inject(
     out.write_all(&header[8..12])?;
 
     // 2. Copy remainder of original host carrier
-    loop {
-        let n = host_in.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        out.write_all(&buf[..n])?;
-    }
+    crate::adapters::io::copy_stream(host_in, out)?;
 
     let inject_offset = host_len;
 
@@ -114,13 +94,7 @@ pub fn riff_inject(
     out.write_all(&(ube_size as u32).to_le_bytes())?;
 
     // 4. Write UBE data
-    loop {
-        let n = ube_in.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        out.write_all(&buf[..n])?;
-    }
+    crate::adapters::io::copy_exact(ube_in, out, ube_size)?;
 
     // 5. Write 1-byte 0 padding if chunk data size was odd
     if pad_len == 1 {

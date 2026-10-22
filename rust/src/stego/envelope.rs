@@ -292,7 +292,10 @@ pub fn unpack_envelope_parts(
         )));
     }
 
-    let mut decoder = DeflateDecoder::new(body);
+    // `orig_len` is the exact size the writer promised, so the inflate is
+    // bounded by it: a forged envelope cannot expand past one extra byte
+    // before being rejected.
+    let mut decoder = DeflateDecoder::new(body).take(orig_len as u64 + 1);
     let mut decompressed = Vec::with_capacity(orig_len);
     decoder
         .read_to_end(&mut decompressed)

@@ -498,8 +498,8 @@ impl StcTrellis {
             // unable to know which round was used, i.e. it would brick the
             // carrier. It can only happen when a caller hands over an element
             // with no legal direction at all (both `rho` values infinite).
-            return Err(StrHideError::General(
-                "STC embedding has no feasible solution: a group has no legal element".into(),
+            return Err(StrHideError::TrellisInfeasible(
+                "a group has no legal element (both directions illegal for every element)".into(),
             ));
         }
 

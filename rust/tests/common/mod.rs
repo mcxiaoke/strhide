@@ -31,10 +31,20 @@ pub fn scratch(name: &str) -> PathBuf {
 }
 
 /// Minimal valid 1x1 PNG (IHDR + IDAT + IEND, CRCs valid).
+///
+/// Both fields of IHDR are **big-endian** per the PNG spec, and the IDAT stream
+/// is a *zlib* stream (2-byte header + adler32), not raw deflate. The previous
+/// fixture wrote the dimensions little-endian — which decodes as 16,777,216 ×
+/// 16,777,216 — and raw-deflate IDAT. The two errors cancelled out: no decoder
+/// could ever reach the pixel data, so the broken dimensions were never
+/// exposed. A fixture that cannot be decoded by the code under test proves
+/// nothing, so this one asserts itself.
 pub fn make_png() -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-    let ihdr_data: [u8; 13] = [1, 0, 0, 0, 1, 0, 0, 0, 8, 2, 0, 0, 0];
+    // width = 1, height = 1, bit depth 8, colour type 2 (RGB), compression 0,
+    // filter 0, interlace 0 — all multi-byte fields big-endian.
+    let ihdr_data: [u8; 13] = [0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0];
     let mut chunk = Vec::new();
     chunk.extend_from_slice(&(ihdr_data.len() as u32).to_be_bytes());
     chunk.extend_from_slice(b"IHDR");
@@ -43,8 +53,9 @@ pub fn make_png() -> Vec<u8> {
     chunk.extend_from_slice(&crc.to_be_bytes());
     out.extend_from_slice(&chunk);
 
-    let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
-    enc.write_all(b"\x00\xff\x00\x00").unwrap();
+    // One scanline: filter byte 0, then one white RGB pixel.
+    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(b"\x00\xff\xff\xff").unwrap();
     let idat_data = enc.finish().unwrap();
     let mut chunk = Vec::new();
     chunk.extend_from_slice(&(idat_data.len() as u32).to_be_bytes());
@@ -56,6 +67,21 @@ pub fn make_png() -> Vec<u8> {
 
     out.extend_from_slice(b"\x00\x00\x00\x00IEND\xaeB`\x82");
     out
+}
+
+/// The `make_png` fixture must be decodable by the code under test, with the
+/// geometry it claims.
+///
+/// `decode_png` lives in the stego module, so the assertion is an integration
+/// test rather than a unit test next to the fixture: a fixture that silently
+/// stopped decoding would let every carrier test pass against garbage.
+#[test]
+fn make_png_fixture_is_decodable_as_1x1() {
+    let png = make_png();
+    let image = strhide::stego::spatial::decode_png(&png).expect("fixture must decode");
+    assert_eq!((image.width, image.height), (1, 1));
+    assert_eq!(image.channels, 3);
+    assert_eq!(image.pixels, vec![255, 255, 255]);
 }
 
 /// Minimal JPEG: SOI, JFIF APP0, DQT, SOF0, SOS, entropy data, EOI.

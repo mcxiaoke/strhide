@@ -94,6 +94,60 @@ fn find_last_eof<R: Read + Seek + ?Sized>(
     ))
 }
 
+/// Trailer facts carried by an XRef *stream* dictionary (PDF 1.5+).
+struct XRefStreamDict {
+    /// `/Size`: one past the highest object number, i.e. the next free number.
+    size: Option<u64>,
+    root_ref: Option<String>,
+    info_ref: Option<String>,
+}
+
+/// Read the dictionary of the XRef stream that `startxref` points at.
+///
+/// This is the only reliable source of the next object number in a
+/// cross-reference-stream document: `/Size` lives in the stream's dictionary,
+/// which is **plaintext even when the stream data itself is Flate-compressed**.
+/// Deriving the number by scanning the 64 KiB tail for `N G obj` instead cannot
+/// work there, because objects inside an object stream never appear in that
+/// form, so `max + 1` can be lower than a number already in use — and the
+/// incremental update would then collide with an existing object and corrupt
+/// the document.
+fn read_xref_stream_dict<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+    startxref: u64,
+) -> Option<XRefStreamDict> {
+    const WINDOW: usize = 8 * 1024;
+
+    let file_size = reader.seek(SeekFrom::End(0)).ok()?;
+    if startxref == 0 || startxref >= file_size {
+        return None;
+    }
+    let restore = reader.stream_position().unwrap_or(0);
+    reader.seek(SeekFrom::Start(startxref)).ok()?;
+    let mut buf = vec![0u8; WINDOW];
+    let n = reader.read(&mut buf[..]).unwrap_or(0);
+    let _ = reader.seek(SeekFrom::Start(restore));
+    buf.truncate(n);
+    if buf.len() < 16 {
+        return None;
+    }
+
+    // The dictionary ends at the `stream` keyword that introduces the data.
+    let text = String::from_utf8_lossy(&buf);
+    let dict_text = text.split("stream").next().unwrap_or(&text);
+    // Only accept an actual XRef stream: a `startxref` that points at something
+    // else (a content stream, a classic xref table) must not be parsed as one.
+    if !dict_text.contains("/XRef") {
+        return None;
+    }
+
+    Some(XRefStreamDict {
+        size: find_int_after(dict_text, "/Size"),
+        root_ref: find_indirect_ref(dict_text, "/Root", false),
+        info_ref: find_indirect_ref(dict_text, "/Info", false),
+    })
+}
+
 pub fn parse_pdf_tail_info<R: Read + Seek + ?Sized>(
     reader: &mut R,
 ) -> Result<PdfTailInfo, StrHideError> {
@@ -151,8 +205,20 @@ pub fn parse_pdf_tail_info<R: Read + Seek + ?Sized>(
         info_ref = find_indirect_ref(trailer_str, "/Info", false);
     }
 
-    // No classic trailer dictionary (xref-stream PDF): derive the next object
-    // number from the highest `N G obj` definition in the tail window.
+    // No classic trailer dictionary (xref-stream PDF): read /Size (and /Root,
+    // /Info) from the XRef stream that `startxref` points at. Only when that is
+    // unavailable does the tail-window `N G obj` scan remain as a last resort.
+    if new_obj_num.is_none()
+        && let Some(dict) = read_xref_stream_dict(reader, prev_startxref)
+    {
+        new_obj_num = dict.size;
+        if root_ref.is_none() {
+            root_ref = dict.root_ref;
+        }
+        if info_ref.is_none() {
+            info_ref = dict.info_ref;
+        }
+    }
     if new_obj_num.is_none() {
         new_obj_num = scan_max_object_number(&text_before_eof).map(|n| n + 1);
     }
@@ -413,18 +479,7 @@ impl HostAdapter for PdfAdapter {
 
         // 1. Write host up to eof_offset
         host_in.seek(SeekFrom::Start(0))?;
-        let mut remaining = info.eof_offset;
-        let mut buf = [0u8; 64 * 1024];
-
-        while remaining > 0 {
-            let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
-            let n = host_in.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-            remaining -= n as u64;
-        }
+        crate::adapters::io::copy_exact(host_in, out, info.eof_offset)?;
 
         let inject_offset = info.eof_offset;
 
@@ -433,14 +488,9 @@ impl HostAdapter for PdfAdapter {
         let actual_obj_offset = inject_offset + 1; // skips leading \n
         out.write_all(obj_header.as_bytes())?;
 
-        // 3. Write UBE data stream (propagate read errors instead of treating them as EOF)
-        loop {
-            let n = ube_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-        }
+        // 3. Write UBE data stream. `ube_size` was measured on this stream, so
+        // a short read means the envelope was truncated.
+        crate::adapters::io::copy_exact(ube_in, out, ube_size)?;
 
         // 4. End object stream
         out.write_all(b"\nendstream\nendobj\n")?;
@@ -482,13 +532,7 @@ impl HostAdapter for PdfAdapter {
         // damage the carrier and break the 100% bit-exact restore guarantee,
         // so they are copied verbatim after the new %%EOF.
         host_in.seek(SeekFrom::Start(info.eof_offset))?;
-        loop {
-            let n = host_in.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-        }
+        crate::adapters::io::copy_stream(host_in, out)?;
 
         Ok((inject_offset, inject_size, 0, 0))
     }
@@ -824,6 +868,126 @@ mod tests {
             assert_eq!(info.new_obj_num, expected_obj + 1);
             prev = out;
         }
+    }
+
+    /// PDF 1.5+ XRef-stream document whose compressed stream data is larger than
+    /// the 64 KiB tail window.
+    ///
+    /// The window then holds nothing but stream bytes, so neither
+    /// `trailer << /Size >>` nor the `N G obj` scan can find the next object
+    /// number: the only place it exists is the XRef stream dictionary at
+    /// `startxref`. Deriving it from the tail instead under-reports (objects
+    /// inside an object stream never appear as `N G obj`), which makes the
+    /// incremental update collide with an existing object.
+    #[test]
+    fn xref_stream_size_comes_from_the_stream_dictionary() {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(
+            b"%PDF-1.5
+",
+        );
+        for obj in [
+            "1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+",
+            "2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+",
+            "3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>
+endobj
+",
+        ] {
+            pdf.extend_from_slice(obj.as_bytes());
+        }
+        let xref_obj_offset = pdf.len() as u64;
+        // A dictionary whose compressed payload is far larger than the tail
+        // window: the window ends up holding stream bytes only.
+        let dict = "<< /Length 70000 /Type /XRef /Root 1 0 R /Size 10 /W [1 2 1] >>";
+        pdf.extend_from_slice(
+            format!(
+                "4 0 obj
+{dict}
+stream
+"
+            )
+            .as_bytes(),
+        );
+        pdf.extend_from_slice(&[0u8; 70_000]);
+        pdf.extend_from_slice(
+            b"
+endstream
+endobj
+",
+        );
+        pdf.extend_from_slice(
+            format!(
+                "startxref
+{xref_obj_offset}
+%%EOF
+"
+            )
+            .as_bytes(),
+        );
+
+        let info = parse_pdf_tail_info(&mut Cursor::new(pdf.clone())).expect("must parse");
+        assert_eq!(info.prev_startxref, xref_obj_offset);
+        assert_eq!(
+            info.new_obj_num,
+            Some(10),
+            "/Size from the XRef stream dictionary is the next object number"
+        );
+        assert_eq!(info.root_ref.as_deref(), Some("1 0 R"));
+
+        // ...and the writer can therefore name a free object.
+        assert_eq!(
+            PdfAdapter::calc_prefix_len(&mut Cursor::new(pdf), 88).unwrap(),
+            pdf_obj_header(10, 88).len() as u64
+        );
+    }
+
+    #[test]
+    fn classic_trailer_still_wins_over_the_xref_stream_scan() {
+        // A hybrid document: the newest trailer dictionary is a classic one, so
+        // its /Size must not be overridden by the XRef stream's.
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(
+            b"%PDF-1.4
+1 0 obj
+<< /Type /Catalog >>
+endobj
+",
+        );
+        let xref_obj_offset = pdf.len() as u64;
+        pdf.extend_from_slice(
+            b"2 0 obj
+<< /Length 4 /Type /XRef /Size 3 >>
+stream
+0000
+endstream
+endobj
+",
+        );
+        pdf.extend_from_slice(
+            b"trailer
+<< /Size 7 /Root 1 0 R >>
+",
+        );
+        pdf.extend_from_slice(
+            format!(
+                "startxref
+{xref_obj_offset}
+%%EOF
+"
+            )
+            .as_bytes(),
+        );
+
+        let info = parse_pdf_tail_info(&mut Cursor::new(pdf)).expect("must parse");
+        assert_eq!(info.new_obj_num, Some(7));
+        assert_eq!(info.root_ref.as_deref(), Some("1 0 R"));
     }
 
     #[test]

@@ -102,6 +102,8 @@ fn eval_png(png_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::er
             &HillCostModel,
             &default_spatial,
             strhide::stego::SafetyLevel::High,
+            None,
+            None,
         ) {
             Ok(c) => c,
             Err(e) => {
@@ -331,7 +333,7 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
                 let tmp_stego_path = std::env::temp_dir().join(format!("eval_stego_{tid}.jpg"));
 
                 let params = JpegParams {
-                    slot_budget: budget,
+                    slot_budget: Some(budget),
                     ..JpegParams::default()
                 };
                 let u = layout_for_payload(&carrier_bytes, payload_len, &params, &DEFAULT_FORMAT)

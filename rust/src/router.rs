@@ -124,3 +124,42 @@ pub fn id_to_strategy(id: u8) -> &'static str {
     }
     "unknown"
 }
+
+/// Largest strategy ID registered in [`STRATEGY_REGISTRY`].
+///
+/// Computed, not written down: [`crate::envelope::MAX_KNOWN_STRATEGY_ID`]
+/// gates the "is this an envelope at all?" heuristic on the unencrypted
+/// de-mask path, and a stale copy of this number silently rejects every
+/// carrier written with a newly added strategy.
+pub const MAX_STRATEGY_ID: u8 = {
+    let mut max = 0u8;
+    let mut i = 0;
+    while i < STRATEGY_REGISTRY.len() {
+        if STRATEGY_REGISTRY[i].1 > max {
+            max = STRATEGY_REGISTRY[i].1;
+        }
+        i += 1;
+    }
+    max
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two numbers must never drift apart: the de-mask gate in
+    /// `envelope.rs` is what makes a wrong-profile read fail deterministically
+    /// instead of returning garbage fields.
+    #[test]
+    fn max_strategy_id_matches_the_registry() {
+        assert_eq!(
+            MAX_STRATEGY_ID,
+            STRATEGY_REGISTRY
+                .iter()
+                .map(|&(_, id)| id)
+                .max()
+                .expect("registry is non-empty")
+        );
+        assert_eq!(crate::envelope::MAX_KNOWN_STRATEGY_ID, MAX_STRATEGY_ID);
+    }
+}

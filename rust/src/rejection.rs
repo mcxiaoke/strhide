@@ -26,12 +26,17 @@ use crate::params::RejectionPolicy;
 /// Inspect a PE reader for an Authenticode certificate table.
 ///
 /// Returns `Ok(Some(reason))` when the PE has a non-empty security directory;
-/// `Ok(None)` when the file is not a PE or is unsigned. The reader's
-/// position is always restored.
+/// `Ok(None)` when the file is not a PE or is unsigned. The reader's position
+/// is always restored.
+///
+/// The scan always starts at offset 0 rather than wherever the caller happens
+/// to be: a `pub fn` that depended on the current stream position silently
+/// answered "not signed" for any caller parked mid-file.
 pub fn check_pe_authenticode<R: Read + Seek + ?Sized>(
     reader: &mut R,
 ) -> Result<Option<String>, StrHideError> {
     let start_pos = reader.stream_position()?;
+    reader.seek(SeekFrom::Start(0))?;
     let mut mz = [0u8; 2];
     if reader.read_exact(&mut mz).is_err() || &mz != b"MZ" {
         reader.seek(SeekFrom::Start(start_pos))?;
@@ -147,10 +152,14 @@ pub fn check_signature_file(filename: Option<&str>) -> Option<String> {
 
 /// Scan a PDF reader for a `/ByteRange` + `/Sig` pair (the CMS/PKCS#7
 /// signature pattern). Returns `Ok(Some(reason))` when found.
+///
+/// Like [`check_pe_authenticode`], the scan starts at offset 0 instead of
+/// trusting the caller's stream position.
 pub fn check_pdf_signature<R: Read + Seek + ?Sized>(
     reader: &mut R,
 ) -> Result<Option<String>, StrHideError> {
     let start_pos = reader.stream_position()?;
+    reader.seek(SeekFrom::Start(0))?;
     let mut header = [0u8; 1024];
     let n = reader.read(&mut header)?;
     if !header[..n].starts_with(b"%PDF-") {
@@ -362,10 +371,7 @@ pub fn run_rejection_checks(
         // file the carrier stays read-only on purpose (read-only media, mounted
         // images, C:\Program Files\...), so only reject a read-only carrier for
         // in-place writes.
-        let in_place = match (std::path::absolute(carrier), std::path::absolute(target)) {
-            (Ok(c), Ok(t)) => c == t,
-            _ => carrier == target,
-        };
+        let in_place = crate::engine::same_file(carrier, target);
         let metadata = std::fs::metadata(carrier)?;
         if in_place && metadata.permissions().readonly() {
             return Err(StrHideError::Rejection(format!(

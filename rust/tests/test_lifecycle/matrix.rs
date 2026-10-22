@@ -574,9 +574,13 @@ fn password_hint_roundtrips_on_every_format() {
         // ...and appears in the password error.
         let err = read_carrier(&out, None, None).unwrap_err();
         assert!(
-            matches!(err, StrHideError::Password(_)),
-            "{label}: expected Password variant, got {err:?}"
+            matches!(
+                err,
+                StrHideError::Password(_) | StrHideError::PasswordWithHint { .. }
+            ),
+            "{label}: expected a password error, got {err:?}"
         );
+        assert_eq!(err.hint(), Some(hint), "{label}: structured hint");
         assert!(err.to_string().contains(hint), "{label}: {err}");
 
         // With the password the payload still reads back.
