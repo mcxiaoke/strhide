@@ -340,6 +340,35 @@ impl StcTrellis {
         deltas: &mut [i8],
     ) -> Result<usize, StrHideError> {
         let n = vals.len();
+        if moves.len() < n || rho_plus.len() < n || rho_minus.len() < n {
+            return Err(StrHideError::General(
+                "STC cost/legality arrays disagree with the element count".into(),
+            ));
+        }
+        self.embed_with_cost_fn(
+            vals,
+            moves,
+            |j| (rho_plus[j], rho_minus[j]),
+            message,
+            deltas,
+        )
+    }
+
+    /// Flexible STC embedding where costs are generated via a closure or lookup function.
+    ///
+    /// Avoids preallocating hundreds of megabytes of `f64` arrays on large carriers.
+    pub fn embed_with_cost_fn<F>(
+        &self,
+        vals: &[u8],
+        moves: &[Move],
+        mut cost_fn: F,
+        message: &[u8],
+        deltas: &mut [i8],
+    ) -> Result<usize, StrHideError>
+    where
+        F: FnMut(usize) -> (f64, f64),
+    {
+        let n = vals.len();
         let u = self.u as usize;
         let h = self.h as usize;
         let m = self.message_bits(n);
@@ -350,9 +379,9 @@ impl StcTrellis {
                 self.h, self.u
             )));
         }
-        if moves.len() < n || rho_plus.len() < n || rho_minus.len() < n {
+        if moves.len() < n {
             return Err(StrHideError::General(
-                "STC cost/legality arrays disagree with the element count".into(),
+                "STC moves array disagrees with the element count".into(),
             ));
         }
         if deltas.len() < n {
@@ -402,7 +431,8 @@ impl StcTrellis {
             } else {
                 0
             };
-            let opts = parity_options(vals[j], moves[j], rho_plus[j], rho_minus[j]);
+            let (rp, rm) = cost_fn(j);
+            let opts = parity_options(vals[j], moves[j], rp, rm);
 
             for (state, &base) in cost.iter().enumerate().take(states) {
                 if base.is_infinite() {

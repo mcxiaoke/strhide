@@ -82,8 +82,8 @@ fn map_dct_error(e: dct_io::DctError) -> StrHideError {
 struct CoverFrame {
     /// Blocks of the payload component (Y).
     block_count: usize,
-    /// Grid slots in ascending flat-index order.
-    grid: Vec<u32>,
+    /// Total candidate AC grid slots.
+    n_total: usize,
     /// SHA-256 over the block/component counts and every DC coefficient.
     digest: [u8; 32],
 }
@@ -91,16 +91,16 @@ struct CoverFrame {
 impl CoverFrame {
     fn read(fmt: &FormatProfile, coeffs: &JpegCoefficients) -> Self {
         let block_count = coeffs.components[0].blocks.len();
-        let grid = v3_layout::grid_indices(block_count, fmt.grid_rule);
+        let n_total = block_count * fmt.grid_rule.slots_per_block();
         Self {
             block_count,
-            grid,
+            n_total,
             digest: cover_digest(fmt, coeffs),
         }
     }
 
     fn n_total(&self) -> usize {
-        self.grid.len()
+        self.n_total
     }
 }
 
@@ -147,19 +147,20 @@ fn ternary_legal(coeff: i16) -> Move {
     }
 }
 
-/// Per-slot arrays the trellis needs, plus the blocks they touch.
+/// Per-slot arrays the trellis needs.
+///
+/// Note: On standard carriers (complete Huffman table), costs are read directly
+/// on demand from `costs`, saving ~224 MB of preallocated `Vec<f64>` heap buffers.
 struct SlotPlan {
     vals: Vec<u8>,
     moves: Vec<Move>,
-    rho_plus: Vec<f64>,
-    rho_minus: Vec<f64>,
+    sparse_overrides: Option<Vec<(f64, f64)>>,
 }
 
 /// Build the trellis inputs for one slot set.
 ///
-/// `table` is `None` for a complete Huffman table (the fast path: no per-slot
-/// symbol work at all), otherwise the missing directions are closed by an
-/// infinite cost.
+/// `table` is `None` for a complete Huffman table (the fast path: zero per-slot
+/// cost buffer allocation), otherwise custom cross-zero costs are tracked in overrides.
 fn plan_slots(
     coeffs: &JpegCoefficients,
     slots: &[u32],
@@ -173,8 +174,7 @@ fn plan_slots(
     let mut plan = SlotPlan {
         vals: Vec::with_capacity(slots.len()),
         moves: Vec::with_capacity(slots.len()),
-        rho_plus: Vec::with_capacity(slots.len()),
-        rho_minus: Vec::with_capacity(slots.len()),
+        sparse_overrides: table.map(|_| Vec::with_capacity(slots.len())),
     };
 
     let mut last_block = usize::MAX;
@@ -218,31 +218,27 @@ fn plan_slots(
             // everywhere else).
             (false, false) => Move::Both,
         };
-        // A cross-zero move stays legal but is priced at the wet cost when the
-        // Huffman table is over-optimised: it may not even be encodable, since it
-        // shifts the run of every following coefficient in the block. Banning it
-        // instead dead-ends group windows on sparse carriers, so it is priced.
-        // With a complete table the ordinary UERD cost applies: the objective
-        // stays "minimise weighted distortion", and a size penalty would trade
-        // detectability for file size, which is the wrong trade.
-        let plus_cost = if !allow_plus {
-            f64::INFINITY
-        } else if table.is_some() && crosses_zero_plus {
-            wet_cost
-        } else {
-            base
-        };
-        let minus_cost = if !allow_minus {
-            f64::INFINITY
-        } else if table.is_some() && crosses_zero_minus {
-            wet_cost
-        } else {
-            base * polarize_weight
-        };
+
+        if let Some(ref mut overrides) = plan.sparse_overrides {
+            let plus_cost = if !allow_plus {
+                f64::INFINITY
+            } else if table.is_some() && crosses_zero_plus {
+                wet_cost
+            } else {
+                base
+            };
+            let minus_cost = if !allow_minus {
+                f64::INFINITY
+            } else if table.is_some() && crosses_zero_minus {
+                wet_cost
+            } else {
+                base * polarize_weight
+            };
+            overrides.push((plus_cost, minus_cost));
+        }
+
         plan.vals.push(parity_carrier(coeff));
         plan.moves.push(mv);
-        plan.rho_plus.push(plus_cost);
-        plan.rho_minus.push(minus_cost);
     }
     plan
 }
@@ -433,6 +429,8 @@ fn embed_once(
 
     // Envelope: the plaintext length fixes the header field, which in turn is
     // the AAD, so encryption has to wait until the superblock is final.
+    let total_coeffs = cover.block_count * 64;
+
     let plaintext = build_plaintext(payload)?;
     let ciphertext_len = plaintext.len() + suite.tag_len();
     let envelope_len = HEADER_OVERHEAD + ciphertext_len;
@@ -445,18 +443,24 @@ fn embed_once(
 
     let master = derive_master(suite, ctx.password, &cover.digest)?;
     let hdr_seed = header_perm_seed(fmt, &master, ctx.domain);
-    let mut hdr_slots = cover.grid.clone();
-    permute_indices(&mut hdr_slots, &hdr_seed);
-    hdr_slots.truncate(hdr_n);
 
-    let body_grid = v3_layout::body_grid(&cover.grid, &hdr_slots, cover.block_count);
-    let layout = v3_layout::compute(n_total, hdr_n, bits, params.stc_h, params.slot_budget)?;
+    // Single working buffer for the carrier AC grid (eliminates 336 MB of redundant Vec clones).
+    let mut slots_buf = v3_layout::grid_indices(cover.block_count, fmt.grid_rule);
+    permute_indices(&mut slots_buf, &hdr_seed);
+    let hdr_slots = slots_buf[..hdr_n].to_vec();
+
+    // Reconstruct body grid in-place into the same allocated buffer!
+    v3_layout::fill_body_grid(&mut slots_buf, &hdr_slots, cover.block_count, fmt.grid_rule);
+    let body_grid_len = slots_buf.len();
+
+    let effective_budget = params.effective_slot_budget(body_grid_len);
+    let layout = v3_layout::compute(n_total, hdr_n, bits, params.stc_h, effective_budget)?;
 
     // Safety tier: advisory (warn upstream) or enforced bpp ceiling.
     if params.safety_enforcement == SafetyEnforcement::Enforced {
-        let max = enforced_payload_limit(n_total, body_grid.len(), params);
+        let max = enforced_payload_limit(total_coeffs, body_grid_len, params);
         if payload.len() > max {
-            let bpp = (payload.len() * 8) as f64 / (cover.block_count * 64) as f64;
+            let bpp = (payload.len() * 8) as f64 / total_coeffs as f64;
             return Err(Attempt::from(StrHideError::General(format!(
                 "Payload ({} bytes, bpp {:.4}) exceeds safety threshold ({} bytes, bpp <= {:.2}) for tier '{}'",
                 payload.len(),
@@ -525,12 +529,11 @@ fn embed_once(
     }
 
     // 3) Body: the ciphertext, over a keyed permutation of the body grid.
-    let mut body_slots = body_grid;
-    permute_indices(&mut body_slots, &perm_seed);
-    body_slots.truncate(layout.body_n);
+    permute_indices(&mut slots_buf, &perm_seed);
+    slots_buf.truncate(layout.body_n);
     embed_slots(
         &mut work,
-        &body_slots,
+        &slots_buf,
         fmt,
         ctx.costs,
         ctx.table,
@@ -602,11 +605,21 @@ fn embed_slots(
     );
     let trellis = StcTrellis::from_seed_grouped(seed, h, u)?;
     let mut deltas = vec![0i8; slots.len()];
-    trellis.embed_with_deltas(
+    let wet_cost = params.wet_cost;
+    let polarize_weight = params.polarize_weight;
+    let rule = fmt.grid_rule;
+    trellis.embed_with_cost_fn(
         &plan.vals,
         &plan.moves,
-        &plan.rho_plus,
-        &plan.rho_minus,
+        |j| {
+            if let Some(ref overrides) = plan.sparse_overrides {
+                overrides[j]
+            } else {
+                let (bi, k) = v3_layout::slot_to_coeff(slots[j], rule);
+                let base = costs[bi * 64 + k].min(wet_cost);
+                (base, base * polarize_weight)
+            }
+        },
         message,
         &mut deltas,
     )?;
@@ -655,6 +668,8 @@ pub fn extract_jpeg(
 
     let password = password.unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET);
 
+    let mut slots_buf = v3_layout::grid_indices(cover.block_count, fmt.grid_rule);
+
     // Trial enumeration: ascending suite id, one KDF per attempt. A wrong
     // password and a non-carrier both end here, with the same error.
     for suite in fmt.suites {
@@ -668,14 +683,23 @@ pub fn extract_jpeg(
             continue;
         };
         let hdr_seed = header_perm_seed(fmt, &master, domain);
-        let mut hdr_slots = cover.grid.clone();
-        permute_indices(&mut hdr_slots, &hdr_seed);
+
+        // Reset and reuse the single preallocated working buffer
+        let per_block = fmt.grid_rule.slots_per_block();
+        slots_buf.clear();
+        for bi in 0..cover.block_count {
+            let base = (bi * per_block) as u32;
+            for s in 0..per_block {
+                slots_buf.push(base + s as u32);
+            }
+        }
+        permute_indices(&mut slots_buf, &hdr_seed);
 
         let sb_n = fmt.superblock_slots();
-        if hdr_slots.len() < sb_n {
+        if slots_buf.len() < sb_n {
             continue;
         }
-        let Some(superblock) = read_superblock(&coeffs, &hdr_slots[..sb_n], fmt, &hdr_seed, domain)
+        let Some(superblock) = read_superblock(&coeffs, &slots_buf[..sb_n], fmt, &hdr_seed, domain)
         else {
             continue;
         };
@@ -692,7 +716,7 @@ pub fn extract_jpeg(
         if hdr_n > n_total {
             continue;
         }
-        hdr_slots.truncate(hdr_n);
+        let hdr_slots = slots_buf[..hdr_n].to_vec();
 
         let ext_slots = &hdr_slots[sb_n..hdr_n];
         let extension_area = if ext_bytes > 0 {
@@ -714,19 +738,23 @@ pub fn extract_jpeg(
 
         let ciphertext_len = superblock.ciphertext_len();
         let bits = ciphertext_len * 8;
-        let body_grid = v3_layout::body_grid(&cover.grid, &hdr_slots, cover.block_count);
+
+        // Reconstruct body grid in-place into the same working buffer!
+        v3_layout::fill_body_grid(&mut slots_buf, &hdr_slots, cover.block_count, fmt.grid_rule);
+        let body_grid_len = slots_buf.len();
         let window = bits + superblock.h as usize - 1;
-        let body_n = superblock.u as usize * window;
-        if body_n > body_grid.len() {
+        let Some(body_n) = window.checked_mul(superblock.u as usize) else {
+            continue;
+        };
+        if body_n > body_grid_len {
             continue;
         }
         let (enc_key, perm_seed) = body_keys(fmt, &master, &superblock.salt, domain);
-        let mut body_slots = body_grid;
-        permute_indices(&mut body_slots, &perm_seed);
-        body_slots.truncate(body_n);
+        permute_indices(&mut slots_buf, &perm_seed);
+        slots_buf.truncate(body_n);
         let Some(ciphertext) = read_bits(
             &coeffs,
-            &body_slots,
+            &slots_buf,
             fmt.grid_rule,
             stc_seed(fmt, &perm_seed, &superblock.salt),
             superblock.h,
@@ -875,6 +903,8 @@ pub fn probe_capacity_with_format(
     let max_raw_payload_bytes = max_ciphertext_bytes.saturating_sub(BODY_OVERHEAD);
 
     let total_coeffs = block_count * 64;
+    let effective_budget = params.effective_slot_budget(body_slots);
+
     let bpp_bits = (total_coeffs as f64 * safety_level.bpp_limit()).floor() as usize;
     let ratio_bits = (body_slots as f64 / safety_level.target_ratio()).floor() as usize;
     let recommended_max_bytes = (bpp_bits.min(ratio_bits) / 8).saturating_sub(BODY_OVERHEAD);
@@ -887,7 +917,7 @@ pub fn probe_capacity_with_format(
         hdr_n,
         recommended_bits,
         params.stc_h,
-        params.slot_budget,
+        effective_budget,
     )
     .map(|layout| layout.u)
     .unwrap_or(1);
@@ -914,16 +944,23 @@ pub fn layout_for_payload(
     fmt: &FormatProfile,
 ) -> Result<Layout, StrHideError> {
     let coeffs = dct_io::read_coefficients(carrier_bytes).map_err(map_dct_error)?;
+    if coeffs.components.is_empty() {
+        return Err(StrHideError::UnsupportedFormat(
+            "JPEG has no image components".into(),
+        ));
+    }
     let block_count = coeffs.components[0].blocks.len();
     let n_total = block_count * fmt.grid_rule.slots_per_block();
     let ext_bytes = encode_extension(&params.extensions)?.len();
     let hdr_n = fmt.header_slots(ext_bytes);
     let ciphertext_len = payload_len + 5 + 16;
+    let body_slots = n_total.saturating_sub(hdr_n);
+    let effective_budget = params.effective_slot_budget(body_slots);
     v3_layout::compute(
         n_total,
         hdr_n,
         ciphertext_len * 8,
         params.stc_h,
-        params.slot_budget,
+        effective_budget,
     )
 }

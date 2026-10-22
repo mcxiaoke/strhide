@@ -375,6 +375,19 @@ impl JpegParams {
         Ok(())
     }
 
+    /// Compute the effective slot budget for layout optimization.
+    ///
+    /// For the default budget setting, scales dynamically with carrier capacity (`body_slots / 4`)
+    /// so large carriers (e.g. 24 MP+) maintain optimal low-distortion group sizes (u >= 2) without
+    /// excessive memory footprint. If the caller explicitly supplied a custom budget, it is respected.
+    pub fn effective_slot_budget(&self, body_slots: usize) -> usize {
+        if self.slot_budget == DEFAULT_SLOT_BUDGET {
+            self.slot_budget.max(body_slots / 4)
+        } else {
+            self.slot_budget
+        }
+    }
+
     /// Warn (not fail) when the budget is too small to spread the payload.
     ///
     /// A tiny budget still produces a valid carrier, it just selects `u = 1`,

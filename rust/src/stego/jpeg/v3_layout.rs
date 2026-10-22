@@ -102,7 +102,7 @@ pub fn compute(
             "Capacity exceeded: need {window} slots for {bits} payload bits (h={h}), have {body_grid_len}"
         )));
     }
-    let u_budget = (slot_budget / window).clamp(1, KERNEL_MAX_U as usize);
+    let u_budget = (slot_budget / window).max(1);
     let u = u_capacity.min(u_budget).min(KERNEL_MAX_U as usize) as u8;
     let body_n = u as usize * window;
     debug_assert!(body_n <= body_grid_len);
@@ -145,17 +145,51 @@ pub fn grid_indices(block_count: usize, rule: GridRule) -> Vec<u32> {
 
 /// `Grid \ HdrSlots`, still in ascending flat-index order.
 ///
-/// Operates on a bitset over the full coefficient space (`block_count * 64`)
-/// so the result order is exactly `grid`'s order.
-pub fn body_grid(grid: &[u32], hdr: &[u32], block_count: usize) -> Vec<u32> {
-    let mut is_header = vec![false; block_count * 64];
-    for &idx in hdr {
-        is_header[idx as usize] = true;
+/// Uses sorted header exclusion for linear two-pointer scanning with zero hash overhead.
+pub fn body_grid(grid: &[u32], hdr: &[u32], _block_count: usize) -> Vec<u32> {
+    let mut out = Vec::with_capacity(grid.len().saturating_sub(hdr.len()));
+    let mut sorted_hdr = hdr.to_vec();
+    sorted_hdr.sort_unstable();
+    sorted_hdr.dedup();
+
+    let mut hdr_idx = 0;
+    for &idx in grid {
+        if hdr_idx < sorted_hdr.len() && idx == sorted_hdr[hdr_idx] {
+            hdr_idx += 1;
+        } else {
+            out.push(idx);
+        }
     }
-    grid.iter()
-        .copied()
-        .filter(|&idx| !is_header[idx as usize])
-        .collect()
+    out
+}
+
+/// Fill `dest` with `Grid \ HdrSlots` in ascending flat-index order, reusing `dest`'s existing heap allocation.
+///
+/// Avoids reallocating 112 MB+ index vectors on large carriers (e.g. 24 MP+) and achieves
+/// zero hash overhead by generating continuous index slices between sorted header slots.
+pub fn fill_body_grid(dest: &mut Vec<u32>, hdr: &[u32], block_count: usize, rule: GridRule) {
+    dest.clear();
+    let per_block = rule.slots_per_block();
+    let n_total = (block_count * per_block) as u32;
+    dest.reserve((n_total as usize).saturating_sub(hdr.len()));
+
+    let mut sorted_hdr = hdr.to_vec();
+    sorted_hdr.sort_unstable();
+    sorted_hdr.dedup();
+
+    let mut cur = 0u32;
+    for &h in &sorted_hdr {
+        if h >= n_total {
+            break;
+        }
+        if h > cur {
+            dest.extend(cur..h);
+        }
+        cur = h + 1;
+    }
+    if cur < n_total {
+        dest.extend(cur..n_total);
+    }
 }
 
 /// Flat slot index -> `(block, coefficient index)`.
@@ -323,5 +357,16 @@ mod tests {
         assert!(layout.body_n <= layout.body_grid_len);
         // One more bit does not fit at u = 1.
         assert!(compute(2_419_200, 718, bits + 8, 8, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn payload_exceeding_slot_budget_falls_back_to_u_one() {
+        let bits = 8 * (4096 + 21);
+        let n = 38_400 * 63;
+        let window = bits + 7;
+        // When budget is smaller than window, it smoothly falls back to u = 1 without failing.
+        let layout = compute(n, 718, bits, 8, window - 1).unwrap();
+        assert_eq!(layout.u, 1);
+        assert_eq!(layout.body_n, window);
     }
 }
