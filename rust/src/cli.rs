@@ -2185,6 +2185,7 @@ fn handle_embed(
     }
 
     for_each_carrier(&args.carrier, quiet, |carrier| {
+        let t_start = std::time::Instant::now();
         let carrier_bytes = std::fs::read(carrier)?;
 
         let mut options = embed_stego_options(&args, password.as_deref(), quiet, true)?;
@@ -2240,6 +2241,12 @@ fn handle_embed(
         }
 
         if !quiet {
+            let elapsed = t_start.elapsed();
+            let elapsed_str = if elapsed.as_secs_f64() < 1.0 {
+                format!("{:.0}ms", elapsed.as_secs_f64() * 1000.0)
+            } else {
+                format!("{:.2}s", elapsed.as_secs_f64())
+            };
             let is_inplace = crate::engine::same_file(carrier, &dest);
             if is_inplace {
                 println!(
@@ -2247,7 +2254,8 @@ fn handle_embed(
                     t!(
                         Msg::EmbedOkInPlace,
                         bytes = payload_bytes.len(),
-                        carrier = carrier.display()
+                        carrier = carrier.display(),
+                        elapsed = elapsed_str
                     )
                 );
             } else {
@@ -2257,7 +2265,8 @@ fn handle_embed(
                         Msg::EmbedOkDest,
                         bytes = payload_bytes.len(),
                         carrier = carrier.display(),
-                        dest = dest.display()
+                        dest = dest.display(),
+                        elapsed = elapsed_str
                     )
                 );
             }

@@ -316,6 +316,9 @@ pub struct JpegParams {
 /// memory. See `docs/stc_v3_phase3_eval_20261021.md`.
 pub const DEFAULT_SLOT_BUDGET: usize = 1_200_000;
 
+/// Upper limit for automatic dynamic scaling of slot budget on massive carriers.
+pub const MAX_DEFAULT_SLOT_BUDGET: usize = 2_400_000;
+
 fn default_cipher_suite() -> u16 {
     crate::stego::format::DEFAULT_SUITE_ID
 }
@@ -387,7 +390,7 @@ impl JpegParams {
     pub fn effective_slot_budget(&self, body_slots: usize) -> usize {
         match self.slot_budget {
             Some(budget) => budget,
-            None => DEFAULT_SLOT_BUDGET.max(body_slots / 4),
+            None => DEFAULT_SLOT_BUDGET.max((body_slots / 4).min(MAX_DEFAULT_SLOT_BUDGET)),
         }
     }
 }

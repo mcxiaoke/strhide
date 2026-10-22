@@ -708,11 +708,11 @@ crate::i18n_messages! {
 
     // ---- Embed execution ----
     EmbedOkDest:
-        en = "[OK] Embedded {bytes} payload bytes into '{carrier}' -> '{dest}'",
-        zh = "[OK] 成功将 {bytes} 字节载荷嵌入 '{carrier}' -> '{dest}'";
+        en = "[OK] Embedded {bytes} payload bytes into '{carrier}' -> '{dest}' (took {elapsed})",
+        zh = "[OK] 成功将 {bytes} 字节载荷嵌入 '{carrier}' -> '{dest}'（耗时 {elapsed}）";
     EmbedOkInPlace:
-        en = "[OK] Embedded {bytes} payload bytes in-place into '{carrier}'",
-        zh = "[OK] 成功将 {bytes} 字节载荷原地嵌入 '{carrier}'";
+        en = "[OK] Embedded {bytes} payload bytes in-place into '{carrier}' (took {elapsed})",
+        zh = "[OK] 成功将 {bytes} 字节载荷原地嵌入 '{carrier}'（耗时 {elapsed}）";
 
     // ---- Multi-carrier batch execution ----
     FailCarrier:

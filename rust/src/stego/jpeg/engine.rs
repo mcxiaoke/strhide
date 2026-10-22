@@ -916,13 +916,14 @@ pub fn probe_capacity_with_format(
 ) -> Result<StegoCapacityInfo, StrHideError> {
     fmt.validate()?;
     params.validate()?;
-    let coeffs = dct_io::read_coefficients(carrier_bytes).map_err(map_dct_error)?;
-    if coeffs.components.is_empty() {
+    let info = dct_io::inspect(carrier_bytes).map_err(map_dct_error)?;
+    if info.components.is_empty() {
         return Err(StrHideError::UnsupportedFormat(
             "JPEG has no image components".into(),
         ));
     }
-    let block_count = coeffs.components[0].blocks.len();
+    let geom = crate::stego::jpeg::geometry::component_geometry(&info, 0, 0);
+    let block_count = geom.grid_w * geom.grid_h;
     let n_total = block_count * fmt.grid_rule.slots_per_block();
     let ext_bytes = encode_extension(&params.extensions)?.len();
     let hdr_n = fmt.header_slots(ext_bytes);

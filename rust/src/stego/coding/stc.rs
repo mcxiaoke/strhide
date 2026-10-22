@@ -404,6 +404,7 @@ impl StcTrellis {
         let store_extra = u > 1;
         let state_bits = (h - 1) + usize::from(store_extra);
         let states = 1usize << state_bits;
+        let bytes_per_col = states / 4;
         let low_mask = (1usize << (h - 1)) - 1;
         let extra_shift = h - 1;
         let inf = f64::INFINITY;
@@ -412,10 +413,9 @@ impl StcTrellis {
         cost[0] = 0.0;
         let mut next = vec![inf; states];
         // Two bits per (column, state): 4 decisions per byte.
-        let mut back = vec![0u8; (n * states).div_ceil(4)];
+        let mut back = vec![0u8; n * bytes_per_col];
 
         for j in 0..n {
-            next.iter_mut().for_each(|c| *c = inf);
             let g = j / u;
             let s = j % u;
             let col = self.cols[s] as usize;
@@ -423,58 +423,101 @@ impl StcTrellis {
             let col_top = (col >> (h - 1)) & 1;
             let decide = s == u - 1;
 
-            // The row finalised when this element closes its group, or None
-            // while the trellis is still warming up.
-            let row = g as isize - (h as isize - 1);
-            let want = if row >= 0 {
-                message_bit(message, row as usize)
-            } else {
-                0
-            };
+            let col_start = j * bytes_per_col;
+            let col_back = &mut back[col_start..col_start + bytes_per_col];
+
             let (rp, rm) = cost_fn(j);
             let opts = parity_options(vals[j], moves[j], rp, rm);
+            let opt0 = opts[0].best;
+            let opt1 = opts[1].best;
 
-            for (state, &base) in cost.iter().enumerate().take(states) {
-                if base.is_infinite() {
-                    continue;
+            if !decide {
+                let col_delta = if store_extra {
+                    col_low | (col_top << extra_shift)
+                } else {
+                    col_low
+                };
+
+                // When not deciding, every state transition is 1-to-1 without merges:
+                // parity 0 -> state (stays the same)
+                // parity 1 -> state ^ col_delta
+                if let Some((dcost0, kind0)) = opt0 {
+                    col_back.fill((kind0 as u8) * 0x55);
+                    for (state, &base) in cost.iter().enumerate().take(states) {
+                        next[state] = if base.is_infinite() {
+                            inf
+                        } else {
+                            base + dcost0
+                        };
+                    }
+                } else {
+                    next.fill(inf);
+                    col_back.fill(0);
                 }
-                let st = state & low_mask;
-                let extra = if store_extra { state >> extra_shift } else { 0 };
 
-                for (parity, opt) in opts.iter().enumerate() {
-                    let Some((dcost, kind)) = opt.best else {
-                        continue;
-                    };
-                    let (st1, ex1) = if parity == 1 {
-                        (st ^ col_low, extra ^ col_top)
-                    } else {
-                        (st, extra)
-                    };
-                    let (nst, nex) = if decide {
-                        // Warm-up rows (`row < 0`) are finalised against
-                        // `want == 0` as well. The backtracker rebuilds the
-                        // previous state from `want`, so a row that is left
-                        // unconstrained here would desynchronise the replay the
-                        // moment a warm-up column flips.
-                        if (st1 & 1) != want {
-                            continue;
+                if let Some((dcost1, kind1)) = opt1 {
+                    for (state, &base) in cost.iter().enumerate().take(states) {
+                        if !base.is_infinite() {
+                            let ns = state ^ col_delta;
+                            let nc = base + dcost1;
+                            if nc < next[ns] {
+                                next[ns] = nc;
+                                let byte_idx = ns >> 2;
+                                let shift = (ns & 3) * 2;
+                                col_back[byte_idx] = (col_back[byte_idx] & !(0b11 << shift))
+                                    | ((kind1 as u8) << shift);
+                            }
                         }
-                        ((st1 >> 1) | (ex1 << (h - 2)), 0)
-                    } else {
-                        (st1, ex1)
-                    };
-                    let ns = if store_extra {
-                        nst | (nex << extra_shift)
-                    } else {
-                        nst
-                    };
-                    let nc = base + dcost;
-                    if nc < next[ns] {
-                        next[ns] = nc;
-                        let idx = j * states + ns;
-                        let shift = (idx & 3) * 2;
-                        back[idx >> 2] =
-                            (back[idx >> 2] & !(0b11 << shift)) | ((kind as u8) << shift);
+                    }
+                }
+            } else {
+                next.fill(inf);
+                col_back.fill(0);
+                let row = g as isize - (h as isize - 1);
+                let want = if row >= 0 {
+                    message_bit(message, row as usize)
+                } else {
+                    0
+                };
+
+                // When deciding, only transitions satisfying (st1 & 1) == want are valid.
+                for (state, &base) in cost.iter().enumerate() {
+                    if base.is_infinite() {
+                        continue;
+                    }
+                    let st = state & low_mask;
+                    let extra = if store_extra { state >> extra_shift } else { 0 };
+
+                    if let Some((dcost0, kind0)) = opt0 {
+                        // parity 0: st1 = st, ex1 = extra
+                        if (st & 1) == want {
+                            let ns = (st >> 1) | (extra << (h - 2));
+                            let nc = base + dcost0;
+                            if nc < next[ns] {
+                                next[ns] = nc;
+                                let byte_idx = ns >> 2;
+                                let shift = (ns & 3) * 2;
+                                col_back[byte_idx] = (col_back[byte_idx] & !(0b11 << shift))
+                                    | ((kind0 as u8) << shift);
+                            }
+                        }
+                    }
+
+                    if let Some((dcost1, kind1)) = opt1 {
+                        // parity 1: st1 = st ^ col_low, ex1 = extra ^ col_top
+                        let st1 = st ^ col_low;
+                        let ex1 = extra ^ col_top;
+                        if (st1 & 1) == want {
+                            let ns = (st1 >> 1) | (ex1 << (h - 2));
+                            let nc = base + dcost1;
+                            if nc < next[ns] {
+                                next[ns] = nc;
+                                let byte_idx = ns >> 2;
+                                let shift = (ns & 3) * 2;
+                                col_back[byte_idx] = (col_back[byte_idx] & !(0b11 << shift))
+                                    | ((kind1 as u8) << shift);
+                            }
+                        }
                     }
                 }
             }
