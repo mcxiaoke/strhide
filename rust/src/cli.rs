@@ -329,7 +329,7 @@ pub struct EmbedArgs {
         short = 'a',
         long = "algorithm",
         value_name = "NAME",
-        help = "Distortion cost algorithm (auto|hill|uerd; default: auto - hill for PNG, uerd for JPEG)"
+        help = "Distortion cost algorithm (auto|hill|suniward|uerd|juniward; default: auto - hill for PNG, uerd for JPEG)"
     )]
     pub algorithm: Option<String>,
 
@@ -461,7 +461,7 @@ pub struct ExtractArgs {
         short = 'a',
         long = "algorithm",
         value_name = "NAME",
-        help = "Distortion cost algorithm (auto|hill|uerd; default: auto)"
+        help = "Distortion cost algorithm (auto|hill|suniward|uerd|juniward; default: auto)"
     )]
     pub algorithm: Option<String>,
 

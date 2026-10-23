@@ -20,7 +20,7 @@ use strhide::stego::registry::CostModelRegistry;
 use strhide::stego::spatial::engine::{SPATIAL_ELIGIBLE_MAX, SPATIAL_ELIGIBLE_MIN};
 use strhide::stego::spatial::{RawImage, decode_png, encode_png};
 use strhide::stego::traits::SpatialCostModel;
-use strhide::stego::{SpatialParams, StegoOptions, embed_carrier};
+use strhide::stego::{SpatialParams, StegoOptions, embed_carrier, extract_carrier};
 
 /// Deterministic high-frequency texture, so the carrier is embeddable.
 fn texture_png(w: u32, h: u32) -> Vec<u8> {
@@ -145,4 +145,42 @@ fn unknown_algorithm_id_is_reported_as_no_payload() {
     // falling back to the default model and decoding noise.
     assert!(CostModelRegistry::spatial_model_from_wire_id(0).is_none());
     assert!(CostModelRegistry::spatial_model_from_wire_id(200).is_none());
+}
+
+/// The real payoff: write with a non-default model, read back with nothing
+/// declared. Without the header carrying the algorithm id this is impossible --
+/// the extractor would rank slots with HILL's cost map and desynchronise.
+#[test]
+fn a_suniward_carrier_extracts_while_the_caller_defaults_to_hill() {
+    let png = texture_png(96, 96);
+    let payload = b"written by suniward, read by hill defaults";
+
+    let write = StegoOptions {
+        algorithm: Some("suniward".into()),
+        ..Default::default()
+    };
+    let stego = embed_carrier(&png, payload, &write).expect("embed with S-UNIWARD");
+
+    let fw = read_feature_word(&stego);
+    assert_eq!(
+        CostModelRegistry::spatial_name_from_wire_id(fw.algorithm_id),
+        Some("suniward"),
+        "the carrier must declare the model that actually wrote it"
+    );
+
+    // Extraction with the default options: `algorithm` is None, so the caller
+    // offers HILL. The carrier's declaration must win.
+    let got = extract_carrier(&stego, &StegoOptions::default())
+        .expect("extraction must follow the carrier, not the default model");
+    assert_eq!(got, payload);
+
+    // And naming a *different* model explicitly must not change the outcome.
+    let read = StegoOptions {
+        algorithm: Some("hill".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        extract_carrier(&stego, &read).expect("explicit hill"),
+        payload
+    );
 }

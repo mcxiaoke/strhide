@@ -19,11 +19,13 @@
 use std::sync::Arc;
 
 use crate::stego::jpeg::cost::{JuniwardCostModel, UerdCostModel};
-use crate::stego::spatial::cost::HillCostModel;
+use crate::stego::spatial::cost::{HillCostModel, SuniwardCostModel};
 use crate::stego::traits::{JpegCostModel, SpatialCostModel};
 
 /// Wire id of [`HillCostModel`]. Reserved permanently.
 pub const SPATIAL_ALGORITHM_HILL: u8 = 1;
+/// Wire id of [`SuniwardCostModel`]. Reserved permanently.
+pub const SPATIAL_ALGORITHM_SUNIWARD: u8 = 2;
 
 /// Registry providing lookup of distortion cost models.
 pub struct CostModelRegistry;
@@ -31,9 +33,14 @@ pub struct CostModelRegistry;
 impl CostModelRegistry {
     /// Look up a spatial cost model by algorithm identifier.
     /// Default model is "hill" if None or "auto" is requested.
+    ///
+    /// "auto" stays on HILL. S-UNIWARD is available but the 2025-2026 CNN
+    /// evaluations put HILL's detection rate *below* the UNIWARD family, so
+    /// promoting it to the default would be a change with no evidence behind it.
     pub fn get_spatial_model(name: Option<&str>) -> Option<Arc<dyn SpatialCostModel>> {
         match name {
             None | Some("auto") | Some("hill") => Some(Arc::new(HillCostModel)),
+            Some("suniward") => Some(Arc::new(SuniwardCostModel)),
             _ => None,
         }
     }
@@ -60,6 +67,7 @@ impl CostModelRegistry {
     pub fn spatial_wire_id(name: &str) -> Option<u8> {
         match name {
             "hill" => Some(SPATIAL_ALGORITHM_HILL),
+            "suniward" => Some(SPATIAL_ALGORITHM_SUNIWARD),
             _ => None,
         }
     }
@@ -68,6 +76,7 @@ impl CostModelRegistry {
     pub fn spatial_name_from_wire_id(id: u8) -> Option<&'static str> {
         match id {
             SPATIAL_ALGORITHM_HILL => Some("hill"),
+            SPATIAL_ALGORITHM_SUNIWARD => Some("suniward"),
             _ => None,
         }
     }
@@ -89,6 +98,11 @@ impl CostModelRegistry {
                 "hill",
                 "Spatial (PNG)",
                 "High-Low-Low content-adaptive filter (Li et al., ICIP 2014)",
+            ),
+            (
+                "suniward",
+                "Spatial (PNG)",
+                "S-UNIWARD wavelet-relative distortion (Holub et al., EURASIP JIS 2014)",
             ),
             (
                 "uerd",
