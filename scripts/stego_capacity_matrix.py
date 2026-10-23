@@ -130,7 +130,7 @@ GRID_SLOTS_PER_BLOCK = 63  # GridRule::ALL_AC, k = 1..63
 HDR_SLOTS = 746  # superblock 718 + minimum extension area 28
 STC_H = 8
 DEFAULT_SLOT_BUDGET = 1_200_000
-MAX_AUTO_BACKTRACK_BYTES = 256 << 20
+MAX_AUTO_BACKTRACK_BYTES = 4 << 30  # 4 GiB
 KERNEL_MAX_U = 64
 BODY_OVERHEAD = 21  # 4-byte length + 1 flags + 16-byte tag
 
@@ -162,7 +162,7 @@ def predict_layout(w: int, h: int, payload_len: int, slot_budget: int | None,
     # On an over-optimised table, u < 3 is lifted to u = 3 (grouped floor)
     # or rejected if u = 3 does not fit.
     if is_over_optimised and u < 3:
-        room = min(body_grid, (512 << 20) // 32)
+        room = min(body_grid, (4 << 30) // 32)
         if window > 0 and room // window >= 3:
             budget = max(budget, 3 * window)
             u_budget = budget // window
@@ -266,7 +266,7 @@ def run_scan(binary: str, stego: str, timeout: int = 60) -> dict:
     cmd = [binary, "scan", "--json", stego]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
-        if proc.returncode == 0 and proc.stdout:
+        if proc.returncode in (0, 1) and proc.stdout:
             data = json.loads(proc.stdout)
             if isinstance(data, list) and data:
                 report = data[0]

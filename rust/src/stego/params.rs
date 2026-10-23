@@ -339,27 +339,17 @@ pub const DEFAULT_SLOT_BUDGET: usize = 1_200_000;
 ///   `h = 8`, 128 B at `h = 10`), so 256 MiB allows 8.4M slots at `h = 8`;
 /// * time -- bytes per slot and states per slot are the same power of two, so
 ///   they cancel and the worst case is ~1 s of kernel time for *any* `h`.
-pub const MAX_AUTO_BACKTRACK_BYTES: usize = 256 << 20;
+pub const MAX_AUTO_BACKTRACK_BYTES: usize = 4 << 30; // 4 GiB
 
 /// Ceiling on the STC backtracking bitmap for the *correctness-driven* group
 /// size on carriers whose Huffman table is over-optimised.
 ///
-/// [`MAX_AUTO_BACKTRACK_BYTES`] is a distortion/time heuristic and happily
-/// picks `u = 1` for a large payload. `u = 1` is a `(1,1)` parity code: the
-/// solution is unique, so on a carrier with an over-optimised table neither
-/// failure mode can be routed around -- a dead slot (both `±1` directions
-/// closed by the table) in the used set kills the embed outright, and the
-/// forced ~50% change rate makes cross-zero chains that need symbols the
-/// table lacks. Which one hits is a per-salt lottery: measured on a 24 MP
-/// carrier with a 512 KiB payload, `u = 1` never succeeded (0/9), `u = 2`
-/// succeeded 4/10, and `u = 3` 10/10.
-///
-/// A grouped code spreads each payload bit over `u` slots and the trellis
-/// picks the live ones, so `u >= 3` is a correctness requirement rather than
-/// a tuning choice and gets its own, larger ceiling. 512 MiB holds `u = 3`
-/// for a 512 KiB payload on a 24 MP carrier (~403 MiB of bitmap) and for
-/// payloads up to ~683 KiB on any carrier whose grid allows.
-pub const MAX_GROUPED_BACKTRACK_BYTES: usize = 512 << 20;
+/// Set to 4 GiB: modern hardware easily accommodates multi-hundred megabyte
+/// to multi-gigabyte trellis buffers, and huge carriers (50 MP .. 100+ MP)
+/// carrying large payloads (512 KiB .. 4+ MiB) need room for `u >= 3` without
+/// arbitrary artificial ceilings. At `h = 8` (32 B/slot) 4 GiB accommodates
+/// 134M slots, fully unlocking the geometric capacity of massive carriers.
+pub const MAX_GROUPED_BACKTRACK_BYTES: usize = 4 << 30; // 4 GiB
 
 /// Slot ceiling implied by [`MAX_GROUPED_BACKTRACK_BYTES`] at height `h`.
 ///
@@ -723,10 +713,10 @@ mod tests {
 
     #[test]
     fn grouped_backtrack_slot_ceiling_scales_with_height() {
-        // 512 MiB / 32 B per slot at h = 8.
-        assert_eq!(max_grouped_backtrack_slots(8), 512 << 20 >> 5);
+        // 4 GiB / 32 B per slot at h = 8.
+        assert_eq!(max_grouped_backtrack_slots(8), (4usize << 30) >> 5);
         // h = 10 doubles the states per slot, hence halves the slot ceiling.
-        assert_eq!(max_grouped_backtrack_slots(10), (512 << 20) / 128);
+        assert_eq!(max_grouped_backtrack_slots(10), (4usize << 30) / 128);
     }
 
     /// The automatic budget pins a 24 MP carrier holding 512 KiB to `u = 1`,
@@ -766,18 +756,19 @@ mod tests {
         let body_slots = n_total - hdr_n;
         let params = JpegParams::default();
         let auto = params.effective_slot_budget(body_slots);
-        // 700 KiB on 24 MP: 3 * window = 16.80M slots, just past the 512 MiB
-        // ceiling -- refuse instead of dropping to the unreliable `u = 2`.
-        let bits = 8 * (700_000 + 21);
-        assert!(grouped_body_budget(body_slots, bits, params.stc_h, auto).is_none());
+        // 700 KiB on 24 MP: 3 * window = 16.80M slots fits inside the 23.6M grid
+        // and 4 GiB memory ceiling.
+        let bits_700k = 8 * (700_000 + 21);
+        assert!(grouped_body_budget(body_slots, bits_700k, params.stc_h, auto).is_some());
 
-        // 1 MiB on 24 MP: even further out.
+        // 1 MiB on 24 MP requires 3 * 8.388M = 25.16M slots, which exceeds
+        // the 23.6M physical grid of 24 MP, so it is refused.
         let bits_1m = 8 * (1_048_576 + 21);
         assert!(grouped_body_budget(body_slots, bits_1m, params.stc_h, auto).is_none());
 
-        // The same payload at h = 10: the ceiling holds a quarter of the slots.
-        let bits_512k = 8 * (524_288 + 21);
-        assert!(grouped_body_budget(body_slots, bits_512k, 10, auto).is_none());
+        // A massive payload (2 MiB) on 24 MP is well beyond physical grid capacity.
+        let bits_2m = 8 * (2 * 1_048_576 + 21);
+        assert!(grouped_body_budget(body_slots, bits_2m, params.stc_h, auto).is_none());
     }
 
     /// An already-grouped automatic budget is returned untouched.
