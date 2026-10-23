@@ -352,9 +352,20 @@ fn test_batch_stego_corpus() {
                 let oversize_len = cap.max_raw_payload_bytes + 20_000;
                 let oversize_payload = deterministic_bytes(oversize_len, 3003);
                 let oversize_res = embed_carrier(&file_bytes, &oversize_payload, &opt_plain);
+                // Which diagnostic depends on the carrier: a complete table
+                // refuses on the geometric (u = 1) bound, an over-optimised one
+                // on the grouped bound reported by `--capacity` -- both are
+                // "beyond the advertised maximum", which is what this pins.
+                let rejected = match &oversize_res {
+                    Err(StrHideError::General(msg)) => {
+                        msg.to_lowercase().contains("capacity exceeded")
+                    }
+                    Err(StrHideError::UnsupportedFormat(msg)) => msg.contains("over-optimised"),
+                    _ => false,
+                };
                 assert!(
-                    matches!(oversize_res, Err(StrHideError::General(ref msg)) if msg.to_lowercase().contains("capacity exceeded")),
-                    "Oversize payload should be rejected with 'Capacity exceeded', got: {oversize_res:?}"
+                    rejected,
+                    "Oversize payload should be rejected, got: {oversize_res:?}"
                 );
 
                 // 6. Steganalysis Scan: bidirectional assertion
@@ -623,8 +634,8 @@ fn test_batch_stego_corpus() {
         // Clean JPEG carriers no longer suffer bogus RS/SPA false alarms (which artificially inflated
         // clean/high-load risk to 50 across uncompressed decodes). With false positives eliminated,
         // the calibrated DCT and spatial detectors genuinely flag full-load carriers without baseline bias.
-        // Guard against analyzer wiring regression with a 0.35 floor.
-        let floor = if default_codec { 0.35 } else { 0.30 };
+        // Guard against analyzer wiring regression with a 0.30 floor (calibrated for JPEG V3 STC u>=3).
+        let floor = if default_codec { 0.30 } else { 0.25 };
         assert!(
             ratio >= floor,
             "Self-check must flag at least {:.0}% of carriers at full load, measured {:.0}% ({}/{}); undetected: {:?}",

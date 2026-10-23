@@ -448,9 +448,102 @@ fn v3_sparse_huffman_table_never_fails_silently() {
     );
 }
 
+/// An over-optimised Huffman table cannot host `u = 1` -- a `(1,1)` parity
+/// code has no routing freedom around dead slots and cross-zero chains, so
+/// the outcome is a per-salt lottery. The engine must lift the body to a
+/// grouped code instead. An explicit tiny slot budget is what pins the old
+/// layout to `u = 1` here; the grouped floor overrides it.
+#[test]
+fn v3_over_optimised_table_keeps_a_grouped_body() {
+    // `carrier.jpg` is a synthetic cover whose luma AC table defines only the
+    // symbols its own coefficients needed (34 of 162).
+    let cover = fs::read(fixture("carrier.jpg")).expect("read carrier");
+    let payload = incompressible(8, 0x6C0B_51DE);
+    let password = "GroupedBody#1";
+    let options = StegoOptions {
+        password: Some(password.into()),
+        jpeg_params: JpegParams {
+            slot_budget: Some(300), // u_budget = 1 without the grouped floor
+            ..JpegParams::default()
+        },
+        ..Default::default()
+    };
+    let stego = embed_carrier(&cover, &payload, &options).expect("embed must lift u to >= 2");
+    let recovered = extract_carrier(&stego, &extract_opts(password)).expect("extract");
+    assert_eq!(recovered, payload, "grouped body must round-trip");
+}
+
+/// When not even `u = 3` fits the carrier, the embed must refuse immediately
+/// with the actionable diagnostic instead of running a lottery it cannot
+/// win: 5 KiB on the 256x256 fixture leaves room for `u = 1` only, and the
+/// fixture's table is far too sparse for that.
+#[test]
+fn v3_over_optimised_table_refuses_when_no_group_fits() {
+    let cover = fs::read(fixture("carrier.jpg")).expect("read carrier");
+    let payload = incompressible(5_000, 0x5A22_0FFE);
+    let err = embed_carrier(&cover, &payload, &extract_opts("RefuseEarly#1"))
+        .expect_err("must refuse, not gamble");
+    match err {
+        StrHideError::UnsupportedFormat(message) => {
+            assert!(
+                message.contains("Huffman table is over-optimised"),
+                "{message}"
+            );
+            assert!(message.contains("reduce payload"), "{message}");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    // layout_for_payload must refuse with the exact same diagnostic
+    let layout_err = strhide::stego::jpeg::engine::layout_for_payload(
+        &cover,
+        payload.len(),
+        &JpegParams::default(),
+        &strhide::stego::format::DEFAULT_FORMAT,
+    )
+    .expect_err("layout_for_payload must also refuse");
+    match layout_err {
+        StrHideError::UnsupportedFormat(message) => {
+            assert!(message.contains("Huffman table is over-optimised"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+/// An explicit budget that lands on `u = 2` must also be lifted to `u = 3`
+/// on an over-optimised carrier because `u = 2` has insufficient degrees
+/// of freedom to avoid dead slots reliably.
+#[test]
+fn v3_over_optimised_table_lifts_u_two_to_u_three() {
+    let cover = fs::read(fixture("carrier.jpg")).expect("read carrier");
+    let payload = incompressible(8, 0x1234_5678);
+    let password = "LiftU2#1";
+    // window for 8 bytes is (8 + 21)*8 + 7 = 239 slots.
+    // budget = 500 gives u_budget = 500 / 239 = 2.
+    let options = StegoOptions {
+        password: Some(password.into()),
+        jpeg_params: JpegParams {
+            slot_budget: Some(500),
+            ..JpegParams::default()
+        },
+        ..Default::default()
+    };
+    let stego = embed_carrier(&cover, &payload, &options).expect("embed must lift u to 3");
+    let recovered = extract_carrier(&stego, &extract_opts(password)).expect("extract");
+    assert_eq!(recovered, payload, "round-trip bit-exact");
+
+    let layout = strhide::stego::jpeg::engine::layout_for_payload(
+        &cover,
+        payload.len(),
+        &options.jpeg_params,
+        &strhide::stego::format::DEFAULT_FORMAT,
+    )
+    .expect("layout");
+    assert_eq!(layout.u, 3, "layout_for_payload must also report u = 3");
+}
+
 /// The over-optimised-Huffman corpus gate: `std` tables take the fast path,
 /// `opt` tables take the symbol-checked path, and both round-trip at 4 KiB.
-///
 /// Ignored by default: the corpus lives in `temp/` (or `$STRHIDE_STEGO_CORPUS`).
 #[test]
 #[ignore]

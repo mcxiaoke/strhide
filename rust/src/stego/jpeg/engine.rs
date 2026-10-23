@@ -304,7 +304,14 @@ struct EmbedContext<'a> {
 /// read back from it, so a new salt is simply a different valid carrier. The
 /// trellis seed and the slot set are re-derived from that salt, which is what
 /// changes the outcome.
-const EMBED_ATTEMPTS: usize = 3;
+///
+/// Six rather than three: even at `u = 3` an over-optimised carrier has a
+/// per-attempt chance of producing an unencodable cross-zero chain (the
+/// residual of defence 2 -- measured 1m at `u = 3` still failed on a 100 MP
+/// carrier), and each attempt is a full embed. Six turns a per-attempt
+/// failure rate of roughly a third into a per-run one of about one in
+/// twenty.
+const EMBED_ATTEMPTS: usize = 6;
 
 /// A failed attempt: the error, plus whether a fresh salt could change it.
 struct Attempt {
@@ -328,8 +335,11 @@ impl From<StrHideError> for Attempt {
 /// A table that only defines the symbols the *cover* needed cannot always encode
 /// the stego version: a move can need another symbol, and a move that crosses
 /// zero also shifts the runs of later coefficients in the same block -- a chain
-/// no slot-level test can predict. Two defences, in order:
+/// no slot-level test can predict. Three defences, in order:
 ///
+/// 0. the body layout keeps a grouped trellis (`u >= 3`) so the search can
+///    route around dead slots and cross-zero chains at all -- see
+///    [`grouped_body_budget`](crate::stego::params::grouped_body_budget);
 /// 1. moves within the non-zero range whose `(run, category)` is missing are
 ///    closed, and cross-zero moves are priced at the wet cost so the trellis only
 ///    uses them when a whole group window has nothing else;
@@ -466,7 +476,38 @@ fn embed_once(
     let body_grid_len = slots_buf.len();
 
     let effective_budget = params.effective_slot_budget(body_grid_len);
-    let layout = v3_layout::compute(n_total, hdr_n, bits, params.stc_h, effective_budget)?;
+    let mut layout = v3_layout::compute(n_total, hdr_n, bits, params.stc_h, effective_budget)?;
+
+    // An over-optimised Huffman table closes some directions outright (dead
+    // slots) and makes cross-zero moves land on symbols the table lacks.
+    // `u = 1` is a `(1,1)` parity code -- the solution is unique, so neither
+    // can be routed around: one dead slot in the used set fails the embed
+    // outright, and the forced ~50% change rate makes unencodable cross-zero
+    // chains. Which one hits is a per-salt lottery (0/9 measured at `u = 1`,
+    // 4/10 at `u = 2`, 10/10 at `u = 3`, 24 MP carrier, 512 KiB payload), so
+    // `u = 2` is not offered either. Require `u = 3` whenever the carrier's
+    // table is incomplete and the trellis fits; refuse early when it does
+    // not, instead of burning seconds of work to lose a coin flip.
+    if ctx.table.is_some() && layout.u < 3 {
+        match crate::stego::params::grouped_body_budget(
+            body_grid_len,
+            bits,
+            params.stc_h,
+            effective_budget,
+        ) {
+            Some(budget) => {
+                layout = v3_layout::compute(n_total, hdr_n, bits, params.stc_h, budget)?;
+            }
+            None => {
+                return Err(Attempt {
+                    error: StrHideError::UnsupportedFormat(
+                        "This JPEG's Huffman table is over-optimised: it cannot encode the modifications required for this payload size. Please reduce payload or re-save the carrier with a standard (Annex K) table.".into(),
+                    ),
+                    retryable: false,
+                });
+            }
+        }
+    }
 
     // Safety tier: advisory (warn upstream) or enforced bpp ceiling.
     if params.safety_enforcement == SafetyEnforcement::Enforced {
@@ -936,7 +977,24 @@ pub fn probe_capacity_with_format(
 
     // The physical ceiling is `u = 1`; `u` grows from there as the payload
     // shrinks, so this is the largest payload that fits at all.
-    let max_bits = v3_layout::max_payload_bits(body_slots, params.stc_h);
+    let mut max_bits = v3_layout::max_payload_bits(body_slots, params.stc_h);
+    let mut max_raw_is_grouped = false;
+    // ... unless the carrier's Huffman table is over-optimised. `u = 1` then
+    // has no routing freedom around dead slots and cross-zero chains, and
+    // `u = 2` still fails often enough to be a coin flip at these loads, so
+    // the embedder requires `u = 3` (`embed_once`) and the grouped bound is
+    // the real ceiling. Reporting the geometric one here would advertise a
+    // capacity that always fails.
+    if dht::luma_ac_symbols(carrier_bytes).is_some_and(|t| !t.is_complete()) {
+        let room = body_slots.min(crate::stego::params::max_grouped_backtrack_slots(
+            params.stc_h,
+        ));
+        let grouped_bits = (room / 3).saturating_sub(params.stc_h as usize - 1);
+        if grouped_bits < max_bits {
+            max_bits = grouped_bits;
+            max_raw_is_grouped = true;
+        }
+    }
     let max_ciphertext_bytes = max_bits / 8;
     let max_raw_payload_bytes = max_ciphertext_bytes.saturating_sub(BODY_OVERHEAD);
 
@@ -966,6 +1024,7 @@ pub fn probe_capacity_with_format(
         total_elements: total_coeffs,
         available_slots: body_slots,
         max_raw_payload_bytes,
+        max_raw_is_grouped,
         recommended_max_bytes,
         estimated_change_rate: crate::stego::coding::expected_stc_change_rate(u),
         safety_level: safety_level.as_str().into(),
@@ -996,11 +1055,18 @@ pub fn layout_for_payload(
     let ciphertext_len = payload_len + 5 + 16;
     let body_slots = n_total.saturating_sub(hdr_n);
     let effective_budget = params.effective_slot_budget(body_slots);
-    v3_layout::compute(
-        n_total,
-        hdr_n,
-        ciphertext_len * 8,
-        params.stc_h,
-        effective_budget,
-    )
+    let bits = ciphertext_len * 8;
+    // Same grouped floor the embedder applies: report the layout the embed
+    // will actually use, not the one the distortion heuristic alone picks.
+    let budget = if dht::luma_ac_symbols(carrier_bytes).is_some_and(|t| !t.is_complete()) {
+        crate::stego::params::grouped_body_budget(body_slots, bits, params.stc_h, effective_budget)
+            .ok_or_else(|| {
+                StrHideError::UnsupportedFormat(
+                    "This JPEG's Huffman table is over-optimised: it cannot encode the modifications required for this payload size. Please reduce payload or re-save the carrier with a standard (Annex K) table.".into(),
+                )
+            })?
+    } else {
+        effective_budget
+    };
+    v3_layout::compute(n_total, hdr_n, bits, params.stc_h, budget)
 }

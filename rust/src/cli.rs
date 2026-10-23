@@ -386,6 +386,7 @@ pub struct EmbedArgs {
         value_name = "INT",
         help = "Fine-tune (JPEG V3): trellis slot budget; a larger budget spreads each payload bit over more \
                 coefficients (fewer changes per coefficient), at the cost of time and memory. Default: automatic -- a quarter of the carrier's coefficient grid (at least 1200000 slots), so the group size follows the carrier instead of falling back to u=1. \
+                On a carrier with an over-optimised Huffman table the value is still raised when needed to keep u>=3 (correctness, not tuning). \
                 Extraction does not need this value."
     )]
     pub slot_budget: Option<usize>,
@@ -1432,10 +1433,15 @@ fn print_inspect_result(res: &crate::engine::InspectResult) {
         println!("{}", t!(Msg::InspectStegoAlgorithm, val = cap.algorithm));
         println!("{}", t!(Msg::InspectStegoSlots, val = cap.available_slots));
         let kib = cap.max_raw_payload_bytes as f64 / 1024.0;
+        let max_raw_msg = if cap.max_raw_is_grouped {
+            Msg::InspectStegoMaxRawGrouped
+        } else {
+            Msg::InspectStegoMaxRaw
+        };
         println!(
             "{}",
             t!(
-                Msg::InspectStegoMaxRaw,
+                max_raw_msg,
                 bytes = cap.max_raw_payload_bytes,
                 kib = format_args!("{kib:.1}")
             )
@@ -2109,10 +2115,15 @@ fn handle_embed(
                 t!(Msg::StegoProbePayloadSlots, val = cap.available_slots)
             );
             let kib = cap.max_raw_payload_bytes as f64 / 1024.0;
+            let max_raw_msg = if cap.max_raw_is_grouped {
+                Msg::StegoProbeMaxRawGrouped
+            } else {
+                Msg::StegoProbeMaxRaw
+            };
             println!(
                 "{}",
                 t!(
-                    Msg::StegoProbeMaxRaw,
+                    max_raw_msg,
                     bytes = cap.max_raw_payload_bytes,
                     kib = format_args!("{kib:.1}")
                 )

@@ -634,6 +634,9 @@ crate::i18n_messages! {
     InspectStegoMaxRaw:
         en = "  Max Raw:         {bytes} bytes ({kib:.1} KiB)",
         zh = "  最大原始载荷: {bytes} 字节 ({kib:.1} KiB)";
+    InspectStegoMaxRawGrouped:
+        en = "  Max Raw:         {bytes} bytes ({kib:.1} KiB) (grouped-code bound; Huffman table over-optimised, u=1 refused)",
+        zh = "  最大原始载荷: {bytes} 字节 ({kib:.1} KiB)（分组码上限；Huffman 表过优化，u=1 不可用）";
     InspectStegoSafeMax:
         en = "  Safe Max:        {bytes} bytes ({kib:.1} KiB) (high stealth)",
         zh = "  推荐安全容量: {bytes} 字节 ({kib:.1} KiB)（高抗检隐蔽）";
@@ -699,6 +702,9 @@ crate::i18n_messages! {
     StegoProbeMaxRaw:
         en = "  Max raw payload: {bytes} bytes ({kib:.1} KiB)",
         zh = "  最大原始载荷: {bytes} 字节 ({kib:.1} KiB)";
+    StegoProbeMaxRawGrouped:
+        en = "  Max raw payload: {bytes} bytes ({kib:.1} KiB) -- grouped-code bound; this carrier's Huffman table is over-optimised, so u=1 (one slot per bit) is refused",
+        zh = "  最大原始载荷: {bytes} 字节 ({kib:.1} KiB)（分组码上限；载体 Huffman 表过优化，u=1 每比特单槽位模式不可用）";
     StegoProbeRecommended:
         en = "  Recommended max: {bytes} bytes ({kib:.1} KiB) (tier: {level}, bpp <= {bpp})",
         zh = "  推荐安全容量: {bytes} 字节 ({kib:.1} KiB)（档位: {level}, bpp <= {bpp}）";

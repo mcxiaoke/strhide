@@ -1084,6 +1084,9 @@ pub fn probe_spatial_capacity_with_profile(
         total_elements: total_pixels,
         available_slots: available_body_slots,
         max_raw_payload_bytes,
+        // The spatial codec has no Huffman-table hazard, so its ceiling is
+        // always the geometric one.
+        max_raw_is_grouped: false,
         recommended_max_bytes,
         estimated_change_rate: match params.codec {
             StegoCodec::Hamming => crate::stego::coding::expected_change_rate(hamming_k),

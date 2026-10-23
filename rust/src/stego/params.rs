@@ -283,6 +283,13 @@ pub struct JpegParams {
     /// value is used as given. Comparing by value made `--slot-budget 1200000`
     /// (exactly the default number) behave as "unset" and silently rescale,
     /// contradicting the documented meaning of the flag.
+    ///
+    /// One exception: on a carrier whose Huffman table is over-optimised the
+    /// value is still raised when needed to keep the body group size at
+    /// `u >= 3` (see [`grouped_body_budget`]). That is a correctness
+    /// constraint, like the grid bound -- `u = 1` cannot route around dead
+    /// slots, and `u = 2` is still a coin flip at these loads -- not a
+    /// tuning override.
     #[serde(default)]
     pub slot_budget: Option<usize>,
     /// Cipher suite written into the superblock (default: the profile's default).
@@ -333,6 +340,69 @@ pub const DEFAULT_SLOT_BUDGET: usize = 1_200_000;
 /// * time -- bytes per slot and states per slot are the same power of two, so
 ///   they cancel and the worst case is ~1 s of kernel time for *any* `h`.
 pub const MAX_AUTO_BACKTRACK_BYTES: usize = 256 << 20;
+
+/// Ceiling on the STC backtracking bitmap for the *correctness-driven* group
+/// size on carriers whose Huffman table is over-optimised.
+///
+/// [`MAX_AUTO_BACKTRACK_BYTES`] is a distortion/time heuristic and happily
+/// picks `u = 1` for a large payload. `u = 1` is a `(1,1)` parity code: the
+/// solution is unique, so on a carrier with an over-optimised table neither
+/// failure mode can be routed around -- a dead slot (both `±1` directions
+/// closed by the table) in the used set kills the embed outright, and the
+/// forced ~50% change rate makes cross-zero chains that need symbols the
+/// table lacks. Which one hits is a per-salt lottery: measured on a 24 MP
+/// carrier with a 512 KiB payload, `u = 1` never succeeded (0/9), `u = 2`
+/// succeeded 4/10, and `u = 3` 10/10.
+///
+/// A grouped code spreads each payload bit over `u` slots and the trellis
+/// picks the live ones, so `u >= 3` is a correctness requirement rather than
+/// a tuning choice and gets its own, larger ceiling. 512 MiB holds `u = 3`
+/// for a 512 KiB payload on a 24 MP carrier (~403 MiB of bitmap) and for
+/// payloads up to ~683 KiB on any carrier whose grid allows.
+pub const MAX_GROUPED_BACKTRACK_BYTES: usize = 512 << 20;
+
+/// Slot ceiling implied by [`MAX_GROUPED_BACKTRACK_BYTES`] at height `h`.
+///
+/// One slot costs `2^h / 64` words of traceback state (32 B at `h = 8`,
+/// 128 B at `h = 10`).
+pub fn max_grouped_backtrack_slots(h: u8) -> usize {
+    let states = 1usize << h;
+    let bytes_per_slot = states.div_ceil(64) * 8;
+    MAX_GROUPED_BACKTRACK_BYTES / bytes_per_slot
+}
+
+/// Budget that keeps the body trellis grouped on an over-optimised carrier.
+///
+/// Returns the budget the layout should use -- the automatic one when it
+/// already buys `u >= 3`, otherwise raised to `3 * window` -- and `None` when
+/// `u = 3` does not fit, in which case the caller must refuse the payload
+/// instead of running an embed whose outcome is a lottery.
+///
+/// `u = 2` is deliberately *not* offered as a fallback: measured on 24 MP
+/// carriers it still fails often enough to be a coin flip at the loads where
+/// `u = 1` gets rejected (512 KiB: 4/10; 900 KiB: 0/6, three salt retries
+/// each), because two slots per bit leave too little room to route around
+/// cross-zero chains. `u = 3` measured 10/10 at the same load. The caller's
+/// `u < 3` gate lifts any smaller group to `u = 3` or refuses the embed when
+/// not even `u = 3` fits.
+///
+/// `window` is `bits + h - 1`: the number of elements one STC pass covers.
+pub fn grouped_body_budget(
+    body_grid_len: usize,
+    bits: usize,
+    h: u8,
+    auto_budget: usize,
+) -> Option<usize> {
+    if bits == 0 {
+        return Some(auto_budget);
+    }
+    let window = bits + h as usize - 1;
+    let room = body_grid_len.min(max_grouped_backtrack_slots(h));
+    if room / window < 3 {
+        return None;
+    }
+    Some(auto_budget.max(3 * window))
+}
 
 fn default_cipher_suite() -> u16 {
     crate::stego::format::DEFAULT_SUITE_ID
@@ -640,5 +710,106 @@ mod tests {
 
         assert_eq!(SafetyLevel::default(), SafetyLevel::High);
         assert_eq!(SafetyEnforcement::default(), SafetyEnforcement::Advisory);
+    }
+
+    /// 24 MP carrier geometry with no extensions: 375k blocks, 23.6M grid
+    /// slots, header 718 + 28.
+    fn carrier_24mp() -> (usize, usize) {
+        (
+            375_000 * 63,
+            crate::stego::format::DEFAULT_FORMAT.header_slots(0),
+        )
+    }
+
+    #[test]
+    fn grouped_backtrack_slot_ceiling_scales_with_height() {
+        // 512 MiB / 32 B per slot at h = 8.
+        assert_eq!(max_grouped_backtrack_slots(8), 512 << 20 >> 5);
+        // h = 10 doubles the states per slot, hence halves the slot ceiling.
+        assert_eq!(max_grouped_backtrack_slots(10), (512 << 20) / 128);
+    }
+
+    /// The automatic budget pins a 24 MP carrier holding 512 KiB to `u = 1`,
+    /// which an over-optimised Huffman table cannot host; the grouped budget
+    /// must lift it to `u = 3`, the measured reliable operating point.
+    #[test]
+    fn grouped_body_budget_lifts_u_one_to_u_three() {
+        let (n_total, hdr_n) = carrier_24mp();
+        let body_slots = n_total - hdr_n;
+        let params = JpegParams::default();
+        let auto = params.effective_slot_budget(body_slots);
+        let bits = 8 * (524_288 + 21);
+
+        let layout =
+            crate::stego::jpeg::v3_layout::compute(n_total, hdr_n, bits, params.stc_h, auto)
+                .unwrap();
+        assert_eq!(layout.u, 1, "the automatic budget lands on u = 1");
+
+        let budget =
+            grouped_body_budget(body_slots, bits, params.stc_h, auto).expect("u = 3 must fit");
+        let grouped =
+            crate::stego::jpeg::v3_layout::compute(n_total, hdr_n, bits, params.stc_h, budget)
+                .unwrap();
+        assert_eq!(grouped.u, 3);
+        // The correctness path stays inside its own memory ceiling.
+        assert!(grouped.body_n * 32 <= MAX_GROUPED_BACKTRACK_BYTES);
+    }
+
+    /// `u = 2` is not offered as a fallback: at the loads where `u = 1` gets
+    /// rejected it is still a coin flip (512 KiB: 4/10, 900 KiB: 0/6 on a
+    /// 24 MP carrier, three salt retries each), because two slots per bit
+    /// leave too little room to route around cross-zero chains. `u = 3`
+    /// measured 10/10 at the same load.
+    #[test]
+    fn grouped_body_budget_refuses_when_u_three_does_not_fit() {
+        let (n_total, hdr_n) = carrier_24mp();
+        let body_slots = n_total - hdr_n;
+        let params = JpegParams::default();
+        let auto = params.effective_slot_budget(body_slots);
+        // 700 KiB on 24 MP: 3 * window = 16.80M slots, just past the 512 MiB
+        // ceiling -- refuse instead of dropping to the unreliable `u = 2`.
+        let bits = 8 * (700_000 + 21);
+        assert!(grouped_body_budget(body_slots, bits, params.stc_h, auto).is_none());
+
+        // 1 MiB on 24 MP: even further out.
+        let bits_1m = 8 * (1_048_576 + 21);
+        assert!(grouped_body_budget(body_slots, bits_1m, params.stc_h, auto).is_none());
+
+        // The same payload at h = 10: the ceiling holds a quarter of the slots.
+        let bits_512k = 8 * (524_288 + 21);
+        assert!(grouped_body_budget(body_slots, bits_512k, 10, auto).is_none());
+    }
+
+    /// An already-grouped automatic budget is returned untouched.
+    #[test]
+    fn grouped_body_budget_keeps_an_already_grouped_auto_budget() {
+        let (n_total, hdr_n) = carrier_24mp();
+        let body_slots = n_total - hdr_n;
+        let params = JpegParams::default();
+        let auto = params.effective_slot_budget(body_slots);
+        let bits = 8 * (200_000 + 21); // auto budget already buys u = 3
+
+        let layout =
+            crate::stego::jpeg::v3_layout::compute(n_total, hdr_n, bits, params.stc_h, auto)
+                .unwrap();
+        assert_eq!(layout.u, 3);
+        assert_eq!(
+            grouped_body_budget(body_slots, bits, params.stc_h, auto),
+            Some(auto)
+        );
+    }
+
+    /// A small carrier with an explicit tiny budget: the grouped floor lifts
+    /// `u = 1` to `u = 3` without exceeding the grid.
+    #[test]
+    fn grouped_body_budget_lifts_a_small_carrier() {
+        // 256x256 fixture: 1024 blocks, 63,766 body slots.
+        let body_slots = 1024 * 63 - 746;
+        let bits = 8 * (8 + 21);
+        let budget = grouped_body_budget(body_slots, bits, 8, 300).expect("u = 3 fits");
+        let layout =
+            crate::stego::jpeg::v3_layout::compute(1024 * 63, 746, bits, 8, budget).unwrap();
+        assert_eq!(layout.u, 3);
+        assert!(layout.body_n <= body_slots);
     }
 }

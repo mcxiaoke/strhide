@@ -191,6 +191,12 @@ pub struct StegoCapacityInfo {
     /// slots (718 + extension area for JPEG V3, 512 for the spatial codec).
     pub available_slots: usize,
     pub max_raw_payload_bytes: usize,
+    /// Whether `max_raw_payload_bytes` is the grouped-code (`u >= 2`) bound
+    /// rather than the `u = 1` geometric one. True exactly when the carrier's
+    /// Huffman table is over-optimised and `u = 1` would be refused; the CLI
+    /// prints a caveat so the lower number is not mistaken for a regression.
+    #[serde(default)]
+    pub max_raw_is_grouped: bool,
     pub recommended_max_bytes: usize,
     /// Expected modified slots per embedded payload bit under the matrix
     /// coding in use (0.2917 for the default Hamming k=3, 0.5 for plain LSB
