@@ -656,17 +656,26 @@ fn walk_png_chunks(data: &[u8]) -> PngWalk {
 
         // PNG Specification (RFC 2083 Section 5.4):
         // Bit 5 of the second byte (0x20) indicates private (1) vs public (0) chunk.
-        let is_private = (ty[1] & 0x20) != 0;
-        let is_standard = PNG_STANDARD_CHUNKS.contains(&ty);
-
+        //
+        // The whitelist is consulted *first*. The case that forces this order is
+        // APNG: `acTL`, `fcTL` and `fdAT` are registered PNG/APNG chunk types
+        // (they are in `PNG_STANDARD_CHUNKS`) whose second letter is lowercase,
+        // i.e. by the RFC's naming rule they are "private" too. Checking
+        // private-ness first flagged every ordinary animated PNG as metadata
+        // injection with a `Likely` severity -- three such chunks saturate the
+        // risk score at 100 on a perfectly clean carrier.
+        //
         // Cap the collected list: a crafted file can repeat one chunk type
         // (or use thousands of distinct types) at no cost, and every entry
         // becomes a finding. 64 is well past what a real image carries.
-        if is_private {
+        let is_standard = PNG_STANDARD_CHUNKS.contains(&ty);
+        if is_standard {
+            // Known chunk type: nothing to report, whatever its naming bits say.
+        } else if (ty[1] & 0x20) != 0 {
             if walk.private.len() < MAX_CHUNK_FINDINGS {
                 walk.private.push((ty_str, len));
             }
-        } else if !is_standard && ty != b"IEND" && walk.unknown.len() < MAX_CHUNK_FINDINGS {
+        } else if ty != b"IEND" && walk.unknown.len() < MAX_CHUNK_FINDINGS {
             walk.unknown.push((ty_str, len));
         }
 
@@ -1862,6 +1871,44 @@ mod tests {
         assert!(
             findings.iter().any(|f| f.detector == "png:private-chunk"),
             "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn standard_chunk_with_private_naming_bits_is_not_flagged() {
+        // APNG's `acTL`/`fcTL`/`fdAT` carry a lowercase second letter, so the
+        // RFC 2083 naming rule calls them private -- but they are registered
+        // types. Checking private-ness before the whitelist flagged every
+        // ordinary animated PNG with `Likely` findings and saturated the risk
+        // score at 100 on a clean carrier.
+        let mut png = fake_png(4, 4, 2, |x, _| vec![(x * 60) as u8, 128, 200]);
+        let iend_pos = png.windows(4).rposition(|w| w == b"IEND").unwrap() - 4;
+        let mut injection = Vec::new();
+        let mut push = |ty: &[u8; 4], body: &[u8]| {
+            injection.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            injection.extend_from_slice(ty);
+            injection.extend_from_slice(body);
+            let mut crc = crc32fast::Hasher::new();
+            crc.update(ty);
+            crc.update(body);
+            injection.extend_from_slice(&crc.finalize().to_be_bytes());
+        };
+        push(b"acTL", &[0, 0, 0, 2, 0, 0, 0, 0]);
+        push(
+            b"fcTL",
+            &[0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0],
+        );
+        png.splice(iend_pos..iend_pos, injection);
+
+        let mut findings = Vec::new();
+        track_png_structure(&ScanView::whole(&png), &mut findings);
+        assert!(
+            !findings.iter().any(|f| f.detector == "png:private-chunk"),
+            "registered chunks must not be reported as private: {findings:?}"
+        );
+        assert!(
+            findings.is_empty(),
+            "a clean APNG chunk sequence must produce no structural finding: {findings:?}"
         );
     }
 

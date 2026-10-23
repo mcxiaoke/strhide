@@ -41,6 +41,7 @@ fn make_stego_png() -> Vec<u8> {
         chunks: Vec::new(),
         idat_sizes: Vec::new(),
         row_filters: Vec::new(),
+        idat_info: None,
     };
     strhide::stego::spatial::encode_png(&img).expect("encode png")
 }

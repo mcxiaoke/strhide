@@ -253,5 +253,6 @@ cargo clippy --all-targets -- -D warnings
 ### 6.3 非目标/未做
 
 - dct-io 4:4:4 破限未执行：用户决定暂缓 vendoring，保持上游 1,048,576 MCU 限制；`img60mp-b` 由 probe/embed 一致拒绝。
-- 未做 DHT 补符号、PNG 多通道、PNG 体积对齐、盲检阈值调整。
+- 未做 DHT 补符号。
+- PNG 多通道 Body 扩容与 IDAT 体积对齐已实施（见 `docs/stego_p3_png_plan_20261023_1945.md` §7）；PNG 分层采样与盲检阈值标定仍未做（B2/B3 暂缓）。
 - 未启用未标定的 `bad_blocks >= 5` 快速失败；本次所有成功格首次成功，暂无需要。

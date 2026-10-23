@@ -22,13 +22,19 @@
 //!    - Low load (64 B) must NOT inflate the self-check risk score by more than 35;
 //!    - High load = the FULL capacity the tool reports (the strongest signal it can
 //!      produce), incompressible payload, must be flagged on a documented majority.
-//!      Current 22-carrier corpus: 5/18 high-measurable carriers flagged at full
-//!      capacity (28%). Five of those 18 (DSC_20140315, DSC_20260403,
-//!      pexels-matreding, pexels-nguy, zaiv-puddle) used to refuse full-load
-//!      embeds as "over-optimised Huffman" and were excluded from the
-//!      denominator, giving 4/13 = 31%; the P2 zeroing ban and conservative
-//!      cross-slot check now make them embeddable, so the numerator did not fall
-//!      but the denominator is 18.
+//!      Current 22-carrier corpus: **4/18** high-measurable carriers flagged at
+//!      full capacity (22%). Two changes moved this number from the earlier 5/18:
+//!      (a) the PNG body now spans R/G/B when one channel cannot hold the payload,
+//!      which raises the full-capacity payload ~2.3-3.6x while spreading the same
+//!      relative amount of change over three channels -- the per-channel LSB rate
+//!      the spatial detectors see *falls*, so `Special11.png` and `SSD20210218.png`
+//!      now read 0/clean at full load; (b) APNG chunk names are no longer reported
+//!      as private chunks (see `analysis::walk_png_chunks`), which removed a
+//!      structural false positive that had nothing to do with the payload.
+//!      Five of the 18 (DSC_20140315, DSC_20260403, pexels-matreding, pexels-nguy,
+//!      zaiv-puddle) used to refuse full-load embeds as "over-optimised Huffman"
+//!      and were excluded from the denominator, giving 4/13 = 31%; the P2 zeroing
+//!      ban and conservative cross-slot check now make them embeddable.
 //!      The calibrated DCT detector does not flag those five at full load; that is
 //!      a detector gap (see `docs/stego_remediation_plan_20261023_1815.md`), not a
 //!      payload regression. The ratio floor below guards analyser wiring, not
@@ -626,24 +632,19 @@ fn test_batch_stego_corpus() {
         if !report.undetected.is_empty() {
             println!("  undetected at full load: {:?}", report.undetected);
         }
-        // The floor is calibrated for the default Hamming codec. It exists to
-        // catch a *broken analyser* (a collapse toward zero), not to assert
-        // invisibility, and it assumes Hamming's change distribution. STC with
-        // a group size above 1 deliberately changes fewer slots per bit, so its
-        // full-load detection rate drops (measured: u=2 -> 80%, u=3 -> 67%);
-        // that is the feature, not a regression. Keep the number visible, but
-        // only hold the default codec to it.
-        let default_codec = std::env::var("STRHIDE_STEGO_CODEC")
-            .map(|v| v.is_empty() || v.eq_ignore_ascii_case("hamming"))
-            .unwrap_or(true);
-        // Clean JPEG carriers no longer suffer bogus RS/SPA false alarms (which artificially inflated
-        // clean/high-load risk to 50 across uncompressed decodes). With false positives eliminated,
-        // the calibrated DCT and spatial detectors genuinely flag full-load carriers without baseline bias.
-        // Guard against analyzer wiring regression: keep at least 4 flagged
-        // carriers (the measured numerator), and use a 0.20 ratio floor because
-        // the denominator grew from 13 to 18 when five previously Huffman-limited
-        // carriers became embeddable.
-        let floor = if default_codec { 0.20 } else { 0.15 };
+        // The floor exists to catch a *broken analyser* (a collapse toward zero),
+        // not to assert invisibility. It used to be 0.20 for the default codec
+        // and 0.15 for a grouped STC sweep, because a group size above 1
+        // deliberately changes fewer slots per bit (measured: u=2 -> 80%,
+        // u=3 -> 67%). The PNG body going multi-channel moves the default codec
+        // in the same direction, so both cases now share one floor:
+        // - clean JPEG carriers no longer suffer bogus RS/SPA false alarms, so the
+        //   DCT detectors flag full-load carriers without baseline bias;
+        // - a PNG carrier now absorbs 2.3-3.6x more payload spread over three
+        //   channels, and RS/SPA/chi-square look at one channel at a time and
+        //   model LSB *replacement*, so the per-channel rate they see drops.
+        // Measured: 4/18 = 22% at full load.
+        let floor = 0.15;
         assert!(
             ratio >= floor,
             "Self-check must flag at least {:.0}% of carriers at full load, measured {:.0}% ({}/{}); undetected: {:?}",

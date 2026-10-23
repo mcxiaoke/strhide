@@ -90,6 +90,26 @@ pub struct RawImage {
     /// same filter to the (LSB-modified) pixels, which keeps the IDAT close
     /// to the original size instead of forcing filter 0 on every row.
     pub row_filters: Vec<u8>,
+    /// What the source IDAT stream said about its own deflate settings, used
+    /// to pick a re-compression level that lands near the original size.
+    /// `None` for hand-built images and for streams whose zlib header is not a
+    /// plain deflate header without a preset dictionary.
+    pub idat_info: Option<IdatInfo>,
+}
+
+/// Self-description carried by the two-byte zlib header of the IDAT stream.
+///
+/// A PNG writer's zlib level is not recoverable from the compressed bytes, but
+/// `FLEVEL` narrows it to four buckets, and the original IDAT *length* is the
+/// real target: re-compressing a level-9 carrier at the default level 6 grew
+/// one real sample by 4.2%, and re-compressing a level-1 carrier at level 6
+/// shrank another by 28% -- both are far larger size changes than the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdatInfo {
+    /// `FLEVEL` bits of the zlib header: 0 = fastest .. 3 = maximum.
+    pub flevel: u8,
+    /// Total IDAT body bytes in the source file.
+    pub orig_len: usize,
 }
 
 /// One PNG chunk captured verbatim (type + body, CRC recomputed on write).
@@ -286,6 +306,22 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
         chunks,
         idat_sizes,
         row_filters,
+        idat_info: idat_info_of(&idat),
+    })
+}
+
+/// Read the zlib header of the IDAT stream, if it is a plain deflate stream.
+///
+/// `CMF & 0x0F == 8` is "deflate with a 32 KiB window" and `FLG & 0x20 == 0`
+/// means no preset dictionary -- both are what a PNG file must contain, so a
+/// mismatch means the stream is not something this encoder should imitate.
+fn idat_info_of(idat: &[u8]) -> Option<IdatInfo> {
+    if idat.len() < 2 || (idat[0] & 0x0F) != 8 || (idat[1] & 0x20) != 0 {
+        return None;
+    }
+    Some(IdatInfo {
+        flevel: (idat[1] >> 6) & 3,
+        orig_len: idat.len(),
     })
 }
 
@@ -300,9 +336,12 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
 /// chunks, the re-compressed stream is split at the same boundaries, so the
 /// chunk sequence survives end to end.
 ///
-/// The zlib level is not recoverable from the stream, so
-/// `Compression::default()` is used; filter preservation is what keeps the
-/// size near the original.
+/// The zlib level is not recoverable from the stream, so it is *estimated*:
+/// evenly spaced sample bands are compressed at each candidate level and the
+/// level whose extrapolated size lands closest to the original IDAT length wins
+/// (see [`choose_deflate_level`]). Filter preservation plus level matching is
+/// what keeps the size near the original; before level matching, a level-9
+/// carrier grew 4.2% and a level-1 carrier shrank 28% on a payload of a few KB.
 ///
 /// A `RawImage` without captured chunks (hand-built, e.g. in tests) is
 /// encoded as a fresh minimal IHDR/IDAT/IEND stream with filter 0 rows.
@@ -329,9 +368,23 @@ pub fn encode_png(image: &RawImage) -> Result<Vec<u8>, StrHideError> {
         filtered.extend_from_slice(&filter_row(prev, row, filter, image.channels));
     }
 
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    let (level, probe) = choose_deflate_level(&filtered, stride + 1, height, image.idat_info);
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(level));
     encoder.write_all(&filtered)?;
     let compressed_idat = encoder.finish()?;
+
+    if let Some(info) = image.idat_info {
+        let delta = (compressed_idat.len() as f64 - info.orig_len as f64) * 100.0
+            / info.orig_len.max(1) as f64;
+        trace(&format!(
+            "idat orig={} final={} delta={delta:+.2}% level={level} flevel={} probe_l1={} probe_l6={}",
+            info.orig_len,
+            compressed_idat.len(),
+            info.flevel,
+            probe[0],
+            probe[1],
+        ));
+    }
 
     if image.chunks.is_empty() {
         // Hand-built RawImage: synthesize a minimal stream.
@@ -419,6 +472,113 @@ pub fn encode_png(image: &RawImage) -> Result<Vec<u8>, StrHideError> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Re-compression level selection
+// ---------------------------------------------------------------------------
+
+/// Level used for the "fast / low compression" family of carriers. Tools that
+/// save PNGs without tuning land here or on [`DEFLATE_LEVEL_DEFAULT`].
+const DEFLATE_LEVEL_FAST: u32 = 1;
+
+/// The default level (`flate2::Compression::default()` is level 6) and the
+/// level almost every ordinary writer (XnConvert, ImageMagick, libpng) uses.
+const DEFLATE_LEVEL_DEFAULT: u32 = 6;
+
+/// Number of row bands the level probe compresses.
+///
+/// Three bands left a 15-30% error on real images (a 14.8 MP wallpaper put its
+/// sky at the top and its detail at the bottom), which is enough to pick the
+/// wrong level. Twenty-four evenly spaced bands keep the projection within ~2%
+/// of the full-stream size on the whole corpus, at roughly 8-25% of the
+/// scanlines -- still far cheaper than a second full compression.
+const PROBE_BANDS: usize = 24;
+
+/// Pick the zlib level whose projected IDAT size is closest to the original.
+///
+/// Exact level recovery is impossible, and `FLEVEL` is not a reliable stand-in
+/// either: a real 14.8 MP sample declares `FLEVEL=2` yet sits closest to level
+/// 9, and another declares `FLEVEL=0` while even level 1 comes out 12% smaller
+/// than the source. So the decision is measured on the actual scanlines: evenly
+/// spaced row bands are deflated at each candidate level and the projection is
+/// compared against the source IDAT length.
+///
+/// Only levels 1 and 6 are candidates. Level 9 would match zopfli-style
+/// carriers a few percent better but costs ~8x the time (measured on this
+/// machine: 4.65 s -> 36.66 s for a 58 MB scanline stream), which is not worth
+/// a 2-4 point size delta.
+///
+/// Returns the chosen level and the two projected sizes, in `[fast, default]`
+/// order, for tracing.
+fn choose_deflate_level(
+    filtered: &[u8],
+    row_len: usize,
+    height: usize,
+    info: Option<IdatInfo>,
+) -> (u32, [usize; 2]) {
+    let default_level = Compression::default().level();
+    let Some(info) = info else {
+        return (default_level, [0, 0]);
+    };
+    if height == 0 || row_len == 0 || filtered.len() < row_len * height {
+        return (default_level, [0, 0]);
+    }
+
+    // `PROBE_BANDS` bands of `band` rows, first band at the top and last at the
+    // bottom. Images too short for that are probed whole.
+    let band = (height / (PROBE_BANDS * 4)).clamp(2, 16).min(height);
+    let mut sample = Vec::new();
+    if PROBE_BANDS * band >= height {
+        sample.extend_from_slice(&filtered[..height * row_len]);
+    } else {
+        let step = (height - band) / (PROBE_BANDS - 1);
+        for i in 0..PROBE_BANDS {
+            let from = i * step;
+            let to = from + band;
+            sample.extend_from_slice(&filtered[from * row_len..to * row_len]);
+        }
+    }
+    if sample.is_empty() {
+        return (default_level, [0, 0]);
+    }
+    let scale = filtered.len() as f64 / sample.len() as f64;
+
+    let est_fast = deflate_len(&sample, DEFLATE_LEVEL_FAST) as f64 * scale;
+    let est_default = deflate_len(&sample, DEFLATE_LEVEL_DEFAULT) as f64 * scale;
+    let orig = info.orig_len as f64;
+    let err_fast = (est_fast - orig).abs();
+    let err_default = (est_default - orig).abs();
+    // On a tie keep the default level so behaviour stays where it was.
+    let level = if err_default <= err_fast {
+        DEFLATE_LEVEL_DEFAULT
+    } else {
+        DEFLATE_LEVEL_FAST
+    };
+    (
+        level,
+        [est_fast.round() as usize, est_default.round() as usize],
+    )
+}
+
+/// Deflate `data` at `level` and report the compressed length.
+fn deflate_len(data: &[u8], level: u32) -> usize {
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(level));
+    // Writing into a `Vec` cannot fail; the length is all the probe needs.
+    if encoder.write_all(data).is_err() {
+        return usize::MAX;
+    }
+    encoder.finish().map(|v| v.len()).unwrap_or(usize::MAX)
+}
+
+/// Optional tracing enabled with `STRHIDE_STEGO_TRACE=1`.
+///
+/// Deliberately stderr-only and off by default, mirroring the JPEG engine's
+/// `[stego]` lines; the `[png]` prefix says which carrier produced the line.
+fn trace(msg: &str) {
+    if std::env::var_os("STRHIDE_STEGO_TRACE").is_some() {
+        eprintln!("[png] {msg}");
+    }
+}
+
 /// Apply PNG filter `filter` to one reconstructed scanline (`cur`), given
 /// the previous reconstructed row (`prev`). Inverse of the unfilter step in
 /// [`decode_png`]; all arithmetic wraps, exactly like the decoder's.
@@ -477,10 +637,66 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 /// Slots reserved for the 32-byte base header (salt | nonce | length word).
 const HEADER_SLOTS: usize = 256;
 
-/// Channel the spatial codec writes into: green for colour images (least
-/// visible), channel 0 for grayscale / gray+alpha.
+/// Channel the base header and the feature word are written into: green for
+/// colour images (least visible), channel 0 for grayscale / gray+alpha.
+///
+/// The body may use more channels ([`ChannelMode`]); the header never does, so
+/// its slot set does not depend on the body's mode. That is required: the
+/// feature word carries the mode, and it cannot be read before the header.
 fn embed_channel(image: &RawImage) -> usize {
     if image.channels >= 3 { 1 } else { 0 }
+}
+
+/// Which pixel channels the payload body may be written into.
+///
+/// The embedder chooses the mode from capacity need and records it in the
+/// feature word, so the extractor never guesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelMode {
+    /// Green (or the carrier's only channel): the single-channel layout.
+    Green = 0,
+    /// Red, green and blue. Alpha is never touched.
+    Rgb = 1,
+}
+
+impl ChannelMode {
+    /// Wire value -> mode. Unknown values are rejected: a carrier claiming a
+    /// mode this build cannot reproduce must read as "no payload here".
+    fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(ChannelMode::Green),
+            1 => Some(ChannelMode::Rgb),
+            _ => None,
+        }
+    }
+
+    /// The channels this mode writes, for a carrier with `channels` components.
+    fn channels(self, channels: usize) -> &'static [usize] {
+        const GREEN: [usize; 1] = [1];
+        const GRAY: [usize; 1] = [0];
+        const RGB: [usize; 3] = [0, 1, 2];
+        match self {
+            ChannelMode::Green if channels >= 3 => &GREEN,
+            ChannelMode::Green => &GRAY,
+            ChannelMode::Rgb => &RGB,
+        }
+    }
+
+    /// False when the mode needs channels the carrier does not have.
+    fn available(self, channels: usize) -> bool {
+        match self {
+            ChannelMode::Green => true,
+            ChannelMode::Rgb => channels >= 3,
+        }
+    }
+
+    /// Human-readable name for diagnostics.
+    fn name(self) -> &'static str {
+        match self {
+            ChannelMode::Green => "green",
+            ChannelMode::Rgb => "rgb",
+        }
+    }
 }
 
 /// The carrier's slot layout: candidates, header assignment, body pool.
@@ -527,25 +743,33 @@ impl SlotPlan {
         // 1. `val & 0xF8` never changes, so the HILL cost map is bit-identical;
         // 2. modified values stay in [7, 248], never reaching 0/255 (no clipping);
         // 3. eligibility itself is class-based, so both ends derive the same set.
-        let mut candidates: Vec<usize> = (0..total_pixels)
+        //
+        // Ranking order is a *total* order: (cost bits, pixel index). HILL costs
+        // are non-negative finite values, so their bit patterns sort exactly
+        // like the values, and the index reproduces the tie-breaking the
+        // previous stable `sort_by` produced -- which matters because flat areas
+        // give thousands of exactly equal costs (`1 / epsilon`). A total order
+        // is what allows `select_nth_unstable` below to stay bit-identical to a
+        // full sort.
+        let mut ranked: Vec<(u64, usize)> = (0..total_pixels)
             .filter(|&idx| {
                 let val = image.pixels[idx * image.channels + channel_offset];
                 (SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&val)
             })
+            .map(|idx| (costs[idx].to_bits(), idx))
             .collect();
 
-        // Rank pixels by cost: lowest cost (most complex/noisy) first
-        candidates.sort_by(|&a, &b| {
-            costs[a]
-                .partial_cmp(&costs[b])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // Exclude the smoothest fraction (e.g. 30%)
-        let allowed_count = ((candidates.len() as f64)
-            * (1.0 - params.exclusion_percentile.clamp(0.0, 0.9)))
-            as usize;
-        candidates.truncate(allowed_count);
+        // Exclude the smoothest fraction (e.g. 30%). Only the kept prefix is
+        // needed, so partition first (O(n)) and sort just that prefix; the
+        // candidate list grows ~3x when the body spans three channels.
+        let allowed_count =
+            ((ranked.len() as f64) * (1.0 - params.exclusion_percentile.clamp(0.0, 0.9))) as usize;
+        if allowed_count < ranked.len() {
+            ranked.select_nth_unstable(allowed_count);
+            ranked.truncate(allowed_count);
+        }
+        ranked.sort_unstable();
+        let candidates: Vec<usize> = ranked.into_iter().map(|(_, px)| px).collect();
 
         // Keyed candidate-set permutation for the header slots (legacy rule:
         // [8, 247] eligibility, 30% exclusion).
@@ -585,25 +809,82 @@ impl SlotPlan {
         &self.permuted[HEADER_SLOTS..V2_TOTAL_HEADER_SLOTS]
     }
 
-    /// Pixels left for the payload body: candidates outside the header set,
-    /// further restricted by the wire `class_rule`.
+    /// Visit every body slot in ranking order.
     ///
-    /// Under the safe non-boundary rule (`class_rule == 1`) only `val % 8` in
-    /// [1, 6] may move, which eliminates the r=0/7 boundary deficit (P0-B).
-    fn body_candidates(&self, image: &RawImage, class_rule: u8) -> Vec<usize> {
-        let channel_offset = embed_channel(image);
-        self.candidates
-            .iter()
-            .copied()
-            .filter(|&s| !self.used_by_header[s])
-            .filter(|&s| {
-                if class_rule != 1 {
-                    return true;
+    /// A slot is a **byte offset** into `image.pixels` (`pixel * channels +
+    /// channel`). Expressing slots as offsets is what makes multi-channel
+    /// embedding possible without a second index space, and it reduces to the
+    /// historical `pixel` index when only one channel is in play. Slots come
+    /// out pixel by pixel in cost order and, inside a pixel, in ascending
+    /// channel order -- exactly the `(cost, channel, pixel)` total order,
+    /// without materialising a second sort.
+    ///
+    /// Restrictions, shared by embed / extract / probe:
+    /// - the pixel already passed header-channel eligibility and the
+    ///   smooth-area exclusion, so one ranking serves both header and body;
+    /// - the header's 512 pixels keep their header channel reserved for the
+    ///   header (the body may still use their other channels: a class-internal
+    ///   `±1` leaves `val & 0xF8` untouched, so the cost map the header is
+    ///   ranked on is bit-identical before and after embedding);
+    /// - the considered channel's own value must be class-interior and, under
+    ///   the safe `class_rule == 1`, sit in `val % 8 ∈ [1, 6]`, which removes
+    ///   the r=0/7 boundary deficit (P0-B).
+    fn for_each_body_slot(
+        &self,
+        image: &RawImage,
+        class_rule: u8,
+        mode: ChannelMode,
+        mut visit: impl FnMut(usize),
+    ) {
+        let channels = image.channels;
+        let header_channel = embed_channel(image);
+        let used = mode.channels(channels);
+        for &px in &self.candidates {
+            let reserved = self.used_by_header[px];
+            for &c in used {
+                if reserved && c == header_channel {
+                    continue;
                 }
-                let val = image.pixels[s * image.channels + channel_offset];
-                (1..=6).contains(&(val % 8))
-            })
-            .collect()
+                let slot = px * channels + c;
+                let val = image.pixels[slot];
+                if !(SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&val) {
+                    continue;
+                }
+                if class_rule == 1 && !(1..=6).contains(&(val % 8)) {
+                    continue;
+                }
+                visit(slot);
+            }
+        }
+    }
+
+    /// Number of body slots available under `mode` / `class_rule`.
+    fn count_body_slots(&self, image: &RawImage, class_rule: u8, mode: ChannelMode) -> usize {
+        let mut n = 0usize;
+        self.for_each_body_slot(image, class_rule, mode, |_| n += 1);
+        n
+    }
+
+    /// The first `limit` body slots under `mode` / `class_rule`, in ranking order.
+    fn body_slots_upto(
+        &self,
+        image: &RawImage,
+        class_rule: u8,
+        mode: ChannelMode,
+        limit: usize,
+    ) -> Vec<usize> {
+        let mut out = Vec::with_capacity(limit);
+        if limit == 0 {
+            return out;
+        }
+        let mut taken = 0usize;
+        self.for_each_body_slot(image, class_rule, mode, |slot| {
+            if taken < limit {
+                out.push(slot);
+                taken += 1;
+            }
+        });
+        out
     }
 }
 
@@ -672,16 +953,21 @@ pub fn embed_spatial_with_profile(
     }
     let header_slots = plan.header_slots();
     let feature_slots = plan.feature_slots();
-    let body_candidates = plan.body_candidates(&image, 1);
 
     let ciphertext_bits = ciphertext_len * 8;
+
+    // Single-channel body pool first. Small payloads therefore keep the exact
+    // layout (and byte-for-byte output) they had before multi-channel existed.
+    let pool_green = plan.count_body_slots(&image, 1, ChannelMode::Green);
 
     // Safety enforcement policy check
     if params.safety_enforcement == crate::stego::params::SafetyEnforcement::Enforced {
         let bpp_limit = params.safety_level.bpp_limit();
         let bpp_bits = (total_pixels as f64 * bpp_limit).floor() as usize;
-        let ratio_bits =
-            (body_candidates.len() as f64 / params.safety_level.target_ratio()).floor() as usize;
+        // Deliberately the single-channel pool: the tier is expressed in bits
+        // per *pixel*, and a three-channel pool would loosen the ratio bound
+        // without any calibration for the extra channels.
+        let ratio_bits = (pool_green as f64 / params.safety_level.target_ratio()).floor() as usize;
         let recommended_max_bytes =
             (bpp_bits.min(ratio_bits) / 8).saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
 
@@ -700,16 +986,16 @@ pub fn embed_spatial_with_profile(
 
     // Resolve matrix-coding strategy: Auto adaptively picks STC group size (u=3, 2, or 1)
     let (resolved_codec, resolved_u) = match params.codec {
-        StegoCodec::Auto => {
-            crate::stego::coding::auto_select_codec(body_candidates.len(), ciphertext_bits)
-        }
+        StegoCodec::Auto => crate::stego::coding::auto_select_codec(pool_green, ciphertext_bits),
         StegoCodec::Stc if params.stc_u == 0 => {
-            crate::stego::coding::auto_select_codec(body_candidates.len(), ciphertext_bits)
+            crate::stego::coding::auto_select_codec(pool_green, ciphertext_bits)
         }
         StegoCodec::Stc => (StegoCodec::Stc, params.stc_u),
         StegoCodec::Hamming => (StegoCodec::Hamming, 0),
     };
 
+    // The slot count follows from the payload and the codec, never from the
+    // pool, so `u` does not have to be re-resolved when the mode grows.
     let needed_body_slots = crate::stego::coding::slots_for_codec(
         ciphertext_bits,
         resolved_codec,
@@ -717,15 +1003,37 @@ pub fn embed_spatial_with_profile(
         resolved_u,
     )?;
 
-    if needed_body_slots > body_candidates.len() {
+    // Pick the smallest channel mode that fits. `Rgb` only adds slots, so the
+    // single-channel layout is used whenever it is sufficient.
+    let (mode, pool_max) = if needed_body_slots <= pool_green {
+        (ChannelMode::Green, pool_green)
+    } else if image.channels >= 3 {
+        let pool_rgb = plan.count_body_slots(&image, 1, ChannelMode::Rgb);
+        if needed_body_slots <= pool_rgb {
+            (ChannelMode::Rgb, pool_rgb)
+        } else {
+            return Err(StrHideError::General(format!(
+                "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{} {})",
+                needed_body_slots,
+                resolved_codec.describe(params.stc_h, resolved_u),
+                pool_rgb,
+                cost_model.id(),
+                ChannelMode::Rgb.name(),
+            )));
+        }
+    } else {
         return Err(StrHideError::General(format!(
             "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{})",
             needed_body_slots,
             resolved_codec.describe(params.stc_h, resolved_u),
-            body_candidates.len(),
+            pool_green,
             cost_model.id(),
         )));
-    }
+    };
+    trace(&format!(
+        "plan pool_green={pool_green} pool_max={pool_max} needed={needed_body_slots} mode={:?}",
+        mode
+    ));
 
     // Header word1 encodes total_len with HEADER_V2_ESCAPE_H (15) for stc_h
     let total_len = (crate::stego::envelope::HEADER_OVERHEAD + ciphertext_len) as u32;
@@ -745,7 +1053,9 @@ pub fn embed_spatial_with_profile(
         codec: resolved_codec,
         u: resolved_u,
         h: params.stc_h,
-        channel_mode: 0,
+        // Self-describing: the extractor rebuilds the body pool from this and
+        // nothing else, so a write here would desynchronise the two ends.
+        channel_mode: mode as u8,
         class_rule: 1, // Safe [1, 6] non-boundary
         kdf_id: 0,     // PBKDF2 100k
         eligible_min: SPATIAL_ELIGIBLE_MIN,
@@ -766,29 +1076,54 @@ pub fn embed_spatial_with_profile(
     let stc_seed =
         crate::stego::envelope::derive_stc_seed_with_label(&perm_seed, &salt, spatial.stc_label);
 
-    let mut body_slots = body_candidates[..needed_body_slots].to_vec();
+    let mut body_slots = plan.body_slots_upto(&image, 1, mode, needed_body_slots);
+    debug_assert_eq!(body_slots.len(), needed_body_slots, "pool counted above");
     permute_indices(&mut body_slots, &perm_seed);
 
-    // Asymmetric per-direction costs. Embed-side only: ranking never sees them.
-    let (rho_plus, rho_minus) =
-        cost_model.direction_costs(&costs, &image.pixels, w, h, image.channels, channel_offset);
-    if rho_plus.len() != total_pixels || rho_minus.len() != total_pixels {
-        return Err(StrHideError::General(
-            "Direction cost map dimension mismatch".into(),
-        ));
+    // Asymmetric per-direction costs. Embed-side only: ranking never sees them,
+    // so the extractor does not have to reproduce them.
+    //
+    // One channel at a time: keeping a `(plus, minus)` pair per channel alive
+    // would cost 6 x `total_pixels` f64, so each pair is consumed into the
+    // slot-indexed vectors and dropped before the next channel is computed.
+    let mut header_rp = vec![0.0f64; V2_TOTAL_HEADER_SLOTS];
+    let mut header_rm = vec![0.0f64; V2_TOTAL_HEADER_SLOTS];
+    let mut body_rp = vec![0.0f64; needed_body_slots];
+    let mut body_rm = vec![0.0f64; needed_body_slots];
+    for &channel in mode.channels(image.channels) {
+        let (plus, minus) =
+            cost_model.direction_costs(&costs, &image.pixels, w, h, image.channels, channel);
+        if plus.len() != total_pixels || minus.len() != total_pixels {
+            return Err(StrHideError::General(
+                "Direction cost map dimension mismatch".into(),
+            ));
+        }
+        if channel == channel_offset {
+            for (i, &px) in header_slots.iter().chain(feature_slots.iter()).enumerate() {
+                header_rp[i] = plus[px];
+                header_rm[i] = minus[px];
+            }
+        }
+        for (i, &slot) in body_slots.iter().enumerate() {
+            if slot % image.channels == channel {
+                let px = slot / image.channels;
+                body_rp[i] = plus[px];
+                body_rm[i] = minus[px];
+            }
+        }
     }
 
     // Embed Phase 1a: 32-byte header word1 (256 slots)
     for (byte_i, &b) in header_bytes.iter().enumerate() {
         for bit_i in 0..8 {
             let target_bit = (b >> (7 - bit_i)) & 1;
-            let slot = header_slots[byte_i * 8 + bit_i];
-            let byte_idx = slot * image.channels + channel_offset;
+            let bit_index = byte_i * 8 + bit_i;
+            let byte_idx = header_slots[bit_index] * image.channels + channel_offset;
             write_bit_ternary(
                 &mut image.pixels[byte_idx],
                 target_bit,
-                rho_plus[slot],
-                rho_minus[slot],
+                header_rp[bit_index],
+                header_rm[bit_index],
             );
         }
     }
@@ -797,44 +1132,40 @@ pub fn embed_spatial_with_profile(
     for (byte_i, &b) in feature_bytes.iter().enumerate() {
         for bit_i in 0..8 {
             let target_bit = (b >> (7 - bit_i)) & 1;
-            let slot = feature_slots[byte_i * 8 + bit_i];
-            let byte_idx = slot * image.channels + channel_offset;
+            let bit_index = HEADER_SLOTS + byte_i * 8 + bit_i;
+            let byte_idx = feature_slots[byte_i * 8 + bit_i] * image.channels + channel_offset;
             write_bit_ternary(
                 &mut image.pixels[byte_idx],
                 target_bit,
-                rho_plus[slot],
-                rho_minus[slot],
+                header_rp[bit_index],
+                header_rm[bit_index],
             );
         }
     }
 
-    // Embed Phase 2: Ciphertext body.
-    let mut slot_vals: Vec<u8> = body_slots
-        .iter()
-        .map(|&slot| image.pixels[slot * image.channels + channel_offset])
-        .collect();
+    // Embed Phase 2: Ciphertext body. Slots are byte offsets, so the write is
+    // a direct `pixels[slot]` -- no channel arithmetic left to get wrong.
+    let mut slot_vals: Vec<u8> = body_slots.iter().map(|&slot| image.pixels[slot]).collect();
     let moves: Vec<Move> = slot_vals.iter().map(|&v| spatial_move_safe(v)).collect();
-    let rp: Vec<f64> = body_slots.iter().map(|&s| rho_plus[s]).collect();
-    let rm: Vec<f64> = body_slots.iter().map(|&s| rho_minus[s]).collect();
     match resolved_codec {
         StegoCodec::Hamming => {
             hamming_embed_ternary(
                 &mut slot_vals,
                 &moves,
-                &rp,
-                &rm,
+                &body_rp,
+                &body_rm,
                 &ciphertext_body,
                 crate::stego::coding::DEFAULT_HAMMING_K,
             )?;
         }
         StegoCodec::Stc | StegoCodec::Auto => {
             let trellis = StcTrellis::from_seed_grouped(stc_seed, params.stc_h, resolved_u)?;
-            trellis.embed(&mut slot_vals, &moves, &rp, &rm, &ciphertext_body)?;
+            trellis.embed(&mut slot_vals, &moves, &body_rp, &body_rm, &ciphertext_body)?;
         }
     }
 
     for (i, &slot) in body_slots.iter().enumerate() {
-        image.pixels[slot * image.channels + channel_offset] = slot_vals[i];
+        image.pixels[slot] = slot_vals[i];
     }
 
     encode_png(&image)
@@ -939,15 +1270,19 @@ pub fn extract_spatial_with_profile(
     }
 
     let fw = FeatureWord::decode(&feature_bytes).map_err(|_| no_hidden())?;
-    let body_candidates = plan.body_candidates(&image, fw.class_rule);
+
+    // The body's channel mode arrives in the feature word. An unknown value, or
+    // one the carrier cannot support, means the header landed on the wrong
+    // slots -- folded into the same generic failure as an AEAD reject.
+    let mode = ChannelMode::from_wire(fw.channel_mode).ok_or_else(no_hidden)?;
+    if !mode.available(image.channels) {
+        return Err(no_hidden());
+    }
 
     let ciphertext_len = total_len - crate::stego::envelope::HEADER_OVERHEAD;
     let ciphertext_bits = ciphertext_len * 8;
     let needed_body_slots =
         crate::stego::coding::slots_for_codec(ciphertext_bits, fw.codec, fw.h, fw.u)?;
-    if needed_body_slots > body_candidates.len() {
-        return Err(no_hidden());
-    }
 
     let master = derive_master(
         spatial.body.default_suite(),
@@ -956,13 +1291,20 @@ pub fn extract_spatial_with_profile(
     )?;
     let (enc_key, perm_seed) = body_keys(spatial.body, &master, salt, domain);
 
-    let mut body_slots = body_candidates[..needed_body_slots].to_vec();
+    let mut body_slots = plan.body_slots_upto(&image, fw.class_rule, mode, needed_body_slots);
+    trace(&format!(
+        "extract mode={:?} class_rule={} total_len={total_len} needed={needed_body_slots} pool={}",
+        mode,
+        fw.class_rule,
+        body_slots.len()
+    ));
+    // Short pool == the carrier is smaller than the header claims: no payload.
+    if body_slots.len() < needed_body_slots {
+        return Err(no_hidden());
+    }
     permute_indices(&mut body_slots, &perm_seed);
 
-    let slot_vals: Vec<u8> = body_slots
-        .iter()
-        .map(|&slot| image.pixels[slot * image.channels + channel_offset])
-        .collect();
+    let slot_vals: Vec<u8> = body_slots.iter().map(|&slot| image.pixels[slot]).collect();
 
     let ciphertext = match fw.codec {
         StegoCodec::Hamming => hamming_extract_bytes(
@@ -1036,13 +1378,26 @@ pub fn probe_spatial_capacity_with_profile(
 
     let plan = SlotPlan::build(&image, &costs, params, password, domain, spatial)?;
 
-    let available_body_slots = if plan.header_fits() {
-        // The embedder always writes `class_rule = 1`, so the capacity it can
-        // actually reach is the rule-1 body pool.
-        plan.body_candidates(&image, 1).len()
+    // Two pool sizes, for two different questions:
+    // - `available_body_slots` answers "how much can the writer actually
+    //   reach?", which is the three-channel pool when the carrier has one;
+    // - `ratio_slots` feeds the safety tier's `slots / bits` bound, which was
+    //   calibrated on single-channel carriers. Reporting the tripled pool there
+    //   would silently raise the recommended payload without any evidence that
+    //   three channels are equally safe, so it keeps the single-channel base.
+    let header_fits = plan.header_fits();
+    let pool_green = if header_fits {
+        plan.count_body_slots(&image, 1, ChannelMode::Green)
     } else {
         0
     };
+    let available_body_slots = match (header_fits, image.channels >= 3) {
+        (false, _) => 0,
+        (true, true) => plan.count_body_slots(&image, 1, ChannelMode::Rgb),
+        (true, false) => pool_green,
+    };
+    let ratio_slots = pool_green;
+
     let hamming_k = crate::stego::coding::DEFAULT_HAMMING_K;
     // The two codecs buy different payload per slot, and the difference is
     // real (measured: a carrier that cannot hold 33 KB under Hamming holds it
@@ -1073,7 +1428,7 @@ pub fn probe_spatial_capacity_with_profile(
 
     // Recommended capacity bounded by safety tier bpp budget and candidate slot ratio r
     let bpp_bits = (total_pixels as f64 * safety_level.bpp_limit()).floor() as usize;
-    let ratio_bits = (available_body_slots as f64 / safety_level.target_ratio()).floor() as usize;
+    let ratio_bits = (ratio_slots as f64 / safety_level.target_ratio()).floor() as usize;
     let target_bits = bpp_bits.min(ratio_bits);
     let recommended_max_bytes =
         (target_bits / 8).saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
@@ -1116,6 +1471,28 @@ mod tests {
         ancillary: &[(&[u8; 4], &[u8])],
         idat_parts: usize,
     ) -> Vec<u8> {
+        craft_png_at_level(
+            width,
+            height,
+            pixels,
+            row_filters,
+            ancillary,
+            idat_parts,
+            Compression::default().level(),
+        )
+    }
+
+    /// [`craft_png`] with an explicit zlib level, so the level-matching path
+    /// can be exercised against carriers written the way real tools write them.
+    fn craft_png_at_level(
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+        row_filters: &[u8],
+        ancillary: &[(&[u8; 4], &[u8])],
+        idat_parts: usize,
+        level: u32,
+    ) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
         let mut ihdr = Vec::with_capacity(13);
@@ -1142,7 +1519,7 @@ mod tests {
             filtered.push(row_filters[y]);
             filtered.extend_from_slice(&filter_row(prev, row, row_filters[y], 3));
         }
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(level));
         encoder.write_all(&filtered).expect("deflate");
         let idat = encoder.finish().expect("deflate finish");
         // Split the compressed stream into `idat_parts` IDAT chunks.
@@ -1412,6 +1789,7 @@ mod tests {
             chunks: Vec::new(),
             idat_sizes: Vec::new(),
             row_filters: Vec::new(),
+            idat_info: None,
         };
         let png = encode_png(&img).expect("encode");
         let decoded = decode_png(&png).expect("decode");
@@ -1769,6 +2147,245 @@ mod tests {
         assert!(
             ok_res.is_ok(),
             "Advisory safety policy must not block embedding"
+        );
+    }
+
+    /// Incompressible bytes: the envelope deflates the payload, so a repeated
+    /// byte pattern would shrink to a fraction of its size and never exercise
+    /// the capacity ceiling.
+    fn noise_payload(len: usize) -> Vec<u8> {
+        let mut s = 0x1234_5678u32;
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            out.push((s & 0xFF) as u8);
+        }
+        out
+    }
+
+    /// The zlib header is captured at decode time: `FLEVEL` and the IDAT total.
+    ///
+    /// The end-to-end size behaviour is not asserted here because the writer's
+    /// deflate backend (miniz) does not reproduce another tool's level 1 byte
+    /// count -- on a synthetic fixture it can be twice as good as zlib's. The
+    /// decision is covered by [`level_choice_follows_the_measured_size`], and
+    /// the real-corpus effect is measured separately.
+    #[test]
+    fn decode_captures_the_zlib_header() {
+        let (w, h) = (32usize, 32usize);
+        let pixels = row_correlated_pixels(w, h);
+        for (level, flevel) in [(1u32, 0u8), (6, 2), (9, 3)] {
+            let png = craft_png_at_level(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1, level);
+            let img = decode_png(&png).expect("decode");
+            let info = img.idat_info.expect("idat header must be captured");
+            assert_eq!(
+                info.flevel, flevel,
+                "level {level} must map to FLEVEL {flevel}"
+            );
+            assert_eq!(info.orig_len, img.idat_sizes.iter().sum::<usize>());
+        }
+        // A hand-built image carries no hint and must encode at the default.
+        let handbuilt = RawImage {
+            width: 4,
+            height: 4,
+            channels: 3,
+            pixels: vec![10u8; 4 * 4 * 3],
+            chunks: Vec::new(),
+            idat_sizes: Vec::new(),
+            row_filters: Vec::new(),
+            idat_info: None,
+        };
+        assert!(!encode_png(&handbuilt).expect("encode").is_empty());
+    }
+
+    /// The level decision itself: whichever candidate matches the source length
+    /// wins, and a carrier without an `IdatInfo` keeps the default level.
+    #[test]
+    fn level_choice_follows_the_measured_size() {
+        // Repetitive text-like rows: level 1 and level 6 differ by a lot, which
+        // is what makes the two candidates distinguishable at all.
+        let (row_len, height) = (48usize, 48usize);
+        let mut data = Vec::new();
+        for y in 0..height {
+            for x in 0..row_len {
+                data.push(((x * 7 + y * 3) % 61 + 40) as u8);
+            }
+        }
+        let fast = deflate_len(&data, 1);
+        let default = deflate_len(&data, 6);
+        assert!(fast > default, "fixture must separate the two levels");
+
+        let pick = |orig: usize| {
+            choose_deflate_level(
+                &data,
+                row_len,
+                height,
+                Some(IdatInfo {
+                    flevel: 0,
+                    orig_len: orig,
+                }),
+            )
+            .0
+        };
+        assert_eq!(pick(fast), 1, "a fast-compressed source must pick level 1");
+        assert_eq!(pick(default), 6, "a default-compressed source must pick 6");
+
+        // No header hint: default level, no probing.
+        let (level, projected) = choose_deflate_level(&data, row_len, height, None);
+        assert_eq!(level, Compression::default().level());
+        assert_eq!(projected, [0, 0]);
+    }
+
+    /// A payload that fits one channel must keep the historical layout: only
+    /// green changes. This is what makes the single-channel path bit-compatible
+    /// with everything measured before multi-channel existed.
+    #[test]
+    fn single_channel_mode_leaves_red_and_blue_untouched() {
+        let (w, h) = (128usize, 128usize);
+        let pixels = row_correlated_pixels(w, h);
+        let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
+        let params = SpatialParams::default();
+        let payload = b"single-channel-layout";
+        let stego =
+            embed_spatial(&png, payload, Some("pw"), None, &HillCostModel, &params).expect("embed");
+        let back =
+            extract_spatial(&stego, Some("pw"), None, &HillCostModel, &params).expect("extract");
+        assert_eq!(back, payload);
+
+        let before = decode_png(&png).expect("decode");
+        let after = decode_png(&stego).expect("decode stego");
+        let mut per_channel = [0usize; 3];
+        for (i, (a, b)) in before.pixels.iter().zip(after.pixels.iter()).enumerate() {
+            if a != b {
+                per_channel[i % 3] += 1;
+            }
+        }
+        assert!(per_channel[1] > 0, "green must carry the payload");
+        assert_eq!(
+            (per_channel[0], per_channel[2]),
+            (0, 0),
+            "a small payload must not touch red/blue: {per_channel:?}"
+        );
+    }
+
+    /// Exceeding the single-channel pool must switch to RGB, round-trip, and
+    /// actually use the extra channels.
+    #[test]
+    fn three_channel_mode_roundtrips_at_full_capacity() {
+        let (w, h) = (192usize, 192usize);
+        let pixels = row_correlated_pixels(w, h);
+        let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
+        let params = SpatialParams::default();
+        let cap = probe_spatial_capacity(
+            &png,
+            &HillCostModel,
+            &params,
+            crate::stego::SafetyLevel::Balanced,
+            Some("pw"),
+            None,
+        )
+        .expect("probe");
+
+        // The probe reports the three-channel ceiling, so this payload can only
+        // fit with `ChannelMode::Rgb`.
+        let payload = noise_payload(cap.max_raw_payload_bytes);
+        let stego = embed_spatial(&png, &payload, Some("pw"), None, &HillCostModel, &params)
+            .expect("embed at the reported ceiling");
+        let back =
+            extract_spatial(&stego, Some("pw"), None, &HillCostModel, &params).expect("extract");
+        assert_eq!(back, payload, "three-channel payload must round-trip");
+
+        let before = decode_png(&png).expect("decode");
+        let after = decode_png(&stego).expect("decode stego");
+        let mut per_channel = [0usize; 3];
+        for (i, (a, b)) in before.pixels.iter().zip(after.pixels.iter()).enumerate() {
+            if a == b {
+                continue;
+            }
+            assert!(a.abs_diff(*b) <= 1, "move too large: {a} -> {b}");
+            assert_eq!(a & 0xF8, b & 0xF8, "class left: {a} -> {b}");
+            per_channel[i % 3] += 1;
+        }
+        assert!(
+            per_channel.iter().all(|&n| n > 0),
+            "three-channel mode must write all three channels: {per_channel:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_channel_modes_are_rejected() {
+        assert_eq!(ChannelMode::from_wire(0), Some(ChannelMode::Green));
+        assert_eq!(ChannelMode::from_wire(1), Some(ChannelMode::Rgb));
+        for bad in [2u8, 3, 255] {
+            assert!(
+                ChannelMode::from_wire(bad).is_none(),
+                "{bad} must be rejected"
+            );
+        }
+        assert!(
+            ChannelMode::Green.available(1),
+            "grayscale supports green mode"
+        );
+        assert!(
+            !ChannelMode::Rgb.available(2),
+            "gray+alpha has no third channel"
+        );
+        assert_eq!(ChannelMode::Green.channels(1), &[0usize]);
+        assert_eq!(ChannelMode::Green.channels(4), &[1usize]);
+        assert_eq!(ChannelMode::Rgb.channels(3), &[0usize, 1, 2]);
+    }
+
+    /// The `(cost bits, pixel)` total order plus `select_nth_unstable` must be
+    /// exactly what the previous stable `sort_by` produced -- including the
+    /// flat regions, where thousands of costs are exactly `1 / epsilon` and the
+    /// tie-breaking order is load-bearing.
+    #[test]
+    fn slot_ranking_matches_the_stable_sort_it_replaced() {
+        let (w, h) = (64usize, 64usize);
+        // Half gradient, half constant: the constant half ties on cost.
+        let mut pixels = gradient_pixels(w, h);
+        for y in h / 2..h {
+            for x in 0..w {
+                let i = (y * w + x) * 3;
+                pixels[i..i + 3].fill(120);
+            }
+        }
+        let png = craft_png(w as u32, h as u32, &pixels, &vec![0u8; h], &[], 1);
+        let img = decode_png(&png).expect("decode");
+        let params = SpatialParams::default();
+        let costs = HillCostModel.compute_cost(&img.pixels, w, h, 3, &params);
+        let plan = SlotPlan::build(
+            &img,
+            &costs,
+            &params,
+            Some("pw"),
+            None,
+            &crate::stego::format::OFFICIAL_SPATIAL,
+        )
+        .expect("plan");
+
+        let mut eligible: Vec<usize> = (0..w * h)
+            .filter(|&i| {
+                (SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&img.pixels[i * 3 + 1])
+            })
+            .collect();
+        eligible.sort_by(|&a, &b| {
+            costs[a]
+                .partial_cmp(&costs[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let allowed = ((eligible.len() as f64)
+            * (1.0 - params.exclusion_percentile.clamp(0.0, 0.9))) as usize;
+        assert_eq!(
+            plan.candidates,
+            eligible[..allowed].to_vec(),
+            "selection must be identical to the stable sort"
+        );
+        assert!(
+            costs[plan.candidates[0]].to_bits() == costs[plan.candidates[1]].to_bits(),
+            "this fixture must contain cost ties for the assertion to mean anything"
         );
     }
 
