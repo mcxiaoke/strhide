@@ -284,9 +284,9 @@ uint8 路径 `temp/hill_mask_probe.py` 给出同向结果 0.142 / 0.707 / 0.957�
 | **B** | 按 hstego 重做 cost polarization（wiener precover + 逐系数方向） | 路线文 P2，MIT 可参考 | UERD 代价构造，不动线格式 | **已完成** |
 | **C** | header 槽位与代价解耦 + 算法 id 写进 feature word | 缺口 B | `SlotPlan::build`、`FeatureWord`、提取流程 | **已完成** |
 | **D** | 参数包 + 注册表一致性测试 | 缺口 C/D | `params.rs`、`registry.rs` | **已完成** |
-| **E** | 加 **J-UNIWARD** 作为第二个 JPEG 插件 | 验证插件边界；顺便给 P0 一个文献可比的对照点 | 新 `jpeg/cost/juniward.rs`，参考 hstego（MIT） | 待 A-D 验证后 |
-| **F** | 加 **S-UNIWARD** 作为第二个空间插件 | 同上，仅作对照，不做默认 | 新 `spatial/cost/suniward.rs`，按论文重写 | 待 E 之后 |
-| **G** | 用 conseal 建 cost map 回归测试 | 数值正确性 | `rust/tests/`，不引 Python 运行时 | 待 E/F |
+| **E** | 加 **J-UNIWARD** 作为第二个 JPEG 插件 | 验证插件边界；顺便给 P0 一个文献可比的对照点 | 新 `jpeg/cost/juniward.rs`，参考 hstego（MIT） | **已完成** |
+| **F** | 加 **S-UNIWARD** 作为第二个空间插件 | 同上，仅作对照，不做默认 | 新 `spatial/cost/suniward.rs`，按论文重写 | **已完成** |
+| **G** | 用 conseal 建 cost map 回归测试 | 数值正确性 | `rust/tests/`，不引 Python 运行时 | 待做 |
 
 ### 6.1 A-D 实施结果（2026-10-23 23:28）
 
@@ -307,6 +307,35 @@ uint8 路径 `temp/hill_mask_probe.py` 给出同向结果 0.142 / 0.707 / 0.957�
 
 **C 的实测**（`tests/png_self_describing.rs`）：给提取端传入一个 id 完全不同的冒牌模型，
 提取仍成功——证明 carrier 的声明优先于调用方的猜测。
+
+### 6.2 E-F 实施结果（2026-10-23 23:49）
+
+| 项 | 实际做法 | 说明 |
+| :--- | :--- | :--- |
+| E | `jpeg/cost/juniward.rs`，σ 默认 `2^-6`（`algorithm_options.sigma` 可覆盖） | **JPEG 侧不需要 wire id**：提取槽位是几何 + 密钥，与代价无关。所以加 JPEG 模型是纯增量，不动线格式 —— 这一点与原设想一致，比 C 顺利 |
+| E | 16 抽头 Daubechies-8 抽到 `stego/wavelet.rs` 共享 | 两个 UNIWARD 用同一套滤波器，不复制 |
+| E | ξ 与 \|ξ\| 都按 1D 外积实现 | 单系数扰动是 8×8 IDCT 基 × quant，而基与 2D 滤波器都可分离，故内层只需 23×23 点积 |
+| F | `spatial/cost/suniward.rs`，wire id `2`，σ 默认 `1.0`（对齐 conseal/stegolab；论文的 `2^-6` 是 JPEG 域取值） | 单像素扰动是 delta，响应即分析滤波器本身，\|ξ\| 可分离 → 每个 band 两趟 1D 卷积 |
+| F | 代价在 `& 0xF8` 掩码像素上算，并加不变量单测 | 与 HILL 同因：排序要能被提取端逐位复现 |
+
+**性能**（release，单线程，embed 全程）：
+
+| 载体 | 基准 | 新模型 | 倍数 |
+| :--- | ---: | ---: | ---: |
+| 24 MP JPEG（6000×4000） | UERD 0.50 s | J-UNIWARD 9.20 s | **18×** |
+| 6 MP PNG（3000×2000） | HILL 2.47 s | S-UNIWARD 2.87 s | **1.16×** |
+
+**质量指标**（`small.jpg`）：
+
+- J-UNIWARD 平坦块均代价 9139 vs 繁忙块 385（**24×**）—— 纹理自适应成立；
+- J-UNIWARD 最便宜 10% 槽位与 UERD 仅重合 **0.47** —— 两者真的选不同位置，不是"更慢的同款"。
+
+**插件边界的结论**：加 JPEG 模型 = registry 一行 + 一个新文件；加空间模型 = 同上再加一个 wire id。
+两者都没碰引擎、`params.rs` 或线格式。A-D 的接口设计在 E/F 上验证通过。
+
+**S-UNIWARD 已经很便宜，但没设成默认**：6 MP 只慢 16%，工程上完全可用。仍然保持 `auto → HILL`，
+因为路线文 §2.1 的 2025–2026 实测显示 HILL 在两个 CNN 检测器下检出率更低。要不要改默认属于
+策略决定，需要 P0 基线数据支撑，不该顺手改。
 
 
 ### 明确不做
