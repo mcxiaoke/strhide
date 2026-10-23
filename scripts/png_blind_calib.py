@@ -83,7 +83,11 @@ def run(cmd, **kw):
 # ---------------------------------------------------------------------------
 
 def cmd_gen(a):
-    covers = [p for p in iter_images(Path(a.covers)) if p.suffix.lower() == ".png"]
+    if a.covers_list:
+        covers = [Path(line.strip()) for line in Path(a.covers_list).read_text(encoding="utf-8").splitlines() if line.strip()]
+        covers = [p for p in covers if p.is_file() and p.suffix.lower() == ".png"]
+    else:
+        covers = [p for p in iter_images(Path(a.covers)) if p.suffix.lower() == ".png"]
     if a.limit:
         covers = covers[: a.limit]
     out = Path(a.out)
@@ -185,7 +189,7 @@ def scan_batch(binary: str, files, chunk: int = 64):
 
 
 def cmd_scan(a):
-    root = Path(a.set[0])
+    root = Path(a.set[0]) if a.set else Path(".").resolve()
     manifest_path = root / "manifest.json"
     labels = {}
     if manifest_path.exists():
@@ -196,7 +200,12 @@ def cmd_scan(a):
             labels[os.path.normpath(m["stego"])] = ("stego", m["payload"])
         files = [Path(p) for p in labels]
     else:
-        files = collect(a.set)
+        paths = list(a.set or [])
+        for lst in a.file_list or []:
+            paths.extend(
+                line.strip() for line in Path(lst).read_text(encoding="utf-8").splitlines() if line.strip()
+            )
+        files = collect(paths)
         for p in files:
             labels[os.path.normpath(str(p))] = ("cover", "-")
 
@@ -289,7 +298,8 @@ def main():
 
     g = sub.add_parser("gen")
     g.add_argument("--bin", required=True)
-    g.add_argument("--covers", required=True)
+    g.add_argument("--covers")
+    g.add_argument("--covers-list", help="text file with one cover per line (takes precedence)")
     g.add_argument("--limit", type=int, default=0)
     g.add_argument("--payloads", default="64,4096,full")
     g.add_argument("--password", default="CalibP@ss2026")
@@ -298,7 +308,8 @@ def main():
 
     s = sub.add_parser("scan")
     s.add_argument("--bin", required=True)
-    s.add_argument("--set", required=True, nargs="+")
+    s.add_argument("--set", nargs="*", help="directories or files to scan")
+    s.add_argument("--file-list", nargs="*", help="text files with one image path per line")
     s.add_argument("--out", required=True)
     s.set_defaults(func=cmd_scan)
 

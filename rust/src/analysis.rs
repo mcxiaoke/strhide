@@ -1326,18 +1326,22 @@ fn ws_analysis(pixels: &[u8], width: u32, channels: usize) -> f64 {
 ///
 /// Calibrated, not inherited from the literature. The textbook 0.05 assumes a
 /// clean cover whose histogram is well behaved; on real PNGs the same
-/// estimators report 0.2-0.7 on *untouched* images (texture, saturation,
-/// JPEG-derived blockiness), which made 21-33% of a 107-cover set alert.
+/// estimators report 0.2-0.5 on *untouched* images (texture, saturation,
+/// compression artifacts), which flagged 25-34% of a 216-cover corpus.
 ///
-/// Measured on that set (`docs/png_blind_calibration_20261023.md`):
-/// - clean covers: median 0.02-0.03, p90 0.19-0.24, max 0.61-0.76;
+/// Measured on that corpus -- 160 DIV2K images plus 56 camera photos stored as
+/// PNG (`docs/png_blind_calibration_20261023.md`):
+/// - clean covers: median 0.016-0.022, p90 0.13-0.22, max 0.42-0.73;
 /// - the same covers with every LSB *replaced* (the rule these estimators
-///   model): median 0.96-1.00.
+///   model): median 0.96-1.00;
+/// - the same covers with 30% of LSBs replaced: median 0.26-0.37.
 ///
-/// 0.70 keeps 1/107 covers above it per detector while still catching 100% /
-/// 75% / 100% of LSB-replacement carriers (WS / RS / SPA). It does *not* make
-/// them detect this project's ternary `±1` matching: that moves the estimates
-/// the other way, which is the honest limit of a replacement-model detector.
+/// 0.70 keeps 1/216 covers above it per detector (0.5%) while still catching
+/// 100% / 85% / 100% of full LSB-replacement carriers (WS / RS / SPA). Two
+/// honest limits: a *partial* replacement below roughly half the pixels reads
+/// 0.26-0.37 and is not flagged, and this project's own ternary `±1` matching
+/// moves the estimates the other way (full load *lowers* them on 27/29
+/// carriers), so a clean verdict says nothing about it.
 const SPATIAL_RATE_THRESHOLD: f64 = 0.70;
 
 /// Rows per spatial statistics slab.
