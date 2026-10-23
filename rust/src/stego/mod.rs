@@ -14,6 +14,7 @@ pub mod prng;
 pub mod registry;
 pub mod spatial;
 pub mod traits;
+pub mod wavelet;
 
 pub use format::{
     CipherSuite, DEFAULT_FORMAT, FormatProfile, GridRule, OFFICIAL_SPATIAL, SpatialFormatProfile,

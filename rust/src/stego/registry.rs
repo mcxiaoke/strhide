@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use crate::stego::jpeg::cost::UerdCostModel;
+use crate::stego::jpeg::cost::{JuniwardCostModel, UerdCostModel};
 use crate::stego::spatial::cost::HillCostModel;
 use crate::stego::traits::{JpegCostModel, SpatialCostModel};
 
@@ -40,9 +40,15 @@ impl CostModelRegistry {
 
     /// Look up a JPEG DCT cost model by algorithm identifier.
     /// Default model is "uerd" if None or "auto" is requested.
+    ///
+    /// "auto" deliberately resolves to UERD, not to the strongest model:
+    /// J-UNIWARD costs roughly two orders of magnitude more per embed for a
+    /// distortion difference that the literature does not show to be a win, so
+    /// it is opt-in only.
     pub fn get_jpeg_model(name: Option<&str>) -> Option<Arc<dyn JpegCostModel>> {
         match name {
             None | Some("auto") | Some("uerd") => Some(Arc::new(UerdCostModel)),
+            Some("juniward") => Some(Arc::new(JuniwardCostModel)),
             _ => None,
         }
     }
@@ -89,6 +95,11 @@ impl CostModelRegistry {
                 "JPEG (JPG)",
                 "Uniform Embedding Revisited Distortion model (Guo et al., IEEE TIFS 2015)",
             ),
+            (
+                "juniward",
+                "JPEG (JPG)",
+                "J-UNIWARD wavelet-relative distortion (Holub et al., EURASIP JIS 2014)",
+            ),
         ]
     }
 }
@@ -104,7 +115,7 @@ mod tests {
         assert!(CostModelRegistry::get_spatial_model(Some("wow")).is_none());
         assert!(CostModelRegistry::get_jpeg_model(Some("nsf5")).is_none());
         assert!(CostModelRegistry::get_spatial_model(Some("uniward")).is_none());
-        assert!(CostModelRegistry::get_jpeg_model(Some("juniward")).is_none());
+        assert!(CostModelRegistry::get_spatial_model(Some("juniward")).is_none());
     }
 
     #[test]

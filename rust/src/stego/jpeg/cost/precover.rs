@@ -45,8 +45,9 @@ const N: usize = 8;
 /// `COS[x][u] = C(u)/2 * cos((2x + 1) u pi / 16)`.
 ///
 /// Same basis as `analysis::calibration`, kept local so this module stays
-/// self-contained.
-fn dct_basis() -> [[f64; N]; N] {
+/// self-contained. Exposed to the sibling cost models (J-UNIWARD needs it to
+/// build the spatial footprint of a single coefficient change).
+pub(crate) fn dct_basis() -> [[f64; N]; N] {
     let mut m = [[0.0f64; N]; N];
     for (x, row) in m.iter_mut().enumerate() {
         for (u, v) in row.iter_mut().enumerate() {
@@ -173,12 +174,16 @@ fn wiener3(plane: &[f64], w: usize, h: usize) -> Vec<f64> {
     out
 }
 
-/// Estimate what the cover's quantized coefficients "should" have been.
+/// Dequantize and inverse-DCT the first component into one pixel plane.
 ///
-/// Returns one `[f64; 64]` per block of the first component, in natural order
-/// and indexed by block index (`bi`), i.e. the same indexing the cost map uses
-/// (`bi * 64 + k`). `None` when the geometry does not describe the block set.
-pub fn estimate(coeffs: &JpegCoefficients, geometry: &JpegGeometry) -> Option<Vec<[f64; 64]>> {
+/// Returns `(plane, width, height)` with the plane in row-major order on the
+/// component's MCU-padded block grid. Shared by everything that needs to see the
+/// carrier in the spatial domain (cost polarization, J-UNIWARD); the level shift
+/// is deliberately skipped -- see the module docs.
+pub fn decompress_luma(
+    coeffs: &JpegCoefficients,
+    geometry: &JpegGeometry,
+) -> Option<(Vec<f64>, usize, usize)> {
     let comp = coeffs.components.first()?;
     let total_blocks = comp.blocks.len();
     if total_blocks == 0 || geometry.positions.len() != total_blocks {
@@ -193,7 +198,6 @@ pub fn estimate(coeffs: &JpegCoefficients, geometry: &JpegGeometry) -> Option<Ve
     let basis = dct_basis();
     let (pw, ph) = (grid_w * N, grid_h * N);
 
-    // 1) dequantize + IDCT into one pixel plane
     let mut plane = vec![0.0f64; pw * ph];
     for (bi, &(r, c)) in geometry.positions.iter().enumerate() {
         let mut dequantized = [0.0f64; 64];
@@ -207,10 +211,24 @@ pub fn estimate(coeffs: &JpegCoefficients, geometry: &JpegGeometry) -> Option<Ve
         }
     }
 
-    // 2) precover: remove the quantization noise
+    Some((plane, pw, ph))
+}
+
+/// Estimate what the cover's quantized coefficients "should" have been.
+///
+/// Returns one `[f64; 64]` per block of the first component, in natural order
+/// and indexed by block index (`bi`), i.e. the same indexing the cost map uses
+/// (`bi * 64 + k`). `None` when the geometry does not describe the block set.
+pub fn estimate(coeffs: &JpegCoefficients, geometry: &JpegGeometry) -> Option<Vec<[f64; 64]>> {
+    let (plane, pw, ph) = decompress_luma(coeffs, geometry)?;
+    let basis = dct_basis();
+    let q: [f64; 64] = std::array::from_fn(|i| geometry.luma_q[i].max(1) as f64);
+    let total_blocks = coeffs.components.first()?.blocks.len();
+
+    // precover: remove the quantization noise
     let precover = wiener3(&plane, pw, ph);
 
-    // 3) forward DCT + dequantize-normalise, back into per-block estimates
+    // forward DCT + dequantize-normalise, back into per-block estimates
     let mut out = vec![[0.0f64; 64]; total_blocks];
     for (bi, &(r, c)) in geometry.positions.iter().enumerate() {
         let mut block = [[0.0f64; N]; N];
