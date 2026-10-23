@@ -311,13 +311,28 @@ pub struct JpegParams {
 ///
 /// Chosen by the Phase 3 grid (`h` x budget, 8 photos, 4/16/64 KiB): 1.2M has the
 /// lowest distortion and file growth of every configuration that stays under the
-/// 3 s embed gate, at ~77 MB of backtracking bitmap (`n * 2^h / 4`, `h = 8`).
-/// 800k is 40% faster and 26 MB lighter for ~6% more changes; 2M+ only adds
-/// memory. See `docs/stc_v3_phase3_eval_20261021.md`.
+/// 3 s embed gate, at ~38 MB of backtracking bitmap (one bit per column and
+/// state: `n * 2^h / 8`, `h = 8`). 800k is 40% faster and 13 MB lighter for ~6%
+/// more changes. It is now only the *floor* of the automatic budget -- see
+/// [`JpegParams::effective_slot_budget`]. See
+/// `docs/stc_v3_phase3_eval_20261021.md`.
 pub const DEFAULT_SLOT_BUDGET: usize = 1_200_000;
 
-/// Upper limit for automatic dynamic scaling of slot budget on massive carriers.
-pub const MAX_DEFAULT_SLOT_BUDGET: usize = 2_400_000;
+/// Ceiling on the STC backtracking bitmap, i.e. on an automatically scaled
+/// trellis size.
+///
+/// This replaces the flat 2.4M-slot ceiling the code used to apply. That ceiling
+/// pinned a 24 MP carrier holding 200 KB to `u = 1`, which is the one group size
+/// with *no* freedom at all -- a `(1,1)` parity code whose solution is unique, so
+/// the UERD cost map cannot move a single flip, and the weighted distortion is
+/// ~29x that of `u = 3`. Sizing by the bitmap instead keeps the trellis
+/// proportional to the carrier and bounds what actually matters:
+///
+/// * memory -- one slot costs `2^h / 64` words of traceback state (32 B at
+///   `h = 8`, 128 B at `h = 10`), so 256 MiB allows 8.4M slots at `h = 8`;
+/// * time -- bytes per slot and states per slot are the same power of two, so
+///   they cancel and the worst case is ~1 s of kernel time for *any* `h`.
+pub const MAX_AUTO_BACKTRACK_BYTES: usize = 256 << 20;
 
 fn default_cipher_suite() -> u16 {
     crate::stego::format::DEFAULT_SUITE_ID
@@ -383,14 +398,31 @@ impl JpegParams {
 
     /// Compute the effective slot budget for layout optimization.
     ///
-    /// Unset (`None`) scales dynamically with carrier capacity (`body_slots / 4`)
-    /// so large carriers (e.g. 24 MP+) keep optimal low-distortion group sizes
-    /// (`u >= 2`) without an excessive memory footprint. An explicit value is
-    /// respected exactly, even when it happens to equal [`DEFAULT_SLOT_BUDGET`].
+    /// Unset (`None`) is proportional to the carrier: a quarter of its body
+    /// grid, so a body grid holding `r` slots per payload bit yields `u = r / 4`
+    /// -- the group size follows how much room the carrier actually has instead
+    /// of being pinned by a flat slot count. Two clamps keep it sane:
+    /// [`DEFAULT_SLOT_BUDGET`] as a floor (small carriers stay generous) and
+    /// [`MAX_AUTO_BACKTRACK_BYTES`] as a memory ceiling (huge carriers stop
+    /// growing the traceback bitmap). An explicit value is respected exactly,
+    /// even when it happens to equal [`DEFAULT_SLOT_BUDGET`].
+    ///
+    /// Worked example: a 24 MP carrier (23.6M-slot grid) with a 200 KB payload
+    /// has `r = 14.7`, so the budget is `23.6M / 4 = 5.9M` and `u = 3`; the old
+    /// flat ceiling gave `u = 1` here, i.e. no adaptivity at all.
     pub fn effective_slot_budget(&self, body_slots: usize) -> usize {
         match self.slot_budget {
             Some(budget) => budget,
-            None => DEFAULT_SLOT_BUDGET.max((body_slots / 4).min(MAX_DEFAULT_SLOT_BUDGET)),
+            None => {
+                // `stc_h` is validated to 4..=10 at the API boundary; clamp
+                // anyway so a hand-built params struct cannot shift-overflow.
+                let h = self.stc_h.min(crate::stego::coding::MAX_STC_H);
+                let states = 1usize << h;
+                let bytes_per_slot = states.div_ceil(64) * 8;
+                let memory_cap =
+                    (MAX_AUTO_BACKTRACK_BYTES / bytes_per_slot).max(DEFAULT_SLOT_BUDGET);
+                DEFAULT_SLOT_BUDGET.max((body_slots / 4).min(memory_cap))
+            }
         }
     }
 }
@@ -552,6 +584,47 @@ mod tests {
             JpegParams::default().effective_slot_budget(100),
             DEFAULT_SLOT_BUDGET
         );
+    }
+
+    /// The default policy must never pin a high-resolution carrier holding a
+    /// large payload to `u = 1`. A flat 2.4M-slot ceiling used to do exactly
+    /// that (24 MP + 200 KB -> `u = 1`), and `u = 1` is a `(1,1)` parity code:
+    /// the solution is unique, so the UERD cost map cannot move a single flip
+    /// and the weighted distortion is ~29x that of `u = 3`.
+    #[test]
+    fn large_carrier_with_large_payload_keeps_a_grouped_trellis() {
+        // 4:2:0 24 MP -> 375k blocks -> 23.6M grid slots, minus the header.
+        let n_total = 375_000 * 63;
+        let hdr_n = 718;
+        let params = JpegParams::default();
+        let body_slots = n_total - hdr_n;
+        let budget = params.effective_slot_budget(body_slots);
+        // A quarter of the grid, so `u` tracks the ratio instead of a constant.
+        assert_eq!(budget, body_slots / 4);
+
+        let bits = 8 * (200_000 + 21); // 200 KB payload plus the envelope header
+        let layout =
+            crate::stego::jpeg::v3_layout::compute(n_total, hdr_n, bits, params.stc_h, budget)
+                .unwrap();
+        assert!(
+            layout.u >= 3,
+            "24 MP + 200 KB must not fall back to u = {}",
+            layout.u
+        );
+        assert_eq!(
+            layout.u,
+            3,
+            "r = {:.1} implies u = 3",
+            body_slots as f64 / (bits + 7) as f64
+        );
+
+        // The same carrier with a payload that nearly fills it still degrades
+        // gracefully -- it just cannot afford a grouped code.
+        let dense = 8 * (700_000 + 21);
+        let dense_layout =
+            crate::stego::jpeg::v3_layout::compute(n_total, hdr_n, dense, params.stc_h, budget)
+                .unwrap();
+        assert!(dense_layout.u >= 1 && dense_layout.u <= layout.u);
     }
 
     #[test]

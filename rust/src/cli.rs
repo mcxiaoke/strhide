@@ -385,7 +385,7 @@ pub struct EmbedArgs {
         long = "slot-budget",
         value_name = "INT",
         help = "Fine-tune (JPEG V3): trellis slot budget; a larger budget spreads each payload bit over more \
-                coefficients (fewer changes per coefficient), at the cost of time and memory. Default: 1200000. \
+                coefficients (fewer changes per coefficient), at the cost of time and memory. Default: automatic -- a quarter of the carrier's coefficient grid (at least 1200000 slots), so the group size follows the carrier instead of falling back to u=1. \
                 Extraction does not need this value."
     )]
     pub slot_budget: Option<usize>,

@@ -125,44 +125,35 @@ impl Kind {
     }
 }
 
-/// Cheapest way to reach one LSB parity for a single element.
+/// Cheapest way to *flip* one element's LSB parity.
+///
+/// Keeping the value always reaches its own parity at zero cost, so a column
+/// only ever chooses between "keep" and "flip". Which of the two carries the
+/// column XOR is decided by the *cover* parity, never by the state, so the flip
+/// direction is an element-level constant -- that is what lets the backtracking
+/// bitmap store a single bit per (column, state).
 #[derive(Debug, Clone, Copy)]
-struct ParityOption {
-    best: Option<(f64, Kind)>,
+struct Flip {
+    /// Infinite when no legal direction flips the parity (both `rho` infinite).
+    cost: f64,
+    kind: Kind,
 }
 
-impl ParityOption {
-    fn empty() -> Self {
-        Self { best: None }
-    }
-
-    fn offer(&mut self, cost: f64, kind: Kind) {
-        if cost.is_infinite() {
-            return;
-        }
-        match self.best {
-            Some((c, _)) if c <= cost => {}
-            _ => self.best = Some((cost, kind)),
-        }
-    }
-}
-
-/// Cheapest way to reach each LSB parity (`0` and `1`) for one element.
-fn parity_options(y: u8, mv: Move, rho_plus: f64, rho_minus: f64) -> [ParityOption; 2] {
-    let mut opts = [ParityOption::empty(), ParityOption::empty()];
-    // Keeping the value always reaches its own parity at zero cost.
-    opts[(y & 1) as usize].offer(0.0, Kind::Keep);
-
-    let flipped = ((y & 1) ^ 1) as usize;
-    match mv {
-        Move::PlusOnly => opts[flipped].offer(rho_plus, Kind::Plus),
-        Move::MinusOnly => opts[flipped].offer(rho_minus, Kind::Minus),
+#[inline]
+fn flip_option(mv: Move, rho_plus: f64, rho_minus: f64) -> Flip {
+    // Ties keep `Plus`, matching the `<=` in the old `ParityOption::offer`.
+    let (cost, kind) = match mv {
+        Move::PlusOnly => (rho_plus, Kind::Plus),
+        Move::MinusOnly => (rho_minus, Kind::Minus),
         Move::Both => {
-            opts[flipped].offer(rho_plus, Kind::Plus);
-            opts[flipped].offer(rho_minus, Kind::Minus);
+            if rho_plus <= rho_minus {
+                (rho_plus, Kind::Plus)
+            } else {
+                (rho_minus, Kind::Minus)
+            }
         }
-    }
-    opts
+    };
+    Flip { cost, kind }
 }
 
 #[inline]
@@ -190,6 +181,143 @@ fn reverse_low_bits(x: u32, h: u8) -> u32 {
         }
     }
     out
+}
+
+/// Run one trellis column.
+///
+/// The column is written destination-first: destination `i` has at most one
+/// source per parity, read at `base(i)` for "keep" and `base(i) ^ col_mask` for
+/// "flip". Expressing it that way removes the two things the old source-ordered
+/// form paid for on every state: a data-dependent branch (the candidates are now
+/// a branch-free select) and a read-modify-write of `next` (both candidates read
+/// the *previous* column, which this column never writes).
+///
+/// `base(i)` is the identity for an accumulating column, and the group shift with
+/// the message bit folded in for a deciding one, so `DECIDE` is a compile-time
+/// constant and the two shapes compile to separate, unswitched loops.
+///
+/// `TWO_WAY` says whether an element really has a choice:
+///
+/// * `u > 1` — the state carries the "extra" bit of row `g+h-1`, the destination
+///   drops it, and both parities reach the same destination from different
+///   sources, so the column is a genuine two-way min.
+/// * `u = 1` — there is no extra bit, so the destination's top bit holds the
+///   element's *post-move parity* instead. That bit fixes whether the element
+///   flipped, so each destination has exactly one source: the column is a plain
+///   permutation plus a constant. (This is why `u = 1` has a 0.5 change rate and
+///   buys no coding gain -- it is a `(1,1)` parity code, not a trellis search.)
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn transfer_column<const DECIDE: bool, const TWO_WAY: bool>(
+    states: usize,
+    state_mask: usize,
+    want: usize,
+    parity_bit: u32,
+    col_mask: usize,
+    cover_parity: usize,
+    flip_cost: f64,
+    cost: &[f64],
+    next: &mut [f64],
+    bits: &mut [u64],
+) {
+    // A deciding column with an extra bit halves the reachable set; without one
+    // the destination's top bit is parity information, so it stays full width.
+    let dests = if DECIDE && TWO_WAY {
+        states >> 1
+    } else {
+        states
+    };
+    // "Keep" lands on the cover parity, so it applies the column XOR exactly
+    // when that parity is 1; "flip" lands on the other parity.
+    let (xor_keep, xor_flip) = if cover_parity == 1 {
+        (col_mask, 0)
+    } else {
+        (0, col_mask)
+    };
+
+    if TWO_WAY && flip_cost.is_finite() {
+        for (w, slot) in bits.iter_mut().enumerate() {
+            let lo = w * 64;
+            if lo >= dests {
+                // Trailing words of a shortened column (a deciding column with
+                // an extra bit only fills half the bitmap).
+                *slot = 0;
+                continue;
+            }
+            let hi = (lo + 64).min(dests);
+            let mut acc = 0u64;
+            for (off, out) in next[lo..hi].iter_mut().enumerate() {
+                let i = lo + off;
+                let base = if DECIDE {
+                    ((i << 1) | want) & state_mask
+                } else {
+                    i
+                };
+                let keep = cost[base ^ xor_keep];
+                let flip = cost[base ^ xor_flip] + flip_cost;
+                let take = flip < keep;
+                acc |= u64::from(take) << (i & 63);
+                *out = if take { flip } else { keep };
+            }
+            *slot = acc;
+        }
+    } else if TWO_WAY {
+        // No legal direction flips the parity: the column is a pure state
+        // transfer, every element keeps its value, so the decisions stay 0.
+        for (w, slot) in bits.iter_mut().enumerate() {
+            let lo = w * 64;
+            if lo >= dests {
+                // Trailing words of a shortened column (a deciding column with
+                // an extra bit only fills half the bitmap).
+                *slot = 0;
+                continue;
+            }
+            let hi = (lo + 64).min(dests);
+            for (off, out) in next[lo..hi].iter_mut().enumerate() {
+                let i = lo + off;
+                let base = if DECIDE {
+                    ((i << 1) | want) & state_mask
+                } else {
+                    i
+                };
+                *out = cost[base ^ xor_keep];
+            }
+            *slot = 0;
+        }
+    } else {
+        // `u = 1`: the destination dictates the parity, hence the direction.
+        for (w, slot) in bits.iter_mut().enumerate() {
+            let lo = w * 64;
+            if lo >= dests {
+                // Trailing words of a shortened column (a deciding column with
+                // an extra bit only fills half the bitmap).
+                *slot = 0;
+                continue;
+            }
+            let hi = (lo + 64).min(dests);
+            let mut acc = 0u64;
+            for (off, out) in next[lo..hi].iter_mut().enumerate() {
+                let i = lo + off;
+                let base = ((i << 1) | want) & state_mask;
+                let parity = (i >> parity_bit) & 1;
+                let src = if parity == 1 { base ^ col_mask } else { base };
+                let step = if parity == cover_parity {
+                    0.0
+                } else {
+                    flip_cost
+                };
+                *out = cost[src] + step;
+                acc |= ((parity ^ cover_parity) as u64) << (i & 63);
+            }
+            *slot = acc;
+        }
+    }
+
+    if DECIDE && TWO_WAY {
+        // The states whose top bit would describe a row past this group are
+        // unreachable from here on.
+        next[dests..states].fill(f64::INFINITY);
+    }
 }
 
 impl StcTrellis {
@@ -398,13 +526,67 @@ impl StcTrellis {
             )));
         }
 
+        // `u = 1` is a `(1,1)` parity code, not a search: the `h-1` warm-up rows
+        // plus the message rows pin down every one of the `n` elements, so the
+        // trellis has exactly one live state per column and the solution is
+        // unique. The cost map cannot move a single flip -- it only chooses the
+        // `+1`/`-1` direction -- so walking the chain is `O(n)` instead of
+        // `O(n * 2^(h-1))` and produces bit-identical deltas.
+        if u == 1 {
+            let col = self.cols[0] as usize;
+            let low_mask = (1usize << (h - 1)) - 1;
+            let col_low = col & low_mask;
+            let col_top = (col >> (h - 1)) & 1;
+            let mut state = 0usize;
+            let mut flips = 0usize;
+            for j in 0..n {
+                let (rp, rm) = cost_fn(j);
+                let flip = flip_option(moves[j], rp, rm);
+                let cover_parity = (vals[j] & 1) as usize;
+                let row = j as isize - (h as isize - 1);
+                let want = if row >= 0 {
+                    message_bit(message, row as usize)
+                } else {
+                    0
+                };
+                // Exactly one of the two branches satisfies the row constraint:
+                // the one whose post-move parity is `want ^ (state & 1)`.
+                let parity = want ^ (state & 1);
+                if parity != cover_parity {
+                    if !flip.cost.is_finite() {
+                        // The JPEG engine keys off this phrase to tell "this
+                        // carrier cannot host the payload" (over-optimised
+                        // Huffman table, a documented limitation) apart from a
+                        // programming error -- keep it.
+                        return Err(StrHideError::TrellisInfeasible(format!(
+                            "no legal element direction exists for element {j}, which must change parity"
+                        )));
+                    }
+                    deltas[j] = if matches!(flip.kind, Kind::Plus) {
+                        1
+                    } else {
+                        -1
+                    };
+                    flips += 1;
+                } else {
+                    deltas[j] = 0;
+                }
+                state = if parity == 1 {
+                    ((state ^ col_low) >> 1) | (col_top << (h - 2))
+                } else {
+                    state >> 1
+                };
+            }
+            return Ok(flips);
+        }
+
         // State: `h-1` bits covering rows `g .. g+h-2`, plus — only when a group
         // spans several elements — one extra bit for row `g+h-1`, which the
         // rest of the group is still adding to.
         let store_extra = u > 1;
         let state_bits = (h - 1) + usize::from(store_extra);
         let states = 1usize << state_bits;
-        let bytes_per_col = states / 4;
+        let state_mask = states - 1;
         let low_mask = (1usize << (h - 1)) - 1;
         let extra_shift = h - 1;
         let inf = f64::INFINITY;
@@ -412,114 +594,100 @@ impl StcTrellis {
         let mut cost = vec![inf; states];
         cost[0] = 0.0;
         let mut next = vec![inf; states];
-        // Two bits per (column, state): 4 decisions per byte.
-        let mut back = vec![0u8; n * bytes_per_col];
+        // One bit per (column, state): 1 = this element's parity was flipped.
+        //
+        // Which *direction* that flip takes is an element-level constant -- both
+        // `+1` and `-1` flip the parity, so the cheaper legal one wins no matter
+        // what the state is. Storing the direction per element instead of per
+        // state halves the bitmap and keeps the inner loop at one bit per state.
+        let words_per_col = states.div_ceil(64);
+        let mut back = vec![0u64; n * words_per_col];
+        let mut flip_kinds = vec![Kind::Keep as u8; n];
+        #[cfg(target_arch = "x86_64")]
+        let avx2 = std::arch::is_x86_feature_detected!("avx2") && n >= 64;
 
         for j in 0..n {
             let g = j / u;
             let s = j % u;
-            let col = self.cols[s] as usize;
-            let col_low = col & low_mask;
-            let col_top = (col >> (h - 1)) & 1;
-            let decide = s == u - 1;
-
-            let col_start = j * bytes_per_col;
-            let col_back = &mut back[col_start..col_start + bytes_per_col];
-
+            // The column vector *is* the state-XOR mask: its bit `d` is this
+            // element's contribution to row `g+d`, and the state is indexed by
+            // exactly those rows. For `u = 1` the top bit belongs to a row the
+            // state does not carry, hence the mask.
+            let col_mask = (self.cols[s] as usize) & state_mask;
             let (rp, rm) = cost_fn(j);
-            let opts = parity_options(vals[j], moves[j], rp, rm);
-            let opt0 = opts[0].best;
-            let opt1 = opts[1].best;
+            let flip = flip_option(moves[j], rp, rm);
+            flip_kinds[j] = flip.kind as u8;
+            let cover_parity = (vals[j] & 1) as usize;
 
-            if !decide {
-                let col_delta = if store_extra {
-                    col_low | (col_top << extra_shift)
-                } else {
-                    col_low
-                };
-
-                // When not deciding, every state transition is 1-to-1 without merges:
-                // parity 0 -> state (stays the same)
-                // parity 1 -> state ^ col_delta
-                if let Some((dcost0, kind0)) = opt0 {
-                    col_back.fill((kind0 as u8) * 0x55);
-                    for (state, &base) in cost.iter().enumerate().take(states) {
-                        next[state] = if base.is_infinite() {
-                            inf
-                        } else {
-                            base + dcost0
-                        };
-                    }
-                } else {
-                    next.fill(inf);
-                    col_back.fill(0);
+            let col_back = &mut back[j * words_per_col..(j + 1) * words_per_col];
+            // Accumulating columns are two thirds of the work at u = 3 and are
+            // the ones a vector kernel can serve without any index gymnastics.
+            #[cfg(target_arch = "x86_64")]
+            if s + 1 != u && avx2 {
+                // SAFETY: `avx2` is `is_x86_feature_detected!("avx2")`, checked
+                // once for the whole embed.
+                unsafe {
+                    accumulate_xor_avx2(
+                        states,
+                        col_mask,
+                        flip.cost,
+                        cover_parity == 0,
+                        &cost,
+                        &mut next,
+                        col_back,
+                    );
                 }
-
-                if let Some((dcost1, kind1)) = opt1 {
-                    for (state, &base) in cost.iter().enumerate().take(states) {
-                        if !base.is_infinite() {
-                            let ns = state ^ col_delta;
-                            let nc = base + dcost1;
-                            if nc < next[ns] {
-                                next[ns] = nc;
-                                let byte_idx = ns >> 2;
-                                let shift = (ns & 3) * 2;
-                                col_back[byte_idx] = (col_back[byte_idx] & !(0b11 << shift))
-                                    | ((kind1 as u8) << shift);
-                            }
-                        }
-                    }
-                }
-            } else {
-                next.fill(inf);
-                col_back.fill(0);
+                std::mem::swap(&mut cost, &mut next);
+                continue;
+            }
+            if s + 1 == u {
                 let row = g as isize - (h as isize - 1);
                 let want = if row >= 0 {
                     message_bit(message, row as usize)
                 } else {
                     0
                 };
-
-                // When deciding, only transitions satisfying (st1 & 1) == want are valid.
-                for (state, &base) in cost.iter().enumerate() {
-                    if base.is_infinite() {
-                        continue;
-                    }
-                    let st = state & low_mask;
-                    let extra = if store_extra { state >> extra_shift } else { 0 };
-
-                    if let Some((dcost0, kind0)) = opt0 {
-                        // parity 0: st1 = st, ex1 = extra
-                        if (st & 1) == want {
-                            let ns = (st >> 1) | (extra << (h - 2));
-                            let nc = base + dcost0;
-                            if nc < next[ns] {
-                                next[ns] = nc;
-                                let byte_idx = ns >> 2;
-                                let shift = (ns & 3) * 2;
-                                col_back[byte_idx] = (col_back[byte_idx] & !(0b11 << shift))
-                                    | ((kind0 as u8) << shift);
-                            }
-                        }
-                    }
-
-                    if let Some((dcost1, kind1)) = opt1 {
-                        // parity 1: st1 = st ^ col_low, ex1 = extra ^ col_top
-                        let st1 = st ^ col_low;
-                        let ex1 = extra ^ col_top;
-                        if (st1 & 1) == want {
-                            let ns = (st1 >> 1) | (ex1 << (h - 2));
-                            let nc = base + dcost1;
-                            if nc < next[ns] {
-                                next[ns] = nc;
-                                let byte_idx = ns >> 2;
-                                let shift = (ns & 3) * 2;
-                                col_back[byte_idx] = (col_back[byte_idx] & !(0b11 << shift))
-                                    | ((kind1 as u8) << shift);
-                            }
-                        }
-                    }
+                let parity_bit = state_bits as u32 - 1;
+                if store_extra {
+                    transfer_column::<true, true>(
+                        states,
+                        state_mask,
+                        want,
+                        parity_bit,
+                        col_mask,
+                        cover_parity,
+                        flip.cost,
+                        &cost,
+                        &mut next,
+                        col_back,
+                    );
+                } else {
+                    transfer_column::<true, false>(
+                        states,
+                        state_mask,
+                        want,
+                        parity_bit,
+                        col_mask,
+                        cover_parity,
+                        flip.cost,
+                        &cost,
+                        &mut next,
+                        col_back,
+                    );
                 }
+            } else {
+                transfer_column::<false, true>(
+                    states,
+                    state_mask,
+                    0,
+                    state_bits as u32 - 1,
+                    col_mask,
+                    cover_parity,
+                    flip.cost,
+                    &cost,
+                    &mut next,
+                    col_back,
+                );
             }
 
             std::mem::swap(&mut cost, &mut next);
@@ -549,12 +717,17 @@ impl StcTrellis {
         let mut state = best_state;
         let mut flips = 0usize;
         for j in (0..n).rev() {
-            let idx = j * states + state;
-            let kind = Kind::from_bits((back[idx >> 2] >> ((idx & 3) * 2)) & 0b11);
-            let delta: i8 = match kind {
-                Kind::Keep => 0,
-                Kind::Plus => 1,
-                Kind::Minus => -1,
+            // `state` is the state *after* column `j`, which is exactly the
+            // destination index the forward pass just wrote.
+            let flipped = (back[j * words_per_col + (state >> 6)] >> (state & 63)) & 1 == 1;
+            let delta: i8 = if flipped {
+                match Kind::from_bits(flip_kinds[j]) {
+                    Kind::Keep => 0,
+                    Kind::Plus => 1,
+                    Kind::Minus => -1,
+                }
+            } else {
+                0
             };
             if delta != 0 {
                 flips += 1;
@@ -628,6 +801,92 @@ pub fn validate_u_wide(u: u8) -> Result<(), StrHideError> {
         )));
     }
     Ok(())
+}
+
+/// AVX2 kernel for an accumulating column (`u > 1`, `s < u-1`).
+///
+/// Both candidates of a destination differ only by the state XOR, and XOR by a
+/// column vector is a *bit-flip permutation*: for four consecutive destinations
+/// `i..i+4` the four sources `(i+k) ^ d` are exactly one aligned four-double
+/// block at `i ^ (d & !3)`, shuffled inside the block by `k ^ (d & 3)`. So the
+/// "gather" that stops LLVM from vectorising this loop becomes one aligned load
+/// plus one `vpermq`, and the min/select becomes `vcmppd` + `vblendvpd`, with
+/// `vmovmskpd` producing the four decision bits in one instruction.
+///
+/// `keep_plain` says whether the *keep* candidate is the un-XORed one, which is
+/// just `cover_parity == 0`: keeping the value lands on the cover parity, and
+/// only parity 1 applies the column XOR.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn accumulate_xor_avx2(
+    states: usize,
+    d: usize,
+    flip_cost: f64,
+    keep_plain: bool,
+    cost: &[f64],
+    next: &mut [f64],
+    bits: &mut [u64],
+) {
+    use std::arch::x86_64::*;
+
+    // SAFETY: the caller checked `is_x86_feature_detected!("avx2")`, and every
+    // load/store below stays inside `cost` / `next` / `bits`: `i < states`,
+    // `(i ^ block) + 3 < states` because the XOR of two `states`-bounded indices
+    // is `states`-bounded and `states` is a multiple of four.
+    unsafe {
+        let lane_xor = d & 3;
+        // Lane permutation inside a four-double block: lane `j` <- lane `j ^ (d & 3)`.
+        let mut idx_words = [0i32; 8];
+        for j in 0..4 {
+            let src = ((j ^ lane_xor) * 2) as i32;
+            idx_words[2 * j] = src;
+            idx_words[2 * j + 1] = src + 1;
+        }
+        let idx = _mm256_loadu_si256(idx_words.as_ptr() as *const __m256i);
+        let cf = _mm256_set1_pd(flip_cost);
+        let block = d & !3usize;
+
+        for (w, slot) in bits.iter_mut().enumerate() {
+            let lo = w * 64;
+            if lo >= states {
+                *slot = 0;
+                continue;
+            }
+            let hi = (lo + 64).min(states);
+            let mut acc = 0u64;
+            let mut i = lo;
+            while i + 4 <= hi {
+                let plain = _mm256_loadu_pd(cost.as_ptr().add(i));
+                let raw = _mm256_loadu_pd(cost.as_ptr().add(i ^ block));
+                let permuted = if lane_xor == 0 {
+                    raw
+                } else {
+                    _mm256_castsi256_pd(_mm256_permutevar8x32_epi32(_mm256_castpd_si256(raw), idx))
+                };
+                let (keep, flip) = if keep_plain {
+                    (plain, _mm256_add_pd(permuted, cf))
+                } else {
+                    (permuted, _mm256_add_pd(plain, cf))
+                };
+                let take = _mm256_cmp_pd::<_CMP_LT_OQ>(flip, keep);
+                _mm256_storeu_pd(next.as_mut_ptr().add(i), _mm256_blendv_pd(keep, flip, take));
+                acc |= (_mm256_movemask_pd(take) as u64) << (i & 63);
+                i += 4;
+            }
+            // The tail is never longer than three states and never happens for a
+            // power-of-two column, but keep the scalar path so the kernel stays
+            // correct if that ever changes.
+            while i < hi {
+                let keep = cost[i ^ if keep_plain { 0 } else { d }];
+                let flip = cost[i ^ if keep_plain { d } else { 0 }] + flip_cost;
+                let take = flip < keep;
+                next[i] = if take { flip } else { keep };
+                acc |= u64::from(take) << (i & 63);
+                i += 1;
+            }
+            *slot = acc;
+        }
+    }
 }
 
 #[cfg(test)]

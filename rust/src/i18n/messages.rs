@@ -546,8 +546,8 @@ crate::i18n_messages! {
         en = "Fine-tune (STC): trellis constraint height, 4..=10 (default: 8)",
         zh = "微调参数（STC）：网格约束高度，4..=10（默认: 8）";
     HelpStegoSlotBudget:
-        en = "Fine-tune (JPEG STC): slot budget for group size auto-derivation (default: 1200000; dynamically scaled for large carriers)",
-        zh = "微调参数（JPEG STC）：组宽自推导的槽位预算（默认: 1200000；大图自适应伸缩）";
+        en = "Fine-tune (JPEG STC): slot budget for group size auto-derivation (default: automatic, a quarter of the carrier grid with a 1200000 floor)",
+        zh = "微调参数（JPEG STC）：组宽自推导的槽位预算（默认: 自适应，取载体网格的 1/4，下限 1200000）";
     HelpStegoCipherSuite:
         en = "Cipher suite id (1 = PBKDF2-200k / AES-256-GCM, 2 = PBKDF2-600k / AES-256-GCM; default: 1)",
         zh = "密码套件编号（1 = PBKDF2-200k / AES-256-GCM, 2 = PBKDF2-600k / AES-256-GCM；默认: 1）";
