@@ -210,6 +210,172 @@ pub fn can_encode_move(block: &[i16; 64], k: usize, new_val: i16, table: &AcSymb
     first_missing_symbol(&modified, table).is_none()
 }
 
+/// Per-block zigzag state for O(1) move checks.
+///
+/// `can_encode_move` copies the whole 64-coefficient block and replays every
+/// symbol. This state records only what a single `±1` move can change:
+///
+/// * creating a non-zero at `z` splits one zero run and changes the run of the
+///   next non-zero coefficient;
+/// * removing a non-zero at `z` merges the runs on both sides;
+/// * changing a non-zero's magnitude only changes the category at `z`.
+///
+/// The state is only valid while the block is unchanged. `plan_slots` caches
+/// one state per block for the duration of one slot set.
+#[derive(Clone, Copy, Debug)]
+pub struct BlockZigzagState {
+    /// Bit `z` (1..=63) is set iff `block[ZIGZAG[z]] != 0`.
+    nz_mask: u64,
+    /// Magnitude category at every zigzag position (index 0 is the DC slot).
+    zz_cat: [u8; 64],
+}
+
+impl BlockZigzagState {
+    pub fn from_block(block: &[i16; 64]) -> Self {
+        let mut nz_mask = 0u64;
+        let mut zz_cat = [0u8; 64];
+        for z in 1..64 {
+            let value = block[ZIGZAG[z] as usize];
+            if value != 0 {
+                nz_mask |= 1u64 << z;
+                zz_cat[z] = category(value);
+            }
+        }
+        Self { nz_mask, zz_cat }
+    }
+
+    /// Zero run in front of zigzag position `z` (`1..=63`).
+    #[inline]
+    pub fn run_before(&self, k: usize) -> usize {
+        let z = ZZ_POS[k] as usize;
+        let mask = self.nz_mask & ((1u64 << z) - 1) & !1u64;
+        let prev = if mask == 0 {
+            0
+        } else {
+            63 - mask.leading_zeros() as usize
+        };
+        z - prev - 1
+    }
+
+    /// Next non-zero zigzag position after `z`, if any.
+    #[inline]
+    fn next_nonzero(&self, z: usize) -> Option<usize> {
+        if z >= 63 {
+            return None;
+        }
+        let mask = self.nz_mask >> (z + 1);
+        if mask == 0 {
+            None
+        } else {
+            Some(z + 1 + mask.trailing_zeros() as usize)
+        }
+    }
+
+    /// Identifier of the zero run that contains zigzag position `k`.
+    ///
+    /// A run is keyed by the non-zero coefficient that terminates it; the
+    /// trailing run (no following non-zero) uses key 0, which cannot collide
+    /// with a real non-zero position (those start at 1).
+    #[inline]
+    pub fn run_key(&self, k: usize) -> usize {
+        let z = ZZ_POS[k] as usize;
+        self.next_nonzero(z).unwrap_or(0)
+    }
+
+    /// Whether replacing the coefficient at natural index `k` with `new_val`
+    /// leaves the block encodable by `table`.
+    ///
+    /// Precondition: the block this state was built from is encodable by
+    /// `table` (always true for a cover JPEG that decoded successfully).
+    #[inline]
+    pub fn can_move(&self, k: usize, new_val: i16, table: &AcSymbolSet) -> bool {
+        self.can_move_with_slots(k, new_val, table, None)
+    }
+
+    /// [`Self::can_move`] with a conservative cross-slot check.
+    ///
+    /// `slots_in_block` has bit `z` set for every coefficient that may be
+    /// modified in the same solve. When the coefficient after a `0 -> ±1`
+    /// insertion is also a slot, its own move may change its category (for
+    /// example `1 -> 2` after `±1 -> 0` is forbidden), so the shifted run must
+    /// be encodable for *every* category that coefficient can take. This closes
+    /// the residual interaction that a per-slot check cannot see; it is
+    /// deliberately conservative and is only applied to large slot sets.
+    #[inline]
+    pub fn can_move_with_slots(
+        &self,
+        k: usize,
+        new_val: i16,
+        table: &AcSymbolSet,
+        slots_in_block: Option<u64>,
+    ) -> bool {
+        let z = ZZ_POS[k] as usize;
+        let old_nonzero = self.nz_mask & (1u64 << z) != 0;
+        let new_nonzero = new_val != 0;
+        match (old_nonzero, new_nonzero) {
+            (false, false) => true,
+            (false, true) => {
+                if !symbol_ok(self.run_before(k), 1, table) {
+                    return false;
+                }
+                match self.next_nonzero(z) {
+                    Some(next) => {
+                        let run_after = next - z - 1;
+                        let next_cat = self.zz_cat[next];
+                        if !symbol_ok(run_after, next_cat, table) {
+                            return false;
+                        }
+                        if slots_in_block.is_some_and(|m| m & (1u64 << next) != 0)
+                            && !category_variants_ok(run_after, next_cat, table)
+                        {
+                            return false;
+                        }
+                        true
+                    }
+                    // The new coefficient is now the last AC coefficient: EOB
+                    // is needed unless it sits at position 63.
+                    None => z == 63 || table.has(SYMBOL_EOB),
+                }
+            }
+            (true, false) => {
+                let run_before = self.run_before(k);
+                let run_after = match self.next_nonzero(z) {
+                    Some(next) => next - z - 1,
+                    None => 63 - z,
+                };
+                let merged = run_before + 1 + run_after;
+                match self.next_nonzero(z) {
+                    Some(next) => symbol_ok(merged, self.zz_cat[next], table),
+                    // Everything after the removed coefficient is zero, so the
+                    // block ends with an EOB.
+                    None => table.has(SYMBOL_EOB),
+                }
+            }
+            (true, true) => symbol_ok(self.run_before(k), category(new_val), table),
+        }
+    }
+}
+
+/// Every category a non-zero coefficient with `cat` can take after one `±1`
+/// move (excluding the forbidden `±1 -> 0`). Conservative at category edges.
+fn category_variants_ok(run: usize, cat: u8, table: &AcSymbolSet) -> bool {
+    if cat == 1 {
+        return symbol_ok(run, 2, table);
+    }
+    let lo = cat.saturating_sub(1).max(1);
+    let hi = (cat + 1).min(10);
+    (lo..=hi).all(|c| symbol_ok(run, c, table))
+}
+
+/// Whether a `(run, category)` symbol is encodable, including any ZRL chunks.
+#[inline]
+fn symbol_ok(run: usize, category: u8, table: &AcSymbolSet) -> bool {
+    if run >= 16 && !table.has(SYMBOL_ZRL) {
+        return false;
+    }
+    table.has(((run % 16) as u8) << 4 | category)
+}
+
 /// Replay the AC symbol sequence of a block and report the first symbol the
 /// table cannot encode.
 ///
@@ -385,6 +551,68 @@ mod tests {
         let mut sparse = full;
         sparse.present[0x01] = false; // run 0, cat 1
         assert!(!can_encode_move(&block, 1, 1, &sparse));
+    }
+
+    /// The O(1) state machine must agree with the whole-block replay for every
+    /// ternary move on an encodable cover block.
+    #[test]
+    fn block_zigzag_state_matches_the_slow_replay() {
+        struct Rng(u64);
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                self.0
+            }
+        }
+
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let mut compared = 0usize;
+        for case in 0..4000 {
+            let mut block = [0i16; 64];
+            // Sparse natural blocks, with occasional long zero runs.
+            let density = (rng.next() % 9) as usize;
+            for z in 1..64 {
+                if (rng.next() as usize) % 10 < density {
+                    block[ZIGZAG[z] as usize] = (rng.next() % 7) as i16 - 3;
+                }
+            }
+            if rng.next().is_multiple_of(17) {
+                block[ZIGZAG[63] as usize] = 1;
+            }
+
+            // Full table minus a random subset: 0%, 10% or 30% missing.
+            let missing_pct = [0usize, 10, 30][(rng.next() % 3) as usize];
+            let mut table = AcSymbolSet::EMPTY;
+            for s in full_symbol_set() {
+                if missing_pct == 0 || (rng.next() as usize) % 100 >= missing_pct {
+                    table.insert(s);
+                }
+            }
+            if first_missing_symbol(&block, &table).is_some() {
+                continue;
+            }
+
+            let state = BlockZigzagState::from_block(&block);
+            for k in 1..64 {
+                for step in [-1i16, 1] {
+                    let new_val = block[k] + step;
+                    if new_val.abs() > 1023 {
+                        continue;
+                    }
+                    let slow = can_encode_move(&block, k, new_val, &table);
+                    let fast = state.can_move(k, new_val, &table);
+                    assert_eq!(
+                        slow, fast,
+                        "case {case} k={k} old={} new={new_val} missing_pct={missing_pct}",
+                        block[k]
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert!(compared > 50_000, "only {compared} moves compared");
     }
 
     #[test]

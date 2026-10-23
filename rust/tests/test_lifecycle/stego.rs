@@ -139,8 +139,9 @@ fn header_slots_of(png: &[u8], password: Option<&str>) -> Vec<usize> {
     });
     let allowed = ((eligible.len() as f64) * (1.0 - params.exclusion_percentile)) as usize;
     let mut candidates = eligible[..allowed].to_vec();
-    strhide::stego::prng::permute_indices(
+    strhide::stego::prng::permute_prefix(
         &mut candidates,
+        strhide::stego::header::V2_TOTAL_HEADER_SLOTS,
         &strhide::stego::envelope::derive_header_perm_seed(password, None),
     );
     candidates[..strhide::stego::header::V2_TOTAL_HEADER_SLOTS].to_vec()

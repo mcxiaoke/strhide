@@ -46,7 +46,7 @@ pub use crate::stego::header::{
     FeatureWord, HEADER_LEN_MASK, HEADER_LEN_MAX, HEADER_V2_ESCAPE_H, V2_TOTAL_HEADER_SLOTS,
     decode_header_word, encode_header_word,
 };
-use crate::stego::prng::permute_indices;
+use crate::stego::prng::{permute_indices, permute_prefix};
 use crate::stego::traits::SpatialCostModel;
 use crate::stego::{SpatialParams, StegoCapacityInfo, StegoCodec};
 
@@ -552,7 +552,7 @@ impl SlotPlan {
         let header_seed =
             crate::stego::envelope::derive_header_perm_seed_with_profile(password, domain, spatial);
         let mut permuted = candidates.clone();
-        permute_indices(&mut permuted, &header_seed);
+        permute_prefix(&mut permuted, V2_TOTAL_HEADER_SLOTS, &header_seed);
 
         let mut used_by_header = vec![false; total_pixels];
         for &s in permuted.iter().take(V2_TOTAL_HEADER_SLOTS) {

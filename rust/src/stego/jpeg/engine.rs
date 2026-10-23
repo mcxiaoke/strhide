@@ -53,7 +53,7 @@ use crate::stego::jpeg::header_v3::{
 };
 use crate::stego::jpeg::v3_layout::{self, Layout};
 use crate::stego::params::{ExtractParams, JpegParams, SafetyEnforcement};
-use crate::stego::prng::permute_indices;
+use crate::stego::prng::{ChaCha12Stream, fisher_yates_prefix_from, permute_prefix};
 use crate::stego::traits::JpegCostModel;
 
 /// Map a dct_io error to StrHideError.
@@ -71,6 +71,114 @@ fn map_dct_error(e: dct_io::DctError) -> StrHideError {
             StrHideError::UnsupportedFormat(format!("Unsupported JPEG variant: {msg}"))
         }
         _ => StrHideError::CorruptedData(format!("Corrupt JPEG coefficient stream: {e}")),
+    }
+}
+
+/// Safety caps for the JPEG decode/allocation path.
+///
+/// `MAX_JPEG_MCU_COUNT` mirrors `dct-io 0.1.1`; it is checked here as well so the
+/// capacity probe and the embedder reject the same carriers for the same reason.
+/// `MAX_JPEG_TOTAL_BLOCKS` is a forward-compatible cap a decoder fork would
+/// enforce (six 8x8 blocks per MCU); it is checked here too so a future decoder
+/// change cannot make the probe and the embedder disagree.
+const MAX_JPEG_MCU_COUNT: usize = 1_048_576;
+const MAX_JPEG_TOTAL_BLOCKS: usize = 6_291_456;
+/// Whole-pipeline working-set ceiling: coefficients + UERD costs + slot grid +
+/// the working copy. The trellis bitmap is checked separately once the layout is
+/// known (its size depends on the payload). 8 GiB admits a full-capacity 100 MP
+/// baseline grid (about 5.4 GiB) while still rejecting pathological 200+ MP
+/// allocations; the uncounted per-block state/slot-mask temporaries are about
+/// 0.3 GiB at that size.
+const MAX_PIPELINE_BYTES: u64 = 8 << 30;
+/// Per-block estimate for the arrays that exist for every carrier:
+/// coefficients (128 B), UERD costs (512 B), slot grid (252 B), work copy (128 B).
+const PIPELINE_BYTES_PER_BLOCK: u64 = 128 + 512 + 63 * 4 + 128;
+const PIPELINE_FIXED_BYTES: u64 = 64 << 20;
+
+/// Carrier metadata plus the cheap resource estimate, shared by embed, extract
+/// and probe so all three paths agree on what the carrier can do.
+struct CarrierPreflight {
+    info: dct_io::JpegInfo,
+    base_bytes: u64,
+}
+
+fn preflight_jpeg(carrier_bytes: &[u8]) -> Result<CarrierPreflight, StrHideError> {
+    let info = dct_io::inspect(carrier_bytes).map_err(map_dct_error)?;
+    if info.components.is_empty() {
+        return Err(StrHideError::UnsupportedFormat(
+            "JPEG has no image components".into(),
+        ));
+    }
+    let max_h = info
+        .components
+        .iter()
+        .map(|c| c.h_samp as usize)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let max_v = info
+        .components
+        .iter()
+        .map(|c| c.v_samp as usize)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let mcu_cols = (info.width as usize).div_ceil(max_h * 8);
+    let mcu_rows = (info.height as usize).div_ceil(max_v * 8);
+    let mcu_count = mcu_cols.checked_mul(mcu_rows).ok_or_else(|| {
+        StrHideError::UnsupportedFormat(
+            "Unsupported JPEG variant: image dimensions overflow the MCU count".into(),
+        )
+    })?;
+    if mcu_count > MAX_JPEG_MCU_COUNT {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "Unsupported JPEG variant: image too large ({mcu_count} MCUs; max {MAX_JPEG_MCU_COUNT})"
+        )));
+    }
+    let total_blocks: usize = info.components.iter().map(|c| c.block_count).sum();
+    if total_blocks > MAX_JPEG_TOTAL_BLOCKS {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "Unsupported JPEG variant: image too large ({total_blocks} 8x8 blocks; max {MAX_JPEG_TOTAL_BLOCKS})"
+        )));
+    }
+    let base_bytes =
+        PIPELINE_FIXED_BYTES.saturating_add(total_blocks as u64 * PIPELINE_BYTES_PER_BLOCK);
+    if base_bytes > MAX_PIPELINE_BYTES {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "Unsupported JPEG variant: image needs about {} MiB of working memory; the {} MiB budget would be exceeded",
+            base_bytes >> 20,
+            MAX_PIPELINE_BYTES >> 20
+        )));
+    }
+    Ok(CarrierPreflight { info, base_bytes })
+}
+
+/// Backtracking-bitmap size for a body of `body_n` slots at height `h`.
+fn estimate_backtrack_bytes(body_n: usize, h: u8) -> u64 {
+    let states = 1u64 << h.min(10);
+    let words_per_col = states.div_ceil(64);
+    body_n as u64 * words_per_col * 8
+}
+
+fn check_pipeline_budget(base_bytes: u64, body_n: usize, h: u8) -> Result<(), StrHideError> {
+    let total = base_bytes.saturating_add(estimate_backtrack_bytes(body_n, h));
+    if total > MAX_PIPELINE_BYTES {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "Unsupported JPEG variant: this payload needs about {} MiB of working memory; the {} MiB budget would be exceeded",
+            total >> 20,
+            MAX_PIPELINE_BYTES >> 20
+        )));
+    }
+    Ok(())
+}
+
+/// Optional tracing enabled with `STRHIDE_STEGO_TRACE=1`.
+///
+/// Deliberately stderr-only and off by default: the library has no logging
+/// dependency, and the matrix script is the main consumer.
+fn trace(msg: &str) {
+    if std::env::var_os("STRHIDE_STEGO_TRACE").is_some() {
+        eprintln!("[stego] {msg}");
     }
 }
 
@@ -144,13 +252,46 @@ fn ternary_legal(coeff: i16) -> Move {
 }
 
 /// Per-slot arrays the trellis needs.
-///
-/// Note: On standard carriers (complete Huffman table), costs are read directly
-/// on demand from `costs`, saving ~224 MB of preallocated `Vec<f64>` heap buffers.
 struct SlotPlan {
     vals: Vec<u8>,
     moves: Vec<Move>,
     sparse_overrides: Option<Vec<(f64, f64)>>,
+}
+
+/// Multiplier applied to a zero insertion when its zero run already contains
+/// another candidate slot. Finite on purpose: see `plan_slots`.
+const CROSS_ZERO_REPEAT_PENALTY: f64 = 1_000.0;
+
+/// Cache of [`dht::BlockZigzagState`] for one slot set.
+///
+/// A dense vector is fastest when the slot set touches a large fraction of the
+/// blocks (the body). The header and extension area touch only a few hundred
+/// slots, so a sparse map avoids allocating one state per block.
+enum BlockStateCache {
+    Dense(Vec<Option<dht::BlockZigzagState>>),
+    Sparse(std::collections::HashMap<usize, dht::BlockZigzagState>),
+}
+
+impl BlockStateCache {
+    fn new(block_count: usize, slot_count: usize) -> Self {
+        if slot_count.saturating_mul(4) >= block_count {
+            Self::Dense(vec![None; block_count])
+        } else {
+            Self::Sparse(std::collections::HashMap::new())
+        }
+    }
+
+    #[inline]
+    fn state(&mut self, bi: usize, block: &[i16; 64]) -> &dht::BlockZigzagState {
+        match self {
+            Self::Dense(states) => {
+                states[bi].get_or_insert_with(|| dht::BlockZigzagState::from_block(block))
+            }
+            Self::Sparse(states) => states
+                .entry(bi)
+                .or_insert_with(|| dht::BlockZigzagState::from_block(block)),
+        }
+    }
 }
 
 /// Build the trellis inputs for one slot set.
@@ -173,11 +314,44 @@ fn plan_slots(
         sparse_overrides: table.map(|_| Vec::with_capacity(slots.len())),
     };
 
-    let mut block_runs: Vec<Option<[u8; 64]>> = if table.is_some() {
-        vec![None; blocks.len()]
-    } else {
-        Vec::new()
-    };
+    let mut state_cache = table.map(|_| BlockStateCache::new(blocks.len(), slots.len()));
+
+    // Price repeated zero insertions in the same zero run out of reach without
+    // hard-locking them. A hard lock (one cross-zero per block) leaves smooth
+    // blocks with almost no movable slots, which makes an h=8, u>=3 trellis
+    // infeasible. A finite but large multiplier keeps every slot reachable while
+    // strongly preferring runs that are not already crowded.
+    //
+    // The same pass records which coefficients are slots, so an insertion can
+    // also verify the shifted symbol for every category the following
+    // coefficient may take (see `can_move_with_slots`).
+    //
+    // Skipped for tiny slot sets (the 746-slot header): the dense bitsets would
+    // cost more than the collision they prevent, and the header trellis is small.
+    let (multi_run, slot_mask): (Option<Vec<u64>>, Option<Vec<u64>>) =
+        if table.is_some() && slots.len() >= 4096 {
+            let cache = state_cache.as_mut().expect("table implies a state cache");
+            let mut seen = vec![0u64; blocks.len()];
+            let mut multi = vec![0u64; blocks.len()];
+            let mut masks = vec![0u64; blocks.len()];
+            for &idx in slots {
+                let (bi, k) = v3_layout::slot_to_coeff(idx, rule);
+                masks[bi] |= 1u64 << dht::ZZ_POS[k] as usize;
+                if blocks[bi][k] != 0 {
+                    continue;
+                }
+                let state = cache.state(bi, &blocks[bi]);
+                let bit = 1u64 << state.run_key(k);
+                if seen[bi] & bit != 0 {
+                    multi[bi] |= bit;
+                } else {
+                    seen[bi] |= bit;
+                }
+            }
+            (Some(multi), Some(masks))
+        } else {
+            (None, None)
+        };
 
     for &idx in slots {
         let (bi, k) = v3_layout::slot_to_coeff(idx, rule);
@@ -185,35 +359,43 @@ fn plan_slots(
         let legal = ternary_legal(coeff);
         let mut allow_plus = matches!(legal, Move::Both | Move::PlusOnly);
         let mut allow_minus = matches!(legal, Move::Both | Move::MinusOnly);
+        let mut cross_cost = wet_cost;
+        let block_slots = slot_mask.as_ref().map(|m| m[bi]);
 
         // A move that crosses zero (`0 <-> ±1`) changes the zero pattern of the
-        // block, hence the run of later coefficients: checked via `can_encode_move`.
+        // block, hence the run of later coefficients: checked via `can_move`.
         let crosses_zero_plus = coeff == 0 || coeff == -1;
         let crosses_zero_minus = coeff == 0 || coeff == 1;
 
         if let Some(table) = table {
-            let runs = match block_runs[bi] {
-                Some(r) => r,
-                None => {
-                    let r = dht::zero_runs(&blocks[bi]);
-                    block_runs[bi] = Some(r);
-                    r
-                }
-            };
+            let state = state_cache
+                .as_mut()
+                .expect("table implies a state cache")
+                .state(bi, &blocks[bi]);
 
-            if crosses_zero_plus {
-                if allow_plus && !dht::can_encode_move(&blocks[bi], k, coeff + 1, table) {
-                    allow_plus = false;
+            if let Some(multi) = multi_run.as_ref() {
+                let run_bit = 1u64 << state.run_key(k);
+                if multi[bi] & run_bit != 0 {
+                    cross_cost = wet_cost * CROSS_ZERO_REPEAT_PENALTY;
                 }
-            } else if allow_plus && !direction_encodable(table, &runs, k, coeff + 1) {
+            }
+
+            // Over-optimised tables: never erase a non-zero coefficient. The
+            // other direction (`±1 -> ±2`) stays open, so the slot is not
+            // locked outright, and every zero-run wall survives. This removes
+            // the dominant cause of post-hoc "missing symbol" failures:
+            // two runs merging into a longer run whose (run, category) symbol
+            // the table does not define.
+            if coeff == 1 {
+                allow_minus = false;
+            } else if coeff == -1 {
                 allow_plus = false;
             }
 
-            if crosses_zero_minus {
-                if allow_minus && !dht::can_encode_move(&blocks[bi], k, coeff - 1, table) {
-                    allow_minus = false;
-                }
-            } else if allow_minus && !direction_encodable(table, &runs, k, coeff - 1) {
+            if allow_plus && !state.can_move_with_slots(k, coeff + 1, table, block_slots) {
+                allow_plus = false;
+            }
+            if allow_minus && !state.can_move_with_slots(k, coeff - 1, table, block_slots) {
                 allow_minus = false;
             }
         }
@@ -233,14 +415,14 @@ fn plan_slots(
             let plus_cost = if !allow_plus {
                 f64::INFINITY
             } else if crosses_zero_plus {
-                wet_cost
+                cross_cost
             } else {
                 base
             };
             let minus_cost = if !allow_minus {
                 f64::INFINITY
             } else if crosses_zero_minus {
-                wet_cost
+                cross_cost
             } else {
                 base * polarize_weight
             };
@@ -251,17 +433,6 @@ fn plan_slots(
         plan.moves.push(mv);
     }
     plan
-}
-
-/// Whether a `±1` move to `value` needs a symbol the table defines.
-///
-/// Returns `true` for structural moves (value 0) so they are not closed here.
-fn direction_encodable(table: &AcSymbolSet, runs: &[u8; 64], k: usize, value: i16) -> bool {
-    let category = dht::category(value);
-    if category == 0 {
-        return true;
-    }
-    table.has((runs[k] << 4) | category)
 }
 
 /// Apply `-1/0/+1` deltas to the coefficients of one slot set.
@@ -295,6 +466,8 @@ struct EmbedContext<'a> {
     table: Option<&'a AcSymbolSet>,
     password: &'a str,
     domain: Option<&'a str>,
+    /// Working-set estimate from [`preflight_jpeg`], before the trellis bitmap.
+    base_bytes: u64,
 }
 
 /// Number of salt values tried when a Huffman-limited block cannot be encoded.
@@ -368,6 +541,7 @@ pub fn embed_jpeg(
         ))
     })?;
 
+    let preflight = preflight_jpeg(carrier_bytes)?;
     let coeffs = dct_io::read_coefficients(carrier_bytes).map_err(map_dct_error)?;
     if coeffs.components.is_empty() {
         return Err(StrHideError::UnsupportedFormat(
@@ -402,12 +576,23 @@ pub fn embed_jpeg(
             .filter(|s| !s.is_empty())
             .unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
         domain,
+        base_bytes: preflight.base_bytes,
     };
+    let mut work = coeffs.clone();
     let mut last_error = None;
-    for _ in 0..EMBED_ATTEMPTS {
-        match embed_once(carrier_bytes, &coeffs, payload, &ctx) {
-            Ok(bytes) => return Ok(bytes),
+    for attempt_idx in 1..=EMBED_ATTEMPTS {
+        let mut applied: Vec<(u32, i8)> = Vec::new();
+        match embed_once(carrier_bytes, &mut work, &mut applied, payload, &ctx) {
+            Ok(bytes) => {
+                trace(&format!("attempt {attempt_idx}/{EMBED_ATTEMPTS} ok"));
+                return Ok(bytes);
+            }
             Err(attempt) => {
+                trace(&format!(
+                    "attempt {attempt_idx}/{EMBED_ATTEMPTS} retryable={} error={}",
+                    attempt.retryable, attempt.error
+                ));
+                rollback(&mut work, &applied, fmt);
                 last_error = Some(attempt.error);
                 if !attempt.retryable {
                     break;
@@ -418,15 +603,19 @@ pub fn embed_jpeg(
     Err(last_error.expect("embed_jpeg always runs at least one attempt"))
 }
 
-/// One full embedding pass over `coeffs` (which are re-serialised against
-/// `carrier_bytes`).
+/// One full embedding pass over `work` (re-serialised against `carrier_bytes`).
+///
+/// Every coefficient change is appended to `applied` so the caller can restore
+/// the original coefficients after a failed attempt. The header, extension area
+/// and body share the same log, so a failure in a later stage cannot leave an
+/// earlier stage's changes behind.
 fn embed_once(
     carrier_bytes: &[u8],
-    coeffs: &JpegCoefficients,
+    work: &mut JpegCoefficients,
+    applied: &mut Vec<(u32, i8)>,
     payload: &[u8],
     ctx: &EmbedContext<'_>,
 ) -> Result<Vec<u8>, Attempt> {
-    let mut work = coeffs.clone();
     let fmt = ctx.fmt;
     let params = ctx.params;
     let cover = ctx.cover;
@@ -468,7 +657,7 @@ fn embed_once(
 
     // Single working buffer for the carrier AC grid (eliminates 336 MB of redundant Vec clones).
     let mut slots_buf = v3_layout::grid_indices(cover.block_count, fmt.grid_rule);
-    permute_indices(&mut slots_buf, &hdr_seed);
+    permute_prefix(&mut slots_buf, hdr_n, &hdr_seed);
     let hdr_slots = slots_buf[..hdr_n].to_vec();
 
     // Reconstruct body grid in-place into the same allocated buffer!
@@ -508,6 +697,8 @@ fn embed_once(
             }
         }
     }
+
+    check_pipeline_budget(ctx.base_bytes, layout.body_n, params.stc_h)?;
 
     // Safety tier: advisory (warn upstream) or enforced bpp ceiling.
     if params.safety_enforcement == SafetyEnforcement::Enforced {
@@ -551,7 +742,7 @@ fn embed_once(
 
     // 1) Superblock: 352 bits through STC(sb_h, sb_u).
     if let Err(e) = embed_slots(
-        &mut work,
+        &mut *work,
         &hdr_slots[..fmt.superblock_slots()],
         fmt,
         ctx.costs,
@@ -562,6 +753,7 @@ fn embed_once(
         fmt.sb_u,
         &superblock_bytes,
         &mut touched,
+        applied,
     ) {
         if ctx.table.is_some() && matches!(e, StrHideError::TrellisInfeasible(_)) {
             return Err(Attempt {
@@ -577,7 +769,7 @@ fn embed_once(
     // 2) Extension area: 8 bits per declared byte through STC(ext_h, ext_u).
     if ext_bytes > 0 {
         embed_slots(
-            &mut work,
+            &mut *work,
             &hdr_slots[fmt.superblock_slots()..hdr_n],
             fmt,
             ctx.costs,
@@ -588,14 +780,15 @@ fn embed_once(
             fmt.ext_u,
             &extension_area,
             &mut touched,
+            applied,
         )?;
     }
 
     // 3) Body: the ciphertext, over a keyed permutation of the body grid.
-    permute_indices(&mut slots_buf, &perm_seed);
+    permute_prefix(&mut slots_buf, layout.body_n, &perm_seed);
     slots_buf.truncate(layout.body_n);
     if let Err(e) = embed_slots(
-        &mut work,
+        &mut *work,
         &slots_buf,
         fmt,
         ctx.costs,
@@ -606,6 +799,7 @@ fn embed_once(
         layout.u,
         &ciphertext,
         &mut touched,
+        applied,
     ) {
         if ctx.table.is_some() && e.to_string().contains("no legal element") {
             return Err(Attempt {
@@ -619,34 +813,44 @@ fn embed_once(
     }
 
     if let Some(table) = ctx.table
-        && let Some(symbol) = first_missing_symbol(&work, &touched, table)
+        && let Some((symbol, block, bad_blocks)) = missing_symbol_stats(&*work, &touched, table)
     {
+        trace(&format!(
+            "missing symbol {} in block {block}; {bad_blocks} bad block(s)",
+            dht::describe_symbol(symbol)
+        ));
         return Err(Attempt {
             error: dht::missing_symbol_error(symbol),
             retryable: true,
         });
     }
 
-    dct_io::write_coefficients(carrier_bytes, &work)
+    dct_io::write_coefficients(carrier_bytes, &*work)
         .map_err(map_dct_error)
         .map_err(Into::into)
 }
 
-/// First missing symbol among the touched blocks, if any.
-fn first_missing_symbol(
+/// First missing symbol among the touched blocks, plus the block index and the
+/// total number of bad blocks.
+fn missing_symbol_stats(
     coeffs: &JpegCoefficients,
     touched: &[bool],
     table: &AcSymbolSet,
-) -> Option<u8> {
+) -> Option<(u8, usize, usize)> {
+    let mut first: Option<(u8, usize)> = None;
+    let mut bad_blocks = 0usize;
     for (bi, block) in coeffs.components[0].blocks.iter().enumerate() {
         if !touched[bi] {
             continue;
         }
         if let Some(symbol) = dht::first_missing_symbol(block, table) {
-            return Some(symbol);
+            bad_blocks += 1;
+            if first.is_none() {
+                first = Some((symbol, bi));
+            }
         }
     }
-    None
+    first.map(|(symbol, block)| (symbol, block, bad_blocks))
 }
 
 /// One STC pass over one slot set.
@@ -663,6 +867,7 @@ fn embed_slots(
     u: u8,
     message: &[u8],
     touched: &mut [bool],
+    applied: &mut Vec<(u32, i8)>,
 ) -> Result<(), StrHideError> {
     if slots.is_empty() {
         return Ok(());
@@ -701,6 +906,7 @@ fn embed_slots(
         if delta != 0 {
             let (bi, _) = v3_layout::slot_to_coeff(idx, fmt.grid_rule);
             touched[bi] = true;
+            applied.push((idx, delta));
         }
     }
     apply_deltas(
@@ -710,6 +916,18 @@ fn embed_slots(
         fmt.grid_rule,
     );
     Ok(())
+}
+
+/// Undo every recorded delta, newest first.
+///
+/// The three embed stages (superblock, extension area, body) append to the same
+/// log, so this restores the exact coefficients the attempt started from.
+fn rollback(coeffs: &mut JpegCoefficients, applied: &[(u32, i8)], fmt: &FormatProfile) {
+    let blocks = &mut coeffs.components[0].blocks;
+    for &(idx, delta) in applied.iter().rev() {
+        let (bi, k) = v3_layout::slot_to_coeff(idx, fmt.grid_rule);
+        blocks[bi][k] = (blocks[bi][k] as i32 - delta as i32) as i16;
+    }
 }
 
 /// Payload ceiling for the enforced safety tier.
@@ -731,6 +949,7 @@ pub fn extract_jpeg(
     extract: &ExtractParams,
 ) -> Result<Vec<u8>, StrHideError> {
     fmt.validate()?;
+    preflight_jpeg(carrier_bytes)?;
     let coeffs = dct_io::read_coefficients(carrier_bytes).map_err(map_dct_error)?;
     if coeffs.components.is_empty() {
         return Err(StrHideError::NoHiddenData("JPEG has no components".into()));
@@ -768,12 +987,21 @@ pub fn extract_jpeg(
         // the capacity, so this is a memcpy rather than a rebuild.
         slots_buf.clear();
         slots_buf.extend_from_slice(&grid_template);
-        permute_indices(&mut slots_buf, &hdr_seed);
 
+        // The header prefix is at least the superblock plus the minimum
+        // extension area (746 slots with the default profile). `ext_bytes` is
+        // unknown until the superblock is read, so shuffle that minimum first
+        // and, if the declared extension is larger, continue the same RNG
+        // stream. A forward prefix shuffle only swaps `i` with an index in
+        // `[i, n)`, so positions below `i` stay final across the continuation.
         let sb_n = fmt.superblock_slots();
         if slots_buf.len() < sb_n {
             continue;
         }
+        let hdr_min = fmt.header_slots(0);
+        let mut hdr_rng = ChaCha12Stream::from_seed(&hdr_seed);
+        fisher_yates_prefix_from(&mut slots_buf, 0, hdr_min, &mut hdr_rng);
+
         let Some(superblock) = read_superblock(&coeffs, &slots_buf[..sb_n], fmt, &hdr_seed, domain)
         else {
             continue;
@@ -790,6 +1018,9 @@ pub fn extract_jpeg(
         let hdr_n = fmt.header_slots(ext_bytes);
         if hdr_n > n_total {
             continue;
+        }
+        if hdr_n > hdr_min {
+            fisher_yates_prefix_from(&mut slots_buf, hdr_min, hdr_n, &mut hdr_rng);
         }
         let hdr_slots = slots_buf[..hdr_n].to_vec();
 
@@ -825,7 +1056,7 @@ pub fn extract_jpeg(
             continue;
         }
         let (enc_key, perm_seed) = body_keys(fmt, &master, &superblock.salt, domain);
-        permute_indices(&mut slots_buf, &perm_seed);
+        permute_prefix(&mut slots_buf, body_n, &perm_seed);
         slots_buf.truncate(body_n);
         let Some(ciphertext) = read_bits(
             &coeffs,
@@ -957,12 +1188,8 @@ pub fn probe_capacity_with_format(
 ) -> Result<StegoCapacityInfo, StrHideError> {
     fmt.validate()?;
     params.validate()?;
-    let info = dct_io::inspect(carrier_bytes).map_err(map_dct_error)?;
-    if info.components.is_empty() {
-        return Err(StrHideError::UnsupportedFormat(
-            "JPEG has no image components".into(),
-        ));
-    }
+    let preflight = preflight_jpeg(carrier_bytes)?;
+    let info = preflight.info;
     let geom = crate::stego::jpeg::geometry::component_geometry(&info, 0, 0);
     let block_count = geom.grid_w * geom.grid_h;
     let n_total = block_count * fmt.grid_rule.slots_per_block();
@@ -1042,6 +1269,7 @@ pub fn layout_for_payload(
 ) -> Result<Layout, StrHideError> {
     fmt.validate()?;
     params.validate()?;
+    let preflight = preflight_jpeg(carrier_bytes)?;
     let coeffs = dct_io::read_coefficients(carrier_bytes).map_err(map_dct_error)?;
     if coeffs.components.is_empty() {
         return Err(StrHideError::UnsupportedFormat(
@@ -1068,5 +1296,7 @@ pub fn layout_for_payload(
     } else {
         effective_budget
     };
-    v3_layout::compute(n_total, hdr_n, bits, params.stc_h, budget)
+    let layout = v3_layout::compute(n_total, hdr_n, bits, params.stc_h, budget)?;
+    check_pipeline_budget(preflight.base_bytes, layout.body_n, params.stc_h)?;
+    Ok(layout)
 }

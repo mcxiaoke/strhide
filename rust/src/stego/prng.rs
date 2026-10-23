@@ -201,6 +201,52 @@ pub fn fisher_yates_shuffle<T>(items: &mut [T], rng: &mut ChaCha12Stream) {
     }
 }
 
+/// In-place unbiased *prefix* Fisher-Yates shuffle.
+///
+/// Uniformly selects and permutes the first `k` elements of `items` in O(k)
+/// time. `k` is clamped to `n - 1`: a full forward Fisher-Yates permutation of
+/// `n` elements needs exactly `n - 1` swap steps.
+pub fn fisher_yates_prefix<T>(items: &mut [T], k: usize, rng: &mut ChaCha12Stream) {
+    fisher_yates_prefix_from(items, 0, k, rng);
+}
+
+/// Continue a forward prefix shuffle over `start..end`.
+///
+/// A step at index `i` only swaps `i` with an index in `[i, n)`, so every
+/// position below `i` is final. That is what lets the extractor shuffle the
+/// minimum header prefix, read the superblock, and then continue the exact same
+/// RNG stream up to the extension-area size the superblock declares.
+pub fn fisher_yates_prefix_from<T>(
+    items: &mut [T],
+    start: usize,
+    end: usize,
+    rng: &mut ChaCha12Stream,
+) {
+    let n = items.len();
+    if n <= 1 {
+        return;
+    }
+    let end = end.min(n - 1);
+    let start = start.min(end);
+    for i in start..end {
+        let j = i + rng.gen_range_usize(n - i);
+        items.swap(i, j);
+    }
+}
+
+/// Permute the first `k` elements of `items` in-place using the 32-byte seed.
+///
+/// This is the prefix counterpart of [`permute_indices`]. It starts a fresh
+/// ChaCha12 stream, so embed and extract must both use it with the same seed
+/// and the same `k` (or the same two-phase continuation).
+pub fn permute_prefix<T>(items: &mut [T], k: usize, seed: &[u8; 32]) {
+    if items.len() <= 1 || k == 0 {
+        return;
+    }
+    let mut rng = ChaCha12Stream::from_seed(seed);
+    fisher_yates_prefix(items, k, &mut rng);
+}
+
 /// Generate a permuted vector of indices 0..n using a 32-byte seed.
 pub fn generate_permuted_indices(n: usize, seed: &[u8; 32]) -> Vec<usize> {
     let mut indices: Vec<usize> = (0..n).collect();
@@ -364,5 +410,95 @@ mod tests {
         let mut single = vec![42];
         permute_indices(&mut single, &seed);
         assert_eq!(single, vec![42]);
+    }
+
+    /// The first `k` positions are a permutation of a k-element subset, and the
+    /// untouched tail is still present exactly once.
+    #[test]
+    fn test_prefix_shuffle_keeps_a_set_without_duplicates() {
+        let seed = [0x3Cu8; 32];
+        for (n, k) in [
+            (0usize, 0usize),
+            (1, 0),
+            (1, 1),
+            (2, 0),
+            (2, 1),
+            (2, 2),
+            (8, 3),
+            (64, 32),
+            (64, 63),
+            (64, 64),
+        ] {
+            let mut items: Vec<usize> = (0..n).collect();
+            permute_prefix(&mut items, k, &seed);
+            assert_eq!(items.len(), n);
+            let mut sorted = items.clone();
+            sorted.sort_unstable();
+            let expected: Vec<usize> = (0..n).collect();
+            assert_eq!(sorted, expected, "n={n} k={k}");
+        }
+    }
+
+    /// A single prefix call must equal a two-phase continuation split at any
+    /// point. This is the contract the JPEG extractor relies on.
+    #[test]
+    fn test_prefix_continuation_matches_a_single_call() {
+        let seed = [0xA7u8; 32];
+        for n in [8usize, 37, 256] {
+            for split in [0usize, 1, n / 3, n - 2, n - 1] {
+                for k in [split, (split + n / 2).min(n)] {
+                    let mut one_shot: Vec<usize> = (0..n).collect();
+                    permute_prefix(&mut one_shot, k, &seed);
+
+                    let mut two_phase: Vec<usize> = (0..n).collect();
+                    let mut rng = ChaCha12Stream::from_seed(&seed);
+                    fisher_yates_prefix_from(&mut two_phase, 0, split, &mut rng);
+                    fisher_yates_prefix_from(&mut two_phase, split, k, &mut rng);
+
+                    assert_eq!(
+                        one_shot, two_phase,
+                        "n={n} split={split} k={k}: continuation changed the permutation"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Fixed seed -> fixed prefix sequence, so a future refactor cannot silently
+    /// change the wire format.
+    #[test]
+    fn test_prefix_fixed_seed_contract() {
+        const CONTRACT_SEED: [u8; 32] = *b"strhide-prng-contract-seed-2026!";
+        let mut items: Vec<usize> = (0..256).collect();
+        permute_prefix(&mut items, 16, &CONTRACT_SEED);
+        #[rustfmt::skip]
+        let expected_first_16: [usize; 16] = [
+            135, 5, 129, 183, 174, 138, 43, 152, 172, 19, 34, 143, 201, 40, 236, 108,
+        ];
+        assert_eq!(&items[..16], &expected_first_16);
+    }
+
+    /// A one-element prefix over many seeds must hit every index roughly
+    /// uniformly; a modulo-biased or reverse-order implementation would skew it.
+    #[test]
+    fn test_prefix_single_position_is_roughly_uniform() {
+        let n = 16usize;
+        let rounds = 4096usize;
+        let mut counts = [0usize; 16];
+        for round in 0..rounds {
+            let mut seed = [0u8; 32];
+            seed[..8].copy_from_slice(&(round as u64).to_le_bytes());
+            let mut items: Vec<usize> = (0..n).collect();
+            permute_prefix(&mut items, 1, &seed);
+            counts[items[0]] += 1;
+        }
+        let expected = rounds as f64 / n as f64;
+        for (idx, &count) in counts.iter().enumerate() {
+            let deviation = (count as f64 - expected).abs() / expected;
+            assert!(
+                deviation < 0.25,
+                "index {idx}: {count} hits, expected about {expected:.0}"
+            );
+        }
     }
 }

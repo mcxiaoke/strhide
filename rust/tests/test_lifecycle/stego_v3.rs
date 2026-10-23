@@ -28,7 +28,7 @@ use strhide::stego::jpeg::cost::UerdCostModel;
 use strhide::stego::jpeg::engine::{embed_jpeg, extract_jpeg, probe_jpeg_capacity};
 use strhide::stego::jpeg::header_v3::{SUPERBLOCK_BYTES, Superblock, Tlv};
 use strhide::stego::jpeg::v3_layout::{grid_indices, slot_to_coeff};
-use strhide::stego::prng::permute_indices;
+use strhide::stego::prng::permute_prefix;
 use strhide::stego::{
     ExtractParams, JpegParams, SafetyLevel, StegoOptions, embed_carrier, extract_carrier,
 };
@@ -118,7 +118,7 @@ fn header_slots_with_suite(
     let master = derive_master(suite, password, &digest).unwrap();
     let seed = header_perm_seed(&DEFAULT_FORMAT, &master, None);
     let mut slots = grid_indices(block_count, DEFAULT_FORMAT.grid_rule);
-    permute_indices(&mut slots, &seed);
+    permute_prefix(&mut slots, DEFAULT_FORMAT.header_slots(ext_bytes), &seed);
     slots.truncate(DEFAULT_FORMAT.header_slots(ext_bytes));
     slots
 }
