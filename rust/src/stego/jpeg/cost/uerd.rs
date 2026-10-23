@@ -23,6 +23,8 @@
 use crate::stego::params::JpegParams;
 use crate::stego::traits::{JpegCostModel, JpegGeometry};
 
+use super::precover;
+
 pub struct UerdCostModel;
 
 impl Default for UerdCostModel {
@@ -166,6 +168,50 @@ impl JpegCostModel for UerdCostModel {
         }
 
         costs
+    }
+
+    /// UERD plus cost polarization.
+    ///
+    /// UERD's own distortion is symmetric: it prices a `±1` move by the block's
+    /// energy and the mode's quantizer step, and says nothing about *which way*
+    /// a coefficient should move. That leaves free information on the table. A
+    /// JPEG coefficient is a quantized sample of a smooth signal, so the value
+    /// it "should" have had can be estimated (dequantize, denoise, re-quantize
+    /// -- see [`precover`]). Moving towards that estimate is less visible than
+    /// moving away from it, because it is the direction the signal lies in.
+    ///
+    /// This is the cost polarization step from `hstego` (MIT), expressed as a
+    /// per-coefficient bias instead of a pre-multiplied cost pair:
+    ///
+    /// ```text
+    /// s = sign(precover_estimate - coeff)
+    /// bias[k] = +1  if s > 0     (raise towards the estimate)
+    ///         = -1  if s < 0     (lower towards the estimate)
+    ///         =  0  otherwise
+    /// ```
+    ///
+    /// The engine discounts the preferred direction by
+    /// [`JpegParams::polarize_weight`] (`hstego` uses `0.65`); `1.0` disables
+    /// the mechanism and this method returns `None`, so the symmetric cost map
+    /// of [`UerdCostModel::compute_cost`] is used unchanged.
+    fn direction_bias(
+        &self,
+        coeffs: &dct_io::JpegCoefficients,
+        geometry: &JpegGeometry,
+        params: &JpegParams,
+    ) -> Option<Vec<i8>> {
+        // `1.0` is "no discount", i.e. the feature is off. Returning `None`
+        // keeps the engine on the symmetric path (and skips the whole
+        // decompress-denoise-recompress round trip).
+        if (params.polarize_weight - 1.0).abs() <= f64::EPSILON {
+            return None;
+        }
+        let bias = precover::bias(coeffs, geometry, 0.0)?;
+        debug_assert_eq!(
+            bias.len(),
+            coeffs.components.first().map_or(0, |c| c.blocks.len()) * 64
+        );
+        Some(bias)
     }
 }
 

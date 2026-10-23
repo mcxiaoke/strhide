@@ -80,6 +80,45 @@ pub trait JpegCostModel: Send + Sync {
         geometry: &JpegGeometry,
         params: &JpegParams,
     ) -> Vec<f64>;
+
+    /// Per-coefficient directional bias for ternary embedding.
+    ///
+    /// Returns `None` when the model has no directional preference, in which
+    /// case both moves are priced at [`JpegCostModel::compute_cost`]. Otherwise
+    /// the vector has the same layout as `compute_cost`
+    /// (`bias[bi * 64 + k]`) and each entry says which of the two moves is the
+    /// less detectable one:
+    ///
+    /// * `+1` — raising the coefficient by one is the cheaper direction;
+    /// * `-1` — lowering it is the cheaper direction;
+    /// * `0` — no preference; both directions stay symmetric.
+    ///
+    /// The engine discounts the preferred direction by
+    /// [`JpegParams::polarize_weight`] and leaves the other at the symmetric
+    /// cost, so `1.0` disables the whole mechanism.
+    ///
+    /// # Why a bias vector and not `(rho_plus, rho_minus)`
+    ///
+    /// A full pair costs `16` bytes per coefficient. JPEG carriers reach 100 MP
+    /// (`block_count * 64` = ~6.3M coefficients), where the symmetric cost map
+    /// alone is already ~50 MB; two more maps would triple the working set that
+    /// [`JpegParams::effective_slot_budget`] and the preflight ceiling are sized
+    /// against. A sign per coefficient is 16x smaller and expresses everything
+    /// the polarization family of models needs.
+    ///
+    /// # Embed-side only
+    ///
+    /// Extraction never computes costs (JPEG slots are geometric and keyed), so
+    /// a model may derive the bias from cover information the extractor could
+    /// not reproduce -- which is exactly what makes polarization free.
+    fn direction_bias(
+        &self,
+        _coeffs: &dct_io::JpegCoefficients,
+        _geometry: &JpegGeometry,
+        _params: &JpegParams,
+    ) -> Option<Vec<i8>> {
+        None
+    }
 }
 
 /// Block-grid geometry of the component a [`JpegCostModel`] embeds into.

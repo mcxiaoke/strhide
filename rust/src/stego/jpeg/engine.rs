@@ -298,11 +298,13 @@ impl BlockStateCache {
 ///
 /// `table` is `None` for a complete Huffman table (the fast path: zero per-slot
 /// cost buffer allocation), otherwise custom cross-zero costs are tracked in overrides.
+#[allow(clippy::too_many_arguments)]
 fn plan_slots(
     coeffs: &JpegCoefficients,
     slots: &[u32],
     rule: crate::stego::format::GridRule,
     costs: &[f64],
+    directions: Option<&[i8]>,
     table: Option<&AcSymbolSet>,
     wet_cost: f64,
     polarize_weight: f64,
@@ -400,7 +402,15 @@ fn plan_slots(
             }
         }
 
+        // Symmetric UERD cost, then the per-direction split. The bias says
+        // which move is the less visible one; the model's preferred direction
+        // is discounted by `polarize_weight`, the other keeps the full cost.
         let base = costs[bi * 64 + k].min(wet_cost);
+        let (base_plus, base_minus) = match directions {
+            Some(bias) if bias[bi * 64 + k] > 0 => (base * polarize_weight, base),
+            Some(bias) if bias[bi * 64 + k] < 0 => (base, base * polarize_weight),
+            _ => (base, base),
+        };
         let mv = match (allow_plus, allow_minus) {
             (true, true) => Move::Both,
             (true, false) => Move::PlusOnly,
@@ -417,14 +427,14 @@ fn plan_slots(
             } else if crosses_zero_plus {
                 cross_cost
             } else {
-                base
+                base_plus
             };
             let minus_cost = if !allow_minus {
                 f64::INFINITY
             } else if crosses_zero_minus {
                 cross_cost
             } else {
-                base * polarize_weight
+                base_minus
             };
             overrides.push((plus_cost, minus_cost));
         }
@@ -463,6 +473,9 @@ struct EmbedContext<'a> {
     params: &'a JpegParams,
     cover: &'a CoverFrame,
     costs: &'a [f64],
+    /// Per-coefficient directional bias from the cost model, `None` when the
+    /// model has no preference (symmetric costs). Embed-side only.
+    directions: Option<&'a [i8]>,
     table: Option<&'a AcSymbolSet>,
     password: &'a str,
     domain: Option<&'a str>,
@@ -562,6 +575,18 @@ pub fn embed_jpeg(
         return Err(StrHideError::General("JPEG cost dimension mismatch".into()));
     }
 
+    // Directional bias (cost polarization). Embed-side only: extraction never
+    // computes costs, so a model may base this on cover information that the
+    // extractor could not reproduce. `None` keeps the symmetric path.
+    let directions = cost_model.direction_bias(&coeffs, &geometry, params);
+    if let Some(bias) = directions.as_ref()
+        && bias.len() != costs.len()
+    {
+        return Err(StrHideError::General(
+            "JPEG direction bias dimension mismatch".into(),
+        ));
+    }
+
     // A complete table needs no per-slot symbol work; anything else takes the
     // slow path (~1% of real files).
     let table = dht::luma_ac_symbols(carrier_bytes).filter(|t| !t.is_complete());
@@ -571,6 +596,7 @@ pub fn embed_jpeg(
         params,
         cover: &cover,
         costs: &costs,
+        directions: directions.as_deref(),
         table: table.as_ref(),
         password: password
             .filter(|s| !s.is_empty())
@@ -746,6 +772,7 @@ fn embed_once(
         &hdr_slots[..fmt.superblock_slots()],
         fmt,
         ctx.costs,
+        ctx.directions,
         ctx.table,
         params,
         header_stc_seed(fmt, &hdr_seed, ctx.domain),
@@ -773,6 +800,7 @@ fn embed_once(
             &hdr_slots[fmt.superblock_slots()..hdr_n],
             fmt,
             ctx.costs,
+            ctx.directions,
             ctx.table,
             params,
             extension_stc_seed(fmt, &hdr_seed, ctx.domain),
@@ -792,6 +820,7 @@ fn embed_once(
         &slots_buf,
         fmt,
         ctx.costs,
+        ctx.directions,
         ctx.table,
         params,
         stc_seed(fmt, &perm_seed, &salt),
@@ -860,6 +889,7 @@ fn embed_slots(
     slots: &[u32],
     fmt: &FormatProfile,
     costs: &[f64],
+    directions: Option<&[i8]>,
     table: Option<&AcSymbolSet>,
     params: &JpegParams,
     seed: u64,
@@ -877,6 +907,7 @@ fn embed_slots(
         slots,
         fmt.grid_rule,
         costs,
+        directions,
         table,
         params.wet_cost,
         params.polarize_weight,
@@ -895,7 +926,11 @@ fn embed_slots(
             } else {
                 let (bi, k) = v3_layout::slot_to_coeff(slots[j], rule);
                 let base = costs[bi * 64 + k].min(wet_cost);
-                (base, base * polarize_weight)
+                match directions {
+                    Some(bias) if bias[bi * 64 + k] > 0 => (base * polarize_weight, base),
+                    Some(bias) if bias[bi * 64 + k] < 0 => (base, base * polarize_weight),
+                    _ => (base, base),
+                }
             }
         },
         message,
