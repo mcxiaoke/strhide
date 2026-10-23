@@ -708,19 +708,58 @@ impl ChannelMode {
 /// body pool, a probe with different credentials excludes *different* pixels and
 /// reports a capacity the writer cannot reach.
 struct SlotPlan {
-    /// Cost-ranked candidates after the smooth-pixel exclusion, in ranking order.
+    /// Body candidates: cost-ranked, after the smooth-pixel exclusion, in
+    /// ranking order. Never used to place the header.
     candidates: Vec<usize>,
-    /// `candidates` in keyed header order; the first 512 entries are the header
-    /// (256) and feature-word (256) slots.
+    /// Header layout: the eligible pixels in keyed order. The first 512 entries
+    /// are the header (256) and feature-word (256) slots.
+    ///
+    /// This vector is a pure function of the carrier's pixels, the credentials
+    /// and the format profile -- **not** of any cost map. That is what lets the
+    /// extractor read the header (and therefore the algorithm id inside the
+    /// feature word) before it knows which cost model wrote the carrier.
     permuted: Vec<usize>,
     /// `used_by_header[px]`: the pixel is one of those 512 slots.
     used_by_header: Vec<bool>,
 }
 
+/// Pixels eligible to carry the header channel, in ascending pixel order.
+///
+/// Eligibility is the class-interior test on the header channel: `val` in
+/// `[8, 247]` so at least one of `val ± 1` stays inside the same eight-value
+/// class. Deliberately **cost-free** -- see [`SlotPlan::permuted`].
+fn header_pool(image: &RawImage) -> Vec<usize> {
+    let total_pixels = image.width as usize * image.height as usize;
+    let channel_offset = embed_channel(image);
+    (0..total_pixels)
+        .filter(|&idx| {
+            let val = image.pixels[idx * image.channels + channel_offset];
+            (SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&val)
+        })
+        .collect()
+}
+
+/// The keyed header layout, computed without a cost model.
+///
+/// Both ends call this: the writer to place the header and the feature word, the
+/// reader to find them before it has resolved an algorithm.
+fn header_layout(
+    image: &RawImage,
+    password: Option<&str>,
+    domain: Option<&str>,
+    spatial: &crate::stego::format::SpatialFormatProfile,
+) -> Vec<usize> {
+    let mut slots = header_pool(image);
+    let seed =
+        crate::stego::envelope::derive_header_perm_seed_with_profile(password, domain, spatial);
+    permute_prefix(&mut slots, V2_TOTAL_HEADER_SLOTS, &seed);
+    slots
+}
+
 impl SlotPlan {
-    /// Rank the candidates and apply the keyed header permutation.
+    /// Rank the body candidates and apply the keyed header layout.
     ///
-    /// `password` / `domain` key the permutation, so they must be the
+    /// `password` / `domain` key the header permutation, so they must be the
     /// credentials the embedder will use — they change which pixels the header
     /// occupies and therefore the body capacity.
     fn build(
@@ -771,12 +810,9 @@ impl SlotPlan {
         ranked.sort_unstable();
         let candidates: Vec<usize> = ranked.into_iter().map(|(_, px)| px).collect();
 
-        // Keyed candidate-set permutation for the header slots (legacy rule:
-        // [8, 247] eligibility, 30% exclusion).
-        let header_seed =
-            crate::stego::envelope::derive_header_perm_seed_with_profile(password, domain, spatial);
-        let mut permuted = candidates.clone();
-        permute_prefix(&mut permuted, V2_TOTAL_HEADER_SLOTS, &header_seed);
+        // The header is placed from the cost-free layout, so a reader can find
+        // it without knowing the algorithm.
+        let permuted = header_layout(image, password, domain, spatial);
 
         let mut used_by_header = vec![false; total_pixels];
         for &s in permuted.iter().take(V2_TOTAL_HEADER_SLOTS) {
@@ -1061,6 +1097,17 @@ pub fn embed_spatial_with_profile(
         eligible_min: SPATIAL_ELIGIBLE_MIN,
         eligible_max: SPATIAL_ELIGIBLE_MAX,
         exclusion_permille: (params.exclusion_percentile.clamp(0.0, 0.9) * 1000.0) as u16,
+        // The carrier has to name its own cost model: the extractor reads the
+        // header before it knows which algorithm wrote the body, so there is no
+        // out-of-band channel to rely on. A model without a wire id would
+        // produce a carrier nobody (including this build) could read back.
+        algorithm_id: crate::stego::registry::CostModelRegistry::spatial_wire_id(cost_model.id())
+            .ok_or_else(|| {
+                StrHideError::General(format!(
+                    "Spatial cost model '{}' has no wire id; a carrier written with it could not be extracted",
+                    cost_model.id()
+                ))
+            })?,
     };
     let feature_bytes = fw.encode();
 
@@ -1201,21 +1248,22 @@ pub fn extract_spatial_with_profile(
     let image = decode_png(carrier_bytes)?;
     let w = image.width as usize;
     let h = image.height as usize;
-
-    // Compute distortion cost map (identical to embedding)
-    let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, params);
-
     let channel_offset = embed_channel(&image);
 
-    // The header permutation must be the one the embedder used: same password,
-    // same domain, same ranking rule.
-    let plan = SlotPlan::build(&image, &costs, params, password, domain, spatial)?;
-    if plan.permuted.len() < HEADER_SLOTS {
+    // Read the header *before* touching any cost model.
+    //
+    // The header layout is a pure function of the pixels, the credentials and
+    // the format profile, so the carrier can tell us which algorithm wrote the
+    // body. That is the whole point of placing the header without a cost map:
+    // the model is named inside the feature word, and reading the feature word
+    // must not require already knowing the model.
+    let header_layout = header_layout(&image, password, domain, spatial);
+    if header_layout.len() < HEADER_SLOTS {
         return Err(StrHideError::NoHiddenData(
             "Carrier has insufficient capacity for stego header".into(),
         ));
     }
-    let header_slots = plan.header_slots();
+    let header_slots = &header_layout[..HEADER_SLOTS];
 
     // Read Phase 1: 32-byte Header ([16B Salt][12B Nonce][4B Total Len])
     let mut header_bytes = [0u8; 32];
@@ -1253,11 +1301,11 @@ pub fn extract_spatial_with_profile(
     // Every carrier this build writes uses the v2 header. A different `h` field
     // means the header landed on the wrong slots, i.e. wrong password or no
     // payload -- report it exactly like an AEAD failure.
-    if raw_stc_h != HEADER_V2_ESCAPE_H || !plan.header_fits() {
+    if raw_stc_h != HEADER_V2_ESCAPE_H || header_layout.len() < V2_TOTAL_HEADER_SLOTS {
         return Err(no_hidden());
     }
 
-    let feature_slots = plan.feature_slots();
+    let feature_slots = &header_layout[HEADER_SLOTS..V2_TOTAL_HEADER_SLOTS];
     let mut feature_bytes = [0u8; 32];
     for byte_i in 0..32 {
         let mut b = 0u8;
@@ -1270,6 +1318,34 @@ pub fn extract_spatial_with_profile(
     }
 
     let fw = FeatureWord::decode(&feature_bytes).map_err(|_| no_hidden())?;
+
+    // The carrier names its cost model. An id this build does not know means a
+    // carrier written by a newer tool -- reported exactly like "no payload",
+    // because guessing a model would silently decode noise.
+    let resolved =
+        crate::stego::registry::CostModelRegistry::spatial_model_from_wire_id(fw.algorithm_id)
+            .ok_or_else(no_hidden)?;
+    if resolved.id() != cost_model.id() {
+        // The carrier is authoritative; the caller's choice is only a hint.
+        trace(&format!(
+            "carrier declares '{}', caller asked for '{}': using the carrier's",
+            resolved.id(),
+            cost_model.id()
+        ));
+    }
+
+    // Distortion cost map of the declared model. Identical to what the embedder
+    // computed, because header/feature pixels never leave their eight-value
+    // class, so the map is bit-identical on the stego.
+    let costs = resolved.compute_cost(&image.pixels, w, h, image.channels, params);
+    // Body ranking needs costs; the header layout inside this plan is the same
+    // cost-free one read above, so the two cannot disagree.
+    let plan = SlotPlan::build(&image, &costs, params, password, domain, spatial)?;
+    debug_assert_eq!(
+        plan.permuted.get(..V2_TOTAL_HEADER_SLOTS),
+        Some(&header_layout[..V2_TOTAL_HEADER_SLOTS]),
+        "the header layout must not depend on the cost map"
+    );
 
     // The body's channel mode arrives in the feature word. An unknown value, or
     // one the carrier cannot support, means the header landed on the wrong

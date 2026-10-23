@@ -122,6 +122,16 @@ pub struct FeatureWord {
     pub eligible_min: u8,
     pub eligible_max: u8,
     pub exclusion_permille: u16,
+    /// Wire id of the spatial cost model that wrote this carrier.
+    ///
+    /// Stored so extraction does not need the algorithm out of band: the header
+    /// is placed from a cost-free layout, so it can be read before the extractor
+    /// knows which model produced the body. See
+    /// [`crate::stego::registry::CostModelRegistry::spatial_name_from_wire_id`].
+    ///
+    /// Lives in `bytes[8]`, which v2 reserved as zero, so the packed `low64`
+    /// layout is unchanged.
+    pub algorithm_id: u8,
 }
 
 impl Default for FeatureWord {
@@ -137,6 +147,7 @@ impl Default for FeatureWord {
             eligible_min: 8,
             eligible_max: 247,
             exclusion_permille: 300, // 30%
+            algorithm_id: crate::stego::registry::SPATIAL_ALGORITHM_HILL,
         }
     }
 }
@@ -163,7 +174,8 @@ impl FeatureWord {
         low64 |= (self.exclusion_permille as u64 & 0xFFFF) << 35;
 
         bytes[..8].copy_from_slice(&low64.to_le_bytes());
-        // bytes[8..32] remain all zeroes (reserved)
+        bytes[8] = self.algorithm_id;
+        // bytes[9..32] remain all zeroes (reserved)
         bytes
     }
 
@@ -176,8 +188,9 @@ impl FeatureWord {
                 "Non-zero reserved bits in feature word low64".into(),
             ));
         }
-        // Bytes 8..32 (bits 64..256) must be all zero
-        if bytes[8..].iter().any(|&b| b != 0) {
+        // Bytes 9..32 (bits 72..256) must be all zero; byte 8 carries the
+        // algorithm id.
+        if bytes[9..].iter().any(|&b| b != 0) {
             return Err(StrHideError::CorruptedData(
                 "Non-zero reserved bytes in feature word high bytes".into(),
             ));
@@ -244,6 +257,7 @@ impl FeatureWord {
             eligible_min,
             eligible_max,
             exclusion_permille,
+            algorithm_id: bytes[8],
         })
     }
 }
@@ -251,6 +265,7 @@ impl FeatureWord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stego::registry::SPATIAL_ALGORITHM_HILL;
 
     #[test]
     fn length_round_trips_and_leaves_the_codec_bits_alone() {
@@ -312,6 +327,7 @@ mod tests {
             eligible_min: 16,
             eligible_max: 240,
             exclusion_permille: 500,
+            algorithm_id: SPATIAL_ALGORITHM_HILL,
         };
         let bytes2 = fw2.encode();
         let decoded2 = FeatureWord::decode(&bytes2).expect("decode fw2");

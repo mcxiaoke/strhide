@@ -173,6 +173,26 @@ pub struct SpatialParams {
     /// Safety policy enforcement mode (default Advisory).
     #[serde(default)]
     pub safety_enforcement: SafetyEnforcement,
+    /// Scalar knobs belonging to a cost model that is **not** the built-in HILL.
+    ///
+    /// The typed fields above (`high_pass_kernel`, `p1_window`, `p2_window`,
+    /// `epsilon`) are HILL's own and stay typed because one of them is not a
+    /// scalar. Every *other* model reads its settings from here, keyed by its
+    /// own vocabulary:
+    ///
+    /// ```toml
+    /// [spatial_params.algorithm_options]
+    /// sigma = 1.0
+    /// ```
+    ///
+    /// The point is that adding a model must not require editing this file. A
+    /// model reads the keys it knows and falls back to its own defaults for
+    /// absent ones; unknown keys are ignored so one config can serve several
+    /// models. `validate` only checks that keys are non-empty and values are
+    /// finite -- it cannot know what a key means, and pretending otherwise would
+    /// put model knowledge back in the wrong place.
+    #[serde(default)]
+    pub algorithm_options: std::collections::BTreeMap<String, f64>,
 }
 
 fn default_stc_h() -> u8 {
@@ -197,6 +217,7 @@ impl Default for SpatialParams {
             stc_u: default_stc_u(),
             safety_level: SafetyLevel::default(),
             safety_enforcement: SafetyEnforcement::default(),
+            algorithm_options: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -253,7 +274,16 @@ impl SpatialParams {
                 }
             }
         }
+        validate_algorithm_options(&self.algorithm_options, "spatial")?;
         Ok(())
+    }
+
+    /// Value of a model-private knob, or `default` when the key is absent.
+    ///
+    /// The accessor exists so a cost model can declare its defaults next to the
+    /// code that uses them instead of shipping a matching struct field here.
+    pub fn model_option(&self, key: &str, default: f64) -> f64 {
+        self.algorithm_options.get(key).copied().unwrap_or(default)
     }
 }
 
@@ -295,12 +325,27 @@ pub struct JpegParams {
     /// Cipher suite written into the superblock (default: the profile's default).
     #[serde(default = "default_cipher_suite")]
     pub cipher_suite: u16,
-    /// Directional cost weight: `rho_minus *= polarize_weight`.
+    /// Cost polarization weight, i.e. the discount applied to the *preferred*
+    /// direction of each coefficient.
     ///
-    /// `1.0` (default) means "disabled", i.e. a symmetric cost map, which is the
-    /// only setting with a measured track record. Values below 1 make shrinking
-    /// `|c|` cheaper; the plan treats that as a Phase 3 experiment that has to
-    /// win an A/B before it becomes a default.
+    /// A JPEG coefficient is a quantized sample of a smooth signal, so the value
+    /// it "should" have had can be estimated (dequantize -> Wiener denoise ->
+    /// re-quantize). Moving a coefficient towards that estimate is less visible
+    /// than moving it away, because it is the direction the signal lies in. The
+    /// cost model reports that preference per coefficient
+    /// ([`JpegCostModel::direction_bias`]) and the engine prices the preferred
+    /// move at `base * polarize_weight`, leaving the opposite move at `base`.
+    ///
+    /// `1.0` (default) disables the mechanism: no bias is computed at all and the
+    /// cost map stays symmetric. `0.65` is what `hstego` (MIT) uses. Valid range
+    /// is `(0, 1]` -- a weight above `1` would *penalize* the less visible
+    /// direction, which is the opposite of the intent, so it is rejected rather
+    /// than silently inverted.
+    ///
+    /// Embed-side only: extraction never computes costs, so nothing about this
+    /// setting is written into the carrier or needed to read it back.
+    ///
+    /// [`JpegCostModel::direction_bias`]: crate::stego::traits::JpegCostModel::direction_bias
     #[serde(default = "default_polarize_weight")]
     pub polarize_weight: f64,
     /// Extension records written into the TLV area (default: none).
@@ -312,6 +357,39 @@ pub struct JpegParams {
     /// Safety policy enforcement mode (default Advisory).
     #[serde(default)]
     pub safety_enforcement: SafetyEnforcement,
+    /// Scalar knobs belonging to a JPEG cost model that is **not** the built-in
+    /// UERD.
+    ///
+    /// `neighbor_weight` above is UERD's own; anything a different model needs
+    /// (e.g. J-UNIWARD's wavelet smoothing) is read from here by its own key.
+    /// See [`SpatialParams::algorithm_options`] for the rationale -- the same
+    /// rules apply, so that adding a model is a model-side change only.
+    #[serde(default)]
+    pub algorithm_options: std::collections::BTreeMap<String, f64>,
+}
+
+/// Validate a model-owned options bag.
+///
+/// Deliberately shallow: the library cannot know what a key means, so it checks
+/// only what is universally wrong -- an empty key (unaddressable) or a
+/// non-finite value (poisons any cost arithmetic downstream).
+fn validate_algorithm_options(
+    bag: &std::collections::BTreeMap<String, f64>,
+    family: &str,
+) -> Result<(), StrHideError> {
+    for (key, value) in bag {
+        if key.trim().is_empty() {
+            return Err(StrHideError::General(format!(
+                "{family} parameter 'algorithm_options' contains an empty key"
+            )));
+        }
+        if !value.is_finite() {
+            return Err(StrHideError::General(format!(
+                "{family} parameter 'algorithm_options.{key}' must be finite, got {value}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Default trellis budget: 1.2M slots.
@@ -414,6 +492,7 @@ impl Default for JpegParams {
             extensions: Vec::new(),
             safety_level: SafetyLevel::default(),
             safety_enforcement: SafetyEnforcement::default(),
+            algorithm_options: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -448,12 +527,27 @@ impl JpegParams {
                 self.polarize_weight
             )));
         }
+        // Above 1 the weight would penalize the *preferred* direction instead of
+        // discounting it, which inverts the meaning of the setting. Reject it
+        // rather than silently doing the opposite of what the name says.
+        if self.polarize_weight > 1.0 {
+            return Err(StrHideError::General(format!(
+                "JPEG parameter 'polarize_weight' must be <= 1.0 (1.0 disables polarization), got {}",
+                self.polarize_weight
+            )));
+        }
         if self.cipher_suite == 0 {
             return Err(StrHideError::General(
                 "Cipher suite id 0 is reserved for 'unset'".into(),
             ));
         }
+        validate_algorithm_options(&self.algorithm_options, "JPEG")?;
         Ok(())
+    }
+
+    /// Value of a model-private knob, or `default` when the key is absent.
+    pub fn model_option(&self, key: &str, default: f64) -> f64 {
+        self.algorithm_options.get(key).copied().unwrap_or(default)
     }
 
     /// Compute the effective slot budget for layout optimization.
@@ -588,6 +682,45 @@ impl StegoOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The options bag is the extension point that keeps a new cost model out
+    /// of this file, so its accessor and validation have to behave predictably.
+    #[test]
+    fn algorithm_options_default_to_the_models_own_values() {
+        let params = SpatialParams::default();
+        assert!(
+            params.algorithm_options.is_empty(),
+            "default carries no bag"
+        );
+        assert_eq!(params.model_option("sigma", 1.0), 1.0);
+
+        let mut tuned = SpatialParams::default();
+        tuned.algorithm_options.insert("sigma".into(), 0.5);
+        assert_eq!(tuned.model_option("sigma", 1.0), 0.5);
+        assert_eq!(
+            tuned.model_option("unrelated", 7.0),
+            7.0,
+            "an absent key must fall back, not fail"
+        );
+        tuned.validate().expect("a tuned bag is valid");
+    }
+
+    #[test]
+    fn algorithm_options_reject_empty_keys_and_non_finite_values() {
+        let mut empty_key = SpatialParams::default();
+        empty_key.algorithm_options.insert("  ".into(), 1.0);
+        let err = empty_key
+            .validate()
+            .expect_err("empty key must be rejected");
+        assert!(err.to_string().contains("empty key"), "got: {err}");
+
+        let mut not_finite = JpegParams::default();
+        not_finite.algorithm_options.insert("gain".into(), f64::NAN);
+        let err = not_finite
+            .validate()
+            .expect_err("NaN must be rejected before it reaches a cost map");
+        assert!(err.to_string().contains("gain"), "got: {err}");
+    }
 
     #[test]
     fn explicit_password_wins_over_profile_secret() {

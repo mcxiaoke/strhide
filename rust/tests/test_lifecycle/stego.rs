@@ -120,11 +120,16 @@ fn median(values: &[f64]) -> f64 {
 /// Deliberately duplicates the engine pipeline: the property under test (the
 /// header position is a function of the secret, not of the per-embed salt) is
 /// only observable from outside if we can reproduce the slot set.
+/// Recompute the header slot layout the way the extractor does.
+///
+/// Deliberately **cost-free**: the header is placed from the eligible pixels in
+/// ascending order and then keyed-permuted, so a reader can find it without
+/// knowing which cost model wrote the body. This used to sort candidates by
+/// HILL cost and drop the smoothest 30%, which made the header unreachable
+/// before the algorithm was known.
 fn header_slots_of(png: &[u8], password: Option<&str>) -> Vec<usize> {
     let img = decode_png(png).expect("decode png");
     let (w, h, ch) = (img.width as usize, img.height as usize, img.channels);
-    let params = SpatialParams::default();
-    let costs = HillCostModel.compute_cost(&img.pixels, w, h, ch, &params);
     let off = if ch >= 3 { 1 } else { 0 };
     let mut eligible: Vec<usize> = (0..w * h)
         .filter(|&i| {
@@ -133,19 +138,16 @@ fn header_slots_of(png: &[u8], password: Option<&str>) -> Vec<usize> {
                 .contains(&img.pixels[i * ch + off])
         })
         .collect();
-    eligible.sort_by(|&a, &b| {
-        costs[a]
-            .partial_cmp(&costs[b])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let allowed = ((eligible.len() as f64) * (1.0 - params.exclusion_percentile)) as usize;
-    let mut candidates = eligible[..allowed].to_vec();
+    assert_eq!(
+        eligible.len(),
+        eligible.iter().filter(|&&i| i < w * h).count()
+    );
     strhide::stego::prng::permute_prefix(
-        &mut candidates,
+        &mut eligible,
         strhide::stego::header::V2_TOTAL_HEADER_SLOTS,
         &strhide::stego::envelope::derive_header_perm_seed(password, None),
     );
-    candidates[..strhide::stego::header::V2_TOTAL_HEADER_SLOTS].to_vec()
+    eligible[..strhide::stego::header::V2_TOTAL_HEADER_SLOTS].to_vec()
 }
 
 /// Read the 32-byte header the way the extractor does, for a known slot set.
