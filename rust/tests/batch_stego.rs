@@ -22,15 +22,16 @@
 //!    - Low load (64 B) must NOT inflate the self-check risk score by more than 35;
 //!    - High load = the FULL capacity the tool reports (the strongest signal it can
 //!      produce), incompressible payload, must be flagged on a documented majority.
-//!      Current 22-carrier corpus: **4/18** high-measurable carriers flagged at
-//!      full capacity (22%). Two changes moved this number from the earlier 5/18:
+//!      Current 22-carrier corpus: **3/18** high-measurable carriers flagged at
+//!      full capacity (17%), of which only **1/18** is payload-driven -- the other
+//!      two already scored >= 10 on the untouched carrier. History of the number:
 //!      (a) the PNG body now spans R/G/B when one channel cannot hold the payload,
-//!      which raises the full-capacity payload ~2.3-3.6x while spreading the same
-//!      relative amount of change over three channels -- the per-channel LSB rate
-//!      the spatial detectors see *falls*, so `Special11.png` and `SSD20210218.png`
-//!      now read 0/clean at full load; (b) APNG chunk names are no longer reported
-//!      as private chunks (see `analysis::walk_png_chunks`), which removed a
-//!      structural false positive that had nothing to do with the payload.
+//!      raising the full-capacity payload ~2.3-3.6x while spreading the same
+//!      relative change over three channels, so `Special11.png`/`SSD20210218.png`
+//!      read 0/clean at full load; (b) APNG chunk names are no longer reported as
+//!      private chunks; (c) the spatial rate thresholds were recalibrated from
+//!      0.05 to 0.70 (see `docs/png_blind_calibration_20261023.md`), which removed
+//!      `jiangsuviews.jpg`'s false alarm -- a spatial RS/SPA hit on a clean JPEG.
 //!      Five of the 18 (DSC_20140315, DSC_20260403, pexels-matreding, pexels-nguy,
 //!      zaiv-puddle) used to refuse full-load embeds as "over-optimised Huffman"
 //!      and were excluded from the denominator, giving 4/13 = 31%; the P2 zeroing
@@ -141,6 +142,11 @@ struct BatchReport {
     high_measured: usize,
     /// Of those, how many the self-check actually flagged (risk >= 10).
     high_flagged: usize,
+    /// Of the flagged ones, how many were *not* already flagged on the clean
+    /// carrier -- i.e. how many the payload itself pushed over the line. The
+    /// rest are carrier properties (an over-optimised Huffman table, a
+    /// pre-existing structural oddity) and say nothing about the embedder.
+    high_payload_driven: usize,
     /// Carriers the self-check failed to flag at 50% load.
     undetected: Vec<String>,
 }
@@ -538,6 +544,9 @@ fn test_batch_stego_corpus() {
                     report.high_measured += 1;
                     if row.high_score >= 10 {
                         report.high_flagged += 1;
+                        if row.orig_score < 10 {
+                            report.high_payload_driven += 1;
+                        }
                     } else {
                         report.undetected.push(filename.clone());
                     }
@@ -629,28 +638,39 @@ fn test_batch_stego_corpus() {
             report.high_measured,
             ratio * 100.0
         );
+        println!(
+            "  payload-driven: {}/{} (the clean carrier scored < 10; the rest were already flagged before embedding)",
+            report.high_payload_driven, report.high_flagged
+        );
         if !report.undetected.is_empty() {
             println!("  undetected at full load: {:?}", report.undetected);
         }
-        // The floor exists to catch a *broken analyser* (a collapse toward zero),
-        // not to assert invisibility. It used to be 0.20 for the default codec
-        // and 0.15 for a grouped STC sweep, because a group size above 1
-        // deliberately changes fewer slots per bit (measured: u=2 -> 80%,
-        // u=3 -> 67%). The PNG body going multi-channel moves the default codec
-        // in the same direction, so both cases now share one floor:
-        // - clean JPEG carriers no longer suffer bogus RS/SPA false alarms, so the
-        //   DCT detectors flag full-load carriers without baseline bias;
-        // - a PNG carrier now absorbs 2.3-3.6x more payload spread over three
-        //   channels, and RS/SPA/chi-square look at one channel at a time and
-        //   model LSB *replacement*, so the per-channel rate they see drops.
-        // Measured: 4/18 = 22% at full load.
-        let floor = 0.15;
+        // Two separate guards, because after the 0.70 recalibration a raw ratio
+        // mostly measures *carrier* properties rather than the embedder:
+        // - `high_flagged` counts any carrier at risk >= 10. Two of the three or
+        //   four are already flagged on the untouched carrier (an over-optimised
+        //   JPEG Huffman table, a pre-existing structural oddity), so this is the
+        //   wiring guard: a dead analyser collapses it.
+        // - `high_payload_driven` counts only the carriers the payload pushed
+        //   over the line. That is the number that says anything about
+        //   detectability, and it stays >= 1 because full capacity is the
+        //   strongest signal the tool can produce.
+        // Measured after the recalibration: 3-4/18 flagged, 1-2 of them
+        // payload-driven (the salt is random per embed, so the boundary carrier
+        // flips run to run). Both counters are printed above; the ratio is kept
+        // for the record only.
         assert!(
-            ratio >= floor,
-            "Self-check must flag at least {:.0}% of carriers at full load, measured {:.0}% ({}/{}); undetected: {:?}",
-            floor * 100.0,
-            ratio * 100.0,
+            report.high_flagged >= 3,
+            "Self-check must flag at least 3 carriers at full load, measured {}/{} ({:.0}%); undetected: {:?}",
             report.high_flagged,
+            report.high_measured,
+            ratio * 100.0,
+            report.undetected
+        );
+        assert!(
+            report.high_payload_driven >= 1,
+            "Full capacity must be visible on at least one carrier, measured {}/{}; undetected: {:?}",
+            report.high_payload_driven,
             report.high_measured,
             report.undetected
         );

@@ -14,11 +14,18 @@
 //!   statistics).
 //! - **Content-domain statistics** — Chi-square LSB attack, Sample Pair
 //!   Analysis (SPA), and Regular/Singular (RS) analysis run on decoded pixel
-//!   samples. These catch classic LSB embedders (and, later, strhide's own
-//!   optional pixel strategy). Algorithms follow the published papers
-//!   (Westfeld & Pfitzmann 1999; Dumitrescu et al. 2003; Fridrich 2001) and
-//!   are implemented from scratch; thresholds are heuristic defaults, not
-//!   calibrated on a clean corpus yet.
+//!   samples. These catch classic LSB *replacement* embedders. Algorithms follow
+//!   the published papers (Westfeld & Pfitzmann 1999; Dumitrescu et al. 2003;
+//!   Fridrich 2001) and are implemented from scratch.
+//!
+//!   The rate thresholds are calibrated on a 107-cover corpus, not taken from
+//!   the papers: at the textbook 0.05, 21-33% of *clean* PNGs alert, because
+//!   these estimators respond to image content (texture, saturation,
+//!   JPEG-derived blockiness) at least as strongly as to a payload. They are
+//!   also blind to ternary `±1` matching by construction -- embedding this
+//!   project's own PNG carriers leaves the estimates unchanged at low load and
+//!   *lowers* them at full load. See
+//!   `docs/png_blind_calibration_20261023.md`.
 //!
 //! All findings carry a `severity` and the report aggregates a 0–100
 //! `risk_score` plus a coarse `verdict`. This is a heuristic triage tool, not
@@ -1315,6 +1322,62 @@ fn ws_analysis(pixels: &[u8], width: u32, channels: usize) -> f64 {
     best_rate
 }
 
+/// Flag threshold for the three spatial rate estimators (RS / SPA / WS).
+///
+/// Calibrated, not inherited from the literature. The textbook 0.05 assumes a
+/// clean cover whose histogram is well behaved; on real PNGs the same
+/// estimators report 0.2-0.7 on *untouched* images (texture, saturation,
+/// JPEG-derived blockiness), which made 21-33% of a 107-cover set alert.
+///
+/// Measured on that set (`docs/png_blind_calibration_20261023.md`):
+/// - clean covers: median 0.02-0.03, p90 0.19-0.24, max 0.61-0.76;
+/// - the same covers with every LSB *replaced* (the rule these estimators
+///   model): median 0.96-1.00.
+///
+/// 0.70 keeps 1/107 covers above it per detector while still catching 100% /
+/// 75% / 100% of LSB-replacement carriers (WS / RS / SPA). It does *not* make
+/// them detect this project's ternary `±1` matching: that moves the estimates
+/// the other way, which is the honest limit of a replacement-model detector.
+const SPATIAL_RATE_THRESHOLD: f64 = 0.70;
+
+/// Rows per spatial statistics slab.
+///
+/// Every spatial detector here assumes vertical adjacency (3x3 windows, sample
+/// pairs), so a slab must be a *contiguous* run of rows: concatenating unrelated
+/// bands would fabricate neighbour pairs that never existed and quietly bias the
+/// estimate. Sampling is therefore done by running the detectors on a few
+/// contiguous slabs and averaging, not by compacting rows into one buffer.
+const SPATIAL_SLAB_ROWS: usize = 512;
+
+/// Maximum pixel bytes per slab, so a very wide carrier does not turn one slab
+/// into the whole image again.
+const SPATIAL_SLAB_BYTES: usize = 4_000_000;
+
+/// Contiguous row slabs covering the top, middle and bottom of the image.
+///
+/// The old code analysed `pixels[..4_000_000]` and then capped at 512 rows,
+/// which on a 3106x4774 carrier meant the top 6.7% of the picture -- for a
+/// landscape that is the sky, and the verdict followed it. Images too short to
+/// split are analysed whole, which keeps small carriers on the old behaviour.
+fn spatial_slabs(pixels: &[u8], stride: usize) -> Vec<&[u8]> {
+    if stride == 0 || pixels.len() < stride * 3 {
+        return vec![pixels];
+    }
+    let total_rows = pixels.len() / stride;
+    let rows = (SPATIAL_SLAB_BYTES / stride)
+        .clamp(3, SPATIAL_SLAB_ROWS)
+        .min(total_rows);
+    if total_rows <= rows * 3 {
+        return vec![&pixels[..total_rows * stride]];
+    }
+    let mid = (total_rows - rows) / 2;
+    vec![
+        &pixels[..rows * stride],
+        &pixels[mid * stride..(mid + rows) * stride],
+        &pixels[(total_rows - rows) * stride..],
+    ]
+}
+
 fn track_spatial_domain(
     pixels: &[u8],
     width: u32,
@@ -1322,15 +1385,36 @@ fn track_spatial_domain(
     findings: &mut Vec<Finding>,
     detectors: &mut Vec<DetectorMetric>,
 ) {
-    let sample: &[u8] = if pixels.len() > 4_000_000 {
-        &pixels[..4_000_000]
+    // Sample the whole height instead of the top of the image, and pool the
+    // per-slab estimates by averaging: a payload spread over the carrier shows
+    // up in every slab, while one anomalous band (sky, flat background) would
+    // dominate a maximum.
+    let stride = width as usize * channels;
+    let slabs = spatial_slabs(pixels, stride);
+    let (mut ws_sum, mut spa_sum, mut rs_sum, mut rs_n) = (0.0f64, 0.0f64, 0.0f64, 0usize);
+    let mut hist = [0u64; 256];
+    for slab in &slabs {
+        ws_sum += ws_analysis(slab, width, channels);
+        spa_sum += spa_estimate_dww(slab, width, channels);
+        if let Some(p) = rs_analysis(slab, width, channels) {
+            rs_sum += p;
+            rs_n += 1;
+        }
+        for &b in *slab {
+            hist[b as usize] += 1;
+        }
+    }
+    let slabs_f = slabs.len().max(1) as f64;
+    let ws_rate = ws_sum / slabs_f;
+    let spa_rate = spa_sum / slabs_f;
+    let rs_rate = if rs_n > 0 {
+        Some(rs_sum / rs_n as f64)
     } else {
-        pixels
+        None
     };
 
     // 1. WS (Weighted Stego-analysis)
-    let ws_rate = ws_analysis(sample, width, channels);
-    if ws_rate > 0.05 {
+    if ws_rate > SPATIAL_RATE_THRESHOLD {
         findings.push(Finding {
             detector: "spatial:ws".into(),
             severity: Severity::Info,
@@ -1341,7 +1425,7 @@ fn track_spatial_domain(
             domain: "spatial".into(),
             status: "ALERT".into(),
             metric: format!("rate: {ws_rate:.3}"),
-            threshold: Some("0.050".into()),
+            threshold: Some(format!("{SPATIAL_RATE_THRESHOLD:.3}")),
             detail: "prediction residual covariance elevated".into(),
         });
     } else {
@@ -1350,27 +1434,25 @@ fn track_spatial_domain(
             domain: "spatial".into(),
             status: "PASS".into(),
             metric: format!("rate: {ws_rate:.3}"),
-            threshold: Some("0.050".into()),
+            threshold: Some(format!("{SPATIAL_RATE_THRESHOLD:.3}")),
             detail: "prediction residuals within normal bounds".into(),
         });
     }
 
     // 2. RS Analysis
-    let rs_p = rs_analysis(sample, width, channels);
-    if let Some(p) = rs_p
-        && p > 0.05
-    {
+    let rs_p = rs_rate.unwrap_or(0.0);
+    if rs_p > SPATIAL_RATE_THRESHOLD {
         findings.push(Finding {
             detector: "rs-analysis".into(),
             severity: Severity::Suspicious,
-            detail: format!("RS analysis estimates LSB embedding rate ~{p:.2}"),
+            detail: format!("RS analysis estimates LSB embedding rate ~{rs_p:.2}"),
         });
         detectors.push(DetectorMetric {
             name: "spatial:rs".into(),
             domain: "spatial".into(),
             status: "ALERT".into(),
-            metric: format!("rate: {p:.3}"),
-            threshold: Some("0.050".into()),
+            metric: format!("rate: {rs_p:.3}"),
+            threshold: Some(format!("{SPATIAL_RATE_THRESHOLD:.3}")),
             detail: "dual-mask flipping asymmetry".into(),
         });
     } else {
@@ -1378,15 +1460,15 @@ fn track_spatial_domain(
             name: "spatial:rs".into(),
             domain: "spatial".into(),
             status: "PASS".into(),
-            metric: format!("rate: {:.3}", rs_p.unwrap_or(0.0)),
-            threshold: Some("0.050".into()),
+            metric: format!("rate: {rs_p:.3}"),
+            threshold: Some(format!("{SPATIAL_RATE_THRESHOLD:.3}")),
             detail: "dual-mask symmetry preserved".into(),
         });
     }
 
     // 3. SPA (Sample Pair Analysis)
-    let spa_p = spa_estimate_dww(sample, width, channels);
-    if spa_p > 0.05 {
+    let spa_p = spa_rate;
+    if spa_p > SPATIAL_RATE_THRESHOLD {
         findings.push(Finding {
             detector: "spa".into(),
             severity: Severity::Suspicious,
@@ -1397,7 +1479,7 @@ fn track_spatial_domain(
             domain: "spatial".into(),
             status: "ALERT".into(),
             metric: format!("rate: {spa_p:.3}"),
-            threshold: Some("0.050".into()),
+            threshold: Some(format!("{SPATIAL_RATE_THRESHOLD:.3}")),
             detail: "DWW sample pair trace deviation".into(),
         });
     } else {
@@ -1406,13 +1488,13 @@ fn track_spatial_domain(
             domain: "spatial".into(),
             status: "PASS".into(),
             metric: format!("rate: {spa_p:.3}"),
-            threshold: Some("0.050".into()),
+            threshold: Some(format!("{SPATIAL_RATE_THRESHOLD:.3}")),
             detail: "sample pair trace counts normal".into(),
         });
     }
 
-    // 4. Chi-square LSB attack
-    let chi2_score = chi2_lsb_suspicion(sample);
+    // 4. Chi-square LSB attack (pooled histogram over every slab)
+    let chi2_score = chi2_suspicion(&hist);
     if chi2_score > 0.5 {
         findings.push(Finding {
             detector: "chi2-lsb".into(),
@@ -1542,11 +1624,20 @@ fn track_content_domain(pixels: &[u8], width: u32, channels: usize, out: &mut Ve
 /// Under LSB embedding, value pairs (2i, 2i+1) migrate toward equal counts.
 /// We return how far the observed chi-square statistic is below the
 /// expectation df (≈127 for 8-bit pixels), normalised to 0..1.
+#[cfg(test)]
 fn chi2_lsb_suspicion(data: &[u8]) -> f64 {
     let mut hist = [0u64; 256];
     for &b in data {
         hist[b as usize] += 1;
     }
+    chi2_suspicion(&hist)
+}
+
+/// [`chi2_lsb_suspicion`] over an already-built histogram.
+///
+/// Split out so the pooled histogram of several sampled slabs yields exactly
+/// the same statistic as one pass over all of them would.
+fn chi2_suspicion(hist: &[u64; 256]) -> f64 {
     let mut chi2 = 0.0;
     let mut df = 0.0;
     for i in (0..256).step_by(2) {
@@ -1910,6 +2001,45 @@ mod tests {
             findings.is_empty(),
             "a clean APNG chunk sequence must produce no structural finding: {findings:?}"
         );
+    }
+
+    #[test]
+    fn spatial_slabs_cover_top_middle_and_bottom() {
+        // 1920x2400 RGBA: stride 7680, 512 rows per slab, three slabs fit.
+        let (w, h, ch) = (1920usize, 2400usize, 4usize);
+        let stride = w * ch;
+        let pixels = vec![0u8; stride * h];
+        let slabs = spatial_slabs(&pixels, stride);
+        assert_eq!(
+            slabs.len(),
+            3,
+            "a tall image must be sampled in three places"
+        );
+        assert_eq!(
+            slabs[0].as_ptr(),
+            pixels.as_ptr(),
+            "first slab starts at the top"
+        );
+        assert_eq!(
+            slabs[1].as_ptr() as usize - pixels.as_ptr() as usize,
+            ((h - 512) / 2) * stride,
+            "middle slab sits at the vertical centre"
+        );
+        assert_eq!(
+            slabs[2].len(),
+            512 * stride,
+            "last slab is rows per slab, ending at the bottom"
+        );
+        for s in &slabs {
+            assert_eq!(s.len() % stride, 0, "a slab is a whole number of rows");
+        }
+
+        // Carriers that only fit one slab's worth of rows are analysed whole,
+        // which is both cheaper and more accurate than three overlapping slabs.
+        let short = vec![0u8; 7680 * 1280];
+        assert_eq!(spatial_slabs(&short, 7680).len(), 1);
+        let small = vec![0u8; 64 * 4 * 10];
+        assert_eq!(spatial_slabs(&small, 256).len(), 1);
     }
 
     #[test]
