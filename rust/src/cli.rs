@@ -72,9 +72,37 @@ pub enum Commands {
     Embed(EmbedArgs),
     /// Content-adaptive steganography: extract payload from image pixels or DCT coefficients
     Extract(ExtractArgs),
+    /// Probe maximum embedding capacity of image carrier(s)
+    Capacity(CapacityArgs),
     /// List all supported formats, strategies, and their capacity limits
     List(ListArgs),
 }
+
+/// Arguments of the read-only capacity probe.
+#[derive(Args, Debug)]
+#[command(after_help = CAPACITY_AFTER_HELP)]
+pub struct CapacityArgs {
+    #[arg(
+        value_name = "CARRIER",
+        required = true,
+        num_args = 1..,
+
+    )]
+    pub carrier: Vec<PathBuf>,
+
+    /// Same tuning/credential knobs as `embed`: the capacity answer is only
+    /// meaningful for the tuning it was probed with.
+    #[command(flatten)]
+    pub tuning: StegoTuningArgs,
+
+    #[arg(
+        long = "json",
+        help = "Print structured JSON output (one StegoCapacityInfo object per carrier)"
+    )]
+    pub json: bool,
+}
+
+const CAPACITY_AFTER_HELP: &str = crate::i18n::messages::CAPACITY_AFTER_HELP_EN;
 
 /// Password arguments shared by all commands that accept one. Declared once
 /// and flattened everywhere so `-p` and `--password-file` are mutually
@@ -309,14 +337,11 @@ pub struct EmbedArgs {
     )]
     pub no_backup: bool,
 
-    #[arg(
-        long = "capacity",
-        help = "Probe and display maximum embedding capacity for the carrier image, then exit without modifying the carrier"
-    )]
+    #[arg(long = "capacity", conflicts_with = "dry_run")]
     pub capacity: bool,
 
-    #[command(flatten)]
-    pub passwords: PasswordArgs,
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
 
     #[arg(
         short = 'e',
@@ -325,39 +350,33 @@ pub struct EmbedArgs {
     )]
     pub encrypt: bool,
 
-    #[arg(
-        short = 'a',
-        long = "algorithm",
-        value_name = "NAME",
-        help = "Distortion cost algorithm (auto|hill|suniward|uerd|juniward|hevc; default: auto - hill for PNG, uerd for JPEG, hevc for HEIF/HEVC)"
-    )]
+    #[command(flatten)]
+    pub tuning: StegoTuningArgs,
+}
+
+/// Tuning and credential arguments shared by `embed` and `capacity`.
+///
+/// Flattened so both verbs expose exactly the same knobs: the capacity probe
+/// is credential- and cost-map-dependent, so a read-only capacity answer must
+/// be able to repeat the embed-time tuning.
+#[derive(Args, Debug)]
+pub struct StegoTuningArgs {
+    #[command(flatten)]
+    pub passwords: PasswordArgs,
+
+    #[arg(short = 'a', long = "algorithm", value_name = "NAME")]
     pub algorithm: Option<String>,
 
-    #[arg(
-        long = "stego-secret",
-        value_name = "SECRET",
-        help = "Private stand-in secret for no-password stego envelopes; enables a private dialect that the public built-in key cannot read. Extract must use the same value."
-    )]
+    #[arg(long = "stego-secret", value_name = "SECRET")]
     pub stego_secret: Option<String>,
 
-    #[arg(
-        long = "stego-domain",
-        value_name = "DOMAIN",
-        help = "Custom domain tag to isolate the HKDF key derivation from the public dialect. Extract must use the same domain."
-    )]
+    #[arg(long = "stego-domain", value_name = "DOMAIN")]
     pub stego_domain: Option<String>,
 
-    #[arg(
-        long = "safety",
-        value_name = "LEVEL",
-        help = "Stego capacity safety tier: 'paranoid' (bpp<=0.06), 'high' (bpp<=0.10, default), or 'balanced' (bpp<=0.15)"
-    )]
+    #[arg(long = "safety", value_name = "LEVEL")]
     pub safety: Option<String>,
 
-    #[arg(
-        long = "enforce-safety",
-        help = "Strictly reject payloads exceeding recommended safety tier instead of advisory warning"
-    )]
+    #[arg(long = "enforce-safety")]
     pub enforce_safety: bool,
 
     #[arg(
@@ -369,56 +388,52 @@ pub struct EmbedArgs {
     // --- Fine-tuning parameters for custom obfuscation and anti-detection ---
     #[arg(
         long = "exclusion-rate",
-        value_name = "FLOAT",
-        help = "Fine-tune (Spatial HILL): fraction of smoothest regions excluded from embedding (0.0 .. 0.8; default: 0.30)"
+        help_heading = "Fine-Tuning Options",
+        value_name = "FLOAT"
     )]
     pub exclusion_rate: Option<f64>,
 
     #[arg(
         long = "neighbor-weight",
-        value_name = "FLOAT",
-        help = "Fine-tune (JPEG UERD): weight applied to 8-neighborhood block energies (default: 0.25)"
+        help_heading = "Fine-Tuning Options",
+        value_name = "FLOAT"
     )]
     pub neighbor_weight: Option<f64>,
 
     #[arg(
         long = "slot-budget",
+        help_heading = "Fine-Tuning Options",
         hide = true,
-        value_name = "INT",
-        help = "Fine-tune (JPEG V3): trellis slot budget; a larger budget spreads each payload bit over more \
-                coefficients (fewer changes per coefficient), at the cost of time and memory. Default: automatic -- a quarter of the carrier's coefficient grid (at least 1200000 slots), so the group size follows the carrier instead of falling back to u=1. \
-                On a carrier with an over-optimised Huffman table the value is still raised when needed to keep u>=3 (correctness, not tuning). \
-                Extraction does not need this value."
+        value_name = "INT"
     )]
     pub slot_budget: Option<usize>,
 
     #[arg(
         long = "cipher-suite",
+        help_heading = "Fine-Tuning Options",
         hide = true,
-        value_name = "ID",
-        help = "Fine-tune (JPEG V3): cipher suite written into the carrier header. 1 = pbkdf2-sha256-200k \
-                (default), 2 = pbkdf2-sha256-600k (slower, stronger). Extraction identifies it automatically."
+        value_name = "ID"
     )]
     pub cipher_suite: Option<u16>,
 
     #[arg(
         long = "p1-window",
-        value_name = "INT",
-        help = "Fine-tune (Spatial HILL): first-stage low-pass filter window size (odd, default: 3)"
+        help_heading = "Fine-Tuning Options",
+        value_name = "INT"
     )]
     pub p1_window: Option<usize>,
 
     #[arg(
         long = "p2-window",
-        value_name = "INT",
-        help = "Fine-tune (Spatial HILL): second-stage low-pass filter window size (odd, default: 15)"
+        help_heading = "Fine-Tuning Options",
+        value_name = "INT"
     )]
     pub p2_window: Option<usize>,
 
     #[arg(
         long = "stc-h",
-        value_name = "INT",
-        help = "Fine-tune (STC): trellis constraint height, 4..=10 (default: 8). Larger is slower and slightly better."
+        help_heading = "Fine-Tuning Options",
+        value_name = "INT"
     )]
     pub stc_h: Option<u8>,
 }
@@ -788,6 +803,7 @@ fn should_print_banner(cli: &Cli) -> bool {
         Commands::List(args) if args.json => false,
         Commands::Read(args) if args.stdout || args.output.is_none() => false,
         Commands::Extract(args) if args.stdout || args.output.is_none() => false,
+        Commands::Capacity(args) if args.json => false,
         _ => true,
     }
 }
@@ -975,6 +991,13 @@ pub(crate) fn run_cli_with(engine: &StrHide, argv: Vec<OsString>) -> i32 {
             }
         },
         Commands::Embed(args) => match handle_embed(args, &cfg, cli.quiet, engine) {
+            Ok(_) => 0,
+            Err(e) => {
+                print_error(&e);
+                1
+            }
+        },
+        Commands::Capacity(args) => match handle_capacity(args, &cfg, cli.quiet, engine) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);
@@ -2041,7 +2064,7 @@ fn apply_stc_h(
 /// different configuration than the one that was about to be used. One builder,
 /// with the embed-only extras behind `embed_extras`.
 fn embed_stego_options(
-    args: &EmbedArgs,
+    args: &StegoTuningArgs,
     password: Option<&str>,
     quiet: bool,
     embed_extras: bool,
@@ -2099,6 +2122,107 @@ fn embed_stego_options(
     Ok(options)
 }
 
+/// Read-only capacity probe shared by `strhide capacity` and `embed --capacity`.
+///
+/// The probe uses the same credentials the embed would: they key the spatial
+/// header permutation, which changes which pixels are available to the payload.
+fn run_capacity_probe(
+    carriers: Vec<PathBuf>,
+    tuning: &StegoTuningArgs,
+    cfg: &FileConfig,
+    quiet: bool,
+    engine: &StrHide,
+    json: bool,
+) -> Result<(), StrHideError> {
+    let password = resolve_password(
+        tuning.passwords.password.as_deref(),
+        tuning.passwords.password_file.as_deref(),
+        cfg,
+        false,
+        false,
+    )?;
+    let stego_secret = resolve_stego_secret(tuning.stego_secret.as_deref(), cfg);
+    let stego_domain = resolve_stego_domain(tuning.stego_domain.as_deref(), cfg);
+    for carrier in &carriers {
+        let carrier_bytes = std::fs::read(carrier)?;
+        let mut options = embed_stego_options(tuning, password.as_deref(), true, false)?;
+        if options.password.is_none() {
+            options.password = stego_secret.clone();
+        }
+        if options.domain.is_none() {
+            options.domain = stego_domain.clone();
+        }
+        let cap = crate::stego::probe_carrier_capacity_with_profile(
+            &carrier_bytes,
+            &options,
+            engine.profile(),
+        )?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string(&cap).map_err(|e| {
+                    StrHideError::General(format!("capacity serialization failed: {e}"))
+                })?
+            );
+            continue;
+        }
+        if quiet {
+            continue;
+        }
+        println!("{}", t!(Msg::StegoProbeHeader, path = carrier.display()));
+        println!("{}", t!(Msg::StegoProbeFormat, val = cap.format));
+        println!("{}", t!(Msg::StegoProbeAlgorithm, val = cap.algorithm));
+        println!(
+            "{}",
+            t!(Msg::StegoProbeTotalElements, val = cap.total_elements)
+        );
+        println!(
+            "{}",
+            t!(Msg::StegoProbePayloadSlots, val = cap.available_slots)
+        );
+        let kib = cap.max_raw_payload_bytes as f64 / 1024.0;
+        let max_raw_msg = if cap.max_raw_is_grouped {
+            Msg::StegoProbeMaxRawGrouped
+        } else {
+            Msg::StegoProbeMaxRaw
+        };
+        println!(
+            "{}",
+            t!(
+                max_raw_msg,
+                bytes = cap.max_raw_payload_bytes,
+                kib = format_args!("{kib:.1}")
+            )
+        );
+        let safe_kib = cap.recommended_max_bytes as f64 / 1024.0;
+        println!(
+            "{}",
+            t!(
+                Msg::StegoProbeRecommended,
+                bytes = cap.recommended_max_bytes,
+                kib = format_args!("{safe_kib:.1}"),
+                level = cap.safety_level,
+                bpp = format_args!("{:.2}", cap.safety_bpp_limit)
+            )
+        );
+        println!(
+            "{}",
+            t!(Msg::StegoProbeEstChanges, rate = cap.estimated_change_rate)
+        );
+    }
+    Ok(())
+}
+
+/// Read-only capacity probe: `strhide capacity [CARRIERS]...`.
+fn handle_capacity(
+    args: CapacityArgs,
+    cfg: &FileConfig,
+    quiet: bool,
+    engine: &StrHide,
+) -> Result<(), StrHideError> {
+    run_capacity_probe(args.carrier, &args.tuning, cfg, quiet, engine, args.json)
+}
+
 fn handle_embed(
     args: EmbedArgs,
     cfg: &FileConfig,
@@ -2108,84 +2232,25 @@ fn handle_embed(
     // Runtime credentials (CLI flag, env, config) are resolved once and
     // carried on StegoOptions; the static Profile dialect is not populated
     // from runtime data.
-    let stego_secret = resolve_stego_secret(args.stego_secret.as_deref(), cfg);
-    let stego_domain = resolve_stego_domain(args.stego_domain.as_deref(), cfg);
+    let stego_secret = resolve_stego_secret(args.tuning.stego_secret.as_deref(), cfg);
+    let stego_domain = resolve_stego_domain(args.tuning.stego_domain.as_deref(), cfg);
 
     if args.capacity {
-        // The probe uses the same credentials the embed would: they key the
-        // spatial header permutation, which changes which pixels are available
-        // to the payload.
-        let capacity_password = resolve_password(
-            args.passwords.password.as_deref(),
-            args.passwords.password_file.as_deref(),
+        return run_capacity_probe(
+            args.carrier.clone(),
+            &args.tuning,
             cfg,
+            quiet,
+            engine,
             false,
-            false,
-        )?;
-        for carrier in &args.carrier {
-            let carrier_bytes = std::fs::read(carrier)?;
-            let mut options =
-                embed_stego_options(&args, capacity_password.as_deref(), true, false)?;
-            if options.password.is_none() {
-                options.password = stego_secret.clone();
-            }
-            if options.domain.is_none() {
-                options.domain = stego_domain.clone();
-            }
-            let cap = crate::stego::probe_carrier_capacity_with_profile(
-                &carrier_bytes,
-                &options,
-                engine.profile(),
-            )?;
-            println!("{}", t!(Msg::StegoProbeHeader, path = carrier.display()));
-            println!("{}", t!(Msg::StegoProbeFormat, val = cap.format));
-            println!("{}", t!(Msg::StegoProbeAlgorithm, val = cap.algorithm));
-            println!(
-                "{}",
-                t!(Msg::StegoProbeTotalElements, val = cap.total_elements)
-            );
-            println!(
-                "{}",
-                t!(Msg::StegoProbePayloadSlots, val = cap.available_slots)
-            );
-            let kib = cap.max_raw_payload_bytes as f64 / 1024.0;
-            let max_raw_msg = if cap.max_raw_is_grouped {
-                Msg::StegoProbeMaxRawGrouped
-            } else {
-                Msg::StegoProbeMaxRaw
-            };
-            println!(
-                "{}",
-                t!(
-                    max_raw_msg,
-                    bytes = cap.max_raw_payload_bytes,
-                    kib = format_args!("{kib:.1}")
-                )
-            );
-            let safe_kib = cap.recommended_max_bytes as f64 / 1024.0;
-            println!(
-                "{}",
-                t!(
-                    Msg::StegoProbeRecommended,
-                    bytes = cap.recommended_max_bytes,
-                    kib = format_args!("{safe_kib:.1}"),
-                    level = cap.safety_level,
-                    bpp = format_args!("{:.2}", cap.safety_bpp_limit)
-                )
-            );
-            println!(
-                "{}",
-                t!(Msg::StegoProbeEstChanges, rate = cap.estimated_change_rate)
-            );
-        }
-        return Ok(());
+        );
     }
 
     // 1. Resolve password
     let encrypt = args.encrypt || cfg.encrypt.unwrap_or(false);
     let password = resolve_password(
-        args.passwords.password.as_deref(),
-        args.passwords.password_file.as_deref(),
+        args.tuning.passwords.password.as_deref(),
+        args.tuning.passwords.password_file.as_deref(),
         cfg,
         encrypt,
         true,
@@ -2196,18 +2261,22 @@ fn handle_embed(
     let profile = *engine.profile();
 
     // 2. Resolve payload bytes (shared with `write`).
-    let payload_bytes =
-        match resolve_payload(&args.payload, args.unescape, cfg, PayloadFlavor::Bytes)? {
-            ResolvedPayload::Stdin => {
-                let mut buf = Vec::new();
-                std::io::stdin().read_to_end(&mut buf)?;
-                buf
-            }
-            ResolvedPayload::File(f) => std::fs::read(f)?,
-            ResolvedPayload::TextFile(p) => std::fs::read(p)?,
-            ResolvedPayload::Text(t) => t.into_bytes(),
-            ResolvedPayload::Bytes(b) => b,
-        };
+    let payload_bytes = match resolve_payload(
+        &args.payload,
+        args.tuning.unescape,
+        cfg,
+        PayloadFlavor::Bytes,
+    )? {
+        ResolvedPayload::Stdin => {
+            let mut buf = Vec::new();
+            std::io::stdin().read_to_end(&mut buf)?;
+            buf
+        }
+        ResolvedPayload::File(f) => std::fs::read(f)?,
+        ResolvedPayload::TextFile(p) => std::fs::read(p)?,
+        ResolvedPayload::Text(t) => t.into_bytes(),
+        ResolvedPayload::Bytes(b) => b,
+    };
 
     if payload_bytes.is_empty() {
         return Err(StrHideError::General("Payload cannot be empty".into()));
@@ -2222,6 +2291,10 @@ fn handle_embed(
                 carrier.display()
             )));
         }
+        // A dry run writes nothing, so the overwrite pre-check does not apply.
+        if args.dry_run {
+            continue;
+        }
         let target =
             resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;
         if let Some(ref t) = target {
@@ -2233,7 +2306,7 @@ fn handle_embed(
         let t_start = std::time::Instant::now();
         let carrier_bytes = std::fs::read(carrier)?;
 
-        let mut options = embed_stego_options(&args, password.as_deref(), quiet, true)?;
+        let mut options = embed_stego_options(&args.tuning, password.as_deref(), quiet, true)?;
         if options.password.is_none() {
             options.password = stego_secret.clone();
         }
@@ -2267,6 +2340,29 @@ fn handle_embed(
             &options,
             &profile,
         )?;
+
+        if args.dry_run {
+            // Full rehearsal, no disk write: everything up to and including the
+            // embed ran (capacity, safety gate, credential resolution), only the
+            // commit is skipped.
+            if !quiet {
+                println!(
+                    "[DRY-RUN] {} -> {} bytes stego (carrier {} bytes, +{} bytes, +{:.2}%). No file written.",
+                    carrier.display(),
+                    stego_bytes.len(),
+                    carrier_bytes.len(),
+                    stego_bytes.len().saturating_sub(carrier_bytes.len()),
+                    if !carrier_bytes.is_empty() {
+                        (stego_bytes.len() as f64 - carrier_bytes.len() as f64)
+                            / carrier_bytes.len() as f64
+                            * 100.0
+                    } else {
+                        0.0
+                    }
+                );
+            }
+            return Ok(());
+        }
 
         let target =
             resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;

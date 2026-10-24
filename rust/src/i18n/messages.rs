@@ -67,6 +67,27 @@ pub const READ_AFTER_HELP_ZH: &str = "\
   strhide read locked.png                  # 提示输入密码前会显示已存的密码提示
 ";
 
+pub const CAPACITY_AFTER_HELP_EN: &str =
+    "Probes the maximum embedding capacity of image carrier(s) without modifying
+them. The same probe backs `strhide embed --capacity`; this command exists so
+a read-only question has a read-only verb.
+
+Examples:
+  strhide capacity photo.png photo.jpg       # Text report per carrier
+  strhide capacity photo.png --json          # Machine-readable report
+  strhide capacity photo.png --safety paranoid
+";
+
+pub const CAPACITY_AFTER_HELP_ZH: &str =
+    "探测图像载体的最大嵌入容量（不修改文件）。与 `strhide embed --capacity` 使用同一探测：
+答案只对探测时的调参组合有效，因此本命令暴露与 embed 相同的调参与凭据参数。
+
+示例：
+  strhide capacity photo.png photo.jpg       # 逐载体输出文本报告
+  strhide capacity photo.png --json          # 机器可读报告
+  strhide capacity photo.png --safety paranoid
+";
+
 pub const EMBED_AFTER_HELP_EN: &str = "\
 Content-adaptive steganography embeds data directly into image textures or frequency
 coefficients (HILL for PNG, UERD for JPEG by default; -a switches to suniward or
@@ -557,6 +578,33 @@ crate::i18n_messages! {
     HelpStegoCipherSuite:
         en = "Cipher suite id (1 = PBKDF2-200k / AES-256-GCM, 2 = PBKDF2-600k / AES-256-GCM; default: 1)",
         zh = "密码套件编号（1 = PBKDF2-200k / AES-256-GCM, 2 = PBKDF2-600k / AES-256-GCM；默认: 1）";
+
+    // ---- Capacity probe command ----
+    CmdCapacity:
+        en = "Probe the maximum embedding capacity of image carrier(s) without modifying them",
+        zh = "探测图像载体的最大嵌入容量（不修改文件）";
+    AfterHelpCapacity: en = CAPACITY_AFTER_HELP_EN, zh = CAPACITY_AFTER_HELP_ZH;
+    HelpCapacityCarrier:
+        en = "Carrier image file(s) (PNG, JPEG, HEIF/HEIC, or HEVC). Use `--` before a filename that starts with '-'.",
+        zh = "图像载体文件（PNG、JPEG、HEIF/HEIC 或 HEVC；文件名若以 '-' 开头需在其前加 '--'）";
+    HelpCapacityJson:
+        en = "Print structured JSON output (one StegoCapacityInfo object per carrier)",
+        zh = "以结构化 JSON 格式输出（每个载体一个 StegoCapacityInfo 对象）";
+    HelpEmbedCapacity:
+        en = "Probe and display maximum embedding capacity for the carrier image, then exit without modifying the carrier",
+        zh = "探测并显示载体的最大嵌入容量，然后退出（不修改载体）";
+    HelpEmbedDryRun:
+        en = "Run the full embed in memory (capacity, safety gate, password path) and report the resulting size without writing any file",
+        zh = "在内存中完整执行嵌入（容量、安全门、密码路径）并报告产物大小，不写入任何文件";
+    HelpExtractAlgorithm:
+        en = "Distortion cost algorithm (auto|hill|suniward|uerd|juniward|hevc). Only 'hevc'/'cabac' change extraction routing (force Scheme C on a HEIF carrier); PNG/JPEG carriers declare their algorithm in the header and ignore this flag",
+        zh = "失真代价算法（auto|hill|suniward|uerd|juniward|hevc）。仅 'hevc'/'cabac' 影响提取路由（对 HEIF 载体强制 Scheme C）；PNG/JPEG 载体在头部自描述算法，此参数被忽略";
+    HelpExtractP1Window:
+        en = "Fine-tune (PNG HILL): first-stage low-pass filter window size used at embed time (odd, default: 3). Must match the embed-time value; extraction recomputes the cost map with it",
+        zh = "微调参数（PNG HILL）：嵌入时使用的第一级低通滤波器窗口尺寸（奇数，默认: 3）。必须与嵌入时一致，提取端用它重算代价图";
+    HelpExtractP2Window:
+        en = "Fine-tune (PNG HILL): second-stage low-pass filter window size used at embed time (odd, default: 15). Must match the embed-time value; extraction recomputes the cost map with it",
+        zh = "微调参数（PNG HILL）：嵌入时使用的第二级低通滤波器窗口尺寸（奇数，默认: 15）。必须与嵌入时一致，提取端用它重算代价图";
 
     // ---- Config warnings ----
     WarnConfigUnknownKey:

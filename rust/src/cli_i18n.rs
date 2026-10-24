@@ -44,6 +44,7 @@ fn cmd_about(name: &str, lang: Lang) -> Option<&'static str> {
         "verify" => Msg::CmdVerify,
         "scan" => Msg::CmdScan,
         "embed" => Msg::CmdEmbed,
+        "capacity" => Msg::CmdCapacity,
         "extract" => Msg::CmdExtract,
         "list" => Msg::CmdList,
         _ => return None,
@@ -56,6 +57,7 @@ fn cmd_after_help(name: &str, lang: Lang) -> Option<&'static str> {
         "write" => Msg::AfterHelpWrite,
         "read" => Msg::AfterHelpRead,
         "embed" => Msg::AfterHelpEmbed,
+        "capacity" => Msg::AfterHelpCapacity,
         "extract" => Msg::AfterHelpExtract,
         "restore" => Msg::AfterHelpRestore,
         "inspect" => Msg::AfterHelpInspect,
@@ -89,19 +91,30 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         (_, "text-file") => Msg::HelpSharedTextFile,
         (_, "text-base64") => Msg::HelpSharedTextBase64,
 
-        // Stego options shared across embed / extract
+        // Stego options: one wording for embed / extract / capacity, except
+        // where the command context changes the meaning (extract's algorithm
+        // is routing-only, its windows repeat embed-time values, and the
+        // capacity probe has its own carrier wording). The specific commands
+        // must be matched before the wildcard arms.
+        ("extract", "algorithm") => Msg::HelpExtractAlgorithm,
+        ("extract", "p1-window") => Msg::HelpExtractP1Window,
+        ("extract", "p2-window") => Msg::HelpExtractP2Window,
         (_, "algorithm") => Msg::HelpStegoAlgorithm,
         (_, "stego-secret") => Msg::HelpEmbedStegoSecret,
         (_, "stego-domain") => Msg::HelpEmbedStegoDomain,
         (_, "safety") => Msg::HelpEmbedSafety,
         (_, "enforce-safety") => Msg::HelpEmbedEnforceSafety,
-        ("embed", "exclusion-rate") => Msg::HelpEmbedExclusionRate,
-        ("embed", "neighbor-weight") => Msg::HelpStegoNeighborWeight,
-        ("embed", "p1-window") => Msg::HelpStegoP1Window,
-        ("embed", "p2-window") => Msg::HelpStegoP2Window,
-        ("embed", "stc-h") => Msg::HelpStegoStcH,
-        ("embed", "slot-budget") => Msg::HelpStegoSlotBudget,
-        ("embed", "cipher-suite") => Msg::HelpStegoCipherSuite,
+        (_, "exclusion-rate") => Msg::HelpEmbedExclusionRate,
+        (_, "neighbor-weight") => Msg::HelpStegoNeighborWeight,
+        (_, "p1-window") => Msg::HelpStegoP1Window,
+        (_, "p2-window") => Msg::HelpStegoP2Window,
+        (_, "stc-h") => Msg::HelpStegoStcH,
+        (_, "slot-budget") => Msg::HelpStegoSlotBudget,
+        (_, "cipher-suite") => Msg::HelpStegoCipherSuite,
+        ("embed", "capacity") => Msg::HelpEmbedCapacity,
+        ("embed", "dry-run") => Msg::HelpEmbedDryRun,
+        ("capacity", "carrier") => Msg::HelpCapacityCarrier,
+        ("capacity", "json") => Msg::HelpCapacityJson,
 
         // write
         ("write", "carrier") => Msg::HelpWriteCarrier,
