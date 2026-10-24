@@ -167,8 +167,8 @@ pub mod facade;
 // Content-domain steganography surface.
 #[cfg(feature = "stego")]
 pub use stego::format::{
-    CipherSuite, DEFAULT_JPEG_FORMAT, GridRule, JpegFormatProfile, OFFICIAL_PNG_FORMAT,
-    PngFormatProfile,
+    CipherSuite, DEFAULT_HEVC_FORMAT, DEFAULT_JPEG_FORMAT, GridRule, HevcFormatProfile,
+    JpegFormatProfile, OFFICIAL_PNG_FORMAT, PngFormatProfile,
 };
 #[cfg(feature = "stego")]
 pub use stego::jpeg::cost::UerdCostModel;

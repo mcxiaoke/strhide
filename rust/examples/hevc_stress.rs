@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let carrier = fs::read(&carrier_path)?;
     let payload = fs::read(&payload_path)?;
     let password = "StrHide-Matrix-Benchmark-Password#2026";
-    let cap = probe_hevc_capacity(&carrier)?;
+    let cap = probe_hevc_capacity(&carrier, &strhide::stego::format::DEFAULT_HEVC_FORMAT)?;
     println!(
         "{carrier_path} ({} B, cap {cap} B) <- {payload_path} ({} B) x {rounds}",
         carrier.len(),
@@ -65,7 +65,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut failures = 0usize;
     for round in 0..rounds {
-        let stego = match embed_hevc(&carrier, &payload, Some(password)) {
+        let stego = match embed_hevc(
+            &carrier,
+            &payload,
+            Some(password),
+            None,
+            &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+            strhide::stego::Freshness::Random,
+        ) {
             Ok(s) => s,
             Err(e) => {
                 failures += 1;
@@ -82,7 +89,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             continue;
         }
-        match extract_hevc(&stego, Some(password)) {
+        match extract_hevc(
+            &stego,
+            Some(password),
+            None,
+            &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+        ) {
             Ok(got) if got == payload => {}
             Ok(got) => {
                 failures += 1;

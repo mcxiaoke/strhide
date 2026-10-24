@@ -200,21 +200,30 @@ fn stego_carriers_decode_in_ffmpeg_with_high_psnr() {
             continue;
         }
         let cover = fs::read(&cover_path).expect("read cover");
-        let capacity = match probe_hevc_capacity(&cover) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[SKIP] {name}: not a Scheme C carrier ({e})");
-                skipped += 1;
-                continue;
-            }
-        };
+        let capacity =
+            match probe_hevc_capacity(&cover, &strhide::stego::format::DEFAULT_HEVC_FORMAT) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[SKIP] {name}: not a Scheme C carrier ({e})");
+                    skipped += 1;
+                    continue;
+                }
+            };
         // ~12% of capacity: a representative "real" payload rather than a
         // capacity stress. The PSNR floor below is what separates a genuine
         // sign-flip embedding from a mangled bitstream.
         let payload_len = (capacity / 8).clamp(512, 64 * 1024);
         let payload = vec![0xA5u8; payload_len];
 
-        let stego = embed_hevc(&cover, &payload, Some(PASSWORD)).expect("embed");
+        let stego = embed_hevc(
+            &cover,
+            &payload,
+            Some(PASSWORD),
+            None,
+            &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+            strhide::stego::Freshness::Random,
+        )
+        .expect("embed");
 
         let stego_path = std::env::temp_dir().join(format!(
             "strhide-hevc-ext-{}-{name}.heic",

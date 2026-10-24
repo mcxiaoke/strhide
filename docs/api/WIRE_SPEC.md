@@ -660,10 +660,10 @@ Scheme C 专为 H.265/HEVC 压缩域原位隐写设计，直接在压缩比特�
 #### 13.11.1 微信封布局（40 字节固定头部 + 载荷）
 
 ```text
-message = magic (4, "SH25") ‖ payload_len (4, BE) ‖ payload_crc (4, BE) ‖ nonce (12) ‖ ciphertext (len + 16B tag)
+message = magic (4, derived) ‖ payload_len (4, BE) ‖ payload_crc (4, BE) ‖ nonce (12) ‖ ciphertext (len + 16B tag)
 ```
 
-- **`magic`（4 字节）**：固定为 ASCII `SH25`（`0x53 0x48 0x32 0x35`，代表 StrHide H.265）。
+- **`magic`（4 字节）**：由方言标签与有效凭据派生（见 13.11.2），**不是**固定常量。早期版本使用固定 ASCII `SH25`，但头部槽位仅由参数集决定、与密码无关，固定魔数构成"免密码存在性预言机"（任何分析者都能定位并比对魔数判定文件藏过数据）；派生化后，无凭据方的视角下头部与空载体同为噪声。
 - **`payload_len`（4 字节，Big-Endian）**：明文原始载荷字节长度。
 - **`payload_crc`（4 字节，Big-Endian）**：明文原始载荷的 IEEE 802.3 CRC32 校验和。提取端在 AEAD 解密后必须验证 CRC，杜绝伪阳性解码。
 - **`nonce`（12 字节）**：CSPRNG 生成的 96 位随机 Nonce。
@@ -675,23 +675,35 @@ message = magic (4, "SH25") ‖ payload_len (4, BE) ‖ payload_crc (4, BE) ‖ 
 为了彻底切断口令暴力枚举预言机，并保证密钥与载体内容强绑定：
 
 ```text
+// 0. 有效凭据解析（与 PNG/JPEG 引擎同一解析链）：
+//    显式密码 > Profile 私有默认密钥（stego_secret）> 公开默认常量
+//    PUBLIC_DEFAULT_SECRET = "strhide-default-content-stego-key-2026"
+//    口令在派生前做 NFC 规范化。
+effective_secret = NFC(password ?? profile.stego_secret ?? PUBLIC_DEFAULT_SECRET)
+
 // 1. 采集不可变参数集计算载体指纹：
 //    HEIF/HEIC：解析 ISO BMFF 树提取 Primary Item 的 hvcC 盒内的 VPS/SPS/PPS NAL 原始字节；
 //    Annex-B：扫描前 1MB 码流提取 VPS (type=32)、SPS (type=33)、PPS (type=34) NAL RBSP 字节。
-cover_digest = SHA-256("strhide-hevc-cover-v1" ‖ vps_bytes ‖ sps_bytes ‖ pps_bytes)
+cover_digest = SHA-256(fmt.cover_salt ‖ vps_bytes ‖ sps_bytes ‖ pps_bytes)     // 官方 fmt.cover_salt = "strhide-hevc-cover-v1"
 
-// 2. 派生 AES-256-GCM 密钥与 STC Trellis 种子：
-key  = HKDF-SHA256(ikm = effective_password, salt = cover_digest, info = "strhide-hevc-aes-key")
+// 2. 域隔离（可选）：配置 stego_domain 时先做子密钥化
+ikm = derive_domain_subkey_with_label(effective_secret, domain, "strhide-hevc-domain-v1") ?? effective_secret
+
+// 3. 派生 AES-256-GCM 密钥、STC Trellis 种子与头部魔数：
+key  = HKDF-SHA256(ikm = ikm, salt = cover_digest, info = fmt.kdf_info)        // 官方 fmt.kdf_info = "strhide-hevc-aes-key"
 seed = u64be(SHA-256(cover_digest)[0..8])
+magic = SHA-256(fmt.magic_label ‖ effective_secret)[..4]                       // 官方 fmt.magic_label = "strhide-hevc-magic-v1"
 ```
 
-- 若用户未提供密码，`effective_password` 默认使用 `DEFAULT_HEVC_SALT`（`b"strhide-hevc-salt-2026"`）；提供密码时严格按密码计算。
+- **凭据优先级**：显式运行时凭据 > Profile 编译期私有默认密钥 > 公开默认常量 `PUBLIC_DEFAULT_SECRET`。全仓仅此一份公开默认常量（结构域与 PNG/JPEG 域各自另有独立常量，三者不同名、互不替代）。
+- **派生标签全部来自 `HevcFormatProfile`**（`stego::format::DEFAULT_HEVC_FORMAT`）：私有编译期定制改标签重建即可消除开源指纹，无需 fork。
+- **威胁模型说明**：header 槽位由参数集（cover_digest）与槽数决定，**与密码无关**——这是 Weyl 均衡抽样与免代价重放的设计要求。因此本格式的"不可见性"边界为：持有正确方言（标签 + 凭据）者可定位头部；无凭据者虽可计算槽位，但派生魔数比对失败，载体与空载体不可区分。
 - 参数集在图片生命周期中不可变，提取端与嵌入端计算出的 `cover_digest` 严格一致。
 
 #### 13.11.3 槽位网格与矩阵编码（STC Trellis）
 
 - **槽位定义**：H.265 变换块（TU）残差系数编码（`residual_coding`）中的 `coeff_sign_flag`。
-- **编码器设置**：`StcTrellis::from_seed_grouped(seed, h=7, u=2)`。
+- **编码器设置**：`StcTrellis::from_seed_grouped(seed, h=7, u=2)`；`h`/`u` 来自 `HevcFormatProfile`（官方 `DEFAULT_HEVC_FORMAT` 即 7/2）。头部不自描述 h/u，读写两侧必须持有同一方言——这与 JPEG 超块内自描述 h/u 不同。
   - 约束高度 $h = 7$，分组格宽 $u = 2$（有效码率 $R = 1/2$）。
   - 嵌入 $M$ 比特消息（头部 320 比特 + 密文正文比特）所需候选槽位为：
     $$N_{\text{slots}} = u \times (M + h - 1) = 2 \times (M + 6)$$
@@ -768,10 +780,10 @@ H.265 标准规定，当 RBSP 出现连续两个 `0x00` 后接 `0x00..=0x03` 时
 | `DEFAULT_HAMMING_K` | `3`（Hamming (7,3)） |
 | `DEFAULT_STC_H` / `MAX_STC_U` | `8` / `3`（空间域） |
 | 空间域可嵌入像素范围 | `[8, 247]` |
-| **HEVC Scheme C 魔数** | `b"SH25"` |
+| **HEVC Scheme C 魔数** | 派生：`SHA-256(magic_label ‖ effective_secret)[..4]`（`magic_label = b"strhide-hevc-magic-v1"`） |
 | **HEVC 固定头部长度** | `40` 字节（Magic 4 + Len 4 + CRC 4 + Nonce 12 + Tag 16） |
-| **HEVC STC 参数** | `h = 7, u = 2`（码率 1/2） |
-| **HEVC 默认 Salt** | `b"strhide-hevc-salt-2026"` |
+| **HEVC STC 参数** | `h = 7, u = 2`（码率 1/2，来自 `DEFAULT_HEVC_FORMAT`） |
+| **HEVC 派生标签** | `cover_salt = b"strhide-hevc-cover-v1"`、`kdf_info = b"strhide-hevc-aes-key"`、domain 标签 `b"strhide-hevc-domain-v1"` |
 | **HEVC 最大防竞争迭代轮数** | `24` |
 
 ### 14.3 最小信封口径

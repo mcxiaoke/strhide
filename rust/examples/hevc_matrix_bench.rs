@@ -189,7 +189,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            let cap = match probe_hevc_capacity(&carrier_bytes) {
+            let cap = match probe_hevc_capacity(
+                &carrier_bytes,
+                &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+            ) {
                 Ok(c) => c,
                 Err(e) => {
                     return CarrierReport {
@@ -222,7 +225,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if *p_size > cap {
                     skipped_overflow += 1;
                     // Verify overflow protection returns error
-                    let overflow_err = embed_hevc(&carrier_bytes, p_data, Some(password));
+                    let overflow_err = embed_hevc(
+                        &carrier_bytes,
+                        p_data,
+                        Some(password),
+                        None,
+                        &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+                        strhide::stego::Freshness::Random,
+                    );
                     assert!(
                         overflow_err.is_err(),
                         "Embedding payload exceeding capacity must return error!"
@@ -232,7 +242,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // A. Benchmark embed
                 let t_embed_start = Instant::now();
-                let stego_carrier = match embed_hevc(&carrier_bytes, p_data, Some(password)) {
+                let stego_carrier = match embed_hevc(
+                    &carrier_bytes,
+                    p_data,
+                    Some(password),
+                    None,
+                    &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+                    strhide::stego::Freshness::Random,
+                ) {
                     Ok(s) => s,
                     Err(e) => {
                         panic!(
@@ -252,7 +269,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // C. Benchmark extract
                 let t_extract_start = Instant::now();
-                let extracted_data = match extract_hevc(&stego_carrier, Some(password)) {
+                let extracted_data = match extract_hevc(
+                    &stego_carrier,
+                    Some(password),
+                    None,
+                    &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+                ) {
                     Ok(d) => d,
                     Err(e) => {
                         panic!(
@@ -270,7 +292,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
 
                 // E. Wrong password rejection check
-                let wrong_res = extract_hevc(&stego_carrier, Some("InvalidPassword!"));
+                let wrong_res = extract_hevc(
+                    &stego_carrier,
+                    Some("InvalidPassword!"),
+                    None,
+                    &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+                );
                 assert!(
                     wrong_res.is_err(),
                     "Extract with invalid password must be rejected!"

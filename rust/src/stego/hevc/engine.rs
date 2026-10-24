@@ -7,12 +7,13 @@ use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use crc32fast::Hasher as Crc32;
 use hkdf::Hkdf;
-use rand::RngExt;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::errors::StrHideError;
 use crate::stego::coding::{Move, StcTrellis};
+use crate::stego::envelope::{Freshness, PUBLIC_DEFAULT_SECRET, derive_domain_subkey_with_label};
+use crate::stego::format::HevcFormatProfile;
 use crate::stego::hevc::bitstream::{compute_hevc_cover_digest, parse_annex_b_spans, rbsp_to_nal};
 use crate::stego::hevc::heif_boxes::parse_heif_targets;
 use crate::stego::hevc::slot::{BinOp, CabacRecorder, StegoSlot, SubstreamRecord};
@@ -24,8 +25,23 @@ use rust_h265::HEVC_CONTEXTS;
 use rust_h265::decoder::Decoder;
 use rust_h265::nal::parse_nal;
 
-/// Steganographic magic signature in ciphertext header (StrHide HEVC).
-const HEVC_STEGO_MAGIC: &[u8; 4] = b"SH25";
+/// Derive the 4-byte header magic from the format's magic label and the
+/// effective secret.
+///
+/// A fixed magic (`SH25`) plus a password-independent header location was a
+/// presence oracle: anyone could locate the header slots from the parameter
+/// sets alone and check for the constant, without any credential. Deriving it
+/// from `label ‖ secret` means a carrier only "looks like Scheme C" to a
+/// holder of the same dialect; for everyone else the header reads as noise,
+/// exactly like an empty carrier.
+fn derive_magic(label: &[u8], secret: &[u8]) -> [u8; 4] {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(label);
+    hasher.update(secret);
+    let digest = hasher.finalize();
+    [digest[0], digest[1], digest[2], digest[3]]
+}
 
 /// Helper converting NalUnitType to raw 6-bit NAL unit type integer without modifying upstream rust_h265.
 fn nal_type_to_u8(t: rust_h265::NalUnitType) -> u8 {
@@ -59,11 +75,9 @@ fn nal_type_to_u8(t: rust_h265::NalUnitType) -> u8 {
     }
 }
 
-/// Fixed header length in bytes: Magic (4) + Len (4) + CRC32 (4) + Nonce (12) + Tag (16) = 40 bytes (320 bits).
-const HEVC_HEADER_BYTES: usize = 40;
-
-/// Default public salt if none provided.
-const DEFAULT_HEVC_SALT: &[u8] = b"strhide-hevc-salt-2026";
+/// Fixed seed for the capacity probe's trellis. Only `slots_for` is used
+/// (which depends on `h`/`u`, not the seed), so any value works.
+const CAPACITY_PROBE_SEED: u64 = 0x5465_676f;
 
 /// Maximum number of STC re-solves while settling the flip set. Each round
 /// either drops the slots that disturbed an emulation-prevention (EPB) window,
@@ -80,24 +94,37 @@ type SlotBitTrace = (usize, usize, usize);
 type EpbConflict = (usize, Vec<SlotBitTrace>);
 
 /// Capacity probe: returns the maximum embeddable payload size in bytes.
-pub fn probe_hevc_capacity(carrier: &[u8]) -> Result<usize, StrHideError> {
+///
+/// `fmt` supplies the trellis geometry and header size the capacity is
+/// measured against, so a private dialect reports its own ceiling.
+pub fn probe_hevc_capacity(carrier: &[u8], fmt: &HevcFormatProfile) -> Result<usize, StrHideError> {
     let slots = scan_hevc_slots(carrier)?;
     let total_slots = slots.len();
-    let trellis = StcTrellis::from_seed_grouped(0x5465_676f, 7, 2)?;
-    let min_needed_slots = trellis.slots_for(HEVC_HEADER_BYTES * 8);
+    let trellis = StcTrellis::from_seed_grouped(CAPACITY_PROBE_SEED, fmt.stc_h, fmt.stc_u)?;
+    let header_bits = fmt.header_bytes * 8;
+    let min_needed_slots = trellis.slots_for(header_bits);
     if total_slots < min_needed_slots {
         return Ok(0);
     }
     // Rate 1/2: ~2 slots per payload bit
-    let available_bits = (total_slots / 2).saturating_sub(HEVC_HEADER_BYTES * 8);
+    let available_bits = (total_slots / 2).saturating_sub(header_bits);
     Ok(available_bits / 8)
 }
 
 /// Embed a payload into an HEVC/HEIC carrier using content-adaptive sign-bit steganography.
+///
+/// The complete expert entry. `secret` is the resolved credential (explicit
+/// password, else the profile's private stego secret, else `None` for the
+/// official public constant); `domain` isolates the HKDF derivation; `fmt` is
+/// the wire-format identity; `freshness` supplies the nonce (`Seeded` makes
+/// the output reproducible for the same inputs).
 pub fn embed_hevc(
     carrier: &[u8],
     payload: &[u8],
-    password: Option<&str>,
+    secret: Option<&str>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+    freshness: Freshness,
 ) -> Result<Vec<u8>, StrHideError> {
     if payload.is_empty() {
         return Err(StrHideError::General("Cannot embed empty payload".into()));
@@ -114,13 +141,13 @@ pub fn embed_hevc(
     let total_slots = all_slots.len();
 
     // 2. Prepare ciphertext and envelope
-    let cover_digest = derive_carrier_digest(carrier, kind);
-    let key = derive_hevc_key(password, &cover_digest);
+    let cover_digest = derive_carrier_digest(carrier, kind, fmt);
+    let key = derive_hevc_key(secret, domain, &cover_digest, fmt);
+    let magic = derive_magic(fmt.magic_label, effective_secret(secret).as_bytes());
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| StrHideError::General(format!("AES-GCM key init failed: {e}")))?;
 
-    let mut nonce_bytes = [0u8; 12];
-    rand::rng().fill(&mut nonce_bytes);
+    let nonce_bytes = freshness.nonce(0);
     let nonce = Nonce::from(nonce_bytes);
 
     let ciphertext = cipher
@@ -132,14 +159,14 @@ pub fn embed_hevc(
     let payload_crc = crc.finalize();
 
     let mut message = Vec::with_capacity(20 + ciphertext.len());
-    message.extend_from_slice(HEVC_STEGO_MAGIC);
+    message.extend_from_slice(&magic);
     message.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     message.extend_from_slice(&payload_crc.to_be_bytes());
     message.extend_from_slice(&nonce_bytes);
     message.extend_from_slice(&ciphertext);
 
     let seed = seed_from_digest(&cover_digest);
-    let trellis = StcTrellis::from_seed_grouped(seed, 7, 2)?;
+    let trellis = StcTrellis::from_seed_grouped(seed, fmt.stc_h, fmt.stc_u)?;
     let needed_slots = trellis.slots_for(message.len() * 8);
 
     if total_slots < needed_slots {
@@ -536,7 +563,16 @@ fn gcd_usize(mut a: usize, mut b: usize) -> usize {
 }
 
 /// Extract hidden payload from an HEVC/HEIC carrier.
-pub fn extract_hevc(carrier: &[u8], password: Option<&str>) -> Result<Vec<u8>, StrHideError> {
+///
+/// The complete expert entry: same credential, domain and format identity the
+/// embedder used. A wrong secret produces the same derived-magic mismatch an
+/// empty carrier would, so the failure carries no oracle.
+pub fn extract_hevc(
+    carrier: &[u8],
+    secret: Option<&str>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+) -> Result<Vec<u8>, StrHideError> {
     let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
         StrHideError::UnsupportedFormat(
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
@@ -544,11 +580,11 @@ pub fn extract_hevc(carrier: &[u8], password: Option<&str>) -> Result<Vec<u8>, S
     })?;
 
     let all_slots = scan_hevc_slots(carrier)?;
-    let cover_digest = derive_carrier_digest(carrier, kind);
+    let cover_digest = derive_carrier_digest(carrier, kind, fmt);
     let seed = seed_from_digest(&cover_digest);
-    let trellis = StcTrellis::from_seed_grouped(seed, 7, 2)?;
+    let trellis = StcTrellis::from_seed_grouped(seed, fmt.stc_h, fmt.stc_u)?;
 
-    let header_slots_count = trellis.slots_for(HEVC_HEADER_BYTES * 8);
+    let header_slots_count = trellis.slots_for(fmt.header_bytes * 8);
     if all_slots.len() < header_slots_count {
         return Err(StrHideError::CorruptedData(
             "Insufficient HEVC slots for header".into(),
@@ -566,15 +602,16 @@ pub fn extract_hevc(carrier: &[u8], password: Option<&str>) -> Result<Vec<u8>, S
         .collect();
 
     // Extract first 40 bytes (320 bits) of header
-    let header_bytes = trellis.extract(&header_bits, HEVC_HEADER_BYTES * 8);
+    let header_bytes = trellis.extract(&header_bits, fmt.header_bytes * 8);
 
-    if header_bytes.len() < HEVC_HEADER_BYTES {
+    if header_bytes.len() < fmt.header_bytes {
         return Err(StrHideError::CorruptedData(
             "HEVC stego header is truncated".into(),
         ));
     }
 
-    if &header_bytes[0..4] != HEVC_STEGO_MAGIC {
+    let expected_magic = derive_magic(fmt.magic_label, effective_secret(secret).as_bytes());
+    if header_bytes[0..4] != expected_magic {
         return Err(StrHideError::CorruptedData(
             "Invalid HEVC stego signature".into(),
         ));
@@ -628,7 +665,7 @@ pub fn extract_hevc(carrier: &[u8], password: Option<&str>) -> Result<Vec<u8>, S
     }
     let ciphertext = &msg_bytes[24..total_msg_len];
 
-    let key = derive_hevc_key(password, &cover_digest);
+    let key = derive_hevc_key(secret, domain, &cover_digest, fmt);
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| StrHideError::General(format!("AES-GCM key init failed: {e}")))?;
     let nonce = Nonce::from(nonce_bytes);
@@ -836,7 +873,11 @@ fn seed_from_digest(cover_digest: &[u8; 32]) -> u64 {
     u64::from_be_bytes(buf)
 }
 
-fn derive_carrier_digest(carrier: &[u8], kind: HevcCarrierKind) -> [u8; 32] {
+fn derive_carrier_digest(
+    carrier: &[u8],
+    kind: HevcCarrierKind,
+    fmt: &HevcFormatProfile,
+) -> [u8; 32] {
     match kind {
         HevcCarrierKind::HeifContainer => {
             if let Ok(target) = parse_heif_targets(carrier) {
@@ -848,7 +889,7 @@ fn derive_carrier_digest(carrier: &[u8], kind: HevcCarrierKind) -> [u8; 32] {
                 // byte offsets into `carrier`; the parsed sets are copies, and
                 // an offset of 0 quietly hashed the file header instead.)
                 let mut hasher = Sha256::new();
-                hasher.update(DEFAULT_HEVC_SALT);
+                hasher.update(fmt.cover_salt);
                 hasher.update((target.parameter_sets.len() as u64).to_be_bytes());
                 for ps in &target.parameter_sets {
                     hasher.update((ps.len() as u64).to_be_bytes());
@@ -861,23 +902,112 @@ fn derive_carrier_digest(carrier: &[u8], kind: HevcCarrierKind) -> [u8; 32] {
         }
         HevcCarrierKind::AnnexBStream => {
             let spans = parse_annex_b_spans(carrier);
-            compute_hevc_cover_digest(carrier, &spans, DEFAULT_HEVC_SALT)
+            compute_hevc_cover_digest(carrier, &spans, fmt.cover_salt)
         }
         _ => [0u8; 32],
     }
 }
 
-fn derive_hevc_key(password: Option<&str>, salt: &[u8; 32]) -> [u8; 32] {
-    let pw_bytes = password
-        .unwrap_or("strhide-hevc-default-key-2026")
-        .as_bytes();
-    let hk = Hkdf::<Sha256>::new(Some(salt), pw_bytes);
+/// The credential actually fed to key derivation: the explicit secret, else
+/// the shared public constant -- the same resolution the PNG/JPEG engines use,
+/// so there is exactly one public default key in the whole crate.
+fn effective_secret(secret: Option<&str>) -> String {
+    match secret.filter(|s| !s.is_empty()) {
+        Some(s) => crate::crypto::normalize_nfc(s),
+        None => PUBLIC_DEFAULT_SECRET.to_string(),
+    }
+}
+
+fn derive_hevc_key(
+    secret: Option<&str>,
+    domain: Option<&str>,
+    salt: &[u8; 32],
+    fmt: &HevcFormatProfile,
+) -> [u8; 32] {
+    let secret_bytes = effective_secret(secret);
+    // Optional domain isolation: subkey the secret first, exactly like the
+    // stego envelope layer, so the same password under two domains yields
+    // unrelated keys.
+    let ikm: Vec<u8> = match derive_domain_subkey_with_label(
+        secret_bytes.as_bytes(),
+        domain,
+        b"strhide-hevc-domain-v1",
+    ) {
+        Some(sub) => sub.to_vec(),
+        None => secret_bytes.into_bytes(),
+    };
+    let hk = Hkdf::<Sha256>::new(Some(salt), &ikm);
     let mut key = [0u8; 32];
     // HKDF-SHA256 can always produce 32 bytes (255 * 32 > 32), so this
     // cannot fail. Use `unwrap_or_default` rather than `expect` so that a
     // hypothetical future change of hash/len cannot abort the process.
-    if hk.expand(b"strhide-hevc-aes256-key", &mut key).is_err() {
+    if hk.expand(fmt.kdf_info, &mut key).is_err() {
         return [0u8; 32];
     }
     key
+}
+
+#[cfg(test)]
+mod dialect_tests {
+    use super::*;
+    use crate::stego::format::DEFAULT_HEVC_FORMAT;
+
+    /// The literals below are pinned to `docs/api/WIRE_SPEC.md` §13.11.2. The
+    /// spec is the only reproduction recipe a private build has; if an
+    /// implementation constant changes without the doc (or vice versa),
+    /// third-party rebuilds silently produce mutually unreadable carriers.
+    #[test]
+    fn default_format_literals_match_the_wire_spec() {
+        let fmt = &DEFAULT_HEVC_FORMAT;
+        assert_eq!(fmt.magic_label, b"strhide-hevc-magic-v1");
+        assert_eq!(fmt.cover_salt, b"strhide-hevc-cover-v1");
+        assert_eq!(fmt.kdf_info, b"strhide-hevc-aes-key");
+        assert_eq!(fmt.stc_h, 7);
+        assert_eq!(fmt.stc_u, 2);
+        assert_eq!(fmt.header_bytes, 40);
+    }
+
+    /// The magic must depend on the credential. A fixed magic plus a
+    /// password-independent header location was a presence oracle; this test
+    /// locks in the fix.
+    #[test]
+    fn magic_is_derived_from_the_secret_not_a_constant() {
+        let m1 = derive_magic(DEFAULT_HEVC_FORMAT.magic_label, b"secret-one");
+        let m2 = derive_magic(DEFAULT_HEVC_FORMAT.magic_label, b"secret-two");
+        assert_ne!(m1, m2, "different secrets must yield different magics");
+        // Same inputs are stable (both ends derive the same value).
+        assert_eq!(
+            m1,
+            derive_magic(DEFAULT_HEVC_FORMAT.magic_label, b"secret-one")
+        );
+    }
+
+    /// The no-secret fallback is the shared public constant, not a
+    /// HEVC-private string: one public default key per crate, resolved through
+    /// the same chain as PNG/JPEG.
+    #[test]
+    fn no_secret_falls_back_to_the_public_constant() {
+        assert_eq!(
+            effective_secret(None),
+            PUBLIC_DEFAULT_SECRET,
+            "the third public default key constant must stay deleted"
+        );
+        assert_eq!(
+            effective_secret(Some("")),
+            PUBLIC_DEFAULT_SECRET,
+            "an empty secret counts as 'not supplied'"
+        );
+        assert_ne!(effective_secret(Some("pw")), PUBLIC_DEFAULT_SECRET);
+    }
+
+    /// Domain isolation subkeys the credential: same secret, different domain,
+    /// unrelated key.
+    #[test]
+    fn domain_changes_the_derived_key() {
+        let digest = [7u8; 32];
+        let fmt = &DEFAULT_HEVC_FORMAT;
+        let k_none = derive_hevc_key(Some("pw"), None, &digest, fmt);
+        let k_domain = derive_hevc_key(Some("pw"), Some("org.acme"), &digest, fmt);
+        assert_ne!(k_none, k_domain);
+    }
 }

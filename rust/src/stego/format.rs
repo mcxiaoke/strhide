@@ -169,6 +169,53 @@ impl GridRule {
     }
 }
 
+/// Identity of the HEVC Scheme C wire format.
+///
+/// The JPEG and PNG engines derive everything from labelled HKDF inputs and a
+/// geometric slot grid; Scheme C does the same, but until now its labels lived
+/// as module constants, so a private build could not own them without forking.
+/// Changing any field here produces a different format: two builds with
+/// different profiles cannot read each other's carriers, and the failure is
+/// indistinguishable from a wrong password.
+///
+/// # Field effects (for private builds)
+///
+/// | field | change it and… |
+/// | :--- | :--- |
+/// | `magic_label` | the derived 4-byte header magic changes |
+/// | `cover_salt` | the cover digest changes, so every key and the trellis seed move |
+/// | `kdf_info` | the AES key derivation changes: unreadable |
+/// | `stc_h` / `stc_u` | different trellis geometry; both sides must agree (the header does not carry them) |
+/// | `header_bytes` | different fixed header size |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HevcFormatProfile {
+    /// HKDF-style label the 4-byte header magic is derived from, together with
+    /// the effective secret. Unlike a fixed magic, a derived one cannot be
+    /// searched for without the credential, so a carrier no longer advertises
+    /// itself to anyone holding the public binary.
+    pub magic_label: &'static [u8],
+    /// Prefix mixed into the cover digest (`SHA-256(cover_salt ‖ parameter sets)`).
+    pub cover_salt: &'static [u8],
+    /// HKDF info label for the payload AES-256-GCM key.
+    pub kdf_info: &'static [u8],
+    /// STC constraint height.
+    pub stc_h: u8,
+    /// STC group size (elements per syndrome row).
+    pub stc_u: u8,
+    /// Fixed header length in bytes (magic 4 + len 4 + crc 4 + nonce 12 + tag 16 = 40).
+    pub header_bytes: usize,
+}
+
+/// Official Scheme C wire format.
+pub const DEFAULT_HEVC_FORMAT: HevcFormatProfile = HevcFormatProfile {
+    magic_label: b"strhide-hevc-magic-v1",
+    cover_salt: b"strhide-hevc-cover-v1",
+    kdf_info: b"strhide-hevc-aes-key",
+    stc_h: 7,
+    stc_u: 2,
+    header_bytes: 40,
+};
+
 /// Identity of one wire format.
 ///
 /// # Field effects (for private builds)

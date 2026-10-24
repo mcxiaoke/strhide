@@ -27,8 +27,8 @@ pub mod wavelet;
 
 pub use envelope::Freshness;
 pub use format::{
-    CipherSuite, DEFAULT_JPEG_FORMAT, GridRule, JpegFormatProfile, OFFICIAL_PNG_FORMAT,
-    PngFormatProfile,
+    CipherSuite, DEFAULT_HEVC_FORMAT, DEFAULT_JPEG_FORMAT, GridRule, HevcFormatProfile,
+    JpegFormatProfile, OFFICIAL_PNG_FORMAT, PngFormatProfile,
 };
 pub use params::{
     ExtractParams, JpegParams, PngParams, SafetyEnforcement, SafetyLevel, SafetyPolicy, StegoCodec,
@@ -130,16 +130,37 @@ pub fn embed_carrier_with_profile(
         if options.algorithm.as_deref() == Some("hevc")
             || options.algorithm.as_deref() == Some("cabac")
         {
-            hevc::embed_hevc(carrier_bytes, payload, options.password.as_deref())
+            hevc::embed_hevc(
+                carrier_bytes,
+                payload,
+                secret,
+                domain,
+                profile.hevc_format(),
+                options.freshness,
+            )
         } else {
             match heif::embed_heif_bridge(carrier_bytes, payload, options, profile) {
                 Ok(bytes) => Ok(bytes),
-                Err(_) => hevc::embed_hevc(carrier_bytes, payload, options.password.as_deref()),
+                Err(_) => hevc::embed_hevc(
+                    carrier_bytes,
+                    payload,
+                    secret,
+                    domain,
+                    profile.hevc_format(),
+                    options.freshness,
+                ),
             }
         }
     } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {
         // Raw Annex-B HEVC bitstream
-        hevc::embed_hevc(carrier_bytes, payload, options.password.as_deref())
+        hevc::embed_hevc(
+            carrier_bytes,
+            payload,
+            secret,
+            domain,
+            profile.hevc_format(),
+            options.freshness,
+        )
     } else {
         Err(StrHideError::UnsupportedFormat(
             "Content-adaptive steganography requires a PNG, JPEG, HEIF, or HEVC carrier".into(),
@@ -204,7 +225,7 @@ pub fn extract_carrier_with_profile(
         )
     } else if crate::sniff::is_heif_bytes(carrier_bytes) {
         // HEIF content-domain steganography: try Scheme C (HEVC CABAC in-place) first, then bridge
-        match hevc::extract_hevc(carrier_bytes, options.password.as_deref()) {
+        match hevc::extract_hevc(carrier_bytes, secret, domain, profile.hevc_format()) {
             Ok(payload) => Ok(payload),
             Err(e) => {
                 if options.algorithm.as_deref() == Some("hevc")
@@ -231,7 +252,7 @@ pub fn extract_carrier_with_profile(
         }
     } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {
         // Raw Annex-B HEVC bitstream
-        hevc::extract_hevc(carrier_bytes, options.password.as_deref())
+        hevc::extract_hevc(carrier_bytes, secret, domain, profile.hevc_format())
     } else {
         Err(StrHideError::UnsupportedFormat(
             "Content-adaptive steganography requires a PNG, JPEG, HEIF, or HEVC carrier".into(),
@@ -385,7 +406,7 @@ pub fn probe_carrier_capacity_with_profile(
         if options.algorithm.as_deref() == Some("hevc")
             || options.algorithm.as_deref() == Some("cabac")
         {
-            let cap = hevc::probe_hevc_capacity(carrier_bytes)?;
+            let cap = hevc::probe_hevc_capacity(carrier_bytes, profile.hevc_format())?;
             Ok(StegoCapacityInfo {
                 format: "HEIF/HEVC".into(),
                 algorithm: "HEVC-CABAC-InPlace".into(),
@@ -402,7 +423,7 @@ pub fn probe_carrier_capacity_with_profile(
             match heif::probe_heif_bridge_capacity(carrier_bytes, options, profile) {
                 Ok(info) => Ok(info),
                 Err(_) => {
-                    let cap = hevc::probe_hevc_capacity(carrier_bytes)?;
+                    let cap = hevc::probe_hevc_capacity(carrier_bytes, profile.hevc_format())?;
                     Ok(StegoCapacityInfo {
                         format: "HEIF/HEVC".into(),
                         algorithm: "HEVC-CABAC-InPlace".into(),
@@ -419,7 +440,7 @@ pub fn probe_carrier_capacity_with_profile(
             }
         }
     } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {
-        let cap = hevc::probe_hevc_capacity(carrier_bytes)?;
+        let cap = hevc::probe_hevc_capacity(carrier_bytes, profile.hevc_format())?;
         Ok(StegoCapacityInfo {
             format: "HEVC-AnnexB".into(),
             algorithm: "HEVC-CABAC-InPlace".into(),

@@ -43,7 +43,8 @@
 use crate::crypto::{BUILTIN_DEFAULT_KEY, CHUNK_SIZE, MAX_CHUNK_SIZE};
 #[cfg(feature = "stego")]
 use crate::stego::format::{
-    DEFAULT_JPEG_FORMAT, JpegFormatProfile, OFFICIAL_PNG_FORMAT, PngFormatProfile,
+    DEFAULT_HEVC_FORMAT, DEFAULT_JPEG_FORMAT, HevcFormatProfile, JpegFormatProfile,
+    OFFICIAL_PNG_FORMAT, PngFormatProfile,
 };
 
 /// Standard high-entropy binary header magic (8 bytes): SHA-256("strhide-standard-header-v2")[..8]
@@ -279,6 +280,9 @@ pub struct StegoProfile {
     /// Private PNG spatial wire-format identity. `None` means the official
     /// [`OFFICIAL_PNG_FORMAT`].
     pub png: Option<PngFormatProfile>,
+    /// Private HEVC Scheme C wire-format identity. `None` means the official
+    /// [`DEFAULT_HEVC_FORMAT`].
+    pub hevc: Option<HevcFormatProfile>,
 }
 
 #[cfg(feature = "stego")]
@@ -290,6 +294,7 @@ impl StegoProfile {
             domain: None,
             jpeg: None,
             png: None,
+            hevc: None,
         }
     }
 
@@ -316,6 +321,12 @@ impl StegoProfile {
     /// Set [`png`](Self::png).
     pub const fn with_png_format(mut self, png: PngFormatProfile) -> Self {
         self.png = Some(png);
+        self
+    }
+
+    /// Set [`hevc`](Self::hevc).
+    pub const fn with_hevc_format(mut self, hevc: HevcFormatProfile) -> Self {
+        self.hevc = Some(hevc);
         self
     }
 
@@ -349,6 +360,15 @@ impl StegoProfile {
         }
     }
 
+    /// HEVC wire-format identity to use: the private [`hevc`](Self::hevc) when
+    /// set, otherwise the official [`DEFAULT_HEVC_FORMAT`].
+    pub fn hevc_format(&self) -> &HevcFormatProfile {
+        match self.hevc.as_ref() {
+            Some(hevc) => hevc,
+            None => &DEFAULT_HEVC_FORMAT,
+        }
+    }
+
     /// True when no private secret, domain, or format profile is set (official
     /// behaviour).
     pub fn is_official(&self) -> bool {
@@ -356,6 +376,7 @@ impl StegoProfile {
             && self.stego_domain().is_none()
             && self.jpeg.is_none()
             && self.png.is_none()
+            && self.hevc.is_none()
     }
 }
 
@@ -488,6 +509,19 @@ impl Profile {
     /// PNG wire-format identity (private if set, else official).
     pub fn png_format(&self) -> &PngFormatProfile {
         self.stego.png_format()
+    }
+
+    /// Set the private HEVC wire-format identity.
+    #[cfg(feature = "stego")]
+    pub const fn with_hevc_format(mut self, hevc: HevcFormatProfile) -> Self {
+        self.stego = self.stego.with_hevc_format(hevc);
+        self
+    }
+
+    /// HEVC wire-format identity (private if set, else official).
+    #[cfg(feature = "stego")]
+    pub fn hevc_format(&self) -> &HevcFormatProfile {
+        self.stego.hevc_format()
     }
 
     #[cfg(feature = "stego")]

@@ -42,7 +42,8 @@ fn test_hevc_capacity_and_roundtrip_gradient() {
     let orig_len = orig_carrier.len();
 
     // 1. Probe capacity
-    let cap = probe_hevc_capacity(&orig_carrier).expect("probe capacity");
+    let cap = probe_hevc_capacity(&orig_carrier, &strhide::stego::format::DEFAULT_HEVC_FORMAT)
+        .expect("probe capacity");
     println!("gradient-512.heic capacity: {} bytes", cap);
     assert!(
         cap >= 100,
@@ -63,8 +64,15 @@ fn test_hevc_capacity_and_roundtrip_gradient() {
         println!("Testing payload len: {} bytes...", payload.len());
 
         // A. Embed with password
-        let stego_carrier =
-            embed_hevc(&orig_carrier, &payload, Some(password)).expect("embed should succeed");
+        let stego_carrier = embed_hevc(
+            &orig_carrier,
+            &payload,
+            Some(password),
+            None,
+            &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+            strhide::stego::Freshness::Random,
+        )
+        .expect("embed should succeed");
 
         // Verify zero bitrate expansion (Δ = 0)
         assert_eq!(
@@ -74,12 +82,22 @@ fn test_hevc_capacity_and_roundtrip_gradient() {
         );
 
         // B. Extract with correct password
-        let extracted = extract_hevc(&stego_carrier, Some(password))
-            .expect("extract with correct password should succeed");
+        let extracted = extract_hevc(
+            &stego_carrier,
+            Some(password),
+            None,
+            &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+        )
+        .expect("extract with correct password should succeed");
         assert_eq!(extracted, payload, "Extracted payload must match 100%!");
 
         // C. Extract with wrong password must fail
-        let wrong_res = extract_hevc(&stego_carrier, Some("WrongPassword!"));
+        let wrong_res = extract_hevc(
+            &stego_carrier,
+            Some("WrongPassword!"),
+            None,
+            &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+        );
         assert!(
             wrong_res.is_err(),
             "Extraction with wrong password must fail!"
@@ -112,7 +130,8 @@ fn test_hevc_corpus_real_photos_batch() {
         }
         let orig = fs::read(path).expect("read");
         let orig_len = orig.len();
-        let cap = probe_hevc_capacity(&orig).expect("probe capacity");
+        let cap = probe_hevc_capacity(&orig, &strhide::stego::format::DEFAULT_HEVC_FORMAT)
+            .expect("probe capacity");
         println!(
             "File: {}, size = {} bytes, capacity = {} bytes",
             path, orig_len, cap
@@ -127,10 +146,24 @@ fn test_hevc_corpus_real_photos_batch() {
             continue;
         }
 
-        let stego = embed_hevc(&orig, payload, Some(password)).expect("embed");
+        let stego = embed_hevc(
+            &orig,
+            payload,
+            Some(password),
+            None,
+            &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+            strhide::stego::Freshness::Random,
+        )
+        .expect("embed");
         assert_eq!(stego.len(), orig_len, "Length must be bit-exact identical!");
 
-        let extracted = extract_hevc(&stego, Some(password)).expect("extract");
+        let extracted = extract_hevc(
+            &stego,
+            Some(password),
+            None,
+            &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+        )
+        .expect("extract");
         assert_eq!(extracted, payload);
 
         verify_frame_decodes(&stego);
@@ -150,10 +183,24 @@ fn test_hevc_img_1842_payload_32k() {
     let payload = fs::read(payload_path).expect("read payload");
     let password = "StrHide-Matrix-Benchmark-Password#2026";
 
-    let stego = embed_hevc(&orig, &payload, Some(password)).expect("embed 32k into IMG_1842");
+    let stego = embed_hevc(
+        &orig,
+        &payload,
+        Some(password),
+        None,
+        &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+        strhide::stego::Freshness::Random,
+    )
+    .expect("embed 32k into IMG_1842");
     assert_eq!(stego.len(), orig.len(), "Carrier len must be bit-exact!");
 
-    let extracted = extract_hevc(&stego, Some(password)).expect("extract 32k from IMG_1842");
+    let extracted = extract_hevc(
+        &stego,
+        Some(password),
+        None,
+        &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+    )
+    .expect("extract 32k from IMG_1842");
     assert_eq!(extracted, payload, "Payload must match bit-for-bit!");
 
     verify_frame_decodes(&stego);
