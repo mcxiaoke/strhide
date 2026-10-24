@@ -29,9 +29,10 @@
 use std::io::{Cursor, Read, Write};
 
 use crc32fast::Hasher as Crc32;
-use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
+use flate2::{Compress, Compression, FlushCompress, Status};
+use rayon::prelude::*;
 
 use crate::errors::StrHideError;
 use crate::stego::coding::{
@@ -323,6 +324,141 @@ fn idat_info_of(idat: &[u8]) -> Option<IdatInfo> {
     })
 }
 
+/// Maximum Rayon worker threads allocated for parallel Deflate compression.
+const MAX_DEFLATE_WORKERS: usize = 8;
+
+/// Minimum scanlines payload (in bytes) to trigger multi-threaded parallel Deflate.
+/// Below 2 MB, the single-thread path avoids thread pool dispatch overhead.
+const MIN_PARALLEL_SCANLINE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Computes the standard RFC 1950 Adler-32 checksum in blocked chunks.
+fn compute_adler32(data: &[u8]) -> u32 {
+    const MOD_ADLER: u32 = 65521;
+    let mut a: u32 = 1;
+    let mut b: u32 = 0;
+    for chunk in data.chunks(5552) {
+        for &byte in chunk {
+            a += byte as u32;
+            b += a;
+        }
+        a %= MOD_ADLER;
+        b %= MOD_ADLER;
+    }
+    (b << 16) | a
+}
+
+/// Compress an uncompressed data slice into a raw Deflate byte stream without zlib framing.
+/// Non-terminal chunks are flushed with `SyncFlush` to force byte-boundary alignment.
+/// The terminal chunk is finished with `Finish` to set the `BFINAL=1` flag.
+fn compress_raw_deflate_chunk(
+    data: &[u8],
+    level: u32,
+    is_last: bool,
+) -> Result<Vec<u8>, StrHideError> {
+    let mut compressor = Compress::new(Compression::new(level), false);
+    let mut out = Vec::with_capacity(data.len() / 2);
+    let mut buf = [0u8; 65536];
+
+    let mut in_pos = 0;
+    while in_pos < data.len() {
+        let before_in = compressor.total_in() as usize;
+        let before_out = compressor.total_out() as usize;
+        compressor
+            .compress(&data[in_pos..], &mut buf, FlushCompress::None)
+            .map_err(|e| StrHideError::General(format!("Deflate compression failure: {e}")))?;
+        let consumed = compressor.total_in() as usize - before_in;
+        let produced = compressor.total_out() as usize - before_out;
+        in_pos += consumed;
+        out.extend_from_slice(&buf[..produced]);
+    }
+
+    let flush = if is_last {
+        FlushCompress::Finish
+    } else {
+        FlushCompress::Sync
+    };
+
+    loop {
+        let before_out = compressor.total_out() as usize;
+        let status = compressor
+            .compress(&[], &mut buf, flush)
+            .map_err(|e| StrHideError::General(format!("Deflate flush failure: {e}")))?;
+        let produced = compressor.total_out() as usize - before_out;
+        out.extend_from_slice(&buf[..produced]);
+
+        if is_last && status == Status::StreamEnd {
+            break;
+        }
+        if !is_last && (produced == 0 || status == Status::StreamEnd) {
+            break;
+        }
+    }
+
+    Ok(out)
+}
+
+/// Compress filtered PNG scanlines into an RFC 1950 compliant zlib datastream.
+/// Uses Rayon parallel multi-chunk Deflate for large images, falling back to single-thread
+/// for small payloads or single-core execution environments.
+fn compress_scanlines_zlib(
+    filtered: &[u8],
+    row_len: usize,
+    height: usize,
+    level: u32,
+) -> Result<Vec<u8>, StrHideError> {
+    let num_threads = rayon::current_num_threads().clamp(1, MAX_DEFLATE_WORKERS);
+
+    if num_threads <= 1 || filtered.len() < MIN_PARALLEL_SCANLINE_BYTES || height < num_threads {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(level));
+        encoder.write_all(filtered)?;
+        return encoder.finish().map_err(Into::into);
+    }
+
+    // Split strictly along row boundaries
+    let rows_per_chunk = height.div_ceil(num_threads);
+    let mut chunk_ranges = Vec::with_capacity(num_threads);
+    let mut current_row = 0;
+    while current_row < height {
+        let end_row = (current_row + rows_per_chunk).min(height);
+        let start_byte = current_row * row_len;
+        let end_byte = end_row * row_len;
+        chunk_ranges.push(&filtered[start_byte..end_byte]);
+        current_row = end_row;
+    }
+
+    let n = chunk_ranges.len();
+    let compressed_chunks: Result<Vec<Vec<u8>>, StrHideError> = chunk_ranges
+        .into_par_iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            let is_last = i + 1 == n;
+            compress_raw_deflate_chunk(chunk, level, is_last)
+        })
+        .collect();
+    let compressed_chunks = compressed_chunks?;
+
+    let adler = compute_adler32(filtered);
+
+    // RFC 1950 zlib header
+    let cmf = 0x78u8;
+    let flg = match level {
+        1 => 0x01u8,
+        2..=5 => 0x5Eu8,
+        6..=8 => 0x9Cu8,
+        _ => 0xDAu8,
+    };
+    let total_len = 2 + compressed_chunks.iter().map(|c| c.len()).sum::<usize>() + 4;
+    let mut out = Vec::with_capacity(total_len);
+    out.push(cmf);
+    out.push(flg);
+    for c in compressed_chunks {
+        out.extend_from_slice(&c);
+    }
+    out.extend_from_slice(&adler.to_be_bytes());
+
+    Ok(out)
+}
+
 /// Encode raw pixels into a PNG byte stream.
 ///
 /// Container fidelity: the chunk sequence captured by [`decode_png`] is
@@ -367,9 +503,7 @@ pub fn encode_png(image: &RawImage) -> Result<Vec<u8>, StrHideError> {
     }
 
     let (level, probe) = choose_deflate_level(&filtered, stride + 1, height, image.idat_info);
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(level));
-    encoder.write_all(&filtered)?;
-    let compressed_idat = encoder.finish()?;
+    let compressed_idat = compress_scanlines_zlib(&filtered, stride + 1, height, level)?;
 
     if let Some(info) = image.idat_info {
         let delta = (compressed_idat.len() as f64 - info.orig_len as f64) * 100.0
