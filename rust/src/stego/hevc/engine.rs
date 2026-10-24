@@ -300,6 +300,7 @@ pub fn embed_hevc(
                 } else {
                     // The flip footprint escaped the substream: treat the whole
                     // substream as unsupported rather than guessing.
+                    bad_substreams.insert((*slice_idx, *sub_idx));
                     slice_ok = false;
                     break;
                 }
@@ -355,7 +356,19 @@ pub fn embed_hevc(
             }
         }
 
-        if conflicts.is_empty() {
+        let mut had_bad_substream = false;
+        for &pos in &positions {
+            let slot = &all_slots[pos];
+            if bad_substreams.contains(&(slot.slice_idx, slot.substream_idx)) && !forbidden[pos] {
+                forbidden[pos] = true;
+                had_bad_substream = true;
+            }
+        }
+        if had_bad_substream {
+            continue;
+        }
+
+        if conflicts.is_empty() && reencoded_slices.len() == flips_per_slice.len() {
             for (span, re_nal) in reencoded_slices {
                 out_carrier[span].copy_from_slice(&re_nal);
             }

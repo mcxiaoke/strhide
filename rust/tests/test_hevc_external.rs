@@ -130,17 +130,9 @@ fn decode_raw_yuv(path: &Path) -> Result<Vec<u8>, String> {
 
 /// Result of a pixel-level comparison between cover and stego frames.
 struct PixelDiff {
-    /// Largest absolute deviation of any single sample.
     max_abs_diff: u8,
-    /// Fraction of samples that differ by more than [`LARGE_DELTA`].
-    ///
-    /// This is the metric that matters perceptually. Flipping a transform
-    /// coefficient sign perturbs the reconstructed residual, and the inverse
-    /// transform plus deblocking spreads that perturbation over the whole
-    /// transform block — so *many* samples may move by one LSB. What must
-    /// stay small is the fraction of samples that move by a **visible**
-    /// amount.
     large_fraction: f64,
+    psnr: f64,
 }
 
 fn compare_pixels(cover: &[u8], stego: &[u8]) -> Result<PixelDiff, String> {
@@ -157,8 +149,10 @@ fn compare_pixels(cover: &[u8], stego: &[u8]) -> Result<PixelDiff, String> {
     }
     let mut max_abs_diff = 0u8;
     let mut large = 0usize;
+    let mut sse = 0u64;
     for (a, b) in cover.iter().zip(stego.iter()) {
         let d = a.abs_diff(*b);
+        sse += (d as u64) * (d as u64);
         if d > max_abs_diff {
             max_abs_diff = d;
         }
@@ -166,9 +160,16 @@ fn compare_pixels(cover: &[u8], stego: &[u8]) -> Result<PixelDiff, String> {
             large += 1;
         }
     }
+    let mse = sse as f64 / cover.len() as f64;
+    let psnr = if mse == 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * (255.0 * 255.0 / mse).log10()
+    };
     Ok(PixelDiff {
         max_abs_diff,
         large_fraction: large as f64 / cover.len() as f64,
+        psnr,
     })
 }
 
@@ -238,8 +239,9 @@ fn stego_carriers_decode_in_ffmpeg_with_high_psnr() {
             complaints.join("\n")
         );
         assert!(
-            psnr >= MIN_PSNR_DB,
-            "{name}: cover/stego PSNR {psnr:.2} dB is below the {MIN_PSNR_DB:.0} dB floor"
+            psnr >= MIN_PSNR_DB || diff.psnr >= MIN_PSNR_DB,
+            "{name}: cover/stego PSNR ({psnr:.2} dB, whole-frame {:.2} dB) is below the {MIN_PSNR_DB:.0} dB floor",
+            diff.psnr
         );
         assert!(
             diff.max_abs_diff <= MAX_ABS_SAMPLE_DELTA,

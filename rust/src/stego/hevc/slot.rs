@@ -147,9 +147,21 @@ impl CabacRecorder {
         x_c: u8,
         y_c: u8,
     ) {
+        let original_bit = bit as u8;
+
+        // DC coefficients (x_c == 0 && y_c == 0) never take part in embedding:
+        // flipping a DC sign shifts the average level of the entire transform block,
+        // causing severe reconstruction distortion and boundary discontinuities.
+        if x_c == 0 && y_c == 0 {
+            self.ops.push(BinOp::Bypass {
+                bit: original_bit,
+                slot_idx: None,
+            });
+            return;
+        }
+
         let slot_idx = self.slots.len();
         let op_idx = self.ops.len();
-        let original_bit = bit as u8;
 
         // Content-adaptive distortion cost model:
         // Higher frequencies (x_c + y_c large) have lower distortion cost.
