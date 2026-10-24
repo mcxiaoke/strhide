@@ -1,7 +1,7 @@
 //! Content-domain bridge steganography for HEIF/HEIC containers.
 //!
 //! Bridges embedded JPEG thumbnails or uncompressed auxiliary items within ISO BMFF containers
-//! to existing content-adaptive steganography engines (`stego::jpeg` and `stego::spatial`).
+//! to existing content-adaptive steganography engines (`stego::jpeg` and `stego::png`).
 //!
 //! The primary HEVC/AVIF photo stream remains 100% bit-exact and untouched.
 
@@ -12,8 +12,8 @@ use crate::params::Profile;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::jpeg;
 use crate::stego::params::StegoOptions;
+use crate::stego::png;
 use crate::stego::registry::CostModelRegistry;
-use crate::stego::spatial;
 
 /// Kind of bridge carrier target located in the HEIF container.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,9 +87,9 @@ pub fn embed_heif_bridge(
     jpeg_params.safety_enforcement = options.safety_enforcement;
     jpeg_params.deterministic = options.freshness.is_seeded();
 
-    let mut spatial_params = options.spatial_params.clone();
-    spatial_params.safety_level = options.safety_level;
-    spatial_params.safety_enforcement = options.safety_enforcement;
+    let mut png_params = options.png_params.clone();
+    png_params.safety_level = options.safety_level;
+    png_params.safety_enforcement = options.safety_enforcement;
 
     match target.kind {
         BridgeTargetKind::DirectJpeg { .. }
@@ -107,7 +107,7 @@ pub fn embed_heif_bridge(
                 payload,
                 secret,
                 domain,
-                profile.format_profile(),
+                profile.jpeg_format(),
                 &jpeg_params,
                 &*model,
                 options.freshness,
@@ -122,14 +122,14 @@ pub fn embed_heif_bridge(
                         options.algorithm
                     ))
                 })?;
-            let stego_bytes = spatial::embed_spatial_with_profile_and_freshness(
+            let stego_bytes = png::embed_png_with_format_and_freshness(
                 carrier_slice,
                 payload,
                 secret,
                 domain,
-                profile.spatial_profile(),
+                profile.png_format(),
                 &*model,
-                &spatial_params,
+                &png_params,
                 options.freshness,
             )?;
             reconstruct_heif(carrier_bytes, &target, &stego_bytes)
@@ -163,7 +163,7 @@ pub fn extract_heif_bridge(
             carrier_slice,
             secret,
             domain,
-            profile.format_profile(),
+            profile.jpeg_format(),
             &options.extract_params,
         ),
         BridgeTargetKind::DirectSpatial { .. } => {
@@ -174,13 +174,13 @@ pub fn extract_heif_bridge(
                         options.algorithm
                     ))
                 })?;
-            spatial::extract_spatial_with_profile(
+            png::extract_png_with_format(
                 carrier_slice,
                 secret,
                 domain,
-                profile.spatial_profile(),
+                profile.png_format(),
                 &*model,
-                &options.spatial_params,
+                &options.png_params,
             )
         }
     }
@@ -214,7 +214,7 @@ pub fn probe_heif_bridge_capacity(
                 &*model,
                 &options.jpeg_params,
                 options.safety_level,
-                profile.format_profile(),
+                profile.jpeg_format(),
             )?;
             info.format = "HEIF (JPEG Thumbnail Bridge)".into();
             Ok(info)
@@ -227,14 +227,14 @@ pub fn probe_heif_bridge_capacity(
                         options.algorithm
                     ))
                 })?;
-            let mut info = spatial::probe_spatial_capacity_with_profile(
+            let mut info = png::probe_png_capacity_with_format(
                 carrier_slice,
                 &*model,
-                &options.spatial_params,
+                &options.png_params,
                 options.safety_level,
                 secret,
                 domain,
-                profile.spatial_profile(),
+                profile.png_format(),
             )?;
             info.format = "HEIF (Uncompressed Item Bridge)".into();
             Ok(info)

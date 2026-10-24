@@ -117,7 +117,7 @@
 //!   dialect profiles ([`params::Profile`]).
 //! - [`stego`] — content-adaptive image steganography (PNG HILL, JPEG UERD +
 //!   ternary STC). Its public surface is re-exported at the crate root:
-//!   [`FormatProfile`] / [`DEFAULT_FORMAT`] (wire-format identity),
+//!   [`JpegFormatProfile`] / [`DEFAULT_JPEG_FORMAT`] (wire-format identity),
 //!   [`JpegParams`] / [`ExtractParams`] (per-call tuning), and
 //!   [`embed`] / [`extract`] (the JPEG entry points a private build calls with
 //!   its own profile).
@@ -162,7 +162,8 @@ pub mod facade;
 // Content-domain steganography surface.
 #[cfg(feature = "stego")]
 pub use stego::format::{
-    CipherSuite, DEFAULT_FORMAT, FormatProfile, GridRule, OFFICIAL_SPATIAL, SpatialFormatProfile,
+    CipherSuite, DEFAULT_JPEG_FORMAT, GridRule, JpegFormatProfile, OFFICIAL_PNG_FORMAT,
+    PngFormatProfile,
 };
 #[cfg(feature = "stego")]
 pub use stego::jpeg::cost::UerdCostModel;

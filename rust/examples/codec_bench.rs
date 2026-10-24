@@ -20,10 +20,10 @@
 
 use std::time::Instant;
 
-use strhide::stego::params::{SpatialParams, StegoCodec};
-use strhide::stego::spatial::cost::HillCostModel;
-use strhide::stego::spatial::engine::{decode_png, embed_spatial, extract_spatial};
-use strhide::stego::traits::SpatialCostModel;
+use strhide::stego::params::{PngParams, StegoCodec};
+use strhide::stego::png::cost::HillCostModel;
+use strhide::stego::png::engine::{decode_png, embed_png, extract_png};
+use strhide::stego::traits::PngCostModel;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -45,13 +45,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The cost map is the one HILL assigns to the *cover*; it is what every
     // codec uses, so summing it over the modified slots is an apples-to-apples
     // distortion number.
-    let costs = HillCostModel.compute_cost(
-        &image.pixels,
-        w,
-        h,
-        image.channels,
-        &SpatialParams::default(),
-    );
+    let costs =
+        HillCostModel.compute_cost(&image.pixels, w, h, image.channels, &PngParams::default());
 
     println!(
         "carrier: {carrier_path} ({}x{}, {} channels), payload: {} bytes ({} bits)",
@@ -72,18 +67,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     for (codec, u) in runs {
-        let params = SpatialParams {
+        let params = PngParams {
             codec: if codec == "Stc" {
                 StegoCodec::Stc
             } else {
                 StegoCodec::Hamming
             },
             stc_u: u.max(1),
-            ..SpatialParams::default()
+            ..PngParams::default()
         };
         let started = Instant::now();
-        let stego = match embed_spatial(&carrier, &payload, password, None, &HillCostModel, &params)
-        {
+        let stego = match embed_png(&carrier, &payload, password, None, &HillCostModel, &params) {
             Ok(s) => s,
             Err(e) => {
                 println!("{codec:<10} {u:>3}   -- {e}");
@@ -105,12 +99,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let recovered = extract_spatial(
+        let recovered = extract_png(
             &stego,
             password,
             None,
             &HillCostModel,
-            &SpatialParams::default(),
+            &PngParams::default(),
         )?;
         let ok = recovered == payload;
         let bits = payload.len() * 8;

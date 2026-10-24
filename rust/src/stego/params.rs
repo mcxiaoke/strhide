@@ -24,7 +24,7 @@ use crate::stego::envelope::Freshness;
 ///   on the cheapest slots.
 ///
 /// The choice is **not** self-describing: it is recorded in two spare bits of
-/// the envelope header (see `spatial::engine`), so extraction never needs to be
+/// the envelope header (see `png::engine`), so extraction never needs to be
 /// told which one was used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -140,7 +140,7 @@ pub enum SafetyEnforcement {
 
 /// Fine-tuning parameters for spatial-domain steganography (e.g. HILL, WOW).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SpatialParams {
+pub struct PngParams {
     /// 3x3 high-pass filter kernel (row-major). Default is normalized KB kernel.
     pub high_pass_kernel: [f64; 9],
     /// First-stage low-pass filter window size (odd, default 3).
@@ -182,7 +182,7 @@ pub struct SpatialParams {
     /// own vocabulary:
     ///
     /// ```toml
-    /// [spatial_params.algorithm_options]
+    /// [png_params.algorithm_options]
     /// sigma = 1.0
     /// ```
     ///
@@ -204,7 +204,7 @@ fn default_stc_u() -> u8 {
     0
 }
 
-impl Default for SpatialParams {
+impl Default for PngParams {
     fn default() -> Self {
         Self {
             // Normalized KB 3x3 kernel: [-1, 2, -1; 2, -4, 2; -1, 2, -1] / 4.0
@@ -223,7 +223,7 @@ impl Default for SpatialParams {
     }
 }
 
-impl SpatialParams {
+impl PngParams {
     /// Reject parameter combinations that the HILL pipeline cannot serve.
     ///
     /// Both low-pass windows must be **positive odd** numbers: the symmetric
@@ -363,7 +363,7 @@ pub struct JpegParams {
     ///
     /// `neighbor_weight` above is UERD's own; anything a different model needs
     /// (e.g. J-UNIWARD's wavelet smoothing) is read from here by its own key.
-    /// See [`SpatialParams::algorithm_options`] for the rationale -- the same
+    /// See [`PngParams::algorithm_options`] for the rationale -- the same
     /// rules apply, so that adding a model is a model-side change only.
     #[serde(default)]
     pub algorithm_options: std::collections::BTreeMap<String, f64>,
@@ -655,7 +655,7 @@ pub struct StegoOptions {
     /// Safety policy enforcement mode (default Advisory).
     pub safety_enforcement: SafetyEnforcement,
     /// Fine-tuning parameters for spatial domain algorithms.
-    pub spatial_params: SpatialParams,
+    pub png_params: PngParams,
     /// Fine-tuning parameters for JPEG DCT domain algorithms.
     pub jpeg_params: JpegParams,
     /// Extraction policy: which suites to try and how much KDF work to allow.
@@ -709,14 +709,14 @@ mod tests {
     /// of this file, so its accessor and validation have to behave predictably.
     #[test]
     fn algorithm_options_default_to_the_models_own_values() {
-        let params = SpatialParams::default();
+        let params = PngParams::default();
         assert!(
             params.algorithm_options.is_empty(),
             "default carries no bag"
         );
         assert_eq!(params.model_option("sigma", 1.0), 1.0);
 
-        let mut tuned = SpatialParams::default();
+        let mut tuned = PngParams::default();
         tuned.algorithm_options.insert("sigma".into(), 0.5);
         assert_eq!(tuned.model_option("sigma", 1.0), 0.5);
         assert_eq!(
@@ -729,7 +729,7 @@ mod tests {
 
     #[test]
     fn algorithm_options_reject_empty_keys_and_non_finite_values() {
-        let mut empty_key = SpatialParams::default();
+        let mut empty_key = PngParams::default();
         empty_key.algorithm_options.insert("  ".into(), 1.0);
         let err = empty_key
             .validate()
@@ -862,7 +862,7 @@ mod tests {
     fn carrier_24mp() -> (usize, usize) {
         (
             375_000 * 63,
-            crate::stego::format::DEFAULT_FORMAT.header_slots(0),
+            crate::stego::format::DEFAULT_JPEG_FORMAT.header_slots(0),
         )
     }
 

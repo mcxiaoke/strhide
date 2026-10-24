@@ -125,14 +125,18 @@ pub fn derive_domain_subkey_with_label(
 /// this: its header seed comes from the suite KDF over the cover digest, so an
 /// attacker cannot trial a password without paying a full KDF.
 pub fn derive_header_perm_seed(password: Option<&str>, domain: Option<&str>) -> [u8; 32] {
-    derive_header_perm_seed_with_profile(password, domain, &crate::stego::format::OFFICIAL_SPATIAL)
+    derive_header_perm_seed_with_profile(
+        password,
+        domain,
+        &crate::stego::format::OFFICIAL_PNG_FORMAT,
+    )
 }
 
 /// [`derive_header_perm_seed`] with explicit spatial profile settings.
 pub fn derive_header_perm_seed_with_profile(
     password: Option<&str>,
     domain: Option<&str>,
-    spatial: &crate::stego::format::SpatialFormatProfile,
+    spatial: &crate::stego::format::PngFormatProfile,
 ) -> [u8; 32] {
     let pw = password.unwrap_or(spatial.fallback_secret);
     let norm_pw = normalize_nfc(pw);
@@ -402,11 +406,11 @@ pub fn unpack_envelope_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stego::format::{DEFAULT_FORMAT, SUITE_PBKDF2_200K, body_keys, derive_master};
+    use crate::stego::format::{DEFAULT_JPEG_FORMAT, SUITE_PBKDF2_200K, body_keys, derive_master};
 
     fn keys(password: &str, salt: &[u8]) -> [u8; 32] {
         let master = derive_master(&SUITE_PBKDF2_200K, password, salt).unwrap();
-        let (enc_key, _) = body_keys(&DEFAULT_FORMAT, &master, salt, None);
+        let (enc_key, _) = body_keys(&DEFAULT_JPEG_FORMAT, &master, salt, None);
         enc_key
     }
 

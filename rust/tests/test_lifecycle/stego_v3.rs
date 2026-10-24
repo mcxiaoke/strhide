@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use strhide::errors::StrHideError;
 use strhide::stego::coding::{Move, StcTrellis};
 use strhide::stego::format::{
-    DEFAULT_FORMAT, FormatProfile, derive_master, extension_stc_seed, header_perm_seed,
+    DEFAULT_JPEG_FORMAT, JpegFormatProfile, derive_master, extension_stc_seed, header_perm_seed,
     header_stc_seed,
 };
 use strhide::stego::jpeg::cost::UerdCostModel;
@@ -85,7 +85,7 @@ fn incompressible(len: usize, seed: u64) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// `SHA-256(tag || u32 block_count || u32 component_count || all DC, i16 BE)`.
-fn cover_digest(fmt: &FormatProfile, coeffs: &dct_io::JpegCoefficients) -> [u8; 32] {
+fn cover_digest(fmt: &JpegFormatProfile, coeffs: &dct_io::JpegCoefficients) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(fmt.cover_digest_tag);
     let block_count = coeffs.components.first().map_or(0, |c| c.blocks.len());
@@ -113,13 +113,17 @@ fn header_slots_with_suite(
 ) -> Vec<u32> {
     let coeffs = dct_io::read_coefficients(jpeg).expect("cover coefficients");
     let block_count = coeffs.components[0].blocks.len();
-    let digest = cover_digest(&DEFAULT_FORMAT, &coeffs);
-    let suite = DEFAULT_FORMAT.suite(suite_id).expect("suite");
+    let digest = cover_digest(&DEFAULT_JPEG_FORMAT, &coeffs);
+    let suite = DEFAULT_JPEG_FORMAT.suite(suite_id).expect("suite");
     let master = derive_master(suite, password, &digest).unwrap();
-    let seed = header_perm_seed(&DEFAULT_FORMAT, &master, None);
-    let mut slots = grid_indices(block_count, DEFAULT_FORMAT.grid_rule);
-    permute_prefix(&mut slots, DEFAULT_FORMAT.header_slots(ext_bytes), &seed);
-    slots.truncate(DEFAULT_FORMAT.header_slots(ext_bytes));
+    let seed = header_perm_seed(&DEFAULT_JPEG_FORMAT, &master, None);
+    let mut slots = grid_indices(block_count, DEFAULT_JPEG_FORMAT.grid_rule);
+    permute_prefix(
+        &mut slots,
+        DEFAULT_JPEG_FORMAT.header_slots(ext_bytes),
+        &seed,
+    );
+    slots.truncate(DEFAULT_JPEG_FORMAT.header_slots(ext_bytes));
     slots
 }
 
@@ -141,24 +145,24 @@ fn read_superblock_with_suite(
 ) -> [u8; SUPERBLOCK_BYTES] {
     let coeffs = dct_io::read_coefficients(jpeg).expect("coefficients");
     let slots = header_slots_with_suite(jpeg, password, suite_id, 0);
-    let digest = cover_digest(&DEFAULT_FORMAT, &coeffs);
-    let suite = DEFAULT_FORMAT.suite(suite_id).expect("suite");
+    let digest = cover_digest(&DEFAULT_JPEG_FORMAT, &coeffs);
+    let suite = DEFAULT_JPEG_FORMAT.suite(suite_id).expect("suite");
     let master = derive_master(suite, password, &digest).unwrap();
-    let seed = header_perm_seed(&DEFAULT_FORMAT, &master, None);
+    let seed = header_perm_seed(&DEFAULT_JPEG_FORMAT, &master, None);
     let trellis = StcTrellis::from_seed_grouped(
-        header_stc_seed(&DEFAULT_FORMAT, &seed, None),
-        DEFAULT_FORMAT.sb_h,
-        DEFAULT_FORMAT.sb_u,
+        header_stc_seed(&DEFAULT_JPEG_FORMAT, &seed, None),
+        DEFAULT_JPEG_FORMAT.sb_h,
+        DEFAULT_JPEG_FORMAT.sb_u,
     )
     .unwrap();
-    let vals: Vec<u8> = slots[..DEFAULT_FORMAT.superblock_slots()]
+    let vals: Vec<u8> = slots[..DEFAULT_JPEG_FORMAT.superblock_slots()]
         .iter()
         .map(|&idx| {
-            let (bi, k) = slot_to_coeff(idx, DEFAULT_FORMAT.grid_rule);
+            let (bi, k) = slot_to_coeff(idx, DEFAULT_JPEG_FORMAT.grid_rule);
             parity(coeffs.components[0].blocks[bi][k])
         })
         .collect();
-    let bits = trellis.extract(&vals, DEFAULT_FORMAT.superblock_bits());
+    let bits = trellis.extract(&vals, DEFAULT_JPEG_FORMAT.superblock_bits());
     let mut raw = [0u8; SUPERBLOCK_BYTES];
     raw.copy_from_slice(&bits[..SUPERBLOCK_BYTES]);
     raw
@@ -172,7 +176,7 @@ fn stc_write(jpeg: &[u8], slots: &[u32], seed: u64, h: u8, u: u8, message: &[u8]
     let vals: Vec<u8> = slots
         .iter()
         .map(|&idx| {
-            let (bi, k) = slot_to_coeff(idx, DEFAULT_FORMAT.grid_rule);
+            let (bi, k) = slot_to_coeff(idx, DEFAULT_JPEG_FORMAT.grid_rule);
             parity(blocks[bi][k])
         })
         .collect();
@@ -193,7 +197,7 @@ fn stc_write(jpeg: &[u8], slots: &[u32], seed: u64, h: u8, u: u8, message: &[u8]
         if delta == 0 {
             continue;
         }
-        let (bi, k) = slot_to_coeff(idx, DEFAULT_FORMAT.grid_rule);
+        let (bi, k) = slot_to_coeff(idx, DEFAULT_JPEG_FORMAT.grid_rule);
         let updated = blocks[bi][k] as i32 + delta as i32;
         assert!(updated.abs() <= 1023);
         blocks[bi][k] = updated as i16;
@@ -218,16 +222,16 @@ fn amend_superblock(
     let encoded = sb.encode();
     let slots = header_slots(jpeg, password, sb.ext_bytes as usize);
     let coeffs = dct_io::read_coefficients(jpeg).expect("coefficients");
-    let digest = cover_digest(&DEFAULT_FORMAT, &coeffs);
-    let master = derive_master(DEFAULT_FORMAT.default_suite(), password, &digest).unwrap();
-    let seed = header_perm_seed(&DEFAULT_FORMAT, &master, None);
+    let digest = cover_digest(&DEFAULT_JPEG_FORMAT, &coeffs);
+    let master = derive_master(DEFAULT_JPEG_FORMAT.default_suite(), password, &digest).unwrap();
+    let seed = header_perm_seed(&DEFAULT_JPEG_FORMAT, &master, None);
 
     let mut out = stc_write(
         jpeg,
-        &slots[..DEFAULT_FORMAT.superblock_slots()],
-        header_stc_seed(&DEFAULT_FORMAT, &seed, None),
-        DEFAULT_FORMAT.sb_h,
-        DEFAULT_FORMAT.sb_u,
+        &slots[..DEFAULT_JPEG_FORMAT.superblock_slots()],
+        header_stc_seed(&DEFAULT_JPEG_FORMAT, &seed, None),
+        DEFAULT_JPEG_FORMAT.sb_h,
+        DEFAULT_JPEG_FORMAT.sb_u,
         &encoded,
     );
     if sb.ext_bytes > 0
@@ -237,10 +241,10 @@ fn amend_superblock(
             assert_eq!(area.len(), sb.ext_bytes as usize);
             out = stc_write(
                 &out,
-                &slots[DEFAULT_FORMAT.superblock_slots()..],
-                extension_stc_seed(&DEFAULT_FORMAT, &seed, None),
-                DEFAULT_FORMAT.ext_h,
-                DEFAULT_FORMAT.ext_u,
+                &slots[DEFAULT_JPEG_FORMAT.superblock_slots()..],
+                extension_stc_seed(&DEFAULT_JPEG_FORMAT, &seed, None),
+                DEFAULT_JPEG_FORMAT.ext_h,
+                DEFAULT_JPEG_FORMAT.ext_u,
                 area,
             );
         }
@@ -379,16 +383,16 @@ fn v3_cover_digest_is_stable_across_embedding() {
     let before = dct_io::read_coefficients(&cover).expect("cover coefficients");
     let after = dct_io::read_coefficients(&stego).expect("stego coefficients");
     assert_eq!(
-        cover_digest(&DEFAULT_FORMAT, &before),
-        cover_digest(&DEFAULT_FORMAT, &after),
+        cover_digest(&DEFAULT_JPEG_FORMAT, &before),
+        cover_digest(&DEFAULT_JPEG_FORMAT, &after),
         "the DC-based digest changed"
     );
     // And the digest really covers the DC values: changing one must move it.
     let mut tampered = before.clone();
     tampered.components[0].blocks[0][0] = tampered.components[0].blocks[0][0].wrapping_add(1);
     assert_ne!(
-        cover_digest(&DEFAULT_FORMAT, &before),
-        cover_digest(&DEFAULT_FORMAT, &tampered)
+        cover_digest(&DEFAULT_JPEG_FORMAT, &before),
+        cover_digest(&DEFAULT_JPEG_FORMAT, &tampered)
     );
 }
 
@@ -397,7 +401,7 @@ fn v3_cover_digest_is_stable_across_embedding() {
 /// reorder the sequence between two processes.
 #[test]
 fn v3_body_grid_is_an_ordered_set_difference() {
-    let grid = grid_indices(4, DEFAULT_FORMAT.grid_rule);
+    let grid = grid_indices(4, DEFAULT_JPEG_FORMAT.grid_rule);
     let hdr = vec![3u32, 0, 63, 100];
     let body = strhide::stego::jpeg::v3_layout::body_grid(&grid, &hdr, 4);
     assert_eq!(&body[..4], &[1, 2, 4, 5]);
@@ -499,7 +503,7 @@ fn v3_over_optimised_table_refuses_when_no_group_fits() {
         &cover,
         payload.len(),
         &JpegParams::default(),
-        &strhide::stego::format::DEFAULT_FORMAT,
+        &strhide::stego::format::DEFAULT_JPEG_FORMAT,
     )
     .expect_err("layout_for_payload must also refuse");
     match layout_err {
@@ -536,7 +540,7 @@ fn v3_over_optimised_table_lifts_u_two_to_u_three() {
         &cover,
         payload.len(),
         &options.jpeg_params,
-        &strhide::stego::format::DEFAULT_FORMAT,
+        &strhide::stego::format::DEFAULT_JPEG_FORMAT,
     )
     .expect("layout");
     assert_eq!(layout.u, 3, "layout_for_payload must also report u = 3");
@@ -611,9 +615,12 @@ fn v3_header_and_body_slots_are_disjoint() {
     let jpeg = fs::read(fixture("carrier_photo.jpg")).expect("read carrier");
     for ext_bytes in [0usize, 3, 40] {
         let slots = header_slots(&jpeg, "pw", ext_bytes);
-        assert_eq!(slots.len(), DEFAULT_FORMAT.header_slots(ext_bytes));
+        assert_eq!(slots.len(), DEFAULT_JPEG_FORMAT.header_slots(ext_bytes));
         let coeffs = dct_io::read_coefficients(&jpeg).expect("coefficients");
-        let grid = grid_indices(coeffs.components[0].blocks.len(), DEFAULT_FORMAT.grid_rule);
+        let grid = grid_indices(
+            coeffs.components[0].blocks.len(),
+            DEFAULT_JPEG_FORMAT.grid_rule,
+        );
         let body = strhide::stego::jpeg::v3_layout::body_grid(
             &grid,
             &slots,
@@ -704,7 +711,7 @@ fn v3_newer_minor_version_is_accepted() {
     let cover = fs::read(fixture("carrier_photo.jpg")).expect("read carrier");
     let password = "MinorCompat#1";
     let payload = b"minor version forward compatibility";
-    let mut fmt = DEFAULT_FORMAT;
+    let mut fmt = DEFAULT_JPEG_FORMAT;
     fmt.format_minor = 7;
     let params = JpegParams::default();
     let stego = embed_jpeg(
@@ -729,7 +736,7 @@ fn v3_newer_minor_version_is_accepted() {
 fn v3_other_major_version_is_not_decodable() {
     let cover = fs::read(fixture("carrier_photo.jpg")).expect("read carrier");
     let password = "MajorCompat#1";
-    let mut fmt = DEFAULT_FORMAT;
+    let mut fmt = DEFAULT_JPEG_FORMAT;
     fmt.format_major = 2;
     let stego = embed_jpeg(
         &cover,
@@ -776,7 +783,7 @@ fn v3_extensions_roundtrip_and_skip_unknowns() {
         payload,
         Some(password),
         None,
-        &DEFAULT_FORMAT,
+        &DEFAULT_JPEG_FORMAT,
         &params,
         &UerdCostModel,
     )
@@ -805,7 +812,7 @@ fn v3_unknown_critical_extension_is_rejected() {
         b"critical extension",
         Some(password),
         None,
-        &DEFAULT_FORMAT,
+        &DEFAULT_JPEG_FORMAT,
         &params,
         &UerdCostModel,
     )
@@ -835,7 +842,7 @@ fn v3_malformed_extension_area_is_reported() {
         b"malformed extension",
         Some(password),
         None,
-        &DEFAULT_FORMAT,
+        &DEFAULT_JPEG_FORMAT,
         &params,
         &UerdCostModel,
     )
@@ -844,15 +851,15 @@ fn v3_malformed_extension_area_is_reported() {
     // Claim a 200-byte TLV inside a 5-byte area.
     let slots = header_slots(&stego, password, 5);
     let coeffs = dct_io::read_coefficients(&stego).expect("coefficients");
-    let digest = cover_digest(&DEFAULT_FORMAT, &coeffs);
-    let master = derive_master(DEFAULT_FORMAT.default_suite(), password, &digest).unwrap();
-    let seed = header_perm_seed(&DEFAULT_FORMAT, &master, None);
+    let digest = cover_digest(&DEFAULT_JPEG_FORMAT, &coeffs);
+    let master = derive_master(DEFAULT_JPEG_FORMAT.default_suite(), password, &digest).unwrap();
+    let seed = header_perm_seed(&DEFAULT_JPEG_FORMAT, &master, None);
     let broken = stc_write(
         &stego,
-        &slots[DEFAULT_FORMAT.superblock_slots()..],
-        extension_stc_seed(&DEFAULT_FORMAT, &seed, None),
-        DEFAULT_FORMAT.ext_h,
-        DEFAULT_FORMAT.ext_u,
+        &slots[DEFAULT_JPEG_FORMAT.superblock_slots()..],
+        extension_stc_seed(&DEFAULT_JPEG_FORMAT, &seed, None),
+        DEFAULT_JPEG_FORMAT.ext_h,
+        DEFAULT_JPEG_FORMAT.ext_u,
         &[0x01, 200, 1, 2, 3],
     );
     let err = extract_carrier(&broken, &extract_opts(password)).unwrap_err();
@@ -883,7 +890,7 @@ fn v3_suite_matrix_roundtrips() {
             payload,
             Some(&password),
             None,
-            &DEFAULT_FORMAT,
+            &DEFAULT_JPEG_FORMAT,
             &params,
             &UerdCostModel,
         )
@@ -910,7 +917,7 @@ fn v3_extract_policy_can_exclude_a_suite() {
         b"suite policy",
         Some(password),
         None,
-        &DEFAULT_FORMAT,
+        &DEFAULT_JPEG_FORMAT,
         &params,
         &UerdCostModel,
     )
@@ -954,7 +961,7 @@ fn v3_wrong_password_costs_a_kdf_each_time() {
 
     let single_kdf = {
         let started = Instant::now();
-        let _ = derive_master(DEFAULT_FORMAT.default_suite(), "probe", b"digest").unwrap();
+        let _ = derive_master(DEFAULT_JPEG_FORMAT.default_suite(), "probe", b"digest").unwrap();
         started.elapsed()
     };
 
@@ -979,7 +986,7 @@ fn v3_correct_password_costs_one_kdf() {
     let stego = embed_carrier(&cover, b"one kdf", &extract_opts(password)).expect("embed");
     let single_kdf = {
         let started = Instant::now();
-        let _ = derive_master(DEFAULT_FORMAT.default_suite(), "probe", b"digest").unwrap();
+        let _ = derive_master(DEFAULT_JPEG_FORMAT.default_suite(), "probe", b"digest").unwrap();
         started.elapsed()
     };
     let started = Instant::now();
@@ -1079,7 +1086,7 @@ fn v3_capacity_probe_is_tight() {
         &exact,
         Some("tight"),
         None,
-        &DEFAULT_FORMAT,
+        &DEFAULT_JPEG_FORMAT,
         &params,
         &UerdCostModel,
     )
@@ -1088,7 +1095,7 @@ fn v3_capacity_probe_is_tight() {
         &stego,
         Some("tight"),
         None,
-        &DEFAULT_FORMAT,
+        &DEFAULT_JPEG_FORMAT,
         &ExtractParams::default(),
     )
     .expect("extract");
@@ -1101,7 +1108,7 @@ fn v3_capacity_probe_is_tight() {
             &over,
             Some("tight"),
             None,
-            &DEFAULT_FORMAT,
+            &DEFAULT_JPEG_FORMAT,
             &params,
             &UerdCostModel
         )
@@ -1126,7 +1133,7 @@ fn v3_extraction_ignores_the_embed_side_budget() {
         payload,
         Some(password),
         None,
-        &DEFAULT_FORMAT,
+        &DEFAULT_JPEG_FORMAT,
         &params,
         &UerdCostModel,
     )

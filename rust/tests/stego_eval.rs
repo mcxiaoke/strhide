@@ -28,9 +28,9 @@ use std::time::Instant;
 use rayon::prelude::*;
 use strhide::analysis::scan_file;
 use strhide::stego::{
-    SpatialParams, StegoOptions, embed_carrier,
-    spatial::{HillCostModel, decode_png},
-    traits::SpatialCostModel,
+    PngParams, StegoOptions, embed_carrier,
+    png::{HillCostModel, decode_png},
+    traits::PngCostModel,
 };
 
 const TEST_PASSWORD: &str = "EvalStegoSuite2026!Secure";
@@ -229,7 +229,7 @@ pub fn measure_slot_predictability(
 
     let total_pixels = width * height;
     let model = HillCostModel;
-    let params = SpatialParams::default();
+    let params = PngParams::default();
     let costs = model.compute_cost(stego_pixels, width, height, channels, &params);
 
     let channel_offset = if channels >= 3 { 1 } else { 0 };

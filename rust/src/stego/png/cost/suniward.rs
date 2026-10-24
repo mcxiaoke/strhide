@@ -29,7 +29,7 @@
 //! # Symmetry
 //!
 //! `|ξ|` does not depend on the sign of the change, so `ρ(+1) = ρ(-1)`. No
-//! directional preference, hence no [`crate::stego::traits::SpatialCostModel::direction_costs`]
+//! directional preference, hence no [`crate::stego::traits::PngCostModel::direction_costs`]
 //! override.
 //!
 //! # Class invariance
@@ -40,8 +40,8 @@
 //! eight-value class (`val & 0xF8` unchanged), so the cost must be computed on
 //! class-masked values -- exactly what HILL does, and for the same reason.
 
-use crate::stego::params::SpatialParams;
-use crate::stego::traits::SpatialCostModel;
+use crate::stego::params::PngParams;
+use crate::stego::traits::PngCostModel;
 use crate::stego::wavelet;
 
 pub struct SuniwardCostModel;
@@ -56,10 +56,10 @@ impl Default for SuniwardCostModel {
 ///
 /// `1.0` matches the reference implementations (conseal / stegolab) on 8-bit
 /// input; the paper's `2^-6` figure is the JPEG-domain setting. Overridable
-/// through [`SpatialParams::algorithm_options`] under the key `sigma`.
+/// through [`PngParams::algorithm_options`] under the key `sigma`.
 const DEFAULT_SIGMA: f64 = 1.0;
 
-impl SpatialCostModel for SuniwardCostModel {
+impl PngCostModel for SuniwardCostModel {
     fn id(&self) -> &'static str {
         "suniward"
     }
@@ -74,7 +74,7 @@ impl SpatialCostModel for SuniwardCostModel {
         width: usize,
         height: usize,
         channels: usize,
-        params: &SpatialParams,
+        params: &PngParams,
     ) -> Vec<f64> {
         if width == 0
             || height == 0
@@ -225,8 +225,8 @@ fn suitability_pass(
 mod tests {
     use super::*;
 
-    fn params() -> SpatialParams {
-        SpatialParams::default()
+    fn params() -> PngParams {
+        PngParams::default()
     }
 
     /// Deterministic texture: a gradient plus pseudo-random noise.

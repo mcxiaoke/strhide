@@ -29,7 +29,7 @@
 
 use crate::errors::StrHideError;
 use crate::stego::envelope::MIN_ENVELOPE_LEN;
-use crate::stego::format::FormatProfile;
+use crate::stego::format::JpegFormatProfile;
 
 /// Encoded superblock size in bytes.
 pub const SUPERBLOCK_BYTES: usize = 44;
@@ -186,7 +186,7 @@ impl Superblock {
     /// Version / suite checks that need the profile and the suite being tried.
     pub fn validate_against(
         &self,
-        fmt: &FormatProfile,
+        fmt: &JpegFormatProfile,
         tried_suite: u16,
     ) -> Result<(), StrHideError> {
         if self.version_major != fmt.format_major {
@@ -305,7 +305,7 @@ pub fn parse_extension(area: &[u8]) -> Result<Vec<(u8, &[u8])>, StrHideError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stego::format::DEFAULT_FORMAT;
+    use crate::stego::format::DEFAULT_JPEG_FORMAT;
 
     fn sample() -> Superblock {
         Superblock {
@@ -391,23 +391,27 @@ mod tests {
     #[test]
     fn version_and_suite_are_checked_against_the_trial() {
         let sb = sample();
-        assert!(sb.validate_against(&DEFAULT_FORMAT, 1).is_ok());
+        assert!(sb.validate_against(&DEFAULT_JPEG_FORMAT, 1).is_ok());
         assert!(matches!(
-            sb.validate_against(&DEFAULT_FORMAT, 2),
+            sb.validate_against(&DEFAULT_JPEG_FORMAT, 2),
             Err(StrHideError::CorruptedData(_))
         ));
 
         let mut other_major = sb;
         other_major.version_major = 2;
         assert!(matches!(
-            other_major.validate_against(&DEFAULT_FORMAT, 1),
+            other_major.validate_against(&DEFAULT_JPEG_FORMAT, 1),
             Err(StrHideError::UnsupportedVersion(_))
         ));
 
         // A newer minor is forward-compatible.
         let mut newer_minor = sb;
         newer_minor.version_minor = 7;
-        assert!(newer_minor.validate_against(&DEFAULT_FORMAT, 1).is_ok());
+        assert!(
+            newer_minor
+                .validate_against(&DEFAULT_JPEG_FORMAT, 1)
+                .is_ok()
+        );
     }
 
     #[test]

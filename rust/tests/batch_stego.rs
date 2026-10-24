@@ -83,8 +83,8 @@ fn codec_options() -> StegoOptions {
         other => panic!("STRHIDE_STEGO_CODEC must be hamming|stc|stc1|stc2|stc3, got {other}"),
     };
     let mut opts = StegoOptions::default();
-    opts.spatial_params.codec = codec;
-    opts.spatial_params.stc_u = u;
+    opts.png_params.codec = codec;
+    opts.png_params.stc_u = u;
     // JPEG V3 is STC-only and derives its group size from the slot budget, so
     // the codec knob only applies to the spatial engine.
     opts

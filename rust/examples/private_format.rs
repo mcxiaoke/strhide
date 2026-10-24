@@ -7,7 +7,7 @@
 //! cargo run --release --example private_format
 //! ```
 //!
-//! [`FormatProfile`] is the compile-time identity of the JPEG V3 wire format:
+//! [`JpegFormatProfile`] is the compile-time identity of the JPEG V3 wire format:
 //! the derivation labels that feed every KDF, the header geometry, the slot
 //! grid rule and the suite whitelist. Changing one byte of a label moves the
 //! header slots, the trellis and every key — the carrier becomes unreadable to
@@ -22,7 +22,7 @@
 //! public surface a private build actually needs.
 
 use strhide::errors::StrHideError;
-use strhide::stego::format::{DEFAULT_FORMAT, FormatProfile};
+use strhide::stego::format::{DEFAULT_JPEG_FORMAT, JpegFormatProfile};
 use strhide::stego::jpeg::cost::UerdCostModel;
 use strhide::stego::jpeg::engine::{embed_jpeg, extract_jpeg};
 use strhide::stego::params::{ExtractParams, JpegParams};
@@ -31,7 +31,7 @@ use strhide::stego::params::{ExtractParams, JpegParams};
 ///
 /// In a real private build these strings would be yours alone; the geometry is
 /// only repeated here to keep the demo short.
-const ACME_FORMAT: FormatProfile = FormatProfile {
+const ACME_FORMAT: JpegFormatProfile = JpegFormatProfile {
     format_major: 1,
     format_minor: 0,
     cover_digest_tag: b"acme-cover-v1",
@@ -45,7 +45,7 @@ const ACME_FORMAT: FormatProfile = FormatProfile {
     ext_h: 8,
     ext_u: 4,
     grid_rule: strhide::stego::format::GridRule::ALL_AC,
-    suites: DEFAULT_FORMAT.suites,
+    suites: DEFAULT_JPEG_FORMAT.suites,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -91,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &stego,
         Some(password),
         None,
-        &DEFAULT_FORMAT,
+        &DEFAULT_JPEG_FORMAT,
         &ExtractParams::default(),
     ) {
         Err(StrHideError::NoHiddenData(_)) => {
@@ -106,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         payload,
         Some(password),
         None,
-        &DEFAULT_FORMAT,
+        &DEFAULT_JPEG_FORMAT,
         &params,
         &cost,
     )?;

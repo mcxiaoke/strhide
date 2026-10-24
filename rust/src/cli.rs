@@ -2001,8 +2001,8 @@ fn warn_nondefault_stego_params(options: &crate::stego::StegoOptions, quiet: boo
     if quiet {
         return;
     }
-    let sp = &options.spatial_params;
-    let d_sp = crate::stego::SpatialParams::default();
+    let sp = &options.png_params;
+    let d_sp = crate::stego::PngParams::default();
     let mut flags: Vec<String> = Vec::new();
     if sp.p1_window != d_sp.p1_window {
         flags.push(format!("--p1-window {}", sp.p1_window));
@@ -2025,10 +2025,10 @@ fn apply_stc_h(
     stc_h: Option<u8>,
 ) -> Result<(), StrHideError> {
     if let Some(h) = stc_h {
-        options.spatial_params.stc_h = h;
+        options.png_params.stc_h = h;
         options.jpeg_params.stc_h = h;
     }
-    options.spatial_params.validate()?;
+    options.png_params.validate()?;
     options.jpeg_params.validate()?;
     Ok(())
 }
@@ -2054,7 +2054,7 @@ fn embed_stego_options(
     };
 
     if let Some(er) = args.exclusion_rate {
-        options.spatial_params.exclusion_percentile = er;
+        options.png_params.exclusion_percentile = er;
     }
     if let Some(nw) = args.neighbor_weight {
         options.jpeg_params.neighbor_weight = nw;
@@ -2066,10 +2066,10 @@ fn embed_stego_options(
         options.jpeg_params.cipher_suite = suite;
     }
     if let Some(p1) = args.p1_window {
-        options.spatial_params.p1_window = p1;
+        options.png_params.p1_window = p1;
     }
     if let Some(p2) = args.p2_window {
-        options.spatial_params.p2_window = p2;
+        options.png_params.p2_window = p2;
     }
 
     let safety_level = match args.safety.as_deref() {
@@ -2343,10 +2343,10 @@ fn handle_extract(
     };
 
     if let Some(p1) = args.p1_window {
-        options.spatial_params.p1_window = p1;
+        options.png_params.p1_window = p1;
     }
     if let Some(p2) = args.p2_window {
-        options.spatial_params.p2_window = p2;
+        options.png_params.p2_window = p2;
     }
     warn_nondefault_stego_params(&options, quiet);
 

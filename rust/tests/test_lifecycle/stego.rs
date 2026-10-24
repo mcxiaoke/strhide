@@ -7,10 +7,11 @@ use std::path::PathBuf;
 use strhide::analysis::scan_file;
 use strhide::params::Profile;
 use strhide::stego::{
-    SpatialParams, StegoOptions, embed_carrier, embed_carrier_with_profile, extract_carrier,
-    extract_carrier_with_profile, probe_carrier_capacity,
-    spatial::{HillCostModel, RawImage, decode_png, encode_png},
-    traits::SpatialCostModel,
+    PngParams, StegoOptions, embed_carrier, embed_carrier_with_profile, extract_carrier,
+    extract_carrier_with_profile,
+    png::{HillCostModel, RawImage, decode_png, encode_png},
+    probe_carrier_capacity,
+    traits::PngCostModel,
 };
 
 /// Private content-domain dialect: the secret now lives in the shared
@@ -115,7 +116,7 @@ fn median(values: &[f64]) -> f64 {
     v.get(v.len() / 2).copied().unwrap_or(0.0)
 }
 
-/// Recompute the header slot positions exactly as `spatial::engine` does.
+/// Recompute the header slot positions exactly as `png::engine` does.
 ///
 /// Deliberately duplicates the engine pipeline: the property under test (the
 /// header position is a function of the secret, not of the per-embed salt) is
@@ -133,8 +134,8 @@ fn header_slots_of(png: &[u8], password: Option<&str>) -> Vec<usize> {
     let off = if ch >= 3 { 1 } else { 0 };
     let mut eligible: Vec<usize> = (0..w * h)
         .filter(|&i| {
-            (strhide::stego::spatial::engine::SPATIAL_ELIGIBLE_MIN
-                ..=strhide::stego::spatial::engine::SPATIAL_ELIGIBLE_MAX)
+            (strhide::stego::png::engine::SPATIAL_ELIGIBLE_MIN
+                ..=strhide::stego::png::engine::SPATIAL_ELIGIBLE_MAX)
                 .contains(&img.pixels[i * ch + off])
         })
         .collect();
@@ -205,9 +206,9 @@ fn test_png_hill_fine_tuning_parameters() {
         ..Default::default()
     };
     // Customize parameters: exclude top 40% smoothest pixels, customize filters
-    opts.spatial_params.exclusion_percentile = 0.40;
-    opts.spatial_params.p1_window = 3;
-    opts.spatial_params.p2_window = 15;
+    opts.png_params.exclusion_percentile = 0.40;
+    opts.png_params.p1_window = 3;
+    opts.png_params.p2_window = 15;
 
     let stego_png = embed_carrier(&png_bytes, secret, &opts).expect("embed tuned");
     let extracted = extract_carrier(&stego_png, &opts).expect("extract tuned");
@@ -592,12 +593,12 @@ fn test_stego_body_slots_follow_cost_order() {
         "50% load must modify at least one body pixel"
     );
 
-    let params = SpatialParams::default();
+    let params = PngParams::default();
     let costs = HillCostModel.compute_cost(&before.pixels, w, n / w, ch, &params);
     let mut eligible: Vec<usize> = (0..n)
         .filter(|&i| {
-            (strhide::stego::spatial::engine::SPATIAL_ELIGIBLE_MIN
-                ..=strhide::stego::spatial::engine::SPATIAL_ELIGIBLE_MAX)
+            (strhide::stego::png::engine::SPATIAL_ELIGIBLE_MIN
+                ..=strhide::stego::png::engine::SPATIAL_ELIGIBLE_MAX)
                 .contains(&before.pixels[i * ch + off])
         })
         .collect();
@@ -649,7 +650,7 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
     // length has to be decoded rather than read as a bare u32.
     let header = read_header(&first, &slots_a[..256]);
     let word = u32::from_be_bytes([header[28], header[29], header[30], header[31]]);
-    let (total_len, _codec_id, stc_h) = strhide::stego::spatial::engine::decode_header_word(word);
+    let (total_len, _codec_id, stc_h) = strhide::stego::png::engine::decode_header_word(word);
     assert_eq!(
         total_len as usize,
         payload.len() + 49,
@@ -671,9 +672,9 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
 
     // Explicit Hamming embed must declare escape h=15 in word1, and codec Hamming in FeatureWord
     let hamming_opts = StegoOptions {
-        spatial_params: SpatialParams {
+        png_params: PngParams {
             codec: strhide::stego::StegoCodec::Hamming,
-            ..SpatialParams::default()
+            ..PngParams::default()
         },
         ..StegoOptions::default()
     };
@@ -685,7 +686,7 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
         hamming_hdr[30],
         hamming_hdr[31],
     ]);
-    let (_, _h_codec, h_h) = strhide::stego::spatial::engine::decode_header_word(hamming_word);
+    let (_, _h_codec, h_h) = strhide::stego::png::engine::decode_header_word(hamming_word);
     assert_eq!(h_h, strhide::stego::header::HEADER_V2_ESCAPE_H);
     let hamming_feat = read_header(&hamming_stego, &slots_a[256..512]);
     let fw_hamming = strhide::stego::header::FeatureWord::decode(&hamming_feat)
@@ -696,7 +697,7 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
     let header2 = read_header(&second, &slots_a[..256]);
     let word2 = u32::from_be_bytes([header2[28], header2[29], header2[30], header2[31]]);
     assert_eq!(
-        word2 & strhide::stego::spatial::engine::HEADER_LEN_MASK,
+        word2 & strhide::stego::png::engine::HEADER_LEN_MASK,
         total_len,
         "header position is salt independent"
     );
@@ -707,7 +708,7 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
     assert_ne!(slots_a, slots_b, "header slots must be keyed");
     let foreign = read_header(&first, &slots_b);
     let foreign_word = u32::from_be_bytes([foreign[28], foreign[29], foreign[30], foreign[31]]);
-    let (foreign_len, _, _) = strhide::stego::spatial::engine::decode_header_word(foreign_word);
+    let (foreign_len, _, _) = strhide::stego::png::engine::decode_header_word(foreign_word);
     assert!(
         foreign_len != total_len,
         "a foreign secret must not land on the real header"
@@ -1017,7 +1018,7 @@ fn test_jpeg_v3_slot_budget_controls_the_change_rate() {
             &jpeg_bytes,
             payload.len(),
             &opts.jpeg_params,
-            &strhide::stego::format::DEFAULT_FORMAT,
+            &strhide::stego::format::DEFAULT_JPEG_FORMAT,
         )
         .expect("layout");
         group_sizes.push(layout.u);

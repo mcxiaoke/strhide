@@ -9,17 +9,17 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use strhide::stego::format::DEFAULT_FORMAT;
+use strhide::stego::format::DEFAULT_JPEG_FORMAT;
 use strhide::stego::jpeg::cost::{JuniwardCostModel, UerdCostModel};
 use strhide::stego::jpeg::engine::{embed_jpeg_with_freshness, extract_jpeg};
 use strhide::stego::jpeg::geometry::geometry_for_carrier;
-use strhide::stego::params::{ExtractParams, JpegParams, SpatialParams, StegoOptions};
-use strhide::stego::prng::deterministic_payload;
-use strhide::stego::spatial::cost::{HillCostModel, SuniwardCostModel};
-use strhide::stego::spatial::engine::{
-    decode_png, embed_spatial_with_profile_and_freshness, encode_png, extract_spatial_with_profile,
+use strhide::stego::params::{ExtractParams, JpegParams, PngParams, StegoOptions};
+use strhide::stego::png::cost::{HillCostModel, SuniwardCostModel};
+use strhide::stego::png::engine::{
+    decode_png, embed_png_with_format_and_freshness, encode_png, extract_png_with_format,
 };
-use strhide::stego::traits::{JpegCostModel, SpatialCostModel};
+use strhide::stego::prng::deterministic_payload;
+use strhide::stego::traits::{JpegCostModel, PngCostModel};
 
 const DEFAULT_PAYLOAD_SIZE: usize = 65536; // 64 KiB
 const DEFAULT_SEED: u64 = 42;
@@ -146,11 +146,11 @@ fn format_duration(dur: std::time::Duration) -> String {
 fn profile_png_with_model(
     path: &Path,
     file_bytes: &[u8],
-    image: &strhide::stego::spatial::engine::RawImage,
+    image: &strhide::stego::png::engine::RawImage,
     d_decode: std::time::Duration,
     d_encode: std::time::Duration,
     payload: &[u8],
-    model: &dyn SpatialCostModel,
+    model: &dyn PngCostModel,
     password: &str,
 ) {
     println!(
@@ -159,14 +159,14 @@ fn profile_png_with_model(
         model.description()
     );
 
-    let spatial_params = SpatialParams::default();
+    let png_params = PngParams::default();
     let t1 = Instant::now();
     let costs = model.compute_cost(
         &image.pixels,
         image.width as usize,
         image.height as usize,
         image.channels,
-        &spatial_params,
+        &png_params,
     );
     let d_cost = t1.elapsed();
     println!(
@@ -195,14 +195,14 @@ fn profile_png_with_model(
         ..Default::default()
     };
     let t4 = Instant::now();
-    let stego_png = match embed_spatial_with_profile_and_freshness(
+    let stego_png = match embed_png_with_format_and_freshness(
         file_bytes,
         payload,
         options.password.as_deref(),
         options.stego_domain.as_deref(),
-        &strhide::stego::format::OFFICIAL_SPATIAL,
+        &strhide::stego::format::OFFICIAL_PNG_FORMAT,
         model,
-        &options.spatial_params,
+        &options.png_params,
         options.freshness,
     ) {
         Ok(bytes) => bytes,
@@ -234,13 +234,13 @@ fn profile_png_with_model(
     );
 
     let t5 = Instant::now();
-    let extracted = match extract_spatial_with_profile(
+    let extracted = match extract_png_with_format(
         &stego_png,
         options.password.as_deref(),
         options.stego_domain.as_deref(),
-        &strhide::stego::format::OFFICIAL_SPATIAL,
+        &strhide::stego::format::OFFICIAL_PNG_FORMAT,
         model,
-        &options.spatial_params,
+        &options.png_params,
     ) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -324,7 +324,7 @@ fn profile_png(path: &Path, payload: &[u8], algo: &str, password: &str) {
     let hill = HillCostModel;
     let suniward = SuniwardCostModel;
 
-    let models: Vec<&dyn SpatialCostModel> = match algo {
+    let models: Vec<&dyn PngCostModel> = match algo {
         "hill" => vec![&hill],
         "suniward" => vec![&suniward],
         _ => vec![&hill, &suniward],
@@ -382,7 +382,7 @@ fn profile_jpeg_with_model(
         payload,
         options.password.as_deref(),
         options.stego_domain.as_deref(),
-        &DEFAULT_FORMAT,
+        &DEFAULT_JPEG_FORMAT,
         &options.jpeg_params,
         model,
         options.freshness,
@@ -418,7 +418,7 @@ fn profile_jpeg_with_model(
         &stego_jpg,
         options.password.as_deref(),
         options.stego_domain.as_deref(),
-        &DEFAULT_FORMAT,
+        &DEFAULT_JPEG_FORMAT,
         &ExtractParams::default(),
     ) {
         Ok(bytes) => bytes,

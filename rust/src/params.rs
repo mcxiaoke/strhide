@@ -17,7 +17,7 @@
 //!
 //! Every profile field is a `'static` borrow (or a [`Copy`] value), so a host
 //! can declare its whole private dialect — including the image
-//! [`FormatProfile`] — as a `const` item with zero runtime cost:
+//! [`JpegFormatProfile`] — as a `const` item with zero runtime cost:
 //!
 //! ```rust
 //! use strhide::params::Profile;
@@ -42,7 +42,9 @@
 
 use crate::crypto::{BUILTIN_DEFAULT_KEY, CHUNK_SIZE, MAX_CHUNK_SIZE};
 #[cfg(feature = "stego")]
-use crate::stego::format::{DEFAULT_FORMAT, FormatProfile, OFFICIAL_SPATIAL, SpatialFormatProfile};
+use crate::stego::format::{
+    DEFAULT_JPEG_FORMAT, JpegFormatProfile, OFFICIAL_PNG_FORMAT, PngFormatProfile,
+};
 
 /// Standard high-entropy binary header magic (8 bytes): SHA-256("strhide-standard-header-v2")[..8]
 pub const STANDARD_HEADER_MAGIC: [u8; 8] = [0xb7, 0x54, 0x2c, 0x82, 0x7e, 0x31, 0x1d, 0x6e];
@@ -266,17 +268,17 @@ pub struct StegoProfile {
     /// An explicit password always wins over this value.
     pub default_secret: Option<&'static str>,
     /// Custom stego domain tag for isolating the HKDF key derivation domain.
-    pub stego_domain: Option<&'static str>,
+    pub domain: Option<&'static str>,
     /// Private JPEG V3 wire-format identity. `None` means the official
-    /// [`DEFAULT_FORMAT`].
+    /// [`DEFAULT_JPEG_FORMAT`].
     ///
     /// Because the format decides the superblock/extension geometry and the
     /// slot grid, a private format makes the carrier unreadable with an
     /// official binary -- exactly like a private secret.
-    pub format: Option<FormatProfile>,
-    /// Private spatial (PNG) wire-format identity. `None` means the official
-    /// [`OFFICIAL_SPATIAL`].
-    pub spatial: Option<SpatialFormatProfile>,
+    pub jpeg: Option<JpegFormatProfile>,
+    /// Private PNG spatial wire-format identity. `None` means the official
+    /// [`OFFICIAL_PNG_FORMAT`].
+    pub png: Option<PngFormatProfile>,
 }
 
 #[cfg(feature = "stego")]
@@ -285,9 +287,9 @@ impl StegoProfile {
     pub const fn new() -> Self {
         Self {
             default_secret: None,
-            stego_domain: None,
-            format: None,
-            spatial: None,
+            domain: None,
+            jpeg: None,
+            png: None,
         }
     }
 
@@ -299,21 +301,21 @@ impl StegoProfile {
         self
     }
 
-    /// Set [`stego_domain`](Self::stego_domain).
+    /// Set [`domain`](Self::domain).
     pub const fn with_stego_domain(mut self, domain: &'static str) -> Self {
-        self.stego_domain = Some(domain);
+        self.domain = Some(domain);
         self
     }
 
-    /// Set [`format`](Self::format).
-    pub const fn with_format(mut self, format: FormatProfile) -> Self {
-        self.format = Some(format);
+    /// Set [`jpeg`](Self::jpeg).
+    pub const fn with_jpeg_format(mut self, format: JpegFormatProfile) -> Self {
+        self.jpeg = Some(format);
         self
     }
 
-    /// Set [`spatial`](Self::spatial).
-    pub const fn with_spatial(mut self, spatial: SpatialFormatProfile) -> Self {
-        self.spatial = Some(spatial);
+    /// Set [`png`](Self::png).
+    pub const fn with_png_format(mut self, png: PngFormatProfile) -> Self {
+        self.png = Some(png);
         self
     }
 
@@ -326,34 +328,34 @@ impl StegoProfile {
 
     /// Custom stego domain tag, or `None` when the official default derivation is used.
     pub fn stego_domain(&self) -> Option<&str> {
-        self.stego_domain.filter(|s| !s.is_empty())
+        self.domain.filter(|s| !s.is_empty())
     }
 
-    /// Wire-format identity to use: the private [`format`](Self::format) when
-    /// set, otherwise the official [`DEFAULT_FORMAT`].
-    pub fn format_profile(&self) -> &FormatProfile {
-        match self.format.as_ref() {
+    /// Wire-format identity to use: the private [`jpeg`](Self::jpeg) when
+    /// set, otherwise the official [`DEFAULT_JPEG_FORMAT`].
+    pub fn jpeg_format(&self) -> &JpegFormatProfile {
+        match self.jpeg.as_ref() {
             Some(format) => format,
-            None => &DEFAULT_FORMAT,
+            None => &DEFAULT_JPEG_FORMAT,
         }
     }
 
-    /// Spatial wire-format identity to use: the private [`spatial`](Self::spatial) when
-    /// set, otherwise the official [`OFFICIAL_SPATIAL`].
-    pub fn spatial_profile(&self) -> &SpatialFormatProfile {
-        match self.spatial.as_ref() {
-            Some(spatial) => spatial,
-            None => &OFFICIAL_SPATIAL,
+    /// PNG wire-format identity to use: the private [`png`](Self::png) when
+    /// set, otherwise the official [`OFFICIAL_PNG_FORMAT`].
+    pub fn png_format(&self) -> &PngFormatProfile {
+        match self.png.as_ref() {
+            Some(png) => png,
+            None => &OFFICIAL_PNG_FORMAT,
         }
     }
 
-    /// True when no private secret, domain, format, or spatial profile is set (official
+    /// True when no private secret, domain, or format profile is set (official
     /// behaviour).
     pub fn is_official(&self) -> bool {
         self.secret().is_none()
             && self.stego_domain().is_none()
-            && self.format.is_none()
-            && self.spatial.is_none()
+            && self.jpeg.is_none()
+            && self.png.is_none()
     }
 }
 
@@ -466,21 +468,21 @@ impl Profile {
         self
     }
 
-    /// Set the private image wire-format identity.
-    pub const fn with_format_profile(mut self, format: FormatProfile) -> Self {
-        self.stego = self.stego.with_format(format);
+    /// Set the private JPEG wire-format identity.
+    pub const fn with_jpeg_format(mut self, format: JpegFormatProfile) -> Self {
+        self.stego = self.stego.with_jpeg_format(format);
         self
     }
 
-    /// Set the private spatial (PNG) wire-format identity.
-    pub const fn with_spatial_profile(mut self, spatial: SpatialFormatProfile) -> Self {
-        self.stego = self.stego.with_spatial(spatial);
+    /// Set the private PNG wire-format identity.
+    pub const fn with_png_format(mut self, png: PngFormatProfile) -> Self {
+        self.stego = self.stego.with_png_format(png);
         self
     }
 
-    /// Spatial wire-format identity (private if set, else official).
-    pub fn spatial_profile(&self) -> &SpatialFormatProfile {
-        self.stego.spatial_profile()
+    /// PNG wire-format identity (private if set, else official).
+    pub fn png_format(&self) -> &PngFormatProfile {
+        self.stego.png_format()
     }
 
     /// Private content-domain secret, if any.
@@ -496,9 +498,9 @@ impl Profile {
         self.stego.stego_domain()
     }
 
-    /// Image wire-format identity (private if set, else official).
-    pub fn format_profile(&self) -> &FormatProfile {
-        self.stego.format_profile()
+    /// JPEG wire-format identity (private if set, else official).
+    pub fn jpeg_format(&self) -> &JpegFormatProfile {
+        self.stego.jpeg_format()
     }
 
     /// Secret used when no user password is supplied.
@@ -556,7 +558,7 @@ mod tests {
         assert_eq!(p.header_magic(), STANDARD_HEADER_MAGIC);
         assert_eq!(p.trailer_magic(), STANDARD_TRAILER_MAGIC);
         assert!(p.locator_magic().is_none());
-        assert_eq!(p.format_profile(), &DEFAULT_FORMAT);
+        assert_eq!(p.jpeg_format(), &DEFAULT_JPEG_FORMAT);
     }
 
     #[test]
@@ -661,14 +663,14 @@ mod tests {
 
     #[test]
     fn private_format_makes_the_profile_private() {
-        // A private FormatProfile is a non-official dialect, and it is the
-        // identity returned by format_profile().
-        let mut custom = DEFAULT_FORMAT;
+        // A private JpegFormatProfile is a non-official dialect, and it is the
+        // identity returned by jpeg_format().
+        let mut custom = DEFAULT_JPEG_FORMAT;
         custom.format_minor = 1;
-        let p = Profile::new().with_format_profile(custom);
+        let p = Profile::new().with_jpeg_format(custom);
         assert!(!p.is_official(), "a private format is not official");
-        assert_eq!(p.format_profile(), &custom);
-        assert_eq!(p.stego.format, Some(custom));
+        assert_eq!(p.jpeg_format(), &custom);
+        assert_eq!(p.stego.jpeg, Some(custom));
     }
 
     #[test]

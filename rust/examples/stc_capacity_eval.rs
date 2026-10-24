@@ -21,19 +21,17 @@ use rand::{RngExt, SeedableRng};
 use rayon::prelude::*;
 
 use strhide::analysis::scan_file;
-use strhide::stego::format::DEFAULT_FORMAT;
+use strhide::stego::format::DEFAULT_JPEG_FORMAT;
 use strhide::stego::jpeg::cost::UerdCostModel;
 use strhide::stego::jpeg::engine::{
     embed_jpeg, extract_jpeg, layout_for_payload, probe_jpeg_capacity,
 };
 use strhide::stego::jpeg::geometry::geometry_for_carrier;
 use strhide::stego::params::ExtractParams;
-use strhide::stego::params::{JpegParams, SpatialParams, StegoCodec};
-use strhide::stego::spatial::cost::HillCostModel;
-use strhide::stego::spatial::engine::{
-    decode_png, embed_spatial, extract_spatial, probe_spatial_capacity,
-};
-use strhide::stego::traits::{JpegCostModel, SpatialCostModel};
+use strhide::stego::params::{JpegParams, PngParams, StegoCodec};
+use strhide::stego::png::cost::HillCostModel;
+use strhide::stego::png::engine::{decode_png, embed_png, extract_png, probe_png_capacity};
+use strhide::stego::traits::{JpegCostModel, PngCostModel};
 
 const RATIOS: [f64; 7] = [0.10, 0.25, 0.50, 0.75, 0.90, 1.25, 1.75];
 const CODECS: [(&str, StegoCodec, u8); 4] = [
@@ -96,8 +94,8 @@ fn eval_png(png_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::er
         };
 
         // Probe capacity and decode cover
-        let default_spatial = SpatialParams::default();
-        let cap = match probe_spatial_capacity(
+        let default_spatial = PngParams::default();
+        let cap = match probe_png_capacity(
             &carrier_bytes,
             &HillCostModel,
             &default_spatial,
@@ -143,14 +141,14 @@ fn eval_png(png_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::er
                 let tid = task_id_counter.fetch_add(1, Ordering::Relaxed);
                 let tmp_stego_path = std::env::temp_dir().join(format!("eval_stego_{tid}.png"));
 
-                let params = SpatialParams {
+                let params = PngParams {
                     codec,
                     stc_u: u.max(1),
-                    ..SpatialParams::default()
+                    ..PngParams::default()
                 };
 
                 let started_embed = Instant::now();
-                let embed_res = embed_spatial(
+                let embed_res = embed_png(
                     &carrier_bytes,
                     &payload,
                     Some(TEST_PASSWORD),
@@ -186,12 +184,12 @@ fn eval_png(png_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::er
 
                         // Extract verification
                         let started_ext = Instant::now();
-                        let ext_res = extract_spatial(
+                        let ext_res = extract_png(
                             &stego_bytes,
                             Some(TEST_PASSWORD),
                             None,
                             &HillCostModel,
-                            &SpatialParams::default(),
+                            &PngParams::default(),
                         );
                         let extract_ms = started_ext.elapsed().as_millis();
                         let verify_ok = match ext_res {
@@ -336,7 +334,7 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
                     slot_budget: Some(budget),
                     ..JpegParams::default()
                 };
-                let u = layout_for_payload(&carrier_bytes, payload_len, &params, &DEFAULT_FORMAT)
+                let u = layout_for_payload(&carrier_bytes, payload_len, &params, &DEFAULT_JPEG_FORMAT)
                     .map(|layout| layout.u)
                     .unwrap_or(0);
 
@@ -346,7 +344,7 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
                     &payload,
                     Some(TEST_PASSWORD),
                     None,
-                    &DEFAULT_FORMAT,
+                    &DEFAULT_JPEG_FORMAT,
                     &params,
                     &UerdCostModel,
                 );
@@ -380,7 +378,7 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
                             &stego_bytes,
                             Some(TEST_PASSWORD),
                             None,
-                            &DEFAULT_FORMAT,
+                            &DEFAULT_JPEG_FORMAT,
                             &ExtractParams::default(),
                         );
                         let extract_ms = started_ext.elapsed().as_millis();

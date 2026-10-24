@@ -24,7 +24,7 @@
 //! Here six of every eight values can move either way, so probability mass
 //! crosses pair boundaries and the pairs are no longer individually flat.
 //! Direction choice is further biased towards the local mean by
-//! [`crate::stego::traits::SpatialCostModel::direction_costs`].
+//! [`crate::stego::traits::PngCostModel::direction_costs`].
 
 use std::io::{Cursor, Read, Write};
 
@@ -46,8 +46,8 @@ pub use crate::stego::header::{
     decode_header_word, encode_header_word,
 };
 use crate::stego::prng::{permute_indices, permute_prefix};
-use crate::stego::traits::SpatialCostModel;
-use crate::stego::{SpatialParams, StegoCapacityInfo, StegoCodec};
+use crate::stego::traits::PngCostModel;
+use crate::stego::{PngParams, StegoCapacityInfo, StegoCodec};
 
 /// Inclusive range of pixel values the spatial engine may embed into.
 ///
@@ -879,7 +879,7 @@ fn header_layout(
     image: &RawImage,
     password: Option<&str>,
     domain: Option<&str>,
-    spatial: &crate::stego::format::SpatialFormatProfile,
+    spatial: &crate::stego::format::PngFormatProfile,
 ) -> Vec<usize> {
     let mut slots = header_pool(image);
     let seed =
@@ -897,10 +897,10 @@ impl SlotPlan {
     fn build(
         image: &RawImage,
         costs: &[f64],
-        params: &SpatialParams,
+        params: &PngParams,
         password: Option<&str>,
         domain: Option<&str>,
-        spatial: &crate::stego::format::SpatialFormatProfile,
+        spatial: &crate::stego::format::PngFormatProfile,
     ) -> Result<Self, StrHideError> {
         let total_pixels = image.width as usize * image.height as usize;
         if costs.len() != total_pixels {
@@ -1065,36 +1065,36 @@ impl SlotPlan {
 // ---------------------------------------------------------------------------
 
 /// Embed secret payload into PNG carrier using content-adaptive spatial steganography.
-pub fn embed_spatial(
+pub fn embed_png(
     carrier_bytes: &[u8],
     payload: &[u8],
     password: Option<&str>,
     domain: Option<&str>,
-    cost_model: &dyn SpatialCostModel,
-    params: &SpatialParams,
+    cost_model: &dyn PngCostModel,
+    params: &PngParams,
 ) -> Result<Vec<u8>, StrHideError> {
-    embed_spatial_with_profile(
+    embed_png_with_format(
         carrier_bytes,
         payload,
         password,
         domain,
-        &crate::stego::format::OFFICIAL_SPATIAL,
+        &crate::stego::format::OFFICIAL_PNG_FORMAT,
         cost_model,
         params,
     )
 }
 
-/// [`embed_spatial`] with an explicit [`SpatialFormatProfile`].
-pub fn embed_spatial_with_profile(
+/// [`embed_png`] with an explicit [`PngFormatProfile`].
+pub fn embed_png_with_format(
     carrier_bytes: &[u8],
     payload: &[u8],
     password: Option<&str>,
     domain: Option<&str>,
-    spatial: &crate::stego::format::SpatialFormatProfile,
-    cost_model: &dyn SpatialCostModel,
-    params: &SpatialParams,
+    spatial: &crate::stego::format::PngFormatProfile,
+    cost_model: &dyn PngCostModel,
+    params: &PngParams,
 ) -> Result<Vec<u8>, StrHideError> {
-    embed_spatial_with_profile_and_freshness(
+    embed_png_with_format_and_freshness(
         carrier_bytes,
         payload,
         password,
@@ -1106,19 +1106,19 @@ pub fn embed_spatial_with_profile(
     )
 }
 
-/// [`embed_spatial_with_profile`] with an explicit [`Freshness`].
+/// [`embed_png_with_format`] with an explicit [`Freshness`].
 ///
 /// `Freshness::Seeded` makes the output byte-identical for the same carrier,
 /// payload, password and seed.
 #[allow(clippy::too_many_arguments)]
-pub fn embed_spatial_with_profile_and_freshness(
+pub fn embed_png_with_format_and_freshness(
     carrier_bytes: &[u8],
     payload: &[u8],
     password: Option<&str>,
     domain: Option<&str>,
-    spatial: &crate::stego::format::SpatialFormatProfile,
-    cost_model: &dyn SpatialCostModel,
-    params: &SpatialParams,
+    spatial: &crate::stego::format::PngFormatProfile,
+    cost_model: &dyn PngCostModel,
+    params: &PngParams,
     freshness: Freshness,
 ) -> Result<Vec<u8>, StrHideError> {
     params.validate()?;
@@ -1269,7 +1269,7 @@ pub fn embed_spatial_with_profile_and_freshness(
         algorithm_id: crate::stego::registry::CostModelRegistry::spatial_wire_id(cost_model.id())
             .ok_or_else(|| {
                 StrHideError::General(format!(
-                    "Spatial cost model '{}' has no wire id; a carrier written with it could not be extracted",
+                    "PNG cost model '{}' has no wire id; a carrier written with it could not be extracted",
                     cost_model.id()
                 ))
             })?,
@@ -1384,31 +1384,31 @@ pub fn embed_spatial_with_profile_and_freshness(
 }
 
 /// Extract secret payload from PNG carrier using content-adaptive spatial steganography.
-pub fn extract_spatial(
+pub fn extract_png(
     carrier_bytes: &[u8],
     password: Option<&str>,
     domain: Option<&str>,
-    cost_model: &dyn SpatialCostModel,
-    params: &SpatialParams,
+    cost_model: &dyn PngCostModel,
+    params: &PngParams,
 ) -> Result<Vec<u8>, StrHideError> {
-    extract_spatial_with_profile(
+    extract_png_with_format(
         carrier_bytes,
         password,
         domain,
-        &crate::stego::format::OFFICIAL_SPATIAL,
+        &crate::stego::format::OFFICIAL_PNG_FORMAT,
         cost_model,
         params,
     )
 }
 
-/// [`extract_spatial`] with an explicit [`SpatialFormatProfile`].
-pub fn extract_spatial_with_profile(
+/// [`extract_png`] with an explicit [`PngFormatProfile`].
+pub fn extract_png_with_format(
     carrier_bytes: &[u8],
     password: Option<&str>,
     domain: Option<&str>,
-    spatial: &crate::stego::format::SpatialFormatProfile,
-    cost_model: &dyn SpatialCostModel,
-    params: &SpatialParams,
+    spatial: &crate::stego::format::PngFormatProfile,
+    cost_model: &dyn PngCostModel,
+    params: &PngParams,
 ) -> Result<Vec<u8>, StrHideError> {
     params.validate()?;
     let image = decode_png(carrier_bytes)?;
@@ -1592,34 +1592,34 @@ pub fn extract_spatial_with_profile(
 }
 
 /// Probe capacity of PNG carrier for spatial content-adaptive steganography.
-pub fn probe_spatial_capacity(
+pub fn probe_png_capacity(
     carrier_bytes: &[u8],
-    cost_model: &dyn SpatialCostModel,
-    params: &SpatialParams,
+    cost_model: &dyn PngCostModel,
+    params: &PngParams,
     safety_level: crate::stego::SafetyLevel,
     password: Option<&str>,
     domain: Option<&str>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
-    probe_spatial_capacity_with_profile(
+    probe_png_capacity_with_format(
         carrier_bytes,
         cost_model,
         params,
         safety_level,
         password,
         domain,
-        &crate::stego::format::OFFICIAL_SPATIAL,
+        &crate::stego::format::OFFICIAL_PNG_FORMAT,
     )
 }
 
-/// [`probe_spatial_capacity`] with an explicit [`SpatialFormatProfile`].
-pub fn probe_spatial_capacity_with_profile(
+/// [`probe_png_capacity`] with an explicit [`PngFormatProfile`].
+pub fn probe_png_capacity_with_format(
     carrier_bytes: &[u8],
-    cost_model: &dyn SpatialCostModel,
-    params: &SpatialParams,
+    cost_model: &dyn PngCostModel,
+    params: &PngParams,
     safety_level: crate::stego::SafetyLevel,
     password: Option<&str>,
     domain: Option<&str>,
-    spatial: &crate::stego::format::SpatialFormatProfile,
+    spatial: &crate::stego::format::PngFormatProfile,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     params.validate()?;
     let image = decode_png(carrier_bytes)?;
@@ -1711,8 +1711,8 @@ pub fn probe_spatial_capacity_with_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stego::params::SpatialParams;
-    use crate::stego::spatial::cost::HillCostModel;
+    use crate::stego::params::PngParams;
+    use crate::stego::png::cost::HillCostModel;
 
     /// Craft a PNG: IHDR + ancillary chunks + one IDAT + IEND, with the
     /// given per-row filters applied to `pixels` (RGB, 8-bit).
@@ -1928,11 +1928,11 @@ mod tests {
         );
 
         let payload = b"container-fidelity-payload";
-        let params = SpatialParams::default();
+        let params = PngParams::default();
         let stego =
-            embed_spatial(&png, payload, Some("pw"), None, &HillCostModel, &params).expect("embed");
+            embed_png(&png, payload, Some("pw"), None, &HillCostModel, &params).expect("embed");
         let extracted =
-            extract_spatial(&stego, Some("pw"), None, &HillCostModel, &params).expect("extract");
+            extract_png(&stego, Some("pw"), None, &HillCostModel, &params).expect("extract");
         assert_eq!(extracted, payload);
 
         let before = decode_png(&png).expect("decode");
@@ -1977,21 +1977,21 @@ mod tests {
         );
 
         let payload = b"stc-roundtrip-payload";
-        let params = SpatialParams {
+        let params = PngParams {
             codec: StegoCodec::Stc,
             stc_h: 8,
-            ..SpatialParams::default()
+            ..PngParams::default()
         };
         let stego =
-            embed_spatial(&png, payload, Some("pw"), None, &HillCostModel, &params).expect("embed");
+            embed_png(&png, payload, Some("pw"), None, &HillCostModel, &params).expect("embed");
 
         // The codec travels in the header, so an extractor configured with Hamming
         // must still read the carrier correctly via header self-description.
-        let extract_params = SpatialParams {
+        let extract_params = PngParams {
             codec: StegoCodec::Hamming,
-            ..SpatialParams::default()
+            ..PngParams::default()
         };
-        let extracted = extract_spatial(&stego, Some("pw"), None, &HillCostModel, &extract_params)
+        let extracted = extract_png(&stego, Some("pw"), None, &HillCostModel, &extract_params)
             .expect("extract");
         assert_eq!(extracted, payload, "STC must be self-describing");
 
@@ -2082,8 +2082,8 @@ mod tests {
         );
 
         // And through a full embed/extract round-trip.
-        let params = SpatialParams::default();
-        let stego = embed_spatial(
+        let params = PngParams::default();
+        let stego = embed_png(
             &png,
             b"split-idat",
             Some("pw"),
@@ -2099,7 +2099,7 @@ mod tests {
             "embedding must not collapse the IDAT run"
         );
         let extracted =
-            extract_spatial(&stego, Some("pw"), None, &HillCostModel, &params).expect("extract");
+            extract_png(&stego, Some("pw"), None, &HillCostModel, &params).expect("extract");
         assert_eq!(extracted, b"split-idat");
     }
 
@@ -2124,21 +2124,21 @@ mod tests {
         let mut change_rates = Vec::new();
         let mut capacities = Vec::new();
         for stc_u in [1u8, 2, 3] {
-            let params = SpatialParams {
+            let params = PngParams {
                 codec: StegoCodec::Stc,
                 stc_h: 8,
                 stc_u,
-                ..SpatialParams::default()
+                ..PngParams::default()
             };
             // Seeded, not random: the salt drives the slot permutation and the
             // trellis columns, so a random draw left the change counts (and
             // this test's outcome) to luck. Same inputs now give the same file.
-            let stego = embed_spatial_with_profile_and_freshness(
+            let stego = embed_png_with_format_and_freshness(
                 &png,
                 payload,
                 Some("pw"),
                 None,
-                &crate::stego::format::OFFICIAL_SPATIAL,
+                &crate::stego::format::OFFICIAL_PNG_FORMAT,
                 &HillCostModel,
                 &params,
                 Freshness::Seeded([0x5A; 32]),
@@ -2147,12 +2147,12 @@ mod tests {
 
             // The extractor still defaults to Hamming: `u` and `h` must arrive
             // through the header.
-            let extracted = extract_spatial(
+            let extracted = extract_png(
                 &stego,
                 Some("pw"),
                 None,
                 &HillCostModel,
-                &SpatialParams::default(),
+                &PngParams::default(),
             )
             .unwrap_or_else(|e| panic!("u={stc_u}: extract failed: {e}"));
             assert_eq!(extracted, payload, "u={stc_u}: must be self-describing");
@@ -2171,7 +2171,7 @@ mod tests {
             }
             change_rates.push(changed as f64 / bits as f64);
 
-            let cap = probe_spatial_capacity(
+            let cap = probe_png_capacity(
                 &png,
                 &HillCostModel,
                 &params,
@@ -2206,12 +2206,12 @@ mod tests {
         let pixels = row_correlated_pixels(w, h);
         let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
 
-        let auto_params = SpatialParams::default();
+        let auto_params = PngParams::default();
         assert_eq!(auto_params.codec, StegoCodec::Auto);
 
         // Light payload: automatically selects STC u=3
         let light_payload = b"short-auto-payload";
-        let stego_light = embed_spatial(
+        let stego_light = embed_png(
             &png,
             light_payload,
             Some("pw"),
@@ -2220,18 +2220,18 @@ mod tests {
             &auto_params,
         )
         .expect("embed light");
-        let rec_light = extract_spatial(
+        let rec_light = extract_png(
             &stego_light,
             Some("pw"),
             None,
             &HillCostModel,
-            &SpatialParams::default(),
+            &PngParams::default(),
         )
         .expect("extract light");
         assert_eq!(rec_light, light_payload);
 
         // Verify that capacity probe reports recommended bytes anchored to high-stealth
-        let cap = probe_spatial_capacity(
+        let cap = probe_png_capacity(
             &png,
             &HillCostModel,
             &auto_params,
@@ -2252,10 +2252,10 @@ mod tests {
         let (w, h) = (128usize, 128usize);
         let pixels = row_correlated_pixels(w, h);
         let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
-        let params = SpatialParams::default();
+        let params = PngParams::default();
 
         for password in [None, Some("pw"), Some("a-completely-different-password")] {
-            let cap = probe_spatial_capacity(
+            let cap = probe_png_capacity(
                 &png,
                 &HillCostModel,
                 &params,
@@ -2266,7 +2266,7 @@ mod tests {
             .expect("probe");
             assert!(cap.max_raw_payload_bytes > 0);
             let payload = vec![0x5Au8; cap.max_raw_payload_bytes];
-            embed_spatial(&png, &payload, password, None, &HillCostModel, &params).unwrap_or_else(
+            embed_png(&png, &payload, password, None, &HillCostModel, &params).unwrap_or_else(
                 |e| {
                     panic!(
                         "password {password:?}: probe reported {} bytes fit but embed failed: {e}",
@@ -2283,11 +2283,11 @@ mod tests {
         let pixels = row_correlated_pixels(w, h);
         let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
 
-        let params = SpatialParams::default();
+        let params = PngParams::default();
         let payload = b"cross-domain-isolation-test";
 
         // Embed under domain "finance.sec"
-        let stego = embed_spatial(
+        let stego = embed_png(
             &png,
             payload,
             Some("shared-pwd"),
@@ -2298,7 +2298,7 @@ mod tests {
         .expect("embed with domain");
 
         // Extract with matching domain succeeds
-        let recovered = extract_spatial(
+        let recovered = extract_png(
             &stego,
             Some("shared-pwd"),
             Some("finance.sec"),
@@ -2309,15 +2309,14 @@ mod tests {
         assert_eq!(recovered, payload);
 
         // Extract with default domain (None) fails
-        let err_default =
-            extract_spatial(&stego, Some("shared-pwd"), None, &HillCostModel, &params);
+        let err_default = extract_png(&stego, Some("shared-pwd"), None, &HillCostModel, &params);
         assert!(
             matches!(err_default, Err(StrHideError::NoHiddenData(_))),
             "extracting with default domain must fail as NoHiddenData"
         );
 
         // Extract with different domain fails
-        let err_other = extract_spatial(
+        let err_other = extract_png(
             &stego,
             Some("shared-pwd"),
             Some("hr.records"),
@@ -2338,28 +2337,28 @@ mod tests {
         let pixels = row_correlated_pixels(w, h);
         let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
 
-        let cap_paranoid = probe_spatial_capacity(
+        let cap_paranoid = probe_png_capacity(
             &png,
             &HillCostModel,
-            &SpatialParams::default(),
+            &PngParams::default(),
             SafetyLevel::Paranoid,
             Some("test-pw"),
             None,
         )
         .expect("probe paranoid");
-        let cap_high = probe_spatial_capacity(
+        let cap_high = probe_png_capacity(
             &png,
             &HillCostModel,
-            &SpatialParams::default(),
+            &PngParams::default(),
             SafetyLevel::High,
             Some("test-pw"),
             None,
         )
         .expect("probe high");
-        let cap_balanced = probe_spatial_capacity(
+        let cap_balanced = probe_png_capacity(
             &png,
             &HillCostModel,
-            &SpatialParams::default(),
+            &PngParams::default(),
             SafetyLevel::Balanced,
             Some("test-pw"),
             None,
@@ -2376,15 +2375,15 @@ mod tests {
         );
 
         // Test enforcement
-        let mut enforced_params = SpatialParams {
+        let mut enforced_params = PngParams {
             safety_level: SafetyLevel::Paranoid,
             safety_enforcement: SafetyEnforcement::Enforced,
-            ..SpatialParams::default()
+            ..PngParams::default()
         };
 
         // Oversize for Paranoid
         let large_payload = vec![0x42; cap_balanced.recommended_max_bytes];
-        let res = embed_spatial(
+        let res = embed_png(
             &png,
             &large_payload,
             Some("test-pw"),
@@ -2399,7 +2398,7 @@ mod tests {
 
         // Same payload with Advisory succeeds
         enforced_params.safety_enforcement = SafetyEnforcement::Advisory;
-        let ok_res = embed_spatial(
+        let ok_res = embed_png(
             &png,
             &large_payload,
             Some("test-pw"),
@@ -2509,12 +2508,11 @@ mod tests {
         let (w, h) = (128usize, 128usize);
         let pixels = row_correlated_pixels(w, h);
         let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
-        let params = SpatialParams::default();
+        let params = PngParams::default();
         let payload = b"single-channel-layout";
         let stego =
-            embed_spatial(&png, payload, Some("pw"), None, &HillCostModel, &params).expect("embed");
-        let back =
-            extract_spatial(&stego, Some("pw"), None, &HillCostModel, &params).expect("extract");
+            embed_png(&png, payload, Some("pw"), None, &HillCostModel, &params).expect("embed");
+        let back = extract_png(&stego, Some("pw"), None, &HillCostModel, &params).expect("extract");
         assert_eq!(back, payload);
 
         let before = decode_png(&png).expect("decode");
@@ -2540,8 +2538,8 @@ mod tests {
         let (w, h) = (192usize, 192usize);
         let pixels = row_correlated_pixels(w, h);
         let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
-        let params = SpatialParams::default();
-        let cap = probe_spatial_capacity(
+        let params = PngParams::default();
+        let cap = probe_png_capacity(
             &png,
             &HillCostModel,
             &params,
@@ -2554,10 +2552,9 @@ mod tests {
         // The probe reports the three-channel ceiling, so this payload can only
         // fit with `ChannelMode::Rgb`.
         let payload = noise_payload(cap.max_raw_payload_bytes);
-        let stego = embed_spatial(&png, &payload, Some("pw"), None, &HillCostModel, &params)
+        let stego = embed_png(&png, &payload, Some("pw"), None, &HillCostModel, &params)
             .expect("embed at the reported ceiling");
-        let back =
-            extract_spatial(&stego, Some("pw"), None, &HillCostModel, &params).expect("extract");
+        let back = extract_png(&stego, Some("pw"), None, &HillCostModel, &params).expect("extract");
         assert_eq!(back, payload, "three-channel payload must round-trip");
 
         let before = decode_png(&png).expect("decode");
@@ -2617,7 +2614,7 @@ mod tests {
         }
         let png = craft_png(w as u32, h as u32, &pixels, &vec![0u8; h], &[], 1);
         let img = decode_png(&png).expect("decode");
-        let params = SpatialParams::default();
+        let params = PngParams::default();
         let costs = HillCostModel.compute_cost(&img.pixels, w, h, 3, &params);
         let plan = SlotPlan::build(
             &img,
@@ -2625,7 +2622,7 @@ mod tests {
             &params,
             Some("pw"),
             None,
-            &crate::stego::format::OFFICIAL_SPATIAL,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
         )
         .expect("plan");
 
@@ -2653,24 +2650,24 @@ mod tests {
     }
 
     #[test]
-    fn private_spatial_profile_bidirectional_isolation() {
+    fn private_png_format_bidirectional_isolation() {
         let (w, h) = (128usize, 128usize);
         let pixels = row_correlated_pixels(w, h);
         let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
         let payload = b"private-spatial-dialect-content-2026";
-        let params = SpatialParams::default();
+        let params = PngParams::default();
 
-        let private_spatial = crate::stego::format::SpatialFormatProfile {
+        let private_spatial = crate::stego::format::PngFormatProfile {
             fallback_secret: "private-secret-key-12345",
             domain_label: b"private-domain-label",
             hpos_salt: b"private-hpos-salt-xyz",
             hpos_label: b"private-hpos-label-xyz",
             stc_label: b"private-stc-label-xyz",
-            body: &crate::stego::format::DEFAULT_FORMAT,
+            body: &crate::stego::format::DEFAULT_JPEG_FORMAT,
         };
 
         // 1. Embed with private dialect
-        let stego_bytes = embed_spatial_with_profile(
+        let stego_bytes = embed_png_with_format(
             &png,
             payload,
             None,
@@ -2682,7 +2679,7 @@ mod tests {
         .expect("embed with private profile");
 
         // 2. Extract with same private dialect -> Success
-        let extracted = extract_spatial_with_profile(
+        let extracted = extract_png_with_format(
             &stego_bytes,
             None,
             None,
@@ -2694,17 +2691,17 @@ mod tests {
         assert_eq!(extracted, payload);
 
         // 3. Extract with official dialect -> Fail with NoHiddenData
-        let official_err = extract_spatial(&stego_bytes, None, None, &HillCostModel, &params);
+        let official_err = extract_png(&stego_bytes, None, None, &HillCostModel, &params);
         assert!(
             matches!(official_err, Err(StrHideError::NoHiddenData(_))),
             "official reader must see private stego as NoHiddenData, got {official_err:?}"
         );
 
         // 4. Official embed read by private reader -> Fail
-        let official_stego = embed_spatial(&png, payload, None, None, &HillCostModel, &params)
-            .expect("official embed");
+        let official_stego =
+            embed_png(&png, payload, None, None, &HillCostModel, &params).expect("official embed");
 
-        let private_err = extract_spatial_with_profile(
+        let private_err = extract_png_with_format(
             &official_stego,
             None,
             None,

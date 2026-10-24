@@ -7,8 +7,8 @@
 //! stages of low-pass smoothing, assigning low costs to complex textures and
 //! high costs to smooth/flat areas.
 
-use crate::stego::params::SpatialParams;
-use crate::stego::traits::SpatialCostModel;
+use crate::stego::params::PngParams;
+use crate::stego::traits::PngCostModel;
 
 pub struct HillCostModel;
 
@@ -18,7 +18,7 @@ impl Default for HillCostModel {
     }
 }
 
-impl SpatialCostModel for HillCostModel {
+impl PngCostModel for HillCostModel {
     fn id(&self) -> &'static str {
         "hill"
     }
@@ -33,7 +33,7 @@ impl SpatialCostModel for HillCostModel {
         width: usize,
         height: usize,
         channels: usize,
-        params: &SpatialParams,
+        params: &PngParams,
     ) -> Vec<f64> {
         let (h, w) = (height, width);
         if w == 0 || h == 0 || pixels.is_empty() {
@@ -73,7 +73,7 @@ impl SpatialCostModel for HillCostModel {
         // other window pair needs the derived value; the old constant 9 made
         // every p1 + p2 > 18 combination index out of bounds.
         // `p1`/`p2` are validated as positive odd numbers by
-        // `SpatialParams::validate`, so the halving below is exact.
+        // `PngParams::validate`, so the halving below is exact.
         let p1 = params.p1_window.max(1);
         let p2 = params.p2_window.max(1);
         let pad = 1 + (p1 - 1) / 2 + (p2 - 1) / 2;
@@ -278,7 +278,7 @@ mod tests {
     fn cost_map_is_invariant_under_class_internal_moves() {
         let (w, h) = (64usize, 48usize);
         let cover = texture_rgb(w, h);
-        let params = SpatialParams::default();
+        let params = PngParams::default();
         let model = HillCostModel;
 
         let base_cover = model.compute_cost(&cover, w, h, 3, &params);
@@ -328,7 +328,7 @@ mod tests {
         let centre = (3 * w + 3) * 3 + 1;
         pixels[centre] = 96;
 
-        let params = SpatialParams::default();
+        let params = PngParams::default();
         let model = HillCostModel;
         let base = model.compute_cost(&pixels, w, h, 3, &params);
         let (plus, minus) = model.direction_costs(&base, &pixels, w, h, 3, 1);

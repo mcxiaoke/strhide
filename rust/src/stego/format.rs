@@ -3,7 +3,7 @@
 //! Two things live here, both of them *compile-time* facts rather than runtime
 //! options:
 //!
-//! 1. [`FormatProfile`] — the identity of a wire format: the domain-separation
+//! 1. [`JpegFormatProfile`] — the identity of a wire format: the domain-separation
 //!    labels that feed every KDF, the superblock / extension geometry, the slot
 //!    grid rule, and the suite whitelist. Changing any of it produces a
 //!    *different format*: two binaries built with different profiles cannot read
@@ -20,11 +20,11 @@
 //! every constant an upstream detector could model as a fingerprint, and use it
 //! yourself. If those constants are `const` items scattered across modules, that
 //! means forking the crate. As a public value, a private build is a single
-//! `FormatProfile` literal plus `cargo build`.
+//! `JpegFormatProfile` literal plus `cargo build`.
 //!
 //! # Frozen once published
 //!
-//! `DEFAULT_FORMAT` is the wire format. Its fields are documented one by one
+//! `DEFAULT_JPEG_FORMAT` is the wire format. Its fields are documented one by one
 //! below; after the first release they may only be changed by bumping
 //! `format_major` (a new format), because every historical carrier was written
 //! with the old derivation.
@@ -187,7 +187,7 @@ impl GridRule {
 /// A mismatch on any of the derivation labels behaves exactly like a wrong
 /// password (`NoHiddenData`), which is the point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FormatProfile {
+pub struct JpegFormatProfile {
     /// Major version; a different value is a different format.
     pub format_major: u8,
     /// Minor version; only optional extensions bump it.
@@ -218,7 +218,7 @@ pub struct FormatProfile {
     pub suites: &'static [CipherSuite],
 }
 
-impl FormatProfile {
+impl JpegFormatProfile {
     /// Bits carried by the superblock (`sb_bytes * 8`).
     pub const fn superblock_bits(&self) -> usize {
         self.sb_bytes as usize * 8
@@ -248,7 +248,7 @@ impl FormatProfile {
     pub fn default_suite(&self) -> &'static CipherSuite {
         self.suite(DEFAULT_SUITE_ID)
             .or_else(|| self.suites.first())
-            .expect("a FormatProfile must list at least one cipher suite")
+            .expect("a JpegFormatProfile must list at least one cipher suite")
     }
 
     /// First structural problem with this profile, if any.
@@ -340,7 +340,7 @@ impl FormatProfile {
     pub fn validate(&self) -> Result<(), StrHideError> {
         match self.problem() {
             Some(problem) => Err(StrHideError::General(format!(
-                "Invalid FormatProfile: {problem}"
+                "Invalid JpegFormatProfile: {problem}"
             ))),
             None => Ok(()),
         }
@@ -349,7 +349,7 @@ impl FormatProfile {
 
 /// The v1 wire format: 44-byte superblock (718 slots), 4-way extension area,
 /// full AC grid, PBKDF2 suites 1 and 2.
-pub const DEFAULT_FORMAT: FormatProfile = FormatProfile {
+pub const DEFAULT_JPEG_FORMAT: JpegFormatProfile = JpegFormatProfile {
     format_major: 1,
     format_minor: 0,
     cover_digest_tag: b"strhide-cover-v1",
@@ -368,7 +368,7 @@ pub const DEFAULT_FORMAT: FormatProfile = FormatProfile {
 
 /// Identity and KDF derivation labels for spatial (PNG) steganography.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SpatialFormatProfile {
+pub struct PngFormatProfile {
     /// Stand-in secret used when neither a user password nor a private secret is provided.
     pub fallback_secret: &'static str,
     /// HKDF info label for domain subkey derivation.
@@ -380,16 +380,16 @@ pub struct SpatialFormatProfile {
     /// HKDF info label for STC trellis seed derivation.
     pub stc_label: &'static [u8],
     /// Format settings for cipher suite and payload keys.
-    pub body: &'static FormatProfile,
+    pub body: &'static JpegFormatProfile,
 }
 
-pub const OFFICIAL_SPATIAL: SpatialFormatProfile = SpatialFormatProfile {
+pub const OFFICIAL_PNG_FORMAT: PngFormatProfile = PngFormatProfile {
     fallback_secret: "strhide-default-content-stego-key-2026",
     domain_label: b"strhide-stego-domain-v1",
     hpos_salt: b"strhide-stego-hpos-salt-v2",
     hpos_label: b"strhide-stego-hpos-v2",
     stc_label: b"strhide-stc-trellis-v1",
-    body: &DEFAULT_FORMAT,
+    body: &DEFAULT_JPEG_FORMAT,
 };
 
 /// Domain-separated HKDF info string: `label || u64be(len) || domain`.
@@ -445,7 +445,11 @@ pub fn derive_master(
 /// `master` already costs one KDF, so an offline guess cannot locate the header
 /// without paying the suite's full price -- this is what closes the "fast
 /// password oracle" hole a plain structural check would open.
-pub fn header_perm_seed(fmt: &FormatProfile, master: &[u8; 32], domain: Option<&str>) -> [u8; 32] {
+pub fn header_perm_seed(
+    fmt: &JpegFormatProfile,
+    master: &[u8; 32],
+    domain: Option<&str>,
+) -> [u8; 32] {
     let info = info_with_domain(fmt.hpos_label, domain);
     let hk = Hkdf::<Sha256>::new(None, master);
     let mut out = [0u8; 32];
@@ -460,7 +464,7 @@ pub fn header_perm_seed(fmt: &FormatProfile, master: &[u8; 32], domain: Option<&
 /// salt: it only splits the master into per-carrier subkeys, so a precomputed
 /// table cannot be reused across carriers.
 pub fn body_keys(
-    fmt: &FormatProfile,
+    fmt: &JpegFormatProfile,
     master: &[u8; 32],
     salt: &[u8],
     domain: Option<&str>,
@@ -478,7 +482,7 @@ pub fn body_keys(
 }
 
 /// STC trellis seed, derived from the body permutation seed and the salt.
-pub fn stc_seed(fmt: &FormatProfile, perm_seed: &[u8; 32], salt: &[u8]) -> u64 {
+pub fn stc_seed(fmt: &JpegFormatProfile, perm_seed: &[u8; 32], salt: &[u8]) -> u64 {
     let hk = Hkdf::<Sha256>::new(Some(salt), perm_seed);
     let mut out = [0u8; 8];
     hk.expand(fmt.stc_label, &mut out)
@@ -490,7 +494,11 @@ pub fn stc_seed(fmt: &FormatProfile, perm_seed: &[u8; 32], salt: &[u8]) -> u64 {
 ///
 /// Domain-separated from the body trellis by the header salt material
 /// (`"hpos"`-derived seed), so header and body never share a matrix.
-pub fn header_stc_seed(fmt: &FormatProfile, header_seed: &[u8; 32], domain: Option<&str>) -> u64 {
+pub fn header_stc_seed(
+    fmt: &JpegFormatProfile,
+    header_seed: &[u8; 32],
+    domain: Option<&str>,
+) -> u64 {
     let mut label = Vec::with_capacity(fmt.stc_label.len() + 4);
     label.extend_from_slice(fmt.stc_label);
     label.extend_from_slice(b"-hdr");
@@ -499,7 +507,7 @@ pub fn header_stc_seed(fmt: &FormatProfile, header_seed: &[u8; 32], domain: Opti
 
 /// Seed of the extension-area trellis (separate from the superblock's).
 pub fn extension_stc_seed(
-    fmt: &FormatProfile,
+    fmt: &JpegFormatProfile,
     header_seed: &[u8; 32],
     domain: Option<&str>,
 ) -> u64 {
@@ -522,18 +530,18 @@ mod tests {
 
     #[test]
     fn default_profile_is_self_consistent() {
-        DEFAULT_FORMAT.validate().expect("default profile");
-        assert_eq!(DEFAULT_FORMAT.superblock_bits(), 352);
-        assert_eq!(DEFAULT_FORMAT.superblock_slots(), 718);
-        assert_eq!(DEFAULT_FORMAT.extension_slots(0), 4 * 7);
+        DEFAULT_JPEG_FORMAT.validate().expect("default profile");
+        assert_eq!(DEFAULT_JPEG_FORMAT.superblock_bits(), 352);
+        assert_eq!(DEFAULT_JPEG_FORMAT.superblock_slots(), 718);
+        assert_eq!(DEFAULT_JPEG_FORMAT.extension_slots(0), 4 * 7);
         // `n = u * (bits + h - 1)` must carry exactly `bits` bits.
-        let bits = DEFAULT_FORMAT.superblock_bits();
-        let n = DEFAULT_FORMAT.superblock_slots();
+        let bits = DEFAULT_JPEG_FORMAT.superblock_bits();
+        let n = DEFAULT_JPEG_FORMAT.superblock_slots();
         assert_eq!(
-            n / DEFAULT_FORMAT.sb_u as usize - (DEFAULT_FORMAT.sb_h as usize - 1),
+            n / DEFAULT_JPEG_FORMAT.sb_u as usize - (DEFAULT_JPEG_FORMAT.sb_h as usize - 1),
             bits
         );
-        assert_eq!(DEFAULT_FORMAT.header_slots(3), 718 + 4 * (24 + 7));
+        assert_eq!(DEFAULT_JPEG_FORMAT.header_slots(3), 718 + 4 * (24 + 7));
     }
 
     #[test]
@@ -545,35 +553,35 @@ mod tests {
             assert!(suite.cost() >= 200_000);
             last = suite.id;
         }
-        assert_eq!(DEFAULT_FORMAT.default_suite().id, DEFAULT_SUITE_ID);
+        assert_eq!(DEFAULT_JPEG_FORMAT.default_suite().id, DEFAULT_SUITE_ID);
         assert_eq!(DEFAULT_SUITE_ID, 1);
-        assert!(DEFAULT_FORMAT.suite(0).is_none());
-        assert!(DEFAULT_FORMAT.suite(RESERVED_SUITE_ARGON2ID).is_none());
-        assert!(DEFAULT_FORMAT.suite(9999).is_none());
+        assert!(DEFAULT_JPEG_FORMAT.suite(0).is_none());
+        assert!(DEFAULT_JPEG_FORMAT.suite(RESERVED_SUITE_ARGON2ID).is_none());
+        assert!(DEFAULT_JPEG_FORMAT.suite(9999).is_none());
     }
 
     #[test]
     fn invalid_profiles_are_rejected() {
-        let mut p = DEFAULT_FORMAT;
+        let mut p = DEFAULT_JPEG_FORMAT;
         p.grid_rule = GridRule {
             k_min: 0,
             k_max: 63,
         };
         assert!(p.validate().is_err(), "DC in the grid must be refused");
 
-        let mut p = DEFAULT_FORMAT;
+        let mut p = DEFAULT_JPEG_FORMAT;
         p.hpos_label = b"enc";
         assert!(p.validate().is_err(), "duplicate labels must be refused");
 
-        let mut p = DEFAULT_FORMAT;
+        let mut p = DEFAULT_JPEG_FORMAT;
         p.sb_h = 3;
         assert!(p.validate().is_err());
 
-        let mut p = DEFAULT_FORMAT;
+        let mut p = DEFAULT_JPEG_FORMAT;
         p.suites = &[];
         assert!(p.validate().is_err());
 
-        let mut p = DEFAULT_FORMAT;
+        let mut p = DEFAULT_JPEG_FORMAT;
         p.grid_rule = GridRule {
             k_min: 20,
             k_max: 10,
@@ -598,13 +606,13 @@ mod tests {
     #[test]
     fn key_layering_is_separated_and_stable() {
         let master = derive_master(&SUITE_PBKDF2_200K, "password", b"cover-digest").unwrap();
-        let hdr_a = header_perm_seed(&DEFAULT_FORMAT, &master, None);
-        let hdr_b = header_perm_seed(&DEFAULT_FORMAT, &master, Some("domain-a"));
+        let hdr_a = header_perm_seed(&DEFAULT_JPEG_FORMAT, &master, None);
+        let hdr_b = header_perm_seed(&DEFAULT_JPEG_FORMAT, &master, Some("domain-a"));
         assert_ne!(hdr_a, hdr_b, "domain must separate the header seed");
 
         let salt = [7u8; 16];
-        let (enc_a, perm_a) = body_keys(&DEFAULT_FORMAT, &master, &salt, None);
-        let (enc_b, perm_b) = body_keys(&DEFAULT_FORMAT, &master, &salt, Some("domain-a"));
+        let (enc_a, perm_a) = body_keys(&DEFAULT_JPEG_FORMAT, &master, &salt, None);
+        let (enc_b, perm_b) = body_keys(&DEFAULT_JPEG_FORMAT, &master, &salt, Some("domain-a"));
         assert_ne!(enc_a, enc_b);
         assert_ne!(perm_a, perm_b);
         assert_ne!(enc_a, perm_a, "key and permutation seed must differ");
@@ -612,22 +620,22 @@ mod tests {
         // Stable across calls: this is the whole "same cover + password = same
         // slot sequence" contract.
         assert_eq!(
-            body_keys(&DEFAULT_FORMAT, &master, &salt, None),
+            body_keys(&DEFAULT_JPEG_FORMAT, &master, &salt, None),
             (enc_a, perm_a)
         );
         assert_eq!(
-            stc_seed(&DEFAULT_FORMAT, &perm_a, &salt),
-            stc_seed(&DEFAULT_FORMAT, &perm_a, &salt)
+            stc_seed(&DEFAULT_JPEG_FORMAT, &perm_a, &salt),
+            stc_seed(&DEFAULT_JPEG_FORMAT, &perm_a, &salt)
         );
         assert_ne!(
-            stc_seed(&DEFAULT_FORMAT, &perm_a, &salt),
-            header_stc_seed(&DEFAULT_FORMAT, &hdr_a, None),
+            stc_seed(&DEFAULT_JPEG_FORMAT, &perm_a, &salt),
+            header_stc_seed(&DEFAULT_JPEG_FORMAT, &hdr_a, None),
             "header and body trellis seeds must be domain-separated"
         );
 
         // A different password or cover digest must move everything.
         let other = derive_master(&SUITE_PBKDF2_200K, "password2", b"cover-digest").unwrap();
-        assert_ne!(header_perm_seed(&DEFAULT_FORMAT, &other, None), hdr_a);
+        assert_ne!(header_perm_seed(&DEFAULT_JPEG_FORMAT, &other, None), hdr_a);
     }
 
     #[test]

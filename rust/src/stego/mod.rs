@@ -12,19 +12,19 @@ pub mod heif;
 pub mod hevc;
 pub mod jpeg;
 pub mod params;
+pub mod png;
 pub mod prng;
 pub mod registry;
-pub mod spatial;
 pub mod traits;
 pub mod wavelet;
 
 pub use envelope::Freshness;
 pub use format::{
-    CipherSuite, DEFAULT_FORMAT, FormatProfile, GridRule, OFFICIAL_SPATIAL, SpatialFormatProfile,
+    CipherSuite, DEFAULT_JPEG_FORMAT, GridRule, JpegFormatProfile, OFFICIAL_PNG_FORMAT,
+    PngFormatProfile,
 };
 pub use params::{
-    ExtractParams, JpegParams, SafetyEnforcement, SafetyLevel, SpatialParams, StegoCodec,
-    StegoOptions,
+    ExtractParams, JpegParams, PngParams, SafetyEnforcement, SafetyLevel, StegoCodec, StegoOptions,
 };
 pub use registry::CostModelRegistry;
 
@@ -60,7 +60,7 @@ pub fn embed_carrier_with_profile(
     // Validate the whole option set up front: a bad window size must surface as
     // a configuration error, not as a panic deep inside the HILL convolution or
     // as an opaque "no capacity" later.
-    options.spatial_params.validate()?;
+    options.png_params.validate()?;
     options.jpeg_params.validate()?;
 
     // Private dialect resolution happens exactly once, here: a configured
@@ -69,9 +69,9 @@ pub fn embed_carrier_with_profile(
     let secret = options.secret(profile);
     let domain = options.domain(profile);
 
-    let mut spatial_params = options.spatial_params.clone();
-    spatial_params.safety_level = options.safety_level;
-    spatial_params.safety_enforcement = options.safety_enforcement;
+    let mut png_params = options.png_params.clone();
+    png_params.safety_level = options.safety_level;
+    png_params.safety_enforcement = options.safety_enforcement;
 
     let mut jpeg_params = options.jpeg_params.clone();
     jpeg_params.safety_level = options.safety_level;
@@ -95,7 +95,7 @@ pub fn embed_carrier_with_profile(
             payload,
             secret,
             domain,
-            profile.format_profile(),
+            profile.jpeg_format(),
             &jpeg_params,
             &*model,
             options.freshness,
@@ -110,14 +110,14 @@ pub fn embed_carrier_with_profile(
                 ))
             },
         )?;
-        spatial::embed_spatial_with_profile_and_freshness(
+        png::embed_png_with_format_and_freshness(
             carrier_bytes,
             payload,
             secret,
             domain,
-            profile.spatial_profile(),
+            profile.png_format(),
             &*model,
-            &spatial_params,
+            &png_params,
             options.freshness,
         )
     } else if crate::adapters::heif::is_heif_bytes(carrier_bytes) {
@@ -162,7 +162,7 @@ pub fn extract_carrier_with_profile(
     options: &StegoOptions,
     profile: &Profile,
 ) -> Result<Vec<u8>, StrHideError> {
-    options.spatial_params.validate()?;
+    options.png_params.validate()?;
     options.jpeg_params.validate()?;
 
     let secret = options.secret(profile);
@@ -176,7 +176,7 @@ pub fn extract_carrier_with_profile(
             carrier_bytes,
             secret,
             domain,
-            profile.format_profile(),
+            profile.jpeg_format(),
             &options.extract_params,
         )
     } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
@@ -189,13 +189,13 @@ pub fn extract_carrier_with_profile(
                 ))
             },
         )?;
-        spatial::extract_spatial_with_profile(
+        png::extract_png_with_format(
             carrier_bytes,
             secret,
             domain,
-            profile.spatial_profile(),
+            profile.png_format(),
             &*model,
-            &options.spatial_params,
+            &options.png_params,
         )
     } else if crate::adapters::heif::is_heif_bytes(carrier_bytes) {
         // HEIF content-domain steganography: try Scheme C (HEVC CABAC in-place) first, then bridge
@@ -302,7 +302,7 @@ pub fn probe_carrier_capacity_with_profile(
     options: &StegoOptions,
     profile: &Profile,
 ) -> Result<StegoCapacityInfo, StrHideError> {
-    options.spatial_params.validate()?;
+    options.png_params.validate()?;
     options.jpeg_params.validate()?;
 
     // Same resolution as embed: an explicit password wins, the profile's stego
@@ -323,7 +323,7 @@ pub fn probe_carrier_capacity_with_profile(
             &*model,
             &options.jpeg_params,
             options.safety_level,
-            profile.format_profile(),
+            profile.jpeg_format(),
         )
     } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
         let model = CostModelRegistry::get_spatial_model(options.algorithm.as_deref()).ok_or_else(
@@ -334,14 +334,14 @@ pub fn probe_carrier_capacity_with_profile(
                 ))
             },
         )?;
-        spatial::probe_spatial_capacity_with_profile(
+        png::probe_png_capacity_with_format(
             carrier_bytes,
             &*model,
-            &options.spatial_params,
+            &options.png_params,
             options.safety_level,
             secret,
             domain,
-            profile.spatial_profile(),
+            profile.png_format(),
         )
     } else if crate::adapters::heif::is_heif_bytes(carrier_bytes) {
         if options.algorithm.as_deref() == Some("hevc")

@@ -20,7 +20,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use strhide::stego::format::DEFAULT_FORMAT;
+use strhide::stego::format::DEFAULT_JPEG_FORMAT;
 use strhide::stego::jpeg::cost::UerdCostModel;
 use strhide::stego::jpeg::engine::{embed_jpeg, extract_jpeg, layout_for_payload};
 use strhide::stego::params::{ExtractParams, JpegParams};
@@ -132,7 +132,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 slot_budget: Some(budget),
                 ..JpegParams::default()
             };
-            if let Ok(layout) = layout_for_payload(&cover, payload_len, &params, &DEFAULT_FORMAT) {
+            if let Ok(layout) =
+                layout_for_payload(&cover, payload_len, &params, &DEFAULT_JPEG_FORMAT)
+            {
                 u = layout.u;
             }
             let started = Instant::now();
@@ -141,7 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &payload,
                 Some(PASSWORD),
                 None,
-                &DEFAULT_FORMAT,
+                &DEFAULT_JPEG_FORMAT,
                 &params,
                 &UerdCostModel,
             ) else {
@@ -152,7 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &stego,
                 Some(PASSWORD),
                 None,
-                &DEFAULT_FORMAT,
+                &DEFAULT_JPEG_FORMAT,
                 &ExtractParams::default(),
             )?;
             assert_eq!(recovered, payload, "roundtrip failed for {path:?}");

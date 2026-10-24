@@ -8,7 +8,7 @@
 //!
 //! # Wire ids
 //!
-//! Spatial carriers store the cost model in the feature word
+//! PNG carriers store the cost model in the feature word
 //! ([`crate::stego::header::FeatureWord::algorithm_id`]) so extraction does not
 //! need the algorithm out of band. That id is a **permanent** contract: once a
 //! number has been written into a carrier it can never mean a different
@@ -19,8 +19,8 @@
 use std::sync::Arc;
 
 use crate::stego::jpeg::cost::{JuniwardCostModel, UerdCostModel};
-use crate::stego::spatial::cost::{HillCostModel, SuniwardCostModel};
-use crate::stego::traits::{JpegCostModel, SpatialCostModel};
+use crate::stego::png::cost::{HillCostModel, SuniwardCostModel};
+use crate::stego::traits::{JpegCostModel, PngCostModel};
 
 /// Wire id of [`HillCostModel`]. Reserved permanently.
 pub const SPATIAL_ALGORITHM_HILL: u8 = 1;
@@ -37,7 +37,7 @@ impl CostModelRegistry {
     /// "auto" stays on HILL. S-UNIWARD is available but the 2025-2026 CNN
     /// evaluations put HILL's detection rate *below* the UNIWARD family, so
     /// promoting it to the default would be a change with no evidence behind it.
-    pub fn get_spatial_model(name: Option<&str>) -> Option<Arc<dyn SpatialCostModel>> {
+    pub fn get_spatial_model(name: Option<&str>) -> Option<Arc<dyn PngCostModel>> {
         match name {
             None | Some("auto") | Some("hill") => Some(Arc::new(HillCostModel)),
             Some("suniward") => Some(Arc::new(SuniwardCostModel)),
@@ -87,7 +87,7 @@ impl CostModelRegistry {
     /// treated exactly like "no payload here", never as a fallback to the
     /// default model (a silent fallback would extract garbage instead of
     /// reporting that the carrier was written by a newer tool).
-    pub fn spatial_model_from_wire_id(id: u8) -> Option<Arc<dyn SpatialCostModel>> {
+    pub fn spatial_model_from_wire_id(id: u8) -> Option<Arc<dyn PngCostModel>> {
         Self::spatial_name_from_wire_id(id).and_then(|name| Self::get_spatial_model(Some(name)))
     }
 
@@ -181,7 +181,7 @@ mod tests {
                         CostModelRegistry::spatial_model_from_wire_id(id).is_some(),
                         "{name}: wire id {id} resolves to no model"
                     );
-                    crate::stego::params::SpatialParams::default()
+                    crate::stego::params::PngParams::default()
                         .validate()
                         .unwrap_or_else(|e| panic!("{name}: default params are invalid: {e}"));
                 }

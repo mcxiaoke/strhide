@@ -43,8 +43,8 @@ use crate::stego::envelope::{
     unpack_envelope_parts,
 };
 use crate::stego::format::{
-    DEFAULT_FORMAT, FormatProfile, body_keys, derive_master, extension_stc_seed, header_perm_seed,
-    header_stc_seed, stc_seed,
+    DEFAULT_JPEG_FORMAT, JpegFormatProfile, body_keys, derive_master, extension_stc_seed,
+    header_perm_seed, header_stc_seed, stc_seed,
 };
 use crate::stego::jpeg::dht::{self, AcSymbolSet};
 use crate::stego::jpeg::header_v3::{
@@ -193,7 +193,7 @@ struct CoverFrame {
 }
 
 impl CoverFrame {
-    fn read(fmt: &FormatProfile, coeffs: &JpegCoefficients) -> Self {
+    fn read(fmt: &JpegFormatProfile, coeffs: &JpegCoefficients) -> Self {
         let block_count = coeffs.components[0].blocks.len();
         let n_total = block_count * fmt.grid_rule.slots_per_block();
         Self {
@@ -213,7 +213,7 @@ impl CoverFrame {
 /// DC is never an embedding target, so this is identical before and after
 /// embedding and can salt the KDF that locates the header. That the digest must
 /// stay stable is exactly why `grid_rule` may never include `k = 0`.
-fn cover_digest(fmt: &FormatProfile, coeffs: &JpegCoefficients) -> [u8; 32] {
+fn cover_digest(fmt: &JpegFormatProfile, coeffs: &JpegCoefficients) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(fmt.cover_digest_tag);
     let block_count = coeffs.components.first().map_or(0, |c| c.blocks.len());
@@ -468,7 +468,7 @@ fn apply_deltas(
 
 /// Everything the two attempts share.
 struct EmbedContext<'a> {
-    fmt: &'a FormatProfile,
+    fmt: &'a JpegFormatProfile,
     suite: &'a crate::stego::format::CipherSuite,
     params: &'a JpegParams,
     cover: &'a CoverFrame,
@@ -542,7 +542,7 @@ pub fn embed_jpeg(
     payload: &[u8],
     password: Option<&str>,
     domain: Option<&str>,
-    fmt: &FormatProfile,
+    fmt: &JpegFormatProfile,
     params: &JpegParams,
     cost_model: &dyn JpegCostModel,
 ) -> Result<Vec<u8>, StrHideError> {
@@ -570,7 +570,7 @@ pub fn embed_jpeg_with_freshness(
     payload: &[u8],
     password: Option<&str>,
     domain: Option<&str>,
-    fmt: &FormatProfile,
+    fmt: &JpegFormatProfile,
     params: &JpegParams,
     cost_model: &dyn JpegCostModel,
     freshness: Freshness,
@@ -927,7 +927,7 @@ fn missing_symbol_stats(
 fn embed_slots(
     coeffs: &mut JpegCoefficients,
     slots: &[u32],
-    fmt: &FormatProfile,
+    fmt: &JpegFormatProfile,
     costs: &[f64],
     directions: Option<&[i8]>,
     table: Option<&AcSymbolSet>,
@@ -997,7 +997,7 @@ fn embed_slots(
 ///
 /// The three embed stages (superblock, extension area, body) append to the same
 /// log, so this restores the exact coefficients the attempt started from.
-fn rollback(coeffs: &mut JpegCoefficients, applied: &[(u32, i8)], fmt: &FormatProfile) {
+fn rollback(coeffs: &mut JpegCoefficients, applied: &[(u32, i8)], fmt: &JpegFormatProfile) {
     let blocks = &mut coeffs.components[0].blocks;
     for &(idx, delta) in applied.iter().rev() {
         let (bi, k) = v3_layout::slot_to_coeff(idx, fmt.grid_rule);
@@ -1020,7 +1020,7 @@ pub fn extract_jpeg(
     carrier_bytes: &[u8],
     password: Option<&str>,
     domain: Option<&str>,
-    fmt: &FormatProfile,
+    fmt: &JpegFormatProfile,
     extract: &ExtractParams,
 ) -> Result<Vec<u8>, StrHideError> {
     fmt.validate()?;
@@ -1188,7 +1188,7 @@ pub fn extract_jpeg(
 fn read_superblock(
     coeffs: &JpegCoefficients,
     slots: &[u32],
-    fmt: &FormatProfile,
+    fmt: &JpegFormatProfile,
     hdr_seed: &[u8; 32],
     domain: Option<&str>,
 ) -> Option<Superblock> {
@@ -1249,17 +1249,17 @@ pub fn probe_jpeg_capacity(
         cost_model,
         params,
         safety_level,
-        &DEFAULT_FORMAT,
+        &DEFAULT_JPEG_FORMAT,
     )
 }
 
-/// [`probe_jpeg_capacity`] for a non-default [`FormatProfile`].
+/// [`probe_jpeg_capacity`] for a non-default [`JpegFormatProfile`].
 pub fn probe_capacity_with_format(
     carrier_bytes: &[u8],
     cost_model: &dyn JpegCostModel,
     params: &JpegParams,
     safety_level: crate::stego::SafetyLevel,
-    fmt: &FormatProfile,
+    fmt: &JpegFormatProfile,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     fmt.validate()?;
     params.validate()?;
@@ -1340,7 +1340,7 @@ pub fn layout_for_payload(
     carrier_bytes: &[u8],
     payload_len: usize,
     params: &JpegParams,
-    fmt: &FormatProfile,
+    fmt: &JpegFormatProfile,
 ) -> Result<Layout, StrHideError> {
     fmt.validate()?;
     params.validate()?;

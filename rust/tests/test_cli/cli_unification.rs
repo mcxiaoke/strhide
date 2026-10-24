@@ -33,7 +33,7 @@ fn make_stego_png() -> Vec<u8> {
             pixels.push(b);
         }
     }
-    let img = strhide::stego::spatial::RawImage {
+    let img = strhide::stego::png::RawImage {
         width: w,
         height: h,
         channels: 3,
@@ -43,7 +43,7 @@ fn make_stego_png() -> Vec<u8> {
         row_filters: Vec::new(),
         idat_info: None,
     };
-    strhide::stego::spatial::encode_png(&img).expect("encode png")
+    strhide::stego::png::encode_png(&img).expect("encode png")
 }
 
 fn seed_stego(dir: &Path, names: &[&str]) {

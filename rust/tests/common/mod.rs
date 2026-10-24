@@ -78,7 +78,7 @@ pub fn make_png() -> Vec<u8> {
 #[test]
 fn make_png_fixture_is_decodable_as_1x1() {
     let png = make_png();
-    let image = strhide::stego::spatial::decode_png(&png).expect("fixture must decode");
+    let image = strhide::stego::png::decode_png(&png).expect("fixture must decode");
     assert_eq!((image.width, image.height), (1, 1));
     assert_eq!(image.channels, 3);
     assert_eq!(image.pixels, vec![255, 255, 255]);

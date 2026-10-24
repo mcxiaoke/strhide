@@ -94,7 +94,7 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
 |---|---|---|
 | [`facade`] | 推荐入口：绑定一个方言 + 写侧基线，动词作为普通方法 | `StrHide`、`new`/`with_profile`/`with_local_params`、`run_cli_from` |
 | [`engine`] | 结构域高层编排：写入、读取、剥离、检查、验证 | `write_carrier*`、`read_carrier*`、`remove_carrier*`、`inspect_carrier*`、`verify_carrier*`、`PayloadSource`、`WriteOptions`、各 `*Result` |
-| [`stego`] | 内容域自适应隐写：嵌入、提取、容量探测（PNG/JPEG/HEIF/HEVC） | `embed_carrier*`、`extract_carrier*`、`probe_carrier_capacity`、`StegoOptions`、`SpatialParams`、`JpegParams`、`StegoCapacityInfo` |
+| [`stego`] | 内容域自适应隐写：嵌入、提取、容量探测（PNG/JPEG/HEIF/HEVC） | `embed_carrier*`、`extract_carrier*`、`probe_carrier_capacity`、`StegoOptions`、`PngParams`、`JpegParams`、`StegoCapacityInfo` |
 | [`params`] | 调参旋钮与私有方言 | `LocalParams`、`Profile`、`StegoProfile`、`MagicPair`、`CompressionStrategy`、`RejectionPolicy` |
 | [`adapters`] | `HostAdapter` trait 与各格式实现；容器 I/O 辅助 | `HostAdapter`、`StrategyCapacity`、`SeekRead`、`SeekWrite`、`SegmentedSubStream` |
 | [`envelope`] | UBE v2.2 二进制结构与序列化 | `EnvelopeHeader`、`EnvelopeTrailer`、各尺寸/标志常量 |
@@ -212,12 +212,13 @@ pub struct WriteOptions<'a> {
 pub struct StegoOptions {
     pub algorithm: Option<String>,         // "hill" / "suniward" / "uerd" / "juniward" / "hevc" / "cabac" / "auto"
     pub password: Option<String>,
-    pub stego_domain: Option<String>,      // 派生隔离域标签（与 Profile::stego_domain 级联）
+    pub domain: Option<String>,            // 派生隔离域标签（与 Profile::stego_domain 级联）
     pub safety_level: SafetyLevel,         // 容量安全档位（High [默认], Balanced, Paranoid）
     pub safety_enforcement: SafetyEnforcement, // 安全执行模式（Advisory [默认], Enforced）
     pub freshness: Freshness,              // 随机新鲜度（Random [默认] / Seeded([u8; 32]) 可复现运行）
-    pub spatial_params: SpatialParams,     // 空间域调优（含 codec/stc_h/stc_u/safety/exclusion_rate）
-    pub jpeg_params: JpegParams,           // JPEG DCT 调优（含 codec/stc_h/stc_u/safety）
+    pub png_params: PngParams,             // PNG 调优（codec/stc_h/stc_u/exclusion_rate/滤波窗口）
+    pub jpeg_params: JpegParams,           // JPEG DCT 调优（stc_h/slot_budget/cipher_suite/polarize_weight）
+    pub extract_params: ExtractParams,     // 提取策略（allowed_suites/max_pbkdf2_iterations）
 }
 ```
 
@@ -340,7 +341,7 @@ std::process::exit(exit_code);
 
 ```text
 embed（PNG→spatial，JPEG→jpeg）：
- 1. validate spatial/jpeg params
+ 1. validate png/jpeg params
  2. 解析载体 → 候选元素（像素 / DCT 系数）
  3. StegoOptions.secret(profile)：显式密码优先，否则 profile 的 stego 私钥
  4. pack_envelope_ext(payload, secret)
@@ -392,7 +393,7 @@ pub struct Profile {
 pub struct StegoProfile {
     pub default_secret: Option<&'static str>,        // 无密码时的图像隐写私钥
     pub stego_domain: Option<&'static str>,          // 图像隐写 HKDF 域标签
-    pub format: Option<FormatProfile>,               // 私有 JPEG V3 线格式身份（None=官方）
+    pub format: Option<JpegFormatProfile>,               // 私有 JPEG V3 线格式身份（None=官方）
 }
 ```
 
@@ -412,7 +413,7 @@ const MY_DIALECT: Profile = Profile::new()
   - 使用公开内置常量时，任何人持任何 strhide 都能读无密码信封；替换为私钥后，线格式一个字节都不变，但没有私钥读不出来。显式密码始终优先于此值。
   - `stego_domain` 实现 HKDF 子密钥化域隔离（NFC 规范化 + 长度前缀防拼接），不同团队或系统即使密码相同也无法互读，杜绝开源共享指纹暴露。
 - 自定义 `magic` 在 stealth 下被忽略（stealth 的魔数由密码派生，固定魔数会破坏可否认性）。
-- 私有 `FormatProfile`（`stego.format`）决定超块/扩展几何与槽位网格，设置后官方二进制无法读取，与私钥等效；`format_profile()` 在未设置时回退 `DEFAULT_FORMAT`。
+- 私有 `JpegFormatProfile`（`stego.jpeg`）决定超块/扩展几何与槽位网格，设置后官方二进制无法读取，与私钥等效；`jpeg_format()` 在未设置时回退 `DEFAULT_JPEG_FORMAT`。
 - `Profile::is_official()` 同时检查两个域：结构域字段（`default_secret`/`stealth_domain`/`magic`）与内容域的私钥、`stego_domain`、`format`，任一设置即非官方。
 
 ### 6.3 内容域密钥与域解析
@@ -505,7 +506,7 @@ const MY_DIALECT: Profile = Profile::new()
 | 自定义头/尾魔数 | `Profile::with_magic` | P |
 | 内容域无密码私钥 | `Profile::with_stego_secret` | P |
 | 内容域 HKDF 域标签 | `Profile::with_stego_domain` | P |
-| 私有图像线格式身份 | `Profile::with_format_profile` | P |
+| 私有图像线格式身份 | `Profile::with_jpeg_format` | P |
 | 可复现随机源 / 确定性测试 | `StegoOptions.freshness = Freshness::Seeded` | Stego |
 | 空间域成本模型选择 | `StegoOptions.algorithm = "hill"` / `"suniward"` | Stego |
 | JPEG 频域成本模型选择 | `StegoOptions.algorithm = "uerd"` / `"juniward"` | Stego |
@@ -513,12 +514,12 @@ const MY_DIALECT: Profile = Profile::new()
 | 统一门面（绑定方言 + 基线） | `StrHide::new` / `with_profile` / `with_local_params` | Facade |
 | 私有命令行 | `StrHide::run_cli_from` | Facade |
 | 内存（免落盘）处理 | `*_carrier_bytes` | I/O |
-| 实现代价模型 trait | `SpatialCostModel` / `JpegCostModel` | 扩展 |
+| 实现代价模型 trait | `PngCostModel` / `JpegCostModel` | 扩展 |
 
 ### 8.2 当前边界（按设计不做或暂缓）
 
 - **HostAdapter 动态注册**：`router::ADAPTERS` 与 `find_adapter` 目前是静态切片，自定义格式适配器无法在运行时注册进引擎。
-- **代价模型经统一入口注入**：`StegoOptions` 目前通过 `algorithm` 名称匹配，没有 trait 对象直接注入字段；外部实现的 `SpatialCostModel/JpegCostModel` 可直接传给 `spatial/jpeg` 子模块的内部函数，但无法仅通过 `embed_carrier` 名称入口生效。
+- **代价模型经统一入口注入**：`StegoOptions` 目前通过 `algorithm` 名称匹配，没有 trait 对象直接注入字段；外部实现的 `PngCostModel/JpegCostModel` 可直接传给 `png/jpeg` 子模块的内部函数，但无法仅通过 `embed_carrier` 名称入口生效。
 - **策略 ID 段**：`STRATEGY_REGISTRY` 中 1–13 为官方保留（`MAX_KNOWN_STRATEGY_ID = 13`）；解掩码启发式会把未知 ID 当噪声。
 - **协议级参数不可配**：加密套件（仅 AES-256-GCM）、PBKDF2 轮数（100 000）、压缩算法（仅 raw deflate）、自定义元数据字段均为线格式常量，本期不开放（详见审计文档 §3.1 / §4.5）。
 

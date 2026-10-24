@@ -1,7 +1,7 @@
 //! HEIF/HEIC content-domain bridge steganography module.
 //!
 //! Bridges embedded JPEG thumbnails or uncompressed auxiliary items within ISO BMFF containers
-//! to existing content-adaptive steganography engines (`stego::jpeg` and `stego::spatial`).
+//! to existing content-adaptive steganography engines (`stego::jpeg` and `stego::png`).
 //!
 //! The primary HEVC/AVIF photo stream remains 100% bit-exact and untouched.
 

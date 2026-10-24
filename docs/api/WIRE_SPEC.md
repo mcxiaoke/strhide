@@ -604,23 +604,23 @@ header_slots[256..512]  = FeatureWord (32B / 256 bits)
 
 ### 13.9 私有版构建指引
 
-格式身份是**编译期**的 `FormatProfile`（`stego::format`），不是 CLI 开关——可切换的格式就是可枚举的格式。
+格式身份是**编译期**的 `JpegFormatProfile`（`stego::format`），不是 CLI 开关——可切换的格式就是可枚举的格式。
 
-**推荐方式：facade + const Profile。** 构造一个 `StrHide`，把私有 `FormatProfile`（以及结构域/内容域私钥、域标签）通过 `const fn` 链绑定，然后在实例上调用动词或 `run_cli_from`，无需修改或重新编译 strhide 源码：
+**推荐方式：facade + const Profile。** 构造一个 `StrHide`，把私有 `JpegFormatProfile`（以及结构域/内容域私钥、域标签）通过 `const fn` 链绑定，然后在实例上调用动词或 `run_cli_from`，无需修改或重新编译 strhide 源码：
 
 ```rust
 use strhide::facade::StrHide;
 use strhide::params::Profile;
 
 const ENGINE: StrHide = StrHide::new().with_profile(
-    Profile::new().with_format_profile(MY_PRIVATE_FORMAT),
+    Profile::new().with_jpeg_format(MY_PRIVATE_FORMAT),
 );
 // ENGINE.embed(...) / ENGINE.extract(...) / ENGINE.run_cli_from(...)
 ```
 
-1. 复制 `DEFAULT_FORMAT` 的字面量，至少改 5 个域分隔标签（`cover_digest_tag` / `hpos_label` / `stc_label` / `enc_label` / `perm_label`）；
+1. 复制 `DEFAULT_JPEG_FORMAT` 的字面量，至少改 5 个域分隔标签（`cover_digest_tag` / `hpos_label` / `stc_label` / `enc_label` / `perm_label`）；
 2. 需要时再改头部几何（`sb_bytes` / `sb_h` / `sb_u`，必须满足 `n = u·(8·bytes + 7)`、`m = 8·bytes`）或 `grid_rule`（`k_min ≥ 1`，DC 绝不能进池）；
-3. 按上面的 facade 方式绑定；若不使用 facade，也可在自己的 `main` 里直接把 `FormatProfile` 传给 `stego::jpeg::embed` / `extract`，或用 `cargo build --features private-profile` 替换 `DEFAULT_FORMAT`；
+3. 按上面的 facade 方式绑定；若不使用 facade，也可在自己的 `main` 里直接把 `JpegFormatProfile` 传给 `stego::jpeg::embed` / `extract`，或用 `cargo build --features private-profile` 替换 `DEFAULT_JPEG_FORMAT`；
 4. 改完先跑 roundtrip，再跑检测评估（`docs/stc_v3_phase3_eval_20261021.md` 的脚本可直接复用）；
 5. **不要分发二进制**：常量会被逆向，私有标签一旦随二进制流出即失去意义。
 
@@ -804,7 +804,7 @@ H.265 标准规定，当 RBSP 出现连续两个 `0x00` 后接 `0x00..=0x03` 时
 | Stealth + 密码 | 仅持有同密码可读 | 持有同密码可读 | 域（domain）也必须一致 |
 | 内容域自定义 `stego_secret` | ❌ | ✅ | 错误密钥表现为 `NoHiddenData`（与错误密码不可区分） |
 | 内容域自定义 `stego_domain` | ❌ | ✅ | HKDF 域标签不同，密钥与 header 置换不一致 |
-| 内容域私有 `FormatProfile` | ❌ | ✅ | 超块/槽位几何不同，官方无法解析 |
+| 内容域私有 `JpegFormatProfile` | ❌ | ✅ | 超块/槽位几何不同，官方无法解析 |
 
 ### 15.3 写侧本地参数（L class）兼容
 

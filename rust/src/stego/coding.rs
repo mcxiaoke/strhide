@@ -304,7 +304,7 @@ pub fn expected_stc_change_rate(stc_u: u8) -> f64 {
 /// ceiling would leave it. Direction legality is a property of the *current*
 /// value, and every legal move keeps the class unchanged — which is what makes
 /// the cost map reproducible at extraction time (see
-/// [`crate::stego::spatial::engine`]).
+/// [`crate::stego::png::engine`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Move {
     /// `+1` and `-1` both stay in the class.

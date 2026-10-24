@@ -16,11 +16,11 @@
 //! 2. the feature word carries the model's wire id, and extraction follows the
 //!    carrier's declaration rather than the caller's guess.
 
+use strhide::stego::png::engine::{SPATIAL_ELIGIBLE_MAX, SPATIAL_ELIGIBLE_MIN};
+use strhide::stego::png::{RawImage, decode_png, encode_png};
 use strhide::stego::registry::CostModelRegistry;
-use strhide::stego::spatial::engine::{SPATIAL_ELIGIBLE_MAX, SPATIAL_ELIGIBLE_MIN};
-use strhide::stego::spatial::{RawImage, decode_png, encode_png};
-use strhide::stego::traits::SpatialCostModel;
-use strhide::stego::{SpatialParams, StegoOptions, embed_carrier, extract_carrier};
+use strhide::stego::traits::PngCostModel;
+use strhide::stego::{PngParams, StegoOptions, embed_carrier, extract_carrier};
 
 /// Deterministic high-frequency texture, so the carrier is embeddable.
 fn texture_png(w: u32, h: u32) -> Vec<u8> {
@@ -86,7 +86,7 @@ fn read_feature_word(png: &[u8]) -> strhide::stego::header::FeatureWord {
 /// the carrier's declaration, extraction would desynchronise and fail.
 struct ImpostorModel;
 
-impl SpatialCostModel for ImpostorModel {
+impl PngCostModel for ImpostorModel {
     fn id(&self) -> &'static str {
         "impostor"
     }
@@ -101,7 +101,7 @@ impl SpatialCostModel for ImpostorModel {
         width: usize,
         height: usize,
         _channels: usize,
-        _params: &SpatialParams,
+        _params: &PngParams,
     ) -> Vec<f64> {
         vec![1.0f64; width * height]
     }
@@ -127,12 +127,12 @@ fn extraction_follows_the_carrier_not_the_caller() {
     let stego = embed_carrier(&png, payload, &StegoOptions::default()).expect("embed");
 
     // The caller asks for a model that has nothing to do with this carrier.
-    let got = strhide::stego::spatial::engine::extract_spatial(
+    let got = strhide::stego::png::engine::extract_png(
         &stego,
         None,
         None,
         &ImpostorModel,
-        &SpatialParams::default(),
+        &PngParams::default(),
     )
     .expect("extraction must use the carrier's declared model");
     assert_eq!(got, payload);
@@ -191,7 +191,7 @@ fn non_default_exclusion_rate_extracts_with_default_options() {
     let payload = b"written with non-default exclusion rate 0.45";
 
     let write = StegoOptions {
-        spatial_params: SpatialParams {
+        png_params: PngParams {
             exclusion_percentile: 0.45,
             ..Default::default()
         },

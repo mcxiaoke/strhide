@@ -4,10 +4,10 @@
 //! J-UNIWARD) or fine-tuning existing ones without affecting the embedding
 //! engines.
 
-use crate::stego::params::{JpegParams, SpatialParams};
+use crate::stego::params::{JpegParams, PngParams};
 
 /// Trait implemented by spatial-domain distortion cost models (e.g. HILL, WOW).
-pub trait SpatialCostModel: Send + Sync {
+pub trait PngCostModel: Send + Sync {
     /// Unique identifier for the algorithm (e.g. "hill", "wow").
     fn id(&self) -> &'static str;
 
@@ -31,7 +31,7 @@ pub trait SpatialCostModel: Send + Sync {
         width: usize,
         height: usize,
         channels: usize,
-        params: &SpatialParams,
+        params: &PngParams,
     ) -> Vec<f64>;
 
     /// Split the symmetric cost map into `(rho_plus, rho_minus)`.

@@ -1,10 +1,10 @@
 // Copyright (c) 2026 strhide developers
 // SPDX-License-Identifier: Apache-2.0
 
-//! Private [`FormatProfile`] end-to-end pass-through.
+//! Private [`JpegFormatProfile`] end-to-end pass-through.
 //!
 //! Regression for the gap where the high-level `stego` entry points hard-coded
-//! `DEFAULT_FORMAT` in all three paths (embed / extract / probe). A private
+//! `DEFAULT_JPEG_FORMAT` in all three paths (embed / extract / probe). A private
 //! wire-format identity must flow through every entry point: a carrier
 //! embedded under it must extract back, the capacity probe must use its
 //! geometry, and an official profile must fail to read it.
@@ -14,14 +14,14 @@ use strhide::stego::{
     StegoOptions, embed_carrier_with_profile, extract_carrier_with_profile,
     probe_carrier_capacity_with_profile,
 };
-use strhide::{DEFAULT_FORMAT, FormatProfile, GridRule};
+use strhide::{DEFAULT_JPEG_FORMAT, GridRule, JpegFormatProfile};
 
 const COVER: &[u8] = include_bytes!("assets/small.jpg");
 const PAYLOAD: &[u8] = b"private-format-roundtrip";
 
 /// A private wire format: same geometry as the default, distinct derivation
 /// labels, so it is a different format that still passes self-validation.
-const PRIVATE_FORMAT: FormatProfile = FormatProfile {
+const PRIVATE_FORMAT: JpegFormatProfile = JpegFormatProfile {
     format_major: 1,
     format_minor: 0,
     cover_digest_tag: b"private-cover-v1",
@@ -35,11 +35,11 @@ const PRIVATE_FORMAT: FormatProfile = FormatProfile {
     ext_h: 8,
     ext_u: 4,
     grid_rule: GridRule::ALL_AC,
-    suites: DEFAULT_FORMAT.suites,
+    suites: DEFAULT_JPEG_FORMAT.suites,
 };
 
 /// The dialect is declared entirely at compile time, including the format.
-const PRIVATE_PROFILE: Profile = Profile::new().with_format_profile(PRIVATE_FORMAT);
+const PRIVATE_PROFILE: Profile = Profile::new().with_jpeg_format(PRIVATE_FORMAT);
 
 #[test]
 fn private_format_embed_extract_roundtrip() {
@@ -65,7 +65,7 @@ fn private_format_probe_uses_private_geometry() {
         "the probe must report capacity"
     );
     // The private format is what the profile resolves to.
-    assert_eq!(PRIVATE_PROFILE.format_profile(), &PRIVATE_FORMAT);
+    assert_eq!(PRIVATE_PROFILE.jpeg_format(), &PRIVATE_FORMAT);
 }
 
 #[test]
