@@ -6,4 +6,7 @@ pub mod header_v3;
 pub mod v3_layout;
 
 pub use cost::UerdCostModel;
-pub use engine::{embed_jpeg, extract_jpeg, probe_capacity_with_format, probe_jpeg_capacity};
+pub use engine::{
+    embed_jpeg, embed_jpeg_with_freshness, extract_jpeg, probe_capacity_with_format,
+    probe_jpeg_capacity,
+};

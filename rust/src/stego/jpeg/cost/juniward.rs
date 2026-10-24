@@ -140,8 +140,13 @@ impl JpegCostModel for JuniwardCostModel {
         // a function pointer, because the bilinear factorisation calls it
         // `PAD*8 + 63` times per block and an indirect call per window would cost
         // more than the multiply-adds it wraps.
+        //
+        // A seeded (reproducible) run stays on the scalar path: FMA fuses the
+        // multiply-add and rounds once, the scalar path rounds twice, and that
+        // last-bit difference can flip a near-tied trellis decision.
         #[cfg(target_arch = "x86_64")]
-        let avx2 = std::arch::is_x86_feature_detected!("avx2")
+        let avx2 = !params.deterministic
+            && std::arch::is_x86_feature_detected!("avx2")
             && std::arch::is_x86_feature_detected!("fma");
         #[cfg(not(target_arch = "x86_64"))]
         let avx2 = false;

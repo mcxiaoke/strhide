@@ -254,6 +254,32 @@ pub fn generate_permuted_indices(n: usize, seed: &[u8; 32]) -> Vec<usize> {
     indices
 }
 
+/// Deterministic payload bytes of exactly `len` bytes.
+///
+/// Draws from the same ChaCha12 stream the slot scattering uses, so the output
+/// is identical on every platform, every build and every run. That makes it a
+/// fixture a hash can be pinned to without committing a binary file: tests and
+/// the `repro_*` examples ask for `len` bytes with a seed and get the same bytes
+/// back.
+///
+/// The bytes are raw keystream, i.e. incompressible, so
+/// [`build_plaintext`](crate::stego::envelope::build_plaintext) stores them
+/// uncompressed and the payload keeps its declared size.
+pub fn deterministic_payload(len: usize, seed: u64) -> Vec<u8> {
+    let mut key = [0u8; 32];
+    key[..8].copy_from_slice(&seed.to_le_bytes());
+    // Domain tag so these bytes never collide with any other use of the stream.
+    key[8..24].copy_from_slice(b"strhide-payload\0");
+    let mut rng = ChaCha12Stream::from_seed(&key);
+
+    let mut out = Vec::with_capacity(len.div_ceil(4) * 4);
+    while out.len() < len {
+        out.extend_from_slice(&rng.next_u32().to_le_bytes());
+    }
+    out.truncate(len);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

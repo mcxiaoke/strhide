@@ -184,6 +184,73 @@ pub fn random_nonce() -> [u8; NONCE_LEN] {
     nonce
 }
 
+/// Where one embedding gets its salt and nonce.
+///
+/// [`Freshness::Random`] is the production path and draws fresh bytes from the
+/// OS. [`Freshness::Seeded`] derives both from a caller-supplied seed, so the
+/// same carrier, payload, password and seed produce byte-identical stego files.
+/// That is what makes a regression reproducible instead of "it failed that one
+/// time".
+///
+/// Reproducibility holds for a fixed `git` revision and target triple. Two
+/// things narrow it further:
+///
+/// * the DCT cost maps accumulate in `f32`, so a build with AVX2/FMA enabled
+///   rounds differently from a scalar one; seeded runs therefore force the
+///   scalar kernel (see `JpegParams::deterministic`);
+/// * compression goes through `flate2`, whose output is stable for a pinned
+///   version but not across backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Freshness {
+    /// Fresh randomness per embedding.
+    #[default]
+    Random,
+    /// Deterministic sequence derived from `seed`.
+    Seeded([u8; 32]),
+}
+
+impl Freshness {
+    /// `true` when the caller asked for a reproducible run.
+    pub fn is_seeded(&self) -> bool {
+        matches!(self, Self::Seeded(_))
+    }
+
+    /// Salt for embedding attempt `attempt` (0-based).
+    ///
+    /// An embedding retries up to [`EMBED_ATTEMPTS`](crate::stego::jpeg) times
+    /// when a Huffman-limited block cannot be encoded, and each retry has to
+    /// draw a *different* salt or a seeded run would repeat the same failure
+    /// forever. Folding the attempt index into the derivation keeps the whole
+    /// retry sequence reproducible.
+    pub fn salt(&self, attempt: u32) -> [u8; SALT_LEN] {
+        match self {
+            Self::Random => random_salt(),
+            Self::Seeded(seed) => derive_seeded(seed, b"salt", attempt),
+        }
+    }
+
+    /// AEAD nonce for embedding attempt `attempt` (0-based).
+    pub fn nonce(&self, attempt: u32) -> [u8; NONCE_LEN] {
+        match self {
+            Self::Random => random_nonce(),
+            Self::Seeded(seed) => derive_seeded(seed, b"nonce", attempt),
+        }
+    }
+}
+
+/// `HKDF-SHA256(seed, info = label || attempt)`, with a domain separator so a
+/// salt can never collide with a nonce derived from the same seed.
+fn derive_seeded<const N: usize>(seed: &[u8; 32], label: &[u8], attempt: u32) -> [u8; N] {
+    let hk = Hkdf::<Sha256>::new(Some(b"strhide-reproducible-v1"), seed);
+    let mut info = Vec::with_capacity(label.len() + 4);
+    info.extend_from_slice(label);
+    info.extend_from_slice(&attempt.to_be_bytes());
+    let mut out = [0u8; N];
+    hk.expand(&info, &mut out)
+        .expect("HKDF output for a salt/nonce is far below the 8160-byte limit");
+    out
+}
+
 /// Compress (when profitable) and frame the payload as AEAD plaintext.
 ///
 /// `[4B original length][1B flags][body]`. The length is known before

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::StrHideError;
 use crate::params::Profile;
+use crate::stego::envelope::Freshness;
 
 /// Matrix-coding layer used to place payload bits into candidate slots.
 ///
@@ -366,6 +367,19 @@ pub struct JpegParams {
     /// rules apply, so that adding a model is a model-side change only.
     #[serde(default)]
     pub algorithm_options: std::collections::BTreeMap<String, f64>,
+    /// Force the portable scalar kernels instead of the AVX2/FMA dispatch.
+    ///
+    /// Set automatically when [`StegoOptions::freshness`] is
+    /// [`Freshness::Seeded`]. The AVX2 path fuses multiply-add and rounds once
+    /// where the scalar path rounds twice, so the two can disagree in the last
+    /// bit of a cost value -- enough to flip a near-tied trellis decision and
+    /// produce a different stego file. A seeded run that lands on different
+    /// slots would defeat the purpose.
+    ///
+    /// Not serialised: it describes the run, not the carrier.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub deterministic: bool,
 }
 
 /// Validate a model-owned options bag.
@@ -493,6 +507,7 @@ impl Default for JpegParams {
             safety_level: SafetyLevel::default(),
             safety_enforcement: SafetyEnforcement::default(),
             algorithm_options: std::collections::BTreeMap::new(),
+            deterministic: false,
         }
     }
 }
@@ -645,6 +660,13 @@ pub struct StegoOptions {
     pub jpeg_params: JpegParams,
     /// Extraction policy: which suites to try and how much KDF work to allow.
     pub extract_params: ExtractParams,
+    /// Source of the per-embedding salt and nonce.
+    ///
+    /// [`Freshness::Random`] (the default) draws fresh bytes and is what every
+    /// production path uses. [`Freshness::Seeded`] derives them from a seed so
+    /// the same inputs produce the same stego file -- for regression tests, the
+    /// `repro_*` examples, and bug reports that need to be replayed.
+    pub freshness: Freshness,
 }
 
 impl StegoOptions {

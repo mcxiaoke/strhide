@@ -16,6 +16,7 @@ pub mod spatial;
 pub mod traits;
 pub mod wavelet;
 
+pub use envelope::Freshness;
 pub use format::{
     CipherSuite, DEFAULT_FORMAT, FormatProfile, GridRule, OFFICIAL_SPATIAL, SpatialFormatProfile,
 };
@@ -73,6 +74,10 @@ pub fn embed_carrier_with_profile(
     let mut jpeg_params = options.jpeg_params.clone();
     jpeg_params.safety_level = options.safety_level;
     jpeg_params.safety_enforcement = options.safety_enforcement;
+    // A seeded run must not take the FMA path: it rounds differently from the
+    // scalar one, and a last-bit disagreement in a cost value can move the
+    // trellis to a different slot.
+    jpeg_params.deterministic = options.freshness.is_seeded();
 
     if carrier_bytes.len() >= 2 && &carrier_bytes[..2] == b"\xFF\xD8" {
         // JPEG format
@@ -83,7 +88,7 @@ pub fn embed_carrier_with_profile(
                     options.algorithm
                 ))
             })?;
-        jpeg::embed_jpeg(
+        jpeg::embed_jpeg_with_freshness(
             carrier_bytes,
             payload,
             secret,
@@ -91,6 +96,7 @@ pub fn embed_carrier_with_profile(
             profile.format_profile(),
             &jpeg_params,
             &*model,
+            options.freshness,
         )
     } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
         // PNG format
@@ -102,7 +108,7 @@ pub fn embed_carrier_with_profile(
                 ))
             },
         )?;
-        spatial::embed_spatial_with_profile(
+        spatial::embed_spatial_with_profile_and_freshness(
             carrier_bytes,
             payload,
             secret,
@@ -110,6 +116,7 @@ pub fn embed_carrier_with_profile(
             profile.spatial_profile(),
             &*model,
             &spatial_params,
+            options.freshness,
         )
     } else {
         Err(StrHideError::UnsupportedFormat(

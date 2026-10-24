@@ -39,7 +39,7 @@ use crate::errors::StrHideError;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::coding::{Move, StcTrellis};
 use crate::stego::envelope::{
-    BODY_OVERHEAD, HEADER_OVERHEAD, build_plaintext, encrypt_with_aad, random_nonce, random_salt,
+    BODY_OVERHEAD, Freshness, HEADER_OVERHEAD, build_plaintext, encrypt_with_aad,
     unpack_envelope_parts,
 };
 use crate::stego::format::{
@@ -481,6 +481,8 @@ struct EmbedContext<'a> {
     domain: Option<&'a str>,
     /// Working-set estimate from [`preflight_jpeg`], before the trellis bitmap.
     base_bytes: u64,
+    /// Source of the salt and nonce for each attempt.
+    freshness: Freshness,
 }
 
 /// Number of salt values tried when a Huffman-limited block cannot be encoded.
@@ -544,6 +546,35 @@ pub fn embed_jpeg(
     params: &JpegParams,
     cost_model: &dyn JpegCostModel,
 ) -> Result<Vec<u8>, StrHideError> {
+    embed_jpeg_with_freshness(
+        carrier_bytes,
+        payload,
+        password,
+        domain,
+        fmt,
+        params,
+        cost_model,
+        Freshness::Random,
+    )
+}
+
+/// [`embed_jpeg`] with an explicit [`Freshness`].
+///
+/// `Freshness::Seeded` makes the output byte-identical for the same carrier,
+/// payload, password and seed. Pair it with `params.deterministic = true` so the
+/// cost map stays on the scalar kernel; [`crate::stego::embed_carrier`] does
+/// that automatically.
+#[allow(clippy::too_many_arguments)]
+pub fn embed_jpeg_with_freshness(
+    carrier_bytes: &[u8],
+    payload: &[u8],
+    password: Option<&str>,
+    domain: Option<&str>,
+    fmt: &FormatProfile,
+    params: &JpegParams,
+    cost_model: &dyn JpegCostModel,
+    freshness: Freshness,
+) -> Result<Vec<u8>, StrHideError> {
     fmt.validate()?;
     params.validate()?;
     let suite = fmt.suite(params.cipher_suite).ok_or_else(|| {
@@ -603,12 +634,20 @@ pub fn embed_jpeg(
             .unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
         domain,
         base_bytes: preflight.base_bytes,
+        freshness,
     };
     let mut work = coeffs.clone();
     let mut last_error = None;
     for attempt_idx in 1..=EMBED_ATTEMPTS {
         let mut applied: Vec<(u32, i8)> = Vec::new();
-        match embed_once(carrier_bytes, &mut work, &mut applied, payload, &ctx) {
+        match embed_once(
+            carrier_bytes,
+            &mut work,
+            &mut applied,
+            payload,
+            &ctx,
+            attempt_idx as u32,
+        ) {
             Ok(bytes) => {
                 trace(&format!("attempt {attempt_idx}/{EMBED_ATTEMPTS} ok"));
                 return Ok(bytes);
@@ -641,6 +680,7 @@ fn embed_once(
     applied: &mut Vec<(u32, i8)>,
     payload: &[u8],
     ctx: &EmbedContext<'_>,
+    attempt: u32,
 ) -> Result<Vec<u8>, Attempt> {
     let fmt = ctx.fmt;
     let params = ctx.params;
@@ -742,8 +782,8 @@ fn embed_once(
         }
     }
 
-    let salt = random_salt();
-    let nonce = random_nonce();
+    let salt = ctx.freshness.salt(attempt);
+    let nonce = ctx.freshness.nonce(attempt);
     let superblock = Superblock {
         version_major: fmt.format_major,
         version_minor: fmt.format_minor,

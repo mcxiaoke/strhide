@@ -38,9 +38,7 @@ use crate::stego::coding::{
     Move, StcTrellis, hamming_embed_ternary, hamming_extract_bytes, spatial_move_safe,
     write_bit_ternary,
 };
-use crate::stego::envelope::{
-    build_plaintext, encrypt_with_aad, random_nonce, random_salt, unpack_envelope_parts,
-};
+use crate::stego::envelope::{Freshness, build_plaintext, encrypt_with_aad, unpack_envelope_parts};
 use crate::stego::format::{body_keys, derive_master};
 pub use crate::stego::header::{
     FeatureWord, HEADER_LEN_MASK, HEADER_LEN_MAX, HEADER_V2_ESCAPE_H, V2_TOTAL_HEADER_SLOTS,
@@ -958,6 +956,33 @@ pub fn embed_spatial_with_profile(
     cost_model: &dyn SpatialCostModel,
     params: &SpatialParams,
 ) -> Result<Vec<u8>, StrHideError> {
+    embed_spatial_with_profile_and_freshness(
+        carrier_bytes,
+        payload,
+        password,
+        domain,
+        spatial,
+        cost_model,
+        params,
+        Freshness::Random,
+    )
+}
+
+/// [`embed_spatial_with_profile`] with an explicit [`Freshness`].
+///
+/// `Freshness::Seeded` makes the output byte-identical for the same carrier,
+/// payload, password and seed.
+#[allow(clippy::too_many_arguments)]
+pub fn embed_spatial_with_profile_and_freshness(
+    carrier_bytes: &[u8],
+    payload: &[u8],
+    password: Option<&str>,
+    domain: Option<&str>,
+    spatial: &crate::stego::format::SpatialFormatProfile,
+    cost_model: &dyn SpatialCostModel,
+    params: &SpatialParams,
+    freshness: Freshness,
+) -> Result<Vec<u8>, StrHideError> {
     let mut image = decode_png(carrier_bytes)?;
     let w = image.width as usize;
     let h = image.height as usize;
@@ -968,8 +993,9 @@ pub fn embed_spatial_with_profile(
     // data, so it cannot exist until codec/h/u are settled.
     let suite = spatial.body.default_suite();
     let plaintext = build_plaintext(payload)?;
-    let salt = random_salt();
-    let nonce = random_nonce();
+    // The spatial writer makes a single pass, so the attempt index is always 0.
+    let salt = freshness.salt(0);
+    let nonce = freshness.nonce(0);
     let master = derive_master(suite, password.unwrap_or(spatial.fallback_secret), &salt)?;
     let (enc_key, perm_seed) = body_keys(spatial.body, &master, &salt, domain);
     let ciphertext_len = plaintext.len() + suite.tag_len();
