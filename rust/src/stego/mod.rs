@@ -9,6 +9,7 @@ pub mod envelope;
 pub mod format;
 pub mod header;
 pub mod heif;
+pub mod hevc;
 pub mod jpeg;
 pub mod params;
 pub mod prng;
@@ -120,11 +121,23 @@ pub fn embed_carrier_with_profile(
             options.freshness,
         )
     } else if crate::adapters::heif::is_heif_bytes(carrier_bytes) {
-        // HEIF content-domain bridge steganography
-        heif::embed_heif_bridge(carrier_bytes, payload, options, profile)
+        // HEIF content-domain steganography
+        if options.algorithm.as_deref() == Some("hevc")
+            || options.algorithm.as_deref() == Some("cabac")
+        {
+            hevc::embed_hevc(carrier_bytes, payload, options.password.as_deref())
+        } else {
+            match heif::embed_heif_bridge(carrier_bytes, payload, options, profile) {
+                Ok(bytes) => Ok(bytes),
+                Err(_) => hevc::embed_hevc(carrier_bytes, payload, options.password.as_deref()),
+            }
+        }
+    } else if hevc::is_hevc_annexb(carrier_bytes) {
+        // Raw Annex-B HEVC bitstream
+        hevc::embed_hevc(carrier_bytes, payload, options.password.as_deref())
     } else {
         Err(StrHideError::UnsupportedFormat(
-            "Content-adaptive steganography requires a PNG, JPEG, or HEIF image carrier".into(),
+            "Content-adaptive steganography requires a PNG, JPEG, HEIF, or HEVC carrier".into(),
         ))
     }
 }
@@ -185,11 +198,38 @@ pub fn extract_carrier_with_profile(
             &options.spatial_params,
         )
     } else if crate::adapters::heif::is_heif_bytes(carrier_bytes) {
-        // HEIF content-domain bridge steganography
-        heif::extract_heif_bridge(carrier_bytes, options, profile)
+        // HEIF content-domain steganography: try Scheme C (HEVC CABAC in-place) first, then bridge
+        match hevc::extract_hevc(carrier_bytes, options.password.as_deref()) {
+            Ok(payload) => Ok(payload),
+            Err(e) => {
+                if options.algorithm.as_deref() == Some("hevc")
+                    || options.algorithm.as_deref() == Some("cabac")
+                {
+                    return Err(e);
+                }
+                match heif::extract_heif_bridge(carrier_bytes, options, profile) {
+                    Ok(payload) => Ok(payload),
+                    // A Scheme C authentication failure means the carrier really
+                    // does carry a CABAC payload, so its password verdict is the
+                    // honest one. Every other HEVC failure only says "this is not
+                    // a Scheme C carrier", and the bridge's verdict describes the
+                    // carrier better than the HEVC probe does.
+                    Err(bridge_err) => {
+                        if matches!(e, StrHideError::Password(_)) {
+                            Err(e)
+                        } else {
+                            Err(bridge_err)
+                        }
+                    }
+                }
+            }
+        }
+    } else if hevc::is_hevc_annexb(carrier_bytes) {
+        // Raw Annex-B HEVC bitstream
+        hevc::extract_hevc(carrier_bytes, options.password.as_deref())
     } else {
         Err(StrHideError::UnsupportedFormat(
-            "Content-adaptive steganography requires a PNG, JPEG, or HEIF image carrier".into(),
+            "Content-adaptive steganography requires a PNG, JPEG, HEIF, or HEVC carrier".into(),
         ))
     }
 }
@@ -304,11 +344,59 @@ pub fn probe_carrier_capacity_with_profile(
             profile.spatial_profile(),
         )
     } else if crate::adapters::heif::is_heif_bytes(carrier_bytes) {
-        // HEIF content-domain bridge steganography
-        heif::probe_heif_bridge_capacity(carrier_bytes, options, profile)
+        if options.algorithm.as_deref() == Some("hevc")
+            || options.algorithm.as_deref() == Some("cabac")
+        {
+            let cap = hevc::probe_hevc_capacity(carrier_bytes)?;
+            Ok(StegoCapacityInfo {
+                format: "HEIF/HEVC".into(),
+                algorithm: "HEVC-CABAC-InPlace".into(),
+                total_elements: cap * 16,
+                available_slots: cap * 16,
+                max_raw_payload_bytes: cap,
+                max_raw_is_grouped: false,
+                recommended_max_bytes: cap,
+                estimated_change_rate: 0.25,
+                safety_level: format!("{:?}", options.safety_level).to_lowercase(),
+                safety_bpp_limit: options.safety_level.bpp_limit(),
+            })
+        } else {
+            match heif::probe_heif_bridge_capacity(carrier_bytes, options, profile) {
+                Ok(info) => Ok(info),
+                Err(_) => {
+                    let cap = hevc::probe_hevc_capacity(carrier_bytes)?;
+                    Ok(StegoCapacityInfo {
+                        format: "HEIF/HEVC".into(),
+                        algorithm: "HEVC-CABAC-InPlace".into(),
+                        total_elements: cap * 16,
+                        available_slots: cap * 16,
+                        max_raw_payload_bytes: cap,
+                        max_raw_is_grouped: false,
+                        recommended_max_bytes: cap,
+                        estimated_change_rate: 0.25,
+                        safety_level: format!("{:?}", options.safety_level).to_lowercase(),
+                        safety_bpp_limit: options.safety_level.bpp_limit(),
+                    })
+                }
+            }
+        }
+    } else if hevc::is_hevc_annexb(carrier_bytes) {
+        let cap = hevc::probe_hevc_capacity(carrier_bytes)?;
+        Ok(StegoCapacityInfo {
+            format: "HEVC-AnnexB".into(),
+            algorithm: "HEVC-CABAC-InPlace".into(),
+            total_elements: cap * 16,
+            available_slots: cap * 16,
+            max_raw_payload_bytes: cap,
+            max_raw_is_grouped: false,
+            recommended_max_bytes: cap,
+            estimated_change_rate: 0.25,
+            safety_level: format!("{:?}", options.safety_level).to_lowercase(),
+            safety_bpp_limit: options.safety_level.bpp_limit(),
+        })
     } else {
         Err(StrHideError::UnsupportedFormat(
-            "Content-adaptive steganography requires a PNG, JPEG, or HEIF image carrier".into(),
+            "Content-adaptive steganography requires a PNG, JPEG, HEIF, or HEVC carrier".into(),
         ))
     }
 }

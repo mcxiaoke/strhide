@@ -102,7 +102,7 @@ pub const EMBED_AFTER_HELP_ZH: &str = "\
 
 pub const EXTRACT_AFTER_HELP_EN: &str = "\
 Extracts data embedded via content-adaptive steganography (embed).
-Carrier format (PNG or JPEG) is automatically detected.
+Carrier format (PNG, JPEG, HEIF/HEIC, or HEVC) is automatically detected.
 
 Examples:
   strhide extract out.jpg -p \"P@ss!\"               # Print text payload to stdout
@@ -112,7 +112,7 @@ Examples:
 
 pub const EXTRACT_AFTER_HELP_ZH: &str = "\
 从自适应隐写图像（embed 生成）中提取隐藏数据。
-自动识别图像载体格式（PNG 或 JPEG）。
+自动识别图像载体格式（PNG、JPEG、HEIF/HEIC 或 HEVC）。
 
 常用示例：
   strhide extract out.jpg -p \"P@ss!\"               # 文本载荷直接输出至终端
@@ -486,8 +486,8 @@ crate::i18n_messages! {
 
     // embed
     HelpEmbedCarrier:
-        en = "Carrier image file(s) (PNG or JPEG; use '--' before filenames starting with '-')",
-        zh = "图像载体文件（PNG 或 JPEG；文件名若以 '-' 开头需在其前加 '--'）";
+        en = "Carrier image file(s) (PNG, JPEG, HEIF/HEIC, or HEVC; use '--' before filenames starting with '-')",
+        zh = "图像载体文件（PNG、JPEG、HEIF/HEIC 或 HEVC；文件名若以 '-' 开头需在其前加 '--'）";
     HelpEmbedOutput:
         en = "Output path for stego image (file path for single image, directory for batch)",
         zh = "生成隐写图像的输出路径（单文件为目标文件名，多文件批处理时为目标目录）";
@@ -518,8 +518,8 @@ crate::i18n_messages! {
 
     // extract
     HelpExtractCarrier:
-        en = "Stego image file to extract payload from (PNG or JPEG)",
-        zh = "待提取数据的隐写图像文件（PNG 或 JPEG）";
+        en = "Stego image file to extract payload from (PNG, JPEG, HEIF/HEIC, or HEVC)",
+        zh = "待提取数据的隐写图像文件（PNG、JPEG、HEIF/HEIC 或 HEVC）";
     HelpExtractOutput:
         en = "Output path to write extracted payload (file path or existing directory)",
         zh = "提取载荷的保存路径（可为具体文件名或已存在的目录）";

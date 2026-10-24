@@ -114,6 +114,11 @@ impl CostModelRegistry {
                 "JPEG (JPG)",
                 "J-UNIWARD wavelet-relative distortion (Holub et al., EURASIP JIS 2014)",
             ),
+            (
+                "hevc",
+                "HEIF/HEVC",
+                "H.265 CABAC bypass sign bit in-place steganography (Scheme C, zero expansion)",
+            ),
         ]
     }
 }
@@ -155,6 +160,7 @@ mod tests {
 
         let mut spatial_seen = 0usize;
         let mut jpeg_seen = 0usize;
+        let mut hevc_seen = 0usize;
         for (name, domain, description) in listed {
             assert!(!description.is_empty(), "{name}: empty description");
             match domain {
@@ -188,12 +194,16 @@ mod tests {
                         .validate()
                         .unwrap_or_else(|e| panic!("{name}: default params are invalid: {e}"));
                 }
+                // The HEVC Scheme C engine carries no cost-model selection, so
+                // this entry only needs to exist for the CLI listing.
+                "HEIF/HEVC" => hevc_seen += 1,
                 other => panic!("{name}: unknown domain label {other:?}"),
             }
         }
 
         assert!(spatial_seen > 0, "no spatial algorithm listed");
         assert!(jpeg_seen > 0, "no JPEG algorithm listed");
+        assert!(hevc_seen > 0, "no HEVC algorithm listed");
     }
 
     /// A wire id is written into carriers permanently, so two algorithms must

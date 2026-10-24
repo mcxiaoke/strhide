@@ -123,6 +123,8 @@
 //!   its own profile).
 //! - [`config`] / [`cli`] / [`analysis`] — internal plumbing for the binary.
 
+extern crate alloc;
+
 pub mod crypto;
 pub mod errors;
 pub mod params;

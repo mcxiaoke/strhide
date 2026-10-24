@@ -22,7 +22,7 @@ This repository ships two implementations:
 - **Safe by default** — integrity/signature rejection checks refuse to modify files that should not be touched (e.g. signed binaries); `write`, `restore`, and `embed` default to writing a new `<stem>-out.<ext>` file, leaving original carriers untouched; explicit `--in-place` modifies carriers directly (creating a `.bak` backup copy); `read`, `extract`, `write`, and `restore` refuse to overwrite existing output files unless `--overwrite` is explicitly specified; original file timestamps are preserved.
 - **TOML configuration** — `./strhide.toml` or `~/.strhide/config.toml` provides defaults; explicit CLI flags (`-c, --config`) always win (see [`strhide.sample.toml`](strhide.sample.toml) for an annotated template).
 - **Batch & recursive carriers** — `write`, `restore`, `scan`, `inspect`, `verify`, and `embed` accept several files (and directories with `-r, --recursive`) at once; `read` takes exactly one carrier.
-- **Content-adaptive steganography (HILL & UERD)** — `embed` and `extract` hide data directly in image pixels (PNG, HILL cost model) or DCT frequency coefficients (JPEG, via UERD cost model). Unlike structure-domain injection, content steganography modifies minimal-distortion texture regions and survives metadata stripping. Pixels are written by **ternary ±1 matching** inside the pixel's eight-value class (`val & 0xF8`), so probability mass crosses value-pair boundaries instead of flattening each pair — the specific pattern chi-square and SPA look for. Measured on the bundled corpus at full capacity the self-scan dropped from 50/100 (SUSPICIOUS, RS+SPA) to 25/100 (LOW, SPA only).
+- **Content-adaptive steganography (HILL, UERD & Scheme C)** — `embed` and `extract` hide data directly in image pixels (PNG, HILL cost model), DCT frequency coefficients (JPEG, via UERD cost model), or H.265/HEVC transform coefficient bypass sign bits (HEIF/HEIC and HEVC Annex-B video, Scheme C). Unlike structure-domain injection, content steganography modifies minimal-distortion texture regions and survives metadata stripping. HEIF/HEIC and HEVC embedding achieves zero byte inflation ($\Delta = 0$) and full syntax compliance while avoiding emulation prevention byte (EPB) hazards. Pixels in PNG are written by **ternary ±1 matching** inside the pixel's eight-value class (`val & 0xF8`), so probability mass crosses value-pair boundaries instead of flattening each pair — the specific pattern chi-square and SPA look for. Measured on the bundled corpus at full capacity the self-scan dropped from 50/100 (SUSPICIOUS, RS+SPA) to 25/100 (LOW, SPA only).
 
 ## Install
 
@@ -97,18 +97,21 @@ strhide restore photo-out.png -o restored.png
 # Or restore in-place:
 strhide restore photo.png --in-place
 
-# --- Content-adaptive pixel/DCT steganography (immune to metadata stripping) ---
+# --- Content-adaptive pixel/DCT/CABAC steganography (immune to metadata stripping) ---
 
 # Probe maximum steganographic capacity of an image without modifying it
 strhide embed photo.png --capacity
+strhide embed photo.heic --capacity
 
-# Embed text or file into complex textures (HILL for PNG, UERD for JPEG)
+# Embed text or file into complex textures (HILL for PNG, UERD for JPEG, Scheme C for HEIF/HEIC/HEVC)
 strhide embed photo.png -t "classified message" -p "P@ss123" -o stego.png
 strhide embed cover.jpg -d secret.zip -p "P@ss123" --in-place
+strhide embed photo.heic -t "classified message" -p "P@ss123" -o stego.heic
 
 # Extract content-adaptive hidden data (--stdout or -o, with --overwrite protection)
 strhide extract stego.png -p "P@ss123" --stdout
 strhide extract stego.jpg -p "P@ss123" -o recovered.zip --overwrite
+strhide extract stego.heic -p "P@ss123" --stdout
 
 # Batch: embed the same payload into several carriers (written to an existing directory
 # or as <stem>-out.<ext>), then restore them
@@ -183,12 +186,15 @@ Unrecognized formats are **rejected**: strhide only modifies explicitly supporte
 
 `strhide inspect <file>` shows the exact strategies available for a given carrier along with their capacity limits; `-s auto` (default) picks a suitable one, and `-s ask` lists them interactively (single carrier only).
 
-### Content-adaptive pixel/DCT steganography (`embed` / `extract`)
+### Content-adaptive pixel/DCT/CABAC steganography (`embed` / `extract`)
 
 | Domain | Supported formats | Algorithm | Mechanism |
 | --- | --- | --- | --- |
 | Spatial domain | PNG (RGB/RGBA/Grayscale) | **HILL** (High-Low-Low) + asymmetric ±1 | Ternary ±1 matching in high-pass texture regions; the move stays inside the pixel's eight-value class so the `val & 0xF8` cost map — and hence the slot ranking — is identical on both ends |
 | DCT frequency domain | JPEG / JPG (Baseline) | **UERD + ternary STC (V3)** | Fixed grid of every AC position, ternary `±1` write-back, 44-byte superblock, `dct-io` lossless re-encoding |
+| CABAC bypass domain | HEIF / HEIC, HEVC Annex-B | **H.265 CABAC Bypass + STC (Scheme C)** | Modulates bypass sign bits in high-frequency transform coefficients with EPB hazard avoidance; zero file growth ($\Delta = 0$), bit-exact syntax compliance, preserves visual fidelity |
+
+*HEIF/HEIC & HEVC: CABAC bypass sign-bit steganography (Scheme C)*: Targets H.265/HEVC transform coefficient sign bits (`coeff_sign_flag`). Because sign bits are bypass-coded in CABAC (equiprobable bin, bypassing adaptive context arithmetic state), modulating legal sign bits incurs minimal perceptual distortion and leaves the CABAC state machine and surrounding macroblock headers intact. An internal `CabacObserver` hooks into the H.265 decoder to gather candidate slots and evaluate EPB (Emulation Prevention Byte `0x000003`) legality, and syndrome-trellis codes (STC) embed the encrypted UBE payload with zero byte inflation ($\Delta = 0$). Single-picture HEIC, burst/grid items, and Annex-B elementary video streams are automatically detected and handled.
 
 *UERD on the real block grid*: the cost model uses the file's own luminance quantization table and the true
 MCU-padded block map (4:2:0 interleaves block rows, so `ceil(sqrt(n))` is wrong for most carriers), and it prices

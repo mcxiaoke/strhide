@@ -275,7 +275,7 @@ pub struct EmbedArgs {
         value_name = "CARRIER",
         required = true,
         num_args = 1..,
-        help = "Carrier image file(s) (PNG or JPEG). Use `--` before a filename that starts with '-'."
+        help = "Carrier image file(s) (PNG, JPEG, HEIF/HEIC, or HEVC). Use `--` before a filename that starts with '-'."
     )]
     pub carrier: Vec<PathBuf>,
 
@@ -329,7 +329,7 @@ pub struct EmbedArgs {
         short = 'a',
         long = "algorithm",
         value_name = "NAME",
-        help = "Distortion cost algorithm (auto|hill|suniward|uerd|juniward; default: auto - hill for PNG, uerd for JPEG)"
+        help = "Distortion cost algorithm (auto|hill|suniward|uerd|juniward|hevc; default: auto - hill for PNG, uerd for JPEG, hevc for HEIF/HEVC)"
     )]
     pub algorithm: Option<String>,
 
@@ -429,7 +429,7 @@ pub struct ExtractArgs {
     #[arg(
         value_name = "CARRIER",
         required = true,
-        help = "Stego image file to extract hidden payload from (PNG or JPEG)."
+        help = "Stego image file to extract hidden payload from (PNG, JPEG, HEIF/HEIC, or HEVC)."
     )]
     pub carrier: PathBuf,
 
@@ -461,7 +461,7 @@ pub struct ExtractArgs {
         short = 'a',
         long = "algorithm",
         value_name = "NAME",
-        help = "Distortion cost algorithm (auto|hill|suniward|uerd|juniward; default: auto)"
+        help = "Distortion cost algorithm (auto|hill|suniward|uerd|juniward|hevc; default: auto)"
     )]
     pub algorithm: Option<String>,
 

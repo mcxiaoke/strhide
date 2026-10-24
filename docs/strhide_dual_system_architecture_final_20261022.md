@@ -18,10 +18,10 @@
 
 | 维度 | 系统 A：结构域容器无损隐写（Carrier / Structure Domain） | 系统 B：内容域图像自适应隐写（Adaptive Stego / Content Domain） |
 | :--- | :--- | :--- |
-| **核心模块** | [`engine`](https://github.com/mcxiaoke/strhide/blob/master/rust/src/engine.rs) + [envelope](https://www.google.com/search?q=https://github.com/mcxiaoke/strhide/blob/master/rust/src/envelope.rs) + [adapters](https://www.google.com/search?q=https://github.com/mcxiaoke/strhide/blob/master/rust/src/adapters/mod.rs) + [router](https://www.google.com/search?q=https://github.com/mcxiaoke/strhide/blob/master/rust/src/router.rs) | [`stego`](https://github.com/mcxiaoke/strhide/blob/master/rust/src/stego/mod.rs)（`spatial` / `jpeg` / `coding` / `registry` / `format`） |
+| **核心模块** | [`engine`](https://github.com/mcxiaoke/strhide/blob/master/rust/src/engine.rs) + [envelope](https://www.google.com/search?q=https://github.com/mcxiaoke/strhide/blob/master/rust/src/envelope.rs) + [adapters](https://www.google.com/search?q=https://github.com/mcxiaoke/strhide/blob/master/rust/src/adapters/mod.rs) + [router](https://www.google.com/search?q=https://github.com/mcxiaoke/strhide/blob/master/rust/src/router.rs) | [`stego`](https://github.com/mcxiaoke/strhide/blob/master/rust/src/stego/mod.rs)（`spatial` / `jpeg` / `hevc` / `coding` / `registry` / `format`） |
 | **设计哲学** | **100% 无损挂载、格式保持、可逆还原** | **内容微调、有损不可逆、抗取证统计分析** |
-| **工作原理** | 在容器合法的结构性空隙（PNG `prIv` 块、JPEG `APP15`、MP4 `uuid`、PE slack/codebits、ZIP pre-CD、PDF 增量更新等）注入完整信封 | 基于失真代价模型（JPEG UERD、PNG HILL），通过 STC 校验格编码或 Hamming 矩阵编码微调像素值或 DCT 交流系数 |
-| **支持载体** | PNG, JPEG, WEBP, HEIF, MP4, WAV, ZIP, PDF, PE, MKV | **仅限图像**（JPEG DCT 频域系数、PNG 空间域像素） |
+| **工作原理** | 在容器合法的结构性空隙（PNG `prIv` 块、JPEG `APP15`、MP4 `uuid`、PE slack/codebits、ZIP pre-CD、PDF 增量更新等）注入完整信封 | 基于失真代价模型（JPEG UERD/J-UNIWARD、PNG HILL/S-UNIWARD、HEVC Scheme C 旁路符号位），通过 STC 校验格编码微调像素值、DCT 系数或 CABAC 符号位 |
+| **支持载体** | PNG, JPEG, WEBP, HEIF, MP4, WAV, ZIP, PDF, PE, MKV | **图像与视频载体**：JPEG（DCT 频域系数）、PNG（空域像素）、HEIF/HEIC 及 HEVC Annex-B（CABAC 旁路符号位 Scheme C，零比特率膨胀 Δ = 0） |
 | **信封协议** | **UBE v2.2**（112B Header + Hint + 加密紧凑元数据块 + 分块 AES-256-GCM 载荷 + 24B Trailer） | **JPEG V3 Superblock**（44B 头部 + TLV 扩展区 + 密文）或 **Spatial Micro-Envelope**（16B salt + 12B nonce + 密文，无静态魔数） |
 | **宿主可逆性** | **支持 bit-for-bit 还原**：信封记录原文件尺寸与 SHA-256，`restore` / `remove` 强校验还原一致性 | **无还原能力**：像素或 DCT 系数一经微调不可逆，不支持 `restore` |
 | **核心动词** | **`write`** / **`read`** / **`restore`**（别名 `remove`）/ **`inspect`** / **`verify`** | **`embed`** / **`extract`** / **`probe`**（容量探测） |

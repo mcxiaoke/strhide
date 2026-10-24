@@ -1,6 +1,6 @@
 [package]
 name = "strhide"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 build = "build.rs"
 description = "Smart format-preserving lossless data hiding library and CLI (PNG/JPEG/MP4/ZIP/PDF/PE carriers, AES-256-GCM, stealth mode)"
@@ -35,8 +35,10 @@ crc32fast = "1.5.2"
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 hkdf = "0.13.0"
 hmac = "0.13.0"
+oxideav-h265 = { git = "https://github.com/mcxiaoke/oxideav-h265.git", tag = "v1-20261024" }
 pbkdf2 = "0.13.0"
 rand = "0.10.3"
+rust_h265 = { git = "https://github.com/mcxiaoke/rust_h265.git", tag = "v1-20261024" }
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.11.1"
 thiserror = "2.0.21"

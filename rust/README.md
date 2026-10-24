@@ -25,8 +25,11 @@ strhide verify report.pdf dir/ -r             # verify host + envelope integrity
 strhide restore photo-out.png -o clean.png    # strip hidden data to clean.png
 strhide restore photo.png --in-place          # restore carrier in-place
 strhide embed photo.png -t "secret" -o out.png # content-adaptive stego (HILL for PNG, UERD for JPEG)
+strhide embed photo.heic -t "secret" -o out.heic # content-adaptive stego (HEIF/HEIC CABAC bypass, zero growth Δ=0)
 strhide embed photo.png --capacity             # probe image stego capacity without embedding
+strhide embed photo.heic --capacity            # probe HEIF/HEIC stego capacity
 strhide extract out.png --stdout               # extract content-adaptive payload
+strhide extract out.heic --stdout              # extract HEIF/HEIC payload
 strhide embed photo.png -t "secret" --stego-secret "s3cr3t" -o out.png # private dialect (no password, unreadable by stock builds)
 strhide list --json                           # format/strategy/limit table (human or --json)
 strhide scan suspicious.bin dir/ -r           # black-box steganalysis (any tool)
@@ -51,7 +54,7 @@ table, then the even/odd coefficient-pair imbalance is compared against that
 reference. It is a heuristic — `clean`/`low` JPEG reports carry a note saying so,
 and quality-100 carriers (all quantization steps == 1) are out of scope.
 
-Supported carriers: PNG, JPEG, MP4, ZIP, PDF, and Windows PE. Unrecognized files
+Supported carriers: PNG, JPEG, WebP, HEIC/HEIF, HEVC (Annex-B), MP4, WAV, MKV, ZIP, PDF, and Windows PE. Unrecognized files
 are rejected rather than appended to.
 
 ## Library

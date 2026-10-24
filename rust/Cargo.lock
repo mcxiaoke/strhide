@@ -59,6 +59,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bytemuck"
+version = "1.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -385,6 +391,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "oxideav-core"
+version = "0.1.41"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3be7e0bb531e2acacae221b386a6a2892a5dce4ef1ce6b58e48888c568e9139f"
+dependencies = [
+ "bytemuck",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "oxideav-h265"
+version = "0.0.15"
+source = "git+https://github.com/mcxiaoke/oxideav-h265.git?tag=v1-20261024#db02660f057e036bff7f0c044a439b875597ed21"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
 name = "pbkdf2"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -488,6 +513,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust_h265"
+version = "0.1.0"
+source = "git+https://github.com/mcxiaoke/rust_h265.git?tag=v1-20261024#3622e199c7e970b377a8abd6fe045ee3a22fbe9f"
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -552,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "strhide"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -565,10 +595,12 @@ dependencies = [
  "hmac",
  "iced-x86",
  "jpeg-decoder",
+ "oxideav-h265",
  "pbkdf2",
  "rand",
  "rayon",
  "rpassword",
+ "rust_h265",
  "serde",
  "serde_json",
  "sha2",
