@@ -1,6 +1,6 @@
 # strhide 线格式规范（Wire Specification）
 
-> 适用版本：crate `strhide` 0.6.x（Rust 实现）。
+> 适用版本：crate `strhide` 0.7.x（Rust 实现）。
 > 本文是 strhide 隐写字节布局的**权威规范**，内容按当前源码核对：结构域 UBE 见 `src/envelope.rs`、`src/engine.rs`、`src/crypto.rs`；内容域微信封见 `src/stego/`。
 > 配套文档：[ARCHITECTURE.md](./ARCHITECTURE.md)（模块职责与数据流转）。
 
@@ -20,7 +20,7 @@
 10. [密钥派生与加密细节](#10-密钥派生与加密细节)
 11. [Stealth（隐蔽）模式](#11-stealth隐蔽模式)
 12. [散落策略信道头：PE Codebits ChannelHeader（14 字节）](#12-散落策略信道头pe-codebits-channelheader14-字节)
-13. [内容域：微信封（Micro-Envelope）](#13-内容域微信封micro-envelope)
+13. [内容域：图像与视频隐写（JPEG / PNG / HEIF / HEVC）](#13-内容域图像与视频隐写jpeg--png--heif--hevc)
 14. [常量速查表](#14-常量速查表)
 15. [兼容矩阵](#15-兼容矩阵)
 
@@ -33,7 +33,7 @@ strhide 有两个相互独立的隐写域，各自有不同的字节布局：
 | 域 | 承载内容 | 字节布局 | 入口 |
 |---|---|---|---|
 | **结构域（structure）** | 一个自包含的 **UBE**（Universal Byte Envelope，连续或经散落信道编码），有头、有尾、有魔数 | 本规范 §2–§12 | `engine` |
-| **内容域（content）** | 嵌入图像像素 / DCT 系数 LSB 的**微信封**，无静态魔数 | 本规范 §13 | `stego` |
+| **内容域（content）** | 嵌入图像像素 / DCT 系数 / H.265 旁路符号位的**微信封**，无静态魔数 | 本规范 §13 | `stego` |
 
 ### 1.1 两种信封格式对比（重要）
 
@@ -53,7 +53,7 @@ strhide 有两个相互独立的隐写域，各自有不同的字节布局：
 | HKDF 子密钥标签 | `strhide-payload`、`strhide-metadata`（掩码：`strhide-header-mask-v1`、`strhide-pe-channel-mask-v1`） | `strhide-stego-enc-v1`、`strhide-stego-perm-v1`、`strhide-stego-hpos-v2`、`strhide-stc-trellis-v1` |
 | 额外派生 | stealth 魔数与 76B/10B 字段掩码 | header 槽位置换种子（无 salt）、STC 网格种子 |
 | 宿主还原 | 记录宿主 size + SHA-256，支持 bit-for-bit 还原（散落策略依赖 slack diff） | **无宿主还原**：像素/系数被改即不可逆，只能重嵌或覆盖 |
-| 最终承载 | 注入容器结构空隙（chunk/段/box/overlay 等）或指令编码散落 | 矩阵编码分散到像素 / DCT 系数的 LSB |
+| 最终承载 | 注入容器结构空隙（chunk/段/box/overlay 等）或指令编码散落 | 矩阵编码分散到像素 / DCT 系数 / H.265 变换系数符号位 |
 | 压缩 | raw deflate；`Auto` 需节省 ≥2% 才保留 | raw deflate；`compressed.len() < raw.len()` 才保留 |
 | 密码 NFC 归一化 | 统一做 Unicode NFC 归一化 | 统一做 Unicode NFC 归一化 |
 
@@ -432,20 +432,21 @@ channel_bytes[4..14] = unmasked[4..14] XOR mask[0..10]
 
 ---
 
-## 13. 内容域：图像隐写
+## 13. 内容域：图像与视频隐写（JPEG / PNG / HEIF / HEVC）
 
-内容域没有结构化信封与静态魔数。载荷先被封成一个**微信封**，再通过矩阵编码把微信封比特分散到图像元素（JPEG 量化 DCT 系数 / PNG 像素）的奇偶位上。
+内容域没有结构化信封与静态魔数。载荷先被封成一个**微信封**，再通过矩阵编码把微信封比特分散到载体元素（JPEG 量化 DCT 系数、PNG 像素或 H.265/HEVC 变换系数旁路符号位）上。
 
-内容域有**两套载体格式**，共用微信封与密钥分层思路，但头部与槽位规则不同：
+内容域包含**三套载体格式体系**，共用微信封与密钥分层思路，但头部与槽位规则针对载体物理特征深度特化：
 
-| | JPEG（V3，STC 三元码） | PNG（空间域，HILL） |
-|---|---|---|
-| 头部 | 44 字节超块 + 可选 TLV 扩展区 | 32 字节头 + 32 字节 FeatureWord |
-| 头部槽位 | `718 + n_ext`（密钥置换前 K 槽） | 512（密钥置换前 K 槽） |
-| 槽位集合 | 全图 AC 位置（几何网格，与系数值无关） | 分类候选像素（与像素值相关，需重算代价图） |
-| 每槽承载 | 三元 `±1`（`R = 1/24 .. 1/1` 自适应） | 由 `--codec` 决定（Hamming / STC `u ≤ 3`） |
-| 头部定位成本 | 一次套件 KDF（无快速口令预言机） | 一次 HKDF（无盐，避免循环依赖） |
-| 提取是否需要代价图 | **不需要** | 需要 |
+| | JPEG（V3，STC 三元码） | PNG（空间域，HILL） | HEIF / HEVC（Scheme C，CABAC Bypass） |
+|---|---|---|---|
+| 头部 | 44 字节超块 + 可选 TLV 扩展区 | 32 字节头 + 32 字节 FeatureWord | 40 字节固定头（Magic 4B + Len 4B + CRC 4B + Nonce 12B + Tag 16B） |
+| 头部槽位 | `718 + n_ext`（密钥置换前 K 槽） | 512（密钥置换前 K 槽） | 密文与头整体由 STC 编码入前置/离散槽位（无独立明文槽） |
+| 槽位集合 | 全图 AC 位置（几何网格，与系数值无关） | 分类候选像素（与像素值相关，需重算代价图） | 变换系数旁路符号位 `coeff_sign_flag`（避让 EPB 冲突） |
+| 每槽承载 | 三元 `±1`（`R = 1/24 .. 1/1` 自适应） | 由 `--codec` 决定（Hamming / STC `u ≤ 3`） | 二元符号位翻转（STC `h=7, u=2`，码率 1/2） |
+| 头部定位成本 | 一次套件 KDF（无快速口令预言机） | 一次 HKDF（无盐，避免循环依赖） | 一次 HKDF-SHA256（以参数集 Cover Digest 为盐） |
+| 提取是否需要代价图 | **不需要** | 需要 | **不需要**（仅需根据槽位数重建 Weyl 离散排列） |
+| 尺寸膨胀 | 极微（Huffman 重编码波动，≤ 1%） | 0（PNG 尺寸由压缩率微弱影响） | **绝对为 0（Δ = 0，纯原位字节改写）** |
 
 ### 13.1 微信封（两种载体共用）
 
@@ -651,6 +652,75 @@ const ENGINE: StrHide = StrHide::new().with_profile(
               不能（>255B 或必须固定位置）→ 提升 major，超块不动，正文前置声明新布局
 ```
 
+### 13.11 CABAC 旁路域（HEIF / HEIC 与 HEVC Annex-B，Scheme C）：线格式与协议规范
+
+Scheme C 专为 H.265/HEVC 压缩域原位隐写设计，直接在压缩比特流（NAL 单元内部的 CABAC 旁路区间）中调制高频变换系数的符号位，具备**零字节膨胀（$\Delta = 0$）**、**严格语法合规**与**极佳抗检鲁棒性**。
+
+#### 13.11.1 微信封布局（40 字节固定头部 + 载荷）
+
+```text
+message = magic (4, "SH25") ‖ payload_len (4, BE) ‖ payload_crc (4, BE) ‖ nonce (12) ‖ ciphertext (len + 16B tag)
+```
+
+- **`magic`（4 字节）**：固定为 ASCII `SH25`（`0x53 0x48 0x32 0x35`，代表 StrHide H.265）。
+- **`payload_len`（4 字节，Big-Endian）**：明文原始载荷字节长度。
+- **`payload_crc`（4 字节，Big-Endian）**：明文原始载荷的 IEEE 802.3 CRC32 校验和。提取端在 AEAD 解密后必须验证 CRC，杜绝伪阳性解码。
+- **`nonce`（12 字节）**：CSPRNG 生成的 96 位随机 Nonce。
+- **`ciphertext`（`payload_len + 16` 字节）**：使用 AES-256-GCM 对原始载荷进行的认证加密，包含 16 字节 GCM Tag。
+- **固定头部总长**：`4 + 4 + 4 + 12 + 16 = 40` 字节（320 比特）。
+
+#### 13.11.2 参数集指纹（Cover Digest）与密钥派生
+
+为了彻底切断口令暴力枚举预言机，并保证密钥与载体内容强绑定：
+
+```text
+// 1. 采集不可变参数集计算载体指纹：
+//    HEIF/HEIC：解析 ISO BMFF 树提取 Primary Item 的 hvcC 盒内的 VPS/SPS/PPS NAL 原始字节；
+//    Annex-B：扫描前 1MB 码流提取 VPS (type=32)、SPS (type=33)、PPS (type=34) NAL RBSP 字节。
+cover_digest = SHA-256("strhide-hevc-cover-v1" ‖ vps_bytes ‖ sps_bytes ‖ pps_bytes)
+
+// 2. 派生 AES-256-GCM 密钥与 STC Trellis 种子：
+key  = HKDF-SHA256(ikm = effective_password, salt = cover_digest, info = "strhide-hevc-aes-key")
+seed = u64be(SHA-256(cover_digest)[0..8])
+```
+
+- 若用户未提供密码，`effective_password` 默认使用 `DEFAULT_HEVC_SALT`（`b"strhide-hevc-salt-2026"`）；提供密码时严格按密码计算。
+- 参数集在图片生命周期中不可变，提取端与嵌入端计算出的 `cover_digest` 严格一致。
+
+#### 13.11.3 槽位网格与矩阵编码（STC Trellis）
+
+- **槽位定义**：H.265 变换块（TU）残差系数编码（`residual_coding`）中的 `coeff_sign_flag`。
+- **编码器设置**：`StcTrellis::from_seed_grouped(seed, h=7, u=2)`。
+  - 约束高度 $h = 7$，分组格宽 $u = 2$（有效码率 $R = 1/2$）。
+  - 嵌入 $M$ 比特消息（头部 320 比特 + 密文正文比特）所需候选槽位为：
+    $$N_{\text{slots}} = u \times (M + h - 1) = 2 \times (M + 6)$$
+  - 每比特平均仅翻转约 0.25 个符号位，极大地降低了视觉失真。
+- **容量模型**：
+  $$\text{Capacity}_{\text{max}} = \left\lfloor \frac{\max(0, \lfloor N_{\text{total}} / 2 \rfloor - 320)}{8} \right\rfloor \text{ 字节}$$
+
+#### 13.11.4 空间均衡抽样（Weyl 离散置换）
+
+为了避免多图像项（如 iPhone 连拍包含数十张独立 HEVC 图像项）或多切片载荷集中落在首图/首个 Slice，导致局部画质劣化：
+
+```text
+step = (N_total * 5 / 8) | 1          // 强制奇数，与 N_total 互质
+positions[i] = (i * step) % N_total   // 确定性离散打散
+```
+
+提取端与嵌入端仅凭 `N_total` 即可生成完全相同的 `positions` 访问顺序，不需要在码流中记录任何额外的置换表。
+
+#### 13.11.5 EPB（Emulation Prevention Byte）防竞争消解机制
+
+H.265 标准规定，当 RBSP 出现连续两个 `0x00` 后接 `0x00..=0x03` 时，必须插入防竞争字节 `0x03`；在解码时剥离 `0x03`。
+
+- **潜在风险**：翻转某个旁路符号位会改变 RBSP 比特。若因此导致码流产生新的 `0x03` 或消除了原有的 `0x03`，NAL 单元字节数将发生变动（$\Delta \neq 0$），进而破坏 ISOBMFF 盒子的物理偏移。
+- **消解机制（最多 24 轮迭代）**：
+  1. 嵌入端执行 STC Viterbi 回溯，得到待翻转槽位；
+  2. 尝试回写 RBSP 并重新计算 EPB 注入点；
+  3. 若检测到任何 NAL 的 RBSP/NAL 字节长度发生变动，定位引起该窗口冲突的符号位槽位；
+  4. 将冲突槽位的翻转代价置为无穷大（`Cost = INFINITY`），保留在槽位池中但禁止翻转；
+  5. 重新运行 STC 求解；通常在 1–2 轮内即可完全消除 EPB 冲突，确保 $\Delta = 0$ 且码流严格符合 H.265 句法规范。
+
 ---
 
 ## 14. 常量速查表
@@ -697,6 +767,11 @@ const ENGINE: StrHide = StrHide::new().with_profile(
 | `DEFAULT_HAMMING_K` | `3`（Hamming (7,3)） |
 | `DEFAULT_STC_H` / `MAX_STC_U` | `8` / `3`（空间域） |
 | 空间域可嵌入像素范围 | `[8, 247]` |
+| **HEVC Scheme C 魔数** | `b"SH25"` |
+| **HEVC 固定头部长度** | `40` 字节（Magic 4 + Len 4 + CRC 4 + Nonce 12 + Tag 16） |
+| **HEVC STC 参数** | `h = 7, u = 2`（码率 1/2） |
+| **HEVC 默认 Salt** | `b"strhide-hevc-salt-2026"` |
+| **HEVC 最大防竞争迭代轮数** | `24` |
 
 ### 14.3 最小信封口径
 
@@ -712,6 +787,7 @@ const ENGINE: StrHide = StrHide::new().with_profile(
 | 读侧能力 \ 写侧产物 | 是否可读 | 结果 |
 |---|---|---|
 | UBE v2.2（当前，compact meta） | ✅ | 正常读取 |
+| Scheme C（HEIF/HEIC、HEVC Annex-B 原位 CABAC） | ✅ | v0.7.0 起原生支持 |
 | UBE v2.2，`FLAG_COMPACT_META` 未置（旧 JSON 元数据） | ❌ | 报不支持的元数据布局 |
 | pre-v2（v0.2/v0.3，ASCII 魔数、明文/JSON 元数据） | ❌ | 报告"无隐藏数据"（旧 ASCII 魔数与明文布局已移除） |
 | 版本号 ≠ `0x02` | ❌ | 报不支持的信封版本 |

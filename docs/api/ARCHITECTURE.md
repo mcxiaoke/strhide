@@ -55,11 +55,11 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
         ▼              ▼                            ▼
 ┌──────────────┐ ┌─────────────┐        ┌───────────────────────────┐
 │  router      │ │  rejection  │        │  stego 子模块：            │
-│  格式嗅探     │ │  预写安全检查 │        │  spatial / jpeg / coding  │
-│  策略名↔ID    │ └─────────────┘        │  traits / registry /      │
-└──────┬───────┘                        │  envelope / header / prng │
-       ▼                                └───────────┬───────────────┘
-┌──────────────────────────────┐                     │
+│  格式嗅探     │ │  预写安全检查 │        │  spatial / jpeg / hevc    │
+│  策略名↔ID    │ └─────────────┘        │  heif / coding / traits   │
+└──────┬───────┘                        │  registry / envelope /    │
+       ▼                                │  header / prng            │
+┌──────────────────────────────┐        └───────────┬───────────────┘
 │  adapters（HostAdapter）      │                     │
 │  PNG/JPEG/WEBP/HEIF/MP4/WAV/  │                     │
 │  ZIP/PDF/PE/MKV + eof 等      │                     │
@@ -76,7 +76,7 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
 两个域彼此独立：
 
 - **结构域**把一个完整的 UBE 信封（有头、有尾、有魔数）放进容器的结构性空隙（私有 chunk、段、盒子、目录前间隙等），入口在 [`engine`]。
-- **内容域**把数据嵌入图像像素（PNG）或 DCT 系数（JPEG）的最低有效位，没有结构化信封，入口在 [`stego`]。
+- **内容域**把数据嵌入图像像素（PNG）、DCT 系数（JPEG）或 H.265/HEVC 变换系数旁路符号位（HEIF/HEIC 与 HEVC Annex-B），没有结构化信封，入口在 [`stego`]。
 
 两域共用底层 [`crypto`]、[`errors`]、[`params`]，但**密钥派生域相互隔离，且信封格式本身就是两套不同结构**（结构域 UBE 有头/尾/元数据，内容域是极简伪随机微信封），互不可读。差异清单见 [WIRE_SPEC §1.1](./WIRE_SPEC.md#11-两种信封格式对比重要)，内容域机制见 [§7.3](#73-内容域隐写)。
 
@@ -94,7 +94,7 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
 |---|---|---|
 | [`facade`] | 推荐入口：绑定一个方言 + 写侧基线，动词作为普通方法 | `StrHide`、`new`/`with_profile`/`with_local_params`、`run_cli_from` |
 | [`engine`] | 结构域高层编排：写入、读取、剥离、检查、验证 | `write_carrier*`、`read_carrier*`、`remove_carrier*`、`inspect_carrier*`、`verify_carrier*`、`PayloadSource`、`WriteOptions`、各 `*Result` |
-| [`stego`] | 内容域自适应隐写：嵌入、提取、容量探测 | `embed_carrier*`、`extract_carrier*`、`probe_carrier_capacity`、`StegoOptions`、`SpatialParams`、`JpegParams`、`StegoCapacityInfo` |
+| [`stego`] | 内容域自适应隐写：嵌入、提取、容量探测（PNG/JPEG/HEIF/HEVC） | `embed_carrier*`、`extract_carrier*`、`probe_carrier_capacity`、`StegoOptions`、`SpatialParams`、`JpegParams`、`StegoCapacityInfo` |
 | [`params`] | 调参旋钮与私有方言 | `LocalParams`、`Profile`、`StegoProfile`、`MagicPair`、`CompressionStrategy`、`RejectionPolicy` |
 | [`adapters`] | `HostAdapter` trait 与各格式实现；容器 I/O 辅助 | `HostAdapter`、`StrategyCapacity`、`SeekRead`、`SeekWrite`、`SegmentedSubStream` |
 | [`envelope`] | UBE v2.2 二进制结构与序列化 | `EnvelopeHeader`、`EnvelopeTrailer`、各尺寸/标志常量 |
@@ -210,7 +210,7 @@ pub struct WriteOptions<'a> {
 
 // 内容域选项（stego）
 pub struct StegoOptions {
-    pub algorithm: Option<String>,         // "hill" / "uerd" / "auto"
+    pub algorithm: Option<String>,         // "hill" / "uerd" / "hevc" / "cabac" / "auto"
     pub password: Option<String>,
     pub stego_domain: Option<String>,      // 派生隔离域标签（与 Profile::stego_domain 级联）
     pub safety_level: SafetyLevel,         // 容量安全档位（High [默认], Balanced, Paranoid）
@@ -460,9 +460,24 @@ const MY_DIALECT: Profile = Profile::new()
 
 ### 7.3 内容域隐写
 
-- 算法由 `CostModelRegistry` 按名称解析：空间域（PNG）默认/`hill` → `HillCostModel`；JPEG 域默认/`uerd` → `UerdCostModel`。未知名（如旧的 `wow`/`nsf5` 别名）**明确拒绝**，不静默映射。
-- 矩阵编码 `StegoCodec`：`Hamming`（(7,3)，每块至多动 1 槽）或 `Stc`（全局 Viterbi 网格，最小化代价加权失真，支持分组 u）；`Auto`（默认）按容量/载荷自适应选择 STC 分组或回退。编码选项直接在 `SpatialParams.codec` 或 `JpegParams.codec` 中配置（连同 `stc_h` 约束高度与 `stc_u` 分组大小）。codec 与 h/u 记录在内容域 header 的空闲位中，提取无需调用方告知。
-- 空间域嵌入限制在像素值 `[8, 247]`，并采用 ternary ±1 匹配与八值类（`val & 0xF8`）约束，保证提取侧代价排序可复现。
+内容域当前支持三大体系架构：
+
+1. **空间域（PNG，Scheme A）**：
+   - 算法由 `CostModelRegistry` 解析：默认/`hill` → `HillCostModel`。未知名（如旧的 `wow`/`nsf5` 别名）**明确拒绝**，不静默映射。
+   - 矩阵编码 `StegoCodec`：`Hamming`（(7,3)，每块至多动 1 槽）或 `Stc`（全局 Viterbi 网格，最小化代价加权失真，支持分组 u）；`Auto`（默认）按容量/载荷自适应选择 STC 分组或回退。
+   - 空间域嵌入限制在像素值 `[8, 247]`，采用 ternary ±1 匹配与八值类（`val & 0xF8`）约束，保证提取侧代价排序完全复现。
+
+2. **DCT 频域（JPEG，Scheme B）**：
+   - 算法由 `CostModelRegistry` 解析：默认/`uerd` → `UerdCostModel`。
+   - 固定网格真三元 STC（V3 协议）：对全图所有 AC 位置（`k = 1..63`）计价并构建几何网格，提取无需代价图与重排序。
+   - 44 字节超块与套件 KDF 分层密钥派生，支持可选 TLV 扩展区与三种密码套件。
+
+3. **CABAC 旁路域（HEIF / HEIC 与 HEVC Annex-B，Scheme C）**：
+   - **载体识别与自动路由**：统一入口 `embed_carrier` / `extract_carrier` 通过 `sniff_hevc_carrier` 自动探测 ISOBMFF 中的 HEVC 图像项（单图或网格/连拍 items）与原始 Annex-B 裸码流，无需调用方手动分支。
+   - **旁路符号位编码（Bypass Coding）**：针对 H.265/HEVC 变换系数的符号位（`coeff_sign_flag`）。由于 CABAC 中符号位属于等概率 Bypass 模式（旁路自适应状态机更新），翻转合法符号位仅改变高频残差的正负极性，绝不破坏宏块语法、不引发上下文概率漂移，且视觉失真极低。
+   - **零尺寸膨胀（$\Delta = 0$）与 EPB 防竞争避让**：修改直接在压缩比特流内部就地（in-place）完成。由于 H.265 标准在遇到 `0x000000` ~ `0x000003` 模式时强制要求插入/剥离防竞争字节 `0x03`（EPB），符号位翻转可能引发 EPB 字节增删而破坏 $\Delta = 0$。引擎在嵌入时执行最多 24 轮迭代校验，对破坏 EPB 窗口的槽位赋予无限大代价（Cost = $\infty$）并重新进行 STC 求解，确保生成的码流 100% 语法合规且文件尺寸绝对守恒。
+   - **空间均衡抽样（Weyl 离散置换）**：针对 iPhone 连拍或 Grid 等包含数十个 HEVC 图像项的复合 HEIC 容器，避免载荷全量压入首张主图造成局部画质失衡，基于全载体候选槽位总数进行确定性 Weyl 离散步长抽样打散。
+   - **架构解耦与上游 Observer**：通过外部依赖 `rust_h265` 的极简 `CabacObserver` 观察者接口截获 bin 流与高频系数元数据；利用 `oxideav-h265` 进行高精度的 CABAC 重编码回写。
 
 ---
 
@@ -525,3 +540,5 @@ const MY_DIALECT: Profile = Profile::new()
 [`i18n`]: ../../rust/src/i18n/mod.rs
 [`cli_i18n`]: ../../rust/src/cli_i18n.rs
 [`jpeg`]: ../../rust/src/jpeg/mod.rs
+[`hevc`]: ../../rust/src/stego/hevc/mod.rs
+[`heif`]: ../../rust/src/stego/heif.rs
