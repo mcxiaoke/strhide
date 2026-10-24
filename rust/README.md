@@ -24,7 +24,7 @@ strhide inspect report.pdf dir/ -r --json     # envelope metadata + capacity (mu
 strhide verify report.pdf dir/ -r             # verify host + envelope integrity (multi-carrier & recursive)
 strhide restore photo-out.png -o clean.png    # strip hidden data to clean.png
 strhide restore photo.png --in-place          # restore carrier in-place
-strhide embed photo.png -t "secret" -o out.png # content-adaptive stego (HILL for PNG, UERD for JPEG)
+strhide embed photo.png -t "secret" -o out.png # content-adaptive stego (HILL / S-UNIWARD for PNG, UERD / J-UNIWARD for JPEG)
 strhide embed photo.heic -t "secret" -o out.heic # content-adaptive stego (HEIF/HEIC CABAC bypass, zero growth Δ=0)
 strhide embed photo.png --capacity             # probe image stego capacity without embedding
 strhide embed photo.heic --capacity            # probe HEIF/HEIC stego capacity

@@ -174,7 +174,7 @@ All functions return a result dict and raise `StrHideError` subclasses on failur
 | PNG | ✓ | chunk injection between IDAT chunks |
 | JPEG | ✓ | APPn segment injection, multi-segment chaining |
 | WebP | ✓ | `riff_chunk` private `SHRD` chunk injection |
-| HEIC / HEIF | ✓ | `box_uuid` compliant ISO BMFF uuid box injection |
+| HEIC / HEIF | ✓ | `item_hidden` (unreferenced private item in `meta`, primary strategy), `free_box` (ISO BMFF `free` box disguise), or `box_uuid` injection |
 | MP4 | ✓ | `box_uuid` free/uuid box injection |
 | WAV | ✓ | `riff_chunk` private `SHRD` chunk injection |
 | MKV | ✓ | `ebml_void` compliant EBML Void element injection |
@@ -190,8 +190,8 @@ Unrecognized formats are **rejected**: strhide only modifies explicitly supporte
 
 | Domain | Supported formats | Algorithm | Mechanism |
 | --- | --- | --- | --- |
-| Spatial domain | PNG (RGB/RGBA/Grayscale) | **HILL** (High-Low-Low) + asymmetric ±1 | Ternary ±1 matching in high-pass texture regions; the move stays inside the pixel's eight-value class so the `val & 0xF8` cost map — and hence the slot ranking — is identical on both ends |
-| DCT frequency domain | JPEG / JPG (Baseline) | **UERD + ternary STC (V3)** | Fixed grid of every AC position, ternary `±1` write-back, 44-byte superblock, `dct-io` lossless re-encoding |
+| Spatial domain | PNG (RGB/RGBA/Grayscale) | **HILL** (default) or **S-UNIWARD** + asymmetric ±1 | Ternary ±1 matching in high-pass texture regions; the move stays inside the pixel's eight-value class so the `val & 0xF8` cost map — and hence the slot ranking — is identical on both ends. Re-encoding accelerated with Rayon + SIMD `zlib-rs` (10.5x speedup) |
+| DCT frequency domain | JPEG / JPG (Baseline) | **UERD** (default) or **J-UNIWARD** + ternary STC (V3) | Fixed grid of every AC position, ternary `±1` write-back, 44-byte superblock, `dct-io` lossless re-encoding |
 | CABAC bypass domain | HEIF / HEIC, HEVC Annex-B | **H.265 CABAC Bypass + STC (Scheme C)** | Modulates bypass sign bits in high-frequency transform coefficients with EPB hazard avoidance; zero file growth ($\Delta = 0$), bit-exact syntax compliance, preserves visual fidelity |
 
 *HEIF/HEIC & HEVC: CABAC bypass sign-bit steganography (Scheme C)*: Targets H.265/HEVC transform coefficient sign bits (`coeff_sign_flag`). Because sign bits are bypass-coded in CABAC (equiprobable bin, bypassing adaptive context arithmetic state), modulating legal sign bits incurs minimal perceptual distortion and leaves the CABAC state machine and surrounding macroblock headers intact. An internal `CabacObserver` hooks into the H.265 decoder to gather candidate slots and evaluate EPB (Emulation Prevention Byte `0x000003`) legality, and syndrome-trellis codes (STC) embed the encrypted UBE payload with zero byte inflation ($\Delta = 0$). Single-picture HEIC, burst/grid items, and Annex-B elementary video streams are automatically detected and handled.

@@ -168,7 +168,7 @@ assert_eq!(payload, b"secret");
 | PNG | ✓ | IDAT 块之间注入 chunk |
 | JPEG | ✓ | APPn 段注入、多段链式 |
 | WebP | ✓ | `riff_chunk` 私有 `SHRD` chunk 注入 |
-| HEIC / HEIF | ✓ | `box_uuid` 规范 ISO BMFF uuid box 注入 |
+| HEIC / HEIF | ✓ | `item_hidden`（未引用私有 item，首选策略）、`free_box`（ISO BMFF `free` 盒伪装）或 `box_uuid` 规范注入 |
 | MP4 | ✓ | `box_uuid` free/uuid box 注入 |
 | WAV | ✓ | `riff_chunk` 私有 `SHRD` chunk 注入 |
 | MKV | ✓ | `ebml_void` 规范 EBML Void 元素注入 |
@@ -184,8 +184,8 @@ assert_eq!(payload, b"secret");
 
 | 隐写域 | 支持格式 | 算法 | 机制特点 |
 | --- | --- | --- | --- |
-| 空间域 | PNG（RGB/RGBA/灰度） | **HILL**（High-Low-Low）+ 非对称 ±1 | 最小失真 KB 高通 + 双级均值平滑；三元 ±1 写入且不离开像素的八值类，成本图按 `val & 0xF8` 掩码，嵌入/提取槽位排序严格一致 |
-| DCT 频域 | JPEG / JPG（基线编码） | **UERD + 三元 STC（V3）** | 全图 AC 位置固定网格、真三元 `±1` 回写、44 字节超块，通过 `dct-io` 实现无损重编 |
+| 空间域 | PNG（RGB/RGBA/灰度） | **HILL**（默认）或 **S-UNIWARD** + 非对称 ±1 | 最小失真 KB 高通 + 双级均值平滑；三元 ±1 写入且不离开像素的八值类，成本图按 `val & 0xF8` 掩码。重编码采用 Rayon 并行 + SIMD `zlib-rs`，大图耗时提速 10.5 倍 |
+| DCT 频域 | JPEG / JPG（基线编码） | **UERD**（默认）或 **J-UNIWARD** + 三元 STC（V3） | 全图 AC 位置固定网格、真三元 `±1` 回写、44 字节超块，通过 `dct-io` 实现无损重编 |
 | CABAC 旁路域 | HEIF / HEIC、HEVC Annex-B | **H.265 CABAC 旁路符号位 + STC（Scheme C）** | 调制高频变换系数的旁路符号位并避让 EPB 防竞争字节；零文件尺寸膨胀（$\Delta = 0$），严格符合 H.265 标准句法，视觉失真极小 |
 
 *HEIF/HEIC 与 HEVC：CABAC 旁路符号位隐写（Scheme C）*：针对 H.265/HEVC 变换系数的符号位（`coeff_sign_flag`）进行调制。由于符号位在 CABAC 中采用旁路编码（Bypass 模式，等概率单 bit，不更新上下文状态转移概率），调制合法符号位在保持极低人眼感知失真的同时，完全不影响前后宏块的算术解码状态机。系统通过 `CabacObserver` 挂载至 H.265 解码管道提取合法槽位并进行 EPB（防竞争字节 `0x000003`）冲突避让，经由 STC 校验格码嵌入加密 UBE 载荷，文件尺寸精确保持零膨胀（$\Delta = 0$）。原生支持单图 HEIC、网格连拍图集以及 Annex-B 裸视频码流。

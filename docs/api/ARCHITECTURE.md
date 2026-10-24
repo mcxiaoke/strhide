@@ -210,12 +210,13 @@ pub struct WriteOptions<'a> {
 
 // 内容域选项（stego）
 pub struct StegoOptions {
-    pub algorithm: Option<String>,         // "hill" / "uerd" / "hevc" / "cabac" / "auto"
+    pub algorithm: Option<String>,         // "hill" / "suniward" / "uerd" / "juniward" / "hevc" / "cabac" / "auto"
     pub password: Option<String>,
     pub stego_domain: Option<String>,      // 派生隔离域标签（与 Profile::stego_domain 级联）
     pub safety_level: SafetyLevel,         // 容量安全档位（High [默认], Balanced, Paranoid）
     pub safety_enforcement: SafetyEnforcement, // 安全执行模式（Advisory [默认], Enforced）
-    pub spatial_params: SpatialParams,     // 空间域调优（含 codec/stc_h/stc_u/safety）
+    pub freshness: Freshness,              // 随机新鲜度（Random [默认] / Seeded([u8; 32]) 可复现运行）
+    pub spatial_params: SpatialParams,     // 空间域调优（含 codec/stc_h/stc_u/safety/exclusion_rate）
     pub jpeg_params: JpegParams,           // JPEG DCT 调优（含 codec/stc_h/stc_u/safety）
 }
 ```
@@ -434,7 +435,7 @@ const MY_DIALECT: Profile = Profile::new()
 | `PngAdapter` | `PNG` | `chunk`、`eof` |
 | `JpegAdapter` | `JPEG` | `app_segment`、`eof` |
 | `WebpAdapter` | `WEBP` | `riff_chunk`、`eof` |
-| `HeifAdapter` | `HEIF` | `box_uuid`、`eof` |
+| `HeifAdapter` | `HEIF` | `item_hidden`、`free_box`、`box_uuid`、`eof` |
 | `Mp4Adapter` | `MP4` | `box_uuid`、`eof` |
 | `WavAdapter` | `WAV` | `riff_chunk`、`eof` |
 | `ZipAdapter` | `ZIP` | `pre_cd_inject`、`eof` |
@@ -460,24 +461,33 @@ const MY_DIALECT: Profile = Profile::new()
 
 ### 7.3 内容域隐写
 
-内容域当前支持三大体系架构：
+内容域当前支持三大体系架构与可复现工程保障：
 
 1. **空间域（PNG，Scheme A）**：
-   - 算法由 `CostModelRegistry` 解析：默认/`hill` → `HillCostModel`。未知名（如旧的 `wow`/`nsf5` 别名）**明确拒绝**，不静默映射。
-   - 矩阵编码 `StegoCodec`：`Hamming`（(7,3)，每块至多动 1 槽）或 `Stc`（全局 Viterbi 网格，最小化代价加权失真，支持分组 u）；`Auto`（默认）按容量/载荷自适应选择 STC 分组或回退。
-   - 空间域嵌入限制在像素值 `[8, 247]`，采用 ternary ±1 匹配与八值类（`val & 0xF8`）约束，保证提取侧代价排序完全复现。
+   - **算法支持**：由 `CostModelRegistry` 解析：默认/`hill` → `HillCostModel`（wire id 1）；`suniward` → `SuniwardCostModel`（wire id 2，自适应连续访存与 SIMD FMA 加速）。未知名**明确拒绝**。
+   - **参数自描述同步**：提取端自动从 `FeatureWord.algorithm_id` 与 `FeatureWord.exclusion_permille` 提取算法 ID 与排除分位数，原生支持自定义 `--exclusion-rate`。
+   - **矩阵编码 `StegoCodec`**：`Hamming`（(7,3)，每块至多动 1 槽）或 `Stc`（全局 Viterbi 网格，最小化代价加权失真，支持分组 u）；`Auto`（默认）按容量/载荷自适应选择 STC 分组或回退。
+   - **数值与边界约束**：像素值限制在 `[8, 247]`，采用 ternary ±1 匹配与八值类（`val & 0xF8`）约束，保证提取侧代价排序完全复现。
+   - **并行 Deflate 重编码**：利用纯 Rust SIMD（`zlib-rs`）结合 Rayon 按扫描线整行切分并发压缩，大图（14.8 MP）重编码耗时由 4 秒降低至 380 毫秒（提速 10.5 倍）。
 
 2. **DCT 频域（JPEG，Scheme B）**：
-   - 算法由 `CostModelRegistry` 解析：默认/`uerd` → `UerdCostModel`。
-   - 固定网格真三元 STC（V3 协议）：对全图所有 AC 位置（`k = 1..63`）计价并构建几何网格，提取无需代价图与重排序。
-   - 44 字节超块与套件 KDF 分层密钥派生，支持可选 TLV 扩展区与三种密码套件。
+   - **算法支持**：默认/`uerd` → `UerdCostModel`；`juniward` → `JuniwardCostModel`（多线程并行化与 Wiener 降噪两趟方差防溢出）。
+   - **固定网格真三元 STC（V3 协议）**：对全图所有 AC 位置（`k = 1..63`）计价并构建几何网格，提取无需代价图与重排序。
+   - **校准与分析加速**：`analysis/calibration` 盲校准采用单趟直方图重构，大幅缩减分析耗时并杜绝数值溢出。
+   - **44 字节超块**与套件 KDF 分层密钥派生，支持可选 TLV 扩展区与三种密码套件。
 
-3. **CABAC 旁路域（HEIF / HEIC 与 HEVC Annex-B，Scheme C）**：
-   - **载体识别与自动路由**：统一入口 `embed_carrier` / `extract_carrier` 通过 `sniff_hevc_carrier` 自动探测 ISOBMFF 中的 HEVC 图像项（单图或网格/连拍 items）与原始 Annex-B 裸码流，无需调用方手动分支。
-   - **旁路符号位编码（Bypass Coding）**：针对 H.265/HEVC 变换系数的符号位（`coeff_sign_flag`）。由于 CABAC 中符号位属于等概率 Bypass 模式（旁路自适应状态机更新），翻转合法符号位仅改变高频残差的正负极性，绝不破坏宏块语法、不引发上下文概率漂移，且视觉失真极低。
-   - **零尺寸膨胀（$\Delta = 0$）与 EPB 防竞争避让**：修改直接在压缩比特流内部就地（in-place）完成。由于 H.265 标准在遇到 `0x000000` ~ `0x000003` 模式时强制要求插入/剥离防竞争字节 `0x03`（EPB），符号位翻转可能引发 EPB 字节增删而破坏 $\Delta = 0$。引擎在嵌入时执行最多 24 轮迭代校验，对破坏 EPB 窗口的槽位赋予无限大代价（Cost = $\infty$）并重新进行 STC 求解，确保生成的码流 100% 语法合规且文件尺寸绝对守恒。
-   - **空间均衡抽样（Weyl 离散置换）**：针对 iPhone 连拍或 Grid 等包含数十个 HEVC 图像项的复合 HEIC 容器，避免载荷全量压入首张主图造成局部画质失衡，基于全载体候选槽位总数进行确定性 Weyl 离散步长抽样打散。
-   - **架构解耦与上游 Observer**：通过外部依赖 `rust_h265` 的极简 `CabacObserver` 观察者接口截获 bin 流与高频系数元数据；利用 `oxideav-h265` 进行高精度的 CABAC 重编码回写。
+3. **HEIF 容器桥接与 CABAC 旁路域（Scheme B / Scheme C）**：
+   - **载体识别与自动路由**：统一入口 `embed_carrier` / `extract_carrier` 自动探测 ISOBMFF 结构中的 HEVC 图像项与原始 Annex-B 裸码流。
+   - **方案 B（内嵌缩略图桥接，`thumb_bridge`）**：当 HEIC 容器包含独立 JPEG Item、未压缩像素项或 Exif TIFF IFD1 缩略图时，自动切片并桥接至 JPEG/空间域引擎，修补 Exif 与 `iloc`/`mdat` 偏移，**主图 100% bit-exact 零失真**。
+   - **方案 C（CABAC 旁路符号位原位隐写）**：
+     - **旁路符号位编码（Bypass Coding）**：针对 H.265 变换系数的符号位（`coeff_sign_flag`，等概率 Bypass 模式，不影响上下文概率状态机更新），改变残差正负极性而不破坏宏块语法，感知失真极低。
+     - **零尺寸膨胀（$\Delta = 0$）与 EPB 避让**：直接在压缩比特流内部就地修改。通过至多 24 轮迭代检验，将破坏 `0x000000..=03` 防竞争窗口的冲突槽位置为无穷大代价（Cost = $\infty$）重新求解，确保文件尺寸 100% 绝对守恒。
+     - **空间均衡抽样（Weyl 离散置换）**：通过确定性互质步长离散抽样，避免载荷全量压在连拍首图导致局部画质失衡。
+     - **外部解耦与 Observer**：通过 `rust_h265` 的 `CabacObserver` 截获 bin 流与系数，通过 `oxideav-h265` 进行精确重编。
+
+4. **可复现嵌入机制（Freshness）**：
+   - 支持 `Freshness::Random`（默认）与 `Freshness::Seeded([u8; 32])`。
+   - 在 Seeded 模式下，salt、nonce 与 payload 均由主种子经 HKDF-SHA256 派生；同时强制浮点代价图走标量内核（避免 AVX2 FMA 舍入差异导致 slot 抖动），实现跨机器/跨 CI 的逐字节确定性可复现。
 
 ---
 
@@ -496,6 +506,10 @@ const MY_DIALECT: Profile = Profile::new()
 | 内容域无密码私钥 | `Profile::with_stego_secret` | P |
 | 内容域 HKDF 域标签 | `Profile::with_stego_domain` | P |
 | 私有图像线格式身份 | `Profile::with_format_profile` | P |
+| 可复现随机源 / 确定性测试 | `StegoOptions.freshness = Freshness::Seeded` | Stego |
+| 空间域成本模型选择 | `StegoOptions.algorithm = "hill"` / `"suniward"` | Stego |
+| JPEG 频域成本模型选择 | `StegoOptions.algorithm = "uerd"` / `"juniward"` | Stego |
+| HEIF 结构域隐藏策略 | `-s item_hidden` / `-s free_box` | 结构域 |
 | 统一门面（绑定方言 + 基线） | `StrHide::new` / `with_profile` / `with_local_params` | Facade |
 | 私有命令行 | `StrHide::run_cli_from` | Facade |
 | 内存（免落盘）处理 | `*_carrier_bytes` | I/O |
@@ -505,7 +519,7 @@ const MY_DIALECT: Profile = Profile::new()
 
 - **HostAdapter 动态注册**：`router::ADAPTERS` 与 `find_adapter` 目前是静态切片，自定义格式适配器无法在运行时注册进引擎。
 - **代价模型经统一入口注入**：`StegoOptions` 目前通过 `algorithm` 名称匹配，没有 trait 对象直接注入字段；外部实现的 `SpatialCostModel/JpegCostModel` 可直接传给 `spatial/jpeg` 子模块的内部函数，但无法仅通过 `embed_carrier` 名称入口生效。
-- **策略 ID 段**：`STRATEGY_REGISTRY` 中 1–11 为官方保留（`MAX_KNOWN_STRATEGY_ID = 11`）；解掩码启发式会把未知 ID 当噪声。
+- **策略 ID 段**：`STRATEGY_REGISTRY` 中 1–13 为官方保留（`MAX_KNOWN_STRATEGY_ID = 13`）；解掩码启发式会把未知 ID 当噪声。
 - **协议级参数不可配**：加密套件（仅 AES-256-GCM）、PBKDF2 轮数（100 000）、压缩算法（仅 raw deflate）、自定义元数据字段均为线格式常量，本期不开放（详见审计文档 §3.1 / §4.5）。
 
 > 上述边界随版本演进可能调整；以最新源码与审计/计划文档为准。

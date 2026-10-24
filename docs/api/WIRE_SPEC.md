@@ -376,7 +376,7 @@ trailer_crc32(stealth) = raw_crc XOR mask
 `EnvelopeHeader::unpack_with_profile` 按序尝试：
 
 1. **密码 + stealth**：若密码派生的 header 魔数匹配（先认证密码），用密码去掩码，要求 `version = 0x02` 且 `FLAG_STEALTH` 置位；
-2. **Profile 默认密钥去掩码**：要求 `version = 0x02`、无 `FLAG_ENCRYPTED`、`strategy_id ≤ 11`、`reserved = 0`；
+2. **Profile 默认密钥去掩码**：要求 `version = 0x02`、无 `FLAG_ENCRYPTED`、`strategy_id ≤ MAX_KNOWN_STRATEGY_ID`（当前 13）、`reserved = 0`；
 3. **裸 header**：直接解析（`FLAG_ENCRYPTED` 信封不掩码）。
 
 ---
@@ -581,8 +581,9 @@ header_slots[256..512]  = FeatureWord (32B / 256 bits)
 
 - `bit 0..4` 版本 `= 2`；`bit 4..6` codec（0=Hamming，1=STC）；`bit 6..9` `u`（1..3）；`bit 9..13` `h`（4..10）
 - `bit 13..15` `channel_mode`；`bit 15..17` `class_rule`（1 = 安全非边界 `val % 8 ∈ [1,6]`）；`bit 17..19` `kdf_id`
-- `bit 19..27` `eligible_min`（8）；`bit 27..35` `eligible_max`（247）；`bit 35..51` `exclusion_permille`
-- `bit 51..256` 保留零位（非 0 即 `NoHiddenData`）
+- `bit 19..27` `eligible_min`（8）；`bit 27..35` `eligible_max`（247）；`bit 35..51` `exclusion_permille`（排除分位数）
+- `bytes[8]`（原保留零位）：`algorithm_id`（1 = HILL，2 = S-UNIWARD；提取端据此自描述选择模型）
+- 其余保留位为零（非 0 即 `NoHiddenData`）
 
 #### 空间域残差赤字消除
 
@@ -743,7 +744,7 @@ H.265 标准规定，当 RBSP 出现连续两个 `0x00` 后接 `0x00..=0x03` 时
 | `PBKDF2_ITERATIONS` | `100_000` |
 | `CHUNK_SIZE`（默认） | `2 MiB = 2,097,152` |
 | `MAX_CHUNK_SIZE` | `64 MiB = 67,108,864` |
-| `MAX_KNOWN_STRATEGY_ID` | `11` |
+| `MAX_KNOWN_STRATEGY_ID` | `13` |
 | `BUILTIN_DEFAULT_KEY` | `"strhide::envelope::v2::default::builtin::public::secret"` |
 | `MIN_UBE_PLAIN` | `178`（见 §14.3） |
 | `MIN_UBE_ENCRYPTED` | `214`（见 §14.3） |
@@ -816,8 +817,8 @@ H.265 标准规定，当 RBSP 出现连续两个 `0x00` 后接 `0x00..=0x03` 时
 
 ### 15.4 策略 ID 兼容
 
-- 策略 ID `1–11` 为官方保留段（见 [ARCHITECTURE §7](./ARCHITECTURE.md#7-适配器与策略体系)）。
-- 解掩码启发式（`MAX_KNOWN_STRATEGY_ID = 11`）会把未知 ID 视为噪声；使用未注册策略 ID 的信封在默认模式下不可读。
+- 策略 ID `1–13` 为官方保留段（见 [ARCHITECTURE §7](./ARCHITECTURE.md#7-适配器与策略体系)）。
+- 解掩码启发式（`MAX_KNOWN_STRATEGY_ID = 13`）会把未知 ID 视为噪声；使用未注册策略 ID 的信封在默认模式下不可读。
 
 ---
 
