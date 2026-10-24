@@ -141,7 +141,7 @@ fn eval_png(png_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::er
                 };
 
                 let started_embed = Instant::now();
-                let embed_res = embed_png(&carrier_bytes, &payload, Some(TEST_PASSWORD), None, &strhide::stego::format::OFFICIAL_PNG_FORMAT, &HillCostModel, &params, strhide::stego::Freshness::Random);
+                let embed_res = embed_png(&carrier_bytes, &payload, Some(TEST_PASSWORD), None, &strhide::stego::format::OFFICIAL_PNG_FORMAT, &HillCostModel, &params, strhide::stego::SafetyPolicy::default(), strhide::stego::Freshness::Random);
                 let embed_ms = started_embed.elapsed().as_millis();
 
                 match embed_res {
@@ -314,7 +314,7 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
                     .unwrap_or(0);
 
                 let started_embed = Instant::now();
-                let embed_res = embed_jpeg(&carrier_bytes, &payload, Some(TEST_PASSWORD), None, &DEFAULT_JPEG_FORMAT, &params, &UerdCostModel, strhide::stego::Freshness::Random);
+                let embed_res = embed_jpeg(&carrier_bytes, &payload, Some(TEST_PASSWORD), None, &DEFAULT_JPEG_FORMAT, &params, strhide::stego::SafetyPolicy::default(), &UerdCostModel, strhide::stego::Freshness::Random);
                 let embed_ms = started_embed.elapsed().as_millis();
 
                 match embed_res {

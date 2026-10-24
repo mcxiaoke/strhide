@@ -45,6 +45,7 @@ pub use crate::stego::header::{
     FeatureWord, HEADER_LEN_MASK, HEADER_LEN_MAX, HEADER_V2_ESCAPE_H, V2_TOTAL_HEADER_SLOTS,
     decode_header_word, encode_header_word,
 };
+use crate::stego::params::SafetyPolicy;
 use crate::stego::prng::{permute_indices, permute_prefix};
 use crate::stego::traits::PngCostModel;
 use crate::stego::{PngParams, StegoCapacityInfo, StegoCodec};
@@ -1071,7 +1072,8 @@ impl SlotPlan {
 /// (explicit password, else the profile's private stego secret, else `None` for
 /// the official public constant); `domain` isolates the HKDF derivation.
 /// `Freshness::Seeded` makes the output byte-identical for the same carrier,
-/// payload, secret and seed.
+/// payload, secret and seed. `safety` is the capacity policy the embed is
+/// checked against.
 #[allow(clippy::too_many_arguments)]
 pub fn embed_png(
     carrier_bytes: &[u8],
@@ -1081,6 +1083,7 @@ pub fn embed_png(
     spatial: &crate::stego::format::PngFormatProfile,
     cost_model: &dyn PngCostModel,
     params: &PngParams,
+    safety: SafetyPolicy,
     freshness: Freshness,
 ) -> Result<Vec<u8>, StrHideError> {
     params.validate()?;
@@ -1124,13 +1127,13 @@ pub fn embed_png(
     let pool_green = plan.count_body_slots(&image, 1, ChannelMode::Green);
 
     // Safety enforcement policy check
-    if params.safety_enforcement == crate::stego::params::SafetyEnforcement::Enforced {
-        let bpp_limit = params.safety_level.bpp_limit();
+    if safety.is_enforced() {
+        let bpp_limit = safety.level.bpp_limit();
         let bpp_bits = (total_pixels as f64 * bpp_limit).floor() as usize;
         // Deliberately the single-channel pool: the tier is expressed in bits
         // per *pixel*, and a three-channel pool would loosen the ratio bound
         // without any calibration for the extra channels.
-        let ratio_bits = (pool_green as f64 / params.safety_level.target_ratio()).floor() as usize;
+        let ratio_bits = (pool_green as f64 / safety.level.target_ratio()).floor() as usize;
         let recommended_max_bytes =
             (bpp_bits.min(ratio_bits) / 8).saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
 
@@ -1142,7 +1145,7 @@ pub fn embed_png(
                 payload_bpp,
                 recommended_max_bytes,
                 bpp_limit,
-                params.safety_level.as_str(),
+                safety.level.as_str(),
             )));
         }
     }
@@ -1870,6 +1873,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            SafetyPolicy::default(),
             Freshness::Random,
         )
         .expect("embed");
@@ -1939,6 +1943,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            SafetyPolicy::default(),
             Freshness::Random,
         )
         .expect("embed");
@@ -2056,6 +2061,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            SafetyPolicy::default(),
             Freshness::Random,
         )
         .expect("embed");
@@ -2115,6 +2121,7 @@ mod tests {
                 &crate::stego::format::OFFICIAL_PNG_FORMAT,
                 &HillCostModel,
                 &params,
+                SafetyPolicy::default(),
                 Freshness::Seeded([0x5A; 32]),
             )
             .unwrap_or_else(|e| panic!("u={stc_u}: embed failed: {e}"));
@@ -2195,6 +2202,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &auto_params,
+            SafetyPolicy::default(),
             Freshness::Random,
         )
         .expect("embed light");
@@ -2214,7 +2222,7 @@ mod tests {
             &png,
             &HillCostModel,
             &auto_params,
-            auto_params.safety_level,
+            crate::stego::SafetyLevel::High,
             Some("pw"),
             None,
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
@@ -2255,6 +2263,7 @@ mod tests {
                 &crate::stego::format::OFFICIAL_PNG_FORMAT,
                 &HillCostModel,
                 &params,
+                SafetyPolicy::default(),
                 Freshness::Random,
             )
             .unwrap_or_else(|e| {
@@ -2284,6 +2293,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            SafetyPolicy::default(),
             Freshness::Random,
         )
         .expect("embed with domain");
@@ -2377,11 +2387,10 @@ mod tests {
             "High <= Balanced"
         );
 
-        // Test enforcement
-        let mut enforced_params = PngParams {
-            safety_level: SafetyLevel::Paranoid,
-            safety_enforcement: SafetyEnforcement::Enforced,
-            ..PngParams::default()
+        // Test enforcement: the policy is a call argument now, not a params field.
+        let enforced = SafetyPolicy {
+            level: SafetyLevel::Paranoid,
+            enforcement: SafetyEnforcement::Enforced,
         };
 
         // Oversize for Paranoid
@@ -2393,7 +2402,8 @@ mod tests {
             None,
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
-            &enforced_params,
+            &PngParams::default(),
+            enforced,
             Freshness::Random,
         );
         assert!(
@@ -2402,7 +2412,6 @@ mod tests {
         );
 
         // Same payload with Advisory succeeds
-        enforced_params.safety_enforcement = SafetyEnforcement::Advisory;
         let ok_res = embed_png(
             &png,
             &large_payload,
@@ -2410,7 +2419,8 @@ mod tests {
             None,
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
-            &enforced_params,
+            &PngParams::default(),
+            SafetyPolicy::default(),
             Freshness::Random,
         );
         assert!(
@@ -2525,6 +2535,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            SafetyPolicy::default(),
             Freshness::Random,
         )
         .expect("embed");
@@ -2585,6 +2596,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            SafetyPolicy::default(),
             Freshness::Random,
         )
         .expect("embed at the reported ceiling");
@@ -2717,6 +2729,7 @@ mod tests {
             &private_spatial,
             &HillCostModel,
             &params,
+            SafetyPolicy::default(),
             Freshness::Random,
         )
         .expect("embed with private profile");
@@ -2756,6 +2769,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            SafetyPolicy::default(),
             Freshness::Random,
         )
         .expect("official embed");

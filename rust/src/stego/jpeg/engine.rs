@@ -52,7 +52,7 @@ use crate::stego::jpeg::header_v3::{
     encode_extension, parse_extension,
 };
 use crate::stego::jpeg::v3_layout::{self, Layout};
-use crate::stego::params::{ExtractParams, JpegParams, SafetyEnforcement};
+use crate::stego::params::{ExtractParams, JpegParams};
 use crate::stego::prng::{ChaCha12Stream, fisher_yates_prefix_from, permute_prefix};
 use crate::stego::traits::JpegCostModel;
 
@@ -483,6 +483,8 @@ struct EmbedContext<'a> {
     base_bytes: u64,
     /// Source of the salt and nonce for each attempt.
     freshness: Freshness,
+    /// Capacity safety policy for the enforced-tier gate.
+    safety: crate::stego::params::SafetyPolicy,
 }
 
 /// Number of salt values tried when a Huffman-limited block cannot be encoded.
@@ -554,6 +556,7 @@ pub fn embed_jpeg(
     domain: Option<&str>,
     fmt: &JpegFormatProfile,
     params: &JpegParams,
+    safety: crate::stego::params::SafetyPolicy,
     cost_model: &dyn JpegCostModel,
     freshness: Freshness,
 ) -> Result<Vec<u8>, StrHideError> {
@@ -617,6 +620,7 @@ pub fn embed_jpeg(
         domain,
         base_bytes: preflight.base_bytes,
         freshness,
+        safety,
     };
     let mut work = coeffs.clone();
     let mut last_error = None;
@@ -668,6 +672,7 @@ fn embed_once(
     let params = ctx.params;
     let cover = ctx.cover;
     let suite = ctx.suite;
+    let safety = ctx.safety;
     let n_total = cover.n_total();
 
     // Header geometry: the extension area first, because it decides how many
@@ -749,8 +754,8 @@ fn embed_once(
     check_pipeline_budget(ctx.base_bytes, layout.body_n, params.stc_h)?;
 
     // Safety tier: advisory (warn upstream) or enforced bpp ceiling.
-    if params.safety_enforcement == SafetyEnforcement::Enforced {
-        let max = enforced_payload_limit(total_coeffs, body_grid_len, params);
+    if safety.is_enforced() {
+        let max = enforced_payload_limit(total_coeffs, body_grid_len, safety);
         if payload.len() > max {
             let bpp = (payload.len() * 8) as f64 / total_coeffs as f64;
             return Err(Attempt::from(StrHideError::General(format!(
@@ -758,8 +763,8 @@ fn embed_once(
                 payload.len(),
                 bpp,
                 max,
-                params.safety_level.bpp_limit(),
-                params.safety_level.as_str(),
+                safety.level.bpp_limit(),
+                safety.level.as_str(),
             ))));
         }
     }
@@ -988,9 +993,13 @@ fn rollback(coeffs: &mut JpegCoefficients, applied: &[(u32, i8)], fmt: &JpegForm
 }
 
 /// Payload ceiling for the enforced safety tier.
-fn enforced_payload_limit(total_coeffs: usize, body_slots: usize, params: &JpegParams) -> usize {
-    let bpp_bits = (total_coeffs as f64 * params.safety_level.bpp_limit()).floor() as usize;
-    let ratio_bits = (body_slots as f64 / params.safety_level.target_ratio()).floor() as usize;
+fn enforced_payload_limit(
+    total_coeffs: usize,
+    body_slots: usize,
+    safety: crate::stego::params::SafetyPolicy,
+) -> usize {
+    let bpp_bits = (total_coeffs as f64 * safety.level.bpp_limit()).floor() as usize;
+    let ratio_bits = (body_slots as f64 / safety.level.target_ratio()).floor() as usize;
     (bpp_bits.min(ratio_bits) / 8).saturating_sub(BODY_OVERHEAD)
 }
 

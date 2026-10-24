@@ -1134,14 +1134,17 @@ fn stego_domain_isolation_lifecycle() {
 
 #[test]
 fn stego_safety_level_and_enforcement_lifecycle() {
-    use strhide::stego::{SafetyEnforcement, SafetyLevel};
+    use strhide::stego::{SafetyEnforcement, SafetyLevel, SafetyPolicy};
 
     let png = generate_texture_png(128, 128); // 16,384 pixels
 
     let cap_paranoid = probe_carrier_capacity(
         &png,
         &StegoOptions {
-            safety_level: SafetyLevel::Paranoid,
+            safety: SafetyPolicy {
+                level: SafetyLevel::Paranoid,
+                ..SafetyPolicy::default()
+            },
             ..Default::default()
         },
     )
@@ -1150,7 +1153,10 @@ fn stego_safety_level_and_enforcement_lifecycle() {
     let cap_high = probe_carrier_capacity(
         &png,
         &StegoOptions {
-            safety_level: SafetyLevel::High,
+            safety: SafetyPolicy {
+                level: SafetyLevel::High,
+                ..SafetyPolicy::default()
+            },
             ..Default::default()
         },
     )
@@ -1159,7 +1165,10 @@ fn stego_safety_level_and_enforcement_lifecycle() {
     let cap_balanced = probe_carrier_capacity(
         &png,
         &StegoOptions {
-            safety_level: SafetyLevel::Balanced,
+            safety: SafetyPolicy {
+                level: SafetyLevel::Balanced,
+                ..SafetyPolicy::default()
+            },
             ..Default::default()
         },
     )
@@ -1175,8 +1184,10 @@ fn stego_safety_level_and_enforcement_lifecycle() {
 
     // Enforced mode on Paranoid tier MUST reject
     let opts_enforced = StegoOptions {
-        safety_level: SafetyLevel::Paranoid,
-        safety_enforcement: SafetyEnforcement::Enforced,
+        safety: SafetyPolicy {
+            level: SafetyLevel::Paranoid,
+            enforcement: SafetyEnforcement::Enforced,
+        },
         ..Default::default()
     };
     let res_enforced = embed_carrier(&png, &payload, &opts_enforced);
@@ -1187,8 +1198,10 @@ fn stego_safety_level_and_enforcement_lifecycle() {
 
     // Advisory mode on Paranoid tier MUST succeed
     let opts_advisory = StegoOptions {
-        safety_level: SafetyLevel::Paranoid,
-        safety_enforcement: SafetyEnforcement::Advisory,
+        safety: SafetyPolicy {
+            level: SafetyLevel::Paranoid,
+            enforcement: SafetyEnforcement::Advisory,
+        },
         ..Default::default()
     };
     let res_advisory = embed_carrier(&png, &payload, &opts_advisory);

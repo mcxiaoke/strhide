@@ -85,6 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &strhide::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            strhide::stego::SafetyPolicy::default(),
             strhide::stego::Freshness::Random,
         ) {
             Ok(s) => s,

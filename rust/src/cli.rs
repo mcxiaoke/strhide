@@ -2083,10 +2083,14 @@ fn embed_stego_options(
         },
         None => crate::stego::SafetyLevel::High,
     };
-    options.safety_level = safety_level;
-    if args.enforce_safety {
-        options.safety_enforcement = crate::stego::SafetyEnforcement::Enforced;
-    }
+    options.safety = crate::stego::SafetyPolicy {
+        level: safety_level,
+        enforcement: if args.enforce_safety {
+            crate::stego::SafetyEnforcement::Enforced
+        } else {
+            crate::stego::SafetyEnforcement::Advisory
+        },
+    };
 
     apply_stc_h(&mut options, args.stc_h)?;
     if embed_extras {
@@ -2238,7 +2242,7 @@ fn handle_embed(
         }
 
         if !quiet
-            && options.safety_enforcement == crate::stego::SafetyEnforcement::Advisory
+            && options.safety.enforcement == crate::stego::SafetyEnforcement::Advisory
             && let Ok(cap) = crate::stego::probe_carrier_capacity_with_profile(
                 &carrier_bytes,
                 &options,
@@ -2252,8 +2256,8 @@ fn handle_embed(
                 payload_bytes.len(),
                 bpp,
                 cap.recommended_max_bytes,
-                options.safety_level.as_str(),
-                options.safety_level.bpp_limit()
+                options.safety.level.as_str(),
+                options.safety.level.bpp_limit()
             );
         }
 

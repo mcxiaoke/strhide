@@ -201,6 +201,7 @@ fn profile_png_with_model(
         &strhide::stego::format::OFFICIAL_PNG_FORMAT,
         model,
         &options.png_params,
+        strhide::stego::SafetyPolicy::default(),
         options.freshness,
     ) {
         Ok(bytes) => bytes,
@@ -382,6 +383,7 @@ fn profile_jpeg_with_model(
         options.domain.as_deref(),
         &DEFAULT_JPEG_FORMAT,
         &options.jpeg_params,
+        strhide::stego::SafetyPolicy::default(),
         model,
         options.freshness,
     ) {

@@ -31,7 +31,8 @@ pub use format::{
     PngFormatProfile,
 };
 pub use params::{
-    ExtractParams, JpegParams, PngParams, SafetyEnforcement, SafetyLevel, StegoCodec, StegoOptions,
+    ExtractParams, JpegParams, PngParams, SafetyEnforcement, SafetyLevel, SafetyPolicy, StegoCodec,
+    StegoOptions,
 };
 pub use registry::CostModelRegistry;
 
@@ -76,13 +77,8 @@ pub fn embed_carrier_with_profile(
     let secret = options.secret(profile);
     let domain = options.domain(profile);
 
-    let mut png_params = options.png_params.clone();
-    png_params.safety_level = options.safety_level;
-    png_params.safety_enforcement = options.safety_enforcement;
-
+    let png_params = options.png_params.clone();
     let mut jpeg_params = options.jpeg_params.clone();
-    jpeg_params.safety_level = options.safety_level;
-    jpeg_params.safety_enforcement = options.safety_enforcement;
     // A seeded run must not take the FMA path: it rounds differently from the
     // scalar one, and a last-bit disagreement in a cost value can move the
     // trellis to a different slot.
@@ -104,6 +100,7 @@ pub fn embed_carrier_with_profile(
             domain,
             profile.jpeg_format(),
             &jpeg_params,
+            options.safety,
             &*model,
             options.freshness,
         )
@@ -125,6 +122,7 @@ pub fn embed_carrier_with_profile(
             profile.png_format(),
             &*model,
             &png_params,
+            options.safety,
             options.freshness,
         )
     } else if crate::sniff::is_heif_bytes(carrier_bytes) {
@@ -362,7 +360,7 @@ pub fn probe_carrier_capacity_with_profile(
             carrier_bytes,
             &*model,
             &options.jpeg_params,
-            options.safety_level,
+            options.safety.level,
             profile.jpeg_format(),
         )
     } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
@@ -378,7 +376,7 @@ pub fn probe_carrier_capacity_with_profile(
             carrier_bytes,
             &*model,
             &options.png_params,
-            options.safety_level,
+            options.safety.level,
             secret,
             domain,
             profile.png_format(),
@@ -397,8 +395,8 @@ pub fn probe_carrier_capacity_with_profile(
                 max_raw_is_grouped: false,
                 recommended_max_bytes: cap,
                 estimated_change_rate: 0.25,
-                safety_level: format!("{:?}", options.safety_level).to_lowercase(),
-                safety_bpp_limit: options.safety_level.bpp_limit(),
+                safety_level: options.safety.level.as_str().into(),
+                safety_bpp_limit: options.safety.level.bpp_limit(),
             })
         } else {
             match heif::probe_heif_bridge_capacity(carrier_bytes, options, profile) {
@@ -414,8 +412,8 @@ pub fn probe_carrier_capacity_with_profile(
                         max_raw_is_grouped: false,
                         recommended_max_bytes: cap,
                         estimated_change_rate: 0.25,
-                        safety_level: format!("{:?}", options.safety_level).to_lowercase(),
-                        safety_bpp_limit: options.safety_level.bpp_limit(),
+                        safety_level: options.safety.level.as_str().into(),
+                        safety_bpp_limit: options.safety.level.bpp_limit(),
                     })
                 }
             }
@@ -431,8 +429,8 @@ pub fn probe_carrier_capacity_with_profile(
             max_raw_is_grouped: false,
             recommended_max_bytes: cap,
             estimated_change_rate: 0.25,
-            safety_level: format!("{:?}", options.safety_level).to_lowercase(),
-            safety_bpp_limit: options.safety_level.bpp_limit(),
+            safety_level: options.safety.level.as_str().into(),
+            safety_bpp_limit: options.safety.level.bpp_limit(),
         })
     } else {
         Err(StrHideError::UnsupportedFormat(

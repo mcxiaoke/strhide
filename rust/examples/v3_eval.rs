@@ -145,6 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None,
                 &DEFAULT_JPEG_FORMAT,
                 &params,
+                strhide::stego::SafetyPolicy::default(),
                 &UerdCostModel,
                 strhide::stego::Freshness::Random,
             ) else {

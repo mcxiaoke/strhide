@@ -213,8 +213,7 @@ pub struct StegoOptions {
     pub algorithm: Option<String>,         // "hill" / "suniward" / "uerd" / "juniward" / "hevc" / "cabac" / "auto"
     pub password: Option<String>,
     pub domain: Option<String>,            // 派生隔离域标签（与 Profile::stego_domain 级联）
-    pub safety_level: SafetyLevel,         // 容量安全档位（High [默认], Balanced, Paranoid）
-    pub safety_enforcement: SafetyEnforcement, // 安全执行模式（Advisory [默认], Enforced）
+    pub safety: SafetyPolicy,             // 容量安全策略（level + enforcement，单一事实源）
     pub freshness: Freshness,              // 随机新鲜度（Random [默认] / Seeded([u8; 32]) 可复现运行）
     pub png_params: PngParams,             // PNG 调优（codec/stc_h/stc_u/exclusion_rate/滤波窗口）
     pub jpeg_params: JpegParams,           // JPEG DCT 调优（stc_h/slot_budget/cipher_suite/polarize_weight）

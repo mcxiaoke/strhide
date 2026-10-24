@@ -83,13 +83,9 @@ pub fn embed_heif_bridge(
     let domain = options.domain(profile);
 
     let mut jpeg_params = options.jpeg_params.clone();
-    jpeg_params.safety_level = options.safety_level;
-    jpeg_params.safety_enforcement = options.safety_enforcement;
     jpeg_params.deterministic = options.freshness.is_seeded();
 
-    let mut png_params = options.png_params.clone();
-    png_params.safety_level = options.safety_level;
-    png_params.safety_enforcement = options.safety_enforcement;
+    let png_params = options.png_params.clone();
 
     match target.kind {
         BridgeTargetKind::DirectJpeg { .. }
@@ -109,6 +105,7 @@ pub fn embed_heif_bridge(
                 domain,
                 profile.jpeg_format(),
                 &jpeg_params,
+                options.safety,
                 &*model,
                 options.freshness,
             )?;
@@ -130,6 +127,7 @@ pub fn embed_heif_bridge(
                 profile.png_format(),
                 &*model,
                 &png_params,
+                options.safety,
                 options.freshness,
             )?;
             reconstruct_heif(carrier_bytes, &target, &stego_bytes)
@@ -213,7 +211,7 @@ pub fn probe_heif_bridge_capacity(
                 carrier_slice,
                 &*model,
                 &options.jpeg_params,
-                options.safety_level,
+                options.safety.level,
                 profile.jpeg_format(),
             )?;
             info.format = "HEIF (JPEG Thumbnail Bridge)".into();
@@ -231,7 +229,7 @@ pub fn probe_heif_bridge_capacity(
                 carrier_slice,
                 &*model,
                 &options.png_params,
-                options.safety_level,
+                options.safety.level,
                 secret,
                 domain,
                 profile.png_format(),

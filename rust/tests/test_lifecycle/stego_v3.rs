@@ -721,6 +721,7 @@ fn v3_newer_minor_version_is_accepted() {
         None,
         &fmt,
         &params,
+        strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
     )
@@ -746,6 +747,7 @@ fn v3_other_major_version_is_not_decodable() {
         None,
         &fmt,
         &JpegParams::default(),
+        strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
     )
@@ -787,6 +789,7 @@ fn v3_extensions_roundtrip_and_skip_unknowns() {
         None,
         &DEFAULT_JPEG_FORMAT,
         &params,
+        strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
     )
@@ -817,6 +820,7 @@ fn v3_unknown_critical_extension_is_rejected() {
         None,
         &DEFAULT_JPEG_FORMAT,
         &params,
+        strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
     )
@@ -848,6 +852,7 @@ fn v3_malformed_extension_area_is_reported() {
         None,
         &DEFAULT_JPEG_FORMAT,
         &params,
+        strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
     )
@@ -897,6 +902,7 @@ fn v3_suite_matrix_roundtrips() {
             None,
             &DEFAULT_JPEG_FORMAT,
             &params,
+            strhide::stego::SafetyPolicy::default(),
             &UerdCostModel,
             strhide::stego::Freshness::Random,
         )
@@ -925,6 +931,7 @@ fn v3_extract_policy_can_exclude_a_suite() {
         None,
         &DEFAULT_JPEG_FORMAT,
         &params,
+        strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
     )
@@ -1101,6 +1108,7 @@ fn v3_capacity_probe_is_tight() {
         None,
         &DEFAULT_JPEG_FORMAT,
         &params,
+        strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
     )
@@ -1124,6 +1132,7 @@ fn v3_capacity_probe_is_tight() {
             None,
             &DEFAULT_JPEG_FORMAT,
             &params,
+            strhide::stego::SafetyPolicy::default(),
             &UerdCostModel,
             strhide::stego::Freshness::Random
         )
@@ -1150,6 +1159,7 @@ fn v3_extraction_ignores_the_embed_side_budget() {
         None,
         &DEFAULT_JPEG_FORMAT,
         &params,
+        strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
     )

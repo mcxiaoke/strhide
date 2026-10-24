@@ -155,6 +155,37 @@ pub enum SafetyEnforcement {
     Enforced,
 }
 
+/// The capacity safety policy: which tier to target and how hard to enforce it.
+///
+/// This is the single source of truth for safety settings. It lives on
+/// [`StegoOptions::safety`] only -- the per-domain parameter structs used to
+/// carry their own copies, which the unified entry silently overwrote, so a
+/// caller that set `PngParams::safety_enforcement` alone could believe it had
+/// enabled enforcement while the default advisory policy was in force.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SafetyPolicy {
+    /// Target capacity tier (default [`SafetyLevel::High`]).
+    pub level: SafetyLevel,
+    /// How to treat a payload above the tier's recommendation (default
+    /// [`SafetyEnforcement::Advisory`]).
+    pub enforcement: SafetyEnforcement,
+}
+
+impl SafetyPolicy {
+    /// Official default policy: `High` tier, `Advisory` enforcement.
+    pub const fn new() -> Self {
+        Self {
+            level: SafetyLevel::High,
+            enforcement: SafetyEnforcement::Advisory,
+        }
+    }
+
+    /// Whether this policy blocks an over-tier payload instead of warning.
+    pub fn is_enforced(self) -> bool {
+        matches!(self.enforcement, SafetyEnforcement::Enforced)
+    }
+}
+
 /// Fine-tuning parameters for spatial-domain steganography (e.g. HILL, WOW).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PngParams {
@@ -185,12 +216,6 @@ pub struct PngParams {
     /// header, so it never needs to be repeated.
     #[serde(default = "default_stc_u")]
     pub stc_u: u8,
-    /// Capacity safety tier (default High).
-    #[serde(default)]
-    pub safety_level: SafetyLevel,
-    /// Safety policy enforcement mode (default Advisory).
-    #[serde(default)]
-    pub safety_enforcement: SafetyEnforcement,
     /// Scalar knobs belonging to a cost model that is **not** the built-in HILL.
     ///
     /// The typed fields above (`high_pass_kernel`, `p1_window`, `p2_window`,
@@ -233,8 +258,6 @@ impl Default for PngParams {
             codec: StegoCodec::Auto,
             stc_h: default_stc_h(),
             stc_u: default_stc_u(),
-            safety_level: SafetyLevel::default(),
-            safety_enforcement: SafetyEnforcement::default(),
             algorithm_options: std::collections::BTreeMap::new(),
         }
     }
@@ -369,12 +392,6 @@ pub struct JpegParams {
     /// Extension records written into the TLV area (default: none).
     #[serde(default)]
     pub extensions: Vec<crate::stego::jpeg::header_v3::Tlv>,
-    /// Capacity safety tier (default High).
-    #[serde(default)]
-    pub safety_level: SafetyLevel,
-    /// Safety policy enforcement mode (default Advisory).
-    #[serde(default)]
-    pub safety_enforcement: SafetyEnforcement,
     /// Scalar knobs belonging to a JPEG cost model that is **not** the built-in
     /// UERD.
     ///
@@ -521,8 +538,6 @@ impl Default for JpegParams {
             cipher_suite: default_cipher_suite(),
             polarize_weight: default_polarize_weight(),
             extensions: Vec::new(),
-            safety_level: SafetyLevel::default(),
-            safety_enforcement: SafetyEnforcement::default(),
             algorithm_options: std::collections::BTreeMap::new(),
             deterministic: false,
         }
@@ -671,10 +686,10 @@ pub struct StegoOptions {
     /// [`StegoProfile::domain`](crate::params::StegoProfile) is the fallback,
     /// `None` means the official default derivation.
     pub domain: Option<String>,
-    /// Capacity safety tier (default High: bpp <= 0.10).
-    pub safety_level: SafetyLevel,
-    /// Safety policy enforcement mode (default Advisory).
-    pub safety_enforcement: SafetyEnforcement,
+    /// Capacity safety policy: target tier and enforcement (default
+    /// `High` / `Advisory`). The single source of truth -- the per-domain
+    /// parameter structs carry no safety settings of their own.
+    pub safety: SafetyPolicy,
     /// Fine-tuning parameters for spatial domain algorithms.
     pub png_params: PngParams,
     /// Fine-tuning parameters for JPEG DCT domain algorithms.
@@ -712,8 +727,7 @@ impl StegoOptions {
 
     /// Chainable builder: set the capacity safety tier and its enforcement.
     pub fn with_safety(mut self, level: SafetyLevel, enforcement: SafetyEnforcement) -> Self {
-        self.safety_level = level;
-        self.safety_enforcement = enforcement;
+        self.safety = SafetyPolicy { level, enforcement };
         self
     }
 

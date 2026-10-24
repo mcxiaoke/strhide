@@ -65,6 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         &ACME_FORMAT,
         &params,
+        strhide::stego::SafetyPolicy::default(),
         &cost,
         strhide::stego::Freshness::Random,
     )?;
@@ -109,6 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         &DEFAULT_JPEG_FORMAT,
         &params,
+        strhide::stego::SafetyPolicy::default(),
         &cost,
         strhide::stego::Freshness::Random,
     )?;
