@@ -122,7 +122,7 @@ impl Fmt {
             Fmt::Png => &["chunk", "eof"],
             Fmt::Jpeg => &["app_segment", "eof"],
             Fmt::Webp => &["riff_chunk", "eof"],
-            Fmt::Heif => &["box_uuid", "eof"],
+            Fmt::Heif => &["item_hidden", "free_box", "box_uuid", "eof"],
             Fmt::Mp4 => &["box_uuid", "eof"],
             Fmt::Wav => &["riff_chunk", "eof"],
             Fmt::Mkv => &["ebml_void", "eof"],

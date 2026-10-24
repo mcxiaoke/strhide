@@ -2,10 +2,11 @@ use std::io::{SeekFrom, Write};
 
 pub use crate::adapters::isobmff::MP4_UUID_NEUTRAL;
 use crate::adapters::isobmff::{
-    calc_prefix_len, isobmff_inject, isobmff_locate, isobmff_strategy_capacities,
-    isobmff_suspicious_structures, isobmff_verify_structure,
+    calc_prefix_len, heif_strategy_capacities, isobmff_can_item_hidden, isobmff_inject,
+    isobmff_locate, isobmff_strip, isobmff_suspicious_structures, isobmff_verify_structure,
 };
-use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity};
+use crate::adapters::{HostAdapter, SeekRead, SeekWrite, StrategyCapacity};
+use crate::envelope::EnvelopeHeader;
 use crate::errors::StrHideError;
 
 /// Recognized HEIF brands in major_brand or compatible_brands list (ISO/IEC 23008-12).
@@ -71,15 +72,19 @@ impl HostAdapter for HeifAdapter {
     }
 
     fn supported_strategies(&self) -> Vec<&'static str> {
-        vec!["box_uuid", "eof"]
+        vec!["item_hidden", "free_box", "box_uuid", "eof"]
     }
 
-    fn choose_auto_strategy(&self, _reader: &mut dyn SeekRead, _ube_size: u64) -> &'static str {
-        "box_uuid"
+    fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, _ube_size: u64) -> &'static str {
+        if isobmff_can_item_hidden(reader) {
+            "item_hidden"
+        } else {
+            "box_uuid"
+        }
     }
 
     fn strategy_capacities(&self, _reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
-        isobmff_strategy_capacities()
+        heif_strategy_capacities()
     }
 
     fn inject(
@@ -98,6 +103,15 @@ impl HostAdapter for HeifAdapter {
         expected_trailer_magic: Option<&[u8; 4]>,
     ) -> Result<Option<(u64, u64, String)>, StrHideError> {
         isobmff_locate(stego_in, expected_trailer_magic)
+    }
+
+    fn strip(
+        &self,
+        stego_in: &mut dyn SeekRead,
+        out: &mut dyn SeekWrite,
+        header: &EnvelopeHeader,
+    ) -> Result<(), StrHideError> {
+        isobmff_strip(stego_in, out, header)
     }
 
     fn verify_structure(
@@ -119,13 +133,19 @@ impl HostAdapter for HeifAdapter {
     ) -> Result<u64, StrHideError> {
         if strategy == "box_uuid" {
             Ok(calc_prefix_len(ube_size))
+        } else if strategy == "item_hidden" || strategy == "free_box" {
+            Ok(8)
         } else {
             Ok(0)
         }
     }
 
     fn strategy_note(&self, strategy: &str, _fallback: bool) -> Option<String> {
-        if strategy == "box_uuid" {
+        if strategy == "item_hidden" {
+            Some("Embedded as a hidden ISO BMFF Item in mdat, registered in iinf/iloc but unreferenced by pitm; primary image and tile grids untouched.".into())
+        } else if strategy == "free_box" {
+            Some("Embedded into compliant ISO BMFF free Box at EOF (padding box).".into())
+        } else if strategy == "box_uuid" {
             Some("Embedded into compliant ISO BMFF uuid Box (32-bit header below 4GB, 64-bit large header at or above 4GB; preserves image item offsets).".into())
         } else if strategy == "eof" {
             Some("Appended after HEIF EOF (EOF overlay).".into())

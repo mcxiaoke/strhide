@@ -99,6 +99,8 @@ pub static STRATEGY_REGISTRY: &[(&str, u8)] = &[
     ("pe_slack", 9),
     ("riff_chunk", 10),
     ("ebml_void", 11),
+    ("item_hidden", 12),
+    ("free_box", 13),
 ];
 
 /// Map a strategy name to the on-wire `strategy_id` byte stored in the
