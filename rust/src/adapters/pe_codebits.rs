@@ -592,13 +592,9 @@ pub fn embed(
     // password-derived stealth magic): the engine has already finalized the
     // trailer by the time it hands the UBE to `inject`, so the last four bytes
     // of the blob are exactly the magic `locate` will expect.
-    debug_assert!(ube.len() >= 4, "UBE is at least the 24-byte trailer");
-    let magic = [
-        ube[ube.len() - 4],
-        ube[ube.len() - 3],
-        ube[ube.len() - 2],
-        ube[ube.len() - 1],
-    ];
+    let magic = *ube.last_chunk::<4>().ok_or_else(|| {
+        CodebitsError::Corrupted("UBE is too short for a 4-byte trailer magic".into())
+    })?;
     let header = ChannelHeader {
         magic,
         version: CHANNEL_VERSION,

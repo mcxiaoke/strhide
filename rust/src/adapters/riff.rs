@@ -164,7 +164,7 @@ pub fn riff_locate(
 
     // Check EOF fallback
     if let Some(trailer) = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)?
-        .filter(|t| t.ube_offset + t.ube_total_size == file_size)
+        .filter(|t| t.ube_offset.checked_add(t.ube_total_size) == Some(file_size))
     {
         return Ok(Some((
             trailer.ube_offset,
@@ -222,7 +222,10 @@ where
             let tail_envelope = EnvelopeTrailer::read_from_tail(stego_in, None)
                 .ok()
                 .flatten()
-                .filter(|t| t.ube_offset == offset && offset + t.ube_total_size == file_size);
+                .filter(|t| {
+                    t.ube_offset == offset
+                        && offset.checked_add(t.ube_total_size) == Some(file_size)
+                });
             if let Some(trailer) = tail_envelope {
                 validate_specific(&chunks).map_err(StrHideError::CorruptedData)?;
                 return Ok((

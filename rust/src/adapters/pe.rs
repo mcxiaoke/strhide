@@ -715,6 +715,23 @@ fn strip_codebits(
     let mut text = pe_codebits::read_text_range(stego_in, &layout)?;
     let channel = pe_codebits::parse_channel_header(&text, layout.bitness)?;
     let diff_len = pe_codebits::CHANNEL_HEADER_LEN + channel.ube_len as usize;
+
+    // Verify that the slack diff region lies entirely within valid PE section padding.
+    // Untrusted channel headers must never cause arbitrary zeroing of host bytes.
+    let slack_start = channel.slack_off as u64;
+    let slack_end = slack_start
+        .checked_add(diff_len as u64)
+        .ok_or_else(|| StrHideError::CorruptedData("pe_codebits slack offset overflows".into()))?;
+    let inside_padding = layout
+        .slack_ranges
+        .iter()
+        .any(|&(start, end)| slack_start >= start && slack_end <= end);
+    if !inside_padding {
+        return Err(StrHideError::CorruptedData(format!(
+            "pe_codebits slack region [{slack_start}, {slack_end}) is not inside PE padding; refusing to zero data"
+        )));
+    }
+
     let diff = pe_codebits::read_at(stego_in, channel.slack_off as u64, diff_len)?;
 
     pe_codebits::apply_diff(&mut text, layout.bitness, &diff)?;

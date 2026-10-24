@@ -1041,7 +1041,11 @@ impl SlotPlan {
         mode: ChannelMode,
         limit: usize,
     ) -> Vec<usize> {
-        let mut out = Vec::with_capacity(limit);
+        let max_possible = self
+            .candidates
+            .len()
+            .saturating_mul(mode.channels(image.channels).len());
+        let mut out = Vec::with_capacity(limit.min(max_possible));
         if limit == 0 {
             return out;
         }
@@ -1117,6 +1121,7 @@ pub fn embed_spatial_with_profile_and_freshness(
     params: &SpatialParams,
     freshness: Freshness,
 ) -> Result<Vec<u8>, StrHideError> {
+    params.validate()?;
     let mut image = decode_png(carrier_bytes)?;
     let w = image.width as usize;
     let h = image.height as usize;
@@ -1405,6 +1410,7 @@ pub fn extract_spatial_with_profile(
     cost_model: &dyn SpatialCostModel,
     params: &SpatialParams,
 ) -> Result<Vec<u8>, StrHideError> {
+    params.validate()?;
     let image = decode_png(carrier_bytes)?;
     let w = image.width as usize;
     let h = image.height as usize;
@@ -1494,13 +1500,17 @@ pub fn extract_spatial_with_profile(
         ));
     }
 
+    // Override exclusion_percentile with carrier's self-describing value from FeatureWord.
+    let mut effective_params = params.clone();
+    effective_params.exclusion_percentile = (fw.exclusion_permille as f64) / 1000.0;
+
     // Distortion cost map of the declared model. Identical to what the embedder
     // computed, because header/feature pixels never leave their eight-value
     // class, so the map is bit-identical on the stego.
-    let costs = resolved.compute_cost(&image.pixels, w, h, image.channels, params);
+    let costs = resolved.compute_cost(&image.pixels, w, h, image.channels, &effective_params);
     // Body ranking needs costs; the header layout inside this plan is the same
     // cost-free one read above, so the two cannot disagree.
-    let plan = SlotPlan::build(&image, &costs, params, password, domain, spatial)?;
+    let plan = SlotPlan::build(&image, &costs, &effective_params, password, domain, spatial)?;
     debug_assert_eq!(
         plan.permuted.get(..V2_TOTAL_HEADER_SLOTS),
         Some(&header_layout[..V2_TOTAL_HEADER_SLOTS]),
@@ -1519,6 +1529,12 @@ pub fn extract_spatial_with_profile(
     let ciphertext_bits = ciphertext_len * 8;
     let needed_body_slots =
         crate::stego::coding::slots_for_codec(ciphertext_bits, fw.codec, fw.h, fw.u)?;
+
+    // Reject untrusted/bogus header total_len before allocating body slots.
+    let pool = plan.count_body_slots(&image, fw.class_rule, mode);
+    if needed_body_slots > pool {
+        return Err(no_hidden());
+    }
 
     let master = derive_master(
         spatial.body.default_suite(),
@@ -1605,6 +1621,7 @@ pub fn probe_spatial_capacity_with_profile(
     domain: Option<&str>,
     spatial: &crate::stego::format::SpatialFormatProfile,
 ) -> Result<StegoCapacityInfo, StrHideError> {
+    params.validate()?;
     let image = decode_png(carrier_bytes)?;
     let w = image.width as usize;
     let h = image.height as usize;

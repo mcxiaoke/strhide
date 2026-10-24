@@ -255,7 +255,7 @@ impl HostAdapter for ZipAdapter {
         // 2. Fallback to EOF
         if let Some(t) = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {
             let file_size = stego_in.seek(SeekFrom::End(0))?;
-            if t.ube_offset + t.ube_total_size == file_size {
+            if t.ube_offset.checked_add(t.ube_total_size) == Some(file_size) {
                 return Ok(Some((t.ube_offset, t.ube_total_size, "eof".into())));
             }
         }
@@ -275,18 +275,7 @@ impl HostAdapter for ZipAdapter {
 
         // Cut out [inject_offset : inject_offset + inject_size]
         stego_in.seek(SeekFrom::Start(0))?;
-        let mut remaining = header.inject_offset;
-        let mut buf = [0u8; 64 * 1024];
-
-        while remaining > 0 {
-            let to_read = std::cmp::min(remaining, buf.len() as u64) as usize;
-            let n = stego_in.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n])?;
-            remaining -= n as u64;
-        }
+        crate::adapters::io::copy_exact(stego_in, out, header.inject_offset)?;
 
         // Copy Central Directory and EOCD up to patch_offset.
         //

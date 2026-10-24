@@ -221,7 +221,7 @@ impl HostAdapter for PngAdapter {
         // Fallback to EOF
         if let Some(t) = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {
             let file_size = stego_in.seek(SeekFrom::End(0))?;
-            if t.ube_offset + t.ube_total_size == file_size {
+            if t.ube_offset.checked_add(t.ube_total_size) == Some(file_size) {
                 return Ok(Some((t.ube_offset, t.ube_total_size, "eof".into())));
             }
         }

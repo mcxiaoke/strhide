@@ -229,8 +229,26 @@ pub fn isobmff_verify_structure(
         }
 
         let box_offset = offset;
-        offset += box_size;
+        let next_offset = match offset.checked_add(box_size) {
+            Some(o) => o,
+            None => {
+                return Ok((
+                    false,
+                    format!(
+                        "Box {} at offset {box_offset} size calculation overflows u64",
+                        String::from_utf8_lossy(box_type)
+                    ),
+                ));
+            }
+        };
+        offset = next_offset;
         box_count += 1;
+        if box_count > 1_000_000 {
+            return Ok((
+                false,
+                "Exceeded maximum top-level box count (1000000)".into(),
+            ));
+        }
         if offset > total_size {
             return Ok((
                 false,

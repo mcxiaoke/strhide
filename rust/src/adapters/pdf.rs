@@ -40,6 +40,11 @@ pub fn parse_pdf_trailer_info<R: Read + Seek + ?Sized>(
             "cannot determine next PDF object number (no /Size and no 'N G obj' definitions in tail window)".into(),
         )
     })?;
+    if new_obj_num >= 0x7FFF_FFFF || new_obj_num >= u64::MAX - 1 {
+        return Err(StrHideError::CorruptedData(
+            "PDF /Size or object number is excessively large or overflows".into(),
+        ));
+    }
 
     // An incremental trailer without /Root breaks the document tree for every
     // conforming reader; refuse instead of writing a damaged carrier (auto
@@ -220,7 +225,7 @@ pub fn parse_pdf_tail_info<R: Read + Seek + ?Sized>(
         }
     }
     if new_obj_num.is_none() {
-        new_obj_num = scan_max_object_number(&text_before_eof).map(|n| n + 1);
+        new_obj_num = scan_max_object_number(&text_before_eof).and_then(|n| n.checked_add(1));
     }
 
     // /Root and /Info may live inside an xref-stream trailer dict (or an older
@@ -598,7 +603,7 @@ impl HostAdapter for PdfAdapter {
         // 2. Fallback to EOF
         if let Some(t) = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {
             let file_size = stego_in.seek(SeekFrom::End(0))?;
-            if t.ube_offset + t.ube_total_size == file_size {
+            if t.ube_offset.checked_add(t.ube_total_size) == Some(file_size) {
                 return Ok(Some((t.ube_offset, t.ube_total_size, "eof".into())));
             }
         }

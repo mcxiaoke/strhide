@@ -184,3 +184,27 @@ fn a_suniward_carrier_extracts_while_the_caller_defaults_to_hill() {
         payload
     );
 }
+
+#[test]
+fn non_default_exclusion_rate_extracts_with_default_options() {
+    let png = texture_png(96, 96);
+    let payload = b"written with non-default exclusion rate 0.45";
+
+    let write = StegoOptions {
+        spatial_params: SpatialParams {
+            exclusion_percentile: 0.45,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let stego = embed_carrier(&png, payload, &write).expect("embed with exclusion rate 0.45");
+
+    let fw = read_feature_word(&stego);
+    assert_eq!(fw.exclusion_permille, 450);
+
+    // Extraction with default options (exclusion_percentile = 0.30).
+    // The self-describing exclusion_permille must be respected so slot ranking synchronises.
+    let got = extract_carrier(&stego, &StegoOptions::default())
+        .expect("extraction must use carrier's exclusion_permille");
+    assert_eq!(got, payload);
+}

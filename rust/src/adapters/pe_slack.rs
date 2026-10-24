@@ -87,7 +87,7 @@ pub fn inject(
 
     // Stream the host, splicing the envelope over `[off, off + ube_size)`.
     copy_range(host_in, out, 0, off)?;
-    copy_stream(ube_in, out)?;
+    crate::adapters::io::copy_exact(ube_in, out, ube_size)?;
     copy_range(host_in, out, off + ube_size, layout.host_size)?;
 
     Ok((off, ube_size, 0, 0))
@@ -371,21 +371,6 @@ fn copy_range<W: Write + ?Sized, R: Read + Seek + ?Sized>(
         remaining -= n as u64;
     }
     Ok(())
-}
-
-/// Copies `reader` from its current position to EOF.
-fn copy_stream<W: Write + ?Sized, R: Read + ?Sized>(
-    reader: &mut R,
-    writer: &mut W,
-) -> Result<(), StrHideError> {
-    let mut buf = vec![0u8; COPY_CHUNK];
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            return Ok(());
-        }
-        writer.write_all(&buf[..n])?;
-    }
 }
 
 fn write_zeros<W: Write + ?Sized>(writer: &mut W, len: u64) -> Result<(), StrHideError> {

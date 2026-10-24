@@ -158,7 +158,10 @@ impl HostAdapter for MkvAdapter {
             let tail_envelope = EnvelopeTrailer::read_from_tail(stego_in, None)
                 .ok()
                 .flatten()
-                .filter(|t| t.ube_offset == offset && offset + t.ube_total_size == file_size);
+                .filter(|t| {
+                    t.ube_offset == offset
+                        && offset.checked_add(t.ube_total_size) == Some(file_size)
+                });
             if let Some(trailer) = tail_envelope.filter(|_| has_ebml_hdr && has_segment) {
                 return Ok((
                     true,
@@ -198,7 +201,14 @@ impl HostAdapter for MkvAdapter {
 
             match size_opt {
                 Some(data_size) => {
-                    offset = match offset.checked_add(header_len + data_size) {
+                    let elem_size = match header_len.checked_add(data_size) {
+                        Some(s) => s,
+                        None => {
+                            return Ok((false, "Element size calculation overflow".into()));
+                        }
+                    };
+                    let elem_offset = offset;
+                    offset = match offset.checked_add(elem_size) {
                         Some(o) => o,
                         None => {
                             return Ok((false, "Element offset calculation overflow".into()));
@@ -207,10 +217,7 @@ impl HostAdapter for MkvAdapter {
                     if offset > file_size {
                         return Ok((
                             false,
-                            format!(
-                                "Element 0x{id:08X} at offset {} extends past EOF",
-                                offset - (header_len + data_size)
-                            ),
+                            format!("Element 0x{id:08X} at offset {elem_offset} extends past EOF"),
                         ));
                     }
                 }
