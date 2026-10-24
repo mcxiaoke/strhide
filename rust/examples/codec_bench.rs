@@ -77,7 +77,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..PngParams::default()
         };
         let started = Instant::now();
-        let stego = match embed_png(&carrier, &payload, password, None, &HillCostModel, &params) {
+        let stego = match embed_png(
+            &carrier,
+            &payload,
+            password,
+            None,
+            &strhide::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &params,
+            strhide::stego::Freshness::Random,
+        ) {
             Ok(s) => s,
             Err(e) => {
                 println!("{codec:<10} {u:>3}   -- {e}");
@@ -103,6 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &stego,
             password,
             None,
+            &strhide::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &PngParams::default(),
         )?;

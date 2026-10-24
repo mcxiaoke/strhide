@@ -1096,7 +1096,7 @@ fn stego_domain_isolation_lifecycle() {
 
     // 2. Options stego_domain overrides profile stego_domain
     let opts_override = StegoOptions {
-        stego_domain: Some("org.enterprise.vault-a".into()),
+        domain: Some("org.enterprise.vault-a".into()),
         ..Default::default()
     };
     // Even if prof_b is passed, opts_override wins
@@ -1107,7 +1107,7 @@ fn stego_domain_isolation_lifecycle() {
     // 3. Password + domain isolation
     let opts_pwd_a = StegoOptions {
         password: Some("SharedPassword123".into()),
-        stego_domain: Some("org.enterprise.vault-a".into()),
+        domain: Some("org.enterprise.vault-a".into()),
         ..Default::default()
     };
     let stego_pwd_a =
@@ -1119,7 +1119,7 @@ fn stego_domain_isolation_lifecycle() {
 
     let opts_pwd_b = StegoOptions {
         password: Some("SharedPassword123".into()),
-        stego_domain: Some("org.enterprise.vault-b".into()),
+        domain: Some("org.enterprise.vault-b".into()),
         ..Default::default()
     };
     let err_pwd_b = extract_carrier(&stego_pwd_a, &opts_pwd_b);

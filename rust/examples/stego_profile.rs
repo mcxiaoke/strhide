@@ -11,13 +11,11 @@ use std::time::Instant;
 
 use strhide::stego::format::DEFAULT_JPEG_FORMAT;
 use strhide::stego::jpeg::cost::{JuniwardCostModel, UerdCostModel};
-use strhide::stego::jpeg::engine::{embed_jpeg_with_freshness, extract_jpeg};
+use strhide::stego::jpeg::engine::{embed_jpeg, extract_jpeg};
 use strhide::stego::jpeg::geometry::geometry_for_carrier;
 use strhide::stego::params::{ExtractParams, JpegParams, PngParams, StegoOptions};
 use strhide::stego::png::cost::{HillCostModel, SuniwardCostModel};
-use strhide::stego::png::engine::{
-    decode_png, embed_png_with_format_and_freshness, encode_png, extract_png_with_format,
-};
+use strhide::stego::png::engine::{decode_png, embed_png, encode_png, extract_png};
 use strhide::stego::prng::deterministic_payload;
 use strhide::stego::traits::{JpegCostModel, PngCostModel};
 
@@ -195,11 +193,11 @@ fn profile_png_with_model(
         ..Default::default()
     };
     let t4 = Instant::now();
-    let stego_png = match embed_png_with_format_and_freshness(
+    let stego_png = match embed_png(
         file_bytes,
         payload,
         options.password.as_deref(),
-        options.stego_domain.as_deref(),
+        options.domain.as_deref(),
         &strhide::stego::format::OFFICIAL_PNG_FORMAT,
         model,
         &options.png_params,
@@ -234,10 +232,10 @@ fn profile_png_with_model(
     );
 
     let t5 = Instant::now();
-    let extracted = match extract_png_with_format(
+    let extracted = match extract_png(
         &stego_png,
         options.password.as_deref(),
-        options.stego_domain.as_deref(),
+        options.domain.as_deref(),
         &strhide::stego::format::OFFICIAL_PNG_FORMAT,
         model,
         &options.png_params,
@@ -377,11 +375,11 @@ fn profile_jpeg_with_model(
         ..Default::default()
     };
     let t4 = Instant::now();
-    let stego_jpg = match embed_jpeg_with_freshness(
+    let stego_jpg = match embed_jpeg(
         file_bytes,
         payload,
         options.password.as_deref(),
-        options.stego_domain.as_deref(),
+        options.domain.as_deref(),
         &DEFAULT_JPEG_FORMAT,
         &options.jpeg_params,
         model,
@@ -417,7 +415,7 @@ fn profile_jpeg_with_model(
     let extracted = match extract_jpeg(
         &stego_jpg,
         options.password.as_deref(),
-        options.stego_domain.as_deref(),
+        options.domain.as_deref(),
         &DEFAULT_JPEG_FORMAT,
         &ExtractParams::default(),
     ) {

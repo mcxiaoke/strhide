@@ -66,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &ACME_FORMAT,
         &params,
         &cost,
+        strhide::stego::Freshness::Random,
     )?;
     println!(
         "embedded {} bytes, {} -> {} bytes",
@@ -109,6 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &DEFAULT_JPEG_FORMAT,
         &params,
         &cost,
+        strhide::stego::Freshness::Random,
     )?;
     assert!(
         extract_jpeg(

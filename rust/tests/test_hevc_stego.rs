@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
 
-use strhide::stego::hevc::h265::decoder::Decoder;
-use strhide::stego::hevc::h265::nal::parse_nal;
+use rust_h265::decoder::Decoder;
+use rust_h265::nal::parse_nal;
 use strhide::stego::hevc::heif_boxes::parse_heif_targets;
 use strhide::stego::hevc::{embed_hevc, extract_hevc, probe_hevc_capacity};
 

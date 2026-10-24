@@ -1,6 +1,6 @@
 //! Carrier sniffing for HEVC streams (HEIF container, MP4 container, or raw Annex-B stream).
 
-use crate::adapters::heif::is_heif_bytes;
+use crate::sniff::is_heif_bytes;
 
 /// Identified container or stream packaging of an HEVC carrier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

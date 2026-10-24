@@ -7,39 +7,9 @@ use crate::adapters::isobmff::{
 };
 use crate::adapters::{HostAdapter, SeekRead, SeekWrite, StrategyCapacity};
 use crate::envelope::EnvelopeHeader;
+
 use crate::errors::StrHideError;
-
-/// Recognized HEIF brands in major_brand or compatible_brands list (ISO/IEC 23008-12).
-pub const HEIF_BRANDS: &[[u8; 4]] = &[
-    *b"heic", *b"heix", *b"hevc", *b"hevx", *b"mif1", *b"msf1", *b"heim", *b"heis", *b"avif",
-    *b"avis",
-];
-
-/// Detect whether the byte slice is an ISO BMFF HEIF/HEIC image container based on ftyp brand.
-pub fn is_heif_bytes(bytes: &[u8]) -> bool {
-    if bytes.len() < 12 {
-        return false;
-    }
-    let size = match bytes.get(..4) {
-        Some(s) => u32::from_be_bytes(s.try_into().unwrap()) as usize,
-        None => return false,
-    };
-    if &bytes[4..8] != b"ftyp" || !(12..=4096).contains(&size) || bytes.len() < size {
-        return false;
-    }
-    let payload = &bytes[8..size];
-    let num_brands = payload.len() / 4;
-    for i in 0..num_brands {
-        if i == 1 {
-            continue;
-        }
-        let brand = &payload[i * 4..(i + 1) * 4];
-        if HEIF_BRANDS.iter().any(|b| b == brand) {
-            return true;
-        }
-    }
-    false
-}
+pub use crate::sniff::{HEIF_BRANDS, is_heif_bytes};
 
 pub struct HeifAdapter;
 

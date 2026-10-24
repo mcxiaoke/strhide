@@ -452,6 +452,7 @@ impl Profile {
         self
     }
 
+    #[cfg(feature = "stego")]
     /// Set the private no-password secret used by image steganography.
     ///
     /// Sugar for `with_stego_profile(StegoProfile::new().with_default_secret(..))`;
@@ -462,29 +463,34 @@ impl Profile {
         self
     }
 
+    #[cfg(feature = "stego")]
     /// Set the custom stego domain tag used to isolate the HKDF key derivation.
     pub const fn with_stego_domain(mut self, domain: &'static str) -> Self {
         self.stego = self.stego.with_stego_domain(domain);
         self
     }
 
+    #[cfg(feature = "stego")]
     /// Set the private JPEG wire-format identity.
     pub const fn with_jpeg_format(mut self, format: JpegFormatProfile) -> Self {
         self.stego = self.stego.with_jpeg_format(format);
         self
     }
 
+    #[cfg(feature = "stego")]
     /// Set the private PNG wire-format identity.
     pub const fn with_png_format(mut self, png: PngFormatProfile) -> Self {
         self.stego = self.stego.with_png_format(png);
         self
     }
 
+    #[cfg(feature = "stego")]
     /// PNG wire-format identity (private if set, else official).
     pub fn png_format(&self) -> &PngFormatProfile {
         self.stego.png_format()
     }
 
+    #[cfg(feature = "stego")]
     /// Private content-domain secret, if any.
     ///
     /// `None` means the stego envelope layer falls back to the public
@@ -493,11 +499,13 @@ impl Profile {
         self.stego.secret()
     }
 
+    #[cfg(feature = "stego")]
     /// Custom stego domain tag, if any.
     pub fn stego_domain(&self) -> Option<&str> {
         self.stego.stego_domain()
     }
 
+    #[cfg(feature = "stego")]
     /// JPEG wire-format identity (private if set, else official).
     pub fn jpeg_format(&self) -> &JpegFormatProfile {
         self.stego.jpeg_format()

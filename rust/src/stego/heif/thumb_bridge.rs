@@ -102,7 +102,7 @@ pub fn embed_heif_bridge(
                         options.algorithm
                     ))
                 })?;
-            let stego_bytes = jpeg::embed_jpeg_with_freshness(
+            let stego_bytes = jpeg::embed_jpeg(
                 carrier_slice,
                 payload,
                 secret,
@@ -122,7 +122,7 @@ pub fn embed_heif_bridge(
                         options.algorithm
                     ))
                 })?;
-            let stego_bytes = png::embed_png_with_format_and_freshness(
+            let stego_bytes = png::embed_png(
                 carrier_slice,
                 payload,
                 secret,
@@ -174,7 +174,7 @@ pub fn extract_heif_bridge(
                         options.algorithm
                     ))
                 })?;
-            png::extract_png_with_format(
+            png::extract_png(
                 carrier_slice,
                 secret,
                 domain,
@@ -209,7 +209,7 @@ pub fn probe_heif_bridge_capacity(
                         options.algorithm
                     ))
                 })?;
-            let mut info = jpeg::probe_capacity_with_format(
+            let mut info = jpeg::probe_jpeg_capacity(
                 carrier_slice,
                 &*model,
                 &options.jpeg_params,
@@ -227,7 +227,7 @@ pub fn probe_heif_bridge_capacity(
                         options.algorithm
                     ))
                 })?;
-            let mut info = png::probe_png_capacity_with_format(
+            let mut info = png::probe_png_capacity(
                 carrier_slice,
                 &*model,
                 &options.png_params,

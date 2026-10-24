@@ -2049,7 +2049,7 @@ fn embed_stego_options(
     let mut options = crate::stego::StegoOptions {
         algorithm: args.algorithm.clone(),
         password: password.map(str::to_string),
-        stego_domain: args.stego_domain.clone(),
+        domain: args.stego_domain.clone(),
         ..Default::default()
     };
 
@@ -2125,8 +2125,8 @@ fn handle_embed(
             if options.password.is_none() {
                 options.password = stego_secret.clone();
             }
-            if options.stego_domain.is_none() {
-                options.stego_domain = stego_domain.clone();
+            if options.domain.is_none() {
+                options.domain = stego_domain.clone();
             }
             let cap = crate::stego::probe_carrier_capacity_with_profile(
                 &carrier_bytes,
@@ -2233,8 +2233,8 @@ fn handle_embed(
         if options.password.is_none() {
             options.password = stego_secret.clone();
         }
-        if options.stego_domain.is_none() {
-            options.stego_domain = stego_domain.clone();
+        if options.domain.is_none() {
+            options.domain = stego_domain.clone();
         }
 
         if !quiet
@@ -2338,7 +2338,7 @@ fn handle_extract(
     let mut options = crate::stego::StegoOptions {
         algorithm: args.algorithm,
         password: password.or(stego_secret),
-        stego_domain,
+        domain: stego_domain,
         ..Default::default()
     };
 

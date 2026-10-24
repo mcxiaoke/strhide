@@ -43,8 +43,8 @@ use crate::stego::envelope::{
     unpack_envelope_parts,
 };
 use crate::stego::format::{
-    DEFAULT_JPEG_FORMAT, JpegFormatProfile, body_keys, derive_master, extension_stc_seed,
-    header_perm_seed, header_stc_seed, stc_seed,
+    JpegFormatProfile, body_keys, derive_master, extension_stc_seed, header_perm_seed,
+    header_stc_seed, stc_seed,
 };
 use crate::stego::jpeg::dht::{self, AcSymbolSet};
 use crate::stego::jpeg::header_v3::{
@@ -516,7 +516,17 @@ impl From<StrHideError> for Attempt {
     }
 }
 
-/// Embed a payload into a JPEG carrier with V3 ternary STC.
+/// Embed a payload into a JPEG carrier with content-adaptive DCT steganography.
+///
+/// The complete expert entry: format identity, cost model, tuning parameters
+/// and salt/nonce source are all explicit. `secret` is the resolved credential
+/// (explicit password, else the profile's private stego secret, else `None` for
+/// the official public constant); `domain` isolates the HKDF derivation.
+///
+/// `Freshness::Seeded` makes the output byte-identical for the same carrier,
+/// payload, secret and seed. Pair it with `params.deterministic = true` so the
+/// cost map stays on the scalar kernel; [`crate::stego::embed_carrier`] does
+/// that automatically.
 ///
 /// # Over-optimised Huffman tables
 ///
@@ -538,34 +548,6 @@ impl From<StrHideError> for Attempt {
 ///    raise a bare `CorruptEntropy`.
 #[allow(clippy::too_many_arguments)]
 pub fn embed_jpeg(
-    carrier_bytes: &[u8],
-    payload: &[u8],
-    password: Option<&str>,
-    domain: Option<&str>,
-    fmt: &JpegFormatProfile,
-    params: &JpegParams,
-    cost_model: &dyn JpegCostModel,
-) -> Result<Vec<u8>, StrHideError> {
-    embed_jpeg_with_freshness(
-        carrier_bytes,
-        payload,
-        password,
-        domain,
-        fmt,
-        params,
-        cost_model,
-        Freshness::Random,
-    )
-}
-
-/// [`embed_jpeg`] with an explicit [`Freshness`].
-///
-/// `Freshness::Seeded` makes the output byte-identical for the same carrier,
-/// payload, password and seed. Pair it with `params.deterministic = true` so the
-/// cost map stays on the scalar kernel; [`crate::stego::embed_carrier`] does
-/// that automatically.
-#[allow(clippy::too_many_arguments)]
-pub fn embed_jpeg_with_freshness(
     carrier_bytes: &[u8],
     payload: &[u8],
     password: Option<&str>,
@@ -1237,24 +1219,12 @@ fn read_bits(
     Some(out)
 }
 
-/// Probe capacity of a JPEG carrier.
+/// Probe the embedding capacity of a JPEG carrier.
+///
+/// The complete expert entry: `safety_level` picks the tier `recommended_max_bytes`
+/// is derived from, `fmt` supplies the grid geometry the budget is measured
+/// against.
 pub fn probe_jpeg_capacity(
-    carrier_bytes: &[u8],
-    cost_model: &dyn JpegCostModel,
-    params: &JpegParams,
-    safety_level: crate::stego::SafetyLevel,
-) -> Result<StegoCapacityInfo, StrHideError> {
-    probe_capacity_with_format(
-        carrier_bytes,
-        cost_model,
-        params,
-        safety_level,
-        &DEFAULT_JPEG_FORMAT,
-    )
-}
-
-/// [`probe_jpeg_capacity`] for a non-default [`JpegFormatProfile`].
-pub fn probe_capacity_with_format(
     carrier_bytes: &[u8],
     cost_model: &dyn JpegCostModel,
     params: &JpegParams,

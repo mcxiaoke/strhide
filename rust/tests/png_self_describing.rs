@@ -131,6 +131,7 @@ fn extraction_follows_the_carrier_not_the_caller() {
         &stego,
         None,
         None,
+        &strhide::stego::format::OFFICIAL_PNG_FORMAT,
         &ImpostorModel,
         &PngParams::default(),
     )

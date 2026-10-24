@@ -17,7 +17,7 @@ exclude = ["tests/"]
 [features]
 default = ["engine", "stego", "cli"]
 engine  = ["dep:filetime", "dep:iced-x86", "dep:serde_json"]
-stego   = ["dep:dct-io", "dep:rayon"]
+stego   = ["dep:dct-io", "dep:filetime", "dep:rayon"]
 cli     = ["engine", "stego", "dep:clap", "dep:rpassword", "dep:toml", "dep:base64", "dep:jpeg-decoder", "dep:serde_json"]
 
 [lib]

@@ -2,19 +2,21 @@
 //!
 //! Provides in-place Sign Data Hiding (SDH) and CABAC bypass-mode bitstream steganography
 //! with zero bitrate expansion (Δ = 0) and zero container structure mutation.
+//!
+//! The public surface is the three engine entries below; the parsing, slot and
+//! CABAC-recording internals are implementation details reachable by path but
+//! undocumented.
 
+#[doc(hidden)]
 pub mod bitstream;
 pub mod engine;
+#[doc(hidden)]
 pub mod error;
+#[doc(hidden)]
 pub mod heif_boxes;
+#[doc(hidden)]
 pub mod slot;
+#[doc(hidden)]
 pub mod sniff;
 
-pub use rust_h265 as h265;
-
-pub use bitstream::{HevcNalSpan, compute_hevc_cover_digest, is_epb_safe_flip};
 pub use engine::{embed_hevc, extract_hevc, probe_hevc_capacity};
-pub use error::{HevcError, Result};
-pub use heif_boxes::{HeifHevcTarget, PhysicalNalSpan, parse_heif_targets};
-pub use slot::{BinOp, CabacRecorder, StegoSlot};
-pub use sniff::{HevcCarrierKind, is_hevc_annexb, sniff_hevc_carrier};

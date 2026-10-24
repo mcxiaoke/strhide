@@ -56,17 +56,18 @@ use std::path::{Path, PathBuf};
 
 use crate::engine::{
     InspectResult, PayloadSource, ReadResult, RemoveResult, VerifyResult, WriteOptions,
-    WriteResult, commit_carrier_bytes, inspect_carrier_bytes, inspect_carrier_with,
-    read_carrier_bytes, read_carrier_with_profile, remove_carrier_bytes,
-    remove_carrier_with_options, verify_carrier_bytes, verify_carrier_with, write_carrier_bytes,
-    write_carrier_with,
+    WriteResult, inspect_carrier_bytes, inspect_carrier_with, read_carrier_bytes,
+    read_carrier_with_profile, remove_carrier_bytes, remove_carrier_with_options,
+    verify_carrier_bytes, verify_carrier_with, write_carrier_bytes, write_carrier_with,
 };
 use crate::errors::StrHideError;
 use crate::params::{LocalParams, Profile};
-use crate::stego::{
-    StegoCapacityInfo, StegoOptions, embed_carrier_with_profile, extract_carrier_with_profile,
-    probe_carrier_capacity_with_profile,
-};
+#[cfg(feature = "stego")]
+use crate::stego::io::{embed_carrier_file, extract_carrier_file};
+#[cfg(feature = "stego")]
+use crate::stego::{StegoCapacityInfo, StegoOptions, probe_carrier_capacity_with_profile};
+#[cfg(feature = "stego")]
+use crate::stego::{embed_carrier_with_profile, extract_carrier_with_profile};
 
 /// A configured strhide engine: one dialect plus one writer-behaviour baseline.
 ///
@@ -133,6 +134,7 @@ impl StrHide {
     /// `argv` must include the program name as its first element, exactly as
     /// [`std::env::args_os`] returns it; clap uses that element for help and
     /// error output, so callers assembling arguments manually must supply one.
+    #[cfg(feature = "cli")]
     pub fn run_cli_from(&self, argv: impl IntoIterator<Item = impl Into<OsString>>) -> i32 {
         let argv: Vec<OsString> = argv.into_iter().map(Into::into).collect();
         crate::cli::run_cli_with(self, argv)
@@ -239,6 +241,7 @@ impl StrHide {
 
     // ───────────────────────── content domain · bytes ──────────────────────────
 
+    #[cfg(feature = "stego")]
     /// Embed `payload` into an in-memory image carrier, returning stego bytes.
     pub fn embed(
         &self,
@@ -249,11 +252,13 @@ impl StrHide {
         embed_carrier_with_profile(carrier, payload, options, &self.profile)
     }
 
+    #[cfg(feature = "stego")]
     /// Extract the payload from an in-memory image carrier.
     pub fn extract(&self, carrier: &[u8], options: &StegoOptions) -> Result<Vec<u8>, StrHideError> {
         extract_carrier_with_profile(carrier, options, &self.profile)
     }
 
+    #[cfg(feature = "stego")]
     /// Probe the embedding capacity of an in-memory image carrier.
     pub fn probe(
         &self,
@@ -265,6 +270,7 @@ impl StrHide {
 
     // ───────────────────────── content domain · file ───────────────────────────
 
+    #[cfg(feature = "stego")]
     /// Embed `payload` into an image file and commit it atomically.
     ///
     /// The carrier is read, the embedding is done in memory, and the result is
@@ -282,12 +288,10 @@ impl StrHide {
         options: &StegoOptions,
         backup: bool,
     ) -> Result<Option<PathBuf>, StrHideError> {
-        let carrier_bytes = std::fs::read(carrier)?;
-        let stego = embed_carrier_with_profile(&carrier_bytes, payload, options, &self.profile)?;
-        let dest = target.unwrap_or(carrier);
-        commit_carrier_bytes(carrier, dest, &stego, backup, true)
+        embed_carrier_file(carrier, target, payload, options, &self.profile, backup)
     }
 
+    #[cfg(feature = "stego")]
     /// Extract the payload from an image file and write it to `output`.
     ///
     /// An existing destination is refused unless `overwrite` is set, matching
@@ -299,8 +303,7 @@ impl StrHide {
         options: &StegoOptions,
         overwrite: bool,
     ) -> Result<PathBuf, StrHideError> {
-        let carrier_bytes = std::fs::read(carrier)?;
-        let data = extract_carrier_with_profile(&carrier_bytes, options, &self.profile)?;
+        let data = extract_carrier_file(carrier, options, &self.profile)?;
 
         let final_dest = if output.is_dir() {
             output.join("extracted.bin")

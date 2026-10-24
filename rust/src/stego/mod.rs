@@ -4,18 +4,25 @@
 //! Provides unified `embed_carrier` and `extract_carrier` entry points with automatic
 //! format sniffing and extensible algorithm selection.
 
+#[doc(hidden)]
 pub mod coding;
+#[doc(hidden)]
 pub mod envelope;
 pub mod format;
+#[doc(hidden)]
 pub mod header;
 pub mod heif;
 pub mod hevc;
+pub mod io;
 pub mod jpeg;
 pub mod params;
 pub mod png;
+#[doc(hidden)]
 pub mod prng;
 pub mod registry;
+pub mod sniff;
 pub mod traits;
+#[doc(hidden)]
 pub mod wavelet;
 
 pub use envelope::Freshness;
@@ -90,7 +97,7 @@ pub fn embed_carrier_with_profile(
                     options.algorithm
                 ))
             })?;
-        jpeg::embed_jpeg_with_freshness(
+        jpeg::embed_jpeg(
             carrier_bytes,
             payload,
             secret,
@@ -110,7 +117,7 @@ pub fn embed_carrier_with_profile(
                 ))
             },
         )?;
-        png::embed_png_with_format_and_freshness(
+        png::embed_png(
             carrier_bytes,
             payload,
             secret,
@@ -120,7 +127,7 @@ pub fn embed_carrier_with_profile(
             &png_params,
             options.freshness,
         )
-    } else if crate::adapters::heif::is_heif_bytes(carrier_bytes) {
+    } else if crate::sniff::is_heif_bytes(carrier_bytes) {
         // HEIF content-domain steganography
         if options.algorithm.as_deref() == Some("hevc")
             || options.algorithm.as_deref() == Some("cabac")
@@ -132,7 +139,7 @@ pub fn embed_carrier_with_profile(
                 Err(_) => hevc::embed_hevc(carrier_bytes, payload, options.password.as_deref()),
             }
         }
-    } else if hevc::is_hevc_annexb(carrier_bytes) {
+    } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {
         // Raw Annex-B HEVC bitstream
         hevc::embed_hevc(carrier_bytes, payload, options.password.as_deref())
     } else {
@@ -189,7 +196,7 @@ pub fn extract_carrier_with_profile(
                 ))
             },
         )?;
-        png::extract_png_with_format(
+        png::extract_png(
             carrier_bytes,
             secret,
             domain,
@@ -197,7 +204,7 @@ pub fn extract_carrier_with_profile(
             &*model,
             &options.png_params,
         )
-    } else if crate::adapters::heif::is_heif_bytes(carrier_bytes) {
+    } else if crate::sniff::is_heif_bytes(carrier_bytes) {
         // HEIF content-domain steganography: try Scheme C (HEVC CABAC in-place) first, then bridge
         match hevc::extract_hevc(carrier_bytes, options.password.as_deref()) {
             Ok(payload) => Ok(payload),
@@ -224,7 +231,7 @@ pub fn extract_carrier_with_profile(
                 }
             }
         }
-    } else if hevc::is_hevc_annexb(carrier_bytes) {
+    } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {
         // Raw Annex-B HEVC bitstream
         hevc::extract_hevc(carrier_bytes, options.password.as_deref())
     } else {
@@ -264,6 +271,39 @@ pub struct StegoCapacityInfo {
     /// Target bits-per-pixel (bpp) limit for the safety tier.
     #[serde(default = "default_safety_bpp_limit")]
     pub safety_bpp_limit: f64,
+}
+
+impl StegoCapacityInfo {
+    /// Whether `payload_len` bytes fit inside the safety-tier recommendation.
+    pub fn fits_recommended(&self, payload_len: usize) -> bool {
+        payload_len <= self.recommended_max_bytes
+    }
+
+    /// Whether `payload_len` bytes fit inside the raw (ungated) capacity.
+    pub fn fits_max(&self, payload_len: usize) -> bool {
+        payload_len <= self.max_raw_payload_bytes
+    }
+
+    /// One-line human-readable summary for logs and CLI output.
+    pub fn summary_string(&self) -> String {
+        format!(
+            "{} / {}: {} payload slots of {} elements, max {} bytes ({}), recommended {} bytes at '{}' safety (bpp <= {:.2}), ~{:.4} changes/bit",
+            self.format,
+            self.algorithm,
+            self.available_slots,
+            self.total_elements,
+            self.max_raw_payload_bytes,
+            if self.max_raw_is_grouped {
+                "grouped"
+            } else {
+                "u=1"
+            },
+            self.recommended_max_bytes,
+            self.safety_level,
+            self.safety_bpp_limit,
+            self.estimated_change_rate,
+        )
+    }
 }
 
 fn default_safety_tier_str() -> String {
@@ -318,7 +358,7 @@ pub fn probe_carrier_capacity_with_profile(
                     options.algorithm
                 ))
             })?;
-        jpeg::probe_capacity_with_format(
+        jpeg::probe_jpeg_capacity(
             carrier_bytes,
             &*model,
             &options.jpeg_params,
@@ -334,7 +374,7 @@ pub fn probe_carrier_capacity_with_profile(
                 ))
             },
         )?;
-        png::probe_png_capacity_with_format(
+        png::probe_png_capacity(
             carrier_bytes,
             &*model,
             &options.png_params,
@@ -343,7 +383,7 @@ pub fn probe_carrier_capacity_with_profile(
             domain,
             profile.png_format(),
         )
-    } else if crate::adapters::heif::is_heif_bytes(carrier_bytes) {
+    } else if crate::sniff::is_heif_bytes(carrier_bytes) {
         if options.algorithm.as_deref() == Some("hevc")
             || options.algorithm.as_deref() == Some("cabac")
         {
@@ -380,7 +420,7 @@ pub fn probe_carrier_capacity_with_profile(
                 }
             }
         }
-    } else if hevc::is_hevc_annexb(carrier_bytes) {
+    } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {
         let cap = hevc::probe_hevc_capacity(carrier_bytes)?;
         Ok(StegoCapacityInfo {
             format: "HEVC-AnnexB".into(),

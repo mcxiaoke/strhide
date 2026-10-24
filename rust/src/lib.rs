@@ -125,9 +125,14 @@
 
 extern crate alloc;
 
+pub mod sniff;
+
 pub mod crypto;
 pub mod errors;
 pub mod params;
+
+#[cfg(any(feature = "engine", feature = "stego"))]
+pub mod commit;
 
 #[cfg(feature = "engine")]
 pub mod adapters;
@@ -167,8 +172,6 @@ pub use stego::format::{
 };
 #[cfg(feature = "stego")]
 pub use stego::jpeg::cost::UerdCostModel;
-#[cfg(feature = "stego")]
-pub use stego::jpeg::engine::{embed_jpeg as embed, extract_jpeg as extract};
 #[cfg(feature = "stego")]
 pub use stego::params::{ExtractParams, JpegParams};
 #[cfg(feature = "stego")]

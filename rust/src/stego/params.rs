@@ -87,6 +87,23 @@ pub enum SafetyLevel {
     Balanced,
 }
 
+impl std::str::FromStr for SafetyLevel {
+    type Err = StrHideError;
+
+    /// Parse a safety tier: case-insensitive `paranoid` / `high` / `balanced`,
+    /// or the numeric aliases `0` (paranoid), `1` (high), `2` (balanced).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "0" | "paranoid" | "Paranoid" | "PARANOID" => Ok(SafetyLevel::Paranoid),
+            "1" | "high" | "High" | "HIGH" => Ok(SafetyLevel::High),
+            "2" | "balanced" | "Balanced" | "BALANCED" => Ok(SafetyLevel::Balanced),
+            other => Err(StrHideError::General(format!(
+                "Invalid safety level '{other}'. Supported: 'paranoid' (0), 'high' (1, default), 'balanced' (2)"
+            ))),
+        }
+    }
+}
+
 impl SafetyLevel {
     /// Maximum bits per pixel (bpp) allowed under this safety level.
     pub fn bpp_limit(self) -> f64 {
@@ -649,7 +666,11 @@ pub struct StegoOptions {
     /// Password for cryptographic key derivation and PRNG scattering.
     pub password: Option<String>,
     /// Custom domain tag for isolating the HKDF key derivation domain.
-    pub stego_domain: Option<String>,
+    ///
+    /// Runtime half of the dialect: the explicit value wins, the profile's
+    /// [`StegoProfile::domain`](crate::params::StegoProfile) is the fallback,
+    /// `None` means the official default derivation.
+    pub domain: Option<String>,
     /// Capacity safety tier (default High: bpp <= 0.10).
     pub safety_level: SafetyLevel,
     /// Safety policy enforcement mode (default Advisory).
@@ -670,6 +691,50 @@ pub struct StegoOptions {
 }
 
 impl StegoOptions {
+    /// Chainable builder: set the password.
+    pub fn with_password(mut self, password: impl Into<String>) -> Self {
+        self.password = Some(password.into());
+        self
+    }
+
+    /// Chainable builder: set the requested algorithm name
+    /// (`hill` / `suniward` / `uerd` / `juniward` / `hevc` / `cabac` / `auto`).
+    pub fn with_algorithm(mut self, algorithm: impl Into<String>) -> Self {
+        self.algorithm = Some(algorithm.into());
+        self
+    }
+
+    /// Chainable builder: set the HKDF domain-isolation tag.
+    pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
+        self.domain = Some(domain.into());
+        self
+    }
+
+    /// Chainable builder: set the capacity safety tier and its enforcement.
+    pub fn with_safety(mut self, level: SafetyLevel, enforcement: SafetyEnforcement) -> Self {
+        self.safety_level = level;
+        self.safety_enforcement = enforcement;
+        self
+    }
+
+    /// Chainable builder: set the salt/nonce source.
+    pub fn with_freshness(mut self, freshness: Freshness) -> Self {
+        self.freshness = freshness;
+        self
+    }
+
+    /// Chainable builder: replace the PNG tuning parameters.
+    pub fn with_png_params(mut self, params: PngParams) -> Self {
+        self.png_params = params;
+        self
+    }
+
+    /// Chainable builder: replace the JPEG tuning parameters.
+    pub fn with_jpeg_params(mut self, params: JpegParams) -> Self {
+        self.jpeg_params = params;
+        self
+    }
+
     /// Secret actually used for key derivation: the explicit password wins, the
     /// profile's private stego secret is the fallback, `None` means "official
     /// public constant" (resolved inside the envelope layer).
@@ -691,10 +756,10 @@ impl StegoOptions {
     }
 
     /// Custom domain tag used for isolating the HKDF key derivation domain:
-    /// the explicit `stego_domain` wins, the profile's `stego_domain` is the fallback,
-    /// `None` means official default derivation.
+    /// the explicit [`domain`](Self::domain) wins, the profile's stego domain is
+    /// the fallback, `None` means the official default derivation.
     pub fn domain<'a>(&'a self, profile: &'a Profile) -> Option<&'a str> {
-        self.stego_domain
+        self.domain
             .as_deref()
             .filter(|s| !s.is_empty())
             .or_else(|| profile.stego_domain())

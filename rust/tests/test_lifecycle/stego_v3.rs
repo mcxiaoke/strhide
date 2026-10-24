@@ -722,6 +722,7 @@ fn v3_newer_minor_version_is_accepted() {
         &fmt,
         &params,
         &UerdCostModel,
+        strhide::stego::Freshness::Random,
     )
     .expect("embed with minor=7");
 
@@ -746,6 +747,7 @@ fn v3_other_major_version_is_not_decodable() {
         &fmt,
         &JpegParams::default(),
         &UerdCostModel,
+        strhide::stego::Freshness::Random,
     )
     .expect("embed with major=2");
     // The other build's header is located by a different label set, so the
@@ -786,6 +788,7 @@ fn v3_extensions_roundtrip_and_skip_unknowns() {
         &DEFAULT_JPEG_FORMAT,
         &params,
         &UerdCostModel,
+        strhide::stego::Freshness::Random,
     )
     .expect("embed with extensions");
     let raw = read_superblock(&stego, password);
@@ -815,6 +818,7 @@ fn v3_unknown_critical_extension_is_rejected() {
         &DEFAULT_JPEG_FORMAT,
         &params,
         &UerdCostModel,
+        strhide::stego::Freshness::Random,
     )
     .expect("embed with critical extension");
     let err = extract_carrier(&stego, &extract_opts(password)).unwrap_err();
@@ -845,6 +849,7 @@ fn v3_malformed_extension_area_is_reported() {
         &DEFAULT_JPEG_FORMAT,
         &params,
         &UerdCostModel,
+        strhide::stego::Freshness::Random,
     )
     .expect("embed");
 
@@ -893,6 +898,7 @@ fn v3_suite_matrix_roundtrips() {
             &DEFAULT_JPEG_FORMAT,
             &params,
             &UerdCostModel,
+            strhide::stego::Freshness::Random,
         )
         .unwrap_or_else(|e| panic!("suite {suite_id}: embed failed: {e}"));
         let raw = read_superblock_with_suite(&stego, &password, suite_id);
@@ -920,6 +926,7 @@ fn v3_extract_policy_can_exclude_a_suite() {
         &DEFAULT_JPEG_FORMAT,
         &params,
         &UerdCostModel,
+        strhide::stego::Freshness::Random,
     )
     .expect("embed suite 2");
 
@@ -1075,8 +1082,14 @@ fn v3_movable_slot_density_is_above_99_percent() {
 fn v3_capacity_probe_is_tight() {
     let cover = fs::read(fixture("carrier_photo.jpg")).expect("read carrier");
     let params = JpegParams::default();
-    let cap =
-        probe_jpeg_capacity(&cover, &UerdCostModel, &params, SafetyLevel::High).expect("probe");
+    let cap = probe_jpeg_capacity(
+        &cover,
+        &UerdCostModel,
+        &params,
+        SafetyLevel::High,
+        &strhide::stego::format::DEFAULT_JPEG_FORMAT,
+    )
+    .expect("probe");
     assert!(cap.available_slots > 0);
     assert_eq!(cap.total_elements, 256 * 64);
 
@@ -1089,6 +1102,7 @@ fn v3_capacity_probe_is_tight() {
         &DEFAULT_JPEG_FORMAT,
         &params,
         &UerdCostModel,
+        strhide::stego::Freshness::Random,
     )
     .expect("probe maximum must embed");
     let recovered = extract_jpeg(
@@ -1110,7 +1124,8 @@ fn v3_capacity_probe_is_tight() {
             None,
             &DEFAULT_JPEG_FORMAT,
             &params,
-            &UerdCostModel
+            &UerdCostModel,
+            strhide::stego::Freshness::Random
         )
         .is_err(),
         "one payload step above the maximum must fail"
@@ -1136,6 +1151,7 @@ fn v3_extraction_ignores_the_embed_side_budget() {
         &DEFAULT_JPEG_FORMAT,
         &params,
         &UerdCostModel,
+        strhide::stego::Freshness::Random,
     )
     .expect("embed with a tiny budget");
 
