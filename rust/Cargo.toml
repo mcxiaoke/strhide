@@ -17,7 +17,7 @@ exclude = ["tests/"]
 [features]
 default = ["engine", "stego", "cli"]
 engine  = ["dep:filetime", "dep:iced-x86", "dep:serde_json"]
-stego   = ["dep:dct-io"]
+stego   = ["dep:dct-io", "dep:rayon"]
 cli     = ["engine", "stego", "dep:clap", "dep:rpassword", "dep:toml", "dep:base64", "dep:jpeg-decoder", "dep:serde_json"]
 
 [lib]
@@ -49,6 +49,7 @@ filetime = { version = "0.2.29", optional = true }
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "encoder"], optional = true }
 jpeg-decoder = { version = "0.3.2", optional = true }
 rpassword = { version = "7.5.4", optional = true }
+rayon = { version = "1.10", optional = true }
 serde_json = { version = "1.0.154", optional = true }
 toml = { version = "0.9", optional = true }
 

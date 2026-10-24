@@ -36,6 +36,7 @@
 //!   removes a subtraction and changes nothing that is read.
 
 use dct_io::JpegCoefficients;
+use rayon::prelude::*;
 
 use crate::stego::traits::JpegGeometry;
 
@@ -198,18 +199,35 @@ pub fn decompress_luma(
     let basis = dct_basis();
     let (pw, ph) = (grid_w * N, grid_h * N);
 
-    let mut plane = vec![0.0f64; pw * ph];
-    for (bi, &(r, c)) in geometry.positions.iter().enumerate() {
-        let mut dequantized = [0.0f64; 64];
-        for k in 0..64 {
-            dequantized[k] = comp.blocks[bi][k] as f64 * q[k];
-        }
-        let block = idct_block(&dequantized, &basis);
-        for (y, block_row) in block.iter().enumerate() {
-            let row = (r * N + y) * pw + c * N;
-            plane[row..row + N].copy_from_slice(block_row);
+    // Blocks arrive in MCU-interleaved order, so a block row's indices are not
+    // contiguous. Bucket them once, then give each 8-row band of the plane to one
+    // task: an IDCT is per-block and independent, so this changes no arithmetic,
+    // only who runs it.
+    let mut by_row: Vec<Vec<usize>> = vec![Vec::new(); grid_h];
+    for (bi, &(r, _)) in geometry.positions.iter().enumerate() {
+        if let Some(row) = by_row.get_mut(r) {
+            row.push(bi);
         }
     }
+
+    let mut plane = vec![0.0f64; pw * ph];
+    plane
+        .par_chunks_mut(pw * N)
+        .enumerate()
+        .for_each(|(r, band)| {
+            for &bi in &by_row[r] {
+                let c = geometry.positions[bi].1;
+                let mut dequantized = [0.0f64; 64];
+                for k in 0..64 {
+                    dequantized[k] = comp.blocks[bi][k] as f64 * q[k];
+                }
+                let block = idct_block(&dequantized, &basis);
+                for (y, block_row) in block.iter().enumerate() {
+                    let off = y * pw + c * N;
+                    band[off..off + N].copy_from_slice(block_row);
+                }
+            }
+        });
 
     Some((plane, pw, ph))
 }
@@ -321,5 +339,53 @@ mod tests {
     fn zero_variance_short_circuits() {
         let plane = vec![7.0f64; 64];
         assert_eq!(wiener3(&plane, 8, 8), plane);
+    }
+
+    /// Every block must land on its own grid cell, including when the decoder's
+    /// block order is MCU-interleaved (4:2:0 here) rather than raster.
+    ///
+    /// The rows are bucketed before the parallel pass, so a mis-bucketed or
+    /// dropped block would leave a cell at zero instead of its DC level.
+    #[test]
+    fn decompress_places_every_block() {
+        use crate::stego::jpeg::geometry::component_geometry;
+        use dct_io::{ComponentCoefficients, ComponentInfo, JpegInfo};
+
+        let info = JpegInfo {
+            width: 32,
+            height: 16,
+            components: vec![ComponentInfo {
+                id: 1,
+                h_samp: 2,
+                v_samp: 2,
+                block_count: 8,
+            }],
+        };
+        let geometry = component_geometry(&info, 0, 8);
+
+        // DC only: a DC of `d` at quantizer step `q` decompresses to the
+        // constant `d * q / 8` over the whole block.
+        let mut blocks = vec![[0i16; 64]; 8];
+        for (bi, block) in blocks.iter_mut().enumerate() {
+            block[0] = 80 * (bi as i16 + 1);
+        }
+        let coeffs = JpegCoefficients {
+            components: vec![ComponentCoefficients { id: 1, blocks }],
+        };
+
+        let (plane, pw, _ph) = decompress_luma(&coeffs, &geometry).expect("decompress");
+        let q0 = geometry.luma_q[0].max(1) as f64;
+        for (bi, &(r, c)) in geometry.positions.iter().enumerate() {
+            let want = 80.0 * (bi as f64 + 1.0) * q0 / 8.0;
+            for y in 0..N {
+                for x in 0..N {
+                    let got = plane[(r * N + y) * pw + c * N + x];
+                    assert!(
+                        (got - want).abs() < 1e-9,
+                        "block {bi} pixel ({y},{x}) at grid ({r},{c}): {got} != {want}"
+                    );
+                }
+            }
+        }
     }
 }

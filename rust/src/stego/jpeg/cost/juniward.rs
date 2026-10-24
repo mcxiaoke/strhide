@@ -36,6 +36,8 @@
 //! flips, so both directions cost the same and no [`JpegCostModel::direction_bias`]
 //! is provided.
 
+use rayon::prelude::*;
+
 use crate::stego::params::JpegParams;
 use crate::stego::traits::{JpegCostModel, JpegGeometry};
 use crate::stego::wavelet;
@@ -72,6 +74,12 @@ const PAD: usize = SUPPORT.div_ceil(LANE) * LANE;
 const PAD_LO: usize = (-SUPPORT_START) as usize;
 /// Padding right/bottom: `SUPPORT - N - PAD_LO`.
 const PAD_HI: usize = SUPPORT - N - PAD_LO;
+/// Blocks handed to one parallel task.
+///
+/// Large enough that the per-task dispatch and scratch setup amortise over the
+/// sweep, small enough that the pool still balances on the tail. It also sets how
+/// often the AVX2/scalar choice is made: once per task, not once per window.
+const SWEEP: usize = 512;
 /// Offset between a support index and the DCT-basis row it convolves with.
 ///
 /// # Derivation
@@ -128,41 +136,17 @@ impl JpegCostModel for JuniwardCostModel {
         let basis = precover::dct_basis();
         let q: [f32; 64] = std::array::from_fn(|i| geometry.luma_q[i].max(1) as f32);
 
-        // The dot-product kernel is chosen once for the whole map. It is a type
-        // parameter rather than a function pointer: the bilinear factorisation
-        // calls it `PAD*8 + 63` times per block, and an indirect call per window
-        // would cost more than the multiply-adds it wraps.
+        // Picked once for the whole map: the AVX2 kernel is a type parameter, not
+        // a function pointer, because the bilinear factorisation calls it
+        // `PAD*8 + 63` times per block and an indirect call per window would cost
+        // more than the multiply-adds it wraps.
         #[cfg(target_arch = "x86_64")]
-        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
-        {
-            // SAFETY: both features were just confirmed at runtime, and the
-            // wrapper carries the matching `target_feature` attributes.
-            unsafe {
-                cost_map_avx2(
-                    &plane,
-                    pw,
-                    ph,
-                    &geometry.positions,
-                    &basis,
-                    &q,
-                    sigma,
-                    &mut costs,
-                )
-            };
-        } else {
-            cost_map::<ScalarKernel>(
-                &plane,
-                pw,
-                ph,
-                &geometry.positions,
-                &basis,
-                &q,
-                sigma,
-                &mut costs,
-            );
-        }
+        let avx2 = std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("fma");
         #[cfg(not(target_arch = "x86_64"))]
-        cost_map::<ScalarKernel>(
+        let avx2 = false;
+
+        cost_map(
             &plane,
             pw,
             ph,
@@ -170,6 +154,7 @@ impl JpegCostModel for JuniwardCostModel {
             &basis,
             &q,
             sigma,
+            avx2,
             &mut costs,
         );
 
@@ -187,14 +172,16 @@ impl JpegCostModel for JuniwardCostModel {
 
 /// Accumulate the three-band distortion map into `costs`.
 ///
-/// `K` is the dot-product kernel. Splitting it out keeps one copy of the loop
-/// while still letting the AVX2 build inline its intrinsics: the wrapper
-/// [`cost_map_avx2`] carries the `target_feature` attributes, so a kernel chosen
-/// there is compiled in an AVX2 context. Dispatching per window instead would
-/// mean an indirect call every 24 multiply-adds.
-#[inline(always)]
+/// Parallel layout: the three bands run in sequence (three live weight planes
+/// would triple the peak footprint, which is already ~400 MB per plane at
+/// 100 MP), but inside a band the residual, the reciprocal plane and the block
+/// sweep are all band-local and run on the pool.
+///
+/// Every stage is a pure function of the cover and writes only its own slice, so
+/// the result is bit-identical to the single-threaded path — there is no
+/// cross-block reduction whose order could change.
 #[allow(clippy::too_many_arguments)]
-fn cost_map<K: DotKernel>(
+fn cost_map(
     plane: &[f64],
     pw: usize,
     ph: usize,
@@ -202,6 +189,7 @@ fn cost_map<K: DotKernel>(
     basis: &[[f64; N]; N],
     q: &[f32; 64],
     sigma: f64,
+    avx2: bool,
     costs: &mut [f64],
 ) {
     // One padded weight plane, allocated once and refilled per band: the
@@ -209,52 +197,127 @@ fn cost_map<K: DotKernel>(
     // regardless of how many bands there are.
     let (wp, hp) = (pw + PAD_LO + PAD_HI, ph + PAD_LO + PAD_HI);
     let mut weights = vec![0.0f32; wp * hp];
-    let mut patch = [0.0f32; PAD * PAD];
-    // Transposed (`mid[j][ky]`, not `mid[ky][j]`): the second pass then walks
-    // both operands contiguously, which is what lets it vectorise.
-    let mut mid = [[0.0f32; PAD]; N];
 
     for (f1, f2) in wavelet::bands() {
         let residual = separable_residual(plane, pw, ph, &f1, &f2);
         reciprocal_plane(&residual, pw, ph, wp, hp, sigma, &mut weights);
         let (u, v) = footprint(basis, &f1, &f2);
+        let ctx = SweepCtx {
+            weights: &weights,
+            wp,
+            u: &u,
+            v: &v,
+            q,
+        };
 
-        for (bi, &(br, bc)) in positions.iter().enumerate() {
-            gather(&weights, wp, br * N, bc * N, &mut patch);
-            let base = bi * 64;
-
-            // T[j][ky] = Σ_kx patch[ky][kx] · |v_j|[kx]
-            for ky in 0..PAD {
-                let row = &patch[ky * PAD..ky * PAD + PAD];
-                for (mid_j, v_j) in mid.iter_mut().zip(v.iter()) {
-                    mid_j[ky] = K::dot(row, v_j);
-                }
-            }
-
-            // S[i][j] = Σ_ky |u_i|[ky] · T[j][ky]
-            for (i, u_i) in u.iter().enumerate() {
-                for (j, mid_j) in mid.iter().enumerate() {
-                    // DC never takes part in embedding; leaving it wet keeps the
-                    // cover digest stable.
-                    let k = i * N + j;
-                    if k == 0 {
-                        continue;
+        // `patch` and `mid` are per-worker scratch; `for_each_init` hands each
+        // task its own pair instead of rebuilding one per block.
+        costs
+            .par_chunks_mut(SWEEP * 64)
+            .zip(positions.par_chunks(SWEEP))
+            .for_each_init(
+                || {
+                    (
+                        [0.0f32; PAD * PAD],
+                        // Transposed (`mid[j][ky]`, not `mid[ky][j]`): the second
+                        // pass then walks both operands contiguously, which is
+                        // what lets it vectorise.
+                        [[0.0f32; PAD]; N],
+                    )
+                },
+                |state, (chunk, chunk_positions)| {
+                    let (patch, mid) = state;
+                    #[cfg(target_arch = "x86_64")]
+                    if avx2 {
+                        // SAFETY: `avx2` mirrors the `is_x86_feature_detected!`
+                        // check made once in `compute_cost`.
+                        unsafe { sweep_avx2(chunk, chunk_positions, &ctx, patch, mid) };
+                        return;
                     }
-                    let sum = K::dot(u_i, mid_j);
-                    // `q` scales the perturbation, and `sum` is already relative
-                    // distortion, so the paper's rho is q * sum.
-                    costs[base + k] += (q[k] * sum) as f64;
+                    let _ = avx2;
+                    sweep_scalar(chunk, chunk_positions, &ctx, patch, mid);
+                },
+            );
+    }
+}
+
+/// Everything one sweep of [`SWEEP`] blocks reads, besides the scratch pair.
+struct SweepCtx<'a> {
+    weights: &'a [f32],
+    wp: usize,
+    u: &'a [[f32; PAD]; N],
+    v: &'a [[f32; PAD]; N],
+    q: &'a [f32; 64],
+}
+
+/// Evaluate `S = Uᵀ·(P·V)` for a batch of blocks, accumulating into `costs`.
+///
+/// `K` is the dot-product kernel; the callers below pick one and let it inline.
+/// The batch is a whole parallel task, so dispatching here costs one branch per
+/// [`SWEEP`] blocks rather than one per window.
+#[inline(always)]
+fn sweep_kernel<K: DotKernel>(
+    costs: &mut [f64],
+    positions: &[(usize, usize)],
+    ctx: &SweepCtx<'_>,
+    patch: &mut [f32; PAD * PAD],
+    mid: &mut [[f32; PAD]; N],
+) {
+    let SweepCtx {
+        weights,
+        wp,
+        u,
+        v,
+        q,
+    } = *ctx;
+
+    for (bi, &(br, bc)) in positions.iter().enumerate() {
+        gather(weights, wp, br * N, bc * N, patch);
+        let base = bi * 64;
+
+        // T[j][ky] = Σ_kx patch[ky][kx] · |v_j|[kx]
+        for ky in 0..PAD {
+            let row = &patch[ky * PAD..ky * PAD + PAD];
+            for (mid_j, v_j) in mid.iter_mut().zip(v.iter()) {
+                mid_j[ky] = K::dot(row, v_j);
+            }
+        }
+
+        // S[i][j] = Σ_ky |u_i|[ky] · T[j][ky]
+        for (i, u_i) in u.iter().enumerate() {
+            for (j, mid_j) in mid.iter().enumerate() {
+                // DC never takes part in embedding; leaving it wet keeps the
+                // cover digest stable.
+                let k = i * N + j;
+                if k == 0 {
+                    continue;
                 }
+                let sum = K::dot(u_i, mid_j);
+                // `q` scales the perturbation, and `sum` is already relative
+                // distortion, so the paper's rho is q * sum.
+                costs[base + k] += (q[k] * sum) as f64;
             }
         }
     }
 }
 
-/// [`cost_map`] specialised for AVX2 + FMA.
+fn sweep_scalar(
+    costs: &mut [f64],
+    positions: &[(usize, usize)],
+    ctx: &SweepCtx<'_>,
+    patch: &mut [f32; PAD * PAD],
+    mid: &mut [[f32; PAD]; N],
+) {
+    sweep_kernel::<ScalarKernel>(costs, positions, ctx, patch, mid);
+}
+
+/// [`sweep_kernel`] specialised for AVX2 + FMA.
 ///
 /// This thin wrapper exists only to establish the target features: the generic
-/// `cost_map` inlines into it, and so does [`Avx2Kernel::dot`], which is what
-/// lets the intrinsics be emitted in the right context.
+/// kernel inlines into it, and so does [`Avx2Kernel::dot`], which is what lets
+/// the intrinsics be emitted in the right context. It runs on a pool thread, so
+/// the guarantee is purely about code generation — the runtime check in
+/// `compute_cost` is what makes the instructions legal there.
 ///
 /// # Safety
 ///
@@ -262,18 +325,14 @@ fn cost_map<K: DotKernel>(
 /// `is_x86_feature_detected!`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-#[allow(clippy::too_many_arguments)]
-unsafe fn cost_map_avx2(
-    plane: &[f64],
-    pw: usize,
-    ph: usize,
-    positions: &[(usize, usize)],
-    basis: &[[f64; N]; N],
-    q: &[f32; 64],
-    sigma: f64,
+unsafe fn sweep_avx2(
     costs: &mut [f64],
+    positions: &[(usize, usize)],
+    ctx: &SweepCtx<'_>,
+    patch: &mut [f32; PAD * PAD],
+    mid: &mut [[f32; PAD]; N],
 ) {
-    cost_map::<Avx2Kernel>(plane, pw, ph, positions, basis, q, sigma, costs);
+    sweep_kernel::<Avx2Kernel>(costs, positions, ctx, patch, mid);
 }
 
 /// Dot product over a `PAD`-wide window.
@@ -364,6 +423,10 @@ unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f32 {
 /// The 2D filter is separable, so this runs as two 1D passes. Edge pixels clamp
 /// instead of zero-padding: zero padding would fake "no texture" along the
 /// border and make the outermost ring look artificially expensive to change.
+///
+/// Both passes are parallel over rows: a row of the output depends on one row of
+/// the previous stage (the vertical pass only *reads* neighbouring rows), so
+/// splitting by row never changes a single floating-point operation.
 fn separable_residual(
     plane: &[f64],
     pw: usize,
@@ -372,32 +435,34 @@ fn separable_residual(
     f2: &[f64; wavelet::TAPS],
 ) -> Vec<f64> {
     let mut horizontal = vec![0.0f64; pw * ph];
-    for y in 0..ph {
-        let row = &plane[y * pw..(y + 1) * pw];
-        let out = &mut horizontal[y * pw..(y + 1) * pw];
-        for (x, dst) in out.iter_mut().enumerate() {
-            let mut acc = 0.0;
-            for (b, &cb) in f2.iter().enumerate() {
-                let sx = (x as isize + b as isize - wavelet::HALF as isize)
-                    .clamp(0, pw as isize - 1) as usize;
-                acc += cb * row[sx];
+    horizontal
+        .par_chunks_mut(pw)
+        .enumerate()
+        .for_each(|(y, out)| {
+            let row = &plane[y * pw..(y + 1) * pw];
+            for (x, dst) in out.iter_mut().enumerate() {
+                let mut acc = 0.0;
+                for (b, &cb) in f2.iter().enumerate() {
+                    let sx = (x as isize + b as isize - wavelet::HALF as isize)
+                        .clamp(0, pw as isize - 1) as usize;
+                    acc += cb * row[sx];
+                }
+                *dst = acc;
             }
-            *dst = acc;
-        }
-    }
+        });
 
     let mut out = vec![0.0f64; pw * ph];
-    for y in 0..ph {
-        for x in 0..pw {
+    out.par_chunks_mut(pw).enumerate().for_each(|(y, dst)| {
+        for (x, o) in dst.iter_mut().enumerate() {
             let mut acc = 0.0;
             for (a, &ca) in f1.iter().enumerate() {
                 let sy = (y as isize + a as isize - wavelet::HALF as isize)
                     .clamp(0, ph as isize - 1) as usize;
                 acc += ca * horizontal[sy * pw + x];
             }
-            out[y * pw + x] = acc;
+            *o = acc;
         }
-    }
+    });
     out
 }
 
@@ -406,6 +471,10 @@ fn separable_residual(
 /// The border is edge-replicated, matching the clamp [`separable_residual`]
 /// applies, so [`gather`] can read a 23-wide window anywhere without a
 /// per-element clamp. Only the interior costs a division; the border is copied.
+///
+/// Interior rows are independent (each writes its own row plus its left/right
+/// edges), so they run in parallel. The top and bottom bands are replicated from
+/// the first and last interior rows, hence they wait for the parallel part.
 fn reciprocal_plane(
     residual: &[f64],
     pw: usize,
@@ -417,23 +486,20 @@ fn reciprocal_plane(
 ) {
     debug_assert_eq!(out.len(), wp * hp);
 
-    for y in 0..ph {
-        let src = &residual[y * pw..(y + 1) * pw];
-        let row = (y + PAD_LO) * wp;
-        let dst = &mut out[row + PAD_LO..row + PAD_LO + pw];
-        for (o, &v) in dst.iter_mut().zip(src.iter()) {
-            *o = (1.0 / (v.abs() + sigma)) as f32;
-        }
-    }
-
-    // Left and right edges of every interior row.
-    for y in 0..ph {
-        let row = (y + PAD_LO) * wp;
-        let first = out[row + PAD_LO];
-        let last = out[row + PAD_LO + pw - 1];
-        out[row..row + PAD_LO].fill(first);
-        out[row + PAD_LO + pw..row + PAD_LO + pw + PAD_HI].fill(last);
-    }
+    out.par_chunks_mut(wp)
+        .enumerate()
+        .skip(PAD_LO)
+        .take(ph)
+        .for_each(|(y, row)| {
+            let source = &residual[(y - PAD_LO) * pw..(y - PAD_LO) * pw + pw];
+            for (o, &v) in row[PAD_LO..PAD_LO + pw].iter_mut().zip(source.iter()) {
+                *o = (1.0 / (v.abs() + sigma)) as f32;
+            }
+            let first = row[PAD_LO];
+            let last = row[PAD_LO + pw - 1];
+            row[..PAD_LO].fill(first);
+            row[PAD_LO + pw..PAD_LO + pw + PAD_HI].fill(last);
+        });
 
     // Top and bottom bands as whole rows, which also fixes the corners.
     for y in 0..PAD_LO {
@@ -638,6 +704,35 @@ mod tests {
                 (scalar - avx).abs() <= tolerance,
                 "kernels disagree: scalar {scalar}, avx2 {avx}"
             );
+        }
+    }
+
+    /// The parallel sweep must be deterministic: every block owns its slice of
+    /// `costs` and there is no cross-block reduction, so two runs have to agree
+    /// bit for bit regardless of how the pool schedules them.
+    #[test]
+    fn cost_map_is_deterministic_across_runs() {
+        let mut blocks = vec![[0i16; 64]; 64];
+        for (bi, b) in blocks.iter_mut().enumerate() {
+            for (k, v) in b.iter_mut().enumerate().skip(1) {
+                *v = (((bi * 11 + k * 17) % 53) as i16) - 26;
+            }
+        }
+        let coeffs = dct_io::JpegCoefficients {
+            components: vec![dct_io::ComponentCoefficients { id: 1, blocks }],
+        };
+        let geometry = JpegGeometry {
+            grid_w: 8,
+            grid_h: 8,
+            positions: (0..64).map(|bi| (bi / 8, bi % 8)).collect(),
+            luma_q: [6u16; 64],
+        };
+        let params = JpegParams::default();
+        let first = JuniwardCostModel.compute_cost(&coeffs, &geometry, &params);
+        let second = JuniwardCostModel.compute_cost(&coeffs, &geometry, &params);
+        assert_eq!(first.len(), second.len());
+        for (i, (a, b)) in first.iter().zip(second.iter()).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "cost {i} differs between runs");
         }
     }
 
