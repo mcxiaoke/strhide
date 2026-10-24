@@ -15,6 +15,32 @@ pub const HEIF_BRANDS: &[[u8; 4]] = &[
     *b"avis",
 ];
 
+/// Detect whether the byte slice is an ISO BMFF HEIF/HEIC image container based on ftyp brand.
+pub fn is_heif_bytes(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 {
+        return false;
+    }
+    let size = match bytes.get(..4) {
+        Some(s) => u32::from_be_bytes(s.try_into().unwrap()) as usize,
+        None => return false,
+    };
+    if &bytes[4..8] != b"ftyp" || !(12..=4096).contains(&size) || bytes.len() < size {
+        return false;
+    }
+    let payload = &bytes[8..size];
+    let num_brands = payload.len() / 4;
+    for i in 0..num_brands {
+        if i == 1 {
+            continue;
+        }
+        let brand = &payload[i * 4..(i + 1) * 4];
+        if HEIF_BRANDS.iter().any(|b| b == brand) {
+            return true;
+        }
+    }
+    false
+}
+
 pub struct HeifAdapter;
 
 impl HostAdapter for HeifAdapter {
@@ -33,30 +59,13 @@ impl HostAdapter for HeifAdapter {
 
         let mut header = [0u8; 8];
         let detected = if reader.read_exact(&mut header).is_ok() {
-            let size = u32::from_be_bytes(header[0..4].try_into().unwrap()) as u64;
+            let size = u32::from_be_bytes(header[0..4].try_into().unwrap()) as usize;
             let tag = &header[4..8];
             if tag == b"ftyp" && (12..=4096).contains(&size) {
-                let payload_len = (size - 8) as usize;
-                let mut payload = vec![0u8; payload_len];
-                if reader.read_exact(&mut payload).is_ok() {
-                    // payload contains:
-                    // 0..4: major_brand
-                    // 4..8: minor_version
-                    // 8..: compatible_brands (each 4 bytes)
-                    let mut matched = false;
-                    let num_brands = payload_len / 4;
-                    for i in 0..num_brands {
-                        // skip index 1 which is minor_version
-                        if i == 1 {
-                            continue;
-                        }
-                        let brand = &payload[i * 4..(i + 1) * 4];
-                        if HEIF_BRANDS.iter().any(|b| b == brand) {
-                            matched = true;
-                            break;
-                        }
-                    }
-                    matched
+                let mut buf = vec![0u8; size];
+                buf[0..8].copy_from_slice(&header);
+                if reader.read_exact(&mut buf[8..size]).is_ok() {
+                    is_heif_bytes(&buf)
                 } else {
                     false
                 }

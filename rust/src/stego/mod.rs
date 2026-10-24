@@ -8,6 +8,7 @@ pub mod coding;
 pub mod envelope;
 pub mod format;
 pub mod header;
+pub mod heif;
 pub mod jpeg;
 pub mod params;
 pub mod prng;
@@ -118,9 +119,12 @@ pub fn embed_carrier_with_profile(
             &spatial_params,
             options.freshness,
         )
+    } else if crate::adapters::heif::is_heif_bytes(carrier_bytes) {
+        // HEIF content-domain bridge steganography
+        heif::embed_heif_bridge(carrier_bytes, payload, options, profile)
     } else {
         Err(StrHideError::UnsupportedFormat(
-            "Content-adaptive steganography requires a PNG or JPEG image carrier".into(),
+            "Content-adaptive steganography requires a PNG, JPEG, or HEIF image carrier".into(),
         ))
     }
 }
@@ -180,9 +184,12 @@ pub fn extract_carrier_with_profile(
             &*model,
             &options.spatial_params,
         )
+    } else if crate::adapters::heif::is_heif_bytes(carrier_bytes) {
+        // HEIF content-domain bridge steganography
+        heif::extract_heif_bridge(carrier_bytes, options, profile)
     } else {
         Err(StrHideError::UnsupportedFormat(
-            "Content-adaptive steganography requires a PNG or JPEG image carrier".into(),
+            "Content-adaptive steganography requires a PNG, JPEG, or HEIF image carrier".into(),
         ))
     }
 }
@@ -296,9 +303,12 @@ pub fn probe_carrier_capacity_with_profile(
             domain,
             profile.spatial_profile(),
         )
+    } else if crate::adapters::heif::is_heif_bytes(carrier_bytes) {
+        // HEIF content-domain bridge steganography
+        heif::probe_heif_bridge_capacity(carrier_bytes, options, profile)
     } else {
         Err(StrHideError::UnsupportedFormat(
-            "Content-adaptive steganography requires a PNG or JPEG image carrier".into(),
+            "Content-adaptive steganography requires a PNG, JPEG, or HEIF image carrier".into(),
         ))
     }
 }
