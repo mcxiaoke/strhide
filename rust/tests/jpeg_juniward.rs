@@ -42,7 +42,7 @@ fn options(algorithm: Option<&str>) -> StegoOptions {
 }
 
 #[test]
-fn juniwward_carrier_roundtrips_without_naming_the_algorithm() {
+fn juniward_carrier_roundtrips_without_naming_the_algorithm() {
     let payload = payload();
     let stego =
         embed_carrier(COVER, &payload, &options(Some("juniward"))).expect("embed with J-UNIWARD");
@@ -55,7 +55,7 @@ fn juniwward_carrier_roundtrips_without_naming_the_algorithm() {
 }
 
 #[test]
-fn juniwward_leaves_the_cover_digest_and_dc_alone() {
+fn juniward_leaves_the_cover_digest_and_dc_alone() {
     // The model must not embed into DC: the body slot grid excludes it, but a
     // cost model that priced DC as cheap could tempt a future rule change.
     let payload = payload();
@@ -78,7 +78,7 @@ fn juniwward_leaves_the_cover_digest_and_dc_alone() {
 /// is an independent statistic from J-UNIWARD's wavelet residual -- so this is
 /// not testing the model against itself.
 #[test]
-fn juniwward_costs_more_in_flat_blocks() {
+fn juniward_costs_more_in_flat_blocks() {
     let coeffs = dct_io::read_coefficients(COVER).expect("coefficients");
     let geometry =
         geometry_for_carrier(COVER, 0, coeffs.components[0].blocks.len()).expect("geometry");
@@ -130,7 +130,7 @@ fn juniwward_costs_more_in_flat_blocks() {
 /// The two models must not rank the same blocks cheapest, otherwise adding
 /// J-UNIWARD would buy nothing but a slower embed.
 #[test]
-fn juniwward_and_uerd_disagree_about_where_to_embed() {
+fn juniward_and_uerd_disagree_about_where_to_embed() {
     let coeffs = dct_io::read_coefficients(COVER).expect("coefficients");
     let geometry =
         geometry_for_carrier(COVER, 0, coeffs.components[0].blocks.len()).expect("geometry");

@@ -13,14 +13,24 @@
 //! distortion of one coefficient is a sum over the wavelet response of that
 //! perturbation, weighted by how little wavelet energy the cover has there.
 //!
-//! # Cost
+//! # Cost of the model, and how this implementation factorises it
 //!
-//! The inner sum has a 23x23 support per coefficient and cannot be factorised:
-//! the weight is `1 / (|residual| + sigma)`, which varies per position, so the
-//! absolute-value kernel (`|u ⊗ v|`) never collapses into two 1D passes the way
-//! the residual itself does. That is why J-UNIWARD is roughly two orders of
-//! magnitude more expensive than UERD, and why it is a comparison model rather
-//! than a default. Measured cost is documented in the assessment doc.
+//! The naive sum is `Σ_{ky,kx} |ΔR[ky][kx]| · W[ky][kx]`, evaluated for *every*
+//! one of the 63 AC coefficients of a block. `|ΔR|` happens to be an outer
+//! product `|u_i| ⊗ |v_j|` (the DCT basis and the wavelet filters are both
+//! separable), so the whole 63-coefficient sweep is one bilinear form on a
+//! single shared 23x23 window of the weight plane:
+//!
+//! ```text
+//! S[i][j] = u_iᵀ · P · v_j  =  u_iᵀ · (P · V)        P = weight window
+//! ```
+//!
+//! Evaluating it as `T = P·V` then `Uᵀ·T` costs `23*8*23 + 8*8*23 = 5704`
+//! multiply-adds instead of `63*23*23 = 33327`: 5.8x fewer, with the same
+//! result up to float summation order. The rest of the win is mechanical: the
+//! weight plane is kept pre-padded so the 23x23 gather is a straight
+//! `copy_from_slice` (no per-pixel clamp), and windows are padded to 24 columns
+//! so the inner products unroll into lanes the compiler can vectorise.
 //!
 //! The model is symmetric: `|ΔR|` is unchanged when the sign of the change
 //! flips, so both directions cost the same and no [`JpegCostModel::direction_bias`]
@@ -51,6 +61,36 @@ const N: usize = 8;
 const SUPPORT: usize = N + wavelet::TAPS - 1;
 /// First offset of the support relative to the block origin, `-(TAPS/2 - 1)`.
 const SUPPORT_START: isize = -(wavelet::HALF as isize - 1);
+/// Width the support is rounded up to so the inner products unroll into whole
+/// vectors. The spare lane is zero-filled by [`gather`] and contributes nothing.
+const LANE: usize = 4;
+const PAD: usize = SUPPORT.div_ceil(LANE) * LANE;
+/// Padding the weight plane needs left/top of the block.
+///
+/// This is exactly `-SUPPORT_START`, which is what lets [`gather`] index the
+/// padded plane with unshifted block coordinates.
+const PAD_LO: usize = (-SUPPORT_START) as usize;
+/// Padding right/bottom: `SUPPORT - N - PAD_LO`.
+const PAD_HI: usize = SUPPORT - N - PAD_LO;
+/// Offset between a support index and the DCT-basis row it convolves with.
+///
+/// # Derivation
+///
+/// [`separable_residual`] evaluates `ΔR[y] = Σ_a f1[a]·Δplane[y + a - HALF]`, and
+/// `Δplane` is non-zero only on rows `[0, N)` of the block. Row `ky` of the
+/// gather window is the absolute row `y₀ + SUPPORT_START + ky`, so the basis row
+/// it lands on is
+///
+/// ```text
+/// (y₀ + SUPPORT_START + ky) + a - HALF - y₀
+///     = ky + a + SUPPORT_START - HALF
+///     = ky + a - (2·HALF - 1)
+/// ```
+///
+/// Getting this offset wrong shifts the entire cost map by one block: the
+/// weights would be read from the neighbourhood of a different block than the
+/// one the coefficient belongs to.
+const BASIS_SHIFT: isize = 2 * wavelet::HALF as isize - 1;
 
 impl JpegCostModel for JuniwardCostModel {
     fn id(&self) -> &'static str {
@@ -86,51 +126,52 @@ impl JpegCostModel for JuniwardCostModel {
             .model_option("sigma", DEFAULT_SIGMA)
             .max(f64::MIN_POSITIVE);
         let basis = precover::dct_basis();
-        let q: [f64; 64] = std::array::from_fn(|i| geometry.luma_q[i].max(1) as f64);
+        let q: [f32; 64] = std::array::from_fn(|i| geometry.luma_q[i].max(1) as f32);
 
-        // One band at a time: the residual and its reciprocal plane are the two
-        // large allocations here, and keeping only one alive bounds the working
-        // set regardless of how many bands there are.
-        for (f1, f2) in wavelet::bands() {
-            let residual = separable_residual(&plane, pw, ph, &f1, &f2);
-            let recip: Vec<f32> = residual
-                .iter()
-                .map(|v| (1.0 / (v.abs() + sigma)) as f32)
-                .collect();
-
-            let (u, v) = footprint(&basis, &f1, &f2);
-
-            let mut patch = vec![0.0f32; SUPPORT * SUPPORT];
-            for (bi, &(br, bc)) in geometry.positions.iter().enumerate() {
-                gather_patch(&recip, pw, ph, br * N, bc * N, &mut patch);
-
-                for (i, u_row) in u.iter().enumerate() {
-                    for (j, v_row) in v.iter().enumerate() {
-                        // DC never takes part in embedding; leaving it wet keeps
-                        // the cover digest stable.
-                        let k = i * N + j;
-                        if k == 0 {
-                            continue;
-                        }
-                        let mut sum = 0.0f32;
-                        for (ky, &uy) in u_row.iter().enumerate() {
-                            if uy == 0.0 {
-                                continue;
-                            }
-                            let row = &patch[ky * SUPPORT..(ky + 1) * SUPPORT];
-                            let mut acc = 0.0f32;
-                            for (kx, &pv) in row.iter().enumerate() {
-                                acc += pv * v_row[kx];
-                            }
-                            sum += uy * acc;
-                        }
-                        // `q` scales the perturbation, and `sum` is already
-                        // relative distortion, so the paper's rho is q * sum.
-                        costs[bi * 64 + k] += (q[k] as f32 * sum) as f64;
-                    }
-                }
-            }
+        // The dot-product kernel is chosen once for the whole map. It is a type
+        // parameter rather than a function pointer: the bilinear factorisation
+        // calls it `PAD*8 + 63` times per block, and an indirect call per window
+        // would cost more than the multiply-adds it wraps.
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+        {
+            // SAFETY: both features were just confirmed at runtime, and the
+            // wrapper carries the matching `target_feature` attributes.
+            unsafe {
+                cost_map_avx2(
+                    &plane,
+                    pw,
+                    ph,
+                    &geometry.positions,
+                    &basis,
+                    &q,
+                    sigma,
+                    &mut costs,
+                )
+            };
+        } else {
+            cost_map::<ScalarKernel>(
+                &plane,
+                pw,
+                ph,
+                &geometry.positions,
+                &basis,
+                &q,
+                sigma,
+                &mut costs,
+            );
         }
+        #[cfg(not(target_arch = "x86_64"))]
+        cost_map::<ScalarKernel>(
+            &plane,
+            pw,
+            ph,
+            &geometry.positions,
+            &basis,
+            &q,
+            sigma,
+            &mut costs,
+        );
 
         // Zero, negative or non-finite costs would make a coefficient look free
         // to the trellis, and anything above the wet cap has to saturate so the
@@ -142,6 +183,180 @@ impl JpegCostModel for JuniwardCostModel {
         }
         costs
     }
+}
+
+/// Accumulate the three-band distortion map into `costs`.
+///
+/// `K` is the dot-product kernel. Splitting it out keeps one copy of the loop
+/// while still letting the AVX2 build inline its intrinsics: the wrapper
+/// [`cost_map_avx2`] carries the `target_feature` attributes, so a kernel chosen
+/// there is compiled in an AVX2 context. Dispatching per window instead would
+/// mean an indirect call every 24 multiply-adds.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn cost_map<K: DotKernel>(
+    plane: &[f64],
+    pw: usize,
+    ph: usize,
+    positions: &[(usize, usize)],
+    basis: &[[f64; N]; N],
+    q: &[f32; 64],
+    sigma: f64,
+    costs: &mut [f64],
+) {
+    // One padded weight plane, allocated once and refilled per band: the
+    // residual stays the only large temporary, so the working set is the same
+    // regardless of how many bands there are.
+    let (wp, hp) = (pw + PAD_LO + PAD_HI, ph + PAD_LO + PAD_HI);
+    let mut weights = vec![0.0f32; wp * hp];
+    let mut patch = [0.0f32; PAD * PAD];
+    // Transposed (`mid[j][ky]`, not `mid[ky][j]`): the second pass then walks
+    // both operands contiguously, which is what lets it vectorise.
+    let mut mid = [[0.0f32; PAD]; N];
+
+    for (f1, f2) in wavelet::bands() {
+        let residual = separable_residual(plane, pw, ph, &f1, &f2);
+        reciprocal_plane(&residual, pw, ph, wp, hp, sigma, &mut weights);
+        let (u, v) = footprint(basis, &f1, &f2);
+
+        for (bi, &(br, bc)) in positions.iter().enumerate() {
+            gather(&weights, wp, br * N, bc * N, &mut patch);
+            let base = bi * 64;
+
+            // T[j][ky] = Σ_kx patch[ky][kx] · |v_j|[kx]
+            for ky in 0..PAD {
+                let row = &patch[ky * PAD..ky * PAD + PAD];
+                for (mid_j, v_j) in mid.iter_mut().zip(v.iter()) {
+                    mid_j[ky] = K::dot(row, v_j);
+                }
+            }
+
+            // S[i][j] = Σ_ky |u_i|[ky] · T[j][ky]
+            for (i, u_i) in u.iter().enumerate() {
+                for (j, mid_j) in mid.iter().enumerate() {
+                    // DC never takes part in embedding; leaving it wet keeps the
+                    // cover digest stable.
+                    let k = i * N + j;
+                    if k == 0 {
+                        continue;
+                    }
+                    let sum = K::dot(u_i, mid_j);
+                    // `q` scales the perturbation, and `sum` is already relative
+                    // distortion, so the paper's rho is q * sum.
+                    costs[base + k] += (q[k] * sum) as f64;
+                }
+            }
+        }
+    }
+}
+
+/// [`cost_map`] specialised for AVX2 + FMA.
+///
+/// This thin wrapper exists only to establish the target features: the generic
+/// `cost_map` inlines into it, and so does [`Avx2Kernel::dot`], which is what
+/// lets the intrinsics be emitted in the right context.
+///
+/// # Safety
+///
+/// The caller must have confirmed `avx2` and `fma` via
+/// `is_x86_feature_detected!`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn cost_map_avx2(
+    plane: &[f64],
+    pw: usize,
+    ph: usize,
+    positions: &[(usize, usize)],
+    basis: &[[f64; N]; N],
+    q: &[f32; 64],
+    sigma: f64,
+    costs: &mut [f64],
+) {
+    cost_map::<Avx2Kernel>(plane, pw, ph, positions, basis, q, sigma, costs);
+}
+
+/// Dot product over a `PAD`-wide window.
+trait DotKernel {
+    fn dot(a: &[f32], b: &[f32]) -> f32;
+}
+
+/// Portable kernel: four independent accumulators break the dependency chain
+/// even when the target has no FMA and only four-wide vectors.
+struct ScalarKernel;
+
+impl DotKernel for ScalarKernel {
+    #[inline(always)]
+    fn dot(a: &[f32], b: &[f32]) -> f32 {
+        let mut acc = [0.0f32; LANE];
+        let mut k = 0;
+        while k + LANE <= PAD {
+            acc[0] += a[k] * b[k];
+            acc[1] += a[k + 1] * b[k + 1];
+            acc[2] += a[k + 2] * b[k + 2];
+            acc[3] += a[k + 3] * b[k + 3];
+            k += LANE;
+        }
+        let mut tail = 0.0f32;
+        while k < PAD {
+            tail += a[k] * b[k];
+            k += 1;
+        }
+        (acc[0] + acc[1]) + (acc[2] + acc[3]) + tail
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+struct Avx2Kernel;
+
+#[cfg(target_arch = "x86_64")]
+impl DotKernel for Avx2Kernel {
+    #[inline(always)]
+    fn dot(a: &[f32], b: &[f32]) -> f32 {
+        // SAFETY: this impl is only instantiated from `cost_map_avx2`, which
+        // carries `avx2,fma` and is only reachable behind the runtime check.
+        unsafe { dot_avx2(a, b) }
+    }
+}
+
+/// Eight-wide FMA dot product. `PAD` is a multiple of eight for the current
+/// filter, so the scalar tail only runs if the wavelet taps ever change.
+///
+/// # Safety
+///
+/// Requires `avx2` and `fma`; `a` and `b` must each hold at least `PAD` lanes.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    debug_assert!(a.len() >= PAD && b.len() >= PAD);
+
+    let (pa, pb) = (a.as_ptr(), b.as_ptr());
+    let mut acc = _mm256_setzero_ps();
+    let mut k = 0;
+    while k + 8 <= PAD {
+        // SAFETY: the loop bound keeps `k + 8 <= PAD <= a.len() == b.len()`.
+        unsafe {
+            let va = _mm256_loadu_ps(pa.add(k));
+            let vb = _mm256_loadu_ps(pb.add(k));
+            acc = _mm256_fmadd_ps(va, vb, acc);
+        }
+        k += 8;
+    }
+
+    let lo = _mm256_castps256_ps128(acc);
+    let hi = _mm256_extractf128_ps(acc, 1);
+    let sum = _mm_add_ps(lo, hi);
+    let sum = _mm_hadd_ps(sum, sum);
+    let sum = _mm_hadd_ps(sum, sum);
+    let mut total = _mm_cvtss_f32(sum);
+
+    while k < PAD {
+        // SAFETY: `k < PAD <= a.len() == b.len()`.
+        total += unsafe { *a.get_unchecked(k) } * unsafe { *b.get_unchecked(k) };
+        k += 1;
+    }
+    total
 }
 
 /// Wavelet residual of one band: `R[y][x] = Σ_{a,b} f1[a] f2[b] · plane[y+a-8][x+b-8]`.
@@ -186,6 +401,68 @@ fn separable_residual(
     out
 }
 
+/// Reciprocal residual `1 / (|R| + sigma)`, written into a pre-padded plane.
+///
+/// The border is edge-replicated, matching the clamp [`separable_residual`]
+/// applies, so [`gather`] can read a 23-wide window anywhere without a
+/// per-element clamp. Only the interior costs a division; the border is copied.
+fn reciprocal_plane(
+    residual: &[f64],
+    pw: usize,
+    ph: usize,
+    wp: usize,
+    hp: usize,
+    sigma: f64,
+    out: &mut [f32],
+) {
+    debug_assert_eq!(out.len(), wp * hp);
+
+    for y in 0..ph {
+        let src = &residual[y * pw..(y + 1) * pw];
+        let row = (y + PAD_LO) * wp;
+        let dst = &mut out[row + PAD_LO..row + PAD_LO + pw];
+        for (o, &v) in dst.iter_mut().zip(src.iter()) {
+            *o = (1.0 / (v.abs() + sigma)) as f32;
+        }
+    }
+
+    // Left and right edges of every interior row.
+    for y in 0..ph {
+        let row = (y + PAD_LO) * wp;
+        let first = out[row + PAD_LO];
+        let last = out[row + PAD_LO + pw - 1];
+        out[row..row + PAD_LO].fill(first);
+        out[row + PAD_LO + pw..row + PAD_LO + pw + PAD_HI].fill(last);
+    }
+
+    // Top and bottom bands as whole rows, which also fixes the corners.
+    for y in 0..PAD_LO {
+        out.copy_within(PAD_LO * wp..(PAD_LO + 1) * wp, y * wp);
+    }
+    for y in 0..PAD_HI {
+        let from = (PAD_LO + ph - 1) * wp;
+        out.copy_within(from..from + wp, (PAD_LO + ph + y) * wp);
+    }
+}
+
+/// Copy the `SUPPORT x SUPPORT` reciprocal-residual window centred on the block
+/// into `patch`, reading the pre-padded plane directly.
+///
+/// `y0`/`x0` are block origins in the original plane's coordinates. The padded
+/// plane's origin sits `PAD_LO` rows/columns above and left of that, which is
+/// exactly `-SUPPORT_START`, so the window starts at `y0` inside the padded
+/// array. Columns and the final row past `SUPPORT` are zeroed so the padded dot
+/// products stay exact; `|u|` and `|v|` are zero there by construction.
+#[inline]
+fn gather(weights: &[f32], wp: usize, y0: usize, x0: usize, patch: &mut [f32; PAD * PAD]) {
+    for ky in 0..SUPPORT {
+        let base = (y0 + ky) * wp + x0;
+        patch[ky * PAD..ky * PAD + SUPPORT].copy_from_slice(&weights[base..base + SUPPORT]);
+        patch[ky * PAD + SUPPORT] = 0.0;
+    }
+    patch[SUPPORT * PAD..].fill(0.0);
+}
+
 /// Per-coefficient wavelet footprint of a `±1` change, as two 1D profiles.
 ///
 /// `u[i][ky]` / `v[j][kx]` are the 23-tap responses of the block's DCT basis
@@ -197,16 +474,15 @@ fn footprint(
     basis: &[[f64; N]; N],
     f1: &[f64; wavelet::TAPS],
     f2: &[f64; wavelet::TAPS],
-) -> ([[f32; SUPPORT]; N], [[f32; SUPPORT]; N]) {
-    let mut u = [[0.0f32; SUPPORT]; N];
-    let mut v = [[0.0f32; SUPPORT]; N];
+) -> ([[f32; PAD]; N], [[f32; PAD]; N]) {
+    let mut u = [[0.0f32; PAD]; N];
+    let mut v = [[0.0f32; PAD]; N];
 
     for (i, u_row) in u.iter_mut().enumerate() {
-        for (ky, dst) in u_row.iter_mut().enumerate() {
-            let t = ky as isize + SUPPORT_START;
+        for (ky, dst) in u_row.iter_mut().take(SUPPORT).enumerate() {
             let mut acc = 0.0f64;
             for (a, &ca) in f1.iter().enumerate() {
-                let idx = t + a as isize;
+                let idx = ky as isize + a as isize - BASIS_SHIFT;
                 if (0..N as isize).contains(&idx) {
                     acc += ca * basis[idx as usize][i];
                 }
@@ -215,11 +491,10 @@ fn footprint(
         }
     }
     for (j, v_row) in v.iter_mut().enumerate() {
-        for (kx, dst) in v_row.iter_mut().enumerate() {
-            let t = kx as isize + SUPPORT_START;
+        for (kx, dst) in v_row.iter_mut().take(SUPPORT).enumerate() {
             let mut acc = 0.0f64;
             for (b, &cb) in f2.iter().enumerate() {
-                let idx = t + b as isize;
+                let idx = kx as isize + b as isize - BASIS_SHIFT;
                 if (0..N as isize).contains(&idx) {
                     acc += cb * basis[idx as usize][j];
                 }
@@ -228,19 +503,6 @@ fn footprint(
         }
     }
     (u, v)
-}
-
-/// Copy the `SUPPORT x SUPPORT` reciprocal-residual window centred on the block
-/// into `patch`, clamping at the plane borders.
-fn gather_patch(recip: &[f32], pw: usize, ph: usize, y0: usize, x0: usize, patch: &mut [f32]) {
-    for ky in 0..SUPPORT {
-        let sy = (y0 as isize + SUPPORT_START + ky as isize).clamp(0, ph as isize - 1) as usize;
-        let dst = &mut patch[ky * SUPPORT..(ky + 1) * SUPPORT];
-        for (kx, dst_v) in dst.iter_mut().enumerate() {
-            let sx = (x0 as isize + SUPPORT_START + kx as isize).clamp(0, pw as isize - 1) as usize;
-            *dst_v = recip[sy * pw + sx];
-        }
-    }
 }
 
 #[cfg(test)]
@@ -276,8 +538,7 @@ mod tests {
     /// test is that nothing comes out as zero or NaN.
     #[test]
     fn flat_plane_produces_finite_costs() {
-        let blocks = vec![[0i16; 64]; 4];
-        let mut blocks = blocks;
+        let mut blocks = vec![[0i16; 64]; 4];
         for b in blocks.iter_mut() {
             b[0] = 800; // flat mid-grey once dequantized with an all-ones table
         }
@@ -296,5 +557,119 @@ mod tests {
             costs.iter().all(|c| c.is_finite() && *c > 0.0),
             "a flat carrier must still produce finite, positive costs"
         );
+    }
+
+    /// The separable footprint must describe the *same* perturbation that
+    /// [`separable_residual`] computes, including which rows and columns of the
+    /// block it lands on.
+    ///
+    /// This is the regression guard for [`BASIS_SHIFT`]. With the offset at
+    /// `SUPPORT_START` instead of `2*HALF - 1`, the footprint silently described
+    /// a block eight pixels away from the one [`gather`] samples, and every cost
+    /// was computed on the wrong neighbourhood.
+    #[test]
+    fn footprint_matches_the_real_residual() {
+        let (pw, ph) = (48usize, 48usize);
+        let (y0, x0) = (16usize, 16usize);
+        let basis = precover::dct_basis();
+
+        for (band, (f1, f2)) in wavelet::bands().iter().enumerate() {
+            let (u, v) = footprint(&basis, f1, f2);
+            for &(i, j) in &[(1usize, 0usize), (2usize, 3usize), (5usize, 6usize)] {
+                // A single coefficient change: the block holds basis(i) ⊗ basis(j).
+                let mut plane = vec![0.0f64; pw * ph];
+                for r in 0..N {
+                    for c in 0..N {
+                        plane[(y0 + r) * pw + x0 + c] = basis[r][i] * basis[c][j];
+                    }
+                }
+                let residual = separable_residual(&plane, pw, ph, f1, f2);
+
+                let mut peak = 0.0f64;
+                let mut worst = 0.0f64;
+                for (ky, &u_ky) in u[i].iter().enumerate().take(SUPPORT) {
+                    for (kx, &v_kx) in v[j].iter().enumerate().take(SUPPORT) {
+                        let y = (y0 as isize + SUPPORT_START + ky as isize) as usize;
+                        let x = (x0 as isize + SUPPORT_START + kx as isize) as usize;
+                        let actual = residual[y * pw + x].abs() as f64;
+                        let predicted = (u_ky * v_kx) as f64;
+                        peak = peak.max(actual);
+                        worst = worst.max((predicted - actual).abs());
+                    }
+                }
+                assert!(
+                    peak > 0.0,
+                    "band {band} coeff ({i},{j}) produced no response"
+                );
+                assert!(
+                    worst / peak < 1e-6,
+                    "band {band} coeff ({i},{j}): footprint disagrees with the residual \
+                     (peak {peak:e}, worst {worst:e})"
+                );
+            }
+        }
+    }
+
+    /// Both dot kernels must agree to float noise. The AVX2 kernel is selected
+    /// at runtime, so a divergence would silently make the cost map depend on
+    /// which machine built the stego.
+    #[test]
+    fn dot_kernels_agree() {
+        let mut a = [0.0f32; PAD];
+        let mut b = [0.0f32; PAD];
+        let mut s = 0x2545_f491u32;
+        for (x, y) in a.iter_mut().zip(b.iter_mut()) {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *x = (s >> 8) as f32 / 1e6 - 2.0;
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *y = (s >> 8) as f32 / 1e6 - 2.0;
+        }
+
+        let scalar = ScalarKernel::dot(&a, &b);
+        assert!(scalar.is_finite() && scalar != 0.0);
+
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+        {
+            // SAFETY: both features were checked immediately above.
+            let avx = unsafe { dot_avx2(&a, &b) };
+            let tolerance = 1e-5 * scalar.abs();
+            assert!(
+                (scalar - avx).abs() <= tolerance,
+                "kernels disagree: scalar {scalar}, avx2 {avx}"
+            );
+        }
+    }
+
+    /// On a textured carrier every cost must stay finite and inside the wet cap,
+    /// and DC must always be exactly wet.
+    #[test]
+    fn textured_carrier_stays_inside_the_cap() {
+        let mut blocks = vec![[0i16; 64]; 16];
+        for (bi, b) in blocks.iter_mut().enumerate() {
+            for (k, v) in b.iter_mut().enumerate().skip(1) {
+                *v = (((bi * 7 + k * 13) % 41) as i16) - 20;
+            }
+        }
+        let coeffs = dct_io::JpegCoefficients {
+            components: vec![dct_io::ComponentCoefficients { id: 1, blocks }],
+        };
+        let geometry = JpegGeometry {
+            grid_w: 4,
+            grid_h: 4,
+            positions: (0..16).map(|bi| (bi / 4, bi % 4)).collect(),
+            luma_q: [4u16; 64],
+        };
+        let params = JpegParams::default();
+        let costs = JuniwardCostModel.compute_cost(&coeffs, &geometry, &params);
+        assert_eq!(costs.len(), 16 * 64);
+        for (i, c) in costs.iter().enumerate() {
+            assert!(c.is_finite(), "cost {i} is not finite");
+            assert!(*c > 0.0, "cost {i} is not positive");
+            assert!(*c <= params.wet_cost, "cost {i} exceeds the wet cap");
+            if i % 64 == 0 {
+                assert_eq!(*c, params.wet_cost, "DC {i} must be wet");
+            }
+        }
     }
 }

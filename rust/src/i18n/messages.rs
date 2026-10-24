@@ -81,12 +81,12 @@ Examples:
   strhide embed graphic.png -d secret.zip -p \"P@ss!\" -o out.png
   strhide embed photo.jpg -t \"custom\" --exclusion-rate 0.40 -o out.jpg
   strhide embed graphic.png -t \"custom\" -a suniward -o out.png  # Switch to S-UNIWARD
-  strhide embed photo.jpg -t \"custom\" -a juniwward -o out.jpg   # Switch to J-UNIWARD (slower)
+  strhide embed photo.jpg -t \"custom\" -a juniward -o out.jpg   # Switch to J-UNIWARD (slower)
 ";
 
 pub const EMBED_AFTER_HELP_ZH: &str = "\
 内容自适应隐写将数据直接嵌入到图像纹理或频域系数中（默认 PNG 用 HILL、JPEG 用 UERD，
-可用 -a 切换到 suniward / juniwward），
+可用 -a 切换到 suniward / juniward），
 可完全免疫容器元数据剥离攻击。
 由于对像素或频域系数值进行了微调，此操作无法 bit-for-bit 还原回原载体文件。
 
@@ -97,7 +97,7 @@ pub const EMBED_AFTER_HELP_ZH: &str = "\
   strhide embed graphic.png -d secret.zip -p \"P@ss!\" -o out.png
   strhide embed photo.jpg -t \"custom\" --exclusion-rate 0.40 -o out.jpg
   strhide embed graphic.png -t \"custom\" -a suniward -o out.png  # 换用 S-UNIWARD 代价模型
-  strhide embed photo.jpg -t \"custom\" -a juniwward -o out.jpg   # 换用 J-UNIWARD 代价模型（较慢）
+  strhide embed photo.jpg -t \"custom\" -a juniward -o out.jpg   # 换用 J-UNIWARD 代价模型（较慢）
 ";
 
 pub const EXTRACT_AFTER_HELP_EN: &str = "\
