@@ -16,13 +16,36 @@ fn scratch_dir(name: &str) -> PathBuf {
     dir
 }
 
-#[test]
-fn test_heif_item_hidden_and_free_box_real_samples() {
-    let test_dir = Path::new("..").join("temp").join("testhevc");
-    if !test_dir.exists() {
-        eprintln!("Skipping test: {:?} does not exist", test_dir);
-        return;
+fn resolve_hevc_corpus() -> Option<PathBuf> {
+    if let Ok(val) = std::env::var("STRHIDE_HEVC_CORPUS") {
+        let p = PathBuf::from(val);
+        if p.is_dir() {
+            return Some(p);
+        }
     }
+    let p1 = Path::new("..").join("temp").join("testhevc");
+    if p1.is_dir() {
+        return Some(p1);
+    }
+    let p2 = Path::new("temp").join("testhevc");
+    if p2.is_dir() {
+        return Some(p2);
+    }
+    None
+}
+
+#[test]
+#[ignore = "requires local temp/testhevc corpus: run with cargo test --test test_heif_hidden_item -- --ignored"]
+fn test_heif_item_hidden_and_free_box_real_samples() {
+    let test_dir = match resolve_hevc_corpus() {
+        Some(d) => d,
+        None => {
+            eprintln!(
+                "[SKIP] HEVC test corpus not found (checked temp/testhevc and $STRHIDE_HEVC_CORPUS)"
+            );
+            return;
+        }
+    };
 
     let samples = [
         "test.heic",
@@ -156,6 +179,42 @@ fn test_heif_item_hidden_and_free_box_real_samples() {
             assert_eq!(read_res.data, payload);
         }
     }
+
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+#[test]
+fn test_heif_synthetic_stub_auto_strategy_fallback() {
+    // Tests that a minimal HEIF stub without meta gracefully falls back to box_uuid
+    let scratch = scratch_dir("stub_heif");
+    let target = scratch.join("minimal.heic");
+
+    // Construct valid 32-byte HEIF stub (ftyp + free)
+    let mut stub = Vec::new();
+    stub.extend_from_slice(&24u32.to_be_bytes());
+    stub.extend_from_slice(b"ftypheic");
+    stub.extend_from_slice(&0u32.to_be_bytes());
+    stub.extend_from_slice(b"mif1heic");
+    stub.extend_from_slice(&8u32.to_be_bytes());
+    stub.extend_from_slice(b"free");
+    fs::write(&target, &stub).unwrap();
+
+    let payload = b"Synthetic HEIF payload";
+    let write_res = write_carrier(
+        &target,
+        PayloadSource::Bytes(payload),
+        &WriteOptions {
+            password: Some("stub-pass"),
+            strategy: "auto",
+            ..Default::default()
+        },
+    )
+    .expect("write auto on stub");
+
+    assert_eq!(write_res.strategy, "box_uuid");
+
+    let read_res = read_carrier(&target, None, Some("stub-pass")).expect("read");
+    assert_eq!(read_res.data, payload);
 
     let _ = fs::remove_dir_all(&scratch);
 }
