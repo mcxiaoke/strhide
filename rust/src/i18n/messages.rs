@@ -69,7 +69,8 @@ pub const READ_AFTER_HELP_ZH: &str = "\
 
 pub const EMBED_AFTER_HELP_EN: &str = "\
 Content-adaptive steganography embeds data directly into image textures or frequency
-coefficients (HILL for PNG, UERD for JPEG), rendering it immune to metadata stripping.
+coefficients (HILL for PNG, UERD for JPEG by default; -a switches to suniward or
+juniward), rendering it immune to metadata stripping.
 Because pixel/coefficient values are subtly modified, this operation cannot be reversed
 to the original carrier bit-for-bit.
 
@@ -79,10 +80,13 @@ Examples:
   strhide embed photo.jpg -t \"secret message\" -o out.jpg      # Save to specified path
   strhide embed graphic.png -d secret.zip -p \"P@ss!\" -o out.png
   strhide embed photo.jpg -t \"custom\" --exclusion-rate 0.40 -o out.jpg
+  strhide embed graphic.png -t \"custom\" -a suniward -o out.png  # Switch to S-UNIWARD
+  strhide embed photo.jpg -t \"custom\" -a juniwward -o out.jpg   # Switch to J-UNIWARD (slower)
 ";
 
 pub const EMBED_AFTER_HELP_ZH: &str = "\
-内容自适应隐写将数据直接嵌入到图像纹理或频域系数中（PNG 采用 HILL，JPEG 采用 UERD），
+内容自适应隐写将数据直接嵌入到图像纹理或频域系数中（默认 PNG 用 HILL、JPEG 用 UERD，
+可用 -a 切换到 suniward / juniwward），
 可完全免疫容器元数据剥离攻击。
 由于对像素或频域系数值进行了微调，此操作无法 bit-for-bit 还原回原载体文件。
 
@@ -92,6 +96,8 @@ pub const EMBED_AFTER_HELP_ZH: &str = "\
   strhide embed photo.jpg -t \"secret message\" -o out.jpg      # 保存至指定输出路径
   strhide embed graphic.png -d secret.zip -p \"P@ss!\" -o out.png
   strhide embed photo.jpg -t \"custom\" --exclusion-rate 0.40 -o out.jpg
+  strhide embed graphic.png -t \"custom\" -a suniward -o out.png  # 换用 S-UNIWARD 代价模型
+  strhide embed photo.jpg -t \"custom\" -a juniwward -o out.jpg   # 换用 J-UNIWARD 代价模型（较慢）
 ";
 
 pub const EXTRACT_AFTER_HELP_EN: &str = "\
@@ -295,7 +301,7 @@ crate::i18n_messages! {
         zh = "扫描检测文件中是否存在隐写或隐藏内容";
     CmdEmbed:
         en = "Embed payload into pixels or DCT coefficients (adaptive stego)",
-        zh = "自适应图像隐写：将数据嵌入像素或频域系数（HILL/UERD）";
+        zh = "自适应图像隐写：将数据嵌入像素或频域系数";
     CmdExtract:
         en = "Extract payload from adaptive stego images",
         zh = "自适应图像隐写：从像素或频域系数中提取数据";
@@ -531,8 +537,8 @@ crate::i18n_messages! {
 
     // ---- Stego tuning options help ----
     HelpStegoAlgorithm:
-        en = "Distortion cost algorithm (auto|hill|uerd; default: auto)",
-        zh = "失真代价评估算法（auto|hill|uerd；默认: auto）";
+        en = "Distortion cost algorithm (auto|hill|suniward|uerd|juniward; default: auto = hill for PNG, uerd for JPEG)",
+        zh = "失真代价评估算法（auto|hill|suniward|uerd|juniward；默认: auto，即 PNG 用 hill、JPEG 用 uerd）";
     HelpStegoNeighborWeight:
         en = "Fine-tune (JPEG UERD): weight applied to 8-neighborhood block energies (default: 0.25)",
         zh = "微调参数（JPEG UERD）：8 邻域块能量权重（默认: 0.25）";

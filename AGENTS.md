@@ -41,6 +41,7 @@ STRHIDE_STEGO_CORPUS=/path/to/stego_corpus cargo test --test batch_stego -- --ig
 
 ### 通用约定
 
+- 如果要用python，使用这个 `C:\Home\Develop\venv` 。
 - 改动代码前先核对影响面，不因修复旧问题引入新问题。
 - 不自发 `commit`/`push`，除非明确要求。
 - CI（`.github/workflows/ci.yml`）在 ubuntu + windows 上硬性跑 `cargo fmt --check`、`cargo clippy --all-targets -D warnings`、`cargo test --all-targets`；crates 发布与 release 打 tag 都 `needs` 这个质量任务，本地这三项必须先全绿。
