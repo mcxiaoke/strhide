@@ -383,6 +383,7 @@ pub struct EmbedArgs {
 
     #[arg(
         long = "slot-budget",
+        hide = true,
         value_name = "INT",
         help = "Fine-tune (JPEG V3): trellis slot budget; a larger budget spreads each payload bit over more \
                 coefficients (fewer changes per coefficient), at the cost of time and memory. Default: automatic -- a quarter of the carrier's coefficient grid (at least 1200000 slots), so the group size follows the carrier instead of falling back to u=1. \
@@ -393,6 +394,7 @@ pub struct EmbedArgs {
 
     #[arg(
         long = "cipher-suite",
+        hide = true,
         value_name = "ID",
         help = "Fine-tune (JPEG V3): cipher suite written into the carrier header. 1 = pbkdf2-sha256-200k \
                 (default), 2 = pbkdf2-sha256-600k (slower, stronger). Extraction identifies it automatically."
@@ -461,7 +463,9 @@ pub struct ExtractArgs {
         short = 'a',
         long = "algorithm",
         value_name = "NAME",
-        help = "Distortion cost algorithm (auto|hill|suniward|uerd|juniward|hevc; default: auto)"
+        help = "Distortion cost algorithm (auto|hill|suniward|uerd|juniward|hevc; default: auto). \
+                Only 'hevc'/'cabac' change extraction routing (force Scheme C on a HEIF carrier); \
+                PNG/JPEG carriers declare their algorithm in the header and ignore this flag."
     )]
     pub algorithm: Option<String>,
 
@@ -479,17 +483,24 @@ pub struct ExtractArgs {
     )]
     pub stego_domain: Option<String>,
 
-    // Fine-tuning parameters matching custom embedding parameters
-    #[arg(long = "exclusion-rate", value_name = "FLOAT")]
-    pub exclusion_rate: Option<f64>,
-
-    #[arg(long = "neighbor-weight", value_name = "FLOAT")]
-    pub neighbor_weight: Option<f64>,
-
-    #[arg(long = "p1-window", value_name = "INT")]
+    // PNG extraction recomputes the HILL cost map to rank body slots, so the
+    // two filter windows must repeat the embed-time values. Everything else
+    // the embedder tuned (algorithm, exclusion rate, codec, h, u) is
+    // self-describing in the carrier header and needs no flag here.
+    #[arg(
+        long = "p1-window",
+        value_name = "INT",
+        help = "Fine-tune (PNG HILL): first-stage low-pass filter window size used at embed time (odd, default: 3). \
+                Must match the embed-time value; extraction recomputes the cost map with it."
+    )]
     pub p1_window: Option<usize>,
 
-    #[arg(long = "p2-window", value_name = "INT")]
+    #[arg(
+        long = "p2-window",
+        value_name = "INT",
+        help = "Fine-tune (PNG HILL): second-stage low-pass filter window size used at embed time (odd, default: 15). \
+                Must match the embed-time value; extraction recomputes the cost map with it."
+    )]
     pub p2_window: Option<usize>,
 }
 
@@ -1974,14 +1985,18 @@ fn handle_list(args: ListArgs) -> Result<(), StrHideError> {
 
 /// Warn when the caller tuned stego parameters away from their defaults.
 ///
-/// Slot selection depends on the cost map, which depends on these
-/// parameters, so extraction only succeeds when they match the embed-time
+/// Slot selection depends on the cost map, which depends on the HILL filter
+/// windows, so extraction only succeeds when they match the embed-time
 /// values. The envelope deliberately carries no parameter fingerprint (the
 /// salt lives inside the header slots, which are themselves cost-map
 /// dependent), so a mismatch is indistinguishable from a wrong password --
 /// this warning is the mitigation. It is printed unconditionally, never
 /// keyed on the extraction outcome, so the message cannot be used as a
 /// detection oracle.
+///
+/// The exclusion rate is deliberately absent: it travels in the carrier's
+/// feature word (`exclusion_permille`), so the extractor overrides whatever
+/// the caller passed and a mismatch cannot occur.
 fn warn_nondefault_stego_params(options: &crate::stego::StegoOptions, quiet: bool) {
     if quiet {
         return;
@@ -1994,9 +2009,6 @@ fn warn_nondefault_stego_params(options: &crate::stego::StegoOptions, quiet: boo
     }
     if sp.p2_window != d_sp.p2_window {
         flags.push(format!("--p2-window {}", sp.p2_window));
-    }
-    if sp.exclusion_percentile != d_sp.exclusion_percentile {
-        flags.push(format!("--exclusion-rate {}", sp.exclusion_percentile));
     }
     if flags.is_empty() {
         return;
@@ -2330,12 +2342,6 @@ fn handle_extract(
         ..Default::default()
     };
 
-    if let Some(er) = args.exclusion_rate {
-        options.spatial_params.exclusion_percentile = er;
-    }
-    if let Some(nw) = args.neighbor_weight {
-        options.jpeg_params.neighbor_weight = nw;
-    }
     if let Some(p1) = args.p1_window {
         options.spatial_params.p1_window = p1;
     }

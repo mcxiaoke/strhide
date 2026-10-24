@@ -215,17 +215,9 @@ written with a different budget still decode. Legality is one bound — `|c| = 1
 is outside the baseline AC table) — plus, for carriers whose Huffman table is over-optimised, the directions whose
 `(run, category)` symbol is missing.
 
-*PNG: matrix coding layer (`--codec`)*: spatial payload bits are placed by `(7,3)` Hamming matrix embedding by
-default. `--codec stc` switches to syndrome-trellis codes (`--stc-h 4..10` default 8, `--stc-u 1..3` default 1),
-which minimises *cost-weighted* distortion instead of per-block change count. The codec, `h` and `u` are recorded in
-the PNG carrier header, so `extract` never needs the flags.
+*PNG: adaptive matrix coding*: spatial payload bits are placed using **syndrome-trellis codes (STC)**, automatically adapted by the library based on available candidate slots (dynamically choosing `u=3`, `u=2`, or `u=1`). This minimises *cost-weighted* distortion instead of per-block change count. `--stc-h 4..10` (default 8) tunes the trellis constraint height. The chosen parameters (`u` and `h`) are self-describing in the PNG header (`FeatureWord`), so `extract` never needs any tuning flags.
 
-`--stc-u` is how many slots share one syndrome row: `u=1` is one bit per slot (0.50 changes/bit), while `u=2/3`
-spreads the same message over 2x/3x the slots — fewer changed slots and lower weighted distortion, at `1/u` of the
-capacity. Measured on PNG carriers (33 KB incompressible payload): `u=2` reaches **0.2758** changes/bit and `u=3`
-**0.2276** on a 1920x1920 carrier whose slot pool is only 16% used, both below Hamming's 0.2925; on a 960x960
-carrier where `u=2` already consumes 82% of the pool it is 0.3063, slightly *above* Hamming. STC's entire advantage
-comes from picking the cheapest slots, and a saturated pool has no cheap slots left.
+`u` is how many slots share one syndrome row: `u=1` is one bit per slot (0.50 changes/bit), while `u=2/3` spreads the same message over 2x/3x the slots — fewer changed slots and lower weighted distortion, at `1/u` of the raw capacity. STC's entire advantage comes from picking the cheapest slots, so when carrier capacity exceeds the payload size, the adaptive scheduler automatically leverages high `u` to achieve minimal distortion.
 
 *What the self-check can and cannot see*: `scan` is triage, not proof. JPEG carriers go through a **calibrated DCT
 test** (`dct:calibration`): the image is decoded, cropped 4 px so the 8x8 grid lands half a block off the embedding

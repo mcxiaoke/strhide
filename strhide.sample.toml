@@ -251,6 +251,30 @@
 
 
 # ------------------------------------------------------------------------------
+# 10b. Stego Domain Tag
+# ------------------------------------------------------------------------------
+# Custom domain tag for the content-adaptive steganography HKDF key derivation.
+#
+# Applies to: `embed`, `extract`
+# Type: string
+# Default: not set (None) — the official default derivation is used
+# CLI override: --stego-domain <DOMAIN>
+# Env override: STRHIDE_STEGO_DOMAIN
+#
+# WHY THIS MATTERS:
+# Keys and header-slot permutations are subkeyed via HKDF with this domain tag
+# (NFC-normalized, length-prefixed). Different teams or environments stay
+# unreadable to each other even when they share the same password, and no
+# shared open-source fingerprint is exposed.
+#
+# PARAMETER CLASS: read/write must agree, exactly like `stego_secret` above.
+# Precedence: CLI flag > env var > this key > the private dialect bound at
+# compile time (library `Profile`) > official default.
+#
+# stego_domain = "org.example.stego-domain-v1"
+
+
+# ------------------------------------------------------------------------------
 # 11. Interface Language
 # ------------------------------------------------------------------------------
 # User interface language for CLI help, status reports, and diagnostics.

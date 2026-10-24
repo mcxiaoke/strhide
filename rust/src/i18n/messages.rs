@@ -513,8 +513,8 @@ crate::i18n_messages! {
         en = "Strictly reject payloads exceeding recommended safety tier instead of advisory warning",
         zh = "严格拒绝超出推荐安全档位容量的载荷（默认仅给出警告提示）";
     HelpEmbedExclusionRate:
-        en = "Fraction of smoothest regions excluded from embedding (0.00-0.80, default: 0.20)",
-        zh = "排除在嵌入之外的最平滑区域比例（0.00-0.80，默认: 0.20；越高越抗检，但容量越低）";
+        en = "Fraction of smoothest regions excluded from embedding (0.00-0.80, default: 0.30)",
+        zh = "排除在嵌入之外的最平滑区域比例（0.00-0.80，默认: 0.30；越高越抗检，但容量越低）";
 
     // extract
     HelpExtractCarrier:

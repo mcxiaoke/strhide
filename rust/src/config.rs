@@ -19,6 +19,7 @@
 //! backup        = true          # write/remove: .bak backup default
 //! unescape      = false         # write: escape-sequence decoding default
 //! stego_secret  = "..."         # embed/extract: private default secret
+//! stego_domain  = "..."         # embed/extract: HKDF domain isolation tag
 //! lang          = "zh"         # all: interface language (en|zh), default: auto-detect
 //! ```
 
