@@ -802,3 +802,47 @@ fn config_file_that_cannot_be_read_is_a_hard_error() {
         stderr(&out)
     );
 }
+
+#[test]
+fn cli_empty_password_flag_rejected() {
+    let dir = scratch("empty_pwd_flag");
+    fs::write(dir.join("c.png"), make_png()).unwrap();
+    let out = run(&dir, &["write", "c.png", "-t", "hello", "-p", ""]);
+    assert_ne!(code(&out), 0);
+    assert!(
+        stderr(&out).contains("Password cannot be empty"),
+        "stderr: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn cli_multiline_password_file_reads_first_line() {
+    let dir = scratch("multiline_pwd_file");
+    fs::write(dir.join("c.png"), make_png()).unwrap();
+    fs::write(
+        dir.join("pw.txt"),
+        "first_secret_pass\nsecond_garbage_line\n",
+    )
+    .unwrap();
+
+    let out = run(
+        &dir,
+        &[
+            "write",
+            "c.png",
+            "-t",
+            "hidden_text",
+            "--password-file",
+            "pw.txt",
+        ],
+    );
+    assert_ok(&out, &["write with multiline pw file"]);
+
+    // Must decode with the first line as password
+    let read_ok = run(
+        &dir,
+        &["read", "c-out.png", "--stdout", "-p", "first_secret_pass"],
+    );
+    assert_eq!(stdout(&read_ok), "hidden_text");
+}

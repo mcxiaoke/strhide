@@ -144,7 +144,7 @@ fn count_abs(blocks: &[[i16; 64]], mode: usize, value: i16, stride: usize) -> f6
     blocks
         .iter()
         .step_by(stride)
-        .filter(|b| b[mode].abs() == value)
+        .filter(|b| b[mode].unsigned_abs() == value as u16)
         .count() as f64
 }
 

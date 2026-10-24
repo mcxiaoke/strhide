@@ -657,25 +657,36 @@ pub fn resolve_password(
     confirm: bool,
 ) -> Result<Option<String>, StrHideError> {
     if let Some(p) = pwd_opt {
+        if p.is_empty() {
+            return Err(StrHideError::Password("Password cannot be empty".into()));
+        }
         return Ok(Some(p.to_string()));
     }
     if let Some(pf) = pwd_file {
         // Name the file in the error: the bare OS message ("file not found")
         // does not tell the user WHICH password file failed, and several
         // commands accept one. Mirrors the config branch below.
-        let mut s = std::fs::read_to_string(pf).map_err(|e| {
+        let s = std::fs::read_to_string(pf).map_err(|e| {
             StrHideError::General(format!(
                 "Failed to read password file '{}': {e}",
                 pf.display()
             ))
         })?;
-        s = s.trim_end_matches(&['\r', '\n'][..]).to_string();
-        return Ok(Some(s));
+        let first_line = s
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(&['\r', '\n'][..]);
+        if first_line.is_empty() {
+            return Err(StrHideError::Password("Password cannot be empty".into()));
+        }
+        return Ok(Some(first_line.to_string()));
     }
-    if let Ok(env_pwd) = std::env::var("STRHIDE_PASSWORD")
-        && !env_pwd.is_empty()
-    {
-        return Ok(Some(env_pwd));
+    if let Ok(env_pwd) = std::env::var("STRHIDE_PASSWORD") {
+        let env_trimmed = env_pwd.trim_end_matches(&['\r', '\n'][..]);
+        if !env_trimmed.is_empty() {
+            return Ok(Some(env_trimmed.to_string()));
+        }
     }
     // Config file sources come after CLI args and the environment variable.
     if let Some(p) = cfg.password.as_deref()
@@ -684,14 +695,21 @@ pub fn resolve_password(
         return Ok(Some(p.to_string()));
     }
     if let Some(pf) = cfg.password_file.as_deref() {
-        let mut s = std::fs::read_to_string(pf).map_err(|e| {
+        let s = std::fs::read_to_string(pf).map_err(|e| {
             StrHideError::General(format!(
                 "Failed to read password file from config '{}': {e}",
                 pf.display()
             ))
         })?;
-        s = s.trim_end_matches(&['\r', '\n'][..]).to_string();
-        return Ok(Some(s));
+        let first_line = s
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(&['\r', '\n'][..]);
+        if first_line.is_empty() {
+            return Err(StrHideError::Password("Password cannot be empty".into()));
+        }
+        return Ok(Some(first_line.to_string()));
     }
     if encrypt_flag {
         // Only prompt when a terminal is actually attached; both stdin and

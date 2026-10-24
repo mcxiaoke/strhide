@@ -74,7 +74,7 @@ impl JpegCostModel for UerdCostModel {
 
         // The file's own luminance quantization table, natural order
         // (Annex K fallback resolved by the engine).
-        let q: [f64; 64] = std::array::from_fn(|i| geometry.luma_q[i] as f64);
+        let q: [f64; 64] = std::array::from_fn(|i| (geometry.luma_q[i].max(1)) as f64);
 
         // Step 1: Compute block energy Eb for each block: sum of |C_k * Q_k| for AC coefficients (k=1..63)
         let mut block_energies = vec![0.0f64; total_blocks];
@@ -82,10 +82,10 @@ impl JpegCostModel for UerdCostModel {
             let mut energy = 0.0f64;
             for k in 1..64 {
                 let coeff = block[k];
-                // Mask LSB of absolute coefficient: (coeff.abs() & !1)
+                // Mask LSB of absolute coefficient: (coeff.unsigned_abs() & !1)
                 // Guarantees 100% deterministic, bit-for-bit identical block energy
-                // and candidate slot ranking across embed and extract.
-                let coeff_energy = (coeff.abs() & !1) as f64;
+                // and candidate slot ranking across embed and extract, without i16::MIN panic.
+                let coeff_energy = (coeff.unsigned_abs() & !1) as f64;
                 energy += coeff_energy * q[k];
             }
             block_energies[bi] = energy;

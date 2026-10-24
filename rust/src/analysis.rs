@@ -1696,7 +1696,10 @@ fn rs_difference(plane: &[i32], rows: usize, cols: usize, mask: RsMask) -> f64 {
             let mut f = w;
             f[4] = match mask {
                 RsMask::Plus => w[4] ^ 1,
-                RsMask::Minus => w[4] + 1,
+                RsMask::Minus => {
+                    let x = w[4];
+                    if x & 1 == 0 { x - 1 } else { x + 1 }
+                }
             };
             n += 1;
             match rs_window_smoothness(&f).cmp(&orig) {
@@ -2327,5 +2330,15 @@ mod tests {
         }
         let est = rs_analysis(&plane, 16, 3);
         assert!(est.is_none() || est.unwrap() < 0.1);
+    }
+
+    #[test]
+    fn rs_negative_mask_is_an_involution() {
+        // RsMask::Minus must be an invertible involution permutation: F_{-1}(F_{-1}(x)) == x
+        for x in -10..=265i32 {
+            let f1 = if x & 1 == 0 { x - 1 } else { x + 1 };
+            let f2 = if f1 & 1 == 0 { f1 - 1 } else { f1 + 1 };
+            assert_eq!(f2, x, "F_(-1) must be an involution for x = {x}");
+        }
     }
 }
