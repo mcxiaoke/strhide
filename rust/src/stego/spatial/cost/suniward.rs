@@ -161,15 +161,19 @@ fn residual_pass(
             *d = acc;
         }
     }
-    for y in 0..h {
-        for x in 0..w {
-            let mut acc = 0.0;
-            for (a, &ca) in f1.iter().enumerate() {
-                let sy = (y as isize + a as isize - wavelet::HALF as isize).clamp(0, h as isize - 1)
-                    as usize;
-                acc += ca * tmp[sy * w + x];
+    out.fill(0.0);
+    for (a, &ca) in f1.iter().enumerate() {
+        if ca == 0.0 {
+            continue;
+        }
+        for y in 0..h {
+            let sy = (y as isize + a as isize - wavelet::HALF as isize).clamp(0, h as isize - 1)
+                as usize;
+            let src_row = &tmp[sy * w..(sy + 1) * w];
+            let dst_row = &mut out[y * w..(y + 1) * w];
+            for (d, &s) in dst_row.iter_mut().zip(src_row) {
+                *d += ca * s;
             }
-            out[y * w + x] = acc;
         }
     }
 }
@@ -200,15 +204,19 @@ fn suitability_pass(
             *d = acc;
         }
     }
-    for y in 0..h {
-        for x in 0..w {
-            let mut acc = 0.0;
-            for (a, &ca) in f1.iter().enumerate() {
-                let sy = (y as isize + a as isize - wavelet::HALF as isize).clamp(0, h as isize - 1)
-                    as usize;
-                acc += ca.abs() * tmp[sy * w + x];
+    for (a, &ca) in f1.iter().enumerate() {
+        let abs_ca = ca.abs();
+        if abs_ca == 0.0 {
+            continue;
+        }
+        for y in 0..h {
+            let sy = (y as isize + a as isize - wavelet::HALF as isize).clamp(0, h as isize - 1)
+                as usize;
+            let src_row = &tmp[sy * w..(sy + 1) * w];
+            let dst_row = &mut out[y * w..(y + 1) * w];
+            for (d, &s) in dst_row.iter_mut().zip(src_row) {
+                *d += abs_ca * s;
             }
-            out[y * w + x] += acc;
         }
     }
 }

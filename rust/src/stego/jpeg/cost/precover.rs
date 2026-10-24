@@ -140,18 +140,24 @@ fn wiener3(plane: &[f64], w: usize, h: usize) -> Vec<f64> {
     for y in 0..h {
         for x in 0..w {
             let mut s = 0.0f64;
-            let mut s2 = 0.0f64;
             for dy in -1isize..=1 {
                 let yy = clamp_index(y as isize + dy, h);
                 for dx in -1isize..=1 {
                     let xx = clamp_index(x as isize + dx, w);
-                    let v = plane[yy * w + xx];
-                    s += v;
-                    s2 += v * v;
+                    s += plane[yy * w + xx];
                 }
             }
             let m = s * INV9;
-            let v = (s2 * INV9 - m * m).max(0.0);
+            let mut var_sum = 0.0f64;
+            for dy in -1isize..=1 {
+                let yy = clamp_index(y as isize + dy, h);
+                for dx in -1isize..=1 {
+                    let xx = clamp_index(x as isize + dx, w);
+                    let diff = plane[yy * w + xx] - m;
+                    var_sum += diff * diff;
+                }
+            }
+            let v = var_sum * INV9;
             mean[y * w + x] = m;
             var[y * w + x] = v;
             total_var += v;

@@ -139,15 +139,6 @@ fn luma_plane(pixels: &[u8], width: usize, height: usize, channels: usize) -> Op
     Some(out)
 }
 
-/// `count(|c| == value)` for one mode, taking every `stride`-th block.
-fn count_abs(blocks: &[[i16; 64]], mode: usize, value: i16, stride: usize) -> f64 {
-    blocks
-        .iter()
-        .step_by(stride)
-        .filter(|b| b[mode].unsigned_abs() == value as u16)
-        .count() as f64
-}
-
 /// Run the calibrated estimator on a JPEG.
 ///
 /// Returns `None` when the file cannot be analysed (progressive JPEG, missing
@@ -243,6 +234,28 @@ pub fn estimate(data: &[u8]) -> Option<CalibrationEstimate> {
     // any given image, and summing raw counts lets those few swamp the signal.
     // The median makes the statistic "what the typical pair looks like", which
     // is what the calibration argument is actually about.
+    // Precompute absolute magnitude histograms ([0..16]) for AC modes (1..64)
+    // in a single pass over luma_blocks and calib blocks, replacing ~1500 full-array scans.
+    let mut luma_hist = [[0u32; 16]; 64];
+    for b in luma_blocks.iter().step_by(stride) {
+        for mode in 1..64usize {
+            let val = b[mode].unsigned_abs() as usize;
+            if val < 16 {
+                luma_hist[mode][val] += 1;
+            }
+        }
+    }
+
+    let mut calib_hist = [[0u32; 16]; 64];
+    for b in calib.iter() {
+        for mode in 1..64usize {
+            let val = b[mode].unsigned_abs() as usize;
+            if val < 16 {
+                calib_hist[mode][val] += 1;
+            }
+        }
+    }
+
     let mut ratios: Vec<f64> = Vec::new();
     for mode in 1..64usize {
         // The (0, 1) pair is included on purpose: the ternary JPEG code changes
@@ -250,12 +263,12 @@ pub fn estimate(data: &[u8]) -> Option<CalibrationEstimate> {
         // embedder equalises the zero/first-bin counts just like any other pair.
         // Skipping it (the original F5 statistic) makes the estimator blind to
         // exactly the half of the change traffic this tool produces.
-        let mut value = 0i16;
-        while value <= MAX_PAIR_ABS {
-            let ae = count_abs(luma_blocks, mode, value, stride);
-            let ao = count_abs(luma_blocks, mode, value + 1, stride);
-            let ce = count_abs(&calib, mode, value, 1);
-            let co = count_abs(&calib, mode, value + 1, 1);
+        let mut value = 0usize;
+        while value <= MAX_PAIR_ABS as usize {
+            let ae = luma_hist[mode][value] as f64;
+            let ao = luma_hist[mode][value + 1] as f64;
+            let ce = calib_hist[mode][value] as f64;
+            let co = calib_hist[mode][value + 1] as f64;
             // Skip pairs whose counts are too small to carry information.
             if (ae + ao) < 20.0 || (ce + co) < 20.0 {
                 value += 2;
@@ -283,11 +296,11 @@ pub fn estimate(data: &[u8]) -> Option<CalibrationEstimate> {
     // F5 beta (reference only; see the field docs for why it stays flat here).
     let mut f5_modes = [0.0f64; 3];
     for (mi, &mode) in CALIBRATION_MODES.iter().enumerate() {
-        let h0 = count_abs(&calib, mode, 0, 1);
-        let h1 = count_abs(&calib, mode, 1, 1);
-        let h2 = count_abs(&calib, mode, 2, 1);
-        let b0 = count_abs(luma_blocks, mode, 0, stride);
-        let b1 = count_abs(luma_blocks, mode, 1, stride);
+        let h0 = calib_hist[mode][0] as f64;
+        let h1 = calib_hist[mode][1] as f64;
+        let h2 = calib_hist[mode][2] as f64;
+        let b0 = luma_hist[mode][0] as f64;
+        let b1 = luma_hist[mode][1] as f64;
         let denom = h1 * h1 + (h2 - h1) * (h2 - h1);
         f5_modes[mi] = if denom <= 1.0 {
             0.0
