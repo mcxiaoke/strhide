@@ -2130,8 +2130,20 @@ mod tests {
                 stc_u,
                 ..SpatialParams::default()
             };
-            let stego = embed_spatial(&png, payload, Some("pw"), None, &HillCostModel, &params)
-                .unwrap_or_else(|e| panic!("u={stc_u}: embed failed: {e}"));
+            // Seeded, not random: the salt drives the slot permutation and the
+            // trellis columns, so a random draw left the change counts (and
+            // this test's outcome) to luck. Same inputs now give the same file.
+            let stego = embed_spatial_with_profile_and_freshness(
+                &png,
+                payload,
+                Some("pw"),
+                None,
+                &crate::stego::format::OFFICIAL_SPATIAL,
+                &HillCostModel,
+                &params,
+                Freshness::Seeded([0x5A; 32]),
+            )
+            .unwrap_or_else(|e| panic!("u={stc_u}: embed failed: {e}"));
 
             // The extractor still defaults to Hamming: `u` and `h` must arrive
             // through the header.
@@ -2171,11 +2183,9 @@ mod tests {
             capacities.push(cap.max_raw_payload_bytes);
         }
 
-        // Only the large gap is asserted here: the salt is random per embed, so
-        // the trellis seed (and therefore the exact change count) differs run
-        // to run. u=2 vs u=3 differ by ~6% on this payload, which a single
-        // sample cannot resolve -- that comparison lives in the deterministic
-        // trellis test (`coding::stc::tests::larger_groups_lower_the_change_rate`).
+        // u=2 vs u=3 differ by only a few percent on this payload, too fine to
+        // pin down here -- that comparison lives in the trellis test
+        // (`coding::stc::tests::larger_groups_lower_the_change_rate`).
         assert!(
             change_rates[1] < change_rates[0] * 0.85,
             "u=2 must cut the change count per bit: {change_rates:?}"

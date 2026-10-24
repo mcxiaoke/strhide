@@ -334,20 +334,34 @@ impl StcTrellis {
     /// superblock and the spatial header both carry it.
     ///
     /// `u` may exceed `h`: see the module docs for why the top bit alone makes
-    /// every element able to steer its group's row. Columns may also coincide;
-    /// that only merges state transitions, it never dead-ends a group.
+    /// every element able to steer its group's row. Identical vectors inside one
+    /// group are skipped while enough distinct patterns remain (a `u=2` group of
+    /// two equal vectors embeds at twice the change rate), so the derivation is
+    /// no longer the raw splitmix stream for the second and later columns.
     pub fn from_seed_grouped(seed: u64, h: u8, u: u8) -> Result<Self, StrHideError> {
         validate_h(h)?;
         validate_u_wide(u)?;
 
         let mask = (1u32 << h) - 1;
-        let mut cols = Vec::with_capacity(u as usize);
-        for s in 0..u as u64 {
+        let pattern = |idx: u64| {
+            let mut x = (splitmix64(seed.wrapping_add(idx)) as u32) & mask;
             // The low and high bits are forced: see the module docs.
-            let mut x = (splitmix64(seed.wrapping_add(s)) as u32) & mask;
             x |= 1;
             x |= 1 << (h - 1);
-            cols.push(reverse_low_bits(x, h));
+            reverse_low_bits(x, h)
+        };
+        // Only the `h - 2` free bits can distinguish columns; past that many
+        // columns a duplicate cannot be avoided.
+        let distinct_patterns = 1u64 << (h - 2);
+        let mut cols = Vec::with_capacity(u as usize);
+        for s in 0..u as u64 {
+            let mut idx = s;
+            let mut col = pattern(idx);
+            while (cols.len() as u64) < distinct_patterns && cols.contains(&col) {
+                idx = idx.wrapping_add(u as u64);
+                col = pattern(idx);
+            }
+            cols.push(col);
         }
 
         Ok(Self { h, u, cols })
@@ -1329,6 +1343,46 @@ mod tests {
             t.embed_with_deltas(&vals, &moves, &rp, &rm, &message, &mut deltas)
                 .is_err()
         );
+    }
+
+    /// A seed whose raw splitmix stream repeats a column inside a group must not
+    /// collapse that group: two identical vectors under `u = 2` embed at the
+    /// `u = 1` change rate, i.e. twice the cost per bit. These seeds are the
+    /// ones that collided before the derivation skipped duplicates, and the
+    /// collapse is what made the spatial group-size test flake about once per
+    /// 64 random salts.
+    #[test]
+    fn grouped_columns_never_collapse_a_group() {
+        let n = 960;
+        let vals: Vec<u8> = (0..n).map(|i| 40 + (i % 8) as u8).collect();
+        let moves: Vec<Move> = vals.iter().map(|&v| spatial_move(v)).collect();
+        let rp = vec![1.0f64; n];
+        let rm = vec![1.0f64; n];
+
+        for seed in [0x5EEDu64, 105, 119, 155, 168, 222, 226] {
+            let mut rates = Vec::new();
+            for u in [1u8, 2, 3] {
+                let t = StcTrellis::from_seed_grouped(seed, 8, u).unwrap();
+                let bits = t.message_bits(n);
+                let message: Vec<u8> = (0..bits.div_ceil(8)).map(|i| (i * 37) as u8).collect();
+                let mut stego = vals.clone();
+                t.embed(&mut stego, &moves, &rp, &rm, &message).unwrap();
+                let flips = vals
+                    .iter()
+                    .zip(stego.iter())
+                    .filter(|(a, b)| a != b)
+                    .count();
+                rates.push(flips as f64 / n as f64);
+            }
+            assert!(
+                rates[1] < rates[0] * 0.85,
+                "seed={seed}: u=2 must cut the change rate: {rates:?}"
+            );
+            assert!(
+                rates[2] < rates[1],
+                "seed={seed}: u=3 must beat u=2: {rates:?}"
+            );
+        }
     }
 
     /// A group whose elements cannot be laid out (n not a multiple of u) is a
