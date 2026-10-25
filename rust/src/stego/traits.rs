@@ -34,16 +34,27 @@ pub trait PngCostModel: Send + Sync {
         params: &PngParams,
     ) -> Vec<f64>;
 
-    /// Split the symmetric cost map into `(rho_plus, rho_minus)`.
+    /// Per-slot directional costs `(rho_plus, rho_minus)` for the requested
+    /// pixel indices.
     ///
-    /// `rho_plus[i]` / `rho_minus[i]` cost raising / lowering pixel `i` by one.
-    /// Only the *direction* choice inside a Hamming/STC block uses these; slot
-    /// ranking always uses `base`, so an asymmetric model can never change
-    /// which slots the extractor picks. The default is symmetric.
+    /// `slots` lists **pixel indices** (into the `width * height` plane of
+    /// `channel`), and both returned vectors have exactly `slots.len()`
+    /// entries in the same order. `rho_plus[i]` / `rho_minus[i]` cost raising
+    /// / lowering that pixel by one. Only the *direction* choice inside a
+    /// Hamming/STC block uses these; slot ranking always uses `base`, so an
+    /// asymmetric model can never change which slots the extractor picks.
+    /// The default is symmetric: both directions reuse `base`.
+    ///
+    /// Taking a slot list instead of materializing full-plane maps keeps the
+    /// working set proportional to the payload, not the carrier: a 50 MP
+    /// embed needs a few thousand directional values, not two 400 MB planes
+    /// per channel (the same reasoning the JPEG side applies to its bias
+    /// vector in [`JpegCostModel::bias`]).
     ///
     /// `channel` is the byte offset the engine embeds into, so a model that
     /// wants a local reference (e.g. the neighborhood mean) reads the same
     /// plane the writer modifies.
+    #[allow(clippy::too_many_arguments)]
     fn direction_costs(
         &self,
         base: &[f64],
@@ -52,8 +63,12 @@ pub trait PngCostModel: Send + Sync {
         _height: usize,
         _channels: usize,
         _channel: usize,
+        slots: &[usize],
     ) -> (Vec<f64>, Vec<f64>) {
-        (base.to_vec(), base.to_vec())
+        (
+            slots.iter().map(|&i| base[i]).collect(),
+            slots.iter().map(|&i| base[i]).collect(),
+        )
     }
 }
 

@@ -157,6 +157,10 @@ impl PngCostModel for HillCostModel {
     /// It only ever decides *which way* a slot moves, never *which slot* is
     /// used: ranking stays on the symmetric `base` map, so extraction does not
     /// see this term at all.
+    ///
+    /// Computed per requested slot only: the neighbourhood mean is O(1) per
+    /// pixel, so pricing the few thousand payload slots costs nothing next to
+    /// materializing two full-plane f64 maps per channel.
     fn direction_costs(
         &self,
         base: &[f64],
@@ -165,22 +169,29 @@ impl PngCostModel for HillCostModel {
         height: usize,
         channels: usize,
         channel: usize,
+        slots: &[usize],
     ) -> (Vec<f64>, Vec<f64>) {
-        let mut plus = Vec::with_capacity(base.len());
-        let mut minus = Vec::with_capacity(base.len());
+        let mut plus = Vec::with_capacity(slots.len());
+        let mut minus = Vec::with_capacity(slots.len());
         if width == 0 || height == 0 || base.is_empty() {
             return (plus, minus);
         }
-        for i in 0..height {
-            for j in 0..width {
-                let idx = i * width + j;
-                let mean = neighbor_class_mean(pixels, width, height, channels, channel, i, j);
-                let v = class_value(pixels[idx * channels + channel]) as f64;
-                let rp = ((v + 1.0 - mean) / 255.0).powi(2);
-                let rm = ((v - 1.0 - mean) / 255.0).powi(2);
-                plus.push(base[idx] * (1.0 + 4.0 * rp));
-                minus.push(base[idx] * (1.0 + 4.0 * rm));
+        for &idx in slots {
+            if idx >= base.len() {
+                // Defensive: the engine passes in-pool indices; a stray index
+                // would panic on a hostile path rather than misprice.
+                plus.push(f64::INFINITY);
+                minus.push(f64::INFINITY);
+                continue;
             }
+            let i = idx / width;
+            let j = idx % width;
+            let mean = neighbor_class_mean(pixels, width, height, channels, channel, i, j);
+            let v = class_value(pixels[idx * channels + channel]) as f64;
+            let rp = ((v + 1.0 - mean) / 255.0).powi(2);
+            let rm = ((v - 1.0 - mean) / 255.0).powi(2);
+            plus.push(base[idx] * (1.0 + 4.0 * rp));
+            minus.push(base[idx] * (1.0 + 4.0 * rm));
         }
         (plus, minus)
     }
@@ -322,7 +333,8 @@ mod tests {
     #[test]
     fn direction_costs_follow_the_local_mean() {
         // A dark pixel in a bright neighbourhood should be cheaper to raise
-        // than to lower, and vice versa.
+        // than to lower, and vice versa. The model prices only the requested
+        // slots, so `slots` below selects exactly the two pixels under test.
         let (w, h) = (8usize, 8usize);
         let mut pixels = vec![200u8; w * h * 3];
         let centre = (3 * w + 3) * 3 + 1;
@@ -330,26 +342,28 @@ mod tests {
 
         let params = PngParams::default();
         let model = HillCostModel;
-        let base = model.compute_cost(&pixels, w, h, 3, &params);
-        let (plus, minus) = model.direction_costs(&base, &pixels, w, h, 3, 1);
-
         let idx = 3 * w + 3;
+        let slots = [idx, 0usize];
+        let base = model.compute_cost(&pixels, w, h, 3, &params);
+        let (plus, minus) = model.direction_costs(&base, &pixels, w, h, 3, 1, &slots);
+
+        assert_eq!(plus.len(), slots.len());
         assert!(
-            plus[idx] < minus[idx],
+            plus[0] < minus[0],
             "raising a dark pixel towards a bright neighbourhood must be cheaper              (plus {:.6} vs minus {:.6})",
-            plus[idx],
-            minus[idx]
+            plus[0],
+            minus[0]
         );
 
         pixels[centre] = 240;
         pixels[0] = 100;
         let base = model.compute_cost(&pixels, w, h, 3, &params);
-        let (plus, minus) = model.direction_costs(&base, &pixels, w, h, 3, 1);
+        let (plus, minus) = model.direction_costs(&base, &pixels, w, h, 3, 1, &slots);
         assert!(
-            minus[idx] < plus[idx],
+            minus[0] < plus[0],
             "lowering a bright pixel towards a dark neighbourhood must be cheaper              (plus {:.6} vs minus {:.6})",
-            plus[idx],
-            minus[idx]
+            plus[0],
+            minus[0]
         );
     }
 }

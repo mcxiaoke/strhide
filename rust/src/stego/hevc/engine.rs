@@ -304,11 +304,13 @@ pub fn embed_hevc(
     }
 
     // 1. Scan and record all slices and substreams
-    let (_carrier_buf, slice_contexts, all_slots) = record_carrier_state(carrier, kind)?;
+    let record = record_carrier_state(carrier, kind)?;
+    let slice_contexts = record.slice_contexts;
+    let all_slots = record.all_slots;
     let total_slots = all_slots.len();
 
     // 2. Prepare ciphertext and envelope
-    let cover_digest = derive_carrier_digest(carrier, kind, fmt);
+    let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);
     let key = derive_hevc_key(secret, domain, &cover_digest, fmt);
     let magic = derive_magic(fmt.magic_label, effective_secret(secret).as_bytes());
     let cipher = Aes256Gcm::new_from_slice(&key)
@@ -336,7 +338,7 @@ pub fn embed_hevc(
     message.extend_from_slice(&nonce_bytes);
     message.extend_from_slice(&ciphertext);
 
-    let seed = seed_from_digest(&cover_digest);
+    let seed = trellis_seed_from_key(&key, &cover_digest);
     let trellis = StcTrellis::from_seed_grouped(seed, fmt.stc_h, fmt.stc_u)?;
     let needed_slots = trellis.slots_for(message.len() * 8);
 
@@ -403,11 +405,14 @@ pub fn embed_hevc(
             if round == 0 {
                 return Err(e);
             }
-            return Err(StrHideError::TrellisInfeasible(format!(
-                "HEVC stego exhausted usable slots after {round} round(s) ({} slot(s) excluded, {} unsupported substream(s)): {e}",
-                forbidden.iter().filter(|x| **x).count(),
-                bad_substreams.len()
-            )));
+            return Err(StrHideError::TrellisInfeasible {
+                cause: crate::errors::TrellisCause::ExhaustedSlots,
+                detail: format!(
+                    "HEVC stego exhausted usable slots after {round} round(s) ({} slot(s) excluded, {} unsupported substream(s)): {e}",
+                    forbidden.iter().filter(|x| **x).count(),
+                    bad_substreams.len()
+                ),
+            });
         }
 
         let mut flips_per_slice: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -670,6 +675,16 @@ fn encode_substream(
         }
     }
 
+    // Mid-slice WPP/tile row substreams are deliberately left out of the
+    // rewrite path: their journal ends with `Terminate{bit:0}` (row-end
+    // more_data=false) and the remaining bits are the cover encoder's
+    // substream finish, whose exact bit pattern differs between HM's and
+    // x265's writers. Re-synthesizing that tail never replayed byte-exactly,
+    // so the 3a check below disqualifies every mid-slice substream and the
+    // payload falls back to the end-of-slice substreams only. Making them
+    // usable requires pricing sign flips by the decoded coefficient
+    // magnitude (sign bins decode before levels, so the cost must be
+    // back-filled from the decoder); see the review report's §3.4#6.
     if !matches!(ops.last(), Some(BinOp::Terminate { bit: 1 })) {
         enc.encode_terminate(&mut writer, 1);
     }
@@ -754,9 +769,13 @@ pub fn extract_hevc(
         return Err(mp4_unsupported());
     }
 
-    let all_slots = scan_hevc_slots(carrier)?;
-    let cover_digest = derive_carrier_digest(carrier, kind, fmt);
-    let seed = seed_from_digest(&cover_digest);
+    let record = record_carrier_state(carrier, kind)?;
+    let all_slots = record.all_slots;
+    let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);
+    // The trellis seed is keyed through the secret-derived key (see
+    // `trellis_seed_from_key`), so it is derived before anything reads slots.
+    let key = derive_hevc_key(secret, domain, &cover_digest, fmt);
+    let seed = trellis_seed_from_key(&key, &cover_digest);
     let trellis = StcTrellis::from_seed_grouped(seed, fmt.stc_h, fmt.stc_u)?;
 
     let header_slots_count = trellis.slots_for(fmt.header_bytes * 8);
@@ -841,7 +860,6 @@ pub fn extract_hevc(
     }
     let ciphertext = &msg_bytes[HEVC_MSG_HEADER_BYTES..total_msg_len];
 
-    let key = derive_hevc_key(secret, domain, &cover_digest, fmt);
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| StrHideError::General(format!("AES-GCM key init failed: {e}")))?;
     let nonce = Nonce::from(nonce_bytes);
@@ -877,19 +895,36 @@ struct SliceContext {
     slot_map: Vec<Option<usize>>,
 }
 
-type CarrierRecord = (Vec<u8>, Vec<SliceContext>, Vec<StegoSlot>);
+/// One pass over the carrier: the recorded slice journals and slot pool,
+/// plus the container parse the digest derivation reuses — deriving the
+/// cover digest must not walk the container a second time (audit 2026-10-24
+/// 2.5).
+struct CarrierRecord {
+    slice_contexts: Vec<SliceContext>,
+    all_slots: Vec<StegoSlot>,
+    digest_inputs: DigestInputs,
+}
+
+/// The already-parsed container pieces `derive_carrier_digest` needs.
+enum DigestInputs {
+    /// HEIF/HEIC: owned copies of the VPS/SPS/PPS NAL bytes.
+    Heif { parameter_sets: Vec<Vec<u8>> },
+    /// Annex-B: the NAL span table.
+    AnnexB {
+        spans: Vec<crate::stego::hevc::bitstream::HevcNalSpan>,
+    },
+}
 
 fn record_carrier_state(
     carrier: &[u8],
     kind: HevcCarrierKind,
 ) -> Result<CarrierRecord, StrHideError> {
-    let out_carrier = carrier.to_vec();
     let mut slice_contexts = Vec::new();
     let mut all_slots = Vec::new();
 
     let mut decoder = Decoder::new();
 
-    match kind {
+    let digest_inputs = match kind {
         HevcCarrierKind::HeifContainer => {
             let target = parse_heif_targets(carrier)
                 .map_err(|e| StrHideError::UnsupportedFormat(format!("HEIF parse error: {e}")))?;
@@ -898,6 +933,11 @@ fn record_carrier_state(
                     let _ = decoder.decode_nal(&unit);
                 }
             }
+            let parameter_sets = target
+                .parameter_sets
+                .iter()
+                .map(|ps| ps.to_vec())
+                .collect::<Vec<Vec<u8>>>();
 
             // `slice_idx` indexes `slice_contexts`, so it advances only when a
             // slice is actually recorded. Using the enumeration index of
@@ -933,6 +973,7 @@ fn record_carrier_state(
                     }
                 }
             }
+            DigestInputs::Heif { parameter_sets }
         }
         HevcCarrierKind::AnnexBStream => {
             let spans = parse_annex_b_spans(carrier);
@@ -973,15 +1014,22 @@ fn record_carrier_state(
                     }
                 }
             }
+            DigestInputs::AnnexB {
+                spans: spans.clone(),
+            }
         }
         _ => {
             return Err(StrHideError::UnsupportedFormat(
                 "Carrier format not supported yet for HEVC stego".into(),
             ));
         }
-    }
+    };
 
-    Ok((out_carrier, slice_contexts, all_slots))
+    Ok(CarrierRecord {
+        slice_contexts,
+        all_slots,
+        digest_inputs,
+    })
 }
 
 /// Move a slice's recorded slots into the carrier-wide slot pool.
@@ -1033,54 +1081,62 @@ fn scan_hevc_slots(carrier: &[u8]) -> Result<Vec<StegoSlot>, StrHideError> {
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
-    let (_, _, slots) = record_carrier_state(carrier, kind)?;
-    Ok(slots)
+    let record = record_carrier_state(carrier, kind)?;
+    Ok(record.all_slots)
 }
 
-/// Derive the 64-bit trellis seed from a carrier digest.
+/// Derive the 64-bit STC trellis seed.
 ///
-/// The digest is a fixed `[u8; 32]`, so this conversion is infallible; the
-/// helper exists so that no call site needs an `unwrap()` on a
-/// slice-to-array conversion.
-#[inline]
-fn seed_from_digest(cover_digest: &[u8; 32]) -> u64 {
+/// Keyed through the (secret-derived) HEVC key rather than through the public
+/// carrier digest alone, so the slot Weyl permutation and the STC code
+/// structure are reproducible only with the credential — the same security
+/// model as the PNG/JPEG engines. A passwordless analyst can then neither
+/// reproduce the permutation for structural detection nor locate the
+/// plaintext message header (whose CRC32 would otherwise be an offline
+/// guessing oracle for low-entropy payloads).
+///
+/// HKDF-SHA256 can always produce 8 bytes, so the error branch is defensive
+/// only, mirroring [`derive_hevc_key`]'s fallback style.
+fn trellis_seed_from_key(key: &[u8; 32], cover_digest: &[u8; 32]) -> u64 {
+    let hk = Hkdf::<Sha256>::new(Some(cover_digest), key);
     let mut buf = [0u8; 8];
-    buf.copy_from_slice(&cover_digest[0..8]);
+    if hk
+        .expand(b"strhide-hevc-trellis-seed-v1", &mut buf)
+        .is_err()
+    {
+        return 0;
+    }
     u64::from_be_bytes(buf)
 }
 
+/// Derive the cover digest from the container parse `record_carrier_state`
+/// already produced — the container is walked exactly once per operation
+/// (audit 2026-10-24 2.5).
 fn derive_carrier_digest(
     carrier: &[u8],
-    kind: HevcCarrierKind,
+    inputs: &DigestInputs,
     fmt: &HevcFormatProfile,
 ) -> [u8; 32] {
-    match kind {
-        HevcCarrierKind::HeifContainer => {
-            if let Ok(target) = parse_heif_targets(carrier) {
-                // Hash the parameter set *contents*. They are immutable during
-                // embedding, which is what makes the digest — and therefore the
-                // trellis seed and the AES key — identical on both ends.
-                //
-                // (Feeding them through `compute_hevc_cover_digest` would need
-                // byte offsets into `carrier`; the parsed sets are copies, and
-                // an offset of 0 quietly hashed the file header instead.)
-                let mut hasher = Sha256::new();
-                hasher.update(fmt.cover_salt);
-                hasher.update((target.parameter_sets.len() as u64).to_be_bytes());
-                for ps in &target.parameter_sets {
-                    hasher.update((ps.len() as u64).to_be_bytes());
-                    hasher.update(ps);
-                }
-                hasher.finalize().into()
-            } else {
-                [0u8; 32]
+    match inputs {
+        DigestInputs::Heif { parameter_sets } => {
+            // Hash the parameter set *contents*. They are immutable during
+            // embedding, which is what makes the digest — and therefore
+            // the AES key and the keyed trellis seed — identical on both
+            // ends.
+            //
+            // (Feeding them through `compute_hevc_cover_digest` would need
+            // byte offsets into `carrier`; the parsed sets are copies, and
+            // an offset of 0 quietly hashed the file header instead.)
+            let mut hasher = Sha256::new();
+            hasher.update(fmt.cover_salt);
+            hasher.update((parameter_sets.len() as u64).to_be_bytes());
+            for ps in parameter_sets {
+                hasher.update((ps.len() as u64).to_be_bytes());
+                hasher.update(ps);
             }
+            hasher.finalize().into()
         }
-        HevcCarrierKind::AnnexBStream => {
-            let spans = parse_annex_b_spans(carrier);
-            compute_hevc_cover_digest(carrier, &spans, fmt.cover_salt)
-        }
-        _ => [0u8; 32],
+        DigestInputs::AnnexB { spans } => compute_hevc_cover_digest(carrier, spans, fmt.cover_salt),
     }
 }
 

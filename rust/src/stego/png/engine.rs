@@ -1107,12 +1107,20 @@ pub fn embed_png(
     let (enc_key, perm_seed) = body_keys(spatial.body, &master, &salt, domain);
     let ciphertext_len = plaintext.len() + suite.tag_len();
 
+    // Quantise the hyperparameters to their wire-exact forms *before* any
+    // use, and run the whole embed on them: the feature word can only carry
+    // `epsilon` as a power of two and `sigma` at `f32` precision, so the
+    // extractor can only ever reproduce these forms. The prober quantises
+    // the same way, so advertised capacity and embedding pool agree.
+    let params = params.wire_quantized();
+    let eps_k = FeatureWord::quantize_epsilon(params.epsilon);
+
     // Compute distortion cost map
-    let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, params);
+    let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, &params);
 
     let channel_offset = embed_channel(&image);
 
-    let plan = SlotPlan::build(&image, &costs, params, password, domain, spatial)?;
+    let plan = SlotPlan::build(&image, &costs, &params, password, domain, spatial)?;
     if !plan.header_fits() {
         return Err(StrHideError::General(format!(
             "Carrier capacity insufficient: available {} slots, minimum header requires {} slots",
@@ -1217,8 +1225,11 @@ pub fn embed_png(
     header_bytes.extend_from_slice(&nonce); // Nonce (12B)
     header_bytes.extend_from_slice(&header_word.to_be_bytes());
 
+    // The hyperparameters were quantised to wire-exact forms at the top of
+    // this function, so what the feature word records is exactly what the
+    // embedder computed with.
     let fw = FeatureWord {
-        version: 2,
+        version: 3,
         codec: resolved_codec,
         u: resolved_u,
         h: params.stc_h,
@@ -1226,9 +1237,11 @@ pub fn embed_png(
         // nothing else, so a write here would desynchronise the two ends.
         channel_mode: mode as u8,
         class_rule: 1, // Safe [1, 6] non-boundary
-        kdf_id: 0,     // PBKDF2 100k
-        eligible_min: SPATIAL_ELIGIBLE_MIN,
-        eligible_max: SPATIAL_ELIGIBLE_MAX,
+        // `params.validate()` guarantees odd windows <= 63, well inside the
+        // 10-bit wire field.
+        p1_window: params.p1_window as u16,
+        p2_window: params.p2_window as u16,
+        neg_log2_epsilon: eps_k,
         exclusion_permille: (params.exclusion_percentile.clamp(0.0, 0.9) * 1000.0) as u16,
         // The carrier has to name its own cost model: the extractor reads the
         // header before it knows which algorithm wrote the body, so there is no
@@ -1241,6 +1254,12 @@ pub fn embed_png(
                     cost_model.id()
                 ))
             })?,
+        sigma: params
+            .algorithm_options
+            .get("sigma")
+            .copied()
+            .unwrap_or(1.0) as f32,
+        kernel_id: 0, // the built-in KB kernel; custom kernels need matching configs
     };
     let feature_bytes = fw.encode();
 
@@ -1263,32 +1282,71 @@ pub fn embed_png(
     // Asymmetric per-direction costs. Embed-side only: ranking never sees them,
     // so the extractor does not have to reproduce them.
     //
-    // One channel at a time: keeping a `(plus, minus)` pair per channel alive
-    // would cost 6 x `total_pixels` f64, so each pair is consumed into the
-    // slot-indexed vectors and dropped before the next channel is computed.
+    // The model prices only the requested slots, so the working set stays
+    // payload-sized instead of materializing full-plane maps per channel.
+    // Header slots are already pixel indices on the header channel; body
+    // slots are byte offsets and become pixel indices per channel.
     let mut header_rp = vec![0.0f64; V2_TOTAL_HEADER_SLOTS];
     let mut header_rm = vec![0.0f64; V2_TOTAL_HEADER_SLOTS];
     let mut body_rp = vec![0.0f64; needed_body_slots];
     let mut body_rm = vec![0.0f64; needed_body_slots];
+    let header_px: Vec<usize> = header_slots
+        .iter()
+        .chain(feature_slots.iter())
+        .copied()
+        .collect();
     for &channel in mode.channels(image.channels) {
-        let (plus, minus) =
-            cost_model.direction_costs(&costs, &image.pixels, w, h, image.channels, channel);
-        if plus.len() != total_pixels || minus.len() != total_pixels {
-            return Err(StrHideError::General(
-                "Direction cost map dimension mismatch".into(),
-            ));
-        }
+        // Body pixel indices for this channel, in body-slot order (the
+        // per-channel subset stays at its body-slot position).
+        let body_px: Vec<usize> = body_slots
+            .iter()
+            .filter(|&&slot| slot % image.channels == channel)
+            .map(|&slot| slot / image.channels)
+            .collect();
+        let (header_plus, header_minus) = if channel == channel_offset {
+            cost_model.direction_costs(
+                &costs,
+                &image.pixels,
+                w,
+                h,
+                image.channels,
+                channel,
+                &header_px,
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let (body_plus, body_minus) = cost_model.direction_costs(
+            &costs,
+            &image.pixels,
+            w,
+            h,
+            image.channels,
+            channel,
+            &body_px,
+        );
         if channel == channel_offset {
-            for (i, &px) in header_slots.iter().chain(feature_slots.iter()).enumerate() {
-                header_rp[i] = plus[px];
-                header_rm[i] = minus[px];
+            if header_plus.len() != header_px.len() || header_minus.len() != header_px.len() {
+                return Err(StrHideError::General(
+                    "Direction cost vector dimension mismatch".into(),
+                ));
+            }
+            for (i, (&rp, &rm)) in header_plus.iter().zip(header_minus.iter()).enumerate() {
+                header_rp[i] = rp;
+                header_rm[i] = rm;
             }
         }
+        if body_plus.len() != body_px.len() || body_minus.len() != body_px.len() {
+            return Err(StrHideError::General(
+                "Direction cost vector dimension mismatch".into(),
+            ));
+        }
+        let mut k = 0usize;
         for (i, &slot) in body_slots.iter().enumerate() {
             if slot % image.channels == channel {
-                let px = slot / image.channels;
-                body_rp[i] = plus[px];
-                body_rm[i] = minus[px];
+                body_rp[i] = body_plus[k];
+                body_rm[i] = body_minus[k];
+                k += 1;
             }
         }
     }
@@ -1455,9 +1513,20 @@ pub fn extract_png(
         ));
     }
 
-    // Override exclusion_percentile with carrier's self-describing value from FeatureWord.
+    // The carrier is self-describing about every hyperparameter that shapes
+    // the cost map: exclusion percentile, HILL's windows and epsilon, and the
+    // sigma model option. Whatever the caller configured is a hint only --
+    // the wire values are what the embedder actually computed with.
     let mut effective_params = params.clone();
     effective_params.exclusion_percentile = (fw.exclusion_permille as f64) / 1000.0;
+    effective_params.p1_window = fw.p1_window as usize;
+    effective_params.p2_window = fw.p2_window as usize;
+    effective_params.epsilon = fw.epsilon();
+    if resolved.id() == "suniward" {
+        effective_params
+            .algorithm_options
+            .insert("sigma".to_string(), fw.sigma as f64);
+    }
 
     // Distortion cost map of the declared model. Identical to what the embedder
     // computed, because header/feature pixels never leave their eight-value
@@ -1561,14 +1630,17 @@ pub fn probe_png_capacity(
     spatial: &crate::stego::format::PngFormatProfile,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     params.validate()?;
+    // Probe with the same wire-quantised hyperparameters the embedder will
+    // use, so the advertised capacity matches the pool embedding sees.
+    let params = params.wire_quantized();
     let image = decode_png(carrier_bytes)?;
     let w = image.width as usize;
     let h = image.height as usize;
     let total_pixels = w * h;
 
-    let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, params);
+    let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, &params);
 
-    let plan = SlotPlan::build(&image, &costs, params, password, domain, spatial)?;
+    let plan = SlotPlan::build(&image, &costs, &params, password, domain, spatial)?;
 
     // Two pool sizes, for two different questions:
     // - `available_body_slots` answers "how much can the writer actually
@@ -1849,6 +1921,77 @@ mod tests {
             pixels,
             "pixels must survive the filtered re-encode"
         );
+    }
+
+    /// v3 feature word: hyperparameters the extractor does not have to be
+    /// told about — non-default HILL windows, a non-power-of-two epsilon and
+    /// a non-default S-UNIWARD sigma must round-trip through the carrier
+    /// alone. Under v2 this silently returned `NoHiddenData` because the
+    /// extractor rebuilt the ranking with its own defaults.
+    #[test]
+    fn nondefault_hyperparameters_roundtrip_via_feature_word() {
+        let (w, h) = (96usize, 96usize);
+        let pixels = row_correlated_pixels(w, h);
+        let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
+        let payload = b"v3-hyperparameters";
+
+        let hill_params = PngParams {
+            p1_window: 5,
+            p2_window: 7,
+            // not a power of two: must be quantised on both ends
+            epsilon: 1e-8,
+            ..PngParams::default()
+        };
+        let stego = embed_png(
+            &png,
+            payload,
+            Some("pw"),
+            None,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &hill_params,
+            SafetyPolicy::default(),
+            Freshness::Random,
+        )
+        .expect("embed with non-default HILL parameters");
+        // The extractor passes *defaults*: the carrier is authoritative.
+        let extracted = extract_png(
+            &stego,
+            Some("pw"),
+            None,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &PngParams::default(),
+        )
+        .expect("extract rebuilds the ranking from the feature word");
+        assert_eq!(extracted, payload);
+
+        let mut suniward_params = PngParams::default();
+        suniward_params
+            .algorithm_options
+            .insert("sigma".to_string(), 0.8);
+        let stego = embed_png(
+            &png,
+            payload,
+            Some("pw"),
+            None,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &crate::stego::png::cost::SuniwardCostModel,
+            &suniward_params,
+            SafetyPolicy::default(),
+            Freshness::Random,
+        )
+        .expect("embed with non-default sigma");
+        let extracted = extract_png(
+            &stego,
+            Some("pw"),
+            None,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &crate::stego::png::cost::SuniwardCostModel,
+            &PngParams::default(),
+        )
+        .expect("extract rebuilds sigma from the feature word");
+        assert_eq!(extracted, payload);
     }
 
     #[test]

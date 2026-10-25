@@ -53,10 +53,16 @@ pub enum StrHideError {
     /// round was used.
     ///
     /// Structured so the JPEG engine can recognise "this carrier's Huffman
-    /// table cannot encode the required modifications" without matching on
-    /// message text.
-    #[error("Embedding infeasible: {0}")]
-    TrellisInfeasible(String),
+    /// table cannot encode the required modifications" by matching on
+    /// [`TrellisCause`] instead of on message text (which i18n rendering or
+    /// rewording would silently break).
+    #[error("Embedding infeasible: {detail}")]
+    TrellisInfeasible {
+        /// Which shape of infeasibility the solver hit.
+        cause: TrellisCause,
+        /// Human-readable context (indices, counts); free-form.
+        detail: String,
+    },
 
     /// Pre-write safety rejection: the carrier is signed (PE Authenticode,
     /// PDF ByteRange, JAR signature), read-only, an unsupported APK, or the
@@ -96,6 +102,26 @@ pub enum StrHideError {
     General(String),
 }
 
+/// Which shape of STC infeasibility the solver hit.
+///
+/// The JPEG engine maps `DeadElement`/`DeadGroup` to its "over-optimised
+/// Huffman table" diagnosis: a wet-point pattern where every candidate in a
+/// parity group is locked by the carrier's table. `ExhaustedSlots` is the
+/// HEVC engine's multi-round wrapper for "the exclusion loop ran out of
+/// usable slots" and never occurs on the JPEG path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TrellisCause {
+    /// One element whose both directions are illegal (the `u = 1` kernel
+    /// path).
+    DeadElement,
+    /// A whole group with no legal element in any position (the `u > 1`
+    /// kernel path).
+    DeadGroup,
+    /// The embed's exclude-and-retry loop ran out of usable slots.
+    ExhaustedSlots,
+}
+
 #[cfg(feature = "engine")]
 impl From<serde_json::Error> for StrHideError {
     fn from(err: serde_json::Error) -> Self {
@@ -119,7 +145,7 @@ impl StrHideError {
             StrHideError::UnsupportedFormat(_) | StrHideError::UnsupportedVersion(_) => {
                 Some(crate::i18n::Msg::ErrUnsupported)
             }
-            StrHideError::TrellisInfeasible(_) => Some(crate::i18n::Msg::ErrUnsupported),
+            StrHideError::TrellisInfeasible { .. } => Some(crate::i18n::Msg::ErrUnsupported),
             StrHideError::NoHiddenData(_) | StrHideError::General(_) => None,
         }
     }
@@ -135,8 +161,8 @@ impl StrHideError {
             | StrHideError::UnsupportedFormat(s)
             | StrHideError::UnsupportedVersion(s)
             | StrHideError::NoHiddenData(s)
-            | StrHideError::General(s)
-            | StrHideError::TrellisInfeasible(s) => s.clone(),
+            | StrHideError::General(s) => s.clone(),
+            StrHideError::TrellisInfeasible { detail, .. } => detail.clone(),
             StrHideError::PasswordWithHint { message, hint } => match hint {
                 Some(h) => format!("{message}. Hint: '{h}'."),
                 None => message.clone(),

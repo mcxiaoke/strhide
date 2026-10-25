@@ -109,8 +109,21 @@ pub const FEATURE_WORD_SLOTS: usize = FEATURE_WORD_BYTES * 8; // 256 slots
 /// Total slots occupied by v2 header (256 basic header slots + 256 feature word slots).
 pub const V2_TOTAL_HEADER_SLOTS: usize = 256 + FEATURE_WORD_SLOTS; // 512 slots
 
-/// Self-describing feature descriptor stored in the 32-byte feature word (v2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Self-describing feature descriptor stored in the 32-byte feature word (v3).
+///
+/// v3 replaces v2's dead fields (`kdf_id`, `eligible_min`, `eligible_max` —
+/// decoded but never read back) with the cost-model hyperparameters the
+/// extractor must reproduce to rebuild the body ranking: HILL's
+/// `p1_window`/`p2_window`/`epsilon` and S-UNIWARD's `sigma`. Two
+/// normalisations make the wire values exact instead of approximate:
+/// `epsilon` is stored as a power of two (`2^-k`) and the writer quantises
+/// the configured value to the nearest power of two before using it, so
+/// both ends compute the identical cost map; `sigma` is stored as `f32`
+/// and the writer rounds it to `f32` precision for the same reason. The
+/// 3x3 high-pass kernel is not carried: it does not fit, so a `kernel_id`
+/// names it instead (0 = the built-in KB kernel) and custom kernels remain
+/// a same-configuration-on-both-ends expert setting.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FeatureWord {
     pub version: u8,
     pub codec: StegoCodec,
@@ -118,9 +131,13 @@ pub struct FeatureWord {
     pub h: u8,
     pub channel_mode: u8,
     pub class_rule: u8,
-    pub kdf_id: u8,
-    pub eligible_min: u8,
-    pub eligible_max: u8,
+    /// First-stage low-pass window (odd, 1..=1023). HILL only.
+    pub p1_window: u16,
+    /// Second-stage low-pass window (odd, 1..=1023). HILL only.
+    pub p2_window: u16,
+    /// `epsilon = 2^-neg_log2_epsilon` (k in 1..=127).
+    pub neg_log2_epsilon: u16,
+    /// Fraction of smoothest pixels excluded from embedding, in per-mille.
     pub exclusion_permille: u16,
     /// Wire id of the spatial cost model that wrote this carrier.
     ///
@@ -132,27 +149,54 @@ pub struct FeatureWord {
     /// Lives in `bytes[8]`, which v2 reserved as zero, so the packed `low64`
     /// layout is unchanged.
     pub algorithm_id: u8,
+    /// S-UNIWARD's `sigma` model option, rounded to `f32` precision. Other
+    /// models ignore it.
+    pub sigma: f32,
+    /// High-pass kernel selector: 0 = the built-in normalized KB kernel.
+    /// No other kernel has a wire id yet.
+    pub kernel_id: u8,
 }
 
 impl Default for FeatureWord {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 3,
             codec: StegoCodec::Stc,
             u: 1,
             h: crate::stego::coding::DEFAULT_STC_H,
             channel_mode: 0, // Green
             class_rule: 1,   // Safe [1, 6] non-boundary
-            kdf_id: 0,       // PBKDF2 100k
-            eligible_min: 8,
-            eligible_max: 247,
+            p1_window: 3,
+            p2_window: 15,
+            neg_log2_epsilon: 23,    // f32::EPSILON = 2^-23
             exclusion_permille: 300, // 30%
             algorithm_id: crate::stego::registry::SPATIAL_ALGORITHM_HILL,
+            sigma: 1.0,
+            kernel_id: 0,
         }
     }
 }
 
+/// Largest window size the feature word can carry (10 bits).
+pub const FEATURE_WORD_MAX_WINDOW: u16 = 1023;
+
 impl FeatureWord {
+    /// The `epsilon` value this word describes (`2^-k`).
+    #[must_use]
+    pub fn epsilon(&self) -> f64 {
+        // k is validated to 1..=127 on decode, so this cannot underflow.
+        (0.5f64).powi(self.neg_log2_epsilon as i32)
+    }
+
+    /// Quantise an arbitrary epsilon to the nearest power of two, the form
+    /// the wire can carry exactly. `f32::EPSILON` and other powers of two
+    /// round-trip unchanged.
+    #[must_use]
+    pub fn quantize_epsilon(epsilon: f64) -> u16 {
+        let k = -epsilon.log2().round();
+        k.clamp(1.0, 127.0) as u16
+    }
+
     /// Serialize feature word into a 32-byte array (256 bits).
     pub fn encode(&self) -> [u8; FEATURE_WORD_BYTES] {
         let mut bytes = [0u8; FEATURE_WORD_BYTES];
@@ -168,39 +212,33 @@ impl FeatureWord {
         low64 |= (self.h as u64 & 0x0F) << 9;
         low64 |= (self.channel_mode as u64 & 0x03) << 13;
         low64 |= (self.class_rule as u64 & 0x03) << 15;
-        low64 |= (self.kdf_id as u64 & 0x03) << 17;
-        low64 |= (self.eligible_min as u64 & 0xFF) << 19;
-        low64 |= (self.eligible_max as u64 & 0xFF) << 27;
-        low64 |= (self.exclusion_permille as u64 & 0xFFFF) << 35;
+        low64 |= (self.p1_window as u64 & 0x3FF) << 17;
+        low64 |= (self.p2_window as u64 & 0x3FF) << 27;
+        low64 |= (self.neg_log2_epsilon as u64 & 0x3FFF) << 37;
+        low64 |= (self.exclusion_permille as u64 & 0xFFFF) << 51;
 
         bytes[..8].copy_from_slice(&low64.to_le_bytes());
         bytes[8] = self.algorithm_id;
-        // bytes[9..32] remain all zeroes (reserved)
+        bytes[9..13].copy_from_slice(&self.sigma.to_le_bytes());
+        bytes[13] = self.kernel_id;
+        // bytes[14..32] remain all zeroes (reserved)
         bytes
     }
 
     /// Deserialize feature word from 32-byte array with strict validation.
     pub fn decode(bytes: &[u8; FEATURE_WORD_BYTES]) -> Result<Self, StrHideError> {
         let low64 = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-        // Upper 13 bits of low64 (bits 51..64) must be zero
-        if (low64 >> 51) != 0 {
-            return Err(StrHideError::CorruptedData(
-                "Non-zero reserved bits in feature word low64".into(),
-            ));
-        }
-        // Bytes 9..32 (bits 72..256) must be all zero; byte 8 carries the
-        // algorithm id.
-        if bytes[9..].iter().any(|&b| b != 0) {
-            return Err(StrHideError::CorruptedData(
-                "Non-zero reserved bytes in feature word high bytes".into(),
-            ));
-        }
-
         let version = (low64 & 0x0F) as u8;
-        if version != 2 {
+        if version != 3 {
             return Err(StrHideError::CorruptedData(format!(
                 "Unsupported feature word version {version}"
             )));
+        }
+        // Bytes 14..32 (reserved) must be all zero.
+        if bytes[14..].iter().any(|&b| b != 0) {
+            return Err(StrHideError::CorruptedData(
+                "Non-zero reserved bytes in feature word high bytes".into(),
+            ));
         }
 
         let codec_id = ((low64 >> 4) & 0x03) as u8;
@@ -230,19 +268,43 @@ impl FeatureWord {
 
         let channel_mode = ((low64 >> 13) & 0x03) as u8;
         let class_rule = ((low64 >> 15) & 0x03) as u8;
-        let kdf_id = ((low64 >> 17) & 0x03) as u8;
-        let eligible_min = ((low64 >> 19) & 0xFF) as u8;
-        let eligible_max = ((low64 >> 27) & 0xFF) as u8;
-        let exclusion_permille = ((low64 >> 35) & 0xFFFF) as u16;
+        let p1_window = ((low64 >> 17) & 0x3FF) as u16;
+        let p2_window = ((low64 >> 27) & 0x3FF) as u16;
+        let neg_log2_epsilon = ((low64 >> 37) & 0x3FFF) as u16;
+        let exclusion_permille = ((low64 >> 51) & 0xFFFF) as u16;
 
-        if (eligible_min != 0 || eligible_max != 0) && eligible_min >= eligible_max {
+        if p1_window == 0 || p1_window.is_multiple_of(2) || p1_window > FEATURE_WORD_MAX_WINDOW {
             return Err(StrHideError::CorruptedData(format!(
-                "Invalid eligible range [{eligible_min}, {eligible_max}] in feature word"
+                "Invalid p1_window {p1_window} in feature word (must be odd, 1..={FEATURE_WORD_MAX_WINDOW})"
+            )));
+        }
+        if p2_window == 0 || p2_window.is_multiple_of(2) || p2_window > FEATURE_WORD_MAX_WINDOW {
+            return Err(StrHideError::CorruptedData(format!(
+                "Invalid p2_window {p2_window} in feature word (must be odd, 1..={FEATURE_WORD_MAX_WINDOW})"
+            )));
+        }
+        if !(1..=127).contains(&neg_log2_epsilon) {
+            return Err(StrHideError::CorruptedData(format!(
+                "Invalid epsilon exponent {neg_log2_epsilon} in feature word"
             )));
         }
         if exclusion_permille > 900 {
             return Err(StrHideError::CorruptedData(format!(
                 "Invalid exclusion permille {exclusion_permille} in feature word"
+            )));
+        }
+
+        let sigma = f32::from_le_bytes(bytes[9..13].try_into().unwrap());
+        if !sigma.is_finite() || sigma <= 0.0 {
+            return Err(StrHideError::CorruptedData(
+                "Invalid sigma in feature word (must be finite and positive)".into(),
+            ));
+        }
+
+        let kernel_id = bytes[13];
+        if kernel_id != 0 {
+            return Err(StrHideError::CorruptedData(format!(
+                "Unknown high-pass kernel id {kernel_id} in feature word"
             )));
         }
 
@@ -253,11 +315,13 @@ impl FeatureWord {
             h,
             channel_mode,
             class_rule,
-            kdf_id,
-            eligible_min,
-            eligible_max,
+            p1_window,
+            p2_window,
+            neg_log2_epsilon,
             exclusion_permille,
             algorithm_id: bytes[8],
+            sigma,
+            kernel_id,
         })
     }
 }
@@ -314,38 +378,53 @@ mod tests {
         let bytes = fw.encode();
         let decoded = FeatureWord::decode(&bytes).expect("decode default feature word");
         assert_eq!(decoded, fw);
+        // The defaults must survive the wire exactly: powers-of-two epsilon
+        // and f32 sigma round-trip bit-for-bit.
+        assert_eq!(fw.epsilon(), f32::EPSILON as f64);
 
-        // Test non-default configurations
+        // Test non-default configurations, including the v3 hyperparameters.
         let fw2 = FeatureWord {
-            version: 2,
             codec: StegoCodec::Hamming,
             u: 1,
             h: 0,
             channel_mode: 1,
             class_rule: 0,
-            kdf_id: 1,
-            eligible_min: 16,
-            eligible_max: 240,
+            p1_window: 5,
+            p2_window: 31,
+            neg_log2_epsilon: 27,
             exclusion_permille: 500,
             algorithm_id: SPATIAL_ALGORITHM_HILL,
+            sigma: 0.75,
+            kernel_id: 0,
+            ..FeatureWord::default()
         };
         let bytes2 = fw2.encode();
         let decoded2 = FeatureWord::decode(&bytes2).expect("decode fw2");
         assert_eq!(decoded2, fw2);
 
-        // Corrupted reserved bits in low64
-        let mut bad_bytes = bytes;
-        bad_bytes[6] |= 0x80; // bit 55
-        assert!(FeatureWord::decode(&bad_bytes).is_err());
+        // Epsilon quantisation: arbitrary values snap to a power of two that
+        // both ends can carry exactly.
+        assert_eq!(FeatureWord::quantize_epsilon(1e-8), 27);
+        assert_eq!(FeatureWord::quantize_epsilon(f32::EPSILON as f64), 23);
 
-        // Corrupted reserved bytes in high bytes
+        // Even windows are rejected (HILL requires odd windows).
+        let mut bad_window = fw;
+        bad_window.p1_window = 4;
+        assert!(FeatureWord::decode(&bad_window.encode()).is_err());
+
+        // Corrupted reserved bytes in the high area
         let mut bad_bytes2 = bytes;
         bad_bytes2[20] = 0x01;
         assert!(FeatureWord::decode(&bad_bytes2).is_err());
 
+        // A non-zero kernel id is not decodable by this build.
+        let mut bad_kernel = fw;
+        bad_kernel.kernel_id = 1;
+        assert!(FeatureWord::decode(&bad_kernel.encode()).is_err());
+
         // Unsupported version
         let mut bad_version = fw;
-        bad_version.version = 3;
+        bad_version.version = 4;
         assert!(FeatureWord::decode(&bad_version.encode()).is_err());
     }
 }

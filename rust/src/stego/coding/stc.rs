@@ -568,13 +568,12 @@ impl StcTrellis {
                 let parity = want ^ (state & 1);
                 if parity != cover_parity {
                     if !flip.cost.is_finite() {
-                        // The JPEG engine keys off this phrase to tell "this
-                        // carrier cannot host the payload" (over-optimised
-                        // Huffman table, a documented limitation) apart from a
-                        // programming error -- keep it.
-                        return Err(StrHideError::TrellisInfeasible(format!(
-                            "no legal element direction exists for element {j}, which must change parity"
-                        )));
+                        return Err(StrHideError::TrellisInfeasible {
+                            cause: crate::errors::TrellisCause::DeadElement,
+                            detail: format!(
+                                "no legal element direction exists for element {j}, which must change parity"
+                            ),
+                        });
                     }
                     deltas[j] = if matches!(flip.kind, Kind::Plus) {
                         1
@@ -723,9 +722,11 @@ impl StcTrellis {
             // unable to know which round was used, i.e. it would brick the
             // carrier. It can only happen when a caller hands over an element
             // with no legal direction at all (both `rho` values infinite).
-            return Err(StrHideError::TrellisInfeasible(
-                "a group has no legal element (both directions illegal for every element)".into(),
-            ));
+            return Err(StrHideError::TrellisInfeasible {
+                cause: crate::errors::TrellisCause::DeadGroup,
+                detail: "a group has no legal element (both directions illegal for every element)"
+                    .into(),
+            });
         }
 
         let mut state = best_state;

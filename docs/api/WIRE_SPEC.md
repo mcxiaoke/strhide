@@ -577,13 +577,19 @@ header_slots[256..512]  = FeatureWord (32B / 256 bits)
 | bit 26..28 | 2 | 矩阵编码标识：`0 = Hamming`；`1..3 = STC u` |
 | bit 28..32 | 4 | `15`（`0x0F`）= v2 逃逸标记（本版本唯一写出的形态） |
 
-#### 32 字节 FeatureWord 自描述字
+#### 32 字节 FeatureWord 自描述字（v3）
 
-- `bit 0..4` 版本 `= 2`；`bit 4..6` codec（0=Hamming，1=STC）；`bit 6..9` `u`（1..3）；`bit 9..13` `h`（4..10）
-- `bit 13..15` `channel_mode`；`bit 15..17` `class_rule`（1 = 安全非边界 `val % 8 ∈ [1,6]`）；`bit 17..19` `kdf_id`
-- `bit 19..27` `eligible_min`（8）；`bit 27..35` `eligible_max`（247）；`bit 35..51` `exclusion_permille`（排除分位数）
-- `bytes[8]`（原保留零位）：`algorithm_id`（1 = HILL，2 = S-UNIWARD；提取端据此自描述选择模型）
-- 其余保留位为零（非 0 即 `NoHiddenData`）
+- `bit 0..4` 版本 `= 3`；`bit 4..6` codec（0=Hamming，1=STC）；`bit 6..9` `u`（1..3）；`bit 9..13` `h`（4..10）
+- `bit 13..15` `channel_mode`；`bit 15..17` `class_rule`（1 = 安全非边界 `val % 8 ∈ [1,6]`）
+- `bit 17..27` `p1_window`（HILL 一阶低通窗，正奇数 ≤1023）；`bit 27..37` `p2_window`（二阶低通窗，同约束）
+- `bit 37..51` `neg_log2_epsilon`（`epsilon = 2^-k`，k ∈ 1..=127；嵌入端把非 2 的幂 epsilon 量化到最近 2 的幂再使用）
+- `bit 51..64` `exclusion_permille`（排除分位数，≤900）
+- `bytes[8]`：`algorithm_id`（1 = HILL，2 = S-UNIWARD；提取端据此自描述选择模型）
+- `bytes[9..13]`：`sigma`（f32 LE，S-UNIWARD 的 model option；嵌入端先舍入到 f32 精度再使用，其他模型忽略）
+- `bytes[13]`：`kernel_id`（0 = 内置 KB 高通核；自定义核不支持自描述，需两端同配置）
+- `bytes[14..32]` 保留为零（非 0 即 `NoHiddenData`）
+- v3 删除了 v2 的死字段 `kdf_id`/`eligible_min`/`eligible_max`（解码即弃，从未读回）
+- 量化语义：`epsilon`/`sigma` 在嵌入端**先**量化到 wire 可精确承载的形式**再**参与代价计算（`PngParams::wire_quantized`），探测容量同口径——提取端从 wire 重建的代价图与嵌入端逐位一致
 
 #### 空间域残差赤字消除
 
@@ -691,13 +697,14 @@ ikm = derive_domain_subkey_with_label(effective_secret, domain, "strhide-hevc-do
 
 // 3. 派生 AES-256-GCM 密钥、STC Trellis 种子与头部魔数：
 key  = HKDF-SHA256(ikm = ikm, salt = cover_digest, info = fmt.kdf_info)        // 官方 fmt.kdf_info = "strhide-hevc-aes-key"
-seed = u64be(SHA-256(cover_digest)[0..8])
+seed = u64be(HKDF-SHA256(ikm = key, salt = cover_digest, info = "strhide-hevc-trellis-seed-v1")[..8])
 magic = SHA-256(fmt.magic_label ‖ effective_secret)[..4]                       // 官方 fmt.magic_label = "strhide-hevc-magic-v1"
 ```
 
 - **凭据优先级**：显式运行时凭据 > Profile 编译期私有默认密钥 > 公开默认常量 `PUBLIC_DEFAULT_SECRET`。全仓仅此一份公开默认常量（结构域与 PNG/JPEG 域各自另有独立常量，三者不同名、互不替代）。
 - **派生标签全部来自 `HevcFormatProfile`**（`stego::format::DEFAULT_HEVC_FORMAT`）：私有编译期定制改标签重建即可消除开源指纹，无需 fork。
-- **威胁模型说明**：header 槽位由参数集（cover_digest）与槽数决定，**与密码无关**——这是 Weyl 均衡抽样与免代价重放的设计要求。因此本格式的"不可见性"边界为：持有正确方言（标签 + 凭据）者可定位头部；无凭据者虽可计算槽位，但派生魔数比对失败，载体与空载体不可区分。
+- **trellis seed 经 key 派生（M11）**：槽位 Weyl 置换与 STC 码结构对无凭据者不可复现——与 PNG/JPEG 引擎的安全模型一致，同时关闭"无口令定位明文消息头 + CRC32 离线枚举"的预言机。
+- **威胁模型说明**：无凭据者既无法定位头部槽位（seed 密钥化），也无法通过魔数比对判定存在性；载体与空载体在其视角下不可区分。
 - 参数集在图片生命周期中不可变，提取端与嵌入端计算出的 `cover_digest` 严格一致。
 
 #### 13.11.3 槽位网格与矩阵编码（STC Trellis）

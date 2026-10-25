@@ -174,6 +174,10 @@ fn profile_png_with_model(
     );
 
     let t2 = Instant::now();
+    // Price a representative slot subset (green-channel pixels, every 16th):
+    // direction costs are per-slot since the payload-sized working-set change.
+    let slot_count = (image.width as usize * image.height as usize).div_ceil(16);
+    let slots: Vec<usize> = (0..slot_count).map(|i| i * 16).collect();
     let (_plus, _minus) = model.direction_costs(
         &costs,
         &image.pixels,
@@ -181,6 +185,7 @@ fn profile_png_with_model(
         image.height as usize,
         image.channels,
         1, // green channel
+        &slots,
     );
     let d_dir = t2.elapsed();
     println!(

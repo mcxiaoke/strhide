@@ -67,6 +67,12 @@ struct IsobmffItem {
 struct IsobmffMeta {
     items: Vec<IsobmffItem>,
     top_boxes: Vec<(usize, usize, [u8; 4])>, // (offset, size, fourcc)
+    /// `pitm` primary item id, when the file declares one. The bridge must
+    /// never rewrite the primary image (module contract: it stays bit-exact).
+    primary_item_id: Option<u32>,
+    /// Item ids referenced as thumbnails (`iref` boxes of type `thmb`). When
+    /// present these are the preferred bridge targets.
+    thumbnail_ids: Vec<u32>,
 }
 
 /// Embed payload into an embedded JPEG or uncompressed carrier within a HEIF container.
@@ -428,54 +434,80 @@ fn read_uint(buf: &[u8], pos: usize, size: usize) -> Result<u64, StrHideError> {
 }
 
 /// Locate the best bridgeable carrier target in the HEIF file.
+///
+/// The primary image (`pitm`) is never a candidate — the module contract
+/// keeps it bit-exact (audit 2026-10-24 5.3). Items referenced as
+/// thumbnails (`iref`/`thmb`) are preferred; without `iref` any declared
+/// non-primary JPEG item qualifies. `unci` (uncompressed) items are not
+/// supported: the spatial engine requires a PNG container, so the old
+/// branch handed it raw pixels it would reject on the first byte
+/// (audit 2026-10-24 5.5).
 pub fn find_bridge_target(data: &[u8]) -> Result<BridgeTarget, StrHideError> {
     let isobmff = parse_isobmff(data).map_err(|e| {
         StrHideError::UnsupportedFormat(format!("Failed to parse ISO BMFF structure: {}", e))
     })?;
 
-    // Priority 1: Independent item_type == b"jpeg"
+    // Priority 1: JPEG items. Thumbnail-referenced ones win; any other
+    // declared non-primary JPEG item is the fallback within this priority.
+    let mut non_thumb_jpeg = None;
     for item in &isobmff.items {
         if &item.item_type == b"jpeg" && !item.extents.is_empty() {
+            if isobmff.primary_item_id == Some(item.item_id) {
+                continue; // the primary image stays bit-exact
+            }
             let ext = &item.extents[0];
-            let start = (item.base_offset + ext.offset) as usize;
-            let len = ext.length as usize;
-            if start + len <= data.len() && len >= 64 && &data[start..start + 2] == b"\xFF\xD8" {
-                return Ok(BridgeTarget {
+            let Some(start) = item
+                .base_offset
+                .checked_add(ext.offset)
+                .and_then(|v| usize::try_from(v).ok())
+            else {
+                continue;
+            };
+            let Some(len) = usize::try_from(ext.length).ok() else {
+                continue;
+            };
+            let Some(end) = start.checked_add(len) else {
+                continue;
+            };
+            if end <= data.len() && len >= 64 && &data[start..start + 2] == b"\xFF\xD8" {
+                let target = BridgeTarget {
                     kind: BridgeTargetKind::DirectJpeg {
                         item_id: item.item_id,
                     },
                     file_offset: start,
                     length: len,
-                });
+                };
+                if isobmff.thumbnail_ids.contains(&item.item_id) {
+                    return Ok(target);
+                }
+                if non_thumb_jpeg.is_none() {
+                    non_thumb_jpeg = Some(target);
+                }
             }
         }
     }
-
-    // Priority 2: Independent item_type == b"unci" (uncompressed spatial item)
-    for item in &isobmff.items {
-        if &item.item_type == b"unci" && !item.extents.is_empty() {
-            let ext = &item.extents[0];
-            let start = (item.base_offset + ext.offset) as usize;
-            let len = ext.length as usize;
-            if start + len <= data.len() && len >= 64 {
-                return Ok(BridgeTarget {
-                    kind: BridgeTargetKind::DirectSpatial {
-                        item_id: item.item_id,
-                    },
-                    file_offset: start,
-                    length: len,
-                });
-            }
-        }
+    if let Some(target) = non_thumb_jpeg {
+        return Ok(target);
     }
 
-    // Priority 3: Embedded JPEG inside an Exif metadata item
+    // Priority 2: Embedded JPEG inside an Exif metadata item
     for item in &isobmff.items {
         if &item.item_type == b"Exif" && !item.extents.is_empty() {
             let ext = &item.extents[0];
-            let exif_start = (item.base_offset + ext.offset) as usize;
-            let exif_len = ext.length as usize;
-            if exif_start + exif_len <= data.len() {
+            let Some(exif_start) = item
+                .base_offset
+                .checked_add(ext.offset)
+                .and_then(|v| usize::try_from(v).ok())
+            else {
+                continue;
+            };
+            let Some(exif_len) = usize::try_from(ext.length).ok() else {
+                continue;
+            };
+            let Some(end) = exif_start.checked_add(exif_len) else {
+                continue;
+            };
+            if end <= data.len() {
                 let exif_slice = &data[exif_start..exif_start + exif_len];
                 if let Some(target) = parse_exif_embedded_jpeg(exif_slice, exif_start, item.item_id)
                 {
@@ -485,7 +517,7 @@ pub fn find_bridge_target(data: &[u8]) -> Result<BridgeTarget, StrHideError> {
         }
     }
 
-    // Priority 4: Fallback scan for standalone embedded JPEG (>= 4096 bytes)
+    // Priority 3: Fallback scan for standalone embedded JPEG (>= 4096 bytes)
     if let Some(target) = fallback_scan_jpeg(data) {
         return Ok(target);
     }
@@ -710,6 +742,8 @@ fn parse_isobmff(data: &[u8]) -> Result<IsobmffMeta, StrHideError> {
 
     let mut iinf_span = None;
     let mut iloc_span = None;
+    let mut pitm_span = None;
+    let mut iref_span = None;
 
     while mpos + 8 <= meta_end {
         let (sb_sz, _) = read_box_header(data, mpos)?;
@@ -721,6 +755,10 @@ fn parse_isobmff(data: &[u8]) -> Result<IsobmffMeta, StrHideError> {
             iinf_span = Some((mpos, sb_sz));
         } else if sfcc == b"iloc" {
             iloc_span = Some((mpos, sb_sz));
+        } else if sfcc == b"pitm" {
+            pitm_span = Some((mpos, sb_sz));
+        } else if sfcc == b"iref" {
+            iref_span = Some((mpos, sb_sz));
         }
         mpos += sb_sz;
     }
@@ -883,7 +921,82 @@ fn parse_isobmff(data: &[u8]) -> Result<IsobmffMeta, StrHideError> {
         }
     }
 
-    Ok(IsobmffMeta { items, top_boxes })
+    let (primary_item_id, thumbnail_ids) = parse_pitm_and_iref(data, pitm_span, iref_span);
+
+    Ok(IsobmffMeta {
+        items,
+        top_boxes,
+        primary_item_id,
+        thumbnail_ids,
+    })
+}
+
+/// Parse `pitm` (primary item id) and `iref`/`thmb` (thumbnail references)
+/// out of the meta box. Both are best-effort: an absent or malformed box
+/// simply leaves the corresponding field empty, and the target selection
+/// below degrades to the historical behaviour.
+fn parse_pitm_and_iref(
+    data: &[u8],
+    pitm_span: Option<(usize, usize)>,
+    iref_span: Option<(usize, usize)>,
+) -> (Option<u32>, Vec<u32>) {
+    let mut primary_item_id = None;
+    if let Some((off, sz)) = pitm_span {
+        let b = &data[off..(off + sz).min(data.len())];
+        // Fullbox: 8 header + 4 version/flags, then item_ID (u16 v0 / u32 v1).
+        match b.get(8) {
+            Some(0) if b.len() >= 14 => {
+                primary_item_id = Some(u16::from_be_bytes(b[12..14].try_into().unwrap()) as u32);
+            }
+            Some(1..) if b.len() >= 16 => {
+                primary_item_id = Some(u32::from_be_bytes(b[12..16].try_into().unwrap()));
+            }
+            _ => {}
+        }
+    }
+
+    let mut thumbnail_ids = Vec::new();
+    if let Some((off, sz)) = iref_span {
+        let b = &data[off..(off + sz).min(data.len())];
+        let id_sz = match b.get(8) {
+            Some(0) => 2usize,
+            Some(1..) => 4,
+            None => 0,
+        };
+        let read_id = |q: usize| -> Option<u32> {
+            if id_sz == 2 && q + 2 <= b.len() {
+                Some(u16::from_be_bytes(b[q..q + 2].try_into().unwrap()) as u32)
+            } else if id_sz == 4 && q + 4 <= b.len() {
+                Some(u32::from_be_bytes(b[q..q + 4].try_into().unwrap()))
+            } else {
+                None
+            }
+        };
+        // Walk the typed reference sub-boxes (thmb/cdsc/...): from_item_ID,
+        // reference_count, then that many to_item_IDs.
+        let mut p = 12usize;
+        while p + 8 <= b.len() {
+            let sub_sz = u32::from_be_bytes(b[p..p + 4].try_into().unwrap()) as usize;
+            if sub_sz < 8 || p + sub_sz > b.len() {
+                break;
+            }
+            let ref_type = &b[p + 4..p + 8];
+            let mut q = p + 8;
+            if let Some(from_id) = read_id(q) {
+                q += id_sz;
+                if q + 2 <= b.len() {
+                    let cnt = u16::from_be_bytes(b[q..q + 2].try_into().unwrap()) as usize;
+                    if ref_type == b"thmb" {
+                        thumbnail_ids.push(from_id);
+                    }
+                    let _ = cnt; // to_item_IDs are not needed for targeting
+                }
+            }
+            p += sub_sz;
+        }
+    }
+
+    (primary_item_id, thumbnail_ids)
 }
 
 fn read_box_header(bytes: &[u8], pos: usize) -> Result<(usize, usize), StrHideError> {
@@ -954,5 +1067,132 @@ mod tests {
             host_extent(&idat, 1600, 1900).is_none(),
             "idat construction is not a file offset and cannot host"
         );
+    }
+
+    /// Minimal HEIF container helpers for the targeting tests below.
+    fn mk_box(fcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut b = Vec::with_capacity(8 + payload.len());
+        b.extend_from_slice(&((8 + payload.len()) as u32).to_be_bytes());
+        b.extend_from_slice(fcc);
+        b.extend_from_slice(payload);
+        b
+    }
+
+    fn mk_fullbox(ver: u8, body: &[u8]) -> Vec<u8> {
+        let mut v = vec![ver, 0, 0, 0];
+        v.extend_from_slice(body);
+        v
+    }
+
+    /// Build a HEIF with two JPEG items (`primary_id` names the `pitm`
+    /// primary) plus an optional `iref`/`thmb` declaring `thumb_id` a
+    /// thumbnail. Returns the file bytes.
+    fn build_two_jpeg_heif(primary_id: u16, thumb_id: Option<u16>) -> Vec<u8> {
+        let mut jpeg_a = vec![0xFF, 0xD8];
+        jpeg_a.extend(std::iter::repeat_n(0x11u8, 62)); // 64 bytes
+        let mut jpeg_b = vec![0xFF, 0xD8];
+        jpeg_b.extend(std::iter::repeat_n(0x22u8, 62));
+
+        let mk_infe = |id: u16| {
+            let mut body = vec![2u8, 0, 0, 0]; // infe version 2
+            body.extend_from_slice(&id.to_be_bytes());
+            body.extend_from_slice(&0u16.to_be_bytes()); // protection
+            body.extend_from_slice(b"jpeg");
+            mk_box(b"infe", &body)
+        };
+        let mut iinf_body = mk_fullbox(0, &2u16.to_be_bytes()); // entry count
+        iinf_body.extend_from_slice(&mk_infe(1));
+        iinf_body.extend_from_slice(&mk_infe(2));
+        let iinf = mk_box(b"iinf", &iinf_body);
+        let pitm = mk_box(b"pitm", &mk_fullbox(0, &primary_id.to_be_bytes()));
+
+        // iref/thmb: from_item_ID = thumb_id, one to_item (the primary).
+        let iref = thumb_id.map(|t| {
+            let mut body = mk_fullbox(0, &[]); // iref version 0 (16-bit ids)
+            let mut thmb_body = Vec::new();
+            thmb_body.extend_from_slice(&t.to_be_bytes());
+            thmb_body.extend_from_slice(&1u16.to_be_bytes()); // reference count
+            thmb_body.extend_from_slice(&primary_id.to_be_bytes());
+            body.extend_from_slice(&mk_box(b"thmb", &thmb_body));
+            mk_box(b"iref", &body)
+        });
+
+        // iloc v0 with 4-byte offset/length fields, no base offset.
+        let mut iloc_body = mk_fullbox(0, &[]);
+        iloc_body.push(0x44); // offset_size=4, length_size=4
+        iloc_body.push(0x00); // base_offset_size=0
+        iloc_body.extend_from_slice(&2u16.to_be_bytes());
+        // The two extents' file offsets depend on the sizes of everything
+        // before mdat, which are fixed once iinf/pitm/iloc/iref sizes are
+        // known; iloc itself is a fixed 8 + 2*14 bytes, so compute in order.
+        let iloc_len = 8 + 8 + 2 * (2 + 2 + 2 + 4 + 4);
+        let mut meta_body_len = pitm.len() + iinf.len() + iloc_len;
+        if let Some(ref r) = iref {
+            meta_body_len += r.len();
+        }
+        let ftyp_len = 8 + 8;
+        // meta box = 8 header + 4 fullbox version/flags + body; mdat = 8 header.
+        let mdat_data_start = ftyp_len + 8 + 4 + meta_body_len + 8;
+        let off_a = mdat_data_start as u32;
+        let off_b = (mdat_data_start + jpeg_a.len()) as u32;
+        for (id, off) in [(1u16, off_a), (2u16, off_b)] {
+            iloc_body.extend_from_slice(&id.to_be_bytes());
+            iloc_body.extend_from_slice(&0u16.to_be_bytes()); // data ref
+            iloc_body.extend_from_slice(&1u16.to_be_bytes()); // extent count
+            iloc_body.extend_from_slice(&off.to_be_bytes());
+            iloc_body.extend_from_slice(&(jpeg_a.len() as u32).to_be_bytes());
+        }
+        assert_eq!(iloc_body.len() + 8, iloc_len);
+        let iloc = mk_box(b"iloc", &iloc_body);
+
+        let mut meta_payload = mk_fullbox(0, &[]);
+        meta_payload.extend_from_slice(&pitm);
+        meta_payload.extend_from_slice(&iinf);
+        if let Some(ref r) = iref {
+            meta_payload.extend_from_slice(r);
+        }
+        meta_payload.extend_from_slice(&iloc);
+        let meta = mk_box(b"meta", &meta_payload);
+
+        let mut file = Vec::new();
+        file.extend_from_slice(&mk_box(b"ftyp", b"mif1\0\0\0\0"));
+        file.extend_from_slice(&meta);
+        file.extend_from_slice(&mk_box(
+            b"mdat",
+            &[jpeg_a.as_slice(), jpeg_b.as_slice()].concat(),
+        ));
+        file
+    }
+
+    /// The bridge must never pick the `pitm` primary image, and must prefer
+    /// an `iref`/`thmb`-declared thumbnail when one exists (audit
+    /// 2026-10-24 5.3).
+    #[test]
+    fn bridge_target_skips_primary_and_prefers_thumbnail() {
+        // Primary is item 1, thumbnail reference names item 2: item 2 wins.
+        let file = build_two_jpeg_heif(1, Some(2));
+        let target = find_bridge_target(&file).expect("thumbnail item is bridgeable");
+        match target.kind {
+            BridgeTargetKind::DirectJpeg { item_id } => assert_eq!(item_id, 2),
+            other => panic!("expected DirectJpeg, got {other:?}"),
+        }
+
+        // Without iref the primary is still excluded; the remaining JPEG
+        // item (2) is the target.
+        let file = build_two_jpeg_heif(1, None);
+        let target = find_bridge_target(&file).expect("non-primary item is bridgeable");
+        match target.kind {
+            BridgeTargetKind::DirectJpeg { item_id } => assert_eq!(item_id, 2),
+            other => panic!("expected DirectJpeg, got {other:?}"),
+        }
+
+        // Swap: primary is item 2 (the second extent), so the target must
+        // flip to item 1.
+        let file = build_two_jpeg_heif(2, Some(1));
+        let target = find_bridge_target(&file).expect("non-primary item is bridgeable");
+        match target.kind {
+            BridgeTargetKind::DirectJpeg { item_id } => assert_eq!(item_id, 1),
+            other => panic!("expected DirectJpeg, got {other:?}"),
+        }
     }
 }

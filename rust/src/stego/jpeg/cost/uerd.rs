@@ -1,8 +1,27 @@
 //! Uniform Embedding Revisited Distortion (UERD) for JPEG DCT coefficients.
 //!
-//! Based on L. Guo, J. Ni, W. Su, C. Tang and Y.-Q. Shi,
-//! "Using Statistical Image Model for JPEG Steganography: Uniform Embedding Revisited",
-//! IEEE Transactions on Information Forensics and Security, 2015.
+//! An **UERD-inspired variant** of L. Guo, J. Ni, W. Su, C. Tang and
+//! Y.-Q. Shi, "Using Statistical Image Model for JPEG Steganography:
+//! Uniform Embedding Revisited", IEEE Transactions on Information Forensics
+//! and Security, 2015. Deliberate deviations from the paper's formula
+//! (embed-side only — extraction is cost-free, so the round trip does not
+//! depend on any of them):
+//!
+//! - the numerator uses `Q[k]` to the **first** power, not `Q[k]^2`, and the
+//!   inter-block `D = 1.5` factor (first row/column modes) is absent;
+//! - the denominator smooths the block energy over the **8-neighbourhood
+//!   including diagonals, averaged** over existing neighbours
+//!   (`J + w·avg`), not the paper's `J + 0.25·(sum of the four
+//!   cross-neighbours)` — the neighbourhood term is therefore weaker and
+//!   mixed with diagonal blocks;
+//! - border blocks average over their actually-present neighbours instead
+//!   of the paper's zero-padded shifted sum.
+//!
+//! These change the *ordering* between modes/blocks relative to the paper's
+//! UERD while keeping its qualitative shape (high-energy textured blocks are
+//! cheap, flat blocks expensive). Aligning the formula requires a detection
+//! evaluation to justify (see the review report M4), which has not been run;
+//! until then this module claims fidelity to the idea, not the arithmetic.
 //!
 //! Evaluates embedding distortion directly on quantized DCT coefficients and
 //! their 8-neighborhood block energies, spreading modifications across complex,
@@ -39,7 +58,7 @@ impl JpegCostModel for UerdCostModel {
     }
 
     fn description(&self) -> &'static str {
-        "Uniform Embedding Revisited Distortion (UERD) DCT model (IEEE TIFS 2015)"
+        "UERD-inspired DCT distortion variant (deviates from Guo et al. IEEE TIFS 2015: Q^1, 8-neighbour average; see module docs)"
     }
 
     fn compute_cost(
@@ -82,9 +101,14 @@ impl JpegCostModel for UerdCostModel {
             let mut energy = 0.0f64;
             for k in 1..64 {
                 let coeff = block[k];
-                // Mask LSB of absolute coefficient: (coeff.unsigned_abs() & !1)
-                // Guarantees 100% deterministic, bit-for-bit identical block energy
-                // and candidate slot ranking across embed and extract, without i16::MIN panic.
+                // Mask the LSB of the absolute coefficient. This does NOT
+                // make the energy "±1 invariant" (|c|=3 contributes 2 before
+                // a flip and 4 after) — it makes the *quantized* contribution
+                // a step function of |c|, so a ±1 modification can only move
+                // a coefficient's energy contribution by one step, never to a
+                // different step. The price of a move therefore never depends
+                // on the exact value the embedder is about to change. The
+                // `unsigned_abs` also avoids the i16::MIN negation panic.
                 let coeff_energy = (coeff.unsigned_abs() & !1) as f64;
                 energy += coeff_energy * q[k];
             }
@@ -146,9 +170,10 @@ impl JpegCostModel for UerdCostModel {
         //
         // Every position is priced, including zero coefficients: the V3 code is
         // ternary and may legally create a coefficient, so `|c| >= 2` is no
-        // longer a gate. The block energy is masked with `|c| & !1`, which is
-        // invariant under `±1`, so the price of a move is the same in both
-        // directions and never depends on a value the embedder could change.
+        // longer a gate. The block energy uses the `|c| & !1` step function
+        // (see Step 1), so a move can shift a coefficient's energy
+        // contribution by one step but the price never depends on the exact
+        // value the embedder is about to change.
         let mut costs = vec![params.wet_cost; total_blocks * 64];
 
         for (bi, &block_rho) in smoothed_energies.iter().enumerate() {

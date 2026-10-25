@@ -818,7 +818,16 @@ fn embed_once(
         &mut touched,
         applied,
     ) {
-        if ctx.table.is_some() && matches!(e, StrHideError::TrellisInfeasible(_)) {
+        if ctx.table.is_some()
+            && matches!(
+                e,
+                StrHideError::TrellisInfeasible {
+                    cause: crate::errors::TrellisCause::DeadElement
+                        | crate::errors::TrellisCause::DeadGroup,
+                    ..
+                }
+            )
+        {
             return Err(Attempt {
                 error: StrHideError::UnsupportedFormat(
                     "This JPEG's Huffman table is over-optimised: it cannot encode the modifications required for this carrier. Please re-save the carrier with a standard (Annex K) table.".into(),
@@ -866,7 +875,16 @@ fn embed_once(
         &mut touched,
         applied,
     ) {
-        if ctx.table.is_some() && e.to_string().contains("no legal element") {
+        if ctx.table.is_some()
+            && matches!(
+                e,
+                StrHideError::TrellisInfeasible {
+                    cause: crate::errors::TrellisCause::DeadElement
+                        | crate::errors::TrellisCause::DeadGroup,
+                    ..
+                }
+            )
+        {
             return Err(Attempt {
                 error: StrHideError::UnsupportedFormat(
                     "This JPEG's Huffman table is over-optimised: it cannot encode the modifications required for this payload size. Please reduce payload or re-save the carrier with a standard (Annex K) table.".into(),

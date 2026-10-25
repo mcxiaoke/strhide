@@ -206,15 +206,13 @@ pub fn extract_carrier_with_profile(
             &options.extract_params,
         )
     } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
-        // PNG format
-        let model = CostModelRegistry::get_spatial_model(options.algorithm.as_deref()).ok_or_else(
-            || {
-                StrHideError::General(format!(
-                    "Unknown or incompatible spatial stego algorithm: {:?}",
-                    options.algorithm
-                ))
-            },
-        )?;
+        // PNG format. The carrier names its cost model in the feature word
+        // and the extractor rebuilds everything from that declaration, so
+        // `--algorithm` must not gate extraction (mirroring the JPEG branch
+        // above): a misspelled algorithm name is not a reason to refuse a
+        // readable carrier. The instance below is only a logging hint.
+        let model = CostModelRegistry::get_spatial_model(None)
+            .expect("the default spatial model always resolves");
         png::extract_png(
             carrier_bytes,
             secret,

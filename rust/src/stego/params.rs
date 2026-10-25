@@ -246,6 +246,25 @@ fn default_stc_u() -> u8 {
     0
 }
 
+impl PngParams {
+    /// Quantise the hyperparameters to the exact forms the PNG feature word
+    /// can carry: `epsilon` as a power of two and the `sigma` model option
+    /// at `f32` precision. The embedder, prober and extractor all run on
+    /// these quantised values, so a carrier's wire description always
+    /// reproduces the cost map it was built with. Values already in wire
+    /// form (the defaults) round-trip unchanged.
+    #[must_use]
+    pub fn wire_quantized(&self) -> Self {
+        let mut p = self.clone();
+        let k = crate::stego::header::FeatureWord::quantize_epsilon(p.epsilon);
+        p.epsilon = (0.5f64).powi(k as i32);
+        if let Some(s) = p.algorithm_options.get_mut("sigma") {
+            *s = *s as f32 as f64;
+        }
+        p
+    }
+}
+
 impl Default for PngParams {
     fn default() -> Self {
         Self {

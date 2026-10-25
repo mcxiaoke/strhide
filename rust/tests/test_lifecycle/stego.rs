@@ -666,9 +666,9 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
     let feature_bytes = read_header(&first, &slots_a[256..512]);
     let fw =
         strhide::stego::header::FeatureWord::decode(&feature_bytes).expect("decode feature word");
-    assert_eq!(fw.version, 2);
+    assert_eq!(fw.version, 3);
     assert_eq!(fw.codec, strhide::stego::StegoCodec::Stc);
-    assert_eq!(fw.h, 8, "v2 FeatureWord carries real constraint height h=8");
+    assert_eq!(fw.h, 8, "v3 FeatureWord carries real constraint height h=8");
 
     // Explicit Hamming embed must declare escape h=15 in word1, and codec Hamming in FeatureWord
     let hamming_opts = StegoOptions {
