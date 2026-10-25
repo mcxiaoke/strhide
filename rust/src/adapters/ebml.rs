@@ -10,66 +10,30 @@ pub const EBML_HEADER_ID: u32 = 0x1A45_DFA3;
 pub const MATROSKA_SEGMENT_ID: u32 = 0x1853_8067;
 
 /// Encode an unsigned integer as an EBML VINT.
-pub fn encode_vint(val: u64) -> Vec<u8> {
-    if val < (1 << 7) - 1 {
-        vec![(0x80 | val) as u8]
-    } else if val < (1 << 14) - 1 {
-        let v = 0x4000 | val;
-        vec![(v >> 8) as u8, v as u8]
-    } else if val < (1 << 21) - 1 {
-        let v = 0x20_0000 | val;
-        vec![(v >> 16) as u8, (v >> 8) as u8, v as u8]
-    } else if val < (1 << 28) - 1 {
-        let v = 0x1000_0000 | val;
-        vec![(v >> 24) as u8, (v >> 16) as u8, (v >> 8) as u8, v as u8]
-    } else if val < (1 << 35) - 1 {
-        let v = 0x08_0000_0000 | val;
-        vec![
-            (v >> 32) as u8,
-            (v >> 24) as u8,
-            (v >> 16) as u8,
-            (v >> 8) as u8,
-            v as u8,
-        ]
-    } else if val < (1 << 42) - 1 {
-        let v = 0x0400_0000_0000 | val;
-        vec![
-            (v >> 40) as u8,
-            (v >> 32) as u8,
-            (v >> 24) as u8,
-            (v >> 16) as u8,
-            (v >> 8) as u8,
-            v as u8,
-        ]
-    } else if val < (1 << 49) - 1 {
-        let v = 0x02_0000_0000_0000 | val;
-        vec![
-            (v >> 48) as u8,
-            (v >> 40) as u8,
-            (v >> 32) as u8,
-            (v >> 24) as u8,
-            (v >> 16) as u8,
-            (v >> 8) as u8,
-            v as u8,
-        ]
-    } else {
-        let v = 0x0100_0000_0000_0000 | val;
-        vec![
-            (v >> 56) as u8,
-            (v >> 48) as u8,
-            (v >> 40) as u8,
-            (v >> 32) as u8,
-            (v >> 24) as u8,
-            (v >> 16) as u8,
-            (v >> 8) as u8,
-            v as u8,
-        ]
+///
+/// The per-length thresholds exclude the all-ones payload: a Data Size VINT
+/// whose bits are all 1 means "unknown size" (RFC 8794), so the boundary
+/// values 127/16383/… must spill into the next length instead of taking the
+/// shorter encoding. (Review P3-15 called those thresholds an RFC SHOULD
+/// violation, but the unknown-size rule makes the longer form mandatory —
+/// the original thresholds were right.)
+///
+/// Returns `None` for `val >= 2^56 - 1`: the 8-byte length is exhausted, and
+/// `2^56 - 1` is itself the unknown-size sentinel. The old code emitted
+/// malformed bytes there; no strhide envelope can reach that size, and
+/// callers treat `None` as "not our envelope".
+pub fn encode_vint(val: u64) -> Option<Vec<u8>> {
+    for len in 1usize..=8 {
+        let marker = 1u64 << (7 * len);
+        if val < marker - 1 {
+            // For an `len`-byte VINT the first byte's leading `len` bits are
+            // the length marker, which lands exactly at `1 << (7 * len)` and
+            // ORs straight in above the 7*len payload bits.
+            let v = marker | val;
+            return Some(v.to_be_bytes()[8 - len..].to_vec());
+        }
     }
-}
-
-/// Calculate the length of the Void element prefix (1 byte ID + VINT size length).
-pub fn calc_prefix_len(ube_size: u64) -> u64 {
-    1 + encode_vint(ube_size).len() as u64
+    None
 }
 
 /// Read an EBML Element ID from reader. Returns (id, id_len).
@@ -131,5 +95,61 @@ pub fn read_vint_size(reader: &mut dyn SeekRead) -> Result<(Option<u64>, usize),
         Ok((None, len))
     } else {
         Ok((Some(val), len))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// Boundary values must avoid the all-ones "unknown size" payload of each
+    /// length: 127/16383/… spill into the next length, and everything from
+    /// `2^56 - 1` up is unrepresentable (the old code emitted malformed
+    /// bytes there — review P3-15).
+    #[test]
+    fn encode_vint_avoids_unknown_size_sentinel() {
+        assert_eq!(encode_vint(0).unwrap(), vec![0x80]);
+        assert_eq!(encode_vint(126).unwrap(), vec![0xFE]);
+        assert_eq!(encode_vint(127).unwrap(), vec![0x40, 0x7F]);
+        assert_eq!(encode_vint(128).unwrap(), vec![0x40, 0x80]);
+        assert_eq!(encode_vint(16382).unwrap(), vec![0x7F, 0xFE]);
+        assert_eq!(encode_vint(16383).unwrap(), vec![0x20, 0x3F, 0xFF]);
+        assert_eq!(encode_vint(16384).unwrap(), vec![0x20, 0x40, 0x00]);
+        assert_eq!(encode_vint(1 << 20).unwrap(), vec![0x30, 0x00, 0x00]);
+        assert_eq!(
+            encode_vint((1 << 56) - 2).unwrap(),
+            vec![0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE]
+        );
+        assert!(encode_vint((1 << 56) - 1).is_none());
+        assert!(encode_vint(1 << 56).is_none());
+        assert!(encode_vint(u64::MAX).is_none());
+    }
+
+    /// Writer and reader share the encoding: every encodable value reads back
+    /// identically, with the VINT length matching the byte count.
+    #[test]
+    fn encode_vint_roundtrips_through_read_vint_size() {
+        for val in [
+            0u64,
+            1,
+            126,
+            127,
+            128,
+            16382,
+            16383,
+            16384,
+            2_097_151,
+            2_097_152,
+            (1 << 28) - 1,
+            (1 << 35) - 1,
+            (1 << 49) - 1,
+            (1 << 56) - 2,
+        ] {
+            let vint = encode_vint(val).unwrap_or_else(|| panic!("{val} must encode"));
+            let (size, vint_len) = read_vint_size(&mut Cursor::new(vint.clone())).unwrap();
+            assert_eq!(size, Some(val), "value {val} must read back");
+            assert_eq!(vint_len, vint.len(), "declared length must match bytes");
+        }
     }
 }

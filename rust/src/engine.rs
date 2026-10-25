@@ -1091,6 +1091,22 @@ where
         adapter.finalize(out, &fin_ctx)?;
     }
 
+    // Post-write self-check (review §5.2): inject and locate must agree on
+    // where the envelope landed, or the write reports success for data that
+    // read/inspect/remove can never reach. Matching against the trailer magic
+    // this write produced is exactly what the read path demands, so a fresh
+    // output its own locate cannot find aborts here instead of orphaning the
+    // envelope. Cost: one streaming locate pass over the output.
+    out.flush()?;
+    out.seek(SeekFrom::Start(0))?;
+    let self_located = adapter.locate(out, Some(&trailer_magic))?;
+    if self_located.is_none() {
+        return Err(StrHideError::General(format!(
+            "Post-write self-check failed: the envelope written via strategy '{}' cannot be located again in the output; aborting so no unreadable stego is committed",
+            selected_strategy
+        )));
+    }
+
     let strategy_note = adapter.strategy_note(&selected_strategy, strategy == "auto");
 
     Ok(WriteCoreResult {

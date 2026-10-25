@@ -250,53 +250,63 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
     let mut tail = vec![0u8; scan_len as usize];
     reader.read_exact(&mut tail)?;
 
-    // Find EOCD PK\x05\x06
-    if let Some(pos) = tail.windows(4).rposition(|w| w == b"PK\x05\x06") {
+    // Find the EOCD. Garbage appended after a valid archive may itself contain
+    // `PK\x05\x06`, so the last match is not necessarily the record the
+    // central directory agrees with (review P3-22): walk candidates from the
+    // tail and keep going while they fail to resolve a readable central
+    // directory. Stopping only at a detected signature keeps the guard
+    // conservative.
+    let candidates: Vec<usize> = tail
+        .windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == b"PK\x05\x06")
+        .map(|(i, _)| i)
+        .collect();
+    for pos in candidates.into_iter().rev() {
         let eocd_pos = (file_size - scan_len) + pos as u64;
         reader.seek(SeekFrom::Start(eocd_pos + 12))?;
         let mut cd_info = [0u8; 8];
-        if reader.read_exact(&mut cd_info).is_ok() {
-            let cd_size = u32::from_le_bytes(cd_info[0..4].try_into().unwrap()) as u64;
-            let cd_offset = u32::from_le_bytes(cd_info[4..8].try_into().unwrap()) as u64;
+        if reader.read_exact(&mut cd_info).is_err() {
+            continue;
+        }
+        let cd_size = u32::from_le_bytes(cd_info[0..4].try_into().unwrap()) as u64;
+        let cd_offset = u32::from_le_bytes(cd_info[4..8].try_into().unwrap()) as u64;
 
-            if cd_offset + cd_size <= file_size && reader.seek(SeekFrom::Start(cd_offset)).is_ok() {
-                let mut cd_buf = vec![0u8; cd_size as usize];
-                if reader.read_exact(&mut cd_buf).is_ok() {
-                    let mut offset = 0;
-                    while offset + 46 <= cd_buf.len() {
-                        if &cd_buf[offset..offset + 4] != b"PK\x01\x02" {
-                            break;
-                        }
-                        let name_len = u16::from_le_bytes(
-                            cd_buf[offset + 28..offset + 30].try_into().unwrap(),
-                        ) as usize;
-                        let extra_len = u16::from_le_bytes(
-                            cd_buf[offset + 30..offset + 32].try_into().unwrap(),
-                        ) as usize;
-                        let comment_len = u16::from_le_bytes(
-                            cd_buf[offset + 32..offset + 34].try_into().unwrap(),
-                        ) as usize;
+        if cd_offset + cd_size > file_size || reader.seek(SeekFrom::Start(cd_offset)).is_err() {
+            continue;
+        }
+        let mut cd_buf = vec![0u8; cd_size as usize];
+        if reader.read_exact(&mut cd_buf).is_err() {
+            continue;
+        }
+        let mut offset = 0;
+        while offset + 46 <= cd_buf.len() {
+            if &cd_buf[offset..offset + 4] != b"PK\x01\x02" {
+                break;
+            }
+            let name_len =
+                u16::from_le_bytes(cd_buf[offset + 28..offset + 30].try_into().unwrap()) as usize;
+            let extra_len =
+                u16::from_le_bytes(cd_buf[offset + 30..offset + 32].try_into().unwrap()) as usize;
+            let comment_len =
+                u16::from_le_bytes(cd_buf[offset + 32..offset + 34].try_into().unwrap()) as usize;
 
-                        let name_start = offset + 46;
-                        if name_start + name_len <= cd_buf.len() {
-                            let name =
-                                String::from_utf8_lossy(&cd_buf[name_start..name_start + name_len]);
-                            let upper = name.to_uppercase();
-                            if upper.starts_with("META-INF/")
-                                && (upper.ends_with(".SF")
-                                    || upper.ends_with(".RSA")
-                                    || upper.ends_with(".DSA"))
-                            {
-                                reader.seek(SeekFrom::Start(start_pos))?;
-                                return Ok(Some(format!(
-                                    "ZIP/JAR archive contains digital signature file ({name}). Modifying it will break JVM/signature verification."
-                                )));
-                            }
-                        }
-                        offset += 46 + name_len + extra_len + comment_len;
-                    }
+            let name_start = offset + 46;
+            if name_start + name_len <= cd_buf.len() {
+                let name = String::from_utf8_lossy(&cd_buf[name_start..name_start + name_len]);
+                let upper = name.to_uppercase();
+                if upper.starts_with("META-INF/")
+                    && (upper.ends_with(".SF")
+                        || upper.ends_with(".RSA")
+                        || upper.ends_with(".DSA"))
+                {
+                    reader.seek(SeekFrom::Start(start_pos))?;
+                    return Ok(Some(format!(
+                        "ZIP/JAR archive contains digital signature file ({name}). Modifying it will break JVM/signature verification."
+                    )));
                 }
             }
+            offset += 46 + name_len + extra_len + comment_len;
         }
     }
 

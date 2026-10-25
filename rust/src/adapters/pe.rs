@@ -635,15 +635,16 @@ fn inject_codebits(
 
     // Defensive check: carrier must not already contain a pe_codebits channel.
     // A second codebits injection would overwrite the first channel's header in .text,
-    // permanently orphaning the first restore diff in slack (P1-1).
+    // permanently orphaning the first restore diff in slack (P1-1). The header
+    // parse alone (magic + version whitelist + capacity) decides, without
+    // requiring the recorded slack_off to fall inside the *current* slack
+    // ranges — a section table edited after injection would otherwise slip
+    // past this second line of defense (review P3-10). The nonzero diff region
+    // confirms the channel is live rather than a coincidental byte pattern.
     if let Ok(existing) = pe_codebits::parse_channel_header(&text, layout.bitness) {
         let diff_len = pe_codebits::CHANNEL_HEADER_LEN + existing.ube_len as usize;
-        let in_slack = layout.slack_ranges.iter().any(|&(s, e)| {
-            (existing.slack_off as u64) >= s && (existing.slack_off as u64 + diff_len as u64) <= e
-        });
-        if in_slack
-            && let Ok(sample) =
-                pe_codebits::read_at(host_in, existing.slack_off as u64, diff_len.min(64))
+        if let Ok(sample) =
+            pe_codebits::read_at(host_in, existing.slack_off as u64, diff_len.min(64))
             && sample.iter().any(|&b| b != 0)
         {
             return Err(StrHideError::General(
@@ -663,7 +664,15 @@ fn inject_codebits(
     // original bytes bit-for-bit.
     let _zeroed = pe_codebits::verify_zero_slack(host_in, slack_off, need_slack)?;
 
-    let diff = pe_codebits::embed(&mut text, layout.bitness, &ube, slack_off as u32)?;
+    // The channel header stores the slack offset as u32; a run beyond 4 GiB
+    // would truncate silently and send strip to the wrong region (P3-7).
+    let slack_off_u32 = u32::try_from(slack_off).map_err(|_| {
+        StrHideError::UnsupportedFormat(
+            "pe_codebits slack run lies beyond 4 GiB; the channel header cannot address it".into(),
+        )
+    })?;
+
+    let diff = pe_codebits::embed(&mut text, layout.bitness, &ube, slack_off_u32)?;
 
     copy_with_patches(
         host_in,

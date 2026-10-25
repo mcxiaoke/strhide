@@ -1,8 +1,7 @@
 use std::io::{SeekFrom, Write};
 
 use crate::adapters::ebml::{
-    EBML_HEADER_ID, EBML_VOID_ID, MATROSKA_SEGMENT_ID, calc_prefix_len, encode_vint,
-    read_element_id, read_vint_size,
+    EBML_HEADER_ID, EBML_VOID_ID, MATROSKA_SEGMENT_ID, encode_vint, read_element_id, read_vint_size,
 };
 use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity};
 use crate::envelope::EnvelopeTrailer;
@@ -85,8 +84,10 @@ impl HostAdapter for MkvAdapter {
         ube_in.seek(SeekFrom::Start(0))?;
 
         let inject_size = if strategy == "ebml_void" {
+            let vint = encode_vint(ube_size).ok_or_else(|| {
+                StrHideError::General("Envelope size exceeds the EBML VINT range".into())
+            })?;
             out.write_all(&[EBML_VOID_ID])?;
-            let vint = encode_vint(ube_size);
             out.write_all(&vint)?;
             1 + vint.len() as u64 + ube_size
         } else {
@@ -110,19 +111,21 @@ impl HostAdapter for MkvAdapter {
         };
 
         // 1. Check ebml_void element
-        let prefix_len = calc_prefix_len(trailer.ube_total_size);
-        if trailer.ube_offset >= prefix_len {
-            stego_in.seek(SeekFrom::Start(trailer.ube_offset - prefix_len))?;
-            let mut prefix = vec![0u8; prefix_len as usize];
-            if stego_in.read_exact(&mut prefix).is_ok()
-                && prefix[0] == EBML_VOID_ID
-                && prefix[1..] == encode_vint(trailer.ube_total_size)
-            {
-                return Ok(Some((
-                    trailer.ube_offset,
-                    trailer.ube_total_size,
-                    "ebml_void".into(),
-                )));
+        if let Some(vint) = encode_vint(trailer.ube_total_size) {
+            let prefix_len = 1 + vint.len() as u64;
+            if trailer.ube_offset >= prefix_len {
+                stego_in.seek(SeekFrom::Start(trailer.ube_offset - prefix_len))?;
+                let mut prefix = vec![0u8; prefix_len as usize];
+                if stego_in.read_exact(&mut prefix).is_ok()
+                    && prefix[0] == EBML_VOID_ID
+                    && prefix[1..] == *vint
+                {
+                    return Ok(Some((
+                        trailer.ube_offset,
+                        trailer.ube_total_size,
+                        "ebml_void".into(),
+                    )));
+                }
             }
         }
 
@@ -264,21 +267,23 @@ impl HostAdapter for MkvAdapter {
             return found;
         }
 
-        let prefix_len = calc_prefix_len(ube_total_size);
-        if ube_offset >= prefix_len
-            && stego_in
-                .seek(SeekFrom::Start(ube_offset - prefix_len))
-                .is_ok()
-        {
-            let mut prefix = vec![0u8; prefix_len as usize];
-            if stego_in.read_exact(&mut prefix).is_ok()
-                && prefix[0] == EBML_VOID_ID
-                && prefix[1..] == encode_vint(ube_total_size)
+        if let Some(vint) = encode_vint(ube_total_size) {
+            let prefix_len = 1 + vint.len() as u64;
+            if ube_offset >= prefix_len
+                && stego_in
+                    .seek(SeekFrom::Start(ube_offset - prefix_len))
+                    .is_ok()
             {
-                found.push(format!(
-                    "trailing EBML Void element at offset {} carries {ube_total_size} bytes",
-                    ube_offset - prefix_len
-                ));
+                let mut prefix = vec![0u8; prefix_len as usize];
+                if stego_in.read_exact(&mut prefix).is_ok()
+                    && prefix[0] == EBML_VOID_ID
+                    && prefix[1..] == *vint
+                {
+                    found.push(format!(
+                        "trailing EBML Void element at offset {} carries {ube_total_size} bytes",
+                        ube_offset - prefix_len
+                    ));
+                }
             }
         }
         found
@@ -291,7 +296,10 @@ impl HostAdapter for MkvAdapter {
         ube_size: u64,
     ) -> Result<u64, StrHideError> {
         if strategy == "ebml_void" {
-            Ok(calc_prefix_len(ube_size))
+            let vint = encode_vint(ube_size).ok_or_else(|| {
+                StrHideError::General("Envelope size exceeds the EBML VINT range".into())
+            })?;
+            Ok(1 + vint.len() as u64)
         } else {
             Ok(0)
         }

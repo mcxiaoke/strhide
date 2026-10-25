@@ -109,6 +109,29 @@ fn test_jar_signature_rejection() {
     assert!(jar_err.unwrap().contains("signature"));
 }
 
+/// Garbage trailing an archive may itself contain `PK\x05\x06`; taking the
+/// last magic match as THE EOCD used to read cd_offset from the garbage and
+/// miss the signature file (review P3-22). The scan must keep walking until
+/// the central directory actually resolves.
+#[test]
+fn test_jar_signature_survives_trailing_eocd_magic_garbage() {
+    let mut jar = make_zip_with_entries(&[
+        ("content.txt", b"regular text"),
+        ("META-INF/SIGN.SF", b"Signature-Version: 1.0"),
+    ]);
+    // A fake EOCD after the real one: cd_offset/cd_size = u32::MAX never
+    // resolves, so the scan falls through to the genuine record.
+    jar.extend_from_slice(b"PK\x05\x06");
+    jar.extend_from_slice(&[0xFFu8; 18]);
+    let mut cursor = Cursor::new(jar);
+    let jar_err = check_jar_signature(&mut cursor, Some("app.jar")).unwrap();
+    assert!(
+        jar_err.is_some(),
+        "signature detection must survive trailing EOCD-like garbage"
+    );
+    assert!(jar_err.unwrap().contains("signature"));
+}
+
 fn make_zip_with_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut cd = Vec::new();

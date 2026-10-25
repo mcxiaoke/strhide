@@ -2,7 +2,7 @@
 //!
 //! Used by [`super::mp4::Mp4Adapter`] and [`super::heif::HeifAdapter`].
 
-use std::io::{SeekFrom, Write};
+use std::io::{Read, SeekFrom, Write};
 
 use crate::adapters::{SeekRead, SeekWrite, StrategyCapacity};
 use crate::envelope::{EnvelopeHeader, EnvelopeTrailer};
@@ -428,6 +428,14 @@ pub fn heif_strategy_capacities() -> Vec<StrategyCapacity> {
     ]
 }
 
+/// Upper bound for the whole-file scans in [`isobmff_can_item_hidden`] and
+/// [`isobmff_has_iloc_item`]. Both only need the boxes up to and including the
+/// `meta` box, which sits near the file start in every real carrier, so the
+/// cap keeps a multi-GB host from being buffered whole (review P3-6). Past the
+/// cap the scans answer "no": auto steers to `box_uuid` on the write path, and
+/// locate falls through to its EOF branch on the read path.
+pub const MAX_ISOBMFF_META_SCAN: u64 = 1024 * 1024 * 1024;
+
 pub fn isobmff_can_item_hidden(reader: &mut dyn SeekRead) -> bool {
     let start_pos = match reader.stream_position() {
         Ok(p) => p,
@@ -437,7 +445,10 @@ pub fn isobmff_can_item_hidden(reader: &mut dyn SeekRead) -> bool {
         return false;
     }
     let mut data = Vec::new();
-    if reader.read_to_end(&mut data).is_err() {
+    if Read::take(&mut *reader, MAX_ISOBMFF_META_SCAN)
+        .read_to_end(&mut data)
+        .is_err()
+    {
         let _ = reader.seek(SeekFrom::Start(start_pos));
         return false;
     }
@@ -640,6 +651,15 @@ fn heif_item_hidden_inject(
         subboxes.push((tag, host_bytes[bpos..bpos + s_size].to_vec()));
         bpos += s_size;
     }
+    // A meta body may end in <8 bytes that cannot start a box header (zero
+    // padding or plain residue). Silently dropping it would shift every later
+    // offset and surface as RestoreMismatch on removal, so it is carried
+    // through verbatim on both the inject and strip sides (review P3-4).
+    let meta_tail: Vec<u8> = if bpos < m_end {
+        host_bytes[bpos..m_end].to_vec()
+    } else {
+        Vec::new()
+    };
 
     let iinf_idx = subboxes
         .iter()
@@ -670,14 +690,17 @@ fn heif_item_hidden_inject(
         // Entry header: size/type (8) + version (1); the item id sits at +12
         // (u16 for infe v2, u32 for v3). The old `ipos + 8` gate allowed an
         // off-by-one on `[ipos + 8]` and did not cover the +12..+16 reads at
-        // all, so a truncated iinf panicked instead of breaking out.
+        // all, so a truncated iinf panicked. These are hard rejects rather
+        // than scan-shortening breaks: continuing with a partial `max_id`
+        // could mint a `new_id` that collides with an item declared after
+        // the break point (review P3-5).
         if ipos + 9 > iinf_box.len() {
-            break;
+            return Err(StrHideError::CorruptedData("Truncated iinf entry".into()));
         }
         let iver = iinf_box[ipos + 8];
         let need = if iver < 3 { 14 } else { 16 };
         if ipos + need > iinf_box.len() {
-            break;
+            return Err(StrHideError::CorruptedData("Truncated iinf entry".into()));
         }
         let isz = u32::from_be_bytes(iinf_box[ipos..ipos + 4].try_into().unwrap()) as usize;
         let iid = if iver < 3 {
@@ -687,7 +710,9 @@ fn heif_item_hidden_inject(
         };
         max_id = max_id.max(iid);
         if isz < need {
-            break; // cannot advance past this entry; stop scanning
+            return Err(StrHideError::CorruptedData(
+                "Malformed iinf entry size".into(),
+            ));
         }
         ipos += isz;
     }
@@ -811,12 +836,21 @@ fn heif_item_hidden_inject(
                     if base_sz > 0 && b_off > 0 {
                         // patched via base_pos
                     } else {
-                        patch_sized_uint(iloc_buf, ext_pos, off_sz, ext_off + delta_meta as u64)?;
+                        // A crafted host can name an extent offset that has no
+                        // headroom for the meta growth; wrapping would write a
+                        // bogus offset into the stego (review P3-3).
+                        let shifted = ext_off.checked_add(delta_meta as u64).ok_or_else(|| {
+                            StrHideError::CorruptedData("iloc extent offset overflows".into())
+                        })?;
+                        patch_sized_uint(iloc_buf, ext_pos, off_sz, shifted)?;
                     }
                 }
             }
             if cm == 0 && base_sz > 0 && b_off > 0 {
-                patch_sized_uint(iloc_buf, base_pos, base_sz, b_off + delta_meta as u64)?;
+                let shifted = b_off.checked_add(delta_meta as u64).ok_or_else(|| {
+                    StrHideError::CorruptedData("iloc base offset overflows".into())
+                })?;
+                patch_sized_uint(iloc_buf, base_pos, base_sz, shifted)?;
             }
         }
 
@@ -852,6 +886,7 @@ fn heif_item_hidden_inject(
     for (_, b) in &subboxes {
         new_meta_body.extend_from_slice(b);
     }
+    new_meta_body.extend_from_slice(&meta_tail);
     let new_meta_size = (new_meta_body.len() + 12) as u32;
     let mut patched_meta = Vec::with_capacity(new_meta_size as usize);
     patched_meta.extend_from_slice(&new_meta_size.to_be_bytes());
@@ -951,6 +986,13 @@ fn heif_item_hidden_strip(
         subboxes.push((tag, stego_bytes[bpos..bpos + s_size].to_vec()));
         bpos += s_size;
     }
+    // The <8-byte meta residue the inject side carried through verbatim
+    // (review P3-4); it must re-enter the restored meta unchanged.
+    let meta_tail: Vec<u8> = if bpos < m_end {
+        stego_bytes[bpos..m_end].to_vec()
+    } else {
+        Vec::new()
+    };
 
     let iinf_idx = subboxes
         .iter()
@@ -1130,6 +1172,7 @@ fn heif_item_hidden_strip(
     for (_, b) in &subboxes {
         restored_meta_body.extend_from_slice(b);
     }
+    restored_meta_body.extend_from_slice(&meta_tail);
     let restored_meta_size = (restored_meta_body.len() + 12) as u32;
     let mut restored_meta = Vec::with_capacity(restored_meta_size as usize);
     restored_meta.extend_from_slice(&restored_meta_size.to_be_bytes());
@@ -1153,7 +1196,7 @@ fn isobmff_has_iloc_item(
     let cur_pos = stego_in.stream_position().unwrap_or(0);
     stego_in.seek(SeekFrom::Start(0))?;
     let mut data = Vec::new();
-    stego_in.read_to_end(&mut data)?;
+    Read::take(&mut *stego_in, MAX_ISOBMFF_META_SCAN).read_to_end(&mut data)?;
     let _ = stego_in.seek(SeekFrom::Start(cur_pos));
 
     let mut pos = 0usize;
@@ -1251,7 +1294,13 @@ fn check_iloc_has_target(
             cpos += off_sz;
             let ext_len = read_sized_uint(iloc_box, cpos, len_sz)?;
             cpos += len_sz;
-            let abs_off = if cm == 0 { b_off + ext_off } else { ext_off };
+            // A wrapped sum could alias a genuine target offset, and a
+            // debug build would panic outright; saturation keeps both out.
+            let abs_off = if cm == 0 {
+                b_off.saturating_add(ext_off)
+            } else {
+                ext_off
+            };
             if abs_off == target_off && ext_len == target_len {
                 return Ok(true);
             }

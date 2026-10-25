@@ -10,7 +10,7 @@ use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 use strhide::adapters::{
-    HeifAdapter, HostAdapter, PdfAdapter, WavAdapter, WebpAdapter, ZipAdapter,
+    HeifAdapter, HostAdapter, JpegAdapter, PdfAdapter, WavAdapter, WebpAdapter, ZipAdapter,
 };
 use strhide::engine::{PayloadSource, WriteOptions, read_carrier, remove_carrier, write_carrier};
 use strhide::envelope::{EnvelopeTrailer, STANDARD_TRAILER_MAGIC};
@@ -479,4 +479,181 @@ fn wav_webp_auto_falls_back_to_eof_on_boundary_mismatch() {
     let restored = dir.join("r.wav");
     remove_carrier(&stego, Some(&restored), None, false).unwrap();
     assert_eq!(fs::read(&restored).unwrap(), carrier_bytes);
+}
+
+// ------------------------------------------------------------------ batch 5
+
+/// A JPEG whose header chain (EXIF/ICC/…) runs past the 16 MiB marker-scan
+/// limit never reaches SOS, so `app_segment` used to be selected by auto and
+/// then fail inside inject with no fallback (P3-19). Auto must probe SOS
+/// reachability and route to the EOF overlay instead.
+fn make_jpeg_with_giant_header() -> Vec<u8> {
+    // 257 max-size APP1 segments: the SOS marker would start at 2 + 256*65535
+    // + 65535 = 16,842,497 > MAX_JPEG_HEADER_SCAN (16,777,216).
+    let mut out = Vec::new();
+    out.extend_from_slice(b"\xff\xd8"); // SOI
+    let seg_payload = [0u8; 65533];
+    for _ in 0..257 {
+        out.extend_from_slice(b"\xff\xe1");
+        out.extend_from_slice(&65535u16.to_be_bytes());
+        out.extend_from_slice(&seg_payload);
+    }
+    out.extend_from_slice(b"\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00"); // SOS
+    out.extend_from_slice(&[0x12u8; 16]);
+    out.extend_from_slice(b"\xff\xd9"); // EOI
+    out
+}
+
+#[test]
+fn jpeg_auto_falls_back_to_eof_when_sos_unreachable() {
+    let giant = make_jpeg_with_giant_header();
+    assert_eq!(
+        JpegAdapter.choose_auto_strategy(&mut Cursor::new(giant.clone()), 128),
+        "eof",
+        "a header chain past the 16 MiB scan limit must not select app_segment"
+    );
+    // Control: a normal JPEG keeps the segment strategy.
+    assert_eq!(
+        JpegAdapter.choose_auto_strategy(&mut Cursor::new(make_jpeg()), 128),
+        "app_segment"
+    );
+
+    // End-to-end: auto writes an EOF envelope that reads and restores cleanly.
+    let dir = scratch("rv25_jpeg_bigheader");
+    let carrier = dir.join("big.jpeg");
+    fs::write(&carrier, &giant).unwrap();
+    let stego = dir.join("s.jpeg");
+    let res = write_carrier_file(
+        &carrier,
+        PayloadSource::Text("jpeg tail secret"),
+        None,
+        "auto",
+        false,
+        &stego,
+    );
+    assert_eq!(res.strategy, "eof");
+    let out = read_carrier(&stego, None, None).unwrap();
+    assert_eq!(out.data, b"jpeg tail secret");
+    let restored = dir.join("r.jpeg");
+    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    assert_eq!(fs::read(&restored).unwrap(), giant);
+}
+
+/// [`make_heif_with_meta`] with `pad` zero bytes appended inside the meta box
+/// (after iloc, before mdat): the <8-byte residue the inject/strip pair must
+/// carry through verbatim (P3-4).
+fn make_heif_with_meta_tail(pad: usize) -> Vec<u8> {
+    let mut v = make_heif_with_meta();
+    // Layout: [ftyp 24][meta][mdat 8+64]; meta starts at 24.
+    let mdat_pos = v.len() - 8 - 64;
+    let meta_len = u32::from_be_bytes(v[24..28].try_into().unwrap()) + pad as u32;
+    v[24..28].copy_from_slice(&meta_len.to_be_bytes());
+    // The iloc base_offset names the absolute mdat payload position; it moves
+    // back by `pad` once the residue joins the meta box.
+    const ILOC_BASE_FIELD: usize = 24 + 12 + 35 + 22; // ftyp + meta hdr/ver + iinf + base field in iloc
+    let base = u32::from_be_bytes(v[ILOC_BASE_FIELD..ILOC_BASE_FIELD + 4].try_into().unwrap())
+        + pad as u32;
+    v[ILOC_BASE_FIELD..ILOC_BASE_FIELD + 4].copy_from_slice(&base.to_be_bytes());
+    v.splice(mdat_pos..mdat_pos, vec![0u8; pad]);
+    v
+}
+
+/// Dropping the meta residue used to shift every later offset: inject
+/// succeeded but remove hit RestoreMismatch. The residue must roundtrip
+/// byte-exactly (P3-4).
+#[test]
+fn heif_meta_tail_residual_roundtrips() {
+    let carrier_bytes = make_heif_with_meta_tail(5);
+    let dir = scratch("rv25_heif_tail");
+    let carrier = dir.join("c.heif");
+    fs::write(&carrier, &carrier_bytes).unwrap();
+    let stego = dir.join("s.heif");
+    let res = write_carrier_file(
+        &carrier,
+        PayloadSource::Text("tail secret"),
+        None,
+        "auto",
+        false,
+        &stego,
+    );
+    assert_eq!(res.strategy, "item_hidden");
+    let out = read_carrier(&stego, None, None).unwrap();
+    assert_eq!(out.data, b"tail secret");
+    let restored = dir.join("r.heif");
+    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    assert_eq!(fs::read(&restored).unwrap(), carrier_bytes);
+}
+
+/// An iinf declaring more entries than it carries used to end the max_id scan
+/// silently, and the minted new_id could collide with an item declared after
+/// the break. The walk must reject the carrier instead (P3-5).
+#[test]
+fn heif_truncated_iinf_entry_rejected() {
+    let mut v = make_heif_with_meta();
+    // iinf entry_count: ftyp(24) + meta hdr/ver(12) + iinf hdr(8) + ver/flags(4).
+    const IINF_COUNT: usize = 48;
+    assert_eq!(
+        u16::from_be_bytes(v[IINF_COUNT..IINF_COUNT + 2].try_into().unwrap()),
+        1
+    );
+    v[IINF_COUNT..IINF_COUNT + 2].copy_from_slice(&2u16.to_be_bytes());
+    let err = HeifAdapter
+        .inject(
+            &mut Cursor::new(v),
+            &mut Cursor::new(vec![0u8; 128]),
+            &mut Vec::new(),
+            "item_hidden",
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("iinf"), "{err}");
+}
+
+/// A 64-bit iloc extent offset with no headroom for the meta growth used to
+/// wrap silently and write a bogus offset into the stego (P3-3, inject-side
+/// add). The carrier must be rejected as corrupted.
+#[test]
+fn heif_iloc_offset_overflow_rejected() {
+    let mut v = make_heif_with_meta();
+    const ILOC: usize = 24 + 12 + 35; // ftyp + meta hdr/ver + iinf
+    v[ILOC + 12] = 0x84; // offset_size=8, length_size=4
+    v[ILOC + 13] = 0x00; // base_size=0, index_size=0
+    // base_offset(4) + extent_count(2) become extent_count(2) + a 64-bit
+    // extent_offset with no headroom for the meta growth (delta = 41).
+    v[ILOC + 22..ILOC + 24].copy_from_slice(&1u16.to_be_bytes());
+    v[ILOC + 24..ILOC + 32].copy_from_slice(&(u64::MAX - 10).to_be_bytes());
+    let err = HeifAdapter
+        .inject(
+            &mut Cursor::new(v),
+            &mut Cursor::new(vec![0u8; 128]),
+            &mut Vec::new(),
+            "item_hidden",
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("overflow"), "{err}");
+}
+
+/// Two concatenated PNGs: the write side picks the LAST IEND while locate
+/// walks chunks up to the FIRST one, so the write used to report success for
+/// an envelope nothing could ever read back (P3-18, root cause still open).
+/// The §5.2 post-write locate self-check must turn that into a clean write
+/// failure instead of orphaned data.
+#[test]
+fn png_concatenated_iend_write_fails_self_check() {
+    let mut concatenated = make_png();
+    concatenated.extend_from_slice(&make_png());
+    let dir = scratch("rv25_png_concat");
+    let carrier = dir.join("c.png");
+    fs::write(&carrier, &concatenated).unwrap();
+    let err = write_carrier(
+        &carrier,
+        PayloadSource::Text("png secret"),
+        &WriteOptions {
+            output_path: Some(&dir.join("o.png")),
+            strategy: "chunk",
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("self-check"), "{err}");
 }

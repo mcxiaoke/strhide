@@ -223,12 +223,18 @@ impl HostAdapter for JpegAdapter {
         vec!["app_segment", "eof"]
     }
 
-    fn choose_auto_strategy(&self, _reader: &mut dyn SeekRead, ube_size: u64) -> &'static str {
+    fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, ube_size: u64) -> &'static str {
         if ube_size > JPEG_MAX_TOTAL_CAPACITY {
-            "eof"
-        } else {
-            "app_segment"
+            return "eof";
         }
+        // app_segment hides the chain before SOS. A header chain past
+        // MAX_JPEG_HEADER_SCAN (or a malformed marker stream) leaves SOS
+        // unreachable, and engine auto is single-shot with no fallback, so the
+        // probe happens here instead of failing inside inject (review P3-19).
+        if find_jpeg_sos_offset(reader).is_err() {
+            return "eof";
+        }
+        "app_segment"
     }
 
     fn strategy_capacities(&self, _reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
@@ -239,7 +245,7 @@ impl HostAdapter for JpegAdapter {
                 available: true,
                 limit: format!("<= {} B (64 MiB)", format_bytes(JPEG_MAX_TOTAL_CAPACITY)),
                 note: Some(
-                    "APP15 segment chain before SOS; per-segment payload capped at 65,533 B; file grows"
+                    "APP15 segment chain before SOS; per-segment payload capped at 65,533 B; requires SOS within the 16 MiB header scan; file grows"
                         .into(),
                 ),
             },
@@ -508,7 +514,7 @@ impl HostAdapter for JpegAdapter {
             Some("Embedded into compliant JPEG APP15 segment(s) before SOS (clean EOI at EOF, 0 trailing bytes).".into())
         } else if strategy == "eof" && fallback {
             Some(
-                "Payload exceeded JPEG maximum capacity; automatically fell back to EOF overlay."
+                "Auto fell back to EOF overlay: payload exceeds the APP15 chain capacity, or the SOS marker is unreachable within the 16 MiB header scan."
                     .into(),
             )
         } else if strategy == "eof" {
