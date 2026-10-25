@@ -42,7 +42,25 @@ P0/P1 项已按批次修复并提交（每批均通过 cargo test / fmt / clippy
 | M9 + 5.1/5.2/5.4 | thumb_bridge infe v3 偏移、宿主 extent 单次修补、iloc v2 守卫、零推进守卫 | `4853a02` |
 | M5 + §3.6 | JPEG delta 断言容忍合法收缩；isobmff iinf/iloc 全部越界读取加门 | `5c4fa2d` |
 
-**仍未修**（P3 与 M12 剩余部分）：M4 UERD 公式对齐（变体已声明，见 §7）、旧审计 2.4（CABAC 双编码，M10 回退后热路径消失）、3.1/3.2（死代码）、§3 全部轻微项、thumb_bridge 补丁重映射/子盒尺寸（见附录 A）、§3.5 KDF（用户决定待 argon2id）。**P2 已于 2026-10-25 下午处理完毕**（部分修复、部分按成本收益搁置），明细见 §7 与 [`docs/CHANGES-20261025.md`](CHANGES-20261025.md) 14:25 条目。注意：M11 改变 HEVC trellis seed、M8 升级 PNG FeatureWord v3，旧 HEVC/PNG 产物不再可读（未发布策略允许）；S1/S2/M1 同理影响旧 suniward、AnnexB 与 Seeded 产物。
+**仍未修**（P3 与 M12 剩余部分）：M4 UERD 公式对齐（变体已声明，见 §7）、旧审计 2.4（CABAC 双编码，M10 回退后热路径消失）、3.1/3.2（死代码）、§3 剩余轻微项（2026-10-25 晚已关闭一批低风险项，见 §0.6）、thumb_bridge 补丁重映射/子盒尺寸（见附录 A）、§3.5 KDF（用户决定待 argon2id）。**P2 已于 2026-10-25 下午处理完毕**（部分修复、部分按成本收益搁置），明细见 §7 与 [`docs/CHANGES-20261025.md`](CHANGES-20261025.md) 14:25 条目。注意：M11 改变 HEVC trellis seed、M8 升级 PNG FeatureWord v3，旧 HEVC/PNG 产物不再可读（未发布策略允许）；S1/S2/M1 同理影响旧 suniward、AnnexB 与 Seeded 产物。
+
+
+### 0.6 P3 / M7 修复状态（2026-10-25 晚，7 个提交）
+
+按"改动小、收益大、风险低"分两批实施，明细见 [`docs/CHANGES-20261025.md`](CHANGES-20261025.md) 17:58–18:18 五条记录。
+
+| 提交 | 内容 |
+| :--- | :--- |
+| `8561404` | HILL 长度守卫、`category` 封顶 15、Hamming `k` 钳位、`slot_positions` u64 乘法、`encode_substream` 上下文越界改 `Err` |
+| `40b961a` | STC 位序文档（改按存储形式陈述）、PNG "six of eight" 纠正、`spatial_move_safe` 自封闭、删 `stc_u <= stc_h` 死检查与 `zero_runs`、重复注释 |
+| `d179e1f` | `write_bytes_atomic`（fsync + 目录同步），`commit_carrier_bytes` 与 `facade::extract_file` 统一 |
+| `3dbdda2` | **M7** PNG 保留 IEND 之后尾部字节（`RawImage::tail`） |
+| `e538e68` | `is_hevc_annexb` 补齐定义域 NAL 类型、`thumb_bridge` 支持 64 位 `meta` 盒 |
+| `3628bc7` | `layout_for_payload` 改按真实信封口径（收 payload 字节）、`sb_bytes` 真校验 |
+| `38a0f91` | HEIF 嵌入/提取方案顺序不对称的原因与已知风险（仅注释 + 记录） |
+
+已关闭：M7、§3.1#1/#5/#6/#11、§3.2#1/#2/#3、§3.3#1/#4/#8、§3.4#1/#3/#4/#5、§3.5#1/#2、§3.6#3/#4/#5。
+仍未做（需评估或含行为变化）：§3.1#2/#3/#4/#7/#8/#9/#10、§3.2#4/#5/#7/#8、§3.3#2/#3/#5/#6、§3.4#6（含 `engine.rs:215` 的 0.25 硬编码）/#7、§3.5#4/#5/#7、M4、M10、KDF/argon2id、thumb_bridge 补丁重映射。
 
 ---
 
@@ -109,7 +127,7 @@ u>1 分支的消息（"a group has **no legal element** …"）恰好也含该�
 
 50 MP 载体：基础 cost 图 400 MB + 每通道 800 MB 方向图 + SlotPlan 的 `ranked`(~700 MB) 与 `permuted`(~400 MB) → 单次嵌入峰值 ~2 GB；100 MP 约 4 GB。而 JPEG 侧在 `traits.rs:100-108` 明确以"16 B/系数太贵"为由拒绝了全图方向代价、改用 i8 bias 向量。引擎最终只使用 `needed_body_slots + 512` 个槽的方向代价，HILL 的邻域均值 O(1)/像素可按需计算，S-UNIWARD 对称模型根本不必拷贝。**修复**：trait 改为按槽取值或接受槽切片；对称模型直接复用 base。
 
-### M7.【确认 ✅】`encode_png` 丢弃 IEND 之后的全部尾部数据
+### M7.【已修复 ✅ `3dbdda2`】`encode_png` 丢弃 IEND 之后的全部尾部数据
 
 **位置**：`rust/src/stego/png/engine.rs:193-199`（decode 在第一个 IEND 处 break）、`:577-603`（encode 只回放捕获的 chunk）。主审已确认 break 语句。adapters 层（`adapters/png.rs:20-30`）明确支持"PNG 后跟任意字节"并实现了 64 KiB 回扫，而像素域路径静默截掉这些字节——与项目"格式保持、无损"定位冲突。**修复**：decode 记录 IEND 结束偏移，encode 原样追加尾部。
 
@@ -344,8 +362,9 @@ PNG `extract_png` 的 `cost_model` 参数实为 hint（载体自带 algorithm_id
 11. ~~M10 WPP 中段子流终止语义~~（**尝试修复后回退**：flush+前缀校验方案码流层面可行，但暴露 cost 缺 |coeff| 的失真缺陷，治本需 vendor sign/level 顺序改动，成本超收益；综述 `docs/HEVC-WPP-COST-ISSUE-20261025.md`）；~~M11 trellis seed 密钥化~~（`HKDF(key, cover_digest)`，连带关闭明文 CRC32 oracle）；~~M12 剩余 2.5~~（容器单次解析 + 载体克隆删除；2.4 因 M10 回退热路径消失，搁置）
 12. ~~§3.5 KDF 参数调齐~~（**搁置**：待后续直接引入 argon2id 一并解决）
 
-**P3（卫生，未修）**
-13. §3 各表轻微项：死代码、文档更正（含 STC 可达性位三处、format.rs 恒真校验、params.rs stc_u 默认值文档）、防御性守卫、注释重复。
+**P3（卫生）——2026-10-25 晚完成第一批（低风险组），见 §0.6**
+13. ~~文档更正（STC 可达性位、PNG six-of-eight、`stc_u` 默认值、重复注释）、死代码（`zero_runs`、`stc_u <= stc_h` 死检查）、防御性守卫（HILL 长度、`category` 上界、Hamming `k`、`slot_positions` 溢出、`encode_substream` 越界）、`format.rs` 恒真校验、`layout_for_payload` 口径、commit/`extract_file` fsync、`is_hevc_annexb` 类型集合、thumb_bridge 64 位 meta、M7 PNG 尾部~~（`8561404` `40b961a` `d179e1f` `3dbdda2` `e538e68` `3628bc7`）
+14. 剩余（需评估/含行为变化）：§3.1#2/#3/#4/#7/#8/#9/#10、§3.2#4/#5/#7/#8、§3.3#2/#3/#5/#6、§3.4#6/#7、§3.5#4/#5/#7、thumb_bridge 补丁重映射
 
 ---
 
