@@ -100,6 +100,27 @@ const HIGH_DISPLACEMENT_PENALTY: f64 = 1_000_000.0;
 /// not carry one. Always superseded by the real value in `record_stego_level`.
 const PROVISIONAL_BIT_DEPTH: u8 = 8;
 
+/// Where a coefficient sits and whether the block was transformed.
+///
+/// Bundled rather than passed as six arguments: the cost model reads all of
+/// them together, and the tuple form was one clippy `too_many_arguments` away
+/// from being unreadable at the call site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlipGeometry {
+    /// Transform unit size in samples (4, 8, 16, 32).
+    pub trafo_size: u8,
+    /// Colour plane (0 luma, 1 Cb, 2 Cr).
+    pub c_idx: u8,
+    /// Coefficient coordinates inside the transform unit.
+    pub x_c: u8,
+    pub y_c: u8,
+    /// Bit depth of the plane the coefficient belongs to.
+    pub bit_depth: u8,
+    /// The decoder did not transform this block (`transform_skip_flag` or
+    /// `cu_transquant_bypass_flag`), so the magnitude is a residual sample.
+    pub sample_domain: bool,
+}
+
 /// Distortion cost of flipping one coefficient sign, from the decoded magnitude.
 ///
 /// A sign flip changes the coefficient from `+dq` to `-dq`, i.e. by `2 * dq` in
@@ -112,18 +133,17 @@ const PROVISIONAL_BIT_DEPTH: u8 = 8;
 /// §8.6.3, which is where the `1/N` block-size factor lives. Dividing by `N`
 /// again would understate a 32×32 block by 8× per sample and 64× in energy.
 /// A non-positive `abs_dq` means "unknown" and is priced as a single level.
+///
+/// `sample_domain` marks blocks the decoder did **not** transform
+/// (`transform_skip_flag` / `cu_transquant_bypass_flag`): there `abs_dq` is
+/// already a residual sample, the basis peak of 64 does not apply, and a sign
+/// flip moves that one sample. Without the distinction a skipped 4×4 block at
+/// QP 32 reported 26 samples and was priced 32× cheaper than the transform-path
+/// coefficient of the same magnitude.
 #[inline]
-pub fn compute_sign_flip_cost(
-    abs_level: u32,
-    abs_dq: i32,
-    trafo_size: u8,
-    c_idx: u8,
-    x_c: u8,
-    y_c: u8,
-    bit_depth: u8,
-) -> f64 {
+pub fn compute_sign_flip_cost(abs_level: u32, abs_dq: i32, geom: FlipGeometry) -> f64 {
     let dq = if abs_dq > 0 { abs_dq as f64 } else { 1.0 };
-    cost_from_dq(abs_level, dq, trafo_size, c_idx, x_c, y_c, bit_depth)
+    cost_from_dq(abs_level, dq, geom)
 }
 
 /// Provisional cost for `record_stego_sign`, where the level has not been
@@ -143,24 +163,31 @@ pub fn provisional_sign_flip_cost(
     cost_from_dq(
         abs_level,
         dq,
-        trafo_size,
-        c_idx,
-        x_c,
-        y_c,
-        PROVISIONAL_BIT_DEPTH,
+        FlipGeometry {
+            trafo_size,
+            c_idx,
+            x_c,
+            y_c,
+            bit_depth: PROVISIONAL_BIT_DEPTH,
+            // The sign callback fires before `transform_skip_flag` is used to
+            // report a level, so assume the transform path here; the level
+            // callback overwrites this cost for every coefficient that carries
+            // a sign.
+            sample_domain: false,
+        },
     )
 }
 
 #[inline]
-fn cost_from_dq(
-    abs_level: u32,
-    dq: f64,
-    trafo_size: u8,
-    c_idx: u8,
-    x_c: u8,
-    y_c: u8,
-    bit_depth: u8,
-) -> f64 {
+fn cost_from_dq(abs_level: u32, dq: f64, geom: FlipGeometry) -> f64 {
+    let FlipGeometry {
+        trafo_size,
+        c_idx,
+        x_c,
+        y_c,
+        bit_depth,
+        sample_domain,
+    } = geom;
     let n = trafo_size.max(4) as f64;
 
     let gx = if x_c == 0 {
@@ -173,7 +200,15 @@ fn cost_from_dq(
     } else {
         core::f64::consts::SQRT_2
     };
-    let peak_sample_delta = (dq * gx * gy) / 64.0 / 2f64.powi(bit_depth as i32 - 8);
+    // Transform path: the coefficient is spread over the block by the inverse
+    // basis, whose peak is 64 (DC) / 64·√2 (any other frequency).
+    // Sample domain (transform skip or transquant bypass): the coefficient *is*
+    // a residual sample, so the whole block basis gain is absent and dividing
+    // by 64 would price it ~32x too cheap -- exactly the case a skipped 4x4
+    // block at QP 32 hits, where a 26-sample error looked as harmless as a
+    // sub-sample one.
+    let basis_peak = if sample_domain { 1.0 } else { gx * gy / 64.0 };
+    let peak_sample_delta = dq * basis_peak / 2f64.powi(bit_depth as i32 - 8);
 
     // Whole-block energy term: a large TU spreads the same error over more
     // samples, so its PSNR cost is lower per flipped sign than a small TU's.
@@ -323,6 +358,7 @@ impl CabacRecorder {
         abs_level: u32,
         abs_dq: i32,
         bit_depth: u8,
+        sample_domain: bool,
     ) {
         if x_c == 0 && y_c == 0 {
             return;
@@ -340,11 +376,14 @@ impl CabacRecorder {
         slot.cost = compute_sign_flip_cost(
             abs_level,
             abs_dq,
-            slot.trafo_size,
-            slot.c_idx,
-            slot.x_c,
-            slot.y_c,
-            bit_depth,
+            FlipGeometry {
+                trafo_size: slot.trafo_size,
+                c_idx: slot.c_idx,
+                x_c: slot.x_c,
+                y_c: slot.y_c,
+                bit_depth,
+                sample_domain,
+            },
         );
         self.next_pending_slot += 1;
     }
@@ -390,8 +429,16 @@ impl rusty_h265::observer::CabacObserver for CabacRecorder {
         self.record_stego_sign(bit, qp, trafo_size, c_idx, x_c, y_c);
     }
 
-    fn record_stego_level(&mut self, x_c: u8, y_c: u8, abs_level: u32, abs_dq: i32, bit_depth: u8) {
-        self.record_stego_level(x_c, y_c, abs_level, abs_dq, bit_depth);
+    fn record_stego_level(
+        &mut self,
+        x_c: u8,
+        y_c: u8,
+        abs_level: u32,
+        abs_dq: i32,
+        bit_depth: u8,
+        sample_domain: bool,
+    ) {
+        self.record_stego_level(x_c, y_c, abs_level, abs_dq, bit_depth, sample_domain);
     }
 
     fn record_terminate(&mut self, bit: u32) {
@@ -402,6 +449,25 @@ impl rusty_h265::observer::CabacObserver for CabacRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Geometry shorthand: `(size, plane, x, y, depth, sample_domain)`.
+    fn g(
+        trafo_size: u8,
+        c_idx: u8,
+        x_c: u8,
+        y_c: u8,
+        bit_depth: u8,
+        sample_domain: bool,
+    ) -> FlipGeometry {
+        FlipGeometry {
+            trafo_size,
+            c_idx,
+            x_c,
+            y_c,
+            bit_depth,
+            sample_domain,
+        }
+    }
 
     /// Sign bins decode before their levels: the recorder must pair each later
     /// `record_stego_level` with the slot created by the matching
@@ -416,19 +482,19 @@ mod tests {
         assert_eq!(rec.slots.len(), 2);
         assert!(matches!(rec.ops[0], BinOp::Bypass { slot_idx: None, .. }));
 
-        rec.record_stego_level(0, 0, 9, 700, 8);
-        rec.record_stego_level(2, 0, 1, 42, 8);
-        rec.record_stego_level(3, 1, 2, 84, 8);
+        rec.record_stego_level(0, 0, 9, 700, 8, false);
+        rec.record_stego_level(2, 0, 1, 42, 8, false);
+        rec.record_stego_level(3, 1, 2, 84, 8, false);
 
         assert_eq!((rec.slots[0].x_c, rec.slots[0].y_c), (2, 0));
         assert_eq!((rec.slots[1].x_c, rec.slots[1].y_c), (3, 1));
         assert_eq!(
             rec.slots[0].cost,
-            compute_sign_flip_cost(1, 42, 8, 0, 2, 0, 8)
+            compute_sign_flip_cost(1, 42, g(8, 0, 2, 0, 8, false))
         );
         assert_eq!(
             rec.slots[1].cost,
-            compute_sign_flip_cost(2, 84, 8, 0, 3, 1, 8)
+            compute_sign_flip_cost(2, 84, g(8, 0, 3, 1, 8, false))
         );
     }
 
@@ -436,8 +502,8 @@ mod tests {
     /// just the frequency position.
     #[test]
     fn cost_tracks_coefficient_magnitude() {
-        let small = compute_sign_flip_cost(1, 40, 8, 0, 2, 2, 8);
-        let large = compute_sign_flip_cost(1, 400, 8, 0, 2, 2, 8);
+        let small = compute_sign_flip_cost(1, 40, g(8, 0, 2, 2, 8, false));
+        let large = compute_sign_flip_cost(1, 400, g(8, 0, 2, 2, 8, false));
         // Cost is quadratic in the magnitude, so 10× the coefficient is 100× the
         // cost (asserted with slack for the frequency/energy factors).
         assert!(large > small * 50.0, "small={small} large={large}");
@@ -445,7 +511,7 @@ mod tests {
         // A flip that would move a sample by more than the soft limit must be
         // penalised, and the penalty must stay finite so the STC never sees
         // `INFINITY` for a slot it may still have to use.
-        let huge = compute_sign_flip_cost(1, 10_000, 32, 0, 1, 0, 8);
+        let huge = compute_sign_flip_cost(1, 10_000, g(32, 0, 1, 0, 8, false));
         assert!(huge.is_finite(), "penalty must be finite");
         assert!(huge >= HIGH_DISPLACEMENT_PENALTY);
     }
@@ -454,7 +520,7 @@ mod tests {
     /// flipped without a visible step.
     #[test]
     fn large_level_is_penalised() {
-        let cost = compute_sign_flip_cost(9, 40, 8, 0, 3, 3, 8);
+        let cost = compute_sign_flip_cost(9, 40, g(8, 0, 3, 3, 8, false));
         assert!(cost >= HIGH_DISPLACEMENT_PENALTY);
     }
 
@@ -462,8 +528,28 @@ mod tests {
     /// is 16× cheaper in energy at 10-bit.
     #[test]
     fn cost_normalises_bit_depth() {
-        let eight = compute_sign_flip_cost(1, 90, 8, 0, 2, 0, 8);
-        let ten = compute_sign_flip_cost(1, 90, 8, 0, 2, 0, 10);
+        let eight = compute_sign_flip_cost(1, 90, g(8, 0, 2, 0, 8, false));
+        let ten = compute_sign_flip_cost(1, 90, g(8, 0, 2, 0, 10, false));
         assert!((eight / ten - 16.0).abs() < 0.5, "eight={eight} ten={ten}");
+    }
+
+    /// A skipped 4×4 block at QP 32 reports 26 samples. The transform path would
+    /// divide that by the basis peak and price it like a sub-sample error; the
+    /// sample domain must not, because flipping the sign moves that residual
+    /// sample by its full magnitude.
+    #[test]
+    fn sample_domain_skips_the_basis_peak() {
+        let transform = compute_sign_flip_cost(2, 26, g(4, 0, 1, 1, 8, false));
+        let skipped = compute_sign_flip_cost(2, 26, g(4, 0, 1, 1, 8, true));
+        assert!(
+            skipped > 500.0 * transform,
+            "skipped={skipped} transform={transform}"
+        );
+        // 32x in amplitude is ~1000x in energy, before the masking factors.
+        assert!(skipped.is_finite() && skipped < HIGH_DISPLACEMENT_PENALTY);
+        // A one-sample residual stays a cheap slot, so skipped blocks are still
+        // usable when a payload needs them.
+        let tiny = compute_sign_flip_cost(1, 1, g(4, 0, 1, 1, 8, true));
+        assert!(tiny < 10.0, "tiny={tiny}");
     }
 }

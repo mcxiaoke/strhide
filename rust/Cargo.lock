@@ -515,7 +515,7 @@ dependencies = [
 [[package]]
 name = "rusty_h265"
 version = "0.6.2"
-source = "git+https://github.com/mcxiaoke/rusty_h265.git?tag=v1-20261025#fcef5b89840d1bd2023497a5a9ade42d5b28c706"
+source = "git+https://github.com/mcxiaoke/rusty_h265.git?tag=v1-20261025-2#ba02bb529a12dcdf57b4c6ff2df535bc4f948422"
 dependencies = [
  "rusty_h265-accel",
 ]
@@ -523,7 +523,7 @@ dependencies = [
 [[package]]
 name = "rusty_h265-accel"
 version = "0.6.2"
-source = "git+https://github.com/mcxiaoke/rusty_h265.git?tag=v1-20261025#fcef5b89840d1bd2023497a5a9ade42d5b28c706"
+source = "git+https://github.com/mcxiaoke/rusty_h265.git?tag=v1-20261025-2#ba02bb529a12dcdf57b4c6ff2df535bc4f948422"
 
 [[package]]
 name = "serde"

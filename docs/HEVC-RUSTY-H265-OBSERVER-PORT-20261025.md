@@ -106,8 +106,8 @@
 ### 5.3 剩余集成项
 
 1. ~~**端到端重编码验证**：用 `oxideav` 的 `CabacEncoder` 回放 rusty 记录的 ops，与 cover 子流字节比对（引擎现成的 `replay_matches_cover`）。~~ **已完成，见 §6**：5 个语料 6,914 个子流全部 byte-exact（零 padding 容忍），翻转样本 40/40 + 5 例全槽翻转均经真实解码器回读 bin 级一致。
-2. **代价模型补 transform-skip 分支**（主仓 `slot.rs`）：`compute_sign_flip_cost` 的 `dq·gx·gy/64` 是按变换路径的 64 倍基增益标定的；transform-skip 块没有该增益，折算后的样本域值再除以 64 会低估 ~32×。需按 `trafo_size`/skip 标志分档，或对 skip 块改用无 `/64` 的公式。**这是既有 vendor 路径就存在的隐性偏差，不是移植引入的。**
-3. **性能**：挂 observer 的耗时未测；批量读保留后预计与不挂接近，待集成时用 release 数据确认。
+2. ~~**代价模型补 transform-skip 分支**（主仓 `slot.rs`）~~ **已完成，见 §10.1**：fork 的 `record_stego_level` 增报 `sample_domain`，代价模型对该类系数不再除以 64 基增益。实测 4K 片逐帧 `max|Δ|` **226–251 → 47–67**（12/12 seed），受影响槽位占 0.91%（其余语料 0）。
+3. ~~**性能**：挂 observer 的耗时未测~~ **已完成，见 §10.2**：钩子开销 0–7%，记录 journal 再加 0–8%（min of 3，release）。
 
 ## 6. 端到端重编码验证（原 §5.3.1，已完成）
 
@@ -199,5 +199,63 @@ cargo run --release -- reenc     # replay + flip（约 1 min）
 
 **验证**：`build --release` 0/0、`fmt --check` clean、`clippy --all-targets` 0、`cargo test` 全绿（250+113+128+9+39+87+18+6）、`cargo test --test local_tests -- --ignored` **19/19**（含 ffmpeg PSNR、真实照片批量、确定性上界、HEIF bridge 4 项）。CLI 冒烟：HEIC 与 `bear.hevc` 往返 OK；**两个小米 tiles 文件从 0 槽变为可嵌入并成功往返**；4 个隐写产物 ffmpeg 解码 0 错误、帧数一致；RExt 4:4:4 与孤立 RASL 片段按预期 fail-closed 并给出可读原因；`seg_bframes` 槽数 2,780,623 与 §4.1 完全相同。
 
-**剩余**：步骤 4 已完成（示例/测试迁到 rusty，`rust_h265` 依赖已从 `Cargo.toml`/`Cargo.lock` 移除；注意 rusty 的静图要 `flush()` 后才会出帧）。剩下 §5.3 的两项标定工作：transform-skip 的代价分档、observer 耗时实测。
+**剩余**：无（§5.3 三项均已闭环，见 §10）。
 
+
+## 10. 两项标定（2026-10-25 23:29）
+
+### 10.1 代价模型：未变换块（transform-skip / transquant bypass）
+
+**错误的准确形式**（带数）：4×4 transform-skip 块、QP 32、level 2 —
+
+| 步骤 | 值 |
+| :--- | :--- |
+| §8.6.3 反量化 | `q_step(32)=2^(28/6)≈25.4`，`64/n=16`，level 2 → `d = 816` |
+| §8.6.2 折算 | `ts_shift = 15 − 8 − 2 = 5` → 残差样本 **26** |
+| 旧代价 | `peak = 26·√2·√2/64 = 0.81` → `l2 ≈ 0.41`，与亚样本级翻转同档 |
+| 实际影响 | 翻这个符号让该残差样本 `+26 → −26`，即**单个像素跳 52 级** |
+
+**实施**：fork 的 `record_stego_level` 增报 `sample_domain`（`transform_skip_flag || cu_transquant_bypass_flag`，tag `v1-20261025-2`）；主仓把 6 个几何参数收成 `FlipGeometry`，`sample_domain` 时基增益从 `gx·gy/64` 换成 `1.0`。
+
+**影响面**（临时计数器实测，已移除）：
+
+| 语料 | 槽 | sample-domain 槽 | 占比 |
+| :--- | ---: | ---: | ---: |
+| seg_bframes（iPhone 4K） | 2,780,623 | 25,427 | **0.91%** |
+| seg_mov | 3,796,578 | 0 | 0 |
+| tiles_x265 | 648,708 | 0 | 0 |
+| IMG_1904.HEIC | 821,321 | 0 | 0 |
+| seg_refonly（小米 tiles） | 9,446,382 | 0 | 0 |
+
+**作用域对照**：seeded 确定性嵌入（`Freshness::Seeded` + `deterministic_payload`）下，0 个此类槽的 `seg_mov` 新旧两版输出 **逐字节相同**（sha256 一致）——改动只触及 goal 中的那一类系数。
+
+**效果**（4K 片，16 KiB 载荷，12 个 seed 的确定性嵌入）：
+
+| seed | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `max\|Δ\|` 旧 | 228 | 245 | 230 | 226 | 226 | 235 | 226 | 232 | 234 | 251 | 226 | 232 |
+| `max\|Δ\|` 新 | 58 | 50 | 55 | 52 | 56 | 56 | 47 | 55 | 53 | 58 | 67 | 59 |
+| PSNR 旧 (dB) | 30.93 | 27.59 | 27.14 | 26.10 | 31.46 | 29.53 | 31.11 | 29.28 | 28.93 | 28.96 | 24.51 | 29.01 |
+| PSNR 新 (dB) | 32.62 | 27.62 | 27.80 | 29.65 | 26.40 | 26.62 | 29.32 | 25.68 | 30.66 | 29.34 | 23.92 | 27.80 |
+
+- **峰值**：226–251 → 47–67，**12/12 全部改善，约 4×**。
+- **PSNR**：均值 28.71 → 28.12 dB（−0.6 dB），而 seed 间自身波动就有 ±3 dB。这不是矛盾：代价模型按**峰值 + 频率/色度掩蔽**标定（`SAFE_MAX_SAMPLE_DELTA` 就是峰值闸），并不最小化 MSE。旧模型把 52 级的单点跳变当成全池最便宜的槽在用，PSNR 好看正是因为 MSE 对小面积大误差不敏感。
+- **遗留观察**：模型按 `dq` 计峰值（符号翻转实际是 `2·dq`），所以 32 的闸实际允许 64 级跳变——新模型下 47–67 的实测值正对应这一点。要再收紧需全体乘 2（能量 4×、排序不变，只移动闸门位置），本次未动。
+
+**测试**：`sample_domain_skips_the_basis_peak` 断言同幅度下 sample-domain 代价 > 500× 变换路径，且单样本残差仍廉价（< 10），由 `cargo test --lib` 覆盖。
+
+### 10.2 observer 开销
+
+`temp/mp4_verify/obssmoke perf`，min of 3，release，单线程；三种模式都在每帧排空输出队列：
+
+| 语料 | 帧 | 不挂 | no-op observer | 记录 journal | no-op/不挂 | journal/不挂 |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| seg_bframes | 78 | 3870 ms | 3978 | 4064 | 1.028× | 1.050× |
+| seg_mov | 183 | 3718 | 3797 | 3558 | 1.021× | 0.957× |
+| tiles_x265 | 10 | 112 | 117 | 128 | 1.048× | 1.145× |
+| seg_refonly | 181 | 4179 | 4466 | 4510 | 1.069× | 1.079× |
+| seg_xiaomi_new | 121 | 3008 | 3002 | 3213 | 0.998× | 1.068× |
+
+钩子本身 0–7%（`record_stego_sign`/`record_stego_level` 只在系数符号上触发）；连记录一起 0–8%，`0.957×` 一例是计时噪声。**§3 第 2 条（保留批量读）的预判成立：热路径没有退化。**
+
+**复现**：`cd temp/mp4_verify/obssmoke && cargo run --release -- perf`；回放/翻转仍是 `reenc`。
