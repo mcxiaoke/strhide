@@ -9,7 +9,7 @@ use crate::common::*;
 use std::fs;
 use std::io::Cursor;
 use std::path::Path;
-use strhide::adapters::{HostAdapter, WavAdapter, ZipAdapter};
+use strhide::adapters::{HostAdapter, PdfAdapter, WavAdapter, ZipAdapter};
 use strhide::engine::{PayloadSource, WriteOptions, read_carrier, remove_carrier, write_carrier};
 use strhide::envelope::{EnvelopeTrailer, STANDARD_TRAILER_MAGIC};
 
@@ -207,4 +207,129 @@ fn heif_without_meta_still_uses_box_uuid() {
     let restored = dir.join("r.heif");
     remove_carrier(&stego, Some(&restored), None, false).unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
+}
+
+// ------------------------------------------------------------------ PDF
+
+/// A PDF whose dirty tail pushes the injected `%%EOF`/`endstream` pair beyond
+/// the old fixed 128 KiB locate window used to be written successfully and
+/// then be unreadable (P1-4). The growing window must locate it, and remove
+/// must still restore byte-exactly.
+#[test]
+fn pdf_dirty_tail_beyond_128k_window_still_locates() {
+    let dir = scratch("rv25_pdf_bigtail");
+    let mut pdf = make_pdf();
+    pdf.resize(pdf.len() + 200 * 1024, b'#');
+    let carrier = dir.join("big.pdf");
+    fs::write(&carrier, &pdf).unwrap();
+    let stego = dir.join("s.pdf");
+    let res = write_carrier_file(
+        &carrier,
+        PayloadSource::Text("deep tail secret"),
+        None,
+        "incremental",
+        false,
+        &stego,
+    );
+    assert_eq!(res.strategy, "incremental");
+    let out = read_carrier(&stego, None, None).unwrap();
+    assert_eq!(out.data, b"deep tail secret");
+    let restored = dir.join("r.pdf");
+    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    assert_eq!(fs::read(&restored).unwrap(), pdf);
+}
+
+/// Build a minimal incremental-update stego body by hand so the trailer bytes
+/// (and therefore the stealth magic) are fully controlled.
+fn craft_incremental_stego(magic: [u8; 4]) -> Vec<u8> {
+    let ube_data = vec![0x42u8; 120];
+    let ube_total = ube_data.len() as u64 + 24;
+    let head = b"%PDF-1.4\n1 0 obj\n<</Length 120>>\nstream\n";
+    let ube_offset = head.len() as u64;
+    let mut body = head.to_vec();
+    body.extend_from_slice(&ube_data);
+    body.extend_from_slice(&EnvelopeTrailer::create(ube_offset, ube_total, magic).pack());
+    body.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<</Size 2>>\nstartxref\n9\n%%EOF\n");
+    body
+}
+
+/// The writer emits `UBE + "\nendstream"`, so the trailer always ends exactly
+/// one EOL before `endstream`. A stealth magic whose own last byte is `\r` or
+/// `\n` made the old trim-all loop eat one byte too many, misaligning the
+/// trailer window and making the stego unreadable ~0.78% of the time (P2-5).
+#[test]
+fn pdf_locate_tolerates_eol_terminated_trailer_magic() {
+    for last in [0x0Au8, 0x0Du8] {
+        let magic = [0xD2, 0x33, 0x44, last];
+        let stego = craft_incremental_stego(magic);
+        let (lo, ls, strat) = PdfAdapter
+            .locate(&mut Cursor::new(stego), Some(&magic))
+            .unwrap()
+            .unwrap_or_else(|| panic!("magic ending in 0x{last:02X} must still locate"));
+        assert_eq!(strat, "incremental");
+        assert_eq!(lo, 40, "ube_offset points at the payload start");
+        assert_eq!(ls, 144);
+    }
+
+    // Control: the standard magic keeps locating through the same code path.
+    let stego = craft_incremental_stego(STANDARD_TRAILER_MAGIC);
+    let (lo, _, strat) = PdfAdapter
+        .locate(&mut Cursor::new(stego), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(strat, "incremental");
+    assert_eq!(lo, 40);
+}
+
+/// An encrypted document (`/Encrypt` in the newest trailer) must refuse the
+/// incremental strategy — the new trailer would not carry the key forward and
+/// readers do not inherit it through `/Prev`, leaving ciphertext bodies
+/// undecryptable (P1-3). Auto falls back to the lossless EOF overlay.
+fn make_pdf_encrypted() -> Vec<u8> {
+    b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
+      xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
+      trailer\n<< /Size 2 /Root 1 0 R /Encrypt 99 0 R >>\nstartxref\n9\n%%EOF\n"
+        .to_vec()
+}
+
+#[test]
+fn pdf_encrypted_document_rejects_incremental_and_roundtrips_via_eof() {
+    let pdf = make_pdf_encrypted();
+    assert_eq!(
+        PdfAdapter.choose_auto_strategy(&mut Cursor::new(pdf.clone()), 128),
+        "eof",
+        "auto must not pick incremental for an encrypted document"
+    );
+
+    let dir = scratch("rv25_pdf_enc");
+    let carrier = dir.join("enc.pdf");
+    fs::write(&carrier, &pdf).unwrap();
+    let err = write_carrier(
+        &carrier,
+        PayloadSource::Text("x"),
+        &WriteOptions {
+            output_path: Some(&dir.join("o.pdf")),
+            strategy: "incremental",
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("encrypted"), "{err}");
+
+    let stego = dir.join("s.pdf");
+    let res = write_carrier_file(
+        &carrier,
+        PayloadSource::Text("enc secret"),
+        None,
+        "auto",
+        false,
+        &stego,
+    );
+    assert_eq!(res.strategy, "eof");
+    let out = read_carrier(&stego, None, None).unwrap();
+    assert_eq!(out.data, b"enc secret");
+    let restored = dir.join("r.pdf");
+    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    assert_eq!(fs::read(&restored).unwrap(), pdf);
 }

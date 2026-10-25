@@ -1,7 +1,7 @@
 //! PDF format adapter for strhide with compliant Incremental Update object stream hiding.
 
 use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity, eof::EofAdapter};
-use crate::envelope::EnvelopeTrailer;
+use crate::envelope::{EnvelopeTrailer, TRAILER_SIZE};
 use crate::errors::StrHideError;
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -29,12 +29,32 @@ pub struct PdfTailInfo {
     pub new_obj_num: Option<u64>,
     pub root_ref: Option<String>,
     pub info_ref: Option<String>,
+    /// `/Encrypt` reference from the newest trailer (classic or XRef stream),
+    /// if any. Mainstream readers take `/Encrypt` only from the trailer that
+    /// `startxref` points at, without walking `/Prev`, so an incremental
+    /// update that does not carry the key forward leaves every encrypted
+    /// string/stream unreadable (review P1-3).
+    pub encrypt_ref: Option<String>,
 }
 
 pub fn parse_pdf_trailer_info<R: Read + Seek + ?Sized>(
     reader: &mut R,
 ) -> Result<PdfTrailerInfo, StrHideError> {
     let tail = parse_pdf_tail_info(reader)?;
+
+    // An encrypted document cannot be extended incrementally: the new trailer
+    // would not carry /Encrypt, and readers do not inherit it through /Prev —
+    // the document would flip to "unencrypted" with ciphertext bodies (P1-3).
+    // The lossless EOF overlay never touches the trailer, so auto falls back
+    // to it through the same parse failure.
+    if tail.encrypt_ref.is_some() {
+        return Err(StrHideError::CorruptedData(
+            "PDF is encrypted (/Encrypt in the newest trailer); an incremental update would \
+             break decryption for standard readers"
+                .into(),
+        ));
+    }
+
     let new_obj_num = tail.new_obj_num.ok_or_else(|| {
         StrHideError::CorruptedData(
             "cannot determine next PDF object number (no /Size and no 'N G obj' definitions in tail window)".into(),
@@ -105,6 +125,7 @@ struct XRefStreamDict {
     size: Option<u64>,
     root_ref: Option<String>,
     info_ref: Option<String>,
+    encrypt_ref: Option<String>,
 }
 
 /// Read the dictionary of the XRef stream that `startxref` points at.
@@ -150,6 +171,7 @@ fn read_xref_stream_dict<R: Read + Seek + ?Sized>(
         size: find_int_after(dict_text, "/Size"),
         root_ref: find_indirect_ref(dict_text, "/Root", false),
         info_ref: find_indirect_ref(dict_text, "/Info", false),
+        encrypt_ref: find_indirect_ref(dict_text, "/Encrypt", false),
     })
 }
 
@@ -202,17 +224,20 @@ pub fn parse_pdf_tail_info<R: Read + Seek + ?Sized>(
     let mut new_obj_num: Option<u64> = None;
     let mut root_ref = None;
     let mut info_ref = None;
+    let mut encrypt_ref = None;
 
     if let Some(trailer_idx) = text_before_eof[..sx_idx].rfind("trailer") {
         let trailer_str = &text_before_eof[trailer_idx..sx_idx];
         new_obj_num = find_int_after(trailer_str, "/Size");
         root_ref = find_indirect_ref(trailer_str, "/Root", false);
         info_ref = find_indirect_ref(trailer_str, "/Info", false);
+        encrypt_ref = find_indirect_ref(trailer_str, "/Encrypt", false);
     }
 
     // No classic trailer dictionary (xref-stream PDF): read /Size (and /Root,
-    // /Info) from the XRef stream that `startxref` points at. Only when that is
-    // unavailable does the tail-window `N G obj` scan remain as a last resort.
+    // /Info, /Encrypt) from the XRef stream that `startxref` points at. Only
+    // when that is unavailable does the tail-window `N G obj` scan remain as a
+    // last resort.
     if new_obj_num.is_none()
         && let Some(dict) = read_xref_stream_dict(reader, prev_startxref)
     {
@@ -223,6 +248,9 @@ pub fn parse_pdf_tail_info<R: Read + Seek + ?Sized>(
         if info_ref.is_none() {
             info_ref = dict.info_ref;
         }
+        if encrypt_ref.is_none() {
+            encrypt_ref = dict.encrypt_ref;
+        }
     }
     if new_obj_num.is_none() {
         new_obj_num = scan_max_object_number(&text_before_eof).and_then(|n| n.checked_add(1));
@@ -230,7 +258,11 @@ pub fn parse_pdf_tail_info<R: Read + Seek + ?Sized>(
 
     // /Root and /Info may live inside an xref-stream trailer dict (or an older
     // incremental trailer) even when the newest trailer omits them; the last
-    // valid reference in the tail is the currently effective one.
+    // valid reference in the tail is the currently effective one. /Encrypt is
+    // deliberately NOT resolved with the same tail-wide fallback: readers take
+    // it from the newest trailer only, so an older /Encrypt without the newest
+    // one means the document is already inconsistent, not that an update must
+    // avoid it.
     if root_ref.is_none() {
         root_ref = find_indirect_ref(&text_before_eof, "/Root", true);
     }
@@ -244,6 +276,7 @@ pub fn parse_pdf_tail_info<R: Read + Seek + ?Sized>(
         new_obj_num,
         root_ref,
         info_ref,
+        encrypt_ref,
     })
 }
 
@@ -394,6 +427,83 @@ impl PdfAdapter {
     }
 }
 
+/// One window attempt of the incremental-update locate scan.
+///
+/// `window_start` is the absolute file offset of `tail[0]`. The writer emits
+/// `UBE + "\nendstream"`, so the envelope's trailer normally ends exactly one
+/// EOL before `endstream`; a stealth trailer magic that itself ends in
+/// `\r`/`\n` would make a single trim eat one byte too many and misalign the
+/// whole 24-byte trailer window (review P2-5), so every EOL boundary with up
+/// to 3 trailing EOLs is tried. Each candidate self-validates through trailer
+/// magic + CRC + the end-of-stream equality + the `stream` prefix, so the
+/// extra candidates cannot turn into false positives.
+fn try_locate_incremental(
+    stego_in: &mut dyn SeekRead,
+    tail: &[u8],
+    window_start: u64,
+    expected_trailer_magic: Option<&[u8; 4]>,
+) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    const EOF_MARKER: &[u8] = b"%%EOF";
+    const ENDSTREAM: &[u8] = b"endstream";
+
+    let Some(eof_idx) = tail
+        .windows(EOF_MARKER.len())
+        .rposition(|w| w == EOF_MARKER)
+    else {
+        return Ok(None);
+    };
+    let Some(endstream_idx) = tail[..eof_idx]
+        .windows(ENDSTREAM.len())
+        .rposition(|w| w == ENDSTREAM)
+    else {
+        return Ok(None);
+    };
+    let stream_content_tail = &tail[..endstream_idx];
+
+    for skip in 0..=3usize {
+        let Some(stream_end) = stream_content_tail.len().checked_sub(skip) else {
+            break;
+        };
+        if stream_content_tail[stream_end..]
+            .iter()
+            .any(|b| *b != b'\r' && *b != b'\n')
+        {
+            continue;
+        }
+        if stream_end < TRAILER_SIZE {
+            continue;
+        }
+        let trailer = match EnvelopeTrailer::unpack(
+            &stream_content_tail[stream_end - TRAILER_SIZE..stream_end],
+            expected_trailer_magic,
+        ) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let abs_stream_end = window_start + stream_end as u64;
+        if trailer.ube_offset.checked_add(trailer.ube_total_size) != Some(abs_stream_end)
+            || trailer.ube_offset < 8
+        {
+            continue;
+        }
+        stego_in.seek(SeekFrom::Start(trailer.ube_offset - 8))?;
+        let mut prefix = [0u8; 8];
+        if stego_in.read_exact(&mut prefix).is_ok()
+            && (prefix.ends_with(b"stream\r\n")
+                || prefix.ends_with(b"stream\n")
+                || prefix.ends_with(b"stream"))
+        {
+            return Ok(Some((
+                trailer.ube_offset,
+                trailer.ube_total_size,
+                "incremental".into(),
+            )));
+        }
+    }
+
+    Ok(None)
+}
+
 impl HostAdapter for PdfAdapter {
     fn format_name(&self) -> &'static str {
         "PDF"
@@ -437,8 +547,11 @@ impl HostAdapter for PdfAdapter {
             let start = r.stream_position().ok();
             if parse_pdf_trailer_info(r).is_err() {
                 incremental.available = false;
-                incremental.note =
-                    Some("PDF trailer / %%EOF could not be parsed; auto falls back to eof".into());
+                incremental.note = Some(
+                    "incremental update not possible for this carrier (unparseable trailer or \
+                     encrypted document); auto falls back to eof"
+                        .into(),
+                );
             }
             if let Some(p) = start {
                 let _ = r.seek(SeekFrom::Start(p));
@@ -553,51 +666,38 @@ impl HostAdapter for PdfAdapter {
             return Ok(None);
         }
 
-        // 1. Check incremental update object stream first
+        // 1. Check incremental update object stream first.
+        //
+        // The written structure is `[original %%EOF][obj + xref + trailer +
+        // %%EOF][dirty tail]`, and the writer preserves an arbitrary dirty
+        // tail byte-exactly, so the injected markers can sit arbitrarily far
+        // from the physical end of the file. A fixed 128 KiB window made such
+        // carriers "write-ok, read-none" (review P1-4); the window starts at
+        // 128 KiB and grows until it covers the file, so any match inside the
+        // first window is byte-for-byte the old behaviour. The trade-off is
+        // that a pathological multi-gigabyte document allocates a file-sized
+        // window on the last iteration; write and verify already touch the
+        // whole file, so locate is not the binding constraint.
         let total_size = stego_in.seek(SeekFrom::End(0))?;
-        let scan_len = std::cmp::min(total_size, 128 * 1024);
-        stego_in.seek(SeekFrom::End(-(scan_len as i64)))?;
-        let mut tail = vec![0u8; scan_len as usize];
-        stego_in.read_exact(&mut tail)?;
+        let mut scan_len = std::cmp::min(total_size, 128 * 1024);
+        loop {
+            stego_in.seek(SeekFrom::End(-(scan_len as i64)))?;
+            let mut tail = vec![0u8; scan_len as usize];
+            stego_in.read_exact(&mut tail)?;
 
-        if let Some(eof_idx) = tail.windows(5).rposition(|w| w == b"%%EOF")
-            && let Some(endstream_idx) = tail[..eof_idx].windows(9).rposition(|w| w == b"endstream")
-        {
-            let stream_content_tail = &tail[..endstream_idx];
-            let mut stream_end_in_tail = stream_content_tail.len();
-            while stream_end_in_tail > 0
-                && (stream_content_tail[stream_end_in_tail - 1] == b'\r'
-                    || stream_content_tail[stream_end_in_tail - 1] == b'\n')
-            {
-                stream_end_in_tail -= 1;
+            if let Some(found) = try_locate_incremental(
+                stego_in,
+                &tail,
+                total_size - scan_len,
+                expected_trailer_magic,
+            )? {
+                return Ok(Some(found));
             }
 
-            if stream_end_in_tail >= 24 {
-                let trailer_bytes =
-                    &stream_content_tail[stream_end_in_tail - 24..stream_end_in_tail];
-                if let Ok(trailer) = EnvelopeTrailer::unpack(trailer_bytes, expected_trailer_magic)
-                {
-                    let abs_stream_end = (total_size - scan_len) + stream_end_in_tail as u64;
-                    if trailer.ube_offset.checked_add(trailer.ube_total_size)
-                        == Some(abs_stream_end)
-                        && trailer.ube_offset >= 8
-                    {
-                        stego_in.seek(SeekFrom::Start(trailer.ube_offset - 8))?;
-                        let mut prefix = [0u8; 8];
-                        if stego_in.read_exact(&mut prefix).is_ok()
-                            && (prefix.ends_with(b"stream\r\n")
-                                || prefix.ends_with(b"stream\n")
-                                || prefix.ends_with(b"stream"))
-                        {
-                            return Ok(Some((
-                                trailer.ube_offset,
-                                trailer.ube_total_size,
-                                "incremental".into(),
-                            )));
-                        }
-                    }
-                }
+            if scan_len >= total_size {
+                break;
             }
+            scan_len = std::cmp::min(total_size, scan_len.saturating_mul(4));
         }
 
         // 2. Fallback to EOF
