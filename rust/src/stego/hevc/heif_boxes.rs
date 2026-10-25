@@ -183,7 +183,7 @@ pub fn parse_heif_targets<'a>(bytes: &'a [u8]) -> Result<HeifHevcTarget<'a>> {
 
     // 5. Parse `iprp` to extract `hvcC` (VPS/SPS/PPS and length_size)
     let iprp = iprp_span.ok_or(HevcError::ContainerMalformed("missing iprp box"))?;
-    let (parameter_sets, length_size) = parse_hvcc_from_iprp(iprp)?;
+    let (parameter_sets, length_size) = parse_hvcc_from_iprp(iprp, &target_item_ids)?;
 
     // 6. Parse `iloc` to get file byte spans for target items
     let iloc = iloc_span.ok_or(HevcError::ContainerMalformed("missing iloc box"))?;
@@ -359,9 +359,13 @@ fn parse_dimg_tiles(iref: &[u8], grid_id: u32) -> Vec<u32> {
     tiles
 }
 
-fn parse_hvcc_from_iprp(iprp: &[u8]) -> Result<(Vec<&[u8]>, usize)> {
+fn parse_hvcc_from_iprp<'a>(
+    iprp: &'a [u8],
+    target_item_ids: &[u32],
+) -> Result<(Vec<&'a [u8]>, usize)> {
     let mut pos = 0usize;
     let mut ipco_data = None;
+    let mut ipma_data = None;
 
     while pos + 8 <= iprp.len() {
         let Some(size) = be_u32(iprp, pos).map(|v| v as usize) else {
@@ -371,18 +375,19 @@ fn parse_hvcc_from_iprp(iprp: &[u8]) -> Result<(Vec<&[u8]>, usize)> {
         if size < 8 || pos.checked_add(size).is_none_or(|end| end > iprp.len()) {
             break;
         }
-        if tag == b"ipco" {
+        if tag == b"ipco" && ipco_data.is_none() {
             ipco_data = Some(&iprp[pos + 8..pos + size]);
-            break;
+        } else if tag == b"ipma" && ipma_data.is_none() {
+            ipma_data = Some(&iprp[pos + 8..pos + size]);
         }
         pos += size;
     }
 
     let ipco = ipco_data.ok_or(HevcError::ContainerMalformed("missing ipco in iprp"))?;
 
-    // Walk properties in `ipco` to find `hvcC`
+    // Enumerate the properties with their 1-based ipco indexes.
+    let mut properties: Vec<(u32, &[u8], &[u8])> = Vec::new();
     let mut ppos = 0usize;
-    let mut hvcc_payload = None;
     while ppos + 8 <= ipco.len() {
         let Some(size) = be_u32(ipco, ppos).map(|v| v as usize) else {
             break;
@@ -391,14 +396,27 @@ fn parse_hvcc_from_iprp(iprp: &[u8]) -> Result<(Vec<&[u8]>, usize)> {
         if size < 8 || ppos.checked_add(size).is_none_or(|end| end > ipco.len()) {
             break;
         }
-        if tag == b"hvcC" {
-            hvcc_payload = Some(&ipco[ppos + 8..ppos + size]);
-            break;
-        }
+        let index = (properties.len() + 1) as u32;
+        properties.push((index, tag, &ipco[ppos + 8..ppos + size]));
         ppos += size;
     }
 
-    let hvcc = hvcc_payload.ok_or(HevcError::ContainerMalformed("missing hvcC property"))?;
+    // Property selection through `ipma` (audit 2026-10-24 4.4): when several
+    // codecs share one ipco, "the first hvcC" may belong to a different item
+    // and yields a wrong length_size / parameter sets. Prefer the hvcC the
+    // target item is actually associated with; fall back to the first hvcC
+    // only when no association names one (no ipma, or a grid whose tiles
+    // carry their own associations).
+    let associated = ipma_data
+        .map(|d| parse_ipma_associations(d, target_item_ids))
+        .unwrap_or_default();
+    let hvcc = properties
+        .iter()
+        .find(|(idx, tag, _)| associated.contains(idx) && *tag == b"hvcC")
+        .or_else(|| properties.iter().find(|(_, tag, _)| *tag == b"hvcC"))
+        .map(|(_, _, payload)| *payload)
+        .ok_or(HevcError::ContainerMalformed("missing hvcC property"))?;
+
     if hvcc.len() < 23 {
         return Err(HevcError::Truncated);
     }
@@ -439,6 +457,69 @@ fn parse_hvcc_from_iprp(iprp: &[u8]) -> Result<(Vec<&[u8]>, usize)> {
     Ok((parameter_sets, length_size))
 }
 
+/// Property indexes (1-based, into `ipco` order) associated with any of
+/// `target_ids` by an `ipma` box.
+///
+/// A malformed or truncated ipma yields an empty set: property selection then
+/// falls back to "the first hvcC" instead of failing the whole parse, which
+/// keeps pre-ipma files and slightly odd writers readable.
+fn parse_ipma_associations(ipma: &[u8], target_ids: &[u32]) -> Vec<u32> {
+    let mut out = Vec::new();
+    if ipma.len() < 8 {
+        return out;
+    }
+    let version = ipma[0];
+    // FullBox flags bit 0: associations use 15-bit property indexes.
+    let large_index = ipma[3] & 0x01 != 0;
+    let Some(entry_count) = be_u32(ipma, 4) else {
+        return out;
+    };
+    let mut pos = 8usize;
+    for _ in 0..entry_count {
+        let item_id = if version < 1 {
+            let Some(id) = be_u16(ipma, pos) else {
+                return out;
+            };
+            pos += 2;
+            id as u32
+        } else {
+            let Some(id) = be_u32(ipma, pos) else {
+                return out;
+            };
+            pos += 4;
+            id
+        };
+        let Some(count) = ipma.get(pos).copied() else {
+            return out;
+        };
+        pos += 1;
+        for _ in 0..count {
+            let index = if large_index {
+                let Some(v) = be_u16(ipma, pos) else {
+                    return out;
+                };
+                pos += 2;
+                (v & 0x7FFF) as u32
+            } else {
+                let Some(v) = ipma.get(pos).copied() else {
+                    return out;
+                };
+                pos += 1;
+                (v & 0x7F) as u32
+            };
+            if target_ids.contains(&item_id) {
+                out.push(index);
+            }
+        }
+    }
+    out
+}
+
+/// Upper bound on the extents collected for the target items. A legal HEIF
+/// image has a handful; this much head-room still rejects the crafted
+/// huge-loop shape of audit 2026-10-24 item 4.2.
+const MAX_TARGET_EXTENTS: usize = 1 << 16;
+
 fn parse_iloc_extents(iloc: &[u8], target_ids: &[u32]) -> Result<Vec<(usize, usize)>> {
     let mut extents = Vec::new();
     if iloc.len() < 8 {
@@ -455,6 +536,27 @@ fn parse_iloc_extents(iloc: &[u8], target_ids: &[u32]) -> Result<Vec<(usize, usi
     } else {
         0
     };
+
+    // The spec restricts every size field to 0, 4 or 8 bytes. Other 4-bit
+    // values make `read_uint` shift the payload out of the value silently and
+    // produce garbage offsets (audit 2026-10-24 4.3).
+    if ![offset_size, length_size, base_offset_size, index_size]
+        .iter()
+        .all(|&s| matches!(s, 0 | 4 | 8))
+    {
+        return Err(HevcError::InvalidData(
+            "iloc size fields must each be 0, 4 or 8",
+        ));
+    }
+    // An extent with no offset, length or index field carries no information,
+    // and the extent loop below would not advance -- the zero-progress
+    // ISOBMFF DoS shape when paired with a large extent count
+    // (audit 2026-10-24 4.2).
+    if offset_size + length_size + index_size == 0 {
+        return Err(HevcError::InvalidData(
+            "iloc extent sizes are all zero; extents carry no data",
+        ));
+    }
 
     let mut pos = 6usize;
     let item_count = if version < 2 {
@@ -497,9 +599,30 @@ fn parse_iloc_extents(iloc: &[u8], target_ids: &[u32]) -> Result<Vec<(usize, usi
             }
         };
 
-        if version >= 1 {
-            pos += 2; // construction_method
+        // 12 reserved bits followed by the 4-bit construction_method
+        // (version >= 1). 0 = file offset; 1 and 2 address the `idat` box or
+        // another item, which this parser cannot resolve to file bytes -- and
+        // treating such an offset as a file offset would hand the CABAC
+        // rewriter the wrong slice span (audit 2026-10-24 4.1).
+        let construction_method = if version >= 1 {
+            match be_u16(iloc, pos) {
+                Some(v) => {
+                    pos += 2;
+                    (v & 0x0F) as u32
+                }
+                None => break,
+            }
+        } else {
+            0
+        };
+        let is_target = target_ids.contains(&item_id);
+        if is_target && construction_method != 0 {
+            return Err(HevcError::Unsupported(
+                "target item uses construction_method != 0 (idat/item offsets); \
+                 only file-offset extents are supported",
+            ));
         }
+
         pos += 2; // data_reference_index
 
         // `read_uint` saturates to 0 when the field would run past the end of
@@ -513,8 +636,6 @@ fn parse_iloc_extents(iloc: &[u8], target_ids: &[u32]) -> Result<Vec<(usize, usi
         };
         pos += 2;
 
-        let is_target = target_ids.contains(&item_id);
-
         for _ in 0..extent_count as usize {
             pos += index_size;
             let ext_offset = read_uint(&iloc[pos.min(iloc.len())..], offset_size);
@@ -523,10 +644,17 @@ fn parse_iloc_extents(iloc: &[u8], target_ids: &[u32]) -> Result<Vec<(usize, usi
             pos += length_size;
 
             if is_target {
-                extents.push((
-                    (base_offset.saturating_add(ext_offset)) as usize,
-                    ext_len as usize,
-                ));
+                if extents.len() >= MAX_TARGET_EXTENTS {
+                    return Err(HevcError::TooLarge);
+                }
+                // `usize::try_from`: a 64-bit extent offset that does not fit
+                // the platform usize (32-bit targets) must be an error, not a
+                // truncating cast that silently points at the file header
+                // (audit 2026-10-24 4.3).
+                let abs = base_offset.saturating_add(ext_offset);
+                let off = usize::try_from(abs).map_err(|_| HevcError::TooLarge)?;
+                let len = usize::try_from(ext_len).map_err(|_| HevcError::TooLarge)?;
+                extents.push((off, len));
             }
         }
     }
@@ -654,5 +782,114 @@ mod tests {
             let buf = vec![0u8; len];
             let _ = parse_iloc_extents(&buf, &[1]);
         }
+    }
+
+    /// The zero-progress ISOBMFF DoS shape: all extent size fields zero paired
+    /// with a large extent count used to spin the extent loop without
+    /// advancing (audit 2026-10-24 4.2), and size fields outside {0,4,8}
+    /// silently shifted data out of `read_uint` (4.3).
+    #[test]
+    fn iloc_zero_progress_and_bad_size_fields_are_rejected() {
+        // offset/length/index/base sizes all zero; extent_count = 0xFFFF.
+        let mut iloc = vec![0u8, 0, 0, 0, 0x00, 0x00];
+        iloc.extend_from_slice(&1u16.to_be_bytes()); // item_count
+        iloc.extend_from_slice(&1u16.to_be_bytes()); // item_ID
+        iloc.extend_from_slice(&0u16.to_be_bytes()); // data_reference_index
+        iloc.extend_from_slice(&0xFFFFu16.to_be_bytes()); // extent_count
+        assert!(matches!(
+            parse_iloc_extents(&iloc, &[1]),
+            Err(HevcError::InvalidData(_))
+        ));
+
+        // offset_size = 9 (spec allows only 0, 4 or 8).
+        let mut iloc = vec![0u8, 0, 0, 0, 0x90, 0x00];
+        iloc.extend_from_slice(&0u16.to_be_bytes());
+        assert!(matches!(
+            parse_iloc_extents(&iloc, &[1]),
+            Err(HevcError::InvalidData(_))
+        ));
+    }
+
+    /// construction_method != 0 addresses the idat box or another item, not
+    /// the file -- pretending otherwise would hand the CABAC rewriter the
+    /// wrong slice span (audit 2026-10-24 4.1). Target items with such a
+    /// construction must be rejected; non-target items may use it freely.
+    #[test]
+    fn construction_method_is_enforced_on_target_items() {
+        let build = |cm: u16| -> Vec<u8> {
+            // version 1, offset/length 4 bytes, base 4 bytes, index 0.
+            let mut iloc = vec![1u8, 0, 0, 0, 0x44, 0x40];
+            iloc.extend_from_slice(&1u16.to_be_bytes()); // item_count
+            iloc.extend_from_slice(&1u16.to_be_bytes()); // item_ID = 1
+            iloc.extend_from_slice(&cm.to_be_bytes()); // construction_method
+            iloc.extend_from_slice(&0u16.to_be_bytes()); // data_reference_index
+            iloc.extend_from_slice(&0u32.to_be_bytes()); // base_offset
+            iloc.extend_from_slice(&1u16.to_be_bytes()); // extent_count
+            iloc.extend_from_slice(&0u32.to_be_bytes()); // extent offset
+            iloc.extend_from_slice(&16u32.to_be_bytes()); // extent length
+            iloc
+        };
+
+        assert_eq!(
+            parse_iloc_extents(&build(0), &[1]).unwrap(),
+            vec![(0, 16)],
+            "file-offset construction must parse as before"
+        );
+        assert!(matches!(
+            parse_iloc_extents(&build(1), &[1]),
+            Err(HevcError::Unsupported(_))
+        ));
+        assert!(
+            parse_iloc_extents(&build(1), &[9]).unwrap().is_empty(),
+            "a non-target item may use idat construction"
+        );
+    }
+
+    fn box_of(tag: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(8 + payload.len());
+        v.extend_from_slice(&((8 + payload.len()) as u32).to_be_bytes());
+        v.extend_from_slice(tag);
+        v.extend_from_slice(payload);
+        v
+    }
+
+    /// A minimal hvcC property whose single array carries one 2-byte NAL.
+    fn hvcc_prop(nal: [u8; 2]) -> Vec<u8> {
+        let mut p = vec![0u8; 23];
+        p[21] = 3; // lengthSizeMinusOne -> 4-byte NAL lengths
+        p[22] = 1; // one array
+        p.push(32); // array NAL type (VPS)
+        p.extend_from_slice(&1u16.to_be_bytes()); // numNalus
+        p.extend_from_slice(&2u16.to_be_bytes()); // nalLength
+        p.extend_from_slice(&nal);
+        box_of(b"hvcC", &p)
+    }
+
+    /// With several codecs' properties in one ipco, the hvcC must be selected
+    /// through the target item's ipma association, not by "first one wins"
+    /// (audit 2026-10-24 4.4). Without an association naming an hvcC, the
+    /// first hvcC remains the documented fallback.
+    #[test]
+    fn ipma_selects_the_associated_hvcc() {
+        let ipco = box_of(
+            b"ipco",
+            &[hvcc_prop([0xAA, 0xBB]), hvcc_prop([0xCC, 0xDD])].concat(),
+        );
+        // item 1 associated with property #2 (essential bit set).
+        let mut ipma = vec![0u8, 0, 0, 0];
+        ipma.extend_from_slice(&1u32.to_be_bytes()); // entry_count
+        ipma.extend_from_slice(&1u16.to_be_bytes()); // item_ID
+        ipma.push(1); // association_count
+        ipma.push(0x80 | 2); // essential + property index 2
+        let ipma = box_of(b"ipma", &ipma);
+
+        let iprp = [ipco.clone(), ipma].concat();
+        let (sets, length_size) = parse_hvcc_from_iprp(&iprp, &[1]).unwrap();
+        assert_eq!(sets, vec![&[0xCCu8, 0xDD][..]]);
+        assert_eq!(length_size, 4);
+
+        // No ipma at all: fall back to the first hvcC.
+        let (sets, _) = parse_hvcc_from_iprp(&ipco, &[1]).unwrap();
+        assert_eq!(sets, vec![&[0xAAu8, 0xBB][..]]);
     }
 }
