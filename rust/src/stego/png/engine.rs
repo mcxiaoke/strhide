@@ -1098,8 +1098,11 @@ pub fn embed_png(
     let suite = spatial.body.default_suite();
     let plaintext = build_plaintext(payload)?;
     // The spatial writer makes a single pass, so the attempt index is always 0.
-    let salt = freshness.salt(0);
-    let nonce = freshness.nonce(0);
+    // Seeded runs bind the derivation to this (cover, payload) pair so a
+    // replay on different inputs can never reuse a (key, nonce) pair.
+    let fresh_binding = Freshness::seeded_binding(carrier_bytes, payload);
+    let salt = freshness.salt(0, &fresh_binding);
+    let nonce = freshness.nonce(0, &fresh_binding);
     let master = derive_master(suite, password.unwrap_or(spatial.fallback_secret), &salt)?;
     let (enc_key, perm_seed) = body_keys(spatial.body, &master, &salt, domain);
     let ciphertext_len = plaintext.len() + suite.tag_len();

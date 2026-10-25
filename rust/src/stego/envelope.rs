@@ -191,10 +191,17 @@ pub fn random_nonce() -> [u8; NONCE_LEN] {
 /// Where one embedding gets its salt and nonce.
 ///
 /// [`Freshness::Random`] is the production path and draws fresh bytes from the
-/// OS. [`Freshness::Seeded`] derives both from a caller-supplied seed, so the
-/// same carrier, payload, password and seed produce byte-identical stego files.
-/// That is what makes a regression reproducible instead of "it failed that one
-/// time".
+/// OS. [`Freshness::Seeded`] derives both from a caller-supplied seed **plus a
+/// binding context** (see [`Freshness::seeded_binding`]), so the same carrier,
+/// payload, password and seed produce byte-identical stego files -- and two
+/// *different* inputs can never collide on the same salt or nonce.
+///
+/// The binding matters because the AEAD key is derived from
+/// `(password, salt)` and the PNG engine uses the salt as the KDF salt
+/// directly: without a payload/cover binding, the same password and seed on
+/// two inputs would reuse the whole `(key, nonce)` pair, and AES-GCM under a
+/// repeated pair with different plaintexts is a two-time pad
+/// (review 2026-10-25, M1).
 ///
 /// Reproducibility holds for a fixed `git` revision and target triple. Two
 /// things narrow it further:
@@ -209,7 +216,7 @@ pub enum Freshness {
     /// Fresh randomness per embedding.
     #[default]
     Random,
-    /// Deterministic sequence derived from `seed`.
+    /// Deterministic sequence derived from `seed` and the binding context.
     Seeded([u8; 32]),
 }
 
@@ -219,36 +226,59 @@ impl Freshness {
         matches!(self, Self::Seeded(_))
     }
 
+    /// Binding context for seeded salt/nonce derivation: the SHA-256 of the
+    /// cover bytes followed by the SHA-256 of the raw payload.
+    ///
+    /// Salt and nonce live in the carrier header and are read back on
+    /// extraction, so binding them to the inputs costs the reader nothing --
+    /// but it guarantees that a seeded run replayed on different inputs can
+    /// never reproduce an earlier `(key, nonce)` pair.
+    pub fn seeded_binding(carrier: &[u8], payload: &[u8]) -> [u8; 64] {
+        use sha2::Digest as _;
+        let mut out = [0u8; 64];
+        out[..32].copy_from_slice(&sha2::Sha256::digest(carrier));
+        out[32..].copy_from_slice(&sha2::Sha256::digest(payload));
+        out
+    }
+
     /// Salt for embedding attempt `attempt` (0-based).
     ///
     /// An embedding retries up to [`EMBED_ATTEMPTS`](crate::stego::jpeg) times
     /// when a Huffman-limited block cannot be encoded, and each retry has to
     /// draw a *different* salt or a seeded run would repeat the same failure
     /// forever. Folding the attempt index into the derivation keeps the whole
-    /// retry sequence reproducible.
-    pub fn salt(&self, attempt: u32) -> [u8; SALT_LEN] {
+    /// retry sequence reproducible. `binding` comes from
+    /// [`Freshness::seeded_binding`] and is ignored by [`Freshness::Random`].
+    pub fn salt(&self, attempt: u32, binding: &[u8]) -> [u8; SALT_LEN] {
         match self {
             Self::Random => random_salt(),
-            Self::Seeded(seed) => derive_seeded(seed, b"salt", attempt),
+            Self::Seeded(seed) => derive_seeded(seed, b"salt", attempt, binding),
         }
     }
 
-    /// AEAD nonce for embedding attempt `attempt` (0-based).
-    pub fn nonce(&self, attempt: u32) -> [u8; NONCE_LEN] {
+    /// AEAD nonce for embedding attempt `attempt` (0-based). See [`Self::salt`].
+    pub fn nonce(&self, attempt: u32, binding: &[u8]) -> [u8; NONCE_LEN] {
         match self {
             Self::Random => random_nonce(),
-            Self::Seeded(seed) => derive_seeded(seed, b"nonce", attempt),
+            Self::Seeded(seed) => derive_seeded(seed, b"nonce", attempt, binding),
         }
     }
 }
 
-/// `HKDF-SHA256(seed, info = label || attempt)`, with a domain separator so a
-/// salt can never collide with a nonce derived from the same seed.
-fn derive_seeded<const N: usize>(seed: &[u8; 32], label: &[u8], attempt: u32) -> [u8; N] {
-    let hk = Hkdf::<Sha256>::new(Some(b"strhide-reproducible-v1"), seed);
-    let mut info = Vec::with_capacity(label.len() + 4);
+/// `HKDF-SHA256(seed, info = label || attempt || binding)`, with a domain
+/// separator so a salt can never collide with a nonce derived from the same
+/// seed.
+fn derive_seeded<const N: usize>(
+    seed: &[u8; 32],
+    label: &[u8],
+    attempt: u32,
+    binding: &[u8],
+) -> [u8; N] {
+    let hk = Hkdf::<Sha256>::new(Some(b"strhide-reproducible-v2"), seed);
+    let mut info = Vec::with_capacity(label.len() + 4 + binding.len());
     info.extend_from_slice(label);
     info.extend_from_slice(&attempt.to_be_bytes());
+    info.extend_from_slice(binding);
     let mut out = [0u8; N];
     hk.expand(&info, &mut out)
         .expect("HKDF output for a salt/nonce is far below the 8160-byte limit");
@@ -412,6 +442,34 @@ mod tests {
         let master = derive_master(&SUITE_PBKDF2_200K, password, salt).unwrap();
         let (enc_key, _) = body_keys(&DEFAULT_JPEG_FORMAT, &master, salt, None);
         enc_key
+    }
+
+    /// Seeded derivations must reproduce for identical inputs and must move
+    /// with either half of the (cover, payload) binding: the PNG engine uses
+    /// the salt directly as the KDF salt, so an unbound seeded salt/nonce
+    /// replayed on different inputs would reuse an AEAD (key, nonce) pair
+    /// (review 2026-10-25, M1).
+    #[test]
+    fn seeded_derivations_bind_to_cover_and_payload() {
+        let f = Freshness::Seeded([9u8; 32]);
+        let a = Freshness::seeded_binding(b"cover-1", b"payload");
+        let other_cover = Freshness::seeded_binding(b"cover-2", b"payload");
+        let other_payload = Freshness::seeded_binding(b"cover-1", b"other-payload");
+
+        assert_eq!(
+            f.salt(0, &a),
+            f.salt(0, &a),
+            "the same (cover, payload, seed) must reproduce exactly"
+        );
+        assert_ne!(f.salt(0, &a), f.salt(0, &other_cover));
+        assert_ne!(f.salt(0, &a), f.salt(0, &other_payload));
+        assert_ne!(f.nonce(0, &a), f.nonce(0, &other_cover));
+        assert_ne!(f.nonce(0, &a), f.nonce(0, &other_payload));
+        assert_ne!(
+            f.salt(0, &a),
+            f.salt(1, &a),
+            "the retry attempt index must still vary the derivation"
+        );
     }
 
     #[test]

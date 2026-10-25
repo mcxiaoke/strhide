@@ -483,6 +483,9 @@ struct EmbedContext<'a> {
     base_bytes: u64,
     /// Source of the salt and nonce for each attempt.
     freshness: Freshness,
+    /// Cover+payload binding for seeded freshness, precomputed once per embed
+    /// (see [`Freshness::seeded_binding`]); stable across retry attempts.
+    fresh_binding: [u8; 64],
     /// Capacity safety policy for the enforced-tier gate.
     safety: crate::stego::params::SafetyPolicy,
 }
@@ -620,6 +623,7 @@ pub fn embed_jpeg(
         domain,
         base_bytes: preflight.base_bytes,
         freshness,
+        fresh_binding: Freshness::seeded_binding(carrier_bytes, payload),
         safety,
     };
     let mut work = coeffs.clone();
@@ -769,8 +773,8 @@ fn embed_once(
         }
     }
 
-    let salt = ctx.freshness.salt(attempt);
-    let nonce = ctx.freshness.nonce(attempt);
+    let salt = ctx.freshness.salt(attempt, &ctx.fresh_binding);
+    let nonce = ctx.freshness.nonce(attempt, &ctx.fresh_binding);
     let superblock = Superblock {
         version_major: fmt.format_major,
         version_minor: fmt.format_minor,

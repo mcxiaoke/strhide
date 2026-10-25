@@ -254,7 +254,11 @@ pub fn embed_hevc(
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| StrHideError::General(format!("AES-GCM key init failed: {e}")))?;
 
-    let nonce_bytes = freshness.nonce(0);
+    // Seeded runs bind the nonce to this (cover, payload) pair: the HEVC key
+    // derives from a cover digest that two same-parameter carriers share, so
+    // an unbound seeded nonce could repeat a (key, nonce) pair across inputs.
+    let fresh_binding = Freshness::seeded_binding(carrier, payload);
+    let nonce_bytes = freshness.nonce(0, &fresh_binding);
     let nonce = Nonce::from(nonce_bytes);
 
     let ciphertext = cipher
