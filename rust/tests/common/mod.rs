@@ -127,6 +127,81 @@ pub fn make_heif() -> Vec<u8> {
     out
 }
 
+/// Synthetic HEIF with a real `meta` box: `iinf` (one infe v2 item) and
+/// `iloc` (v1, one item located through a base_offset extent into `mdat`).
+///
+/// This is the only in-CI carrier shape that reaches the iinf/iloc patch and
+/// restore core of the item_hidden strategy; the real-corpus lifecycle tests
+/// for that path are all `--ignored`.
+pub fn make_heif_with_meta() -> Vec<u8> {
+    let mdat_data_len = 64usize;
+
+    // infe v2 for item 1 (21 bytes: hdr 8 + ver/flags 4 + id 2 + prot 2 + type 4 + NUL 1)
+    let mut infe = Vec::new();
+    infe.extend_from_slice(&21u32.to_be_bytes());
+    infe.extend_from_slice(b"infe");
+    infe.extend_from_slice(&[2, 0, 0, 0]);
+    infe.extend_from_slice(&1u16.to_be_bytes()); // item_id
+    infe.extend_from_slice(&0u16.to_be_bytes()); // protection_index
+    infe.extend_from_slice(b"hvc1");
+    infe.push(0); // null-terminated item name
+
+    // iinf v0: hdr 8 + ver/flags 4 + entry count 2 + one infe entry
+    let mut iinf = Vec::new();
+    iinf.extend_from_slice(&((12 + 2 + infe.len()) as u32).to_be_bytes());
+    iinf.extend_from_slice(b"iinf");
+    iinf.extend_from_slice(&[0, 0, 0, 0]);
+    iinf.extend_from_slice(&1u16.to_be_bytes()); // entry_count
+    iinf.extend_from_slice(&infe);
+
+    // iloc v1: offset_size=4, length_size=4, base_size=4, index_size=0.
+    // One item whose single extent is located via base_offset (absolute mdat
+    // payload position) + extent_offset 0 — this exercises the base-offset
+    // branch of the inject/strip patch walk. Byte 22..26 of the box is the
+    // base_offset field and is patched to the real position below.
+    let mut iloc = Vec::new();
+    iloc.extend_from_slice(&36u32.to_be_bytes()); // 12 hdr + count 2 + entry 20 + ver/fields 2
+    iloc.extend_from_slice(b"iloc");
+    iloc.extend_from_slice(&[1, 0, 0, 0]); // version 1
+    iloc.push(0x44); // offset_size=4, length_size=4
+    iloc.push(0x40); // base_size=4, index_size=0
+    iloc.extend_from_slice(&1u16.to_be_bytes()); // item_count
+    iloc.extend_from_slice(&1u16.to_be_bytes()); // item_id
+    iloc.extend_from_slice(&0u16.to_be_bytes()); // construction_method (v1)
+    iloc.extend_from_slice(&0u16.to_be_bytes()); // data_reference_index
+    iloc.extend_from_slice(&0u32.to_be_bytes()); // base_offset — patched below
+    iloc.extend_from_slice(&1u16.to_be_bytes()); // extent_count
+    iloc.extend_from_slice(&0u32.to_be_bytes()); // extent_offset
+    iloc.extend_from_slice(&(mdat_data_len as u32).to_be_bytes()); // extent_length
+    const ILOC_BASE_OFFSET_FIELD: usize = 8 + 4 + 2 + 2 + 2 + 2 + 2; // hdr+ver+2+count+id+cm+dref
+
+    // ftyp (24 bytes: size + 'ftyp' + major 'mif1' + minor 0 + 'mif1heic')
+    let mut out = Vec::new();
+    out.extend_from_slice(&24u32.to_be_bytes());
+    out.extend_from_slice(b"ftyp");
+    out.extend_from_slice(b"mif1");
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(b"mif1heic");
+
+    // meta fullbox: hdr 8 + ver/flags 4 + iinf + iloc
+    let meta_len = 12 + iinf.len() + iloc.len();
+    let mdat_data_pos = (out.len() + meta_len + 8) as u64;
+    iloc[ILOC_BASE_OFFSET_FIELD..ILOC_BASE_OFFSET_FIELD + 4]
+        .copy_from_slice(&(mdat_data_pos as u32).to_be_bytes());
+
+    out.extend_from_slice(&(meta_len as u32).to_be_bytes());
+    out.extend_from_slice(b"meta");
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out.extend_from_slice(&iinf);
+    out.extend_from_slice(&iloc);
+
+    // mdat
+    out.extend_from_slice(&((8 + mdat_data_len) as u32).to_be_bytes());
+    out.extend_from_slice(b"mdat");
+    out.resize(out.len() + mdat_data_len, 0xC3);
+    out
+}
+
 /// Minimal valid WebP: RIFF header with 'WEBP' and a minimal 'VP8 ' chunk.
 pub fn make_webp() -> Vec<u8> {
     let mut out = Vec::new();

@@ -15,8 +15,8 @@
 //! The [`crate::engine`] never parses a container itself — it calls into the
 //! adapter trait. Adapters live in submodules:
 //!
-//! - [`png`], [`jpeg`], [`mp4`], [`zip`], [`pdf`], [`pe`] — the six supported
-//!   carriers.
+//! - [`png`], [`jpeg`], [`mp4`], [`heif`], [`zip`], [`pdf`], [`pe`], [`wav`],
+//!   [`webp`], [`mkv`] — the ten supported carriers.
 //! - [`eof`] — the universal fallback strategy (append after EOF) shared by
 //!   every carrier when its primary strategy does not fit.
 //! - [`pe_codebits`], [`pe_slack`] — sub-strategies of the PE adapter.
@@ -200,8 +200,8 @@ pub trait HostAdapter: Send + Sync {
     /// implementation writes the restored patch value at
     /// `patch_offset - inject_size` in `out`, i.e. translated into the
     /// stripped stream's coordinates. Adapters that emit a non-zero
-    /// `patch_offset` (currently only ZIP) may override this with an
-    /// equivalent streaming implementation.
+    /// `patch_offset` (ZIP at `eocd_pos + 16 + ube_size`, RIFF at offset 4)
+    /// may override this with an equivalent streaming implementation.
     fn strip(
         &self,
         stego_in: &mut dyn SeekRead,
@@ -233,9 +233,12 @@ pub trait HostAdapter: Send + Sync {
         // `inject_offset`), so a stego-coordinate `patch_offset` maps to
         // `patch_offset - inject_size` here — the same translation the
         // ZIP-specific override performs. Sentinel: 0 means "no patch"; a
-        // genuine patch offset is always >= 16 (ZIP writes it at
-        // eocd_pos + 16 + ube_size), so a patch at absolute offset 0 is
-        // unreachable in the protocol.
+        // genuine patch offset is always >= 4 (RIFF patches its size field at
+        // offset 4, ZIP writes at `eocd_pos + 16 + ube_size`), so a patch at
+        // absolute offset 0 is unreachable in the protocol. RIFF never pairs
+        // the offset-4 patch with a zero original value either: `riff_inject`
+        // rejects carriers whose declared RIFF size is 0 via its boundary
+        // check.
         if header.patch_offset != 0 {
             let out_patch_pos = if (header.patch_offset as u64) < header.inject_offset {
                 header.patch_offset as u64

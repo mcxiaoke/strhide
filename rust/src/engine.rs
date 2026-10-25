@@ -263,7 +263,7 @@ impl CarrierMetadata {
 fn encode_metadata(meta: &CarrierMetadata) -> Result<Vec<u8>, StrHideError> {
     meta.encode_compact().ok_or_else(|| {
         StrHideError::General(
-            "Payload filename exceeds 65535 bytes or its SHA-256 is malformed;              cannot encode envelope metadata"
+            "Payload filename exceeds 65535 bytes or its SHA-256 is malformed; cannot encode envelope metadata"
                 .into(),
         )
     })

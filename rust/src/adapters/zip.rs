@@ -99,6 +99,11 @@ impl HostAdapter for ZipAdapter {
 
     fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, ube_size: u64) -> &'static str {
         match find_eocd_offset(reader) {
+            // An empty archive has its Central Directory at offset 0: the UBE
+            // would land at file offset 0 and the stego would no longer start
+            // with a ZIP magic, so neither this adapter nor any other could
+            // ever detect it again. Route to the EOF overlay instead.
+            Ok((_, 0, _)) => "eof",
             Ok((eocd_pos, cd_offset, _)) => {
                 // The EOCD cd_offset field AND the patch position
                 // (eocd_pos + 16, shifted by ube_size) must both stay inside
@@ -131,6 +136,11 @@ impl HostAdapter for ZipAdapter {
         if let Some(r) = reader {
             let start = r.stream_position().ok();
             match find_eocd_offset(r) {
+                Ok((_, 0, _)) => {
+                    pre_cd.available = false;
+                    pre_cd.note =
+                        Some("Empty archive (no Central Directory); auto falls back to eof".into());
+                }
                 Ok((eocd_pos, cd_offset, _)) => {
                     let patch_limit = std::cmp::max(cd_offset, eocd_pos + 16);
                     // Mirrors choose_auto_strategy: patch_limit + ube must stay
@@ -184,6 +194,13 @@ impl HostAdapter for ZipAdapter {
         }
 
         let (eocd_pos, cd_offset, _) = find_eocd_offset(host_in)?;
+        if cd_offset == 0 {
+            return Err(StrHideError::UnsupportedFormat(
+                "Empty archive: there is no Central Directory to inject before (the envelope \
+                 would overwrite the archive's own magic). Please specify --strategy eof."
+                    .into(),
+            ));
+        }
 
         let ube_size = ube_in.seek(SeekFrom::End(0))?;
         ube_in.seek(SeekFrom::Start(0))?;

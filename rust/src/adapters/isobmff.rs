@@ -685,7 +685,12 @@ fn heif_item_hidden_inject(
         }
         ipos += isz;
     }
-    let new_id = (max_id + 1).max(1);
+    // A crafted infe entry may declare item_id = u32::MAX. Wrapping to 0 here
+    // would collide with the primary image's item id (conventionally 1), so
+    // refuse the carrier instead of emitting an invalid stego.
+    let new_id = max_id
+        .checked_add(1)
+        .ok_or_else(|| StrHideError::CorruptedData("iinf item_id space exhausted".into()))?;
 
     // Build new infe
     let new_infe = if new_id <= 0xFFFF {
@@ -715,7 +720,17 @@ fn heif_item_hidden_inject(
 
     // 4. Parse iloc geometry
     let iloc_box = &subboxes[iloc_idx].1;
+    // Versioned length gates (same style as `check_iloc_has_target`): the meta
+    // sub-box extraction only guarantees `size >= header_len`, so a crafted
+    // ultra-short iloc must fail as CorruptedData instead of panicking on the
+    // bare index reads below.
+    if iloc_box.len() < 14 {
+        return Err(StrHideError::CorruptedData("Truncated iloc box".into()));
+    }
     let iloc_ver = iloc_box[8];
+    if iloc_box.len() < if iloc_ver < 2 { 16 } else { 18 } {
+        return Err(StrHideError::CorruptedData("Truncated iloc box".into()));
+    }
     let off_sz = ((iloc_box[12] >> 4) & 0x0F) as usize;
     let len_sz = (iloc_box[12] & 0x0F) as usize;
     let base_sz = ((iloc_box[13] >> 4) & 0x0F) as usize;
@@ -763,6 +778,9 @@ fn heif_item_hidden_inject(
         for _ in 0..iloc_cnt {
             cpos += id_sz;
             let cm = if iloc_ver >= 1 {
+                if cpos + 2 > iloc_buf.len() {
+                    return Err(StrHideError::CorruptedData("Truncated iloc entry".into()));
+                }
                 let val = u16::from_be_bytes(iloc_buf[cpos..cpos + 2].try_into().unwrap()) & 0x0F;
                 cpos += 2;
                 val
@@ -773,6 +791,9 @@ fn heif_item_hidden_inject(
             let base_pos = cpos;
             let b_off = read_sized_uint(iloc_buf, cpos, base_sz)?;
             cpos += base_sz;
+            if cpos + 2 > iloc_buf.len() {
+                return Err(StrHideError::CorruptedData("Truncated iloc entry".into()));
+            }
             let e_cnt = u16::from_be_bytes(iloc_buf[cpos..cpos + 2].try_into().unwrap()) as usize;
             cpos += 2;
             for _ in 0..e_cnt {
@@ -887,6 +908,28 @@ fn heif_item_hidden_strip(
         return Err(StrHideError::CorruptedData("Truncated meta box".into()));
     }
 
+    // The header is only masked with the public built-in key, so a forged
+    // stego can name arbitrary coordinates. Beyond the EOF check above, the
+    // meta box must end before the injected region and the injected region
+    // (meta growth + the trailing mdat2 box) must run to the end of the file;
+    // anything else would slice with start > end in step 7 below.
+    if (header.inject_offset as usize) < m_end {
+        return Err(StrHideError::CorruptedData(
+            "inject_offset precedes the end of the meta box".into(),
+        ));
+    }
+    let inject_end = header
+        .inject_offset
+        .checked_add(header.inject_size)
+        .ok_or_else(|| {
+            StrHideError::CorruptedData("Injected region overflows u64 offsets".into())
+        })?;
+    if inject_end != stego_bytes.len() as u64 {
+        return Err(StrHideError::CorruptedData(
+            "inject_offset + inject_size does not match the stego file length".into(),
+        ));
+    }
+
     // 2. Extract sub-boxes in meta
     let mut subboxes: Vec<([u8; 4], Vec<u8>)> = Vec::new();
     let mut bpos = m_body_start;
@@ -999,6 +1042,9 @@ fn heif_item_hidden_strip(
         for _ in 0..iloc_cnt - 1 {
             cpos += id_sz;
             let cm = if iloc_ver >= 1 {
+                if cpos + 2 > iloc_buf.len() {
+                    return Err(StrHideError::CorruptedData("Truncated iloc entry".into()));
+                }
                 let val = u16::from_be_bytes(iloc_buf[cpos..cpos + 2].try_into().unwrap()) & 0x0F;
                 cpos += 2;
                 val
@@ -1009,6 +1055,9 @@ fn heif_item_hidden_strip(
             let base_pos = cpos;
             let b_off = read_sized_uint(iloc_buf, cpos, base_sz)?;
             cpos += base_sz;
+            if cpos + 2 > iloc_buf.len() {
+                return Err(StrHideError::CorruptedData("Truncated iloc entry".into()));
+            }
             let e_cnt = u16::from_be_bytes(iloc_buf[cpos..cpos + 2].try_into().unwrap()) as usize;
             cpos += 2;
             for _ in 0..e_cnt {
@@ -1208,7 +1257,7 @@ fn check_iloc_has_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::envelope::{STANDARD_TRAILER_MAGIC, TRAILER_SIZE};
+    use crate::envelope::{EnvelopeHeader, STANDARD_TRAILER_MAGIC, TRAILER_SIZE};
     use std::io::Cursor;
 
     /// The 32-bit form tops out at `0xFFFFFFFF`; the value that exactly reaches
@@ -1356,5 +1405,309 @@ mod tests {
             }
             let _ = check_iloc_has_target(&box_bytes, 0, 0);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Synthetic meta-HEIF hosts for the item_hidden iinf/iloc core.
+    //
+    // These are the only in-CI carriers that reach the iinf/iloc patch and
+    // restore code of the item_hidden strategy; the real-corpus lifecycle
+    // tests for that path are all `--ignored`.
+
+    /// `iinf` box (v0 with an infe v2 entry, or v1 with an infe v3 entry).
+    fn make_iinf(item_id: u32, infe_version: u8) -> Vec<u8> {
+        let mut infe = Vec::new();
+        if infe_version == 2 {
+            infe.extend_from_slice(&21u32.to_be_bytes());
+            infe.extend_from_slice(b"infe");
+            infe.extend_from_slice(&[2, 0, 0, 0]);
+            infe.extend_from_slice(&(item_id as u16).to_be_bytes());
+            infe.extend_from_slice(&0u16.to_be_bytes()); // protection_index
+            infe.extend_from_slice(b"hvc1");
+            infe.push(0); // null-terminated item name
+        } else {
+            infe.extend_from_slice(&23u32.to_be_bytes());
+            infe.extend_from_slice(b"infe");
+            infe.extend_from_slice(&[3, 0, 0, 0]);
+            infe.extend_from_slice(&item_id.to_be_bytes());
+            infe.extend_from_slice(&0u16.to_be_bytes());
+            infe.extend_from_slice(b"hvc1");
+            infe.push(0);
+        }
+        let iinf_ver = if infe_version == 2 { 0u8 } else { 1u8 };
+        let mut iinf = Vec::new();
+        let count_sz = if iinf_ver == 0 { 2usize } else { 4 };
+        iinf.extend_from_slice(&((12 + count_sz + infe.len()) as u32).to_be_bytes());
+        iinf.extend_from_slice(b"iinf");
+        iinf.extend_from_slice(&[iinf_ver, 0, 0, 0]);
+        if iinf_ver == 0 {
+            iinf.extend_from_slice(&1u16.to_be_bytes());
+        } else {
+            iinf.extend_from_slice(&1u32.to_be_bytes());
+        }
+        iinf.extend_from_slice(&infe);
+        iinf
+    }
+
+    /// `iloc` v1 box (36 bytes): offset/length size 4, base size 4, one item
+    /// with one extent located through `base_offset`. `count_override` can
+    /// declare more items than the box actually holds.
+    fn make_iloc_box(count_override: Option<u16>) -> Vec<u8> {
+        let mut iloc = Vec::new();
+        iloc.extend_from_slice(&36u32.to_be_bytes());
+        iloc.extend_from_slice(b"iloc");
+        iloc.extend_from_slice(&[1, 0, 0, 0]); // version 1
+        iloc.push(0x44); // offset_size=4, length_size=4
+        iloc.push(0x40); // base_size=4, index_size=0
+        iloc.extend_from_slice(&count_override.unwrap_or(1).to_be_bytes());
+        iloc.extend_from_slice(&1u16.to_be_bytes()); // item_id
+        iloc.extend_from_slice(&0u16.to_be_bytes()); // construction_method
+        iloc.extend_from_slice(&0u16.to_be_bytes()); // data_reference_index
+        iloc.extend_from_slice(&0u32.to_be_bytes()); // base_offset — patched below
+        iloc.extend_from_slice(&1u16.to_be_bytes()); // extent_count
+        iloc.extend_from_slice(&0u32.to_be_bytes()); // extent_offset
+        iloc.extend_from_slice(&64u32.to_be_bytes()); // extent_length
+        iloc
+    }
+
+    /// ftyp(24) + meta(fullbox: iinf + iloc) + mdat(64 bytes). The iloc item's
+    /// base_offset is patched to the absolute mdat payload position.
+    fn assemble_meta_heif(iinf: &[u8], iloc: &[u8]) -> Vec<u8> {
+        let meta_len = 12 + iinf.len() + iloc.len();
+        let mut out = Vec::new();
+        out.extend_from_slice(&24u32.to_be_bytes());
+        out.extend_from_slice(b"ftyp");
+        out.extend_from_slice(b"mif1");
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(b"mif1heic");
+        let mdat_pos = (24 + meta_len + 8) as u32;
+        out.extend_from_slice(&(meta_len as u32).to_be_bytes());
+        out.extend_from_slice(b"meta");
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        out.extend_from_slice(iinf);
+        out.extend_from_slice(iloc);
+        out.extend_from_slice(&(72u32.to_be_bytes()));
+        out.extend_from_slice(b"mdat");
+        out.resize(out.len() + 64, 0xC3);
+        // base_offset field: meta starts at 24, iloc follows the 12-byte meta
+        // header plus iinf, and sits 22 bytes into the iloc box.
+        let base_pos = 24 + 12 + iinf.len() + 22;
+        out[base_pos..base_pos + 4].copy_from_slice(&mdat_pos.to_be_bytes());
+        out
+    }
+
+    fn synthetic_meta_heif(item_id: u32, infe_version: u8) -> Vec<u8> {
+        let iinf = make_iinf(item_id, infe_version);
+        let iloc = make_iloc_box(None);
+        assemble_meta_heif(&iinf, &iloc)
+    }
+
+    #[test]
+    fn item_hidden_roundtrips_on_a_synthetic_meta_heif() {
+        let host = synthetic_meta_heif(1, 2);
+        // Deterministic for this fixture: one 21-byte infe + one 20-byte iloc
+        // entry appended to iinf/iloc.
+        let delta_meta = 41u64;
+        let inject_offset = host.len() as u64 + delta_meta;
+        let ube_data_len = 200u64;
+        let ube_total = ube_data_len + TRAILER_SIZE as u64;
+
+        let mut ube = vec![0x77u8; ube_data_len as usize];
+        ube.extend_from_slice(
+            &EnvelopeTrailer::create(inject_offset + 8, ube_total, STANDARD_TRAILER_MAGIC).pack(),
+        );
+
+        let mut out = Vec::new();
+        let (offset, size, patch_off, orig) = isobmff_inject(
+            "HEIF",
+            &mut Cursor::new(host.clone()),
+            &mut Cursor::new(ube.clone()),
+            &mut out,
+            "item_hidden",
+        )
+        .unwrap();
+        assert_eq!(offset, inject_offset);
+        assert_eq!(size, 8 + ube_total);
+        assert_eq!((patch_off, orig), (0, 0));
+
+        let mut cur = Cursor::new(out.clone());
+        let (lo, ls, strat) = isobmff_locate(&mut cur, None).unwrap().unwrap();
+        assert_eq!(strat, "item_hidden");
+        assert_eq!(
+            lo,
+            inject_offset + 8,
+            "trailer records the mdat payload start"
+        );
+        assert_eq!(ls, ube_total);
+
+        let mut cur = Cursor::new(out.clone());
+        let (ok, detail) = isobmff_verify_structure("HEIF", &mut cur).unwrap();
+        assert!(ok, "synthetic item_hidden stego must verify: {detail}");
+
+        let header = EnvelopeHeader {
+            strategy_id: 12,
+            inject_offset: offset,
+            inject_size: size,
+            ..Default::default()
+        };
+        let mut restored = Cursor::new(Vec::new());
+        isobmff_strip(&mut Cursor::new(out), &mut restored, &header).unwrap();
+        assert_eq!(
+            restored.into_inner(),
+            host,
+            "strip must restore the host byte-exactly"
+        );
+    }
+
+    /// A crafted ultra-short `iloc` (the meta sub-box walk only guarantees
+    /// `size >= header_len`) must fail as CorruptedData, never panic on the
+    /// bare index reads of the inject-side geometry parse (P1-1).
+    #[test]
+    fn item_hidden_inject_rejects_an_ultra_short_iloc() {
+        let iinf = make_iinf(1, 2);
+        for (len, ver) in [
+            (8usize, 1u8),
+            (12, 1),
+            (13, 1),
+            (14, 0),
+            (15, 1),
+            (16, 2),
+            (17, 2),
+        ] {
+            let mut iloc = vec![0u8; len];
+            iloc[0..4].copy_from_slice(&(len as u32).to_be_bytes());
+            iloc[4..8].copy_from_slice(b"iloc");
+            if len > 8 {
+                iloc[8] = ver;
+            }
+            let host = assemble_meta_heif(&iinf, &iloc);
+            let err = isobmff_inject(
+                "HEIF",
+                &mut Cursor::new(host),
+                &mut Cursor::new(vec![0u8; 224]),
+                &mut Vec::new(),
+                "item_hidden",
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("Truncated iloc"),
+                "iloc len {len} v{ver}: {err}"
+            );
+        }
+    }
+
+    /// An iloc item count larger than the box contents must be rejected by
+    /// both the inject and the strip walk, not panic on the u16 entry reads
+    /// (P2-1).
+    #[test]
+    fn item_hidden_walks_reject_iloc_count_beyond_data() {
+        let iinf = make_iinf(1, 2);
+        let iloc = make_iloc_box(Some(2)); // declares 2 items, box holds 1
+
+        let err = isobmff_inject(
+            "HEIF",
+            &mut Cursor::new(assemble_meta_heif(&iinf, &iloc)),
+            &mut Cursor::new(vec![0u8; 224]),
+            &mut Vec::new(),
+            "item_hidden",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Truncated iloc entry"), "{err}");
+
+        // Strip side: take a valid stego and inflate the item count.
+        let host = synthetic_meta_heif(1, 2);
+        let mut stego = Vec::new();
+        let (offset, size, _, _) = isobmff_inject(
+            "HEIF",
+            &mut Cursor::new(host),
+            &mut Cursor::new(vec![0u8; 200]),
+            &mut stego,
+            "item_hidden",
+        )
+        .unwrap();
+        // In the stego the iloc box sits after the grown iinf (one 21-byte
+        // infe added); its 16-bit item count is 14 bytes into the box.
+        let count_pos = 24 + 12 + 35 + 21 + 14;
+        stego[count_pos..count_pos + 2].copy_from_slice(&5u16.to_be_bytes());
+        let header = EnvelopeHeader {
+            strategy_id: 12,
+            inject_offset: offset,
+            inject_size: size,
+            ..Default::default()
+        };
+        let err = isobmff_strip(
+            &mut Cursor::new(stego),
+            &mut Cursor::new(Vec::new()),
+            &header,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Truncated iloc entry"), "{err}");
+    }
+
+    /// An infe entry declaring `item_id = u32::MAX` must refuse the carrier:
+    /// the old `(max_id + 1).max(1)` wrapped to 1 in release and collided with
+    /// the primary image's item id (P2-2).
+    #[test]
+    fn item_hidden_inject_rejects_item_id_u32_max() {
+        let host = synthetic_meta_heif(u32::MAX, 3);
+        let err = isobmff_inject(
+            "HEIF",
+            &mut Cursor::new(host),
+            &mut Cursor::new(vec![0u8; 224]),
+            &mut Vec::new(),
+            "item_hidden",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("item_id space exhausted"), "{err}");
+    }
+
+    /// The non-AEAD header can be fully forged, so strip must cross-check the
+    /// declared coordinates against the actual layout before slicing (P2-3).
+    #[test]
+    fn item_hidden_strip_rejects_forged_coordinates() {
+        let host = synthetic_meta_heif(1, 2);
+        let ube_total = 224u64;
+        let mut stego = Vec::new();
+        isobmff_inject(
+            "HEIF",
+            &mut Cursor::new(host),
+            &mut Cursor::new(vec![0u8; 200]),
+            &mut stego,
+            "item_hidden",
+        )
+        .unwrap();
+
+        // (a) inject_offset inside the meta box would slice start > end.
+        let mut header = EnvelopeHeader {
+            strategy_id: 12,
+            inject_offset: 40, // meta spans 24..(24+meta_len)
+            inject_size: stego.len() as u64 - 40,
+            ..Default::default()
+        };
+        let err = isobmff_strip(
+            &mut Cursor::new(stego.clone()),
+            &mut Cursor::new(Vec::new()),
+            &header,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("precedes the end of the meta box"),
+            "{err}"
+        );
+
+        // (b) a size that does not run to the end of the file is equally forged.
+        header.inject_offset = stego.len() as u64 - 8 - ube_total;
+        header.inject_size = 8 + ube_total - 1;
+        let err = isobmff_strip(
+            &mut Cursor::new(stego),
+            &mut Cursor::new(Vec::new()),
+            &header,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not match the stego file length"),
+            "{err}"
+        );
     }
 }

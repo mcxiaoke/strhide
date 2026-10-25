@@ -5,6 +5,7 @@
 //! - `p2_fixes`: error propagation and corruption detection across carriers.
 //! - `p2_protocol`: protocol-level envelope validation and PDF xref streams.
 //! - `review_20261019`: findings lockdown from comprehensive code reviews.
+//! - `review_20261025`: findings lockdown from the structure-domain deep review.
 //! - `real_samples`: integration checks against real-world media and executable files.
 
 #[path = "common/mod.rs"]
@@ -20,3 +21,5 @@ mod p2_protocol;
 mod real_samples;
 #[path = "test_regression/review_20261019.rs"]
 mod review_20261019;
+#[path = "test_regression/review_20261025.rs"]
+mod review_20261025;

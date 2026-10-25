@@ -67,6 +67,21 @@ pub fn riff_inject(
     host_in.read_exact(&mut header)?;
     let old_riff_size = u32::from_le_bytes(header[4..8].try_into().unwrap());
 
+    // The SHRD chunk is appended at the physical end of the file while the
+    // RIFF size patch assumes the declared boundary coincides with it. A
+    // carrier that violates this (streaming WAV with size = 0, trailing ID3
+    // or garbage) would leave locate walking junk past the declared boundary
+    // — for odd ube sizes the envelope becomes unreachable and the occupied
+    // check double-injects — so refuse such carriers up front (review
+    // 2026-10-25); `--strategy eof` stays available and symmetric.
+    let declared_end = 8u64 + old_riff_size as u64;
+    if host_len != declared_end {
+        return Err(StrHideError::CorruptedData(format!(
+            "{format_name} file length ({host_len}) does not match the declared RIFF size \
+             (chunk area ends at {declared_end}); please specify --strategy eof"
+        )));
+    }
+
     let pad_len = ube_size % 2;
     let inject_size = 8 + ube_size + pad_len;
 
