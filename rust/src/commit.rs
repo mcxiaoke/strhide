@@ -135,15 +135,7 @@ pub fn commit_carrier_bytes(
         backup_path = Some(bak);
     }
 
-    let mut tmp_os = target_path.as_os_str().to_os_string();
-    tmp_os.push(".strhide.tmp");
-    let tmp_target = PathBuf::from(tmp_os);
-    let mut tmp_guard = TmpGuard::new(tmp_target.clone());
-
-    std::fs::write(&tmp_target, stego_bytes)?;
-
-    std::fs::rename(&tmp_target, target_path)?;
-    tmp_guard.commit();
+    write_bytes_atomic(target_path, stego_bytes)?;
 
     let _ = std::fs::set_permissions(target_path, orig_permissions);
     if preserve_time {
@@ -151,4 +143,50 @@ pub fn commit_carrier_bytes(
     }
 
     Ok(backup_path)
+}
+
+/// Write `bytes` to `path` through a sibling temp file, then rename over it.
+///
+/// The temp file is `fsync`ed before the rename: renaming first and syncing
+/// later leaves a window where a power cut can expose the new name with
+/// zero-length or partially written contents. The parent directory is synced
+/// afterwards so the rename itself survives on ext4/xfs; on Windows the rename
+/// is journaled by NTFS and the call is a no-op.
+///
+/// Errors leave no `*.strhide.tmp` behind (the guard removes it on unwind).
+pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), StrHideError> {
+    use std::io::Write as _;
+
+    let mut tmp_os = path.as_os_str().to_os_string();
+    tmp_os.push(".strhide.tmp");
+    let tmp_path = PathBuf::from(tmp_os);
+    let mut guard = TmpGuard::new(tmp_path.clone());
+
+    {
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, path)?;
+    guard.commit();
+    sync_parent_dir(path);
+    Ok(())
+}
+
+/// Flush the directory entry created by a rename (no-op off unix).
+fn sync_parent_dir(path: &Path) {
+    #[cfg(unix)]
+    {
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }

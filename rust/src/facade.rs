@@ -321,7 +321,9 @@ impl StrHide {
         {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&final_dest, &data)?;
+        // Same temp+fsync+rename path the carrier writers use: a half-written
+        // payload must never be visible under the destination name.
+        crate::commit::write_bytes_atomic(&final_dest, &data)?;
         Ok(final_dest)
     }
 }
