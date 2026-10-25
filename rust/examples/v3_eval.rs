@@ -132,8 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 slot_budget: Some(budget),
                 ..JpegParams::default()
             };
-            if let Ok(layout) =
-                layout_for_payload(&cover, payload_len, &params, &DEFAULT_JPEG_FORMAT)
+            if let Ok(layout) = layout_for_payload(&cover, &payload, &params, &DEFAULT_JPEG_FORMAT)
             {
                 u = layout.u;
             }

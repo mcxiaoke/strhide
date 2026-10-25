@@ -1018,7 +1018,7 @@ fn test_jpeg_v3_slot_budget_controls_the_change_rate() {
 
         let layout = strhide::stego::jpeg::engine::layout_for_payload(
             &jpeg_bytes,
-            payload.len(),
+            payload,
             &opts.jpeg_params,
             &strhide::stego::format::DEFAULT_JPEG_FORMAT,
         )

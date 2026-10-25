@@ -1341,15 +1341,28 @@ pub fn probe_jpeg_capacity(
 }
 
 /// Layout information for diagnostics and tests: the resolved group size and
-/// body slot count for a given payload length.
+/// body slot count for a given payload.
+///
+/// Takes the payload bytes, not just its length: [`build_plaintext`] deflates
+/// the payload whenever that is smaller, and the ciphertext length (plaintext +
+/// AEAD tag, the suite comes from `params.cipher_suite`) is what actually
+/// decides `u`. A length-only API reported the layout of an uncompressed
+/// envelope -- exactly the case where the real writer picks a larger `u`.
 pub fn layout_for_payload(
     carrier_bytes: &[u8],
-    payload_len: usize,
+    payload: &[u8],
     params: &JpegParams,
     fmt: &JpegFormatProfile,
 ) -> Result<Layout, StrHideError> {
     fmt.validate()?;
     params.validate()?;
+    let suite = fmt.suite(params.cipher_suite).ok_or_else(|| {
+        StrHideError::UnsupportedVersion(format!(
+            "Cipher suite {} is not implemented by this build (known: {:?})",
+            params.cipher_suite,
+            fmt.suites.iter().map(|s| s.id).collect::<Vec<_>>()
+        ))
+    })?;
     let preflight = preflight_jpeg(carrier_bytes)?;
     let coeffs = dct_io::read_coefficients(carrier_bytes).map_err(map_dct_error)?;
     if coeffs.components.is_empty() {
@@ -1361,7 +1374,8 @@ pub fn layout_for_payload(
     let n_total = block_count * fmt.grid_rule.slots_per_block();
     let ext_bytes = encode_extension(&params.extensions)?.len();
     let hdr_n = fmt.header_slots(ext_bytes);
-    let ciphertext_len = payload_len + 5 + 16;
+    let plaintext = build_plaintext(payload)?;
+    let ciphertext_len = plaintext.len() + suite.tag_len();
     let body_slots = n_total.saturating_sub(hdr_n);
     let effective_budget = params.effective_slot_budget(body_slots);
     let bits = ciphertext_len * 8;

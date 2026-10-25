@@ -323,10 +323,18 @@ impl JpegFormatProfile {
             return Some(format!("ext_u must be in 1..=64, got {}", self.ext_u));
         }
         // `n = u * (bits + h - 1)` must carry exactly `bits` message bits, i.e.
-        // `n / u - (h - 1) == bits`, which holds by construction; the check that
-        // can actually fail is a group wider than the trellis window needs.
-        if self.sb_u as usize * (self.sb_h as usize - 1) > self.superblock_slots() {
-            return Some("superblock geometry is not self-consistent".into());
+        // `n / u - (h - 1) == bits`, which holds by construction. The check that
+        // *can* fail is the one below: the superblock is serialised to a fixed
+        // [`SUPERBLOCK_BYTES`] buffer, so a profile that claims a different
+        // `sb_bytes` embeds the wrong number of bits -- fewer silently truncates
+        // the header and makes every carrier unreadable, more reads past the
+        // buffer.
+        if self.sb_bytes as usize != crate::stego::jpeg::header_v3::SUPERBLOCK_BYTES {
+            return Some(format!(
+                "sb_bytes must be {}, the serialised superblock length, got {}",
+                crate::stego::jpeg::header_v3::SUPERBLOCK_BYTES,
+                self.sb_bytes
+            ));
         }
         if self.grid_rule.k_min < 1 {
             return Some(format!(
@@ -630,6 +638,17 @@ mod tests {
         let mut p = DEFAULT_JPEG_FORMAT;
         p.sb_h = 3;
         assert!(p.validate().is_err());
+
+        // The serialised superblock is a fixed 44-byte buffer: any other
+        // `sb_bytes` embeds the wrong bit count (short = truncated header that
+        // no reader can decode, long = reads past the buffer).
+        let mut p = DEFAULT_JPEG_FORMAT;
+        p.sb_bytes = 43;
+        let err = p.validate().expect_err("short superblock must be refused");
+        assert!(format!("{err}").contains("sb_bytes"), "{err}");
+        let mut p = DEFAULT_JPEG_FORMAT;
+        p.sb_bytes = 45;
+        assert!(p.validate().is_err(), "long superblock must be refused");
 
         let mut p = DEFAULT_JPEG_FORMAT;
         p.suites = &[];

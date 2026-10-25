@@ -126,7 +126,10 @@ pub fn embed_carrier_with_profile(
             options.freshness,
         )
     } else if crate::sniff::is_heif_bytes(carrier_bytes) {
-        // HEIF content-domain steganography
+        // HEIF content-domain steganography: bridge first (it leaves the
+        // primary image untouched), Scheme C as the fallback when no item is
+        // bridgeable. Extraction probes in the opposite order -- see the note
+        // on the HEIF branch in `extract_carrier`.
         if options.algorithm.as_deref() == Some("hevc")
             || options.algorithm.as_deref() == Some("cabac")
         {
@@ -222,7 +225,20 @@ pub fn extract_carrier_with_profile(
             &options.png_params,
         )
     } else if crate::sniff::is_heif_bytes(carrier_bytes) {
-        // HEIF content-domain steganography: try Scheme C (HEVC CABAC in-place) first, then bridge
+        // HEIF content-domain steganography: try Scheme C (HEVC CABAC in-place) first, then bridge.
+        //
+        // The order is deliberately *not* the embed order (embed tries the
+        // bridge first because replacing a thumbnail leaves the primary image
+        // bit-exact, while Scheme C perturbs it). On the read side the cheap
+        // and total test wins: a Scheme C probe either authenticates or proves
+        // the carrier is not Scheme C, whereas the bridge has to locate a
+        // rewritable item first.
+        //
+        // Consequence to keep in mind for any future reordering: a carrier that
+        // was embedded twice -- once through the bridge, once through Scheme C
+        // -- carries two payloads, and this order returns the Scheme C one.
+        // Fixing that needs a freshness rule (e.g. refusing a second embed in
+        // the other scheme), not a different order.
         match hevc::extract_hevc(carrier_bytes, secret, domain, profile.hevc_format()) {
             Ok(payload) => Ok(payload),
             Err(e) => {

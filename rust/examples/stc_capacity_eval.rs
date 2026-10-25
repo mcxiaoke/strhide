@@ -309,7 +309,7 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
                     slot_budget: Some(budget),
                     ..JpegParams::default()
                 };
-                let u = layout_for_payload(&carrier_bytes, payload_len, &params, &DEFAULT_JPEG_FORMAT)
+                let u = layout_for_payload(&carrier_bytes, &payload, &params, &DEFAULT_JPEG_FORMAT)
                     .map(|layout| layout.u)
                     .unwrap_or(0);
 

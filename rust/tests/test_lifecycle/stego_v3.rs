@@ -437,7 +437,7 @@ fn v3_over_optimised_table_refuses_when_no_group_fits() {
     // layout_for_payload must refuse with the exact same diagnostic
     let layout_err = strhide::stego::jpeg::engine::layout_for_payload(
         &cover,
-        payload.len(),
+        &payload,
         &JpegParams::default(),
         &strhide::stego::format::DEFAULT_JPEG_FORMAT,
     )
@@ -474,7 +474,7 @@ fn v3_over_optimised_table_lifts_u_two_to_u_three() {
 
     let layout = strhide::stego::jpeg::engine::layout_for_payload(
         &cover,
-        payload.len(),
+        &payload,
         &options.jpeg_params,
         &strhide::stego::format::DEFAULT_JPEG_FORMAT,
     )
