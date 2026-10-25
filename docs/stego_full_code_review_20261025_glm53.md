@@ -9,6 +9,7 @@
 | 方法 | 6 路并行子系统深审 + 主审独立复验关键发现（对照参考文献/本地参考实现/手工数学推导）；静态审查，未运行构建 |
 | 参考文献 | Filler et al. TIFS 2011（STC）；Holub & Fridrich EURASIP JIS 2014（S-UNIWARD）；Li et al. ICIP 2014（HILL）；Guo et al. TIFS 2015（UERD）；本地参考 `temp/github/stegolab`（HILL/S-UNIWARD/J-UNIWARD）与 `hstego` |
 | 结论强度 | 每条发现标注【确认/疑似】；标 ✅ 的条目经主审独立复验（非仅转述子审） |
+| 修复状态 | P0/P1 已于审查当日全部修复并提交（8 个提交），逐项状态见 §0.5 与 §7；已修复条目在正文标 【已修复 ✅ 提交号】 并简化 |
 
 ---
 
@@ -20,7 +21,7 @@
    - **HEVC AnnexB 封面摘要窗口覆盖会被改写的 CABAC 数据**——短 slice header 的流嵌入后摘要漂移，正确口令也无法提取（功能性失败，且该路径零测试覆盖）。
 3. **发现 1 个跨引擎的密码学隐患**：`Freshness::Seeded` 模式下 salt 与 nonce 都只由 seed 派生、与载体和载荷零绑定，同一口令+同一 seed 在两个载体上嵌入不同载荷即构成 **AES-GCM 二次本簿**（nonce 重用）。生产默认 `Random` 不受影响，风险集中在专家/回归模式。
 4. **主要系统性短板不在算法而在契约承载方式**：关键契约靠错误消息**子串**跨模块耦合（且 `errors.rs` 文档宣称的结构化恰恰不存在）；测试 oracle 有被 `0x5A` 首位巧合掩盖的差一；多处文档/注释与代码事实相反（含直接诱使 S2 的 "never touched" 断言）；wire 格式自描述"做了一半"。
-5. **HEVC 外围欠账集中**：2026-10-24 审计（`docs/HEVC-STC-AUDIT-20261024.md`）所列代码级发现**截至当前 HEAD 全部未修复**，本次又新发现 5 项（含严重 1 项）。
+5. **HEVC 外围欠账集中**：2026-10-24 审计（`docs/HEVC-STC-AUDIT-20261024.md`）所列代码级发现在审查时点**全部未修复**，本次又新发现 5 项（含严重 1 项）。（审查当日已清偿其中 2.1/2.2/2.3/4.1–4.4/5.1/5.2/5.4，见 §0.5。）
 6. **结构域（次重点）**：写入/提交路径健壮性好，但 `adapters/isobmff.rs` 的 iinf/iloc 解析对恶意文件有确认的 panic 路径；仓库存在三个互不复用的 ISOBMFF 解析器，健壮性纪律没有共享。
 7. **内存工程双标**：JPEG 侧为省 16 B/系数精心设计了 bias 向量与闭包，PNG 侧却对每通道分配两张全平面 f64 方向图 + GB 级 SlotPlan 瞬时分配，50 MP 载体单次嵌入峰值 ~2 GB。
 
@@ -45,90 +46,33 @@ P0/P1 项已按批次修复并提交（每批均通过 cargo test / fmt / clippy
 
 ---
 
-## 1. 严重问题（确认，建议立即修复）
+## 1. 严重问题
 
-### S1.【确认 ✅】S-UNIWARD：suitability 卷积与 residual 卷积方向镜像失配，实现的不是论文的失真函数
+### S1.【已修复 ✅ `85d0bc8`】S-UNIWARD suitability 卷积与 residual 卷积方向镜像失配
 
-**位置**：`rust/src/stego/png/cost/suniward.rs:157,170`（residual_pass）与 `:200,213`（suitability_pass）
+**位置**：`rust/src/stego/png/cost/suniward.rs`（residual_pass / suitability_pass）。两个 pass 同朝向采样（相关），而 suitability 权重是 residual 算子的伴随——差一个核镜像，HPDF 前载大抽头（~0.31/0.68/0.59 @ 索引 1..3）配到每条边缘的错误一侧，实现的不是论文的失真函数。不影响往返与类不变性（现有测试因此全部漏过），只影响抗检测质量与算法保真度。
 
-**问题**：两个 pass 使用**同一朝向**的采样索引（相关，不翻转核）：
+**修复**：`residual_pass` 改为卷积索引（与 stegolab/hstego 参考同构），`suitability_pass` 不动即成精确伴随对；新增判别性测试（红绿验证：镜像取向 near/far≈1.31 → 修复后≈0.73）。**注意：代价图已变，旧 suniward 载体不可读，需重嵌。**
 
-```text
-R(y,x)  = Σ_{a,b} f1[a]·f2[b]·P(y+a−HALF, x+b−HALF)      // residual
-cost(p) += Σ_{a,b} |f1[a]|·|f2[b]|·W(p+a−HALF, …)         // suitability，同样不翻转
-```
+### S2.【已修复 ✅ `f64b53b`】HEVC AnnexB 封面摘要窗口覆盖会被改写的 CABAC 数据
 
-**数学论证**：S-UNIWARD 定义 ρ(p) = Σ ξ(p→p')/(σ+|R(p')|)，其中 ξ(p→p') 是残差算子对 p 处单位脉冲的响应。若 R 由上述相关形式定义，则 ξ(p→p') = K(p−p'+HALF)（K=f1⊗f2）。因此代价必须写成
+**位置**：`rust/src/stego/hevc/bitstream.rs:192-199`。VCL 分支哈希 NAL 头后 18 字节，断言"前 16 字节是 slice header 永不被改"——短 slice header（单 slice I 帧典型 3-8 字节）时大半是首 CTU 的 CABAC 载荷；翻转落进窗口即摘要漂移，`extract_hevc` 对**隐写后**载体重算摘要 → trellis seed 与 AES key 漂移 → 正确口令也报 `Invalid HEVC stego signature`。该生产路径零测试（matrix bench 只喂 HEIF 载体；且失败是概率事件——12 个 seed 中 2 个，这也是从未暴露的原因）。
 
-```text
-ρ(p) = Σ_m |K(m)|·W(p + HALF − m)     // 大抽头 m 配到 p 的右侧
-```
-
-而代码把大抽头 |K(m)| 配到了 `W(p + m − HALF)`（p 的左侧）——相差一个完整的核镜像。HPDF 的能量前载（|f|≈0.31/0.68/0.59 集中在 m=1..3），镜像后边缘附近的精细配价整体落错一侧。
-
-**参考实现对照**（`temp/github/stegolab/S-UNIWARD/s-uniward-color.py:143-151`）：
-
-```python
-R0 = scipy.signal.convolve2d(cover_padded, F[i], mode="same")          # 卷积（翻转核）
-X  = scipy.signal.convolve2d(1./(np.abs(R0)+sgm), np.rot90(np.abs(F[i]), 2), 'same')  # 不翻转
-```
-
-参考实现两个 pass 方向**相反**；本实现两个 pass 同向。主审已独立复算 1D 数值例（脉冲在 p=10，HALF=8）：正确代价的大权重应读 p 右侧 5–7 px 的残差，代码读的是 p 左侧 5–7 px。
-
-**影响面**：不破坏嵌入/提取对称性（两端重算同一张图）、不破坏类不变性测试（镜像后性质仍成立——这也是现有测试没能拦住它的原因）。属于"算法实现错误、工程上可工作"，使 `id()=="suniward"` 声称的 EURASIP JIS 2014 失真函数名不符实。HILL 不受影响（KB 核与 box 核均中心对称）。JPEG 侧的 J-UNIWARD 已专项排除同类问题（其 footprint 由同一残差公式解析推导并被 `footprint_matches_the_real_residual` 测试锁定）。
-
-**修复**：`residual_pass` 改为卷积索引（`y−a+HALF`），或等价地 `suitability_pass` 使用镜像核 `f[TAPS−1−a]`；两处任改其一。修复会改变 suniward 代价图——按 AGENTS.md"未发布不考虑兼容"可直接改，但需同步更新 prng/回归基准里依赖代价图的任何固定值。同时建议补一个"对照参考实现的数值对拍"测试（现有测试只断言形状/正性/平坦>纹理，这些镜像后照样通过，起不到守护作用）。
-
-### S2.【确认 ✅】HEVC AnnexB：封面摘要窗口包含会被改写的 CABAC 数据 → 嵌入后摘要漂移、提取静默失败
-
-**位置**：`rust/src/stego/hevc/bitstream.rs:192-199`（compute_hevc_cover_digest 的 VCL 分支）
-
-```rust
-} else if span.is_vcl() {
-    // For VCL slices, hash the 2-byte NAL header plus the first 16 bytes of slice header
-    // (which are never touched by residual steganography)
-    let header_end = (span.header_offset + 18).min(span.end_offset()).min(data.len());
-    hasher.update(&data[span.header_offset..header_end]);
-```
-
-**问题**：注释断言"前 16 字节是 slice header、永远不会被改写"——对短 slice header 的流不成立。CABAC 子流 0 的起点是 `sh.header_size_bits / 8`（rust_h265 `decoder.rs:611`），单 slice 的 I 帧（IDR_W_RADL/CRA）slice header 典型仅 3–6 字节，因此 NAL 偏移 18 字节的哈希窗口里约有 **10–13 字节是首个 CTU 的 CABAC 码字**——正是 `encode_substream` 重编码会改写的区域。
-
-**失败链**（主审已在源码确认提取路径）：嵌入翻转子流 0 早期的符号位 → 进位改写 NAL[5..18) 内字节 → `extract_hevc`（`engine.rs:689-692`）对**隐写后**载体重算同一摘要 → 摘要漂移 → trellis seed 与 AES key 双双漂移 → `Invalid HEVC stego signature`（`engine.rs:720-725`），正确口令也无法提取。Weyl 置换的元素 0 固定映射到首个 CTU 的第一个符号槽，中大型载荷下翻转落入首 CTU 是主路径概率事件，不是罕见边界。
-
-**测试盲区**：该路径是生产路由（`stego/mod.rs:154-166`），但**全仓零 AnnexB embed/extract 测试**（`tests/test_media/hevc_stego.rs` 只测 HEIF 载体；HEIF 主路径恰好安全，因为其 digest 分支只哈希参数集）。`bitstream.rs:296-319` 的自测只改**最后一个**字节验证摘要不变，恰好避开被改写窗口。
-
-**修复**：哈希窗口收缩到 `min(2 + cabac_byte_offset, 18)`（真实 slice header 长度），或改用与 HEIF 一致的"仅参数集"方案；并补 AnnexB 往返回归测试。
+**修复**：VCL NAL 只哈希构造上不可变的字节（2 字节 NAL 头 + NAL 长度，Δ=0 保证），与 HEIF 分支（仅参数集）同哲学；新增确定性回归（henc-133 短 header fixture + 固定 seed，修复前稳定失败）、HEIC 重建 AnnexB 端到端往返、摘要绑定/稳定性单元测试。gradient-512 不触发（header 21 字节 > 16）属正常，回归由 henc-133（5 字节）锁定。
 
 ---
 
-## 2. 中等问题（确认，建议排期修复）
+## 2. 中等问题
 
-### M1.【确认 ✅】`Freshness::Seeded` 下 salt/nonce 与载体、载荷零绑定 → AES-GCM 二次本簿（跨引擎）
+> 已修复的条目只保留摘要与修复去向，完整论证见对应提交信息（§0.5 列出提交号）。未修复条目保留全文。
 
-**位置**：`rust/src/stego/envelope.rs:226-256`（Freshness::salt / nonce / derive_seeded）+ 各引擎 key 派生（PNG `engine.rs:1104` `body_keys(…, &master, &salt, …)`；HEVC `engine.rs:1028-1055`；JPEG 经 suite KDF 同构）
+### M1.【已修复 ✅ `9c30e53`】`Freshness::Seeded` 下 salt/nonce 与载体、载荷零绑定 → AES-GCM 二次本簿（跨引擎）
 
-**问题**：`Seeded(seed)` 模式下 `salt = HKDF(seed, "salt", attempt)`、`nonce = HKDF(seed, "nonce", attempt)`——二者**只**依赖 (seed, attempt)，与载体和载荷无关。而 payload key = f(password, salt)。于是同一口令 + 同一 seed：
+**位置**：`rust/src/stego/envelope.rs`（Freshness::salt / nonce）+ 三引擎 key 派生。Seeded 模式下 salt/nonce 只依赖 (seed, attempt)，而 payload key = f(password, salt)、PNG 更是直接以 salt 作 KDF 盐——同口令+同 seed 在两个不同输入上即重用整个 (key, nonce) 对，不同明文下的 GCM 二次本簿（密文异或泄漏明文异或、GHASH 可构造伪造）。生产默认 `Random` 不受影响，风险集中在专家/回归/批测模式。**修复**：新增 `Freshness::seeded_binding(cover, payload)`（SHA256‖SHA256）并强制全部调用点传入；提取端从载体回读无需重推，可复现性保持；域分隔符升 v2。**注意：旧 Seeded 产物不可复现出新版输出。**
 
-- 在**两个不同载体**上嵌**不同载荷** → 相同 key + 相同 nonce + 不同明文 → GCM 二次本簿：密文异或泄漏明文异或，GHASH 代数结构可构造伪造；
-- 甚至同一载体先后重嵌不同载荷也同样构成重用。
+### M2.【已修复 ✅ `f4d352e`】STC 穷举 oracle 的暖行判定差一，被测试消息首位=0 的巧合掩盖
 
-AAD 不同（各载体 header 不同）**不能**挽救——GCM 密钥流只依赖 (key, nonce)。HEVC 侧更弱：封面摘要只哈希 VPS/SPS/PPS，同一设备同参数拍摄的两张 HEIC 摘要完全相同，key 也跨载体相同；但 `Random` 模式（生产默认）nonce 随机，不受影响。风险集中在专家/回归/批测模式（恰好是 `local_batch_*` 的使用方式：固定 seed + 同一 secret 遍历语料）。
-
-**修复**：Seeded 派生混入封面摘要与载荷摘要（nonce 本就写进载体，提取端无需重推，不影响对称性）；并在文档中明示 Seeded 的安全边界。
-
-### M2.【确认 ✅】STC 穷举 oracle 的暖行判定差一，被测试消息首位=0 的巧合掩盖
-
-**位置**：`rust/src/stego/coding/stc.rs:933-947`（Oracle::matches）
-
-```rust
-let want = if row + 1 > h {          // 应为 row + 1 >= h（即 row >= h-1）
-    message_bit(self.message, row - (h - 1))
-} else { 0 };
-```
-
-**论证**（主审独立复验）：内核真实约定是行 r 携带消息位 r−(h−1)（嵌入端 `stc.rs:657-663`：组 g=h−1 在行 h−1 上强制消息位 0；提取端 `stc.rs:408-413`：消息位 b 读行 b+(h−1)）。因此暖行只有 0..=h−2（h−1 行），**行 h−1 是第一个消息行**。oracle 的 `row+1 > h`（即 row ≥ h）把行 0..=h−1 共 h 行当暖行——多约束了一行、少验了消息位 0。测试消息由 `0x5A*(i+1)` 生成，`0x5A = 0b0101_1010` 的首位（MSB-first 的消息位 0）恰好是 0，两种约束集巧合等价。这是全文件唯一的穷举最优性基准（`brute_force_min_cost` 唯一调用点），换首位 ≥ 0x80 的消息即可暴露。
-
-**修复**：条件改为 `row + 1 >= h`，并在测试中故意加入首位为 1 的消息防回归。
+**位置**：`rust/src/stego/coding/stc.rs`（Oracle::matches）。内核约定行 `h-1` 携带消息位 0（extract：消息位 b ↔ 行 b+h−1），oracle 的 `row+1 > h` 却把行 `0..=h-1` 全约束为 0——多锁一行、少验消息位 0，恰被 `0x5A` 首位为 0 掩蔽，最优性验证只覆盖了半个消息空间。**修复**：`row+1 >= h`，测试消息生成改 `0xA5`（首位 1，红：6.25 vs 错误系统的 8）。
 
 ### M3.【确认 ✅】跨模块契约靠错误消息子串耦合
 
@@ -155,11 +99,9 @@ u>1 分支的消息（"a group has **no legal element** …"）恰好也含该�
 
 **影响**：嵌入端专用（V3 槽位是几何的，提取端不算代价），不破坏往返；但隐蔽性层面这不是论文意义上的 UERD 排序，而模块文档声称"Based on … IEEE TIFS 2015"。**修复**：对齐公式，或在 `description()`/模块文档中显式声明这是"UERD-inspired 变体"并给出差异清单。另注：uerd.rs:85-90/150 注释声称 `|c| & !1` 掩码"对 ±1 不变"不成立（|c|=3→4 时 2→4），它只是把奇数幅度贡献减一个台阶——行为无害，注释失实。
 
-### M5.【确认】`apply_deltas` 的 debug_assert 对合法收缩误报（debug 构建可 panic）
+### M5.【已修复 ✅ `5c4fa2d`】`apply_deltas` 的 debug_assert 对合法收缩误报（debug 构建可 panic）
 
-**位置**：`rust/src/stego/jpeg/engine.rs:461-464`
-
-`debug_assert!(updated.abs() <= 1023, "AC coefficient left the baseline range")`——合法性规则只禁止**增长**穿越 ±1023；封面系数经自定义 Huffman 表可合法携带 cat 11–15（|c| 最大 32767），|c|=2000 的系数 MinusOnly 收缩到 1999 是合法操作，debug 构建却 panic。**修复**：断言改为"未越出封面原值 ±1 且未增长穿越 ±1023"。
+**位置**：`rust/src/stego/jpeg/engine.rs`（apply_deltas）。断言 `updated.abs() <= 1023` 拦截一切超界值，但封面经自定义 Huffman 表可合法携带 cat 11–15（|c| 最大 32767），其 MinusOnly 收缩到 1999 之类的值是合法操作，debug 构建却 panic。**修复**：断言只拦"增长穿越 ±1023"（`updated.abs() <= 1023 || updated.abs() < before.abs()`）。
 
 ### M6.【确认】PNG 引擎 `direction_costs` 全平面分配：大图内存峰值失控，且与 JPEG 侧设计自相矛盾
 
@@ -177,15 +119,9 @@ u>1 分支的消息（"a group has **no legal element** …"）恰好也含该�
 
 HILL 的 `p1_window/p2_window/epsilon` 与 S-UNIWARD 的 `sigma` 不随载体走——提取端必须逐字重复嵌入端超参，否则静默 `NoHiddenData`；`eligible_min/max`、`kdf_id` 是解码即弃的死字段，若未来写入非默认值，旧读取器恰好会拿硬编码常量误读。feature word 尚有 bits 51..64 与 bytes 9..32 保留空间。**修复**：把窗口/epsilon/sigma 编入保留区（版本升 v3），或删掉死字段并文档声明。
 
-### M9.【确认 ✅】HEIF 桥 `ContainerJpegFallback` 的宿主 item 永不被识别 → iloc extent 长度永不更新
+### M9.【已修复 ✅ `4853a02`】HEIF 桥 `ContainerJpegFallback` 的宿主 item 永不被识别 → iloc extent 长度永不更新
 
-**位置**：`rust/src/stego/heif/thumb_bridge.rs:289-294`。主审已确认：
-
-```rust
-BridgeTargetKind::ContainerJpegFallback => false,   // 永远 false
-```
-
-fallback 扫描找到的 JPEG 必然位于某个 item 的 extent 内（典型是 Exif 缩略图）；宿主 item 长度声明不变而内容长度已变 → 容器静默损坏。与旧审计 5.1（`infe` v3 `item_type` 偏移错 2 字节使优先级 1–3 全部落空）**组合触发**：v3 文件 → 优先级 3 失败 → fallback 找到同一张缩略图 → 嵌入"成功"但 Exif item 的 iloc 长度错误。**修复**：fallback 定位时回查 extent 区间包含 `target.file_offset` 的 item 并按其修补。
+**位置**：`rust/src/stego/heif/thumb_bridge.rs`（reconstruct_heif）。`ContainerJpegFallback => false` 恒假——fallback 找到的 JPEG 必然位于某个 item 的 extent 内（典型是 Exif 缩略图），宿主 item 长度声明不变而内容已变 → 容器静默损坏；与旧审计 5.1（infe v3 偏移，同提交已修）组合触发。**修复**：宿主 = 物理覆盖目标区域的文件偏移 extent 所在 item；iloc 长度 delta 只加在该 extent 一次（顺带修复旧审计 5.2 的"每 extent 各加一次"）；宿主 item 自身后置 extent 一并平移；跨 extent 目标拒绝而非错补。
 
 ### M10.【确认】HEVC WPP 中段子流永远无法 replay（静默容量损失）
 
@@ -199,13 +135,13 @@ fallback 扫描找到的 JPEG 必然位于某个 item 的 extent 内（典型是
 
 任何持有二进制的分析者都能复现槽位 Weyl 置换与 STC 码结构，对翻转位置分布做结构化统计检测；PNG/JPEG 的同类映射是密钥化的。载荷机密性不受影响（GCM），但隐写安全性弱于同仓其他引擎。
 
-**连锁后果（主审补充）**：消息头含**明文 CRC32**（`engine.rs:264-266`，`crc.update(payload)` 后写入 header，位于 GCM 密文之外）。由于 trellis/槽序公开，无口令者对任意 HEIF/HEVC 载体执行 scan→extract 即可得到候选 40 字节头——对真载体直接读出 `len/crc/nonce/ciphertext`，随后**离线**枚举低熵明文（短文本、已知结构文档）用 CRC32 验证猜测，完全绕开口令与 GCM。高熵载荷不受实际影响。修复 M11（seed 混入 secret）同时关闭此 oracle；或去掉明文 CRC（GCM tag 已提供完整性，CRC 本属冗余）。
+**连锁后果（主审补充）**：消息头含**明文 CRC32**（`engine.rs:264-266`，位于 GCM 密文之外）。由于 trellis/槽序公开，无口令者对任意 HEIF/HEVC 载体执行 scan→extract 即可得到候选 40 字节头——对真载体直接读出 `len/crc/nonce/ciphertext`，随后**离线**枚举低熵明文（短文本、已知结构文档）用 CRC32 验证猜测，完全绕开口令与 GCM。高熵载荷不受实际影响。修复 M11（seed 混入 secret）同时关闭此 oracle；或去掉明文 CRC（GCM tag 已提供完整性，CRC 本属冗余）。
 
 **修复**：把 secret（或其派生）混入 trellis seed 派生，提取端对称重推。
 
-### M12.【确认】HEVC 旧审计（2026-10-24）P1/P2 项全部未修复
+### M12.【部分已修复 ✅ `e76aa97` + `6d81ec7`】HEVC 旧审计（2026-10-24）清偿
 
-`docs/HEVC-STC-AUDIT-20261024.md` 所列代码级发现截至当前 HEAD **一项未动**，含：容量虚报 1 字节（`engine.rs:112,185` 的 `total_slots/2` 硬编码码率、漏 h−1）；extract 硬编码 24/16 且 `header_bytes<24` 方言 panic（`engine.rs:744-749`）；MP4 被嗅探认下但未实现（`sniff.rs:41`）；子流双重重编码/容器双重解析；`heif_boxes.rs` 的 construction_method 忽略、iloc 零推进 DoS、iloc v2 panic；`thumb_bridge.rs` 的 `infe` v3 偏移、多 extent delta×N 等。见附录 A 完整对照。
+已修复（见附录 A）：2.1 容量虚报（`message_bits` 逆函数 + 容量可达性回归）；2.2 extract 硬编码 24/16 与 `header_bytes<24` panic（命名常量 + 入口守卫 + 文档更正）；2.3 MP4 嗅探不实现（五入口显式报错）；4.1–4.4 heif_boxes 四项（construction_method / 零推进 DoS / `as usize` / ipma 关联选 hvcC）。**仍未修**：2.4/2.5（子流双重重编码、容器双重解析——性能项，P2）、3.1/3.2（死函数、剩余未用错误变体；`Unsupported`/`TooLarge` 已在本轮投入使用）、5.3/5.5 其余项。
 
 ### M13.【确认】PNG/JPEG 提取接口对 cost model 参数的语义不一致
 
@@ -287,8 +223,8 @@ PNG `extract_png` 的 `cost_model` 参数实为 hint（载体自带 algorithm_id
 
 | # | 位置 | 问题 | 级别 |
 | :--- | :--- | :--- | :--- |
-| 1 | `adapters/isobmff.rs:657-669` | iinf 解析：循环门 `ipos + 8 > iinf_box.len()` 允许 `ipos+8 == len` 仍执行 `iinf_box[ipos + 8]`（越界 panic）；且 `iinf_box[ipos+12..ipos+14]` / `[ipos+12..ipos+16]` 的读取**完全无边界检查**——entry_cnt 与 isz 均为文件控制，截断/恶意 iinf 恒 panic（slice index out of range） | 中等·健壮性 |
-| 2 | `adapters/isobmff.rs:949-954` | iloc 计数读取 `[14..16]`/`[14..18]` 发生在长度门 `iloc_buf.len() < iloc_item_len`（:954）**之前**，短 iloc 先 panic 后校验；同文件 :901-912 的 `iloc_box[8]/[12]/[13]` 亦无前置长度检查 | 中等·健壮性 |
+| 1 | `adapters/isobmff.rs` | 【已修复 ✅ `5c4fa2d`】iinf max-item-id 循环：边界门 `ipos+8 > len` 差一且不覆盖 `[ipos+12..+14/+16]` 读取，截断/恶意 iinf 恒 panic；现按版本计算前置门 | ~~中等~~ 已修 |
+| 2 | `adapters/isobmff.rs` | 【已修复 ✅ `5c4fa2d`】iloc 计数读取发生在长度门之前（strip 三处）与 `check_iloc_has_target` 的 v2 门（`>=16` 读 `[14..18]`）；现全部前置门 + 逐长度回归测试 | ~~中等~~ 已修 |
 | 3 | `commit.rs:143-145` | tmp 写入 + rename 无 fsync：电力故障/内核崩溃窗口内可能得到"rename 已持久而数据未持久"的截断载体。正常运行无影响，属持久性瑕疵 | 轻微 |
 | 4 | `facade.rs:299-326` | `extract_file` 用非原子 `std::fs::write` 直写（其余写路径全走 `commit_carrier_bytes`），目录输出时硬编码 `extracted.bin` | 轻微·一致性 |
 | 5 | `router.rs` / `stego/mod.rs` | `embed_carrier` 对 HEIF "先 bridge 后 HEVC" 与 `extract_carrier` "先 HEVC 后 bridge" 回退顺序相反（语义自洽、有注释），但无测试锁定该顺序——被"顺手统一"即静默破坏一侧 | 建议 |
@@ -329,7 +265,7 @@ PNG `extract_png` 的 `cost_model` 参数实为 hint（载体自带 algorithm_id
 
 确认正确（择要）：**CABAC journal 重编码管线**是本子系统最大亮点——解码端四条 bin 路径全入账，WPP 上下文继承/tiles 重初始化/dependent slice 状态继承精确捕获，编码端 first-bit 抑制/进位/flush 符合规范且有 roundtrip 测试；**Δ=0 有算法级保证**（翻转 bypass 符号位不改变 range；decision 未翻转则 range 演化相同；bypass 每 bin 恰 1 输出位；flush 位数固定 → 重编码位长严格不变）+ EPB 窗口集合不变 ⇒ NAL 长度不变 + `re_nal.len()==carrier_span.len()` 双保险；replay 安全网把一切建模缺口降级为容量排除而非载体损坏；失败回滚安全（全部 slice 通过才写回）；提取端敌意长度防护（全程 checked 算术）到位；无口令 oracle（空载体/错口令/未嵌错误不可区分）；`heif_boxes.rs` 边界纪律整体优秀（be_u16/u32/u64 + checked_add + usize::try_from 全覆盖）。
 
-本子系统发现：S2、M9、M10、M11、M12、3.4 表全部条目。三类根因：封面摘要/密钥绑定未覆盖所有被改写字节；无测试路径（AnnexB、WPP、v3 容器）默认按最乐观假设工作；两个 ISOBMFF 解析器各写各的互不复用（`heif_boxes.rs` 正确 vs `thumb_bridge.rs` 错误形成对照）。
+本子系统发现：S2、M9、M10、M11、M12、3.4 表全部条目。三类根因：封面摘要/密钥绑定未覆盖所有被改写字节；无测试路径（AnnexB、WPP、v3 容器）默认按最乐观假设工作（AnnexB 的往返与确定性回归已在 `f64b53b` 补齐）；两个 ISOBMFF 解析器各写各的互不复用（`heif_boxes.rs` 正确 vs `thumb_bridge.rs` 错误形成对照）。
 
 ### 4.5 框架层（envelope / crypto / format / header / params / registry / traits）——主审自审
 
@@ -390,25 +326,25 @@ PNG `extract_png` 的 `cost_model` 参数实为 hint（载体自带 algorithm_id
 
 ## 7. 修复优先级路线图
 
-**P0（发布前必须）**
-1. S1 S-UNIWARD 镜像失配（改一个 pass 的索引方向 + 补参考对拍测试；趁未发布直接改，代价图变更无兼容负担）
-2. S2 HEVC AnnexB 摘要窗口（收缩到真实 slice header 长度 + 补 AnnexB 往返测试）
-3. M2 STC oracle 差一（一行修复 + 首位为 1 的测试消息）
+**P0（发布前必须）——✅ 已全部修复（2026-10-25，提交号见 §0.5）**
+1. ~~S1 S-UNIWARD 镜像失配~~（`85d0bc8`）
+2. ~~S2 HEVC AnnexB 摘要窗口~~（`f64b53b`）
+3. ~~M2 STC oracle 差一~~（`f4d352e`）
 
-**P1（尽快）**
-4. M1 Seeded nonce/salt 绑定封面与载荷摘要（nonce 在文件内，提取端无需重推，改动小）
-5. M9 fallback iloc 修补（与旧审计 5.1 的 infe v3 偏移一起修，两者组合触发容器损坏）
-6. M12 清偿 2026-10-24 HEVC 审计（容量差一、extract 硬编码/panic、MP4 误认、heif_boxes 四项——多数是小改动）
-7. M5 debug_assert 误报（一行）
-8. §3.6 isobmff.rs iinf/iloc 边界检查（两个中等健壮性 panic 点，改动小）
+**P1（尽快）——✅ 已全部修复（2026-10-25）**
+4. ~~M1 Seeded nonce/salt 绑定封面与载荷~~（`9c30e53`）
+5. ~~M9 fallback iloc 修补 + 旧审计 5.1/5.2/5.4~~（`4853a02`）
+6. ~~M12 清偿 2026-10-24 HEVC 审计（容量差一、extract 硬编码/panic、MP4 误认、heif_boxes 四项）~~（`e76aa97` + `6d81ec7`）
+7. ~~M5 debug_assert 误报~~（`5c4fa2d`）
+8. ~~§3.6 isobmff.rs iinf/iloc 边界检查~~（`5c4fa2d`）
 
-**P2（排期）**
+**P2（排期，未修）**
 9. M3 TrellisInfeasible 结构化 + M4 UERD 对齐论文或声明变体
 10. M6/M13 PNG 内存与提取接口；M8 feature word 收口（发布前的最后窗口）
-11. M10 WPP 中段子流终止语义 + M11 trellis seed 密钥化
+11. M10 WPP 中段子流终止语义 + M11 trellis seed 密钥化（连带明文 CRC32 oracle）；M12 剩余项（旧审计 2.4/2.5 性能双解析/双编码、5.3/5.5 其余）
 12. §3.5 KDF 参数调齐（结构域 100k → ≥200k，趁发布前改 wire 常量）
 
-**P3（卫生）**
+**P3（卫生，未修）**
 13. §3 各表轻微项：死代码、文档更正（含 STC 可达性位三处、format.rs 恒真校验、params.rs stc_u 默认值文档）、防御性守卫、注释重复。
 
 ---
@@ -441,4 +377,4 @@ PNG `extract_png` 的 `cost_model` 参数实为 hint（载体自带 algorithm_id
 
 ---
 
-*报告结束。发现总计：严重 2、中等 15（M1–M13 + isobmff 两条）、轻微/建议 45+。核心算法内核经独立推导验证无误；建议按 §7 优先级推进，P0 三项均为小改动但收益直接。*
+*报告结束。发现总计：严重 2、中等 15（M1–M13 + isobmff 两条）、轻微/建议 45+。核心算法内核经独立推导验证无误。**P0/P1 已于审查当日全部修复（8 个提交，§0.5）**；剩余 P2/P3 见 §7。*
