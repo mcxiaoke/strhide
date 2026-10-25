@@ -457,10 +457,15 @@ fn apply_deltas(
             continue;
         }
         let (bi, k) = v3_layout::slot_to_coeff(idx, rule);
-        let updated = blocks[bi][k] as i32 + delta as i32;
+        let before = blocks[bi][k];
+        let updated = before as i32 + delta as i32;
+        // Legality forbids *growing* past ±1023, but the cover itself may
+        // legally carry category 11-15 magnitudes (a custom Huffman table can
+        // define them), and shrinking such a coefficient stays above 1023.
+        // Only flag a move that grows beyond ±1023.
         debug_assert!(
-            updated.abs() <= 1023,
-            "AC coefficient left the baseline range"
+            updated.abs() <= 1023 || updated.abs() < before.unsigned_abs() as i32,
+            "AC coefficient grew past the baseline range"
         );
         blocks[bi][k] = updated as i16;
     }

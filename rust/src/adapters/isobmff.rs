@@ -646,7 +646,13 @@ fn heif_item_hidden_inject(
 
     // 3. Parse iinf to find max_item_id
     let iinf_box = &subboxes[iinf_idx].1;
+    if iinf_box.len() < 12 {
+        return Err(StrHideError::CorruptedData("Truncated iinf box".into()));
+    }
     let iinf_ver = iinf_box[8];
+    if iinf_box.len() < if iinf_ver == 0 { 14 } else { 16 } {
+        return Err(StrHideError::CorruptedData("Truncated iinf box".into()));
+    }
     let entry_cnt = if iinf_ver == 0 {
         u16::from_be_bytes(iinf_box[12..14].try_into().unwrap()) as u32
     } else {
@@ -655,17 +661,28 @@ fn heif_item_hidden_inject(
     let mut ipos = if iinf_ver == 0 { 14 } else { 16 };
     let mut max_id = 0u32;
     for _ in 0..entry_cnt {
-        if ipos + 8 > iinf_box.len() {
+        // Entry header: size/type (8) + version (1); the item id sits at +12
+        // (u16 for infe v2, u32 for v3). The old `ipos + 8` gate allowed an
+        // off-by-one on `[ipos + 8]` and did not cover the +12..+16 reads at
+        // all, so a truncated iinf panicked instead of breaking out.
+        if ipos + 9 > iinf_box.len() {
+            break;
+        }
+        let iver = iinf_box[ipos + 8];
+        let need = if iver < 3 { 14 } else { 16 };
+        if ipos + need > iinf_box.len() {
             break;
         }
         let isz = u32::from_be_bytes(iinf_box[ipos..ipos + 4].try_into().unwrap()) as usize;
-        let iver = iinf_box[ipos + 8];
         let iid = if iver < 3 {
             u16::from_be_bytes(iinf_box[ipos + 12..ipos + 14].try_into().unwrap()) as u32
         } else {
             u32::from_be_bytes(iinf_box[ipos + 12..ipos + 16].try_into().unwrap())
         };
         max_id = max_id.max(iid);
+        if isz < need {
+            break; // cannot advance past this entry; stop scanning
+        }
         ipos += isz;
     }
     let new_id = (max_id + 1).max(1);
@@ -898,6 +915,9 @@ fn heif_item_hidden_strip(
     // 3. Inspect iloc and iinf to determine added lengths
     let (iloc_item_len, infe_len, delta_meta) = {
         let iloc_box = &subboxes[iloc_idx].1;
+        if iloc_box.len() < 14 {
+            return Err(StrHideError::CorruptedData("Truncated iloc box".into()));
+        }
         let iloc_ver = iloc_box[8];
         let off_sz = ((iloc_box[12] >> 4) & 0x0F) as usize;
         let len_sz = (iloc_box[12] & 0x0F) as usize;
@@ -936,6 +956,9 @@ fn heif_item_hidden_strip(
     // 4. Strip iloc
     {
         let iloc_buf = &mut subboxes[iloc_idx].1;
+        if iloc_buf.len() < 14 {
+            return Err(StrHideError::CorruptedData("Truncated iloc box".into()));
+        }
         let iloc_ver = iloc_buf[8];
         let off_sz = ((iloc_buf[12] >> 4) & 0x0F) as usize;
         let len_sz = (iloc_buf[12] & 0x0F) as usize;
@@ -946,6 +969,11 @@ fn heif_item_hidden_strip(
             0
         };
         let id_sz = if iloc_ver < 2 { 2 } else { 4 };
+        // The count read needs 16 bytes (v0/v1) or 18 (v2+); checking it only
+        // after the read let a short box panic first (review 2026-10-25).
+        if iloc_buf.len() < if iloc_ver < 2 { 16 } else { 18 } {
+            return Err(StrHideError::CorruptedData("Truncated iloc box".into()));
+        }
         let iloc_cnt = if iloc_ver < 2 {
             u16::from_be_bytes(iloc_buf[14..16].try_into().unwrap()) as u32
         } else {
@@ -1015,7 +1043,13 @@ fn heif_item_hidden_strip(
     // 5. Strip iinf
     {
         let iinf_buf = &mut subboxes[iinf_idx].1;
+        if iinf_buf.len() < 14 {
+            return Err(StrHideError::CorruptedData("Truncated iinf box".into()));
+        }
         let iinf_ver = iinf_buf[8];
+        if iinf_buf.len() < if iinf_ver == 0 { 14 } else { 16 } {
+            return Err(StrHideError::CorruptedData("Truncated iinf box".into()));
+        }
         let entry_cnt = if iinf_ver == 0 {
             u16::from_be_bytes(iinf_buf[12..14].try_into().unwrap()) as u32
         } else {
@@ -1108,7 +1142,7 @@ fn check_iloc_has_target(
     target_off: u64,
     target_len: u64,
 ) -> Result<bool, StrHideError> {
-    if iloc_box.len() < 16 {
+    if iloc_box.len() < 14 {
         return Ok(false);
     }
     let iloc_ver = iloc_box[8];
@@ -1120,6 +1154,11 @@ fn check_iloc_has_target(
     } else {
         0
     };
+    // v2+ carries a 32-bit count at +14..18; the old `>= 16` gate let a 16-
+    // or 17-byte box panic on the wider read (review 2026-10-25).
+    if iloc_box.len() < if iloc_ver < 2 { 16 } else { 18 } {
+        return Ok(false);
+    }
     let iloc_cnt = if iloc_ver < 2 {
         u16::from_be_bytes(iloc_box[14..16].try_into().unwrap()) as u32
     } else {
@@ -1299,5 +1338,23 @@ mod tests {
         let (offset, _, strategy) = isobmff_locate(&mut cursor, None).unwrap().unwrap();
         assert_eq!(strategy, "box_uuid");
         assert_eq!(offset, ube_offset);
+    }
+
+    /// A v2+ iloc box of 16 or 17 bytes cannot hold the 32-bit item count at
+    /// +14..18; the old `>= 16` gate let the wider read panic. Every short
+    /// form must return `Ok(false)`, never abort (review 2026-10-25).
+    #[test]
+    fn short_iloc_boxes_of_every_version_do_not_panic() {
+        for len in 0..24usize {
+            let mut box_bytes = vec![0u8; len];
+            if len >= 9 {
+                box_bytes[8] = 2; // version 2 wherever the byte exists
+            }
+            let _ = check_iloc_has_target(&box_bytes, 0, 0);
+            if len >= 9 {
+                box_bytes[8] = 0; // and version 0
+            }
+            let _ = check_iloc_has_target(&box_bytes, 0, 0);
+        }
     }
 }
