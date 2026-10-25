@@ -283,6 +283,14 @@ fn reconstruct_heif(
     let isobmff = parse_isobmff(original)?;
 
     let target_end_orig = (target.file_offset + target.length) as u64;
+    let target_start = target.file_offset as u64;
+
+    // The extent that physically contains the replaced region: only its
+    // declared length may change, by exactly one delta. The old code patched
+    // *every* extent of the target item (adding delta N times on multi-extent
+    // items) and never identified a host item for the container fallback,
+    // leaving its iloc length stale while the bytes had already moved
+    // (audit 2026-10-24 5.2, review 2026-10-25 M9).
 
     for item in &isobmff.items {
         // Is this the item containing the target?
@@ -290,15 +298,35 @@ fn reconstruct_heif(
             BridgeTargetKind::DirectJpeg { item_id } => item.item_id == item_id,
             BridgeTargetKind::DirectSpatial { item_id } => item.item_id == item_id,
             BridgeTargetKind::ExifJpeg { exif_item_id, .. } => item.item_id == exif_item_id,
-            BridgeTargetKind::ContainerJpegFallback => false,
+            // The container fallback has no item id: the host is whatever
+            // file-offset item's extent physically covers the target region.
+            BridgeTargetKind::ContainerJpegFallback => {
+                host_extent(item, target_start, target_end_orig).is_some()
+            }
         };
 
         if is_target_item {
-            // Update extent length for this item
+            let Some(host) = host_extent(item, target_start, target_end_orig) else {
+                return Err(StrHideError::Rejection(format!(
+                    "bridge target at offset {} is not covered by a single file-offset \
+                     extent of item {}",
+                    target.file_offset, item.item_id
+                )));
+            };
+            if host.length_sz > 0 && host.length_pos + host.length_sz <= out.len() {
+                let new_extent_len = ((host.length as i64) + delta).max(0) as u64;
+                patch_uint(&mut out, host.length_pos, host.length_sz, new_extent_len)?;
+            }
+            // The host item's own later extents move with the shift, exactly
+            // like other items' extents do below.
             for ext in &item.extents {
-                if ext.length_sz > 0 && ext.length_pos + ext.length_sz <= out.len() {
-                    let new_extent_len = ((ext.length as i64) + delta).max(0) as u64;
-                    patch_uint(&mut out, ext.length_pos, ext.length_sz, new_extent_len)?;
+                if ext.offset_pos == host.offset_pos && ext.length_pos == host.length_pos {
+                    continue;
+                }
+                let abs_off = item.base_offset.saturating_add(ext.offset);
+                if abs_off >= target_end_orig && ext.offset_sz > 0 {
+                    let new_ext_off = ((ext.offset as i64) + delta).max(0) as u64;
+                    patch_uint(&mut out, ext.offset_pos, ext.offset_sz, new_ext_off)?;
                 }
             }
         } else if item.construction_method == 0 {
@@ -342,6 +370,18 @@ fn reconstruct_heif(
     }
 
     Ok(out)
+}
+
+/// The extent of `item` (file-offset construction only) that physically
+/// contains `[target_start, target_end)`.
+fn host_extent(item: &IsobmffItem, target_start: u64, target_end: u64) -> Option<&IsobmffExtent> {
+    if item.construction_method != 0 {
+        return None;
+    }
+    item.extents.iter().find(|e| {
+        let start = item.base_offset.saturating_add(e.offset);
+        start <= target_start && target_end <= start.saturating_add(e.length)
+    })
 }
 
 fn patch_uint(buf: &mut [u8], pos: usize, size: usize, val: u64) -> Result<(), StrHideError> {
@@ -708,9 +748,16 @@ fn parse_isobmff(data: &[u8]) -> Result<IsobmffMeta, StrHideError> {
                         as u32;
                     let itype: [u8; 4] = iinf_buf[ipos + 16..ipos + 20].try_into().unwrap();
                     items_map.insert(id, itype);
-                } else if infe_ver == 3 && infe_sz >= 24 {
+                } else if infe_ver == 3 && infe_sz >= 22 {
+                    // v3: item_ID(32) at +12..16, protection(16) at +16..18,
+                    // item_type(32) at +18..22. The old code read +20..24 --
+                    // two bytes into the item name -- so every v3 item_type
+                    // was garbage and all directed lookups fell through to the
+                    // full-file fallback scan (audit 2026-10-24 5.1). The
+                    // smallest legal v3 box that carries a type is 22 bytes
+                    // (23 with the name's NUL).
                     let id = u32::from_be_bytes(iinf_buf[ipos + 12..ipos + 16].try_into().unwrap());
-                    let itype: [u8; 4] = iinf_buf[ipos + 20..ipos + 24].try_into().unwrap();
+                    let itype: [u8; 4] = iinf_buf[ipos + 18..ipos + 22].try_into().unwrap();
                     items_map.insert(id, itype);
                 }
             }
@@ -733,11 +780,34 @@ fn parse_isobmff(data: &[u8]) -> Result<IsobmffMeta, StrHideError> {
         };
         let id_sz = if iloc_ver < 2 { 2 } else { 4 };
 
+        // v2+ stores a 32-bit item count at +14..18; the old `>= 16` guard
+        // let a 16- or 17-byte box through and the read panicked
+        // (audit 2026-10-24 5.4).
         let item_cnt = if iloc_ver < 2 {
+            if iloc_buf.len() < 16 {
+                return Err(StrHideError::CorruptedData(
+                    "iloc item-count field truncated".into(),
+                ));
+            }
             u16::from_be_bytes(iloc_buf[14..16].try_into().unwrap()) as usize
         } else {
+            if iloc_buf.len() < 18 {
+                return Err(StrHideError::CorruptedData(
+                    "iloc v2 item-count field truncated".into(),
+                ));
+            }
             u32::from_be_bytes(iloc_buf[14..18].try_into().unwrap()) as usize
         };
+
+        // All-zero extent size fields make the extent loop below advance zero
+        // bytes per iteration -- the same zero-progress DoS shape fixed in
+        // heif_boxes (audit 2026-10-24 4.2); `read_uint(_, _, 0)` would
+        // happily spin 65535 times here.
+        if off_sz + len_sz + idx_sz == 0 {
+            return Err(StrHideError::CorruptedData(
+                "iloc extent sizes are all zero; extents carry no data".into(),
+            ));
+        }
 
         let mut pos = if iloc_ver < 2 { 16 } else { 18 };
 
@@ -833,5 +903,56 @@ fn read_box_header(bytes: &[u8], pos: usize) -> Result<(usize, usize), StrHideEr
         Ok((bytes.len() - pos, 8))
     } else {
         Ok((size_32, 8))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ext(offset: u64, length: u64, tag: usize) -> IsobmffExtent {
+        IsobmffExtent {
+            offset,
+            offset_pos: tag * 100,
+            offset_sz: 4,
+            length,
+            length_pos: tag * 100 + 8,
+            length_sz: 4,
+        }
+    }
+
+    /// The host-extent selection that drives the iloc length patch: the
+    /// extent that physically covers the replaced region, on file-offset
+    /// items only. A multi-extent item must select exactly the covering
+    /// extent -- the old code added the length delta to every extent,
+    /// corrupting the declared total (audit 2026-10-24 5.2) -- and idat
+    /// construction can never host the bridge target (review 2026-10-25 M9).
+    #[test]
+    fn host_extent_selects_the_covering_extent() {
+        let item = IsobmffItem {
+            item_id: 5,
+            item_type: *b"Exif",
+            construction_method: 0,
+            base_offset: 1000,
+            base_offset_pos: 0,
+            base_offset_sz: 4,
+            extents: vec![ext(0, 500, 0), ext(500, 800, 1)],
+        };
+        // Inside the second extent [1500, 2300): absolute target 1600..1900.
+        let host = host_extent(&item, 1600, 1900).expect("second extent covers it");
+        assert_eq!(host.offset, 500);
+        // Partially straddling two extents selects nothing: patching either
+        // one alone would be wrong, and the caller must refuse the target.
+        assert!(host_extent(&item, 1400, 1600).is_none());
+        // Outside every extent: no host (the container fallback then treats
+        // this item as a non-target and shifts only what follows the region).
+        assert!(host_extent(&item, 2600, 2700).is_none());
+
+        let mut idat = item.clone();
+        idat.construction_method = 1;
+        assert!(
+            host_extent(&idat, 1600, 1900).is_none(),
+            "idat construction is not a file offset and cannot host"
+        );
     }
 }
