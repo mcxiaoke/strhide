@@ -9,7 +9,7 @@
 | 方法 | 主审精读框架层与 PNG/JPEG 适配器；3 路子审分别逐行精读 ISOBMFF 族、PE 族、PDF/ZIP/RIFF 族；全部 P1/P2 发现由主审逐条对照源码复核后才收录；静态审查 + 测试代码交叉核对 |
 | 基线 | commit `20f9c96` + 工作区未提交改动（`rust/src/stego/hevc/engine.rs`、`Cargo.toml/lock`，均为内容域 HEVC WPP/seed 重构进行中的代码）；`cargo test --all-targets` 结果见 §0.5 |
 | 结论强度 | 每条发现标注【确认】（主审已逐步对照源码验证）或【疑似】（机理成立、影响需运行时验证）；P3 中未经主审逐条复核的仅收录子审给出明确代码证据的条目 |
-| 修复状态 | 4 项 P1 与 7 项 P2 已于审查当日分三批全部修复提交：`7277060`（isobmff 四项 + ZIP 空档案 + RIFF 边界 + 文档漂移）、`9f3e9af`（PDF 三项）、`93efc2d`（ZIP64 + HEIF 4 GiB + WAV/WebP auto）；已修复条目标题标 ✅ 与提交号，实施明细见 [`CHANGES-20261025.md`](CHANGES-20261025.md) 同日三条记录。P3 仅 P3-14/17/20/21 随批修复，其余开放 |
+| 修复状态 | 4 项 P1 与 7 项 P2 已于审查当日分三批全部修复提交：`7277060`（isobmff 四项 + ZIP 空档案 + RIFF 边界 + 文档漂移）、`9f3e9af`（PDF 三项）、`93efc2d`（ZIP64 + HEIF 4 GiB + WAV/WebP auto）；已修复条目标题标 ✅ 与提交号，实施明细见 [`CHANGES-20261025.md`](CHANGES-20261025.md) 同日记录。P3 中 P3-14/17/19/20/21/3/4/5/6（最小版）/7/10/15/22 与 §5.2 自检已随批修复（第五批未提交，见同文件 17:34 记录），P3-8 评估后暂不做，其余开放 |
 | 关联文档 | [`stego_full_code_review_20261025_glm53.md`](stego_full_code_review_20261025_glm53.md)（同日全面审查，结构域当时仅为次重点抽查）；本次为结构域专项逐行深审 |
 
 ---
@@ -184,19 +184,19 @@ out.write_all(&stego_bytes[m_off + m_size..header.inject_offset as usize])?;
 | :--- | :--- | :--- | :--- |
 | P3-1 | `isobmff.rs:28-53` | `trailing_envelope_len` 只校验 offset/size 自洽、不校验 trailer magic/CRC，verify_structure 可被构造数据提前放行（L1 层理论假阳性；L2/L3 仍拦截） | 确认 |
 | P3-2 | `isobmff.rs:828-833, 847` | 64-bit 头（largesize）的 meta 重组被静默归一化为 12 字节头，`inject_offset`/iloc extent 偏移基准错位 8 字节 → 信封补丁落在信封中部、事后不可定位；现实中 libheif 不生成此形态 | 确认机理 |
-| P3-3 | `isobmff.rs:1199` | `check_iloc_has_target` 的 `b_off + ext_off` 未用 `checked_add`（crafted 输入 debug panic、release 回绕；对比同文件其他处的谨慎风格） | 确认 |
-| P3-4 | `isobmff.rs:625-636, 1074-1083` | meta 末尾 <8 字节残余不进入子盒重组，注入后静默丢失 → restore 报 `RestoreMismatch`（畸形载体） | 确认 |
-| P3-5 | `isobmff.rs:683-685` | iinf 条目走查遇畸形条目即 break，`max_id` 不完整 → new_id 可能与断点后条目碰撞（stego 结构无效，字节仍可还原） | 确认 |
-| P3-6 | `isobmff.rs:433-437, 1100-1101` | `can_item_hidden`/`has_iloc_item` `read_to_end` 全文件入内存（write 与 read 路径各一次；多 GB 载体 OOM 风险） | 确认 |
+| P3-3 | `isobmff.rs:1199` | `check_iloc_has_target` 的 `b_off + ext_off` 未用 `checked_add`（crafted 输入 debug panic、release 回绕；对比同文件其他处的谨慎风格） | 确认（✅ 已修：`saturating_add`，inject 侧两处同族裸加法改 `checked_add` 拒绝） |
+| P3-4 | `isobmff.rs:625-636, 1074-1083` | meta 末尾 <8 字节残余不进入子盒重组，注入后静默丢失 → restore 报 `RestoreMismatch`（畸形载体） | 确认（✅ 已修：inject/strip 双侧捕获 `meta_tail` 原样并回重组） |
+| P3-5 | `isobmff.rs:683-685` | iinf 条目走查遇畸形条目即 break，`max_id` 不完整 → new_id 可能与断点后条目碰撞（stego 结构无效，字节仍可还原） | 确认（✅ 已修：畸形条目三处 break 改 `CorruptedData` 硬拒绝） |
+| P3-6 | `isobmff.rs:433-437, 1100-1101` | `can_item_hidden`/`has_iloc_item` `read_to_end` 全文件入内存（write 与 read 路径各一次；多 GB 载体 OOM 风险） | 确认（✅ 已修最小版：`MAX_ISOBMFF_META_SCAN = 1 GiB` 有界读取，超限写路径落 box_uuid、读路径落 EOF 分支；流式重构不做） |
 
 ### 3.2 PE 族（本子系统无 P1/P2）
 
 | # | 位置 | 问题 | 确认度 |
 | :--- | :--- | :--- | :--- |
-| P3-7 | `pe.rs:666` | `slack_off as u32` 静默截断：>4 GiB PE 且唯一足够零 run 位于 4 GiB 之外时，信道头记录错误 slack_off → strip 大概率干净拒绝、小概率清零错误 padding 区 | 确认机理 |
+| P3-7 | `pe.rs:666` | `slack_off as u32` 静默截断：>4 GiB PE 且唯一足够零 run 位于 4 GiB 之外时，信道头记录错误 slack_off → strip 大概率干净拒绝、小概率清零错误 padding 区 | 确认机理（✅ 已修：`u32::try_from` 前置门，超限报 `UnsupportedFormat`） |
 | P3-8 | `pe_codebits.rs:650-706` | restore diff 位图无 CRC：padding 中 diff 区损坏 → strip 静默产出错误 .text（engine 层 `orig_host_sha256` 比对兜底检出，adapter 层无告警） | 确认 |
 | P3-9 | `pe.rs:414-423, 435-443` | eof 策略信封恒被定位为 `pe_overlay`（eof fallback 分支对自产文件不可达）；strategy 字符串与 header.strategy_id 不一致，仅影响显示/统计 | 确认 |
-| P3-10 | `pe.rs:639-653` | codebits 双写防护要求既有信道 slack_off 落在**当前** slack_ranges：节表被第三方改动后防护失效（防御纵深缺口，自产文件不可达） | 确认机理 |
+| P3-10 | `pe.rs:639-653` | codebits 双写防护要求既有信道 slack_off 落在**当前** slack_ranges：节表被第三方改动后防护失效（防御纵深缺口，自产文件不可达） | 确认机理（✅ 已修：去掉 containment 前提，信道头解析通过 + diff 区非零即拒绝） |
 | P3-11 | `pe_codebits.rs:953, 1032` | `pe_geometry` 64 KiB 头窗：节表 >64 KiB（约 >1630 节）时 codebits/slack 同时不可用（overlay 仍可用），与 `parse_pe_headers` 行为不一致（注释已声明取舍） | 确认 |
 | P3-12 | `pe_codebits.rs:1068, 259-349` | 对抗性大输入内存放大：`.text` 扫描窗可达整个文件 + 每指令约 32 B 的位置表（locate/strip 均对不可信 stego 执行） | 确认 |
 | P3-13 | `pe.rs:520-528` | `suspicious_structures` 的 136 B overlay 阈值对合法大 overlay（调试信息等）误报（方向保守，可接受） | 确认 |
@@ -206,7 +206,7 @@ out.write_all(&stego_bytes[m_off + m_size..header.inject_offset as usize])?;
 | # | 位置 | 问题 | 确认度 |
 | :--- | :--- | :--- | :--- |
 | P3-14 | `riff.rs:104-105` + `mod.rs:198-204, 236-238` | `old_riff_size == 0` 时返回 `patch_offset=4, orig_patch_val=0`，违反 trait 文档的哨兵约定（`orig==0 ⇒ 无补丁`）；且 `mod.rs` 两处注释失实（"currently only ZIP" 发非零 patch、哨兵语义描述）。engine/默认 strip 实测不受影响，还原仍精确 | 确认（✅ 已修 `7277060`：注释更新，哨兵输入面随 P1-2 边界校验关闭） |
-| P3-15 | `ebml.rs:13-67` | `encode_vint` 阈值 `(1 << 7) - 1` 使 127/16383 等边界值编为 n+1 字节非最短 VINT（RFC 8794 为 SHOULD）；`val >= 2^56` 分支产出畸形字节（UBE 尺寸不可达，读写共用同一函数故一致性无损） | 确认 |
+| P3-15 | `ebml.rs:13-67` | `encode_vint` 阈值 `(1 << 7) - 1` 使 127/16383 等边界值编为 n+1 字节非最短 VINT（RFC 8794 为 SHOULD）；`val >= 2^56` 分支产出畸形字节（UBE 尺寸不可达，读写共用同一函数故一致性无损） | 确认（✅ 已修：**阈值半项为报告误报**——127/16383 的最短编码恰为全 1 payload 的 unknown-size 哨兵，更长编码是规范强制，原阈值保留；`val >= 2^56 - 1` 分支改 `Option` 返回拒绝畸形字节，mkv 三处调用方适配） |
 | P3-16 | `mkv.rs:27-34` | detect 不校验 DocType：任意 EBML 方言（非 matroska/webm）都会被追加 Void/EOF 信封（追加式注入字节精确，风险低） | 确认 |
 | P3-17 | `wav.rs:25-27, 88-92`（webp 同构） | `choose_auto_strategy` 恒选 `riff_chunk` 无视 4 GiB 余量，`strategy_note` 宣称的"自动回退 EOF"不存在（对比 ZIP/PDF 的 auto 均真实考虑 ube_size）；容量 note 误导 | 确认（✅ 已修 `93efc2d`：`riff_can_chunk` 共享判定驱动 auto 与容量表） |
 
@@ -214,11 +214,11 @@ out.write_all(&stego_bytes[m_off + m_size..header.inject_offset as usize])?;
 
 | # | 位置 | 问题 | 确认度 |
 | :--- | :--- | :--- | :--- |
-| P3-18 | `png.rs:31-52` | `find_iend_offset` 反向扫描取**最后一个** 12 字节 IEND 完整序列：多 IEND/拼接 PNG（如 PNG 后拼接另一 PNG）时注入点落在非终止 IEND 之后，块注入的 chunk 在 locate 的前向 chunk 走链（首个 IEND 即终止）之外 → 写成功读不回。改为前向 chunk 走链定位（与 locate 同语义）即可根除 | 确认机理 |
-| P3-19 | `jpeg.rs:18, 73, 282` | `MAX_JPEG_HEADER_SCAN = 16 MiB`：头部链（EXIF/ICC 等）超过 16 MiB 的 JPEG 无法定位 SOS，auto 选 app_segment 后 inject 干净报错且无 eof 回退（写失败而非读失败，与 P2-4/P3-17 同族） | 确认 |
+| P3-18 | `png.rs:31-52` | `find_iend_offset` 反向扫描取**最后一个** 12 字节 IEND 完整序列：多 IEND/拼接 PNG（如 PNG 后拼接另一 PNG）时注入点落在非终止 IEND 之后，块注入的 chunk 在 locate 的前向 chunk 走链（首个 IEND 即终止）之外 → 写成功读不回。改为前向 chunk 走链定位（与 locate 同语义）即可根除 | 确认机理（根因仍开放；§5.2 写后 locate 自检已把该案例转为写入期报错，见 `review_20261025.rs::png_concatenated_iend_write_fails_self_check`） |
+| P3-19 | `jpeg.rs:18, 73, 282` | `MAX_JPEG_HEADER_SCAN = 16 MiB`：头部链（EXIF/ICC 等）超过 16 MiB 的 JPEG 无法定位 SOS，auto 选 app_segment 后 inject 干净报错且无 eof 回退（写失败而非读失败，与 P2-4/P3-17 同族） | 确认（✅ 已修：`choose_auto_strategy` 先探测 SOS 可达性，不可达落 eof；容量 note 与 fallback 文案同步） |
 | P3-20 | `engine.rs:266` | 错误消息内嵌 14 个多余空格（编辑残留）：`"...is malformed;              cannot encode envelope metadata"` | 确认（✅ 已修 `7277060`） |
 | P3-21 | `adapters/mod.rs:18-19` | 模块文档 "the six supported carriers" 实际 10 个适配器（stale doc） | 确认（✅ 已修 `7277060`） |
-| P3-22 | `rejection.rs:254-262` | `check_jar_signature` 的 EOCD `rposition` 对"EOCD 之后尾随含 `PK\x05\x06` 的垃圾"会取错记录 → cd_offset 错误 → 签名检测漏报（仅影响拒绝检查的保守性，非注入路径） | 确认机理 |
+| P3-22 | `rejection.rs:254-262` | `check_jar_signature` 的 EOCD `rposition` 对"EOCD 之后尾随含 `PK\x05\x06` 的垃圾"会取错记录 → cd_offset 错误 → 签名检测漏报（仅影响拒绝检查的保守性，非注入路径） | 确认机理（✅ 已修：EOCD 候选从尾向头逐个验证 CD 自洽，解析失败继续前溯） |
 
 **上轮遗留、本次复核仍然成立的已知项**（不重复展开）：`commit.rs` tmp+rename 无 fsync（crash 窗口）；`facade.rs:299-326` `extract_file` 非原子写 + 目录输出硬编码 `extracted.bin`；router HEIF "先 bridge 后 HEVC" 回退顺序无测试锁定。
 
@@ -333,14 +333,14 @@ PE 族：零 panic 面（所有切片前置检查）。isobmff.rs：5 处 panic 
 4. PDF：脏尾 ≥ 128 KiB（P1-4）、加密 PDF（P1-3）、stealth magic 尾字节 0x0A/0x0D（P2-5，可用固定口令做确定性用例）。
 5. ZIP：空档案生命周期（P2-6）、ZIP64 两种形态（P2-7）、`patch_offset/inject_offset` 篡改的 strip 拒绝路径。
 6. PE：diff 位图损坏的负向测试（P3-8）、`slack_off` u32 边界（P3-7）、REX/高字节寄存器全 Code×寄存器类的 decode→flip→decode→restore property 测试、pe32（0x10B）slack 用例。
-7. 写后 locate 自检缺失（§5.2 的系统性对策）：`write_core` 成功路径上对产物做一次 locate 回读，可把本类缺陷全部转化为写入期失败。
+7. ~~写后 locate 自检缺失（§5.2 的系统性对策）~~（✅ 第五批已落地：`write_core` 成功路径对产物做一次 locate 回读，本类缺陷全部转化为写入期失败）；
 8. 带 SeekHead/Cues 的真实 MKV fixture（P3 相关：追加安全性的测试固化）；VP8X 扩展 WebP。
 
 ---
 
 ## 8. 修复优先级路线图
 
-> **执行状态（2026-10-25 当日）**：第 1–7 条（第一批）、第 8–10 条（第二批）与第 11–12 条（第三批，P3-19 除外）已全部完成并提交——`7277060` / `9f3e9af` / `93efc2d`。P3-19（JPEG 头链 16 MiB 无 eof 回退）未实施，仍开放；"写后 locate 自检"（§5.2 机制性对策）与 P3 清理项待后续批次。
+> **执行状态（2026-10-25 当日）**：第 1–7 条（第一批）、第 8–10 条（第二批）与第 11–12 条（第三批，P3-19 除外）已全部完成并提交——`7277060` / `9f3e9af` / `93efc2d`。第五批（17:34）完成剩余 P3 清理与机制性对策：P3-19（JPEG auto 头链探测回退 eof）、§5.2 写后 locate 自检（`write_core` 产物 locate 回读，失败即拒写）、isobmff P3-3/4/5/6（最小版：读取上限 1 GiB）、PE 防御纵深 P3-7/P3-10、P3-15（阈值半项为报告误报，unknown-size 哨兵使原阈值正确；仅修 `≥2^56` 畸形分支）、P3-22；P3-8（diff 位图 CRC）经评估暂不做（engine 层 `orig_host_sha256` 已兜底）。明细见 [`CHANGES-20261025.md`](CHANGES-20261025.md) 17:34:45 条目。仍开放：P3-1/2/9/11/12/13/16/18 与上轮遗留三项（commit fsync、facade 非原子写、router 顺序测试）；自检已把 P3-18 类案例从"写成功读不回"转为写入期报错。
 
 **P0（建议立即修，均为功能性缺陷且修复成本低）**
 
