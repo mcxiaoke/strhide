@@ -134,11 +134,17 @@ impl PngCostModel for SuniwardCostModel {
     }
 }
 
-/// `R(y, x) = Σ_{a,b} f1[a] f2[b] · plane(y + a - HALF, x + b - HALF)`.
+/// `R(y, x) = Σ_{a,b} f1[a] f2[b] · plane(y - a + HALF, x - b + HALF)`.
 ///
-/// Separable: horizontal pass into `tmp`, then vertical into `out`. Edge pixels
-/// clamp; zero padding would fake "no texture" along the border and make the
-/// outermost ring look specially expensive to change.
+/// Separable: horizontal pass into `tmp`, then vertical into `out`. This is a
+/// **convolution** (kernel applied reversed, matching `scipy.convolve2d` and
+/// the stegolab/hstego references), which is what makes the suitability pass
+/// below the exact adjoint: a unit delta at `p` produces
+/// `R(p') = f1[y'-y+HALF]·f2[x'-x+HALF]`, so weighting `W(p')` with
+/// `|f1|⊗|f2|` read at `p' = p + (a-HALF, b-HALF)` sums precisely
+/// `ξ(p → p')` over the delta's response. Edge pixels clamp; zero padding
+/// would fake "no texture" along the border and make the outermost ring look
+/// specially expensive to change.
 fn residual_pass(
     plane: &[f64],
     w: usize,
@@ -154,7 +160,7 @@ fn residual_pass(
         for (x, d) in dst.iter_mut().enumerate() {
             let mut acc = 0.0;
             for (b, &cb) in f2.iter().enumerate() {
-                let sx = (x as isize + b as isize - wavelet::HALF as isize).clamp(0, w as isize - 1)
+                let sx = (x as isize - b as isize + wavelet::HALF as isize).clamp(0, w as isize - 1)
                     as usize;
                 acc += cb * row[sx];
             }
@@ -167,7 +173,7 @@ fn residual_pass(
             continue;
         }
         for y in 0..h {
-            let sy = (y as isize + a as isize - wavelet::HALF as isize).clamp(0, h as isize - 1)
+            let sy = (y as isize - a as isize + wavelet::HALF as isize).clamp(0, h as isize - 1)
                 as usize;
             let src_row = &tmp[sy * w..(sy + 1) * w];
             let dst_row = &mut out[y * w..(y + 1) * w];
@@ -180,8 +186,13 @@ fn residual_pass(
 
 /// `out(y, x) += Σ_{a,b} |f1[a]| |f2[b]| · src(y + a - HALF, x + b - HALF)`.
 ///
-/// Same centring as [`residual_pass`], because `ξ` is the transform's own
-/// response to a delta and must be applied exactly the way `R` was.
+/// The adjoint of [`residual_pass`]: because the residual is a convolution,
+/// the response of a delta at `(y, x)` is the kernel read forward from that
+/// point, so the suitability weights `|f1| ⊗ |f2|` applied at the *same*
+/// `(a - HALF, b - HALF)` offsets sum `ξ(p → p')` over exactly the positions
+/// the delta influences. Both passes must use opposite kernel orientations --
+/// mirroring either one breaks the `ρ(p) = Σ ξ(p→p')/(|R(p')|+σ)` definition
+/// and silently prices the wrong side of every edge.
 fn suitability_pass(
     src: &[f64],
     w: usize,
@@ -307,6 +318,44 @@ mod tests {
         assert!(
             flat > busy * 3.0,
             "flat areas must cost clearly more (flat {flat:.4e}, busy {busy:.4e})"
+        );
+    }
+
+    /// The suitability pass must be the adjoint of the residual pass: the
+    /// HPDF energy is front-loaded (taps 1..3 hold ~0.31/0.68/0.59, the tail
+    /// is ~100x smaller), so a delta's residual lands on the opposite side of
+    /// the delta depending on the kernel orientation. With the convolution
+    /// residual (the reference convention), a vertical stripe at `x0` puts its
+    /// wavelet energy at `x0-7..=x0-5`, and the big suitability taps of a
+    /// pixel at `p` read `p-7..=p-5` -- so a stripe at `p+1` makes `p` cheap
+    /// while a stripe at `p-11` barely moves its cost. The pre-fix code ran
+    /// both passes in the same orientation, which mirrored this relationship
+    /// and priced the wrong side of every edge; this test pins the correct
+    /// one.
+    #[test]
+    fn suitability_reads_the_side_the_residual_lands_on() {
+        let (w, h) = (96usize, 64usize);
+        let probe_x = 40usize;
+        let probe_idx = 32 * w + probe_x; // interior row
+
+        let cost_at = |stripe_x: usize| {
+            let mut px = vec![128u8; w * h];
+            for row in 0..h {
+                px[row * w + stripe_x] = 228;
+            }
+            let cost = SuniwardCostModel.compute_cost(&px, w, h, 1, &params());
+            cost[probe_idx]
+        };
+
+        let near = cost_at(probe_x + 1);
+        let far = cost_at(probe_x - 11);
+        // Only the (l,h) band carries the asymmetry on a y-constant plane, so
+        // the expected ratio is ~0.73 after the fix and ~1.34 with the mirrored
+        // (pre-fix) orientation; 0.85 separates both with margin.
+        assert!(
+            near < far * 0.85,
+            "a stripe whose residual lands under the probe's big taps must be clearly cheaper \
+             (stripe@+1: {near:.6}, stripe@-11: {far:.6})"
         );
     }
 
