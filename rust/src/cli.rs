@@ -33,20 +33,14 @@ pub struct Cli {
     #[arg(short = 'c', long, global = true, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
-    #[arg(
-        short = 'q',
-        long = "quiet",
-        global = true,
-        help = "Suppress normal status output: [OK]/[INFO] progress, notices, and human-readable reports. Payload data (read), --json/table output, and [ERROR] messages always print; the exit code tells scripts whether the command succeeded."
-    )]
+    #[arg(short = 'q', long = "quiet", global = true)]
     pub quiet: bool,
 
     #[arg(
         long = "lang",
         global = true,
         value_name = "LANG",
-        value_parser = ["en", "zh"],
-        help = "Interface language: en or zh (default: STRHIDE_LANG / config / system locale)"
+        value_parser = ["en", "zh"]
     )]
     pub lang: Option<String>,
 
@@ -95,10 +89,7 @@ pub struct CapacityArgs {
     #[command(flatten)]
     pub tuning: StegoTuningArgs,
 
-    #[arg(
-        long = "json",
-        help = "Print structured JSON output (one StegoCapacityInfo object per carrier)"
-    )]
+    #[arg(long = "json")]
     pub json: bool,
 }
 
@@ -110,19 +101,10 @@ const CAPACITY_AFTER_HELP: &str = crate::i18n::messages::CAPACITY_AFTER_HELP_EN;
 #[derive(Args, Debug)]
 #[group(required = false, multiple = false)]
 pub struct PasswordArgs {
-    #[arg(
-        short = 'p',
-        long = "password",
-        value_name = "PASSWORD",
-        help = "Password in plain text (it stays visible in shell history and process listings). Prefer --password-file, STRHIDE_PASSWORD, or the interactive prompt."
-    )]
+    #[arg(short = 'p', long = "password", value_name = "PASSWORD")]
     pub password: Option<String>,
 
-    #[arg(
-        long = "password-file",
-        value_name = "FILE",
-        help = "Read the password from this file (first line; trailing CR/LF is trimmed). Mutually exclusive with -p/--password."
-    )]
+    #[arg(long = "password-file", value_name = "FILE")]
     pub password_file: Option<PathBuf>,
 }
 
@@ -136,40 +118,19 @@ pub struct PasswordArgs {
 #[derive(Args, Debug)]
 #[group(required = false, multiple = false)]
 pub struct PayloadSourceArgs {
-    #[arg(
-        short = 'd',
-        long = "data",
-        value_name = "FILE",
-        help = "Hide this file as the payload (any content, binary or text). Mutually exclusive with the other payload sources."
-    )]
+    #[arg(short = 'd', long = "data", value_name = "FILE")]
     pub data: Option<PathBuf>,
 
-    #[arg(
-        short = 't',
-        long = "text",
-        value_name = "TEXT",
-        help = "Hide this text as the payload; combine with --unescape for C-style escapes. Mutually exclusive with the other payload sources."
-    )]
+    #[arg(short = 't', long = "text", value_name = "TEXT")]
     pub text: Option<String>,
 
-    #[arg(
-        long = "text-file",
-        value_name = "FILE",
-        help = "Hide the text read from this file (must be UTF-8). Mutually exclusive with the other payload sources."
-    )]
+    #[arg(long = "text-file", value_name = "FILE")]
     pub text_file: Option<PathBuf>,
 
-    #[arg(
-        long = "text-base64",
-        value_name = "BASE64",
-        help = "Hide this base64-encoded text; it must decode to valid UTF-8 (arbitrary binary belongs in -d/--data). Mutually exclusive with the other payload sources."
-    )]
+    #[arg(long = "text-base64", value_name = "BASE64")]
     pub text_base64: Option<String>,
 
-    #[arg(
-        long = "stdin",
-        help = "Read the payload from standard input, e.g. `cat secret.txt | strhide write photo.png --stdin`. Mutually exclusive with the other payload sources."
-    )]
+    #[arg(long = "stdin")]
     pub stdin: bool,
 }
 
@@ -179,81 +140,49 @@ pub struct WriteArgs {
     #[arg(
         value_name = "CARRIER",
         required = true,
-        num_args = 1..,
-        help = "Carrier file(s) to hide the payload in; give several to embed the same payload into each. Use `--` before a filename that starts with '-'."
+        num_args = 1..
     )]
     pub carrier: Vec<PathBuf>,
 
     #[command(flatten)]
     pub payload: PayloadSourceArgs,
 
-    #[arg(
-        short = 'o',
-        long = "output",
-        value_name = "PATH",
-        help = "Write the modified carrier to this path. A single path names the result for one carrier; with several carriers it must be an existing directory and each output keeps its carrier's name. Default: write to <carrier>-out.<ext>."
-    )]
+    #[arg(short = 'o', long = "output", value_name = "PATH")]
     pub output: Option<PathBuf>,
 
-    #[arg(
-        long = "in-place",
-        conflicts_with = "output",
-        help = "Modify carrier file(s) in place (creates .bak backup by default unless --no-backup). Default: write to <carrier>-out.<ext>."
-    )]
+    #[arg(long = "in-place", conflicts_with = "output")]
     pub in_place: bool,
 
-    #[arg(
-        long = "overwrite",
-        help = "Allow overwriting existing output file(s) without prompt"
-    )]
+    #[arg(long = "overwrite")]
     pub overwrite: bool,
 
     #[command(flatten)]
     pub passwords: PasswordArgs,
 
-    #[arg(
-        short = 'e',
-        long = "encrypt",
-        help = "Ask for an encryption password when no password source is given (interactive prompt; fails without a TTY). Note: the payload is always encrypted - without a password a built-in key is used."
-    )]
+    #[arg(short = 'e', long = "encrypt")]
     pub encrypt: bool,
 
     #[arg(
         short = 'H',
         long = "hint",
         alias = "password-hint",
-        value_name = "TEXT",
-        help = "Store this password hint inside the envelope (shown to whoever reads the payload later; not secret). Incompatible with --stealth."
+        value_name = "TEXT"
     )]
     pub hint: Option<String>,
 
-    #[arg(
-        short = 's',
-        long = "strategy",
-        value_name = "STRATEGY",
-        help = "Hiding strategy (auto|ask|<name>; default: auto or config file)"
-    )]
+    #[arg(short = 's', long = "strategy", value_name = "STRATEGY")]
     pub strategy: Option<String>,
 
-    #[arg(
-        long = "stealth",
-        help = "Stealth mode: hide without detectable markers - the envelope signature derives from the password, so this implies password protection and requires one (-p/--password, --password-file, or STRHIDE_PASSWORD). Incompatible with a password hint."
-    )]
+    #[arg(long = "stealth")]
     pub stealth: bool,
 
-    #[arg(long = "no-preserve-time", default_value_t = true, action = clap::ArgAction::SetFalse, help = "Do not preserve original carrier timestamps (default: preserve)")]
+    #[arg(long = "no-preserve-time", default_value_t = true, action = clap::ArgAction::SetFalse)]
     pub preserve_time: bool,
 
-    #[arg(
-        long = "no-backup",
-        help = "Do not create a '<carrier>.bak' backup next to a modified carrier (default: a .bak copy is kept; backups only apply to in-place modification)."
-    )]
+    #[arg(long = "no-backup")]
     pub no_backup: bool,
 
-    #[arg(
-        long = "unescape",
-        help = "Decode C-style escape sequences (\\n, \\r, \\t, \\xHH, \\uNNNN, ...) in the -t/--text payload before hiding; malformed escapes are kept literally."
-    )]
+    #[arg(long = "unescape")]
     pub unescape: bool,
 }
 
@@ -262,35 +191,19 @@ const WRITE_AFTER_HELP: &str = crate::i18n::messages::WRITE_AFTER_HELP_EN;
 #[derive(Args, Debug)]
 #[command(after_help = READ_AFTER_HELP)]
 pub struct ReadArgs {
-    #[arg(
-        value_name = "CARRIER",
-        required = true,
-        help = "Carrier file to extract the hidden payload from. Use `--` before a filename that starts with '-'."
-    )]
+    #[arg(value_name = "CARRIER", required = true)]
     pub carrier: PathBuf,
 
-    #[arg(
-        short = 'o',
-        long = "output",
-        value_name = "PATH",
-        help = "Write the extracted payload to a file, or into an existing directory keeping the filename stored in the envelope."
-    )]
+    #[arg(short = 'o', long = "output", value_name = "PATH")]
     pub output: Option<PathBuf>,
 
     #[command(flatten)]
     pub passwords: PasswordArgs,
 
-    #[arg(
-        long = "stdout",
-        conflicts_with = "output",
-        help = "Print the payload to standard output instead of writing a file (mutually exclusive with -o/--output)."
-    )]
+    #[arg(long = "stdout", conflicts_with = "output")]
     pub stdout: bool,
 
-    #[arg(
-        long = "overwrite",
-        help = "Allow overwriting an existing file when extracting a payload"
-    )]
+    #[arg(long = "overwrite")]
     pub overwrite: bool,
 }
 
@@ -302,39 +215,23 @@ pub struct EmbedArgs {
     #[arg(
         value_name = "CARRIER",
         required = true,
-        num_args = 1..,
-        help = "Carrier image file(s) (PNG, JPEG, HEIF/HEIC, or HEVC). Use `--` before a filename that starts with '-'."
+        num_args = 1..
     )]
     pub carrier: Vec<PathBuf>,
 
     #[command(flatten)]
     pub payload: PayloadSourceArgs,
 
-    #[arg(
-        short = 'o',
-        long = "output",
-        value_name = "PATH",
-        help = "Write modified carrier to this path (or into an existing directory for multiple carriers). Default: write to <carrier>-out.<ext>."
-    )]
+    #[arg(short = 'o', long = "output", value_name = "PATH")]
     pub output: Option<PathBuf>,
 
-    #[arg(
-        long = "in-place",
-        conflicts_with = "output",
-        help = "Modify carrier image(s) in place (creates .bak backup by default unless --no-backup). Note: content steganography modifies pixels/coefficients and cannot be restored to original bit-for-bit."
-    )]
+    #[arg(long = "in-place", conflicts_with = "output")]
     pub in_place: bool,
 
-    #[arg(
-        long = "overwrite",
-        help = "Allow overwriting existing output file(s) without prompt"
-    )]
+    #[arg(long = "overwrite")]
     pub overwrite: bool,
 
-    #[arg(
-        long = "no-backup",
-        help = "Do not create a '<carrier>.bak' backup copy when modifying in place."
-    )]
+    #[arg(long = "no-backup")]
     pub no_backup: bool,
 
     #[arg(long = "capacity", conflicts_with = "dry_run")]
@@ -343,11 +240,7 @@ pub struct EmbedArgs {
     #[arg(long = "dry-run")]
     pub dry_run: bool,
 
-    #[arg(
-        short = 'e',
-        long = "encrypt",
-        help = "Ask for an encryption password when no password source is given (interactive prompt; fails without a TTY)."
-    )]
+    #[arg(short = 'e', long = "encrypt")]
     pub encrypt: bool,
 
     #[command(flatten)]
@@ -379,10 +272,7 @@ pub struct StegoTuningArgs {
     #[arg(long = "enforce-safety")]
     pub enforce_safety: bool,
 
-    #[arg(
-        long = "unescape",
-        help = "Decode C-style escape sequences (\\n, \\r, \\t, ...) in the -t/--text payload before embedding"
-    )]
+    #[arg(long = "unescape")]
     pub unescape: bool,
 
     // --- Fine-tuning parameters for custom obfuscation and anti-detection ---
@@ -443,79 +333,38 @@ const EMBED_AFTER_HELP: &str = crate::i18n::messages::EMBED_AFTER_HELP_EN;
 #[derive(Args, Debug)]
 #[command(after_help = EXTRACT_AFTER_HELP)]
 pub struct ExtractArgs {
-    #[arg(
-        value_name = "CARRIER",
-        required = true,
-        help = "Stego image file to extract hidden payload from (PNG, JPEG, HEIF/HEIC, or HEVC)."
-    )]
+    #[arg(value_name = "CARRIER", required = true)]
     pub carrier: PathBuf,
 
-    #[arg(
-        short = 'o',
-        long = "output",
-        value_name = "PATH",
-        help = "Write extracted payload to a file (or into an existing directory). If omitted, text payloads are printed to stdout."
-    )]
+    #[arg(short = 'o', long = "output", value_name = "PATH")]
     pub output: Option<PathBuf>,
 
-    #[arg(
-        long = "stdout",
-        conflicts_with = "output",
-        help = "Print the payload to standard output instead of writing a file (mutually exclusive with -o/--output)."
-    )]
+    #[arg(long = "stdout", conflicts_with = "output")]
     pub stdout: bool,
 
-    #[arg(
-        long = "overwrite",
-        help = "Allow overwriting an existing file when extracting a payload"
-    )]
+    #[arg(long = "overwrite")]
     pub overwrite: bool,
 
     #[command(flatten)]
     pub passwords: PasswordArgs,
 
-    #[arg(
-        short = 'a',
-        long = "algorithm",
-        value_name = "NAME",
-        help = "Distortion cost algorithm (auto|hill|suniward|uerd|juniward|hevc; default: auto). \
-                Only 'hevc'/'cabac' change extraction routing (force Scheme C on a HEIF carrier); \
-                PNG/JPEG carriers declare their algorithm in the header and ignore this flag."
-    )]
+    #[arg(short = 'a', long = "algorithm", value_name = "NAME")]
     pub algorithm: Option<String>,
 
-    #[arg(
-        long = "stego-secret",
-        value_name = "SECRET",
-        help = "Private stand-in secret for no-password stego envelopes; must equal the value used at embed time."
-    )]
+    #[arg(long = "stego-secret", value_name = "SECRET")]
     pub stego_secret: Option<String>,
 
-    #[arg(
-        long = "stego-domain",
-        value_name = "DOMAIN",
-        help = "Custom domain tag to isolate the HKDF key derivation from the public dialect; must equal the value used at embed time."
-    )]
+    #[arg(long = "stego-domain", value_name = "DOMAIN")]
     pub stego_domain: Option<String>,
 
     // PNG extraction recomputes the HILL cost map to rank body slots, so the
     // two filter windows must repeat the embed-time values. Everything else
     // the embedder tuned (algorithm, exclusion rate, codec, h, u) is
     // self-describing in the carrier header and needs no flag here.
-    #[arg(
-        long = "p1-window",
-        value_name = "INT",
-        help = "Fine-tune (PNG HILL): first-stage low-pass filter window size used at embed time (odd, default: 3). \
-                Must match the embed-time value; extraction recomputes the cost map with it."
-    )]
+    #[arg(long = "p1-window", value_name = "INT")]
     pub p1_window: Option<usize>,
 
-    #[arg(
-        long = "p2-window",
-        value_name = "INT",
-        help = "Fine-tune (PNG HILL): second-stage low-pass filter window size used at embed time (odd, default: 15). \
-                Must match the embed-time value; extraction recomputes the cost map with it."
-    )]
+    #[arg(long = "p2-window", value_name = "INT")]
     pub p2_window: Option<usize>,
 }
 
@@ -527,39 +376,23 @@ pub struct RestoreArgs {
     #[arg(
         value_name = "CARRIER",
         required = true,
-        num_args = 1..,
-        help = "Carrier file(s) to restore; give several to strip each one. Use `--` before a filename that starts with '-'."
+        num_args = 1..
     )]
     pub carrier: Vec<PathBuf>,
 
-    #[arg(
-        short = 'o',
-        long = "output",
-        value_name = "PATH",
-        help = "Write the restored carrier to this path. A single path names the result for one carrier; with several carriers it must be an existing directory. Default: write to <carrier>-out.<ext>."
-    )]
+    #[arg(short = 'o', long = "output", value_name = "PATH")]
     pub output: Option<PathBuf>,
 
-    #[arg(
-        long = "in-place",
-        conflicts_with = "output",
-        help = "Restore carrier file(s) in place (creates .bak backup by default unless --no-backup). Default: write to <carrier>-out.<ext>."
-    )]
+    #[arg(long = "in-place", conflicts_with = "output")]
     pub in_place: bool,
 
-    #[arg(
-        long = "overwrite",
-        help = "Allow overwriting existing output file(s) without prompt"
-    )]
+    #[arg(long = "overwrite")]
     pub overwrite: bool,
 
     #[command(flatten)]
     pub passwords: PasswordArgs,
 
-    #[arg(
-        long = "no-backup",
-        help = "Do not create a '<carrier>.bak' backup for in-place restoration (default: a .bak copy is kept; backups only apply to in-place restoration)."
-    )]
+    #[arg(long = "no-backup")]
     pub no_backup: bool,
 }
 
@@ -571,8 +404,7 @@ pub struct InspectArgs {
     #[arg(
         value_name = "CARRIER",
         required = true,
-        num_args = 1..,
-        help = "Carrier file(s) or directory(ies) to inspect; reports host format, envelope metadata, and per-strategy capacity. Use `--` before a filename that starts with '-'."
+        num_args = 1..
     )]
     pub carrier: Vec<PathBuf>,
 
@@ -583,10 +415,7 @@ pub struct InspectArgs {
     #[arg(short = 'r', long = "recursive")]
     pub recursive: bool,
 
-    #[arg(
-        long = "json",
-        help = "Print machine-readable JSON report (single object for one file, array for multiple files/directories)."
-    )]
+    #[arg(long = "json")]
     pub json: bool,
 }
 
@@ -598,8 +427,7 @@ pub struct VerifyArgs {
     #[arg(
         value_name = "CARRIER",
         required = true,
-        num_args = 1..,
-        help = "Carrier file(s) or directory(ies) to verify. Use `--` before a filename that starts with '-'."
+        num_args = 1..
     )]
     pub carrier: Vec<PathBuf>,
 
@@ -610,10 +438,7 @@ pub struct VerifyArgs {
     #[arg(short = 'r', long = "recursive")]
     pub recursive: bool,
 
-    #[arg(
-        long = "json",
-        help = "Print machine-readable JSON report (single object for one file, array for multiple files/directories)."
-    )]
+    #[arg(long = "json")]
     pub json: bool,
 }
 
@@ -621,10 +446,7 @@ const VERIFY_AFTER_HELP: &str = crate::i18n::messages::VERIFY_AFTER_HELP_EN;
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
-    #[arg(
-        long = "json",
-        help = "Emit structured JSON output containing formats, strategies, and algorithms"
-    )]
+    #[arg(long = "json")]
     pub json: bool,
 }
 
@@ -640,8 +462,7 @@ pub struct ScanArgs {
     #[arg(
         value_name = "FILE",
         required = true,
-        num_args = 1..,
-        help = "File(s) or directory(ies) to scan. Directories are scanned non-recursively unless --recursive is given. Use `--` before a filename that starts with '-'."
+        num_args = 1..
     )]
     pub input: Vec<PathBuf>,
 

@@ -126,10 +126,10 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         ("write", "encrypt") => Msg::HelpWriteEncrypt,
         ("write", "no-encrypt") => Msg::HelpWriteNoEncrypt,
         ("write", "hint") => Msg::HelpWriteHint,
-        ("write", "preserve-time") => Msg::HelpWritePreserveTime,
+        ("write", "preserve-time") => Msg::HelpWriteNoPreserveTime,
         ("write", "no-preserve-time") => Msg::HelpWriteNoPreserveTime,
         ("write", "no-backup") => Msg::HelpWriteNoBackup,
-        ("write", "unescape") => Msg::HelpWriteUnescape,
+        (_, "unescape") => Msg::HelpWriteUnescape,
 
         // read
         ("read", "carrier") => Msg::HelpReadCarrier,
@@ -165,6 +165,7 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         ("embed", "in-place") => Msg::HelpEmbedInPlace,
         ("embed", "overwrite") => Msg::HelpEmbedOverwrite,
         ("embed", "no-backup") => Msg::HelpEmbedNoBackup,
+        ("embed", "encrypt") => Msg::HelpEmbedEncrypt,
 
         // extract
         ("extract", "carrier") => Msg::HelpExtractCarrier,

@@ -521,6 +521,9 @@ crate::i18n_messages! {
     HelpEmbedNoBackup:
         en = "Do not create '<carrier>.bak' backup during in-place embedding",
         zh = "原地嵌入时不创建 .bak 备份";
+    HelpEmbedEncrypt:
+        en = "Ask for an encryption password when no password source is given (interactive prompt; fails without a TTY)",
+        zh = "未提供密码时交互式提示输入加密密码（若无终端 TTY 则直接失败）";
     HelpEmbedStegoSecret:
         en = "Private default secret for adaptive stego (read/write must agree)",
         zh = "自适应隐写私有默认密钥（嵌入与提取两端必须一致）";
