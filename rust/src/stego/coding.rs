@@ -60,10 +60,20 @@ pub fn validate_k(k: usize) -> Result<(), StrHideError> {
 }
 
 /// Calculate required slots to embed `num_bits` with parameter `k`.
+///
+/// `k` outside `1..=MAX_HAMMING_K` is a caller bug: `validate_k` is the
+/// boundary check, this is a pure helper. Debug builds assert it; release
+/// builds clamp to the largest supported `k`, which *over*-estimates the slot
+/// count, so a bad value can neither panic on `1 << k` nor under-report.
 pub fn required_slots(num_bits: usize, k: usize) -> usize {
     if k <= 1 {
         return num_bits;
     }
+    debug_assert!(
+        k <= MAX_HAMMING_K,
+        "required_slots: k = {k} is out of range"
+    );
+    let k = k.min(MAX_HAMMING_K);
     let n = (1usize << k) - 1;
     let full_blocks = num_bits / k;
     let tail_bits = num_bits % k;
@@ -71,10 +81,18 @@ pub fn required_slots(num_bits: usize, k: usize) -> usize {
 }
 
 /// Calculate maximum payload capacity in bytes given `available_slots` and parameter `k`.
+///
+/// Clamped like [`required_slots`], so an out-of-range `k` under-estimates the
+/// capacity instead of overflowing the shift.
 pub fn max_payload_bytes(available_slots: usize, k: usize) -> usize {
     if k <= 1 {
         return available_slots / 8;
     }
+    debug_assert!(
+        k <= MAX_HAMMING_K,
+        "max_payload_bytes: k = {k} is out of range"
+    );
+    let k = k.min(MAX_HAMMING_K);
     let n = (1usize << k) - 1;
     let full_blocks = available_slots / n;
     let remaining_slots = available_slots % n;

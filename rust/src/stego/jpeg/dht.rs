@@ -178,11 +178,19 @@ fn parse_dht(mut payload: &[u8], ac_tables: &mut [Option<AcSymbolSet>; 4]) {
 }
 
 /// JPEG magnitude category: 0 for zero, otherwise the bit length of `|v|`.
+///
+/// The JPEG baseline range caps this at 15; `i16::MIN` is the one value whose
+/// bit length is 16 and whose low nibble would collide with the run bits of a
+/// `(run << 4) | category` symbol (0xN0 reads as ZRL). Real carriers never hold
+/// it -- the V3 legality rule bounds `|c|` by 1023 -- so the value only shows
+/// up in crafted files, and it is capped here rather than asserted: this is
+/// data-driven input, so a debug-only panic would be a denial of service on
+/// the debug builds the test suite runs on.
 pub fn category(v: i16) -> u8 {
     if v == 0 {
         0
     } else {
-        (16 - v.unsigned_abs().leading_zeros()) as u8
+        ((16 - v.unsigned_abs().leading_zeros()) as u8).min(15)
     }
 }
 
@@ -496,6 +504,15 @@ mod tests {
         assert_eq!(category(-1023), 10);
         // The V3 legality rule makes this unreachable in a written carrier.
         assert_eq!(category(1024), 11);
+    }
+
+    #[test]
+    fn category_caps_the_crafted_sixteen_bit_magnitude() {
+        // `i16::MIN` has bit length 16; the low nibble of `(run << 4) | 16`
+        // would read as ZRL, so the value is capped at the baseline maximum.
+        assert_eq!(category(i16::MIN), 15);
+        assert_eq!(category(-32767), 15);
+        assert_eq!(category(32767), 15);
     }
 
     #[test]

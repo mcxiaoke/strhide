@@ -436,8 +436,12 @@ pub fn embed_hevc(
                 let slice_rec = &slice_contexts[slice_idx];
                 let sub = &slice_rec.substreams[sub_idx];
                 let cover = &slice_rec.orig_rbsp[sub.rbsp_byte_start..sub.rbsp_byte_end];
-                let (replay, _) = encode_substream(slice_rec, sub, &[]);
-                replay_matches_cover(&replay, cover)
+                // A journal that cannot even be replayed without flips is not
+                // sound for flipping: treat it as a bad substream.
+                match encode_substream(slice_rec, sub, &[]) {
+                    Ok((replay, _)) => replay_matches_cover(&replay, cover),
+                    Err(_) => false,
+                }
             });
             if !ok && bad_substreams.insert((slice_idx, sub_idx)) {
                 unsound.push((slice_idx, sub_idx));
@@ -485,7 +489,17 @@ pub fn embed_hevc(
             for sub_idx in &substream_ids {
                 let sub = &slice_rec.substreams[*sub_idx];
                 let orig_sub_len = sub.rbsp_byte_end.saturating_sub(sub.rbsp_byte_start);
-                let (reencoded, sub_trace) = encode_substream(slice_rec, sub, &flipped_ops);
+                let (reencoded, sub_trace) = match encode_substream(slice_rec, sub, &flipped_ops) {
+                    Ok(pair) => pair,
+                    Err(_) => {
+                        // Journal/stream disagreement inside this substream:
+                        // drop it like a length mismatch instead of writing
+                        // a desynchronised re-encode.
+                        bad_substreams.insert((*slice_idx, *sub_idx));
+                        slice_ok = false;
+                        break;
+                    }
+                };
 
                 if reencoded.len() == orig_sub_len {
                     modified_rbsp[sub.rbsp_byte_start..sub.rbsp_byte_end]
@@ -635,7 +649,7 @@ fn encode_substream(
     slice: &SliceContext,
     sub: &SubstreamRecord,
     flipped_ops: &[bool],
-) -> (Vec<u8>, Vec<SlotBitTrace>) {
+) -> Result<(Vec<u8>, Vec<SlotBitTrace>), StrHideError> {
     let mut enc = CabacEncoder::new();
     let mut writer = BitWriter::new();
     let mut ctx_array = [ContextModel::init(154, 26); HEVC_CONTEXTS];
@@ -655,9 +669,16 @@ fn encode_substream(
         match *op {
             BinOp::Decision { ctx_idx, bit } => {
                 let idx = ctx_idx as usize;
-                if idx < HEVC_CONTEXTS {
-                    enc.encode_decision(&mut writer, &mut ctx_array[idx], bit);
-                }
+                // A context index outside the model array means the journal and
+                // this build disagree about the syntax. Skipping the bin would
+                // silently desynchronise the replay, so it is a hard error: the
+                // caller marks the substream unsupported.
+                let ctx = ctx_array.get_mut(idx).ok_or_else(|| {
+                    StrHideError::CorruptedData(format!(
+                        "CABAC context index {idx} is out of range (HEVC_CONTEXTS = {HEVC_CONTEXTS})"
+                    ))
+                })?;
+                enc.encode_decision(&mut writer, ctx, bit);
             }
             BinOp::Bypass { bit, slot_idx } => {
                 let out_bit = if flipped { bit ^ 1 } else { bit };
@@ -692,7 +713,7 @@ fn encode_substream(
         enc.encode_terminate(&mut writer, 1);
     }
     writer.align_zero();
-    (writer.finish(), trace)
+    Ok((writer.finish(), trace))
 }
 
 /// Is the journal replay byte-identical to the cover substream?
@@ -738,7 +759,10 @@ fn slot_positions(total: usize, count: usize) -> Vec<usize> {
         }
     }
     (0..count.min(total))
-        .map(|i| (i * stride) % total)
+        // `i * stride` overflows `usize` on 32-bit targets once a burst HEIC
+        // exposes a few billion slots; the modulus only needs the product's low
+        // bits, so the multiply runs in `u64`.
+        .map(|i| ((i as u64 * stride as u64) % total as u64) as usize)
         .collect()
 }
 

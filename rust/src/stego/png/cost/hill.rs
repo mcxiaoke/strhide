@@ -45,7 +45,9 @@ impl PngCostModel for HillCostModel {
         params: &PngParams,
     ) -> Vec<f64> {
         let (h, w) = (height, width);
-        if w == 0 || h == 0 || pixels.is_empty() {
+        // Same contract as S-UNIWARD: a caller that hands over a buffer shorter
+        // than `w * h * channels` gets an empty map instead of an index panic.
+        if w == 0 || h == 0 || pixels.is_empty() || pixels.len() < w * h * channels {
             return Vec::new();
         }
 
@@ -292,6 +294,17 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn short_buffers_are_rejected_without_panicking() {
+        // Same contract as S-UNIWARD: a buffer shorter than `w * h * channels`
+        // must yield an empty map, not an index panic on the last row.
+        let model = HillCostModel;
+        let params = PngParams::default();
+        let short = vec![128u8; 16 * 16 * 3 - 7];
+        assert!(model.compute_cost(&short, 16, 16, 3, &params).is_empty());
+        assert!(model.compute_cost(&short, 16, 16, 4, &params).is_empty());
     }
 
     #[test]
