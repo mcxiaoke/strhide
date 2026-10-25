@@ -15,6 +15,8 @@ pub mod error;
 #[doc(hidden)]
 pub mod heif_boxes;
 #[doc(hidden)]
+pub mod mp4_boxes;
+#[doc(hidden)]
 pub mod slot;
 #[doc(hidden)]
 pub mod sniff;

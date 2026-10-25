@@ -417,6 +417,18 @@ fn parse_hvcc_from_iprp<'a>(
         .map(|(_, _, payload)| *payload)
         .ok_or(HevcError::ContainerMalformed("missing hvcC property"))?;
 
+    parse_hvcc_record(hvcc)
+}
+
+/// Parse an `HEVCDecoderConfigurationRecord` (`hvcC` payload).
+///
+/// Shared by the HEIF property path (`iprp/ipco/hvcC`) and the MP4 sample
+/// entry path (`stsd/hvc1|hev1/hvcC`): both carry the exact same record, and
+/// two copies of this loop would be two places to get `numOfArrays` wrong.
+///
+/// Returns the VPS/SPS/PPS NAL units (no length prefixes) plus the NAL length
+/// prefix size used by the samples that reference this configuration.
+pub fn parse_hvcc_record(hvcc: &[u8]) -> Result<(Vec<&[u8]>, usize)> {
     if hvcc.len() < 23 {
         return Err(HevcError::Truncated);
     }
@@ -670,7 +682,7 @@ fn parse_iloc_extents(iloc: &[u8], target_ids: &[u32]) -> Result<Vec<(usize, usi
 
 /// Read a big-endian `u16` at `off`. Returns `None` if out of bounds.
 #[inline]
-fn be_u16(bytes: &[u8], off: usize) -> Option<u16> {
+pub(crate) fn be_u16(bytes: &[u8], off: usize) -> Option<u16> {
     let end = off.checked_add(2)?;
     if end > bytes.len() {
         return None;
@@ -680,7 +692,7 @@ fn be_u16(bytes: &[u8], off: usize) -> Option<u16> {
 
 /// Read a big-endian `u32` at `off`. Returns `None` if out of bounds.
 #[inline]
-fn be_u32(bytes: &[u8], off: usize) -> Option<u32> {
+pub(crate) fn be_u32(bytes: &[u8], off: usize) -> Option<u32> {
     let end = off.checked_add(4)?;
     if end > bytes.len() {
         return None;
@@ -695,7 +707,7 @@ fn be_u32(bytes: &[u8], off: usize) -> Option<u32> {
 
 /// Read a big-endian `u64` at `off`. Returns `None` if out of bounds.
 #[inline]
-fn be_u64(bytes: &[u8], off: usize) -> Option<u64> {
+pub(crate) fn be_u64(bytes: &[u8], off: usize) -> Option<u64> {
     let end = off.checked_add(8)?;
     if end > bytes.len() {
         return None;

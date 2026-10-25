@@ -16,8 +16,12 @@ use crate::stego::envelope::{Freshness, PUBLIC_DEFAULT_SECRET, derive_domain_sub
 use crate::stego::format::HevcFormatProfile;
 use crate::stego::hevc::bitstream::{compute_hevc_cover_digest, parse_annex_b_spans, rbsp_to_nal};
 use crate::stego::hevc::heif_boxes::parse_heif_targets;
+use crate::stego::hevc::mp4_boxes::parse_mp4_targets;
 use crate::stego::hevc::slot::{BinOp, CabacRecorder, StegoSlot, SubstreamRecord};
-use crate::stego::hevc::sniff::{HevcCarrierKind, NAL_SPS_NUT, sniff_hevc_carrier};
+use crate::stego::hevc::sniff::{
+    HevcCarrierKind, NAL_RADL_N, NAL_RASL_N, NAL_SPS_NUT, NAL_STSA_N, NAL_TRAIL_N, NAL_TSA_N,
+    sniff_hevc_carrier,
+};
 use crate::stego::{SafetyLevel, StegoCapacityInfo};
 use oxideav_h265::cabac::ContextModel;
 use oxideav_h265::encoder::bitwriter::BitWriter;
@@ -98,16 +102,6 @@ fn check_header_bytes(fmt: &HevcFormatProfile) -> Result<(), StrHideError> {
     Ok(())
 }
 
-/// MP4/MOV containers are recognised by the sniffer but not implemented
-/// (audit 2026-10-24 2.3): say so explicitly at every entry point instead of
-/// a generic failure from deep inside the pipeline.
-fn mp4_unsupported() -> StrHideError {
-    StrHideError::UnsupportedFormat(
-        "MP4/MOV HEVC carriers are not supported yet; remux to HEIF or a raw Annex-B bitstream"
-            .into(),
-    )
-}
-
 /// Where a flipped bypass bin landed in the codeword:
 /// `(global slot index, first affected RBSP byte, last affected RBSP byte)`.
 type SlotBitTrace = (usize, usize, usize);
@@ -121,14 +115,11 @@ type EpbConflict = (usize, Vec<SlotBitTrace>);
 /// `fmt` supplies the trellis geometry and header size the capacity is
 /// measured against, so a private dialect reports its own ceiling.
 pub fn probe_hevc_capacity(carrier: &[u8], fmt: &HevcFormatProfile) -> Result<usize, StrHideError> {
-    let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
+    sniff_hevc_carrier(carrier).ok_or_else(|| {
         StrHideError::UnsupportedFormat(
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
-    if kind == HevcCarrierKind::Mp4Container {
-        return Err(mp4_unsupported());
-    }
     let slots = scan_hevc_slots(carrier)?;
     let total_slots = slots.len();
     let trellis = StcTrellis::from_seed_grouped(CAPACITY_PROBE_SEED, fmt.stc_h, fmt.stc_u)?;
@@ -204,7 +195,20 @@ pub fn extract_hevc_dimensions(carrier: &[u8]) -> Result<(u32, u32), StrHideErro
             }
         }
         HevcCarrierKind::Mp4Container => {
-            return Err(mp4_unsupported());
+            let target = parse_mp4_targets(carrier).map_err(|e| {
+                StrHideError::UnsupportedFormat(format!("MP4/MOV parse error: {e}"))
+            })?;
+            // The sample entries carry no size of their own that can be
+            // trusted (they duplicate the SPS, and some writers leave them
+            // wrong); the `hvcC` SPS is the same one the decoder will use.
+            for ps in &target.parameter_sets {
+                if ps.len() > 2
+                    && (ps[0] >> 1) & 0x3F == NAL_SPS_NUT
+                    && let Some(dims) = sps_dimensions(&nal_rbsp(ps))
+                {
+                    return Ok(dims);
+                }
+            }
         }
     }
 
@@ -230,9 +234,6 @@ pub fn probe_hevc_capacity_info(
         HevcCarrierKind::AnnexBStream => "HEVC-AnnexB",
         HevcCarrierKind::Mp4Container => "MP4/HEVC",
     };
-    if kind == HevcCarrierKind::Mp4Container {
-        return Err(mp4_unsupported());
-    }
 
     let slots = scan_hevc_slots(carrier)?;
     let total_slots = slots.len();
@@ -308,9 +309,6 @@ pub fn embed_hevc(
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
-    if kind == HevcCarrierKind::Mp4Container {
-        return Err(mp4_unsupported());
-    }
 
     // 1. Scan and record all slices and substreams
     let record = record_carrier_state(carrier, kind)?;
@@ -801,9 +799,6 @@ pub fn extract_hevc(
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
-    if kind == HevcCarrierKind::Mp4Container {
-        return Err(mp4_unsupported());
-    }
 
     let record = record_carrier_state(carrier, kind)?;
     let all_slots = record.all_slots;
@@ -943,27 +938,38 @@ struct CarrierRecord {
 
 /// The already-parsed container pieces `derive_carrier_digest` needs.
 enum DigestInputs {
-    /// HEIF/HEIC: owned copies of the VPS/SPS/PPS NAL bytes.
-    Heif { parameter_sets: Vec<Vec<u8>> },
+    /// HEIF/HEIC and MP4/MOV: owned copies of the `hvcC` VPS/SPS/PPS NAL bytes.
+    ///
+    /// Both containers keep the parameter sets in a `hvcC` record that the
+    /// embedder never touches, so one digest recipe covers both.
+    ParameterSets { parameter_sets: Vec<Vec<u8>> },
     /// Annex-B: the NAL span table.
     AnnexB {
         spans: Vec<crate::stego::hevc::bitstream::HevcNalSpan>,
     },
 }
 
+/// One VCL NAL unit that may be recorded, in decode order.
+#[derive(Clone)]
+struct CandidateSlice {
+    /// File byte range of the NAL (header included, length prefix or start
+    /// code excluded) -- the exact range the re-encoder writes back.
+    span: std::ops::Range<usize>,
+    nal_type: u8,
+    layer_id: u8,
+    temporal_id: u8,
+}
+
 fn record_carrier_state(
     carrier: &[u8],
     kind: HevcCarrierKind,
 ) -> Result<CarrierRecord, StrHideError> {
-    let mut slice_contexts = Vec::new();
-    let mut all_slots = Vec::new();
-
     let mut decoder = Decoder::new();
     // First decode error, kept so a carrier that yields no slices can say why
     // instead of presenting as "0 bytes of capacity".
     let mut decode_error: Option<String> = None;
 
-    let digest_inputs = match kind {
+    let (candidates, digest_inputs) = match kind {
         HevcCarrierKind::HeifContainer => {
             let target = parse_heif_targets(carrier)
                 .map_err(|e| StrHideError::UnsupportedFormat(format!("HEIF parse error: {e}")))?;
@@ -972,57 +978,32 @@ fn record_carrier_state(
                     decode_error.get_or_insert_with(|| format!("parameter set: {e}"));
                 }
             }
-            let parameter_sets = target
-                .parameter_sets
-                .iter()
-                .map(|ps| ps.to_vec())
-                .collect::<Vec<Vec<u8>>>();
-
-            // `slice_idx` indexes `slice_contexts`, so it advances only when a
-            // slice is actually recorded. Using the enumeration index of
-            // `slice_spans` would desynchronise the two as soon as one slice
-            // fails to decode, and `slot.slice_idx` would then point at the
-            // wrong context (or out of bounds) during embedding.
-            let mut slice_idx = 0usize;
-            for span in target.slice_spans.iter() {
-                let range = span.start..span.end();
-                if range.end > carrier.len() {
-                    continue;
-                }
-                let slice_bytes = &carrier[range.clone()];
-                if slice_bytes.len() < 2 {
-                    continue;
-                }
-                let mut recorder = CabacRecorder::with_slice(slice_idx);
-                let decoded = decoder.decode_nal_with_observer(slice_bytes, &mut recorder);
-                drain_frames(&mut decoder);
-                match decoded {
-                    Err(e) => {
-                        decode_error.get_or_insert_with(|| e.to_string());
-                    }
-                    // A picture the decoder skipped (§8.1.3: RASL with no
-                    // leading IRAP, or a non-VCL NAL) records nothing and must
-                    // not consume a slice index.
-                    Ok(_) if recorder.substreams.is_empty() => {}
-                    Ok(_) => {
-                        let rbsp = nal_rbsp(slice_bytes);
-                        let slot_map = absorb_recorder(&mut recorder, &rbsp, &mut all_slots);
-                        let (nal_type, layer_id, temporal_id) = nal_header_fields(slice_bytes);
-                        slice_contexts.push(SliceContext {
-                            carrier_span: range,
-                            nal_type,
-                            layer_id,
-                            temporal_id,
-                            orig_rbsp: rbsp,
-                            ops: recorder.ops,
-                            substreams: recorder.substreams,
-                            slot_map,
-                        });
-                        slice_idx += 1;
-                    }
+            let parameter_sets = owned_parameter_sets(&target.parameter_sets);
+            let mut candidates = Vec::with_capacity(target.slice_spans.len());
+            for span in &target.slice_spans {
+                if let Some(cand) = candidate_slice(carrier, span.start..span.end()) {
+                    candidates.push(cand);
                 }
             }
-            DigestInputs::Heif { parameter_sets }
+            (candidates, DigestInputs::ParameterSets { parameter_sets })
+        }
+        HevcCarrierKind::Mp4Container => {
+            let target = parse_mp4_targets(carrier).map_err(|e| {
+                StrHideError::UnsupportedFormat(format!("MP4/MOV parse error: {e}"))
+            })?;
+            for ps in &target.parameter_sets {
+                if let Err(e) = decoder.push_nal(ps, None) {
+                    decode_error.get_or_insert_with(|| format!("parameter set: {e}"));
+                }
+            }
+            let parameter_sets = owned_parameter_sets(&target.parameter_sets);
+            let mut candidates = Vec::with_capacity(target.slice_spans.len());
+            for span in &target.slice_spans {
+                if let Some(cand) = candidate_slice(carrier, span.start..span.end()) {
+                    candidates.push(cand);
+                }
+            }
+            (candidates, DigestInputs::ParameterSets { parameter_sets })
         }
         HevcCarrierKind::AnnexBStream => {
             let spans = parse_annex_b_spans(carrier);
@@ -1034,52 +1015,76 @@ fn record_carrier_state(
                     }
                 }
             }
-
-            let mut slice_idx = 0;
+            let mut candidates = Vec::new();
             for span in &spans {
-                if span.is_vcl() {
-                    let end = span.end_offset().min(carrier.len());
-                    let range = span.header_offset..end;
-                    let slice_bytes = &carrier[range.clone()];
-                    if slice_bytes.len() < 2 {
-                        continue;
-                    }
-                    let mut recorder = CabacRecorder::with_slice(slice_idx);
-                    let decoded = decoder.decode_nal_with_observer(slice_bytes, &mut recorder);
-                    drain_frames(&mut decoder);
-                    match decoded {
-                        Err(e) => {
-                            decode_error.get_or_insert_with(|| e.to_string());
-                        }
-                        Ok(_) if recorder.substreams.is_empty() => {}
-                        Ok(_) => {
-                            let rbsp = nal_rbsp(slice_bytes);
-                            let slot_map = absorb_recorder(&mut recorder, &rbsp, &mut all_slots);
-                            slice_contexts.push(SliceContext {
-                                carrier_span: range,
-                                nal_type: span.nal_type,
-                                layer_id: span.layer_id,
-                                temporal_id: span.temporal_id,
-                                orig_rbsp: rbsp,
-                                ops: recorder.ops,
-                                substreams: recorder.substreams,
-                                slot_map,
-                            });
-                            slice_idx += 1;
-                        }
-                    }
+                if !span.is_vcl() {
+                    continue;
+                }
+                let range = span.header_offset..span.end_offset().min(carrier.len());
+                if let Some(cand) = candidate_slice(carrier, range) {
+                    candidates.push(cand);
                 }
             }
-            DigestInputs::AnnexB {
-                spans: spans.clone(),
-            }
-        }
-        _ => {
-            return Err(StrHideError::UnsupportedFormat(
-                "Carrier format not supported yet for HEVC stego".into(),
-            ));
+            (candidates, DigestInputs::AnnexB { spans })
         }
     };
+
+    // The gate decides which slices *contribute slots*; it must never decide
+    // which slices the decoder *sees*. A P/B picture needs its reference
+    // pictures in the DPB, and the decoder skips everything until it meets an
+    // IRAP ("stream does not start with an IRAP", H.265 8.1.3) -- feeding only
+    // the non-reference pictures therefore yields exactly zero recordings.
+    // Every candidate is pushed in decode order; unselected ones go through the
+    // plain path with no observer attached.
+    let has_non_reference = candidates.iter().any(|c| is_non_reference_vcl(c.nal_type));
+
+    let mut slice_contexts = Vec::new();
+    let mut all_slots = Vec::new();
+
+    // `slice_idx` indexes `slice_contexts`, so it advances only when a slice is
+    // actually recorded. Using the enumeration index of the candidate list
+    // would desynchronise the two as soon as one slice fails to decode, and
+    // `slot.slice_idx` would then point at the wrong context during embedding.
+    let mut slice_idx = 0usize;
+    for cand in &candidates {
+        let slice_bytes = &carrier[cand.span.clone()];
+        if slice_bytes.len() < 2 {
+            continue;
+        }
+        if !selectable(cand.nal_type, has_non_reference) {
+            if let Err(e) = decoder.push_nal(slice_bytes, None) {
+                decode_error.get_or_insert_with(|| e.to_string());
+            }
+            drain_frames(&mut decoder);
+            continue;
+        }
+        let mut recorder = CabacRecorder::with_slice(slice_idx);
+        let decoded = decoder.decode_nal_with_observer(slice_bytes, &mut recorder);
+        drain_frames(&mut decoder);
+        match decoded {
+            Err(e) => {
+                decode_error.get_or_insert_with(|| e.to_string());
+            }
+            // A picture the decoder skipped (H.265 8.1.3: RASL with no leading
+            // IRAP) records nothing and must not consume a slice index.
+            Ok(_) if recorder.substreams.is_empty() => {}
+            Ok(_) => {
+                let rbsp = nal_rbsp(slice_bytes);
+                let slot_map = absorb_recorder(&mut recorder, &rbsp, &mut all_slots);
+                slice_contexts.push(SliceContext {
+                    carrier_span: cand.span.clone(),
+                    nal_type: cand.nal_type,
+                    layer_id: cand.layer_id,
+                    temporal_id: cand.temporal_id,
+                    orig_rbsp: rbsp,
+                    ops: recorder.ops,
+                    substreams: recorder.substreams,
+                    slot_map,
+                });
+                slice_idx += 1;
+            }
+        }
+    }
 
     // A carrier the decoder refused outright (Range Extensions, >10-bit, a
     // truncated stream) would otherwise surface as "0 bytes of capacity" --
@@ -1098,6 +1103,66 @@ fn record_carrier_state(
         all_slots,
         digest_inputs,
     })
+}
+
+fn owned_parameter_sets(parameter_sets: &[&[u8]]) -> Vec<Vec<u8>> {
+    parameter_sets.iter().map(|ps| ps.to_vec()).collect()
+}
+
+/// Wrap one candidate span, reading its NAL header fields (H.265 7.3.1.2).
+///
+/// Returns `None` for a span too short to hold a header, for a set
+/// `forbidden_zero_bit`, or for `temporal_id_plus1 == 0` (invalid per spec and
+/// the same rule the Annex-B parser applies).
+fn candidate_slice(carrier: &[u8], span: std::ops::Range<usize>) -> Option<CandidateSlice> {
+    let nal = carrier.get(span.clone())?;
+    if nal.len() < 2 {
+        return None;
+    }
+    let b0 = nal[0];
+    let b1 = nal[1];
+    if (b0 & 0x80) != 0 || (b1 & 0x07) == 0 {
+        return None;
+    }
+    let (nal_type, layer_id, temporal_id) = nal_header_fields(nal);
+    Some(CandidateSlice {
+        span,
+        nal_type,
+        layer_id,
+        temporal_id,
+    })
+}
+
+/// Non-reference VCL NAL types (H.265 Table 7-1, even values in 0..=8).
+///
+/// A picture of one of these types is not added to the decoded picture buffer,
+/// so no later picture predicts from it: flipping its coefficients cannot drift
+/// into the rest of the video.
+fn is_non_reference_vcl(nal_type: u8) -> bool {
+    matches!(
+        nal_type,
+        NAL_TRAIL_N | NAL_TSA_N | NAL_STSA_N | NAL_RADL_N | NAL_RASL_N
+    )
+}
+
+/// Two-tier deterministic frame-type gate.
+///
+/// * **Tier A** -- the stream contains at least one non-reference picture
+///   (`TRAIL_N`/`TSA_N`/`STSA_N`/`RADL_N`/`RASL_N`): record **only** those.
+///   They never enter the DPB, so the embedding provably cannot drift into a
+///   later frame. iPhone MP4 and MOV recordings land here (~50% of pictures).
+/// * **Tier B** -- the stream has no non-reference picture at all: record every
+///   VCL NAL. This is the still-image case (HEIC, a single-IDR stream: all IRAP,
+///   nothing predicts forwards in a meaningful way), and the all-`TRAIL_R`
+///   case some Android hardware encoders emit, where Tier A would leave 0
+///   slots. The magnitude-aware cost model bounds each flip; measured drift
+///   over 78 frames at 2 KiB stays at PSNR 39-40 dB with no accumulation.
+///
+/// The choice depends only on the sequence of `nal_unit_type` values, which
+/// embedding never changes (sign flips live inside the CABAC payload), so both
+/// ends derive the same slot pool and the wire header carries no flag.
+fn selectable(nal_type: u8, has_non_reference: bool) -> bool {
+    !has_non_reference || is_non_reference_vcl(nal_type)
 }
 
 /// Drop every decoded picture the decoder has queued.
@@ -1198,7 +1263,7 @@ fn derive_carrier_digest(
     fmt: &HevcFormatProfile,
 ) -> [u8; 32] {
     match inputs {
-        DigestInputs::Heif { parameter_sets } => {
+        DigestInputs::ParameterSets { parameter_sets } => {
             // Hash the parameter set *contents*. They are immutable during
             // embedding, which is what makes the digest — and therefore
             // the AES key and the keyed trellis seed — identical on both
@@ -1263,6 +1328,7 @@ fn derive_hevc_key(
 mod dialect_tests {
     use super::*;
     use crate::stego::format::DEFAULT_HEVC_FORMAT;
+    use crate::stego::hevc::sniff::{NAL_IDR_W_RADL, NAL_TRAIL_R};
 
     /// The literals below are pinned to `docs/api/WIRE_SPEC.md` §13.11.2. The
     /// spec is the only reproduction recipe a private build has; if an
@@ -1321,5 +1387,38 @@ mod dialect_tests {
         let k_none = derive_hevc_key(Some("pw"), None, &digest, fmt);
         let k_domain = derive_hevc_key(Some("pw"), Some("org.acme"), &digest, fmt);
         assert_ne!(k_none, k_domain);
+    }
+
+    /// The gate keeps only non-reference pictures when the stream has any, and
+    /// keeps everything when it has none -- the still-image case and the
+    /// all-reference case, where Tier A would leave no capacity at all.
+    #[test]
+    fn gate_is_two_tier_and_stateless() {
+        // Tier A: a stream that has non-reference pictures records only those.
+        assert!(selectable(NAL_TRAIL_N, true));
+        assert!(selectable(NAL_TSA_N, true));
+        assert!(selectable(NAL_RASL_N, true));
+        assert!(!selectable(NAL_TRAIL_R, true));
+        // IDR_W_RADL is a reference picture: dropped too, even though it is an
+        // IRAP, because the stream does hold non-reference pictures to use.
+        assert!(!selectable(NAL_IDR_W_RADL, true));
+
+        // Tier B: no non-reference picture anywhere -> record everything. That
+        // is the still-image case (all IRAP) and the all-`TRAIL_R` case some
+        // Android encoders emit, where Tier A would leave no capacity at all.
+        assert!(selectable(NAL_TRAIL_R, false));
+        assert!(selectable(NAL_IDR_W_RADL, false));
+        assert!(selectable(NAL_TRAIL_N, false));
+    }
+
+    #[test]
+    fn non_reference_types_are_the_even_vcl_range() {
+        for t in 0u8..=9 {
+            assert_eq!(is_non_reference_vcl(t), t % 2 == 0, "nal_type {t}");
+        }
+        // 16..=21 (BLA/IDR/CRA) are all reference pictures.
+        for t in 16u8..=21 {
+            assert!(!is_non_reference_vcl(t), "nal_type {t} is an IRAP");
+        }
     }
 }

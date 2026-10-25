@@ -159,6 +159,17 @@ pub fn embed_carrier_with_profile(
                 Err(_) => heif::embed_heif_bridge(carrier_bytes, payload, options, profile),
             }
         }
+    } else if hevc::sniff::is_mp4_bytes(carrier_bytes) {
+        // MP4/MOV video container: Scheme C on the sample table. Byte length is
+        // preserved (Delta = 0), so `stsz`/`stco`/`co64` stay valid untouched.
+        hevc::embed_hevc(
+            carrier_bytes,
+            payload,
+            secret,
+            domain,
+            profile.hevc_format(),
+            options.freshness,
+        )
     } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {
         // Raw Annex-B HEVC bitstream
         hevc::embed_hevc(
@@ -171,7 +182,8 @@ pub fn embed_carrier_with_profile(
         )
     } else {
         Err(StrHideError::UnsupportedFormat(
-            "Content-adaptive steganography requires a PNG, JPEG, HEIF, or HEVC carrier".into(),
+            "Content-adaptive steganography requires a PNG, JPEG, HEIF/HEIC, or HEVC carrier (Annex-B or MP4/MOV)"
+                .into(),
         ))
     }
 }
@@ -258,12 +270,16 @@ pub fn extract_carrier_with_profile(
                 }
             }
         }
+    } else if hevc::sniff::is_mp4_bytes(carrier_bytes) {
+        // MP4/MOV video container
+        hevc::extract_hevc(carrier_bytes, secret, domain, profile.hevc_format())
     } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {
         // Raw Annex-B HEVC bitstream
         hevc::extract_hevc(carrier_bytes, secret, domain, profile.hevc_format())
     } else {
         Err(StrHideError::UnsupportedFormat(
-            "Content-adaptive steganography requires a PNG, JPEG, HEIF, or HEVC carrier".into(),
+            "Content-adaptive steganography requires a PNG, JPEG, HEIF/HEIC, or HEVC carrier (Annex-B or MP4/MOV)"
+                .into(),
         ))
     }
 }
@@ -432,11 +448,15 @@ pub fn probe_carrier_capacity_with_profile(
                 Err(_) => heif::probe_heif_bridge_capacity(carrier_bytes, options, profile),
             }
         }
-    } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {
+    } else if hevc::sniff::is_mp4_bytes(carrier_bytes) || hevc::sniff::is_hevc_annexb(carrier_bytes)
+    {
+        // MP4/MOV video container, or a raw Annex-B bitstream: one entry point,
+        // the container decides where the slice NALs live.
         hevc::probe_hevc_capacity_info(carrier_bytes, profile.hevc_format(), options.safety.level)
     } else {
         Err(StrHideError::UnsupportedFormat(
-            "Content-adaptive steganography requires a PNG, JPEG, HEIF, or HEVC carrier".into(),
+            "Content-adaptive steganography requires a PNG, JPEG, HEIF/HEIC, or HEVC carrier (Annex-B or MP4/MOV)"
+                .into(),
         ))
     }
 }

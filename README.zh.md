@@ -21,7 +21,7 @@
 - **默认安全**——完整性/签名拒绝检查会拒绝修改不宜触碰的文件（如签名二进制）；`write`、`restore` 与 `embed` 默认输出至 `<stem>-out.<ext>` 新文件，原始宿主 100% 保持干净；提供显式 `--in-place` 选项进行原地修改（自动创建 `.bak` 备份）；`read`、`extract`、`write` 和 `restore` 默认拒绝覆盖已存在的输出文件（需 `--overwrite` 才允许）；保留原始文件时间戳。
 - **TOML 配置**——`./strhide.toml` 或 `~/.strhide/config.toml` 提供默认值，显式命令行参数（`-c, --config`）始终优先（详见注解模板 [`strhide.sample.toml`](strhide.sample.toml)）。
 - **批量与递归载体**——`write`、`restore`、`scan`、`inspect`、`verify`、`embed` 均支持一次处理多个文件或目录递归扫描（`-r, --recursive`）；`read` 针对单个载体。
-- **内容自适应隐写（HILL、UERD 与 Scheme C）**——`embed` 与 `extract` 命令直接在图像像素（PNG，按 HILL 成本模型选位）、DCT 频域系数（JPEG，通过 UERD 成本模型）或 H.265/HEVC 变换系数旁路符号位（HEIF/HEIC 与 HEVC Annex-B 视频，Scheme C）中嵌入数据。与结构层注入不同，内容隐写修改的是最小失真纹理区，可抵御重封包与元数据剥离清洗。HEIF/HEIC 与 HEVC 隐写达成零字节膨胀（$\Delta = 0$）与标准句法合规，并内建 EPB 竞争防护。PNG 像素写入采用**三元 ±1 匹配**：修改被约束在像素所在的八值类内（`val & 0xF8`），因此概率质量会跨值对边界流动，而不是把每个值对压平——后者正是卡方/SPA 检测器攻击的目标。实测：本仓库语料满容量嵌入后自检分数由 50/100（SUSPICIOUS，RS+SPA）降到 25/100（LOW，仅 SPA）。
+- **内容自适应隐写（HILL、UERD 与 Scheme C）**——`embed` 与 `extract` 命令直接在图像像素（PNG，按 HILL 成本模型选位）、DCT 频域系数（JPEG，通过 UERD 成本模型）或 H.265/HEVC 变换系数旁路符号位（HEIF/HEIC、HEVC Annex-B 裸流与 MP4/MOV 视频，Scheme C）中嵌入数据。与结构层注入不同，内容隐写修改的是最小失真纹理区，可抵御重封包与元数据剥离清洗。HEIF/HEIC 与 HEVC 隐写达成零字节膨胀（$\Delta = 0$）与标准句法合规，并内建 EPB 竞争防护。PNG 像素写入采用**三元 ±1 匹配**：修改被约束在像素所在的八值类内（`val & 0xF8`），因此概率质量会跨值对边界流动，而不是把每个值对压平——后者正是卡方/SPA 检测器攻击的目标。实测：本仓库语料满容量嵌入后自检分数由 50/100（SUSPICIOUS，RS+SPA）降到 25/100（LOW，仅 SPA）。
 
 ## 安装
 
@@ -100,7 +100,7 @@ strhide restore photo.png --in-place
 strhide embed photo.png --capacity
 strhide embed photo.heic --capacity
 
-# 将文本或文件嵌入复杂高频纹理中（PNG 默认 HILL，JPEG 默认 UERD，HEIF/HEIC/HEVC 默认 Scheme C）
+# 将文本或文件嵌入复杂高频纹理中（PNG 默认 HILL，JPEG 默认 UERD，HEIF/HEIC/HEVC/MP4 默认 Scheme C）
 strhide embed photo.png -t "机密信息" -p "P@ss123" -o stego.png
 strhide embed cover.jpg -d secret.zip -p "P@ss123" --in-place
 strhide embed photo.heic -t "机密信息" -p "P@ss123" -o stego.heic
@@ -186,9 +186,9 @@ assert_eq!(payload, b"secret");
 | --- | --- | --- | --- |
 | 空间域 | PNG（RGB/RGBA/灰度） | **HILL**（默认）或 **S-UNIWARD** + 非对称 ±1 | 最小失真 KB 高通 + 双级均值平滑；三元 ±1 写入且不离开像素的八值类，成本图按 `val & 0xF8` 掩码。重编码采用 Rayon 并行 + SIMD `zlib-rs`，大图耗时提速 10.5 倍 |
 | DCT 频域 | JPEG / JPG（基线编码） | **UERD**（默认）或 **J-UNIWARD** + 三元 STC（V3） | 全图 AC 位置固定网格、真三元 `±1` 回写、44 字节超块，通过 `dct-io` 实现无损重编 |
-| CABAC 旁路域 | HEIF / HEIC、HEVC Annex-B | **H.265 CABAC 旁路符号位 + STC（Scheme C）** | 调制高频变换系数的旁路符号位并避让 EPB 防竞争字节；零文件尺寸膨胀（$\Delta = 0$），严格符合 H.265 标准句法，视觉失真极小 |
+| CABAC 旁路域 | HEIF / HEIC、HEVC Annex-B、MP4 / MOV（HEVC） | **H.265 CABAC 旁路符号位 + STC（Scheme C）** | 调制高频变换系数的旁路符号位并避让 EPB 防竞争字节；零文件尺寸膨胀（$\Delta = 0$），严格符合 H.265 标准句法，视觉失真极小 |
 
-*HEIF/HEIC 与 HEVC：CABAC 旁路符号位隐写（Scheme C）*：针对 H.265/HEVC 变换系数的符号位（`coeff_sign_flag`）进行调制。由于符号位在 CABAC 中采用旁路编码（Bypass 模式，等概率单 bit，不更新上下文状态转移概率），调制合法符号位在保持极低人眼感知失真的同时，完全不影响前后宏块的算术解码状态机。系统通过 `CabacObserver` 挂载至 H.265 解码管道提取合法槽位并进行 EPB（防竞争字节 `0x000003`）冲突避让，经由 STC 校验格码嵌入加密 UBE 载荷，文件尺寸精确保持零膨胀（$\Delta = 0$）。原生支持单图 HEIC、网格连拍图集以及 Annex-B 裸视频码流。
+*HEIF/HEIC 与 HEVC：CABAC 旁路符号位隐写（Scheme C）*：针对 H.265/HEVC 变换系数的符号位（`coeff_sign_flag`）进行调制。由于符号位在 CABAC 中采用旁路编码（Bypass 模式，等概率单 bit，不更新上下文状态转移概率），调制合法符号位在保持极低人眼感知失真的同时，完全不影响前后宏块的算术解码状态机。系统通过 `CabacObserver` 挂载至 H.265 解码管道提取合法槽位并进行 EPB（防竞争字节 `0x000003`）冲突避让，经由 STC 校验格码嵌入加密 UBE 载荷，文件尺寸精确保持零膨胀（$\Delta = 0$）。原生支持单图 HEIC、网格连拍图集、Annex-B 裸视频码流，以及 MP4/MOV 容器（按样本表定位切片、`hvcC` 提供参数集）。视频载体默认只使用非参考帧，翻转的系数不会向后继帧传播（详见下节）。
 
 *安全拦截防护*：APNG 动图（`acTL`）、调色板索引图（`PLTE`）、隔行扫描图（Adam7）与渐进式 JPEG（SOF2）会被自动检测并优雅拦截，保护原图功能与外观不受破坏。
 

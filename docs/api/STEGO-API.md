@@ -24,7 +24,7 @@
 ## 2. 统一入口与凭据优先级
 
 ```rust
-// 推荐入口（自动格式嗅探：PNG / JPEG / HEIF / HEVC Annex-B）
+// 推荐入口（自动格式嗅探：PNG / JPEG / HEIF / HEVC Annex-B / MP4·MOV）
 stego::embed_carrier(carrier_bytes, payload, &options)                       // 官方方言
 stego::embed_carrier_with_profile(carrier_bytes, payload, &options, &profile) // 私有方言
 stego::extract_carrier[_with_profile](carrier_bytes, &options[, &profile])

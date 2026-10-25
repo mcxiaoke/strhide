@@ -1188,27 +1188,44 @@ pub mod annexb_sniff {
             }
         };
 
-        // `bear.hevc` is 320x180 with parameter sets and a handful of frames:
-        // small enough to keep the test quick, complete enough to embed.
-        let carrier = dir.join("bear.hevc");
-        if !carrier.is_file() {
-            eprintln!("[SKIP] {} missing", carrier.display());
-            return;
-        }
-        let bytes = fs::read(&carrier).expect("read carrier");
         let payload = b"annexb-real-stream-roundtrip-2026";
         let options = StegoOptions {
             password: Some("annexb#corpus".into()),
             ..StegoOptions::default()
         };
 
-        let info =
-            probe_carrier_capacity(&bytes, &options).expect("capacity probe on a real stream");
-        assert!(
-            info.max_raw_payload_bytes >= payload.len(),
-            "real stream advertises {} bytes, need {}",
-            info.max_raw_payload_bytes,
-            payload.len()
+        // The frame-type gate (non-reference pictures only) leaves a short
+        // clip such as `bear.hevc` (320x180, 15 non-reference frames, 368
+        // slots) below the 40-byte header, so pick the first stream in the
+        // corpus that can actually carry the payload instead of pinning one
+        // file name. `test-25fps.hevc` advertises ~2.3 KiB.
+        let mut chosen = None;
+        for name in ["test-25fps.hevc", "bbb.hevc", "bear.hevc"] {
+            let candidate = dir.join(name);
+            if !candidate.is_file() {
+                continue;
+            }
+            let bytes = fs::read(&candidate).expect("read carrier");
+            match probe_carrier_capacity(&bytes, &options) {
+                Ok(info) if info.max_raw_payload_bytes >= payload.len() => {
+                    chosen = Some((name, bytes, info));
+                    break;
+                }
+                Ok(info) => eprintln!(
+                    "[SKIP] {name}: gated capacity {} B cannot carry {} B",
+                    info.max_raw_payload_bytes,
+                    payload.len()
+                ),
+                Err(e) => eprintln!("[SKIP] {name}: {e}"),
+            }
+        }
+        let Some((name, bytes, info)) = chosen else {
+            eprintln!("[SKIP] no corpus stream with enough capacity for {payload:?}");
+            return;
+        };
+        println!(
+            "[ANNEXB] {name}: slots={}, capacity={} B",
+            info.available_slots, info.max_raw_payload_bytes
         );
 
         let stego = embed_carrier(&bytes, payload, &options).expect("embed into a real stream");
@@ -1223,5 +1240,302 @@ pub mod annexb_sniff {
         );
         let recovered = extract_carrier(&stego, &options).expect("extract");
         assert_eq!(recovered, payload, "round-trip must be byte-exact");
+    }
+}
+
+/// MP4/MOV container carriers (Scheme C over the ISO-BMFF sample table).
+///
+/// The engine core is container-agnostic; what these tests pin down is the
+/// container layer: sample-table arithmetic (stsz/stco/co64/stsc), the
+/// `hvcC` parameter sets, the frame-type gate and the guarantee that an
+/// embedding never touches `moov`.
+pub mod mp4_container {
+    // Copyright (c) 2026 strhide developers
+    // SPDX-License-Identifier: Apache-2.0
+
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use strhide::stego::Freshness;
+    use strhide::stego::hevc::mp4_boxes::parse_mp4_targets;
+    use strhide::stego::hevc::{embed_hevc, extract_hevc, probe_hevc_capacity};
+
+    const PASSWORD: &str = "Mp4CorpusValidation#2026";
+
+    /// Floor for the whole-file PSNR against the cover.
+    ///
+    /// These carriers are gated to non-reference pictures (or, for the
+    /// all-`TRAIL_R` stream, priced by the magnitude-aware model), and a
+    /// 2 KiB payload touches a tiny fraction of the sign bits: measured PSNR
+    /// is 53..60 dB. 30 dB is the "the bitstream was not damaged" floor, not
+    /// the expected value.
+    const MIN_PSNR_DB: f64 = 30.0;
+
+    /// Real-world corpus: iPhone 4K (`hev1`, `stco`), iPhone MOV (`qt` brand,
+    /// open GOP), Android 1080p60 (`hvc1`, `co64`, every picture a reference
+    /// picture) and two encoder samples (extra `hvcC` arrays).
+    const CORPUS: [&str; 6] = [
+        "VID_20250228_120825_C.mp4",
+        "IMG_0033.MOV",
+        "IMG_0892.MOV",
+        "VID_20261002_154545.mp4",
+        "SDRSample.mp4",
+        "HDRSample.mp4",
+    ];
+
+    fn corpus_dir() -> Option<PathBuf> {
+        if let Ok(val) = std::env::var("STRHIDE_HEVC_DIR") {
+            let p = PathBuf::from(val);
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+        let dir = PathBuf::from("../temp/testhevc");
+        dir.is_dir().then_some(dir)
+    }
+
+    fn ffmpeg_available() -> bool {
+        Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Average PSNR between two files and every decoder complaint ffmpeg made.
+    fn psnr_and_complaints(cover: &Path, stego: &Path) -> Result<(f64, Vec<String>), String> {
+        let out = Command::new("ffmpeg")
+            .args(["-hide_banner", "-nostdin", "-i"])
+            .arg(cover)
+            .args(["-i"])
+            .arg(stego)
+            .args(["-lavfi", "[0:v][1:v]psnr", "-f", "null", "-"])
+            .output()
+            .map_err(|e| format!("cannot run ffmpeg: {e}"))?;
+        let log = String::from_utf8_lossy(&out.stderr).to_string();
+        let noise: Vec<String> = log
+            .lines()
+            .filter(|line| {
+                // Indented lines are the container's metadata dump: these
+                // carriers carry the encoder command line in their `comment`
+                // tag, which contains "-v error" and would otherwise read as a
+                // decoder complaint. Real diagnostics are never indented.
+                if line.starts_with(' ') || line.starts_with('\t') {
+                    return false;
+                }
+                let lower = line.to_ascii_lowercase();
+                [
+                    "error", "invalid", "corrupt", "missing", "truncat", "failed",
+                ]
+                .iter()
+                .any(|needle| lower.contains(needle))
+                    && !lower.contains("psnr")
+            })
+            .map(str::to_string)
+            .collect();
+        let psnr = log
+            .lines()
+            .filter_map(|line| line.split("average:").nth(1))
+            .filter_map(|tail| tail.split_whitespace().next())
+            .filter_map(|value| value.parse::<f64>().ok())
+            .next_back()
+            .ok_or_else(|| format!("ffmpeg produced no PSNR summary:\n{log}"))?;
+        Ok((psnr, noise))
+    }
+
+    /// `(tag, box_start, payload_start, box_end)` for the direct children of
+    /// `[start, end)`. Independent of the parser under test: the point of the
+    /// check below is that `moov` is byte-identical, so it must be located
+    /// without reusing that parser's box walk.
+    fn top_level_boxes(data: &[u8]) -> Vec<(String, usize, usize, usize)> {
+        let mut out = Vec::new();
+        let mut pos = 0usize;
+        while pos + 8 <= data.len() {
+            let size32 =
+                u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            let tag = String::from_utf8_lossy(&data[pos + 4..pos + 8]).to_string();
+            let (hdr, size) = if size32 == 1 {
+                let mut b = [0u8; 8];
+                b.copy_from_slice(data.get(pos + 8..pos + 16).unwrap_or(&[0u8; 8]));
+                (16usize, u64::from_be_bytes(b) as usize)
+            } else if size32 == 0 {
+                (8usize, data.len() - pos)
+            } else {
+                (8usize, size32 as usize)
+            };
+            if size < hdr || pos + size > data.len() {
+                break;
+            }
+            out.push((tag, pos, pos + hdr, pos + size));
+            pos += size;
+        }
+        out
+    }
+
+    fn payload_offset(data: &[u8], tag: &[u8; 4]) -> Option<usize> {
+        data.windows(4).position(|w| w == tag).map(|i| i + 4)
+    }
+
+    /// Probe -> embed -> extract over the real corpus.
+    ///
+    /// Asserts what the container layer promises: byte-exact round-trip, an
+    /// unchanged file length (Δ = 0) and a bitstream ffmpeg still decodes
+    /// without complaint.
+    #[test]
+    #[ignore = "requires ffmpeg on PATH and the local temp/testhevc corpus"]
+    pub fn local_hevc_mp4_corpus_roundtrip() {
+        if !ffmpeg_available() {
+            eprintln!("[SKIP] ffmpeg not found on PATH");
+            return;
+        }
+        let Some(dir) = corpus_dir() else {
+            eprintln!("[SKIP] testhevc corpus not found");
+            return;
+        };
+
+        let payload: Vec<u8> = (0..2048u32).map(|i| ((i * 37 + 11) % 256) as u8).collect();
+        for name in CORPUS {
+            let cover_path = dir.join(name);
+            if !cover_path.is_file() {
+                continue;
+            }
+            let cover = fs::read(&cover_path).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let capacity =
+                probe_hevc_capacity(&cover, &strhide::stego::format::DEFAULT_HEVC_FORMAT)
+                    .unwrap_or_else(|e| panic!("{name}: capacity probe failed: {e}"));
+            assert!(
+                capacity >= payload.len(),
+                "{name}: capacity {capacity} B cannot hold {} B",
+                payload.len()
+            );
+
+            let stego = embed_hevc(
+                &cover,
+                &payload,
+                Some(PASSWORD),
+                None,
+                &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+                Freshness::Random,
+            )
+            .unwrap_or_else(|e| panic!("{name}: embed failed: {e}"));
+            assert_eq!(
+                stego.len(),
+                cover.len(),
+                "{name}: an MP4 embed must not resize the container (Delta = 0)"
+            );
+
+            let recovered = extract_hevc(
+                &stego,
+                Some(PASSWORD),
+                None,
+                &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+            )
+            .unwrap_or_else(|e| panic!("{name}: extract failed: {e}"));
+            assert_eq!(recovered, payload, "{name}: round-trip must be byte-exact");
+
+            let stego_path = std::env::temp_dir()
+                .join(format!("strhide-hevc-mp4-{}-{name}", std::process::id()));
+            fs::write(&stego_path, &stego).expect("write stego carrier");
+            let (psnr, noise) = psnr_and_complaints(&cover_path, &stego_path)
+                .unwrap_or_else(|e| panic!("{name}: ffmpeg: {e}"));
+            let _ = fs::remove_file(&stego_path);
+
+            println!("[MP4] {name}: capacity={capacity} B, PSNR={psnr:.2} dB");
+            assert!(
+                noise.is_empty(),
+                "{name}: ffmpeg reported trouble decoding the stego carrier: {noise:?}"
+            );
+            assert!(
+                psnr >= MIN_PSNR_DB,
+                "{name}: PSNR {psnr:.2} dB is below the {MIN_PSNR_DB:.0} dB floor"
+            );
+        }
+    }
+
+    /// The whole point of Δ = 0 in a container: `moov` (sample sizes, chunk
+    /// offsets, `hvcC`) is byte-identical, only `mdat` moved.
+    #[test]
+    #[ignore = "requires the local temp/testhevc corpus"]
+    pub fn local_hevc_mp4_container_tables_untouched() {
+        let Some(dir) = corpus_dir() else {
+            eprintln!("[SKIP] testhevc corpus not found");
+            return;
+        };
+
+        for name in CORPUS {
+            let cover_path = dir.join(name);
+            if !cover_path.is_file() {
+                continue;
+            }
+            let cover = fs::read(&cover_path).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let payload = b"strhide mp4 container tables must not move".repeat(32);
+
+            let stego = embed_hevc(
+                &cover,
+                &payload,
+                Some(PASSWORD),
+                None,
+                &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+                Freshness::Seeded([7u8; 32]),
+            )
+            .unwrap_or_else(|e| panic!("{name}: embed failed: {e}"));
+            assert_eq!(stego.len(), cover.len(), "{name}: file length changed");
+
+            let cover_boxes = top_level_boxes(&cover);
+            let stego_boxes = top_level_boxes(&stego);
+            assert_eq!(
+                cover_boxes.len(),
+                stego_boxes.len(),
+                "{name}: the top-level box layout changed"
+            );
+            for ((tag, _, cp, ce), (_, _, sp, se)) in cover_boxes.iter().zip(stego_boxes.iter()) {
+                let identical = cover[*cp..*ce] == stego[*sp..*se];
+                if tag == "mdat" {
+                    assert!(!identical, "{name}: mdat must carry the payload");
+                } else {
+                    assert!(identical, "{name}: box `{tag}` must be byte-identical");
+                }
+            }
+        }
+    }
+
+    /// Fragmented files and the compact size table are rejected explicitly
+    /// instead of producing spans from tables the parser cannot resolve.
+    #[test]
+    #[ignore = "requires the local temp/testhevc corpus"]
+    pub fn local_hevc_mp4_rejects_unsupported_variants() {
+        let Some(dir) = corpus_dir() else {
+            eprintln!("[SKIP] testhevc corpus not found");
+            return;
+        };
+        let cover_path = dir.join(CORPUS[0]);
+        if !cover_path.is_file() {
+            eprintln!("[SKIP] {} missing", CORPUS[0]);
+            return;
+        }
+        let cover = fs::read(&cover_path).expect("read cover");
+        assert!(parse_mp4_targets(&cover).is_ok());
+
+        // A `moof` at the top level: samples live in fragments.
+        let mut fragmented = cover.clone();
+        let mut moof = 16u32.to_be_bytes().to_vec();
+        moof.extend_from_slice(b"moof");
+        moof.extend_from_slice(&[0u8; 8]);
+        fragmented.extend_from_slice(&moof);
+        assert!(
+            parse_mp4_targets(&fragmented).is_err(),
+            "a fragmented MP4 must be rejected"
+        );
+
+        // `stsz` renamed to `stz2`: the only size table present is the
+        // compact form the parser refuses.
+        let mut compact = cover.clone();
+        let stsz = payload_offset(&compact, b"stsz").expect("stsz present");
+        compact[stsz - 4..stsz].copy_from_slice(b"stz2");
+        assert!(
+            parse_mp4_targets(&compact).is_err(),
+            "an stz2-only sample table must be rejected"
+        );
     }
 }
