@@ -202,7 +202,14 @@ pub struct HevcFormatProfile {
     pub stc_h: u8,
     /// STC group size (elements per syndrome row).
     pub stc_u: u8,
-    /// Fixed header length in bytes (magic 4 + len 4 + crc 4 + nonce 12 + tag 16 = 40).
+    /// Fixed per-carrier overhead budget in bytes; must be >= 24 (the on-wire
+    /// message header: magic 4 + len 4 + crc 4 + nonce 12) and covers the
+    /// 16-byte GCM tag trailing the ciphertext for the default value of 40.
+    ///
+    /// This is *not* a header the embedder writes in one block: the tag sits
+    /// at the end of the message, after the ciphertext. The value sizes the
+    /// fixed prefix the extractor reads to learn the payload length, and the
+    /// header budget subtracted from capacity.
     pub header_bytes: usize,
 }
 

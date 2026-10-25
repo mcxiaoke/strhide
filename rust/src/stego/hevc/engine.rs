@@ -87,6 +87,39 @@ const CAPACITY_PROBE_SEED: u64 = 0x5465_676f;
 /// the loop always makes progress. Healthy carriers settle in one round.
 const MAX_EMBED_ROUNDS: usize = 24;
 
+/// On-wire message header of an HEVC stego carrier:
+/// `[magic 4][payload_len 4][payload crc32 4][nonce 12]`. The GCM tag does not
+/// live here -- it trails the ciphertext (audit 2026-10-24 2.2: the constants
+/// used to be hard-coded at the call sites while `fmt.header_bytes` described
+/// a different quantity, so a private dialect with a small `header_bytes`
+/// panicked on `header_bytes[12..24]`).
+const HEVC_MSG_HEADER_BYTES: usize = 24;
+/// AES-256-GCM tag length appended to the ciphertext.
+const HEVC_TAG_BYTES: usize = 16;
+
+/// `fmt.header_bytes` must at least cover the fixed message header, or the
+/// extractor could not read the payload length. The default profile budgets 40
+/// = `HEVC_MSG_HEADER_BYTES + HEVC_TAG_BYTES`, the true total overhead.
+fn check_header_bytes(fmt: &HevcFormatProfile) -> Result<(), StrHideError> {
+    if fmt.header_bytes < HEVC_MSG_HEADER_BYTES {
+        return Err(StrHideError::UnsupportedVersion(format!(
+            "HevcFormatProfile.header_bytes must be >= {HEVC_MSG_HEADER_BYTES}, got {}",
+            fmt.header_bytes
+        )));
+    }
+    Ok(())
+}
+
+/// MP4/MOV containers are recognised by the sniffer but not implemented
+/// (audit 2026-10-24 2.3): say so explicitly at every entry point instead of
+/// a generic failure from deep inside the pipeline.
+fn mp4_unsupported() -> StrHideError {
+    StrHideError::UnsupportedFormat(
+        "MP4/MOV HEVC carriers are not supported yet; remux to HEIF or a raw Annex-B bitstream"
+            .into(),
+    )
+}
+
 /// Where a flipped bypass bin landed in the codeword:
 /// `(global slot index, first affected RBSP byte, last affected RBSP byte)`.
 type SlotBitTrace = (usize, usize, usize);
@@ -100,6 +133,14 @@ type EpbConflict = (usize, Vec<SlotBitTrace>);
 /// `fmt` supplies the trellis geometry and header size the capacity is
 /// measured against, so a private dialect reports its own ceiling.
 pub fn probe_hevc_capacity(carrier: &[u8], fmt: &HevcFormatProfile) -> Result<usize, StrHideError> {
+    let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
+        StrHideError::UnsupportedFormat(
+            "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
+        )
+    })?;
+    if kind == HevcCarrierKind::Mp4Container {
+        return Err(mp4_unsupported());
+    }
     let slots = scan_hevc_slots(carrier)?;
     let total_slots = slots.len();
     let trellis = StcTrellis::from_seed_grouped(CAPACITY_PROBE_SEED, fmt.stc_h, fmt.stc_u)?;
@@ -108,8 +149,14 @@ pub fn probe_hevc_capacity(carrier: &[u8], fmt: &HevcFormatProfile) -> Result<us
     if total_slots < min_needed_slots {
         return Ok(0);
     }
-    // Rate 1/2: ~2 slots per payload bit
-    let available_bits = (total_slots / 2).saturating_sub(header_bits);
+    // `message_bits` is the exact inverse of `slots_for` (n/u - (h-1)), so the
+    // bound honours both the group size and the warm-up rows. The previous
+    // hard-coded `total_slots / 2` ignored both and over-reported by h-1 bits,
+    // which crossed the byte boundary on most carriers (audit 2026-10-24 2.1:
+    // 9 of 14 corpus files advertised one byte more than embed accepts).
+    let available_bits = trellis
+        .message_bits(total_slots)
+        .saturating_sub(header_bits);
     Ok(available_bits / 8)
 }
 
@@ -147,7 +194,9 @@ pub fn extract_hevc_dimensions(carrier: &[u8]) -> Result<(u32, u32), StrHideErro
                 }
             }
         }
-        HevcCarrierKind::Mp4Container => {}
+        HevcCarrierKind::Mp4Container => {
+            return Err(mp4_unsupported());
+        }
     }
 
     Err(StrHideError::General(
@@ -172,6 +221,9 @@ pub fn probe_hevc_capacity_info(
         HevcCarrierKind::AnnexBStream => "HEVC-AnnexB",
         HevcCarrierKind::Mp4Container => "MP4/HEVC",
     };
+    if kind == HevcCarrierKind::Mp4Container {
+        return Err(mp4_unsupported());
+    }
 
     let slots = scan_hevc_slots(carrier)?;
     let total_slots = slots.len();
@@ -182,7 +234,11 @@ pub fn probe_hevc_capacity_info(
     let max_raw_payload_bytes = if total_slots < min_needed_slots {
         0
     } else {
-        let available_bits = (total_slots / 2).saturating_sub(header_bits);
+        // Exact inverse of `slots_for` (audit 2026-10-24 2.1): honours the
+        // group size `u` and the h-1 warm-up rows instead of a hard-coded 1/2.
+        let available_bits = trellis
+            .message_bits(total_slots)
+            .saturating_sub(header_bits);
         available_bits / 8
     };
 
@@ -236,12 +292,16 @@ pub fn embed_hevc(
     if payload.is_empty() {
         return Err(StrHideError::General("Cannot embed empty payload".into()));
     }
+    check_header_bytes(fmt)?;
 
     let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
         StrHideError::UnsupportedFormat(
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
+    if kind == HevcCarrierKind::Mp4Container {
+        return Err(mp4_unsupported());
+    }
 
     // 1. Scan and record all slices and substreams
     let (_carrier_buf, slice_contexts, all_slots) = record_carrier_state(carrier, kind)?;
@@ -269,7 +329,7 @@ pub fn embed_hevc(
     crc.update(payload);
     let payload_crc = crc.finalize();
 
-    let mut message = Vec::with_capacity(20 + ciphertext.len());
+    let mut message = Vec::with_capacity(HEVC_MSG_HEADER_BYTES + ciphertext.len());
     message.extend_from_slice(&magic);
     message.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     message.extend_from_slice(&payload_crc.to_be_bytes());
@@ -684,11 +744,15 @@ pub fn extract_hevc(
     domain: Option<&str>,
     fmt: &HevcFormatProfile,
 ) -> Result<Vec<u8>, StrHideError> {
+    check_header_bytes(fmt)?;
     let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
         StrHideError::UnsupportedFormat(
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
+    if kind == HevcCarrierKind::Mp4Container {
+        return Err(mp4_unsupported());
+    }
 
     let all_slots = scan_hevc_slots(carrier)?;
     let cover_digest = derive_carrier_digest(carrier, kind, fmt);
@@ -712,10 +776,11 @@ pub fn extract_hevc(
         .map(|&p| all_slots[p].original_bit)
         .collect();
 
-    // Extract first 40 bytes (320 bits) of header
+    // `fmt.header_bytes` is the fixed prefix this read sizes; the on-wire
+    // layout it must at least cover is HEVC_MSG_HEADER_BYTES bytes.
     let header_bytes = trellis.extract(&header_bits, fmt.header_bytes * 8);
 
-    if header_bytes.len() < fmt.header_bytes {
+    if header_bytes.len() < HEVC_MSG_HEADER_BYTES {
         return Err(StrHideError::CorruptedData(
             "HEVC stego header is truncated".into(),
         ));
@@ -745,11 +810,11 @@ pub fn extract_hevc(
         header_bytes[11],
     ]);
     let mut nonce_bytes = [0u8; 12];
-    nonce_bytes.copy_from_slice(&header_bytes[12..24]);
+    nonce_bytes.copy_from_slice(&header_bytes[12..HEVC_MSG_HEADER_BYTES]);
 
-    let total_msg_len = 24usize
+    let total_msg_len = HEVC_MSG_HEADER_BYTES
         .checked_add(payload_len)
-        .and_then(|v| v.checked_add(16))
+        .and_then(|v| v.checked_add(HEVC_TAG_BYTES))
         .ok_or_else(|| StrHideError::CorruptedData("HEVC stego header length overflows".into()))?;
     let total_msg_bits = total_msg_len
         .checked_mul(8)
@@ -774,7 +839,7 @@ pub fn extract_hevc(
             "Carrier truncated for declared payload".into(),
         ));
     }
-    let ciphertext = &msg_bytes[24..total_msg_len];
+    let ciphertext = &msg_bytes[HEVC_MSG_HEADER_BYTES..total_msg_len];
 
     let key = derive_hevc_key(secret, domain, &cover_digest, fmt);
     let cipher = Aes256Gcm::new_from_slice(&key)

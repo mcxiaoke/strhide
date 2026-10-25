@@ -219,6 +219,51 @@ fn test_hevc_annexb_short_slice_header_roundtrip() {
     assert_eq!(extracted, payload);
 }
 
+/// The capacity probe must not advertise more than the embedder accepts
+/// (audit 2026-10-24 2.1: the old `total_slots / 2` rate ignored the trellis
+/// warm-up rows and over-reported by h-1 bits, crossing the byte boundary on
+/// most carriers -- 9 of 14 corpus files advertised one byte too many).
+#[test]
+fn test_hevc_capacity_is_reachable() {
+    let fixtures = [
+        "../temp/github/heic-rs/tests/fixtures/gradient-512.heic",
+        "../temp/github/oxideav-h265/tests/fixture_bytes/r460/henc-133.hevc",
+    ];
+    for file_path in fixtures {
+        if !Path::new(file_path).exists() {
+            continue;
+        }
+        let carrier = fs::read(file_path).expect("read carrier");
+        let cap = probe_hevc_capacity(&carrier, &strhide::stego::format::DEFAULT_HEVC_FORMAT)
+            .expect("probe capacity");
+        assert!(cap >= 1, "{file_path}: expected real capacity");
+
+        // A payload of exactly the advertised capacity must embed.
+        let payload: Vec<u8> = (0..cap).map(|i| (i * 37 % 251) as u8).collect();
+        let stego = embed_hevc(
+            &carrier,
+            &payload,
+            Some("capacity-check"),
+            None,
+            &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+            strhide::stego::Freshness::Random,
+        )
+        .unwrap_or_else(|e| {
+            panic!("{file_path}: embedding the advertised {cap} bytes failed: {e}")
+        });
+        let back = extract_hevc(
+            &stego,
+            Some("capacity-check"),
+            None,
+            &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+        )
+        .unwrap_or_else(|e| {
+            panic!("{file_path}: extracting the full-capacity carrier failed: {e}")
+        });
+        assert_eq!(back, payload);
+    }
+}
+
 #[test]
 fn test_hevc_capacity_safety_scaling_and_sps_dimensions() {
     let file_path = "../temp/github/heic-rs/tests/fixtures/gradient-512.heic";
