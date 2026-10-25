@@ -38,21 +38,21 @@
 
 ### P2-2. doc 注释粘连错位：三个公开函数在 rustdoc 上缺失文档
 
-**位置**：`rust/src/engine.rs:651-678`（write 侧）、`rust/src/engine.rs:1672-1687`（remove 侧）
+**位置**：`rust/src/engine.rs:652-678`（write 侧）、`rust/src/engine.rs:1672-1687`（remove 侧）
 
 这是同一模式的编辑事故，两处：
 
-**write 侧**：`/// Inject `source` into `carrier_path` with library-level tuning.` 起的完整文档块（含 `local`/`profile` 参数说明和 `write_carrier_with` + `LocalParams`/`Profile` 的完整示例，engine.rs:651-678）紧跟在 `write_carrier`（649 行结束）之后，却粘连在**私有**结构体 `struct WriteCoreResult`（engine.rs:680）上。公开的 `pub fn write_carrier_with`（engine.rs:1131）只有后补的简短文档（1124-1130，"staging through a temp file and an atomic rename"），不含 `local`/`profile` 参数说明与示例。
+**write 侧**：`/// Inject `source` into `carrier_path` with library-level tuning.` 起的完整文档块（含 `local`/`profile` 参数说明和 `write_carrier_with` + `LocalParams`/`Profile` 的完整示例，engine.rs:652-678）紧跟在 `write_carrier`（649 行结束）之后，却粘连在**私有**结构体 `struct WriteCoreResult`（engine.rs:680）上。公开的 `pub fn write_carrier_with`（engine.rs:1131）只有后补的简短文档（1124-1130，"staging through a temp file and an atomic rename"），不含 `local`/`profile` 参数说明与示例。
 
 **remove 侧**：本应属于 `remove_carrier_with_options` 的文档（"Strip the envelope of a carrier written under `profile`... `overwrite` decides what happens..."，engine.rs:1672-1681）与本应属于 `remove_core` 的文档（"Strip the envelope from `host` into `out`..."，engine.rs:1682-1687）**两段粘连**，全部落在私有 `fn remove_core`（engine.rs:1688）上。公开的 `pub fn remove_carrier_with`（engine.rs:1783）与 `pub fn remove_carrier_with_options`（engine.rs:1801）**没有任何 doc comment**。
 
 **影响**：`cargo doc` / docs.rs 上：`write_carrier_with` 缺 `local`/`profile` 语义说明与示例；`remove_carrier_with`、`remove_carrier_with_options` 零文档（含 `overwrite` 语义、"逆序移除"契约等关键信息）。私有项的 doc 不进文档，这段文字完全沉没。结构域恰恰是文档密度最高的模块，此处缺口显眼。
 
-**建议**：将 651-678 的文档块移到 `pub fn write_carrier_with`（1131）前（与 1124-1130 现有文档合并）；将 1672-1681 移到 `remove_carrier_with_options`（1801）前、1672 前半段（不含 `overwrite` 段）给 `remove_carrier_with`（1783）；1682-1687 留给 `remove_core`。移动后 `cargo doc` 应无 broken intra-doc link。
+**建议**：将 652-678 的文档块移到 `pub fn write_carrier_with`（1131）前（与 1124-1130 现有文档合并）；将 1672-1681 移到 `remove_carrier_with_options`（1801）前、1672 前半段（不含 `overwrite` 段）给 `remove_carrier_with`（1783）；1682-1687 留给 `remove_core`。移动后 `cargo doc` 应无 broken intra-doc link。
 
 ### P2-3. `WriteOptions` 默认值文档与 CLI 实际默认相反
 
-**位置**：`rust/src/engine.rs:577`（`WriteOptions` doc）
+**位置**：`rust/src/engine.rs:576-577`（`WriteOptions` doc）
 
 ```rust
 /// The `Default` values match the CLI defaults: `auto` strategy, timestamps and
@@ -67,7 +67,7 @@
 
 ### P2-4. crate 级文档"六个载体家族"过时（实际 10 个适配器）
 
-**位置**：`rust/src/lib.rs:11`（"Format-preserving injection for six carrier families"）、`lib.rs:13-15`（列举缺 WebP/HEIF/WAV/MKV）、`lib.rs:29-37`（六行格式表）
+**位置**：`rust/src/lib.rs:11`（"Format-preserving injection for six carrier families"）、`lib.rs:13-15`（列举缺 WebP/HEIF/WAV/MKV）、`lib.rs:30-37`（六行格式表）
 
 **问题**：`router::ADAPTERS` 现有 10 个适配器（PNG、JPEG、WebP、HEIF、MP4、WAV、ZIP、PDF、PE、MKV），README 主表格已列全。前次审查的 P3-21 已修复 `adapters/mod.rs:18` 的同类失实注释（"six supported carriers"），但 `lib.rs` 的 crate 级文档漏改——同一处文档漂移只修了一半。
 

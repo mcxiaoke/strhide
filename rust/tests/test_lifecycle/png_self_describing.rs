@@ -41,6 +41,7 @@ fn texture_png(w: u32, h: u32) -> Vec<u8> {
         idat_sizes: Vec::new(),
         row_filters: Vec::new(),
         idat_info: None,
+        tail: Vec::new(),
     })
     .expect("encode png")
 }

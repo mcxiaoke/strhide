@@ -88,6 +88,7 @@ fn generate_texture_png(w: u32, h: u32) -> Vec<u8> {
         idat_sizes: Vec::new(),
         row_filters: Vec::new(),
         idat_info: None,
+        tail: Vec::new(),
     };
     encode_png(&img).expect("encode png")
 }
@@ -397,6 +398,7 @@ fn test_stego_saturation_exclusion() {
         idat_sizes: Vec::new(),
         row_filters: Vec::new(),
         idat_info: None,
+        tail: Vec::new(),
     })
     .unwrap();
 

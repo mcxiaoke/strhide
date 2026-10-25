@@ -99,6 +99,11 @@ pub struct RawImage {
     /// `None` for hand-built images and for streams whose zlib header is not a
     /// plain deflate header without a preset dictionary.
     pub idat_info: Option<IdatInfo>,
+    /// Bytes that followed the IEND chunk in the source file, copied back
+    /// verbatim. Some producers append signatures or vendor trailers there; the
+    /// decoder stops at IEND, so without this field a re-encode silently
+    /// truncated them and the "format preserving" promise broke.
+    pub tail: Vec<u8>,
 }
 
 /// Self-description carried by the two-byte zlib header of the IDAT stream.
@@ -139,6 +144,7 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
     let mut idat: Vec<u8> = Vec::new();
     let mut chunks: Vec<PngChunk> = Vec::new();
     let mut idat_sizes: Vec<usize> = Vec::new();
+    let mut tail: Vec<u8> = Vec::new();
 
     while pos + 8 <= data.len() {
         let len =
@@ -199,6 +205,12 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
                     ty: *b"IEND",
                     data: Vec::new(),
                 });
+                // Everything past the IEND chunk (its 4-byte CRC included) is
+                // not chunk data. Keep it so `encode_png` can put it back.
+                let after = body_end + 4;
+                if after < data.len() {
+                    tail = data[after..].to_vec();
+                }
                 break;
             }
             _ => {
@@ -311,6 +323,7 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
         idat_sizes,
         row_filters,
         idat_info: idat_info_of(&idat),
+        tail,
     })
 }
 
@@ -547,6 +560,7 @@ pub fn encode_png(image: &RawImage) -> Result<Vec<u8>, StrHideError> {
         write_chunk(&mut out, b"IHDR", &ihdr);
         write_chunk(&mut out, b"IDAT", &compressed_idat);
         write_chunk(&mut out, b"IEND", &[]);
+        out.extend_from_slice(&image.tail);
         return Ok(out);
     }
 
@@ -605,6 +619,9 @@ pub fn encode_png(image: &RawImage) -> Result<Vec<u8>, StrHideError> {
         // Truncated source without IEND: still emit a well-formed file.
         write_chunk(&mut out, b"IEND", &[]);
     }
+    // Producer-appended trailer (signature, vendor index, ...) goes back after
+    // IEND exactly where it was found.
+    out.extend_from_slice(&image.tail);
 
     Ok(out)
 }
@@ -2153,6 +2170,52 @@ mod tests {
     }
 
     #[test]
+    fn bytes_after_iend_survive_a_round_trip() {
+        // Producers append signatures or vendor trailers after IEND. The
+        // decoder stops at IEND, so before `RawImage::tail` existed a re-encode
+        // silently truncated them -- a lie for a format-preserving tool.
+        let (w, h) = (32usize, 32usize);
+        let pixels = row_correlated_pixels(w, h);
+        let mut png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
+        let trailer = b"\x00STRHIDE-TRAILER\xff\x00".to_vec();
+        png.extend_from_slice(&trailer);
+
+        let decoded = decode_png(&png).expect("decode");
+        assert_eq!(decoded.tail, trailer, "decoder must keep the trailer");
+        let reencoded = encode_png(&decoded).expect("encode");
+        assert!(reencoded.ends_with(&trailer), "re-encode must put it back");
+
+        let payload = b"tail-preserved-payload";
+        let params = PngParams::default();
+        let stego = embed_png(
+            &png,
+            payload,
+            Some("pw"),
+            None,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &params,
+            SafetyPolicy::default(),
+            Freshness::Seeded([0x21; 32]),
+        )
+        .expect("embed");
+        assert!(
+            stego.ends_with(&trailer),
+            "the stego carrier must keep the trailer too"
+        );
+        let extracted = extract_png(
+            &stego,
+            Some("pw"),
+            None,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &params,
+        )
+        .expect("extract");
+        assert_eq!(extracted, payload);
+    }
+
+    #[test]
     fn handbuilt_image_without_chunks_still_encodes() {
         let img = RawImage {
             width: 4,
@@ -2163,6 +2226,7 @@ mod tests {
             idat_sizes: Vec::new(),
             row_filters: Vec::new(),
             idat_info: None,
+            tail: Vec::new(),
         };
         let png = encode_png(&img).expect("encode");
         let decoded = decode_png(&png).expect("decode");
@@ -2625,6 +2689,7 @@ mod tests {
             idat_sizes: Vec::new(),
             row_filters: Vec::new(),
             idat_info: None,
+            tail: Vec::new(),
         };
         assert!(!encode_png(&handbuilt).expect("encode").is_empty());
     }
