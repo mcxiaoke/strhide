@@ -675,16 +675,19 @@ fn encode_substream(
         }
     }
 
-    // Mid-slice WPP/tile row substreams are deliberately left out of the
-    // rewrite path: their journal ends with `Terminate{bit:0}` (row-end
-    // more_data=false) and the remaining bits are the cover encoder's
-    // substream finish, whose exact bit pattern differs between HM's and
-    // x265's writers. Re-synthesizing that tail never replayed byte-exactly,
-    // so the 3a check below disqualifies every mid-slice substream and the
-    // payload falls back to the end-of-slice substreams only. Making them
-    // usable requires pricing sign flips by the decoded coefficient
-    // magnitude (sign bins decode before levels, so the cost must be
-    // back-filled from the decoder); see the review report's §3.4#6.
+    // H.265 §9.3.2.6 / §7.3.8.2 substream termination:
+    // - The final substream of a slice ends with `end_of_slice_segment_flag = 1`
+    //   (`BinOp::Terminate { bit: 1 }` already recorded at the end of `ops`).
+    // - Mid-slice WPP/tile substreams end their CTU row with
+    //   `end_of_slice_segment_flag = 0` (`BinOp::Terminate { bit: 0 }`), followed
+    //   in the bitstream by `end_of_subset_one_bit = 1` and byte alignment.
+    //   The decoder jumps straight to the next entry point after
+    //   `Terminate { bit: 0 }` and so never records that bit; emitting
+    //   `encode_terminate(1)` here reconstructs the exact standard substream
+    //   tail, which is what makes mid-row substreams usable at all.
+    //
+    // Verified 2026-10-25 by replaying every substream of the local corpus: all
+    // match byte-exactly (512×512 WPP 16/16, real HEICs 768/768 each).
     if !matches!(ops.last(), Some(BinOp::Terminate { bit: 1 })) {
         enc.encode_terminate(&mut writer, 1);
     }

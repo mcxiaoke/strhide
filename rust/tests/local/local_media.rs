@@ -657,6 +657,25 @@ pub mod hevc_external {
     /// local corpus are 51 .. 110.
     const MAX_ABS_SAMPLE_DELTA: u8 = 200;
 
+    /// PSNR floor for the deterministic 50%-capacity case.
+    ///
+    /// Measured after the magnitude-aware cost model (2026-10-25): 36.47 ..
+    /// 38.51 dB across two carriers and three seeds, up from 26.03 .. 31.75 dB
+    /// with the frequency-only model.
+    const DET_MIN_PSNR_DB: f64 = 34.0;
+
+    /// Single-sample ceiling for the deterministic 50%-capacity case.
+    ///
+    /// The cost model prices one flip at ≤ 32 levels; the measured maxima are
+    /// 24 .. 31, and the extra headroom covers two flips landing in one
+    /// transform block.
+    const DET_MAX_ABS_SAMPLE_DELTA: u8 = 48;
+
+    /// Fraction of samples allowed to move by more than [`LARGE_DELTA`] in the
+    /// deterministic case. Measured 0.0003 .. 0.0027 (was 0.028 .. 0.099 with
+    /// the frequency-only model).
+    const DET_MAX_LARGE_FRACTION: f64 = 0.01;
+
     fn ffmpeg_available() -> bool {
         Command::new("ffmpeg")
             .arg("-version")
@@ -781,6 +800,94 @@ pub mod hevc_external {
             large_fraction: large as f64 / cover.len() as f64,
             psnr,
         })
+    }
+
+    /// Deterministic high-payload regression for the magnitude-aware cost model.
+    ///
+    /// Sign flips are priced by the decoded coefficient magnitude now, so a
+    /// 50%-of-capacity payload must stay inside a tight per-sample bound instead
+    /// of riding on `x_c + y_c` alone. Before the model (2026-10-25) the same
+    /// inputs produced max|d| 98..173 and whole-frame PSNR 26..32 dB.
+    ///
+    /// `Freshness::Seeded` keeps this reproducible; a random nonce turned the
+    /// bound into a coin flip.
+    #[test]
+    #[ignore = "requires ffmpeg on PATH and the local testhevc corpus"]
+    pub fn local_hevc_deterministic_high_payload_max_delta_bound() {
+        if !ffmpeg_available() {
+            eprintln!("[SKIP] ffmpeg not found on PATH");
+            return;
+        }
+        let Some(dir) = corpus_dir() else {
+            eprintln!("[SKIP] testhevc corpus not found");
+            return;
+        };
+
+        for name in ["IMG_0874.HEIC", "IMG_1904.HEIC"] {
+            let cover_path = dir.join(name);
+            if !cover_path.exists() {
+                continue;
+            }
+            let cover = fs::read(&cover_path).expect("read cover");
+            let capacity =
+                probe_hevc_capacity(&cover, &strhide::stego::format::DEFAULT_HEVC_FORMAT)
+                    .expect("probe capacity");
+
+            // Half the advertised capacity pushes the trellis well past the
+            // cheapest slots, which is exactly where a magnitude-blind cost
+            // model starts flipping large coefficients.
+            let payload_len = (capacity / 2).clamp(1024, 64 * 1024);
+            let payload: Vec<u8> = (0..payload_len).map(|i| (i * 131 % 251) as u8).collect();
+
+            for seed_byte in [1u8, 7u8, 42u8] {
+                let stego = embed_hevc(
+                    &cover,
+                    &payload,
+                    Some(PASSWORD),
+                    None,
+                    &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+                    strhide::stego::Freshness::Seeded([seed_byte; 32]),
+                )
+                .unwrap_or_else(|e| panic!("{name} (seed {seed_byte}): embed failed: {e}"));
+
+                let stego_path = std::env::temp_dir().join(format!(
+                    "strhide-hevc-det-{seed_byte}-{}-{name}.heic",
+                    std::process::id()
+                ));
+                fs::write(&stego_path, &stego).expect("write stego carrier");
+
+                let cover_raw =
+                    decode_raw_yuv(&cover_path).unwrap_or_else(|e| panic!("{name}: {e}"));
+                let stego_raw =
+                    decode_raw_yuv(&stego_path).unwrap_or_else(|e| panic!("{name}: {e}"));
+                let diff = compare_pixels(&cover_raw, &stego_raw)
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+                let _ = fs::remove_file(&stego_path);
+
+                println!(
+                    "[DET seed={seed_byte}] {name}: payload={payload_len}/{capacity} B, \
+                 PSNR={:.2} dB, max|d|={}, large_frac={:.4}",
+                    diff.psnr, diff.max_abs_diff, diff.large_fraction
+                );
+
+                assert!(
+                    diff.psnr >= DET_MIN_PSNR_DB,
+                    "{name} (seed {seed_byte}): PSNR {:.2} dB is below the {DET_MIN_PSNR_DB:.0} dB floor",
+                    diff.psnr
+                );
+                assert!(
+                    diff.max_abs_diff <= DET_MAX_ABS_SAMPLE_DELTA,
+                    "{name} (seed {seed_byte}): a sample moved by {} (limit {DET_MAX_ABS_SAMPLE_DELTA})",
+                    diff.max_abs_diff
+                );
+                assert!(
+                    diff.large_fraction <= DET_MAX_LARGE_FRACTION,
+                    "{name} (seed {seed_byte}): {:.4} of samples moved by more than {LARGE_DELTA} \
+                 (limit {DET_MAX_LARGE_FRACTION})",
+                    diff.large_fraction
+                );
+            }
+        }
     }
 
     #[test]

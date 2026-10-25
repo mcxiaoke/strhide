@@ -515,7 +515,7 @@ dependencies = [
 [[package]]
 name = "rust_h265"
 version = "0.1.0"
-source = "git+https://github.com/mcxiaoke/rust_h265.git?tag=v1-20261025#7387b16bc52e797e3267b7513cbab7a26f79af5b"
+source = "git+https://github.com/mcxiaoke/rust_h265.git?tag=v1-20261025-2#aeadd6d0c18b4026350f670549d030e94a701817"
 
 [[package]]
 name = "serde"

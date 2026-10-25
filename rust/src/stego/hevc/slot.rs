@@ -69,6 +69,122 @@ pub struct CabacRecorder {
     pub current_slice_idx: usize,
     /// Current substream index.
     pub current_substream_idx: usize,
+    /// Next slot awaiting its magnitude back-fill from `record_stego_level`.
+    ///
+    /// Sign bins decode before levels, so `record_stego_sign` can only store a
+    /// provisional cost. The vendor hook then reports the coefficient magnitude
+    /// in the very same coding-group order, which makes a plain cursor enough:
+    /// the only entries without a slot are the DC `(0, 0)` signs, and both
+    /// callbacks skip those on the same coordinate test.
+    next_pending_slot: usize,
+}
+
+/// Largest sample deviation (8-bit levels) a single sign flip may cause before
+/// its slot is treated as a last resort.
+const SAFE_MAX_SAMPLE_DELTA: f64 = 32.0;
+
+/// Cost handed to slots whose flip would move a sample too far, or whose
+/// coefficient is too large to be a cheap carrier.
+///
+/// Deliberately finite: `f64::INFINITY` would let a `u = 2` trellis group whose
+/// two slots are both unusable collapse into `TrellisCause::DeadGroup`. This
+/// value keeps such slots ~1e6 times more expensive than a typical flip, so the
+/// trellis avoids them at any realistic payload while still being able to use
+/// them when the payload genuinely needs every slot.
+const HIGH_DISPLACEMENT_PENALTY: f64 = 1_000_000.0;
+
+/// Provisional bit depth assumed by `record_stego_sign`, whose call site does
+/// not carry one. Always superseded by the real value in `record_stego_level`.
+const PROVISIONAL_BIT_DEPTH: u8 = 8;
+
+/// Distortion cost of flipping one coefficient sign, from the decoded magnitude.
+///
+/// A sign flip changes the coefficient from `+dq` to `-dq`, i.e. by `2 * dq` in
+/// the transform domain. The two-pass inverse transform of H.265 §8.6.4 has a
+/// fixed total right shift of 19 bits and basis peaks of 64 (DC) / ~64·√2 (any
+/// other frequency) regardless of block size, so the worst single-sample shift
+/// is `dq * g(x_c) * g(y_c) / 64` in samples of `bit_depth`.
+///
+/// `abs_dq` already carries the `bdShift = bitDepth + log2(N) - 5` right shift of
+/// §8.6.3, which is where the `1/N` block-size factor lives. Dividing by `N`
+/// again would understate a 32×32 block by 8× per sample and 64× in energy.
+/// A non-positive `abs_dq` means "unknown" and is priced as a single level.
+#[inline]
+pub fn compute_sign_flip_cost(
+    abs_level: u32,
+    abs_dq: i32,
+    trafo_size: u8,
+    c_idx: u8,
+    x_c: u8,
+    y_c: u8,
+    bit_depth: u8,
+) -> f64 {
+    let dq = if abs_dq > 0 { abs_dq as f64 } else { 1.0 };
+    cost_from_dq(abs_level, dq, trafo_size, c_idx, x_c, y_c, bit_depth)
+}
+
+/// Provisional cost for `record_stego_sign`, where the level has not been
+/// decoded yet and only the §8.6.3 quantizer step is available.
+#[inline]
+pub fn provisional_sign_flip_cost(
+    abs_level: u32,
+    qp: i32,
+    trafo_size: u8,
+    c_idx: u8,
+    x_c: u8,
+    y_c: u8,
+) -> f64 {
+    let n = trafo_size.max(4) as f64;
+    let q_step = 2.0_f64.powf((qp - 4) as f64 / 6.0);
+    let dq = abs_level.max(1) as f64 * q_step * (64.0 / n);
+    cost_from_dq(
+        abs_level,
+        dq,
+        trafo_size,
+        c_idx,
+        x_c,
+        y_c,
+        PROVISIONAL_BIT_DEPTH,
+    )
+}
+
+#[inline]
+fn cost_from_dq(
+    abs_level: u32,
+    dq: f64,
+    trafo_size: u8,
+    c_idx: u8,
+    x_c: u8,
+    y_c: u8,
+    bit_depth: u8,
+) -> f64 {
+    let n = trafo_size.max(4) as f64;
+
+    let gx = if x_c == 0 {
+        1.0
+    } else {
+        core::f64::consts::SQRT_2
+    };
+    let gy = if y_c == 0 {
+        1.0
+    } else {
+        core::f64::consts::SQRT_2
+    };
+    let peak_sample_delta = (dq * gx * gy) / 64.0 / 2f64.powi(bit_depth as i32 - 8);
+
+    // Whole-block energy term: a large TU spreads the same error over more
+    // samples, so its PSNR cost is lower per flipped sign than a small TU's.
+    let block_energy = 1.0 + 0.05 * (n / 4.0) * (n / 4.0);
+    // High frequencies and chroma carry less visible error.
+    let freq_masking = 1.0 + ((x_c + y_c) as f64) * 0.35;
+    let comp_factor = if c_idx == 0 { 1.0 } else { 0.7 };
+    let l2_cost = peak_sample_delta * peak_sample_delta * block_energy * comp_factor / freq_masking;
+
+    if peak_sample_delta > SAFE_MAX_SAMPLE_DELTA || abs_level > 4 {
+        HIGH_DISPLACEMENT_PENALTY + l2_cost
+    } else {
+        l2_cost.max(0.1)
+    }
 }
 
 impl CabacRecorder {
@@ -85,6 +201,7 @@ impl CabacRecorder {
             substreams: Vec::new(),
             current_slice_idx: slice_idx,
             current_substream_idx: 0,
+            next_pending_slot: 0,
         }
     }
 
@@ -163,13 +280,10 @@ impl CabacRecorder {
         let slot_idx = self.slots.len();
         let op_idx = self.ops.len();
 
-        // Content-adaptive distortion cost model:
-        // Higher frequencies (x_c + y_c large) have lower distortion cost.
-        // Chroma components have slightly lower distortion cost than Luma.
-        let freq_dist = (x_c + y_c) as f64;
-        let freq_factor = 1.0 / (1.0 + freq_dist * 0.35);
-        let comp_factor = if c_idx == 0 { 1.0 } else { 0.7 };
-        let cost = (10.0 * freq_factor * comp_factor).max(0.1);
+        // Provisional cost: sign bins decode before their levels, so the real
+        // magnitude is unknown here. `record_stego_level` overwrites this in the
+        // same coding group.
+        let cost = provisional_sign_flip_cost(1, qp, trafo_size, c_idx, x_c, y_c);
 
         self.slots.push(StegoSlot {
             slot_idx,
@@ -189,6 +303,47 @@ impl CabacRecorder {
             bit: original_bit,
             slot_idx: Some(slot_idx),
         });
+    }
+
+    /// Back-fill the magnitude of the coefficient whose sign was just recorded,
+    /// and replace the provisional cost with the real distortion estimate.
+    ///
+    /// The decoder reports one call per recorded sign, in coding-group order.
+    /// DC `(0, 0)` signs never create a slot, and this method mirrors that skip
+    /// on the same coordinate test, so the cursor stays aligned without any
+    /// per-entry placeholder table.
+    #[inline]
+    pub fn record_stego_level(
+        &mut self,
+        x_c: u8,
+        y_c: u8,
+        abs_level: u32,
+        abs_dq: i32,
+        bit_depth: u8,
+    ) {
+        if x_c == 0 && y_c == 0 {
+            return;
+        }
+        let Some(slot) = self.slots.get_mut(self.next_pending_slot) else {
+            debug_assert!(false, "record_stego_level outran record_stego_sign");
+            return;
+        };
+        debug_assert_eq!(
+            (slot.x_c, slot.y_c),
+            (x_c, y_c),
+            "sign/level coordinate desync at slot {}",
+            self.next_pending_slot
+        );
+        slot.cost = compute_sign_flip_cost(
+            abs_level,
+            abs_dq,
+            slot.trafo_size,
+            slot.c_idx,
+            slot.x_c,
+            slot.y_c,
+            bit_depth,
+        );
+        self.next_pending_slot += 1;
     }
 
     /// Record a terminate bin.
@@ -232,7 +387,80 @@ impl rust_h265::CabacObserver for CabacRecorder {
         self.record_stego_sign(bit, qp, trafo_size, c_idx, x_c, y_c);
     }
 
+    fn record_stego_level(&mut self, x_c: u8, y_c: u8, abs_level: u32, abs_dq: i32, bit_depth: u8) {
+        self.record_stego_level(x_c, y_c, abs_level, abs_dq, bit_depth);
+    }
+
     fn record_terminate(&mut self, bit: u32) {
         self.record_terminate(bit);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sign bins decode before their levels: the recorder must pair each later
+    /// `record_stego_level` with the slot created by the matching
+    /// `record_stego_sign`, even though the DC sign in between creates no slot.
+    #[test]
+    fn level_backfill_stays_aligned_across_dc() {
+        let mut rec = CabacRecorder::new();
+        // (0,0) is DC: recorded as a bin, never as a slot.
+        rec.record_stego_sign(0, 27, 8, 0, 0, 0);
+        rec.record_stego_sign(1, 27, 8, 0, 2, 0);
+        rec.record_stego_sign(0, 27, 8, 0, 3, 1);
+        assert_eq!(rec.slots.len(), 2);
+        assert!(matches!(rec.ops[0], BinOp::Bypass { slot_idx: None, .. }));
+
+        rec.record_stego_level(0, 0, 9, 700, 8);
+        rec.record_stego_level(2, 0, 1, 42, 8);
+        rec.record_stego_level(3, 1, 2, 84, 8);
+
+        assert_eq!((rec.slots[0].x_c, rec.slots[0].y_c), (2, 0));
+        assert_eq!((rec.slots[1].x_c, rec.slots[1].y_c), (3, 1));
+        assert_eq!(
+            rec.slots[0].cost,
+            compute_sign_flip_cost(1, 42, 8, 0, 2, 0, 8)
+        );
+        assert_eq!(
+            rec.slots[1].cost,
+            compute_sign_flip_cost(2, 84, 8, 0, 3, 1, 8)
+        );
+    }
+
+    /// The whole point of the model: cost must follow the decoded magnitude, not
+    /// just the frequency position.
+    #[test]
+    fn cost_tracks_coefficient_magnitude() {
+        let small = compute_sign_flip_cost(1, 40, 8, 0, 2, 2, 8);
+        let large = compute_sign_flip_cost(1, 400, 8, 0, 2, 2, 8);
+        // Cost is quadratic in the magnitude, so 10× the coefficient is 100× the
+        // cost (asserted with slack for the frequency/energy factors).
+        assert!(large > small * 50.0, "small={small} large={large}");
+
+        // A flip that would move a sample by more than the soft limit must be
+        // penalised, and the penalty must stay finite so the STC never sees
+        // `INFINITY` for a slot it may still have to use.
+        let huge = compute_sign_flip_cost(1, 10_000, 32, 0, 1, 0, 8);
+        assert!(huge.is_finite(), "penalty must be finite");
+        assert!(huge >= HIGH_DISPLACEMENT_PENALTY);
+    }
+
+    /// Large coefficients are expensive regardless of geometry: they cannot be
+    /// flipped without a visible step.
+    #[test]
+    fn large_level_is_penalised() {
+        let cost = compute_sign_flip_cost(9, 40, 8, 0, 3, 3, 8);
+        assert!(cost >= HIGH_DISPLACEMENT_PENALTY);
+    }
+
+    /// Displacement is expressed in 8-bit levels, so the same dequantized value
+    /// is 16× cheaper in energy at 10-bit.
+    #[test]
+    fn cost_normalises_bit_depth() {
+        let eight = compute_sign_flip_cost(1, 90, 8, 0, 2, 0, 8);
+        let ten = compute_sign_flip_cost(1, 90, 8, 0, 2, 0, 10);
+        assert!((eight / ten - 16.0).abs() < 0.5, "eight={eight} ten={ten}");
     }
 }
