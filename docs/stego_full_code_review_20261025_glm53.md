@@ -42,7 +42,7 @@ P0/P1 项已按批次修复并提交（每批均通过 cargo test / fmt / clippy
 | M9 + 5.1/5.2/5.4 | thumb_bridge infe v3 偏移、宿主 extent 单次修补、iloc v2 守卫、零推进守卫 | `4853a02` |
 | M5 + §3.6 | JPEG delta 断言容忍合法收缩；isobmff iinf/iloc 全部越界读取加门 | `5c4fa2d` |
 
-**仍未修**（P2/P3 与 M12 剩余部分）：M3 字符串耦合、M4 UERD 公式、M6/M13 PNG 内存与接口、M8 feature word、M10 WPP 终止语义、M11 trellis seed 公开（连同明文 CRC32 oracle）、旧审计 2.4/2.5（性能双解析/双编码）、3.1/3.2（死代码）、§3 全部轻微项。注意：S1 修复改变了 suniward 代价图，此前生成的 suniward PNG 载体不再可读（未发布策略允许）；S2/M1 同理影响旧 AnnexB 与 Seeded 产物。
+**仍未修**（P3 与 M12 剩余部分）：M4 UERD 公式对齐（变体已声明，见 §7）、旧审计 2.4（CABAC 双编码，M10 回退后热路径消失）、3.1/3.2（死代码）、§3 全部轻微项、thumb_bridge 补丁重映射/子盒尺寸（见附录 A）、§3.5 KDF（用户决定待 argon2id）。**P2 已于 2026-10-25 下午处理完毕**（部分修复、部分按成本收益搁置），明细见 §7 与 [`docs/CHANGES-20261025.md`](CHANGES-20261025.md) 14:25 条目。注意：M11 改变 HEVC trellis seed、M8 升级 PNG FeatureWord v3，旧 HEVC/PNG 产物不再可读（未发布策略允许）；S1/S2/M1 同理影响旧 suniward、AnnexB 与 Seeded 产物。
 
 ---
 
@@ -74,7 +74,7 @@ P0/P1 项已按批次修复并提交（每批均通过 cargo test / fmt / clippy
 
 **位置**：`rust/src/stego/coding/stc.rs`（Oracle::matches）。内核约定行 `h-1` 携带消息位 0（extract：消息位 b ↔ 行 b+h−1），oracle 的 `row+1 > h` 却把行 `0..=h-1` 全约束为 0——多锁一行、少验消息位 0，恰被 `0x5A` 首位为 0 掩蔽，最优性验证只覆盖了半个消息空间。**修复**：`row+1 >= h`，测试消息生成改 `0xA5`（首位 1，红：6.25 vs 错误系统的 8）。
 
-### M3.【确认 ✅】跨模块契约靠错误消息子串耦合
+### M3.【已修复 ✅ 2026-10-25 P2】跨模块契约靠错误消息子串耦合
 
 **位置**：`rust/src/stego/jpeg/engine.rs:860` ↔ `rust/src/stego/coding/stc.rs:575-577`（u=1 分支）与 `stc.rs:726-728`（u>1 分支）
 
@@ -87,7 +87,7 @@ u>1 分支的消息（"a group has **no legal element** …"）恰好也含该�
 
 **修复**：给 `TrellisInfeasible` 增加结构化原因（如 `enum TrellisCause { DeadElement, DeadGroup }`），engine 按变体匹配。
 
-### M4.【确认】UERD 代价公式与论文/官方实现三处保真度偏差
+### M4.【文档已处理 ✅，公式对齐搁置】UERD 代价公式与论文/官方实现三处保真度偏差
 
 **位置**：`rust/src/stego/jpeg/cost/uerd.rs:145-168`（分子）、`:107-143`（分母平滑）。主审已抽查确认 `cost = q[k] / block_rho`（uerd.rs:163）用 Q 的一次幂。
 
@@ -103,7 +103,7 @@ u>1 分支的消息（"a group has **no legal element** …"）恰好也含该�
 
 **位置**：`rust/src/stego/jpeg/engine.rs`（apply_deltas）。断言 `updated.abs() <= 1023` 拦截一切超界值，但封面经自定义 Huffman 表可合法携带 cat 11–15（|c| 最大 32767），其 MinusOnly 收缩到 1999 之类的值是合法操作，debug 构建却 panic。**修复**：断言只拦"增长穿越 ±1023"（`updated.abs() <= 1023 || updated.abs() < before.abs()`）。
 
-### M6.【确认】PNG 引擎 `direction_costs` 全平面分配：大图内存峰值失控，且与 JPEG 侧设计自相矛盾
+### M6.【已修复 ✅ 2026-10-25 P2】PNG 引擎 `direction_costs` 全平面分配：大图内存峰值失控，且与 JPEG 侧设计自相矛盾
 
 **位置**：`rust/src/stego/traits.rs:47-57`（默认实现 `base.to_vec()`×2）、`rust/src/stego/png/cost/hill.rs:169-185`（HILL 覆写同样两张 w×h f64）、消费端 `png/engine.rs:1266-1291`。
 
@@ -113,7 +113,7 @@ u>1 分支的消息（"a group has **no legal element** …"）恰好也含该�
 
 **位置**：`rust/src/stego/png/engine.rs:193-199`（decode 在第一个 IEND 处 break）、`:577-603`（encode 只回放捕获的 chunk）。主审已确认 break 语句。adapters 层（`adapters/png.rs:20-30`）明确支持"PNG 后跟任意字节"并实现了 64 KiB 回扫，而像素域路径静默截掉这些字节——与项目"格式保持、无损"定位冲突。**修复**：decode 记录 IEND 结束偏移，encode 原样追加尾部。
 
-### M8.【确认】PNG FeatureWord 自描述不完整且含死字段
+### M8.【已修复 ✅ 2026-10-25 P2，FeatureWord 升 v3】PNG FeatureWord 自描述不完整且含死字段
 
 **位置**：`rust/src/stego/png/engine.rs:1455-1457`（feature word 只覆盖 `exclusion_percentile`）、`rust/src/stego/header.rs:231-242`（`eligible_min/eligible_max/kdf_id` 解码+校验但从未使用）、`engine.rs:1019-1024`（提取端用硬编码 `SPATIAL_ELIGIBLE_MIN/MAX`）。
 
@@ -123,13 +123,13 @@ HILL 的 `p1_window/p2_window/epsilon` 与 S-UNIWARD 的 `sigma` 不随载体走
 
 **位置**：`rust/src/stego/heif/thumb_bridge.rs`（reconstruct_heif）。`ContainerJpegFallback => false` 恒假——fallback 找到的 JPEG 必然位于某个 item 的 extent 内（典型是 Exif 缩略图），宿主 item 长度声明不变而内容已变 → 容器静默损坏；与旧审计 5.1（infe v3 偏移，同提交已修）组合触发。**修复**：宿主 = 物理覆盖目标区域的文件偏移 extent 所在 item；iloc 长度 delta 只加在该 extent 一次（顺带修复旧审计 5.2 的"每 extent 各加一次"）；宿主 item 自身后置 extent 一并平移；跨 extent 目标拒绝而非错补。
 
-### M10.【确认】HEVC WPP 中段子流永远无法 replay（静默容量损失）
+### M10.【尝试修复后回退 ⏸ 2026-10-25 P2，综述见 `docs/HEVC-WPP-COST-ISSUE-20261025.md`】HEVC WPP 中段子流永远无法 replay（静默容量损失）
 
 **位置**：`rust/src/stego/hevc/engine.rs:609-611`
 
 `encode_substream` 对不以 `Terminate{bit:1}` 结尾的子流无条件补写 terminate(1)+flush。但 WPP 行边界子流的 journal 记录为 `Terminate{bit:0}`（行尾 `more_data=false` 的正确语义），强补后与封面"terminate(0)+00 填充"必然不同 → `replay_matches_cover` 失败 → 全部中段子流每轮白做两次编码后被整体排除。若编码器行尾写 terminate(1)（HM 风格），rust_h265 又会把该行当整个 NAL 结束——两种风格下 WPP 多子流容量都大幅受损。安全网保证"不损坏、只降容量"，iPhone HEIC 网格每 tile 单子流不受影响，故无人察觉。**修复**：按是否为该 slice 的最后子流决定终止写法，中段子流照 journal 原样收尾。
 
-### M11.【确认 ✅】HEVC 的 STC trellis seed 完全公开，与 PNG/JPEG 安全模型不一致
+### M11.【已修复 ✅ 2026-10-25 P2】HEVC 的 STC trellis seed 完全公开，与 PNG/JPEG 安全模型不一致
 
 **位置**：`rust/src/stego/hevc/engine.rs:275-276`（seed 仅由公开参数集摘要 + 公开常量派生，主审已复核）对照 `png/engine.rs:1103-1104,1253`（stc_seed 派生自密码派生的 perm_seed）。
 
@@ -143,7 +143,7 @@ HILL 的 `p1_window/p2_window/epsilon` 与 S-UNIWARD 的 `sigma` 不随载体走
 
 已修复（见附录 A）：2.1 容量虚报（`message_bits` 逆函数 + 容量可达性回归）；2.2 extract 硬编码 24/16 与 `header_bytes<24` panic（命名常量 + 入口守卫 + 文档更正）；2.3 MP4 嗅探不实现（五入口显式报错）；4.1–4.4 heif_boxes 四项（construction_method / 零推进 DoS / `as usize` / ipma 关联选 hvcC）。**仍未修**：2.4/2.5（子流双重重编码、容器双重解析——性能项，P2）、3.1/3.2（死函数、剩余未用错误变体；`Unsupported`/`TooLarge` 已在本轮投入使用）、5.3/5.5 其余项。
 
-### M13.【确认】PNG/JPEG 提取接口对 cost model 参数的语义不一致
+### M13.【已修复 ✅ 2026-10-25 P2 轻量版】PNG/JPEG 提取接口对 cost model 参数的语义不一致
 
 PNG `extract_png` 的 `cost_model` 参数实为 hint（载体自带 algorithm_id 优先），但拼写错误会在读载体前就报错（`stego/mod.rs:210-217`）；JPEG 提取端则明确不取模型。同一 `stego/mod.rs` 内两套哲学并存，且"传错模型也能解出来"增加认知负担。**修复**：PNG 对齐 JPEG（参数改 `Option` 或删除）。
 
@@ -338,11 +338,11 @@ PNG `extract_png` 的 `cost_model` 参数实为 hint（载体自带 algorithm_id
 7. ~~M5 debug_assert 误报~~（`5c4fa2d`）
 8. ~~§3.6 isobmff.rs iinf/iloc 边界检查~~（`5c4fa2d`）
 
-**P2（排期，未修）**
-9. M3 TrellisInfeasible 结构化 + M4 UERD 对齐论文或声明变体
-10. M6/M13 PNG 内存与提取接口；M8 feature word 收口（发布前的最后窗口）
-11. M10 WPP 中段子流终止语义 + M11 trellis seed 密钥化（连带明文 CRC32 oracle）；M12 剩余项（旧审计 2.4/2.5 性能双解析/双编码、5.3/5.5 其余）
-12. §3.5 KDF 参数调齐（结构域 100k → ≥200k，趁发布前改 wire 常量）
+**P2（排期，未修）——✅ 2026-10-25 下午处理完毕（明细见 `docs/CHANGES-20261025.md` 14:25 条目）**
+9. ~~M3 TrellisInfeasible 结构化~~（`TrellisCause{DeadElement,DeadGroup,ExhaustedSlots}`，两处子串匹配消灭）；~~M4 UERD 对齐论文或声明变体~~（**选择声明变体**：模块文档列出三处偏差 + description() 同步 + 失实注释更正；公式对齐需检测评估支撑，搁置）
+10. ~~M6/M13 PNG 内存与提取接口~~（`direction_costs` 改按槽取值，50MP 方向代价工作集 ~2 GB → 载荷量级；提取不再按 `--algorithm` 前置报错）；~~M8 feature word 收口~~（**升 v3**：超参 epsilon/sigma/窗口自描述入 wire + `wire_quantized()` 两端一致，死字段 `kdf_id`/`eligible_min/max` 删除，连带关闭 §3.3#7）
+11. ~~M10 WPP 中段子流终止语义~~（**尝试修复后回退**：flush+前缀校验方案码流层面可行，但暴露 cost 缺 |coeff| 的失真缺陷，治本需 vendor sign/level 顺序改动，成本超收益；综述 `docs/HEVC-WPP-COST-ISSUE-20261025.md`）；~~M11 trellis seed 密钥化~~（`HKDF(key, cover_digest)`，连带关闭明文 CRC32 oracle）；~~M12 剩余 2.5~~（容器单次解析 + 载体克隆删除；2.4 因 M10 回退热路径消失，搁置）
+12. ~~§3.5 KDF 参数调齐~~（**搁置**：待后续直接引入 argon2id 一并解决）
 
 **P3（卫生，未修）**
 13. §3 各表轻微项：死代码、文档更正（含 STC 可达性位三处、format.rs 恒真校验、params.rs stc_u 默认值文档）、防御性守卫、注释重复。
@@ -358,10 +358,10 @@ PNG `extract_png` 的 `cost_model` 参数实为 hint（载体自带 algorithm_id
 | 2.1 | 容量虚报 1 字节（`total_slots/2` 硬编码、漏 h−1） | ✓ 已修复（`e76aa97`，改用 `message_bits` 逆函数 + 容量可达性回归测试） |
 | 2.2 | extract 硬编码 24/16；`header_bytes<24` 方言 panic | ✓ 已修复（`e76aa97`，命名常量 + 入口守卫 + 文档更正） |
 | 2.3 | MP4 被嗅探认下但未实现 | ✓ 已修复（`e76aa97`，五个入口显式报"remux to HEIF or Annex-B"） |
-| 2.4 / 2.5 | 子流双重重编码 / 容器双重解析 | 未修（性能项，属 P2） |
+| 2.4 / 2.5 | 子流双重重编码 / 容器双重解析 | 2.5 ✓ 已修复（2026-10-25 P2：单次解析 + 载体克隆删除）；2.4 未修（M10 回退后中段子流本被排除，热路径消失，搁置） |
 | 4.1–4.4 | construction_method / iloc 零推进 DoS / `as usize` / 无 ipma | ✓ 已修复（`6d81ec7`） |
 | 5.1 / 5.2 / 5.4 | `infe` v3 偏移 / 多 extent delta×N / iloc v2 panic | ✓ 已修复（`4853a02`） |
-| 5.3 / 5.5 其余 | pitm/iref 未解析、补丁坐标重映射、meta 子盒尺寸等 | 未修 |
+| 5.3 / 5.5 其余 | pitm/iref 未解析、补丁坐标重映射、meta 子盒尺寸等 | 5.3 ✓ 已修复（2026-10-25 P2：pitm/iref 解析、主图永不选、thmb 优先、checked 加法、unci 必败分支删除，含回归测试）；5.5 的重映射/子盒尺寸未修（成本高触发面窄，搁置） |
 | 3.1 / 3.2 | 死函数 / 未用错误变体 | 未修（注：`Unsupported`/`TooLarge` 变体已在 `6d81ec7`/`e76aa97` 中投入使用） |
 | 1.2 / 1.4 | STC 排除不可行 / 死分支 | 1.2 未修；1.4 未修（oracle 差一即本文 M2 已修 `f4d352e`） |
 
@@ -377,4 +377,4 @@ PNG `extract_png` 的 `cost_model` 参数实为 hint（载体自带 algorithm_id
 
 ---
 
-*报告结束。发现总计：严重 2、中等 15（M1–M13 + isobmff 两条）、轻微/建议 45+。核心算法内核经独立推导验证无误。**P0/P1 已于审查当日全部修复（8 个提交，§0.5）**；剩余 P2/P3 见 §7。*
+*报告结束。发现总计：严重 2、中等 15（M1–M13 + isobmff 两条）、轻微/建议 45+。核心算法内核经独立推导验证无误。**P0/P1 已于审查当日修复（8 个提交，§0.5）；P2 于同日下午处理完毕（修复 + 按成本收益搁置，§7）**；剩余 P3 与搁置项见 §0.5"仍未修"。*
