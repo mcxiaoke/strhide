@@ -3,7 +3,7 @@
 | 项 | 内容 |
 | :--- | :--- |
 | 文档编号 | `STRUCT-GUIDE-20261025` |
-| 基线 | commit `ddb409c`（master，crate 版本 0.7.1） |
+| 基线 | commit `ddb409c`（master，crate 版本 0.7.1）；其后 `d179e1f`（提交路径 fsync/原子写内部实现）与 `3dbdda2`（内容域 PNG 尾部保留）不改变本文所描述的任何结构域接口签名、参数与常量 |
 | 范围 | 结构域（structure domain）lib 公开接口与全部参数：`engine` / `facade` / `params` / `envelope` / `errors` / `router` / `rejection` / `adapters` / `commit` / `sniff` 模块 |
 | 术语 | **结构域** = 把 UBE 信封注入载体容器结构缝隙的 write/read/restore/inspect/verify 五动词；**内容域** = 像素/DCT/CABAC 隐写（`embed`/`extract`/`probe`），仅在本指南与结构域交界处（`inspect` 容量探测、`Profile` 共享）提及，详见 [`heic_hevc_steganography_guide.md`](heic_hevc_steganography_guide.md) 等内容域文档 |
 | 姊妹篇 | 参数一致性评审见 [`structure_domain_params_audit_20261025.md`](structure_domain_params_audit_20261025.md)；健壮性缺陷见 [`structure_domain_code_review_20261025.md`](structure_domain_code_review_20261025.md) |

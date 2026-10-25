@@ -4,7 +4,7 @@
 | :--- | :--- |
 | 文档编号 | `STRUCT-PARAMS-AUDIT-20261025` |
 | 审查时间 | 2026-10-25 |
-| 基线 | commit `ddb409c`（master，crate 0.7.1），工作区干净 |
+| 基线 | 审查起点 commit `ddb409c`（master，crate 0.7.1，工作区干净）；审查期间并发批次落地 `d179e1f`（carrier/提取产物 fsync 原子写——已据实更新 P3-10）与 `3dbdda2`（内容域 PNG IEND 尾部保留，不触及结构域接口面）。全部签名、字段、常量与行号以工作区现状逐条复核，两提交均未改变本报告所引用的结构域接口形状 |
 | 视角 | **接口与参数的规范性/一致性/可用性**：公开 API 形状、参数命名与类型、默认值语义、文档（rustdoc）准确性、CLI↔库映射。与 [`structure_domain_code_review_20261025.md`](structure_domain_code_review_20261025.md)（健壮性缺陷逐行深审）和 [`cli_lib_interface_audit_20261025.md`](cli_lib_interface_audit_20261025.md)（提取依赖维度）互补，三者无重叠条目 |
 | 方法 | 逐行精读 `engine.rs`（2,268 行）、`params.rs`、`facade.rs`、`envelope.rs`、`errors.rs`、`router.rs`、`rejection.rs`、`commit.rs`、`sniff.rs`、`adapters/mod.rs` 全部公开项；对照 `cli.rs` 参数定义与 `handle_write`/`handle_restore` 调用点；10 个适配器的 `supported_strategies`/`choose_auto_strategy`/`strategy_capacities` 全量核对；`cargo clippy --all-targets` 全绿、`cargo test --lib` 242 项全过（验证当日） |
 | 结论 | 无 P1（无"参数会写坏数据/读错数据"级缺陷）。**P2 共 5 项**（文档错误/公开 rustdoc 缺失/默认值语义误导/覆盖保护不一致），**P3 共 11 项**（命名与形状不统一、可用性），观察项若干。均为接口卫生问题，不影响功能正确性 |
@@ -81,7 +81,7 @@
 - 写路径无检查：`rust/src/engine.rs:1145`（`target_path = options.output_path.unwrap_or(carrier_path)`）与 `engine.rs:1203`（`std::fs::rename(&tmp_target, target_path)`）之间没有任何目标存在性检查——`fs::rename` 的替换语义直接覆盖已存在文件。
 - 读路径有检查：`engine.rs:1556-1561`（`write_payload_to` 拒绝覆盖，报 `Rejection`）。
 - 还原路径有检查：`engine.rs:1822-1827`（`remove_carrier_with_options` 拒绝覆盖非原地目标）。
-- 门面锁死 `false`：`rust/src/facade.rs:156-163`（`StrHide::read` 硬编码 `overwrite = false`）、`facade.rs:165-174`（`StrHide::restore` 同）；而内容域 `facade.rs:299-326` 的 `extract_file` **有** `overwrite` 参数。
+- 门面锁死 `false`：`rust/src/facade.rs:156-163`（`StrHide::read` 硬编码 `overwrite = false`）、`facade.rs:166-174`（`StrHide::restore` 同）；而内容域 `facade.rs:299-328` 的 `extract_file` **有** `overwrite` 参数。
 - CLI 有保护：`cli.rs:2276-2284`（`check_overwrite`）+ 各 handle 的 `--overwrite` 传递。
 
 **问题**：三个层面各不一致——
@@ -177,13 +177,13 @@ bytes 入口做不了文件系统检查，所以 `Strict` 与 `ContentOnly` 在�
 
 **建议**：删除 2029 行的重复属性。
 
-### P3-10. 门面 `extract_file` 目录输出硬编码 `extracted.bin` 且非原子写
+### P3-10. 门面 `extract_file` 目录输出硬编码 `extracted.bin`（原子写半项已修复）
 
-**位置**：`facade.rs:308-324`
+**位置**：`facade.rs:299-328`
 
-结构域 `read` 目录输出用 metadata 文件名 + `sanitize_filename`；内容域 `extract_file` 目录输出固定 `extracted.bin`（内容域确实没有文件名元数据，行为可解释）且直接 `fs::write` 非原子（原文件可能被截断后写失败）。此项是 2026-10-25 全面审查的结构域相邻遗留项（该报告附录 B 已列），本报告收录仅为完整性：结构域 `read` 的对应路径（`write_payload_to`）是清洗 + 直接创建，本身也是"创建失败即报错"，无截断风险——两者实际风险不对称。
+结构域 `read` 目录输出用 metadata 文件名 + `sanitize_filename`；内容域 `extract_file` 目录输出固定 `extracted.bin`（内容域确实没有文件名元数据，行为可解释）。本报告审查期间（commit `d179e1f`，2026-10-25 18:08），其"直接 `fs::write` 非原子写、中途失败留下半截文件"的半项已由并发批次修复（改走 `commit::write_bytes_atomic` 的 temp+fsync+rename 路径）；**剩余半项**是目录输出的固定文件名与结构域 `read`（metadata 文件名 + 清洗）口径不一致，属文档/一致性说明范畴。
 
-**建议**：`extract_file` 目录输出加防覆盖检查（已有）+ 临时文件原子提交（复用 `commit_carrier_bytes` 或简单 write-rename）；文档写明与结构域 `read` 的文件名差异。
+**建议**：`extract_file` doc 写明目录输出固定为 `extracted.bin` 及其缘由（内容域无文件名元数据）；如需与结构域对齐，可让调用方传入文件名参数。
 
 ### P3-11. 结构域与内容域的默认 KDF 迭代数不同，跨域文档易混淆
 

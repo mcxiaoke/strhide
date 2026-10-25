@@ -720,23 +720,25 @@ fn parse_isobmff(data: &[u8]) -> Result<IsobmffMeta, StrHideError> {
     let mut meta_span = None;
 
     while pos + 8 <= data.len() {
-        let (bsize, _) = read_box_header(data, pos)?;
+        let (bsize, bhdr) = read_box_header(data, pos)?;
         if bsize == 0 || pos + bsize > data.len() {
             break;
         }
         let fcc: [u8; 4] = data[pos + 4..pos + 8].try_into().unwrap();
         top_boxes.push((pos, bsize, fcc));
         if &fcc == b"meta" {
-            meta_span = Some((pos, bsize));
+            meta_span = Some((pos, bsize, bhdr));
         }
         pos += bsize;
     }
 
-    let (meta_off, meta_sz) = meta_span
+    let (meta_off, meta_sz, meta_hdr) = meta_span
         .ok_or_else(|| StrHideError::CorruptedData("No meta box found in HEIF container".into()))?;
 
-    // Parse subboxes inside meta (skip 8-byte box header + 4-byte fullbox flags)
-    let meta_body_start = meta_off + 12;
+    // Subboxes start after the box header (8 bytes, or 16 for a `largesize`
+    // box) plus the 4-byte fullbox version/flags. Assuming 8 put the walk 8
+    // bytes into the first child for a large `meta`.
+    let meta_body_start = meta_off + meta_hdr + 4;
     let meta_end = meta_off + meta_sz;
     let mut mpos = meta_body_start;
 
@@ -1194,5 +1196,57 @@ mod tests {
             BridgeTargetKind::DirectJpeg { item_id } => assert_eq!(item_id, 1),
             other => panic!("expected DirectJpeg, got {other:?}"),
         }
+    }
+
+    /// A `meta` box using the 64-bit `largesize` form has a 16-byte header; the
+    /// walk used to assume 8 and started 8 bytes into the first child, so every
+    /// span was garbage and the bridge fell back to the full-file JPEG scan.
+    #[test]
+    fn large_size_meta_box_still_parses() {
+        fn mk_large_box(fcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let mut b = Vec::with_capacity(16 + payload.len());
+            b.extend_from_slice(&1u32.to_be_bytes());
+            b.extend_from_slice(fcc);
+            b.extend_from_slice(&((16 + payload.len()) as u64).to_be_bytes());
+            b.extend_from_slice(payload);
+            b
+        }
+
+        let mut infe_body = vec![2u8, 0, 0, 0]; // infe version 2
+        infe_body.extend_from_slice(&1u16.to_be_bytes()); // item_ID
+        infe_body.extend_from_slice(&0u16.to_be_bytes()); // protection
+        infe_body.extend_from_slice(b"jpeg");
+        let infe = mk_box(b"infe", &infe_body);
+
+        let mut iinf_body = mk_fullbox(0, &1u16.to_be_bytes()); // entry count
+        iinf_body.extend_from_slice(&infe);
+        let iinf = mk_box(b"iinf", &iinf_body);
+
+        let mut iloc_body = mk_fullbox(0, &[]);
+        iloc_body.push(0x44); // offset_size=4, length_size=4
+        iloc_body.push(0x00); // base_offset_size=0
+        iloc_body.extend_from_slice(&1u16.to_be_bytes()); // item count
+        iloc_body.extend_from_slice(&1u16.to_be_bytes()); // item_ID
+        iloc_body.extend_from_slice(&0u16.to_be_bytes()); // data_reference_index
+        iloc_body.extend_from_slice(&1u16.to_be_bytes()); // extent count
+        iloc_body.extend_from_slice(&100u32.to_be_bytes()); // extent offset
+        iloc_body.extend_from_slice(&8u32.to_be_bytes()); // extent length
+        let iloc = mk_box(b"iloc", &iloc_body);
+
+        let mut meta_body = mk_fullbox(0, &[]);
+        meta_body.extend_from_slice(&iinf);
+        meta_body.extend_from_slice(&iloc);
+        let meta = mk_large_box(b"meta", &meta_body);
+
+        let mut file = mk_box(b"ftyp", b"heic    ");
+        file.extend_from_slice(&meta);
+
+        let parsed = parse_isobmff(&file).expect("large-size meta must parse");
+        assert_eq!(parsed.items.len(), 1, "the iloc item must be found");
+        assert_eq!(parsed.items[0].item_id, 1);
+        assert_eq!(parsed.items[0].item_type, *b"jpeg");
+        assert_eq!(parsed.items[0].extents.len(), 1);
+        assert_eq!(parsed.items[0].extents[0].offset, 100);
+        assert_eq!(parsed.items[0].extents[0].length, 8);
     }
 }
