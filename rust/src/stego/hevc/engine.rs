@@ -17,13 +17,15 @@ use crate::stego::format::HevcFormatProfile;
 use crate::stego::hevc::bitstream::{compute_hevc_cover_digest, parse_annex_b_spans, rbsp_to_nal};
 use crate::stego::hevc::heif_boxes::parse_heif_targets;
 use crate::stego::hevc::slot::{BinOp, CabacRecorder, StegoSlot, SubstreamRecord};
-use crate::stego::hevc::sniff::{HevcCarrierKind, sniff_hevc_carrier};
+use crate::stego::hevc::sniff::{HevcCarrierKind, NAL_SPS_NUT, sniff_hevc_carrier};
+use crate::stego::{SafetyLevel, StegoCapacityInfo};
 use oxideav_h265::cabac::ContextModel;
 use oxideav_h265::encoder::bitwriter::BitWriter;
 use oxideav_h265::encoder::cabac::CabacEncoder;
 use rust_h265::HEVC_CONTEXTS;
 use rust_h265::decoder::Decoder;
 use rust_h265::nal::parse_nal;
+use rust_h265::{NalUnitType, parse_sps};
 
 /// Derive the 4-byte header magic from the format's magic label and the
 /// effective secret.
@@ -109,6 +111,111 @@ pub fn probe_hevc_capacity(carrier: &[u8], fmt: &HevcFormatProfile) -> Result<us
     // Rate 1/2: ~2 slots per payload bit
     let available_bits = (total_slots / 2).saturating_sub(header_bits);
     Ok(available_bits / 8)
+}
+
+/// Extracts the picture dimensions `(width, height)` in luma samples from the carrier's SPS.
+pub fn extract_hevc_dimensions(carrier: &[u8]) -> Result<(u32, u32), StrHideError> {
+    let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
+        StrHideError::UnsupportedFormat(
+            "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
+        )
+    })?;
+
+    match kind {
+        HevcCarrierKind::HeifContainer => {
+            let target = parse_heif_targets(carrier)
+                .map_err(|e| StrHideError::UnsupportedFormat(format!("HEIF parse error: {e}")))?;
+            for ps in &target.parameter_sets {
+                if let Some(unit) = parse_nal(ps)
+                    && unit.nal_unit_type == NalUnitType::Sps
+                    && let Ok(sps) = parse_sps(&unit.rbsp)
+                {
+                    return Ok((sps.cropped_width(), sps.cropped_height()));
+                }
+            }
+        }
+        HevcCarrierKind::AnnexBStream => {
+            let spans = parse_annex_b_spans(carrier);
+            for span in &spans {
+                if span.nal_type == NAL_SPS_NUT {
+                    let end = span.end_offset().min(carrier.len());
+                    if let Some(unit) = parse_nal(&carrier[span.header_offset..end])
+                        && let Ok(sps) = parse_sps(&unit.rbsp)
+                    {
+                        return Ok((sps.cropped_width(), sps.cropped_height()));
+                    }
+                }
+            }
+        }
+        HevcCarrierKind::Mp4Container => {}
+    }
+
+    Err(StrHideError::General(
+        "No valid SPS found in HEVC carrier".into(),
+    ))
+}
+
+/// Full capacity probe returning structured [`StegoCapacityInfo`], with recommended
+/// payload capacity scaled by the caller's [`SafetyLevel`] and carrier dimensions.
+pub fn probe_hevc_capacity_info(
+    carrier: &[u8],
+    fmt: &HevcFormatProfile,
+    safety_level: SafetyLevel,
+) -> Result<StegoCapacityInfo, StrHideError> {
+    let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
+        StrHideError::UnsupportedFormat(
+            "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
+        )
+    })?;
+    let format_name = match kind {
+        HevcCarrierKind::HeifContainer => "HEIF/HEVC",
+        HevcCarrierKind::AnnexBStream => "HEVC-AnnexB",
+        HevcCarrierKind::Mp4Container => "MP4/HEVC",
+    };
+
+    let slots = scan_hevc_slots(carrier)?;
+    let total_slots = slots.len();
+    let trellis = StcTrellis::from_seed_grouped(CAPACITY_PROBE_SEED, fmt.stc_h, fmt.stc_u)?;
+    let header_bits = fmt.header_bytes * 8;
+    let min_needed_slots = trellis.slots_for(header_bits);
+
+    let max_raw_payload_bytes = if total_slots < min_needed_slots {
+        0
+    } else {
+        let available_bits = (total_slots / 2).saturating_sub(header_bits);
+        available_bits / 8
+    };
+
+    // Extract picture dimensions from SPS to derive true pixel count
+    let (width, height) = extract_hevc_dimensions(carrier).unwrap_or((0, 0));
+    let total_pixels = (width as usize) * (height as usize);
+    let total_elements = if total_pixels > 0 {
+        total_pixels
+    } else {
+        total_slots
+    };
+
+    // Safety-bounded recommended capacity:
+    // min(bpp_limit * total_pixels, available_slots / target_ratio)
+    let bpp_bits = (total_elements as f64 * safety_level.bpp_limit()).floor() as usize;
+    let ratio_bits = (total_slots as f64 / safety_level.target_ratio()).floor() as usize;
+    let target_bits = bpp_bits.min(ratio_bits);
+    let recommended_max_bytes = (target_bits / 8)
+        .saturating_sub(fmt.header_bytes)
+        .min(max_raw_payload_bytes);
+
+    Ok(StegoCapacityInfo {
+        format: format_name.into(),
+        algorithm: "HEVC-CABAC-InPlace".into(),
+        total_elements,
+        available_slots: total_slots,
+        max_raw_payload_bytes,
+        max_raw_is_grouped: false,
+        recommended_max_bytes,
+        estimated_change_rate: 0.25,
+        safety_level: safety_level.as_str().into(),
+        safety_bpp_limit: safety_level.bpp_limit(),
+    })
 }
 
 /// Embed a payload into an HEVC/HEIC carrier using content-adaptive sign-bit steganography.

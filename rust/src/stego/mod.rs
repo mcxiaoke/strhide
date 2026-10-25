@@ -406,53 +406,23 @@ pub fn probe_carrier_capacity_with_profile(
         if options.algorithm.as_deref() == Some("hevc")
             || options.algorithm.as_deref() == Some("cabac")
         {
-            let cap = hevc::probe_hevc_capacity(carrier_bytes, profile.hevc_format())?;
-            Ok(StegoCapacityInfo {
-                format: "HEIF/HEVC".into(),
-                algorithm: "HEVC-CABAC-InPlace".into(),
-                total_elements: cap * 16,
-                available_slots: cap * 16,
-                max_raw_payload_bytes: cap,
-                max_raw_is_grouped: false,
-                recommended_max_bytes: cap,
-                estimated_change_rate: 0.25,
-                safety_level: options.safety.level.as_str().into(),
-                safety_bpp_limit: options.safety.level.bpp_limit(),
-            })
+            hevc::probe_hevc_capacity_info(
+                carrier_bytes,
+                profile.hevc_format(),
+                options.safety.level,
+            )
         } else {
             match heif::probe_heif_bridge_capacity(carrier_bytes, options, profile) {
                 Ok(info) => Ok(info),
-                Err(_) => {
-                    let cap = hevc::probe_hevc_capacity(carrier_bytes, profile.hevc_format())?;
-                    Ok(StegoCapacityInfo {
-                        format: "HEIF/HEVC".into(),
-                        algorithm: "HEVC-CABAC-InPlace".into(),
-                        total_elements: cap * 16,
-                        available_slots: cap * 16,
-                        max_raw_payload_bytes: cap,
-                        max_raw_is_grouped: false,
-                        recommended_max_bytes: cap,
-                        estimated_change_rate: 0.25,
-                        safety_level: options.safety.level.as_str().into(),
-                        safety_bpp_limit: options.safety.level.bpp_limit(),
-                    })
-                }
+                Err(_) => hevc::probe_hevc_capacity_info(
+                    carrier_bytes,
+                    profile.hevc_format(),
+                    options.safety.level,
+                ),
             }
         }
     } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {
-        let cap = hevc::probe_hevc_capacity(carrier_bytes, profile.hevc_format())?;
-        Ok(StegoCapacityInfo {
-            format: "HEVC-AnnexB".into(),
-            algorithm: "HEVC-CABAC-InPlace".into(),
-            total_elements: cap * 16,
-            available_slots: cap * 16,
-            max_raw_payload_bytes: cap,
-            max_raw_is_grouped: false,
-            recommended_max_bytes: cap,
-            estimated_change_rate: 0.25,
-            safety_level: options.safety.level.as_str().into(),
-            safety_bpp_limit: options.safety.level.bpp_limit(),
-        })
+        hevc::probe_hevc_capacity_info(carrier_bytes, profile.hevc_format(), options.safety.level)
     } else {
         Err(StrHideError::UnsupportedFormat(
             "Content-adaptive steganography requires a PNG, JPEG, HEIF, or HEVC carrier".into(),

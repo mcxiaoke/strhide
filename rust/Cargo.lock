@@ -515,7 +515,7 @@ dependencies = [
 [[package]]
 name = "rust_h265"
 version = "0.1.0"
-source = "git+https://github.com/mcxiaoke/rust_h265.git?tag=v1-20261024#3622e199c7e970b377a8abd6fe045ee3a22fbe9f"
+source = "git+https://github.com/mcxiaoke/rust_h265.git?tag=v1-20261025#7387b16bc52e797e3267b7513cbab7a26f79af5b"
 
 [[package]]
 name = "serde"
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "strhide"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "aes-gcm",
  "base64",

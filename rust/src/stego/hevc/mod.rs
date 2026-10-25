@@ -19,4 +19,7 @@ pub mod slot;
 #[doc(hidden)]
 pub mod sniff;
 
-pub use engine::{embed_hevc, extract_hevc, probe_hevc_capacity};
+pub use engine::{
+    embed_hevc, extract_hevc, extract_hevc_dimensions, probe_hevc_capacity,
+    probe_hevc_capacity_info,
+};

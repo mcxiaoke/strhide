@@ -206,3 +206,46 @@ fn test_hevc_img_1842_payload_32k() {
     verify_frame_decodes(&stego);
     println!("IMG_1842 with 32KB payload PASSED 100%!");
 }
+
+#[test]
+fn test_hevc_capacity_safety_scaling_and_sps_dimensions() {
+    let file_path = "../temp/github/heic-rs/tests/fixtures/gradient-512.heic";
+    if !Path::new(file_path).exists() {
+        return;
+    }
+    let orig_carrier = fs::read(file_path).expect("read carrier");
+
+    // 1. Dimensions parsed from SPS
+    let (w, h) = strhide::stego::hevc::extract_hevc_dimensions(&orig_carrier)
+        .expect("extract hevc dimensions from SPS");
+    assert_eq!(
+        (w, h),
+        (512, 512),
+        "Expected 512x512 from gradient-512 fixture"
+    );
+
+    // 2. Capacity probe info with different safety levels
+    let levels = [
+        strhide::stego::SafetyLevel::Paranoid,
+        strhide::stego::SafetyLevel::High,
+        strhide::stego::SafetyLevel::Balanced,
+    ];
+
+    let mut prev_rec = 0;
+    for &lvl in &levels {
+        let options = strhide::stego::StegoOptions::default()
+            .with_algorithm("hevc")
+            .with_safety(lvl, strhide::stego::SafetyEnforcement::Advisory);
+        let profile = strhide::params::Profile::default();
+        let info =
+            strhide::stego::probe_carrier_capacity_with_profile(&orig_carrier, &options, &profile)
+                .expect("probe capacity info");
+
+        assert_eq!(info.total_elements, 512 * 512);
+        assert!(info.available_slots > 0);
+        assert!(info.max_raw_payload_bytes > 0);
+        assert!(info.recommended_max_bytes <= info.max_raw_payload_bytes);
+        assert!(info.recommended_max_bytes >= prev_rec);
+        prev_rec = info.recommended_max_bytes;
+    }
+}

@@ -169,11 +169,8 @@ ARCHITECTURE.md 的 `StegoOptions` 字段清单修正（补 `extract_params`、J
    `StegoOptions::with_safety`、`stego::io`、`SafetyLevel: FromStr`），CarrotHash
    约 150 行自建 I/O 与 4 处 safety 同步可删除；属另一仓库，未在本期提交范围。
    迁移配方见 `docs/api/STEGO-API.md` §3。
-2. **HEVC 容量与安全档位**：`probe_hevc_capacity` 的 `recommended_max_bytes` 仍为
-   物理容量，不随 `--safety` 折算（需解析 SPS 帧尺寸）；已在 STEGO-API.md 明示。
-3. **非 stego 命令（write/read/restore…）的 help 双份维护**：本期单一事实源化仅覆盖
-   stego 范围参数；其余参数沿用 clap 内联英文 + i18n 覆盖，模式与守卫测试已就绪，
-   可按同法渐进收敛。
+2. **HEVC 容量与安全档位**：`probe_hevc_capacity_info` 已实现解析 SPS 帧尺寸（`extract_hevc_dimensions`），并接入 `bpp_limit` 与 `target_ratio` 推荐容量数学模型（2026-10-25 解决）。
+3. **非 stego 命令（write/read/restore…）的 help 双份维护**：全量命令的 52 处内联 `help` 属性已全部清理，单一事实源收敛至 `i18n::messages`，经 `tests/cli_help_guard.rs` 全量断言验证（2026-10-25 解决）。
 4. **HEVC 头部不自描述 h/u**：如需方言外可读，需线格式扩展位（v3 级变更），
    当前以 `HevcFormatProfile` 方言约束替代。
 5. **conseal 数值预言机回归**（来源文档 G 项）：仍未做，独立事项。
