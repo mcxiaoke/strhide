@@ -513,9 +513,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust_h265"
-version = "0.1.0"
-source = "git+https://github.com/mcxiaoke/rust_h265.git?tag=v1-20261025-2#aeadd6d0c18b4026350f670549d030e94a701817"
+name = "rusty_h265"
+version = "0.6.2"
+source = "git+https://github.com/mcxiaoke/rusty_h265.git?tag=v1-20261025#fcef5b89840d1bd2023497a5a9ade42d5b28c706"
+dependencies = [
+ "rusty_h265-accel",
+]
+
+[[package]]
+name = "rusty_h265-accel"
+version = "0.6.2"
+source = "git+https://github.com/mcxiaoke/rusty_h265.git?tag=v1-20261025#fcef5b89840d1bd2023497a5a9ade42d5b28c706"
 
 [[package]]
 name = "serde"
@@ -600,7 +608,7 @@ dependencies = [
  "rand",
  "rayon",
  "rpassword",
- "rust_h265",
+ "rusty_h265",
  "serde",
  "serde_json",
  "sha2",

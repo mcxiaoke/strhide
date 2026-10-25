@@ -547,35 +547,27 @@ pub mod hevc_stego {
     use std::fs;
     use std::path::Path;
 
-    use rust_h265::decoder::Decoder;
-    use rust_h265::nal::parse_nal;
+    use rusty_h265::Decoder;
     use strhide::stego::hevc::heif_boxes::parse_heif_targets;
     use strhide::stego::hevc::{embed_hevc, extract_hevc, probe_hevc_capacity};
 
-    /// Verify that an HEIC file can be decoded to a valid frame by rust_h265.
+    /// Verify that an HEIC file can be decoded to a valid frame by rusty_h265.
     fn verify_frame_decodes(carrier_bytes: &[u8]) {
         let target = parse_heif_targets(carrier_bytes).expect("parse targets");
         let mut decoder = Decoder::new();
         for ps in &target.parameter_sets {
-            if let Some(unit) = parse_nal(ps) {
-                let _ = decoder.decode_nal(&unit);
-            }
+            let _ = decoder.push_nal(ps, None);
         }
-        let mut decoded_any = false;
         for span in &target.slice_spans {
-            let slice_bytes = &carrier_bytes[span.start..span.end()];
-            if let Some(unit) = parse_nal(slice_bytes)
-                && let Ok(Some(frame)) = decoder.decode_nal(&unit)
-            {
-                assert!(frame.width > 0 && frame.height > 0);
-                decoded_any = true;
-                break;
-            }
+            let _ = decoder.push_nal(&carrier_bytes[span.start..span.end()], None);
         }
-        assert!(
-            decoded_any,
-            "Failed to decode at least one full frame from carrier!"
-        );
+        // A picture is only handed out once the decoder sees the *next* one
+        // start, so a still image needs `flush` before `next_frame` yields.
+        decoder.flush();
+        let frame = decoder
+            .next_frame()
+            .expect("Failed to decode at least one full frame from carrier!");
+        assert!(frame.width > 0 && frame.height > 0);
     }
 
     #[test]

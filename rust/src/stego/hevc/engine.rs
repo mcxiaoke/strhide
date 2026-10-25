@@ -22,10 +22,9 @@ use crate::stego::{SafetyLevel, StegoCapacityInfo};
 use oxideav_h265::cabac::ContextModel;
 use oxideav_h265::encoder::bitwriter::BitWriter;
 use oxideav_h265::encoder::cabac::CabacEncoder;
-use rust_h265::HEVC_CONTEXTS;
-use rust_h265::decoder::Decoder;
-use rust_h265::nal::parse_nal;
-use rust_h265::{NalUnitType, parse_sps};
+use rusty_h265::Decoder;
+use rusty_h265::observer::ENCODER_CONTEXTS;
+use rusty_h265::ps::parse_sps;
 
 /// Derive the 4-byte header magic from the format's magic label and the
 /// effective secret.
@@ -45,36 +44,25 @@ fn derive_magic(label: &[u8], secret: &[u8]) -> [u8; 4] {
     [digest[0], digest[1], digest[2], digest[3]]
 }
 
-/// Helper converting NalUnitType to raw 6-bit NAL unit type integer without modifying upstream rust_h265.
-fn nal_type_to_u8(t: rust_h265::NalUnitType) -> u8 {
-    match t {
-        rust_h265::NalUnitType::TrailN => 0,
-        rust_h265::NalUnitType::TrailR => 1,
-        rust_h265::NalUnitType::TsaN => 2,
-        rust_h265::NalUnitType::TsaR => 3,
-        rust_h265::NalUnitType::StsaN => 4,
-        rust_h265::NalUnitType::StsaR => 5,
-        rust_h265::NalUnitType::RadlN => 6,
-        rust_h265::NalUnitType::RadlR => 7,
-        rust_h265::NalUnitType::RaslN => 8,
-        rust_h265::NalUnitType::RaslR => 9,
-        rust_h265::NalUnitType::BlaWLp => 16,
-        rust_h265::NalUnitType::BlaWRadl => 17,
-        rust_h265::NalUnitType::BlaNLp => 18,
-        rust_h265::NalUnitType::IdrWRadl => 19,
-        rust_h265::NalUnitType::IdrNLp => 20,
-        rust_h265::NalUnitType::Cra => 21,
-        rust_h265::NalUnitType::Vps => 32,
-        rust_h265::NalUnitType::Sps => 33,
-        rust_h265::NalUnitType::Pps => 34,
-        rust_h265::NalUnitType::Aud => 35,
-        rust_h265::NalUnitType::Eos => 36,
-        rust_h265::NalUnitType::Eob => 37,
-        rust_h265::NalUnitType::Fd => 38,
-        rust_h265::NalUnitType::PrefixSei => 39,
-        rust_h265::NalUnitType::SuffixSei => 40,
-        rust_h265::NalUnitType::Other(v) => v,
-    }
+/// The three header fields the writer needs back, read straight off the 2-byte
+/// NAL header (§7.3.1.2). The decoder hands us the same stream but not the
+/// envelope, and the span table only covers Annex-B carriers.
+fn nal_header_fields(nal: &[u8]) -> (u8, u8, u8) {
+    debug_assert!(nal.len() >= 2, "a NAL header is two bytes");
+    let (b0, b1) = (nal[0], nal[1]);
+    (
+        (b0 >> 1) & 0x3F,
+        ((b0 & 0x01) << 5) | (b1 >> 3),
+        (b1 & 0x07).saturating_sub(1),
+    )
+}
+
+/// RBSP payload of a NAL unit (§7.4.2 emulation prevention removal).
+///
+/// The decoder applies exactly this transform before CABAC, so the substream
+/// byte offsets in the journal index the buffer this returns.
+fn nal_rbsp(nal: &[u8]) -> Vec<u8> {
+    rusty_h265::nal::unescape(&nal[2..]).data
 }
 
 /// Fixed seed for the capacity probe's trellis. Only `slots_for` is used
@@ -160,6 +148,26 @@ pub fn probe_hevc_capacity(carrier: &[u8], fmt: &HevcFormatProfile) -> Result<us
     Ok(available_bits / 8)
 }
 
+/// Cropped output geometry of an SPS in luma samples (§7.4.3.2.1).
+///
+/// `rusty_h265` reports the coded size plus the conformance-window offsets in
+/// chroma units; the crop is scaled by `SubWidthC`/`SubHeightC` (Table 6-1).
+/// For 4:2:0 — every carrier this engine accepts — that is 2/2.
+fn sps_dimensions(rbsp: &[u8]) -> Option<(u32, u32)> {
+    let sps = parse_sps(rbsp).ok()?;
+    let (sub_w, sub_h): (u32, u32) = match sps.chroma_format_idc {
+        1 => (2, 2),
+        2 => (2, 1),
+        _ => (1, 1),
+    };
+    let crop_w = sub_w.saturating_mul(sps.conf_win[0].saturating_add(sps.conf_win[1]));
+    let crop_h = sub_h.saturating_mul(sps.conf_win[2].saturating_add(sps.conf_win[3]));
+    Some((
+        sps.width.saturating_sub(crop_w),
+        sps.height.saturating_sub(crop_h),
+    ))
+}
+
 /// Extracts the picture dimensions `(width, height)` in luma samples from the carrier's SPS.
 pub fn extract_hevc_dimensions(carrier: &[u8]) -> Result<(u32, u32), StrHideError> {
     let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
@@ -173,11 +181,11 @@ pub fn extract_hevc_dimensions(carrier: &[u8]) -> Result<(u32, u32), StrHideErro
             let target = parse_heif_targets(carrier)
                 .map_err(|e| StrHideError::UnsupportedFormat(format!("HEIF parse error: {e}")))?;
             for ps in &target.parameter_sets {
-                if let Some(unit) = parse_nal(ps)
-                    && unit.nal_unit_type == NalUnitType::Sps
-                    && let Ok(sps) = parse_sps(&unit.rbsp)
+                if ps.len() > 2
+                    && (ps[0] >> 1) & 0x3F == NAL_SPS_NUT
+                    && let Some(dims) = sps_dimensions(&nal_rbsp(ps))
                 {
-                    return Ok((sps.cropped_width(), sps.cropped_height()));
+                    return Ok(dims);
                 }
             }
         }
@@ -186,10 +194,11 @@ pub fn extract_hevc_dimensions(carrier: &[u8]) -> Result<(u32, u32), StrHideErro
             for span in &spans {
                 if span.nal_type == NAL_SPS_NUT {
                     let end = span.end_offset().min(carrier.len());
-                    if let Some(unit) = parse_nal(&carrier[span.header_offset..end])
-                        && let Ok(sps) = parse_sps(&unit.rbsp)
+                    let nal = &carrier[span.header_offset..end];
+                    if nal.len() > 2
+                        && let Some(dims) = sps_dimensions(&nal_rbsp(nal))
                     {
-                        return Ok((sps.cropped_width(), sps.cropped_height()));
+                        return Ok(dims);
                     }
                 }
             }
@@ -652,7 +661,7 @@ fn encode_substream(
 ) -> Result<(Vec<u8>, Vec<SlotBitTrace>), StrHideError> {
     let mut enc = CabacEncoder::new();
     let mut writer = BitWriter::new();
-    let mut ctx_array = [ContextModel::init(154, 26); HEVC_CONTEXTS];
+    let mut ctx_array = [ContextModel::init(154, 26); ENCODER_CONTEXTS];
     for (model, &state) in ctx_array.iter_mut().zip(sub.init_contexts.iter()) {
         *model = ContextModel {
             p_state_idx: state >> 1,
@@ -675,7 +684,7 @@ fn encode_substream(
                 // caller marks the substream unsupported.
                 let ctx = ctx_array.get_mut(idx).ok_or_else(|| {
                     StrHideError::CorruptedData(format!(
-                        "CABAC context index {idx} is out of range (HEVC_CONTEXTS = {HEVC_CONTEXTS})"
+                        "CABAC context index {idx} is out of range (ENCODER_CONTEXTS = {ENCODER_CONTEXTS})"
                     ))
                 })?;
                 enc.encode_decision(&mut writer, ctx, bit);
@@ -950,14 +959,17 @@ fn record_carrier_state(
     let mut all_slots = Vec::new();
 
     let mut decoder = Decoder::new();
+    // First decode error, kept so a carrier that yields no slices can say why
+    // instead of presenting as "0 bytes of capacity".
+    let mut decode_error: Option<String> = None;
 
     let digest_inputs = match kind {
         HevcCarrierKind::HeifContainer => {
             let target = parse_heif_targets(carrier)
                 .map_err(|e| StrHideError::UnsupportedFormat(format!("HEIF parse error: {e}")))?;
             for ps in &target.parameter_sets {
-                if let Some(unit) = parse_nal(ps) {
-                    let _ = decoder.decode_nal(&unit);
+                if let Err(e) = decoder.push_nal(ps, None) {
+                    decode_error.get_or_insert_with(|| format!("parameter set: {e}"));
                 }
             }
             let parameter_sets = target
@@ -978,20 +990,30 @@ fn record_carrier_state(
                     continue;
                 }
                 let slice_bytes = &carrier[range.clone()];
-                if let Some(slice_unit) = parse_nal(slice_bytes) {
-                    let mut recorder = CabacRecorder::with_slice(slice_idx);
-                    if decoder
-                        .decode_nal_with_observer(&slice_unit, &mut recorder)
-                        .is_ok()
-                    {
-                        let slot_map =
-                            absorb_recorder(&mut recorder, &slice_unit.rbsp, &mut all_slots);
+                if slice_bytes.len() < 2 {
+                    continue;
+                }
+                let mut recorder = CabacRecorder::with_slice(slice_idx);
+                let decoded = decoder.decode_nal_with_observer(slice_bytes, &mut recorder);
+                drain_frames(&mut decoder);
+                match decoded {
+                    Err(e) => {
+                        decode_error.get_or_insert_with(|| e.to_string());
+                    }
+                    // A picture the decoder skipped (§8.1.3: RASL with no
+                    // leading IRAP, or a non-VCL NAL) records nothing and must
+                    // not consume a slice index.
+                    Ok(_) if recorder.substreams.is_empty() => {}
+                    Ok(_) => {
+                        let rbsp = nal_rbsp(slice_bytes);
+                        let slot_map = absorb_recorder(&mut recorder, &rbsp, &mut all_slots);
+                        let (nal_type, layer_id, temporal_id) = nal_header_fields(slice_bytes);
                         slice_contexts.push(SliceContext {
                             carrier_span: range,
-                            nal_type: nal_type_to_u8(slice_unit.nal_unit_type),
-                            layer_id: slice_unit.nuh_layer_id,
-                            temporal_id: slice_unit.temporal_id,
-                            orig_rbsp: slice_unit.rbsp.clone().into_owned(),
+                            nal_type,
+                            layer_id,
+                            temporal_id,
+                            orig_rbsp: rbsp,
                             ops: recorder.ops,
                             substreams: recorder.substreams,
                             slot_map,
@@ -1007,8 +1029,8 @@ fn record_carrier_state(
             for span in &spans {
                 if span.is_param_set() {
                     let end = span.end_offset().min(carrier.len());
-                    if let Some(unit) = parse_nal(&carrier[span.header_offset..end]) {
-                        let _ = decoder.decode_nal(&unit);
+                    if let Err(e) = decoder.push_nal(&carrier[span.header_offset..end], None) {
+                        decode_error.get_or_insert_with(|| format!("parameter set: {e}"));
                     }
                 }
             }
@@ -1018,20 +1040,27 @@ fn record_carrier_state(
                 if span.is_vcl() {
                     let end = span.end_offset().min(carrier.len());
                     let range = span.header_offset..end;
-                    if let Some(unit) = parse_nal(&carrier[range.clone()]) {
-                        let mut recorder = CabacRecorder::with_slice(slice_idx);
-                        if decoder
-                            .decode_nal_with_observer(&unit, &mut recorder)
-                            .is_ok()
-                        {
-                            let slot_map =
-                                absorb_recorder(&mut recorder, &unit.rbsp, &mut all_slots);
+                    let slice_bytes = &carrier[range.clone()];
+                    if slice_bytes.len() < 2 {
+                        continue;
+                    }
+                    let mut recorder = CabacRecorder::with_slice(slice_idx);
+                    let decoded = decoder.decode_nal_with_observer(slice_bytes, &mut recorder);
+                    drain_frames(&mut decoder);
+                    match decoded {
+                        Err(e) => {
+                            decode_error.get_or_insert_with(|| e.to_string());
+                        }
+                        Ok(_) if recorder.substreams.is_empty() => {}
+                        Ok(_) => {
+                            let rbsp = nal_rbsp(slice_bytes);
+                            let slot_map = absorb_recorder(&mut recorder, &rbsp, &mut all_slots);
                             slice_contexts.push(SliceContext {
                                 carrier_span: range,
-                                nal_type: nal_type_to_u8(unit.nal_unit_type),
-                                layer_id: unit.nuh_layer_id,
-                                temporal_id: unit.temporal_id,
-                                orig_rbsp: unit.rbsp.clone().into_owned(),
+                                nal_type: span.nal_type,
+                                layer_id: span.layer_id,
+                                temporal_id: span.temporal_id,
+                                orig_rbsp: rbsp,
                                 ops: recorder.ops,
                                 substreams: recorder.substreams,
                                 slot_map,
@@ -1052,11 +1081,35 @@ fn record_carrier_state(
         }
     };
 
+    // A carrier the decoder refused outright (Range Extensions, >10-bit, a
+    // truncated stream) would otherwise surface as "0 bytes of capacity" --
+    // indistinguishable from a carrier that is simply too small. Name the
+    // reason instead of reporting an empty pool.
+    if slice_contexts.is_empty()
+        && let Some(reason) = decode_error
+    {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "HEVC carrier could not be decoded: {reason}"
+        )));
+    }
+
     Ok(CarrierRecord {
         slice_contexts,
         all_slots,
         digest_inputs,
     })
+}
+
+/// Drop every decoded picture the decoder has queued.
+///
+/// The decoder hands finished pictures out through a queue and only
+/// `next_frame` releases them; each entry pins its sample planes through an
+/// `Arc<Picture>` the DPB shares, so the buffers come back only when the last
+/// handle goes. This engine never looks at pixels — it wants the bin stream —
+/// so leaving the queue alone would hold one picture per frame of the carrier
+/// (12 MB each at 4K; a five-clip corpus peaked at 2.0 GB without this).
+fn drain_frames(decoder: &mut Decoder) {
+    while decoder.next_frame().is_ok() {}
 }
 
 /// Move a slice's recorded slots into the carrier-wide slot pool.

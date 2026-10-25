@@ -13,8 +13,7 @@
 
 use std::fs;
 
-use rust_h265::decoder::Decoder;
-use rust_h265::nal::parse_nal;
+use rusty_h265::Decoder;
 use strhide::stego::hevc::heif_boxes::parse_heif_targets;
 use strhide::stego::hevc::{embed_hevc, extract_hevc, probe_hevc_capacity};
 
@@ -24,20 +23,17 @@ fn frame_decodes(carrier: &[u8]) -> bool {
     };
     let mut decoder = Decoder::new();
     for ps in &target.parameter_sets {
-        if let Some(unit) = parse_nal(ps) {
-            let _ = decoder.decode_nal(&unit);
-        }
+        let _ = decoder.push_nal(ps, None);
     }
     for span in &target.slice_spans {
-        if let Some(unit) = parse_nal(&carrier[span.start..span.end()])
-            && let Ok(Some(frame)) = decoder.decode_nal(&unit)
-            && frame.width > 0
-            && frame.height > 0
-        {
-            return true;
-        }
+        let _ = decoder.push_nal(&carrier[span.start..span.end()], None);
     }
-    false
+    // A still image only yields its picture after `flush`: the decoder closes a
+    // picture when the next one starts, which never happens for one image.
+    decoder.flush();
+    decoder
+        .next_frame()
+        .is_ok_and(|f| f.width > 0 && f.height > 0)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

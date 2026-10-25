@@ -2,6 +2,8 @@
 
 use alloc::vec::Vec;
 
+use rusty_h265::observer::ENCODER_CONTEXTS;
+
 /// A recorded CABAC arithmetic decoding operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinOp {
@@ -47,8 +49,9 @@ pub struct SubstreamRecord {
     pub op_start: usize,
     /// Offset in the slice's `ops` Vec where this substream ends.
     pub op_end: usize,
-    /// Initial CABAC context model for this substream (179 bytes).
-    pub init_contexts: [u8; rust_h265::HEVC_CONTEXTS],
+    /// Initial CABAC context model for this substream (179 bytes: the native
+    /// decoder states widened to the encoder's slot layout).
+    pub init_contexts: [u8; ENCODER_CONTEXTS],
     /// Byte offset in the RBSP where this substream starts.
     pub rbsp_byte_start: usize,
     /// Byte offset in the RBSP where this substream ends.
@@ -210,7 +213,7 @@ impl CabacRecorder {
         &mut self,
         substream_idx: usize,
         rbsp_byte_start: usize,
-        init_contexts: &[u8; rust_h265::HEVC_CONTEXTS],
+        init_contexts: &[u8; ENCODER_CONTEXTS],
     ) {
         if let Some(prev) = self.substreams.last_mut() {
             prev.op_end = self.ops.len();
@@ -353,12 +356,12 @@ impl CabacRecorder {
     }
 }
 
-impl rust_h265::CabacObserver for CabacRecorder {
+impl rusty_h265::observer::CabacObserver for CabacRecorder {
     fn start_substream(
         &mut self,
         substream_idx: usize,
         rbsp_byte_start: usize,
-        init_contexts: &[u8; rust_h265::HEVC_CONTEXTS],
+        init_contexts: &[u8; ENCODER_CONTEXTS],
     ) {
         self.start_substream(substream_idx, rbsp_byte_start, init_contexts);
     }
