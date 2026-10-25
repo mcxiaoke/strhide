@@ -179,6 +179,16 @@ pub fn is_epb_safe_flip(data: &[u8], pos: usize, bit_idx: u8) -> bool {
 ///
 /// This provides a symmetric deterministic key derivation source that remains 100% constant
 /// across embedding and extraction, even after residual coefficient signs are flipped.
+///
+/// Only bytes that are immutable **by construction** are hashed: parameter sets
+/// in full, and for VCL NALs the 2-byte NAL header plus the NAL length. A
+/// fixed window over the slice header bytes is *not* safe: the first CABAC
+/// payload byte sits at `2 + slice_segment_header_bytes` and single-slice
+/// I-frame headers are routinely 3-8 bytes, so an 18-byte window covers
+/// rewritable CABAC data of the first CTU -- flipping a sign bit there drifted
+/// the digest and bricked extraction with the correct password
+/// (review 2026-10-25, S2). NAL lengths are stable because the re-encoder
+/// guarantees byte-length preservation (Delta = 0).
 pub fn compute_hevc_cover_digest(data: &[u8], spans: &[HevcNalSpan], salt: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(salt);
@@ -190,12 +200,11 @@ pub fn compute_hevc_cover_digest(data: &[u8], spans: &[HevcNalSpan], salt: &[u8]
             let end = span.end_offset().min(data.len());
             hasher.update(&data[span.header_offset..end]);
         } else if span.is_vcl() {
-            // For VCL slices, hash the 2-byte NAL header plus the first 16 bytes of slice header
-            // (which are never touched by residual steganography)
-            let header_end = (span.header_offset + 18)
+            let header_end = (span.header_offset + 2)
                 .min(span.end_offset())
                 .min(data.len());
             hasher.update(&data[span.header_offset..header_end]);
+            hasher.update((span.nal_len as u64).to_be_bytes());
         }
     }
 
@@ -306,15 +315,52 @@ mod tests {
         let spans = parse_annex_b_spans(&annex_b);
         let digest1 = compute_hevc_cover_digest(&annex_b, &spans, b"salt1");
 
-        // Mutate residual byte near the end (offset 28)
-        let mut modified = annex_b.clone();
-        let last_idx = modified.len() - 1;
-        modified[last_idx] ^= 0x01;
+        // Mutating residual bytes anywhere in the VCL NAL -- including the
+        // early CABAC region (NAL bytes 3..18) where short slice headers put
+        // the first CTU's bins, and the tail -- must leave the digest alone.
+        for vcl_byte in [3usize, 5, 10, 17, 21] {
+            let mut modified = annex_b.clone();
+            let pos = 10 + 4 + vcl_byte; // VPS NAL + start code prefix
+            modified[pos] ^= 0x01;
+            let digest2 = compute_hevc_cover_digest(&modified, &spans, b"salt1");
+            assert_eq!(
+                digest1, digest2,
+                "digest must ignore VCL NAL byte {vcl_byte} (CABAC payload)"
+            );
+        }
+    }
 
-        let digest2 = compute_hevc_cover_digest(&modified, &spans, b"salt1");
-        assert_eq!(
-            digest1, digest2,
-            "Digest must remain identical when residual flips"
+    /// The digest must still *bind* the carrier: the VCL NAL header byte and
+    /// the NAL length both feed it, so two streams that differ there derive
+    /// different keys.
+    #[test]
+    fn test_cover_digest_binds_nal_header_and_length() {
+        let mut annex_b = Vec::new();
+        annex_b.extend_from_slice(&[0, 0, 0, 1, 0x40, 0x01, 0x01, 0x02, 0x03, 0x04]);
+        annex_b.extend_from_slice(&[0, 0, 0, 1, 0x26, 0x01]);
+        annex_b.extend_from_slice(&[0x55; 20]);
+        let spans = parse_annex_b_spans(&annex_b);
+        let base = compute_hevc_cover_digest(&annex_b, &spans, b"salt1");
+
+        // Different slice type (NAL header byte): IDR_W_RADL -> IDR_N_LP.
+        let mut other_type = annex_b.clone();
+        other_type[14] = 0x28; // (20 << 1)
+        let spans2 = parse_annex_b_spans(&other_type);
+        assert_ne!(
+            base,
+            compute_hevc_cover_digest(&other_type, &spans2, b"salt1")
         );
+
+        // Different NAL length (one byte longer CABAC payload).
+        let mut longer = annex_b.clone();
+        longer.push(0x00);
+        let spans3 = parse_annex_b_spans(&longer);
+        assert_ne!(base, compute_hevc_cover_digest(&longer, &spans3, b"salt1"));
+
+        // Parameter set bytes still bind as before.
+        let mut ps = annex_b.clone();
+        ps[6] ^= 0x01;
+        let spans4 = parse_annex_b_spans(&ps);
+        assert_ne!(base, compute_hevc_cover_digest(&ps, &spans4, b"salt1"));
     }
 }

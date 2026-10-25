@@ -109,6 +109,116 @@ fn test_hevc_capacity_and_roundtrip_gradient() {
     println!("gradient-512.heic ALL PAYLOAD SIZES PASSED!");
 }
 
+/// A raw Annex-B stream rebuilt from the HEIC fixture's NAL units must survive
+/// a full embed/extract round trip.
+///
+/// The Annex-B cover digest used to hash an 18-byte window over every VCL NAL
+/// on the assumption that the first 16 bytes after the NAL header are slice
+/// header. On short slice headers (single-slice I frames: typically 3-6
+/// bytes) most of that window is the first CTU's CABAC payload, which
+/// embedding *does* rewrite, so the digest drifted and extraction failed with
+/// the correct password (review 2026-10-25, S2). The payload here is large
+/// enough that the STC solution flips sign bits inside the first CTU of the
+/// first slice -- exactly the region the old digest wrongly covered.
+#[test]
+fn test_hevc_annexb_roundtrip_from_heic_nals() {
+    let file_path = "../temp/github/heic-rs/tests/fixtures/gradient-512.heic";
+    if !Path::new(file_path).exists() {
+        return;
+    }
+    let heic = fs::read(file_path).expect("read carrier");
+
+    // Rebuild the HEVC bitstream as Annex-B: parameter sets first, then the
+    // slice segments, each behind a 4-byte start code.
+    let target = parse_heif_targets(&heic).expect("parse heif targets");
+    let mut annexb: Vec<u8> = Vec::new();
+    for ps in &target.parameter_sets {
+        annexb.extend_from_slice(&[0, 0, 0, 1]);
+        annexb.extend_from_slice(ps);
+    }
+    for span in &target.slice_spans {
+        annexb.extend_from_slice(&[0, 0, 0, 1]);
+        annexb.extend_from_slice(&heic[span.start..span.end()]);
+    }
+    assert!(
+        strhide::stego::hevc::sniff::is_hevc_annexb(&annexb),
+        "rebuilt stream must sniff as Annex-B HEVC"
+    );
+
+    let cap = probe_hevc_capacity(&annexb, &strhide::stego::format::DEFAULT_HEVC_FORMAT)
+        .expect("probe annex-b capacity");
+    assert!(cap >= 64, "gradient fixture should offer real capacity");
+    let len = cap.min(120);
+    let payload: Vec<u8> = (0..len).map(|i| (i * 37 % 251) as u8).collect();
+    let password = "AnnexBRoundTrip#2026";
+
+    let stego = embed_hevc(
+        &annexb,
+        &payload,
+        Some(password),
+        None,
+        &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+        strhide::stego::Freshness::Random,
+    )
+    .expect("embed into Annex-B stream");
+    assert_eq!(stego.len(), annexb.len(), "Delta = 0 must hold");
+
+    let extracted = extract_hevc(
+        &stego,
+        Some(password),
+        None,
+        &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+    )
+    .expect("extract with the correct password must succeed");
+    assert_eq!(extracted, payload, "Annex-B round trip must be exact");
+
+    let wrong = extract_hevc(
+        &stego,
+        Some("WrongPassword!"),
+        None,
+        &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+    );
+    assert!(wrong.is_err(), "wrong password must be rejected");
+}
+
+/// Deterministic regression for the Annex-B cover-digest window bug
+/// (review 2026-10-25, S2): `henc-133.hevc` has a 5-byte slice segment
+/// header, so the old 18-byte hash window covered ~11 bytes of the first
+/// CTU's CABAC payload. With this carrier, payload and seed the STC solution
+/// flips a sign bit inside that window: on the old code extraction fails with
+/// "Invalid HEVC stego signature" even though the password is correct.
+#[test]
+fn test_hevc_annexb_short_slice_header_roundtrip() {
+    let file_path = "../temp/github/oxideav-h265/tests/fixture_bytes/r460/henc-133.hevc";
+    if !Path::new(file_path).exists() {
+        return;
+    }
+    let annexb = fs::read(file_path).expect("read carrier");
+    assert!(strhide::stego::hevc::sniff::is_hevc_annexb(&annexb));
+
+    let payload: Vec<u8> = (0..200usize).map(|i| (i * 37 % 251) as u8).collect();
+    let password = "pw";
+    let stego = embed_hevc(
+        &annexb,
+        &payload,
+        Some(password),
+        None,
+        &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+        strhide::stego::Freshness::Seeded([2u8; 32]),
+    )
+    .expect("embed into short-header Annex-B stream");
+    assert_eq!(stego.len(), annexb.len(), "Delta = 0 must hold");
+
+    let extracted = extract_hevc(
+        &stego,
+        Some(password),
+        None,
+        &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+    )
+    .expect("correct password must extract a short-slice-header carrier");
+    assert_eq!(extracted, payload);
+}
+
 #[test]
 fn test_hevc_capacity_safety_scaling_and_sps_dimensions() {
     let file_path = "../temp/github/heic-rs/tests/fixtures/gradient-512.heic";
