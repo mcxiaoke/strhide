@@ -17,26 +17,26 @@
 ```bash
 cd rust
 cargo build --release       # 编译，产物在 target/release/strhide
-cargo test          		# 运行测试套件
-cargo test --test batch_corpus -- --ignored
-cargo test --test batch_stego -- --ignored
+cargo test          		# 运行常规测试套件（全部通过，0 ignored 混杂）
+cargo test local_batch_corpus -- --ignored
+cargo test local_batch_stego -- --ignored
 cargo fmt && cargo clippy   # 提交前格式化并修复所有 lint
 ```
 
 ### 语料批量回归（不随 `cargo test` 运行）
 
-`rust/tests/batch_corpus.rs` 对 `temp/testfiles` 全语料依次跑 拒绝 / 明文 / 加密 / stealth 场景，逐项校验 100% 还原。
+`rust/tests/local/local_corpus.rs` 对 `temp/testfiles` 全语料依次跑 拒绝 / 明文 / 加密 / stealth 场景，逐项校验 100% 还原。
 
 ```bash
 cd rust
-cargo test --test batch_corpus -- --ignored --nocapture
+cargo test local_batch_corpus -- --ignored --nocapture
 # 语料在别处时：
-STRHIDE_CORPUS=/path/to/corpus cargo test --release --test batch_corpus -- --ignored --nocapture
+STRHIDE_CORPUS=/path/to/corpus cargo test --release local_batch_corpus -- --ignored --nocapture
 
 # 内容自适应图像隐写批测（针对 temp/teststego 全量真实大图及抗检扫描评估）：
-cargo test --test batch_stego -- --ignored --nocapture
+cargo test local_batch_stego -- --ignored --nocapture
 # 隐写语料在别处时：
-STRHIDE_STEGO_CORPUS=/path/to/stego_corpus cargo test --test batch_stego -- --ignored --nocapture
+STRHIDE_STEGO_CORPUS=/path/to/stego_corpus cargo test local_batch_stego -- --ignored --nocapture
 ```
 
 ### 通用约定

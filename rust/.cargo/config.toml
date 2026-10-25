@@ -1,0 +1,6 @@
+[build]
+jobs = 8
+
+[env]
+RUST_TEST_THREADS = "8"
+RAYON_NUM_THREADS = "8"

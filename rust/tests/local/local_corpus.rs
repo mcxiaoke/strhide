@@ -1,4 +1,4 @@
-//! Corpus-level batch runner — Rust counterpart of Python
+﻿//! Corpus-level batch runner — Rust counterpart of Python
 //! `python/tests/batch_test_runner.py`.
 //!
 //! Different tool from [`real_samples`](self): that one pins six fixed samples
@@ -341,7 +341,7 @@ fn first_line(msg: &str) -> String {
 
 #[test]
 #[ignore = "corpus sweep over temp/testfiles: run with --release --test batch_corpus -- --ignored --nocapture"]
-fn batch_corpus_all_modes() {
+fn local_batch_corpus_all_modes() {
     let Some(corpus) = corpus_dir() else {
         eprintln!(
             "[SKIP] corpus directory not found (set STRHIDE_CORPUS to point at one); \

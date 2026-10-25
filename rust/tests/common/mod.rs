@@ -319,3 +319,21 @@ pub fn make_pe_custom(machine: u16, opt_magic: u16, text_len: usize, tight: bool
     img.resize(raw_ptr as usize + raw_size as usize, 0);
     img
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn verify_test_threads_limit() {
+        if let Ok(threads) = std::env::var("RUST_TEST_THREADS") {
+            assert_eq!(threads, "8", "RUST_TEST_THREADS should be set to 8");
+        }
+        if let Ok(rayon_threads) = std::env::var("RAYON_NUM_THREADS") {
+            assert_eq!(rayon_threads, "8", "RAYON_NUM_THREADS should be set to 8");
+        }
+        assert!(
+            rayon::current_num_threads() <= 8,
+            "Rayon thread pool exceeds 8: {}",
+            rayon::current_num_threads()
+        );
+    }
+}

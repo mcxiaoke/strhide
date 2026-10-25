@@ -397,3 +397,77 @@ fn verify_accepts_the_profile() {
     assert!(!official.level2_envelope.ok);
     assert!(!official.level3_crypto.ok);
 }
+
+// --------------------------------------------------------------------------- stego private format
+
+const PRIVATE_FORMAT: strhide::JpegFormatProfile = strhide::JpegFormatProfile {
+    format_major: 1,
+    format_minor: 0,
+    cover_digest_tag: b"private-cover-v1",
+    hpos_label: b"private-hpos",
+    stc_label: b"private-stc",
+    enc_label: b"private-enc",
+    perm_label: b"private-perm",
+    sb_bytes: 44,
+    sb_h: 8,
+    sb_u: 2,
+    ext_h: 8,
+    ext_u: 4,
+    grid_rule: strhide::GridRule::ALL_AC,
+    suites: strhide::DEFAULT_JPEG_FORMAT.suites,
+};
+
+const PRIVATE_JPEG_PROFILE: Profile = Profile::new().with_jpeg_format(PRIVATE_FORMAT);
+const SMALL_JPG: &[u8] = include_bytes!("../assets/small.jpg");
+const PRIVATE_PAYLOAD: &[u8] = b"private-format-roundtrip";
+
+#[test]
+fn private_format_embed_extract_roundtrip() {
+    use strhide::stego::{StegoOptions, embed_carrier_with_profile, extract_carrier_with_profile};
+
+    let options = StegoOptions::default();
+    let stego =
+        embed_carrier_with_profile(SMALL_JPG, PRIVATE_PAYLOAD, &options, &PRIVATE_JPEG_PROFILE)
+            .expect("embed under private format");
+    assert_ne!(stego, SMALL_JPG, "the carrier must change");
+
+    let extracted = extract_carrier_with_profile(&stego, &options, &PRIVATE_JPEG_PROFILE)
+        .expect("extract under private format");
+    assert_eq!(extracted, PRIVATE_PAYLOAD);
+}
+
+#[test]
+fn private_format_probe_uses_private_geometry() {
+    use strhide::stego::{StegoOptions, probe_carrier_capacity_with_profile};
+
+    let options = StegoOptions::default();
+    let cap = probe_carrier_capacity_with_profile(SMALL_JPG, &options, &PRIVATE_JPEG_PROFILE)
+        .expect("probe under private format");
+    assert!(
+        cap.recommended_max_bytes > 0,
+        "the probe must report capacity"
+    );
+    assert_eq!(PRIVATE_JPEG_PROFILE.jpeg_format(), &PRIVATE_FORMAT);
+}
+
+#[test]
+fn official_profile_cannot_read_private_format() {
+    use strhide::stego::{StegoOptions, embed_carrier_with_profile, extract_carrier_with_profile};
+
+    let options = StegoOptions::default();
+    let stego =
+        embed_carrier_with_profile(SMALL_JPG, PRIVATE_PAYLOAD, &options, &PRIVATE_JPEG_PROFILE)
+            .expect("embed under private format");
+
+    let official = Profile::default();
+    assert!(
+        extract_carrier_with_profile(&stego, &options, &official).is_err(),
+        "an official profile must not read a private-format carrier"
+    );
+}
+
+#[test]
+fn private_format_is_a_non_official_dialect() {
+    assert!(!PRIVATE_JPEG_PROFILE.is_official());
+    assert!(Profile::default().is_official());
+}

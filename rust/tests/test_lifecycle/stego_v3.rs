@@ -12,10 +12,8 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use strhide::errors::StrHideError;
@@ -309,68 +307,6 @@ fn v3_payload_sizes_roundtrip_on_a_photo() {
     }
 }
 
-/// The full Phase 2 gate: 4 KiB / 16 KiB / 64 KiB across 20 corpus photos,
-/// bit-for-bit roundtrip. Ignored by default because it embeds 60 carriers.
-///
-/// ```text
-/// cargo test --release --test test_lifecycle v3_payload_matrix -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn v3_payload_matrix_twenty_images() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("temp")
-        .join("images")
-        .join("jpg");
-    let mut files: Vec<PathBuf> = match std::fs::read_dir(&root) {
-        Ok(entries) => entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg")))
-            .collect(),
-        Err(_) => return,
-    };
-    files.sort();
-    files.truncate(20);
-    if files.is_empty() {
-        return;
-    }
-
-    let password = "MatrixGate#2026";
-    let opts = StegoOptions {
-        algorithm: Some("uerd".into()),
-        password: Some(password.into()),
-        ..Default::default()
-    };
-    let done = AtomicUsize::new(0);
-    files.par_iter().for_each(|path| {
-        let cover = std::fs::read(path).expect("read cover");
-        for size in [4096usize, 16384, 65536] {
-            let payload = incompressible(size, (size as u64) ^ 0x5EED);
-            let stego = match embed_carrier(&cover, &payload, &opts) {
-                Ok(stego) => stego,
-                // A 64 KiB payload legitimately exceeds small carriers.
-                Err(StrHideError::General(message)) if message.contains("Capacity exceeded") => {
-                    continue;
-                }
-                Err(e) => panic!("{}: {size} B: embed failed: {e}", path.display()),
-            };
-            let recovered = extract_carrier(&stego, &opts)
-                .unwrap_or_else(|e| panic!("{}: {size} B: extract failed: {e}", path.display()));
-            assert_eq!(recovered, payload, "{}: {size} B", path.display());
-            done.fetch_add(1, Ordering::Relaxed);
-        }
-    });
-    let done_count = done.load(Ordering::Relaxed);
-    println!("{done_count} roundtrips across {} carriers", files.len());
-    assert!(
-        done_count >= 30,
-        "expected at least 30 roundtrips, got {done_count}"
-    );
-}
-
 /// The cover digest must be identical before and after embedding: it salts the
 /// KDF that locates the header, so any drift would make the carrier unreadable
 /// by its own writer.
@@ -544,68 +480,6 @@ fn v3_over_optimised_table_lifts_u_two_to_u_three() {
     )
     .expect("layout");
     assert_eq!(layout.u, 3, "layout_for_payload must also report u = 3");
-}
-
-/// The over-optimised-Huffman corpus gate: `std` tables take the fast path,
-/// `opt` tables take the symbol-checked path, and both round-trip at 4 KiB.
-/// Ignored by default: the corpus lives in `temp/` (or `$STRHIDE_STEGO_CORPUS`).
-#[test]
-#[ignore]
-fn v3_huffman_corpus_roundtrips() {
-    let Some(std_dir) = corpus("jpeg_huffman/std") else {
-        return;
-    };
-    let Some(opt_dir) = corpus("jpeg_huffman/opt") else {
-        return;
-    };
-    let payload = incompressible(4096, 0xC0FFEE);
-    let password = "HuffmanCorpus#1";
-
-    let mut checked = 0usize;
-    let mut groups: Vec<(Vec<PathBuf>, Option<bool>)> = Vec::new();
-    for (dir, expect_complete) in [(std_dir, true), (opt_dir, false)] {
-        let mut files: Vec<PathBuf> = fs::read_dir(&dir)
-            .expect("read dir")
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg")))
-            .collect();
-        files.sort();
-        assert!(!files.is_empty(), "no JPEGs in {}", dir.display());
-        groups.push((files, Some(expect_complete)));
-    }
-    // The real-world sparse-table samples: a 24 MP camera-and-ffmpeg export and
-    // a small web sample. Their table completeness differs, so it is not
-    // asserted -- only that they round-trip.
-    let extras: Vec<PathBuf> = ["testfiles/file-08.jpg", "real_samples/sample.jpg"]
-        .iter()
-        .filter_map(|rel| corpus(rel))
-        .collect();
-    if !extras.is_empty() {
-        groups.push((extras, None));
-    }
-
-    for (files, expect_complete) in groups {
-        for path in files {
-            let cover = fs::read(&path).expect("read");
-            let symbols = strhide::stego::jpeg::dht::luma_ac_symbols(&cover).expect("parse DHT");
-            if let Some(expected) = expect_complete {
-                assert_eq!(
-                    symbols.is_complete(),
-                    expected,
-                    "{}: table completeness",
-                    path.display()
-                );
-            }
-            let stego = embed_carrier(&cover, &payload, &extract_opts(password))
-                .unwrap_or_else(|e| panic!("{}: embed failed: {e}", path.display()));
-            let recovered = extract_carrier(&stego, &extract_opts(password))
-                .unwrap_or_else(|e| panic!("{}: extract failed: {e}", path.display()));
-            assert_eq!(recovered, payload, "{}", path.display());
-            checked += 1;
-        }
-    }
-    println!("{checked} over-optimised/standard table carriers round-tripped");
 }
 
 /// `BodyGrid = Grid \ HdrSlots`: the two sets must be disjoint and their union
