@@ -68,6 +68,27 @@ pub fn find_eocd_offset<R: Read + Seek + ?Sized>(
     ))
 }
 
+/// Whether a ZIP64 EOCD locator sits immediately before the EOCD record.
+///
+/// Per APPNOTE the tail order is `[zip64 EOCD record][zip64 EOCD locator][EOCD]`
+/// and the locator is fixed-size, so a 20-byte probe at the exact position
+/// decides. Injection shifts the Central Directory and every record after it
+/// without updating the locator's "offset of zip64 EOCD record" field, which
+/// breaks strict third-party readers, so the classic strategy refuses such
+/// archives (review P2-7); `--strategy eof` stays available. A comment may
+/// legally contain the magic, but only at the exact position can it be a real
+/// chain element.
+fn has_zip64_locator<R: Read + Seek + ?Sized>(reader: &mut R, eocd_pos: u64) -> bool {
+    if eocd_pos < 20 {
+        return false;
+    }
+    if reader.seek(SeekFrom::Start(eocd_pos - 20)).is_err() {
+        return false;
+    }
+    let mut magic = [0u8; 4];
+    reader.read_exact(&mut magic).is_ok() && magic == *b"PK\x06\x07"
+}
+
 pub struct ZipAdapter;
 
 impl HostAdapter for ZipAdapter {
@@ -105,6 +126,11 @@ impl HostAdapter for ZipAdapter {
             // ever detect it again. Route to the EOF overlay instead.
             Ok((_, 0, _)) => "eof",
             Ok((eocd_pos, cd_offset, _)) => {
+                // ZIP64 archives shift the zip64 records without patching
+                // their locator; only the EOF overlay is symmetric there.
+                if has_zip64_locator(reader, eocd_pos) {
+                    return "eof";
+                }
                 // The EOCD cd_offset field AND the patch position
                 // (eocd_pos + 16, shifted by ube_size) must both stay inside
                 // the 32-bit range, otherwise removal would restore a
@@ -198,6 +224,13 @@ impl HostAdapter for ZipAdapter {
             return Err(StrHideError::UnsupportedFormat(
                 "Empty archive: there is no Central Directory to inject before (the envelope \
                  would overwrite the archive's own magic). Please specify --strategy eof."
+                    .into(),
+            ));
+        }
+        if has_zip64_locator(host_in, eocd_pos) {
+            return Err(StrHideError::UnsupportedFormat(
+                "ZIP64 archive (EOCD64 locator present): injection would leave the locator's \
+                 zip64-EOCD offset stale for strict readers. Please specify --strategy eof."
                     .into(),
             ));
         }
@@ -343,12 +376,21 @@ impl HostAdapter for ZipAdapter {
         stego_in: &mut dyn SeekRead,
     ) -> Result<(bool, String), StrHideError> {
         match find_eocd_offset(stego_in) {
-            Ok((eocd_pos, cd_offset, cd_size)) => Ok((
-                true,
-                format!(
-                    "Valid ZIP archive (EOCD at {eocd_pos}, Central Directory at {cd_offset}, size {cd_size})"
-                ),
-            )),
+            Ok((eocd_pos, cd_offset, cd_size)) => {
+                let detail = if has_zip64_locator(stego_in, eocd_pos) {
+                    format!(
+                        "Valid ZIP64 archive (EOCD64 locator at {}, EOCD at {eocd_pos}, \
+                         Central Directory at {cd_offset}, size {cd_size}); \
+                         only the eof strategy is supported",
+                        eocd_pos - 20
+                    )
+                } else {
+                    format!(
+                        "Valid ZIP archive (EOCD at {eocd_pos}, Central Directory at {cd_offset}, size {cd_size})"
+                    )
+                };
+                Ok((true, detail))
+            }
             Err(e) => Ok((false, format!("Corrupted ZIP archive: {e}"))),
         }
     }

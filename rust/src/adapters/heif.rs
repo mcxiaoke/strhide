@@ -1,6 +1,6 @@
 use std::io::{SeekFrom, Write};
 
-pub use crate::adapters::isobmff::MP4_UUID_NEUTRAL;
+pub use crate::adapters::isobmff::{ITEM_HIDDEN_MAX_ENVELOPE, MP4_UUID_NEUTRAL};
 use crate::adapters::isobmff::{
     calc_prefix_len, heif_strategy_capacities, isobmff_can_item_hidden, isobmff_inject,
     isobmff_locate, isobmff_strip, isobmff_suspicious_structures, isobmff_verify_structure,
@@ -54,8 +54,13 @@ impl HostAdapter for HeifAdapter {
         vec!["item_hidden", "free_box", "box_uuid", "eof"]
     }
 
-    fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, _ube_size: u64) -> &'static str {
-        if isobmff_can_item_hidden(reader) {
+    fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, ube_size: u64) -> &'static str {
+        // item_hidden registers the envelope through 32-bit iloc fields and a
+        // 32-bit mdat box size, so it has a hard ~4 GiB ceiling the capacity
+        // table must not overstate (review P2-4). box_uuid switches to a
+        // 64-bit large header and is genuinely unlimited; engine auto is
+        // single-shot, so the size check has to happen here.
+        if ube_size <= ITEM_HIDDEN_MAX_ENVELOPE && isobmff_can_item_hidden(reader) {
             "item_hidden"
         } else {
             "box_uuid"

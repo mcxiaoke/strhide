@@ -1,8 +1,8 @@
 use std::io::Write;
 
 use crate::adapters::riff::{
-    riff_detect, riff_inject, riff_locate, riff_strategy_capacities, riff_suspicious_structures,
-    riff_verify_structure,
+    riff_can_chunk, riff_detect, riff_inject, riff_locate, riff_strategy_capacities,
+    riff_suspicious_structures, riff_verify_structure,
 };
 use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity};
 use crate::errors::StrHideError;
@@ -22,12 +22,19 @@ impl HostAdapter for WebpAdapter {
         vec!["riff_chunk", "eof"]
     }
 
-    fn choose_auto_strategy(&self, _reader: &mut dyn SeekRead, _ube_size: u64) -> &'static str {
-        "riff_chunk"
+    fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, ube_size: u64) -> &'static str {
+        // Mirrors WAV: keep riff_chunk only when write and read agree (declared
+        // boundary = physical end, u32 size headroom), else EOF overlay
+        // (review P1-2 / P3-17).
+        if riff_can_chunk(reader, ube_size) {
+            "riff_chunk"
+        } else {
+            "eof"
+        }
     }
 
-    fn strategy_capacities(&self, _reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
-        riff_strategy_capacities("WebP")
+    fn strategy_capacities(&self, reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
+        riff_strategy_capacities("WebP", reader)
     }
 
     fn inject(
@@ -88,7 +95,8 @@ impl HostAdapter for WebpAdapter {
             )
         } else if strategy == "eof" && fallback {
             Some(
-                "Payload exceeded WebP RIFF 4GB limit; automatically fell back to EOF overlay."
+                "Carrier layout or payload did not fit the RIFF chunk strategy (declared \
+                 boundary mismatch or 4 GiB limit); automatically fell back to EOF overlay."
                     .into(),
             )
         } else if strategy == "eof" {

@@ -9,7 +9,9 @@ use crate::common::*;
 use std::fs;
 use std::io::Cursor;
 use std::path::Path;
-use strhide::adapters::{HostAdapter, PdfAdapter, WavAdapter, ZipAdapter};
+use strhide::adapters::{
+    HeifAdapter, HostAdapter, PdfAdapter, WavAdapter, WebpAdapter, ZipAdapter,
+};
 use strhide::engine::{PayloadSource, WriteOptions, read_carrier, remove_carrier, write_carrier};
 use strhide::envelope::{EnvelopeTrailer, STANDARD_TRAILER_MAGIC};
 
@@ -332,4 +334,149 @@ fn pdf_encrypted_document_rejects_incremental_and_roundtrips_via_eof() {
     let restored = dir.join("r.pdf");
     remove_carrier(&stego, Some(&restored), None, false).unwrap();
     assert_eq!(fs::read(&restored).unwrap(), pdf);
+}
+
+// ------------------------------------------------------------------ batch 3
+
+/// A ZIP64 archive with an EOCD64 locator before the classic EOCD (classic
+/// fields real, not sentinel). Injection would shift the zip64 records
+/// without patching the locator's offset field, so auto must route to eof and
+/// explicit pre_cd_inject must be refused (P2-7).
+fn make_zip64() -> Vec<u8> {
+    let mut zip = make_zip();
+    // The zero-comment EOCD is the last 22 bytes; insert before it so the
+    // tail order matches APPNOTE: [zip64 record][locator][EOCD].
+    let eocd_pos = zip.len() - 22;
+    let mut zip64 = Vec::new();
+    zip64.extend_from_slice(b"PK\x06\x06");
+    zip64.extend_from_slice(&44u64.to_le_bytes()); // size of the remaining fields
+    zip64.resize(56, 0); // fields strhide never reads
+    zip64.extend_from_slice(b"PK\x06\x07");
+    zip64.extend_from_slice(&0u32.to_le_bytes()); // disk number
+    zip64.extend_from_slice(&(eocd_pos as u64).to_le_bytes()); // zip64 EOCD offset
+    zip64.extend_from_slice(&1u32.to_le_bytes()); // total disks
+    zip.splice(eocd_pos..eocd_pos, zip64);
+    zip
+}
+
+#[test]
+fn zip64_locator_routes_auto_to_eof() {
+    let zip = make_zip64();
+    assert_eq!(
+        ZipAdapter.choose_auto_strategy(&mut Cursor::new(zip.clone()), 128),
+        "eof",
+        "auto must not pick pre_cd_inject when an EOCD64 locator is present"
+    );
+
+    let err = ZipAdapter
+        .inject(
+            &mut Cursor::new(zip.clone()),
+            &mut Cursor::new(vec![0u8; 128]),
+            &mut Vec::new(),
+            "pre_cd_inject",
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("ZIP64"), "{err}");
+
+    // The eof strategy stays fully functional on ZIP64 carriers.
+    let dir = scratch("rv25_zip64");
+    let carrier = dir.join("z64.zip");
+    fs::write(&carrier, &zip).unwrap();
+    let stego = dir.join("s.zip");
+    let res = write_carrier_file(
+        &carrier,
+        PayloadSource::Text("zip64 secret"),
+        None,
+        "auto",
+        false,
+        &stego,
+    );
+    assert_eq!(res.strategy, "eof");
+    let out = read_carrier(&stego, None, None).unwrap();
+    assert_eq!(out.data, b"zip64 secret");
+    let restored = dir.join("r.zip");
+    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    assert_eq!(fs::read(&restored).unwrap(), zip);
+}
+
+/// item_hidden tops out at a ~4 GiB envelope (32-bit mdat size + iloc
+/// fields); auto must route anything larger to the genuinely unlimited
+/// box_uuid strategy instead of failing the write (P2-4). The threshold is a
+/// plain number on a small carrier, so the test needs no huge allocation.
+#[test]
+fn heif_auto_routes_oversized_envelopes_to_box_uuid() {
+    let max = u32::MAX as u64 - 8;
+    assert_eq!(
+        HeifAdapter.choose_auto_strategy(&mut Cursor::new(make_heif_with_meta()), 1024),
+        "item_hidden"
+    );
+    assert_eq!(
+        HeifAdapter.choose_auto_strategy(&mut Cursor::new(make_heif_with_meta()), max),
+        "item_hidden",
+        "the exact bound is still reachable"
+    );
+    assert_eq!(
+        HeifAdapter.choose_auto_strategy(&mut Cursor::new(make_heif_with_meta()), max + 1),
+        "box_uuid",
+        "one past the bound must not choose a strategy that cannot write it"
+    );
+}
+
+/// WAV/WebP auto must keep riff_chunk only when write and read agree (clean
+/// declared boundary, u32 headroom) and route everything else to eof, whose
+/// write and read are symmetric by construction (P3-17 / P1-2 auto half).
+#[test]
+fn wav_webp_auto_falls_back_to_eof_on_boundary_mismatch() {
+    assert_eq!(
+        WavAdapter.choose_auto_strategy(&mut Cursor::new(make_wav()), 128),
+        "riff_chunk"
+    );
+    assert_eq!(
+        WebpAdapter.choose_auto_strategy(&mut Cursor::new(make_webp()), 128),
+        "riff_chunk"
+    );
+
+    let mut wav = make_wav();
+    wav.extend_from_slice(b"JUNK");
+    assert_eq!(
+        WavAdapter.choose_auto_strategy(&mut Cursor::new(wav), 128),
+        "eof",
+        "trailing bytes past the declared boundary must route to eof"
+    );
+    let mut webp = make_webp();
+    webp.extend_from_slice(b"JUNK");
+    assert_eq!(
+        WebpAdapter.choose_auto_strategy(&mut Cursor::new(webp), 128),
+        "eof"
+    );
+
+    // The 4 GiB patched-size limit is part of the same predicate.
+    assert_eq!(
+        WavAdapter.choose_auto_strategy(&mut Cursor::new(make_wav()), u32::MAX as u64),
+        "eof",
+        "envelopes beyond the u32 RIFF size must route to eof"
+    );
+
+    // End-to-end: the mismatched carrier now writes an eof envelope that
+    // reads and restores cleanly instead of failing mid-write.
+    let dir = scratch("rv25_wav_auto");
+    let mut carrier_bytes = make_wav();
+    carrier_bytes.extend_from_slice(b"ID3JUNK");
+    let carrier = dir.join("c.wav");
+    fs::write(&carrier, &carrier_bytes).unwrap();
+    let stego = dir.join("s.wav");
+    let res = write_carrier_file(
+        &carrier,
+        PayloadSource::Text("wav auto secret"),
+        None,
+        "auto",
+        false,
+        &stego,
+    );
+    assert_eq!(res.strategy, "eof");
+    let out = read_carrier(&stego, None, None).unwrap();
+    assert_eq!(out.data, b"wav auto secret");
+    let restored = dir.join("r.wav");
+    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    assert_eq!(fs::read(&restored).unwrap(), carrier_bytes);
 }

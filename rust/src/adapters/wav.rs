@@ -1,8 +1,8 @@
 use std::io::Write;
 
 use crate::adapters::riff::{
-    riff_detect, riff_inject, riff_locate, riff_strategy_capacities, riff_suspicious_structures,
-    riff_verify_structure,
+    riff_can_chunk, riff_detect, riff_inject, riff_locate, riff_strategy_capacities,
+    riff_suspicious_structures, riff_verify_structure,
 };
 use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity};
 use crate::errors::StrHideError;
@@ -22,12 +22,20 @@ impl HostAdapter for WavAdapter {
         vec!["riff_chunk", "eof"]
     }
 
-    fn choose_auto_strategy(&self, _reader: &mut dyn SeekRead, _ube_size: u64) -> &'static str {
-        "riff_chunk"
+    fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, ube_size: u64) -> &'static str {
+        // riff_chunk must stay symmetric: the declared boundary must be the
+        // physical end and the patched size must stay inside u32. Anything
+        // else routes to the EOF overlay, whose write and read agree by
+        // construction (review P1-2 / P3-17).
+        if riff_can_chunk(reader, ube_size) {
+            "riff_chunk"
+        } else {
+            "eof"
+        }
     }
 
-    fn strategy_capacities(&self, _reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
-        riff_strategy_capacities("WAV")
+    fn strategy_capacities(&self, reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
+        riff_strategy_capacities("WAV", reader)
     }
 
     fn inject(
@@ -87,7 +95,8 @@ impl HostAdapter for WavAdapter {
             Some("Embedded into compliant WAV private RIFF chunk 'SHRD' (0 trailing bytes).".into())
         } else if strategy == "eof" && fallback {
             Some(
-                "Payload exceeded WAV RIFF 4GB limit; automatically fell back to EOF overlay."
+                "Carrier layout or payload did not fit the RIFF chunk strategy (declared \
+                 boundary mismatch or 4 GiB limit); automatically fell back to EOF overlay."
                     .into(),
             )
         } else if strategy == "eof" {

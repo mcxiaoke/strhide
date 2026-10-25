@@ -12,6 +12,12 @@ pub const MP4_UUID_NEUTRAL: [u8; 16] = [
     0xd4, 0x1a, 0x8e, 0x9c, 0x4f, 0x21, 0x4e, 0x87, 0x9a, 0x33, 0x5b, 0x6d, 0x12, 0x84, 0xef, 0x70,
 ];
 
+/// Largest envelope the `item_hidden` strategy can carry: the second `mdat`
+/// box writes its size into a 32-bit field (`8 + ube_size <= u32::MAX`) and
+/// registers the extent through 32-bit iloc offset/length fields. Capacity
+/// text and the auto strategy both derive from this constant (review P2-4).
+pub const ITEM_HIDDEN_MAX_ENVELOPE: u64 = u32::MAX as u64 - 8;
+
 /// Bytes of Box header written before the envelope for the `box_uuid`
 /// strategy: 24 for the standard 32-bit header (`size` + `uuid` + usertype),
 /// 32 for the 64-bit large header (`size == 1` + `uuid` + `largesize` +
@@ -391,7 +397,7 @@ pub fn heif_strategy_capacities() -> Vec<StrategyCapacity> {
             strategy: "item_hidden".into(),
             capacity_bytes: None,
             available: true,
-            limit: "unlimited (file grows)".into(),
+            limit: "up to ~4 GiB envelope (32-bit mdat box and iloc fields); file grows".into(),
             note: Some(
                 "hidden ISO BMFF Item registered in iinf/iloc; unreferenced by pitm/iref, primary photo bit-exact, zero suspicious boxes".into(),
             ),
@@ -400,7 +406,7 @@ pub fn heif_strategy_capacities() -> Vec<StrategyCapacity> {
             strategy: "free_box".into(),
             capacity_bytes: None,
             available: true,
-            limit: "unlimited (file grows)".into(),
+            limit: "up to ~4 GiB envelope (32-bit box size); file grows".into(),
             note: Some("standard ISO BMFF free padding box at EOF; skipped by all standard media decoders".into()),
         },
         StrategyCapacity {

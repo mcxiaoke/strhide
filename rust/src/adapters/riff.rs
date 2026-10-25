@@ -338,17 +338,64 @@ pub fn riff_suspicious_structures(stego_in: &mut dyn SeekRead) -> Vec<String> {
     found
 }
 
-pub fn riff_strategy_capacities(format_name: &str) -> Vec<StrategyCapacity> {
+/// Whether `riff_chunk` can accept this carrier and envelope: the declared
+/// RIFF boundary must coincide with the physical end of the file, and the
+/// patched size field must stay inside u32. Mirrors the hard checks in
+/// [`riff_inject`] so the auto decision and the capacity table share one
+/// predicate instead of drifting (review P3-17).
+pub fn riff_can_chunk(reader: &mut dyn SeekRead, ube_size: u64) -> bool {
+    let start = reader.stream_position().unwrap_or(0);
+    let host_len = match reader.seek(SeekFrom::End(0)) {
+        Ok(l) => l,
+        Err(_) => return false,
+    };
+    if reader.seek(SeekFrom::Start(0)).is_err() {
+        return false;
+    }
+    let mut header = [0u8; 12];
+    let ok = if reader.read_exact(&mut header).is_ok() {
+        let old_riff_size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as u64;
+        let pad = ube_size % 2;
+        let inject_size = 8 + ube_size + pad;
+        host_len == 8 + old_riff_size && old_riff_size + inject_size <= u32::MAX as u64
+    } else {
+        false
+    };
+    let _ = reader.seek(SeekFrom::Start(start));
+    ok
+}
+
+pub fn riff_strategy_capacities(
+    format_name: &str,
+    reader: Option<&mut dyn SeekRead>,
+) -> Vec<StrategyCapacity> {
+    let mut chunk = StrategyCapacity {
+        strategy: "riff_chunk".into(),
+        capacity_bytes: None,
+        available: true,
+        limit: "up to 4GB RIFF limit (file grows)".into(),
+        note: Some(format!(
+            "Embedded into compliant {format_name} private RIFF chunk 'SHRD' (0 trailing bytes)"
+        )),
+    };
+    if let Some(r) = reader {
+        let start = r.stream_position().ok();
+        // The boundary predicate is payload-independent, so a zero-sized
+        // envelope decides availability; the 4 GiB limit is payload-dependent
+        // and stays as the generic limit text.
+        if !riff_can_chunk(r, 0) {
+            chunk.available = false;
+            chunk.note = Some(
+                "declared RIFF boundary does not match the file length; auto falls back to eof"
+                    .into(),
+            );
+        }
+        if let Some(p) = start {
+            let _ = r.seek(SeekFrom::Start(p));
+        }
+    }
     vec![
-        StrategyCapacity {
-            strategy: "riff_chunk".into(),
-            capacity_bytes: None,
-            available: true,
-            limit: "up to 4GB RIFF limit (file grows)".into(),
-            note: Some(format!(
-                "Embedded into compliant {format_name} private RIFF chunk 'SHRD' (0 trailing bytes)"
-            )),
-        },
+        chunk,
         StrategyCapacity {
             strategy: "eof".into(),
             capacity_bytes: None,
