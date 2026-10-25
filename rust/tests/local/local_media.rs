@@ -196,6 +196,10 @@ pub mod heif_bridge {
     use std::path::{Path, PathBuf};
 
     use strhide::errors::StrHideError;
+    use strhide::params::Profile;
+    use strhide::stego::heif::{
+        embed_heif_bridge, extract_heif_bridge, probe_heif_bridge_capacity,
+    };
     use strhide::stego::{StegoOptions, embed_carrier, extract_carrier, probe_carrier_capacity};
 
     fn resolve_hevc_corpus() -> Option<PathBuf> {
@@ -251,11 +255,17 @@ pub mod heif_bridge {
             return;
         }
 
+        // The router prefers Scheme C (HEVC CABAC) and only falls back to the
+        // bridge, so the bridge's own contract is exercised through its own
+        // API. Router-level priority is pinned by
+        // `local_heif_router_prefers_scheme_c` below.
+        let profile = Profile::default();
         let orig_bytes = fs::read(sample_path).expect("read original HEIC");
 
         // 1. Probe capacity
         let options = StegoOptions::default();
-        let cap = probe_carrier_capacity(&orig_bytes, &options).expect("probe capacity");
+        let cap = probe_heif_bridge_capacity(&orig_bytes, &options, &profile)
+            .expect("probe bridge capacity");
         assert_eq!(cap.format, "HEIF (JPEG Thumbnail Bridge)");
         assert!(
             cap.available_slots > 500,
@@ -270,7 +280,7 @@ pub mod heif_bridge {
             ..Default::default()
         };
 
-        let stego_bytes = embed_carrier(&orig_bytes, payload, &embed_opts)
+        let stego_bytes = embed_heif_bridge(&orig_bytes, payload, &embed_opts, &profile)
             .expect("embed carrier into HEIF thumbnail bridge");
 
         assert!(!stego_bytes.is_empty());
@@ -287,8 +297,8 @@ pub mod heif_bridge {
             password: Some("bridge_pass_2026".into()),
             ..Default::default()
         };
-        let extracted =
-            extract_carrier(&stego_bytes, &extract_opts).expect("extract with correct password");
+        let extracted = extract_heif_bridge(&stego_bytes, &extract_opts, &profile)
+            .expect("extract with correct password");
         assert_eq!(
             extracted, payload,
             "Extracted payload must match original 100%"
@@ -299,7 +309,7 @@ pub mod heif_bridge {
             password: Some("wrong_password".into()),
             ..Default::default()
         };
-        let wrong_res = extract_carrier(&stego_bytes, &wrong_opts);
+        let wrong_res = extract_heif_bridge(&stego_bytes, &wrong_opts, &profile);
         assert!(
             matches!(wrong_res, Err(StrHideError::NoHiddenData(_))),
             "Wrong password must report NoHiddenData, got {:?}",
@@ -314,6 +324,65 @@ pub mod heif_bridge {
             "Stego HEIF must have zero suspicious structural warnings, got: {:?}",
             warnings
         );
+    }
+
+    /// The router must write Scheme C (HEVC CABAC in place) and only fall back
+    /// to the thumbnail bridge. The discriminator is an explicit Scheme C
+    /// extraction: it never falls back, so it can only succeed when the payload
+    /// really lives in the CABAC stream -- and the bridge must simultaneously
+    /// report nothing, which proves the thumbnail was left alone.
+    #[test]
+    #[ignore = "requires local temp/testhevc corpus: run with cargo test --test test_heif_stego_bridge -- --ignored"]
+    pub fn local_heif_router_prefers_scheme_c() {
+        let corpus = match resolve_hevc_corpus() {
+            Some(d) => d,
+            None => {
+                eprintln!("[SKIP] HEVC corpus not found");
+                return;
+            }
+        };
+        let sample_path = corpus.join("IMG_20261018_113710.HEIC");
+        if !sample_path.exists() {
+            eprintln!("Sample {:?} does not exist, skipping test.", sample_path);
+            return;
+        }
+        let orig_bytes = fs::read(sample_path).expect("read original HEIC");
+        let profile = Profile::default();
+        let payload = b"router-prefers-scheme-c-2026";
+        let opts = StegoOptions {
+            password: Some("scheme_c_priority".into()),
+            ..Default::default()
+        };
+
+        let cap = probe_carrier_capacity(&orig_bytes, &opts).expect("probe capacity");
+        assert_eq!(
+            cap.format, "HEIF/HEVC",
+            "router must advertise the Scheme C carrier, not the bridge"
+        );
+
+        let stego = embed_carrier(&orig_bytes, payload, &opts).expect("embed");
+        assert_eq!(
+            stego.len(),
+            orig_bytes.len(),
+            "Scheme C rewrites CABAC bins in place; the file size must not move"
+        );
+
+        let explicit = StegoOptions {
+            algorithm: Some("hevc".into()),
+            ..opts.clone()
+        };
+        let cabac = extract_carrier(&stego, &explicit)
+            .expect("explicit Scheme C extraction must find the payload");
+        assert_eq!(cabac, payload);
+
+        let bridge = extract_heif_bridge(&stego, &opts, &profile);
+        assert!(
+            matches!(bridge, Err(StrHideError::NoHiddenData(_))),
+            "the thumbnail bridge must stay empty, got {bridge:?}"
+        );
+
+        let auto = extract_carrier(&stego, &opts).expect("default extraction agrees");
+        assert_eq!(auto, payload);
     }
 
     #[test]
@@ -396,7 +465,11 @@ pub mod heif_bridge {
             password: Some("fidelity_pw".into()),
             ..Default::default()
         };
-        let stego_bytes = embed_carrier(&orig_bytes, payload, &opts).expect("embed");
+        // Bridge API, not the router: the router prefers Scheme C, which by
+        // design perturbs the primary image. "Primary stays bit-exact" is the
+        // bridge's own guarantee and has to be tested where it is implemented.
+        let stego_bytes =
+            embed_heif_bridge(&orig_bytes, payload, &opts, &Profile::default()).expect("embed");
 
         let py_bin = match find_python_command() {
             Some(bin) => bin,
@@ -996,5 +1069,167 @@ pub mod hevc_external {
             checked > 0,
             "no carrier was validated ({skipped} skipped) — the corpus or ffmpeg is missing"
         );
+    }
+}
+
+/// Real Annex-B streams: sniff coverage and an end-to-end round-trip.
+///
+/// The corpus is built by `scripts/fetch_hevc_samples.py` (gitignored under
+/// `temp/testhevc/annexb`) from the PhotoPrism HEVC sample set plus ffmpeg
+/// derivations. Its point is variety the unit tests cannot invent: VPS-first,
+/// IDR-first, bare `TRAIL_R` frames, open-GOP `RASL` frames, 10-bit, HDR10 and
+/// 4:4:4 encodes. `is_hevc_annexb` used to accept only ten NAL types, so any
+/// file whose first NAL was a TSA/STSA/RADL/RASL/BLA was reported as "not
+/// HEVC" -- a real risk for cut segments and frame extractors.
+pub mod annexb_sniff {
+    // Copyright (c) 2026 strhide developers
+    // SPDX-License-Identifier: Apache-2.0
+
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use strhide::stego::hevc::sniff::is_hevc_annexb;
+    use strhide::stego::{StegoOptions, embed_carrier, extract_carrier, probe_carrier_capacity};
+
+    fn corpus_dir() -> Option<PathBuf> {
+        if let Ok(val) = std::env::var("STRHIDE_HEVC_ANNEXB_DIR") {
+            let p = PathBuf::from(val);
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+        [
+            Path::new("..").join("temp").join("testhevc").join("annexb"),
+            Path::new("temp").join("testhevc").join("annexb"),
+        ]
+        .into_iter()
+        .find(|candidate| candidate.is_dir())
+    }
+
+    /// `(start-code offset, NAL header offset)` for every Annex-B NAL.
+    fn nal_units(data: &[u8]) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        while i + 3 < data.len() {
+            if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+                out.push((i, i + 3));
+                i += 3;
+            } else if i + 4 < data.len() && data[i..i + 4] == [0, 0, 0, 1] {
+                out.push((i, i + 4));
+                i += 4;
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    fn first_nal_type(data: &[u8]) -> Option<u8> {
+        let units = nal_units(data);
+        let (_, header) = *units.first()?;
+        data.get(header).map(|b| (b >> 1) & 0x3F)
+    }
+
+    /// H.265 Table 7-1 defines every value outside the reserved ranges.
+    fn is_defined_nal_type(t: u8) -> bool {
+        matches!(t, 0..=9 | 16..=21 | 32..=40)
+    }
+
+    #[test]
+    #[ignore = "requires the local temp/testhevc/annexb corpus: run with cargo test local_hevc_annexb_sniff -- --ignored"]
+    fn local_hevc_annexb_sniff_accepts_every_real_stream() {
+        let dir = match corpus_dir() {
+            Some(d) => d,
+            None => {
+                eprintln!(
+                    "[SKIP] Annex-B corpus not found (temp/testhevc/annexb); run scripts/fetch_hevc_samples.py"
+                );
+                return;
+            }
+        };
+
+        let mut checked = 0usize;
+        let mut first_types = BTreeSet::new();
+        for entry in fs::read_dir(&dir).expect("read corpus dir") {
+            let path = entry.expect("dir entry").path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if !(name.ends_with(".hevc") || name.ends_with(".hevc10")) {
+                continue;
+            }
+            let bytes = fs::read(&path).unwrap_or_else(|e| panic!("{name}: read failed: {e}"));
+            assert!(
+                is_hevc_annexb(&bytes),
+                "{name}: a real Annex-B stream must sniff as HEVC"
+            );
+            let nal_type = first_nal_type(&bytes)
+                .unwrap_or_else(|| panic!("{name}: no Annex-B start code found"));
+            assert!(
+                is_defined_nal_type(nal_type),
+                "{name}: first NAL type {nal_type} is reserved/unspecified"
+            );
+            first_types.insert(nal_type);
+            checked += 1;
+        }
+
+        assert!(
+            checked >= 8,
+            "only {checked} Annex-B streams found; the corpus looks incomplete"
+        );
+        // The whole reason the accepted set was widened: real files can open on
+        // a plain VCL NAL (frame extractors, cut segments), not just on VPS/SPS.
+        assert!(
+            first_types.iter().any(|t| *t <= 9),
+            "corpus must cover a non-parameter-set VCL start, got {first_types:?}"
+        );
+        println!("sniffed {checked} real streams, first NAL types {first_types:?}");
+    }
+
+    #[test]
+    #[ignore = "requires the local temp/testhevc/annexb corpus: run with cargo test local_hevc_annexb_roundtrip -- --ignored"]
+    fn local_hevc_annexb_roundtrip_on_a_real_stream() {
+        let dir = match corpus_dir() {
+            Some(d) => d,
+            None => {
+                eprintln!("[SKIP] Annex-B corpus not found (temp/testhevc/annexb)");
+                return;
+            }
+        };
+
+        // `bear.hevc` is 320x180 with parameter sets and a handful of frames:
+        // small enough to keep the test quick, complete enough to embed.
+        let carrier = dir.join("bear.hevc");
+        if !carrier.is_file() {
+            eprintln!("[SKIP] {} missing", carrier.display());
+            return;
+        }
+        let bytes = fs::read(&carrier).expect("read carrier");
+        let payload = b"annexb-real-stream-roundtrip-2026";
+        let options = StegoOptions {
+            password: Some("annexb#corpus".into()),
+            ..StegoOptions::default()
+        };
+
+        let info =
+            probe_carrier_capacity(&bytes, &options).expect("capacity probe on a real stream");
+        assert!(
+            info.max_raw_payload_bytes >= payload.len(),
+            "real stream advertises {} bytes, need {}",
+            info.max_raw_payload_bytes,
+            payload.len()
+        );
+
+        let stego = embed_carrier(&bytes, payload, &options).expect("embed into a real stream");
+        assert_eq!(
+            stego.len(),
+            bytes.len(),
+            "Annex-B embed must not resize the stream"
+        );
+        assert!(
+            is_hevc_annexb(&stego),
+            "the stego stream must still sniff as HEVC"
+        );
+        let recovered = extract_carrier(&stego, &options).expect("extract");
+        assert_eq!(recovered, payload, "round-trip must be byte-exact");
     }
 }

@@ -22,6 +22,8 @@ cargo test local_ -- --ignored # 单独运行本地批量测试
 cargo fmt && cargo clippy   # 提交前格式化并修复所有 lint
 ```
 
+本地 HEVC/HEIF 语料放在 `temp/testhevc/`（gitignored）。真实 Annex-B 码流语料由 `python scripts/fetch_hevc_samples.py` 下载并派生（PhotoPrism 公开样本 + ffmpeg open-GOP 重编码），清单写入 `temp/testhevc/annexb/manifest.txt`；`cargo test local_hevc_annexb -- --ignored` 遍历该目录。
+
 ### 通用约定
 
 - 如果要用python，使用这个 `C:\Home\Develop\venv` 。

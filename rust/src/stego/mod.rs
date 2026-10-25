@@ -126,10 +126,15 @@ pub fn embed_carrier_with_profile(
             options.freshness,
         )
     } else if crate::sniff::is_heif_bytes(carrier_bytes) {
-        // HEIF content-domain steganography: bridge first (it leaves the
-        // primary image untouched), Scheme C as the fallback when no item is
-        // bridgeable. Extraction probes in the opposite order -- see the note
-        // on the HEIF branch in `extract_carrier`.
+        // HEIF content-domain steganography: Scheme C (HEVC CABAC in-place)
+        // first, thumbnail bridge second. The order is the same on read, write
+        // and capacity so all three agree on what a carrier holds: a file
+        // embedded twice carries two payloads, and "the one the writer would
+        // have produced" has to be the one the reader returns.
+        //
+        // The bridge is the older scheme and stays only as the fallback for
+        // HEIFs whose HEVC items cannot be rewritten (no hvc1 item, unsupported
+        // slice syntax) but which do carry a rewritable JPEG/auxiliary item.
         if options.algorithm.as_deref() == Some("hevc")
             || options.algorithm.as_deref() == Some("cabac")
         {
@@ -142,16 +147,16 @@ pub fn embed_carrier_with_profile(
                 options.freshness,
             )
         } else {
-            match heif::embed_heif_bridge(carrier_bytes, payload, options, profile) {
+            match hevc::embed_hevc(
+                carrier_bytes,
+                payload,
+                secret,
+                domain,
+                profile.hevc_format(),
+                options.freshness,
+            ) {
                 Ok(bytes) => Ok(bytes),
-                Err(_) => hevc::embed_hevc(
-                    carrier_bytes,
-                    payload,
-                    secret,
-                    domain,
-                    profile.hevc_format(),
-                    options.freshness,
-                ),
+                Err(_) => heif::embed_heif_bridge(carrier_bytes, payload, options, profile),
             }
         }
     } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {
@@ -225,20 +230,9 @@ pub fn extract_carrier_with_profile(
             &options.png_params,
         )
     } else if crate::sniff::is_heif_bytes(carrier_bytes) {
-        // HEIF content-domain steganography: try Scheme C (HEVC CABAC in-place) first, then bridge.
-        //
-        // The order is deliberately *not* the embed order (embed tries the
-        // bridge first because replacing a thumbnail leaves the primary image
-        // bit-exact, while Scheme C perturbs it). On the read side the cheap
-        // and total test wins: a Scheme C probe either authenticates or proves
-        // the carrier is not Scheme C, whereas the bridge has to locate a
-        // rewritable item first.
-        //
-        // Consequence to keep in mind for any future reordering: a carrier that
-        // was embedded twice -- once through the bridge, once through Scheme C
-        // -- carries two payloads, and this order returns the Scheme C one.
-        // Fixing that needs a freshness rule (e.g. refusing a second embed in
-        // the other scheme), not a different order.
+        // HEIF content-domain steganography: Scheme C (HEVC CABAC in-place)
+        // first, then the thumbnail bridge. Same order as embed and probe --
+        // see the note on the HEIF branch in `embed_carrier`.
         match hevc::extract_hevc(carrier_bytes, secret, domain, profile.hevc_format()) {
             Ok(payload) => Ok(payload),
             Err(e) => {
@@ -417,6 +411,9 @@ pub fn probe_carrier_capacity_with_profile(
             profile.png_format(),
         )
     } else if crate::sniff::is_heif_bytes(carrier_bytes) {
+        // Same order as embed/extract: Scheme C first, bridge as the fallback.
+        // A probe that advertises the bridge's capacity while the writer fills
+        // the CABAC stream (or the other way round) is worse than useless.
         if options.algorithm.as_deref() == Some("hevc")
             || options.algorithm.as_deref() == Some("cabac")
         {
@@ -426,13 +423,13 @@ pub fn probe_carrier_capacity_with_profile(
                 options.safety.level,
             )
         } else {
-            match heif::probe_heif_bridge_capacity(carrier_bytes, options, profile) {
+            match hevc::probe_hevc_capacity_info(
+                carrier_bytes,
+                profile.hevc_format(),
+                options.safety.level,
+            ) {
                 Ok(info) => Ok(info),
-                Err(_) => hevc::probe_hevc_capacity_info(
-                    carrier_bytes,
-                    profile.hevc_format(),
-                    options.safety.level,
-                ),
+                Err(_) => heif::probe_heif_bridge_capacity(carrier_bytes, options, profile),
             }
         }
     } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {

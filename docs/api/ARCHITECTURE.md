@@ -477,13 +477,13 @@ const MY_DIALECT: Profile = Profile::new()
    - **44 字节超块**与套件 KDF 分层密钥派生，支持可选 TLV 扩展区与三种密码套件。
 
 3. **HEIF 容器桥接与 CABAC 旁路域（Scheme B / Scheme C）**：
-   - **载体识别与自动路由**：统一入口 `embed_carrier` / `extract_carrier` 自动探测 ISOBMFF 结构中的 HEVC 图像项与原始 Annex-B 裸码流。
-   - **方案 B（内嵌缩略图桥接，`thumb_bridge`）**：当 HEIC 容器包含独立 JPEG Item、未压缩像素项或 Exif TIFF IFD1 缩略图时，自动切片并桥接至 JPEG/空间域引擎，修补 Exif 与 `iloc`/`mdat` 偏移，**主图 100% bit-exact 零失真**。
-   - **方案 C（CABAC 旁路符号位原位隐写）**：
+   - **载体识别与自动路由**：统一入口 `embed_carrier` / `extract_carrier` / `probe_carrier_capacity` 自动探测 ISOBMFF 结构中的 HEVC 图像项与原始 Annex-B 裸码流。HEIF 上三者同序：**先方案 C，失败再落方案 B**（桥接是早期方案，保留为兜底通道），因此"某个载体里读到的载荷"恒等于"写入端会产出的那份"。
+   - **方案 C（CABAC 旁路符号位原位隐写）**：HEIF/HEIC 的默认路径，也是不支持桥接的纯 HEVC 码流唯一路径。
      - **旁路符号位编码（Bypass Coding）**：针对 H.265 变换系数的符号位（`coeff_sign_flag`，等概率 Bypass 模式，不影响上下文概率状态机更新），改变残差正负极性而不破坏宏块语法，感知失真极低。
      - **零尺寸膨胀（$\Delta = 0$）与 EPB 避让**：直接在压缩比特流内部就地修改。通过至多 24 轮迭代检验，将破坏 `0x000000..=03` 防竞争窗口的冲突槽位置为无穷大代价（Cost = $\infty$）重新求解，确保文件尺寸 100% 绝对守恒。
      - **空间均衡抽样（Weyl 离散置换）**：通过确定性互质步长离散抽样，避免载荷全量压在连拍首图导致局部画质失衡。
      - **外部解耦与 Observer**：通过 `rust_h265` 的 `CabacObserver` 截获 bin 流与系数，通过 `oxideav-h265` 进行精确重编。
+   - **方案 B（内嵌缩略图桥接 `thumb_bridge`，兜底通道）**：当方案 C 不可用（无 HEVC 项、slice 语法不受支持）而容器包含独立 JPEG Item、未压缩像素项或 Exif TIFF IFD1 缩略图时，自动切片并桥接至 JPEG/空间域引擎，修补 Exif 与 `iloc`/`mdat` 偏移，**主图 100% bit-exact 零失真**。该性质是桥接自身的契约，只能在桥接 API 上验证（路由层会先走方案 C 并改动主图）。
 
 4. **可复现嵌入机制（Freshness）**：
    - 支持 `Freshness::Random`（默认）与 `Freshness::Seeded([u8; 32])`。
