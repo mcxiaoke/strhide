@@ -932,12 +932,14 @@ mod tests {
 
     impl Oracle<'_> {
         /// Every row of `H` must hold: the warm-up rows decode as zero (the
-        /// encoder constrains them too) and the rest carry the message.
+        /// encoder constrains them too) and the rest carry the message. Row
+        /// `h - 1` is the *first* message row (message bit 0, see `extract`),
+        /// so the warm-up rows are exactly `0..h-1`.
         fn matches(&self, cur: &[u8]) -> bool {
             let groups = self.vals.len() / self.t.u() as usize;
             let h = self.t.h() as usize;
             (0..groups).all(|row| {
-                let want = if row + 1 > h {
+                let want = if row + 1 >= h {
                     message_bit(self.message, row - (h - 1))
                 } else {
                     0
@@ -1086,8 +1088,12 @@ mod tests {
             let moves: Vec<Move> = vals.iter().map(|&v| spatial_move(v)).collect();
             let (rp, rm) = asym_costs(n);
             let bits = t.message_bits(n);
+            // 0xA5 puts a 1 in the first message bit. The oracle's warm-row
+            // boundary used to be off by one, constraining row h-1 to zero
+            // while the embedder writes message bit 0 there; a leading 0x5A
+            // byte masked that discrepancy for years.
             let message: Vec<u8> = (0..bits.div_ceil(8))
-                .map(|i| 0x5Au8.wrapping_mul(i as u8 + 1))
+                .map(|i| 0xA5u8.wrapping_mul(i as u8 + 1))
                 .collect();
 
             let mut stego = vals.clone();
