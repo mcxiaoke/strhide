@@ -26,10 +26,14 @@
 //! per `n` elements, i.e. a relative payload of about `1/u`, at the cost of a
 //! proportional capacity loss. Decoding is still a single forward pass.
 //!
-//! Every column vector has its lowest and highest bits set: the highest bit is
-//! that element's influence on the row the group is about to finalise (without
-//! it some parities are unreachable), and the lowest keeps the newest state bit
-//! meaningful. Within a group the `u` vectors are linearly independent, so the
+//! Every column vector has two bits forced. One of them lands on the row the
+//! group is about to finalise (without it some parities are unreachable), the
+//! other lands on the newest state bit (which keeps the shift register
+//! meaningful). `from_seed_grouped` forces them on the pre-reversal pattern,
+//! i.e. bits `h-1` and `0`; the stored column is that pattern reversed, so
+//! stored bit `0` is the finalising row and stored bit `h-1` the newest one --
+//! `bit d` of a stored column is the element's contribution to row `g+d`.
+//! Within a group the `u` vectors are linearly independent, so the
 //! group's `u` elements can steer the syndrome independently instead of
 //! collapsing into a single XOR.
 //!
@@ -60,8 +64,8 @@
 //!
 //! The original construction capped `u` at `h` and required the group's column
 //! vectors to be linearly independent. Neither is necessary: every column has
-//! its top bit forced to 1, so *each* element can steer the row its group is
-//! about to finalise, and correlated columns only reduce the number of distinct
+//! the bit that lands on the finalising row forced to 1, so *each* element can
+//! steer that row, and correlated columns only reduce the number of distinct
 //! state transitions, not their reachability. Dropping both lets the JPEG engine
 //! spread one payload bit over up to `KERNEL_MAX_U` = 64
 //! elements, which is where the change-rate win comes from.
@@ -333,8 +337,9 @@ impl StcTrellis {
     /// classic form). The caller must pass the same `u` on both ends — the JPEG
     /// superblock and the spatial header both carry it.
     ///
-    /// `u` may exceed `h`: see the module docs for why the top bit alone makes
-    /// every element able to steer its group's row. Identical vectors inside one
+    /// `u` may exceed `h`: see the module docs for why the forced bit on the
+    /// finalising row alone makes every element able to steer its group's row.
+    /// Identical vectors inside one
     /// group are skipped while enough distinct patterns remain (a `u=2` group of
     /// two equal vectors embeds at twice the change rate), so the derivation is
     /// no longer the raw splitmix stream for the second and later columns.

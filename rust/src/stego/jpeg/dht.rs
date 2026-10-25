@@ -194,23 +194,6 @@ pub fn category(v: i16) -> u8 {
     }
 }
 
-/// Zero run in front of zigzag position `zz` (`1..=63`) of a block.
-/// Zero run in front of every natural coefficient index, in one zigzag pass.
-pub fn zero_runs(block: &[i16; 64]) -> [u8; 64] {
-    let mut runs = [0u8; 64];
-    let mut run = 0u8;
-    for &zigzag_index in ZIGZAG.iter().skip(1) {
-        let k = zigzag_index as usize;
-        runs[k] = run;
-        if block[k] == 0 {
-            run = (run + 1) % 16;
-        } else {
-            run = 0;
-        }
-    }
-    runs
-}
-
 /// Check whether writing `new_val` at natural index `k` leaves the block encodable by `table`.
 pub fn can_encode_move(block: &[i16; 64], k: usize, new_val: i16, table: &AcSymbolSet) -> bool {
     let mut modified = *block;

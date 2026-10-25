@@ -211,7 +211,8 @@ pub struct PngParams {
     /// STC constraint height, used only when `codec == Stc` (default 8).
     #[serde(default = "default_stc_h")]
     pub stc_h: u8,
-    /// STC group size: how many elements share one syndrome row (default 1).
+    /// STC group size: how many elements share one syndrome row (default `0`,
+    /// meaning auto -- the engine picks 1, 2 or 3 from the slot-to-bit ratio).
     ///
     /// `1` is the classic one-row-per-element code (one slot per bit). `2` and
     /// `3` carry one bit per 2 or 3 slots instead, which spreads the same
@@ -220,6 +221,12 @@ pub struct PngParams {
     /// distortion drops further. The trade is capacity -- a group of `u` buys
     /// roughly `1/u` bit per slot. Extraction reads `u` from the envelope
     /// header, so it never needs to be repeated.
+    ///
+    /// Values above `stc_h` are legal in the trellis itself (it caps `u` at 64,
+    /// not at `h`), but the spatial engine's own validator caps this field at 3
+    /// while `stc_h >= 4`, so `u > h` is unreachable here; the wider range is
+    /// exercised by the JPEG superblock profile. `0` means "let
+    /// `auto_select_codec` decide".
     #[serde(default = "default_stc_u")]
     pub stc_u: u8,
     /// Scalar knobs belonging to a cost model that is **not** the built-in HILL.
@@ -323,13 +330,13 @@ impl PngParams {
         if self.codec == StegoCodec::Stc || self.codec == StegoCodec::Auto {
             crate::stego::coding::validate_stc_h(self.stc_h)?;
             if self.stc_u != 0 {
+                // No `u <= h` rule here: `validate_stc_u` already caps `u` at 3
+                // while `stc_h >= 4`, so the old comparison could never fire.
+                // The trellis keeps a forced bit on the row each group is about
+                // to finalise and therefore allows `u > h` in general -- that
+                // wider range belongs to the JPEG superblock profile, which
+                // validates through `validate_u_wide`.
                 crate::stego::coding::validate_stc_u(self.stc_u)?;
-                if self.stc_u > self.stc_h {
-                    return Err(StrHideError::General(format!(
-                        "STC parameter 'stc_u' must be <= 'stc_h' (got u={}, h={})",
-                        self.stc_u, self.stc_h
-                    )));
-                }
             }
         }
         validate_algorithm_options(&self.algorithm_options, "spatial")?;

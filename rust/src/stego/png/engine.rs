@@ -11,19 +11,23 @@
 //! still the slot's parity and extraction is unchanged.
 //!
 //! The move is constrained to the pixel's **eight-value class** (`val & 0xF8`):
-//! from the class floor only `+1` is legal, from the ceiling only `-1`, in
-//! between both are. That constraint exists because the extractor rebuilds the
-//! slot ranking from a cost map computed on the *stego* image, so the ranking
-//! must be reproducible: HILL masks its input with `0xF8`, and a class-internal
-//! `±1` leaves that masked value untouched. Unrestricted matching would change
-//! it and desynchronise the ranking.
+//! the engine ranks candidates under the safe rule
+//! ([`crate::stego::coding::spatial_move_safe`]), where class positions `r = 0`
+//! and `r = 7` are not candidates at all, `r = 1` may only move up and `r = 6`
+//! only down, so no modified pixel ever lands on a boundary residue. The
+//! constraint exists because the extractor rebuilds the slot ranking from a
+//! cost map computed on the *stego* image, so the ranking must be reproducible:
+//! HILL masks its input with `0xF8`, and a class-internal `±1` leaves that
+//! masked value untouched. Unrestricted matching would change it and
+//! desynchronise the ranking.
 //!
 //! Why this is not just LSB replacement with extra steps: replacement always
 //! moves a slot in the direction of the target bit, so every value pair
 //! `(2k, 2k+1)` is equalised — the exact signature chi-square and SPA look for.
-//! Here six of every eight values can move either way, so probability mass
-//! crosses pair boundaries and the pairs are no longer individually flat.
-//! Direction choice is further biased towards the local mean by
+//! Here the four interior class positions (`r = 2..=5`, half of every class)
+//! can move either way, so probability mass crosses pair boundaries and the
+//! pairs are no longer individually flat. Direction choice is further biased
+//! towards the local mean by
 //! [`crate::stego::traits::PngCostModel::direction_costs`].
 
 use std::io::{Cursor, Read, Write};

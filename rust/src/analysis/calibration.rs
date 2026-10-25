@@ -154,18 +154,12 @@ pub fn estimate(data: &[u8]) -> Option<CalibrationEstimate> {
 
     // Applicability gate: calibration re-quantises *decoded* pixels, so it needs
     // quantization steps that are large compared with the IDCT round-trip error
-    // (~1). With a quality-100 style table (all steps == 1) the reference is
+    // (~1). With an all-ones table (quality-100 style) the reference is
     // dominated by that rounding and the estimator reports nonsense: measured
-    // 0.659 ("66% embedded") on a clean 911x582 sample with an all-ones table.
-    // Such carriers stay with the pixel-domain detectors and the "clean is not
-    // proof" caveat.
-    // Applicability boundary: calibration re-quantises *decoded* pixels, so it
-    // needs quantization steps that are large compared with the IDCT round-trip
-    // error (~1). With an all-ones table (quality-100 style) the reference is
-    // dominated by that rounding: measured 0.659 ("66% embedded") on a clean
-    // 911x582 sample whose luma table is entirely 1. Such carriers fall back to
-    // the pixel-domain detectors plus the explicit "clean is not proof" caveat
-    // instead of producing a bogus finding.
+    // 0.659 ("66% embedded") on a clean 911x582 sample whose luma table is
+    // entirely 1. Such carriers fall back to the pixel-domain detectors plus
+    // the explicit "clean is not proof" caveat instead of producing a bogus
+    // finding.
     let mean_step = qt.iter().map(|&v| v.max(1) as f64).sum::<f64>() / 64.0;
     if mean_step < 2.0 {
         return None;

@@ -348,18 +348,23 @@ pub fn spatial_move(val: u8) -> Move {
 
 /// Direction legality for a spatial slot under safe non-boundary rule (r in [1, 6]).
 ///
-/// Under this rule, slots with r=0 or r=7 are strictly excluded from candidates.
+/// Under this rule, slots with r=0 or r=7 are strictly excluded from candidates
+/// (`class_rule == 1` in [`crate::stego::png::engine`]).
 /// For r=1, only +1 is legal (to 2, never down to 0).
 /// For r=6, only -1 is legal (to 5, never up to 7).
 /// For r in 2..=5, both +1 and -1 stay strictly inside [1, 6].
 /// As a result, all modified pixels stay strictly within [1, 6], zero modified
 /// pixels enter {0, 7}, and the delta histogram at r=0 and r=7 stays exactly zero,
 /// completely eliminating the boundary deficit vulnerability (P0-B).
+///
+/// The r=0 / r=7 arms keep the function class-preserving on its own instead of
+/// relying on that pre-filter: `val & 0xF8` is what the extractor re-derives the
+/// cost map from, so no caller should be able to make a slot cross it.
 #[inline]
 pub fn spatial_move_safe(val: u8) -> Move {
     match val % SPATIAL_CLASS {
-        1 => Move::PlusOnly,
-        6 => Move::MinusOnly,
+        0 | 1 => Move::PlusOnly,
+        6 | 7 => Move::MinusOnly,
         _ => Move::Both,
     }
 }
@@ -541,6 +546,35 @@ pub fn hamming_extract_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_safe_move_stays_inside_the_eight_value_class() {
+        // `val & 0xF8` is the cost-map invariant the extractor re-derives, so
+        // `spatial_move_safe` must never offer a direction that crosses it --
+        // including the class-boundary residues the candidate pool filters out,
+        // which a future caller could hand over by mistake.
+        for val in 0u8..=255 {
+            let r = val % SPATIAL_CLASS;
+            let mv = spatial_move_safe(val);
+            let dirs: &[i16] = match mv {
+                Move::PlusOnly => &[1],
+                Move::MinusOnly => &[-1],
+                Move::Both => &[1, -1],
+            };
+            for &d in dirs {
+                let moved = (val as i16 + d) as u8;
+                assert_eq!(val & 0xF8, moved & 0xF8, "{val} -> {moved} left the class");
+            }
+            if r == 0 || r == SPATIAL_CLASS - 1 {
+                assert_ne!(mv, Move::Both, "r={r} must not offer both directions");
+            }
+        }
+        // Interior residues keep both directions; this is where the change-rate
+        // win over LSB replacement comes from.
+        for r in 2u8..=5 {
+            assert_eq!(spatial_move_safe(r), Move::Both);
+        }
+    }
 
     /// Deterministic xorshift32 stream: real pseudo-random LSB noise (the old
     /// version used `i % 2`, a periodic pattern that gave the syndrome test a

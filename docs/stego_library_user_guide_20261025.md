@@ -48,7 +48,7 @@ println!("{}", info.summary_string());
 use strhide::stego::{embed_carrier_with_profile, extract_carrier_with_profile, probe_carrier_capacity_with_profile};
 use strhide::params::Profile;
 
-const PROFILE: Profile = Profile::default().with_stego_secret("my-private-secret");
+const PROFILE: Profile = Profile::new().with_stego_secret("my-private-secret");
 let out = embed_carrier_with_profile(&carrier, b"payload", &StegoOptions::default(), &PROFILE)?;
 ```
 
@@ -662,7 +662,7 @@ assert_eq!(a, b);
 use strhide::params::Profile;
 use strhide::stego::{embed_carrier_with_profile, extract_carrier_with_profile, StegoOptions};
 
-const P: Profile = Profile::default()
+const P: Profile = Profile::new()
     .with_stego_secret("only-us-know")
     .with_stego_domain("team-x");
 let stego = embed_carrier_with_profile(&cover, b"msg", &StegoOptions::default(), &P)?;
