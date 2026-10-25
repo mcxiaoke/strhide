@@ -10,6 +10,15 @@
 use crate::stego::params::PngParams;
 use crate::stego::traits::PngCostModel;
 
+/// The built-in normalized KB 3x3 high-pass kernel (row-major):
+/// `[-1, 2, -1; 2, -4, 2; -1, 2, -1] / 4.0`.
+///
+/// Hard-coded on purpose: `kernel_id = 0` in the feature word names exactly
+/// this kernel, and a custom kernel has no wire identity — a carrier written
+/// with one would be unreadable by a default extractor. Exposing the kernel
+/// as a tuning field was removed for that reason.
+const KB_HIGH_PASS_KERNEL: [f64; 9] = [-0.25, 0.50, -0.25, 0.50, -1.00, 0.50, -0.25, 0.50, -0.25];
+
 pub struct HillCostModel;
 
 impl Default for HillCostModel {
@@ -83,7 +92,7 @@ impl PngCostModel for HillCostModel {
         // High-pass residual: I1 = |x * KB|
         let (h1, w1) = (hp - 2, wp - 2);
         let mut i1 = vec![0.0f64; h1 * w1];
-        let kb = &params.high_pass_kernel;
+        let kb = &KB_HIGH_PASS_KERNEL;
         for i in 0..h1 {
             let r0 = &x_pad[i * wp..(i + 1) * wp];
             let r1 = &x_pad[(i + 1) * wp..(i + 2) * wp];

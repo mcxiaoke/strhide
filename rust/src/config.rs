@@ -18,8 +18,6 @@
 //! preserve_time = true          # write: timestamp preservation default
 //! backup        = true          # write/remove: .bak backup default
 //! unescape      = false         # write: escape-sequence decoding default
-//! stego_secret  = "..."         # embed/extract: private default secret
-//! stego_domain  = "..."         # embed/extract: HKDF domain isolation tag
 //! lang          = "zh"         # all: interface language (en|zh), default: auto-detect
 //! ```
 
@@ -41,8 +39,6 @@ const KNOWN_KEYS: &[&str] = &[
     "preserve_time",
     "backup",
     "unescape",
-    "stego_secret",
-    "stego_domain",
     "lang",
 ];
 
@@ -61,12 +57,6 @@ pub struct FileConfig {
     pub unescape: Option<bool>,
     /// Interface language ("en" | "zh"); unset or invalid falls back to environment/system/English.
     pub lang: Option<String>,
-    /// Private default secret for content-adaptive steganography. Replaces the
-    /// public built-in constant when no user password is given. Read/write must
-    /// agree, so this belongs with the password, not with the tuning knobs.
-    pub stego_secret: Option<String>,
-    /// Custom stego domain tag for isolating the HKDF key derivation domain.
-    pub stego_domain: Option<String>,
 }
 
 /// Candidate paths in lookup order, excluding an explicit `--config` path.
@@ -111,9 +101,7 @@ fn parse_config(
         StrHideError::General(format!("Invalid config file '{}': {e}", origin.display()))
     })?;
 
-    if is_cwd_implicit
-        && (cfg.password.is_some() || cfg.password_file.is_some() || cfg.stego_secret.is_some())
-    {
+    if is_cwd_implicit && (cfg.password.is_some() || cfg.password_file.is_some()) {
         eprintln!(
             "[WARNING] Loaded sensitive password/secret keys from local CWD config '{}'. Ensure this file is trusted.",
             origin.display()
@@ -156,30 +144,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cwd_implicit_loads_password_and_secret() {
+    fn cwd_implicit_loads_password() {
         let toml_str = r#"
             strategy = "pe_slack"
             password = "test_injected_pwd"
-            stego_secret = "test_secret"
-            stego_domain = "org.acme.domain"
             backup = true
         "#;
         let cfg = parse_config(toml_str, Path::new("strhide.toml"), true).unwrap();
         assert_eq!(cfg.strategy.as_deref(), Some("pe_slack"));
         assert_eq!(cfg.backup, Some(true));
         assert_eq!(cfg.password.as_deref(), Some("test_injected_pwd"));
-        assert_eq!(cfg.stego_secret.as_deref(), Some("test_secret"));
-        assert_eq!(cfg.stego_domain.as_deref(), Some("org.acme.domain"));
     }
 
     #[test]
-    fn explicit_config_keeps_password_and_secret() {
+    fn explicit_config_keeps_password() {
         let toml_str = r#"
             password = "valid_user_pwd"
-            stego_secret = "valid_secret"
         "#;
         let cfg = parse_config(toml_str, Path::new("explicit.toml"), false).unwrap();
         assert_eq!(cfg.password.as_deref(), Some("valid_user_pwd"));
-        assert_eq!(cfg.stego_secret.as_deref(), Some("valid_secret"));
+    }
+
+    #[test]
+    fn removed_stego_credential_keys_are_ignored_as_unknown() {
+        // `stego_secret` / `stego_domain` were removed from the CLI surface:
+        // a leftover key in an old config must be reported as unknown (stderr
+        // warning) and ignored, not silently honoured.
+        let toml_str = r#"
+            stego_secret = "leftover"
+            stego_domain = "leftover"
+        "#;
+        let cfg = parse_config(toml_str, Path::new("explicit.toml"), false).unwrap();
+        assert_eq!(cfg.password, None);
     }
 }

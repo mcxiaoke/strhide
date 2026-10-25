@@ -477,15 +477,37 @@ fn global_config_short_option() {
     assert_eq!(json["password_hint"], "custom_short_cfg_hint");
 }
 
-/// `--stego-secret` creates a private dialect for content steganography: the
-/// public built-in key (no secret) and any other secret must both fail.
+/// The stego credential flags were removed from the CLI surface: a private
+/// no-password dialect is compile-time `Profile` territory, and the password
+/// is the only credential the extract side must remember. The flags must be
+/// rejected on every verb that used to accept them, and a no-password embed
+/// must round-trip with no credentials at all.
 #[test]
-fn embed_extract_private_stego_secret_isolation() {
-    let dir = scratch("unify_stego_secret");
+fn stego_credential_flags_are_rejected_and_no_password_roundtrips() {
+    let dir = scratch("unify_stego_credential_flags_removed");
     seed_stego(&dir, &["carrier.png"]);
-    let payload = "private dialect payload 2026";
+    let payload = "public constant payload 2026";
     fs::write(dir.join("data.txt"), payload).unwrap();
 
+    for (verb, mut args) in [
+        ("embed", vec!["embed", "carrier.png", "-d", "data.txt"]),
+        ("extract", vec!["extract", "carrier.png", "--stdout"]),
+        ("capacity", vec!["capacity", "carrier.png"]),
+    ] {
+        for flag in ["--stego-secret", "--stego-domain"] {
+            args.push(flag);
+            args.push("whatever");
+            let out = run(&dir, &args);
+            assert_eq!(
+                code(&out),
+                2,
+                "{verb} must reject {flag}: stderr: {}",
+                stderr(&out)
+            );
+        }
+    }
+
+    // No-password embed uses the public built-in constant...
     let embed = run(
         &dir,
         &[
@@ -493,275 +515,73 @@ fn embed_extract_private_stego_secret_isolation() {
             "carrier.png",
             "-d",
             "data.txt",
-            "--stego-secret",
-            "acme-private-dialect-2026",
             "--in-place",
             "--no-backup",
         ],
     );
     assert_eq!(code(&embed), 0, "stderr: {}", stderr(&embed));
 
-    // The same secret reads the payload back.
-    let ok = run(
-        &dir,
-        &[
-            "extract",
-            "carrier.png",
-            "--stdout",
-            "--stego-secret",
-            "acme-private-dialect-2026",
-        ],
-    );
+    // ...so extraction needs no credential whatsoever.
+    let ok = run(&dir, &["extract", "carrier.png", "--stdout"]);
     assert_eq!(code(&ok), 0, "stderr: {}", stderr(&ok));
     assert_eq!(stdout(&ok), payload);
+}
 
-    // The official public constant must not: no garbage on stdout either.
-    let public = run(&dir, &["extract", "carrier.png", "--stdout"]);
-    assert_eq!(code(&public), 1, "stdout: {}", stdout(&public));
-    assert_eq!(
-        stdout(&public),
-        "",
-        "failed extract must not print payloads"
+/// `stego_secret` / `stego_domain` config keys and `STRHIDE_STEGO_SECRET` /
+/// `STRHIDE_STEGO_DOMAIN` environment variables are no longer part of the CLI
+/// surface: leftover config keys warn as unknown and are ignored, the env vars
+/// are inert, and a no-password embed stays readable regardless of both.
+#[test]
+fn removed_stego_credential_sources_are_inert() {
+    let dir = scratch("unify_stego_credential_sources_inert");
+    seed_stego(&dir, &["carrier.png"]);
+    let payload = "inert sources payload 2026";
+    fs::write(dir.join("data.txt"), payload).unwrap();
+    fs::write(
+        dir.join("strhide.toml"),
+        "stego_secret = \"leftover-secret\"\nstego_domain = \"leftover-domain\"\n",
+    )
+    .unwrap();
+
+    // Embed ignores the leftover keys (unknown-key warning) and uses the
+    // public constant.
+    let embed = run(
+        &dir,
+        &[
+            "embed",
+            "carrier.png",
+            "-d",
+            "data.txt",
+            "--in-place",
+            "--no-backup",
+        ],
     );
-    // Wrong secret must be indistinguishable from "nothing hidden": one
-    // generic message, no "the envelope is here but the layout is wrong" hint.
+    assert_eq!(code(&embed), 0, "stderr: {}", stderr(&embed));
     assert!(
-        stderr(&public).contains("No valid payload found"),
-        "stderr: {}",
-        stderr(&public)
+        stderr(&embed).contains("stego_secret") && stderr(&embed).contains("stego_domain"),
+        "leftover keys must be named in the unknown-key warning: {}",
+        stderr(&embed)
     );
 
-    // A different private secret must not either.
-    let other = run(
-        &dir,
-        &[
-            "extract",
-            "carrier.png",
-            "--stdout",
-            "--stego-secret",
-            "someone-elses-dialect-2026",
-        ],
+    // Extraction ignores the env vars too: the same public constant applies,
+    // so the payload reads back with no credential at all.
+    let out = base_cmd()
+        .args(["extract", "carrier.png", "--stdout"])
+        .current_dir(&dir)
+        .env("USERPROFILE", &dir)
+        .env("HOME", &dir)
+        .env("STRHIDE_PASSWORD", "")
+        .env("STRHIDE_STEGO_SECRET", "some-other-secret")
+        .env("STRHIDE_STEGO_DOMAIN", "some-other-domain")
+        .output()
+        .expect("failed to run strhide binary");
+    assert_eq!(
+        code(&out),
+        0,
+        "env vars must be inert: stderr: {}",
+        stderr(&out)
     );
-    assert_eq!(code(&other), 1);
-}
-
-/// Precedence for the stego secret: CLI flag > `STRHIDE_STEGO_SECRET` > config.
-#[test]
-fn stego_secret_precedence_flag_env_config() {
-    let dir = scratch("unify_stego_secret_precedence");
-    seed_stego(&dir, &["carrier.png"]);
-    let payload = "config dialect payload";
-    fs::write(dir.join("data.txt"), payload).unwrap();
-    // Implicitly loaded because the test runs with cwd + HOME = dir.
-    fs::write(
-        dir.join("strhide.toml"),
-        "stego_secret = \"config-dialect-2026\"\n",
-    )
-    .unwrap();
-
-    let embed = run(
-        &dir,
-        &[
-            "embed",
-            "carrier.png",
-            "-d",
-            "data.txt",
-            "--in-place",
-            "--no-backup",
-        ],
-    );
-    assert_eq!(code(&embed), 0, "stderr: {}", stderr(&embed));
-
-    // Config value decrypts.
-    let cfg_ok = run(&dir, &["extract", "carrier.png", "--stdout"]);
-    assert_eq!(code(&cfg_ok), 0, "stderr: {}", stderr(&cfg_ok));
-    assert_eq!(stdout(&cfg_ok), payload);
-
-    let run_env = |secret: Option<&str>| -> Output {
-        let mut cmd = base_cmd();
-        cmd.args(["extract", "carrier.png", "--stdout"])
-            .current_dir(&dir)
-            .env("USERPROFILE", &dir)
-            .env("HOME", &dir)
-            .env("STRHIDE_PASSWORD", "");
-        match secret {
-            Some(s) => cmd.env("STRHIDE_STEGO_SECRET", s),
-            None => cmd.env_remove("STRHIDE_STEGO_SECRET"),
-        };
-        cmd.output().expect("failed to run strhide binary")
-    };
-
-    // Env mirrors the config value -> still readable.
-    let env_ok = run_env(Some("config-dialect-2026"));
-    assert_eq!(code(&env_ok), 0, "stderr: {}", stderr(&env_ok));
-
-    // Env overrides the config file -> unreadable.
-    let env_bad = run_env(Some("env-dialect-2026"));
-    assert_eq!(code(&env_bad), 1, "env must override the config file");
-
-    // The CLI flag overrides both.
-    let flag_bad = run(
-        &dir,
-        &[
-            "extract",
-            "carrier.png",
-            "--stdout",
-            "--stego-secret",
-            "flag-dialect-2026",
-        ],
-    );
-    assert_eq!(code(&flag_bad), 1, "flag must override env and config");
-
-    let flag_ok = run(
-        &dir,
-        &[
-            "extract",
-            "carrier.png",
-            "--stdout",
-            "--stego-secret",
-            "config-dialect-2026",
-        ],
-    );
-    assert_eq!(code(&flag_ok), 0, "stderr: {}", stderr(&flag_ok));
-    assert_eq!(stdout(&flag_ok), payload);
-}
-
-/// A carrier embedded with an explicit --stego-domain tag can only be extracted
-/// with the exact same domain tag. Default domain and other domains must fail.
-#[test]
-fn embed_extract_stego_domain_isolation() {
-    let dir = scratch("unify_stego_domain");
-    seed_stego(&dir, &["carrier.png"]);
-    let payload = "domain isolated payload 2026";
-    fs::write(dir.join("data.txt"), payload).unwrap();
-
-    let embed = run(
-        &dir,
-        &[
-            "embed",
-            "carrier.png",
-            "-d",
-            "data.txt",
-            "--stego-domain",
-            "org.vault.security",
-            "--in-place",
-            "--no-backup",
-        ],
-    );
-    assert_eq!(code(&embed), 0, "stderr: {}", stderr(&embed));
-
-    // The same domain tag reads the payload back.
-    let ok = run(
-        &dir,
-        &[
-            "extract",
-            "carrier.png",
-            "--stdout",
-            "--stego-domain",
-            "org.vault.security",
-        ],
-    );
-    assert_eq!(code(&ok), 0, "stderr: {}", stderr(&ok));
-    assert_eq!(stdout(&ok), payload);
-
-    // Default domain (no --stego-domain flag) must fail.
-    let default_dom = run(&dir, &["extract", "carrier.png", "--stdout"]);
-    assert_eq!(code(&default_dom), 1);
-    assert_eq!(stdout(&default_dom), "");
-
-    // Different domain tag must fail.
-    let other_dom = run(
-        &dir,
-        &[
-            "extract",
-            "carrier.png",
-            "--stdout",
-            "--stego-domain",
-            "org.other.security",
-        ],
-    );
-    assert_eq!(code(&other_dom), 1);
-    assert_eq!(stdout(&other_dom), "");
-}
-
-/// Precedence for the stego domain: CLI flag > `STRHIDE_STEGO_DOMAIN` > config.
-#[test]
-fn stego_domain_precedence_flag_env_config() {
-    let dir = scratch("unify_stego_domain_precedence");
-    seed_stego(&dir, &["carrier.png"]);
-    let payload = "config domain payload";
-    fs::write(dir.join("data.txt"), payload).unwrap();
-    fs::write(
-        dir.join("strhide.toml"),
-        "stego_domain = \"config-domain-2026\"\n",
-    )
-    .unwrap();
-
-    let embed = run(
-        &dir,
-        &[
-            "embed",
-            "carrier.png",
-            "-d",
-            "data.txt",
-            "--in-place",
-            "--no-backup",
-        ],
-    );
-    assert_eq!(code(&embed), 0, "stderr: {}", stderr(&embed));
-
-    // Config value decrypts.
-    let cfg_ok = run(&dir, &["extract", "carrier.png", "--stdout"]);
-    assert_eq!(code(&cfg_ok), 0, "stderr: {}", stderr(&cfg_ok));
-    assert_eq!(stdout(&cfg_ok), payload);
-
-    let run_env = |domain: Option<&str>| -> Output {
-        let mut cmd = base_cmd();
-        cmd.args(["extract", "carrier.png", "--stdout"])
-            .current_dir(&dir)
-            .env("USERPROFILE", &dir)
-            .env("HOME", &dir)
-            .env("STRHIDE_PASSWORD", "");
-        match domain {
-            Some(d) => cmd.env("STRHIDE_STEGO_DOMAIN", d),
-            None => cmd.env_remove("STRHIDE_STEGO_DOMAIN"),
-        };
-        cmd.output().expect("failed to run strhide binary")
-    };
-
-    // Env mirrors the config value -> still readable.
-    let env_ok = run_env(Some("config-domain-2026"));
-    assert_eq!(code(&env_ok), 0, "stderr: {}", stderr(&env_ok));
-
-    // Env overrides the config file -> unreadable.
-    let env_bad = run_env(Some("env-domain-2026"));
-    assert_eq!(code(&env_bad), 1, "env must override the config file");
-
-    // The CLI flag overrides both.
-    let flag_bad = run(
-        &dir,
-        &[
-            "extract",
-            "carrier.png",
-            "--stdout",
-            "--stego-domain",
-            "flag-domain-2026",
-        ],
-    );
-    assert_eq!(code(&flag_bad), 1, "flag must override env and config");
-
-    let flag_ok = run(
-        &dir,
-        &[
-            "extract",
-            "carrier.png",
-            "--stdout",
-            "--stego-domain",
-            "config-domain-2026",
-        ],
-    );
-    assert_eq!(code(&flag_ok), 0, "stderr: {}", stderr(&flag_ok));
-    assert_eq!(stdout(&flag_ok), payload);
+    assert_eq!(stdout(&out), payload);
 }
 
 /// Test CLI --safety and --enforce-safety flags on probe and embed.

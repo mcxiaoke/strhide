@@ -52,10 +52,10 @@ use crate::stego::format::{Aead as SuiteAead, CipherSuite};
 /// permutation become known).
 ///
 /// Replace it with a private value through
-/// [`Profile::with_stego_secret`](crate::params::Profile::with_stego_secret)
-/// (CLI: `--stego-secret`, config: `stego_secret`). Note the parameter class: it
-/// must be identical on embed and extract, otherwise the carrier reads back as
-/// `NoHiddenData`.
+/// [`Profile::with_stego_secret`](crate::params::Profile::with_stego_secret) in
+/// a custom build (compile-time dialect; there is deliberately no CLI flag for
+/// it). Note the parameter class: it must be identical on embed and extract,
+/// otherwise the carrier reads back as `NoHiddenData`.
 pub const PUBLIC_DEFAULT_SECRET: &str = "strhide-default-content-stego-key-2026";
 
 pub const SALT_LEN: usize = 16;

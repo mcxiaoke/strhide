@@ -260,12 +260,6 @@ pub struct StegoTuningArgs {
     #[arg(short = 'a', long = "algorithm", value_name = "NAME")]
     pub algorithm: Option<String>,
 
-    #[arg(long = "stego-secret", value_name = "SECRET")]
-    pub stego_secret: Option<String>,
-
-    #[arg(long = "stego-domain", value_name = "DOMAIN")]
-    pub stego_domain: Option<String>,
-
     #[arg(long = "safety", value_name = "LEVEL")]
     pub safety: Option<String>,
 
@@ -347,25 +341,6 @@ pub struct ExtractArgs {
 
     #[command(flatten)]
     pub passwords: PasswordArgs,
-
-    #[arg(short = 'a', long = "algorithm", value_name = "NAME")]
-    pub algorithm: Option<String>,
-
-    #[arg(long = "stego-secret", value_name = "SECRET")]
-    pub stego_secret: Option<String>,
-
-    #[arg(long = "stego-domain", value_name = "DOMAIN")]
-    pub stego_domain: Option<String>,
-
-    // PNG extraction recomputes the HILL cost map to rank body slots, so the
-    // two filter windows must repeat the embed-time values. Everything else
-    // the embedder tuned (algorithm, exclusion rate, codec, h, u) is
-    // self-describing in the carrier header and needs no flag here.
-    #[arg(long = "p1-window", value_name = "INT")]
-    pub p1_window: Option<usize>,
-
-    #[arg(long = "p2-window", value_name = "INT")]
-    pub p2_window: Option<usize>,
 }
 
 const EXTRACT_AFTER_HELP: &str = crate::i18n::messages::EXTRACT_AFTER_HELP_EN;
@@ -573,44 +548,6 @@ pub fn resolve_password(
         ));
     }
     Ok(None)
-}
-
-/// Resolve the private stego default secret.
-///
-/// Precedence mirrors `resolve_password`: CLI flag, then
-/// `STRHIDE_STEGO_SECRET`, then the config file. An empty value means "not
-/// configured" rather than "empty secret" -- an empty secret would silently
-/// fall back to the public constant and defeat the purpose.
-fn resolve_stego_secret(explicit: Option<&str>, cfg: &FileConfig) -> Option<String> {
-    if let Some(s) = explicit
-        && !s.is_empty()
-    {
-        return Some(s.to_string());
-    }
-    if let Ok(env_secret) = std::env::var("STRHIDE_STEGO_SECRET")
-        && !env_secret.is_empty()
-    {
-        return Some(env_secret);
-    }
-    cfg.stego_secret.as_ref().filter(|s| !s.is_empty()).cloned()
-}
-
-/// Resolve the custom stego domain tag.
-///
-/// Precedence mirrors `resolve_stego_secret`: CLI flag, then
-/// `STRHIDE_STEGO_DOMAIN`, then the config file. An empty value means "not configured".
-fn resolve_stego_domain(explicit: Option<&str>, cfg: &FileConfig) -> Option<String> {
-    if let Some(d) = explicit
-        && !d.is_empty()
-    {
-        return Some(d.to_string());
-    }
-    if let Ok(env_domain) = std::env::var("STRHIDE_STEGO_DOMAIN")
-        && !env_domain.is_empty()
-    {
-        return Some(env_domain);
-    }
-    cfg.stego_domain.as_ref().filter(|d| !d.is_empty()).cloned()
 }
 
 fn should_print_banner(cli: &Cli) -> bool {
@@ -1827,42 +1764,6 @@ fn handle_list(args: ListArgs) -> Result<(), StrHideError> {
     Ok(())
 }
 
-/// Warn when the caller tuned stego parameters away from their defaults.
-///
-/// Slot selection depends on the cost map, which depends on the HILL filter
-/// windows, so extraction only succeeds when they match the embed-time
-/// values. The envelope deliberately carries no parameter fingerprint (the
-/// salt lives inside the header slots, which are themselves cost-map
-/// dependent), so a mismatch is indistinguishable from a wrong password --
-/// this warning is the mitigation. It is printed unconditionally, never
-/// keyed on the extraction outcome, so the message cannot be used as a
-/// detection oracle.
-///
-/// The exclusion rate is deliberately absent: it travels in the carrier's
-/// feature word (`exclusion_permille`), so the extractor overrides whatever
-/// the caller passed and a mismatch cannot occur.
-fn warn_nondefault_stego_params(options: &crate::stego::StegoOptions, quiet: bool) {
-    if quiet {
-        return;
-    }
-    let sp = &options.png_params;
-    let d_sp = crate::stego::PngParams::default();
-    let mut flags: Vec<String> = Vec::new();
-    if sp.p1_window != d_sp.p1_window {
-        flags.push(format!("--p1-window {}", sp.p1_window));
-    }
-    if sp.p2_window != d_sp.p2_window {
-        flags.push(format!("--p2-window {}", sp.p2_window));
-    }
-    if flags.is_empty() {
-        return;
-    }
-    eprintln!(
-        "[WARN] Non-default stego parameters: {}. Extraction succeeds only with the same values; a mismatch fails as 'No valid payload found'.",
-        flags.join(" ")
-    );
-}
-
 /// Apply `--stc-h` to the option set.
 fn apply_stc_h(
     options: &mut crate::stego::StegoOptions,
@@ -1877,23 +1778,21 @@ fn apply_stc_h(
     Ok(())
 }
 
-/// Assemble the stego option set for `embed`.
+/// Assemble the stego option set for `embed` and the capacity probe.
 ///
 /// The `--capacity` probe and the real embed used to build this list twice, and
-/// the two copies had drifted: only the embed path applied `--stc-h` and warned
-/// about non-default parameters, so a probe could report a capacity for a
-/// different configuration than the one that was about to be used. One builder,
-/// with the embed-only extras behind `embed_extras`.
+/// the two copies had drifted: only the embed path applied `--stc-h`, so a probe
+/// could report a capacity for a different configuration than the one that was
+/// about to be used. One builder serves both callers. The only credential it
+/// carries is the user password; a private no-password dialect (secret, domain,
+/// wire-format identity) is compile-time [`Profile`] territory, not a CLI flag.
 fn embed_stego_options(
     args: &StegoTuningArgs,
     password: Option<&str>,
-    quiet: bool,
-    embed_extras: bool,
 ) -> Result<crate::stego::StegoOptions, StrHideError> {
     let mut options = crate::stego::StegoOptions {
         algorithm: args.algorithm.clone(),
         password: password.map(str::to_string),
-        domain: args.stego_domain.clone(),
         ..Default::default()
     };
 
@@ -1937,9 +1836,6 @@ fn embed_stego_options(
     };
 
     apply_stc_h(&mut options, args.stc_h)?;
-    if embed_extras {
-        warn_nondefault_stego_params(&options, quiet);
-    }
     Ok(options)
 }
 
@@ -1962,17 +1858,9 @@ fn run_capacity_probe(
         false,
         false,
     )?;
-    let stego_secret = resolve_stego_secret(tuning.stego_secret.as_deref(), cfg);
-    let stego_domain = resolve_stego_domain(tuning.stego_domain.as_deref(), cfg);
     for carrier in &carriers {
         let carrier_bytes = std::fs::read(carrier)?;
-        let mut options = embed_stego_options(tuning, password.as_deref(), true, false)?;
-        if options.password.is_none() {
-            options.password = stego_secret.clone();
-        }
-        if options.domain.is_none() {
-            options.domain = stego_domain.clone();
-        }
+        let options = embed_stego_options(tuning, password.as_deref())?;
         let cap = crate::stego::probe_carrier_capacity_with_profile(
             &carrier_bytes,
             &options,
@@ -2050,12 +1938,9 @@ fn handle_embed(
     quiet: bool,
     engine: &StrHide,
 ) -> Result<(), StrHideError> {
-    // Runtime credentials (CLI flag, env, config) are resolved once and
-    // carried on StegoOptions; the static Profile dialect is not populated
-    // from runtime data.
-    let stego_secret = resolve_stego_secret(args.tuning.stego_secret.as_deref(), cfg);
-    let stego_domain = resolve_stego_domain(args.tuning.stego_domain.as_deref(), cfg);
-
+    // The user password is the only runtime credential: a private no-password
+    // dialect (secret, domain, wire-format identity) is compile-time Profile
+    // territory and is bound on the engine, not populated from runtime data.
     if args.capacity {
         return run_capacity_probe(
             args.carrier.clone(),
@@ -2076,7 +1961,6 @@ fn handle_embed(
         encrypt,
         true,
     )?;
-    // stego_secret / stego_domain were resolved at the top of the command.
     // The dialect profile is bound on the engine; copy it out (Profile is Copy)
     // so the existing `&profile` call sites below are unchanged.
     let profile = *engine.profile();
@@ -2127,13 +2011,7 @@ fn handle_embed(
         let t_start = std::time::Instant::now();
         let carrier_bytes = std::fs::read(carrier)?;
 
-        let mut options = embed_stego_options(&args.tuning, password.as_deref(), quiet, true)?;
-        if options.password.is_none() {
-            options.password = stego_secret.clone();
-        }
-        if options.domain.is_none() {
-            options.domain = stego_domain.clone();
-        }
+        let options = embed_stego_options(&args.tuning, password.as_deref())?;
 
         if !quiet
             && options.safety.enforcement == crate::stego::SafetyEnforcement::Advisory
@@ -2253,23 +2131,16 @@ fn handle_extract(
 
     let carrier_bytes = std::fs::read(&args.carrier)?;
 
-    let stego_secret = resolve_stego_secret(args.stego_secret.as_deref(), cfg);
-    let stego_domain = resolve_stego_domain(args.stego_domain.as_deref(), cfg);
+    // The password is the only credential the user can be expected to
+    // remember: the carrier is self-describing about format, algorithm, and
+    // every cost-map hyperparameter (feature word / superblock), and a
+    // private no-password dialect is compile-time Profile territory on the
+    // engine, not a command-line flag.
     let profile = *engine.profile();
-    let mut options = crate::stego::StegoOptions {
-        algorithm: args.algorithm,
-        password: password.or(stego_secret),
-        domain: stego_domain,
+    let options = crate::stego::StegoOptions {
+        password,
         ..Default::default()
     };
-
-    if let Some(p1) = args.p1_window {
-        options.png_params.p1_window = p1;
-    }
-    if let Some(p2) = args.p2_window {
-        options.png_params.p2_window = p2;
-    }
-    warn_nondefault_stego_params(&options, quiet);
 
     let payload = crate::stego::extract_carrier_with_profile(&carrier_bytes, &options, &profile)?;
 

@@ -187,10 +187,16 @@ impl SafetyPolicy {
 }
 
 /// Fine-tuning parameters for spatial-domain steganography (e.g. HILL, WOW).
+///
+/// Every field here either travels in the carrier's feature word
+/// (`p1_window`, `p2_window`, `epsilon`, `exclusion_percentile`, `codec`,
+/// `stc_h`, `stc_u`) or only shapes the embed-side offer, so extraction never
+/// depends on the caller repeating an embed-time value. The high-pass kernel
+/// is deliberately **not** a field: the built-in normalized KB kernel is the
+/// only one with a wire identity (`kernel_id = 0`), and a custom kernel would
+/// silently produce carriers the default extractor cannot read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PngParams {
-    /// 3x3 high-pass filter kernel (row-major). Default is normalized KB kernel.
-    pub high_pass_kernel: [f64; 9],
     /// First-stage low-pass filter window size (odd, default 3).
     pub p1_window: usize,
     /// Second-stage low-pass filter window size (odd, default 15).
@@ -218,10 +224,9 @@ pub struct PngParams {
     pub stc_u: u8,
     /// Scalar knobs belonging to a cost model that is **not** the built-in HILL.
     ///
-    /// The typed fields above (`high_pass_kernel`, `p1_window`, `p2_window`,
-    /// `epsilon`) are HILL's own and stay typed because one of them is not a
-    /// scalar. Every *other* model reads its settings from here, keyed by its
-    /// own vocabulary:
+    /// The typed fields above (`p1_window`, `p2_window`, `epsilon`) are HILL's
+    /// own and stay typed because one of them is not a scalar. Every *other*
+    /// model reads its settings from here, keyed by its own vocabulary:
     ///
     /// ```toml
     /// [png_params.algorithm_options]
@@ -268,8 +273,6 @@ impl PngParams {
 impl Default for PngParams {
     fn default() -> Self {
         Self {
-            // Normalized KB 3x3 kernel: [-1, 2, -1; 2, -4, 2; -1, 2, -1] / 4.0
-            high_pass_kernel: [-0.25, 0.50, -0.25, 0.50, -1.00, 0.50, -0.25, 0.50, -0.25],
             p1_window: 3,
             p2_window: 15,
             epsilon: f32::EPSILON as f64,
@@ -310,11 +313,6 @@ impl PngParams {
                     "HILL parameter '{name}' must be <= 63, got {window}"
                 )));
             }
-        }
-        if self.high_pass_kernel.iter().any(|v| !v.is_finite()) {
-            return Err(StrHideError::General(
-                "HILL parameter 'high_pass_kernel' must contain only finite values".into(),
-            ));
         }
         if !self.epsilon.is_finite() || self.epsilon <= 0.0 {
             return Err(StrHideError::General(format!(

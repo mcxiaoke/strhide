@@ -524,12 +524,6 @@ crate::i18n_messages! {
     HelpEmbedEncrypt:
         en = "Ask for an encryption password when no password source is given (interactive prompt; fails without a TTY)",
         zh = "未提供密码时交互式提示输入加密密码（若无终端 TTY 则直接失败）";
-    HelpEmbedStegoSecret:
-        en = "Private default secret for adaptive stego (read/write must agree)",
-        zh = "自适应隐写私有默认密钥（嵌入与提取两端必须一致）";
-    HelpEmbedStegoDomain:
-        en = "Custom domain tag for HKDF key derivation isolation (read/write must agree)",
-        zh = "自适应隐写域隔离标签（用于隔离 HKDF 密钥派生，嵌入与提取两端必须一致）";
     HelpEmbedSafety:
         en = "Stego capacity safety tier ('paranoid': bpp<=0.06, 'high': bpp<=0.10 [default], 'balanced': bpp<=0.15)",
         zh = "自适应隐写安全容量档位（'paranoid': bpp<=0.06, 'high': bpp<=0.10 [默认], 'balanced': bpp<=0.15）";
@@ -599,15 +593,6 @@ crate::i18n_messages! {
     HelpEmbedDryRun:
         en = "Run the full embed in memory (capacity, safety gate, password path) and report the resulting size without writing any file",
         zh = "在内存中完整执行嵌入（容量、安全门、密码路径）并报告产物大小，不写入任何文件";
-    HelpExtractAlgorithm:
-        en = "Distortion cost algorithm (auto|hill|suniward|uerd|juniward|hevc). Only 'hevc'/'cabac' change extraction routing (force Scheme C on a HEIF carrier); PNG/JPEG carriers declare their algorithm in the header and ignore this flag",
-        zh = "失真代价算法（auto|hill|suniward|uerd|juniward|hevc）。仅 'hevc'/'cabac' 影响提取路由（对 HEIF 载体强制 Scheme C）；PNG/JPEG 载体在头部自描述算法，此参数被忽略";
-    HelpExtractP1Window:
-        en = "Fine-tune (PNG HILL): first-stage low-pass filter window size used at embed time (odd, default: 3). Must match the embed-time value; extraction recomputes the cost map with it",
-        zh = "微调参数（PNG HILL）：嵌入时使用的第一级低通滤波器窗口尺寸（奇数，默认: 3）。必须与嵌入时一致，提取端用它重算代价图";
-    HelpExtractP2Window:
-        en = "Fine-tune (PNG HILL): second-stage low-pass filter window size used at embed time (odd, default: 15). Must match the embed-time value; extraction recomputes the cost map with it",
-        zh = "微调参数（PNG HILL）：嵌入时使用的第二级低通滤波器窗口尺寸（奇数，默认: 15）。必须与嵌入时一致，提取端用它重算代价图";
 
     // ---- Config warnings ----
     WarnConfigUnknownKey:

@@ -91,17 +91,11 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         (_, "text-file") => Msg::HelpSharedTextFile,
         (_, "text-base64") => Msg::HelpSharedTextBase64,
 
-        // Stego options: one wording for embed / extract / capacity, except
-        // where the command context changes the meaning (extract's algorithm
-        // is routing-only, its windows repeat embed-time values, and the
-        // capacity probe has its own carrier wording). The specific commands
-        // must be matched before the wildcard arms.
-        ("extract", "algorithm") => Msg::HelpExtractAlgorithm,
-        ("extract", "p1-window") => Msg::HelpExtractP1Window,
-        ("extract", "p2-window") => Msg::HelpExtractP2Window,
+        // Stego options: one wording for embed / capacity, except where the
+        // command context changes the meaning (the capacity probe has its own
+        // carrier wording). The specific commands must be matched before the
+        // wildcard arms.
         (_, "algorithm") => Msg::HelpStegoAlgorithm,
-        (_, "stego-secret") => Msg::HelpEmbedStegoSecret,
-        (_, "stego-domain") => Msg::HelpEmbedStegoDomain,
         (_, "safety") => Msg::HelpEmbedSafety,
         (_, "enforce-safety") => Msg::HelpEmbedEnforceSafety,
         (_, "exclusion-rate") => Msg::HelpEmbedExclusionRate,
