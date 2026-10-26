@@ -237,8 +237,8 @@ pub fn probe_hevc_capacity_info(
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
-    let (slots_count, is_estimated) = probe_hevc_slots_count(carrier, kind, exact)?;
-    build_hevc_capacity_info(carrier, kind, fmt, slots_count, safety_level, is_estimated)
+    let pool = probe_hevc_pool(carrier, kind, exact)?;
+    build_hevc_capacity_info(carrier, kind, fmt, &pool, safety_level)
 }
 
 fn count_absorbed_slots(recorder: &mut CabacRecorder, rbsp: &[u8]) -> usize {
@@ -268,14 +268,14 @@ fn count_absorbed_slots(recorder: &mut CabacRecorder, rbsp: &[u8]) -> usize {
     }
 }
 
-fn probe_hevc_slots_count(
+fn probe_hevc_pool(
     carrier: &[u8],
     kind: HevcCarrierKind,
     exact: bool,
-) -> Result<(usize, bool), StrHideError> {
+) -> Result<PoolProfile, StrHideError> {
     if kind != HevcCarrierKind::Mp4Container || exact {
         let record = record_carrier_state(carrier, kind)?;
-        return Ok((record.all_slots.len(), false));
+        return Ok(PoolProfile::from_record(&record));
     }
 
     let target = parse_mp4_targets(carrier)
@@ -302,48 +302,51 @@ fn probe_hevc_slots_count(
         }
     }
 
-    let has_non_reference = candidates.iter().any(|c| is_non_reference_vcl(c.nal_type));
-    let total_selectable = candidates
-        .iter()
-        .filter(|c| selectable(c.nal_type, has_non_reference))
-        .count();
+    let has_inter = candidates.iter().any(|c| !is_irap(c.nal_type));
 
-    // 150 frames or fewer: full scan (0% estimation error, fast enough)
-    if total_selectable <= 150 {
-        let record = record_carrier_state(carrier, kind)?;
-        return Ok((record.all_slots.len(), false));
+    // Pictures and per-band picture counts are exact and free: slice headers are
+    // not decoded, only `first_slice_segment_in_pic_flag` is read.
+    let (pictures, band_pictures) = count_pictures(carrier, kind, &candidates, has_inter);
+    let mut band_total_bytes = [0usize; 2];
+    let mut selectable = 0usize;
+    for cand in &candidates {
+        let band = picture_band(cand.nal_type, has_inter);
+        if let Some(b) = band {
+            band_total_bytes[b as usize] += cand.span.len();
+            selectable += 1;
+        }
     }
 
-    let total_selectable_bytes: usize = candidates
-        .iter()
-        .filter(|c| selectable(c.nal_type, has_non_reference))
-        .map(|c| c.span.len())
-        .sum();
+    // 150 pictures or fewer: full scan (0% estimation error, fast enough)
+    if selectable <= 150 {
+        let record = record_carrier_state(carrier, kind)?;
+        return Ok(PoolProfile::from_record(&record));
+    }
 
     // Sample 20%, clamped to [150, 1000]
-    let sample_limit = ((total_selectable as f64 * 0.20).round() as usize).clamp(150, 1000);
+    let sample_limit = ((selectable as f64 * 0.20).round() as usize).clamp(150, 1000);
     let mut recorded_slices = 0usize;
-    let mut recorded_slots = 0usize;
-    let mut sampled_bytes = 0usize;
+    let mut band_recorded_slots = [0usize; 2];
+    let mut band_sampled_bytes = [0usize; 2];
 
     for cand in &candidates {
         let slice_bytes = &carrier[cand.span.clone()];
         if slice_bytes.len() < 2 {
             continue;
         }
-        if !selectable(cand.nal_type, has_non_reference) {
+        let Some(band) = picture_band(cand.nal_type, has_inter) else {
             if let Err(e) = decoder.push_nal(slice_bytes, None) {
                 decode_error.get_or_insert_with(|| e.to_string());
             }
             drain_frames(&mut decoder);
             continue;
-        }
+        };
 
         if recorded_slices >= sample_limit {
             break;
         }
 
-        let mut recorder = CabacRecorder::with_slice(recorded_slices);
+        let mut recorder = CabacRecorder::with_slice(recorded_slices, band);
         let decoded = decoder.decode_nal_with_observer(slice_bytes, &mut recorder);
         drain_frames(&mut decoder);
 
@@ -355,9 +358,9 @@ fn probe_hevc_slots_count(
             Ok(_) => {
                 let rbsp = nal_rbsp(slice_bytes);
                 let absorbed = count_absorbed_slots(&mut recorder, &rbsp);
-                recorded_slots += absorbed;
+                band_recorded_slots[band as usize] += absorbed;
+                band_sampled_bytes[band as usize] += cand.span.len();
                 recorded_slices += 1;
-                sampled_bytes += cand.span.len();
             }
         }
     }
@@ -370,24 +373,55 @@ fn probe_hevc_slots_count(
         )));
     }
 
-    let total_slots = if sampled_bytes > 0 {
-        ((recorded_slots as f64 / sampled_bytes as f64) * total_selectable_bytes as f64).round()
-            as usize
-    } else {
-        recorded_slots
-    };
+    // Scale each band by its own byte ratio: the two bands have very different
+    // slot densities (a reference picture carries 2-3x the residual of a
+    // non-reference one), so a single global ratio would bias the estimate.
+    let mut band_slots = [0usize; 2];
+    for b in 0..2 {
+        band_slots[b] = if band_sampled_bytes[b] > 0 {
+            ((band_recorded_slots[b] as f64 / band_sampled_bytes[b] as f64)
+                * band_total_bytes[b] as f64)
+                .round() as usize
+        } else {
+            0
+        };
+    }
 
-    Ok((total_slots, true))
+    Ok(PoolProfile {
+        total_slots: band_slots[0] + band_slots[1],
+        band_slots,
+        band_pictures,
+        pictures,
+        is_estimated: true,
+    })
 }
 
-/// Helper to construct [`StegoCapacityInfo`] from known slot count and carrier properties.
-pub fn build_hevc_capacity_info(
+/// Slots per modification of the payload budget: one payload bit occupies
+/// `stc_u = 2` slots and about a quarter of the selected slots get flipped, so
+/// one flip corresponds to four slots. Used to turn "flips per reference
+/// picture" into a slot budget.
+const SLOTS_PER_REF_FLIP: usize = 4;
+
+/// Helper to construct [`StegoCapacityInfo`] from the recorded pool geometry.
+///
+/// Two different policies meet here, because a still picture and a video do not
+/// distort the same way:
+///
+/// * **Still carrier** (one picture): the payload is bounded by
+///   `min(bpp_limit * pixels, slots / target_ratio)`, the still-image anchors
+///   calibrated on DIV2K.
+/// * **Video** (more than one picture): those anchors do not work. `bpp * pixels`
+///   ignores length (it pinned every 1080p video to 25.3 KiB), and
+///   `slots / target_ratio` bounds the fraction of the *pool*, while the real
+///   damage comes from flips in pictures that later pictures predict from. The
+///   budget is therefore spent on the drift ladder: a fraction of the
+///   drift-free band, plus a fixed number of flips per reference picture.
+pub(crate) fn build_hevc_capacity_info(
     carrier: &[u8],
     kind: HevcCarrierKind,
     fmt: &HevcFormatProfile,
-    total_slots: usize,
+    pool: &PoolProfile,
     safety_level: SafetyLevel,
-    is_estimated: bool,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let format_name = match kind {
         HevcCarrierKind::HeifContainer => "HEIF/HEVC",
@@ -395,6 +429,7 @@ pub fn build_hevc_capacity_info(
         HevcCarrierKind::Mp4Container => "MP4/HEVC",
     };
 
+    let total_slots = pool.total_slots;
     let trellis = StcTrellis::from_seed_grouped(CAPACITY_PROBE_SEED, fmt.stc_h, fmt.stc_u)?;
     let header_bits = fmt.header_bytes * 8;
     let min_needed_slots = trellis.slots_for(header_bits);
@@ -410,20 +445,32 @@ pub fn build_hevc_capacity_info(
         available_bits / 8
     };
 
-    // Extract picture dimensions from SPS to derive true pixel count
+    // Extract picture dimensions from SPS to derive the true element count.
+    // That count is pixels times pictures: the per-frame version was the bug
+    // that made a 13.6 s video and a 6.4 s video recommend the same 25.3 KiB.
     let (width, height) = extract_hevc_dimensions(carrier).unwrap_or((0, 0));
+    let picture_count = pool.pictures.max(1);
     let total_pixels = (width as usize) * (height as usize);
     let total_elements = if total_pixels > 0 {
-        total_pixels
+        total_pixels.saturating_mul(picture_count)
     } else {
         total_slots
     };
 
-    // Safety-bounded recommended capacity:
-    // min(bpp_limit * total_pixels, available_slots / target_ratio)
-    let bpp_bits = (total_elements as f64 * safety_level.bpp_limit()).floor() as usize;
-    let ratio_bits = (total_slots as f64 / safety_level.target_ratio()).floor() as usize;
-    let target_bits = bpp_bits.min(ratio_bits);
+    let target_bits = if picture_count > 1 {
+        let budget = safety_level.video_budget();
+        let non_ref_slots = (pool.band_slots[0] as f64 * budget.non_ref_fraction).floor() as usize;
+        let ref_slots = budget
+            .ref_flips_per_picture
+            .saturating_mul(pool.band_pictures[1])
+            .saturating_mul(SLOTS_PER_REF_FLIP)
+            .min(pool.band_slots[1]);
+        trellis.message_bits(non_ref_slots.saturating_add(ref_slots))
+    } else {
+        let bpp_bits = (total_elements as f64 * safety_level.bpp_limit()).floor() as usize;
+        let ratio_bits = (total_slots as f64 / safety_level.target_ratio()).floor() as usize;
+        bpp_bits.min(ratio_bits)
+    };
     let recommended_max_bytes = (target_bits / 8)
         .saturating_sub(fmt.header_bytes)
         .min(max_raw_payload_bytes);
@@ -467,7 +514,7 @@ pub fn build_hevc_capacity_info(
         estimated_change_rate: 0.25,
         safety_level: safety_level.as_str().into(),
         safety_bpp_limit: safety_level.bpp_limit(),
-        is_estimated,
+        is_estimated: pool.is_estimated,
         media_info,
     })
 }
@@ -501,12 +548,12 @@ pub fn embed_hevc_with_info(
 
     // 1. Scan and record all slices and substreams
     let record = record_carrier_state(carrier, kind)?;
+    let pool = PoolProfile::from_record(&record);
+    let capacity_info = build_hevc_capacity_info(carrier, kind, fmt, &pool, safety_level)?;
+    let bands = record.bands;
     let slice_contexts = record.slice_contexts;
     let all_slots = record.all_slots;
     let total_slots = all_slots.len();
-
-    let capacity_info =
-        build_hevc_capacity_info(carrier, kind, fmt, total_slots, safety_level, false)?;
 
     // 2. Prepare ciphertext and envelope
     let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);
@@ -550,13 +597,13 @@ pub fn embed_hevc_with_info(
 
     // 3. Element order, then solve / re-encode until the flip set is safe.
     //
-    //    Slots are consumed in a deterministic Weyl permutation of the pool
-    //    (`slot_positions`), not in recording order. Recording order is
-    //    spatial: it starts at the first item (for a burst .heic, the primary
-    //    image) and inside it at the first slices, so a small payload used to
-    //    eat the first picture's signs wholesale and flatten it. The extractor
-    //    derives the same permutation from `total_slots` alone, so no side
-    //    information is needed.
+    //    Slots are consumed in a deterministic Weyl permutation inside each
+    //    drift band (`band_positions`), not in recording order. Recording order
+    //    is spatial: it starts at the first item (for a burst .heic, the
+    //    primary image) and inside it at the first slices, so a small payload
+    //    used to eat the first picture's signs wholesale and flatten it. The
+    //    extractor derives the same permutation from the band layout alone, so
+    //    no side information is needed.
     //
     //    Two things can make an individual slot unusable:
     //      * flipping it disturbs a `00 00 xx<=3` boundary, so RBSP->NAL
@@ -570,7 +617,7 @@ pub fn embed_hevc_with_info(
     //    Both are discovered while embedding. Such slots get an infinite STC
     //    cost and are simply never flipped -- the slot *set* never changes,
     //    because extraction has no way to learn about the exclusion.
-    let positions = slot_positions(total_slots, needed_slots);
+    let positions = band_positions(&bands, needed_slots);
     let mut forbidden = vec![false; total_slots];
     let mut bad_substreams: HashSet<(usize, usize)> = HashSet::new();
     let mut replay_ok: HashMap<(usize, usize), bool> = HashMap::new();
@@ -954,38 +1001,59 @@ fn replay_matches_cover(replay: &[u8], cover: &[u8]) -> bool {
         && cover[replay.len()..].iter().all(|b| *b == 0)
 }
 
-/// Deterministic Weyl permutation of the slot pool, shared by the embedder and
-/// the extractor.
+/// Deterministic Weyl permutation of each drift band, consumed band by band.
 ///
-/// Element `i` maps to slot `(i * stride) mod total`. `stride` is ~0.618 of the
-/// pool and coprime with it, so consecutive elements land in different slices,
-/// different items and different corners of the picture. Consuming slots in
-/// recording order instead concentrates the whole payload on the first item --
-/// for a burst `.heic` (dozens of independent pictures in one file) that
-/// flattens the primary image while the other 40-odd pictures stay pristine.
+/// Element `i` maps to slot `band.start + (j * stride) mod len` where `j` is the
+/// element's index inside that band. `stride` is ~0.618 of the band and coprime
+/// with it, so consecutive elements land in different slices, different pictures
+/// and different corners of the frame. Consuming slots in recording order
+/// instead concentrates the whole payload on the first item -- for a burst
+/// `.heic` (dozens of independent pictures in one file) that flattens the
+/// primary image while the other 40-odd pictures stay pristine.
 ///
-/// `count` only decides how many elements are produced; the mapping of element
-/// `i` never depends on it, which is what lets the extractor read the header
-/// prefix and the full message with the same permutation.
-fn slot_positions(total: usize, count: usize) -> Vec<usize> {
-    if total == 0 {
-        return Vec::new();
-    }
-    let mut stride = ((total as u64 * 618_034) / 1_000_000) as usize;
-    stride = stride.max(1);
-    while gcd_usize(stride, total) != 1 {
-        stride += 1;
-        if stride >= total {
-            stride = 1;
+/// Two properties matter:
+///
+/// * `count` only decides how many elements are produced; the mapping of element
+///   `i` never depends on it, which is what lets the extractor read the header
+///   prefix and then the full message with the same mapping.
+/// * Bands are never interleaved. A payload that fits in band 0 (pictures
+///   nothing predicts from) never reaches band 1, so the drift-free rung is
+///   exhausted before any reference picture is touched.
+fn band_positions(bands: &[std::ops::Range<usize>], count: usize) -> Vec<usize> {
+    let mut out = Vec::with_capacity(count);
+    for band in bands {
+        if out.len() >= count {
             break;
         }
+        let len = band.len();
+        if len == 0 {
+            continue;
+        }
+        let stride = permutation_stride(len);
+        for i in 0..len {
+            if out.len() >= count {
+                break;
+            }
+            // `i * stride` overflows `usize` on 32-bit targets once a burst
+            // HEIC exposes a few billion slots; the modulus only needs the
+            // product's low bits, so the multiply runs in `u64`.
+            out.push(band.start + ((i as u64 * stride as u64) % len as u64) as usize);
+        }
     }
-    (0..count.min(total))
-        // `i * stride` overflows `usize` on 32-bit targets once a burst HEIC
-        // exposes a few billion slots; the modulus only needs the product's low
-        // bits, so the multiply runs in `u64`.
-        .map(|i| ((i as u64 * stride as u64) % total as u64) as usize)
-        .collect()
+    out
+}
+
+/// Weyl stride for a band of `len` slots: ~0.618 of it and coprime with it.
+fn permutation_stride(len: usize) -> usize {
+    let mut stride = ((len as u64 * 618_034) / 1_000_000) as usize;
+    stride = stride.max(1);
+    while gcd_usize(stride, len) != 1 {
+        stride += 1;
+        if stride >= len {
+            return 1;
+        }
+    }
+    stride
 }
 
 fn gcd_usize(mut a: usize, mut b: usize) -> usize {
@@ -1016,6 +1084,7 @@ pub fn extract_hevc(
     })?;
 
     let record = record_carrier_state(carrier, kind)?;
+    let bands = record.bands.clone();
     let all_slots = record.all_slots;
     let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);
     // The trellis seed is keyed through the secret-derived key (see
@@ -1035,7 +1104,7 @@ pub fn extract_hevc(
     // from `all_slots.len()` alone, and element `i` maps to the same slot no
     // matter how many elements are read, so the header prefix and the full
     // message stay consistent.
-    let header_positions = slot_positions(all_slots.len(), header_slots_count);
+    let header_positions = band_positions(&bands, header_slots_count);
     let header_bits: Vec<u8> = header_positions
         .iter()
         .map(|&p| all_slots[p].original_bit)
@@ -1091,7 +1160,7 @@ pub fn extract_hevc(
         ));
     }
 
-    let msg_positions = slot_positions(all_slots.len(), total_needed_slots);
+    let msg_positions = band_positions(&bands, total_needed_slots);
     let cover_bits: Vec<u8> = msg_positions
         .iter()
         .map(|&p| all_slots[p].original_bit)
@@ -1147,8 +1216,46 @@ struct SliceContext {
 /// 2.5).
 struct CarrierRecord {
     slice_contexts: Vec<SliceContext>,
+    /// Slot pool in drift-ladder order: band 0 first, band 1 after it.
     all_slots: Vec<StegoSlot>,
+    /// Pool ranges of each band, in consumption order.
+    bands: Vec<std::ops::Range<usize>>,
+    /// Pictures in the carrier (all VCL, including excluded IRAPs).
+    pictures: usize,
+    /// Pictures that may carry slots, per band.
+    band_pictures: [usize; 2],
     digest_inputs: DigestInputs,
+}
+
+/// Pool geometry the capacity report needs: how big the ladder is, how it is
+/// split, and how many pictures each rung holds.
+pub(crate) struct PoolProfile {
+    total_slots: usize,
+    band_slots: [usize; 2],
+    band_pictures: [usize; 2],
+    pictures: usize,
+    is_estimated: bool,
+}
+
+impl PoolProfile {
+    fn from_record(record: &CarrierRecord) -> Self {
+        let mut band_slots = [0usize; 2];
+        // `bands` is [band 0, band 1] in that order. Index by position, not by
+        // `range.start`: an empty band 0 makes both ranges start at 0, and
+        // testing the start silently credited band 1's slots to band 0 -- which
+        // let an all-reference video spend the drift-free budget it does not
+        // have.
+        for (index, range) in record.bands.iter().enumerate().take(2) {
+            band_slots[index] = range.len();
+        }
+        PoolProfile {
+            total_slots: record.all_slots.len(),
+            band_slots,
+            band_pictures: record.band_pictures,
+            pictures: record.pictures,
+            is_estimated: false,
+        }
+    }
 }
 
 /// The already-parsed container pieces `derive_carrier_digest` needs.
@@ -1249,14 +1356,22 @@ fn record_carrier_state(
         }
     };
 
-    // The gate decides which slices *contribute slots*; it must never decide
+    // The ladder decides which slices *contribute slots*; it must never decide
     // which slices the decoder *sees*. A P/B picture needs its reference
     // pictures in the DPB, and the decoder skips everything until it meets an
     // IRAP ("stream does not start with an IRAP", H.265 8.1.3) -- feeding only
-    // the non-reference pictures therefore yields exactly zero recordings.
-    // Every candidate is pushed in decode order; unselected ones go through the
-    // plain path with no observer attached.
-    let has_non_reference = candidates.iter().any(|c| is_non_reference_vcl(c.nal_type));
+    // the drift-free pictures therefore yields exactly zero recordings. Every
+    // candidate is pushed in decode order; excluded ones go through the plain
+    // path with no observer attached.
+    let has_inter = candidates.iter().any(|c| !is_irap(c.nal_type));
+
+    // Picture counts drive the per-picture budgets, so they are taken from
+    // `first_slice_segment_in_pic_flag` rather than from the span list: a
+    // multi-slice picture is one picture, and counting its slices would inflate
+    // every per-picture budget by the slice count. A HEIF carrier is one image
+    // by definition -- its grid tiles are separate items, each a standalone
+    // picture, and they are all the same image.
+    let (pictures, band_pictures) = count_pictures(carrier, kind, &candidates, has_inter);
 
     let mut slice_contexts = Vec::new();
     let mut all_slots = Vec::new();
@@ -1271,14 +1386,14 @@ fn record_carrier_state(
         if slice_bytes.len() < 2 {
             continue;
         }
-        if !selectable(cand.nal_type, has_non_reference) {
+        let Some(band) = picture_band(cand.nal_type, has_inter) else {
             if let Err(e) = decoder.push_nal(slice_bytes, None) {
                 decode_error.get_or_insert_with(|| e.to_string());
             }
             drain_frames(&mut decoder);
             continue;
-        }
-        let mut recorder = CabacRecorder::with_slice(slice_idx);
+        };
+        let mut recorder = CabacRecorder::with_slice(slice_idx, band);
         let decoded = decoder.decode_nal_with_observer(slice_bytes, &mut recorder);
         drain_frames(&mut decoder);
         match decoded {
@@ -1318,9 +1433,42 @@ fn record_carrier_state(
         )));
     }
 
+    // Stable-partition the pool into the drift ladder: band 0 (non-reference)
+    // first, band 1 (reference) after it. `band_positions` walks the bands in
+    // this order, so a payload that fits in band 0 never touches a picture that
+    // something predicts from.
+    let mut order: Vec<usize> = (0..all_slots.len()).collect();
+    order.sort_by_key(|&i| all_slots[i].band);
+    let mut remap = vec![0usize; all_slots.len()];
+    for (new, &old) in order.iter().enumerate() {
+        remap[old] = new;
+    }
+    let mut sorted = Vec::with_capacity(all_slots.len());
+    for &old in &order {
+        let mut slot = all_slots[old];
+        slot.slot_idx = remap[old];
+        sorted.push(slot);
+    }
+    // Slice contexts address their slots by the recording-order id, which the
+    // re-encoder translates through `slot_map`; remap it in place so the two
+    // stay consistent.
+    for ctx in &mut slice_contexts {
+        for mapped in ctx.slot_map.iter_mut().flatten() {
+            *mapped = remap[*mapped];
+        }
+    }
+    let band0_len = sorted
+        .iter()
+        .filter(|slot| slot.band == BAND_NON_REFERENCE)
+        .count();
+    let bands = vec![0..band0_len, band0_len..sorted.len()];
+
     Ok(CarrierRecord {
         slice_contexts,
-        all_slots,
+        all_slots: sorted,
+        bands,
+        pictures,
+        band_pictures,
         digest_inputs,
     })
 }
@@ -1365,24 +1513,92 @@ fn is_non_reference_vcl(nal_type: u8) -> bool {
     )
 }
 
-/// Two-tier deterministic frame-type gate.
+/// IRAP (intra random access point) VCL types: BLA/IDR/CRA, H.265 Table 7-1.
 ///
-/// * **Tier A** -- the stream contains at least one non-reference picture
-///   (`TRAIL_N`/`TSA_N`/`STSA_N`/`RADL_N`/`RASL_N`): record **only** those.
-///   They never enter the DPB, so the embedding provably cannot drift into a
-///   later frame. iPhone MP4 and MOV recordings land here (~50% of pictures).
-/// * **Tier B** -- the stream has no non-reference picture at all: record every
-///   VCL NAL. This is the still-image case (HEIC, a single-IDR stream: all IRAP,
-///   nothing predicts forwards in a meaningful way), and the all-`TRAIL_R`
-///   case some Android hardware encoders emit, where Tier A would leave 0
-///   slots. The magnitude-aware cost model bounds each flip; measured drift
-///   over 78 frames at 2 KiB stays at PSNR 39-40 dB with no accumulation.
+/// These are the prediction roots of a GOP. A flip in one of them is seen by
+/// every picture that follows until the next IRAP, which is why they are the
+/// one class the ladder never spends: measured at equal payload, including them
+/// costs 15-20 dB (`docs/hevc_video_capacity_quality_audit_20261026.md` §2).
+fn is_irap(nal_type: u8) -> bool {
+    (16..=23).contains(&nal_type)
+}
+
+/// Drift-free band: pictures nothing predicts from.
+const BAND_NON_REFERENCE: u8 = 0;
+/// Reference band: pictures later pictures predict from until the next IRAP.
+const BAND_REFERENCE: u8 = 1;
+
+/// Place a VCL picture on the drift ladder, or `None` when it may not carry
+/// slots at all.
 ///
-/// The choice depends only on the sequence of `nal_unit_type` values, which
+/// * **No inter picture anywhere** (still image, all-intra stream): nothing is
+///   predicted from anything, so every picture is drift-free.
+/// * **Otherwise**: non-reference pictures are drift-free (band 0), reference
+///   non-IRAP pictures are band 1, and IRAPs are excluded.
+///
+/// The answer depends only on the sequence of `nal_unit_type` values, which
 /// embedding never changes (sign flips live inside the CABAC payload), so both
-/// ends derive the same slot pool and the wire header carries no flag.
-fn selectable(nal_type: u8, has_non_reference: bool) -> bool {
-    !has_non_reference || is_non_reference_vcl(nal_type)
+/// ends derive the same ladder and the wire header carries no flag.
+fn picture_band(nal_type: u8, has_inter: bool) -> Option<u8> {
+    if !has_inter || is_non_reference_vcl(nal_type) {
+        return Some(BAND_NON_REFERENCE);
+    }
+    if is_irap(nal_type) {
+        return None;
+    }
+    Some(BAND_REFERENCE)
+}
+
+/// Count the pictures of a carrier and how many of them sit on each rung.
+///
+/// A HEIF carrier is a single image: its grid tiles are separate items, each a
+/// standalone picture, but they are all the same image, so counting them would
+/// inflate every per-picture budget by the tile count. For streams the answer
+/// comes from `first_slice_segment_in_pic_flag`, which the container parsers do
+/// not expose (a multi-slice picture is one sample, several NAL units).
+fn count_pictures(
+    carrier: &[u8],
+    kind: HevcCarrierKind,
+    candidates: &[CandidateSlice],
+    has_inter: bool,
+) -> (usize, [usize; 2]) {
+    let mut band_pictures = [0usize; 2];
+    if kind == HevcCarrierKind::HeifContainer {
+        if let Some(first) = candidates.first()
+            && let Some(band) = picture_band(first.nal_type, has_inter)
+        {
+            band_pictures[band as usize] = 1;
+        }
+        return (1, band_pictures);
+    }
+
+    let mut pictures = 0usize;
+    for cand in candidates {
+        if !starts_picture(&carrier[cand.span.clone()]) {
+            continue;
+        }
+        pictures += 1;
+        if let Some(band) = picture_band(cand.nal_type, has_inter) {
+            band_pictures[band as usize] += 1;
+        }
+    }
+    (pictures.max(1), band_pictures)
+}
+
+/// Does this VCL NAL start a new picture?
+///
+/// `first_slice_segment_in_pic_flag` is the first syntax element of every slice
+/// segment header (H.265 §7.3.6.1), i.e. the MSB of the first RBSP byte. A
+/// picture made of several slices must be counted once: the per-picture budgets
+/// are expressed per picture, not per slice.
+fn starts_picture(nal: &[u8]) -> bool {
+    if nal.len() <= 2 {
+        return false;
+    }
+    rusty_h265::nal::unescape(&nal[2..])
+        .data
+        .first()
+        .is_some_and(|first| (first & 0x80) != 0)
 }
 
 /// Drop every decoded picture the decoder has queued.
@@ -1609,26 +1825,65 @@ mod dialect_tests {
         assert_ne!(k_none, k_domain);
     }
 
-    /// The gate keeps only non-reference pictures when the stream has any, and
-    /// keeps everything when it has none -- the still-image case and the
-    /// all-reference case, where Tier A would leave no capacity at all.
+    /// The ladder is stateless and depends only on the NAL type sequence: a
+    /// non-reference picture sits on the drift-free rung, a reference non-IRAP
+    /// picture on the second rung, an IRAP is excluded. An all-intra stream
+    /// (still image, all-IDR video) has nothing predicted from anything, so
+    /// every picture is drift-free.
     #[test]
-    fn gate_is_two_tier_and_stateless() {
-        // Tier A: a stream that has non-reference pictures records only those.
-        assert!(selectable(NAL_TRAIL_N, true));
-        assert!(selectable(NAL_TSA_N, true));
-        assert!(selectable(NAL_RASL_N, true));
-        assert!(!selectable(NAL_TRAIL_R, true));
-        // IDR_W_RADL is a reference picture: dropped too, even though it is an
-        // IRAP, because the stream does hold non-reference pictures to use.
-        assert!(!selectable(NAL_IDR_W_RADL, true));
+    fn ladder_is_stateless_and_has_two_rungs() {
+        // Inter stream: non-reference -> band 0, reference -> band 1.
+        assert_eq!(picture_band(NAL_TRAIL_N, true), Some(BAND_NON_REFERENCE));
+        assert_eq!(picture_band(NAL_TSA_N, true), Some(BAND_NON_REFERENCE));
+        assert_eq!(picture_band(NAL_RASL_N, true), Some(BAND_NON_REFERENCE));
+        assert_eq!(picture_band(NAL_TRAIL_R, true), Some(BAND_REFERENCE));
+        // IRAP is the prediction root of a whole GOP: never carries slots when
+        // the stream has inter pictures.
+        assert_eq!(picture_band(NAL_IDR_W_RADL, true), None);
+        assert_eq!(picture_band(21, true), None);
 
-        // Tier B: no non-reference picture anywhere -> record everything. That
-        // is the still-image case (all IRAP) and the all-`TRAIL_R` case some
-        // Android encoders emit, where Tier A would leave no capacity at all.
-        assert!(selectable(NAL_TRAIL_R, false));
-        assert!(selectable(NAL_IDR_W_RADL, false));
-        assert!(selectable(NAL_TRAIL_N, false));
+        // All-intra: nothing predicts from anything, so everything is band 0 --
+        // that is the still-image case and the all-IDR video case.
+        assert_eq!(picture_band(NAL_TRAIL_R, false), Some(BAND_NON_REFERENCE));
+        assert_eq!(
+            picture_band(NAL_IDR_W_RADL, false),
+            Some(BAND_NON_REFERENCE)
+        );
+        assert_eq!(picture_band(NAL_TRAIL_N, false), Some(BAND_NON_REFERENCE));
+    }
+
+    /// Band order is the drift ladder: element 0..len(band0) all land in band 0,
+    /// so a 40-byte header and a small payload never touch a reference picture.
+    #[test]
+    fn band_positions_exhaust_the_drift_free_rung_first() {
+        let bands = vec![0..10usize, 10..40];
+        let positions = band_positions(&bands, 10);
+        assert_eq!(positions.len(), 10);
+        assert!(positions.iter().all(|p| *p < 10));
+        // Every slot of the band is used exactly once (a permutation).
+        let mut seen = positions.clone();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..10).collect::<Vec<_>>());
+
+        // Spilling into band 1 happens only after band 0 is exhausted.
+        let wide = band_positions(&bands, 25);
+        assert!(wide[..10].iter().all(|p| *p < 10));
+        assert!(wide[10..].iter().all(|p| (10..40).contains(p)));
+    }
+
+    /// Element `i` must map to the same slot no matter how many elements are
+    /// requested -- the extractor reads the header with a short prefix and then
+    /// the whole message with a longer one.
+    #[test]
+    fn band_positions_are_prefix_stable() {
+        let bands = vec![0..7usize, 7..23, 23..24];
+        let full = band_positions(&bands, 24);
+        for count in [1usize, 5, 7, 12, 23] {
+            assert_eq!(band_positions(&bands, count), full[..count].to_vec());
+        }
+        // Empty bands (no slots recorded) must not shift the mapping.
+        let with_empty = vec![0..0usize, 0..7, 7..7, 7..23];
+        assert_eq!(band_positions(&with_empty, 12), full[..12].to_vec());
     }
 
     #[test]

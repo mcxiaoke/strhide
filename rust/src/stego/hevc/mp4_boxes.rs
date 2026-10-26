@@ -50,6 +50,12 @@ pub struct Mp4HevcTarget<'a> {
     /// Physical spans of every VCL NAL unit in the video track, in sample
     /// order, which is decode order.
     pub slice_spans: Vec<PhysicalNalSpan>,
+    /// Number of samples (pictures) in the video track, from `stsz`.
+    ///
+    /// One sample is one coded picture: multi-slice pictures are a single
+    /// sample, so this is the picture count the capacity report needs -- the
+    /// slice span list cannot give it.
+    pub picture_count: usize,
     /// Video duration in seconds from `mdhd`.
     pub duration_secs: Option<f64>,
     /// Video frame rate (fps) from sample count and duration.
@@ -154,6 +160,7 @@ fn parse_video_trak<'a>(bytes: &'a [u8], mdia_children: &[BoxRef]) -> Result<Mp4
         .find(|b| &b.tag == b"stbl")
         .ok_or(HevcError::ContainerMalformed("video track has no stbl box"))?;
     let (mut target, sample_count) = parse_stbl(bytes, stbl)?;
+    target.picture_count = sample_count;
 
     if let Some((timescale, duration)) = mdhd_timing.filter(|(ts, _)| *ts > 0) {
         let sec = duration as f64 / timescale as f64;
@@ -255,6 +262,7 @@ fn parse_stbl<'a>(bytes: &'a [u8], stbl: &BoxRef) -> Result<(Mp4HevcTarget<'a>, 
             parameter_sets,
             length_size,
             slice_spans,
+            picture_count: sample_count,
             duration_secs: None,
             fps: None,
         },

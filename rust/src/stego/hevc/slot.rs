@@ -37,6 +37,13 @@ pub struct StegoSlot {
     /// 2D coordinate inside the transform unit.
     pub x_c: u8,
     pub y_c: u8,
+    /// Drift band of the picture this coefficient belongs to.
+    ///
+    /// `0` = non-reference picture (no later picture predicts from it, so a
+    /// flip cannot drift); `1` = reference picture (the error lives until the
+    /// next IRAP). The band decides the pool order in `embed_hevc`: a payload
+    /// that fits in band 0 never touches a reference picture.
+    pub band: u8,
     /// Perceptual distortion cost for STC matrix coding.
     pub cost: f64,
 }
@@ -72,6 +79,9 @@ pub struct CabacRecorder {
     pub current_slice_idx: usize,
     /// Current substream index.
     pub current_substream_idx: usize,
+    /// Drift band of the picture currently being decoded (see
+    /// [`StegoSlot::band`]); stamped onto every slot this recorder produces.
+    pub current_band: u8,
     /// Next slot awaiting its magnitude back-fill from `record_stego_level`.
     ///
     /// Sign bins decode before levels, so `record_stego_sign` can only store a
@@ -232,13 +242,18 @@ impl CabacRecorder {
     }
 
     /// Reset for a new slice while keeping accumulated global slots or create fresh.
-    pub fn with_slice(slice_idx: usize) -> Self {
+    ///
+    /// `band` is the drift band of the picture this slice belongs to; it is
+    /// stamped onto every slot the recorder produces, and the pool order in
+    /// `embed_hevc` is derived from it.
+    pub fn with_slice(slice_idx: usize, band: u8) -> Self {
         CabacRecorder {
             ops: Vec::new(),
             slots: Vec::new(),
             substreams: Vec::new(),
             current_slice_idx: slice_idx,
             current_substream_idx: 0,
+            current_band: band,
             next_pending_slot: 0,
         }
     }
@@ -334,6 +349,7 @@ impl CabacRecorder {
             c_idx,
             x_c,
             y_c,
+            band: self.current_band,
             cost,
         });
 

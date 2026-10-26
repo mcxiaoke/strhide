@@ -696,31 +696,78 @@ pub mod hevc_external {
 
     const PASSWORD: &str = "ExternalValidationPassword#2026";
 
-    /// Minimum accepted PSNR (dB) between cover and stego frames. Flipping a
-    /// sparse set of transform-coefficient signs costs a fraction of a dB at
-    /// these rates; anything below this means the bitstream changed far more
-    /// than intended.
-    const MIN_PSNR_DB: f64 = 30.0;
+    /// Quality gate for one carrier class.
+    ///
+    /// Still images and videos fail differently, so they get separate gates: a
+    /// still picture carries the whole payload in one frame and has no temporal
+    /// masking, while a video spreads it over hundreds of pictures (and, in the
+    /// drift ladder, may leave whole pictures untouched). One shared threshold
+    /// set either rejects healthy video for being "too busy" or waves through a
+    /// still picture with a wrecked block.
+    ///
+    /// Baselines and the reasoning behind each number live in
+    /// `docs/hevc_steganalysis_and_quality_spec_20261026.md`.
+    struct QualityGate {
+        /// Whole-buffer PSNR floor (all planes, all frames).
+        min_psnr: f64,
+        /// Worst 8x8 luma patch PSNR floor: catches block-localised damage that
+        /// an aggregate PSNR averages away.
+        min_patch_psnr: f64,
+        /// Absolute ceiling on the single worst sample deviation.
+        max_abs_delta: u8,
+        /// Absolute ceiling on the 99.9th percentile deviation.
+        max_p999_delta: u8,
+        /// Fraction of samples allowed to move by more than [`LARGE_DELTA`].
+        max_large_fraction: f64,
+        /// Fraction of 8x8 luma patches allowed below [`BAD_PATCH_PSNR_DB`].
+        max_bad_patch_fraction: f64,
+    }
+
+    /// Gate for still carriers (`.heic`, single-picture Annex-B), applied at
+    /// ~12% of capacity -- the rate the corpus test uses.
+    ///
+    /// Baselines (2026-10-26, five HEIC carriers): PSNR 39.0 .. 45.5 dB,
+    /// worst 8x8 patch 21.3 .. 28.4 dB, max|d| 12 .. 27, p99.9 8 .. 12,
+    /// >16-level samples 0.00%, no patch below 25 dB.
+    ///
+    /// A still picture has one frame, so its worst patch stays on screen: it is
+    /// gated here (`min_patch_psnr`), unlike video where it is one frame in
+    /// hundreds.
+    const STILL_GATE: QualityGate = QualityGate {
+        min_psnr: 34.0,
+        min_patch_psnr: 18.0,
+        max_abs_delta: 48,
+        max_p999_delta: 24,
+        max_large_fraction: 0.01,
+        max_bad_patch_fraction: 0.005,
+    };
+
+    /// Gate for video carriers (`.mp4` / `.mov`), applied at the *recommended*
+    /// safety capacity -- the number the CLI tells users to stay within.
+    ///
+    /// Baselines (2026-10-26, three carriers: 385 / 228 / 816 pictures):
+    /// PSNR 48.5 .. 53.5 dB, worst 8x8 patch 13.6 .. 32.4 dB, max|d| 19 .. 99,
+    /// p99.9 4 .. 14, >16-level samples 0.00% .. 0.06%, patches below 25 dB
+    /// 0.000% .. 0.100%.
+    ///
+    /// `min_patch_psnr` is deliberately loose (8 dB): over hundreds of frames
+    /// the *worst* patch is an extreme-value statistic and says little about
+    /// visibility -- one 8x8 block for one frame at 60 fps is not what a viewer
+    /// perceives (VMAF is 99.99 at these rates). The pooled
+    /// `max_bad_patch_fraction` carries the real signal instead, and it is the
+    /// number that actually moves with payload.
+    const VIDEO_GATE: QualityGate = QualityGate {
+        min_psnr: 42.0,
+        min_patch_psnr: 8.0,
+        max_abs_delta: 140,
+        max_p999_delta: 24,
+        max_large_fraction: 0.002,
+        max_bad_patch_fraction: 0.003,
+    };
 
     /// A sample deviation of this many levels or more counts as "visibly
     /// changed". Below it the difference is at most a rounding-level wobble.
     const LARGE_DELTA: u8 = 16;
-
-    /// Upper bound on the fraction of samples that may deviate by more than
-    /// [`LARGE_DELTA`].
-    ///
-    /// Measured on the local corpus at ~12% of capacity the observed values are
-    /// 1.2% .. 4.4%; the limit is set at 12% so the test catches a genuinely
-    /// damaged bitstream (where the deviation is not sparse at all) without
-    /// flaking on content that is simply busy.
-    const MAX_LARGE_FRACTION: f64 = 0.12;
-
-    /// Absolute ceiling on the single worst sample deviation.
-    ///
-    /// 255 is the maximum possible value for an 8-bit sample, so this only
-    /// rejects a completely corrupted reconstruction. Measured maxima on the
-    /// local corpus are 51 .. 110.
-    const MAX_ABS_SAMPLE_DELTA: u8 = 200;
 
     /// PSNR floor for the deterministic 50%-capacity case.
     ///
@@ -735,6 +782,18 @@ pub mod hevc_external {
     /// 24 .. 31, and the extra headroom covers two flips landing in one
     /// transform block.
     const DET_MAX_ABS_SAMPLE_DELTA: u8 = 48;
+
+    /// 99.9th percentile ceiling for the deterministic case: the tail is what
+    /// separates "a few priced outliers" from "the cost model stopped working".
+    /// Measured 15 .. 20 over three seeds at 50% capacity.
+    const DET_MAX_P999_DELTA: u8 = 28;
+
+    /// Worst 8x8 patch floor for the deterministic case, in dB.
+    ///
+    /// A still picture is a single frame, so its worst patch is on screen the
+    /// whole time and belongs in the gate (unlike video, where it is one frame
+    /// in hundreds). Measured 20.6 .. 23.0 dB at 50% capacity.
+    const DET_MIN_PATCH_PSNR_DB: f64 = 16.0;
 
     /// Fraction of samples allowed to move by more than [`LARGE_DELTA`] in the
     /// deterministic case. Measured 0.0003 .. 0.0027 (was 0.028 .. 0.099 with
@@ -798,73 +857,368 @@ pub mod hevc_external {
         Ok((psnr, noise))
     }
 
-    /// Decode a file to raw YUV420p and return the raw plane bytes.
+    /// Coded picture size, asked of the decoder rather than of our own SPS
+    /// parser.
     ///
-    /// Comparing the *decoded pixels* (not just a PSNR summary) is a much
-    /// stronger statement than a single aggregate number: it proves that both
-    /// files decode to the same geometry — same frame count, same dimensions —
-    /// and that the per-sample deviation stays inside a tight bound. A PSNR
-    /// average can hide a handful of catastrophically wrong pixels.
-    fn decode_raw_yuv(path: &Path) -> Result<Vec<u8>, String> {
-        let out = Command::new("ffmpeg")
-            .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
-            .arg(path)
-            .args(["-f", "rawvideo", "-pix_fmt", "yuv420p", "-"])
-            .output()
-            .map_err(|e| format!("cannot run ffmpeg: {e}"))?;
-        if !out.status.success() {
-            return Err(format!(
-                "ffmpeg failed to decode {}: {}",
-                path.display(),
-                String::from_utf8_lossy(&out.stderr)
-            ));
+    /// `extract_hevc_dimensions` returns `None` for carriers whose SPS the
+    /// parser cannot reach, which silently disabled the 8x8 patch metric on one
+    /// corpus file (it reported "no patch is bad"). ffprobe knows every file
+    /// ffmpeg can decode, so the metric is never skipped.
+    fn probe_dimensions(path: &Path, carrier: &[u8]) -> (usize, usize) {
+        // The *decoded* frame size decides how `compare_decoded` slices the
+        // byte stream, so it is the only correct answer here. Neither other
+        // source is reliable: SPS gives the coded size before conformance-window
+        // cropping (`test.heic` decodes 1652x1790 from a 1652x1792 SPS), and
+        // ffprobe refuses some HEIC fixtures outright.
+        if let Some(dims) = decoded_dimensions(path) {
+            return dims;
         }
-        Ok(out.stdout)
+        if let Ok((w, h)) = strhide::stego::hevc::extract_hevc_dimensions(carrier)
+            && w > 0
+            && h > 0
+        {
+            return (w as usize, h as usize);
+        }
+        probe_dimensions_ffprobe(path)
+    }
+
+    /// Frame size as the decoder outputs it, read from ffmpeg's `showinfo` line
+    /// (`s:WxH`).
+    fn decoded_dimensions(path: &Path) -> Option<(usize, usize)> {
+        let out = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-i",
+                path.to_str()?,
+                "-frames:v",
+                "1",
+                "-vf",
+                "showinfo",
+                "-f",
+                "null",
+                "-",
+            ])
+            .output()
+            .ok()?;
+        // `s:WxH` is not the only `s:` in the log -- the HEIC brand line
+        // ("compatible_brands: mif1heic...") contains one too, and a naive
+        // `split("s:")` picks that first. Only accept a match that parses as
+        // `digits x digits`.
+        let log = String::from_utf8_lossy(&out.stderr);
+        let mut found = None;
+        for (idx, _) in log.match_indices("s:") {
+            let rest = &log[idx + 2..];
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            if let Some((w, h)) = rest[..end].split_once('x')
+                && let (Ok(w), Ok(h)) = (w.parse::<usize>(), h.parse::<usize>())
+            {
+                found = Some((w, h));
+            }
+        }
+        found
+    }
+
+    fn probe_dimensions_ffprobe(path: &Path) -> (usize, usize) {
+        let out = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(path)
+            .output();
+        let text = out
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        let mut parts = text.split(',');
+        match (
+            parts.next().and_then(|v| v.trim().parse::<usize>().ok()),
+            parts.next().and_then(|v| v.trim().parse::<usize>().ok()),
+        ) {
+            (Some(w), Some(h)) => (w, h),
+            _ => (0, 0),
+        }
     }
 
     /// Result of a pixel-level comparison between cover and stego frames.
     struct PixelDiff {
         max_abs_diff: u8,
+        /// 99.9th percentile sample deviation: the outlier *level*, robust to a
+        /// single catastrophic sample the way `max_abs_diff` is not.
+        p999_abs_diff: u8,
         large_fraction: f64,
         psnr: f64,
+        /// Worst 8x8 luma patch PSNR over every decoded frame.
+        ///
+        /// Whole-image PSNR averages a sparse, block-localised perturbation
+        /// away: a single TU whose coefficients flipped can look like a visible
+        /// patch while the frame still reports 48 dB. This is the number that
+        /// catches "average is fine, one block is not".
+        min_patch_psnr: f64,
+        /// Fraction of 8x8 luma patches below [`BAD_PATCH_PSNR_DB`].
+        ///
+        /// The *worst* patch is an extreme-value statistic: over a long clip it
+        /// grows with the number of patches, so gating on it makes the threshold
+        /// a function of clip length. The fraction of bad patches is the
+        /// length-normalised version of the same signal.
+        bad_patch_fraction: f64,
     }
 
-    fn compare_pixels(cover: &[u8], stego: &[u8]) -> Result<PixelDiff, String> {
-        if cover.len() != stego.len() {
+    /// A 8x8 luma patch below this PSNR counts as visibly damaged.
+    const BAD_PATCH_PSNR_DB: f64 = 25.0;
+
+    /// Running cover/stego difference statistics, fed one frame at a time.
+    ///
+    /// Frames are pushed as they arrive instead of materialising both decoded
+    /// buffers: a 4K clip is 12.4 MB per frame, so 228 frames cost ~2.8 GB per
+    /// side. The local suite runs its tests in parallel, and two of those
+    /// allocations at once were enough to send the machine into swap -- the
+    /// suite then looked hung (30 min instead of 3 min) even though every single
+    /// test finished in seconds when run alone.
+    struct DiffAccumulator {
+        width: usize,
+        height: usize,
+        samples: u64,
+        sse: u64,
+        large: usize,
+        max_abs_diff: u8,
+        hist: [usize; 256],
+        worst_patch_sse: u64,
+        bad_patches: usize,
+        patches: usize,
+    }
+
+    impl DiffAccumulator {
+        fn new(width: usize, height: usize) -> Self {
+            DiffAccumulator {
+                width,
+                height,
+                samples: 0,
+                sse: 0,
+                large: 0,
+                max_abs_diff: 0,
+                hist: [0usize; 256],
+                worst_patch_sse: 0,
+                bad_patches: 0,
+                patches: 0,
+            }
+        }
+
+        /// Byte length of one yuv420p frame at this geometry.
+        fn frame_size(&self) -> usize {
+            self.width.saturating_mul(self.height) / 2 * 3
+        }
+
+        /// Fold one decoded frame (all planes) into the statistics.
+        fn push(&mut self, cover: &[u8], stego: &[u8]) {
+            debug_assert_eq!(cover.len(), stego.len());
+            for (a, b) in cover.iter().zip(stego.iter()) {
+                let d = a.abs_diff(*b);
+                self.hist[d as usize] += 1;
+                self.sse += (d as u64) * (d as u64);
+                if d > self.max_abs_diff {
+                    self.max_abs_diff = d;
+                }
+                if d > LARGE_DELTA {
+                    self.large += 1;
+                }
+            }
+            self.samples += cover.len() as u64;
+            self.patch_scan(cover, stego);
+        }
+
+        /// Worst and bad-fraction of the 8x8 luma patches of one frame.
+        fn patch_scan(&mut self, cover: &[u8], stego: &[u8]) {
+            let (w, h) = (self.width, self.height);
+            let luma = w * h;
+            if w < 8 || h < 8 || luma == 0 || cover.len() < luma {
+                return;
+            }
+            let bad_sse = (64.0 * 255.0 * 255.0 / 10f64.powf(BAD_PATCH_PSNR_DB / 10.0)) as u64;
+            let (y_cover, y_stego) = (&cover[..luma], &stego[..luma]);
+            for by in (0..=h - 8).step_by(8) {
+                for bx in (0..=w - 8).step_by(8) {
+                    let mut sse = 0u64;
+                    for row in 0..8 {
+                        let start = (by + row) * w + bx;
+                        for col in 0..8 {
+                            let d = y_cover[start + col].abs_diff(y_stego[start + col]) as u64;
+                            sse += d * d;
+                        }
+                    }
+                    self.patches += 1;
+                    if sse > bad_sse {
+                        self.bad_patches += 1;
+                    }
+                    self.worst_patch_sse = self.worst_patch_sse.max(sse);
+                }
+            }
+        }
+
+        fn finish(self) -> PixelDiff {
+            let mse = self.sse as f64 / self.samples.max(1) as f64;
+            let psnr = if mse == 0.0 {
+                f64::INFINITY
+            } else {
+                10.0 * (255.0 * 255.0 / mse).log10()
+            };
+            // Walk the histogram to the 99.9th percentile sample.
+            let target = ((self.samples as f64) * 0.999).ceil() as usize;
+            let mut acc = 0usize;
+            let mut p999_abs_diff = 0u8;
+            for (delta, count) in self.hist.iter().enumerate() {
+                acc += count;
+                if acc >= target {
+                    p999_abs_diff = delta as u8;
+                    break;
+                }
+            }
+            let min_patch_psnr = if self.worst_patch_sse == 0 {
+                f64::INFINITY
+            } else {
+                10.0 * (255.0 * 255.0 / (self.worst_patch_sse as f64 / 64.0)).log10()
+            };
+            PixelDiff {
+                max_abs_diff: self.max_abs_diff,
+                p999_abs_diff,
+                large_fraction: self.large as f64 / self.samples.max(1) as f64,
+                psnr,
+                min_patch_psnr,
+                bad_patch_fraction: self.bad_patches as f64 / self.patches.max(1) as f64,
+            }
+        }
+    }
+
+    /// Decode both files with ffmpeg and compare them **streaming**, one frame
+    /// at a time, so peak memory stays at two frames.
+    fn compare_decoded(
+        cover: &Path,
+        stego: &Path,
+        dims: (usize, usize),
+    ) -> Result<PixelDiff, String> {
+        use std::io::Read;
+
+        /// Spawn a decoder and drain its stderr on a thread.
+        ///
+        /// Draining is not optional: a piped stderr nobody reads fills its
+        /// 64 KiB buffer, ffmpeg blocks on the write, and the frame loop waits
+        /// forever for bytes the child will never produce. That is exactly how
+        /// this helper hung the whole local suite (the test process sat at
+        /// 36 MB RSS with a live `ffmpeg.exe` child, progressing nowhere).
+        fn spawn(
+            path: &Path,
+        ) -> Result<(std::process::Child, std::thread::JoinHandle<String>), String> {
+            let mut child = Command::new("ffmpeg")
+                .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
+                .arg(path)
+                .args(["-f", "rawvideo", "-pix_fmt", "yuv420p", "-"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("cannot run ffmpeg: {e}"))?;
+            let mut stderr = child.stderr.take().ok_or("ffmpeg has no stderr")?;
+            let drain = std::thread::spawn(move || {
+                let mut text = String::new();
+                let _ = stderr.read_to_string(&mut text);
+                text
+            });
+            Ok((child, drain))
+        }
+
+        let (mut cover_child, cover_drain) = spawn(cover)?;
+        let (mut stego_child, stego_drain) = spawn(stego)?;
+        let mut acc = DiffAccumulator::new(dims.0, dims.1);
+        let frame = acc.frame_size();
+        if frame == 0 {
             return Err(format!(
-                "decoded size mismatch: cover {} bytes, stego {} bytes \
-             (different frame count or dimensions)",
-                cover.len(),
-                stego.len()
+                "unknown picture size for {} (SPS and ffprobe both failed)",
+                cover.display()
             ));
         }
-        if cover.is_empty() {
-            return Err("decoded no samples at all".to_string());
-        }
-        let mut max_abs_diff = 0u8;
-        let mut large = 0usize;
-        let mut sse = 0u64;
-        for (a, b) in cover.iter().zip(stego.iter()) {
-            let d = a.abs_diff(*b);
-            sse += (d as u64) * (d as u64);
-            if d > max_abs_diff {
-                max_abs_diff = d;
+
+        let mut cover_out = cover_child.stdout.take().ok_or("no stdout")?;
+        let mut stego_out = stego_child.stdout.take().ok_or("no stdout")?;
+        let mut cover_frame = vec![0u8; frame];
+        let mut stego_frame = vec![0u8; frame];
+        let mut outcome: Result<(), String> = Ok(());
+        loop {
+            match cover_out.read_exact(&mut cover_frame) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => {
+                    outcome = Err(format!("reading cover frames: {e}"));
+                    break;
+                }
             }
-            if d > LARGE_DELTA {
-                large += 1;
+            match stego_out.read_exact(&mut stego_frame) {
+                Ok(()) => acc.push(&cover_frame, &stego_frame),
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    outcome = Err(format!(
+                        "stego stream ended early ({e}) — different frame count?"
+                    ));
+                    break;
+                }
+                Err(e) => {
+                    outcome = Err(format!("reading stego frames: {e}"));
+                    break;
+                }
             }
         }
-        let mse = sse as f64 / cover.len() as f64;
-        let psnr = if mse == 0.0 {
-            f64::INFINITY
-        } else {
-            10.0 * (255.0 * 255.0 / mse).log10()
-        };
-        Ok(PixelDiff {
-            max_abs_diff,
-            large_fraction: large as f64 / cover.len() as f64,
-            psnr,
-        })
+
+        // Drain the rest of the stego stream before closing either pipe: if the
+        // cover ends first, an unfinished stego encoder is still writing, and
+        // closing its stdout makes it die with EPIPE ("Error submitting a packet
+        // to the muxer") instead of finishing cleanly. Leftover frames are also
+        // a real mismatch, not just noise.
+        if outcome.is_ok() {
+            let mut extra = 0usize;
+            while stego_out.read_exact(&mut stego_frame).is_ok() {
+                extra += 1;
+            }
+            if extra > 0 {
+                outcome = Err(format!("stego has {extra} more frame(s) than the cover"));
+            }
+        }
+        drop(cover_out);
+        drop(stego_out);
+        let mut complaints = Vec::new();
+        for (label, child, drain) in [
+            ("cover", &mut cover_child, cover_drain),
+            ("stego", &mut stego_child, stego_drain),
+        ] {
+            let status = child.wait().map_err(|e| format!("{label}: {e}"))?;
+            let text = drain.join().unwrap_or_default();
+            let text = text.trim();
+            if !status.success() {
+                complaints.push(format!("{label} exited with {status}: {text}"));
+            } else if !text.is_empty() {
+                complaints.push(format!("{label} decoder complained: {text}"));
+            }
+        }
+        outcome?;
+        // A geometry mistake makes the frame loop compare nothing and every
+        // statistic look perfect (max|d| = 0, no bad patches). Refuse to report
+        // a clean bill of health for a comparison that never happened.
+        if acc.samples == 0 || acc.patches == 0 {
+            return Err(format!(
+                "compared nothing for {} ({}x{} yielded no frames)",
+                cover.display(),
+                dims.0,
+                dims.1
+            ));
+        }
+        if !complaints.is_empty() {
+            return Err(complaints.join("; "));
+        }
+        Ok(acc.finish())
     }
 
     /// Deterministic high-payload regression for the magnitude-aware cost model.
@@ -921,18 +1275,21 @@ pub mod hevc_external {
                 ));
                 fs::write(&stego_path, &stego).expect("write stego carrier");
 
-                let cover_raw =
-                    decode_raw_yuv(&cover_path).unwrap_or_else(|e| panic!("{name}: {e}"));
-                let stego_raw =
-                    decode_raw_yuv(&stego_path).unwrap_or_else(|e| panic!("{name}: {e}"));
-                let diff = compare_pixels(&cover_raw, &stego_raw)
+                let dims = probe_dimensions(&cover_path, &cover);
+                let diff = compare_decoded(&cover_path, &stego_path, dims)
                     .unwrap_or_else(|e| panic!("{name}: {e}"));
                 let _ = fs::remove_file(&stego_path);
 
                 println!(
                     "[DET seed={seed_byte}] {name}: payload={payload_len}/{capacity} B, \
-                 PSNR={:.2} dB, max|d|={}, large_frac={:.4}",
-                    diff.psnr, diff.max_abs_diff, diff.large_fraction
+                 PSNR={:.2} dB, patch_psnr={:.2} dB, bad={:.5}, max|d|={}, p99.9={}, \
+                 large_frac={:.4}",
+                    diff.psnr,
+                    diff.min_patch_psnr,
+                    diff.bad_patch_fraction,
+                    diff.max_abs_diff,
+                    diff.p999_abs_diff,
+                    diff.large_fraction
                 );
 
                 assert!(
@@ -941,9 +1298,21 @@ pub mod hevc_external {
                     diff.psnr
                 );
                 assert!(
+                    diff.min_patch_psnr >= DET_MIN_PATCH_PSNR_DB,
+                    "{name} (seed {seed_byte}): worst 8x8 patch is {:.2} dB, below the \
+                 {DET_MIN_PATCH_PSNR_DB:.0} dB floor",
+                    diff.min_patch_psnr
+                );
+                assert!(
                     diff.max_abs_diff <= DET_MAX_ABS_SAMPLE_DELTA,
                     "{name} (seed {seed_byte}): a sample moved by {} (limit {DET_MAX_ABS_SAMPLE_DELTA})",
                     diff.max_abs_diff
+                );
+                assert!(
+                    diff.p999_abs_diff <= DET_MAX_P999_DELTA,
+                    "{name} (seed {seed_byte}): 99.9th percentile deviation is {} \
+                 (limit {DET_MAX_P999_DELTA})",
+                    diff.p999_abs_diff
                 );
                 assert!(
                     diff.large_fraction <= DET_MAX_LARGE_FRACTION,
@@ -1018,10 +1387,9 @@ pub mod hevc_external {
 
             // Pixel-level equivalence: the two files must decode to the very same
             // geometry, and the deviation must stay small in absolute terms.
-            let cover_raw = decode_raw_yuv(&cover_path).unwrap_or_else(|e| panic!("{name}: {e}"));
-            let stego_raw = decode_raw_yuv(&stego_path).unwrap_or_else(|e| panic!("{name}: {e}"));
-            let diff =
-                compare_pixels(&cover_raw, &stego_raw).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let dims = probe_dimensions(&cover_path, &cover);
+            let diff = compare_decoded(&cover_path, &stego_path, dims)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
 
             let _ = fs::remove_file(&stego_path);
 
@@ -1031,28 +1399,54 @@ pub mod hevc_external {
                 complaints.join("\n")
             );
             assert!(
-                psnr >= MIN_PSNR_DB || diff.psnr >= MIN_PSNR_DB,
-                "{name}: cover/stego PSNR ({psnr:.2} dB, whole-frame {:.2} dB) is below the {MIN_PSNR_DB:.0} dB floor",
-                diff.psnr
+                psnr >= STILL_GATE.min_psnr || diff.psnr >= STILL_GATE.min_psnr,
+                "{name}: cover/stego PSNR ({psnr:.2} dB, whole-frame {:.2} dB) is below the {:.0} dB floor",
+                diff.psnr,
+                STILL_GATE.min_psnr
             );
             assert!(
-                diff.max_abs_diff <= MAX_ABS_SAMPLE_DELTA,
+                diff.min_patch_psnr >= STILL_GATE.min_patch_psnr,
+                "{name}: worst 8x8 luma patch is {:.2} dB (floor {:.0} dB) — the damage is \
+             block-localised, not sparse",
+                diff.min_patch_psnr,
+                STILL_GATE.min_patch_psnr
+            );
+            assert!(
+                diff.max_abs_diff <= STILL_GATE.max_abs_delta,
                 "{name}: a decoded sample moved by {} (limit {}), which is more than a \
              coefficient-sign flip should ever cause",
                 diff.max_abs_diff,
-                MAX_ABS_SAMPLE_DELTA
+                STILL_GATE.max_abs_delta
             );
             assert!(
-                diff.large_fraction <= MAX_LARGE_FRACTION,
+                diff.p999_abs_diff <= STILL_GATE.max_p999_delta,
+                "{name}: 99.9th percentile deviation is {} (limit {})",
+                diff.p999_abs_diff,
+                STILL_GATE.max_p999_delta
+            );
+            assert!(
+                diff.large_fraction <= STILL_GATE.max_large_fraction,
                 "{name}: {:.4} of all decoded samples moved by more than {LARGE_DELTA} \
              (limit {:.4}) — the change is not sparse enough to be a sign flip",
                 diff.large_fraction,
-                MAX_LARGE_FRACTION
+                STILL_GATE.max_large_fraction
+            );
+            assert!(
+                diff.bad_patch_fraction <= STILL_GATE.max_bad_patch_fraction,
+                "{name}: {:.4} of 8x8 luma patches are below {BAD_PATCH_PSNR_DB:.0} dB \
+             (limit {:.4})",
+                diff.bad_patch_fraction,
+                STILL_GATE.max_bad_patch_fraction
             );
             println!(
                 "[OK] {name}: payload {payload_len} B of {capacity} B, ffmpeg clean, \
-             PSNR {psnr:.2} dB, {:.4} samples moved > {LARGE_DELTA} (max |d| = {})",
-                diff.large_fraction, diff.max_abs_diff
+             PSNR {psnr:.2} dB (patch {:.2} dB, bad {:.5}), {:.4} samples moved > {LARGE_DELTA} \
+             (max |d| = {}, p99.9 = {})",
+                diff.min_patch_psnr,
+                diff.bad_patch_fraction,
+                diff.large_fraction,
+                diff.max_abs_diff,
+                diff.p999_abs_diff
             );
             checked += 1;
         }
@@ -1060,6 +1454,147 @@ pub mod hevc_external {
         assert!(
             checked > 0,
             "no carrier was validated ({skipped} skipped) — the corpus or ffmpeg is missing"
+        );
+    }
+
+    /// Video carriers at the **recommended** safety capacity must stay inside
+    /// [`VIDEO_GATE`].
+    ///
+    /// The still-image tests above run at ~12% of capacity; this one runs at
+    /// exactly the number the CLI recommends, because that is the contract users
+    /// rely on. The two carriers differ deliberately: a phone MOV with
+    /// non-reference pictures (the payload fits the drift-free rung, so whole
+    /// pictures stay bit-identical) and an all-reference MP4 (every picture is
+    /// touched, spread thin).
+    #[test]
+    #[ignore = "requires ffmpeg on PATH and the local testhevc corpus"]
+    pub fn local_hevc_video_recommended_capacity_quality() {
+        use strhide::stego::SafetyLevel;
+
+        if !ffmpeg_available() {
+            eprintln!("[SKIP] ffmpeg not found on PATH");
+            return;
+        }
+        let Some(dir) = corpus_dir() else {
+            eprintln!("[SKIP] testhevc corpus not found");
+            return;
+        };
+
+        let mut checked = 0usize;
+        for name in [
+            "IMG_0033.MOV",
+            "VID_20250228_120825_C.mp4",
+            "VID_20261007_203536.mp4",
+        ] {
+            let cover_path = dir.join(name);
+            if !cover_path.exists() {
+                continue;
+            }
+            let cover = fs::read(&cover_path).expect("read cover");
+            let info = match strhide::stego::hevc::probe_hevc_capacity_info(
+                &cover,
+                &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+                SafetyLevel::High,
+                true,
+            ) {
+                Ok(info) => info,
+                Err(e) => {
+                    eprintln!("[SKIP] {name}: not a Scheme C carrier ({e})");
+                    continue;
+                }
+            };
+            if info.recommended_max_bytes == 0 {
+                eprintln!("[SKIP] {name}: no recommended capacity");
+                continue;
+            }
+
+            let payload_len = info.recommended_max_bytes;
+            let payload: Vec<u8> = (0..payload_len).map(|i| (i * 131 % 251) as u8).collect();
+            let stego = embed_hevc(
+                &cover,
+                &payload,
+                Some(PASSWORD),
+                None,
+                &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+                strhide::stego::Freshness::Seeded([9u8; 32]),
+            )
+            .unwrap_or_else(|e| panic!("{name}: embed failed: {e}"));
+
+            // Δ = 0 is the whole point of the scheme and must survive the video
+            // path as well.
+            assert_eq!(
+                stego.len(),
+                cover.len(),
+                "{name}: embedding changed the carrier length (Δ = {} bytes)",
+                stego.len() as i64 - cover.len() as i64
+            );
+
+            let stego_path = std::env::temp_dir()
+                .join(format!("strhide-hevc-vidq-{}-{name}", std::process::id()));
+            fs::write(&stego_path, &stego).expect("write stego carrier");
+
+            let dims = probe_dimensions(&cover_path, &cover);
+            let diff = compare_decoded(&cover_path, &stego_path, dims)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let _ = fs::remove_file(&stego_path);
+
+            println!(
+                "[VID] {name}: payload {payload_len} B (recommended), slots {slots}, \
+                 PSNR {psnr:.2} dB, patch {patch:.2} dB, bad {bad:.5}, max|d| {max_d}, \
+                 p99.9 {p999}, large {large:.4}",
+                slots = info.available_slots,
+                psnr = diff.psnr,
+                patch = diff.min_patch_psnr,
+                bad = diff.bad_patch_fraction,
+                max_d = diff.max_abs_diff,
+                p999 = diff.p999_abs_diff,
+                large = diff.large_fraction,
+            );
+
+            assert!(
+                diff.psnr >= VIDEO_GATE.min_psnr,
+                "{name}: PSNR {:.2} dB is below the {:.0} dB floor at the recommended capacity",
+                diff.psnr,
+                VIDEO_GATE.min_psnr
+            );
+            assert!(
+                diff.min_patch_psnr >= VIDEO_GATE.min_patch_psnr,
+                "{name}: worst 8x8 luma patch is {:.2} dB (floor {:.0} dB)",
+                diff.min_patch_psnr,
+                VIDEO_GATE.min_patch_psnr
+            );
+            assert!(
+                diff.max_abs_diff <= VIDEO_GATE.max_abs_delta,
+                "{name}: a decoded sample moved by {} (limit {})",
+                diff.max_abs_diff,
+                VIDEO_GATE.max_abs_delta
+            );
+            assert!(
+                diff.p999_abs_diff <= VIDEO_GATE.max_p999_delta,
+                "{name}: 99.9th percentile deviation is {} (limit {})",
+                diff.p999_abs_diff,
+                VIDEO_GATE.max_p999_delta
+            );
+            assert!(
+                diff.large_fraction <= VIDEO_GATE.max_large_fraction,
+                "{name}: {:.4} of decoded samples moved by more than {LARGE_DELTA} \
+             (limit {:.4})",
+                diff.large_fraction,
+                VIDEO_GATE.max_large_fraction
+            );
+            assert!(
+                diff.bad_patch_fraction <= VIDEO_GATE.max_bad_patch_fraction,
+                "{name}: {:.4} of 8x8 luma patches are below {BAD_PATCH_PSNR_DB:.0} dB \
+             (limit {:.4}) — damage is no longer a rare tail",
+                diff.bad_patch_fraction,
+                VIDEO_GATE.max_bad_patch_fraction
+            );
+            checked += 1;
+        }
+
+        assert!(
+            checked > 0,
+            "no video carrier was validated — the corpus or ffmpeg is missing"
         );
     }
 }

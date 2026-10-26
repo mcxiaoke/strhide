@@ -88,7 +88,7 @@ fn run_probe_stats(carrier: &[u8], max_recorded_slices: Option<usize>) -> Option
             break;
         }
 
-        let mut recorder = CabacRecorder::with_slice(recorded_slices);
+        let mut recorder = CabacRecorder::with_slice(recorded_slices, 0);
         let decoded = decoder.decode_nal_with_observer(slice_bytes, &mut recorder);
         drain_frames(&mut decoder);
 

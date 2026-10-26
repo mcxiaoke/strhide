@@ -18,9 +18,13 @@
 cd rust
 cargo build --release       # 编译，产物在 target/release/strhide
 cargo test          		# 运行常规测试套件（全部通过，0 ignored 混杂）
-cargo test local_ -- --ignored # 单独运行本地批量测试
+cargo test local_ -- --ignored # 单独运行本地批量测试（约 3 分钟）
 cargo fmt && cargo clippy   # 提交前格式化并修复所有 lint
 ```
+
+**本地批测的内存峰值约 12 GB**：`embed_hevc` 会把每个切片的全部 CABAC bin 留在内存里用于磁带回放，一个 13.6 s 的 1080p60 视频就是 3.8 亿 bin（单个视频门限测试单独占用约 12 GB、116 s）。并行跑没问题，但不要在跑批测的同时开其它吃内存的进程——被 swap 拖住时表现和"死锁"很像。
+
+排障提示：跑重测试时把日志重定向到文件再轮询，不要只看终端——`cargo test` 的进度只在测试结束时打印。
 
 本地 HEVC/HEIF 语料放在 `temp/testhevc/`（gitignored）。真实 Annex-B 码流语料由 `python scripts/fetch_hevc_samples.py` 下载并派生（PhotoPrism 公开样本 + ffmpeg open-GOP 重编码），清单写入 `temp/testhevc/annexb/manifest.txt`；`cargo test local_hevc_annexb -- --ignored` 遍历该目录。
 

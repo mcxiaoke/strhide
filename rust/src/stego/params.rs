@@ -134,6 +134,33 @@ impl SafetyLevel {
         }
     }
 
+    /// Drift-ladder budget for HEVC **video** carriers (multi-picture).
+    ///
+    /// `bpp_limit` and `target_ratio` above are still-image anchors: they bound
+    /// the payload by pixels and by the fraction of the slot pool, neither of
+    /// which tracks video distortion. In a video, damage comes from flips in
+    /// pictures later pictures predict from, so the budget is expressed as
+    /// "how much of the drift-free band" plus "how many flips per reference
+    /// picture" instead. Calibrated on `temp/testhevc`
+    /// (see `docs/hevc_video_capacity_quality_audit_20261026.md`):
+    /// 220 flips per reference picture lands around 44 dB, 450 around 41 dB.
+    pub fn video_budget(self) -> VideoBudget {
+        match self {
+            SafetyLevel::Paranoid => VideoBudget {
+                non_ref_fraction: 0.35,
+                ref_flips_per_picture: 110,
+            },
+            SafetyLevel::High => VideoBudget {
+                non_ref_fraction: 0.60,
+                ref_flips_per_picture: 220,
+            },
+            SafetyLevel::Balanced => VideoBudget {
+                non_ref_fraction: 0.95,
+                ref_flips_per_picture: 450,
+            },
+        }
+    }
+
     /// Display string for diagnostics and CLI output.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -142,6 +169,21 @@ impl SafetyLevel {
             SafetyLevel::Balanced => "balanced",
         }
     }
+}
+
+/// Drift-ladder budget an HEVC video carrier is recommended to stay within.
+///
+/// One payload bit needs about two slots (`stc_u = 2`) and about half a slot
+/// gets modified, so four slots correspond to one modification.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VideoBudget {
+    /// Fraction of the non-reference (drift-free) slot band the recommended
+    /// payload may occupy.
+    pub non_ref_fraction: f64,
+    /// Flips per reference picture the recommended payload may spend. Every
+    /// flip in a reference picture is seen by the pictures that predict from
+    /// it until the next IRAP, so this is the actual quality knob.
+    pub ref_flips_per_picture: usize,
 }
 
 /// Safety policy enforcement mode for embedding operations.
