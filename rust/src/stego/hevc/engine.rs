@@ -172,6 +172,9 @@ pub fn extract_hevc_dimensions(carrier: &[u8]) -> Result<(u32, u32), StrHideErro
         HevcCarrierKind::HeifContainer => {
             let target = parse_heif_targets(carrier)
                 .map_err(|e| StrHideError::UnsupportedFormat(format!("HEIF parse error: {e}")))?;
+            if let Some(dims) = target.dimensions {
+                return Ok(dims);
+            }
             for ps in &target.parameter_sets {
                 if ps.len() > 2
                     && (ps[0] >> 1) & 0x3F == NAL_SPS_NUT
@@ -425,6 +428,34 @@ pub fn build_hevc_capacity_info(
         .saturating_sub(fmt.header_bytes)
         .min(max_raw_payload_bytes);
 
+    let media_info = if width > 0 && height > 0 {
+        match kind {
+            HevcCarrierKind::Mp4Container => {
+                if let Ok(target) = parse_mp4_targets(carrier) {
+                    if let (Some(fps), Some(sec)) = (target.fps, target.duration_secs) {
+                        let mbps = if sec > 0.0 {
+                            (carrier.len() as f64 * 8.0) / sec / 1_000_000.0
+                        } else {
+                            0.0
+                        };
+                        Some(format!(
+                            "{width}x{height}, {fps:.2} fps, {sec:.1}s ({mbps:.1} Mbps)"
+                        ))
+                    } else {
+                        Some(format!("{width}x{height}"))
+                    }
+                } else {
+                    Some(format!("{width}x{height}"))
+                }
+            }
+            HevcCarrierKind::HeifContainer | HevcCarrierKind::AnnexBStream => {
+                Some(format!("{width}x{height}"))
+            }
+        }
+    } else {
+        None
+    };
+
     Ok(StegoCapacityInfo {
         format: format_name.into(),
         algorithm: "HEVC-CABAC-InPlace".into(),
@@ -437,6 +468,7 @@ pub fn build_hevc_capacity_info(
         safety_level: safety_level.as_str().into(),
         safety_bpp_limit: safety_level.bpp_limit(),
         is_estimated,
+        media_info,
     })
 }
 

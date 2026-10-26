@@ -437,6 +437,9 @@ pub struct InspectResult {
     #[cfg(feature = "stego")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_stego_capacity: Option<crate::stego::StegoCapacityInfo>,
+    /// Carrier media summary (e.g. "4032x3024" or "1920x1080, 24.00 fps, 11.9s (15.2 Mbps)").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_info: Option<String>,
 }
 
 /// Result of one verification level.
@@ -2005,6 +2008,13 @@ fn inspect_core(
         None
     };
 
+    #[cfg(feature = "stego")]
+    let media_info = content_stego_capacity
+        .as_ref()
+        .and_then(|c| c.media_info.clone());
+    #[cfg(not(feature = "stego"))]
+    let media_info = None;
+
     let loc = locate_envelope(host, adapter, password, profile)?;
 
     let (ube_offset, ube_total_size, strategy_name) = match loc {
@@ -2026,8 +2036,8 @@ fn inspect_core(
                 metadata: None,
                 strategies,
                 #[cfg(feature = "stego")]
-                #[cfg(feature = "stego")]
                 content_stego_capacity,
+                media_info,
             });
         }
     };
@@ -2119,6 +2129,7 @@ fn inspect_core(
         strategies,
         #[cfg(feature = "stego")]
         content_stego_capacity,
+        media_info,
     })
 }
 

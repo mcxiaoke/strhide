@@ -22,6 +22,10 @@ impl HostAdapter for Mp4Adapter {
         "MP4"
     }
 
+    fn supports_content_stego(&self) -> bool {
+        true
+    }
+
     fn detect(&self, reader: &mut dyn SeekRead) -> bool {
         let start_pos = match reader.stream_position() {
             Ok(pos) => pos,

@@ -38,6 +38,8 @@ pub struct HeifHevcTarget<'a> {
     pub length_size: usize,
     /// Physical spans of all slice NAL units in the carrier file.
     pub slice_spans: Vec<PhysicalNalSpan>,
+    /// Master image dimensions (width, height) in pixels from `ispe`.
+    pub dimensions: Option<(u32, u32)>,
 }
 
 /// Parse HEIF container and locate HEVC parameter sets and slice NAL byte spans.
@@ -181,9 +183,12 @@ pub fn parse_heif_targets<'a>(bytes: &'a [u8]) -> Result<HeifHevcTarget<'a>> {
         target_item_ids.push(pid);
     }
 
-    // 5. Parse `iprp` to extract `hvcC` (VPS/SPS/PPS and length_size)
+    // 5. Parse `iprp` to extract `hvcC` (VPS/SPS/PPS and length_size) and master dimensions
     let iprp = iprp_span.ok_or(HevcError::ContainerMalformed("missing iprp box"))?;
-    let (parameter_sets, length_size) = parse_hvcc_from_iprp(iprp, &target_item_ids)?;
+    let iprp_info = parse_hvcc_from_iprp(iprp, pid, &target_item_ids)?;
+    let parameter_sets = iprp_info.parameter_sets;
+    let length_size = iprp_info.length_size;
+    let dimensions = iprp_info.dimensions;
 
     // 6. Parse `iloc` to get file byte spans for target items
     let iloc = iloc_span.ok_or(HevcError::ContainerMalformed("missing iloc box"))?;
@@ -236,6 +241,7 @@ pub fn parse_heif_targets<'a>(bytes: &'a [u8]) -> Result<HeifHevcTarget<'a>> {
         parameter_sets,
         length_size,
         slice_spans,
+        dimensions,
     })
 }
 
@@ -359,10 +365,17 @@ fn parse_dimg_tiles(iref: &[u8], grid_id: u32) -> Vec<u32> {
     tiles
 }
 
+struct IprpInfo<'a> {
+    parameter_sets: Vec<&'a [u8]>,
+    length_size: usize,
+    dimensions: Option<(u32, u32)>,
+}
+
 fn parse_hvcc_from_iprp<'a>(
     iprp: &'a [u8],
+    primary_id: u32,
     target_item_ids: &[u32],
-) -> Result<(Vec<&'a [u8]>, usize)> {
+) -> Result<IprpInfo<'a>> {
     let mut pos = 0usize;
     let mut ipco_data = None;
     let mut ipma_data = None;
@@ -417,7 +430,37 @@ fn parse_hvcc_from_iprp<'a>(
         .map(|(_, _, payload)| *payload)
         .ok_or(HevcError::ContainerMalformed("missing hvcC property"))?;
 
-    parse_hvcc_record(hvcc)
+    let (parameter_sets, length_size) = parse_hvcc_record(hvcc)?;
+
+    // Resolve primary image dimensions from `ispe` property
+    let primary_associated = ipma_data
+        .map(|d| parse_ipma_associations(d, &[primary_id]))
+        .unwrap_or_default();
+    let dimensions = properties
+        .iter()
+        .find(|(idx, tag, _)| primary_associated.contains(idx) && *tag == b"ispe")
+        .or_else(|| {
+            properties
+                .iter()
+                .find(|(idx, tag, _)| associated.contains(idx) && *tag == b"ispe")
+        })
+        .or_else(|| properties.iter().find(|(_, tag, _)| *tag == b"ispe"))
+        .and_then(|(_, _, payload)| parse_ispe(payload));
+
+    Ok(IprpInfo {
+        parameter_sets,
+        length_size,
+        dimensions,
+    })
+}
+
+fn parse_ispe(payload: &[u8]) -> Option<(u32, u32)> {
+    if payload.len() < 12 {
+        return None;
+    }
+    let w = be_u32(payload, 4)?;
+    let h = be_u32(payload, 8)?;
+    if w > 0 && h > 0 { Some((w, h)) } else { None }
 }
 
 /// Parse an `HEVCDecoderConfigurationRecord` (`hvcC` payload).
@@ -896,12 +939,12 @@ mod tests {
         let ipma = box_of(b"ipma", &ipma);
 
         let iprp = [ipco.clone(), ipma].concat();
-        let (sets, length_size) = parse_hvcc_from_iprp(&iprp, &[1]).unwrap();
-        assert_eq!(sets, vec![&[0xCCu8, 0xDD][..]]);
-        assert_eq!(length_size, 4);
+        let info = parse_hvcc_from_iprp(&iprp, 1, &[1]).unwrap();
+        assert_eq!(info.parameter_sets, vec![&[0xCCu8, 0xDD][..]]);
+        assert_eq!(info.length_size, 4);
 
         // No ipma at all: fall back to the first hvcC.
-        let (sets, _) = parse_hvcc_from_iprp(&ipco, &[1]).unwrap();
-        assert_eq!(sets, vec![&[0xAAu8, 0xBB][..]]);
+        let info = parse_hvcc_from_iprp(&ipco, 1, &[1]).unwrap();
+        assert_eq!(info.parameter_sets, vec![&[0xAAu8, 0xBB][..]]);
     }
 }

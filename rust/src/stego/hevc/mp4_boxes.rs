@@ -50,6 +50,10 @@ pub struct Mp4HevcTarget<'a> {
     /// Physical spans of every VCL NAL unit in the video track, in sample
     /// order, which is decode order.
     pub slice_spans: Vec<PhysicalNalSpan>,
+    /// Video duration in seconds from `mdhd`.
+    pub duration_secs: Option<f64>,
+    /// Video frame rate (fps) from sample count and duration.
+    pub fps: Option<f64>,
 }
 
 /// A parsed box header: tag, slice ranges of the box and of its payload.
@@ -135,6 +139,11 @@ pub fn parse_mp4_targets(bytes: &[u8]) -> Result<Mp4HevcTarget<'_>> {
 
 /// Parse one `vide` track: `mdia/minf/stbl`.
 fn parse_video_trak<'a>(bytes: &'a [u8], mdia_children: &[BoxRef]) -> Result<Mp4HevcTarget<'a>> {
+    let mdhd_timing = mdia_children
+        .iter()
+        .find(|b| &b.tag == b"mdhd")
+        .and_then(|b| parse_mdhd(bytes, b));
+
     let minf = mdia_children
         .iter()
         .find(|b| &b.tag == b"minf")
@@ -144,12 +153,47 @@ fn parse_video_trak<'a>(bytes: &'a [u8], mdia_children: &[BoxRef]) -> Result<Mp4
         .iter()
         .find(|b| &b.tag == b"stbl")
         .ok_or(HevcError::ContainerMalformed("video track has no stbl box"))?;
-    parse_stbl(bytes, stbl)
+    let (mut target, sample_count) = parse_stbl(bytes, stbl)?;
+
+    if let Some((timescale, duration)) = mdhd_timing.filter(|(ts, _)| *ts > 0) {
+        let sec = duration as f64 / timescale as f64;
+        target.duration_secs = Some(sec);
+        if sec > 0.0 && sample_count > 0 {
+            target.fps = Some(sample_count as f64 / sec);
+        }
+    }
+
+    Ok(target)
+}
+
+fn parse_mdhd(bytes: &[u8], mdhd: &BoxRef) -> Option<(u32, u64)> {
+    let p = mdhd.payload_start;
+    if p + 4 > mdhd.end || p + 4 > bytes.len() {
+        return None;
+    }
+    let version = bytes[p];
+    if version == 0 {
+        if p + 20 > mdhd.end || p + 20 > bytes.len() {
+            return None;
+        }
+        let timescale = be_u32(bytes, p + 12)?;
+        let duration = be_u32(bytes, p + 16)? as u64;
+        Some((timescale, duration))
+    } else if version == 1 {
+        if p + 32 > mdhd.end || p + 32 > bytes.len() {
+            return None;
+        }
+        let timescale = be_u32(bytes, p + 20)?;
+        let duration = be_u64(bytes, p + 24)?;
+        Some((timescale, duration))
+    } else {
+        None
+    }
 }
 
 /// Parse `stbl`: sample description (`hvcC`), sizes, chunk offsets and the
 /// sample-to-chunk map, then resolve every VCL NAL to a file span.
-fn parse_stbl<'a>(bytes: &'a [u8], stbl: &BoxRef) -> Result<Mp4HevcTarget<'a>> {
+fn parse_stbl<'a>(bytes: &'a [u8], stbl: &BoxRef) -> Result<(Mp4HevcTarget<'a>, usize)> {
     let kids = boxes_in(bytes, stbl.payload_start, stbl.end)?;
 
     if kids.iter().any(|b| &b.tag == b"stz2") && !kids.iter().any(|b| &b.tag == b"stsz") {
@@ -169,6 +213,7 @@ fn parse_stbl<'a>(bytes: &'a [u8], stbl: &BoxRef) -> Result<Mp4HevcTarget<'a>> {
         .find(|b| &b.tag == b"stsz")
         .ok_or(HevcError::ContainerMalformed("missing stsz box"))?;
     let sizes = parse_sample_sizes(bytes, stsz)?;
+    let sample_count = sizes.len();
 
     // 64-bit offsets win when both are present: a file that had to grow past
     // 4 GiB carries `co64`, and a stale `stco` beside it would be wrong.
@@ -205,11 +250,16 @@ fn parse_stbl<'a>(bytes: &'a [u8], stbl: &BoxRef) -> Result<Mp4HevcTarget<'a>> {
         return Err(HevcError::NoSlices);
     }
 
-    Ok(Mp4HevcTarget {
-        parameter_sets,
-        length_size,
-        slice_spans,
-    })
+    Ok((
+        Mp4HevcTarget {
+            parameter_sets,
+            length_size,
+            slice_spans,
+            duration_secs: None,
+            fps: None,
+        },
+        sample_count,
+    ))
 }
 
 /// Locate the HEVC sample entry in `stsd` and parse its `hvcC`.

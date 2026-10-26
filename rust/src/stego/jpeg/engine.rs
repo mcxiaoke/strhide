@@ -1338,6 +1338,7 @@ pub fn probe_jpeg_capacity(
         safety_level: safety_level.as_str().into(),
         safety_bpp_limit: safety_level.bpp_limit(),
         is_estimated: false,
+        media_info: Some(format!("{}x{}", info.width, info.height)),
     })
 }
 

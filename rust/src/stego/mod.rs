@@ -339,6 +339,9 @@ pub struct StegoCapacityInfo {
     /// Whether capacity was estimated by sampling rather than a full-carrier scan.
     #[serde(default)]
     pub is_estimated: bool,
+    /// Carrier media summary (e.g. "4032x3024" or "1920x1080, 24.00 fps, 11.9s (15.2 Mbps)").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_info: Option<String>,
 }
 
 impl StegoCapacityInfo {

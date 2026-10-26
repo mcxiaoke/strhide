@@ -628,6 +628,9 @@ crate::i18n_messages! {
     InspectFormat:
         en = "Format:  {val}",
         zh = "载体格式: {val}";
+    InspectMediaInfo:
+        en = "Media Info: {val}",
+        zh = "媒体信息: {val}";
     InspectHasHidden:
         en = "Has Hidden Data: {val}",
         zh = "隐藏数据: {val}";
@@ -738,6 +741,9 @@ crate::i18n_messages! {
     StegoProbeAlgorithm:
         en = "  Algorithm:       {val}",
         zh = "  隐写算法:     {val}";
+    StegoProbeMediaInfo:
+        en = "  Media info:      {val}",
+        zh = "  媒体信息:     {val}";
     StegoProbeTotalElements:
         en = "  Total elements:  {val}",
         zh = "  总元素数:     {val}";

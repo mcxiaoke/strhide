@@ -1188,6 +1188,9 @@ fn handle_restore(
 fn print_inspect_result(res: &crate::engine::InspectResult) {
     println!("{}", t!(Msg::InspectCarrier, val = res.carrier));
     println!("{}", t!(Msg::InspectFormat, val = res.format));
+    if let Some(ref m) = res.media_info {
+        println!("{}", t!(Msg::InspectMediaInfo, val = m));
+    }
     println!("{}", t!(Msg::InspectHasHidden, val = res.has_hidden_data));
     if res.has_hidden_data {
         if let Some(s) = &res.strategy {
@@ -1888,6 +1891,9 @@ fn run_capacity_probe(
         println!("{}", t!(Msg::StegoProbeHeader, path = carrier.display()));
         println!("{}", t!(Msg::StegoProbeFormat, val = cap.format));
         println!("{}", t!(Msg::StegoProbeAlgorithm, val = cap.algorithm));
+        if let Some(ref m) = cap.media_info {
+            println!("{}", t!(Msg::StegoProbeMediaInfo, val = m));
+        }
         println!(
             "{}",
             t!(Msg::StegoProbeTotalElements, val = cap.total_elements)
