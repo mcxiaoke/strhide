@@ -124,6 +124,7 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         ("write", "no-preserve-time") => Msg::HelpWriteNoPreserveTime,
         ("write", "no-backup") => Msg::HelpWriteNoBackup,
         (_, "unescape") => Msg::HelpWriteUnescape,
+        (_, "exact") => Msg::HelpExact,
 
         // read
         ("read", "carrier") => Msg::HelpReadCarrier,

@@ -1337,6 +1337,7 @@ pub fn probe_jpeg_capacity(
         estimated_change_rate: crate::stego::coding::expected_stc_change_rate(u),
         safety_level: safety_level.as_str().into(),
         safety_bpp_limit: safety_level.bpp_limit(),
+        is_estimated: false,
     })
 }
 

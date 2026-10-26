@@ -440,6 +440,9 @@ crate::i18n_messages! {
     HelpWriteUnescape:
         en = "Decode C-style escape sequences in text payload (\\n, \\r, \\t, \\\\, \\xHH, etc.)",
         zh = "解析文本中的 C 风格转义字符（如 \\n, \\t, \\xHH 等）";
+    HelpExact:
+        en = "Disable fast sampling estimation and force exact full-carrier capacity scan",
+        zh = "禁用快速采样预估，强制执行全量载体精确容量扫描";
 
     // read
     HelpReadCarrier:
@@ -753,6 +756,9 @@ crate::i18n_messages! {
     StegoProbeEstChanges:
         en = "  Est. changes:   ~{rate:.3} per payload bit (matrix coding); recommended payload is anchored to low-risk region",
         zh = "  预估修改率:   ~{rate:.3} 每有效比特（矩阵编码）；推荐载荷已锚定至统计低风险区";
+    StegoProbeEstimatedNote:
+        en = "  Note:         Capacity estimated from 20% sample with byte weighting; use '--exact' for full scan",
+        zh = "  说明:         以上容量由前 20% 样本字节加权预估；使用 '--exact' 可强制执行全量精确扫描";
 
     // ---- Embed execution ----
     EmbedOkDest:
@@ -761,6 +767,9 @@ crate::i18n_messages! {
     EmbedOkInPlace:
         en = "[OK] Embedded {bytes} payload bytes in-place into '{carrier}' (took {elapsed})",
         zh = "[OK] 成功将 {bytes} 字节载荷原地嵌入 '{carrier}'（耗时 {elapsed}）";
+    EmbedCapacityReport:
+        en = "     Carrier exact capacity: safe {safe} bytes ({used:.1}% used), max {max} bytes ({slots} slots)",
+        zh = "     载体确切容量: 安全容量 {safe} 字节 (当前已用 {used:.1}%)，最大原始 {max} 字节 (槽位 {slots})";
 
     // ---- Multi-carrier batch execution ----
     FailCarrier:

@@ -727,6 +727,8 @@ pub struct StegoOptions {
     /// the same inputs produce the same stego file -- for regression tests, the
     /// `repro_*` examples, and bug reports that need to be replayed.
     pub freshness: Freshness,
+    /// Force exact capacity scan, disabling fast sampling estimation on long carriers.
+    pub exact: bool,
 }
 
 impl StegoOptions {

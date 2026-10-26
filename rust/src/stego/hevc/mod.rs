@@ -22,6 +22,6 @@ pub mod slot;
 pub mod sniff;
 
 pub use engine::{
-    embed_hevc, extract_hevc, extract_hevc_dimensions, probe_hevc_capacity,
+    embed_hevc, embed_hevc_with_info, extract_hevc, extract_hevc_dimensions, probe_hevc_capacity,
     probe_hevc_capacity_info,
 };

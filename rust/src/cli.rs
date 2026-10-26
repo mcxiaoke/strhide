@@ -269,6 +269,12 @@ pub struct StegoTuningArgs {
     #[arg(long = "unescape")]
     pub unescape: bool,
 
+    #[arg(
+        long = "exact",
+        help = "Disable fast sampling estimation and force exact full-carrier capacity scan"
+    )]
+    pub exact: bool,
+
     // --- Fine-tuning parameters for custom obfuscation and anti-detection ---
     #[arg(
         long = "exclusion-rate",
@@ -1793,6 +1799,7 @@ fn embed_stego_options(
     let mut options = crate::stego::StegoOptions {
         algorithm: args.algorithm.clone(),
         password: password.map(str::to_string),
+        exact: args.exact,
         ..Default::default()
     };
 
@@ -1885,9 +1892,13 @@ fn run_capacity_probe(
             "{}",
             t!(Msg::StegoProbeTotalElements, val = cap.total_elements)
         );
+        let approx = if cap.is_estimated { "~" } else { "" };
         println!(
             "{}",
-            t!(Msg::StegoProbePayloadSlots, val = cap.available_slots)
+            t!(
+                Msg::StegoProbePayloadSlots,
+                val = format_args!("{approx}{}", cap.available_slots)
+            )
         );
         let kib = cap.max_raw_payload_bytes as f64 / 1024.0;
         let max_raw_msg = if cap.max_raw_is_grouped {
@@ -1899,8 +1910,8 @@ fn run_capacity_probe(
             "{}",
             t!(
                 max_raw_msg,
-                bytes = cap.max_raw_payload_bytes,
-                kib = format_args!("{kib:.1}")
+                bytes = format_args!("{approx}{}", cap.max_raw_payload_bytes),
+                kib = format_args!("{approx}{kib:.1}")
             )
         );
         let safe_kib = cap.recommended_max_bytes as f64 / 1024.0;
@@ -1908,8 +1919,8 @@ fn run_capacity_probe(
             "{}",
             t!(
                 Msg::StegoProbeRecommended,
-                bytes = cap.recommended_max_bytes,
-                kib = format_args!("{safe_kib:.1}"),
+                bytes = format_args!("{approx}{}", cap.recommended_max_bytes),
+                kib = format_args!("{approx}{safe_kib:.1}"),
                 level = cap.safety_level,
                 bpp = format_args!("{:.2}", cap.safety_bpp_limit)
             )
@@ -1918,6 +1929,9 @@ fn run_capacity_probe(
             "{}",
             t!(Msg::StegoProbeEstChanges, rate = cap.estimated_change_rate)
         );
+        if cap.is_estimated {
+            println!("{}", t!(Msg::StegoProbeEstimatedNote));
+        }
     }
     Ok(())
 }
@@ -2013,32 +2027,41 @@ fn handle_embed(
 
         let options = embed_stego_options(&args.tuning, password.as_deref())?;
 
-        if !quiet
-            && options.safety.enforcement == crate::stego::SafetyEnforcement::Advisory
-            && let Ok(cap) = crate::stego::probe_carrier_capacity_with_profile(
-                &carrier_bytes,
-                &options,
-                &profile,
-            )
-            && payload_bytes.len() > cap.recommended_max_bytes
-        {
-            let bpp = (payload_bytes.len() * 8) as f64 / cap.total_elements as f64;
-            eprintln!(
-                "[WARN] Payload ({} bytes, bpp {:.4}) exceeds recommended safety threshold ({} bytes, tier: '{}', bpp <= {:.2}). Detection risk is elevated.",
-                payload_bytes.len(),
-                bpp,
-                cap.recommended_max_bytes,
-                options.safety.level.as_str(),
-                options.safety.level.bpp_limit()
-            );
-        }
-
-        let stego_bytes = crate::stego::embed_carrier_with_profile(
+        let (stego_bytes, cap_info) = crate::stego::embed_carrier_with_profile_info(
             &carrier_bytes,
             &payload_bytes,
             &options,
             &profile,
         )?;
+
+        if !quiet && options.safety.enforcement == crate::stego::SafetyEnforcement::Advisory {
+            let cap_fallback;
+            let cap = match cap_info.as_ref() {
+                Some(c) => Some(c),
+                None => {
+                    cap_fallback = crate::stego::probe_carrier_capacity_with_profile(
+                        &carrier_bytes,
+                        &options,
+                        &profile,
+                    )
+                    .ok();
+                    cap_fallback.as_ref()
+                }
+            };
+            if let Some(cap) = cap
+                && payload_bytes.len() > cap.recommended_max_bytes
+            {
+                let bpp = (payload_bytes.len() * 8) as f64 / cap.total_elements as f64;
+                eprintln!(
+                    "[WARN] Payload ({} bytes, bpp {:.4}) exceeds recommended safety threshold ({} bytes, tier: '{}', bpp <= {:.2}). Detection risk is elevated.",
+                    payload_bytes.len(),
+                    bpp,
+                    cap.recommended_max_bytes,
+                    options.safety.level.as_str(),
+                    options.safety.level.bpp_limit()
+                );
+            }
+        }
 
         if args.dry_run {
             // Full rehearsal, no disk write: everything up to and including the
@@ -2059,6 +2082,23 @@ fn handle_embed(
                         0.0
                     }
                 );
+                if let Some(ref cap) = cap_info {
+                    let used_pct = if cap.recommended_max_bytes > 0 {
+                        (payload_bytes.len() as f64 / cap.recommended_max_bytes as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    println!(
+                        "{}",
+                        t!(
+                            Msg::EmbedCapacityReport,
+                            safe = cap.recommended_max_bytes,
+                            used = format_args!("{used_pct:.1}"),
+                            max = cap.max_raw_payload_bytes,
+                            slots = cap.available_slots
+                        )
+                    );
+                }
             }
             return Ok(());
         }
@@ -2107,6 +2147,23 @@ fn handle_embed(
                         carrier = carrier.display(),
                         dest = dest.display(),
                         elapsed = elapsed_str
+                    )
+                );
+            }
+            if let Some(ref cap) = cap_info {
+                let used_pct = if cap.recommended_max_bytes > 0 {
+                    (payload_bytes.len() as f64 / cap.recommended_max_bytes as f64) * 100.0
+                } else {
+                    0.0
+                };
+                println!(
+                    "{}",
+                    t!(
+                        Msg::EmbedCapacityReport,
+                        safe = cap.recommended_max_bytes,
+                        used = format_args!("{used_pct:.1}"),
+                        max = cap.max_raw_payload_bytes,
+                        slots = cap.available_slots
                     )
                 );
             }

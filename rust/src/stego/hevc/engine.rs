@@ -27,6 +27,7 @@ use oxideav_h265::cabac::ContextModel;
 use oxideav_h265::encoder::bitwriter::BitWriter;
 use oxideav_h265::encoder::cabac::CabacEncoder;
 use rusty_h265::Decoder;
+use rusty_h265::ctu::Ablate;
 use rusty_h265::observer::ENCODER_CONTEXTS;
 use rusty_h265::ps::parse_sps;
 
@@ -219,24 +220,178 @@ pub fn extract_hevc_dimensions(carrier: &[u8]) -> Result<(u32, u32), StrHideErro
 
 /// Full capacity probe returning structured [`StegoCapacityInfo`], with recommended
 /// payload capacity scaled by the caller's [`SafetyLevel`] and carrier dimensions.
+///
+/// If `exact` is false, carriers with >150 selectable slices employ fast 20%
+/// sample-weighted estimation to deliver sub-second probe responses.
 pub fn probe_hevc_capacity_info(
     carrier: &[u8],
     fmt: &HevcFormatProfile,
     safety_level: SafetyLevel,
+    exact: bool,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
         StrHideError::UnsupportedFormat(
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
+    let (slots_count, is_estimated) = probe_hevc_slots_count(carrier, kind, exact)?;
+    build_hevc_capacity_info(carrier, kind, fmt, slots_count, safety_level, is_estimated)
+}
+
+fn count_absorbed_slots(recorder: &mut CabacRecorder, rbsp: &[u8]) -> usize {
+    let is_multi_sub = recorder.substreams.len() > 1;
+    let mut excluded = std::collections::HashSet::new();
+    if is_multi_sub {
+        for sub in &recorder.substreams {
+            if sub.rbsp_byte_start <= sub.rbsp_byte_end && sub.rbsp_byte_end <= rbsp.len() {
+                let sub_data = &rbsp[sub.rbsp_byte_start..sub.rbsp_byte_end];
+                if sub_data
+                    .windows(3)
+                    .any(|w| w[0] == 0 && w[1] == 0 && w[2] <= 3)
+                {
+                    excluded.insert(sub.substream_idx);
+                }
+            }
+        }
+    }
+    if is_multi_sub && !excluded.is_empty() {
+        recorder
+            .slots
+            .iter()
+            .filter(|s| !excluded.contains(&s.substream_idx))
+            .count()
+    } else {
+        recorder.slots.len()
+    }
+}
+
+fn probe_hevc_slots_count(
+    carrier: &[u8],
+    kind: HevcCarrierKind,
+    exact: bool,
+) -> Result<(usize, bool), StrHideError> {
+    if kind != HevcCarrierKind::Mp4Container || exact {
+        let record = record_carrier_state(carrier, kind)?;
+        return Ok((record.all_slots.len(), false));
+    }
+
+    let target = parse_mp4_targets(carrier)
+        .map_err(|e| StrHideError::UnsupportedFormat(format!("MP4/MOV parse error: {e}")))?;
+
+    let mut decoder = Decoder::new();
+    decoder.ablate = Ablate {
+        mc: true,
+        intra: true,
+        residual: true,
+    };
+
+    let mut decode_error: Option<String> = None;
+    for ps in &target.parameter_sets {
+        if let Err(e) = decoder.push_nal(ps, None) {
+            decode_error.get_or_insert_with(|| format!("parameter set: {e}"));
+        }
+    }
+
+    let mut candidates = Vec::with_capacity(target.slice_spans.len());
+    for span in &target.slice_spans {
+        if let Some(cand) = candidate_slice(carrier, span.start..span.end()) {
+            candidates.push(cand);
+        }
+    }
+
+    let has_non_reference = candidates.iter().any(|c| is_non_reference_vcl(c.nal_type));
+    let total_selectable = candidates
+        .iter()
+        .filter(|c| selectable(c.nal_type, has_non_reference))
+        .count();
+
+    // 150 frames or fewer: full scan (0% estimation error, fast enough)
+    if total_selectable <= 150 {
+        let record = record_carrier_state(carrier, kind)?;
+        return Ok((record.all_slots.len(), false));
+    }
+
+    let total_selectable_bytes: usize = candidates
+        .iter()
+        .filter(|c| selectable(c.nal_type, has_non_reference))
+        .map(|c| c.span.len())
+        .sum();
+
+    // Sample 20%, clamped to [150, 1000]
+    let sample_limit = ((total_selectable as f64 * 0.20).round() as usize).clamp(150, 1000);
+    let mut recorded_slices = 0usize;
+    let mut recorded_slots = 0usize;
+    let mut sampled_bytes = 0usize;
+
+    for cand in &candidates {
+        let slice_bytes = &carrier[cand.span.clone()];
+        if slice_bytes.len() < 2 {
+            continue;
+        }
+        if !selectable(cand.nal_type, has_non_reference) {
+            if let Err(e) = decoder.push_nal(slice_bytes, None) {
+                decode_error.get_or_insert_with(|| e.to_string());
+            }
+            drain_frames(&mut decoder);
+            continue;
+        }
+
+        if recorded_slices >= sample_limit {
+            break;
+        }
+
+        let mut recorder = CabacRecorder::with_slice(recorded_slices);
+        let decoded = decoder.decode_nal_with_observer(slice_bytes, &mut recorder);
+        drain_frames(&mut decoder);
+
+        match decoded {
+            Err(e) => {
+                decode_error.get_or_insert_with(|| e.to_string());
+            }
+            Ok(_) if recorder.substreams.is_empty() => {}
+            Ok(_) => {
+                let rbsp = nal_rbsp(slice_bytes);
+                let absorbed = count_absorbed_slots(&mut recorder, &rbsp);
+                recorded_slots += absorbed;
+                recorded_slices += 1;
+                sampled_bytes += cand.span.len();
+            }
+        }
+    }
+
+    if recorded_slices == 0
+        && let Some(reason) = decode_error
+    {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "HEVC carrier could not be decoded: {reason}"
+        )));
+    }
+
+    let total_slots = if sampled_bytes > 0 {
+        ((recorded_slots as f64 / sampled_bytes as f64) * total_selectable_bytes as f64).round()
+            as usize
+    } else {
+        recorded_slots
+    };
+
+    Ok((total_slots, true))
+}
+
+/// Helper to construct [`StegoCapacityInfo`] from known slot count and carrier properties.
+pub fn build_hevc_capacity_info(
+    carrier: &[u8],
+    kind: HevcCarrierKind,
+    fmt: &HevcFormatProfile,
+    total_slots: usize,
+    safety_level: SafetyLevel,
+    is_estimated: bool,
+) -> Result<StegoCapacityInfo, StrHideError> {
     let format_name = match kind {
         HevcCarrierKind::HeifContainer => "HEIF/HEVC",
         HevcCarrierKind::AnnexBStream => "HEVC-AnnexB",
         HevcCarrierKind::Mp4Container => "MP4/HEVC",
     };
 
-    let slots = scan_hevc_slots(carrier)?;
-    let total_slots = slots.len();
     let trellis = StcTrellis::from_seed_grouped(CAPACITY_PROBE_SEED, fmt.stc_h, fmt.stc_u)?;
     let header_bits = fmt.header_bytes * 8;
     let min_needed_slots = trellis.slots_for(header_bits);
@@ -281,6 +436,7 @@ pub fn probe_hevc_capacity_info(
         estimated_change_rate: 0.25,
         safety_level: safety_level.as_str().into(),
         safety_bpp_limit: safety_level.bpp_limit(),
+        is_estimated,
     })
 }
 
@@ -291,14 +447,15 @@ pub fn probe_hevc_capacity_info(
 /// official public constant); `domain` isolates the HKDF derivation; `fmt` is
 /// the wire-format identity; `freshness` supplies the nonce (`Seeded` makes
 /// the output reproducible for the same inputs).
-pub fn embed_hevc(
+pub fn embed_hevc_with_info(
     carrier: &[u8],
     payload: &[u8],
     secret: Option<&str>,
     domain: Option<&str>,
     fmt: &HevcFormatProfile,
     freshness: Freshness,
-) -> Result<Vec<u8>, StrHideError> {
+    safety_level: SafetyLevel,
+) -> Result<(Vec<u8>, StegoCapacityInfo), StrHideError> {
     if payload.is_empty() {
         return Err(StrHideError::General("Cannot embed empty payload".into()));
     }
@@ -315,6 +472,9 @@ pub fn embed_hevc(
     let slice_contexts = record.slice_contexts;
     let all_slots = record.all_slots;
     let total_slots = all_slots.len();
+
+    let capacity_info =
+        build_hevc_capacity_info(carrier, kind, fmt, total_slots, safety_level, false)?;
 
     // 2. Prepare ciphertext and envelope
     let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);
@@ -596,7 +756,7 @@ pub fn embed_hevc(
             for (span, re_nal) in reencoded_slices {
                 out_carrier[span].copy_from_slice(&re_nal);
             }
-            return Ok(out_carrier);
+            return Ok((out_carrier, capacity_info));
         }
 
         // 3c. Exclude the slots whose flipped bits sit next to a disturbed
@@ -644,6 +804,29 @@ pub fn embed_hevc(
     Err(StrHideError::General(format!(
         "HEVC stego cannot settle on an EPB-safe flip set within {MAX_EMBED_ROUNDS} rounds"
     )))
+}
+
+/// Embed a payload into an HEVC/HEIC carrier using content-adaptive sign-bit steganography.
+///
+/// Wrapper around [`embed_hevc_with_info`] discarding the structured capacity metadata.
+pub fn embed_hevc(
+    carrier: &[u8],
+    payload: &[u8],
+    secret: Option<&str>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+    freshness: Freshness,
+) -> Result<Vec<u8>, StrHideError> {
+    embed_hevc_with_info(
+        carrier,
+        payload,
+        secret,
+        domain,
+        fmt,
+        freshness,
+        SafetyLevel::default(),
+    )
+    .map(|(bytes, _)| bytes)
 }
 
 /// Re-encode one CABAC substream from its recorded journal.
@@ -965,6 +1148,11 @@ fn record_carrier_state(
     kind: HevcCarrierKind,
 ) -> Result<CarrierRecord, StrHideError> {
     let mut decoder = Decoder::new();
+    decoder.ablate = Ablate {
+        mc: true,
+        intra: true,
+        residual: true,
+    };
     // First decode error, kept so a carrier that yields no slices can say why
     // instead of presenting as "0 bytes of capacity".
     let mut decode_error: Option<String> = None;

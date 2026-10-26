@@ -65,6 +65,18 @@ pub fn embed_carrier_with_profile(
     options: &StegoOptions,
     profile: &Profile,
 ) -> Result<Vec<u8>, StrHideError> {
+    embed_carrier_with_profile_info(carrier_bytes, payload, options, profile)
+        .map(|(bytes, _)| bytes)
+}
+
+/// Automatically sniff carrier format, embed payload, and return both the modified carrier
+/// and optional structured capacity metadata if produced during embedding.
+pub fn embed_carrier_with_profile_info(
+    carrier_bytes: &[u8],
+    payload: &[u8],
+    options: &StegoOptions,
+    profile: &Profile,
+) -> Result<(Vec<u8>, Option<StegoCapacityInfo>), StrHideError> {
     // Validate the whole option set up front: a bad window size must surface as
     // a configuration error, not as a panic deep inside the HILL convolution or
     // as an opaque "no capacity" later.
@@ -104,6 +116,7 @@ pub fn embed_carrier_with_profile(
             &*model,
             options.freshness,
         )
+        .map(|b| (b, None))
     } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
         // PNG format
         let model = CostModelRegistry::get_spatial_model(options.algorithm.as_deref()).ok_or_else(
@@ -125,6 +138,7 @@ pub fn embed_carrier_with_profile(
             options.safety,
             options.freshness,
         )
+        .map(|b| (b, None))
     } else if crate::sniff::is_heif_bytes(carrier_bytes) {
         // HEIF content-domain steganography: Scheme C (HEVC CABAC in-place)
         // first, thumbnail bridge second. The order is the same on read, write
@@ -138,48 +152,56 @@ pub fn embed_carrier_with_profile(
         if options.algorithm.as_deref() == Some("hevc")
             || options.algorithm.as_deref() == Some("cabac")
         {
-            hevc::embed_hevc(
+            hevc::embed_hevc_with_info(
                 carrier_bytes,
                 payload,
                 secret,
                 domain,
                 profile.hevc_format(),
                 options.freshness,
+                options.safety.level,
             )
+            .map(|(b, info)| (b, Some(info)))
         } else {
-            match hevc::embed_hevc(
+            match hevc::embed_hevc_with_info(
                 carrier_bytes,
                 payload,
                 secret,
                 domain,
                 profile.hevc_format(),
                 options.freshness,
+                options.safety.level,
             ) {
-                Ok(bytes) => Ok(bytes),
-                Err(_) => heif::embed_heif_bridge(carrier_bytes, payload, options, profile),
+                Ok((bytes, info)) => Ok((bytes, Some(info))),
+                Err(_) => heif::embed_heif_bridge(carrier_bytes, payload, options, profile)
+                    .map(|b| (b, None)),
             }
         }
     } else if hevc::sniff::is_mp4_bytes(carrier_bytes) {
         // MP4/MOV video container: Scheme C on the sample table. Byte length is
         // preserved (Delta = 0), so `stsz`/`stco`/`co64` stay valid untouched.
-        hevc::embed_hevc(
+        hevc::embed_hevc_with_info(
             carrier_bytes,
             payload,
             secret,
             domain,
             profile.hevc_format(),
             options.freshness,
+            options.safety.level,
         )
+        .map(|(b, info)| (b, Some(info)))
     } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {
         // Raw Annex-B HEVC bitstream
-        hevc::embed_hevc(
+        hevc::embed_hevc_with_info(
             carrier_bytes,
             payload,
             secret,
             domain,
             profile.hevc_format(),
             options.freshness,
+            options.safety.level,
         )
+        .map(|(b, info)| (b, Some(info)))
     } else {
         Err(StrHideError::UnsupportedFormat(
             "Content-adaptive steganography requires a PNG, JPEG, HEIF/HEIC, or HEVC carrier (Annex-B or MP4/MOV)"
@@ -314,6 +336,9 @@ pub struct StegoCapacityInfo {
     /// Target bits-per-pixel (bpp) limit for the safety tier.
     #[serde(default = "default_safety_bpp_limit")]
     pub safety_bpp_limit: f64,
+    /// Whether capacity was estimated by sampling rather than a full-carrier scan.
+    #[serde(default)]
+    pub is_estimated: bool,
 }
 
 impl StegoCapacityInfo {
@@ -437,12 +462,14 @@ pub fn probe_carrier_capacity_with_profile(
                 carrier_bytes,
                 profile.hevc_format(),
                 options.safety.level,
+                options.exact,
             )
         } else {
             match hevc::probe_hevc_capacity_info(
                 carrier_bytes,
                 profile.hevc_format(),
                 options.safety.level,
+                options.exact,
             ) {
                 Ok(info) => Ok(info),
                 Err(_) => heif::probe_heif_bridge_capacity(carrier_bytes, options, profile),
@@ -452,7 +479,12 @@ pub fn probe_carrier_capacity_with_profile(
     {
         // MP4/MOV video container, or a raw Annex-B bitstream: one entry point,
         // the container decides where the slice NALs live.
-        hevc::probe_hevc_capacity_info(carrier_bytes, profile.hevc_format(), options.safety.level)
+        hevc::probe_hevc_capacity_info(
+            carrier_bytes,
+            profile.hevc_format(),
+            options.safety.level,
+            options.exact,
+        )
     } else {
         Err(StrHideError::UnsupportedFormat(
             "Content-adaptive steganography requires a PNG, JPEG, HEIF/HEIC, or HEVC carrier (Annex-B or MP4/MOV)"

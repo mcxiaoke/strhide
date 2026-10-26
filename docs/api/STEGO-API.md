@@ -123,8 +123,8 @@ pub const DIALECT: Profile = Profile::new()
 |---|---|---|
 | `embed` | `embed_carrier_with_profile` | 日常层：`-t/-d/-p/-o/--in-place/-a/--safety/--enforce-safety`；专家层（Fine-Tuning Options 分组）：`--exclusion-rate/--neighbor-weight/--p1-window/--p2-window/--stc-h`；隐藏层（`hide = true`）：`--slot-budget/--cipher-suite`；`--dry-run` 全内存演练不落盘 |
 | `extract` | `extract_carrier_with_profile` | 仅保留活参数：`--p1-window/--p2-window`（PNG 代价图重算必需）；`-a` 仅 `hevc/cabac` 影响路由；算法/排除率等由载体自描述 |
-| `capacity` | `probe_carrier_capacity_with_profile` | 独立只读探测子命令（与 `embed --capacity` 同一实现），`--json` 输出 `StegoCapacityInfo`；与 embed 共享同一组调参/凭据参数 |
-| `embed --capacity` | 同上 | 别名形式保留 |
+| `capacity` | `probe_carrier_capacity_with_profile` | 独立只读探测子命令（与 `embed --capacity` 同一实现），`--json` 输出 `StegoCapacityInfo`；`--exact` 强制全量精确扫描（长视频默认开启前 20% 样本加权快速估算）；与 embed 共享同一组调参/凭据参数 |
+| `embed --capacity` | 同上 | 别名形式保留，支持 `--exact` |
 
 提取端自描述范围（无需在提取时重复）：算法 id、排除率（`exclusion_permille`）、
 codec、`h`、`u`、通道模式（PNG `FeatureWord`）；`h`/`u`、套件 id（JPEG 超块）。
