@@ -612,6 +612,21 @@ impl StrHideError { pub fn detail_i18n(&self) -> ErrorDetail; }   // GUI 用它 
 5. 文档同步：`lib.rs` 根导出修正（`embed`/`extract` 实际未导出、`PngParams`/`StegoOptions` 缺失）、`ARCHITECTURE.md`、`STEGO-API.md`、`WIRE_SPEC.md`、README 双份。
 6. 验收：`cargo doc --no-deps --all-features` 无 warning；rustdoc 示例全部可编译；最小构建转硬性；GUI 冒烟（`Control` 上报进度 + 中途取消 + 中文错误渲染）。
 
+> **阶段 4 验收与收尾（2026-10-27 20:31）**
+>
+> **已完成（批次 1–5）**：
+> 1. 方言三分（`StructureProfile` + `StegoProfile` + `facade::Dialect`）、`facade` 去门控、`.structure()` / `.stego()` 子门面、`ReadOptions` / `RestoreOptions`；`*_with_profile` → `*_with_dialect`。
+> 2. `WriteResult` / `RemoveResult` / `InspectResult` / `VerifyResult` 强类型化（`FileFormat` / `StrategyId` / `PathBuf` / `Warning` 列表，删 `status`），`media_info` → `core::media::MediaInfo`，新增 `StrHideError::detail_i18n()`，`--json` 定版。
+> 3. 批量编排下沉 `core::pipeline`（`preflight_batch` 用 `CarrierValidator` 回调保持 `core` 零格式耦合）。
+> 4. `cli.rs` 拆为 `cli/{mod,args,helpers,render,cmd_structure,cmd_stego,cmd_diag}`；`[stego]` 配置段；`read`/`extract` 多载体批量；帮助分组（子命令三组顺序 + 分组图例 + 调优按格式分节）。
+> 5. `lib.rs` 顶层导出重写 + `prelude`；`ARCHITECTURE.md`、`STEGO-API.md`、`README.md` / `README.zh.md` 同步。
+>
+> **硬性验收全绿**：`cargo test --all-features --all-targets` 725 项；`cargo fmt --check` / `clippy -D warnings` / `cargo doc` 零告警；8 条最小构建（含四条细分内容域）零告警；基线 58/58 字节一致。
+>
+> **两处偏差**：
+> - `jpeg-decoder` **未**移到 `content-jpeg`：源码核对后发现唯一消费者仍是 `analysis`（内容域读 JPEG 走 `dct-io` 系数接口），移动只会引入未使用依赖；等真正实现 GUI 缩略图预览时再引入。
+> - clap 4.6 **无法**把子命令列表分成三段带标题区块（只支持单个 `subcommand_help_heading`），改用 `display_order` 保证三组连续 + 根 `after_help` 图例。
+
 ---
 
 ## 七、验收与护栏（不靠自觉）

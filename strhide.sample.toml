@@ -29,7 +29,8 @@
 # FORMAT RULES:
 # -------------
 # - All keys are OPTIONAL. Unset or commented-out keys use built-in defaults.
-# - Keys must be flat at the top level. Do NOT use section headers (no [tables]).
+# - Keys are flat at the top level, except for one optional `[stego]` table
+#   (section 12) which groups the content-domain defaults.
 # - Unrecognized keys will trigger a warning:
 #     [WARNING] Unknown key '...' in config file '...' (ignored).
 # ==============================================================================
@@ -230,7 +231,7 @@
 # `embed` uses the public built-in constant, and `extract` needs nothing but the
 # password (if one was used) — the carrier is self-describing about everything
 # else. A private no-password dialect (custom secret, HKDF domain, wire-format
-# identity) is compile-time territory: bind a library `Profile` (see
+# identity) is compile-time territory: bind a library `Dialect` (see
 # `StegoProfile::with_default_secret` / `with_stego_domain`) in a custom build.
 # Leftover keys in an old config file are reported as unknown and ignored.
 
@@ -247,6 +248,23 @@
 # Env override: STRHIDE_LANG
 #
 # lang = "zh"
+
+
+# ------------------------------------------------------------------------------
+# 12. Content-Domain Defaults (`[stego]` table)
+# ------------------------------------------------------------------------------
+# Defaults for `embed` and `capacity`. These mirror exactly three flags —
+# --safety, --enforce-safety, --algorithm — because those are the knobs a
+# deployment wants to pin once instead of repeating on every command line.
+# Per-format tuning parameters (--p1-window, --neighbor-weight, ...) stay
+# flag-only: they are experimentation knobs, not policy.
+#
+# An explicit CLI flag always wins over the configured default.
+#
+# [stego]
+# safety         = "high"    # paranoid | high | balanced
+# enforce_safety = false     # true = refuse payloads above the tier instead of warning
+# algorithm      = "auto"    # auto | hill | suniw | uerd | juniward | ...
 
 
 # ==============================================================================

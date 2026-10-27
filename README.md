@@ -75,6 +75,10 @@ strhide write report.pdf -d secret.zip -p "S3cret!" -H "my usual one"
 strhide read photo-out.png -o out/
 strhide read photo-out.png --stdout
 
+# Batch read: several carriers into one directory. Unnamed payloads are named
+# after their carrier (a.png -> a.txt) so they cannot overwrite each other.
+strhide read a.png b.png -o out/
+
 # Black-box steganalysis: scan files or a whole directory recursively for hidden
 # content from any tool (structural + statistical signs, no strhide knowledge);
 # --json supported
@@ -130,42 +134,46 @@ Payload sources on `write` are mutually exclusive too: `-d/--data`, `-t/--text`,
 
 ## Rust library API
 
-The `strhide` crate can be used as a library. The recommended entry point is a **`StrHide`** instance: it binds one private dialect (`Profile`) and one writer-behaviour baseline (`LocalParams`), then exposes every verb as an ordinary method. The whole dialect can be declared `const` at compile time (zero runtime cost), and both file-path and in-memory (`&[u8]` -> `Vec<u8>`) variants are provided.
+The `strhide` crate can be used as a library. The recommended entry point is a **`StrHide`** instance: it binds one private dialect ([`Dialect`]) and one writer-behaviour baseline (`LocalParams`), and exposes the two domains as sub-facades — `.structure()` for container envelopes, `.stego()` for pixel/DCT/CABAC embedding. The whole dialect can be declared `const` at compile time (zero runtime cost), and both file-path and in-memory (`&[u8]` -> `Vec<u8>`) variants are provided.
 
 ```rust
-use strhide::structure::{PayloadSource, WriteOptions};
-use strhide::facade::StrHide;
-use strhide::params::Profile;
+use strhide::facade::{Dialect, StrHide};
+use strhide::structure::{PayloadSource, ReadOptions, WriteOptions};
 
-// The whole private dialect is declared at compile time.
+// The whole private dialect is declared at compile time and covers both domains.
 const ENGINE: StrHide = StrHide::new()
-    .with_profile(Profile::new().with_default_secret("my-deployment-key"));
+    .with_dialect(Dialect::new().with_default_secret("my-deployment-key"));
 
 // Structure domain, in-memory:
-let (stego, _) = ENGINE.write_bytes(
+let (stego, _) = ENGINE.structure().write_bytes(
     &cover,
     PayloadSource::Bytes(b"secret"),
     &WriteOptions::default(),
 )?;
-let read = ENGINE.read_bytes(&stego, None)?;
+let read = ENGINE.structure().read_bytes(&stego, None)?;
 assert_eq!(read.data, b"secret");
 
 // Content domain (image steganography), in-memory:
-let stego = ENGINE.embed(&jpeg, b"secret", &Default::default())?;
-let payload = ENGINE.extract(&stego, &Default::default())?;
-assert_eq!(payload, b"secret");
+let stego = ENGINE.stego().embed(&jpeg, &Payload::bytes(b"secret"), &EmbedOptions::default())?;
+let payload = ENGINE.stego().extract(&stego, &ExtractOptions::default())?;
+assert_eq!(payload.as_bytes(), b"secret");
 ```
 
-A host can also drive its own command line with the bound dialect: `ENGINE.run_cli_from(std::env::args_os())` returns the exit code without calling `process::exit`. The underlying free functions (`write_carrier_bytes`, etc.) remain available for callers that prefer them.
+Three details worth knowing before you integrate:
+
+- **Typed options, not positional flags.** `WriteOptions` / `ReadOptions` / `RestoreOptions` (structure) and `EmbedOptions` / `ExtractOptions` / `ProbeOptions` / `InspectOptions` / `VerifyOptions` (stego) carry everything a call needs; `ReadOptions::new().with_password("pw").with_overwrite(true)` cannot be misread the way `read(p, out, Some("pw"), true)` could.
+- **Typed results.** `WriteResult.format` is a `FileFormat`, `strategy` is a `StrategyId` (registry id + name), `backup_file` is a `PathBuf`, and `warnings` is a list of tagged `Warning` values — no consumer has to parse prose.
+- **Typed errors for GUIs.** `StrHideError::detail_i18n()` returns `ErrorDetail { category, detail, hint }`, and `ErrorDetail::render(lang)` produces the same line the CLI prints; a UI thread can render it in its own language without scraping English text.
+
+A host can also drive its own command line with the bound dialect: `ENGINE.run_cli_from(std::env::args_os())` returns the exit code without calling `process::exit`. The underlying free functions (`write_carrier_bytes`, `embed_carrier`, ...) remain available for callers that prefer them, and `use strhide::prelude::*;` imports the common types in one line.
 
 Library documentation:
 
 - [`docs/api/ARCHITECTURE.md`](docs/api/ARCHITECTURE.md) — module topology, public API surface, data flow, extension points;
+- [`docs/api/STEGO-API.md`](docs/api/STEGO-API.md) — content-domain API, credential precedence, private-dialect recipe;
 - [`docs/api/WIRE_SPEC.md`](docs/api/WIRE_SPEC.md) — UBE v2.2 binary wire format, key derivation, compatibility matrix.
 
 Runnable examples: `cargo run --example in_memory`, `cargo run --example private_profile`, `cargo run --example codec_bench`.
-
-All functions return a result dict and raise `StrHideError` subclasses on failure (`RejectionError`, `CorruptedDataError`, `PasswordError`, `UnsupportedFormatError`, `NoHiddenDataError`, `RestoreMismatchError`). The package ships type annotations (`py.typed`).
 
 ## Supported carriers & strategies
 
@@ -229,7 +237,7 @@ quantization steps are 1) is not calibratable by design, because re-quantising d
 rounding at that scale. **A `clean` verdict still does not mean a carrier holds no hidden data** — a clean or low
 JPEG result carries an explicit note saying so.
 
-*Private dialect & domain isolation*: with no password, both the envelope key and the header-slot permutation are derived from a constant that lives in the source tree, so any strhide build can read a no-password carrier. The CLI deliberately exposes **no** flag to replace that constant: a private no-password dialect (custom secret, HKDF domain, wire-format identity) is compile-time territory — bind a library [`Profile`] (`Profile::with_stego_secret` / `with_stego_domain`) in a custom build, and keys and header permutations are subkeyed via HKDF with NFC normalization and length prefixing. Embed and extract must agree on the dialect; any mismatch safely fails as `NoHiddenData`. For interactive use, pass `-p/--password`: the password is the only credential the `extract` side ever needs to remember.
+*Private dialect & domain isolation*: with no password, both the envelope key and the header-slot permutation are derived from a constant that lives in the source tree, so any strhide build can read a no-password carrier. The CLI deliberately exposes **no** flag to replace that constant: a private no-password dialect (custom secret, HKDF domain, wire-format identity) is compile-time territory — bind a library `Dialect` (`Dialect::with_default_secret` sets both halves; `StegoProfile::with_stego_domain` isolates the image domain) in a custom build, and keys and header permutations are subkeyed via HKDF with NFC normalization and length prefixing. Embed and extract must agree on the dialect; any mismatch safely fails as `NoHiddenData`. For interactive use, pass `-p/--password`: the password is the only credential the `extract` side ever needs to remember.
 
 *Safety capacity tiers (`--safety` & `--enforce-safety`)*: Content steganography supports three calibrated safety capacity tiers:
 - `high` (default recommended): payload budget $\le 0.10$ bpp (approx. slot ratio $r \ge 6.9$). Minimal distortion, optimal for anti-steganalysis.

@@ -74,6 +74,10 @@ strhide write report.pdf -d secret.zip -p "S3cret!" -H "my usual one"
 strhide read photo-out.png -o out/
 strhide read photo-out.png --stdout
 
+# 批量提取：多个载体写入同一目录。未记录文件名的载荷按载体命名（a.png → a.txt），
+# 因此不会互相覆盖
+strhide read a.png b.png -o out/
+
 # 黑盒隐写分析：递归扫描文件或整个目录，检测来自任意工具的隐藏内容
 # （结构 + 统计特征，不依赖 strhide 内部知识）；支持 --json
 strhide scan suspicious.bin ./downloads -r
@@ -126,37 +130,43 @@ strhide list --json
 
 ## Rust 库 API
 
-`strhide` 也可作为库使用。推荐入口是一个 **`StrHide`** 实例：构造时绑定一个私有方言（`Profile`）和一个写侧行为基线（`LocalParams`），然后把每个动词作为普通方法调用。整个方言可以在编译期声明为 `const`（零运行时开销），并同时提供文件路径与内存（`&[u8]` → `Vec<u8>`）两种形态。
+`strhide` 也可作为库使用。推荐入口是一个 **`StrHide`** 实例：构造时绑定一个私有方言（`Dialect`）和一个写侧行为基线（`LocalParams`），两个域各有一个子门面——`.structure()` 是容器信封、`.stego()` 是像素 / DCT / CABAC 嵌入。整个方言可以在编译期声明为 `const`（零运行时开销），并同时提供文件路径与内存（`&[u8]` → `Vec<u8>`）两种形态。
 
 ```rust
-use strhide::structure::{PayloadSource, WriteOptions};
-use strhide::facade::StrHide;
-use strhide::params::Profile;
+use strhide::facade::{Dialect, StrHide};
+use strhide::structure::{PayloadSource, ReadOptions, WriteOptions};
 
-// 整个私有方言在编译期声明。
+// 整个私有方言在编译期声明，同时覆盖两个域。
 const ENGINE: StrHide = StrHide::new()
-    .with_profile(Profile::new().with_default_secret("my-deployment-key"));
+    .with_dialect(Dialect::new().with_default_secret("my-deployment-key"));
 
 // 结构域（内存形态）：
-let (stego, _) = ENGINE.write_bytes(
+let (stego, _) = ENGINE.structure().write_bytes(
     &cover,
     PayloadSource::Bytes(b"secret"),
     &WriteOptions::default(),
 )?;
-let read = ENGINE.read_bytes(&stego, None)?;
+let read = ENGINE.structure().read_bytes(&stego, None)?;
 assert_eq!(read.data, b"secret");
 
 // 内容域（图像隐写，内存形态）：
-let stego = ENGINE.embed(&jpeg, b"secret", &Default::default())?;
-let payload = ENGINE.extract(&stego, &Default::default())?;
-assert_eq!(payload, b"secret");
+let stego = ENGINE.stego().embed(&jpeg, &Payload::bytes(b"secret"), &EmbedOptions::default())?;
+let payload = ENGINE.stego().extract(&stego, &ExtractOptions::default())?;
+assert_eq!(payload.as_bytes(), b"secret");
 ```
 
-宿主还可以用绑定的方言驱动自己的命令行：`ENGINE.run_cli_from(std::env::args_os())` 返回退出码而不调用 `process::exit`。底层自由函数（`write_carrier_bytes` 等）仍对偏好直接调用的用户开放。
+接入前值得知道的三点：
+
+- **强类型选项，不是位置参数。** 结构域用 `WriteOptions` / `ReadOptions` / `RestoreOptions`，内容域用 `EmbedOptions` / `ExtractOptions` / `ProbeOptions` / `InspectOptions` / `VerifyOptions`；`ReadOptions::new().with_password("pw").with_overwrite(true)` 不会像 `read(p, out, Some("pw"), true)` 那样被读错。
+- **强类型结果。** `WriteResult.format` 是 `FileFormat`，`strategy` 是 `StrategyId`（注册表 id + 名称），`backup_file` 是 `PathBuf`，`warnings` 是带 `kind` 标签的 `Warning` 列表——前端不需要解析任何散文。
+- **给 GUI 的错误。** `StrHideError::detail_i18n()` 返回 `ErrorDetail { category, detail, hint }`，`ErrorDetail::render(lang)` 输出与 CLI 同一行；UI 线程可用自己的语言渲染，无需从英文文本里反解。
+
+宿主还可以用绑定的方言驱动自己的命令行：`ENGINE.run_cli_from(std::env::args_os())` 返回退出码而不调用 `process::exit`。底层自由函数（`write_carrier_bytes`、`embed_carrier` 等）仍对偏好直接调用的用户开放；`use strhide::prelude::*;` 一行导入常用类型。
 
 库文档：
 
 - [`docs/api/ARCHITECTURE.md`](docs/api/ARCHITECTURE.md) — 模块拓扑、公开 API、数据流转、扩展点；
+- [`docs/api/STEGO-API.md`](docs/api/STEGO-API.md) — 内容域 API、凭据优先级、私有方言配方；
 - [`docs/api/WIRE_SPEC.md`](docs/api/WIRE_SPEC.md) — UBE v2.2 二进制线格式、密钥派生、兼容矩阵。
 
 可运行示例：`cargo run --example in_memory`、`cargo run --example private_profile`、`cargo run --example codec_bench`。
@@ -192,7 +202,7 @@ assert_eq!(payload, b"secret");
 
 *安全拦截防护*：APNG 动图（`acTL`）、调色板索引图（`PLTE`）、隔行扫描图（Adam7）与渐进式 JPEG（SOF2）会被自动检测并优雅拦截，保护原图功能与外观不受破坏。
 
-*私有方言*：无密码时，信封密钥与头部槽位置换都由源码内的公开常量派生，因此任何 strhide 构建都能读取无密码载体。CLI 刻意**不提供**替换该常量的参数：私有方言（自定义密钥、HKDF 域标签、wire 格式身份）属于编译期定制——在自定义构建中绑定库层 [`Profile`]（`Profile::with_stego_secret` / `with_stego_domain`）即可，密钥与头部置换经 HKDF（NFC 规范化 + 长度前缀）做子密钥化。写入与提取两端方言必须一致，否则提取报 `NoHiddenData`。交互式使用请传 `-p/--password`：密码是提取端唯一需要记住的凭据。
+*私有方言*：无密码时，信封密钥与头部槽位置换都由源码内的公开常量派生，因此任何 strhide 构建都能读取无密码载体。CLI 刻意**不提供**替换该常量的参数：私有方言（自定义密钥、HKDF 域标签、wire 格式身份）属于编译期定制——在自定义构建中绑定库层 `Dialect`（`Dialect::with_default_secret` 同时设置两半，`StegoProfile::with_stego_domain` 隔离图像域）即可，密钥与头部置换经 HKDF（NFC 规范化 + 长度前缀）做子密钥化。写入与提取两端方言必须一致，否则提取报 `NoHiddenData`。交互式使用请传 `-p/--password`：密码是提取端唯一需要记住的凭据。
 
 *UERD 用真实块网格*：代价模型使用文件自身的亮度量化表与真实的 MCU 补齐块映射（4:2:0 的块行是交错的，`ceil(sqrt(n))` 对多数载体都是错的），并且对**每个** AC 位置（含 0）计价——因为编码是三元的。
 
