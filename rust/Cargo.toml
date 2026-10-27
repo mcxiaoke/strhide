@@ -19,8 +19,14 @@ exclude = ["tests/"]
 # strhide` must not drag in clap/rpassword/toml. `analysis` stays in the default
 # set because it is a headline capability (and its only extra dependency is
 # `jpeg-decoder`); the CLI is the heavy switch.
-# Stage 1 finalises the per-format split (structure-base/structure-pe,
-# content-png/content-jpeg/content-hevc); until then each domain is one switch.
+# Each domain is one switch. The per-format split (structure-base/structure-pe,
+# content-png/content-jpeg/content-hevc) is deliberately NOT exposed yet: it was
+# attempted on 2026-10-27 and does not compile, for two measured reasons -
+# (a) `Profile` still carries `stego_secret()`/`png_format()`/`jpeg_format()`
+# unconditionally, so every content format needs the whole domain (the `Dialect`
+# split in plan 3.5), and (b) `stego/format.rs` reads SUPERBLOCK_BYTES out of
+# `stego::jpeg::header_v3`. Both are stage-2 items; adding features that cannot
+# be enabled alone would just advertise a broken build.
 default = ["structure", "content", "analysis"]
 
 # Foundation shared by both domains (atomic commit, timestamp preservation).

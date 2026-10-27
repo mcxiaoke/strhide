@@ -190,6 +190,8 @@ pub static CAPABILITIES: &[Capability] = &[ /* 每格式一行 */ ];
 
 ### 2.4 Feature 设计（可编译版）
 
+> **落地状态（2026-10-27）**：`core-io` / `structure` / `content` / `analysis` / `config` / `cli` 六个开关已生效，四条最小构建零告警。下面表中的 `structure-base` / `structure-pe` / `content-png` / `content-jpeg` / `content-hevc` / `content-heif-bridge` **尚未暴露**——实测拆不动，卡在两项阶段 2 的前置工作（`Profile` 的方言拆分、`stego/format.rs` 对 jpeg 线常量的依赖），详见 §六 阶段 1 的进度注记。
+
 ```toml
 [features]
 # 库的默认值：两个域 + 分析，不含 cli（cargo add 不该拖 clap/toml/rpassword）。
@@ -521,6 +523,19 @@ impl StrHideError { pub fn detail_i18n(&self) -> ErrorDetail; }   // GUI 用它 
 4. **i18n 与配置模型下沉**：`cli/i18n` → `core/i18n`（`errors.rs:136` 依赖它，否则 `structure-base` 单独编不过）；`FileConfig` 的模型与合并规则 → `core/config.rs::Settings`，`cli/cfg_paths.rs` 只留路径发现与 TOML 解析。语言从 thread_local 改为显式 `RenderCtx { lang }`（§5.4）。
 5. 只抽 `formats/isobmff/`（三份 3,585 行合一）。`png_chunks` / `riff` / `ebml` **暂不动**；仅把 `dqt.rs` 从顶层 `src/jpeg/` 迁入 `formats/jpeg_segments.rs`（它本来就是公共依赖）。
 6. 验收：`baseline_hash.py --check` 全等；`analysis` 的 PE 扫描不回归；五个最小构建全绿。
+
+> **阶段 1 收尾结论（2026-10-27 13:28）**
+>
+> **已完成**（三个提交，每个都以 `baseline_hash.py --check` 58/58 字节一致收口）：
+> 1. `formats` 层：`FileFormat` + `sniff_bytes`/`sniff_stream` + `annexb` + `CAPABILITIES`；内容域 15 处手写魔数比较收成 3 次嗅探；删除 `HostAdapter::supports_content_stego`；`tests/test_lifecycle/sniff.rs` 把格式层 / 路由器 / 能力表钉在一起。
+> 2. 结构域物理归位 `src/structure/`（`router`→`registry`、`adapters` 下移），i18n 与配置模型下沉 `src/core/`，`errors::category()` 去掉 cli 门控，`locale::detect` 与 config 解耦。
+> 3. Feature 图重排：`engine`→`structure`、`stego`→`content`、新增 `core-io`/`config`；`default` 收窄为 `["structure","content","analysis"]`（不再拖 clap/toml/rpassword）；CI 测试带 `--all-features`，四条最小构建转硬性。
+> 4. `dqt.rs` 迁入 `formats/jpeg_segments.rs`（原第 4 项的一部分）。
+>
+> **后移 / 明确不做**：
+> - **按格式细分 feature 后移**。2026-10-27 实测发现它编不过：① `Profile` 无条件提供 `stego_secret()`/`png_format()`/`jpeg_format()`，任何单一内容格式都会连带需要整个内容域（需先做 §3.5 的 `Dialect` 拆分）；② `stego/format.rs` 直接从 `stego::jpeg::header_v3` 取 `SUPERBLOCK_BYTES`；`structure-base`（无 PE）同样卡在按 `feature = "structure"` 门控的 `Profile::locator_magic()` 等方法上。结论：**feature 细分必须排在阶段 2 的 `StegoEngine` 注册表与 `Dialect` 拆分之后**，否则只会放出"声明了但打不开"的开关。
+> - **ISOBMFF 三份合一另开批次**。3,585 行、两域写语义不同，是全项目风险最高的一处；现有基线覆盖结构域 HEIF/MP4 共 44 例，但内容域 HEVC 路径需要额外语料回归（`--include-content-hevc`，单条 1080p60 约 100 s / 12 GB），不适合与目录改名混在同一批。
+
 
 > **进度（2026-10-27 13:02）**：第 1、2 项**已完成**（`rust/src/formats/{sniff,annexb,capability,mod}.rs`，内容域三处瀑布改为单次 `sniff_bytes` 分派，删除 `HostAdapter::supports_content_stego` 及其 4 处覆写；新增 `tests/test_lifecycle/sniff.rs` 5 项一致性测试把"格式层 / 路由器 / 能力表"钉在一起）。698 项测试全绿、基线 58/58 不变。**未做**：第 3 项（feature 图 + `engine`→`structure` 改名 + i18n/config 下沉 `core`）、第 4 项（ISOBMFF 三份合一）——两者各自是一个独立提交，避免与本次结构改动混在一起。
 
