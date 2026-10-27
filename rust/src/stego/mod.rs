@@ -33,6 +33,11 @@ pub mod traits;
 #[doc(hidden)]
 pub mod wavelet;
 
+pub use crate::stego::jpeg::registry::get_jpeg_model;
+pub use crate::stego::png::registry::{
+    SPATIAL_ALGORITHM_HILL, SPATIAL_ALGORITHM_SUNIWARD, get_spatial_model,
+    spatial_model_from_wire_id, spatial_name_from_wire_id, spatial_wire_id,
+};
 pub use engine::{StegoEngine, engine_for, supported_formats};
 pub use envelope::Freshness;
 pub use format::{
@@ -46,7 +51,48 @@ pub use options::{
 pub use params::{
     ExtractParams, JpegParams, PngParams, SafetyEnforcement, SafetyLevel, SafetyPolicy, StegoCodec,
 };
-pub use registry::CostModelRegistry;
+pub use registry::list_algorithms;
+
+/// Compatibility facade over the per-domain registries.
+pub struct CostModelRegistry;
+
+impl CostModelRegistry {
+    /// See [`crate::stego::png::registry::get_spatial_model`].
+    pub fn get_spatial_model(
+        name: Option<&str>,
+    ) -> Option<std::sync::Arc<dyn crate::stego::traits::PngCostModel>> {
+        crate::stego::png::registry::get_spatial_model(name)
+    }
+
+    /// See [`crate::stego::jpeg::registry::get_jpeg_model`].
+    pub fn get_jpeg_model(
+        name: Option<&str>,
+    ) -> Option<std::sync::Arc<dyn crate::stego::traits::JpegCostModel>> {
+        crate::stego::jpeg::registry::get_jpeg_model(name)
+    }
+
+    /// See [`crate::stego::png::registry::spatial_wire_id`].
+    pub fn spatial_wire_id(name: &str) -> Option<u8> {
+        crate::stego::png::registry::spatial_wire_id(name)
+    }
+
+    /// See [`crate::stego::png::registry::spatial_name_from_wire_id`].
+    pub fn spatial_name_from_wire_id(id: u8) -> Option<&'static str> {
+        crate::stego::png::registry::spatial_name_from_wire_id(id)
+    }
+
+    /// See [`crate::stego::png::registry::spatial_model_from_wire_id`].
+    pub fn spatial_model_from_wire_id(
+        id: u8,
+    ) -> Option<std::sync::Arc<dyn crate::stego::traits::PngCostModel>> {
+        crate::stego::png::registry::spatial_model_from_wire_id(id)
+    }
+
+    /// See [`registry::list_algorithms`].
+    pub fn list_algorithms() -> Vec<(&'static str, &'static str, &'static str)> {
+        crate::stego::registry::list_algorithms()
+    }
+}
 
 use crate::core::payload::Payload;
 use crate::errors::StrHideError;

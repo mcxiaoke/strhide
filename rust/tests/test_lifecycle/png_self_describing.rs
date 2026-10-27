@@ -18,9 +18,9 @@
 
 use strhide::core::control::Control;
 use strhide::core::payload::Payload;
+use strhide::stego::CostModelRegistry;
 use strhide::stego::png::engine::{SPATIAL_ELIGIBLE_MAX, SPATIAL_ELIGIBLE_MIN};
 use strhide::stego::png::{RawImage, decode_png, encode_png};
-use strhide::stego::registry::CostModelRegistry;
 use strhide::stego::traits::PngCostModel;
 use strhide::stego::{
     EmbedOptions, ExtractOptions, PngParams, SpatialAlgorithm, StegoTuning, embed_carrier,
@@ -125,7 +125,7 @@ fn the_carrier_declares_which_model_wrote_it() {
 
     let fw = read_feature_word(&stego);
     assert_eq!(
-        CostModelRegistry::spatial_name_from_wire_id(fw.algorithm_id),
+        strhide::stego::png::registry::spatial_name_from_wire_id(fw.algorithm_id),
         Some("hill"),
         "the feature word must name the model that wrote the body"
     );
@@ -181,7 +181,7 @@ fn a_suniward_carrier_extracts_while_the_caller_defaults_to_hill() {
 
     let fw = read_feature_word(&stego);
     assert_eq!(
-        CostModelRegistry::spatial_name_from_wire_id(fw.algorithm_id),
+        strhide::stego::png::registry::spatial_name_from_wire_id(fw.algorithm_id),
         Some("suniward"),
         "the carrier must declare the model that actually wrote it"
     );

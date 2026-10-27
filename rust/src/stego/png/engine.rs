@@ -1277,7 +1277,7 @@ pub fn embed_png(
         // header before it knows which algorithm wrote the body, so there is no
         // out-of-band channel to rely on. A model without a wire id would
         // produce a carrier nobody (including this build) could read back.
-        algorithm_id: crate::stego::registry::CostModelRegistry::spatial_wire_id(cost_model.id())
+        algorithm_id: crate::stego::png::registry::spatial_wire_id(cost_model.id())
             .ok_or_else(|| {
                 StrHideError::General(format!(
                     "PNG cost model '{}' has no wire id; a carrier written with it could not be extracted",
@@ -1534,9 +1534,8 @@ pub fn extract_png(
     // The carrier names its cost model. An id this build does not know means a
     // carrier written by a newer tool -- reported exactly like "no payload",
     // because guessing a model would silently decode noise.
-    let resolved =
-        crate::stego::registry::CostModelRegistry::spatial_model_from_wire_id(fw.algorithm_id)
-            .ok_or_else(no_hidden)?;
+    let resolved = crate::stego::png::registry::spatial_model_from_wire_id(fw.algorithm_id)
+        .ok_or_else(no_hidden)?;
     if resolved.id() != cost_model.id() {
         // The carrier is authoritative; the caller's choice is only a hint.
         trace(&format!(

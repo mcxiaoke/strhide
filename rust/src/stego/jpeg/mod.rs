@@ -9,6 +9,8 @@ pub mod header_v3;
 pub mod v3_layout;
 
 pub mod cost;
+pub mod registry;
 
 pub use cost::UerdCostModel;
 pub use engine::{embed_jpeg, extract_jpeg, probe_jpeg_capacity};
+pub use registry::get_jpeg_model;

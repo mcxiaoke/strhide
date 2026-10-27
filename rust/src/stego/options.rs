@@ -35,8 +35,9 @@ use crate::formats::FileFormat;
 use crate::params::StegoProfile;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::envelope::Freshness;
+use crate::stego::jpeg::registry as jpeg_registry;
 use crate::stego::params::{ExtractParams, JpegParams, PngParams, SafetyPolicy};
-use crate::stego::registry::CostModelRegistry;
+use crate::stego::png::registry as png_registry;
 use crate::stego::traits::{JpegCostModel, PngCostModel};
 
 /// Spatial-domain cost model selection.
@@ -74,9 +75,9 @@ impl SpatialAlgorithm {
     /// The model instance to run.
     pub fn model(&self) -> Arc<dyn PngCostModel> {
         match self {
-            SpatialAlgorithm::Hill => CostModelRegistry::get_spatial_model(Some("hill"))
+            SpatialAlgorithm::Hill => png_registry::get_spatial_model(Some("hill"))
                 .expect("the built-in HILL model always resolves"),
-            SpatialAlgorithm::Suniward => CostModelRegistry::get_spatial_model(Some("suniward"))
+            SpatialAlgorithm::Suniward => png_registry::get_spatial_model(Some("suniward"))
                 .expect("the built-in S-UNIWARD model always resolves"),
             SpatialAlgorithm::Custom(model) => Arc::clone(model),
         }
@@ -124,9 +125,9 @@ impl JpegAlgorithm {
     /// The model instance to run.
     pub fn model(&self) -> Arc<dyn JpegCostModel> {
         match self {
-            JpegAlgorithm::Uerd => CostModelRegistry::get_jpeg_model(Some("uerd"))
+            JpegAlgorithm::Uerd => jpeg_registry::get_jpeg_model(Some("uerd"))
                 .expect("the built-in UERD model always resolves"),
-            JpegAlgorithm::Juniward => CostModelRegistry::get_jpeg_model(Some("juniward"))
+            JpegAlgorithm::Juniward => jpeg_registry::get_jpeg_model(Some("juniward"))
                 .expect("the built-in J-UNIWARD model always resolves"),
             JpegAlgorithm::Custom(model) => Arc::clone(model),
         }

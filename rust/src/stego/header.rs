@@ -144,7 +144,7 @@ pub struct FeatureWord {
     /// Stored so extraction does not need the algorithm out of band: the header
     /// is placed from a cost-free layout, so it can be read before the extractor
     /// knows which model produced the body. See
-    /// [`crate::stego::registry::CostModelRegistry::spatial_name_from_wire_id`].
+    /// [`crate::stego::png::registry::spatial_name_from_wire_id`].
     ///
     /// Lives in `bytes[8]`, which v2 reserved as zero, so the packed `low64`
     /// layout is unchanged.
@@ -170,7 +170,7 @@ impl Default for FeatureWord {
             p2_window: 15,
             neg_log2_epsilon: 23,    // f32::EPSILON = 2^-23
             exclusion_permille: 300, // 30%
-            algorithm_id: crate::stego::registry::SPATIAL_ALGORITHM_HILL,
+            algorithm_id: crate::stego::png::registry::SPATIAL_ALGORITHM_HILL,
             sigma: 1.0,
             kernel_id: 0,
         }
@@ -329,7 +329,7 @@ impl FeatureWord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stego::registry::SPATIAL_ALGORITHM_HILL;
+    use crate::stego::png::registry::SPATIAL_ALGORITHM_HILL;
 
     #[test]
     fn length_round_trips_and_leaves_the_codec_bits_alone() {
