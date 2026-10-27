@@ -30,7 +30,9 @@ python scripts/baseline_hash.py --check   # 与 temp/baseline/baseline.json 逐�
 
 冻结/重建基线用 `--write`。它跑 `rust/tests/fixtures`、`rust/tests/assets`、`temp/testhevc` 共 58 例的 write/read/restore 与 embed/extract，比对策略、信封大小、还原 sha256 与容量数字；内容域用固定 `--seed` 驱动，连 stego 产物字节（sha256）一起比，结构域信封 nonce 随机、只比大小与还原。依赖 gitignored 语料，只在本地跑，不进 CI。改动任何解析/注入路径后必须 `--check` 全绿。
 
-**本地批测的内存峰值约 12 GB**：`embed_hevc` 会把每个切片的全部 CABAC bin 留在内存里用于磁带回放，一个 13.6 s 的 1080p60 视频就是 3.8 亿 bin（单个视频门限测试单独占用约 12 GB、116 s）。并行跑没问题，但不要在跑批测的同时开其它吃内存的进程——被 swap 拖住时表现和"死锁"很像。
+**HEVC 内存要记两个数**：`embed_hevc` 必须把每个切片的 CABAC bin 序列留在内存里用于磁带回放，一个 13.5 s 的 1080p60 视频约 2.7 亿 bin（2 字节/条 ≈ 0.54 GB）+ 1700 万槽位（32 字节/条 ≈ 0.54 GB）。单个载体实测 **embed 峰值 1.31 GB、extract 0.59 GB**（2026-10-27 之前是 16 B/bin + 56 B/槽位，两者都是 7.45 GB）。整套 `cargo test local_ -- --ignored` 现在实测 **约 100–110 s、峰值 8.6–9.7 GB**（2026-10-27 之前是 287 s / 破 20 GB）。峰值里 HEVC 只占约 1.3 GB×并发数，其余是并行跑的 PNG/JPEG 隐写评测。
+
+关于"要不要给 HEVC 测试加串行锁"：2026-10-27 实测过两种口径——加锁 6.9 GB / 104.7 s，不加锁 8.6–9.7 GB / 99–111 s。**耗时没有差别**（瓶颈是 PNG/JPEG 评测，不是 HEVC），锁只买到 2.5 GB 峰值，却会让排队等锁的测试被报成 "has been running for over 60 seconds"，所以那把 `hevc_serial()` 已删除。两个条件下应该把它加回来（`tests/common` 里一个 static `Mutex`，各 HEVC 测试首行取一次）：① 在 16 GB 内存的机器上跑整套；② 语料里新增 4K/更长的视频载体（单载体峰值会从 1.3 GB 涨到数 GB，叠加才会重新变成问题）。
 
 排障提示：跑重测试时把日志重定向到文件再轮询，不要只看终端——`cargo test` 的进度只在测试结束时打印。
 

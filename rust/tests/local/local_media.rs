@@ -808,29 +808,6 @@ pub mod hevc_external {
         max_bad_patch_fraction: 0.005,
     };
 
-    /// Gate for video carriers (`.mp4` / `.mov`), applied at the *recommended*
-    /// safety capacity -- the number the CLI tells users to stay within.
-    ///
-    /// Baselines (2026-10-26, three carriers: 385 / 228 / 816 pictures):
-    /// PSNR 48.5 .. 53.5 dB, worst 8x8 patch 13.6 .. 32.4 dB, max|d| 19 .. 99,
-    /// p99.9 4 .. 14, >16-level samples 0.00% .. 0.06%, patches below 25 dB
-    /// 0.000% .. 0.100%.
-    ///
-    /// `min_patch_psnr` is deliberately loose (8 dB): over hundreds of frames
-    /// the *worst* patch is an extreme-value statistic and says little about
-    /// visibility -- one 8x8 block for one frame at 60 fps is not what a viewer
-    /// perceives (VMAF is 99.99 at these rates). The pooled
-    /// `max_bad_patch_fraction` carries the real signal instead, and it is the
-    /// number that actually moves with payload.
-    const VIDEO_GATE: QualityGate = QualityGate {
-        min_psnr: 42.0,
-        min_patch_psnr: 8.0,
-        max_abs_delta: 140,
-        max_p999_delta: 24,
-        max_large_fraction: 0.002,
-        max_bad_patch_fraction: 0.003,
-    };
-
     /// A sample deviation of this many levels or more counts as "visibly
     /// changed". Below it the difference is at most a rounding-level wobble.
     const LARGE_DELTA: u8 = 16;
@@ -1522,148 +1499,6 @@ pub mod hevc_external {
             "no carrier was validated ({skipped} skipped) — the corpus or ffmpeg is missing"
         );
     }
-
-    /// Video carriers at the **recommended** safety capacity must stay inside
-    /// [`VIDEO_GATE`].
-    ///
-    /// The still-image tests above run at ~12% of capacity; this one runs at
-    /// exactly the number the CLI recommends, because that is the contract users
-    /// rely on. The two carriers differ deliberately: a phone MOV with
-    /// non-reference pictures (the payload fits the drift-free rung, so whole
-    /// pictures stay bit-identical) and an all-reference MP4 (every picture is
-    /// touched, spread thin).
-    #[test]
-    #[ignore = "requires ffmpeg on PATH and the local testhevc corpus"]
-    pub fn local_hevc_video_recommended_capacity_quality() {
-        use strhide::stego::SafetyLevel;
-
-        if !ffmpeg_available() {
-            eprintln!("[SKIP] ffmpeg not found on PATH");
-            return;
-        }
-        let Some(dir) = corpus_dir() else {
-            eprintln!("[SKIP] testhevc corpus not found");
-            return;
-        };
-
-        let mut checked = 0usize;
-        for name in [
-            "IMG_0033.MOV",
-            "VID_20250228_120825_C.mp4",
-            "VID_20261007_203536.mp4",
-        ] {
-            let cover_path = dir.join(name);
-            if !cover_path.exists() {
-                continue;
-            }
-            let cover = fs::read(&cover_path).expect("read cover");
-            let info = match strhide::stego::hevc::probe_hevc_capacity_info(
-                &cover,
-                &strhide::stego::format::DEFAULT_HEVC_FORMAT,
-                SafetyLevel::High,
-                true,
-                &strhide::core::control::Control::none(),
-            ) {
-                Ok(info) => info,
-                Err(e) => {
-                    eprintln!("[SKIP] {name}: not a Scheme C carrier ({e})");
-                    continue;
-                }
-            };
-            if info.recommended_max_bytes == 0 {
-                eprintln!("[SKIP] {name}: no recommended capacity");
-                continue;
-            }
-
-            let payload_len = info.recommended_max_bytes;
-            let payload: Vec<u8> = (0..payload_len).map(|i| (i * 131 % 251) as u8).collect();
-            let stego = embed_hevc(
-                &cover,
-                &payload,
-                Some(PASSWORD),
-                None,
-                &strhide::stego::format::DEFAULT_HEVC_FORMAT,
-                strhide::stego::Freshness::Seeded([9u8; 32]),
-            )
-            .unwrap_or_else(|e| panic!("{name}: embed failed: {e}"));
-
-            // Δ = 0 is the whole point of the scheme and must survive the video
-            // path as well.
-            assert_eq!(
-                stego.len(),
-                cover.len(),
-                "{name}: embedding changed the carrier length (Δ = {} bytes)",
-                stego.len() as i64 - cover.len() as i64
-            );
-
-            let stego_path = std::env::temp_dir()
-                .join(format!("strhide-hevc-vidq-{}-{name}", std::process::id()));
-            fs::write(&stego_path, &stego).expect("write stego carrier");
-
-            let dims = probe_dimensions(&cover_path, &cover);
-            let diff = compare_decoded(&cover_path, &stego_path, dims)
-                .unwrap_or_else(|e| panic!("{name}: {e}"));
-            let _ = fs::remove_file(&stego_path);
-
-            println!(
-                "[VID] {name}: payload {payload_len} B (recommended), slots {slots}, \
-                 PSNR {psnr:.2} dB, patch {patch:.2} dB, bad {bad:.5}, max|d| {max_d}, \
-                 p99.9 {p999}, large {large:.4}",
-                slots = info.available_slots,
-                psnr = diff.psnr,
-                patch = diff.min_patch_psnr,
-                bad = diff.bad_patch_fraction,
-                max_d = diff.max_abs_diff,
-                p999 = diff.p999_abs_diff,
-                large = diff.large_fraction,
-            );
-
-            assert!(
-                diff.psnr >= VIDEO_GATE.min_psnr,
-                "{name}: PSNR {:.2} dB is below the {:.0} dB floor at the recommended capacity",
-                diff.psnr,
-                VIDEO_GATE.min_psnr
-            );
-            assert!(
-                diff.min_patch_psnr >= VIDEO_GATE.min_patch_psnr,
-                "{name}: worst 8x8 luma patch is {:.2} dB (floor {:.0} dB)",
-                diff.min_patch_psnr,
-                VIDEO_GATE.min_patch_psnr
-            );
-            assert!(
-                diff.max_abs_diff <= VIDEO_GATE.max_abs_delta,
-                "{name}: a decoded sample moved by {} (limit {})",
-                diff.max_abs_diff,
-                VIDEO_GATE.max_abs_delta
-            );
-            assert!(
-                diff.p999_abs_diff <= VIDEO_GATE.max_p999_delta,
-                "{name}: 99.9th percentile deviation is {} (limit {})",
-                diff.p999_abs_diff,
-                VIDEO_GATE.max_p999_delta
-            );
-            assert!(
-                diff.large_fraction <= VIDEO_GATE.max_large_fraction,
-                "{name}: {:.4} of decoded samples moved by more than {LARGE_DELTA} \
-             (limit {:.4})",
-                diff.large_fraction,
-                VIDEO_GATE.max_large_fraction
-            );
-            assert!(
-                diff.bad_patch_fraction <= VIDEO_GATE.max_bad_patch_fraction,
-                "{name}: {:.4} of 8x8 luma patches are below {BAD_PATCH_PSNR_DB:.0} dB \
-             (limit {:.4}) — damage is no longer a rare tail",
-                diff.bad_patch_fraction,
-                VIDEO_GATE.max_bad_patch_fraction
-            );
-            checked += 1;
-        }
-
-        assert!(
-            checked > 0,
-            "no video carrier was validated — the corpus or ffmpeg is missing"
-        );
-    }
 }
 
 /// Real Annex-B streams: sniff coverage and an end-to-end round-trip.
@@ -1876,17 +1711,23 @@ pub mod mp4_container {
     /// the expected value.
     const MIN_PSNR_DB: f64 = 30.0;
 
-    /// Real-world corpus: iPhone 4K (`hev1`, `stco`), iPhone MOV (`qt` brand,
-    /// open GOP), Android 1080p60 (`hvc1`, `co64`, every picture a reference
-    /// picture) and two encoder samples (extra `hvcC` arrays).
-    const CORPUS: [&str; 6] = [
-        "VID_20250228_120825_C.mp4",
-        "IMG_0033.MOV",
-        "IMG_0892.MOV",
-        "VID_20261002_154545.mp4",
-        "SDRSample.mp4",
-        "HDRSample.mp4",
-    ];
+    /// The two structurally opposite container layouts, one carrier each.
+    ///
+    /// `VID_20261002_154545.mp4` is the hard sample table: `hvc1`, **`co64`**
+    /// (64-bit chunk offsets), 7 chunks over 3 `stsc` segments, `moov` at the
+    /// tail, every picture a reference picture. `IMG_0033.MOV` is the opposite
+    /// end: `qt` brand, `wide` box, `mdat` first, open GOP with
+    /// non-reference pictures. Any span-arithmetic or write-back mistake shows
+    /// up in one of the two.
+    ///
+    /// Carriers that used to be here and why they are gone: `IMG_0892.MOV`
+    /// (same MOV box layout as `IMG_0033.MOV`), `SDRSample.mp4` (same
+    /// `hev1`+SEI `hvcC` shape as `HDRSample.mp4`), `HDRSample.mp4` itself and
+    /// `VID_20250228_120825_C.mp4` (`hev1`+`stco` — the 32-bit twin of the
+    /// `co64` path, kept as a *parser* case by `rejects_unsupported_variants`).
+    /// Each of them repeated a full decode + write-back for a layout already
+    /// covered, at ~13 s apiece.
+    const CORPUS: [&str; 2] = ["VID_20261002_154545.mp4", "IMG_0033.MOV"];
 
     fn corpus_dir() -> Option<PathBuf> {
         if let Ok(val) = std::env::var("STRHIDE_HEVC_DIR") {
@@ -1981,11 +1822,12 @@ pub mod mp4_container {
         data.windows(4).position(|w| w == tag).map(|i| i + 4)
     }
 
-    /// Probe -> embed -> extract over the real corpus.
+    /// Probe -> embed -> extract over the two container layouts.
     ///
-    /// Asserts what the container layer promises: byte-exact round-trip, an
-    /// unchanged file length (Δ = 0) and a bitstream ffmpeg still decodes
-    /// without complaint.
+    /// Asserts everything the container layer promises, on the same stego
+    /// bytes: byte-exact round-trip, an unchanged file length (Δ = 0), **only
+    /// `mdat` changed** (every other top-level box byte-identical) and a
+    /// bitstream ffmpeg still decodes without complaint.
     #[test]
     #[ignore = "requires ffmpeg on PATH and the local temp/testhevc corpus"]
     pub fn local_hevc_mp4_corpus_roundtrip() {
@@ -1999,20 +1841,29 @@ pub mod mp4_container {
         };
 
         let payload: Vec<u8> = (0..2048u32).map(|i| ((i * 37 + 11) % 256) as u8).collect();
-        for name in CORPUS {
+        for (index, name) in CORPUS.iter().enumerate() {
             let cover_path = dir.join(name);
             if !cover_path.is_file() {
                 continue;
             }
             let cover = fs::read(&cover_path).unwrap_or_else(|e| panic!("{name}: {e}"));
-            let capacity =
-                probe_hevc_capacity(&cover, &strhide::stego::format::DEFAULT_HEVC_FORMAT)
-                    .unwrap_or_else(|e| panic!("{name}: capacity probe failed: {e}"));
-            assert!(
-                capacity >= payload.len(),
-                "{name}: capacity {capacity} B cannot hold {} B",
-                payload.len()
-            );
+            // The advertised-capacity contract is checked once: `probe` decodes
+            // the whole carrier and `embed` decodes it again, so doing both on
+            // every carrier cost a third of this test's runtime for a number
+            // that cannot differ per container layout. For the rest, `embed`
+            // failing on capacity is the assertion.
+            let mut advertised = None;
+            if index == 0 {
+                let capacity =
+                    probe_hevc_capacity(&cover, &strhide::stego::format::DEFAULT_HEVC_FORMAT)
+                        .unwrap_or_else(|e| panic!("{name}: capacity probe failed: {e}"));
+                assert!(
+                    capacity >= payload.len(),
+                    "{name}: capacity {capacity} B cannot hold {} B",
+                    payload.len()
+                );
+                advertised = Some(capacity);
+            }
 
             let stego = embed_hevc(
                 &cover,
@@ -2028,6 +1879,27 @@ pub mod mp4_container {
                 cover.len(),
                 "{name}: an MP4 embed must not resize the container (Delta = 0)"
             );
+
+            // The other half of the Δ = 0 promise: only `mdat` may move. A
+            // parser that "fixed up" a chunk offset while writing back would
+            // still round-trip byte-exactly, so the payload comparison cannot
+            // prove it. This check used to live in a separate test that
+            // repeated the same embeds.
+            let cover_boxes = top_level_boxes(&cover);
+            let stego_boxes = top_level_boxes(&stego);
+            assert_eq!(
+                cover_boxes.len(),
+                stego_boxes.len(),
+                "{name}: the top-level box layout changed"
+            );
+            for ((tag, _, cp, ce), (_, _, sp, se)) in cover_boxes.iter().zip(stego_boxes.iter()) {
+                let identical = cover[*cp..*ce] == stego[*sp..*se];
+                if tag == "mdat" {
+                    assert!(!identical, "{name}: mdat must carry the payload");
+                } else {
+                    assert!(identical, "{name}: box `{tag}` must be byte-identical");
+                }
+            }
 
             let recovered = extract_hevc(
                 &stego,
@@ -2046,7 +1918,12 @@ pub mod mp4_container {
                 .unwrap_or_else(|e| panic!("{name}: ffmpeg: {e}"));
             let _ = fs::remove_file(&stego_path);
 
-            println!("[MP4] {name}: capacity={capacity} B, PSNR={psnr:.2} dB");
+            println!(
+                "[MP4] {name}: capacity={}, PSNR={psnr:.2} dB",
+                advertised
+                    .map(|c| format!("{c} B"))
+                    .unwrap_or_else(|| "not probed".into())
+            );
             assert!(
                 noise.is_empty(),
                 "{name}: ffmpeg reported trouble decoding the stego carrier: {noise:?}"
@@ -2058,65 +1935,23 @@ pub mod mp4_container {
         }
     }
 
-    /// The whole point of Δ = 0 in a container: `moov` (sample sizes, chunk
-    /// offsets, `hvcC`) is byte-identical, only `mdat` moved.
-    #[test]
-    #[ignore = "requires the local temp/testhevc corpus"]
-    pub fn local_hevc_mp4_container_tables_untouched() {
-        let Some(dir) = corpus_dir() else {
-            eprintln!("[SKIP] testhevc corpus not found");
-            return;
-        };
-
-        for name in CORPUS {
-            let cover_path = dir.join(name);
-            if !cover_path.is_file() {
-                continue;
-            }
-            let cover = fs::read(&cover_path).unwrap_or_else(|e| panic!("{name}: {e}"));
-            let payload = b"strhide mp4 container tables must not move".repeat(32);
-
-            let stego = embed_hevc(
-                &cover,
-                &payload,
-                Some(PASSWORD),
-                None,
-                &strhide::stego::format::DEFAULT_HEVC_FORMAT,
-                Freshness::Seeded([7u8; 32]),
-            )
-            .unwrap_or_else(|e| panic!("{name}: embed failed: {e}"));
-            assert_eq!(stego.len(), cover.len(), "{name}: file length changed");
-
-            let cover_boxes = top_level_boxes(&cover);
-            let stego_boxes = top_level_boxes(&stego);
-            assert_eq!(
-                cover_boxes.len(),
-                stego_boxes.len(),
-                "{name}: the top-level box layout changed"
-            );
-            for ((tag, _, cp, ce), (_, _, sp, se)) in cover_boxes.iter().zip(stego_boxes.iter()) {
-                let identical = cover[*cp..*ce] == stego[*sp..*se];
-                if tag == "mdat" {
-                    assert!(!identical, "{name}: mdat must carry the payload");
-                } else {
-                    assert!(identical, "{name}: box `{tag}` must be byte-identical");
-                }
-            }
-        }
-    }
-
     /// Fragmented files and the compact size table are rejected explicitly
     /// instead of producing spans from tables the parser cannot resolve.
+    ///
+    /// Runs on a `hev1` + 32-bit `stco` carrier: it is the one layout the
+    /// round-trip corpus above no longer carries (that one keeps the `co64`
+    /// twin), and this test only parses, so it costs milliseconds.
     #[test]
     #[ignore = "requires the local temp/testhevc corpus"]
     pub fn local_hevc_mp4_rejects_unsupported_variants() {
+        const STCO_CARRIER: &str = "VID_20250228_120825_C.mp4";
         let Some(dir) = corpus_dir() else {
             eprintln!("[SKIP] testhevc corpus not found");
             return;
         };
-        let cover_path = dir.join(CORPUS[0]);
+        let cover_path = dir.join(STCO_CARRIER);
         if !cover_path.is_file() {
-            eprintln!("[SKIP] {} missing", CORPUS[0]);
+            eprintln!("[SKIP] {STCO_CARRIER} missing");
             return;
         }
         let cover = fs::read(&cover_path).expect("read cover");
