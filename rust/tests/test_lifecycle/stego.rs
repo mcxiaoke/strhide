@@ -314,6 +314,7 @@ fn test_jpeg_uerd_fine_tuning() {
     assert_eq!(extracted, secret);
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn test_cli_embed_and_extract_roundtrip() {
     let dir = scratch("cli_roundtrip");

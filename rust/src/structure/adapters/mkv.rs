@@ -1,11 +1,11 @@
 use std::io::{SeekFrom, Write};
 
-use crate::adapters::ebml::{
+use crate::errors::StrHideError;
+use crate::structure::adapters::ebml::{
     EBML_HEADER_ID, EBML_VOID_ID, MATROSKA_SEGMENT_ID, encode_vint, read_element_id, read_vint_size,
 };
-use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity};
-use crate::envelope::EnvelopeTrailer;
-use crate::errors::StrHideError;
+use crate::structure::adapters::{HostAdapter, SeekRead, StrategyCapacity};
+use crate::structure::envelope::EnvelopeTrailer;
 
 pub struct MkvAdapter;
 
@@ -77,7 +77,7 @@ impl HostAdapter for MkvAdapter {
         }
 
         host_in.seek(SeekFrom::Start(0))?;
-        let host_len = crate::adapters::io::copy_stream(host_in, out)?;
+        let host_len = crate::structure::adapters::io::copy_stream(host_in, out)?;
 
         let inject_offset = host_len;
         let ube_size = ube_in.seek(SeekFrom::End(0))?;
@@ -94,7 +94,7 @@ impl HostAdapter for MkvAdapter {
             ube_size
         };
 
-        crate::adapters::io::copy_exact(ube_in, out, ube_size)?;
+        crate::structure::adapters::io::copy_exact(ube_in, out, ube_size)?;
 
         Ok((inject_offset, inject_size, 0, 0))
     }

@@ -6,11 +6,11 @@ use std::fs;
 use std::path::PathBuf;
 
 use strhide::crypto::compute_file_sha256;
-use strhide::engine::{
+use strhide::errors::StrHideError;
+use strhide::structure::{
     PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
     write_carrier,
 };
-use strhide::errors::StrHideError;
 
 fn samples_dir() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

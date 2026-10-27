@@ -1,6 +1,6 @@
 //! Localization traverser for clap Command tree.
 
-use crate::i18n::{Lang, Msg};
+use crate::core::i18n::{Lang, Msg};
 use clap::Command;
 
 /// Recursively traverse and update the Command's about, after_help, and argument helps.

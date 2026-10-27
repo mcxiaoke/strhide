@@ -129,7 +129,7 @@ strhide list --json
 `strhide` 也可作为库使用。推荐入口是一个 **`StrHide`** 实例：构造时绑定一个私有方言（`Profile`）和一个写侧行为基线（`LocalParams`），然后把每个动词作为普通方法调用。整个方言可以在编译期声明为 `const`（零运行时开销），并同时提供文件路径与内存（`&[u8]` → `Vec<u8>`）两种形态。
 
 ```rust
-use strhide::engine::{PayloadSource, WriteOptions};
+use strhide::structure::{PayloadSource, WriteOptions};
 use strhide::facade::StrHide;
 use strhide::params::Profile;
 

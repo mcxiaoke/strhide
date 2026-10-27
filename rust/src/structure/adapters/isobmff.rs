@@ -4,9 +4,9 @@
 
 use std::io::{Read, SeekFrom, Write};
 
-use crate::adapters::{SeekRead, SeekWrite, StrategyCapacity};
-use crate::envelope::{EnvelopeHeader, EnvelopeTrailer};
 use crate::errors::StrHideError;
+use crate::structure::adapters::{SeekRead, SeekWrite, StrategyCapacity};
+use crate::structure::envelope::{EnvelopeHeader, EnvelopeTrailer};
 
 pub const MP4_UUID_NEUTRAL: [u8; 16] = [
     0xd4, 0x1a, 0x8e, 0x9c, 0x4f, 0x21, 0x4e, 0x87, 0x9a, 0x33, 0x5b, 0x6d, 0x12, 0x84, 0xef, 0x70,
@@ -75,7 +75,7 @@ pub fn isobmff_inject(
     }
 
     host_in.seek(SeekFrom::Start(0))?;
-    let host_len = crate::adapters::io::copy_stream(host_in, out)?;
+    let host_len = crate::structure::adapters::io::copy_stream(host_in, out)?;
 
     let inject_offset = host_len;
     let ube_size = ube_in.seek(SeekFrom::End(0))?;
@@ -112,7 +112,7 @@ pub fn isobmff_inject(
         ube_size
     };
 
-    crate::adapters::io::copy_stream(ube_in, out)?;
+    crate::structure::adapters::io::copy_stream(ube_in, out)?;
 
     Ok((inject_offset, inject_size, 0, 0))
 }
@@ -499,7 +499,7 @@ pub fn isobmff_strip(
         return heif_item_hidden_strip(stego_in, out, header);
     }
     stego_in.seek(SeekFrom::Start(0))?;
-    crate::adapters::io::copy_exact(stego_in, out, header.inject_offset)?;
+    crate::structure::adapters::io::copy_exact(stego_in, out, header.inject_offset)?;
     let inject_end = header
         .inject_offset
         .checked_add(header.inject_size)
@@ -510,7 +510,7 @@ pub fn isobmff_strip(
             ))
         })?;
     stego_in.seek(SeekFrom::Start(inject_end))?;
-    crate::adapters::io::copy_stream(stego_in, out)?;
+    crate::structure::adapters::io::copy_stream(stego_in, out)?;
     Ok(())
 }
 
@@ -1312,7 +1312,7 @@ fn check_iloc_has_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::envelope::{EnvelopeHeader, STANDARD_TRAILER_MAGIC, TRAILER_SIZE};
+    use crate::structure::envelope::{EnvelopeHeader, STANDARD_TRAILER_MAGIC, TRAILER_SIZE};
     use std::io::Cursor;
 
     /// The 32-bit form tops out at `0xFFFFFFFF`; the value that exactly reaches

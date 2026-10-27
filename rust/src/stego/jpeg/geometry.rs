@@ -29,7 +29,7 @@
 
 use dct_io::JpegInfo;
 
-use crate::jpeg::dqt::{STANDARD_LUMA_QT, parse_luma_dqt};
+use crate::formats::jpeg_segments::{STANDARD_LUMA_QT, parse_luma_dqt};
 use crate::stego::traits::JpegGeometry;
 
 /// Build the block geometry of one component plus the file's luma table.

@@ -1,12 +1,12 @@
 use std::io::{SeekFrom, Write};
 
-pub use crate::adapters::isobmff::{ITEM_HIDDEN_MAX_ENVELOPE, MP4_UUID_NEUTRAL};
-use crate::adapters::isobmff::{
+pub use crate::structure::adapters::isobmff::{ITEM_HIDDEN_MAX_ENVELOPE, MP4_UUID_NEUTRAL};
+use crate::structure::adapters::isobmff::{
     calc_prefix_len, heif_strategy_capacities, isobmff_can_item_hidden, isobmff_inject,
     isobmff_locate, isobmff_strip, isobmff_suspicious_structures, isobmff_verify_structure,
 };
-use crate::adapters::{HostAdapter, SeekRead, SeekWrite, StrategyCapacity};
-use crate::envelope::EnvelopeHeader;
+use crate::structure::adapters::{HostAdapter, SeekRead, SeekWrite, StrategyCapacity};
+use crate::structure::envelope::EnvelopeHeader;
 
 use crate::errors::StrHideError;
 pub use crate::sniff::{HEIF_BRANDS, is_heif_bytes};

@@ -7,10 +7,10 @@
 //! carrier forms (path / bytes), and that a private dialect bound on an engine
 //! is isolated from the official engine.
 
-use strhide::engine::{PayloadSource, WriteOptions};
 use strhide::facade::StrHide;
 use strhide::params::Profile;
 use strhide::stego::StegoOptions;
+use strhide::structure::{PayloadSource, WriteOptions};
 
 use crate::common::scratch;
 
@@ -55,7 +55,10 @@ fn structure_bytes_inspect_and_verify() {
     assert!(inspect.has_hidden_data, "inspect must report hidden data");
 
     let verify = engine.verify_bytes(&stego, None).expect("verify_bytes");
-    assert!(strhide::engine::verify_passed(&verify), "verify must pass");
+    assert!(
+        strhide::structure::verify_passed(&verify),
+        "verify must pass"
+    );
 }
 
 // ───────────────────────── structure domain · path ──────────────────────────
@@ -108,7 +111,7 @@ fn structure_path_inspect_and_verify() {
     assert!(inspect.has_hidden_data);
 
     let verify = engine.verify(&carrier, None).expect("verify");
-    assert!(strhide::engine::verify_passed(&verify));
+    assert!(strhide::structure::verify_passed(&verify));
 }
 
 // ───────────────────────── content domain · bytes ───────────────────────────
@@ -218,6 +221,7 @@ fn per_op_local_params_override_does_not_mutate_engine() {
 
 // ───────────────────── run_cli_from (engine-driven CLI) ─────────────────────
 
+#[cfg(feature = "cli")]
 #[test]
 fn run_cli_from_version_returns_zero() {
     let engine = StrHide::new();
@@ -225,6 +229,7 @@ fn run_cli_from_version_returns_zero() {
     assert_eq!(code, 0);
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn run_cli_from_help_returns_zero() {
     let engine = StrHide::new();
@@ -232,6 +237,7 @@ fn run_cli_from_help_returns_zero() {
     assert_eq!(code, 0);
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn run_cli_from_private_dialect_isolation() {
     let dir = scratch("facade_cli_private");
@@ -268,6 +274,7 @@ fn run_cli_from_private_dialect_isolation() {
     assert_eq!(read_private, 0, "private CLI read must succeed");
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn run_cli_from_content_domain_private_isolation() {
     let dir = scratch("facade_cli_content");

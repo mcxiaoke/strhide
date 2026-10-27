@@ -9,11 +9,13 @@ use crate::common::*;
 use std::fs;
 use std::io::Cursor;
 use std::path::Path;
-use strhide::adapters::{
+use strhide::structure::adapters::{
     HeifAdapter, HostAdapter, JpegAdapter, PdfAdapter, WavAdapter, WebpAdapter, ZipAdapter,
 };
-use strhide::engine::{PayloadSource, WriteOptions, read_carrier, remove_carrier, write_carrier};
-use strhide::envelope::{EnvelopeTrailer, STANDARD_TRAILER_MAGIC};
+use strhide::structure::envelope::{EnvelopeTrailer, STANDARD_TRAILER_MAGIC};
+use strhide::structure::{
+    PayloadSource, WriteOptions, read_carrier, remove_carrier, write_carrier,
+};
 
 fn write_carrier_file(
     carrier: &Path,
@@ -22,7 +24,7 @@ fn write_carrier_file(
     strategy: &str,
     stealth: bool,
     out: &Path,
-) -> strhide::engine::WriteResult {
+) -> strhide::structure::WriteResult {
     write_carrier(
         carrier,
         payload,

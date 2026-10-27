@@ -3,8 +3,8 @@
 use crate::common::*;
 use rand::RngExt;
 use std::fs;
-use strhide::adapters::jpeg::{JPEG_COM, JPEG_EOI, JPEG_SOI, find_jpeg_sos_offset};
-use strhide::engine::{
+use strhide::structure::adapters::jpeg::{JPEG_COM, JPEG_EOI, JPEG_SOI, find_jpeg_sos_offset};
+use strhide::structure::{
     PayloadSource, WriteOptions, read_carrier, remove_carrier, verify_carrier, write_carrier,
 };
 
@@ -167,8 +167,8 @@ fn test_jpeg_com_segments_are_not_envelope_channels() {
     // is gone, so `locate` only looks at APP15 (and the EOF trailer) and must
     // report "no envelope" for a payload parked in a comment.
     let mut f = fs::File::open(&stego).unwrap();
-    let adapter = strhide::adapters::jpeg::JpegAdapter;
-    use strhide::adapters::HostAdapter;
+    let adapter = strhide::structure::adapters::jpeg::JpegAdapter;
+    use strhide::structure::adapters::HostAdapter;
     let loc = adapter.locate(&mut f, None).unwrap();
     assert!(loc.is_none());
 }

@@ -4,10 +4,10 @@ use crate::common::*;
 use std::fs;
 
 use strhide::crypto::compute_file_sha256;
-use strhide::engine::{
+use strhide::errors::StrHideError;
+use strhide::structure::{
     PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, write_carrier,
 };
-use strhide::errors::StrHideError;
 
 fn make_dummy_png() -> Vec<u8> {
     let mut out = Vec::new();

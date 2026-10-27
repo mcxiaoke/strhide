@@ -1,10 +1,10 @@
 //! ZIP format adapter for strhide using pre-CD injection and EOCD CD Offset adjustment.
 
-use crate::adapters::{
+use crate::errors::StrHideError;
+use crate::structure::adapters::{
     HostAdapter, SeekRead, SeekWrite, StrategyCapacity, eof::EofAdapter, format_bytes,
 };
-use crate::envelope::{EnvelopeHeader, EnvelopeTrailer};
-use crate::errors::StrHideError;
+use crate::structure::envelope::{EnvelopeHeader, EnvelopeTrailer};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 pub const ZIP_LOCAL_MAGIC: [u8; 4] = *b"PK\x03\x04";
@@ -249,20 +249,20 @@ impl HostAdapter for ZipAdapter {
 
         // 1. Write everything before Central Directory
         host_in.seek(SeekFrom::Start(0))?;
-        crate::adapters::io::copy_exact(host_in, out, cd_offset)?;
+        crate::structure::adapters::io::copy_exact(host_in, out, cd_offset)?;
 
         let inject_offset = cd_offset;
 
         // 2. Write UBE data stream. `ube_size` was read from the same stream, so
         // a short read here means the input was truncated: say so rather than
         // writing a silently shortened envelope.
-        crate::adapters::io::copy_exact(ube_in, out, ube_size)?;
+        crate::structure::adapters::io::copy_exact(ube_in, out, ube_size)?;
 
         let inject_size = ube_size;
 
         // 3. Write Central Directory and EOCD up to cd_offset field (offset 16 of EOCD)
         let cd_and_eocd_prefix_len = (eocd_pos + 16) - cd_offset;
-        crate::adapters::io::copy_exact(host_in, out, cd_and_eocd_prefix_len)?;
+        crate::structure::adapters::io::copy_exact(host_in, out, cd_and_eocd_prefix_len)?;
 
         // 4. Write updated Central Directory offset
         let new_cd_offset = (cd_offset + ube_size) as u32;
@@ -274,7 +274,7 @@ impl HostAdapter for ZipAdapter {
         host_in.seek(SeekFrom::Current(4))?;
 
         // 5. Write remaining part of EOCD (comment length and comment data)
-        crate::adapters::io::copy_stream(host_in, out)?;
+        crate::structure::adapters::io::copy_stream(host_in, out)?;
 
         Ok((inject_offset, inject_size, patch_offset, orig_patch_val))
     }
@@ -325,7 +325,7 @@ impl HostAdapter for ZipAdapter {
 
         // Cut out [inject_offset : inject_offset + inject_size]
         stego_in.seek(SeekFrom::Start(0))?;
-        crate::adapters::io::copy_exact(stego_in, out, header.inject_offset)?;
+        crate::structure::adapters::io::copy_exact(stego_in, out, header.inject_offset)?;
 
         // Copy Central Directory and EOCD up to patch_offset.
         //
@@ -351,7 +351,7 @@ impl HostAdapter for ZipAdapter {
                     header.patch_offset
                 ))
             })?;
-        crate::adapters::io::copy_exact(stego_in, out, bytes_before_patch)?;
+        crate::structure::adapters::io::copy_exact(stego_in, out, bytes_before_patch)?;
 
         // Write original patch value (original cd_offset)
         out.write_all(&header.orig_patch_val.to_le_bytes())?;
@@ -366,7 +366,7 @@ impl HostAdapter for ZipAdapter {
         stego_in.seek(SeekFrom::Start(patch_field_end as u64))?;
 
         // Copy remaining EOCD bytes (comment len + comment)
-        crate::adapters::io::copy_stream(stego_in, out)?;
+        crate::structure::adapters::io::copy_stream(stego_in, out)?;
 
         Ok(())
     }

@@ -7,6 +7,7 @@ use crate::common::*;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "cli")]
 use std::process::Stdio;
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -16,13 +17,13 @@ fn make_minimal_png() -> Vec<u8> {
 
 use rand::RngExt;
 
-use strhide::adapters::zip::find_eocd_offset;
-use strhide::engine::{
+use strhide::errors::StrHideError;
+use strhide::structure::adapters::zip::find_eocd_offset;
+use strhide::structure::envelope::{EnvelopeHeader, EnvelopeTrailer, MAX_HINT_LEN};
+use strhide::structure::{
     PayloadSource, WriteOptions, read_carrier, remove_carrier, sanitize_filename, verify_carrier,
     write_carrier,
 };
-use strhide::envelope::{EnvelopeHeader, EnvelopeTrailer, MAX_HINT_LEN};
-use strhide::errors::StrHideError;
 
 // --------------------------------------------------------------------------- helpers
 
@@ -33,7 +34,7 @@ fn write_carrier_file(
     strategy: &str,
     stealth: bool,
     out: &Path,
-) -> strhide::engine::WriteResult {
+) -> strhide::structure::WriteResult {
     write_carrier(
         carrier,
         payload,
@@ -70,6 +71,7 @@ fn stealth_requires_password() {
     assert!(err.to_string().contains("requires a password"), "{err}");
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn cli_stealth_without_password_fails_fast() {
     let dir = scratch("cli_stealth");
@@ -96,6 +98,7 @@ fn cli_stealth_without_password_fails_fast() {
     assert!(stderr.contains("Password required"), "{stderr}");
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn cli_no_preserve_time_flag_accepted() {
     let dir = scratch("cli_npt");
@@ -165,12 +168,13 @@ fn path_traversal_sanitized() {
 
     // Re-encrypt evil metadata filename under BUILTIN_DEFAULT_KEY.
     // The metadata block uses the compact binary layout (FLAG_COMPACT_META).
-    use strhide::adapters::HostAdapter;
+    use strhide::structure::adapters::HostAdapter;
     let mut data = fs::read(&stego).unwrap();
     let mut cf = std::io::Cursor::new(&data);
-    let adapter = strhide::adapters::zip::ZipAdapter;
+    let adapter = strhide::structure::adapters::zip::ZipAdapter;
     let (offset, _, _) = adapter.locate(&mut cf, None).unwrap().unwrap();
-    let hdr_bytes = &data[offset as usize..offset as usize + strhide::envelope::HEADER_SIZE];
+    let hdr_bytes =
+        &data[offset as usize..offset as usize + strhide::structure::envelope::HEADER_SIZE];
     let header = EnvelopeHeader::unpack_with_password(hdr_bytes, None).unwrap();
 
     let (_, meta_key) =
@@ -179,7 +183,7 @@ fn path_traversal_sanitized() {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    let evil_meta = strhide::engine::CarrierMetadata {
+    let evil_meta = strhide::structure::CarrierMetadata {
         filename: "../EVIL.txt".into(),
         raw_size: b"poc-data".len() as u64,
         raw_sha256: sha_hex,
@@ -195,7 +199,8 @@ fn path_traversal_sanitized() {
     .unwrap();
     assert_eq!(enc_meta.len(), header.meta_len as usize);
 
-    let meta_pos = offset as usize + strhide::envelope::HEADER_SIZE + header.hint_len as usize;
+    let meta_pos =
+        offset as usize + strhide::structure::envelope::HEADER_SIZE + header.hint_len as usize;
     data[meta_pos..meta_pos + enc_meta.len()].copy_from_slice(&enc_meta);
     fs::write(&stego, &data).unwrap();
 

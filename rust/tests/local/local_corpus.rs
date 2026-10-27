@@ -1,4 +1,4 @@
-﻿//! Corpus-level batch runner — Rust counterpart of Python
+//! Corpus-level batch runner — Rust counterpart of Python
 //! `python/tests/batch_test_runner.py`.
 //!
 //! Different tool from [`real_samples`](self): that one pins six fixed samples
@@ -40,12 +40,12 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use strhide::crypto::compute_file_sha256;
-use strhide::engine::{
+use strhide::errors::StrHideError;
+use strhide::structure::rejection::run_all_rejection_checks;
+use strhide::structure::{
     PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
     write_carrier,
 };
-use strhide::errors::StrHideError;
-use strhide::rejection::run_all_rejection_checks;
 
 const ENC_PASSWORD: &str = "P@ssw0rd!Secure_2026";
 const STEALTH_PASSWORD: &str = "StealthPassword!2026";

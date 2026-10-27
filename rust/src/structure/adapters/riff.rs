@@ -4,9 +4,9 @@
 
 use std::io::{SeekFrom, Write};
 
-use crate::adapters::{SeekRead, StrategyCapacity};
-use crate::envelope::EnvelopeTrailer;
 use crate::errors::StrHideError;
+use crate::structure::adapters::{SeekRead, StrategyCapacity};
+use crate::structure::envelope::EnvelopeTrailer;
 
 pub const RIFF_CHUNK_FOURCC: [u8; 4] = *b"SHRD";
 
@@ -56,9 +56,9 @@ pub fn riff_inject(
 
     if strategy == "eof" {
         // Simple EOF overlay
-        let host_len = crate::adapters::io::copy_stream(host_in, out)?;
+        let host_len = crate::structure::adapters::io::copy_stream(host_in, out)?;
         let inject_offset = host_len;
-        crate::adapters::io::copy_exact(ube_in, out, ube_size)?;
+        crate::structure::adapters::io::copy_exact(ube_in, out, ube_size)?;
         return Ok((inject_offset, ube_size, 0, 0));
     }
 
@@ -100,7 +100,7 @@ pub fn riff_inject(
     out.write_all(&header[8..12])?;
 
     // 2. Copy remainder of original host carrier
-    crate::adapters::io::copy_stream(host_in, out)?;
+    crate::structure::adapters::io::copy_stream(host_in, out)?;
 
     let inject_offset = host_len;
 
@@ -109,7 +109,7 @@ pub fn riff_inject(
     out.write_all(&(ube_size as u32).to_le_bytes())?;
 
     // 4. Write UBE data
-    crate::adapters::io::copy_exact(ube_in, out, ube_size)?;
+    crate::structure::adapters::io::copy_exact(ube_in, out, ube_size)?;
 
     // 5. Write 1-byte 0 padding if chunk data size was odd
     if pad_len == 1 {

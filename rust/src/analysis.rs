@@ -1,7 +1,7 @@
 //! Steganalysis: black-box scanning of arbitrary files for hidden content.
 //!
 //! This is the runtime counterpart to strhide's own write/read pipeline:
-//! where [`crate::engine::inspect_carrier`] answers "is there a strhide
+//! where [`crate::structure::inspect_carrier`] answers "is there a strhide
 //! envelope *I* know about in this file?", `scan_file` answers "is this file
 //! suspiciously modified, by *any* tool, and by how much?".
 //!
@@ -40,9 +40,9 @@ use serde::Serialize;
 
 pub mod calibration;
 
-use crate::adapters::{pe_codebits, pe_slack};
-use crate::envelope::{MIN_UBE_PLAIN, STANDARD_HEADER_MAGIC};
 use crate::errors::StrHideError;
+use crate::structure::adapters::{pe_codebits, pe_slack};
+use crate::structure::envelope::{MIN_UBE_PLAIN, STANDARD_HEADER_MAGIC};
 
 /// Hard cap on file size we fully load for scanning. Larger files still get
 /// magic-byte and structural scanning on a prefix+tail window, but pixel

@@ -15,10 +15,33 @@ categories = ["cryptography", "multimedia", "command-line-utilities"]
 exclude = ["tests/"]
 
 [features]
-default = ["engine", "stego", "cli"]
-engine  = ["dep:filetime", "dep:iced-x86", "dep:serde_json"]
-stego   = ["dep:dct-io", "dep:filetime", "dep:rayon"]
-cli     = ["engine", "stego", "dep:clap", "dep:rpassword", "dep:toml", "dep:base64", "dep:jpeg-decoder", "dep:serde_json"]
+# Library defaults: both domains plus steganalysis, but not the CLI. `cargo add
+# strhide` must not drag in clap/rpassword/toml. `analysis` stays in the default
+# set because it is a headline capability (and its only extra dependency is
+# `jpeg-decoder`); the CLI is the heavy switch.
+# Stage 1 finalises the per-format split (structure-base/structure-pe,
+# content-png/content-jpeg/content-hevc); until then each domain is one switch.
+default = ["structure", "content", "analysis"]
+
+# Foundation shared by both domains (atomic commit, timestamp preservation).
+core-io = ["dep:filetime"]
+
+# Structure domain: format-preserving envelope injection, bit-exact restore.
+structure = ["core-io", "dep:iced-x86", "dep:serde_json"]
+
+# Content domain: pixel / DCT / CABAC steganography.
+content = ["core-io", "dep:dct-io", "dep:rayon"]
+
+# Black-box steganalysis. Needs the structure domain (it recognises UBE
+# envelopes and reads PE code) and the DCT reader (JPEG calibration); it does
+# not need the content domain's embedding engines.
+analysis = ["structure", "dep:jpeg-decoder", "dep:dct-io"]
+
+# TOML settings model (`strhide.toml`, `~/.strhide/config.toml`).
+config = ["dep:toml"]
+
+# Command line.
+cli = ["structure", "content", "analysis", "config", "dep:clap", "dep:rpassword", "dep:base64"]
 
 [lib]
 name = "strhide"

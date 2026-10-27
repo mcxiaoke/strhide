@@ -35,7 +35,7 @@ use crate::errors::StrHideError;
 /// This is a deliberate deviation from design doc §5.2's `STHC` placeholder:
 /// deriving the magic from the UBE trailer keeps the adapter free of any
 /// stealth/password knowledge while preserving deniability.
-pub const CHANNEL_MAGIC: [u8; 4] = crate::envelope::STANDARD_TRAILER_MAGIC;
+pub const CHANNEL_MAGIC: [u8; 4] = crate::structure::envelope::STANDARD_TRAILER_MAGIC;
 
 /// Channel container version (see design doc §5).
 pub const CHANNEL_VERSION: u8 = 1;
@@ -49,10 +49,10 @@ const CHANNEL_HEADER_BITS: usize = CHANNEL_HEADER_LEN * 8;
 /// header plus a 24-byte trailer, so anything smaller means a corrupt header
 /// rather than a real envelope. Writer-side minimums (which depend on the
 /// metadata layout and on whether the payload is encrypted) live in
-/// [`crate::envelope::MIN_UBE_PLAIN`] and [`crate::envelope::MIN_UBE_ENCRYPTED`];
+/// [`crate::structure::envelope::MIN_UBE_PLAIN`] and [`crate::structure::envelope::MIN_UBE_ENCRYPTED`];
 /// capacity reporting must use those, not this.
-pub const MIN_UBE_LEN: u32 =
-    crate::envelope::HEADER_SIZE as u32 + crate::envelope::TRAILER_SIZE as u32;
+pub const MIN_UBE_LEN: u32 = crate::structure::envelope::HEADER_SIZE as u32
+    + crate::structure::envelope::TRAILER_SIZE as u32;
 
 /// Errors raised by the code-bit channel. Mapped onto [`StrHideError`] at the
 /// adapter boundary; `ChannelNotFound` is *not* an error for `locate` (it

@@ -39,7 +39,7 @@
 //! colour transform, no extra encoder in the dependency tree.
 
 use crate::analysis::decode_jpeg_pixels;
-use crate::jpeg::dqt::parse_luma_dqt;
+use crate::formats::jpeg_segments::parse_luma_dqt;
 
 /// Natural-order indices of the modes the estimator uses: `(0,1) -> 1`,
 /// `(1,0) -> 8`, `(1,1) -> 9`.

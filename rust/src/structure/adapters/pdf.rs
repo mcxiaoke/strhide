@@ -1,8 +1,8 @@
 //! PDF format adapter for strhide with compliant Incremental Update object stream hiding.
 
-use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity, eof::EofAdapter};
-use crate::envelope::{EnvelopeTrailer, TRAILER_SIZE};
 use crate::errors::StrHideError;
+use crate::structure::adapters::{HostAdapter, SeekRead, StrategyCapacity, eof::EofAdapter};
+use crate::structure::envelope::{EnvelopeTrailer, TRAILER_SIZE};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 pub const PDF_MAGIC: [u8; 5] = *b"%PDF-";
@@ -597,7 +597,7 @@ impl HostAdapter for PdfAdapter {
 
         // 1. Write host up to eof_offset
         host_in.seek(SeekFrom::Start(0))?;
-        crate::adapters::io::copy_exact(host_in, out, info.eof_offset)?;
+        crate::structure::adapters::io::copy_exact(host_in, out, info.eof_offset)?;
 
         let inject_offset = info.eof_offset;
 
@@ -608,7 +608,7 @@ impl HostAdapter for PdfAdapter {
 
         // 3. Write UBE data stream. `ube_size` was measured on this stream, so
         // a short read means the envelope was truncated.
-        crate::adapters::io::copy_exact(ube_in, out, ube_size)?;
+        crate::structure::adapters::io::copy_exact(ube_in, out, ube_size)?;
 
         // 4. End object stream
         out.write_all(b"\nendstream\nendobj\n")?;
@@ -650,7 +650,7 @@ impl HostAdapter for PdfAdapter {
         // damage the carrier and break the 100% bit-exact restore guarantee,
         // so they are copied verbatim after the new %%EOF.
         host_in.seek(SeekFrom::Start(info.eof_offset))?;
-        crate::adapters::io::copy_stream(host_in, out)?;
+        crate::structure::adapters::io::copy_stream(host_in, out)?;
 
         Ok((inject_offset, inject_size, 0, 0))
     }
@@ -852,8 +852,8 @@ impl HostAdapter for PdfAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::HostAdapter;
-    use crate::envelope::{STANDARD_TRAILER_MAGIC, TRAILER_SIZE};
+    use crate::structure::adapters::HostAdapter;
+    use crate::structure::envelope::{STANDARD_TRAILER_MAGIC, TRAILER_SIZE};
     use std::io::Cursor;
 
     /// Classic PDF with `/Size 2` and `/Root`: the smallest carrier the

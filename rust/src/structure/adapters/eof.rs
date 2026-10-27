@@ -1,6 +1,6 @@
-use crate::adapters::{HostAdapter, SeekRead, SeekWrite, StrategyCapacity};
-use crate::envelope::{EnvelopeHeader, EnvelopeTrailer};
 use crate::errors::StrHideError;
+use crate::structure::adapters::{HostAdapter, SeekRead, SeekWrite, StrategyCapacity};
+use crate::structure::envelope::{EnvelopeHeader, EnvelopeTrailer};
 use std::io::{SeekFrom, Write};
 
 pub struct EofAdapter;
@@ -46,11 +46,11 @@ impl HostAdapter for EofAdapter {
         }
 
         host_in.seek(SeekFrom::Start(0))?;
-        let host_len = crate::adapters::io::copy_stream(host_in, out)?;
+        let host_len = crate::structure::adapters::io::copy_stream(host_in, out)?;
 
         let inject_offset = host_len;
         ube_in.seek(SeekFrom::Start(0))?;
-        let ube_len = crate::adapters::io::copy_stream(ube_in, out)?;
+        let ube_len = crate::structure::adapters::io::copy_stream(ube_in, out)?;
 
         Ok((inject_offset, ube_len, 0, 0))
     }
@@ -84,7 +84,7 @@ impl HostAdapter for EofAdapter {
         header: &EnvelopeHeader,
     ) -> Result<(), StrHideError> {
         stego_in.seek(SeekFrom::Start(0))?;
-        crate::adapters::io::copy_exact(stego_in, out, header.orig_host_size)?;
+        crate::structure::adapters::io::copy_exact(stego_in, out, header.orig_host_size)?;
         Ok(())
     }
 

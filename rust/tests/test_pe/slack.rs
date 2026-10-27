@@ -11,13 +11,13 @@ use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 
-use strhide::adapters::pe_codebits;
-use strhide::engine::{
+use strhide::errors::StrHideError;
+use strhide::structure::adapters::pe_codebits;
+use strhide::structure::envelope::EnvelopeHeader;
+use strhide::structure::{
     PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
     write_carrier,
 };
-use strhide::envelope::EnvelopeHeader;
-use strhide::errors::StrHideError;
 
 // --------------------------------------------------------------------------- helpers
 
@@ -533,8 +533,8 @@ fn tampered_envelope_fails_cleanly() {
 /// so a corrupted envelope can never zero executable bytes.
 #[test]
 fn strip_refuses_ranges_outside_padding() {
-    use strhide::adapters::HostAdapter;
-    use strhide::adapters::pe::PeAdapter;
+    use strhide::structure::adapters::HostAdapter;
+    use strhide::structure::adapters::pe::PeAdapter;
 
     let original = slack_carrier();
     let ranges = slack_ranges(&original);
@@ -659,7 +659,7 @@ fn zero_virtual_size_section_is_not_padding() {
 /// T12: the strategy registry knows pe_slack (id 9) in both directions.
 #[test]
 fn strategy_registry_roundtrip() {
-    use strhide::router::{id_to_strategy, strategy_to_id};
+    use strhide::structure::registry::{id_to_strategy, strategy_to_id};
     assert_eq!(strategy_to_id("pe_slack").unwrap(), 9);
     assert_eq!(id_to_strategy(9), "pe_slack");
 }

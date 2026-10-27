@@ -9,12 +9,12 @@
 //! therefore cross-checks the byte API against the file API rather than only
 //! against itself.
 
-use strhide::engine::{
+use strhide::errors::StrHideError;
+use strhide::params::{LocalParams, Profile};
+use strhide::structure::{
     PayloadSource, ReadResult, WriteOptions, read_carrier_bytes, read_carrier_with_profile,
     remove_carrier_bytes, remove_carrier_with, write_carrier_bytes, write_carrier_with,
 };
-use strhide::errors::StrHideError;
-use strhide::params::{LocalParams, Profile};
 
 use crate::common::scratch;
 

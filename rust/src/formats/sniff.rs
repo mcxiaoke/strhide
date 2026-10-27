@@ -99,7 +99,7 @@ impl FileFormat {
         FileFormat::HevcAnnexB,
     ];
 
-    /// Display name, identical to [`crate::adapters::HostAdapter::format_name`]
+    /// Display name, identical to [`crate::structure::adapters::HostAdapter::format_name`]
     /// for the container formats (a consistency test asserts it).
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -202,7 +202,7 @@ fn is_pdf_bytes(bytes: &[u8]) -> bool {
 /// Header-level PE probe: `MZ`, a plausible `e_lfanew`, and the `PE\0\0`
 /// signature it points at.
 ///
-/// Deliberately weaker than [`crate::adapters::pe`]'s full header parse (machine
+/// Deliberately weaker than [`crate::structure::adapters::pe`]'s full header parse (machine
 /// type, section table, optional-header size): this answers "which format does
 /// this look like", and the adapter still validates before writing anything.
 fn is_pe_bytes(bytes: &[u8]) -> bool {

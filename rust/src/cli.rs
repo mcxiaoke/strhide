@@ -6,16 +6,16 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
-use crate::config::{self, FileConfig};
-use crate::engine::{
+use crate::core::config::{self, FileConfig};
+use crate::core::i18n::{self, Msg, t};
+use crate::errors::StrHideError;
+use crate::facade::StrHide;
+use crate::structure::registry::{ADAPTERS, find_adapter_or_reject};
+use crate::structure::{
     PayloadSource, RemoveResult, WriteOptions, WriteResult, inspect_carrier_with,
     read_carrier_with_profile, remove_carrier_with_options, verify_carrier_with,
     write_carrier_with,
 };
-use crate::errors::StrHideError;
-use crate::facade::StrHide;
-use crate::i18n::{self, Msg, t};
-use crate::router::{ADAPTERS, find_adapter_or_reject};
 
 pub const STRHIDE_VERSION_INFO: &str = env!("STRHIDE_VERSION_INFO");
 pub const STRHIDE_GIT_HASH: &str = env!("STRHIDE_GIT_HASH");
@@ -93,7 +93,7 @@ pub struct CapacityArgs {
     pub json: bool,
 }
 
-const CAPACITY_AFTER_HELP: &str = crate::i18n::messages::CAPACITY_AFTER_HELP_EN;
+const CAPACITY_AFTER_HELP: &str = crate::core::i18n::messages::CAPACITY_AFTER_HELP_EN;
 
 /// Password arguments shared by all commands that accept one. Declared once
 /// and flattened everywhere so `-p` and `--password-file` are mutually
@@ -186,7 +186,7 @@ pub struct WriteArgs {
     pub unescape: bool,
 }
 
-const WRITE_AFTER_HELP: &str = crate::i18n::messages::WRITE_AFTER_HELP_EN;
+const WRITE_AFTER_HELP: &str = crate::core::i18n::messages::WRITE_AFTER_HELP_EN;
 
 #[derive(Args, Debug)]
 #[command(after_help = READ_AFTER_HELP)]
@@ -207,7 +207,7 @@ pub struct ReadArgs {
     pub overwrite: bool,
 }
 
-const READ_AFTER_HELP: &str = crate::i18n::messages::READ_AFTER_HELP_EN;
+const READ_AFTER_HELP: &str = crate::core::i18n::messages::READ_AFTER_HELP_EN;
 
 #[derive(Args, Debug)]
 #[command(after_help = EMBED_AFTER_HELP)]
@@ -341,7 +341,7 @@ pub struct StegoTuningArgs {
     pub seed: Option<String>,
 }
 
-const EMBED_AFTER_HELP: &str = crate::i18n::messages::EMBED_AFTER_HELP_EN;
+const EMBED_AFTER_HELP: &str = crate::core::i18n::messages::EMBED_AFTER_HELP_EN;
 
 #[derive(Args, Debug)]
 #[command(after_help = EXTRACT_AFTER_HELP)]
@@ -362,7 +362,7 @@ pub struct ExtractArgs {
     pub passwords: PasswordArgs,
 }
 
-const EXTRACT_AFTER_HELP: &str = crate::i18n::messages::EXTRACT_AFTER_HELP_EN;
+const EXTRACT_AFTER_HELP: &str = crate::core::i18n::messages::EXTRACT_AFTER_HELP_EN;
 
 #[derive(Args, Debug)]
 #[command(after_help = RESTORE_AFTER_HELP)]
@@ -390,7 +390,7 @@ pub struct RestoreArgs {
     pub no_backup: bool,
 }
 
-const RESTORE_AFTER_HELP: &str = crate::i18n::messages::RESTORE_AFTER_HELP_EN;
+const RESTORE_AFTER_HELP: &str = crate::core::i18n::messages::RESTORE_AFTER_HELP_EN;
 
 #[derive(Args, Debug)]
 #[command(after_help = INSPECT_AFTER_HELP)]
@@ -413,7 +413,7 @@ pub struct InspectArgs {
     pub json: bool,
 }
 
-const INSPECT_AFTER_HELP: &str = crate::i18n::messages::INSPECT_AFTER_HELP_EN;
+const INSPECT_AFTER_HELP: &str = crate::core::i18n::messages::INSPECT_AFTER_HELP_EN;
 
 #[derive(Args, Debug)]
 #[command(after_help = VERIFY_AFTER_HELP)]
@@ -436,7 +436,7 @@ pub struct VerifyArgs {
     pub json: bool,
 }
 
-const VERIFY_AFTER_HELP: &str = crate::i18n::messages::VERIFY_AFTER_HELP_EN;
+const VERIFY_AFTER_HELP: &str = crate::core::i18n::messages::VERIFY_AFTER_HELP_EN;
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
@@ -469,7 +469,7 @@ pub struct ScanArgs {
     pub json: bool,
 }
 
-const SCAN_AFTER_HELP: &str = crate::i18n::messages::SCAN_AFTER_HELP_EN;
+const SCAN_AFTER_HELP: &str = crate::core::i18n::messages::SCAN_AFTER_HELP_EN;
 
 pub fn prompt_password(confirm: bool) -> Result<String, StrHideError> {
     let p1 = t!(Msg::PromptEnterPassword);
@@ -645,7 +645,7 @@ fn scan_subcommand(argv: &[std::ffi::OsString]) -> Option<&str> {
 
 fn render_early_error(e: clap::Error, argv: &[std::ffi::OsString]) -> i32 {
     use clap::error::ErrorKind::*;
-    let lang = i18n::locale::detect(scan_lang_flag(argv), &FileConfig::default());
+    let lang = i18n::locale::detect(scan_lang_flag(argv), None);
     i18n::set_lang(lang);
 
     match e.kind() {
@@ -695,10 +695,8 @@ pub(crate) fn run_cli_with(engine: &StrHide, argv: Vec<OsString>) -> i32 {
     let cfg = match config::load(cfg_path.map(|p| p.as_ref())) {
         Ok(c) => c,
         Err(e) => {
-            let lang = i18n::locale::detect(
-                pre.get_one::<String>("lang").map(String::as_str),
-                &FileConfig::default(),
-            );
+            let lang =
+                i18n::locale::detect(pre.get_one::<String>("lang").map(String::as_str), None);
             i18n::set_lang(lang);
             print_error(&e);
             return 1;
@@ -706,7 +704,10 @@ pub(crate) fn run_cli_with(engine: &StrHide, argv: Vec<OsString>) -> i32 {
     };
 
     // 3) 确定语言并全局生效
-    let lang = i18n::locale::detect(pre.get_one::<String>("lang").map(String::as_str), &cfg);
+    let lang = i18n::locale::detect(
+        pre.get_one::<String>("lang").map(String::as_str),
+        cfg.lang.as_deref(),
+    );
     i18n::set_lang(lang);
 
     // 4) 从 matches 构造 Cli
@@ -1113,7 +1114,7 @@ fn handle_read(
         let fn_to_use = if res.filename.is_empty() {
             "extracted.bin".to_string()
         } else {
-            crate::engine::sanitize_filename(&res.filename)
+            crate::structure::sanitize_filename(&res.filename)
         };
         // Same overwrite protection as the explicit-output path: never truncate
         // a file the user did not name.
@@ -1198,7 +1199,7 @@ fn handle_restore(
     })
 }
 
-fn print_inspect_result(res: &crate::engine::InspectResult) {
+fn print_inspect_result(res: &crate::structure::InspectResult) {
     println!("{}", t!(Msg::InspectCarrier, val = res.carrier));
     println!("{}", t!(Msg::InspectFormat, val = res.format));
     if let Some(ref m) = res.media_info {
@@ -1395,7 +1396,7 @@ fn handle_inspect(
     Ok(())
 }
 
-fn print_verify_result(res: &crate::engine::VerifyResult) {
+fn print_verify_result(res: &crate::structure::VerifyResult) {
     println!("{}", t!(Msg::InspectCarrier, val = res.carrier));
     println!("{}", t!(Msg::InspectFormat, val = res.format));
     println!(
@@ -1454,7 +1455,7 @@ fn handle_verify(
         } else if !quiet {
             print_verify_result(&res);
         }
-        return Ok(if crate::engine::verify_passed(&res) {
+        return Ok(if crate::structure::verify_passed(&res) {
             0
         } else {
             1
@@ -1467,7 +1468,7 @@ fn handle_verify(
     for carrier in &files {
         match verify_carrier_with(carrier, password.as_deref(), engine.profile()) {
             Ok(res) => {
-                let ok = crate::engine::verify_passed(&res);
+                let ok = crate::structure::verify_passed(&res);
                 if !ok {
                     any_failed = true;
                 }
@@ -1501,7 +1502,7 @@ fn handle_verify(
     } else if !quiet {
         let passed = reports
             .iter()
-            .filter(|r| crate::engine::verify_passed(r))
+            .filter(|r| crate::structure::verify_passed(r))
             .count();
         let failed_cnt = reports.len() - passed;
         println!(
@@ -2158,7 +2159,7 @@ fn handle_embed(
 
         let backup = !args.no_backup && cfg.backup.unwrap_or(true);
         let backup_created =
-            crate::engine::commit_carrier_bytes(carrier, &dest, &stego_bytes, backup, true)?;
+            crate::structure::commit_carrier_bytes(carrier, &dest, &stego_bytes, backup, true)?;
 
         if let Some(ref bak) = backup_created
             && !quiet
@@ -2173,7 +2174,7 @@ fn handle_embed(
             } else {
                 format!("{:.2}s", elapsed.as_secs_f64())
             };
-            let is_inplace = crate::engine::same_file(carrier, &dest);
+            let is_inplace = crate::structure::same_file(carrier, &dest);
             if is_inplace {
                 println!(
                     "{}",

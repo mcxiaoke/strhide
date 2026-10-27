@@ -19,7 +19,7 @@
 //! - **Stealth mode**: header/trailer magics, header sensitive fields, and
 //!   trailer CRC are all derived from the password, so an envelope is
 //!   indistinguishable from random bytes without it (plausible deniability).
-//! - **Lossless restoration**: [`engine::remove_carrier`] verifies the
+//! - **Lossless restoration**: [`structure::remove_carrier`] verifies the
 //!   restored carrier against the SHA-256 and size recorded in the envelope
 //!   before committing, and refuses to commit on any mismatch.
 //! - **Rejection-first design**: signed PE/PDF/JAR files, read-only targets,
@@ -36,7 +36,7 @@
 //! | PDF | `incremental` (append updates) | `eof` |
 //! | PE | `pe_codebits` / `pe_slack` / `pe_overlay` | `eof` |
 //!
-//! `strategy = "auto"` (the [`crate::engine::WriteOptions`] default) picks
+//! `strategy = "auto"` (the [`crate::structure::WriteOptions`] default) picks
 //! the primary strategy when it fits and falls back to `eof` transparently.
 //!
 //! ## CLI quick start
@@ -51,15 +51,15 @@
 //!
 //! ## Library usage
 //!
-//! The library entry points live in [`engine`]: [`engine::write_carrier`]
-//! injects a payload, [`engine::read_carrier_with`] extracts it, and
-//! [`engine::remove_carrier`] strips the envelope and restores the carrier.
+//! The library entry points live in [`structure`]: [`structure::write_carrier`]
+//! injects a payload, [`structure::read_carrier_with`] extracts it, and
+//! [`structure::remove_carrier`] strips the envelope and restores the carrier.
 //! Every fallible call returns a [`std::result::Result`] whose error type is
 //! [`errors::StrHideError`].
 //!
 //! ```no_run
 //! # fn main() -> Result<(), strhide::errors::StrHideError> {
-//! use strhide::engine::{write_carrier, read_carrier_with, PayloadSource, WriteOptions};
+//! use strhide::structure::{write_carrier, read_carrier_with, PayloadSource, WriteOptions};
 //!
 //! // Write a text payload into an existing PNG carrier, in place.
 //! write_carrier(
@@ -90,9 +90,9 @@
 //!
 //! The plain entry points use the historical defaults. To change writer-only
 //! behaviour without touching the wire format, pass [`params::LocalParams`] to
-//! [`engine::write_carrier_with`]; to key envelopes with your own secret (so
+//! [`structure::write_carrier_with`]; to key envelopes with your own secret (so
 //! that an official binary cannot read them), pass a [`params::Profile`] to the
-//! `*_with` entry points of [`engine`]:
+//! `*_with` entry points of [`structure`]:
 //!
 //! - [`params::LocalParams`] — chunk size, compression policy, rejection
 //!   policy. The reader never needs these, so varying them is always safe.
@@ -102,29 +102,32 @@
 //!
 //! ## Crate layout
 //!
-//! - [`engine`] — the high-level write / read / inspect / verify / remove API.
-//! - [`envelope`] — binary serialization of the 112-byte header and 24-byte
-//!   trailer (UBE v2.2 wire format).
-//! - [`crypto`] — AES-256-GCM chunked encryption, PBKDF2/HKDF key derivation,
-//!   raw-deflate compression, SHA-256 helpers.
-//! - [`adapters`] — the [`adapters::HostAdapter`] trait and one implementation
-//!   per carrier format (PNG, JPEG, MP4, ZIP, PDF, PE).
-//! - [`router`] — format sniffing and strategy name ↔ ID mapping.
-//! - [`rejection`] — pre-write safety checks (signed files, read-only targets,
-//!   APK, signature containers).
-//! - [`errors`] — the single [`errors::StrHideError`] error enum.
-//! - [`params`] — library tuning knobs ([`params::LocalParams`]) and private
-//!   dialect profiles ([`params::Profile`]).
-//! - [`stego`] — content-adaptive image steganography (PNG HILL, JPEG UERD +
-//!   ternary STC). Its public surface is re-exported at the crate root:
+//! The two domains are peers; neither may reference the other.
+//!
+//! - [`formats`] — layer 2: [`formats::FileFormat`], `sniff_bytes` /
+//!   `sniff_stream`, and the [`formats::capability`] table ("what can this
+//!   format carry?").
+//! - [`structure`] — layer 3A, the container domain: [`structure::write_carrier`]
+//!   and friends, with [`structure::envelope`] (UBE v2.2 wire format),
+//!   [`structure::adapters`] (one `HostAdapter` per container) and
+//!   [`structure::registry`] (format routing + strategy IDs).
+//! - [`stego`] — layer 3B, the content domain: PNG HILL, JPEG UERD + ternary
+//!   STC, HEVC CABAC. Its public surface is re-exported at the crate root:
 //!   [`JpegFormatProfile`] / [`DEFAULT_JPEG_FORMAT`] (wire-format identity),
 //!   [`JpegParams`] / [`ExtractParams`] (per-call tuning), and
 //!   [`embed`] / [`extract`] (the JPEG entry points a private build calls with
 //!   its own profile).
-//! - [`config`] / [`cli`] / [`analysis`] — internal plumbing for the binary.
+//! - [`analysis`] — layer 4: black-box steganalysis.
+//! - [`core`] — layer 1: [`core::i18n`] (message catalogue) and, when the
+//!   `config` feature is on, [`core::config`] (TOML settings).
+//! - [`crypto`] / [`errors`] / [`params`] / [`commit`] — stage-1 residents that
+//!   stage 2 moves under [`core`].
+//! - [`cli`] — layer 5: the command line (feature `cli`).
 
 extern crate alloc;
 
+// Layer 1-2: shared by both domains, always compiled.
+pub mod core;
 pub mod formats;
 pub mod sniff;
 
@@ -132,48 +135,42 @@ pub mod crypto;
 pub mod errors;
 pub mod params;
 
-#[cfg(any(feature = "engine", feature = "stego"))]
+#[cfg(any(feature = "structure", feature = "content"))]
 pub mod commit;
 
-#[cfg(feature = "engine")]
-pub mod adapters;
-#[cfg(feature = "engine")]
-pub mod engine;
-#[cfg(feature = "engine")]
-pub mod envelope;
-#[cfg(feature = "engine")]
-pub mod rejection;
-#[cfg(feature = "engine")]
-pub mod router;
+/// Historical path: the message catalogue used to live at `strhide::i18n`.
+pub use crate::core::i18n;
 
-#[cfg(feature = "stego")]
-pub mod jpeg;
-#[cfg(feature = "stego")]
+// Layer 3A: structure domain (envelope injection, bit-exact restore).
+#[cfg(feature = "structure")]
+pub mod structure;
+
+// Layer 3B: content domain (pixel / DCT / CABAC steganography).
+#[cfg(feature = "content")]
 pub mod stego;
 
-#[cfg(feature = "cli")]
+// Layer 4: black-box steganalysis.
+#[cfg(feature = "analysis")]
 pub mod analysis;
+
+// Layer 5: command line.
 #[cfg(feature = "cli")]
 pub mod cli;
 #[cfg(feature = "cli")]
 pub mod cli_i18n;
-#[cfg(feature = "cli")]
-pub mod config;
-#[cfg(feature = "cli")]
-pub mod i18n;
 
-#[cfg(feature = "engine")]
+#[cfg(feature = "structure")]
 pub mod facade;
 
 // Content-domain steganography surface.
-#[cfg(feature = "stego")]
+#[cfg(feature = "content")]
 pub use stego::format::{
     CipherSuite, DEFAULT_HEVC_FORMAT, DEFAULT_JPEG_FORMAT, GridRule, HevcFormatProfile,
     JpegFormatProfile, OFFICIAL_PNG_FORMAT, PngFormatProfile,
 };
-#[cfg(feature = "stego")]
+#[cfg(feature = "content")]
 pub use stego::jpeg::cost::UerdCostModel;
-#[cfg(feature = "stego")]
+#[cfg(feature = "content")]
 pub use stego::params::{ExtractParams, JpegParams};
-#[cfg(feature = "stego")]
+#[cfg(feature = "content")]
 pub use stego::traits::JpegCostModel;

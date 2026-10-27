@@ -9,7 +9,7 @@ use crate::common::*;
 use std::fs;
 use std::path::Path;
 
-use strhide::engine::{
+use strhide::structure::{
     PayloadSource, WriteOptions, read_carrier, remove_carrier, verify_carrier, write_carrier,
 };
 
@@ -72,7 +72,7 @@ fn smallest_envelopes_match_the_documented_minimums() {
         &dir.join("enc.png"),
     );
     assert_eq!(enc, 219, "encrypted envelope size changed: {enc}");
-    assert!(enc <= strhide::envelope::MIN_UBE_ENCRYPTED as u64 + 10);
+    assert!(enc <= strhide::structure::envelope::MIN_UBE_ENCRYPTED as u64 + 10);
 
     // Hint bytes are stored verbatim in front of the metadata block.
     let hinted = write(

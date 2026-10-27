@@ -243,7 +243,7 @@ impl JpegCostModel for UerdCostModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jpeg::dqt::STANDARD_LUMA_QT;
+    use crate::formats::jpeg_segments::STANDARD_LUMA_QT;
     use crate::stego::jpeg::geometry::component_geometry;
     use dct_io::{ComponentCoefficients, JpegCoefficients};
 

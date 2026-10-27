@@ -11,14 +11,14 @@ use crate::common::*;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
-use strhide::adapters::HostAdapter;
-use strhide::adapters::jpeg::JpegAdapter;
-use strhide::adapters::mp4::Mp4Adapter;
-use strhide::adapters::pdf::PdfAdapter;
-use strhide::adapters::pe::PeAdapter;
-use strhide::adapters::png::PngAdapter;
-use strhide::adapters::zip::ZipAdapter;
-use strhide::engine::{PayloadSource, WriteOptions, verify_carrier, write_carrier};
+use strhide::structure::adapters::HostAdapter;
+use strhide::structure::adapters::jpeg::JpegAdapter;
+use strhide::structure::adapters::mp4::Mp4Adapter;
+use strhide::structure::adapters::pdf::PdfAdapter;
+use strhide::structure::adapters::pe::PeAdapter;
+use strhide::structure::adapters::png::PngAdapter;
+use strhide::structure::adapters::zip::ZipAdapter;
+use strhide::structure::{PayloadSource, WriteOptions, verify_carrier, write_carrier};
 
 // --------------------------------------------------------------------------- helpers
 
@@ -78,8 +78,8 @@ fn assert_inject_propagates_ube_read_error(
     name: &str,
     host: Vec<u8>,
     inject: impl Fn(
-        &mut dyn strhide::adapters::SeekRead,
-        &mut dyn strhide::adapters::SeekRead,
+        &mut dyn strhide::structure::adapters::SeekRead,
+        &mut dyn strhide::structure::adapters::SeekRead,
         &mut dyn Write,
     ) -> Result<(), strhide::errors::StrHideError>,
 ) {
@@ -348,7 +348,7 @@ fn test_commit_carrier_bytes_atomic_and_backup() {
     fs::write(&carrier, make_png()).unwrap();
 
     let stego_bytes = b"new stego content";
-    let bak1 = strhide::engine::commit_carrier_bytes(&carrier, &target, stego_bytes, true, true)
+    let bak1 = strhide::structure::commit_carrier_bytes(&carrier, &target, stego_bytes, true, true)
         .unwrap()
         .expect("in-place backup created");
 
@@ -358,7 +358,7 @@ fn test_commit_carrier_bytes_atomic_and_backup() {
 
     // Second commit: backup must not overwrite existing bak1
     let bak2 =
-        strhide::engine::commit_carrier_bytes(&carrier, &target, b"another round", true, true)
+        strhide::structure::commit_carrier_bytes(&carrier, &target, b"another round", true, true)
             .unwrap()
             .expect("second backup created");
 

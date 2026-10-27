@@ -130,7 +130,7 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
 新接入的库使用者应优先使用 `StrHide`：构造一次（整个方言可在编译期声明为 `const`），然后在实例上调用动词。它把绑定的 `Profile`/`LocalParams` 自动转发给底层自由函数，无需在每个调用点重复传参。
 
 ```rust
-use strhide::engine::{PayloadSource, WriteOptions};
+use strhide::structure::{PayloadSource, WriteOptions};
 use strhide::facade::StrHide;
 use strhide::params::Profile;
 
@@ -428,7 +428,7 @@ const MY_DIALECT: Profile = Profile::new()
 
 ### 7.1 结构域适配器与策略
 
-引擎不解析容器，全部委托给 `HostAdapter`。当前内置 10 种格式适配器（`router::ADAPTERS`，顺序即检测优先级）：
+引擎不解析容器，全部委托给 `HostAdapter`。当前内置 10 种格式适配器（`structure::registry::ADAPTERS`，顺序即检测优先级）：
 
 | 适配器 | `format_name` | 支持策略（按优先级） |
 |---|---|---|
@@ -517,7 +517,7 @@ const MY_DIALECT: Profile = Profile::new()
 
 ### 8.2 当前边界（按设计不做或暂缓）
 
-- **HostAdapter 动态注册**：`router::ADAPTERS` 与 `find_adapter` 目前是静态切片，自定义格式适配器无法在运行时注册进引擎。
+- **HostAdapter 动态注册**：`structure::registry::ADAPTERS` 与 `find_adapter` 目前是静态切片，自定义格式适配器无法在运行时注册进引擎。
 - **代价模型经统一入口注入**：`StegoOptions` 目前通过 `algorithm` 名称匹配，没有 trait 对象直接注入字段；外部实现的 `PngCostModel/JpegCostModel` 可直接传给 `png/jpeg` 子模块的内部函数，但无法仅通过 `embed_carrier` 名称入口生效。
 - **策略 ID 段**：`STRATEGY_REGISTRY` 中 1–13 为官方保留（`MAX_KNOWN_STRATEGY_ID = 13`）；解掩码启发式会把未知 ID 当噪声。
 - **协议级参数不可配**：加密套件（仅 AES-256-GCM）、PBKDF2 轮数（100 000）、压缩算法（仅 raw deflate）、自定义元数据字段均为线格式常量，本期不开放（详见审计文档 §3.1 / §4.5）。

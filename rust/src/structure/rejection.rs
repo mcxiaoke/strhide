@@ -1,6 +1,6 @@
 //! Pre-write safety checks and rejection rules.
 //!
-//! Before [`crate::engine::write_carrier`] opens the target for writing, it
+//! Before [`crate::structure::write_carrier`] opens the target for writing, it
 //! runs every check here. The goal is to refuse operations that would
 //! silently break something the user did not ask to break:
 //!
@@ -381,7 +381,7 @@ pub fn run_rejection_checks(
         // file the carrier stays read-only on purpose (read-only media, mounted
         // images, C:\Program Files\...), so only reject a read-only carrier for
         // in-place writes.
-        let in_place = crate::engine::same_file(carrier, target);
+        let in_place = crate::structure::same_file(carrier, target);
         let metadata = std::fs::metadata(carrier)?;
         if in_place && metadata.permissions().readonly() {
             return Err(StrHideError::Rejection(format!(

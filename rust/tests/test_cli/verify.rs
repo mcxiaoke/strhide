@@ -20,11 +20,11 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Output, Stdio};
 
-use strhide::engine::{
+use strhide::errors::StrHideError;
+use strhide::structure::{
     PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
     write_carrier,
 };
-use strhide::errors::StrHideError;
 
 fn run(dir: &Path, args: &[&str]) -> Output {
     base_cmd()

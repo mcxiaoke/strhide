@@ -42,14 +42,14 @@ use crate::params::Profile;
 pub use crate::params::{STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC};
 use std::io::{Read, Seek, SeekFrom};
 
-/// Largest strategy ID in [`crate::router::STRATEGY_REGISTRY`].
+/// Largest strategy ID in [`crate::structure::registry::STRATEGY_REGISTRY`].
 ///
 /// Used in the unencrypted envelope de-mask heuristic to eliminate false
 /// positives while allowing all valid registered strategy IDs. Derived from the
 /// registry rather than hand-maintained: a strategy added without updating this
 /// constant would make a *new* carrier fail the "is this an envelope at all?"
 /// gate and read back as "no hidden data".
-pub const MAX_KNOWN_STRATEGY_ID: u8 = crate::router::MAX_STRATEGY_ID;
+pub const MAX_KNOWN_STRATEGY_ID: u8 = crate::structure::registry::MAX_STRATEGY_ID;
 
 /// Envelope version written and accepted by this build.
 ///

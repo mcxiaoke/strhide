@@ -10,7 +10,7 @@ pub mod heif_hidden_item {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use strhide::engine::{
+    use strhide::structure::{
         PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
         write_carrier,
     };
@@ -318,7 +318,8 @@ pub mod heif_bridge {
 
         // 5. Structure domain orthogonality: no suspicious UUID or trailing junk
         let mut cursor = std::io::Cursor::new(&stego_bytes);
-        let warnings = strhide::adapters::isobmff::isobmff_suspicious_structures(&mut cursor);
+        let warnings =
+            strhide::structure::adapters::isobmff::isobmff_suspicious_structures(&mut cursor);
         assert!(
             warnings.is_empty(),
             "Stego HEIF must have zero suspicious structural warnings, got: {:?}",

@@ -1,11 +1,11 @@
 //! PNG format adapter for strhide with neutral ancillary chunk and dirty-tail tolerance.
 
-use crate::adapters::{
+use crate::errors::StrHideError;
+use crate::structure::adapters::{
     FinalizeCtx, HostAdapter, SeekRead, SeekReadWrite, StrategyCapacity, eof::EofAdapter,
     format_bytes,
 };
-use crate::envelope::EnvelopeTrailer;
-use crate::errors::StrHideError;
+use crate::structure::envelope::EnvelopeTrailer;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 pub const PNG_MAGIC: [u8; 8] = *b"\x89PNG\r\n\x1a\n";
@@ -135,7 +135,7 @@ impl HostAdapter for PngAdapter {
 
         // 1. Write everything before IEND
         host_in.seek(SeekFrom::Start(0))?;
-        crate::adapters::io::copy_exact(host_in, out, iend_offset)?;
+        crate::structure::adapters::io::copy_exact(host_in, out, iend_offset)?;
 
         let inject_offset = iend_offset;
 
@@ -169,7 +169,7 @@ impl HostAdapter for PngAdapter {
 
         // 3. Write IEND chunk and any trailing dirty data
         host_in.seek(SeekFrom::Start(iend_offset))?;
-        crate::adapters::io::copy_stream(host_in, out)?;
+        crate::structure::adapters::io::copy_stream(host_in, out)?;
 
         Ok((inject_offset, inject_size, 0, 0))
     }

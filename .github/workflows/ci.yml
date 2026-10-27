@@ -44,18 +44,18 @@ jobs:
 
       # `--all-targets` compiles the integration tests but does not run the
       # #[ignore]d corpus sweep (`batch_corpus`), which needs external files.
+      # `--all-features` is what covers the CLI: the library default set
+      # deliberately excludes clap/toml/rpassword, and `tests/test_cli.rs` is
+      # gated on the `cli` feature.
       - name: Test
-        run: cargo test --release --locked --all-targets
+        run: cargo test --release --locked --all-features --all-targets
 
-      # Stage 0 of `docs/strhide_architecture_and_refactoring_plan.md` tracks
-      # the "one domain at a time" build. It is deliberately non-blocking for
-      # now: both builds compile, but the `engine`-only build still emits
-      # dead-code/unused-import warnings (`MAX_CONTENT_STEGO_BYTES`,
-      # `OsString`, `PathBuf`) that stage 1 removes together with the
-      # `structure-base` / `content-*` feature split. Flip this to blocking
-      # once stage 1 lands.
-      - name: Minimal feature builds (stage 0, non-blocking)
-        continue-on-error: true
+      # The two domains must compile without each other (stage 1 of
+      # docs/strhide_architecture_and_refactoring_plan.md). Blocking since
+      # stage 1 landed; the per-format split adds content-png/-jpeg/-hevc here.
+      - name: Minimal feature builds
         run: |
-          cargo build --no-default-features --features engine
-          cargo build --no-default-features --features stego
+          cargo build --no-default-features
+          cargo build --no-default-features --features structure
+          cargo build --no-default-features --features content
+          cargo build --no-default-features --features analysis

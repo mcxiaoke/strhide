@@ -17,9 +17,9 @@
 ```bash
 cd rust
 cargo build --release       # 编译，产物在 target/release/strhide
-cargo test          		# 运行常规测试套件（全部通过，0 ignored 混杂）
-cargo test local_ -- --ignored # 单独运行本地批量测试（约 3 分钟）
-cargo fmt && cargo clippy   # 提交前格式化并修复所有 lint
+cargo test --all-features --all-targets   # 全量测试（默认 feature 集不含 cli，CLI 测试按 feature 门控）
+cargo test local_ -- --ignored --all-features # 单独运行本地批量测试（约 3 分钟）
+cargo fmt && cargo clippy --all-targets --all-features -- -D warnings   # 提交前格式化并修复所有 lint
 ```
 
 ### 字节级基线（架构重构期间必跑）
@@ -41,4 +41,5 @@ python scripts/baseline_hash.py --check   # 与 temp/baseline/baseline.json 逐�
 - 如果要用python，使用这个 `C:\Home\Develop\venv` 。
 - 改动代码前先核对影响面，不因修复旧问题引入新问题。
 - 不自发 `commit`/`push`，除非明确要求。
-- CI上硬性跑 `cargo fmt --check`、`cargo clippy --all-targets -D warnings`、`cargo test --all-targets`；crates 发布与 release 打 tag 都 `needs` 这个质量任务，本地这三项必须先全绿。
+- CI 上硬性跑 `cargo fmt --check`、`cargo clippy --all-targets --all-features -D warnings`、`cargo test --all-features --all-targets`，外加四条最小 feature 构建（`--no-default-features`、`structure`、`content`、`analysis`）；crates 发布与 release 打 tag 都 `needs` 这个质量任务，本地这些项必须先全绿。
+- 默认 feature 是 `structure + content + analysis`，**不含 `cli`**（`cargo add strhide` 不该拖 clap/toml/rpassword）；用 CLI 或跑 CLI 测试时显式加 `--features cli` 或 `--all-features`。

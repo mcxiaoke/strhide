@@ -12,8 +12,8 @@ use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use strhide::adapters::pdf::parse_pdf_trailer_info;
-use strhide::engine::{
+use strhide::structure::adapters::pdf::parse_pdf_trailer_info;
+use strhide::structure::{
     PayloadSource, WriteOptions, read_carrier, remove_carrier, verify_carrier, write_carrier,
 };
 
@@ -280,9 +280,9 @@ fn verify_accepts_untampered_carrier() {
 #[test]
 fn default_strip_restores_patch_in_stripped_coordinates() {
     use std::io::Cursor;
-    use strhide::adapters::HostAdapter;
-    use strhide::adapters::png::PngAdapter;
-    use strhide::envelope::EnvelopeHeader;
+    use strhide::structure::adapters::HostAdapter;
+    use strhide::structure::adapters::png::PngAdapter;
+    use strhide::structure::envelope::EnvelopeHeader;
 
     // Host with a 4-byte patchable field at offset 60.
     let mut host = vec![0xAAu8; 100];

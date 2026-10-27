@@ -1,7 +1,6 @@
 //! System and environment locale detection.
 
-use crate::config::FileConfig;
-use crate::i18n::Lang;
+use crate::core::i18n::Lang;
 
 /// Detect interface language with standard priority chain:
 /// 1. Explicit CLI argument `--lang`
@@ -9,7 +8,7 @@ use crate::i18n::Lang;
 /// 3. `config.toml` file `lang` key
 /// 4. System OS locale
 /// 5. Fallback: English (`Lang::En`)
-pub fn detect(cli_lang: Option<&str>, cfg: &FileConfig) -> Lang {
+pub fn detect(cli_lang: Option<&str>, config_lang: Option<&str>) -> Lang {
     cli_lang
         .and_then(Lang::parse)
         .or_else(|| {
@@ -18,7 +17,7 @@ pub fn detect(cli_lang: Option<&str>, cfg: &FileConfig) -> Lang {
                 .or_else(|| std::env::var("STRHIDE_LANGUAGE").ok())
                 .and_then(|s| Lang::parse(&s))
         })
-        .or_else(|| cfg.lang.as_deref().and_then(Lang::parse))
+        .or_else(|| config_lang.and_then(Lang::parse))
         .or_else(system_lang)
         .unwrap_or(Lang::En)
 }

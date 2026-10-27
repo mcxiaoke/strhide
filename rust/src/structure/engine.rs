@@ -27,10 +27,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::RngExt;
 use serde::Serialize;
 
-use crate::adapters::{
+use crate::commit::{TmpGuard, next_backup_path};
+use crate::structure::adapters::{
     FinalizeCtx, HostAdapter, SeekRead, SeekWrite, StrategyCapacity, TrailerCtx,
 };
-use crate::commit::{TmpGuard, next_backup_path};
 
 pub use crate::commit::same_file;
 
@@ -39,14 +39,16 @@ use crate::crypto::{
     compress_stream, decompress_stream, decrypt_metadata, decrypt_stream_from_chunks, derive_all,
     derive_keys, derive_stealth_magics, encrypt_metadata, encrypt_stream_to_chunks, normalize_nfc,
 };
-use crate::envelope::{
+use crate::errors::StrHideError;
+use crate::params::{LocalParams, Profile};
+use crate::structure::envelope::{
     EnvelopeHeader, EnvelopeTrailer, FLAG_COMPACT_META, FLAG_COMPRESSED, FLAG_ENCRYPTED,
     FLAG_HAS_HINT, FLAG_IS_FILE, FLAG_STEALTH, HEADER_SIZE, TRAILER_SIZE, UnpackSecrets,
 };
-use crate::errors::StrHideError;
-use crate::params::{LocalParams, Profile};
-use crate::rejection::run_rejection_checks;
-use crate::router::{find_adapter, find_adapter_or_reject, id_to_strategy, strategy_to_id};
+use crate::structure::registry::{
+    find_adapter, find_adapter_or_reject, id_to_strategy, strategy_to_id,
+};
+use crate::structure::rejection::run_rejection_checks;
 
 /// Metadata about the payload being hidden, stored inside the encrypted
 /// envelope metadata block.
@@ -145,6 +147,7 @@ const COMPACT_META_MAX_NAME: usize = u16::MAX as usize;
 /// The probe needs the whole image decoded, which rules out streaming, so the
 /// read is bounded: above this size the field is reported as absent instead of
 /// allocating whatever the file happens to claim.
+#[cfg(feature = "content")]
 const MAX_CONTENT_STEGO_BYTES: u64 = 512 * 1024 * 1024;
 
 fn put_varint(out: &mut Vec<u8>, mut value: u64) {
@@ -434,7 +437,7 @@ pub struct InspectResult {
     /// answering "how much more could fit").
     pub strategies: Vec<StrategyCapacity>,
     /// Content-adaptive pixel/DCT steganography capacity for PNG/JPEG carriers.
-    #[cfg(feature = "stego")]
+    #[cfg(feature = "content")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_stego_capacity: Option<crate::stego::StegoCapacityInfo>,
     /// Carrier media summary (e.g. "4032x3024" or "1920x1080, 24.00 fps, 11.9s (15.2 Mbps)").
@@ -453,7 +456,7 @@ pub struct LevelStatus {
     /// is needed but none was supplied).
     ///
     /// A skipped level is **not** a pass, but it is not a failure either: the
-    /// caller could not have known either way. [`verify_passed`](crate::engine::verify_passed)
+    /// caller could not have known either way. [`verify_passed`](crate::structure::verify_passed)
     /// counts it as "not disproven", while a level that ran and failed counts
     /// as a failure.
     #[serde(default)]
@@ -629,7 +632,7 @@ impl Default for WriteOptions<'_> {
 /// # Examples
 ///
 /// ```no_run
-/// use strhide::engine::{write_carrier, PayloadSource, WriteOptions};
+/// use strhide::structure::{write_carrier, PayloadSource, WriteOptions};
 /// # fn main() -> Result<(), strhide::errors::StrHideError> {
 /// write_carrier(
 ///     std::path::Path::new("photo.png"),
@@ -662,7 +665,7 @@ pub fn write_carrier(
 ///   same profile; `Profile::default()` is the official dialect.
 ///
 /// ```no_run
-/// use strhide::engine::{write_carrier_with, PayloadSource, WriteOptions};
+/// use strhide::structure::{write_carrier_with, PayloadSource, WriteOptions};
 /// use strhide::params::{CompressionStrategy, LocalParams, Profile};
 /// # fn main() -> Result<(), strhide::errors::StrHideError> {
 /// // Both types are `#[non_exhaustive]`: build from `default()` with setters.
@@ -1246,7 +1249,7 @@ pub fn write_carrier_with(
 ///
 /// Rejection checks are content-only: the path-based ones (read-only carrier,
 /// target-directory write probe, `.apk`/signature-file name checks) describe
-/// the filesystem, not the carrier. [`crate::rejection::check_content`] still
+/// the filesystem, not the carrier. [`crate::structure::rejection::check_content`] still
 /// refuses Authenticode/PDF/JAR-signed carriers, which is the part that matters
 /// for "do not break someone's signature".
 ///
@@ -1270,7 +1273,7 @@ pub fn write_carrier_bytes(
     let mut host = Cursor::new(carrier);
     if local.rejection != crate::params::RejectionPolicy::Skip {
         host.seek(SeekFrom::Start(0))?;
-        crate::rejection::check_content(&mut host, None)?;
+        crate::structure::rejection::check_content(&mut host, None)?;
     }
 
     let mut out = Cursor::new(Vec::new());
@@ -1344,7 +1347,7 @@ struct AuthenticatedEnvelope<'a> {
     header: EnvelopeHeader,
     meta_obj: CarrierMetadata,
     payload_key: [u8; 32],
-    fixed_header_aad: [u8; crate::envelope::AAD_SIZE],
+    fixed_header_aad: [u8; crate::structure::envelope::AAD_SIZE],
     total_payload_bytes: u64,
 }
 
@@ -1987,8 +1990,8 @@ fn inspect_core(
     // read back into memory. Bounded on purpose: `inspect` also runs on data it
     // was merely pointed at, and a 4 GiB "PNG" must not become a 4 GiB
     // allocation. Above the cap the field is simply absent.
-    #[cfg(feature = "stego")]
-    let content_stego_capacity = if crate::router::supports_content_stego(adapter) {
+    #[cfg(feature = "content")]
+    let content_stego_capacity = if crate::structure::registry::supports_content_stego(adapter) {
         host.seek(SeekFrom::Start(0))?;
         let mut buf = Vec::new();
         host.take(MAX_CONTENT_STEGO_BYTES).read_to_end(&mut buf)?;
@@ -2008,11 +2011,11 @@ fn inspect_core(
         None
     };
 
-    #[cfg(feature = "stego")]
+    #[cfg(feature = "content")]
     let media_info = content_stego_capacity
         .as_ref()
         .and_then(|c| c.media_info.clone());
-    #[cfg(not(feature = "stego"))]
+    #[cfg(not(feature = "content"))]
     let media_info = None;
 
     let loc = locate_envelope(host, adapter, password, profile)?;
@@ -2035,7 +2038,7 @@ fn inspect_core(
                 orig_host_sha256: None,
                 metadata: None,
                 strategies,
-                #[cfg(feature = "stego")]
+                #[cfg(feature = "content")]
                 content_stego_capacity,
                 media_info,
             });
@@ -2127,7 +2130,7 @@ fn inspect_core(
         ),
         metadata: meta_val,
         strategies,
-        #[cfg(feature = "stego")]
+        #[cfg(feature = "content")]
         content_stego_capacity,
         media_info,
     })

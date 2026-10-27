@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use strhide::engine::{PayloadSource, WriteOptions, read_carrier, write_carrier};
+use strhide::structure::{PayloadSource, WriteOptions, read_carrier, write_carrier};
 
 fn scratch_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("strhide_test_heif_{name}_{}", std::process::id()));

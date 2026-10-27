@@ -76,11 +76,11 @@ macro_rules! i18n_messages {
         }
 
         impl Msg {
-            pub fn text(self, lang: $crate::i18n::Lang) -> &'static str {
+            pub fn text(self, lang: $crate::core::i18n::Lang) -> &'static str {
                 match (self, lang) {
                     $(
-                        (Msg::$name, $crate::i18n::Lang::En) => $en,
-                        (Msg::$name, $crate::i18n::Lang::Zh) => $zh,
+                        (Msg::$name, $crate::core::i18n::Lang::En) => $en,
+                        (Msg::$name, $crate::core::i18n::Lang::Zh) => $zh,
                     )*
                 }
             }
@@ -92,11 +92,11 @@ macro_rules! i18n_messages {
 #[macro_export]
 macro_rules! t {
     ($msg:path) => {
-        $msg.text($crate::i18n::lang()).to_string()
+        $msg.text($crate::core::i18n::lang()).to_string()
     };
     ($msg:path, $($key:ident = $val:expr),+ $(,)?) => {
-        $crate::i18n::format_msg(
-            $msg.text($crate::i18n::lang()),
+        $crate::core::i18n::format_msg(
+            $msg.text($crate::core::i18n::lang()),
             &[ $( (stringify!($key), &$val as &dyn std::fmt::Display) ),+ ],
         )
     };

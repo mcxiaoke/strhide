@@ -1,6 +1,6 @@
 use crate::common::*;
 use std::fs;
-use strhide::engine::{
+use strhide::structure::{
     PayloadSource, WriteOptions, read_carrier, remove_carrier, verify_carrier, write_carrier,
 };
 
@@ -128,8 +128,8 @@ fn test_pre_v2_stealth_unmasked_envelope_is_rejected() {
     use strhide::crypto::{
         derive_keys, derive_stealth_magics, encrypt_metadata, encrypt_stream_to_chunks,
     };
-    use strhide::engine::CarrierMetadata;
-    use strhide::envelope::{
+    use strhide::structure::CarrierMetadata;
+    use strhide::structure::envelope::{
         EnvelopeHeader, EnvelopeTrailer, FLAG_ENCRYPTED, FLAG_STEALTH, HEADER_SIZE,
     };
 
@@ -286,7 +286,7 @@ fn test_default_carrier_uniform_encryption_and_zero_plaintext() {
     assert_eq!(read_res.filename, filename);
 
     // 5. Inspect without password shows hidden data and extracts metadata
-    let inspect_res = strhide::engine::inspect_carrier(&out_path, None).unwrap();
+    let inspect_res = strhide::structure::inspect_carrier(&out_path, None).unwrap();
     assert!(inspect_res.has_hidden_data);
     assert_eq!(inspect_res.is_encrypted, Some(false));
     assert!(inspect_res.metadata.is_some());
@@ -305,8 +305,8 @@ fn test_default_carrier_uniform_encryption_and_zero_plaintext() {
 
 #[test]
 fn test_pre_v2_plaintext_metadata_envelope_is_rejected() {
-    use strhide::engine::CarrierMetadata;
-    use strhide::envelope::{
+    use strhide::structure::CarrierMetadata;
+    use strhide::structure::envelope::{
         EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE, STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC,
     };
 
@@ -332,8 +332,8 @@ fn test_pre_v2_plaintext_metadata_envelope_is_rejected() {
     let header = EnvelopeHeader {
         magic_header: STANDARD_HEADER_MAGIC,
         version: 2,
-        flags: strhide::envelope::FLAG_COMPACT_META, // unencrypted, compact meta
-        strategy_id: 2,                              // PNG chunk
+        flags: strhide::structure::envelope::FLAG_COMPACT_META, // unencrypted, compact meta
+        strategy_id: 2,                                         // PNG chunk
         orig_host_size: host_size,
         orig_host_sha256: host_sha,
         inject_offset: 57,

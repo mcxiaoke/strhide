@@ -1,11 +1,11 @@
 //! JPEG format adapter for strhide with APP15/COM segment multi-chain hiding.
 
-use crate::adapters::{
+use crate::errors::StrHideError;
+use crate::structure::adapters::{
     HostAdapter, SeekRead, SegmentedSubStream, StrategyCapacity, SubStream, TrailerCtx,
     eof::EofAdapter, format_bytes,
 };
-use crate::envelope::EnvelopeTrailer;
-use crate::errors::StrHideError;
+use crate::structure::envelope::EnvelopeTrailer;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 
 pub const JPEG_SOI: [u8; 2] = [0xFF, 0xD8];
@@ -285,7 +285,7 @@ impl HostAdapter for JpegAdapter {
 
         // 1. Write host before SOS
         host_in.seek(SeekFrom::Start(0))?;
-        crate::adapters::io::copy_exact(host_in, out, sos_offset)?;
+        crate::structure::adapters::io::copy_exact(host_in, out, sos_offset)?;
 
         let inject_offset = sos_offset;
 
@@ -301,12 +301,12 @@ impl HostAdapter for JpegAdapter {
 
             // The segment length was computed from `ube_size` on this same
             // stream, so a short read means the envelope was truncated.
-            crate::adapters::io::copy_exact(ube_in, out, seg_payload_len)?;
+            crate::structure::adapters::io::copy_exact(ube_in, out, seg_payload_len)?;
         }
 
         // 3. Write host from SOS onwards through EOI
         host_in.seek(SeekFrom::Start(sos_offset))?;
-        crate::adapters::io::copy_stream(host_in, out)?;
+        crate::structure::adapters::io::copy_stream(host_in, out)?;
 
         Ok((inject_offset, inject_size, 0, 0))
     }

@@ -1,4 +1,10 @@
 //! Unified CLI integration tests suite.
+//!
+//! The whole binary is gated on the `cli` feature: the library's default
+//! feature set deliberately excludes the command line (clap/toml/rpassword),
+//! so `cargo test` on the defaults builds an empty binary here. CI runs
+//! `cargo test --all-features` to cover it.
+#![cfg(feature = "cli")]
 
 #[path = "common/mod.rs"]
 pub mod common;

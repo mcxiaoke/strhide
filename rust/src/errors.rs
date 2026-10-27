@@ -80,7 +80,7 @@ pub enum StrHideError {
     #[error("Safety threshold exceeded: {0}")]
     SafetyThreshold(String),
 
-    /// [`crate::engine::remove_carrier`] restored a file whose size or SHA-256
+    /// [`crate::structure::remove_carrier`] restored a file whose size or SHA-256
     /// does not match the original recorded in the envelope header. This
     /// usually means a second envelope was layered on top and must be removed
     /// first, most-recently-written first.
@@ -94,7 +94,7 @@ pub enum StrHideError {
 
     /// The carrier looks like a valid format but no envelope (standard or
     /// stealth-with-the-supplied-password) was located. The message may carry
-    /// a structural hint when [`crate::adapters::HostAdapter::suspicious_structures`]
+    /// a structural hint when [`crate::structure::adapters::HostAdapter::suspicious_structures`]
     /// detects an envelope-shaped container.
     #[error("{0}")]
     NoHiddenData(String),
@@ -132,7 +132,7 @@ pub enum TrellisCause {
     ExhaustedSlots,
 }
 
-#[cfg(feature = "engine")]
+#[cfg(feature = "structure")]
 impl From<serde_json::Error> for StrHideError {
     fn from(err: serde_json::Error) -> Self {
         StrHideError::CorruptedData(format!("JSON serialization error: {err}"))
@@ -142,22 +142,21 @@ impl From<serde_json::Error> for StrHideError {
 impl StrHideError {
     /// Error category (used to translate category prefixes during CLI rendering).
     /// `NoHiddenData` and `General` do not carry a prefix and return `None`.
-    #[cfg(feature = "cli")]
-    pub fn category(&self) -> Option<crate::i18n::Msg> {
+    pub fn category(&self) -> Option<crate::core::i18n::Msg> {
         match self {
-            StrHideError::Io(_) => Some(crate::i18n::Msg::ErrIo),
-            StrHideError::CorruptedData(_) => Some(crate::i18n::Msg::ErrCorrupted),
+            StrHideError::Io(_) => Some(crate::core::i18n::Msg::ErrIo),
+            StrHideError::CorruptedData(_) => Some(crate::core::i18n::Msg::ErrCorrupted),
             StrHideError::Password(_) | StrHideError::PasswordWithHint { .. } => {
-                Some(crate::i18n::Msg::ErrPassword)
+                Some(crate::core::i18n::Msg::ErrPassword)
             }
             StrHideError::Rejection(_) | StrHideError::SafetyThreshold(_) => {
-                Some(crate::i18n::Msg::ErrRejection)
+                Some(crate::core::i18n::Msg::ErrRejection)
             }
-            StrHideError::RestoreMismatch(_) => Some(crate::i18n::Msg::ErrRestoreMismatch),
+            StrHideError::RestoreMismatch(_) => Some(crate::core::i18n::Msg::ErrRestoreMismatch),
             StrHideError::UnsupportedFormat(_) | StrHideError::UnsupportedVersion(_) => {
-                Some(crate::i18n::Msg::ErrUnsupported)
+                Some(crate::core::i18n::Msg::ErrUnsupported)
             }
-            StrHideError::TrellisInfeasible { .. } => Some(crate::i18n::Msg::ErrUnsupported),
+            StrHideError::TrellisInfeasible { .. } => Some(crate::core::i18n::Msg::ErrUnsupported),
             StrHideError::NoHiddenData(_) | StrHideError::General(_) => None,
         }
     }

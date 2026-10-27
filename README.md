@@ -133,7 +133,7 @@ Payload sources on `write` are mutually exclusive too: `-d/--data`, `-t/--text`,
 The `strhide` crate can be used as a library. The recommended entry point is a **`StrHide`** instance: it binds one private dialect (`Profile`) and one writer-behaviour baseline (`LocalParams`), then exposes every verb as an ordinary method. The whole dialect can be declared `const` at compile time (zero runtime cost), and both file-path and in-memory (`&[u8]` -> `Vec<u8>`) variants are provided.
 
 ```rust
-use strhide::engine::{PayloadSource, WriteOptions};
+use strhide::structure::{PayloadSource, WriteOptions};
 use strhide::facade::StrHide;
 use strhide::params::Profile;
 

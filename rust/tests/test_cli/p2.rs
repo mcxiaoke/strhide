@@ -15,8 +15,8 @@ use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 use std::process::Stdio;
 
-use strhide::engine::{PayloadSource, WriteOptions, read_carrier, write_carrier};
 use strhide::errors::StrHideError;
+use strhide::structure::{PayloadSource, WriteOptions, read_carrier, write_carrier};
 
 // --------------------------------------------------------------------------- helpers
 
@@ -462,7 +462,7 @@ fn readonly_parent_directory_is_rejected() {
 
 #[test]
 fn backup_collision_uses_timestamped_name() {
-    use strhide::engine::remove_carrier;
+    use strhide::structure::remove_carrier;
 
     let dir = scratch("bak_collision");
     let carrier = dir.join("c.png");

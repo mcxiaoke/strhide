@@ -7,13 +7,13 @@
 //! `"pe_codebits"`, ...) and the single-byte `strategy_id` stored in the
 //! envelope header.
 
-use crate::adapters::{
+use crate::errors::StrHideError;
+use crate::formats::sniff::FileFormat;
+use crate::structure::adapters::{
     HostAdapter, SeekRead, heif::HeifAdapter, jpeg::JpegAdapter, mkv::MkvAdapter, mp4::Mp4Adapter,
     pdf::PdfAdapter, pe::PeAdapter, png::PngAdapter, wav::WavAdapter, webp::WebpAdapter,
     zip::ZipAdapter,
 };
-use crate::errors::StrHideError;
-use crate::formats::sniff::FileFormat;
 
 /// Formats strhide explicitly recognizes as carriers.
 ///
@@ -141,7 +141,7 @@ pub fn id_to_strategy(id: u8) -> &'static str {
 
 /// Largest strategy ID registered in [`STRATEGY_REGISTRY`].
 ///
-/// Computed, not written down: [`crate::envelope::MAX_KNOWN_STRATEGY_ID`]
+/// Computed, not written down: [`crate::structure::envelope::MAX_KNOWN_STRATEGY_ID`]
 /// gates the "is this an envelope at all?" heuristic on the unencrypted
 /// de-mask path, and a stale copy of this number silently rejects every
 /// carrier written with a newly added strategy.
@@ -174,6 +174,9 @@ mod tests {
                 .max()
                 .expect("registry is non-empty")
         );
-        assert_eq!(crate::envelope::MAX_KNOWN_STRATEGY_ID, MAX_STRATEGY_ID);
+        assert_eq!(
+            crate::structure::envelope::MAX_KNOWN_STRATEGY_ID,
+            MAX_STRATEGY_ID
+        );
     }
 }

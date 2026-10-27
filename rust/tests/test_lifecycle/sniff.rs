@@ -10,7 +10,7 @@
 use std::io::Cursor;
 
 use strhide::formats::{FileFormat, capability_of, sniff_bytes, sniff_stream};
-use strhide::router::{ADAPTERS, find_adapter};
+use strhide::structure::registry::{ADAPTERS, find_adapter};
 
 use crate::common::*;
 

@@ -17,12 +17,12 @@
 //! zero-filling exactly the region the envelope occupies. Nothing else in the
 //! file is touched.
 
-use crate::adapters::{SeekRead, SeekWrite, format_bytes, pe_codebits};
-use crate::envelope::{
+use crate::errors::StrHideError;
+use crate::structure::adapters::{SeekRead, SeekWrite, format_bytes, pe_codebits};
+use crate::structure::envelope::{
     EnvelopeHeader, EnvelopeTrailer, MIN_UBE_PLAIN, STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC,
     TRAILER_SIZE,
 };
-use crate::errors::StrHideError;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 /// Byte offset of `trailer_magic` inside a packed [`EnvelopeTrailer`].
@@ -87,7 +87,7 @@ pub fn inject(
 
     // Stream the host, splicing the envelope over `[off, off + ube_size)`.
     copy_range(host_in, out, 0, off)?;
-    crate::adapters::io::copy_exact(ube_in, out, ube_size)?;
+    crate::structure::adapters::io::copy_exact(ube_in, out, ube_size)?;
     copy_range(host_in, out, off + ube_size, layout.host_size)?;
 
     Ok((off, ube_size, 0, 0))

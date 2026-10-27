@@ -13,6 +13,7 @@
 
 pub mod annexb;
 pub mod capability;
+pub mod jpeg_segments;
 pub mod sniff;
 
 pub use capability::{CAPABILITIES, Capability, StegoKind, capability_of};

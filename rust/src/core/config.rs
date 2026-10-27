@@ -87,7 +87,7 @@ fn parse_config(
             eprintln!(
                 "{}",
                 crate::t!(
-                    crate::i18n::Msg::WarnConfigUnknownKey,
+                    crate::core::i18n::Msg::WarnConfigUnknownKey,
                     key = key,
                     path = origin.display()
                 )

@@ -2,7 +2,7 @@
 // (ported from Python `test_rejection.py`).
 
 use std::io::Cursor;
-use strhide::rejection::{
+use strhide::structure::rejection::{
     check_jar_signature, check_pdf_signature, check_pe_authenticode, check_signature_file,
     check_unsupported_apk,
 };

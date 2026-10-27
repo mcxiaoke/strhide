@@ -24,9 +24,9 @@
 //! password, because a distinguishable error would tell an attacker that an
 //! envelope exists but the dialect is wrong.
 
-use strhide::engine::{PayloadSource, WriteOptions, read_carrier_bytes, write_carrier_bytes};
 use strhide::errors::StrHideError;
 use strhide::params::{LocalParams, MagicPair, Profile};
+use strhide::structure::{PayloadSource, WriteOptions, read_carrier_bytes, write_carrier_bytes};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cover = std::fs::read("rust/tests/assets/minimal.png")

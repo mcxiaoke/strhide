@@ -1,21 +1,21 @@
 use std::io::Write;
 
-use crate::adapters::riff::{
+use crate::errors::StrHideError;
+use crate::structure::adapters::riff::{
     riff_can_chunk, riff_detect, riff_inject, riff_locate, riff_strategy_capacities,
     riff_suspicious_structures, riff_verify_structure,
 };
-use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity};
-use crate::errors::StrHideError;
+use crate::structure::adapters::{HostAdapter, SeekRead, StrategyCapacity};
 
-pub struct WavAdapter;
+pub struct WebpAdapter;
 
-impl HostAdapter for WavAdapter {
+impl HostAdapter for WebpAdapter {
     fn format_name(&self) -> &'static str {
-        "WAV"
+        "WEBP"
     }
 
     fn detect(&self, reader: &mut dyn SeekRead) -> bool {
-        riff_detect(reader, b"WAVE")
+        riff_detect(reader, b"WEBP")
     }
 
     fn supported_strategies(&self) -> Vec<&'static str> {
@@ -23,10 +23,9 @@ impl HostAdapter for WavAdapter {
     }
 
     fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, ube_size: u64) -> &'static str {
-        // riff_chunk must stay symmetric: the declared boundary must be the
-        // physical end and the patched size must stay inside u32. Anything
-        // else routes to the EOF overlay, whose write and read agree by
-        // construction (review P1-2 / P3-17).
+        // Mirrors WAV: keep riff_chunk only when write and read agree (declared
+        // boundary = physical end, u32 size headroom), else EOF overlay
+        // (review P1-2 / P3-17).
         if riff_can_chunk(reader, ube_size) {
             "riff_chunk"
         } else {
@@ -35,7 +34,7 @@ impl HostAdapter for WavAdapter {
     }
 
     fn strategy_capacities(&self, reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
-        riff_strategy_capacities("WAV", reader)
+        riff_strategy_capacities("WebP", reader)
     }
 
     fn inject(
@@ -60,13 +59,12 @@ impl HostAdapter for WavAdapter {
         &self,
         stego_in: &mut dyn SeekRead,
     ) -> Result<(bool, String), StrHideError> {
-        riff_verify_structure(self.format_name(), stego_in, b"WAVE", |chunks| {
-            let has_fmt = chunks.iter().any(|(tag, _)| tag == b"fmt ");
-            let has_data = chunks.iter().any(|(tag, _)| tag == b"data");
-            if !has_fmt {
-                Err("WAV missing 'fmt ' chunk".into())
-            } else if !has_data {
-                Err("WAV missing 'data' chunk".into())
+        riff_verify_structure(self.format_name(), stego_in, b"WEBP", |chunks| {
+            let has_image_chunk = chunks
+                .iter()
+                .any(|(tag, _)| tag == b"VP8 " || tag == b"VP8L" || tag == b"VP8X");
+            if !has_image_chunk {
+                Err("WebP missing primary image chunk (VP8, VP8L, or VP8X)".into())
             } else {
                 Ok(())
             }
@@ -92,7 +90,9 @@ impl HostAdapter for WavAdapter {
 
     fn strategy_note(&self, strategy: &str, fallback: bool) -> Option<String> {
         if strategy == "riff_chunk" {
-            Some("Embedded into compliant WAV private RIFF chunk 'SHRD' (0 trailing bytes).".into())
+            Some(
+                "Embedded into compliant WebP private RIFF chunk 'SHRD' (0 trailing bytes).".into(),
+            )
         } else if strategy == "eof" && fallback {
             Some(
                 "Carrier layout or payload did not fit the RIFF chunk strategy (declared \
@@ -100,7 +100,7 @@ impl HostAdapter for WavAdapter {
                     .into(),
             )
         } else if strategy == "eof" {
-            Some("Appended after WAV EOF (EOF overlay).".into())
+            Some("Appended after WebP EOF (EOF overlay).".into())
         } else {
             None
         }

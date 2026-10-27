@@ -6,15 +6,18 @@
 
 use crate::common::*;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "cli")]
+use std::path::PathBuf;
+#[cfg(feature = "cli")]
 use std::process::Stdio;
 
-use strhide::adapters::HostAdapter;
-use strhide::engine::{
+use strhide::errors::StrHideError;
+use strhide::structure::adapters::HostAdapter;
+use strhide::structure::{
     PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
     write_carrier,
 };
-use strhide::errors::StrHideError;
 
 // --------------------------------------------------------------------------- helpers
 
@@ -25,7 +28,7 @@ fn write_carrier_file(
     strategy: &str,
     stealth: bool,
     out: &Path,
-) -> strhide::engine::WriteResult {
+) -> strhide::structure::WriteResult {
     write_carrier(
         carrier,
         payload,
@@ -91,7 +94,7 @@ fn fragmented_mp4_first_box_is_recognized() {
         data.extend_from_slice(&[0u8; 16]);
         let mut cur = std::io::Cursor::new(&data);
         assert!(
-            strhide::router::find_adapter(&mut cur).is_some(),
+            strhide::structure::registry::find_adapter(&mut cur).is_some(),
             "first box {tag:?} must be recognized as ISO-BMFF"
         );
     }
@@ -117,7 +120,7 @@ fn zip_tampered_patch_offset_returns_corrupted_data() {
     );
     let mut raw = fs::read(&stego).unwrap();
     let mut cur = std::io::Cursor::new(&raw);
-    let (off, _, _) = strhide::adapters::zip::ZipAdapter
+    let (off, _, _) = strhide::structure::adapters::zip::ZipAdapter
         .locate(&mut cur, None)
         .unwrap()
         .expect("envelope");
@@ -135,6 +138,7 @@ fn zip_tampered_patch_offset_returns_corrupted_data() {
 // --------------------------------------------------------------------------- A-4
 
 /// `remove` must honour the configured `backup` default, like `write` does.
+#[cfg(feature = "cli")]
 #[test]
 fn remove_honours_config_backup_false() {
     let dir = scratch("rm_backup_cfg");
@@ -179,6 +183,7 @@ fn remove_honours_config_backup_false() {
 // --------------------------------------------------------------------------- A-5
 
 /// A hint containing an apostrophe must be shown verbatim.
+#[cfg(feature = "cli")]
 #[test]
 fn cli_password_hint_with_apostrophe_is_shown_verbatim() {
     let dir = scratch("hint_apostrophe");
@@ -227,6 +232,7 @@ fn cli_password_hint_with_apostrophe_is_shown_verbatim() {
 // --------------------------------------------------------------------------- A-3
 
 /// A hint coming from the config file must not block `--stealth`.
+#[cfg(feature = "cli")]
 #[test]
 fn cli_stealth_ignores_configured_hint() {
     let dir = scratch("stealth_cfg_hint");
@@ -262,6 +268,7 @@ fn cli_stealth_ignores_configured_hint() {
 }
 
 /// An explicit `-H` with `--stealth` must still be rejected.
+#[cfg(feature = "cli")]
 #[test]
 fn cli_stealth_rejects_explicit_hint() {
     let dir = scratch("stealth_explicit_hint");
@@ -298,6 +305,7 @@ fn cli_stealth_rejects_explicit_hint() {
 // --------------------------------------------------------------------------- A-6
 
 /// Console output must be pure ASCII so it survives a CP936 console.
+#[cfg(feature = "cli")]
 #[test]
 fn list_output_is_pure_ascii() {
     let out = base_cmd()
@@ -424,7 +432,7 @@ fn extract_refuses_to_overwrite_existing_file() {
         "existing file was modified"
     );
 
-    let res = strhide::engine::read_carrier_with(&stego, Some(&outdir), None, true).unwrap();
+    let res = strhide::structure::read_carrier_with(&stego, Some(&outdir), None, true).unwrap();
     assert!(res.written_file.is_some());
     assert_eq!(fs::read(outdir.join("important.txt")).unwrap(), b"PAYLOAD");
 }
@@ -456,6 +464,7 @@ fn decompression_limit_is_enforced() {
 
 /// A single carrier with `-o <dir>` writes into the directory, like batch mode
 /// and like `read -o <dir>`; previously it failed with a bare OS error.
+#[cfg(feature = "cli")]
 #[test]
 fn single_carrier_output_directory() {
     let dir = scratch("single_outdir");
@@ -493,6 +502,7 @@ fn single_carrier_output_directory() {
 
 /// Reading a no-password envelope with `-p` must warn that the password was
 /// not used (the envelope is masked with the public built-in key).
+#[cfg(feature = "cli")]
 #[test]
 fn read_warns_when_password_is_unused() {
     let dir = scratch("pw_unused_warning");
@@ -583,8 +593,8 @@ fn pe_eof_strategy_inspect_attribution() {
 #[test]
 fn a13_zip_and_pdf_suspicious_structures_detection() {
     use std::io::Cursor;
-    use strhide::adapters::pdf::PdfAdapter;
-    use strhide::adapters::zip::ZipAdapter;
+    use strhide::structure::adapters::pdf::PdfAdapter;
+    use strhide::structure::adapters::zip::ZipAdapter;
 
     let dir = scratch("a13_suspicious");
 

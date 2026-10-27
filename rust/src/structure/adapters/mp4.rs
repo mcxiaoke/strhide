@@ -1,12 +1,12 @@
 use std::io::Write;
 
-pub use crate::adapters::isobmff::MP4_UUID_NEUTRAL;
-use crate::adapters::isobmff::{
+use crate::errors::StrHideError;
+pub use crate::structure::adapters::isobmff::MP4_UUID_NEUTRAL;
+use crate::structure::adapters::isobmff::{
     calc_prefix_len, isobmff_inject, isobmff_locate, isobmff_strategy_capacities,
     isobmff_suspicious_structures, isobmff_verify_structure,
 };
-use crate::adapters::{HostAdapter, SeekRead, StrategyCapacity};
-use crate::errors::StrHideError;
+use crate::structure::adapters::{HostAdapter, SeekRead, StrategyCapacity};
 use std::io::SeekFrom;
 
 pub struct Mp4Adapter;

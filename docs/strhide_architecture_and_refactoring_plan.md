@@ -192,8 +192,9 @@ pub static CAPABILITIES: &[Capability] = &[ /* 每格式一行 */ ];
 
 ```toml
 [features]
-# 库的默认值：最常用的双格式，不含 cli / analysis / hevc
-default = ["structure", "content-png", "content-jpeg"]
+# 库的默认值：两个域 + 分析，不含 cli（cargo add 不该拖 clap/toml/rpassword）。
+# 实现时把 analysis 留在了默认集：它只多一个 jpeg-decoder，且是主打能力之一。
+default = ["structure", "content", "analysis"]
 
 # ── 地基 ──
 core-io        = ["dep:filetime"]                 # TmpGuard、时间戳保留
@@ -212,7 +213,9 @@ content-hevc        = ["content-base", "dep:oxideav-h265", "dep:rusty_h265"]
 content-heif-bridge = ["content-hevc", "content-png", "content-jpeg"]
 
 # ── 分析 ──
-analysis = ["structure", "dep:jpeg-decoder"]      # 需要 adapters::pe_* 与 envelope 常量
+# 需要结构域（PE 代码位 + UBE 信封常量）与 DCT 读取（JPEG 盲校准直接用 dct-io），
+# 但不需要内容域的嵌入引擎。
+analysis = ["structure", "dep:jpeg-decoder", "dep:dct-io"]
 
 # ── CLI ──
 cli = ["structure", "content-png", "content-jpeg", "content-hevc", "content-heif-bridge",
@@ -602,7 +605,7 @@ python scripts/baseline_hash.py --check
 | # | v1 内容 | 问题（有源码证据） | v2 修正 |
 |---|---|---|---|
 | 1 | `structure-base = ["dep:filetime"]` | `engine.rs:431` 的 `InspectResult.metadata: Option<serde_json::Value>` 是结构域公开 API，缺 `serde_json` 编译失败 | 补 `dep:serde_json`（§2.4） |
-| 2 | `analysis = ["structure-base", "dep:jpeg-decoder"]` | `analysis.rs:43` 用 `adapters::pe_codebits`（iced-x86） | 改依赖 `structure`（§2.4） |
+| 2 | `analysis = ["structure-base", "dep:jpeg-decoder"]` | `analysis.rs` 用 `adapters::pe_codebits`（iced-x86）**且** `analysis/calibration.rs` 直接用 `dct-io`；只升到 `structure-base` 仍编不过 | 改依赖 `structure` + `dep:dct-io`（§2.4，2026-10-27 实测确认） |
 | 3 | "隔离到 `content-hevc` 后主库即可满足 crates.io 发布校验" | optional 不豁免 git 依赖；path vendor 同样受阻 | 明确不承诺发布，列出两条可行路径（§八-4） |
 | 4 | `analysis` 在 DAG 里只依赖 `formats`/`core` | `analysis.rs:43-44` 依赖 `adapters::pe_*` 与 `envelope` 常量 | DAG 允许 `analysis → structure`，写明理由（§2.1） |
 | 5 | `core/params.rs` 装 `Profile`、`SafetyPolicy` | `params.rs:408-437` 的 `Profile` 内嵌 `StegoProfile`（→ `stego/format.rs`）；`SafetyPolicy` 在 `stego/params.rs:208` | `Profile` 拆成 `StructureProfile` + `StegoProfile` + `Dialect`；`SafetyPolicy` 留内容域（§3.5） |

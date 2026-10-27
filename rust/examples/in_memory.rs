@@ -23,10 +23,10 @@
 //! code as the file API, so a carrier written in memory is readable from disk
 //! and vice versa.
 
-use strhide::engine::{
+use strhide::params::{LocalParams, Profile};
+use strhide::structure::{
     PayloadSource, WriteOptions, read_carrier_bytes, remove_carrier_bytes, write_carrier_bytes,
 };
-use strhide::params::{LocalParams, Profile};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pretend this came from an HTTP upload.

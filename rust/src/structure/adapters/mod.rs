@@ -50,8 +50,8 @@ pub use wav::WavAdapter;
 pub use webp::WebpAdapter;
 pub use zip::ZipAdapter;
 
-use crate::envelope::EnvelopeHeader;
 use crate::errors::StrHideError;
+use crate::structure::envelope::EnvelopeHeader;
 use serde::Serialize;
 use std::io::{Read, Seek, Write};
 
@@ -212,7 +212,7 @@ pub trait HostAdapter: Send + Sync {
         use std::io::SeekFrom;
 
         stego_in.seek(SeekFrom::Start(0))?;
-        crate::adapters::io::copy_exact(stego_in, out, header.inject_offset)?;
+        crate::structure::adapters::io::copy_exact(stego_in, out, header.inject_offset)?;
 
         // Skip injected bytes
         let inject_end = header
@@ -225,7 +225,7 @@ pub trait HostAdapter: Send + Sync {
                 ))
             })?;
         stego_in.seek(SeekFrom::Start(inject_end))?;
-        crate::adapters::io::copy_stream(stego_in, out)?;
+        crate::structure::adapters::io::copy_stream(stego_in, out)?;
 
         // Restore original patched value if applicable.
         //

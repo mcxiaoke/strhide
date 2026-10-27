@@ -15,12 +15,12 @@ use crate::common::*;
 use std::fs;
 use std::path::Path;
 
-use strhide::engine::{
+use strhide::errors::StrHideError;
+use strhide::params::{CompressionStrategy, LocalParams, MagicPair, Profile};
+use strhide::structure::{
     PayloadSource, WriteOptions, inspect_carrier_with, read_carrier_with_profile,
     remove_carrier_with, verify_carrier_with, write_carrier_with,
 };
-use strhide::errors::StrHideError;
-use strhide::params::{CompressionStrategy, LocalParams, MagicPair, Profile};
 
 fn profile_with_secret(secret: &'static str) -> Profile {
     Profile::default().with_default_secret(secret)

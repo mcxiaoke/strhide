@@ -94,7 +94,8 @@ pub const PBKDF2_ITERATIONS: u32 = 100_000;
 /// Default internal secret used when the user does not specify a password.
 /// All envelopes are uniformly encrypted with AES-256-GCM and Deflate-compressed,
 /// eliminating plaintext leakage (no plaintext payload, metadata, or host SHA-256 in hex view).
-pub const BUILTIN_DEFAULT_KEY: &str = "strhide::envelope::v2::default::builtin::public::secret";
+pub const BUILTIN_DEFAULT_KEY: &str =
+    "strhide::structure::envelope::v2::default::builtin::public::secret";
 
 /// NFC-normalize a user-supplied string (password, hint, filename).
 ///

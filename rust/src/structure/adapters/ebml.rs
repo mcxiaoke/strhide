@@ -2,8 +2,8 @@
 //!
 //! Used by [`super::mkv::MkvAdapter`].
 
-use crate::adapters::SeekRead;
 use crate::errors::StrHideError;
+use crate::structure::adapters::SeekRead;
 
 pub const EBML_VOID_ID: u8 = 0xEC;
 pub const EBML_HEADER_ID: u32 = 0x1A45_DFA3;

@@ -1,12 +1,12 @@
 //! Windows Portable Executable (PE) adapter for strhide.
 
-use crate::adapters::pe_codebits;
-use crate::adapters::pe_slack;
-use crate::adapters::{
+use crate::errors::StrHideError;
+use crate::structure::adapters::pe_codebits;
+use crate::structure::adapters::pe_slack;
+use crate::structure::adapters::{
     HostAdapter, SeekRead, SeekWrite, StrategyCapacity, SubStream, format_bytes,
 };
-use crate::envelope::EnvelopeTrailer;
-use crate::errors::StrHideError;
+use crate::structure::envelope::EnvelopeTrailer;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
 pub const PE_DOS_MAGIC: [u8; 2] = *b"MZ";
@@ -231,29 +231,30 @@ impl HostAdapter for PeAdapter {
                         // emits, not the 136-byte structural bound: otherwise
                         // `inspect` advertises a capacity that every `write`
                         // rejects.
-                        let plain_ok = cap >= crate::envelope::MIN_UBE_PLAIN as usize;
-                        let encrypted_ok = cap >= crate::envelope::MIN_UBE_ENCRYPTED as usize;
+                        let plain_ok = cap >= crate::structure::envelope::MIN_UBE_PLAIN as usize;
+                        let encrypted_ok =
+                            cap >= crate::structure::envelope::MIN_UBE_ENCRYPTED as usize;
                         codebits.available = plain_ok;
                         codebits.limit =
                             format!("<= {} B (file size unchanged)", format_bytes(cap as u64));
                         codebits.note = Some(if encrypted_ok {
                             format!(
                                 "instruction-encoding channel; fits an encrypted envelope (smallest {} B); longest zero-value slack run is {} B, which caps the restore diff",
-                                format_bytes(crate::envelope::MIN_UBE_ENCRYPTED as u64),
+                                format_bytes(crate::structure::envelope::MIN_UBE_ENCRYPTED as u64),
                                 format_bytes(slack as u64)
                             )
                         } else if plain_ok {
                             format!(
                                 "instruction-encoding channel; fits an unencrypted envelope only (encrypted needs >= {} B); longest zero-value slack run is {} B, which caps the restore diff",
-                                format_bytes(crate::envelope::MIN_UBE_ENCRYPTED as u64),
+                                format_bytes(crate::structure::envelope::MIN_UBE_ENCRYPTED as u64),
                                 format_bytes(slack as u64)
                             )
                         } else {
                             format!(
                                 "not usable on this .text: at most {} B (unencrypted needs >= {} B, encrypted >= {} B)",
                                 format_bytes(cap as u64),
-                                format_bytes(crate::envelope::MIN_UBE_PLAIN as u64),
-                                format_bytes(crate::envelope::MIN_UBE_ENCRYPTED as u64)
+                                format_bytes(crate::structure::envelope::MIN_UBE_PLAIN as u64),
+                                format_bytes(crate::structure::envelope::MIN_UBE_ENCRYPTED as u64)
                             )
                         });
                     }
@@ -285,7 +286,7 @@ impl HostAdapter for PeAdapter {
                     let run =
                         pe_codebits::max_zero_run_streaming(r, &layout.slack_ranges).unwrap_or(0);
                     pad.capacity_bytes = Some(run as u64);
-                    let plain_ok = run >= crate::envelope::MIN_UBE_PLAIN as usize;
+                    let plain_ok = run >= crate::structure::envelope::MIN_UBE_PLAIN as usize;
                     pad.available = plain_ok;
                     pad.limit = format!("<= {} B (file size unchanged)", format_bytes(run as u64));
                     pad.note = Some(if plain_ok {
@@ -298,7 +299,7 @@ impl HostAdapter for PeAdapter {
                         format!(
                             "not usable on this carrier: largest zero run is {} B (smallest envelope is {} B)",
                             format_bytes(run as u64),
-                            format_bytes(crate::envelope::MIN_UBE_PLAIN as u64)
+                            format_bytes(crate::structure::envelope::MIN_UBE_PLAIN as u64)
                         )
                     });
                 }
@@ -386,10 +387,10 @@ impl HostAdapter for PeAdapter {
         }
 
         host_in.seek(SeekFrom::Start(0))?;
-        let inject_offset = crate::adapters::io::copy_stream(host_in, out)?;
+        let inject_offset = crate::structure::adapters::io::copy_stream(host_in, out)?;
         let ube_size = ube_in.seek(SeekFrom::End(0))?;
         ube_in.seek(SeekFrom::Start(0))?;
-        crate::adapters::io::copy_exact(ube_in, out, ube_size)?;
+        crate::structure::adapters::io::copy_exact(ube_in, out, ube_size)?;
 
         Ok((inject_offset, ube_size, 0, 0))
     }
@@ -477,12 +478,12 @@ impl HostAdapter for PeAdapter {
         &self,
         stego_in: &mut dyn SeekRead,
         out: &mut dyn SeekWrite,
-        header: &crate::envelope::EnvelopeHeader,
+        header: &crate::structure::envelope::EnvelopeHeader,
     ) -> Result<(), StrHideError> {
-        if crate::router::id_to_strategy(header.strategy_id) == "pe_codebits" {
+        if crate::structure::registry::id_to_strategy(header.strategy_id) == "pe_codebits" {
             return strip_codebits(stego_in, out);
         }
-        if crate::router::id_to_strategy(header.strategy_id) == "pe_slack" {
+        if crate::structure::registry::id_to_strategy(header.strategy_id) == "pe_slack" {
             // The envelope overwrote padding in place: restore = zero-fill that
             // exact region, which reproduces the original bytes because the
             // writer verified the region was all-zero before overwriting it.
@@ -494,7 +495,7 @@ impl HostAdapter for PeAdapter {
         // because the codebits dispatch needs a strategy hook that the header
         // provides (PE never emits a non-zero patch_offset).
         stego_in.seek(SeekFrom::Start(0))?;
-        crate::adapters::io::copy_exact(stego_in, out, header.inject_offset)?;
+        crate::structure::adapters::io::copy_exact(stego_in, out, header.inject_offset)?;
         Ok(())
     }
 
@@ -539,7 +540,7 @@ impl HostAdapter for PeAdapter {
                     "strhide envelope header at offset {offset} inside PE section padding ({} padding range(s) scanned)",
                     scan.ranges
                 ));
-            } else if scan.nonzero >= crate::envelope::MIN_UBE_PLAIN as u64
+            } else if scan.nonzero >= crate::structure::envelope::MIN_UBE_PLAIN as u64
                 && scan.distinct >= pe_slack::MIN_CIPHERTEXT_DISTINCT
             {
                 found.push(format!(

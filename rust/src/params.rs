@@ -29,7 +29,7 @@
 //!
 //! Runtime credentials (CLI flags, config files, environment variables) do
 //! **not** belong here: they are per-operation and are carried by
-//! [`crate::engine::WriteOptions`] / [`crate::stego::StegoOptions`], whose
+//! [`crate::structure::WriteOptions`] / [`crate::stego::StegoOptions`], whose
 //! explicit value always wins over the profile's static default.
 //!
 //! Splitting this way (instead of the earlier `EngineConfig` / `ReadConfig`
@@ -41,7 +41,7 @@
 //! already stored in (or recoverable from) the envelope.
 
 use crate::crypto::{BUILTIN_DEFAULT_KEY, CHUNK_SIZE, MAX_CHUNK_SIZE};
-#[cfg(feature = "stego")]
+#[cfg(feature = "content")]
 use crate::stego::format::{
     DEFAULT_HEVC_FORMAT, DEFAULT_JPEG_FORMAT, HevcFormatProfile, JpegFormatProfile,
     OFFICIAL_PNG_FORMAT, PngFormatProfile,
@@ -258,7 +258,7 @@ impl LocalParams {
 /// domains ([`crate::envelope`] vs [`crate::stego::envelope`]), so sharing one
 /// string would couple two independent dialects. Both are carried by the same
 /// `Profile`, so there is still exactly one object to store and pass around.
-#[cfg(feature = "stego")]
+#[cfg(feature = "content")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct StegoProfile {
@@ -285,7 +285,7 @@ pub struct StegoProfile {
     pub hevc: Option<HevcFormatProfile>,
 }
 
-#[cfg(feature = "stego")]
+#[cfg(feature = "content")]
 impl StegoProfile {
     /// Official content-domain defaults (no private secret, official format).
     pub const fn new() -> Self {
@@ -380,11 +380,11 @@ impl StegoProfile {
     }
 }
 
-#[cfg(not(feature = "stego"))]
+#[cfg(not(feature = "content"))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StegoProfile;
 
-#[cfg(not(feature = "stego"))]
+#[cfg(not(feature = "content"))]
 impl StegoProfile {
     pub const fn new() -> Self {
         Self
@@ -473,7 +473,7 @@ impl Profile {
         self
     }
 
-    #[cfg(feature = "stego")]
+    #[cfg(feature = "content")]
     /// Set the private no-password secret used by image steganography.
     ///
     /// Sugar for `with_stego_profile(StegoProfile::new().with_default_secret(..))`;
@@ -484,47 +484,47 @@ impl Profile {
         self
     }
 
-    #[cfg(feature = "stego")]
+    #[cfg(feature = "content")]
     /// Set the custom stego domain tag used to isolate the HKDF key derivation.
     pub const fn with_stego_domain(mut self, domain: &'static str) -> Self {
         self.stego = self.stego.with_stego_domain(domain);
         self
     }
 
-    #[cfg(feature = "stego")]
+    #[cfg(feature = "content")]
     /// Set the private JPEG wire-format identity.
     pub const fn with_jpeg_format(mut self, format: JpegFormatProfile) -> Self {
         self.stego = self.stego.with_jpeg_format(format);
         self
     }
 
-    #[cfg(feature = "stego")]
+    #[cfg(feature = "content")]
     /// Set the private PNG wire-format identity.
     pub const fn with_png_format(mut self, png: PngFormatProfile) -> Self {
         self.stego = self.stego.with_png_format(png);
         self
     }
 
-    #[cfg(feature = "stego")]
+    #[cfg(feature = "content")]
     /// PNG wire-format identity (private if set, else official).
     pub fn png_format(&self) -> &PngFormatProfile {
         self.stego.png_format()
     }
 
     /// Set the private HEVC wire-format identity.
-    #[cfg(feature = "stego")]
+    #[cfg(feature = "content")]
     pub const fn with_hevc_format(mut self, hevc: HevcFormatProfile) -> Self {
         self.stego = self.stego.with_hevc_format(hevc);
         self
     }
 
     /// HEVC wire-format identity (private if set, else official).
-    #[cfg(feature = "stego")]
+    #[cfg(feature = "content")]
     pub fn hevc_format(&self) -> &HevcFormatProfile {
         self.stego.hevc_format()
     }
 
-    #[cfg(feature = "stego")]
+    #[cfg(feature = "content")]
     /// Private content-domain secret, if any.
     ///
     /// `None` means the stego envelope layer falls back to the public
@@ -533,13 +533,13 @@ impl Profile {
         self.stego.secret()
     }
 
-    #[cfg(feature = "stego")]
+    #[cfg(feature = "content")]
     /// Custom stego domain tag, if any.
     pub fn stego_domain(&self) -> Option<&str> {
         self.stego.stego_domain()
     }
 
-    #[cfg(feature = "stego")]
+    #[cfg(feature = "content")]
     /// JPEG wire-format identity (private if set, else official).
     pub fn jpeg_format(&self) -> &JpegFormatProfile {
         self.stego.jpeg_format()
@@ -569,7 +569,7 @@ impl Profile {
 
     /// Trailer magic to hand to `HostAdapter::locate`: `None` for the official
     /// dialect (which also accepts legacy magics), the custom magic otherwise.
-    #[cfg(any(feature = "engine", test))]
+    #[cfg(any(feature = "structure", test))]
     pub(crate) fn locator_magic(&self) -> Option<&[u8; 4]> {
         self.magic.as_ref().map(|m| &m.trailer)
     }
