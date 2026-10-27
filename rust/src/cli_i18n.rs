@@ -54,6 +54,7 @@ fn cmd_about(name: &str, lang: Lang) -> Option<&'static str> {
 
 fn cmd_after_help(name: &str, lang: Lang) -> Option<&'static str> {
     let msg = match name {
+        "strhide" => Msg::AfterHelpRoot,
         "write" => Msg::AfterHelpWrite,
         "read" => Msg::AfterHelpRead,
         "embed" => Msg::AfterHelpEmbed,

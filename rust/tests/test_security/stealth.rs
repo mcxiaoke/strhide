@@ -1,7 +1,8 @@
 use crate::common::*;
 use std::fs;
 use strhide::structure::{
-    PayloadSource, WriteOptions, read_carrier, remove_carrier, verify_carrier, write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, read_carrier, remove_carrier,
+    verify_carrier, write_carrier,
 };
 
 fn sample_png() -> Vec<u8> {
@@ -60,7 +61,15 @@ fn test_stealth_carrier_leaks_no_host_sha256() {
     );
 
     // 2. Read with password succeeds and verifies payload
-    let read_res = read_carrier(&out_path, None, Some(password)).unwrap();
+    let read_res = read_carrier(
+        &out_path,
+        &ReadOptions {
+            output_path: None,
+            password: Some(password),
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(read_res.data, secret.as_bytes());
 
     // 3. Verify succeeds
@@ -70,7 +79,16 @@ fn test_stealth_carrier_leaks_no_host_sha256() {
     assert!(verify_res.level3_crypto.ok);
 
     // 4. Remove restores exact byte-for-byte carrier
-    let rem_res = remove_carrier(&out_path, None, Some(password), false).unwrap();
+    let rem_res = remove_carrier(
+        &out_path,
+        &RestoreOptions {
+            output_path: None,
+            password: Some(password),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert!(rem_res.verified_identical);
     let restored_bytes = fs::read(&out_path).unwrap();
     assert_eq!(restored_bytes, raw_png);
@@ -220,8 +238,15 @@ fn test_pre_v2_stealth_unmasked_envelope_is_rejected() {
     // Pre-v2 stealth envelopes packed the header unmasked and stored JSON
     // metadata. Both layouts are gone: the read must fail rather than return
     // partially-parsed data, and the carrier must be left untouched.
-    let read_err = read_carrier(&carrier_path, None, Some(password))
-        .expect_err("pre-v2 unmasked stealth envelope must not be readable");
+    let read_err = read_carrier(
+        &carrier_path,
+        &ReadOptions {
+            output_path: None,
+            password: Some(password),
+            overwrite: false,
+        },
+    )
+    .expect_err("pre-v2 unmasked stealth envelope must not be readable");
     let _ = read_err;
     assert_eq!(fs::read(&carrier_path).unwrap(), stego_png);
 }
@@ -281,7 +306,15 @@ fn test_default_carrier_uniform_encryption_and_zero_plaintext() {
     );
 
     // 4. Read without password extracts seamlessly and 100% deterministically
-    let read_res = read_carrier(&out_path, None, None).unwrap();
+    let read_res = read_carrier(
+        &out_path,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(read_res.data, secret);
     assert_eq!(read_res.filename, filename);
 
@@ -298,7 +331,16 @@ fn test_default_carrier_uniform_encryption_and_zero_plaintext() {
     assert!(verify_res.level3_crypto.ok);
 
     // 7. Remove carrier restores 100% byte-for-byte exact host
-    let rem_res = remove_carrier(&out_path, None, None, false).unwrap();
+    let rem_res = remove_carrier(
+        &out_path,
+        &RestoreOptions {
+            output_path: None,
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert!(rem_res.verified_identical);
     assert_eq!(fs::read(&out_path).unwrap(), raw_png);
 }
@@ -369,8 +411,15 @@ fn test_pre_v2_plaintext_metadata_envelope_is_rejected() {
 
     // Metadata is AEAD-sealed in every current envelope; a plaintext block is
     // no longer accepted, so `read` fails and the carrier stays byte-identical.
-    read_carrier(&carrier_path, None, None)
-        .expect_err("pre-v2 plaintext metadata must not be readable");
+    read_carrier(
+        &carrier_path,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .expect_err("pre-v2 plaintext metadata must not be readable");
     assert_eq!(fs::read(&carrier_path).unwrap(), stego_png);
 }
 
@@ -415,7 +464,15 @@ fn test_standard_carrier_has_zero_ascii_magics() {
     );
 
     // 2. Read extracts payload 100% deterministically
-    let read_res = read_carrier(&out_path, None, None).unwrap();
+    let read_res = read_carrier(
+        &out_path,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(read_res.data, secret.as_bytes());
 
     // 3. Verify carrier passes all checks
@@ -425,7 +482,16 @@ fn test_standard_carrier_has_zero_ascii_magics() {
     assert!(verify_res.level3_crypto.ok);
 
     // 4. Remove restores original carrier byte-for-byte
-    let rem_res = remove_carrier(&out_path, None, None, false).unwrap();
+    let rem_res = remove_carrier(
+        &out_path,
+        &RestoreOptions {
+            output_path: None,
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert!(rem_res.verified_identical);
     assert_eq!(fs::read(&out_path).unwrap(), raw_png);
 }

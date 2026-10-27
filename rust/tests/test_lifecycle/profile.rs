@@ -1,7 +1,7 @@
 //! Library parameters and private-dialect profiles.
 //!
 //! M1 of `docs/library_api_practical_plan_20261020.md`: `LocalParams` (L class,
-//! writer-only) and `Profile` (P class, read/write must agree) threaded through
+//! writer-only) and `StructureProfile` (P class, read/write must agree) threaded through
 //! every engine entry point, with **zero** wire-format changes.
 //!
 //! The central claim under test is the *separation*, not just the round trip:
@@ -16,18 +16,21 @@ use std::fs;
 use std::path::Path;
 
 use strhide::errors::StrHideError;
-use strhide::params::{CompressionStrategy, LocalParams, MagicPair, Profile};
+use strhide::params::{CompressionStrategy, LocalParams, MagicPair};
+use strhide::stego::params::StegoProfile;
+use strhide::structure::StructureProfile;
 use strhide::structure::{
-    PayloadSource, WriteOptions, inspect_carrier_with, read_carrier_with_profile,
-    remove_carrier_with, verify_carrier_with, write_carrier_with,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, inspect_carrier_with,
+    read_carrier_with_dialect, remove_carrier_with_dialect, verify_carrier_with,
+    write_carrier_with,
 };
 
-fn profile_with_secret(secret: &'static str) -> Profile {
-    Profile::default().with_default_secret(secret)
+fn profile_with_secret(secret: &'static str) -> StructureProfile {
+    StructureProfile::default().with_default_secret(secret)
 }
 
-fn profile_with_magic() -> Profile {
-    Profile::default().with_magic(MagicPair {
+fn profile_with_magic() -> StructureProfile {
+    StructureProfile::default().with_magic(MagicPair {
         header: *b"PRIVHDR1",
         trailer: *b"PRVT",
     })
@@ -40,7 +43,7 @@ fn write(
     payload: &[u8],
     password: Option<&str>,
     local: &LocalParams,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> u64 {
     write_carrier_with(
         carrier,
@@ -64,8 +67,16 @@ fn write(
 /// or a stealth domain simply hides the envelope (`NoHiddenData`), while the
 /// same magics with a different secret are found and then fail to decode
 /// (`CorruptedData` / `Password`). What matters is that nothing comes out.
-fn assert_unreadable(carrier: &Path, password: Option<&str>, profile: &Profile) {
-    match read_carrier_with_profile(carrier, None, password, false, profile) {
+fn assert_unreadable(carrier: &Path, password: Option<&str>, profile: &StructureProfile) {
+    match read_carrier_with_dialect(
+        carrier,
+        &ReadOptions {
+            output_path: None,
+            password,
+            overwrite: false,
+        },
+        profile,
+    ) {
         Ok(res) => panic!(
             "a mismatched profile must not decode anything, got {} bytes",
             res.data.len()
@@ -100,19 +111,38 @@ fn private_default_secret_is_unreadable_with_the_official_profile() {
     );
 
     // Same profile: normal round trip.
-    let res = read_carrier_with_profile(&stego, None, None, false, &profile).unwrap();
+    let res = read_carrier_with_dialect(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+        &profile,
+    )
+    .unwrap();
     assert_eq!(res.data, b"hidden payload");
 
     // Official profile: the envelope is found (standard magics) but the header
     // mask and both keys derive from the other secret, so nothing decodes.
-    assert_unreadable(&stego, None, &Profile::default());
+    assert_unreadable(&stego, None, &StructureProfile::default());
 
     // A different private dialect is equally locked out.
     assert_unreadable(&stego, None, &profile_with_secret("another-dialect"));
 
     // The carrier still restores bit-for-bit through the dialect.
     let restored = dir.join("restored.png");
-    let removed = remove_carrier_with(&stego, Some(&restored), None, false, &profile).unwrap();
+    let removed = remove_carrier_with_dialect(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+        &profile,
+    )
+    .unwrap();
     assert!(removed.verified_identical);
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
 }
@@ -137,8 +167,16 @@ fn explicit_password_still_wins_over_the_private_secret() {
         &profile_with_secret("my-private-dialect"),
     );
 
-    let res = read_carrier_with_profile(&stego, None, Some("pw"), false, &Profile::default())
-        .expect("explicit password must not depend on the profile's default secret");
+    let res = read_carrier_with_dialect(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: Some("pw"),
+            overwrite: false,
+        },
+        &StructureProfile::default(),
+    )
+    .expect("explicit password must not depend on the profile's default secret");
     assert_eq!(res.data, b"pw payload");
 }
 
@@ -161,8 +199,8 @@ fn custom_magic_is_invisible_to_the_official_reader() {
 
     // `locate` searches for the dialect's own trailer magic, so the official
     // reader does not even see an envelope.
-    assert_unreadable(&stego, None, &Profile::default());
-    let official = inspect_carrier_with(&stego, None, &Profile::default()).unwrap();
+    assert_unreadable(&stego, None, &StructureProfile::default());
+    let official = inspect_carrier_with(&stego, None, &StructureProfile::default()).unwrap();
     assert!(
         !official.has_hidden_data,
         "official inspect must not report a private-magic envelope"
@@ -172,9 +210,17 @@ fn custom_magic_is_invisible_to_the_official_reader() {
     let mine = inspect_carrier_with(&stego, None, &profile).unwrap();
     assert!(mine.has_hidden_data);
     assert_eq!(
-        read_carrier_with_profile(&stego, None, None, false, &profile)
-            .unwrap()
-            .data,
+        read_carrier_with_dialect(
+            &stego,
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+            },
+            &profile
+        )
+        .unwrap()
+        .data,
         b"magic payload"
     );
 }
@@ -186,7 +232,7 @@ fn custom_stealth_domain_changes_the_derived_magic() {
     fs::write(&carrier, make_png()).unwrap();
     let stego = dir.join("stego.png");
 
-    let profile = Profile::default().with_stealth_domain(&b"acme-stealth-v1"[..]);
+    let profile = StructureProfile::default().with_stealth_domain(&b"acme-stealth-v1"[..]);
     write_carrier_with(
         &carrier,
         PayloadSource::Bytes(b"stealth payload"),
@@ -204,15 +250,23 @@ fn custom_stealth_domain_changes_the_derived_magic() {
 
     // Correct password, same domain: readable.
     assert_eq!(
-        read_carrier_with_profile(&stego, None, Some("pw"), false, &profile)
-            .unwrap()
-            .data,
+        read_carrier_with_dialect(
+            &stego,
+            &ReadOptions {
+                output_path: None,
+                password: Some("pw"),
+                overwrite: false,
+            },
+            &profile
+        )
+        .unwrap()
+        .data,
         b"stealth payload"
     );
 
     // Correct password, official domain: the derived magic differs, so the
     // envelope is invisible rather than mis-decoded.
-    assert_unreadable(&stego, Some("pw"), &Profile::default());
+    assert_unreadable(&stego, Some("pw"), &StructureProfile::default());
 }
 
 #[test]
@@ -232,7 +286,7 @@ fn chunk_size_is_a_writer_only_knob() {
         &payload,
         None,
         &never,
-        &Profile::default(),
+        &StructureProfile::default(),
     );
 
     let chunked = dir.join("chunked.png");
@@ -242,7 +296,7 @@ fn chunk_size_is_a_writer_only_knob() {
         &payload,
         None,
         &small,
-        &Profile::default(),
+        &StructureProfile::default(),
     );
 
     // 5000 bytes / 512 = 10 chunks instead of 1, i.e. +9 * 20 bytes of framing.
@@ -251,7 +305,16 @@ fn chunk_size_is_a_writer_only_knob() {
     // Both are read with the default LocalParams: the reader is never told the
     // chunk size, and does not need to be.
     for path in [&baseline, &chunked] {
-        let res = read_carrier_with_profile(path, None, None, false, &Profile::default()).unwrap();
+        let res = read_carrier_with_dialect(
+            path,
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+            },
+            &StructureProfile::default(),
+        )
+        .unwrap();
         assert_eq!(res.data, payload);
     }
 }
@@ -265,8 +328,15 @@ fn compression_strategy_is_a_writer_only_knob() {
 
     let never = LocalParams::default().with_compression(CompressionStrategy::Never);
     let out = dir.join("never.png");
-    write(&carrier, &out, &payload, None, &never, &Profile::default());
-    let info = inspect_carrier_with(&out, None, &Profile::default()).unwrap();
+    write(
+        &carrier,
+        &out,
+        &payload,
+        None,
+        &never,
+        &StructureProfile::default(),
+    );
+    let info = inspect_carrier_with(&out, None, &StructureProfile::default()).unwrap();
     assert_eq!(
         info.is_compressed,
         Some(false),
@@ -277,13 +347,28 @@ fn compression_strategy_is_a_writer_only_knob() {
     // follows FLAG_COMPRESSED and never learns the level.
     let always = LocalParams::default().with_compression(CompressionStrategy::Always { level: 1 });
     let out = dir.join("always.png");
-    write(&carrier, &out, &payload, None, &always, &Profile::default());
-    let info = inspect_carrier_with(&out, None, &Profile::default()).unwrap();
+    write(
+        &carrier,
+        &out,
+        &payload,
+        None,
+        &always,
+        &StructureProfile::default(),
+    );
+    let info = inspect_carrier_with(&out, None, &StructureProfile::default()).unwrap();
     assert_eq!(info.is_compressed, Some(true));
     assert_eq!(
-        read_carrier_with_profile(&out, None, None, false, &Profile::default())
-            .unwrap()
-            .data,
+        read_carrier_with_dialect(
+            &out,
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+            },
+            &StructureProfile::default()
+        )
+        .unwrap()
+        .data,
         payload
     );
 }
@@ -309,7 +394,7 @@ fn invalid_local_params_fail_before_touching_the_carrier() {
                 ..WriteOptions::default()
             },
             &bad,
-            &Profile::default(),
+            &StructureProfile::default(),
         )
         .unwrap_err();
         assert!(matches!(err, StrHideError::General(_)), "{err}");
@@ -337,7 +422,7 @@ fn rejection_policy_governs_filename_checks() {
             ..WriteOptions::default()
         },
         &LocalParams::default(),
-        &Profile::default(),
+        &StructureProfile::default(),
     )
     .unwrap_err();
     assert!(matches!(err, StrHideError::Rejection(_)), "{err}");
@@ -351,13 +436,21 @@ fn rejection_policy_governs_filename_checks() {
             ..WriteOptions::default()
         },
         &skip,
-        &Profile::default(),
+        &StructureProfile::default(),
     )
     .unwrap();
     assert_eq!(
-        read_carrier_with_profile(&carrier, None, None, false, &Profile::default())
-            .unwrap()
-            .data,
+        read_carrier_with_dialect(
+            &carrier,
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+            },
+            &StructureProfile::default()
+        )
+        .unwrap()
+        .data,
         b"x"
     );
 }
@@ -393,7 +486,7 @@ fn verify_accepts_the_profile() {
     );
 
     // Without the profile, level 2 cannot even parse the header.
-    let official = verify_carrier_with(&stego, None, &Profile::default()).unwrap();
+    let official = verify_carrier_with(&stego, None, &StructureProfile::default()).unwrap();
     assert!(!official.level2_envelope.ok);
     assert!(!official.level3_crypto.ok);
 }
@@ -417,17 +510,17 @@ const PRIVATE_FORMAT: strhide::JpegFormatProfile = strhide::JpegFormatProfile {
     suites: strhide::DEFAULT_JPEG_FORMAT.suites,
 };
 
-const PRIVATE_JPEG_PROFILE: Profile = Profile::new().with_jpeg_format(PRIVATE_FORMAT);
+const PRIVATE_JPEG_PROFILE: StegoProfile = StegoProfile::new().with_jpeg_format(PRIVATE_FORMAT);
 const SMALL_JPG: &[u8] = include_bytes!("../assets/small.jpg");
 const PRIVATE_PAYLOAD: &[u8] = b"private-format-roundtrip";
 
 #[test]
 fn private_format_embed_extract_roundtrip() {
     use strhide::core::payload::Payload;
-    use strhide::stego::{EmbedOptions, embed_carrier_with_profile, extract_carrier_with_profile};
+    use strhide::stego::{EmbedOptions, embed_carrier_with_dialect, extract_carrier_with_dialect};
 
     let options = EmbedOptions::default();
-    let stego = embed_carrier_with_profile(
+    let stego = embed_carrier_with_dialect(
         SMALL_JPG,
         &Payload::bytes(PRIVATE_PAYLOAD),
         &options,
@@ -437,17 +530,17 @@ fn private_format_embed_extract_roundtrip() {
     assert_ne!(stego, SMALL_JPG, "the carrier must change");
 
     let extracted =
-        extract_carrier_with_profile(&stego, &options.extract_options(), &PRIVATE_JPEG_PROFILE)
+        extract_carrier_with_dialect(&stego, &options.extract_options(), &PRIVATE_JPEG_PROFILE)
             .expect("extract under private format");
     assert_eq!(extracted, PRIVATE_PAYLOAD);
 }
 
 #[test]
 fn private_format_probe_uses_private_geometry() {
-    use strhide::stego::{ProbeOptions, probe_carrier_capacity_with_profile};
+    use strhide::stego::{ProbeOptions, probe_carrier_capacity_with_dialect};
 
     let options = ProbeOptions::default();
-    let cap = probe_carrier_capacity_with_profile(SMALL_JPG, &options, &PRIVATE_JPEG_PROFILE)
+    let cap = probe_carrier_capacity_with_dialect(SMALL_JPG, &options, &PRIVATE_JPEG_PROFILE)
         .expect("probe under private format");
     assert!(
         cap.recommended_max_bytes > 0,
@@ -459,10 +552,10 @@ fn private_format_probe_uses_private_geometry() {
 #[test]
 fn official_profile_cannot_read_private_format() {
     use strhide::core::payload::Payload;
-    use strhide::stego::{EmbedOptions, embed_carrier_with_profile, extract_carrier_with_profile};
+    use strhide::stego::{EmbedOptions, embed_carrier_with_dialect, extract_carrier_with_dialect};
 
     let options = EmbedOptions::default();
-    let stego = embed_carrier_with_profile(
+    let stego = embed_carrier_with_dialect(
         SMALL_JPG,
         &Payload::bytes(PRIVATE_PAYLOAD),
         &options,
@@ -470,9 +563,9 @@ fn official_profile_cannot_read_private_format() {
     )
     .expect("embed under private format");
 
-    let official = Profile::default();
+    let official = StegoProfile::default();
     assert!(
-        extract_carrier_with_profile(&stego, &options.extract_options(), &official).is_err(),
+        extract_carrier_with_dialect(&stego, &options.extract_options(), &official).is_err(),
         "an official profile must not read a private-format carrier"
     );
 }
@@ -480,5 +573,5 @@ fn official_profile_cannot_read_private_format() {
 #[test]
 fn private_format_is_a_non_official_dialect() {
     assert!(!PRIVATE_JPEG_PROFILE.is_official());
-    assert!(Profile::default().is_official());
+    assert!(StegoProfile::default().is_official());
 }

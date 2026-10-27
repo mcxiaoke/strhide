@@ -17,6 +17,7 @@ use std::process::Stdio;
 
 use strhide::errors::StrHideError;
 use strhide::structure::{PayloadSource, WriteOptions, read_carrier, write_carrier};
+use strhide::structure::{ReadOptions, RestoreOptions};
 
 // --------------------------------------------------------------------------- helpers
 
@@ -203,7 +204,15 @@ fn read_stealth_without_password_reports_guidance() {
     .unwrap();
 
     // Engine level: NoHiddenDataError carrying actionable guidance.
-    let err = read_carrier(&out, None, None).unwrap_err();
+    let err = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap_err();
     assert!(
         matches!(err, StrHideError::NoHiddenData(_)),
         "expected NoHiddenData variant, got {err:?}"
@@ -249,7 +258,15 @@ fn read_encrypted_without_password_raises_password_variant() {
     )
     .unwrap();
 
-    let err = read_carrier(&out, None, None).unwrap_err();
+    let err = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap_err();
     assert!(
         matches!(err, StrHideError::PasswordWithHint { .. }),
         "expected PasswordWithHint variant, got {err:?}"
@@ -310,8 +327,16 @@ fn clean_zip_is_still_accepted() {
         },
     )
     .unwrap();
-    assert_eq!(res.strategy, "pre_cd_inject");
-    let read = read_carrier(&out, None, None).unwrap();
+    assert_eq!(res.strategy.name(), "pre_cd_inject");
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(read.data, b"payload");
 }
 
@@ -349,7 +374,15 @@ fn cli_unescape_supports_full_escape_set() {
         String::from_utf8_lossy(&res.stderr)
     );
 
-    let read = read_carrier(&out, None, None).unwrap();
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     // \x42 -> 'B', \u4E2D -> '中', \101 -> 'A' (octal), \t -> tab,
     // \U0001F680 -> 🚀, \q -> literal backslash-q, \a -> BEL,
     // \x4b -> 'K' (exactly two hex digits), \xz -> verbatim, \g -> verbatim.
@@ -391,7 +424,15 @@ fn cli_unescape_combines_surrogate_pair() {
         String::from_utf8_lossy(&res.stderr)
     );
 
-    let read = read_carrier(&out, None, None).unwrap();
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(read.data, "P\u{1F680}Q\u{FFFD}\\uZZZZ".as_bytes().to_vec());
 }
 
@@ -420,7 +461,15 @@ fn cli_unescape_keeps_non_ascii_input_intact() {
         .unwrap();
     assert_eq!(res.status.code(), Some(0));
 
-    let read = read_carrier(&out, None, None).unwrap();
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     // NFC normalization applies to the text payload; the escapes are decoded
     // and the CJK characters survive unmangled.
     assert_eq!(read.data, "中文\n行".as_bytes().to_vec());
@@ -477,15 +526,32 @@ fn backup_collision_uses_timestamped_name() {
     )
     .unwrap();
     let bak1 = w1.backup_file.expect("backup created");
-    assert!(bak1.ends_with(".bak"), "{bak1}");
+    assert!(
+        bak1.to_string_lossy().ends_with(".bak"),
+        "{}",
+        bak1.display()
+    );
     assert_eq!(fs::read(&bak1).unwrap(), original);
 
     // Removing in place would previously overwrite that .bak, destroying the
     // only pre-write copy of the carrier.
-    let r1 = remove_carrier(&carrier, None, None, true).unwrap();
+    let r1 = remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: None,
+            password: None,
+            backup: true,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     let bak2 = r1.backup_file.expect("backup created");
     assert_ne!(bak1, bak2, "backup path was reused");
-    assert!(bak2.contains(".bak-"), "{bak2}");
+    assert!(
+        bak2.to_string_lossy().contains(".bak-"),
+        "{}",
+        bak2.display()
+    );
     assert!(
         fs::metadata(&bak1).is_ok(),
         "first backup must be preserved"

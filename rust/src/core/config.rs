@@ -19,7 +19,14 @@
 //! backup        = true          # write/remove: .bak backup default
 //! unescape      = false         # write: escape-sequence decoding default
 //! lang          = "zh"         # all: interface language (en|zh), default: auto-detect
+//!
+//! [stego]
+//! safety         = "high"      # embed/capacity: paranoid | high | balanced
+//! enforce_safety = false       # embed/capacity: refuse instead of warn above the tier
+//! algorithm      = "auto"      # embed/capacity: auto | hill | suniw
 //! ```
+//!
+//! An explicit CLI flag always wins over the configured default.
 
 use std::path::{Path, PathBuf};
 
@@ -40,6 +47,7 @@ const KNOWN_KEYS: &[&str] = &[
     "backup",
     "unescape",
     "lang",
+    "stego",
 ];
 
 /// Parsed configuration file. Every field is optional; `None` means "not
@@ -57,6 +65,25 @@ pub struct FileConfig {
     pub unescape: Option<bool>,
     /// Interface language ("en" | "zh"); unset or invalid falls back to environment/system/English.
     pub lang: Option<String>,
+    /// `[stego]` section: defaults for `embed` / `capacity`.
+    pub stego: Option<StegoConfig>,
+}
+
+/// `[stego]` section: content-domain defaults applied when the matching CLI
+/// flag is absent.
+///
+/// These mirror exactly three flags — `--safety`, `--enforce-safety`,
+/// `--algorithm` — because those are the knobs a deployment wants to pin once
+/// rather than repeat on every command line. Per-format tuning parameters stay
+/// flag-only: they are experimentation knobs, not policy.
+#[derive(Deserialize, Debug, Default, Clone)]
+pub struct StegoConfig {
+    /// Safety tier name (`paranoid` | `high` | `balanced`).
+    pub safety: Option<String>,
+    /// Refuse (instead of warn) when the payload exceeds the tier's capacity.
+    pub enforce_safety: Option<bool>,
+    /// Cost model / algorithm name (`auto` | `hill` | `suniw` | `uerd` | ...).
+    pub algorithm: Option<String>,
 }
 
 /// Candidate paths in lookup order, excluding an explicit `--config` path.
@@ -163,6 +190,27 @@ mod tests {
         "#;
         let cfg = parse_config(toml_str, Path::new("explicit.toml"), false).unwrap();
         assert_eq!(cfg.password.as_deref(), Some("valid_user_pwd"));
+    }
+
+    #[test]
+    fn stego_section_is_parsed() {
+        let toml_str = r#"
+            [stego]
+            safety = "paranoid"
+            enforce_safety = true
+            algorithm = "hill"
+        "#;
+        let cfg = parse_config(toml_str, Path::new("explicit.toml"), false).unwrap();
+        let stego = cfg.stego.expect("[stego] section must be captured");
+        assert_eq!(stego.safety.as_deref(), Some("paranoid"));
+        assert_eq!(stego.enforce_safety, Some(true));
+        assert_eq!(stego.algorithm.as_deref(), Some("hill"));
+    }
+
+    #[test]
+    fn absent_stego_section_leaves_defaults_alone() {
+        let cfg = parse_config("backup = true", Path::new("explicit.toml"), false).unwrap();
+        assert!(cfg.stego.is_none());
     }
 
     #[test]

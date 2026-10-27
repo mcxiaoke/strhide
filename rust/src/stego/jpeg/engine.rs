@@ -36,6 +36,7 @@ use dct_io::JpegCoefficients;
 use sha2::{Digest, Sha256};
 
 use crate::core::control::{Control, Stage};
+use crate::core::media::MediaInfo;
 use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::stego::StegoCapacityInfo;
@@ -1299,12 +1300,12 @@ pub fn inspect_jpeg(
         }
     };
     control.check()?;
-    let media_info = Some(format!(
-        "{}x{}",
-        preflight.info.width, preflight.info.height
+    let media_info = Some(MediaInfo::new(
+        u32::from(preflight.info.width),
+        u32::from(preflight.info.height),
     ));
     let mut empty_info = StegoHeaderInfo::empty("JPEG");
-    empty_info.media_info = media_info.clone();
+    empty_info.media_info = media_info;
 
     let coeffs = match dct_io::read_coefficients(carrier_bytes) {
         Ok(c) => c,
@@ -1562,7 +1563,10 @@ pub fn probe_jpeg_capacity(
         safety_level: safety_level.as_str().into(),
         safety_bpp_limit: safety_level.bpp_limit(),
         is_estimated: false,
-        media_info: Some(format!("{}x{}", info.width, info.height)),
+        media_info: Some(MediaInfo::new(
+            u32::from(info.width),
+            u32::from(info.height),
+        )),
     })
 }
 

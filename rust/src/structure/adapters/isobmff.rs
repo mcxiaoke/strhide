@@ -429,7 +429,7 @@ pub fn heif_strategy_capacities() -> Vec<StrategyCapacity> {
 }
 
 /// Upper bound for the whole-file scans in [`isobmff_can_item_hidden`] and
-/// [`isobmff_has_iloc_item`]. Both only need the boxes up to and including the
+/// `isobmff_has_iloc_item`. Both only need the boxes up to and including the
 /// `meta` box, which sits near the file start in every real carrier, so the
 /// cap keeps a multi-GB host from being buffered whole (review P3-6). Past the
 /// cap the scans answer "no": auto steers to `box_uuid` on the write path, and

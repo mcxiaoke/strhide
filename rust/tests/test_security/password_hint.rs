@@ -6,7 +6,8 @@ use std::fs;
 use strhide::crypto::compute_file_sha256;
 use strhide::errors::StrHideError;
 use strhide::structure::{
-    PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, inspect_carrier, read_carrier,
+    remove_carrier, write_carrier,
 };
 
 fn make_dummy_png() -> Vec<u8> {
@@ -76,7 +77,15 @@ fn test_password_hint_lifecycle() {
 
     // 3. Read carrier without password: the error carries the hint as a
     // structured field (and still renders it into the message).
-    let err = read_carrier(&carrier, None, None).unwrap_err();
+    let err = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap_err();
     assert_eq!(err.hint(), Some(hint_text), "structured hint: {err:?}");
     assert!(
         err.to_string().contains(hint_text),
@@ -84,12 +93,29 @@ fn test_password_hint_lifecycle() {
     );
 
     // 4. Read carrier with correct password: must extract successfully!
-    let res_r = read_carrier(&carrier, None, Some(pwd)).expect("read");
+    let res_r = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: Some(pwd),
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(String::from_utf8(res_r.data).unwrap(), secret);
 
     // 5. Remove carrier: 100% loss-free restore
     let restored = dir.join("test.restored.png");
-    remove_carrier(&carrier, Some(&restored), Some(pwd), false).expect("remove");
+    remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some(pwd),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert_eq!(compute_file_sha256(&restored).unwrap(), orig_sha);
 }
 
@@ -138,7 +164,15 @@ fn test_no_hint_behavior() {
     assert_eq!(res_i.password_hint, None);
 
     // Read without password: fails with password required, but NO hint
-    let err = read_carrier(&carrier, None, None).unwrap_err();
+    let err = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap_err();
     assert_eq!(err.hint(), None, "no hint should be present: {err:?}");
     assert!(
         !err.to_string().contains("Hint:"),
@@ -146,12 +180,29 @@ fn test_no_hint_behavior() {
     );
 
     // Read with password
-    let res_r = read_carrier(&carrier, None, Some("pwd123")).expect("read");
+    let res_r = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: Some("pwd123"),
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(String::from_utf8(res_r.data).unwrap(), "no hint secret");
 
     // Remove
     let restored = dir.join("test.restored.png");
-    remove_carrier(&carrier, Some(&restored), Some("pwd123"), false).expect("remove");
+    remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some("pwd123"),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert_eq!(compute_file_sha256(&restored).unwrap(), orig_sha);
 }
 

@@ -10,6 +10,8 @@ pub mod heif_hidden_item {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    use strhide::structure::{ReadOptions, RestoreOptions};
+
     use strhide::structure::{
         PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
         write_carrier,
@@ -93,7 +95,7 @@ pub mod heif_hidden_item {
                 )
                 .unwrap_or_else(|e| panic!("Failed to write item_hidden into {sample_name}: {e}"));
 
-                assert_eq!(write_res.strategy, "item_hidden");
+                assert_eq!(write_res.strategy.name(), "item_hidden");
 
                 // Verify structure
                 let verify_res = verify_carrier(&target_path, None).expect("verify");
@@ -105,14 +107,31 @@ pub mod heif_hidden_item {
 
                 // Inspect
                 let insp = inspect_carrier(&target_path, None).expect("inspect");
-                assert_eq!(insp.strategy.as_deref(), Some("item_hidden"));
+                assert_eq!(insp.strategy.map(|s| s.name()), Some("item_hidden"));
 
                 // Read
-                let read_res = read_carrier(&target_path, None, Some("heif-pass")).expect("read");
+                let read_res = read_carrier(
+                    &target_path,
+                    &ReadOptions {
+                        output_path: None,
+                        password: Some("heif-pass"),
+                        overwrite: false,
+                    },
+                )
+                .expect("read");
                 assert_eq!(read_res.data, payload);
 
                 // Strip / remove and check 100% bit-exact restoration
-                let remove_res = remove_carrier(&target_path, None, None, false).expect("remove");
+                let remove_res = remove_carrier(
+                    &target_path,
+                    &RestoreOptions {
+                        output_path: None,
+                        password: None,
+                        backup: false,
+                        overwrite: false,
+                    },
+                )
+                .expect("remove");
                 assert!(remove_res.verified_identical);
 
                 let restored_bytes = fs::read(&target_path).unwrap();
@@ -142,12 +161,29 @@ pub mod heif_hidden_item {
                 )
                 .unwrap_or_else(|e| panic!("Failed to write free_box into {sample_name}: {e}"));
 
-                assert_eq!(write_res.strategy, "free_box");
+                assert_eq!(write_res.strategy.name(), "free_box");
 
-                let read_res = read_carrier(&target_path, None, Some("heif-pass")).expect("read");
+                let read_res = read_carrier(
+                    &target_path,
+                    &ReadOptions {
+                        output_path: None,
+                        password: Some("heif-pass"),
+                        overwrite: false,
+                    },
+                )
+                .expect("read");
                 assert_eq!(read_res.data, payload);
 
-                let remove_res = remove_carrier(&target_path, None, None, false).expect("remove");
+                let remove_res = remove_carrier(
+                    &target_path,
+                    &RestoreOptions {
+                        output_path: None,
+                        password: None,
+                        backup: false,
+                        overwrite: false,
+                    },
+                )
+                .expect("remove");
                 assert!(remove_res.verified_identical);
 
                 let restored_bytes = fs::read(&target_path).unwrap();
@@ -178,11 +214,20 @@ pub mod heif_hidden_item {
                 .unwrap_or_else(|e| panic!("Failed to write auto into {sample_name}: {e}"));
 
                 assert_eq!(
-                    write_res.strategy, "item_hidden",
+                    write_res.strategy.name(),
+                    "item_hidden",
                     "Auto strategy should choose item_hidden for {sample_name}"
                 );
 
-                let read_res = read_carrier(&target_path, None, Some("heif-pass")).expect("read");
+                let read_res = read_carrier(
+                    &target_path,
+                    &ReadOptions {
+                        output_path: None,
+                        password: Some("heif-pass"),
+                        overwrite: false,
+                    },
+                )
+                .expect("read");
                 assert_eq!(read_res.data, payload);
             }
         }
@@ -197,10 +242,10 @@ pub mod heif_bridge {
 
     use strhide::core::payload::Payload;
     use strhide::errors::StrHideError;
-    use strhide::params::Profile;
     use strhide::stego::heif::{
         embed_heif_bridge, extract_heif_bridge, probe_heif_bridge_capacity,
     };
+    use strhide::stego::params::StegoProfile;
     use strhide::stego::{
         BridgeOptions, EmbedOptions, ExtractParams, HevcMode, StegoTuning, embed_carrier,
         extract_carrier, probe_carrier_capacity,
@@ -263,13 +308,13 @@ pub mod heif_bridge {
         // bridge, so the bridge's own contract is exercised through its own
         // API. Router-level priority is pinned by
         // `local_heif_router_prefers_scheme_c` below.
-        let profile = Profile::default();
+        let profile = StegoProfile::default();
         let orig_bytes = fs::read(sample_path).expect("read original HEIC");
 
         // 1. Probe capacity
         let cap = probe_heif_bridge_capacity(
             &orig_bytes,
-            &BridgeOptions::new(&profile.stego),
+            &BridgeOptions::new(&profile),
             &strhide::core::control::Control::none(),
         )
         .expect("probe bridge capacity");
@@ -285,7 +330,7 @@ pub mod heif_bridge {
         let stego_bytes = embed_heif_bridge(
             &orig_bytes,
             payload,
-            &BridgeOptions::new(&profile.stego).with_password("bridge_pass_2026"),
+            &BridgeOptions::new(&profile).with_password("bridge_pass_2026"),
             &strhide::core::control::Control::none(),
         )
         .expect("embed carrier into HEIF thumbnail bridge");
@@ -302,7 +347,7 @@ pub mod heif_bridge {
         // 3. Extract payload with matching password
         let extracted = extract_heif_bridge(
             &stego_bytes,
-            &BridgeOptions::new(&profile.stego).with_password("bridge_pass_2026"),
+            &BridgeOptions::new(&profile).with_password("bridge_pass_2026"),
             &ExtractParams::default(),
             &strhide::core::control::Control::none(),
         )
@@ -315,7 +360,7 @@ pub mod heif_bridge {
         // 4. Extract with wrong password must fail cleanly as NoHiddenData
         let wrong_res = extract_heif_bridge(
             &stego_bytes,
-            &BridgeOptions::new(&profile.stego).with_password("wrong_password"),
+            &BridgeOptions::new(&profile).with_password("wrong_password"),
             &ExtractParams::default(),
             &strhide::core::control::Control::none(),
         );
@@ -357,7 +402,7 @@ pub mod heif_bridge {
             return;
         }
         let orig_bytes = fs::read(sample_path).expect("read original HEIC");
-        let profile = Profile::default();
+        let profile = StegoProfile::default();
         let payload = b"router-prefers-scheme-c-2026";
         let opts = EmbedOptions {
             password: Some("scheme_c_priority"),
@@ -388,7 +433,7 @@ pub mod heif_bridge {
 
         let bridge = extract_heif_bridge(
             &stego,
-            &BridgeOptions::new(&profile.stego).with_password("scheme_c_priority"),
+            &BridgeOptions::new(&profile).with_password("scheme_c_priority"),
             &ExtractParams::default(),
             &strhide::core::control::Control::none(),
         );
@@ -478,14 +523,14 @@ pub mod heif_bridge {
         let orig_bytes = fs::read(&sample_path).expect("read original HEIC");
 
         let payload = b"Bit-exact visual fidelity test";
-        let profile = Profile::default();
+        let profile = StegoProfile::default();
         // Bridge API, not the router: the router prefers Scheme C, which by
         // design perturbs the primary image. "Primary stays bit-exact" is the
         // bridge's own guarantee and has to be tested where it is implemented.
         let stego_bytes = embed_heif_bridge(
             &orig_bytes,
             payload,
-            &BridgeOptions::new(&profile.stego).with_password("fidelity_pw"),
+            &BridgeOptions::new(&profile).with_password("fidelity_pw"),
             &strhide::core::control::Control::none(),
         )
         .expect("embed");

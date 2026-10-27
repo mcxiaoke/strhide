@@ -6,11 +6,11 @@ use std::path::PathBuf;
 
 use strhide::analysis::scan_file;
 use strhide::core::payload::Payload;
-use strhide::params::Profile;
+use strhide::stego::params::StegoProfile;
 use strhide::stego::{
     EmbedOptions, ExtractOptions, HevcMode, JpegAlgorithm, JpegParams, PngParams, ProbeOptions,
-    SpatialAlgorithm, StegoTuning, embed_carrier, embed_carrier_with_profile, extract_carrier,
-    extract_carrier_with_profile,
+    SpatialAlgorithm, StegoTuning, embed_carrier, embed_carrier_with_dialect, extract_carrier,
+    extract_carrier_with_dialect,
     png::{HillCostModel, RawImage, decode_png, encode_png},
     probe_carrier_capacity,
     traits::PngCostModel,
@@ -34,9 +34,9 @@ fn tuning_for(name: &str) -> StegoTuning {
 }
 
 /// Private content-domain dialect: the secret now lives in the shared
-/// `Profile`, not in the embed options.
-fn stego_profile(secret: &'static str) -> Profile {
-    Profile::default().with_stego_secret(secret)
+/// `StegoProfile`, not in the embed options.
+fn stego_profile(secret: &'static str) -> StegoProfile {
+    StegoProfile::default().with_default_secret(secret)
 }
 
 /// Resolves a fixture file bundled in `tests/fixtures/`.
@@ -761,36 +761,36 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
     );
 }
 
-/// A private `Profile::stego` secret must create a private dialect: the official
+/// A private `StegoProfile` secret must create a private dialect: the official
 /// public constant, or any other secret, must not be able to read it.
 ///
 /// This is the regression guard for the "public code can decode every
 /// no-password carrier" flaw: before it, the key and the header-slot
 /// permutation were both derived from a constant in the source tree.
 ///
-/// The secret is carried by `Profile` (M1b), so the *profile* is what has to
+/// The secret is carried by `StegoProfile` (M1b), so the *dialect* is what has to
 /// match — the embed options no longer have a `default_secret` field at all.
 #[test]
 fn test_stego_private_default_secret_isolation() {
     let png_bytes = generate_texture_png(128, 128);
     let secret = b"Private dialect payload, 2026-10-20";
 
-    let official = Profile::default();
+    let official = StegoProfile::default();
     let private = stego_profile("acme-private-dialect-2026");
     let other = stego_profile("someone-elses-dialect-2026");
     let opts = EmbedOptions::default();
 
     // 1. Round trip with the private secret and no password.
-    let stego = embed_carrier_with_profile(&png_bytes, &Payload::bytes(secret), &opts, &private)
+    let stego = embed_carrier_with_dialect(&png_bytes, &Payload::bytes(secret), &opts, &private)
         .expect("embed with private secret");
     assert_eq!(
-        extract_carrier_with_profile(&stego, &opts.extract_options(), &private)
+        extract_carrier_with_dialect(&stego, &opts.extract_options(), &private)
             .expect("private extract"),
         secret
     );
 
     // 2. The official public constant must NOT read it.
-    let res_official = extract_carrier_with_profile(&stego, &opts.extract_options(), &official);
+    let res_official = extract_carrier_with_dialect(&stego, &opts.extract_options(), &official);
     assert!(
         matches!(
             res_official,
@@ -800,7 +800,7 @@ fn test_stego_private_default_secret_isolation() {
     );
 
     // 3. A different private secret must NOT read it.
-    let res_other = extract_carrier_with_profile(&stego, &opts.extract_options(), &other);
+    let res_other = extract_carrier_with_dialect(&stego, &opts.extract_options(), &other);
     assert!(
         matches!(
             res_other,
@@ -811,16 +811,16 @@ fn test_stego_private_default_secret_isolation() {
 
     // 4. Symmetry: an official carrier stays readable only with official opts.
     let official_stego =
-        embed_carrier_with_profile(&png_bytes, &Payload::bytes(secret), &opts, &official)
+        embed_carrier_with_dialect(&png_bytes, &Payload::bytes(secret), &opts, &official)
             .expect("embed official");
     assert_eq!(
-        extract_carrier_with_profile(&official_stego, &opts.extract_options(), &official)
+        extract_carrier_with_dialect(&official_stego, &opts.extract_options(), &official)
             .expect("official extract"),
         secret
     );
     assert!(
         matches!(
-            extract_carrier_with_profile(&official_stego, &opts.extract_options(), &private),
+            extract_carrier_with_dialect(&official_stego, &opts.extract_options(), &private),
             Err(strhide::errors::StrHideError::NoHiddenData(_))
         ),
         "private secret must not read an official carrier"
@@ -831,7 +831,7 @@ fn test_stego_private_default_secret_isolation() {
         password: Some("UserChosenPassword1"),
         ..Default::default()
     };
-    let pw_stego = embed_carrier_with_profile(
+    let pw_stego = embed_carrier_with_dialect(
         &png_bytes,
         &Payload::bytes(secret),
         &with_password,
@@ -843,15 +843,15 @@ fn test_stego_private_default_secret_isolation() {
         "password must take precedence over the profile secret"
     );
     assert_eq!(
-        extract_carrier_with_profile(&pw_stego, &with_password.extract_options(), &private)
+        extract_carrier_with_dialect(&pw_stego, &with_password.extract_options(), &private)
             .expect("password extract"),
         secret
     );
     // Neither the private default secret alone nor the official constant may
     // stand in for the password.
-    assert!(extract_carrier_with_profile(&pw_stego, &opts.extract_options(), &private).is_err());
-    assert!(extract_carrier_with_profile(&pw_stego, &opts.extract_options(), &other).is_err());
-    assert!(extract_carrier_with_profile(&pw_stego, &opts.extract_options(), &official).is_err());
+    assert!(extract_carrier_with_dialect(&pw_stego, &opts.extract_options(), &private).is_err());
+    assert!(extract_carrier_with_dialect(&pw_stego, &opts.extract_options(), &other).is_err());
+    assert!(extract_carrier_with_dialect(&pw_stego, &opts.extract_options(), &official).is_err());
 }
 
 /// The legacy `embed_carrier` / `extract_carrier` entries are the official
@@ -872,7 +872,7 @@ fn test_stego_legacy_entries_use_the_official_profile() {
 
     let private = stego_profile("acme-private-dialect-2026");
     let private_stego =
-        embed_carrier_with_profile(&png_bytes, &Payload::bytes(secret), &opts, &private)
+        embed_carrier_with_dialect(&png_bytes, &Payload::bytes(secret), &opts, &private)
             .expect("embed private");
     assert!(
         extract_carrier(&private_stego, &opts.extract_options()).is_err(),
@@ -892,19 +892,19 @@ fn test_jpeg_private_default_secret_isolation() {
         tuning: tuning_for("uerd"),
         ..Default::default()
     };
-    let official = Profile::default();
+    let official = StegoProfile::default();
     let private = stego_profile("acme-jpeg-dialect-2026");
 
-    let stego = embed_carrier_with_profile(&jpeg_bytes, &Payload::bytes(secret), &opts, &private)
+    let stego = embed_carrier_with_dialect(&jpeg_bytes, &Payload::bytes(secret), &opts, &private)
         .expect("embed jpeg private");
     assert_eq!(
-        extract_carrier_with_profile(&stego, &opts.extract_options(), &private)
+        extract_carrier_with_dialect(&stego, &opts.extract_options(), &private)
             .expect("private jpeg extract"),
         secret
     );
     assert!(
         matches!(
-            extract_carrier_with_profile(&stego, &opts.extract_options(), &official),
+            extract_carrier_with_dialect(&stego, &opts.extract_options(), &official),
             Err(strhide::errors::StrHideError::NoHiddenData(_))
         ),
         "official secret must fail on a private-dialect JPEG carrier"
@@ -1126,29 +1126,29 @@ fn stego_domain_isolation_lifecycle() {
     let png = generate_texture_png(128, 128);
     let payload = b"cross-domain-isolation-integration-test";
 
-    // 1. Profile domain isolation
-    let prof_a = Profile::default().with_stego_domain("org.enterprise.vault-a");
-    let prof_b = Profile::default().with_stego_domain("org.enterprise.vault-b");
-    let prof_default = Profile::default();
+    // 1. StegoProfile domain isolation
+    let prof_a = StegoProfile::default().with_stego_domain("org.enterprise.vault-a");
+    let prof_b = StegoProfile::default().with_stego_domain("org.enterprise.vault-b");
+    let prof_default = StegoProfile::default();
 
     let opts = EmbedOptions::default();
-    let stego_a = embed_carrier_with_profile(&png, &Payload::bytes(payload), &opts, &prof_a)
+    let stego_a = embed_carrier_with_dialect(&png, &Payload::bytes(payload), &opts, &prof_a)
         .expect("embed with profile domain-a");
 
     // Matching profile extracts losslessly
-    let rec_a = extract_carrier_with_profile(&stego_a, &opts.extract_options(), &prof_a)
+    let rec_a = extract_carrier_with_dialect(&stego_a, &opts.extract_options(), &prof_a)
         .expect("extract with matching profile domain-a");
     assert_eq!(rec_a, payload);
 
     // Mismatched profile (domain-b) fails with NoHiddenData
-    let err_b = extract_carrier_with_profile(&stego_a, &opts.extract_options(), &prof_b);
+    let err_b = extract_carrier_with_dialect(&stego_a, &opts.extract_options(), &prof_b);
     assert!(
         matches!(err_b, Err(strhide::errors::StrHideError::NoHiddenData(_))),
         "mismatched profile domain must fail"
     );
 
     // Default profile (no domain) fails with NoHiddenData
-    let err_def = extract_carrier_with_profile(&stego_a, &opts.extract_options(), &prof_default);
+    let err_def = extract_carrier_with_dialect(&stego_a, &opts.extract_options(), &prof_default);
     assert!(
         matches!(err_def, Err(strhide::errors::StrHideError::NoHiddenData(_))),
         "default profile on domain-isolated carrier must fail"
@@ -1161,7 +1161,7 @@ fn stego_domain_isolation_lifecycle() {
     };
     // Even if prof_b is passed, opts_override wins
     let rec_override =
-        extract_carrier_with_profile(&stego_a, &opts_override.extract_options(), &prof_b)
+        extract_carrier_with_dialect(&stego_a, &opts_override.extract_options(), &prof_b)
             .expect("options domain must override profile domain");
     assert_eq!(rec_override, payload);
 

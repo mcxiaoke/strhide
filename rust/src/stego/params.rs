@@ -475,7 +475,7 @@ pub struct JpegParams {
     /// Force the portable scalar kernels instead of the AVX2/FMA dispatch.
     ///
     /// Set automatically when [`crate::stego::EmbedOptions::freshness`] is
-    /// [`Freshness::Seeded`]. The AVX2 path fuses multiply-add and rounds once
+    /// [`crate::stego::Freshness::Seeded`]. The AVX2 path fuses multiply-add and rounds once
     /// where the scalar path rounds twice, so the two can disagree in the last
     /// bit of a cost value -- enough to flip a near-tied trellis decision and
     /// produce a different stego file. A seeded run that lands on different
@@ -743,6 +743,166 @@ impl ExtractParams {
             Some(ids) => ids.contains(&suite_id),
             None => true,
         }
+    }
+}
+
+/// The private content-domain dialect: everything embed and extract must agree
+/// on, and that deliberately does not live in the carrier.
+///
+/// **P class**, like [`StructureProfile`](crate::structure::params::StructureProfile):
+/// a mismatch surfaces as `NoHiddenData` — the same "silently unreadable" shape
+/// as a wrong password, which is why this lives with the secret and not with
+/// the per-call tuning knobs in [`EmbedOptions`](crate::stego::EmbedOptions).
+///
+/// The secret is deliberately **not** the structure-domain
+/// [`StructureProfile::default_secret`](crate::structure::params::StructureProfile::default_secret):
+/// the two subsystems derive keys in different domains
+/// ([`crate::structure::envelope`] vs [`crate::stego::envelope`]), so sharing
+/// one string would couple two independent dialects.
+/// [`crate::facade::Dialect`] composes the halves, so there is still exactly one
+/// object for a host to store and pass around.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StegoProfile {
+    /// Private stand-in secret for no-password image steganography, replacing
+    /// the public [`crate::stego::envelope::PUBLIC_DEFAULT_SECRET`].
+    ///
+    /// Both the AEAD key and the header-slot permutation are derived from it.
+    /// An explicit password always wins over this value.
+    pub default_secret: Option<&'static str>,
+    /// Custom stego domain tag for isolating the HKDF key derivation domain.
+    pub domain: Option<&'static str>,
+    /// Private JPEG V3 wire-format identity. `None` means the official
+    /// [`DEFAULT_JPEG_FORMAT`](crate::stego::format::DEFAULT_JPEG_FORMAT).
+    ///
+    /// Because the format decides the superblock/extension geometry and the
+    /// slot grid, a private format makes the carrier unreadable with an
+    /// official binary -- exactly like a private secret.
+    #[cfg(feature = "content-jpeg")]
+    pub jpeg: Option<crate::stego::format::JpegFormatProfile>,
+    /// Private PNG spatial wire-format identity. `None` means the official
+    /// [`OFFICIAL_PNG_FORMAT`](crate::stego::format::OFFICIAL_PNG_FORMAT).
+    #[cfg(feature = "content-png")]
+    pub png: Option<crate::stego::format::PngFormatProfile>,
+    /// Private HEVC Scheme C wire-format identity. `None` means the official
+    /// [`DEFAULT_HEVC_FORMAT`](crate::stego::format::DEFAULT_HEVC_FORMAT).
+    #[cfg(feature = "content-hevc")]
+    pub hevc: Option<crate::stego::format::HevcFormatProfile>,
+}
+
+impl StegoProfile {
+    /// Official content-domain defaults (no private secret, official format).
+    pub const fn new() -> Self {
+        Self {
+            default_secret: None,
+            domain: None,
+            #[cfg(feature = "content-jpeg")]
+            jpeg: None,
+            #[cfg(feature = "content-png")]
+            png: None,
+            #[cfg(feature = "content-hevc")]
+            hevc: None,
+        }
+    }
+
+    /// Set [`default_secret`](Self::default_secret).
+    ///
+    /// `const` builder form because the struct is `#[non_exhaustive]`.
+    pub const fn with_default_secret(mut self, secret: &'static str) -> Self {
+        self.default_secret = Some(secret);
+        self
+    }
+
+    /// Set [`domain`](Self::domain).
+    pub const fn with_stego_domain(mut self, domain: &'static str) -> Self {
+        self.domain = Some(domain);
+        self
+    }
+
+    /// Set [`jpeg`](Self::jpeg).
+    #[cfg(feature = "content-jpeg")]
+    pub const fn with_jpeg_format(
+        mut self,
+        format: crate::stego::format::JpegFormatProfile,
+    ) -> Self {
+        self.jpeg = Some(format);
+        self
+    }
+
+    /// Set [`png`](Self::png).
+    #[cfg(feature = "content-png")]
+    pub const fn with_png_format(mut self, png: crate::stego::format::PngFormatProfile) -> Self {
+        self.png = Some(png);
+        self
+    }
+
+    /// Set [`hevc`](Self::hevc).
+    #[cfg(feature = "content-hevc")]
+    pub const fn with_hevc_format(mut self, hevc: crate::stego::format::HevcFormatProfile) -> Self {
+        self.hevc = Some(hevc);
+        self
+    }
+
+    /// Private secret, or `None` when the official public constant must be
+    /// used. An empty string counts as "not configured", so a blank config
+    /// value cannot silently *disable* confidentiality by looking configured.
+    pub fn secret(&self) -> Option<&str> {
+        self.default_secret.filter(|s| !s.is_empty())
+    }
+
+    /// Custom stego domain tag, or `None` when the official default derivation is used.
+    pub fn stego_domain(&self) -> Option<&str> {
+        self.domain.filter(|s| !s.is_empty())
+    }
+
+    /// Wire-format identity to use: the private [`jpeg`](Self::jpeg) when
+    /// set, otherwise the official default.
+    #[cfg(feature = "content-jpeg")]
+    pub fn jpeg_format(&self) -> &crate::stego::format::JpegFormatProfile {
+        match self.jpeg.as_ref() {
+            Some(format) => format,
+            None => &crate::stego::format::DEFAULT_JPEG_FORMAT,
+        }
+    }
+
+    /// PNG wire-format identity to use: the private [`png`](Self::png) when
+    /// set, otherwise the official default.
+    #[cfg(feature = "content-png")]
+    pub fn png_format(&self) -> &crate::stego::format::PngFormatProfile {
+        match self.png.as_ref() {
+            Some(png) => png,
+            None => &crate::stego::format::OFFICIAL_PNG_FORMAT,
+        }
+    }
+
+    /// HEVC wire-format identity to use: the private [`hevc`](Self::hevc) when
+    /// set, otherwise the official default.
+    #[cfg(feature = "content-hevc")]
+    pub fn hevc_format(&self) -> &crate::stego::format::HevcFormatProfile {
+        match self.hevc.as_ref() {
+            Some(hevc) => hevc,
+            None => &crate::stego::format::DEFAULT_HEVC_FORMAT,
+        }
+    }
+
+    /// True when no private secret, domain, or format profile is set (official
+    /// behaviour).
+    pub fn is_official(&self) -> bool {
+        #[allow(unused_mut)]
+        let mut ok = self.secret().is_none() && self.stego_domain().is_none();
+        #[cfg(feature = "content-jpeg")]
+        {
+            ok = ok && self.jpeg.is_none();
+        }
+        #[cfg(feature = "content-png")]
+        {
+            ok = ok && self.png.is_none();
+        }
+        #[cfg(feature = "content-hevc")]
+        {
+            ok = ok && self.hevc.is_none();
+        }
+        ok
     }
 }
 

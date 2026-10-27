@@ -1,6 +1,6 @@
 //! Format sniffing and strategy routing.
 //!
-//! This module is the bridge between a raw file and the [`crate::adapters`]
+//! This module is the bridge between a raw file and the [`crate::structure::adapters`]
 //! trait: given an open stream, [`find_adapter`] walks the supported formats
 //! in priority order and returns the adapter whose `detect` accepts it. It
 //! also converts between the human-readable strategy names (`"chunk"`,
@@ -137,6 +137,58 @@ pub fn id_to_strategy(id: u8) -> &'static str {
         }
     }
     "unknown"
+}
+
+/// A strategy, as the typed field of a result instead of a bare `String`.
+///
+/// The wire format stores a single byte (`strategy_id`), and
+/// [`STRATEGY_REGISTRY`] is the name table; carrying both in the result lets a
+/// front end sort/group by the stable numeric key while still showing the name,
+/// without re-parsing either from prose (plan §5.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StrategyId(u8);
+
+impl StrategyId {
+    /// Wrap a raw `strategy_id` byte. Unregistered values are allowed: a
+    /// carrier written by a newer build must still be inspectable.
+    pub const fn from_u8(id: u8) -> Self {
+        Self(id)
+    }
+
+    /// Look a strategy up by name; `None` when the name is not registered.
+    pub fn from_name(name: &str) -> Option<Self> {
+        STRATEGY_REGISTRY
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|&(_, id)| Self(id))
+    }
+
+    /// The raw `strategy_id` byte.
+    pub const fn id(self) -> u8 {
+        self.0
+    }
+
+    /// The registered name, or `"unknown"` for an unregistered id.
+    pub fn name(self) -> &'static str {
+        id_to_strategy(self.0)
+    }
+}
+
+impl std::fmt::Display for StrategyId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl serde::Serialize for StrategyId {
+    /// `{"id": 2, "name": "chunk"}` — both keys are stable from stage 4 on.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = serializer.serialize_struct("StrategyId", 2)?;
+        st.serialize_field("id", &self.0)?;
+        st.serialize_field("name", &self.name())?;
+        st.end()
+    }
 }
 
 /// Largest strategy ID registered in [`STRATEGY_REGISTRY`].

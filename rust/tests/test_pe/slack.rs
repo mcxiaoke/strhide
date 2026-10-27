@@ -15,8 +15,8 @@ use strhide::errors::StrHideError;
 use strhide::structure::adapters::pe_codebits;
 use strhide::structure::envelope::EnvelopeHeader;
 use strhide::structure::{
-    PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
-    write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, inspect_carrier, read_carrier,
+    remove_carrier, verify_carrier, write_carrier,
 };
 
 // --------------------------------------------------------------------------- helpers
@@ -200,7 +200,8 @@ fn auto_prefers_slack_and_restores_bit_exact() {
     )
     .expect("write");
     assert_eq!(
-        res.strategy, "pe_slack",
+        res.strategy.name(),
+        "pe_slack",
         "auto must pick pe_slack here: {:?}",
         res.strategy_note
     );
@@ -210,12 +211,20 @@ fn auto_prefers_slack_and_restores_bit_exact() {
         "pe_slack must not change the file size"
     );
 
-    let read = read_carrier(&out, None, None).expect("read");
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(read.data, b"meet at the old bridge, 9pm");
 
     let ins = inspect_carrier(&out, None).expect("inspect");
     assert!(ins.has_hidden_data);
-    assert_eq!(ins.strategy.as_deref(), Some("pe_slack"));
+    assert_eq!(ins.strategy.map(|s| s.name()), Some("pe_slack"));
 
     let v = verify_carrier(&out, None).expect("verify");
     assert!(v.level1_host.ok, "L1: {}", v.level1_host.detail);
@@ -223,7 +232,16 @@ fn auto_prefers_slack_and_restores_bit_exact() {
     assert!(v.level3_crypto.ok, "L3: {}", v.level3_crypto.detail);
 
     let restored = dir.join("app.restored.exe");
-    let rem = remove_carrier(&out, Some(&restored), None, false).expect("remove");
+    let rem = remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert!(rem.verified_identical);
     assert_eq!(
         restored_sha(&restored),
@@ -239,7 +257,7 @@ fn auto_prefers_slack_and_restores_bit_exact() {
         &write_opts(&out2, "auto"),
     )
     .expect("re-write after remove");
-    assert_eq!(again.strategy, "pe_slack");
+    assert_eq!(again.strategy.name(), "pe_slack");
 }
 
 fn restored_sha(path: &Path) -> String {
@@ -270,7 +288,8 @@ fn auto_prefers_codebits_over_slack() {
     )
     .expect("write");
     assert_eq!(
-        res.strategy, "pe_codebits",
+        res.strategy.name(),
+        "pe_codebits",
         "auto order is codebits -> slack -> overlay"
     );
 }
@@ -370,14 +389,35 @@ fn arm64_pe_uses_padding() {
         &write_opts(&out, "auto"),
     )
     .expect("write");
-    assert_eq!(res.strategy, "pe_slack", "codebits cannot serve ARM64");
+    assert_eq!(
+        res.strategy.name(),
+        "pe_slack",
+        "codebits cannot serve ARM64"
+    );
     assert_eq!(fs::metadata(&out).unwrap().len(), original.len() as u64);
 
-    let read = read_carrier(&out, None, None).expect("read");
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(read.data, b"arm64 secret");
 
     let restored = dir.join("arm64.restored.exe");
-    let rem = remove_carrier(&out, Some(&restored), None, false).expect("remove");
+    let rem = remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert!(rem.verified_identical);
     assert_eq!(fs::read(&restored).unwrap(), original);
 }
@@ -400,18 +440,50 @@ fn slack_encrypted_roundtrip() {
     };
     write_carrier(&carrier, PayloadSource::Text("encrypted secret"), &opts).expect("write");
 
-    assert!(read_carrier(&out, None, None).is_err(), "password required");
-    assert!(read_carrier(&out, None, Some("wrong pw")).is_err());
+    assert!(
+        read_carrier(
+            &out,
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+            }
+        )
+        .is_err(),
+        "password required"
+    );
+    assert!(
+        read_carrier(
+            &out,
+            &ReadOptions {
+                output_path: None,
+                password: Some("wrong pw"),
+                overwrite: false,
+            }
+        )
+        .is_err()
+    );
 
-    let read = read_carrier(&out, None, Some("correct horse battery staple")).expect("read");
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: Some("correct horse battery staple"),
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(read.data, b"encrypted secret");
 
     let restored = dir.join("enc.restored.exe");
     remove_carrier(
         &out,
-        Some(&restored),
-        Some("correct horse battery staple"),
-        false,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some("correct horse battery staple"),
+            backup: false,
+            overwrite: false,
+        },
     )
     .expect("remove");
     assert_eq!(fs::read(&restored).unwrap(), original);
@@ -437,7 +509,15 @@ fn slack_stealth_denies_without_password() {
     };
     write_carrier(&carrier, PayloadSource::Text("invisible"), &opts).expect("write");
 
-    let err = read_carrier(&out, None, None).unwrap_err();
+    let err = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap_err();
     assert!(
         matches!(err, StrHideError::NoHiddenData(_)),
         "expected NoHiddenData, got {err:?}"
@@ -447,12 +527,39 @@ fn slack_stealth_denies_without_password() {
             && err.to_string().contains("PE section padding"),
         "the padding trace should be reported: {err}"
     );
-    assert!(read_carrier(&out, None, Some("nope")).is_err());
+    assert!(
+        read_carrier(
+            &out,
+            &ReadOptions {
+                output_path: None,
+                password: Some("nope"),
+                overwrite: false,
+            }
+        )
+        .is_err()
+    );
 
-    let read = read_carrier(&out, None, Some("stealth pw")).expect("read");
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: Some("stealth pw"),
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(read.data, b"invisible");
     let restored = dir.join("s.restored.exe");
-    let rem = remove_carrier(&out, Some(&restored), Some("stealth pw"), false).expect("remove");
+    let rem = remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some("stealth pw"),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert!(rem.verified_identical);
     assert_eq!(
         sha256_hex(&fs::read(&restored).unwrap()),
@@ -515,12 +622,28 @@ fn tampered_envelope_fails_cleanly() {
     fs::write(&tampered, &bytes).unwrap();
 
     assert!(
-        read_carrier(&tampered, None, None).is_err(),
+        read_carrier(
+            &tampered,
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+            }
+        )
+        .is_err(),
         "read must fail on tampered ciphertext"
     );
     let restored = dir.join("c.tampered.restored.exe");
-    let rem = remove_carrier(&tampered, Some(&restored), None, false)
-        .expect("restore must still succeed");
+    let rem = remove_carrier(
+        &tampered,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("restore must still succeed");
     assert!(rem.verified_identical);
     assert_eq!(
         fs::read(&restored).unwrap(),
@@ -711,7 +834,7 @@ fn envelope_ending_at_eof_is_still_reported_as_slack() {
     let stego_len = fs::metadata(&out).unwrap().len();
     let ins = inspect_carrier(&out, None).expect("inspect");
     assert_eq!(
-        ins.strategy.as_deref(),
+        ins.strategy.map(|s| s.name()),
         Some("pe_slack"),
         "a padding envelope at EOF must not be reported as eof"
     );
@@ -721,11 +844,28 @@ fn envelope_ending_at_eof_is_still_reported_as_slack() {
         "the envelope must end exactly at EOF"
     );
 
-    let read = read_carrier(&out, None, None).expect("read");
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(read.data, b"tail placement");
 
     let restored = dir.join("tail.restored.exe");
-    let rem = remove_carrier(&out, Some(&restored), None, false).expect("remove");
+    let rem = remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert!(rem.verified_identical);
     assert_eq!(fs::read(&restored).unwrap(), original);
 }

@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use strhide::crypto::compute_file_sha256;
 use strhide::errors::StrHideError;
 use strhide::structure::{
-    PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
-    write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, inspect_carrier, read_carrier,
+    remove_carrier, verify_carrier, write_carrier,
 };
 
 fn samples_dir() -> Option<PathBuf> {
@@ -111,13 +111,13 @@ fn test_real_png_full_lifecycle() {
         ..Default::default()
     };
     let res_w = write_carrier(&carrier, PayloadSource::Text(secret), &opts).expect("write PNG");
-    assert_eq!(res_w.format, "PNG");
-    assert_eq!(res_w.strategy, "chunk");
+    assert_eq!(res_w.format.as_str(), "PNG");
+    assert_eq!(res_w.strategy.name(), "chunk");
 
     // 2. Inspect
     let res_i = inspect_carrier(&carrier, Some(pwd)).expect("inspect PNG");
     assert!(res_i.has_hidden_data);
-    assert_eq!(res_i.format, "PNG");
+    assert_eq!(res_i.format.as_str(), "PNG");
 
     // 3. Verify
     let res_v = verify_carrier(&carrier, Some(pwd)).expect("verify PNG");
@@ -130,12 +130,29 @@ fn test_real_png_full_lifecycle() {
     assert!(res_v.level3_crypto.ok, "L3: {}", res_v.level3_crypto.detail);
 
     // 4. Read
-    let res_r = read_carrier(&carrier, None, Some(pwd)).expect("read PNG");
+    let res_r = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: Some(pwd),
+            overwrite: false,
+        },
+    )
+    .expect("read PNG");
     assert_eq!(String::from_utf8(res_r.data).unwrap(), secret);
 
     // 5. Remove & bit-for-bit restore
     let restored = dir.join("sample.restored.png");
-    remove_carrier(&carrier, Some(&restored), Some(pwd), false).expect("remove PNG");
+    remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some(pwd),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove PNG");
     let restored_sha = compute_file_sha256(&restored).unwrap();
     assert_eq!(restored_sha, orig_sha);
 }
@@ -165,7 +182,7 @@ fn test_real_jpg_full_lifecycle() {
         ..Default::default()
     };
     let res_w = write_carrier(&carrier, PayloadSource::Text(secret), &opts).expect("write JPG");
-    assert_eq!(res_w.format, "JPEG");
+    assert_eq!(res_w.format.as_str(), "JPEG");
 
     // 2. Verify
     let res_v = verify_carrier(&carrier, Some(pwd)).expect("verify JPG");
@@ -178,12 +195,29 @@ fn test_real_jpg_full_lifecycle() {
     assert!(res_v.level3_crypto.ok, "L3: {}", res_v.level3_crypto.detail);
 
     // 3. Read
-    let res_r = read_carrier(&carrier, None, Some(pwd)).expect("read JPG");
+    let res_r = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: Some(pwd),
+            overwrite: false,
+        },
+    )
+    .expect("read JPG");
     assert_eq!(String::from_utf8(res_r.data).unwrap(), secret);
 
     // 4. Remove & bit-for-bit restore
     let restored = dir.join("sample.restored.jpg");
-    remove_carrier(&carrier, Some(&restored), Some(pwd), false).expect("remove JPG");
+    remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some(pwd),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove JPG");
     let restored_sha = compute_file_sha256(&restored).unwrap();
     assert_eq!(restored_sha, orig_sha);
 }
@@ -213,8 +247,8 @@ fn test_real_mp4_full_lifecycle() {
         ..Default::default()
     };
     let res_w = write_carrier(&carrier, PayloadSource::Text(secret), &opts).expect("write MP4");
-    assert_eq!(res_w.format, "MP4");
-    assert_eq!(res_w.strategy, "box_uuid");
+    assert_eq!(res_w.format.as_str(), "MP4");
+    assert_eq!(res_w.strategy.name(), "box_uuid");
 
     // 2. Verify
     let res_v = verify_carrier(&carrier, Some(pwd)).expect("verify MP4");
@@ -227,12 +261,29 @@ fn test_real_mp4_full_lifecycle() {
     assert!(res_v.level3_crypto.ok, "L3: {}", res_v.level3_crypto.detail);
 
     // 3. Read
-    let res_r = read_carrier(&carrier, None, Some(pwd)).expect("read MP4");
+    let res_r = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: Some(pwd),
+            overwrite: false,
+        },
+    )
+    .expect("read MP4");
     assert_eq!(String::from_utf8(res_r.data).unwrap(), secret);
 
     // 4. Remove & bit-for-bit restore
     let restored = dir.join("sample.restored.mp4");
-    remove_carrier(&carrier, Some(&restored), Some(pwd), false).expect("remove MP4");
+    remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some(pwd),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove MP4");
     let restored_sha = compute_file_sha256(&restored).unwrap();
     assert_eq!(restored_sha, orig_sha);
 }
@@ -262,8 +313,8 @@ fn test_real_zip_full_lifecycle() {
         ..Default::default()
     };
     let res_w = write_carrier(&carrier, PayloadSource::Text(secret), &opts).expect("write ZIP");
-    assert_eq!(res_w.format, "ZIP");
-    assert_eq!(res_w.strategy, "pre_cd_inject");
+    assert_eq!(res_w.format.as_str(), "ZIP");
+    assert_eq!(res_w.strategy.name(), "pre_cd_inject");
 
     // 2. Verify
     let res_v = verify_carrier(&carrier, Some(pwd)).expect("verify ZIP");
@@ -276,12 +327,29 @@ fn test_real_zip_full_lifecycle() {
     assert!(res_v.level3_crypto.ok, "L3: {}", res_v.level3_crypto.detail);
 
     // 3. Read
-    let res_r = read_carrier(&carrier, None, Some(pwd)).expect("read ZIP");
+    let res_r = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: Some(pwd),
+            overwrite: false,
+        },
+    )
+    .expect("read ZIP");
     assert_eq!(String::from_utf8(res_r.data).unwrap(), secret);
 
     // 4. Remove & bit-for-bit restore
     let restored = dir.join("sample.restored.zip");
-    remove_carrier(&carrier, Some(&restored), Some(pwd), false).expect("remove ZIP");
+    remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some(pwd),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove ZIP");
     let restored_sha = compute_file_sha256(&restored).unwrap();
     assert_eq!(restored_sha, orig_sha);
 }
@@ -311,8 +379,8 @@ fn test_real_pdf_full_lifecycle() {
         ..Default::default()
     };
     let res_w = write_carrier(&carrier, PayloadSource::Text(secret), &opts).expect("write PDF");
-    assert_eq!(res_w.format, "PDF");
-    assert_eq!(res_w.strategy, "incremental");
+    assert_eq!(res_w.format.as_str(), "PDF");
+    assert_eq!(res_w.strategy.name(), "incremental");
 
     // 2. Verify
     let res_v = verify_carrier(&carrier, Some(pwd)).expect("verify PDF");
@@ -325,12 +393,29 @@ fn test_real_pdf_full_lifecycle() {
     assert!(res_v.level3_crypto.ok, "L3: {}", res_v.level3_crypto.detail);
 
     // 3. Read
-    let res_r = read_carrier(&carrier, None, Some(pwd)).expect("read PDF");
+    let res_r = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: Some(pwd),
+            overwrite: false,
+        },
+    )
+    .expect("read PDF");
     assert_eq!(String::from_utf8(res_r.data).unwrap(), secret);
 
     // 4. Remove & bit-for-bit restore
     let restored = dir.join("sample.restored.pdf");
-    remove_carrier(&carrier, Some(&restored), Some(pwd), false).expect("remove PDF");
+    remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some(pwd),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove PDF");
     let restored_sha = compute_file_sha256(&restored).unwrap();
     assert_eq!(restored_sha, orig_sha);
 }

@@ -3,9 +3,9 @@
 //! This is the module library callers should use. The flow for each operation
 //! is:
 //!
-//! 1. Run rejection checks ([`crate::rejection`]).
+//! 1. Run rejection checks ([`crate::structure::rejection`]).
 //! 2. Snapshot the carrier's metadata (size, SHA-256, permissions, mtime/atime).
-//! 3. Detect the carrier format via [`crate::router`] and locate any existing
+//! 3. Detect the carrier format via [`crate::structure::registry`] and locate any existing
 //!    envelope.
 //! 4. Build the UBE (header + optional hint + encrypted metadata + chunked
 //!    encrypted payload + trailer) in a staging buffer.
@@ -40,13 +40,16 @@ use crate::crypto::{
     derive_keys, derive_stealth_magics, encrypt_metadata, encrypt_stream_to_chunks, normalize_nfc,
 };
 use crate::errors::StrHideError;
-use crate::params::{LocalParams, Profile};
+use crate::formats::FileFormat;
+use crate::params::LocalParams;
 use crate::structure::envelope::{
     EnvelopeHeader, EnvelopeTrailer, FLAG_COMPACT_META, FLAG_COMPRESSED, FLAG_ENCRYPTED,
     FLAG_HAS_HINT, FLAG_IS_FILE, FLAG_STEALTH, HEADER_SIZE, TRAILER_SIZE, UnpackSecrets,
 };
+use crate::structure::options::{ReadOptions, RestoreOptions, WriteOptions};
+use crate::structure::params::StructureProfile;
 use crate::structure::registry::{
-    find_adapter, find_adapter_or_reject, id_to_strategy, strategy_to_id,
+    StrategyId, find_adapter, find_adapter_or_reject, strategy_to_id,
 };
 use crate::structure::rejection::run_rejection_checks;
 
@@ -67,7 +70,7 @@ pub struct CarrierMetadata {
 /// Stealth mode password derivation domain separation string.
 ///
 /// Re-exported from [`crate::params`] for the public API: the constant lives
-/// next to [`Profile::stealth_domain`], which is what actually drives
+/// next to [`StructureProfile::stealth_domain`], which is what actually drives
 /// derivation.
 pub use crate::params::STEALTH_DOMAIN;
 
@@ -83,7 +86,7 @@ fn locate_envelope(
     carrier: &mut dyn SeekRead,
     adapter: &dyn HostAdapter,
     password: Option<&str>,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<Option<(u64, u64, String)>, StrHideError> {
     Ok(locate_envelope_with_magic(carrier, adapter, password, profile)?.location)
 }
@@ -106,7 +109,7 @@ fn locate_envelope_with_magic(
     carrier: &mut dyn SeekRead,
     adapter: &dyn HostAdapter,
     password: Option<&str>,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<Located, StrHideError> {
     if let Some(pwd) = password {
         let magics = derive_stealth_magics(pwd, profile.domain())?;
@@ -332,19 +335,72 @@ impl<'a> PayloadSource<'a> {
     }
 }
 
+/// A non-fatal warning attached to a successful write.
+///
+/// Typed rather than a pre-rendered sentence so a front end can group, filter,
+/// or localize it (plan §5.3). Every variant carries the numbers it talks
+/// about, so no consumer has to parse them back out of prose.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Warning {
+    /// The envelope is more than half the size of the carrier, which is
+    /// visible as file-size inflation and weakens stealth.
+    SizeInflation {
+        /// Size of the injected envelope in bytes.
+        ube_size: u64,
+        /// Size of the carrier before injection, in bytes.
+        host_size: u64,
+        /// `ube_size / host_size * 100`, rounded to one decimal.
+        ratio_pct: f64,
+    },
+    /// The carrier already shows envelope-shaped structures, so injecting now
+    /// would stack a second envelope on top (usually a stealth envelope written
+    /// under a password we were not given).
+    SuspiciousStructures {
+        /// Structural hints reported by the adapter.
+        hints: Vec<String>,
+    },
+}
+
+impl Warning {
+    /// The English sentence this warning used to be, kept for CLI rendering.
+    pub fn message(&self) -> String {
+        match self {
+            Warning::SizeInflation {
+                ube_size,
+                host_size,
+                ratio_pct,
+            } => format!(
+                "Hidden data envelope ({ube_size} bytes) is {ratio_pct:.1}% of the carrier file size ({host_size} bytes), above the 50% inflation warning threshold. Noticeable file size inflation may compromise stealthiness!"
+            ),
+            Warning::SuspiciousStructures { hints } => format!(
+                "Carrier shows structures consistent with a hidden envelope ({}). It may already contain a stealth envelope written with a different password; injecting now would stack a second envelope on top.",
+                hints.join("; ")
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for Warning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
 /// Outcome of a successful [`write_carrier`]. Serialized to JSON by the CLI.
-#[derive(Debug, Serialize)]
+///
+/// `Ok` already means success, so there is no `status` field; every field is
+/// typed (format, strategy, paths) instead of being a pre-rendered string.
+#[derive(Debug, Clone, Serialize)]
 pub struct WriteResult {
-    /// Always `"success"` when the call returns `Ok`.
-    pub status: String,
-    /// Path the (possibly stego) carrier was written to.
-    pub carrier: String,
-    /// Detected carrier format: `"PNG"`, `"JPEG"`, `"MP4"`, `"ZIP"`,
-    /// `"PDF"`, or `"PE"`.
-    pub format: String,
-    /// Strategy actually chosen (e.g. `"chunk"`, `"app_segment"`,
-    /// `"pe_codebits"`).
-    pub strategy: String,
+    /// Path the (possibly stego) carrier was written to, or `<memory>` for the
+    /// byte-level entry points.
+    pub carrier: PathBuf,
+    /// Detected carrier format.
+    pub format: FileFormat,
+    /// Strategy actually chosen, with both its registry id and its name.
+    pub strategy: StrategyId,
     /// Human-readable explanation of what the chosen strategy did, when
     /// non-trivial (e.g. automatic fallback to `eof`).
     pub strategy_note: Option<String>,
@@ -359,17 +415,18 @@ pub struct WriteResult {
     /// Echo of the password hint, when one was set.
     pub password_hint: Option<String>,
     /// Path of the `<carrier>.bak` file kept for an in-place write, if any.
-    pub backup_file: Option<String>,
-    /// Non-fatal warnings (e.g. envelope > 50% of carrier size, probable
-    /// pre-existing stealth envelope).
-    pub warning: Option<String>,
+    pub backup_file: Option<PathBuf>,
+    /// Non-fatal warnings, in the order they were detected. Empty on a clean
+    /// write (two warnings can co-occur, which is why this is a list).
+    pub warnings: Vec<Warning>,
 }
 
-/// Outcome of a successful [`read_carrier`] / [`read_carrier_with`].
+/// Outcome of a successful [`read_carrier`] / [`read_carrier_with_dialect`].
 #[derive(Debug)]
 pub struct ReadResult {
-    /// Path the carrier was read from.
-    pub carrier: String,
+    /// Path the carrier was read from, or `<memory>` for the byte-level
+    /// entry points.
+    pub carrier: PathBuf,
     /// Decrypted, decompressed payload bytes.
     pub data: Vec<u8>,
     /// Whether the envelope declared the payload to be a file (vs inline text).
@@ -380,7 +437,8 @@ pub struct ReadResult {
     pub is_encrypted: bool,
     pub filename: String,
     pub raw_size: u64,
-    pub written_file: Option<String>,
+    /// Where the payload was written, when an output path was given.
+    pub written_file: Option<PathBuf>,
 }
 
 /// Outcome of [`inspect_carrier`].
@@ -391,15 +449,15 @@ pub struct ReadResult {
 #[derive(Debug, Serialize)]
 pub struct InspectResult {
     /// Path inspected.
-    pub carrier: String,
+    pub carrier: PathBuf,
     /// Detected carrier format.
-    pub format: String,
+    pub format: FileFormat,
     /// Whether an envelope (standard, or stealth-with-the-supplied-password)
     /// was located.
     pub has_hidden_data: bool,
     /// Strategy the envelope was written with.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub strategy: Option<String>,
+    pub strategy: Option<StrategyId>,
     /// File offset of the envelope start (virtual offset for scattered
     /// strategies).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -440,7 +498,7 @@ pub struct LevelStatus {
     /// is needed but none was supplied).
     ///
     /// A skipped level is **not** a pass, but it is not a failure either: the
-    /// caller could not have known either way. [`verify_passed`](crate::structure::verify_passed)
+    /// caller could not have known either way. [`verify_passed`]
     /// counts it as "not disproven", while a level that ran and failed counts
     /// as a failure.
     #[serde(default)]
@@ -479,8 +537,8 @@ impl LevelStatus {
 /// Outcome of [`verify_carrier`]: three independent checks.
 #[derive(Debug, Serialize)]
 pub struct VerifyResult {
-    pub carrier: String,
-    pub format: String,
+    pub carrier: PathBuf,
+    pub format: FileFormat,
     /// Level 1: host container structure still parses (e.g. PNG CRCs, ZIP
     /// central directory, PE headers).
     pub level1_host: LevelStatus,
@@ -494,10 +552,8 @@ pub struct VerifyResult {
 /// Outcome of a successful [`remove_carrier`].
 #[derive(Debug, Serialize)]
 pub struct RemoveResult {
-    /// Always `"success"` when the call returns `Ok`.
-    pub status: String,
     /// Path the restored carrier was written to.
-    pub carrier: String,
+    pub carrier: PathBuf,
     /// Size of the restored file (must equal `orig_host_size` recorded in the
     /// envelope).
     pub restored_size: u64,
@@ -507,27 +563,27 @@ pub struct RemoveResult {
     /// struct rather than just on `Result::is_ok`.
     pub verified_identical: bool,
     /// Path of the backup kept for an in-place removal, if any.
-    pub backup_file: Option<String>,
+    pub backup_file: Option<PathBuf>,
 }
 
 /// Sanitize an untrusted metadata filename down to a safe bare file name.
 ///
-/// Envelope metadata (especially in unencrypted envelopes) is attacker-controlled
-/// input: `../../etc/passwd` style values must never escape the output directory.
-/// Only the final path component is kept; empty results and `.`/`..` fall back to
-/// "extracted.bin".
+/// Re-exported from [`crate::core::fs`] so the structure-domain path keeps its
+/// historical name and both domains share one implementation.
+pub use crate::core::fs::sanitize_filename;
+
+/// Typed format of an adapter, or an error when its name is unregistered.
 ///
-/// Both `/` and `\` are treated as separators on every platform: the envelope may
-/// be written on one OS and read on another, so the sanitized name must not depend
-/// on the host's path rules (a Windows-style name read on Unix would otherwise
-/// keep its backslashes verbatim). Names carrying a `:` (drive prefix like `C:`) are
-/// rejected as well, so they cannot turn into uncreatable files on Windows.
-pub fn sanitize_filename(name: &str) -> String {
-    let candidate = name.rsplit(['/', '\\']).find(|seg| !seg.is_empty());
-    match candidate {
-        Some(n) if n != "." && n != ".." && !n.contains(':') => n.to_string(),
-        _ => "extracted.bin".to_string(),
-    }
+/// `format_name()` stays a `&'static str` because adapters are the low-level
+/// layer; the public result structs carry the enum, so the conversion happens
+/// once, here, instead of at every construction site.
+fn adapter_format(adapter: &dyn HostAdapter) -> Result<FileFormat, StrHideError> {
+    FileFormat::from_adapter_name(adapter.format_name()).ok_or_else(|| {
+        StrHideError::General(format!(
+            "Adapter reports unknown format name '{}'",
+            adapter.format_name()
+        ))
+    })
 }
 
 /// Build the "no hidden data" error for a carrier that `locate` could not
@@ -557,44 +613,6 @@ fn no_hidden_data_error(
         }
     }
     StrHideError::NoHiddenData(msg)
-}
-
-/// Options controlling an injection. Bundled into a struct so the public API
-/// stays readable and extensible as features grow (replaces a nine-parameter
-/// positional signature that clippy flagged as `too_many_arguments`).
-///
-/// The `Default` values match the CLI defaults: `auto` strategy, timestamps and
-/// in-place backup preserved, no encryption, no stealth.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WriteOptions<'a> {
-    /// Write the stego carrier here instead of overwriting the carrier.
-    pub output_path: Option<&'a Path>,
-    /// Password for encryption; required for `--stealth`.
-    pub password: Option<&'a str>,
-    /// Password hint (mutually exclusive with `stealth`, max 1024 bytes).
-    pub password_hint: Option<&'a str>,
-    /// Injection strategy name or `auto`.
-    pub strategy: &'a str,
-    /// Hide the envelope with password-derived magics (requires `password`).
-    pub stealth: bool,
-    /// Clone the carrier's original timestamps onto the result.
-    pub preserve_time: bool,
-    /// Keep a `<carrier>.bak` backup for in-place writes.
-    pub backup: bool,
-}
-
-impl Default for WriteOptions<'_> {
-    fn default() -> Self {
-        Self {
-            output_path: None,
-            password: None,
-            password_hint: None,
-            strategy: "auto",
-            stealth: false,
-            preserve_time: true,
-            backup: true,
-        }
-    }
 }
 
 /// Inject `source` into `carrier_path`, returning a [`WriteResult`].
@@ -635,7 +653,7 @@ pub fn write_carrier(
         source,
         options,
         &LocalParams::default(),
-        &Profile::default(),
+        &StructureProfile::default(),
     )
 }
 
@@ -645,15 +663,16 @@ pub fn write_carrier(
 ///
 /// - `local`: writer-only knobs ([`LocalParams`]) that the reader never needs.
 ///   Passing different values than the reader uses is safe.
-/// - `profile`: the private dialect ([`Profile`]). The reader must be given the
-///   same profile; `Profile::default()` is the official dialect.
+/// - `dialect`: the private dialect ([`StructureProfile`]). The reader must be
+///   given the same dialect; `StructureProfile::default()` is the official one.
 ///
 /// ```no_run
-/// use strhide::structure::{write_carrier_with, PayloadSource, WriteOptions};
-/// use strhide::params::{CompressionStrategy, LocalParams, Profile};
+/// use strhide::structure::params::StructureProfile;
+/// use strhide::structure::{PayloadSource, WriteOptions, write_carrier_with};
+/// use strhide::params::{CompressionStrategy, LocalParams};
 /// # fn main() -> Result<(), strhide::errors::StrHideError> {
 /// // Both types are `#[non_exhaustive]`: build from `default()` with setters.
-/// let profile = Profile::default().with_default_secret("my-private-dialect");
+/// let dialect = StructureProfile::default().with_default_secret("my-private-dialect");
 /// let local = LocalParams::default()
 ///     .with_chunk_size(64 * 1024)
 ///     .with_compression(CompressionStrategy::Never);
@@ -662,20 +681,20 @@ pub fn write_carrier(
 ///     PayloadSource::Text("secret"),
 ///     &WriteOptions::default(),
 ///     &local,
-///     &profile,
+///     &dialect,
 /// )?;
 /// # Ok(()) }
 /// ```
 /// Everything a write produces that does not depend on a path.
 struct WriteCoreResult {
-    format: &'static str,
-    strategy: String,
+    format: FileFormat,
+    strategy: StrategyId,
     strategy_note: Option<String>,
     raw_size: u64,
     ube_size: u64,
     is_encrypted: bool,
     is_stealth: bool,
-    warning: Option<String>,
+    warnings: Vec<Warning>,
 }
 
 /// Build and inject an envelope from `host` into `out`.
@@ -695,7 +714,7 @@ fn write_core<H, W>(
     source: PayloadSource,
     options: &WriteOptions<'_>,
     local: &LocalParams,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<WriteCoreResult, StrHideError>
 where
     H: Read + Seek,
@@ -878,7 +897,7 @@ where
         header_magic = magics.0;
         trailer_magic = magics.1;
     } else {
-        // The profile decides the dialect; `Profile::default()` yields the
+        // The profile decides the dialect; `StructureProfile::default()` yields the
         // standard magics, byte-identical to every earlier release.
         header_magic = profile.header_magic();
         trailer_magic = profile.trailer_magic();
@@ -981,28 +1000,25 @@ where
         )));
     }
 
-    // Check size inflation warning (> 50%)
-    let mut warning_msg = None;
+    // Non-fatal warnings. Both can fire for one write, so they are collected
+    // instead of being merged into one sentence.
+    let mut warnings = Vec::new();
     if orig_host_size > 0 && ube_total_size > (orig_host_size / 2) {
         let ratio_pct = (ube_total_size as f64 / orig_host_size as f64) * 100.0;
         // State the measured ratio and refer to the threshold separately. The
         // old text hard-coded "exceeds 50.0%" next to the real percentage,
         // which read like a contradiction for tiny carriers (e.g. "50.0% ...
         // 319.4%").
-        warning_msg = Some(format!(
-            "Hidden data envelope ({ube_total_size} bytes) is {ratio_pct:.1}% of the carrier file size ({orig_host_size} bytes), above the 50% inflation warning threshold. Noticeable file size inflation may compromise stealthiness!"
-        ));
+        warnings.push(Warning::SizeInflation {
+            ube_size: ube_total_size,
+            host_size: orig_host_size,
+            ratio_pct,
+        });
     }
-
-    // Merge structural warnings (probable pre-existing stealth envelope).
+    // Probable pre-existing stealth envelope.
     if !structural_warnings.is_empty() {
-        let extra = format!(
-            "Carrier shows structures consistent with a hidden envelope ({}). It may already contain a stealth envelope written with a different password; injecting now would stack a second envelope on top.",
-            structural_warnings.join("; ")
-        );
-        warning_msg = Some(match warning_msg {
-            Some(w) => format!("{w} {extra}"),
-            None => extra,
+        warnings.push(Warning::SuspiciousStructures {
+            hints: structural_warnings.clone(),
         });
     }
 
@@ -1100,14 +1116,16 @@ where
     let strategy_note = adapter.strategy_note(&selected_strategy, strategy == "auto");
 
     Ok(WriteCoreResult {
-        format: adapter.format_name(),
-        strategy: selected_strategy.clone(),
+        format: FileFormat::from_adapter_name(adapter.format_name())
+            .expect("every registered adapter maps to a FileFormat"),
+        strategy: StrategyId::from_name(&selected_strategy)
+            .expect("the selected strategy comes from STRATEGY_REGISTRY"),
         strategy_note,
         raw_size,
         ube_size: ube_total_size,
         is_encrypted: has_custom_password,
         is_stealth: (flags & FLAG_STEALTH) != 0,
-        warning: warning_msg,
+        warnings,
     })
 }
 
@@ -1123,7 +1141,7 @@ pub fn write_carrier_with(
     source: PayloadSource,
     options: &WriteOptions<'_>,
     local: &LocalParams,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<WriteResult, StrHideError> {
     if !carrier_path.exists() {
         return Err(StrHideError::General(format!(
@@ -1187,7 +1205,7 @@ pub fn write_carrier_with(
     if is_inplace && options.backup {
         let bak = next_backup_path(carrier_path);
         std::fs::copy(carrier_path, &bak)?;
-        backup_file = Some(bak.display().to_string());
+        backup_file = Some(bak);
     }
 
     std::fs::rename(&tmp_target, target_path)?;
@@ -1201,9 +1219,8 @@ pub fn write_carrier_with(
     }
 
     Ok(WriteResult {
-        status: "success".into(),
-        carrier: target_path.display().to_string(),
-        format: core.format.into(),
+        carrier: target_path.to_path_buf(),
+        format: core.format,
         strategy: core.strategy,
         strategy_note: core.strategy_note,
         raw_size: core.raw_size,
@@ -1212,7 +1229,7 @@ pub fn write_carrier_with(
         is_stealth: core.is_stealth,
         password_hint: options.password_hint.map(|s| s.to_string()),
         backup_file,
-        warning: core.warning,
+        warnings: core.warnings,
     })
 }
 
@@ -1244,7 +1261,7 @@ pub fn write_carrier_bytes(
     source: PayloadSource,
     options: &WriteOptions<'_>,
     local: &LocalParams,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<(Vec<u8>, WriteResult), StrHideError> {
     if let Some(p) = options.output_path {
         return Err(StrHideError::General(format!(
@@ -1265,9 +1282,8 @@ pub fn write_carrier_bytes(
     let bytes = out.into_inner();
 
     let result = WriteResult {
-        status: "success".into(),
-        carrier: "<memory>".into(),
-        format: core.format.into(),
+        carrier: PathBuf::from("<memory>"),
+        format: core.format,
         strategy: core.strategy,
         strategy_note: core.strategy_note,
         raw_size: core.raw_size,
@@ -1276,41 +1292,25 @@ pub fn write_carrier_bytes(
         is_stealth: core.is_stealth,
         password_hint: options.password_hint.map(|s| s.to_string()),
         backup_file: None,
-        warning: core.warning,
+        warnings: core.warnings,
     };
     Ok((bytes, result))
 }
 
-/// Extract the payload of a carrier.
+/// Extract the payload of a carrier, in the official dialect.
 ///
-/// Refuses to overwrite an existing output file; use [`read_carrier_with`] with
-/// `overwrite = true` (CLI: `--overwrite`) to allow it.
+/// [`ReadOptions`] carries the destination, the password, and the overwrite
+/// decision. Without [`ReadOptions::overwrite`], an existing destination is an
+/// error: silently truncating it would lose a user file, which contradicts the
+/// tool's "lossless, restorable" contract.
+///
+/// Call [`read_carrier_with_dialect`] when a private
+/// [`StructureProfile`] was used at write time.
 pub fn read_carrier(
     carrier_path: &Path,
-    output_path: Option<&Path>,
-    password: Option<&str>,
+    options: &ReadOptions<'_>,
 ) -> Result<ReadResult, StrHideError> {
-    read_carrier_with(carrier_path, output_path, password, false)
-}
-
-/// Extract the payload of a carrier, optionally replacing an existing output.
-///
-/// Without `overwrite`, an existing destination is an error: silently
-/// truncating it would lose a user file, which contradicts the tool's
-/// "lossless, restorable" contract.
-pub fn read_carrier_with(
-    carrier_path: &Path,
-    output_path: Option<&Path>,
-    password: Option<&str>,
-    overwrite: bool,
-) -> Result<ReadResult, StrHideError> {
-    read_carrier_with_profile(
-        carrier_path,
-        output_path,
-        password,
-        overwrite,
-        &Profile::default(),
-    )
+    read_carrier_with_dialect(carrier_path, options, &StructureProfile::default())
 }
 
 /// Everything a successful read produces before any file is written.
@@ -1340,7 +1340,7 @@ fn open_and_authenticate_envelope<'a>(
     host: &'a mut dyn SeekRead,
     label: &str,
     password: Option<&str>,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<AuthenticatedEnvelope<'a>, StrHideError> {
     let adapter = find_adapter_or_reject(host, label)?;
 
@@ -1448,7 +1448,7 @@ fn read_core(
     host: &mut dyn SeekRead,
     label: &str,
     password: Option<&str>,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<ReadCore, StrHideError> {
     let mut env = open_and_authenticate_envelope(host, label, password, profile)?;
 
@@ -1501,7 +1501,7 @@ fn verify_l3_stream(
     host: &mut dyn SeekRead,
     label: &str,
     password: Option<&str>,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<u64, StrHideError> {
     host.seek(SeekFrom::Start(0))?;
     let mut env = open_and_authenticate_envelope(host, label, password, profile)?;
@@ -1528,7 +1528,7 @@ fn write_payload_to(
     out_p: &Path,
     core: &ReadCore,
     overwrite: bool,
-) -> Result<String, StrHideError> {
+) -> Result<PathBuf, StrHideError> {
     let final_dest = if out_p.is_dir() {
         let fn_to_use = if core.filename.is_empty() {
             "extracted.bin".to_string()
@@ -1562,22 +1562,20 @@ fn write_payload_to(
         ))
     })?;
     out_f.write_all(&core.data)?;
-    Ok(final_dest.display().to_string())
+    Ok(final_dest)
 }
 
-/// Extract the payload of a carrier written under `profile`.
+/// Extract the payload of a carrier written under `dialect`.
 ///
-/// The profile must be the same one used at write time. For the official
-/// profile this is identical to [`read_carrier_with`]; for a private dialect a
+/// The dialect must be the same one used at write time. For the official
+/// dialect this is identical to [`read_carrier`]; for a private dialect a
 /// mismatched profile cannot return payload bytes — the envelope is either not
 /// found at all (stealth, or a custom trailer magic) or fails header/`AEAD`
 /// validation (custom `default_secret` with the standard magics).
-pub fn read_carrier_with_profile(
+pub fn read_carrier_with_dialect(
     carrier_path: &Path,
-    output_path: Option<&Path>,
-    password: Option<&str>,
-    overwrite: bool,
-    profile: &Profile,
+    options: &ReadOptions<'_>,
+    dialect: &StructureProfile,
 ) -> Result<ReadResult, StrHideError> {
     if !carrier_path.exists() {
         return Err(StrHideError::General(format!(
@@ -1588,14 +1586,14 @@ pub fn read_carrier_with_profile(
 
     let label = carrier_path.display().to_string();
     let mut f = File::open(carrier_path)?;
-    let core = read_core(&mut f, &label, password, profile)?;
-    let written_file = match output_path {
-        Some(out_p) => Some(write_payload_to(out_p, &core, overwrite)?),
+    let core = read_core(&mut f, &label, options.password, dialect)?;
+    let written_file = match options.output_path {
+        Some(out_p) => Some(write_payload_to(out_p, &core, options.overwrite)?),
         None => None,
     };
 
     Ok(ReadResult {
-        carrier: label,
+        carrier: carrier_path.to_path_buf(),
         data: core.data,
         is_file: core.is_file,
         is_encrypted: core.is_encrypted,
@@ -1607,18 +1605,18 @@ pub fn read_carrier_with_profile(
 
 /// Extract the payload of an in-memory carrier.
 ///
-/// Identical validation to [`read_carrier_with_profile`] (format detection,
+/// Identical validation to [`read_carrier_with_dialect`] (format detection,
 /// AEAD authentication, SHA-256 check); `written_file` is always `None` because
 /// nothing is written — the caller already has the bytes.
 pub fn read_carrier_bytes(
     carrier: &[u8],
     password: Option<&str>,
-    profile: &Profile,
+    dialect: &StructureProfile,
 ) -> Result<ReadResult, StrHideError> {
     let mut host = Cursor::new(carrier);
-    let core = read_core(&mut host, "<memory>", password, profile)?;
+    let core = read_core(&mut host, "<memory>", password, dialect)?;
     Ok(ReadResult {
-        carrier: "<memory>".into(),
+        carrier: PathBuf::from("<memory>"),
         data: core.data,
         is_file: core.is_file,
         is_encrypted: core.is_encrypted,
@@ -1629,46 +1627,29 @@ pub fn read_carrier_bytes(
 }
 
 /// Strip the envelope from `carrier_path` and restore the original carrier
-/// bit-for-bit.
+/// bit-for-bit, in the official dialect.
 ///
-/// When `output_path` is `None` the carrier is rewritten in place; otherwise
-/// the restored bytes are written there (the original carrier is untouched).
+/// When [`RestoreOptions::output_path`] is `None` the carrier is rewritten in
+/// place; otherwise the restored bytes are written there (the original carrier
+/// is untouched).
 ///
 /// The restored file is hashed and compared to the `orig_host_size` /
 /// `orig_host_sha256` recorded in the envelope. On mismatch the new file is
 /// discarded and [`StrHideError::RestoreMismatch`] is returned — usually
 /// because a second envelope was layered on top and must be removed first.
 ///
-/// `password` is required only when the envelope was written in stealth mode;
+/// A password is required only when the envelope was written in stealth mode;
 /// a non-stealth envelope is stripped regardless of password.
 ///
-/// When `backup` is true and the write is in place, a `<carrier>.bak` file is
-/// kept before overwriting.
+/// When [`RestoreOptions::backup`] is true and the write is in place, a
+/// `<carrier>.bak` file is kept before overwriting.
 pub fn remove_carrier(
     carrier_path: &Path,
-    output_path: Option<&Path>,
-    password: Option<&str>,
-    backup: bool,
+    options: &RestoreOptions<'_>,
 ) -> Result<RemoveResult, StrHideError> {
-    remove_carrier_with(
-        carrier_path,
-        output_path,
-        password,
-        backup,
-        &Profile::default(),
-    )
+    remove_carrier_with_dialect(carrier_path, options, &StructureProfile::default())
 }
 
-/// Strip the envelope of a carrier written under `profile`.
-///
-/// The profile must be the one used at write time: it drives envelope location
-/// (custom magic), the stealth domain, and the `default_secret` used to decode
-/// a non-password envelope.
-///
-/// `overwrite` decides what happens when `output_path` names a file that
-/// already exists. It defaults to refusing (see [`remove_carrier_with_options`]
-/// for why), which is the safe answer for a library call; the CLI resolves the
-/// user's choice first and passes `true` only after they have confirmed.
 /// Strip the envelope from `host` into `out`, returning the envelope header.
 ///
 /// I/O-free core shared by [`remove_carrier_with`] and
@@ -1680,7 +1661,7 @@ fn remove_core(
     out: &mut dyn SeekWrite,
     label: &str,
     password: Option<&str>,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<EnvelopeHeader, StrHideError> {
     let adapter = find_adapter_or_reject(host, label)?;
     let loc = locate_envelope(host, adapter, password, profile)?;
@@ -1719,7 +1700,7 @@ fn verify_restored(
     restored: &mut dyn SeekRead,
     header: &EnvelopeHeader,
     password: Option<&str>,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<(u64, [u8; 32]), StrHideError> {
     restored.seek(SeekFrom::Start(0))?;
     let restored_size = restored.seek(SeekFrom::End(0))?;
@@ -1770,31 +1751,23 @@ fn verify_restored(
     )))
 }
 
-pub fn remove_carrier_with(
-    carrier_path: &Path,
-    output_path: Option<&Path>,
-    password: Option<&str>,
-    backup: bool,
-    profile: &Profile,
-) -> Result<RemoveResult, StrHideError> {
-    remove_carrier_with_options(carrier_path, output_path, password, backup, profile, false)
-}
-
-/// [`remove_carrier_with`] with an explicit `overwrite` decision.
+/// Strip the envelope of a carrier written under `dialect`.
 ///
-/// When `overwrite` is false and `output_path` names a different, existing file
-/// the call is refused: restoring replaces the file with the pre-envelope host,
-/// and `rename`-ing over a user's file loses it with no way back. The CLI asks
-/// the user first (via `check_overwrite`) and passes `true` only after they have
-/// confirmed. In-place restoration — the default when no output path is given —
-/// is the one case where overwriting is the whole point.
-pub fn remove_carrier_with_options(
+/// The dialect must be the one used at write time: it drives envelope location
+/// (custom magic), the stealth domain, and the `default_secret` used to decode
+/// a non-password envelope.
+///
+/// [`RestoreOptions::overwrite`] decides what happens when the output path
+/// names a different file that already exists. It defaults to refusing, which
+/// is the safe answer for a library call: restoring replaces the file with the
+/// pre-envelope host, and `rename`-ing over a user's file loses it with no way
+/// back. The CLI resolves the user's choice first and passes `true` only after
+/// they have confirmed. In-place restoration — the default when no output path
+/// is given — is the one case where overwriting is the whole point.
+pub fn remove_carrier_with_dialect(
     carrier_path: &Path,
-    output_path: Option<&Path>,
-    password: Option<&str>,
-    backup: bool,
-    profile: &Profile,
-    overwrite: bool,
+    options: &RestoreOptions<'_>,
+    dialect: &StructureProfile,
 ) -> Result<RemoveResult, StrHideError> {
     if !carrier_path.exists() {
         return Err(StrHideError::General(format!(
@@ -1803,13 +1776,13 @@ pub fn remove_carrier_with_options(
         )));
     }
 
-    let target_path = output_path.unwrap_or(carrier_path);
+    let target_path = options.output_path.unwrap_or(carrier_path);
     let meta = std::fs::metadata(carrier_path)?;
     let orig_permissions = meta.permissions();
     let orig_atime = filetime::FileTime::from_last_access_time(&meta);
     let orig_mtime = filetime::FileTime::from_last_modification_time(&meta);
 
-    if !overwrite && !same_file(target_path, carrier_path) && target_path.exists() {
+    if !options.overwrite && !same_file(target_path, carrier_path) && target_path.exists() {
         return Err(StrHideError::Rejection(format!(
             "Refusing to overwrite existing file '{}'. Choose another output path.",
             target_path.display()
@@ -1834,21 +1807,21 @@ pub fn remove_carrier_with_options(
             .create(true)
             .truncate(true)
             .open(&tmp_target)?;
-        remove_core(&mut cf, &mut out_f, &label, password, profile)?
+        remove_core(&mut cf, &mut out_f, &label, options.password, dialect)?
     };
 
     // Verify restored file
     let (restored_size, restored_sha256) = {
         let mut rf = File::open(&tmp_target)?;
-        verify_restored(&mut rf, &header, password, profile)?
+        verify_restored(&mut rf, &header, options.password, dialect)?
     };
 
     let is_inplace = same_file(target_path, carrier_path);
     let mut backup_file = None;
-    if is_inplace && backup {
+    if is_inplace && options.backup {
         let bak = next_backup_path(carrier_path);
         std::fs::copy(carrier_path, &bak)?;
-        backup_file = Some(bak.display().to_string());
+        backup_file = Some(bak);
     }
 
     std::fs::rename(&tmp_target, target_path)?;
@@ -1857,8 +1830,7 @@ pub fn remove_carrier_with_options(
     let _ = filetime::set_file_times(target_path, orig_atime, orig_mtime);
 
     Ok(RemoveResult {
-        status: "success".into(),
-        carrier: target_path.display().to_string(),
+        carrier: target_path.to_path_buf(),
         restored_size,
         restored_sha256: restored_sha256
             .iter()
@@ -1879,21 +1851,20 @@ pub fn remove_carrier_with_options(
 pub fn remove_carrier_bytes(
     carrier: &[u8],
     password: Option<&str>,
-    profile: &Profile,
+    dialect: &StructureProfile,
 ) -> Result<(Vec<u8>, RemoveResult), StrHideError> {
     let mut host = Cursor::new(carrier);
     let mut out = Cursor::new(Vec::new());
-    let header = remove_core(&mut host, &mut out, "<memory>", password, profile)?;
+    let header = remove_core(&mut host, &mut out, "<memory>", password, dialect)?;
     let bytes = out.into_inner();
 
     let (restored_size, restored_sha256) = {
         let mut restored = Cursor::new(&bytes);
-        verify_restored(&mut restored, &header, password, profile)?
+        verify_restored(&mut restored, &header, password, dialect)?
     };
 
     let result = RemoveResult {
-        status: "success".into(),
-        carrier: "<memory>".into(),
+        carrier: PathBuf::from("<memory>"),
         restored_size,
         restored_sha256: restored_sha256
             .iter()
@@ -1914,7 +1885,7 @@ pub fn inspect_carrier(
     carrier_path: &Path,
     password: Option<&str>,
 ) -> Result<InspectResult, StrHideError> {
-    inspect_carrier_with(carrier_path, password, &Profile::default())
+    inspect_carrier_with(carrier_path, password, &StructureProfile::default())
 }
 
 /// Inspect a carrier written under `profile`.
@@ -1925,7 +1896,7 @@ pub fn inspect_carrier(
 pub fn inspect_carrier_with(
     carrier_path: &Path,
     password: Option<&str>,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<InspectResult, StrHideError> {
     if !carrier_path.exists() {
         return Err(StrHideError::General(format!(
@@ -1948,7 +1919,7 @@ pub fn inspect_carrier_with(
 pub fn inspect_carrier_bytes(
     carrier: &[u8],
     password: Option<&str>,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<InspectResult, StrHideError> {
     let mut host = Cursor::new(carrier);
     inspect_core(&mut host, "<memory>", password, profile)
@@ -1960,7 +1931,7 @@ fn inspect_core(
     host: &mut dyn SeekRead,
     label: &str,
     password: Option<&str>,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<InspectResult, StrHideError> {
     host.seek(SeekFrom::Start(0))?;
     let adapter = find_adapter_or_reject(host, label)?;
@@ -1976,8 +1947,8 @@ fn inspect_core(
         Some(l) => l,
         None => {
             return Ok(InspectResult {
-                carrier: label.to_string(),
-                format: adapter.format_name().into(),
+                carrier: PathBuf::from(label),
+                format: adapter_format(adapter)?,
                 has_hidden_data: false,
                 strategy: None,
                 ube_offset: None,
@@ -2053,14 +2024,14 @@ fn inspect_core(
     }
 
     let reported_strategy = if header.strategy_id > 0 {
-        id_to_strategy(header.strategy_id).to_string()
+        StrategyId::from_u8(header.strategy_id)
     } else {
-        strategy_name
+        StrategyId::from_name(&strategy_name).unwrap_or(StrategyId::from_u8(0))
     };
 
     Ok(InspectResult {
-        carrier: label.to_string(),
-        format: adapter.format_name().into(),
+        carrier: PathBuf::from(label),
+        format: adapter_format(adapter)?,
         has_hidden_data: true,
         strategy: Some(reported_strategy),
         ube_offset: Some(ube_offset),
@@ -2092,7 +2063,7 @@ pub fn verify_carrier(
     carrier_path: &Path,
     password: Option<&str>,
 ) -> Result<VerifyResult, StrHideError> {
-    verify_carrier_with(carrier_path, password, &Profile::default())
+    verify_carrier_with(carrier_path, password, &StructureProfile::default())
 }
 
 /// Verify a carrier written under `profile`.
@@ -2102,7 +2073,7 @@ pub fn verify_carrier(
 pub fn verify_carrier_with(
     carrier_path: &Path,
     password: Option<&str>,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<VerifyResult, StrHideError> {
     if !carrier_path.exists() {
         return Err(StrHideError::General(format!(
@@ -2125,7 +2096,7 @@ pub fn verify_carrier_with(
 pub fn verify_carrier_bytes(
     carrier: &[u8],
     password: Option<&str>,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<VerifyResult, StrHideError> {
     let mut host = Cursor::new(carrier);
     verify_core(&mut host, "<memory>", password, profile)
@@ -2137,7 +2108,7 @@ fn verify_core(
     host: &mut dyn SeekRead,
     label: &str,
     password: Option<&str>,
-    profile: &Profile,
+    profile: &StructureProfile,
 ) -> Result<VerifyResult, StrHideError> {
     host.seek(SeekFrom::Start(0))?;
     let adapter = find_adapter_or_reject(host, label)?;
@@ -2151,8 +2122,8 @@ fn verify_core(
         Some(l) => l,
         None => {
             return Ok(VerifyResult {
-                carrier: label.to_string(),
-                format: adapter.format_name().into(),
+                carrier: PathBuf::from(label),
+                format: adapter_format(adapter)?,
                 level1_host: LevelStatus {
                     ok: l1_ok,
                     detail: l1_msg,
@@ -2280,8 +2251,8 @@ fn verify_core(
     };
 
     Ok(VerifyResult {
-        carrier: label.to_string(),
-        format: adapter.format_name().into(),
+        carrier: PathBuf::from(label),
+        format: adapter_format(adapter)?,
         level1_host: LevelStatus {
             ok: l1_ok,
             detail: l1_msg,

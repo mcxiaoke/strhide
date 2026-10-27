@@ -45,7 +45,7 @@ use crate::stego::format::{Aead as SuiteAead, CipherSuite};
 /// Official public fallback secret.
 ///
 /// Used only when neither a user password nor a private
-/// [`StegoProfile::default_secret`](crate::params::StegoProfile::default_secret)
+/// [`StegoProfile::default_secret`](crate::stego::params::StegoProfile::default_secret)
 /// is supplied. The value is public by design: it keeps payloads off
 /// plaintext-on-disk, but it gives **no** confidentiality against anyone who
 /// has this source tree -- they can reproduce the exact key derivation and
@@ -53,7 +53,7 @@ use crate::stego::format::{Aead as SuiteAead, CipherSuite};
 /// permutation become known).
 ///
 /// Replace it with a private value through
-/// [`Profile::with_stego_secret`](crate::params::Profile::with_stego_secret) in
+/// [`Dialect::with_default_secret`](crate::facade::Dialect::with_default_secret) in
 /// a custom build (compile-time dialect; there is deliberately no CLI flag for
 /// it). Note the parameter class: it must be identical on embed and extract,
 /// otherwise the carrier reads back as `NoHiddenData`.

@@ -320,3 +320,114 @@ fn batch_remove_reports_how_far_it_got_before_failing() {
     assert_eq!(fs::read(dir.join("a.png")).unwrap(), make_png());
     assert_eq!(payload(&dir, "c.png"), "x");
 }
+
+// ------------------------------------------------------------ read / extract
+
+#[test]
+fn batch_read_writes_one_named_payload_per_carrier() {
+    // Stage 4 gave `read` the same `CARRIER...` + `-o <DIR>` shape the other
+    // eight commands already had. Two text payloads record no filename, so the
+    // outputs must be named after their carriers instead of colliding on
+    // `extracted.bin`.
+    let dir = scratch("read_batch");
+    seed(&dir, &["a.png", "b.png"]);
+    let out = run(
+        &dir,
+        &["write", "a.png", "b.png", "-t", "shared", "--in-place"],
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+
+    let out_dir = dir.join("out");
+    fs::create_dir(&out_dir).unwrap();
+    let out = run(
+        &dir,
+        &["read", "a.png", "b.png", "-o", "out", "--lang", "en"],
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert!(
+        stdout(&out).contains("[SUMMARY] 2/2 carriers succeeded."),
+        "stdout: {}",
+        stdout(&out)
+    );
+
+    assert_eq!(fs::read_to_string(out_dir.join("a.txt")).unwrap(), "shared");
+    assert_eq!(fs::read_to_string(out_dir.join("b.txt")).unwrap(), "shared");
+    assert!(
+        !out_dir.join("extracted.bin").exists(),
+        "unnamed payloads must not all be called extracted.bin"
+    );
+}
+
+#[test]
+fn batch_read_requires_an_output_directory_for_several_carriers() {
+    let dir = scratch("read_batch_no_out");
+    seed(&dir, &["a.png", "b.png"]);
+    let out = run(&dir, &["write", "a.png", "b.png", "-t", "x", "--in-place"]);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+
+    let out = run(&dir, &["read", "a.png", "b.png", "--lang", "en"]);
+    assert_eq!(code(&out), 1);
+    assert!(
+        stderr(&out).contains("needs `-o <DIR>`"),
+        "stderr: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn batch_read_rejects_stdout_for_several_carriers() {
+    let dir = scratch("read_batch_stdout");
+    seed(&dir, &["a.png", "b.png"]);
+    let out = run(&dir, &["write", "a.png", "b.png", "-t", "x", "--in-place"]);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+
+    let out = run(
+        &dir,
+        &["read", "a.png", "b.png", "--stdout", "--lang", "en"],
+    );
+    assert_eq!(code(&out), 1);
+    assert!(
+        stderr(&out).contains("--stdout"),
+        "stderr: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn batch_read_refuses_to_overwrite_without_the_flag() {
+    let dir = scratch("read_batch_overwrite");
+    seed(&dir, &["a.png", "b.png"]);
+    let out = run(&dir, &["write", "a.png", "b.png", "-t", "x", "--in-place"]);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+
+    let out_dir = dir.join("out");
+    fs::create_dir(&out_dir).unwrap();
+    fs::write(out_dir.join("a.txt"), "stale").unwrap();
+
+    let out = run(
+        &dir,
+        &["read", "a.png", "b.png", "-o", "out", "--lang", "en"],
+    );
+    assert_eq!(code(&out), 1);
+    assert_eq!(
+        fs::read_to_string(out_dir.join("a.txt")).unwrap(),
+        "stale",
+        "a refused read must not truncate the existing file"
+    );
+
+    let out = run(
+        &dir,
+        &[
+            "read",
+            "a.png",
+            "b.png",
+            "-o",
+            "out",
+            "--overwrite",
+            "--lang",
+            "en",
+        ],
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert_eq!(fs::read_to_string(out_dir.join("a.txt")).unwrap(), "x");
+}

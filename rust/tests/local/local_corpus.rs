@@ -43,8 +43,8 @@ use strhide::crypto::compute_file_sha256;
 use strhide::errors::StrHideError;
 use strhide::structure::rejection::run_all_rejection_checks;
 use strhide::structure::{
-    PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
-    write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, inspect_carrier, read_carrier,
+    remove_carrier, verify_carrier, write_carrier,
 };
 
 const ENC_PASSWORD: &str = "P@ssw0rd!Secure_2026";
@@ -242,10 +242,27 @@ fn plain_mode(
 
     verify_all_levels(&carrier, None)?;
 
-    let r = read_carrier(&carrier, None, None).map_err(|e| format!("read: {e}"))?;
+    let r = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .map_err(|e| format!("read: {e}"))?;
     assert_payload(&r.data, payload, "plaintext")?;
 
-    remove_carrier(&carrier, None, None, false).map_err(|e| format!("remove: {e}"))?;
+    remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: None,
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .map_err(|e| format!("remove: {e}"))?;
     assert_restored(&carrier, orig_sha, "remove")?;
     Ok(format!(
         "format={:<5} strategy={:<14} ube={}B",
@@ -272,21 +289,54 @@ fn encrypted_mode(
     verify_all_levels(&carrier, Some(ENC_PASSWORD))?;
 
     // A wrong password must be a clean Password error, never garbage output.
-    match read_carrier(&carrier, None, Some("WrongPassword!")) {
+    match read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: Some("WrongPassword!"),
+            overwrite: false,
+        },
+    ) {
         Err(StrHideError::Password(_)) => {}
         Err(e) => return Err(format!("wrong password gave an unexpected error: {e}")),
         Ok(_) => return Err("wrong password was accepted".into()),
     }
-    if read_carrier(&carrier, None, None).is_ok() {
+    if read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .is_ok()
+    {
         return Err("encrypted payload was readable without a password".into());
     }
 
-    let r = read_carrier(&carrier, None, Some(ENC_PASSWORD)).map_err(|e| format!("read: {e}"))?;
+    let r = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: Some(ENC_PASSWORD),
+            overwrite: false,
+        },
+    )
+    .map_err(|e| format!("read: {e}"))?;
     assert_payload(&r.data, payload, "encrypted")?;
 
     // Structural restore needs no password: the envelope header carries the
     // boundaries and the payload itself is never decrypted.
-    remove_carrier(&carrier, None, None, false).map_err(|e| format!("remove: {e}"))?;
+    remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: None,
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .map_err(|e| format!("remove: {e}"))?;
     assert_restored(&carrier, orig_sha, "remove")?;
     Ok(format!(
         "format={:<5} strategy={:<14} ube={}B",
@@ -320,12 +370,27 @@ fn stealth_mode(
         ));
     }
 
-    let r =
-        read_carrier(&carrier, None, Some(STEALTH_PASSWORD)).map_err(|e| format!("read: {e}"))?;
+    let r = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: Some(STEALTH_PASSWORD),
+            overwrite: false,
+        },
+    )
+    .map_err(|e| format!("read: {e}"))?;
     assert_payload(&r.data, payload, "stealth")?;
 
-    remove_carrier(&carrier, None, Some(STEALTH_PASSWORD), false)
-        .map_err(|e| format!("remove: {e}"))?;
+    remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: None,
+            password: Some(STEALTH_PASSWORD),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .map_err(|e| format!("remove: {e}"))?;
     assert_restored(&carrier, orig_sha, "remove")?;
     Ok(format!(
         "format={:<5} strategy={:<14} ube={}B",

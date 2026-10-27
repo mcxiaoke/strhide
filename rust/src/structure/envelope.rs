@@ -30,7 +30,7 @@
 //! XOR-masked with a keystream derived from the password (or, for the default
 //! non-encrypted envelope, from the profile's default secret —
 //! [`crate::crypto::BUILTIN_DEFAULT_KEY`] unless a private
-//! [`Profile`] overrides it).
+//! [`StructureProfile`] overrides it).
 //!
 //! Readers should prefer [`EnvelopeHeader::unpack_with_password`] (official
 //! dialect) or [`EnvelopeHeader::unpack_with_profile`] (any dialect) and
@@ -38,8 +38,8 @@
 //! de-masked header.
 
 use crate::errors::StrHideError;
-use crate::params::Profile;
 pub use crate::params::{STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC};
+use crate::structure::params::StructureProfile;
 use std::io::{Read, Seek, SeekFrom};
 
 /// Largest strategy ID in [`crate::structure::registry::STRATEGY_REGISTRY`].
@@ -264,7 +264,7 @@ impl EnvelopeHeader {
     ///
     /// The masking secret must match on both sides — this is the write half of
     /// the pair whose read half is [`Self::unpack_with_profile`]. A private
-    /// `Profile::default_secret` therefore has to be supplied to both calls or
+    /// `StructureProfile::default_secret` therefore has to be supplied to both calls or
     /// the header becomes unreadable.
     ///
     /// Callers that already hold a [`crate::crypto::PasswordSecrets`] (the
@@ -273,7 +273,7 @@ impl EnvelopeHeader {
     pub fn pack_with_profile(
         &self,
         password: Option<&str>,
-        profile: &Profile,
+        profile: &StructureProfile,
     ) -> Result<[u8; HEADER_SIZE], StrHideError> {
         let mask_secret = if self.is_stealth() {
             password
@@ -347,9 +347,9 @@ impl EnvelopeHeader {
     /// Unpack 112-byte fixed header, handling stealth and default de-masking
     /// for the official dialect.
     ///
-    /// Wrapper over [`Self::unpack_with_profile`] with `Profile::default()`.
+    /// Wrapper over [`Self::unpack_with_profile`] with `StructureProfile::default()`.
     pub fn unpack_with_password(data: &[u8], password: Option<&str>) -> Result<Self, StrHideError> {
-        Self::unpack_with_profile(data, password, &Profile::default())
+        Self::unpack_with_profile(data, password, &StructureProfile::default())
     }
 
     /// Unpack 112-byte fixed header, handling stealth and default de-masking.
@@ -368,7 +368,7 @@ impl EnvelopeHeader {
     pub fn unpack_with_profile(
         data: &[u8],
         password: Option<&str>,
-        profile: &Profile,
+        profile: &StructureProfile,
     ) -> Result<Self, StrHideError> {
         Self::unpack_with_secrets(data, password, profile, &UnpackSecrets::default())
     }
@@ -380,7 +380,7 @@ impl EnvelopeHeader {
     pub fn unpack_with_secrets(
         data: &[u8],
         password: Option<&str>,
-        profile: &Profile,
+        profile: &StructureProfile,
         secrets: &UnpackSecrets,
     ) -> Result<Self, StrHideError> {
         if data.len() < HEADER_SIZE {

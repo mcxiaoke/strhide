@@ -53,7 +53,7 @@ pub trait PngCostModel: Send + Sync {
     /// working set proportional to the payload, not the carrier: a 50 MP
     /// embed needs a few thousand directional values, not two 400 MB planes
     /// per channel (the same reasoning the JPEG side applies to its bias
-    /// vector in [`JpegCostModel::bias`]).
+    /// vector in `JpegCostModel::direction_bias`).
     ///
     /// `channel` is the byte offset the engine embeds into, so a model that
     /// wants a local reference (e.g. the neighborhood mean) reads the same

@@ -22,8 +22,8 @@ use std::process::{Output, Stdio};
 
 use strhide::errors::StrHideError;
 use strhide::structure::{
-    PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
-    write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, inspect_carrier, read_carrier,
+    remove_carrier, verify_carrier, write_carrier,
 };
 
 fn run(dir: &Path, args: &[&str]) -> Output {
@@ -205,13 +205,17 @@ fn size_inflation_warning_is_raised_above_fifty_percent() {
         carrier_size
     );
     let warning = res
-        .warning
-        .as_deref()
-        .expect("a payload this large relative to the carrier must warn");
-    assert!(
-        warning.contains("above the 50% inflation warning threshold"),
-        "warning: {warning}"
-    );
+        .warnings
+        .iter()
+        .map(|w| w.message())
+        .find(|m| m.contains("above the 50% inflation warning threshold"))
+        .unwrap_or_else(|| {
+            panic!(
+                "a payload this large relative to the carrier must warn, got {:?}",
+                res.warnings
+            )
+        });
+    let _ = &warning;
     assert!(
         warning.contains(&format!("{} bytes", carrier_size)),
         "warning must quote the carrier size: {warning}"
@@ -251,9 +255,10 @@ fn small_payload_in_large_carrier_does_not_warn() {
         },
     )
     .expect("write");
-    assert_eq!(
-        res.warning, None,
-        "tiny payload in a 200 KB carrier must not warn"
+    assert!(
+        res.warnings.is_empty(),
+        "tiny payload in a 200 KB carrier must not warn, got {:?}",
+        res.warnings
     );
 }
 
@@ -294,17 +299,15 @@ fn inflation_and_structural_warnings_are_merged() {
     )
     .expect("second write");
 
-    let warning = res
-        .warning
-        .as_deref()
-        .expect("expected a structural warning at minimum");
+    let rendered: Vec<String> = res.warnings.iter().map(|w| w.message()).collect();
+    let joined = rendered.join(" ");
     assert!(
-        warning.contains("consistent with a hidden envelope"),
-        "structural part missing: {warning}"
+        joined.contains("consistent with a hidden envelope"),
+        "structural part missing: {rendered:?}"
     );
     assert!(
-        warning.contains("above the 50% inflation warning threshold"),
-        "inflation part missing: {warning}"
+        joined.contains("above the 50% inflation warning threshold"),
+        "inflation part missing: {rendered:?}"
     );
 }
 
@@ -335,7 +338,10 @@ fn cli_inspect_json_is_valid_and_complete() {
         .unwrap_or_else(|e| panic!("inspect --json must emit valid JSON: {e}\n{}", stdout(&out)));
     assert_eq!(json["format"], "PNG");
     assert_eq!(json["has_hidden_data"], true);
-    assert_eq!(json["strategy"], "chunk");
+    // Stage 4 froze the `--json` shape: a strategy is now an object carrying
+    // both the stable numeric id and its registry name.
+    assert_eq!(json["strategy"]["name"], "chunk");
+    assert_eq!(json["strategy"]["id"], 2);
     assert_eq!(json["is_encrypted"], true);
     assert_eq!(json["is_stealth"], false);
     assert!(json["ube_offset"].is_u64(), "ube_offset must be a number");
@@ -504,7 +510,15 @@ fn strategy_ask_selects_the_chosen_entry() {
         stego.starts_with(&orig),
         "eof must keep the host bytes intact"
     );
-    let read = read_carrier(&dir.join("c.png"), None, None).expect("read");
+    let read = read_carrier(
+        &dir.join("c.png"),
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(read.data, b"asked payload");
 }
 
@@ -537,10 +551,27 @@ fn strategy_ask_out_of_range_and_non_numeric_fall_back_to_first() {
             stdout(&out)
         );
         // chunk embeds before IEND: the file must NOT end with the envelope.
-        let read = read_carrier(&dir.join("c.png"), None, None).expect("read");
+        let read = read_carrier(
+            &dir.join("c.png"),
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+            },
+        )
+        .expect("read");
         assert_eq!(read.data, b"fallback");
         let restored = dir.join("restored.png");
-        remove_carrier(&dir.join("c.png"), Some(&restored), None, false).expect("remove");
+        remove_carrier(
+            &dir.join("c.png"),
+            &RestoreOptions {
+                output_path: Some(&restored),
+                password: None,
+                backup: false,
+                overwrite: false,
+            },
+        )
+        .expect("remove");
         assert_eq!(fs::read(&restored).unwrap(), make_png());
     }
 }
@@ -592,7 +623,15 @@ fn read_encrypted_without_password_returns_password_variant_with_hint() {
     )
     .expect("write");
 
-    let err = read_carrier(&out, None, None).unwrap_err();
+    let err = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap_err();
     assert!(
         matches!(err, StrHideError::PasswordWithHint { .. }),
         "expected PasswordWithHint variant, got {err:?}"

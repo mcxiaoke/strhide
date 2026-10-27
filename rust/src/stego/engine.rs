@@ -22,7 +22,6 @@
 use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::formats::FileFormat;
-use crate::params::StegoProfile;
 use crate::stego::StegoCapacityInfo;
 #[cfg(feature = "content-heif-bridge")]
 use crate::stego::heif::thumb_bridge;
@@ -32,6 +31,7 @@ use crate::stego::options::{
     EmbedOptions, EmbedOutput, ExtractOptions, InspectOptions, ProbeOptions, StegoHeaderInfo,
     StegoVerifyResult, VerifyOptions,
 };
+use crate::stego::params::StegoProfile;
 
 /// One content-domain embedding engine.
 ///

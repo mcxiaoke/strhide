@@ -21,8 +21,8 @@ use strhide::errors::StrHideError;
 use strhide::structure::adapters::zip::find_eocd_offset;
 use strhide::structure::envelope::{EnvelopeHeader, EnvelopeTrailer, MAX_HINT_LEN};
 use strhide::structure::{
-    PayloadSource, WriteOptions, read_carrier, remove_carrier, sanitize_filename, verify_carrier,
-    write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, read_carrier, remove_carrier,
+    sanitize_filename, verify_carrier, write_carrier,
 };
 
 // --------------------------------------------------------------------------- helpers
@@ -206,7 +206,15 @@ fn path_traversal_sanitized() {
 
     let outdir = dir.join("out");
     fs::create_dir_all(&outdir).unwrap();
-    let res = read_carrier(&stego, Some(&outdir), None).unwrap();
+    let res = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: Some(&outdir),
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert!(outdir.join("EVIL.txt").exists());
     assert!(!dir.join("EVIL.txt").exists());
     assert_eq!(res.filename, "../EVIL.txt"); // metadata preserved verbatim
@@ -269,10 +277,11 @@ fn structural_warning_for_unknown_password_envelope() {
         &dir.join("w2.png"),
     );
     assert!(
-        res.warning
-            .as_deref()
-            .unwrap_or("")
-            .contains("consistent with a hidden envelope")
+        res.warnings
+            .iter()
+            .any(|w| w.message().contains("consistent with a hidden envelope")),
+        "expected a SuspiciousStructures warning, got {:?}",
+        res.warnings
     );
 }
 
@@ -301,9 +310,27 @@ fn double_envelope_reverse_order_removal() {
     );
 
     let s1 = dir.join("s1.png");
-    remove_carrier(&stego, Some(&s1), None, false).unwrap();
+    remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&s1),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     let s2 = dir.join("s2.png");
-    remove_carrier(&s1, Some(&s2), Some("pw1"), false).unwrap();
+    remove_carrier(
+        &s1,
+        &RestoreOptions {
+            output_path: Some(&s2),
+            password: Some("pw1"),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&s2).unwrap(), orig);
 }
 
@@ -329,7 +356,16 @@ fn double_envelope_inner_first_removal_diagnosed() {
         false,
         &stego,
     );
-    let err = remove_carrier(&stego, Some(&dir.join("x.png")), Some("pw1"), false).unwrap_err();
+    let err = remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&dir.join("x.png")),
+            password: Some("pw1"),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap_err();
     assert!(
         err.to_string().contains("reverse order of injection"),
         "{err}"
@@ -352,10 +388,27 @@ fn pdf_dirty_tail_lossless() {
         false,
         &stego,
     );
-    let res = read_carrier(&stego, None, None).unwrap();
+    let res = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(res.data, b"hello secret");
     let restored = dir.join("r.pdf");
-    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
 }
 
@@ -418,14 +471,31 @@ fn auto_capacity_boundary_uses_multisegment_app15() {
         &dir.join("bs.jpg"),
     );
     // Multi-segment chain now handles >64KB payloads without degrading to eof
-    assert_eq!(res.strategy, "app_segment");
+    assert_eq!(res.strategy.name(), "app_segment");
     assert_eq!(res.ube_size, target);
-    let out = read_carrier(&dir.join("bs.jpg"), None, Some("pw")).unwrap();
+    let out = read_carrier(
+        &dir.join("bs.jpg"),
+        &ReadOptions {
+            output_path: None,
+            password: Some("pw"),
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(out.data.len(), payload_len);
 
     // Verify 100% loss-free restore
     let restored = dir.join("restored.jpg");
-    remove_carrier(&dir.join("bs.jpg"), Some(&restored), Some("pw"), false).unwrap();
+    remove_carrier(
+        &dir.join("bs.jpg"),
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some("pw"),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
 }
 
@@ -489,11 +559,20 @@ fn zip_fake_eocd_comment_lifecycle() {
         false,
         &stego,
     );
-    assert_eq!(res.strategy, "pre_cd_inject");
+    assert_eq!(res.strategy.name(), "pre_cd_inject");
     let v = verify_carrier(&stego, None).unwrap();
     assert!(v.level2_envelope.ok);
     let restored = dir.join("fcr.zip");
-    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
 }
 
@@ -511,10 +590,27 @@ fn zip_eof_stego_still_locatable() {
         false,
         &stego,
     );
-    let res = read_carrier(&stego, None, None).unwrap();
+    let res = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(res.data, b"x");
     let restored = dir.join("er.zip");
-    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
 }
 
@@ -547,7 +643,17 @@ fn tampered_meta_len_rejected() {
     let p = off as usize + 104;
     raw[p..p + 4].copy_from_slice(&0xFFFFFFF0u32.to_le_bytes());
     fs::write(dir.join("t.zip"), &raw).unwrap();
-    assert!(read_carrier(&dir.join("t.zip"), None, None).is_err());
+    assert!(
+        read_carrier(
+            &dir.join("t.zip"),
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+            }
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -556,7 +662,17 @@ fn tampered_hint_len_rejected() {
     let p = off as usize + 108;
     raw[p..p + 4].copy_from_slice(&0xFFFFFFF0u32.to_le_bytes());
     fs::write(dir.join("t.zip"), &raw).unwrap();
-    assert!(read_carrier(&dir.join("t.zip"), None, None).is_err());
+    assert!(
+        read_carrier(
+            &dir.join("t.zip"),
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+            }
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -646,6 +762,14 @@ fn tmp_guard_removes_uncommitted_temp() {
 #[test]
 fn error_type_is_still_strhide_error() {
     let dir = scratch("errtype");
-    let err = read_carrier(&dir.join("nonexistent.bin"), None, None).unwrap_err();
+    let err = read_carrier(
+        &dir.join("nonexistent.bin"),
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap_err();
     assert!(matches!(err, StrHideError::General(_)));
 }

@@ -1,37 +1,38 @@
 // Copyright (c) 2026 strhide developers
 // SPDX-License-Identifier: Apache-2.0
 
-//! The single entry-point facade: a [`StrHide`] instance binds one private
-//! dialect ([`Profile`]) and one writer-behaviour baseline ([`LocalParams`]),
-//! then exposes every verb as an ordinary method.
+//! The single entry-point facade: a [`StrHide`] instance binds one [`Dialect`]
+//! and one writer-behaviour baseline ([`LocalParams`]), then exposes the two
+//! domains as sub-facades ([`StructureFacade`] / [`StegoFacade`]).
 //!
-//! This is the shape used by the mature libraries in the field (OpenStego binds
-//! its config at construction and exposes plain `embedData`/`extractData`
-//! methods; reqwest builds a configured `Client` and calls methods on it):
+//! Three design points (stage 4, plan §3.1):
 //!
 //! - **configuration and actions are separate.** The long-lived dialect and
 //!   tuning are set once at construction; the verbs are plain methods that
-//!   forward to the existing free functions in [`crate::engine`] and
-//!   [`crate::stego`] (one to three lines each).
-//! - **there is one surface, not two.** The structure-domain verbs (`write`,
-//!   `read`, `restore`, ...) and the content-domain verbs (`embed`, `extract`,
-//!   `probe`) are distinct words, so a root-level method is unambiguous; no
-//!   namespace/direct dual form is needed.
+//!   forward to the free functions in [`crate::structure`] and [`crate::stego`].
+//! - **one domain per namespace.** `structure` (container envelopes) and
+//!   `stego` (pixel / DCT / CABAC embedding) are reached through
+//!   [`StrHide::structure`] and [`StrHide::stego`], so a verb name can never be
+//!   ambiguous and neither domain leaks into the other's type signatures.
 //! - **path and bytes variants are both provided.** Services without a
 //!   writable filesystem stay in memory; the file variants reuse the same
 //!   atomic commit path as the CLI.
 //!
+//! The module is compiled **unconditionally** — the domain methods simply
+//! disappear when their feature is off, so `strhide::facade::StrHide` is a
+//! usable type in every build (plan §1.1: the recommended entry point must not
+//! be feature-gated).
+//!
 //! # Example
 //!
 //! ```
-//! use strhide::facade::StrHide;
-//! use strhide::params::Profile;
+//! use strhide::facade::{Dialect, StrHide};
 //!
-//! // The whole dialect is declared at compile time.
+//! // The whole dialect is declared at compile time and applies to both domains.
 //! const ENGINE: StrHide = StrHide::new()
-//!     .with_profile(Profile::new().with_default_secret("my-deployment-key"));
+//!     .with_dialect(Dialect::new().with_default_secret("my-deployment-key"));
 //!
-//! assert!(!ENGINE.profile().is_official());
+//! assert!(!ENGINE.dialect().is_official());
 //! ```
 //!
 //! # Per-operation `LocalParams` override
@@ -53,78 +54,185 @@
 
 #[cfg(feature = "cli")]
 use std::ffi::OsString;
+#[cfg(any(feature = "structure-base", feature = "content-base"))]
 use std::path::Path;
-#[cfg(feature = "content")]
+#[cfg(feature = "content-base")]
 use std::path::PathBuf;
 
-#[cfg(feature = "content")]
+#[cfg(feature = "content-base")]
 use crate::core::payload::Payload;
+#[cfg(any(feature = "structure-base", feature = "content-base"))]
 use crate::errors::StrHideError;
-use crate::params::{LocalParams, Profile};
-#[cfg(feature = "content")]
-use crate::stego::io::{embed_carrier_file, extract_carrier_file};
-#[cfg(feature = "content")]
-use crate::stego::{
-    EmbedOptions, ExtractOptions, ProbeOptions, StegoCapacityInfo, embed_carrier_with_profile,
-    extract_carrier_with_profile, probe_carrier_capacity_with_profile,
-};
+#[cfg(feature = "structure-base")]
+use crate::params::LocalParams;
+#[cfg(feature = "structure-base")]
+use crate::structure::params::StructureProfile;
+#[cfg(feature = "structure-base")]
 use crate::structure::{
-    InspectResult, PayloadSource, ReadResult, RemoveResult, VerifyResult, WriteOptions,
-    WriteResult, inspect_carrier_bytes, inspect_carrier_with, read_carrier_bytes,
-    read_carrier_with_profile, remove_carrier_bytes, remove_carrier_with_options,
-    verify_carrier_bytes, verify_carrier_with, write_carrier_bytes, write_carrier_with,
+    InspectResult, PayloadSource, ReadOptions, ReadResult, RemoveResult, RestoreOptions,
+    VerifyResult, WriteOptions, WriteResult, inspect_carrier_bytes, inspect_carrier_with,
+    read_carrier_bytes, read_carrier_with_dialect, remove_carrier_bytes,
+    remove_carrier_with_dialect, verify_carrier_bytes, verify_carrier_with, write_carrier_bytes,
+    write_carrier_with,
 };
+
+#[cfg(feature = "content-base")]
+use crate::stego::io::{embed_carrier_file, extract_carrier_file_payload};
+#[cfg(feature = "content-base")]
+use crate::stego::params::StegoProfile;
+#[cfg(feature = "content-base")]
+use crate::stego::{
+    EmbedOptions, ExtractOptions, InspectOptions, ProbeOptions, StegoCapacityInfo, StegoHeaderInfo,
+    StegoVerifyResult, VerifyOptions, embed_carrier_with_dialect, extract_carrier_payload,
+    inspect_carrier_with_dialect, probe_carrier_capacity_with_dialect, verify_carrier_with_dialect,
+};
+
+/// The private dialect for both domains, composed.
+///
+/// This is the one object a host stores: the structure half drives the UBE
+/// envelope, the content half drives image embedding, and
+/// [`with_default_secret`](Self::with_default_secret) sets both so the common
+/// case (one private deployment secret) needs no thought.
+///
+/// Each half is optional at compile time: a `content`-only build has no
+/// `structure` field, and a `structure`-only build has no `stego` field. The
+/// all-default dialect is the official one, byte-compatible with every release.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Dialect {
+    /// Structure-domain (UBE envelope) dialect.
+    #[cfg(feature = "structure-base")]
+    pub structure: StructureProfile,
+    /// Content-domain (pixel / DCT / CABAC) dialect.
+    #[cfg(feature = "content-base")]
+    pub stego: StegoProfile,
+}
+
+impl Dialect {
+    /// Official dialect: every field at its default.
+    pub const fn new() -> Self {
+        Self {
+            #[cfg(feature = "structure-base")]
+            structure: StructureProfile::new(),
+            #[cfg(feature = "content-base")]
+            stego: StegoProfile::new(),
+        }
+    }
+
+    /// Set the private no-password secret on **both** halves.
+    ///
+    /// The two domains derive keys in different derivation domains, so the
+    /// same string produces two unrelated keys — which is the intent: one
+    /// deployment secret, two independent dialects.
+    #[allow(unused_mut, unused_variables)]
+    pub const fn with_default_secret(mut self, secret: &'static str) -> Self {
+        #[cfg(feature = "structure-base")]
+        {
+            self.structure.default_secret = Some(secret);
+        }
+        #[cfg(feature = "content-base")]
+        {
+            self.stego.default_secret = Some(secret);
+        }
+        self
+    }
+
+    /// Replace the structure half.
+    #[cfg(feature = "structure-base")]
+    pub const fn with_structure_profile(mut self, structure: StructureProfile) -> Self {
+        self.structure = structure;
+        self
+    }
+
+    /// Replace the content half.
+    #[cfg(feature = "content-base")]
+    pub const fn with_stego_profile(mut self, stego: StegoProfile) -> Self {
+        self.stego = stego;
+        self
+    }
+
+    /// Set the content-domain secret only, leaving the UBE secret alone.
+    #[cfg(feature = "content-base")]
+    pub const fn with_stego_secret(mut self, secret: &'static str) -> Self {
+        self.stego = self.stego.with_default_secret(secret);
+        self
+    }
+
+    /// True when every field on every compiled-in domain is default.
+    pub fn is_official(&self) -> bool {
+        #[allow(unused_mut)]
+        let mut ok = true;
+        #[cfg(feature = "structure-base")]
+        {
+            ok = ok && self.structure.is_official();
+        }
+        #[cfg(feature = "content-base")]
+        {
+            ok = ok && self.stego.is_official();
+        }
+        ok
+    }
+}
 
 /// A configured strhide engine: one dialect plus one writer-behaviour baseline.
 ///
 /// Construct with [`new`](Self::new) and the `const` builders
-/// [`with_profile`](Self::with_profile) /
-/// [`with_local_params`](Self::with_local_params), then call the verb methods.
+/// [`with_dialect`](Self::with_dialect) /
+/// [`with_local_params`](Self::with_local_params), then pick a domain with
+/// [`structure`](Self::structure) or [`stego`](Self::stego).
 ///
-/// Cheap and `Copy`: it only borrows static data and holds small `Copy`
-/// configuration values, so passing it around or deriving a per-call variant
-/// costs nothing.
-#[derive(Debug, Clone, Copy)]
+/// Cheap and `Copy`: it only holds small `Copy` configuration values, so
+/// passing it around or deriving a per-call variant costs nothing.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct StrHide {
-    profile: Profile,
+    dialect: Dialect,
+    #[cfg(feature = "structure-base")]
     local: LocalParams,
-}
-
-impl Default for StrHide {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl StrHide {
     /// The official engine: official dialect and default writer behaviour.
     pub const fn new() -> Self {
         Self {
-            profile: Profile::new(),
+            dialect: Dialect::new(),
+            #[cfg(feature = "structure-base")]
             local: LocalParams::new(),
         }
     }
 
-    /// Bind a private dialect ([`Profile`]).
-    pub const fn with_profile(mut self, profile: Profile) -> Self {
-        self.profile = profile;
+    /// Bind a private dialect ([`Dialect`]).
+    pub const fn with_dialect(mut self, dialect: Dialect) -> Self {
+        self.dialect = dialect;
         self
     }
 
     /// Set the writer-behaviour baseline ([`LocalParams`]).
+    #[cfg(feature = "structure-base")]
     pub const fn with_local_params(mut self, local: LocalParams) -> Self {
         self.local = local;
         self
     }
 
     /// The dialect this engine is bound to.
-    pub fn profile(&self) -> &Profile {
-        &self.profile
+    pub fn dialect(&self) -> &Dialect {
+        &self.dialect
     }
 
     /// The writer-behaviour baseline.
+    #[cfg(feature = "structure-base")]
     pub fn local_params(&self) -> &LocalParams {
         &self.local
+    }
+
+    /// The structure (container envelope) domain.
+    #[cfg(feature = "structure-base")]
+    pub const fn structure(&self) -> StructureFacade<'_> {
+        StructureFacade { engine: self }
+    }
+
+    /// The content (pixel / DCT / CABAC) domain.
+    #[cfg(feature = "content-base")]
+    pub const fn stego(&self) -> StegoFacade<'_> {
+        StegoFacade { engine: self }
     }
 
     // ─────────────────────────────── command line ────────────────────────────
@@ -145,94 +253,38 @@ impl StrHide {
         let argv: Vec<OsString> = argv.into_iter().map(Into::into).collect();
         crate::cli::run_cli_with(self, argv)
     }
+}
 
-    // ───────────────────────── structure domain · path ─────────────────────────
+// ───────────────────────────── structure domain ──────────────────────────────
 
-    /// Inject `source` into the carrier at `carrier`, returning the result.
-    pub fn write(
+/// Structure-domain verbs: format-preserving envelope injection, extraction,
+/// restore, inspect, and verify.
+///
+/// Obtained from [`StrHide::structure`]; borrows the engine, so it is cheap and
+/// cannot outlive it.
+#[cfg(feature = "structure-base")]
+#[derive(Debug, Clone, Copy)]
+pub struct StructureFacade<'a> {
+    engine: &'a StrHide,
+}
+
+#[cfg(feature = "structure-base")]
+impl StructureFacade<'_> {
+    /// Inject `source` into the carrier at `carrier`.
+    pub fn write_file(
         &self,
         carrier: &Path,
         source: PayloadSource<'_>,
         options: &WriteOptions<'_>,
     ) -> Result<WriteResult, StrHideError> {
-        write_carrier_with(carrier, source, options, &self.local, &self.profile)
+        write_carrier_with(
+            carrier,
+            source,
+            options,
+            self.engine.local_params(),
+            &self.engine.dialect().structure,
+        )
     }
-
-    /// Extract the payload from `carrier`, optionally writing it to `output`.
-    ///
-    /// Refuses to replace an existing destination; use
-    /// [`read_with`](Self::read_with) to allow it.
-    pub fn read(
-        &self,
-        carrier: &Path,
-        output: Option<&Path>,
-        password: Option<&str>,
-    ) -> Result<ReadResult, StrHideError> {
-        self.read_with(carrier, output, password, false)
-    }
-
-    /// Extract the payload, optionally allowing an existing destination to be
-    /// replaced.
-    ///
-    /// `overwrite` is the read-side counterpart of `restore`'s `backup`: both
-    /// were previously hard-coded on the facade (`false`), which forced callers
-    /// that need either behaviour back to the five-parameter free functions.
-    pub fn read_with(
-        &self,
-        carrier: &Path,
-        output: Option<&Path>,
-        password: Option<&str>,
-        overwrite: bool,
-    ) -> Result<ReadResult, StrHideError> {
-        read_carrier_with_profile(carrier, output, password, overwrite, &self.profile)
-    }
-
-    /// Strip the envelope and restore the original carrier.
-    ///
-    /// Refuses to replace an existing destination; use
-    /// [`restore_with`](Self::restore_with) to allow it.
-    pub fn restore(
-        &self,
-        carrier: &Path,
-        output: Option<&Path>,
-        password: Option<&str>,
-        backup: bool,
-    ) -> Result<RemoveResult, StrHideError> {
-        self.restore_with(carrier, output, password, backup, false)
-    }
-
-    /// Strip the envelope and restore the original carrier, optionally
-    /// allowing an existing destination to be replaced.
-    pub fn restore_with(
-        &self,
-        carrier: &Path,
-        output: Option<&Path>,
-        password: Option<&str>,
-        backup: bool,
-        overwrite: bool,
-    ) -> Result<RemoveResult, StrHideError> {
-        remove_carrier_with_options(carrier, output, password, backup, &self.profile, overwrite)
-    }
-
-    /// Inspect a carrier without modifying it.
-    pub fn inspect(
-        &self,
-        carrier: &Path,
-        password: Option<&str>,
-    ) -> Result<InspectResult, StrHideError> {
-        inspect_carrier_with(carrier, password, &self.profile)
-    }
-
-    /// Verify host structure, envelope integrity, and payload crypto.
-    pub fn verify(
-        &self,
-        carrier: &Path,
-        password: Option<&str>,
-    ) -> Result<VerifyResult, StrHideError> {
-        verify_carrier_with(carrier, password, &self.profile)
-    }
-
-    // ──────────────────────── structure domain · bytes ─────────────────────────
 
     /// Inject `source` into an in-memory carrier, returning the stego bytes.
     pub fn write_bytes(
@@ -241,7 +293,26 @@ impl StrHide {
         source: PayloadSource<'_>,
         options: &WriteOptions<'_>,
     ) -> Result<(Vec<u8>, WriteResult), StrHideError> {
-        write_carrier_bytes(carrier, source, options, &self.local, &self.profile)
+        write_carrier_bytes(
+            carrier,
+            source,
+            options,
+            self.engine.local_params(),
+            &self.engine.dialect().structure,
+        )
+    }
+
+    /// Extract the payload described by `options`.
+    ///
+    /// With [`ReadOptions::output_path`] unset the payload comes back in
+    /// [`ReadResult::data`]; otherwise it is written there (refusing to replace
+    /// an existing file unless [`ReadOptions::overwrite`] is set).
+    pub fn read_file(
+        &self,
+        carrier: &Path,
+        options: &ReadOptions<'_>,
+    ) -> Result<ReadResult, StrHideError> {
+        read_carrier_with_dialect(carrier, options, &self.engine.dialect().structure)
     }
 
     /// Extract the payload from an in-memory carrier.
@@ -250,7 +321,16 @@ impl StrHide {
         carrier: &[u8],
         password: Option<&str>,
     ) -> Result<ReadResult, StrHideError> {
-        read_carrier_bytes(carrier, password, &self.profile)
+        read_carrier_bytes(carrier, password, &self.engine.dialect().structure)
+    }
+
+    /// Strip the envelope and restore the original carrier.
+    pub fn restore_file(
+        &self,
+        carrier: &Path,
+        options: &RestoreOptions<'_>,
+    ) -> Result<RemoveResult, StrHideError> {
+        remove_carrier_with_dialect(carrier, options, &self.engine.dialect().structure)
     }
 
     /// Strip the envelope from an in-memory carrier, returning restored bytes.
@@ -259,7 +339,16 @@ impl StrHide {
         carrier: &[u8],
         password: Option<&str>,
     ) -> Result<(Vec<u8>, RemoveResult), StrHideError> {
-        remove_carrier_bytes(carrier, password, &self.profile)
+        remove_carrier_bytes(carrier, password, &self.engine.dialect().structure)
+    }
+
+    /// Inspect a carrier without modifying it.
+    pub fn inspect_file(
+        &self,
+        carrier: &Path,
+        password: Option<&str>,
+    ) -> Result<InspectResult, StrHideError> {
+        inspect_carrier_with(carrier, password, &self.engine.dialect().structure)
     }
 
     /// Inspect an in-memory carrier.
@@ -268,7 +357,16 @@ impl StrHide {
         carrier: &[u8],
         password: Option<&str>,
     ) -> Result<InspectResult, StrHideError> {
-        inspect_carrier_bytes(carrier, password, &self.profile)
+        inspect_carrier_bytes(carrier, password, &self.engine.dialect().structure)
+    }
+
+    /// Verify host structure, envelope integrity, and payload crypto.
+    pub fn verify_file(
+        &self,
+        carrier: &Path,
+        password: Option<&str>,
+    ) -> Result<VerifyResult, StrHideError> {
+        verify_carrier_with(carrier, password, &self.engine.dialect().structure)
     }
 
     /// Verify an in-memory carrier.
@@ -277,12 +375,24 @@ impl StrHide {
         carrier: &[u8],
         password: Option<&str>,
     ) -> Result<VerifyResult, StrHideError> {
-        verify_carrier_bytes(carrier, password, &self.profile)
+        verify_carrier_bytes(carrier, password, &self.engine.dialect().structure)
     }
+}
 
-    // ───────────────────────── content domain · bytes ──────────────────────────
+// ────────────────────────────── content domain ───────────────────────────────
 
-    #[cfg(feature = "content")]
+/// Content-domain verbs: embedding into pixels, DCT coefficients, or CABAC
+/// bins, plus the capacity probe and the content-side diagnostics.
+///
+/// Obtained from [`StrHide::stego`]; borrows the engine.
+#[cfg(feature = "content-base")]
+#[derive(Debug, Clone, Copy)]
+pub struct StegoFacade<'a> {
+    engine: &'a StrHide,
+}
+
+#[cfg(feature = "content-base")]
+impl StegoFacade<'_> {
     /// Embed `payload` into an in-memory image carrier, returning stego bytes.
     pub fn embed(
         &self,
@@ -290,37 +400,53 @@ impl StrHide {
         payload: &Payload<'_>,
         options: &EmbedOptions<'_>,
     ) -> Result<Vec<u8>, StrHideError> {
-        embed_carrier_with_profile(carrier, payload, options, &self.profile)
+        embed_carrier_with_dialect(carrier, payload, options, &self.engine.dialect().stego)
     }
 
-    #[cfg(feature = "content")]
     /// Extract the payload from an in-memory image carrier.
+    ///
+    /// Returns the unified [`Payload`], which carries the original filename
+    /// when the micro-header recorded one (see plan §4.2).
     pub fn extract(
         &self,
         carrier: &[u8],
         options: &ExtractOptions<'_>,
-    ) -> Result<Vec<u8>, StrHideError> {
-        extract_carrier_with_profile(carrier, options, &self.profile)
+    ) -> Result<Payload<'static>, StrHideError> {
+        extract_carrier_payload(carrier, options, &self.engine.dialect().stego)
     }
 
-    #[cfg(feature = "content")]
     /// Probe the embedding capacity of an in-memory image carrier.
     pub fn probe(
         &self,
         carrier: &[u8],
         options: &ProbeOptions<'_>,
     ) -> Result<StegoCapacityInfo, StrHideError> {
-        probe_carrier_capacity_with_profile(carrier, options, &self.profile)
+        probe_carrier_capacity_with_dialect(carrier, options, &self.engine.dialect().stego)
     }
 
-    // ───────────────────────── content domain · file ───────────────────────────
+    /// Read-only feature/header inspection (no payload extraction).
+    pub fn inspect(
+        &self,
+        carrier: &[u8],
+        options: &InspectOptions<'_>,
+    ) -> Result<StegoHeaderInfo, StrHideError> {
+        inspect_carrier_with_dialect(carrier, options, &self.engine.dialect().stego)
+    }
 
-    #[cfg(feature = "content")]
+    /// Three-tier verification of a content-domain carrier.
+    pub fn verify(
+        &self,
+        carrier: &[u8],
+        options: &VerifyOptions<'_>,
+    ) -> Result<StegoVerifyResult, StrHideError> {
+        verify_carrier_with_dialect(carrier, options, &self.engine.dialect().stego)
+    }
+
     /// Embed `payload` into an image file and commit it atomically.
     ///
     /// The carrier is read, the embedding is done in memory, and the result is
-    /// committed through [`commit_carrier_bytes`] (temp file + atomic rename,
-    /// optional `.bak`, timestamp preservation) -- the same path the CLI uses.
+    /// committed through the same temp-file + atomic-rename path the structure
+    /// domain and the CLI use (optional `.bak`, timestamps preserved).
     ///
     /// When `target` is `None` the carrier is replaced in place; otherwise the
     /// result is written to `target` and the original carrier is left alone.
@@ -333,14 +459,22 @@ impl StrHide {
         options: &EmbedOptions<'_>,
         backup: bool,
     ) -> Result<Option<PathBuf>, StrHideError> {
-        embed_carrier_file(carrier, target, payload, options, &self.profile, backup)
+        embed_carrier_file(
+            carrier,
+            target,
+            payload,
+            options,
+            &self.engine.dialect().stego,
+            backup,
+        )
     }
 
-    #[cfg(feature = "content")]
     /// Extract the payload from an image file and write it to `output`.
     ///
     /// An existing destination is refused unless `overwrite` is set, matching
-    /// the structure-domain `read` behaviour.
+    /// the structure-domain `read` behaviour. When `output` is a directory the
+    /// payload is written inside it under its recorded (sanitized) filename, or
+    /// `extracted.bin` when none was stored.
     pub fn extract_file(
         &self,
         carrier: &Path,
@@ -348,10 +482,16 @@ impl StrHide {
         options: &ExtractOptions<'_>,
         overwrite: bool,
     ) -> Result<PathBuf, StrHideError> {
-        let data = extract_carrier_file(carrier, options, &self.profile)?;
+        let payload = extract_carrier_file_payload(carrier, options, &self.engine.dialect().stego)?;
+        let data = payload.data.to_vec();
 
         let final_dest = if output.is_dir() {
-            output.join("extracted.bin")
+            let name = payload
+                .name
+                .as_deref()
+                .map(crate::core::fs::sanitize_filename)
+                .unwrap_or_else(|| "extracted.bin".to_string());
+            output.join(name)
         } else {
             output.to_path_buf()
         };

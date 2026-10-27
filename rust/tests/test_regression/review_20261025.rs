@@ -14,7 +14,8 @@ use strhide::structure::adapters::{
 };
 use strhide::structure::envelope::{EnvelopeTrailer, STANDARD_TRAILER_MAGIC};
 use strhide::structure::{
-    PayloadSource, WriteOptions, read_carrier, remove_carrier, write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, read_carrier, remove_carrier,
+    write_carrier,
 };
 
 fn write_carrier_file(
@@ -93,11 +94,28 @@ fn zip_empty_archive_auto_falls_back_to_eof() {
         false,
         &stego,
     );
-    assert_eq!(res.strategy, "eof");
-    let out = read_carrier(&stego, None, None).unwrap();
+    assert_eq!(res.strategy.name(), "eof");
+    let out = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(out.data, b"empty zip secret");
     let restored = dir.join("r.zip");
-    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), zip);
 }
 
@@ -179,13 +197,31 @@ fn heif_item_hidden_synthetic_roundtrip() {
         &stego,
     );
     assert_eq!(
-        res.strategy, "item_hidden",
+        res.strategy.name(),
+        "item_hidden",
         "auto must pick item_hidden for a meta-bearing HEIF"
     );
-    let out = read_carrier(&stego, None, None).unwrap();
+    let out = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(out.data, b"meta heif secret");
     let restored = dir.join("r.heif");
-    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
 }
 
@@ -205,11 +241,28 @@ fn heif_without_meta_still_uses_box_uuid() {
         false,
         &stego,
     );
-    assert_eq!(res.strategy, "box_uuid");
-    let out = read_carrier(&stego, None, None).unwrap();
+    assert_eq!(res.strategy.name(), "box_uuid");
+    let out = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(out.data, b"plain heif secret");
     let restored = dir.join("r.heif");
-    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
 }
 
@@ -235,11 +288,28 @@ fn pdf_dirty_tail_beyond_128k_window_still_locates() {
         false,
         &stego,
     );
-    assert_eq!(res.strategy, "incremental");
-    let out = read_carrier(&stego, None, None).unwrap();
+    assert_eq!(res.strategy.name(), "incremental");
+    let out = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(out.data, b"deep tail secret");
     let restored = dir.join("r.pdf");
-    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), pdf);
 }
 
@@ -330,11 +400,28 @@ fn pdf_encrypted_document_rejects_incremental_and_roundtrips_via_eof() {
         false,
         &stego,
     );
-    assert_eq!(res.strategy, "eof");
-    let out = read_carrier(&stego, None, None).unwrap();
+    assert_eq!(res.strategy.name(), "eof");
+    let out = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(out.data, b"enc secret");
     let restored = dir.join("r.pdf");
-    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), pdf);
 }
 
@@ -393,11 +480,28 @@ fn zip64_locator_routes_auto_to_eof() {
         false,
         &stego,
     );
-    assert_eq!(res.strategy, "eof");
-    let out = read_carrier(&stego, None, None).unwrap();
+    assert_eq!(res.strategy.name(), "eof");
+    let out = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(out.data, b"zip64 secret");
     let restored = dir.join("r.zip");
-    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), zip);
 }
 
@@ -475,11 +579,28 @@ fn wav_webp_auto_falls_back_to_eof_on_boundary_mismatch() {
         false,
         &stego,
     );
-    assert_eq!(res.strategy, "eof");
-    let out = read_carrier(&stego, None, None).unwrap();
+    assert_eq!(res.strategy.name(), "eof");
+    let out = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(out.data, b"wav auto secret");
     let restored = dir.join("r.wav");
-    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), carrier_bytes);
 }
 
@@ -533,11 +654,28 @@ fn jpeg_auto_falls_back_to_eof_when_sos_unreachable() {
         false,
         &stego,
     );
-    assert_eq!(res.strategy, "eof");
-    let out = read_carrier(&stego, None, None).unwrap();
+    assert_eq!(res.strategy.name(), "eof");
+    let out = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(out.data, b"jpeg tail secret");
     let restored = dir.join("r.jpeg");
-    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), giant);
 }
 
@@ -578,11 +716,28 @@ fn heif_meta_tail_residual_roundtrips() {
         false,
         &stego,
     );
-    assert_eq!(res.strategy, "item_hidden");
-    let out = read_carrier(&stego, None, None).unwrap();
+    assert_eq!(res.strategy.name(), "item_hidden");
+    let out = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(out.data, b"tail secret");
     let restored = dir.join("r.heif");
-    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), carrier_bytes);
 }
 

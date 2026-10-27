@@ -10,7 +10,8 @@ use std::fs;
 use std::path::Path;
 
 use strhide::structure::{
-    PayloadSource, WriteOptions, read_carrier, remove_carrier, verify_carrier, write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, read_carrier, remove_carrier,
+    verify_carrier, write_carrier,
 };
 
 fn png() -> Vec<u8> {
@@ -97,7 +98,15 @@ fn compact_metadata_survives_the_full_cycle() {
 
     write(&carrier, &payload, Some("pw"), "auto", None, &stego);
 
-    let out = read_carrier(&stego, None, Some("pw")).unwrap();
+    let out = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: Some("pw"),
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(out.data, b"hello compact metadata");
     assert_eq!(out.filename, "报告 v2.txt");
 
@@ -107,6 +116,15 @@ fn compact_metadata_survives_the_full_cycle() {
     assert!(v.level3_crypto.ok, "{}", v.level3_crypto.detail);
 
     let restored = dir.join("restored.png");
-    remove_carrier(&stego, Some(&restored), Some("pw"), false).unwrap();
+    remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some("pw"),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), png());
 }

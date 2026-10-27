@@ -23,7 +23,8 @@
 //! code as the file API, so a carrier written in memory is readable from disk
 //! and vice versa.
 
-use strhide::params::{LocalParams, Profile};
+use strhide::params::LocalParams;
+use strhide::structure::StructureProfile;
 use strhide::structure::{
     PayloadSource, WriteOptions, read_carrier_bytes, remove_carrier_bytes, write_carrier_bytes,
 };
@@ -44,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PayloadSource::Bytes(secret_message),
         &options,
         &LocalParams::default(),
-        &Profile::default(),
+        &StructureProfile::default(),
     )?;
     println!(
         "embedded {} bytes of payload into a {}-byte envelope ({} -> {} carrier bytes, strategy {})",
@@ -57,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Extraction never needs the write-time options, only the password: the
     // profile is a read/write-must-agree parameter, the rest travels inside.
-    let read = read_carrier_bytes(&stego, options.password, &Profile::default())?;
+    let read = read_carrier_bytes(&stego, options.password, &StructureProfile::default())?;
     assert_eq!(read.data, secret_message);
     println!(
         "recovered {} bytes (filename '{}', encrypted: {})",
@@ -68,7 +69,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The inverse operation proves it was lossless: the restored bytes must be
     // identical to the cover that went in.
-    let (restored, removed) = remove_carrier_bytes(&stego, options.password, &Profile::default())?;
+    let (restored, removed) =
+        remove_carrier_bytes(&stego, options.password, &StructureProfile::default())?;
     assert_eq!(restored, cover, "restore must be bit-for-bit");
     println!(
         "removed the envelope, verified identical: {} ({} bytes)",

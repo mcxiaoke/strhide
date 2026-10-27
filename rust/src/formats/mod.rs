@@ -6,7 +6,7 @@
 //! `docs/strhide_architecture_and_refactoring_plan.md` §2.1).
 //!
 //! - [`sniff`] answers "what file is this?" — [`FileFormat`],
-//!   [`sniff_bytes`](sniff::sniff_bytes), [`sniff_stream`](sniff::sniff_stream).
+//!   [`sniff_bytes`], [`sniff_stream`].
 //! - [`annexb`] is the raw-bitstream framing probe that
 //!   [`sniff`](sniff::sniff_bytes) consults last.
 //! - [`capability`] answers "what can be done with it?" — one row per format.

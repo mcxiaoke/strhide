@@ -124,6 +124,21 @@ impl FileFormat {
     }
 }
 
+impl std::fmt::Display for FileFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl serde::Serialize for FileFormat {
+    /// Serialized as its display name (`"PNG"`, `"HEVC-AnnexB"`, ...), which is
+    /// what the `--json` output has always carried: making the enum the field
+    /// type must not change the on-the-wire spelling (plan §5.3).
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// Detect whether the byte slice is an ISO BMFF HEIF/HEIC image container based on ftyp brand.
 ///
 /// The first box must be a well-formed `ftyp` whose size is sane, and at least

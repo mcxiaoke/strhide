@@ -125,7 +125,7 @@ impl CostModelRegistry {
 use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::formats::sniff::{FileFormat, sniff_bytes};
-use crate::params::Profile;
+use crate::stego::params::StegoProfile;
 
 /// Resolve the engine for a carrier, or fail with the one unsupported-format
 /// message every entry point shares.
@@ -154,71 +154,70 @@ pub(crate) fn unsupported_carrier(format: FileFormat) -> StrHideError {
 /// content-adaptive steganography.
 ///
 /// Uses the official dialect (no private secret). Call
-/// [`embed_carrier_with_profile`] when a private [`Profile`] must be honoured.
+/// [`embed_carrier_with_dialect`] when a private [`StegoProfile`] must be honoured.
 pub fn embed_carrier(
     carrier_bytes: &[u8],
     payload: &Payload<'_>,
     options: &EmbedOptions<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
-    embed_carrier_with_profile(carrier_bytes, payload, options, &Profile::default())
+    embed_carrier_with_dialect(carrier_bytes, payload, options, &StegoProfile::default())
 }
 
-/// [`embed_carrier`] with an explicit private-dialect [`Profile`].
+/// [`embed_carrier`] with an explicit private-dialect [`StegoProfile`].
 ///
-/// The profile only supplies the no-password dialect (its
-/// [`StegoProfile`](crate::params::StegoProfile) half); an explicit
+/// The dialect only supplies the no-password secret; an explicit
 /// [`EmbedOptions::password`] still wins. A carrier embedded under a private
-/// secret is unreadable with the official profile -- and fails as
+/// secret is unreadable with the official dialect -- and fails as
 /// `NoHiddenData`, not as a distinguishable error.
-pub fn embed_carrier_with_profile(
+pub fn embed_carrier_with_dialect(
     carrier_bytes: &[u8],
     payload: &Payload<'_>,
     options: &EmbedOptions<'_>,
-    profile: &Profile,
+    dialect: &StegoProfile,
 ) -> Result<Vec<u8>, StrHideError> {
-    embed_carrier_with_profile_info(carrier_bytes, payload, options, profile).map(|out| out.bytes)
+    embed_carrier_with_dialect_info(carrier_bytes, payload, options, dialect).map(|out| out.bytes)
 }
 
 /// Automatically sniff the carrier format, embed `payload`, and return the
 /// modified carrier together with whatever capacity metadata the engine
 /// produced while embedding.
-pub fn embed_carrier_with_profile_info(
+pub fn embed_carrier_with_dialect_info(
     carrier_bytes: &[u8],
     payload: &Payload<'_>,
     options: &EmbedOptions<'_>,
-    profile: &Profile,
+    dialect: &StegoProfile,
 ) -> Result<EmbedOutput, StrHideError> {
     let engine = engine_for_carrier(carrier_bytes)?;
     // Private dialect resolution happens exactly once, inside the engine
     // adapter: a configured secret is indistinguishable from a user password
     // downstream, which is what keeps the two engine families byte-compatible.
-    engine.embed(carrier_bytes, payload, options, &profile.stego)
+    engine.embed(carrier_bytes, payload, options, dialect)
 }
 
 /// Automatically sniff the carrier format and extract the payload.
 ///
-/// Uses the official dialect. Call [`extract_carrier_with_profile`] when the
-/// carrier was embedded under a private [`Profile`].
+/// Uses the official dialect. Call [`extract_carrier_with_dialect`] when the
+/// carrier was embedded under a private [`StegoProfile`].
 pub fn extract_carrier(
     carrier_bytes: &[u8],
     options: &ExtractOptions<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
-    extract_carrier_with_profile(carrier_bytes, options, &Profile::default())
+    extract_carrier_with_dialect(carrier_bytes, options, &StegoProfile::default())
 }
 
-/// [`extract_carrier`] with an explicit private-dialect [`Profile`].
+/// [`extract_carrier`] with an explicit private-dialect [`StegoProfile`].
 ///
-/// A profile mismatch is reported as `NoHiddenData`, identical to a wrong
+/// A dialect mismatch is reported as `NoHiddenData`, identical to a wrong
 /// password, so no oracle tells the caller which of the two was wrong.
-pub fn extract_carrier_with_profile(
+pub fn extract_carrier_with_dialect(
     carrier_bytes: &[u8],
     options: &ExtractOptions<'_>,
-    profile: &Profile,
+    dialect: &StegoProfile,
 ) -> Result<Vec<u8>, StrHideError> {
-    extract_carrier_payload(carrier_bytes, options, profile).map(Payload::into_bytes)
+    extract_carrier_payload(carrier_bytes, options, dialect).map(Payload::into_bytes)
 }
 
-/// [`extract_carrier_with_profile`] returning the unified [`Payload`] instead of
+/// [`extract_carrier_with_dialect`] returning the unified [`Payload`] instead of
 /// raw bytes.
 ///
 /// `kind` and `name` are not on the wire yet -- stage 3 adds the micro-header
@@ -228,10 +227,10 @@ pub fn extract_carrier_with_profile(
 pub fn extract_carrier_payload(
     carrier_bytes: &[u8],
     options: &ExtractOptions<'_>,
-    profile: &Profile,
+    dialect: &StegoProfile,
 ) -> Result<Payload<'static>, StrHideError> {
     let engine = engine_for_carrier(carrier_bytes)?;
-    engine.extract(carrier_bytes, options, &profile.stego)
+    engine.extract(carrier_bytes, options, dialect)
 }
 
 /// Automatically sniff the carrier format and inspect steganographic headers.
@@ -239,17 +238,17 @@ pub fn inspect_carrier(
     carrier_bytes: &[u8],
     options: &InspectOptions<'_>,
 ) -> Result<StegoHeaderInfo, StrHideError> {
-    inspect_carrier_with_profile(carrier_bytes, options, &Profile::default())
+    inspect_carrier_with_dialect(carrier_bytes, options, &StegoProfile::default())
 }
 
-/// [`inspect_carrier`] with an explicit [`Profile`].
-pub fn inspect_carrier_with_profile(
+/// [`inspect_carrier`] with an explicit [`StegoProfile`].
+pub fn inspect_carrier_with_dialect(
     carrier_bytes: &[u8],
     options: &InspectOptions<'_>,
-    profile: &Profile,
+    dialect: &StegoProfile,
 ) -> Result<StegoHeaderInfo, StrHideError> {
     let engine = engine_for_carrier(carrier_bytes)?;
-    engine.inspect(carrier_bytes, options, &profile.stego)
+    engine.inspect(carrier_bytes, options, dialect)
 }
 
 /// Automatically sniff the carrier format and run multi-tier verification.
@@ -257,17 +256,17 @@ pub fn verify_carrier(
     carrier_bytes: &[u8],
     options: &VerifyOptions<'_>,
 ) -> Result<StegoVerifyResult, StrHideError> {
-    verify_carrier_with_profile(carrier_bytes, options, &Profile::default())
+    verify_carrier_with_dialect(carrier_bytes, options, &StegoProfile::default())
 }
 
-/// [`verify_carrier`] with an explicit [`Profile`].
-pub fn verify_carrier_with_profile(
+/// [`verify_carrier`] with an explicit [`StegoProfile`].
+pub fn verify_carrier_with_dialect(
     carrier_bytes: &[u8],
     options: &VerifyOptions<'_>,
-    profile: &Profile,
+    dialect: &StegoProfile,
 ) -> Result<StegoVerifyResult, StrHideError> {
     let engine = engine_for_carrier(carrier_bytes)?;
-    engine.verify(carrier_bytes, options, &profile.stego)
+    engine.verify(carrier_bytes, options, dialect)
 }
 
 /// Capacity information for content-adaptive steganography.
@@ -303,9 +302,10 @@ pub struct StegoCapacityInfo {
     /// Whether capacity was estimated by sampling rather than a full-carrier scan.
     #[serde(default)]
     pub is_estimated: bool,
-    /// Carrier media summary (e.g. "4032x3024" or "1920x1080, 24.00 fps, 11.9s (15.2 Mbps)").
+    /// Carrier resolution (plus frame rate/duration/bitrate for video), when
+    /// the container could be parsed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub media_info: Option<String>,
+    pub media_info: Option<crate::core::media::MediaInfo>,
 }
 
 impl StegoCapacityInfo {
@@ -362,23 +362,23 @@ fn default_safety_bpp_limit() -> f64 {
 ///   pool, so a different credential assigns different pixels to the header
 ///   and yields a different capacity.
 ///
-/// Use [`probe_carrier_capacity_with_profile`] when a private
-/// [`Profile`](crate::params::Profile) supplies the no-password secret.
+/// Use [`probe_carrier_capacity_with_dialect`] when a private
+/// [`StegoProfile`] supplies the no-password secret.
 pub fn probe_carrier_capacity(
     carrier_bytes: &[u8],
     options: &ProbeOptions<'_>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
-    probe_carrier_capacity_with_profile(carrier_bytes, options, &Profile::default())
+    probe_carrier_capacity_with_dialect(carrier_bytes, options, &StegoProfile::default())
 }
 
-/// [`probe_carrier_capacity`] with an explicit private-dialect [`Profile`].
-pub fn probe_carrier_capacity_with_profile(
+/// [`probe_carrier_capacity`] with an explicit private-dialect [`StegoProfile`].
+pub fn probe_carrier_capacity_with_dialect(
     carrier_bytes: &[u8],
     options: &ProbeOptions<'_>,
-    profile: &Profile,
+    dialect: &StegoProfile,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let engine = engine_for_carrier(carrier_bytes)?;
     // Same resolution as embed: an explicit password wins, the profile's stego
     // secret is the fallback, `None` means the public constant downstream.
-    engine.probe(carrier_bytes, options, &profile.stego)
+    engine.probe(carrier_bytes, options, dialect)
 }

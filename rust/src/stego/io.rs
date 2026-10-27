@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 use crate::core::payload::Payload;
 use crate::errors::StrHideError;
-use crate::params::Profile;
-use crate::stego::{EmbedOptions, ExtractOptions, embed_carrier_with_profile};
+use crate::stego::params::StegoProfile;
+use crate::stego::{EmbedOptions, ExtractOptions, embed_carrier_with_dialect};
 
 /// Embed `payload` into the carrier file at `carrier_path` and commit the result.
 ///
@@ -33,11 +33,11 @@ pub fn embed_carrier_file(
     target_path: Option<&Path>,
     payload: &Payload<'_>,
     options: &EmbedOptions<'_>,
-    profile: &Profile,
+    dialect: &StegoProfile,
     backup: bool,
 ) -> Result<Option<PathBuf>, StrHideError> {
     let carrier_bytes = std::fs::read(carrier_path)?;
-    let stego_bytes = embed_carrier_with_profile(&carrier_bytes, payload, options, profile)?;
+    let stego_bytes = embed_carrier_with_dialect(&carrier_bytes, payload, options, dialect)?;
     let dest = target_path.unwrap_or(carrier_path);
     crate::commit::commit_carrier_bytes(carrier_path, dest, &stego_bytes, backup, true)
 }
@@ -50,19 +50,19 @@ pub fn embed_carrier_file(
 pub fn extract_carrier_file(
     carrier_path: &Path,
     options: &ExtractOptions<'_>,
-    profile: &Profile,
+    dialect: &StegoProfile,
 ) -> Result<Vec<u8>, StrHideError> {
-    extract_carrier_file_payload(carrier_path, options, profile).map(Payload::into_bytes)
+    extract_carrier_file_payload(carrier_path, options, dialect).map(Payload::into_bytes)
 }
 
 /// [`extract_carrier_file`] returning the unified [`Payload`] with preserved metadata.
 pub fn extract_carrier_file_payload(
     carrier_path: &Path,
     options: &ExtractOptions<'_>,
-    profile: &Profile,
+    dialect: &StegoProfile,
 ) -> Result<Payload<'static>, StrHideError> {
     let carrier_bytes = std::fs::read(carrier_path)?;
-    crate::stego::extract_carrier_payload(&carrier_bytes, options, profile)
+    crate::stego::extract_carrier_payload(&carrier_bytes, options, dialect)
 }
 
 #[cfg(test)]
@@ -83,7 +83,7 @@ mod tests {
             None,
             &Payload::bytes(b"payload"),
             &EmbedOptions::default(),
-            &Profile::default(),
+            &StegoProfile::default(),
             true,
         );
         assert!(
@@ -107,8 +107,11 @@ mod tests {
         let carrier = dir.join("carrier.bin");
         std::fs::write(&carrier, b"still not an image").expect("write carrier");
 
-        let result =
-            extract_carrier_file(&carrier, &ExtractOptions::default(), &Profile::default());
+        let result = extract_carrier_file(
+            &carrier,
+            &ExtractOptions::default(),
+            &StegoProfile::default(),
+        );
         assert!(matches!(result, Err(StrHideError::UnsupportedFormat(_))));
 
         let _ = std::fs::remove_dir_all(&dir);

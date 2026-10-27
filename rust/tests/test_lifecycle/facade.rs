@@ -3,15 +3,18 @@
 
 //! Facade ([`StrHide`]) integration tests: the verb × carrier matrix.
 //!
-//! These verify the facade forwards correctly across both domains and both
-//! carrier forms (path / bytes), and that a private dialect bound on an engine
-//! is isolated from the official engine.
+//! These verify the two sub-facades ([`StructureFacade`] / [`StegoFacade`])
+//! forward correctly across both domains and both carrier forms (path / bytes),
+//! that the option structs (`ReadOptions` / `RestoreOptions`) drive the
+//! overwrite behaviour, and that a private dialect bound on an engine is
+//! isolated from the official engine.
 
 use strhide::core::payload::Payload;
-use strhide::facade::StrHide;
-use strhide::params::Profile;
+use strhide::facade::{Dialect, StrHide};
+use strhide::stego::params::StegoProfile;
 use strhide::stego::{EmbedOptions, ExtractOptions, ProbeOptions};
-use strhide::structure::{PayloadSource, WriteOptions};
+use strhide::structure::params::StructureProfile;
+use strhide::structure::{PayloadSource, ReadOptions, RestoreOptions, WriteOptions};
 
 use crate::common::scratch;
 
@@ -29,15 +32,22 @@ fn structure_bytes_write_read_restore_roundtrip() {
     let options = WriteOptions::default();
 
     let (stego, write) = engine
+        .structure()
         .write_bytes(PNG, PayloadSource::Bytes(STRUCT_PAYLOAD), &options)
         .expect("write_bytes");
     assert!(write.ube_size > 0);
     assert_ne!(stego, PNG);
 
-    let read = engine.read_bytes(&stego, None).expect("read_bytes");
+    let read = engine
+        .structure()
+        .read_bytes(&stego, None)
+        .expect("read_bytes");
     assert_eq!(read.data, STRUCT_PAYLOAD);
 
-    let (restored, _remove) = engine.restore_bytes(&stego, None).expect("restore_bytes");
+    let (restored, _remove) = engine
+        .structure()
+        .restore_bytes(&stego, None)
+        .expect("restore_bytes");
     assert_eq!(
         restored, PNG,
         "restore_bytes must recover the original carrier"
@@ -49,13 +59,20 @@ fn structure_bytes_inspect_and_verify() {
     let engine = StrHide::new();
     let options = WriteOptions::default();
     let (stego, _) = engine
+        .structure()
         .write_bytes(PNG, PayloadSource::Bytes(STRUCT_PAYLOAD), &options)
         .expect("write_bytes");
 
-    let inspect = engine.inspect_bytes(&stego, None).expect("inspect_bytes");
+    let inspect = engine
+        .structure()
+        .inspect_bytes(&stego, None)
+        .expect("inspect_bytes");
     assert!(inspect.has_hidden_data, "inspect must report hidden data");
 
-    let verify = engine.verify_bytes(&stego, None).expect("verify_bytes");
+    let verify = engine
+        .structure()
+        .verify_bytes(&stego, None)
+        .expect("verify_bytes");
     assert!(
         strhide::structure::verify_passed(&verify),
         "verify must pass"
@@ -77,14 +94,19 @@ fn structure_path_write_read_restore_roundtrip() {
     };
 
     engine
-        .write(&carrier, PayloadSource::Bytes(STRUCT_PAYLOAD), &options)
+        .structure()
+        .write_file(&carrier, PayloadSource::Bytes(STRUCT_PAYLOAD), &options)
         .expect("write");
 
-    let read = engine.read(&carrier, None, None).expect("read");
+    let read = engine
+        .structure()
+        .read_file(&carrier, &ReadOptions::default())
+        .expect("read");
     assert_eq!(read.data, STRUCT_PAYLOAD);
 
     engine
-        .restore(&carrier, None, None, false)
+        .structure()
+        .restore_file(&carrier, &RestoreOptions::default())
         .expect("restore");
     assert_eq!(
         std::fs::read(&carrier).expect("read carrier"),
@@ -105,13 +127,20 @@ fn structure_path_inspect_and_verify() {
         ..WriteOptions::default()
     };
     engine
-        .write(&carrier, PayloadSource::Bytes(STRUCT_PAYLOAD), &options)
+        .structure()
+        .write_file(&carrier, PayloadSource::Bytes(STRUCT_PAYLOAD), &options)
         .expect("write");
 
-    let inspect = engine.inspect(&carrier, None).expect("inspect");
+    let inspect = engine
+        .structure()
+        .inspect_file(&carrier, None)
+        .expect("inspect");
     assert!(inspect.has_hidden_data);
 
-    let verify = engine.verify(&carrier, None).expect("verify");
+    let verify = engine
+        .structure()
+        .verify_file(&carrier, None)
+        .expect("verify");
     assert!(strhide::structure::verify_passed(&verify));
 }
 
@@ -123,21 +152,23 @@ fn content_bytes_embed_extract_roundtrip() {
     let options = EmbedOptions::default();
 
     let stego = engine
+        .stego()
         .embed(JPG, &Payload::bytes(CONTENT_PAYLOAD), &options)
         .expect("embed");
     assert_ne!(stego, JPG);
 
     let extracted = engine
+        .stego()
         .extract(&stego, &options.extract_options())
         .expect("extract");
-    assert_eq!(extracted, CONTENT_PAYLOAD);
+    assert_eq!(extracted.data.as_ref(), CONTENT_PAYLOAD);
 }
 
 #[test]
 fn content_bytes_probe_reports_capacity() {
     let engine = StrHide::new();
     let options = ProbeOptions::default();
-    let cap = engine.probe(JPG, &options).expect("probe");
+    let cap = engine.stego().probe(JPG, &options).expect("probe");
     assert!(cap.recommended_max_bytes > 0);
 }
 
@@ -154,6 +185,7 @@ fn content_file_embed_and_extract_roundtrip() {
     let options = EmbedOptions::default();
 
     engine
+        .stego()
         .embed_file(
             &carrier,
             None,
@@ -164,6 +196,7 @@ fn content_file_embed_and_extract_roundtrip() {
         .expect("embed_file");
 
     engine
+        .stego()
         .extract_file(&carrier, &output, &ExtractOptions::default(), false)
         .expect("extract_file");
     assert_eq!(
@@ -182,6 +215,7 @@ fn content_file_embed_to_target_leaves_original_untouched() {
     let engine = StrHide::new();
     let options = EmbedOptions::default();
     engine
+        .stego()
         .embed_file(
             &carrier,
             Some(&target),
@@ -200,26 +234,85 @@ fn content_file_embed_to_target_leaves_original_untouched() {
 #[test]
 fn private_dialect_engine_is_isolated_from_official() {
     const PRIVATE_ENGINE: StrHide =
-        StrHide::new().with_profile(Profile::new().with_default_secret("facade-private-key"));
-    assert!(!PRIVATE_ENGINE.profile().is_official());
+        StrHide::new().with_dialect(Dialect::new().with_structure_profile(
+            StructureProfile::new().with_default_secret("facade-private-key"),
+        ));
+    assert!(!PRIVATE_ENGINE.dialect().structure.is_official());
 
     let options = WriteOptions::default();
     let (stego, _) = PRIVATE_ENGINE
+        .structure()
         .write_bytes(PNG, PayloadSource::Bytes(STRUCT_PAYLOAD), &options)
         .expect("private write");
 
     // The official engine cannot read a carrier written under the private dialect.
     let official = StrHide::new();
     assert!(
-        official.read_bytes(&stego, None).is_err(),
+        official.structure().read_bytes(&stego, None).is_err(),
         "official engine must not read a private carrier"
     );
 
     // The private engine still reads its own carrier.
     let read = PRIVATE_ENGINE
+        .structure()
         .read_bytes(&stego, None)
         .expect("private read");
     assert_eq!(read.data, STRUCT_PAYLOAD);
+}
+
+#[test]
+fn one_dialect_secret_applies_to_both_domains() {
+    // `Dialect::with_default_secret` is the one-line private deployment knob:
+    // it must key both halves, so neither the envelope nor the image carrier is
+    // readable with an official build.
+    let dialect = Dialect::new().with_default_secret("one-key-both-domains");
+    assert!(!dialect.is_official());
+    assert_eq!(dialect.structure.secret(), "one-key-both-domains");
+    assert_eq!(dialect.stego.secret(), Some("one-key-both-domains"));
+
+    let private = StrHide::new().with_dialect(dialect);
+
+    // Structure half: unreadable by the official engine.
+    let (stego_png, _) = private
+        .structure()
+        .write_bytes(
+            PNG,
+            PayloadSource::Bytes(STRUCT_PAYLOAD),
+            &WriteOptions::default(),
+        )
+        .expect("private structure write");
+    assert!(
+        StrHide::new()
+            .structure()
+            .read_bytes(&stego_png, None)
+            .is_err()
+    );
+
+    // Content half: unreadable by the official engine.
+    let options = EmbedOptions::default();
+    let stego_jpg = private
+        .stego()
+        .embed(JPG, &Payload::bytes(CONTENT_PAYLOAD), &options)
+        .expect("private content embed");
+    assert!(
+        StrHide::new()
+            .stego()
+            .extract(&stego_jpg, &options.extract_options())
+            .is_err(),
+        "official engine must not extract a private content carrier"
+    );
+    let back = private
+        .stego()
+        .extract(&stego_jpg, &options.extract_options())
+        .expect("private extract");
+    assert_eq!(back.data.as_ref(), CONTENT_PAYLOAD);
+
+    // A dialect that only customises the content half stays official for the
+    // structure domain: the two halves are independent.
+    let stego_only =
+        Dialect::new().with_stego_profile(StegoProfile::new().with_default_secret("k"));
+    assert!(!stego_only.is_official());
+    assert!(stego_only.structure.is_official());
 }
 
 #[test]
@@ -261,9 +354,11 @@ fn run_cli_from_private_dialect_isolation() {
     let carrier = dir.join("carrier.png");
     std::fs::write(&carrier, PNG).expect("seed carrier");
 
-    const PRIVATE: StrHide =
-        StrHide::new().with_profile(Profile::new().with_default_secret("cli-private-key"));
-    assert!(!PRIVATE.profile().is_official());
+    const PRIVATE: StrHide = StrHide::new()
+        .with_dialect(Dialect::new().with_structure_profile(
+            StructureProfile::new().with_default_secret("cli-private-key"),
+        ));
+    assert!(!PRIVATE.dialect().structure.is_official());
 
     // The private engine writes through its own command line.
     let carrier_str = carrier.to_str().expect("utf-8 path");
@@ -299,10 +394,12 @@ fn run_cli_from_content_domain_private_isolation() {
     std::fs::write(&carrier, JPG).expect("seed carrier");
 
     // A private stego dialect (custom domain + secret).
-    const PRIVATE: StrHide = StrHide::new().with_profile(
-        Profile::new()
-            .with_stego_secret("cli-stego-key")
-            .with_stego_domain("cli-stego-domain"),
+    const PRIVATE: StrHide = StrHide::new().with_dialect(
+        Dialect::new().with_stego_profile(
+            StegoProfile::new()
+                .with_default_secret("cli-stego-key")
+                .with_stego_domain("cli-stego-domain"),
+        ),
     );
 
     let carrier_str = carrier.to_str().expect("utf-8 path");
@@ -330,12 +427,12 @@ fn run_cli_from_content_domain_private_isolation() {
     assert_eq!(extract_private, 0, "private CLI extract must succeed");
 }
 
-// ───────────────────────── structure domain · path ─────────────────────────
+// ───────────────────────── overwrite policy ─────────────────────────
 
 /// `read` / `restore` used to hard-code `overwrite = false` on the facade, so a
-/// caller could not replace an existing destination without dropping down to
-/// the five-parameter free functions. Both now have an explicit `_with` form,
-/// and the refusing form must leave the existing file untouched.
+/// caller could not replace an existing destination without dropping down to a
+/// positional free function. Both now take an option struct, and the refusing
+/// default must leave the existing file untouched.
 #[test]
 fn structure_read_and_restore_honour_the_overwrite_flag() {
     use strhide::errors::StrHideError;
@@ -346,7 +443,8 @@ fn structure_read_and_restore_honour_the_overwrite_flag() {
     std::fs::write(&carrier, PNG).expect("seed carrier");
 
     engine
-        .write(
+        .structure()
+        .write_file(
             &carrier,
             PayloadSource::Bytes(STRUCT_PAYLOAD),
             &WriteOptions::default(),
@@ -357,7 +455,8 @@ fn structure_read_and_restore_honour_the_overwrite_flag() {
     std::fs::write(&out, b"stale").expect("seed output");
 
     let err = engine
-        .read(&carrier, Some(&out), None)
+        .structure()
+        .read_file(&carrier, &ReadOptions::new().with_output(&out))
         .expect_err("read must refuse an existing destination");
     assert!(
         matches!(err, StrHideError::Rejection(_)),
@@ -370,15 +469,20 @@ fn structure_read_and_restore_honour_the_overwrite_flag() {
     );
 
     engine
-        .read_with(&carrier, Some(&out), None, true)
-        .expect("read_with(overwrite)");
+        .structure()
+        .read_file(
+            &carrier,
+            &ReadOptions::new().with_output(&out).with_overwrite(true),
+        )
+        .expect("read with overwrite");
     assert_eq!(std::fs::read(&out).expect("read back"), STRUCT_PAYLOAD);
 
     let restored = dir.join("restored.png");
     std::fs::write(&restored, b"stale").expect("seed restore target");
 
     let err = engine
-        .restore(&carrier, Some(&restored), None, false)
+        .structure()
+        .restore_file(&carrier, &RestoreOptions::new().with_output(&restored))
         .expect_err("restore must refuse an existing destination");
     assert!(
         matches!(err, StrHideError::Rejection(_)),
@@ -386,11 +490,90 @@ fn structure_read_and_restore_honour_the_overwrite_flag() {
     );
 
     engine
-        .restore_with(&carrier, Some(&restored), None, false, true)
-        .expect("restore_with(overwrite)");
+        .structure()
+        .restore_file(
+            &carrier,
+            &RestoreOptions::new()
+                .with_output(&restored)
+                .with_overwrite(true),
+        )
+        .expect("restore with overwrite");
     assert_eq!(
         std::fs::read(&restored).expect("read back"),
         PNG,
         "restored carrier must be bit-identical to the original"
     );
+}
+
+// ───────────────────────── GUI front-end smoke ─────────────────────────
+
+/// The three things a GUI needs from the library without depending on `cli`:
+/// progress events, a working cancel token, and an error it can render in its
+/// own language.
+#[test]
+fn gui_front_end_smoke() {
+    use std::sync::Mutex;
+
+    use strhide::core::control::{CancelToken, Control, Event, Progress};
+    use strhide::core::i18n::Lang;
+    use strhide::errors::StrHideError;
+
+    /// Collects events so the test can assert they were reported.
+    #[derive(Default)]
+    struct Recorder {
+        events: Mutex<Vec<Event>>,
+    }
+
+    impl Progress for Recorder {
+        fn report(&self, event: Event) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    // 1. Progress: an embed reports at least one stage event.
+    let recorder = Recorder::default();
+    let control = Control::with_progress(&recorder);
+    let options = EmbedOptions {
+        control,
+        ..Default::default()
+    };
+    let _ = StrHide::new()
+        .stego()
+        .embed(JPG, &Payload::bytes(CONTENT_PAYLOAD), &options)
+        .expect("embed with progress");
+    assert!(
+        !recorder.events.lock().unwrap().is_empty(),
+        "a GUI would show nothing if no stage event was reported"
+    );
+
+    // 2. Cancellation: a pre-cancelled token stops before any output.
+    let token = CancelToken::new();
+    token.cancel();
+    let cancelled_options = EmbedOptions {
+        control: Control::with_cancel(&token),
+        ..Default::default()
+    };
+    let err = StrHide::new()
+        .stego()
+        .embed(JPG, &Payload::bytes(CONTENT_PAYLOAD), &cancelled_options)
+        .expect_err("a cancelled embed must not succeed");
+    assert!(
+        matches!(err, StrHideError::Cancelled),
+        "expected Cancelled, got {err:?}"
+    );
+
+    // 3. Localized error rendering, without the CLI's thread-local language.
+    let zh = StrHideError::Password("wrong password".into())
+        .detail_i18n()
+        .render(Lang::Zh);
+    assert!(
+        zh.contains("密码"),
+        "a Chinese UI must get a Chinese category label, got: {zh}"
+    );
+    assert!(zh.contains("wrong password"), "detail must survive: {zh}");
+
+    let en = StrHideError::Password("wrong password".into())
+        .detail_i18n()
+        .render(Lang::En);
+    assert!(en.contains("Password error"), "got: {en}");
 }

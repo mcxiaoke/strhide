@@ -12,7 +12,7 @@
 //! - answer how much data each strategy can hold
 //!   ([`HostAdapter::strategy_capacities`]).
 //!
-//! The [`crate::engine`] never parses a container itself — it calls into the
+//! The [`crate::structure::engine`] never parses a container itself — it calls into the
 //! adapter trait. Adapters live in submodules:
 //!
 //! - [`png`], [`jpeg`], [`mp4`], [`heif`], [`zip`], [`pdf`], [`pe`], [`wav`],

@@ -13,8 +13,8 @@ use std::path::Path;
 
 use strhide::errors::StrHideError;
 use strhide::structure::{
-    PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
-    write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, inspect_carrier, read_carrier,
+    remove_carrier, verify_carrier, write_carrier,
 };
 
 // --------------------------------------------------------------------------- helpers
@@ -58,7 +58,8 @@ fn codebits_auto_roundtrip_and_byte_exact_restore() {
     )
     .expect("write");
     assert_eq!(
-        result.strategy, "pe_codebits",
+        result.strategy.name(),
+        "pe_codebits",
         "auto must pick pe_codebits: {:?}",
         result.strategy_note
     );
@@ -69,12 +70,20 @@ fn codebits_auto_roundtrip_and_byte_exact_restore() {
     );
 
     // read back
-    let read = read_carrier(&out, None, None).expect("read");
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(read.data, b"meet at the old bridge, 9pm");
 
     // inspect + verify
     let ins = inspect_carrier(&out, None).expect("inspect");
-    assert_eq!(ins.strategy.as_deref(), Some("pe_codebits"));
+    assert_eq!(ins.strategy.map(|s| s.name()), Some("pe_codebits"));
     assert!(ins.has_hidden_data);
     let v = verify_carrier(&out, None).expect("verify");
     assert!(v.level1_host.ok, "L1: {}", v.level1_host.detail);
@@ -83,7 +92,16 @@ fn codebits_auto_roundtrip_and_byte_exact_restore() {
 
     // remove -> byte-exact restore
     let restored = dir.join("app.restored.exe");
-    let rem = remove_carrier(&out, Some(&restored), None, false).expect("remove");
+    let rem = remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert!(rem.verified_identical);
     let restored_bytes = fs::read(&restored).unwrap();
     assert_eq!(restored_bytes.len(), original.len());
@@ -101,7 +119,7 @@ fn codebits_auto_roundtrip_and_byte_exact_restore() {
         &write_opts(&out2, "auto"),
     )
     .expect("re-write after remove");
-    assert_eq!(r2.strategy, "pe_codebits");
+    assert_eq!(r2.strategy.name(), "pe_codebits");
 }
 
 /// T6: encrypted payload round-trips through the bit channel.
@@ -122,17 +140,38 @@ fn codebits_encrypted_roundtrip() {
     write_carrier(&carrier, PayloadSource::Text("encrypted secret"), &opts).expect("write");
 
     // Wrong password must fail cleanly.
-    assert!(read_carrier(&out, None, Some("wrong pw")).is_err());
+    assert!(
+        read_carrier(
+            &out,
+            &ReadOptions {
+                output_path: None,
+                password: Some("wrong pw"),
+                overwrite: false,
+            }
+        )
+        .is_err()
+    );
     // Right password round-trips.
-    let read = read_carrier(&out, None, Some("correct horse battery staple")).expect("read");
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: Some("correct horse battery staple"),
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(read.data, b"encrypted secret");
 
     let restored = dir.join("enc.restored.exe");
     let rem = remove_carrier(
         &out,
-        Some(&restored),
-        Some("correct horse battery staple"),
-        false,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some("correct horse battery staple"),
+            backup: false,
+            overwrite: false,
+        },
     )
     .expect("remove");
     assert!(rem.verified_identical);
@@ -159,19 +198,54 @@ fn codebits_stealth_denies_without_password() {
     write_carrier(&carrier, PayloadSource::Text("invisible"), &opts).expect("write");
 
     // No password: nothing to find (plausible deniability).
-    let err = read_carrier(&out, None, None).unwrap_err();
+    let err = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap_err();
     assert!(
         matches!(err, strhide::errors::StrHideError::NoHiddenData(_)),
         "expected NoHiddenData, got {err:?}"
     );
     // Wrong password: same.
-    assert!(read_carrier(&out, None, Some("nope")).is_err());
+    assert!(
+        read_carrier(
+            &out,
+            &ReadOptions {
+                output_path: None,
+                password: Some("nope"),
+                overwrite: false,
+            }
+        )
+        .is_err()
+    );
 
     // Right password: full round-trip and byte-exact restore.
-    let read = read_carrier(&out, None, Some("stealth pw")).expect("read");
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: Some("stealth pw"),
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(read.data, b"invisible");
     let restored = dir.join("s.restored.exe");
-    let rem = remove_carrier(&out, Some(&restored), Some("stealth pw"), false).expect("remove");
+    let rem = remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some("stealth pw"),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert!(rem.verified_identical);
     assert_eq!(
         sha256_hex(&fs::read(&restored).unwrap()),
@@ -200,14 +274,32 @@ fn auto_falls_back_to_overlay_on_tiny_text() {
     )
     .expect("write");
     assert_eq!(
-        result.strategy, "pe_overlay",
+        result.strategy.name(),
+        "pe_overlay",
         "a slack-free tiny .text must fall back to overlay"
     );
 
-    let read = read_carrier(&out, None, None).expect("read");
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(read.data, b"hi");
     let restored = dir.join("tiny.restored.exe");
-    let rem = remove_carrier(&out, Some(&restored), None, false).expect("remove");
+    let rem = remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert!(rem.verified_identical);
     assert_eq!(sha256_hex(&fs::read(&restored).unwrap()), orig_sha);
 }
@@ -299,12 +391,29 @@ fn corrupted_text_fails_cleanly() {
     fs::write(&tampered, &bytes).unwrap();
 
     assert!(
-        read_carrier(&tampered, None, None).is_err(),
+        read_carrier(
+            &tampered,
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+            }
+        )
+        .is_err(),
         "read must fail on a tampered channel"
     );
     let restored = dir.join("c.tampered.restored.exe");
     assert!(
-        remove_carrier(&tampered, Some(&restored), None, false).is_err(),
+        remove_carrier(
+            &tampered,
+            &RestoreOptions {
+                output_path: Some(&restored),
+                password: None,
+                backup: false,
+                overwrite: false,
+            }
+        )
+        .is_err(),
         "remove must fail (or refuse) on a tampered channel"
     );
 }
@@ -325,13 +434,30 @@ fn codebits_32bit_pe_roundtrip() {
         &write_opts(&out, "auto"),
     )
     .expect("write");
-    assert_eq!(result.strategy, "pe_codebits");
+    assert_eq!(result.strategy.name(), "pe_codebits");
     assert_eq!(fs::metadata(&out).unwrap().len(), original.len() as u64);
 
-    let read = read_carrier(&out, None, None).expect("read");
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(read.data, b"thirty-two bits");
     let restored = dir.join("x32.restored.exe");
-    let rem = remove_carrier(&out, Some(&restored), None, false).expect("remove");
+    let rem = remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert!(rem.verified_identical);
     assert_eq!(sha256_hex(&fs::read(&restored).unwrap()), orig_sha);
 }
@@ -418,14 +544,31 @@ with two lines
 
         assert!(
             matches!(
-                read_carrier(&carrier, None, None).unwrap_err(),
+                read_carrier(
+                    &carrier,
+                    &ReadOptions {
+                        output_path: None,
+                        password: None,
+                        overwrite: false,
+                    }
+                )
+                .unwrap_err(),
                 StrHideError::UnsupportedFormat(_)
             ),
             "{name}: read should reject"
         );
         assert!(
             matches!(
-                remove_carrier(&carrier, Some(&out), None, false).unwrap_err(),
+                remove_carrier(
+                    &carrier,
+                    &RestoreOptions {
+                        output_path: Some(&out),
+                        password: None,
+                        backup: false,
+                        overwrite: false,
+                    }
+                )
+                .unwrap_err(),
                 StrHideError::UnsupportedFormat(_)
             ),
             "{name}: remove should reject"
@@ -470,14 +613,31 @@ fn eof_strategy_still_works_on_supported_formats() {
         &write_opts(&out, "eof"),
     )
     .expect("eof strategy on a supported carrier");
-    assert_eq!(result.strategy, "eof");
-    assert_eq!(result.format, "PNG");
+    assert_eq!(result.strategy.name(), "eof");
+    assert_eq!(result.format.as_str(), "PNG");
     assert!(fs::metadata(&out).unwrap().len() > original.len() as u64);
 
-    let read = read_carrier(&out, None, None).expect("read");
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(read.data, b"eof on png");
     let restored = dir.join("c.restored.png");
-    let rem = remove_carrier(&out, Some(&restored), None, false).expect("remove");
+    let rem = remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert!(rem.verified_identical);
     assert_eq!(fs::read(&restored).unwrap(), original);
 }
@@ -504,7 +664,7 @@ fn inspect_reports_exact_codebits_capacity() {
     fs::write(&carrier, make_pe(0x8664, 0x20B, 0x3000, false)).unwrap();
 
     let res = inspect_carrier(&carrier, None).expect("inspect");
-    assert_eq!(res.format, "PE");
+    assert_eq!(res.format.as_str(), "PE");
     assert!(!res.has_hidden_data);
 
     assert_eq!(
@@ -533,7 +693,7 @@ fn inspect_reports_exact_codebits_capacity() {
         &write_opts(&out, "auto"),
     )
     .expect("write");
-    assert_eq!(written.strategy, "pe_codebits");
+    assert_eq!(written.strategy.name(), "pe_codebits");
     assert!(
         written.ube_size <= cap,
         "envelope {} B exceeded reported capacity {} B",
@@ -582,7 +742,7 @@ fn inspect_reports_png_capacity_and_json_schema() {
     fs::write(&carrier, include_bytes!("../assets/minimal.png")).unwrap();
 
     let res = inspect_carrier(&carrier, None).expect("inspect");
-    assert_eq!(res.format, "PNG");
+    assert_eq!(res.format.as_str(), "PNG");
     assert_eq!(res.strategies[0].strategy, "chunk");
     assert_eq!(res.strategies[0].capacity_bytes, Some(0x7FFF_FFFF));
     assert!(res.strategies[0].available);
@@ -683,11 +843,28 @@ fn compact_metadata_makes_marginal_carriers_usable() {
         fs::metadata(&carrier).unwrap().len()
     );
 
-    let read = read_carrier(&out, None, Some("pw")).expect("read");
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: Some("pw"),
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(read.data, b"hi");
 
     let restored = dir.join("marginal.restored.exe");
-    remove_carrier(&out, Some(&restored), Some("pw"), false).expect("remove");
+    remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some("pw"),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert_eq!(fs::read(&restored).unwrap(), original);
 }
 
@@ -761,7 +938,15 @@ fn codebits_channel_header_keystream_masking_verified() {
     assert_eq!(header_bytes[5] ^ mask[1], 0);
 
     // 4. Engine lifecycle (read, verify, strip) must succeed 100% and be bit-exact
-    let read = read_carrier(&out, None, None).expect("read");
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .expect("read");
     assert_eq!(read.data, b"secret codebits payload");
 
     let v = verify_carrier(&out, None).expect("verify");
@@ -770,7 +955,16 @@ fn codebits_channel_header_keystream_masking_verified() {
     assert!(v.level3_crypto.ok, "L3: {}", v.level3_crypto.detail);
 
     let restored = dir.join("masked_sample.restored.exe");
-    remove_carrier(&out, Some(&restored), None, false).expect("remove");
+    remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert_eq!(
         fs::read(&restored).unwrap(),
         original,
@@ -862,11 +1056,28 @@ fn codebits_double_injection_stealth_fails_safely_and_preserves_carrier() {
     );
 
     // 3. First payload is intact and carrier can be bit-exactly restored
-    let read = read_carrier(&steg1, None, Some("stealth_pass_1")).unwrap();
+    let read = read_carrier(
+        &steg1,
+        &ReadOptions {
+            output_path: None,
+            password: Some("stealth_pass_1"),
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(read.data, b"first secret");
 
     let restored = dir.join("restored.exe");
-    remove_carrier(&steg1, Some(&restored), Some("stealth_pass_1"), false).unwrap();
+    remove_carrier(
+        &steg1,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some("stealth_pass_1"),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(
         fs::read(&restored).unwrap(),
         original,
@@ -944,7 +1155,15 @@ fn codebits_strip_rejects_slack_outside_padding() {
     fs::write(&tampered, &tampered_bytes).unwrap();
 
     let restored = dir.join("restored.exe");
-    let res = remove_carrier(&tampered, Some(&restored), None, false);
+    let res = remove_carrier(
+        &tampered,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    );
     assert!(
         res.is_err(),
         "strip_codebits must reject slack landing outside padding"

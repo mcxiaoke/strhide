@@ -7,7 +7,7 @@
 //! - `compact_meta`: compact metadata envelope encoding on marginal carriers.
 //! - `jpeg_multisegment`: multi-segment JPEG APP15 payload splitting.
 //! - `unicode_and_binary`: UTF-8/Unicode and arbitrary binary payloads.
-//! - `profile`: `LocalParams` / `Profile` plumbing and dialect isolation (M1).
+//! - `profile`: `LocalParams` / `StructureProfile` plumbing and dialect isolation (M1).
 //! - `jpeg_juniward`: J-UNIWARD cost model integration.
 //! - `jpeg_polarization`: Cost polarization end-to-end behavior.
 //! - `png_self_describing`: PNG self-describing wire format.

@@ -12,6 +12,9 @@
 //!   PNG (`prIv` ancillary chunk), JPEG (APP15 segment), MP4 (`uuid` box),
 //!   ZIP (pre-central-directory), PDF (incremental update), and Windows PE
 //!   (section slack, x86/x64 instruction encoding, or overlay).
+//! - **Content-adaptive steganography** for PNG (HILL / S-UNIWARD), JPEG
+//!   (UERD / J-UNIWARD + ternary STC), and H.265/HEVC (CABAC bin flipping,
+//!   Annex-B or MP4/MOV).
 //! - **AES-256-GCM authenticated encryption** for both the payload and the
 //!   metadata; keys derived with PBKDF2-HMAC-SHA256 (100 000 iterations) +
 //!   HKDF-SHA256. Even without a password, envelopes are uniformly encrypted
@@ -36,13 +39,13 @@
 //! | PDF | `incremental` (append updates) | `eof` |
 //! | PE | `pe_codebits` / `pe_slack` / `pe_overlay` | `eof` |
 //!
-//! `strategy = "auto"` (the [`crate::structure::WriteOptions`] default) picks
-//! the primary strategy when it fits and falls back to `eof` transparently.
+//! `strategy = "auto"` (the [`structure::WriteOptions`] default) picks the
+//! primary strategy when it fits and falls back to `eof` transparently.
 //!
 //! ## CLI quick start
 //!
 //! ```text
-//! strhide write carrier.png --data-text "hello" --password pw
+//! strhide write carrier.png --text "hello" --password pw
 //! strhide read  carrier.png --output out.txt --password pw
 //! strhide inspect carrier.png --password pw
 //! strhide verify carrier.png --password pw
@@ -51,18 +54,19 @@
 //!
 //! ## Library usage
 //!
-//! The library entry points live in [`structure`]: [`structure::write_carrier`]
-//! injects a payload, [`structure::read_carrier_with`] extracts it, and
-//! [`structure::remove_carrier`] strips the envelope and restores the carrier.
-//! Every fallible call returns a [`std::result::Result`] whose error type is
-//! [`errors::StrHideError`].
+//! The recommended entry point is [`facade::StrHide`]: bind one
+//! [`facade::Dialect`] once, then reach the two domains through
+//! [`facade::StrHide::structure`] and [`facade::StrHide::stego`].
 //!
 //! ```no_run
 //! # fn main() -> Result<(), strhide::errors::StrHideError> {
-//! use strhide::structure::{write_carrier, read_carrier_with, PayloadSource, WriteOptions};
+//! use strhide::facade::StrHide;
+//! use strhide::structure::{PayloadSource, ReadOptions, WriteOptions};
+//!
+//! let engine = StrHide::new();
 //!
 //! // Write a text payload into an existing PNG carrier, in place.
-//! write_carrier(
+//! engine.structure().write_file(
 //!     std::path::Path::new("photo.png"),
 //!     PayloadSource::Text("hello from strhide"),
 //!     &WriteOptions {
@@ -71,34 +75,32 @@
 //!     },
 //! )?;
 //!
-//! // Extract it back.
-//! let extracted = read_carrier_with(
+//! // Extract it back (in memory: no `output_path`).
+//! let read = engine.structure().read_file(
 //!     std::path::Path::new("photo.png"),
-//!     None,            // write to a Vec, not a file
-//!     Some("s3cret"),
-//!     false,
+//!     &ReadOptions::new().with_password("s3cret"),
 //! )?;
-//! assert_eq!(extracted.data, b"hello from strhide");
+//! assert_eq!(read.data, b"hello from strhide");
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! After `remove_carrier`, `photo.png` is byte-for-byte identical to the file
+//! After `restore_file`, `photo.png` is byte-for-byte identical to the file
 //! before the write.
 //!
 //! ## Tuning and private dialects
 //!
-//! The plain entry points use the historical defaults. To change writer-only
-//! behaviour without touching the wire format, pass [`params::LocalParams`] to
-//! [`structure::write_carrier_with`]; to key envelopes with your own secret (so
-//! that an official binary cannot read them), pass a [`params::Profile`] to the
-//! `*_with` entry points of [`structure`]:
+//! The plain entry points use the historical defaults. Two orthogonal types
+//! cover the rest:
 //!
-//! - [`params::LocalParams`] — chunk size, compression policy, rejection
-//!   policy. The reader never needs these, so varying them is always safe.
-//! - [`params::Profile`] — private default secret, stealth derivation domain,
-//!   custom magic pair. Read and write must use the **same** profile;
-//!   `Profile::default()` is the official dialect.
+//! - [`params::LocalParams`] — writer-only knobs (chunk size, compression
+//!   policy, rejection policy). The reader never needs them, so varying them is
+//!   always safe.
+//! - [`facade::Dialect`] — the private dialect, composed of
+//!   [`structure::params::StructureProfile`] (envelope secret, stealth domain,
+//!   magic pair) and [`stego::params::StegoProfile`] (image secret, HKDF
+//!   domain, private wire-format identities). Read and write must use the
+//!   **same** dialect; `Dialect::new()` is the official one.
 //!
 //! ## Crate layout
 //!
@@ -109,20 +111,28 @@
 //!   format carry?").
 //! - [`structure`] — layer 3A, the container domain: [`structure::write_carrier`]
 //!   and friends, with [`structure::envelope`] (UBE v2.2 wire format),
-//!   [`structure::adapters`] (one `HostAdapter` per container) and
-//!   [`structure::registry`] (format routing + strategy IDs).
+//!   [`structure::adapters`] (one `HostAdapter` per container),
+//!   [`structure::registry`] (format routing, strategy IDs) and
+//!   [`structure::params::StructureProfile`].
 //! - [`stego`] — layer 3B, the content domain: PNG HILL, JPEG UERD + ternary
 //!   STC, HEVC CABAC. Its public surface is re-exported at the crate root:
 //!   [`JpegFormatProfile`] / [`DEFAULT_JPEG_FORMAT`] (wire-format identity),
 //!   [`JpegParams`] / [`ExtractParams`] (per-call tuning), and
-//!   [`embed`] / [`extract`] (the JPEG entry points a private build calls with
-//!   its own profile).
+//!   [`embed_carrier`] / [`extract_carrier`] (entry points a private build
+//!   calls with its own [`stego::params::StegoProfile`]).
 //! - [`analysis`] — layer 4: black-box steganalysis.
-//! - [`core`] — layer 1: [`core::i18n`] (message catalogue) and, when the
-//!   `config` feature is on, [`core::config`] (TOML settings).
-//! - [`crypto`] / [`errors`] / [`params`] / [`commit`] — stage-1 residents that
-//!   stage 2 moves under [`core`].
+//! - [`core`] — layer 1: [`core::i18n`] (message catalogue),
+//!   [`core::control`] (progress + cancellation), [`core::payload`],
+//!   [`core::media`], [`core::fs`], [`core::pipeline`] (batch orchestration)
+//!   and, when the `config` feature is on, [`core::config`] (TOML settings).
+//! - [`crypto`] / [`errors`] / [`params`] / [`commit`] — crate-root residents
+//!   that a later batch moves under [`core`].
 //! - [`cli`] — layer 5: the command line (feature `cli`).
+//!
+//! ## Prelude
+//!
+//! [`prelude`] re-exports the types most callers need, so a first integration
+//! is one `use strhide::prelude::*;`.
 
 extern crate alloc;
 
@@ -159,8 +169,80 @@ pub mod cli;
 #[cfg(feature = "cli")]
 pub mod cli_i18n;
 
-#[cfg(feature = "structure-base")]
 pub mod facade;
+
+// ── Facade (always compiled; methods are gated per domain) ──────────────────
+pub use facade::{Dialect, StrHide};
+
+// ── Errors ─────────────────────────────────────────────────────────────────
+pub use errors::{ErrorDetail, StrHideError, TrellisCause};
+
+// ── Formats ────────────────────────────────────────────────────────────────
+pub use formats::sniff::FileFormat;
+
+// ── Structure domain ───────────────────────────────────────────────────────
+#[cfg(feature = "structure-base")]
+pub use structure::params::StructureProfile;
+#[cfg(feature = "structure-base")]
+pub use structure::{
+    PayloadSource, ReadOptions, ReadResult, RemoveResult, RestoreOptions, StrategyId, Warning,
+    WriteOptions, WriteResult,
+};
+
+// ── Content domain ─────────────────────────────────────────────────────────
+#[cfg(feature = "content-base")]
+pub use core::media::MediaInfo;
+#[cfg(feature = "content-base")]
+pub use core::payload::{Payload, PayloadKind};
+#[cfg(feature = "content-base")]
+pub use stego::params::StegoProfile;
+#[cfg(feature = "content-base")]
+pub use stego::{
+    EmbedOptions, EmbedOutput, ExtractOptions, InspectOptions, ProbeOptions, SafetyEnforcement,
+    SafetyLevel, SafetyPolicy, StegoCapacityInfo, StegoHeaderInfo, StegoTuning, StegoVerifyResult,
+    VerifyOptions, embed_carrier, extract_carrier, probe_carrier_capacity,
+};
+#[cfg(feature = "content-base")]
+pub use stego::{
+    embed_carrier_with_dialect, extract_carrier_with_dialect, probe_carrier_capacity_with_dialect,
+};
+
+// ── Prelude ────────────────────────────────────────────────────────────────
+pub mod prelude {
+    //! The types a first integration needs.
+    //!
+    //! ```
+    //! use strhide::prelude::*;
+    //!
+    //! let engine = StrHide::new();
+    //! assert!(engine.dialect().is_official());
+    //! ```
+
+    pub use crate::errors::{ErrorDetail, StrHideError};
+    pub use crate::facade::{Dialect, StrHide};
+    pub use crate::formats::sniff::FileFormat;
+    pub use crate::params::{CompressionStrategy, LocalParams, RejectionPolicy};
+
+    #[cfg(feature = "structure-base")]
+    pub use crate::structure::params::StructureProfile;
+    #[cfg(feature = "structure-base")]
+    pub use crate::structure::{
+        PayloadSource, ReadOptions, ReadResult, RemoveResult, RestoreOptions, WriteOptions,
+        WriteResult,
+    };
+
+    #[cfg(feature = "content-base")]
+    pub use crate::core::media::MediaInfo;
+    #[cfg(feature = "content-base")]
+    pub use crate::core::payload::Payload;
+    #[cfg(feature = "content-base")]
+    pub use crate::stego::params::StegoProfile;
+    #[cfg(feature = "content-base")]
+    pub use crate::stego::{
+        EmbedOptions, ExtractOptions, ProbeOptions, SafetyEnforcement, SafetyLevel, SafetyPolicy,
+        StegoCapacityInfo, StegoTuning,
+    };
+}
 
 // Content-domain steganography surface.
 #[cfg(feature = "content-base")]

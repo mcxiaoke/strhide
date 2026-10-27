@@ -21,8 +21,8 @@ use std::path::Path;
 
 use strhide::errors::StrHideError;
 use strhide::structure::{
-    PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
-    write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, inspect_carrier, read_carrier,
+    remove_carrier, verify_carrier, write_carrier,
 };
 
 // --------------------------------------------------------------------------- synthetic carriers
@@ -185,12 +185,12 @@ fn run_cell(
     .unwrap_or_else(|e| panic!("{label}: write failed: {e}"));
 
     assert_eq!(
-        write.strategy,
+        write.strategy.name(),
         expect_strategy,
         "{label}: unexpected strategy (note: {})",
         write.strategy_note.as_deref().unwrap_or("-")
     );
-    assert_eq!(write.format, fmt.name(), "{label}: format");
+    assert_eq!(write.format.as_str(), fmt.name(), "{label}: format");
     assert_eq!(write.is_stealth, stealth, "{label}: is_stealth flag");
     assert_eq!(
         write.is_encrypted,
@@ -203,7 +203,7 @@ fn run_cell(
         inspect_carrier(&out, password).unwrap_or_else(|e| panic!("{label}: inspect failed: {e}"));
     assert!(insp.has_hidden_data, "{label}: inspect found nothing");
     assert_eq!(
-        insp.strategy.as_deref(),
+        insp.strategy.map(|s| s.name()),
         Some(expect_strategy),
         "{label}: inspect strategy"
     );
@@ -235,8 +235,15 @@ fn run_cell(
     assert!(v.level3_crypto.ok, "{label}: L3 {}", v.level3_crypto.detail);
 
     // read
-    let read =
-        read_carrier(&out, None, password).unwrap_or_else(|e| panic!("{label}: read failed: {e}"));
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password,
+            overwrite: false,
+        },
+    )
+    .unwrap_or_else(|e| panic!("{label}: read failed: {e}"));
     assert_eq!(
         String::from_utf8(read.data).unwrap(),
         "matrix payload 中文 🚀",
@@ -245,8 +252,16 @@ fn run_cell(
 
     // remove -> byte-exact restore
     let restored = dir.join(format!("c.restored.{}", fmt.ext()));
-    let rem = remove_carrier(&out, Some(&restored), password, false)
-        .unwrap_or_else(|e| panic!("{label}: remove failed: {e}"));
+    let rem = remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap_or_else(|e| panic!("{label}: remove failed: {e}"));
     assert!(rem.verified_identical, "{label}: remove must verify");
     assert_eq!(
         fs::read(&restored).unwrap(),
@@ -291,10 +306,21 @@ fn run_cell_any_reported_strategy(
         },
     )
     .unwrap_or_else(|e| panic!("{label}: write failed: {e}"));
-    assert_eq!(write.strategy, write_strategy, "{label}: write strategy");
+    assert_eq!(
+        write.strategy.name(),
+        write_strategy,
+        "{label}: write strategy"
+    );
 
-    let read =
-        read_carrier(&out, None, password).unwrap_or_else(|e| panic!("{label}: read failed: {e}"));
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password,
+            overwrite: false,
+        },
+    )
+    .unwrap_or_else(|e| panic!("{label}: read failed: {e}"));
     assert_eq!(
         String::from_utf8(read.data).unwrap(),
         "matrix payload",
@@ -302,8 +328,16 @@ fn run_cell_any_reported_strategy(
     );
 
     let restored = dir.join(format!("c.restored.{}", fmt.ext()));
-    remove_carrier(&out, Some(&restored), password, false)
-        .unwrap_or_else(|e| panic!("{label}: remove failed: {e}"));
+    remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap_or_else(|e| panic!("{label}: remove failed: {e}"));
     assert_eq!(
         fs::read(&restored).unwrap(),
         original,
@@ -455,7 +489,15 @@ fn stealth_envelope_is_invisible_without_its_password() {
         )
         .unwrap_or_else(|e| panic!("{label}: write failed: {e}"));
 
-        let err = read_carrier(&out, None, None).unwrap_err();
+        let err = read_carrier(
+            &out,
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+            },
+        )
+        .unwrap_err();
         assert!(
             matches!(err, StrHideError::NoHiddenData(_)),
             "{label}: expected NoHiddenData without the password, got {err:?}"
@@ -472,7 +514,15 @@ fn stealth_envelope_is_invisible_without_its_password() {
         }
 
         // The wrong password is equally invisible (not a Password error).
-        let wrong = read_carrier(&out, None, Some("wrong-pw")).unwrap_err();
+        let wrong = read_carrier(
+            &out,
+            &ReadOptions {
+                output_path: None,
+                password: Some("wrong-pw"),
+                overwrite: false,
+            },
+        )
+        .unwrap_err();
         assert!(
             matches!(wrong, StrHideError::NoHiddenData(_)),
             "{label}: wrong password must not locate the envelope, got {wrong:?}"
@@ -572,7 +622,15 @@ fn password_hint_roundtrips_on_every_format() {
         );
 
         // ...and appears in the password error.
-        let err = read_carrier(&out, None, None).unwrap_err();
+        let err = read_carrier(
+            &out,
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+            },
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -584,7 +642,15 @@ fn password_hint_roundtrips_on_every_format() {
         assert!(err.to_string().contains(hint), "{label}: {err}");
 
         // With the password the payload still reads back.
-        let read = read_carrier(&out, None, Some("hint-pw")).expect("read");
+        let read = read_carrier(
+            &out,
+            &ReadOptions {
+                output_path: None,
+                password: Some("hint-pw"),
+                overwrite: false,
+            },
+        )
+        .expect("read");
         assert_eq!(String::from_utf8(read.data).unwrap(), "hinted", "{label}");
     }
 }

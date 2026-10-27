@@ -331,6 +331,19 @@ crate::i18n_messages! {
         zh = "列出支持的载体格式、隐藏策略及容量上限";
 
     // ---- After help ----
+    AfterHelpRoot:
+        en = "Groups:
+  Container    write | read | restore            envelope inside the host file
+  Media Stego  embed | extract | capacity         payload inside pixels / DCT / CABAC
+  Diagnostics  inspect | verify | scan | list      read-only analysis
+
+Run `strhide <COMMAND> --help` for the options of one command.",
+        zh = "命令分组：
+  Container    容器封装  write | read | restore        在宿主文件内写入信封
+  Media Stego  图像隐写  embed | extract | capacity   在像素 / DCT / CABAC 中嵌入数据
+  Diagnostics  诊断分析  inspect | verify | scan | list  只读结构与统计检查
+
+用 `strhide <命令> --help` 查看单个命令的选项。";
     AfterHelpWrite:
         en = WRITE_AFTER_HELP_EN,
         zh = WRITE_AFTER_HELP_ZH;

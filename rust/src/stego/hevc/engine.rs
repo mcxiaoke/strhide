@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::core::control::{Control, Event, Stage};
+use crate::core::media::MediaInfo;
 use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::stego::coding::{Move, StcTrellis};
@@ -487,29 +488,29 @@ pub(crate) fn build_hevc_capacity_info(
         .min(max_raw_payload_bytes);
 
     let media_info = if width > 0 && height > 0 {
-        match kind {
-            HevcCarrierKind::Mp4Container => {
-                if let Ok(target) = parse_mp4_targets(carrier) {
-                    if let (Some(fps), Some(sec)) = (target.fps, target.duration_secs) {
-                        let mbps = if sec > 0.0 {
-                            (carrier.len() as f64 * 8.0) / sec / 1_000_000.0
-                        } else {
-                            0.0
-                        };
-                        Some(format!(
-                            "{width}x{height}, {fps:.2} fps, {sec:.1}s ({mbps:.1} Mbps)"
-                        ))
-                    } else {
-                        Some(format!("{width}x{height}"))
-                    }
+        let base = MediaInfo::new(width, height);
+        let video = if kind == HevcCarrierKind::Mp4Container {
+            parse_mp4_targets(carrier).ok().and_then(|target| {
+                let fps = target.fps?;
+                let sec = target.duration_secs?;
+                let bps = if sec > 0.0 {
+                    (carrier.len() as f64 * 8.0) / sec
                 } else {
-                    Some(format!("{width}x{height}"))
-                }
-            }
-            HevcCarrierKind::HeifContainer | HevcCarrierKind::AnnexBStream => {
-                Some(format!("{width}x{height}"))
-            }
-        }
+                    0.0
+                };
+                Some((fps, sec, bps))
+            })
+        } else {
+            None
+        };
+        Some(match video {
+            Some((fps, sec, bps)) => base.with_video(
+                fps as f32,
+                (sec * 1000.0).round() as u64,
+                bps.round() as u64,
+            ),
+            None => base,
+        })
     } else {
         None
     };
@@ -1297,7 +1298,7 @@ pub fn inspect_hevc(
 
     let (width, height) = extract_hevc_dimensions(carrier).unwrap_or((0, 0));
     let media_info = if width > 0 && height > 0 {
-        Some(format!("{width}x{height}"))
+        Some(MediaInfo::new(width, height))
     } else {
         None
     };
@@ -1306,7 +1307,7 @@ pub fn inspect_hevc(
         HevcCarrierKind::AnnexBStream => "HEVC-AnnexB",
         HevcCarrierKind::Mp4Container => "MP4/HEVC",
     });
-    empty_info.media_info = media_info.clone();
+    empty_info.media_info = media_info;
 
     let record = match record_carrier_state(carrier, kind) {
         Ok(r) => r,

@@ -292,9 +292,9 @@ fn test_hevc_capacity_safety_scaling_and_sps_dimensions() {
                 strhide::stego::HevcMode::Cabac,
             ))
             .with_safety(lvl, strhide::stego::SafetyEnforcement::Advisory);
-        let profile = strhide::params::Profile::default();
+        let profile = strhide::stego::params::StegoProfile::default();
         let info =
-            strhide::stego::probe_carrier_capacity_with_profile(&orig_carrier, &options, &profile)
+            strhide::stego::probe_carrier_capacity_with_dialect(&orig_carrier, &options, &profile)
                 .expect("probe capacity info");
 
         assert_eq!(info.total_elements, 512 * 512);
@@ -319,7 +319,10 @@ fn test_hevc_inspect_and_verify() {
         strhide::stego::inspect_carrier(&orig_carrier, &strhide::stego::InspectOptions::new())
             .expect("inspect clean heic");
     assert!(!inspect_clean.has_hidden_data);
-    assert_eq!(inspect_clean.media_info.as_deref(), Some("512x512"));
+    assert_eq!(
+        inspect_clean.media_info.map(|m| m.to_string()).as_deref(),
+        Some("512x512")
+    );
 
     let verify_clean =
         strhide::stego::verify_carrier(&orig_carrier, &strhide::stego::VerifyOptions::new())
@@ -343,7 +346,10 @@ fn test_hevc_inspect_and_verify() {
         strhide::stego::inspect_carrier(&stego, &inspect_opts).expect("inspect stego heic");
     assert!(inspect_stego.has_hidden_data);
     assert!(inspect_stego.algorithm.is_some());
-    assert_eq!(inspect_stego.media_info.as_deref(), Some("512x512"));
+    assert_eq!(
+        inspect_stego.media_info.map(|m| m.to_string()).as_deref(),
+        Some("512x512")
+    );
 
     // Verify with password
     let verify_opts = strhide::stego::VerifyOptions::new().with_password("hevc-secret");

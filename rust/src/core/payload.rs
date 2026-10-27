@@ -16,8 +16,9 @@
 //! ```no_run
 //! use strhide::core::payload::Payload;
 //!
-//! // A file on disk, with its name kept for the eventual micro-header.
-//! let payload = Payload::file("notes.txt", &std::fs::read("notes.txt").unwrap());
+//! // A file on disk, with its name kept for the micro-header.
+//! let bytes = std::fs::read("notes.txt").unwrap();
+//! let payload = Payload::file("notes.txt", &bytes);
 //! assert_eq!(payload.name(), Some("notes.txt"));
 //! assert_eq!(payload.kind(), strhide::core::payload::PayloadKind::File);
 //! ```

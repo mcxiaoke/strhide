@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use strhide::structure::ReadOptions;
 use strhide::structure::{PayloadSource, WriteOptions, read_carrier, write_carrier};
 
 fn scratch_dir(name: &str) -> PathBuf {
@@ -38,7 +39,14 @@ fn test_heif_synthetic_stub_auto_strategy_fallback() {
         res.err()
     );
 
-    let read_res = read_carrier(&target, None, None);
+    let read_res = read_carrier(
+        &target,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    );
     assert!(
         read_res.is_ok(),
         "Reading payload back from fallback HEIF should succeed"

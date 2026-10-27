@@ -3,8 +3,8 @@
 //! This module is the single source of truth for the envelope's crypto
 //! contract: key derivation, AEAD encryption, chunk framing, and the
 //! decompression bomb bound. It is **not** a general-purpose crypto library —
-//! every function assumes it is being driven by [`crate::engine`] and the wire
-//! format in [`crate::envelope`].
+//! every function assumes it is being driven by [`crate::structure`] and the wire
+//! format in [`crate::structure::envelope`].
 //!
 //! # Cryptographic layout
 //!

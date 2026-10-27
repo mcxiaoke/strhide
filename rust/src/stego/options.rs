@@ -34,7 +34,6 @@ use serde::Serialize;
 use crate::core::control::Control;
 use crate::errors::StrHideError;
 use crate::formats::FileFormat;
-use crate::params::StegoProfile;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::envelope::Freshness;
 #[cfg(feature = "content-jpeg")]
@@ -43,6 +42,7 @@ use crate::stego::jpeg::registry as jpeg_registry;
 use crate::stego::params::JpegParams;
 #[cfg(feature = "content-png")]
 use crate::stego::params::PngParams;
+use crate::stego::params::StegoProfile;
 use crate::stego::params::{ExtractParams, SafetyPolicy};
 #[cfg(feature = "content-png")]
 use crate::stego::png::registry as png_registry;
@@ -769,7 +769,7 @@ impl<'a> ExtractOptions<'a> {
 /// (a JPEG thumbnail or a PNG `unci` item), so it takes a whole
 /// [`StegoTuning`] and resolves it: naming a PNG cost model still lets a
 /// JPEG-thumbnail carrier work, with UERD, because
-/// [`StegoTuning::resolve`] fills the unnamed half from the defaults.
+/// `StegoTuning::resolve` fills the unnamed half from the defaults.
 ///
 /// It is public because "embed only in the HEIF thumbnail, leave the primary
 /// image alone" is a legitimate request the router does not expose: the router
@@ -887,7 +887,7 @@ impl EmbedOutput {
 }
 
 /// Read-only steganographic header diagnostics obtained without full payload decoding.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct StegoHeaderInfo {
     pub format: String,
     pub has_hidden_data: bool,
@@ -899,8 +899,10 @@ pub struct StegoHeaderInfo {
     pub envelope_len: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_len: Option<usize>,
+    /// Resolution (and, for video carriers, frame rate/duration/bitrate) of
+    /// the carrier, when it could be parsed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub media_info: Option<String>,
+    pub media_info: Option<crate::core::media::MediaInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }

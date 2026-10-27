@@ -20,10 +20,15 @@
 pub mod adapters;
 pub mod engine;
 pub mod envelope;
+pub mod options;
+pub mod params;
 pub mod registry;
 pub mod rejection;
 
 pub use engine::*;
+pub use options::{ReadOptions, RestoreOptions, WriteOptions};
+pub use params::StructureProfile;
 pub use registry::{
-    ADAPTERS, STRATEGY_REGISTRY, find_adapter, find_adapter_or_reject, supports_content_stego,
+    ADAPTERS, STRATEGY_REGISTRY, StrategyId, find_adapter, find_adapter_or_reject,
+    supports_content_stego,
 };

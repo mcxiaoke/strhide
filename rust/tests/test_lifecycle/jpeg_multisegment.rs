@@ -5,7 +5,8 @@ use rand::RngExt;
 use std::fs;
 use strhide::structure::adapters::jpeg::{JPEG_COM, JPEG_EOI, JPEG_SOI, find_jpeg_sos_offset};
 use strhide::structure::{
-    PayloadSource, WriteOptions, read_carrier, remove_carrier, verify_carrier, write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, read_carrier, remove_carrier,
+    verify_carrier, write_carrier,
 };
 
 fn make_sample_jpeg_with_comment(comment_text: &[u8]) -> Vec<u8> {
@@ -62,7 +63,7 @@ fn test_jpeg_multisegment_chain_boundary_and_lossless_restore() {
     .unwrap();
 
     // 1. Verify strategy selected is app_segment
-    assert_eq!(res.strategy, "app_segment");
+    assert_eq!(res.strategy.name(), "app_segment");
 
     // 2. Scan markers in stego file:
     // Ensure multiple APP15 segments exist before SOS, and NO trailing data after EOI
@@ -129,12 +130,29 @@ fn test_jpeg_multisegment_chain_boundary_and_lossless_restore() {
     );
 
     // 4. Read back payload
-    let read_res = read_carrier(&stego, None, Some("secret123")).unwrap();
+    let read_res = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: Some("secret123"),
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(read_res.data, payload);
 
     // 5. Lossless remove and bitwise SHA-256 comparison
     let restored = dir.join("restored.jpg");
-    let rem_res = remove_carrier(&stego, Some(&restored), Some("secret123"), false).unwrap();
+    let rem_res = remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some("secret123"),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert!(rem_res.verified_identical);
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
 }

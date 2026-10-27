@@ -15,8 +15,8 @@ use std::process::Stdio;
 use strhide::errors::StrHideError;
 use strhide::structure::adapters::HostAdapter;
 use strhide::structure::{
-    PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
-    write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, inspect_carrier, read_carrier,
+    remove_carrier, verify_carrier, write_carrier,
 };
 
 // --------------------------------------------------------------------------- helpers
@@ -127,10 +127,27 @@ fn zip_tampered_patch_offset_returns_corrupted_data() {
     raw[off as usize + 96..off as usize + 100].copy_from_slice(&0u32.to_le_bytes());
     fs::write(&stego, &raw).unwrap();
 
-    let err = remove_carrier(&stego, Some(&dir.join("o.zip")), Some("pw"), false).unwrap_err();
+    let err = remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&dir.join("o.zip")),
+            password: Some("pw"),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap_err();
     assert!(matches!(err, StrHideError::CorruptedData(_)), "{err}");
     assert!(
-        read_carrier(&stego, None, Some("pw")).is_ok(),
+        read_carrier(
+            &stego,
+            &ReadOptions {
+                output_path: None,
+                password: Some("pw"),
+                overwrite: false,
+            }
+        )
+        .is_ok(),
         "payload itself must stay readable"
     );
 }
@@ -370,10 +387,31 @@ fn png_dirty_tail_beyond_64k_is_supported() {
         false,
         &stego,
     );
-    assert_eq!(res.strategy, "chunk");
-    assert_eq!(read_carrier(&stego, None, None).unwrap().data, b"tail");
+    assert_eq!(res.strategy.name(), "chunk");
+    assert_eq!(
+        read_carrier(
+            &stego,
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+            }
+        )
+        .unwrap()
+        .data,
+        b"tail"
+    );
     let restored = dir.join("r.png");
-    remove_carrier(&stego, Some(&restored), None, false).unwrap();
+    remove_carrier(
+        &stego,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), data);
 }
 
@@ -395,8 +433,20 @@ fn png_dirty_tail_auto_strategy() {
         false,
         &stego,
     );
-    assert_eq!(res.strategy, "chunk");
-    assert_eq!(read_carrier(&stego, None, None).unwrap().data, b"auto");
+    assert_eq!(res.strategy.name(), "chunk");
+    assert_eq!(
+        read_carrier(
+            &stego,
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+            }
+        )
+        .unwrap()
+        .data,
+        b"auto"
+    );
 }
 
 // --------------------------------------------------------------------------- P2-3
@@ -424,7 +474,15 @@ fn extract_refuses_to_overwrite_existing_file() {
     fs::create_dir_all(&outdir).unwrap();
     fs::write(outdir.join("important.txt"), b"KEEP-ME").unwrap();
 
-    let err = read_carrier(&stego, Some(&outdir), None).unwrap_err();
+    let err = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: Some(&outdir),
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap_err();
     assert!(matches!(err, StrHideError::Rejection(_)), "{err}");
     assert_eq!(
         fs::read(outdir.join("important.txt")).unwrap(),
@@ -432,7 +490,15 @@ fn extract_refuses_to_overwrite_existing_file() {
         "existing file was modified"
     );
 
-    let res = strhide::structure::read_carrier_with(&stego, Some(&outdir), None, true).unwrap();
+    let res = strhide::structure::read_carrier(
+        &stego,
+        &strhide::structure::ReadOptions {
+            output_path: Some(&outdir),
+            password: None,
+            overwrite: true,
+        },
+    )
+    .unwrap();
     assert!(res.written_file.is_some());
     assert_eq!(fs::read(outdir.join("important.txt")).unwrap(), b"PAYLOAD");
 }
@@ -559,7 +625,7 @@ fn pe_eof_strategy_inspect_attribution() {
     );
     let inspect_eof = inspect_carrier(&stego_eof, None).unwrap();
     assert_eq!(
-        inspect_eof.strategy.as_deref(),
+        inspect_eof.strategy.map(|s| s.name()),
         Some("eof"),
         "expected eof strategy, got {:?}",
         inspect_eof.strategy
@@ -579,7 +645,7 @@ fn pe_eof_strategy_inspect_attribution() {
     );
     let inspect_ovl = inspect_carrier(&stego_ovl, None).unwrap();
     assert_eq!(
-        inspect_ovl.strategy.as_deref(),
+        inspect_ovl.strategy.map(|s| s.name()),
         Some("pe_overlay"),
         "expected pe_overlay strategy, got {:?}",
         inspect_ovl.strategy
@@ -676,7 +742,15 @@ fn a15_unencrypted_corrupted_metadata_reports_corrupted_not_password() {
         false,
         &stego_enc,
     );
-    let err_enc = read_carrier(&stego_enc, None, Some("WrongPass123")).unwrap_err();
+    let err_enc = read_carrier(
+        &stego_enc,
+        &ReadOptions {
+            output_path: None,
+            password: Some("WrongPass123"),
+            overwrite: false,
+        },
+    )
+    .unwrap_err();
     assert!(
         matches!(err_enc, StrHideError::Password(_)),
         "wrong password must yield Password error, got: {err_enc:?}"
@@ -701,7 +775,14 @@ fn a15_unencrypted_corrupted_metadata_reports_corrupted_not_password() {
     let tampered = dir.join("s_tampered.png");
     fs::write(&tampered, &bytes).unwrap();
 
-    let err_plain = read_carrier(&tampered, None, None);
+    let err_plain = read_carrier(
+        &tampered,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    );
     if let Err(e) = err_plain {
         assert!(
             !matches!(e, StrHideError::Password(_)),

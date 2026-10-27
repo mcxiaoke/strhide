@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 use strhide::structure::adapters::pdf::parse_pdf_trailer_info;
 use strhide::structure::{
-    PayloadSource, WriteOptions, read_carrier, remove_carrier, verify_carrier, write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, read_carrier, remove_carrier,
+    verify_carrier, write_carrier,
 };
 
 // --------------------------------------------------------------------------- helpers
@@ -98,7 +99,7 @@ fn pdf_xref_stream_incremental_write_roundtrip() {
         },
     )
     .unwrap();
-    assert_eq!(res.strategy, "incremental");
+    assert_eq!(res.strategy.name(), "incremental");
 
     // The injected object must use the derived number 5, not 9999.
     let stego = fs::read(&out).unwrap();
@@ -112,9 +113,26 @@ fn pdf_xref_stream_incremental_write_roundtrip() {
     );
 
     // Full lossless lifecycle still holds.
-    let read = read_carrier(&out, None, None).unwrap();
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(read.data, b"xref stream secret");
-    remove_carrier(&out, None, None, false).unwrap();
+    remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: None,
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&out).unwrap(), make_xref_stream_pdf());
 }
 
@@ -154,7 +172,7 @@ fn pdf_without_root_is_rejected_for_incremental() {
         },
     )
     .unwrap();
-    assert_eq!(res.strategy, "eof");
+    assert_eq!(res.strategy.name(), "eof");
 
     // explicit incremental fails with a clear message
     let err = write_carrier(
@@ -198,7 +216,7 @@ fn pdf_l1_survives_an_overlay_larger_than_the_tail_window() {
         },
     )
     .unwrap();
-    assert_eq!(res.strategy, "eof");
+    assert_eq!(res.strategy.name(), "eof");
 
     let v = verify_carrier(&out, None).unwrap();
     assert!(
@@ -212,8 +230,29 @@ fn pdf_l1_survives_an_overlay_larger_than_the_tail_window() {
         v.level2_envelope.detail
     );
 
-    assert_eq!(read_carrier(&out, None, None).unwrap().data, payload);
-    remove_carrier(&out, Some(&restored), None, false).unwrap();
+    assert_eq!(
+        read_carrier(
+            &out,
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+            }
+        )
+        .unwrap()
+        .data,
+        payload
+    );
+    remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
 }
 

@@ -1,7 +1,7 @@
 //! Error types returned by every strhide public function.
 //!
-//! All fallible entry points in [`crate::engine`] and the primitives in
-//! [`crate::crypto`] / [`crate::envelope`] return
+//! All fallible entry points in [`crate::structure`] and the primitives in
+//! [`crate::crypto`] / [`crate::structure::envelope`] return
 //! [`Result<T, StrHideError>`](std::result::Result). The variants map
 //! one-to-one to failure classes so callers can branch on them without
 //! string-matching messages.
@@ -208,4 +208,70 @@ impl StrHideError {
             _ => None,
         }
     }
+
+    /// Structured, language-neutral view of this error for a front end.
+    ///
+    /// [`Display`](std::fmt::Display) always renders English; a GUI or HTTP
+    /// service needs the *parts* — the category message id, the detail text,
+    /// the hint — so it can render in whatever language its UI thread is in.
+    /// This is the counterpart of [`detail`](Self::detail), which is a
+    /// pre-rendered English string (plan §5.3).
+    ///
+    /// ```no_run
+    /// use strhide::core::i18n::Lang;
+    /// use strhide::errors::StrHideError;
+    ///
+    /// let err = StrHideError::Password("wrong password".into());
+    /// let rendered = err.detail_i18n().render(Lang::Zh);
+    /// assert!(rendered.contains("wrong password"));
+    /// ```
+    pub fn detail_i18n(&self) -> ErrorDetail {
+        ErrorDetail {
+            category: self.category(),
+            detail: self.detail(),
+            hint: self.hint().map(str::to_string),
+        }
+    }
+}
+
+/// The parts of an [`StrHideError`], separated so a non-English front end can
+/// render it instead of scraping [`Display`](std::fmt::Display).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorDetail {
+    /// Localizable category label ("I/O error", "Password error", ...), or
+    /// `None` for errors that read as one plain sentence.
+    pub category: Option<crate::core::i18n::Msg>,
+    /// The detail text, in English. Engine-generated, so it is not translated;
+    /// the category label around it is.
+    pub detail: String,
+    /// The envelope password hint, when the error carries one.
+    pub hint: Option<String>,
+}
+
+impl ErrorDetail {
+    /// Render the same single line the CLI prints, in `lang`.
+    pub fn render(&self, lang: crate::core::i18n::Lang) -> String {
+        match self.category {
+            Some(cat) => crate::core::i18n::format_msg(
+                cat_line(lang),
+                &[("prefix", &cat.text(lang)), ("detail", &self.detail)],
+            ),
+            None => crate::core::i18n::format_msg(plain_line(lang), &[("detail", &self.detail)]),
+        }
+    }
+
+    /// The translated category label, for a front end that owns its own layout.
+    pub fn category_text(&self, lang: crate::core::i18n::Lang) -> Option<&'static str> {
+        self.category.map(|cat| cat.text(lang))
+    }
+}
+
+/// The `"[ERROR] {prefix}: {detail}"` template in `lang`.
+fn cat_line(lang: crate::core::i18n::Lang) -> &'static str {
+    crate::core::i18n::Msg::ErrorLine.text(lang)
+}
+
+/// The `"[ERROR] {detail}"` template in `lang`.
+fn plain_line(lang: crate::core::i18n::Lang) -> &'static str {
+    crate::core::i18n::Msg::ErrorLinePlain.text(lang)
 }

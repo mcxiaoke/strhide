@@ -33,6 +33,7 @@
 use std::io::{Cursor, Read, Write};
 
 use crate::core::control::{Control, Stage};
+use crate::core::media::MediaInfo;
 use crate::core::payload::Payload;
 use crc32fast::Hasher as Crc32;
 use flate2::read::ZlibDecoder;
@@ -494,7 +495,7 @@ fn compress_scanlines_zlib(
 /// The zlib level is not recoverable from the stream, so it is *estimated*:
 /// evenly spaced sample bands are compressed at each candidate level and the
 /// level whose extrapolated size lands closest to the original IDAT length wins
-/// (see [`choose_deflate_level`]). Filter preservation plus level matching is
+/// (see `choose_deflate_level`). Filter preservation plus level matching is
 /// what keeps the size near the original; before level matching, a level-9
 /// carrier grew 4.2% and a level-1 carrier shrank 28% on a payload of a few KB.
 ///
@@ -1676,9 +1677,9 @@ pub fn inspect_png(
         }
     };
     control.check()?;
-    let media_info = Some(format!("{}x{}", image.width, image.height));
+    let media_info = Some(MediaInfo::new(image.width, image.height));
     let mut empty_info = StegoHeaderInfo::empty("PNG");
-    empty_info.media_info = media_info.clone();
+    empty_info.media_info = media_info;
 
     let channel_offset = embed_channel(&image);
     let header_layout = header_layout(&image, password, domain, spatial);
@@ -1960,7 +1961,7 @@ pub fn probe_png_capacity(
         safety_level: safety_level.as_str().into(),
         safety_bpp_limit: safety_level.bpp_limit(),
         is_estimated: false,
-        media_info: Some(format!("{}x{}", image.width, image.height)),
+        media_info: Some(MediaInfo::new(image.width, image.height)),
     })
 }
 

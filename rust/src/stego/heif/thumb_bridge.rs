@@ -239,7 +239,7 @@ pub fn inspect_heif_bridge(
     carrier_bytes: &[u8],
     password: Option<&str>,
     domain: Option<&str>,
-    dialect: &crate::params::StegoProfile,
+    dialect: &crate::stego::params::StegoProfile,
     control: &Control<'_>,
 ) -> Result<StegoHeaderInfo, StrHideError> {
     control.check()?;
@@ -287,7 +287,7 @@ pub fn verify_heif_bridge(
     carrier_bytes: &[u8],
     password: Option<&str>,
     domain: Option<&str>,
-    dialect: &crate::params::StegoProfile,
+    dialect: &crate::stego::params::StegoProfile,
     limits: &ExtractParams,
     control: &Control<'_>,
 ) -> Result<StegoVerifyResult, StrHideError> {

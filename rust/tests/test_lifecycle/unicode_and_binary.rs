@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use strhide::crypto::compute_file_sha256;
 use strhide::errors::StrHideError;
 use strhide::structure::{
-    PayloadSource, WriteOptions, inspect_carrier, read_carrier, remove_carrier, verify_carrier,
-    write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, inspect_carrier, read_carrier,
+    remove_carrier, verify_carrier, write_carrier,
 };
 
 fn testfiles_dir() -> Option<PathBuf> {
@@ -70,21 +70,46 @@ fn test_chinese_and_emoji_text_with_chinese_password() {
     assert!(res_v.level3_crypto.ok, "L3: {}", res_v.level3_crypto.detail);
 
     // 4. Wrong password test
-    let err = read_carrier(&carrier, None, Some("错误的密码_2026")).unwrap_err();
+    let err = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: Some("错误的密码_2026"),
+            overwrite: false,
+        },
+    )
+    .unwrap_err();
     match err {
         StrHideError::Password(_) => {}
         other => panic!("expected PasswordError on wrong password, got {other:?}"),
     }
 
     // 5. Read and check 100% exact byte and string match
-    let res_r = read_carrier(&carrier, None, Some(chinese_password)).expect("read");
+    let res_r = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: Some(chinese_password),
+            overwrite: false,
+        },
+    )
+    .expect("read");
     let extracted_str = String::from_utf8(res_r.data.clone()).expect("valid utf-8");
     assert_eq!(extracted_str, chinese_text);
     assert_eq!(res_r.data, chinese_text.as_bytes());
 
     // 6. Remove and check 100% bit-for-bit restoration
     let restored = dir.join("test_chinese.restored.png");
-    remove_carrier(&carrier, Some(&restored), Some(chinese_password), false).expect("remove");
+    remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some(chinese_password),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     let restored_sha = compute_file_sha256(&restored).unwrap();
     assert_eq!(restored_sha, orig_sha);
 }
@@ -129,13 +154,30 @@ fn test_arbitrary_binary_payload_with_all_bytes() {
     assert_eq!(res_w.raw_size, raw_binary.len() as u64);
 
     // Read binary
-    let res_r = read_carrier(&carrier, None, Some(unicode_password)).expect("read raw binary");
+    let res_r = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: Some(unicode_password),
+            overwrite: false,
+        },
+    )
+    .expect("read raw binary");
     assert_eq!(res_r.data.len(), raw_binary.len());
     assert_eq!(res_r.data, raw_binary);
 
     // Remove & check exact bit match
     let restored = dir.join("test_binary.restored.jpg");
-    remove_carrier(&carrier, Some(&restored), Some(unicode_password), false).expect("remove");
+    remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some(unicode_password),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert_eq!(compute_file_sha256(&restored).unwrap(), orig_sha);
 }
 
@@ -190,8 +232,15 @@ fn test_large_binary_file_crossing_chunks() {
     // 3. Read out to file
     let extract_dir = dir.join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
-    let res_r = read_carrier(&carrier, Some(&extract_dir), Some(complex_password))
-        .expect("read large file");
+    let res_r = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: Some(&extract_dir),
+            password: Some(complex_password),
+            overwrite: false,
+        },
+    )
+    .expect("read large file");
     let written_str = res_r.written_file.expect("written file path");
     let extracted_file = PathBuf::from(&written_str);
     assert!(extracted_file.exists());
@@ -213,7 +262,16 @@ fn test_large_binary_file_crossing_chunks() {
 
     // 4. Remove & check carrier 100% restored
     let restored = dir.join("test_large.restored.mp4");
-    remove_carrier(&carrier, Some(&restored), Some(complex_password), false).expect("remove");
+    remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some(complex_password),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert_eq!(compute_file_sha256(&restored).unwrap(), orig_carrier_sha);
 }
 
@@ -262,13 +320,30 @@ fn test_chinese_filename_and_unicode_stealth_mode() {
     assert_eq!(res_i.is_stealth, Some(true));
 
     // 3. Read in stealth mode
-    let res_r = read_carrier(&carrier, None, Some(stealth_password)).expect("read stealth");
+    let res_r = read_carrier(
+        &carrier,
+        &ReadOptions {
+            output_path: None,
+            password: Some(stealth_password),
+            overwrite: false,
+        },
+    )
+    .expect("read stealth");
     assert_eq!(res_r.data, secret_bytes);
     assert_eq!(res_r.filename, "绝密报告.docx");
 
     // 4. Remove in stealth mode
     let restored = dir.join("test_stealth.restored.zip");
-    remove_carrier(&carrier, Some(&restored), Some(stealth_password), false).expect("remove");
+    remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: Some(stealth_password),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove");
     assert_eq!(compute_file_sha256(&restored).unwrap(), orig_sha);
 }
 
@@ -300,11 +375,28 @@ fn test_tiny_and_empty_payloads() {
         ..Default::default()
     };
     write_carrier(&carrier1, PayloadSource::Bytes(b"X"), &opts1).expect("write 1 byte");
-    let res1 = read_carrier(&carrier1, None, Some("密_1")).expect("read 1 byte");
+    let res1 = read_carrier(
+        &carrier1,
+        &ReadOptions {
+            output_path: None,
+            password: Some("密_1"),
+            overwrite: false,
+        },
+    )
+    .expect("read 1 byte");
     assert_eq!(res1.data, b"X");
 
     let restored1 = dir.join("tiny1.restored.exe");
-    remove_carrier(&carrier1, Some(&restored1), Some("密_1"), false).expect("remove 1 byte");
+    remove_carrier(
+        &carrier1,
+        &RestoreOptions {
+            output_path: Some(&restored1),
+            password: Some("密_1"),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove 1 byte");
     assert_eq!(compute_file_sha256(&restored1).unwrap(), orig_sha1);
 
     // Test empty text
@@ -314,10 +406,27 @@ fn test_tiny_and_empty_payloads() {
         ..Default::default()
     };
     write_carrier(&carrier2, PayloadSource::Text(""), &opts2).expect("write empty text");
-    let res2 = read_carrier(&carrier2, None, Some("密_2")).expect("read empty text");
+    let res2 = read_carrier(
+        &carrier2,
+        &ReadOptions {
+            output_path: None,
+            password: Some("密_2"),
+            overwrite: false,
+        },
+    )
+    .expect("read empty text");
     assert_eq!(res2.data, b"");
 
     let restored2 = dir.join("empty.restored.exe");
-    remove_carrier(&carrier2, Some(&restored2), Some("密_2"), false).expect("remove empty text");
+    remove_carrier(
+        &carrier2,
+        &RestoreOptions {
+            output_path: Some(&restored2),
+            password: Some("密_2"),
+            backup: false,
+            overwrite: false,
+        },
+    )
+    .expect("remove empty text");
     assert_eq!(compute_file_sha256(&restored2).unwrap(), orig_sha2);
 }
