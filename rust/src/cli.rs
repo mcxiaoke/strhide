@@ -1214,9 +1214,6 @@ fn handle_restore(
 fn print_inspect_result(res: &crate::structure::InspectResult) {
     println!("{}", t!(Msg::InspectCarrier, val = res.carrier));
     println!("{}", t!(Msg::InspectFormat, val = res.format));
-    if let Some(ref m) = res.media_info {
-        println!("{}", t!(Msg::InspectMediaInfo, val = m));
-    }
     println!("{}", t!(Msg::InspectHasHidden, val = res.has_hidden_data));
     if res.has_hidden_data {
         if let Some(s) = &res.strategy {
@@ -1270,36 +1267,6 @@ fn print_inspect_result(res: &crate::structure::InspectResult) {
                 c.strategy, auto, state, c.limit, detail
             );
         }
-    }
-
-    if let Some(cap) = &res.content_stego_capacity {
-        println!();
-        println!("{}", t!(Msg::InspectStegoHeader));
-        println!("{}", t!(Msg::InspectStegoAlgorithm, val = cap.algorithm));
-        println!("{}", t!(Msg::InspectStegoSlots, val = cap.available_slots));
-        let kib = cap.max_raw_payload_bytes as f64 / 1024.0;
-        let max_raw_msg = if cap.max_raw_is_grouped {
-            Msg::InspectStegoMaxRawGrouped
-        } else {
-            Msg::InspectStegoMaxRaw
-        };
-        println!(
-            "{}",
-            t!(
-                max_raw_msg,
-                bytes = cap.max_raw_payload_bytes,
-                kib = format_args!("{kib:.1}")
-            )
-        );
-        let safe_kib = cap.recommended_max_bytes as f64 / 1024.0;
-        println!(
-            "{}",
-            t!(
-                Msg::InspectStegoSafeMax,
-                bytes = cap.recommended_max_bytes,
-                kib = format_args!("{safe_kib:.1}")
-            )
-        );
     }
 }
 

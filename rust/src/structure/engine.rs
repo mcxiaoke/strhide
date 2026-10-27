@@ -141,15 +141,6 @@ const COMPACT_META_VERSION: u8 = 0x01;
 /// 1-byte payload's metadata from 137 to ~46 bytes.
 const COMPACT_META_MAX_NAME: usize = u16::MAX as usize;
 
-/// Largest carrier `inspect` will read into memory to measure content-domain
-/// (pixel/DCT) capacity.
-///
-/// The probe needs the whole image decoded, which rules out streaming, so the
-/// read is bounded: above this size the field is reported as absent instead of
-/// allocating whatever the file happens to claim.
-#[cfg(feature = "content-base")]
-const MAX_CONTENT_STEGO_BYTES: u64 = 512 * 1024 * 1024;
-
 fn put_varint(out: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
         out.push((value as u8) | 0x80);
@@ -436,13 +427,6 @@ pub struct InspectResult {
     /// priority order. Always present (also when an envelope already exists,
     /// answering "how much more could fit").
     pub strategies: Vec<StrategyCapacity>,
-    /// Content-adaptive pixel/DCT steganography capacity for PNG/JPEG carriers.
-    #[cfg(feature = "content-base")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_stego_capacity: Option<crate::stego::StegoCapacityInfo>,
-    /// Carrier media summary (e.g. "4032x3024" or "1920x1080, 24.00 fps, 11.9s (15.2 Mbps)").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub media_info: Option<String>,
 }
 
 /// Result of one verification level.
@@ -1986,38 +1970,6 @@ fn inspect_core(
     // PE measures `.text` density and zero slack, ZIP measures the EOCD offset.
     let strategies = adapter.strategy_capacities(Some(host));
 
-    // Content-domain capacity needs the whole image decoded, so the carrier is
-    // read back into memory. Bounded on purpose: `inspect` also runs on data it
-    // was merely pointed at, and a 4 GiB "PNG" must not become a 4 GiB
-    // allocation. Above the cap the field is simply absent.
-    #[cfg(feature = "content-base")]
-    let content_stego_capacity = if crate::structure::registry::supports_content_stego(adapter) {
-        host.seek(SeekFrom::Start(0))?;
-        let mut buf = Vec::new();
-        host.take(MAX_CONTENT_STEGO_BYTES).read_to_end(&mut buf)?;
-        host.seek(SeekFrom::Start(0))?;
-        if (buf.len() as u64) < MAX_CONTENT_STEGO_BYTES {
-            // Same credentials an `embed` would use for the profile's dialect.
-            crate::stego::probe_carrier_capacity_with_profile(
-                &buf,
-                &crate::stego::ProbeOptions::default(),
-                profile,
-            )
-            .ok()
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    #[cfg(feature = "content-base")]
-    let media_info = content_stego_capacity
-        .as_ref()
-        .and_then(|c| c.media_info.clone());
-    #[cfg(not(feature = "content-base"))]
-    let media_info = None;
-
     let loc = locate_envelope(host, adapter, password, profile)?;
 
     let (ube_offset, ube_total_size, strategy_name) = match loc {
@@ -2038,9 +1990,6 @@ fn inspect_core(
                 orig_host_sha256: None,
                 metadata: None,
                 strategies,
-                #[cfg(feature = "content-base")]
-                content_stego_capacity,
-                media_info,
             });
         }
     };
@@ -2130,9 +2079,6 @@ fn inspect_core(
         ),
         metadata: meta_val,
         strategies,
-        #[cfg(feature = "content-base")]
-        content_stego_capacity,
-        media_info,
     })
 }
 
