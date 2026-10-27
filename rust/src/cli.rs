@@ -104,7 +104,7 @@ const CAPACITY_AFTER_HELP: &str = crate::core::i18n::messages::CAPACITY_AFTER_HE
 /// Password arguments shared by all commands that accept one. Declared once
 /// and flattened everywhere so `-p` and `--password-file` are mutually
 /// exclusive: `resolve_password` would otherwise silently prefer `-p`.
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 #[group(required = false, multiple = false)]
 pub struct PasswordArgs {
     #[arg(short = 'p', long = "password", value_name = "PASSWORD")]
@@ -211,6 +211,12 @@ pub struct ReadArgs {
 
     #[arg(long = "overwrite")]
     pub overwrite: bool,
+
+    #[arg(
+        long = "auto",
+        help = "Automatically fall back to content steganography extraction if no structure envelope is found"
+    )]
+    pub auto: bool,
 }
 
 const READ_AFTER_HELP: &str = crate::core::i18n::messages::READ_AFTER_HELP_EN;
@@ -372,6 +378,12 @@ pub struct ExtractArgs {
 
     #[command(flatten)]
     pub passwords: PasswordArgs,
+
+    #[arg(
+        long = "auto",
+        help = "Automatically fall back to structure-domain read if no content steganography is found"
+    )]
+    pub auto: bool,
 }
 
 const EXTRACT_AFTER_HELP: &str = crate::core::i18n::messages::EXTRACT_AFTER_HELP_EN;
@@ -1097,6 +1109,45 @@ fn handle_read(
                 engine.profile(),
             )?
         }
+        Err(e @ StrHideError::NoHiddenData(_)) => {
+            #[cfg(feature = "content")]
+            {
+                if let Ok(bytes) = std::fs::read(&args.carrier) {
+                    let inspect_opts = crate::stego::InspectOptions::new()
+                        .with_password(password.as_deref().unwrap_or_default());
+                    if let Ok(stego_info) = crate::stego::inspect_carrier_with_profile(
+                        &bytes,
+                        &inspect_opts,
+                        engine.profile(),
+                    ) && stego_info.has_hidden_data
+                    {
+                        if args.auto {
+                            if !quiet {
+                                eprintln!(
+                                    "No structure hidden data found; auto-redirecting to content steganography extraction..."
+                                );
+                            }
+                            let extract_args = ExtractArgs {
+                                carrier: args.carrier.clone(),
+                                output: args.output.clone(),
+                                stdout: args.stdout,
+                                overwrite: args.overwrite,
+                                passwords: args.passwords.clone(),
+                                auto: false,
+                            };
+                            return handle_extract(extract_args, cfg, quiet, engine);
+                        } else {
+                            return Err(StrHideError::NoHiddenData(format!(
+                                "No structure-domain envelope found, but detected content-adaptive steganography ({}, {}). Use `strhide extract` or add `--auto` to extract.",
+                                stego_info.format,
+                                stego_info.algorithm.as_deref().unwrap_or("stego")
+                            )));
+                        }
+                    }
+                }
+            }
+            return Err(e);
+        }
         Err(e) => return Err(e),
     };
 
@@ -1295,6 +1346,15 @@ fn print_json<T: serde::Serialize>(val: &T) -> Result<(), StrHideError> {
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+struct DualInspectResult {
+    #[serde(flatten)]
+    structure: crate::structure::InspectResult,
+    #[cfg(feature = "content")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_stego: Option<crate::stego::StegoHeaderInfo>,
+}
+
 fn handle_inspect(
     args: InspectArgs,
     cfg: &FileConfig,
@@ -1320,10 +1380,45 @@ fn handle_inspect(
     if !is_batch && files.len() == 1 {
         let carrier = &files[0];
         let res = inspect_carrier_with(carrier, password.as_deref(), engine.profile())?;
+        #[cfg(feature = "content")]
+        let content_info = std::fs::read(carrier).ok().and_then(|bytes| {
+            let opts = crate::stego::InspectOptions::new()
+                .with_password(password.as_deref().unwrap_or_default());
+            crate::stego::inspect_carrier_with_profile(&bytes, &opts, engine.profile()).ok()
+        });
         if args.json {
-            print_json(&res)?;
+            let dual = DualInspectResult {
+                structure: res,
+                #[cfg(feature = "content")]
+                content_stego: content_info.filter(|c| c.has_hidden_data),
+            };
+            print_json(&dual)?;
         } else if !quiet {
             print_inspect_result(&res);
+            #[cfg(feature = "content")]
+            if let Some(ref cs) = content_info
+                && cs.has_hidden_data
+            {
+                println!();
+                println!("Content Steganography Domain:");
+                println!("  Format: {}", cs.format);
+                println!("  Has Hidden Data: true");
+                if let Some(algo) = &cs.algorithm {
+                    println!("  Algorithm: {}", algo);
+                }
+                if let Some(codec) = &cs.codec {
+                    println!("  Codec: {}", codec);
+                }
+                if let Some(len) = cs.envelope_len {
+                    println!("  Envelope Size: {} bytes", len);
+                }
+                if let Some(len) = cs.payload_len {
+                    println!("  Payload Size: {} bytes", len);
+                }
+                if let Some(media) = &cs.media_info {
+                    println!("  Dimensions: {}", media);
+                }
+            }
         }
         return Ok(());
     }
@@ -1333,6 +1428,12 @@ fn handle_inspect(
     for carrier in &files {
         match inspect_carrier_with(carrier, password.as_deref(), engine.profile()) {
             Ok(res) => {
+                #[cfg(feature = "content")]
+                let content_info = std::fs::read(carrier).ok().and_then(|bytes| {
+                    let opts = crate::stego::InspectOptions::new()
+                        .with_password(password.as_deref().unwrap_or_default());
+                    crate::stego::inspect_carrier_with_profile(&bytes, &opts, engine.profile()).ok()
+                });
                 if !args.json && !quiet {
                     println!(
                         "=== [{}/{}] {} ===",
@@ -1341,9 +1442,37 @@ fn handle_inspect(
                         carrier.display()
                     );
                     print_inspect_result(&res);
+                    #[cfg(feature = "content")]
+                    if let Some(ref cs) = content_info
+                        && cs.has_hidden_data
+                    {
+                        println!();
+                        println!("Content Steganography Domain:");
+                        println!("  Format: {}", cs.format);
+                        println!("  Has Hidden Data: true");
+                        if let Some(algo) = &cs.algorithm {
+                            println!("  Algorithm: {}", algo);
+                        }
+                        if let Some(codec) = &cs.codec {
+                            println!("  Codec: {}", codec);
+                        }
+                        if let Some(len) = cs.envelope_len {
+                            println!("  Envelope Size: {} bytes", len);
+                        }
+                        if let Some(len) = cs.payload_len {
+                            println!("  Payload Size: {} bytes", len);
+                        }
+                        if let Some(media) = &cs.media_info {
+                            println!("  Dimensions: {}", media);
+                        }
+                    }
                     println!();
                 }
-                reports.push(res);
+                reports.push(DualInspectResult {
+                    structure: res,
+                    #[cfg(feature = "content")]
+                    content_stego: content_info.filter(|c| c.has_hidden_data),
+                });
             }
             Err(e) => {
                 failures += 1;
@@ -1360,7 +1489,24 @@ fn handle_inspect(
     if args.json {
         print_json(&reports)?;
     } else if !quiet {
-        let hidden = reports.iter().filter(|r| r.has_hidden_data).count();
+        let hidden = reports
+            .iter()
+            .filter(|r| {
+                r.structure.has_hidden_data || {
+                    #[cfg(feature = "content")]
+                    {
+                        r.content_stego
+                            .as_ref()
+                            .map(|c| c.has_hidden_data)
+                            .unwrap_or(false)
+                    }
+                    #[cfg(not(feature = "content"))]
+                    {
+                        false
+                    }
+                }
+            })
+            .count();
         println!(
             "{}",
             t!(
@@ -1404,6 +1550,32 @@ fn print_verify_result(res: &crate::structure::VerifyResult) {
     );
 }
 
+#[derive(serde::Serialize)]
+struct DualVerifyResult {
+    #[serde(flatten)]
+    structure: crate::structure::VerifyResult,
+    #[cfg(feature = "content")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_stego: Option<crate::stego::StegoVerifyResult>,
+}
+
+#[cfg(feature = "content")]
+fn print_content_verify_result(res: &crate::stego::StegoVerifyResult) {
+    println!(
+        "Content Steganography Domain Verification ({}):",
+        res.format
+    );
+    for lvl in &res.levels {
+        let status = if lvl.ok { "OK" } else { "FAIL" };
+        let msg = lvl.message.as_deref().unwrap_or("");
+        if msg.is_empty() {
+            println!("  Level {} [{}]: {}", lvl.level, lvl.name, status);
+        } else {
+            println!("  Level {} [{}]: {} - {}", lvl.level, lvl.name, status, msg);
+        }
+    }
+}
+
 fn handle_verify(
     args: VerifyArgs,
     cfg: &FileConfig,
@@ -1429,16 +1601,41 @@ fn handle_verify(
     if !is_batch && files.len() == 1 {
         let carrier = &files[0];
         let res = verify_carrier_with(carrier, password.as_deref(), engine.profile())?;
-        if args.json {
-            print_json(&res)?;
-        } else if !quiet {
-            print_verify_result(&res);
-        }
-        return Ok(if crate::structure::verify_passed(&res) {
-            0
-        } else {
-            1
+        #[cfg(feature = "content")]
+        let content_res = std::fs::read(carrier).ok().and_then(|bytes| {
+            let opts = crate::stego::VerifyOptions::new()
+                .with_password(password.as_deref().unwrap_or_default());
+            crate::stego::verify_carrier_with_profile(&bytes, &opts, engine.profile()).ok()
         });
+
+        let struct_ok = crate::structure::verify_passed(&res);
+        #[cfg(feature = "content")]
+        let content_ok = content_res.as_ref().map(|c| c.is_all_ok()).unwrap_or(false);
+        #[cfg(not(feature = "content"))]
+        let content_ok = false;
+
+        if args.json {
+            let dual = DualVerifyResult {
+                structure: res,
+                #[cfg(feature = "content")]
+                content_stego: content_res.filter(|c| c.is_all_ok()),
+            };
+            print_json(&dual)?;
+        } else if !quiet {
+            if struct_ok || !content_ok {
+                print_verify_result(&res);
+            }
+            #[cfg(feature = "content")]
+            if let Some(ref cs) = content_res
+                && cs.is_all_ok()
+            {
+                if struct_ok {
+                    println!();
+                }
+                print_content_verify_result(cs);
+            }
+        }
+        return Ok(if struct_ok || content_ok { 0 } else { 1 });
     }
 
     let mut reports = Vec::with_capacity(files.len());
@@ -1447,8 +1644,19 @@ fn handle_verify(
     for carrier in &files {
         match verify_carrier_with(carrier, password.as_deref(), engine.profile()) {
             Ok(res) => {
-                let ok = crate::structure::verify_passed(&res);
-                if !ok {
+                #[cfg(feature = "content")]
+                let content_res = std::fs::read(carrier).ok().and_then(|bytes| {
+                    let opts = crate::stego::VerifyOptions::new()
+                        .with_password(password.as_deref().unwrap_or_default());
+                    crate::stego::verify_carrier_with_profile(&bytes, &opts, engine.profile()).ok()
+                });
+                let struct_ok = crate::structure::verify_passed(&res);
+                #[cfg(feature = "content")]
+                let content_ok = content_res.as_ref().map(|c| c.is_all_ok()).unwrap_or(false);
+                #[cfg(not(feature = "content"))]
+                let content_ok = false;
+
+                if !struct_ok && !content_ok {
                     any_failed = true;
                 }
                 if !args.json && !quiet {
@@ -1458,10 +1666,25 @@ fn handle_verify(
                         files.len(),
                         carrier.display()
                     );
-                    print_verify_result(&res);
+                    if struct_ok || !content_ok {
+                        print_verify_result(&res);
+                    }
+                    #[cfg(feature = "content")]
+                    if let Some(ref cs) = content_res
+                        && cs.is_all_ok()
+                    {
+                        if struct_ok {
+                            println!();
+                        }
+                        print_content_verify_result(cs);
+                    }
                     println!();
                 }
-                reports.push(res);
+                reports.push(DualVerifyResult {
+                    structure: res,
+                    #[cfg(feature = "content")]
+                    content_stego: content_res.filter(|c| c.is_all_ok()),
+                });
             }
             Err(e) => {
                 failures += 1;
@@ -1481,7 +1704,21 @@ fn handle_verify(
     } else if !quiet {
         let passed = reports
             .iter()
-            .filter(|r| crate::structure::verify_passed(r))
+            .filter(|r| {
+                crate::structure::verify_passed(&r.structure) || {
+                    #[cfg(feature = "content")]
+                    {
+                        r.content_stego
+                            .as_ref()
+                            .map(|c| c.is_all_ok())
+                            .unwrap_or(false)
+                    }
+                    #[cfg(not(feature = "content"))]
+                    {
+                        false
+                    }
+                }
+            })
             .count();
         let failed_cnt = reports.len() - passed;
         println!(
@@ -2351,7 +2588,45 @@ fn handle_extract(
         ..Default::default()
     };
 
-    let payload = crate::stego::extract_carrier_payload(&carrier_bytes, &options, &profile)?;
+    let payload = match crate::stego::extract_carrier_payload(&carrier_bytes, &options, &profile) {
+        Ok(p) => p,
+        Err(e) => {
+            #[cfg(feature = "structure")]
+            if matches!(
+                e,
+                StrHideError::NoHiddenData(_) | StrHideError::UnsupportedFormat(_)
+            ) && let Ok(inspect_res) = crate::structure::inspect_carrier_with(
+                &args.carrier,
+                password.as_deref(),
+                engine.profile(),
+            ) && inspect_res.has_hidden_data
+            {
+                if args.auto {
+                    if !quiet {
+                        eprintln!(
+                            "No content stego found; auto-redirecting to structure-domain read..."
+                        );
+                    }
+                    let read_args = ReadArgs {
+                        carrier: args.carrier.clone(),
+                        output: args.output.clone(),
+                        passwords: args.passwords.clone(),
+                        stdout: args.stdout,
+                        overwrite: args.overwrite,
+                        auto: false,
+                    };
+                    return handle_read(read_args, cfg, quiet, engine);
+                } else {
+                    return Err(StrHideError::NoHiddenData(format!(
+                        "No content-adaptive steganography found, but detected structure-domain hidden data ({}, strategy: {}). Use `strhide read` or add `--auto` to read.",
+                        inspect_res.format,
+                        inspect_res.strategy.as_deref().unwrap_or("auto")
+                    )));
+                }
+            }
+            return Err(e);
+        }
+    };
 
     if let Some(ref out_path) = args.output {
         let dest = if out_path.is_dir() {

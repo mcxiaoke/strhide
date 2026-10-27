@@ -726,3 +726,125 @@ fn embed_seed_is_reproducible_and_seed_dependent() {
         stderr(&bad)
     );
 }
+
+#[test]
+fn dual_domain_inspect_and_verify() {
+    let dir = scratch("dual_domain_inspect_verify");
+    seed_stego(&dir, &["stego.png"]);
+
+    let embed = run(
+        &dir,
+        &[
+            "embed",
+            "stego.png",
+            "-t",
+            "hello stego content",
+            "--in-place",
+            "--no-backup",
+        ],
+    );
+    assert_eq!(code(&embed), 0, "stderr: {}", stderr(&embed));
+
+    // 1. Inspect human output
+    let insp = run(&dir, &["inspect", "stego.png"]);
+    assert_eq!(code(&insp), 0, "stderr: {}", stderr(&insp));
+    let text = stdout(&insp);
+    assert!(text.contains("Content Steganography Domain:"), "{text}");
+    assert!(text.contains("Has Hidden Data: true"), "{text}");
+    assert!(text.contains("Format: PNG"), "{text}");
+
+    // 2. Inspect JSON output
+    let insp_json = run(&dir, &["inspect", "stego.png", "--json"]);
+    assert_eq!(code(&insp_json), 0, "stderr: {}", stderr(&insp_json));
+    let val: serde_json::Value = serde_json::from_str(&stdout(&insp_json)).expect("parse json");
+    assert_eq!(val["format"], "PNG");
+    assert_eq!(val["content_stego"]["has_hidden_data"], true);
+    assert!(val["content_stego"]["algorithm"].is_string());
+
+    // 3. Verify human output (should pass for content stego!)
+    let ver = run(&dir, &["verify", "stego.png"]);
+    assert_eq!(
+        code(&ver),
+        0,
+        "stdout: {}\nstderr: {}",
+        stdout(&ver),
+        stderr(&ver)
+    );
+    let ver_text = stdout(&ver);
+    assert!(
+        ver_text.contains("Content Steganography Domain Verification"),
+        "{ver_text}"
+    );
+    assert!(ver_text.contains("Level 1"), "{ver_text}");
+    assert!(ver_text.contains("Level 2"), "{ver_text}");
+    assert!(ver_text.contains("Level 3"), "{ver_text}");
+
+    // 4. Verify JSON output
+    let ver_json = run(&dir, &["verify", "stego.png", "--json"]);
+    assert_eq!(code(&ver_json), 0, "stderr: {}", stderr(&ver_json));
+    let ver_val: serde_json::Value =
+        serde_json::from_str(&stdout(&ver_json)).expect("parse verify json");
+    assert!(ver_val["content_stego"].is_object());
+}
+
+#[test]
+fn cross_domain_auto_fallback() {
+    let dir = scratch("cross_domain_fallback");
+    seed_stego(&dir, &["stego.png", "carrier.png"]);
+
+    // 1. Prepare stego carrier
+    let embed = run(
+        &dir,
+        &[
+            "embed",
+            "stego.png",
+            "-t",
+            "cross domain stego payload",
+            "--in-place",
+            "--no-backup",
+        ],
+    );
+    assert_eq!(code(&embed), 0, "stderr: {}", stderr(&embed));
+
+    // Try `read` without --auto: fails with helpful hint
+    let read_fail = run(&dir, &["read", "stego.png"]);
+    assert_eq!(code(&read_fail), 1);
+    let fail_err = stderr(&read_fail);
+    assert!(
+        fail_err.contains("detected content-adaptive steganography") && fail_err.contains("--auto"),
+        "stderr: {fail_err}"
+    );
+
+    // Try `read --auto`: succeeds and outputs payload!
+    let read_auto = run(&dir, &["read", "stego.png", "--auto", "--stdout"]);
+    assert_eq!(code(&read_auto), 0, "stderr: {}", stderr(&read_auto));
+    assert_eq!(stdout(&read_auto).trim(), "cross domain stego payload");
+
+    // 2. Prepare structure hidden carrier
+    let write = run(
+        &dir,
+        &[
+            "write",
+            "carrier.png",
+            "-t",
+            "cross domain struct payload",
+            "--in-place",
+            "--no-backup",
+        ],
+    );
+    assert_eq!(code(&write), 0, "stderr: {}", stderr(&write));
+
+    // Try `extract` without --auto: fails with helpful hint
+    let extract_fail = run(&dir, &["extract", "carrier.png"]);
+    assert_eq!(code(&extract_fail), 1);
+    let ext_err = stderr(&extract_fail);
+    assert!(
+        ext_err.contains("detected structure-domain hidden data") && ext_err.contains("--auto"),
+        "stderr: {ext_err}"
+    );
+
+    // Try `extract --auto`: succeeds and outputs payload!
+    let extract_auto = run(&dir, &["extract", "carrier.png", "--auto", "--stdout"]);
+    assert_eq!(code(&extract_auto), 0, "stderr: {}", stderr(&extract_auto));
+    assert_eq!(stdout(&extract_auto).trim(), "cross domain struct payload");
+}
