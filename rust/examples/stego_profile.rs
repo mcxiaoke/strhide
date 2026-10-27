@@ -13,7 +13,7 @@ use strhide::stego::format::DEFAULT_JPEG_FORMAT;
 use strhide::stego::jpeg::cost::{JuniwardCostModel, UerdCostModel};
 use strhide::stego::jpeg::engine::{embed_jpeg, extract_jpeg};
 use strhide::stego::jpeg::geometry::geometry_for_carrier;
-use strhide::stego::params::{ExtractParams, JpegParams, PngParams, StegoOptions};
+use strhide::stego::params::{ExtractParams, JpegParams, PngParams};
 use strhide::stego::png::cost::{HillCostModel, SuniwardCostModel};
 use strhide::stego::png::engine::{decode_png, embed_png, encode_png, extract_png};
 use strhide::stego::prng::deterministic_payload;
@@ -193,21 +193,18 @@ fn profile_png_with_model(
         format_duration(d_dir)
     );
 
-    let options = StegoOptions {
-        password: Some(password.into()),
-        ..Default::default()
-    };
+    let password = Some(password);
     let t4 = Instant::now();
     let stego_png = match embed_png(
         file_bytes,
         payload,
-        options.password.as_deref(),
-        options.domain.as_deref(),
+        password,
+        None,
         &strhide::stego::format::OFFICIAL_PNG_FORMAT,
         model,
-        &options.png_params,
+        &png_params,
         strhide::stego::SafetyPolicy::default(),
-        options.freshness,
+        strhide::stego::Freshness::Random,
     ) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -240,11 +237,11 @@ fn profile_png_with_model(
     let t5 = Instant::now();
     let extracted = match extract_png(
         &stego_png,
-        options.password.as_deref(),
-        options.domain.as_deref(),
+        password,
+        None,
         &strhide::stego::format::OFFICIAL_PNG_FORMAT,
         model,
-        &options.png_params,
+        &png_params,
     ) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -376,21 +373,18 @@ fn profile_jpeg_with_model(
         format_duration(d_cost)
     );
 
-    let options = StegoOptions {
-        password: Some(password.into()),
-        ..Default::default()
-    };
+    let password = Some(password);
     let t4 = Instant::now();
     let stego_jpg = match embed_jpeg(
         file_bytes,
         payload,
-        options.password.as_deref(),
-        options.domain.as_deref(),
+        password,
+        None,
         &DEFAULT_JPEG_FORMAT,
-        &options.jpeg_params,
+        &jpeg_params,
         strhide::stego::SafetyPolicy::default(),
         model,
-        options.freshness,
+        strhide::stego::Freshness::Random,
     ) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -421,8 +415,8 @@ fn profile_jpeg_with_model(
     let t5 = Instant::now();
     let extracted = match extract_jpeg(
         &stego_jpg,
-        options.password.as_deref(),
-        options.domain.as_deref(),
+        password,
+        None,
         &DEFAULT_JPEG_FORMAT,
         &ExtractParams::default(),
     ) {

@@ -8,12 +8,11 @@
 use std::convert::TryInto;
 
 use crate::errors::StrHideError;
-use crate::params::Profile;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::jpeg;
-use crate::stego::params::StegoOptions;
+use crate::stego::options::{BridgeOptions, StegoTuning};
+use crate::stego::params::ExtractParams;
 use crate::stego::png;
-use crate::stego::registry::CostModelRegistry;
 
 /// Kind of bridge carrier target located in the HEIF container.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,62 +78,45 @@ struct IsobmffMeta {
 pub fn embed_heif_bridge(
     carrier_bytes: &[u8],
     payload: &[u8],
-    options: &StegoOptions,
-    profile: &Profile,
+    bridge: &BridgeOptions<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
     let target = find_bridge_target(carrier_bytes)?;
     let carrier_slice = &carrier_bytes[target.file_offset..target.file_offset + target.length];
+    let tuning = bridge.tuning.resolve();
 
-    let secret = options.secret(profile);
-    let domain = options.domain(profile);
-
-    let mut jpeg_params = options.jpeg_params.clone();
-    jpeg_params.deterministic = options.freshness.is_seeded();
-
-    let png_params = options.png_params.clone();
+    let mut jpeg_params = tuning.jpeg_params.clone();
+    jpeg_params.deterministic = bridge.freshness.is_seeded();
+    let secret = bridge.resolved_secret(bridge.dialect);
+    let domain = bridge.resolved_domain(bridge.dialect);
 
     match target.kind {
         BridgeTargetKind::DirectJpeg { .. }
         | BridgeTargetKind::ExifJpeg { .. }
         | BridgeTargetKind::ContainerJpegFallback => {
-            let model = CostModelRegistry::get_jpeg_model(options.algorithm.as_deref())
-                .ok_or_else(|| {
-                    StrHideError::General(format!(
-                        "Unknown or incompatible JPEG stego algorithm: {:?}",
-                        options.algorithm
-                    ))
-                })?;
             let stego_bytes = jpeg::embed_jpeg(
                 carrier_slice,
                 payload,
                 secret,
                 domain,
-                profile.jpeg_format(),
+                bridge.dialect.jpeg_format(),
                 &jpeg_params,
-                options.safety,
-                &*model,
-                options.freshness,
+                bridge.safety,
+                &*tuning.jpeg_model,
+                bridge.freshness,
             )?;
             reconstruct_heif(carrier_bytes, &target, &stego_bytes)
         }
         BridgeTargetKind::DirectSpatial { .. } => {
-            let model = CostModelRegistry::get_spatial_model(options.algorithm.as_deref())
-                .ok_or_else(|| {
-                    StrHideError::General(format!(
-                        "Unknown or incompatible spatial stego algorithm: {:?}",
-                        options.algorithm
-                    ))
-                })?;
             let stego_bytes = png::embed_png(
                 carrier_slice,
                 payload,
                 secret,
                 domain,
-                profile.png_format(),
-                &*model,
-                &png_params,
-                options.safety,
-                options.freshness,
+                bridge.dialect.png_format(),
+                &*tuning.png_model,
+                &tuning.png_params,
+                bridge.safety,
+                bridge.freshness,
             )?;
             reconstruct_heif(carrier_bytes, &target, &stego_bytes)
         }
@@ -142,10 +124,14 @@ pub fn embed_heif_bridge(
 }
 
 /// Extract payload from an embedded JPEG or uncompressed carrier within a HEIF container.
+///
+/// `limits` is the read-side policy (which suites to try, how much KDF work to
+/// allow). It is not part of [`BridgeOptions`] because nothing on the write side
+/// has an equivalent.
 pub fn extract_heif_bridge(
     carrier_bytes: &[u8],
-    options: &StegoOptions,
-    profile: &Profile,
+    bridge: &BridgeOptions<'_>,
+    limits: &ExtractParams,
 ) -> Result<Vec<u8>, StrHideError> {
     let target = match find_bridge_target(carrier_bytes) {
         Ok(t) => t,
@@ -156,9 +142,11 @@ pub fn extract_heif_bridge(
         }
     };
     let carrier_slice = &carrier_bytes[target.file_offset..target.file_offset + target.length];
-
-    let secret = options.secret(profile);
-    let domain = options.domain(profile);
+    // The carrier is self-describing, so the read path always resolves the
+    // default tuning; `BridgeOptions::tuning` only shapes what is written.
+    let tuning = StegoTuning::Auto.resolve();
+    let secret = bridge.resolved_secret(bridge.dialect);
+    let domain = bridge.resolved_domain(bridge.dialect);
 
     match target.kind {
         BridgeTargetKind::DirectJpeg { .. }
@@ -167,78 +155,54 @@ pub fn extract_heif_bridge(
             carrier_slice,
             secret,
             domain,
-            profile.jpeg_format(),
-            &options.extract_params,
+            bridge.dialect.jpeg_format(),
+            limits,
         ),
-        BridgeTargetKind::DirectSpatial { .. } => {
-            let model = CostModelRegistry::get_spatial_model(options.algorithm.as_deref())
-                .ok_or_else(|| {
-                    StrHideError::General(format!(
-                        "Unknown or incompatible spatial stego algorithm: {:?}",
-                        options.algorithm
-                    ))
-                })?;
-            png::extract_png(
-                carrier_slice,
-                secret,
-                domain,
-                profile.png_format(),
-                &*model,
-                &options.png_params,
-            )
-        }
+        BridgeTargetKind::DirectSpatial { .. } => png::extract_png(
+            carrier_slice,
+            secret,
+            domain,
+            bridge.dialect.png_format(),
+            &*tuning.png_model,
+            &tuning.png_params,
+        ),
     }
 }
 
 /// Probe capacity of the bridgeable carrier within a HEIF container.
 pub fn probe_heif_bridge_capacity(
     carrier_bytes: &[u8],
-    options: &StegoOptions,
-    profile: &Profile,
+    bridge: &BridgeOptions<'_>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let target = find_bridge_target(carrier_bytes)?;
     let carrier_slice = &carrier_bytes[target.file_offset..target.file_offset + target.length];
-
-    let secret = options.secret(profile);
-    let domain = options.domain(profile);
+    let tuning = bridge.tuning.resolve();
+    let secret = bridge.resolved_secret(bridge.dialect);
+    let domain = bridge.resolved_domain(bridge.dialect);
 
     match target.kind {
         BridgeTargetKind::DirectJpeg { .. }
         | BridgeTargetKind::ExifJpeg { .. }
         | BridgeTargetKind::ContainerJpegFallback => {
-            let model = CostModelRegistry::get_jpeg_model(options.algorithm.as_deref())
-                .ok_or_else(|| {
-                    StrHideError::General(format!(
-                        "Unknown or incompatible JPEG stego algorithm: {:?}",
-                        options.algorithm
-                    ))
-                })?;
             let mut info = jpeg::probe_jpeg_capacity(
                 carrier_slice,
-                &*model,
-                &options.jpeg_params,
-                options.safety.level,
-                profile.jpeg_format(),
+                &*tuning.jpeg_model,
+                &tuning.jpeg_params,
+                bridge.safety.level,
+                bridge.dialect.jpeg_format(),
             )?;
             info.format = "HEIF (JPEG Thumbnail Bridge)".into();
             Ok(info)
         }
         BridgeTargetKind::DirectSpatial { .. } => {
-            let model = CostModelRegistry::get_spatial_model(options.algorithm.as_deref())
-                .ok_or_else(|| {
-                    StrHideError::General(format!(
-                        "Unknown or incompatible spatial stego algorithm: {:?}",
-                        options.algorithm
-                    ))
-                })?;
             let mut info = png::probe_png_capacity(
                 carrier_slice,
-                &*model,
-                &options.png_params,
-                options.safety.level,
+                &*tuning.png_model,
+                &tuning.png_params,
+                bridge.safety.level,
                 secret,
                 domain,
-                profile.png_format(),
+                bridge.dialect.png_format(),
             )?;
             info.format = "HEIF (Uncompressed Item Bridge)".into();
             Ok(info)

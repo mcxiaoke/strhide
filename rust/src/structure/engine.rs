@@ -2000,7 +2000,7 @@ fn inspect_core(
             // Same credentials an `embed` would use for the profile's dialect.
             crate::stego::probe_carrier_capacity_with_profile(
                 &buf,
-                &crate::stego::StegoOptions::default(),
+                &crate::stego::ProbeOptions::default(),
                 profile,
             )
             .ok()

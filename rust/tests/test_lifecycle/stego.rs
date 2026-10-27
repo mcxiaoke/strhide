@@ -5,17 +5,36 @@ use std::fs;
 use std::path::PathBuf;
 
 use strhide::analysis::scan_file;
+use strhide::core::payload::Payload;
 use strhide::params::Profile;
 use strhide::stego::{
-    PngParams, StegoOptions, embed_carrier, embed_carrier_with_profile, extract_carrier,
+    EmbedOptions, ExtractOptions, HevcMode, JpegAlgorithm, JpegParams, PngParams, ProbeOptions,
+    SpatialAlgorithm, StegoTuning, embed_carrier, embed_carrier_with_profile, extract_carrier,
     extract_carrier_with_profile,
     png::{HillCostModel, RawImage, decode_png, encode_png},
     probe_carrier_capacity,
     traits::PngCostModel,
 };
 
+/// Typed tuning from an algorithm name, mirroring what the CLI does.
+fn tuning_for(name: &str) -> StegoTuning {
+    if let Some(model) = SpatialAlgorithm::from_name(name) {
+        return StegoTuning::Png {
+            model,
+            params: PngParams::default(),
+        };
+    }
+    if let Some(model) = JpegAlgorithm::from_name(name) {
+        return StegoTuning::Jpeg {
+            model,
+            params: JpegParams::default(),
+        };
+    }
+    StegoTuning::hevc(HevcMode::from_name(name).expect("known HEVC mode"))
+}
+
 /// Private content-domain dialect: the secret now lives in the shared
-/// `Profile`, not in `StegoOptions`.
+/// `Profile`, not in the embed options.
 fn stego_profile(secret: &'static str) -> Profile {
     Profile::default().with_stego_secret(secret)
 }
@@ -174,24 +193,24 @@ fn test_png_hill_content_stego_roundtrip() {
     let secret = b"Hello from HILL content-adaptive steganography! 2026";
     let password = "SecretPassword123!";
 
-    let mut opts = StegoOptions {
-        algorithm: Some("hill".into()),
-        password: Some(password.into()),
+    let mut opts = EmbedOptions {
+        tuning: tuning_for("hill"),
+        password: Some(password),
         ..Default::default()
     };
 
     // 1. Embed
-    let stego_png = embed_carrier(&png_bytes, secret, &opts).expect("embed png");
+    let stego_png = embed_carrier(&png_bytes, &Payload::bytes(secret), &opts).expect("embed png");
     assert_ne!(png_bytes, stego_png, "stego png should modify pixel values");
 
     // 2. Extract with correct password
-    let extracted = extract_carrier(&stego_png, &opts).expect("extract png");
+    let extracted = extract_carrier(&stego_png, &opts.extract_options()).expect("extract png");
     assert_eq!(extracted, secret, "extracted payload must match original");
 
     // 3. Extract with wrong password must fail
-    opts.password = Some("WrongPassword999!".into());
+    opts.password = Some("WrongPassword999!");
     assert!(
-        extract_carrier(&stego_png, &opts).is_err(),
+        extract_carrier(&stego_png, &opts.extract_options()).is_err(),
         "wrong password must fail"
     );
 }
@@ -201,18 +220,18 @@ fn test_png_hill_fine_tuning_parameters() {
     let png_bytes = generate_texture_png(128, 128);
     let secret = b"Fine-tuned parameters test";
 
-    let mut opts = StegoOptions {
-        algorithm: Some("hill".into()),
-        password: Some("pwd".into()),
+    let mut opts = EmbedOptions {
+        tuning: tuning_for("hill"),
+        password: Some("pwd"),
         ..Default::default()
     };
     // Customize parameters: exclude top 40% smoothest pixels, customize filters
-    opts.png_params.exclusion_percentile = 0.40;
-    opts.png_params.p1_window = 3;
-    opts.png_params.p2_window = 15;
+    opts.png_params_mut().exclusion_percentile = 0.40;
+    opts.png_params_mut().p1_window = 3;
+    opts.png_params_mut().p2_window = 15;
 
-    let stego_png = embed_carrier(&png_bytes, secret, &opts).expect("embed tuned");
-    let extracted = extract_carrier(&stego_png, &opts).expect("extract tuned");
+    let stego_png = embed_carrier(&png_bytes, &Payload::bytes(secret), &opts).expect("embed tuned");
+    let extracted = extract_carrier(&stego_png, &opts.extract_options()).expect("extract tuned");
     assert_eq!(extracted, secret);
 }
 
@@ -221,13 +240,13 @@ fn test_png_hill_scan_analysis_pass() {
     let png_bytes = generate_texture_png(160, 160);
     let secret = b"Steganalysis resistance test under scan_file";
 
-    let opts = StegoOptions {
-        algorithm: Some("hill".into()),
-        password: Some("Pass!".into()),
+    let opts = EmbedOptions {
+        tuning: tuning_for("hill"),
+        password: Some("Pass!"),
         ..Default::default()
     };
 
-    let stego_png = embed_carrier(&png_bytes, secret, &opts).expect("embed");
+    let stego_png = embed_carrier(&png_bytes, &Payload::bytes(secret), &opts).expect("embed");
 
     let dir = scratch("png_scan");
     let file_path = dir.join("stego.png");
@@ -258,27 +277,28 @@ fn test_jpeg_uerd_content_stego_roundtrip() {
     let secret = b"JPEG UERD content-adaptive secret message 2026!";
     let password = "JpegPassword2026#";
 
-    let mut opts = StegoOptions {
-        algorithm: Some("uerd".into()),
-        password: Some(password.into()),
+    let mut opts = EmbedOptions {
+        tuning: tuning_for("uerd"),
+        password: Some(password),
         ..Default::default()
     };
 
     // 1. Embed into JPEG DCT coefficients
-    let stego_jpeg = embed_carrier(&jpeg_bytes, secret, &opts).expect("embed jpeg");
+    let stego_jpeg =
+        embed_carrier(&jpeg_bytes, &Payload::bytes(secret), &opts).expect("embed jpeg");
     assert_ne!(
         jpeg_bytes, stego_jpeg,
         "stego jpeg should differ from original"
     );
 
     // 2. Extract with correct password
-    let extracted = extract_carrier(&stego_jpeg, &opts).expect("extract jpeg");
+    let extracted = extract_carrier(&stego_jpeg, &opts.extract_options()).expect("extract jpeg");
     assert_eq!(extracted, secret, "extracted payload must match original");
 
     // 3. Extract with wrong password must fail
-    opts.password = Some("WrongPassword!".into());
+    opts.password = Some("WrongPassword!");
     assert!(
-        extract_carrier(&stego_jpeg, &opts).is_err(),
+        extract_carrier(&stego_jpeg, &opts.extract_options()).is_err(),
         "wrong password must fail"
     );
 }
@@ -299,18 +319,18 @@ fn test_jpeg_uerd_fine_tuning() {
     let jpeg_bytes = fs::read(&candidate).unwrap();
     let secret = b"Customized UERD neighbor weight test";
 
-    let mut opts = StegoOptions {
-        algorithm: Some("uerd".into()),
-        password: Some("p1".into()),
+    let mut opts = EmbedOptions {
+        tuning: tuning_for("uerd"),
+        password: Some("p1"),
         ..Default::default()
     };
-    opts.jpeg_params.neighbor_weight = 0.35;
+    opts.jpeg_params_mut().neighbor_weight = 0.35;
     // The V3 knob that replaces the old pool/truncation parameters: a larger
     // slot budget spreads the payload over more coefficients.
-    opts.jpeg_params.slot_budget = Some(200_000);
+    opts.jpeg_params_mut().slot_budget = Some(200_000);
 
-    let stego_jpeg = embed_carrier(&jpeg_bytes, secret, &opts).unwrap();
-    let extracted = extract_carrier(&stego_jpeg, &opts).unwrap();
+    let stego_jpeg = embed_carrier(&jpeg_bytes, &Payload::bytes(secret), &opts).unwrap();
+    let extracted = extract_carrier(&stego_jpeg, &opts.extract_options()).unwrap();
     assert_eq!(extracted, secret);
 }
 
@@ -404,14 +424,15 @@ fn test_stego_saturation_exclusion() {
     .unwrap();
 
     let secret = b"Saturation boundary protection verified!";
-    let opts = StegoOptions {
-        password: Some("SaturationSecret123".into()),
+    let opts = EmbedOptions {
+        password: Some("SaturationSecret123"),
         ..Default::default()
     };
 
-    let stego_png = embed_carrier(&png_bytes, secret, &opts).expect("embed carrier");
+    let stego_png =
+        embed_carrier(&png_bytes, &Payload::bytes(secret), &opts).expect("embed carrier");
     assert_eq!(
-        extract_carrier(&stego_png, &opts).expect("extract carrier"),
+        extract_carrier(&stego_png, &opts.extract_options()).expect("extract carrier"),
         secret
     );
 
@@ -449,23 +470,24 @@ fn test_stego_keyed_permutation_property() {
     let png_bytes = generate_texture_png(64, 64);
     let secret = b"Keyed permutation isolates passwords completely";
 
-    let opts_a = StegoOptions {
-        password: Some("AliceSecret2026".into()),
+    let opts_a = EmbedOptions {
+        password: Some("AliceSecret2026"),
         ..Default::default()
     };
-    let opts_b = StegoOptions {
-        password: Some("BobSecret2026".into()),
+    let opts_b = EmbedOptions {
+        password: Some("BobSecret2026"),
         ..Default::default()
     };
 
-    let stego_a = embed_carrier(&png_bytes, secret, &opts_a).expect("embed with Alice");
+    let stego_a =
+        embed_carrier(&png_bytes, &Payload::bytes(secret), &opts_a).expect("embed with Alice");
 
     // Alice extracts successfully
-    let res_a = extract_carrier(&stego_a, &opts_a).expect("Alice extracts");
+    let res_a = extract_carrier(&stego_a, &opts_a.extract_options()).expect("Alice extracts");
     assert_eq!(res_a, secret);
 
     // Bob cannot extract (must return NoHiddenData error, not panic)
-    let res_b = extract_carrier(&stego_a, &opts_b);
+    let res_b = extract_carrier(&stego_a, &opts_b.extract_options());
     assert!(
         matches!(res_b, Err(strhide::errors::StrHideError::NoHiddenData(_))),
         "Bob must receive NoHiddenData, got: {res_b:?}"
@@ -488,8 +510,8 @@ fn test_stego_high_load_steganalysis_response() {
             }
         }
     };
-    let opts = StegoOptions::default();
-    let cap = probe_carrier_capacity(&png_bytes, &opts).expect("probe");
+    let opts = EmbedOptions::default();
+    let cap = probe_carrier_capacity(&png_bytes, &opts.probe_options()).expect("probe");
 
     let dir = scratch("steganalysis_response");
     let clean_path = dir.join("clean.png");
@@ -497,11 +519,11 @@ fn test_stego_high_load_steganalysis_response() {
     let high_path = dir.join("high.png");
     fs::write(&clean_path, &png_bytes).unwrap();
 
-    let low_stego = embed_carrier(&png_bytes, b"16 bytes message", &opts).unwrap();
+    let low_stego = embed_carrier(&png_bytes, &Payload::bytes(b"16 bytes message"), &opts).unwrap();
     // Full capacity AND incompressible: a constant-byte payload would be
     // squeezed by the envelope's Deflate pass and would not load the carrier.
     let high_secret = incompressible(cap.max_raw_payload_bytes, 0x5A5A);
-    let high_stego = embed_carrier(&png_bytes, &high_secret, &opts).unwrap();
+    let high_stego = embed_carrier(&png_bytes, &Payload::bytes(&high_secret), &opts).unwrap();
 
     fs::write(&low_path, &low_stego).unwrap();
     fs::write(&high_path, &high_stego).unwrap();
@@ -519,7 +541,10 @@ fn test_stego_high_load_steganalysis_response() {
     );
 
     // High load roundtrip must extract 100% losslessly.
-    assert_eq!(extract_carrier(&high_stego, &opts).unwrap(), high_secret);
+    assert_eq!(
+        extract_carrier(&high_stego, &opts.extract_options()).unwrap(),
+        high_secret
+    );
 
     // Monotonicity: high load risk score must never be less than clean carrier.
     assert!(
@@ -539,8 +564,8 @@ fn test_stego_high_load_steganalysis_response() {
 #[test]
 fn test_stego_capacity_model_is_tight() {
     let png_bytes = generate_texture_png(128, 128);
-    let opts = StegoOptions::default();
-    let cap = probe_carrier_capacity(&png_bytes, &opts).expect("probe");
+    let opts = EmbedOptions::default();
+    let cap = probe_carrier_capacity(&png_bytes, &opts.probe_options()).expect("probe");
 
     assert!(
         cap.max_raw_payload_bytes > 0,
@@ -548,11 +573,15 @@ fn test_stego_capacity_model_is_tight() {
     );
 
     let exact = incompressible(cap.max_raw_payload_bytes, 0x1234);
-    let stego = embed_carrier(&png_bytes, &exact, &opts).expect("probe max must embed");
-    assert_eq!(extract_carrier(&stego, &opts).expect("extract"), exact);
+    let stego =
+        embed_carrier(&png_bytes, &Payload::bytes(&exact), &opts).expect("probe max must embed");
+    assert_eq!(
+        extract_carrier(&stego, &opts.extract_options()).expect("extract"),
+        exact
+    );
 
     let over = incompressible(cap.max_raw_payload_bytes + 1, 0x1234);
-    let res = embed_carrier(&png_bytes, &over, &opts);
+    let res = embed_carrier(&png_bytes, &Payload::bytes(&over), &opts);
     assert!(
         matches!(res, Err(strhide::errors::StrHideError::General(ref m)) if m.contains("capacity exceeded")),
         "probe max + 1 byte must be rejected as over capacity, got: {res:?}"
@@ -568,11 +597,11 @@ fn test_stego_capacity_model_is_tight() {
 #[test]
 fn test_stego_body_slots_follow_cost_order() {
     let png_bytes = generate_texture_png(128, 128);
-    let opts = StegoOptions::default();
-    let cap = probe_carrier_capacity(&png_bytes, &opts).expect("probe");
+    let opts = EmbedOptions::default();
+    let cap = probe_carrier_capacity(&png_bytes, &opts.probe_options()).expect("probe");
 
     let payload = incompressible(cap.max_raw_payload_bytes / 2, 0xBEEF);
-    let stego = embed_carrier(&png_bytes, &payload, &opts).expect("embed");
+    let stego = embed_carrier(&png_bytes, &Payload::bytes(&payload), &opts).expect("embed");
 
     let before = decode_png(&png_bytes).unwrap();
     let after = decode_png(&stego).unwrap();
@@ -635,8 +664,18 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
     let payload = incompressible(64, 0x77);
 
     // No password -> public default secret.
-    let first = embed_carrier(&png_bytes, &payload, &StegoOptions::default()).unwrap();
-    let second = embed_carrier(&png_bytes, &payload, &StegoOptions::default()).unwrap();
+    let first = embed_carrier(
+        &png_bytes,
+        &Payload::bytes(&payload),
+        &EmbedOptions::default(),
+    )
+    .unwrap();
+    let second = embed_carrier(
+        &png_bytes,
+        &Payload::bytes(&payload),
+        &EmbedOptions::default(),
+    )
+    .unwrap();
     assert_ne!(
         first, second,
         "two embeds must differ (random salt/nonce), otherwise nothing below is meaningful"
@@ -674,14 +713,18 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
     assert_eq!(fw.h, 8, "v3 FeatureWord carries real constraint height h=8");
 
     // Explicit Hamming embed must declare escape h=15 in word1, and codec Hamming in FeatureWord
-    let hamming_opts = StegoOptions {
-        png_params: PngParams {
-            codec: strhide::stego::StegoCodec::Hamming,
-            ..PngParams::default()
+    let hamming_opts = EmbedOptions {
+        tuning: StegoTuning::Png {
+            model: SpatialAlgorithm::default(),
+            params: PngParams {
+                codec: strhide::stego::StegoCodec::Hamming,
+                ..PngParams::default()
+            },
         },
-        ..StegoOptions::default()
+        ..EmbedOptions::default()
     };
-    let hamming_stego = embed_carrier(&png_bytes, &payload, &hamming_opts).unwrap();
+    let hamming_stego =
+        embed_carrier(&png_bytes, &Payload::bytes(&payload), &hamming_opts).unwrap();
     let hamming_hdr = read_header(&hamming_stego, &slots_a[..256]);
     let hamming_word = u32::from_be_bytes([
         hamming_hdr[28],
@@ -726,7 +769,7 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
 /// permutation were both derived from a constant in the source tree.
 ///
 /// The secret is carried by `Profile` (M1b), so the *profile* is what has to
-/// match — `StegoOptions` no longer has a `default_secret` field at all.
+/// match — the embed options no longer have a `default_secret` field at all.
 #[test]
 fn test_stego_private_default_secret_isolation() {
     let png_bytes = generate_texture_png(128, 128);
@@ -735,18 +778,19 @@ fn test_stego_private_default_secret_isolation() {
     let official = Profile::default();
     let private = stego_profile("acme-private-dialect-2026");
     let other = stego_profile("someone-elses-dialect-2026");
-    let opts = StegoOptions::default();
+    let opts = EmbedOptions::default();
 
     // 1. Round trip with the private secret and no password.
-    let stego = embed_carrier_with_profile(&png_bytes, secret, &opts, &private)
+    let stego = embed_carrier_with_profile(&png_bytes, &Payload::bytes(secret), &opts, &private)
         .expect("embed with private secret");
     assert_eq!(
-        extract_carrier_with_profile(&stego, &opts, &private).expect("private extract"),
+        extract_carrier_with_profile(&stego, &opts.extract_options(), &private)
+            .expect("private extract"),
         secret
     );
 
     // 2. The official public constant must NOT read it.
-    let res_official = extract_carrier_with_profile(&stego, &opts, &official);
+    let res_official = extract_carrier_with_profile(&stego, &opts.extract_options(), &official);
     assert!(
         matches!(
             res_official,
@@ -756,7 +800,7 @@ fn test_stego_private_default_secret_isolation() {
     );
 
     // 3. A different private secret must NOT read it.
-    let res_other = extract_carrier_with_profile(&stego, &opts, &other);
+    let res_other = extract_carrier_with_profile(&stego, &opts.extract_options(), &other);
     assert!(
         matches!(
             res_other,
@@ -767,40 +811,47 @@ fn test_stego_private_default_secret_isolation() {
 
     // 4. Symmetry: an official carrier stays readable only with official opts.
     let official_stego =
-        embed_carrier_with_profile(&png_bytes, secret, &opts, &official).expect("embed official");
+        embed_carrier_with_profile(&png_bytes, &Payload::bytes(secret), &opts, &official)
+            .expect("embed official");
     assert_eq!(
-        extract_carrier_with_profile(&official_stego, &opts, &official).expect("official extract"),
+        extract_carrier_with_profile(&official_stego, &opts.extract_options(), &official)
+            .expect("official extract"),
         secret
     );
     assert!(
         matches!(
-            extract_carrier_with_profile(&official_stego, &opts, &private),
+            extract_carrier_with_profile(&official_stego, &opts.extract_options(), &private),
             Err(strhide::errors::StrHideError::NoHiddenData(_))
         ),
         "private secret must not read an official carrier"
     );
 
     // 5. An explicit password outranks the private default secret.
-    let with_password = StegoOptions {
-        password: Some("UserChosenPassword1".into()),
+    let with_password = EmbedOptions {
+        password: Some("UserChosenPassword1"),
         ..Default::default()
     };
-    let pw_stego = embed_carrier_with_profile(&png_bytes, secret, &with_password, &private)
-        .expect("embed with password");
+    let pw_stego = embed_carrier_with_profile(
+        &png_bytes,
+        &Payload::bytes(secret),
+        &with_password,
+        &private,
+    )
+    .expect("embed with password");
     assert_ne!(
         pw_stego, stego,
         "password must take precedence over the profile secret"
     );
     assert_eq!(
-        extract_carrier_with_profile(&pw_stego, &with_password, &private)
+        extract_carrier_with_profile(&pw_stego, &with_password.extract_options(), &private)
             .expect("password extract"),
         secret
     );
     // Neither the private default secret alone nor the official constant may
     // stand in for the password.
-    assert!(extract_carrier_with_profile(&pw_stego, &opts, &private).is_err());
-    assert!(extract_carrier_with_profile(&pw_stego, &opts, &other).is_err());
-    assert!(extract_carrier_with_profile(&pw_stego, &opts, &official).is_err());
+    assert!(extract_carrier_with_profile(&pw_stego, &opts.extract_options(), &private).is_err());
+    assert!(extract_carrier_with_profile(&pw_stego, &opts.extract_options(), &other).is_err());
+    assert!(extract_carrier_with_profile(&pw_stego, &opts.extract_options(), &official).is_err());
 }
 
 /// The legacy `embed_carrier` / `extract_carrier` entries are the official
@@ -810,19 +861,21 @@ fn test_stego_private_default_secret_isolation() {
 fn test_stego_legacy_entries_use_the_official_profile() {
     let png_bytes = generate_texture_png(96, 96);
     let secret = b"Legacy entry points stay official";
-    let opts = StegoOptions::default();
+    let opts = EmbedOptions::default();
 
-    let official_stego = embed_carrier(&png_bytes, secret, &opts).expect("embed legacy");
+    let official_stego =
+        embed_carrier(&png_bytes, &Payload::bytes(secret), &opts).expect("embed legacy");
     assert_eq!(
-        extract_carrier(&official_stego, &opts).expect("extract legacy"),
+        extract_carrier(&official_stego, &opts.extract_options()).expect("extract legacy"),
         secret
     );
 
     let private = stego_profile("acme-private-dialect-2026");
     let private_stego =
-        embed_carrier_with_profile(&png_bytes, secret, &opts, &private).expect("embed private");
+        embed_carrier_with_profile(&png_bytes, &Payload::bytes(secret), &opts, &private)
+            .expect("embed private");
     assert!(
-        extract_carrier(&private_stego, &opts).is_err(),
+        extract_carrier(&private_stego, &opts.extract_options()).is_err(),
         "the legacy entry must not pick up a private dialect implicitly"
     );
 }
@@ -835,22 +888,23 @@ fn test_jpeg_private_default_secret_isolation() {
     let jpeg_bytes = fs::read(&candidate).expect("read carrier jpeg");
     let secret = b"Private JPEG dialect payload";
 
-    let opts = StegoOptions {
-        algorithm: Some("uerd".into()),
+    let opts = EmbedOptions {
+        tuning: tuning_for("uerd"),
         ..Default::default()
     };
     let official = Profile::default();
     let private = stego_profile("acme-jpeg-dialect-2026");
 
-    let stego = embed_carrier_with_profile(&jpeg_bytes, secret, &opts, &private)
+    let stego = embed_carrier_with_profile(&jpeg_bytes, &Payload::bytes(secret), &opts, &private)
         .expect("embed jpeg private");
     assert_eq!(
-        extract_carrier_with_profile(&stego, &opts, &private).expect("private jpeg extract"),
+        extract_carrier_with_profile(&stego, &opts.extract_options(), &private)
+            .expect("private jpeg extract"),
         secret
     );
     assert!(
         matches!(
-            extract_carrier_with_profile(&stego, &opts, &official),
+            extract_carrier_with_profile(&stego, &opts.extract_options(), &official),
             Err(strhide::errors::StrHideError::NoHiddenData(_))
         ),
         "official secret must fail on a private-dialect JPEG carrier"
@@ -889,11 +943,15 @@ fn test_jpeg_calibration_detector_clean_vs_loaded() {
         clean.findings
     );
 
-    let opts = StegoOptions::default();
-    let cap = probe_carrier_capacity(&jpeg_bytes, &opts).expect("probe");
+    let opts = EmbedOptions::default();
+    let cap = probe_carrier_capacity(&jpeg_bytes, &opts.probe_options()).expect("probe");
     let payload = incompressible(cap.max_raw_payload_bytes, 0xCAFE);
-    let stego = embed_carrier(&jpeg_bytes, &payload, &opts).expect("embed full capacity");
-    assert_eq!(extract_carrier(&stego, &opts).expect("extract"), payload);
+    let stego =
+        embed_carrier(&jpeg_bytes, &Payload::bytes(&payload), &opts).expect("embed full capacity");
+    assert_eq!(
+        extract_carrier(&stego, &opts.extract_options()).expect("extract"),
+        payload
+    );
     let stego_path = dir.join("loaded.jpg");
     fs::write(&stego_path, &stego).unwrap();
 
@@ -971,24 +1029,23 @@ fn test_jpeg_v3_slot_budget_controls_the_change_rate() {
     let payload = b"JPEG V3 ternary STC payload 2026!";
     let password = "JpegStcPassword#2026";
 
-    let extract_opts = StegoOptions {
-        algorithm: Some("uerd".into()),
-        password: Some(password.into()),
+    let extract_opts = ExtractOptions {
+        password: Some(password),
         ..Default::default()
     };
 
     let mut changed_counts = Vec::new();
     let mut group_sizes = Vec::new();
     for budget in [2_000usize, 800_000] {
-        let mut opts = StegoOptions {
-            algorithm: Some("uerd".into()),
-            password: Some(password.into()),
+        let mut opts = EmbedOptions {
+            tuning: tuning_for("uerd"),
+            password: Some(password),
             ..Default::default()
         };
-        opts.jpeg_params.stc_h = 8;
-        opts.jpeg_params.slot_budget = Some(budget);
+        opts.jpeg_params_mut().stc_h = 8;
+        opts.jpeg_params_mut().slot_budget = Some(budget);
 
-        let stego = embed_carrier(&jpeg_bytes, payload, &opts)
+        let stego = embed_carrier(&jpeg_bytes, &Payload::bytes(payload), &opts)
             .unwrap_or_else(|e| panic!("budget={budget}: embed failed: {e}"));
         assert_ne!(stego, jpeg_bytes, "budget={budget}: stego must differ");
 
@@ -1020,7 +1077,7 @@ fn test_jpeg_v3_slot_budget_controls_the_change_rate() {
         let layout = strhide::stego::jpeg::engine::layout_for_payload(
             &jpeg_bytes,
             payload,
-            &opts.jpeg_params,
+            opts.jpeg_params_mut(),
             &strhide::stego::format::DEFAULT_JPEG_FORMAT,
         )
         .expect("layout");
@@ -1041,9 +1098,9 @@ fn test_jpeg_v3_slot_budget_controls_the_change_rate() {
 #[test]
 fn test_stego_v2_feature_word_tamper_fails_safely() {
     let png_bytes = generate_texture_png(128, 128);
-    let opts = StegoOptions::default();
+    let opts = EmbedOptions::default();
     let payload = b"secret payload testing feature word integrity";
-    let stego = embed_carrier(&png_bytes, payload, &opts).expect("embed v2 stego");
+    let stego = embed_carrier(&png_bytes, &Payload::bytes(payload), &opts).expect("embed v2 stego");
 
     let slots = header_slots_of(&png_bytes, None);
     assert!(slots.len() >= 512);
@@ -1057,7 +1114,7 @@ fn test_stego_v2_feature_word_tamper_fails_safely() {
     img.pixels[tamper_slot * ch + off] ^= 1;
 
     let tampered_bytes = encode_png(&img).expect("encode");
-    let res = extract_carrier(&tampered_bytes, &opts);
+    let res = extract_carrier(&tampered_bytes, &opts.extract_options());
     assert!(
         matches!(res, Err(strhide::errors::StrHideError::NoHiddenData(_))),
         "Tampered FeatureWord must yield NoHiddenData, got: {res:?}"
@@ -1074,58 +1131,59 @@ fn stego_domain_isolation_lifecycle() {
     let prof_b = Profile::default().with_stego_domain("org.enterprise.vault-b");
     let prof_default = Profile::default();
 
-    let opts = StegoOptions::default();
-    let stego_a = embed_carrier_with_profile(&png, payload, &opts, &prof_a)
+    let opts = EmbedOptions::default();
+    let stego_a = embed_carrier_with_profile(&png, &Payload::bytes(payload), &opts, &prof_a)
         .expect("embed with profile domain-a");
 
     // Matching profile extracts losslessly
-    let rec_a = extract_carrier_with_profile(&stego_a, &opts, &prof_a)
+    let rec_a = extract_carrier_with_profile(&stego_a, &opts.extract_options(), &prof_a)
         .expect("extract with matching profile domain-a");
     assert_eq!(rec_a, payload);
 
     // Mismatched profile (domain-b) fails with NoHiddenData
-    let err_b = extract_carrier_with_profile(&stego_a, &opts, &prof_b);
+    let err_b = extract_carrier_with_profile(&stego_a, &opts.extract_options(), &prof_b);
     assert!(
         matches!(err_b, Err(strhide::errors::StrHideError::NoHiddenData(_))),
         "mismatched profile domain must fail"
     );
 
     // Default profile (no domain) fails with NoHiddenData
-    let err_def = extract_carrier_with_profile(&stego_a, &opts, &prof_default);
+    let err_def = extract_carrier_with_profile(&stego_a, &opts.extract_options(), &prof_default);
     assert!(
         matches!(err_def, Err(strhide::errors::StrHideError::NoHiddenData(_))),
         "default profile on domain-isolated carrier must fail"
     );
 
     // 2. Options stego_domain overrides profile stego_domain
-    let opts_override = StegoOptions {
-        domain: Some("org.enterprise.vault-a".into()),
+    let opts_override = EmbedOptions {
+        domain: Some("org.enterprise.vault-a"),
         ..Default::default()
     };
     // Even if prof_b is passed, opts_override wins
-    let rec_override = extract_carrier_with_profile(&stego_a, &opts_override, &prof_b)
-        .expect("options domain must override profile domain");
+    let rec_override =
+        extract_carrier_with_profile(&stego_a, &opts_override.extract_options(), &prof_b)
+            .expect("options domain must override profile domain");
     assert_eq!(rec_override, payload);
 
     // 3. Password + domain isolation
-    let opts_pwd_a = StegoOptions {
-        password: Some("SharedPassword123".into()),
-        domain: Some("org.enterprise.vault-a".into()),
+    let opts_pwd_a = EmbedOptions {
+        password: Some("SharedPassword123"),
+        domain: Some("org.enterprise.vault-a"),
         ..Default::default()
     };
-    let stego_pwd_a =
-        embed_carrier(&png, payload, &opts_pwd_a).expect("embed with password + domain");
+    let stego_pwd_a = embed_carrier(&png, &Payload::bytes(payload), &opts_pwd_a)
+        .expect("embed with password + domain");
 
-    let rec_pwd_a =
-        extract_carrier(&stego_pwd_a, &opts_pwd_a).expect("extract with same password + domain");
+    let rec_pwd_a = extract_carrier(&stego_pwd_a, &opts_pwd_a.extract_options())
+        .expect("extract with same password + domain");
     assert_eq!(rec_pwd_a, payload);
 
-    let opts_pwd_b = StegoOptions {
-        password: Some("SharedPassword123".into()),
-        domain: Some("org.enterprise.vault-b".into()),
+    let opts_pwd_b = EmbedOptions {
+        password: Some("SharedPassword123"),
+        domain: Some("org.enterprise.vault-b"),
         ..Default::default()
     };
-    let err_pwd_b = extract_carrier(&stego_pwd_a, &opts_pwd_b);
+    let err_pwd_b = extract_carrier(&stego_pwd_a, &opts_pwd_b.extract_options());
     assert!(
         matches!(
             err_pwd_b,
@@ -1143,7 +1201,7 @@ fn stego_safety_level_and_enforcement_lifecycle() {
 
     let cap_paranoid = probe_carrier_capacity(
         &png,
-        &StegoOptions {
+        &ProbeOptions {
             safety: SafetyPolicy {
                 level: SafetyLevel::Paranoid,
                 ..SafetyPolicy::default()
@@ -1155,7 +1213,7 @@ fn stego_safety_level_and_enforcement_lifecycle() {
 
     let cap_high = probe_carrier_capacity(
         &png,
-        &StegoOptions {
+        &ProbeOptions {
             safety: SafetyPolicy {
                 level: SafetyLevel::High,
                 ..SafetyPolicy::default()
@@ -1167,7 +1225,7 @@ fn stego_safety_level_and_enforcement_lifecycle() {
 
     let cap_balanced = probe_carrier_capacity(
         &png,
-        &StegoOptions {
+        &ProbeOptions {
             safety: SafetyPolicy {
                 level: SafetyLevel::Balanced,
                 ..SafetyPolicy::default()
@@ -1186,33 +1244,33 @@ fn stego_safety_level_and_enforcement_lifecycle() {
     let payload = vec![0x33; cap_balanced.recommended_max_bytes];
 
     // Enforced mode on Paranoid tier MUST reject
-    let opts_enforced = StegoOptions {
+    let opts_enforced = EmbedOptions {
         safety: SafetyPolicy {
             level: SafetyLevel::Paranoid,
             enforcement: SafetyEnforcement::Enforced,
         },
         ..Default::default()
     };
-    let res_enforced = embed_carrier(&png, &payload, &opts_enforced);
+    let res_enforced = embed_carrier(&png, &Payload::bytes(&payload), &opts_enforced);
     assert!(
         res_enforced.is_err(),
         "Enforced mode must reject payload exceeding safety tier"
     );
 
     // Advisory mode on Paranoid tier MUST succeed
-    let opts_advisory = StegoOptions {
+    let opts_advisory = EmbedOptions {
         safety: SafetyPolicy {
             level: SafetyLevel::Paranoid,
             enforcement: SafetyEnforcement::Advisory,
         },
         ..Default::default()
     };
-    let res_advisory = embed_carrier(&png, &payload, &opts_advisory);
+    let res_advisory = embed_carrier(&png, &Payload::bytes(&payload), &opts_advisory);
     assert!(
         res_advisory.is_ok(),
         "Advisory mode must not reject payload within physical capacity"
     );
     let stego = res_advisory.unwrap();
-    let extracted = extract_carrier(&stego, &opts_advisory).expect("extract");
+    let extracted = extract_carrier(&stego, &opts_advisory.extract_options()).expect("extract");
     assert_eq!(extracted, payload);
 }

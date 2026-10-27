@@ -280,8 +280,10 @@ fn test_hevc_capacity_safety_scaling_and_sps_dimensions() {
 
     let mut prev_rec = 0;
     for &lvl in &levels {
-        let options = strhide::stego::StegoOptions::default()
-            .with_algorithm("hevc")
+        let options = strhide::stego::ProbeOptions::default()
+            .with_tuning(strhide::stego::StegoTuning::hevc(
+                strhide::stego::HevcMode::Cabac,
+            ))
             .with_safety(lvl, strhide::stego::SafetyEnforcement::Advisory);
         let profile = strhide::params::Profile::default();
         let info =

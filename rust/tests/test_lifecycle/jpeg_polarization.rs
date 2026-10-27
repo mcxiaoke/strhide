@@ -17,7 +17,8 @@
 //! meaningless. Aggregated over the whole payload the sign of the shift is well
 //! defined.
 
-use strhide::stego::StegoOptions;
+use strhide::core::payload::Payload;
+use strhide::stego::EmbedOptions;
 use strhide::stego::jpeg::cost::precover;
 use strhide::stego::jpeg::geometry::geometry_for_carrier;
 use strhide::stego::{embed_carrier, extract_carrier};
@@ -38,9 +39,11 @@ fn payload() -> Vec<u8> {
     out
 }
 
-fn options(polarize_weight: f64) -> StegoOptions {
-    let mut opts = StegoOptions::default();
-    opts.jpeg_params.polarize_weight = polarize_weight;
+fn options(polarize_weight: f64) -> EmbedOptions<'static> {
+    let mut opts = EmbedOptions::default();
+    // `jpeg_params_mut` installs the DCT arm on first use; the carrier in this
+    // file is a JPEG, so that is the arm it needs.
+    opts.jpeg_params_mut().polarize_weight = polarize_weight;
     opts
 }
 
@@ -99,9 +102,9 @@ fn measure(cover: &[u8], stego: &[u8]) -> MoveStats {
 fn polarized_embed_still_roundtrips() {
     let payload = payload();
     let opts = options(0.65);
-    let stego = embed_carrier(COVER, &payload, &opts).expect("polarized embed");
+    let stego = embed_carrier(COVER, &Payload::bytes(&payload), &opts).expect("polarized embed");
     assert_ne!(stego, COVER, "the carrier must change");
-    let back = extract_carrier(&stego, &opts).expect("extract");
+    let back = extract_carrier(&stego, &opts.extract_options()).expect("extract");
     assert_eq!(back, payload, "polarization is embed-side only");
 }
 
@@ -109,8 +112,10 @@ fn polarized_embed_still_roundtrips() {
 fn polarization_shifts_moves_towards_the_estimate() {
     let payload = payload();
 
-    let plain = embed_carrier(COVER, &payload, &options(1.0)).expect("symmetric embed");
-    let polarized = embed_carrier(COVER, &payload, &options(0.65)).expect("polarized embed");
+    let plain =
+        embed_carrier(COVER, &Payload::bytes(&payload), &options(1.0)).expect("symmetric embed");
+    let polarized =
+        embed_carrier(COVER, &Payload::bytes(&payload), &options(0.65)).expect("polarized embed");
 
     let baseline = measure(COVER, &plain);
     let treated = measure(COVER, &polarized);
@@ -165,7 +170,8 @@ fn weight_above_one_is_rejected() {
     // Above 1 the weight would penalize the preferred direction, inverting the
     // setting's meaning. It must fail loudly instead.
     let opts = options(1.5);
-    let err = embed_carrier(COVER, b"x", &opts).expect_err("weight 1.5 must be rejected");
+    let err = embed_carrier(COVER, &Payload::bytes(b"x"), &opts)
+        .expect_err("weight 1.5 must be rejected");
     assert!(
         err.to_string().contains("polarize_weight"),
         "error should name the parameter, got: {err}"

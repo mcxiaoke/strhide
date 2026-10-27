@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use sha2::{Digest, Sha256};
+use strhide::core::payload::Payload;
 use strhide::stego::prng::deterministic_payload;
-use strhide::stego::{Freshness, StegoOptions, embed_carrier};
+use strhide::stego::{EmbedOptions, Freshness, JpegAlgorithm, StegoTuning, embed_carrier};
 
 const DEFAULT_SIZES: &[usize] = &[512, 1024, 16384, 65536];
 const DEFAULT_ALGOS: &[&str] = &["uerd", "juniward"];
@@ -160,13 +161,23 @@ fn main() -> ExitCode {
 
         for algo in &args.algos {
             for &len in &args.sizes {
-                let options = StegoOptions {
-                    algorithm: Some(algo.clone()),
+                // This suite only walks JPEG carriers, so the tuning arm is
+                // the DCT one; an unknown name is reported per case instead of
+                // aborting the sweep.
+                let Some(model) = JpegAlgorithm::from_name(algo) else {
+                    eprintln!("repro_suite: {name}: unknown algorithm '{algo}'");
+                    continue;
+                };
+                let options = EmbedOptions {
+                    tuning: StegoTuning::Jpeg {
+                        model,
+                        params: Default::default(),
+                    },
                     freshness: Freshness::Seeded(seed),
                     ..Default::default()
                 };
                 let payload = deterministic_payload(len, args.seed);
-                match embed_carrier(&bytes, &payload, &options) {
+                match embed_carrier(&bytes, &Payload::bytes(&payload), &options) {
                     Ok(stego) => {
                         let key = format!("{name}|{algo}|{len}");
                         rows.insert(key, (stego.len(), digest(&stego)));

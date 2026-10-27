@@ -11,9 +11,12 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::params::Profile;
-use crate::stego::{StegoOptions, embed_carrier_with_profile, extract_carrier_with_profile};
+use crate::stego::{
+    EmbedOptions, ExtractOptions, embed_carrier_with_profile, extract_carrier_with_profile,
+};
 
 /// Embed `payload` into the carrier file at `carrier_path` and commit the result.
 ///
@@ -30,8 +33,8 @@ use crate::stego::{StegoOptions, embed_carrier_with_profile, extract_carrier_wit
 pub fn embed_carrier_file(
     carrier_path: &Path,
     target_path: Option<&Path>,
-    payload: &[u8],
-    options: &StegoOptions,
+    payload: &Payload<'_>,
+    options: &EmbedOptions<'_>,
     profile: &Profile,
     backup: bool,
 ) -> Result<Option<PathBuf>, StrHideError> {
@@ -48,7 +51,7 @@ pub fn embed_carrier_file(
 /// decision, which keeps this function free of overwrite policy.
 pub fn extract_carrier_file(
     carrier_path: &Path,
-    options: &StegoOptions,
+    options: &ExtractOptions<'_>,
     profile: &Profile,
 ) -> Result<Vec<u8>, StrHideError> {
     let carrier_bytes = std::fs::read(carrier_path)?;
@@ -58,7 +61,7 @@ pub fn extract_carrier_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stego::StegoOptions;
+    use crate::stego::{EmbedOptions, ExtractOptions};
 
     #[test]
     fn unsupported_carrier_is_refused_without_touching_the_file() {
@@ -71,8 +74,8 @@ mod tests {
         let result = embed_carrier_file(
             &carrier,
             None,
-            b"payload",
-            &StegoOptions::default(),
+            &Payload::bytes(b"payload"),
+            &EmbedOptions::default(),
             &Profile::default(),
             true,
         );
@@ -97,7 +100,8 @@ mod tests {
         let carrier = dir.join("carrier.bin");
         std::fs::write(&carrier, b"still not an image").expect("write carrier");
 
-        let result = extract_carrier_file(&carrier, &StegoOptions::default(), &Profile::default());
+        let result =
+            extract_carrier_file(&carrier, &ExtractOptions::default(), &Profile::default());
         assert!(matches!(result, Err(StrHideError::UnsupportedFormat(_))));
 
         let _ = std::fs::remove_dir_all(&dir);

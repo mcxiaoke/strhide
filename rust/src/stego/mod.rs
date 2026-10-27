@@ -1,11 +1,19 @@
 //! Content-adaptive steganography module (HILL, UERD, LSB/DCT Matching).
 //!
-//! Fully decoupled from the structure-domain container hiding pipeline (write/read/restore).
-//! Provides unified `embed_carrier` and `extract_carrier` entry points with automatic
-//! format sniffing and extensible algorithm selection.
+//! Fully decoupled from the structure-domain container hiding pipeline
+//! (write/read/restore). Provides unified `embed_carrier` and `extract_carrier`
+//! entry points with automatic format sniffing and extensible algorithm
+//! selection.
+//!
+//! Dispatch is one registry lookup ([`engine::engine_for`]) on the format the
+//! sniffer reported; the engines own what happens next. Until stage 2 this file
+//! held three parallel `if format == ...` waterfalls -- one per entry point --
+//! which is how a probe could end up advertising a different capacity than the
+//! writer filled.
 
 #[doc(hidden)]
 pub mod coding;
+pub mod engine;
 #[doc(hidden)]
 pub mod envelope;
 pub mod format;
@@ -15,6 +23,7 @@ pub mod heif;
 pub mod hevc;
 pub mod io;
 pub mod jpeg;
+pub mod options;
 pub mod params;
 pub mod png;
 #[doc(hidden)]
@@ -24,205 +33,101 @@ pub mod traits;
 #[doc(hidden)]
 pub mod wavelet;
 
+pub use engine::{StegoEngine, engine_for, supported_formats};
 pub use envelope::Freshness;
 pub use format::{
     CipherSuite, DEFAULT_HEVC_FORMAT, DEFAULT_JPEG_FORMAT, GridRule, HevcFormatProfile,
     JpegFormatProfile, OFFICIAL_PNG_FORMAT, PngFormatProfile,
 };
+pub use options::{
+    BridgeOptions, EmbedOptions, EmbedOutput, ExtractOptions, HevcMode, HevcParams, JpegAlgorithm,
+    ProbeOptions, SpatialAlgorithm, StegoTuning,
+};
 pub use params::{
     ExtractParams, JpegParams, PngParams, SafetyEnforcement, SafetyLevel, SafetyPolicy, StegoCodec,
-    StegoOptions,
 };
 pub use registry::CostModelRegistry;
 
+use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::formats::sniff::{FileFormat, sniff_bytes};
 use crate::params::Profile;
 
-/// Automatically sniff carrier format and embed payload using content-adaptive steganography.
+/// Resolve the engine for a carrier, or fail with the one unsupported-format
+/// message every entry point shares.
+fn engine_for_carrier(carrier_bytes: &[u8]) -> Result<&'static dyn StegoEngine, StrHideError> {
+    let Some(format) = sniff_bytes(carrier_bytes) else {
+        return Err(StrHideError::UnsupportedFormat(
+            "Content-adaptive steganography requires a PNG, JPEG, HEIF/HEIC, or HEVC carrier (Annex-B or MP4/MOV)"
+                .into(),
+        ));
+    };
+    // A format the sniffer knows but the content domain cannot carry (ZIP, PE,
+    // ...) says so by name instead of pretending the bytes are unreadable.
+    engine::engine_for(format).ok_or_else(|| unsupported_carrier(format))
+}
+
+/// The unsupported-format error, worded once for every entry point.
+pub(crate) fn unsupported_carrier(format: FileFormat) -> StrHideError {
+    StrHideError::UnsupportedFormat(format!(
+        "Content-adaptive steganography requires a PNG, JPEG, HEIF/HEIC, or HEVC carrier \
+         (Annex-B or MP4/MOV); '{}' is not one",
+        format.as_str()
+    ))
+}
+
+/// Automatically sniff the carrier format and embed `payload` using
+/// content-adaptive steganography.
 ///
 /// Uses the official dialect (no private secret). Call
-/// [`embed_carrier_with_profile`] when a private
-/// [`Profile`] must be honoured.
+/// [`embed_carrier_with_profile`] when a private [`Profile`] must be honoured.
 pub fn embed_carrier(
     carrier_bytes: &[u8],
-    payload: &[u8],
-    options: &StegoOptions,
+    payload: &Payload<'_>,
+    options: &EmbedOptions<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
     embed_carrier_with_profile(carrier_bytes, payload, options, &Profile::default())
 }
 
 /// [`embed_carrier`] with an explicit private-dialect [`Profile`].
 ///
-/// The profile only supplies the no-password secret
-/// ([`Profile::stego_secret`]); an explicit
-/// [`StegoOptions::password`] still wins. A carrier embedded under a private
+/// The profile only supplies the no-password dialect (its
+/// [`StegoProfile`](crate::params::StegoProfile) half); an explicit
+/// [`EmbedOptions::password`] still wins. A carrier embedded under a private
 /// secret is unreadable with the official profile -- and fails as
 /// `NoHiddenData`, not as a distinguishable error.
 pub fn embed_carrier_with_profile(
     carrier_bytes: &[u8],
-    payload: &[u8],
-    options: &StegoOptions,
+    payload: &Payload<'_>,
+    options: &EmbedOptions<'_>,
     profile: &Profile,
 ) -> Result<Vec<u8>, StrHideError> {
-    embed_carrier_with_profile_info(carrier_bytes, payload, options, profile)
-        .map(|(bytes, _)| bytes)
+    embed_carrier_with_profile_info(carrier_bytes, payload, options, profile).map(|out| out.bytes)
 }
 
-/// Automatically sniff carrier format, embed payload, and return both the modified carrier
-/// and optional structured capacity metadata if produced during embedding.
+/// Automatically sniff the carrier format, embed `payload`, and return the
+/// modified carrier together with whatever capacity metadata the engine
+/// produced while embedding.
 pub fn embed_carrier_with_profile_info(
     carrier_bytes: &[u8],
-    payload: &[u8],
-    options: &StegoOptions,
+    payload: &Payload<'_>,
+    options: &EmbedOptions<'_>,
     profile: &Profile,
-) -> Result<(Vec<u8>, Option<StegoCapacityInfo>), StrHideError> {
-    // Validate the whole option set up front: a bad window size must surface as
-    // a configuration error, not as a panic deep inside the HILL convolution or
-    // as an opaque "no capacity" later.
-    options.png_params.validate()?;
-    options.jpeg_params.validate()?;
-
-    // Private dialect resolution happens exactly once, here: a configured
-    // secret is indistinguishable from a user password downstream, which is
-    // what keeps the two engine families byte-compatible.
-    let secret = options.secret(profile);
-    let domain = options.domain(profile);
-
-    let png_params = options.png_params.clone();
-    let mut jpeg_params = options.jpeg_params.clone();
-    // A seeded run must not take the FMA path: it rounds differently from the
-    // scalar one, and a last-bit disagreement in a cost value can move the
-    // trellis to a different slot.
-    jpeg_params.deterministic = options.freshness.is_seeded();
-
-    let format = sniff_bytes(carrier_bytes);
-
-    if format == Some(FileFormat::Jpeg) {
-        // JPEG format
-        let model =
-            CostModelRegistry::get_jpeg_model(options.algorithm.as_deref()).ok_or_else(|| {
-                StrHideError::General(format!(
-                    "Unknown or incompatible JPEG stego algorithm: {:?}",
-                    options.algorithm
-                ))
-            })?;
-        jpeg::embed_jpeg(
-            carrier_bytes,
-            payload,
-            secret,
-            domain,
-            profile.jpeg_format(),
-            &jpeg_params,
-            options.safety,
-            &*model,
-            options.freshness,
-        )
-        .map(|b| (b, None))
-    } else if format == Some(FileFormat::Png) {
-        // PNG format
-        let model = CostModelRegistry::get_spatial_model(options.algorithm.as_deref()).ok_or_else(
-            || {
-                StrHideError::General(format!(
-                    "Unknown or incompatible spatial stego algorithm: {:?}",
-                    options.algorithm
-                ))
-            },
-        )?;
-        png::embed_png(
-            carrier_bytes,
-            payload,
-            secret,
-            domain,
-            profile.png_format(),
-            &*model,
-            &png_params,
-            options.safety,
-            options.freshness,
-        )
-        .map(|b| (b, None))
-    } else if format == Some(FileFormat::Heif) {
-        // HEIF content-domain steganography: Scheme C (HEVC CABAC in-place)
-        // first, thumbnail bridge second. The order is the same on read, write
-        // and capacity so all three agree on what a carrier holds: a file
-        // embedded twice carries two payloads, and "the one the writer would
-        // have produced" has to be the one the reader returns.
-        //
-        // The bridge is the older scheme and stays only as the fallback for
-        // HEIFs whose HEVC items cannot be rewritten (no hvc1 item, unsupported
-        // slice syntax) but which do carry a rewritable JPEG/auxiliary item.
-        if options.algorithm.as_deref() == Some("hevc")
-            || options.algorithm.as_deref() == Some("cabac")
-        {
-            hevc::embed_hevc_with_info(
-                carrier_bytes,
-                payload,
-                secret,
-                domain,
-                profile.hevc_format(),
-                options.freshness,
-                options.safety,
-            )
-            .map(|(b, info)| (b, Some(info)))
-        } else {
-            match hevc::embed_hevc_with_info(
-                carrier_bytes,
-                payload,
-                secret,
-                domain,
-                profile.hevc_format(),
-                options.freshness,
-                options.safety,
-            ) {
-                Ok((bytes, info)) => Ok((bytes, Some(info))),
-                // A safety-policy refusal is final: retrying through the
-                // thumbnail bridge would replace it with the bridge's own
-                // "no bridgeable item" error and hide the real reason.
-                Err(e @ StrHideError::SafetyThreshold(_)) => Err(e),
-                Err(_) => heif::embed_heif_bridge(carrier_bytes, payload, options, profile)
-                    .map(|b| (b, None)),
-            }
-        }
-    } else if format == Some(FileFormat::Mp4) {
-        // MP4/MOV video container: Scheme C on the sample table. Byte length is
-        // preserved (Delta = 0), so `stsz`/`stco`/`co64` stay valid untouched.
-        hevc::embed_hevc_with_info(
-            carrier_bytes,
-            payload,
-            secret,
-            domain,
-            profile.hevc_format(),
-            options.freshness,
-            options.safety,
-        )
-        .map(|(b, info)| (b, Some(info)))
-    } else if format == Some(FileFormat::HevcAnnexB) {
-        // Raw Annex-B HEVC bitstream
-        hevc::embed_hevc_with_info(
-            carrier_bytes,
-            payload,
-            secret,
-            domain,
-            profile.hevc_format(),
-            options.freshness,
-            options.safety,
-        )
-        .map(|(b, info)| (b, Some(info)))
-    } else {
-        Err(StrHideError::UnsupportedFormat(
-            "Content-adaptive steganography requires a PNG, JPEG, HEIF/HEIC, or HEVC carrier (Annex-B or MP4/MOV)"
-                .into(),
-        ))
-    }
+) -> Result<EmbedOutput, StrHideError> {
+    let engine = engine_for_carrier(carrier_bytes)?;
+    // Private dialect resolution happens exactly once, inside the engine
+    // adapter: a configured secret is indistinguishable from a user password
+    // downstream, which is what keeps the two engine families byte-compatible.
+    engine.embed(carrier_bytes, payload, options, &profile.stego)
 }
 
-/// Automatically sniff carrier format and extract payload using content-adaptive steganography.
+/// Automatically sniff the carrier format and extract the payload.
 ///
 /// Uses the official dialect. Call [`extract_carrier_with_profile`] when the
 /// carrier was embedded under a private [`Profile`].
 pub fn extract_carrier(
     carrier_bytes: &[u8],
-    options: &StegoOptions,
+    options: &ExtractOptions<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
     extract_carrier_with_profile(carrier_bytes, options, &Profile::default())
 }
@@ -233,85 +138,26 @@ pub fn extract_carrier(
 /// password, so no oracle tells the caller which of the two was wrong.
 pub fn extract_carrier_with_profile(
     carrier_bytes: &[u8],
-    options: &StegoOptions,
+    options: &ExtractOptions<'_>,
     profile: &Profile,
 ) -> Result<Vec<u8>, StrHideError> {
-    options.png_params.validate()?;
-    options.jpeg_params.validate()?;
+    extract_carrier_payload(carrier_bytes, options, profile).map(Payload::into_bytes)
+}
 
-    let secret = options.secret(profile);
-    let domain = options.domain(profile);
-
-    let format = sniff_bytes(carrier_bytes);
-
-    if format == Some(FileFormat::Jpeg) {
-        // JPEG format. No cost model is looked up on purpose: the V3 slot set
-        // is geometric, so extraction must not depend on the embedder's cost
-        // function (or on `--algorithm`).
-        jpeg::extract_jpeg(
-            carrier_bytes,
-            secret,
-            domain,
-            profile.jpeg_format(),
-            &options.extract_params,
-        )
-    } else if format == Some(FileFormat::Png) {
-        // PNG format. The carrier names its cost model in the feature word
-        // and the extractor rebuilds everything from that declaration, so
-        // `--algorithm` must not gate extraction (mirroring the JPEG branch
-        // above): a misspelled algorithm name is not a reason to refuse a
-        // readable carrier. The instance below is only a logging hint.
-        let model = CostModelRegistry::get_spatial_model(None)
-            .expect("the default spatial model always resolves");
-        png::extract_png(
-            carrier_bytes,
-            secret,
-            domain,
-            profile.png_format(),
-            &*model,
-            &options.png_params,
-        )
-    } else if format == Some(FileFormat::Heif) {
-        // HEIF content-domain steganography: Scheme C (HEVC CABAC in-place)
-        // first, then the thumbnail bridge. Same order as embed and probe --
-        // see the note on the HEIF branch in `embed_carrier`.
-        match hevc::extract_hevc(carrier_bytes, secret, domain, profile.hevc_format()) {
-            Ok(payload) => Ok(payload),
-            Err(e) => {
-                if options.algorithm.as_deref() == Some("hevc")
-                    || options.algorithm.as_deref() == Some("cabac")
-                {
-                    return Err(e);
-                }
-                match heif::extract_heif_bridge(carrier_bytes, options, profile) {
-                    Ok(payload) => Ok(payload),
-                    // A Scheme C authentication failure means the carrier really
-                    // does carry a CABAC payload, so its password verdict is the
-                    // honest one. Every other HEVC failure only says "this is not
-                    // a Scheme C carrier", and the bridge's verdict describes the
-                    // carrier better than the HEVC probe does.
-                    Err(bridge_err) => {
-                        if matches!(e, StrHideError::Password(_)) {
-                            Err(e)
-                        } else {
-                            Err(bridge_err)
-                        }
-                    }
-                }
-            }
-        }
-    } else if format == Some(FileFormat::Mp4) {
-        // MP4/MOV video container
-        hevc::extract_hevc(carrier_bytes, secret, domain, profile.hevc_format())
-    } else if format == Some(FileFormat::HevcAnnexB) {
-        // Raw Annex-B HEVC bitstream
-        hevc::extract_hevc(carrier_bytes, secret, domain, profile.hevc_format())
-    } else {
-        Err(StrHideError::UnsupportedFormat(
-            "Content-adaptive steganography requires a PNG, JPEG, HEIF/HEIC, or HEVC carrier (Annex-B or MP4/MOV)"
-                .into(),
-        ))
-    }
+/// [`extract_carrier_with_profile`] returning the unified [`Payload`] instead of
+/// raw bytes.
+///
+/// `kind` and `name` are not on the wire yet -- stage 3 adds the micro-header
+/// that persists them -- so the result always carries
+/// [`PayloadKind::Bytes`](crate::core::payload::PayloadKind::Bytes). The
+/// signature is written once here so it does not have to change twice.
+pub fn extract_carrier_payload(
+    carrier_bytes: &[u8],
+    options: &ExtractOptions<'_>,
+    profile: &Profile,
+) -> Result<Payload<'static>, StrHideError> {
+    let engine = engine_for_carrier(carrier_bytes)?;
+    engine.extract(carrier_bytes, options, &profile.stego)
 }
 
 /// Capacity information for content-adaptive steganography.
@@ -393,7 +239,7 @@ fn default_safety_bpp_limit() -> f64 {
     0.10
 }
 
-/// Automatically sniff carrier format and probe embedding capacity.
+/// Automatically sniff the carrier format and probe embedding capacity.
 ///
 /// Credentials matter, and they are taken from `options` exactly like
 /// [`embed_carrier`] does:
@@ -407,10 +253,10 @@ fn default_safety_bpp_limit() -> f64 {
 ///   and yields a different capacity.
 ///
 /// Use [`probe_carrier_capacity_with_profile`] when a private
-/// [`Profile`](crate::params::Profile) supplies the no-password stego secret.
+/// [`Profile`](crate::params::Profile) supplies the no-password secret.
 pub fn probe_carrier_capacity(
     carrier_bytes: &[u8],
-    options: &StegoOptions,
+    options: &ProbeOptions<'_>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     probe_carrier_capacity_with_profile(carrier_bytes, options, &Profile::default())
 }
@@ -418,89 +264,11 @@ pub fn probe_carrier_capacity(
 /// [`probe_carrier_capacity`] with an explicit private-dialect [`Profile`].
 pub fn probe_carrier_capacity_with_profile(
     carrier_bytes: &[u8],
-    options: &StegoOptions,
+    options: &ProbeOptions<'_>,
     profile: &Profile,
 ) -> Result<StegoCapacityInfo, StrHideError> {
-    options.png_params.validate()?;
-    options.jpeg_params.validate()?;
-
+    let engine = engine_for_carrier(carrier_bytes)?;
     // Same resolution as embed: an explicit password wins, the profile's stego
     // secret is the fallback, `None` means the public constant downstream.
-    let secret = options.secret(profile);
-    let domain = options.domain(profile);
-
-    let format = sniff_bytes(carrier_bytes);
-
-    if format == Some(FileFormat::Jpeg) {
-        let model =
-            CostModelRegistry::get_jpeg_model(options.algorithm.as_deref()).ok_or_else(|| {
-                StrHideError::General(format!(
-                    "Unknown or incompatible JPEG stego algorithm: {:?}",
-                    options.algorithm
-                ))
-            })?;
-        jpeg::probe_jpeg_capacity(
-            carrier_bytes,
-            &*model,
-            &options.jpeg_params,
-            options.safety.level,
-            profile.jpeg_format(),
-        )
-    } else if format == Some(FileFormat::Png) {
-        let model = CostModelRegistry::get_spatial_model(options.algorithm.as_deref()).ok_or_else(
-            || {
-                StrHideError::General(format!(
-                    "Unknown or incompatible spatial stego algorithm: {:?}",
-                    options.algorithm
-                ))
-            },
-        )?;
-        png::probe_png_capacity(
-            carrier_bytes,
-            &*model,
-            &options.png_params,
-            options.safety.level,
-            secret,
-            domain,
-            profile.png_format(),
-        )
-    } else if format == Some(FileFormat::Heif) {
-        // Same order as embed/extract: Scheme C first, bridge as the fallback.
-        // A probe that advertises the bridge's capacity while the writer fills
-        // the CABAC stream (or the other way round) is worse than useless.
-        if options.algorithm.as_deref() == Some("hevc")
-            || options.algorithm.as_deref() == Some("cabac")
-        {
-            hevc::probe_hevc_capacity_info(
-                carrier_bytes,
-                profile.hevc_format(),
-                options.safety.level,
-                options.exact,
-            )
-        } else {
-            match hevc::probe_hevc_capacity_info(
-                carrier_bytes,
-                profile.hevc_format(),
-                options.safety.level,
-                options.exact,
-            ) {
-                Ok(info) => Ok(info),
-                Err(_) => heif::probe_heif_bridge_capacity(carrier_bytes, options, profile),
-            }
-        }
-    } else if matches!(format, Some(FileFormat::Mp4 | FileFormat::HevcAnnexB)) {
-        // MP4/MOV video container, or a raw Annex-B bitstream: one entry point,
-        // the container decides where the slice NALs live.
-        hevc::probe_hevc_capacity_info(
-            carrier_bytes,
-            profile.hevc_format(),
-            options.safety.level,
-            options.exact,
-        )
-    } else {
-        Err(StrHideError::UnsupportedFormat(
-            "Content-adaptive steganography requires a PNG, JPEG, HEIF/HEIC, or HEVC carrier (Annex-B or MP4/MOV)"
-                .into(),
-        ))
-    }
+    engine.probe(carrier_bytes, options, &profile.stego)
 }

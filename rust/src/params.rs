@@ -29,7 +29,7 @@
 //!
 //! Runtime credentials (CLI flags, config files, environment variables) do
 //! **not** belong here: they are per-operation and are carried by
-//! [`crate::structure::WriteOptions`] / [`crate::stego::StegoOptions`], whose
+//! [`crate::structure::WriteOptions`] / [`crate::stego::EmbedOptions`], whose
 //! explicit value always wins over the profile's static default.
 //!
 //! Splitting this way (instead of the earlier `EngineConfig` / `ReadConfig`
@@ -251,7 +251,7 @@ impl LocalParams {
 /// in the carrier, so embed and extract must be given the same value. A
 /// mismatch surfaces as `NoHiddenData` -- the same "silently unreadable" shape
 /// as a wrong password, which is why this lives with the secret and not with
-/// the tuning knobs in [`StegoOptions`](crate::stego::StegoOptions).
+/// the tuning knobs in [`EmbedOptions`](crate::stego::EmbedOptions).
 ///
 /// The secret is deliberately **not** the structure-domain
 /// [`Profile::default_secret`]: the two subsystems derive keys in different

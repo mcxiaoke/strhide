@@ -13,8 +13,12 @@
 use std::process::ExitCode;
 
 use sha2::{Digest, Sha256};
+use strhide::core::payload::Payload;
 use strhide::stego::prng::deterministic_payload;
-use strhide::stego::{Freshness, StegoOptions, embed_carrier, extract_carrier};
+use strhide::stego::{
+    EmbedOptions, ExtractOptions, Freshness, HevcMode, JpegAlgorithm, SpatialAlgorithm,
+    StegoTuning, embed_carrier, extract_carrier,
+};
 
 const DEFAULT_BYTES: usize = 1024;
 const DEFAULT_SEED: u64 = 1;
@@ -107,17 +111,21 @@ fn main() -> ExitCode {
 
     let payload = deterministic_payload(args.bytes, args.seed);
 
-    let mut options = StegoOptions {
-        algorithm: args.algorithm.clone(),
-        password: args.password.clone(),
+    let tuning = match tuning_for(args.algorithm.as_deref()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("repro_embed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let options = EmbedOptions {
+        password: args.password.as_deref(),
+        tuning,
         freshness: Freshness::Seeded(seed_bytes(args.seed)),
         ..Default::default()
     };
-    // `embed_carrier` flips this on too; setting it here keeps the example
-    // explicit about what reproducible mode costs.
-    options.jpeg_params.deterministic = true;
 
-    let stego = match embed_carrier(&carrier, &payload, &options) {
+    let stego = match embed_carrier(&carrier, &Payload::bytes(&payload), &options) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("repro_embed: embed failed: {e}");
@@ -127,11 +135,10 @@ fn main() -> ExitCode {
 
     // Round-trip immediately: a reproducible digest of the wrong payload is
     // worse than no digest at all.
-    let mut read_options = StegoOptions {
-        password: args.password.clone(),
+    let read_options = ExtractOptions {
+        password: args.password.as_deref(),
         ..Default::default()
     };
-    read_options.freshness = Freshness::Random;
     match extract_carrier(&stego, &read_options) {
         Ok(back) if back == payload => {}
         Ok(_) => {
@@ -159,6 +166,36 @@ fn main() -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+/// Map `--algo` onto a typed tuning arm.
+///
+/// The name already says which format's model it is, so the carrier does not
+/// have to be sniffed first; a mismatched carrier is rejected by the engine.
+fn tuning_for(algorithm: Option<&str>) -> Result<StegoTuning, String> {
+    let Some(name) = algorithm else {
+        return Ok(StegoTuning::Auto);
+    };
+    let name = name.trim();
+    if name == "auto" {
+        return Ok(StegoTuning::Auto);
+    }
+    if let Some(model) = SpatialAlgorithm::from_name(name) {
+        return Ok(StegoTuning::Png {
+            model,
+            params: Default::default(),
+        });
+    }
+    if let Some(model) = JpegAlgorithm::from_name(name) {
+        return Ok(StegoTuning::Jpeg {
+            model,
+            params: Default::default(),
+        });
+    }
+    if let Some(mode) = HevcMode::from_name(name) {
+        return Ok(StegoTuning::hevc(mode));
+    }
+    Err(format!("unknown algorithm '{name}'"))
 }
 
 /// Spread the 64-bit seed over 32 bytes so every seed maps to a distinct key.

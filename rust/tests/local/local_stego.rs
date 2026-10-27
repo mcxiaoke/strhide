@@ -59,9 +59,10 @@ pub mod batch_stego {
 
     use rayon::prelude::*;
     use strhide::analysis::scan_file;
+    use strhide::core::payload::Payload;
     use strhide::errors::StrHideError;
     use strhide::stego::{
-        StegoCapacityInfo, StegoCodec, StegoOptions, embed_carrier, extract_carrier,
+        EmbedOptions, StegoCapacityInfo, StegoCodec, embed_carrier, extract_carrier,
         probe_carrier_capacity,
     };
 
@@ -70,15 +71,10 @@ pub mod batch_stego {
     const TEST_PASSWORD: &str = "BatchStegoP@ssword2026!";
     const WRONG_PASSWORD: &str = "IncorrectPassword999!";
 
-    /// Matrix-coding layer for the whole sweep, from `STRHIDE_STEGO_CODEC`:
-    /// `hamming` (default), `stc`, `stc2` or `stc3`.
-    ///
-    /// The knob is applied to both engines so PNG and JPEG carriers in the same run
-    /// are exercised under the same code, which is the point of a corpus sweep:
-    /// `--codec stc --stc-u 2` must still round-trip 100% of the accepted files,
-    /// even though its capacity is lower and some carriers will legitimately refuse
-    /// the larger payloads.
-    fn codec_options() -> StegoOptions {
+    /// Spatial codec override from `STRHIDE_STEGO_CODEC`, applied to the PNG
+    /// arm only: JPEG V3 is STC-only and derives its group size from the slot
+    /// budget, so the codec knob never applied to the DCT engine.
+    fn codec_options(carrier: &[u8]) -> EmbedOptions<'static> {
         let raw = std::env::var("STRHIDE_STEGO_CODEC").unwrap_or_default();
         let (codec, u) = match raw.to_ascii_lowercase().as_str() {
             "" | "hamming" => (StegoCodec::Hamming, 1u8),
@@ -87,11 +83,13 @@ pub mod batch_stego {
             "stc3" => (StegoCodec::Stc, 3),
             other => panic!("STRHIDE_STEGO_CODEC must be hamming|stc|stc1|stc2|stc3, got {other}"),
         };
-        let mut opts = StegoOptions::default();
-        opts.png_params.codec = codec;
-        opts.png_params.stc_u = u;
-        // JPEG V3 is STC-only and derives its group size from the slot budget, so
-        // the codec knob only applies to the spatial engine.
+        if strhide::formats::sniff::sniff_bytes(carrier) != Some(strhide::formats::FileFormat::Png)
+        {
+            return EmbedOptions::default();
+        }
+        let mut opts = EmbedOptions::default();
+        opts.png_params_mut().codec = codec;
+        opts.png_params_mut().stc_u = u;
         opts
     }
 
@@ -264,8 +262,8 @@ pub mod batch_stego {
 
                 if is_apng || is_indexed || is_progressive_jpg || is_interlaced_png {
                     let payload = b"Test rejection payload";
-                    let opt = codec_options();
-                    let res = embed_carrier(&file_bytes, payload, &opt);
+                    let opt = codec_options(&file_bytes);
+                    let res = embed_carrier(&file_bytes, &Payload::bytes(payload), &opt);
                     match res {
                         Err(StrHideError::UnsupportedFormat(msg)) => {
                             let format = if is_apng {
@@ -307,8 +305,8 @@ pub mod batch_stego {
                 }
 
                 // 2. Normal valid carrier: probe capacity
-                let opt_probe = codec_options();
-                let cap: StegoCapacityInfo = match probe_carrier_capacity(&file_bytes, &opt_probe) {
+                let opt_probe = codec_options(&file_bytes);
+                let cap: StegoCapacityInfo = match probe_carrier_capacity(&file_bytes, &opt_probe.probe_options()) {
                     Ok(c) => c,
                     Err(e) => {
                         panic!("Failed to probe capacity for {filename}: {e:?}");
@@ -324,11 +322,11 @@ pub mod batch_stego {
 
                 // 3. Roundtrip Test 1: Small payload (64 bytes) with password
                 let payload1 = deterministic_bytes(64, 1001);
-                let mut opt_enc = codec_options();
-                opt_enc.password = Some(TEST_PASSWORD.to_string());
+                let mut opt_enc = codec_options(&file_bytes);
+                opt_enc.password = Some(TEST_PASSWORD);
 
                 let t_embed_start = Instant::now();
-                let stego_bytes = embed_carrier(&file_bytes, &payload1, &opt_enc)
+                let stego_bytes = embed_carrier(&file_bytes, &Payload::bytes(&payload1), &opt_enc)
                     .unwrap_or_else(|e| panic!("Embedding 64B failed on {filename}: {e:?}"));
                 let embed_ms = t_embed_start.elapsed().as_millis();
 
@@ -338,7 +336,7 @@ pub mod batch_stego {
 
                 // Extract with correct password
                 let t_ext_start = Instant::now();
-                let extracted1 = extract_carrier(&stego_bytes, &opt_enc)
+                let extracted1 = extract_carrier(&stego_bytes, &opt_enc.extract_options())
                     .unwrap_or_else(|e| panic!("Extraction failed on {filename}: {e:?}"));
                 let extract_ms = t_ext_start.elapsed().as_millis();
 
@@ -348,8 +346,8 @@ pub mod batch_stego {
                 );
 
                 // Denial on wrong password
-                opt_enc.password = Some(WRONG_PASSWORD.to_string());
-                let wrong_res = extract_carrier(&stego_bytes, &opt_enc);
+                opt_enc.password = Some(WRONG_PASSWORD);
+                let wrong_res = extract_carrier(&stego_bytes, &opt_enc.extract_options());
                 assert!(
                     matches!(wrong_res, Err(StrHideError::NoHiddenData(_))),
                     "Wrong password should return NoHiddenData on {filename}, got: {wrong_res:?}"
@@ -358,11 +356,11 @@ pub mod batch_stego {
                 // 4. Roundtrip Test 2: Medium payload without password
                 let medium_size = 1024.min(cap.recommended_max_bytes.max(64));
                 let payload2 = deterministic_bytes(medium_size, 2002);
-                let opt_plain = codec_options();
-                let stego_bytes2 = embed_carrier(&file_bytes, &payload2, &opt_plain).unwrap_or_else(|e| {
+                let opt_plain = codec_options(&file_bytes);
+                let stego_bytes2 = embed_carrier(&file_bytes, &Payload::bytes(&payload2), &opt_plain).unwrap_or_else(|e| {
                     panic!("Embedding medium {medium_size}B failed on {filename}: {e:?}")
                 });
-                let extracted2 = extract_carrier(&stego_bytes2, &opt_plain).unwrap_or_else(|e| {
+                let extracted2 = extract_carrier(&stego_bytes2, &opt_plain.extract_options()).unwrap_or_else(|e| {
                     panic!("Extracting medium {medium_size}B failed on {filename}: {e:?}")
                 });
                 assert_eq!(
@@ -373,7 +371,7 @@ pub mod batch_stego {
                 // 5. Oversize rejection test
                 let oversize_len = cap.max_raw_payload_bytes + 20_000;
                 let oversize_payload = deterministic_bytes(oversize_len, 3003);
-                let oversize_res = embed_carrier(&file_bytes, &oversize_payload, &opt_plain);
+                let oversize_res = embed_carrier(&file_bytes, &Payload::bytes(&oversize_payload), &opt_plain);
                 // Which diagnostic depends on the carrier: a complete table
                 // refuses on the geometric (u = 1) bound, an over-optimised one
                 // on the grouped bound reported by `--capacity` -- both are
@@ -414,9 +412,9 @@ pub mod batch_stego {
                 let mut huffman_limited = false;
                 let (high_scan_score, high_scan_verdict) = if cap.max_raw_payload_bytes >= 512 {
                     let high_payload = deterministic_bytes(high_load_size, 4004);
-                    match embed_carrier(&file_bytes, &high_payload, &opt_plain) {
+                    match embed_carrier(&file_bytes, &Payload::bytes(&high_payload), &opt_plain) {
                         Ok(high_stego) => {
-                            let high_extracted = extract_carrier(&high_stego, &opt_plain)
+                            let high_extracted = extract_carrier(&high_stego, &opt_plain.extract_options())
                                 .unwrap_or_else(|e| {
                                     panic!("High-load extract failed on {filename}: {e:?}")
                                 });
@@ -715,8 +713,9 @@ pub mod eval {
 
     use rayon::prelude::*;
     use strhide::analysis::scan_file;
+    use strhide::core::payload::Payload;
     use strhide::stego::{
-        PngParams, StegoOptions, embed_carrier,
+        EmbedOptions, PngParams, embed_carrier,
         png::{HillCostModel, decode_png},
         traits::PngCostModel,
     };
@@ -1089,13 +1088,14 @@ pub mod eval {
                     }
 
                     let payload = generate_pseudo_payload(payload_len, 0xACE1234 + idx as u64);
-                    let opts = StegoOptions {
-                        password: Some(TEST_PASSWORD.into()),
+                    let opts = EmbedOptions {
+                        password: Some(TEST_PASSWORD),
                         ..Default::default()
                     };
 
                     let t0 = Instant::now();
-                    let stego_bytes = embed_carrier(&raw_bytes, &payload, &opts).ok()?;
+                    let stego_bytes =
+                        embed_carrier(&raw_bytes, &Payload::bytes(&payload), &opts).ok()?;
                     let embed_dur = t0.elapsed();
 
                     let stego_decoded = decode_png(&stego_bytes).ok()?;
@@ -1237,8 +1237,11 @@ pub mod v3_corpus {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use strhide::core::payload::Payload;
     use strhide::errors::StrHideError;
-    use strhide::stego::{StegoOptions, embed_carrier, extract_carrier};
+    use strhide::stego::{
+        EmbedOptions, JpegAlgorithm, JpegParams, StegoTuning, embed_carrier, extract_carrier,
+    };
 
     fn corpus(rel: &str) -> Option<PathBuf> {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1279,9 +1282,9 @@ pub mod v3_corpus {
         out
     }
 
-    fn extract_opts(password: &str) -> StegoOptions {
-        StegoOptions {
-            password: Some(password.into()),
+    fn password_options(password: &str) -> EmbedOptions<'_> {
+        EmbedOptions {
+            password: Some(password),
             ..Default::default()
         }
     }
@@ -1310,9 +1313,12 @@ pub mod v3_corpus {
         }
 
         let password = "MatrixGate#2026";
-        let opts = StegoOptions {
-            algorithm: Some("uerd".into()),
-            password: Some(password.into()),
+        let opts = EmbedOptions {
+            tuning: StegoTuning::Jpeg {
+                model: JpegAlgorithm::Uerd,
+                params: JpegParams::default(),
+            },
+            password: Some(password),
             ..Default::default()
         };
         let done = AtomicUsize::new(0);
@@ -1320,7 +1326,7 @@ pub mod v3_corpus {
             let cover = std::fs::read(path).expect("read cover");
             for size in [4096usize, 16384, 65536] {
                 let payload = incompressible(size, (size as u64) ^ 0x5EED);
-                let stego = match embed_carrier(&cover, &payload, &opts) {
+                let stego = match embed_carrier(&cover, &Payload::bytes(&payload), &opts) {
                     Ok(stego) => stego,
                     Err(StrHideError::General(message))
                         if message.contains("Capacity exceeded") =>
@@ -1329,9 +1335,10 @@ pub mod v3_corpus {
                     }
                     Err(e) => panic!("{}: {size} B: embed failed: {e}", path.display()),
                 };
-                let recovered = extract_carrier(&stego, &opts).unwrap_or_else(|e| {
-                    panic!("{}: {size} B: extract failed: {e}", path.display())
-                });
+                let recovered =
+                    extract_carrier(&stego, &opts.extract_options()).unwrap_or_else(|e| {
+                        panic!("{}: {size} B: extract failed: {e}", path.display())
+                    });
                 assert_eq!(recovered, payload, "{}: {size} B", path.display());
                 done.fetch_add(1, Ordering::Relaxed);
             }
@@ -1390,10 +1397,15 @@ pub mod v3_corpus {
                         path.display()
                     );
                 }
-                let stego = embed_carrier(&cover, &payload, &extract_opts(password))
-                    .unwrap_or_else(|e| panic!("{}: embed failed: {e}", path.display()));
-                let recovered = extract_carrier(&stego, &extract_opts(password))
-                    .unwrap_or_else(|e| panic!("{}: extract failed: {e}", path.display()));
+                let stego = embed_carrier(
+                    &cover,
+                    &Payload::bytes(&payload),
+                    &password_options(password),
+                )
+                .unwrap_or_else(|e| panic!("{}: embed failed: {e}", path.display()));
+                let recovered =
+                    extract_carrier(&stego, &password_options(password).extract_options())
+                        .unwrap_or_else(|e| panic!("{}: extract failed: {e}", path.display()));
                 assert_eq!(recovered, payload, "{}", path.display());
                 checked += 1;
             }

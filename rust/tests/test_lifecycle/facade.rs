@@ -7,9 +7,10 @@
 //! carrier forms (path / bytes), and that a private dialect bound on an engine
 //! is isolated from the official engine.
 
+use strhide::core::payload::Payload;
 use strhide::facade::StrHide;
 use strhide::params::Profile;
-use strhide::stego::StegoOptions;
+use strhide::stego::{EmbedOptions, ExtractOptions, ProbeOptions};
 use strhide::structure::{PayloadSource, WriteOptions};
 
 use crate::common::scratch;
@@ -119,19 +120,23 @@ fn structure_path_inspect_and_verify() {
 #[test]
 fn content_bytes_embed_extract_roundtrip() {
     let engine = StrHide::new();
-    let options = StegoOptions::default();
+    let options = EmbedOptions::default();
 
-    let stego = engine.embed(JPG, CONTENT_PAYLOAD, &options).expect("embed");
+    let stego = engine
+        .embed(JPG, &Payload::bytes(CONTENT_PAYLOAD), &options)
+        .expect("embed");
     assert_ne!(stego, JPG);
 
-    let extracted = engine.extract(&stego, &options).expect("extract");
+    let extracted = engine
+        .extract(&stego, &options.extract_options())
+        .expect("extract");
     assert_eq!(extracted, CONTENT_PAYLOAD);
 }
 
 #[test]
 fn content_bytes_probe_reports_capacity() {
     let engine = StrHide::new();
-    let options = StegoOptions::default();
+    let options = ProbeOptions::default();
     let cap = engine.probe(JPG, &options).expect("probe");
     assert!(cap.recommended_max_bytes > 0);
 }
@@ -146,14 +151,20 @@ fn content_file_embed_and_extract_roundtrip() {
     let output = dir.join("extracted.bin");
 
     let engine = StrHide::new();
-    let options = StegoOptions::default();
+    let options = EmbedOptions::default();
 
     engine
-        .embed_file(&carrier, None, CONTENT_PAYLOAD, &options, false)
+        .embed_file(
+            &carrier,
+            None,
+            &Payload::bytes(CONTENT_PAYLOAD),
+            &options,
+            false,
+        )
         .expect("embed_file");
 
     engine
-        .extract_file(&carrier, &output, &options, false)
+        .extract_file(&carrier, &output, &ExtractOptions::default(), false)
         .expect("extract_file");
     assert_eq!(
         std::fs::read(&output).expect("read output"),
@@ -169,9 +180,15 @@ fn content_file_embed_to_target_leaves_original_untouched() {
     let target = dir.join("target.jpg");
 
     let engine = StrHide::new();
-    let options = StegoOptions::default();
+    let options = EmbedOptions::default();
     engine
-        .embed_file(&carrier, Some(&target), CONTENT_PAYLOAD, &options, false)
+        .embed_file(
+            &carrier,
+            Some(&target),
+            &Payload::bytes(CONTENT_PAYLOAD),
+            &options,
+            false,
+        )
         .expect("embed_file to target");
 
     assert_eq!(std::fs::read(&carrier).expect("read carrier"), JPG);

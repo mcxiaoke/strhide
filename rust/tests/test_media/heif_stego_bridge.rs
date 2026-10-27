@@ -1,8 +1,9 @@
 // Copyright (c) 2026 strhide developers
 // SPDX-License-Identifier: Apache-2.0
 
+use strhide::core::payload::Payload;
 use strhide::errors::StrHideError;
-use strhide::stego::{StegoOptions, embed_carrier, extract_carrier};
+use strhide::stego::{EmbedOptions, embed_carrier, extract_carrier};
 
 #[test]
 fn test_heif_bridge_unsupported_carrier_fails_gracefully() {
@@ -16,15 +17,15 @@ fn test_heif_bridge_unsupported_carrier_fails_gracefully() {
     stub.extend_from_slice(b"free");
 
     let payload = b"test payload";
-    let opts = StegoOptions::default();
-    let res = embed_carrier(&stub, payload, &opts);
+    let opts = EmbedOptions::default();
+    let res = embed_carrier(&stub, &Payload::bytes(payload), &opts);
     assert!(
         matches!(res, Err(StrHideError::UnsupportedFormat(_))),
         "HEIF with no bridgeable thumbnail must return UnsupportedFormat, got {:?}",
         res
     );
 
-    let ext_res = extract_carrier(&stub, &opts);
+    let ext_res = extract_carrier(&stub, &opts.extract_options());
     assert!(
         matches!(ext_res, Err(StrHideError::NoHiddenData(_))),
         "Extracting from HEIF with no bridgeable thumbnail must return NoHiddenData, got {:?}",

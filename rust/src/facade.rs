@@ -57,14 +57,17 @@ use std::path::Path;
 #[cfg(feature = "content")]
 use std::path::PathBuf;
 
+#[cfg(feature = "content")]
+use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::params::{LocalParams, Profile};
 #[cfg(feature = "content")]
 use crate::stego::io::{embed_carrier_file, extract_carrier_file};
 #[cfg(feature = "content")]
-use crate::stego::{StegoCapacityInfo, StegoOptions, probe_carrier_capacity_with_profile};
-#[cfg(feature = "content")]
-use crate::stego::{embed_carrier_with_profile, extract_carrier_with_profile};
+use crate::stego::{
+    EmbedOptions, ExtractOptions, ProbeOptions, StegoCapacityInfo, embed_carrier_with_profile,
+    extract_carrier_with_profile, probe_carrier_capacity_with_profile,
+};
 use crate::structure::{
     InspectResult, PayloadSource, ReadResult, RemoveResult, VerifyResult, WriteOptions,
     WriteResult, inspect_carrier_bytes, inspect_carrier_with, read_carrier_bytes,
@@ -284,15 +287,19 @@ impl StrHide {
     pub fn embed(
         &self,
         carrier: &[u8],
-        payload: &[u8],
-        options: &StegoOptions,
+        payload: &Payload<'_>,
+        options: &EmbedOptions<'_>,
     ) -> Result<Vec<u8>, StrHideError> {
         embed_carrier_with_profile(carrier, payload, options, &self.profile)
     }
 
     #[cfg(feature = "content")]
     /// Extract the payload from an in-memory image carrier.
-    pub fn extract(&self, carrier: &[u8], options: &StegoOptions) -> Result<Vec<u8>, StrHideError> {
+    pub fn extract(
+        &self,
+        carrier: &[u8],
+        options: &ExtractOptions<'_>,
+    ) -> Result<Vec<u8>, StrHideError> {
         extract_carrier_with_profile(carrier, options, &self.profile)
     }
 
@@ -301,7 +308,7 @@ impl StrHide {
     pub fn probe(
         &self,
         carrier: &[u8],
-        options: &StegoOptions,
+        options: &ProbeOptions<'_>,
     ) -> Result<StegoCapacityInfo, StrHideError> {
         probe_carrier_capacity_with_profile(carrier, options, &self.profile)
     }
@@ -322,8 +329,8 @@ impl StrHide {
         &self,
         carrier: &Path,
         target: Option<&Path>,
-        payload: &[u8],
-        options: &StegoOptions,
+        payload: &Payload<'_>,
+        options: &EmbedOptions<'_>,
         backup: bool,
     ) -> Result<Option<PathBuf>, StrHideError> {
         embed_carrier_file(carrier, target, payload, options, &self.profile, backup)
@@ -338,7 +345,7 @@ impl StrHide {
         &self,
         carrier: &Path,
         output: &Path,
-        options: &StegoOptions,
+        options: &ExtractOptions<'_>,
         overwrite: bool,
     ) -> Result<PathBuf, StrHideError> {
         let data = extract_carrier_file(carrier, options, &self.profile)?;

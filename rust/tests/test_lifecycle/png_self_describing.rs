@@ -16,11 +16,15 @@
 //! 2. the feature word carries the model's wire id, and extraction follows the
 //!    carrier's declaration rather than the caller's guess.
 
+use strhide::core::payload::Payload;
 use strhide::stego::png::engine::{SPATIAL_ELIGIBLE_MAX, SPATIAL_ELIGIBLE_MIN};
 use strhide::stego::png::{RawImage, decode_png, encode_png};
 use strhide::stego::registry::CostModelRegistry;
 use strhide::stego::traits::PngCostModel;
-use strhide::stego::{PngParams, StegoOptions, embed_carrier, extract_carrier};
+use strhide::stego::{
+    EmbedOptions, ExtractOptions, PngParams, SpatialAlgorithm, StegoTuning, embed_carrier,
+    extract_carrier,
+};
 
 /// Deterministic high-frequency texture, so the carrier is embeddable.
 fn texture_png(w: u32, h: u32) -> Vec<u8> {
@@ -111,7 +115,12 @@ impl PngCostModel for ImpostorModel {
 #[test]
 fn the_carrier_declares_which_model_wrote_it() {
     let png = texture_png(96, 96);
-    let stego = embed_carrier(&png, b"self-describing", &StegoOptions::default()).expect("embed");
+    let stego = embed_carrier(
+        &png,
+        &Payload::bytes(b"self-describing"),
+        &EmbedOptions::default(),
+    )
+    .expect("embed");
 
     let fw = read_feature_word(&stego);
     assert_eq!(
@@ -125,7 +134,8 @@ fn the_carrier_declares_which_model_wrote_it() {
 fn extraction_follows_the_carrier_not_the_caller() {
     let png = texture_png(96, 96);
     let payload = b"the declaration wins over the caller";
-    let stego = embed_carrier(&png, payload, &StegoOptions::default()).expect("embed");
+    let stego =
+        embed_carrier(&png, &Payload::bytes(payload), &EmbedOptions::default()).expect("embed");
 
     // The caller asks for a model that has nothing to do with this carrier.
     let got = strhide::stego::png::engine::extract_png(
@@ -157,11 +167,15 @@ fn a_suniward_carrier_extracts_while_the_caller_defaults_to_hill() {
     let png = texture_png(96, 96);
     let payload = b"written by suniward, read by hill defaults";
 
-    let write = StegoOptions {
-        algorithm: Some("suniward".into()),
+    let write = EmbedOptions {
+        tuning: StegoTuning::Png {
+            model: SpatialAlgorithm::Suniward,
+            params: PngParams::default(),
+        },
         ..Default::default()
     };
-    let stego = embed_carrier(&png, payload, &write).expect("embed with S-UNIWARD");
+    let stego =
+        embed_carrier(&png, &Payload::bytes(payload), &write).expect("embed with S-UNIWARD");
 
     let fw = read_feature_word(&stego);
     assert_eq!(
@@ -172,19 +186,9 @@ fn a_suniward_carrier_extracts_while_the_caller_defaults_to_hill() {
 
     // Extraction with the default options: `algorithm` is None, so the caller
     // offers HILL. The carrier's declaration must win.
-    let got = extract_carrier(&stego, &StegoOptions::default())
+    let got = extract_carrier(&stego, &ExtractOptions::default())
         .expect("extraction must follow the carrier, not the default model");
     assert_eq!(got, payload);
-
-    // And naming a *different* model explicitly must not change the outcome.
-    let read = StegoOptions {
-        algorithm: Some("hill".into()),
-        ..Default::default()
-    };
-    assert_eq!(
-        extract_carrier(&stego, &read).expect("explicit hill"),
-        payload
-    );
 }
 
 #[test]
@@ -192,21 +196,25 @@ fn non_default_exclusion_rate_extracts_with_default_options() {
     let png = texture_png(96, 96);
     let payload = b"written with non-default exclusion rate 0.45";
 
-    let write = StegoOptions {
-        png_params: PngParams {
-            exclusion_percentile: 0.45,
-            ..Default::default()
+    let write = EmbedOptions {
+        tuning: StegoTuning::Png {
+            model: SpatialAlgorithm::default(),
+            params: PngParams {
+                exclusion_percentile: 0.45,
+                ..Default::default()
+            },
         },
         ..Default::default()
     };
-    let stego = embed_carrier(&png, payload, &write).expect("embed with exclusion rate 0.45");
+    let stego = embed_carrier(&png, &Payload::bytes(payload), &write)
+        .expect("embed with exclusion rate 0.45");
 
     let fw = read_feature_word(&stego);
     assert_eq!(fw.exclusion_permille, 450);
 
     // Extraction with default options (exclusion_percentile = 0.30).
     // The self-describing exclusion_permille must be respected so slot ranking synchronises.
-    let got = extract_carrier(&stego, &StegoOptions::default())
+    let got = extract_carrier(&stego, &ExtractOptions::default())
         .expect("extraction must use carrier's exclusion_permille");
     assert_eq!(got, payload);
 }

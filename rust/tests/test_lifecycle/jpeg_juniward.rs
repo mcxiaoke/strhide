@@ -15,10 +15,14 @@
 
 use std::time::Instant;
 
+use strhide::core::payload::Payload;
 use strhide::stego::jpeg::cost::{JuniwardCostModel, UerdCostModel};
 use strhide::stego::jpeg::geometry::geometry_for_carrier;
 use strhide::stego::traits::JpegCostModel;
-use strhide::stego::{JpegParams, StegoOptions, embed_carrier, extract_carrier};
+use strhide::stego::{
+    EmbedOptions, ExtractOptions, JpegAlgorithm, JpegParams, StegoTuning, embed_carrier,
+    extract_carrier,
+};
 
 const COVER: &[u8] = include_bytes!("../assets/small.jpg");
 
@@ -34,9 +38,15 @@ fn payload() -> Vec<u8> {
     out
 }
 
-fn options(algorithm: Option<&str>) -> StegoOptions {
-    StegoOptions {
-        algorithm: algorithm.map(str::to_string),
+fn options(algorithm: Option<&str>) -> EmbedOptions<'static> {
+    EmbedOptions {
+        tuning: match algorithm {
+            None => StegoTuning::Auto,
+            Some(name) => StegoTuning::Jpeg {
+                model: JpegAlgorithm::from_name(name).expect("a known JPEG model"),
+                params: JpegParams::default(),
+            },
+        },
         ..Default::default()
     }
 }
@@ -44,13 +54,14 @@ fn options(algorithm: Option<&str>) -> StegoOptions {
 #[test]
 fn juniward_carrier_roundtrips_without_naming_the_algorithm() {
     let payload = payload();
-    let stego =
-        embed_carrier(COVER, &payload, &options(Some("juniward"))).expect("embed with J-UNIWARD");
+    let stego = embed_carrier(COVER, &Payload::bytes(&payload), &options(Some("juniward")))
+        .expect("embed with J-UNIWARD");
     assert_ne!(stego, COVER, "the carrier must change");
 
     // Extraction must not need the algorithm: the JPEG slot set is geometric
     // and keyed, so a new cost model cannot affect it.
-    let back = extract_carrier(&stego, &options(None)).expect("extract without naming a model");
+    let back = extract_carrier(&stego, &ExtractOptions::default())
+        .expect("extract without naming a model");
     assert_eq!(back, payload);
 }
 
@@ -59,7 +70,8 @@ fn juniward_leaves_the_cover_digest_and_dc_alone() {
     // The model must not embed into DC: the body slot grid excludes it, but a
     // cost model that priced DC as cheap could tempt a future rule change.
     let payload = payload();
-    let stego = embed_carrier(COVER, &payload, &options(Some("juniward"))).expect("embed");
+    let stego =
+        embed_carrier(COVER, &Payload::bytes(&payload), &options(Some("juniward"))).expect("embed");
 
     let before = dct_io::read_coefficients(COVER).expect("cover coefficients");
     let after = dct_io::read_coefficients(&stego).expect("stego coefficients");

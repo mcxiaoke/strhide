@@ -195,12 +195,16 @@ pub mod heif_bridge {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    use strhide::core::payload::Payload;
     use strhide::errors::StrHideError;
     use strhide::params::Profile;
     use strhide::stego::heif::{
         embed_heif_bridge, extract_heif_bridge, probe_heif_bridge_capacity,
     };
-    use strhide::stego::{StegoOptions, embed_carrier, extract_carrier, probe_carrier_capacity};
+    use strhide::stego::{
+        BridgeOptions, EmbedOptions, ExtractParams, HevcMode, StegoTuning, embed_carrier,
+        extract_carrier, probe_carrier_capacity,
+    };
 
     fn resolve_hevc_corpus() -> Option<PathBuf> {
         if let Ok(val) = std::env::var("STRHIDE_HEVC_CORPUS") {
@@ -263,8 +267,7 @@ pub mod heif_bridge {
         let orig_bytes = fs::read(sample_path).expect("read original HEIC");
 
         // 1. Probe capacity
-        let options = StegoOptions::default();
-        let cap = probe_heif_bridge_capacity(&orig_bytes, &options, &profile)
+        let cap = probe_heif_bridge_capacity(&orig_bytes, &BridgeOptions::new(&profile.stego))
             .expect("probe bridge capacity");
         assert_eq!(cap.format, "HEIF (JPEG Thumbnail Bridge)");
         assert!(
@@ -275,13 +278,12 @@ pub mod heif_bridge {
 
         // 2. Embed payload
         let payload = b"Hello from strhide content-domain bridge steganography in HEIC thumbnail!";
-        let embed_opts = StegoOptions {
-            password: Some("bridge_pass_2026".into()),
-            ..Default::default()
-        };
-
-        let stego_bytes = embed_heif_bridge(&orig_bytes, payload, &embed_opts, &profile)
-            .expect("embed carrier into HEIF thumbnail bridge");
+        let stego_bytes = embed_heif_bridge(
+            &orig_bytes,
+            payload,
+            &BridgeOptions::new(&profile.stego).with_password("bridge_pass_2026"),
+        )
+        .expect("embed carrier into HEIF thumbnail bridge");
 
         assert!(!stego_bytes.is_empty());
         // Primary content is preserved; file size should remain close to original (slight delta for JPEG Huffman re-encoding)
@@ -293,23 +295,23 @@ pub mod heif_bridge {
         );
 
         // 3. Extract payload with matching password
-        let extract_opts = StegoOptions {
-            password: Some("bridge_pass_2026".into()),
-            ..Default::default()
-        };
-        let extracted = extract_heif_bridge(&stego_bytes, &extract_opts, &profile)
-            .expect("extract with correct password");
+        let extracted = extract_heif_bridge(
+            &stego_bytes,
+            &BridgeOptions::new(&profile.stego).with_password("bridge_pass_2026"),
+            &ExtractParams::default(),
+        )
+        .expect("extract with correct password");
         assert_eq!(
             extracted, payload,
             "Extracted payload must match original 100%"
         );
 
         // 4. Extract with wrong password must fail cleanly as NoHiddenData
-        let wrong_opts = StegoOptions {
-            password: Some("wrong_password".into()),
-            ..Default::default()
-        };
-        let wrong_res = extract_heif_bridge(&stego_bytes, &wrong_opts, &profile);
+        let wrong_res = extract_heif_bridge(
+            &stego_bytes,
+            &BridgeOptions::new(&profile.stego).with_password("wrong_password"),
+            &ExtractParams::default(),
+        );
         assert!(
             matches!(wrong_res, Err(StrHideError::NoHiddenData(_))),
             "Wrong password must report NoHiddenData, got {:?}",
@@ -350,39 +352,45 @@ pub mod heif_bridge {
         let orig_bytes = fs::read(sample_path).expect("read original HEIC");
         let profile = Profile::default();
         let payload = b"router-prefers-scheme-c-2026";
-        let opts = StegoOptions {
-            password: Some("scheme_c_priority".into()),
+        let opts = EmbedOptions {
+            password: Some("scheme_c_priority"),
             ..Default::default()
         };
 
-        let cap = probe_carrier_capacity(&orig_bytes, &opts).expect("probe capacity");
+        let cap =
+            probe_carrier_capacity(&orig_bytes, &opts.probe_options()).expect("probe capacity");
         assert_eq!(
             cap.format, "HEIF/HEVC",
             "router must advertise the Scheme C carrier, not the bridge"
         );
 
-        let stego = embed_carrier(&orig_bytes, payload, &opts).expect("embed");
+        let stego = embed_carrier(&orig_bytes, &Payload::bytes(payload), &opts).expect("embed");
         assert_eq!(
             stego.len(),
             orig_bytes.len(),
             "Scheme C rewrites CABAC bins in place; the file size must not move"
         );
 
-        let explicit = StegoOptions {
-            algorithm: Some("hevc".into()),
+        let explicit = EmbedOptions {
+            tuning: StegoTuning::hevc(HevcMode::Cabac),
             ..opts.clone()
         };
-        let cabac = extract_carrier(&stego, &explicit)
+        let cabac = extract_carrier(&stego, &explicit.extract_options())
             .expect("explicit Scheme C extraction must find the payload");
         assert_eq!(cabac, payload);
 
-        let bridge = extract_heif_bridge(&stego, &opts, &profile);
+        let bridge = extract_heif_bridge(
+            &stego,
+            &BridgeOptions::new(&profile.stego).with_password("scheme_c_priority"),
+            &ExtractParams::default(),
+        );
         assert!(
             matches!(bridge, Err(StrHideError::NoHiddenData(_))),
             "the thumbnail bridge must stay empty, got {bridge:?}"
         );
 
-        let auto = extract_carrier(&stego, &opts).expect("default extraction agrees");
+        let auto =
+            extract_carrier(&stego, &opts.extract_options()).expect("default extraction agrees");
         assert_eq!(auto, payload);
     }
 
@@ -416,19 +424,19 @@ pub mod heif_bridge {
             let orig_bytes = fs::read(&sample_path).expect("read sample");
             let payload = format!("Batch test payload for {}", name).into_bytes();
 
-            let embed_opts = StegoOptions {
-                password: Some("batch_test_pass".into()),
+            let embed_opts = EmbedOptions {
+                password: Some("batch_test_pass"),
                 ..Default::default()
             };
 
-            let stego_bytes = embed_carrier(&orig_bytes, &payload, &embed_opts)
+            let stego_bytes = embed_carrier(&orig_bytes, &Payload::bytes(&payload), &embed_opts)
                 .unwrap_or_else(|e| panic!("Failed to embed in {}: {}", name, e));
 
-            let extract_opts = StegoOptions {
-                password: Some("batch_test_pass".into()),
+            let extract_opts = EmbedOptions {
+                password: Some("batch_test_pass"),
                 ..Default::default()
             };
-            let extracted = extract_carrier(&stego_bytes, &extract_opts)
+            let extracted = extract_carrier(&stego_bytes, &extract_opts.extract_options())
                 .unwrap_or_else(|e| panic!("Failed to extract from {}: {}", name, e));
 
             assert_eq!(extracted, payload, "Payload mismatch for {}", name);
@@ -462,15 +470,16 @@ pub mod heif_bridge {
         let orig_bytes = fs::read(&sample_path).expect("read original HEIC");
 
         let payload = b"Bit-exact visual fidelity test";
-        let opts = StegoOptions {
-            password: Some("fidelity_pw".into()),
-            ..Default::default()
-        };
+        let profile = Profile::default();
         // Bridge API, not the router: the router prefers Scheme C, which by
         // design perturbs the primary image. "Primary stays bit-exact" is the
         // bridge's own guarantee and has to be tested where it is implemented.
-        let stego_bytes =
-            embed_heif_bridge(&orig_bytes, payload, &opts, &Profile::default()).expect("embed");
+        let stego_bytes = embed_heif_bridge(
+            &orig_bytes,
+            payload,
+            &BridgeOptions::new(&profile.stego).with_password("fidelity_pw"),
+        )
+        .expect("embed");
 
         let py_bin = match find_python_command() {
             Some(bin) => bin,
@@ -1617,8 +1626,9 @@ pub mod annexb_sniff {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    use strhide::core::payload::Payload;
     use strhide::stego::hevc::sniff::is_hevc_annexb;
-    use strhide::stego::{StegoOptions, embed_carrier, extract_carrier, probe_carrier_capacity};
+    use strhide::stego::{EmbedOptions, embed_carrier, extract_carrier, probe_carrier_capacity};
 
     fn corpus_dir() -> Option<PathBuf> {
         if let Ok(val) = std::env::var("STRHIDE_HEVC_ANNEXB_DIR") {
@@ -1725,9 +1735,9 @@ pub mod annexb_sniff {
         };
 
         let payload = b"annexb-real-stream-roundtrip-2026";
-        let options = StegoOptions {
-            password: Some("annexb#corpus".into()),
-            ..StegoOptions::default()
+        let options = EmbedOptions {
+            password: Some("annexb#corpus"),
+            ..EmbedOptions::default()
         };
 
         // The frame-type gate (non-reference pictures only) leaves a short
@@ -1742,7 +1752,7 @@ pub mod annexb_sniff {
                 continue;
             }
             let bytes = fs::read(&candidate).expect("read carrier");
-            match probe_carrier_capacity(&bytes, &options) {
+            match probe_carrier_capacity(&bytes, &options.probe_options()) {
                 Ok(info) if info.max_raw_payload_bytes >= payload.len() => {
                     chosen = Some((name, bytes, info));
                     break;
@@ -1764,7 +1774,8 @@ pub mod annexb_sniff {
             info.available_slots, info.max_raw_payload_bytes
         );
 
-        let stego = embed_carrier(&bytes, payload, &options).expect("embed into a real stream");
+        let stego = embed_carrier(&bytes, &Payload::bytes(payload), &options)
+            .expect("embed into a real stream");
         assert_eq!(
             stego.len(),
             bytes.len(),
@@ -1774,7 +1785,7 @@ pub mod annexb_sniff {
             is_hevc_annexb(&stego),
             "the stego stream must still sniff as HEVC"
         );
-        let recovered = extract_carrier(&stego, &options).expect("extract");
+        let recovered = extract_carrier(&stego, &options.extract_options()).expect("extract");
         assert_eq!(recovered, payload, "round-trip must be byte-exact");
     }
 }

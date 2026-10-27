@@ -8,8 +8,14 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::core::config::{self, FileConfig};
 use crate::core::i18n::{self, Msg, t};
+use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::facade::StrHide;
+use crate::formats::FileFormat;
+use crate::stego::{
+    EmbedOptions, HevcMode, JpegAlgorithm, JpegParams, PngParams, ProbeOptions, SafetyEnforcement,
+    SafetyLevel, SafetyPolicy, SpatialAlgorithm, StegoTuning,
+};
 use crate::structure::registry::{ADAPTERS, find_adapter_or_reject};
 use crate::structure::{
     PayloadSource, RemoveResult, WriteOptions, WriteResult, inspect_carrier_with,
@@ -1787,60 +1793,130 @@ fn handle_list(args: ListArgs) -> Result<(), StrHideError> {
     Ok(())
 }
 
-/// Apply `--stc-h` to the option set.
-fn apply_stc_h(
-    options: &mut crate::stego::StegoOptions,
-    stc_h: Option<u8>,
-) -> Result<(), StrHideError> {
-    if let Some(h) = stc_h {
-        options.png_params.stc_h = h;
-        options.jpeg_params.stc_h = h;
-    }
-    options.png_params.validate()?;
-    options.jpeg_params.validate()?;
-    Ok(())
+/// Whether any per-format tuning flag was given.
+///
+/// A tuning arm can only be built once the carrier format is known, so this
+/// decides whether an unsniffable carrier is an error ("you asked for a PNG
+/// filter window, but this file is not an image") or just "use the defaults".
+fn has_per_format_flags(args: &StegoTuningArgs) -> bool {
+    args.exclusion_rate.is_some()
+        || args.neighbor_weight.is_some()
+        || args.slot_budget.is_some()
+        || args.cipher_suite.is_some()
+        || args.p1_window.is_some()
+        || args.p2_window.is_some()
+        || args.stc_h.is_some()
 }
 
-/// Assemble the stego option set for `embed` and the capacity probe.
+/// Build the [`StegoTuning`] the flags ask for.
 ///
-/// The `--capacity` probe and the real embed used to build this list twice, and
-/// the two copies had drifted: only the embed path applied `--stc-h`, so a probe
-/// could report a capacity for a different configuration than the one that was
-/// about to be used. One builder serves both callers. The only credential it
-/// carries is the user password; a private no-password dialect (secret, domain,
-/// wire-format identity) is compile-time [`Profile`] territory, not a CLI flag.
-fn embed_stego_options(
+/// The format has to be known here: a tuning arm names one format's cost model
+/// and parameters, and `--stc-h` / `--exclusion-rate` mean different structs
+/// depending on which arm they land in. `None` therefore means "the user asked
+/// for per-format tuning on a file whose format we cannot sniff", which is an
+/// error rather than a silently ignored flag.
+fn stego_tuning(
     args: &StegoTuningArgs,
-    password: Option<&str>,
-) -> Result<crate::stego::StegoOptions, StrHideError> {
-    let mut options = crate::stego::StegoOptions {
-        algorithm: args.algorithm.clone(),
-        password: password.map(str::to_string),
-        exact: args.exact,
-        ..Default::default()
+    format: Option<FileFormat>,
+) -> Result<StegoTuning, StrHideError> {
+    // An explicit `--algorithm` picks the arm on its own: naming a model is
+    // already a statement about which format it belongs to.
+    if let Some(name) = args.algorithm.as_deref() {
+        let name = name.trim();
+        if name == "auto" {
+            return Ok(StegoTuning::Auto);
+        }
+        if let Some(model) = SpatialAlgorithm::from_name(name) {
+            let mut params = PngParams::default();
+            apply_png_flags(&mut params, args);
+            return Ok(StegoTuning::Png { model, params });
+        }
+        if let Some(model) = JpegAlgorithm::from_name(name) {
+            let mut params = JpegParams::default();
+            apply_jpeg_flags(&mut params, args);
+            return Ok(StegoTuning::Jpeg { model, params });
+        }
+        if let Some(mode) = HevcMode::from_name(name) {
+            return Ok(StegoTuning::hevc(mode));
+        }
+        return Err(StrHideError::General(format!(
+            "Unknown algorithm '{name}'. Supported: hill, suniward (PNG), uerd, juniward (JPEG), \
+             hevc, cabac (HEIF/HEVC), auto"
+        )));
+    }
+
+    if !has_per_format_flags(args) {
+        return Ok(StegoTuning::Auto);
+    }
+
+    let Some(format) = format else {
+        return Err(StrHideError::General(
+            "Tuning flags such as --stc-h need to know the carrier format, and this file \
+             could not be recognised as a PNG, JPEG, HEIF/HEIC, or HEVC carrier"
+                .into(),
+        ));
     };
 
+    match format {
+        FileFormat::Png => {
+            let mut params = PngParams::default();
+            apply_png_flags(&mut params, args);
+            Ok(StegoTuning::Png {
+                model: SpatialAlgorithm::default(),
+                params,
+            })
+        }
+        FileFormat::Jpeg => {
+            let mut params = JpegParams::default();
+            apply_jpeg_flags(&mut params, args);
+            Ok(StegoTuning::Jpeg {
+                model: JpegAlgorithm::default(),
+                params,
+            })
+        }
+        // HEVC has no per-call tuning yet, so these flags carry nothing to
+        // apply. They stay accepted (and ignored) exactly as before rather than
+        // turning a working command line into an error.
+        _ => Ok(StegoTuning::Auto),
+    }
+}
+
+/// Apply the spatial-only flags.
+fn apply_png_flags(params: &mut PngParams, args: &StegoTuningArgs) {
     if let Some(er) = args.exclusion_rate {
-        options.png_params.exclusion_percentile = er;
-    }
-    if let Some(nw) = args.neighbor_weight {
-        options.jpeg_params.neighbor_weight = nw;
-    }
-    if let Some(budget) = args.slot_budget {
-        options.jpeg_params.slot_budget = Some(budget);
-    }
-    if let Some(suite) = args.cipher_suite {
-        options.jpeg_params.cipher_suite = suite;
+        params.exclusion_percentile = er;
     }
     if let Some(p1) = args.p1_window {
-        options.png_params.p1_window = p1;
+        params.p1_window = p1;
     }
     if let Some(p2) = args.p2_window {
-        options.png_params.p2_window = p2;
+        params.p2_window = p2;
     }
+    if let Some(h) = args.stc_h {
+        params.stc_h = h;
+    }
+}
 
-    let safety_level = match args.safety.as_deref() {
-        Some(s) => match crate::stego::SafetyLevel::parse(s) {
+/// Apply the DCT-only flags.
+fn apply_jpeg_flags(params: &mut JpegParams, args: &StegoTuningArgs) {
+    if let Some(nw) = args.neighbor_weight {
+        params.neighbor_weight = nw;
+    }
+    if let Some(budget) = args.slot_budget {
+        params.slot_budget = Some(budget);
+    }
+    if let Some(suite) = args.cipher_suite {
+        params.cipher_suite = suite;
+    }
+    if let Some(h) = args.stc_h {
+        params.stc_h = h;
+    }
+}
+
+/// Parse `--safety` and `--enforce-safety` into one policy.
+fn stego_safety(args: &StegoTuningArgs) -> Result<SafetyPolicy, StrHideError> {
+    let level = match args.safety.as_deref() {
+        Some(s) => match SafetyLevel::parse(s) {
             Some(lvl) => lvl,
             None => {
                 return Err(StrHideError::General(format!(
@@ -1848,22 +1924,59 @@ fn embed_stego_options(
                 )));
             }
         },
-        None => crate::stego::SafetyLevel::High,
+        None => SafetyLevel::High,
     };
-    options.safety = crate::stego::SafetyPolicy {
-        level: safety_level,
+    Ok(SafetyPolicy {
+        level,
         enforcement: if args.enforce_safety {
-            crate::stego::SafetyEnforcement::Enforced
+            SafetyEnforcement::Enforced
         } else {
-            crate::stego::SafetyEnforcement::Advisory
+            SafetyEnforcement::Advisory
         },
-    };
+    })
+}
 
-    apply_stc_h(&mut options, args.stc_h)?;
+/// Assemble the option sets for `embed` and the capacity probe.
+///
+/// The `--capacity` probe and the real embed used to build this list twice, and
+/// the two copies had drifted: only the embed path applied `--stc-h`, so a probe
+/// could report a capacity for a different configuration than the one that was
+/// about to be used. One builder now serves both callers and returns both typed
+/// option sets, so neither has to borrow the other's fields.
+///
+/// The only credential it carries is the user password; a private no-password
+/// dialect (secret, domain, wire-format identity) is compile-time [`Profile`]
+/// territory, not a CLI flag.
+fn stego_options<'a>(
+    args: &StegoTuningArgs,
+    password: Option<&'a str>,
+    format: Option<FileFormat>,
+) -> Result<(EmbedOptions<'a>, ProbeOptions<'a>), StrHideError> {
+    let tuning = stego_tuning(args, format)?;
+    let safety = stego_safety(args)?;
+    let mut embed = EmbedOptions {
+        password,
+        safety,
+        tuning: tuning.clone(),
+        exact: args.exact,
+        ..Default::default()
+    };
     if let Some(seed_hex) = args.seed.as_deref() {
-        options.freshness = crate::stego::Freshness::Seeded(parse_seed_hex(seed_hex)?);
+        embed.freshness = crate::stego::Freshness::Seeded(parse_seed_hex(seed_hex)?);
     }
-    Ok(options)
+    let probe = ProbeOptions {
+        password,
+        safety,
+        tuning,
+        exact: args.exact,
+        ..Default::default()
+    };
+    Ok((embed, probe))
+}
+
+/// The carrier's sniffed format, for tuning build-out.
+fn carrier_format(bytes: &[u8]) -> Option<FileFormat> {
+    crate::formats::sniff::sniff_bytes(bytes)
 }
 
 /// Parse a 64-hex-digit deterministic seed for `--seed`.
@@ -1911,7 +2024,8 @@ fn run_capacity_probe(
     )?;
     for carrier in &carriers {
         let carrier_bytes = std::fs::read(carrier)?;
-        let options = embed_stego_options(tuning, password.as_deref())?;
+        let (_, options) =
+            stego_options(tuning, password.as_deref(), carrier_format(&carrier_bytes))?;
         let cap = crate::stego::probe_carrier_capacity_with_profile(
             &carrier_bytes,
             &options,
@@ -2072,23 +2186,29 @@ fn handle_embed(
         let t_start = std::time::Instant::now();
         let carrier_bytes = std::fs::read(carrier)?;
 
-        let options = embed_stego_options(&args.tuning, password.as_deref())?;
+        let (options, probe_options) = stego_options(
+            &args.tuning,
+            password.as_deref(),
+            carrier_format(&carrier_bytes),
+        )?;
 
-        let (stego_bytes, cap_info) = crate::stego::embed_carrier_with_profile_info(
+        let output = crate::stego::embed_carrier_with_profile_info(
             &carrier_bytes,
-            &payload_bytes,
+            &Payload::bytes(&payload_bytes),
             &options,
             &profile,
         )?;
+        let stego_bytes = output.bytes;
+        let cap_info = output.capacity;
 
-        if !quiet && options.safety.enforcement == crate::stego::SafetyEnforcement::Advisory {
+        if !quiet && options.safety.enforcement == SafetyEnforcement::Advisory {
             let cap_fallback;
             let cap = match cap_info.as_ref() {
                 Some(c) => Some(c),
                 None => {
                     cap_fallback = crate::stego::probe_carrier_capacity_with_profile(
                         &carrier_bytes,
-                        &options,
+                        &probe_options,
                         &profile,
                     )
                     .ok();
@@ -2241,8 +2361,8 @@ fn handle_extract(
     // private no-password dialect is compile-time Profile territory on the
     // engine, not a command-line flag.
     let profile = *engine.profile();
-    let options = crate::stego::StegoOptions {
-        password,
+    let options = crate::stego::ExtractOptions {
+        password: password.as_deref(),
         ..Default::default()
     };
 

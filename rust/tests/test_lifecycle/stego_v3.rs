@@ -16,6 +16,7 @@ use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 
+use strhide::core::payload::Payload;
 use strhide::errors::StrHideError;
 use strhide::stego::coding::{Move, StcTrellis};
 use strhide::stego::format::{
@@ -28,7 +29,8 @@ use strhide::stego::jpeg::header_v3::{SUPERBLOCK_BYTES, Superblock, Tlv};
 use strhide::stego::jpeg::v3_layout::{grid_indices, slot_to_coeff};
 use strhide::stego::prng::permute_prefix;
 use strhide::stego::{
-    ExtractParams, JpegParams, SafetyLevel, StegoOptions, embed_carrier, extract_carrier,
+    EmbedOptions, ExtractOptions, ExtractParams, JpegAlgorithm, JpegParams, SafetyLevel,
+    StegoTuning, embed_carrier, extract_carrier,
 };
 
 fn fixture(name: &str) -> PathBuf {
@@ -250,9 +252,11 @@ fn amend_superblock(
     out
 }
 
-fn extract_opts(password: &str) -> StegoOptions {
-    StegoOptions {
-        password: Some(password.into()),
+fn write_opts(password: &str) -> EmbedOptions<'_> {
+    // The write side pins only the credential; the JPEG V3 engine derives the
+    // slot geometry from the carrier and the budget from the payload.
+    EmbedOptions {
+        password: Some(password),
         ..Default::default()
     }
 }
@@ -273,14 +277,17 @@ fn v3_payload_sizes_roundtrip_on_a_photo() {
 
     for size in [4096usize, 16384, 65536] {
         let payload = incompressible(size, size as u64);
-        let stego_opts = StegoOptions {
-            algorithm: Some("uerd".into()),
-            password: Some(password.into()),
+        let stego_opts = EmbedOptions {
+            tuning: StegoTuning::Jpeg {
+                model: JpegAlgorithm::Uerd,
+                params: JpegParams::default(),
+            },
+            password: Some(password),
             ..Default::default()
         };
-        let stego = embed_carrier(&cover, &payload, &stego_opts)
+        let stego = embed_carrier(&cover, &Payload::bytes(&payload), &stego_opts)
             .unwrap_or_else(|e| panic!("{size} B: embed failed: {e}"));
-        let recovered = extract_carrier(&stego, &stego_opts)
+        let recovered = extract_carrier(&stego, &stego_opts.extract_options())
             .unwrap_or_else(|e| panic!("{size} B: extract failed: {e}"));
         assert_eq!(recovered, payload, "{size} B: payload mismatch");
 
@@ -314,7 +321,12 @@ fn v3_payload_sizes_roundtrip_on_a_photo() {
 fn v3_cover_digest_is_stable_across_embedding() {
     let cover = fs::read(fixture("carrier_photo.jpg")).expect("read carrier");
     let password = "DigestStability#1";
-    let stego = embed_carrier(&cover, b"digest stability", &extract_opts(password)).expect("embed");
+    let stego = embed_carrier(
+        &cover,
+        &Payload::bytes(b"digest stability"),
+        &write_opts(password),
+    )
+    .expect("embed");
 
     let before = dct_io::read_coefficients(&cover).expect("cover coefficients");
     let after = dct_io::read_coefficients(&stego).expect("stego coefficients");
@@ -367,9 +379,10 @@ fn v3_sparse_huffman_table_never_fails_silently() {
     let mut written = 0usize;
     for size in [32usize, 256, 1024, 3000] {
         let payload = incompressible(size, size as u64);
-        match embed_carrier(&cover, &payload, &extract_opts(password)) {
+        match embed_carrier(&cover, &Payload::bytes(&payload), &write_opts(password)) {
             Ok(stego) => {
-                let recovered = extract_carrier(&stego, &extract_opts(password)).expect("extract");
+                let recovered = extract_carrier(&stego, &write_opts(password).extract_options())
+                    .expect("extract");
                 assert_eq!(recovered, payload, "{size} B roundtrip");
                 written += 1;
             }
@@ -400,16 +413,21 @@ fn v3_over_optimised_table_keeps_a_grouped_body() {
     let cover = fs::read(fixture("carrier.jpg")).expect("read carrier");
     let payload = incompressible(8, 0x6C0B_51DE);
     let password = "GroupedBody#1";
-    let options = StegoOptions {
-        password: Some(password.into()),
-        jpeg_params: JpegParams {
-            slot_budget: Some(300), // u_budget = 1 without the grouped floor
-            ..JpegParams::default()
+    let options = EmbedOptions {
+        password: Some(password),
+        tuning: StegoTuning::Jpeg {
+            model: JpegAlgorithm::default(),
+            params: JpegParams {
+                slot_budget: Some(300), // u_budget = 1 without the grouped floor
+                ..JpegParams::default()
+            },
         },
         ..Default::default()
     };
-    let stego = embed_carrier(&cover, &payload, &options).expect("embed must lift u to >= 2");
-    let recovered = extract_carrier(&stego, &extract_opts(password)).expect("extract");
+    let stego = embed_carrier(&cover, &Payload::bytes(&payload), &options)
+        .expect("embed must lift u to >= 2");
+    let recovered =
+        extract_carrier(&stego, &write_opts(password).extract_options()).expect("extract");
     assert_eq!(recovered, payload, "grouped body must round-trip");
 }
 
@@ -421,8 +439,12 @@ fn v3_over_optimised_table_keeps_a_grouped_body() {
 fn v3_over_optimised_table_refuses_when_no_group_fits() {
     let cover = fs::read(fixture("carrier.jpg")).expect("read carrier");
     let payload = incompressible(5_000, 0x5A22_0FFE);
-    let err = embed_carrier(&cover, &payload, &extract_opts("RefuseEarly#1"))
-        .expect_err("must refuse, not gamble");
+    let err = embed_carrier(
+        &cover,
+        &Payload::bytes(&payload),
+        &write_opts("RefuseEarly#1"),
+    )
+    .expect_err("must refuse, not gamble");
     match err {
         StrHideError::UnsupportedFormat(message) => {
             assert!(
@@ -460,22 +482,27 @@ fn v3_over_optimised_table_lifts_u_two_to_u_three() {
     let password = "LiftU2#1";
     // window for 8 bytes is (8 + 21)*8 + 7 = 239 slots.
     // budget = 500 gives u_budget = 500 / 239 = 2.
-    let options = StegoOptions {
-        password: Some(password.into()),
-        jpeg_params: JpegParams {
-            slot_budget: Some(500),
-            ..JpegParams::default()
+    let mut options = EmbedOptions {
+        password: Some(password),
+        tuning: StegoTuning::Jpeg {
+            model: JpegAlgorithm::default(),
+            params: JpegParams {
+                slot_budget: Some(500),
+                ..JpegParams::default()
+            },
         },
         ..Default::default()
     };
-    let stego = embed_carrier(&cover, &payload, &options).expect("embed must lift u to 3");
-    let recovered = extract_carrier(&stego, &extract_opts(password)).expect("extract");
+    let stego =
+        embed_carrier(&cover, &Payload::bytes(&payload), &options).expect("embed must lift u to 3");
+    let recovered =
+        extract_carrier(&stego, &write_opts(password).extract_options()).expect("extract");
     assert_eq!(recovered, payload, "round-trip bit-exact");
 
     let layout = strhide::stego::jpeg::engine::layout_for_payload(
         &cover,
         &payload,
-        &options.jpeg_params,
+        options.jpeg_params_mut(),
         &strhide::stego::format::DEFAULT_JPEG_FORMAT,
     )
     .expect("layout");
@@ -517,10 +544,10 @@ fn v3_header_slots_are_keyed_by_password_only() {
     let cover = fs::read(fixture("carrier_photo.jpg")).expect("read carrier");
     let a = incompressible(32, 1);
     let b = incompressible(48, 2);
-    let opts_a = extract_opts("shared-password");
-    let opts_b = extract_opts("other-password");
-    let stego_a = embed_carrier(&cover, &a, &opts_a).expect("embed a");
-    let stego_b = embed_carrier(&cover, &b, &opts_a).expect("embed b");
+    let opts_a = write_opts("shared-password");
+    let opts_b = write_opts("other-password");
+    let stego_a = embed_carrier(&cover, &Payload::bytes(&a), &opts_a).expect("embed a");
+    let stego_b = embed_carrier(&cover, &Payload::bytes(&b), &opts_a).expect("embed b");
     assert_eq!(
         header_slots(&stego_a, "shared-password", 0),
         header_slots(&cover, "shared-password", 0)
@@ -533,7 +560,7 @@ fn v3_header_slots_are_keyed_by_password_only() {
         header_slots(&cover, "shared-password", 0),
         header_slots(&cover, "other-password", 0)
     );
-    assert!(extract_carrier(&stego_b, &opts_b).is_err());
+    assert!(extract_carrier(&stego_b, &opts_b.extract_options()).is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -547,11 +574,12 @@ fn v3_superblock_is_bound_by_aad() {
     let cover = fs::read(fixture("carrier_photo.jpg")).expect("read carrier");
     let password = "AadBinding#1";
     let payload = b"aad binding payload";
-    let stego = embed_carrier(&cover, payload, &extract_opts(password)).expect("embed");
+    let stego =
+        embed_carrier(&cover, &Payload::bytes(payload), &write_opts(password)).expect("embed");
 
     // `version_minor` is not validated, so only the AAD can catch it.
     let tampered = amend_superblock(&stego, password, |sb| sb.version_minor = 9, None);
-    let err = extract_carrier(&tampered, &extract_opts(password)).unwrap_err();
+    let err = extract_carrier(&tampered, &write_opts(password).extract_options()).unwrap_err();
     assert!(
         matches!(err, StrHideError::NoHiddenData(_)),
         "AAD must reject a changed minor version, got {err:?}"
@@ -564,7 +592,7 @@ fn v3_superblock_is_bound_by_aad() {
         |sb| sb.u = sb.u.wrapping_add(1).max(1),
         None,
     );
-    let err = extract_carrier(&tampered, &extract_opts(password)).unwrap_err();
+    let err = extract_carrier(&tampered, &write_opts(password).extract_options()).unwrap_err();
     assert!(matches!(err, StrHideError::NoHiddenData(_)), "{err:?}");
 }
 
@@ -573,9 +601,14 @@ fn v3_superblock_is_bound_by_aad() {
 fn v3_reserved_flags_are_rejected() {
     let cover = fs::read(fixture("carrier_photo.jpg")).expect("read carrier");
     let password = "ReservedFlags#1";
-    let stego = embed_carrier(&cover, b"flags payload", &extract_opts(password)).expect("embed");
+    let stego = embed_carrier(
+        &cover,
+        &Payload::bytes(b"flags payload"),
+        &write_opts(password),
+    )
+    .expect("embed");
     let tampered = amend_superblock(&stego, password, |sb| sb.flags = 1, None);
-    assert!(extract_carrier(&tampered, &extract_opts(password)).is_err());
+    assert!(extract_carrier(&tampered, &write_opts(password).extract_options()).is_err());
 }
 
 /// A carrier written with a newer minor version still decodes: minor versions
@@ -603,7 +636,8 @@ fn v3_newer_minor_version_is_accepted() {
 
     let raw = read_superblock(&stego, password);
     assert_eq!(raw[1], 7);
-    let recovered = extract_carrier(&stego, &extract_opts(password)).expect("extract");
+    let recovered =
+        extract_carrier(&stego, &write_opts(password).extract_options()).expect("extract");
     assert_eq!(recovered, payload);
 }
 
@@ -628,7 +662,7 @@ fn v3_other_major_version_is_not_decodable() {
     .expect("embed with major=2");
     // The other build's header is located by a different label set, so the
     // default build simply finds nothing -- no distinguishable error.
-    let err = extract_carrier(&stego, &extract_opts(password)).unwrap_err();
+    let err = extract_carrier(&stego, &write_opts(password).extract_options()).unwrap_err();
     assert!(matches!(err, StrHideError::NoHiddenData(_)), "{err:?}");
 }
 
@@ -671,7 +705,8 @@ fn v3_extensions_roundtrip_and_skip_unknowns() {
     let raw = read_superblock(&stego, password);
     let sb = Superblock::decode(&raw).expect("decode");
     assert_eq!(sb.ext_bytes as usize, 6 + 8);
-    let recovered = extract_carrier(&stego, &extract_opts(password)).expect("extract");
+    let recovered =
+        extract_carrier(&stego, &write_opts(password).extract_options()).expect("extract");
     assert_eq!(recovered, payload);
 }
 
@@ -699,7 +734,7 @@ fn v3_unknown_critical_extension_is_rejected() {
         strhide::stego::Freshness::Random,
     )
     .expect("embed with critical extension");
-    let err = extract_carrier(&stego, &extract_opts(password)).unwrap_err();
+    let err = extract_carrier(&stego, &write_opts(password).extract_options()).unwrap_err();
     assert!(
         matches!(err, StrHideError::UnsupportedVersion(_)),
         "critical extension must be refused, got {err:?}"
@@ -746,7 +781,7 @@ fn v3_malformed_extension_area_is_reported() {
         DEFAULT_JPEG_FORMAT.ext_u,
         &[0x01, 200, 1, 2, 3],
     );
-    let err = extract_carrier(&broken, &extract_opts(password)).unwrap_err();
+    let err = extract_carrier(&broken, &write_opts(password).extract_options()).unwrap_err();
     assert!(
         matches!(err, StrHideError::CorruptedData(_)),
         "malformed extension must be CorruptedData, got {err:?}"
@@ -783,7 +818,7 @@ fn v3_suite_matrix_roundtrips() {
         .unwrap_or_else(|e| panic!("suite {suite_id}: embed failed: {e}"));
         let raw = read_superblock_with_suite(&stego, &password, suite_id);
         assert_eq!(u16::from_be_bytes([raw[36], raw[37]]), suite_id);
-        let recovered = extract_carrier(&stego, &extract_opts(&password))
+        let recovered = extract_carrier(&stego, &write_opts(&password).extract_options())
             .unwrap_or_else(|e| panic!("suite {suite_id}: extract failed: {e}"));
         assert_eq!(recovered, payload);
     }
@@ -811,13 +846,16 @@ fn v3_extract_policy_can_exclude_a_suite() {
     )
     .expect("embed suite 2");
 
-    let mut opts = extract_opts(password);
-    opts.extract_params.allowed_suites = Some(vec![1]);
+    let mut opts = ExtractOptions {
+        password: Some(password),
+        ..Default::default()
+    };
+    opts.limits.allowed_suites = Some(vec![1]);
     let err = extract_carrier(&stego, &opts).unwrap_err();
     assert!(matches!(err, StrHideError::NoHiddenData(_)), "{err:?}");
 
     // ... and works again when the suite is allowed.
-    assert!(extract_carrier(&stego, &extract_opts(password)).is_ok());
+    assert!(extract_carrier(&stego, &write_opts(password).extract_options()).is_ok());
 }
 
 /// A KDF-cost ceiling below the suite's cost means "do not run it".
@@ -825,10 +863,18 @@ fn v3_extract_policy_can_exclude_a_suite() {
 fn v3_kdf_cost_ceiling_is_enforced() {
     let cover = fs::read(fixture("carrier_photo.jpg")).expect("read carrier");
     let password = "CostCeiling#1";
-    let stego = embed_carrier(&cover, b"cost ceiling", &extract_opts(password)).expect("embed");
+    let stego = embed_carrier(
+        &cover,
+        &Payload::bytes(b"cost ceiling"),
+        &write_opts(password),
+    )
+    .expect("embed");
 
-    let mut opts = extract_opts(password);
-    opts.extract_params.max_pbkdf2_iterations = 100_000; // suite 1 needs 200k
+    let mut opts = ExtractOptions {
+        password: Some(password),
+        ..Default::default()
+    };
+    opts.limits.max_pbkdf2_iterations = 100_000; // suite 1 needs 200k
     let started = Instant::now();
     let err = extract_carrier(&stego, &opts).unwrap_err();
     let elapsed = started.elapsed();
@@ -845,7 +891,12 @@ fn v3_kdf_cost_ceiling_is_enforced() {
 fn v3_wrong_password_costs_a_kdf_each_time() {
     let cover = fs::read(fixture("carrier_photo.jpg")).expect("read carrier");
     let password = "OracleGate#1";
-    let stego = embed_carrier(&cover, b"oracle cost gate", &extract_opts(password)).expect("embed");
+    let stego = embed_carrier(
+        &cover,
+        &Payload::bytes(b"oracle cost gate"),
+        &write_opts(password),
+    )
+    .expect("embed");
 
     let single_kdf = {
         let started = Instant::now();
@@ -856,7 +907,10 @@ fn v3_wrong_password_costs_a_kdf_each_time() {
     const ATTEMPTS: u32 = 8;
     let started = Instant::now();
     for attempt in 0..ATTEMPTS {
-        let opts = extract_opts(&format!("wrong-{attempt}"));
+        let opts = ExtractOptions {
+            password: Some(&format!("wrong-{attempt}")),
+            ..Default::default()
+        };
         assert!(extract_carrier(&stego, &opts).is_err());
     }
     let per_attempt = started.elapsed() / ATTEMPTS;
@@ -871,14 +925,16 @@ fn v3_wrong_password_costs_a_kdf_each_time() {
 fn v3_correct_password_costs_one_kdf() {
     let cover = fs::read(fixture("carrier_photo.jpg")).expect("read carrier");
     let password = "OneKdf#1";
-    let stego = embed_carrier(&cover, b"one kdf", &extract_opts(password)).expect("embed");
+    let stego =
+        embed_carrier(&cover, &Payload::bytes(b"one kdf"), &write_opts(password)).expect("embed");
     let single_kdf = {
         let started = Instant::now();
         let _ = derive_master(DEFAULT_JPEG_FORMAT.default_suite(), "probe", b"digest").unwrap();
         started.elapsed()
     };
     let started = Instant::now();
-    let recovered = extract_carrier(&stego, &extract_opts(password)).expect("extract");
+    let recovered =
+        extract_carrier(&stego, &write_opts(password).extract_options()).expect("extract");
     let elapsed = started.elapsed();
     assert_eq!(recovered, b"one kdf");
     assert!(
@@ -891,13 +947,18 @@ fn v3_correct_password_costs_one_kdf() {
 #[test]
 fn v3_wrong_password_and_clean_carrier_look_identical() {
     let cover = fs::read(fixture("carrier_photo.jpg")).expect("read carrier");
-    let stego = embed_carrier(&cover, b"indistinguishable", &extract_opts("right")).expect("embed");
+    let stego = embed_carrier(
+        &cover,
+        &Payload::bytes(b"indistinguishable"),
+        &write_opts("right"),
+    )
+    .expect("embed");
 
-    let wrong = extract_carrier(&stego, &extract_opts("wrong")).unwrap_err();
-    let clean = extract_carrier(&cover, &extract_opts("right")).unwrap_err();
+    let wrong = extract_carrier(&stego, &write_opts("wrong").extract_options()).unwrap_err();
+    let clean = extract_carrier(&cover, &write_opts("right").extract_options()).unwrap_err();
     assert!(matches!(wrong, StrHideError::NoHiddenData(_)), "{wrong:?}");
     assert!(matches!(clean, StrHideError::NoHiddenData(_)), "{clean:?}");
-    assert!(extract_carrier(&cover, &extract_opts("wrong")).is_err());
+    assert!(extract_carrier(&cover, &write_opts("wrong").extract_options()).is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -921,7 +982,12 @@ fn v3_ac_boundary_never_overflows() {
 
     let password = "Boundary1023#1";
     let payload = incompressible(64, 5);
-    let stego = embed_carrier(&boundary_cover, &payload, &extract_opts(password)).expect("embed");
+    let stego = embed_carrier(
+        &boundary_cover,
+        &Payload::bytes(&payload),
+        &write_opts(password),
+    )
+    .expect("embed");
     let after = dct_io::read_coefficients(&stego).expect("stego coefficients");
     for block in &after.components[0].blocks {
         for (k, &value) in block.iter().enumerate().skip(1) {
@@ -931,7 +997,8 @@ fn v3_ac_boundary_never_overflows() {
             );
         }
     }
-    let recovered = extract_carrier(&stego, &extract_opts(password)).expect("extract");
+    let recovered =
+        extract_carrier(&stego, &write_opts(password).extract_options()).expect("extract");
     assert_eq!(recovered, payload);
 }
 
@@ -1044,6 +1111,7 @@ fn v3_extraction_ignores_the_embed_side_budget() {
         ..JpegParams::default()
     };
     assert_ne!(other, params);
-    let recovered = extract_carrier(&stego, &extract_opts(password)).expect("extract");
+    let recovered =
+        extract_carrier(&stego, &write_opts(password).extract_options()).expect("extract");
     assert_eq!(recovered, payload);
 }

@@ -6,8 +6,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::errors::StrHideError;
-use crate::params::Profile;
-use crate::stego::envelope::Freshness;
 
 /// Matrix-coding layer used to place payload bits into candidate slots.
 ///
@@ -200,7 +198,7 @@ pub enum SafetyEnforcement {
 /// The capacity safety policy: which tier to target and how hard to enforce it.
 ///
 /// This is the single source of truth for safety settings. It lives on
-/// [`StegoOptions::safety`] only -- the per-domain parameter structs used to
+/// [`SafetyPolicy`] only -- the per-domain parameter structs used to
 /// carry their own copies, which the unified entry silently overwrote, so a
 /// caller that set `PngParams::safety_enforcement` alone could believe it had
 /// enabled enforcement while the default advisory policy was in force.
@@ -469,7 +467,7 @@ pub struct JpegParams {
     pub algorithm_options: std::collections::BTreeMap<String, f64>,
     /// Force the portable scalar kernels instead of the AVX2/FMA dispatch.
     ///
-    /// Set automatically when [`StegoOptions::freshness`] is
+    /// Set automatically when [`crate::stego::EmbedOptions::freshness`] is
     /// [`Freshness::Seeded`]. The AVX2 path fuses multiply-add and rounds once
     /// where the scalar path rounds twice, so the two can disagree in the last
     /// bit of a cost value -- enough to flip a near-tied trellis decision and
@@ -732,122 +730,6 @@ impl ExtractParams {
     }
 }
 
-/// Unified configuration options passed to embed and extract pipelines.
-///
-/// Everything here is either a per-call choice ([`algorithm`](Self::algorithm))
-/// or a user-supplied credential ([`password`](Self::password)), plus **L-class**
-/// tuning knobs that only the writer's cost map depends on. The **P-class**
-/// part -- the private no-password secret -- deliberately lives in
-/// [`StegoProfile`](crate::params::StegoProfile), next to the structure-domain
-/// dialect fields, so there is exactly one object to store and pass around.
-#[derive(Debug, Clone, Default)]
-pub struct StegoOptions {
-    /// Requested algorithm name (e.g. "hill", "uerd", "auto").
-    pub algorithm: Option<String>,
-    /// Password for cryptographic key derivation and PRNG scattering.
-    pub password: Option<String>,
-    /// Custom domain tag for isolating the HKDF key derivation domain.
-    ///
-    /// Runtime half of the dialect: the explicit value wins, the profile's
-    /// [`StegoProfile::domain`](crate::params::StegoProfile) is the fallback,
-    /// `None` means the official default derivation.
-    pub domain: Option<String>,
-    /// Capacity safety policy: target tier and enforcement (default
-    /// `High` / `Advisory`). The single source of truth -- the per-domain
-    /// parameter structs carry no safety settings of their own.
-    pub safety: SafetyPolicy,
-    /// Fine-tuning parameters for spatial domain algorithms.
-    pub png_params: PngParams,
-    /// Fine-tuning parameters for JPEG DCT domain algorithms.
-    pub jpeg_params: JpegParams,
-    /// Extraction policy: which suites to try and how much KDF work to allow.
-    pub extract_params: ExtractParams,
-    /// Source of the per-embedding salt and nonce.
-    ///
-    /// [`Freshness::Random`] (the default) draws fresh bytes and is what every
-    /// production path uses. [`Freshness::Seeded`] derives them from a seed so
-    /// the same inputs produce the same stego file -- for regression tests, the
-    /// `repro_*` examples, and bug reports that need to be replayed.
-    pub freshness: Freshness,
-    /// Force exact capacity scan, disabling fast sampling estimation on long carriers.
-    pub exact: bool,
-}
-
-impl StegoOptions {
-    /// Chainable builder: set the password.
-    pub fn with_password(mut self, password: impl Into<String>) -> Self {
-        self.password = Some(password.into());
-        self
-    }
-
-    /// Chainable builder: set the requested algorithm name
-    /// (`hill` / `suniward` / `uerd` / `juniward` / `hevc` / `cabac` / `auto`).
-    pub fn with_algorithm(mut self, algorithm: impl Into<String>) -> Self {
-        self.algorithm = Some(algorithm.into());
-        self
-    }
-
-    /// Chainable builder: set the HKDF domain-isolation tag.
-    pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
-        self.domain = Some(domain.into());
-        self
-    }
-
-    /// Chainable builder: set the capacity safety tier and its enforcement.
-    pub fn with_safety(mut self, level: SafetyLevel, enforcement: SafetyEnforcement) -> Self {
-        self.safety = SafetyPolicy { level, enforcement };
-        self
-    }
-
-    /// Chainable builder: set the salt/nonce source.
-    pub fn with_freshness(mut self, freshness: Freshness) -> Self {
-        self.freshness = freshness;
-        self
-    }
-
-    /// Chainable builder: replace the PNG tuning parameters.
-    pub fn with_png_params(mut self, params: PngParams) -> Self {
-        self.png_params = params;
-        self
-    }
-
-    /// Chainable builder: replace the JPEG tuning parameters.
-    pub fn with_jpeg_params(mut self, params: JpegParams) -> Self {
-        self.jpeg_params = params;
-        self
-    }
-
-    /// Secret actually used for key derivation: the explicit password wins, the
-    /// profile's private stego secret is the fallback, `None` means "official
-    /// public constant" (resolved inside the envelope layer).
-    ///
-    /// Resolving here keeps the two engine families byte-identical: a private
-    /// default secret is not special-cased anywhere downstream, it simply
-    /// travels the same path as a user password.
-    ///
-    /// An empty password is treated as "not supplied" and does **not** mask the
-    /// profile secret. The previous implementation joined the two options with
-    /// `or` and filtered afterwards, so `password = Some("")` silently dropped
-    /// the private secret and fell back to the public constant -- a quiet
-    /// downgrade of exactly the knob that exists to prevent it.
-    pub fn secret<'a>(&'a self, profile: &'a Profile) -> Option<&'a str> {
-        self.password
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .or_else(|| profile.stego_secret())
-    }
-
-    /// Custom domain tag used for isolating the HKDF key derivation domain:
-    /// the explicit [`domain`](Self::domain) wins, the profile's stego domain is
-    /// the fallback, `None` means the official default derivation.
-    pub fn domain<'a>(&'a self, profile: &'a Profile) -> Option<&'a str> {
-        self.domain
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .or_else(|| profile.stego_domain())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -889,37 +771,6 @@ mod tests {
             .validate()
             .expect_err("NaN must be rejected before it reaches a cost map");
         assert!(err.to_string().contains("gain"), "got: {err}");
-    }
-
-    #[test]
-    fn explicit_password_wins_over_profile_secret() {
-        let opts = StegoOptions {
-            password: Some("user-password".into()),
-            ..Default::default()
-        };
-        let profile = Profile::default().with_stego_secret("private-dialect");
-        assert_eq!(opts.secret(&profile), Some("user-password"));
-    }
-
-    #[test]
-    fn profile_secret_fills_in_without_a_password() {
-        let profile = Profile::default().with_stego_secret("private-dialect");
-        assert_eq!(
-            StegoOptions::default().secret(&profile),
-            Some("private-dialect")
-        );
-        // Official profile -> public constant, resolved downstream.
-        assert_eq!(StegoOptions::default().secret(&Profile::default()), None);
-    }
-
-    #[test]
-    fn empty_password_does_not_mask_the_profile_secret() {
-        let opts = StegoOptions {
-            password: Some(String::new()),
-            ..Default::default()
-        };
-        let profile = Profile::default().with_stego_secret("private-dialect");
-        assert_eq!(opts.secret(&profile), Some("private-dialect"));
     }
 
     #[test]
