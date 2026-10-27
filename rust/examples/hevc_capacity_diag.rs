@@ -20,7 +20,7 @@ use rusty_h265::Decoder;
 use rusty_h265::ctu::Ablate;
 use strhide::stego::hevc::heif_boxes::parse_heif_targets;
 use strhide::stego::hevc::mp4_boxes::parse_mp4_targets;
-use strhide::stego::hevc::slot::{BinOp, CabacRecorder};
+use strhide::stego::hevc::slot::CabacRecorder;
 use strhide::stego::hevc::sniff::{
     HevcCarrierKind, NAL_RADL_N, NAL_RASL_N, NAL_STSA_N, NAL_TRAIL_N, NAL_TSA_N, sniff_hevc_carrier,
 };
@@ -131,7 +131,7 @@ fn diag(path: &str) {
         let absorbed = rec
             .slots
             .iter()
-            .filter(|s| !excluded.contains(&s.substream_idx))
+            .filter(|s| !excluded.contains(&(s.substream_idx as usize)))
             .count();
 
         let e = per_type.entry(nal_type).or_default();
@@ -142,13 +142,9 @@ fn diag(path: &str) {
         e.bypass_other += rec
             .ops
             .iter()
-            .filter(|op| matches!(op, BinOp::Bypass { slot_idx: None, .. }))
+            .filter(|op| op.is_bypass() && !op.is_stego())
             .count();
-        e.decision_bins += rec
-            .ops
-            .iter()
-            .filter(|op| matches!(op, BinOp::Decision { .. }))
-            .count();
+        e.decision_bins += rec.ops.iter().filter(|op| op.is_decision()).count();
         e.substreams += rec.substreams.len();
         e.excluded_subs += excluded.len();
     }

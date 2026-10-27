@@ -4,32 +4,155 @@ use alloc::vec::Vec;
 
 use rusty_h265::observer::ENCODER_CONTEXTS;
 
-/// A recorded CABAC arithmetic decoding operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BinOp {
-    /// Context-mode decision bin.
-    Decision { ctx_idx: u16, bit: u8 },
-    /// Equiprobable bypass bin.
-    Bypass { bit: u8, slot_idx: Option<usize> },
-    /// End-of-slice or end-of-substream terminate bin.
-    Terminate { bit: u8 },
+/// A recorded CABAC arithmetic decoding operation, packed into two bytes.
+///
+/// The journal is by far the largest allocation of the engine: a 13.6 s
+/// 1080p60 stream records ~270 M bins, so every byte per bin is 270 MB and the
+/// obvious Rust shape (`enum` with `Option<usize>` to address the slot) is 16
+/// bytes per bin -- 4.3 GB for that one video, which is what made a HEVC embed
+/// peak above 7 GB. The packed form keeps exactly the same information in
+/// 16 bits:
+///
+/// ```text
+/// bits  1..=0  kind: 0 = decision, 1 = bypass, 2 = terminate
+/// bit      2  bin value
+/// bit      3  bypass only: this bin is a stego slot (a non-DC sign bit)
+/// bits 15..=4  decision only: CABAC context index (12 bits)
+/// ```
+///
+/// A bypass bin deliberately does *not* store the slot index any more: the
+/// slot a bypass bin belongs to is its position among the stego-flagged bypass
+/// bins of the same slice, which the re-encoder re-derives by counting as it
+/// walks the substream (see `SubstreamRecord::slot_start`). That is the same
+/// number the recorder stamped onto the slot, without spending 8 bytes per bin
+/// on it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct BinOp(u16);
+
+impl BinOp {
+    const KIND_MASK: u16 = 0b11;
+    const KIND_DECISION: u16 = 0;
+    const KIND_BYPASS: u16 = 1;
+    const KIND_TERMINATE: u16 = 2;
+    const VALUE_SHIFT: u32 = 2;
+    const STEGO: u16 = 1 << 3;
+    const CTX_SHIFT: u32 = 4;
+    /// Largest context index the 12-bit field can hold.
+    ///
+    /// `ENCODER_CONTEXTS` is 179, so this is only a saturation guard: a context
+    /// index that does not fit is stored saturated and therefore fails the
+    /// re-encoder's range check, which marks the substream unsupported instead
+    /// of silently re-encoding it with the wrong model.
+    const CTX_MAX: u16 = 0x0FFF;
+
+    /// A context-mode decision bin.
+    #[inline]
+    pub fn decision(ctx_idx: usize, bit: u8) -> Self {
+        let ctx = if ctx_idx >= Self::CTX_MAX as usize {
+            Self::CTX_MAX
+        } else {
+            ctx_idx as u16
+        };
+        Self(Self::KIND_DECISION | Self::value(bit) | (ctx << Self::CTX_SHIFT))
+    }
+
+    /// An equiprobable bypass bin. `stego` marks a bypass bin that carries a
+    /// slot (a non-DC coefficient sign).
+    #[inline]
+    pub fn bypass(bit: u8, stego: bool) -> Self {
+        let flag = if stego { Self::STEGO } else { 0 };
+        Self(Self::KIND_BYPASS | Self::value(bit) | flag)
+    }
+
+    /// An end-of-slice or end-of-substream terminate bin.
+    #[inline]
+    pub fn terminate(bit: u8) -> Self {
+        Self(Self::KIND_TERMINATE | Self::value(bit))
+    }
+
+    #[inline]
+    fn value(bit: u8) -> u16 {
+        ((bit & 1) as u16) << Self::VALUE_SHIFT
+    }
+
+    #[inline]
+    pub fn is_decision(self) -> bool {
+        self.0 & Self::KIND_MASK == Self::KIND_DECISION
+    }
+
+    #[inline]
+    pub fn is_bypass(self) -> bool {
+        self.0 & Self::KIND_MASK == Self::KIND_BYPASS
+    }
+
+    #[inline]
+    pub fn is_terminate(self) -> bool {
+        self.0 & Self::KIND_MASK == Self::KIND_TERMINATE
+    }
+
+    /// The recorded bin value (0 or 1).
+    #[inline]
+    pub fn bit(self) -> u8 {
+        ((self.0 >> Self::VALUE_SHIFT) & 1) as u8
+    }
+
+    /// CABAC context index of a decision bin (0 for other kinds).
+    #[inline]
+    pub fn ctx_idx(self) -> usize {
+        (self.0 >> Self::CTX_SHIFT) as usize
+    }
+
+    /// Whether this bypass bin is a stego slot.
+    #[inline]
+    pub fn is_stego(self) -> bool {
+        self.0 & Self::STEGO != 0
+    }
+}
+
+impl core::fmt::Debug for BinOp {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.is_decision() {
+            write!(
+                f,
+                "Decision {{ ctx_idx: {}, bit: {} }}",
+                self.ctx_idx(),
+                self.bit()
+            )
+        } else if self.is_bypass() {
+            write!(
+                f,
+                "Bypass {{ bit: {}, stego: {} }}",
+                self.bit(),
+                self.is_stego()
+            )
+        } else {
+            write!(f, "Terminate {{ bit: {} }}", self.bit())
+        }
+    }
 }
 
 /// A candidate steganographic slot corresponding to an in-place CABAC bypass sign bit.
+///
+/// Field widths are chosen for the pool, not for the arithmetic: a video
+/// carrier at 1080p60 yields ~17 M slots in a 13 s clip, so 32 bytes here
+/// (where four `usize` fields made it 56) is the difference between one and two
+/// gigabytes. `qp` stays an `i16` because the H.265 QP range for 8-bit video is
+/// -6..=51 and the value is only consumed as an `i32` by the cost model.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StegoSlot {
-    /// Global index across all slices in the carrier.
-    pub slot_idx: usize,
+    /// Global index across all slices in the carrier (recording order until the
+    /// drift-band sort in `record_carrier_state` renumbers it).
+    pub slot_idx: u32,
     /// 0-based slice index within the carrier.
-    pub slice_idx: usize,
-    /// Substream index within the slice.
-    pub substream_idx: usize,
+    pub slice_idx: u32,
     /// Index in the slice's recorded `BinOp` sequence.
-    pub op_idx: usize,
+    pub op_idx: u32,
+    /// Substream index within the slice.
+    pub substream_idx: u16,
+    /// Slice or block quantization parameter (QP).
+    pub qp: i16,
     /// Original sign bit (0 = positive, 1 = negative).
     pub original_bit: u8,
-    /// Slice or block quantization parameter (QP).
-    pub qp: i32,
     /// Transform unit size (4, 8, 16, 32).
     pub trafo_size: u8,
     /// Color plane index (0: Luma Y, 1: Cb, 2: Cr).
@@ -48,6 +171,9 @@ pub struct StegoSlot {
     pub cost: f64,
 }
 
+const _: () = assert!(core::mem::size_of::<StegoSlot>() == 32);
+const _: () = assert!(core::mem::size_of::<BinOp>() == 2);
+
 /// Metadata and boundaries for a WPP/Tile substream within a slice.
 #[derive(Clone, Debug)]
 pub struct SubstreamRecord {
@@ -56,6 +182,12 @@ pub struct SubstreamRecord {
     pub op_start: usize,
     /// Offset in the slice's `ops` Vec where this substream ends.
     pub op_end: usize,
+    /// Recorder-local index of the first slot this substream contributes.
+    ///
+    /// A [`BinOp`] no longer stores the slot index, so the re-encoder derives
+    /// it by counting stego-flagged bypass bins as it walks the substream from
+    /// `op_start`; this is the counter's starting value.
+    pub slot_start: usize,
     /// Initial CABAC context model for this substream (179 bytes: the native
     /// decoder states widened to the encoder's slot layout).
     pub init_contexts: [u8; ENCODER_CONTEXTS],
@@ -65,16 +197,35 @@ pub struct SubstreamRecord {
     pub rbsp_byte_end: usize,
 }
 
+/// What a [`CabacRecorder`] captures.
+///
+/// Embedding needs the full journal: every touched substream is re-encoded from
+/// its recorded bin sequence. Extraction, inspection, verification and capacity
+/// probing only read slot sign bits, so they can skip the journal, the cost
+/// model and the slot map — the journal is ~2 bytes per CABAC bin (hundreds of
+/// millions on a video), which used to be the bulk of a `read`'s footprint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RecordMode {
+    /// Journal + perceptual cost + slot map: everything `embed` replays.
+    #[default]
+    Embed,
+    /// Slot bits only: no journal, no cost model, no slot map.
+    Slots,
+}
+
 /// Recorder attached to the CABAC decoding loop to capture the bin stream
 /// and isolate stego sign positions for re-encoding.
 #[derive(Default, Clone, Debug)]
 pub struct CabacRecorder {
-    /// Full sequence of CABAC bins in decode order.
+    /// Full sequence of CABAC bins in decode order (empty in
+    /// [`RecordMode::Slots`]).
     pub ops: Vec<BinOp>,
     /// Isolated steganographic bypass sign slots.
     pub slots: Vec<StegoSlot>,
     /// Substream boundaries and initial contexts.
     pub substreams: Vec<SubstreamRecord>,
+    /// What this recorder captures.
+    mode: RecordMode,
     /// Current slice index being decoded.
     pub current_slice_idx: usize,
     /// Current substream index.
@@ -247,15 +398,27 @@ impl CabacRecorder {
     /// stamped onto every slot the recorder produces, and the pool order in
     /// `embed_hevc` is derived from it.
     pub fn with_slice(slice_idx: usize, band: u8) -> Self {
+        Self::with_slice_mode(slice_idx, band, RecordMode::Embed)
+    }
+
+    /// [`Self::with_slice`] with an explicit [`RecordMode`].
+    pub fn with_slice_mode(slice_idx: usize, band: u8, mode: RecordMode) -> Self {
         CabacRecorder {
             ops: Vec::new(),
             slots: Vec::new(),
             substreams: Vec::new(),
+            mode,
             current_slice_idx: slice_idx,
             current_substream_idx: 0,
             current_band: band,
             next_pending_slot: 0,
         }
+    }
+
+    /// Whether this recorder keeps the replayable bin journal.
+    #[inline]
+    fn journals(&self) -> bool {
+        self.mode == RecordMode::Embed
     }
 
     /// Mark the beginning of a new substream.
@@ -274,6 +437,7 @@ impl CabacRecorder {
             substream_idx,
             op_start: self.ops.len(),
             op_end: self.ops.len(),
+            slot_start: self.slots.len(),
             init_contexts: *init_contexts,
             rbsp_byte_start,
             rbsp_byte_end: 0,
@@ -291,19 +455,17 @@ impl CabacRecorder {
     /// Record a context decision bin.
     #[inline]
     pub fn record_decision(&mut self, ctx_idx: usize, bit: u32) {
-        self.ops.push(BinOp::Decision {
-            ctx_idx: ctx_idx as u16,
-            bit: bit as u8,
-        });
+        if self.journals() {
+            self.ops.push(BinOp::decision(ctx_idx, bit as u8));
+        }
     }
 
     /// Record a generic bypass bin (non-stego).
     #[inline]
     pub fn record_bypass(&mut self, bit: u32) {
-        self.ops.push(BinOp::Bypass {
-            bit: bit as u8,
-            slot_idx: None,
-        });
+        if self.journals() {
+            self.ops.push(BinOp::bypass(bit as u8, false));
+        }
     }
 
     /// Record a bypass sign bit as a potential stego slot.
@@ -318,33 +480,40 @@ impl CabacRecorder {
         y_c: u8,
     ) {
         let original_bit = bit as u8;
+        let journals = self.journals();
 
         // DC coefficients (x_c == 0 && y_c == 0) never take part in embedding:
         // flipping a DC sign shifts the average level of the entire transform block,
         // causing severe reconstruction distortion and boundary discontinuities.
         if x_c == 0 && y_c == 0 {
-            self.ops.push(BinOp::Bypass {
-                bit: original_bit,
-                slot_idx: None,
-            });
+            if journals {
+                self.ops.push(BinOp::bypass(original_bit, false));
+            }
             return;
         }
 
-        let slot_idx = self.slots.len();
-        let op_idx = self.ops.len();
+        debug_assert!(self.slots.len() <= u32::MAX as usize);
+        debug_assert!(self.ops.len() <= u32::MAX as usize);
+        let slot_idx = self.slots.len() as u32;
+        let op_idx = self.ops.len() as u32;
 
         // Provisional cost: sign bins decode before their levels, so the real
         // magnitude is unknown here. `record_stego_level` overwrites this in the
-        // same coding group.
-        let cost = provisional_sign_flip_cost(1, qp, trafo_size, c_idx, x_c, y_c);
+        // same coding group. Read-only passes never replay the journal and never
+        // rank slots, so they skip the cost model entirely.
+        let cost = if journals {
+            provisional_sign_flip_cost(1, qp, trafo_size, c_idx, x_c, y_c)
+        } else {
+            0.0
+        };
 
         self.slots.push(StegoSlot {
             slot_idx,
-            slice_idx: self.current_slice_idx,
-            substream_idx: self.current_substream_idx,
+            slice_idx: self.current_slice_idx as u32,
+            substream_idx: self.current_substream_idx as u16,
             op_idx,
             original_bit,
-            qp,
+            qp: qp.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
             trafo_size,
             c_idx,
             x_c,
@@ -353,10 +522,9 @@ impl CabacRecorder {
             cost,
         });
 
-        self.ops.push(BinOp::Bypass {
-            bit: original_bit,
-            slot_idx: Some(slot_idx),
-        });
+        if journals {
+            self.ops.push(BinOp::bypass(original_bit, true));
+        }
     }
 
     /// Back-fill the magnitude of the coefficient whose sign was just recorded,
@@ -377,6 +545,12 @@ impl CabacRecorder {
         sample_domain: bool,
     ) {
         if x_c == 0 && y_c == 0 {
+            return;
+        }
+        // The magnitude only feeds the distortion cost, which is what the
+        // trellis ranks slots by. A read-only pass never ranks anything, so it
+        // skips the per-coefficient cost model (and its `powf`) entirely.
+        if !self.journals() {
             return;
         }
         let Some(slot) = self.slots.get_mut(self.next_pending_slot) else {
@@ -407,7 +581,9 @@ impl CabacRecorder {
     /// Record a terminate bin.
     #[inline]
     pub fn record_terminate(&mut self, bit: u32) {
-        self.ops.push(BinOp::Terminate { bit: bit as u8 });
+        if self.journals() {
+            self.ops.push(BinOp::terminate(bit as u8));
+        }
     }
 }
 
@@ -496,7 +672,11 @@ mod tests {
         rec.record_stego_sign(1, 27, 8, 0, 2, 0);
         rec.record_stego_sign(0, 27, 8, 0, 3, 1);
         assert_eq!(rec.slots.len(), 2);
-        assert!(matches!(rec.ops[0], BinOp::Bypass { slot_idx: None, .. }));
+        // The DC sign is journaled as a plain bypass bin, the signs that own a
+        // slot are flagged.
+        assert!(rec.ops[0].is_bypass() && !rec.ops[0].is_stego());
+        assert!(rec.ops[1].is_bypass() && rec.ops[1].is_stego());
+        assert!(rec.ops[2].is_bypass() && rec.ops[2].is_stego());
 
         rec.record_stego_level(0, 0, 9, 700, 8, false);
         rec.record_stego_level(2, 0, 1, 42, 8, false);
@@ -567,5 +747,72 @@ mod tests {
         // usable when a payload needs them.
         let tiny = compute_sign_flip_cost(1, 1, g(4, 0, 1, 1, 8, true));
         assert!(tiny < 10.0, "tiny={tiny}");
+    }
+
+    /// The packed journal must carry every field the re-encoder reads, with no
+    /// aliasing between the kind bits and the payload bits.
+    #[test]
+    fn binop_packing_roundtrips() {
+        for ctx in [0usize, 1, 63, 178, 4094] {
+            for bit in [0u8, 1] {
+                let op = BinOp::decision(ctx, bit);
+                assert!(op.is_decision() && !op.is_bypass() && !op.is_terminate());
+                assert_eq!(op.ctx_idx(), ctx);
+                assert_eq!(op.bit(), bit);
+                assert!(!op.is_stego(), "a decision bin is never a stego slot");
+            }
+        }
+        for bit in [0u8, 1] {
+            for stego in [false, true] {
+                let op = BinOp::bypass(bit, stego);
+                assert!(op.is_bypass() && !op.is_decision() && !op.is_terminate());
+                assert_eq!(op.bit(), bit);
+                assert_eq!(op.is_stego(), stego);
+                assert_eq!(op.ctx_idx(), 0);
+            }
+            let op = BinOp::terminate(bit);
+            assert!(op.is_terminate() && !op.is_decision() && !op.is_bypass());
+            assert_eq!(op.bit(), bit);
+            assert!(!op.is_stego());
+        }
+        // An index that does not fit the 12-bit field saturates instead of
+        // wrapping into a *valid* context number.
+        let saturated = BinOp::decision(0x1234, 0);
+        assert!(saturated.is_decision());
+        assert!(saturated.ctx_idx() >= ENCODER_CONTEXTS);
+    }
+
+    /// A read-only recorder keeps the slot signs but spends nothing on the
+    /// journal, the cost model or the substream slot addresses.
+    #[test]
+    fn slots_mode_skips_the_journal() {
+        let mut rec = CabacRecorder::with_slice_mode(0, 0, RecordMode::Slots);
+        rec.start_substream(0, 0, &[0u8; ENCODER_CONTEXTS]);
+        rec.record_decision(7, 1);
+        rec.record_bypass(0);
+        rec.record_stego_sign(1, 27, 8, 0, 2, 0);
+        rec.record_stego_level(2, 0, 1, 42, 8, false);
+        rec.record_terminate(1);
+        rec.finish_slice(64);
+
+        assert!(rec.ops.is_empty(), "no journal in slot-only mode");
+        assert_eq!(rec.slots.len(), 1);
+        assert_eq!(rec.slots[0].original_bit, 1);
+        assert_eq!(rec.slots[0].cost, 0.0, "cost model is not run");
+        assert_eq!(rec.substreams[0].slot_start, 0);
+
+        // The embed mode must see exactly the same slot, with a real cost.
+        let mut full = CabacRecorder::with_slice_mode(0, 0, RecordMode::Embed);
+        full.start_substream(0, 0, &[0u8; ENCODER_CONTEXTS]);
+        full.record_decision(7, 1);
+        full.record_bypass(0);
+        full.record_stego_sign(1, 27, 8, 0, 2, 0);
+        full.record_stego_level(2, 0, 1, 42, 8, false);
+        full.record_terminate(1);
+        full.finish_slice(64);
+
+        assert_eq!(full.slots[0].original_bit, rec.slots[0].original_bit);
+        assert!(full.slots[0].cost > 0.0);
+        assert_eq!(full.ops.len(), 4);
     }
 }

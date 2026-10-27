@@ -23,7 +23,7 @@ use crate::stego::format::HevcFormatProfile;
 use crate::stego::hevc::bitstream::{compute_hevc_cover_digest, parse_annex_b_spans, rbsp_to_nal};
 use crate::stego::hevc::heif_boxes::parse_heif_targets;
 use crate::stego::hevc::mp4_boxes::parse_mp4_targets;
-use crate::stego::hevc::slot::{BinOp, CabacRecorder, StegoSlot, SubstreamRecord};
+use crate::stego::hevc::slot::{BinOp, CabacRecorder, RecordMode, StegoSlot, SubstreamRecord};
 use crate::stego::hevc::sniff::{
     HevcCarrierKind, NAL_RADL_N, NAL_RASL_N, NAL_SPS_NUT, NAL_STSA_N, NAL_TRAIL_N, NAL_TSA_N,
     sniff_hevc_carrier,
@@ -273,7 +273,7 @@ fn count_absorbed_slots(recorder: &mut CabacRecorder, rbsp: &[u8]) -> usize {
         recorder
             .slots
             .iter()
-            .filter(|s| !excluded.contains(&s.substream_idx))
+            .filter(|s| !excluded.contains(&(s.substream_idx as usize)))
             .count()
     } else {
         recorder.slots.len()
@@ -286,7 +286,7 @@ fn probe_hevc_pool(
     exact: bool,
 ) -> Result<PoolProfile, StrHideError> {
     if kind != HevcCarrierKind::Mp4Container || exact {
-        let record = record_carrier_state(carrier, kind)?;
+        let record = record_carrier_state(carrier, kind, RecordMode::Slots)?;
         return Ok(PoolProfile::from_record(&record));
     }
 
@@ -331,7 +331,7 @@ fn probe_hevc_pool(
 
     // 150 pictures or fewer: full scan (0% estimation error, fast enough)
     if selectable <= 150 {
-        let record = record_carrier_state(carrier, kind)?;
+        let record = record_carrier_state(carrier, kind, RecordMode::Slots)?;
         return Ok(PoolProfile::from_record(&record));
     }
 
@@ -586,7 +586,7 @@ pub fn embed_hevc_with_info(
 
     // 1. Scan and record all slices and substreams
     control.stage(Stage::Decode);
-    let record = record_carrier_state(carrier, kind)?;
+    let record = record_carrier_state(carrier, kind, RecordMode::Embed)?;
     // Checkpoint after the parse: recording a long video is tens of seconds.
     control.check()?;
     control.stage(Stage::Solve);
@@ -724,10 +724,10 @@ pub fn embed_hevc_with_info(
             if delta != 0 {
                 let slot = &all_slots[positions[i]];
                 flips_per_slice
-                    .entry(slot.slice_idx)
+                    .entry(slot.slice_idx as usize)
                     .or_default()
-                    .push(slot.op_idx);
-                touched.insert((slot.slice_idx, slot.substream_idx));
+                    .push(slot.op_idx as usize);
+                touched.insert((slot.slice_idx as usize, slot.substream_idx as usize));
             }
         }
 
@@ -753,7 +753,8 @@ pub fn embed_hevc_with_info(
         if !unsound.is_empty() {
             for &pos in &positions {
                 let slot = &all_slots[pos];
-                if bad_substreams.contains(&(slot.slice_idx, slot.substream_idx)) {
+                if bad_substreams.contains(&(slot.slice_idx as usize, slot.substream_idx as usize))
+                {
                     forbidden[pos] = true;
                 }
             }
@@ -888,7 +889,9 @@ pub fn embed_hevc_with_info(
         let mut had_bad_substream = false;
         for &pos in &positions {
             let slot = &all_slots[pos];
-            if bad_substreams.contains(&(slot.slice_idx, slot.substream_idx)) && !forbidden[pos] {
+            if bad_substreams.contains(&(slot.slice_idx as usize, slot.substream_idx as usize))
+                && !forbidden[pos]
+            {
                 forbidden[pos] = true;
                 had_bad_substream = true;
             }
@@ -1016,37 +1019,39 @@ fn encode_substream(
 
     let ops = &slice.ops[sub.op_start..sub.op_end];
     let mut trace = Vec::new();
+    // The journal stores no slot index: a stego bypass bin is identified by its
+    // position among the stego bypass bins of the slice, which is exactly the
+    // recorder-local slot index `slot_map` is keyed by.
+    let mut local_slot = sub.slot_start;
 
     for (offset, op) in ops.iter().enumerate() {
         let op_idx = sub.op_start + offset;
         let flipped = flipped_ops.get(op_idx).copied().unwrap_or(false);
-        match *op {
-            BinOp::Decision { ctx_idx, bit } => {
-                let idx = ctx_idx as usize;
-                // A context index outside the model array means the journal and
-                // this build disagree about the syntax. Skipping the bin would
-                // silently desynchronise the replay, so it is a hard error: the
-                // caller marks the substream unsupported.
-                let ctx = ctx_array.get_mut(idx).ok_or_else(|| {
-                    StrHideError::CorruptedData(format!(
-                        "CABAC context index {idx} is out of range (ENCODER_CONTEXTS = {ENCODER_CONTEXTS})"
-                    ))
-                })?;
-                enc.encode_decision(&mut writer, ctx, bit);
-            }
-            BinOp::Bypass { bit, slot_idx } => {
-                let out_bit = if flipped { bit ^ 1 } else { bit };
-                let bit_lo = writer.bit_len();
-                enc.encode_bypass(&mut writer, out_bit);
-                let bit_hi = writer.bit_len();
-                if flipped
-                    && let Some(local) = slot_idx
-                    && let Some(&Some(global)) = slice.slot_map.get(local)
-                {
+        if op.is_decision() {
+            let idx = op.ctx_idx();
+            // A context index outside the model array means the journal and
+            // this build disagree about the syntax. Skipping the bin would
+            // silently desynchronise the replay, so it is a hard error: the
+            // caller marks the substream unsupported.
+            let ctx = ctx_array.get_mut(idx).ok_or_else(|| {
+                StrHideError::CorruptedData(format!(
+                    "CABAC context index {idx} is out of range (ENCODER_CONTEXTS = {ENCODER_CONTEXTS})"
+                ))
+            })?;
+            enc.encode_decision(&mut writer, ctx, op.bit());
+        } else if op.is_bypass() {
+            let out_bit = if flipped { op.bit() ^ 1 } else { op.bit() };
+            let bit_lo = writer.bit_len();
+            enc.encode_bypass(&mut writer, out_bit);
+            let bit_hi = writer.bit_len();
+            if op.is_stego() {
+                if flipped && let Some(&Some(global)) = slice.slot_map.get(local_slot) {
                     trace.push((global, bit_lo, bit_hi));
                 }
+                local_slot += 1;
             }
-            BinOp::Terminate { bit } => enc.encode_terminate(&mut writer, bit),
+        } else {
+            enc.encode_terminate(&mut writer, op.bit());
         }
     }
 
@@ -1063,7 +1068,10 @@ fn encode_substream(
     //
     // Verified 2026-10-25 by replaying every substream of the local corpus: all
     // match byte-exactly (512×512 WPP 16/16, real HEICs 768/768 each).
-    if !matches!(ops.last(), Some(BinOp::Terminate { bit: 1 })) {
+    if !ops
+        .last()
+        .is_some_and(|op| op.is_terminate() && op.bit() == 1)
+    {
         enc.encode_terminate(&mut writer, 1);
     }
     writer.align_zero();
@@ -1169,7 +1177,7 @@ pub fn extract_hevc(
         )
     })?;
 
-    let record = record_carrier_state(carrier, kind)?;
+    let record = record_carrier_state(carrier, kind, RecordMode::Slots)?;
     control.check()?;
     let bands = record.bands.clone();
     let all_slots = record.all_slots;
@@ -1309,7 +1317,7 @@ pub fn inspect_hevc(
     });
     empty_info.media_info = media_info;
 
-    let record = match record_carrier_state(carrier, kind) {
+    let record = match record_carrier_state(carrier, kind, RecordMode::Slots) {
         Ok(r) => r,
         Err(_) => return Ok(empty_info),
     };
@@ -1409,7 +1417,7 @@ pub fn verify_hevc(
         }
     };
 
-    match record_carrier_state(carrier, kind) {
+    match record_carrier_state(carrier, kind, RecordMode::Slots) {
         Ok(rec) => {
             levels.push(VerifyLevel::pass(
                 1,
@@ -1580,6 +1588,7 @@ struct CandidateSlice {
 fn record_carrier_state(
     carrier: &[u8],
     kind: HevcCarrierKind,
+    mode: RecordMode,
 ) -> Result<CarrierRecord, StrHideError> {
     let mut decoder = Decoder::new();
     decoder.ablate = Ablate {
@@ -1688,7 +1697,7 @@ fn record_carrier_state(
             drain_frames(&mut decoder);
             continue;
         };
-        let mut recorder = CabacRecorder::with_slice(slice_idx, band);
+        let mut recorder = CabacRecorder::with_slice_mode(slice_idx, band, mode);
         let decoded = decoder.decode_nal_with_observer(slice_bytes, &mut recorder);
         drain_frames(&mut decoder);
         match decoded {
@@ -1700,16 +1709,29 @@ fn record_carrier_state(
             Ok(_) if recorder.substreams.is_empty() => {}
             Ok(_) => {
                 let rbsp = nal_rbsp(slice_bytes);
+                // The EPB exclusion runs in both modes: it decides which slots
+                // enter the pool, so the pool layout has to be identical on the
+                // read side or the trellis would read different elements.
                 let slot_map = absorb_recorder(&mut recorder, &rbsp, &mut all_slots);
                 slice_contexts.push(SliceContext {
                     carrier_span: cand.span.clone(),
                     nal_type: cand.nal_type,
                     layer_id: cand.layer_id,
                     temporal_id: cand.temporal_id,
-                    orig_rbsp: rbsp,
+                    // Only the embedder rewrites an RBSP.
+                    orig_rbsp: if mode == RecordMode::Embed {
+                        rbsp
+                    } else {
+                        Vec::new()
+                    },
                     ops: recorder.ops,
                     substreams: recorder.substreams,
-                    slot_map,
+                    // Read-only passes never translate a bin back to a slot.
+                    slot_map: if mode == RecordMode::Embed {
+                        slot_map
+                    } else {
+                        Vec::new()
+                    },
                 });
                 slice_idx += 1;
             }
@@ -1732,35 +1754,38 @@ fn record_carrier_state(
     // first, band 1 (reference) after it. `band_positions` walks the bands in
     // this order, so a payload that fits in band 0 never touches a picture that
     // something predicts from.
-    let mut order: Vec<usize> = (0..all_slots.len()).collect();
-    order.sort_by_key(|&i| all_slots[i].band);
-    let mut remap = vec![0usize; all_slots.len()];
-    for (new, &old) in order.iter().enumerate() {
-        remap[old] = new;
-    }
-    let mut sorted = Vec::with_capacity(all_slots.len());
-    for &old in &order {
-        let mut slot = all_slots[old];
-        slot.slot_idx = remap[old];
-        sorted.push(slot);
-    }
-    // Slice contexts address their slots by the recording-order id, which the
-    // re-encoder translates through `slot_map`; remap it in place so the two
-    // stay consistent.
-    for ctx in &mut slice_contexts {
-        for mapped in ctx.slot_map.iter_mut().flatten() {
-            *mapped = remap[*mapped];
-        }
-    }
-    let band0_len = sorted
+    //
+    // Sorted in place, keeping `slot_idx` as the recording-order id until the
+    // new numbering is known: a second `Vec<StegoSlot>` for the sorted copy
+    // doubled the pool (0.5 GB for a 13 s 1080p60 clip) for no benefit. A
+    // carrier that is already single-band (every still image, and a video whose
+    // slices all sit on one rung) skips both the sort and the remap.
+    let band0_len = all_slots
         .iter()
         .filter(|slot| slot.band == BAND_NON_REFERENCE)
         .count();
-    let bands = vec![0..band0_len, band0_len..sorted.len()];
+    if band0_len != 0 && band0_len != all_slots.len() {
+        all_slots.sort_by_key(|slot| slot.band);
+        let mut remap = vec![0u32; all_slots.len()];
+        for (new, slot) in all_slots.iter_mut().enumerate() {
+            debug_assert!((slot.slot_idx as usize) < remap.len());
+            remap[slot.slot_idx as usize] = new as u32;
+            slot.slot_idx = new as u32;
+        }
+        // Slice contexts address their slots by the recording-order id, which
+        // the re-encoder translates through `slot_map`; remap it in place so
+        // the two stay consistent.
+        for ctx in &mut slice_contexts {
+            for mapped in ctx.slot_map.iter_mut().flatten() {
+                *mapped = remap[*mapped] as usize;
+            }
+        }
+    }
+    let bands = vec![0..band0_len, band0_len..all_slots.len()];
 
     Ok(CarrierRecord {
         slice_contexts,
-        all_slots: sorted,
+        all_slots,
         bands,
         pictures,
         band_pictures,
@@ -1940,12 +1965,12 @@ fn absorb_recorder(
 
     let mut slot_map = Vec::with_capacity(recorder.slots.len());
     for mut slot in recorder.slots.drain(..) {
-        if is_multi_sub && excluded.contains(&slot.substream_idx) {
+        if is_multi_sub && excluded.contains(&(slot.substream_idx as usize)) {
             slot_map.push(None);
             continue;
         }
-        slot.slot_idx = all_slots.len();
-        slot_map.push(Some(slot.slot_idx));
+        slot.slot_idx = all_slots.len() as u32;
+        slot_map.push(Some(slot.slot_idx as usize));
         all_slots.push(slot);
     }
     slot_map
@@ -1957,7 +1982,7 @@ fn scan_hevc_slots(carrier: &[u8]) -> Result<Vec<StegoSlot>, StrHideError> {
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
-    let record = record_carrier_state(carrier, kind)?;
+    let record = record_carrier_state(carrier, kind, RecordMode::Slots)?;
     Ok(record.all_slots)
 }
 
