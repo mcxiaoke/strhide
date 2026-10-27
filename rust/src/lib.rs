@@ -125,6 +125,7 @@
 
 extern crate alloc;
 
+pub mod formats;
 pub mod sniff;
 
 pub mod crypto;

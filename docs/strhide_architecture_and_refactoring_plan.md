@@ -519,6 +519,8 @@ impl StrHideError { pub fn detail_i18n(&self) -> ErrorDetail; }   // GUI 用它 
 5. 只抽 `formats/isobmff/`（三份 3,585 行合一）。`png_chunks` / `riff` / `ebml` **暂不动**；仅把 `dqt.rs` 从顶层 `src/jpeg/` 迁入 `formats/jpeg_segments.rs`（它本来就是公共依赖）。
 6. 验收：`baseline_hash.py --check` 全等；`analysis` 的 PE 扫描不回归；五个最小构建全绿。
 
+> **进度（2026-10-27 13:02）**：第 1、2 项**已完成**（`rust/src/formats/{sniff,annexb,capability,mod}.rs`，内容域三处瀑布改为单次 `sniff_bytes` 分派，删除 `HostAdapter::supports_content_stego` 及其 4 处覆写；新增 `tests/test_lifecycle/sniff.rs` 5 项一致性测试把"格式层 / 路由器 / 能力表"钉在一起）。698 项测试全绿、基线 58/58 不变。**未做**：第 3 项（feature 图 + `engine`→`structure` 改名 + i18n/config 下沉 `core`）、第 4 项（ISOBMFF 三份合一）——两者各自是一个独立提交，避免与本次结构改动混在一起。
+
 ### 阶段 2：内容域 trait 化 + 参数强类型 + 进度取消（4–5 人日）
 
 1. `StegoEngine` trait（含 `inspect` / `verify`）+ 注册表，删掉 `stego/mod.rs` 三处 if-else。

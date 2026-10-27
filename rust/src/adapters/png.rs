@@ -58,10 +58,6 @@ impl HostAdapter for PngAdapter {
         "PNG"
     }
 
-    fn supports_content_stego(&self) -> bool {
-        true
-    }
-
     fn detect(&self, reader: &mut dyn SeekRead) -> bool {
         let start_pos = match reader.stream_position() {
             Ok(pos) => pos,

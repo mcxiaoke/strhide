@@ -38,6 +38,8 @@ mod png_self_describing;
 mod profile;
 #[path = "test_lifecycle/reproducible.rs"]
 mod reproducible;
+#[path = "test_lifecycle/sniff.rs"]
+mod sniff;
 #[path = "test_lifecycle/stego.rs"]
 mod stego;
 #[path = "test_lifecycle/stego_v3.rs"]

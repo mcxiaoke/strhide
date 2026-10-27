@@ -36,6 +36,7 @@ pub use params::{
 pub use registry::CostModelRegistry;
 
 use crate::errors::StrHideError;
+use crate::formats::sniff::{FileFormat, sniff_bytes};
 use crate::params::Profile;
 
 /// Automatically sniff carrier format and embed payload using content-adaptive steganography.
@@ -95,7 +96,9 @@ pub fn embed_carrier_with_profile_info(
     // trellis to a different slot.
     jpeg_params.deterministic = options.freshness.is_seeded();
 
-    if carrier_bytes.len() >= 2 && &carrier_bytes[..2] == b"\xFF\xD8" {
+    let format = sniff_bytes(carrier_bytes);
+
+    if format == Some(FileFormat::Jpeg) {
         // JPEG format
         let model =
             CostModelRegistry::get_jpeg_model(options.algorithm.as_deref()).ok_or_else(|| {
@@ -116,7 +119,7 @@ pub fn embed_carrier_with_profile_info(
             options.freshness,
         )
         .map(|b| (b, None))
-    } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
+    } else if format == Some(FileFormat::Png) {
         // PNG format
         let model = CostModelRegistry::get_spatial_model(options.algorithm.as_deref()).ok_or_else(
             || {
@@ -138,7 +141,7 @@ pub fn embed_carrier_with_profile_info(
             options.freshness,
         )
         .map(|b| (b, None))
-    } else if crate::sniff::is_heif_bytes(carrier_bytes) {
+    } else if format == Some(FileFormat::Heif) {
         // HEIF content-domain steganography: Scheme C (HEVC CABAC in-place)
         // first, thumbnail bridge second. The order is the same on read, write
         // and capacity so all three agree on what a carrier holds: a file
@@ -180,7 +183,7 @@ pub fn embed_carrier_with_profile_info(
                     .map(|b| (b, None)),
             }
         }
-    } else if hevc::sniff::is_mp4_bytes(carrier_bytes) {
+    } else if format == Some(FileFormat::Mp4) {
         // MP4/MOV video container: Scheme C on the sample table. Byte length is
         // preserved (Delta = 0), so `stsz`/`stco`/`co64` stay valid untouched.
         hevc::embed_hevc_with_info(
@@ -193,7 +196,7 @@ pub fn embed_carrier_with_profile_info(
             options.safety,
         )
         .map(|(b, info)| (b, Some(info)))
-    } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {
+    } else if format == Some(FileFormat::HevcAnnexB) {
         // Raw Annex-B HEVC bitstream
         hevc::embed_hevc_with_info(
             carrier_bytes,
@@ -239,7 +242,9 @@ pub fn extract_carrier_with_profile(
     let secret = options.secret(profile);
     let domain = options.domain(profile);
 
-    if carrier_bytes.len() >= 2 && &carrier_bytes[..2] == b"\xFF\xD8" {
+    let format = sniff_bytes(carrier_bytes);
+
+    if format == Some(FileFormat::Jpeg) {
         // JPEG format. No cost model is looked up on purpose: the V3 slot set
         // is geometric, so extraction must not depend on the embedder's cost
         // function (or on `--algorithm`).
@@ -250,7 +255,7 @@ pub fn extract_carrier_with_profile(
             profile.jpeg_format(),
             &options.extract_params,
         )
-    } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
+    } else if format == Some(FileFormat::Png) {
         // PNG format. The carrier names its cost model in the feature word
         // and the extractor rebuilds everything from that declaration, so
         // `--algorithm` must not gate extraction (mirroring the JPEG branch
@@ -266,7 +271,7 @@ pub fn extract_carrier_with_profile(
             &*model,
             &options.png_params,
         )
-    } else if crate::sniff::is_heif_bytes(carrier_bytes) {
+    } else if format == Some(FileFormat::Heif) {
         // HEIF content-domain steganography: Scheme C (HEVC CABAC in-place)
         // first, then the thumbnail bridge. Same order as embed and probe --
         // see the note on the HEIF branch in `embed_carrier`.
@@ -295,10 +300,10 @@ pub fn extract_carrier_with_profile(
                 }
             }
         }
-    } else if hevc::sniff::is_mp4_bytes(carrier_bytes) {
+    } else if format == Some(FileFormat::Mp4) {
         // MP4/MOV video container
         hevc::extract_hevc(carrier_bytes, secret, domain, profile.hevc_format())
-    } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {
+    } else if format == Some(FileFormat::HevcAnnexB) {
         // Raw Annex-B HEVC bitstream
         hevc::extract_hevc(carrier_bytes, secret, domain, profile.hevc_format())
     } else {
@@ -424,7 +429,9 @@ pub fn probe_carrier_capacity_with_profile(
     let secret = options.secret(profile);
     let domain = options.domain(profile);
 
-    if carrier_bytes.len() >= 2 && &carrier_bytes[..2] == b"\xFF\xD8" {
+    let format = sniff_bytes(carrier_bytes);
+
+    if format == Some(FileFormat::Jpeg) {
         let model =
             CostModelRegistry::get_jpeg_model(options.algorithm.as_deref()).ok_or_else(|| {
                 StrHideError::General(format!(
@@ -439,7 +446,7 @@ pub fn probe_carrier_capacity_with_profile(
             options.safety.level,
             profile.jpeg_format(),
         )
-    } else if carrier_bytes.len() >= 8 && &carrier_bytes[..8] == b"\x89PNG\r\n\x1a\n" {
+    } else if format == Some(FileFormat::Png) {
         let model = CostModelRegistry::get_spatial_model(options.algorithm.as_deref()).ok_or_else(
             || {
                 StrHideError::General(format!(
@@ -457,7 +464,7 @@ pub fn probe_carrier_capacity_with_profile(
             domain,
             profile.png_format(),
         )
-    } else if crate::sniff::is_heif_bytes(carrier_bytes) {
+    } else if format == Some(FileFormat::Heif) {
         // Same order as embed/extract: Scheme C first, bridge as the fallback.
         // A probe that advertises the bridge's capacity while the writer fills
         // the CABAC stream (or the other way round) is worse than useless.
@@ -481,8 +488,7 @@ pub fn probe_carrier_capacity_with_profile(
                 Err(_) => heif::probe_heif_bridge_capacity(carrier_bytes, options, profile),
             }
         }
-    } else if hevc::sniff::is_mp4_bytes(carrier_bytes) || hevc::sniff::is_hevc_annexb(carrier_bytes)
-    {
+    } else if matches!(format, Some(FileFormat::Mp4 | FileFormat::HevcAnnexB)) {
         // MP4/MOV video container, or a raw Annex-B bitstream: one entry point,
         // the container decides where the slice NALs live.
         hevc::probe_hevc_capacity_info(

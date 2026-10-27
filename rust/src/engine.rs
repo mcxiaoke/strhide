@@ -1988,7 +1988,7 @@ fn inspect_core(
     // was merely pointed at, and a 4 GiB "PNG" must not become a 4 GiB
     // allocation. Above the cap the field is simply absent.
     #[cfg(feature = "stego")]
-    let content_stego_capacity = if adapter.supports_content_stego() {
+    let content_stego_capacity = if crate::router::supports_content_stego(adapter) {
         host.seek(SeekFrom::Start(0))?;
         let mut buf = Vec::new();
         host.take(MAX_CONTENT_STEGO_BYTES).read_to_end(&mut buf)?;

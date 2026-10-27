@@ -258,16 +258,6 @@ pub trait HostAdapter: Send + Sync {
         Ok(())
     }
 
-    /// Whether this format can also carry *content-domain* (pixel/DCT)
-    /// steganography, so `inspect` should measure that capacity.
-    ///
-    /// A trait method rather than a check on [`format_name`](Self::format_name):
-    /// the display name is presentation, and routing on it means a rename
-    /// silently disables the feature.
-    fn supports_content_stego(&self) -> bool {
-        false
-    }
-
     /// Verifies host container structure integrity.
     fn verify_structure(&self, stego_in: &mut dyn SeekRead)
     -> Result<(bool, String), StrHideError>;
