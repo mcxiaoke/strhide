@@ -36,12 +36,13 @@ use dct_io::JpegCoefficients;
 use sha2::{Digest, Sha256};
 
 use crate::core::control::{Control, Stage};
+use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::coding::{Move, StcTrellis};
 use crate::stego::envelope::{
-    BODY_OVERHEAD, Freshness, HEADER_OVERHEAD, build_plaintext, encrypt_with_aad,
-    unpack_envelope_parts,
+    BODY_OVERHEAD, Freshness, HEADER_OVERHEAD, build_plaintext, build_plaintext_bytes,
+    encrypt_with_aad, unpack_envelope_parts,
 };
 use crate::stego::format::{
     JpegFormatProfile, body_keys, derive_master, extension_stc_seed, header_perm_seed,
@@ -494,6 +495,7 @@ struct EmbedContext<'a> {
     fresh_binding: [u8; 64],
     /// Capacity safety policy for the enforced-tier gate.
     safety: crate::stego::params::SafetyPolicy,
+    payload: &'a Payload<'a>,
 }
 
 /// Number of salt values tried when a Huffman-limited block cannot be encoded.
@@ -558,10 +560,10 @@ impl From<StrHideError> for Attempt {
 ///    embed reports the symbol and says what to do, instead of letting `dct-io`
 ///    raise a bare `CorruptEntropy`.
 #[allow(clippy::too_many_arguments)]
-pub fn embed_jpeg(
+pub fn embed_jpeg<'a>(
     carrier_bytes: &[u8],
-    payload: &[u8],
-    password: Option<&str>,
+    payload: impl Into<Payload<'a>>,
+    secret: Option<&str>,
     domain: Option<&str>,
     fmt: &JpegFormatProfile,
     params: &JpegParams,
@@ -570,6 +572,7 @@ pub fn embed_jpeg(
     freshness: Freshness,
     control: &Control<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
+    let payload = payload.into();
     fmt.validate()?;
     params.validate()?;
     control.stage(Stage::Decode);
@@ -630,14 +633,15 @@ pub fn embed_jpeg(
         costs: &costs,
         directions: directions.as_deref(),
         table: table.as_ref(),
-        password: password
+        password: secret
             .filter(|s| !s.is_empty())
             .unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
         domain,
         base_bytes: preflight.base_bytes,
         freshness,
-        fresh_binding: Freshness::seeded_binding(carrier_bytes, payload),
+        fresh_binding: Freshness::seeded_binding(carrier_bytes, payload.as_bytes()),
         safety,
+        payload: &payload,
     };
     let mut work = coeffs.clone();
     let mut last_error = None;
@@ -651,7 +655,6 @@ pub fn embed_jpeg(
             carrier_bytes,
             &mut work,
             &mut applied,
-            payload,
             &ctx,
             attempt_idx as u32,
         ) {
@@ -685,7 +688,6 @@ fn embed_once(
     carrier_bytes: &[u8],
     work: &mut JpegCoefficients,
     applied: &mut Vec<(u32, i8)>,
-    payload: &[u8],
     ctx: &EmbedContext<'_>,
     attempt: u32,
 ) -> Result<Vec<u8>, Attempt> {
@@ -716,7 +718,7 @@ fn embed_once(
     // the AAD, so encryption has to wait until the superblock is final.
     let total_coeffs = cover.block_count * 64;
 
-    let plaintext = build_plaintext(payload)?;
+    let plaintext = build_plaintext(ctx.payload)?;
     let ciphertext_len = plaintext.len() + suite.tag_len();
     let envelope_len = HEADER_OVERHEAD + ciphertext_len;
     if envelope_len as u64 > ENVELOPE_LEN_MAX as u64 {
@@ -777,11 +779,11 @@ fn embed_once(
     // Safety tier: advisory (warn upstream) or enforced bpp ceiling.
     if safety.is_enforced() {
         let max = enforced_payload_limit(total_coeffs, body_grid_len, safety);
-        if payload.len() > max {
-            let bpp = (payload.len() * 8) as f64 / total_coeffs as f64;
+        if ctx.payload.len() > max {
+            let bpp = (ctx.payload.len() * 8) as f64 / total_coeffs as f64;
             return Err(Attempt::from(StrHideError::General(format!(
                 "Payload ({} bytes, bpp {:.4}) exceeds safety threshold ({} bytes, bpp <= {:.2}) for tier '{}'",
-                payload.len(),
+                ctx.payload.len(),
                 bpp,
                 max,
                 safety.level.bpp_limit(),
@@ -1053,7 +1055,7 @@ pub fn extract_jpeg(
     fmt: &JpegFormatProfile,
     extract: &ExtractParams,
     control: &Control<'_>,
-) -> Result<Vec<u8>, StrHideError> {
+) -> Result<Payload<'static>, StrHideError> {
     fmt.validate()?;
     preflight_jpeg(carrier_bytes)?;
     let coeffs = dct_io::read_coefficients(carrier_bytes).map_err(map_dct_error)?;
@@ -1393,7 +1395,7 @@ pub fn layout_for_payload(
     let n_total = block_count * fmt.grid_rule.slots_per_block();
     let ext_bytes = encode_extension(&params.extensions)?.len();
     let hdr_n = fmt.header_slots(ext_bytes);
-    let plaintext = build_plaintext(payload)?;
+    let plaintext = build_plaintext_bytes(payload)?;
     let ciphertext_len = plaintext.len() + suite.tag_len();
     let body_slots = n_total.saturating_sub(hdr_n);
     let effective_budget = params.effective_slot_budget(body_slots);

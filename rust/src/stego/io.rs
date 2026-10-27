@@ -14,9 +14,7 @@ use std::path::{Path, PathBuf};
 use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::params::Profile;
-use crate::stego::{
-    EmbedOptions, ExtractOptions, embed_carrier_with_profile, extract_carrier_with_profile,
-};
+use crate::stego::{EmbedOptions, ExtractOptions, embed_carrier_with_profile};
 
 /// Embed `payload` into the carrier file at `carrier_path` and commit the result.
 ///
@@ -54,8 +52,17 @@ pub fn extract_carrier_file(
     options: &ExtractOptions<'_>,
     profile: &Profile,
 ) -> Result<Vec<u8>, StrHideError> {
+    extract_carrier_file_payload(carrier_path, options, profile).map(Payload::into_bytes)
+}
+
+/// [`extract_carrier_file`] returning the unified [`Payload`] with preserved metadata.
+pub fn extract_carrier_file_payload(
+    carrier_path: &Path,
+    options: &ExtractOptions<'_>,
+    profile: &Profile,
+) -> Result<Payload<'static>, StrHideError> {
     let carrier_bytes = std::fs::read(carrier_path)?;
-    extract_carrier_with_profile(&carrier_bytes, options, profile)
+    crate::stego::extract_carrier_payload(&carrier_bytes, options, profile)
 }
 
 #[cfg(test)]

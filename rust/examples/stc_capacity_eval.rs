@@ -174,7 +174,7 @@ fn eval_png(png_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::er
                         let ext_res = extract_png(&stego_bytes, Some(TEST_PASSWORD), None, &strhide::stego::format::OFFICIAL_PNG_FORMAT, &HillCostModel, &PngParams::default(), &Control::none());
                         let extract_ms = started_ext.elapsed().as_millis();
                         let verify_ok = match ext_res {
-                            Ok(recovered) => recovered == payload,
+                            Ok(recovered) => recovered.as_bytes() == payload.as_slice(),
                             Err(_) => false,
                         };
 
@@ -352,7 +352,7 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
                         );
                         let extract_ms = started_ext.elapsed().as_millis();
                         let verify_ok = match ext_res {
-                            Ok(recovered) => recovered == payload,
+                            Ok(recovered) => recovered.as_bytes() == payload.as_slice(),
                             Err(_) => false,
                         };
 

@@ -37,6 +37,7 @@ use hkdf::Hkdf;
 use rand::RngExt;
 use sha2::Sha256;
 
+use crate::core::payload::{Payload, PayloadKind};
 use crate::crypto::normalize_nfc;
 use crate::errors::StrHideError;
 use crate::stego::format::{Aead as SuiteAead, CipherSuite};
@@ -62,17 +63,24 @@ pub const SALT_LEN: usize = 16;
 pub const NONCE_LEN: usize = 12;
 pub const TAG_LEN: usize = 16;
 pub const HEADER_OVERHEAD: usize = SALT_LEN + NONCE_LEN; // 28 bytes
-pub const MIN_ENVELOPE_LEN: usize = HEADER_OVERHEAD + 4 + 1 + TAG_LEN; // 49 bytes
 
-/// Bytes the **ciphertext** spends on things that are not payload:
-/// `[4-byte original length][1-byte flags]` inside the plaintext plus the
-/// 16-byte AEAD tag.
+/// Micro-header tag for plain text or raw bytes without filename.
+pub const MICRO_TAG_TEXT_OR_RAW: u8 = 0x00;
+
+/// Micro-header tag for a file payload preserving its filename.
+pub const MICRO_TAG_FILE: u8 = 0x01;
+
+/// Minimal micro-header overhead: 1 byte (`0x00`) for text/raw payload.
+pub const MICRO_OVERHEAD_MIN: usize = 1;
+
+/// Bytes the **ciphertext** spends on things that are not raw payload:
+/// `[4-byte original length][1-byte flags]` plus the 1-byte minimal micro-header
+/// inside the plaintext, plus the 16-byte AEAD tag.
 ///
-/// The 28-byte salt/nonce is deliberately NOT part of this number: it is
-/// carried by the carrier header, not by the body slots. Capacity probes must
-/// subtract this from the body ciphertext budget, otherwise they under-report by
-/// 28 bytes (they used to subtract `MIN_ENVELOPE_LEN`).
-pub const BODY_OVERHEAD: usize = 4 + 1 + TAG_LEN; // 21 bytes
+/// The 28-byte salt/nonce is carried by the carrier header, not by body slots.
+pub const BODY_OVERHEAD: usize = 4 + 1 + MICRO_OVERHEAD_MIN + TAG_LEN; // 22 bytes
+
+pub const MIN_ENVELOPE_LEN: usize = HEADER_OVERHEAD + BODY_OVERHEAD; // 50 bytes
 
 /// Largest payload a decoded envelope may expand to (matches the header's
 /// 26-bit length field).
@@ -285,36 +293,123 @@ fn derive_seeded<const N: usize>(
     out
 }
 
-/// Compress (when profitable) and frame the payload as AEAD plaintext.
+/// Sanitize a filename to prevent path traversal and ensure it fits in a u8 length byte (<= 255 bytes).
+pub fn sanitize_filename(name: &str) -> Option<String> {
+    let p = std::path::Path::new(name);
+    let base = p.file_name()?.to_str()?;
+    let norm = normalize_nfc(base);
+    let trimmed = norm.trim();
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return None;
+    }
+    // Truncate at UTF-8 boundary to at most 255 bytes
+    let mut byte_limit = 255.min(trimmed.len());
+    while !trimmed.is_char_boundary(byte_limit) {
+        byte_limit -= 1;
+    }
+    let safe = &trimmed[..byte_limit];
+    if safe.is_empty() {
+        None
+    } else {
+        Some(safe.to_string())
+    }
+}
+
+/// Encode `Payload` with the stealth micro-header into raw uncompressed bytes.
 ///
-/// `[4B original length][1B flags][body]`. The length is known before
+/// Format:
+/// - `[0x00][data]` for text, raw bytes, or when filename is omitted.
+/// - `[0x01][name_len: u8][name_bytes (UTF-8)][data]` for file payload with name.
+pub fn encode_micro_header(payload: &Payload<'_>) -> Vec<u8> {
+    if payload.kind() == PayloadKind::File
+        && let Some(raw_name) = payload.name()
+        && let Some(safe_name) = sanitize_filename(raw_name)
+    {
+        let name_bytes = safe_name.as_bytes();
+        let mut out = Vec::with_capacity(2 + name_bytes.len() + payload.len());
+        out.push(MICRO_TAG_FILE);
+        out.push(name_bytes.len() as u8);
+        out.extend_from_slice(name_bytes);
+        out.extend_from_slice(payload.as_bytes());
+        return out;
+    }
+    let mut out = Vec::with_capacity(1 + payload.len());
+    out.push(MICRO_TAG_TEXT_OR_RAW);
+    out.extend_from_slice(payload.as_bytes());
+    out
+}
+
+/// Decode a decompressed plain buffer into a [`Payload`], unpacking the micro-header.
+pub fn decode_micro_header(plain: &[u8]) -> Result<Payload<'static>, StrHideError> {
+    if plain.is_empty() {
+        return Err(StrHideError::CorruptedData(
+            "Empty micro-envelope plaintext".into(),
+        ));
+    }
+    match plain[0] {
+        MICRO_TAG_TEXT_OR_RAW => Ok(Payload::owned(plain[1..].to_vec())),
+        MICRO_TAG_FILE => {
+            if plain.len() < 2 {
+                return Err(StrHideError::CorruptedData(
+                    "Truncated file micro-header".into(),
+                ));
+            }
+            let name_len = plain[1] as usize;
+            if plain.len() < 2 + name_len {
+                return Err(StrHideError::CorruptedData(
+                    "Truncated filename in micro-header".into(),
+                ));
+            }
+            let name_str = std::str::from_utf8(&plain[2..2 + name_len]).map_err(|_| {
+                StrHideError::CorruptedData("Filename in micro-header is not valid UTF-8".into())
+            })?;
+            let safe_name =
+                sanitize_filename(name_str).unwrap_or_else(|| "extracted.bin".to_string());
+            let data = plain[2 + name_len..].to_vec();
+            Ok(Payload::file(safe_name, &data).into_owned())
+        }
+        tag => Err(StrHideError::CorruptedData(format!(
+            "Unknown micro-header tag {tag:#04x}"
+        ))),
+    }
+}
+
+/// Compress (when profitable) and frame the payload with stealth micro-header as AEAD plaintext.
+///
+/// `[4B original length][1B flags][micro-header][payload bytes]`. The length is known before
 /// encryption, which is what lets the caller size the header field first and
 /// only then encrypt with the finished header as associated data.
-pub fn build_plaintext(payload: &[u8]) -> Result<Vec<u8>, StrHideError> {
-    if payload.len() > MAX_PLAINTEXT_LEN {
+pub fn build_plaintext(payload: &Payload<'_>) -> Result<Vec<u8>, StrHideError> {
+    let uncompressed = encode_micro_header(payload);
+    if uncompressed.len() > MAX_PLAINTEXT_LEN {
         return Err(StrHideError::General(format!(
-            "Payload of {} bytes exceeds the {MAX_PLAINTEXT_LEN}-byte envelope limit",
-            payload.len()
+            "Payload of {} bytes (with micro-header) exceeds the {MAX_PLAINTEXT_LEN}-byte envelope limit",
+            uncompressed.len()
         )));
     }
     let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(payload)?;
+    encoder.write_all(&uncompressed)?;
     let compressed = encoder.finish()?;
 
-    let (body, flags) = if compressed.len() < payload.len() {
+    let (body, flags) = if compressed.len() < uncompressed.len() {
         (
             compressed,
             FLAG_COMPRESSED | (COMPRESSION_DEFLATE << COMPRESSION_SHIFT),
         )
     } else {
-        (payload.to_vec(), 0u8)
+        (uncompressed.clone(), 0u8)
     };
 
     let mut plaintext = Vec::with_capacity(5 + body.len());
-    plaintext.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    plaintext.extend_from_slice(&(uncompressed.len() as u32).to_be_bytes());
     plaintext.push(flags);
     plaintext.extend_from_slice(&body);
     Ok(plaintext)
+}
+
+/// Helper to build framed plaintext directly from raw bytes (no filename, text/raw tag).
+pub fn build_plaintext_bytes(bytes: &[u8]) -> Result<Vec<u8>, StrHideError> {
+    build_plaintext(&Payload::bytes(bytes))
 }
 
 /// Encrypt the framed plaintext, authenticating `aad` (the carrier header).
@@ -343,16 +438,16 @@ pub fn encrypt_with_aad(
     }
 }
 
-/// Decrypt and unframe a ciphertext, without building a combined envelope
-/// buffer. A tag failure is reported as `NoHiddenData`, identical to "there is
-/// nothing here", so the two cases cannot be told apart.
+/// Decrypt and unframe a ciphertext, unpacking the stealth micro-header into a [`Payload`].
+/// A tag failure is reported as `NoHiddenData`, identical to "there is nothing here",
+/// so the two cases cannot be told apart.
 pub fn unpack_envelope_parts(
     suite: &CipherSuite,
     key: &[u8; 32],
     nonce: &[u8; NONCE_LEN],
     aad: &[u8],
     ciphertext: &[u8],
-) -> Result<Vec<u8>, StrHideError> {
+) -> Result<Payload<'static>, StrHideError> {
     if ciphertext.len() < 5 + suite.tag_len() {
         return Err(StrHideError::NoHiddenData("No valid payload found".into()));
     }
@@ -403,7 +498,7 @@ pub fn unpack_envelope_parts(
                 "Plaintext length mismatch".into(),
             ));
         }
-        return Ok(body.to_vec());
+        return decode_micro_header(body);
     }
 
     if algorithm != COMPRESSION_DEFLATE {
@@ -430,7 +525,18 @@ pub fn unpack_envelope_parts(
             "Decompressed length mismatch".into(),
         ));
     }
-    Ok(decompressed)
+    decode_micro_header(&decompressed)
+}
+
+/// Convenience wrapper returning raw payload bytes instead of [`Payload`].
+pub fn unpack_envelope_parts_raw(
+    suite: &CipherSuite,
+    key: &[u8; 32],
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, StrHideError> {
+    unpack_envelope_parts(suite, key, nonce, aad, ciphertext).map(Payload::into_bytes)
 }
 
 #[cfg(test)]
@@ -481,11 +587,11 @@ mod tests {
 
         // Compressible payload takes the Deflate path.
         let repetitive = vec![0x21u8; 4096];
-        let plaintext = build_plaintext(&repetitive).unwrap();
+        let plaintext = build_plaintext_bytes(&repetitive).unwrap();
         assert_eq!(plaintext[4] & FLAG_COMPRESSED, FLAG_COMPRESSED);
         let ct = encrypt_with_aad(&SUITE_PBKDF2_200K, &key, &nonce, aad, &plaintext).unwrap();
         let out = unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, aad, &ct).unwrap();
-        assert_eq!(out, repetitive);
+        assert_eq!(out.as_bytes(), repetitive.as_slice());
 
         // Incompressible payload stays raw.
         let mut state = 0x9E37_79B9_7F4A_7C15u64;
@@ -497,11 +603,11 @@ mod tests {
                 state as u8
             })
             .collect();
-        let plaintext = build_plaintext(&random).unwrap();
+        let plaintext = build_plaintext_bytes(&random).unwrap();
         assert_eq!(plaintext[4] & FLAG_COMPRESSED, 0);
         let ct = encrypt_with_aad(&SUITE_PBKDF2_200K, &key, &nonce, aad, &plaintext).unwrap();
         let out = unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, aad, &ct).unwrap();
-        assert_eq!(out, random);
+        assert_eq!(out.as_bytes(), random.as_slice());
     }
 
     #[test]
@@ -509,7 +615,7 @@ mod tests {
         let salt = [1u8; SALT_LEN];
         let key = keys("password", &salt);
         let nonce = [2u8; NONCE_LEN];
-        let plaintext = build_plaintext(b"bound payload").unwrap();
+        let plaintext = build_plaintext_bytes(b"bound payload").unwrap();
         let ct =
             encrypt_with_aad(&SUITE_PBKDF2_200K, &key, &nonce, b"header-a", &plaintext).unwrap();
 
@@ -565,14 +671,58 @@ mod tests {
         let salt = [5u8; SALT_LEN];
         let key = keys("pw", &salt);
         let nonce = [6u8; NONCE_LEN];
-        let plaintext = build_plaintext(b"").unwrap();
+        let plaintext = build_plaintext_bytes(b"").unwrap();
         let ct = encrypt_with_aad(&SUITE_PBKDF2_200K, &key, &nonce, b"aad", &plaintext).unwrap();
         assert_eq!(
-            unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, b"aad", &ct).unwrap(),
-            Vec::<u8>::new()
+            unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, b"aad", &ct)
+                .unwrap()
+                .as_bytes(),
+            b""
         );
 
         // A ciphertext shorter than the tag cannot be a valid envelope.
         assert!(unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, b"aad", &ct[..4]).is_err());
+    }
+
+    #[test]
+    fn micro_header_roundtrips_file_and_text() {
+        let salt = [42u8; SALT_LEN];
+        let key = keys("password", &salt);
+        let nonce = [7u8; NONCE_LEN];
+        let aad = b"header aad";
+
+        // 1. Text / raw without filename
+        let text_p = Payload::text("hello world");
+        let pt = build_plaintext(&text_p).unwrap();
+        let ct = encrypt_with_aad(&SUITE_PBKDF2_200K, &key, &nonce, aad, &pt).unwrap();
+        let out = unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, aad, &ct).unwrap();
+        assert_eq!(out.as_bytes(), b"hello world");
+        assert_eq!(out.name(), None);
+
+        // 2. File with filename preserved
+        let file_p = Payload::file("notes.txt", b"secret notes");
+        let pt = build_plaintext(&file_p).unwrap();
+        let ct = encrypt_with_aad(&SUITE_PBKDF2_200K, &key, &nonce, aad, &pt).unwrap();
+        let out = unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, aad, &ct).unwrap();
+        assert_eq!(out.as_bytes(), b"secret notes");
+        assert_eq!(out.name(), Some("notes.txt"));
+        assert_eq!(out.kind(), PayloadKind::File);
+
+        // 3. File with keep_filename = false (--no-filename)
+        let anon_p = Payload::bytes(b"secret notes");
+        let pt_anon = build_plaintext(&anon_p).unwrap();
+        let ct_anon = encrypt_with_aad(&SUITE_PBKDF2_200K, &key, &nonce, aad, &pt_anon).unwrap();
+        let out_anon =
+            unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, aad, &ct_anon).unwrap();
+        assert_eq!(out_anon.as_bytes(), b"secret notes");
+        assert_eq!(out_anon.name(), None);
+
+        // 4. Path traversal prevention
+        let dangerous_p = Payload::file("../../etc/shadow", b"secret data");
+        let pt_dang = build_plaintext(&dangerous_p).unwrap();
+        let ct_dang = encrypt_with_aad(&SUITE_PBKDF2_200K, &key, &nonce, aad, &pt_dang).unwrap();
+        let out_dang =
+            unpack_envelope_parts(&SUITE_PBKDF2_200K, &key, &nonce, aad, &ct_dang).unwrap();
+        assert_eq!(out_dang.name(), Some("shadow"));
     }
 }

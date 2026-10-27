@@ -98,6 +98,24 @@ impl<'a> Payload<'a> {
         }
     }
 
+    /// An owned file payload.
+    pub fn owned_file(name: impl Into<String>, data: Vec<u8>) -> Payload<'static> {
+        Payload {
+            data: Cow::Owned(data),
+            kind: PayloadKind::File,
+            name: Some(name.into()),
+        }
+    }
+
+    /// Convert this payload into an owned [`Payload<'static>`].
+    pub fn into_owned(self) -> Payload<'static> {
+        Payload {
+            data: Cow::Owned(self.data.into_owned()),
+            kind: self.kind,
+            name: self.name,
+        }
+    }
+
     /// Set the original file name.
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
@@ -157,15 +175,87 @@ impl<'a> From<&'a [u8]> for Payload<'a> {
     }
 }
 
+impl<'a> From<&'a Vec<u8>> for Payload<'a> {
+    fn from(data: &'a Vec<u8>) -> Self {
+        Self::bytes(data.as_slice())
+    }
+}
+
+impl<'a, const N: usize> From<&'a [u8; N]> for Payload<'a> {
+    fn from(data: &'a [u8; N]) -> Self {
+        Self::bytes(data.as_slice())
+    }
+}
+
 impl<'a> From<&'a str> for Payload<'a> {
     fn from(text: &'a str) -> Self {
         Self::text(text)
     }
 }
 
+impl<'a> From<&'a Payload<'a>> for Payload<'a> {
+    fn from(p: &'a Payload<'a>) -> Self {
+        p.clone()
+    }
+}
+
 impl<'a> From<Vec<u8>> for Payload<'a> {
     fn from(data: Vec<u8>) -> Self {
         Self::owned(data)
+    }
+}
+
+impl PartialEq<[u8]> for Payload<'_> {
+    fn eq(&self, other: &[u8]) -> bool {
+        self.as_bytes() == other
+    }
+}
+
+impl PartialEq<Vec<u8>> for Payload<'_> {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        self.as_bytes() == other.as_slice()
+    }
+}
+
+impl PartialEq<Payload<'_>> for Vec<u8> {
+    fn eq(&self, other: &Payload<'_>) -> bool {
+        self.as_slice() == other.as_bytes()
+    }
+}
+
+impl PartialEq<&[u8]> for Payload<'_> {
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.as_bytes() == *other
+    }
+}
+
+impl PartialEq<Payload<'_>> for &[u8] {
+    fn eq(&self, other: &Payload<'_>) -> bool {
+        *self == other.as_bytes()
+    }
+}
+
+impl<const N: usize> PartialEq<[u8; N]> for Payload<'_> {
+    fn eq(&self, other: &[u8; N]) -> bool {
+        self.as_bytes() == other.as_slice()
+    }
+}
+
+impl<const N: usize> PartialEq<Payload<'_>> for [u8; N] {
+    fn eq(&self, other: &Payload<'_>) -> bool {
+        self.as_slice() == other.as_bytes()
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for Payload<'_> {
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.as_bytes() == other.as_slice()
+    }
+}
+
+impl<const N: usize> PartialEq<Payload<'_>> for &[u8; N] {
+    fn eq(&self, other: &Payload<'_>) -> bool {
+        self.as_slice() == other.as_bytes()
     }
 }
 

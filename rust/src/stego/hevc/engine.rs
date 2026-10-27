@@ -11,9 +11,13 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::core::control::{Control, Event, Stage};
+use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::stego::coding::{Move, StcTrellis};
-use crate::stego::envelope::{Freshness, PUBLIC_DEFAULT_SECRET, derive_domain_subkey_with_label};
+use crate::stego::envelope::{
+    Freshness, PUBLIC_DEFAULT_SECRET, decode_micro_header, derive_domain_subkey_with_label,
+    encode_micro_header,
+};
 use crate::stego::format::HevcFormatProfile;
 use crate::stego::hevc::bitstream::{compute_hevc_cover_digest, parse_annex_b_spans, rbsp_to_nal};
 use crate::stego::hevc::heif_boxes::parse_heif_targets;
@@ -138,7 +142,7 @@ pub fn probe_hevc_capacity(carrier: &[u8], fmt: &HevcFormatProfile) -> Result<us
     let available_bits = trellis
         .message_bits(total_slots)
         .saturating_sub(header_bits);
-    Ok(available_bits / 8)
+    Ok((available_bits / 8).saturating_sub(1))
 }
 
 /// Cropped output geometry of an SPS in luma samples (§7.4.3.2.1).
@@ -448,7 +452,7 @@ pub(crate) fn build_hevc_capacity_info(
         let available_bits = trellis
             .message_bits(total_slots)
             .saturating_sub(header_bits);
-        available_bits / 8
+        (available_bits / 8).saturating_sub(1)
     };
 
     // Extract picture dimensions from SPS to derive the true element count.
@@ -478,7 +482,7 @@ pub(crate) fn build_hevc_capacity_info(
         bpp_bits.min(ratio_bits)
     };
     let recommended_max_bytes = (target_bits / 8)
-        .saturating_sub(fmt.header_bytes)
+        .saturating_sub(fmt.header_bytes + 1)
         .min(max_raw_payload_bytes);
 
     let media_info = if width > 0 && height > 0 {
@@ -559,7 +563,7 @@ fn enforce_safety(
 #[allow(clippy::too_many_arguments)]
 pub fn embed_hevc_with_info(
     carrier: &[u8],
-    payload: &[u8],
+    payload: &Payload<'_>,
     secret: Option<&str>,
     domain: Option<&str>,
     fmt: &HevcFormatProfile,
@@ -587,6 +591,8 @@ pub fn embed_hevc_with_info(
     let pool = PoolProfile::from_record(&record);
     let capacity_info = build_hevc_capacity_info(carrier, kind, fmt, &pool, safety.level)?;
 
+    let uncompressed = encode_micro_header(payload);
+
     // Safety enforcement policy check (parity with the PNG and JPEG engines,
     // which gate on `SafetyPolicy` rather than the bare tier: passing only the
     // level here silently made `--enforce-safety` a no-op for HEVC carriers).
@@ -611,21 +617,21 @@ pub fn embed_hevc_with_info(
     // Seeded runs bind the nonce to this (cover, payload) pair: the HEVC key
     // derives from a cover digest that two same-parameter carriers share, so
     // an unbound seeded nonce could repeat a (key, nonce) pair across inputs.
-    let fresh_binding = Freshness::seeded_binding(carrier, payload);
+    let fresh_binding = Freshness::seeded_binding(carrier, payload.as_bytes());
     let nonce_bytes = freshness.nonce(0, &fresh_binding);
     let nonce = Nonce::from(nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(&nonce, payload)
+        .encrypt(&nonce, uncompressed.as_slice())
         .map_err(|e| StrHideError::General(format!("HEVC payload encryption failed: {e}")))?;
 
     let mut crc = Crc32::new();
-    crc.update(payload);
+    crc.update(&uncompressed);
     let payload_crc = crc.finalize();
 
     let mut message = Vec::with_capacity(HEVC_MSG_HEADER_BYTES + ciphertext.len());
     message.extend_from_slice(&magic);
-    message.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    message.extend_from_slice(&(uncompressed.len() as u32).to_be_bytes());
     message.extend_from_slice(&payload_crc.to_be_bytes());
     message.extend_from_slice(&nonce_bytes);
     message.extend_from_slice(&ciphertext);
@@ -943,12 +949,9 @@ pub fn embed_hevc_with_info(
     )))
 }
 
-/// Embed a payload into an HEVC/HEIC carrier using content-adaptive sign-bit steganography.
-///
-/// Wrapper around [`embed_hevc_with_info`] discarding the structured capacity metadata.
-pub fn embed_hevc(
+pub fn embed_hevc_payload(
     carrier: &[u8],
-    payload: &[u8],
+    payload: &Payload<'_>,
     secret: Option<&str>,
     domain: Option<&str>,
     fmt: &HevcFormatProfile,
@@ -965,6 +968,27 @@ pub fn embed_hevc(
         &Control::none(),
     )
     .map(|(bytes, _)| bytes)
+}
+
+/// Embed a payload into an HEVC/HEIC carrier using content-adaptive sign-bit steganography.
+///
+/// Wrapper around [`embed_hevc_with_info`] discarding the structured capacity metadata.
+pub fn embed_hevc(
+    carrier: &[u8],
+    payload: &[u8],
+    secret: Option<&str>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+    freshness: Freshness,
+) -> Result<Vec<u8>, StrHideError> {
+    embed_hevc_payload(
+        carrier,
+        &Payload::bytes(payload),
+        secret,
+        domain,
+        fmt,
+        freshness,
+    )
 }
 
 /// Re-encode one CABAC substream from its recorded journal.
@@ -1135,7 +1159,7 @@ pub fn extract_hevc(
     domain: Option<&str>,
     fmt: &HevcFormatProfile,
     control: &Control<'_>,
-) -> Result<Vec<u8>, StrHideError> {
+) -> Result<Payload<'static>, StrHideError> {
     check_header_bytes(fmt)?;
     let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
         StrHideError::UnsupportedFormat(
@@ -1252,7 +1276,7 @@ pub fn extract_hevc(
         ));
     }
 
-    Ok(decrypted)
+    decode_micro_header(&decrypted)
 }
 
 /// Helper struct for slice recording and span tracking.

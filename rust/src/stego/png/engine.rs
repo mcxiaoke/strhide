@@ -33,6 +33,7 @@
 use std::io::{Cursor, Read, Write};
 
 use crate::core::control::{Control, Stage};
+use crate::core::payload::Payload;
 use crc32fast::Hasher as Crc32;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -1097,9 +1098,9 @@ impl SlotPlan {
 /// payload, secret and seed. `safety` is the capacity policy the embed is
 /// checked against.
 #[allow(clippy::too_many_arguments)]
-pub fn embed_png(
+pub fn embed_png<'a>(
     carrier_bytes: &[u8],
-    payload: &[u8],
+    payload: impl Into<Payload<'a>>,
     password: Option<&str>,
     domain: Option<&str>,
     spatial: &crate::stego::format::PngFormatProfile,
@@ -1109,6 +1110,7 @@ pub fn embed_png(
     freshness: Freshness,
     control: &Control<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
+    let payload = payload.into();
     params.validate()?;
     control.stage(Stage::Decode);
     let mut image = decode_png(carrier_bytes)?;
@@ -1123,11 +1125,11 @@ pub fn embed_png(
     // is produced further down: the finished 64-byte header is its associated
     // data, so it cannot exist until codec/h/u are settled.
     let suite = spatial.body.default_suite();
-    let plaintext = build_plaintext(payload)?;
+    let plaintext = build_plaintext(&payload)?;
     // The spatial writer makes a single pass, so the attempt index is always 0.
     // Seeded runs bind the derivation to this (cover, payload) pair so a
     // replay on different inputs can never reuse a (key, nonce) pair.
-    let fresh_binding = Freshness::seeded_binding(carrier_bytes, payload);
+    let fresh_binding = Freshness::seeded_binding(carrier_bytes, payload.as_bytes());
     let salt = freshness.salt(0, &fresh_binding);
     let nonce = freshness.nonce(0, &fresh_binding);
     let master = derive_master(suite, password.unwrap_or(spatial.fallback_secret), &salt)?;
@@ -1454,7 +1456,7 @@ pub fn extract_png(
     cost_model: &dyn PngCostModel,
     params: &PngParams,
     control: &Control<'_>,
-) -> Result<Vec<u8>, StrHideError> {
+) -> Result<Payload<'static>, StrHideError> {
     params.validate()?;
     let image = decode_png(carrier_bytes)?;
     control.check()?;
@@ -1762,6 +1764,54 @@ mod tests {
     use super::*;
     use crate::stego::params::PngParams;
     use crate::stego::png::cost::HillCostModel;
+
+    #[allow(clippy::too_many_arguments)]
+    fn embed_png(
+        carrier_bytes: &[u8],
+        payload: &[u8],
+        password: Option<&str>,
+        domain: Option<&str>,
+        spatial: &crate::stego::format::PngFormatProfile,
+        cost_model: &dyn PngCostModel,
+        params: &PngParams,
+        safety: SafetyPolicy,
+        freshness: Freshness,
+        control: &Control<'_>,
+    ) -> Result<Vec<u8>, StrHideError> {
+        super::embed_png(
+            carrier_bytes,
+            payload,
+            password,
+            domain,
+            spatial,
+            cost_model,
+            params,
+            safety,
+            freshness,
+            control,
+        )
+    }
+
+    fn extract_png(
+        carrier_bytes: &[u8],
+        password: Option<&str>,
+        domain: Option<&str>,
+        spatial: &crate::stego::format::PngFormatProfile,
+        cost_model: &dyn PngCostModel,
+        params: &PngParams,
+        control: &Control<'_>,
+    ) -> Result<Vec<u8>, StrHideError> {
+        super::extract_png(
+            carrier_bytes,
+            password,
+            domain,
+            spatial,
+            cost_model,
+            params,
+            control,
+        )
+        .map(Payload::into_bytes)
+    }
 
     /// Craft a PNG: IHDR + ancillary chunks + one IDAT + IEND, with the
     /// given per-row filters applied to `pixels` (RGB, 8-bit).

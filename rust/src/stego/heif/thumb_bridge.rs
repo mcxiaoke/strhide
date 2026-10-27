@@ -10,6 +10,7 @@
 use std::convert::TryInto;
 
 use crate::core::control::Control;
+use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::jpeg;
@@ -78,12 +79,13 @@ struct IsobmffMeta {
 }
 
 /// Embed payload into an embedded JPEG or uncompressed carrier within a HEIF container.
-pub fn embed_heif_bridge(
+pub fn embed_heif_bridge<'a>(
     carrier_bytes: &[u8],
-    payload: &[u8],
+    payload: impl Into<Payload<'a>>,
     bridge: &BridgeOptions<'_>,
     control: &Control<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
+    let payload = payload.into();
     let target = find_bridge_target(carrier_bytes)?;
     let carrier_slice = &carrier_bytes[target.file_offset..target.file_offset + target.length];
     let tuning = bridge.tuning.resolve();
@@ -93,13 +95,21 @@ pub fn embed_heif_bridge(
     let secret = bridge.resolved_secret(bridge.dialect);
     let domain = bridge.resolved_domain(bridge.dialect);
 
+    let anon_payload;
+    let eff_payload = if bridge.no_filename && payload.name().is_some() {
+        anon_payload = Payload::bytes(payload.as_bytes());
+        &anon_payload
+    } else {
+        &payload
+    };
+
     match target.kind {
         BridgeTargetKind::DirectJpeg { .. }
         | BridgeTargetKind::ExifJpeg { .. }
         | BridgeTargetKind::ContainerJpegFallback => {
             let stego_bytes = jpeg::embed_jpeg(
                 carrier_slice,
-                payload,
+                eff_payload,
                 secret,
                 domain,
                 bridge.dialect.jpeg_format(),
@@ -114,7 +124,7 @@ pub fn embed_heif_bridge(
         BridgeTargetKind::DirectSpatial { .. } => {
             let stego_bytes = png::embed_png(
                 carrier_slice,
-                payload,
+                eff_payload,
                 secret,
                 domain,
                 bridge.dialect.png_format(),
@@ -139,7 +149,7 @@ pub fn extract_heif_bridge(
     bridge: &BridgeOptions<'_>,
     limits: &ExtractParams,
     control: &Control<'_>,
-) -> Result<Vec<u8>, StrHideError> {
+) -> Result<Payload<'static>, StrHideError> {
     let target = match find_bridge_target(carrier_bytes) {
         Ok(t) => t,
         Err(_) => {

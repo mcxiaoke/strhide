@@ -251,6 +251,12 @@ pub struct EmbedArgs {
 
     #[command(flatten)]
     pub tuning: StegoTuningArgs,
+
+    #[arg(
+        long = "no-filename",
+        help = "Do not store original filename in the carrier"
+    )]
+    pub no_filename: bool,
 }
 
 /// Tuning and credential arguments shared by `embed` and `capacity`.
@@ -2140,8 +2146,8 @@ fn handle_embed(
     // so the existing `&profile` call sites below are unchanged.
     let profile = *engine.profile();
 
-    // 2. Resolve payload bytes (shared with `write`).
-    let payload_bytes = match resolve_payload(
+    // 2. Resolve payload (shared with `write`).
+    let payload = match resolve_payload(
         &args.payload,
         args.tuning.unescape,
         cfg,
@@ -2150,17 +2156,28 @@ fn handle_embed(
         ResolvedPayload::Stdin => {
             let mut buf = Vec::new();
             std::io::stdin().read_to_end(&mut buf)?;
-            buf
+            Payload::owned(buf)
         }
-        ResolvedPayload::File(f) => std::fs::read(f)?,
-        ResolvedPayload::TextFile(p) => std::fs::read(p)?,
-        ResolvedPayload::Text(t) => t.into_bytes(),
-        ResolvedPayload::Bytes(b) => b,
+        ResolvedPayload::File(f) => {
+            let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let data = std::fs::read(&f)?;
+            Payload::owned_file(name, data)
+        }
+        ResolvedPayload::TextFile(p) => {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let data = std::fs::read(&p)?;
+            Payload::owned_file(name, data)
+        }
+        ResolvedPayload::Text(t) => {
+            Payload::owned(t.into_bytes()).with_kind(crate::core::payload::PayloadKind::Text)
+        }
+        ResolvedPayload::Bytes(b) => Payload::owned(b),
     };
 
-    if payload_bytes.is_empty() {
+    if payload.is_empty() {
         return Err(StrHideError::General("Payload cannot be empty".into()));
     }
+    let payload_len = payload.len();
 
     let multi = args.carrier.len() > 1;
     let output_dir = batch_output_dir(args.output.as_deref(), multi, "embedding into")?;
@@ -2186,15 +2203,16 @@ fn handle_embed(
         let t_start = std::time::Instant::now();
         let carrier_bytes = std::fs::read(carrier)?;
 
-        let (options, probe_options) = stego_options(
+        let (mut options, probe_options) = stego_options(
             &args.tuning,
             password.as_deref(),
             carrier_format(&carrier_bytes),
         )?;
+        options.no_filename = args.no_filename;
 
         let output = crate::stego::embed_carrier_with_profile_info(
             &carrier_bytes,
-            &Payload::bytes(&payload_bytes),
+            &payload,
             &options,
             &profile,
         )?;
@@ -2216,12 +2234,12 @@ fn handle_embed(
                 }
             };
             if let Some(cap) = cap
-                && payload_bytes.len() > cap.recommended_max_bytes
+                && payload_len > cap.recommended_max_bytes
             {
-                let bpp = (payload_bytes.len() * 8) as f64 / cap.total_elements as f64;
+                let bpp = (payload_len * 8) as f64 / cap.total_elements as f64;
                 eprintln!(
                     "[WARN] Payload ({} bytes, bpp {:.4}) exceeds recommended safety threshold ({} bytes, tier: '{}', bpp <= {:.2}). Detection risk is elevated.",
-                    payload_bytes.len(),
+                    payload_len,
                     bpp,
                     cap.recommended_max_bytes,
                     options.safety.level.as_str(),
@@ -2251,7 +2269,7 @@ fn handle_embed(
                 );
                 if let Some(ref cap) = cap_info {
                     let used_pct = if cap.recommended_max_bytes > 0 {
-                        (payload_bytes.len() as f64 / cap.recommended_max_bytes as f64) * 100.0
+                        (payload_len as f64 / cap.recommended_max_bytes as f64) * 100.0
                     } else {
                         0.0
                     };
@@ -2300,7 +2318,7 @@ fn handle_embed(
                     "{}",
                     t!(
                         Msg::EmbedOkInPlace,
-                        bytes = payload_bytes.len(),
+                        bytes = payload_len,
                         carrier = carrier.display(),
                         elapsed = elapsed_str
                     )
@@ -2310,7 +2328,7 @@ fn handle_embed(
                     "{}",
                     t!(
                         Msg::EmbedOkDest,
-                        bytes = payload_bytes.len(),
+                        bytes = payload_len,
                         carrier = carrier.display(),
                         dest = dest.display(),
                         elapsed = elapsed_str
@@ -2319,7 +2337,7 @@ fn handle_embed(
             }
             if let Some(ref cap) = cap_info {
                 let used_pct = if cap.recommended_max_bytes > 0 {
-                    (payload_bytes.len() as f64 / cap.recommended_max_bytes as f64) * 100.0
+                    (payload_len as f64 / cap.recommended_max_bytes as f64) * 100.0
                 } else {
                     0.0
                 };
@@ -2366,16 +2384,17 @@ fn handle_extract(
         ..Default::default()
     };
 
-    let payload = crate::stego::extract_carrier_with_profile(&carrier_bytes, &options, &profile)?;
+    let payload = crate::stego::extract_carrier_payload(&carrier_bytes, &options, &profile)?;
 
     if let Some(ref out_path) = args.output {
         let dest = if out_path.is_dir() {
-            out_path.join("extracted.bin")
+            let name = payload.name().unwrap_or("extracted.bin");
+            out_path.join(name)
         } else {
             out_path.clone()
         };
         check_overwrite(&dest, args.overwrite)?;
-        std::fs::write(&dest, &payload)?;
+        std::fs::write(&dest, payload.as_bytes())?;
         if !quiet {
             println!(
                 "{}",
@@ -2383,21 +2402,28 @@ fn handle_extract(
             );
         }
     } else if args.stdout {
-        std::io::stdout().write_all(&payload)?;
+        std::io::stdout().write_all(payload.as_bytes())?;
+    } else if let Some(name) = payload.name() {
+        let dest = PathBuf::from(name);
+        check_overwrite(&dest, args.overwrite)?;
+        std::fs::write(&dest, payload.as_bytes())?;
+        if !quiet {
+            println!(
+                "{}",
+                t!(Msg::ExtractOk, bytes = payload.len(), path = dest.display())
+            );
+        }
+    } else if let Ok(text) = std::str::from_utf8(payload.as_bytes()) {
+        print!("{text}");
+        if !text.ends_with('\n') {
+            println!();
+        }
     } else {
-        // Output to stdout or default file
-        if let Ok(text) = std::str::from_utf8(&payload) {
-            print!("{text}");
-            if !text.ends_with('\n') {
-                println!();
-            }
-        } else {
-            let dest = PathBuf::from("extracted.bin");
-            check_overwrite(&dest, args.overwrite)?;
-            std::fs::write(&dest, &payload)?;
-            if !quiet {
-                println!("{}", t!(Msg::ExtractBinaryDetected, bytes = payload.len()));
-            }
+        let dest = PathBuf::from("extracted.bin");
+        check_overwrite(&dest, args.overwrite)?;
+        std::fs::write(&dest, payload.as_bytes())?;
+        if !quiet {
+            println!("{}", t!(Msg::ExtractBinaryDetected, bytes = payload.len()));
         }
     }
 

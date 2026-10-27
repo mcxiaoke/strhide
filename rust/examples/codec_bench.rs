@@ -78,9 +78,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..PngParams::default()
         };
         let started = Instant::now();
+        let payload_obj = strhide::core::payload::Payload::bytes(&payload);
         let stego = match embed_png(
             &carrier,
-            &payload,
+            &payload_obj,
             password,
             None,
             &strhide::stego::format::OFFICIAL_PNG_FORMAT,

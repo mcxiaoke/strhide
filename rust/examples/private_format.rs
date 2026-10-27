@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &ExtractParams::default(),
         &Control::none(),
     )?;
-    assert_eq!(recovered, payload);
+    assert_eq!(recovered.as_bytes(), payload);
     println!("private profile: payload recovered");
 
     // 3. The official build finds nothing -- and cannot tell it apart from a

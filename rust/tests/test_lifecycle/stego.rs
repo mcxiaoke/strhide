@@ -687,7 +687,7 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
     assert_eq!(slots_a, header_slots_of(&png_bytes, None));
 
     // The model matches the engine: the header read from those slots must parse
-    // as the real envelope length (payload + 49 for an incompressible body).
+    // as the real envelope length (payload + 50 for an incompressible body with micro-header).
     // The header word also carries the codec/h flags in its top bits, so the
     // length has to be decoded rather than read as a bare u32.
     let header = read_header(&first, &slots_a[..256]);
@@ -695,7 +695,7 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
     let (total_len, _codec_id, stc_h) = strhide::stego::png::engine::decode_header_word(word);
     assert_eq!(
         total_len as usize,
-        payload.len() + 49,
+        payload.len() + strhide::stego::envelope::MIN_ENVELOPE_LEN,
         "header at the computed slots must carry the real envelope length"
     );
     // In v2, word1 writes HEADER_V2_ESCAPE_H (15) for stc_h

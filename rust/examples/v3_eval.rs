@@ -161,7 +161,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &ExtractParams::default(),
                 &Control::none(),
             )?;
-            assert_eq!(recovered, payload, "roundtrip failed for {path:?}");
+            assert_eq!(
+                recovered.as_bytes(),
+                payload.as_slice(),
+                "roundtrip failed for {path:?}"
+            );
 
             let before = dct_io::read_coefficients(&cover)?;
             let after = dct_io::read_coefficients(&stego)?;

@@ -448,24 +448,33 @@ channel_bytes[4..14] = unmasked[4..14] XOR mask[0..10]
 | 提取是否需要代价图 | **不需要** | 需要 | **不需要**（仅需根据槽位数重建 Weyl 离散排列） |
 | 尺寸膨胀 | 极微（Huffman 重编码波动，≤ 1%） | 0（PNG 尺寸由压缩率微弱影响） | **绝对为 0（Δ = 0，纯原位字节改写）** |
 
-### 13.1 微信封（两种载体共用）
+### 13.1 微信封与隐写微头（载体共用）
 
 ```text
-plaintext = orig_len (4, BE) ‖ flags (1) ‖ payload bytes
+plaintext = orig_len (4, BE) ‖ flags (1) ‖ micro_header ‖ payload_bytes
 ciphertext = AEAD(enc_key, nonce, plaintext, aad = 载体头部全部字节)
 ```
 
-- AEAD：AES-256-GCM，tag 16 字节；`nonce` 12 字节由载体头部承载。
+- AEAD：AES-256-GCM / ChaCha20-Poly1305，tag 16 字节；`nonce` 12 字节由载体头部承载。
 - **AAD = 载体头部全部字节**（JPEG：44 字节超块；PNG：32 字节头 + 32 字节 FeatureWord）。任何被解码器使用的头字段都被绑定，改写即校验失败，而不是"能解密但行为诡异"。
 - `flags` 位分配（密文内，唯一演进入口）：
 
 | 位 | 含义 |
 |---|---|
-| `bit0` | `1` = 载荷经 raw deflate 压缩（仅当压缩后更短时才压缩） |
+| `bit0` | `1` = 微头与载荷经 raw deflate 压缩（仅当压缩后更短时才压缩） |
 | `bit1..3` | 压缩算法 id：`0 = deflate`（brotli/zstd 预留）；置非 0 而不压缩 → 拒绝 |
 | `bit4..7` | **必须为 0**；非 0 即拒绝（`CorruptedData`） |
 
-- 常量：`SALT_LEN = 16`、`NONCE_LEN = 12`、`TAG_LEN = 16`、`HEADER_OVERHEAD = 28`、`MIN_ENVELOPE_LEN = 49`、`BODY_OVERHEAD = 21`（4 长度 + 1 标志 + 16 tag）。28 字节 salt/nonce 物理上位于载体头部，不占正文槽位；`envelope_len` 仍是"逻辑信封长度"（含这 28 字节），正文比特数 = `8 × (envelope_len − 28)`。
+- **微头（Micro-Header，线格式与文件名保留）**：
+  位于压缩/解压与 AEAD 保护区内，对外部检测完全隐蔽（零静态指纹）：
+  - 纯文本、二进制裸字节、或指定 `--no-filename` 时：
+    `[0x00] ‖ payload_bytes`（微头开销仅 1 字节）
+  - 携带文件名且保留时：
+    `[0x01] ‖ name_len (1B, 1..255) ‖ sanitized_filename_utf8 ‖ payload_bytes`
+    文件名由 `sanitize_filename` 过滤路径穿越（去路径前缀、过滤非法控制字符与 Windows 危险字符，空或非法回退为提取默认名）。
+  - HEVC 原位隐写（Scheme C）在 AES-GCM 明文中同样使用上述微头格式（tag `0x00` / `0x01`）。
+
+- 常量：`SALT_LEN = 16`、`NONCE_LEN = 12`、`TAG_LEN = 16`、`HEADER_OVERHEAD = 28`、`MIN_ENVELOPE_LEN = 50`（含 1 字节微头最小开销）、`BODY_OVERHEAD = 22`（4 长度 + 1 标志 + 1 微头最小 + 16 tag）。28 字节 salt/nonce 物理上位于载体头部，不占正文槽位；`envelope_len` 仍是"逻辑信封长度"（含这 28 字节），正文比特数 = `8 × (envelope_len − 28)`。
 
 ### 13.2 密码套件表（JPEG V3）
 

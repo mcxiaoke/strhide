@@ -417,9 +417,16 @@ pub struct EmbedOptions<'a> {
     pub control: Control<'a>,
     /// Rayon pool to run the engine on. `None` uses the global pool.
     pub pool: Option<Arc<rayon::ThreadPool>>,
+    /// Omit original filename from micro-header even when payload came from a file.
+    pub no_filename: bool,
 }
 
 impl<'a> EmbedOptions<'a> {
+    /// Omit original filename from micro-header.
+    pub fn with_no_filename(mut self, no_filename: bool) -> Self {
+        self.no_filename = no_filename;
+        self
+    }
     /// Set the password.
     pub fn with_password(mut self, password: &'a str) -> Self {
         self.password = Some(password);
@@ -782,6 +789,8 @@ pub struct BridgeOptions<'a> {
     /// Salt/nonce source. Unused on the read path, where it stays at its
     /// default.
     pub freshness: Freshness,
+    /// Omit original filename from micro-header.
+    pub no_filename: bool,
 }
 
 #[cfg(feature = "content-heif-bridge")]
@@ -808,6 +817,7 @@ impl<'a> BridgeOptions<'a> {
             tuning: StegoTuning::Auto,
             safety: SafetyPolicy::new(),
             freshness: Freshness::Random,
+            no_filename: false,
         }
     }
 

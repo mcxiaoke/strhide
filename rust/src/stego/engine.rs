@@ -160,10 +160,17 @@ impl StegoEngine for PngEngine {
         let secret = opts.secret(dialect);
         let domain = opts.domain(dialect);
         opts.control.check()?;
+        let anon_payload;
+        let eff_payload = if opts.no_filename && payload.name().is_some() {
+            anon_payload = Payload::bytes(payload.as_bytes());
+            &anon_payload
+        } else {
+            payload
+        };
         let bytes = with_pool(opts.pool.as_ref(), || {
             crate::stego::png::embed_png(
                 carrier,
-                payload.as_bytes(),
+                eff_payload,
                 secret,
                 domain,
                 dialect.png_format(),
@@ -192,7 +199,7 @@ impl StegoEngine for PngEngine {
         // docs and `extract_png`.
         let model = crate::stego::options::SpatialAlgorithm::default().model();
         let params = crate::stego::params::PngParams::default();
-        let bytes = with_pool(opts.pool.as_ref(), || {
+        with_pool(opts.pool.as_ref(), || {
             crate::stego::png::extract_png(
                 carrier,
                 secret,
@@ -202,8 +209,7 @@ impl StegoEngine for PngEngine {
                 &params,
                 &opts.control,
             )
-        })?;
-        Ok(Payload::owned(bytes))
+        })
     }
 }
 
@@ -255,10 +261,17 @@ impl StegoEngine for JpegEngine {
         // the trellis to a different slot.
         jpeg_params.deterministic = opts.freshness.is_seeded();
         opts.control.check()?;
+        let anon_payload;
+        let eff_payload = if opts.no_filename && payload.name().is_some() {
+            anon_payload = Payload::bytes(payload.as_bytes());
+            &anon_payload
+        } else {
+            payload
+        };
         let bytes = with_pool(opts.pool.as_ref(), || {
             crate::stego::jpeg::embed_jpeg(
                 carrier,
-                payload.as_bytes(),
+                eff_payload,
                 secret,
                 domain,
                 dialect.jpeg_format(),
@@ -283,7 +296,7 @@ impl StegoEngine for JpegEngine {
         opts.control.check()?;
         // No cost model on purpose: the V3 slot set is geometric, so extraction
         // must not depend on the embedder's cost function.
-        let bytes = with_pool(opts.pool.as_ref(), || {
+        with_pool(opts.pool.as_ref(), || {
             crate::stego::jpeg::extract_jpeg(
                 carrier,
                 secret,
@@ -292,8 +305,7 @@ impl StegoEngine for JpegEngine {
                 &opts.limits,
                 &opts.control,
             )
-        })?;
-        Ok(Payload::owned(bytes))
+        })
     }
 }
 
@@ -311,10 +323,18 @@ fn hevc_embed(
     let domain = opts.domain(dialect);
     opts.control.check()?;
 
+    let anon_payload;
+    let eff_payload = if opts.no_filename && payload.name().is_some() {
+        anon_payload = Payload::bytes(payload.as_bytes());
+        &anon_payload
+    } else {
+        payload
+    };
+
     let direct = || {
         crate::stego::hevc::embed_hevc_with_info(
             carrier,
-            payload.as_bytes(),
+            eff_payload,
             secret,
             domain,
             dialect.hevc_format(),
@@ -348,7 +368,7 @@ fn hevc_embed(
         Err(_) => {
             let bridge = thumb_bridge::embed_heif_bridge(
                 carrier,
-                payload.as_bytes(),
+                payload,
                 &crate::stego::options::BridgeOptions {
                     dialect,
                     password: opts.password,
@@ -356,6 +376,7 @@ fn hevc_embed(
                     tuning: opts.tuning.clone(),
                     safety: opts.safety,
                     freshness: opts.freshness,
+                    no_filename: opts.no_filename,
                 },
                 &opts.control,
             )?;
@@ -388,11 +409,11 @@ fn hevc_extract(
     };
 
     if format != FileFormat::Heif {
-        return Ok(Payload::owned(with_pool(opts.pool.as_ref(), direct)?));
+        return with_pool(opts.pool.as_ref(), direct);
     }
 
     match with_pool(opts.pool.as_ref(), direct) {
-        Ok(bytes) => Ok(Payload::owned(bytes)),
+        Ok(payload) => Ok(payload),
         #[cfg(feature = "content-heif-bridge")]
         Err(e) => {
             match thumb_bridge::extract_heif_bridge(
@@ -403,7 +424,7 @@ fn hevc_extract(
                 &opts.limits,
                 &opts.control,
             ) {
-                Ok(payload) => Ok(Payload::owned(payload)),
+                Ok(payload) => Ok(payload),
                 // A Scheme C authentication failure means the carrier really
                 // does carry a CABAC payload, so its password verdict is the
                 // honest one. Every other HEVC failure only says "this is not
@@ -463,6 +484,7 @@ fn hevc_probe(
                 tuning: opts.tuning.clone(),
                 safety: opts.safety,
                 freshness: crate::stego::envelope::Freshness::Random,
+                no_filename: false,
             },
             &opts.control,
         ),
