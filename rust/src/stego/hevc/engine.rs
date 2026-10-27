@@ -27,6 +27,7 @@ use crate::stego::hevc::sniff::{
     HevcCarrierKind, NAL_RADL_N, NAL_RASL_N, NAL_SPS_NUT, NAL_STSA_N, NAL_TRAIL_N, NAL_TSA_N,
     sniff_hevc_carrier,
 };
+use crate::stego::options::{StegoHeaderInfo, StegoVerifyResult, VerifyLevel};
 use crate::stego::{SafetyLevel, SafetyPolicy, StegoCapacityInfo};
 use oxideav_h265::cabac::ContextModel;
 use oxideav_h265::encoder::bitwriter::BitWriter;
@@ -1277,6 +1278,214 @@ pub fn extract_hevc(
     }
 
     decode_micro_header(&decrypted)
+}
+
+/// Inspect HEVC carrier for steganographic header.
+pub fn inspect_hevc(
+    carrier: &[u8],
+    secret: Option<&str>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+    control: &Control<'_>,
+) -> Result<StegoHeaderInfo, StrHideError> {
+    control.check()?;
+    check_header_bytes(fmt)?;
+    let kind = match sniff_hevc_carrier(carrier) {
+        Some(k) => k,
+        None => return Ok(StegoHeaderInfo::empty("HEVC")),
+    };
+
+    let (width, height) = extract_hevc_dimensions(carrier).unwrap_or((0, 0));
+    let media_info = if width > 0 && height > 0 {
+        Some(format!("{width}x{height}"))
+    } else {
+        None
+    };
+    let mut empty_info = StegoHeaderInfo::empty(match kind {
+        HevcCarrierKind::HeifContainer => "HEIF/HEVC",
+        HevcCarrierKind::AnnexBStream => "HEVC-AnnexB",
+        HevcCarrierKind::Mp4Container => "MP4/HEVC",
+    });
+    empty_info.media_info = media_info.clone();
+
+    let record = match record_carrier_state(carrier, kind) {
+        Ok(r) => r,
+        Err(_) => return Ok(empty_info),
+    };
+    control.check()?;
+
+    let bands = record.bands.clone();
+    let all_slots = record.all_slots;
+    let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);
+    let key = derive_hevc_key(secret, domain, &cover_digest, fmt);
+    let seed = trellis_seed_from_key(&key, &cover_digest);
+    let trellis = match StcTrellis::from_seed_grouped(seed, fmt.stc_h, fmt.stc_u) {
+        Ok(t) => t,
+        Err(_) => return Ok(empty_info),
+    };
+
+    let header_slots_count = trellis.slots_for(fmt.header_bytes * 8);
+    if all_slots.len() < header_slots_count {
+        return Ok(empty_info);
+    }
+
+    let header_positions = band_positions(&bands, header_slots_count);
+    let header_bits: Vec<u8> = header_positions
+        .iter()
+        .map(|&p| all_slots[p].original_bit)
+        .collect();
+
+    let header_bytes = trellis.extract(&header_bits, fmt.header_bytes * 8);
+    if header_bytes.len() < HEVC_MSG_HEADER_BYTES {
+        return Ok(empty_info);
+    }
+
+    let expected_magic = derive_magic(fmt.magic_label, effective_secret(secret).as_bytes());
+    if header_bytes[0..4] != expected_magic {
+        return Ok(empty_info);
+    }
+
+    let payload_len = u32::from_be_bytes([
+        header_bytes[4],
+        header_bytes[5],
+        header_bytes[6],
+        header_bytes[7],
+    ]) as usize;
+
+    Ok(StegoHeaderInfo {
+        format: match kind {
+            HevcCarrierKind::HeifContainer => "HEIF/HEVC".into(),
+            HevcCarrierKind::AnnexBStream => "HEVC-AnnexB".into(),
+            HevcCarrierKind::Mp4Container => "MP4/HEVC".into(),
+        },
+        has_hidden_data: true,
+        algorithm: Some("HEVC-CABAC-InPlace".into()),
+        codec: Some(format!("STC (h={}, u={})", fmt.stc_h, fmt.stc_u)),
+        envelope_len: Some(HEVC_MSG_HEADER_BYTES + 16 + payload_len),
+        payload_len: Some(payload_len),
+        media_info,
+        note: None,
+    })
+}
+
+/// Three-level diagnostic verification for HEVC carriers.
+pub fn verify_hevc(
+    carrier: &[u8],
+    secret: Option<&str>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+    control: &Control<'_>,
+) -> Result<StegoVerifyResult, StrHideError> {
+    control.check()?;
+    let mut levels = Vec::new();
+    let format_name = match sniff_hevc_carrier(carrier) {
+        Some(HevcCarrierKind::HeifContainer) => "HEIF/HEVC",
+        Some(HevcCarrierKind::AnnexBStream) => "HEVC-AnnexB",
+        Some(HevcCarrierKind::Mp4Container) => "MP4/HEVC",
+        None => "HEVC",
+    };
+
+    // Level 1: Container & NAL Parse
+    let kind = match sniff_hevc_carrier(carrier) {
+        Some(k) => k,
+        None => {
+            levels.push(VerifyLevel::fail(
+                1,
+                "HEVC container format",
+                "Unrecognized HEVC carrier",
+            ));
+            levels.push(VerifyLevel::fail(
+                2,
+                "Stego header",
+                "Skipped due to level 1 failure",
+            ));
+            levels.push(VerifyLevel::fail(
+                3,
+                "Payload decryption",
+                "Skipped due to level 1 failure",
+            ));
+            return Ok(StegoVerifyResult::new(format_name, levels));
+        }
+    };
+
+    match record_carrier_state(carrier, kind) {
+        Ok(rec) => {
+            levels.push(VerifyLevel::pass(
+                1,
+                format!(
+                    "HEVC bitstream and CABAC slots valid ({} slots)",
+                    rec.all_slots.len()
+                ),
+            ));
+        }
+        Err(e) => {
+            levels.push(VerifyLevel::fail(1, "HEVC bitstream parse", e.to_string()));
+            levels.push(VerifyLevel::fail(
+                2,
+                "Stego header",
+                "Skipped due to level 1 failure",
+            ));
+            levels.push(VerifyLevel::fail(
+                3,
+                "Payload decryption",
+                "Skipped due to level 1 failure",
+            ));
+            return Ok(StegoVerifyResult::new(format_name, levels));
+        }
+    }
+    control.check()?;
+
+    // Level 2: Stego Header & Magic check
+    let header_info = inspect_hevc(carrier, secret, domain, fmt, control)?;
+    if !header_info.has_hidden_data {
+        levels.push(VerifyLevel::fail(
+            2,
+            "Stego header",
+            "No valid HEVC stego signature found (or wrong password)",
+        ));
+        levels.push(VerifyLevel::fail(
+            3,
+            "Payload decryption",
+            "No stego header to extract payload from",
+        ));
+        return Ok(StegoVerifyResult::new(format_name, levels));
+    }
+    levels.push(VerifyLevel::pass(
+        2,
+        format!(
+            "Stego header valid (payload: {} B, total: {} B)",
+            header_info.payload_len.unwrap_or(0),
+            header_info.envelope_len.unwrap_or(0),
+        ),
+    ));
+    control.check()?;
+
+    // Level 3: Extraction & AES-GCM tag verification
+    match extract_hevc(carrier, secret, domain, fmt, control) {
+        Ok(payload) => {
+            let desc = match payload.name() {
+                Some(name) => format!(
+                    "Payload decrypted & verified ({} bytes, filename: '{}')",
+                    payload.len(),
+                    name
+                ),
+                None => format!(
+                    "Payload decrypted & verified ({} bytes, raw/text)",
+                    payload.len()
+                ),
+            };
+            levels.push(VerifyLevel::pass(3, desc));
+        }
+        Err(e) => {
+            levels.push(VerifyLevel::fail(
+                3,
+                "Payload decryption",
+                format!("Decryption or authentication failed: {e}"),
+            ));
+        }
+    }
+
+    Ok(StegoVerifyResult::new(format_name, levels))
 }
 
 /// Helper struct for slice recording and span tracking.

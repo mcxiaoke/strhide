@@ -305,3 +305,55 @@ fn test_hevc_capacity_safety_scaling_and_sps_dimensions() {
         prev_rec = info.recommended_max_bytes;
     }
 }
+
+#[test]
+fn test_hevc_inspect_and_verify() {
+    let file_path = "../temp/github/heic-rs/tests/fixtures/gradient-512.heic";
+    if !Path::new(file_path).exists() {
+        return;
+    }
+    let orig_carrier = fs::read(file_path).expect("read carrier");
+
+    // 1. Clean carrier
+    let inspect_clean =
+        strhide::stego::inspect_carrier(&orig_carrier, &strhide::stego::InspectOptions::new())
+            .expect("inspect clean heic");
+    assert!(!inspect_clean.has_hidden_data);
+    assert_eq!(inspect_clean.media_info.as_deref(), Some("512x512"));
+
+    let verify_clean =
+        strhide::stego::verify_carrier(&orig_carrier, &strhide::stego::VerifyOptions::new())
+            .expect("verify clean heic");
+    assert!(verify_clean.levels[0].ok);
+    assert!(!verify_clean.levels[1].ok);
+    assert!(!verify_clean.is_all_ok());
+
+    // 2. Embedded carrier
+    let payload = strhide::core::payload::Payload::file(
+        "hevc_note.txt",
+        b"Hidden payload inside HEVC gradient",
+    );
+    let embed_opts = strhide::stego::EmbedOptions::default().with_password("hevc-secret");
+    let stego = strhide::stego::embed_carrier(&orig_carrier, &payload, &embed_opts)
+        .expect("embed carrier heic");
+
+    // Inspect with password
+    let inspect_opts = strhide::stego::InspectOptions::new().with_password("hevc-secret");
+    let inspect_stego =
+        strhide::stego::inspect_carrier(&stego, &inspect_opts).expect("inspect stego heic");
+    assert!(inspect_stego.has_hidden_data);
+    assert!(inspect_stego.algorithm.is_some());
+    assert_eq!(inspect_stego.media_info.as_deref(), Some("512x512"));
+
+    // Verify with password
+    let verify_opts = strhide::stego::VerifyOptions::new().with_password("hevc-secret");
+    let verify_stego =
+        strhide::stego::verify_carrier(&stego, &verify_opts).expect("verify stego heic");
+    assert!(verify_stego.is_all_ok());
+
+    // Verify with wrong password
+    let verify_wrong_opts = strhide::stego::VerifyOptions::new().with_password("bad-pass");
+    let verify_wrong =
+        strhide::stego::verify_carrier(&stego, &verify_wrong_opts).expect("verify wrong password");
+    assert!(!verify_wrong.is_all_ok());
+}

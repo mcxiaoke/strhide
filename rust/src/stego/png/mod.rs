@@ -4,7 +4,8 @@ pub mod registry;
 
 pub use cost::HillCostModel;
 pub use engine::{
-    PngChunk, RawImage, decode_png, embed_png, encode_png, extract_png, probe_png_capacity,
+    PngChunk, RawImage, decode_png, embed_png, encode_png, extract_png, inspect_png,
+    probe_png_capacity, verify_png,
 };
 pub use registry::{
     SPATIAL_ALGORITHM_HILL, SPATIAL_ALGORITHM_SUNIWARD, get_spatial_model,

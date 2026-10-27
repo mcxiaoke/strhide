@@ -54,6 +54,7 @@ use crate::stego::jpeg::header_v3::{
     encode_extension, parse_extension,
 };
 use crate::stego::jpeg::v3_layout::{self, Layout};
+use crate::stego::options::{StegoHeaderInfo, StegoVerifyResult, VerifyLevel};
 use crate::stego::params::{ExtractParams, JpegParams};
 use crate::stego::prng::{ChaCha12Stream, fisher_yates_prefix_from, permute_prefix};
 use crate::stego::traits::JpegCostModel;
@@ -1270,6 +1271,210 @@ fn read_bits(
     let mut out = trellis.extract(&vals, bits);
     out.truncate(bits.div_ceil(8));
     Some(out)
+}
+
+/// Inspect JPEG for V3 superblock and stego metadata without solving trellis.
+pub fn inspect_jpeg(
+    carrier_bytes: &[u8],
+    password: Option<&str>,
+    domain: Option<&str>,
+    fmt: &JpegFormatProfile,
+    control: &Control<'_>,
+) -> Result<StegoHeaderInfo, StrHideError> {
+    control.check()?;
+    fmt.validate()?;
+    let preflight = match preflight_jpeg(carrier_bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(StegoHeaderInfo {
+                format: "JPEG".into(),
+                has_hidden_data: false,
+                algorithm: None,
+                codec: None,
+                envelope_len: None,
+                payload_len: None,
+                media_info: None,
+                note: Some(format!("Preflight failed: {e}")),
+            });
+        }
+    };
+    control.check()?;
+    let media_info = Some(format!(
+        "{}x{}",
+        preflight.info.width, preflight.info.height
+    ));
+    let mut empty_info = StegoHeaderInfo::empty("JPEG");
+    empty_info.media_info = media_info.clone();
+
+    let coeffs = match dct_io::read_coefficients(carrier_bytes) {
+        Ok(c) => c,
+        Err(_) => return Ok(empty_info),
+    };
+    if coeffs.components.is_empty() {
+        return Ok(empty_info);
+    }
+    control.check()?;
+    let cover = CoverFrame::read(fmt, &coeffs);
+
+    let password = password
+        .filter(|s| !s.is_empty())
+        .unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET);
+
+    let grid_template = v3_layout::grid_indices(cover.block_count, fmt.grid_rule);
+    let mut slots_buf = grid_template.clone();
+
+    for suite in fmt.suites {
+        control.check()?;
+        let Ok(master) = derive_master(suite, password, &cover.digest) else {
+            continue;
+        };
+        let hdr_seed = header_perm_seed(fmt, &master, domain);
+        slots_buf.clear();
+        slots_buf.extend_from_slice(&grid_template);
+
+        let sb_n = fmt.superblock_slots();
+        if slots_buf.len() < sb_n {
+            continue;
+        }
+        let hdr_min = fmt.header_slots(0);
+        let mut hdr_rng = ChaCha12Stream::from_seed(&hdr_seed);
+        fisher_yates_prefix_from(&mut slots_buf, 0, hdr_min, &mut hdr_rng);
+
+        let Some(superblock) = read_superblock(&coeffs, &slots_buf[..sb_n], fmt, &hdr_seed, domain)
+        else {
+            continue;
+        };
+        if superblock.validate_against(fmt, suite.id).is_err() {
+            continue;
+        }
+        if superblock.codec_id != CODEC_TERNARY_STC {
+            continue;
+        }
+
+        return Ok(StegoHeaderInfo {
+            format: "JPEG".into(),
+            has_hidden_data: true,
+            algorithm: Some("UERD/J-UNIWARD".into()),
+            codec: Some(format!(
+                "Ternary STC (h={}, u={})",
+                superblock.h, superblock.u
+            )),
+            envelope_len: Some(superblock.envelope_len as usize),
+            payload_len: None,
+            media_info,
+            note: None,
+        });
+    }
+
+    Ok(empty_info)
+}
+
+/// Three-level diagnostic verification for JPEG carriers.
+pub fn verify_jpeg(
+    carrier_bytes: &[u8],
+    password: Option<&str>,
+    domain: Option<&str>,
+    fmt: &JpegFormatProfile,
+    limits: &ExtractParams,
+    control: &Control<'_>,
+) -> Result<StegoVerifyResult, StrHideError> {
+    control.check()?;
+    let mut levels = Vec::new();
+
+    // Level 1: Container & DCT Coeffs Parse
+    let (info, coeffs) = match preflight_jpeg(carrier_bytes).and_then(|p| {
+        dct_io::read_coefficients(carrier_bytes)
+            .map_err(map_dct_error)
+            .map(|c| (p.info, c))
+    }) {
+        Ok((info, c)) => {
+            levels.push(VerifyLevel::pass(
+                1,
+                format!(
+                    "JPEG structure & DCT scan valid ({}x{}, {} blocks)",
+                    info.width,
+                    info.height,
+                    c.components
+                        .first()
+                        .map(|comp| comp.blocks.len())
+                        .unwrap_or(0)
+                ),
+            ));
+            (info, c)
+        }
+        Err(e) => {
+            levels.push(VerifyLevel::fail(
+                1,
+                "JPEG DCT coefficients decode",
+                e.to_string(),
+            ));
+            levels.push(VerifyLevel::fail(
+                2,
+                "Stego superblock",
+                "Skipped due to level 1 failure",
+            ));
+            levels.push(VerifyLevel::fail(
+                3,
+                "Payload decryption",
+                "Skipped due to level 1 failure",
+            ));
+            return Ok(StegoVerifyResult::new("JPEG", levels));
+        }
+    };
+    let _ = (info, coeffs);
+    control.check()?;
+
+    // Level 2: Superblock inspection
+    let header_info = inspect_jpeg(carrier_bytes, password, domain, fmt, control)?;
+    if !header_info.has_hidden_data {
+        levels.push(VerifyLevel::fail(
+            2,
+            "Stego superblock",
+            "No valid V3 superblock found (or wrong password)",
+        ));
+        levels.push(VerifyLevel::fail(
+            3,
+            "Payload decryption",
+            "No superblock to extract payload from",
+        ));
+        return Ok(StegoVerifyResult::new("JPEG", levels));
+    }
+    levels.push(VerifyLevel::pass(
+        2,
+        format!(
+            "Stego superblock valid (codec: {}, envelope: {} B)",
+            header_info.codec.as_deref().unwrap_or("unknown"),
+            header_info.envelope_len.unwrap_or(0),
+        ),
+    ));
+    control.check()?;
+
+    // Level 3: Payload Decryption & AEAD Authenticity
+    match extract_jpeg(carrier_bytes, password, domain, fmt, limits, control) {
+        Ok(payload) => {
+            let desc = match payload.name() {
+                Some(name) => format!(
+                    "Payload decrypted & verified ({} bytes, filename: '{}')",
+                    payload.len(),
+                    name
+                ),
+                None => format!(
+                    "Payload decrypted & verified ({} bytes, raw/text)",
+                    payload.len()
+                ),
+            };
+            levels.push(VerifyLevel::pass(3, desc));
+        }
+        Err(e) => {
+            levels.push(VerifyLevel::fail(
+                3,
+                "Payload decryption",
+                format!("Decryption or authentication failed: {e}"),
+            ));
+        }
+    }
+
+    Ok(StegoVerifyResult::new("JPEG", levels))
 }
 
 /// Probe the embedding capacity of a JPEG carrier.

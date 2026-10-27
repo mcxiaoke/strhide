@@ -29,6 +29,8 @@
 
 use std::sync::Arc;
 
+use serde::Serialize;
+
 use crate::core::control::Control;
 use crate::errors::StrHideError;
 use crate::formats::FileFormat;
@@ -881,6 +883,196 @@ impl EmbedOutput {
             bytes,
             capacity: None,
         }
+    }
+}
+
+/// Read-only steganographic header diagnostics obtained without full payload decoding.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StegoHeaderInfo {
+    pub format: String,
+    pub has_hidden_data: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub algorithm: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope_len: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_len: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_info: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl StegoHeaderInfo {
+    pub fn empty(format: impl Into<String>) -> Self {
+        Self {
+            format: format.into(),
+            has_hidden_data: false,
+            algorithm: None,
+            codec: None,
+            envelope_len: None,
+            payload_len: None,
+            media_info: None,
+            note: None,
+        }
+    }
+}
+
+/// Options for inspecting a content carrier for steganographic headers.
+#[derive(Debug, Clone, Default)]
+pub struct InspectOptions<'a> {
+    pub password: Option<&'a str>,
+    pub domain: Option<&'a str>,
+    pub limits: ExtractParams,
+    pub control: Control<'a>,
+}
+
+impl<'a> InspectOptions<'a> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_password(mut self, password: &'a str) -> Self {
+        self.password = Some(password);
+        self
+    }
+
+    pub fn with_domain(mut self, domain: &'a str) -> Self {
+        self.domain = Some(domain);
+        self
+    }
+
+    pub fn with_limits(mut self, limits: ExtractParams) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    pub fn with_control(mut self, control: Control<'a>) -> Self {
+        self.control = control;
+        self
+    }
+
+    pub fn secret<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
+    where
+        'a: 's,
+    {
+        self.password
+            .filter(|s| !s.is_empty())
+            .or_else(|| dialect.secret())
+    }
+
+    pub fn domain<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
+    where
+        'a: 's,
+    {
+        self.domain
+            .filter(|s| !s.is_empty())
+            .or_else(|| dialect.stego_domain())
+    }
+}
+
+/// Status of one verification tier.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct VerifyLevel {
+    pub level: u8,
+    pub name: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl VerifyLevel {
+    pub fn pass(level: u8, name: impl Into<String>) -> Self {
+        Self {
+            level,
+            name: name.into(),
+            ok: true,
+            message: None,
+        }
+    }
+
+    pub fn fail(level: u8, name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            level,
+            name: name.into(),
+            ok: false,
+            message: Some(message.into()),
+        }
+    }
+}
+
+/// Three-tier diagnostic verification result for content carriers.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StegoVerifyResult {
+    pub format: String,
+    pub levels: Vec<VerifyLevel>,
+}
+
+impl StegoVerifyResult {
+    pub fn new(format: impl Into<String>, levels: Vec<VerifyLevel>) -> Self {
+        Self {
+            format: format.into(),
+            levels,
+        }
+    }
+
+    pub fn is_all_ok(&self) -> bool {
+        self.levels.iter().all(|l| l.ok)
+    }
+}
+
+/// Options for verifying a content carrier through diagnostic levels.
+#[derive(Debug, Clone, Default)]
+pub struct VerifyOptions<'a> {
+    pub password: Option<&'a str>,
+    pub domain: Option<&'a str>,
+    pub limits: ExtractParams,
+    pub control: Control<'a>,
+}
+
+impl<'a> VerifyOptions<'a> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_password(mut self, password: &'a str) -> Self {
+        self.password = Some(password);
+        self
+    }
+
+    pub fn with_domain(mut self, domain: &'a str) -> Self {
+        self.domain = Some(domain);
+        self
+    }
+
+    pub fn with_limits(mut self, limits: ExtractParams) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    pub fn with_control(mut self, control: Control<'a>) -> Self {
+        self.control = control;
+        self
+    }
+
+    pub fn secret<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
+    where
+        'a: 's,
+    {
+        self.password
+            .filter(|s| !s.is_empty())
+            .or_else(|| dialect.secret())
+    }
+
+    pub fn domain<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
+    where
+        'a: 's,
+    {
+        self.domain
+            .filter(|s| !s.is_empty())
+            .or_else(|| dialect.stego_domain())
     }
 }
 

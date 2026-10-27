@@ -51,6 +51,7 @@ pub use crate::stego::header::{
     FeatureWord, HEADER_LEN_MASK, HEADER_LEN_MAX, HEADER_V2_ESCAPE_H, V2_TOTAL_HEADER_SLOTS,
     decode_header_word, encode_header_word,
 };
+use crate::stego::options::{StegoHeaderInfo, StegoVerifyResult, VerifyLevel};
 use crate::stego::params::SafetyPolicy;
 use crate::stego::prng::{permute_indices, permute_prefix};
 use crate::stego::traits::PngCostModel;
@@ -1648,6 +1649,210 @@ pub fn extract_png(
         &aad,
         &ciphertext,
     )
+}
+
+/// Inspect PNG for stego header and self-describing metadata without decoding body.
+pub fn inspect_png(
+    carrier_bytes: &[u8],
+    password: Option<&str>,
+    domain: Option<&str>,
+    spatial: &crate::stego::format::PngFormatProfile,
+    control: &Control<'_>,
+) -> Result<StegoHeaderInfo, StrHideError> {
+    control.check()?;
+    let image = match decode_png(carrier_bytes) {
+        Ok(img) => img,
+        Err(e) => {
+            return Ok(StegoHeaderInfo {
+                format: "PNG".into(),
+                has_hidden_data: false,
+                algorithm: None,
+                codec: None,
+                envelope_len: None,
+                payload_len: None,
+                media_info: None,
+                note: Some(format!("Decode failed: {e}")),
+            });
+        }
+    };
+    control.check()?;
+    let media_info = Some(format!("{}x{}", image.width, image.height));
+    let mut empty_info = StegoHeaderInfo::empty("PNG");
+    empty_info.media_info = media_info.clone();
+
+    let channel_offset = embed_channel(&image);
+    let header_layout = header_layout(&image, password, domain, spatial);
+    if header_layout.len() < V2_TOTAL_HEADER_SLOTS {
+        return Ok(empty_info);
+    }
+    let header_slots = &header_layout[..HEADER_SLOTS];
+
+    // Read Phase 1: 32-byte Header ([16B Salt][12B Nonce][4B Total Len])
+    let mut header_bytes = [0u8; 32];
+    for byte_i in 0..32 {
+        let mut b = 0u8;
+        for bit_i in 0..8 {
+            let slot = header_slots[byte_i * 8 + bit_i];
+            let val = image.pixels[slot * image.channels + channel_offset];
+            b = (b << 1) | (val & 1);
+        }
+        header_bytes[byte_i] = b;
+    }
+
+    let (total_len, raw_stc_h) = {
+        let word = u32::from_be_bytes([
+            header_bytes[28],
+            header_bytes[29],
+            header_bytes[30],
+            header_bytes[31],
+        ]);
+        let (len, _codec_id, stc_h) = decode_header_word(word);
+        (len as usize, stc_h)
+    };
+
+    if !(crate::stego::envelope::MIN_ENVELOPE_LEN..=HEADER_LEN_MAX as usize).contains(&total_len) {
+        return Ok(empty_info);
+    }
+    if raw_stc_h != HEADER_V2_ESCAPE_H {
+        return Ok(empty_info);
+    }
+
+    let feature_slots = &header_layout[HEADER_SLOTS..V2_TOTAL_HEADER_SLOTS];
+    let mut feature_bytes = [0u8; 32];
+    for byte_i in 0..32 {
+        let mut b = 0u8;
+        for bit_i in 0..8 {
+            let slot = feature_slots[byte_i * 8 + bit_i];
+            let val = image.pixels[slot * image.channels + channel_offset];
+            b = (b << 1) | (val & 1);
+        }
+        feature_bytes[byte_i] = b;
+    }
+
+    let Ok(fw) = FeatureWord::decode(&feature_bytes) else {
+        return Ok(empty_info);
+    };
+
+    let algo_name = crate::stego::png::registry::spatial_model_from_wire_id(fw.algorithm_id)
+        .map(|m| m.id().to_string())
+        .unwrap_or_else(|| format!("Unknown(0x{:02x})", fw.algorithm_id));
+
+    Ok(StegoHeaderInfo {
+        format: "PNG".into(),
+        has_hidden_data: true,
+        algorithm: Some(algo_name),
+        codec: Some(format!("{:?} (h={}, u={})", fw.codec, fw.h, fw.u)),
+        envelope_len: Some(total_len),
+        payload_len: None,
+        media_info,
+        note: None,
+    })
+}
+
+/// Three-level diagnostic verification for PNG carriers.
+pub fn verify_png(
+    carrier_bytes: &[u8],
+    password: Option<&str>,
+    domain: Option<&str>,
+    spatial: &crate::stego::format::PngFormatProfile,
+    _limits: &crate::stego::params::ExtractParams,
+    control: &Control<'_>,
+) -> Result<StegoVerifyResult, StrHideError> {
+    control.check()?;
+    let mut levels = Vec::new();
+
+    // Level 1: Container & Decode
+    let image = match decode_png(carrier_bytes) {
+        Ok(img) => {
+            levels.push(VerifyLevel::pass(
+                1,
+                format!(
+                    "PNG structure valid ({}x{}, {} channels)",
+                    img.width, img.height, img.channels
+                ),
+            ));
+            img
+        }
+        Err(e) => {
+            levels.push(VerifyLevel::fail(1, "PNG structure decode", e.to_string()));
+            levels.push(VerifyLevel::fail(
+                2,
+                "Stego header",
+                "Skipped due to level 1 failure",
+            ));
+            levels.push(VerifyLevel::fail(
+                3,
+                "Payload decryption",
+                "Skipped due to level 1 failure",
+            ));
+            return Ok(StegoVerifyResult::new("PNG", levels));
+        }
+    };
+    let _ = image;
+    control.check()?;
+
+    // Level 2: Stego Header & FeatureWord
+    let header_info = inspect_png(carrier_bytes, password, domain, spatial, control)?;
+    if !header_info.has_hidden_data {
+        levels.push(VerifyLevel::fail(
+            2,
+            "Stego header",
+            "No valid stego header or FeatureWord found (or wrong password)",
+        ));
+        levels.push(VerifyLevel::fail(
+            3,
+            "Payload decryption",
+            "No stego header to extract payload from",
+        ));
+        return Ok(StegoVerifyResult::new("PNG", levels));
+    }
+    levels.push(VerifyLevel::pass(
+        2,
+        format!(
+            "Stego header valid (algorithm: {}, codec: {}, envelope: {} B)",
+            header_info.algorithm.as_deref().unwrap_or("unknown"),
+            header_info.codec.as_deref().unwrap_or("unknown"),
+            header_info.envelope_len.unwrap_or(0),
+        ),
+    ));
+    control.check()?;
+
+    // Level 3: Payload Decryption & AEAD Authenticity
+    let model = crate::stego::options::SpatialAlgorithm::default().model();
+    let params = crate::stego::params::PngParams::default();
+    match extract_png(
+        carrier_bytes,
+        password,
+        domain,
+        spatial,
+        &*model,
+        &params,
+        control,
+    ) {
+        Ok(payload) => {
+            let desc = match payload.name() {
+                Some(name) => format!(
+                    "Payload decrypted & verified ({} bytes, filename: '{}')",
+                    payload.len(),
+                    name
+                ),
+                None => format!(
+                    "Payload decrypted & verified ({} bytes, raw/text)",
+                    payload.len()
+                ),
+            };
+            levels.push(VerifyLevel::pass(3, desc));
+        }
+        Err(e) => {
+            levels.push(VerifyLevel::fail(
+                3,
+                "Payload decryption",
+                format!("Decryption or authentication failed: {e}"),
+            ));
+        }
+    }
+
+    Ok(StegoVerifyResult::new("PNG", levels))
 }
 
 /// Probe the embedding capacity of a PNG carrier.

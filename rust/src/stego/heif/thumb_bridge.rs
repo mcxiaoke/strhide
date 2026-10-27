@@ -14,7 +14,9 @@ use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::jpeg;
-use crate::stego::options::{BridgeOptions, StegoTuning};
+use crate::stego::options::{
+    BridgeOptions, StegoHeaderInfo, StegoTuning, StegoVerifyResult, VerifyLevel,
+};
 use crate::stego::params::ExtractParams;
 use crate::stego::png;
 
@@ -228,6 +230,115 @@ pub fn probe_heif_bridge_capacity(
             )?;
             info.format = "HEIF (Uncompressed Item Bridge)".into();
             Ok(info)
+        }
+    }
+}
+
+/// Inspect a bridge carrier within a HEIF container without full payload decoding.
+pub fn inspect_heif_bridge(
+    carrier_bytes: &[u8],
+    password: Option<&str>,
+    domain: Option<&str>,
+    dialect: &crate::params::StegoProfile,
+    control: &Control<'_>,
+) -> Result<StegoHeaderInfo, StrHideError> {
+    control.check()?;
+    let target = match find_bridge_target(carrier_bytes) {
+        Ok(t) => t,
+        Err(_) => return Ok(StegoHeaderInfo::empty("HEIF-Bridge")),
+    };
+    let carrier_slice = &carrier_bytes[target.file_offset..target.file_offset + target.length];
+    let secret = password
+        .filter(|s| !s.is_empty())
+        .or_else(|| dialect.secret());
+    let domain = domain
+        .filter(|s| !s.is_empty())
+        .or_else(|| dialect.stego_domain());
+
+    match target.kind {
+        BridgeTargetKind::DirectJpeg { .. }
+        | BridgeTargetKind::ExifJpeg { .. }
+        | BridgeTargetKind::ContainerJpegFallback => {
+            let mut info = jpeg::inspect_jpeg(
+                carrier_slice,
+                secret,
+                domain,
+                dialect.jpeg_format(),
+                control,
+            )?;
+            if info.has_hidden_data {
+                info.format = "HEIF (JPEG Thumbnail Bridge)".into();
+            }
+            Ok(info)
+        }
+        BridgeTargetKind::DirectSpatial { .. } => {
+            let mut info =
+                png::inspect_png(carrier_slice, secret, domain, dialect.png_format(), control)?;
+            if info.has_hidden_data {
+                info.format = "HEIF (Uncompressed Item Bridge)".into();
+            }
+            Ok(info)
+        }
+    }
+}
+
+/// Three-level diagnostic verification for HEIF bridge carrier.
+pub fn verify_heif_bridge(
+    carrier_bytes: &[u8],
+    password: Option<&str>,
+    domain: Option<&str>,
+    dialect: &crate::params::StegoProfile,
+    limits: &ExtractParams,
+    control: &Control<'_>,
+) -> Result<StegoVerifyResult, StrHideError> {
+    control.check()?;
+    let target = match find_bridge_target(carrier_bytes) {
+        Ok(t) => t,
+        Err(_) => {
+            return Ok(StegoVerifyResult::new(
+                "HEIF-Bridge",
+                vec![
+                    VerifyLevel::fail(1, "HEIF bridge target", "No bridgeable item found"),
+                    VerifyLevel::fail(2, "Stego header", "Skipped due to level 1 failure"),
+                    VerifyLevel::fail(3, "Payload decryption", "Skipped due to level 1 failure"),
+                ],
+            ));
+        }
+    };
+    let carrier_slice = &carrier_bytes[target.file_offset..target.file_offset + target.length];
+    let secret = password
+        .filter(|s| !s.is_empty())
+        .or_else(|| dialect.secret());
+    let domain = domain
+        .filter(|s| !s.is_empty())
+        .or_else(|| dialect.stego_domain());
+
+    match target.kind {
+        BridgeTargetKind::DirectJpeg { .. }
+        | BridgeTargetKind::ExifJpeg { .. }
+        | BridgeTargetKind::ContainerJpegFallback => {
+            let mut res = jpeg::verify_jpeg(
+                carrier_slice,
+                secret,
+                domain,
+                dialect.jpeg_format(),
+                limits,
+                control,
+            )?;
+            res.format = "HEIF (JPEG Thumbnail Bridge)".into();
+            Ok(res)
+        }
+        BridgeTargetKind::DirectSpatial { .. } => {
+            let mut res = png::verify_png(
+                carrier_slice,
+                secret,
+                domain,
+                dialect.png_format(),
+                limits,
+                control,
+            )?;
+            res.format = "HEIF (Uncompressed Item Bridge)".into();
+            Ok(res)
         }
     }
 }

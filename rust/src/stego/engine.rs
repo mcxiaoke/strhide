@@ -28,7 +28,10 @@ use crate::stego::StegoCapacityInfo;
 use crate::stego::heif::thumb_bridge;
 #[cfg(feature = "content-hevc")]
 use crate::stego::options::HevcMode;
-use crate::stego::options::{EmbedOptions, EmbedOutput, ExtractOptions, ProbeOptions};
+use crate::stego::options::{
+    EmbedOptions, EmbedOutput, ExtractOptions, InspectOptions, ProbeOptions, StegoHeaderInfo,
+    StegoVerifyResult, VerifyOptions,
+};
 
 /// One content-domain embedding engine.
 ///
@@ -63,6 +66,22 @@ pub trait StegoEngine: Send + Sync {
         opts: &ExtractOptions<'_>,
         dialect: &StegoProfile,
     ) -> Result<Payload<'static>, StrHideError>;
+
+    /// Fast inspect carrier header for stego metadata without full decoding.
+    fn inspect(
+        &self,
+        carrier: &[u8],
+        opts: &InspectOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoHeaderInfo, StrHideError>;
+
+    /// Multi-tier verification of carrier syntax and embedded stego payload.
+    fn verify(
+        &self,
+        carrier: &[u8],
+        opts: &VerifyOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoVerifyResult, StrHideError>;
 }
 
 /// Registry, in lookup order. `HeifEngine` before `Mp4Engine` is not a
@@ -211,6 +230,37 @@ impl StegoEngine for PngEngine {
             )
         })
     }
+
+    fn inspect(
+        &self,
+        carrier: &[u8],
+        opts: &InspectOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoHeaderInfo, StrHideError> {
+        let secret = opts.secret(dialect);
+        let domain = opts.domain(dialect);
+        opts.control.check()?;
+        crate::stego::png::inspect_png(carrier, secret, domain, dialect.png_format(), &opts.control)
+    }
+
+    fn verify(
+        &self,
+        carrier: &[u8],
+        opts: &VerifyOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoVerifyResult, StrHideError> {
+        let secret = opts.secret(dialect);
+        let domain = opts.domain(dialect);
+        opts.control.check()?;
+        crate::stego::png::verify_png(
+            carrier,
+            secret,
+            domain,
+            dialect.png_format(),
+            &opts.limits,
+            &opts.control,
+        )
+    }
 }
 
 /// JPEG DCT-domain engine (UERD / J-UNIWARD, ternary STC).
@@ -306,6 +356,43 @@ impl StegoEngine for JpegEngine {
                 &opts.control,
             )
         })
+    }
+
+    fn inspect(
+        &self,
+        carrier: &[u8],
+        opts: &InspectOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoHeaderInfo, StrHideError> {
+        let secret = opts.secret(dialect);
+        let domain = opts.domain(dialect);
+        opts.control.check()?;
+        crate::stego::jpeg::inspect_jpeg(
+            carrier,
+            secret,
+            domain,
+            dialect.jpeg_format(),
+            &opts.control,
+        )
+    }
+
+    fn verify(
+        &self,
+        carrier: &[u8],
+        opts: &VerifyOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoVerifyResult, StrHideError> {
+        let secret = opts.secret(dialect);
+        let domain = opts.domain(dialect);
+        opts.control.check()?;
+        crate::stego::jpeg::verify_jpeg(
+            carrier,
+            secret,
+            domain,
+            dialect.jpeg_format(),
+            &opts.limits,
+            &opts.control,
+        )
     }
 }
 
@@ -493,6 +580,101 @@ fn hevc_probe(
     }
 }
 
+#[cfg(feature = "content-hevc")]
+fn hevc_inspect(
+    format: FileFormat,
+    carrier: &[u8],
+    opts: &InspectOptions<'_>,
+    dialect: &StegoProfile,
+) -> Result<StegoHeaderInfo, StrHideError> {
+    let secret = opts.secret(dialect);
+    let domain = opts.domain(dialect);
+    opts.control.check()?;
+
+    let direct = || {
+        crate::stego::hevc::inspect_hevc(
+            carrier,
+            secret,
+            domain,
+            dialect.hevc_format(),
+            &opts.control,
+        )
+    };
+
+    if format != FileFormat::Heif {
+        return direct();
+    }
+
+    let primary_info = direct()?;
+    if primary_info.has_hidden_data {
+        return Ok(primary_info);
+    }
+
+    #[cfg(feature = "content-heif-bridge")]
+    {
+        let bridge_info = thumb_bridge::inspect_heif_bridge(
+            carrier,
+            opts.password,
+            opts.domain,
+            dialect,
+            &opts.control,
+        )?;
+        if bridge_info.has_hidden_data {
+            return Ok(bridge_info);
+        }
+    }
+
+    Ok(primary_info)
+}
+
+#[cfg(feature = "content-hevc")]
+fn hevc_verify(
+    format: FileFormat,
+    carrier: &[u8],
+    opts: &VerifyOptions<'_>,
+    dialect: &StegoProfile,
+) -> Result<StegoVerifyResult, StrHideError> {
+    let secret = opts.secret(dialect);
+    let domain = opts.domain(dialect);
+    opts.control.check()?;
+
+    let direct = || {
+        crate::stego::hevc::verify_hevc(
+            carrier,
+            secret,
+            domain,
+            dialect.hevc_format(),
+            &opts.control,
+        )
+    };
+
+    if format != FileFormat::Heif {
+        return direct();
+    }
+
+    let primary_ver = direct()?;
+    if primary_ver.is_all_ok() {
+        return Ok(primary_ver);
+    }
+
+    #[cfg(feature = "content-heif-bridge")]
+    {
+        let bridge_ver = thumb_bridge::verify_heif_bridge(
+            carrier,
+            opts.password,
+            opts.domain,
+            dialect,
+            &opts.limits,
+            &opts.control,
+        )?;
+        if bridge_ver.is_all_ok() {
+            return Ok(bridge_ver);
+        }
+    }
+
+    Ok(primary_ver)
+}
+
 /// HEIF/HEIC still image: Scheme C, with the thumbnail bridge as fallback.
 #[cfg(feature = "content-hevc")]
 pub struct HeifEngine;
@@ -532,6 +714,24 @@ impl StegoEngine for HeifEngine {
         dialect: &StegoProfile,
     ) -> Result<Payload<'static>, StrHideError> {
         hevc_extract(self.format(), carrier, opts, dialect)
+    }
+
+    fn inspect(
+        &self,
+        carrier: &[u8],
+        opts: &InspectOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoHeaderInfo, StrHideError> {
+        hevc_inspect(self.format(), carrier, opts, dialect)
+    }
+
+    fn verify(
+        &self,
+        carrier: &[u8],
+        opts: &VerifyOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoVerifyResult, StrHideError> {
+        hevc_verify(self.format(), carrier, opts, dialect)
     }
 }
 
@@ -574,6 +774,24 @@ impl StegoEngine for Mp4Engine {
     ) -> Result<Payload<'static>, StrHideError> {
         hevc_extract(self.format(), carrier, opts, dialect)
     }
+
+    fn inspect(
+        &self,
+        carrier: &[u8],
+        opts: &InspectOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoHeaderInfo, StrHideError> {
+        hevc_inspect(self.format(), carrier, opts, dialect)
+    }
+
+    fn verify(
+        &self,
+        carrier: &[u8],
+        opts: &VerifyOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoVerifyResult, StrHideError> {
+        hevc_verify(self.format(), carrier, opts, dialect)
+    }
 }
 
 /// Raw Annex-B HEVC bitstream: Scheme C only.
@@ -614,6 +832,24 @@ impl StegoEngine for AnnexBEngine {
         dialect: &StegoProfile,
     ) -> Result<Payload<'static>, StrHideError> {
         hevc_extract(self.format(), carrier, opts, dialect)
+    }
+
+    fn inspect(
+        &self,
+        carrier: &[u8],
+        opts: &InspectOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoHeaderInfo, StrHideError> {
+        hevc_inspect(self.format(), carrier, opts, dialect)
+    }
+
+    fn verify(
+        &self,
+        carrier: &[u8],
+        opts: &VerifyOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoVerifyResult, StrHideError> {
+        hevc_verify(self.format(), carrier, opts, dialect)
     }
 }
 
@@ -678,5 +914,137 @@ mod tests {
                 format.as_str()
             );
         }
+    }
+
+    #[test]
+    #[cfg(feature = "content-png")]
+    fn test_png_inspect_and_verify() {
+        let carrier_bytes = include_bytes!("../../tests/fixtures/carrier.png");
+        let profile = StegoProfile::default();
+
+        // 1. Clean carrier
+        let inspect_clean = PngEngine
+            .inspect(carrier_bytes, &InspectOptions::new(), &profile)
+            .expect("inspect clean png");
+        assert_eq!(inspect_clean.format, "PNG");
+        assert!(!inspect_clean.has_hidden_data);
+
+        let verify_clean = PngEngine
+            .verify(carrier_bytes, &VerifyOptions::new(), &profile)
+            .expect("verify clean png");
+        assert_eq!(verify_clean.format, "PNG");
+        assert!(verify_clean.levels[0].ok);
+        assert!(!verify_clean.levels[1].ok);
+        assert!(!verify_clean.is_all_ok());
+
+        // 2. Embedded carrier
+        let payload = Payload::file("hello.txt", b"Secret data embedded in PNG carrier");
+        let embed_opts = EmbedOptions::default().with_password("png-pass");
+        let stego_bytes = PngEngine
+            .embed(carrier_bytes, &payload, &embed_opts, &profile)
+            .expect("embed png")
+            .bytes;
+
+        // Inspect with matching password
+        let inspect_opts = InspectOptions::new().with_password("png-pass");
+        let inspect_stego = PngEngine
+            .inspect(&stego_bytes, &inspect_opts, &profile)
+            .expect("inspect stego png");
+        assert!(inspect_stego.has_hidden_data);
+        assert_eq!(inspect_stego.format, "PNG");
+        assert!(inspect_stego.algorithm.is_some());
+        assert!(inspect_stego.codec.is_some());
+        assert!(inspect_stego.envelope_len.unwrap_or(0) > 0);
+
+        // Verify with matching password
+        let verify_opts = VerifyOptions::new().with_password("png-pass");
+        let verify_stego = PngEngine
+            .verify(&stego_bytes, &verify_opts, &profile)
+            .expect("verify stego png");
+        assert!(verify_stego.is_all_ok());
+        assert_eq!(verify_stego.levels.len(), 3);
+        assert!(verify_stego.levels.iter().all(|l| l.ok));
+
+        // Verify with wrong password
+        let verify_wrong_opts = VerifyOptions::new().with_password("wrong-pass");
+        let verify_wrong = PngEngine
+            .verify(&stego_bytes, &verify_wrong_opts, &profile)
+            .expect("verify wrong password");
+        assert!(!verify_wrong.is_all_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "content-jpeg")]
+    fn test_jpeg_inspect_and_verify() {
+        let carrier_bytes = include_bytes!("../../tests/fixtures/carrier.jpg");
+        let profile = StegoProfile::default();
+
+        // 1. Clean carrier
+        let inspect_clean = JpegEngine
+            .inspect(carrier_bytes, &InspectOptions::new(), &profile)
+            .expect("inspect clean jpeg");
+        assert_eq!(inspect_clean.format, "JPEG");
+        assert!(!inspect_clean.has_hidden_data);
+
+        let verify_clean = JpegEngine
+            .verify(carrier_bytes, &VerifyOptions::new(), &profile)
+            .expect("verify clean jpeg");
+        assert_eq!(verify_clean.format, "JPEG");
+        assert!(verify_clean.levels[0].ok);
+        assert!(!verify_clean.levels[1].ok);
+        assert!(!verify_clean.is_all_ok());
+
+        // 2. Embedded carrier
+        let payload = Payload::file("note.txt", b"Stego message inside JPEG carrier");
+        let embed_opts = EmbedOptions::default().with_password("jpeg-pass");
+        let stego_bytes = JpegEngine
+            .embed(carrier_bytes, &payload, &embed_opts, &profile)
+            .expect("embed jpeg")
+            .bytes;
+
+        // Inspect with matching password
+        let inspect_opts = InspectOptions::new().with_password("jpeg-pass");
+        let inspect_stego = JpegEngine
+            .inspect(&stego_bytes, &inspect_opts, &profile)
+            .expect("inspect stego jpeg");
+        assert!(inspect_stego.has_hidden_data);
+        assert_eq!(inspect_stego.format, "JPEG");
+        assert!(inspect_stego.algorithm.is_some());
+        assert!(inspect_stego.codec.is_some());
+        assert!(inspect_stego.envelope_len.unwrap_or(0) > 0);
+
+        // Verify with matching password
+        let verify_opts = VerifyOptions::new().with_password("jpeg-pass");
+        let verify_stego = JpegEngine
+            .verify(&stego_bytes, &verify_opts, &profile)
+            .expect("verify stego jpeg");
+        assert!(verify_stego.is_all_ok());
+        assert_eq!(verify_stego.levels.len(), 3);
+        assert!(verify_stego.levels.iter().all(|l| l.ok));
+
+        // Verify with wrong password
+        let verify_wrong_opts = VerifyOptions::new().with_password("wrong-pass");
+        let verify_wrong = JpegEngine
+            .verify(&stego_bytes, &verify_wrong_opts, &profile)
+            .expect("verify wrong password");
+        assert!(!verify_wrong.is_all_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "content")]
+    fn test_top_level_inspect_and_verify() {
+        let carrier_bytes = include_bytes!("../../tests/fixtures/carrier.png");
+        let payload = Payload::bytes(b"Top level content test");
+        let embed_opts = EmbedOptions::default();
+        let stego_bytes = crate::stego::embed_carrier(carrier_bytes, &payload, &embed_opts)
+            .expect("embed png top level");
+
+        let inspect_info = crate::stego::inspect_carrier(&stego_bytes, &InspectOptions::new())
+            .expect("inspect top level");
+        assert!(inspect_info.has_hidden_data);
+
+        let verify_res = crate::stego::verify_carrier(&stego_bytes, &VerifyOptions::new())
+            .expect("verify top level");
+        assert!(verify_res.is_all_ok());
     }
 }

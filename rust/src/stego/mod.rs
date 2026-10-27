@@ -61,7 +61,10 @@ pub use options::BridgeOptions;
 pub use options::JpegAlgorithm;
 #[cfg(feature = "content-png")]
 pub use options::SpatialAlgorithm;
-pub use options::{EmbedOptions, EmbedOutput, ExtractOptions, ProbeOptions, StegoTuning};
+pub use options::{
+    EmbedOptions, EmbedOutput, ExtractOptions, InspectOptions, ProbeOptions, StegoHeaderInfo,
+    StegoTuning, StegoVerifyResult, VerifyLevel, VerifyOptions,
+};
 #[cfg(feature = "content-hevc")]
 pub use options::{HevcMode, HevcParams};
 
@@ -229,6 +232,42 @@ pub fn extract_carrier_payload(
 ) -> Result<Payload<'static>, StrHideError> {
     let engine = engine_for_carrier(carrier_bytes)?;
     engine.extract(carrier_bytes, options, &profile.stego)
+}
+
+/// Automatically sniff the carrier format and inspect steganographic headers.
+pub fn inspect_carrier(
+    carrier_bytes: &[u8],
+    options: &InspectOptions<'_>,
+) -> Result<StegoHeaderInfo, StrHideError> {
+    inspect_carrier_with_profile(carrier_bytes, options, &Profile::default())
+}
+
+/// [`inspect_carrier`] with an explicit [`Profile`].
+pub fn inspect_carrier_with_profile(
+    carrier_bytes: &[u8],
+    options: &InspectOptions<'_>,
+    profile: &Profile,
+) -> Result<StegoHeaderInfo, StrHideError> {
+    let engine = engine_for_carrier(carrier_bytes)?;
+    engine.inspect(carrier_bytes, options, &profile.stego)
+}
+
+/// Automatically sniff the carrier format and run multi-tier verification.
+pub fn verify_carrier(
+    carrier_bytes: &[u8],
+    options: &VerifyOptions<'_>,
+) -> Result<StegoVerifyResult, StrHideError> {
+    verify_carrier_with_profile(carrier_bytes, options, &Profile::default())
+}
+
+/// [`verify_carrier`] with an explicit [`Profile`].
+pub fn verify_carrier_with_profile(
+    carrier_bytes: &[u8],
+    options: &VerifyOptions<'_>,
+    profile: &Profile,
+) -> Result<StegoVerifyResult, StrHideError> {
+    let engine = engine_for_carrier(carrier_bytes)?;
+    engine.verify(carrier_bytes, options, &profile.stego)
 }
 
 /// Capacity information for content-adaptive steganography.
