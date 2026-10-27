@@ -101,6 +101,26 @@ opt-level = 2
 debug = 1
 codegen-units = 12
 
+# iced-x86 1.21.0 computes the instruction length as
+#     let instr_len = self.data_ptr as u32 - data_ptr as u32;
+# (src/decoder.rs::decode), i.e. it truncates both pointers to 32 bits and
+# relies on that subtraction wrapping. When the decoded buffer straddles a
+# 4 GiB virtual-address boundary the low-32-bit difference goes negative, so a
+# build with overflow checks panics with "attempt to subtract with overflow" --
+# release builds are unaffected (modular arithmetic yields the correct length).
+#
+# `pe_codebits::profile` hands iced a freshly heap-allocated `.text` copy, so
+# whether a given run hits the boundary depends on the allocator's address:
+# reproducible failure rate `len / 4 GiB` per decode, i.e. a rare, flaky panic
+# in the PE corpus sweep. Upstream has no release with this fixed, so the
+# wrapping semantics its code assumes are declared here for every profile that
+# enables overflow checks.
+[profile.dev.package."iced-x86"]
+overflow-checks = false
+
+[profile.test.package."iced-x86"]
+overflow-checks = false
+
 [profile.release]
 opt-level = 3
 lto = true

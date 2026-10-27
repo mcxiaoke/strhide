@@ -1174,3 +1174,114 @@ fn codebits_strip_rejects_slack_outside_padding() {
         "unexpected error message: {err_msg}"
     );
 }
+
+// --------------------------------------------------------------------------- iced-x86 build contract
+
+/// Regression for a flaky panic in the PE corpus sweep: `profile` must return
+/// the same positions no matter *where* the code buffer happens to live.
+///
+/// iced-x86 1.21.0 derives an instruction's length from both data pointers
+/// truncated to 32 bits (`src/decoder.rs::decode`:
+/// `let instr_len = self.data_ptr as u32 - data_ptr as u32;`). That is only
+/// correct because the subtraction wraps; a `.text` copy that straddles a 4 GiB
+/// virtual-address boundary makes it underflow. Release builds wrap silently
+/// (and produce the right length), but any build with overflow checks panics
+/// with "attempt to subtract with overflow" — which is exactly how
+/// `local_batch_corpus_all_modes` failed on a PE carrier. `Cargo.toml` turns
+/// overflow checks off for that one crate; this test pins the contract, so
+/// removing the override (or bumping iced-x86 onto the same arithmetic) fails
+/// here instead of as a rare failure probability `len / 4 GiB` per decode.
+#[cfg(all(windows, feature = "structure-pe"))]
+mod address_boundary {
+    use strhide::structure::adapters::pe_codebits;
+
+    const MEM_COMMIT: u32 = 0x1000;
+    const MEM_RESERVE: u32 = 0x2000;
+    const MEM_RELEASE: u32 = 0x8000;
+    const PAGE_READWRITE: u32 = 0x04;
+    const PAGE: usize = 4096;
+    /// Bytes of code placed on each side of the 4 GiB line.
+    const WINDOW: usize = 256;
+
+    unsafe extern "system" {
+        fn VirtualAlloc(
+            addr: *mut core::ffi::c_void,
+            size: usize,
+            ty: u32,
+            protect: u32,
+        ) -> *mut core::ffi::c_void;
+        fn VirtualFree(addr: *mut core::ffi::c_void, size: usize, ty: u32) -> i32;
+    }
+
+    fn pattern() -> Vec<u8> {
+        // `mov eax, ebx` (89 D8) repeated: two bytes, an instrumentable semantic
+        // pair, and — the point here — an instruction that ends exactly on the
+        // 4 GiB line when the run starts an even number of bytes below it.
+        let mut v = Vec::with_capacity(WINDOW * 2);
+        while v.len() < WINDOW * 2 {
+            v.extend_from_slice(&[0x89, 0xD8]);
+        }
+        v
+    }
+
+    #[test]
+    fn profile_is_independent_of_the_buffer_address() {
+        if usize::BITS < 64 {
+            eprintln!("[SKIP] needs a 64-bit address space");
+            return;
+        }
+
+        let bytes = pattern();
+        let baseline = pe_codebits::profile(&bytes, 64);
+        assert!(
+            !baseline.is_empty(),
+            "the control buffer must yield instrumentable positions"
+        );
+
+        // Reserve address space (not memory) and commit only the two pages that
+        // span the 4 GiB line inside it.
+        let reserve = 8usize << 30;
+        let base =
+            unsafe { VirtualAlloc(core::ptr::null_mut(), reserve, MEM_RESERVE, PAGE_READWRITE) }
+                as usize;
+        assert!(base != 0, "VirtualAlloc(MEM_RESERVE) failed");
+        let boundary = (base | 0xFFFF_FFFF) + 1;
+        assert!(
+            boundary > base && boundary - base + PAGE <= reserve,
+            "no 4 GiB boundary inside the reservation"
+        );
+
+        let commit = boundary - PAGE;
+        let region = unsafe {
+            VirtualAlloc(
+                commit as *mut core::ffi::c_void,
+                PAGE * 2,
+                MEM_COMMIT,
+                PAGE_READWRITE,
+            )
+        } as usize;
+        assert_eq!(region, commit, "VirtualAlloc(MEM_COMMIT) failed");
+
+        // Place the code so that it starts below the line and ends above it.
+        let start = boundary - WINDOW;
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), start as *mut u8, bytes.len());
+        }
+        let straddling = unsafe { core::slice::from_raw_parts(start as *const u8, bytes.len()) };
+        assert_eq!(
+            straddling.as_ptr() as usize % (4 << 30),
+            0xFFFF_FF00,
+            "the buffer must really wrap the 4 GiB line"
+        );
+
+        let observed = pe_codebits::profile(straddling, 64);
+        unsafe {
+            VirtualFree(base as *mut core::ffi::c_void, 0, MEM_RELEASE);
+        }
+
+        assert_eq!(
+            observed, baseline,
+            "instruction positions must not depend on the buffer address"
+        );
+    }
+}
