@@ -10,6 +10,7 @@ use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::core::control::{Control, Event, Stage};
 use crate::errors::StrHideError;
 use crate::stego::coding::{Move, StcTrellis};
 use crate::stego::envelope::{Freshness, PUBLIC_DEFAULT_SECRET, derive_domain_subkey_with_label};
@@ -231,6 +232,7 @@ pub fn probe_hevc_capacity_info(
     fmt: &HevcFormatProfile,
     safety_level: SafetyLevel,
     exact: bool,
+    control: &Control<'_>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
         StrHideError::UnsupportedFormat(
@@ -238,6 +240,10 @@ pub fn probe_hevc_capacity_info(
         )
     })?;
     let pool = probe_hevc_pool(carrier, kind, exact)?;
+    // The pool scan is the long part of an exact probe; report before the
+    // (cheap) summary is built so a cancellation lands after the scan, not
+    // silently in the middle of it.
+    control.check()?;
     build_hevc_capacity_info(carrier, kind, fmt, &pool, safety_level)
 }
 
@@ -550,6 +556,7 @@ fn enforce_safety(
 /// the wire-format identity; `freshness` supplies the nonce (`Seeded` makes
 /// the output reproducible for the same inputs); `safety` is the full policy,
 /// so `Enforced` blocks an over-tier payload instead of only warning.
+#[allow(clippy::too_many_arguments)]
 pub fn embed_hevc_with_info(
     carrier: &[u8],
     payload: &[u8],
@@ -558,6 +565,7 @@ pub fn embed_hevc_with_info(
     fmt: &HevcFormatProfile,
     freshness: Freshness,
     safety: SafetyPolicy,
+    control: &Control<'_>,
 ) -> Result<(Vec<u8>, StegoCapacityInfo), StrHideError> {
     if payload.is_empty() {
         return Err(StrHideError::General("Cannot embed empty payload".into()));
@@ -571,7 +579,11 @@ pub fn embed_hevc_with_info(
     })?;
 
     // 1. Scan and record all slices and substreams
+    control.stage(Stage::Decode);
     let record = record_carrier_state(carrier, kind)?;
+    // Checkpoint after the parse: recording a long video is tens of seconds.
+    control.check()?;
+    control.stage(Stage::Solve);
     let pool = PoolProfile::from_record(&record);
     let capacity_info = build_hevc_capacity_info(carrier, kind, fmt, &pool, safety.level)?;
 
@@ -658,6 +670,9 @@ pub fn embed_hevc_with_info(
     let mut out_carrier = carrier.to_vec();
 
     for round in 0..MAX_EMBED_ROUNDS {
+        // Each round re-walks every slot and rewrites whole slices; stopping
+        // between rounds leaves the untouched cover bytes still on disk.
+        control.check()?;
         let mut cover_bits = Vec::with_capacity(needed_slots);
         let mut costs = Vec::with_capacity(needed_slots);
         let mut moves = Vec::with_capacity(needed_slots);
@@ -742,7 +757,16 @@ pub fn embed_hevc_with_info(
         let mut conflicts: Vec<EpbConflict> = Vec::new();
         let mut reencoded_slices = Vec::new();
 
+        let slice_total = flips_per_slice.len() as u64;
         for (slice_idx, op_indices) in &flips_per_slice {
+            // Checkpoint per slice rewrite: the CABAC replay of one slice is
+            // the unit of work a user can observe on the progress bar.
+            control.check()?;
+            control.report(Event::progress(
+                Stage::Encode,
+                *slice_idx as u64,
+                Some(slice_total),
+            ));
             let slice_rec = &slice_contexts[*slice_idx];
             let mut flipped_ops = vec![false; slice_rec.ops.len()];
             for &op_idx in op_indices {
@@ -938,6 +962,7 @@ pub fn embed_hevc(
         fmt,
         freshness,
         SafetyPolicy::new(),
+        &Control::none(),
     )
     .map(|(bytes, _)| bytes)
 }
@@ -1109,6 +1134,7 @@ pub fn extract_hevc(
     secret: Option<&str>,
     domain: Option<&str>,
     fmt: &HevcFormatProfile,
+    control: &Control<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
     check_header_bytes(fmt)?;
     let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
@@ -1118,6 +1144,7 @@ pub fn extract_hevc(
     })?;
 
     let record = record_carrier_state(carrier, kind)?;
+    control.check()?;
     let bands = record.bands.clone();
     let all_slots = record.all_slots;
     let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);

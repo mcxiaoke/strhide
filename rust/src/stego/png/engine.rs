@@ -32,6 +32,7 @@
 
 use std::io::{Cursor, Read, Write};
 
+use crate::core::control::{Control, Stage};
 use crc32fast::Hasher as Crc32;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -1106,9 +1107,14 @@ pub fn embed_png(
     params: &PngParams,
     safety: SafetyPolicy,
     freshness: Freshness,
+    control: &Control<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
     params.validate()?;
+    control.stage(Stage::Decode);
     let mut image = decode_png(carrier_bytes)?;
+    // Checkpoint after the decode: on a 50 MP carrier this alone is seconds.
+    control.check()?;
+    control.stage(Stage::CostMap);
     let w = image.width as usize;
     let h = image.height as usize;
     let total_pixels = w * h;
@@ -1138,6 +1144,9 @@ pub fn embed_png(
 
     // Compute distortion cost map
     let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, &params);
+    // Checkpoint after the cost map: the second big fixed cost of an embed.
+    control.check()?;
+    control.stage(Stage::Solve);
 
     let channel_offset = embed_channel(&image);
 
@@ -1427,6 +1436,7 @@ pub fn embed_png(
         image.pixels[slot] = slot_vals[i];
     }
 
+    control.stage(Stage::Encode);
     encode_png(&image)
 }
 
@@ -1443,9 +1453,11 @@ pub fn extract_png(
     spatial: &crate::stego::format::PngFormatProfile,
     cost_model: &dyn PngCostModel,
     params: &PngParams,
+    control: &Control<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
     params.validate()?;
     let image = decode_png(carrier_bytes)?;
+    control.check()?;
     let w = image.width as usize;
     let h = image.height as usize;
     let channel_offset = embed_channel(&image);
@@ -1553,6 +1565,7 @@ pub fn extract_png(
     // computed, because header/feature pixels never leave their eight-value
     // class, so the map is bit-identical on the stego.
     let costs = resolved.compute_cost(&image.pixels, w, h, image.channels, &effective_params);
+    control.check()?;
     // Body ranking needs costs; the header layout inside this plan is the same
     // cost-free one read above, so the two cannot disagree.
     let plan = SlotPlan::build(&image, &costs, &effective_params, password, domain, spatial)?;
@@ -1641,6 +1654,7 @@ pub fn extract_png(
 /// The complete expert entry: `safety_level` picks the tier `recommended_max_bytes`
 /// is derived from; `secret`/`domain` key the header-slot permutation, which
 /// decides which pixels are available to the payload.
+#[allow(clippy::too_many_arguments)]
 pub fn probe_png_capacity(
     carrier_bytes: &[u8],
     cost_model: &dyn PngCostModel,
@@ -1649,6 +1663,7 @@ pub fn probe_png_capacity(
     password: Option<&str>,
     domain: Option<&str>,
     spatial: &crate::stego::format::PngFormatProfile,
+    control: &Control<'_>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     params.validate()?;
     // Probe with the same wire-quantised hyperparameters the embedder will
@@ -1660,6 +1675,7 @@ pub fn probe_png_capacity(
     let total_pixels = w * h;
 
     let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, &params);
+    control.check()?;
 
     let plan = SlotPlan::build(&image, &costs, &params, password, domain, spatial)?;
 
@@ -1975,6 +1991,7 @@ mod tests {
             &hill_params,
             SafetyPolicy::default(),
             Freshness::Random,
+            &Control::none(),
         )
         .expect("embed with non-default HILL parameters");
         // The extractor passes *defaults*: the carrier is authoritative.
@@ -1985,6 +2002,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &PngParams::default(),
+            &Control::none(),
         )
         .expect("extract rebuilds the ranking from the feature word");
         assert_eq!(extracted, payload);
@@ -2003,6 +2021,7 @@ mod tests {
             &suniward_params,
             SafetyPolicy::default(),
             Freshness::Random,
+            &Control::none(),
         )
         .expect("embed with non-default sigma");
         let extracted = extract_png(
@@ -2012,6 +2031,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &crate::stego::png::cost::SuniwardCostModel,
             &PngParams::default(),
+            &Control::none(),
         )
         .expect("extract rebuilds sigma from the feature word");
         assert_eq!(extracted, payload);
@@ -2044,6 +2064,7 @@ mod tests {
             &params,
             SafetyPolicy::default(),
             Freshness::Random,
+            &Control::none(),
         )
         .expect("embed");
         let extracted = extract_png(
@@ -2053,6 +2074,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            &Control::none(),
         )
         .expect("extract");
         assert_eq!(extracted, payload);
@@ -2114,6 +2136,7 @@ mod tests {
             &params,
             SafetyPolicy::default(),
             Freshness::Random,
+            &Control::none(),
         )
         .expect("embed");
 
@@ -2130,6 +2153,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &extract_params,
+            &Control::none(),
         )
         .expect("extract");
         assert_eq!(extracted, payload, "STC must be self-describing");
@@ -2199,6 +2223,7 @@ mod tests {
             &params,
             SafetyPolicy::default(),
             Freshness::Seeded([0x21; 32]),
+            &Control::none(),
         )
         .expect("embed");
         assert!(
@@ -2212,6 +2237,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            &Control::none(),
         )
         .expect("extract");
         assert_eq!(extracted, payload);
@@ -2279,6 +2305,7 @@ mod tests {
             &params,
             SafetyPolicy::default(),
             Freshness::Random,
+            &Control::none(),
         )
         .expect("embed");
         let after = decode_png(&stego).expect("decode stego");
@@ -2294,6 +2321,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            &Control::none(),
         )
         .expect("extract");
         assert_eq!(extracted, b"split-idat");
@@ -2339,6 +2367,7 @@ mod tests {
                 &params,
                 SafetyPolicy::default(),
                 Freshness::Seeded([0x5A; 32]),
+                &Control::none(),
             )
             .unwrap_or_else(|e| panic!("u={stc_u}: embed failed: {e}"));
 
@@ -2351,6 +2380,7 @@ mod tests {
                 &crate::stego::format::OFFICIAL_PNG_FORMAT,
                 &HillCostModel,
                 &PngParams::default(),
+                &Control::none(),
             )
             .unwrap_or_else(|e| panic!("u={stc_u}: extract failed: {e}"));
             assert_eq!(extracted, payload, "u={stc_u}: must be self-describing");
@@ -2377,6 +2407,7 @@ mod tests {
                 Some("pw"),
                 None,
                 &crate::stego::format::OFFICIAL_PNG_FORMAT,
+                &Control::none(),
             )
             .expect("capacity probe");
             capacities.push(cap.max_raw_payload_bytes);
@@ -2420,6 +2451,7 @@ mod tests {
             &auto_params,
             SafetyPolicy::default(),
             Freshness::Random,
+            &Control::none(),
         )
         .expect("embed light");
         let rec_light = extract_png(
@@ -2429,6 +2461,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &PngParams::default(),
+            &Control::none(),
         )
         .expect("extract light");
         assert_eq!(rec_light, light_payload);
@@ -2442,6 +2475,7 @@ mod tests {
             Some("pw"),
             None,
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &Control::none(),
         )
         .expect("probe");
         assert!(cap.recommended_max_bytes > 0);
@@ -2467,6 +2501,7 @@ mod tests {
                 password,
                 None,
                 &crate::stego::format::OFFICIAL_PNG_FORMAT,
+                &Control::none(),
             )
             .expect("probe");
             assert!(cap.max_raw_payload_bytes > 0);
@@ -2481,6 +2516,7 @@ mod tests {
                 &params,
                 SafetyPolicy::default(),
                 Freshness::Random,
+                &Control::none(),
             )
             .unwrap_or_else(|e| {
                 panic!(
@@ -2511,6 +2547,7 @@ mod tests {
             &params,
             SafetyPolicy::default(),
             Freshness::Random,
+            &Control::none(),
         )
         .expect("embed with domain");
 
@@ -2522,6 +2559,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            &Control::none(),
         )
         .expect("extract with same domain");
         assert_eq!(recovered, payload);
@@ -2534,6 +2572,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            &Control::none(),
         );
         assert!(
             matches!(err_default, Err(StrHideError::NoHiddenData(_))),
@@ -2548,6 +2587,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            &Control::none(),
         );
         assert!(
             matches!(err_other, Err(StrHideError::NoHiddenData(_))),
@@ -2571,6 +2611,7 @@ mod tests {
             Some("test-pw"),
             None,
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &Control::none(),
         )
         .expect("probe paranoid");
         let cap_high = probe_png_capacity(
@@ -2581,6 +2622,7 @@ mod tests {
             Some("test-pw"),
             None,
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &Control::none(),
         )
         .expect("probe high");
         let cap_balanced = probe_png_capacity(
@@ -2591,6 +2633,7 @@ mod tests {
             Some("test-pw"),
             None,
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &Control::none(),
         )
         .expect("probe balanced");
 
@@ -2621,6 +2664,7 @@ mod tests {
             &PngParams::default(),
             enforced,
             Freshness::Random,
+            &Control::none(),
         );
         assert!(
             res.is_err(),
@@ -2638,6 +2682,7 @@ mod tests {
             &PngParams::default(),
             SafetyPolicy::default(),
             Freshness::Random,
+            &Control::none(),
         );
         assert!(
             ok_res.is_ok(),
@@ -2754,6 +2799,7 @@ mod tests {
             &params,
             SafetyPolicy::default(),
             Freshness::Random,
+            &Control::none(),
         )
         .expect("embed");
         let back = extract_png(
@@ -2763,6 +2809,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            &Control::none(),
         )
         .expect("extract");
         assert_eq!(back, payload);
@@ -2799,6 +2846,7 @@ mod tests {
             Some("pw"),
             None,
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &Control::none(),
         )
         .expect("probe");
 
@@ -2815,6 +2863,7 @@ mod tests {
             &params,
             SafetyPolicy::default(),
             Freshness::Random,
+            &Control::none(),
         )
         .expect("embed at the reported ceiling");
         let back = extract_png(
@@ -2824,6 +2873,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            &Control::none(),
         )
         .expect("extract");
         assert_eq!(back, payload, "three-channel payload must round-trip");
@@ -2948,6 +2998,7 @@ mod tests {
             &params,
             SafetyPolicy::default(),
             Freshness::Random,
+            &Control::none(),
         )
         .expect("embed with private profile");
 
@@ -2959,6 +3010,7 @@ mod tests {
             &private_spatial,
             &HillCostModel,
             &params,
+            &Control::none(),
         )
         .expect("extract with matching private profile");
         assert_eq!(extracted, payload);
@@ -2971,6 +3023,7 @@ mod tests {
             &crate::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
+            &Control::none(),
         );
         assert!(
             matches!(official_err, Err(StrHideError::NoHiddenData(_))),
@@ -2988,6 +3041,7 @@ mod tests {
             &params,
             SafetyPolicy::default(),
             Freshness::Random,
+            &Control::none(),
         )
         .expect("official embed");
 
@@ -2998,6 +3052,7 @@ mod tests {
             &private_spatial,
             &HillCostModel,
             &params,
+            &Control::none(),
         );
         assert!(
             matches!(private_err, Err(StrHideError::NoHiddenData(_))),

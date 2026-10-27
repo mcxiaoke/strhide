@@ -267,8 +267,12 @@ pub mod heif_bridge {
         let orig_bytes = fs::read(sample_path).expect("read original HEIC");
 
         // 1. Probe capacity
-        let cap = probe_heif_bridge_capacity(&orig_bytes, &BridgeOptions::new(&profile.stego))
-            .expect("probe bridge capacity");
+        let cap = probe_heif_bridge_capacity(
+            &orig_bytes,
+            &BridgeOptions::new(&profile.stego),
+            &strhide::core::control::Control::none(),
+        )
+        .expect("probe bridge capacity");
         assert_eq!(cap.format, "HEIF (JPEG Thumbnail Bridge)");
         assert!(
             cap.available_slots > 500,
@@ -282,6 +286,7 @@ pub mod heif_bridge {
             &orig_bytes,
             payload,
             &BridgeOptions::new(&profile.stego).with_password("bridge_pass_2026"),
+            &strhide::core::control::Control::none(),
         )
         .expect("embed carrier into HEIF thumbnail bridge");
 
@@ -299,6 +304,7 @@ pub mod heif_bridge {
             &stego_bytes,
             &BridgeOptions::new(&profile.stego).with_password("bridge_pass_2026"),
             &ExtractParams::default(),
+            &strhide::core::control::Control::none(),
         )
         .expect("extract with correct password");
         assert_eq!(
@@ -311,6 +317,7 @@ pub mod heif_bridge {
             &stego_bytes,
             &BridgeOptions::new(&profile.stego).with_password("wrong_password"),
             &ExtractParams::default(),
+            &strhide::core::control::Control::none(),
         );
         assert!(
             matches!(wrong_res, Err(StrHideError::NoHiddenData(_))),
@@ -383,6 +390,7 @@ pub mod heif_bridge {
             &stego,
             &BridgeOptions::new(&profile.stego).with_password("scheme_c_priority"),
             &ExtractParams::default(),
+            &strhide::core::control::Control::none(),
         );
         assert!(
             matches!(bridge, Err(StrHideError::NoHiddenData(_))),
@@ -478,6 +486,7 @@ pub mod heif_bridge {
             &orig_bytes,
             payload,
             &BridgeOptions::new(&profile.stego).with_password("fidelity_pw"),
+            &strhide::core::control::Control::none(),
         )
         .expect("embed");
 
@@ -633,6 +642,7 @@ pub mod hevc_stego {
                 Some(password),
                 None,
                 &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+                &strhide::core::control::Control::none(),
             )
             .expect("extract");
             assert_eq!(extracted, payload);
@@ -670,6 +680,7 @@ pub mod hevc_stego {
             Some(password),
             None,
             &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+            &strhide::core::control::Control::none(),
         )
         .expect("extract 32k from IMG_1842");
         assert_eq!(extracted, payload, "Payload must match bit-for-bit!");
@@ -1506,6 +1517,7 @@ pub mod hevc_external {
                 &strhide::stego::format::DEFAULT_HEVC_FORMAT,
                 SafetyLevel::High,
                 true,
+                &strhide::core::control::Control::none(),
             ) {
                 Ok(info) => info,
                 Err(e) => {
@@ -1977,6 +1989,7 @@ pub mod mp4_container {
                 Some(PASSWORD),
                 None,
                 &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+                &strhide::core::control::Control::none(),
             )
             .unwrap_or_else(|e| panic!("{name}: extract failed: {e}"));
             assert_eq!(recovered, payload, "{name}: round-trip must be byte-exact");

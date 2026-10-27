@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use strhide::core::control::Control;
 use strhide::stego::format::DEFAULT_JPEG_FORMAT;
 use strhide::stego::jpeg::cost::{JuniwardCostModel, UerdCostModel};
 use strhide::stego::jpeg::engine::{embed_jpeg, extract_jpeg};
@@ -205,6 +206,7 @@ fn profile_png_with_model(
         &png_params,
         strhide::stego::SafetyPolicy::default(),
         strhide::stego::Freshness::Random,
+        &Control::none(),
     ) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -242,6 +244,7 @@ fn profile_png_with_model(
         &strhide::stego::format::OFFICIAL_PNG_FORMAT,
         model,
         &png_params,
+        &Control::none(),
     ) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -385,6 +388,7 @@ fn profile_jpeg_with_model(
         strhide::stego::SafetyPolicy::default(),
         model,
         strhide::stego::Freshness::Random,
+        &Control::none(),
     ) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -419,6 +423,7 @@ fn profile_jpeg_with_model(
         None,
         &DEFAULT_JPEG_FORMAT,
         &ExtractParams::default(),
+        &Control::none(),
     ) {
         Ok(bytes) => bytes,
         Err(e) => {

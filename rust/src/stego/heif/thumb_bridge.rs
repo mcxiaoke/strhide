@@ -7,6 +7,7 @@
 
 use std::convert::TryInto;
 
+use crate::core::control::Control;
 use crate::errors::StrHideError;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::jpeg;
@@ -79,6 +80,7 @@ pub fn embed_heif_bridge(
     carrier_bytes: &[u8],
     payload: &[u8],
     bridge: &BridgeOptions<'_>,
+    control: &Control<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
     let target = find_bridge_target(carrier_bytes)?;
     let carrier_slice = &carrier_bytes[target.file_offset..target.file_offset + target.length];
@@ -103,6 +105,7 @@ pub fn embed_heif_bridge(
                 bridge.safety,
                 &*tuning.jpeg_model,
                 bridge.freshness,
+                control,
             )?;
             reconstruct_heif(carrier_bytes, &target, &stego_bytes)
         }
@@ -117,6 +120,7 @@ pub fn embed_heif_bridge(
                 &tuning.png_params,
                 bridge.safety,
                 bridge.freshness,
+                control,
             )?;
             reconstruct_heif(carrier_bytes, &target, &stego_bytes)
         }
@@ -132,6 +136,7 @@ pub fn extract_heif_bridge(
     carrier_bytes: &[u8],
     bridge: &BridgeOptions<'_>,
     limits: &ExtractParams,
+    control: &Control<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
     let target = match find_bridge_target(carrier_bytes) {
         Ok(t) => t,
@@ -157,6 +162,7 @@ pub fn extract_heif_bridge(
             domain,
             bridge.dialect.jpeg_format(),
             limits,
+            control,
         ),
         BridgeTargetKind::DirectSpatial { .. } => png::extract_png(
             carrier_slice,
@@ -165,6 +171,7 @@ pub fn extract_heif_bridge(
             bridge.dialect.png_format(),
             &*tuning.png_model,
             &tuning.png_params,
+            control,
         ),
     }
 }
@@ -173,6 +180,7 @@ pub fn extract_heif_bridge(
 pub fn probe_heif_bridge_capacity(
     carrier_bytes: &[u8],
     bridge: &BridgeOptions<'_>,
+    control: &Control<'_>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let target = find_bridge_target(carrier_bytes)?;
     let carrier_slice = &carrier_bytes[target.file_offset..target.file_offset + target.length];
@@ -190,6 +198,7 @@ pub fn probe_heif_bridge_capacity(
                 &tuning.jpeg_params,
                 bridge.safety.level,
                 bridge.dialect.jpeg_format(),
+                control,
             )?;
             info.format = "HEIF (JPEG Thumbnail Bridge)".into();
             Ok(info)
@@ -203,6 +212,7 @@ pub fn probe_heif_bridge_capacity(
                 secret,
                 domain,
                 bridge.dialect.png_format(),
+                control,
             )?;
             info.format = "HEIF (Uncompressed Item Bridge)".into();
             Ok(info)

@@ -21,6 +21,7 @@
 //! Everything the demo prints is asserted, so it doubles as a test of the
 //! public surface a private build actually needs.
 
+use strhide::core::control::Control;
 use strhide::errors::StrHideError;
 use strhide::stego::format::{DEFAULT_JPEG_FORMAT, JpegFormatProfile};
 use strhide::stego::jpeg::cost::UerdCostModel;
@@ -68,6 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         strhide::stego::SafetyPolicy::default(),
         &cost,
         strhide::stego::Freshness::Random,
+        &Control::none(),
     )?;
     println!(
         "embedded {} bytes, {} -> {} bytes",
@@ -83,6 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         &ACME_FORMAT,
         &ExtractParams::default(),
+        &Control::none(),
     )?;
     assert_eq!(recovered, payload);
     println!("private profile: payload recovered");
@@ -95,6 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         &DEFAULT_JPEG_FORMAT,
         &ExtractParams::default(),
+        &Control::none(),
     ) {
         Err(StrHideError::NoHiddenData(_)) => {
             println!("official profile: NoHiddenData (indistinguishable from 'empty')");
@@ -113,6 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         strhide::stego::SafetyPolicy::default(),
         &cost,
         strhide::stego::Freshness::Random,
+        &Control::none(),
     )?;
     assert!(
         extract_jpeg(
@@ -120,7 +125,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(password),
             None,
             &ACME_FORMAT,
-            &ExtractParams::default()
+            &ExtractParams::default(),
+            &Control::none(),
         )
         .is_err()
     );

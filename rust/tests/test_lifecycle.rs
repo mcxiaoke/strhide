@@ -20,6 +20,8 @@ pub mod common;
 
 #[path = "test_lifecycle/api_bytes.rs"]
 mod api_bytes;
+#[path = "test_lifecycle/cancellation.rs"]
+mod cancellation;
 #[path = "test_lifecycle/compact_meta.rs"]
 mod compact_meta;
 #[path = "test_lifecycle/facade.rs"]

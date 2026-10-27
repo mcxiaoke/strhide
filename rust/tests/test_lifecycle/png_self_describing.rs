@@ -16,6 +16,7 @@
 //! 2. the feature word carries the model's wire id, and extraction follows the
 //!    carrier's declaration rather than the caller's guess.
 
+use strhide::core::control::Control;
 use strhide::core::payload::Payload;
 use strhide::stego::png::engine::{SPATIAL_ELIGIBLE_MAX, SPATIAL_ELIGIBLE_MIN};
 use strhide::stego::png::{RawImage, decode_png, encode_png};
@@ -145,6 +146,7 @@ fn extraction_follows_the_carrier_not_the_caller() {
         &strhide::stego::format::OFFICIAL_PNG_FORMAT,
         &ImpostorModel,
         &PngParams::default(),
+        &Control::none(),
     )
     .expect("extraction must use the carrier's declared model");
     assert_eq!(got, payload);

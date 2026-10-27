@@ -21,6 +21,7 @@ use rand::{RngExt, SeedableRng};
 use rayon::prelude::*;
 
 use strhide::analysis::scan_file;
+use strhide::core::control::Control;
 use strhide::stego::format::DEFAULT_JPEG_FORMAT;
 use strhide::stego::jpeg::cost::UerdCostModel;
 use strhide::stego::jpeg::engine::{
@@ -95,7 +96,7 @@ fn eval_png(png_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::er
 
         // Probe capacity and decode cover
         let default_spatial = PngParams::default();
-        let cap = match probe_png_capacity(&carrier_bytes, &HillCostModel, &default_spatial, strhide::stego::SafetyLevel::High, None, None, &strhide::stego::format::OFFICIAL_PNG_FORMAT) {
+        let cap = match probe_png_capacity(&carrier_bytes, &HillCostModel, &default_spatial, strhide::stego::SafetyLevel::High, None, None, &strhide::stego::format::OFFICIAL_PNG_FORMAT, &Control::none()) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[SKIP] Capacity probe failed on {}: {e}", carrier_name);
@@ -141,7 +142,7 @@ fn eval_png(png_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::er
                 };
 
                 let started_embed = Instant::now();
-                let embed_res = embed_png(&carrier_bytes, &payload, Some(TEST_PASSWORD), None, &strhide::stego::format::OFFICIAL_PNG_FORMAT, &HillCostModel, &params, strhide::stego::SafetyPolicy::default(), strhide::stego::Freshness::Random);
+                let embed_res = embed_png(&carrier_bytes, &payload, Some(TEST_PASSWORD), None, &strhide::stego::format::OFFICIAL_PNG_FORMAT, &HillCostModel, &params, strhide::stego::SafetyPolicy::default(), strhide::stego::Freshness::Random, &Control::none());
                 let embed_ms = started_embed.elapsed().as_millis();
 
                 match embed_res {
@@ -170,7 +171,7 @@ fn eval_png(png_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::er
 
                         // Extract verification
                         let started_ext = Instant::now();
-                        let ext_res = extract_png(&stego_bytes, Some(TEST_PASSWORD), None, &strhide::stego::format::OFFICIAL_PNG_FORMAT, &HillCostModel, &PngParams::default());
+                        let ext_res = extract_png(&stego_bytes, Some(TEST_PASSWORD), None, &strhide::stego::format::OFFICIAL_PNG_FORMAT, &HillCostModel, &PngParams::default(), &Control::none());
                         let extract_ms = started_ext.elapsed().as_millis();
                         let verify_ok = match ext_res {
                             Ok(recovered) => recovered == payload,
@@ -251,7 +252,7 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
         };
 
         let default_jpeg = JpegParams::default();
-        let cap = match probe_jpeg_capacity(&carrier_bytes, &UerdCostModel, &default_jpeg, strhide::stego::SafetyLevel::High, &strhide::stego::format::DEFAULT_JPEG_FORMAT) {
+        let cap = match probe_jpeg_capacity(&carrier_bytes, &UerdCostModel, &default_jpeg, strhide::stego::SafetyLevel::High, &strhide::stego::format::DEFAULT_JPEG_FORMAT, &Control::none()) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[SKIP] JPEG capacity probe failed on {}: {e}", carrier_name);
@@ -314,7 +315,7 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
                     .unwrap_or(0);
 
                 let started_embed = Instant::now();
-                let embed_res = embed_jpeg(&carrier_bytes, &payload, Some(TEST_PASSWORD), None, &DEFAULT_JPEG_FORMAT, &params, strhide::stego::SafetyPolicy::default(), &UerdCostModel, strhide::stego::Freshness::Random);
+                let embed_res = embed_jpeg(&carrier_bytes, &payload, Some(TEST_PASSWORD), None, &DEFAULT_JPEG_FORMAT, &params, strhide::stego::SafetyPolicy::default(), &UerdCostModel, strhide::stego::Freshness::Random, &Control::none());
                 let embed_ms = started_embed.elapsed().as_millis();
 
                 match embed_res {
@@ -347,6 +348,7 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
                             None,
                             &DEFAULT_JPEG_FORMAT,
                             &ExtractParams::default(),
+                                                    &Control::none(),
                         );
                         let extract_ms = started_ext.elapsed().as_millis();
                         let verify_ok = match ext_res {

@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 use rusty_h265::Decoder;
+use strhide::core::control::Control;
 use strhide::stego::hevc::heif_boxes::parse_heif_targets;
 use strhide::stego::hevc::{embed_hevc, extract_hevc, probe_hevc_capacity};
 
@@ -269,6 +270,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(password),
                     None,
                     &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+                    &Control::none(),
                 ) {
                     Ok(d) => d,
                     Err(e) => {
@@ -292,6 +294,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some("InvalidPassword!"),
                     None,
                     &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+                    &Control::none(),
                 );
                 assert!(
                     wrong_res.is_err(),

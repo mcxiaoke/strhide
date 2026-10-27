@@ -20,6 +20,7 @@
 
 use std::time::Instant;
 
+use strhide::core::control::Control;
 use strhide::stego::params::{PngParams, StegoCodec};
 use strhide::stego::png::cost::HillCostModel;
 use strhide::stego::png::engine::{decode_png, embed_png, extract_png};
@@ -87,6 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &params,
             strhide::stego::SafetyPolicy::default(),
             strhide::stego::Freshness::Random,
+            &Control::none(),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -116,6 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &strhide::stego::format::OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &PngParams::default(),
+            &Control::none(),
         )?;
         let ok = recovered == payload;
         let bits = payload.len() * 8;

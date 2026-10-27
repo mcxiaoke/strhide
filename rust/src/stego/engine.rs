@@ -133,6 +133,7 @@ impl StegoEngine for PngEngine {
                 secret,
                 domain,
                 dialect.png_format(),
+                &opts.control,
             )
         })
     }
@@ -160,6 +161,7 @@ impl StegoEngine for PngEngine {
                 &resolved.png_params,
                 opts.safety,
                 opts.freshness,
+                &opts.control,
             )
         })?;
         Ok(EmbedOutput::bytes_only(bytes))
@@ -188,6 +190,7 @@ impl StegoEngine for PngEngine {
                 dialect.png_format(),
                 &*model,
                 &params,
+                &opts.control,
             )
         })?;
         Ok(Payload::owned(bytes))
@@ -218,6 +221,7 @@ impl StegoEngine for JpegEngine {
                 &resolved.jpeg_params,
                 opts.safety.level,
                 dialect.jpeg_format(),
+                &opts.control,
             )
         })
     }
@@ -250,6 +254,7 @@ impl StegoEngine for JpegEngine {
                 opts.safety,
                 &*resolved.jpeg_model,
                 opts.freshness,
+                &opts.control,
             )
         })?;
         Ok(EmbedOutput::bytes_only(bytes))
@@ -273,6 +278,7 @@ impl StegoEngine for JpegEngine {
                 domain,
                 dialect.jpeg_format(),
                 &opts.limits,
+                &opts.control,
             )
         })?;
         Ok(Payload::owned(bytes))
@@ -301,6 +307,7 @@ fn hevc_embed(
             dialect.hevc_format(),
             opts.freshness,
             opts.safety,
+            &opts.control,
         )
     };
 
@@ -336,6 +343,7 @@ fn hevc_embed(
                     safety: opts.safety,
                     freshness: opts.freshness,
                 },
+                &opts.control,
             )?;
             Ok(EmbedOutput::bytes_only(bridge))
         }
@@ -352,8 +360,15 @@ fn hevc_extract(
     let domain = opts.domain(dialect);
     opts.control.check()?;
 
-    let direct =
-        || crate::stego::hevc::extract_hevc(carrier, secret, domain, dialect.hevc_format());
+    let direct = || {
+        crate::stego::hevc::extract_hevc(
+            carrier,
+            secret,
+            domain,
+            dialect.hevc_format(),
+            &opts.control,
+        )
+    };
 
     if format != FileFormat::Heif {
         return Ok(Payload::owned(with_pool(opts.pool.as_ref(), direct)?));
@@ -368,6 +383,7 @@ fn hevc_extract(
                     .with_password(opts.password.unwrap_or_default())
                     .with_domain(opts.domain.unwrap_or_default()),
                 &opts.limits,
+                &opts.control,
             ) {
                 Ok(payload) => Ok(Payload::owned(payload)),
                 // A Scheme C authentication failure means the carrier really
@@ -402,6 +418,7 @@ fn hevc_probe(
             dialect.hevc_format(),
             opts.safety.level,
             opts.exact,
+            &opts.control,
         )
     };
 
@@ -425,6 +442,7 @@ fn hevc_probe(
                 safety: opts.safety,
                 freshness: crate::stego::envelope::Freshness::Random,
             },
+            &opts.control,
         ),
     }
 }

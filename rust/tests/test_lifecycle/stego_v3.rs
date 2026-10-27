@@ -10,6 +10,8 @@
 //! two independent implementations must agree, otherwise carriers written today
 //! stop decoding tomorrow.
 
+use strhide::core::control::Control;
+
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -631,6 +633,7 @@ fn v3_newer_minor_version_is_accepted() {
         strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
+        &Control::none(),
     )
     .expect("embed with minor=7");
 
@@ -658,6 +661,7 @@ fn v3_other_major_version_is_not_decodable() {
         strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
+        &Control::none(),
     )
     .expect("embed with major=2");
     // The other build's header is located by a different label set, so the
@@ -700,6 +704,7 @@ fn v3_extensions_roundtrip_and_skip_unknowns() {
         strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
+        &Control::none(),
     )
     .expect("embed with extensions");
     let raw = read_superblock(&stego, password);
@@ -732,6 +737,7 @@ fn v3_unknown_critical_extension_is_rejected() {
         strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
+        &Control::none(),
     )
     .expect("embed with critical extension");
     let err = extract_carrier(&stego, &write_opts(password).extract_options()).unwrap_err();
@@ -764,6 +770,7 @@ fn v3_malformed_extension_area_is_reported() {
         strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
+        &Control::none(),
     )
     .expect("embed");
 
@@ -814,6 +821,7 @@ fn v3_suite_matrix_roundtrips() {
             strhide::stego::SafetyPolicy::default(),
             &UerdCostModel,
             strhide::stego::Freshness::Random,
+            &Control::none(),
         )
         .unwrap_or_else(|e| panic!("suite {suite_id}: embed failed: {e}"));
         let raw = read_superblock_with_suite(&stego, &password, suite_id);
@@ -843,6 +851,7 @@ fn v3_extract_policy_can_exclude_a_suite() {
         strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
+        &Control::none(),
     )
     .expect("embed suite 2");
 
@@ -1036,6 +1045,7 @@ fn v3_capacity_probe_is_tight() {
         &params,
         SafetyLevel::High,
         &strhide::stego::format::DEFAULT_JPEG_FORMAT,
+        &Control::none(),
     )
     .expect("probe");
     assert!(cap.available_slots > 0);
@@ -1052,6 +1062,7 @@ fn v3_capacity_probe_is_tight() {
         strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
+        &Control::none(),
     )
     .expect("probe maximum must embed");
     let recovered = extract_jpeg(
@@ -1060,6 +1071,7 @@ fn v3_capacity_probe_is_tight() {
         None,
         &DEFAULT_JPEG_FORMAT,
         &ExtractParams::default(),
+        &Control::none(),
     )
     .expect("extract");
     assert_eq!(recovered, exact);
@@ -1075,7 +1087,8 @@ fn v3_capacity_probe_is_tight() {
             &params,
             strhide::stego::SafetyPolicy::default(),
             &UerdCostModel,
-            strhide::stego::Freshness::Random
+            strhide::stego::Freshness::Random,
+            &Control::none(),
         )
         .is_err(),
         "one payload step above the maximum must fail"
@@ -1103,6 +1116,7 @@ fn v3_extraction_ignores_the_embed_side_budget() {
         strhide::stego::SafetyPolicy::default(),
         &UerdCostModel,
         strhide::stego::Freshness::Random,
+        &Control::none(),
     )
     .expect("embed with a tiny budget");
 

@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use rusty_h265::Decoder;
+use strhide::core::control::Control;
 use strhide::stego::hevc::heif_boxes::parse_heif_targets;
 use strhide::stego::hevc::{embed_hevc, extract_hevc, probe_hevc_capacity};
 
@@ -77,6 +78,7 @@ fn test_hevc_capacity_and_roundtrip_gradient() {
             Some(password),
             None,
             &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+            &Control::none(),
         )
         .expect("extract with correct password should succeed");
         assert_eq!(extracted, payload, "Extracted payload must match 100%!");
@@ -87,6 +89,7 @@ fn test_hevc_capacity_and_roundtrip_gradient() {
             Some("WrongPassword!"),
             None,
             &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+            &Control::none(),
         );
         assert!(
             wrong_res.is_err(),
@@ -158,6 +161,7 @@ fn test_hevc_annexb_roundtrip_from_heic_nals() {
         Some(password),
         None,
         &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+        &Control::none(),
     )
     .expect("extract with the correct password must succeed");
     assert_eq!(extracted, payload, "Annex-B round trip must be exact");
@@ -167,6 +171,7 @@ fn test_hevc_annexb_roundtrip_from_heic_nals() {
         Some("WrongPassword!"),
         None,
         &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+        &Control::none(),
     );
     assert!(wrong.is_err(), "wrong password must be rejected");
 }
@@ -204,6 +209,7 @@ fn test_hevc_annexb_short_slice_header_roundtrip() {
         Some(password),
         None,
         &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+        &Control::none(),
     )
     .expect("correct password must extract a short-slice-header carrier");
     assert_eq!(extracted, payload);
@@ -246,6 +252,7 @@ fn test_hevc_capacity_is_reachable() {
             Some("capacity-check"),
             None,
             &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+            &Control::none(),
         )
         .unwrap_or_else(|e| {
             panic!("{file_path}: extracting the full-capacity carrier failed: {e}")

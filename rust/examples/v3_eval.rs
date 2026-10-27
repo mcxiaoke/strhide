@@ -20,6 +20,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use strhide::core::control::Control;
 use strhide::stego::format::DEFAULT_JPEG_FORMAT;
 use strhide::stego::jpeg::cost::UerdCostModel;
 use strhide::stego::jpeg::engine::{embed_jpeg, extract_jpeg, layout_for_payload};
@@ -147,6 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 strhide::stego::SafetyPolicy::default(),
                 &UerdCostModel,
                 strhide::stego::Freshness::Random,
+                &Control::none(),
             ) else {
                 continue;
             };
@@ -157,6 +159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None,
                 &DEFAULT_JPEG_FORMAT,
                 &ExtractParams::default(),
+                &Control::none(),
             )?;
             assert_eq!(recovered, payload, "roundtrip failed for {path:?}");
 

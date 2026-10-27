@@ -35,6 +35,7 @@
 use dct_io::JpegCoefficients;
 use sha2::{Digest, Sha256};
 
+use crate::core::control::{Control, Stage};
 use crate::errors::StrHideError;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::coding::{Move, StcTrellis};
@@ -567,9 +568,12 @@ pub fn embed_jpeg(
     safety: crate::stego::params::SafetyPolicy,
     cost_model: &dyn JpegCostModel,
     freshness: Freshness,
+    control: &Control<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
     fmt.validate()?;
     params.validate()?;
+    control.stage(Stage::Decode);
+    control.check()?;
     let suite = fmt.suite(params.cipher_suite).ok_or_else(|| {
         StrHideError::UnsupportedVersion(format!(
             "Cipher suite {} is not implemented by this build (known: {:?})",
@@ -595,6 +599,10 @@ pub fn embed_jpeg(
     )
     .map_err(map_dct_error)?;
     let costs = cost_model.compute_cost(&coeffs, &geometry, params);
+    // Checkpoint after the cost map; the trellis solve is the last long phase
+    // and there is no safe way to stop it half-way that the reader could see.
+    control.check()?;
+    control.stage(Stage::Solve);
     if costs.len() != cover.block_count * 64 {
         return Err(StrHideError::General("JPEG cost dimension mismatch".into()));
     }
@@ -634,6 +642,10 @@ pub fn embed_jpeg(
     let mut work = coeffs.clone();
     let mut last_error = None;
     for attempt_idx in 1..=EMBED_ATTEMPTS {
+        // Checkpoint per attempt: embed_once ends in dct_io::write_coefficients,
+        // past which the output exists and stopping would only waste the work.
+        control.check()?;
+        control.stage(Stage::Encode);
         let mut applied: Vec<(u32, i8)> = Vec::new();
         match embed_once(
             carrier_bytes,
@@ -1040,10 +1052,12 @@ pub fn extract_jpeg(
     domain: Option<&str>,
     fmt: &JpegFormatProfile,
     extract: &ExtractParams,
+    control: &Control<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
     fmt.validate()?;
     preflight_jpeg(carrier_bytes)?;
     let coeffs = dct_io::read_coefficients(carrier_bytes).map_err(map_dct_error)?;
+    control.check()?;
     if coeffs.components.is_empty() {
         return Err(StrHideError::NoHiddenData("JPEG has no components".into()));
     }
@@ -1065,6 +1079,7 @@ pub fn extract_jpeg(
     // Trial enumeration: ascending suite id, one KDF per attempt. A wrong
     // password and a non-carrier both end here, with the same error.
     for suite in fmt.suites {
+        control.check()?;
         if !extract.allows_suite(suite.id) {
             continue;
         }
@@ -1266,9 +1281,11 @@ pub fn probe_jpeg_capacity(
     params: &JpegParams,
     safety_level: crate::stego::SafetyLevel,
     fmt: &JpegFormatProfile,
+    control: &Control<'_>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     fmt.validate()?;
     params.validate()?;
+    control.check()?;
     let preflight = preflight_jpeg(carrier_bytes)?;
     let info = preflight.info;
     let geom = crate::stego::jpeg::geometry::component_geometry(&info, 0, 0);
