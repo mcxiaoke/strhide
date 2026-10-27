@@ -589,6 +589,20 @@ impl StrHideError { pub fn detail_i18n(&self) -> ErrorDetail; }   // GUI 用它 
 2. `inspect` / `verify` 双域、`read`/`extract` 互助提示与 `--auto`；`InspectResult` 移除 `content_stego_capacity`。
 3. 验收：新增 CLI 集成测试 4 类载体 × 双域 ×（正确密码 / 错误密码 / 无密码）。
 
+> **阶段 3 验收与收尾（2026-10-27 19:23）**
+>
+> **已完成（批次 1–4 提交）**：
+> - 批次 1 (`6c67340`)：微头线格式（`MICRO_TAG_TEXT_OR_RAW = 0x00` 与 `MICRO_TAG_FILE = 0x01`）+ 原文件名安全净化与保留 + `Payload` 全链路打通 + HEVC/JPEG/PNG/HEIF-Bridge 统一支持微头；
+> - 批次 2 (`e246e97`)：`structure/engine.rs` 彻底清除内容域反向探查代码与 `InspectResult.content_stego_capacity` / `media_info`，结构域纯正化；
+> - 批次 3 (`51e5bac`)：`StegoEngine` trait 补齐 `inspect` 与 `verify`，5 个内容引擎（PNG、JPEG、HEIF、MP4、AnnexB）及缩略图桥接全量实现三级诊断校验；暴露顶层门面函数；
+> - 批次 4 (`6a3d2b7`)：CLI 双域诊断聚合（`DualInspectResult` / `DualVerifyResult`）、跨域互助提示（结构域/内容域交叉误用指导）与 `--auto` 智能提取；
+> - **硬性验收全绿**：
+>   1. `python scripts/baseline_hash.py --check`：**58/58 例与基线完全一致**（结构域还原逐字节一致，内容域哈希一致）；
+>   2. `cargo test --all-features local_ -- --ignored`：**23 项重型语料测试全绿**（耗时 193 s，包含长视频 HEVC、真实 HEIF 照片、V3 JPEG 语料、STC 矩阵求解与 FFmpeg PSNR 校验）；
+>   3. `cargo test --all-features --all-targets` 全部通过；
+>   4. 4 条独立最小构建（`--no-default-features`、`structure`、`content`、`analysis`）全部编译通过；
+>   5. `cargo fmt --check` 与 `cargo clippy --all-targets --all-features -- -D warnings` 零告警通过。
+
 ### 阶段 4：门面 + 结果结构化 + CLI 收尾（4–5 人日）
 
 1. `facade` 去门控、`.structure()` / `.stego()`；**新建 `ReadOptions` / `RestoreOptions`**；`Profile` → `Dialect`。
