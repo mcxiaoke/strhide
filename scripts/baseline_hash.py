@@ -170,6 +170,17 @@ def load_json_block(stdout: str) -> dict | None:
         return None
 
 
+def strategy_name(value) -> str | None:
+    """The strategy's registry name, whatever shape the CLI reports.
+
+    Stage 4 turned `strategy` from a bare string into `{id, name}`; the baseline
+    records the *name* either way, so a frozen baseline stays comparable.
+    """
+    if isinstance(value, dict):
+        return value.get("name")
+    return value
+
+
 def capacity_pairs(inspect: dict | None) -> list[list] | None:
     if not inspect:
         return None
@@ -228,7 +239,7 @@ def structure_pass(bin_path: Path, orig: Path, work: Path, timeout: int) -> dict
     inspect = load_json_block(out) if code == 0 else None
     if inspect:
         result["format"] = inspect.get("format")
-        result["strategy"] = inspect.get("strategy")
+        result["strategy"] = strategy_name(inspect.get("strategy"))
         result["ube_total_size"] = inspect.get("ube_total_size")
         result["strategy_capacities"] = capacity_pairs(inspect)
 
