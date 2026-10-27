@@ -106,6 +106,17 @@ pub enum StrHideError {
     #[error("Unsupported version: {0}")]
     UnsupportedVersion(String),
 
+    /// The caller asked to stop through a
+    /// [`CancelToken`](crate::core::control::CancelToken), and the engine
+    /// stopped at its next checkpoint.
+    ///
+    /// Not a failure: no output was committed and the carrier is untouched.
+    /// A dedicated variant (rather than [`General`](Self::General)) so a GUI can
+    /// tell "the user pressed cancel" from "this went wrong" without matching
+    /// on message text.
+    #[error("Operation cancelled")]
+    Cancelled,
+
     /// Any other user-facing failure: internal invariants, invalid arguments,
     /// unsupported strategy for the detected format, output path problems.
     #[error("{0}")]
@@ -157,6 +168,9 @@ impl StrHideError {
                 Some(crate::core::i18n::Msg::ErrUnsupported)
             }
             StrHideError::TrellisInfeasible { .. } => Some(crate::core::i18n::Msg::ErrUnsupported),
+            // A cancellation is the caller's own decision, not an error class:
+            // there is nothing to translate and nothing went wrong.
+            StrHideError::Cancelled => None,
             StrHideError::NoHiddenData(_) | StrHideError::General(_) => None,
         }
     }
@@ -175,6 +189,7 @@ impl StrHideError {
             | StrHideError::NoHiddenData(s)
             | StrHideError::General(s) => s.clone(),
             StrHideError::TrellisInfeasible { detail, .. } => detail.clone(),
+            StrHideError::Cancelled => "Operation cancelled".into(),
             StrHideError::PasswordWithHint { message, hint } => match hint {
                 Some(h) => format!("{message}. Hint: '{h}'."),
                 None => message.clone(),
