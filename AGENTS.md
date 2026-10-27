@@ -22,6 +22,14 @@ cargo test local_ -- --ignored # 单独运行本地批量测试（约 3 分钟�
 cargo fmt && cargo clippy   # 提交前格式化并修复所有 lint
 ```
 
+### 字节级基线（架构重构期间必跑）
+
+```bash
+python scripts/baseline_hash.py --check   # 与 temp/baseline/baseline.json 逐例比对
+```
+
+冻结/重建基线用 `--write`。它跑 `rust/tests/fixtures`、`rust/tests/assets`、`temp/testhevc` 共 58 例的 write/read/restore 与 embed/extract，比对策略、信封大小、还原 sha256 与容量数字；内容域用固定 `--seed` 驱动，连 stego 产物字节（sha256）一起比，结构域信封 nonce 随机、只比大小与还原。依赖 gitignored 语料，只在本地跑，不进 CI。改动任何解析/注入路径后必须 `--check` 全绿。
+
 **本地批测的内存峰值约 12 GB**：`embed_hevc` 会把每个切片的全部 CABAC bin 留在内存里用于磁带回放，一个 13.6 s 的 1080p60 视频就是 3.8 亿 bin（单个视频门限测试单独占用约 12 GB、116 s）。并行跑没问题，但不要在跑批测的同时开其它吃内存的进程——被 swap 拖住时表现和"死锁"很像。
 
 排障提示：跑重测试时把日志重定向到文件再轮询，不要只看终端——`cargo test` 的进度只在测试结束时打印。

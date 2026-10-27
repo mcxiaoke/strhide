@@ -664,3 +664,65 @@ fn embed_safety_tiers_probe_and_enforcement() {
     let extracted = fs::read(dir.join("extracted.bin")).unwrap();
     assert_eq!(extracted, payload);
 }
+
+/// `--seed` must make a content-domain embed byte-reproducible.
+///
+/// Without it the salt/nonce come from fresh randomness, so the same carrier
+/// and payload never produce the same file twice — which is why the refactor
+/// baseline harness (`scripts/baseline_hash.py`) drives every embed with a
+/// fixed seed and compares the stego bytes, not just their size.
+#[test]
+fn embed_seed_is_reproducible_and_seed_dependent() {
+    let dir = scratch("unify_embed_seed");
+    seed_stego(&dir, &["a.png"]);
+
+    const SEED: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    const OTHER_SEED: &str = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100";
+
+    let embed = |out: &str, extra: &[&str]| {
+        let mut args = vec![
+            "embed",
+            "a.png",
+            "-t",
+            "seed repro",
+            "-o",
+            out,
+            "--no-backup",
+            "--overwrite",
+        ];
+        args.extend_from_slice(extra);
+        run(&dir, &args)
+    };
+
+    let first = embed("one.png", &["--seed", SEED]);
+    assert_eq!(code(&first), 0, "stderr: {}", stderr(&first));
+    let again = embed("two.png", &["--seed", SEED]);
+    assert_eq!(code(&again), 0, "stderr: {}", stderr(&again));
+    assert_eq!(
+        fs::read(dir.join("one.png")).unwrap(),
+        fs::read(dir.join("two.png")).unwrap(),
+        "the same seed must produce a byte-identical carrier"
+    );
+
+    let other = embed("three.png", &["--seed", OTHER_SEED]);
+    assert_eq!(code(&other), 0, "stderr: {}", stderr(&other));
+    assert_ne!(
+        fs::read(dir.join("one.png")).unwrap(),
+        fs::read(dir.join("three.png")).unwrap(),
+        "a different seed must produce a different carrier"
+    );
+
+    // A seeded carrier is still an ordinary carrier: extraction must work.
+    let extract = run(&dir, &["extract", "one.png", "--stdout"]);
+    assert_eq!(code(&extract), 0, "stderr: {}", stderr(&extract));
+    assert_eq!(stdout(&extract).trim(), "seed repro");
+
+    // A malformed seed is rejected instead of being silently padded/hashed.
+    let bad = embed("four.png", &["--seed", "abc"]);
+    assert_eq!(code(&bad), 1);
+    assert!(
+        stderr(&bad).contains("64 hex digits"),
+        "stderr: {}",
+        stderr(&bad)
+    );
+}

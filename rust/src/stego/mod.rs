@@ -20,7 +20,6 @@ pub mod png;
 #[doc(hidden)]
 pub mod prng;
 pub mod registry;
-pub mod sniff;
 pub mod traits;
 #[doc(hidden)]
 pub mod wavelet;
@@ -159,7 +158,7 @@ pub fn embed_carrier_with_profile_info(
                 domain,
                 profile.hevc_format(),
                 options.freshness,
-                options.safety.level,
+                options.safety,
             )
             .map(|(b, info)| (b, Some(info)))
         } else {
@@ -170,9 +169,13 @@ pub fn embed_carrier_with_profile_info(
                 domain,
                 profile.hevc_format(),
                 options.freshness,
-                options.safety.level,
+                options.safety,
             ) {
                 Ok((bytes, info)) => Ok((bytes, Some(info))),
+                // A safety-policy refusal is final: retrying through the
+                // thumbnail bridge would replace it with the bridge's own
+                // "no bridgeable item" error and hide the real reason.
+                Err(e @ StrHideError::SafetyThreshold(_)) => Err(e),
                 Err(_) => heif::embed_heif_bridge(carrier_bytes, payload, options, profile)
                     .map(|b| (b, None)),
             }
@@ -187,7 +190,7 @@ pub fn embed_carrier_with_profile_info(
             domain,
             profile.hevc_format(),
             options.freshness,
-            options.safety.level,
+            options.safety,
         )
         .map(|(b, info)| (b, Some(info)))
     } else if hevc::sniff::is_hevc_annexb(carrier_bytes) {
@@ -199,7 +202,7 @@ pub fn embed_carrier_with_profile_info(
             domain,
             profile.hevc_format(),
             options.freshness,
-            options.safety.level,
+            options.safety,
         )
         .map(|(b, info)| (b, Some(info)))
     } else {

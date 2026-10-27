@@ -153,16 +153,38 @@ impl StrHide {
     }
 
     /// Extract the payload from `carrier`, optionally writing it to `output`.
+    ///
+    /// Refuses to replace an existing destination; use
+    /// [`read_with`](Self::read_with) to allow it.
     pub fn read(
         &self,
         carrier: &Path,
         output: Option<&Path>,
         password: Option<&str>,
     ) -> Result<ReadResult, StrHideError> {
-        read_carrier_with_profile(carrier, output, password, false, &self.profile)
+        self.read_with(carrier, output, password, false)
+    }
+
+    /// Extract the payload, optionally allowing an existing destination to be
+    /// replaced.
+    ///
+    /// `overwrite` is the read-side counterpart of `restore`'s `backup`: both
+    /// were previously hard-coded on the facade (`false`), which forced callers
+    /// that need either behaviour back to the five-parameter free functions.
+    pub fn read_with(
+        &self,
+        carrier: &Path,
+        output: Option<&Path>,
+        password: Option<&str>,
+        overwrite: bool,
+    ) -> Result<ReadResult, StrHideError> {
+        read_carrier_with_profile(carrier, output, password, overwrite, &self.profile)
     }
 
     /// Strip the envelope and restore the original carrier.
+    ///
+    /// Refuses to replace an existing destination; use
+    /// [`restore_with`](Self::restore_with) to allow it.
     pub fn restore(
         &self,
         carrier: &Path,
@@ -170,7 +192,20 @@ impl StrHide {
         password: Option<&str>,
         backup: bool,
     ) -> Result<RemoveResult, StrHideError> {
-        remove_carrier_with_options(carrier, output, password, backup, &self.profile, false)
+        self.restore_with(carrier, output, password, backup, false)
+    }
+
+    /// Strip the envelope and restore the original carrier, optionally
+    /// allowing an existing destination to be replaced.
+    pub fn restore_with(
+        &self,
+        carrier: &Path,
+        output: Option<&Path>,
+        password: Option<&str>,
+        backup: bool,
+        overwrite: bool,
+    ) -> Result<RemoveResult, StrHideError> {
+        remove_carrier_with_options(carrier, output, password, backup, &self.profile, overwrite)
     }
 
     /// Inspect a carrier without modifying it.

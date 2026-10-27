@@ -70,6 +70,16 @@ pub enum StrHideError {
     #[error("Rejection error: {0}")]
     Rejection(String),
 
+    /// The payload is larger than the recommended capacity of the requested
+    /// safety tier while `SafetyEnforcement::Enforced` is in force.
+    ///
+    /// A separate variant rather than [`General`](Self::General) because the
+    /// content domain retries some embeds through a fallback engine (the HEIF
+    /// thumbnail bridge): a policy refusal is final, and must not be replaced
+    /// by the fallback's unrelated "no bridgeable item" error.
+    #[error("Safety threshold exceeded: {0}")]
+    SafetyThreshold(String),
+
     /// [`crate::engine::remove_carrier`] restored a file whose size or SHA-256
     /// does not match the original recorded in the envelope header. This
     /// usually means a second envelope was layered on top and must be removed
@@ -140,7 +150,9 @@ impl StrHideError {
             StrHideError::Password(_) | StrHideError::PasswordWithHint { .. } => {
                 Some(crate::i18n::Msg::ErrPassword)
             }
-            StrHideError::Rejection(_) => Some(crate::i18n::Msg::ErrRejection),
+            StrHideError::Rejection(_) | StrHideError::SafetyThreshold(_) => {
+                Some(crate::i18n::Msg::ErrRejection)
+            }
             StrHideError::RestoreMismatch(_) => Some(crate::i18n::Msg::ErrRestoreMismatch),
             StrHideError::UnsupportedFormat(_) | StrHideError::UnsupportedVersion(_) => {
                 Some(crate::i18n::Msg::ErrUnsupported)
@@ -157,6 +169,7 @@ impl StrHideError {
             StrHideError::CorruptedData(s)
             | StrHideError::Password(s)
             | StrHideError::Rejection(s)
+            | StrHideError::SafetyThreshold(s)
             | StrHideError::RestoreMismatch(s)
             | StrHideError::UnsupportedFormat(s)
             | StrHideError::UnsupportedVersion(s)

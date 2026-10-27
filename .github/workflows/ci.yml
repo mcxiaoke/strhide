@@ -39,7 +39,23 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
       # `--all-targets` compiles the integration tests but does not run the
       # #[ignore]d corpus sweep (`batch_corpus`), which needs external files.
       - name: Test
         run: cargo test --release --locked --all-targets
+
+      # Stage 0 of `docs/strhide_architecture_and_refactoring_plan.md` tracks
+      # the "one domain at a time" build. It is deliberately non-blocking for
+      # now: both builds compile, but the `engine`-only build still emits
+      # dead-code/unused-import warnings (`MAX_CONTENT_STEGO_BYTES`,
+      # `OsString`, `PathBuf`) that stage 1 removes together with the
+      # `structure-base` / `content-*` feature split. Flip this to blocking
+      # once stage 1 lands.
+      - name: Minimal feature builds (stage 0, non-blocking)
+        continue-on-error: true
+        run: |
+          cargo build --no-default-features --features engine
+          cargo build --no-default-features --features stego

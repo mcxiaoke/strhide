@@ -326,6 +326,19 @@ pub struct StegoTuningArgs {
         value_name = "INT"
     )]
     pub stc_h: Option<u8>,
+
+    /// Deterministic embedding seed as 64 hex digits (32 bytes).
+    ///
+    /// Lays the salt/nonce out from the seed instead of fresh randomness, so
+    /// the same carrier + payload + options produce a byte-identical stego
+    /// file. Intended for regression baselines and reproducible bug reports;
+    /// leave it unset for production, where a repeated salt is a liability.
+    #[arg(
+        long = "seed",
+        help_heading = "Fine-Tuning Options",
+        value_name = "HEX64"
+    )]
+    pub seed: Option<String>,
 }
 
 const EMBED_AFTER_HELP: &str = crate::i18n::messages::EMBED_AFTER_HELP_EN;
@@ -1846,7 +1859,34 @@ fn embed_stego_options(
     };
 
     apply_stc_h(&mut options, args.stc_h)?;
+    if let Some(seed_hex) = args.seed.as_deref() {
+        options.freshness = crate::stego::Freshness::Seeded(parse_seed_hex(seed_hex)?);
+    }
     Ok(options)
+}
+
+/// Parse a 64-hex-digit deterministic seed for `--seed`.
+///
+/// A short or non-hex seed is rejected instead of being padded or hashed:
+/// silently deriving a seed from arbitrary text would make two "same" seeds
+/// produce different carriers, which is exactly the failure mode the flag
+/// exists to prevent.
+fn parse_seed_hex(text: &str) -> Result<[u8; 32], StrHideError> {
+    let digits = text.trim();
+    let digits = digits.strip_prefix("0x").unwrap_or(digits);
+    if digits.len() != 64 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(StrHideError::General(
+            "--seed must be exactly 64 hex digits (32 bytes), e.g. \
+             --seed 000102...3e3f"
+                .into(),
+        ));
+    }
+    let mut out = [0u8; 32];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16)
+            .map_err(|e| StrHideError::General(format!("--seed is not valid hex: {e}")))?;
+    }
+    Ok(out)
 }
 
 /// Read-only capacity probe shared by `strhide capacity` and `embed --capacity`.

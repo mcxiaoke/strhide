@@ -305,3 +305,68 @@ fn run_cli_from_content_domain_private_isolation() {
     let extract_private = PRIVATE.run_cli_from(["strhide", "extract", carrier_str, "--stdout"]);
     assert_eq!(extract_private, 0, "private CLI extract must succeed");
 }
+
+// ───────────────────────── structure domain · path ─────────────────────────
+
+/// `read` / `restore` used to hard-code `overwrite = false` on the facade, so a
+/// caller could not replace an existing destination without dropping down to
+/// the five-parameter free functions. Both now have an explicit `_with` form,
+/// and the refusing form must leave the existing file untouched.
+#[test]
+fn structure_read_and_restore_honour_the_overwrite_flag() {
+    use strhide::errors::StrHideError;
+
+    let dir = scratch("facade_overwrite");
+    let engine = StrHide::new();
+    let carrier = dir.join("carrier.png");
+    std::fs::write(&carrier, PNG).expect("seed carrier");
+
+    engine
+        .write(
+            &carrier,
+            PayloadSource::Bytes(STRUCT_PAYLOAD),
+            &WriteOptions::default(),
+        )
+        .expect("write");
+
+    let out = dir.join("payload.bin");
+    std::fs::write(&out, b"stale").expect("seed output");
+
+    let err = engine
+        .read(&carrier, Some(&out), None)
+        .expect_err("read must refuse an existing destination");
+    assert!(
+        matches!(err, StrHideError::Rejection(_)),
+        "expected Rejection, got {err:?}"
+    );
+    assert_eq!(
+        std::fs::read(&out).expect("read back"),
+        b"stale",
+        "a refused read must not truncate the existing file"
+    );
+
+    engine
+        .read_with(&carrier, Some(&out), None, true)
+        .expect("read_with(overwrite)");
+    assert_eq!(std::fs::read(&out).expect("read back"), STRUCT_PAYLOAD);
+
+    let restored = dir.join("restored.png");
+    std::fs::write(&restored, b"stale").expect("seed restore target");
+
+    let err = engine
+        .restore(&carrier, Some(&restored), None, false)
+        .expect_err("restore must refuse an existing destination");
+    assert!(
+        matches!(err, StrHideError::Rejection(_)),
+        "expected Rejection, got {err:?}"
+    );
+
+    engine
+        .restore_with(&carrier, Some(&restored), None, false, true)
+        .expect("restore_with(overwrite)");
+    assert_eq!(
+        std::fs::read(&restored).expect("read back"),
+        PNG,
+        "restored carrier must be bit-identical to the original"
+    );
+}

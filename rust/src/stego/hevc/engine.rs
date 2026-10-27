@@ -22,7 +22,7 @@ use crate::stego::hevc::sniff::{
     HevcCarrierKind, NAL_RADL_N, NAL_RASL_N, NAL_SPS_NUT, NAL_STSA_N, NAL_TRAIL_N, NAL_TSA_N,
     sniff_hevc_carrier,
 };
-use crate::stego::{SafetyLevel, StegoCapacityInfo};
+use crate::stego::{SafetyLevel, SafetyPolicy, StegoCapacityInfo};
 use oxideav_h265::cabac::ContextModel;
 use oxideav_h265::encoder::bitwriter::BitWriter;
 use oxideav_h265::encoder::cabac::CabacEncoder;
@@ -519,13 +519,37 @@ pub(crate) fn build_hevc_capacity_info(
     })
 }
 
+/// Refuse a payload that is above the enforced safety tier.
+///
+/// Takes plain numbers instead of a [`StegoCapacityInfo`] so the policy decision
+/// is unit-testable without a carrier: the bug this guards against was passing
+/// only `SafetyLevel` down the call chain, which silently dropped
+/// `SafetyEnforcement::Enforced` and made `--enforce-safety` a no-op for every
+/// HEVC carrier.
+fn enforce_safety(
+    payload_len: usize,
+    recommended_max_bytes: usize,
+    max_raw_payload_bytes: usize,
+    safety: SafetyPolicy,
+) -> Result<(), StrHideError> {
+    if !safety.is_enforced() || payload_len <= recommended_max_bytes {
+        return Ok(());
+    }
+    Err(StrHideError::SafetyThreshold(format!(
+        "Payload ({payload_len} bytes) exceeds safety threshold ({recommended_max_bytes} bytes) \
+         for tier '{}' (carrier maximum is {max_raw_payload_bytes} bytes)",
+        safety.level.as_str(),
+    )))
+}
+
 /// Embed a payload into an HEVC/HEIC carrier using content-adaptive sign-bit steganography.
 ///
 /// The complete expert entry. `secret` is the resolved credential (explicit
 /// password, else the profile's private stego secret, else `None` for the
 /// official public constant); `domain` isolates the HKDF derivation; `fmt` is
 /// the wire-format identity; `freshness` supplies the nonce (`Seeded` makes
-/// the output reproducible for the same inputs).
+/// the output reproducible for the same inputs); `safety` is the full policy,
+/// so `Enforced` blocks an over-tier payload instead of only warning.
 pub fn embed_hevc_with_info(
     carrier: &[u8],
     payload: &[u8],
@@ -533,7 +557,7 @@ pub fn embed_hevc_with_info(
     domain: Option<&str>,
     fmt: &HevcFormatProfile,
     freshness: Freshness,
-    safety_level: SafetyLevel,
+    safety: SafetyPolicy,
 ) -> Result<(Vec<u8>, StegoCapacityInfo), StrHideError> {
     if payload.is_empty() {
         return Err(StrHideError::General("Cannot embed empty payload".into()));
@@ -549,7 +573,17 @@ pub fn embed_hevc_with_info(
     // 1. Scan and record all slices and substreams
     let record = record_carrier_state(carrier, kind)?;
     let pool = PoolProfile::from_record(&record);
-    let capacity_info = build_hevc_capacity_info(carrier, kind, fmt, &pool, safety_level)?;
+    let capacity_info = build_hevc_capacity_info(carrier, kind, fmt, &pool, safety.level)?;
+
+    // Safety enforcement policy check (parity with the PNG and JPEG engines,
+    // which gate on `SafetyPolicy` rather than the bare tier: passing only the
+    // level here silently made `--enforce-safety` a no-op for HEVC carriers).
+    enforce_safety(
+        payload.len(),
+        capacity_info.recommended_max_bytes,
+        capacity_info.max_raw_payload_bytes,
+        safety,
+    )?;
     let bands = record.bands;
     let slice_contexts = record.slice_contexts;
     let all_slots = record.all_slots;
@@ -903,7 +937,7 @@ pub fn embed_hevc(
         domain,
         fmt,
         freshness,
-        SafetyLevel::default(),
+        SafetyPolicy::new(),
     )
     .map(|(bytes, _)| bytes)
 }
@@ -1895,5 +1929,48 @@ mod dialect_tests {
         for t in 16u8..=21 {
             assert!(!is_non_reference_vcl(t), "nal_type {t} is an IRAP");
         }
+    }
+}
+
+/// Regression tests for the safety-policy gate (bug B1: the HEVC path used to
+/// receive only the tier's level, so `--enforce-safety` never blocked).
+#[cfg(test)]
+mod safety_policy_tests {
+    use super::enforce_safety;
+    use crate::errors::StrHideError;
+    use crate::stego::{SafetyEnforcement, SafetyLevel, SafetyPolicy};
+
+    fn policy(enforcement: SafetyEnforcement) -> SafetyPolicy {
+        SafetyPolicy {
+            level: SafetyLevel::High,
+            enforcement,
+        }
+    }
+
+    #[test]
+    fn advisory_policy_never_blocks_an_over_tier_payload() {
+        let p = policy(SafetyEnforcement::Advisory);
+        assert!(enforce_safety(10_000, 4_788, 16_618, p).is_ok());
+    }
+
+    #[test]
+    fn enforced_policy_blocks_an_over_tier_payload() {
+        let p = policy(SafetyEnforcement::Enforced);
+        let err = enforce_safety(9_216, 4_788, 16_618, p).expect_err("must be refused");
+        assert!(
+            matches!(err, StrHideError::SafetyThreshold(_)),
+            "expected SafetyThreshold, got {err:?}"
+        );
+        // The message must name both bounds: the tier limit that refused it and
+        // the carrier maximum, so the user knows how far over they are.
+        let text = err.to_string();
+        assert!(text.contains("4788") && text.contains("16618"), "{text}");
+    }
+
+    #[test]
+    fn enforced_policy_allows_a_payload_at_the_recommended_boundary() {
+        let p = policy(SafetyEnforcement::Enforced);
+        assert!(enforce_safety(4_788, 4_788, 16_618, p).is_ok());
+        assert!(enforce_safety(0, 4_788, 16_618, p).is_ok());
     }
 }
