@@ -235,6 +235,7 @@ impl SafetyPolicy {
 /// is deliberately **not** a field: the built-in normalized KB kernel is the
 /// only one with a wire identity (`kernel_id = 0`), and a custom kernel would
 /// silently produce carriers the default extractor cannot read.
+#[cfg(feature = "content-png")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PngParams {
     /// First-stage low-pass filter window size (odd, default 3).
@@ -290,14 +291,17 @@ pub struct PngParams {
     pub algorithm_options: std::collections::BTreeMap<String, f64>,
 }
 
+#[allow(dead_code)]
 fn default_stc_h() -> u8 {
     crate::stego::coding::DEFAULT_STC_H
 }
 
+#[allow(dead_code)]
 fn default_stc_u() -> u8 {
     0
 }
 
+#[cfg(feature = "content-png")]
 impl PngParams {
     /// Quantise the hyperparameters to the exact forms the PNG feature word
     /// can carry: `epsilon` as a power of two and the `sigma` model option
@@ -317,6 +321,7 @@ impl PngParams {
     }
 }
 
+#[cfg(feature = "content-png")]
 impl Default for PngParams {
     fn default() -> Self {
         Self {
@@ -332,6 +337,7 @@ impl Default for PngParams {
     }
 }
 
+#[cfg(feature = "content-png")]
 impl PngParams {
     /// Reject parameter combinations that the HILL pipeline cannot serve.
     ///
@@ -397,6 +403,7 @@ impl PngParams {
 /// Everything here changes either the offer (which slots are cheap) or the
 /// embed-side search. None of it changes what the extractor must know: the
 /// superblock carries `h` and `u`, and the slot set is derived from the key.
+#[cfg(feature = "content-jpeg")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JpegParams {
     /// Weight applied to the 8-neighborhood block energies (default 0.25).
@@ -485,6 +492,7 @@ pub struct JpegParams {
 /// Deliberately shallow: the library cannot know what a key means, so it checks
 /// only what is universally wrong -- an empty key (unaddressable) or a
 /// non-finite value (poisons any cost arithmetic downstream).
+#[allow(dead_code)]
 fn validate_algorithm_options(
     bag: &std::collections::BTreeMap<String, f64>,
     family: &str,
@@ -513,6 +521,7 @@ fn validate_algorithm_options(
 /// more changes. It is now only the *floor* of the automatic budget -- see
 /// [`JpegParams::effective_slot_budget`]. See
 /// `docs/stc_v3_phase3_eval_20261021.md`.
+#[allow(dead_code)]
 pub const DEFAULT_SLOT_BUDGET: usize = 1_200_000;
 
 /// Ceiling on the STC backtracking bitmap, i.e. on an automatically scaled
@@ -529,6 +538,7 @@ pub const DEFAULT_SLOT_BUDGET: usize = 1_200_000;
 ///   `h = 8`, 128 B at `h = 10`), so 256 MiB allows 8.4M slots at `h = 8`;
 /// * time -- bytes per slot and states per slot are the same power of two, so
 ///   they cancel and the worst case is ~1 s of kernel time for *any* `h`.
+#[allow(dead_code)]
 pub const MAX_AUTO_BACKTRACK_BYTES: usize = 4 << 30; // 4 GiB
 
 /// Ceiling on the STC backtracking bitmap for the *correctness-driven* group
@@ -545,6 +555,7 @@ pub const MAX_GROUPED_BACKTRACK_BYTES: usize = 4 << 30; // 4 GiB
 ///
 /// One slot costs `2^h / 64` words of traceback state (32 B at `h = 8`,
 /// 128 B at `h = 10`).
+#[allow(dead_code)]
 pub fn max_grouped_backtrack_slots(h: u8) -> usize {
     let states = 1usize << h;
     let bytes_per_slot = states.div_ceil(64) * 8;
@@ -567,6 +578,7 @@ pub fn max_grouped_backtrack_slots(h: u8) -> usize {
 /// not even `u = 3` fits.
 ///
 /// `window` is `bits + h - 1`: the number of elements one STC pass covers.
+#[allow(dead_code)]
 pub fn grouped_body_budget(
     body_grid_len: usize,
     bits: usize,
@@ -584,14 +596,17 @@ pub fn grouped_body_budget(
     Some(auto_budget.max(3 * window))
 }
 
+#[allow(dead_code)]
 fn default_cipher_suite() -> u16 {
     crate::stego::format::DEFAULT_SUITE_ID
 }
 
+#[allow(dead_code)]
 fn default_polarize_weight() -> f64 {
     1.0
 }
 
+#[cfg(feature = "content-jpeg")]
 impl Default for JpegParams {
     fn default() -> Self {
         Self {
@@ -608,6 +623,7 @@ impl Default for JpegParams {
     }
 }
 
+#[cfg(feature = "content-jpeg")]
 impl JpegParams {
     /// Reject parameter values that would produce a NaN/Inf cost map, an empty
     /// search or a header field the decoder rejects.
@@ -736,6 +752,7 @@ mod tests {
 
     /// The options bag is the extension point that keeps a new cost model out
     /// of this file, so its accessor and validation have to behave predictably.
+    #[cfg(feature = "content-png")]
     #[test]
     fn algorithm_options_default_to_the_models_own_values() {
         let params = PngParams::default();
@@ -756,15 +773,20 @@ mod tests {
         tuned.validate().expect("a tuned bag is valid");
     }
 
+    #[cfg(feature = "content-png")]
     #[test]
-    fn algorithm_options_reject_empty_keys_and_non_finite_values() {
+    fn png_algorithm_options_reject_empty_keys() {
         let mut empty_key = PngParams::default();
         empty_key.algorithm_options.insert("  ".into(), 1.0);
         let err = empty_key
             .validate()
             .expect_err("empty key must be rejected");
         assert!(err.to_string().contains("empty key"), "got: {err}");
+    }
 
+    #[cfg(feature = "content-jpeg")]
+    #[test]
+    fn jpeg_algorithm_options_reject_non_finite_values() {
         let mut not_finite = JpegParams::default();
         not_finite.algorithm_options.insert("gain".into(), f64::NAN);
         let err = not_finite
@@ -773,6 +795,7 @@ mod tests {
         assert!(err.to_string().contains("gain"), "got: {err}");
     }
 
+    #[cfg(feature = "content-jpeg")]
     #[test]
     fn explicit_slot_budget_is_honoured_even_when_it_equals_the_default() {
         // "Explicitly configured" and "unset" must be distinguishable: an
@@ -804,6 +827,7 @@ mod tests {
     /// that (24 MP + 200 KB -> `u = 1`), and `u = 1` is a `(1,1)` parity code:
     /// the solution is unique, so the UERD cost map cannot move a single flip
     /// and the weighted distortion is ~29x that of `u = 3`.
+    #[cfg(feature = "content-jpeg")]
     #[test]
     fn large_carrier_with_large_payload_keeps_a_grouped_trellis() {
         // 4:2:0 24 MP -> 375k blocks -> 23.6M grid slots, minus the header.
@@ -857,6 +881,7 @@ mod tests {
 
     /// 24 MP carrier geometry with no extensions: 375k blocks, 23.6M grid
     /// slots, header 718 + 28.
+    #[cfg(feature = "content-jpeg")]
     fn carrier_24mp() -> (usize, usize) {
         (
             375_000 * 63,
@@ -864,6 +889,7 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "content-jpeg")]
     #[test]
     fn grouped_backtrack_slot_ceiling_scales_with_height() {
         // 4 GiB / 32 B per slot at h = 8.
@@ -875,6 +901,7 @@ mod tests {
     /// The automatic budget pins a 24 MP carrier holding 512 KiB to `u = 1`,
     /// which an over-optimised Huffman table cannot host; the grouped budget
     /// must lift it to `u = 3`, the measured reliable operating point.
+    #[cfg(feature = "content-jpeg")]
     #[test]
     fn grouped_body_budget_lifts_u_one_to_u_three() {
         let (n_total, hdr_n) = carrier_24mp();
@@ -903,6 +930,7 @@ mod tests {
     /// 24 MP carrier, three salt retries each), because two slots per bit
     /// leave too little room to route around cross-zero chains. `u = 3`
     /// measured 10/10 at the same load.
+    #[cfg(feature = "content-jpeg")]
     #[test]
     fn grouped_body_budget_refuses_when_u_three_does_not_fit() {
         let (n_total, hdr_n) = carrier_24mp();
@@ -925,6 +953,7 @@ mod tests {
     }
 
     /// An already-grouped automatic budget is returned untouched.
+    #[cfg(feature = "content-jpeg")]
     #[test]
     fn grouped_body_budget_keeps_an_already_grouped_auto_budget() {
         let (n_total, hdr_n) = carrier_24mp();
@@ -945,6 +974,7 @@ mod tests {
 
     /// A small carrier with an explicit tiny budget: the grouped floor lifts
     /// `u = 1` to `u = 3` without exceeding the grid.
+    #[cfg(feature = "content-jpeg")]
     #[test]
     fn grouped_body_budget_lifts_a_small_carrier() {
         // 256x256 fixture: 1024 blocks, 63,766 body slots.

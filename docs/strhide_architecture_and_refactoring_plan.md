@@ -548,6 +548,41 @@ impl StrHideError { pub fn detail_i18n(&self) -> ErrorDetail; }   // GUI 用它 
 5. `registry.rs` 拆成 `png/registry.rs` + `jpeg/registry.rs`，切断 `content-hevc` 对 png/jpeg 的隐藏边；HEIF 桥接移入 `content-heif-bridge` 门控。
 6. 验收：`cargo test --all-targets` 668 全绿；`cargo test local_ -- --ignored` 通过；基线全等（默认参数不变，字节不变）；取消测试（在 50% 处置位 → 返回 `Cancelled` 且不留临时文件）。
 
+> **阶段 2 验收与收尾（2026-10-27 15:12）**
+>
+> **已完成（批次 1–4 提交）**：
+> - 批次 1 (`33ba05c`)：`core/control.rs`（`Control`/`CancelToken`/`Stage`/`Event`）+ 统一 `core/payload.rs`（`Payload`/`PayloadKind`）；
+> - 批次 2 (`d98797c`)：强类型 options（`EmbedOptions`/`ProbeOptions`/`ExtractOptions`/`StegoTuning`）+ `StegoEngine` trait + 引擎注册表 `engine_for`；彻底删除 `StegoOptions`；
+> - 批次 3 (`1927689`)：PNG、JPEG、HEVC（Scheme C 与 HEIF 桥接）三个引擎全面埋入取消检查点与阶段上报（`Event::progress`）；新增 5 项取消与确定性单测；
+> - 批次 4 (`8fa291f`)：`CostModelRegistry` 按域拆分为 `png/registry.rs` 与 `jpeg/registry.rs`，顶层改薄聚合。
+> - **硬性验收全绿**：
+>   1. `python scripts/baseline_hash.py --check`：**58/58 例与基线完全一致**（结构域还原逐字节一致，内容域哈希一致）；
+>   2. `cargo test --all-features local_ -- --ignored`：**23 项重型语料测试全绿**（耗时 201 s，包含长视频 HEVC、真实 HEIF 照片、V3 JPEG 语料、STC 矩阵求解与 FFmpeg PSNR 校验）；
+>   3. 取消与确定性测试全部通过。
+>
+> **批次 5（per-format feature 门控）实施落地完成（2026-10-27）**：
+> - 抽离纯 std 的 `structure/adapters/pe_layout.rs`，解除 `pe_slack` 和 `analysis` 对 `iced-x86` 的硬依赖；
+> - `stego/format.rs` 内收 `JPEG_SUPERBLOCK_BYTES = 44`，解除穿透引用；
+> - `stego/options.rs`、`stego/registry.rs`、`stego/params.rs`、`stego/traits.rs`、`stego/header.rs`、`stego/engine.rs` 全面适配按格式 feature 条件编译；
+> - `Cargo.toml` 开放细分 features 并将 H.265 相关重依赖标为 optional；
+> - 5 条独立最小构建（`structure-base`, `content-png`, `content-jpeg`, `content-hevc`, `analysis`）全部零警告零错误通过；全量测试 293+87+18 项全绿；基线 58/58 例一致。
+
+> **批次 5 实施清单（已全部落地）**：
+> 1. [x] `Cargo.toml`：开放细分 features（`structure-base`、`structure-pe`、`content-base`、`content-png`、`content-jpeg`、`content-hevc`、`content-heif-bridge`）。
+> 2. [x] 结构域 PE 拆分：抽离 `structure/adapters/pe_layout.rs`（纯 PE 节区与 slack 扫描，不引入 `iced-x86`），供 `pe_slack` 与 `analysis` 使用；`pe_codebits.rs` 仅留机器码反汇编并加 `#[cfg(feature = "structure-pe")]`；`structure/registry.rs` 相应门控。
+> 3. [x] 内容域格式解耦：
+>    - `stego/format.rs` 内收 `SUPERBLOCK_BYTES` 常量定义，切断对 `stego::jpeg` 内部常量的反向读取；
+>    - `stego/heif/thumb_bridge.rs` 整体加 `#[cfg(feature = "content-heif-bridge")]`；`HeifEngine` 在无该 feature 时仅走 Scheme C；
+> 4. [x] `options.rs` / `ResolvedTuning` 门控：
+>    - `ResolvedTuning` 字段与 `resolve()` 填充按 `content-png`/`content-jpeg`/`content-hevc` 条件编译；
+>    - `stego/registry.rs` 的 `list_algorithms()` 按启用 feature 聚合；
+> 5. [x] `Profile` / `StegoProfile` 门控：
+>    - `StegoProfile` 的 `jpeg`/`png`/`hevc` 字段与 `Profile` 上对应格式方法打上细分 feature 门控；
+> 6. [x] `stego/engine.rs` 注册表动态切片：
+>    - `ENGINES` 切片条目按 feature 门控，支持 0~5 个引擎组合；
+> 7. [x] CI 验证：
+>    - 验证 5 条最小构建独立可编：`structure-base`、`content-png`、`content-jpeg`、`content-hevc`、`analysis`。
+
 ### 阶段 3：微头 + 双域诊断（2–3 人日）
 
 1. 微头（§4.2）+ `WIRE_SPEC.md` 更新 + 三种形态的互操作测试。

@@ -12,9 +12,14 @@
 //! the one that ran.
 
 /// Return list of available algorithm names and descriptions for CLI listing.
+#[allow(clippy::vec_init_then_push)]
 pub fn list_algorithms() -> Vec<(&'static str, &'static str, &'static str)> {
-    let mut out = crate::stego::png::registry::list();
+    let mut out = Vec::new();
+    #[cfg(feature = "content-png")]
+    out.extend(crate::stego::png::registry::list());
+    #[cfg(feature = "content-jpeg")]
     out.extend(crate::stego::jpeg::registry::list());
+    #[cfg(feature = "content-hevc")]
     out.push((
         "hevc",
         "HEIF/HEVC",
@@ -30,12 +35,16 @@ mod tests {
         let listed = super::list_algorithms();
         assert!(!listed.is_empty(), "the CLI listing must not be empty");
 
+        #[allow(unused_mut)]
         let mut spatial_seen = 0usize;
+        #[allow(unused_mut)]
         let mut jpeg_seen = 0usize;
+        #[allow(unused_mut)]
         let mut hevc_seen = 0usize;
         for (name, domain, description) in listed {
             assert!(!description.is_empty(), "{name}: empty description");
             match domain {
+                #[cfg(feature = "content-png")]
                 "Spatial (PNG)" => {
                     spatial_seen += 1;
                     let model = crate::stego::png::registry::get_spatial_model(Some(name))
@@ -49,6 +58,7 @@ mod tests {
                         "{name}: wire id {id} does not map back"
                     );
                 }
+                #[cfg(feature = "content-jpeg")]
                 "JPEG (JPG)" => {
                     jpeg_seen += 1;
                     let model = crate::stego::jpeg::registry::get_jpeg_model(Some(name))
@@ -62,8 +72,11 @@ mod tests {
             }
         }
 
+        #[cfg(feature = "content-png")]
         assert!(spatial_seen > 0, "no spatial algorithm listed");
+        #[cfg(feature = "content-jpeg")]
         assert!(jpeg_seen > 0, "no JPEG algorithm listed");
+        #[cfg(feature = "content-hevc")]
         assert!(hevc_seen > 0, "no HEVC algorithm listed");
     }
 }

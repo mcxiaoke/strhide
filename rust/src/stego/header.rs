@@ -101,12 +101,15 @@ pub fn decode_header_word(word: u32) -> (u32, u32, u8) {
 pub const HEADER_V2_ESCAPE_H: u8 = 15;
 
 /// Size of the v2 feature word block in bytes.
+#[cfg(feature = "content-png")]
 pub const FEATURE_WORD_BYTES: usize = 32;
 
 /// Number of candidate slots carrying the 32-byte feature word (1 bit per slot).
+#[cfg(feature = "content-png")]
 pub const FEATURE_WORD_SLOTS: usize = FEATURE_WORD_BYTES * 8; // 256 slots
 
 /// Total slots occupied by v2 header (256 basic header slots + 256 feature word slots).
+#[cfg(feature = "content-png")]
 pub const V2_TOTAL_HEADER_SLOTS: usize = 256 + FEATURE_WORD_SLOTS; // 512 slots
 
 /// Self-describing feature descriptor stored in the 32-byte feature word (v3).
@@ -123,6 +126,7 @@ pub const V2_TOTAL_HEADER_SLOTS: usize = 256 + FEATURE_WORD_SLOTS; // 512 slots
 /// 3x3 high-pass kernel is not carried: it does not fit, so a `kernel_id`
 /// names it instead (0 = the built-in KB kernel) and custom kernels remain
 /// a same-configuration-on-both-ends expert setting.
+#[cfg(feature = "content-png")]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FeatureWord {
     pub version: u8,
@@ -157,6 +161,7 @@ pub struct FeatureWord {
     pub kernel_id: u8,
 }
 
+#[cfg(feature = "content-png")]
 impl Default for FeatureWord {
     fn default() -> Self {
         Self {
@@ -178,8 +183,10 @@ impl Default for FeatureWord {
 }
 
 /// Largest window size the feature word can carry (10 bits).
+#[cfg(feature = "content-png")]
 pub const FEATURE_WORD_MAX_WINDOW: u16 = 1023;
 
+#[cfg(feature = "content-png")]
 impl FeatureWord {
     /// The `epsilon` value this word describes (`2^-k`).
     #[must_use]
@@ -372,6 +379,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "content-png")]
     #[test]
     fn feature_word_roundtrip_and_validation() {
         let fw = FeatureWord::default();

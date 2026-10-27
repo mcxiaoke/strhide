@@ -19,38 +19,58 @@ pub mod envelope;
 pub mod format;
 #[doc(hidden)]
 pub mod header;
+#[cfg(feature = "content-hevc")]
 pub mod heif;
+#[cfg(feature = "content-hevc")]
 pub mod hevc;
 pub mod io;
+#[cfg(feature = "content-jpeg")]
 pub mod jpeg;
 pub mod options;
 pub mod params;
+#[cfg(feature = "content-png")]
 pub mod png;
 #[doc(hidden)]
 pub mod prng;
 pub mod registry;
 pub mod traits;
+#[cfg(any(feature = "content-png", feature = "content-jpeg"))]
 #[doc(hidden)]
 pub mod wavelet;
 
+#[cfg(feature = "content-jpeg")]
 pub use crate::stego::jpeg::registry::get_jpeg_model;
+#[cfg(feature = "content-png")]
 pub use crate::stego::png::registry::{
     SPATIAL_ALGORITHM_HILL, SPATIAL_ALGORITHM_SUNIWARD, get_spatial_model,
     spatial_model_from_wire_id, spatial_name_from_wire_id, spatial_wire_id,
 };
 pub use engine::{StegoEngine, engine_for, supported_formats};
 pub use envelope::Freshness;
-pub use format::{
-    CipherSuite, DEFAULT_HEVC_FORMAT, DEFAULT_JPEG_FORMAT, GridRule, HevcFormatProfile,
-    JpegFormatProfile, OFFICIAL_PNG_FORMAT, PngFormatProfile,
-};
-pub use options::{
-    BridgeOptions, EmbedOptions, EmbedOutput, ExtractOptions, HevcMode, HevcParams, JpegAlgorithm,
-    ProbeOptions, SpatialAlgorithm, StegoTuning,
-};
-pub use params::{
-    ExtractParams, JpegParams, PngParams, SafetyEnforcement, SafetyLevel, SafetyPolicy, StegoCodec,
-};
+pub use format::{CipherSuite, GridRule};
+#[cfg(feature = "content-hevc")]
+pub use format::{DEFAULT_HEVC_FORMAT, HevcFormatProfile};
+#[cfg(feature = "content-jpeg")]
+pub use format::{DEFAULT_JPEG_FORMAT, JpegFormatProfile};
+#[cfg(feature = "content-png")]
+pub use format::{OFFICIAL_PNG_FORMAT, PngFormatProfile};
+
+#[cfg(feature = "content-heif-bridge")]
+pub use options::BridgeOptions;
+#[cfg(feature = "content-jpeg")]
+pub use options::JpegAlgorithm;
+#[cfg(feature = "content-png")]
+pub use options::SpatialAlgorithm;
+pub use options::{EmbedOptions, EmbedOutput, ExtractOptions, ProbeOptions, StegoTuning};
+#[cfg(feature = "content-hevc")]
+pub use options::{HevcMode, HevcParams};
+
+#[cfg(feature = "content-jpeg")]
+pub use params::JpegParams;
+#[cfg(feature = "content-png")]
+pub use params::PngParams;
+pub use params::{ExtractParams, SafetyEnforcement, SafetyLevel, SafetyPolicy, StegoCodec};
+
 pub use registry::list_algorithms;
 
 /// Compatibility facade over the per-domain registries.
@@ -58,6 +78,7 @@ pub struct CostModelRegistry;
 
 impl CostModelRegistry {
     /// See [`crate::stego::png::registry::get_spatial_model`].
+    #[cfg(feature = "content-png")]
     pub fn get_spatial_model(
         name: Option<&str>,
     ) -> Option<std::sync::Arc<dyn crate::stego::traits::PngCostModel>> {
@@ -65,6 +86,7 @@ impl CostModelRegistry {
     }
 
     /// See [`crate::stego::jpeg::registry::get_jpeg_model`].
+    #[cfg(feature = "content-jpeg")]
     pub fn get_jpeg_model(
         name: Option<&str>,
     ) -> Option<std::sync::Arc<dyn crate::stego::traits::JpegCostModel>> {
@@ -72,16 +94,19 @@ impl CostModelRegistry {
     }
 
     /// See [`crate::stego::png::registry::spatial_wire_id`].
+    #[cfg(feature = "content-png")]
     pub fn spatial_wire_id(name: &str) -> Option<u8> {
         crate::stego::png::registry::spatial_wire_id(name)
     }
 
     /// See [`crate::stego::png::registry::spatial_name_from_wire_id`].
+    #[cfg(feature = "content-png")]
     pub fn spatial_name_from_wire_id(id: u8) -> Option<&'static str> {
         crate::stego::png::registry::spatial_name_from_wire_id(id)
     }
 
     /// See [`crate::stego::png::registry::spatial_model_from_wire_id`].
+    #[cfg(feature = "content-png")]
     pub fn spatial_model_from_wire_id(
         id: u8,
     ) -> Option<std::sync::Arc<dyn crate::stego::traits::PngCostModel>> {

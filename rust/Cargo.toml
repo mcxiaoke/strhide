@@ -19,24 +19,33 @@ exclude = ["tests/"]
 # strhide` must not drag in clap/rpassword/toml. `analysis` stays in the default
 # set because it is a headline capability (and its only extra dependency is
 # `jpeg-decoder`); the CLI is the heavy switch.
-# Each domain is one switch. The per-format split (structure-base/structure-pe,
-# content-png/content-jpeg/content-hevc) is deliberately NOT exposed yet: it was
-# attempted on 2026-10-27 and does not compile, for two measured reasons -
-# (a) `Profile` still carries `stego_secret()`/`png_format()`/`jpeg_format()`
-# unconditionally, so every content format needs the whole domain (the `Dialect`
-# split in plan 3.5), and (b) `stego/format.rs` reads SUPERBLOCK_BYTES out of
-# `stego::jpeg::header_v3`. Both are stage-2 items; adding features that cannot
-# be enabled alone would just advertise a broken build.
 default = ["structure", "content", "analysis"]
 
 # Foundation shared by both domains (atomic commit, timestamp preservation).
 core-io = ["dep:filetime"]
 
-# Structure domain: format-preserving envelope injection, bit-exact restore.
-structure = ["core-io", "dep:iced-x86", "dep:serde_json"]
+# Structure domain:
+# - structure-base: container hiding for PNG, JPEG, MP4, ZIP, PDF, and PE slack/overlay
+#   (zero disassembly dependency; compiles without iced-x86).
+# - structure-pe: adds x86/x64 instruction substitution (`pe_codebits`) via iced-x86.
+# - structure: meta-feature enabling the full structure domain.
+structure-base = ["core-io", "dep:serde_json"]
+structure-pe   = ["structure-base", "dep:iced-x86"]
+structure      = ["structure-base", "structure-pe"]
 
-# Content domain: pixel / DCT / CABAC steganography.
-content = ["core-io", "dep:dct-io", "dep:rayon"]
+# Content domain:
+# - content-base: shared foundation (rayon, cost-model traits, generic STC coding).
+# - content-png: spatial-domain PNG steganography (HILL, S-UNIWARD).
+# - content-jpeg: DCT-domain JPEG steganography (UERD, ternary STC).
+# - content-hevc: H.265/HEVC CABAC steganography (Annex-B and MP4/MOV bitstreams).
+# - content-heif-bridge: HEIF/HEIC container and thumbnail transcoding bridge (pulls in PNG + JPEG).
+# - content: meta-feature enabling all content engines.
+content-base        = ["core-io", "dep:rayon"]
+content-png         = ["content-base"]
+content-jpeg        = ["content-base", "dep:dct-io"]
+content-hevc        = ["content-base", "dep:oxideav-h265", "dep:rusty_h265"]
+content-heif-bridge = ["content-hevc", "content-png", "content-jpeg"]
+content             = ["content-png", "content-jpeg", "content-hevc", "content-heif-bridge"]
 
 # Black-box steganalysis. Needs the structure domain (it recognises UBE
 # envelopes and reads PE code) and the DCT reader (JPEG calibration); it does
@@ -64,10 +73,10 @@ crc32fast = "1.5.2"
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 hkdf = "0.13.0"
 hmac = "0.13.0"
-oxideav-h265 = { git = "https://github.com/mcxiaoke/oxideav-h265.git", tag = "v1-20261024" }
+oxideav-h265 = { git = "https://github.com/mcxiaoke/oxideav-h265.git", tag = "v1-20261024", optional = true }
 pbkdf2 = "0.13.0"
 rand = "0.10.3"
-rusty_h265 = { git = "https://github.com/mcxiaoke/rusty_h265.git", tag = "v1-20261025-2" }
+rusty_h265 = { git = "https://github.com/mcxiaoke/rusty_h265.git", tag = "v1-20261025-2", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.11.1"
 thiserror = "2.0.21"

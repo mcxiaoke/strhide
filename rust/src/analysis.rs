@@ -41,7 +41,7 @@ use serde::Serialize;
 pub mod calibration;
 
 use crate::errors::StrHideError;
-use crate::structure::adapters::{pe_codebits, pe_slack};
+use crate::structure::adapters::{pe_layout, pe_slack};
 use crate::structure::envelope::{MIN_UBE_PLAIN, STANDARD_HEADER_MAGIC};
 
 /// Hard cap on file size we fully load for scanning. Larger files still get
@@ -978,7 +978,7 @@ fn find_next_jpeg_marker(data: &[u8], start: usize) -> usize {
 /// any other code-cave embedder. (Appended overlay data is covered separately
 /// by the trailing-entropy and `overlay:high-entropy` checks.)
 fn track_pe_structure(data: &[u8], out: &mut Vec<Finding>) {
-    let Ok(layout) = pe_codebits::pe_slack_layout(data) else {
+    let Ok(layout) = pe_layout::pe_slack_layout(data) else {
         return;
     };
     let mut nonzero = 0u64;

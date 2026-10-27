@@ -32,7 +32,7 @@ use crate::stego::envelope::MIN_ENVELOPE_LEN;
 use crate::stego::format::JpegFormatProfile;
 
 /// Encoded superblock size in bytes.
-pub const SUPERBLOCK_BYTES: usize = 44;
+pub use crate::stego::format::JPEG_SUPERBLOCK_BYTES as SUPERBLOCK_BYTES;
 
 /// Largest envelope the 26-bit length field can express (64 MiB).
 pub const ENVELOPE_LEN_MAX: u32 = (1 << 26) - 1;

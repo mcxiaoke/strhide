@@ -31,7 +31,9 @@ pub mod mkv;
 pub mod mp4;
 pub mod pdf;
 pub mod pe;
+#[cfg(feature = "structure-pe")]
 pub mod pe_codebits;
+pub mod pe_layout;
 pub mod pe_slack;
 pub mod png;
 pub mod riff;

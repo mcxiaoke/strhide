@@ -18,7 +18,7 @@
 //! file is touched.
 
 use crate::errors::StrHideError;
-use crate::structure::adapters::{SeekRead, SeekWrite, format_bytes, pe_codebits};
+use crate::structure::adapters::{SeekRead, SeekWrite, format_bytes, pe_layout};
 use crate::structure::envelope::{
     EnvelopeHeader, EnvelopeTrailer, MIN_UBE_PLAIN, STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC,
     TRAILER_SIZE,
@@ -42,9 +42,7 @@ pub fn find_slack_run<R: Read + Seek + ?Sized>(
     ranges: &[(u64, u64)],
     needed: usize,
 ) -> Result<Option<u64>, StrHideError> {
-    Ok(pe_codebits::find_slack_run_streaming(
-        reader, ranges, needed,
-    )?)
+    Ok(pe_layout::find_slack_run_streaming(reader, ranges, needed)?)
 }
 
 /// Injects `ube_in` into the carrier's padding and writes the container to
@@ -66,12 +64,12 @@ pub fn inject(
     let ube_len = usize::try_from(ube_size)
         .map_err(|_| StrHideError::UnsupportedFormat("envelope is too large".into()))?;
 
-    let layout = pe_codebits::parse_slack_layout_streaming(host_in)?;
+    let layout = pe_layout::parse_slack_layout_streaming(host_in)?;
     let off = match find_slack_run(host_in, &layout.slack_ranges, ube_len)? {
         Some(off) => off,
         None => {
             let largest =
-                pe_codebits::max_zero_run_streaming(host_in, &layout.slack_ranges).unwrap_or(0);
+                pe_layout::max_zero_run_streaming(host_in, &layout.slack_ranges).unwrap_or(0);
             return Err(StrHideError::UnsupportedFormat(format!(
                 "PE section padding cannot host a pe_slack envelope: no contiguous zero-value run \
                  of {} bytes (largest padding run is {} bytes; use pe_overlay for this payload)",
@@ -83,7 +81,7 @@ pub fn inject(
 
     // Defensive re-check: the bytes we are about to overwrite must be all-zero,
     // otherwise zero-filling them on strip would not restore the original file.
-    pe_codebits::verify_zero_slack(host_in, off, ube_len)?;
+    pe_layout::verify_zero_slack(host_in, off, ube_len)?;
 
     // Stream the host, splicing the envelope over `[off, off + ube_size)`.
     copy_range(host_in, out, 0, off)?;
@@ -104,12 +102,12 @@ pub fn locate(
     stego_in: &mut dyn SeekRead,
     expected_trailer_magic: Option<&[u8; 4]>,
 ) -> Result<Option<(u64, u64)>, StrHideError> {
-    let layout = match pe_codebits::parse_slack_layout_streaming(stego_in) {
+    let layout = match pe_layout::parse_slack_layout_streaming(stego_in) {
         Ok(layout) => layout,
         Err(
-            pe_codebits::CodebitsError::NotPe
-            | pe_codebits::CodebitsError::NoText
-            | pe_codebits::CodebitsError::UnsupportedMachine(_),
+            pe_layout::CodebitsError::NotPe
+            | pe_layout::CodebitsError::NoText
+            | pe_layout::CodebitsError::UnsupportedMachine(_),
         ) => return Ok(None),
         Err(e) => return Err(e.into()),
     };
@@ -236,7 +234,7 @@ pub fn strip(
 
     // Only ever zero bytes that are inside a padding range. A corrupted header
     // pointing at section data must fail instead of silently destroying code.
-    let layout = pe_codebits::parse_slack_layout_streaming(stego_in)?;
+    let layout = pe_layout::parse_slack_layout_streaming(stego_in)?;
     let inside_padding = layout
         .slack_ranges
         .iter()
@@ -284,7 +282,7 @@ pub const MIN_CIPHERTEXT_DISTINCT: usize = 100;
 /// Scans the carrier's padding ranges once, reporting both the non-zero count
 /// and whether a strhide header magic is present.
 pub fn scan_slack(stego_in: &mut dyn SeekRead) -> Result<SlackScan, StrHideError> {
-    let layout = match pe_codebits::parse_slack_layout_streaming(stego_in) {
+    let layout = match pe_layout::parse_slack_layout_streaming(stego_in) {
         Ok(layout) => layout,
         Err(_) => return Ok(SlackScan::default()),
     };

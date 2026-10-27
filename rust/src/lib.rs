@@ -135,18 +135,18 @@ pub mod crypto;
 pub mod errors;
 pub mod params;
 
-#[cfg(any(feature = "structure", feature = "content"))]
+#[cfg(any(feature = "structure-base", feature = "content-base"))]
 pub mod commit;
 
 /// Historical path: the message catalogue used to live at `strhide::i18n`.
 pub use crate::core::i18n;
 
 // Layer 3A: structure domain (envelope injection, bit-exact restore).
-#[cfg(feature = "structure")]
+#[cfg(feature = "structure-base")]
 pub mod structure;
 
 // Layer 3B: content domain (pixel / DCT / CABAC steganography).
-#[cfg(feature = "content")]
+#[cfg(feature = "content-base")]
 pub mod stego;
 
 // Layer 4: black-box steganalysis.
@@ -159,18 +159,26 @@ pub mod cli;
 #[cfg(feature = "cli")]
 pub mod cli_i18n;
 
-#[cfg(feature = "structure")]
+#[cfg(feature = "structure-base")]
 pub mod facade;
 
 // Content-domain steganography surface.
-#[cfg(feature = "content")]
-pub use stego::format::{
-    CipherSuite, DEFAULT_HEVC_FORMAT, DEFAULT_JPEG_FORMAT, GridRule, HevcFormatProfile,
-    JpegFormatProfile, OFFICIAL_PNG_FORMAT, PngFormatProfile,
-};
-#[cfg(feature = "content")]
+#[cfg(feature = "content-base")]
+pub use stego::format::{CipherSuite, GridRule};
+#[cfg(feature = "content-hevc")]
+pub use stego::format::{DEFAULT_HEVC_FORMAT, HevcFormatProfile};
+#[cfg(feature = "content-jpeg")]
+pub use stego::format::{DEFAULT_JPEG_FORMAT, JpegFormatProfile};
+#[cfg(feature = "content-png")]
+pub use stego::format::{OFFICIAL_PNG_FORMAT, PngFormatProfile};
+
+#[cfg(feature = "content-jpeg")]
 pub use stego::jpeg::cost::UerdCostModel;
-#[cfg(feature = "content")]
-pub use stego::params::{ExtractParams, JpegParams};
-#[cfg(feature = "content")]
+#[cfg(feature = "content-base")]
+pub use stego::params::ExtractParams;
+#[cfg(feature = "content-jpeg")]
+pub use stego::params::JpegParams;
+#[cfg(feature = "content-png")]
+pub use stego::params::PngParams;
+#[cfg(feature = "content-jpeg")]
 pub use stego::traits::JpegCostModel;

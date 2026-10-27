@@ -147,7 +147,7 @@ const COMPACT_META_MAX_NAME: usize = u16::MAX as usize;
 /// The probe needs the whole image decoded, which rules out streaming, so the
 /// read is bounded: above this size the field is reported as absent instead of
 /// allocating whatever the file happens to claim.
-#[cfg(feature = "content")]
+#[cfg(feature = "content-base")]
 const MAX_CONTENT_STEGO_BYTES: u64 = 512 * 1024 * 1024;
 
 fn put_varint(out: &mut Vec<u8>, mut value: u64) {
@@ -437,7 +437,7 @@ pub struct InspectResult {
     /// answering "how much more could fit").
     pub strategies: Vec<StrategyCapacity>,
     /// Content-adaptive pixel/DCT steganography capacity for PNG/JPEG carriers.
-    #[cfg(feature = "content")]
+    #[cfg(feature = "content-base")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_stego_capacity: Option<crate::stego::StegoCapacityInfo>,
     /// Carrier media summary (e.g. "4032x3024" or "1920x1080, 24.00 fps, 11.9s (15.2 Mbps)").
@@ -1990,7 +1990,7 @@ fn inspect_core(
     // read back into memory. Bounded on purpose: `inspect` also runs on data it
     // was merely pointed at, and a 4 GiB "PNG" must not become a 4 GiB
     // allocation. Above the cap the field is simply absent.
-    #[cfg(feature = "content")]
+    #[cfg(feature = "content-base")]
     let content_stego_capacity = if crate::structure::registry::supports_content_stego(adapter) {
         host.seek(SeekFrom::Start(0))?;
         let mut buf = Vec::new();
@@ -2011,11 +2011,11 @@ fn inspect_core(
         None
     };
 
-    #[cfg(feature = "content")]
+    #[cfg(feature = "content-base")]
     let media_info = content_stego_capacity
         .as_ref()
         .and_then(|c| c.media_info.clone());
-    #[cfg(not(feature = "content"))]
+    #[cfg(not(feature = "content-base"))]
     let media_info = None;
 
     let loc = locate_envelope(host, adapter, password, profile)?;
@@ -2038,7 +2038,7 @@ fn inspect_core(
                 orig_host_sha256: None,
                 metadata: None,
                 strategies,
-                #[cfg(feature = "content")]
+                #[cfg(feature = "content-base")]
                 content_stego_capacity,
                 media_info,
             });
@@ -2130,7 +2130,7 @@ fn inspect_core(
         ),
         metadata: meta_val,
         strategies,
-        #[cfg(feature = "content")]
+        #[cfg(feature = "content-base")]
         content_stego_capacity,
         media_info,
     })

@@ -108,7 +108,10 @@ pub static CAPABILITIES: &[Capability] = &[
     },
     Capability {
         format: FileFormat::Pe,
+        #[cfg(feature = "structure-pe")]
         structure: &["pe_codebits", "pe_slack", "pe_overlay", "eof"],
+        #[cfg(not(feature = "structure-pe"))]
+        structure: &["pe_slack", "pe_overlay", "eof"],
         stego: &[],
         extensions: &["exe", "dll"],
     },

@@ -35,10 +35,19 @@ use crate::formats::FileFormat;
 use crate::params::StegoProfile;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::envelope::Freshness;
+#[cfg(feature = "content-jpeg")]
 use crate::stego::jpeg::registry as jpeg_registry;
-use crate::stego::params::{ExtractParams, JpegParams, PngParams, SafetyPolicy};
+#[cfg(feature = "content-jpeg")]
+use crate::stego::params::JpegParams;
+#[cfg(feature = "content-png")]
+use crate::stego::params::PngParams;
+use crate::stego::params::{ExtractParams, SafetyPolicy};
+#[cfg(feature = "content-png")]
 use crate::stego::png::registry as png_registry;
-use crate::stego::traits::{JpegCostModel, PngCostModel};
+#[cfg(feature = "content-jpeg")]
+use crate::stego::traits::JpegCostModel;
+#[cfg(feature = "content-png")]
+use crate::stego::traits::PngCostModel;
 
 /// Spatial-domain cost model selection.
 ///
@@ -47,6 +56,7 @@ use crate::stego::traits::{JpegCostModel, PngCostModel};
 /// runtime "unknown algorithm" from inside the engine -- and
 /// [`Custom`](Self::Custom) closes the "a private build cannot inject its own
 /// cost model" gap the registry-only lookup had.
+#[cfg(feature = "content-png")]
 #[derive(Clone, Default)]
 pub enum SpatialAlgorithm {
     /// HILL (Li et al., ICIP 2014) -- the default.
@@ -60,6 +70,7 @@ pub enum SpatialAlgorithm {
     Custom(Arc<dyn PngCostModel>),
 }
 
+#[cfg(feature = "content-png")]
 impl SpatialAlgorithm {
     /// Resolve a CLI/config name. `None` for an unknown name; `"auto"` maps to
     /// [`Hill`](Self::Hill), matching the registry's "auto stays on HILL"
@@ -93,6 +104,7 @@ impl SpatialAlgorithm {
     }
 }
 
+#[cfg(feature = "content-png")]
 impl std::fmt::Debug for SpatialAlgorithm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.id())
@@ -100,6 +112,7 @@ impl std::fmt::Debug for SpatialAlgorithm {
 }
 
 /// JPEG DCT-domain cost model selection.
+#[cfg(feature = "content-jpeg")]
 #[derive(Clone, Default)]
 pub enum JpegAlgorithm {
     /// UERD (Guo et al., IEEE TIFS 2015) -- the default.
@@ -111,6 +124,7 @@ pub enum JpegAlgorithm {
     Custom(Arc<dyn JpegCostModel>),
 }
 
+#[cfg(feature = "content-jpeg")]
 impl JpegAlgorithm {
     /// Resolve a CLI/config name. `None` for an unknown name; `"auto"` maps to
     /// [`Uerd`](Self::Uerd).
@@ -143,6 +157,7 @@ impl JpegAlgorithm {
     }
 }
 
+#[cfg(feature = "content-jpeg")]
 impl std::fmt::Debug for JpegAlgorithm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.id())
@@ -150,6 +165,7 @@ impl std::fmt::Debug for JpegAlgorithm {
 }
 
 /// Which HEVC scheme the caller wants for a HEIF carrier.
+#[cfg(feature = "content-hevc")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum HevcMode {
     /// Scheme C (CABAC in-place) when the carrier allows it, the thumbnail
@@ -161,6 +177,7 @@ pub enum HevcMode {
     Cabac,
 }
 
+#[cfg(feature = "content-hevc")]
 impl HevcMode {
     /// Resolve `"hevc"` / `"cabac"` / `"auto"`.
     pub fn from_name(name: &str) -> Option<Self> {
@@ -180,6 +197,7 @@ impl HevcMode {
 /// exists so the [`StegoTuning`] arm and the plumbing around it are written
 /// once -- a future knob (a drift-ladder limit, a WPP switch) becomes a field
 /// here instead of a new enum shape that breaks every caller.
+#[cfg(feature = "content-hevc")]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HevcParams {}
@@ -196,6 +214,7 @@ pub enum StegoTuning {
     #[default]
     Auto,
     /// Explicit spatial tuning; only valid for PNG carriers.
+    #[cfg(feature = "content-png")]
     Png {
         /// Cost model to run.
         model: SpatialAlgorithm,
@@ -203,6 +222,7 @@ pub enum StegoTuning {
         params: PngParams,
     },
     /// Explicit DCT tuning; only valid for JPEG carriers.
+    #[cfg(feature = "content-jpeg")]
     Jpeg {
         /// Cost model to run.
         model: JpegAlgorithm,
@@ -210,6 +230,7 @@ pub enum StegoTuning {
         params: JpegParams,
     },
     /// Explicit HEVC scheme selection.
+    #[cfg(feature = "content-hevc")]
     Hevc {
         /// Whether the thumbnail bridge may be used as a fallback.
         mode: HevcMode,
@@ -222,18 +243,21 @@ impl std::fmt::Debug for StegoTuning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StegoTuning::Auto => f.write_str("Auto"),
+            #[cfg(feature = "content-png")]
             StegoTuning::Png { model, params } => f
                 .debug_struct("Png")
                 .field("model", model)
                 .field("codec", &params.codec)
                 .field("stc_h", &params.stc_h)
                 .finish(),
+            #[cfg(feature = "content-jpeg")]
             StegoTuning::Jpeg { model, params } => f
                 .debug_struct("Jpeg")
                 .field("model", model)
                 .field("cipher_suite", &params.cipher_suite)
                 .field("stc_h", &params.stc_h)
                 .finish(),
+            #[cfg(feature = "content-hevc")]
             StegoTuning::Hevc { mode, .. } => f.debug_struct("Hevc").field("mode", mode).finish(),
         }
     }
@@ -241,6 +265,7 @@ impl std::fmt::Debug for StegoTuning {
 
 impl StegoTuning {
     /// Explicit spatial tuning with the given parameters and the default model.
+    #[cfg(feature = "content-png")]
     pub fn png(params: PngParams) -> Self {
         StegoTuning::Png {
             model: SpatialAlgorithm::default(),
@@ -249,6 +274,7 @@ impl StegoTuning {
     }
 
     /// Explicit DCT tuning with the given parameters and the default model.
+    #[cfg(feature = "content-jpeg")]
     pub fn jpeg(params: JpegParams) -> Self {
         StegoTuning::Jpeg {
             model: JpegAlgorithm::default(),
@@ -257,6 +283,7 @@ impl StegoTuning {
     }
 
     /// Explicit HEVC scheme selection with the default (empty) params.
+    #[cfg(feature = "content-hevc")]
     pub fn hevc(mode: HevcMode) -> Self {
         StegoTuning::Hevc {
             mode,
@@ -275,44 +302,57 @@ impl StegoTuning {
     pub(crate) fn applicable_to(&self, format: FileFormat) -> Result<(), StrHideError> {
         match (self, format) {
             (StegoTuning::Auto, _) => Ok(()),
+            #[cfg(feature = "content-png")]
             (StegoTuning::Png { model, .. }, FileFormat::Png) => {
                 let _ = model;
                 Ok(())
             }
+            #[cfg(feature = "content-jpeg")]
             (StegoTuning::Jpeg { .. }, FileFormat::Jpeg) => Ok(()),
+            #[cfg(feature = "content-hevc")]
             (StegoTuning::Hevc { .. }, FileFormat::Heif | FileFormat::Mp4) => Ok(()),
+            #[cfg(feature = "content-hevc")]
             (StegoTuning::Hevc { .. }, FileFormat::HevcAnnexB) => Ok(()),
+            #[cfg(feature = "content-png")]
             (StegoTuning::Png { model, .. }, other) => Err(StrHideError::General(format!(
                 "stego algorithm '{}' is a spatial (PNG) model and cannot be used on a {} carrier",
                 model.id(),
                 other.as_str()
             ))),
+            #[cfg(feature = "content-jpeg")]
             (StegoTuning::Jpeg { model, .. }, other) => Err(StrHideError::General(format!(
                 "stego algorithm '{}' is a JPEG DCT model and cannot be used on a {} carrier",
                 model.id(),
                 other.as_str()
             ))),
+            #[cfg(feature = "content-hevc")]
             (StegoTuning::Hevc { .. }, other) => Err(StrHideError::General(format!(
                 "the HEVC engine cannot be used on a {} carrier",
                 other.as_str()
             ))),
+            #[allow(unreachable_patterns)]
+            _ => Ok(()),
         }
     }
 
     /// Fully resolved knobs, defaults filled in for formats the tuning does not
     /// name. Used by the HEIF bridge, which may end up in either half.
     pub(crate) fn resolve(&self) -> ResolvedTuning {
+        #[allow(unused_mut)]
         let mut resolved = ResolvedTuning::default();
         match self {
             StegoTuning::Auto => {}
+            #[cfg(feature = "content-png")]
             StegoTuning::Png { model, params } => {
                 resolved.png_model = model.model();
                 resolved.png_params = params.clone();
             }
+            #[cfg(feature = "content-jpeg")]
             StegoTuning::Jpeg { model, params } => {
                 resolved.jpeg_model = model.model();
                 resolved.jpeg_params = params.clone();
             }
+            #[cfg(feature = "content-hevc")]
             StegoTuning::Hevc { mode, .. } => resolved.hevc_mode = *mode,
         }
         resolved
@@ -323,20 +363,30 @@ impl StegoTuning {
 /// from the defaults.
 #[derive(Clone)]
 pub(crate) struct ResolvedTuning {
+    #[cfg(feature = "content-png")]
     pub(crate) png_model: Arc<dyn PngCostModel>,
+    #[cfg(feature = "content-png")]
     pub(crate) png_params: PngParams,
+    #[cfg(feature = "content-jpeg")]
     pub(crate) jpeg_model: Arc<dyn JpegCostModel>,
+    #[cfg(feature = "content-jpeg")]
     pub(crate) jpeg_params: JpegParams,
+    #[cfg(feature = "content-hevc")]
     pub(crate) hevc_mode: HevcMode,
 }
 
 impl Default for ResolvedTuning {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "content-png")]
             png_model: SpatialAlgorithm::default().model(),
+            #[cfg(feature = "content-png")]
             png_params: PngParams::default(),
+            #[cfg(feature = "content-jpeg")]
             jpeg_model: JpegAlgorithm::default().model(),
+            #[cfg(feature = "content-jpeg")]
             jpeg_params: JpegParams::default(),
+            #[cfg(feature = "content-hevc")]
             hevc_mode: HevcMode::Auto,
         }
     }
@@ -399,12 +449,14 @@ impl<'a> EmbedOptions<'a> {
     }
 
     /// Replace the PNG tuning, keeping the default model.
+    #[cfg(feature = "content-png")]
     pub fn with_png_tuning(mut self, params: PngParams) -> Self {
         self.tuning = StegoTuning::png(params);
         self
     }
 
     /// Replace the JPEG tuning, keeping the default model.
+    #[cfg(feature = "content-jpeg")]
     pub fn with_jpeg_tuning(mut self, params: JpegParams) -> Self {
         self.tuning = StegoTuning::jpeg(params);
         self
@@ -438,6 +490,7 @@ impl<'a> EmbedOptions<'a> {
     ///
     /// For a caller that sets one knob without naming a model:
     /// `opts.png_params_mut().stc_h = 6`.
+    #[cfg(feature = "content-png")]
     pub fn png_params_mut(&mut self) -> &mut PngParams {
         if !matches!(self.tuning, StegoTuning::Png { .. }) {
             let params = match std::mem::take(&mut self.tuning) {
@@ -453,6 +506,7 @@ impl<'a> EmbedOptions<'a> {
     }
 
     /// Mutable JPEG parameters, switching the tuning to the JPEG arm first.
+    #[cfg(feature = "content-jpeg")]
     pub fn jpeg_params_mut(&mut self) -> &mut JpegParams {
         if !matches!(self.tuning, StegoTuning::Jpeg { .. }) {
             let params = match std::mem::take(&mut self.tuning) {
@@ -583,12 +637,14 @@ impl<'a> ProbeOptions<'a> {
     }
 
     /// Replace the PNG tuning, keeping the default model.
+    #[cfg(feature = "content-png")]
     pub fn with_png_tuning(mut self, params: PngParams) -> Self {
         self.tuning = StegoTuning::png(params);
         self
     }
 
     /// Replace the JPEG tuning, keeping the default model.
+    #[cfg(feature = "content-jpeg")]
     pub fn with_jpeg_tuning(mut self, params: JpegParams) -> Self {
         self.tuning = StegoTuning::jpeg(params);
         self
@@ -709,6 +765,7 @@ impl<'a> ExtractOptions<'a> {
 /// It is public because "embed only in the HEIF thumbnail, leave the primary
 /// image alone" is a legitimate request the router does not expose: the router
 /// always tries Scheme C first.
+#[cfg(feature = "content-heif-bridge")]
 #[derive(Debug, Clone)]
 pub struct BridgeOptions<'a> {
     /// Private-dialect wire-format identities and no-password secret.
@@ -727,6 +784,7 @@ pub struct BridgeOptions<'a> {
     pub freshness: Freshness,
 }
 
+#[cfg(feature = "content-heif-bridge")]
 impl Default for BridgeOptions<'_> {
     /// The official dialect: `BridgeOptions::default()` behaves exactly like
     /// the router with default options, which is what a test wants.
@@ -736,8 +794,10 @@ impl Default for BridgeOptions<'_> {
 }
 
 /// The official dialect, as a value a `Default` impl can borrow.
+#[cfg(feature = "content-heif-bridge")]
 static OFFICIAL_DIALECT: StegoProfile = StegoProfile::new();
 
+#[cfg(feature = "content-heif-bridge")]
 impl<'a> BridgeOptions<'a> {
     /// Official-dialect options with every knob at its default.
     pub const fn new(dialect: &'a StegoProfile) -> Self {

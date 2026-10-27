@@ -240,6 +240,8 @@ pub const DEFAULT_HEVC_FORMAT: HevcFormatProfile = HevcFormatProfile {
 ///
 /// A mismatch on any of the derivation labels behaves exactly like a wrong
 /// password (`NoHiddenData`), which is the point.
+pub const JPEG_SUPERBLOCK_BYTES: usize = 44;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JpegFormatProfile {
     /// Major version; a different value is a different format.
@@ -329,11 +331,10 @@ impl JpegFormatProfile {
         // `sb_bytes` embeds the wrong number of bits -- fewer silently truncates
         // the header and makes every carrier unreadable, more reads past the
         // buffer.
-        if self.sb_bytes as usize != crate::stego::jpeg::header_v3::SUPERBLOCK_BYTES {
+        if self.sb_bytes as usize != JPEG_SUPERBLOCK_BYTES {
             return Some(format!(
                 "sb_bytes must be {}, the serialised superblock length, got {}",
-                crate::stego::jpeg::header_v3::SUPERBLOCK_BYTES,
-                self.sb_bytes
+                JPEG_SUPERBLOCK_BYTES, self.sb_bytes
             ));
         }
         if self.grid_rule.k_min < 1 {

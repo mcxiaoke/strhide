@@ -4,9 +4,13 @@
 //! J-UNIWARD) or fine-tuning existing ones without affecting the embedding
 //! engines.
 
-use crate::stego::params::{JpegParams, PngParams};
+#[cfg(feature = "content-jpeg")]
+use crate::stego::params::JpegParams;
+#[cfg(feature = "content-png")]
+use crate::stego::params::PngParams;
 
 /// Trait implemented by spatial-domain distortion cost models (e.g. HILL, WOW).
+#[cfg(feature = "content-png")]
 pub trait PngCostModel: Send + Sync {
     /// Unique identifier for the algorithm (e.g. "hill", "wow").
     fn id(&self) -> &'static str;
@@ -73,6 +77,7 @@ pub trait PngCostModel: Send + Sync {
 }
 
 /// Trait implemented by JPEG DCT domain distortion cost models (e.g. UERD, J-UNIWARD).
+#[cfg(feature = "content-jpeg")]
 pub trait JpegCostModel: Send + Sync {
     /// Unique identifier for the algorithm (e.g. "uerd", "juniward").
     fn id(&self) -> &'static str;
@@ -143,6 +148,7 @@ pub trait JpegCostModel: Send + Sync {
 /// model needs the index -> (row, col) mapping; a grid width alone is not
 /// enough, and neither `ceil(sqrt(n))` nor `ceil(width/8)` reproduces the
 /// true layout for 4:2:0 carriers.
+#[cfg(feature = "content-jpeg")]
 #[derive(Debug, Clone)]
 pub struct JpegGeometry {
     /// Grid width in blocks of the component's MCU-padded block grid.

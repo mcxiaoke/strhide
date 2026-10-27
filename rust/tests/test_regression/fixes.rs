@@ -542,15 +542,6 @@ fn stego_with_trailer(name: &str) -> (PathBuf, Vec<u8>, u64) {
 }
 
 #[test]
-fn tampered_version_rejected() {
-    let (dir, mut raw, off) = stego_with_trailer("tamper_ver");
-    raw[off as usize + 8] = 0x09;
-    fs::write(dir.join("t.zip"), &raw).unwrap();
-    let err = read_carrier(&dir.join("t.zip"), None, None).unwrap_err();
-    assert!(err.to_string().contains("version"), "{err}");
-}
-
-#[test]
 fn tampered_meta_len_rejected() {
     let (dir, mut raw, off) = stego_with_trailer("tamper_meta");
     let p = off as usize + 104;

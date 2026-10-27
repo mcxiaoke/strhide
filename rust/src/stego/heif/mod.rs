@@ -5,8 +5,10 @@
 //!
 //! The primary HEVC/AVIF photo stream remains 100% bit-exact and untouched.
 
+#[cfg(feature = "content-heif-bridge")]
 pub mod thumb_bridge;
 
+#[cfg(feature = "content-heif-bridge")]
 pub use thumb_bridge::{
     BridgeTarget, BridgeTargetKind, embed_heif_bridge, extract_heif_bridge,
     probe_heif_bridge_capacity,

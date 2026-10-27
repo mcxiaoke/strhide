@@ -1,13 +1,17 @@
 //! Windows Portable Executable (PE) adapter for strhide.
 
 use crate::errors::StrHideError;
+#[cfg(feature = "structure-pe")]
 use crate::structure::adapters::pe_codebits;
+use crate::structure::adapters::pe_layout;
 use crate::structure::adapters::pe_slack;
 use crate::structure::adapters::{
     HostAdapter, SeekRead, SeekWrite, StrategyCapacity, SubStream, format_bytes,
 };
 use crate::structure::envelope::EnvelopeTrailer;
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+#[cfg(feature = "structure-pe")]
+use std::io::Cursor;
+use std::io::{Read, Seek, SeekFrom, Write};
 
 pub const PE_DOS_MAGIC: [u8; 2] = *b"MZ";
 pub const PE_NT_MAGIC: [u8; 4] = *b"PE\x00\x00";
@@ -142,11 +146,26 @@ impl HostAdapter for PeAdapter {
     }
 
     fn supported_strategies(&self) -> Vec<&'static str> {
-        vec!["pe_codebits", "pe_slack", "pe_overlay", "eof"]
+        #[cfg(feature = "structure-pe")]
+        {
+            vec!["pe_codebits", "pe_slack", "pe_overlay", "eof"]
+        }
+        #[cfg(not(feature = "structure-pe"))]
+        {
+            vec!["pe_slack", "pe_overlay", "eof"]
+        }
     }
 
     fn is_scattered_strategy(&self, strategy: &str) -> bool {
-        strategy == "pe_codebits"
+        #[cfg(feature = "structure-pe")]
+        {
+            strategy == "pe_codebits"
+        }
+        #[cfg(not(feature = "structure-pe"))]
+        {
+            let _ = strategy;
+            false
+        }
     }
 
     fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, ube_size: u64) -> &'static str {
@@ -162,6 +181,7 @@ impl HostAdapter for PeAdapter {
         // envelope is written in place, while the code-bit channel must park
         // its `14 + ube` restore diff in padding. So any carrier that fits
         // `pe_codebits` also fits `pe_slack` — the reverse is not true.
+        #[cfg(feature = "structure-pe")]
         if let Ok(layout) = pe_codebits::parse_pe_code_layout_streaming(reader)
             && let Ok(text) = pe_codebits::read_text_range(reader, &layout)
         {
@@ -173,7 +193,7 @@ impl HostAdapter for PeAdapter {
                 return "pe_codebits";
             }
         }
-        if let Ok(layout) = pe_codebits::parse_slack_layout_streaming(reader)
+        if let Ok(layout) = pe_layout::parse_slack_layout_streaming(reader)
             && let Ok(Some(_)) = pe_slack::find_slack_run(
                 reader,
                 &layout.slack_ranges,
@@ -188,6 +208,7 @@ impl HostAdapter for PeAdapter {
     fn strategy_capacities(&self, reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
         // Static answer first; `Some(reader)` replaces it with a measurement of
         // THIS carrier's `.text` and zero-value slack.
+        #[cfg(feature = "structure-pe")]
         let mut codebits = StrategyCapacity {
             strategy: "pe_codebits".into(),
             capacity_bytes: None,
@@ -215,6 +236,7 @@ impl HostAdapter for PeAdapter {
             if let Ok(info) = parse_pe_headers(r) {
                 signed = info.has_authenticode;
             }
+            #[cfg(feature = "structure-pe")]
             match pe_codebits::parse_pe_code_layout_streaming(r) {
                 Ok(layout) => match pe_codebits::read_text_range(r, &layout) {
                     Ok(text) => {
@@ -281,10 +303,10 @@ impl HostAdapter for PeAdapter {
             // Padding capacity is measured independently of `.text`: it works
             // on any architecture, and the limit is the longest single zero run
             // (the envelope is contiguous and self-contained).
-            match pe_codebits::parse_slack_layout_streaming(r) {
+            match pe_layout::parse_slack_layout_streaming(r) {
                 Ok(layout) => {
                     let run =
-                        pe_codebits::max_zero_run_streaming(r, &layout.slack_ranges).unwrap_or(0);
+                        pe_layout::max_zero_run_streaming(r, &layout.slack_ranges).unwrap_or(0);
                     pad.capacity_bytes = Some(run as u64);
                     let plain_ok = run >= crate::structure::envelope::MIN_UBE_PLAIN as usize;
                     pad.available = plain_ok;
@@ -315,6 +337,7 @@ impl HostAdapter for PeAdapter {
         }
 
         let mut caps = vec![
+            #[cfg(feature = "structure-pe")]
             codebits,
             pad,
             StrategyCapacity {
@@ -354,7 +377,7 @@ impl HostAdapter for PeAdapter {
         out: &mut dyn Write,
         strategy: &str,
     ) -> Result<(u64, u64, u32, u32), StrHideError> {
-        if !matches!(strategy, "pe_codebits" | "pe_slack" | "pe_overlay" | "eof") {
+        if !self.supported_strategies().contains(&strategy) {
             return Err(StrHideError::UnsupportedFormat(format!(
                 "Strategy '{strategy}' not supported by PE adapter"
             )));
@@ -375,6 +398,7 @@ impl HostAdapter for PeAdapter {
             )));
         }
 
+        #[cfg(feature = "structure-pe")]
         if strategy == "pe_codebits" {
             return inject_codebits(host_in, ube_in, out);
         }
@@ -403,6 +427,7 @@ impl HostAdapter for PeAdapter {
         // Code-bit channel first (design doc §8.1): a channel carrier has no
         // trailer at EOF and a trailer carrier has no channel, so the two
         // checks are mutually exclusive and the order only affects cost.
+        #[cfg(feature = "structure-pe")]
         if let Some(loc) = locate_codebits(stego_in, expected_trailer_magic)? {
             return Ok(Some(loc));
         }
@@ -454,6 +479,7 @@ impl HostAdapter for PeAdapter {
         ube_total_size: u64,
         strategy: &str,
     ) -> Result<Box<dyn SeekRead + 'a>, StrHideError> {
+        #[cfg(feature = "structure-pe")]
         if strategy == "pe_codebits" {
             let layout = pe_codebits::parse_pe_code_layout_streaming(carrier)?;
             let text = pe_codebits::read_text_range(carrier, &layout)?;
@@ -467,6 +493,7 @@ impl HostAdapter for PeAdapter {
             }
             return Ok(Box::new(Cursor::new(ube)));
         }
+        let _ = strategy;
         Ok(Box::new(SubStream::new(
             carrier,
             ube_offset,
@@ -480,6 +507,7 @@ impl HostAdapter for PeAdapter {
         out: &mut dyn SeekWrite,
         header: &crate::structure::envelope::EnvelopeHeader,
     ) -> Result<(), StrHideError> {
+        #[cfg(feature = "structure-pe")]
         if crate::structure::registry::id_to_strategy(header.strategy_id) == "pe_codebits" {
             return strip_codebits(stego_in, out);
         }
@@ -553,9 +581,11 @@ impl HostAdapter for PeAdapter {
     }
 
     fn strategy_note(&self, strategy: &str, _fallback: bool) -> Option<String> {
+        #[cfg(feature = "structure-pe")]
         if strategy == "pe_codebits" {
-            Some("Embedded into x86/x64 instruction encodings (ModR/M semantic pairs) in .text; carrier file size unchanged (restore diff stored in zero-value PE padding).".into())
-        } else if strategy == "pe_slack" {
+            return Some("Embedded into x86/x64 instruction encodings (ModR/M semantic pairs) in .text; carrier file size unchanged (restore diff stored in zero-value PE padding).".into());
+        }
+        if strategy == "pe_slack" {
             Some("Embedded into Windows PE section alignment padding (file size unchanged; no overlaying data past the last section, executable code untouched).".into())
         } else if strategy == "pe_overlay" {
             Some("Embedded into Windows PE image overlay (executable code and PE sections remain 100% intact).".into())
@@ -571,6 +601,7 @@ impl HostAdapter for PeAdapter {
 /// `(start, end)` with the corresponding replacement bytes. Regions are sorted
 /// internally and must be non-overlapping (the `.text` scan window and the
 /// slack diff region are disjoint by construction).
+#[cfg(feature = "structure-pe")]
 fn copy_with_patches<R: Read + Seek + ?Sized, W: Write + ?Sized>(
     reader: &mut R,
     writer: &mut W,
@@ -616,6 +647,7 @@ fn copy_with_patches<R: Read + Seek + ?Sized, W: Write + ?Sized>(
 /// `.text` instruction encodings and store the restore diff in zero-value
 /// slack. The output has exactly the host's size; `inject_offset` and friends
 /// are all zero because the envelope has no contiguous file location.
+#[cfg(feature = "structure-pe")]
 fn inject_codebits(
     host_in: &mut dyn SeekRead,
     ube_in: &mut dyn SeekRead,
@@ -694,6 +726,7 @@ fn inject_codebits(
 /// the magic (standard `CHANNEL_MAGIC`, legacy `STH!` / `STHC`, or the
 /// password-derived stealth magic passed in as `expected_trailer_magic`).
 /// A magic mismatch is "no channel here".
+#[cfg(feature = "structure-pe")]
 fn locate_codebits(
     stego_in: &mut dyn SeekRead,
     expected_trailer_magic: Option<&[u8; 4]>,
@@ -717,6 +750,7 @@ fn locate_codebits(
 
 /// `pe_codebits` restoration (design doc §7.4): flip the marked `.text`
 /// positions back to their original forms and zero the slack diff region.
+#[cfg(feature = "structure-pe")]
 fn strip_codebits(
     stego_in: &mut dyn SeekRead,
     out: &mut dyn SeekWrite,

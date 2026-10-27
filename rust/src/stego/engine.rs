@@ -24,8 +24,11 @@ use crate::errors::StrHideError;
 use crate::formats::FileFormat;
 use crate::params::StegoProfile;
 use crate::stego::StegoCapacityInfo;
+#[cfg(feature = "content-heif-bridge")]
 use crate::stego::heif::thumb_bridge;
-use crate::stego::options::{EmbedOptions, EmbedOutput, ExtractOptions, HevcMode, ProbeOptions};
+#[cfg(feature = "content-hevc")]
+use crate::stego::options::HevcMode;
+use crate::stego::options::{EmbedOptions, EmbedOutput, ExtractOptions, ProbeOptions};
 
 /// One content-domain embedding engine.
 ///
@@ -65,11 +68,16 @@ pub trait StegoEngine: Send + Sync {
 /// Registry, in lookup order. `HeifEngine` before `Mp4Engine` is not a
 /// preference: their format sets are disjoint, so order is irrelevant, but
 /// keeping the image container first matches how the sniffer presents them.
-static ENGINES: [&dyn StegoEngine; 5] = [
+static ENGINES: &[&dyn StegoEngine] = &[
+    #[cfg(feature = "content-png")]
     &PngEngine,
+    #[cfg(feature = "content-jpeg")]
     &JpegEngine,
+    #[cfg(feature = "content-hevc")]
     &HeifEngine,
+    #[cfg(feature = "content-hevc")]
     &Mp4Engine,
+    #[cfg(feature = "content-hevc")]
     &AnnexBEngine,
 ];
 
@@ -106,8 +114,10 @@ where
 }
 
 /// PNG spatial-domain engine (HILL / S-UNIWARD, STC or Hamming).
+#[cfg(feature = "content-png")]
 pub struct PngEngine;
 
+#[cfg(feature = "content-png")]
 impl StegoEngine for PngEngine {
     fn format(&self) -> FileFormat {
         FileFormat::Png
@@ -198,8 +208,10 @@ impl StegoEngine for PngEngine {
 }
 
 /// JPEG DCT-domain engine (UERD / J-UNIWARD, ternary STC).
+#[cfg(feature = "content-jpeg")]
 pub struct JpegEngine;
 
+#[cfg(feature = "content-jpeg")]
 impl StegoEngine for JpegEngine {
     fn format(&self) -> FileFormat {
         FileFormat::Jpeg
@@ -286,6 +298,7 @@ impl StegoEngine for JpegEngine {
 }
 
 /// Shared Scheme C implementation behind the three HEVC carriers.
+#[cfg(feature = "content-hevc")]
 fn hevc_embed(
     format: FileFormat,
     carrier: &[u8],
@@ -331,6 +344,7 @@ fn hevc_embed(
         // error and hide the real reason.
         Err(e @ StrHideError::SafetyThreshold(_)) => Err(e),
         Err(e) if resolved.hevc_mode == HevcMode::Cabac => Err(e),
+        #[cfg(feature = "content-heif-bridge")]
         Err(_) => {
             let bridge = thumb_bridge::embed_heif_bridge(
                 carrier,
@@ -347,9 +361,12 @@ fn hevc_embed(
             )?;
             Ok(EmbedOutput::bytes_only(bridge))
         }
+        #[cfg(not(feature = "content-heif-bridge"))]
+        Err(e) => Err(e),
     }
 }
 
+#[cfg(feature = "content-hevc")]
 fn hevc_extract(
     format: FileFormat,
     carrier: &[u8],
@@ -376,6 +393,7 @@ fn hevc_extract(
 
     match with_pool(opts.pool.as_ref(), direct) {
         Ok(bytes) => Ok(Payload::owned(bytes)),
+        #[cfg(feature = "content-heif-bridge")]
         Err(e) => {
             match thumb_bridge::extract_heif_bridge(
                 carrier,
@@ -400,9 +418,12 @@ fn hevc_extract(
                 }
             }
         }
+        #[cfg(not(feature = "content-heif-bridge"))]
+        Err(e) => Err(e),
     }
 }
 
+#[cfg(feature = "content-hevc")]
 fn hevc_probe(
     format: FileFormat,
     carrier: &[u8],
@@ -432,6 +453,7 @@ fn hevc_probe(
         // Same order as embed and extract: a probe that advertises the
         // bridge's capacity while the writer fills the CABAC stream (or the
         // other way round) is worse than useless.
+        #[cfg(feature = "content-heif-bridge")]
         Err(_) => thumb_bridge::probe_heif_bridge_capacity(
             carrier,
             &crate::stego::options::BridgeOptions {
@@ -444,12 +466,16 @@ fn hevc_probe(
             },
             &opts.control,
         ),
+        #[cfg(not(feature = "content-heif-bridge"))]
+        Err(e) => Err(e),
     }
 }
 
 /// HEIF/HEIC still image: Scheme C, with the thumbnail bridge as fallback.
+#[cfg(feature = "content-hevc")]
 pub struct HeifEngine;
 
+#[cfg(feature = "content-hevc")]
 impl StegoEngine for HeifEngine {
     fn format(&self) -> FileFormat {
         FileFormat::Heif
@@ -488,8 +514,10 @@ impl StegoEngine for HeifEngine {
 }
 
 /// MP4/MOV video: Scheme C on the sample table, no bridge.
+#[cfg(feature = "content-hevc")]
 pub struct Mp4Engine;
 
+#[cfg(feature = "content-hevc")]
 impl StegoEngine for Mp4Engine {
     fn format(&self) -> FileFormat {
         FileFormat::Mp4
@@ -527,8 +555,10 @@ impl StegoEngine for Mp4Engine {
 }
 
 /// Raw Annex-B HEVC bitstream: Scheme C only.
+#[cfg(feature = "content-hevc")]
 pub struct AnnexBEngine;
 
+#[cfg(feature = "content-hevc")]
 impl StegoEngine for AnnexBEngine {
     fn format(&self) -> FileFormat {
         FileFormat::HevcAnnexB
@@ -571,6 +601,7 @@ mod tests {
     use crate::formats::capability::CAPABILITIES;
 
     #[test]
+    #[cfg(feature = "content")]
     fn every_content_capable_format_has_an_engine() {
         for cap in CAPABILITIES {
             if cap.stego.is_empty() {

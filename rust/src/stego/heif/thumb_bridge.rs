@@ -1,3 +1,5 @@
+#![cfg(feature = "content-heif-bridge")]
+
 //! Content-domain bridge steganography for HEIF/HEIC containers.
 //!
 //! Bridges embedded JPEG thumbnails or uncompressed auxiliary items within ISO BMFF containers
