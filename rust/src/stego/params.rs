@@ -145,15 +145,15 @@ impl SafetyLevel {
     pub fn video_budget(self) -> VideoBudget {
         match self {
             SafetyLevel::Paranoid => VideoBudget {
-                non_ref_fraction: 0.35,
+                non_ref_fraction: 0.1,
                 ref_flips_per_picture: 110,
             },
             SafetyLevel::High => VideoBudget {
-                non_ref_fraction: 0.60,
+                non_ref_fraction: 0.2,
                 ref_flips_per_picture: 220,
             },
             SafetyLevel::Balanced => VideoBudget {
-                non_ref_fraction: 0.95,
+                non_ref_fraction: 0.4,
                 ref_flips_per_picture: 450,
             },
         }

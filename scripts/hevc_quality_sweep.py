@@ -61,15 +61,18 @@ def embed(carrier: Path, payload: Path, out: Path) -> str:
     ])
 
 
-def psnr(cover: Path, stego: Path, stats: Path | None, workdir: Path) -> dict[str, float]:
+def psnr(cover: Path, stego: Path, stats: Path | None, workdir: Path, frames: int | None = None) -> dict[str, float]:
     # Filter options are `:`-separated, so an absolute Windows path (`C:...`)
     # cannot be passed as an option value. ffmpeg runs with `workdir` as its cwd
     # and the stats file is named relative to it instead.
     lavfi = "[0:v][1:v]psnr"
     if stats:
         lavfi += f"=stats_file={stats.name}"
-    log = run(["ffmpeg", "-hide_banner", "-nostdin", "-i", str(cover), "-i", str(stego),
-               "-lavfi", lavfi, "-f", "null", "-"], cwd=workdir)
+    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-i", str(cover), "-i", str(stego)]
+    if frames:
+        cmd += ["-vframes", str(frames)]
+    cmd += ["-lavfi", lavfi, "-f", "null", "-"]
+    log = run(cmd, cwd=workdir)
     match = PSNR_RE.search(log)
     if not match:
         raise SystemExit(f"no PSNR summary:\n{log[-1000:]}")
@@ -86,16 +89,19 @@ def per_frame_psnr(stats: Path) -> list[float]:
     return values
 
 
-def ssim(cover: Path, stego: Path) -> dict[str, float]:
-    log = run(["ffmpeg", "-hide_banner", "-nostdin", "-i", str(cover), "-i", str(stego),
-               "-lavfi", "[0:v][1:v]ssim", "-f", "null", "-"])
+def ssim(cover: Path, stego: Path, frames: int | None = None) -> dict[str, float]:
+    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-i", str(cover), "-i", str(stego)]
+    if frames:
+        cmd += ["-vframes", str(frames)]
+    cmd += ["-lavfi", "[0:v][1:v]ssim", "-f", "null", "-"]
+    log = run(cmd)
     match = SSIM_RE.search(log)
     if not match:
         raise SystemExit(f"no SSIM summary:\n{log[-1000:]}")
     return {"ssim": float(match.group(1))}
 
 
-def vmaf(cover: Path, stego: Path, workdir: Path, model: Path) -> dict[str, float]:
+def vmaf(cover: Path, stego: Path, workdir: Path, model: Path, frames: int | None = None) -> dict[str, float]:
     log_path = workdir / "vmaf.json"
     log_path.unlink(missing_ok=True)
     # Same reason as `psnr`: the model path travels inside a filter option, so it
@@ -103,10 +109,11 @@ def vmaf(cover: Path, stego: Path, workdir: Path, model: Path) -> dict[str, floa
     local_model = workdir / "vmaf_model.json"
     if not local_model.exists():
         local_model.write_bytes(model.read_bytes())
-    log = run(["ffmpeg", "-hide_banner", "-nostdin", "-i", str(cover), "-i", str(stego),
-               "-lavfi",
-               "[0:v][1:v]libvmaf=log_fmt=json:log_path=vmaf.json:model=path=vmaf_model.json",
-               "-f", "null", "-"], cwd=workdir)
+    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-i", str(cover), "-i", str(stego)]
+    if frames:
+        cmd += ["-vframes", str(frames)]
+    cmd += ["-lavfi", "[0:v][1:v]libvmaf=log_fmt=json:log_path=vmaf.json:model=path=vmaf_model.json", "-f", "null", "-"]
+    log = run(cmd, cwd=workdir)
     if not log_path.exists():
         raise SystemExit(f"VMAF produced no log:\n{log[-1000:]}")
     data = json.loads(log_path.read_text(encoding="utf-8"))
@@ -119,6 +126,7 @@ def main() -> int:
     ap.add_argument("--carrier", required=True)
     ap.add_argument("--payloads", required=True, help="逗号分隔的载荷字节数")
     ap.add_argument("--metrics", default="psnr,ssim,vmaf")
+    ap.add_argument("--frames", type=int, default=None, help="限定前 N 帧")
     ap.add_argument(
         "--vmaf-model",
         default=None,
@@ -170,7 +178,7 @@ def main() -> int:
 
             stats = work / f"psnr_{size}.log"
             row: dict[str, float] = {"payload": size}
-            row.update(psnr(carrier, stego, stats, work))
+            row.update(psnr(carrier, stego, stats, work, args.frames))
             frames = per_frame_psnr(stats)
             if frames:
                 finite = [f for f in frames if f != float("inf")]
@@ -183,9 +191,9 @@ def main() -> int:
                     encoding="utf-8",
                 )
             if "ssim" in metrics:
-                row.update(ssim(carrier, stego))
+                row.update(ssim(carrier, stego, args.frames))
             if "vmaf" in metrics:
-                row.update(vmaf(carrier, stego, work, model))
+                row.update(vmaf(carrier, stego, work, model, args.frames))
 
             rows.append(row)
             print(f"{size:>10} {int(size * 4):>9} {row['psnr_avg']:>9.2f} {row['psnr_min']:>7.2f} "

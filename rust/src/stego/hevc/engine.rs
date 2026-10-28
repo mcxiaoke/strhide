@@ -718,6 +718,24 @@ pub fn embed_hevc_patches(
     safety: SafetyPolicy,
     control: &Control<'_>,
 ) -> Result<(Vec<HevcCarrierPatch>, StegoCapacityInfo), StrHideError> {
+    embed_hevc_patches_with_factor(
+        carrier, payload, secret, domain, fmt, freshness, safety, control, 1.0,
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn embed_hevc_patches_with_factor(
+    carrier: &[u8],
+    payload: &Payload<'_>,
+    secret: Option<&str>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+    freshness: Freshness,
+    safety: SafetyPolicy,
+    control: &Control<'_>,
+    window_factor: f64,
+) -> Result<(Vec<HevcCarrierPatch>, StegoCapacityInfo), StrHideError> {
     if payload.is_empty() {
         return Err(StrHideError::General("Cannot embed empty payload".into()));
     }
@@ -733,7 +751,16 @@ pub fn embed_hevc_patches(
     let uncompressed = encode_micro_header(payload);
     let body_msg_len = uncompressed.len() + HEVC_TAG_BYTES;
     let body_needed_slots = StcTrellis::slots_for_params(body_msg_len * 8, fmt.stc_h, fmt.stc_u);
-    let target_slots = HEVC_SUPERBLOCK_POOL_SLOTS + body_needed_slots + 128;
+    let non_ref_fraction = safety.level.video_budget().non_ref_fraction;
+    let factor = if window_factor > 1.0 {
+        window_factor
+    } else if kind == HevcCarrierKind::HeifContainer {
+        1.0
+    } else {
+        (1.0 / non_ref_fraction).max(1.0)
+    };
+    let desired_body_slots = ((body_needed_slots as f64) * factor).ceil() as usize;
+    let target_slots = HEVC_SUPERBLOCK_POOL_SLOTS + desired_body_slots + 128;
 
     control.stage(Stage::Decode);
     let record = record_carrier_state(
@@ -763,9 +790,30 @@ pub fn embed_hevc_patches(
         || total_slots < HEVC_SUPERBLOCK_MIN_SLOTS + body_needed_slots
     {
         return Err(StrHideError::General(format!(
-            "HEVC capacity exceeded: needed {} slots, carrier available {}",
+            "HEVC carrier capacity exceeded: needed at least {} slots, but carrier only has {}",
             HEVC_SUPERBLOCK_MIN_SLOTS + body_needed_slots,
             total_slots
+        )));
+    }
+
+    let is_video = kind == HevcCarrierKind::Mp4Container || record.pictures > 1;
+    if is_video && total_slots < HEVC_SUPERBLOCK_MIN_SLOTS + desired_body_slots {
+        let current_tier = safety.level.as_str();
+        let hint = match safety.level {
+            SafetyLevel::Paranoid => {
+                "carrier capacity insufficient for paranoid tier (0.1 budget); try '--safety high' (0.2) or '--safety balanced' (0.4)"
+            }
+            SafetyLevel::High => {
+                "carrier capacity insufficient for default high tier (0.2 budget); try '--safety balanced' (0.4)"
+            }
+            SafetyLevel::Balanced => {
+                "carrier capacity insufficient for balanced tier (0.4 budget); payload is too large for this carrier"
+            }
+        };
+        return Err(StrHideError::General(format!(
+            "HEVC capacity insufficient for tier '{current_tier}': needed {needed} slots ({factor:.1}x sparsity), carrier only has {available} slots. Hint: {hint}",
+            needed = HEVC_SUPERBLOCK_MIN_SLOTS + desired_body_slots,
+            available = total_slots,
         )));
     }
 
@@ -2778,4 +2826,46 @@ mod safety_policy_tests {
         assert!(enforce_safety(4_788, 4_788, 16_618, p).is_ok());
         assert!(enforce_safety(0, 4_788, 16_618, p).is_ok());
     }
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct ScanStats {
+    pub slices_scanned: usize,
+    pub total_slots: usize,
+    pub band0_slots: usize,
+    pub band1_slots: usize,
+    pub elapsed_micros: u64,
+}
+
+#[doc(hidden)]
+pub fn bench_scan_slices(
+    carrier: &[u8],
+    slice_count: usize,
+    full_capture: bool,
+) -> Result<ScanStats, StrHideError> {
+    let kind = sniff_hevc_carrier(carrier)
+        .ok_or_else(|| StrHideError::UnsupportedFormat("Not HEVC carrier".into()))?;
+    let capture = if full_capture {
+        Capture::Full
+    } else {
+        Capture::Bits
+    };
+    let t0 = std::time::Instant::now();
+    let record = record_carrier_state(
+        carrier,
+        kind,
+        capture,
+        StopCondition::TargetSlices(slice_count),
+    )?;
+    let elapsed = t0.elapsed().as_micros() as u64;
+    let band0 = record.bands.first().map_or(0, |r| r.len());
+    let band1 = record.bands.get(1).map_or(0, |r| r.len());
+    Ok(ScanStats {
+        slices_scanned: record.slice_slot_ranges.len(),
+        total_slots: band0 + band1,
+        band0_slots: band0,
+        band1_slots: band1,
+        elapsed_micros: elapsed,
+    })
 }
