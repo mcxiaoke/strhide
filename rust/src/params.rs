@@ -19,6 +19,8 @@
 //! `LocalParams` never changes the UBE v2.2 wire format: chunk framing and
 //! compression are self-describing in the envelope.
 
+use serde::{Deserialize, Serialize};
+
 use crate::crypto::{CHUNK_SIZE, MAX_CHUNK_SIZE};
 
 /// Standard high-entropy binary header magic (8 bytes): SHA-256("strhide-standard-header-v2")[..8]
@@ -71,7 +73,7 @@ impl MagicPair {
 ///
 /// **L class.** Only the writer decides; the reader trusts `FLAG_COMPRESSED`
 /// and always inflates raw deflate, independent of the level used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum CompressionStrategy {
     /// Compress when it saves at least 2% (the historical rule) at level 6.
@@ -114,7 +116,7 @@ impl CompressionStrategy {
 ///
 /// **L class.** The checks protect the carrier from being written when it looks
 /// signed or unwritable; they never affect what the reader can decode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum RejectionPolicy {
     /// Every check: container signatures (PE/PDF/JAR), filename policy (APK,
@@ -135,7 +137,7 @@ pub enum RejectionPolicy {
 /// carrier unreadable: the reader derives everything it needs from the
 /// envelope (chunk lengths are self-framing, compression is flagged, and
 /// neither is negotiated).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct LocalParams {
     /// Plaintext bytes per AEAD chunk. Default 2 MiB, maximum 64 MiB.

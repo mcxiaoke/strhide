@@ -16,5 +16,5 @@ pub mod capability;
 pub mod jpeg_segments;
 pub mod sniff;
 
-pub use capability::{CAPABILITIES, Capability, StegoKind, capability_of};
+pub use capability::{CAPABILITIES, Capability, MemoryProfile, StegoKind, capability_of};
 pub use sniff::{FileFormat, sniff_bytes, sniff_stream};

@@ -26,7 +26,7 @@ pub mod registry;
 pub mod rejection;
 
 pub use engine::*;
-pub use options::{ReadOptions, RestoreOptions, WriteOptions};
+pub use options::{ReadOptions, RestoreOptions, StrategyChoice, WriteOptions};
 pub use params::StructureProfile;
 pub use registry::{
     ADAPTERS, STRATEGY_REGISTRY, StrategyId, find_adapter, find_adapter_or_reject,

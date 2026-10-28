@@ -180,11 +180,8 @@ fn check_pipeline_budget(base_bytes: u64, body_n: usize, h: u8) -> Result<(), St
 ///
 /// Deliberately stderr-only and off by default: the library has no logging
 /// dependency, and the matrix script is the main consumer.
-fn trace(msg: &str) {
-    if std::env::var_os("STRHIDE_STEGO_TRACE").is_some() {
-        eprintln!("[stego] {msg}");
-    }
-}
+#[inline(always)]
+fn trace(_msg: &str) {}
 
 /// Everything both ends derive from the carrier alone.
 struct CoverFrame {

@@ -330,6 +330,43 @@ pub fn map_io_cancel(control: &Control<'_>, err: StrHideError) -> StrHideError {
     }
 }
 
+/// Owned carrier of progress reporter and cancel token for background worker threads (GUI / async tasks).
+///
+/// Preserves the lightweight `Copy` semantics of [`Control<'_>`] while providing an owned,
+/// thread-safe container that can be safely moved across thread boundaries.
+#[derive(Clone, Default)]
+pub struct TaskControl {
+    pub progress: Option<std::sync::Arc<dyn Progress>>,
+    pub cancel: std::sync::Arc<CancelToken>,
+}
+
+impl TaskControl {
+    pub fn new(progress: impl Progress + 'static) -> Self {
+        Self {
+            progress: Some(std::sync::Arc::new(progress)),
+            cancel: std::sync::Arc::new(CancelToken::new()),
+        }
+    }
+
+    pub fn with_cancel(cancel: std::sync::Arc<CancelToken>) -> Self {
+        Self {
+            progress: None,
+            cancel,
+        }
+    }
+
+    /// Borrow an ephemeral [`Control<'_>`] suitable for passing into options structs.
+    pub fn borrow_control(&self) -> Control<'_> {
+        Control {
+            progress: match &self.progress {
+                Some(p) => p.as_ref(),
+                None => &NoProgress,
+            },
+            cancel: Some(&self.cancel),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,5 +462,17 @@ mod tests {
         started_rx.recv().expect("worker started");
         token.cancel();
         handle.join().expect("worker");
+    }
+
+    #[test]
+    fn task_control_borrows_and_cancels() {
+        let task_ctrl = TaskControl::new(Recorder::default());
+        let ctrl = task_ctrl.borrow_control();
+        assert!(!ctrl.is_cancelled());
+        assert!(ctrl.check().is_ok());
+
+        task_ctrl.cancel.cancel();
+        assert!(ctrl.is_cancelled());
+        assert!(matches!(ctrl.check(), Err(StrHideError::Cancelled)));
     }
 }

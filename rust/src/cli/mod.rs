@@ -169,6 +169,10 @@ pub(crate) fn run_cli_with(engine: &StrHide, argv: Vec<OsString>) -> i32 {
     );
     i18n::set_lang(lang);
 
+    for warn in &cfg.warnings {
+        eprintln!("{warn}");
+    }
+
     // 4) 从 matches 构造 Cli
     let cli = match Cli::from_arg_matches(&pre) {
         Ok(c) => c,

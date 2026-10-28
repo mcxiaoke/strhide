@@ -326,21 +326,21 @@ pub enum ErrorKind {
 
 /// The parts of an [`StrHideError`], separated so a non-English front end can
 /// render it instead of scraping [`Display`](std::fmt::Display).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorDetail {
     /// Machine-readable stable classification.
     pub kind: ErrorKind,
     /// Localizable category enum key (serialized as its stable ID e.g. "ErrPassword").
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub category: Option<crate::core::i18n::Msg>,
     /// Pre-rendered category label in the active language.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub category_label: Option<&'static str>,
     /// The detail text, in English. Engine-generated, so it is not translated;
     /// the category label around it is.
     pub detail: String,
     /// The envelope password hint, when the error carries one.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
 }
 

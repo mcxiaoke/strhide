@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rand::RngExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::commit::{TmpGuard, next_backup_path};
 use crate::structure::adapters::{
@@ -59,12 +59,34 @@ use crate::structure::rejection::run_rejection_checks;
 /// This is the metadata that survives `read`: the original filename, the
 /// uncompressed payload size, its SHA-256, and a write timestamp. On extract,
 /// `raw_sha256` is re-computed over the decrypted payload and must match.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CarrierMetadata {
     pub filename: String,
     pub raw_size: u64,
     pub raw_sha256: String,
     pub created_at: u64,
+}
+
+/// Inspection status of the envelope's encrypted metadata block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MetadataInspection {
+    Decrypted(CarrierMetadata),
+    DecryptFailed { error: String },
+}
+
+impl std::fmt::Display for MetadataInspection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decrypted(meta) => {
+                let json = serde_json::to_string(meta).map_err(|_| std::fmt::Error)?;
+                write!(f, "{json}")
+            }
+            Self::DecryptFailed { error } => {
+                write!(f, "{{\"error\":\"{error}\"}}")
+            }
+        }
+    }
 }
 
 /// Stealth mode password derivation domain separation string.
@@ -340,7 +362,7 @@ impl<'a> PayloadSource<'a> {
 /// Typed rather than a pre-rendered sentence so a front end can group, filter,
 /// or localize it (plan §5.3). Every variant carries the numbers it talks
 /// about, so no consumer has to parse them back out of prose.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Warning {
@@ -441,7 +463,7 @@ pub struct WriteResult {
 }
 
 /// Outcome of a successful [`read_carrier`] / [`read_carrier_with_dialect`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ReadResult {
     /// Path the carrier was read from, or `<memory>` for the byte-level
     /// entry points.
@@ -460,12 +482,45 @@ pub struct ReadResult {
     pub written_file: Option<PathBuf>,
 }
 
+/// Lightweight IPC read outcome summary omitting raw payload bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadSummary {
+    pub carrier: PathBuf,
+    pub is_file: bool,
+    pub is_encrypted: bool,
+    pub filename: String,
+    pub raw_size: u64,
+    pub written_file: Option<PathBuf>,
+    /// Only present when payload is UTF-8 readable and <= 64 KiB
+    pub text_preview: Option<String>,
+}
+
+impl ReadResult {
+    /// Convert to a lightweight [`ReadSummary`] suitable for IPC transfer across WebView/IPC boundaries.
+    pub fn summary(&self) -> ReadSummary {
+        let text_preview = if self.data.len() <= 64 * 1024 {
+            std::str::from_utf8(&self.data).ok().map(|s| s.to_string())
+        } else {
+            None
+        };
+        ReadSummary {
+            carrier: self.carrier.clone(),
+            is_file: self.is_file,
+            is_encrypted: self.is_encrypted,
+            filename: self.filename.clone(),
+            raw_size: self.raw_size,
+            written_file: self.written_file.clone(),
+            text_preview,
+        }
+    }
+}
+
 /// Outcome of [`inspect_carrier`].
 ///
 /// Every field is `Option`-wrapped so the same type can describe a carrier
 /// with no envelope: `has_hidden_data == false`, and all envelope-derived
 /// fields are `None`. `strategies` is always populated.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InspectResult {
     /// Path inspected.
     pub carrier: PathBuf,
@@ -499,7 +554,10 @@ pub struct InspectResult {
     /// Decrypted metadata (payload filename, size, sha256, created_at),
     /// when it could be decrypted.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
+    pub metadata: Option<MetadataInspection>,
+    /// Detected suspicious stealth envelope structure markers when has_hidden_data is false.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suspicious_hints: Vec<String>,
     /// Capacity of every supported strategy for this carrier, in recommended
     /// priority order. Always present (also when an envelope already exists,
     /// answering "how much more could fit").
@@ -1242,7 +1300,7 @@ pub fn write_carrier_with(
         backup_file = Some(bak);
     }
 
-    std::fs::rename(&tmp_target, target_path)?;
+    crate::commit::rename_with_retry(&tmp_target, target_path)?;
     tmp_guard.commit();
 
     // Restore original carrier permissions (mode/readonly) alongside timestamps.
@@ -1879,7 +1937,7 @@ pub fn remove_carrier_with_dialect(
         backup_file = Some(bak);
     }
 
-    std::fs::rename(&tmp_target, target_path)?;
+    crate::commit::rename_with_retry(&tmp_target, target_path)?;
     tmp_guard.commit();
     let _ = std::fs::set_permissions(target_path, orig_permissions);
     let _ = filetime::set_file_times(target_path, orig_atime, orig_mtime);
@@ -2001,6 +2059,8 @@ fn inspect_core(
     let (ube_offset, ube_total_size, strategy_name) = match loc {
         Some(l) => l,
         None => {
+            let _ = host.seek(std::io::SeekFrom::Start(0));
+            let suspicious_hints = adapter.suspicious_structures(host);
             return Ok(InspectResult {
                 carrier: PathBuf::from(label),
                 format: adapter_format(adapter)?,
@@ -2015,6 +2075,7 @@ fn inspect_core(
                 orig_host_size: None,
                 orig_host_sha256: None,
                 metadata: None,
+                suspicious_hints,
                 strategies,
             });
         }
@@ -2050,10 +2111,8 @@ fn inspect_core(
             } else {
                 None
             };
-            if let Some(meta_obj) = decoded
-                && let Ok(val) = serde_json::to_value(&meta_obj)
-            {
-                meta_val = Some(val);
+            if let Some(meta_obj) = decoded {
+                meta_val = Some(MetadataInspection::Decrypted(meta_obj));
             }
         }
     } else if let Some(pwd) = password {
@@ -2067,13 +2126,13 @@ fn inspect_core(
                 &header.base_nonce,
                 &header.get_aad(),
             ) {
-                if let Ok(meta_obj) = decode_metadata(&dec, header.is_compact_meta())
-                    && let Ok(val) = serde_json::to_value(&meta_obj)
-                {
-                    meta_val = Some(val);
+                if let Ok(meta_obj) = decode_metadata(&dec, header.is_compact_meta()) {
+                    meta_val = Some(MetadataInspection::Decrypted(meta_obj));
                 }
             } else {
-                meta_val = Some(serde_json::json!({"error": "Invalid password"}));
+                meta_val = Some(MetadataInspection::DecryptFailed {
+                    error: "Invalid password".to_string(),
+                });
             }
         }
     }
@@ -2104,6 +2163,7 @@ fn inspect_core(
                 .collect::<String>(),
         ),
         metadata: meta_val,
+        suspicious_hints: Vec::new(),
         strategies,
     })
 }
@@ -2452,5 +2512,37 @@ mod compact_meta_tests {
             w2.render(RenderCtx::new(Lang::Zh))
                 .contains("载体呈现与隐藏信封一致的结构")
         );
+    }
+
+    #[test]
+    fn test_read_summary_and_metadata_inspection() {
+        let read = ReadResult {
+            carrier: PathBuf::from("test.png"),
+            data: b"hello world".to_vec(),
+            is_file: false,
+            is_encrypted: false,
+            filename: String::new(),
+            raw_size: 11,
+            written_file: None,
+        };
+        let summary = read.summary();
+        assert_eq!(summary.raw_size, 11);
+        assert_eq!(summary.text_preview, Some("hello world".into()));
+
+        let meta = CarrierMetadata {
+            filename: "secret.txt".into(),
+            raw_size: 100,
+            raw_sha256: "0".repeat(64),
+            created_at: 12345678,
+        };
+        let inspection = MetadataInspection::Decrypted(meta.clone());
+        let json = serde_json::to_string(&inspection).expect("serialize");
+        assert!(json.contains("secret.txt"));
+
+        let fail = MetadataInspection::DecryptFailed {
+            error: "Invalid password".into(),
+        };
+        let json_fail = serde_json::to_string(&fail).expect("serialize");
+        assert!(json_fail.contains("Invalid password"));
     }
 }

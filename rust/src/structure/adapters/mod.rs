@@ -54,7 +54,7 @@ pub use zip::ZipAdapter;
 
 use crate::errors::StrHideError;
 use crate::structure::envelope::EnvelopeHeader;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, Write};
 
 /// Combination trait: anything that is both [`Read`] and [`Seek`]. Auto-implemented
@@ -93,7 +93,7 @@ pub struct FinalizeCtx<'a> {
 /// Produced by [`HostAdapter::strategy_capacities`]. The vector returned by an
 /// adapter is ordered by **recommended priority**, matching the order in which
 /// the auto strategy prefers them.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StrategyCapacity {
     pub strategy: String,
     /// Exact maximum UBE envelope size in bytes, when it can be stated as a

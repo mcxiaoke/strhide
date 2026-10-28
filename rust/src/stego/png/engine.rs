@@ -731,11 +731,8 @@ fn deflate_len(data: &[u8], level: u32) -> usize {
 ///
 /// Deliberately stderr-only and off by default, mirroring the JPEG engine's
 /// `[stego]` lines; the `[png]` prefix says which carrier produced the line.
-fn trace(msg: &str) {
-    if std::env::var_os("STRHIDE_STEGO_TRACE").is_some() {
-        eprintln!("[png] {msg}");
-    }
-}
+#[inline(always)]
+fn trace(_msg: &str) {}
 
 /// Apply PNG filter `filter` to one reconstructed scanline (`cur`), given
 /// the previous reconstructed row (`prev`). Inverse of the unfilter step in

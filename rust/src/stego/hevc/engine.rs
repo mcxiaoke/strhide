@@ -1640,22 +1640,26 @@ fn extract_hevc_record(
 }
 
 /// Inspect HEVC carrier for steganographic header using an already recorded carrier state.
+#[allow(clippy::too_many_arguments)]
 fn inspect_hevc_record(
     carrier: &[u8],
     kind: HevcCarrierKind,
     record: &CarrierRecord,
+    media_info: Option<MediaInfo>,
     secret: Option<&str>,
     domain: Option<&str>,
     fmt: &HevcFormatProfile,
     control: &Control<'_>,
 ) -> Result<StegoHeaderInfo, StrHideError> {
     control.check()?;
-    let (width, height) = extract_hevc_dimensions(carrier).unwrap_or((0, 0));
-    let media_info = if width > 0 && height > 0 {
-        Some(MediaInfo::new(width, height))
-    } else {
-        None
-    };
+    let media_info = media_info.or_else(|| {
+        let (width, height) = extract_hevc_dimensions(carrier).unwrap_or((0, 0));
+        if width > 0 && height > 0 {
+            Some(MediaInfo::new(width, height))
+        } else {
+            None
+        }
+    });
     let mut empty_info = StegoHeaderInfo::empty(match kind {
         HevcCarrierKind::HeifContainer => "HEIF/HEVC",
         HevcCarrierKind::AnnexBStream => "HEVC-AnnexB",
@@ -1754,7 +1758,211 @@ pub fn inspect_hevc(
         Ok(r) => r,
         Err(_) => return Ok(empty_info),
     };
-    inspect_hevc_record(carrier, kind, &record, secret, domain, fmt, control)
+    inspect_hevc_record(
+        carrier, kind, &record, media_info, secret, domain, fmt, control,
+    )
+}
+
+/// Stream-inspect an MP4 carrier directly from disk using Seek + Read, bounding peak memory to < 8 MiB
+/// even for multi-gigabyte video files.
+pub fn inspect_hevc_mp4_file(
+    carrier_path: &std::path::Path,
+    secret: Option<&str>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+    control: &Control<'_>,
+) -> Result<StegoHeaderInfo, StrHideError> {
+    use std::io::{Read, Seek, SeekFrom};
+    control.check()?;
+    check_header_bytes(fmt)?;
+
+    let mut file = std::fs::File::open(carrier_path)?;
+    let file_len = file.metadata()?.len() as usize;
+
+    let mut pos: u64 = 0;
+    let mut moov_box: Option<(u64, usize)> = None;
+    while pos + 8 <= file_len as u64 {
+        file.seek(SeekFrom::Start(pos))?;
+        let mut header = [0u8; 8];
+        if file.read_exact(&mut header).is_err() {
+            break;
+        }
+        let size32 = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let tag = [header[4], header[5], header[6], header[7]];
+        let (header_len, total_size) = if size32 == 1 {
+            let mut s64 = [0u8; 8];
+            if file.read_exact(&mut s64).is_err() {
+                break;
+            }
+            (16u64, u64::from_be_bytes(s64))
+        } else if size32 == 0 {
+            (8u64, (file_len as u64) - pos)
+        } else {
+            (8u64, size32 as u64)
+        };
+        if total_size < header_len
+            || pos
+                .checked_add(total_size)
+                .is_none_or(|e| e > file_len as u64)
+        {
+            break;
+        }
+        if &tag == b"moov" {
+            moov_box = Some((pos, total_size as usize));
+            break;
+        }
+        pos += total_size;
+    }
+
+    let (moov_pos, moov_size) = match moov_box {
+        Some(b) => b,
+        None => return Ok(StegoHeaderInfo::empty("MP4/HEVC")),
+    };
+
+    if moov_size > 32 * 1024 * 1024 {
+        return Err(StrHideError::UnsupportedFormat(
+            "MP4 moov box exceeds 32 MiB".into(),
+        ));
+    }
+
+    file.seek(SeekFrom::Start(moov_pos))?;
+    let mut moov_bytes = vec![0u8; moov_size];
+    file.read_exact(&mut moov_bytes)?;
+
+    let target = match crate::stego::hevc::mp4_boxes::parse_moov_target(&moov_bytes, file_len) {
+        Ok(t) => t,
+        Err(_) => return Ok(StegoHeaderInfo::empty("MP4/HEVC")),
+    };
+
+    let mut media_info = None;
+    for ps in &target.parameter_sets {
+        if ps.len() > 2
+            && (ps[0] >> 1) & 0x3F == NAL_SPS_NUT
+            && let Some(dims) = sps_dimensions(&nal_rbsp(ps))
+        {
+            media_info = Some(MediaInfo::new(dims.0, dims.1));
+            break;
+        }
+    }
+
+    let mut empty_info = StegoHeaderInfo::empty("MP4/HEVC");
+    empty_info.media_info = media_info;
+
+    let mut decoder = Decoder::new();
+    decoder.ablate = Ablate {
+        mc: true,
+        intra: true,
+        residual: true,
+    };
+    for ps in &target.parameter_sets {
+        let _ = decoder.push_nal(ps, None);
+    }
+    let parameter_sets = owned_parameter_sets(&target.parameter_sets);
+
+    let mut sink = SlotSink::new(Capture::Bits);
+    let mut recorded_slices = 0usize;
+    let mut slice_idx = 0usize;
+
+    for &(sample_offset, sample_size) in &target.samples {
+        control.check()?;
+        if sample_size < 4 || sample_offset + sample_size > file_len {
+            continue;
+        }
+        if sample_size > 8 * 1024 * 1024 {
+            continue;
+        }
+        file.seek(SeekFrom::Start(sample_offset as u64))?;
+        let mut sample_buf = vec![0u8; sample_size];
+        if file.read_exact(&mut sample_buf).is_err() {
+            continue;
+        }
+
+        let mut spans = Vec::new();
+        if crate::stego::hevc::mp4_boxes::collect_sample_slice_spans(
+            &sample_buf,
+            0,
+            sample_size,
+            target.length_size,
+            &mut spans,
+        )
+        .is_err()
+        {
+            continue;
+        }
+
+        for span in spans {
+            let slice_bytes = &sample_buf[span.start..span.end()];
+            if slice_bytes.len() < 2 {
+                continue;
+            }
+            let (nal_type, _, _) = nal_header_fields(slice_bytes);
+            let Some(band) = picture_band(nal_type, false) else {
+                let _ = decoder.push_nal(slice_bytes, None);
+                drain_frames(&mut decoder);
+                continue;
+            };
+
+            let mut recorder = CabacRecorder::with_slice_mode(slice_idx, band, RecordMode::Slots);
+            let decoded = decoder.decode_nal_with_observer(slice_bytes, &mut recorder);
+            drain_frames(&mut decoder);
+            if decoded.is_ok() && !recorder.substreams.is_empty() {
+                let rbsp = nal_rbsp(slice_bytes);
+                absorb_recorder(&mut recorder, &rbsp, &mut sink);
+                recorded_slices += 1;
+                slice_idx += 1;
+                let current_slots = sink.counts[0] + sink.counts[1];
+                if current_slots >= HEVC_SUPERBLOCK_POOL_SLOTS {
+                    break;
+                }
+            }
+        }
+
+        let current_slots = sink.counts[0] + sink.counts[1];
+        if current_slots >= HEVC_SUPERBLOCK_POOL_SLOTS {
+            break;
+        }
+    }
+
+    let total_slots = sink.counts[0] + sink.counts[1];
+    if total_slots < HEVC_SUPERBLOCK_MIN_SLOTS {
+        return Ok(empty_info);
+    }
+
+    let SlotSink {
+        counts,
+        band_bits,
+        raw_bits,
+        raw_slots,
+        slice_slot_ranges,
+        ..
+    } = sink;
+    let band0_len = counts[0];
+    let [band0_bits, band1_bits] = band_bits;
+    let bands = vec![0..band0_len, band0_len..total_slots];
+
+    let record = CarrierRecord {
+        slice_contexts: Vec::new(),
+        all_slots: raw_slots,
+        band_bits: [band0_bits.bytes, band1_bits.bytes],
+        bands,
+        pictures: target.picture_count,
+        band_pictures: [target.picture_count, 0],
+        digest_inputs: DigestInputs::ParameterSets { parameter_sets },
+        recorded_slices,
+        raw_bits: raw_bits.bytes,
+        slice_slot_ranges,
+    };
+
+    inspect_hevc_record(
+        &[],
+        HevcCarrierKind::Mp4Container,
+        &record,
+        media_info,
+        secret,
+        domain,
+        fmt,
+        control,
+    )
 }
 
 /// Three-level diagnostic verification for HEVC carriers.
@@ -1830,7 +2038,8 @@ pub fn verify_hevc(
     };
     control.check()?;
 
-    let header_info = inspect_hevc_record(carrier, kind, &record, secret, domain, fmt, control)?;
+    let header_info =
+        inspect_hevc_record(carrier, kind, &record, None, secret, domain, fmt, control)?;
     if !header_info.has_hidden_data {
         levels.push(VerifyLevel::fail(
             2,

@@ -102,11 +102,21 @@ pub enum Domain {
 }
 
 /// Options controlling a dual-domain inspection pass.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct DualOptions<'a> {
     pub password: Option<&'a str>,
     pub domain: Option<&'a str>,
     pub control: Control<'a>,
+}
+
+impl std::fmt::Debug for DualOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DualOptions")
+            .field("password", &self.password.map(|_| "<redacted>"))
+            .field("domain", &self.domain)
+            .field("control", &self.control)
+            .finish()
+    }
 }
 
 /// Cross-domain inspection diagnosis.
@@ -127,7 +137,7 @@ pub struct DualInspect {
 
 /// Options for automatic domain selection extraction.
 #[cfg(all(feature = "structure-base", feature = "content-base"))]
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct SmartExtractOptions<'a> {
     pub password: Option<&'a str>,
     pub domain: Option<&'a str>,
@@ -136,6 +146,19 @@ pub struct SmartExtractOptions<'a> {
     /// Preferred domain when both domains hold hidden data (defaults to Structure).
     pub prefer: Option<Domain>,
     pub control: Control<'a>,
+}
+
+#[cfg(all(feature = "structure-base", feature = "content-base"))]
+impl std::fmt::Debug for SmartExtractOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmartExtractOptions")
+            .field("password", &self.password.map(|_| "<redacted>"))
+            .field("domain", &self.domain)
+            .field("limits", &self.limits)
+            .field("prefer", &self.prefer)
+            .field("control", &self.control)
+            .finish()
+    }
 }
 
 /// Structured outcome of automatic domain selection extraction.

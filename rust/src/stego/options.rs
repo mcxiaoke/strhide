@@ -114,6 +114,21 @@ impl std::fmt::Debug for SpatialAlgorithm {
     }
 }
 
+#[cfg(feature = "content-png")]
+impl PartialEq for SpatialAlgorithm {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Hill, Self::Hill) => true,
+            (Self::Suniward, Self::Suniward) => true,
+            (Self::Custom(a), Self::Custom(b)) => Arc::ptr_eq(a, b) || a.id() == b.id(),
+            _ => false,
+        }
+    }
+}
+
+#[cfg(feature = "content-png")]
+impl Eq for SpatialAlgorithm {}
+
 /// JPEG DCT-domain cost model selection.
 #[cfg(feature = "content-jpeg")]
 #[derive(Clone, Default)]
@@ -167,6 +182,21 @@ impl std::fmt::Debug for JpegAlgorithm {
     }
 }
 
+#[cfg(feature = "content-jpeg")]
+impl PartialEq for JpegAlgorithm {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Uerd, Self::Uerd) => true,
+            (Self::Juniward, Self::Juniward) => true,
+            (Self::Custom(a), Self::Custom(b)) => Arc::ptr_eq(a, b) || a.id() == b.id(),
+            _ => false,
+        }
+    }
+}
+
+#[cfg(feature = "content-jpeg")]
+impl Eq for JpegAlgorithm {}
+
 /// Which HEVC scheme the caller wants for a HEIF carrier.
 #[cfg(feature = "content-hevc")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -211,7 +241,7 @@ pub struct HevcParams {}
 /// carrier turns out to be", which is what every existing caller does. Naming a
 /// format pins that half explicitly -- and makes a mismatch (a PNG cost model on
 /// a JPEG carrier) an error instead of a silently ignored field.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub enum StegoTuning {
     /// Per-format defaults.
     #[default]
@@ -401,7 +431,7 @@ impl Default for ResolvedTuning {
 /// credential, or a policy. The private no-password secret is **not** here: it
 /// is dialect state ([`StegoProfile`]) and travels as its own argument, so there
 /// is exactly one object to store and pass around.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct EmbedOptions<'a> {
     /// User password. Winning over the dialect's private secret when non-empty;
     /// an empty string counts as "not supplied".
@@ -422,6 +452,40 @@ pub struct EmbedOptions<'a> {
     pub pool: Option<Arc<rayon::ThreadPool>>,
     /// Omit original filename from micro-header even when payload came from a file.
     pub no_filename: bool,
+}
+
+impl PartialEq for EmbedOptions<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.password == other.password
+            && self.domain == other.domain
+            && self.safety == other.safety
+            && self.tuning == other.tuning
+            && self.freshness == other.freshness
+            && self.exact == other.exact
+            && self.control == other.control
+            && self.no_filename == other.no_filename
+            && match (&self.pool, &other.pool) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+}
+
+impl std::fmt::Debug for EmbedOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbedOptions")
+            .field("password", &self.password.map(|_| "<redacted>"))
+            .field("domain", &self.domain)
+            .field("safety", &self.safety)
+            .field("tuning", &self.tuning)
+            .field("freshness", &self.freshness)
+            .field("exact", &self.exact)
+            .field("control", &self.control)
+            .field("pool", &self.pool.as_ref().map(|_| "<ThreadPool>"))
+            .field("no_filename", &self.no_filename)
+            .finish()
+    }
 }
 
 impl<'a> EmbedOptions<'a> {
@@ -599,7 +663,7 @@ impl<'a> EmbedOptions<'a> {
 /// recommendation is derived from it) and the tuning (a probe that advertises
 /// the capacity of a different configuration than the writer is worse than
 /// useless).
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ProbeOptions<'a> {
     /// User password; keys the spatial header permutation.
     pub password: Option<&'a str>,
@@ -615,6 +679,36 @@ pub struct ProbeOptions<'a> {
     pub control: Control<'a>,
     /// Rayon pool to run on.
     pub pool: Option<Arc<rayon::ThreadPool>>,
+}
+
+impl PartialEq for ProbeOptions<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.password == other.password
+            && self.domain == other.domain
+            && self.safety == other.safety
+            && self.tuning == other.tuning
+            && self.exact == other.exact
+            && self.control == other.control
+            && match (&self.pool, &other.pool) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+}
+
+impl std::fmt::Debug for ProbeOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProbeOptions")
+            .field("password", &self.password.map(|_| "<redacted>"))
+            .field("domain", &self.domain)
+            .field("safety", &self.safety)
+            .field("tuning", &self.tuning)
+            .field("exact", &self.exact)
+            .field("control", &self.control)
+            .field("pool", &self.pool.as_ref().map(|_| "<ThreadPool>"))
+            .finish()
+    }
 }
 
 impl<'a> ProbeOptions<'a> {
@@ -698,7 +792,7 @@ impl<'a> ProbeOptions<'a> {
 /// No tuning (see the module docs: the carrier is self-describing), no salt
 /// source, no safety policy -- a reader that refuses a carrier because it
 /// exceeds a write-side tier would be inventing a failure.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ExtractOptions<'a> {
     /// User password.
     pub password: Option<&'a str>,
@@ -710,6 +804,32 @@ pub struct ExtractOptions<'a> {
     pub control: Control<'a>,
     /// Rayon pool to run on.
     pub pool: Option<Arc<rayon::ThreadPool>>,
+}
+
+impl PartialEq for ExtractOptions<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.password == other.password
+            && self.domain == other.domain
+            && self.limits == other.limits
+            && self.control == other.control
+            && match (&self.pool, &other.pool) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+}
+
+impl std::fmt::Debug for ExtractOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtractOptions")
+            .field("password", &self.password.map(|_| "<redacted>"))
+            .field("domain", &self.domain)
+            .field("limits", &self.limits)
+            .field("control", &self.control)
+            .field("pool", &self.pool.as_ref().map(|_| "<ThreadPool>"))
+            .finish()
+    }
 }
 
 impl<'a> ExtractOptions<'a> {
@@ -951,12 +1071,23 @@ impl StegoHeaderInfo {
 }
 
 /// Options for inspecting a content carrier for steganographic headers.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct InspectOptions<'a> {
     pub password: Option<&'a str>,
     pub domain: Option<&'a str>,
     pub limits: ExtractParams,
     pub control: Control<'a>,
+}
+
+impl std::fmt::Debug for InspectOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InspectOptions")
+            .field("password", &self.password.map(|_| "<redacted>"))
+            .field("domain", &self.domain)
+            .field("limits", &self.limits)
+            .field("control", &self.control)
+            .finish()
+    }
 }
 
 impl<'a> InspectOptions<'a> {
@@ -1058,12 +1189,23 @@ impl StegoVerifyResult {
 }
 
 /// Options for verifying a content carrier through diagnostic levels.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct VerifyOptions<'a> {
     pub password: Option<&'a str>,
     pub domain: Option<&'a str>,
     pub limits: ExtractParams,
     pub control: Control<'a>,
+}
+
+impl std::fmt::Debug for VerifyOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifyOptions")
+            .field("password", &self.password.map(|_| "<redacted>"))
+            .field("domain", &self.domain)
+            .field("limits", &self.limits)
+            .field("control", &self.control)
+            .finish()
+    }
 }
 
 impl<'a> VerifyOptions<'a> {
@@ -1230,5 +1372,33 @@ mod tests {
         assert!(JpegAlgorithm::from_name("hill").is_none());
         assert!(HevcMode::from_name("cabac").is_some());
         assert!(HevcMode::from_name("nope").is_none());
+    }
+
+    #[test]
+    fn password_is_redacted_in_debug() {
+        let opts = EmbedOptions::default().with_password("super-secret-password");
+        let debug = format!("{opts:?}");
+        assert!(!debug.contains("super-secret-password"));
+        assert!(debug.contains("<redacted>"));
+
+        let probe = ProbeOptions::default().with_password("super-secret-password");
+        let debug_probe = format!("{probe:?}");
+        assert!(!debug_probe.contains("super-secret-password"));
+        assert!(debug_probe.contains("<redacted>"));
+
+        let extract = ExtractOptions::default().with_password("super-secret-password");
+        let debug_extract = format!("{extract:?}");
+        assert!(!debug_extract.contains("super-secret-password"));
+        assert!(debug_extract.contains("<redacted>"));
+
+        let inspect = InspectOptions::default().with_password("super-secret-password");
+        let debug_inspect = format!("{inspect:?}");
+        assert!(!debug_inspect.contains("super-secret-password"));
+        assert!(debug_inspect.contains("<redacted>"));
+
+        let verify = VerifyOptions::default().with_password("super-secret-password");
+        let debug_verify = format!("{verify:?}");
+        assert!(!debug_verify.contains("super-secret-password"));
+        assert!(debug_verify.contains("<redacted>"));
     }
 }

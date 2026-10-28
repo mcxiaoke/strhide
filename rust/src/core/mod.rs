@@ -19,12 +19,15 @@
 //! The remaining crate-root residents (`crypto`, `errors`, `params`, `commit`)
 //! move here in a later batch so each commit stays reviewable.
 
+pub mod batch;
 pub mod control;
 pub mod fs;
 pub mod i18n;
 pub mod media;
 pub mod payload;
 pub mod pipeline;
+
+pub use batch::{BatchOutcome, BatchPlan, ItemOutcome, run_batch};
 
 #[cfg(feature = "config")]
 pub mod config;

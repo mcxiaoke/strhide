@@ -67,6 +67,9 @@ pub struct FileConfig {
     pub lang: Option<String>,
     /// `[stego]` section: defaults for `embed` / `capacity`.
     pub stego: Option<StegoConfig>,
+    /// Warnings collected during parsing (e.g. unknown keys, sensitive credentials in CWD config).
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }
 
 /// `[stego]` section: content-domain defaults applied when the matching CLI
@@ -109,32 +112,36 @@ fn parse_config(
             origin.display()
         ))
     })?;
+
+    let mut warnings = Vec::new();
+
     for key in table.keys() {
         if !KNOWN_KEYS.contains(&key.as_str()) {
-            eprintln!(
-                "{}",
+            warnings.push(
                 crate::t!(
                     crate::core::i18n::Msg::WarnConfigUnknownKey,
                     key = key,
                     path = origin.display()
                 )
+                .to_string(),
             );
         }
     }
     // Deserialise from the table that was already validated, instead of
     // parsing the same text a second time: two independent parses can disagree
     // (and used to report two different messages for one syntax error).
-    let cfg: FileConfig = table.try_into().map_err(|e| {
+    let mut cfg: FileConfig = table.try_into().map_err(|e| {
         StrHideError::General(format!("Invalid config file '{}': {e}", origin.display()))
     })?;
 
     if is_cwd_implicit && (cfg.password.is_some() || cfg.password_file.is_some()) {
-        eprintln!(
+        warnings.push(format!(
             "[WARNING] Loaded sensitive password/secret keys from local CWD config '{}'. Ensure this file is trusted.",
             origin.display()
-        );
+        ));
     }
 
+    cfg.warnings = warnings;
     Ok(cfg)
 }
 

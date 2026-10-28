@@ -213,6 +213,23 @@ pub fn inspect_carrier_file(
     options: &crate::stego::InspectOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<crate::stego::StegoHeaderInfo, StrHideError> {
+    #[cfg(feature = "content-hevc")]
+    {
+        let mut file = std::fs::File::open(carrier_path)?;
+        let format = crate::formats::sniff::sniff_stream(&mut file)?;
+        drop(file);
+
+        if format == Some(crate::formats::FileFormat::Mp4) {
+            return crate::stego::hevc::inspect_hevc_mp4_file(
+                carrier_path,
+                options.password,
+                options.domain,
+                dialect.hevc_format(),
+                &options.control,
+            );
+        }
+    }
+
     let carrier_bytes = std::fs::read(carrier_path)?;
     crate::stego::inspect_carrier_with_dialect(&carrier_bytes, options, dialect)
 }

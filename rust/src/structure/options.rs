@@ -13,6 +13,37 @@
 use std::path::Path;
 
 use crate::core::control::Control;
+use crate::structure::registry::StrategyId;
+
+/// Strongly typed strategy selection: either automatic selection or an explicit named strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum StrategyChoice {
+    #[default]
+    Auto,
+    Named(StrategyId),
+}
+
+impl StrategyChoice {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Named(id) => id.name(),
+        }
+    }
+}
+
+impl From<&str> for StrategyChoice {
+    fn from(s: &str) -> Self {
+        let trimmed = s.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+            Self::Auto
+        } else if let Some(id) = StrategyId::from_name(trimmed) {
+            Self::Named(id)
+        } else {
+            Self::Auto
+        }
+    }
+}
 
 /// Options controlling an injection. Bundled into a struct so the public API
 /// stays readable and extensible as features grow (replaces a nine-parameter
@@ -20,7 +51,7 @@ use crate::core::control::Control;
 ///
 /// The `Default` values match the CLI defaults: `auto` strategy, timestamps and
 /// in-place backup preserved, no encryption, no stealth.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct WriteOptions<'a> {
     /// Write the stego carrier here instead of overwriting the carrier.
     pub output_path: Option<&'a Path>,
@@ -38,6 +69,21 @@ pub struct WriteOptions<'a> {
     pub backup: bool,
     /// Progress reporting and cancellation channel.
     pub control: Control<'a>,
+}
+
+impl std::fmt::Debug for WriteOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WriteOptions")
+            .field("output_path", &self.output_path)
+            .field("password", &self.password.map(|_| "<redacted>"))
+            .field("password_hint", &self.password_hint)
+            .field("strategy", &self.strategy)
+            .field("stealth", &self.stealth)
+            .field("preserve_time", &self.preserve_time)
+            .field("backup", &self.backup)
+            .field("control", &self.control)
+            .finish()
+    }
 }
 
 impl Default for WriteOptions<'_> {
@@ -69,7 +115,7 @@ impl<'a> WriteOptions<'a> {
 /// [`ReadResult::data`](crate::structure::ReadResult::data) instead of writing
 /// a file. Without [`overwrite`](Self::overwrite) an existing destination is an
 /// error: silently truncating it would lose a user file.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReadOptions<'a> {
     /// Write the payload here; `None` keeps it in memory.
     pub output_path: Option<&'a Path>,
@@ -79,6 +125,17 @@ pub struct ReadOptions<'a> {
     pub overwrite: bool,
     /// Progress reporting and cancellation channel.
     pub control: Control<'a>,
+}
+
+impl std::fmt::Debug for ReadOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadOptions")
+            .field("output_path", &self.output_path)
+            .field("password", &self.password.map(|_| "<redacted>"))
+            .field("overwrite", &self.overwrite)
+            .field("control", &self.control)
+            .finish()
+    }
 }
 
 impl<'a> ReadOptions<'a> {
@@ -122,7 +179,7 @@ impl<'a> ReadOptions<'a> {
 /// In-place restoration is the default (`output_path == None`); an explicit
 /// path never overwrites an existing file unless
 /// [`overwrite`](Self::overwrite) is set.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct RestoreOptions<'a> {
     /// Write the restored carrier here; `None` restores in place.
     pub output_path: Option<&'a Path>,
@@ -134,6 +191,18 @@ pub struct RestoreOptions<'a> {
     pub overwrite: bool,
     /// Progress reporting and cancellation channel.
     pub control: Control<'a>,
+}
+
+impl std::fmt::Debug for RestoreOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RestoreOptions")
+            .field("output_path", &self.output_path)
+            .field("password", &self.password.map(|_| "<redacted>"))
+            .field("backup", &self.backup)
+            .field("overwrite", &self.overwrite)
+            .field("control", &self.control)
+            .finish()
+    }
 }
 
 impl<'a> RestoreOptions<'a> {
@@ -210,5 +279,37 @@ mod tests {
         assert!(restore.backup);
         assert!(!restore.overwrite);
         assert!(restore.output_path.is_none());
+    }
+
+    #[test]
+    fn password_is_redacted_in_debug() {
+        let write_opts = WriteOptions {
+            password: Some("super-secret-password"),
+            ..WriteOptions::default()
+        };
+        let debug = format!("{write_opts:?}");
+        assert!(!debug.contains("super-secret-password"));
+        assert!(debug.contains("<redacted>"));
+
+        let read_opts = ReadOptions::new().with_password("super-secret-password");
+        let debug_read = format!("{read_opts:?}");
+        assert!(!debug_read.contains("super-secret-password"));
+        assert!(debug_read.contains("<redacted>"));
+
+        let restore_opts = RestoreOptions::new().with_password("super-secret-password");
+        let debug_restore = format!("{restore_opts:?}");
+        assert!(!debug_restore.contains("super-secret-password"));
+        assert!(debug_restore.contains("<redacted>"));
+    }
+
+    #[test]
+    fn strategy_choice_roundtrips() {
+        assert_eq!(StrategyChoice::from("auto"), StrategyChoice::Auto);
+        assert_eq!(StrategyChoice::from(""), StrategyChoice::Auto);
+        assert_eq!(
+            StrategyChoice::from("eof"),
+            StrategyChoice::Named(StrategyId::from_u8(1))
+        );
+        assert_eq!(StrategyChoice::Auto.as_str(), "auto");
     }
 }

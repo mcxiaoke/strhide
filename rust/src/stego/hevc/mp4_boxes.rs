@@ -62,6 +62,16 @@ pub struct Mp4HevcTarget<'a> {
     pub fps: Option<f64>,
 }
 
+/// Target representation parsed from `moov` only, without reading `mdat`.
+pub struct Mp4StreamTarget<'a> {
+    pub parameter_sets: Vec<&'a [u8]>,
+    pub length_size: usize,
+    pub samples: Vec<(usize, usize)>,
+    pub picture_count: usize,
+    pub duration_secs: Option<f64>,
+    pub fps: Option<f64>,
+}
+
 /// A parsed box header: tag, slice ranges of the box and of its payload.
 struct BoxRef {
     tag: [u8; 4],
@@ -141,6 +151,132 @@ pub fn parse_mp4_targets(bytes: &[u8]) -> Result<Mp4HevcTarget<'_>> {
         return Err(HevcError::ContainerMalformed("no video track in moov"));
     }
     Err(last_error.unwrap_or(HevcError::ContainerMalformed("no HEVC video track in moov")))
+}
+
+/// Parse an MP4/MOV `moov` box buffer directly, without requiring `mdat` to be in memory.
+pub fn parse_moov_target<'a>(moov_bytes: &'a [u8], file_len: usize) -> Result<Mp4StreamTarget<'a>> {
+    let top = boxes_in(moov_bytes, 0, moov_bytes.len())?;
+    let moov = top
+        .iter()
+        .find(|b| &b.tag == b"moov")
+        .ok_or(HevcError::ContainerMalformed("missing moov box"))?;
+    let moov_children = boxes_in(moov_bytes, moov.payload_start, moov.end)?;
+    if moov_children.iter().any(|b| &b.tag == b"mvex") {
+        return Err(HevcError::Unsupported(
+            "fragmented MP4/MOV (mvex in moov) is not supported",
+        ));
+    }
+
+    let mut video_tracks = 0usize;
+    let mut last_error: Option<HevcError> = None;
+    for trak in moov_children.iter().filter(|b| &b.tag == b"trak") {
+        let trak_children = boxes_in(moov_bytes, trak.payload_start, trak.end)?;
+        if trak_children.iter().any(|b| &b.tag == b"traf") {
+            return Err(HevcError::Unsupported(
+                "fragmented MP4/MOV (traf inside trak) is not supported",
+            ));
+        }
+        let Some(mdia) = trak_children.iter().find(|b| &b.tag == b"mdia") else {
+            continue;
+        };
+        let mdia_children = boxes_in(moov_bytes, mdia.payload_start, mdia.end)?;
+        let Some(hdlr) = mdia_children.iter().find(|b| &b.tag == b"hdlr") else {
+            continue;
+        };
+        let handler = be_u32(moov_bytes, hdlr.payload_start.saturating_add(8));
+        if handler != Some(u32::from_be_bytes(*b"vide")) {
+            continue;
+        }
+        video_tracks += 1;
+        match parse_video_trak_stream(moov_bytes, &mdia_children, file_len) {
+            Ok(target) => return Ok(target),
+            Err(e) => {
+                if last_error.is_none() {
+                    last_error = Some(e);
+                }
+            }
+        }
+    }
+
+    if video_tracks == 0 {
+        return Err(HevcError::ContainerMalformed("no video track in moov"));
+    }
+    Err(last_error.unwrap_or(HevcError::ContainerMalformed("no HEVC video track in moov")))
+}
+
+fn parse_video_trak_stream<'a>(
+    bytes: &'a [u8],
+    mdia_children: &[BoxRef],
+    file_len: usize,
+) -> Result<Mp4StreamTarget<'a>> {
+    let mdhd_timing = mdia_children
+        .iter()
+        .find(|b| &b.tag == b"mdhd")
+        .and_then(|b| parse_mdhd(bytes, b));
+
+    let minf = mdia_children
+        .iter()
+        .find(|b| &b.tag == b"minf")
+        .ok_or(HevcError::ContainerMalformed("video track has no minf box"))?;
+    let minf_children = boxes_in(bytes, minf.payload_start, minf.end)?;
+    let stbl = minf_children
+        .iter()
+        .find(|b| &b.tag == b"stbl")
+        .ok_or(HevcError::ContainerMalformed("video track has no stbl box"))?;
+    let (parameter_sets, length_size, description_index) = {
+        let kids = boxes_in(bytes, stbl.payload_start, stbl.end)?;
+        let stsd = kids
+            .iter()
+            .find(|b| &b.tag == b"stsd")
+            .ok_or(HevcError::ContainerMalformed("missing stsd box"))?;
+        parse_sample_description(bytes, stsd)?
+    };
+
+    let kids = boxes_in(bytes, stbl.payload_start, stbl.end)?;
+    let stsz = kids
+        .iter()
+        .find(|b| &b.tag == b"stsz")
+        .ok_or(HevcError::ContainerMalformed("missing stsz box"))?;
+    let sizes = parse_sample_sizes(bytes, stsz)?;
+    let sample_count = sizes.len();
+
+    let chunk_offsets = if let Some(co64) = kids.iter().find(|b| &b.tag == b"co64") {
+        parse_chunk_offsets(bytes, co64, true)?
+    } else if let Some(stco) = kids.iter().find(|b| &b.tag == b"stco") {
+        parse_chunk_offsets(bytes, stco, false)?
+    } else {
+        return Err(HevcError::ContainerMalformed(
+            "missing stco/co64 chunk offset box",
+        ));
+    };
+
+    let stsc = kids
+        .iter()
+        .find(|b| &b.tag == b"stsc")
+        .ok_or(HevcError::ContainerMalformed("missing stsc box"))?;
+    let runs = parse_sample_to_chunk(bytes, stsc)?;
+
+    let samples =
+        resolve_sample_offsets(file_len, &sizes, &chunk_offsets, &runs, description_index)?;
+
+    let mut target = Mp4StreamTarget {
+        parameter_sets,
+        length_size,
+        samples,
+        picture_count: sample_count,
+        duration_secs: None,
+        fps: None,
+    };
+
+    if let Some((timescale, duration)) = mdhd_timing.filter(|(ts, _)| *ts > 0) {
+        let sec = duration as f64 / timescale as f64;
+        target.duration_secs = Some(sec);
+        if sec > 0.0 && sample_count > 0 {
+            target.fps = Some(sample_count as f64 / sec);
+        }
+    }
+
+    Ok(target)
 }
 
 /// Parse one `vide` track: `mdia/minf/stbl`.
@@ -551,7 +687,7 @@ fn resolve_sample_offsets(
 /// The leading length prefix is deliberately excluded from the span: it is
 /// container framing, not part of the NAL, and the engine guarantees the
 /// re-encoded NAL keeps its length (Δ = 0), so the prefix stays valid.
-fn collect_sample_slice_spans(
+pub(crate) fn collect_sample_slice_spans(
     bytes: &[u8],
     offset: usize,
     size: usize,

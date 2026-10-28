@@ -12,10 +12,28 @@
 //! `supported_strategies()` matches its row here, so the two cannot drift
 //! silently.
 
+use serde::{Deserialize, Serialize};
+
 use crate::formats::sniff::FileFormat;
 
+/// Memory consumption profile for an operation on a carrier format.
+///
+/// Used by GUI schedulers to bound worker concurrency: `Streaming` carriers
+/// can run with multiple concurrent threads safely, while `WholeFile` carriers
+/// (e.g. 50 MP images or HEVC video bitstreams) are scheduled with restricted
+/// concurrency to prevent out-of-memory errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryProfile {
+    /// Bounded memory stream processing (e.g. ZIP, PDF, PE slack/overlay, WAV, MKV).
+    Streaming,
+    /// Uncompressed raster/DCT coefficient arrays or CABAC bitstream recording.
+    WholeFile,
+}
+
 /// The content-domain engines, as advertised to users and dispatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StegoKind {
     /// PNG spatial domain (HILL / S-UNIWARD + STC).
     PngSpatial,
@@ -39,6 +57,7 @@ impl StegoKind {
 }
 
 /// One carrier format's capabilities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Capability {
     pub format: FileFormat,
     /// Structure-domain strategies, in the adapter's priority order. Empty for
@@ -48,6 +67,8 @@ pub struct Capability {
     pub stego: &'static [StegoKind],
     /// File extensions, for CLI filtering and future GUI file dialogs.
     pub extensions: &'static [&'static str],
+    /// Concurrency and memory profile.
+    pub memory: MemoryProfile,
 }
 
 /// Every supported format. Order matches [`FileFormat::ALL`].
@@ -63,6 +84,7 @@ pub static CAPABILITIES: &[Capability] = &[
         #[cfg(not(feature = "content-png"))]
         stego: &[],
         extensions: &["png"],
+        memory: MemoryProfile::WholeFile,
     },
     Capability {
         format: FileFormat::Jpeg,
@@ -75,6 +97,7 @@ pub static CAPABILITIES: &[Capability] = &[
         #[cfg(not(feature = "content-jpeg"))]
         stego: &[],
         extensions: &["jpg", "jpeg", "jpe"],
+        memory: MemoryProfile::WholeFile,
     },
     Capability {
         format: FileFormat::Webp,
@@ -84,6 +107,7 @@ pub static CAPABILITIES: &[Capability] = &[
         structure: &[],
         stego: &[],
         extensions: &["webp"],
+        memory: MemoryProfile::Streaming,
     },
     Capability {
         format: FileFormat::Heif,
@@ -98,6 +122,7 @@ pub static CAPABILITIES: &[Capability] = &[
         #[cfg(not(feature = "content-hevc"))]
         stego: &[],
         extensions: &["heic", "heif", "avif"],
+        memory: MemoryProfile::WholeFile,
     },
     Capability {
         format: FileFormat::Mp4,
@@ -110,6 +135,7 @@ pub static CAPABILITIES: &[Capability] = &[
         #[cfg(not(feature = "content-hevc"))]
         stego: &[],
         extensions: &["mp4", "mov", "m4v"],
+        memory: MemoryProfile::WholeFile,
     },
     Capability {
         format: FileFormat::Mkv,
@@ -119,6 +145,7 @@ pub static CAPABILITIES: &[Capability] = &[
         structure: &[],
         stego: &[],
         extensions: &["mkv", "webm"],
+        memory: MemoryProfile::Streaming,
     },
     Capability {
         format: FileFormat::Wav,
@@ -128,6 +155,7 @@ pub static CAPABILITIES: &[Capability] = &[
         structure: &[],
         stego: &[],
         extensions: &["wav"],
+        memory: MemoryProfile::Streaming,
     },
     Capability {
         format: FileFormat::Zip,
@@ -137,6 +165,7 @@ pub static CAPABILITIES: &[Capability] = &[
         structure: &[],
         stego: &[],
         extensions: &["zip", "jar"],
+        memory: MemoryProfile::Streaming,
     },
     Capability {
         format: FileFormat::Pdf,
@@ -146,6 +175,7 @@ pub static CAPABILITIES: &[Capability] = &[
         structure: &[],
         stego: &[],
         extensions: &["pdf"],
+        memory: MemoryProfile::Streaming,
     },
     Capability {
         format: FileFormat::Pe,
@@ -157,6 +187,7 @@ pub static CAPABILITIES: &[Capability] = &[
         structure: &[],
         stego: &[],
         extensions: &["exe", "dll"],
+        memory: MemoryProfile::Streaming,
     },
     Capability {
         format: FileFormat::HevcAnnexB,
@@ -166,6 +197,7 @@ pub static CAPABILITIES: &[Capability] = &[
         #[cfg(not(feature = "content-hevc"))]
         stego: &[],
         extensions: &["h265", "hevc", "265"],
+        memory: MemoryProfile::WholeFile,
     },
 ];
 

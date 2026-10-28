@@ -213,7 +213,7 @@ pub fn commit_carrier_patches(
         file.sync_all()?;
     }
 
-    std::fs::rename(&tmp_path, target_path)?;
+    rename_with_retry(&tmp_path, target_path)?;
     guard.commit();
     sync_parent_dir(target_path);
 
@@ -247,10 +247,45 @@ pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), StrHid
         file.write_all(bytes)?;
         file.sync_all()?;
     }
-    std::fs::rename(&tmp_path, path)?;
+    rename_with_retry(&tmp_path, path)?;
     guard.commit();
     sync_parent_dir(path);
     Ok(())
+}
+
+/// Rename `from` to `to` with bounded exponential backoff retries when encountering
+/// file sharing violations (Windows error 32 / 33) or permission denied errors caused
+/// by media preview components or external processes holding open handles.
+pub fn rename_with_retry(from: &Path, to: &Path) -> Result<(), StrHideError> {
+    const BACKOFF_MS: [u64; 3] = [20, 50, 100];
+    let mut last_err = None;
+    for (attempt, &wait_ms) in BACKOFF_MS.iter().enumerate() {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) if is_sharing_or_permission_error(&e) => {
+                last_err = Some(e);
+                if attempt + 1 < BACKOFF_MS.len() {
+                    std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+                }
+            }
+            Err(e) => return Err(StrHideError::Io(e)),
+        }
+    }
+    let _ = last_err;
+    Err(StrHideError::TargetBusy(to.to_path_buf()))
+}
+
+fn is_sharing_or_permission_error(err: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        if let Some(raw) = err.raw_os_error() {
+            // ERROR_SHARING_VIOLATION = 32, ERROR_LOCK_VIOLATION = 33, ERROR_ACCESS_DENIED = 5
+            if raw == 32 || raw == 33 || raw == 5 {
+                return true;
+            }
+        }
+    }
+    err.kind() == std::io::ErrorKind::PermissionDenied
 }
 
 /// Flush the directory entry created by a rename (no-op off unix).
