@@ -140,38 +140,20 @@ impl core::fmt::Debug for BinOp {
 /// -6..=51 and the value is only consumed as an `i32` by the cost model.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StegoSlot {
-    /// Global index across all slices in the carrier (recording order until the
-    /// drift-band sort in `record_carrier_state` renumbers it).
-    pub slot_idx: u32,
-    /// 0-based slice index within the carrier.
-    pub slice_idx: u32,
+    /// Perceptual distortion cost for STC matrix coding.
+    pub cost: f32,
     /// Index in the slice's recorded `BinOp` sequence.
     pub op_idx: u32,
+    /// 0-based slice index within the carrier.
+    pub slice_idx: u32,
     /// Substream index within the slice.
     pub substream_idx: u16,
-    /// Slice or block quantization parameter (QP).
-    pub qp: i16,
     /// Original sign bit (0 = positive, 1 = negative).
     pub original_bit: u8,
-    /// Transform unit size (4, 8, 16, 32).
-    pub trafo_size: u8,
-    /// Color plane index (0: Luma Y, 1: Cb, 2: Cr).
-    pub c_idx: u8,
-    /// 2D coordinate inside the transform unit.
-    pub x_c: u8,
-    pub y_c: u8,
-    /// Drift band of the picture this coefficient belongs to.
-    ///
-    /// `0` = non-reference picture (no later picture predicts from it, so a
-    /// flip cannot drift); `1` = reference picture (the error lives until the
-    /// next IRAP). The band decides the pool order in `embed_hevc`: a payload
-    /// that fits in band 0 never touches a reference picture.
-    pub band: u8,
-    /// Perceptual distortion cost for STC matrix coding.
-    pub cost: f64,
+    pub _pad: u8,
 }
 
-const _: () = assert!(core::mem::size_of::<StegoSlot>() == 32);
+const _: () = assert!(core::mem::size_of::<StegoSlot>() == 16);
 const _: () = assert!(core::mem::size_of::<BinOp>() == 2);
 
 /// Metadata and boundaries for a WPP/Tile substream within a slice.
@@ -213,6 +195,18 @@ pub enum RecordMode {
     Slots,
 }
 
+/// Intermediate coordinate and transform metadata waiting for magnitude back-fill.
+///
+/// Kept only during the decoding of a single slice and drained on absorption.
+/// Not stored on the long-lived [`StegoSlot`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingSignInfo {
+    pub trafo_size: u8,
+    pub c_idx: u8,
+    pub x_c: u8,
+    pub y_c: u8,
+}
+
 /// Recorder attached to the CABAC decoding loop to capture the bin stream
 /// and isolate stego sign positions for re-encoding.
 #[derive(Default, Clone, Debug)]
@@ -224,6 +218,8 @@ pub struct CabacRecorder {
     pub slots: Vec<StegoSlot>,
     /// Substream boundaries and initial contexts.
     pub substreams: Vec<SubstreamRecord>,
+    /// Intermediate slice-local sign geometry for `record_stego_level` back-fill.
+    pub(crate) pending_signs: Vec<PendingSignInfo>,
     /// What this recorder captures.
     mode: RecordMode,
     /// Current slice index being decoded.
@@ -407,12 +403,19 @@ impl CabacRecorder {
             ops: Vec::new(),
             slots: Vec::new(),
             substreams: Vec::new(),
+            pending_signs: Vec::new(),
             mode,
             current_slice_idx: slice_idx,
             current_substream_idx: 0,
             current_band: band,
             next_pending_slot: 0,
         }
+    }
+
+    /// Clear pending coordinate metadata and reset magnitude backfill cursor.
+    pub fn reset_pending(&mut self) {
+        self.pending_signs.clear();
+        self.next_pending_slot = 0;
     }
 
     /// Whether this recorder keeps the replayable bin journal.
@@ -494,32 +497,34 @@ impl CabacRecorder {
 
         debug_assert!(self.slots.len() <= u32::MAX as usize);
         debug_assert!(self.ops.len() <= u32::MAX as usize);
-        let slot_idx = self.slots.len() as u32;
         let op_idx = self.ops.len() as u32;
+
+        if journals {
+            self.pending_signs.push(PendingSignInfo {
+                trafo_size,
+                c_idx,
+                x_c,
+                y_c,
+            });
+        }
 
         // Provisional cost: sign bins decode before their levels, so the real
         // magnitude is unknown here. `record_stego_level` overwrites this in the
         // same coding group. Read-only passes never replay the journal and never
         // rank slots, so they skip the cost model entirely.
         let cost = if journals {
-            provisional_sign_flip_cost(1, qp, trafo_size, c_idx, x_c, y_c)
+            provisional_sign_flip_cost(1, qp, trafo_size, c_idx, x_c, y_c) as f32
         } else {
             0.0
         };
 
         self.slots.push(StegoSlot {
-            slot_idx,
+            cost,
+            op_idx,
             slice_idx: self.current_slice_idx as u32,
             substream_idx: self.current_substream_idx as u16,
-            op_idx,
             original_bit,
-            qp: qp.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-            trafo_size,
-            c_idx,
-            x_c,
-            y_c,
-            band: self.current_band,
-            cost,
+            _pad: 0,
         });
 
         if journals {
@@ -553,28 +558,31 @@ impl CabacRecorder {
         if !self.journals() {
             return;
         }
-        let Some(slot) = self.slots.get_mut(self.next_pending_slot) else {
+        let Some(pending) = self.pending_signs.get(self.next_pending_slot) else {
             debug_assert!(false, "record_stego_level outran record_stego_sign");
             return;
         };
         debug_assert_eq!(
-            (slot.x_c, slot.y_c),
+            (pending.x_c, pending.y_c),
             (x_c, y_c),
             "sign/level coordinate desync at slot {}",
             self.next_pending_slot
         );
-        slot.cost = compute_sign_flip_cost(
+        let cost = compute_sign_flip_cost(
             abs_level,
             abs_dq,
             FlipGeometry {
-                trafo_size: slot.trafo_size,
-                c_idx: slot.c_idx,
-                x_c: slot.x_c,
-                y_c: slot.y_c,
+                trafo_size: pending.trafo_size,
+                c_idx: pending.c_idx,
+                x_c: pending.x_c,
+                y_c: pending.y_c,
                 bit_depth,
                 sample_domain,
             },
-        );
+        ) as f32;
+        if let Some(slot) = self.slots.get_mut(self.next_pending_slot) {
+            slot.cost = cost;
+        }
         self.next_pending_slot += 1;
     }
 
@@ -682,15 +690,15 @@ mod tests {
         rec.record_stego_level(2, 0, 1, 42, 8, false);
         rec.record_stego_level(3, 1, 2, 84, 8, false);
 
-        assert_eq!((rec.slots[0].x_c, rec.slots[0].y_c), (2, 0));
-        assert_eq!((rec.slots[1].x_c, rec.slots[1].y_c), (3, 1));
+        assert_eq!((rec.pending_signs[0].x_c, rec.pending_signs[0].y_c), (2, 0));
+        assert_eq!((rec.pending_signs[1].x_c, rec.pending_signs[1].y_c), (3, 1));
         assert_eq!(
             rec.slots[0].cost,
-            compute_sign_flip_cost(1, 42, g(8, 0, 2, 0, 8, false))
+            compute_sign_flip_cost(1, 42, g(8, 0, 2, 0, 8, false)) as f32
         );
         assert_eq!(
             rec.slots[1].cost,
-            compute_sign_flip_cost(2, 84, g(8, 0, 3, 1, 8, false))
+            compute_sign_flip_cost(2, 84, g(8, 0, 3, 1, 8, false)) as f32
         );
     }
 
