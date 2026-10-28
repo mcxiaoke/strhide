@@ -14,6 +14,8 @@ import { CarrierSummary } from "./components/stage/CarrierSummary";
 import { ProgressBarOverlay } from "./components/common/ProgressBarOverlay";
 import { InspectExtractView } from "./views/InspectExtractView";
 import { HideEmbedView } from "./views/HideEmbedView";
+import { VerifyRestoreView } from "./views/VerifyRestoreView";
+import { ForensicsBatchView } from "./views/ForensicsBatchView";
 
 export const App: React.FC = () => {
   const { activeTab, setActiveTab, carrierPath, loadCapabilities } = useWorkspaceStore();
@@ -101,24 +103,8 @@ export const App: React.FC = () => {
           {/* Active View Container */}
           {activeTab === "inspect" && <InspectExtractView />}
           {activeTab === "hide" && <HideEmbedView />}
-          {activeTab === "verify" && (
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-8 text-center text-slate-400">
-              <CheckCircle className="h-10 w-10 text-emerald-500/50 mx-auto mb-3" />
-              <h3 className="text-base font-semibold text-slate-200">工作台 3: 三级校验与无损还原</h3>
-              <p className="mt-1 text-xs text-slate-500">
-                L1/L2/L3 步进式完整性校验与 100% 原始字节级无损剥离还原
-              </p>
-            </div>
-          )}
-          {activeTab === "forensics" && (
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-8 text-center text-slate-400">
-              <Microscope className="h-10 w-10 text-purple-500/50 mx-auto mb-3" />
-              <h3 className="text-base font-semibold text-slate-200">工作台 4: 反隐写取证与批处理中心</h3>
-              <p className="mt-1 text-xs text-slate-500">
-                0..100 黑盒反隐写风险评分盘、检测器指标矩阵与多文件批量处理队列
-              </p>
-            </div>
-          )}
+          {activeTab === "verify" && <VerifyRestoreView />}
+          {activeTab === "forensics" && <ForensicsBatchView />}
         </main>
       </div>
 
