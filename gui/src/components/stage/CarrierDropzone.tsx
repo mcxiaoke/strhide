@@ -9,21 +9,28 @@ export const CarrierDropzone: React.FC = () => {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    getCurrentWebview()
-      .onDragDropEvent((event) => {
-        if (event.payload.type === "drop") {
-          const paths = event.payload.paths;
-          if (paths && paths.length > 0) {
-            setCarrier(paths[0]);
-          }
-        }
-      })
-      .then((fn) => {
-        unlisten = fn;
-      })
-      .catch((err) => {
-        console.warn("Drag & drop listener error:", err);
-      });
+    try {
+      const webview = getCurrentWebview();
+      if (webview && typeof webview.onDragDropEvent === "function") {
+        webview
+          .onDragDropEvent((event) => {
+            if (event.payload.type === "drop") {
+              const paths = event.payload.paths;
+              if (paths && paths.length > 0) {
+                setCarrier(paths[0]);
+              }
+            }
+          })
+          .then((fn) => {
+            unlisten = fn;
+          })
+          .catch((err) => {
+            console.warn("Drag & drop listener error:", err);
+          });
+      }
+    } catch (err) {
+      console.warn("Webview drag-drop initialization skipped in non-Tauri context:", err);
+    }
 
     return () => {
       if (unlisten) unlisten();

@@ -74,8 +74,9 @@ export const ForensicsBatchView: React.FC = () => {
         multiple: true,
         title: "批量选择待处理文件",
       });
-      if (selected && Array.isArray(selected)) {
-        const unique = Array.from(new Set([...batchItems, ...selected]));
+      if (selected) {
+        const items = Array.isArray(selected) ? selected : [selected];
+        const unique = Array.from(new Set([...batchItems, ...items]));
         setBatchItems(unique);
       }
     } catch (err) {
