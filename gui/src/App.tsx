@@ -13,6 +13,7 @@ import { CarrierDropzone } from "./components/stage/CarrierDropzone";
 import { CarrierSummary } from "./components/stage/CarrierSummary";
 import { ProgressBarOverlay } from "./components/common/ProgressBarOverlay";
 import { InspectExtractView } from "./views/InspectExtractView";
+import { HideEmbedView } from "./views/HideEmbedView";
 
 export const App: React.FC = () => {
   const { activeTab, setActiveTab, carrierPath, loadCapabilities } = useWorkspaceStore();
@@ -99,15 +100,7 @@ export const App: React.FC = () => {
 
           {/* Active View Container */}
           {activeTab === "inspect" && <InspectExtractView />}
-          {activeTab === "hide" && (
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-8 text-center text-slate-400">
-              <Shield className="h-10 w-10 text-cyan-500/50 mx-auto mb-3" />
-              <h3 className="text-base font-semibold text-slate-200">工作台 2: 隐藏与自适应嵌入</h3>
-              <p className="mt-1 text-xs text-slate-500">
-                支持结构域注入与内容域（PNG/JPEG/HEVC）自适应隐写、三档容量水位尺与修改率统计
-              </p>
-            </div>
-          )}
+          {activeTab === "hide" && <HideEmbedView />}
           {activeTab === "verify" && (
             <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-8 text-center text-slate-400">
               <CheckCircle className="h-10 w-10 text-emerald-500/50 mx-auto mb-3" />
