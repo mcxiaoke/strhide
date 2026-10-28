@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { useWorkspaceStore } from "./store/workspaceStore";
 import { useSettingsStore } from "./store/settingsStore";
+import { t } from "./lib/i18n";
 import { CarrierDropzone } from "./components/stage/CarrierDropzone";
 import { CarrierSummary } from "./components/stage/CarrierSummary";
 import { ProgressBarOverlay } from "./components/common/ProgressBarOverlay";
@@ -25,11 +26,13 @@ export const App: React.FC = () => {
     loadCapabilities();
   }, [loadCapabilities]);
 
+  const i18nText = t(lang);
+
   const tabs = [
-    { id: "inspect" as const, label: "检视与智能提取", icon: Search },
-    { id: "hide" as const, label: "隐藏与自适应嵌入", icon: Shield },
-    { id: "verify" as const, label: "三级校验与无损还原", icon: CheckCircle },
-    { id: "forensics" as const, label: "反隐写取证与批处理", icon: Microscope },
+    { id: "inspect" as const, label: i18nText.tabs.inspect, icon: Search },
+    { id: "hide" as const, label: i18nText.tabs.hide, icon: Shield },
+    { id: "verify" as const, label: i18nText.tabs.verify, icon: CheckCircle },
+    { id: "forensics" as const, label: i18nText.tabs.forensics, icon: Microscope },
   ];
 
   return (
@@ -89,9 +92,9 @@ export const App: React.FC = () => {
           <div className="rounded-xl border border-slate-800/80 bg-slate-900/80 p-3 text-[11px] text-slate-500 space-y-1">
             <div className="flex items-center gap-1.5 text-slate-400 font-medium">
               <Sliders className="h-3 w-3 text-cyan-400" />
-              <span>内核就绪 (Stage A–E)</span>
+              <span>{i18nText.common.stageReady}</span>
             </div>
-            <p>零拷贝原位补丁 · 100% 字节无损还原</p>
+            <p>{i18nText.common.features}</p>
           </div>
         </nav>
 
