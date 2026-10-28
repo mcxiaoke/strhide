@@ -449,7 +449,7 @@ fn hevc_embed(
         // A safety-policy refusal is final: retrying through the thumbnail
         // bridge would replace it with the bridge's own "no bridgeable item"
         // error and hide the real reason.
-        Err(e @ StrHideError::SafetyThreshold(_)) => Err(e),
+        Err(e @ StrHideError::SafetyThreshold { .. }) => Err(e),
         Err(e) if resolved.hevc_mode == HevcMode::Cabac => Err(e),
         #[cfg(feature = "content-heif-bridge")]
         Err(_) => {

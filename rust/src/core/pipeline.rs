@@ -124,10 +124,7 @@ pub fn derive_default_output_path(carrier: &Path, suffix: &str) -> PathBuf {
 /// Refuse to write over an existing file unless the caller said `overwrite`.
 pub fn check_overwrite(target: &Path, overwrite: bool) -> Result<(), StrHideError> {
     if target.exists() && !overwrite {
-        return Err(StrHideError::Rejection(format!(
-            "Refusing to overwrite existing file '{}'. Choose another -o path or pass --overwrite.",
-            target.display()
-        )));
+        return Err(StrHideError::AlreadyExists(target.to_path_buf()));
     }
     Ok(())
 }
@@ -322,7 +319,10 @@ mod tests {
         let target = dir.join("exists.bin");
         fs::write(&target, b"x").unwrap();
 
-        assert!(check_overwrite(&target, false).is_err());
+        assert!(matches!(
+            check_overwrite(&target, false),
+            Err(StrHideError::AlreadyExists(_))
+        ));
         assert!(check_overwrite(&target, true).is_ok());
         assert!(check_overwrite(&dir.join("missing.bin"), false).is_ok());
     }

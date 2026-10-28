@@ -52,10 +52,15 @@ jobs:
 
       # The two domains must compile without each other (stage 1 of
       # docs/strhide_architecture_and_refactoring_plan.md). Blocking since
-      # stage 1 landed; the per-format split adds content-png/-jpeg/-hevc here.
+      # stage 1 landed; fine-grained builds ensure light-weight GUIs can compile
+      # trimmed feature combinations.
       - name: Minimal feature builds
         run: |
           cargo build --no-default-features
+          cargo build --no-default-features --features structure-base
           cargo build --no-default-features --features structure
+          cargo build --no-default-features --features content-png
+          cargo build --no-default-features --features content-jpeg
+          cargo build --no-default-features --features content-hevc
           cargo build --no-default-features --features content
           cargo build --no-default-features --features analysis

@@ -653,17 +653,17 @@ pub(crate) fn build_hevc_capacity_info(
 fn enforce_safety(
     payload_len: usize,
     recommended_max_bytes: usize,
-    max_raw_payload_bytes: usize,
+    _max_raw_payload_bytes: usize,
     safety: SafetyPolicy,
 ) -> Result<(), StrHideError> {
     if !safety.is_enforced() || payload_len <= recommended_max_bytes {
         return Ok(());
     }
-    Err(StrHideError::SafetyThreshold(format!(
-        "Payload ({payload_len} bytes) exceeds safety threshold ({recommended_max_bytes} bytes) \
-         for tier '{}' (carrier maximum is {max_raw_payload_bytes} bytes)",
-        safety.level.as_str(),
-    )))
+    Err(StrHideError::SafetyThreshold {
+        tier: safety.level,
+        required_bytes: payload_len,
+        available_bytes: recommended_max_bytes,
+    })
 }
 
 /// Embed a payload into an HEVC/HEIC carrier using content-adaptive sign-bit steganography.
@@ -2811,13 +2811,11 @@ mod safety_policy_tests {
         let p = policy(SafetyEnforcement::Enforced);
         let err = enforce_safety(9_216, 4_788, 16_618, p).expect_err("must be refused");
         assert!(
-            matches!(err, StrHideError::SafetyThreshold(_)),
+            matches!(err, StrHideError::SafetyThreshold { .. }),
             "expected SafetyThreshold, got {err:?}"
         );
-        // The message must name both bounds: the tier limit that refused it and
-        // the carrier maximum, so the user knows how far over they are.
         let text = err.to_string();
-        assert!(text.contains("4788") && text.contains("16618"), "{text}");
+        assert!(text.contains("4788") && text.contains("9216"), "{text}");
     }
 
     #[test]

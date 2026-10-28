@@ -113,6 +113,20 @@ pub struct StrategyCapacity {
 }
 
 impl StrategyCapacity {
+    /// Render human-readable limit string according to language context.
+    pub fn render_limit(&self, ctx: crate::core::i18n::RenderCtx) -> String {
+        match ctx.lang {
+            crate::core::i18n::Lang::En => self.limit.clone(),
+            crate::core::i18n::Lang::Zh => {
+                if self.limit == "unlimited (file grows)" {
+                    "无上限 (文件增长)".to_string()
+                } else {
+                    self.limit.clone()
+                }
+            }
+        }
+    }
+
     /// Helper constructor for strategies that append data and grow the file without an architectural upper bound.
     pub fn unbounded_growth(strategy: &str, note: &str) -> Self {
         Self {

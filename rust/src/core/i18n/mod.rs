@@ -8,8 +8,6 @@ pub mod messages;
 
 pub use messages::Msg;
 
-use std::cell::Cell;
-
 /// Supported user interface languages.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Lang {
@@ -45,18 +43,43 @@ impl Lang {
     }
 }
 
-thread_local! {
-    static CURRENT: Cell<Lang> = const { Cell::new(Lang::En) };
-}
+use std::sync::atomic::{AtomicU8, Ordering};
 
-/// Set the current thread's interface language.
+static CURRENT_LANG: AtomicU8 = AtomicU8::new(0); // 0 = En, 1 = Zh
+
+/// Set the default interface language across threads.
 pub fn set_lang(lang: Lang) {
-    CURRENT.with(|c| c.set(lang));
+    CURRENT_LANG.store(
+        match lang {
+            Lang::En => 0,
+            Lang::Zh => 1,
+        },
+        Ordering::Relaxed,
+    );
 }
 
-/// Get the current thread's interface language.
+/// Get the current interface language.
 pub fn lang() -> Lang {
-    CURRENT.with(Cell::get)
+    match CURRENT_LANG.load(Ordering::Relaxed) {
+        1 => Lang::Zh,
+        _ => Lang::En,
+    }
+}
+
+/// Explicit rendering context for GUI / multi-language requests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderCtx {
+    pub lang: Lang,
+}
+
+impl RenderCtx {
+    pub const fn new(lang: Lang) -> Self {
+        Self { lang }
+    }
+
+    pub fn current() -> Self {
+        Self { lang: lang() }
+    }
 }
 
 /// Declare the bilingual message catalog.
@@ -76,6 +99,12 @@ macro_rules! i18n_messages {
         }
 
         impl Msg {
+            pub const fn id(self) -> &'static str {
+                match self {
+                    $(Msg::$name => stringify!($name),)*
+                }
+            }
+
             pub fn text(self, lang: $crate::core::i18n::Lang) -> &'static str {
                 match (self, lang) {
                     $(
@@ -85,12 +114,27 @@ macro_rules! i18n_messages {
                 }
             }
         }
+
+        impl serde::Serialize for Msg {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.id())
+            }
+        }
     };
 }
 
 /// Retrieve message text (without arguments) or render with named arguments.
 #[macro_export]
 macro_rules! t {
+    (ctx = $ctx:expr, $msg:path) => {
+        $msg.text($ctx.lang).to_string()
+    };
+    (ctx = $ctx:expr, $msg:path, $($key:ident = $val:expr),+ $(,)?) => {
+        $crate::core::i18n::format_msg(
+            $msg.text($ctx.lang),
+            &[ $( (stringify!($key), &$val as &dyn std::fmt::Display) ),+ ],
+        )
+    };
     ($msg:path) => {
         $msg.text($crate::core::i18n::lang()).to_string()
     };
@@ -201,5 +245,31 @@ mod tests {
         let tpl = "Size: {kib:.1} KiB";
         let res = format_msg(tpl, &[("kib", &"12.3")]);
         assert_eq!(res, "Size: 12.3 KiB");
+    }
+
+    #[test]
+    fn test_atomic_lang_cross_thread_and_msg_id() {
+        set_lang(Lang::En);
+        assert_eq!(lang(), Lang::En);
+
+        // Msg ID stable key test
+        assert_eq!(Msg::ErrIo.id(), "ErrIo");
+        assert_eq!(Msg::ErrPassword.id(), "ErrPassword");
+
+        // Msg serialization to stable key
+        let json = serde_json::to_string(&Msg::ErrPassword).expect("serialize");
+        assert_eq!(json, "\"ErrPassword\"");
+
+        // Atomic lang across spawned threads
+        set_lang(Lang::Zh);
+        let handle = std::thread::spawn(|| {
+            assert_eq!(lang(), Lang::Zh);
+            let ctx = RenderCtx::current();
+            assert_eq!(ctx.lang, Lang::Zh);
+        });
+        handle.join().unwrap();
+
+        // Restore default
+        set_lang(Lang::En);
     }
 }

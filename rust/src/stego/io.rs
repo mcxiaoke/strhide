@@ -38,12 +38,11 @@ pub fn embed_carrier_file(
 ) -> Result<Option<PathBuf>, StrHideError> {
     let carrier_bytes = std::fs::read(carrier_path)?;
     let dest = target_path.unwrap_or(carrier_path);
-    let format = crate::formats::sniff::sniff_bytes(&carrier_bytes);
 
-    if matches!(
-        format,
-        Some(crate::formats::FileFormat::Mp4 | crate::formats::FileFormat::HevcAnnexB)
-    ) {
+    #[cfg(feature = "content-hevc")]
+    if let Some(crate::formats::FileFormat::Mp4 | crate::formats::FileFormat::HevcAnnexB) =
+        crate::formats::sniff::sniff_bytes(&carrier_bytes)
+    {
         let domain = options.domain(dialect);
         options.control.check()?;
         let anon_payload;
@@ -166,6 +165,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "content-hevc")]
     fn hevc_annexb_embed_carrier_file_roundtrip_patches() {
         let candidate = Path::new("../temp/testhevc/annexb/test-25fps.hevc");
         if !candidate.is_file() {

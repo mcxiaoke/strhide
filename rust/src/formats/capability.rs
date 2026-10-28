@@ -54,85 +54,136 @@ pub struct Capability {
 pub static CAPABILITIES: &[Capability] = &[
     Capability {
         format: FileFormat::Png,
+        #[cfg(feature = "structure-base")]
         structure: &["chunk", "eof"],
+        #[cfg(not(feature = "structure-base"))]
+        structure: &[],
+        #[cfg(feature = "content-png")]
         stego: &[StegoKind::PngSpatial],
+        #[cfg(not(feature = "content-png"))]
+        stego: &[],
         extensions: &["png"],
     },
     Capability {
         format: FileFormat::Jpeg,
+        #[cfg(feature = "structure-base")]
         structure: &["app_segment", "eof"],
+        #[cfg(not(feature = "structure-base"))]
+        structure: &[],
+        #[cfg(feature = "content-jpeg")]
         stego: &[StegoKind::JpegDct],
+        #[cfg(not(feature = "content-jpeg"))]
+        stego: &[],
         extensions: &["jpg", "jpeg", "jpe"],
     },
     Capability {
         format: FileFormat::Webp,
+        #[cfg(feature = "structure-base")]
         structure: &["riff_chunk", "eof"],
+        #[cfg(not(feature = "structure-base"))]
+        structure: &[],
         stego: &[],
         extensions: &["webp"],
     },
     Capability {
         format: FileFormat::Heif,
+        #[cfg(feature = "structure-base")]
         structure: &["item_hidden", "free_box", "box_uuid", "eof"],
+        #[cfg(not(feature = "structure-base"))]
+        structure: &[],
+        #[cfg(all(feature = "content-hevc", feature = "content-heif-bridge"))]
         stego: &[StegoKind::HevcCabac, StegoKind::HeifBridge],
+        #[cfg(all(feature = "content-hevc", not(feature = "content-heif-bridge")))]
+        stego: &[StegoKind::HevcCabac],
+        #[cfg(not(feature = "content-hevc"))]
+        stego: &[],
         extensions: &["heic", "heif", "avif"],
     },
     Capability {
         format: FileFormat::Mp4,
+        #[cfg(feature = "structure-base")]
         structure: &["box_uuid", "eof"],
+        #[cfg(not(feature = "structure-base"))]
+        structure: &[],
+        #[cfg(feature = "content-hevc")]
         stego: &[StegoKind::HevcCabac],
+        #[cfg(not(feature = "content-hevc"))]
+        stego: &[],
         extensions: &["mp4", "mov", "m4v"],
     },
     Capability {
         format: FileFormat::Mkv,
+        #[cfg(feature = "structure-base")]
         structure: &["ebml_void", "eof"],
+        #[cfg(not(feature = "structure-base"))]
+        structure: &[],
         stego: &[],
         extensions: &["mkv", "webm"],
     },
     Capability {
         format: FileFormat::Wav,
+        #[cfg(feature = "structure-base")]
         structure: &["riff_chunk", "eof"],
+        #[cfg(not(feature = "structure-base"))]
+        structure: &[],
         stego: &[],
         extensions: &["wav"],
     },
     Capability {
         format: FileFormat::Zip,
+        #[cfg(feature = "structure-base")]
         structure: &["pre_cd_inject", "eof"],
+        #[cfg(not(feature = "structure-base"))]
+        structure: &[],
         stego: &[],
         extensions: &["zip", "jar"],
     },
     Capability {
         format: FileFormat::Pdf,
+        #[cfg(feature = "structure-base")]
         structure: &["incremental", "eof"],
+        #[cfg(not(feature = "structure-base"))]
+        structure: &[],
         stego: &[],
         extensions: &["pdf"],
     },
     Capability {
         format: FileFormat::Pe,
-        #[cfg(feature = "structure-pe")]
+        #[cfg(all(feature = "structure-base", feature = "structure-pe"))]
         structure: &["pe_codebits", "pe_slack", "pe_overlay", "eof"],
-        #[cfg(not(feature = "structure-pe"))]
+        #[cfg(all(feature = "structure-base", not(feature = "structure-pe")))]
         structure: &["pe_slack", "pe_overlay", "eof"],
+        #[cfg(not(feature = "structure-base"))]
+        structure: &[],
         stego: &[],
         extensions: &["exe", "dll"],
     },
     Capability {
         format: FileFormat::HevcAnnexB,
         structure: &[],
+        #[cfg(feature = "content-hevc")]
         stego: &[StegoKind::HevcCabac],
+        #[cfg(not(feature = "content-hevc"))]
+        stego: &[],
         extensions: &["h265", "hevc", "265"],
     },
 ];
 
 /// The row for `format`.
-///
-/// Panics on an unlisted format: `FileFormat` and `CAPABILITIES` are both
-/// crate-local, and the table has one row per variant, so a missing row is a
-/// programming error rather than a user-facing condition. A unit test pins it.
 pub fn capability_of(format: FileFormat) -> &'static Capability {
-    CAPABILITIES
-        .iter()
-        .find(|c| c.format == format)
-        .unwrap_or_else(|| panic!("no capability row for {format:?}"))
+    match format {
+        FileFormat::Png => &CAPABILITIES[0],
+        FileFormat::Jpeg => &CAPABILITIES[1],
+        FileFormat::Webp => &CAPABILITIES[2],
+        FileFormat::Heif => &CAPABILITIES[3],
+        FileFormat::Mp4 => &CAPABILITIES[4],
+        FileFormat::Mkv => &CAPABILITIES[5],
+        FileFormat::Wav => &CAPABILITIES[6],
+        FileFormat::Zip => &CAPABILITIES[7],
+        FileFormat::Pdf => &CAPABILITIES[8],
+        FileFormat::Pe => &CAPABILITIES[9],
+        FileFormat::HevcAnnexB => &CAPABILITIES[10],
+    }
 }
 
 impl FileFormat {
@@ -170,31 +221,42 @@ mod tests {
 
     #[test]
     fn domain_support_matches_the_documented_matrix() {
-        // Structure domain: every container, but not a raw Annex-B stream.
+        // Structure domain: every container when structure-base is enabled, but not a raw Annex-B stream.
         for format in FileFormat::ALL {
-            let expected = *format != FileFormat::HevcAnnexB;
+            let expected = {
+                #[cfg(feature = "structure-base")]
+                {
+                    *format != FileFormat::HevcAnnexB
+                }
+                #[cfg(not(feature = "structure-base"))]
+                {
+                    false
+                }
+            };
             assert_eq!(
                 format.supports_structure(),
                 expected,
                 "{format:?} structure support"
             );
         }
-        // Content domain: exactly the five HEVC/PNG/JPEG carriers.
+        // Content domain: exactly the enabled HEVC/PNG/JPEG carriers.
         let stego: Vec<_> = FileFormat::ALL
             .iter()
             .copied()
             .filter(|f| f.supports_stego())
             .collect();
-        assert_eq!(
-            stego,
-            vec![
-                FileFormat::Png,
-                FileFormat::Jpeg,
-                FileFormat::Heif,
-                FileFormat::Mp4,
-                FileFormat::HevcAnnexB,
-            ]
-        );
+        let mut expected = Vec::new();
+        #[cfg(feature = "content-png")]
+        expected.push(FileFormat::Png);
+        #[cfg(feature = "content-jpeg")]
+        expected.push(FileFormat::Jpeg);
+        #[cfg(feature = "content-hevc")]
+        {
+            expected.push(FileFormat::Heif);
+            expected.push(FileFormat::Mp4);
+            expected.push(FileFormat::HevcAnnexB);
+        }
+        assert_eq!(stego, expected);
     }
 
     #[test]

@@ -986,6 +986,10 @@ pub struct VerifyLevel {
 }
 
 impl VerifyLevel {
+    pub fn render_message(&self, _ctx: crate::core::i18n::RenderCtx) -> Option<&str> {
+        self.message.as_deref()
+    }
+
     pub fn pass(level: u8, name: impl Into<String>) -> Self {
         Self {
             level,

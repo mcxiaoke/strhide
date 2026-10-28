@@ -219,6 +219,110 @@ impl LocalParams {
     }
 }
 
+/// Capacity safety tier controlling the maximum recommended bits per pixel (bpp).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SafetyLevel {
+    /// Paranoid security tier: bpp <= 0.06 bits/pixel (approx r >= 11.5), ultra-low detection risk.
+    Paranoid,
+    /// High security tier (recommended default): bpp <= 0.10 bits/pixel (approx r >= 6.9).
+    #[default]
+    High,
+    /// Balanced tier: bpp <= 0.15 bits/pixel (approx r >= 4.6). Legacy boundary, not claimed undetectable.
+    Balanced,
+}
+
+impl std::str::FromStr for SafetyLevel {
+    type Err = crate::errors::StrHideError;
+
+    /// Parse a safety tier: case-insensitive `paranoid` / `high` / `balanced`,
+    /// or the numeric aliases `0` (paranoid), `1` (high), `2` (balanced).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "0" | "paranoid" | "Paranoid" | "PARANOID" => Ok(SafetyLevel::Paranoid),
+            "1" | "high" | "High" | "HIGH" => Ok(SafetyLevel::High),
+            "2" | "balanced" | "Balanced" | "BALANCED" => Ok(SafetyLevel::Balanced),
+            other => Err(crate::errors::StrHideError::General(format!(
+                "Invalid safety level '{other}'. Supported: 'paranoid' (0), 'high' (1, default), 'balanced' (2)"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for SafetyLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl SafetyLevel {
+    /// Maximum bits per pixel (bpp) allowed under this safety level.
+    pub fn bpp_limit(self) -> f64 {
+        match self {
+            SafetyLevel::Paranoid => 0.06,
+            SafetyLevel::High => 0.10,
+            SafetyLevel::Balanced => 0.15,
+        }
+    }
+
+    /// Target candidate-to-message ratio `r = slots / bits`.
+    /// Calibrated against the DIV2K natural image dataset in Phase 0 (c_density ≈ 0.69).
+    pub fn target_ratio(self) -> f64 {
+        match self {
+            SafetyLevel::Paranoid => 11.5,
+            SafetyLevel::High => 6.9,
+            SafetyLevel::Balanced => 4.6,
+        }
+    }
+
+    /// Parse from case-insensitive string ("high", "balanced", "paranoid").
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "paranoid" => Some(SafetyLevel::Paranoid),
+            "high" => Some(SafetyLevel::High),
+            "balanced" => Some(SafetyLevel::Balanced),
+            _ => None,
+        }
+    }
+
+    /// Drift-ladder budget for HEVC **video** carriers (multi-picture).
+    pub fn video_budget(self) -> VideoBudget {
+        match self {
+            SafetyLevel::Paranoid => VideoBudget {
+                non_ref_fraction: 0.1,
+                ref_flips_per_picture: 110,
+            },
+            SafetyLevel::High => VideoBudget {
+                non_ref_fraction: 0.2,
+                ref_flips_per_picture: 220,
+            },
+            SafetyLevel::Balanced => VideoBudget {
+                non_ref_fraction: 0.4,
+                ref_flips_per_picture: 450,
+            },
+        }
+    }
+
+    /// Display string for diagnostics and CLI output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SafetyLevel::Paranoid => "paranoid",
+            SafetyLevel::High => "high",
+            SafetyLevel::Balanced => "balanced",
+        }
+    }
+}
+
+/// Drift-ladder budget an HEVC video carrier is recommended to stay within.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VideoBudget {
+    /// Fraction of the non-reference (drift-free) slot band the recommended
+    /// payload may occupy.
+    pub non_ref_fraction: f64,
+    /// Flips per reference picture the recommended payload may spend.
+    pub ref_flips_per_picture: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -380,6 +380,25 @@ impl Warning {
             ),
         }
     }
+    /// Render the warning according to the given context language.
+    pub fn render(&self, ctx: crate::core::i18n::RenderCtx) -> String {
+        match ctx.lang {
+            crate::core::i18n::Lang::En => self.message(),
+            crate::core::i18n::Lang::Zh => match self {
+                Warning::SizeInflation {
+                    ube_size,
+                    host_size,
+                    ratio_pct,
+                } => format!(
+                    "隐藏数据信封 ({ube_size} 字节) 占载体大小 ({host_size} 字节) 的 {ratio_pct:.1}%，超出 50% 膨胀告警阈值。显著的文件体积膨胀可能会影响隐蔽性！"
+                ),
+                Warning::SuspiciousStructures { hints } => format!(
+                    "载体呈现与隐藏信封一致的结构 ({})。它可能已包含使用其他密码写入的隐身信封；此时写入可能会堆叠第二个信封。",
+                    hints.join("; ")
+                ),
+            },
+        }
+    }
 }
 
 impl std::fmt::Display for Warning {
@@ -506,6 +525,11 @@ pub struct LevelStatus {
 }
 
 impl LevelStatus {
+    /// Render status detail according to context.
+    pub fn render(&self, _ctx: crate::core::i18n::RenderCtx) -> &str {
+        &self.detail
+    }
+
     /// A level that ran and passed.
     fn pass(detail: impl Into<String>) -> Self {
         Self {
@@ -1715,7 +1739,7 @@ fn verify_restored(
     // stealth envelope underneath), so stripping this one cannot reproduce the
     // recorded original. Envelopes must be removed in reverse order of
     // injection.
-    let mut diagnosis = String::new();
+    let mut residual_envelope = false;
     restored.seek(SeekFrom::Start(0))?;
     if let Some(r_adapter) = find_adapter(restored) {
         let remaining = r_adapter
@@ -1731,24 +1755,27 @@ fn verify_restored(
                 })
             });
         if remaining.is_some() {
-            diagnosis = "\nDiagnosis: the restored file still contains another hidden envelope. Remove envelopes in reverse order of injection (most recently written first).".to_string();
+            residual_envelope = true;
         }
     }
 
-    Err(StrHideError::RestoreMismatch(format!(
-        "Restored size: {restored_size} (expected {})\nRestored SHA256: {}\nExpected SHA256: {}{}",
-        header.orig_host_size,
-        restored_sha256
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>(),
-        header
-            .orig_host_sha256
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>(),
-        diagnosis
-    )))
+    let res_sha = restored_sha256
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let exp_sha = header
+        .orig_host_sha256
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+
+    Err(StrHideError::RestoreMismatch {
+        restored_size,
+        expected_size: header.orig_host_size,
+        restored_sha256: res_sha,
+        expected_sha256: exp_sha,
+        residual_envelope,
+    })
 }
 
 /// Strip the envelope of a carrier written under `dialect`.
@@ -2375,5 +2402,27 @@ mod compact_meta_tests {
         bad_digest.raw_sha256 = "zz".repeat(32);
         assert!(bad_digest.encode_compact().is_none());
         assert!(encode_metadata(&bad_digest).is_err());
+    }
+
+    #[test]
+    fn test_warning_render_bilingual() {
+        use crate::core::i18n::{Lang, RenderCtx};
+
+        let w1 = Warning::SizeInflation {
+            ube_size: 1000,
+            host_size: 1500,
+            ratio_pct: 66.7,
+        };
+        assert_eq!(w1.render(RenderCtx::new(Lang::En)), w1.message());
+        assert!(w1.render(RenderCtx::new(Lang::Zh)).contains("隐藏数据信封"));
+
+        let w2 = Warning::SuspiciousStructures {
+            hints: vec!["prIv chunk".into()],
+        };
+        assert_eq!(w2.render(RenderCtx::new(Lang::En)), w2.message());
+        assert!(
+            w2.render(RenderCtx::new(Lang::Zh))
+                .contains("载体呈现与隐藏信封一致的结构")
+        );
     }
 }

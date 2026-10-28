@@ -6,6 +6,7 @@
 //! one-to-one to failure classes so callers can branch on them without
 //! string-matching messages.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// The single error type for the whole crate.
@@ -70,6 +71,16 @@ pub enum StrHideError {
     #[error("Rejection error: {0}")]
     Rejection(String),
 
+    /// Target destination file already exists and overwrite was not permitted.
+    #[error(
+        "Refusing to overwrite existing file '{0}'. Choose another -o path or pass --overwrite."
+    )]
+    AlreadyExists(std::path::PathBuf),
+
+    /// Target file is in use by another process (e.g. preview or media player lock).
+    #[error("Target file '{0}' is in use by another process")]
+    TargetBusy(std::path::PathBuf),
+
     /// The payload is larger than the recommended capacity of the requested
     /// safety tier while `SafetyEnforcement::Enforced` is in force.
     ///
@@ -77,15 +88,27 @@ pub enum StrHideError {
     /// content domain retries some embeds through a fallback engine (the HEIF
     /// thumbnail bridge): a policy refusal is final, and must not be replaced
     /// by the fallback's unrelated "no bridgeable item" error.
-    #[error("Safety threshold exceeded: {0}")]
-    SafetyThreshold(String),
+    #[error(
+        "Safety threshold exceeded: payload is {required_bytes} bytes, limit for tier '{tier}' is {available_bytes} bytes"
+    )]
+    SafetyThreshold {
+        tier: crate::params::SafetyLevel,
+        required_bytes: usize,
+        available_bytes: usize,
+    },
 
     /// [`crate::structure::remove_carrier`] restored a file whose size or SHA-256
     /// does not match the original recorded in the envelope header. This
     /// usually means a second envelope was layered on top and must be removed
     /// first, most-recently-written first.
-    #[error("100% restore verification failed: {0}")]
-    RestoreMismatch(String),
+    #[error("100% restore verification failed: restored size {restored_size} (expected {expected_size}) or SHA256 mismatch{}", if *.residual_envelope { "\nDiagnosis: the restored file still contains another hidden envelope. Remove envelopes in reverse order of injection (most recently written first)." } else { "" })]
+    RestoreMismatch {
+        restored_size: u64,
+        expected_size: u64,
+        restored_sha256: String,
+        expected_sha256: String,
+        residual_envelope: bool,
+    },
 
     /// The carrier bytes do not match any supported format magic
     /// (PNG / JPEG / MP4 / ZIP / PDF / PE).
@@ -143,7 +166,7 @@ pub enum TrellisCause {
     ExhaustedSlots,
 }
 
-#[cfg(feature = "structure")]
+#[cfg(feature = "structure-base")]
 impl From<serde_json::Error> for StrHideError {
     fn from(err: serde_json::Error) -> Self {
         StrHideError::CorruptedData(format!("JSON serialization error: {err}"))
@@ -151,6 +174,27 @@ impl From<serde_json::Error> for StrHideError {
 }
 
 impl StrHideError {
+    /// Machine-readable error kind for frontends.
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            StrHideError::Io(_) => ErrorKind::Io,
+            StrHideError::CorruptedData(_) => ErrorKind::CorruptedData,
+            StrHideError::Password(_) => ErrorKind::Password,
+            StrHideError::PasswordWithHint { .. } => ErrorKind::PasswordWithHint,
+            StrHideError::TrellisInfeasible { .. } => ErrorKind::TrellisInfeasible,
+            StrHideError::Rejection(_) => ErrorKind::Rejection,
+            StrHideError::AlreadyExists(_) => ErrorKind::AlreadyExists,
+            StrHideError::TargetBusy(_) => ErrorKind::TargetBusy,
+            StrHideError::SafetyThreshold { .. } => ErrorKind::SafetyThreshold,
+            StrHideError::RestoreMismatch { .. } => ErrorKind::RestoreMismatch,
+            StrHideError::UnsupportedFormat(_) => ErrorKind::UnsupportedFormat,
+            StrHideError::NoHiddenData(_) => ErrorKind::NoHiddenData,
+            StrHideError::UnsupportedVersion(_) => ErrorKind::UnsupportedVersion,
+            StrHideError::Cancelled => ErrorKind::Cancelled,
+            StrHideError::General(_) => ErrorKind::General,
+        }
+    }
+
     /// Error category (used to translate category prefixes during CLI rendering).
     /// `NoHiddenData` and `General` do not carry a prefix and return `None`.
     pub fn category(&self) -> Option<crate::core::i18n::Msg> {
@@ -160,10 +204,14 @@ impl StrHideError {
             StrHideError::Password(_) | StrHideError::PasswordWithHint { .. } => {
                 Some(crate::core::i18n::Msg::ErrPassword)
             }
-            StrHideError::Rejection(_) | StrHideError::SafetyThreshold(_) => {
+            StrHideError::Rejection(_) | StrHideError::SafetyThreshold { .. } => {
                 Some(crate::core::i18n::Msg::ErrRejection)
             }
-            StrHideError::RestoreMismatch(_) => Some(crate::core::i18n::Msg::ErrRestoreMismatch),
+            StrHideError::AlreadyExists(_) => Some(crate::core::i18n::Msg::ErrRejection),
+            StrHideError::TargetBusy(_) => Some(crate::core::i18n::Msg::ErrIo),
+            StrHideError::RestoreMismatch { .. } => {
+                Some(crate::core::i18n::Msg::ErrRestoreMismatch)
+            }
             StrHideError::UnsupportedFormat(_) | StrHideError::UnsupportedVersion(_) => {
                 Some(crate::core::i18n::Msg::ErrUnsupported)
             }
@@ -182,12 +230,44 @@ impl StrHideError {
             StrHideError::CorruptedData(s)
             | StrHideError::Password(s)
             | StrHideError::Rejection(s)
-            | StrHideError::SafetyThreshold(s)
-            | StrHideError::RestoreMismatch(s)
             | StrHideError::UnsupportedFormat(s)
             | StrHideError::UnsupportedVersion(s)
             | StrHideError::NoHiddenData(s)
             | StrHideError::General(s) => s.clone(),
+            StrHideError::AlreadyExists(p) => {
+                format!(
+                    "Refusing to overwrite existing file '{}'. Choose another -o path or pass --overwrite.",
+                    p.display()
+                )
+            }
+            StrHideError::TargetBusy(p) => {
+                format!("Target file '{}' is in use by another process", p.display())
+            }
+            StrHideError::SafetyThreshold {
+                tier,
+                required_bytes,
+                available_bytes,
+            } => {
+                format!(
+                    "Payload ({required_bytes} bytes) exceeds recommended safety threshold ({available_bytes} bytes, tier: '{tier}')."
+                )
+            }
+            StrHideError::RestoreMismatch {
+                restored_size,
+                expected_size,
+                restored_sha256,
+                expected_sha256,
+                residual_envelope,
+            } => {
+                let diag = if *residual_envelope {
+                    "\nDiagnosis: the restored file still contains another hidden envelope. Remove envelopes in reverse order of injection (most recently written first)."
+                } else {
+                    ""
+                };
+                format!(
+                    "Restored size: {restored_size} (expected {expected_size})\nRestored SHA256: {restored_sha256}\nExpected SHA256: {expected_sha256}{diag}"
+                )
+            }
             StrHideError::TrellisInfeasible { detail, .. } => detail.clone(),
             StrHideError::Cancelled => "Operation cancelled".into(),
             StrHideError::PasswordWithHint { message, hint } => match hint {
@@ -198,10 +278,6 @@ impl StrHideError {
     }
 
     /// The envelope's password hint, when the error carries one.
-    ///
-    /// A field rather than text to parse: the hint is arbitrary user input and
-    /// may itself contain quotes, so any string-splitting scheme was fragile by
-    /// construction.
     pub fn hint(&self) -> Option<&str> {
         match self {
             StrHideError::PasswordWithHint { hint, .. } => hint.as_deref(),
@@ -209,42 +285,62 @@ impl StrHideError {
         }
     }
 
-    /// Structured, language-neutral view of this error for a front end.
-    ///
-    /// [`Display`](std::fmt::Display) always renders English; a GUI or HTTP
-    /// service needs the *parts* — the category message id, the detail text,
-    /// the hint — so it can render in whatever language its UI thread is in.
-    /// This is the counterpart of [`detail`](Self::detail), which is a
-    /// pre-rendered English string (plan §5.3).
-    ///
-    /// ```no_run
-    /// use strhide::core::i18n::Lang;
-    /// use strhide::errors::StrHideError;
-    ///
-    /// let err = StrHideError::Password("wrong password".into());
-    /// let rendered = err.detail_i18n().render(Lang::Zh);
-    /// assert!(rendered.contains("wrong password"));
-    /// ```
+    /// Structured, language-neutral view of this error for a front end using global lang.
     pub fn detail_i18n(&self) -> ErrorDetail {
+        self.detail_i18n_with_ctx(crate::core::i18n::RenderCtx::current())
+    }
+
+    /// Structured, language-neutral view of this error for a front end using explicit RenderCtx.
+    pub fn detail_i18n_with_ctx(&self, ctx: crate::core::i18n::RenderCtx) -> ErrorDetail {
+        let cat = self.category();
         ErrorDetail {
-            category: self.category(),
+            kind: self.kind(),
+            category: cat,
+            category_label: cat.map(|c| c.text(ctx.lang)),
             detail: self.detail(),
             hint: self.hint().map(str::to_string),
         }
     }
 }
 
+/// Machine-readable stable error kinds for GUI and IPC dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorKind {
+    Io,
+    CorruptedData,
+    Password,
+    PasswordWithHint,
+    TrellisInfeasible,
+    Rejection,
+    AlreadyExists,
+    TargetBusy,
+    SafetyThreshold,
+    RestoreMismatch,
+    UnsupportedFormat,
+    NoHiddenData,
+    UnsupportedVersion,
+    Cancelled,
+    General,
+}
+
 /// The parts of an [`StrHideError`], separated so a non-English front end can
 /// render it instead of scraping [`Display`](std::fmt::Display).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ErrorDetail {
-    /// Localizable category label ("I/O error", "Password error", ...), or
-    /// `None` for errors that read as one plain sentence.
+    /// Machine-readable stable classification.
+    pub kind: ErrorKind,
+    /// Localizable category enum key (serialized as its stable ID e.g. "ErrPassword").
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<crate::core::i18n::Msg>,
+    /// Pre-rendered category label in the active language.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category_label: Option<&'static str>,
     /// The detail text, in English. Engine-generated, so it is not translated;
     /// the category label around it is.
     pub detail: String,
     /// The envelope password hint, when the error carries one.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
 }
 
@@ -274,4 +370,66 @@ fn cat_line(lang: crate::core::i18n::Lang) -> &'static str {
 /// The `"[ERROR] {detail}"` template in `lang`.
 fn plain_line(lang: crate::core::i18n::Lang) -> &'static str {
     crate::core::i18n::Msg::ErrorLinePlain.text(lang)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_error_detail_serialization_and_kind() {
+        let err = StrHideError::Password("invalid password".into());
+        let detail = err.detail_i18n();
+        assert_eq!(detail.kind, ErrorKind::Password);
+        assert_eq!(detail.category, Some(crate::core::i18n::Msg::ErrPassword));
+
+        let json = serde_json::to_string(&detail).expect("serialize ErrorDetail");
+        assert!(json.contains("\"kind\":\"password\""), "{json}");
+        assert!(json.contains("\"category\":\"ErrPassword\""), "{json}");
+        assert!(json.contains("\"detail\":\"invalid password\""), "{json}");
+    }
+
+    #[test]
+    fn test_structured_error_variants() {
+        let exists = StrHideError::AlreadyExists(PathBuf::from("secret.png"));
+        assert_eq!(exists.kind(), ErrorKind::AlreadyExists);
+        assert!(exists.detail().contains("secret.png"));
+
+        let busy = StrHideError::TargetBusy(PathBuf::from("video.mp4"));
+        assert_eq!(busy.kind(), ErrorKind::TargetBusy);
+        assert!(busy.detail().contains("video.mp4"));
+
+        let safety = StrHideError::SafetyThreshold {
+            tier: crate::params::SafetyLevel::High,
+            required_bytes: 1000,
+            available_bytes: 500,
+        };
+        assert_eq!(safety.kind(), ErrorKind::SafetyThreshold);
+        assert!(safety.detail().contains("1000"));
+        assert!(safety.detail().contains("500"));
+        assert!(safety.detail().contains("high"));
+
+        let mismatch = StrHideError::RestoreMismatch {
+            restored_size: 100,
+            expected_size: 200,
+            restored_sha256: "aaa".into(),
+            expected_sha256: "bbb".into(),
+            residual_envelope: true,
+        };
+        assert_eq!(mismatch.kind(), ErrorKind::RestoreMismatch);
+        assert!(mismatch.detail().contains("another hidden envelope"));
+    }
+
+    #[test]
+    fn test_detail_i18n_with_ctx() {
+        let err = StrHideError::Password("wrong".into());
+        let zh_ctx = crate::core::i18n::RenderCtx::new(crate::core::i18n::Lang::Zh);
+        let detail_zh = err.detail_i18n_with_ctx(zh_ctx);
+        assert_eq!(detail_zh.category_label, Some("密码错误或缺失"));
+
+        let en_ctx = crate::core::i18n::RenderCtx::new(crate::core::i18n::Lang::En);
+        let detail_en = err.detail_i18n_with_ctx(en_ctx);
+        assert_eq!(detail_en.category_label, Some("Password error"));
+    }
 }
