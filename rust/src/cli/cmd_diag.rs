@@ -85,6 +85,7 @@ pub(crate) fn handle_inspect(
         return Ok(());
     }
 
+    let t_start = std::time::Instant::now();
     let mut reports = Vec::with_capacity(files.len());
     let mut failures = 0usize;
     for carrier in &files {
@@ -174,13 +175,15 @@ pub(crate) fn handle_inspect(
                 }
             })
             .count();
+        let elapsed_str = format_duration(t_start.elapsed());
         println!(
             "{}",
             t!(
                 Msg::InspectSummary,
                 total = reports.len(),
                 hidden = hidden,
-                failed = failures
+                failed = failures,
+                elapsed = elapsed_str
             )
         );
     }
@@ -250,6 +253,7 @@ pub(crate) fn handle_verify(
         return Ok(if struct_ok || content_ok { 0 } else { 1 });
     }
 
+    let t_start = std::time::Instant::now();
     let mut reports = Vec::with_capacity(files.len());
     let mut failures = 0usize;
     let mut any_failed = false;
@@ -338,6 +342,7 @@ pub(crate) fn handle_verify(
             })
             .count();
         let failed_cnt = reports.len() - passed;
+        let elapsed_str = format_duration(t_start.elapsed());
         println!(
             "{}",
             t!(
@@ -345,7 +350,8 @@ pub(crate) fn handle_verify(
                 total = reports.len(),
                 passed = passed,
                 failed = failed_cnt,
-                unreadable = failures
+                unreadable = failures,
+                elapsed = elapsed_str
             )
         );
     }
@@ -365,6 +371,7 @@ pub(crate) fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideErr
         ));
     }
 
+    let t_start = std::time::Instant::now();
     let mut reports = Vec::with_capacity(files.len());
     let mut failures = 0usize;
     for f in &files {
@@ -428,13 +435,15 @@ pub(crate) fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideErr
             }
         }
         let findings_cnt = reports.iter().filter(|r| !r.findings.is_empty()).count();
+        let elapsed_str = format_duration(t_start.elapsed());
         println!(
             "{}",
             t!(
                 Msg::ScanSummary,
                 total = reports.len(),
                 findings = findings_cnt,
-                failed = failures
+                failed = failures,
+                elapsed = elapsed_str
             )
         );
     }

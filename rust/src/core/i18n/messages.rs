@@ -289,8 +289,8 @@ crate::i18n_messages! {
 
     // ---- Basic status lines ----
     ReadOkExtracted:
-        en = "[OK] Extracted payload to '{path}' ({bytes} bytes).",
-        zh = "[OK] 成功提取载荷至 '{path}'（共 {bytes} 字节）";
+        en = "[OK] Extracted payload {bytes} to '{path}' (took {elapsed})",
+        zh = "[OK] 成功提取载荷 {bytes} 至 '{path}' (耗时 {elapsed})";
     InfoBackupCreated:
         en = "[INFO] Backup created at '{path}'.",
         zh = "[INFO] 已创建原文件备份: '{path}'";
@@ -628,11 +628,11 @@ Run `strhide <COMMAND> --help` for the options of one command.",
         en = "[WARNING] This envelope is not encrypted: written without a password, supplied password was ignored.",
         zh = "[WARNING] 此信封未设置个人密码加密，所提供的密码已被忽略。";
     ExtractOk:
-        en = "[OK] Extracted {bytes} bytes to '{path}'",
-        zh = "[OK] 成功提取数据至 '{path}'（共 {bytes} 字节）";
+        en = "[OK] Extracted payload {bytes} to '{path}' (took {elapsed})",
+        zh = "[OK] 成功提取载荷 {bytes} 至 '{path}' (耗时 {elapsed})";
     ExtractBinaryDetected:
-        en = "[OK] Binary payload detected ({bytes} bytes). Extracted to 'extracted.bin'.",
-        zh = "[OK] 检测到二进制载荷（共 {bytes} 字节），已保存为 'extracted.bin'。";
+        en = "[OK] Extracted binary payload {bytes} to 'extracted.bin' (took {elapsed})",
+        zh = "[OK] 检测到二进制载荷 {bytes}，已保存至 'extracted.bin' (耗时 {elapsed})";
 
     // ---- Inspect report ----
     InspectCarrier:
@@ -705,8 +705,8 @@ Run `strhide <COMMAND> --help` for the options of one command.",
         en = "[WARN] failed to inspect '{path}': {err}",
         zh = "[WARN] 检查文件 '{path}' 失败: {err}";
     InspectSummary:
-        en = "Inspected {total} file(s), {hidden} with hidden data, {failed} failed.",
-        zh = "共检查 {total} 个文件: {hidden} 个含隐藏数据，{failed} 个检查失败。";
+        en = "Inspected {total} file(s): {hidden} with hidden data, {failed} failed (took {elapsed}).",
+        zh = "共检查 {total} 个文件: {hidden} 个含隐藏数据，{failed} 个检查失败 (耗时 {elapsed})。";
 
     // ---- Verify report ----
     VerifyL1:
@@ -722,8 +722,8 @@ Run `strhide <COMMAND> --help` for the options of one command.",
         en = "[WARN] failed to verify '{path}': {err}",
         zh = "[WARN] 校验文件 '{path}' 失败: {err}";
     VerifySummary:
-        en = "Verified {total} file(s): {passed} passed, {failed} with verification failures, {unreadable} unreadable.",
-        zh = "共校验 {total} 个文件: {passed} 个通过，{failed} 个未通过，{unreadable} 个无法读取。";
+        en = "Verified {total} file(s): {passed} passed, {failed} with verification failures, {unreadable} unreadable (took {elapsed}).",
+        zh = "共校验 {total} 个文件: {passed} 个通过，{failed} 个未通过，{unreadable} 个无法读取 (耗时 {elapsed})。";
 
     // ---- Scan report ----
     WarnScanFailed:
@@ -733,8 +733,8 @@ Run `strhide <COMMAND> --help` for the options of one command.",
         en = "[WARN] '{path}' does not exist, skipping",
         zh = "[WARN] '{path}' 不存在，已跳过";
     ScanSummary:
-        en = "\nScanned {total} file(s), {findings} with findings, {failed} failed.",
-        zh = "\n共扫描 {total} 个文件: {findings} 个存在异常检出，{failed} 个扫描失败。";
+        en = "\nScanned {total} file(s): {findings} with findings, {failed} failed (took {elapsed}).",
+        zh = "\n共扫描 {total} 个文件: {findings} 个存在异常检出，{failed} 个扫描失败 (耗时 {elapsed})。";
 
     // ---- List table ----
     ListCarrierDependentNotice:
@@ -746,49 +746,37 @@ Run `strhide <COMMAND> --help` for the options of one command.",
 
     // ---- Stego capacity probe ----
     StegoProbeHeader:
-        en = "Content-Adaptive Steganography Capacity for '{path}':",
-        zh = "文件 '{path}' 的自适应隐写容量:";
-    StegoProbeFormat:
-        en = "  Format:          {val}",
-        zh = "  图像格式:     {val}";
-    StegoProbeAlgorithm:
-        en = "  Algorithm:       {val}",
-        zh = "  隐写算法:     {val}";
-    StegoProbeMediaInfo:
-        en = "  Media info:      {val}",
-        zh = "  媒体信息:     {val}";
-    StegoProbeTotalElements:
-        en = "  Total elements:  {val}",
-        zh = "  总元素数:     {val}";
-    StegoProbePayloadSlots:
-        en = "  Payload slots:   {val} slots (body only; header slots excluded)",
-        zh = "  载荷槽位:     {val} 个（仅主体；已排除头部槽位）";
-    StegoProbeMaxRaw:
-        en = "  Max raw payload: {bytes} bytes ({kib:.1} KiB)",
-        zh = "  最大原始载荷: {bytes} 字节 ({kib:.1} KiB)";
-    StegoProbeMaxRawGrouped:
-        en = "  Max raw payload: {bytes} bytes ({kib:.1} KiB) -- grouped-code bound; this carrier's Huffman table is over-optimised, so u=1 (one slot per bit) is refused",
-        zh = "  最大原始载荷: {bytes} 字节 ({kib:.1} KiB)（分组码上限；载体 Huffman 表过优化，u=1 每比特单槽位模式不可用）";
-    StegoProbeRecommended:
-        en = "  Recommended max: {bytes} bytes ({kib:.1} KiB) (tier: {level}, bpp <= {bpp})",
-        zh = "  推荐安全容量: {bytes} 字节 ({kib:.1} KiB)（档位: {level}, bpp <= {bpp}）";
-    StegoProbeEstChanges:
-        en = "  Est. changes:   ~{rate:.3} per payload bit (matrix coding); recommended payload is anchored to low-risk region",
-        zh = "  预估修改率:   ~{rate:.3} 每有效比特（矩阵编码）；推荐载荷已锚定至统计低风险区";
-    StegoProbeEstimatedNote:
-        en = "  Note:         Capacity estimated from 20% sample with byte weighting; use '--exact' for full scan",
-        zh = "  说明:         以上容量由前 20% 样本字节加权预估；使用 '--exact' 可强制执行全量精确扫描";
+        en = "Content-Adaptive Steganography Capacity for '{path}' (took {elapsed}):",
+        zh = "文件 '{path}' 的自适应隐写容量 (耗时 {elapsed}):";
+    StegoProbeLineMedia:
+        en = "  Media:     {media}",
+        zh = "  载体媒体: {media}";
+    StegoProbeLineAlgo:
+        en = "  Algorithm: {algo} | Est. changes ~{rate:.2}",
+        zh = "  隐写算法: {algo} | 预估修改率 ~{rate:.2}";
+    StegoProbeLineCap:
+        en = "  Capacity:  safe {safe} | max {max} ({slots} slots){note}",
+        zh = "  隐写容量: 推荐安全 {safe} | 最大原始 {max} ({slots} 槽位){note}";
+    StegoProbeNoteExactHint:
+        en = " [sample estimate; use '--exact' for full scan]",
+        zh = " [加权预估，可用 '--exact' 全量扫描]";
+    StegoProbeNoteGrouped:
+        en = " [grouped-code bound]",
+        zh = " [分组码上限]";
 
     // ---- Embed execution ----
     EmbedOkDest:
-        en = "[OK] Embedded {bytes} payload bytes into '{carrier}' -> '{dest}' (took {elapsed})",
-        zh = "[OK] 成功将 {bytes} 字节载荷嵌入 '{carrier}' -> '{dest}'（耗时 {elapsed}）";
+        en = "[OK] Embedded {bytes} payload into '{carrier}' -> '{dest}' [algorithm: {algo}] (took {elapsed})",
+        zh = "[OK] 载荷 {bytes} 成功嵌入 '{carrier}' -> '{dest}' [算法: {algo}] (耗时 {elapsed})";
     EmbedOkInPlace:
-        en = "[OK] Embedded {bytes} payload bytes in-place into '{carrier}' (took {elapsed})",
-        zh = "[OK] 成功将 {bytes} 字节载荷原地嵌入 '{carrier}'（耗时 {elapsed}）";
+        en = "[OK] Embedded {bytes} payload in-place into '{carrier}' [algorithm: {algo}] (took {elapsed})",
+        zh = "[OK] 载荷 {bytes} 成功原地嵌入 '{carrier}' [算法: {algo}] (耗时 {elapsed})";
     EmbedCapacityReport:
-        en = "     Carrier exact capacity: safe {safe} bytes ({used:.1}% used), max {max} bytes ({slots} slots)",
-        zh = "     载体确切容量: 安全容量 {safe} 字节 (当前已用 {used:.1}%)，最大原始 {max} 字节 (槽位 {slots})";
+        en = "     Capacity usage: {used:.1}% (safe {safe}, max {max}, {slots} slots)",
+        zh = "     容量占用: {used:.1}% (安全 {safe}, 最大 {max}, {slots} 槽位)";
+    EmbedDryRun:
+        en = "[DRY-RUN] '{carrier}' rehearsal complete [algorithm: {algo}] (took {elapsed}): est. size {stego} (carrier {orig}, {diff} / {pct:.2}%), no file written",
+        zh = "[DRY-RUN] '{carrier}' 演练完成 [算法: {algo}] (耗时 {elapsed}): 预估大小 {stego} (原 {orig}, {diff} / {pct:.2}%), 未写入文件";
 
     // ---- Multi-carrier batch execution ----
     FailCarrier:
@@ -803,11 +791,11 @@ Run `strhide <COMMAND> --help` for the options of one command.",
 
     // ---- Write & Restore result ----
     WriteOk:
-        en = "[OK] Successfully embedded into '{carrier}' using strategy '{strategy}'.",
-        zh = "[OK] 成功写入载体 '{carrier}'（策略: {strategy}）。";
+        en = "[OK] Successfully written to '{carrier}' using strategy '{strategy}' (took {elapsed})",
+        zh = "[OK] 成功写入载体 '{carrier}' [策略: {strategy}] (耗时 {elapsed})";
     WritePayloadUbe:
-        en = "     Payload: {raw} bytes -> UBE: {ube} bytes.",
-        zh = "     载荷大小: {raw} 字节 -> 信封大小: {ube} 字节。";
+        en = "     Payload {raw} -> Envelope {ube}{backup}",
+        zh = "     载荷 {raw} -> 信封 {ube}{backup}";
     WriteStrategyNote:
         en = "     [STRATEGY] {note}",
         zh = "     [STRATEGY] {note}";
@@ -815,21 +803,18 @@ Run `strhide <COMMAND> --help` for the options of one command.",
         en = "     Password Hint: '{hint}'.",
         zh = "     密码提示: '{hint}'。";
     WriteBackupNote:
-        en = "     [BACKUP] Original carrier backed up to '{path}'.",
-        zh = "     [BACKUP] 原始载体已备份至 '{path}'。";
+        en = " | Backup: '{path}'",
+        zh = " | 备份: '{path}'";
     WriteWarningNote:
         en = "[WARNING] {warn}",
         zh = "[WARNING] {warn}";
     RestoreOk:
-        en = "[OK] Successfully stripped hidden data from '{carrier}'.",
-        zh = "[OK] 成功清除隐藏数据，宿主已还原: '{carrier}'。";
-    RestoreSize:
-        en = "     Restored size: {bytes} bytes.",
-        zh = "     还原后大小: {bytes} 字节。";
-    RestoreSha256:
-        en = "     SHA-256: {sha} (100% verified identical to original).",
-        zh = "     SHA-256: {sha}（100% 校验与原文件完全一致）。";
+        en = "[OK] Hidden data removed, carrier restored: '{carrier}' ({bytes}, took {elapsed})",
+        zh = "[OK] 成功清除隐藏数据，宿主已还原: '{carrier}' ({bytes}, 耗时 {elapsed})";
+    RestoreDetail:
+        en = "     SHA-256: {sha} (100% verified identical){backup}",
+        zh = "     SHA-256: {sha} (100% 校验完全一致){backup}";
     RestoreBackupNote:
-        en = "     [BACKUP] Prior carrier backed up to '{path}'.",
-        zh = "     [BACKUP] 修改前载体已备份至 '{path}'。";
+        en = " | Backup: '{path}'",
+        zh = " | 备份: '{path}'";
 }

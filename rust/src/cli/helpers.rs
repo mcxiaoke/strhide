@@ -572,3 +572,165 @@ pub(crate) fn read_hex(chars: &[char], start: usize, count: usize) -> Option<u32
     }
     Some(value)
 }
+
+/// Format large counts (elements, slots, etc.) into human-readable units (K, M, G, T).
+pub(crate) fn format_count(n: u64) -> String {
+    let f = n as f64;
+    if n < 1_000 {
+        format!("{n}")
+    } else if n < 1_000_000 {
+        format!("{:.2}K", f / 1_000.0)
+    } else if n < 1_000_000_000 {
+        format!("{:.2}M", f / 1_000_000.0)
+    } else if n < 1_000_000_000_000 {
+        format!("{:.2}G", f / 1_000_000_000.0)
+    } else {
+        format!("{:.2}T", f / 1_000_000_000_000.0)
+    }
+}
+
+/// Format byte counts into human-readable binary units (B, KiB, MiB, GiB, TiB).
+pub(crate) fn format_size(bytes: u64) -> String {
+    let f = bytes as f64;
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const TIB: f64 = 1024.0 * 1024.0 * 1024.0 * 1024.0;
+
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if f < MIB {
+        format!("{:.2} KiB", f / KIB)
+    } else if f < GIB {
+        format!("{:.2} MiB", f / MIB)
+    } else if f < TIB {
+        format!("{:.2} GiB", f / GIB)
+    } else {
+        format!("{:.2} TiB", f / TIB)
+    }
+}
+
+/// Format elapsed time into human-friendly duration strings.
+pub(crate) fn format_duration(d: std::time::Duration) -> String {
+    let secs_f = d.as_secs_f64();
+    if secs_f < 1.0 {
+        format!("{}ms", d.as_millis())
+    } else if secs_f < 60.0 {
+        format!("{:.2}s", secs_f)
+    } else {
+        let total_secs = d.as_secs();
+        let mins = total_secs / 60;
+        let secs = total_secs % 60;
+        format!("{mins}m {secs}s")
+    }
+}
+
+/// Summarise steganography algorithm name and relevant hyper-parameters.
+pub(crate) fn format_stego_algorithm(
+    tuning: &StegoTuning,
+    safety: &SafetyPolicy,
+    format: Option<FileFormat>,
+    cap_algo: Option<&str>,
+) -> String {
+    let safety_str = safety.level.as_str();
+    match tuning {
+        #[cfg(feature = "content-png")]
+        StegoTuning::Png { model, params } => {
+            format!(
+                "{} (stc_h: {}, safety: {})",
+                model.id(),
+                params.stc_h,
+                safety_str
+            )
+        }
+        #[cfg(feature = "content-jpeg")]
+        StegoTuning::Jpeg { model, params } => {
+            format!(
+                "{} (stc_h: {}, safety: {})",
+                model.id(),
+                params.stc_h,
+                safety_str
+            )
+        }
+        #[cfg(feature = "content-hevc")]
+        StegoTuning::Hevc { .. } => {
+            let name = cap_algo.unwrap_or("HEVC-CABAC-InPlace");
+            format!("{name} (safety: {safety_str})")
+        }
+        StegoTuning::Auto => match format {
+            #[cfg(feature = "content-png")]
+            Some(FileFormat::Png) => {
+                let name = cap_algo.unwrap_or("hill");
+                format!("{name} (stc_h: 7, safety: {safety_str})")
+            }
+            #[cfg(feature = "content-jpeg")]
+            Some(FileFormat::Jpeg) => {
+                let name = cap_algo.unwrap_or("uerd");
+                format!("{name} (stc_h: 7, safety: {safety_str})")
+            }
+            #[cfg(feature = "content-hevc")]
+            Some(FileFormat::Mp4 | FileFormat::Heif | FileFormat::HevcAnnexB) => {
+                let name = cap_algo.unwrap_or("HEVC-CABAC-InPlace");
+                format!("{name} (safety: {safety_str})")
+            }
+            _ => {
+                if let Some(algo) = cap_algo {
+                    format!("{algo} (safety: {safety_str})")
+                } else {
+                    format!("auto (safety: {safety_str})")
+                }
+            }
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_format_count() {
+        assert_eq!(format_count(0), "0");
+        assert_eq!(format_count(999), "999");
+        assert_eq!(format_count(1_000), "1.00K");
+        assert_eq!(format_count(12_500), "12.50K");
+        assert_eq!(format_count(559_362_333), "559.36M");
+        assert_eq!(format_count(71_443_814_400), "71.44G");
+    }
+
+    #[test]
+    fn test_format_size() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1024), "1.00 KiB");
+        assert_eq!(format_size(100 * 1024), "100.00 KiB");
+        assert_eq!(format_size(1_500_122), "1.43 MiB");
+        assert_eq!(format_size(34_960_095), "33.34 MiB");
+        assert_eq!(format_size(1024 * 1024 * 1024 * 2), "2.00 GiB");
+    }
+
+    #[test]
+    fn test_format_duration() {
+        assert_eq!(format_duration(Duration::from_millis(42)), "42ms");
+        assert_eq!(format_duration(Duration::from_millis(999)), "999ms");
+        assert_eq!(format_duration(Duration::from_millis(1250)), "1.25s");
+        assert_eq!(format_duration(Duration::from_secs(65)), "1m 5s");
+        assert_eq!(format_duration(Duration::from_secs(135)), "2m 15s");
+    }
+
+    #[test]
+    fn test_format_stego_algorithm() {
+        let safety = SafetyPolicy::default(); // high
+        let s = format_stego_algorithm(
+            &StegoTuning::Auto,
+            &safety,
+            Some(FileFormat::Mp4),
+            Some("HEVC-CABAC-InPlace"),
+        );
+        assert_eq!(s, "HEVC-CABAC-InPlace (safety: high)");
+
+        let s2 = format_stego_algorithm(&StegoTuning::Auto, &safety, Some(FileFormat::Jpeg), None);
+        assert_eq!(s2, "uerd (stc_h: 7, safety: high)");
+    }
+}

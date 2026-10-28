@@ -158,6 +158,7 @@ pub(crate) fn handle_write(
     let backup = !args.no_backup && cfg.backup.unwrap_or(true);
 
     for_each_carrier(&args.carrier, quiet, |carrier| {
+        let t_start = std::time::Instant::now();
         let output =
             resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;
         if let Some(ref t) = output {
@@ -182,7 +183,7 @@ pub(crate) fn handle_write(
             engine.local_params(),
             &engine.dialect().structure,
         )?;
-        print_write_result(&res, quiet);
+        print_write_result(&res, quiet, t_start.elapsed());
         Ok(())
     })
 }
@@ -244,6 +245,7 @@ fn read_one(
     quiet: bool,
     engine: &StrHide,
 ) -> Result<(), StrHideError> {
+    let t_start = std::time::Instant::now();
     // In batch mode (`-o <DIR>`) the payload is read in memory and named here:
     // the engine can only name outputs after the recorded filename, which is
     // absent for text payloads, and two unnamed payloads would collide on
@@ -343,23 +345,27 @@ fn read_one(
         check_overwrite(&dest, args.overwrite)?;
         std::fs::write(&dest, &res.data)?;
         if !quiet {
+            let elapsed_str = format_duration(t_start.elapsed());
             println!(
                 "{}",
                 t!(
                     Msg::ReadOkExtracted,
                     path = dest.display(),
-                    bytes = res.raw_size
+                    bytes = format_size(res.raw_size),
+                    elapsed = elapsed_str
                 )
             );
         }
     } else if let Some(wf) = res.written_file {
         if !quiet {
+            let elapsed_str = format_duration(t_start.elapsed());
             println!(
                 "{}",
                 t!(
                     Msg::ReadOkExtracted,
                     path = wf.display(),
-                    bytes = res.raw_size
+                    bytes = format_size(res.raw_size),
+                    elapsed = elapsed_str
                 )
             );
         }
@@ -393,9 +399,15 @@ fn read_one(
         })?;
         f.write_all(&res.data)?;
         if !quiet {
+            let elapsed_str = format_duration(t_start.elapsed());
             println!(
                 "{}",
-                t!(Msg::ReadOkExtracted, path = fn_to_use, bytes = res.raw_size)
+                t!(
+                    Msg::ReadOkExtracted,
+                    path = fn_to_use,
+                    bytes = format_size(res.raw_size),
+                    elapsed = elapsed_str
+                )
             );
         }
     }
@@ -441,6 +453,7 @@ pub(crate) fn handle_restore(
     let backup = !args.no_backup && cfg.backup.unwrap_or(true);
 
     for_each_carrier(&args.carrier, quiet, |carrier| {
+        let t_start = std::time::Instant::now();
         let output =
             resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;
         if let Some(ref t) = output {
@@ -458,7 +471,7 @@ pub(crate) fn handle_restore(
             },
             &engine.dialect().structure,
         )?;
-        print_remove_result(&res, quiet);
+        print_remove_result(&res, quiet, t_start.elapsed());
         Ok(())
     })
 }

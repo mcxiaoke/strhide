@@ -169,21 +169,33 @@ pub(crate) fn print_content_verify_result(res: &crate::stego::StegoVerifyResult)
     }
 }
 
-pub(crate) fn print_write_result(res: &WriteResult, quiet: bool) {
+pub(crate) fn print_write_result(res: &WriteResult, quiet: bool, elapsed: std::time::Duration) {
     if quiet {
         return;
     }
+    let elapsed_str = super::helpers::format_duration(elapsed);
     println!(
         "{}",
         t!(
             Msg::WriteOk,
             carrier = res.carrier.display(),
-            strategy = res.strategy.name()
+            strategy = res.strategy.name(),
+            elapsed = elapsed_str
         )
     );
+    let backup_str = if let Some(bak) = &res.backup_file {
+        t!(Msg::WriteBackupNote, path = bak.display())
+    } else {
+        String::new()
+    };
     println!(
         "{}",
-        t!(Msg::WritePayloadUbe, raw = res.raw_size, ube = res.ube_size)
+        t!(
+            Msg::WritePayloadUbe,
+            raw = super::helpers::format_size(res.raw_size),
+            ube = super::helpers::format_size(res.ube_size),
+            backup = backup_str
+        )
     );
     if let Some(note) = &res.strategy_note {
         println!("{}", t!(Msg::WriteStrategyNote, note = note));
@@ -191,22 +203,36 @@ pub(crate) fn print_write_result(res: &WriteResult, quiet: bool) {
     if let Some(hint) = &res.password_hint {
         println!("{}", t!(Msg::WritePasswordHint, hint = hint));
     }
-    if let Some(bak) = &res.backup_file {
-        println!("{}", t!(Msg::WriteBackupNote, path = bak.display()));
-    }
     for warn in &res.warnings {
         eprintln!("{}", t!(Msg::WriteWarningNote, warn = warn.message()));
     }
 }
 
-pub(crate) fn print_remove_result(res: &RemoveResult, quiet: bool) {
+pub(crate) fn print_remove_result(res: &RemoveResult, quiet: bool, elapsed: std::time::Duration) {
     if quiet {
         return;
     }
-    println!("{}", t!(Msg::RestoreOk, carrier = res.carrier.display()));
-    println!("{}", t!(Msg::RestoreSize, bytes = res.restored_size));
-    println!("{}", t!(Msg::RestoreSha256, sha = res.restored_sha256));
-    if let Some(bak) = &res.backup_file {
-        println!("{}", t!(Msg::RestoreBackupNote, path = bak.display()));
-    }
+    let elapsed_str = super::helpers::format_duration(elapsed);
+    println!(
+        "{}",
+        t!(
+            Msg::RestoreOk,
+            carrier = res.carrier.display(),
+            bytes = super::helpers::format_size(res.restored_size),
+            elapsed = elapsed_str
+        )
+    );
+    let backup_str = if let Some(bak) = &res.backup_file {
+        t!(Msg::RestoreBackupNote, path = bak.display())
+    } else {
+        String::new()
+    };
+    println!(
+        "{}",
+        t!(
+            Msg::RestoreDetail,
+            sha = res.restored_sha256,
+            backup = backup_str
+        )
+    );
 }

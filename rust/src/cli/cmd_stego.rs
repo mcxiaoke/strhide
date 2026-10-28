@@ -41,6 +41,7 @@ fn run_capacity_probe(
         false,
     )?;
     for carrier in &carriers {
+        let t_start = std::time::Instant::now();
         let carrier_bytes = std::fs::read(carrier)?;
         let (_, options) = stego_options(
             tuning,
@@ -65,56 +66,93 @@ fn run_capacity_probe(
         if quiet {
             continue;
         }
-        println!("{}", t!(Msg::StegoProbeHeader, path = carrier.display()));
-        println!("{}", t!(Msg::StegoProbeFormat, val = cap.format));
-        println!("{}", t!(Msg::StegoProbeAlgorithm, val = cap.algorithm));
-        if let Some(ref m) = cap.media_info {
-            println!("{}", t!(Msg::StegoProbeMediaInfo, val = m));
-        }
-        println!(
-            "{}",
-            t!(Msg::StegoProbeTotalElements, val = cap.total_elements)
-        );
-        let approx = if cap.is_estimated { "~" } else { "" };
+
+        let elapsed_str = format_duration(t_start.elapsed());
         println!(
             "{}",
             t!(
-                Msg::StegoProbePayloadSlots,
-                val = format_args!("{approx}{}", cap.available_slots)
+                Msg::StegoProbeHeader,
+                path = carrier.display(),
+                elapsed = elapsed_str
             )
         );
-        let kib = cap.max_raw_payload_bytes as f64 / 1024.0;
-        let max_raw_msg = if cap.max_raw_is_grouped {
-            Msg::StegoProbeMaxRawGrouped
+
+        // Line 1: Media info
+        let is_zh = matches!(crate::core::i18n::lang(), crate::core::i18n::Lang::Zh);
+        let elem_unit = if is_zh { "元素" } else { "elements" };
+        let media_desc = if let Some(ref m) = cap.media_info {
+            format!(
+                "{}, {}, {} {}",
+                cap.format,
+                m,
+                format_count(cap.total_elements as u64),
+                elem_unit
+            )
         } else {
-            Msg::StegoProbeMaxRaw
+            format!(
+                "{}, {} {}",
+                cap.format,
+                format_count(cap.total_elements as u64),
+                elem_unit
+            )
+        };
+        println!("{}", t!(Msg::StegoProbeLineMedia, media = media_desc));
+
+        // Line 2: Algorithm & Tuning & Rate
+        let tier_label = if is_zh { "档位" } else { "tier" };
+        let algo_desc = match &options.tuning {
+            #[cfg(feature = "content-png")]
+            crate::stego::StegoTuning::Png { params, .. } => {
+                format!(
+                    "{} (stc_h: {}, {}: {}, bpp <= {:.2})",
+                    cap.algorithm, params.stc_h, tier_label, cap.safety_level, cap.safety_bpp_limit
+                )
+            }
+            #[cfg(feature = "content-jpeg")]
+            crate::stego::StegoTuning::Jpeg { params, .. } => {
+                format!(
+                    "{} (stc_h: {}, {}: {}, bpp <= {:.2})",
+                    cap.algorithm, params.stc_h, tier_label, cap.safety_level, cap.safety_bpp_limit
+                )
+            }
+            _ => {
+                format!(
+                    "{} ({}: {}, bpp <= {:.2})",
+                    cap.algorithm, tier_label, cap.safety_level, cap.safety_bpp_limit
+                )
+            }
         };
         println!(
             "{}",
             t!(
-                max_raw_msg,
-                bytes = format_args!("{approx}{}", cap.max_raw_payload_bytes),
-                kib = format_args!("{approx}{kib:.1}")
+                Msg::StegoProbeLineAlgo,
+                algo = algo_desc,
+                rate = cap.estimated_change_rate
             )
         );
-        let safe_kib = cap.recommended_max_bytes as f64 / 1024.0;
+
+        // Line 3: Capacity & Slots
+        let approx = if cap.is_estimated { "~" } else { "" };
+        let safe_str = format!("{approx}{}", format_size(cap.recommended_max_bytes as u64));
+        let max_str = format!("{approx}{}", format_size(cap.max_raw_payload_bytes as u64));
+        let slots_str = format!("{approx}{}", format_count(cap.available_slots as u64));
+        let mut note = String::new();
+        if cap.is_estimated {
+            note.push_str(&t!(Msg::StegoProbeNoteExactHint));
+        }
+        if cap.max_raw_is_grouped {
+            note.push_str(&t!(Msg::StegoProbeNoteGrouped));
+        }
         println!(
             "{}",
             t!(
-                Msg::StegoProbeRecommended,
-                bytes = format_args!("{approx}{}", cap.recommended_max_bytes),
-                kib = format_args!("{approx}{safe_kib:.1}"),
-                level = cap.safety_level,
-                bpp = format_args!("{:.2}", cap.safety_bpp_limit)
+                Msg::StegoProbeLineCap,
+                safe = safe_str,
+                max = max_str,
+                slots = slots_str,
+                note = note
             )
         );
-        println!(
-            "{}",
-            t!(Msg::StegoProbeEstChanges, rate = cap.estimated_change_rate)
-        );
-        if cap.is_estimated {
-            println!("{}", t!(Msg::StegoProbeEstimatedNote));
-        }
     }
     Ok(())
 }
@@ -265,24 +303,40 @@ pub(crate) fn handle_embed(
             }
         }
 
+        let algo_str = format_stego_algorithm(
+            &options.tuning,
+            &options.safety,
+            carrier_format(&carrier_bytes),
+            cap_info.as_ref().map(|c| c.algorithm.as_str()),
+        );
+
         if args.dry_run {
             // Full rehearsal, no disk write: everything up to and including the
             // embed ran (capacity, safety gate, credential resolution), only the
             // commit is skipped.
             if !quiet {
+                let elapsed_str = format_duration(t_start.elapsed());
+                let diff = stego_bytes.len().saturating_sub(carrier_bytes.len());
+                let pct = if !carrier_bytes.is_empty() {
+                    (stego_bytes.len() as f64 - carrier_bytes.len() as f64)
+                        / carrier_bytes.len() as f64
+                        * 100.0
+                } else {
+                    0.0
+                };
+                let diff_str = format!("+{}", format_size(diff as u64));
                 println!(
-                    "[DRY-RUN] {} -> {} bytes stego (carrier {} bytes, +{} bytes, +{:.2}%). No file written.",
-                    carrier.display(),
-                    stego_bytes.len(),
-                    carrier_bytes.len(),
-                    stego_bytes.len().saturating_sub(carrier_bytes.len()),
-                    if !carrier_bytes.is_empty() {
-                        (stego_bytes.len() as f64 - carrier_bytes.len() as f64)
-                            / carrier_bytes.len() as f64
-                            * 100.0
-                    } else {
-                        0.0
-                    }
+                    "{}",
+                    t!(
+                        Msg::EmbedDryRun,
+                        carrier = carrier.display(),
+                        algo = algo_str,
+                        elapsed = elapsed_str,
+                        stego = format_size(stego_bytes.len() as u64),
+                        orig = format_size(carrier_bytes.len() as u64),
+                        diff = diff_str,
+                        pct = pct
+                    )
                 );
                 if let Some(ref cap) = cap_info {
                     let used_pct = if cap.recommended_max_bytes > 0 {
@@ -294,10 +348,10 @@ pub(crate) fn handle_embed(
                         "{}",
                         t!(
                             Msg::EmbedCapacityReport,
-                            safe = cap.recommended_max_bytes,
+                            safe = format_size(cap.recommended_max_bytes as u64),
                             used = format_args!("{used_pct:.1}"),
-                            max = cap.max_raw_payload_bytes,
-                            slots = cap.available_slots
+                            max = format_size(cap.max_raw_payload_bytes as u64),
+                            slots = format_count(cap.available_slots as u64)
                         )
                     );
                 }
@@ -323,20 +377,16 @@ pub(crate) fn handle_embed(
         }
 
         if !quiet {
-            let elapsed = t_start.elapsed();
-            let elapsed_str = if elapsed.as_secs_f64() < 1.0 {
-                format!("{:.0}ms", elapsed.as_secs_f64() * 1000.0)
-            } else {
-                format!("{:.2}s", elapsed.as_secs_f64())
-            };
+            let elapsed_str = format_duration(t_start.elapsed());
             let is_inplace = crate::structure::same_file(carrier, &dest);
             if is_inplace {
                 println!(
                     "{}",
                     t!(
                         Msg::EmbedOkInPlace,
-                        bytes = payload_len,
+                        bytes = format_size(payload_len as u64),
                         carrier = carrier.display(),
+                        algo = algo_str,
                         elapsed = elapsed_str
                     )
                 );
@@ -345,9 +395,10 @@ pub(crate) fn handle_embed(
                     "{}",
                     t!(
                         Msg::EmbedOkDest,
-                        bytes = payload_len,
+                        bytes = format_size(payload_len as u64),
                         carrier = carrier.display(),
                         dest = dest.display(),
+                        algo = algo_str,
                         elapsed = elapsed_str
                     )
                 );
@@ -362,10 +413,10 @@ pub(crate) fn handle_embed(
                     "{}",
                     t!(
                         Msg::EmbedCapacityReport,
-                        safe = cap.recommended_max_bytes,
+                        safe = format_size(cap.recommended_max_bytes as u64),
                         used = format_args!("{used_pct:.1}"),
-                        max = cap.max_raw_payload_bytes,
-                        slots = cap.available_slots
+                        max = format_size(cap.max_raw_payload_bytes as u64),
+                        slots = format_count(cap.available_slots as u64)
                     )
                 );
             }
@@ -430,6 +481,7 @@ fn extract_one(
     quiet: bool,
     engine: &StrHide,
 ) -> Result<(), StrHideError> {
+    let t_start = std::time::Instant::now();
     let carrier_bytes = std::fs::read(carrier)?;
 
     // A private no-password dialect is compile-time `Dialect` territory on the
@@ -504,9 +556,15 @@ fn extract_one(
         check_overwrite(&dest, args.overwrite)?;
         std::fs::write(&dest, payload.as_bytes())?;
         if !quiet {
+            let elapsed_str = format_duration(t_start.elapsed());
             println!(
                 "{}",
-                t!(Msg::ExtractOk, bytes = payload.len(), path = dest.display())
+                t!(
+                    Msg::ExtractOk,
+                    bytes = format_size(payload.len() as u64),
+                    path = dest.display(),
+                    elapsed = elapsed_str
+                )
             );
         }
     } else if args.stdout {
@@ -516,9 +574,15 @@ fn extract_one(
         check_overwrite(&dest, args.overwrite)?;
         std::fs::write(&dest, payload.as_bytes())?;
         if !quiet {
+            let elapsed_str = format_duration(t_start.elapsed());
             println!(
                 "{}",
-                t!(Msg::ExtractOk, bytes = payload.len(), path = dest.display())
+                t!(
+                    Msg::ExtractOk,
+                    bytes = format_size(payload.len() as u64),
+                    path = dest.display(),
+                    elapsed = elapsed_str
+                )
             );
         }
     } else if let Ok(text) = std::str::from_utf8(payload.as_bytes()) {
@@ -531,7 +595,15 @@ fn extract_one(
         check_overwrite(&dest, args.overwrite)?;
         std::fs::write(&dest, payload.as_bytes())?;
         if !quiet {
-            println!("{}", t!(Msg::ExtractBinaryDetected, bytes = payload.len()));
+            let elapsed_str = format_duration(t_start.elapsed());
+            println!(
+                "{}",
+                t!(
+                    Msg::ExtractBinaryDetected,
+                    bytes = format_size(payload.len() as u64),
+                    elapsed = elapsed_str
+                )
+            );
         }
     }
 

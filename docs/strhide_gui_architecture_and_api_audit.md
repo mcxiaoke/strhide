@@ -1,318 +1,146 @@
-# `strhide` 数据隐藏库 GUI 层适配深度评估与架构改造方案
+# `strhide` GUI 层适配与前端就绪度统一架构方案（v2.0 终版）
 
-> **评估基线**：`strhide v0.7.4`（Rust 2024 Edition，含 2026-10-27 阶段 0–4 架构重组及 2026-10-28 HEVC Scheme C v2 批次 1–5 性能与内存优化）  
-> **适用框架**：Tauri v2 / Electron / Wails（跨进程 IPC + Web 前端）、iced / egui / Slint / GPUI（纯 Rust 原生多线程 GUI）、Flutter (`flutter_rust_bridge`)  
-> **文档性质**：库使用者视角的架构审计、接口缺口定位与可落地改造指南
+> **文档定位（单一事实源）**：本文档为 `strhide` 面向 GUI 客户端（Tauri v2 / Electron / iced / egui / Slint）的**唯一主蓝图（v2.0）**。它完整合并了《GUI 前端就绪度复核与补齐方案》（`gui_frontend_readiness_plan_20261027.md`，编号 **G1–G10**）与《0.7.4 增量架构审计》（编号 **1.1–7.2**），并逐条吸纳了两份交叉审核意见（`strhide_gui_audit_review_20261028.md` 与 `gui_architecture_and_readiness_cross_audit_20261028_gmf.md`）的全部勘误与裁决。
+>
+> **代码基线**：`strhide v0.7.4`（仓库 HEAD `9abd810`，含 2026-10-27 阶段 0–4 重构及 2026-10-28 HEVC Scheme C v2 批次 1–5 优化）
+>
+> **引用规范**：为避免行号随重构漂移，本文所有源码证据均以 **模块路径 + 符号名** 为主锚点，辅以 `0.7.4` 实测行号。
 
-## 一、 评估背景与总体结论
+## 零、 总体结论与版本演进说明
 
-站在 `strhide` 库使用者的立场上，如果我们计划为其构建一套生产级图形界面（GUI），首先需要肯定的是：**当前代码库（经历了阶段 0–4 的重构与 2026-10-28 的 HEVC 专项优化）已经具备了良好的分层雏形**。例如：
+### 0.1 核心结论
 
-1. **双域解耦与门面入口**：通过 `facade::StrHide` 绑定编译期 `Dialect` 与 `LocalParams`，并以 `.structure()` 与 `.stego()` 子门面隔离结构域（UBE v2.2 容器注入）与内容域（PNG 空间域 / JPEG DCT 域 / HEVC CABAC 域）。
-2. **参数分级（L Class / P Class）**：将仅影响写入端的调优旋钮（`LocalParams`、`EmbedOptions`）与提取端解耦，结合 PNG 64B `FeatureWord`、JPEG 44B 超块、HEVC 32B `HevcSuperblock` 以及加密区内的隐写微头（Micro-header），实现了**提取端除密码外零参数依赖**。
-3. **前端就绪层地基**：已初步引入 `core::control`（`Control`、`CancelToken`、`Progress`、`Stage`）、`core::pipeline`（批量路径推导与预检）、`core::media::MediaInfo` 强类型媒体信息及 `errors::ErrorDetail`。
+经过阶段 0–4 架构重组与 2026-10-28 HEVC 批次 1–5 优化，`strhide` 已经完成了“双域解耦、能力表单一事实源、微头自描述（提取端仅需密码）、HEVC 分窗流式早退与增量切片覆写”等核心算法与工程地基。
 
-然而，当我们真正动手编写 **Tauri 异步 Command** 或 **iced / egui 后台工作线程** 时，将现有源码（`rust/src/**`）与仓库架构文档（如 `docs/strhide_architecture_and_refactoring_plan.md`、`docs/HEVC-LARGE-CARRIER-MEMORY-PLAN-20261027.md`、`docs/api/ARCHITECTURE.md`）逐行比对，会发现**“架构设计文档承诺的 GUI 就绪能力”与“当前代码实际落地的接口”之间仍存在显著断层**，甚至最新提交中还引入了细分 Feature 编译破损和 CLI/Facade 优化旁路。
+然而，站在 GUI 开发者视角核对 `0.7.4` 源码，当前库距离“前端开箱即用”仍存在 **14 项关键缺口（整合自 G1–G10 与 0.7.4 增量审计）**，其中包含 **2 项在 0.7.4 新引入的实测回归问题**：
 
-### 核心问题全景速查表
+1. **细分 Feature 编译破损（P0 实测复现）**：`stego::io::embed_carrier_file`（`src/stego/io.rs:58`）无条件调用了 `crate::stego::hevc::embed_hevc_patches` 与 `dialect.hevc_format()`，未加 `#[cfg(feature = "content-hevc")]`，导致 `cargo check --no-default-features --features content-png`（或 `content-jpeg`）直接编译失败（3 处编译错误）。
 
-| 编号 | 维度 | 问题与缺口摘要 | 精准源码位置 | 影响的 GUI 形态 | 严重度 |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **1.1** | 编译与门控 | `stego/io.rs` 无条件调用 `hevc::embed_hevc_patches`，未加 `#[cfg(feature = "content-hevc")]`，单开 `content-png`/`jpeg` 编译直接失败；`errors.rs` 中 `serde_json` 门控错写为 `structure` 而非 `structure-base` | `src/stego/io.rs:60`<br>`src/errors.rs:146` | 裁剪 Feature 的轻量级 GUI | **P0 阻断** |
-| **1.2** | 能力发现 | `formats::capability::CAPABILITIES` 中内容域引擎列表未随 `content-*` Feature 条件编译，导致裁剪构建下 GUI 能力探测失真 | `src/formats/capability.rs:51-125` | 动态渲染格式支持矩阵的 GUI | **P1 高** |
-| **1.3** | 包组织架构 | `oxideav-h265` 与 `rusty_h265` 作为 Git 依赖共存于单一 Crate，阻碍 Workspace 模块化拆分、离线构建与插件化分发 | `rust/Cargo.toml:42, 45` | 全平台打包与 CI/CD | **P2 中** |
-| **2.1** | 门面缺口 | 双域聚合诊断（`DualInspectResult` / `DualVerifyResult`）与跨域智能提取（`--auto`）滞留在 `src/cli/`，未下沉至 `facade` | `src/cli/render.rs:107, 145`<br>`src/cli/cmd_diag.rs:45-60`<br>`src/cli/cmd_structure.rs:291` | 所有需要“一键检测/提取”的 GUI | **P0 阻断** |
-| **2.2** | 接口割裂 | `StegoFacade::embed_file` 仅返回 `Option<PathBuf>`，丢弃容量与告警；且 `cli/cmd_stego.rs` 绕过 `embed_carrier_file`，导致 2026-10-28 大视频零拷贝补丁优化在 CLI 失效 | `src/facade.rs:342`<br>`src/stego/io.rs:32`<br>`src/cli/cmd_stego.rs:229, 302` | 所有调用文件级嵌入的 GUI 与 CLI | **P0 阻断** |
-| **2.3** | 接口不对称 | `StegoFacade` 缺少文件级 `probe_file` / `inspect_file` / `verify_file`，与 `StructureFacade` 的 `_file` / `_bytes` 对称设计脱节 | `src/facade.rs:316-399` | 操作本地文件路径的桌面 GUI | **P1 高** |
-| **2.4** | 模块游离 | 黑盒分析 `analysis::scan_file` 游离于 `StrHide` 门面之外，无 `scan_bytes` 内存接口，且 `list` 能力汇总困在 `cli/cmd_diag.rs` | `src/analysis.rs:1951`<br>`src/cli/cmd_diag.rs:542` | 含隐写取证/检测面板的 GUI | **P1 高** |
-| **2.5** | 配置合并 | `FileConfig` 虽在 `core::config`，但将其合并为 `EmbedOptions` / `WriteOptions` 的逻辑困在 `cli/helpers.rs` | `src/core/config.rs:51`<br>`src/cli/helpers.rs:236-352` | 支持加载/保存配置的 GUI | **P2 中** |
-| **3.1** | 生命周期 | `Dialect` / `StructureProfile` / `StegoProfile` 强制要求 `&'static str`，GUI 无法在运行时从设置界面或系统密钥链动态构造私有方言 | `src/facade.rs:124`<br>`src/structure/params.rs:51`<br>`src/stego/params.rs:815` | 支持自定义私有方言/部署密钥的 GUI | **P0 阻断** |
-| **3.2** | 异步与并发 | `WriteOptions<'a>`、`EmbedOptions<'a>`、`Control<'a>` 携带借用生命周期 `'a`，无法直接跨 `tokio::spawn_blocking` 或 UI 后台线程传递 | `src/structure/options.rs:23`<br>`src/stego/options.rs:403`<br>`src/core/control.rs:166` | Tauri 异步命令、iced/egui 异步任务 | **P0 阻断** |
-| **4.1** | 进度与取消 | 结构域（`structure`）与分析域（`analysis`）完全未接入 `Control`（违背重构方案 §3.4 / §5.2 承诺），大文件写入/还原无法取消且无进度 | `src/structure/options.rs`<br>`src/structure/engine.rs`<br>`src/analysis.rs` | 处理大型 ZIP/MP4/PE 容器的 GUI | **P0 阻断** |
-| **4.2** | 进度粒度 | 内容域生产代码中 `Event::progress` 调用次数为 **0**；HEVC `record_carrier_state` 未传 `Control`，长视频精确探测/解码阶段无法响应取消 | `src/stego/hevc/engine.rs:357, 766`<br>`src/stego/png/engine.rs`<br>`src/stego/jpeg/engine.rs` | 含进度条与取消按钮的 GUI | **P0 阻断** |
-| **4.3** | 批量编排 | `core::pipeline::for_each_carrier` 无进度事件、无 `CancelToken`、强行 `println!` 且遇首个错误即中止，无法支撑 GUI 任务队列 | `src/core/pipeline.rs:30-66` | 批量隐写/批量提取任务队列 UI | **P1 高** |
-| **5.1** | 序列化缺失 | `StrHideError`、`ErrorDetail`、`TrellisCause`、`Msg`、`Lang` 未实现 `serde::Serialize` / `Deserialize`，无法直接跨越 Tauri IPC 边界 | `src/errors.rs:15, 128, 208`<br>`src/core/i18n/mod.rs:14, 67` | Tauri / Electron / HTTP 服务 | **P0 阻断** |
-| **5.2** | IPC 载荷爆炸 | `ReadResult`、`Payload`、`EmbedOutput` 缺 `Serialize`，且未分离“元数据预览”与“大体积字节流”，直接序列化会撑爆 WebView IPC | `src/structure/engine.rs:431`<br>`src/core/payload.rs:49`<br>`src/stego/options.rs:869` | Tauri / WebView 架构 GUI | **P1 高** |
-| **5.3** | 反序列化缺失 | 绝大多数 `*Options`、`StegoTuning`、`LocalParams`、`StrategyId`、`FileFormat` 缺少 `serde::Deserialize` | `src/structure/options.rs`<br>`src/stego/options.rs`<br>`src/params.rs` | 前端表单直传 JSON 配置的 GUI | **P1 高** |
-| **5.4** | 弱类型元数据 | `InspectResult.metadata` 为 `Option<serde_json::Value>`，且密码错误时塞入 `{"error": "Invalid password"}` 非法结构 | `src/structure/engine.rs:483, 2021` | 强类型前端（TypeScript / Rust UI） | **P1 高** |
-| **6.1** | 大文件内存 | `stego/io.rs` 等处仍用 `std::fs::read` 整文件读入堆内存，处理数 GB 4K 视频时产生数 GB 连续分配，缺只读 `mmap` 支持 | `src/stego/io.rs:39, 109`<br>`src/cli/cmd_stego.rs:44, 220` | 处理 >1GB 视频载体的桌面 GUI | **P1 高** |
-| **6.2** | 控制台污染 | `stego/jpeg`、`stego/png`、`core/config`、`core/pipeline` 内部残留 `eprintln!` / `println!`，GUI 无法捕获告警；`PayloadSource::Stdin` 易致死锁 | `src/stego/jpeg/engine.rs:185`<br>`src/stego/png/engine.rs:736`<br>`src/core/config.rs:114, 132` | 无终端窗口的桌面 GUI | **P2 中** |
-| **7.1** | i18n 线程陷阱 | `core::i18n` 仍用 `thread_local!` 保存语言状态（方案 §5.4 未落地），后台工作线程语言失灵；且错误 `detail` 仍硬编码英文 | `src/core/i18n/mod.rs:45-56`<br>`src/errors.rs:154-205` | 多线程/异步双语 GUI | **P1 高** |
-| **7.2** | 视觉预览缺口 | `EmbedOutput` 缺失方案 §3.3 规划的 `QualityStats`（PSNR/修改率），PNG/JPEG 嵌入不返回 `capacity`，且无修改位置热力图/代价图导出接口 | `src/stego/options.rs:869`<br>`src/stego/engine.rs:199, 329` | 专业隐写分析与画质对比视图 | **P2 中** |
+2. **CLI 绕过零拷贝补丁通道（P0 实测确认）**：2026-10-28 批次 4 在 `stego::io::embed_carrier_file` 中实现了 MP4/Annex-B 的 `embed_hevc_patches` + `commit_carrier_patches` 原位零拷贝覆写；但因 `StegoFacade::embed_file`（`src/facade.rs:454`）仅返回 `Option<PathBuf>`（丢失容量与安全告警），`cli::cmd_stego::handle_embed`（`src/cli/cmd_stego.rs:268, 371`）绕过了该函数，仍在内存中分配完整载体 `Vec<u8>` 并调用 `commit_carrier_bytes`。
 
-## 二、 维度一：Crate 组织、Feature 门控与依赖分发问题
+3. **进度与取消断层（G1 / G8）**：结构域 `src/structure/` 内 `Control` 出现次数为 **0**；全库生产代码中细粒度进度 `Event::progress` 与 `Control::stage_sized` 调用次数为 **0**（2026-10-28 批次 3 改为 Rayon 并行重编码时还误删了 HEVC 的 `Stage::Encode` 上报）；HEVC 的 `record_carrier_state` 与 `probe_hevc_pool` 未传 `Control`，长视频精确扫描期间无法响应取消。
 
-### 1.1 `stego/io.rs` 与 `errors.rs` 的 Feature 条件编译破损（实测 Bug）
+4. **双域聚合与智能提取缺位（G2）**：`DualInspectResult` / `DualVerifyResult` 仍是 `cli::render` 的 `pub(crate)` 私有结构，且门面缺少能防双域数据丢失（`also_present`）、防 PBKDF2 假死（`limits`）的 `smart_extract` 状态机。
 
-**问题诊断**：
-在 2026-10-27 阶段 2（批次 5）中，`Cargo.toml` 划分了细粒度的内容域 Feature：`content-png`、`content-jpeg`、`content-hevc`、`content-heif-bridge`。对于许多只需要图片隐写（PNG/JPEG）的轻量级 GUI 工具，开发者会配置：
-`strhide = { version = "0.7.4", default-features = false, features = ["structure-base", "content-png", "content-jpeg"] }`
-然而，在 2026-10-28 批次 4 的改动中，`rust/src/stego/io.rs:42-83` 的 `embed_carrier_file` 新增了对 MP4 和 Annex-B 的增量补丁快速路径，**却漏加了 `#[cfg(feature = "content-hevc")]` 门控**：
+5. **跨进程 IPC 序列化、i18n 与桌面端平台防线缺口（G3 / G4 / G5 / G6 / G9）**：`ErrorDetail` / `ReadResult` 缺 `Serialize`、高分辨率载荷直接序列化存在撑爆 WebView IPC 风险、`panic = "abort"` 与 Windows 预览文件句柄占用（`TargetBusy`）未设防、`Options` 的 `Debug` 实现会向日志明文泄露密码。
 
-```rust
-// rust/src/stego/io.rs:42-69（当前代码）
-if matches!(
-    format,
-    Some(crate::formats::FileFormat::Mp4 | crate::formats::FileFormat::HevcAnnexB)
-) {
-    // ...
-    let direct = || {
-        // Bug：当未启用 content-hevc 时，crate::stego::hevc 模块根本不存在（stego/mod.rs:21）！
-        crate::stego::hevc::embed_hevc_patches(
-            &carrier_bytes,
-            eff_payload,
-            secret,
-            domain,
-            dialect.hevc_format(), // Bug：StegoProfile::hevc_format() 也挂在 #[cfg(feature = "content-hevc")] 下！
-            options.freshness,
-            options.safety,
-            &options.control,
-        )
-    };
+### 0.2 v1 → v2 审核勘误与方案裁决记录
+
+本版（v2.0）对前序版本中的事实偏差、编译瑕疵及两份文档间的冲突进行了全面修正与裁决：
+
+| 审核议题 | v1 方案问题或两案冲突点 | v2.0 终版修正与裁决结论 | 
+| ----- | ----- | ----- | 
+| **源码锚点与行号** | 混用了 `0.7.3` 与 `0.7.4` 行号（如 `analysis::scan_file` 误标为 1951 行的测试函数，实际在 `:263`；`StegoFacade::embed_file` 在 `facade.rs:454`；Git 依赖在 `Cargo.toml:76,79`） | **全面订正为 `0.7.4` 精确行号，并以“模块+符号名”为主锚点**，彻底消除行号漂移风险。 | 
+| **`errors.rs:146` 定性** | 将 `#[cfg(feature = "structure")] impl From<serde_json::Error>` 与 `stego/io.rs` 并列为“编译直接失败” | **修正定性**：`structure-base` 单独编译可通过；问题本质是 `From` 实现在 `structure-base`（不含 PE）下消失，降级为 **API 门控缺口**。 | 
+| **双域诊断与智能提取 (`G2`)** | v1 的 `DualInspectReport` 漏了 `#[serde(flatten)]` 和 `content_error`；`extract_auto_bytes` 盲目捕获 `NoHiddenData` 回退内容域，且丢弃第二域载荷、缺少 `limits` | **全面采纳 27日方案 G2**：使用 `#[serde(flatten)]` 保持 `--json` 100% 兼容；`smart_extract` 先跑廉价 `inspect_any`，带 `limits: ExtractParams` 与 `also_present: Option<Domain>`。 | 
+| **结构域进度注入 (`G1`)** | v1 建议直接修改结构域内部流式拷贝循环，且未考虑取消点与 `.bak` 备份的时序 | **采纳 27日方案 G1**：在 `core::control` 提供 `ProgressWriter` / `ProgressSeekWriter` 包装 `out`，10 个适配器零改动；**取消点严格置于 `.bak` 复制与 `rename` 提交区间之前**。 | 
+| **i18n 多线程状态 (`G3` / `7.1`)** | 27日方案主张大改 71 处 `t!` 宏显式传 `RenderCtx`；v1 主张 5 行改为 `AtomicU8` 但把 `ErrorDetail.category` 改成了 `Option<String>` 丢了稳定 `Msg` 键 | **融合最优解**：① 底层 `CURRENT` 由 `thread_local!` 换为 `AtomicU8`（5 行代码立即解决工作线程语言失步，免改 71 处宏）；② 新增 `Msg::id()` 稳定键与 `RenderCtx`，保留 `ErrorDetail.category: Option<Msg>` 并序列化为稳定 ID。 | 
+| **跨线程 `Control` 与生命周期 (`3.1` / `3.2`)** | v1 提出全局 `intern_dialect_str` 驻留池（有驻留明文密钥风险），并将 `TaskControl` 列为 P0 | **修正与降级**：① 废除明文密钥 `Box::leak` 驻留池，改用 `RuntimeDialect`（`Arc<str>`）或按会话传参；② 保持 `Control<'a>` 为 `Copy`，展示在 Worker 闭包内零改动构造 `Control` 的标准模式，同时提供可选 `TaskControl` 辅助封装。 | 
+| **大文件读取模型 (`G4` / `6.1`)** | v1 在 `inspect_file_any` 中误用 `std::fs::read`，又在 §6.1 主张全面引入 `unsafe` 的 `memmap2::Mmap` | **分级裁决**：① `inspect_file` / `verify_file` 必须采用 **有界头尾流式读取（零 `unsafe`、峰值 ≤ 8 MiB）**；② 深入评估 `mmap` 在文件被外部截断时触发 `SIGBUS` 的崩溃风险，仅作为大视频 `embed`/`probe` 的可选受控优化。 | 
+| **PNG/JPEG `EmbedOutput.capacity` (`7.2`)** | v1 声称 `embed_png` / `embed_jpeg` 已算完 `available_slots`，构造 `StegoCapacityInfo` 成本为零 | **正面修正**：`stego/options.rs:870-875` 明确注释 PNG/JPEG 嵌入不跑完整容量模型（`embed_png` 仅算绿通道 `pool_green`，`embed_jpeg` 仅算 `enforced_payload_limit`）。尊重该契约，改为导出真正零成本的已应用修改统计 `EmbedStats { modified_slots, .. }`。 | 
+
+## 一、 统一问题全景矩阵（G1–G10 融合 0.7.4 增量审计）
+
+| 统一编号 | 对应旧编号 | 所属模块与关键符号 | 问题与缺口描述 | 严重度 | 
+| ----- | ----- | ----- | ----- | ----- | 
+| **U1** | 增量 1.1 / 1.2 | `stego::io::embed_carrier_file`  `errors::StrHideError`  `formats::capability::CAPABILITIES` | `stego/io.rs:58` 调用 `hevc::embed_hevc_patches` 缺 `#[cfg(feature = "content-hevc")]`，单开 `content-png`/`jpeg` 编译失败；`errors.rs:146` 门控错写为 `structure`；`CAPABILITIES` 内容域引擎未随 Feature 条件裁剪；CI 缺细分 Feature 构建门禁 | **P0 阻断** | 
+| **U2** | 增量 2.2 + G4 | `StegoFacade::embed_file`  `stego::io::embed_carrier_file`  `cli::cmd_stego::handle_embed` | `embed_file` 仅返回 `Option<PathBuf>` 且含裸 `bool`；`cmd_stego.rs:268,371` 为拿容量与告警绕过 `embed_carrier_file`，导致 10-28 批次 4 的 MP4/HEVC 零拷贝原位补丁优化在 CLI 失效；`stego/io.rs:86` 硬编码 `preserve_time = true` | **P0 阻断** | 
+| **U3** | G2 + 增量 2.1 | `cli::render::DualInspectResult`  `cli::cmd_diag::handle_inspect`  `StrHide` 门面 | 双域诊断聚合在 `cmd_diag.rs` 重复 4 次且类型为 `pub(crate)`；门面在 `cli/` 中零调用；缺少防双域载荷静默丢失（`also_present`）与防 PBKDF2 假死（`limits`）的 `smart_extract` | **P0 阻断** | 
+| **U4** | G1 | `structure::options::*Options`  `structure::engine::{write_core, remove_core}` | 结构域无 `Control` 字段，数 GB 容器写入、还原、SHA-256 校验与 `.bak` 备份全程零进度、零取消；且取消点若落入 `.bak` 复制与 `rename` 之间会残留孤儿 `.bak` | **P0 阻断** | 
+| **U5** | G8 + 增量 4.2 | `stego::hevc::engine::{record_carrier_state, probe_hevc_pool}`  `stego::{png,jpeg,hevc}` | 全库生产代码 `Event::progress` 与 `stage_sized` 调用数为 **0**；10-28 批次 3 误删 HEVC `Stage::Encode`；HEVC 切片录制与池扫描未传 `Control`，长视频扫描/解码阶段无法取消；`probe`/`extract`/`verify` 缺阶段上报 | **P0 阻断** | 
+| **U6** | G3 + 增量 5.1 / 7.1 | `core::i18n::{lang, set_lang, Msg}`  `errors::{StrHideError, ErrorDetail}` | `i18n` 使用 `thread_local!` 导致 GUI 工作线程语言失步；`Msg` 缺稳定 `id()`；`ErrorDetail` 缺 `Serialize` 与 `ErrorKind`；6 个高频错误变体与 7 个必显字段为硬编码英文散文 | **P0 阻断** | 
+| **U7** | G4 + 增量 6.1 | `StegoFacade`  `stego::io` | `StegoFacade` 缺少文件级 `probe_file` / `inspect_file` / `verify_file`；诊断接口若用 `std::fs::read` 读 2 GB 视频会产生 2 GB 堆内存峰值，需改为有界头尾流式读取 | **P1 高** | 
+| **U8** | 增量 5.2 / 5.3 / 5.4 | `structure::ReadResult`  `structure::InspectResult`  各域 `*Options` / `*Result` | `ReadResult` 落盘后仍携带全量 `data: Vec<u8>`，跨 Tauri IPC 序列化会撑爆 WebView；`InspectResult.metadata` 密码错误时塞入 `{"error": "Invalid password"}` 弱类型 JSON；缺 `suspicious_hints` 字段；核心枚举与结果缺 `Deserialize` | **P1 高** | 
+| **U9** | G5 + 增量 4.3 / 6.2 | `core::pipeline::for_each_carrier`  `core::config::parse_config` | `for_each_carrier` 首错即停、无取消/并发控制、直接向 stdout `println!`；`config.rs` 与 `stego/{png,jpeg}` 内部残留裸 `eprintln!` | **P1 高** | 
+| **U10** | G9 | `Cargo.toml` (`panic = "abort"`)  `commit::commit_carrier_bytes`  `formats::capability::capability_of` | `panic = "abort"` 下任何内部 panic 会直接杀死 GUI 并跳过 `TmpGuard::drop` 留下 `.strhide.tmp`；Windows 下 WebView 预览占用文件时 `rename` 无重试且无 `TargetBusy` 错误提示 | **P1 高** | 
+| **U11** | G6 + 增量 2.5 | `WriteOptions` / `EmbedOptions`  `PayloadSource`  `cli::helpers` | `*Options` 自动派生的 `Debug` 会将明文密码打入日志；`EmbedOptions` 缺 `PartialEq`（无法做表单脏检查）；`WriteOptions.strategy` 为裸 `&str`；`FileConfig` 合并逻辑滞留 `cli::helpers` | **P1 高** | 
+| **U12** | 增量 3.1 / 3.2 | `facade::Dialect`  `core::control::Control` | `Dialect` 字段要求 `&'static str`，运行时动态密钥配置不便；异步 GUI（`tokio::spawn_blocking`）跨线程传递 `Control` 与选项需清晰的 `'static` 桥接模式 | **P1 高** | 
+| **U13** | 增量 2.4 + 7.2 | `analysis::scan_file`  `stego::options::EmbedOutput` | `analysis` 未接入 `StrHide` 门面、缺 `scan_bytes` 与 `Control`；`EmbedOutput` 可补充轻量级已应用修改统计 `EmbedStats`（实际翻转槽位数）供 GUI 展示 | **P2 中** | 
+| **U14** | G7 + G10 | `src/lib.rs`  `scripts/import_lint.py`  `docs/api/*` | Crate 根残留待迁移模块与死导出（`supports_content_stego`、`src/sniff.rs`）；缺 `import_lint.py` 边界守卫；GUI 推荐 Feature 组合与 JSON-over-IPC 决策需固化入文档 | **P2 中** | 
+
+## 二、 P0 级阻断问题详解与可靠修复方案（U1–U6）
+
+### U1：细分 Feature 编译破损、能力表静态硬编码与 CI 矩阵缺口（增量 1.1 / 1.2）
+
+#### 1. 源码证据与实测复现
+
+* **`stego::io::embed_carrier_file`（`rust/src/stego/io.rs:42-83`）**：2026-10-28 批次 4 新增的 MP4 / Annex-B 补丁分支直接调用了 `crate::stego::hevc::embed_hevc_patches`（`:58`）和 `dialect.hevc_format()`（`:63`）。但 `pub mod hevc` 在 `rust/src/stego/mod.rs:24` 被 `#[cfg(feature = "content-hevc")]` 门控，`StegoProfile::hevc_format` 在 `rust/src/stego/params.rs:880` 同样被 `#[cfg(feature = "content-hevc")]` 门控。
+  在工作区实测执行：
+
+  ```
+  cargo check --no-default-features --features content-png   # FAILED (3 errors)
+  cargo check --no-default-features --features content-jpeg  # FAILED (3 errors)
+  
+  ```
+
+  为什么 CI 没抓到？因为当前 CI 的最小构建矩阵只跑了 `--no-default-features`、`structure`、`content`、`analysis` 四条，**漏掉了 `content-png`、`content-jpeg`、`content-hevc`、`structure-base` 四条细粒度独立构建**。
+
+* **`errors::StrHideError`（`rust/src/errors.rs:146`）**：`#[cfg(feature = "structure")] impl From<serde_json::Error> for StrHideError` 门控在 `structure`（含 PE 反汇编）上，而 `serde_json` 实际由 `structure-base`（`rust/Cargo.toml:32`）引入。单开 `structure-base` 虽可编译，但该 `From` 转换实现丢失。
+
+* **`formats::capability::CAPABILITIES`（`rust/src/formats/capability.rs:46-121`）**：`FileFormat::Pe` 的结构域策略（`:111`）正确按 `#[cfg(feature = "structure-pe")]` 条件编译，但所有格式的 `structure` 与 `stego` 数组均未按 `structure-base` / `content-png` / `content-jpeg` / `content-hevc` / `content-heif-bridge` 门控，导致裁剪 Feature 的 GUI 查询 `FileFormat::Mp4.supports_stego()` 仍返回 `true`。
+
+#### 2. 可靠修复方案
+
+1. **在 `stego/io.rs` 中补齐 `#[cfg(feature = "content-hevc")]` 门控**（注：采纳审核意见 §5.5，**绝不**将文件 I/O 塞进纯字节级的 `StegoEngine` trait，保持分层纯粹）：
+
 ```
-
-此外，在 `rust/src/errors.rs:146` 中：
-```rust
-#[cfg(feature = "structure")]
-impl From<serde_json::Error> for StrHideError
-```
-而在 `Cargo.toml:26` 中，`serde_json` 是由 `structure-base = ["core-io", "dep:serde_json"]` 引入的。若 GUI 仅启用 `structure-base`（排除 `iced-x86` 反汇编依赖），`From<serde_json::Error>` 就会因门控条件不匹配而消失。
-
-**可靠可行的解决办法**：
-1. 在 `rust/src/stego/io.rs:42` 补齐 `#[cfg(feature = "content-hevc")]`，或者更彻底地——在 `StegoEngine` trait 上提供默认的 `embed_file` 方法，让 `Mp4Engine` 与 `AnnexBEngine` 内部覆写增量补丁提交逻辑，彻底消除 `stego/io.rs` 中的格式分支判断。
-2. 将 `rust/src/errors.rs:146` 的门控修正为 `#[cfg(feature = "structure-base")]`。
-
-```rust
-// 修复方案 A：在 rust/src/stego/io.rs 中补齐条件编译门控
+// rust/src/stego/io.rs:42
 #[cfg(feature = "content-hevc")]
 if matches!(
     format,
     Some(crate::formats::FileFormat::Mp4 | crate::formats::FileFormat::HevcAnnexB)
 ) {
-    // 仅在启用 content-hevc 时编译增量补丁路径
+    // 仅当启用 content-hevc 时编译增量补丁零拷贝路径
     // ...
 }
+
 ```
 
-### 1.2 `formats::capability::CAPABILITIES` 未与编译期 Feature 联动
+2. **修正 `rust/src/errors.rs:146`**：改为 `#[cfg(feature = "structure-base")]`。
 
-**问题诊断**：
-GUI 启动时需要调用 `formats::capability::CAPABILITIES` 或 `FileFormat::supports_stego()` 来动态生成文件选择器的扩展名过滤器（File Dialog Filter）以及界面上的可用模式开关。
-在 `rust/src/formats/capability.rs:110-115` 中，`FileFormat::Pe` 正确地根据 `#[cfg(feature = "structure-pe")]` 裁剪了 `"pe_codebits"` 策略；但同一文件中的 `stego` 字段（第 56、62、74、80、121 行）却完全是硬编码静态切片。如果 GUI 构建时关闭了 `content-hevc`，`FileFormat::Mp4.supports_stego()` 依然返回 `true`，用户选完 MP4 点击嵌入才收到运行时的 `UnsupportedFormat` 报错。
+3. **联动 `rust/src/formats/capability.rs`**：对 `CAPABILITIES` 表中的 `structure` 与 `stego` 切片元素加上对应的 `#[cfg(feature = "...")]` 属性，并更新 `capability.rs` 中的单元测试门控。
 
-**可靠可行的解决办法**：
-在 `rust/src/formats/capability.rs` 中使 `stego` 与 `structure` 数组严格跟随当前激活的 Feature：
+4. **补齐 CI 硬性门禁**：在 `.github/workflows/ci.yml` 中将 `structure-base`、`content-png`、`content-jpeg`、`content-hevc`、`analysis` 五条独立构建全部设为硬性检查。
 
-```rust
-// rust/src/formats/capability.rs 改进方案
-pub static CAPABILITIES: &[Capability] = &[
-    Capability {
-        format: FileFormat::Png,
-        #[cfg(feature = "structure-base")]
-        structure: &["chunk", "eof"],
-        #[cfg(not(feature = "structure-base"))]
-        structure: &[],
-        #[cfg(feature = "content-png")]
-        stego: &[StegoKind::PngSpatial],
-        #[cfg(not(feature = "content-png"))]
-        stego: &[],
-        extensions: &["png"],
-    },
-    Capability {
-        format: FileFormat::Heif,
-        #[cfg(feature = "structure-base")]
-        structure: &["item_hidden", "free_box", "box_uuid", "eof"],
-        #[cfg(not(feature = "structure-base"))]
-        structure: &[],
-        stego: &[
-            #[cfg(feature = "content-hevc")]
-            StegoKind::HevcCabac,
-            #[cfg(feature = "content-heif-bridge")]
-            StegoKind::HeifBridge,
-        ],
-        extensions: &["heic", "heif", "avif"],
-    },
-    // 其余格式同理按 feature 门控
-];
+### U2：`StegoFacade::embed_file` 接口补齐与打通 CLI 大视频零拷贝补丁通道（增量 2.2 + G4）
+
+#### 1. 源码证据与影响
+
+* **门面与 I/O 签名不对称**：`StegoFacade::embed_file`（`rust/src/facade.rs:454`）与 `stego::io::embed_carrier_file`（`rust/src/stego/io.rs:31`）接收裸 `backup: bool` 参数，将 `preserve_time` 硬编码为 `true`（`stego/io.rs:79, 86`），且仅返回 `Result<Option<PathBuf>, StrHideError>`（只返回 `.bak` 路径），丢弃了 `embed_hevc_patches` 算出的 `StegoCapacityInfo`！
+
+* **CLI 旁路零拷贝优化**：在 `rust/src/cli/cmd_stego.rs:268-371` 的 `handle_embed` 中，CLI 为了拿到 `output.capacity` 做 Advisory 安全阈值告警和 `--dry-run` 报告，没有调用 `embed_carrier_file`，而是直接调 `embed_carrier_with_dialect_info`（在内部执行 `carrier.to_vec()` 分配数百 MB 完整载体副本）再调 `crate::structure::commit_carrier_bytes`（全盘写出，且跨模块引用了 `structure` 的重导出而非 `crate::commit`）。
+
+#### 2. 可靠修复方案
+
+融合 G4 的 `FileTarget` 设计与 28日方案的 `StegoEmbedResult`，消除裸 `bool` 参数，让 `stego::io::embed_carrier_file` 返回完整结构化结果，并使 CLI 与 GUI 共用同一条零拷贝通道：
+
 ```
-
-### 1.3 单包架构与 Git 依赖对 GUI 工程化的阻碍
-
-**问题诊断**：
-`rust/Cargo.toml:42, 45` 直接通过 `git = "https://github.com/mcxiaoke/..."` 引入 `oxideav-h265` 和 `rusty_h265`，且库与 CLI 共处一个 `Cargo.toml`。当为该项目构建 Tauri 或 Rust GUI 时：
-- 若将 GUI 放在同一仓库下，最好采用 **Cargo Workspace** 管理；
-- 企业内网构建、Linux 发行版打包（Nix / Debian / Flatpak）通常禁止构建期联网拉取 Git 依赖。
-
-**可靠可行的解决办法**：
-将 `rust/` 升级为 Cargo Workspace 结构，并将两个自有 H.265 仓库作为 `vendor/` 子模块或 `[patch]` 路径维护：
-
-```toml
-# 根目录 Cargo.toml (Workspace 推荐布局)
-[workspace]
-resolver = "2"
-members = [
-    "crates/strhide-core",      # 纯核心与协议库（原 rust/src 除 cli 外）
-    "crates/strhide-cli",       # 命令行二进制（依赖 strhide-core）
-    "crates/strhide-gui-tauri", # 或 strhide-gui-iced，直接依赖 strhide-core
-]
-
-[workspace.dependencies]
-oxideav-h265 = { path = "vendor/oxideav-h265", version = "0.1.0" }
-rusty_h265   = { path = "vendor/rusty_h265", version = "0.1.0" }
-```
-
-## 三、 维度二：CLI 与 Library 门面能力割裂——核心业务滞留在 `src/cli/`
-
-在阶段 4 重构中，虽然 `core::pipeline` 下沉了 6 个批量辅助函数，但审计 `rust/src/cli/{cmd_diag,cmd_stego,cmd_structure,helpers,render}.rs` 可以发现，**仍有 5 项对 GUI 至关重要的核心业务逻辑被锁死在 `cli` 模块内部**（且标记为 `pub(crate)` 或与 `println!` 耦合）。
-
-### 2.1 双域联合诊断与跨域自动提取（`--auto`）未下沉至 `StrHide` 门面
-
-**问题诊断**：
-在 GUI 中，最符合直觉的交互是：**用户拖入一个文件，GUI 自动显示它是否包含隐藏数据（无论结构域还是内容域），点击“提取”即可自动取出数据**，无需用户先去猜这个 PNG/JPEG/MP4 当初是用 `write`（结构域）还是 `embed`（内容域）写的。
-查看源码：
-- `DualInspectResult` 与 `DualVerifyResult` 定义在 `rust/src/cli/render.rs:107, 145`，且可见性为 `pub(crate)`；
-- 双域 `inspect` 与 `verify` 的编排逻辑写在 `rust/src/cli/cmd_diag.rs:43-65, 214-245`；
-- `read` 未命中时自动探测内容域并跳转 `extract`（以及反向跳转）的逻辑写在 `rust/src/cli/cmd_structure.rs:291-330` 和 `rust/src/cli/cmd_stego.rs:445-483`。
-
-如果 GUI 不开启 `cli` Feature，它根本拿不到这些类型和逻辑；即使开启了 `cli` Feature，这些函数也全部直接向 `stdout` 打印文本，返回 `Result<(), StrHideError>`，GUI 完全无法复用！
-
-**可靠可行的解决办法**：
-在 `facade.rs` 的 `StrHide` 顶层门面上直接提供跨双域的 `inspect_any`、`verify_any` 与 `extract_any` 方法，并将 `DualInspectResult` / `DualVerifyResult` 提升为 `facade` 的公开强类型结构：
-
-```rust
-// 建议新增于 rust/src/facade.rs
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DualInspectReport {
-    #[cfg(feature = "structure-base")]
-    pub structure: Option<crate::structure::InspectResult>,
-    #[cfg(feature = "content-base")]
-    pub content_stego: Option<crate::stego::StegoHeaderInfo>,
+// 1. 统一文件落盘目标选项（置于 crate::commit 或 crate::core::fs，两域共用）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileTarget<'a> {
+    /// None = 原地覆盖；Some(file_path) = 写入目标路径
+    pub output_path: Option<&'a Path>,
+    /// 原地覆盖时是否保留 <carrier>.bak
+    pub backup: bool,
+    /// 是否保留原载体 atime/mtime 时间戳（修复 stego/io.rs 硬编码 true 的问题）
+    pub preserve_time: bool,
+    /// 目标文件已存在（非原地）时是否允许覆盖
+    pub overwrite: bool,
 }
 
-impl DualInspectReport {
-    pub fn has_any_hidden_data(&self) -> bool {
-        let s = {
-            #[cfg(feature = "structure-base")]
-            { self.structure.as_ref().is_some_and(|r| r.has_hidden_data) }
-            #[cfg(not(feature = "structure-base"))]
-            { false }
-        };
-        let c = {
-            #[cfg(feature = "content-base")]
-            { self.content_stego.as_ref().is_some_and(|r| r.has_hidden_data) }
-            #[cfg(not(feature = "content-base"))]
-            { false }
-        };
-        s || c
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MatchedDomain {
-    Structure,
-    ContentStego,
-}
-
-impl StrHide {
-    /// 跨双域统一检查载体（只读），供 GUI 文件拖入时一键获取完整画像
-    pub fn inspect_file_any(
-        &self,
-        carrier: &Path,
-        password: Option<&str>,
-    ) -> Result<DualInspectReport, StrHideError> {
-        #[cfg(feature = "structure-base")]
-        let structure = self.structure().inspect_file(carrier, password).ok();
-
-        #[cfg(feature = "content-base")]
-        let content_stego = {
-            let fmt = std::fs::File::open(carrier)
-                .ok()
-                .and_then(|mut f| crate::formats::sniff::sniff_stream(&mut f));
-            if fmt.is_some_and(|f| f.supports_stego()) {
-                std::fs::read(carrier).ok().and_then(|bytes| {
-                    let opts = crate::stego::InspectOptions::new()
-                        .with_password(password.unwrap_or_default());
-                    self.stego().inspect(&bytes, &opts).ok()
-                })
-            } else {
-                None
-            }
-        };
-
-        Ok(DualInspectReport {
-            #[cfg(feature = "structure-base")]
-            structure,
-            #[cfg(feature = "content-base")]
-            content_stego,
-        })
-    }
-
-    /// 跨双域智能提取：优先尝试结构域（O(1) 定位），未命中时无缝回退内容域提取
-    #[cfg(all(feature = "structure-base", feature = "content-base"))]
-    pub fn extract_auto_bytes(
-        &self,
-        carrier: &[u8],
-        password: Option<&str>,
-        control: crate::core::control::Control<'_>,
-    ) -> Result<(MatchedDomain, Payload<'static>), StrHideError> {
-        match self.structure().read_bytes(carrier, password) {
-            Ok(read_res) => {
-                let kind = if read_res.is_file {
-                    crate::core::payload::PayloadKind::File
-                } else {
-                    crate::core::payload::PayloadKind::Text
-                };
-                let mut payload = Payload::owned(read_res.data).with_kind(kind);
-                if !read_res.filename.is_empty() {
-                    payload = payload.with_name(read_res.filename);
-                }
-                Ok((MatchedDomain::Structure, payload))
-            }
-            Err(StrHideError::NoHiddenData(_) | StrHideError::UnsupportedFormat(_)) => {
-                let opts = crate::stego::ExtractOptions::default()
-                    .with_password(password.unwrap_or_default())
-                    .with_control(control);
-                let payload = self.stego().extract(carrier, &opts)?;
-                Ok((MatchedDomain::ContentStego, payload))
-            }
-            Err(e) => Err(e),
+impl Default for FileTarget<'_> {
+    fn default() -> Self {
+        Self {
+            output_path: None,
+            backup: true,
+            preserve_time: true,
+            overwrite: false,
         }
     }
 }
-```
 
-### 2.2 `StegoFacade::embed_file` 返回值残缺，且 CLI 绕过它导致大视频零拷贝优化失效
-
-**问题诊断（重大发现）**：
-对比两个子门面的文件写入接口：
-- `StructureFacade::write_file` 返回 `Result<WriteResult, StrHideError>`，内含 `carrier`、`format`、`strategy`、`raw_size`、`ube_size`、`is_encrypted`、`backup_file`、`warnings` 等全套结构化信息；
-- `StegoFacade::embed_file`（`rust/src/facade.rs:342`）委托给 `stego::io::embed_carrier_file`，却只返回 `Result<Option<PathBuf>, StrHideError>`（仅仅返回了一个可选的 `.bak` 备份路径！）。
-
-这带来了两个严重后果：
-1. **GUI 调用 `embed_file` 拿不到任何结果统计**：拿不到 `StegoCapacityInfo`（总槽位数、最大容量、推荐容量、占用百分比）、拿不到 Advisory 安全超限警告（当 `SafetyEnforcement::Advisory` 且载荷超过推荐阈值时），也无法执行 `dry_run`。
-2. **CLI 自身为了拿 `capacity` 绕过了 `embed_carrier_file`，导致 2026-10-28 批次 4 的零拷贝补丁优化在 CLI 失效**：
-   查看 `rust/src/cli/cmd_stego.rs:220-303`：
-   ```rust
-   // rust/src/cli/cmd_stego.rs:229-303（当前代码）
-   let output = crate::stego::embed_carrier_with_dialect_info(
-       &carrier_bytes, &payload, &options, &dialect,
-   )?;
-   let stego_bytes = output.bytes; // 分配了完整载体副本！
-   // ...
-   let backup_created =
-       crate::structure::commit_carrier_bytes(carrier, &dest, &stego_bytes, backup, true)?;
-   ```
-   在 2026-10-28 11:04 的 `CHANGES-20261028.md`（批次 4）中，作者专门在 `stego/io.rs::embed_carrier_file` 里为 MP4/HEVC 实现了 `embed_hevc_patches` + `commit_carrier_patches`（免去全尺寸 `Vec<u8>` 拷贝，仅对修改切片 seek 原位覆写）。但因为 `embed_carrier_file` 不返回 `EmbedOutput`（含 `capacity`），`cmd_stego.rs` 根本没有调用它，而是继续调 `embed_carrier_with_dialect_info` + `commit_carrier_bytes`！
-
-**可靠可行的解决办法**：
-定义强类型的 `StegoEmbedResult` 与 `StegoWarning`，重构 `stego::io::embed_carrier_file` 使其返回 `Result<StegoEmbedResult, StrHideError>`，并让 CLI 的 `handle_embed` 与 GUI 共同调用这一条路径：
-
-```rust
-// 建议定义于 rust/src/stego/options.rs 并由 stego::io::embed_carrier_file 返回
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// 2. 内容域文件级嵌入的结构化返回结果（置于 rust/src/stego/options.rs）
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StegoWarning {
     SafetyThresholdExceeded {
@@ -324,376 +152,449 @@ pub enum StegoWarning {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StegoEmbedResult {
     pub carrier: PathBuf,
-    pub output_path: PathBuf,
-    pub format: FileFormat,
+    pub written_to: PathBuf,
+    pub format: crate::formats::FileFormat,
     pub payload_bytes: usize,
     pub carrier_before_bytes: u64,
     pub carrier_after_bytes: u64,
     pub backup_file: Option<PathBuf>,
-    pub capacity: Option<StegoCapacityInfo>,
+    pub capacity: Option<crate::stego::StegoCapacityInfo>,
     pub warnings: Vec<StegoWarning>,
-    pub dry_run: bool,
-}
-```
-在 `embed_carrier_file` 内部统一处理：
-- 若为 MP4 / Annex-B（且非 `dry_run`），走 `embed_hevc_patches` + `commit_carrier_patches` 零拷贝路径，同时保留其返回的 `_capacity` 填入 `StegoEmbedResult.capacity`；
-- 若 `options.safety.enforcement == SafetyEnforcement::Advisory` 且 `payload.len() > cap.recommended_max_bytes`，自动生成 `StegoWarning::SafetyThresholdExceeded` 放入 `warnings`；
-- 这样 CLI 和 GUI 只需调 `engine.stego().embed_file(...)` 即可同时享受到**零拷贝低内存**和**完整结构化报表**。
-
-### 2.3 `StegoFacade` 缺少文件级 `probe_file` / `inspect_file` / `verify_file`
-
-**问题诊断**：
-在桌面 GUI 中，用户通过文件对话框或拖拽传入的都是 `PathBuf`。`StructureFacade` 提供了完整的 `write_file` / `read_file` / `restore_file` / `inspect_file` / `verify_file`；而 `StegoFacade`（`rust/src/facade.rs:316-399`）除了 `embed_file` 和 `extract_file` 外，`probe`、`inspect`、`verify` 全部只接受 `carrier: &[u8]`。
-这迫使 GUI 调用方自己去写 `std::fs::read(&path)`，而且一旦未来底层优化为只读 `mmap` 或流式头部读取（例如 `inspect` 只需读文件头或前几个 NAL 切片），接收 `&[u8]` 的签名会逼迫调用方把几个 GB 的视频全量读进内存。
-
-**可靠可行的解决办法**：
-在 `StegoFacade` 与 `stego::io` 中补齐 `probe_file`、`inspect_file`、`verify_file` 三个文件级入口：
-
-```rust
-// 建议补充于 rust/src/facade.rs 的 impl StegoFacade<'_>
-pub fn probe_file(
-    &self,
-    carrier: &Path,
-    options: &ProbeOptions<'_>,
-) -> Result<StegoCapacityInfo, StrHideError> {
-    crate::stego::io::probe_carrier_file(carrier, options, &self.engine.dialect().stego)
 }
 
-pub fn inspect_file(
-    &self,
-    carrier: &Path,
-    options: &InspectOptions<'_>,
-) -> Result<StegoHeaderInfo, StrHideError> {
-    crate::stego::io::inspect_carrier_file(carrier, options, &self.engine.dialect().stego)
-}
-
-pub fn verify_file(
-    &self,
-    carrier: &Path,
-    options: &VerifyOptions<'_>,
-) -> Result<StegoVerifyResult, StrHideError> {
-    crate::stego::io::verify_carrier_file(carrier, options, &self.engine.dialect().stego)
-}
 ```
 
-### 2.4 `analysis` 域与能力列表未接入 `StrHide` 门面，且缺少 `scan_bytes`
+在 `stego::io::embed_carrier_file` 中：
 
-**问题诊断**：
-1. `analysis::scan_file`（`rust/src/analysis.rs:1951`）是独立自由函数，在 `StrHide` 上没有 `.analysis()` 子门面，且**只有 `scan_file(&Path)`，没有 `scan_bytes(&[u8])`**。当 GUI 需要对内存中刚生成的隐写产物（例如在 `dry_run` 预览对比模式或 WebAssembly / Tauri 内存缓冲中）直接跑一次黑盒隐写分析评分（`risk_score`、`detectors`）以向用户展示“隐写前 vs 隐写后抗检测指标对比”时，必须先写临时文件再调 `scan_file`！
-2. `analysis.rs:44` 硬编码引用了 `STANDARD_HEADER_MAGIC`：如果用户使用自定义 `Dialect`（自定义 `MagicPair`），`StrHide` 门面本可将该私有方言的魔数传给 `analysis` 以检测自有方言信封，但独立函数 `scan_file` 无法感知 `StrHide` 的 `Dialect`。
+* 先通过 `core::pipeline::check_overwrite` 校验非原地目标的 `target.overwrite`；
 
-**可靠可行的解决办法**：
-在 `analysis.rs` 中将核心扫描逻辑拆分为 `scan_bytes(data: &[u8], label: &str, dialect: Option<&Dialect>) -> Result<ScanReport, StrHideError>` 与 `scan_file`，并在 `StrHide` 上暴露 `.analysis()` 子门面（提供 `scan_file` 与 `scan_bytes`）。
+* 对于 `Mp4` / `HevcAnnexB`（在 `#[cfg(feature = "content-hevc")]` 下），调用 `embed_hevc_patches` 拿到 `(patches, capacity)`，立即 `drop(carrier_bytes)`，调用 `commit_carrier_patches(carrier_path, dest, &patches, target.backup, target.preserve_time)`，并将 `Some(capacity)` 存入 `StegoEmbedResult`；
 
-### 2.5 配置合并逻辑（`FileConfig` -> `*Options`）困在 `cli/helpers.rs`
+* 若 `options.safety.enforcement == SafetyEnforcement::Advisory`，检查 `capacity`（若 PNG/JPEG 未返回 `capacity` 且调用方需要告警，或按 `enforced_payload_limit` 阈值判定）生成 `StegoWarning::SafetyThresholdExceeded`；
 
-**问题诊断**：
-`core::config::FileConfig` 已经下沉到 `core`，但将 `FileConfig` 的字段（如 `strategy`、`stealth`、`preserve_time`、`backup`、`stego.safety`、`stego.enforce_safety`、`stego.algorithm`）转换为 `WriteOptions` 或 `EmbedOptions` / `ProbeOptions` 的函数 `stego_tuning`、`stego_safety`、`stego_options` 却全部写在 `rust/src/cli/helpers.rs:236-352` 中，且绑定了 `clap` 的 `StegoTuningArgs`。GUI 读取 `strhide.toml` 后，无法直接由 `FileConfig` 派生出默认的 `WriteOptions` 和 `EmbedOptions`。
+* 在 `cli/cmd_stego.rs` 的非 `--dry-run` 分支中直接调用 `embed_carrier_file`，使 CLI 与 GUI 100% 共享大视频零拷贝原位补丁优化！
 
-**可靠可行的解决办法**：
-在 `core::config::FileConfig`（或各域 Options）上直接提供 `to_write_options()`、`to_stego_safety()`、`resolve_stego_tuning(format: Option<FileFormat>)` 方法，使配置语义真正下沉到 `core`，CLI 与 GUI 共用同一套解析与默认值派生。
+### U3：双域联合诊断（`inspect_any` / `verify_any`）与防丢数智能提取（`smart_extract`）下沉门面（G2 + 增量 2.1）
 
-## 四、 维度三：借用生命周期（`'a` / `'static`）与异步 GUI / 多线程任务模型的冲突
+#### 1. 源码证据与 v1 方案缺陷剖析
 
-这是使用 Rust 编写 GUI（无论是 `iced`、`egui`、`Slint` 还是 `Tauri`）时**在编译期最容易碰壁**的设计问题。
+* 现状：`DualInspectResult`（`cli/render.rs:108`）与 `DualVerifyResult`（`:147`）为 `pub(crate)`，聚合逻辑在 `cli/cmd_diag.rs` 重复 4 次（`:52, :139, :233, :304`），且用 `.ok()` 吞掉了内容域报错；门面 `StrHide` 在 `cli/` 中调用次数为 0。
 
-### 3.1 `Dialect` / `StructureProfile` / `StegoProfile` 强制 `'static` 生命周期，阻断 GUI 运行时配置私有方言
+* 纠正 v1 方案的三处缺陷（采纳 27日方案 G2 与 GMF 交叉复核裁决）：
 
-**问题诊断**：
-查看 `rust/src/facade.rs:124`、`rust/src/structure/params.rs:51`、`rust/src/stego/params.rs:815`：
-```rust
-pub struct StructureProfile {
-    pub default_secret: Option<&'static str>,
-    pub stealth_domain: Option<&'static [u8]>,
-    pub magic: Option<MagicPair>,
-}
+  1. **必须保留 `#[serde(flatten)]`**：确保 CLI `--json` 输出的顶层字段与现有基线 100% 兼容，同时新增 `content_error: Option<ErrorDetail>` 保留内容域诊断失败原因。
+
+  2. **载体可能同时在两个域都藏有数据**：一个 PNG 或 MP4 可以既有结构域信封（如 `prIv` chunk / `uuid` box），又有内容域隐写（像素 / CABAC）。如果先读结构域成功就直接返回，GUI 用户永远无法得知或提取第二份内容域载荷！因此必须返回 `also_present: Option<Domain>`。
+
+  3. **禁止靠“盲跑提取捕获 `NoHiddenData`”来判域，且必须带 `limits: ExtractParams`**：若结构域是 Stealth 隐身信封而用户输错了密码，`read` 会返回 `NoHiddenData`；若直接回退去跑内容域 `extract`，会对几千万像素的大图做全量代价图计算与 PBKDF2 迭代，造成 UI 假死。必须先走廉价的 `inspect_any` 状态机！
+
+#### 2. 可靠修复方案
+
 ```
-在 `docs/api/ARCHITECTURE.md` §6.2 中解释了使用 `&'static str` 的原因：为了让 `const MY_DIALECT: Dialect = Dialect::new().with_default_secret("...");` 能在编译期通过 `const fn` 求值（因为 Rust 编译器对 `const fn` 中包含 `Drop` 的类型如 `Cow<'static, str>` 重新赋值会报 E0493）。
-但是，**在 GUI 场景下，私有方言参数往往不是编译期写死的常量**！用户会在 GUI 的“首选项 / 团队安全配置”弹窗中输入：
-- 团队默认密钥（`default_secret`）
-- 隐写 HKDF 隔离域（`stego_domain` / `stealth_domain`）
-- 甚至从本地配置文件或系统密钥链（Keychain）动态加载。
+// 新增于 rust/src/facade.rs
+use serde::{Deserialize, Serialize};
+use crate::core::control::Control;
+use crate::errors::{ErrorDetail, StrHideError};
 
-因为字段类型是 `&'static str`，且 `StrHide` 是 `#[derive(Clone, Copy)]`，GUI 从输入框拿到 `String` 后，除非调用 `Box::leak(input.into_boxed_str())` 造成永久内存泄漏，否则**根本无法构造 `Dialect`**！
-
-**可靠可行的解决办法**：
-如何在**既100%保留 `const fn` 编译期零开销构造与 `Copy` 语义**，又**允许 GUI 在运行时安全持有动态方言**？有两条成熟路径：
-
-**方案一（零破坏扩展）：引入 `ArcStr` / 内部驻留或提供 `OwnedDialect` 包装器**
-保留 `StructureProfile` / `StegoProfile` / `Dialect` 的 `&'static` 与 `const fn` 不变，新增一个运行时管理容器 `DynamicDialect`（或使用全局去重驻留池 `InternedSecret`），避免重复 `Box::leak`：
-
-```rust
-use std::collections::HashSet;
-use std::sync::{LazyLock, Mutex};
-
-static INTERNED_STRINGS: LazyLock<Mutex<HashSet<&'static str>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
-
-/// 安全驻留运行时配置字符串（相同字符串全局只分配一次，不会随调用无限泄漏）
-pub fn intern_dialect_str(s: &str) -> &'static str {
-    let mut pool = INTERNED_STRINGS.lock().unwrap();
-    if let Some(&existing) = pool.get(s) {
-        return existing;
-    }
-    let leaked: &'static str = Box::leak(s.to_owned().into_boxed_str());
-    pool.insert(leaked);
-    leaked
-}
-```
-并在 `Dialect` 上提供非 `const` 的运行时便捷构造函数：
-```rust
-impl Dialect {
-    /// 供 GUI / 服务端在运行时从动态配置构造方言（内部自动去重驻留）
-    pub fn from_runtime_secret(secret: &str) -> Self {
-        Self::new().with_default_secret(intern_dialect_str(secret))
-    }
-}
-```
-这一方案**不需要改动全库任何一处函数签名**，`StrHide` 依然是 `Copy`，既存の `const ENGINE: StrHide = ...` 100% 兼容，同时彻底解决了 GUI 动态修改方言时重复泄漏内存的问题！
-
-### 3.2 `*Options<'a>` 与 `Control<'a>` 的借用生命周期阻碍跨线程 `spawn`
-
-**问题诊断**：
-在 GUI 架构中，任何文件读写或隐写计算都**绝不能在 UI 主线程执行**，必须派发到后台线程（如 `tokio::task::spawn_blocking`、`std::thread::spawn`、`rayon::spawn`）。这些跨线程闭包全部要求 `F: FnOnce() -> R + Send + 'static`。
-然而当前库的所有操作选项都带有借用生命周期 `'a`：
-- `WriteOptions<'a>`：借用 `output_path: Option<&'a Path>`、`password: Option<&'a str>`、`strategy: &'a str`
-- `ReadOptions<'a>` / `RestoreOptions<'a>`：借用 `output_path`、`password`
-- `EmbedOptions<'a>` / `ProbeOptions<'a>` / `ExtractOptions<'a>`：借用 `password: Option<&'a str>`、`domain: Option<&'a str>`、`control: Control<'a>`
-- `Control<'a>`：借用 `progress: &'a dyn Progress`、`cancel: Option<&'a CancelToken>`
-
-这意味着 GUI 无法在 UI 线程组装好一个 `EmbedOptions` 或 `WriteOptions` 然后 `move` 进后台任务队列（Job Queue）中排队执行！
-
-**可靠可行的解决办法**：
-1. **改造 `Control` 为支持 `Arc` 共享的 `ControlHandle`（或让 `Control<'a>` 兼容 `Arc<dyn Progress>`）**：
-   在 GUI 中，`CancelToken` 和 `Progress` 监听器天然需要被 UI 主线程（点击取消按钮、读取进度状态）和后台 Worker 线程同时持有。
-
-```rust
-// 建议在 rust/src/core/control.rs 中增加 Owned 控制句柄，与借用版 Control<'a> 零成本互转
-use std::sync::Arc;
-
-#[derive(Clone, Default)]
-pub struct TaskControl {
-    pub progress: Option<Arc<dyn Progress>>,
-    pub cancel: Arc<CancelToken>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Domain {
+    Structure,
+    Content,
 }
 
-impl TaskControl {
-    pub fn new(progress: impl Progress + 'static) -> Self {
-        Self {
-            progress: Some(Arc::new(progress)),
-            cancel: Arc::new(CancelToken::new()),
-        }
+#[derive(Debug, Clone, Default)]
+pub struct DualOptions<'a> {
+    pub password: Option<&'a str>,
+    pub domain: Option<&'a str>,
+    pub control: Control<'a>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DualInspect {
+    #[cfg(feature = "structure-base")]
+    #[serde(flatten)]
+    pub structure: crate::structure::InspectResult,
+
+    #[cfg(feature = "content-base")]
+    #[serde(rename = "content_stego", skip_serializing_if = "Option::is_none")]
+    pub content: Option<crate::stego::StegoHeaderInfo>,
+
+    #[cfg(feature = "content-base")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_error: Option<ErrorDetail>,
+}
+
+#[cfg(all(feature = "structure-base", feature = "content-base"))]
+#[derive(Debug, Clone, Default)]
+pub struct SmartExtractOptions<'a> {
+    pub password: Option<&'a str>,
+    pub domain: Option<&'a str>,
+    /// 限制尝试的密码套件与最大 PBKDF2 迭代次数，防止错密导致 GUI 假死
+    pub limits: crate::stego::ExtractParams,
+    /// 当两域同时存在载荷时的优先提取域（默认 Structure）
+    pub prefer: Option<Domain>,
+    pub control: Control<'a>,
+}
+
+#[cfg(all(feature = "structure-base", feature = "content-base"))]
+#[derive(Debug, Clone)]
+pub struct ExtractOutcome {
+    pub payload: crate::core::payload::Payload<'static>,
+    pub source: Domain,
+    /// 若另一域也同时检出有效隐藏数据，在此返回该域标识，供 GUI 提示“发现第二载荷”
+    pub also_present: Option<Domain>,
+}
+
+impl StrHide {
+    /// 跨双域只读诊断：结构域流式定位 + 内容域有界头部探测
+    pub fn inspect_any(
+        &self,
+        carrier: &Path,
+        opts: &DualOptions<'_>,
+    ) -> Result<DualInspect, StrHideError> {
+        #[cfg(feature = "structure-base")]
+        let structure = self.structure().inspect_file(carrier, opts.password)?;
+
+        #[cfg(feature = "content-base")]
+        let (content, content_error) = {
+            let format = {
+                #[cfg(feature = "structure-base")]
+                { Some(structure.format) }
+                #[cfg(not(feature = "structure-base"))]
+                {
+                    let mut f = std::fs::File::open(carrier)?;
+                    crate::formats::sniff::sniff_stream(&mut f)?
+                }
+            };
+            if format.is_some_and(|f| f.supports_stego()) {
+                let stego_opts = crate::stego::InspectOptions {
+                    password: opts.password,
+                    domain: opts.domain,
+                    limits: crate::stego::ExtractParams::default(),
+                    control: opts.control,
+                };
+                match self.stego().inspect_file(carrier, &stego_opts) {
+                    Ok(info) => (Some(info).filter(|i| i.has_hidden_data), None),
+                    Err(e) => (None, Some(e.detail_i18n())),
+                }
+            } else {
+                (None, None)
+            }
+        };
+
+        Ok(DualInspect {
+            #[cfg(feature = "structure-base")]
+            structure,
+            #[cfg(feature = "content-base")]
+            content,
+            #[cfg(feature = "content-base")]
+            content_error,
+        })
     }
 
-    pub fn cancel_token(&self) -> Arc<CancelToken> {
-        Arc::clone(&self.cancel)
-    }
-
-    /// 借用为底层引擎所需的 Control<'_>
-    pub fn as_control(&self) -> Control<'_> {
-        Control {
-            progress: match &self.progress {
-                Some(p) => p.as_ref(),
-                None => &NoProgress,
+    /// 自动判域安全提取（先经廉价 inspect_any 判定，杜绝盲目全量解码与双载荷丢失）
+    #[cfg(all(feature = "structure-base", feature = "content-base"))]
+    pub fn smart_extract(
+        &self,
+        carrier: &Path,
+        opts: &SmartExtractOptions<'_>,
+    ) -> Result<ExtractOutcome, StrHideError> {
+        let diag = self.inspect_any(
+            carrier,
+            &DualOptions {
+                password: opts.password,
+                domain: opts.domain,
+                control: opts.control,
             },
-            cancel: Some(&self.cancel),
+        )?;
+        let has_struct = diag.structure.has_hidden_data;
+        let has_content = diag.content.as_ref().is_some_and(|c| c.has_hidden_data);
+
+        let (chosen, also_present) = match (has_struct, has_content) {
+            (true, true) => {
+                let primary = opts.prefer.unwrap_or(Domain::Structure);
+                let secondary = match primary {
+                    Domain::Structure => Domain::Content,
+                    Domain::Content => Domain::Structure,
+                };
+                (primary, Some(secondary))
+            }
+            (true, false) => (Domain::Structure, None),
+            (false, true) => (Domain::Content, None),
+            (false, false) => {
+                return Err(StrHideError::NoHiddenData(format!(
+                    "No hidden data found in '{}'",
+                    carrier.display()
+                )));
+            }
+        };
+
+        match chosen {
+            Domain::Structure => {
+                let read_res = self.structure().read_file(
+                    carrier,
+                    &crate::structure::ReadOptions {
+                        output_path: None,
+                        password: opts.password,
+                        overwrite: false,
+                    },
+                )?;
+                let kind = if read_res.is_file {
+                    crate::core::payload::PayloadKind::File
+                } else {
+                    crate::core::payload::PayloadKind::Text
+                };
+                let mut payload = crate::core::payload::Payload::owned(read_res.data).with_kind(kind);
+                if !read_res.filename.is_empty() {
+                    payload = payload.with_name(read_res.filename);
+                }
+                Ok(ExtractOutcome {
+                    payload,
+                    source: Domain::Structure,
+                    also_present,
+                })
+            }
+            Domain::Content => {
+                let ex_opts = crate::stego::ExtractOptions {
+                    password: opts.password,
+                    domain: opts.domain,
+                    limits: opts.limits.clone(),
+                    control: opts.control,
+                    pool: None,
+                };
+                let payload = crate::stego::io::extract_carrier_file_payload(
+                    carrier,
+                    &ex_opts,
+                    &self.dialect().stego,
+                )?;
+                Ok(ExtractOutcome {
+                    payload,
+                    source: Domain::Content,
+                    also_present,
+                })
+            }
         }
     }
 }
+
 ```
-2. **为 `*Options` 提供 `'static` Owned 变体或 `Cow<'a, ...>` 升级**：
-   将 `WriteOptions<'a>`、`EmbedOptions<'a>` 等内部的 `&'a str` / `&'a Path` 改为 `Cow<'a, str>` / `Cow<'a, Path>`（或者提供实现了 `Serialize + Deserialize + Clone + Send + 'static` 的 `WriteRequest` / `EmbedRequest` DTO 并实现 `.as_options(&self) -> EmbedOptions<'_>`）。这样：
-   - 现有传入 `&str` / `&Path` 的调用代码通过 `.into()` 或保持不变；
-   - Tauri / GUI 任务队列可以直接存储和传递 `'static` 的请求对象。
 
-## 五、 维度四：长耗时任务的进度汇报（Progress）与协作式取消（Cancel）断层
+### U4：结构域进度与取消接入——外包 `ProgressWriter` 与 `.bak` 提交时序守卫（G1）
 
-隐写与大文件容器处理是典型的 CPU + I/O 密集型任务。虽然 `core/control.rs` 定义了 `Stage`、`Event`、`Progress` 和 `CancelToken`，但深入审查三个引擎与文件提交层，可以发现**进度汇报和取消检查存在多处严重断层**。
+#### 1. 源码证据与设计权衡
 
-### 4.1 结构域（`structure`）与分析域（`analysis`）完全未接入 `Control`
+* `WriteOptions`（`src/structure/options.rs:22`）、`ReadOptions`（`:59`）、`RestoreOptions`（`:103`）均无 `control: Control<'a>` 字段。
 
-**问题诊断**：
-在 `docs/strhide_architecture_and_refactoring_plan.md` §3.4 与 §5.2 中，作者明确规划：
-> “`WriteOptions` / 内容域 options 带 `control` 与 `pool`……结构域的 `WriteOptions` 同步加 `control`。”
+* 结构域所有适配器写入均通过 `out: &mut dyn Write`（`inject`）或 `out: &mut dyn SeekWrite`（`strip`），且底层流拷贝收敛于 `src/structure/adapters/io.rs:13, 33`（`copy_exact` / `copy_stream`）。
 
-但核查当前实际代码（`rust/src/structure/options.rs` 与 `rust/src/structure/engine.rs`）：
-- `WriteOptions`、`ReadOptions`、`RestoreOptions` 中**完全没有 `control` 字段**！
-- `structure/engine.rs` 的 `write_core`、`read_core`、`remove_core`、`inspect_core`、`verify_core` 中**没有任何一处调用 `Control`**！
-- 当用户在 GUI 中使用结构域向一个 2 GB 的 MP4 视频或大型 ZIP 注入一个 500 MB 的文件载荷时：
-  1. 引擎对 2 GB 原始载体做流式 SHA-256（耗时数秒）；
-  2. 对 500 MB 载荷做 Deflate 压缩（耗时十余秒）；
-  3. 按 2 MiB 分块做 250 次 AES-256-GCM 加密；
-  4. 将 2.5 GB 数据写入 `.strhide.tmp` 并创建 2 GB 的 `.bak` 备份文件。
-  在整个过程中，**GUI 进度条是 0%，且用户点击“取消”按钮完全无效**！
-- 同样地，`analysis::scan_file` 在扫描最多 64 MiB 的图像并解码像素跑 Chi2 / SPA / RS 统计与 JPEG 盲校准时，也没有 `Control` 参数，批量扫描文件夹时无法中断单个慢文件。
+* **关键时序陷阱（27日方案 G1 取舍 4）**：在 `write_carrier_with`（`src/structure/engine.rs:1207`）和 `remove_carrier_with_dialect`（`:1823`）中，流程是：`写入/校验临时文件` → `std::fs::copy 生成 .bak` → `rename(tmp -> target)`。`TmpGuard`（`src/commit.rs:59`）只负责在出错/取消时清理 `.strhide.tmp`，**不会清理 `.bak`**！如果在生成 `.bak` 之后、`rename` 之前响应取消，磁盘上会多出一个孤儿 `.bak` 文件。
 
-**可靠可行的解决办法**：
-1. 在 `WriteOptions<'a>`、`ReadOptions<'a>`、`RestoreOptions<'a>` 中补齐 `pub control: Control<'a>` 字段。
-2. 在 `crypto.rs` 的流式分块函数 `encrypt_stream_to_chunks`、`decrypt_stream_from_chunks`、`compress_stream` 以及 `structure/engine.rs` 的 `copy_range` 流式拷贝循环中传入 `&Control<'_>`，每处理一个 Chunk（2 MiB）调用一次 `control.check()?` 并触发 `control.report(Event::progress(Stage::Encode, done_bytes, Some(total_bytes)))`。
+#### 2. 可靠修复方案
 
-```rust
-// 示例：在 structure/engine.rs 流式拷贝与加密分块中埋入进度与取消检查
-pub(crate) fn copy_stream_with_progress(
-    reader: &mut dyn Read,
-    writer: &mut dyn Write,
-    mut remaining: u64,
+1. 在 `WriteOptions`、`ReadOptions`、`RestoreOptions` 中增加 `pub control: Control<'a>`（由于 `Control<'a>` 是 `Copy`，三个 Options 结构体依然保持 `Copy`！）。
+
+2. 在 `src/core/control.rs` 中新增 `ProgressWriter` 与 `ProgressSeekWriter`，在引擎调用 `adapter.inject`、`adapter.strip` 和 `verify_restored` 时包装输出流，**10 个格式适配器一行代码不用改**：
+
+```
+// 新增于 rust/src/core/control.rs
+use std::io::{self, Seek, SeekFrom, Write};
+
+pub const PROGRESS_STEP_BYTES: u64 = 4 * 1024 * 1024; // 每 4 MiB 触发一次进度回调
+
+pub struct ProgressWriter<'a, 'c, W: Write + ?Sized> {
+    inner: &'a mut W,
+    control: Control<'c>,
     stage: Stage,
-    control: &Control<'_>,
-) -> Result<u64, StrHideError> {
-    let total = remaining;
-    let mut done = 0u64;
-    let mut buf = vec![0u8; 256 * 1024]; // 256 KiB 缓冲
-    control.stage_sized(stage, total);
-    while remaining > 0 {
-        control.check()?; // 每次循环响应取消信号，TmpGuard 自动 Drop 清理临时文件
-        let to_read = (remaining as usize).min(buf.len());
-        let n = reader.read(&mut buf[..to_read])?;
-        if n == 0 {
-            break;
+    total: u64,
+    done: u64,
+    next_report: u64,
+}
+
+impl<'a, 'c, W: Write + ?Sized> ProgressWriter<'a, 'c, W> {
+    pub fn new(inner: &'a mut W, control: Control<'c>, stage: Stage, total: u64) -> Self {
+        control.stage_sized(stage, total);
+        Self {
+            inner,
+            control,
+            stage,
+            total,
+            done: 0,
+            next_report: PROGRESS_STEP_BYTES.min(total),
         }
-        writer.write_all(&buf[..n])?;
-        remaining -= n as u64;
-        done += n as u64;
-        control.report(Event::progress(stage, done, Some(total)));
     }
-    Ok(done)
 }
+
+impl<W: Write + ?Sized> Write for ProgressWriter<'_, '_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.control.is_cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "strhide: cancelled"));
+        }
+        let n = self.inner.write(buf)?;
+        self.done += n as u64;
+        if self.done >= self.next_report || self.done == self.total {
+            self.control.report(Event::progress(self.stage, self.done, Some(self.total)));
+            self.next_report = self.done + PROGRESS_STEP_BYTES;
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl<W: Write + Seek + ?Sized> Seek for ProgressWriter<'_, '_, W> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+/// 将底层因取消产生的 Interrupted I/O 错误还原为 StrHideError::Cancelled
+pub fn map_io_cancel(control: &Control<'_>, err: StrHideError) -> StrHideError {
+    match err {
+        StrHideError::Io(ref io_err)
+            if io_err.kind() == io::ErrorKind::Interrupted && control.is_cancelled() =>
+        {
+            StrHideError::Cancelled
+        }
+        other => other,
+    }
+}
+
 ```
 
-### 4.2 内容域（`stego`）生产代码中 `Event::progress` 调用数为 0，且 HEVC 解码循环无法取消
+3. **严格界定不可取消的原子提交区**：在 `write_carrier_with`（`inject` + `finalize` 完成后）和 `remove_carrier_with_dialect`（`verify_restored` 完成后），进入 `.bak` 复制前执行最后一次 `options.control.check()?`；一旦开始复制 `.bak` 与 `rename`，视为不可中断的提交事务，彻底杜绝孤儿 `.bak` 文件。
 
-**问题诊断（源码实测核对）**：
-对整个 `rust/src/` 执行全局搜索 `control\.(report|stage|check)`，结果令人意外：
-1. **细粒度进度 `Event::progress(stage, done, total)` 和 `control.stage_sized` 在整个生产代码中调用次数为 0**（仅在 `core/control.rs:276-277` 的单元测试中调用过）！
-   - 在 `CHANGES-20261027.md`（14:38:05，阶段 2 批次 3）中曾记录“HEVC Encode 按 slice 携带进度”；
-   - 但在 `CHANGES-20261028.md`（10:58:06，批次 3）将 `reencode_slice` 改为 `rayon` 多核并行 `into_par_iter()` 时，原有的逐 slice 进度上报被删除了，且连 `control.stage(Stage::Encode)` 也在 `embed_hevc_patches_with_factor` 中遗漏了！
-2. **HEVC 最耗时的 `record_carrier_state` 和 `probe_hevc_pool` 完全没有传入 `Control`**：
-   查看 `rust/src/stego/hevc/engine.rs:355-369` 与 `765-772`：
-   ```rust
-   // rust/src/stego/hevc/engine.rs:355-369
-   pub fn probe_hevc_capacity_info(
-       carrier: &[u8],
-       fmt: &HevcFormatProfile,
-       safety_level: SafetyLevel,
-       exact: bool,
-       control: &Control<'_>,
-   ) -> Result<StegoCapacityInfo, StrHideError> {
-       let kind = sniff_hevc_carrier(carrier)...;
-       let pool = probe_hevc_pool(carrier, kind, exact)?; // <-- 内部耗时最高达 168 秒，却没传 control！
-       control.check()?; // <-- 只能等 168 秒全片扫描完才检查取消！
-       build_hevc_capacity_info(carrier, kind, fmt, &pool, safety_level)
-   }
-   ```
-   同样在 `embed_hevc_patches_with_factor`（第 766 行）、`extract_hevc`（第 1430 行）、`verify_hevc`（第 1742 行）中，`record_carrier_state` 均未接收 `control: &Control<'_>`。当用户对一部 24 分钟 1080p 视频执行精确容量探测（`exact = true`，34,454 个切片，耗时 168.7 秒）或大载荷嵌入时，在漫长的 `Decode` 阶段内，**既没有任何切片进度更新，也无法响应用户的取消操作**！
-3. **`extract`、`probe`、`inspect`、`verify` 四个操作在 PNG/JPEG/HEVC 中均只调了 `control.check()`，从未调用 `control.stage(...)`**：GUI 在执行提取或校验时，连当前处于哪个阶段（`Decode` / `CostMap` / `Verify`）都收不到。
+### U5：内容域全阶段进度补齐与 HEVC 扫描/并行重编码取消检查点（G8 + 增量 4.2）
 
-**可靠可行的解决办法**：
-1. 为 `record_carrier_state` 和 `probe_hevc_pool` 增加 `control: &Control<'_>` 参数。在遍历 `candidates`（NAL 切片循环）时，每解码一个（或每 16 个）切片调用一次 `control.check()?`，并调用 `control.report(Event::progress(Stage::Decode, idx as u64, Some(total_slices as u64)))`。
-2. 在 `rayon` 并行重编码（如 HEVC 的 `reencode_slice` 和 PNG 的并行 Deflate 行压缩）中，使用 `AtomicU64` 计数器配合 `control.check()?` 实现无锁并行进度上报与即时取消短路：
+#### 1. 源码证据与设计边界
 
-```rust
-// HEVC 并行切片重编码中的进度上报与取消短路标准写法
-use std::sync::atomic::{AtomicU64, Ordering};
+* **生产代码 0 处 `Event::progress`**：`rg "Event::progress|stage_sized" rust/src` 仅命中 `core/control.rs` 的测试。
 
-let total_slices = touched_slice_indices.len() as u64;
-control.stage_sized(Stage::Encode, total_slices);
-let completed = AtomicU64::new(0);
+* **HEVC 2026-10-28 批次 3 遗漏 `Stage::Encode`**：`src/stego/hevc/engine.rs:765, 773` 上报了 `Stage::Decode` 和 `Stage::Solve`，但在第 890–950 行进入多核切片重编码（`reencode_slice`）时漏掉了 `control.stage(Stage::Encode)`。
 
-let reencoded: Result<Vec<_>, StrHideError> = touched_slice_indices
-    .par_iter()
-    .map(|&slice_idx| {
-        control.check()?; // Rayon 工作线程发现取消立即短路返回 Err(StrHideError::Cancelled)
-        let res = reencode_slice(
-            slice_idx,
-            &slice_contexts[slice_idx],
-            &flips_per_slice[slice_idx],
-            &bad_substreams,
-            &replay_ok,
-        );
-        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-        control.report(Event::progress(Stage::Encode, done, Some(total_slices)));
-        Ok(res)
-    })
-    .collect();
+* **HEVC 长耗时扫描无取消点**：`probe_hevc_pool`（`src/stego/hevc/engine.rs:364`）与 `record_carrier_state`（`:766, :1430, :1742`）未接收 `control: &Control<'_>`。对 24 分钟视频执行 `capacity --exact`（耗时 168 秒）时，NAL 切片循环内完全无法响应取消。
+
+* **容量探测（`probe`）无阶段上报（G8）**：`png/engine.rs:1885`、`jpeg/engine.rs:1496`、`hevc/engine.rs:368` 的 `probe` 路径只有 `control.check()`，没有任何 `Stage::Decode` / `Stage::CostMap` 进度事件，GUI 点击“测量容量”时进度条完全不动。
+
+#### 2. 可靠修复方案
+
+1. **为 `record_carrier_state` 与 `probe_hevc_pool` 传入 `control: &Control<'_>`**：
+
+   * 在遍历 `candidates`（NAL 切片列表，总数 `total_slices` 已知）时，先调用 `control.stage_sized(Stage::Decode, total_slices as u64)`；
+
+   * 每处理 16 个切片调用一次 `control.check()?` 与 `control.report(Event::progress(Stage::Decode, idx as u64, Some(total_slices as u64)))`。
+
+2. **补齐 PNG / JPEG / HEVC 的 `probe` 与 `extract` 阶段上报（G8）**：
+
+   * PNG / JPEG 的 `probe` 复用与 `embed` 相同的 `Stage::Decode` → `Stage::CostMap` 上报点；在 `compute_cost` 按行块/DCT 块并行计算时，每完成一批上报 `Event::progress(Stage::CostMap, done, Some(total))`。
+
+3. **HEVC 多轮排除重试（`MAX_EMBED_ROUNDS`）与 Rayon 并行重编码的进度语义（回应审核意见 §5.3）**：
+
+   * 在 `embed_hevc_patches_with_factor` 的 `for round in 0..MAX_EMBED_ROUNDS` 循环外（首次进入重编码前）上报 `control.stage_sized(Stage::Encode, touched_slices.len() as u64)`；
+
+   * 在 `par_iter()` 内部首行调用 `control.check()?`：需要说明的是，Rayon 的 `collect::<Result<Vec<_>, _>>()` 在检测到首个 `Err(StrHideError::Cancelled)` 后会停止拉取未开始的任务，正在执行中的几个线程跑完当前切片（单切片仅几毫秒）后即刻汇合返回 `Err(Cancelled)`，不会继续后续轮次；
+
+   * 若因 EPB 防竞争冲突进入下一轮 retry（实测绝大多数在 1–2 轮内完成），进度条保持在 `Stage::Encode` 并刷新当前轮次的 `done / total`。
+
+### U6：i18n 多线程同步、稳定消息 ID（`Msg::id`）与高频错误结构化（G3 + 增量 5.1 / 7.1）
+
+#### 1. 源码证据与两份评审的融合裁决
+
+* `src/core/i18n/mod.rs:48-60` 使用 `thread_local! { static CURRENT: Cell<Lang> }`，UI 主线程调用 `set_lang(Lang::Zh)` 后，后台工作线程的 `lang()` 仍返回 `Lang::En`。
+
+* `src/errors.rs:240` 的 `ErrorDetail` 没有实现 `Serialize`，也没有机器可读的 `ErrorKind`。
+
+* **为什么将“底层 `AtomicU8`”与“显式 `RenderCtx` + `Msg::id()`”结合是最佳方案？**
+
+  * 审核意见（`strhide_gui_audit_review_20261028.md` §3.5 / §4）指出：v1 把 `ErrorDetail.category: Option<Msg>` 替换为 `category_label: Option<String>` 会丢失 `Msg` 这个稳定枚举键，且多语言客户端/服务端需要显式 `RenderCtx { lang }`；
+
+  * 交叉复核报告（GMF §四.2）指出：如果强制把全库 7 个文件 71 处 `t!` 调用全部手动改成 `t!(ctx, ...)`，改动面过大且易引发合并冲突。
+
+  * **两全其美的解法**：
+
+    1. 将 `core/i18n/mod.rs:48` 的 `thread_local!` 替换为 `static CURRENT_LANG: AtomicU8 = AtomicU8::new(0)`（5 行代码改动，让现有 71 处無参 `t!(Msg::...)` 在多线程桌面 GUI 下瞬间具备跨线程一致性，零破坏）；
+
+    2. **同时**新增 `RenderCtx { pub lang: Lang }` 与 `t!(ctx = my_ctx, Msg::...)` 宏分支，并在 `i18n_messages!` 宏中为 `Msg` 生成稳定的 `pub const fn id(self) -> &'static str`（返回 `"ErrIo"`、`"WarnSizeInflation"` 等标识符）；
+
+    3. **保留 `ErrorDetail.category: Option<Msg>` 不变**，为 `Msg` 实现 `Serialize`（序列化为其稳定 `id()` 字符串），并为 `ErrorDetail` 增加 `pub kind: ErrorKind`！
+
+#### 2. 可靠修复方案
+
 ```
-
-### 4.3 `core::pipeline::for_each_carrier` 无法满足 GUI 批量任务队列需求
-
-**问题诊断**：
-`rust/src/core/pipeline.rs:30-66` 的 `for_each_carrier` 虽然从 `cli.rs` 下沉到了 `core`，但它的实现仍然是纯 CLI 思维：
-- 直接调用 `println!` / `eprintln!` 打印进度总结；
-- 遇到第一个失败文件立即 `return Err(e)` 中断整个批次，且只返回 `Result<(), StrHideError>`，GUI 拿不到“哪些文件成功了、产出路径是什么、哪个文件因什么错误失败了”的结构化列表；
-- 不支持 `CancelToken` 在文件之间中止批处理，也不支持上报“当前第 `i / N` 个文件”的批次进度。
-
-**可靠可行的解决办法**：
-在 `core::pipeline` 中新增面向 GUI / 服务端的结构化批处理执行器 `run_batch`：
-
-```rust
-// 建议新增于 rust/src/core/pipeline.rs
+// 1. rust/src/core/i18n/mod.rs：原子默认语言 + 显式 RenderCtx + Msg::id() 稳定键
+use std::sync::atomic::{AtomicU8, Ordering};
 use serde::{Deserialize, Serialize};
-use crate::core::control::CancelToken;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum BatchFailurePolicy {
-    /// 遇到首个失败立即停止后续文件（CLI 默认行为）
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lang {
     #[default]
-    StopOnFirstError,
-    /// 记录错误并继续处理剩余文件（GUI 批量队列常用行为）
-    ContinueOnError,
+    En,
+    Zh,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BatchItemOutcome<T> {
-    pub carrier: PathBuf,
-    pub result: Result<T, crate::errors::ErrorDetail>,
+static CURRENT_LANG: AtomicU8 = AtomicU8::new(0); // 0 = En, 1 = Zh
+
+pub fn set_lang(lang: Lang) {
+    CURRENT_LANG.store(match lang { Lang::En => 0, Lang::Zh => 1 }, Ordering::Relaxed);
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BatchSummary<T> {
-    pub outcomes: Vec<BatchItemOutcome<T>>,
-    pub succeeded: usize,
-    pub failed: usize,
-    pub cancelled: bool,
+pub fn lang() -> Lang {
+    match CURRENT_LANG.load(Ordering::Relaxed) {
+        1 => Lang::Zh,
+        _ => Lang::En,
+    }
 }
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderCtx {
+    pub lang: Lang,
+}
+
+impl RenderCtx {
+    pub const fn new(lang: Lang) -> Self {
+        Self { lang }
+    }
+    pub fn current() -> Self {
+        Self { lang: lang() }
+    }
+}
+
+// 在 i18n_messages! 宏生成的 impl Msg 中增加 id() 与 Serialize：
+impl Msg {
+    pub const fn id(self) -> &'static str {
+        match self {
+            $(Msg::$name => stringify!($name),)*
+        }
+    }
+}
+
+impl Serialize for Msg {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.id())
+    }
+}
+
 ```
 
-## 六、 维度五：跨进程 IPC / 前端序列化（Serde）与类型契约缺口
-
-如果使用 **Tauri**、**Electron** 或 **Wails** 开发 GUI，Rust 后端与前端（TypeScript）之间通过 JSON IPC 通信；即使使用纯 Rust GUI（如 `iced` / `egui`），保存任务历史记录、导出诊断报告也需要 `serde::Serialize` 与 `serde::Deserialize`。
-
-### 5.1 错误体系（`StrHideError` / `ErrorDetail` / `Msg`）缺失 `Serialize`
-
-**问题诊断**：
-在 Tauri 中，命令函数签名为：
-`#[tauri::command] async fn write_carrier_cmd(...) -> Result<WriteResult, ErrorDetail>`
-Tauri 要求返回值的 `Ok` 和 `Err` 类型都必须实现 `serde::Serialize`。
-然而检查 `rust/src/errors.rs` 与 `rust/src/core/i18n/mod.rs`：
-- `StrHideError`（`errors.rs:15`）：未实现 `Serialize`；
-- `ErrorDetail`（`errors.rs:208`）：仅有 `#[derive(Debug, Clone, PartialEq, Eq)]`，**未实现 `Serialize` / `Deserialize`**；
-- `TrellisCause`（`errors.rs:128`）：**未实现 `Serialize` / `Deserialize`**；
-- `Msg`（`core/i18n/mod.rs:67`）与 `Lang`（`core/i18n/mod.rs:14`）：**未实现 `Serialize` / `Deserialize`**。
-
-此外，前端不仅需要渲染好的错误文本，还需要**机器可读的错误判别码（Error Kind/Code）**，以便在 UI 上做出精准交互反应（例如：收到 `code == "password_with_hint"` 时自动弹出密码输入框并展示 `hint`；收到 `code == "safety_threshold"` 时弹出“是否切换为 Balanced 档位或强制嵌入”的确认框；收到 `code == "cancelled"` 时静默重置按钮状态而不弹错误 Toast）。
-
-**可靠可行的解决办法**：
-为 `ErrorDetail` 增加机器可读的 `ErrorKind` 枚举并实现完整的 `Serialize` / `Deserialize`：
-
-```rust
-// rust/src/errors.rs 改造方案
-use serde::{Deserialize, Serialize};
-
+```
+// 2. rust/src/errors.rs：保留 category: Option<Msg>，新增 ErrorKind 与 6 个高频结构化变体（G3）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
     Io,
     CorruptedData,
-    PasswordRequiredOrWrong,
+    Password,
     PasswordWithHint,
     TrellisInfeasible,
     Rejection,
+    AlreadyExists,
+    TargetBusy,
     SafetyThreshold,
     RestoreMismatch,
     UnsupportedFormat,
@@ -703,33 +604,81 @@ pub enum ErrorKind {
     General,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ErrorDetail {
-    /// 机器可读的错误分类码，供 GUI 分支处理（如弹窗要求密码、静默处理取消等）
+    /// 机器可读的稳定错误分类（供前端 switch-case 弹窗或分支处理）
     pub kind: ErrorKind,
-    /// 本地化分类前缀标签（根据传入语言渲染）
-    pub category_label: Option<String>,
-    /// 详细原因描述
+    /// 稳定消息目录枚举（序列化为 Msg::id() 如 "ErrPassword"）
+    pub category: Option<crate::core::i18n::Msg>,
+    /// 按当前或指定语言预渲染的分类前缀（如 "密码错误"）
+    pub category_label: Option<&'static str>,
+    /// 底层详情描述
     pub detail: String,
-    /// 当 kind == PasswordWithHint 时携带的密码提示
+    /// 密码提示（当 kind == PasswordWithHint 时存在）
     pub hint: Option<String>,
 }
+
 ```
 
-### 5.2 `ReadResult`、`Payload`、`EmbedOutput` 缺 `Serialize`，且未隔离大字节数组与元数据
+同时按 G3 规范，将 GUI 最高频触发的错误变体升级为携带强类型结构化字段（不再让 GUI 从英文字符串里用正则抠路径或字节数）：
 
-**问题诊断**：
-1. `ReadResult`（`structure/engine.rs:431`）、`Payload`（`core/payload.rs:49`）、`EmbedOutput`（`stego/options.rs:869`）均未派生 `serde::Serialize`。
-2. 在 `ReadResult` 中，`pub data: Vec<u8>` 与 `is_file`、`filename`、`raw_size`、`written_file` 绑在同一个结构体里。
-   - 当用户通过 `ReadOptions { output_path: Some(path), .. }` 将载荷提取到磁盘文件时，`structure/engine.rs` **依然把全部 `data: Vec<u8>` 保留在 `ReadResult.data` 中返回**！
-   - 如果 Tauri 后端将 `ReadResult` 直接序列化返回给前端，一个 100 MB 的提取文件不仅已经在磁盘写了一份，还会在 IPC 通道中被 `serde_json` 序列化成长度一亿的 JSON 整数数组 `[80, 75, 3, 4, ...]`，直接导致前端 WebView 卡死或内存溢出！
+* `AlreadyExists(PathBuf)`：目标文件已存在时直接携带路径，方便 GUI 弹出“文件 `xxx` 已存在，是否覆盖 / 另存为？”对话框；
 
-**可靠可行的解决办法**：
-1. 当 `ReadOptions.output_path` 为 `Some(_)` 时，落盘成功后不再把巨型 `Vec<u8>` 塞进返回给 UI 的摘要里，或者在 `ReadResult` 上提供 `.into_summary() -> ReadSummary`（不含 `data: Vec<u8>`，但增加 `text_preview: Option<String>` 供小文本载荷直接在 UI 预览）。
-2. 为 `ReadSummary`、`StegoEmbedResult` 实现 `Serialize` / `Deserialize`。
+* `TargetBusy(PathBuf)`：Windows 下目标文件被预览组件或外部进程占用（配合 U10）；
 
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
+* `SafetyThreshold { tier: SafetyLevel, required_bytes: usize, available_bytes: usize }`：携带安全档位、当前载荷字节数与推荐上限字节数，方便 GUI 绘制容量对比条并提供“切换至 Balanced 档位”快捷按钮；
+
+* `RestoreMismatch { restored_size: u64, expected_size: u64, restored_sha256: String, expected_sha256: String, residual_envelope: bool }`：结构化展示还原校验失败的期望值与实际值。
+
+此外，对 G3 列出的 **7 个 GUI 必显结构字段**（`Warning`、`LevelStatus`、`StrategyCapacity`、`VerifyLevel` 等）提供 `.render(ctx: RenderCtx) -> String` 方法，在 `messages.rs` 中增补约 20 条中英文模板，确保 `Lang::En` 下输出与现有英文逐字相同，`Lang::Zh` 下实现 100% 纯中文展示。
+
+## 三、 P1 级高优先级缺口详解与可靠修复方案（U7–U12）
+
+### U7：内容域文件级对称接口与大文件有界流式诊断 vs. `mmap` 评估（G4 + 增量 6.1）
+
+#### 1. 源码证据与 `mmap` 安全性深度评估（回应审核意见 §4 / §5.2）
+
+* `StegoFacade`（`src/facade.rs:390-514`）目前有 `embed_file` 和 `extract_file`（以及 `stego/io.rs:98` 的 `extract_carrier_file`），但**缺少 `probe_file`、`inspect_file`、`verify_file`**。
+
+* 当 GUI 在文件列表中展示一个 2 GB 的 MP4 视频并调用诊断接口时，如果底层直接调用 `std::fs::read(carrier_path)`（如 `src/stego/io.rs:39, 112` 及 `src/cli/cmd_diag.rs:46` 所示），会瞬间分配 2 GB 堆内存！
+
+* **有界流式读（Bounded Read）vs. `memmap2::Mmap` 的权衡**：
+  审核意见（`strhide_gui_audit_review_20261028.md` §4 & §5.2）敏锐指出：`unsafe { Mmap::map(&file) }` 在文件被外部进程并发截断或修改（或位于 SMB/NFS 网络挂载盘）时，操作系统会向进程发送 `SIGBUS`（Unix）或 `STATUS_IN_PAGE_ERROR`（Windows），在 Rust 中无法通过 `Result` 捕获，会直接导致整个 GUI 进程崩溃！
+
+#### 2. 可靠修复方案（两级策略，安全优先）
+
+1. **第一级（强制、零 `unsafe`、零新依赖）：`inspect_carrier_file` 采用有界窗口流式读取（G4）**
+
+   * PNG `inspect` 只需读取 PNG 头与前几个 IDAT 块解出前几行像素（或对于大图限制最大扫描尺寸）；
+
+   * JPEG `inspect` 只需读取前部系数解出 718 个超块槽位；
+
+   * HEVC / MP4 `inspect`（Scheme C v2，`StopCondition::MinSlots(2048)`）只需解析 `moov` 盒子样本表 + 读取 `mdat` 中前 1\~2 个 NAL 切片的字节区间（仅几十 KB），**完全不需要把整个 2 GB 的 `mdat` 读进内存**！
+
+   * 实现 `stego::io::{inspect_carrier_file, verify_carrier_file, probe_carrier_file}` 并挂入 `StegoFacade`，其中 `inspect_carrier_file` 对 MP4 通过 `Seek + Read` 只读取 `moov` 与前 2 个切片字节，使 2 GB 视频的 `inspect_file` 峰值内存严格 **≤ 8 MiB**！
+
+2. **第二级（可选 Feature `mmap`，仅用于本地大文件 `probe_file` / `embed_file`）**：
+
+   * 仅当用户开启可选 `mmap` Feature 且目标为本地常规文件时，在 `probe_carrier_file` / `embed_carrier_file` 中使用只读映射以节省数 GB 堆分配，并在原地覆写 `commit_carrier_patches` 前显式 `drop(mmap)` 释放句柄。
+
+### U8：IPC 大载荷隔离（`ReadSummary`）、`InspectResult.metadata` 强类型化与 `Deserialize` 补齐（增量 5.2 / 5.3 / 5.4）
+
+#### 1. 源码证据（含 §5.4 措辞修正）
+
+* **`ReadResult`（`src/structure/engine.rs:449`）**：未实现 `Serialize`；且即使 `ReadOptions.output_path` 已指定将载荷写入磁盘文件，`ReadResult.data: Vec<u8>` 依然保留了完整载荷字节。若直接经 Tauri IPC 序列化返回前端，100 MB 文件会变成一亿个十进制数字的 JSON 数组，直接撑爆 WebView。
+
+* **`InspectResult.metadata`（`src/structure/engine.rs:483, 2004-2024`）**：类型为 `Option<serde_json::Value>`。当未提供密码时为 `None`；**当调用方提供了密码但元数据解密失败时**（`:2021`），代码写入 `Some(serde_json::json!({"error": "Invalid password"}))`。这迫使前端做弱类型 JSON 键嗅探。
+
+* **`InspectResult` 缺少 `suspicious_hints`**：当载体包含 Stealth 隐身信封且未提供密码时，`has_hidden_data` 为 `false`；此时 `adapter.suspicious_structures(carrier)`（仅在 `engine.rs:601` 读失败与 `:811` 写警告中调用）能ตรวจ出可疑结构（如 `private PNG chunk 'prIv'`），但 `InspectResult` 却没有字段将该提示传给 GUI！
+
+* **缺失 `Deserialize`**：`FileFormat`（`src/formats/sniff.rs:133`）与 `StrategyId`（`src/structure/registry.rs:183`）仅有手写 `Serialize`，无 `Deserialize`。
+
+#### 2. 可靠修复方案
+
+1. **为 `ReadResult` 提供轻量级 IPC 摘要转换 `ReadSummary`**：
+
+```
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReadSummary {
     pub carrier: PathBuf,
     pub is_file: bool,
@@ -737,41 +686,16 @@ pub struct ReadSummary {
     pub filename: String,
     pub raw_size: u64,
     pub written_file: Option<PathBuf>,
-    /// 当 !is_file 且 UTF-8 文本长度 <= 64 KiB 时内联返回，供 GUI 直接展示文本内容
-    pub inline_text: Option<String>,
+    /// 仅当载荷为文本（或 UTF-8 可读）且 <= 64 KiB 时内联携带，避免大文件撑爆 IPC
+    pub text_preview: Option<String>,
 }
+
 ```
 
-### 5.3 公开参数与枚举缺失 `serde::Deserialize`（以及 TS 类型生成支持）
+2. **强类型化 `InspectResult.metadata` 并补齐 `suspicious_hints`**：
 
-**问题诊断**：
-当前库中，虽然 `WriteResult`、`InspectResult`、`VerifyResult`、`RemoveResult`、`StrategyId`、`FileFormat`、`Warning` 实现了 `Serialize`，但它们**全部没有实现 `Deserialize`**；同时，输入侧的 `LocalParams`、`CompressionStrategy`、`RejectionPolicy`、`StegoTuning`、`SpatialAlgorithm`、`JpegAlgorithm`、`HevcMode`、`Freshness` **既没有 `Serialize` 也没有 `Deserialize`**。
-在 GUI 中，前端往往需要将用户的参数配置保存为预设（Preset JSON）或通过 IPC 发送给 Rust 后端。缺失 `Deserialize` 会迫使 GUI 层为上述十几个类型逐一手写 DTO 转换代码。
-
-**可靠可行的解决办法**：
-- 为 `FileFormat`、`StrategyId`、`Warning`、`LocalParams`、`CompressionStrategy`、`RejectionPolicy`、`HevcMode`、`Freshness` 及各 `*Result` 统一补齐 `#[derive(Serialize, Deserialize)]`。
-- 对于包含 `Custom(Arc<dyn ...CostModel>)` 的 `SpatialAlgorithm` 和 `JpegAlgorithm`，通过自定义 `Serialize` / `Deserialize` 将 `"hill"` / `"suniward"` / `"uerd"` / `"juniward"` 与枚举变体映射（反序列化遇到未知值报错）。
-- 可选增加 `ts-rs` 或 `specta` Feature 门控（`#[cfg_attr(feature = "specta", derive(specta::Type))]`），一键生成前端 TypeScript 类型定义。
-
-### 5.4 `InspectResult.metadata` 的弱类型与错误注入反模式
-
-**问题诊断**：
-查看 `rust/src/structure/engine.rs:483` 与 `1995-2025`：
-```rust
-// rust/src/structure/engine.rs:483
-pub metadata: Option<serde_json::Value>,
-
-// rust/src/structure/engine.rs:2021
-meta_val = Some(serde_json::json!({"error": "Invalid password"}));
 ```
-当 `inspect_carrier` 成功解密元数据时，`metadata` 的内容是序列化后的 `CarrierMetadata { filename, raw_size, raw_sha256, created_at }`；而当未提供密码或密码错误无法解密元数据时，代码却往 `metadata` 字段塞了一个 `{"error": "Invalid password"}` 的 JSON 对象！
-这是一种典型的弱类型反模式：GUI 前端拿到 `InspectResult` 后，无法直接访问 `res.metadata.filename`，还必须先判断 `serde_json::Value` 里有没有 `"error"` 键。而且结构域仅仅为了这一个字段，就被迫在 `structure-base` 中引入了整个 `serde_json` 依赖（见 `docs/strhide_architecture_and_refactoring_plan.md` §十 勘误表第 1 条）。
-
-**可靠可行的解决办法**：
-将 `CarrierMetadata` 完善为公开强类型结构，并用强类型枚举 `MetadataInspection`（或 `Option<CarrierMetadata>` + `metadata_error: Option<String>`）替代 `Option<serde_json::Value>`：
-
-```rust
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CarrierMetadata {
     pub filename: String,
     pub raw_size: u64,
@@ -779,320 +703,384 @@ pub struct CarrierMetadata {
     pub created_at: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum MetadataInspection {
     Decrypted(CarrierMetadata),
-    Locked { error: String },
-}
-```
-注：使用 `#[serde(untagged)]` 甚至能保持现有 CLI `--json` 输出的 JSON 结构 100% 向后兼容，同时让 Rust GUI 直接按强类型模式匹配，并且彻底移除了 `structure-base` 对 `serde_json` 的强依赖！
-
-## 七、 维度六：大文件内存模型、交互式 I/O 陷阱与库内控制台污染
-
-### 6.1 内容域文件级接口仍使用 `std::fs::read` 全量读入堆内存
-
-**问题诊断**：
-在 `docs/HEVC-LARGE-CARRIER-MEMORY-PLAN-20261027.md` §2 与 §6（P2）中，作者已经深刻指出了大视频载体的内存瓶颈，并在 2026-10-28 批次 1–4 中将槽位池压缩到 16 B、引入了 Scheme C v2 流式分窗（`StopCondition::MinSlots(2048)` / `TargetSlots`）以及 `commit_carrier_patches` 原位切片覆写。
-然而，查看 `rust/src/stego/io.rs:39, 109`：
-```rust
-pub fn embed_carrier_file(...) -> Result<Option<PathBuf>, StrHideError> {
-    let carrier_bytes = std::fs::read(carrier_path)?; // <-- 一次性将整个文件读入堆内存 Vec<u8>！
-```
-以及 `extract_carrier_file_payload`：
-```rust
-pub fn extract_carrier_file_payload(...) -> Result<Payload<'static>, StrHideError> {
-    let carrier_bytes = std::fs::read(carrier_path)?; // <-- 即使只读前 2 个切片（20ms 早退），也先把整个数 GB 的 MP4 读进堆内存！
-```
-试想：用户在 GUI 中拖入一个 **4 GB 的 4K HEVC 视频**，仅仅想做一次快速 `inspect` 或输入密码做 `extract`（底层算法只需解码前 2048 个槽位，耗时 <20 ms），却因为外层调用了 `std::fs::read`，不得不先花几秒钟从磁盘读取 4 GB 数据并分配 4 GB 堆内存！
-
-**可靠可行的解决办法**：
-在 `core-io` 中引入轻量级的只读内存映射（`memmap2::Mmap`）或封装 `CarrierBuffer`：
-- `Mmap` 实现了 `Deref<Target = [u8]>`，因此现有的 `StegoEngine` trait 签名（接收 `carrier: &[u8]`）**一行都不用改**！
-- 当 `stego::io` 打开一个 4 GB 的 MP4 文件并映射为 `&mmap[..]` 传给 `inspect_carrier`、`extract_carrier` 或 `embed_hevc_patches` 时，操作系统只会按需分页加载被访问到的前几个切片（仅几 MB 物理内存开销），错密早退真正做到全链路 20 ms、零大内存分配！
-- 在 `embed_carrier_file` 中，当 `embed_hevc_patches` 计算完补丁后，只需 `drop(mmap)` 释放文件映射句柄，再调用 `commit_carrier_patches` 原位写入即可（Windows 下必须在写文件前 `drop` 只读 `Mmap` 句柄以避免文件锁冲突）。
-
-```rust
-// rust/src/stego/io.rs 使用只读 mmap 替代 std::fs::read 的零侵入方案
-pub fn extract_carrier_file_payload(
-    carrier_path: &Path,
-    options: &ExtractOptions<'_>,
-    dialect: &StegoProfile,
-) -> Result<Payload<'static>, StrHideError> {
-    let file = std::fs::File::open(carrier_path)?;
-    // 对于空文件直接报错，非空文件使用只读 mmap 按需分页，无需改动下游 &[u8] 签名
-    let metadata = file.metadata()?;
-    if metadata.len() == 0 {
-        return Err(StrHideError::UnsupportedFormat("Carrier file is empty".into()));
-    }
-    let mmap = unsafe { memmap2::Mmap::map(&file)? };
-    crate::stego::extract_carrier_payload(&mmap, options, dialect)
-}
-```
-
-### 6.2 库代码内部残留 `eprintln!` / `println!` 与 `Stdin` 阻塞隐患
-
-**问题诊断**：
-在非 `cli` 模块中检索标准输出宏，发现以下残留：
-1. `rust/src/stego/jpeg/engine.rs:185`：`eprintln!("[stego] {msg}");`
-2. `rust/src/stego/png/engine.rs:736`：`eprintln!("[png] {msg}");`
-3. `rust/src/core/config.rs:114, 132`：遇到未知配置键或本地目录配置含密码时，直接 `eprintln!` 打印警告，返回值 `Result<FileConfig, StrHideError>` 中不包含警告列表。
-4. `rust/src/core/pipeline.rs:45, 47, 62`：`for_each_carrier` 直接 `println!` / `eprintln!`。
-5. `rust/src/structure/engine.rs:304`：`PayloadSource::Stdin` 在 GUI 应用（Windows `#![windows_subsystem = "windows"]`）中若被误用，会因无标准输入流或阻塞式等待 EOF 导致后台线程挂死。
-
-**可靠可行的解决办法**：
-- 将 `core::config::load` 改为返回 `Result<(FileConfig, Vec<ConfigWarning>), StrHideError>`（或保留 `load` 并新增 `load_with_warnings`），让 GUI 可以将配置警告渲染在界面通知栏中；
-- 移除 `stego/jpeg/engine.rs:185` 与 `stego/png/engine.rs:736` 中的裸 `eprintln!`（可改用 `log` / `tracing` 宏或通过 `Control` 事件通道传递诊断消息）；
-- 将 `PayloadSource::Stdin` 门控在 `#[cfg(feature = "cli")]` 下，或注明仅限 CLI 使用。
-
-### 6.3 内容域与结构域在“需要密码 vs 无隐藏数据”上的交互差异
-
-**问题诊断**：
-在 GUI 中，当用户拖入一个文件但尚未输入密码时：
-- **结构域（非 Stealth）**：Header 魔数固定，且 `FLAG_ENCRYPTED` 明文可见（经固定掩码解开）。因此 `inspect_file(path, None)` 可以明确告诉 GUI：`has_hidden_data = true, is_encrypted = Some(true), password_hint = Some("...")`！GUI 可以立即在界面上展示一个漂亮的“🔒 该文件包含加密隐藏数据（提示：xxx），请输入密码解锁”状态卡片。
-- **结构域（Stealth 模式）**：魔数由密码派生，无密码时 `has_hidden_data = false`，但 `HostAdapter::suspicious_structures` 会检测出可疑容器结构。然而在当前代码中（`structure/engine.rs:450, 578`），**`InspectResult` 结构体中竟然没有 `suspicious_hints: Vec<String>` 字段**！`suspicious_structures` 只在 `write`（作为 `Warning`）和 `read` 失败（拼入 `NoHiddenData` 的英文错误字符串中）时被调用，而在 `inspect_carrier` 中完全没有返回给调用者！
-- **内容域（`stego`）**：无密码时默认使用 `PUBLIC_DEFAULT_SECRET` 尝试定位和校验 Header。如果该图片实际上是用密码 `"123456"` 嵌入的，无密码调用 `stego().inspect(&bytes, &InspectOptions::new())` 会返回 `has_hidden_data = false`。
-
-**可靠可行的解决办法**：
-1. **在 `structure::InspectResult` 中增加 `pub suspicious_hints: Vec<String>` 字段**：当 `has_hidden_data == false` 时，调用 `adapter.suspicious_structures(carrier)` 填入该字段。这样 GUI 在用户拖入 Stealth 载体时，可以立即提示：“未检测到标准信封，但发现可疑容器结构（`private PNG chunk 'prIv'`），若为隐身模式请提供密码重试”！
-2. **在 GUI 状态机设计中明确引导**：对于支持内容域的格式（PNG/JPEG/HEIF/MP4），当结构域与默认密钥内容域均返回 `has_hidden_data == false` 时，GUI 界面应显示：“未检出公开信封（若使用了密码保护或隐身模式，请输入密码后重新检测）”。
-
-## 八、 维度七：多语言（i18n）线程局部陷阱与 GUI 视觉预览/对比能力缺口
-
-### 7.1 `core::i18n` 仍使用 `thread_local!` 状态，且底层诊断文本未纳入本地化
-
-**问题诊断**：
-在 `docs/strhide_architecture_and_refactoring_plan.md` §5.4 中，作者已经准确识别出了问题：
-> “`i18n/mod.rs:49` 是 `thread_local! { static CURRENT: Cell<Lang> }`，`set_lang` 只影响当前线程。GUI 在 UI 线程设中文，worker 线程渲染仍是英文。改成显式参数：`RenderCtx { lang: Lang }`……”
-
-然而核查当前代码 `rust/src/core/i18n/mod.rs:45-56`：
-```rust
-thread_local! {
-    static CURRENT: Cell<Lang> = const { Cell::new(Lang::En) };
-}
-pub fn set_lang(lang: Lang) { CURRENT.with(|c| c.set(lang)); }
-pub fn lang() -> Lang { CURRENT.with(Cell::get) }
-```
-**这一计划项在代码中尚未落地**！
-1. 如果把 `CURRENT` 从 `thread_local! { Cell<Lang> }` 改为进程级原子变量 `static CURRENT: AtomicU8 = AtomicU8::new(0);`，仅需 5 行代码改动，就能让 UI 主线程调用 `i18n::set_lang(Lang::Zh)` 后**瞬间对所有 Tokio / Rayon / 后台工作线程全局生效**，同时还保留显式传入 `lang: Lang` 的 `ErrorDetail::render(lang)` 接口。
-2. 此外，目前 `ErrorDetail::render(Lang::Zh)`（`errors.rs:224`）只翻译了分类前缀（如 `[ERROR] 安全策略拦截: `），后面的 `detail` 依然是引擎内部拼接的英文句子（如 `"Payload (9216 bytes) exceeds safety threshold (4788 bytes)..."`）。对于面向终端用户的中文 GUI，这种“半中半英”的报错体验不佳。
-
-**可靠可行的解决办法**：
-1. 立即将 `core/i18n/mod.rs` 中的 `thread_local!` 替换为 `AtomicU8` 全局原子变量（消除跨线程语言不一致问题）：
-```rust
-// rust/src/core/i18n/mod.rs 修复方案
-use std::sync::atomic::{AtomicU8, Ordering};
-
-static CURRENT_LANG: AtomicU8 = AtomicU8::new(0); // 0 = En, 1 = Zh
-
-pub fn set_lang(lang: Lang) {
-    let val = match lang {
-        Lang::En => 0,
-        Lang::Zh => 1,
-    };
-    CURRENT_LANG.store(val, Ordering::Relaxed);
+    DecryptFailed { error: String },
 }
 
-pub fn lang() -> Lang {
-    match CURRENT_LANG.load(Ordering::Relaxed) {
-        1 => Lang::Zh,
-        _ => Lang::En,
-    }
-}
 ```
-2. 为常见高频用户错误（如密码错误、容量超限、文件已存在拒绝覆盖、签名文件拒绝修改、格式不支持）在 `ErrorDetail` 中提供结构化参数或直接通过 `t!(Msg::...)` 生成双语消息。
 
-### 7.2 缺乏 GUI 专属的“隐写质量指标、容量回传与修改热力图（Diff Preview）”接口
+在 `InspectResult` 中将 `metadata` 类型改为 `Option<MetadataInspection>`（得益于 `#[serde(untagged)]`，CLI `--json` 输出格式 100% 保持不变！），并新增：
 
-**问题诊断**：
-在开发隐写软件的 GUI 时，与命令行最大的体验差异在于**可视化反馈**：
-1. **`EmbedOutput` 在 PNG 和 JPEG 引擎中不返回 `capacity`，且缺少 `QualityStats`**：
-   查看 `rust/src/stego/engine.rs:199`（`PngEngine::embed`）与 `329`（`JpegEngine::embed`），两者均返回 `Ok(EmbedOutput::bytes_only(bytes))`，即 `capacity` 为 `None`（只有 `HeifEngine`/`Mp4Engine`/`AnnexBEngine` 填充了 `capacity`）。这导致 CLI（`cmd_stego.rs:240`）和 GUI 在嵌入 PNG/JPEG 后如果想知道容量占用率，不得不**重新解码一遍图片去跑 `probe_carrier_capacity`**，白白浪费一倍的 CPU 时间！而实际上 `embed_png` 和 `embed_jpeg` 在内部已经算完了 `available_slots` 和 `total_elements`，顺手构造 `StegoCapacityInfo` 成本为零。
-2. **缺少画质与修改统计（`QualityStats`）**：
-   重构方案 §3.3 曾设计 `pub quality: Option<QualityStats>`，但未在代码中实现。用户在 GUI 完成嵌入后，非常希望直观看到：**本次嵌入共修改了多少个像素/DCT系数/CABAC符号位（Modified Elements Count）、修改率（Change Rate %）、PSNR（dB）**。
-3. **缺少可视化对比/热力图生成辅助接口（Visual Diff / Cost Map Preview）**：
-   GUI 往往提供“原图 vs 隐写图”分屏对比，以及“修改点放大镜（将 ±1 修改的像素或 DCT 块高亮为红/绿点）”和“纹理代价分布热力图（Cost Map Grayscale/Heatmap）”。目前 `png::engine::decode_png` 虽在专家面公开，但代价图计算与修改位置集合被封闭在 `embed_png` / `embed_jpeg` 函数内部，GUI 无法获取。
+```
+#[serde(default, skip_serializing_if = "Vec::is_empty")]
+pub suspicious_hints: Vec<String>,
 
-**可靠可行的解决办法**：
-1. 在 `EmbedOutput` 中补齐 `pub stats: Option<EmbedStats>`，并在 `embed_png`、`embed_jpeg`、`embed_hevc` 内部直接返回已计算的 `StegoCapacityInfo` 与实际修改统计：
-```rust
+```
+
+当 `has_hidden_data == false` 时填入 `adapter.suspicious_structures(carrier)`，让 GUI 能够提醒用户“检测到可疑隐身信封结构，请尝试输入密码解锁”。
+3. **补齐 `FileFormat`、`StrategyId`、`Warning`、`LocalParams`、`CompressionStrategy`、`RejectionPolicy` 的 `Deserialize` 实现**。
+
+### U9：无打印结构化批处理执行器 `core::batch` 与库内 `eprintln!` 清理（G5 + 增量 4.3 / 6.2）
+
+#### 1. 源码证据
+
+* `core::pipeline::for_each_carrier`（`src/core/pipeline.rs:30-65`）内部直接调用 `println!` / `eprintln!`，遇到首个错误直接 `return Err(e)` 中断，无逐项结果返回、无 `CancelToken`、无并发度控制。
+
+* `src/core/config.rs:114, 132`、`src/stego/jpeg/engine.rs:185`、`src/stego/png/engine.rs:736` 存在直接向 stderr 输出的 `eprintln!`。
+
+#### 2. 可靠修复方案（统一采用 27日方案 G5 `core::batch::run_batch`）
+
+将批量执行器收敛为唯一一套 `core::batch::run_batch`（不再保留两套命名）：
+
+```
+// 新增于 rust/src/core/batch.rs
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use serde::{Deserialize, Serialize};
+use crate::core::control::{CancelToken, Control};
+use crate::errors::{ErrorDetail, StrHideError};
+
+#[derive(Debug, Clone, Default)]
+pub struct BatchPlan {
+    /// true = 单文件失败后记录错误并继续后续文件（GUI 队列默认）；false = 首错即停（CLI 默认）
+    pub continue_on_error: bool,
+    /// 最大并发数：1 = 串行（大内存内容域推荐）；>1 = 受控并行
+    pub max_concurrency: usize,
+    pub cancel: Option<Arc<CancelToken>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmbedStats {
-    /// 实际发生 ±1 或 bit 翻转的槽位数量
-    pub modified_slots: usize,
-    /// 候选池总槽位数
-    pub available_slots: usize,
-    /// 实际修改比例 (modified_slots / available_slots)
-    pub modification_ratio: f64,
-    /// 空间域/像素域 PSNR (dB)，仅当可直接由修改量推算时提供（如 PNG ±1 修改：MSE = modified_slots / total_elements）
-    pub estimated_psnr_db: Option<f64>,
+pub struct ItemOutcome<R> {
+    pub index: usize,
+    pub item: PathBuf,
+    pub result: Result<R, ErrorDetail>,
+    pub elapsed_ms: u64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchOutcome<R> {
+    pub items: Vec<ItemOutcome<R>>,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub cancelled: bool,
+}
+
 ```
-注：对于 PNG 空间域，每个被修改的通道值严格变化 `±1`（误差平方为 `1`），因此**根本不需要重新解码对比原图与隐写图**，直接由 `MSE = modified_slots as f64 / total_elements as f64` 即可在 `O(1)` 时间内精确算出 `PSNR = 10.0 * log10(255.0^2 / MSE)`！
-2. 在专家面（`stego::png` / `stego::jpeg`）提供一个可选的诊断预览函数 `generate_diff_heatmap_png(orig: &[u8], stego: &[u8]) -> Result<Vec<u8>, StrHideError>`，直接输出一张标注了修改位置的高亮 PNG 字节流，供 GUI 前端通过 `Blob URL` 或 `egui::ColorImage` 直接渲染。
 
-## 九、 分阶段改造实施路线图（Actionable Checklist）
+同时在 `formats::capability::Capability` 中增加 `pub memory: MemoryProfile`（`Streaming` vs `WholeFile`），供 GUI 任务队列自动决定并发度（结构域流式可并行，内容域大图/视频默认串行防 OOM）；并将 `core::config::load` 的配置项告警改为收集在结构体字段 `warnings: Vec<String>` 中返回，彻底清除非 `cli` 模块中的 `println!` / `eprintln!`。
 
-为了让上述改进平稳落地且不破坏现有 728 项单元与集成测试及 58 例字节级基线（`baseline_hash.py`），建议按以下四个小批次推进：
+### U10：桌面端崩溃隔离（`panic = "unwind"`）与 Windows 预览文件锁重试（`TargetBusy`）（G9）
 
-### 阶段 P0：编译修复与零成本补齐（预计 0.5–1 人日）
-- [ ] **修复 `stego/io.rs` 编译门控**：为 `embed_carrier_file` 中的 MP4/Annex-B 增量补丁分支加上 `#[cfg(feature = "content-hevc")]`，确保 `--no-default-features --features content-png` 与 `content-jpeg` 恢复编译通过。
-- [ ] **修复 `errors.rs` 门控**：将 `impl From<serde_json::Error> for StrHideError` 的门控由 `#[cfg(feature = "structure")]` 修正为 `#[cfg(feature = "structure-base")]`。
-- [ ] **修复 `formats/capability.rs` 条件编译**：使 `CAPABILITIES` 表中的 `structure` 与 `stego` 数组严格跟随 `structure-*` 和 `content-*` Feature。
-- [ ] **修复 `core/i18n/mod.rs` 跨线程语言状态**：将 `thread_local! { static CURRENT: Cell<Lang> }` 替换为 `AtomicU8`，使 GUI 主线程切换语言对所有工作线程立即生效。
+#### 1. 源码证据与桌面端真实痛点
 
-### 阶段 P1：Serde 全面补齐与门面能力收口（预计 1.5–2 人日）
-- [ ] **错误与结果类型 Serde 化**：为 `ErrorDetail`（含新增 `ErrorKind`）、`TrellisCause`、`Msg`、`Lang`、`ReadSummary`、`EmbedOutput`、`FileFormat`、`StrategyId`、`Warning`、`LocalParams`、`StegoTuning` 等统一派生 `Serialize` 与 `Deserialize`。
-- [ ] **强类型化 `InspectResult.metadata`**：引入 `MetadataInspection` 替换 `Option<serde_json::Value>`，并在 `structure::InspectResult` 中增加 `pub suspicious_hints: Vec<String>`。
-- [ ] **升级 `StegoFacade::embed_file` 与 `stego::io`**：返回包含 `capacity`、`warnings`、`backup_file` 的 `StegoEmbedResult`；让 `cli/cmd_stego.rs` 改调 `embed_carrier_file`，激活 CLI 下的大视频零拷贝补丁优化；补齐 `probe_file`、`inspect_file`、`verify_file`。
-- [ ] **下沉双域能力至 `StrHide` 门面**：在 `StrHide` 上新增 `inspect_file_any`、`verify_file_any`、`extract_auto_file` / `extract_auto_bytes` 以及 `.analysis()` 子门面（含 `scan_file` 与 `scan_bytes`）。
-- [ ] **下沉配置合并方法**：在 `core::config::FileConfig` 上提供生成默认 `WriteOptions` / `EmbedOptions` 的方法，并收集配置警告而非直接 `eprintln!`。
+* `rust/Cargo.toml:128` 配置了 `[profile.release] panic = "abort"`。若 GUI 二进制沿用此配置，工作线程任何一处意外 panic（如第三方解码器边界条件或 `capability_of` 在 `src/formats/capability.rs:134` 的 `panic!`）都会直接终止整个 GUI 进程，且跳过 `TmpGuard`（`src/commit.rs:59`）的 `Drop` 析构，在用户目录留下半成品 `.strhide.tmp`！
 
-### 阶段 P2：异步/多线程所有权改造与全链路进度/取消（预计 2–3 人日）
-- [ ] **运行时 `Dialect` 支持**：在 `facade` 中提供 `intern_dialect_str` 与 `Dialect::from_runtime_secret`，解决 `&'static str` 无法接收 GUI 运行时设置的问题。
-- [ ] **引入 `TaskControl` 与 Owned 请求结构**：支持 `Arc<dyn Progress>` 与 `Arc<CancelToken>`，方便跨 `tokio::spawn_blocking` 或 UI 线程传递。
-- [ ] **补齐结构域与分析域 `Control`**：在 `WriteOptions`、`ReadOptions`、`RestoreOptions` 及 `analysis::scan_*` 中接入 `Control`，在流式哈希、压缩、分块加解密与文件拷贝循环中埋入 `control.check()?` 与 `Event::progress`。
-- [ ] **补齐内容域细粒度进度**：为 HEVC `record_carrier_state` 与 `probe_hevc_pool` 传入 `Control`，在切片解码循环与 Rayon 并行重编码中上报 `Event::progress(stage, done, Some(total))`。
-- [ ] **升级 `core::pipeline`**：提供支持 `CancelToken`、进度回调与 `BatchFailurePolicy` 的结构化批量执行器。
+* `src/commit.rs:170` 直接执行 `std::fs::rename(&tmp_path, path)?`。在 Windows 桌面 GUI 中，当用户正在界面右侧用 `<video>` 或 `<img>` 标签预览载体文件时，操作系统文件句柄处于打开状态，此时点击“原地写入/还原”必然在 `rename` 处触发 `ERROR_SHARING_VIOLATION (os error 32)` / `PermissionDenied`。
 
-### 阶段 P3：大文件只读 `mmap` 与 GUI 视觉预览增强（预计 1.5–2 人日）
-- [ ] **`stego/io.rs` 引入只读 `mmap`**：使用 `memmap2::Mmap` 替代 `std::fs::read`，消除多 GB 视频在 `probe_file` / `inspect_file` / `extract_file` / `embed_file` 时的整文件堆内存分配。
-- [ ] **补齐 `EmbedOutput` 的 `capacity` 与 `EmbedStats`**：在 PNG/JPEG 嵌入时一并返回容量信息与修改槽位数、推算 PSNR（dB）。
-- [ ] **新增修改点热力图/代价图预览接口**：供 GUI 渲染隐写前后像素/DCT 块差异视图。
+#### 2. 可靠修复方案
 
-## 十、 GUI 层对接架构参考模板（Tauri v2 & Rust Native）
+1. **在 `commit.rs` 中为 `rename` 增加有界退避重试与 `TargetBusy` 专用错误**：
 
-完成上述改造后，无论是使用 **Tauri v2** 还是 **iced / egui**，GUI 层都只需编写极薄的胶水代码即可接入 `strhide`：
+```
+// rust/src/commit.rs 改进方案
+fn rename_with_retry(from: &Path, to: &Path) -> Result<(), StrHideError> {
+    const BACKOFF_MS: [u64; 3] = [20, 50, 100];
+    let mut last_err = None;
+    for (attempt, &wait_ms) in BACKOFF_MS.iter().enumerate() {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) if is_sharing_or_permission_error(&e) => {
+                last_err = Some(e);
+                if attempt + 1 < BACKOFF_MS.len() {
+                    std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+                }
+            }
+            Err(e) => return Err(StrHideError::Io(e)),
+        }
+    }
+    // 三次重试仍被占用，返回结构化 TargetBusy 错误，供 GUI 提示“请先关闭预览或选择另存为”
+    let _ = last_err;
+    Err(StrHideError::TargetBusy(to.to_path_buf()))
+}
 
-### 10.1 Tauri v2 异步 Command 与 Channel 实时进度流对接示例
+```
 
-```rust
+2. **清理库内可达 `panic!`**：将 `formats::capability::capability_of` 中的 `panic!` 改为编译期穷尽 `match`（`FileFormat` 的所有枚举分支直接映射到静态 `Capability` 引用），从根源上消除运行期 panic 可能！
+
+3. **GUI 宿主 Profile 规范**：在 Workspace 的 GUI 子包（如 `src-tauri/Cargo.toml`）中显式声明 `panic = "unwind"`，并在后台任务入口使用 `std::panic::catch_unwind` 兜底转换为 `StrHideError::General`，保证 `TmpGuard::drop` 100% 触发。
+
+### U11：密码日志脱敏（Redacted `Debug`）、表单脏检查与强类型 `Strategy`（G6 + 增量 2.5）
+
+#### 1. 源码证据
+
+* `WriteOptions`（`src/structure/options.rs:21`）、`ReadOptions`（`:58`）、`RestoreOptions`（`:102`）、`EmbedOptions`（`src/stego/options.rs:403`）、`ExtractOptions`（`:701`）等全部使用 `#[derive(Debug)]`。一旦 GUI 开启 `tracing::instrument` 或调试日志打印 `{opts:?}`，**用户的明文密码会直接写入日志文件**！
+
+* `EmbedOptions` 与 `StegoTuning` 未实现 `PartialEq`，GUI 设置面板无法直接对比 `current_opts != saved_opts` 判断是否有未保存修改。
+
+* `WriteOptions.strategy` 为 `&'a str`（`:30`），而输出侧已是强类型 `StrategyId`；`PayloadSource::Stdin`（`src/structure/engine.rs:304`）暴露在库级枚举中；`FileConfig` 转 `*Options` 的函数困在 `src/cli/helpers.rs:226-373`。
+
+#### 2. 可靠修复方案
+
+1. **手写所有含 `password` 选项结构体的 `std::fmt::Debug`**：将 `password` 字段格式化为 `Some("<redacted>")` 或 `None`。
+
+2. **为 `StegoTuning` 与 `EmbedOptions` 实现 `PartialEq`**（`SpatialAlgorithm::Custom` 与 `JpegAlgorithm::Custom` 按 `model.id()` 或 `Arc::ptr_eq` 判等）。
+
+3. **强类型化写入策略选择**：新增 `pub enum StrategyChoice { Auto, Named(StrategyId) }`（保留 `From<&str>` 兼容），并将 `FileConfig` 派生 `WriteOptions` / `EmbedOptions` 的方法下沉至 `core::config::FileConfig`。
+
+### U12：运行时私有方言（`RuntimeDialect`）与异步任务跨线程控制模式（增量 3.1 / 3.2）
+
+#### 1. 针对审核意见 §4 与 §5.1 的深度修正
+
+* **修正 v1 的 `intern_dialect_str` 泄漏池问题**：审核意见 §5.1 正确指出，若用全局 `HashSet<&'static str>` + `Box::leak` 驻留用户在 GUI 中输入的部署密钥，每次输错重改都会在进程内存中永久残留一条明文密钥，属于安全反模式。
+
+* **正确解法**：
+
+  1. 绝大多数组织定制版 GUI 的私有方言在编译期或进程启动时固定一次即可，无需每次调用动态 `leak`；
+
+  2. 若确需在 GUI 运行期动态切换“组织默认密钥 (`default_secret`)”或“隐写隔离域 (`domain`)”，对于每次调用，直接通过 `WriteOptions.password` / `EmbedOptions.password` 与 `EmbedOptions.domain` 传入即可；或者在 `facade` 中提供一个内部持有 `Arc<str>`（配合 `zeroize`）的 `OwnedDialect` 辅助容器，在工作线程作用域内借用给底层引擎，彻底避免 `&'static str` 泄漏。
+
+* **保持 `Control<'a>` 为 `Copy`，提供零开销跨线程范式**：
+  审核意见 §4 强调 `Control<'a>` 必须保持 `Copy`（从而让 `WriteOptions` 等保持 `Copy`）。在 `tokio::spawn_blocking` 或 `std::thread::spawn` 中，其实**根本不需要修改 `Control<'a>` 的定义**：只需将 `Arc<CancelToken>` 和 `mpsc::Sender`（或 Tauri `Channel`）`move` 进工作线程闭包，在闭包栈帧内部构造 `Control { progress: &bridge, cancel: Some(&token) }` 即可！为方便调用方少写模板代码，可在 `core::control` 中附加一个独立的 Owned 辅助结构 `TaskControl`（不替代 `Control<'a>`）：
+
+```
+// 新增于 rust/src/core/control.rs：不改动 Control<'a> 的 Copy 语义，仅作为跨线程搬运助手
+#[derive(Clone, Default)]
+pub struct TaskControl {
+    pub progress: Option<std::sync::Arc<dyn Progress>>,
+    pub cancel: std::sync::Arc<CancelToken>,
+}
+
+impl TaskControl {
+    pub fn new(progress: impl Progress + 'static) -> Self {
+        Self {
+            progress: Some(std::sync::Arc::new(progress)),
+            cancel: std::sync::Arc::new(CancelToken::new()),
+        }
+    }
+
+    /// 在工作线程闭包内部借用出 Copy 的 Control<'_>
+    pub fn borrow_control(&self) -> Control<'_> {
+        Control {
+            progress: match &self.progress {
+                Some(p) => p.as_ref(),
+                None => &NoProgress,
+            },
+            cancel: Some(&self.cancel),
+        }
+    }
+}
+
+```
+
+## 四、 P2 级增强与工程收尾（U13–U14）
+
+### U13：`analysis` 接入 `StrHide` 门面与 `EmbedOutput` 真实修改统计（增量 2.4 + 7.2 修正版）
+
+1. **`analysis` 子门面与 `scan_bytes`**：
+   在 `src/analysis.rs:263` 的 `scan_file` 旁拆分出 `scan_bytes(data: &[u8], label: &str)`，并在 `StrHide` 上暴露 `.analysis()` 子门面，使 GUI 能对内存中的隐写预览产物直接执行黑盒隐写分析评分对比。
+
+2. **关于 `EmbedOutput.capacity` 与 `EmbedStats` 的诚实设计（回应审核意见 §2.3）**：
+
+   * `src/stego/options.rs:870-875` 明确注释：PNG 与 JPEG 的 `embed` 路径刻意将 `capacity` 置为 `None`，因为 `embed_png`（`src/stego/png/engine.rs:1173`）只计算了单通道绿池 `pool_green`，`embed_jpeg`（`src/stego/jpeg/engine.rs:782`）只计算了 `enforced_payload_limit`，并未运行 `probe` 的完整分组容量模型。**我们完全尊重并保留这一设计契约，不在 `embed_png`/`embed_jpeg` 中伪造或额外重跑 `StegoCapacityInfo`**。
+
+   * 但与此同时，`embed_jpeg`（`src/stego/jpeg/engine.rs:655` 的 `applied: Vec<(u32, i8)>`）、`embed_png`（翻转计数）和 `embed_hevc`（翻转槽位数）在嵌入完成时**确实已经精确持有“本次实际修改了多少个元素（`modified_slots`）”**！因此在 `EmbedOutput` 中新增可选的 `pub stats: Option<EmbedStats>`（记录 `modified_slots` 与 `total_candidate_slots`），真正做到**零额外计算成本**，同时让 GUI 能在嵌入完成后立即向用户展示：“本次共精细微调了 1,420 个像素/系数（修改率 0.08%）”。
+
+### U14：模块清理、边界守卫脚本与推荐 Feature 矩阵（G7 + G10）
+
+1. **清理组织遗留（G7）**：
+
+   * 将 `crypto`、`errors`、`params`、`commit` 移入 `src/core/`，顶层 `lib.rs` 保留 `pub use` 重导出；
+
+   * 删除 0 调用点的死导出 `structure::supports_content_stego`（`src/structure/mod.rs:33`、`registry.rs:57`）与过渡兼容层 `src/sniff.rs`；
+
+   * 新增 `scripts/import_lint.py` 并加入 CI，硬性守护三条边界：`structure ↛ stego`、`stego ↛ structure`、`core ↛ {formats, structure, stego, cli}`。
+
+2. **GUI 推荐 Feature 组合表（G10a）**：
+
+   * **标准读写与诊断 GUI**：`default-features = false, features = ["structure", "content"]`（不拉入 `analysis` 专用的 `jpeg-decoder`）；
+
+   * **含反隐写取证页的全功能 GUI**：`default-features = false, features = ["structure", "content", "analysis"]`；
+
+   * **纯图像轻量隐写工具**：`default-features = false, features = ["structure-base", "content-png", "content-jpeg"]`（零反汇编依赖、零 H.265 依赖）。
+
+3. **跨语言与 IPC 形态决策（G10c）**：明确**不构建 C ABI**，统一采用 **JSON-over-IPC**（Tauri Command 直接序列化强类型 Rust 结构，Electron / Python / Flutter 走进程内绑定或 `--json`）。
+
+## 五、 统一分阶段实施路线图与硬性验收表
+
+我们将全部 14 项任务（U1–U14）按依赖关系编排为 **4 个实施阶段（Stage A–D，总计约 6.5–8.5 人日）**。
+
+```
+Stage A (P0 编译修复与错误/i18n地基)
+   │  解锁 Msg::id() 与 ErrorDetail: Serialize
+   ▼
+Stage B (P0 门面统一、零拷贝收口与全链路进度/取消)
+   │  解锁 GUI 单文件完整闭环（打开诊断 -> 容量探测 -> 嵌入/写入 -> 智能提取 -> 还原）
+   ▼
+Stage C (P1 有界诊断读、结构化批处理、Windows防锁与安全脱敏)
+   │  解锁 GUI 批量任务队列、大视频秒级列表预览与生产级健壮性
+   ▼
+Stage D (P2 分析门面、修改统计与边界守卫收尾)
+
+```
+
+### 阶段划分与逐项硬性验收标准
+
+| 阶段 | 包含任务 | 预计工期 | 一条式硬性验收口径（Pass / Fail） | 
+| ----- | ----- | ----- | ----- | 
+| **Stage A**  （P0 地基） | **U1**（Feature 门控修复 + CI 矩阵）  **U6**（i18n `AtomicU8` + `Msg::id()` + `ErrorDetail: Serialize` + 6 个结构化错误变体） | 1.5–2 人日 | 1\. `cargo check --no-default-features --features content-png` 与 `content-jpeg` 零错误通过；  2\. `serde_json::to_string(&err.detail_i18n())` 成功输出含 `kind` 与 `category` (`Msg::id()`) 的 JSON；  3\. `Lang::En` 下 7 个必显字段 `render()` 与原 `message()` 逐字节相等。 | 
+| **Stage B**  （P0 核心） | **U2**（`StegoEmbedResult` + CLI 零拷贝汇合）  **U3**（`inspect_any` / `verify_any` / `smart_extract`）  **U4**（结构域 `ProgressWriter` + `.bak` 时序）  **U5**（内容域 `probe`/`hevc` 进度与取消） | 2.5–3 人日 | 1\. `cli/cmd_stego.rs` 改调 `embed_carrier_file`，529 MB 视频嵌入峰值内存不回退；  2\. `inspect_any` 的 `--json` 输出与现有 CLI diff 为空；双域皆有载荷时 `smart_extract` 的 `also_present` 非空；  3\. 4 GB 载体还原中途取消返回 `Cancelled`，无残留 `.tmp` 且**无多出 `.bak`**；  4\. 50 MP JPEG `probe` 与长视频 HEVC `Decode`/`Encode` 均上报中间进度且可随时取消；  5\. `python scripts/baseline_hash.py --check` 全量字节一致。 | 
+| **Stage C**  （P1 健壮性） | **U7**（`StegoFacade::*_file` + 有界诊断读）  **U8**（`ReadSummary` + `MetadataInspection` + `suspicious_hints`）  **U9**（`core::batch::run_batch` + 去 `eprintln!`）  **U10**（`TargetBusy` 重试 + `panic = "unwind"`）  **U11**（密码 `Debug` 脱敏 + `PartialEq`）  **U12**（`TaskControl`） | 2–2.5 人日 | 1\. 对 >2 GB 的 MP4 调用 `stego().inspect_file` 峰值内存 ≤ 8 MiB；  2\. 20 项批处理第 3 项失败且 `continue_on_error = true` 时，返回完整 20 条 `ItemOutcome` 且 stdout 零输出；  3\. Windows 下另一进程占用目标文件时，原地写入重试 3 次后返回 `StrHideError::TargetBusy`；  4\. 任意 `*Options` 的 `format!("{opts:?}")` 不包含传入的密码明文。 | 
+| **Stage D**  （P2 收尾） | **U13**（`StrHide::analysis()` + `scan_bytes` + `EmbedStats`）  **U14**（`core` 目录归位 + `import_lint.py` + 文档同步） | 0.5–1 人日 | 1\. `python scripts/import_lint.py` 零违规通过；  2\. GUI 使用 `--no-default-features --features structure,content` 编译通过且 `cargo tree` 不含 `jpeg-decoder`。 | 
+
+## 六、 修正后的 GUI 对接参考实现（Tauri v2 多任务安全版）
+
+以下参考模板已彻底修正 v1 示例中的全部问题（采用多任务 `HashMap<u64, Arc<CancelToken>>` 替代单槽覆盖、使用新设计的 `FileTarget` 与 `StegoEmbedResult`、在 `spawn_blocking` 闭包内安全构造 `Control` 并包裹 `catch_unwind`）：
+
+```
 // src-tauri/src/commands.rs
+use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{ipc::Channel, State};
-use strhide::prelude::*;
+
 use strhide::core::control::{CancelToken, Control, Event, Progress};
-use strhide::errors::ErrorDetail;
+use strhide::errors::{ErrorDetail, StrHideError};
+use strhide::facade::{DualInspect, DualOptions, StrHide};
+use strhide::prelude::*;
 
-/// 全局应用状态：持有可动态切换方言的引擎与当前运行任务的取消令牌
-pub struct AppState {
-    pub engine: Mutex<StrHide>,
-    pub active_cancel: Mutex<Option<Arc<CancelToken>>>,
-}
-
-/// 将 strhide 的 Progress 事件实时桥接到 Tauri v2 的前端 IPC Channel
-struct TauriProgressBridge {
-    channel: Channel<GuiProgressEvent>,
+/// GUI 全局状态：StrHide 本身为 Copy，取消令牌按 task_id 独立登记，支持多任务并发与精准取消
+#[derive(Default)]
+pub struct GuiAppState {
+    pub engine: StrHide,
+    pub running_tasks: Mutex<HashMap<u64, Arc<CancelToken>>>,
 }
 
 #[derive(Clone, serde::Serialize)]
-pub struct GuiProgressEvent {
+pub struct ProgressPayload {
+    pub task_id: u64,
     pub stage: &'static str,
     pub done: u64,
     pub total: Option<u64>,
 }
 
-impl Progress for TauriProgressBridge {
-    fn report(&self, event: Event) {
-        let _ = self.channel.send(GuiProgressEvent {
-            stage: event.stage.as_str(),
-            done: event.done,
-            total: event.total,
+struct ChannelProgress {
+    task_id: u64,
+    channel: Channel<ProgressPayload>,
+}
+
+impl Progress for ChannelProgress {
+    fn report(&self, ev: Event) {
+        let _ = self.channel.send(ProgressPayload {
+            task_id: self.task_id,
+            stage: ev.stage.as_str(),
+            done: ev.done,
+            total: ev.total,
         });
     }
 }
 
+/// 推荐交互第 1 步：拖入文件时先跑廉价双域诊断（有界头尾读取，不读全量视频）
 #[tauri::command]
-pub async fn embed_file_cmd(
-    state: State<'_, AppState>,
+pub async fn inspect_carrier_cmd(
+    state: State<'_, GuiAppState>,
     carrier_path: PathBuf,
-    output_path: Option<PathBuf>,
-    payload_text: Option<String>,
-    payload_file: Option<PathBuf>,
     password: Option<String>,
-    safety_level: String,
-    enforce_safety: bool,
-    backup: bool,
-    on_progress: Channel<GuiProgressEvent>,
-) -> Result<strhide::stego::StegoEmbedResult, ErrorDetail> {
-    let engine = *state.engine.lock().unwrap();
-    let cancel_token = Arc::new(CancelToken::new());
-    *state.active_cancel.lock().unwrap() = Some(Arc::clone(&cancel_token));
-
-    // 将重型 CPU/IO 隐写任务派发至 Tokio blocking 线程池，绝不阻塞 UI 主线程
-    let res = tauri::async_runtime::spawn_blocking(move || {
-        let bridge = TauriProgressBridge { channel: on_progress };
-        let control = Control {
-            progress: &bridge,
-            cancel: Some(&cancel_token),
+) -> Result<DualInspect, ErrorDetail> {
+    let engine = state.engine;
+    tauri::async_runtime::spawn_blocking(move || {
+        let opts = DualOptions {
+            password: password.as_deref(),
+            domain: None,
+            control: Control::none(),
         };
-
-        let payload = if let Some(file_path) = payload_file {
-            let name = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("payload.bin").to_string();
-            let bytes = std::fs::read(&file_path)?;
-            Payload::owned_file(name, bytes)
-        } else if let Some(text) = payload_text {
-            Payload::owned(text.into_bytes()).with_kind(strhide::PayloadKind::Text)
-        } else {
-            return Err(StrHideError::General("No payload provided".into()));
-        };
-
-        let level = SafetyLevel::parse(&safety_level).unwrap_or(SafetyLevel::High);
-        let enforcement = if enforce_safety {
-            SafetyEnforcement::Enforced
-        } else {
-            SafetyEnforcement::Advisory
-        };
-
-        let opts = EmbedOptions::default()
-            .with_password(password.as_deref().unwrap_or_default())
-            .with_safety(level, enforcement)
-            .with_control(control);
-
-        engine.stego().embed_file(
-            &carrier_path,
-            output_path.as_deref(),
-            &payload,
-            &opts,
-            backup,
-        )
+        engine.inspect_any(&carrier_path, &opts)
     })
     .await
-    .map_err(|e| StrHideError::General(format!("Task panic: {e}")).detail_i18n())?;
-
-    *state.active_cancel.lock().unwrap() = None;
-    res.map_err(|e| e.detail_i18n())
+    .map_err(|e| StrHideError::General(format!("Join error: {e}")).detail_i18n())?
+    .map_err(|e| e.detail_i18n())
 }
 
+/// 推荐交互第 2 步：执行内容域文件嵌入（享受 MP4/HEVC 零拷贝补丁优化与实时进度）
 #[tauri::command]
-pub fn cancel_current_task(state: State<'_, AppState>) {
-    if let Some(token) = state.active_cancel.lock().unwrap().as_ref() {
+pub async fn embed_carrier_cmd(
+    state: State<'_, GuiAppState>,
+    task_id: u64,
+    carrier_path: PathBuf,
+    output_path: Option<PathBuf>,
+    payload_file: PathBuf,
+    password: Option<String>,
+    backup: bool,
+    preserve_time: bool,
+    overwrite: bool,
+    on_progress: Channel<ProgressPayload>,
+) -> Result<strhide::stego::StegoEmbedResult, ErrorDetail> {
+    let engine = state.engine;
+    let token = Arc::new(CancelToken::new());
+    state.running_tasks.lock().unwrap().insert(task_id, Arc::clone(&token));
+
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        // 在任务边界使用 catch_unwind 兜底（配合 GUI Cargo.toml 的 panic = "unwind"），确保 TmpGuard 正常 Drop
+        let res = catch_unwind(AssertUnwindSafe(|| {
+            let reporter = ChannelProgress {
+                task_id,
+                channel: on_progress,
+            };
+            // Control<'_> 直接借用当前工作线程栈帧上的 reporter 与 token，保持 Copy 零开销
+            let control = Control {
+                progress: &reporter,
+                cancel: Some(&token),
+            };
+
+            let name = payload_file
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("payload.bin")
+                .to_string();
+            let bytes = std::fs::read(&payload_file)?;
+            let payload = Payload::owned_file(name, bytes);
+
+            let opts = EmbedOptions::default()
+                .with_password(password.as_deref().unwrap_or_default())
+                .with_control(control);
+
+            let target = strhide::commit::FileTarget {
+                output_path: output_path.as_deref(),
+                backup,
+                preserve_time,
+                overwrite,
+            };
+
+            engine.stego().embed_file(&carrier_path, &payload, &opts, &target)
+        }));
+
+        match res {
+            Ok(inner) => inner,
+            Err(_) => Err(StrHideError::General("Internal engine panic caught at worker boundary".into())),
+        }
+    })
+    .await;
+
+    state.running_tasks.lock().unwrap().remove(&task_id);
+
+    outcome
+        .map_err(|e| StrHideError::General(format!("Worker join error: {e}")).detail_i18n())?
+        .map_err(|e| e.detail_i18n())
+}
+
+/// 按 task_id 精准取消指定任务，不影响其它正在运行的任务
+#[tauri::command]
+pub fn cancel_task_cmd(state: State<'_, GuiAppState>, task_id: u64) -> bool {
+    if let Some(token) = state.running_tasks.lock().unwrap().get(&task_id) {
         token.cancel();
+        true
+    } else {
+        false
     }
 }
-```
 
-### 10.2 纯 Rust GUI（`egui` / `iced`）非阻塞 Worker 与受控 Rayon 线程池配置
-
-在纯 Rust GUI 中，为避免 PNG 并行 Deflate 或 HEVC 多核重编码占满全部 CPU 核心导致 GUI 掉帧（低于 60 FPS），应当在 GUI 初始化时构造一个预留 1–2 个物理核心给 UI 渲染线程的专用 `rayon::ThreadPool`，并通过 `EmbedOptions::with_pool` 注入：
-
-```rust
-use std::sync::Arc;
-
-/// 初始化供隐写引擎使用的后台计算线程池，预留至少 1 个核心给 GUI 渲染线程
-pub fn create_gui_stego_pool() -> Arc<rayon::ThreadPool> {
-    let total_threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let worker_threads = total_threads.saturating_sub(1).max(1);
-
-    Arc::new(
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(worker_threads)
-            .thread_name(|idx| format!("strhide-worker-{idx}"))
-            .build()
-            .expect("failed to build stego rayon pool"),
-    )
-}
 ```
