@@ -388,13 +388,18 @@ impl StcTrellis {
         (n / self.u as usize).saturating_sub(self.h as usize - 1)
     }
 
-    /// Number of elements needed to carry `bits` message bits.
-    pub fn slots_for(&self, bits: usize) -> usize {
+    /// Number of elements needed to carry `bits` message bits for parameters `(h, u)`.
+    pub fn slots_for_params(bits: usize, h: u8, u: u8) -> usize {
         if bits == 0 {
             0
         } else {
-            self.u as usize * (bits + self.h as usize - 1)
+            u as usize * (bits + h as usize - 1)
         }
+    }
+
+    /// Number of elements needed to carry `bits` message bits.
+    pub fn slots_for(&self, bits: usize) -> usize {
+        Self::slots_for_params(bits, self.h, self.u)
     }
 
     /// Recompute the syndrome of the element LSBs (`H x`), MSB-first packed.

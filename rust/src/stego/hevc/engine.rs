@@ -3,7 +3,7 @@
 //! Provides zero bitrate expansion (Δ = 0), content-adaptive distortion-minimized
 //! steganographic embedding and extraction directly within H.265/HEVC bitstreams.
 
-use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::aead::{Aead, KeyInit, Payload as AeadPayload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use crc32fast::Hasher as Crc32;
 use hkdf::Hkdf;
@@ -87,23 +87,146 @@ const CAPACITY_PROBE_SEED: u64 = 0x5465_676f;
 /// the loop always makes progress. Healthy carriers settle in one round.
 const MAX_EMBED_ROUNDS: usize = 24;
 
-/// On-wire message header of an HEVC stego carrier:
-/// `[magic 4][payload_len 4][payload crc32 4][nonce 12]`. The GCM tag does not
-/// live here -- it trails the ciphertext (audit 2026-10-24 2.2: the constants
-/// used to be hard-coded at the call sites while `fmt.header_bytes` described
-/// a different quantity, so a private dialect with a small `header_bytes`
-/// panicked on `header_bytes[12..24]`).
-const HEVC_MSG_HEADER_BYTES: usize = 24;
+/// Fixed 32-byte HEVC Superblock for Scheme C v2.
+pub const HEVC_SUPERBLOCK_BYTES: usize = 32;
+/// Number of initial carrier slots that form the Superblock candidate pool.
+pub const HEVC_SUPERBLOCK_POOL_SLOTS: usize = 2048;
+/// Minimum slots needed to embed the 32-byte Superblock with STC h=7, u=2.
+pub const HEVC_SUPERBLOCK_MIN_SLOTS: usize = 524;
 /// AES-256-GCM tag length appended to the ciphertext.
-const HEVC_TAG_BYTES: usize = 16;
+pub const HEVC_TAG_BYTES: usize = 16;
 
-/// `fmt.header_bytes` must at least cover the fixed message header, or the
-/// extractor could not read the payload length. The default profile budgets 40
-/// = `HEVC_MSG_HEADER_BYTES + HEVC_TAG_BYTES`, the true total overhead.
+/// Fixed-size 32-byte header anchored in the initial carrier slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HevcSuperblock {
+    /// 4-byte credential-derived magic.
+    pub magic: [u8; 4],
+    /// High 4 bits: version (0x2); bit 0: multi-window flag.
+    pub version_and_flags: u8,
+    /// STC group size `u` used for the payload body.
+    pub stc_u_body: u8,
+    /// Number of recorded candidate slices in the primary window W0.
+    pub window_slices: u16,
+    /// Total number of windows M (1 for single-window).
+    pub total_windows: u16,
+    /// Reserved, must be 0.
+    pub reserved: u16,
+    /// Compressed/micro-header payload length in bytes.
+    pub payload_len: u32,
+    /// Payload CRC32.
+    pub payload_crc32: u32,
+    /// AES-256-GCM 12-byte nonce.
+    pub nonce: [u8; 12],
+}
+
+impl HevcSuperblock {
+    pub fn encode(&self) -> [u8; HEVC_SUPERBLOCK_BYTES] {
+        let mut buf = [0u8; HEVC_SUPERBLOCK_BYTES];
+        buf[0..4].copy_from_slice(&self.magic);
+        buf[4] = self.version_and_flags;
+        buf[5] = self.stc_u_body;
+        buf[6..8].copy_from_slice(&self.window_slices.to_be_bytes());
+        buf[8..10].copy_from_slice(&self.total_windows.to_be_bytes());
+        buf[10..12].copy_from_slice(&self.reserved.to_be_bytes());
+        buf[12..16].copy_from_slice(&self.payload_len.to_be_bytes());
+        buf[16..20].copy_from_slice(&self.payload_crc32.to_be_bytes());
+        buf[20..32].copy_from_slice(&self.nonce);
+        buf
+    }
+
+    pub fn decode(buf: &[u8; HEVC_SUPERBLOCK_BYTES]) -> Result<Self, StrHideError> {
+        let mut magic = [0u8; 4];
+        magic.copy_from_slice(&buf[0..4]);
+        let version_and_flags = buf[4];
+        let version = version_and_flags >> 4;
+        if version != 2 {
+            return Err(StrHideError::CorruptedData(format!(
+                "Unsupported HEVC stego version: {version}"
+            )));
+        }
+        let stc_u_body = buf[5];
+        let window_slices = u16::from_be_bytes([buf[6], buf[7]]);
+        let total_windows = u16::from_be_bytes([buf[8], buf[9]]);
+        let reserved = u16::from_be_bytes([buf[10], buf[11]]);
+        let payload_len = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
+        let payload_crc32 = u32::from_be_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&buf[20..32]);
+        Ok(HevcSuperblock {
+            magic,
+            version_and_flags,
+            stc_u_body,
+            window_slices,
+            total_windows,
+            reserved,
+            payload_len,
+            payload_crc32,
+            nonce,
+        })
+    }
+}
+
+/// Early-exit stopping condition for streaming NAL decode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StopCondition {
+    /// Full scan (for probe_hevc_capacity).
+    All,
+    /// Stop as soon as at least `min_slots` are accumulated (for Superblock probing).
+    MinSlots(usize),
+    /// Stop after `target` recorded slices (for window extraction).
+    TargetSlices(usize),
+    /// Stop as soon as at least `target` slots are accumulated (for window embedding).
+    TargetSlots(usize),
+}
+
+/// Select the deterministic Weyl slots for the 32-byte Superblock within candidate pool.
+pub fn superblock_positions(pool_size: usize) -> Vec<usize> {
+    assert!(pool_size >= HEVC_SUPERBLOCK_MIN_SLOTS);
+    let count = HEVC_SUPERBLOCK_MIN_SLOTS;
+    let stride = permutation_stride(pool_size);
+    let mut positions = Vec::with_capacity(count);
+    for i in 0..count {
+        positions.push(((i as u64 * stride as u64) % pool_size as u64) as usize);
+    }
+    positions
+}
+
+/// Partition non-Superblock slots within the window into Band 0 and Band 1 stream indices.
+fn get_body_slot_indices(
+    total_slots: usize,
+    _pool_size: usize,
+    sb_positions: &[usize],
+    slice_slot_ranges: &[(usize, u8)],
+) -> (Vec<usize>, Vec<usize>) {
+    let mut is_sb = vec![false; total_slots];
+    for &pos in sb_positions {
+        if pos < total_slots {
+            is_sb[pos] = true;
+        }
+    }
+    let mut band0 = Vec::new();
+    let mut band1 = Vec::new();
+    let mut current_slot = 0usize;
+    for &(count, band) in slice_slot_ranges {
+        for _ in 0..count {
+            if current_slot < total_slots && !is_sb[current_slot] {
+                if band == 0 {
+                    band0.push(current_slot);
+                } else {
+                    band1.push(current_slot);
+                }
+            }
+            current_slot += 1;
+        }
+    }
+    (band0, band1)
+}
+
+/// `fmt.header_bytes` must at least cover the fixed Superblock.
 fn check_header_bytes(fmt: &HevcFormatProfile) -> Result<(), StrHideError> {
-    if fmt.header_bytes < HEVC_MSG_HEADER_BYTES {
+    if fmt.header_bytes < HEVC_SUPERBLOCK_BYTES {
         return Err(StrHideError::UnsupportedVersion(format!(
-            "HevcFormatProfile.header_bytes must be >= {HEVC_MSG_HEADER_BYTES}, got {}",
+            "HevcFormatProfile.header_bytes must be >= {HEVC_SUPERBLOCK_BYTES}, got {}",
             fmt.header_bytes
         )));
     }
@@ -130,20 +253,13 @@ pub fn probe_hevc_capacity(carrier: &[u8], fmt: &HevcFormatProfile) -> Result<us
     })?;
     let total_slots = scan_hevc_slot_count(carrier)?;
     let trellis = StcTrellis::from_seed_grouped(CAPACITY_PROBE_SEED, fmt.stc_h, fmt.stc_u)?;
-    let header_bits = fmt.header_bytes * 8;
-    let min_needed_slots = trellis.slots_for(header_bits);
-    if total_slots < min_needed_slots {
+    if total_slots < HEVC_SUPERBLOCK_MIN_SLOTS {
         return Ok(0);
     }
-    // `message_bits` is the exact inverse of `slots_for` (n/u - (h-1)), so the
-    // bound honours both the group size and the warm-up rows. The previous
-    // hard-coded `total_slots / 2` ignored both and over-reported by h-1 bits,
-    // which crossed the byte boundary on most carriers (audit 2026-10-24 2.1:
-    // 9 of 14 corpus files advertised one byte more than embed accepts).
-    let available_bits = trellis
-        .message_bits(total_slots)
-        .saturating_sub(header_bits);
-    Ok((available_bits / 8).saturating_sub(1))
+    let body_slots = total_slots.saturating_sub(HEVC_SUPERBLOCK_MIN_SLOTS);
+    let available_bits = trellis.message_bits(body_slots);
+    let available_bytes = (available_bits / 8).saturating_sub(HEVC_TAG_BYTES);
+    Ok(available_bytes.saturating_sub(1))
 }
 
 /// Cropped output geometry of an SPS in luma samples (§7.4.3.2.1).
@@ -285,7 +401,7 @@ fn probe_hevc_pool(
     exact: bool,
 ) -> Result<PoolProfile, StrHideError> {
     if kind != HevcCarrierKind::Mp4Container || exact {
-        let record = record_carrier_state(carrier, kind, Capture::Count)?;
+        let record = record_carrier_state(carrier, kind, Capture::Count, StopCondition::All)?;
         return Ok(PoolProfile::from_record(&record));
     }
 
@@ -330,7 +446,7 @@ fn probe_hevc_pool(
 
     // 150 pictures or fewer: full scan (0% estimation error, fast enough)
     if selectable <= 150 {
-        let record = record_carrier_state(carrier, kind, Capture::Count)?;
+        let record = record_carrier_state(carrier, kind, Capture::Count, StopCondition::All)?;
         return Ok(PoolProfile::from_record(&record));
     }
 
@@ -442,18 +558,14 @@ pub(crate) fn build_hevc_capacity_info(
 
     let total_slots = pool.total_slots;
     let trellis = StcTrellis::from_seed_grouped(CAPACITY_PROBE_SEED, fmt.stc_h, fmt.stc_u)?;
-    let header_bits = fmt.header_bytes * 8;
-    let min_needed_slots = trellis.slots_for(header_bits);
 
-    let max_raw_payload_bytes = if total_slots < min_needed_slots {
+    let max_raw_payload_bytes = if total_slots < HEVC_SUPERBLOCK_MIN_SLOTS {
         0
     } else {
-        // Exact inverse of `slots_for` (audit 2026-10-24 2.1): honours the
-        // group size `u` and the h-1 warm-up rows instead of a hard-coded 1/2.
-        let available_bits = trellis
-            .message_bits(total_slots)
-            .saturating_sub(header_bits);
-        (available_bits / 8).saturating_sub(1)
+        let body_slots = total_slots.saturating_sub(HEVC_SUPERBLOCK_MIN_SLOTS);
+        let available_bits = trellis.message_bits(body_slots);
+        let available_bytes = (available_bits / 8).saturating_sub(HEVC_TAG_BYTES);
+        available_bytes.saturating_sub(1)
     };
 
     // Extract picture dimensions from SPS to derive the true element count.
@@ -583,145 +695,210 @@ pub fn embed_hevc_with_info(
         )
     })?;
 
-    // 1. Scan and record all slices and substreams
+    // 1. Calculate required capacity and stream window
+    let uncompressed = encode_micro_header(payload);
+    let body_msg_len = uncompressed.len() + HEVC_TAG_BYTES;
+    let body_needed_slots = StcTrellis::slots_for_params(body_msg_len * 8, fmt.stc_h, fmt.stc_u);
+    let target_slots = HEVC_SUPERBLOCK_POOL_SLOTS + body_needed_slots + 128;
+
     control.stage(Stage::Decode);
-    let record = record_carrier_state(carrier, kind, Capture::Full)?;
-    // Checkpoint after the parse: recording a long video is tens of seconds.
+    let record = record_carrier_state(
+        carrier,
+        kind,
+        Capture::Full,
+        StopCondition::TargetSlots(target_slots),
+    )?;
     control.check()?;
     control.stage(Stage::Solve);
     let pool = PoolProfile::from_record(&record);
     let capacity_info = build_hevc_capacity_info(carrier, kind, fmt, &pool, safety.level)?;
 
-    let uncompressed = encode_micro_header(payload);
-
-    // Safety enforcement policy check (parity with the PNG and JPEG engines,
-    // which gate on `SafetyPolicy` rather than the bare tier: passing only the
-    // level here silently made `--enforce-safety` a no-op for HEVC carriers).
     enforce_safety(
         payload.len(),
         capacity_info.recommended_max_bytes,
         capacity_info.max_raw_payload_bytes,
         safety,
     )?;
-    let bands = record.bands;
+
     let slice_contexts = record.slice_contexts;
     let all_slots = record.all_slots;
     let total_slots = all_slots.len();
+    let pool_size = total_slots.min(HEVC_SUPERBLOCK_POOL_SLOTS);
 
-    // 2. Prepare ciphertext and envelope
+    if pool_size < HEVC_SUPERBLOCK_MIN_SLOTS
+        || total_slots < HEVC_SUPERBLOCK_MIN_SLOTS + body_needed_slots
+    {
+        return Err(StrHideError::General(format!(
+            "HEVC capacity exceeded: needed {} slots, carrier available {}",
+            HEVC_SUPERBLOCK_MIN_SLOTS + body_needed_slots,
+            total_slots
+        )));
+    }
+
+    // 2. Derive Superblock and Body slot positions
+    let sb_positions = superblock_positions(pool_size);
+    let (body_band0, body_band1) = get_body_slot_indices(
+        total_slots,
+        pool_size,
+        &sb_positions,
+        &record.slice_slot_ranges,
+    );
+    let body_bands = vec![
+        0..body_band0.len(),
+        body_band0.len()..(body_band0.len() + body_band1.len()),
+    ];
+    let mut all_body_indices = body_band0;
+    all_body_indices.extend(body_band1);
+    let body_positions_rel = band_positions(&body_bands, body_needed_slots);
+    let body_positions: Vec<usize> = body_positions_rel
+        .into_iter()
+        .map(|rel| all_body_indices[rel])
+        .collect();
+
+    // 3. Prepare Superblock and AEAD ciphertext
     let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);
     let key = derive_hevc_key(secret, domain, &cover_digest, fmt);
     let magic = derive_magic(fmt.magic_label, effective_secret(secret).as_bytes());
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| StrHideError::General(format!("AES-GCM key init failed: {e}")))?;
 
-    // Seeded runs bind the nonce to this (cover, payload) pair: the HEVC key
-    // derives from a cover digest that two same-parameter carriers share, so
-    // an unbound seeded nonce could repeat a (key, nonce) pair across inputs.
     let fresh_binding = Freshness::seeded_binding(carrier, payload.as_bytes());
     let nonce_bytes = freshness.nonce(0, &fresh_binding);
     let nonce = Nonce::from(nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(&nonce, uncompressed.as_slice())
-        .map_err(|e| StrHideError::General(format!("HEVC payload encryption failed: {e}")))?;
 
     let mut crc = Crc32::new();
     crc.update(&uncompressed);
     let payload_crc = crc.finalize();
 
-    let mut message = Vec::with_capacity(HEVC_MSG_HEADER_BYTES + ciphertext.len());
-    message.extend_from_slice(&magic);
-    message.extend_from_slice(&(uncompressed.len() as u32).to_be_bytes());
-    message.extend_from_slice(&payload_crc.to_be_bytes());
-    message.extend_from_slice(&nonce_bytes);
-    message.extend_from_slice(&ciphertext);
+    let sb = HevcSuperblock {
+        magic,
+        version_and_flags: 0x20,
+        stc_u_body: fmt.stc_u,
+        window_slices: slice_contexts.len() as u16,
+        total_windows: 1,
+        reserved: 0,
+        payload_len: uncompressed.len() as u32,
+        payload_crc32: payload_crc,
+        nonce: nonce_bytes,
+    };
+    let sb_bytes = sb.encode();
+
+    let ciphertext = cipher
+        .encrypt(
+            &nonce,
+            AeadPayload {
+                msg: uncompressed.as_slice(),
+                aad: &sb_bytes,
+            },
+        )
+        .map_err(|e| StrHideError::General(format!("HEVC payload encryption failed: {e}")))?;
 
     let seed = trellis_seed_from_key(&key, &cover_digest);
-    let trellis = StcTrellis::from_seed_grouped(seed, fmt.stc_h, fmt.stc_u)?;
-    let needed_slots = trellis.slots_for(message.len() * 8);
+    let sb_trellis = StcTrellis::from_seed_grouped(seed, 7, 2)?;
+    let body_trellis = StcTrellis::from_seed_grouped(seed, fmt.stc_h, fmt.stc_u)?;
 
-    if total_slots < needed_slots {
-        return Err(StrHideError::General(format!(
-            "HEVC capacity exceeded: needed {} slots, carrier available {}",
-            needed_slots, total_slots
-        )));
-    }
-
-    // 3. Element order, then solve / re-encode until the flip set is safe.
-    //
-    //    Slots are consumed in a deterministic Weyl permutation inside each
-    //    drift band (`band_positions`), not in recording order. Recording order
-    //    is spatial: it starts at the first item (for a burst .heic, the
-    //    primary image) and inside it at the first slices, so a small payload
-    //    used to eat the first picture's signs wholesale and flatten it. The
-    //    extractor derives the same permutation from the band layout alone, so
-    //    no side information is needed.
-    //
-    //    Two things can make an individual slot unusable:
-    //      * flipping it disturbs a `00 00 xx<=3` boundary, so RBSP->NAL
-    //        emulation prevention would insert/drop a byte and break the
-    //        zero-expansion promise; and
-    //      * the journal of its substream does not replay the cover byte for
-    //        byte, i.e. that substream uses syntax the recorder does not model
-    //        (PCM sample data, aligned bypass coding, an unparsed PPS
-    //        extension, ...).
-    //
-    //    Both are discovered while embedding. Such slots get an infinite STC
-    //    cost and are simply never flipped -- the slot *set* never changes,
-    //    because extraction has no way to learn about the exclusion.
-    let positions = band_positions(&bands, needed_slots);
     let mut forbidden: HashSet<usize> = HashSet::new();
     let mut bad_substreams: HashSet<(usize, usize)> = HashSet::new();
     let mut replay_ok: HashMap<(usize, usize), bool> = HashMap::new();
     let mut out_carrier = carrier.to_vec();
 
     for round in 0..MAX_EMBED_ROUNDS {
-        // Each round re-walks every slot and rewrites whole slices; stopping
-        // between rounds leaves the untouched cover bytes still on disk.
         control.check()?;
-        let mut cover_bits = Vec::with_capacity(needed_slots);
-        let mut costs = Vec::with_capacity(needed_slots);
-        let mut moves = Vec::with_capacity(needed_slots);
-        for &pos in &positions {
+
+        // 3a. Solve Superblock STC
+        let mut sb_cover_bits = Vec::with_capacity(sb_positions.len());
+        let mut sb_costs = Vec::with_capacity(sb_positions.len());
+        let mut sb_moves = Vec::with_capacity(sb_positions.len());
+        for &pos in &sb_positions {
             let slot = &all_slots[pos];
-            cover_bits.push(slot.original_bit);
-            costs.push(if forbidden.contains(&pos) {
+            sb_cover_bits.push(slot.original_bit);
+            sb_costs.push(if forbidden.contains(&pos) {
                 f64::INFINITY
             } else {
                 slot.cost as f64
             });
-            // A bypass sign bit is one bit of the arithmetic codeword: flipping
-            // it only inverts the geometrically negated coefficient.
-            moves.push(if slot.original_bit == 0 {
+            sb_moves.push(if slot.original_bit == 0 {
                 Move::PlusOnly
             } else {
                 Move::MinusOnly
             });
         }
-
-        let mut deltas = vec![0i8; needed_slots];
-        if let Err(e) =
-            trellis.embed_with_deltas(&cover_bits, &moves, &costs, &costs, &message, &mut deltas)
-        {
+        let mut sb_deltas = vec![0i8; sb_positions.len()];
+        if let Err(e) = sb_trellis.embed_with_deltas(
+            &sb_cover_bits,
+            &sb_moves,
+            &sb_costs,
+            &sb_costs,
+            &sb_bytes,
+            &mut sb_deltas,
+        ) {
             if round == 0 {
                 return Err(e);
             }
             return Err(StrHideError::TrellisInfeasible {
                 cause: crate::errors::TrellisCause::ExhaustedSlots,
                 detail: format!(
-                    "HEVC stego exhausted usable slots after {round} round(s) ({} slot(s) excluded, {} unsupported substream(s)): {e}",
-                    forbidden.len(),
-                    bad_substreams.len()
+                    "HEVC Superblock STC exhausted usable slots after {round} round(s) ({} slot(s) excluded): {e}",
+                    forbidden.len()
+                ),
+            });
+        }
+
+        // 3b. Solve Body STC
+        let mut body_cover_bits = Vec::with_capacity(body_positions.len());
+        let mut body_costs = Vec::with_capacity(body_positions.len());
+        let mut body_moves = Vec::with_capacity(body_positions.len());
+        for &pos in &body_positions {
+            let slot = &all_slots[pos];
+            body_cover_bits.push(slot.original_bit);
+            body_costs.push(if forbidden.contains(&pos) {
+                f64::INFINITY
+            } else {
+                slot.cost as f64
+            });
+            body_moves.push(if slot.original_bit == 0 {
+                Move::PlusOnly
+            } else {
+                Move::MinusOnly
+            });
+        }
+        let mut body_deltas = vec![0i8; body_positions.len()];
+        if let Err(e) = body_trellis.embed_with_deltas(
+            &body_cover_bits,
+            &body_moves,
+            &body_costs,
+            &body_costs,
+            &ciphertext,
+            &mut body_deltas,
+        ) {
+            if round == 0 {
+                return Err(e);
+            }
+            return Err(StrHideError::TrellisInfeasible {
+                cause: crate::errors::TrellisCause::ExhaustedSlots,
+                detail: format!(
+                    "HEVC Body STC exhausted usable slots after {round} round(s) ({} slot(s) excluded): {e}",
+                    forbidden.len()
                 ),
             });
         }
 
         let mut flips_per_slice: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
         let mut touched: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for (i, &delta) in deltas.iter().enumerate() {
+        for (i, &delta) in sb_deltas.iter().enumerate() {
             if delta != 0 {
-                let global_slot_idx = positions[i];
+                let global_slot_idx = sb_positions[i];
+                let slot = &all_slots[global_slot_idx];
+                flips_per_slice
+                    .entry(slot.slice_idx as usize)
+                    .or_default()
+                    .push((slot.op_idx as usize, global_slot_idx));
+                touched.insert((slot.slice_idx as usize, slot.substream_idx as usize));
+            }
+        }
+        for (i, &delta) in body_deltas.iter().enumerate() {
+            if delta != 0 {
+                let global_slot_idx = body_positions[i];
                 let slot = &all_slots[global_slot_idx];
                 flips_per_slice
                     .entry(slot.slice_idx as usize)
@@ -734,16 +911,13 @@ pub fn embed_hevc_with_info(
             entries.sort_unstable_by_key(|(op_idx, _)| *op_idx);
         }
 
-        // 3a. Journal fidelity: before a substream is rewritten, prove that its
-        //     recorded journal reproduces the cover exactly.
+        // 3c. Journal fidelity
         let mut unsound = Vec::new();
         for &(slice_idx, sub_idx) in &touched {
             let ok = *replay_ok.entry((slice_idx, sub_idx)).or_insert_with(|| {
                 let slice_rec = &slice_contexts[slice_idx];
                 let sub = &slice_rec.substreams[sub_idx];
                 let cover = &slice_rec.orig_rbsp[sub.rbsp_byte_start..sub.rbsp_byte_end];
-                // A journal that cannot even be replayed without flips is not
-                // sound for flipping: treat it as a bad substream.
                 match encode_substream(slice_rec, sub, &[]) {
                     Ok((replay, _)) => replay_matches_cover(&replay, cover),
                     Err(_) => false,
@@ -754,7 +928,7 @@ pub fn embed_hevc_with_info(
             }
         }
         if !unsound.is_empty() {
-            for &pos in &positions {
+            for &pos in sb_positions.iter().chain(body_positions.iter()) {
                 let slot = &all_slots[pos];
                 if bad_substreams.contains(&(slot.slice_idx as usize, slot.substream_idx as usize))
                 {
@@ -887,7 +1061,7 @@ pub fn embed_hevc_with_info(
         }
 
         let mut had_bad_substream = false;
-        for &pos in &positions {
+        for &pos in sb_positions.iter().chain(body_positions.iter()) {
             let slot = &all_slots[pos];
             if bad_substreams.contains(&(slot.slice_idx as usize, slot.substream_idx as usize))
                 && forbidden.insert(pos)
@@ -1164,114 +1338,150 @@ fn gcd_usize(mut a: usize, mut b: usize) -> usize {
     a
 }
 
-/// Extract hidden payload from HEVC carrier using an already recorded carrier state.
-fn extract_hevc_record(
+/// Extract hidden payload from an HEVC/HEIC carrier.
+pub fn extract_hevc(
     carrier: &[u8],
-    record: &CarrierRecord,
     secret: Option<&str>,
     domain: Option<&str>,
     fmt: &HevcFormatProfile,
     control: &Control<'_>,
 ) -> Result<Payload<'static>, StrHideError> {
     control.check()?;
-    let bands = record.bands.clone();
-    let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);
-    // The trellis seed is keyed through the secret-derived key (see
-    // `trellis_seed_from_key`), so it is derived before anything reads slots.
+    check_header_bytes(fmt)?;
+    let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
+        StrHideError::UnsupportedFormat(
+            "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
+        )
+    })?;
+
+    // 1. First stage: scan up to HEVC_SUPERBLOCK_POOL_SLOTS to read and verify Superblock
+    let sb_record = record_carrier_state(
+        carrier,
+        kind,
+        Capture::Bits,
+        StopCondition::MinSlots(HEVC_SUPERBLOCK_POOL_SLOTS),
+    )?;
+    extract_hevc_from_sb_record(carrier, kind, sb_record, secret, domain, fmt, control)
+}
+
+fn extract_hevc_from_sb_record(
+    carrier: &[u8],
+    kind: HevcCarrierKind,
+    sb_record: CarrierRecord,
+    secret: Option<&str>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+    control: &Control<'_>,
+) -> Result<Payload<'static>, StrHideError> {
+    control.check()?;
+    let total_slots = sb_record.total_slots();
+    let pool_size = total_slots.min(HEVC_SUPERBLOCK_POOL_SLOTS);
+    if pool_size < HEVC_SUPERBLOCK_MIN_SLOTS {
+        return Err(StrHideError::CorruptedData(
+            "Insufficient HEVC slots for Superblock".into(),
+        ));
+    }
+
+    let cover_digest = derive_carrier_digest(carrier, &sb_record.digest_inputs, fmt);
     let key = derive_hevc_key(secret, domain, &cover_digest, fmt);
     let seed = trellis_seed_from_key(&key, &cover_digest);
-    let trellis = StcTrellis::from_seed_grouped(seed, fmt.stc_h, fmt.stc_u)?;
 
-    let header_slots_count = trellis.slots_for(fmt.header_bytes * 8);
-    if record.total_slots() < header_slots_count {
-        return Err(StrHideError::CorruptedData(
-            "Insufficient HEVC slots for header".into(),
-        ));
-    }
-
-    // The slot permutation must match the embedder's exactly: it is derived
-    // from `all_slots.len()` alone, and element `i` maps to the same slot no
-    // matter how many elements are read, so the header prefix and the full
-    // message stay consistent.
-    let header_positions = band_positions(&bands, header_slots_count);
-    let header_bits: Vec<u8> = header_positions
+    let sb_positions = superblock_positions(pool_size);
+    let sb_bits: Vec<u8> = sb_positions
         .iter()
-        .map(|&p| record.slot_bit(p))
+        .map(|&p| sb_record.raw_slot_bit(p))
         .collect();
 
-    // `fmt.header_bytes` is the fixed prefix this read sizes; the on-wire
-    // layout it must at least cover is HEVC_MSG_HEADER_BYTES bytes.
-    let header_bytes = trellis.extract(&header_bits, fmt.header_bytes * 8);
-
-    if header_bytes.len() < HEVC_MSG_HEADER_BYTES {
+    let sb_trellis = StcTrellis::from_seed_grouped(seed, 7, 2)?;
+    let sb_raw = sb_trellis.extract(&sb_bits, HEVC_SUPERBLOCK_BYTES * 8);
+    if sb_raw.len() < HEVC_SUPERBLOCK_BYTES {
         return Err(StrHideError::CorruptedData(
-            "HEVC stego header is truncated".into(),
+            "HEVC Superblock is truncated".into(),
         ));
     }
+    let mut sb_bytes = [0u8; HEVC_SUPERBLOCK_BYTES];
+    sb_bytes.copy_from_slice(&sb_raw[0..HEVC_SUPERBLOCK_BYTES]);
+    let sb = HevcSuperblock::decode(&sb_bytes)?;
 
     let expected_magic = derive_magic(fmt.magic_label, effective_secret(secret).as_bytes());
-    if header_bytes[0..4] != expected_magic {
+    if sb.magic != expected_magic {
         return Err(StrHideError::CorruptedData(
             "Invalid HEVC stego signature".into(),
         ));
     }
 
-    // `payload_len` comes straight from the carrier, i.e. it is
-    // attacker-controlled. Every arithmetic step below uses checked
-    // operations so that a hostile header cannot overflow the length
-    // computation on a 32-bit target.
-    let payload_len = u32::from_be_bytes([
-        header_bytes[4],
-        header_bytes[5],
-        header_bytes[6],
-        header_bytes[7],
-    ]) as usize;
-    let expected_crc = u32::from_be_bytes([
-        header_bytes[8],
-        header_bytes[9],
-        header_bytes[10],
-        header_bytes[11],
-    ]);
-    let mut nonce_bytes = [0u8; 12];
-    nonce_bytes.copy_from_slice(&header_bytes[12..HEVC_MSG_HEADER_BYTES]);
+    // 2. Second stage: read Body
+    let w0 = sb.window_slices as usize;
+    let body_record = if sb_record.recorded_slices >= w0 {
+        sb_record
+    } else {
+        record_carrier_state(
+            carrier,
+            kind,
+            Capture::Bits,
+            StopCondition::TargetSlices(w0),
+        )?
+    };
 
-    let total_msg_len = HEVC_MSG_HEADER_BYTES
-        .checked_add(payload_len)
-        .and_then(|v| v.checked_add(HEVC_TAG_BYTES))
-        .ok_or_else(|| StrHideError::CorruptedData("HEVC stego header length overflows".into()))?;
-    let total_msg_bits = total_msg_len
-        .checked_mul(8)
-        .ok_or_else(|| StrHideError::CorruptedData("HEVC stego header length overflows".into()))?;
-    let total_needed_slots = trellis.slots_for(total_msg_bits);
-    if total_needed_slots > record.total_slots() {
+    let total_window_slots = body_record.total_slots();
+    let (body_band0, body_band1) = get_body_slot_indices(
+        total_window_slots,
+        pool_size,
+        &sb_positions,
+        &body_record.slice_slot_ranges,
+    );
+
+    let body_msg_len = (sb.payload_len as usize)
+        .checked_add(HEVC_TAG_BYTES)
+        .ok_or_else(|| StrHideError::CorruptedData("HEVC payload length overflows".into()))?;
+    let body_trellis = StcTrellis::from_seed_grouped(seed, fmt.stc_h, sb.stc_u_body)?;
+    let body_needed_slots = body_trellis.slots_for(body_msg_len * 8);
+
+    let available_body_slots = body_band0.len() + body_band1.len();
+    if available_body_slots < body_needed_slots {
+        return Err(StrHideError::CorruptedData(
+            "Carrier window truncated for declared payload".into(),
+        ));
+    }
+
+    let body_bands = vec![
+        0..body_band0.len(),
+        body_band0.len()..(body_band0.len() + body_band1.len()),
+    ];
+    let mut all_body_indices = body_band0;
+    all_body_indices.extend(body_band1);
+    let body_positions_rel = band_positions(&body_bands, body_needed_slots);
+    let body_bits: Vec<u8> = body_positions_rel
+        .into_iter()
+        .map(|rel| body_record.raw_slot_bit(all_body_indices[rel]))
+        .collect();
+
+    let ciphertext = body_trellis.extract(&body_bits, body_msg_len * 8);
+    if ciphertext.len() < body_msg_len {
         return Err(StrHideError::CorruptedData(
             "Carrier truncated for declared payload".into(),
         ));
     }
-
-    let msg_positions = band_positions(&bands, total_needed_slots);
-    let cover_bits: Vec<u8> = msg_positions.iter().map(|&p| record.slot_bit(p)).collect();
-    let msg_bytes = trellis.extract(&cover_bits, total_msg_bits);
-    // `extract` clamps to the trellis capacity, so a short vector here means
-    // the carrier cannot hold the declared payload. Check before slicing.
-    if msg_bytes.len() < total_msg_len {
-        return Err(StrHideError::CorruptedData(
-            "Carrier truncated for declared payload".into(),
-        ));
-    }
-    let ciphertext = &msg_bytes[HEVC_MSG_HEADER_BYTES..total_msg_len];
 
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| StrHideError::General(format!("AES-GCM key init failed: {e}")))?;
-    let nonce = Nonce::from(nonce_bytes);
+    let nonce = Nonce::from(sb.nonce);
 
-    let decrypted = cipher.decrypt(&nonce, ciphertext).map_err(|_| {
-        StrHideError::Password("Authentication failed or incorrect password".into())
-    })?;
+    let decrypted = cipher
+        .decrypt(
+            &nonce,
+            AeadPayload {
+                msg: &ciphertext[0..body_msg_len],
+                aad: &sb_bytes,
+            },
+        )
+        .map_err(|_| {
+            StrHideError::Password("Authentication failed or incorrect password".into())
+        })?;
 
     let mut crc = Crc32::new();
     crc.update(&decrypted);
-    if crc.finalize() != expected_crc {
+    if crc.finalize() != sb.payload_crc32 {
         return Err(StrHideError::CorruptedData(
             "CRC32 mismatch in HEVC payload".into(),
         ));
@@ -1280,27 +1490,47 @@ fn extract_hevc_record(
     decode_micro_header(&decrypted)
 }
 
-/// Extract hidden payload from an HEVC/HEIC carrier.
-///
-/// The complete expert entry: same credential, domain and format identity the
-/// embedder used. A wrong secret produces the same derived-magic mismatch an
-/// empty carrier would, so the failure carries no oracle.
-pub fn extract_hevc(
+#[allow(dead_code)]
+fn extract_hevc_record(
     carrier: &[u8],
+    record: &CarrierRecord,
     secret: Option<&str>,
     domain: Option<&str>,
     fmt: &HevcFormatProfile,
     control: &Control<'_>,
 ) -> Result<Payload<'static>, StrHideError> {
-    check_header_bytes(fmt)?;
     let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
         StrHideError::UnsupportedFormat(
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
-
-    let record = record_carrier_state(carrier, kind, Capture::Bits)?;
-    extract_hevc_record(carrier, &record, secret, domain, fmt, control)
+    extract_hevc_from_sb_record(
+        carrier,
+        kind,
+        CarrierRecord {
+            slice_contexts: record.slice_contexts.clone(),
+            all_slots: record.all_slots.clone(),
+            band_bits: record.band_bits.clone(),
+            bands: record.bands.clone(),
+            pictures: record.pictures,
+            band_pictures: record.band_pictures,
+            digest_inputs: match &record.digest_inputs {
+                DigestInputs::ParameterSets { parameter_sets } => DigestInputs::ParameterSets {
+                    parameter_sets: parameter_sets.clone(),
+                },
+                DigestInputs::AnnexB { spans } => DigestInputs::AnnexB {
+                    spans: spans.clone(),
+                },
+            },
+            recorded_slices: record.recorded_slices,
+            raw_bits: record.raw_bits.clone(),
+            slice_slot_ranges: record.slice_slot_ranges.clone(),
+        },
+        secret,
+        domain,
+        fmt,
+        control,
+    )
 }
 
 /// Inspect HEVC carrier for steganographic header using an already recorded carrier state.
@@ -1327,43 +1557,43 @@ fn inspect_hevc_record(
     });
     empty_info.media_info = media_info;
 
-    let bands = record.bands.clone();
+    let total_slots = record.total_slots();
+    let pool_size = total_slots.min(HEVC_SUPERBLOCK_POOL_SLOTS);
+    if pool_size < HEVC_SUPERBLOCK_MIN_SLOTS {
+        return Ok(empty_info);
+    }
+
     let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);
     let key = derive_hevc_key(secret, domain, &cover_digest, fmt);
     let seed = trellis_seed_from_key(&key, &cover_digest);
-    let trellis = match StcTrellis::from_seed_grouped(seed, fmt.stc_h, fmt.stc_u) {
+
+    let sb_positions = superblock_positions(pool_size);
+    let sb_bits: Vec<u8> = sb_positions
+        .iter()
+        .map(|&p| record.raw_slot_bit(p))
+        .collect();
+
+    let sb_trellis = match StcTrellis::from_seed_grouped(seed, 7, 2) {
         Ok(t) => t,
         Err(_) => return Ok(empty_info),
     };
-
-    let header_slots_count = trellis.slots_for(fmt.header_bytes * 8);
-    if record.total_slots() < header_slots_count {
+    let sb_raw = sb_trellis.extract(&sb_bits, HEVC_SUPERBLOCK_BYTES * 8);
+    if sb_raw.len() < HEVC_SUPERBLOCK_BYTES {
         return Ok(empty_info);
     }
-
-    let header_positions = band_positions(&bands, header_slots_count);
-    let header_bits: Vec<u8> = header_positions
-        .iter()
-        .map(|&p| record.slot_bit(p))
-        .collect();
-
-    let header_bytes = trellis.extract(&header_bits, fmt.header_bytes * 8);
-    if header_bytes.len() < HEVC_MSG_HEADER_BYTES {
-        return Ok(empty_info);
-    }
+    let mut sb_bytes = [0u8; HEVC_SUPERBLOCK_BYTES];
+    sb_bytes.copy_from_slice(&sb_raw[0..HEVC_SUPERBLOCK_BYTES]);
+    let sb = match HevcSuperblock::decode(&sb_bytes) {
+        Ok(s) => s,
+        Err(_) => return Ok(empty_info),
+    };
 
     let expected_magic = derive_magic(fmt.magic_label, effective_secret(secret).as_bytes());
-    if header_bytes[0..4] != expected_magic {
+    if sb.magic != expected_magic {
         return Ok(empty_info);
     }
 
-    let payload_len = u32::from_be_bytes([
-        header_bytes[4],
-        header_bytes[5],
-        header_bytes[6],
-        header_bytes[7],
-    ]) as usize;
-
+    let payload_len = sb.payload_len as usize;
     Ok(StegoHeaderInfo {
         format: match kind {
             HevcCarrierKind::HeifContainer => "HEIF/HEVC".into(),
@@ -1372,8 +1602,8 @@ fn inspect_hevc_record(
         },
         has_hidden_data: true,
         algorithm: Some("HEVC-CABAC-InPlace".into()),
-        codec: Some(format!("STC (h={}, u={})", fmt.stc_h, fmt.stc_u)),
-        envelope_len: Some(HEVC_MSG_HEADER_BYTES + 16 + payload_len),
+        codec: Some(format!("STC (h=7, u={})", sb.stc_u_body)),
+        envelope_len: Some(HEVC_SUPERBLOCK_BYTES + HEVC_TAG_BYTES + payload_len),
         payload_len: Some(payload_len),
         media_info,
         note: None,
@@ -1408,7 +1638,12 @@ pub fn inspect_hevc(
     });
     empty_info.media_info = media_info;
 
-    let record = match record_carrier_state(carrier, kind, Capture::Bits) {
+    let record = match record_carrier_state(
+        carrier,
+        kind,
+        Capture::Bits,
+        StopCondition::MinSlots(HEVC_SUPERBLOCK_POOL_SLOTS),
+    ) {
         Ok(r) => r,
         Err(_) => return Ok(empty_info),
     };
@@ -1432,7 +1667,6 @@ pub fn verify_hevc(
         None => "HEVC",
     };
 
-    // Level 1: Container & NAL Parse
     let kind = match sniff_hevc_carrier(carrier) {
         Some(k) => k,
         None => {
@@ -1455,9 +1689,12 @@ pub fn verify_hevc(
         }
     };
 
-    // Single-pass bitstream scan: Capture::Bits gives slot counts (Level 1),
-    // header sign bits (Level 2), and full payload bits (Level 3).
-    let record = match record_carrier_state(carrier, kind, Capture::Bits) {
+    let record = match record_carrier_state(
+        carrier,
+        kind,
+        Capture::Bits,
+        StopCondition::MinSlots(HEVC_SUPERBLOCK_POOL_SLOTS),
+    ) {
         Ok(rec) => {
             levels.push(VerifyLevel::pass(
                 1,
@@ -1485,7 +1722,6 @@ pub fn verify_hevc(
     };
     control.check()?;
 
-    // Level 2: Stego Header & Magic check (reusing single-pass record)
     let header_info = inspect_hevc_record(carrier, kind, &record, secret, domain, fmt, control)?;
     if !header_info.has_hidden_data {
         levels.push(VerifyLevel::fail(
@@ -1510,8 +1746,7 @@ pub fn verify_hevc(
     ));
     control.check()?;
 
-    // Level 3: Extraction & AES-GCM tag verification (reusing single-pass record)
-    match extract_hevc_record(carrier, &record, secret, domain, fmt, control) {
+    match extract_hevc_from_sb_record(carrier, kind, record, secret, domain, fmt, control) {
         Ok(payload) => {
             let desc = match payload.name() {
                 Some(name) => format!(
@@ -1545,6 +1780,8 @@ struct SliceContext {
     nal_type: u8,
     layer_id: u8,
     temporal_id: u8,
+    #[allow(dead_code)]
+    band: u8,
     orig_rbsp: Vec<u8>,
     ops: Vec<BinOp>,
     substreams: Vec<SubstreamRecord>,
@@ -1573,13 +1810,11 @@ enum Capture {
 /// 2.5).
 struct CarrierRecord {
     slice_contexts: Vec<SliceContext>,
-    /// Slot pool in drift-ladder order: band 0 first, band 1 after it.
+    /// Slot pool in stream recording order.
     /// Populated by [`Capture::Full`] only.
     all_slots: Vec<StegoSlot>,
     /// Sign bit of every slot, packed LSB-first, one vector per band in
-    /// recording order. The stable partition into the drift ladder is a no-op
-    /// on this layout, so [`Capture::Bits`] needs neither the sort nor the
-    /// `slot_idx` remap.
+    /// recording order.
     band_bits: [Vec<u8>; 2],
     /// Pool ranges of each band, in consumption order.
     bands: Vec<std::ops::Range<usize>>,
@@ -1588,6 +1823,12 @@ struct CarrierRecord {
     /// Pictures that may carry slots, per band.
     band_pictures: [usize; 2],
     digest_inputs: DigestInputs,
+    /// Total slices recorded in this window pass.
+    recorded_slices: usize,
+    /// Sign bit of every recorded slot in stream order.
+    raw_bits: Vec<u8>,
+    /// (slot_count, band) for each recorded slice.
+    slice_slot_ranges: Vec<(usize, u8)>,
 }
 
 impl CarrierRecord {
@@ -1598,11 +1839,17 @@ impl CarrierRecord {
 
     /// Sign bit at pool position `index`, where the pool is band 0 followed by
     /// band 1. Valid for [`Capture::Bits`].
+    #[cfg(test)]
     fn slot_bit(&self, index: usize) -> u8 {
         let band = usize::from(index >= self.bands[0].len());
         let range = &self.bands[band];
         debug_assert!(range.contains(&index));
         bit_at(&self.band_bits[band], index.saturating_sub(range.start))
+    }
+
+    /// Sign bit at stream position `index`. Valid for [`Capture::Bits`].
+    fn raw_slot_bit(&self, index: usize) -> u8 {
+        bit_at(&self.raw_bits, index)
     }
 }
 
@@ -1641,6 +1888,9 @@ struct SlotSink {
     counts: [usize; 2],
     band_bits: [BitPacker; 2],
     band_slots: [Vec<StegoSlot>; 2],
+    raw_bits: BitPacker,
+    raw_slots: Vec<StegoSlot>,
+    slice_slot_ranges: Vec<(usize, u8)>,
 }
 
 impl SlotSink {
@@ -1650,6 +1900,9 @@ impl SlotSink {
             counts: [0; 2],
             band_bits: [BitPacker::default(), BitPacker::default()],
             band_slots: [Vec::new(), Vec::new()],
+            raw_bits: BitPacker::default(),
+            raw_slots: Vec::new(),
+            slice_slot_ranges: Vec::new(),
         }
     }
 
@@ -1660,9 +1913,11 @@ impl SlotSink {
             Capture::Count => {}
             Capture::Bits => {
                 self.band_bits[band].push(slot.original_bit);
+                self.raw_bits.push(slot.original_bit);
             }
             Capture::Full => {
                 self.band_slots[band].push(slot);
+                self.raw_slots.push(slot);
             }
         }
     }
@@ -1727,6 +1982,7 @@ fn record_carrier_state(
     carrier: &[u8],
     kind: HevcCarrierKind,
     capture: Capture,
+    stop: StopCondition,
 ) -> Result<CarrierRecord, StrHideError> {
     // Only the embedder rewrites an RBSP or replays a bin journal; the
     // read-only levels run the recorder in slot-only mode and never keep a
@@ -1861,20 +2117,30 @@ fn record_carrier_state(
                 // read side or the trellis would read different elements.
                 absorb_recorder(&mut recorder, &rbsp, &mut sink);
                 recorded_slices += 1;
-                if capture != Capture::Full {
-                    slice_idx += 1;
-                    continue;
+                if capture == Capture::Full {
+                    slice_contexts.push(SliceContext {
+                        carrier_span: cand.span.clone(),
+                        nal_type: cand.nal_type,
+                        layer_id: cand.layer_id,
+                        temporal_id: cand.temporal_id,
+                        band,
+                        orig_rbsp: rbsp,
+                        ops: recorder.ops,
+                        substreams: recorder.substreams,
+                    });
                 }
-                slice_contexts.push(SliceContext {
-                    carrier_span: cand.span.clone(),
-                    nal_type: cand.nal_type,
-                    layer_id: cand.layer_id,
-                    temporal_id: cand.temporal_id,
-                    orig_rbsp: rbsp,
-                    ops: recorder.ops,
-                    substreams: recorder.substreams,
-                });
                 slice_idx += 1;
+
+                let total_current_slots = sink.counts[0] + sink.counts[1];
+                let should_stop = match stop {
+                    StopCondition::All => false,
+                    StopCondition::MinSlots(min) => total_current_slots >= min,
+                    StopCondition::TargetSlices(target_slices) => recorded_slices >= target_slices,
+                    StopCondition::TargetSlots(target) => total_current_slots >= target,
+                };
+                if should_stop {
+                    break;
+                }
             }
         }
     }
@@ -1894,29 +2160,28 @@ fn record_carrier_state(
     let SlotSink {
         counts,
         band_bits,
-        mut band_slots,
+        raw_bits,
+        raw_slots,
+        slice_slot_ranges,
         ..
     } = sink;
     let band0_len = counts[0];
     let total_slots = counts[0] + counts[1];
-
-    // The dual buckets are naturally in drift ladder order: band 0 first,
-    // band 1 after it. Concatenation is O(1) amortized and preserves order
-    // without sorting or remap.
-    let mut all = std::mem::take(&mut band_slots[0]);
-    all.append(&mut band_slots[1]);
 
     let [band0_bits, band1_bits] = band_bits;
     let bands = vec![0..band0_len, band0_len..total_slots];
 
     Ok(CarrierRecord {
         slice_contexts,
-        all_slots: all,
+        all_slots: raw_slots,
         band_bits: [band0_bits.bytes, band1_bits.bytes],
         bands,
         pictures,
         band_pictures,
         digest_inputs,
+        recorded_slices,
+        raw_bits: raw_bits.bytes,
+        slice_slot_ranges,
     })
 }
 
@@ -2087,12 +2352,15 @@ fn absorb_recorder(recorder: &mut CabacRecorder, rbsp: &[u8], sink: &mut SlotSin
     }
 
     let band = recorder.current_band as usize;
+    let start_count = sink.counts[0] + sink.counts[1];
     for slot in recorder.slots.drain(..) {
         if is_multi_sub && excluded.contains(&(slot.substream_idx as usize)) {
             continue;
         }
         sink.push(slot, band);
     }
+    let added = (sink.counts[0] + sink.counts[1]) - start_count;
+    sink.slice_slot_ranges.push((added, recorder.current_band));
     recorder.reset_pending();
 }
 
@@ -2102,7 +2370,7 @@ fn scan_hevc_slot_count(carrier: &[u8]) -> Result<usize, StrHideError> {
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
-    let record = record_carrier_state(carrier, kind, Capture::Count)?;
+    let record = record_carrier_state(carrier, kind, Capture::Count, StopCondition::All)?;
     Ok(record.total_slots())
 }
 
@@ -2205,6 +2473,7 @@ mod capture_tests {
     use super::*;
 
     fn record(bands: Vec<std::ops::Range<usize>>, band_bits: [Vec<u8>; 2]) -> CarrierRecord {
+        let total = bands.iter().map(|r| r.len()).sum();
         CarrierRecord {
             slice_contexts: Vec::new(),
             all_slots: Vec::new(),
@@ -2215,6 +2484,9 @@ mod capture_tests {
             digest_inputs: DigestInputs::ParameterSets {
                 parameter_sets: Vec::new(),
             },
+            recorded_slices: 1,
+            raw_bits: Vec::new(),
+            slice_slot_ranges: vec![(total, 0)],
         }
     }
 
@@ -2262,6 +2534,36 @@ mod capture_tests {
         assert_eq!(pack(&[1; 9]), vec![0xFF, 0b0000_0001]);
         assert_eq!(pack(&[]), Vec::<u8>::new());
     }
+
+    #[test]
+    fn superblock_encode_decode_roundtrip() {
+        let sb = HevcSuperblock {
+            magic: [0x53, 0x54, 0x52, 0x48],
+            version_and_flags: 0x20,
+            stc_u_body: 2,
+            window_slices: 12,
+            total_windows: 1,
+            reserved: 0,
+            payload_len: 1024,
+            payload_crc32: 0xDEADBEEF,
+            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        };
+        let encoded = sb.encode();
+        assert_eq!(encoded.len(), HEVC_SUPERBLOCK_BYTES);
+        let decoded = HevcSuperblock::decode(&encoded).expect("decode superblock");
+        assert_eq!(sb, decoded);
+    }
+
+    #[test]
+    fn superblock_positions_are_distinct() {
+        let positions = superblock_positions(2048);
+        assert_eq!(positions.len(), HEVC_SUPERBLOCK_MIN_SLOTS);
+        let set: HashSet<usize> = positions.iter().copied().collect();
+        assert_eq!(set.len(), HEVC_SUPERBLOCK_MIN_SLOTS);
+        for &p in &positions {
+            assert!(p < 2048);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2277,12 +2579,12 @@ mod dialect_tests {
     #[test]
     fn default_format_literals_match_the_wire_spec() {
         let fmt = &DEFAULT_HEVC_FORMAT;
-        assert_eq!(fmt.magic_label, b"strhide-hevc-magic-v1");
+        assert_eq!(fmt.magic_label, b"strhide-hevc-magic-v2");
         assert_eq!(fmt.cover_salt, b"strhide-hevc-cover-v1");
         assert_eq!(fmt.kdf_info, b"strhide-hevc-aes-key");
         assert_eq!(fmt.stc_h, 7);
         assert_eq!(fmt.stc_u, 2);
-        assert_eq!(fmt.header_bytes, 40);
+        assert_eq!(fmt.header_bytes, 48);
     }
 
     /// The magic must depend on the credential. A fixed magic plus a

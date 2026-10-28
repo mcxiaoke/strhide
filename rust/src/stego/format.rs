@@ -213,14 +213,14 @@ pub struct HevcFormatProfile {
     pub header_bytes: usize,
 }
 
-/// Official Scheme C wire format.
+/// Official Scheme C wire format (Scheme C v2: Superblock + windowing).
 pub const DEFAULT_HEVC_FORMAT: HevcFormatProfile = HevcFormatProfile {
-    magic_label: b"strhide-hevc-magic-v1",
+    magic_label: b"strhide-hevc-magic-v2",
     cover_salt: b"strhide-hevc-cover-v1",
     kdf_info: b"strhide-hevc-aes-key",
     stc_h: 7,
     stc_u: 2,
-    header_bytes: 40,
+    header_bytes: 48,
 };
 
 /// Identity of one wire format.
