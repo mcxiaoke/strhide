@@ -175,7 +175,7 @@ fn file_restore_refuses_to_overwrite_an_existing_output() {
     )
     .expect_err("restore must refuse an occupied output path");
     assert!(
-        matches!(err, StrHideError::Rejection(_)),
+        matches!(err, StrHideError::AlreadyExists(_)),
         "expected a Rejection, got {err:?}"
     );
     assert_eq!(

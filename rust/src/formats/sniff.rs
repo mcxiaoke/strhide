@@ -14,6 +14,7 @@
 //! "which format wins?" — and because the adapters use them directly.
 
 use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 
 use crate::formats::annexb::is_hevc_annexb;
 
@@ -320,6 +321,12 @@ where
     })();
     let _ = reader.seek(SeekFrom::Start(restore));
     outcome
+}
+
+/// Classify a file on disk by reading its leading magic bytes via [`sniff_stream`].
+pub fn sniff_file(path: &Path) -> std::io::Result<Option<FileFormat>> {
+    let mut file = std::fs::File::open(path)?;
+    sniff_stream(&mut file)
 }
 
 #[cfg(test)]

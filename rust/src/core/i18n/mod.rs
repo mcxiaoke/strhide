@@ -9,7 +9,8 @@ pub mod messages;
 pub use messages::Msg;
 
 /// Supported user interface languages.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Lang {
     #[default]
     En,

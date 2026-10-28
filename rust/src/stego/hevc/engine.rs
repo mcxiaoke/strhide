@@ -1860,13 +1860,57 @@ pub fn inspect_hevc_mp4_file(
             && (ps[0] >> 1) & 0x3F == NAL_SPS_NUT
             && let Some(dims) = sps_dimensions(&nal_rbsp(ps))
         {
-            media_info = Some(MediaInfo::new(dims.0, dims.1));
+            let base = MediaInfo::new(dims.0, dims.1);
+            media_info = Some(match (target.fps, target.duration_secs) {
+                (Some(fps), Some(sec)) if sec > 0.0 => {
+                    let bps = (file_len as f64 * 8.0) / sec;
+                    base.with_video(
+                        fps as f32,
+                        (sec * 1000.0).round() as u64,
+                        bps.round() as u64,
+                    )
+                }
+                _ => base,
+            });
             break;
         }
     }
 
     let mut empty_info = StegoHeaderInfo::empty("MP4/HEVC");
     empty_info.media_info = media_info;
+
+    // Detect if this MP4 stream contains inter-coded frames (P/B). When has_inter is true,
+    // IDR/IRAP frames are excluded from the superblock pool to protect prediction stability.
+    let mut has_inter = false;
+    for &(sample_offset, sample_size) in target.samples.iter().take(64) {
+        if sample_size < target.length_size + 2 || sample_offset + sample_size > file_len {
+            continue;
+        }
+        if sample_size <= 256 * 1024 {
+            let mut hdr_buf = vec![0u8; sample_size];
+            if file.seek(SeekFrom::Start(sample_offset as u64)).is_ok()
+                && file.read_exact(&mut hdr_buf).is_ok()
+            {
+                let mut spans = Vec::new();
+                if crate::stego::hevc::mp4_boxes::collect_sample_slice_spans(
+                    &hdr_buf,
+                    0,
+                    sample_size,
+                    target.length_size,
+                    &mut spans,
+                )
+                .is_ok()
+                    && spans.iter().any(|s| {
+                        let (nt, _, _) = nal_header_fields(&hdr_buf[s.start..s.end()]);
+                        !is_irap(nt)
+                    })
+                {
+                    has_inter = true;
+                    break;
+                }
+            }
+        }
+    }
 
     let mut decoder = Decoder::new();
     decoder.ablate = Ablate {
@@ -1916,7 +1960,7 @@ pub fn inspect_hevc_mp4_file(
                 continue;
             }
             let (nal_type, _, _) = nal_header_fields(slice_bytes);
-            let Some(band) = picture_band(nal_type, false) else {
+            let Some(band) = picture_band(nal_type, has_inter) else {
                 let _ = decoder.push_nal(slice_bytes, None);
                 drain_frames(&mut decoder);
                 continue;

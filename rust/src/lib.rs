@@ -172,10 +172,10 @@ pub mod cli_i18n;
 pub mod facade;
 
 // ── Facade (always compiled; methods are gated per domain) ──────────────────
-pub use facade::{Dialect, StrHide};
+pub use facade::{Dialect, DualInspect, DualVerify, StrHide};
 
 // ── Errors ─────────────────────────────────────────────────────────────────
-pub use errors::{ErrorDetail, StrHideError, TrellisCause};
+pub use errors::{ErrorDetail, ErrorKind, StrHideError, TrellisCause};
 
 // ── Formats ────────────────────────────────────────────────────────────────
 pub use formats::sniff::FileFormat;
@@ -185,8 +185,8 @@ pub use formats::sniff::FileFormat;
 pub use structure::params::StructureProfile;
 #[cfg(feature = "structure-base")]
 pub use structure::{
-    PayloadSource, ReadOptions, ReadResult, RemoveResult, RestoreOptions, StrategyId, Warning,
-    WriteOptions, WriteResult,
+    PayloadSource, ReadOptions, ReadResult, ReadSummary, RemoveResult, RestoreOptions,
+    StrategyChoice, StrategyId, Warning, WriteOptions, WriteResult,
 };
 
 // ── Content domain ─────────────────────────────────────────────────────────
@@ -199,8 +199,9 @@ pub use stego::params::StegoProfile;
 #[cfg(feature = "content-base")]
 pub use stego::{
     EmbedOptions, EmbedOutput, EmbedStats, ExtractOptions, InspectOptions, ProbeOptions,
-    SafetyEnforcement, SafetyLevel, SafetyPolicy, StegoCapacityInfo, StegoHeaderInfo, StegoTuning,
-    StegoVerifyResult, VerifyOptions, embed_carrier, extract_carrier, probe_carrier_capacity,
+    SafetyEnforcement, SafetyLevel, SafetyPolicy, StegoCapacityInfo, StegoEmbedResult,
+    StegoHeaderInfo, StegoTuning, StegoVerifyResult, VerifyOptions, embed_carrier, extract_carrier,
+    probe_carrier_capacity,
 };
 #[cfg(feature = "content-base")]
 pub use stego::{
@@ -218,8 +219,8 @@ pub mod prelude {
     //! assert!(engine.dialect().is_official());
     //! ```
 
-    pub use crate::errors::{ErrorDetail, StrHideError};
-    pub use crate::facade::{Dialect, StrHide};
+    pub use crate::errors::{ErrorDetail, ErrorKind, StrHideError};
+    pub use crate::facade::{Dialect, DualInspect, DualVerify, StrHide};
     pub use crate::formats::sniff::FileFormat;
     pub use crate::params::{CompressionStrategy, LocalParams, RejectionPolicy};
 
@@ -227,8 +228,8 @@ pub mod prelude {
     pub use crate::structure::params::StructureProfile;
     #[cfg(feature = "structure-base")]
     pub use crate::structure::{
-        PayloadSource, ReadOptions, ReadResult, RemoveResult, RestoreOptions, WriteOptions,
-        WriteResult,
+        PayloadSource, ReadOptions, ReadResult, ReadSummary, RemoveResult, RestoreOptions,
+        StrategyChoice, WriteOptions, WriteResult,
     };
 
     #[cfg(feature = "content-base")]
@@ -239,8 +240,8 @@ pub mod prelude {
     pub use crate::stego::params::StegoProfile;
     #[cfg(feature = "content-base")]
     pub use crate::stego::{
-        EmbedOptions, ExtractOptions, ProbeOptions, SafetyEnforcement, SafetyLevel, SafetyPolicy,
-        StegoCapacityInfo, StegoTuning,
+        EmbedOptions, EmbedStats, ExtractOptions, ProbeOptions, SafetyEnforcement, SafetyLevel,
+        SafetyPolicy, StegoCapacityInfo, StegoEmbedResult, StegoTuning,
     };
 }
 

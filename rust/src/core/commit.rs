@@ -258,20 +258,19 @@ pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), StrHid
 /// by media preview components or external processes holding open handles.
 pub fn rename_with_retry(from: &Path, to: &Path) -> Result<(), StrHideError> {
     const BACKOFF_MS: [u64; 3] = [20, 50, 100];
-    let mut last_err = None;
-    for (attempt, &wait_ms) in BACKOFF_MS.iter().enumerate() {
+    match std::fs::rename(from, to) {
+        Ok(()) => return Ok(()),
+        Err(e) if !is_sharing_or_permission_error(&e) => return Err(StrHideError::Io(e)),
+        Err(_) => {}
+    }
+    for &wait_ms in &BACKOFF_MS {
+        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
         match std::fs::rename(from, to) {
             Ok(()) => return Ok(()),
-            Err(e) if is_sharing_or_permission_error(&e) => {
-                last_err = Some(e);
-                if attempt + 1 < BACKOFF_MS.len() {
-                    std::thread::sleep(std::time::Duration::from_millis(wait_ms));
-                }
-            }
-            Err(e) => return Err(StrHideError::Io(e)),
+            Err(e) if !is_sharing_or_permission_error(&e) => return Err(StrHideError::Io(e)),
+            Err(_) => {}
         }
     }
-    let _ = last_err;
     Err(StrHideError::TargetBusy(to.to_path_buf()))
 }
 
@@ -284,8 +283,13 @@ fn is_sharing_or_permission_error(err: &std::io::Error) -> bool {
                 return true;
             }
         }
+        err.kind() == std::io::ErrorKind::PermissionDenied
     }
-    err.kind() == std::io::ErrorKind::PermissionDenied
+    #[cfg(not(windows))]
+    {
+        let _ = err;
+        false
+    }
 }
 
 /// Flush the directory entry created by a rename (no-op off unix).

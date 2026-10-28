@@ -297,37 +297,32 @@ fn read_one(
         Err(e @ StrHideError::NoHiddenData(_)) => {
             #[cfg(feature = "content")]
             {
-                if let Ok(bytes) = std::fs::read(carrier) {
-                    let inspect_opts = crate::stego::InspectOptions::new()
-                        .with_password(password.as_deref().unwrap_or_default());
-                    if let Ok(stego_info) = crate::stego::inspect_carrier_with_dialect(
-                        &bytes,
-                        &inspect_opts,
-                        &engine.dialect().stego,
-                    ) && stego_info.has_hidden_data
-                    {
-                        if args.auto {
-                            if !quiet {
-                                eprintln!(
-                                    "No structure hidden data found; auto-redirecting to content steganography extraction..."
-                                );
-                            }
-                            let extract_args = ExtractArgs {
-                                carrier: vec![carrier.to_path_buf()],
-                                output: args.output.clone(),
-                                stdout: args.stdout,
-                                overwrite: args.overwrite,
-                                passwords: args.passwords.clone(),
-                                auto: false,
-                            };
-                            return handle_extract(extract_args, cfg, quiet, engine);
-                        } else {
-                            return Err(StrHideError::NoHiddenData(format!(
-                                "No structure-domain envelope found, but detected content-adaptive steganography ({}, {}). Use `strhide extract` or add `--auto` to extract.",
-                                stego_info.format,
-                                stego_info.algorithm.as_deref().unwrap_or("stego")
-                            )));
+                let inspect_opts = crate::stego::InspectOptions::new()
+                    .with_password(password.as_deref().unwrap_or_default());
+                if let Ok(stego_info) = engine.stego().inspect_file(carrier, &inspect_opts)
+                    && stego_info.has_hidden_data
+                {
+                    if args.auto {
+                        if !quiet {
+                            eprintln!(
+                                "No structure hidden data found; auto-redirecting to content steganography extraction..."
+                            );
                         }
+                        let extract_args = ExtractArgs {
+                            carrier: vec![carrier.to_path_buf()],
+                            output: args.output.clone(),
+                            stdout: args.stdout,
+                            overwrite: args.overwrite,
+                            passwords: args.passwords.clone(),
+                            auto: false,
+                        };
+                        return handle_extract(extract_args, cfg, quiet, engine);
+                    } else {
+                        return Err(StrHideError::NoHiddenData(format!(
+                            "No structure-domain envelope found, but detected content-adaptive steganography ({}, {}). Use `strhide extract` or add `--auto` to extract.",
+                            stego_info.format,
+                            stego_info.algorithm.as_deref().unwrap_or("stego")
+                        )));
                     }
                 }
             }

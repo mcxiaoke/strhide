@@ -219,11 +219,8 @@ pub fn preflight_batch(batch: BatchPreflight<'_>) -> Result<(), StrHideError> {
             Some(t) => t,
             None => identity,
         };
-        if target.exists() && !batch.in_place && !batch.overwrite {
-            return Err(StrHideError::Rejection(format!(
-                "Refusing to overwrite existing file '{}'. Choose another -o path or pass --overwrite.",
-                target.display()
-            )));
+        if !batch.in_place {
+            check_overwrite(&target, batch.overwrite)?;
         }
         if !seen_targets.insert(target.clone()) {
             return Err(StrHideError::General(format!(

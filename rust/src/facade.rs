@@ -120,7 +120,7 @@ impl std::fmt::Debug for DualOptions<'_> {
 }
 
 /// Cross-domain inspection diagnosis.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct DualInspect {
     #[cfg(feature = "structure-base")]
     #[serde(flatten)]
@@ -133,6 +133,43 @@ pub struct DualInspect {
     #[cfg(feature = "content-base")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_error: Option<ErrorDetail>,
+
+    #[cfg(feature = "content-base")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_info: Option<crate::core::media::MediaInfo>,
+}
+
+/// Cross-domain verification result.
+#[derive(Debug, Serialize)]
+pub struct DualVerify {
+    #[cfg(feature = "structure-base")]
+    #[serde(flatten)]
+    pub structure: crate::structure::VerifyResult,
+
+    #[cfg(feature = "content-base")]
+    #[serde(rename = "content_stego", skip_serializing_if = "Option::is_none")]
+    pub content: Option<crate::stego::StegoVerifyResult>,
+}
+
+impl DualVerify {
+    /// Returns true if either structure verification or content verification succeeded.
+    pub fn is_any_ok(&self) -> bool {
+        #[cfg(feature = "structure-base")]
+        let struct_ok = crate::structure::verify_passed(&self.structure);
+        #[cfg(not(feature = "structure-base"))]
+        let struct_ok = false;
+
+        #[cfg(feature = "content-base")]
+        let content_ok = self
+            .content
+            .as_ref()
+            .map(|c| c.is_all_ok())
+            .unwrap_or(false);
+        #[cfg(not(feature = "content-base"))]
+        let content_ok = false;
+
+        struct_ok || content_ok
+    }
 }
 
 /// Options for automatic domain selection extraction.
@@ -338,7 +375,7 @@ impl StrHide {
         let structure = self.structure().inspect_file(carrier, opts.password)?;
 
         #[cfg(feature = "content-base")]
-        let (content, content_error) = {
+        let (content, content_error, media_info) = {
             let format = {
                 #[cfg(feature = "structure-base")]
                 {
@@ -346,8 +383,7 @@ impl StrHide {
                 }
                 #[cfg(not(feature = "structure-base"))]
                 {
-                    let mut f = std::fs::File::open(carrier)?;
-                    crate::formats::sniff::sniff_stream(&mut f)?
+                    crate::formats::sniff::sniff_file(carrier)?
                 }
             };
             if format.is_some_and(|f| f.supports_stego()) {
@@ -358,11 +394,14 @@ impl StrHide {
                     control: opts.control,
                 };
                 match self.stego().inspect_file(carrier, &stego_opts) {
-                    Ok(info) => (Some(info).filter(|i| i.has_hidden_data), None),
-                    Err(e) => (None, Some(e.detail_i18n())),
+                    Ok(info) => {
+                        let mi = info.media_info;
+                        (Some(info), None, mi)
+                    }
+                    Err(e) => (None, Some(e.detail_i18n()), None),
                 }
             } else {
-                (None, None)
+                (None, None, None)
             }
         };
 
@@ -373,6 +412,53 @@ impl StrHide {
             content,
             #[cfg(feature = "content-base")]
             content_error,
+            #[cfg(feature = "content-base")]
+            media_info,
+        })
+    }
+
+    /// Cross-domain verification.
+    pub fn verify_any(
+        &self,
+        carrier: &Path,
+        opts: &DualOptions<'_>,
+    ) -> Result<DualVerify, StrHideError> {
+        #[allow(unused_variables)]
+        let _ = (carrier, opts);
+
+        #[cfg(feature = "structure-base")]
+        let structure = self.structure().verify_file(carrier, opts.password)?;
+
+        #[cfg(feature = "content-base")]
+        let content = {
+            let format = {
+                #[cfg(feature = "structure-base")]
+                {
+                    Some(structure.format)
+                }
+                #[cfg(not(feature = "structure-base"))]
+                {
+                    crate::formats::sniff::sniff_file(carrier)?
+                }
+            };
+            if format.is_some_and(|f| f.supports_stego()) {
+                let ver_opts = crate::stego::VerifyOptions {
+                    password: opts.password,
+                    domain: opts.domain,
+                    limits: crate::stego::ExtractParams::default(),
+                    control: opts.control,
+                };
+                self.stego().verify_file(carrier, &ver_opts).ok()
+            } else {
+                None
+            }
+        };
+
+        Ok(DualVerify {
+            #[cfg(feature = "structure-base")]
+            structure,
+            #[cfg(feature = "content-base")]
+            content,
         })
     }
 
@@ -739,12 +825,7 @@ impl StegoFacade<'_> {
         } else {
             output.to_path_buf()
         };
-        if final_dest.exists() && !overwrite {
-            return Err(StrHideError::Rejection(format!(
-                "Refusing to overwrite existing file '{}'. Choose another output or pass overwrite.",
-                final_dest.display()
-            )));
-        }
+        crate::core::pipeline::check_overwrite(&final_dest, overwrite)?;
         if let Some(parent) = final_dest.parent()
             && !parent.as_os_str().is_empty()
         {

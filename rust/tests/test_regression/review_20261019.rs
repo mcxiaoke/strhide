@@ -489,7 +489,7 @@ fn extract_refuses_to_overwrite_existing_file() {
         },
     )
     .unwrap_err();
-    assert!(matches!(err, StrHideError::Rejection(_)), "{err}");
+    assert!(matches!(err, StrHideError::AlreadyExists(_)), "{err}");
     assert_eq!(
         fs::read(outdir.join("important.txt")).unwrap(),
         b"KEEP-ME",

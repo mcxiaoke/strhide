@@ -255,17 +255,14 @@ pub(crate) fn handle_embed(
 
     for_each_carrier(&args.carrier, quiet, |carrier| {
         let t_start = std::time::Instant::now();
-        let carrier_bytes = std::fs::read(carrier)?;
+        let format = crate::formats::sniff_file(carrier)?;
 
-        let (mut options, probe_options) = stego_options(
-            &args.tuning,
-            password.as_deref(),
-            carrier_format(&carrier_bytes),
-            cfg,
-        )?;
+        let (mut options, probe_options) =
+            stego_options(&args.tuning, password.as_deref(), format, cfg)?;
         options.no_filename = args.no_filename;
 
         if args.dry_run {
+            let carrier_bytes = std::fs::read(carrier)?;
             let output = crate::stego::embed_carrier_with_dialect_info(
                 &carrier_bytes,
                 &payload,

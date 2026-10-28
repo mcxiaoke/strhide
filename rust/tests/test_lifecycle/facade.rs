@@ -469,8 +469,8 @@ fn structure_read_and_restore_honour_the_overwrite_flag() {
         .read_file(&carrier, &ReadOptions::new().with_output(&out))
         .expect_err("read must refuse an existing destination");
     assert!(
-        matches!(err, StrHideError::Rejection(_)),
-        "expected Rejection, got {err:?}"
+        matches!(err, StrHideError::AlreadyExists(_)),
+        "expected AlreadyExists, got {err:?}"
     );
     assert_eq!(
         std::fs::read(&out).expect("read back"),
@@ -495,8 +495,8 @@ fn structure_read_and_restore_honour_the_overwrite_flag() {
         .restore_file(&carrier, &RestoreOptions::new().with_output(&restored))
         .expect_err("restore must refuse an existing destination");
     assert!(
-        matches!(err, StrHideError::Rejection(_)),
-        "expected Rejection, got {err:?}"
+        matches!(err, StrHideError::AlreadyExists(_)),
+        "expected AlreadyExists, got {err:?}"
     );
 
     engine
@@ -596,12 +596,13 @@ fn test_inspect_any_and_smart_extract_cross_domain() {
 
     let engine = StrHide::new();
 
-    // 1. Initial carrier: no hidden data
+    // 1. Initial carrier: no hidden data, but media_info and clean content info are preserved
     let diag = engine
         .inspect_any(&carrier, &strhide::facade::DualOptions::default())
         .expect("inspect_any on clean carrier");
     assert!(!diag.structure.has_hidden_data);
-    assert!(diag.content.is_none());
+    assert!(diag.content.as_ref().is_some_and(|c| !c.has_hidden_data));
+    assert!(diag.media_info.is_some());
 
     // 2. Inject structural payload
     let source = PayloadSource::Text("structure secret");
@@ -627,6 +628,60 @@ fn test_inspect_any_and_smart_extract_cross_domain() {
     assert_eq!(outcome.source, strhide::facade::Domain::Structure);
     assert_eq!(outcome.payload.as_bytes(), b"structure secret");
     assert!(outcome.also_present.is_none());
+}
+
+#[test]
+fn test_verify_any_clean_and_stego() {
+    let dir = scratch("verify_any_cross_domain");
+    let carrier = dir.join("carrier.png");
+    std::fs::write(&carrier, PNG).expect("seed png");
+
+    let engine = StrHide::new();
+
+    // 1. Clean carrier: structure fails level 2 (no envelope), verify_any is_any_ok is false
+    let ver = engine
+        .verify_any(&carrier, &strhide::facade::DualOptions::default())
+        .expect("verify_any clean");
+    assert!(!ver.is_any_ok());
+
+    // 2. Inject structural payload
+    engine
+        .structure()
+        .write_file(
+            &carrier,
+            PayloadSource::Text("secret"),
+            &WriteOptions {
+                output_path: None,
+                ..Default::default()
+            },
+        )
+        .expect("write_file");
+
+    // 3. Verify on stego carrier: is_any_ok is true
+    let ver_stego = engine
+        .verify_any(&carrier, &strhide::facade::DualOptions::default())
+        .expect("verify_any stego");
+    assert!(ver_stego.is_any_ok());
+    assert!(ver_stego.structure.level2_envelope.ok);
+}
+
+#[test]
+fn test_hevc_mp4_inspect_media_info_and_has_inter() {
+    let mp4_path = std::path::PathBuf::from("../temp/testhevc/TSU_640x360.mp4");
+    if !mp4_path.is_file() {
+        return;
+    }
+    let engine = StrHide::new();
+    let diag = engine
+        .inspect_any(&mp4_path, &strhide::facade::DualOptions::default())
+        .expect("inspect_any on mp4");
+    assert!(!diag.structure.has_hidden_data);
+    assert!(diag.media_info.is_some());
+    let media = diag.media_info.as_ref().unwrap();
+    assert_eq!(media.width, 640);
+    assert_eq!(media.height, 360);
+    assert!(media.fps.is_some());
+    assert!(media.duration_ms.is_some());
 }
 
 #[test]

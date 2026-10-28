@@ -1635,12 +1635,7 @@ fn write_payload_to(
     // Never truncate an existing file by accident: extracting several
     // carriers that contain the same payload name (or reading into a busy
     // directory) used to replace user files silently.
-    if final_dest.exists() && !overwrite {
-        return Err(StrHideError::Rejection(format!(
-            "Refusing to overwrite existing file '{}'. Choose another -o path or pass --overwrite.",
-            final_dest.display()
-        )));
-    }
+    crate::core::pipeline::check_overwrite(&final_dest, overwrite)?;
 
     let mut out_f = File::create(&final_dest).map_err(|e| {
         let reason = match e.kind() {
@@ -1883,11 +1878,8 @@ pub fn remove_carrier_with_dialect(
     let orig_atime = filetime::FileTime::from_last_access_time(&meta);
     let orig_mtime = filetime::FileTime::from_last_modification_time(&meta);
 
-    if !options.overwrite && !same_file(target_path, carrier_path) && target_path.exists() {
-        return Err(StrHideError::Rejection(format!(
-            "Refusing to overwrite existing file '{}'. Choose another output path.",
-            target_path.display()
-        )));
+    if !same_file(target_path, carrier_path) {
+        crate::core::pipeline::check_overwrite(target_path, options.overwrite)?;
     }
 
     let label = carrier_path.display().to_string();

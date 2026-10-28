@@ -1209,15 +1209,11 @@ pub fn embed_png_with_stats<'a>(
             (bpp_bits.min(ratio_bits) / 8).saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
 
         if payload.len() > recommended_max_bytes {
-            let payload_bpp = (payload.len() * 8) as f64 / total_pixels as f64;
-            return Err(StrHideError::General(format!(
-                "Payload ({} bytes, bpp {:.4}) exceeds safety threshold ({} bytes, bpp <= {:.2}) for tier '{}'",
-                payload.len(),
-                payload_bpp,
-                recommended_max_bytes,
-                bpp_limit,
-                safety.level.as_str(),
-            )));
+            return Err(StrHideError::SafetyThreshold {
+                tier: safety.level,
+                required_bytes: payload.len(),
+                available_bytes: recommended_max_bytes,
+            });
         }
     }
 

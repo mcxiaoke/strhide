@@ -10,7 +10,6 @@ use crate::core::i18n::Msg;
 use crate::errors::StrHideError;
 use crate::facade::StrHide;
 use crate::structure::registry::ADAPTERS;
-use crate::structure::verify_carrier_with;
 use crate::t;
 
 use super::args::*;
@@ -54,7 +53,9 @@ pub(crate) fn handle_inspect(
         } else if !quiet {
             print_inspect_result(&dual.structure);
             #[cfg(feature = "content")]
-            if let Some(ref cs) = dual.content {
+            if let Some(ref cs) = dual.content
+                && cs.has_hidden_data
+            {
                 println!();
                 println!("Content Steganography Domain:");
                 println!("  Format: {}", cs.format);
@@ -101,7 +102,9 @@ pub(crate) fn handle_inspect(
                     );
                     print_inspect_result(&dual.structure);
                     #[cfg(feature = "content")]
-                    if let Some(ref cs) = dual.content {
+                    if let Some(ref cs) = dual.content
+                        && cs.has_hidden_data
+                    {
                         println!();
                         println!("Content Steganography Domain:");
                         println!("  Format: {}", cs.format);
@@ -199,33 +202,38 @@ pub(crate) fn handle_verify(
 
     if !is_batch && files.len() == 1 {
         let carrier = &files[0];
-        let res = verify_carrier_with(carrier, password.as_deref(), &engine.dialect().structure)?;
-        #[cfg(feature = "content")]
-        let content_res = std::fs::read(carrier).ok().and_then(|bytes| {
-            let opts = crate::stego::VerifyOptions::new()
-                .with_password(password.as_deref().unwrap_or_default());
-            crate::stego::verify_carrier_with_dialect(&bytes, &opts, &engine.dialect().stego).ok()
-        });
+        let dual = engine.verify_any(
+            carrier,
+            &crate::facade::DualOptions {
+                password: password.as_deref(),
+                domain: None,
+                control: crate::core::control::Control::none(),
+            },
+        )?;
 
-        let struct_ok = crate::structure::verify_passed(&res);
+        let struct_ok = crate::structure::verify_passed(&dual.structure);
         #[cfg(feature = "content")]
-        let content_ok = content_res.as_ref().map(|c| c.is_all_ok()).unwrap_or(false);
+        let content_ok = dual
+            .content
+            .as_ref()
+            .map(|c| c.is_all_ok())
+            .unwrap_or(false);
         #[cfg(not(feature = "content"))]
         let content_ok = false;
 
         if args.json {
-            let dual = DualVerifyResult {
-                structure: res,
+            let res = DualVerifyResult {
+                structure: dual.structure,
                 #[cfg(feature = "content")]
-                content_stego: content_res.filter(|c| c.is_all_ok()),
+                content_stego: dual.content.filter(|c| c.is_all_ok()),
             };
-            print_json(&dual)?;
+            print_json(&res)?;
         } else if !quiet {
             if struct_ok || !content_ok {
-                print_verify_result(&res);
+                print_verify_result(&dual.structure);
             }
             #[cfg(feature = "content")]
-            if let Some(ref cs) = content_res
+            if let Some(ref cs) = dual.content
                 && cs.is_all_ok()
             {
                 if struct_ok {
@@ -242,22 +250,22 @@ pub(crate) fn handle_verify(
     let mut failures = 0usize;
     let mut any_failed = false;
     for carrier in &files {
-        match verify_carrier_with(carrier, password.as_deref(), &engine.dialect().structure) {
-            Ok(res) => {
+        match engine.verify_any(
+            carrier,
+            &crate::facade::DualOptions {
+                password: password.as_deref(),
+                domain: None,
+                control: crate::core::control::Control::none(),
+            },
+        ) {
+            Ok(dual) => {
+                let struct_ok = crate::structure::verify_passed(&dual.structure);
                 #[cfg(feature = "content")]
-                let content_res = std::fs::read(carrier).ok().and_then(|bytes| {
-                    let opts = crate::stego::VerifyOptions::new()
-                        .with_password(password.as_deref().unwrap_or_default());
-                    crate::stego::verify_carrier_with_dialect(
-                        &bytes,
-                        &opts,
-                        &engine.dialect().stego,
-                    )
-                    .ok()
-                });
-                let struct_ok = crate::structure::verify_passed(&res);
-                #[cfg(feature = "content")]
-                let content_ok = content_res.as_ref().map(|c| c.is_all_ok()).unwrap_or(false);
+                let content_ok = dual
+                    .content
+                    .as_ref()
+                    .map(|c| c.is_all_ok())
+                    .unwrap_or(false);
                 #[cfg(not(feature = "content"))]
                 let content_ok = false;
 
@@ -272,10 +280,10 @@ pub(crate) fn handle_verify(
                         carrier.display()
                     );
                     if struct_ok || !content_ok {
-                        print_verify_result(&res);
+                        print_verify_result(&dual.structure);
                     }
                     #[cfg(feature = "content")]
-                    if let Some(ref cs) = content_res
+                    if let Some(ref cs) = dual.content
                         && cs.is_all_ok()
                     {
                         if struct_ok {
@@ -286,9 +294,9 @@ pub(crate) fn handle_verify(
                     println!();
                 }
                 reports.push(DualVerifyResult {
-                    structure: res,
+                    structure: dual.structure,
                     #[cfg(feature = "content")]
-                    content_stego: content_res.filter(|c| c.is_all_ok()),
+                    content_stego: dual.content.filter(|c| c.is_all_ok()),
                 });
             }
             Err(e) => {

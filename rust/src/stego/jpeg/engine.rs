@@ -813,15 +813,11 @@ fn embed_once(
     if safety.is_enforced() {
         let max = enforced_payload_limit(total_coeffs, body_grid_len, safety);
         if ctx.payload.len() > max {
-            let bpp = (ctx.payload.len() * 8) as f64 / total_coeffs as f64;
-            return Err(Attempt::from(StrHideError::General(format!(
-                "Payload ({} bytes, bpp {:.4}) exceeds safety threshold ({} bytes, bpp <= {:.2}) for tier '{}'",
-                ctx.payload.len(),
-                bpp,
-                max,
-                safety.level.bpp_limit(),
-                safety.level.as_str(),
-            ))));
+            return Err(Attempt::from(StrHideError::SafetyThreshold {
+                tier: safety.level,
+                required_bytes: ctx.payload.len(),
+                available_bytes: max,
+            }));
         }
     }
 

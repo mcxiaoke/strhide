@@ -102,6 +102,18 @@ impl Default for WriteOptions<'_> {
 }
 
 impl<'a> WriteOptions<'a> {
+    /// Set strategy name.
+    pub const fn with_strategy(mut self, strategy: &'a str) -> Self {
+        self.strategy = strategy;
+        self
+    }
+
+    /// Set strategy from [`StrategyChoice`].
+    pub fn with_strategy_choice(mut self, choice: StrategyChoice) -> Self {
+        self.strategy = choice.as_str();
+        self
+    }
+
     /// Set [`control`](Self::control).
     pub const fn with_control(mut self, control: Control<'a>) -> Self {
         self.control = control;
