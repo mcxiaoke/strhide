@@ -128,8 +128,7 @@ pub fn probe_hevc_capacity(carrier: &[u8], fmt: &HevcFormatProfile) -> Result<us
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
-    let slots = scan_hevc_slots(carrier)?;
-    let total_slots = slots.len();
+    let total_slots = scan_hevc_slot_count(carrier)?;
     let trellis = StcTrellis::from_seed_grouped(CAPACITY_PROBE_SEED, fmt.stc_h, fmt.stc_u)?;
     let header_bits = fmt.header_bytes * 8;
     let min_needed_slots = trellis.slots_for(header_bits);
@@ -286,7 +285,7 @@ fn probe_hevc_pool(
     exact: bool,
 ) -> Result<PoolProfile, StrHideError> {
     if kind != HevcCarrierKind::Mp4Container || exact {
-        let record = record_carrier_state(carrier, kind, RecordMode::Slots)?;
+        let record = record_carrier_state(carrier, kind, Capture::Count)?;
         return Ok(PoolProfile::from_record(&record));
     }
 
@@ -331,7 +330,7 @@ fn probe_hevc_pool(
 
     // 150 pictures or fewer: full scan (0% estimation error, fast enough)
     if selectable <= 150 {
-        let record = record_carrier_state(carrier, kind, RecordMode::Slots)?;
+        let record = record_carrier_state(carrier, kind, Capture::Count)?;
         return Ok(PoolProfile::from_record(&record));
     }
 
@@ -586,7 +585,7 @@ pub fn embed_hevc_with_info(
 
     // 1. Scan and record all slices and substreams
     control.stage(Stage::Decode);
-    let record = record_carrier_state(carrier, kind, RecordMode::Embed)?;
+    let record = record_carrier_state(carrier, kind, Capture::Full)?;
     // Checkpoint after the parse: recording a long video is tens of seconds.
     control.check()?;
     control.stage(Stage::Solve);
@@ -1177,10 +1176,9 @@ pub fn extract_hevc(
         )
     })?;
 
-    let record = record_carrier_state(carrier, kind, RecordMode::Slots)?;
+    let record = record_carrier_state(carrier, kind, Capture::Bits)?;
     control.check()?;
     let bands = record.bands.clone();
-    let all_slots = record.all_slots;
     let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);
     // The trellis seed is keyed through the secret-derived key (see
     // `trellis_seed_from_key`), so it is derived before anything reads slots.
@@ -1189,7 +1187,7 @@ pub fn extract_hevc(
     let trellis = StcTrellis::from_seed_grouped(seed, fmt.stc_h, fmt.stc_u)?;
 
     let header_slots_count = trellis.slots_for(fmt.header_bytes * 8);
-    if all_slots.len() < header_slots_count {
+    if record.total_slots() < header_slots_count {
         return Err(StrHideError::CorruptedData(
             "Insufficient HEVC slots for header".into(),
         ));
@@ -1202,7 +1200,7 @@ pub fn extract_hevc(
     let header_positions = band_positions(&bands, header_slots_count);
     let header_bits: Vec<u8> = header_positions
         .iter()
-        .map(|&p| all_slots[p].original_bit)
+        .map(|&p| record.slot_bit(p))
         .collect();
 
     // `fmt.header_bytes` is the fixed prefix this read sizes; the on-wire
@@ -1249,17 +1247,14 @@ pub fn extract_hevc(
         .checked_mul(8)
         .ok_or_else(|| StrHideError::CorruptedData("HEVC stego header length overflows".into()))?;
     let total_needed_slots = trellis.slots_for(total_msg_bits);
-    if total_needed_slots > all_slots.len() {
+    if total_needed_slots > record.total_slots() {
         return Err(StrHideError::CorruptedData(
             "Carrier truncated for declared payload".into(),
         ));
     }
 
     let msg_positions = band_positions(&bands, total_needed_slots);
-    let cover_bits: Vec<u8> = msg_positions
-        .iter()
-        .map(|&p| all_slots[p].original_bit)
-        .collect();
+    let cover_bits: Vec<u8> = msg_positions.iter().map(|&p| record.slot_bit(p)).collect();
     let msg_bytes = trellis.extract(&cover_bits, total_msg_bits);
     // `extract` clamps to the trellis capacity, so a short vector here means
     // the carrier cannot hold the declared payload. Check before slicing.
@@ -1317,14 +1312,13 @@ pub fn inspect_hevc(
     });
     empty_info.media_info = media_info;
 
-    let record = match record_carrier_state(carrier, kind, RecordMode::Slots) {
+    let record = match record_carrier_state(carrier, kind, Capture::Bits) {
         Ok(r) => r,
         Err(_) => return Ok(empty_info),
     };
     control.check()?;
 
     let bands = record.bands.clone();
-    let all_slots = record.all_slots;
     let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);
     let key = derive_hevc_key(secret, domain, &cover_digest, fmt);
     let seed = trellis_seed_from_key(&key, &cover_digest);
@@ -1334,14 +1328,14 @@ pub fn inspect_hevc(
     };
 
     let header_slots_count = trellis.slots_for(fmt.header_bytes * 8);
-    if all_slots.len() < header_slots_count {
+    if record.total_slots() < header_slots_count {
         return Ok(empty_info);
     }
 
     let header_positions = band_positions(&bands, header_slots_count);
     let header_bits: Vec<u8> = header_positions
         .iter()
-        .map(|&p| all_slots[p].original_bit)
+        .map(|&p| record.slot_bit(p))
         .collect();
 
     let header_bytes = trellis.extract(&header_bits, fmt.header_bytes * 8);
@@ -1417,13 +1411,13 @@ pub fn verify_hevc(
         }
     };
 
-    match record_carrier_state(carrier, kind, RecordMode::Slots) {
+    match record_carrier_state(carrier, kind, Capture::Count) {
         Ok(rec) => {
             levels.push(VerifyLevel::pass(
                 1,
                 format!(
                     "HEVC bitstream and CABAC slots valid ({} slots)",
-                    rec.all_slots.len()
+                    rec.total_slots()
                 ),
             ));
         }
@@ -1513,6 +1507,23 @@ struct SliceContext {
     slot_map: Vec<Option<usize>>,
 }
 
+/// How much of every recorded slot `record_carrier_state` keeps.
+///
+/// Every pass used to build the full 32-byte [`StegoSlot`] pool even when it
+/// only needed a count. A 24-minute 1080p carrier has 5.7e8 slots, i.e. 18 GB
+/// (34 GB once `Vec` doubles to the next power of two) for data a capacity probe
+/// never reads. The capture level is what keeps a probe at a few counters and an
+/// extract at one bit per slot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Capture {
+    /// Per-band slot counts only: capacity probe, verify.
+    Count,
+    /// Counts plus the sign bit of every slot in pool order: extract, inspect.
+    Bits,
+    /// Full slot records, replay journal and RBSP: embed.
+    Full,
+}
+
 /// One pass over the carrier: the recorded slice journals and slot pool,
 /// plus the container parse the digest derivation reuses — deriving the
 /// cover digest must not walk the container a second time (audit 2026-10-24
@@ -1520,7 +1531,13 @@ struct SliceContext {
 struct CarrierRecord {
     slice_contexts: Vec<SliceContext>,
     /// Slot pool in drift-ladder order: band 0 first, band 1 after it.
+    /// Populated by [`Capture::Full`] only.
     all_slots: Vec<StegoSlot>,
+    /// Sign bit of every slot, packed LSB-first, one vector per band in
+    /// recording order. The stable partition into the drift ladder is a no-op
+    /// on this layout, so [`Capture::Bits`] needs neither the sort nor the
+    /// `slot_idx` remap.
+    band_bits: [Vec<u8>; 2],
     /// Pool ranges of each band, in consumption order.
     bands: Vec<std::ops::Range<usize>>,
     /// Pictures in the carrier (all VCL, including excluded IRAPs).
@@ -1528,6 +1545,93 @@ struct CarrierRecord {
     /// Pictures that may carry slots, per band.
     band_pictures: [usize; 2],
     digest_inputs: DigestInputs,
+}
+
+impl CarrierRecord {
+    /// Size of the slot pool. Valid for every capture level.
+    fn total_slots(&self) -> usize {
+        self.bands.iter().map(|range| range.len()).sum()
+    }
+
+    /// Sign bit at pool position `index`, where the pool is band 0 followed by
+    /// band 1. Valid for [`Capture::Bits`].
+    fn slot_bit(&self, index: usize) -> u8 {
+        let band = usize::from(index >= self.bands[0].len());
+        let range = &self.bands[band];
+        debug_assert!(range.contains(&index));
+        bit_at(&self.band_bits[band], index.saturating_sub(range.start))
+    }
+}
+
+/// Read bit `index` out of an LSB-first packed vector.
+#[inline]
+fn bit_at(bits: &[u8], index: usize) -> u8 {
+    bits.get(index / 8)
+        .map_or(0, |byte| (byte >> (index % 8)) & 1)
+}
+
+/// Append-only LSB-first bit vector. One sign bit per slot instead of 32 bytes.
+#[derive(Default)]
+struct BitPacker {
+    bytes: Vec<u8>,
+    len: usize,
+}
+
+impl BitPacker {
+    #[inline]
+    fn push(&mut self, bit: u8) {
+        if self.len.is_multiple_of(8) {
+            self.bytes.push(0);
+        }
+        if bit & 1 != 0 {
+            let last = self.bytes.len() - 1;
+            self.bytes[last] |= 1 << (self.len % 8);
+        }
+        self.len += 1;
+    }
+}
+
+/// Where the slots of the current slice go, according to [`Capture`].
+struct SlotSink {
+    capture: Capture,
+    /// Slots that entered the pool, per band.
+    counts: [usize; 2],
+    band_bits: [BitPacker; 2],
+    all: Vec<StegoSlot>,
+}
+
+impl SlotSink {
+    fn new(capture: Capture) -> Self {
+        SlotSink {
+            capture,
+            counts: [0; 2],
+            band_bits: [BitPacker::default(), BitPacker::default()],
+            all: Vec::new(),
+        }
+    }
+
+    /// Record one pool slot. Returns the global pool index for
+    /// [`Capture::Full`], `None` for the read-only levels that never address a
+    /// slot by index.
+    fn push(&mut self, slot: StegoSlot) -> Option<usize> {
+        let band = slot.band as usize;
+        self.counts[band] += 1;
+        match self.capture {
+            Capture::Count => None,
+            Capture::Bits => {
+                self.band_bits[band].push(slot.original_bit);
+                None
+            }
+            Capture::Full => {
+                let index = self.all.len();
+                self.all.push(StegoSlot {
+                    slot_idx: index as u32,
+                    ..slot
+                });
+                Some(index)
+            }
+        }
+    }
 }
 
 /// Pool geometry the capacity report needs: how big the ladder is, how it is
@@ -1552,7 +1656,7 @@ impl PoolProfile {
             band_slots[index] = range.len();
         }
         PoolProfile {
-            total_slots: record.all_slots.len(),
+            total_slots: record.total_slots(),
             band_slots,
             band_pictures: record.band_pictures,
             pictures: record.pictures,
@@ -1588,8 +1692,16 @@ struct CandidateSlice {
 fn record_carrier_state(
     carrier: &[u8],
     kind: HevcCarrierKind,
-    mode: RecordMode,
+    capture: Capture,
 ) -> Result<CarrierRecord, StrHideError> {
+    // Only the embedder rewrites an RBSP or replays a bin journal; the
+    // read-only levels run the recorder in slot-only mode and never keep a
+    // slice context at all.
+    let mode = if capture == Capture::Full {
+        RecordMode::Embed
+    } else {
+        RecordMode::Slots
+    };
     let mut decoder = Decoder::new();
     decoder.ablate = Ablate {
         mc: true,
@@ -1678,7 +1790,8 @@ fn record_carrier_state(
     let (pictures, band_pictures) = count_pictures(carrier, kind, &candidates, has_inter);
 
     let mut slice_contexts = Vec::new();
-    let mut all_slots = Vec::new();
+    let mut sink = SlotSink::new(capture);
+    let mut recorded_slices = 0usize;
 
     // `slice_idx` indexes `slice_contexts`, so it advances only when a slice is
     // actually recorded. Using the enumeration index of the candidate list
@@ -1709,29 +1822,24 @@ fn record_carrier_state(
             Ok(_) if recorder.substreams.is_empty() => {}
             Ok(_) => {
                 let rbsp = nal_rbsp(slice_bytes);
-                // The EPB exclusion runs in both modes: it decides which slots
+                // The EPB exclusion runs in every mode: it decides which slots
                 // enter the pool, so the pool layout has to be identical on the
                 // read side or the trellis would read different elements.
-                let slot_map = absorb_recorder(&mut recorder, &rbsp, &mut all_slots);
+                let slot_map = absorb_recorder(&mut recorder, &rbsp, &mut sink);
+                recorded_slices += 1;
+                if capture != Capture::Full {
+                    slice_idx += 1;
+                    continue;
+                }
                 slice_contexts.push(SliceContext {
                     carrier_span: cand.span.clone(),
                     nal_type: cand.nal_type,
                     layer_id: cand.layer_id,
                     temporal_id: cand.temporal_id,
-                    // Only the embedder rewrites an RBSP.
-                    orig_rbsp: if mode == RecordMode::Embed {
-                        rbsp
-                    } else {
-                        Vec::new()
-                    },
+                    orig_rbsp: rbsp,
                     ops: recorder.ops,
                     substreams: recorder.substreams,
-                    // Read-only passes never translate a bin back to a slot.
-                    slot_map: if mode == RecordMode::Embed {
-                        slot_map
-                    } else {
-                        Vec::new()
-                    },
+                    slot_map,
                 });
                 slice_idx += 1;
             }
@@ -1742,13 +1850,22 @@ fn record_carrier_state(
     // truncated stream) would otherwise surface as "0 bytes of capacity" --
     // indistinguishable from a carrier that is simply too small. Name the
     // reason instead of reporting an empty pool.
-    if slice_contexts.is_empty()
+    if recorded_slices == 0
         && let Some(reason) = decode_error
     {
         return Err(StrHideError::UnsupportedFormat(format!(
             "HEVC carrier could not be decoded: {reason}"
         )));
     }
+
+    let SlotSink {
+        counts,
+        band_bits,
+        mut all,
+        ..
+    } = sink;
+    let band0_len = counts[0];
+    let total_slots = counts[0] + counts[1];
 
     // Stable-partition the pool into the drift ladder: band 0 (non-reference)
     // first, band 1 (reference) after it. `band_positions` walks the bands in
@@ -1759,15 +1876,12 @@ fn record_carrier_state(
     // new numbering is known: a second `Vec<StegoSlot>` for the sorted copy
     // doubled the pool (0.5 GB for a 13 s 1080p60 clip) for no benefit. A
     // carrier that is already single-band (every still image, and a video whose
-    // slices all sit on one rung) skips both the sort and the remap.
-    let band0_len = all_slots
-        .iter()
-        .filter(|slot| slot.band == BAND_NON_REFERENCE)
-        .count();
-    if band0_len != 0 && band0_len != all_slots.len() {
-        all_slots.sort_by_key(|slot| slot.band);
-        let mut remap = vec![0u32; all_slots.len()];
-        for (new, slot) in all_slots.iter_mut().enumerate() {
+    // slices all sit on one rung) skips both the sort and the remap. The
+    // bit-only capture needs neither: it records each band separately.
+    if capture == Capture::Full && band0_len != 0 && band0_len != all.len() {
+        all.sort_by_key(|slot| slot.band);
+        let mut remap = vec![0u32; all.len()];
+        for (new, slot) in all.iter_mut().enumerate() {
             debug_assert!((slot.slot_idx as usize) < remap.len());
             remap[slot.slot_idx as usize] = new as u32;
             slot.slot_idx = new as u32;
@@ -1781,11 +1895,13 @@ fn record_carrier_state(
             }
         }
     }
-    let bands = vec![0..band0_len, band0_len..all_slots.len()];
+    let [band0_bits, band1_bits] = band_bits;
+    let bands = vec![0..band0_len, band0_len..total_slots];
 
     Ok(CarrierRecord {
         slice_contexts,
-        all_slots,
+        all_slots: all,
+        band_bits: [band0_bits.bytes, band1_bits.bytes],
         bands,
         pictures,
         band_pictures,
@@ -1945,7 +2061,7 @@ fn drain_frames(decoder: &mut Decoder) {
 fn absorb_recorder(
     recorder: &mut CabacRecorder,
     rbsp: &[u8],
-    all_slots: &mut Vec<StegoSlot>,
+    sink: &mut SlotSink,
 ) -> Vec<Option<usize>> {
     let is_multi_sub = recorder.substreams.len() > 1;
     let mut excluded = std::collections::HashSet::new();
@@ -1963,27 +2079,37 @@ fn absorb_recorder(
         }
     }
 
-    let mut slot_map = Vec::with_capacity(recorder.slots.len());
-    for mut slot in recorder.slots.drain(..) {
+    // The map is only consulted by the embedder, which is the only level that
+    // addresses a slot by its recording-order id.
+    let keep_map = sink.capture == Capture::Full;
+    let mut slot_map = if keep_map {
+        Vec::with_capacity(recorder.slots.len())
+    } else {
+        Vec::new()
+    };
+    for slot in recorder.slots.drain(..) {
         if is_multi_sub && excluded.contains(&(slot.substream_idx as usize)) {
-            slot_map.push(None);
+            if keep_map {
+                slot_map.push(None);
+            }
             continue;
         }
-        slot.slot_idx = all_slots.len() as u32;
-        slot_map.push(Some(slot.slot_idx as usize));
-        all_slots.push(slot);
+        let mapped = sink.push(slot);
+        if keep_map {
+            slot_map.push(mapped);
+        }
     }
     slot_map
 }
 
-fn scan_hevc_slots(carrier: &[u8]) -> Result<Vec<StegoSlot>, StrHideError> {
+fn scan_hevc_slot_count(carrier: &[u8]) -> Result<usize, StrHideError> {
     let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
         StrHideError::UnsupportedFormat(
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
-    let record = record_carrier_state(carrier, kind, RecordMode::Slots)?;
-    Ok(record.all_slots)
+    let record = record_carrier_state(carrier, kind, Capture::Count)?;
+    Ok(record.total_slots())
 }
 
 /// Derive the 64-bit STC trellis seed.
@@ -2078,6 +2204,70 @@ fn derive_hevc_key(
         return [0u8; 32];
     }
     key
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    fn record(bands: Vec<std::ops::Range<usize>>, band_bits: [Vec<u8>; 2]) -> CarrierRecord {
+        CarrierRecord {
+            slice_contexts: Vec::new(),
+            all_slots: Vec::new(),
+            band_bits,
+            bands,
+            pictures: 1,
+            band_pictures: [1, 0],
+            digest_inputs: DigestInputs::ParameterSets {
+                parameter_sets: Vec::new(),
+            },
+        }
+    }
+
+    fn pack(bits: &[u8]) -> Vec<u8> {
+        let mut packer = BitPacker::default();
+        for &bit in bits {
+            packer.push(bit);
+        }
+        packer.bytes
+    }
+
+    /// `Capture::Bits` must answer exactly what `all_slots[p].original_bit`
+    /// answered, including across byte boundaries and across the drift-ladder
+    /// partition.
+    #[test]
+    fn slot_bit_matches_the_pool_order() {
+        // band 0: 10 slots (not a byte multiple), band 1: 3 slots.
+        let band0 = [1u8, 0, 1, 1, 0, 0, 0, 1, 1, 0];
+        let band1 = [0u8, 1, 1];
+        let rec = record(vec![0..10, 10..13], [pack(&band0), pack(&band1)]);
+        assert_eq!(rec.total_slots(), 13);
+        let expected: Vec<u8> = band0.iter().chain(band1.iter()).copied().collect();
+        for (index, &want) in expected.iter().enumerate() {
+            assert_eq!(rec.slot_bit(index), want, "pool position {index}");
+        }
+    }
+
+    /// An empty band 0 shifts band 1 to pool position 0; the mapping must not
+    /// fall back to band 0's (empty) buffer.
+    #[test]
+    fn slot_bit_handles_an_empty_leading_band() {
+        let rec = record(vec![0..0, 0..4], [Vec::new(), pack(&[1, 0, 0, 1])]);
+        assert_eq!(rec.total_slots(), 4);
+        assert_eq!(
+            (0..4).map(|i| rec.slot_bit(i)).collect::<Vec<_>>(),
+            vec![1, 0, 0, 1]
+        );
+    }
+
+    /// LSB-first packing, including the last partial byte.
+    #[test]
+    fn bit_packer_packs_lsb_first() {
+        assert_eq!(pack(&[1]), vec![0b0000_0001]);
+        assert_eq!(pack(&[0, 0, 0, 0, 0, 0, 0, 1]), vec![0b1000_0000]);
+        assert_eq!(pack(&[1; 9]), vec![0xFF, 0b0000_0001]);
+        assert_eq!(pack(&[]), Vec::<u8>::new());
+    }
 }
 
 #[cfg(test)]
