@@ -145,6 +145,62 @@ pub fn commit_carrier_bytes(
     Ok(backup_path)
 }
 
+/// Safely commit in-place stego patches to `target_path` by streaming the original
+/// carrier via `fs::copy` and rewriting only the modified spans, with an atomic rename,
+/// crash-safe temporary file guard, and `.bak` backup.
+pub fn commit_carrier_patches(
+    carrier_path: &Path,
+    target_path: &Path,
+    patches: &[(std::ops::Range<usize>, Vec<u8>)],
+    backup: bool,
+    preserve_time: bool,
+) -> Result<Option<PathBuf>, StrHideError> {
+    use std::fs::OpenOptions;
+    use std::io::{Seek, SeekFrom, Write};
+
+    let meta = std::fs::metadata(carrier_path)?;
+    let orig_permissions = meta.permissions();
+    let orig_atime = filetime::FileTime::from_last_access_time(&meta);
+    let orig_mtime = filetime::FileTime::from_last_modification_time(&meta);
+
+    let is_inplace = same_file(target_path, carrier_path);
+    let mut backup_path = None;
+    if is_inplace && backup {
+        let bak = next_backup_path(carrier_path);
+        std::fs::copy(carrier_path, &bak)?;
+        backup_path = Some(bak);
+    }
+
+    let mut tmp_os = target_path.as_os_str().to_os_string();
+    tmp_os.push(".strhide.tmp");
+    let tmp_path = PathBuf::from(tmp_os);
+    let mut guard = TmpGuard::new(tmp_path.clone());
+
+    // 1. Kernel-level stream copy (zero user-space heap allocation)
+    std::fs::copy(carrier_path, &tmp_path)?;
+
+    // 2. Open for in-place patch overwrite
+    {
+        let mut file = OpenOptions::new().read(true).write(true).open(&tmp_path)?;
+        for (span, patch) in patches {
+            file.seek(SeekFrom::Start(span.start as u64))?;
+            file.write_all(patch)?;
+        }
+        file.sync_all()?;
+    }
+
+    std::fs::rename(&tmp_path, target_path)?;
+    guard.commit();
+    sync_parent_dir(target_path);
+
+    let _ = std::fs::set_permissions(target_path, orig_permissions);
+    if preserve_time {
+        let _ = filetime::set_file_times(target_path, orig_atime, orig_mtime);
+    }
+
+    Ok(backup_path)
+}
+
 /// Write `bytes` to `path` through a sibling temp file, then rename over it.
 ///
 /// The temp file is `fsync`ed before the rename: renaming first and syncing
@@ -188,5 +244,40 @@ fn sync_parent_dir(path: &Path) {
     #[cfg(not(unix))]
     {
         let _ = path;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commit_carrier_patches_applies_correctly() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("strhide_test_{}", rand::rng().random::<u32>()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let src_file = temp_dir.join("carrier.bin");
+        let dst_file = temp_dir.join("carrier_out.bin");
+
+        let original_data = vec![0x11u8; 1024];
+        std::fs::write(&src_file, &original_data).unwrap();
+
+        let patches = vec![
+            (10..15, vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE]),
+            (100..102, vec![0x99, 0x88]),
+        ];
+
+        let bak = commit_carrier_patches(&src_file, &dst_file, &patches, false, false).unwrap();
+        assert!(bak.is_none());
+        assert!(dst_file.exists());
+
+        let result = std::fs::read(&dst_file).unwrap();
+        assert_eq!(result.len(), 1024);
+        assert_eq!(&result[10..15], &[0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
+        assert_eq!(&result[100..102], &[0x99, 0x88]);
+        assert_eq!(&result[0..10], &[0x11; 10]);
+        assert_eq!(&result[15..100], &[0x11; 85]);
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 }

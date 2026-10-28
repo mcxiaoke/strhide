@@ -10,7 +10,7 @@ use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::core::control::{Control, Event, Stage};
+use crate::core::control::{Control, Stage};
 use crate::core::media::MediaInfo;
 use crate::core::payload::Payload;
 use crate::errors::StrHideError;
@@ -33,6 +33,7 @@ use crate::stego::{SafetyLevel, SafetyPolicy, StegoCapacityInfo};
 use oxideav_h265::cabac::ContextModel;
 use oxideav_h265::encoder::bitwriter::BitWriter;
 use oxideav_h265::encoder::cabac::CabacEncoder;
+use rayon::prelude::*;
 use rusty_h265::Decoder;
 use rusty_h265::ctu::Ablate;
 use rusty_h265::observer::ENCODER_CONTEXTS;
@@ -673,6 +674,16 @@ fn enforce_safety(
 /// the wire-format identity; `freshness` supplies the nonce (`Seeded` makes
 /// the output reproducible for the same inputs); `safety` is the full policy,
 /// so `Enforced` blocks an over-tier payload instead of only warning.
+/// An in-place modification patch for an HEVC carrier: `(byte_range, replacement_nal_bytes)`.
+pub type HevcCarrierPatch = (std::ops::Range<usize>, Vec<u8>);
+
+/// Apply in-place NAL patches to a mutable carrier buffer.
+pub fn apply_hevc_patches(carrier: &mut [u8], patches: &[HevcCarrierPatch]) {
+    for (span, re_nal) in patches {
+        carrier[span.clone()].copy_from_slice(re_nal);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn embed_hevc_with_info(
     carrier: &[u8],
@@ -684,6 +695,29 @@ pub fn embed_hevc_with_info(
     safety: SafetyPolicy,
     control: &Control<'_>,
 ) -> Result<(Vec<u8>, StegoCapacityInfo), StrHideError> {
+    let (patches, capacity_info) = embed_hevc_patches(
+        carrier, payload, secret, domain, fmt, freshness, safety, control,
+    )?;
+    let mut out_carrier = carrier.to_vec();
+    apply_hevc_patches(&mut out_carrier, &patches);
+    Ok((out_carrier, capacity_info))
+}
+
+/// Embed a payload into an HEVC carrier and return in-place NAL delta patches.
+///
+/// This avoids cloning or mutating the entire carrier in memory, allowing zero-heap-overhead
+/// streaming commit to disk via `commit_carrier_patches`.
+#[allow(clippy::too_many_arguments)]
+pub fn embed_hevc_patches(
+    carrier: &[u8],
+    payload: &Payload<'_>,
+    secret: Option<&str>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+    freshness: Freshness,
+    safety: SafetyPolicy,
+    control: &Control<'_>,
+) -> Result<(Vec<HevcCarrierPatch>, StegoCapacityInfo), StrHideError> {
     if payload.is_empty() {
         return Err(StrHideError::General("Cannot embed empty payload".into()));
     }
@@ -800,7 +834,6 @@ pub fn embed_hevc_with_info(
     let mut forbidden: HashSet<usize> = HashSet::new();
     let mut bad_substreams: HashSet<(usize, usize)> = HashSet::new();
     let mut replay_ok: HashMap<(usize, usize), bool> = HashMap::new();
-    let mut out_carrier = carrier.to_vec();
 
     for round in 0..MAX_EMBED_ROUNDS {
         control.check()?;
@@ -938,125 +971,36 @@ pub fn embed_hevc_with_info(
             continue;
         }
 
-        // 3b. Re-encode every touched slice and check that the emulation
-        //     prevention window set is unchanged.
+        // 3b. Re-encode every touched slice in parallel using rayon
         let mut conflicts: Vec<EpbConflict> = Vec::new();
         let mut reencoded_slices = Vec::new();
 
-        let slice_total = flips_per_slice.len() as u64;
-        for (slice_idx, flipped_entries) in &flips_per_slice {
-            // Checkpoint per slice rewrite: the CABAC replay of one slice is
-            // the unit of work a user can observe on the progress bar.
-            control.check()?;
-            control.report(Event::progress(
-                Stage::Encode,
-                *slice_idx as u64,
-                Some(slice_total),
-            ));
-            let slice_rec = &slice_contexts[*slice_idx];
+        let slice_items: Vec<(usize, &Vec<(usize, usize)>)> = flips_per_slice
+            .iter()
+            .map(|(&idx, entries)| (idx, entries))
+            .collect();
 
-            let mut substream_ids: Vec<usize> = flipped_entries
-                .iter()
-                .filter_map(|&(op_idx, _)| {
-                    slice_rec
-                        .substreams
-                        .iter()
-                        .position(|s| op_idx >= s.op_start && op_idx < s.op_end)
-                })
-                .collect();
-            substream_ids.sort_unstable();
-            substream_ids.dedup();
+        let outcomes: Vec<SliceReencodeOutcome> = slice_items
+            .into_par_iter()
+            .map(|(slice_idx, flipped_entries)| {
+                reencode_slice(slice_idx, &slice_contexts[slice_idx], flipped_entries)
+            })
+            .collect();
 
-            let mut modified_rbsp = slice_rec.orig_rbsp.clone();
-            // (global slot, first touched RBSP byte, last touched RBSP byte)
-            let mut trace: Vec<SlotBitTrace> = Vec::new();
-            let mut slice_ok = true;
-
-            for sub_idx in &substream_ids {
-                let sub = &slice_rec.substreams[*sub_idx];
-                let orig_sub_len = sub.rbsp_byte_end.saturating_sub(sub.rbsp_byte_start);
-                let (reencoded, sub_trace) = match encode_substream(slice_rec, sub, flipped_entries)
-                {
-                    Ok(pair) => pair,
-                    Err(_) => {
-                        // Journal/stream disagreement inside this substream:
-                        // drop it like a length mismatch instead of writing
-                        // a desynchronised re-encode.
-                        bad_substreams.insert((*slice_idx, *sub_idx));
-                        slice_ok = false;
-                        break;
-                    }
-                };
-
-                if reencoded.len() == orig_sub_len {
-                    modified_rbsp[sub.rbsp_byte_start..sub.rbsp_byte_end]
-                        .copy_from_slice(&reencoded);
-                } else if reencoded.len() < orig_sub_len && orig_sub_len - reencoded.len() <= 4 {
-                    // Trailing `cabac_zero_word` padding: the cover carried zero
-                    // words that the journal does not model.
-                    modified_rbsp[sub.rbsp_byte_start..sub.rbsp_byte_start + reencoded.len()]
-                        .copy_from_slice(&reencoded);
-                    for b in
-                        &mut modified_rbsp[sub.rbsp_byte_start + reencoded.len()..sub.rbsp_byte_end]
-                    {
-                        *b = 0;
-                    }
-                } else {
-                    // The flip footprint escaped the substream: treat the whole
-                    // substream as unsupported rather than guessing.
-                    bad_substreams.insert((*slice_idx, *sub_idx));
-                    slice_ok = false;
-                    break;
+        for outcome in outcomes {
+            match outcome {
+                SliceReencodeOutcome::Success { span, re_nal } => {
+                    reencoded_slices.push((span, re_nal));
                 }
-
-                for (global, bit_lo, bit_hi) in sub_trace {
-                    trace.push((
-                        global,
-                        sub.rbsp_byte_start + bit_lo / 8,
-                        sub.rbsp_byte_start + bit_hi.saturating_sub(1) / 8,
-                    ));
+                SliceReencodeOutcome::Conflict(c) => {
+                    conflicts.extend(c);
                 }
-            }
-
-            if slice_ok {
-                // Emulation prevention byte insertion is a pure function of the
-                // `00 00 xx<=3` windows, so comparing those windows is
-                // equivalent to comparing the NAL lengths -- and it also catches
-                // a "one byte added, one byte dropped" swap that keeps the
-                // length intact but shifts every following WPP entry point.
-                for p in 2..modified_rbsp.len() {
-                    let now_starts_epb = modified_rbsp[p - 2] == 0
-                        && modified_rbsp[p - 1] == 0
-                        && modified_rbsp[p] <= 3;
-                    let cover_starts_epb = slice_rec.orig_rbsp[p - 2] == 0
-                        && slice_rec.orig_rbsp[p - 1] == 0
-                        && slice_rec.orig_rbsp[p] <= 3;
-                    if now_starts_epb != cover_starts_epb {
-                        conflicts.push((p, trace.clone()));
-                        slice_ok = false;
-                        break;
-                    }
+                SliceReencodeOutcome::BadSubstream(slice_idx, sub_idx) => {
+                    bad_substreams.insert((slice_idx, sub_idx));
                 }
-            }
-
-            if !slice_ok {
-                continue;
-            }
-
-            let re_nal = rbsp_to_nal(
-                slice_rec.nal_type,
-                slice_rec.layer_id,
-                slice_rec.temporal_id,
-                &modified_rbsp,
-            );
-            if re_nal.len() == slice_rec.carrier_span.len() {
-                reencoded_slices.push((slice_rec.carrier_span.clone(), re_nal));
-            } else {
-                return Err(StrHideError::General(format!(
-                    "HEVC slice {slice_idx}: re-encoded NAL is {} bytes but the cover span is {} bytes",
-                    re_nal.len(),
-                    slice_rec.carrier_span.len()
-                )));
+                SliceReencodeOutcome::LengthError(msg) => {
+                    return Err(StrHideError::General(msg));
+                }
             }
         }
 
@@ -1074,10 +1018,7 @@ pub fn embed_hevc_with_info(
         }
 
         if conflicts.is_empty() && reencoded_slices.len() == flips_per_slice.len() {
-            for (span, re_nal) in reencoded_slices {
-                out_carrier[span].copy_from_slice(&re_nal);
-            }
-            return Ok((out_carrier, capacity_info));
+            return Ok((reencoded_slices, capacity_info));
         }
 
         // 3c. Exclude the slots whose flipped bits sit next to a disturbed
@@ -1256,6 +1197,98 @@ fn encode_substream(
     }
     writer.align_zero();
     Ok((writer.finish(), trace))
+}
+
+enum SliceReencodeOutcome {
+    Success {
+        span: std::ops::Range<usize>,
+        re_nal: Vec<u8>,
+    },
+    Conflict(Vec<EpbConflict>),
+    BadSubstream(usize, usize),
+    LengthError(String),
+}
+
+fn reencode_slice(
+    slice_idx: usize,
+    slice_rec: &SliceContext,
+    flipped_entries: &[(usize, usize)],
+) -> SliceReencodeOutcome {
+    let mut substream_ids: Vec<usize> = flipped_entries
+        .iter()
+        .filter_map(|&(op_idx, _)| {
+            slice_rec
+                .substreams
+                .iter()
+                .position(|s| op_idx >= s.op_start && op_idx < s.op_end)
+        })
+        .collect();
+    substream_ids.sort_unstable();
+    substream_ids.dedup();
+
+    let mut modified_rbsp = slice_rec.orig_rbsp.clone();
+    let mut trace: Vec<SlotBitTrace> = Vec::new();
+
+    for sub_idx in &substream_ids {
+        let sub = &slice_rec.substreams[*sub_idx];
+        let orig_sub_len = sub.rbsp_byte_end.saturating_sub(sub.rbsp_byte_start);
+        let (reencoded, sub_trace) = match encode_substream(slice_rec, sub, flipped_entries) {
+            Ok(pair) => pair,
+            Err(_) => return SliceReencodeOutcome::BadSubstream(slice_idx, *sub_idx),
+        };
+
+        if reencoded.len() == orig_sub_len {
+            modified_rbsp[sub.rbsp_byte_start..sub.rbsp_byte_end].copy_from_slice(&reencoded);
+        } else if reencoded.len() < orig_sub_len && orig_sub_len - reencoded.len() <= 4 {
+            modified_rbsp[sub.rbsp_byte_start..sub.rbsp_byte_start + reencoded.len()]
+                .copy_from_slice(&reencoded);
+            for b in &mut modified_rbsp[sub.rbsp_byte_start + reencoded.len()..sub.rbsp_byte_end] {
+                *b = 0;
+            }
+        } else {
+            return SliceReencodeOutcome::BadSubstream(slice_idx, *sub_idx);
+        }
+
+        for (global, bit_lo, bit_hi) in sub_trace {
+            trace.push((
+                global,
+                sub.rbsp_byte_start + bit_lo / 8,
+                sub.rbsp_byte_start + bit_hi.saturating_sub(1) / 8,
+            ));
+        }
+    }
+
+    let mut conflicts = Vec::new();
+    for p in 2..modified_rbsp.len() {
+        let now_starts_epb =
+            modified_rbsp[p - 2] == 0 && modified_rbsp[p - 1] == 0 && modified_rbsp[p] <= 3;
+        let cover_starts_epb = slice_rec.orig_rbsp[p - 2] == 0
+            && slice_rec.orig_rbsp[p - 1] == 0
+            && slice_rec.orig_rbsp[p] <= 3;
+        if now_starts_epb != cover_starts_epb {
+            conflicts.push((p, trace));
+            return SliceReencodeOutcome::Conflict(conflicts);
+        }
+    }
+
+    let re_nal = rbsp_to_nal(
+        slice_rec.nal_type,
+        slice_rec.layer_id,
+        slice_rec.temporal_id,
+        &modified_rbsp,
+    );
+    if re_nal.len() == slice_rec.carrier_span.len() {
+        SliceReencodeOutcome::Success {
+            span: slice_rec.carrier_span.clone(),
+            re_nal,
+        }
+    } else {
+        SliceReencodeOutcome::LengthError(format!(
+            "HEVC slice {slice_idx}: re-encoded NAL is {} bytes but the cover span is {} bytes",
+            re_nal.len(),
+            slice_rec.carrier_span.len()
+        ))
+    }
 }
 
 /// Is the journal replay byte-identical to the cover substream?
