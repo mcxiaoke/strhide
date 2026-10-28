@@ -37,8 +37,56 @@ pub fn embed_carrier_file(
     backup: bool,
 ) -> Result<Option<PathBuf>, StrHideError> {
     let carrier_bytes = std::fs::read(carrier_path)?;
-    let stego_bytes = embed_carrier_with_dialect(&carrier_bytes, payload, options, dialect)?;
     let dest = target_path.unwrap_or(carrier_path);
+    let format = crate::formats::sniff::sniff_bytes(&carrier_bytes);
+
+    if matches!(
+        format,
+        Some(crate::formats::FileFormat::Mp4 | crate::formats::FileFormat::HevcAnnexB)
+    ) {
+        let domain = options.domain(dialect);
+        options.control.check()?;
+        let anon_payload;
+        let eff_payload = if options.no_filename && payload.name().is_some() {
+            anon_payload = Payload::bytes(payload.as_bytes());
+            &anon_payload
+        } else {
+            payload
+        };
+        let secret = options.secret(dialect);
+        let direct = || {
+            crate::stego::hevc::embed_hevc_patches(
+                &carrier_bytes,
+                eff_payload,
+                secret,
+                domain,
+                dialect.hevc_format(),
+                options.freshness,
+                options.safety,
+                &options.control,
+            )
+        };
+        let patches_res = match &options.pool {
+            Some(pool) => pool.install(direct),
+            None => direct(),
+        };
+        match patches_res {
+            Ok((patches, _capacity)) => {
+                drop(carrier_bytes);
+                return crate::commit::commit_carrier_patches(
+                    carrier_path,
+                    dest,
+                    &patches,
+                    backup,
+                    true,
+                );
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    let stego_bytes = embed_carrier_with_dialect(&carrier_bytes, payload, options, dialect)?;
+    drop(carrier_bytes);
     crate::commit::commit_carrier_bytes(carrier_path, dest, &stego_bytes, backup, true)
 }
 
@@ -113,6 +161,40 @@ mod tests {
             &StegoProfile::default(),
         );
         assert!(matches!(result, Err(StrHideError::UnsupportedFormat(_))));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hevc_annexb_embed_carrier_file_roundtrip_patches() {
+        let candidate = Path::new("../temp/testhevc/annexb/test-25fps.hevc");
+        if !candidate.is_file() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("strhide-io-hevc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let dest = dir.join("stego.hevc");
+
+        let secret = "io-patch-test-pwd";
+        let payload = Payload::bytes(b"hello patches from io");
+        let opts = EmbedOptions {
+            password: Some(secret),
+            ..EmbedOptions::default()
+        };
+        let profile = StegoProfile::default();
+
+        let bak = embed_carrier_file(candidate, Some(&dest), &payload, &opts, &profile, false)
+            .expect("embed_carrier_file");
+        assert!(bak.is_none());
+        assert!(dest.is_file());
+
+        let extract_opts = ExtractOptions {
+            password: Some(secret),
+            ..ExtractOptions::default()
+        };
+        let extracted =
+            extract_carrier_file(&dest, &extract_opts, &profile).expect("extract_carrier_file");
+        assert_eq!(extracted, b"hello patches from io");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
