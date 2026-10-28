@@ -144,7 +144,7 @@ fn test_carrier(carrier_path_str: &str) {
 
         for &factor in &factors {
             let t_embed = Instant::now();
-            let (patches, _cap) = embed_hevc_patches_with_factor(
+            let (patches, _cap, _stats) = embed_hevc_patches_with_factor(
                 &carrier_bytes,
                 &payload,
                 Some(password),

@@ -28,7 +28,4 @@ pub mod rejection;
 pub use engine::*;
 pub use options::{ReadOptions, RestoreOptions, StrategyChoice, WriteOptions};
 pub use params::StructureProfile;
-pub use registry::{
-    ADAPTERS, STRATEGY_REGISTRY, StrategyId, find_adapter, find_adapter_or_reject,
-    supports_content_stego,
-};
+pub use registry::{ADAPTERS, STRATEGY_REGISTRY, StrategyId, find_adapter, find_adapter_or_reject};

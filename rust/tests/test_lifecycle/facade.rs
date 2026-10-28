@@ -693,3 +693,65 @@ fn test_progress_writer_and_cancellation() {
     let mapped = map_io_cancel(&control, strhide_err);
     assert!(matches!(mapped, StrHideError::Cancelled));
 }
+
+#[test]
+#[cfg(feature = "analysis")]
+fn facade_analysis_scan_bytes_and_file() {
+    let engine = StrHide::new();
+    let report = engine.analysis().scan_bytes(PNG, "memory.png");
+    assert_eq!(report.carrier, "memory.png");
+    assert_eq!(report.file_size, PNG.len() as u64);
+    assert!(!report.verdict.is_empty());
+
+    let dir = scratch("facade_analysis");
+    let carrier_path = dir.join("carrier.png");
+    std::fs::write(&carrier_path, PNG).expect("write carrier");
+
+    let file_report = engine
+        .analysis()
+        .scan_file(&carrier_path)
+        .expect("scan file");
+    assert_eq!(file_report.file_size, PNG.len() as u64);
+    assert_eq!(file_report.verdict, report.verdict);
+}
+
+#[test]
+#[cfg(all(feature = "content-jpeg", feature = "structure-base"))]
+fn facade_embed_stats_populated() {
+    let engine = StrHide::new();
+    let dir = scratch("facade_embed_stats");
+    let carrier = dir.join("carrier.jpg");
+    std::fs::write(&carrier, JPG).expect("write carrier");
+
+    let options = EmbedOptions {
+        password: Some("pw"),
+        ..EmbedOptions::default()
+    };
+    let target = strhide::core::commit::FileTarget {
+        output_path: None,
+        backup: false,
+        preserve_time: false,
+        overwrite: true,
+    };
+
+    let res = engine
+        .stego()
+        .embed_file(
+            &carrier,
+            &Payload::bytes(CONTENT_PAYLOAD),
+            &options,
+            &target,
+        )
+        .expect("embed");
+
+    let stats = res.stats.expect("embed stats must be populated");
+    assert!(stats.modified_slots > 0, "must modify at least 1 slot");
+    assert!(
+        stats.total_candidate_slots > 0,
+        "total candidate slots must be non-zero"
+    );
+    assert!(
+        stats.modified_slots <= stats.total_candidate_slots,
+        "modified slots cannot exceed candidate slots"
+    );
+}

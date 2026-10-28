@@ -571,6 +571,35 @@ pub fn embed_jpeg<'a>(
     freshness: Freshness,
     control: &Control<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
+    embed_jpeg_with_stats(
+        carrier_bytes,
+        payload,
+        secret,
+        domain,
+        fmt,
+        params,
+        safety,
+        cost_model,
+        freshness,
+        control,
+    )
+    .map(|(bytes, _)| bytes)
+}
+
+/// Embed a payload into a JPEG carrier and return both modified bytes and embed statistics.
+#[allow(clippy::too_many_arguments)]
+pub fn embed_jpeg_with_stats<'a>(
+    carrier_bytes: &[u8],
+    payload: impl Into<Payload<'a>>,
+    secret: Option<&str>,
+    domain: Option<&str>,
+    fmt: &JpegFormatProfile,
+    params: &JpegParams,
+    safety: crate::stego::params::SafetyPolicy,
+    cost_model: &dyn JpegCostModel,
+    freshness: Freshness,
+    control: &Control<'_>,
+) -> Result<(Vec<u8>, crate::stego::EmbedStats), StrHideError> {
     let payload = payload.into();
     fmt.validate()?;
     params.validate()?;
@@ -660,7 +689,11 @@ pub fn embed_jpeg<'a>(
         ) {
             Ok(bytes) => {
                 trace(&format!("attempt {attempt_idx}/{EMBED_ATTEMPTS} ok"));
-                return Ok(bytes);
+                let stats = crate::stego::EmbedStats {
+                    modified_slots: applied.len(),
+                    total_candidate_slots: cover.n_total,
+                };
+                return Ok((bytes, stats));
             }
             Err(attempt) => {
                 trace(&format!(

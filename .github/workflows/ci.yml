@@ -42,6 +42,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Architectural boundary check
+        run: python ../scripts/import_lint.py
+
       # `--all-targets` compiles the integration tests but does not run the
       # #[ignore]d corpus sweep (`batch_corpus`), which needs external files.
       # `--all-features` is what covers the CLI: the library default set

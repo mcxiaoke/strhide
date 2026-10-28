@@ -36,7 +36,7 @@ use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub mod calibration;
 
@@ -88,7 +88,7 @@ const CALIBRATION_FLAG_RATE: f64 = 0.05;
 const CALIBRATION_STRONG_RATE: f64 = 0.15;
 
 /// How strongly a single finding points at embedded data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// Observation only (e.g. a standard-but-unusual ancillary chunk).
@@ -100,7 +100,7 @@ pub enum Severity {
 }
 
 /// One detector's verdict on the file.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Finding {
     /// Detector id, e.g. "magic:strhide-header", "png:unknown-chunk", "chi2-lsb".
     pub detector: String,
@@ -109,7 +109,7 @@ pub struct Finding {
 }
 
 /// Quantitative measurement and status for one individual detector.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectorMetric {
     /// Detector id (e.g. "dct:calibration", "dct:chi2", "spatial:ws", "spatial:rs", "jpeg:structure")
     pub name: String,
@@ -127,7 +127,7 @@ pub struct DetectorMetric {
 }
 
 /// Aggregated scan result for one file.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanReport {
     pub carrier: String,
     /// Detected container format, or `None` for unrecognized files.
@@ -147,6 +147,9 @@ pub struct ScanReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detectors: Vec<DetectorMetric>,
 }
+
+/// Convenient alias for [`ScanReport`].
+pub type AnalysisReport = ScanReport;
 
 // ---------------------------------------------------------------------------
 // Scan view: what a detector is allowed to look at
@@ -255,8 +258,23 @@ fn report_trailing(
 }
 
 // ---------------------------------------------------------------------------
-// Public entry point
+// Public entry points and internal scan dispatcher
 // ---------------------------------------------------------------------------
+
+/// Scan raw bytes in memory. Never errors out on "nothing found".
+pub fn scan_bytes(data: &[u8], label: &str) -> ScanReport {
+    let file_size = data.len() as u64;
+    let carrier = label.to_string();
+    let view = if file_size <= MAX_FULL_SCAN {
+        ScanView::whole(data)
+    } else {
+        let prefix = &data[..PREFIX_WINDOW.min(data.len())];
+        let tail_offset = file_size.saturating_sub(STRUCT_TAIL_WINDOW as u64);
+        let tail = &data[tail_offset as usize..];
+        ScanView::windowed(prefix, tail_offset, tail, file_size)
+    };
+    scan_view_internal(&view, carrier, file_size)
+}
 
 /// Scan one file end to end. Never errors out on "nothing found"; only real
 /// I/O / unreadable-file problems return `Err`.
@@ -264,9 +282,6 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
     let metadata = std::fs::metadata(path)?;
     let file_size = metadata.len();
     let carrier = path.display().to_string();
-
-    let mut findings: Vec<Finding> = Vec::new();
-    let mut detectors: Vec<DetectorMetric> = Vec::new();
 
     // Read whole file (bounded). Above the cap we keep the first
     // `PREFIX_WINDOW` and the last `STRUCT_TAIL_WINDOW` bytes *separately*.
@@ -293,11 +308,18 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
         None => ScanView::whole(&prefix),
     };
 
+    Ok(scan_view_internal(&view, carrier, file_size))
+}
+
+fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> ScanReport {
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut detectors: Vec<DetectorMetric> = Vec::new();
+
     let format = sniff_format(view.prefix);
 
     // 1. Signature domain: known tools / envelopes
     let sig_before = findings.len();
-    track_tool_signatures(&view, &mut findings);
+    track_tool_signatures(view, &mut findings);
     let sig_alert = findings[sig_before..]
         .iter()
         .any(|f| f.detector == "signature:known-tool");
@@ -326,7 +348,7 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
     match format.as_deref() {
         Some("PNG") => {
             let before_cnt = findings.len();
-            track_png_structure(&view, &mut findings);
+            track_png_structure(view, &mut findings);
             let has_trailing = findings[before_cnt..]
                 .iter()
                 .any(|f| f.detector == "png:trailing-data");
@@ -377,7 +399,7 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
         }
         Some("JPEG") => {
             let before_cnt = findings.len();
-            track_jpeg_structure(&view, &mut findings);
+            track_jpeg_structure(view, &mut findings);
             let has_trailing = findings[before_cnt..]
                 .iter()
                 .any(|f| f.detector == "jpeg:trailing-data");
@@ -429,7 +451,7 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
         Some("PE") if view.is_whole() => track_pe_structure(view.prefix, &mut findings),
         _ => {}
     }
-    track_trailing_entropy(&view, format.as_deref(), &mut findings);
+    track_trailing_entropy(view, format.as_deref(), &mut findings);
 
     // Set when the calibrated DCT test fired; used to decide whether the
     // "clean is not proof" caveat still applies to this report.
@@ -477,7 +499,7 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
         ));
     }
 
-    Ok(ScanReport {
+    ScanReport {
         carrier,
         format,
         file_size,
@@ -486,7 +508,7 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
         verdict: verdict.into(),
         notes,
         detectors,
-    })
+    }
 }
 
 // ---------------------------------------------------------------------------

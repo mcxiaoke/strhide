@@ -12,5 +12,7 @@ pub mod cost;
 pub mod registry;
 
 pub use cost::UerdCostModel;
-pub use engine::{embed_jpeg, extract_jpeg, inspect_jpeg, probe_jpeg_capacity, verify_jpeg};
+pub use engine::{
+    embed_jpeg, embed_jpeg_with_stats, extract_jpeg, inspect_jpeg, probe_jpeg_capacity, verify_jpeg,
+};
 pub use registry::get_jpeg_model;

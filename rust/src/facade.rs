@@ -319,6 +319,12 @@ impl StrHide {
         StegoFacade { engine: self }
     }
 
+    /// The analysis (black-box steganalysis) domain.
+    #[cfg(feature = "analysis")]
+    pub const fn analysis(&self) -> AnalysisFacade<'_> {
+        AnalysisFacade { engine: self }
+    }
+
     /// Cross-domain read-only inspection.
     pub fn inspect_any(
         &self,
@@ -748,5 +754,30 @@ impl StegoFacade<'_> {
         // payload must never be visible under the destination name.
         crate::commit::write_bytes_atomic(&final_dest, &data)?;
         Ok(final_dest)
+    }
+}
+
+// ───────────────────────────── analysis domain ──────────────────────────────
+
+/// Analysis-domain verbs: black-box heuristic steganalysis of files or bytes.
+///
+/// Obtained from [`StrHide::analysis`].
+#[cfg(feature = "analysis")]
+#[derive(Debug, Clone, Copy)]
+pub struct AnalysisFacade<'a> {
+    #[allow(dead_code)]
+    engine: &'a StrHide,
+}
+
+#[cfg(feature = "analysis")]
+impl AnalysisFacade<'_> {
+    /// Scan raw bytes in memory.
+    pub fn scan_bytes(&self, data: &[u8], label: &str) -> crate::analysis::AnalysisReport {
+        crate::analysis::scan_bytes(data, label)
+    }
+
+    /// Scan a file at `path`.
+    pub fn scan_file(&self, path: &Path) -> Result<crate::analysis::AnalysisReport, StrHideError> {
+        crate::analysis::scan_file(path)
     }
 }

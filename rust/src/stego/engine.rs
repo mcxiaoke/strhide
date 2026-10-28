@@ -186,8 +186,8 @@ impl StegoEngine for PngEngine {
         } else {
             payload
         };
-        let bytes = with_pool(opts.pool.as_ref(), || {
-            crate::stego::png::embed_png(
+        let (bytes, stats) = with_pool(opts.pool.as_ref(), || {
+            crate::stego::png::embed_png_with_stats(
                 carrier,
                 eff_payload,
                 secret,
@@ -200,7 +200,7 @@ impl StegoEngine for PngEngine {
                 &opts.control,
             )
         })?;
-        Ok(EmbedOutput::bytes_only(bytes))
+        Ok(EmbedOutput::with_stats(bytes, stats))
     }
 
     fn extract(
@@ -318,8 +318,8 @@ impl StegoEngine for JpegEngine {
         } else {
             payload
         };
-        let bytes = with_pool(opts.pool.as_ref(), || {
-            crate::stego::jpeg::embed_jpeg(
+        let (bytes, stats) = with_pool(opts.pool.as_ref(), || {
+            crate::stego::jpeg::embed_jpeg_with_stats(
                 carrier,
                 eff_payload,
                 secret,
@@ -332,7 +332,7 @@ impl StegoEngine for JpegEngine {
                 &opts.control,
             )
         })?;
-        Ok(EmbedOutput::bytes_only(bytes))
+        Ok(EmbedOutput::with_stats(bytes, stats))
     }
 
     fn extract(
@@ -433,18 +433,20 @@ fn hevc_embed(
 
     if format != FileFormat::Heif {
         // MP4/MOV video and raw Annex-B: Scheme C is the only path.
-        let (bytes, info) = with_pool(opts.pool.as_ref(), direct)?;
+        let (bytes, info, stats) = with_pool(opts.pool.as_ref(), direct)?;
         return Ok(EmbedOutput {
             bytes,
             capacity: Some(info),
+            stats: Some(stats),
         });
     }
 
     let first = with_pool(opts.pool.as_ref(), direct);
     match first {
-        Ok((bytes, info)) => Ok(EmbedOutput {
+        Ok((bytes, info, stats)) => Ok(EmbedOutput {
             bytes,
             capacity: Some(info),
+            stats: Some(stats),
         }),
         // A safety-policy refusal is final: retrying through the thumbnail
         // bridge would replace it with the bridge's own "no bridgeable item"

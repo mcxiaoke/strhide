@@ -87,7 +87,7 @@ pub fn embed_carrier_file(
             None => direct(),
         };
         match patches_res {
-            Ok((patches, capacity)) => {
+            Ok((patches, capacity, stats)) => {
                 drop(carrier_bytes);
                 let backup_file = commit_carrier_patches(
                     carrier_path,
@@ -122,6 +122,7 @@ pub fn embed_carrier_file(
                     carrier_after_bytes,
                     backup_file,
                     capacity: Some(capacity),
+                    stats: Some(stats),
                     warnings,
                 });
             }
@@ -180,6 +181,7 @@ pub fn embed_carrier_file(
         carrier_after_bytes,
         backup_file,
         capacity: cap,
+        stats: output.stats,
         warnings,
     })
 }

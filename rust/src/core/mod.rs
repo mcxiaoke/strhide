@@ -20,10 +20,15 @@
 //! move here in a later batch so each commit stays reviewable.
 
 pub mod batch;
+#[cfg(any(feature = "structure-base", feature = "content-base"))]
+pub mod commit;
 pub mod control;
+pub mod crypto;
+pub mod errors;
 pub mod fs;
 pub mod i18n;
 pub mod media;
+pub mod params;
 pub mod payload;
 pub mod pipeline;
 

@@ -139,14 +139,14 @@ extern crate alloc;
 // Layer 1-2: shared by both domains, always compiled.
 pub mod core;
 pub mod formats;
-pub mod sniff;
 
-pub mod crypto;
-pub mod errors;
-pub mod params;
+// Layer 1: core re-exports for backwards compatibility
+pub use core::crypto;
+pub use core::errors;
+pub use core::params;
 
 #[cfg(any(feature = "structure-base", feature = "content-base"))]
-pub mod commit;
+pub use core::commit;
 
 /// Historical path: the message catalogue used to live at `strhide::i18n`.
 pub use crate::core::i18n;
@@ -198,9 +198,9 @@ pub use core::payload::{Payload, PayloadKind};
 pub use stego::params::StegoProfile;
 #[cfg(feature = "content-base")]
 pub use stego::{
-    EmbedOptions, EmbedOutput, ExtractOptions, InspectOptions, ProbeOptions, SafetyEnforcement,
-    SafetyLevel, SafetyPolicy, StegoCapacityInfo, StegoHeaderInfo, StegoTuning, StegoVerifyResult,
-    VerifyOptions, embed_carrier, extract_carrier, probe_carrier_capacity,
+    EmbedOptions, EmbedOutput, EmbedStats, ExtractOptions, InspectOptions, ProbeOptions,
+    SafetyEnforcement, SafetyLevel, SafetyPolicy, StegoCapacityInfo, StegoHeaderInfo, StegoTuning,
+    StegoVerifyResult, VerifyOptions, embed_carrier, extract_carrier, probe_carrier_capacity,
 };
 #[cfg(feature = "content-base")]
 pub use stego::{

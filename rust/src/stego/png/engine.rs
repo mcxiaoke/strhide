@@ -1109,6 +1109,35 @@ pub fn embed_png<'a>(
     freshness: Freshness,
     control: &Control<'_>,
 ) -> Result<Vec<u8>, StrHideError> {
+    embed_png_with_stats(
+        carrier_bytes,
+        payload,
+        password,
+        domain,
+        spatial,
+        cost_model,
+        params,
+        safety,
+        freshness,
+        control,
+    )
+    .map(|(bytes, _)| bytes)
+}
+
+/// Embed a payload into a PNG carrier and return both modified bytes and embed statistics.
+#[allow(clippy::too_many_arguments)]
+pub fn embed_png_with_stats<'a>(
+    carrier_bytes: &[u8],
+    payload: impl Into<Payload<'a>>,
+    password: Option<&str>,
+    domain: Option<&str>,
+    spatial: &crate::stego::format::PngFormatProfile,
+    cost_model: &dyn PngCostModel,
+    params: &PngParams,
+    safety: SafetyPolicy,
+    freshness: Freshness,
+    control: &Control<'_>,
+) -> Result<(Vec<u8>, crate::stego::EmbedStats), StrHideError> {
     let payload = payload.into();
     params.validate()?;
     control.stage(Stage::Decode);
@@ -1382,18 +1411,24 @@ pub fn embed_png<'a>(
         }
     }
 
+    let mut modified_slots = 0;
+
     // Embed Phase 1a: 32-byte header word1 (256 slots)
     for (byte_i, &b) in header_bytes.iter().enumerate() {
         for bit_i in 0..8 {
             let target_bit = (b >> (7 - bit_i)) & 1;
             let bit_index = byte_i * 8 + bit_i;
             let byte_idx = header_slots[bit_index] * image.channels + channel_offset;
+            let prev = image.pixels[byte_idx];
             write_bit_ternary(
                 &mut image.pixels[byte_idx],
                 target_bit,
                 header_rp[bit_index],
                 header_rm[bit_index],
             );
+            if image.pixels[byte_idx] != prev {
+                modified_slots += 1;
+            }
         }
     }
 
@@ -1403,12 +1438,16 @@ pub fn embed_png<'a>(
             let target_bit = (b >> (7 - bit_i)) & 1;
             let bit_index = HEADER_SLOTS + byte_i * 8 + bit_i;
             let byte_idx = feature_slots[byte_i * 8 + bit_i] * image.channels + channel_offset;
+            let prev = image.pixels[byte_idx];
             write_bit_ternary(
                 &mut image.pixels[byte_idx],
                 target_bit,
                 header_rp[bit_index],
                 header_rm[bit_index],
             );
+            if image.pixels[byte_idx] != prev {
+                modified_slots += 1;
+            }
         }
     }
 
@@ -1434,11 +1473,19 @@ pub fn embed_png<'a>(
     }
 
     for (i, &slot) in body_slots.iter().enumerate() {
+        if image.pixels[slot] != slot_vals[i] {
+            modified_slots += 1;
+        }
         image.pixels[slot] = slot_vals[i];
     }
 
     control.stage(Stage::Encode);
-    encode_png(&image)
+    let encoded = encode_png(&image)?;
+    let stats = crate::stego::EmbedStats {
+        modified_slots,
+        total_candidate_slots: total_pixels,
+    };
+    Ok((encoded, stats))
 }
 
 /// Extract a payload from a PNG carrier with content-adaptive spatial steganography.

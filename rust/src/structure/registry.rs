@@ -8,7 +8,6 @@
 //! envelope header.
 
 use crate::errors::StrHideError;
-use crate::formats::sniff::FileFormat;
 use crate::structure::adapters::{
     HostAdapter, SeekRead, heif::HeifAdapter, jpeg::JpegAdapter, mkv::MkvAdapter, mp4::Mp4Adapter,
     pdf::PdfAdapter, pe::PeAdapter, png::PngAdapter, wav::WavAdapter, webp::WebpAdapter,
@@ -45,17 +44,6 @@ pub fn find_adapter(reader: &mut dyn SeekRead) -> Option<&'static dyn HostAdapte
         }
     }
     None
-}
-
-/// Whether this adapter's format can also carry content-domain (pixel/DCT/CABAC)
-/// steganography, so `inspect` should measure that capacity too.
-///
-/// Answered from [`crate::formats::capability`] rather than from a
-/// `HostAdapter` method: the adapters are the *structure* domain and must not
-/// know the content domain exists. `tests/test_lifecycle/sniff.rs` pins the
-/// name → [`FileFormat`] round-trip this relies on.
-pub fn supports_content_stego(adapter: &dyn HostAdapter) -> bool {
-    FileFormat::from_adapter_name(adapter.format_name()).is_some_and(|f| f.supports_stego())
 }
 
 /// Like [`find_adapter`], but produces a user-facing rejection error for

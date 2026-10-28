@@ -708,13 +708,13 @@ pub fn embed_hevc_with_info(
     freshness: Freshness,
     safety: SafetyPolicy,
     control: &Control<'_>,
-) -> Result<(Vec<u8>, StegoCapacityInfo), StrHideError> {
-    let (patches, capacity_info) = embed_hevc_patches(
+) -> Result<(Vec<u8>, StegoCapacityInfo, crate::stego::EmbedStats), StrHideError> {
+    let (patches, capacity_info, stats) = embed_hevc_patches(
         carrier, payload, secret, domain, fmt, freshness, safety, control,
     )?;
     let mut out_carrier = carrier.to_vec();
     apply_hevc_patches(&mut out_carrier, &patches);
-    Ok((out_carrier, capacity_info))
+    Ok((out_carrier, capacity_info, stats))
 }
 
 /// Embed a payload into an HEVC carrier and return in-place NAL delta patches.
@@ -731,7 +731,14 @@ pub fn embed_hevc_patches(
     freshness: Freshness,
     safety: SafetyPolicy,
     control: &Control<'_>,
-) -> Result<(Vec<HevcCarrierPatch>, StegoCapacityInfo), StrHideError> {
+) -> Result<
+    (
+        Vec<HevcCarrierPatch>,
+        StegoCapacityInfo,
+        crate::stego::EmbedStats,
+    ),
+    StrHideError,
+> {
     embed_hevc_patches_with_factor(
         carrier, payload, secret, domain, fmt, freshness, safety, control, 1.0,
     )
@@ -749,7 +756,14 @@ pub fn embed_hevc_patches_with_factor(
     safety: SafetyPolicy,
     control: &Control<'_>,
     window_factor: f64,
-) -> Result<(Vec<HevcCarrierPatch>, StegoCapacityInfo), StrHideError> {
+) -> Result<
+    (
+        Vec<HevcCarrierPatch>,
+        StegoCapacityInfo,
+        crate::stego::EmbedStats,
+    ),
+    StrHideError,
+> {
     if payload.is_empty() {
         return Err(StrHideError::General("Cannot embed empty payload".into()));
     }
@@ -1089,7 +1103,13 @@ pub fn embed_hevc_patches_with_factor(
         }
 
         if conflicts.is_empty() && reencoded_slices.len() == flips_per_slice.len() {
-            return Ok((reencoded_slices, capacity_info));
+            let modified_slots = sb_deltas.iter().filter(|&&d| d != 0).count()
+                + body_deltas.iter().filter(|&&d| d != 0).count();
+            let stats = crate::stego::EmbedStats {
+                modified_slots,
+                total_candidate_slots: total_slots,
+            };
+            return Ok((reencoded_slices, capacity_info, stats));
         }
 
         // 3c. Exclude the slots whose flipped bits sit next to a disturbed
@@ -1159,7 +1179,7 @@ pub fn embed_hevc_payload(
         SafetyPolicy::new(),
         &Control::none(),
     )
-    .map(|(bytes, _)| bytes)
+    .map(|(bytes, _, _)| bytes)
 }
 
 /// Embed a payload into an HEVC/HEIC carrier using content-adaptive sign-bit steganography.

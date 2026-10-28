@@ -983,6 +983,15 @@ impl<'a> BridgeOptions<'a> {
     }
 }
 
+/// Exact carrier modification statistics reported by the embedder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbedStats {
+    /// Number of elements (pixels, DCT coefficients, or CABAC bins) modified.
+    pub modified_slots: usize,
+    /// Total number of candidate elements in the carrier pool.
+    pub total_candidate_slots: usize,
+}
+
 /// What an embed produced.
 #[derive(Debug, Clone)]
 pub struct EmbedOutput {
@@ -995,14 +1004,26 @@ pub struct EmbedOutput {
     /// would report a budget nobody actually checked. Call
     /// [`probe`](crate::stego::probe_carrier_capacity) when the number matters.
     pub capacity: Option<StegoCapacityInfo>,
+    /// Exact modification statistics from the embedder, when available.
+    pub stats: Option<EmbedStats>,
 }
 
 impl EmbedOutput {
-    /// An output with no capacity metadata.
+    /// An output with no capacity metadata or embed stats.
     pub fn bytes_only(bytes: Vec<u8>) -> Self {
         Self {
             bytes,
             capacity: None,
+            stats: None,
+        }
+    }
+
+    /// An output with both bytes and embed statistics.
+    pub fn with_stats(bytes: Vec<u8>, stats: EmbedStats) -> Self {
+        Self {
+            bytes,
+            capacity: None,
+            stats: Some(stats),
         }
     }
 }
@@ -1031,6 +1052,7 @@ pub struct StegoEmbedResult {
     pub carrier_after_bytes: u64,
     pub backup_file: Option<PathBuf>,
     pub capacity: Option<StegoCapacityInfo>,
+    pub stats: Option<EmbedStats>,
     pub warnings: Vec<StegoWarning>,
 }
 

@@ -9,7 +9,7 @@ use crate::structure::adapters::{HostAdapter, SeekRead, SeekWrite, StrategyCapac
 use crate::structure::envelope::EnvelopeHeader;
 
 use crate::errors::StrHideError;
-pub use crate::sniff::{HEIF_BRANDS, is_heif_bytes};
+pub use crate::formats::sniff::{HEIF_BRANDS, is_heif_bytes};
 
 pub struct HeifAdapter;
 
