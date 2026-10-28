@@ -217,6 +217,7 @@ fn auto_prefers_slack_and_restores_bit_exact() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -239,6 +240,7 @@ fn auto_prefers_slack_and_restores_bit_exact() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -402,6 +404,7 @@ fn arm64_pe_uses_padding() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -415,6 +418,7 @@ fn arm64_pe_uses_padding() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -447,6 +451,7 @@ fn slack_encrypted_roundtrip() {
                 output_path: None,
                 password: None,
                 overwrite: false,
+                ..Default::default()
             }
         )
         .is_err(),
@@ -459,6 +464,7 @@ fn slack_encrypted_roundtrip() {
                 output_path: None,
                 password: Some("wrong pw"),
                 overwrite: false,
+                ..Default::default()
             }
         )
         .is_err()
@@ -470,6 +476,7 @@ fn slack_encrypted_roundtrip() {
             output_path: None,
             password: Some("correct horse battery staple"),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -483,6 +490,7 @@ fn slack_encrypted_roundtrip() {
             password: Some("correct horse battery staple"),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -515,6 +523,7 @@ fn slack_stealth_denies_without_password() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_err();
@@ -534,6 +543,7 @@ fn slack_stealth_denies_without_password() {
                 output_path: None,
                 password: Some("nope"),
                 overwrite: false,
+                ..Default::default()
             }
         )
         .is_err()
@@ -545,6 +555,7 @@ fn slack_stealth_denies_without_password() {
             output_path: None,
             password: Some("stealth pw"),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -557,6 +568,7 @@ fn slack_stealth_denies_without_password() {
             password: Some("stealth pw"),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -628,6 +640,7 @@ fn tampered_envelope_fails_cleanly() {
                 output_path: None,
                 password: None,
                 overwrite: false,
+                ..Default::default()
             }
         )
         .is_err(),
@@ -641,6 +654,7 @@ fn tampered_envelope_fails_cleanly() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("restore must still succeed");
@@ -850,6 +864,7 @@ fn envelope_ending_at_eof_is_still_reported_as_slack() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -863,6 +878,7 @@ fn envelope_ending_at_eof_is_still_reported_as_slack() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");

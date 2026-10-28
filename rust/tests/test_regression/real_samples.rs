@@ -136,6 +136,7 @@ fn test_real_png_full_lifecycle() {
             output_path: None,
             password: Some(pwd),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read PNG");
@@ -150,6 +151,7 @@ fn test_real_png_full_lifecycle() {
             password: Some(pwd),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove PNG");
@@ -201,6 +203,7 @@ fn test_real_jpg_full_lifecycle() {
             output_path: None,
             password: Some(pwd),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read JPG");
@@ -215,6 +218,7 @@ fn test_real_jpg_full_lifecycle() {
             password: Some(pwd),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove JPG");
@@ -267,6 +271,7 @@ fn test_real_mp4_full_lifecycle() {
             output_path: None,
             password: Some(pwd),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read MP4");
@@ -281,6 +286,7 @@ fn test_real_mp4_full_lifecycle() {
             password: Some(pwd),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove MP4");
@@ -333,6 +339,7 @@ fn test_real_zip_full_lifecycle() {
             output_path: None,
             password: Some(pwd),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read ZIP");
@@ -347,6 +354,7 @@ fn test_real_zip_full_lifecycle() {
             password: Some(pwd),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove ZIP");
@@ -399,6 +407,7 @@ fn test_real_pdf_full_lifecycle() {
             output_path: None,
             password: Some(pwd),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read PDF");
@@ -413,6 +422,7 @@ fn test_real_pdf_full_lifecycle() {
             password: Some(pwd),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove PDF");

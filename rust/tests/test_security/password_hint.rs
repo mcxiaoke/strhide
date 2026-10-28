@@ -83,6 +83,7 @@ fn test_password_hint_lifecycle() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_err();
@@ -99,6 +100,7 @@ fn test_password_hint_lifecycle() {
             output_path: None,
             password: Some(pwd),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -113,6 +115,7 @@ fn test_password_hint_lifecycle() {
             password: Some(pwd),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -170,6 +173,7 @@ fn test_no_hint_behavior() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_err();
@@ -186,6 +190,7 @@ fn test_no_hint_behavior() {
             output_path: None,
             password: Some("pwd123"),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -200,6 +205,7 @@ fn test_no_hint_behavior() {
             password: Some("pwd123"),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");

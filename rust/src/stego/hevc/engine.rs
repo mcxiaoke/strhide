@@ -10,7 +10,7 @@ use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::core::control::{Control, Stage};
+use crate::core::control::{Control, Event, Stage};
 use crate::core::media::MediaInfo;
 use crate::core::payload::Payload;
 use crate::errors::StrHideError;
@@ -361,7 +361,8 @@ pub fn probe_hevc_capacity_info(
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
-    let pool = probe_hevc_pool(carrier, kind, exact)?;
+    control.stage(Stage::Decode);
+    let pool = probe_hevc_pool(carrier, kind, exact, control)?;
     // The pool scan is the long part of an exact probe; report before the
     // (cheap) summary is built so a cancellation lands after the scan, not
     // silently in the middle of it.
@@ -400,9 +401,11 @@ fn probe_hevc_pool(
     carrier: &[u8],
     kind: HevcCarrierKind,
     exact: bool,
+    control: &Control<'_>,
 ) -> Result<PoolProfile, StrHideError> {
     if kind != HevcCarrierKind::Mp4Container || exact {
-        let record = record_carrier_state(carrier, kind, Capture::Count, StopCondition::All)?;
+        let record =
+            record_carrier_state(carrier, kind, Capture::Count, StopCondition::All, control)?;
         return Ok(PoolProfile::from_record(&record));
     }
 
@@ -447,7 +450,8 @@ fn probe_hevc_pool(
 
     // 150 pictures or fewer: full scan (0% estimation error, fast enough)
     if selectable <= 150 {
-        let record = record_carrier_state(carrier, kind, Capture::Count, StopCondition::All)?;
+        let record =
+            record_carrier_state(carrier, kind, Capture::Count, StopCondition::All, control)?;
         return Ok(PoolProfile::from_record(&record));
     }
 
@@ -457,7 +461,17 @@ fn probe_hevc_pool(
     let mut band_recorded_slots = [0usize; 2];
     let mut band_sampled_bytes = [0usize; 2];
 
-    for cand in &candidates {
+    control.stage_sized(Stage::Decode, sample_limit as u64);
+
+    for (c_idx, cand) in candidates.iter().enumerate() {
+        if c_idx % 16 == 0 {
+            control.check()?;
+            control.report(Event::progress(
+                Stage::Decode,
+                recorded_slices as u64,
+                Some(sample_limit as u64),
+            ));
+        }
         let slice_bytes = &carrier[cand.span.clone()];
         if slice_bytes.len() < 2 {
             continue;
@@ -768,6 +782,7 @@ pub fn embed_hevc_patches_with_factor(
         kind,
         Capture::Full,
         StopCondition::TargetSlots(target_slots),
+        control,
     )?;
     control.check()?;
     control.stage(Stage::Solve);
@@ -1028,12 +1043,20 @@ pub fn embed_hevc_patches_with_factor(
             .map(|(&idx, entries)| (idx, entries))
             .collect();
 
-        let outcomes: Vec<SliceReencodeOutcome> = slice_items
+        control.stage_sized(Stage::Encode, slice_items.len() as u64);
+
+        let outcomes: Result<Vec<SliceReencodeOutcome>, StrHideError> = slice_items
             .into_par_iter()
             .map(|(slice_idx, flipped_entries)| {
-                reencode_slice(slice_idx, &slice_contexts[slice_idx], flipped_entries)
+                control.check()?;
+                Ok(reencode_slice(
+                    slice_idx,
+                    &slice_contexts[slice_idx],
+                    flipped_entries,
+                ))
             })
             .collect();
+        let outcomes = outcomes?;
 
         for outcome in outcomes {
             match outcome {
@@ -1441,6 +1464,7 @@ pub fn extract_hevc(
         kind,
         Capture::Bits,
         StopCondition::MinSlots(HEVC_SUPERBLOCK_POOL_SLOTS),
+        control,
     )?;
     extract_hevc_from_sb_record(carrier, kind, sb_record, secret, domain, fmt, control)
 }
@@ -1501,6 +1525,7 @@ fn extract_hevc_from_sb_record(
             kind,
             Capture::Bits,
             StopCondition::TargetSlices(w0),
+            control,
         )?
     };
 
@@ -1724,6 +1749,7 @@ pub fn inspect_hevc(
         kind,
         Capture::Bits,
         StopCondition::MinSlots(HEVC_SUPERBLOCK_POOL_SLOTS),
+        control,
     ) {
         Ok(r) => r,
         Err(_) => return Ok(empty_info),
@@ -1775,6 +1801,7 @@ pub fn verify_hevc(
         kind,
         Capture::Bits,
         StopCondition::MinSlots(HEVC_SUPERBLOCK_POOL_SLOTS),
+        control,
     ) {
         Ok(rec) => {
             levels.push(VerifyLevel::pass(
@@ -2064,6 +2091,7 @@ fn record_carrier_state(
     kind: HevcCarrierKind,
     capture: Capture,
     stop: StopCondition,
+    control: &Control<'_>,
 ) -> Result<CarrierRecord, StrHideError> {
     // Only the embedder rewrites an RBSP or replays a bin journal; the
     // read-only levels run the recorder in slot-only mode and never keep a
@@ -2164,12 +2192,23 @@ fn record_carrier_state(
     let mut sink = SlotSink::new(capture);
     let mut recorded_slices = 0usize;
 
+    let total_slices = candidates.len();
+    control.stage_sized(Stage::Decode, total_slices as u64);
+
     // `slice_idx` indexes `slice_contexts`, so it advances only when a slice is
     // actually recorded. Using the enumeration index of the candidate list
     // would desynchronise the two as soon as one slice fails to decode, and
     // `slot.slice_idx` would then point at the wrong context during embedding.
     let mut slice_idx = 0usize;
-    for cand in &candidates {
+    for (cand_idx, cand) in candidates.iter().enumerate() {
+        if cand_idx % 16 == 0 {
+            control.check()?;
+            control.report(Event::progress(
+                Stage::Decode,
+                cand_idx as u64,
+                Some(total_slices as u64),
+            ));
+        }
         let slice_bytes = &carrier[cand.span.clone()];
         if slice_bytes.len() < 2 {
             continue;
@@ -2225,6 +2264,11 @@ fn record_carrier_state(
             }
         }
     }
+    control.report(Event::progress(
+        Stage::Decode,
+        total_slices as u64,
+        Some(total_slices as u64),
+    ));
 
     // A carrier the decoder refused outright (Range Extensions, >10-bit, a
     // truncated stream) would otherwise surface as "0 bytes of capacity" --
@@ -2451,7 +2495,13 @@ fn scan_hevc_slot_count(carrier: &[u8]) -> Result<usize, StrHideError> {
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
-    let record = record_carrier_state(carrier, kind, Capture::Count, StopCondition::All)?;
+    let record = record_carrier_state(
+        carrier,
+        kind,
+        Capture::Count,
+        StopCondition::All,
+        &Control::none(),
+    )?;
     Ok(record.total_slots())
 }
 
@@ -2855,6 +2905,7 @@ pub fn bench_scan_slices(
         kind,
         capture,
         StopCondition::TargetSlices(slice_count),
+        &Control::none(),
     )?;
     let elapsed = t0.elapsed().as_micros() as u64;
     let band0 = record.bands.first().map_or(0, |r| r.len());

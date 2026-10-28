@@ -116,6 +116,7 @@ pub mod heif_hidden_item {
                         output_path: None,
                         password: Some("heif-pass"),
                         overwrite: false,
+                        ..Default::default()
                     },
                 )
                 .expect("read");
@@ -129,6 +130,7 @@ pub mod heif_hidden_item {
                         password: None,
                         backup: false,
                         overwrite: false,
+                        ..Default::default()
                     },
                 )
                 .expect("remove");
@@ -169,6 +171,7 @@ pub mod heif_hidden_item {
                         output_path: None,
                         password: Some("heif-pass"),
                         overwrite: false,
+                        ..Default::default()
                     },
                 )
                 .expect("read");
@@ -181,6 +184,7 @@ pub mod heif_hidden_item {
                         password: None,
                         backup: false,
                         overwrite: false,
+                        ..Default::default()
                     },
                 )
                 .expect("remove");
@@ -225,6 +229,7 @@ pub mod heif_hidden_item {
                         output_path: None,
                         password: Some("heif-pass"),
                         overwrite: false,
+                        ..Default::default()
                     },
                 )
                 .expect("read");

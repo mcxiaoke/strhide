@@ -85,6 +85,7 @@ fn byte_api_and_file_api_are_cross_readable() {
             output_path: None,
             password: Some(PASSWORD),
             overwrite: false,
+            ..Default::default()
         },
         &StructureProfile::default(),
     )
@@ -168,6 +169,7 @@ fn file_restore_refuses_to_overwrite_an_existing_output() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
         &StructureProfile::default(),
     )
@@ -355,6 +357,7 @@ fn byte_and_file_remove_agree() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
         &StructureProfile::default(),
     )

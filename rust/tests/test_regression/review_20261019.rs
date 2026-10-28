@@ -134,6 +134,7 @@ fn zip_tampered_patch_offset_returns_corrupted_data() {
             password: Some("pw"),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_err();
@@ -145,6 +146,7 @@ fn zip_tampered_patch_offset_returns_corrupted_data() {
                 output_path: None,
                 password: Some("pw"),
                 overwrite: false,
+                ..Default::default()
             }
         )
         .is_ok(),
@@ -395,6 +397,7 @@ fn png_dirty_tail_beyond_64k_is_supported() {
                 output_path: None,
                 password: None,
                 overwrite: false,
+                ..Default::default()
             }
         )
         .unwrap()
@@ -409,6 +412,7 @@ fn png_dirty_tail_beyond_64k_is_supported() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -441,6 +445,7 @@ fn png_dirty_tail_auto_strategy() {
                 output_path: None,
                 password: None,
                 overwrite: false,
+                ..Default::default()
             }
         )
         .unwrap()
@@ -480,6 +485,7 @@ fn extract_refuses_to_overwrite_existing_file() {
             output_path: Some(&outdir),
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_err();
@@ -496,6 +502,7 @@ fn extract_refuses_to_overwrite_existing_file() {
             output_path: Some(&outdir),
             password: None,
             overwrite: true,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -748,6 +755,7 @@ fn a15_unencrypted_corrupted_metadata_reports_corrupted_not_password() {
             output_path: None,
             password: Some("WrongPass123"),
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_err();
@@ -781,6 +789,7 @@ fn a15_unencrypted_corrupted_metadata_reports_corrupted_not_password() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     );
     if let Err(e) = err_plain {

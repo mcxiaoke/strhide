@@ -12,6 +12,8 @@
 
 use std::path::Path;
 
+use crate::core::control::Control;
+
 /// Options controlling an injection. Bundled into a struct so the public API
 /// stays readable and extensible as features grow (replaces a nine-parameter
 /// positional signature that clippy flagged as `too_many_arguments`).
@@ -34,6 +36,8 @@ pub struct WriteOptions<'a> {
     pub preserve_time: bool,
     /// Keep a `<carrier>.bak` backup for in-place writes.
     pub backup: bool,
+    /// Progress reporting and cancellation channel.
+    pub control: Control<'a>,
 }
 
 impl Default for WriteOptions<'_> {
@@ -46,7 +50,16 @@ impl Default for WriteOptions<'_> {
             stealth: false,
             preserve_time: true,
             backup: true,
+            control: Control::none(),
         }
+    }
+}
+
+impl<'a> WriteOptions<'a> {
+    /// Set [`control`](Self::control).
+    pub const fn with_control(mut self, control: Control<'a>) -> Self {
+        self.control = control;
+        self
     }
 }
 
@@ -64,6 +77,8 @@ pub struct ReadOptions<'a> {
     pub password: Option<&'a str>,
     /// Replace an existing destination instead of refusing.
     pub overwrite: bool,
+    /// Progress reporting and cancellation channel.
+    pub control: Control<'a>,
 }
 
 impl<'a> ReadOptions<'a> {
@@ -73,6 +88,7 @@ impl<'a> ReadOptions<'a> {
             output_path: None,
             password: None,
             overwrite: false,
+            control: Control::none(),
         }
     }
 
@@ -93,6 +109,12 @@ impl<'a> ReadOptions<'a> {
         self.overwrite = overwrite;
         self
     }
+
+    /// Set [`control`](Self::control).
+    pub const fn with_control(mut self, control: Control<'a>) -> Self {
+        self.control = control;
+        self
+    }
 }
 
 /// Options controlling a restore (envelope removal).
@@ -110,6 +132,8 @@ pub struct RestoreOptions<'a> {
     pub backup: bool,
     /// Replace an existing *different* destination instead of refusing.
     pub overwrite: bool,
+    /// Progress reporting and cancellation channel.
+    pub control: Control<'a>,
 }
 
 impl<'a> RestoreOptions<'a> {
@@ -120,6 +144,7 @@ impl<'a> RestoreOptions<'a> {
             password: None,
             backup: false,
             overwrite: false,
+            control: Control::none(),
         }
     }
 
@@ -144,6 +169,12 @@ impl<'a> RestoreOptions<'a> {
     /// Set [`overwrite`](Self::overwrite).
     pub const fn with_overwrite(mut self, overwrite: bool) -> Self {
         self.overwrite = overwrite;
+        self
+    }
+
+    /// Set [`control`](Self::control).
+    pub const fn with_control(mut self, control: Control<'a>) -> Self {
+        self.control = control;
         self
     }
 }

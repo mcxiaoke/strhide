@@ -1460,6 +1460,7 @@ pub fn extract_png(
     control: &Control<'_>,
 ) -> Result<Payload<'static>, StrHideError> {
     params.validate()?;
+    control.stage(Stage::Decode);
     let image = decode_png(carrier_bytes)?;
     control.check()?;
     let w = image.width as usize;
@@ -1876,11 +1877,13 @@ pub fn probe_png_capacity(
     // Probe with the same wire-quantised hyperparameters the embedder will
     // use, so the advertised capacity matches the pool embedding sees.
     let params = params.wire_quantized();
+    control.stage(Stage::Decode);
     let image = decode_png(carrier_bytes)?;
     let w = image.width as usize;
     let h = image.height as usize;
     let total_pixels = w * h;
 
+    control.stage(Stage::CostMap);
     let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, &params);
     control.check()?;
 

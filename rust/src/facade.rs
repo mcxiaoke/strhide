@@ -54,14 +54,17 @@
 
 #[cfg(feature = "cli")]
 use std::ffi::OsString;
-#[cfg(any(feature = "structure-base", feature = "content-base"))]
 use std::path::Path;
 #[cfg(feature = "content-base")]
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
+use crate::core::control::Control;
 #[cfg(feature = "content-base")]
 use crate::core::payload::Payload;
-#[cfg(any(feature = "structure-base", feature = "content-base"))]
+#[cfg(feature = "content-base")]
+use crate::errors::ErrorDetail;
 use crate::errors::StrHideError;
 #[cfg(feature = "structure-base")]
 use crate::params::LocalParams;
@@ -77,7 +80,10 @@ use crate::structure::{
 };
 
 #[cfg(feature = "content-base")]
-use crate::stego::io::{embed_carrier_file, extract_carrier_file_payload};
+use crate::stego::io::{
+    embed_carrier_file, extract_carrier_file_payload, inspect_carrier_file, probe_carrier_file,
+    verify_carrier_file,
+};
 #[cfg(feature = "content-base")]
 use crate::stego::params::StegoProfile;
 #[cfg(feature = "content-base")]
@@ -86,6 +92,61 @@ use crate::stego::{
     StegoVerifyResult, VerifyOptions, embed_carrier_with_dialect, extract_carrier_payload,
     inspect_carrier_with_dialect, probe_carrier_capacity_with_dialect, verify_carrier_with_dialect,
 };
+
+/// Target hiding domain in a carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Domain {
+    Structure,
+    Content,
+}
+
+/// Options controlling a dual-domain inspection pass.
+#[derive(Debug, Clone, Default)]
+pub struct DualOptions<'a> {
+    pub password: Option<&'a str>,
+    pub domain: Option<&'a str>,
+    pub control: Control<'a>,
+}
+
+/// Cross-domain inspection diagnosis.
+#[derive(Debug, Clone, Serialize)]
+pub struct DualInspect {
+    #[cfg(feature = "structure-base")]
+    #[serde(flatten)]
+    pub structure: crate::structure::InspectResult,
+
+    #[cfg(feature = "content-base")]
+    #[serde(rename = "content_stego", skip_serializing_if = "Option::is_none")]
+    pub content: Option<crate::stego::StegoHeaderInfo>,
+
+    #[cfg(feature = "content-base")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_error: Option<ErrorDetail>,
+}
+
+/// Options for automatic domain selection extraction.
+#[cfg(all(feature = "structure-base", feature = "content-base"))]
+#[derive(Debug, Clone, Default)]
+pub struct SmartExtractOptions<'a> {
+    pub password: Option<&'a str>,
+    pub domain: Option<&'a str>,
+    /// Limits PBKDF2 iterations and tried cipher suites to avoid GUI hangs.
+    pub limits: crate::stego::ExtractParams,
+    /// Preferred domain when both domains hold hidden data (defaults to Structure).
+    pub prefer: Option<Domain>,
+    pub control: Control<'a>,
+}
+
+/// Structured outcome of automatic domain selection extraction.
+#[cfg(all(feature = "structure-base", feature = "content-base"))]
+#[derive(Debug, Clone)]
+pub struct ExtractOutcome {
+    pub payload: crate::core::payload::Payload<'static>,
+    pub source: Domain,
+    /// Set if the other domain also contained hidden data.
+    pub also_present: Option<Domain>,
+}
 
 /// The private dialect for both domains, composed.
 ///
@@ -233,6 +294,143 @@ impl StrHide {
     #[cfg(feature = "content-base")]
     pub const fn stego(&self) -> StegoFacade<'_> {
         StegoFacade { engine: self }
+    }
+
+    /// Cross-domain read-only inspection.
+    pub fn inspect_any(
+        &self,
+        carrier: &Path,
+        opts: &DualOptions<'_>,
+    ) -> Result<DualInspect, StrHideError> {
+        #[allow(unused_variables)]
+        let _ = (carrier, opts);
+
+        #[cfg(feature = "structure-base")]
+        let structure = self.structure().inspect_file(carrier, opts.password)?;
+
+        #[cfg(feature = "content-base")]
+        let (content, content_error) = {
+            let format = {
+                #[cfg(feature = "structure-base")]
+                {
+                    Some(structure.format)
+                }
+                #[cfg(not(feature = "structure-base"))]
+                {
+                    let mut f = std::fs::File::open(carrier)?;
+                    crate::formats::sniff::sniff_stream(&mut f)?
+                }
+            };
+            if format.is_some_and(|f| f.supports_stego()) {
+                let stego_opts = crate::stego::InspectOptions {
+                    password: opts.password,
+                    domain: opts.domain,
+                    limits: crate::stego::ExtractParams::default(),
+                    control: opts.control,
+                };
+                match self.stego().inspect_file(carrier, &stego_opts) {
+                    Ok(info) => (Some(info).filter(|i| i.has_hidden_data), None),
+                    Err(e) => (None, Some(e.detail_i18n())),
+                }
+            } else {
+                (None, None)
+            }
+        };
+
+        Ok(DualInspect {
+            #[cfg(feature = "structure-base")]
+            structure,
+            #[cfg(feature = "content-base")]
+            content,
+            #[cfg(feature = "content-base")]
+            content_error,
+        })
+    }
+
+    /// Auto-detect domain safe payload extraction (guided by cheap inspect_any).
+    #[cfg(all(feature = "structure-base", feature = "content-base"))]
+    pub fn smart_extract(
+        &self,
+        carrier: &Path,
+        opts: &SmartExtractOptions<'_>,
+    ) -> Result<ExtractOutcome, StrHideError> {
+        let diag = self.inspect_any(
+            carrier,
+            &DualOptions {
+                password: opts.password,
+                domain: opts.domain,
+                control: opts.control,
+            },
+        )?;
+        let has_struct = diag.structure.has_hidden_data;
+        let has_content = diag.content.as_ref().is_some_and(|c| c.has_hidden_data);
+
+        let (chosen, also_present) = match (has_struct, has_content) {
+            (true, true) => {
+                let primary = opts.prefer.unwrap_or(Domain::Structure);
+                let secondary = match primary {
+                    Domain::Structure => Domain::Content,
+                    Domain::Content => Domain::Structure,
+                };
+                (primary, Some(secondary))
+            }
+            (true, false) => (Domain::Structure, None),
+            (false, true) => (Domain::Content, None),
+            (false, false) => {
+                return Err(StrHideError::NoHiddenData(format!(
+                    "No hidden data found in '{}'",
+                    carrier.display()
+                )));
+            }
+        };
+
+        match chosen {
+            Domain::Structure => {
+                let read_res = self.structure().read_file(
+                    carrier,
+                    &crate::structure::ReadOptions {
+                        output_path: None,
+                        password: opts.password,
+                        overwrite: false,
+                        control: opts.control,
+                    },
+                )?;
+                let kind = if read_res.is_file {
+                    crate::core::payload::PayloadKind::File
+                } else {
+                    crate::core::payload::PayloadKind::Text
+                };
+                let mut payload =
+                    crate::core::payload::Payload::owned(read_res.data).with_kind(kind);
+                if !read_res.filename.is_empty() {
+                    payload = payload.with_name(read_res.filename);
+                }
+                Ok(ExtractOutcome {
+                    payload,
+                    source: Domain::Structure,
+                    also_present,
+                })
+            }
+            Domain::Content => {
+                let ex_opts = crate::stego::ExtractOptions {
+                    password: opts.password,
+                    domain: opts.domain,
+                    limits: opts.limits.clone(),
+                    control: opts.control,
+                    pool: None,
+                };
+                let payload = crate::stego::io::extract_carrier_file_payload(
+                    carrier,
+                    &ex_opts,
+                    &self.dialect().stego,
+                )?;
+                Ok(ExtractOutcome {
+                    payload,
+                    source: Domain::Content,
+                    also_present,
+                })
+            }
+        }
     }
 
     // ─────────────────────────────── command line ────────────────────────────
@@ -442,30 +640,47 @@ impl StegoFacade<'_> {
         verify_carrier_with_dialect(carrier, options, &self.engine.dialect().stego)
     }
 
+    /// Probe the embedding capacity of an image or video file.
+    pub fn probe_file(
+        &self,
+        carrier: &Path,
+        options: &ProbeOptions<'_>,
+    ) -> Result<StegoCapacityInfo, StrHideError> {
+        probe_carrier_file(carrier, options, &self.engine.dialect().stego)
+    }
+
+    /// Read-only feature/header inspection of an image or video file.
+    pub fn inspect_file(
+        &self,
+        carrier: &Path,
+        options: &InspectOptions<'_>,
+    ) -> Result<StegoHeaderInfo, StrHideError> {
+        inspect_carrier_file(carrier, options, &self.engine.dialect().stego)
+    }
+
+    /// Three-tier verification of a content-domain carrier file.
+    pub fn verify_file(
+        &self,
+        carrier: &Path,
+        options: &VerifyOptions<'_>,
+    ) -> Result<StegoVerifyResult, StrHideError> {
+        verify_carrier_file(carrier, options, &self.engine.dialect().stego)
+    }
+
     /// Embed `payload` into an image file and commit it atomically.
-    ///
-    /// The carrier is read, the embedding is done in memory, and the result is
-    /// committed through the same temp-file + atomic-rename path the structure
-    /// domain and the CLI use (optional `.bak`, timestamps preserved).
-    ///
-    /// When `target` is `None` the carrier is replaced in place; otherwise the
-    /// result is written to `target` and the original carrier is left alone.
-    /// Returns the created backup path, if any.
     pub fn embed_file(
         &self,
         carrier: &Path,
-        target: Option<&Path>,
         payload: &Payload<'_>,
         options: &EmbedOptions<'_>,
-        backup: bool,
-    ) -> Result<Option<PathBuf>, StrHideError> {
+        target: &crate::commit::FileTarget<'_>,
+    ) -> Result<crate::stego::StegoEmbedResult, StrHideError> {
         embed_carrier_file(
             carrier,
-            target,
             payload,
             options,
             &self.engine.dialect().stego,
-            backup,
+            target,
         )
     }
 

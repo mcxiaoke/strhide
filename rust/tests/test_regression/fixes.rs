@@ -212,6 +212,7 @@ fn path_traversal_sanitized() {
             output_path: Some(&outdir),
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -317,6 +318,7 @@ fn double_envelope_reverse_order_removal() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -328,6 +330,7 @@ fn double_envelope_reverse_order_removal() {
             password: Some("pw1"),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -363,6 +366,7 @@ fn double_envelope_inner_first_removal_diagnosed() {
             password: Some("pw1"),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_err();
@@ -394,6 +398,7 @@ fn pdf_dirty_tail_lossless() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -406,6 +411,7 @@ fn pdf_dirty_tail_lossless() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -479,6 +485,7 @@ fn auto_capacity_boundary_uses_multisegment_app15() {
             output_path: None,
             password: Some("pw"),
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -493,6 +500,7 @@ fn auto_capacity_boundary_uses_multisegment_app15() {
             password: Some("pw"),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -570,6 +578,7 @@ fn zip_fake_eocd_comment_lifecycle() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -596,6 +605,7 @@ fn zip_eof_stego_still_locatable() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -608,6 +618,7 @@ fn zip_eof_stego_still_locatable() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -650,6 +661,7 @@ fn tampered_meta_len_rejected() {
                 output_path: None,
                 password: None,
                 overwrite: false,
+                ..Default::default()
             }
         )
         .is_err()
@@ -669,6 +681,7 @@ fn tampered_hint_len_rejected() {
                 output_path: None,
                 password: None,
                 overwrite: false,
+                ..Default::default()
             }
         )
         .is_err()
@@ -768,6 +781,7 @@ fn error_type_is_still_strhide_error() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_err();

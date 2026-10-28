@@ -45,6 +45,7 @@ fn test_heif_synthetic_stub_auto_strategy_fallback() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     );
     assert!(

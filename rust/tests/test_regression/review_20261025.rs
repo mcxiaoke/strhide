@@ -101,6 +101,7 @@ fn zip_empty_archive_auto_falls_back_to_eof() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -113,6 +114,7 @@ fn zip_empty_archive_auto_falls_back_to_eof() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -207,6 +209,7 @@ fn heif_item_hidden_synthetic_roundtrip() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -219,6 +222,7 @@ fn heif_item_hidden_synthetic_roundtrip() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -248,6 +252,7 @@ fn heif_without_meta_still_uses_box_uuid() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -260,6 +265,7 @@ fn heif_without_meta_still_uses_box_uuid() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -295,6 +301,7 @@ fn pdf_dirty_tail_beyond_128k_window_still_locates() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -307,6 +314,7 @@ fn pdf_dirty_tail_beyond_128k_window_still_locates() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -407,6 +415,7 @@ fn pdf_encrypted_document_rejects_incremental_and_roundtrips_via_eof() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -419,6 +428,7 @@ fn pdf_encrypted_document_rejects_incremental_and_roundtrips_via_eof() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -487,6 +497,7 @@ fn zip64_locator_routes_auto_to_eof() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -499,6 +510,7 @@ fn zip64_locator_routes_auto_to_eof() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -586,6 +598,7 @@ fn wav_webp_auto_falls_back_to_eof_on_boundary_mismatch() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -598,6 +611,7 @@ fn wav_webp_auto_falls_back_to_eof_on_boundary_mismatch() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -661,6 +675,7 @@ fn jpeg_auto_falls_back_to_eof_when_sos_unreachable() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -673,6 +688,7 @@ fn jpeg_auto_falls_back_to_eof_when_sos_unreachable() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -723,6 +739,7 @@ fn heif_meta_tail_residual_roundtrips() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -735,6 +752,7 @@ fn heif_meta_tail_residual_roundtrips() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();

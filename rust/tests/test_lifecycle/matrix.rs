@@ -241,6 +241,7 @@ fn run_cell(
             output_path: None,
             password,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_or_else(|e| panic!("{label}: read failed: {e}"));
@@ -259,6 +260,7 @@ fn run_cell(
             password,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_or_else(|e| panic!("{label}: remove failed: {e}"));
@@ -318,6 +320,7 @@ fn run_cell_any_reported_strategy(
             output_path: None,
             password,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_or_else(|e| panic!("{label}: read failed: {e}"));
@@ -335,6 +338,7 @@ fn run_cell_any_reported_strategy(
             password,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_or_else(|e| panic!("{label}: remove failed: {e}"));
@@ -495,6 +499,7 @@ fn stealth_envelope_is_invisible_without_its_password() {
                 output_path: None,
                 password: None,
                 overwrite: false,
+                ..Default::default()
             },
         )
         .unwrap_err();
@@ -520,6 +525,7 @@ fn stealth_envelope_is_invisible_without_its_password() {
                 output_path: None,
                 password: Some("wrong-pw"),
                 overwrite: false,
+                ..Default::default()
             },
         )
         .unwrap_err();
@@ -628,6 +634,7 @@ fn password_hint_roundtrips_on_every_format() {
                 output_path: None,
                 password: None,
                 overwrite: false,
+                ..Default::default()
             },
         )
         .unwrap_err();
@@ -648,6 +655,7 @@ fn password_hint_roundtrips_on_every_format() {
                 output_path: None,
                 password: Some("hint-pw"),
                 overwrite: false,
+                ..Default::default()
             },
         )
         .expect("read");

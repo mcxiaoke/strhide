@@ -74,6 +74,7 @@ fn assert_unreadable(carrier: &Path, password: Option<&str>, profile: &Structure
             output_path: None,
             password,
             overwrite: false,
+            ..Default::default()
         },
         profile,
     ) {
@@ -117,6 +118,7 @@ fn private_default_secret_is_unreadable_with_the_official_profile() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
         &profile,
     )
@@ -139,6 +141,7 @@ fn private_default_secret_is_unreadable_with_the_official_profile() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
         &profile,
     )
@@ -173,6 +176,7 @@ fn explicit_password_still_wins_over_the_private_secret() {
             output_path: None,
             password: Some("pw"),
             overwrite: false,
+            ..Default::default()
         },
         &StructureProfile::default(),
     )
@@ -216,6 +220,7 @@ fn custom_magic_is_invisible_to_the_official_reader() {
                 output_path: None,
                 password: None,
                 overwrite: false,
+                ..Default::default()
             },
             &profile
         )
@@ -256,6 +261,7 @@ fn custom_stealth_domain_changes_the_derived_magic() {
                 output_path: None,
                 password: Some("pw"),
                 overwrite: false,
+                ..Default::default()
             },
             &profile
         )
@@ -311,6 +317,7 @@ fn chunk_size_is_a_writer_only_knob() {
                 output_path: None,
                 password: None,
                 overwrite: false,
+                ..Default::default()
             },
             &StructureProfile::default(),
         )
@@ -364,6 +371,7 @@ fn compression_strategy_is_a_writer_only_knob() {
                 output_path: None,
                 password: None,
                 overwrite: false,
+                ..Default::default()
             },
             &StructureProfile::default()
         )
@@ -446,6 +454,7 @@ fn rejection_policy_governs_filename_checks() {
                 output_path: None,
                 password: None,
                 overwrite: false,
+                ..Default::default()
             },
             &StructureProfile::default()
         )

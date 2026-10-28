@@ -210,6 +210,7 @@ fn read_stealth_without_password_reports_guidance() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_err();
@@ -264,6 +265,7 @@ fn read_encrypted_without_password_raises_password_variant() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_err();
@@ -334,6 +336,7 @@ fn clean_zip_is_still_accepted() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -380,6 +383,7 @@ fn cli_unescape_supports_full_escape_set() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -430,6 +434,7 @@ fn cli_unescape_combines_surrogate_pair() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -467,6 +472,7 @@ fn cli_unescape_keeps_non_ascii_input_intact() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -542,6 +548,7 @@ fn backup_collision_uses_timestamped_name() {
             password: None,
             backup: true,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();

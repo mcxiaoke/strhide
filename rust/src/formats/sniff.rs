@@ -139,6 +139,34 @@ impl serde::Serialize for FileFormat {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for FileFormat {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|f| f.as_str().eq_ignore_ascii_case(&s))
+            .ok_or_else(|| {
+                serde::de::Error::unknown_variant(
+                    &s,
+                    &[
+                        "PNG",
+                        "JPEG",
+                        "WEBP",
+                        "HEIF",
+                        "MP4",
+                        "MKV",
+                        "WAV",
+                        "ZIP",
+                        "PDF",
+                        "PE",
+                        "HEVC-AnnexB",
+                    ],
+                )
+            })
+    }
+}
+
 /// Detect whether the byte slice is an ISO BMFF HEIF/HEIC image container based on ftyp brand.
 ///
 /// The first box must be a well-formed `ftyp` whose size is sane, and at least

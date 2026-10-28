@@ -12,6 +12,30 @@ use rand::RngExt;
 
 use crate::errors::StrHideError;
 
+/// Target file commit configuration shared across structure and content domains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileTarget<'a> {
+    /// None = overwrite carrier in place; Some(path) = write to destination path.
+    pub output_path: Option<&'a Path>,
+    /// Whether to keep `<carrier>.bak` on in-place commits.
+    pub backup: bool,
+    /// Whether to clone original carrier atime/mtime timestamps onto target.
+    pub preserve_time: bool,
+    /// Whether to allow overwriting an existing destination file when output_path is Some.
+    pub overwrite: bool,
+}
+
+impl Default for FileTarget<'_> {
+    fn default() -> Self {
+        Self {
+            output_path: None,
+            backup: true,
+            preserve_time: true,
+            overwrite: false,
+        }
+    }
+}
+
 /// Whether two paths refer to the same file.
 ///
 /// The lexical comparison stays as the last resort, so a missing file still

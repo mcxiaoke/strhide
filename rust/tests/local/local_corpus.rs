@@ -248,6 +248,7 @@ fn plain_mode(
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .map_err(|e| format!("read: {e}"))?;
@@ -260,6 +261,7 @@ fn plain_mode(
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .map_err(|e| format!("remove: {e}"))?;
@@ -295,6 +297,7 @@ fn encrypted_mode(
             output_path: None,
             password: Some("WrongPassword!"),
             overwrite: false,
+            ..Default::default()
         },
     ) {
         Err(StrHideError::Password(_)) => {}
@@ -307,6 +310,7 @@ fn encrypted_mode(
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .is_ok()
@@ -320,6 +324,7 @@ fn encrypted_mode(
             output_path: None,
             password: Some(ENC_PASSWORD),
             overwrite: false,
+            ..Default::default()
         },
     )
     .map_err(|e| format!("read: {e}"))?;
@@ -334,6 +339,7 @@ fn encrypted_mode(
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .map_err(|e| format!("remove: {e}"))?;
@@ -376,6 +382,7 @@ fn stealth_mode(
             output_path: None,
             password: Some(STEALTH_PASSWORD),
             overwrite: false,
+            ..Default::default()
         },
     )
     .map_err(|e| format!("read: {e}"))?;
@@ -388,6 +395,7 @@ fn stealth_mode(
             password: Some(STEALTH_PASSWORD),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .map_err(|e| format!("remove: {e}"))?;

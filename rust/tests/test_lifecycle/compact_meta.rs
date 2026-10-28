@@ -104,6 +104,7 @@ fn compact_metadata_survives_the_full_cycle() {
             output_path: None,
             password: Some("pw"),
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -123,6 +124,7 @@ fn compact_metadata_survives_the_full_cycle() {
             password: Some("pw"),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();

@@ -191,6 +191,24 @@ impl serde::Serialize for StrategyId {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for StrategyId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Helper {
+            Num(u8),
+            Str(String),
+            Map { id: u8 },
+        }
+        match Helper::deserialize(deserializer)? {
+            Helper::Num(n) => Ok(Self(n)),
+            Helper::Str(s) => Self::from_name(&s)
+                .ok_or_else(|| serde::de::Error::custom(format!("unknown strategy name: {s}"))),
+            Helper::Map { id } => Ok(Self(id)),
+        }
+    }
+}
+
 /// Largest strategy ID registered in [`STRATEGY_REGISTRY`].
 ///
 /// Computed, not written down: [`crate::structure::envelope::MAX_KNOWN_STRATEGY_ID`]

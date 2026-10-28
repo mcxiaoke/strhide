@@ -265,52 +265,52 @@ pub(crate) fn handle_embed(
         )?;
         options.no_filename = args.no_filename;
 
-        let output = crate::stego::embed_carrier_with_dialect_info(
-            &carrier_bytes,
-            &payload,
-            &options,
-            &dialect,
-        )?;
-        let stego_bytes = output.bytes;
-        let cap_info = output.capacity;
-
-        if !quiet && options.safety.enforcement == SafetyEnforcement::Advisory {
-            let cap_fallback;
-            let cap = match cap_info.as_ref() {
-                Some(c) => Some(c),
-                None => {
-                    cap_fallback = crate::stego::probe_carrier_capacity_with_dialect(
-                        &carrier_bytes,
-                        &probe_options,
-                        &dialect,
-                    )
-                    .ok();
-                    cap_fallback.as_ref()
-                }
-            };
-            if let Some(cap) = cap
-                && payload_len > cap.recommended_max_bytes
-            {
-                let bpp = (payload_len * 8) as f64 / cap.total_elements as f64;
-                eprintln!(
-                    "[WARN] Payload ({} bytes, bpp {:.4}) exceeds recommended safety threshold ({} bytes, tier: '{}', bpp <= {:.2}). Detection risk is elevated.",
-                    payload_len,
-                    bpp,
-                    cap.recommended_max_bytes,
-                    options.safety.level.as_str(),
-                    options.safety.level.bpp_limit()
-                );
-            }
-        }
-
-        let algo_str = format_stego_algorithm(
-            &options.tuning,
-            &options.safety,
-            carrier_format(&carrier_bytes),
-            cap_info.as_ref().map(|c| c.algorithm.as_str()),
-        );
-
         if args.dry_run {
+            let output = crate::stego::embed_carrier_with_dialect_info(
+                &carrier_bytes,
+                &payload,
+                &options,
+                &dialect,
+            )?;
+            let stego_bytes = output.bytes;
+            let cap_info = output.capacity;
+
+            if !quiet && options.safety.enforcement == SafetyEnforcement::Advisory {
+                let cap_fallback;
+                let cap = match cap_info.as_ref() {
+                    Some(c) => Some(c),
+                    None => {
+                        cap_fallback = crate::stego::probe_carrier_capacity_with_dialect(
+                            &carrier_bytes,
+                            &probe_options,
+                            &dialect,
+                        )
+                        .ok();
+                        cap_fallback.as_ref()
+                    }
+                };
+                if let Some(cap) = cap
+                    && payload_len > cap.recommended_max_bytes
+                {
+                    let bpp = (payload_len * 8) as f64 / cap.total_elements as f64;
+                    eprintln!(
+                        "[WARN] Payload ({} bytes, bpp {:.4}) exceeds recommended safety threshold ({} bytes, tier: '{}', bpp <= {:.2}). Detection risk is elevated.",
+                        payload_len,
+                        bpp,
+                        cap.recommended_max_bytes,
+                        options.safety.level.as_str(),
+                        options.safety.level.bpp_limit()
+                    );
+                }
+            }
+
+            let algo_str = format_stego_algorithm(
+                &options.tuning,
+                &options.safety,
+                carrier_format(&carrier_bytes),
+                cap_info.as_ref().map(|c| c.algorithm.as_str()),
+            );
+
             // Full rehearsal, no disk write: everything up to and including the
             // embed ran (capacity, safety gate, credential resolution), only the
             // commit is skipped.
@@ -361,24 +361,57 @@ pub(crate) fn handle_embed(
 
         let target =
             resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;
-        if let Some(ref dest) = target {
-            check_overwrite(dest, args.overwrite)?;
-        }
-        let dest = target.unwrap_or_else(|| carrier.to_path_buf());
-
         let backup = !args.no_backup && cfg.backup.unwrap_or(true);
-        let backup_created =
-            crate::structure::commit_carrier_bytes(carrier, &dest, &stego_bytes, backup, true)?;
+        let file_target = crate::commit::FileTarget {
+            output_path: target.as_deref(),
+            backup,
+            preserve_time: true,
+            overwrite: args.overwrite,
+        };
 
-        if let Some(ref bak) = backup_created
-            && !quiet
-        {
-            println!("{}", t!(Msg::InfoBackupCreated, path = bak.display()));
-        }
+        let res = crate::stego::io::embed_carrier_file(
+            carrier,
+            &payload,
+            &options,
+            &dialect,
+            &file_target,
+        )?;
 
         if !quiet {
+            for w in &res.warnings {
+                match w {
+                    crate::stego::StegoWarning::SafetyThresholdExceeded {
+                        payload_bytes,
+                        recommended_max_bytes,
+                        safety_level,
+                        actual_bpp,
+                        limit_bpp,
+                    } => {
+                        eprintln!(
+                            "[WARN] Payload ({} bytes, bpp {:.4}) exceeds recommended safety threshold ({} bytes, tier: '{}', bpp <= {:.2}). Detection risk is elevated.",
+                            payload_bytes,
+                            actual_bpp,
+                            recommended_max_bytes,
+                            safety_level,
+                            limit_bpp
+                        );
+                    }
+                }
+            }
+
+            if let Some(ref bak) = res.backup_file {
+                println!("{}", t!(Msg::InfoBackupCreated, path = bak.display()));
+            }
+
             let elapsed_str = format_duration(t_start.elapsed());
-            let is_inplace = crate::structure::same_file(carrier, &dest);
+            let is_inplace = crate::structure::same_file(carrier, &res.written_to);
+            let algo_str = format_stego_algorithm(
+                &options.tuning,
+                &options.safety,
+                Some(res.format),
+                res.capacity.as_ref().map(|c| c.algorithm.as_str()),
+            );
+
             if is_inplace {
                 println!(
                     "{}",
@@ -397,13 +430,13 @@ pub(crate) fn handle_embed(
                         Msg::EmbedOkDest,
                         bytes = format_size(payload_len as u64),
                         carrier = carrier.display(),
-                        dest = dest.display(),
+                        dest = res.written_to.display(),
                         algo = algo_str,
                         elapsed = elapsed_str
                     )
                 );
             }
-            if let Some(ref cap) = cap_info {
+            if let Some(ref cap) = res.capacity {
                 let used_pct = if cap.recommended_max_bytes > 0 {
                     (payload_len as f64 / cap.recommended_max_bytes as f64) * 100.0
                 } else {

@@ -603,6 +603,7 @@ pub fn embed_jpeg<'a>(
         coeffs.components[0].blocks.len(),
     )
     .map_err(map_dct_error)?;
+    control.stage(Stage::CostMap);
     let costs = cost_model.compute_cost(&coeffs, &geometry, params);
     // Checkpoint after the cost map; the trellis solve is the last long phase
     // and there is no safe way to stop it half-way that the reader could see.
@@ -1059,6 +1060,7 @@ pub fn extract_jpeg(
     control: &Control<'_>,
 ) -> Result<Payload<'static>, StrHideError> {
     fmt.validate()?;
+    control.stage(Stage::Decode);
     preflight_jpeg(carrier_bytes)?;
     let coeffs = dct_io::read_coefficients(carrier_bytes).map_err(map_dct_error)?;
     control.check()?;
@@ -1493,6 +1495,7 @@ pub fn probe_jpeg_capacity(
 ) -> Result<StegoCapacityInfo, StrHideError> {
     fmt.validate()?;
     params.validate()?;
+    control.stage(Stage::Decode);
     control.check()?;
     let preflight = preflight_jpeg(carrier_bytes)?;
     let info = preflight.info;

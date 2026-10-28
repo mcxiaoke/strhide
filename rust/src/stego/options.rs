@@ -27,9 +27,10 @@
 //! extract time is therefore not just unnecessary, it is a second source of
 //! truth that can silently disagree with the carrier.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::core::control::Control;
 use crate::errors::StrHideError;
@@ -884,6 +885,33 @@ impl EmbedOutput {
             capacity: None,
         }
     }
+}
+
+/// Advisory warnings produced during steganographic embedding.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StegoWarning {
+    SafetyThresholdExceeded {
+        payload_bytes: usize,
+        recommended_max_bytes: usize,
+        safety_level: String,
+        actual_bpp: f64,
+        limit_bpp: f64,
+    },
+}
+
+/// Structured outcome of embedding into a carrier file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StegoEmbedResult {
+    pub carrier: PathBuf,
+    pub written_to: PathBuf,
+    pub format: crate::formats::FileFormat,
+    pub payload_bytes: usize,
+    pub carrier_before_bytes: u64,
+    pub carrier_after_bytes: u64,
+    pub backup_file: Option<PathBuf>,
+    pub capacity: Option<StegoCapacityInfo>,
+    pub warnings: Vec<StegoWarning>,
 }
 
 /// Read-only steganographic header diagnostics obtained without full payload decoding.

@@ -104,16 +104,6 @@ pub(crate) fn print_json<T: serde::Serialize>(val: &T) -> Result<(), StrHideErro
     Ok(())
 }
 
-#[derive(serde::Serialize)]
-pub(crate) struct DualInspectResult {
-    // fields are read by cmd_diag (verdict aggregation) and serialized
-    #[serde(flatten)]
-    pub(crate) structure: crate::structure::InspectResult,
-    #[cfg(feature = "content")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) content_stego: Option<crate::stego::StegoHeaderInfo>,
-}
-
 pub(crate) fn print_verify_result(res: &crate::structure::VerifyResult) {
     println!("{}", t!(Msg::InspectCarrier, val = res.carrier.display()));
     println!("{}", t!(Msg::InspectFormat, val = res.format.as_str()));

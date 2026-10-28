@@ -184,14 +184,19 @@ fn content_file_embed_and_extract_roundtrip() {
     let engine = StrHide::new();
     let options = EmbedOptions::default();
 
+    let target_cfg = strhide::commit::FileTarget {
+        output_path: None,
+        backup: false,
+        preserve_time: true,
+        overwrite: true,
+    };
     engine
         .stego()
         .embed_file(
             &carrier,
-            None,
             &Payload::bytes(CONTENT_PAYLOAD),
             &options,
-            false,
+            &target_cfg,
         )
         .expect("embed_file");
 
@@ -214,14 +219,19 @@ fn content_file_embed_to_target_leaves_original_untouched() {
 
     let engine = StrHide::new();
     let options = EmbedOptions::default();
+    let target_cfg = strhide::commit::FileTarget {
+        output_path: Some(&target),
+        backup: false,
+        preserve_time: true,
+        overwrite: true,
+    };
     engine
         .stego()
         .embed_file(
             &carrier,
-            Some(&target),
             &Payload::bytes(CONTENT_PAYLOAD),
             &options,
-            false,
+            &target_cfg,
         )
         .expect("embed_file to target");
 
@@ -576,4 +586,110 @@ fn gui_front_end_smoke() {
         .detail_i18n()
         .render(Lang::En);
     assert!(en.contains("Password error"), "got: {en}");
+}
+
+#[test]
+fn test_inspect_any_and_smart_extract_cross_domain() {
+    let dir = scratch("inspect_any_smart_extract");
+    let carrier = dir.join("carrier.png");
+    std::fs::write(&carrier, PNG).expect("seed png");
+
+    let engine = StrHide::new();
+
+    // 1. Initial carrier: no hidden data
+    let diag = engine
+        .inspect_any(&carrier, &strhide::facade::DualOptions::default())
+        .expect("inspect_any on clean carrier");
+    assert!(!diag.structure.has_hidden_data);
+    assert!(diag.content.is_none());
+
+    // 2. Inject structural payload
+    let source = PayloadSource::Text("structure secret");
+    let write_opts = WriteOptions {
+        output_path: None,
+        ..Default::default()
+    };
+    engine
+        .structure()
+        .write_file(&carrier, source, &write_opts)
+        .expect("structure write_file");
+
+    // 3. inspect_any detects structure envelope
+    let diag = engine
+        .inspect_any(&carrier, &strhide::facade::DualOptions::default())
+        .expect("inspect_any on stego carrier");
+    assert!(diag.structure.has_hidden_data);
+
+    // 4. smart_extract automatically picks structure domain and extracts payload
+    let outcome = engine
+        .smart_extract(&carrier, &strhide::facade::SmartExtractOptions::default())
+        .expect("smart_extract");
+    assert_eq!(outcome.source, strhide::facade::Domain::Structure);
+    assert_eq!(outcome.payload.as_bytes(), b"structure secret");
+    assert!(outcome.also_present.is_none());
+}
+
+#[test]
+fn test_stego_file_symmetry_probe_inspect_verify() {
+    let dir = scratch("stego_file_symmetry");
+    let carrier = dir.join("carrier.jpg");
+    std::fs::write(&carrier, JPG).expect("seed jpg");
+
+    let engine = StrHide::new();
+    let probe_opts = ProbeOptions::default();
+    let cap = engine
+        .stego()
+        .probe_file(&carrier, &probe_opts)
+        .expect("probe_file");
+    assert!(cap.recommended_max_bytes > 0);
+
+    let inspect_opts = strhide::stego::InspectOptions::default();
+    let info = engine
+        .stego()
+        .inspect_file(&carrier, &inspect_opts)
+        .expect("inspect_file");
+    assert!(!info.has_hidden_data);
+
+    let verify_opts = strhide::stego::VerifyOptions::default();
+    let v_res = engine
+        .stego()
+        .verify_file(&carrier, &verify_opts)
+        .expect("verify_file");
+    assert!(v_res.levels[0].ok);
+}
+
+#[test]
+fn test_progress_writer_and_cancellation() {
+    use std::io::Write;
+    use std::sync::Mutex;
+    use strhide::core::control::{
+        CancelToken, Control, Event, Progress, ProgressWriter, Stage, map_io_cancel,
+    };
+    use strhide::errors::StrHideError;
+
+    struct TestProgress(Mutex<Vec<Event>>);
+    impl Progress for TestProgress {
+        fn report(&self, e: Event) {
+            self.0.lock().unwrap().push(e);
+        }
+    }
+
+    let progress = TestProgress(Mutex::new(Vec::new()));
+    let cancel = CancelToken::new();
+    let control = Control {
+        progress: &progress,
+        cancel: Some(&cancel),
+    };
+
+    let mut dest = Vec::new();
+    let mut pw = ProgressWriter::new(&mut dest, control, Stage::Write, 100);
+
+    // Cancel before write
+    cancel.cancel();
+    let err = pw.write(b"hello world").expect_err("should be cancelled");
+    assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+
+    let strhide_err = StrHideError::Io(err);
+    let mapped = map_io_cancel(&control, strhide_err);
+    assert!(matches!(mapped, StrHideError::Cancelled));
 }

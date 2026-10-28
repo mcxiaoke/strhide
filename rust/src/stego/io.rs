@@ -9,12 +9,17 @@
 //! `engine` required — so a pure stego consumer (e.g. a dedicated image tool)
 //! does not have to reimplement ~150 lines of crash-safe file handling.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+#[cfg(feature = "content-hevc")]
+use crate::commit::commit_carrier_patches;
+use crate::commit::{FileTarget, commit_carrier_bytes};
 use crate::core::payload::Payload;
+use crate::core::pipeline::check_overwrite;
 use crate::errors::StrHideError;
-use crate::stego::params::StegoProfile;
-use crate::stego::{EmbedOptions, ExtractOptions, embed_carrier_with_dialect};
+use crate::stego::embed_carrier_with_dialect_info;
+use crate::stego::options::{EmbedOptions, ExtractOptions, StegoEmbedResult, StegoWarning};
+use crate::stego::params::{SafetyEnforcement, StegoProfile};
 
 /// Embed `payload` into the carrier file at `carrier_path` and commit the result.
 ///
@@ -27,22 +32,34 @@ use crate::stego::{EmbedOptions, ExtractOptions, embed_carrier_with_dialect};
 /// result is written to `target_path` and the original carrier is left alone.
 /// An in-place write keeps a `<carrier>.bak` copy when `backup` is set.
 ///
-/// Returns the backup path that was created, if any.
+/// Embed `payload` into the carrier file at `carrier_path` and commit the result atomically.
 pub fn embed_carrier_file(
     carrier_path: &Path,
-    target_path: Option<&Path>,
     payload: &Payload<'_>,
     options: &EmbedOptions<'_>,
     dialect: &StegoProfile,
-    backup: bool,
-) -> Result<Option<PathBuf>, StrHideError> {
+    target: &FileTarget<'_>,
+) -> Result<StegoEmbedResult, StrHideError> {
+    let carrier_meta = std::fs::metadata(carrier_path)?;
+    let carrier_before_bytes = carrier_meta.len();
+    let dest = target.output_path.unwrap_or(carrier_path);
+    if target.output_path.is_some() {
+        check_overwrite(dest, target.overwrite)?;
+    }
+
     let carrier_bytes = std::fs::read(carrier_path)?;
-    let dest = target_path.unwrap_or(carrier_path);
+    let format = crate::formats::sniff::sniff_bytes(&carrier_bytes).ok_or_else(|| {
+        StrHideError::UnsupportedFormat(format!(
+            "Failed to identify carrier format for '{}'",
+            carrier_path.display()
+        ))
+    })?;
 
     #[cfg(feature = "content-hevc")]
-    if let Some(crate::formats::FileFormat::Mp4 | crate::formats::FileFormat::HevcAnnexB) =
-        crate::formats::sniff::sniff_bytes(&carrier_bytes)
-    {
+    if matches!(
+        format,
+        crate::formats::FileFormat::Mp4 | crate::formats::FileFormat::HevcAnnexB
+    ) {
         let domain = options.domain(dialect);
         options.control.check()?;
         let anon_payload;
@@ -70,23 +87,101 @@ pub fn embed_carrier_file(
             None => direct(),
         };
         match patches_res {
-            Ok((patches, _capacity)) => {
+            Ok((patches, capacity)) => {
                 drop(carrier_bytes);
-                return crate::commit::commit_carrier_patches(
+                let backup_file = commit_carrier_patches(
                     carrier_path,
                     dest,
                     &patches,
-                    backup,
-                    true,
-                );
+                    target.backup,
+                    target.preserve_time,
+                )?;
+                let carrier_after_bytes = std::fs::metadata(dest)?.len();
+
+                let mut warnings = Vec::new();
+                if options.safety.enforcement == SafetyEnforcement::Advisory
+                    && payload.as_bytes().len() > capacity.recommended_max_bytes
+                {
+                    let bpp = (payload.as_bytes().len() * 8) as f64
+                        / capacity.total_elements.max(1) as f64;
+                    warnings.push(StegoWarning::SafetyThresholdExceeded {
+                        payload_bytes: payload.as_bytes().len(),
+                        recommended_max_bytes: capacity.recommended_max_bytes,
+                        safety_level: options.safety.level.as_str().to_string(),
+                        actual_bpp: bpp,
+                        limit_bpp: options.safety.level.bpp_limit(),
+                    });
+                }
+
+                return Ok(StegoEmbedResult {
+                    carrier: carrier_path.to_path_buf(),
+                    written_to: dest.to_path_buf(),
+                    format,
+                    payload_bytes: payload.as_bytes().len(),
+                    carrier_before_bytes,
+                    carrier_after_bytes,
+                    backup_file,
+                    capacity: Some(capacity),
+                    warnings,
+                });
             }
             Err(e) => return Err(e),
         }
     }
 
-    let stego_bytes = embed_carrier_with_dialect(&carrier_bytes, payload, options, dialect)?;
+    let output = embed_carrier_with_dialect_info(&carrier_bytes, payload, options, dialect)?;
+    let cap = match output.capacity {
+        Some(c) => Some(c),
+        None => {
+            let probe_opts = crate::stego::ProbeOptions {
+                password: options.password,
+                domain: options.domain,
+                safety: options.safety,
+                tuning: options.tuning.clone(),
+                exact: false,
+                control: options.control,
+                pool: options.pool.clone(),
+            };
+            crate::stego::probe_carrier_capacity_with_dialect(&carrier_bytes, &probe_opts, dialect)
+                .ok()
+        }
+    };
     drop(carrier_bytes);
-    crate::commit::commit_carrier_bytes(carrier_path, dest, &stego_bytes, backup, true)
+    let backup_file = commit_carrier_bytes(
+        carrier_path,
+        dest,
+        &output.bytes,
+        target.backup,
+        target.preserve_time,
+    )?;
+    let carrier_after_bytes = std::fs::metadata(dest)?.len();
+
+    let mut warnings = Vec::new();
+    if options.safety.enforcement == SafetyEnforcement::Advisory
+        && let Some(ref cap_ref) = cap
+        && payload.as_bytes().len() > cap_ref.recommended_max_bytes
+    {
+        let bpp = (payload.as_bytes().len() * 8) as f64 / cap_ref.total_elements.max(1) as f64;
+        warnings.push(StegoWarning::SafetyThresholdExceeded {
+            payload_bytes: payload.as_bytes().len(),
+            recommended_max_bytes: cap_ref.recommended_max_bytes,
+            safety_level: options.safety.level.as_str().to_string(),
+            actual_bpp: bpp,
+            limit_bpp: options.safety.level.bpp_limit(),
+        });
+    }
+
+    Ok(StegoEmbedResult {
+        carrier: carrier_path.to_path_buf(),
+        written_to: dest.to_path_buf(),
+        format,
+        payload_bytes: payload.as_bytes().len(),
+        carrier_before_bytes,
+        carrier_after_bytes,
+        backup_file,
+        capacity: cap,
+        warnings,
+    })
 }
 
 /// Extract the payload from the carrier file at `carrier_path`.
@@ -112,6 +207,36 @@ pub fn extract_carrier_file_payload(
     crate::stego::extract_carrier_payload(&carrier_bytes, options, dialect)
 }
 
+/// Inspect the carrier file at `carrier_path`.
+pub fn inspect_carrier_file(
+    carrier_path: &Path,
+    options: &crate::stego::InspectOptions<'_>,
+    dialect: &StegoProfile,
+) -> Result<crate::stego::StegoHeaderInfo, StrHideError> {
+    let carrier_bytes = std::fs::read(carrier_path)?;
+    crate::stego::inspect_carrier_with_dialect(&carrier_bytes, options, dialect)
+}
+
+/// Probe the carrier file capacity at `carrier_path`.
+pub fn probe_carrier_file(
+    carrier_path: &Path,
+    options: &crate::stego::ProbeOptions<'_>,
+    dialect: &StegoProfile,
+) -> Result<crate::stego::StegoCapacityInfo, StrHideError> {
+    let carrier_bytes = std::fs::read(carrier_path)?;
+    crate::stego::probe_carrier_capacity_with_dialect(&carrier_bytes, options, dialect)
+}
+
+/// Verify the carrier file at `carrier_path`.
+pub fn verify_carrier_file(
+    carrier_path: &Path,
+    options: &crate::stego::VerifyOptions<'_>,
+    dialect: &StegoProfile,
+) -> Result<crate::stego::StegoVerifyResult, StrHideError> {
+    let carrier_bytes = std::fs::read(carrier_path)?;
+    crate::stego::verify_carrier_with_dialect(&carrier_bytes, options, dialect)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,13 +250,13 @@ mod tests {
         let original = b"this is not an image carrier";
         std::fs::write(&carrier, original).expect("write carrier");
 
+        let target = FileTarget::default();
         let result = embed_carrier_file(
             &carrier,
-            None,
             &Payload::bytes(b"payload"),
             &EmbedOptions::default(),
             &StegoProfile::default(),
-            true,
+            &target,
         );
         assert!(
             matches!(result, Err(StrHideError::UnsupportedFormat(_))),
@@ -183,9 +308,15 @@ mod tests {
         };
         let profile = StegoProfile::default();
 
-        let bak = embed_carrier_file(candidate, Some(&dest), &payload, &opts, &profile, false)
+        let target = FileTarget {
+            output_path: Some(&dest),
+            backup: false,
+            preserve_time: true,
+            overwrite: true,
+        };
+        let res = embed_carrier_file(candidate, &payload, &opts, &profile, &target)
             .expect("embed_carrier_file");
-        assert!(bak.is_none());
+        assert!(res.backup_file.is_none());
         assert!(dest.is_file());
 
         let extract_opts = ExtractOptions {

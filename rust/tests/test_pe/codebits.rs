@@ -76,6 +76,7 @@ fn codebits_auto_roundtrip_and_byte_exact_restore() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -99,6 +100,7 @@ fn codebits_auto_roundtrip_and_byte_exact_restore() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -147,6 +149,7 @@ fn codebits_encrypted_roundtrip() {
                 output_path: None,
                 password: Some("wrong pw"),
                 overwrite: false,
+                ..Default::default()
             }
         )
         .is_err()
@@ -158,6 +161,7 @@ fn codebits_encrypted_roundtrip() {
             output_path: None,
             password: Some("correct horse battery staple"),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -171,6 +175,7 @@ fn codebits_encrypted_roundtrip() {
             password: Some("correct horse battery staple"),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -204,6 +209,7 @@ fn codebits_stealth_denies_without_password() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_err();
@@ -219,6 +225,7 @@ fn codebits_stealth_denies_without_password() {
                 output_path: None,
                 password: Some("nope"),
                 overwrite: false,
+                ..Default::default()
             }
         )
         .is_err()
@@ -231,6 +238,7 @@ fn codebits_stealth_denies_without_password() {
             output_path: None,
             password: Some("stealth pw"),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -243,6 +251,7 @@ fn codebits_stealth_denies_without_password() {
             password: Some("stealth pw"),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -285,6 +294,7 @@ fn auto_falls_back_to_overlay_on_tiny_text() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -297,6 +307,7 @@ fn auto_falls_back_to_overlay_on_tiny_text() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -397,6 +408,7 @@ fn corrupted_text_fails_cleanly() {
                 output_path: None,
                 password: None,
                 overwrite: false,
+                ..Default::default()
             }
         )
         .is_err(),
@@ -411,6 +423,7 @@ fn corrupted_text_fails_cleanly() {
                 password: None,
                 backup: false,
                 overwrite: false,
+                ..Default::default()
             }
         )
         .is_err(),
@@ -443,6 +456,7 @@ fn codebits_32bit_pe_roundtrip() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -455,6 +469,7 @@ fn codebits_32bit_pe_roundtrip() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -550,6 +565,7 @@ with two lines
                         output_path: None,
                         password: None,
                         overwrite: false,
+                        ..Default::default()
                     }
                 )
                 .unwrap_err(),
@@ -566,6 +582,7 @@ with two lines
                         password: None,
                         backup: false,
                         overwrite: false,
+                        ..Default::default()
                     }
                 )
                 .unwrap_err(),
@@ -623,6 +640,7 @@ fn eof_strategy_still_works_on_supported_formats() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -635,6 +653,7 @@ fn eof_strategy_still_works_on_supported_formats() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -849,6 +868,7 @@ fn compact_metadata_makes_marginal_carriers_usable() {
             output_path: None,
             password: Some("pw"),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -862,6 +882,7 @@ fn compact_metadata_makes_marginal_carriers_usable() {
             password: Some("pw"),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -944,6 +965,7 @@ fn codebits_channel_header_keystream_masking_verified() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -962,6 +984,7 @@ fn codebits_channel_header_keystream_masking_verified() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -1062,6 +1085,7 @@ fn codebits_double_injection_stealth_fails_safely_and_preserves_carrier() {
             output_path: None,
             password: Some("stealth_pass_1"),
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -1075,6 +1099,7 @@ fn codebits_double_injection_stealth_fails_safely_and_preserves_carrier() {
             password: Some("stealth_pass_1"),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -1162,6 +1187,7 @@ fn codebits_strip_rejects_slack_outside_padding() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     );
     assert!(

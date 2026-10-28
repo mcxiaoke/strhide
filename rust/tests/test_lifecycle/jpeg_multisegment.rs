@@ -136,6 +136,7 @@ fn test_jpeg_multisegment_chain_boundary_and_lossless_restore() {
             output_path: None,
             password: Some("secret123"),
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -150,6 +151,7 @@ fn test_jpeg_multisegment_chain_boundary_and_lossless_restore() {
             password: Some("secret123"),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();

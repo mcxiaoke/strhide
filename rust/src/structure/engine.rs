@@ -465,7 +465,7 @@ pub struct ReadResult {
 /// Every field is `Option`-wrapped so the same type can describe a carrier
 /// with no envelope: `has_hidden_data == false`, and all envelope-derived
 /// fields are `None`. `strategies` is always populated.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InspectResult {
     /// Path inspected.
     pub carrier: PathBuf,
@@ -1220,8 +1220,18 @@ pub fn write_carrier_with(
                     dir.display()
                 ))
             })?;
-        write_core(&mut host, &mut out_file, source, options, local, profile)?
+        let mut pw = crate::core::control::ProgressWriter::new(
+            &mut out_file,
+            options.control,
+            crate::core::control::Stage::Write,
+            meta.len(),
+        );
+        write_core(&mut host, &mut pw, source, options, local, profile)
+            .map_err(|e| crate::core::control::map_io_cancel(&options.control, e))?
     };
+
+    // Strict cancellation check before .bak creation and atomic commit
+    options.control.check()?;
 
     // 2. In-place backup (if applicable) & Atomic commit
     let is_inplace = same_file(target_path, carrier_path);
@@ -1609,10 +1619,16 @@ pub fn read_carrier_with_dialect(
     }
 
     let label = carrier_path.display().to_string();
+    options.control.stage(crate::core::control::Stage::Read);
+    options.control.check()?;
     let mut f = File::open(carrier_path)?;
     let core = read_core(&mut f, &label, options.password, dialect)?;
+    options.control.check()?;
     let written_file = match options.output_path {
-        Some(out_p) => Some(write_payload_to(out_p, &core, options.overwrite)?),
+        Some(out_p) => {
+            options.control.stage(crate::core::control::Stage::Write);
+            Some(write_payload_to(out_p, &core, options.overwrite)?)
+        }
         None => None,
     };
 
@@ -1834,14 +1850,26 @@ pub fn remove_carrier_with_dialect(
             .create(true)
             .truncate(true)
             .open(&tmp_target)?;
-        remove_core(&mut cf, &mut out_f, &label, options.password, dialect)?
+        let mut pw = crate::core::control::ProgressWriter::new(
+            &mut out_f,
+            options.control,
+            crate::core::control::Stage::Write,
+            meta.len(),
+        );
+        remove_core(&mut cf, &mut pw, &label, options.password, dialect)
+            .map_err(|e| crate::core::control::map_io_cancel(&options.control, e))?
     };
 
     // Verify restored file
+    options.control.stage(crate::core::control::Stage::Verify);
+    options.control.check()?;
     let (restored_size, restored_sha256) = {
         let mut rf = File::open(&tmp_target)?;
         verify_restored(&mut rf, &header, options.password, dialect)?
     };
+
+    // Strict cancellation check before .bak creation and atomic commit
+    options.control.check()?;
 
     let is_inplace = same_file(target_path, carrier_path);
     let mut backup_file = None;

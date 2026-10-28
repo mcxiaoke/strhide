@@ -516,6 +516,7 @@ fn strategy_ask_selects_the_chosen_entry() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -557,6 +558,7 @@ fn strategy_ask_out_of_range_and_non_numeric_fall_back_to_first() {
                 output_path: None,
                 password: None,
                 overwrite: false,
+                ..Default::default()
             },
         )
         .expect("read");
@@ -569,6 +571,7 @@ fn strategy_ask_out_of_range_and_non_numeric_fall_back_to_first() {
                 password: None,
                 backup: false,
                 overwrite: false,
+                ..Default::default()
             },
         )
         .expect("remove");
@@ -629,6 +632,7 @@ fn read_encrypted_without_password_returns_password_variant_with_hint() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_err();

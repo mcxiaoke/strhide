@@ -25,6 +25,7 @@
 //! The default is [`Control::none`]: no callback, no token, no behaviour change
 //! for every existing caller (including the CLI's `--quiet` path).
 
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::errors::StrHideError;
@@ -241,6 +242,91 @@ impl std::fmt::Debug for Control<'_> {
             .field("progress", &"<sink>")
             .field("cancel", &self.cancel.is_some())
             .finish()
+    }
+}
+
+impl PartialEq for Control<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.progress, other.progress)
+            && match (self.cancel, other.cancel) {
+                (None, None) => true,
+                (Some(a), Some(b)) => std::ptr::eq(a, b),
+                _ => false,
+            }
+    }
+}
+
+impl Eq for Control<'_> {}
+
+pub const PROGRESS_STEP_BYTES: u64 = 4 * 1024 * 1024; // Every 4 MiB trigger a progress report
+
+pub struct ProgressWriter<'a, 'c, W: Write + ?Sized> {
+    inner: &'a mut W,
+    control: Control<'c>,
+    stage: Stage,
+    total: u64,
+    done: u64,
+    next_report: u64,
+}
+
+impl<'a, 'c, W: Write + ?Sized> ProgressWriter<'a, 'c, W> {
+    pub fn new(inner: &'a mut W, control: Control<'c>, stage: Stage, total: u64) -> Self {
+        control.stage_sized(stage, total);
+        Self {
+            inner,
+            control,
+            stage,
+            total,
+            done: 0,
+            next_report: PROGRESS_STEP_BYTES.min(total),
+        }
+    }
+}
+
+impl<W: Write + ?Sized> Write for ProgressWriter<'_, '_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.control.is_cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "strhide: cancelled",
+            ));
+        }
+        let n = self.inner.write(buf)?;
+        self.done += n as u64;
+        if self.done >= self.next_report || self.done == self.total {
+            self.control
+                .report(Event::progress(self.stage, self.done, Some(self.total)));
+            self.next_report = self.done + PROGRESS_STEP_BYTES;
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl<W: Write + Read + ?Sized> Read for ProgressWriter<'_, '_, W> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl<W: Write + Seek + ?Sized> Seek for ProgressWriter<'_, '_, W> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+/// Convert an interrupted I/O error into StrHideError::Cancelled if cancelled.
+pub fn map_io_cancel(control: &Control<'_>, err: StrHideError) -> StrHideError {
+    match err {
+        StrHideError::Io(ref io_err)
+            if io_err.kind() == io::ErrorKind::Interrupted && control.is_cancelled() =>
+        {
+            StrHideError::Cancelled
+        }
+        other => other,
     }
 }
 

@@ -62,8 +62,8 @@ pub use options::JpegAlgorithm;
 #[cfg(feature = "content-png")]
 pub use options::SpatialAlgorithm;
 pub use options::{
-    EmbedOptions, EmbedOutput, ExtractOptions, InspectOptions, ProbeOptions, StegoHeaderInfo,
-    StegoTuning, StegoVerifyResult, VerifyLevel, VerifyOptions,
+    EmbedOptions, EmbedOutput, ExtractOptions, InspectOptions, ProbeOptions, StegoEmbedResult,
+    StegoHeaderInfo, StegoTuning, StegoVerifyResult, StegoWarning, VerifyLevel, VerifyOptions,
 };
 #[cfg(feature = "content-hevc")]
 pub use options::{HevcMode, HevcParams};

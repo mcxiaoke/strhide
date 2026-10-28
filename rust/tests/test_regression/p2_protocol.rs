@@ -119,6 +119,7 @@ fn pdf_xref_stream_incremental_write_roundtrip() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -130,6 +131,7 @@ fn pdf_xref_stream_incremental_write_roundtrip() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -237,6 +239,7 @@ fn pdf_l1_survives_an_overlay_larger_than_the_tail_window() {
                 output_path: None,
                 password: None,
                 overwrite: false,
+                ..Default::default()
             }
         )
         .unwrap()
@@ -250,6 +253,7 @@ fn pdf_l1_survives_an_overlay_larger_than_the_tail_window() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();

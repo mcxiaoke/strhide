@@ -67,6 +67,7 @@ fn test_stealth_carrier_leaks_no_host_sha256() {
             output_path: None,
             password: Some(password),
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -86,6 +87,7 @@ fn test_stealth_carrier_leaks_no_host_sha256() {
             password: Some(password),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -244,6 +246,7 @@ fn test_pre_v2_stealth_unmasked_envelope_is_rejected() {
             output_path: None,
             password: Some(password),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect_err("pre-v2 unmasked stealth envelope must not be readable");
@@ -312,6 +315,7 @@ fn test_default_carrier_uniform_encryption_and_zero_plaintext() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -338,6 +342,7 @@ fn test_default_carrier_uniform_encryption_and_zero_plaintext() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -417,6 +422,7 @@ fn test_pre_v2_plaintext_metadata_envelope_is_rejected() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect_err("pre-v2 plaintext metadata must not be readable");
@@ -470,6 +476,7 @@ fn test_standard_carrier_has_zero_ascii_magics() {
             output_path: None,
             password: None,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -489,6 +496,7 @@ fn test_standard_carrier_has_zero_ascii_magics() {
             password: None,
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap();

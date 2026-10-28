@@ -76,6 +76,7 @@ fn test_chinese_and_emoji_text_with_chinese_password() {
             output_path: None,
             password: Some("错误的密码_2026"),
             overwrite: false,
+            ..Default::default()
         },
     )
     .unwrap_err();
@@ -91,6 +92,7 @@ fn test_chinese_and_emoji_text_with_chinese_password() {
             output_path: None,
             password: Some(chinese_password),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read");
@@ -107,6 +109,7 @@ fn test_chinese_and_emoji_text_with_chinese_password() {
             password: Some(chinese_password),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -160,6 +163,7 @@ fn test_arbitrary_binary_payload_with_all_bytes() {
             output_path: None,
             password: Some(unicode_password),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read raw binary");
@@ -175,6 +179,7 @@ fn test_arbitrary_binary_payload_with_all_bytes() {
             password: Some(unicode_password),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -238,6 +243,7 @@ fn test_large_binary_file_crossing_chunks() {
             output_path: Some(&extract_dir),
             password: Some(complex_password),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read large file");
@@ -269,6 +275,7 @@ fn test_large_binary_file_crossing_chunks() {
             password: Some(complex_password),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -326,6 +333,7 @@ fn test_chinese_filename_and_unicode_stealth_mode() {
             output_path: None,
             password: Some(stealth_password),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read stealth");
@@ -341,6 +349,7 @@ fn test_chinese_filename_and_unicode_stealth_mode() {
             password: Some(stealth_password),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove");
@@ -381,6 +390,7 @@ fn test_tiny_and_empty_payloads() {
             output_path: None,
             password: Some("密_1"),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read 1 byte");
@@ -394,6 +404,7 @@ fn test_tiny_and_empty_payloads() {
             password: Some("密_1"),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove 1 byte");
@@ -412,6 +423,7 @@ fn test_tiny_and_empty_payloads() {
             output_path: None,
             password: Some("密_2"),
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("read empty text");
@@ -425,6 +437,7 @@ fn test_tiny_and_empty_payloads() {
             password: Some("密_2"),
             backup: false,
             overwrite: false,
+            ..Default::default()
         },
     )
     .expect("remove empty text");

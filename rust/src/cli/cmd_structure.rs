@@ -8,6 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::core::config::FileConfig;
+use crate::core::control::Control;
 use crate::core::i18n::Msg;
 use crate::core::pipeline::{
     BatchPreflight, batch_output_dir, check_overwrite, for_each_carrier, preflight_batch,
@@ -179,6 +180,7 @@ pub(crate) fn handle_write(
                 stealth,
                 preserve_time,
                 backup,
+                control: Control::none(),
             },
             engine.local_params(),
             &engine.dialect().structure,
@@ -260,6 +262,7 @@ fn read_one(
             output_path,
             password: password.as_deref(),
             overwrite: args.overwrite,
+            control: Control::none(),
         },
         &engine.dialect().structure,
     ) {
@@ -286,6 +289,7 @@ fn read_one(
                     output_path,
                     password: password.as_deref(),
                     overwrite: args.overwrite,
+                    control: Control::none(),
                 },
                 &engine.dialect().structure,
             )?
@@ -468,6 +472,7 @@ pub(crate) fn handle_restore(
                 password: password.as_deref(),
                 backup,
                 overwrite: args.overwrite,
+                control: Control::none(),
             },
             &engine.dialect().structure,
         )?;
