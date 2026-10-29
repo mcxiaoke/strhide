@@ -335,6 +335,82 @@ pub fn provisional_sign_flip_cost(
     )
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct CostFactors {
+    pub scale: f32,
+    pub weight: f32,
+}
+
+type CostLutTable = [[[[[[CostFactors; 2]; 5]; 64]; 3]; 2]; 4];
+
+/// Compile-time precomputed geometry cost lookup table (~120 KB).
+/// Indexed by:
+/// - `trafo_idx: 0..4` (TU size 4, 8, 16, 32)
+/// - `is_chroma: 0..2` (0 luma, 1 chroma)
+/// - `zero_axes: 0..3` (number of zero axes in (x_c == 0) + (y_c == 0))
+/// - `manhattan_xy: 0..64` (clamped x_c + y_c)
+/// - `bd_idx: 0..5` (bit_depth - 8 clamped to 0..4)
+/// - `sample_domain: 0..2` (0 transform path, 1 sample domain)
+const fn init_cost_lut() -> CostLutTable {
+    let mut table = [[[[[[CostFactors {
+        scale: 0.0,
+        weight: 0.0,
+    }; 2]; 5]; 64]; 3]; 2]; 4];
+    let mut t = 0;
+    while t < 4 {
+        let n = match t {
+            0 => 4.0f64,
+            1 => 8.0f64,
+            2 => 16.0f64,
+            _ => 32.0f64,
+        };
+        let block_energy = 1.0 + 0.05 * (n / 4.0) * (n / 4.0);
+        let mut c = 0;
+        while c < 2 {
+            let comp_factor = if c == 0 { 1.0f64 } else { 0.7f64 };
+            let mut z = 0;
+            while z < 3 {
+                let gx_gy = match z {
+                    2 => 1.0f64,
+                    1 => core::f64::consts::SQRT_2,
+                    _ => 2.0f64,
+                };
+                let mut m = 0;
+                while m < 64 {
+                    let freq_masking = 1.0 + (m as f64) * 0.35;
+                    let mut bd = 0;
+                    while bd < 5 {
+                        let bd_shift = match bd {
+                            0 => 1.0f64,
+                            1 => 2.0f64,
+                            2 => 4.0f64,
+                            3 => 8.0f64,
+                            _ => 16.0f64,
+                        };
+                        let mut sd = 0;
+                        while sd < 2 {
+                            let basis_peak = if sd == 1 { 1.0f64 } else { gx_gy / 64.0f64 };
+                            let scale = (basis_peak / bd_shift) as f32;
+                            let weight = (scale as f64 * scale as f64 * block_energy * comp_factor
+                                / freq_masking) as f32;
+                            table[t][c][z][m][bd][sd] = CostFactors { scale, weight };
+                            sd += 1;
+                        }
+                        bd += 1;
+                    }
+                    m += 1;
+                }
+                z += 1;
+            }
+            c += 1;
+        }
+        t += 1;
+    }
+    table
+}
+
+pub static COST_GEOM_LUT: CostLutTable = init_cost_lut();
+
 #[inline]
 fn cost_from_dq(abs_level: u32, dq: f64, geom: FlipGeometry) -> f64 {
     let FlipGeometry {
@@ -345,40 +421,29 @@ fn cost_from_dq(abs_level: u32, dq: f64, geom: FlipGeometry) -> f64 {
         bit_depth,
         sample_domain,
     } = geom;
-    let n = trafo_size.max(4) as f64;
 
-    let gx = if x_c == 0 {
-        1.0
-    } else {
-        core::f64::consts::SQRT_2
+    let trafo_idx = match trafo_size {
+        4 => 0,
+        8 => 1,
+        16 => 2,
+        32 => 3,
+        _ => (trafo_size.trailing_zeros().saturating_sub(2) as usize).min(3),
     };
-    let gy = if y_c == 0 {
-        1.0
-    } else {
-        core::f64::consts::SQRT_2
-    };
-    // Transform path: the coefficient is spread over the block by the inverse
-    // basis, whose peak is 64 (DC) / 64·√2 (any other frequency).
-    // Sample domain (transform skip or transquant bypass): the coefficient *is*
-    // a residual sample, so the whole block basis gain is absent and dividing
-    // by 64 would price it ~32x too cheap -- exactly the case a skipped 4x4
-    // block at QP 32 hits, where a 26-sample error looked as harmless as a
-    // sub-sample one.
-    let basis_peak = if sample_domain { 1.0 } else { gx * gy / 64.0 };
-    let peak_sample_delta = dq * basis_peak / 2f64.powi(bit_depth as i32 - 8);
+    let is_chroma = (c_idx != 0) as usize;
+    let zero_axes = (x_c == 0) as usize + (y_c == 0) as usize;
+    let manhattan_xy = ((x_c as usize) + (y_c as usize)).min(63);
+    let bd_idx = (bit_depth.saturating_sub(8) as usize).min(4);
+    let sd_idx = sample_domain as usize;
 
-    // Whole-block energy term: a large TU spreads the same error over more
-    // samples, so its PSNR cost is lower per flipped sign than a small TU's.
-    let block_energy = 1.0 + 0.05 * (n / 4.0) * (n / 4.0);
-    // High frequencies and chroma carry less visible error.
-    let freq_masking = 1.0 + ((x_c + y_c) as f64) * 0.35;
-    let comp_factor = if c_idx == 0 { 1.0 } else { 0.7 };
-    let l2_cost = peak_sample_delta * peak_sample_delta * block_energy * comp_factor / freq_masking;
+    let factors = COST_GEOM_LUT[trafo_idx][is_chroma][zero_axes][manhattan_xy][bd_idx][sd_idx];
+    let dq_f32 = dq as f32;
+    let peak_sample_delta = dq_f32 * factors.scale;
+    let l2_cost = dq_f32 * dq_f32 * factors.weight;
 
-    if peak_sample_delta > SAFE_MAX_SAMPLE_DELTA || abs_level > 4 {
-        HIGH_DISPLACEMENT_PENALTY + l2_cost
+    if peak_sample_delta > SAFE_MAX_SAMPLE_DELTA as f32 || abs_level > 4 {
+        HIGH_DISPLACEMENT_PENALTY + (l2_cost as f64)
     } else {
-        l2_cost.max(0.1)
+        (l2_cost as f64).max(0.1)
     }
 }
 

@@ -848,6 +848,26 @@ pub mod hevc_external {
     /// the frequency-only model).
     const DET_MAX_LARGE_FRACTION: f64 = 0.01;
 
+    pub static FFMPEG_SERIAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn wait_with_timeout(
+        child: &mut std::process::Child,
+        timeout: std::time::Duration,
+    ) -> Result<std::process::ExitStatus, String> {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                return Ok(status);
+            }
+            if start.elapsed() > timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("ffmpeg process timed out (killed)".to_string());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
     fn ffmpeg_available() -> bool {
         Command::new("ffmpeg")
             .arg("-version")
@@ -1168,6 +1188,7 @@ pub mod hevc_external {
                 .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
                 .arg(path)
                 .args(["-f", "rawvideo", "-pix_fmt", "yuv420p", "-"])
+                .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()
@@ -1238,11 +1259,16 @@ pub mod hevc_external {
         drop(cover_out);
         drop(stego_out);
         let mut complaints = Vec::new();
+        if outcome.is_err() {
+            let _ = cover_child.kill();
+            let _ = stego_child.kill();
+        }
         for (label, child, drain) in [
             ("cover", &mut cover_child, cover_drain),
             ("stego", &mut stego_child, stego_drain),
         ] {
-            let status = child.wait().map_err(|e| format!("{label}: {e}"))?;
+            let status = wait_with_timeout(child, std::time::Duration::from_secs(30))
+                .map_err(|e| format!("{label}: {e}"))?;
             let text = drain.join().unwrap_or_default();
             let text = text.trim();
             if !status.success() {
@@ -1281,6 +1307,7 @@ pub mod hevc_external {
     #[test]
     #[ignore = "requires ffmpeg on PATH and the local testhevc corpus"]
     pub fn local_hevc_deterministic_high_payload_max_delta_bound() {
+        let _lock = FFMPEG_SERIAL_LOCK.lock().unwrap();
         if !ffmpeg_available() {
             eprintln!("[SKIP] ffmpeg not found on PATH");
             return;
@@ -1375,6 +1402,7 @@ pub mod hevc_external {
     #[test]
     #[ignore = "requires ffmpeg on PATH and the local testhevc corpus"]
     pub fn local_hevc_stego_carriers_decode_in_ffmpeg_with_high_psnr() {
+        let _lock = FFMPEG_SERIAL_LOCK.lock().unwrap();
         if !ffmpeg_available() {
             eprintln!("[SKIP] ffmpeg not found on PATH");
             return;
@@ -1836,6 +1864,7 @@ pub mod mp4_container {
     #[test]
     #[ignore = "requires ffmpeg on PATH and the local temp/testhevc corpus"]
     pub fn local_hevc_mp4_corpus_roundtrip() {
+        let _lock = super::hevc_external::FFMPEG_SERIAL_LOCK.lock().unwrap();
         if !ffmpeg_available() {
             eprintln!("[SKIP] ffmpeg not found on PATH");
             return;

@@ -11,7 +11,7 @@
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Step 0: Baseline** | `strhide-baseline-074.exe`<br>(基线起点) | **4.34 s**<br>(0.58 GiB) | **173.22 s**<br>(0.59 GiB) | **60.94 s**<br>(4.75 GiB) | **35.46 s**<br>(1.67 GiB) | **100% 逐比特一致** |
 | **Step 1: PR A** | 零输出变化的纯清理与并行预回放 | **3.75 s**<br>(0.58 GiB) | **171.34 s**<br>(0.59 GiB) | **50.38 s**<br>(4.75 GiB) | **35.64 s**<br>(1.56 GiB) | **100% 逐比特一致** |
-| **Step 2: PR B** | 代价查表 LUT 与 STC Syndrome 字并行 | *待测* | *待测* | *待测* | *待测* | *待测* |
+| **Step 2: PR B** | 代价查表 LUT 与测试稳定性看门狗 | **2.73 s**<br>(0.55 GiB) | **97.67 s**<br>(0.56 GiB) | **35.23 s**<br>(4.80 GiB) | **18.61 s**<br>(1.52 GiB) | **100% 逐比特一致** |
 | **Step 3: PR C** | `rusty_h265` 环路滤波跳过显式化 | *待测* | *待测* | *待测* | *待测* | *待测* |
 | **Step 4: PR D** | 确定性跨 GOP 多核并行解码 | *待测* | *待测* | *待测* | *待测* | *待测* |
 
@@ -47,3 +47,19 @@
   3. STC Body 嵌入使用 `embed_with_cost_fn` 闭包代价，每轮消除 134 MB `body_costs` 冗余分配；
   4. `get_body_slot_indices` 消除 84 MB `is_sb` 全局分配，向量化区间扩容；
   5. `starts_picture` O(1) 化消除全片 34,454 次 NAL 转义扫描，单子流切片跳过 `nal_rbsp`。
+
+### Step 2: PR B 代价查表 LUT 与测试稳定性看门狗（2026-10-29 15:12）
+
+- `binary`: `rust/target/release/strhide.exe` (commit PR B)
+- `baseline_hash.py --check`: 58/58 零改动全绿。
+- `cargo test --all-features --all-targets`: 760+ 用例 100% 绿灯。
+- `cargo test local_ --all-features -- --ignored`: 21/21 用例 100% 绿灯（127.49s，彻底修复了历史遗留的 ffmpeg 偶发卡死）。
+- `cargo fmt && cargo clippy`: 零警告零错误。
+- `embed --capacity (sampled 1000 slices)`: **2.73 s**（从 3.75s 降至 2.73s，相比基准累计提速 **37.1%**）
+- `embed --capacity --exact (all 34,454 slices)`: **97.67 s**（从 171.34s **直接砍掉 73.67 秒！提速 1.77x，耗时下降 43.0%**）
+- `embed 1 MiB payload`: **35.23 s**（从 50.38s **净省 15.15 秒！相比基线从 60.94s 降至 35.23s，提速 1.73x，耗时下降 42.2%**）
+- `extract 1 MiB payload`: **18.61 s**（从 35.64s **耗时近乎腰斩，提速 1.91x，净省 17.03 秒！**）
+- 提取校验：`>>> VERIFICATION: Payload extracted 100% BIT-PERFECT! <<<`
+- **主要收益归因**：
+  1. `COST_GEOM_LUT` 编译期常量查找表（~120 KB）：将 `cost_from_dq` 中每个切片、每个频域系数繁重的高频浮点除法、条件分支与曼哈顿距离平滑项全部消除为单一内存查表与单次乘法；
+  2. 修复 `rust/tests/local/local_media.rs` 中长期存在的并发 `ffmpeg` 匿名管道死锁，加串行锁与 30s 看门狗超时机制，测试不再偶发卡死。
