@@ -10,7 +10,8 @@ use crate::core::config::FileConfig;
 use crate::core::i18n::Msg;
 use crate::core::payload::Payload;
 use crate::core::pipeline::{
-    batch_output_dir, check_overwrite, for_each_carrier, resolve_carrier_target,
+    BatchPreflight, batch_output_dir, check_overwrite, for_each_carrier, preflight_batch,
+    resolve_carrier_target,
 };
 use crate::errors::StrHideError;
 use crate::facade::StrHide;
@@ -235,21 +236,37 @@ pub(crate) fn handle_embed(
 
     let multi = args.carrier.len() > 1;
     let output_dir = batch_output_dir(args.output.as_deref(), multi, "embedding into")?;
-    for carrier in &args.carrier {
+    if multi {
+        preflight_batch(BatchPreflight {
+            carriers: &args.carrier,
+            in_place: args.in_place,
+            output: args.output.as_deref(),
+            output_dir,
+            // A dry run writes nothing, so the overwrite pre-check does not apply.
+            overwrite: args.dry_run || args.overwrite,
+            validate: Some(&validate_stego_carrier_format),
+        })?;
+    } else {
+        let carrier = &args.carrier[0];
         if !carrier.exists() {
             return Err(StrHideError::General(format!(
                 "Carrier file '{}' not found",
                 carrier.display()
             )));
         }
-        // A dry run writes nothing, so the overwrite pre-check does not apply.
-        if args.dry_run {
-            continue;
+        if carrier.is_dir() {
+            return Err(StrHideError::General(format!(
+                "'{}' is a directory, not a carrier file",
+                carrier.display()
+            )));
         }
-        let target =
-            resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;
-        if let Some(ref t) = target {
-            check_overwrite(t, args.overwrite)?;
+        validate_stego_carrier_format(carrier)?;
+        if !args.dry_run {
+            let target =
+                resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;
+            if let Some(ref t) = target {
+                check_overwrite(t, args.overwrite)?;
+            }
         }
     }
 

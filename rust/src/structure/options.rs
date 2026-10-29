@@ -67,6 +67,8 @@ pub struct WriteOptions<'a> {
     pub preserve_time: bool,
     /// Keep a `<carrier>.bak` backup for in-place writes.
     pub backup: bool,
+    /// Replace an existing different destination instead of refusing.
+    pub overwrite: bool,
     /// Progress reporting and cancellation channel.
     pub control: Control<'a>,
 }
@@ -81,6 +83,7 @@ impl std::fmt::Debug for WriteOptions<'_> {
             .field("stealth", &self.stealth)
             .field("preserve_time", &self.preserve_time)
             .field("backup", &self.backup)
+            .field("overwrite", &self.overwrite)
             .field("control", &self.control)
             .finish()
     }
@@ -96,6 +99,7 @@ impl Default for WriteOptions<'_> {
             stealth: false,
             preserve_time: true,
             backup: true,
+            overwrite: false,
             control: Control::none(),
         }
     }
@@ -105,6 +109,12 @@ impl<'a> WriteOptions<'a> {
     /// Set strategy name.
     pub const fn with_strategy(mut self, strategy: &'a str) -> Self {
         self.strategy = strategy;
+        self
+    }
+
+    /// Set [`overwrite`](Self::overwrite).
+    pub const fn with_overwrite(mut self, overwrite: bool) -> Self {
+        self.overwrite = overwrite;
         self
     }
 

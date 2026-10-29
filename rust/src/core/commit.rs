@@ -136,6 +136,15 @@ pub(crate) fn next_backup_path(carrier: &Path) -> PathBuf {
     with_suffix(&format!(".bak-{now}-{pid}-{}", rand::rng().random::<u32>()))
 }
 
+/// Generate a collision-free temporary file path alongside `path` using process ID and random salt.
+pub fn temp_path_for(path: &Path) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    let pid = std::process::id();
+    let r: u32 = rand::rng().random();
+    os.push(format!(".strhide.{pid}.{r}.tmp"));
+    PathBuf::from(os)
+}
+
 /// Safely commit stego bytes to `target_path` with an atomic rename, a
 /// crash-safe temporary file guard, collision-free `.bak` backup on in-place
 /// writes, and preservation of the original carrier's permissions and timestamps.
@@ -195,9 +204,7 @@ pub fn commit_carrier_patches(
         backup_path = Some(bak);
     }
 
-    let mut tmp_os = target_path.as_os_str().to_os_string();
-    tmp_os.push(".strhide.tmp");
-    let tmp_path = PathBuf::from(tmp_os);
+    let tmp_path = temp_path_for(target_path);
     let mut guard = TmpGuard::new(tmp_path.clone());
 
     // 1. Kernel-level stream copy (zero user-space heap allocation)
@@ -237,9 +244,7 @@ pub fn commit_carrier_patches(
 pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), StrHideError> {
     use std::io::Write as _;
 
-    let mut tmp_os = path.as_os_str().to_os_string();
-    tmp_os.push(".strhide.tmp");
-    let tmp_path = PathBuf::from(tmp_os);
+    let tmp_path = temp_path_for(path);
     let mut guard = TmpGuard::new(tmp_path.clone());
 
     {

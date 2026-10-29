@@ -766,7 +766,7 @@ fn tmp_guard_removes_uncommitted_temp() {
     for entry in fs::read_dir(&dir).unwrap() {
         let name = entry.unwrap().file_name();
         assert!(
-            !name.to_string_lossy().contains(".strhide.tmp"),
+            !name.to_string_lossy().contains(".strhide."),
             "leftover temp file: {name:?}"
         );
     }

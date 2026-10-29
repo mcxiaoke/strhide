@@ -184,6 +184,7 @@ fn pdf_without_root_is_rejected_for_incremental() {
             output_path: Some(&out),
             strategy: "incremental",
             backup: false,
+            overwrite: true,
             ..Default::default()
         },
     )

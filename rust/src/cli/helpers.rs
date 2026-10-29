@@ -437,6 +437,18 @@ pub(crate) fn validate_carrier_format(carrier: &Path) -> Result<(), StrHideError
     Ok(())
 }
 
+/// Stego carrier validator handed to [`crate::core::pipeline::preflight_batch`].
+pub(crate) fn validate_stego_carrier_format(carrier: &Path) -> Result<(), StrHideError> {
+    let Some(format) = crate::formats::sniff_file(carrier)? else {
+        return Err(StrHideError::UnsupportedFormat(
+            "Content-adaptive steganography requires a PNG, JPEG, HEIF/HEIC, or HEVC carrier (Annex-B or MP4/MOV)".into(),
+        ));
+    };
+    crate::stego::engine::engine_for(format)
+        .ok_or_else(|| crate::stego::unsupported_carrier(format))?;
+    Ok(())
+}
+
 /// Decode C-style escape sequences, mirroring the Python implementation
 /// character for character.
 ///

@@ -180,6 +180,7 @@ pub(crate) fn handle_write(
                 stealth,
                 preserve_time,
                 backup,
+                overwrite: args.overwrite,
                 control: Control::none(),
             },
             engine.local_params(),

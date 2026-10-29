@@ -669,21 +669,14 @@ fn inject_codebits(
     // Defensive check: carrier must not already contain a pe_codebits channel.
     // A second codebits injection would overwrite the first channel's header in .text,
     // permanently orphaning the first restore diff in slack (P1-1). The header
-    // parse alone (magic + version whitelist + capacity) decides, without
+    // parse alone (version whitelist + capacity) decides, without
     // requiring the recorded slack_off to fall inside the *current* slack
     // ranges — a section table edited after injection would otherwise slip
-    // past this second line of defense (review P3-10). The nonzero diff region
-    // confirms the channel is live rather than a coincidental byte pattern.
-    if let Ok(existing) = pe_codebits::parse_channel_header(&text, layout.bitness) {
-        let diff_len = pe_codebits::CHANNEL_HEADER_LEN + existing.ube_len as usize;
-        if let Ok(sample) =
-            pe_codebits::read_at(host_in, existing.slack_off as u64, diff_len.min(64))
-            && sample.iter().any(|&b| b != 0)
-        {
-            return Err(StrHideError::General(
-                "Carrier already contains hidden data (pe_codebits channel). Use remove first or specify another file.".into(),
-            ));
-        }
+    // past this second line of defense (review P3-10).
+    if pe_codebits::parse_channel_header(&text, layout.bitness).is_ok() {
+        return Err(StrHideError::General(
+            "Carrier already contains hidden data (pe_codebits channel). Use remove first or specify another file.".into(),
+        ));
     }
 
     let slack_off = pe_codebits::find_slack_run_streaming(host_in, &layout.slack_ranges, need_slack)?

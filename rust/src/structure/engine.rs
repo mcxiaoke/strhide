@@ -27,7 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
-use crate::commit::{TmpGuard, next_backup_path};
+use crate::commit::{TmpGuard, next_backup_path, temp_path_for};
 use crate::structure::adapters::{
     FinalizeCtx, HostAdapter, SeekRead, SeekWrite, StrategyCapacity, TrailerCtx,
 };
@@ -1234,6 +1234,10 @@ pub fn write_carrier_with(
 
     let target_path = options.output_path.unwrap_or(carrier_path);
 
+    if !same_file(target_path, carrier_path) {
+        crate::core::pipeline::check_overwrite(target_path, options.overwrite)?;
+    }
+
     // 1. Run security rejection checks (carrier policy + target permissions)
     run_rejection_checks(carrier_path, target_path, local.rejection)?;
 
@@ -1242,12 +1246,10 @@ pub fn write_carrier_with(
     let orig_atime = filetime::FileTime::from_last_access_time(&meta);
     let orig_mtime = filetime::FileTime::from_last_modification_time(&meta);
 
-    // The temp name is built from the OsString: `display()` is lossy for
-    // non-UTF-8 targets. TmpGuard removes the half-written file on any early
-    // return unless `commit()` runs after the rename succeeded.
-    let mut tmp_os = target_path.as_os_str().to_os_string();
-    tmp_os.push(".strhide.tmp");
-    let tmp_target = PathBuf::from(tmp_os);
+    // Collision-free temp file guard prevents races under concurrent execution.
+    // TmpGuard removes the half-written file on any early return unless `commit()`
+    // runs after the rename succeeded.
+    let tmp_target = temp_path_for(target_path);
     let mut tmp_guard = TmpGuard::new(tmp_target.clone());
 
     let core = {
@@ -1891,13 +1893,7 @@ pub fn remove_carrier_with_dialect(
     }
 
     let label = carrier_path.display().to_string();
-    // Build the temp name from the OsString, exactly like the write path above:
-    // `display()` is lossy for non-UTF-8 paths (unpaired surrogates on Windows,
-    // arbitrary bytes on Unix), and a lossy name would send the restored bytes
-    // to a file nobody asked for.
-    let mut tmp_os = target_path.as_os_str().to_os_string();
-    tmp_os.push(".strhide.restoring.tmp");
-    let tmp_target = PathBuf::from(tmp_os);
+    let tmp_target = temp_path_for(target_path);
     let mut tmp_guard = TmpGuard::new(tmp_target.clone());
 
     let header = {
