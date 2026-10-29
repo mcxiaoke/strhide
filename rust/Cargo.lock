@@ -515,6 +515,7 @@ dependencies = [
 [[package]]
 name = "rusty_h265"
 version = "0.6.2"
+source = "git+https://github.com/mcxiaoke/rusty_h265.git?tag=v1-20261029#c1f6aee07ae54d0c388bdbf0e1616e47f6a1143f"
 dependencies = [
  "rusty_h265-accel",
 ]
@@ -522,6 +523,7 @@ dependencies = [
 [[package]]
 name = "rusty_h265-accel"
 version = "0.6.2"
+source = "git+https://github.com/mcxiaoke/rusty_h265.git?tag=v1-20261029#c1f6aee07ae54d0c388bdbf0e1616e47f6a1143f"
 
 [[package]]
 name = "serde"
@@ -588,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "strhide"
-version = "0.7.4"
+version = "0.8.0"
 dependencies = [
  "aes-gcm",
  "base64",
