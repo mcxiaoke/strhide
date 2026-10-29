@@ -84,7 +84,7 @@ pub const MIN_ENVELOPE_LEN: usize = HEADER_OVERHEAD + BODY_OVERHEAD; // 50 bytes
 
 /// Largest payload a decoded envelope may expand to (matches the header's
 /// 26-bit length field).
-pub const MAX_PLAINTEXT_LEN: usize = 1 << 26;
+pub const MAX_PLAINTEXT_LEN: usize = crate::stego::header::HEADER_LEN_MAX as usize;
 
 /// Flag bit 0: the payload is compressed.
 const FLAG_COMPRESSED: u8 = 0x01;

@@ -1604,6 +1604,7 @@ pub fn extract_png(
             .algorithm_options
             .insert("sigma".to_string(), fw.sigma as f64);
     }
+    effective_params.validate()?;
 
     // Distortion cost map of the declared model. Identical to what the embedder
     // computed, because header/feature pixels never leave their eight-value

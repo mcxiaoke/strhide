@@ -1554,8 +1554,16 @@ fn read_core(
         env.total_payload_bytes,
     )?;
 
+    let max_safe_size = crate::crypto::MAX_VERIFY_PAYLOAD_SIZE;
+    if env.meta_obj.raw_size > max_safe_size {
+        return Err(StrHideError::General(format!(
+            "Declared payload size ({} bytes) exceeds the safe decompression limit ({} bytes)",
+            env.meta_obj.raw_size, max_safe_size
+        )));
+    }
+
     let data = if env.header.is_compressed() {
-        let mut decomp = Vec::new();
+        let mut decomp = Vec::with_capacity(env.meta_obj.raw_size.min(1024 * 1024) as usize);
         decompress_stream(
             &mut Cursor::new(&decrypted_payload),
             &mut decomp,

@@ -83,9 +83,8 @@ pub const MAX_HINT_LEN: u32 = 1024;
 /// Used by capacity reporting (`pe_codebits`) so `inspect` stops advertising a
 /// capacity that cannot hold even the smallest real envelope (`MIN_UBE_LEN` of
 /// 136 only covers header + trailer, which no writer ever emits).
-pub const MIN_UBE_PLAIN: u32 = 178;
-/// Same, encrypted: `112 + (meta 41 + 16 tag) + (1 + 4 length + 16 tag) + 24`.
-pub const MIN_UBE_ENCRYPTED: u32 = 214;
+pub const MIN_UBE_ENCRYPTED: u32 = 213;
+pub const MIN_UBE_PLAIN: u32 = MIN_UBE_ENCRYPTED;
 
 /// Fixed 112-byte envelope header, serialized little-endian.
 ///
@@ -403,7 +402,7 @@ impl EnvelopeHeader {
                 Some(m) => data[..8] == m[..],
                 None => crate::crypto::derive_stealth_magics(pwd, profile.domain())
                     .ok()
-                    .is_none_or(|m| data[..8] == m.0[..]),
+                    .is_some_and(|m| data[..8] == m.0[..]),
             };
             let mask = match &secrets.password {
                 Some(s) => Some(s.header_mask),

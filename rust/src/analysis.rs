@@ -42,7 +42,7 @@ pub mod calibration;
 
 use crate::errors::StrHideError;
 use crate::structure::adapters::{pe_layout, pe_slack};
-use crate::structure::envelope::{MIN_UBE_PLAIN, STANDARD_HEADER_MAGIC};
+use crate::structure::envelope::STANDARD_HEADER_MAGIC;
 
 /// Hard cap on file size we fully load for scanning. Larger files still get
 /// magic-byte and structural scanning on a prefix+tail window, but pixel
@@ -1057,7 +1057,9 @@ fn track_pe_structure(data: &[u8], out: &mut Vec<Finding>) {
                  this is a pe_slack payload"
             ),
         });
-    } else if nonzero >= MIN_UBE_PLAIN as u64 && distinct >= pe_slack::MIN_CIPHERTEXT_DISTINCT {
+    } else if nonzero >= pe_slack::MIN_CIPHERTEXT_NONZERO
+        && distinct >= pe_slack::MIN_CIPHERTEXT_DISTINCT
+    {
         out.push(Finding {
             detector: "pe:nonzero-padding".into(),
             severity: Severity::Suspicious,

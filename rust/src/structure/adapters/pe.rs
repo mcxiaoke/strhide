@@ -568,7 +568,7 @@ impl HostAdapter for PeAdapter {
                     "strhide envelope header at offset {offset} inside PE section padding ({} padding range(s) scanned)",
                     scan.ranges
                 ));
-            } else if scan.nonzero >= crate::structure::envelope::MIN_UBE_PLAIN as u64
+            } else if scan.nonzero >= pe_slack::MIN_CIPHERTEXT_NONZERO
                 && scan.distinct >= pe_slack::MIN_CIPHERTEXT_DISTINCT
             {
                 found.push(format!(

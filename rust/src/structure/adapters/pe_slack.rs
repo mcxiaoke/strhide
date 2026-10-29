@@ -279,6 +279,10 @@ pub struct SlackScan {
 /// "leftover data" without needing the password.
 pub const MIN_CIPHERTEXT_DISTINCT: usize = 100;
 
+/// Minimum number of non-zero bytes for padding to plausibly contain a minimal
+/// envelope (~213 bytes, of which ~180-205 bytes are non-zero due to internal zeros in headers).
+pub const MIN_CIPHERTEXT_NONZERO: u64 = 175;
+
 /// Scans the carrier's padding ranges once, reporting both the non-zero count
 /// and whether a strhide header magic is present.
 pub fn scan_slack(stego_in: &mut dyn SeekRead) -> Result<SlackScan, StrHideError> {

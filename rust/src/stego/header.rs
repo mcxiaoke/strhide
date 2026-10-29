@@ -184,7 +184,7 @@ impl Default for FeatureWord {
 
 /// Largest window size the feature word can carry (10 bits).
 #[cfg(feature = "content-png")]
-pub const FEATURE_WORD_MAX_WINDOW: u16 = 1023;
+pub const FEATURE_WORD_MAX_WINDOW: u16 = 63;
 
 #[cfg(feature = "content-png")]
 impl FeatureWord {
@@ -275,6 +275,11 @@ impl FeatureWord {
 
         let channel_mode = ((low64 >> 13) & 0x03) as u8;
         let class_rule = ((low64 >> 15) & 0x03) as u8;
+        if class_rule > 1 {
+            return Err(StrHideError::CorruptedData(format!(
+                "Invalid class_rule {class_rule} in feature word (only 0 and 1 are supported)"
+            )));
+        }
         let p1_window = ((low64 >> 17) & 0x3FF) as u16;
         let p2_window = ((low64 >> 27) & 0x3FF) as u16;
         let neg_log2_epsilon = ((low64 >> 37) & 0x3FFF) as u16;
@@ -434,5 +439,15 @@ mod tests {
         let mut bad_version = fw;
         bad_version.version = 4;
         assert!(FeatureWord::decode(&bad_version.encode()).is_err());
+
+        // Oversized window (> 63)
+        let mut bad_oversized = fw;
+        bad_oversized.p1_window = 65;
+        assert!(FeatureWord::decode(&bad_oversized.encode()).is_err());
+
+        // Undefined class_rule (> 1)
+        let mut bad_rule = fw;
+        bad_rule.class_rule = 2;
+        assert!(FeatureWord::decode(&bad_rule.encode()).is_err());
     }
 }
