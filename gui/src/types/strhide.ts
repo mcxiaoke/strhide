@@ -102,6 +102,22 @@ export interface StegoCapacityInfo {
   media_info?: MediaInfo;
 }
 
+export interface StegoCapacityFullDto extends StegoCapacityInfo {
+  paranoid_max_bytes: number;
+  high_max_bytes: number;
+  balanced_max_bytes: number;
+}
+
+export interface FileMetadataDto {
+  path: string;
+  filename: string;
+  size_bytes: number;
+  exists: boolean;
+  is_file: boolean;
+  is_dir: boolean;
+  modified_ms?: number;
+}
+
 export interface EmbedStats {
   modified_slots: number;
   total_candidate_slots: number;

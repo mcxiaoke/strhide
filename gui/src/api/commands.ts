@@ -7,7 +7,8 @@ import type {
   WriteResult,
   ReadSummary,
   RemoveResult,
-  StegoCapacityInfo,
+  StegoCapacityFullDto,
+  FileMetadataDto,
   StegoEmbedResult,
   SmartExtractSummaryDto,
   StructureWriteRequest,
@@ -22,6 +23,10 @@ import type {
 
 export async function getCapabilities(): Promise<Capability[]> {
   return invoke<Capability[]>("get_capabilities_cmd");
+}
+
+export async function getFileMetadata(path: string): Promise<FileMetadataDto> {
+  return invoke<FileMetadataDto>("get_file_metadata_cmd", { path });
 }
 
 export async function inspectCarrier(
@@ -115,12 +120,12 @@ export async function probeStegoCapacity(
   algorithm?: string,
   exact: boolean = false,
   onProgress?: (ev: ProgressEvent) => void,
-): Promise<StegoCapacityInfo> {
+): Promise<StegoCapacityFullDto> {
   const channel = new Channel<ProgressEvent>();
   if (onProgress) {
     channel.onmessage = onProgress;
   }
-  return invoke<StegoCapacityInfo>("probe_stego_capacity_cmd", {
+  return invoke<StegoCapacityFullDto>("probe_stego_capacity_cmd", {
     taskId,
     path,
     safetyLevel,

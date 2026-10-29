@@ -1,9 +1,9 @@
 import React from "react";
 import { ShieldCheck, ShieldAlert, AlertTriangle } from "lucide-react";
-import type { SafetyLevel, StegoCapacityInfo } from "../../types/strhide";
+import type { SafetyLevel, StegoCapacityInfo, StegoCapacityFullDto } from "../../types/strhide";
 
 interface CapacityMeterProps {
-  capacity: StegoCapacityInfo | null;
+  capacity: StegoCapacityFullDto | StegoCapacityInfo | null;
   payloadBytes: number;
   selectedSafety: SafetyLevel;
   onSelectSafety: (level: SafetyLevel) => void;
@@ -13,7 +13,7 @@ interface CapacityMeterProps {
 }
 
 function formatBytes(bytes?: number): string {
-  if (bytes === undefined || bytes === null) return "--";
+  if (bytes === undefined || bytes === null || bytes <= 0) return "--";
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
@@ -28,45 +28,60 @@ export const CapacityMeter: React.FC<CapacityMeterProps> = ({
   onToggleEnforceSafety,
   isLoading,
 }) => {
-  const maxBytes = capacity?.recommended_max_bytes || 1;
+  const isVideo =
+    capacity?.format.toLowerCase() === "hevc" ||
+    capacity?.format.toLowerCase() === "mp4" ||
+    capacity?.format.toLowerCase() === "mkv";
+
+  const fullCap = capacity as Partial<StegoCapacityFullDto> | null;
+
+  const getTierMaxBytes = (tier: SafetyLevel): number => {
+    if (!capacity) return 0;
+    if (tier === "paranoid") return fullCap?.paranoid_max_bytes ?? capacity.recommended_max_bytes;
+    if (tier === "high") return fullCap?.high_max_bytes ?? capacity.recommended_max_bytes;
+    if (tier === "balanced") return fullCap?.balanced_max_bytes ?? capacity.recommended_max_bytes;
+    return capacity.recommended_max_bytes;
+  };
+
+  const currentTierMax = getTierMaxBytes(selectedSafety) || capacity?.recommended_max_bytes || 1;
   const rawMaxBytes = capacity?.max_raw_payload_bytes || 1;
 
-  const usageRatio = Math.min((payloadBytes / maxBytes) * 100, 100);
-  const isOverRecommended = payloadBytes > maxBytes;
+  const usageRatio = Math.min((payloadBytes / currentTierMax) * 100, 100);
+  const isOverRecommended = payloadBytes > currentTierMax;
   const isOverRawLimit = payloadBytes > rawMaxBytes;
 
   const tiers: Array<{
     id: SafetyLevel;
     label: string;
-    bpp: string;
+    metric: string;
     desc: string;
     color: string;
   }> = [
     {
       id: "paranoid",
       label: "Paranoid (偏执)",
-      bpp: "≤0.06 bpp",
-      desc: "极低检测风险，抗高级特征分析",
+      metric: isVideo ? "≤10% non-ref" : "≤0.06 bpp",
+      desc: isVideo ? "仅修改极少非参考帧，极致防重编码畸变" : "极低检测风险，抗高级特征分析",
       color: "border-emerald-500/60 text-emerald-400 bg-emerald-950/30",
     },
     {
       id: "high",
       label: "High (推荐)",
-      bpp: "≤0.10 bpp",
-      desc: "默认安全线，抵抗常用取证工具",
+      metric: isVideo ? "≤20% non-ref" : "≤0.10 bpp",
+      desc: isVideo ? "默认视频安全预算线，兼顾容量与隐蔽" : "默认安全线，抵抗常用取证工具",
       color: "border-cyan-500/60 text-cyan-400 bg-cyan-950/30",
     },
     {
       id: "balanced",
       label: "Balanced (均衡)",
-      bpp: "≤0.15 bpp",
-      desc: "传统隐写容量上限，适合纹理复杂图",
+      metric: isVideo ? "≤40% non-ref" : "≤0.15 bpp",
+      desc: isVideo ? "视频帧冗余极限预算" : "传统隐写容量上限，适合纹理复杂图",
       color: "border-amber-500/60 text-amber-400 bg-amber-950/30",
     },
   ];
 
   return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-5 shadow-xl">
+    <div className="rounded-2xl border border-slate-700 bg-slate-900/90 p-5 shadow-xl">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
         <div className="flex items-center gap-2">
           {isOverRecommended ? (
@@ -96,6 +111,7 @@ export const CapacityMeter: React.FC<CapacityMeterProps> = ({
       <div className="mt-4 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
         {tiers.map((t) => {
           const isSelected = selectedSafety === t.id;
+          const tierCapacity = getTierMaxBytes(t.id);
           return (
             <button
               key={t.id}
@@ -109,9 +125,12 @@ export const CapacityMeter: React.FC<CapacityMeterProps> = ({
             >
               <div className="flex items-center justify-between font-semibold text-xs">
                 <span>{t.label}</span>
-                <span className="font-mono text-[10px] opacity-80">{t.bpp}</span>
+                <span className="font-mono text-[10px] opacity-80">{t.metric}</span>
               </div>
               <p className="mt-1 text-[11px] opacity-75">{t.desc}</p>
+              <div className="mt-2 text-[11px] font-mono font-semibold text-slate-300">
+                推荐上限: <span className="text-cyan-400">{formatBytes(tierCapacity)}</span>
+              </div>
             </button>
           );
         })}
@@ -124,7 +143,7 @@ export const CapacityMeter: React.FC<CapacityMeterProps> = ({
             当前载荷: <strong className="text-slate-100">{formatBytes(payloadBytes)}</strong>
           </span>
           <span className="text-slate-400">
-            推荐上限: <strong className="text-cyan-300">{formatBytes(capacity?.recommended_max_bytes)}</strong>{" "}
+            推荐上限: <strong className="text-cyan-300">{formatBytes(currentTierMax)}</strong>{" "}
             (极限: {formatBytes(capacity?.max_raw_payload_bytes)})
           </span>
         </div>
@@ -132,7 +151,7 @@ export const CapacityMeter: React.FC<CapacityMeterProps> = ({
         {/* Progress Bar Track */}
         <div className="relative h-3 w-full overflow-hidden rounded-full bg-slate-950 border border-slate-800">
           <div
-            className={`h-full transition-all duration-300 ease-out ${
+            className={`h-full transition-all duration-200 ease-out ${
               isOverRawLimit
                 ? "bg-rose-600"
                 : isOverRecommended
@@ -161,9 +180,9 @@ export const CapacityMeter: React.FC<CapacityMeterProps> = ({
               </div>
               <p className="mt-0.5 text-[11px] opacity-90 leading-relaxed">
                 当前载荷 ({formatBytes(payloadBytes)}) 超出 {selectedSafety} 档位安全上限 (
-                {formatBytes(capacity?.recommended_max_bytes)})。
+                {formatBytes(currentTierMax)})。
                 {enforceSafety
-                  ? "当前处于严格阻断模式，请删减载荷或切换至 Balanced 档位后继续。"
+                  ? "当前处于严格阻断模式，请删减载荷或切换至更高容量档位后继续。"
                   : "当前处于仅告警不阻断模式，可继续嵌入，但会削弱抗统计分析隐蔽性。"}
               </p>
             </div>

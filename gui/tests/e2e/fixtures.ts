@@ -149,6 +149,18 @@ export function createTauriMockScript(opts: MockDataOptions = {}) {
         };
       }
 
+      if (cmd === "get_file_metadata_cmd") {
+        return {
+          path: args.path || "C:\\\\Samples\\\\secret.txt",
+          filename: "secret.txt",
+          size_bytes: 4096,
+          exists: true,
+          is_file: true,
+          is_dir: false,
+          modified_ms: Date.now()
+        };
+      }
+
       if (cmd === "probe_stego_capacity_cmd") {
         return {
           format: "PNG",
@@ -158,6 +170,9 @@ export function createTauriMockScript(opts: MockDataOptions = {}) {
           max_raw_payload_bytes: 64000,
           max_raw_is_grouped: false,
           recommended_max_bytes: 25600,
+          paranoid_max_bytes: 15360,
+          high_max_bytes: 25600,
+          balanced_max_bytes: 38400,
           estimated_change_rate: 0.08,
           safety_level: args.safety_level || "high",
           safety_bpp_limit: 0.10,

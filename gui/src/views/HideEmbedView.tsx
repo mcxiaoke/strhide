@@ -17,7 +17,7 @@ import {
 import { useWorkspaceStore } from "../store/workspaceStore";
 import { useTaskStore } from "../store/taskStore";
 import { useSettingsStore } from "../store/settingsStore";
-import { writeStructureFile, embedStegoFile, probeStegoCapacity } from "../api/commands";
+import { writeStructureFile, embedStegoFile, probeStegoCapacity, getFileMetadata } from "../api/commands";
 import { CapacityMeter } from "../components/hide/CapacityMeter";
 import { TuningDrawer } from "../components/hide/TuningDrawer";
 import { OverwriteDialog } from "../components/common/OverwriteDialog";
@@ -26,7 +26,7 @@ import { parseStrHideError } from "../lib/errorHandler";
 import type {
   Domain,
   SafetyLevel,
-  StegoCapacityInfo,
+  StegoCapacityFullDto,
   PayloadInputDto,
   EmbedStats,
 } from "../types/strhide";
@@ -61,9 +61,10 @@ export const HideEmbedView: React.FC = () => {
   const [preserveTime, setPreserveTime] = useState(true);
   const [showTuning, setShowTuning] = useState(false);
 
-  // Capacity state
-  const [capacity, setCapacity] = useState<StegoCapacityInfo | null>(null);
+  // Capacity state with global carrier caching
+  const [capacity, setCapacity] = useState<StegoCapacityFullDto | null>(null);
   const [isProbing, setIsProbing] = useState(false);
+  const capacityCacheRef = useRef<Map<string, StegoCapacityFullDto>>(new Map());
 
   // Outcome & dialogs
   const [result, setResult] = useState<{
@@ -98,11 +99,18 @@ export const HideEmbedView: React.FC = () => {
       ? new TextEncoder().encode(textContent).length
       : payloadFileSize;
 
-  // Probe capacity on carrier or safety change with debouncing
+  // Probe capacity on carrier or core tuning change (cached across safety tier switches)
   const probeTimerRef = useRef<number | null>(null);
   useEffect(() => {
     if (!carrierPath || !supportsStego || domain !== "content") {
       setCapacity(null);
+      return;
+    }
+
+    const cacheKey = `${carrierPath}:${password || ""}:${selectedAlgorithm}`;
+    const cached = capacityCacheRef.current.get(cacheKey);
+    if (cached) {
+      setCapacity(cached);
       return;
     }
 
@@ -122,18 +130,19 @@ export const HideEmbedView: React.FC = () => {
           selectedAlgorithm !== "auto" ? selectedAlgorithm : undefined,
           false,
         );
+        capacityCacheRef.current.set(cacheKey, info);
         setCapacity(info);
       } catch (err) {
         console.warn("Capacity probe error:", err);
       } finally {
         setIsProbing(false);
       }
-    }, 200);
+    }, 150);
 
     return () => {
       if (probeTimerRef.current) window.clearTimeout(probeTimerRef.current);
     };
-  }, [carrierPath, supportsStego, domain, safetyLevel, password, selectedAlgorithm]);
+  }, [carrierPath, supportsStego, domain, password, selectedAlgorithm]);
 
   const handlePickPayloadFile = async () => {
     try {
@@ -143,8 +152,13 @@ export const HideEmbedView: React.FC = () => {
       });
       if (selected && typeof selected === "string") {
         setPayloadFilePath(selected);
-        // Estimate size from metadata or arbitrary default
-        setPayloadFileSize(1024); // Will be read accurately by Rust backend
+        try {
+          const meta = await getFileMetadata(selected);
+          setPayloadFileSize(meta.size_bytes);
+        } catch (metaErr) {
+          console.warn("Failed to get file metadata:", metaErr);
+          setPayloadFileSize(0);
+        }
       }
     } catch (err) {
       console.error("Payload pick error:", err);
