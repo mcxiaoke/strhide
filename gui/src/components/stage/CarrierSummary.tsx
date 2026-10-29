@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import {
   FileText,
   FolderOpen,
@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useWorkspaceStore } from "../../store/workspaceStore";
 import { openCarrier, revealCarrier } from "../../lib/openActions";
+import { getFileMetadata } from "../../api/commands";
 
 function formatBytes(bytes?: number): string {
   if (bytes === undefined || bytes === null) return "--";
@@ -33,11 +34,32 @@ export const CarrierSummary: React.FC = () => {
   const { carrierPath, inspection, isInspecting, inspectCurrentCarrier, clearCarrier } =
     useWorkspaceStore();
 
+  const [exactFileSize, setExactFileSize] = useState<number | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    if (carrierPath) {
+      getFileMetadata(carrierPath)
+        .then((meta) => {
+          if (active) setExactFileSize(Number(meta.size_bytes));
+        })
+        .catch(() => {
+          if (active) setExactFileSize(null);
+        });
+    } else {
+      setExactFileSize(null);
+    }
+    return () => {
+      active = false;
+    };
+  }, [carrierPath]);
+
   if (!carrierPath) return null;
 
   const fileName = carrierPath.split(/[/\\]/).pop() || carrierPath;
   const format = inspection?.format || "检测中...";
   const mediaInfo = inspection?.media_info || inspection?.content_stego?.media_info;
+  const displaySize = inspection?.orig_host_size || exactFileSize;
 
   return (
     <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-5 shadow-xl shadow-black/40 backdrop-blur-md">
@@ -53,9 +75,9 @@ export const CarrierSummary: React.FC = () => {
               <span className="rounded-md bg-cyan-900/40 px-2 py-0.5 text-xs font-semibold text-cyan-300 border border-cyan-700/50 uppercase">
                 {format}
               </span>
-              {inspection?.orig_host_size && (
-                <span className="rounded-md bg-emerald-950/40 px-2 py-0.5 text-xs font-medium text-emerald-400 border border-emerald-800/50">
-                  原载体: {formatBytes(inspection.orig_host_size)}
+              {displaySize !== null && displaySize !== undefined && (
+                <span className="rounded-md bg-emerald-950/40 px-2 py-0.5 text-xs font-medium text-emerald-400 border border-emerald-800/50 font-mono">
+                  文件大小: {formatBytes(displaySize)}
                 </span>
               )}
             </div>

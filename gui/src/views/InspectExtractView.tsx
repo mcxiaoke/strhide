@@ -187,7 +187,7 @@ export const InspectExtractView: React.FC = () => {
               )}
               {struct?.is_compressed && (
                 <span className="rounded bg-blue-950 px-2 py-0.5 text-blue-300 border border-blue-800/50">
-                  Zstd 压缩
+                  Deflate 压缩
                 </span>
               )}
               {struct?.is_stealth && (
