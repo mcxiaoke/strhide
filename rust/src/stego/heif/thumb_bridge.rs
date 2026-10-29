@@ -343,6 +343,59 @@ pub fn verify_heif_bridge(
     }
 }
 
+/// Map a byte position in the original file to the same field in the
+/// reconstructed buffer.
+///
+/// Everything before the replaced payload keeps its offset; everything after
+/// moves by `delta`; a metadata field that points *into* the replaced range
+/// cannot be patched safely (the field itself would be overwritten by the new
+/// carrier), so it is rejected instead of writing to the wrong bytes.
+fn map_reconstructed_pos(
+    pos: usize,
+    target_start: usize,
+    target_end: usize,
+    delta: i64,
+) -> Result<usize, StrHideError> {
+    if pos < target_start {
+        return Ok(pos);
+    }
+    if pos >= target_end {
+        let shifted = (pos as i64)
+            .checked_add(delta)
+            .filter(|v| *v >= 0)
+            .ok_or_else(|| {
+                StrHideError::CorruptedData(
+                    "bridge offset underflows the reconstructed file".into(),
+                )
+            })?;
+        return Ok(shifted as usize);
+    }
+    Err(StrHideError::CorruptedData(
+        "bridge metadata field lies inside the replaced payload".into(),
+    ))
+}
+
+/// Does the container carry a media track whose absolute offsets (`stco`,
+/// `co64`, `saio`) would be invalidated by a length change?
+///
+/// Only top-level `moov` boxes are scanned: those tables are the ones that
+/// address bytes outside the replaced item, and a `delta != 0` rebuild would
+/// leave them stale. The bridge refuses such carriers instead of writing a
+/// file whose track samples point at the wrong bytes.
+fn has_relocatable_track_tables(isobmff: &IsobmffMeta, original: &[u8]) -> bool {
+    isobmff.top_boxes.iter().any(|&(off, size, fcc)| {
+        if fcc != *b"moov" {
+            return false;
+        }
+        let Some(moov) = original.get(off..off.saturating_add(size)) else {
+            return false;
+        };
+        [b"stco", b"co64", b"saio"]
+            .iter()
+            .any(|tag| moov.windows(4).any(|w| w == *tag))
+    })
+}
+
 /// Reconstruct the HEIF container with modified carrier bytes and patch iloc / mdat offsets.
 fn reconstruct_heif(
     original: &[u8],
@@ -363,30 +416,47 @@ fn reconstruct_heif(
     out.extend_from_slice(new_carrier);
     out.extend_from_slice(&original[target.file_offset + target.length..]);
 
-    // 1. If Exif TIFF Tag 0x0202 is present, patch its 4-byte value
+    let target_start = target.file_offset;
+    let target_end = target.file_offset + target.length;
+    let map = |pos: usize| map_reconstructed_pos(pos, target_start, target_end, delta);
+
+    // 1. If Exif TIFF Tag 0x0202 is present, patch its 4-byte value. The tag
+    // lives in the Exif item and may be before *or* after the embedded JPEG
+    // (IFD1 is allowed at the end of the TIFF block), so its position has to
+    // be mapped like every other field.
     if let BridgeTargetKind::ExifJpeg {
         tag_0202_file_offset: Some(tag_pos),
         is_little_endian,
         ..
     } = target.kind
     {
-        // Tag pos is within the Exif header, before the modified JPEG content
-        if tag_pos + 4 <= out.len() && tag_pos < target.file_offset {
-            let new_len_u32 = new_carrier.len() as u32;
-            let val_bytes = if is_little_endian {
-                new_len_u32.to_le_bytes()
-            } else {
-                new_len_u32.to_be_bytes()
-            };
-            out[tag_pos..tag_pos + 4].copy_from_slice(&val_bytes);
+        let mapped = map(tag_pos)?;
+        if mapped + 4 > out.len() {
+            return Err(StrHideError::CorruptedData(
+                "Exif 0x0202 tag lies outside the reconstructed file".into(),
+            ));
         }
+        let new_len_u32 = new_carrier.len() as u32;
+        let val_bytes = if is_little_endian {
+            new_len_u32.to_le_bytes()
+        } else {
+            new_len_u32.to_be_bytes()
+        };
+        out[mapped..mapped + 4].copy_from_slice(&val_bytes);
     }
 
     // 2. Parse ISOBMFF meta and patch iloc and top boxes
     let isobmff = parse_isobmff(original)?;
+    if has_relocatable_track_tables(&isobmff, original) {
+        return Err(StrHideError::Rejection(
+            "HEIF bridge cannot resize a carrier with media tracks: `stco`/`co64`/`saio` \
+             offsets outside the replaced item would become stale"
+                .into(),
+        ));
+    }
 
-    let target_end_orig = (target.file_offset + target.length) as u64;
-    let target_start = target.file_offset as u64;
+    let target_end_orig = target_end as u64;
+    let target_start_u64 = target_start as u64;
 
     // The extent that physically contains the replaced region: only its
     // declared length may change, by exactly one delta. The old code patched
@@ -404,21 +474,27 @@ fn reconstruct_heif(
             // The container fallback has no item id: the host is whatever
             // file-offset item's extent physically covers the target region.
             BridgeTargetKind::ContainerJpegFallback => {
-                host_extent(item, target_start, target_end_orig).is_some()
+                host_extent(item, target_start_u64, target_end_orig).is_some()
             }
         };
 
         if is_target_item {
-            let Some(host) = host_extent(item, target_start, target_end_orig) else {
+            let Some(host) = host_extent(item, target_start_u64, target_end_orig) else {
                 return Err(StrHideError::Rejection(format!(
                     "bridge target at offset {} is not covered by a single file-offset \
                      extent of item {}",
                     target.file_offset, item.item_id
                 )));
             };
-            if host.length_sz > 0 && host.length_pos + host.length_sz <= out.len() {
+            if host.length_sz > 0 {
+                let mapped = map(host.length_pos)?;
+                if mapped + host.length_sz > out.len() {
+                    return Err(StrHideError::CorruptedData(
+                        "bridge extent length field lies outside the reconstructed file".into(),
+                    ));
+                }
                 let new_extent_len = ((host.length as i64) + delta).max(0) as u64;
-                patch_uint(&mut out, host.length_pos, host.length_sz, new_extent_len)?;
+                patch_uint(&mut out, mapped, host.length_sz, new_extent_len)?;
             }
             // The host item's own later extents move with the shift, exactly
             // like other items' extents do below.
@@ -429,7 +505,7 @@ fn reconstruct_heif(
                 let abs_off = item.base_offset.saturating_add(ext.offset);
                 if abs_off >= target_end_orig && ext.offset_sz > 0 {
                     let new_ext_off = ((ext.offset as i64) + delta).max(0) as u64;
-                    patch_uint(&mut out, ext.offset_pos, ext.offset_sz, new_ext_off)?;
+                    patch_uint(&mut out, map(ext.offset_pos)?, ext.offset_sz, new_ext_off)?;
                 }
             }
         } else if item.construction_method == 0 {
@@ -438,7 +514,7 @@ fn reconstruct_heif(
                 let new_base = ((item.base_offset as i64) + delta).max(0) as u64;
                 patch_uint(
                     &mut out,
-                    item.base_offset_pos,
+                    map(item.base_offset_pos)?,
                     item.base_offset_sz,
                     new_base,
                 )?;
@@ -447,7 +523,7 @@ fn reconstruct_heif(
                     let abs_off = item.base_offset + ext.offset;
                     if abs_off >= target_end_orig && ext.offset_sz > 0 {
                         let new_ext_off = ((ext.offset as i64) + delta).max(0) as u64;
-                        patch_uint(&mut out, ext.offset_pos, ext.offset_sz, new_ext_off)?;
+                        patch_uint(&mut out, map(ext.offset_pos)?, ext.offset_sz, new_ext_off)?;
                     }
                 }
             }
@@ -465,8 +541,15 @@ fn reconstruct_heif(
                 let new_sz_u64 = new_box_sz as u64;
                 out[box_off + 8..box_off + 16].copy_from_slice(&new_sz_u64.to_be_bytes());
             } else if sz_32 > 0 {
-                // 32-bit box
-                let new_sz_u32 = new_box_sz as u32;
+                // 32-bit box: growing past 4 GiB would silently wrap the size
+                // field and truncate every parser's view of the container.
+                let new_sz_u32 = u32::try_from(new_box_sz).map_err(|_| {
+                    StrHideError::General(
+                        "HEIF bridge grew a 32-bit box beyond 4 GiB; the carrier layout cannot \
+                         represent it"
+                            .into(),
+                    )
+                })?;
                 out[box_off..box_off + 4].copy_from_slice(&new_sz_u32.to_be_bytes());
             }
         }
@@ -1177,6 +1260,55 @@ mod tests {
         b
     }
 
+    #[test]
+    fn map_reconstructed_pos_shifts_only_post_payload_fields() {
+        // Before the replaced payload: identity.
+        assert_eq!(map_reconstructed_pos(10, 100, 200, 50).unwrap(), 10);
+        assert_eq!(map_reconstructed_pos(99, 100, 200, 50).unwrap(), 99);
+        // At/after the old end: shifted by delta.
+        assert_eq!(map_reconstructed_pos(200, 100, 200, 50).unwrap(), 250);
+        assert_eq!(map_reconstructed_pos(300, 100, 200, 50).unwrap(), 350);
+        // Inside the replaced payload: a field cannot live there.
+        assert!(map_reconstructed_pos(150, 100, 200, 50).is_err());
+        // Shrinking below zero is rejected, not wrapped.
+        assert!(map_reconstructed_pos(200, 100, 200, -300).is_err());
+        assert_eq!(map_reconstructed_pos(200, 100, 200, -200).unwrap(), 0);
+    }
+
+    #[test]
+    fn track_offset_tables_are_detected_in_moov_only() {
+        let mut moov_payload = Vec::new();
+        moov_payload.extend_from_slice(&[0u8; 8]);
+        moov_payload.extend_from_slice(b"stco");
+        let mut file = mk_box(b"ftyp", b"mif1\0\0\0\0");
+        file.extend_from_slice(&mk_box(b"moov", &moov_payload));
+
+        let parsed = parse_isobmff(&file).expect_err("no meta box");
+        assert!(matches!(parsed, StrHideError::CorruptedData(_)));
+
+        let meta = {
+            let mut body = vec![0u8, 0, 0, 0];
+            body.extend_from_slice(&mk_box(b"iinf", &{
+                let mut b = vec![0u8, 0, 0, 0];
+                b.extend_from_slice(&0u16.to_be_bytes());
+                b
+            }));
+            body.extend_from_slice(&mk_box(b"iloc", &{
+                let mut b = vec![0u8, 0, 0, 0];
+                b.push(0x44);
+                b.push(0x00);
+                b.extend_from_slice(&0u16.to_be_bytes());
+                b
+            }));
+            mk_box(b"meta", &body)
+        };
+        let mut file = mk_box(b"ftyp", b"mif1\0\0\0\0");
+        file.extend_from_slice(&meta);
+        file.extend_from_slice(&mk_box(b"moov", &moov_payload));
+        let parsed = parse_isobmff(&file).expect("meta + moov parse");
+        assert!(has_relocatable_track_tables(&parsed, &file));
+    }
+
     fn mk_fullbox(ver: u8, body: &[u8]) -> Vec<u8> {
         let mut v = vec![ver, 0, 0, 0];
         v.extend_from_slice(body);
@@ -1261,6 +1393,86 @@ mod tests {
             &[jpeg_a.as_slice(), jpeg_b.as_slice()].concat(),
         ));
         file
+    }
+
+    /// Same two-JPEG carrier with the legal but less common `ftyp -> mdat ->
+    /// meta` order: the replaced item lives *before* the metadata that points
+    /// at it, which is where the old reconstruction patched the wrong bytes.
+    fn build_two_jpeg_heif_mdat_first(primary_id: u16) -> Vec<u8> {
+        let mut jpeg_a = vec![0xFF, 0xD8];
+        jpeg_a.extend(std::iter::repeat_n(0x11u8, 62));
+        let mut jpeg_b = vec![0xFF, 0xD8];
+        jpeg_b.extend(std::iter::repeat_n(0x22u8, 62));
+
+        let mk_infe = |id: u16| {
+            let mut body = vec![2u8, 0, 0, 0];
+            body.extend_from_slice(&id.to_be_bytes());
+            body.extend_from_slice(&0u16.to_be_bytes());
+            body.extend_from_slice(b"jpeg");
+            mk_box(b"infe", &body)
+        };
+        let mut iinf_body = mk_fullbox(0, &2u16.to_be_bytes());
+        iinf_body.extend_from_slice(&mk_infe(1));
+        iinf_body.extend_from_slice(&mk_infe(2));
+        let iinf = mk_box(b"iinf", &iinf_body);
+        let pitm = mk_box(b"pitm", &mk_fullbox(0, &primary_id.to_be_bytes()));
+
+        let mut iloc_body = mk_fullbox(0, &[]);
+        iloc_body.push(0x44);
+        iloc_body.push(0x00);
+        iloc_body.extend_from_slice(&2u16.to_be_bytes());
+        let off_a = 24u32; // ftyp (24) + mdat header (8)
+        let off_b = off_a + jpeg_a.len() as u32;
+        for (id, off) in [(1u16, off_a), (2u16, off_b)] {
+            iloc_body.extend_from_slice(&id.to_be_bytes());
+            iloc_body.extend_from_slice(&0u16.to_be_bytes());
+            iloc_body.extend_from_slice(&1u16.to_be_bytes());
+            iloc_body.extend_from_slice(&off.to_be_bytes());
+            iloc_body.extend_from_slice(&(jpeg_a.len() as u32).to_be_bytes());
+        }
+        let iloc = mk_box(b"iloc", &iloc_body);
+
+        let mut meta_payload = mk_fullbox(0, &[]);
+        meta_payload.extend_from_slice(&pitm);
+        meta_payload.extend_from_slice(&iinf);
+        meta_payload.extend_from_slice(&iloc);
+        let meta = mk_box(b"meta", &meta_payload);
+
+        let mut file = Vec::new();
+        file.extend_from_slice(&mk_box(b"ftyp", b"mif1\0\0\0\0"));
+        file.extend_from_slice(&mk_box(
+            b"mdat",
+            &[jpeg_a.as_slice(), jpeg_b.as_slice()].concat(),
+        ));
+        file.extend_from_slice(&meta);
+        file
+    }
+
+    #[test]
+    fn reconstruct_maps_fields_after_a_pre_meta_payload() {
+        let file = build_two_jpeg_heif_mdat_first(1);
+        let target = find_bridge_target(&file).expect("non-primary item is bridgeable");
+        assert!(matches!(
+            target.kind,
+            BridgeTargetKind::DirectJpeg { item_id: 2 }
+        ));
+        assert_eq!(target.file_offset, 24 + 64);
+
+        let mut new_carrier = vec![0xFF, 0xD8];
+        new_carrier.extend(std::iter::repeat_n(0x33u8, 98));
+        let out = reconstruct_heif(&file, &target, &new_carrier).expect("reconstruct");
+
+        let parsed = parse_isobmff(&out).expect("reconstructed container parses");
+        let item = |id: u32| parsed.items.iter().find(|i| i.item_id == id).unwrap();
+        // Item 1 lives before the replaced payload: both its value and the
+        // field position are unchanged.
+        assert_eq!(item(1).extents[0].offset, 24);
+        // Item 2 covers the replaced region: its length changes by delta and
+        // its offset stays, because it starts before the payload.
+        assert_eq!(item(2).extents[0].offset, 24 + 64);
+        assert_eq!(item(2).extents[0].length, new_carrier.len() as u64);
+        // A third item placed after the metadata would have to move; the
+        // mapping is exercised directly in the unit test above.
     }
 
     /// The bridge must never pick the `pitm` primary image, and must prefer

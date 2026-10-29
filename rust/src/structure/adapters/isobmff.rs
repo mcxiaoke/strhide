@@ -851,9 +851,14 @@ fn heif_item_hidden_inject(
                 let ext_off = read_sized_uint(iloc_buf, cpos, off_sz)?;
                 cpos += off_sz + len_sz;
                 if cm == 0 {
+                    let abs_off = b_off.saturating_add(ext_off);
                     if base_sz > 0 && b_off > 0 {
                         // patched via base_pos
-                    } else {
+                    } else if abs_off >= m_end as u64 {
+                        // Only extents that physically live after the old meta
+                        // moved by `delta_meta`; an item inside an `mdat` that
+                        // precedes `meta` keeps its absolute offset. The old
+                        // unconditional shift rewrote those to bogus values.
                         // A crafted host can name an extent offset that has no
                         // headroom for the meta growth; wrapping would write a
                         // bogus offset into the stego (review P3-3).
@@ -864,7 +869,7 @@ fn heif_item_hidden_inject(
                     }
                 }
             }
-            if cm == 0 && base_sz > 0 && b_off > 0 {
+            if cm == 0 && base_sz > 0 && b_off > 0 && b_off >= m_end as u64 {
                 let shifted = b_off.checked_add(delta_meta as u64).ok_or_else(|| {
                     StrHideError::CorruptedData("iloc base offset overflows".into())
                 })?;
@@ -1137,9 +1142,12 @@ fn heif_item_hidden_strip(
                 let ext_off = read_sized_uint(iloc_buf, cpos, off_sz)?;
                 cpos += off_sz + len_sz;
                 if cm == 0 {
+                    let abs_off = b_off.saturating_add(ext_off);
                     if base_sz > 0 && b_off > 0 {
                         // handled at base_pos
-                    } else {
+                    } else if abs_off >= m_end as u64 {
+                        // Mirror the inject-side condition: only offsets that
+                        // were shifted forward when the meta grew come back.
                         patch_sized_uint(
                             iloc_buf,
                             ext_pos,
@@ -1149,7 +1157,7 @@ fn heif_item_hidden_strip(
                     }
                 }
             }
-            if cm == 0 && base_sz > 0 && b_off > 0 {
+            if cm == 0 && base_sz > 0 && b_off > 0 && b_off >= m_end as u64 {
                 patch_sized_uint(
                     iloc_buf,
                     base_pos,
@@ -1574,10 +1582,85 @@ mod tests {
         out
     }
 
+    /// ftyp(24) + mdat(72) + meta(fullbox: iinf + iloc). The media bytes come
+    /// *before* the metadata, which is legal ISOBMFF but was mishandled: every
+    /// iloc offset used to be shifted by `delta_meta` even though the item
+    /// itself never moved.
+    fn assemble_meta_heif_mdat_first(iinf: &[u8], iloc: &[u8]) -> Vec<u8> {
+        let mdat_len = 72usize;
+        let meta_off = 24 + mdat_len;
+        let meta_len = 12 + iinf.len() + iloc.len();
+        let mut out = Vec::new();
+        out.extend_from_slice(&24u32.to_be_bytes());
+        out.extend_from_slice(b"ftyp");
+        out.extend_from_slice(b"mif1");
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(b"mif1heic");
+        out.extend_from_slice(&(mdat_len as u32).to_be_bytes());
+        out.extend_from_slice(b"mdat");
+        out.resize(out.len() + mdat_len - 8, 0xC3);
+        out.extend_from_slice(&(meta_len as u32).to_be_bytes());
+        out.extend_from_slice(b"meta");
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        out.extend_from_slice(iinf);
+        out.extend_from_slice(iloc);
+        let mdat_payload: u32 = 24 + 8;
+        let base_pos = meta_off + 12 + iinf.len() + 22;
+        out[base_pos..base_pos + 4].copy_from_slice(&mdat_payload.to_be_bytes());
+        out
+    }
+
     fn synthetic_meta_heif(item_id: u32, infe_version: u8) -> Vec<u8> {
         let iinf = make_iinf(item_id, infe_version);
         let iloc = make_iloc_box(None);
         assemble_meta_heif(&iinf, &iloc)
+    }
+
+    #[test]
+    fn item_hidden_leaves_pre_meta_mdat_offsets_alone() {
+        let iinf = make_iinf(1, 2);
+        let iloc = make_iloc_box(None);
+        let host = assemble_meta_heif_mdat_first(&iinf, &iloc);
+
+        let delta_meta = 41u64;
+        let inject_offset = host.len() as u64 + delta_meta;
+        let ube_data_len = 200u64;
+        let ube_total = ube_data_len + TRAILER_SIZE as u64;
+        let mut ube = vec![0x77u8; ube_data_len as usize];
+        ube.extend_from_slice(
+            &EnvelopeTrailer::create(inject_offset + 8, ube_total, STANDARD_TRAILER_MAGIC).pack(),
+        );
+
+        let mut out = Vec::new();
+        isobmff_inject(
+            "HEIF",
+            &mut Cursor::new(host.clone()),
+            &mut Cursor::new(ube),
+            &mut out,
+            "item_hidden",
+        )
+        .unwrap();
+
+        // meta starts after mdat and does not move, but the injected 21-byte
+        // infe grows iinf and therefore shifts the iloc entries by one infe.
+        let meta_off = 24 + 72;
+        let base_pos = meta_off + 12 + iinf.len() + 21 + 22;
+        let base = u32::from_be_bytes(out[base_pos..base_pos + 4].try_into().unwrap());
+        assert_eq!(
+            base, 32,
+            "an item inside the pre-meta mdat must keep its absolute offset"
+        );
+
+        // ... and removal still restores the host byte-exactly.
+        let header = EnvelopeHeader {
+            strategy_id: 12,
+            inject_offset,
+            inject_size: 8 + ube_total,
+            ..Default::default()
+        };
+        let mut restored = Cursor::new(Vec::new());
+        isobmff_strip(&mut Cursor::new(out), &mut restored, &header).unwrap();
+        assert_eq!(restored.into_inner(), host);
     }
 
     #[test]
