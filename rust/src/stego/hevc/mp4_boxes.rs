@@ -40,6 +40,13 @@ const HEVC_SAMPLE_ENTRIES: [&[u8; 4]; 2] = [b"hvc1", b"hev1"];
 /// (ISO/IEC 14496-12 §12.1.3).
 const VISUAL_SAMPLE_ENTRY_HEADER: usize = 86;
 
+/// Upper bound on the samples one `stsz` box may declare. The fixed-size path
+/// materialises `vec![fixed; count]` straight from the file field, so a crafted
+/// `sample_count` of `u32::MAX` would request 16 GiB and abort the process
+/// (Rust allocation failure is an abort, not a catchable error). 16 M samples
+/// is far beyond any real video (a 4-hour 60 fps clip is ~0.9 M).
+const MAX_MP4_SAMPLES: usize = 16 * 1024 * 1024;
+
 /// Extracted MP4/MOV carrier information ready for Scheme C steganography.
 pub struct Mp4HevcTarget<'a> {
     /// VPS, SPS, PPS (and any other array entries) from `hvcC`, without
@@ -509,6 +516,11 @@ fn parse_sample_sizes(bytes: &[u8], stsz: &BoxRef) -> Result<Vec<u32>> {
     }
     let fixed = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
     let count = u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]]) as usize;
+    if count > MAX_MP4_SAMPLES {
+        return Err(HevcError::ContainerMalformed(
+            "stsz sample count exceeds the supported limit",
+        ));
+    }
     if fixed != 0 {
         return Ok(vec![fixed; count]);
     }

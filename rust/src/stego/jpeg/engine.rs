@@ -113,6 +113,16 @@ fn preflight_jpeg(carrier_bytes: &[u8]) -> Result<CarrierPreflight, StrHideError
             "JPEG has no image components".into(),
         ));
     }
+    // The slot grid, the luma cost table and `components_mask` all assume a
+    // single luma plane (grayscale) or Y/Cb/Cr. A 4-component CMYK file would
+    // silently treat the C plane as luma, so refuse it up front instead of
+    // guessing.
+    if info.components.len() != 1 && info.components.len() != 3 {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "Unsupported JPEG variant: {} components (only grayscale and YCbCr are supported)",
+            info.components.len()
+        )));
+    }
     let max_h = info
         .components
         .iter()
@@ -174,6 +184,19 @@ fn check_pipeline_budget(base_bytes: u64, body_n: usize, h: u8) -> Result<(), St
         )));
     }
     Ok(())
+}
+
+/// Body slots whose backtracking bitmap still fits the pipeline budget.
+///
+/// The probe has to subtract the same bitmap cost `check_pipeline_budget`
+/// charges the embedder; otherwise a very large grid advertises tens of MB
+/// that the writer can never actually allocate.
+fn max_body_slots_within_pipeline(base_bytes: u64, h: u8) -> usize {
+    let states = 1u64 << h.min(10);
+    let words_per_col = states.div_ceil(64);
+    let bytes_per_slot = words_per_col * 8;
+    let remaining = MAX_PIPELINE_BYTES.saturating_sub(base_bytes);
+    usize::try_from(remaining / bytes_per_slot).unwrap_or(usize::MAX)
 }
 
 /// Optional tracing enabled with `STRHIDE_STEGO_TRACE=1`.
@@ -1536,6 +1559,13 @@ pub fn probe_jpeg_capacity(
         )));
     }
     let body_slots = n_total - hdr_n;
+    // The writer charges the trellis bitmap against the same 8 GiB pipeline
+    // budget; a probe that ignored it advertised capacities the embedder
+    // rejects outright.
+    let body_slots = body_slots.min(max_body_slots_within_pipeline(
+        preflight.base_bytes,
+        params.stc_h,
+    ));
 
     // The physical ceiling is `u = 1`; `u` grows from there as the payload
     // shrinks, so this is the largest payload that fits at all.

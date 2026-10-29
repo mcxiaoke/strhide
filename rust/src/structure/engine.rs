@@ -564,6 +564,30 @@ pub struct InspectResult {
     pub strategies: Vec<StrategyCapacity>,
 }
 
+impl InspectResult {
+    /// Report for a content-only carrier: the structure domain has no adapter
+    /// for `format`, so no envelope can be present and no strategy applies.
+    pub fn not_applicable(carrier: &Path, format: FileFormat) -> Self {
+        Self {
+            carrier: carrier.to_path_buf(),
+            format,
+            has_hidden_data: false,
+            strategy: None,
+            ube_offset: None,
+            ube_total_size: None,
+            is_encrypted: None,
+            is_compressed: None,
+            is_stealth: None,
+            password_hint: None,
+            orig_host_size: None,
+            orig_host_sha256: None,
+            metadata: None,
+            suspicious_hints: Vec::new(),
+            strategies: Vec::new(),
+        }
+    }
+}
+
 /// Result of one verification level.
 #[derive(Debug, Serialize)]
 pub struct LevelStatus {
@@ -629,6 +653,24 @@ pub struct VerifyResult {
     pub level2_envelope: LevelStatus,
     /// Level 3: payload actually decrypts and its SHA-256 matches metadata.
     pub level3_crypto: LevelStatus,
+}
+
+impl VerifyResult {
+    /// Verdict for a content-only carrier: every structure level is skipped
+    /// because there is nothing to verify there.
+    pub fn not_applicable(carrier: &Path, format: FileFormat) -> Self {
+        let detail = format!(
+            "structure domain does not support {} carriers",
+            format.as_str()
+        );
+        Self {
+            carrier: carrier.to_path_buf(),
+            format,
+            level1_host: LevelStatus::skipped(detail.clone()),
+            level2_envelope: LevelStatus::skipped(detail.clone()),
+            level3_crypto: LevelStatus::skipped(detail),
+        }
+    }
 }
 
 /// Outcome of a successful [`remove_carrier`].

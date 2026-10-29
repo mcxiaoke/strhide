@@ -224,8 +224,12 @@ pub fn inspect_carrier_file(
         if format == Some(crate::formats::FileFormat::Mp4) {
             return crate::stego::hevc::inspect_hevc_mp4_file(
                 carrier_path,
-                options.password,
-                options.domain,
+                // Resolve credentials exactly like the bytes-level entry
+                // points: an explicit password wins, the profile's private
+                // secret/domain are the fallback. Passing `options.password`
+                // raw silently ignored a custom `StegoProfile`.
+                options.secret(dialect),
+                options.domain(dialect),
                 dialect.hevc_format(),
                 &options.control,
             );

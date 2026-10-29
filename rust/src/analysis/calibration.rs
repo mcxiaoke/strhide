@@ -166,9 +166,18 @@ pub fn estimate(data: &[u8]) -> Option<CalibrationEstimate> {
     }
 
     // `jpeg_decoder` yields RGB for colour JPEGs and 1 byte per pixel for
-    // grayscale; the component count from the coefficient stream tells us which.
-    let channels = if actual.components.len() == 1 { 1 } else { 3 };
-    let (pixels, width, _reported_channels) = decode_jpeg_pixels(data)?;
+    // grayscale; the reported channel count is the only safe source (the
+    // coefficient stream also has 4 components for CMYK, where assuming 3
+    // would slice the pixel buffer with the wrong stride).
+    let (pixels, width, channels) = decode_jpeg_pixels(data)?;
+    if channels != 1 && channels != 3 {
+        // CMYK32 / 16-bit samples have no meaningful luma plane here; SKIP
+        // instead of reporting a bogus rate computed from a misaligned stride.
+        return None;
+    }
+    if actual.components.len() != channels {
+        return None;
+    }
     let width = width as usize;
     if width == 0 || pixels.len() % (width * channels) != 0 {
         return None;

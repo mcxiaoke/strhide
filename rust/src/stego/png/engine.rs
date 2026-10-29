@@ -262,6 +262,14 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
     };
 
     let bpp = channels;
+    let total_pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| StrHideError::CorruptedData("PNG dimensions overflow usize".into()))?;
+    if total_pixels > MAX_PNG_PIXELS {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "PNG dimensions {width}x{height} exceed the {MAX_PNG_PIXELS}-pixel content-stego limit"
+        )));
+    }
     let stride = width as usize * bpp;
 
     // A carrier is untrusted input and `stride * height` is exactly how many
@@ -357,6 +365,16 @@ fn idat_info_of(idat: &[u8]) -> Option<IdatInfo> {
 
 /// Maximum Rayon worker threads allocated for parallel Deflate compression.
 const MAX_DEFLATE_WORKERS: usize = 8;
+
+/// Upper bound on the pixels a content-domain PNG carrier may have.
+///
+/// The decode alone is `width * height * channels` bytes, and every cost model
+/// keeps several full-image `f64` planes on top of it (HILL alone is ~48 B per
+/// pixel). Without this check a valid-but-hostile PNG whose IHDR declares
+/// 32768×32768 makes `inspect`/`embed`/`extract` allocate tens of GiB and abort
+/// the process. 64 MP admits 8K RGBA (33 MP) with headroom while keeping the
+/// worst case bounded.
+const MAX_PNG_PIXELS: usize = 64 * 1024 * 1024;
 
 /// Minimum scanlines payload (in bytes) to trigger multi-threaded parallel Deflate.
 /// Below 2 MB, the single-thread path avoids thread pool dispatch overhead.

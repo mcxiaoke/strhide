@@ -105,13 +105,22 @@ pub(crate) fn print_json<T: serde::Serialize>(val: &T) -> Result<(), StrHideErro
 }
 
 pub(crate) fn print_verify_result(res: &crate::structure::VerifyResult) {
+    fn status(level: &crate::structure::LevelStatus) -> &'static str {
+        if level.skipped {
+            "SKIP"
+        } else if level.ok {
+            "OK"
+        } else {
+            "FAIL"
+        }
+    }
     println!("{}", t!(Msg::InspectCarrier, val = res.carrier.display()));
     println!("{}", t!(Msg::InspectFormat, val = res.format.as_str()));
     println!(
         "{}",
         t!(
             Msg::VerifyL1,
-            status = if res.level1_host.ok { "OK" } else { "FAIL" },
+            status = status(&res.level1_host),
             detail = res.level1_host.detail
         )
     );
@@ -119,7 +128,7 @@ pub(crate) fn print_verify_result(res: &crate::structure::VerifyResult) {
         "{}",
         t!(
             Msg::VerifyL2,
-            status = if res.level2_envelope.ok { "OK" } else { "FAIL" },
+            status = status(&res.level2_envelope),
             detail = res.level2_envelope.detail
         )
     );
@@ -127,7 +136,7 @@ pub(crate) fn print_verify_result(res: &crate::structure::VerifyResult) {
         "{}",
         t!(
             Msg::VerifyL3,
-            status = if res.level3_crypto.ok { "OK" } else { "FAIL" },
+            status = status(&res.level3_crypto),
             detail = res.level3_crypto.detail
         )
     );

@@ -673,10 +673,24 @@ fn inject_codebits(
     // requiring the recorded slack_off to fall inside the *current* slack
     // ranges — a section table edited after injection would otherwise slip
     // past this second line of defense (review P3-10).
-    if pe_codebits::parse_channel_header(&text, layout.bitness).is_ok() {
-        return Err(StrHideError::General(
-            "Carrier already contains hidden data (pe_codebits channel). Use remove first or specify another file.".into(),
-        ));
+    //
+    // `parse_channel_header` deliberately does not check the magic (it also
+    // serves the post-`locate` extraction path), and on a clean `.text` the
+    // first 112 decoded bits are arbitrary instructions: `version == 1` alone
+    // is a 1/256 chance. Require the recorded slack offset to sit inside a
+    // declared slack range with room for the recorded diff, which a random
+    // header essentially never satisfies.
+    if let Ok(header) = pe_codebits::parse_channel_header(&text, layout.bitness) {
+        let needed_slack = pe_codebits::CHANNEL_HEADER_LEN as u64 + u64::from(header.ube_len);
+        let slack_off = u64::from(header.slack_off);
+        let in_slack = layout.slack_ranges.iter().any(|&(start, end)| {
+            slack_off >= start && slack_off.saturating_add(needed_slack) <= end
+        });
+        if in_slack {
+            return Err(StrHideError::General(
+                "Carrier already contains hidden data (pe_codebits channel). Use remove first or specify another file.".into(),
+            ));
+        }
     }
 
     let slack_off = pe_codebits::find_slack_run_streaming(host_in, &layout.slack_ranges, need_slack)?

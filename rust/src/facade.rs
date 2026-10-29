@@ -372,7 +372,18 @@ impl StrHide {
         let _ = (carrier, opts);
 
         #[cfg(feature = "structure-base")]
-        let structure = self.structure().inspect_file(carrier, opts.password)?;
+        let structure = match crate::formats::sniff::sniff_file(carrier) {
+            // Annex-B HEVC is a content-only carrier: there is no structure
+            // adapter, so calling `inspect_file` would reject the file before
+            // the content engine ever ran (which made `inspect`/`smart_extract`
+            // fail on every .h265/.hevc stream).
+            Ok(Some(format)) if !format.supports_structure() && format.supports_stego() => {
+                crate::structure::InspectResult::not_applicable(carrier, format)
+            }
+            // Unreadable/unknown files still go through the structure domain so
+            // the caller gets its usual, more precise rejection message.
+            _ => self.structure().inspect_file(carrier, opts.password)?,
+        };
 
         #[cfg(feature = "content-base")]
         let (content, content_error, media_info) = {
@@ -427,7 +438,13 @@ impl StrHide {
         let _ = (carrier, opts);
 
         #[cfg(feature = "structure-base")]
-        let structure = self.structure().verify_file(carrier, opts.password)?;
+        let structure = match crate::formats::sniff::sniff_file(carrier) {
+            // Same content-only exemption as `inspect_any`.
+            Ok(Some(format)) if !format.supports_structure() && format.supports_stego() => {
+                crate::structure::VerifyResult::not_applicable(carrier, format)
+            }
+            _ => self.structure().verify_file(carrier, opts.password)?,
+        };
 
         #[cfg(feature = "content-base")]
         let content = {
