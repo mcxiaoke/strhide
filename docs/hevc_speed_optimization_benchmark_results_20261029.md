@@ -13,7 +13,7 @@
 | **Step 1: PR A** | 零输出变化的纯清理与并行预回放 | **3.75 s**<br>(0.58 GiB) | **171.34 s**<br>(0.59 GiB) | **50.38 s**<br>(4.75 GiB) | **35.64 s**<br>(1.56 GiB) | **100% 逐比特一致** |
 | **Step 2: PR B** | 代价查表 LUT 与测试稳定性看门狗 | **2.73 s**<br>(0.55 GiB) | **97.67 s**<br>(0.56 GiB) | **35.23 s**<br>(4.80 GiB) | **18.61 s**<br>(1.52 GiB) | **100% 逐比特一致** |
 | **Step 3: PR C** | `rusty_h265` 环路滤波跳过显式化与外部超时看门狗 | **2.34 s**<br>(0.55 GiB) | **93.09 s**<br>(0.56 GiB) | **36.62 s**<br>(4.74 GiB) | **18.77 s**<br>(1.68 GiB) | **100% 逐比特一致** |
-| **Step 4: PR D** | 确定性跨 GOP 多核并行解码 | *待测* | *待测* | *待测* | *待测* | *待测* |
+| **Step 4: PR D** | 确定性跨 GOP 多核并行解码与波次准入控制 | **2.19 s**<br>(0.55 GiB) | **26.29 s**<br>(0.90 GiB) | **23.00 s**<br>(4.89 GiB) | **5.49 s**<br>(1.61 GiB) | **100% 逐比特一致** |
 
 ---
 
@@ -81,3 +81,31 @@
   1. 在 `F:\Develop\github\strhide-vendor\rusty_h265` 的 `Decoder` 结构体上增加 `pub skip_loop_filters: bool` 显式字段及 `pub fn reset_sequence(&mut self)` 序列重置方法；
   2. 在 `strhide` 的 `probe_hevc_pool`、`extract_mp4_carrier` 与 `record_carrier_state` 中显式置 `skip_loop_filters = true`，全路径抹除不必要的 Deblocking 与 SAO 环路滤波耗时；
   3. 为 `rust/tests/local/local_media.rs` 中所有 `Command::new("ffmpeg")` 调用补充 `run_ffmpeg_with_timeout` 15~30s 进程级看门狗与 `.stdin(Stdio::null())` 句柄隔离，彻底防御 Windows 管道继承死锁。
+
+### Step 4: PR D 确定性跨 GOP 多核并行解码（2026-10-29 16:35）
+
+- `binary`: `rust/target/release/strhide.exe` (commit PR D)
+- `upstream`: `F:\Develop\github\strhide-vendor\rusty_h265` (`v1-20261029`)
+- `baseline_hash.py --check`: 58/58 零改动全绿。
+- `cargo test --all-features --all-targets`: 760+ 用例 100% 绿灯。
+- `cargo test local_ --all-features -- --ignored`: 21/21 用例 100% 绿灯（119.37s 稳定通过，无任何卡顿）。
+- `cargo fmt && cargo clippy`: 零警告零错误。
+- `embed --capacity (sampled 1000 slices)`: **2.19 s**（从基线 4.34s 降至 2.19s，提速 **1.98x**，耗时腰斩）
+- `embed --capacity --exact (all 34,454 slices)`: **26.29 s**（从基线 173.22s **骤降 146.93 秒！直接提速 6.59x，耗时下降 84.8%**）
+- `embed 1 MiB payload`: **23.00 s**（从基线 60.94s **净省 37.94 秒！直接提速 2.65x，耗时下降 62.3%**）
+- `extract 1 MiB payload`: **5.49 s**（从基线 35.46s **骤降 29.97 秒！直接提速 6.46x，耗时下降 84.5%**）
+- 提取校验：`>>> VERIFICATION: Payload extracted 100% BIT-PERFECT! <<<`
+- 软解校验：`ffmpeg -v error -i temp/bench_out.mp4 -f null -` 全片 34,454 帧解码 0 错误退出（exit code 0）。
+- **多线程确定性测试门禁（Gate 1）**：
+  - `RAYON_NUM_THREADS=1`：提取耗时 19.10s，载荷哈希与原载荷 100% 匹配。
+  - `RAYON_NUM_THREADS=4`：提取耗时 7.56s，载荷哈希与原载荷 100% 匹配。
+  - `RAYON_NUM_THREADS=16`：提取耗时 5.50s，载荷哈希与原载荷 100% 匹配。
+  - 单线程与任意多线程产出 100% 逐比特全等。
+- **内存水位线门禁（Gate 3）**：
+  - 实测 `embed 1 MiB` 峰值工作集（RSS）为 **4.89 GiB**（5,011.51 MiB），严格控制在 8.0 GiB 预算的 61.1%（远低于 7.2 GiB 警戒线）。
+- **主要收益归因**：
+  1. **跨 GOP 并行切分**：基于 `is_irap(cand.nal_type) && starts_picture(&carrier[cand.span])` 识别独立 GOP 边界（`anime-b.mp4` 共切分 322 个 GOP），并彻底排除 `NAL_RASL_N` 与 `NAL_RASL_R`，确保每个 GOP 自包含、零外部依赖；
+  2. **Rayon 多核全速解码**：`StopCondition::All` 按分批波次并发解码，全片 34,454 切片耗时从 93s 骤降至 26s；
+  3. **自适应按需解码提取**：`StopCondition::TargetSlices` 根据 Superblock 声明的切片需求精确预估并并行解码前 $K$ 个 GOP，提取耗时从 18.7s 骤降至 5.49s；
+  4. **波次内存准入控制**：`StopCondition::TargetSlots` 按批次（16 GOPs/批）并发解码，满足槽位时精确截断，峰值内存稳稳压在 4.89 GiB；
+  5. **位压缩向量无缝拼接**：实现 `BitPacker::extend` 与 `BitPacker::truncate`，支持高效按位无损合并与精准切片截断。

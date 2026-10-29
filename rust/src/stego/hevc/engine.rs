@@ -27,8 +27,8 @@ use crate::stego::hevc::slot::{
     BinOp, CabacRecorder, HIGH_DISPLACEMENT_PENALTY, RecordMode, StegoSlot, SubstreamRecord,
 };
 use crate::stego::hevc::sniff::{
-    HevcCarrierKind, NAL_RADL_N, NAL_RASL_N, NAL_SPS_NUT, NAL_STSA_N, NAL_TRAIL_N, NAL_TSA_N,
-    sniff_hevc_carrier,
+    HevcCarrierKind, NAL_RADL_N, NAL_RASL_N, NAL_RASL_R, NAL_SPS_NUT, NAL_STSA_N, NAL_TRAIL_N,
+    NAL_TSA_N, sniff_hevc_carrier,
 };
 use crate::stego::options::{StegoHeaderInfo, StegoVerifyResult, VerifyLevel};
 use crate::stego::{SafetyLevel, SafetyPolicy, StegoCapacityInfo};
@@ -2267,6 +2267,48 @@ impl BitPacker {
         }
         self.len += 1;
     }
+
+    fn truncate(&mut self, new_len: usize) {
+        if new_len >= self.len {
+            return;
+        }
+        self.len = new_len;
+        let needed_bytes = self.len.div_ceil(8);
+        self.bytes.truncate(needed_bytes);
+        if let Some(last) = self.bytes.last_mut() {
+            let rem = self.len % 8;
+            if rem != 0 {
+                *last &= (1 << rem) - 1;
+            }
+        }
+    }
+
+    fn extend(&mut self, other: &BitPacker) {
+        if other.len == 0 {
+            return;
+        }
+        let shift = self.len % 8;
+        if shift == 0 {
+            self.bytes.extend_from_slice(&other.bytes);
+            self.len += other.len;
+            return;
+        }
+        let inv_shift = 8 - shift;
+        for &b in &other.bytes {
+            let last = self.bytes.len() - 1;
+            self.bytes[last] |= b << shift;
+            self.bytes.push(b >> inv_shift);
+        }
+        self.len += other.len;
+        let needed_bytes = self.len.div_ceil(8);
+        self.bytes.truncate(needed_bytes);
+        if let Some(last) = self.bytes.last_mut() {
+            let rem = self.len % 8;
+            if rem != 0 {
+                *last &= (1 << rem) - 1;
+            }
+        }
+    }
 }
 
 /// Where the slots of the current slice go, according to [`Capture`].
@@ -2363,21 +2405,108 @@ struct CandidateSlice {
     temporal_id: u8,
 }
 
-fn record_carrier_state(
+struct GopSliceRecord {
+    recorded_slices: usize,
+    sink: SlotSink,
+    slice_contexts: Vec<SliceContext>,
+    decode_error: Option<String>,
+}
+
+impl GopSliceRecord {
+    fn new(capture: Capture) -> Self {
+        GopSliceRecord {
+            recorded_slices: 0,
+            sink: SlotSink::new(capture),
+            slice_contexts: Vec::new(),
+            decode_error: None,
+        }
+    }
+
+    fn truncate_to_slices(&mut self, kept_slices: usize) {
+        if kept_slices >= self.recorded_slices {
+            return;
+        }
+        let new_counts_0: usize = self.sink.slice_slot_ranges[..kept_slices]
+            .iter()
+            .filter(|(_, b)| *b == 0)
+            .map(|(c, _)| *c)
+            .sum();
+        let new_counts_1: usize = self.sink.slice_slot_ranges[..kept_slices]
+            .iter()
+            .filter(|(_, b)| *b == 1)
+            .map(|(c, _)| *c)
+            .sum();
+        let total_kept_slots = new_counts_0 + new_counts_1;
+
+        self.sink.counts = [new_counts_0, new_counts_1];
+        self.sink.slice_slot_ranges.truncate(kept_slices);
+        match self.sink.capture {
+            Capture::Count => {}
+            Capture::Bits => {
+                self.sink.band_bits[0].truncate(new_counts_0);
+                self.sink.band_bits[1].truncate(new_counts_1);
+                self.sink.raw_bits.truncate(total_kept_slots);
+            }
+            Capture::Full => {
+                self.sink.raw_slots.truncate(total_kept_slots);
+                self.slice_contexts.truncate(kept_slices);
+            }
+        }
+        self.recorded_slices = kept_slices;
+    }
+}
+
+fn find_gop_ranges(carrier: &[u8], candidates: &[CandidateSlice]) -> Vec<std::ops::Range<usize>> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let mut gop_starts = Vec::new();
+    for (idx, cand) in candidates.iter().enumerate() {
+        if idx == 0 || (is_irap(cand.nal_type) && starts_picture(&carrier[cand.span.clone()])) {
+            gop_starts.push(idx);
+        }
+    }
+    let mut ranges = Vec::with_capacity(gop_starts.len());
+    for i in 0..gop_starts.len() {
+        let start = gop_starts[i];
+        let end = if i + 1 < gop_starts.len() {
+            gop_starts[i + 1]
+        } else {
+            candidates.len()
+        };
+        ranges.push(start..end);
+    }
+    ranges
+}
+
+fn estimate_gops_for_slices(
+    remaining_gops: &[std::ops::Range<usize>],
+    candidates: &[CandidateSlice],
+    has_inter: bool,
+    needed_slices: usize,
+) -> usize {
+    let mut sum = 0usize;
+    for (i, range) in remaining_gops.iter().enumerate() {
+        for cand in &candidates[range.clone()] {
+            if picture_band(cand.nal_type, has_inter).is_some() {
+                sum += 1;
+            }
+        }
+        if sum >= needed_slices {
+            return i + 1;
+        }
+    }
+    remaining_gops.len().max(1)
+}
+
+fn decode_gop_slice_range(
     carrier: &[u8],
-    kind: HevcCarrierKind,
+    candidates: &[CandidateSlice],
+    parameter_sets: &[Vec<u8>],
+    has_inter: bool,
+    mode: RecordMode,
     capture: Capture,
-    stop: StopCondition,
-    control: &Control<'_>,
-) -> Result<CarrierRecord, StrHideError> {
-    // Only the embedder rewrites an RBSP or replays a bin journal; the
-    // read-only levels run the recorder in slot-only mode and never keep a
-    // slice context at all.
-    let mode = if capture == Capture::Full {
-        RecordMode::Embed
-    } else {
-        RecordMode::Slots
-    };
+) -> Result<GopSliceRecord, String> {
     let mut decoder = Decoder::new();
     decoder.skip_loop_filters = true;
     decoder.ablate = Ablate {
@@ -2385,19 +2514,117 @@ fn record_carrier_state(
         intra: true,
         residual: true,
     };
-    // First decode error, kept so a carrier that yields no slices can say why
-    // instead of presenting as "0 bytes of capacity".
-    let mut decode_error: Option<String> = None;
+    for ps in parameter_sets {
+        if let Err(e) = decoder.push_nal(ps, None) {
+            return Err(format!("parameter set: {e}"));
+        }
+    }
 
-    let (candidates, digest_inputs) = match kind {
+    let mut record = GopSliceRecord::new(capture);
+    let mut decode_error: Option<String> = None;
+    let mut local_slice_idx = 0usize;
+
+    for cand in candidates {
+        let slice_bytes = &carrier[cand.span.clone()];
+        if slice_bytes.len() < 2 {
+            continue;
+        }
+        let Some(band) = picture_band(cand.nal_type, has_inter) else {
+            if let Err(e) = decoder.push_nal(slice_bytes, None) {
+                decode_error.get_or_insert_with(|| e.to_string());
+            }
+            drain_frames(&mut decoder);
+            continue;
+        };
+
+        let mut recorder =
+            CabacRecorder::with_slice_capacity(local_slice_idx, band, mode, slice_bytes.len());
+        let decoded = decoder.decode_nal_with_observer(slice_bytes, &mut recorder);
+        drain_frames(&mut decoder);
+
+        match decoded {
+            Err(e) => {
+                decode_error.get_or_insert_with(|| e.to_string());
+            }
+            Ok(_) if recorder.substreams.is_empty() => {}
+            Ok(_) => {
+                let is_multi_sub = recorder.substreams.len() > 1;
+                let rbsp = if is_multi_sub || capture == Capture::Full {
+                    nal_rbsp(slice_bytes)
+                } else {
+                    Vec::new()
+                };
+                absorb_recorder(&mut recorder, &rbsp, &mut record.sink);
+                record.recorded_slices += 1;
+                if capture == Capture::Full {
+                    record.slice_contexts.push(SliceContext {
+                        carrier_span: cand.span.clone(),
+                        nal_type: cand.nal_type,
+                        layer_id: cand.layer_id,
+                        temporal_id: cand.temporal_id,
+                        band,
+                        orig_rbsp: rbsp,
+                        ops: recorder.ops,
+                        substreams: recorder.substreams,
+                    });
+                }
+                local_slice_idx += 1;
+            }
+        }
+    }
+
+    record.decode_error = decode_error;
+    Ok(record)
+}
+
+fn merge_gop_record(
+    global_sink: &mut SlotSink,
+    global_slice_contexts: &mut Vec<SliceContext>,
+    global_recorded_slices: &mut usize,
+    mut gop: GopSliceRecord,
+) {
+    global_sink.counts[0] += gop.sink.counts[0];
+    global_sink.counts[1] += gop.sink.counts[1];
+    global_sink
+        .slice_slot_ranges
+        .extend_from_slice(&gop.sink.slice_slot_ranges);
+
+    match global_sink.capture {
+        Capture::Count => {}
+        Capture::Bits => {
+            global_sink.band_bits[0].extend(&gop.sink.band_bits[0]);
+            global_sink.band_bits[1].extend(&gop.sink.band_bits[1]);
+            global_sink.raw_bits.extend(&gop.sink.raw_bits);
+        }
+        Capture::Full => {
+            let base_slice_idx = *global_recorded_slices as u32;
+            for slot in &mut gop.sink.raw_slots {
+                slot.slice_idx += base_slice_idx;
+            }
+            global_sink.raw_slots.extend(gop.sink.raw_slots);
+            global_slice_contexts.extend(gop.slice_contexts);
+        }
+    }
+    *global_recorded_slices += gop.recorded_slices;
+}
+
+fn record_carrier_state(
+    carrier: &[u8],
+    kind: HevcCarrierKind,
+    capture: Capture,
+    stop: StopCondition,
+    control: &Control<'_>,
+) -> Result<CarrierRecord, StrHideError> {
+    let mode = if capture == Capture::Full {
+        RecordMode::Embed
+    } else {
+        RecordMode::Slots
+    };
+
+    let (candidates, digest_inputs, parameter_sets) = match kind {
         HevcCarrierKind::HeifContainer => {
             let target = parse_heif_targets(carrier)
                 .map_err(|e| StrHideError::UnsupportedFormat(format!("HEIF parse error: {e}")))?;
-            for ps in &target.parameter_sets {
-                if let Err(e) = decoder.push_nal(ps, None) {
-                    decode_error.get_or_insert_with(|| format!("parameter set: {e}"));
-                }
-            }
             let parameter_sets = owned_parameter_sets(&target.parameter_sets);
             let mut candidates = Vec::with_capacity(target.slice_spans.len());
             for span in &target.slice_spans {
@@ -2405,17 +2632,18 @@ fn record_carrier_state(
                     candidates.push(cand);
                 }
             }
-            (candidates, DigestInputs::ParameterSets { parameter_sets })
+            (
+                candidates,
+                DigestInputs::ParameterSets {
+                    parameter_sets: parameter_sets.clone(),
+                },
+                parameter_sets,
+            )
         }
         HevcCarrierKind::Mp4Container => {
             let target = parse_mp4_targets(carrier).map_err(|e| {
                 StrHideError::UnsupportedFormat(format!("MP4/MOV parse error: {e}"))
             })?;
-            for ps in &target.parameter_sets {
-                if let Err(e) = decoder.push_nal(ps, None) {
-                    decode_error.get_or_insert_with(|| format!("parameter set: {e}"));
-                }
-            }
             let parameter_sets = owned_parameter_sets(&target.parameter_sets);
             let mut candidates = Vec::with_capacity(target.slice_spans.len());
             for span in &target.slice_spans {
@@ -2423,16 +2651,21 @@ fn record_carrier_state(
                     candidates.push(cand);
                 }
             }
-            (candidates, DigestInputs::ParameterSets { parameter_sets })
+            (
+                candidates,
+                DigestInputs::ParameterSets {
+                    parameter_sets: parameter_sets.clone(),
+                },
+                parameter_sets,
+            )
         }
         HevcCarrierKind::AnnexBStream => {
             let spans = parse_annex_b_spans(carrier);
+            let mut parameter_sets = Vec::new();
             for span in &spans {
                 if span.is_param_set() {
                     let end = span.end_offset().min(carrier.len());
-                    if let Err(e) = decoder.push_nal(&carrier[span.header_offset..end], None) {
-                        decode_error.get_or_insert_with(|| format!("parameter set: {e}"));
-                    }
+                    parameter_sets.push(carrier[span.header_offset..end].to_vec());
                 }
             }
             let mut candidates = Vec::new();
@@ -2445,124 +2678,133 @@ fn record_carrier_state(
                     candidates.push(cand);
                 }
             }
-            (candidates, DigestInputs::AnnexB { spans })
+            (candidates, DigestInputs::AnnexB { spans }, parameter_sets)
         }
     };
 
-    // The ladder decides which slices *contribute slots*; it must never decide
-    // which slices the decoder *sees*. A P/B picture needs its reference
-    // pictures in the DPB, and the decoder skips everything until it meets an
-    // IRAP ("stream does not start with an IRAP", H.265 8.1.3) -- feeding only
-    // the drift-free pictures therefore yields exactly zero recordings. Every
-    // candidate is pushed in decode order; excluded ones go through the plain
-    // path with no observer attached.
     let has_inter = candidates.iter().any(|c| !is_irap(c.nal_type));
 
-    // Picture counts drive the per-picture budgets, so they are taken from
-    // `first_slice_segment_in_pic_flag` rather than from the span list: a
-    // multi-slice picture is one picture, and counting its slices would inflate
-    // every per-picture budget by the slice count. A HEIF carrier is one image
-    // by definition -- its grid tiles are separate items, each a standalone
-    // picture, and they are all the same image.
     let (pictures, band_pictures) = if capture == Capture::Bits {
         (1, [1, 0])
     } else {
         count_pictures(carrier, kind, &candidates, has_inter)
     };
 
-    let mut slice_contexts = Vec::new();
-    let mut sink = SlotSink::new(capture);
-    let mut recorded_slices = 0usize;
-
+    let gop_ranges = find_gop_ranges(carrier, &candidates);
     let total_slices = candidates.len();
     control.stage_sized(Stage::Decode, total_slices as u64);
 
-    // `slice_idx` indexes `slice_contexts`, so it advances only when a slice is
-    // actually recorded. Using the enumeration index of the candidate list
-    // would desynchronise the two as soon as one slice fails to decode, and
-    // `slot.slice_idx` would then point at the wrong context during embedding.
-    let mut slice_idx = 0usize;
-    for (cand_idx, cand) in candidates.iter().enumerate() {
-        if cand_idx % 16 == 0 {
-            control.check()?;
-            control.report(Event::progress(
-                Stage::Decode,
-                cand_idx as u64,
-                Some(total_slices as u64),
-            ));
-        }
-        let slice_bytes = &carrier[cand.span.clone()];
-        if slice_bytes.len() < 2 {
-            continue;
-        }
-        let Some(band) = picture_band(cand.nal_type, has_inter) else {
-            if let Err(e) = decoder.push_nal(slice_bytes, None) {
-                decode_error.get_or_insert_with(|| e.to_string());
-            }
-            drain_frames(&mut decoder);
-            continue;
-        };
-        let mut recorder =
-            CabacRecorder::with_slice_capacity(slice_idx, band, mode, slice_bytes.len());
-        let decoded = decoder.decode_nal_with_observer(slice_bytes, &mut recorder);
-        drain_frames(&mut decoder);
-        match decoded {
-            Err(e) => {
-                decode_error.get_or_insert_with(|| e.to_string());
-            }
-            // A picture the decoder skipped (H.265 8.1.3: RASL with no leading
-            // IRAP) records nothing and must not consume a slice index.
-            Ok(_) if recorder.substreams.is_empty() => {}
-            Ok(_) => {
-                let is_multi_sub = recorder.substreams.len() > 1;
-                let rbsp = if is_multi_sub || capture == Capture::Full {
-                    nal_rbsp(slice_bytes)
-                } else {
-                    Vec::new()
-                };
-                // The EPB exclusion runs in every mode: it decides which slots
-                // enter the pool, so the pool layout has to be identical on the
-                // read side or the trellis would read different elements.
-                absorb_recorder(&mut recorder, &rbsp, &mut sink);
-                recorded_slices += 1;
-                if capture == Capture::Full {
-                    slice_contexts.push(SliceContext {
-                        carrier_span: cand.span.clone(),
-                        nal_type: cand.nal_type,
-                        layer_id: cand.layer_id,
-                        temporal_id: cand.temporal_id,
-                        band,
-                        orig_rbsp: rbsp,
-                        ops: recorder.ops,
-                        substreams: recorder.substreams,
-                    });
-                }
-                slice_idx += 1;
+    let mut global_sink = SlotSink::new(capture);
+    let mut global_slice_contexts = Vec::new();
+    let mut global_recorded_slices = 0usize;
+    let mut decode_error: Option<String> = None;
 
-                let total_current_slots = sink.counts[0] + sink.counts[1];
+    let mut gop_idx = 0;
+    while gop_idx < gop_ranges.len() {
+        control.check()?;
+        let batch_size = match stop {
+            StopCondition::All => 32,
+            StopCondition::MinSlots(min) => {
+                if min <= 2048 {
+                    1
+                } else {
+                    16
+                }
+            }
+            StopCondition::TargetSlices(target_slices) => {
+                let needed = target_slices.saturating_sub(global_recorded_slices);
+                let est_gops = estimate_gops_for_slices(
+                    &gop_ranges[gop_idx..],
+                    &candidates,
+                    has_inter,
+                    needed,
+                );
+                est_gops.clamp(1, 48)
+            }
+            StopCondition::TargetSlots(_) => 16,
+        };
+
+        let end_idx = (gop_idx + batch_size).min(gop_ranges.len());
+        let batch_ranges = &gop_ranges[gop_idx..end_idx];
+
+        let batch_results: Vec<Result<GopSliceRecord, String>> = batch_ranges
+            .par_iter()
+            .map(|range| {
+                decode_gop_slice_range(
+                    carrier,
+                    &candidates[range.clone()],
+                    &parameter_sets,
+                    has_inter,
+                    mode,
+                    capture,
+                )
+            })
+            .collect();
+
+        let mut finished = false;
+        for gop_res in batch_results {
+            let mut gop = match gop_res {
+                Ok(g) => g,
+                Err(e) => {
+                    decode_error.get_or_insert(e);
+                    continue;
+                }
+            };
+            if let Some(err) = gop.decode_error.take() {
+                decode_error.get_or_insert(err);
+            }
+
+            let mut current_slots = global_sink.counts[0] + global_sink.counts[1];
+            let mut current_slices = global_recorded_slices;
+            let mut slices_to_take = gop.recorded_slices;
+            let mut stop_now = false;
+
+            for (idx, &(slot_cnt, _band)) in gop.sink.slice_slot_ranges.iter().enumerate() {
+                current_slots += slot_cnt;
+                current_slices += 1;
                 let should_stop = match stop {
                     StopCondition::All => false,
-                    StopCondition::MinSlots(min) => total_current_slots >= min,
-                    StopCondition::TargetSlices(target_slices) => recorded_slices >= target_slices,
-                    StopCondition::TargetSlots(target) => total_current_slots >= target,
+                    StopCondition::MinSlots(min) => current_slots >= min,
+                    StopCondition::TargetSlices(target_slices) => current_slices >= target_slices,
+                    StopCondition::TargetSlots(target) => current_slots >= target,
                 };
                 if should_stop {
+                    slices_to_take = idx + 1;
+                    stop_now = true;
                     break;
                 }
             }
-        }
-    }
-    control.report(Event::progress(
-        Stage::Decode,
-        total_slices as u64,
-        Some(total_slices as u64),
-    ));
 
-    // A carrier the decoder refused outright (Range Extensions, >10-bit, a
-    // truncated stream) would otherwise surface as "0 bytes of capacity" --
-    // indistinguishable from a carrier that is simply too small. Name the
-    // reason instead of reporting an empty pool.
-    if recorded_slices == 0
+            if slices_to_take < gop.recorded_slices {
+                gop.truncate_to_slices(slices_to_take);
+            }
+
+            merge_gop_record(
+                &mut global_sink,
+                &mut global_slice_contexts,
+                &mut global_recorded_slices,
+                gop,
+            );
+
+            if stop_now {
+                finished = true;
+                break;
+            }
+        }
+
+        control.report(Event::progress(
+            Stage::Decode,
+            gop_ranges[..end_idx].iter().map(|r| r.len()).sum::<usize>() as u64,
+            Some(total_slices as u64),
+        ));
+
+        if finished {
+            break;
+        }
+        gop_idx = end_idx;
+    }
+
+    if global_recorded_slices == 0
         && let Some(reason) = decode_error
     {
         return Err(StrHideError::UnsupportedFormat(format!(
@@ -2577,7 +2819,7 @@ fn record_carrier_state(
         raw_slots,
         slice_slot_ranges,
         ..
-    } = sink;
+    } = global_sink;
     let band0_len = counts[0];
     let total_slots = counts[0] + counts[1];
 
@@ -2585,14 +2827,14 @@ fn record_carrier_state(
     let bands = vec![0..band0_len, band0_len..total_slots];
 
     Ok(CarrierRecord {
-        slice_contexts,
+        slice_contexts: global_slice_contexts,
         all_slots: raw_slots,
         band_bits: [band0_bits.bytes, band1_bits.bytes],
         bands,
         pictures,
         band_pictures,
         digest_inputs,
-        recorded_slices,
+        recorded_slices: global_recorded_slices,
         raw_bits: raw_bits.bytes,
         slice_slot_ranges,
     })
@@ -2665,6 +2907,9 @@ const BAND_REFERENCE: u8 = 1;
 /// embedding never changes (sign flips live inside the CABAC payload), so both
 /// ends derive the same ladder and the wire header carries no flag.
 fn picture_band(nal_type: u8, has_inter: bool) -> Option<u8> {
+    if nal_type == NAL_RASL_N || nal_type == NAL_RASL_R {
+        return None;
+    }
     if !has_inter || is_non_reference_vcl(nal_type) {
         return Some(BAND_NON_REFERENCE);
     }
@@ -2996,6 +3241,55 @@ mod capture_tests {
             assert!(p < 2048);
         }
     }
+
+    #[test]
+    fn bitpacker_extend_and_truncate_correctness() {
+        for len1 in 0..35 {
+            for len2 in 0..35 {
+                let bits1: Vec<u8> = (0..len1).map(|i| ((i * 7 + 3) % 2) as u8).collect();
+                let bits2: Vec<u8> = (0..len2).map(|i| ((i * 11 + 5) % 2) as u8).collect();
+
+                let mut p1 = BitPacker::default();
+                for &b in &bits1 {
+                    p1.push(b);
+                }
+
+                let mut p2 = BitPacker::default();
+                for &b in &bits2 {
+                    p2.push(b);
+                }
+
+                p1.extend(&p2);
+
+                assert_eq!(p1.len, len1 + len2);
+                let combined: Vec<u8> = bits1.iter().chain(bits2.iter()).copied().collect();
+                for (i, &expected) in combined.iter().enumerate() {
+                    assert_eq!(
+                        bit_at(&p1.bytes, i),
+                        expected,
+                        "Mismatch at index {i} for len1={len1}, len2={len2}"
+                    );
+                }
+
+                // Test truncate
+                for trunc_len in [0, len1 / 2, len1, len1 + len2 / 2, len1 + len2] {
+                    let mut p_trunc = BitPacker::default();
+                    for &b in &combined {
+                        p_trunc.push(b);
+                    }
+                    p_trunc.truncate(trunc_len);
+                    assert_eq!(p_trunc.len, trunc_len);
+                    for (i, &expected) in combined.iter().enumerate().take(trunc_len) {
+                        assert_eq!(
+                            bit_at(&p_trunc.bytes, i),
+                            expected,
+                            "Truncate mismatch at {i} for trunc_len={trunc_len}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3073,7 +3367,8 @@ mod dialect_tests {
         // Inter stream: non-reference -> band 0, reference -> band 1.
         assert_eq!(picture_band(NAL_TRAIL_N, true), Some(BAND_NON_REFERENCE));
         assert_eq!(picture_band(NAL_TSA_N, true), Some(BAND_NON_REFERENCE));
-        assert_eq!(picture_band(NAL_RASL_N, true), Some(BAND_NON_REFERENCE));
+        assert_eq!(picture_band(NAL_RASL_N, true), None);
+        assert_eq!(picture_band(NAL_RASL_R, true), None);
         assert_eq!(picture_band(NAL_TRAIL_R, true), Some(BAND_REFERENCE));
         // IRAP is the prediction root of a whole GOP: never carries slots when
         // the stream has inter pictures.
