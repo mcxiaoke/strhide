@@ -62,21 +62,21 @@ export const CapacityMeter: React.FC<CapacityMeterProps> = ({
       label: "Paranoid (偏执)",
       metric: isVideo ? "≤10% non-ref" : "≤0.06 bpp",
       desc: isVideo ? "仅修改极少非参考帧，极致防重编码畸变" : "极低检测风险，抗高级特征分析",
-      color: "border-emerald-500/60 text-emerald-400 bg-emerald-950/30",
+      color: "border-emerald-600/80 text-emerald-400 bg-emerald-950/40",
     },
     {
       id: "high",
       label: "High (推荐)",
       metric: isVideo ? "≤20% non-ref" : "≤0.10 bpp",
       desc: isVideo ? "默认视频安全预算线，兼顾容量与隐蔽" : "默认安全线，抵抗常用取证工具",
-      color: "border-cyan-500/60 text-cyan-400 bg-cyan-950/30",
+      color: "border-cyan-600/80 text-cyan-400 bg-cyan-950/40",
     },
     {
       id: "balanced",
       label: "Balanced (均衡)",
       metric: isVideo ? "≤40% non-ref" : "≤0.15 bpp",
       desc: isVideo ? "视频帧冗余极限预算" : "传统隐写容量上限，适合纹理复杂图",
-      color: "border-amber-500/60 text-amber-400 bg-amber-950/30",
+      color: "border-amber-600/80 text-amber-400 bg-amber-950/40",
     },
   ];
 
@@ -125,11 +125,11 @@ export const CapacityMeter: React.FC<CapacityMeterProps> = ({
             >
               <div className="flex items-center justify-between font-semibold text-xs">
                 <span>{t.label}</span>
-                <span className="font-mono text-[10px] opacity-80">{t.metric}</span>
+                <span className="font-mono text-[10px] text-slate-400">{t.metric}</span>
               </div>
-              <p className="mt-1 text-[11px] opacity-75">{t.desc}</p>
+              <p className="mt-1 text-[11px] text-slate-400 leading-normal">{t.desc}</p>
               <div className="mt-2 text-[11px] font-mono font-semibold text-slate-300">
-                推荐上限: <span className="text-cyan-400">{formatBytes(tierCapacity)}</span>
+                推荐上限: <span className="text-cyan-400 font-bold">{formatBytes(tierCapacity)}</span>
               </div>
             </button>
           );

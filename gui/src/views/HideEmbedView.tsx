@@ -359,9 +359,9 @@ export const HideEmbedView: React.FC = () => {
               placeholder="在此输入需要隐藏的秘密明文信息（自动统计 UTF-8 字节数）..."
               value={textContent}
               onChange={(e) => setTextContent(e.target.value)}
-              className="w-full rounded-xl border border-slate-800 bg-slate-950 p-3 text-xs text-slate-100 placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none font-mono"
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 p-3 text-xs text-slate-100 placeholder:text-slate-500 focus:border-cyan-500 focus:outline-none font-mono"
             />
-            <div className="mt-1 flex justify-between text-[11px] text-slate-500 font-mono">
+            <div className="mt-1 flex justify-between text-[11px] text-slate-400 font-mono">
               <span>UTF-8 字节数: {payloadBytes} B</span>
               <span>字符数: {textContent.length}</span>
             </div>
@@ -416,7 +416,7 @@ export const HideEmbedView: React.FC = () => {
               placeholder="留空则采用部署私有 Dialect 密钥..."
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none"
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-500 focus:border-cyan-500 focus:outline-none"
             />
           </div>
 
@@ -428,7 +428,7 @@ export const HideEmbedView: React.FC = () => {
                 placeholder="例如: 生日年份 / 常用绰号..."
                 value={passwordHint}
                 onChange={(e) => setPasswordHint(e.target.value)}
-                className="w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none"
+                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-500 focus:border-cyan-500 focus:outline-none"
               />
             </div>
           )}
@@ -479,7 +479,7 @@ export const HideEmbedView: React.FC = () => {
 
         <button
           onClick={() => handleStartHide(false)}
-          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-6 py-2.5 text-xs font-bold text-white shadow-xl shadow-cyan-950/60 hover:brightness-110 active:scale-95"
+          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-700 px-6 py-2.5 text-xs font-bold text-white shadow-xl shadow-cyan-950/60 hover:brightness-110 active:scale-95"
         >
           <span>开始隐藏 / 嵌入</span>
           <ArrowRight className="h-4 w-4" />

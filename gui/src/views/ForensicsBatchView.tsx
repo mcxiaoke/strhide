@@ -162,7 +162,7 @@ export const ForensicsBatchView: React.FC = () => {
                 <button
                   onClick={handleScanSingle}
                   disabled={isScanning}
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-md hover:brightness-110 active:scale-95 disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-purple-700 to-indigo-700 px-4 py-2 text-xs font-bold text-white shadow-md hover:brightness-110 active:scale-95 disabled:opacity-50"
                 >
                   <RotateCw className={`h-3.5 w-3.5 ${isScanning ? "animate-spin" : ""}`} />
                   开始反隐写扫描
@@ -359,7 +359,7 @@ export const ForensicsBatchView: React.FC = () => {
                 </span>
                 <button
                   onClick={handleStartBatch}
-                  className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-5 py-2 text-xs font-bold text-white shadow-lg hover:brightness-110 active:scale-95"
+                  className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-700 px-5 py-2 text-xs font-bold text-white shadow-lg hover:brightness-110 active:scale-95"
                 >
                   <Play className="h-3.5 w-3.5" />
                   执行批量任务

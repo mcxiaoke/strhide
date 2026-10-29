@@ -185,14 +185,14 @@ export const VerifyRestoreView: React.FC = () => {
                 placeholder="Level 3 解密密码..."
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-48 rounded-xl border border-slate-800 bg-slate-950 py-1.5 pl-8 pr-3 text-xs text-slate-200 placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none"
+                className="w-48 rounded-xl border border-slate-700 bg-slate-950 py-1.5 pl-8 pr-3 text-xs text-slate-200 placeholder:text-slate-500 focus:border-cyan-500 focus:outline-none"
               />
             </div>
 
             <button
               onClick={handleVerify}
               disabled={isVerifying}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-4 py-1.5 text-xs font-semibold text-white shadow-md hover:brightness-110 active:scale-95 disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-700 px-4 py-1.5 text-xs font-semibold text-white shadow-md hover:brightness-110 active:scale-95 disabled:opacity-50"
             >
               <ShieldCheck className="h-4 w-4" />
               运行三级校验
@@ -253,7 +253,7 @@ export const VerifyRestoreView: React.FC = () => {
           <button
             onClick={handleRestore}
             disabled={isRestoring}
-            className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2 text-xs font-semibold text-white shadow-lg hover:bg-emerald-500 active:scale-95 disabled:opacity-50"
+            className="inline-flex items-center gap-2 rounded-xl bg-emerald-700 px-5 py-2 text-xs font-bold text-white shadow-lg hover:bg-emerald-600 active:scale-95 disabled:opacity-50"
           >
             <RotateCcw className="h-4 w-4" />
             一键剥离并还原

@@ -317,8 +317,8 @@ export const InspectExtractView: React.FC = () => {
 
         {passwordHint && (
           <div className="mb-3 inline-flex items-center gap-1.5 rounded-lg bg-amber-950/60 px-3 py-1 text-xs text-amber-300 border border-amber-800/40">
-            <Info className="h-3.5 w-3.5" />
-            <span>密码提示 (Hint): <strong className="text-white font-mono">{passwordHint}</strong></span>
+            <Info className="h-3.5 w-3.5 text-amber-400" />
+            <span>密码提示 (Hint): <strong className="text-amber-200 font-mono">{passwordHint}</strong></span>
           </div>
         )}
 
@@ -330,14 +330,14 @@ export const InspectExtractView: React.FC = () => {
               placeholder="如载荷已加密，请输入解密密码..."
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-xl border border-slate-800 bg-slate-950 py-2.5 pl-9 pr-3 text-xs text-slate-100 placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none"
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 py-2.5 pl-9 pr-3 text-xs text-slate-100 placeholder:text-slate-500 focus:border-cyan-500 focus:outline-none"
             />
           </div>
 
           <select
             value={preferDomain || ""}
             onChange={(e) => setPreferDomain((e.target.value as Domain) || undefined)}
-            className="rounded-xl border border-slate-800 bg-slate-950 px-3 py-2.5 text-xs text-slate-300 focus:border-cyan-500 focus:outline-none"
+            className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-xs text-slate-200 focus:border-cyan-500 focus:outline-none"
           >
             <option value="">优先域: 自动检测 (Auto)</option>
             <option value="structure">优先结构域 (Structure)</option>
@@ -347,7 +347,7 @@ export const InspectExtractView: React.FC = () => {
           <button
             onClick={() => handleSmartExtract()}
             disabled={isInspecting}
-            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-5 py-2.5 text-xs font-semibold text-white shadow-lg shadow-cyan-950/50 hover:brightness-110 active:scale-95 disabled:opacity-50"
+            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-700 px-5 py-2.5 text-xs font-semibold text-white shadow-lg shadow-cyan-950/50 hover:brightness-110 active:scale-95 disabled:opacity-50"
           >
             <Download className="h-4 w-4" />
             开始提取
