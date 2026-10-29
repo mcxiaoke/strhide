@@ -94,6 +94,50 @@ pub async fn inspect_carrier_cmd(
     })?
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FileMetadataDto {
+    pub path: String,
+    pub filename: String,
+    pub size_bytes: u64,
+    pub exists: bool,
+    pub is_file: bool,
+    pub is_dir: bool,
+    pub modified_ms: Option<u64>,
+}
+
+#[tauri::command]
+pub fn get_file_metadata_cmd(path: PathBuf) -> Result<FileMetadataDto, ErrorDetail> {
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    match std::fs::metadata(&path) {
+        Ok(meta) => {
+            let modified_ms = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64);
+
+            Ok(FileMetadataDto {
+                path: path.to_string_lossy().into_owned(),
+                filename,
+                size_bytes: meta.len(),
+                exists: true,
+                is_file: meta.is_file(),
+                is_dir: meta.is_dir(),
+                modified_ms,
+            })
+        }
+        Err(err) => {
+            let ctx = RenderCtx::new(i18n::lang());
+            Err(strhide::errors::StrHideError::Io(err).detail_i18n_with_ctx(ctx))
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn verify_carrier_cmd(
     state: State<'_, GuiState>,
