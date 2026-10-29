@@ -692,6 +692,9 @@ fn parse_iloc_extents(iloc: &[u8], target_ids: &[u32]) -> Result<Vec<(usize, usi
         pos += 2;
 
         for _ in 0..extent_count as usize {
+            if pos >= iloc.len() {
+                break;
+            }
             pos += index_size;
             let ext_offset = read_uint(&iloc[pos.min(iloc.len())..], offset_size);
             pos += offset_size;

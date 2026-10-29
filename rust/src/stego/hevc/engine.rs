@@ -23,7 +23,9 @@ use crate::stego::format::HevcFormatProfile;
 use crate::stego::hevc::bitstream::{compute_hevc_cover_digest, parse_annex_b_spans, rbsp_to_nal};
 use crate::stego::hevc::heif_boxes::parse_heif_targets;
 use crate::stego::hevc::mp4_boxes::parse_mp4_targets;
-use crate::stego::hevc::slot::{BinOp, CabacRecorder, RecordMode, StegoSlot, SubstreamRecord};
+use crate::stego::hevc::slot::{
+    BinOp, CabacRecorder, HIGH_DISPLACEMENT_PENALTY, RecordMode, StegoSlot, SubstreamRecord,
+};
 use crate::stego::hevc::sniff::{
     HevcCarrierKind, NAL_RADL_N, NAL_RASL_N, NAL_SPS_NUT, NAL_STSA_N, NAL_TRAIL_N, NAL_TSA_N,
     sniff_hevc_carrier,
@@ -881,11 +883,18 @@ pub fn embed_hevc_patches_with_factor(
     crc.update(&uncompressed);
     let payload_crc = crc.finalize();
 
+    let window_slices = u16::try_from(slice_contexts.len()).map_err(|_| {
+        StrHideError::UnsupportedFormat(format!(
+            "HEVC carrier has {} slices, exceeding the superblock window slice limit (65535)",
+            slice_contexts.len()
+        ))
+    })?;
+
     let sb = HevcSuperblock {
         magic,
         version_and_flags: 0x20,
         stc_u_body: fmt.stc_u,
-        window_slices: slice_contexts.len() as u16,
+        window_slices,
         total_windows: 1,
         reserved: 0,
         payload_len: uncompressed.len() as u32,
@@ -923,7 +932,7 @@ pub fn embed_hevc_patches_with_factor(
             let slot = &all_slots[pos];
             sb_cover_bits.push(slot.original_bit);
             sb_costs.push(if forbidden.contains(&pos) {
-                f64::INFINITY
+                HIGH_DISPLACEMENT_PENALTY
             } else {
                 slot.cost as f64
             });
@@ -962,7 +971,7 @@ pub fn embed_hevc_patches_with_factor(
             let slot = &all_slots[pos];
             body_cover_bits.push(slot.original_bit);
             body_costs.push(if forbidden.contains(&pos) {
-                f64::INFINITY
+                HIGH_DISPLACEMENT_PENALTY
             } else {
                 slot.cost as f64
             });
@@ -1882,7 +1891,7 @@ pub fn inspect_hevc_mp4_file(
     // Detect if this MP4 stream contains inter-coded frames (P/B). When has_inter is true,
     // IDR/IRAP frames are excluded from the superblock pool to protect prediction stability.
     let mut has_inter = false;
-    for &(sample_offset, sample_size) in target.samples.iter().take(64) {
+    for &(sample_offset, sample_size) in &target.samples {
         if sample_size < target.length_size + 2 || sample_offset + sample_size > file_len {
             continue;
         }
@@ -2268,7 +2277,6 @@ struct SlotSink {
     /// Slots that entered the pool, per band.
     counts: [usize; 2],
     band_bits: [BitPacker; 2],
-    band_slots: [Vec<StegoSlot>; 2],
     raw_bits: BitPacker,
     raw_slots: Vec<StegoSlot>,
     slice_slot_ranges: Vec<(usize, u8)>,
@@ -2280,7 +2288,6 @@ impl SlotSink {
             capture,
             counts: [0; 2],
             band_bits: [BitPacker::default(), BitPacker::default()],
-            band_slots: [Vec::new(), Vec::new()],
             raw_bits: BitPacker::default(),
             raw_slots: Vec::new(),
             slice_slot_ranges: Vec::new(),
@@ -2297,7 +2304,6 @@ impl SlotSink {
                 self.raw_bits.push(slot.original_bit);
             }
             Capture::Full => {
-                self.band_slots[band].push(slot);
                 self.raw_slots.push(slot);
             }
         }

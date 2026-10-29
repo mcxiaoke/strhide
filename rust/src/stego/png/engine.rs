@@ -1025,7 +1025,7 @@ impl SlotPlan {
         image: &RawImage,
         class_rule: u8,
         mode: ChannelMode,
-        mut visit: impl FnMut(usize),
+        mut visit: impl FnMut(usize) -> bool,
     ) {
         let channels = image.channels;
         let header_channel = embed_channel(image);
@@ -1044,7 +1044,9 @@ impl SlotPlan {
                 if class_rule == 1 && !(1..=6).contains(&(val % 8)) {
                     continue;
                 }
-                visit(slot);
+                if !visit(slot) {
+                    return;
+                }
             }
         }
     }
@@ -1052,7 +1054,10 @@ impl SlotPlan {
     /// Number of body slots available under `mode` / `class_rule`.
     fn count_body_slots(&self, image: &RawImage, class_rule: u8, mode: ChannelMode) -> usize {
         let mut n = 0usize;
-        self.for_each_body_slot(image, class_rule, mode, |_| n += 1);
+        self.for_each_body_slot(image, class_rule, mode, |_| {
+            n += 1;
+            true
+        });
         n
     }
 
@@ -1072,12 +1077,9 @@ impl SlotPlan {
         if limit == 0 {
             return out;
         }
-        let mut taken = 0usize;
         self.for_each_body_slot(image, class_rule, mode, |slot| {
-            if taken < limit {
-                out.push(slot);
-                taken += 1;
-            }
+            out.push(slot);
+            out.len() < limit
         });
         out
     }

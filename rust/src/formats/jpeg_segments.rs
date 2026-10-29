@@ -102,13 +102,65 @@ pub fn parse_dqt_tables(data: &[u8]) -> Option<Vec<QuantTable>> {
     }
 }
 
+/// Parse the quantization table destination selector (`Tq`) for a component from the SOF marker.
+///
+/// SOF markers: SOF0..SOF3, SOF5..SOF7, SOF9..SOF11.
+pub fn parse_component_tq(data: &[u8], comp_idx: usize) -> Option<u8> {
+    let mut i = 2usize; // skip SOI
+    while i + 4 <= data.len() {
+        if data[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = data[i + 1];
+        if marker == 0xD8 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            i += 2;
+            continue;
+        }
+        if marker == 0xDA || marker == 0xD9 {
+            // Scan started or EOI: no SOF found before scan
+            break;
+        }
+        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+        if len < 2 || i + 2 + len > data.len() {
+            return None;
+        }
+        if matches!(marker, 0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB) {
+            // SOF payload: P(1) + Y(2) + X(2) + Nf(1) = 6 bytes after len
+            if len < 8 {
+                return None;
+            }
+            let num_components = data[i + 9] as usize;
+            if comp_idx >= num_components {
+                return None;
+            }
+            let comp_offset = i + 10 + comp_idx * 3;
+            if comp_offset + 3 > i + 2 + len {
+                return None;
+            }
+            return Some(data[comp_offset + 2]);
+        }
+        i += 2 + len;
+    }
+    None
+}
+
+/// Quantization table for component `comp_idx` (using `Tq` from SOF, or falling back to `id == 0`),
+/// in natural order. `None` when the file has no matching or parsable DQT.
+pub fn parse_component_dqt(data: &[u8], comp_idx: usize) -> Option<[u16; 64]> {
+    let tables = parse_dqt_tables(data)?;
+    let target_tq = parse_component_tq(data, comp_idx).unwrap_or(0);
+    tables
+        .iter()
+        .find(|t| t.id == target_tq)
+        .or_else(|| tables.iter().find(|t| t.id == 0))
+        .map(|t| t.q)
+}
+
 /// First table with `id == 0` (the luminance table by near-universal encoder
 /// convention), in natural order. `None` when the file has no parsable DQT.
 pub fn parse_luma_dqt(data: &[u8]) -> Option<[u16; 64]> {
-    parse_dqt_tables(data)?
-        .into_iter()
-        .find(|t| t.id == 0)
-        .map(|t| t.q)
+    parse_component_dqt(data, 0)
 }
 
 #[cfg(test)]
@@ -187,5 +239,29 @@ mod tests {
         assert_eq!(STANDARD_LUMA_QT[0], 16); // DC
         assert_eq!(STANDARD_LUMA_QT[1], 11);
         assert_eq!(STANDARD_LUMA_QT[63], 99);
+    }
+
+    #[test]
+    fn parses_component_tq_and_dqt_from_sof() {
+        let table_luma = QuantTable {
+            id: 2,
+            q: [11u16; 64],
+        };
+        let table_chroma = QuantTable {
+            id: 3,
+            q: [22u16; 64],
+        };
+        let mut data = vec![0xFF, 0xD8];
+        data.extend(dqt_segment(&[table_luma, table_chroma]));
+        // SOF0: len = 11 (8 + 3*1), P=8, Y=100, X=100, Nf=1, C1=1, H1V1=0x11, Tq1=2
+        let sof0 = vec![
+            0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x64, 0x00, 0x64, 0x01, 0x01, 0x11, 0x02,
+        ];
+        data.extend(sof0);
+        data.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02]);
+
+        assert_eq!(parse_component_tq(&data, 0), Some(2));
+        assert_eq!(parse_component_dqt(&data, 0), Some([11u16; 64]));
+        assert_eq!(parse_luma_dqt(&data), Some([11u16; 64]));
     }
 }

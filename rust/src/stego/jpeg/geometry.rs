@@ -29,7 +29,7 @@
 
 use dct_io::JpegInfo;
 
-use crate::formats::jpeg_segments::{STANDARD_LUMA_QT, parse_luma_dqt};
+use crate::formats::jpeg_segments::{STANDARD_LUMA_QT, parse_component_dqt};
 use crate::stego::traits::JpegGeometry;
 
 /// Build the block geometry of one component plus the file's luma table.
@@ -44,7 +44,7 @@ pub fn geometry_for_carrier(
 ) -> Result<JpegGeometry, dct_io::DctError> {
     let info = dct_io::inspect(carrier)?;
     let mut geometry = component_geometry(&info, comp_idx, n_blocks);
-    geometry.luma_q = parse_luma_dqt(carrier).unwrap_or(STANDARD_LUMA_QT);
+    geometry.luma_q = parse_component_dqt(carrier, comp_idx).unwrap_or(STANDARD_LUMA_QT);
     Ok(geometry)
 }
 

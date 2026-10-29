@@ -402,7 +402,7 @@ pub fn write_bit_ternary(val: &mut u8, target_bit: u8, rho_plus: f64, rho_minus:
     if (*val & 1) == target_bit {
         return;
     }
-    flip_with_cost(val, spatial_move(*val), rho_plus, rho_minus);
+    flip_with_cost(val, spatial_move_safe(*val), rho_plus, rho_minus);
 }
 
 /// Embed bytes into slots using ternary `±1` matching under Hamming coding.

@@ -251,7 +251,7 @@ const SAFE_MAX_SAMPLE_DELTA: f64 = 32.0;
 /// value keeps such slots ~1e6 times more expensive than a typical flip, so the
 /// trellis avoids them at any realistic payload while still being able to use
 /// them when the payload genuinely needs every slot.
-const HIGH_DISPLACEMENT_PENALTY: f64 = 1_000_000.0;
+pub(crate) const HIGH_DISPLACEMENT_PENALTY: f64 = 1_000_000.0;
 
 /// Provisional bit depth assumed by `record_stego_sign`, whose call site does
 /// not carry one. Always superseded by the real value in `record_stego_level`.
