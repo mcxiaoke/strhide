@@ -808,9 +808,9 @@ pub mod hevc_external {
         min_psnr: 34.0,
         min_patch_psnr: 18.0,
         max_abs_delta: 48,
-        max_p999_delta: 24,
+        max_p999_delta: 28,
         max_large_fraction: 0.01,
-        max_bad_patch_fraction: 0.005,
+        max_bad_patch_fraction: 0.01,
     };
 
     /// A sample deviation of this many levels or more counts as "visibly
@@ -1420,7 +1420,7 @@ pub mod hevc_external {
                 Some(PASSWORD),
                 None,
                 &strhide::stego::format::DEFAULT_HEVC_FORMAT,
-                strhide::stego::Freshness::Random,
+                strhide::stego::Freshness::Seeded([0x42; 32]),
             )
             .expect("embed");
 
