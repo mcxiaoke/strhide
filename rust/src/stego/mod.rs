@@ -77,6 +77,43 @@ pub use params::{ExtractParams, SafetyEnforcement, SafetyLevel, SafetyPolicy, St
 
 pub use registry::list_algorithms;
 
+static INIT_DEFAULT_POOL: std::sync::Once = std::sync::Once::new();
+
+/// Computes the default worker thread count from the total available parallelism:
+/// minimum 4, maximum half of the total cores, clamped to `total`.
+#[inline]
+pub fn compute_default_threads(total: usize) -> usize {
+    if total == 0 {
+        1
+    } else {
+        (total / 2).max(4).min(total)
+    }
+}
+
+/// Returns the calculated default worker thread count for the current machine.
+pub fn default_thread_count() -> usize {
+    let total = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    compute_default_threads(total)
+}
+
+/// Initialize Rayon's global thread pool using the default thread count
+/// (`(cores / 2).max(4).min(cores)`), unless overridden by the `RAYON_NUM_THREADS`
+/// environment variable.
+///
+/// Safe to call multiple times (idempotent via `std::sync::Once`).
+pub fn init_default_thread_pool() {
+    INIT_DEFAULT_POOL.call_once(|| {
+        if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+            let threads = default_thread_count();
+            let _ = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build_global();
+        }
+    });
+}
+
 /// Compatibility facade over the per-domain registries.
 pub struct CostModelRegistry;
 
@@ -188,6 +225,7 @@ pub fn embed_carrier_with_dialect_info(
     options: &EmbedOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<EmbedOutput, StrHideError> {
+    init_default_thread_pool();
     let engine = engine_for_carrier(carrier_bytes)?;
     // Private dialect resolution happens exactly once, inside the engine
     // adapter: a configured secret is indistinguishable from a user password
@@ -230,6 +268,7 @@ pub fn extract_carrier_payload(
     options: &ExtractOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<Payload<'static>, StrHideError> {
+    init_default_thread_pool();
     let engine = engine_for_carrier(carrier_bytes)?;
     engine.extract(carrier_bytes, options, dialect)
 }
@@ -248,6 +287,7 @@ pub fn inspect_carrier_with_dialect(
     options: &InspectOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<StegoHeaderInfo, StrHideError> {
+    init_default_thread_pool();
     let engine = engine_for_carrier(carrier_bytes)?;
     engine.inspect(carrier_bytes, options, dialect)
 }
@@ -266,6 +306,7 @@ pub fn verify_carrier_with_dialect(
     options: &VerifyOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<StegoVerifyResult, StrHideError> {
+    init_default_thread_pool();
     let engine = engine_for_carrier(carrier_bytes)?;
     engine.verify(carrier_bytes, options, dialect)
 }
@@ -378,8 +419,37 @@ pub fn probe_carrier_capacity_with_dialect(
     options: &ProbeOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<StegoCapacityInfo, StrHideError> {
+    init_default_thread_pool();
     let engine = engine_for_carrier(carrier_bytes)?;
     // Same resolution as embed: an explicit password wins, the profile's stego
     // secret is the fallback, `None` means the public constant downstream.
     engine.probe(carrier_bytes, options, dialect)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_default_threads() {
+        assert_eq!(compute_default_threads(0), 1);
+        assert_eq!(compute_default_threads(1), 1);
+        assert_eq!(compute_default_threads(2), 2);
+        assert_eq!(compute_default_threads(3), 3);
+        assert_eq!(compute_default_threads(4), 4);
+        assert_eq!(compute_default_threads(6), 4);
+        assert_eq!(compute_default_threads(8), 4);
+        assert_eq!(compute_default_threads(12), 6);
+        assert_eq!(compute_default_threads(16), 8);
+        assert_eq!(compute_default_threads(32), 16);
+        assert_eq!(compute_default_threads(64), 32);
+    }
+
+    #[test]
+    fn test_default_thread_pool_init_idempotent() {
+        init_default_thread_pool();
+        init_default_thread_pool();
+        let threads = default_thread_count();
+        assert!(threads >= 1);
+    }
 }

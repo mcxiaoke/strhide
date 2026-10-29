@@ -143,6 +143,9 @@ pub fn run_cli() -> i32 {
 }
 
 pub(crate) fn run_cli_with(engine: &StrHide, argv: Vec<OsString>) -> i32 {
+    #[cfg(feature = "content-base")]
+    crate::stego::init_default_thread_pool();
+
     // 1) 预解析（英文模板，仅用于取得 matches；不触发任何输出）
     let pre = match Cli::command().try_get_matches_from(argv.clone()) {
         Ok(m) => m,
