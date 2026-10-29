@@ -39,7 +39,7 @@ function formatBytes(bytes?: number): string {
 }
 
 export const HideEmbedView: React.FC = () => {
-  const { carrierPath, inspection, capabilities } = useWorkspaceStore();
+  const { carrierPath, inspection, inspectError, capabilities } = useWorkspaceStore();
   const { startTask, updateProgress, finishTask } = useTaskStore();
   const { autoBackup } = useSettingsStore();
 
@@ -64,6 +64,7 @@ export const HideEmbedView: React.FC = () => {
   // Capacity state with global carrier caching
   const [capacity, setCapacity] = useState<StegoCapacityFullDto | null>(null);
   const [isProbing, setIsProbing] = useState(false);
+  const [probeError, setProbeError] = useState<string | null>(null);
   const capacityCacheRef = useRef<Map<string, StegoCapacityFullDto>>(new Map());
 
   // Outcome & dialogs
@@ -84,14 +85,18 @@ export const HideEmbedView: React.FC = () => {
   const supportsStego = currentCap ? currentCap.stego.length > 0 : false;
   const supportsStructure = currentCap ? currentCap.structure.length > 0 : true;
 
-  // Auto-select domain based on carrier capability
+  // Real carrier validation: an MP4 without HEVC stream does NOT support content stego
+  const contentError = inspection?.content_error;
+  const fileSupportsStego = supportsStego && !contentError;
+
+  // Auto-select domain based on actual carrier capability
   useEffect(() => {
-    if (supportsStego) {
+    if (fileSupportsStego) {
       setDomain("content");
-    } else {
+    } else if (supportsStructure) {
       setDomain("structure");
     }
-  }, [supportsStego]);
+  }, [fileSupportsStego, supportsStructure]);
 
   // Compute live payload bytes
   const payloadBytes =
@@ -102,8 +107,9 @@ export const HideEmbedView: React.FC = () => {
   // Probe capacity on carrier or core tuning change (cached across safety tier switches)
   const probeTimerRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!carrierPath || !supportsStego || domain !== "content") {
+    if (!carrierPath || !fileSupportsStego || domain !== "content") {
       setCapacity(null);
+      setProbeError(null);
       return;
     }
 
@@ -111,6 +117,7 @@ export const HideEmbedView: React.FC = () => {
     const cached = capacityCacheRef.current.get(cacheKey);
     if (cached) {
       setCapacity(cached);
+      setProbeError(null);
       return;
     }
 
@@ -132,8 +139,12 @@ export const HideEmbedView: React.FC = () => {
         );
         capacityCacheRef.current.set(cacheKey, info);
         setCapacity(info);
+        setProbeError(null);
       } catch (err) {
+        const parsed = parseStrHideError(err);
         console.warn("Capacity probe error:", err);
+        setProbeError(parsed.message || "该载体文件不支持内容域自适应隐写探测");
+        setCapacity(null);
       } finally {
         setIsProbing(false);
       }
@@ -142,7 +153,7 @@ export const HideEmbedView: React.FC = () => {
     return () => {
       if (probeTimerRef.current) window.clearTimeout(probeTimerRef.current);
     };
-  }, [carrierPath, supportsStego, domain, password, selectedAlgorithm]);
+  }, [carrierPath, fileSupportsStego, domain, password, selectedAlgorithm]);
 
   const handlePickPayloadFile = async () => {
     try {
@@ -280,6 +291,21 @@ export const HideEmbedView: React.FC = () => {
     );
   }
 
+  // If carrier format itself is completely unsupported (neither structure nor stego available)
+  if (inspectError || (!supportsStructure && !fileSupportsStego)) {
+    return (
+      <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-rose-800/80 bg-rose-950/20 p-8 text-center text-rose-300 space-y-3">
+        <AlertTriangle className="h-10 w-10 text-rose-400" />
+        <div>
+          <h3 className="text-base font-bold text-rose-200">当前载体格式不支持隐藏写入</h3>
+          <p className="mt-1 text-xs text-slate-400 max-w-md mx-auto">
+            {inspectError?.detail || "该文件格式既不支持结构域注入，也不支持内容域自适应隐写。请更换支持的载体文件（如 PNG, JPEG, MP4/HEVC, HEIF, ZIP, PDF, PE 等）。"}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       {/* Domain Switcher */}
@@ -294,18 +320,19 @@ export const HideEmbedView: React.FC = () => {
         <div className="flex items-center gap-2 rounded-xl bg-slate-950 p-1 border border-slate-800">
           <button
             type="button"
-            disabled={!supportsStego}
+            disabled={!fileSupportsStego}
             onClick={() => setDomain("content")}
             className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold transition-all ${
               domain === "content"
                 ? "bg-indigo-600 text-white shadow-md"
-                : supportsStego
+                : fileSupportsStego
                 ? "text-slate-400 hover:text-slate-200"
-                : "text-slate-600 cursor-not-allowed opacity-40"
+                : "text-slate-500 cursor-not-allowed opacity-50 bg-slate-950/40"
             }`}
+            title={contentError ? contentError.detail : undefined}
           >
             <Sparkles className="h-4 w-4" />
-            内容域自适应隐写 (抗统计分析)
+            内容域自适应隐写 {!fileSupportsStego ? "(此载体不支持)" : "(抗统计分析)"}
           </button>
           <button
             type="button"
@@ -388,8 +415,39 @@ export const HideEmbedView: React.FC = () => {
         )}
       </div>
 
+      {/* Unsupported Content Stego Alert Banner */}
+      {domain === "content" && (contentError || probeError) && (
+        <div className="rounded-2xl border border-amber-800/80 bg-amber-950/40 p-5 text-xs text-amber-200 shadow-xl space-y-3 animate-in fade-in">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="h-5 w-5 text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <h4 className="font-bold text-sm text-amber-300">
+                当前载体不支持内容域自适应隐写
+              </h4>
+              <p className="mt-1 leading-relaxed text-slate-300 font-mono">
+                {contentError?.detail || probeError || "该视频文件不包含支持的 HEVC (H.265) 视频流（如 H.264/AVC 编码暂不支持 CABAC 隐写）。"}
+              </p>
+            </div>
+          </div>
+
+          {supportsStructure && (
+            <div className="pt-1 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setDomain("structure")}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-cyan-700 hover:bg-cyan-600 px-4 py-2 font-bold text-white text-xs shadow-md transition-all active:scale-95"
+              >
+                <Layers className="h-4 w-4" />
+                一键切换至【结构域容器注入】(支持 100% 无损还原)
+              </button>
+              <span className="text-slate-400">结构域支持所有 MP4 容器直接封装</span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Capacity Meter (Content domain only) */}
-      {domain === "content" && (
+      {domain === "content" && !contentError && !probeError && (
         <CapacityMeter
           capacity={capacity}
           payloadBytes={payloadBytes}
@@ -479,7 +537,17 @@ export const HideEmbedView: React.FC = () => {
 
         <button
           onClick={() => handleStartHide(false)}
-          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-700 px-6 py-2.5 text-xs font-bold text-white shadow-xl shadow-cyan-950/60 hover:brightness-110 active:scale-95"
+          disabled={domain === "content" && (!capacity || !!probeError || !fileSupportsStego)}
+          className={`inline-flex items-center gap-2 rounded-xl px-6 py-2.5 text-xs font-bold text-white shadow-xl transition-all active:scale-95 ${
+            domain === "content" && (!capacity || !!probeError || !fileSupportsStego)
+              ? "bg-slate-800 text-slate-500 cursor-not-allowed shadow-none"
+              : "bg-gradient-to-r from-cyan-600 to-blue-700 shadow-cyan-950/60 hover:brightness-110"
+          }`}
+          title={
+            domain === "content" && (!capacity || !!probeError || !fileSupportsStego)
+              ? "当前载体不支持内容域隐写，请切换至结构域容器注入"
+              : undefined
+          }
         >
           <span>开始隐藏 / 嵌入</span>
           <ArrowRight className="h-4 w-4" />

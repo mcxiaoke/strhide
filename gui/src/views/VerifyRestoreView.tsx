@@ -26,7 +26,7 @@ function formatBytes(bytes?: number): string {
 }
 
 export const VerifyRestoreView: React.FC = () => {
-  const { carrierPath, inspection } = useWorkspaceStore();
+  const { carrierPath, inspection, inspectError } = useWorkspaceStore();
   const { startTask, updateProgress, finishTask } = useTaskStore();
 
   const [password, setPassword] = useState("");
@@ -41,6 +41,20 @@ export const VerifyRestoreView: React.FC = () => {
       <div className="flex h-64 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-800 text-center text-slate-500">
         <ShieldCheck className="h-8 w-8 text-slate-600 mb-2" />
         <p className="text-sm font-medium">请先在上方拖入或选择载体文件</p>
+      </div>
+    );
+  }
+
+  if (inspectError) {
+    return (
+      <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-rose-800/80 bg-rose-950/20 p-8 text-center text-rose-300 space-y-3">
+        <AlertTriangle className="h-10 w-10 text-rose-400" />
+        <div>
+          <h3 className="text-base font-bold text-rose-200">无法校验不受支持的文件格式</h3>
+          <p className="mt-1 text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
+            {inspectError.detail || "该文件格式不受支持或文件已损坏。"}
+          </p>
+        </div>
       </div>
     );
   }

@@ -9,6 +9,7 @@ import {
   Film,
   Maximize2,
   HardDrive,
+  AlertTriangle,
 } from "lucide-react";
 import { useWorkspaceStore } from "../../store/workspaceStore";
 import { openCarrier, revealCarrier } from "../../lib/openActions";
@@ -31,8 +32,14 @@ function formatDuration(ms?: number): string {
 }
 
 export const CarrierSummary: React.FC = () => {
-  const { carrierPath, inspection, isInspecting, inspectCurrentCarrier, clearCarrier } =
-    useWorkspaceStore();
+  const {
+    carrierPath,
+    inspection,
+    inspectError,
+    isInspecting,
+    inspectCurrentCarrier,
+    clearCarrier,
+  } = useWorkspaceStore();
 
   const [exactFileSize, setExactFileSize] = useState<number | null>(null);
 
@@ -57,9 +64,12 @@ export const CarrierSummary: React.FC = () => {
   if (!carrierPath) return null;
 
   const fileName = carrierPath.split(/[/\\]/).pop() || carrierPath;
-  const format = inspection?.format || "检测中...";
+  const format = inspectError
+    ? "不受支持"
+    : inspection?.format || (isInspecting ? "检测中..." : "未知格式");
   const mediaInfo = inspection?.media_info || inspection?.content_stego?.media_info;
   const displaySize = inspection?.orig_host_size || exactFileSize;
+  const contentError = inspection?.content_error;
 
   return (
     <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-5 shadow-xl shadow-black/40 backdrop-blur-md">
@@ -72,9 +82,24 @@ export const CarrierSummary: React.FC = () => {
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-base font-bold text-slate-100 tracking-tight">{fileName}</h2>
-              <span className="rounded-md bg-cyan-900/40 px-2 py-0.5 text-xs font-semibold text-cyan-300 border border-cyan-700/50 uppercase">
-                {format}
-              </span>
+              {inspectError ? (
+                <span className="rounded-md bg-rose-950/60 px-2 py-0.5 text-xs font-semibold text-rose-300 border border-rose-800/80 uppercase">
+                  不受支持
+                </span>
+              ) : (
+                <span className="rounded-md bg-cyan-900/40 px-2 py-0.5 text-xs font-semibold text-cyan-300 border border-cyan-700/50 uppercase">
+                  {format}
+                </span>
+              )}
+              {contentError && (
+                <span
+                  className="rounded-md bg-amber-950/60 px-2 py-0.5 text-xs font-medium text-amber-300 border border-amber-800/60 flex items-center gap-1"
+                  title={contentError.detail}
+                >
+                  <AlertTriangle className="h-3 w-3 text-amber-400" />
+                  内容隐写不支持 (仅结构注入可用)
+                </span>
+              )}
               {displaySize !== null && displaySize !== undefined && (
                 <span className="rounded-md bg-emerald-950/40 px-2 py-0.5 text-xs font-medium text-emerald-400 border border-emerald-800/50 font-mono">
                   文件大小: {formatBytes(displaySize)}
@@ -82,6 +107,19 @@ export const CarrierSummary: React.FC = () => {
               )}
             </div>
             <p className="mt-1 text-xs text-slate-400 font-mono break-all max-w-2xl">{carrierPath}</p>
+
+            {/* Global inspection error alert */}
+            {inspectError && (
+              <div className="mt-3 rounded-xl border border-rose-800/80 bg-rose-950/40 p-3 text-xs text-rose-300 flex items-start gap-2.5">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-rose-400 mt-0.5" />
+                <div>
+                  <span className="font-bold">载体检视失败 / 不支持的文件格式:</span>
+                  <p className="mt-0.5 text-rose-200 leading-relaxed font-mono">
+                    {inspectError.detail || "该文件格式不受支持或文件已损坏"}
+                  </p>
+                </div>
+              </div>
+            )}
 
             {/* Media Metadata Tags */}
             {mediaInfo && (

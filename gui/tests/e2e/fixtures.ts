@@ -9,6 +9,9 @@ export interface MockDataOptions {
   verdict?: "clean" | "low" | "suspicious" | "likely-hidden";
   alsoPresent?: "structure" | "content";
   conflictOnEmbed?: boolean;
+  format?: string;
+  contentError?: string;
+  inspectError?: string;
 }
 
 export function createTauriMockScript(opts: MockDataOptions = {}) {
@@ -97,9 +100,15 @@ export function createTauriMockScript(opts: MockDataOptions = {}) {
       }
 
       if (cmd === "inspect_carrier_cmd") {
+        if (${opts.inspectError ? `true` : `false`}) {
+          throw {
+            kind: "unsupported_format",
+            detail: "${opts.inspectError || "Unsupported format"}"
+          };
+        }
         return {
           carrier: args.path || "C:\\\\Samples\\\\secret_image.png",
-          format: "PNG",
+          format: "${opts.format || "PNG"}",
           has_hidden_data: ${opts.hasHiddenData !== undefined ? opts.hasHiddenData : true},
           strategy: { id: 2, name: "chunk" },
           ube_offset: 1420,
@@ -131,8 +140,8 @@ export function createTauriMockScript(opts: MockDataOptions = {}) {
               limit: "无上限 (文件增长)"
             }
           ],
-          content_stego: {
-            format: "PNG",
+          content_stego: ${opts.contentError ? `null` : `{
+            format: "${opts.format || "PNG"}",
             has_hidden_data: ${opts.hasHiddenData !== undefined ? opts.hasHiddenData : true},
             algorithm: "HILL",
             codec: "STC (h=7, u=2)",
@@ -141,7 +150,11 @@ export function createTauriMockScript(opts: MockDataOptions = {}) {
               width: 1920,
               height: 1080
             }
-          },
+          }`},
+          content_error: ${opts.contentError ? `{
+            kind: "unsupported_format",
+            detail: "${opts.contentError}"
+          }` : `null`},
           media_info: {
             width: 1920,
             height: 1080
@@ -162,6 +175,12 @@ export function createTauriMockScript(opts: MockDataOptions = {}) {
       }
 
       if (cmd === "probe_stego_capacity_cmd") {
+        if (${opts.contentError ? `true` : `false`}) {
+          throw {
+            kind: "unsupported_format",
+            detail: "${opts.contentError || "Unsupported format"}"
+          };
+        }
         return {
           format: "PNG",
           algorithm: "HILL",

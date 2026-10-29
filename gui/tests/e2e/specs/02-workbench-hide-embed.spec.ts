@@ -178,4 +178,31 @@ test.describe("工作台 2: 隐藏与自适应嵌入台 E2E 及截图验证", ()
     await page.locator("button:has-text('Balanced (均衡)')").click();
     await expect(page.locator("text=37.5 KB").first()).toBeVisible();
   });
+
+  test("09-不支持内容域隐写的载体(如H.264视频)智能降级结构域与显式警报提示", async ({ page }) => {
+    // 模拟载入截图中的 file-00.mp4 (H.264视频流，缺少 HEVC CABAC 隐写流)
+    await page.addInitScript(createTauriMockScript({
+      carrierPath: "C:\\Home\\Projects\\strhide\\temp\\testfiles\\file-00.mp4",
+      format: "MP4",
+      contentError: "MP4/MOV parse error: unsupported HEVC feature: video track sample entry is not HEVC (hvc1/hev1)",
+    }));
+    await page.goto("http://localhost:1420");
+
+    // 载入载体进入工作台 2
+    await page.locator("text=拖拽载体文件至此").click();
+    await page.locator("button:has-text('隐藏与自适应嵌入')").click();
+
+    // 1. 验证载体头部信息栏准确提示内容隐写不支持
+    await expect(page.locator("text=内容隐写不支持 (仅结构注入可用)")).toBeVisible();
+
+    // 2. 验证前端智能自动选定“结构域容器注入 (支持 100% 还原)”，避免用户陷入全部为 -- 的空白状态
+    const structBtn = page.locator("button:has-text('结构域容器注入 (支持 100% 还原)')");
+    await expect(structBtn).toBeVisible();
+    await expect(structBtn).toHaveClass(/bg-cyan-600/);
+
+    // 3. 验证“内容域自适应隐写”按钮被标记为禁用态且提示不支持
+    const contentBtn = page.locator("button:has-text('内容域自适应隐写 (此载体不支持)')");
+    await expect(contentBtn).toBeVisible();
+    await expect(contentBtn).toBeDisabled();
+  });
 });

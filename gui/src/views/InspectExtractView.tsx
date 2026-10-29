@@ -29,7 +29,7 @@ function formatBytes(bytes?: number | null): string {
 }
 
 export const InspectExtractView: React.FC = () => {
-  const { carrierPath, inspection, isInspecting, inspectCurrentCarrier } = useWorkspaceStore();
+  const { carrierPath, inspection, inspectError, isInspecting, inspectCurrentCarrier } = useWorkspaceStore();
   const { startTask, updateProgress, finishTask } = useTaskStore();
 
   const [password, setPassword] = useState("");
@@ -47,6 +47,20 @@ export const InspectExtractView: React.FC = () => {
       <div className="flex h-64 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-800 text-center text-slate-500">
         <Info className="h-8 w-8 text-slate-600 mb-2" />
         <p className="text-sm font-medium">请先在上方拖入或选择载体文件</p>
+      </div>
+    );
+  }
+
+  if (inspectError) {
+    return (
+      <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-rose-800/80 bg-rose-950/20 p-8 text-center text-rose-300 space-y-3">
+        <AlertTriangle className="h-10 w-10 text-rose-400" />
+        <div>
+          <h3 className="text-base font-bold text-rose-200">载体检视失败 / 不支持的文件格式</h3>
+          <p className="mt-1 text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
+            {inspectError.detail || "该文件格式不受支持或文件已损坏。请更换支持的载体文件（如 PNG, JPEG, MP4/HEVC, HEIF, ZIP, PDF, PE 等）。"}
+          </p>
+        </div>
       </div>
     );
   }
@@ -247,6 +261,11 @@ export const InspectExtractView: React.FC = () => {
                 <Check className="h-3 w-3" />
                 已检测到隐写
               </span>
+            ) : inspection?.content_error ? (
+              <span className="rounded-full bg-amber-950/60 px-2.5 py-0.5 text-xs font-medium text-amber-300 border border-amber-800/60 flex items-center gap-1">
+                <AlertTriangle className="h-3 w-3 text-amber-400" />
+                不支持此编码流
+              </span>
             ) : (
               <span className="rounded-full bg-slate-800 px-2.5 py-0.5 text-xs font-medium text-slate-400">
                 未检测到隐写
@@ -277,9 +296,12 @@ export const InspectExtractView: React.FC = () => {
               <div className="rounded-lg bg-slate-800/60 p-2 text-slate-300">{content.note}</div>
             )}
             {inspection?.content_error && (
-              <div className="rounded-lg border border-slate-800 bg-slate-950/80 p-2 text-slate-400">
-                <span className="text-rose-400 font-medium">内容域提示: </span>
-                {inspection.content_error.detail}
+              <div className="rounded-xl border border-amber-800/80 bg-amber-950/40 p-3 text-xs text-amber-200 flex items-start gap-2">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
+                <div>
+                  <span className="font-bold text-amber-300">内容域流提示: </span>
+                  <p className="mt-0.5 text-slate-300 font-mono leading-relaxed">{inspection.content_error.detail}</p>
+                </div>
               </div>
             )}
           </div>
