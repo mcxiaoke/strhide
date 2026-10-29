@@ -62,6 +62,10 @@ pub fn is_hevc_annexb(bytes: &[u8]) -> bool {
     if (b0 & 0x80) != 0 {
         return false;
     }
+    let nuh_layer_id = ((b0 & 1) << 5) | (b1 >> 3);
+    if nuh_layer_id != 0 {
+        return false;
+    }
     let temporal_id_plus1 = b1 & 0x07;
     if temporal_id_plus1 == 0 {
         return false;

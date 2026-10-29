@@ -250,6 +250,14 @@ pub fn estimate(data: &[u8]) -> Option<CalibrationEstimate> {
         }
     }
 
+    let luma_sampled_blocks = luma_blocks.len().div_ceil(stride);
+    let calib_blocks = calib.len();
+    let calib_scale = if calib_blocks > 0 {
+        luma_sampled_blocks as f64 / calib_blocks as f64
+    } else {
+        1.0
+    };
+
     let mut ratios: Vec<f64> = Vec::new();
     for mode in 1..64usize {
         // The (0, 1) pair is included on purpose: the ternary JPEG code changes
@@ -269,7 +277,7 @@ pub fn estimate(data: &[u8]) -> Option<CalibrationEstimate> {
                 continue;
             }
             let a = (ae - ao).abs();
-            let c = (ce - co).abs();
+            let c = (ce - co).abs() * calib_scale;
             ratios.push((a + 1.0) / (c + 1.0));
             value += 2;
         }

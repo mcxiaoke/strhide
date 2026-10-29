@@ -1185,6 +1185,12 @@ fn decode_png_pixels(data: &[u8]) -> Option<(Vec<u8>, u32, usize)> {
         .checked_mul(height as usize)
         .and_then(|v| v.checked_add(height as usize))?; // +1 filter byte per row
 
+    // Reject decompression bombs where declared geometry requires excessive memory.
+    const MAX_INFLATE_EXPECTED: usize = 256 * 1024 * 1024; // 256 MiB
+    if expected > MAX_INFLATE_EXPECTED {
+        return None;
+    }
+
     // Inflate.
     let mut z = flate2::read::ZlibDecoder::new(Cursor::new(&idat)).take(expected as u64 + 1);
     let mut raw = Vec::new();

@@ -595,7 +595,8 @@ fn extract_one(
 
     if let Some(ref out_path) = explicit {
         let dest = if out_path.is_dir() {
-            let name = payload.name().unwrap_or("extracted.bin");
+            let name =
+                crate::core::fs::sanitize_filename(payload.name().unwrap_or("extracted.bin"));
             out_path.join(name)
         } else {
             out_path.clone()
@@ -616,8 +617,9 @@ fn extract_one(
         }
     } else if args.stdout {
         std::io::stdout().write_all(payload.as_bytes())?;
-    } else if let Some(name) = payload.name() {
-        let dest = PathBuf::from(name);
+    } else if let Some(raw_name) = payload.name() {
+        let clean_name = crate::core::fs::sanitize_filename(raw_name);
+        let dest = PathBuf::from(clean_name);
         check_overwrite(&dest, args.overwrite)?;
         std::fs::write(&dest, payload.as_bytes())?;
         if !quiet {
