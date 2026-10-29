@@ -1804,8 +1804,62 @@ pub fn inspect_hevc(
     )
 }
 
-/// Stream-inspect an MP4 carrier directly from disk using Seek + Read, bounding peak memory to < 8 MiB
-/// even for multi-gigabyte video files.
+/// Prefix of a sample the streaming has-inter probe reads. Every VCL NAL that
+/// identifies a picture sits at or near the sample start (AUD/SEI prefixes are
+/// a few hundred bytes), so 1 MiB is enough without materialising a 64 MiB
+/// sample just to classify it.
+const HAS_INTER_PREFIX_BYTES: usize = 1024 * 1024;
+
+/// Does the sample prefix contain a non-IRAP VCL NAL?
+///
+/// Walks the length-prefixed NALs exactly like `collect_sample_slice_spans`
+/// (VCL only, forbidden bit clear, non-zero temporal id) but stops at the first
+/// incomplete NAL instead of rejecting the prefix as truncated.
+fn sample_prefix_has_inter(prefix: &[u8], length_size: usize) -> bool {
+    if !(1..=4).contains(&length_size) {
+        return false;
+    }
+    let mut pos = 0usize;
+    while pos + length_size <= prefix.len() {
+        let nal_len = match length_size {
+            1 => prefix[pos] as usize,
+            2 => u16::from_be_bytes([prefix[pos], prefix[pos + 1]]) as usize,
+            3 => {
+                ((prefix[pos] as usize) << 16)
+                    | ((prefix[pos + 1] as usize) << 8)
+                    | prefix[pos + 2] as usize
+            }
+            _ => u32::from_be_bytes([
+                prefix[pos],
+                prefix[pos + 1],
+                prefix[pos + 2],
+                prefix[pos + 3],
+            ]) as usize,
+        };
+        let nal_start = pos + length_size;
+        if nal_start + 2 > prefix.len() {
+            return false;
+        }
+        let b0 = prefix[nal_start];
+        let b1 = prefix[nal_start + 1];
+        let nal_type = (b0 >> 1) & 0x3F;
+        if nal_type <= 31 && (b0 & 0x80) == 0 && (b1 & 0x07) > 0 && !is_irap(nal_type) {
+            return true;
+        }
+        let Some(nal_end) = nal_start.checked_add(nal_len) else {
+            return false;
+        };
+        if nal_end > prefix.len() {
+            return false;
+        }
+        pos = nal_end;
+    }
+    false
+}
+
+/// Stream-inspect an MP4 carrier directly from disk using Seek + Read, so peak
+/// memory stays bounded by the `moov` (<= 32 MiB) plus one sample
+/// (<= `MAX_HEVC_SAMPLE_BYTES`) even for multi-gigabyte video files.
 pub fn inspect_hevc_mp4_file(
     carrier_path: &std::path::Path,
     secret: Option<&str>,
@@ -1907,28 +1961,17 @@ pub fn inspect_hevc_mp4_file(
         if sample_size < target.length_size + 2 || sample_offset + sample_size > file_len {
             continue;
         }
-        if sample_size <= 256 * 1024 {
-            let mut hdr_buf = vec![0u8; sample_size];
+        // Same ceiling as `parse_mp4_targets`: samples the byte-level path
+        // skips must not influence `has_inter` here either.
+        if sample_size <= crate::stego::hevc::mp4_boxes::MAX_HEVC_SAMPLE_BYTES {
+            let prefix_len = sample_size.min(HAS_INTER_PREFIX_BYTES);
+            let mut hdr_buf = vec![0u8; prefix_len];
             if file.seek(SeekFrom::Start(sample_offset as u64)).is_ok()
                 && file.read_exact(&mut hdr_buf).is_ok()
+                && sample_prefix_has_inter(&hdr_buf, target.length_size)
             {
-                let mut spans = Vec::new();
-                if crate::stego::hevc::mp4_boxes::collect_sample_slice_spans(
-                    &hdr_buf,
-                    0,
-                    sample_size,
-                    target.length_size,
-                    &mut spans,
-                )
-                .is_ok()
-                    && spans.iter().any(|s| {
-                        let (nt, _, _) = nal_header_fields(&hdr_buf[s.start..s.end()]);
-                        !is_irap(nt)
-                    })
-                {
-                    has_inter = true;
-                    break;
-                }
+                has_inter = true;
+                break;
             }
         }
     }
@@ -1954,7 +1997,9 @@ pub fn inspect_hevc_mp4_file(
         if sample_size < 4 || sample_offset + sample_size > file_len {
             continue;
         }
-        if sample_size > 8 * 1024 * 1024 {
+        if sample_size > crate::stego::hevc::mp4_boxes::MAX_HEVC_SAMPLE_BYTES {
+            // Same ceiling the byte-level recorder applies, so the slot pool is
+            // rebuilt from the same set of samples.
             continue;
         }
         file.seek(SeekFrom::Start(sample_offset as u64))?;
@@ -2517,7 +2562,7 @@ fn estimate_gops_for_slices(
 fn decode_gop_slice_range(
     carrier: &[u8],
     candidates: &[CandidateSlice],
-    parameter_sets: &[Vec<u8>],
+    parameter_sets: &[&[u8]],
     has_inter: bool,
     mode: RecordMode,
     capture: Capture,
@@ -2623,6 +2668,29 @@ fn merge_gop_record(
     *global_recorded_slices += gop.recorded_slices;
 }
 
+/// Parameter sets that are active at a GOP's first slice.
+///
+/// Container carriers (`hvcC`) declare every set up front (`ends = None`). An
+/// Annex-B stream may redefine SPS/PPS mid-file, so a GOP may only see the sets
+/// that physically precede it. Feeding the whole file's sets to every GOP made
+/// the last definition of `sps/pps id 0` overwrite the earlier ones, decoding
+/// early GOPs with the wrong geometry.
+fn active_parameter_sets<'a>(
+    sets: &'a [Vec<u8>],
+    ends: Option<&[usize]>,
+    gop_start_byte: usize,
+) -> Vec<&'a [u8]> {
+    match ends {
+        None => sets.iter().map(Vec::as_slice).collect(),
+        Some(ends) => sets
+            .iter()
+            .zip(ends)
+            .filter(|(_, end)| **end <= gop_start_byte)
+            .map(|(ps, _)| ps.as_slice())
+            .collect(),
+    }
+}
+
 fn record_carrier_state(
     carrier: &[u8],
     kind: HevcCarrierKind,
@@ -2636,7 +2704,7 @@ fn record_carrier_state(
         RecordMode::Slots
     };
 
-    let (candidates, digest_inputs, parameter_sets) = match kind {
+    let (candidates, digest_inputs, parameter_sets, ps_end_offsets) = match kind {
         HevcCarrierKind::HeifContainer => {
             let target = parse_heif_targets(carrier)
                 .map_err(|e| StrHideError::UnsupportedFormat(format!("HEIF parse error: {e}")))?;
@@ -2653,6 +2721,7 @@ fn record_carrier_state(
                     parameter_sets: parameter_sets.clone(),
                 },
                 parameter_sets,
+                None,
             )
         }
         HevcCarrierKind::Mp4Container => {
@@ -2672,15 +2741,18 @@ fn record_carrier_state(
                     parameter_sets: parameter_sets.clone(),
                 },
                 parameter_sets,
+                None,
             )
         }
         HevcCarrierKind::AnnexBStream => {
             let spans = parse_annex_b_spans(carrier);
             let mut parameter_sets = Vec::new();
+            let mut ps_end_offsets = Vec::new();
             for span in &spans {
                 if span.is_param_set() {
                     let end = span.end_offset().min(carrier.len());
                     parameter_sets.push(carrier[span.header_offset..end].to_vec());
+                    ps_end_offsets.push(end);
                 }
             }
             let mut candidates = Vec::new();
@@ -2693,7 +2765,12 @@ fn record_carrier_state(
                     candidates.push(cand);
                 }
             }
-            (candidates, DigestInputs::AnnexB { spans }, parameter_sets)
+            (
+                candidates,
+                DigestInputs::AnnexB { spans },
+                parameter_sets,
+                Some(ps_end_offsets),
+            )
         }
     };
 
@@ -2745,10 +2822,18 @@ fn record_carrier_state(
         let batch_results: Vec<Result<GopSliceRecord, String>> = batch_ranges
             .par_iter()
             .map(|range| {
+                let gop_start_byte = candidates
+                    .get(range.start)
+                    .map_or(0, |cand| cand.span.start);
+                let active_sets = active_parameter_sets(
+                    &parameter_sets,
+                    ps_end_offsets.as_deref(),
+                    gop_start_byte,
+                );
                 decode_gop_slice_range(
                     carrier,
                     &candidates[range.clone()],
-                    &parameter_sets,
+                    &active_sets,
                     has_inter,
                     mode,
                     capture,
@@ -3002,10 +3087,12 @@ fn drain_frames(decoder: &mut Decoder) {
 /// carries a `00 00 xx<=3` window stays out of the pool: flipping near it could
 /// shift every following substream even when the total NAL length is preserved.
 fn absorb_recorder(recorder: &mut CabacRecorder, rbsp: &[u8], sink: &mut SlotSink) {
-    if recorder.mode() == RecordMode::Embed && recorder.next_pending_slot() != recorder.slots.len()
-    {
-        // Slice decoding was truncated mid-slice before levels backfilled signs.
-        // Discard all incomplete slots from this slice so desynced slots never enter the pool.
+    if recorder.next_pending_slot() != recorder.slots.len() {
+        // Slice decoding was truncated mid-slice before every sign got its
+        // level back-fill. Discard all incomplete slots from this slice so
+        // desynced slots never enter the pool. The check runs in every record
+        // mode: embed used to drop the slice while extract (slot-only mode)
+        // kept its slots, which shifted every later global slot index.
         recorder.slots.clear();
         recorder.reset_pending();
         return;
@@ -3484,6 +3571,58 @@ mod safety_policy_tests {
         let p = policy(SafetyEnforcement::Enforced);
         assert!(enforce_safety(4_788, 4_788, 16_618, p).is_ok());
         assert!(enforce_safety(0, 4_788, 16_618, p).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod annex_b_parameter_set_tests {
+    use super::{active_parameter_sets, sample_prefix_has_inter};
+
+    #[test]
+    fn a_gop_only_sees_parameter_sets_that_precede_it() {
+        let sets = vec![vec![0x40, 0x01], vec![0x42, 0x01], vec![0x44, 0x01]];
+        // Container carriers apply every set up front.
+        let all = active_parameter_sets(&sets, None, 0);
+        assert_eq!(all.len(), 3);
+
+        // Annex-B: the set ending at byte 10 is not visible to a GOP at byte 5,
+        // while both earlier sets are.
+        let ends = [10usize, 20, 90];
+        assert_eq!(active_parameter_sets(&sets, Some(&ends), 5).len(), 0);
+        assert_eq!(active_parameter_sets(&sets, Some(&ends), 10).len(), 1);
+        assert_eq!(active_parameter_sets(&sets, Some(&ends), 90).len(), 3);
+        // A mid-stream redefinition does not leak backwards.
+        assert_eq!(active_parameter_sets(&sets, Some(&ends), 45).len(), 2);
+    }
+
+    #[test]
+    fn sample_prefix_classifies_slice_nal_types() {
+        let mut sample = Vec::new();
+        // length_size = 2, IRAP slice (type 19) then a trailing P slice (type 1).
+        sample.extend_from_slice(&4u16.to_be_bytes());
+        sample.extend_from_slice(&[19 << 1, 1, 0, 0]);
+        sample.extend_from_slice(&4u16.to_be_bytes());
+        sample.extend_from_slice(&[1 << 1, 1, 0, 0]);
+        assert!(sample_prefix_has_inter(&sample, 2));
+
+        // Only an IRAP slice is not an inter frame.
+        let mut irap_only = Vec::new();
+        irap_only.extend_from_slice(&4u16.to_be_bytes());
+        irap_only.extend_from_slice(&[19 << 1, 1, 0, 0]);
+        assert!(!sample_prefix_has_inter(&irap_only, 2));
+
+        // A truncated final NAL simply ends the walk.
+        let mut truncated = Vec::new();
+        truncated.extend_from_slice(&4u16.to_be_bytes());
+        truncated.extend_from_slice(&[19 << 1, 1]);
+        assert!(!sample_prefix_has_inter(&truncated, 2));
+
+        // Empty/garbage prefixes never panic.
+        assert!(!sample_prefix_has_inter(&[], 4));
+        assert!(!sample_prefix_has_inter(&[0u8; 4], 0));
+        let mut huge = 0xFFFF_FFFFu32.to_be_bytes().to_vec();
+        huge.push(0);
+        assert!(!sample_prefix_has_inter(&huge, 4));
     }
 }
 

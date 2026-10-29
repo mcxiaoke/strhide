@@ -47,6 +47,14 @@ const VISUAL_SAMPLE_ENTRY_HEADER: usize = 86;
 /// is far beyond any real video (a 4-hour 60 fps clip is ~0.9 M).
 const MAX_MP4_SAMPLES: usize = 16 * 1024 * 1024;
 
+/// Largest MP4/HEVC sample the content engine will decode.
+///
+/// Both the byte-level path (`parse_mp4_targets`) and the streaming inspect
+/// path must apply the same ceiling: if one side skips a 4K/8K IDR sample and
+/// the other decodes it, the slot pool diverges and a written payload can no
+/// longer be found. 64 MiB admits 8K intra frames (typically 10–40 MiB).
+pub const MAX_HEVC_SAMPLE_BYTES: usize = 64 * 1024 * 1024;
+
 /// Extracted MP4/MOV carrier information ready for Scheme C steganography.
 pub struct Mp4HevcTarget<'a> {
     /// VPS, SPS, PPS (and any other array entries) from `hvcC`, without
@@ -393,6 +401,9 @@ fn parse_stbl<'a>(bytes: &'a [u8], stbl: &BoxRef) -> Result<(Mp4HevcTarget<'a>, 
 
     let mut slice_spans = Vec::new();
     for (offset, size) in samples {
+        if size > MAX_HEVC_SAMPLE_BYTES {
+            continue;
+        }
         collect_sample_slice_spans(bytes, offset, size, length_size, &mut slice_spans)?;
     }
 

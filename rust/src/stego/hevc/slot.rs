@@ -505,7 +505,12 @@ impl CabacRecorder {
         }
     }
 
-    /// Number of slots awaiting level magnitude backfill.
+    /// Number of slots whose magnitude has been back-filled.
+    ///
+    /// In [`RecordMode::Slots`] no magnitudes are requested, so
+    /// `record_stego_level` only advances the same counter: a slice is complete
+    /// iff this equals `slots.len()`. Both modes share the check so a slice
+    /// truncated mid-decode is excluded from the slot pool on every path.
     #[inline]
     pub fn next_pending_slot(&self) -> usize {
         self.next_pending_slot
@@ -660,8 +665,11 @@ impl CabacRecorder {
         }
         // The magnitude only feeds the distortion cost, which is what the
         // trellis ranks slots by. A read-only pass never ranks anything, so it
-        // skips the per-coefficient cost model (and its `powf`) entirely.
+        // skips the per-coefficient cost model (and its `powf`) entirely --
+        // but it still records that the level arrived, which is the only
+        // completeness signal a truncated decode leaves behind.
         if !self.journals() {
+            self.next_pending_slot += 1;
             return;
         }
         let Some(pending) = self.pending_signs.get(self.next_pending_slot) else {
@@ -914,6 +922,11 @@ mod tests {
         assert_eq!(rec.slots[0].original_bit, 1);
         assert_eq!(rec.slots[0].cost, 0.0, "cost model is not run");
         assert_eq!(rec.substreams[0].slot_start, 0);
+        assert_eq!(
+            rec.next_pending_slot(),
+            rec.slots.len(),
+            "a complete slot-only slice sees one level per slot"
+        );
 
         // The embed mode must see exactly the same slot, with a real cost.
         let mut full = CabacRecorder::with_slice_mode(0, 0, RecordMode::Embed);
@@ -928,5 +941,24 @@ mod tests {
         assert_eq!(full.slots[0].original_bit, rec.slots[0].original_bit);
         assert!(full.slots[0].cost > 0.0);
         assert_eq!(full.ops.len(), 4);
+        assert_eq!(full.next_pending_slot(), full.slots.len());
+    }
+
+    /// A slice that records a sign but never its level must be flagged
+    /// incomplete in *every* record mode: this is the signal both embed and
+    /// extract use to exclude the whole slice, so their slot numbering stays in
+    /// lockstep.
+    #[test]
+    fn truncated_slice_is_incomplete_in_both_modes() {
+        for mode in [RecordMode::Embed, RecordMode::Slots] {
+            let mut rec = CabacRecorder::with_slice_mode(0, 0, mode);
+            rec.record_stego_sign(1, 27, 8, 0, 2, 0);
+            assert_eq!(rec.slots.len(), 1, "{mode:?}");
+            assert_ne!(
+                rec.next_pending_slot(),
+                rec.slots.len(),
+                "{mode:?}: a sign without its level must not count as complete"
+            );
+        }
     }
 }
