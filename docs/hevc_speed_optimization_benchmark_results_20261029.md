@@ -12,7 +12,7 @@
 | **Step 0: Baseline** | `strhide-baseline-074.exe`<br>(基线起点) | **4.34 s**<br>(0.58 GiB) | **173.22 s**<br>(0.59 GiB) | **60.94 s**<br>(4.75 GiB) | **35.46 s**<br>(1.67 GiB) | **100% 逐比特一致** |
 | **Step 1: PR A** | 零输出变化的纯清理与并行预回放 | **3.75 s**<br>(0.58 GiB) | **171.34 s**<br>(0.59 GiB) | **50.38 s**<br>(4.75 GiB) | **35.64 s**<br>(1.56 GiB) | **100% 逐比特一致** |
 | **Step 2: PR B** | 代价查表 LUT 与测试稳定性看门狗 | **2.73 s**<br>(0.55 GiB) | **97.67 s**<br>(0.56 GiB) | **35.23 s**<br>(4.80 GiB) | **18.61 s**<br>(1.52 GiB) | **100% 逐比特一致** |
-| **Step 3: PR C** | `rusty_h265` 环路滤波跳过显式化 | *待测* | *待测* | *待测* | *待测* | *待测* |
+| **Step 3: PR C** | `rusty_h265` 环路滤波跳过显式化与外部超时看门狗 | **2.34 s**<br>(0.55 GiB) | **93.09 s**<br>(0.56 GiB) | **36.62 s**<br>(4.74 GiB) | **18.77 s**<br>(1.68 GiB) | **100% 逐比特一致** |
 | **Step 4: PR D** | 确定性跨 GOP 多核并行解码 | *待测* | *待测* | *待测* | *待测* | *待测* |
 
 ---
@@ -63,3 +63,21 @@
 - **主要收益归因**：
   1. `COST_GEOM_LUT` 编译期常量查找表（~120 KB）：将 `cost_from_dq` 中每个切片、每个频域系数繁重的高频浮点除法、条件分支与曼哈顿距离平滑项全部消除为单一内存查表与单次乘法；
   2. 修复 `rust/tests/local/local_media.rs` 中长期存在的并发 `ffmpeg` 匿名管道死锁，加串行锁与 30s 看门狗超时机制，测试不再偶发卡死。
+
+### Step 3: PR C `rusty_h265` 环路滤波跳过显式化与超时防御（2026-10-29 16:04）
+
+- `binary`: `rust/target/release/strhide.exe` (commit PR C)
+- `upstream`: `F:\Develop\github\strhide-vendor\rusty_h265` (`v1-20261029`)
+- `baseline_hash.py --check`: 58/58 零改动全绿。
+- `cargo test --all-features --all-targets`: 760+ 用例 100% 绿灯。
+- `cargo test local_ --all-features -- --ignored`: 21/21 用例 100% 绿灯（127.42s 稳定通过，无任何卡顿）。
+- `cargo fmt && cargo clippy`: 零警告零错误。
+- `embed --capacity (sampled 1000 slices)`: **2.34 s**（相比 PR B 2.73s 继续提速，相比基线 4.34s 累计提速 **1.85x**）
+- `embed --capacity --exact (all 34,454 slices)`: **93.09 s**（从基线 173.22s 累计**净省 80.13 秒，耗时下降 46.3%**）
+- `embed 1 MiB payload`: **36.62 s**（保持在 35~36s 极速区间，相比基线 60.94s 提速 1.66x）
+- `extract 1 MiB payload`: **18.77 s**（保持在 18s 极速区间，相比基线 35.46s 提速 1.89x）
+- 提取校验：`>>> VERIFICATION: Payload extracted 100% BIT-PERFECT! <<<`
+- **主要收益归因**：
+  1. 在 `F:\Develop\github\strhide-vendor\rusty_h265` 的 `Decoder` 结构体上增加 `pub skip_loop_filters: bool` 显式字段及 `pub fn reset_sequence(&mut self)` 序列重置方法；
+  2. 在 `strhide` 的 `probe_hevc_pool`、`extract_mp4_carrier` 与 `record_carrier_state` 中显式置 `skip_loop_filters = true`，全路径抹除不必要的 Deblocking 与 SAO 环路滤波耗时；
+  3. 为 `rust/tests/local/local_media.rs` 中所有 `Command::new("ffmpeg")` 调用补充 `run_ffmpeg_with_timeout` 15~30s 进程级看门狗与 `.stdin(Stdio::null())` 句柄隔离，彻底防御 Windows 管道继承死锁。

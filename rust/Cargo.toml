@@ -127,3 +127,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[patch."https://github.com/mcxiaoke/rusty_h265.git"]
+rusty_h265 = { path = "F:/Develop/github/strhide-vendor/rusty_h265/crates/rusty_h265" }

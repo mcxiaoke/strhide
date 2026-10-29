@@ -426,6 +426,7 @@ fn probe_hevc_pool(
         .map_err(|e| StrHideError::UnsupportedFormat(format!("MP4/MOV parse error: {e}")))?;
 
     let mut decoder = Decoder::new();
+    decoder.skip_loop_filters = true;
     decoder.ablate = Ablate {
         mc: true,
         intra: true,
@@ -1918,6 +1919,7 @@ pub fn inspect_hevc_mp4_file(
     }
 
     let mut decoder = Decoder::new();
+    decoder.skip_loop_filters = true;
     decoder.ablate = Ablate {
         mc: true,
         intra: true,
@@ -2377,6 +2379,7 @@ fn record_carrier_state(
         RecordMode::Slots
     };
     let mut decoder = Decoder::new();
+    decoder.skip_loop_filters = true;
     decoder.ablate = Ablate {
         mc: true,
         intra: true,

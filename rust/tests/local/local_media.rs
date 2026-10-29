@@ -868,6 +868,25 @@ pub mod hevc_external {
         }
     }
 
+    pub fn run_ffmpeg_with_timeout(
+        args: &[&str],
+        timeout: std::time::Duration,
+    ) -> Result<String, String> {
+        use std::io::Read;
+        let mut child = Command::new("ffmpeg")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("cannot run ffmpeg: {e}"))?;
+        let mut stderr = child.stderr.take().ok_or("no stderr")?;
+        let _ = wait_with_timeout(&mut child, timeout)?;
+        let mut log = String::new();
+        let _ = stderr.read_to_string(&mut log);
+        Ok(log)
+    }
+
     fn ffmpeg_available() -> bool {
         Command::new("ffmpeg")
             .arg("-version")
@@ -888,16 +907,24 @@ pub mod hevc_external {
         reference: &Path,
         candidate: &Path,
     ) -> Result<(f64, Vec<String>), String> {
-        let out = Command::new("ffmpeg")
-            .args(["-hide_banner", "-nostdin", "-i"])
-            .arg(reference)
-            .args(["-i"])
-            .arg(candidate)
-            .args(["-lavfi", "[0:v][1:v]psnr", "-f", "null", "-"])
-            .output()
-            .map_err(|e| format!("cannot run ffmpeg: {e}"))?;
-
-        let log = String::from_utf8_lossy(&out.stderr).to_string();
+        let ref_str = reference.to_str().ok_or("invalid ref path")?;
+        let cand_str = candidate.to_str().ok_or("invalid cand path")?;
+        let log = run_ffmpeg_with_timeout(
+            &[
+                "-hide_banner",
+                "-nostdin",
+                "-i",
+                ref_str,
+                "-i",
+                cand_str,
+                "-lavfi",
+                "[0:v][1:v]psnr",
+                "-f",
+                "null",
+                "-",
+            ],
+            std::time::Duration::from_secs(30),
+        )?;
         let noise: Vec<String> = log
             .lines()
             .filter(|line| {
@@ -953,8 +980,8 @@ pub mod hevc_external {
     /// Frame size as the decoder outputs it, read from ffmpeg's `showinfo` line
     /// (`s:WxH`).
     fn decoded_dimensions(path: &Path) -> Option<(usize, usize)> {
-        let out = Command::new("ffmpeg")
-            .args([
+        let log = run_ffmpeg_with_timeout(
+            &[
                 "-hide_banner",
                 "-nostdin",
                 "-i",
@@ -966,14 +993,10 @@ pub mod hevc_external {
                 "-f",
                 "null",
                 "-",
-            ])
-            .output()
-            .ok()?;
-        // `s:WxH` is not the only `s:` in the log -- the HEIC brand line
-        // ("compatible_brands: mif1heic...") contains one too, and a naive
-        // `split("s:")` picks that first. Only accept a match that parses as
-        // `digits x digits`.
-        let log = String::from_utf8_lossy(&out.stderr);
+            ],
+            std::time::Duration::from_secs(15),
+        )
+        .ok()?;
         let mut found = None;
         for (idx, _) in log.match_indices("s:") {
             let rest = &log[idx + 2..];
@@ -1783,15 +1806,24 @@ pub mod mp4_container {
 
     /// Average PSNR between two files and every decoder complaint ffmpeg made.
     fn psnr_and_complaints(cover: &Path, stego: &Path) -> Result<(f64, Vec<String>), String> {
-        let out = Command::new("ffmpeg")
-            .args(["-hide_banner", "-nostdin", "-i"])
-            .arg(cover)
-            .args(["-i"])
-            .arg(stego)
-            .args(["-lavfi", "[0:v][1:v]psnr", "-f", "null", "-"])
-            .output()
-            .map_err(|e| format!("cannot run ffmpeg: {e}"))?;
-        let log = String::from_utf8_lossy(&out.stderr).to_string();
+        let cov_str = cover.to_str().ok_or("invalid cover path")?;
+        let stg_str = stego.to_str().ok_or("invalid stego path")?;
+        let log = super::hevc_external::run_ffmpeg_with_timeout(
+            &[
+                "-hide_banner",
+                "-nostdin",
+                "-i",
+                cov_str,
+                "-i",
+                stg_str,
+                "-lavfi",
+                "[0:v][1:v]psnr",
+                "-f",
+                "null",
+                "-",
+            ],
+            std::time::Duration::from_secs(30),
+        )?;
         let noise: Vec<String> = log
             .lines()
             .filter(|line| {
