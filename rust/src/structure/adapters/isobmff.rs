@@ -629,6 +629,15 @@ fn heif_item_hidden_inject(
     let (m_off, m_size, m_hlen) = meta_span.ok_or_else(|| {
         StrHideError::UnsupportedFormat("No meta box found in HEIF carrier for item_hidden".into())
     })?;
+    // The rewrite below rebuilds the meta header as `size32 + "meta" +
+    // version/flags` (12 bytes). A 64-bit (`largesize`) meta header would have
+    // its largesize high word overwritten with those version/flags bytes, so
+    // refuse the carrier instead of emitting a structurally broken file.
+    if m_hlen != 8 {
+        return Err(StrHideError::UnsupportedFormat(
+            "HEIF carriers with a 64-bit meta box header are not supported for item_hidden".into(),
+        ));
+    }
 
     let m_body_start = m_off + m_hlen + 4; // FullBox version+flags
     let m_end = m_off + m_size;
@@ -779,6 +788,15 @@ fn heif_item_hidden_inject(
     let id_sz = if iloc_ver < 2 { 2 } else { 4 };
     let cm_sz = if iloc_ver >= 1 { 2 } else { 0 };
     let iloc_item_len = id_sz + cm_sz + 2 + base_sz + 2 + idx_sz + off_sz + len_sz;
+    // `iloc` v0/v1 address items with 16-bit ids and 16-bit entry counts; a
+    // larger new id or a full count would silently wrap to 0 and pair the
+    // iinf entry with the wrong iloc record. v2+ has 32-bit fields, so only
+    // the v0/v1 forms need the guard.
+    if iloc_ver < 2 && (new_id > 0xFFFF || iloc_cnt >= 0xFFFF) {
+        return Err(StrHideError::UnsupportedFormat(
+            "HEIF iloc v0/v1 item-id or entry-count space is exhausted".into(),
+        ));
+    }
     let delta_meta = infe_len + iloc_item_len;
     let target_ext_off = host_bytes.len() as u64 + delta_meta as u64 + 8;
 
@@ -869,6 +887,11 @@ fn heif_item_hidden_inject(
     // Update iinf
     {
         let iinf_buf = &mut subboxes[iinf_idx].1;
+        if iinf_ver == 0 && entry_cnt >= 0xFFFF {
+            return Err(StrHideError::UnsupportedFormat(
+                "HEIF iinf v0 entry-count space is exhausted".into(),
+            ));
+        }
         let new_iinf_sz = (iinf_buf.len() + infe_len) as u32;
         iinf_buf[0..4].copy_from_slice(&new_iinf_sz.to_be_bytes());
         if iinf_ver == 0 {

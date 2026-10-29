@@ -114,7 +114,10 @@ where
             let elapsed_ms = start.elapsed().as_millis() as u64;
 
             let is_err = res.is_err();
-            let mapped = res.map_err(|e| e.detail_i18n());
+            let mapped = res.map_err(|e| match plan.ctx {
+                Some(ctx) => e.detail_i18n_with_ctx(ctx),
+                None => e.detail_i18n(),
+            });
             let outcome = ItemOutcome {
                 index: idx,
                 item: path.to_path_buf(),

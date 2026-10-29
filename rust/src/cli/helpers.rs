@@ -235,26 +235,30 @@ pub(crate) fn stego_tuning(
     let configured = cfg.stego.as_ref().and_then(|s| s.algorithm.as_deref());
     if let Some(name) = args.algorithm.as_deref().or(configured) {
         let name = name.trim();
-        if name == "auto" {
+        if name != "auto" {
+            if let Some(model) = SpatialAlgorithm::from_name(name) {
+                let mut params = PngParams::default();
+                apply_png_flags(&mut params, args);
+                return Ok(StegoTuning::Png { model, params });
+            }
+            if let Some(model) = JpegAlgorithm::from_name(name) {
+                let mut params = JpegParams::default();
+                apply_jpeg_flags(&mut params, args);
+                return Ok(StegoTuning::Jpeg { model, params });
+            }
+            if let Some(mode) = HevcMode::from_name(name) {
+                return Ok(StegoTuning::hevc(mode));
+            }
+            return Err(StrHideError::General(format!(
+                "Unknown algorithm '{name}'. Supported: hill, suniward (PNG), uerd, juniward (JPEG), \
+                 hevc, cabac (HEIF/HEVC), auto"
+            )));
+        }
+        // `auto` with format-level tuning flags must still honour them; only a
+        // bare "auto" means "let every format use its defaults".
+        if !has_per_format_flags(args) {
             return Ok(StegoTuning::Auto);
         }
-        if let Some(model) = SpatialAlgorithm::from_name(name) {
-            let mut params = PngParams::default();
-            apply_png_flags(&mut params, args);
-            return Ok(StegoTuning::Png { model, params });
-        }
-        if let Some(model) = JpegAlgorithm::from_name(name) {
-            let mut params = JpegParams::default();
-            apply_jpeg_flags(&mut params, args);
-            return Ok(StegoTuning::Jpeg { model, params });
-        }
-        if let Some(mode) = HevcMode::from_name(name) {
-            return Ok(StegoTuning::hevc(mode));
-        }
-        return Err(StrHideError::General(format!(
-            "Unknown algorithm '{name}'. Supported: hill, suniward (PNG), uerd, juniward (JPEG), \
-             hevc, cabac (HEIF/HEVC), auto"
-        )));
     }
 
     if !has_per_format_flags(args) {
@@ -673,12 +677,18 @@ pub(crate) fn format_stego_algorithm(
             #[cfg(feature = "content-png")]
             Some(FileFormat::Png) => {
                 let name = cap_algo.unwrap_or("hill");
-                format!("{name} (stc_h: 7, safety: {safety_str})")
+                format!(
+                    "{name} (stc_h: {}, safety: {safety_str})",
+                    crate::stego::coding::DEFAULT_STC_H
+                )
             }
             #[cfg(feature = "content-jpeg")]
             Some(FileFormat::Jpeg) => {
                 let name = cap_algo.unwrap_or("uerd");
-                format!("{name} (stc_h: 7, safety: {safety_str})")
+                format!(
+                    "{name} (stc_h: {}, safety: {safety_str})",
+                    crate::stego::coding::DEFAULT_STC_H
+                )
             }
             #[cfg(feature = "content-hevc")]
             Some(FileFormat::Mp4 | FileFormat::Heif | FileFormat::HevcAnnexB) => {
@@ -743,6 +753,13 @@ mod tests {
         assert_eq!(s, "HEVC-CABAC-InPlace (safety: high)");
 
         let s2 = format_stego_algorithm(&StegoTuning::Auto, &safety, Some(FileFormat::Jpeg), None);
-        assert_eq!(s2, "uerd (stc_h: 7, safety: high)");
+        assert_eq!(
+            s2,
+            format!(
+                "uerd (stc_h: {}, safety: high)",
+                crate::stego::coding::DEFAULT_STC_H
+            ),
+            "the capacity banner must advertise the real default height"
+        );
     }
 }

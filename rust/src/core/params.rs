@@ -277,12 +277,13 @@ impl SafetyLevel {
         }
     }
 
-    /// Parse from case-insensitive string ("high", "balanced", "paranoid").
+    /// Parse from case-insensitive string ("high", "balanced", "paranoid"),
+    /// or the numeric aliases `0` (paranoid), `1` (high), `2` (balanced).
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "paranoid" => Some(SafetyLevel::Paranoid),
-            "high" => Some(SafetyLevel::High),
-            "balanced" => Some(SafetyLevel::Balanced),
+            "0" | "paranoid" => Some(SafetyLevel::Paranoid),
+            "1" | "high" => Some(SafetyLevel::High),
+            "2" | "balanced" => Some(SafetyLevel::Balanced),
             _ => None,
         }
     }

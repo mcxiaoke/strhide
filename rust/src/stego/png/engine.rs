@@ -190,9 +190,18 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
                 ));
             }
             b"PLTE" => {
-                return Err(StrHideError::UnsupportedFormat(
-                    "Indexed/palette PNG is not supported for content-adaptive pixel steganography; please use RGB/RGBA/Grayscale PNG".into(),
-                ));
+                if color_type == 3 {
+                    return Err(StrHideError::UnsupportedFormat(
+                        "Indexed/palette PNG is not supported for content-adaptive pixel steganography; please use RGB/RGBA/Grayscale PNG".into(),
+                    ));
+                }
+                // A truecolour PNG may carry PLTE as a *suggested* palette; it
+                // is optional metadata, not an indexed colour table, so keep it
+                // verbatim instead of refusing an otherwise valid carrier.
+                chunks.push(PngChunk {
+                    ty: *b"PLTE",
+                    data: body.to_vec(),
+                });
             }
             b"IDAT" => {
                 idat.extend_from_slice(body);
@@ -1635,12 +1644,10 @@ pub fn extract_png(
     let needed_body_slots =
         crate::stego::coding::slots_for_codec(ciphertext_bits, fw.codec, fw.h, fw.u)?;
 
-    // Reject untrusted/bogus header total_len before allocating body slots.
-    let pool = plan.count_body_slots(&image, fw.class_rule, mode);
-    if needed_body_slots > pool {
-        return Err(no_hidden());
-    }
-
+    // `body_slots_upto` stops as soon as `needed_body_slots` are collected and
+    // its length check below rejects short pools, so a separate full-image
+    // `count_body_slots` pass only doubled the scan without changing the
+    // verdict.
     let master = derive_master(
         spatial.body.default_suite(),
         password.unwrap_or(spatial.fallback_secret),
@@ -2477,6 +2484,46 @@ mod tests {
             assert!(a.abs_diff(*b) <= 1, "move too large: {a} -> {b}");
             assert_eq!(a & 0xF8, b & 0xF8, "class left: {a} -> {b}");
         }
+    }
+
+    #[test]
+    fn exclusion_rate_off_the_permille_grid_roundtrips() {
+        // The feature word can only carry integer permille, so the embedder has
+        // to rank candidates with the same quantised rate the extractor will
+        // reconstruct. Before the fix, 0.0123 wrote 12 permille but ranked with
+        // 0.0123, and the payload became silently unreadable.
+        let (w, h) = (96usize, 96usize);
+        let pixels = row_correlated_pixels(w, h);
+        let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
+        let payload = b"permille-quantised-roundtrip";
+        let params = PngParams {
+            exclusion_percentile: 0.0123,
+            ..PngParams::default()
+        };
+        let stego = embed_png(
+            &png,
+            payload,
+            Some("pw"),
+            None,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &params,
+            SafetyPolicy::default(),
+            Freshness::Random,
+            &Control::none(),
+        )
+        .expect("embed");
+        let extracted = extract_png(
+            &stego,
+            Some("pw"),
+            None,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &PngParams::default(),
+            &Control::none(),
+        )
+        .expect("extract");
+        assert_eq!(extracted, payload, "the wire value must round-trip");
     }
 
     #[test]

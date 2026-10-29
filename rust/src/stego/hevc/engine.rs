@@ -23,9 +23,7 @@ use crate::stego::format::HevcFormatProfile;
 use crate::stego::hevc::bitstream::{compute_hevc_cover_digest, parse_annex_b_spans, rbsp_to_nal};
 use crate::stego::hevc::heif_boxes::parse_heif_targets;
 use crate::stego::hevc::mp4_boxes::parse_mp4_targets;
-use crate::stego::hevc::slot::{
-    BinOp, CabacRecorder, HIGH_DISPLACEMENT_PENALTY, RecordMode, StegoSlot, SubstreamRecord,
-};
+use crate::stego::hevc::slot::{BinOp, CabacRecorder, RecordMode, StegoSlot, SubstreamRecord};
 use crate::stego::hevc::sniff::{
     HevcCarrierKind, NAL_RADL_N, NAL_RASL_N, NAL_RASL_R, NAL_SPS_NUT, NAL_STSA_N, NAL_TRAIL_N,
     NAL_TSA_N, sniff_hevc_carrier,
@@ -89,6 +87,12 @@ const CAPACITY_PROBE_SEED: u64 = 0x5465_676f;
 /// drops a substream whose journal does not replay the cover, or gives up, so
 /// the loop always makes progress. Healthy carriers settle in one round.
 const MAX_EMBED_ROUNDS: usize = 24;
+
+/// Extra cost added to a slot excluded by an earlier round. It must lift the
+/// slot strictly above its own legal cost: a legal high-displacement slot
+/// already costs `HIGH_DISPLACEMENT_PENALTY + l2_cost`, so reusing the bare
+/// penalty here made excluded slots *cheaper* and the trellis preferred them.
+const FORBIDDEN_SLOT_SURCHARGE: f64 = 1e9;
 
 /// Fixed 32-byte HEVC Superblock for Scheme C v2.
 pub const HEVC_SUPERBLOCK_BYTES: usize = 32;
@@ -952,7 +956,7 @@ pub fn embed_hevc_patches_with_factor(
             let slot = &all_slots[pos];
             sb_cover_bits.push(slot.original_bit);
             sb_costs.push(if forbidden.contains(&pos) {
-                HIGH_DISPLACEMENT_PENALTY
+                slot.cost as f64 + FORBIDDEN_SLOT_SURCHARGE
             } else {
                 slot.cost as f64
             });
@@ -1002,7 +1006,7 @@ pub fn embed_hevc_patches_with_factor(
             |j| {
                 let pos = body_positions[j];
                 let cost = if forbidden.contains(&pos) {
-                    HIGH_DISPLACEMENT_PENALTY
+                    all_slots[pos].cost as f64 + FORBIDDEN_SLOT_SURCHARGE
                 } else {
                     all_slots[pos].cost as f64
                 };
@@ -1149,6 +1153,17 @@ pub fn embed_hevc_patches_with_factor(
         }
 
         if progress == 0 {
+            // `conflicts` can be empty here when a BadSubstream hit a substream
+            // whose slots were all excluded in an earlier round: the slice
+            // failed to re-encode, yet there is no EPB trace to point at.
+            // Report that explicitly instead of indexing `conflicts[0]`.
+            if conflicts.is_empty() {
+                return Err(StrHideError::General(format!(
+                    "HEVC stego cannot resolve a substream whose slots were already excluded \
+                     (round {round}, {} slot(s) forbidden)",
+                    forbidden.len()
+                )));
+            }
             return Err(StrHideError::General(format!(
                 "HEVC stego cannot localize the emulation-prevention conflict at RBSP byte {}",
                 conflicts[0].0

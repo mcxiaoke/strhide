@@ -168,17 +168,28 @@ impl HostAdapter for ZipAdapter {
                         Some("Empty archive (no Central Directory); auto falls back to eof".into());
                 }
                 Ok((eocd_pos, cd_offset, _)) => {
-                    let patch_limit = std::cmp::max(cd_offset, eocd_pos + 16);
-                    // Mirrors choose_auto_strategy: patch_limit + ube must stay
-                    // strictly below 0xFFFFFFFF.
-                    let cap = 0xFFFF_FFFEu64.saturating_sub(patch_limit);
-                    pre_cd.capacity_bytes = Some(cap);
-                    pre_cd.limit = format!(
-                        "<= {} B (4 GiB - EOCD offset {})",
-                        format_bytes(cap),
-                        format_bytes(patch_limit)
-                    );
-                    pre_cd.note = Some("before Central Directory; file grows".into());
+                    // Mirror choose_auto_strategy: ZIP64 archives patch their
+                    // locator asymmetrically, so the pre-CD strategy is not
+                    // available there even when the 32-bit fields still fit.
+                    if has_zip64_locator(r, eocd_pos) {
+                        pre_cd.available = false;
+                        pre_cd.note = Some(
+                            "ZIP64 archive (zip64 EOCD locator present); auto falls back to eof"
+                                .into(),
+                        );
+                    } else {
+                        let patch_limit = std::cmp::max(cd_offset, eocd_pos + 16);
+                        // Mirrors choose_auto_strategy: patch_limit + ube must stay
+                        // strictly below 0xFFFFFFFF.
+                        let cap = 0xFFFF_FFFEu64.saturating_sub(patch_limit);
+                        pre_cd.capacity_bytes = Some(cap);
+                        pre_cd.limit = format!(
+                            "<= {} B (4 GiB - EOCD offset {})",
+                            format_bytes(cap),
+                            format_bytes(patch_limit)
+                        );
+                        pre_cd.note = Some("before Central Directory; file grows".into());
+                    }
                 }
                 Err(_) => {
                     pre_cd.available = false;

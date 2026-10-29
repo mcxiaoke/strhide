@@ -204,6 +204,13 @@ impl PngParams {
         let mut p = self.clone();
         let k = crate::stego::header::FeatureWord::quantize_epsilon(p.epsilon);
         p.epsilon = (0.5f64).powi(k as i32);
+        // The feature word records the percentile as integer permille, so the
+        // embedder, prober and extractor must all run on exactly that value.
+        // Without this, a rate such as `--exclusion-rate 0.0123` selects one
+        // candidate prefix on the write side and a different one on read-back,
+        // and the payload silently becomes unreadable.
+        p.exclusion_percentile =
+            ((p.exclusion_percentile.clamp(0.0, 0.9) * 1000.0) as u16 as f64) / 1000.0;
         if let Some(s) = p.algorithm_options.get_mut("sigma") {
             *s = *s as f32 as f64;
         }
@@ -261,6 +268,17 @@ impl PngParams {
             return Err(StrHideError::General(format!(
                 "HILL parameter 'epsilon' must be a finite positive number, got {}",
                 self.epsilon
+            )));
+        }
+        // Out-of-range values used to be silently clamped while ranking and
+        // then truncated to permille on the wire: reject them at the boundary
+        // instead of hiding the disagreement.
+        if !self.exclusion_percentile.is_finite()
+            || !(0.0..=0.9).contains(&self.exclusion_percentile)
+        {
+            return Err(StrHideError::General(format!(
+                "HILL parameter 'exclusion_percentile' must be in 0.0..=0.9, got {}",
+                self.exclusion_percentile
             )));
         }
         if self.codec == StegoCodec::Stc || self.codec == StegoCodec::Auto {
@@ -834,6 +852,33 @@ mod tests {
         assert!(err.to_string().contains("empty key"), "got: {err}");
     }
 
+    #[cfg(feature = "content-png")]
+    #[test]
+    fn png_params_reject_out_of_range_exclusion() {
+        for bad in [-0.1, 0.95, f64::NAN] {
+            let params = PngParams {
+                exclusion_percentile: bad,
+                ..PngParams::default()
+            };
+            let err = params
+                .validate()
+                .expect_err("an out-of-range exclusion rate must be rejected");
+            assert!(
+                err.to_string().contains("exclusion_percentile"),
+                "got: {err}"
+            );
+        }
+        let params = PngParams {
+            exclusion_percentile: 0.0123,
+            ..PngParams::default()
+        };
+        assert_eq!(
+            params.wire_quantized().exclusion_percentile,
+            0.012,
+            "the wire form is integer permille"
+        );
+    }
+
     #[cfg(feature = "content-jpeg")]
     #[test]
     fn jpeg_algorithm_options_reject_non_finite_values() {
@@ -920,6 +965,9 @@ mod tests {
         assert_eq!(SafetyLevel::parse("High"), Some(SafetyLevel::High));
         assert_eq!(SafetyLevel::parse("BALANCED"), Some(SafetyLevel::Balanced));
         assert_eq!(SafetyLevel::parse("unknown"), None);
+        assert_eq!(SafetyLevel::parse("0"), Some(SafetyLevel::Paranoid));
+        assert_eq!(SafetyLevel::parse("1"), Some(SafetyLevel::High));
+        assert_eq!(SafetyLevel::parse("2"), Some(SafetyLevel::Balanced));
 
         assert_eq!(SafetyLevel::Paranoid.bpp_limit(), 0.06);
         assert_eq!(SafetyLevel::High.bpp_limit(), 0.10);

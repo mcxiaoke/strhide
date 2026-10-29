@@ -18,10 +18,57 @@
 /// rejected as well, so they cannot turn into uncreatable files on Windows.
 pub fn sanitize_filename(name: &str) -> String {
     let candidate = name.rsplit(['/', '\\']).find(|seg| !seg.is_empty());
-    match candidate {
-        Some(n) if n != "." && n != ".." && !n.contains(':') => n.to_string(),
-        _ => "extracted.bin".to_string(),
+    let Some(n) = candidate else {
+        return FALLBACK_NAME.to_string();
+    };
+    if n == "." || n == ".." || n.contains(':') {
+        return FALLBACK_NAME.to_string();
     }
+
+    // Terminal escape sequences and other control bytes must not reach a log
+    // line or a file name; Windows also rejects these characters outright.
+    let mut cleaned: String = n
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+
+    // Windows silently drops trailing dots and spaces, which lets two distinct
+    // names collide on disk; strip them on every platform so the result does
+    // not depend on the host.
+    while cleaned.ends_with('.') || cleaned.ends_with(' ') {
+        cleaned.pop();
+    }
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        return FALLBACK_NAME.to_string();
+    }
+
+    // `CON`, `NUL`, `COM1`... are device names, not files, on Windows.
+    let stem = cleaned.split('.').next().unwrap_or(&cleaned);
+    if is_windows_reserved_device(stem) {
+        cleaned.insert(0, '_');
+    }
+    cleaned
+}
+
+const FALLBACK_NAME: &str = "extracted.bin";
+
+fn is_windows_reserved_device(stem: &str) -> bool {
+    let upper = stem.to_ascii_uppercase();
+    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        return true;
+    }
+    for prefix in ["COM", "LPT"] {
+        if let Some(digit) = upper.strip_prefix(prefix) {
+            return matches!(digit, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9");
+        }
+    }
+    false
 }
 
 /// Output name for one carrier of a batch whose payload recorded no filename.
@@ -86,5 +133,26 @@ mod tests {
         assert_eq!(sanitize_filename(".."), "extracted.bin");
         assert_eq!(sanitize_filename(""), "extracted.bin");
         assert_eq!(sanitize_filename("C:evil.txt"), "extracted.bin");
+    }
+
+    #[test]
+    fn neutralises_control_bytes_and_windows_special_names() {
+        // A terminal escape sequence must not survive into logs or file names.
+        assert_eq!(sanitize_filename("evil\x1b[31m.txt"), "evil_[31m.txt");
+        assert_eq!(sanitize_filename("a\nb.txt"), "a_b.txt");
+        // Windows-rejected characters become underscores.
+        assert_eq!(sanitize_filename("a<b>c?.txt"), "a_b_c_.txt");
+        // Trailing dots/spaces would be silently dropped by Windows otherwise.
+        assert_eq!(sanitize_filename("evil. "), "evil");
+        // Reserved device names are prefixed instead of rejected outright.
+        assert_eq!(sanitize_filename("CON.txt"), "_CON.txt");
+        assert_eq!(sanitize_filename("com1.bin"), "_com1.bin");
+        assert_eq!(sanitize_filename("LPT9"), "_LPT9");
+        assert_eq!(
+            sanitize_filename("COM0.txt"),
+            "COM0.txt",
+            "COM0 is not a device name"
+        );
+        assert_eq!(sanitize_filename("\u{7}"), "_");
     }
 }
