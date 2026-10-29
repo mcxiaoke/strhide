@@ -145,4 +145,37 @@ test.describe("工作台 2: 隐藏与自适应嵌入台 E2E 及截图验证", ()
       fullPage: true,
     });
   });
+
+  test("08-选择本地载荷文件真实元数据与瞬时容量档位切换验证", async ({ page }) => {
+    await page.addInitScript(createTauriMockScript({
+      carrierPath: "C:\\Samples\\holiday_photo.png",
+      conflictOnEmbed: false,
+    }));
+    await page.goto("http://localhost:1420");
+
+    // 载入载体并进入工作台 2
+    await page.locator("text=拖拽载体文件至此").click();
+    await page.locator("button:has-text('隐藏与自适应嵌入')").click();
+
+    // 切换至“本地文件”
+    await page.locator("button:has-text('本地文件')").click();
+
+    // 点击选择要隐藏的载荷文件
+    await page.locator("text=点击选择要隐藏的本地文件").click();
+
+    // 验证真实文件大小被准确读取 (4.0 KB 真实元数据，而非旧的 1 KB 假数据)
+    await expect(page.locator("text=4.0 KB").first()).toBeVisible();
+
+    // 验证档位卡片中常态显示真实推荐上限
+    await expect(page.locator("text=Paranoid (偏执)")).toBeVisible();
+    await expect(page.locator("text=Balanced (均衡)")).toBeVisible();
+
+    // 瞬时点击切换至 Paranoid 档位，验证推荐上限即时更新为 15.0 KB
+    await page.locator("button:has-text('Paranoid (偏执)')").click();
+    await expect(page.locator("text=15.0 KB").first()).toBeVisible();
+
+    // 瞬时点击切换至 Balanced 档位，验证推荐上限即时更新为 37.5 KB
+    await page.locator("button:has-text('Balanced (均衡)')").click();
+    await expect(page.locator("text=37.5 KB").first()).toBeVisible();
+  });
 });
