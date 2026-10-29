@@ -1086,6 +1086,7 @@ fn track_trailing_entropy(view: &ScanView, format: Option<&str>, out: &mut Vec<F
     let suspicious_tail = match format {
         Some("PNG") => false,  // covered precisely by png:trailing-data
         Some("JPEG") => false, // covered precisely by jpeg:trailing-data
+        Some("ZIP" | "MP4" | "PDF" | "HEIF" | "MKV") => false, // compressed native payload at EOF
         _ => entropy >= 7.5,
     };
     if suspicious_tail {
@@ -1468,29 +1469,39 @@ fn track_spatial_domain(
     }
 
     // 2. RS Analysis
-    let rs_p = rs_rate.unwrap_or(0.0);
-    if rs_p > SPATIAL_RATE_THRESHOLD {
-        findings.push(Finding {
-            detector: "rs-analysis".into(),
-            severity: Severity::Suspicious,
-            detail: format!("RS analysis estimates LSB embedding rate ~{rs_p:.2}"),
-        });
-        detectors.push(DetectorMetric {
-            name: "spatial:rs".into(),
-            domain: "spatial".into(),
-            status: "ALERT".into(),
-            metric: format!("rate: {rs_p:.3}"),
-            threshold: Some(format!("{SPATIAL_RATE_THRESHOLD:.3}")),
-            detail: "dual-mask flipping asymmetry".into(),
-        });
+    if let Some(rs_p) = rs_rate {
+        if rs_p > SPATIAL_RATE_THRESHOLD {
+            findings.push(Finding {
+                detector: "rs-analysis".into(),
+                severity: Severity::Suspicious,
+                detail: format!("RS analysis estimates LSB embedding rate ~{rs_p:.2}"),
+            });
+            detectors.push(DetectorMetric {
+                name: "spatial:rs".into(),
+                domain: "spatial".into(),
+                status: "ALERT".into(),
+                metric: format!("rate: {rs_p:.3}"),
+                threshold: Some(format!("{SPATIAL_RATE_THRESHOLD:.3}")),
+                detail: "dual-mask flipping asymmetry".into(),
+            });
+        } else {
+            detectors.push(DetectorMetric {
+                name: "spatial:rs".into(),
+                domain: "spatial".into(),
+                status: "PASS".into(),
+                metric: format!("rate: {rs_p:.3}"),
+                threshold: Some(format!("{SPATIAL_RATE_THRESHOLD:.3}")),
+                detail: "dual-mask symmetry preserved".into(),
+            });
+        }
     } else {
         detectors.push(DetectorMetric {
             name: "spatial:rs".into(),
             domain: "spatial".into(),
-            status: "PASS".into(),
-            metric: format!("rate: {rs_p:.3}"),
+            status: "SKIPPED".into(),
+            metric: "n/a".into(),
             threshold: Some(format!("{SPATIAL_RATE_THRESHOLD:.3}")),
-            detail: "dual-mask symmetry preserved".into(),
+            detail: "image geometry unsuitable for RS slab sampling".into(),
         });
     }
 
@@ -1605,7 +1616,7 @@ fn track_jpeg_dct_domain(
         detectors.push(DetectorMetric {
             name: "dct:calibration".into(),
             domain: "dct".into(),
-            status: "PASS".into(),
+            status: "SKIPPED".into(),
             metric: "n/a".into(),
             threshold: Some(format!("{CALIBRATION_FLAG_RATE:.3}")),
             detail: "carrier quantization not suitable for calibration (e.g. q100)".into(),
@@ -1666,20 +1677,23 @@ fn chi2_lsb_suspicion(data: &[u8]) -> f64 {
 /// Split out so the pooled histogram of several sampled slabs yields exactly
 /// the same statistic as one pass over all of them would.
 fn chi2_suspicion(hist: &[u64; 256]) -> f64 {
-    let mut chi2 = 0.0;
-    let mut df = 0.0;
+    let mut total_imbalance = 0.0;
+    let mut count = 0.0;
     for i in (0..256).step_by(2) {
-        let expected = (hist[i] + hist[i + 1]) as f64 / 2.0;
-        if expected > 0.0 {
-            chi2 += (hist[i] as f64 - expected).powi(2) / expected;
-            df += 1.0;
+        let total = hist[i] + hist[i + 1];
+        if total >= 8 {
+            let diff = (hist[i] as f64 - hist[i + 1] as f64).abs();
+            total_imbalance += diff / total as f64;
+            count += 1.0;
         }
     }
-    if df == 0.0 {
+    if count == 0.0 {
         return 0.0;
     }
-    // Clean images: chi2 ≈ df. Fully embedded: chi2 → 0.
-    ((df - chi2) / df).clamp(0.0, 1.0)
+    let avg_imbalance = total_imbalance / count;
+    // When pair counts are equalized (LSB embedded), avg_imbalance -> 0, suspicion -> 1.0.
+    // In clean natural images, local gradients cause natural imbalance, dropping suspicion to 0.0.
+    (1.0 - avg_imbalance * 4.0).clamp(0.0, 1.0)
 }
 
 #[derive(Clone, Copy)]
