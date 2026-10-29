@@ -190,11 +190,23 @@ pub struct CodePosition {
 /// rewrite is an equal-length in-place substitution, re-profiling an embedded
 /// range yields the identical list (design doc §4.3).
 pub fn profile(text: &[u8], bitness: u32) -> Vec<CodePosition> {
+    profile_upto(text, bitness, None)
+}
+
+/// [`profile`] that stops after `max_positions` candidates.
+///
+/// A channel header lives in the first 112 positions, so reading it does not
+/// need a full-`.text` disassembly. The returned list is always a prefix of
+/// [`profile`]'s output; callers that need a capacity figure keep `None`.
+pub fn profile_upto(text: &[u8], bitness: u32, max_positions: Option<usize>) -> Vec<CodePosition> {
     let mut out = Vec::new();
     let mut decoder = Decoder::new(bitness, text, DecoderOptions::NONE);
     let mut encoder = Encoder::new(bitness);
 
     for insn in &mut decoder {
+        if max_positions.is_some_and(|max| out.len() >= max) {
+            break;
+        }
         let code = insn.code();
         // F0: skip data embedded in .text (jump tables, constants, ...).
         if code == Code::INVALID {
@@ -433,15 +445,26 @@ fn header_from_positions(prof: &[CodePosition]) -> Result<ChannelHeader, Codebit
     ChannelHeader::unpack(&bits_to_bytes(&header_bits))
 }
 
-/// Version + capacity sanity for an already magic-verified header.
-fn validate_header(header: &ChannelHeader, positions: usize) -> Result<(), CodebitsError> {
+/// Version + payload-floor sanity for a header whose capacity is not yet known.
+fn validate_header_prefix(header: &ChannelHeader) -> Result<(), CodebitsError> {
     if header.version != CHANNEL_VERSION {
         return Err(CodebitsError::Corrupted(format!(
             "unsupported channel version {} (expected {CHANNEL_VERSION})",
             header.version
         )));
     }
-    if header.ube_len < MIN_UBE_LEN || positions < header.total_bits() {
+    if header.ube_len < MIN_UBE_LEN {
+        return Err(CodebitsError::Corrupted(
+            "channel header payload length is below the minimum".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Version + capacity sanity for an already magic-verified header.
+fn validate_header(header: &ChannelHeader, positions: usize) -> Result<(), CodebitsError> {
+    validate_header_prefix(header)?;
+    if positions < header.total_bits() {
         return Err(CodebitsError::Corrupted(
             "channel header payload length inconsistent with .text capacity".into(),
         ));
@@ -449,9 +472,8 @@ fn validate_header(header: &ChannelHeader, positions: usize) -> Result<(), Codeb
     Ok(())
 }
 
-/// Parses the channel header **without** any magic filter: only the version
-/// and capacity sanity checks are applied. Used by [`extract_ube`] and
-/// Decodes and validates the channel header from an already-computed profile.
+/// Decodes the channel header from an already-computed full profile: version,
+/// payload floor and `.text` capacity must all be consistent.
 pub fn parse_channel_header_from_profile(
     prof: &[CodePosition],
 ) -> Result<ChannelHeader, CodebitsError> {
@@ -460,28 +482,38 @@ pub fn parse_channel_header_from_profile(
     Ok(header)
 }
 
-/// Reads the channel header from a code range. Used by [`extract_ube`] and
-/// [`apply_diff`], which run after a successful magic-checked `locate`.
+/// Reads the channel header from a code range, scanning only the first
+/// [`CHANNEL_HEADER_BITS`] candidate positions.
+///
+/// Callers that need capacity validation use
+/// [`parse_channel_header_from_profile`] with a full profile; this entry point
+/// is for "does a header already exist?" and post-`locate` field reads.
 pub fn parse_channel_header(text: &[u8], bitness: u32) -> Result<ChannelHeader, CodebitsError> {
-    let prof = profile(text, bitness);
-    parse_channel_header_from_profile(&prof)
+    let prof = profile_upto(text, bitness, Some(CHANNEL_HEADER_BITS));
+    let header = header_from_positions(&prof)?;
+    validate_header_prefix(&header)?;
+    Ok(header)
 }
 
 /// Reads and validates the channel header, requiring the magic to equal
 /// `expected_magic` (or [`CHANNEL_MAGIC`] when `None`). This is the `locate`
 /// entry point: a magic mismatch is a clean "no channel here", never an error.
+///
+/// Only the 112 header positions are disassembled; `ube_len` is validated
+/// against the minimum here, and `extract_ube` re-checks it against the real
+/// `.text` capacity when it reads the payload.
 pub fn read_channel_header(
     text: &[u8],
     bitness: u32,
     expected_magic: Option<[u8; 4]>,
 ) -> Result<ChannelHeader, CodebitsError> {
-    let prof = profile(text, bitness);
+    let prof = profile_upto(text, bitness, Some(CHANNEL_HEADER_BITS));
     let header = header_from_positions(&prof)?;
     let want = expected_magic.unwrap_or(CHANNEL_MAGIC);
     if header.magic != want {
         return Err(CodebitsError::ChannelNotFound);
     }
-    validate_header(&header, prof.len())?;
+    validate_header_prefix(&header)?;
     Ok(header)
 }
 
@@ -489,13 +521,19 @@ pub fn read_channel_header(
 /// range. The returned `Vec<u8>` is the opaque UBE byte stream. Does not
 /// filter by magic — callers must have located the channel first.
 pub fn extract_ube(text: &[u8], bitness: u32) -> Result<(ChannelHeader, Vec<u8>), CodebitsError> {
-    let prof = profile(text, bitness);
-    let header = parse_channel_header_from_profile(&prof)?;
-    let bits: Vec<bool> = prof
-        .iter()
-        .take(header.total_bits())
-        .map(|p| p.bit)
-        .collect();
+    let prefix = profile_upto(text, bitness, Some(CHANNEL_HEADER_BITS));
+    let header = header_from_positions(&prefix)?;
+    validate_header_prefix(&header)?;
+    let total_bits = header.total_bits();
+    // Second pass bounded by the payload the header declares: a full scan is
+    // only paid when the channel really spans the whole section.
+    let prof = profile_upto(text, bitness, Some(total_bits));
+    if prof.len() < total_bits {
+        return Err(CodebitsError::Corrupted(
+            "channel header payload length inconsistent with .text capacity".into(),
+        ));
+    }
+    let bits: Vec<bool> = prof.iter().take(total_bits).map(|p| p.bit).collect();
     let channel = bits_to_bytes(&bits);
     Ok((header, channel[CHANNEL_HEADER_LEN..].to_vec()))
 }
@@ -587,8 +625,9 @@ pub fn apply_diff(
 ) -> Result<ChannelHeader, CodebitsError> {
     // The header rides inside the diff-covered region; read it from the text
     // itself so that a stale/short diff is caught by the length check below.
-    let prof = profile(text, bitness);
-    let header = parse_channel_header_from_profile(&prof)?;
+    let prefix = profile_upto(text, bitness, Some(CHANNEL_HEADER_BITS));
+    let header = header_from_positions(&prefix)?;
+    validate_header_prefix(&header)?;
 
     let total_bits = header.total_bits();
     if diff.len() != header.diff_len() {
@@ -599,6 +638,7 @@ pub fn apply_diff(
         )));
     }
 
+    let prof = profile_upto(text, bitness, Some(total_bits));
     if prof.len() < total_bits {
         return Err(CodebitsError::Corrupted(
             ".text capacity shrank below channel size".into(),
@@ -691,6 +731,31 @@ mod tests {
         for p in &prof {
             assert!(p.len == 2);
         }
+    }
+
+    #[test]
+    fn profile_upto_returns_exactly_a_prefix() {
+        let mut full = Vec::new();
+        while full.len() < 8192 {
+            full.extend_from_slice(&synthetic_text());
+        }
+        full.truncate(8192);
+        let all = profile(&full, 64);
+        assert!(all.len() >= CHANNEL_HEADER_BITS, "fixture has capacity");
+        let limited = profile_upto(&full, 64, Some(CHANNEL_HEADER_BITS));
+        assert_eq!(limited.len(), CHANNEL_HEADER_BITS.min(all.len()));
+        assert_eq!(
+            limited
+                .iter()
+                .map(|p| (p.offset, p.bit))
+                .collect::<Vec<_>>(),
+            all[..limited.len()]
+                .iter()
+                .map(|p| (p.offset, p.bit))
+                .collect::<Vec<_>>(),
+            "the bounded scan must be a prefix of the full one"
+        );
+        assert_eq!(profile_upto(&full, 64, None), all);
     }
 
     #[test]

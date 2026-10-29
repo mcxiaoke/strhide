@@ -38,6 +38,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::formats::FileFormat;
+
 pub mod calibration;
 
 use crate::errors::StrHideError;
@@ -243,14 +245,13 @@ fn report_trailing(
         return;
     }
     let ent = view.trailing_entropy(end_offset);
-    let severity = if ent >= 7.0 && trailing >= 32 {
-        Severity::Likely
-    } else {
-        Severity::Suspicious
-    };
+    // Bytes after the container's own end marker are a structural fact, not a
+    // statistical guess: an appended text file is still appended data. Entropy
+    // only refines the detail; it no longer downgrades the finding to
+    // "suspicious" (which left confirmed overlays below the CI gate).
     out.push(Finding {
         detector: detector.into(),
-        severity,
+        severity: Severity::Likely,
         detail: format!(
             "{trailing} trailing bytes present after {marker} (entropy {ent:.2} bits/byte)"
         ),
@@ -315,7 +316,7 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
     let mut findings: Vec<Finding> = Vec::new();
     let mut detectors: Vec<DetectorMetric> = Vec::new();
 
-    let format = sniff_format(view.prefix);
+    let format = crate::formats::sniff::sniff_bytes(view.prefix);
 
     // 1. Signature domain: known tools / envelopes
     let sig_before = findings.len();
@@ -345,8 +346,8 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
     });
 
     // 2. Container structure domain
-    match format.as_deref() {
-        Some("PNG") => {
+    match format {
+        Some(FileFormat::Png) => {
             let before_cnt = findings.len();
             track_png_structure(view, &mut findings);
             let has_trailing = findings[before_cnt..]
@@ -397,7 +398,7 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
                 },
             });
         }
-        Some("JPEG") => {
+        Some(FileFormat::Jpeg) => {
             let before_cnt = findings.len();
             track_jpeg_structure(view, &mut findings);
             let has_trailing = findings[before_cnt..]
@@ -448,10 +449,13 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
                 },
             });
         }
-        Some("PE") if view.is_whole() => track_pe_structure(view.prefix, &mut findings),
+        Some(FileFormat::Pe) if view.is_whole() => track_pe_structure(view.prefix, &mut findings),
+        Some(other) if view.is_whole() => {
+            track_container_structures(view, other, &mut findings, &mut detectors);
+        }
         _ => {}
     }
-    track_trailing_entropy(view, format.as_deref(), &mut findings);
+    track_trailing_entropy(view, format, &mut findings);
 
     // Set when the calibrated DCT test fired; used to decide whether the
     // "clean is not proof" caveat still applies to this report.
@@ -460,15 +464,15 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
     // 3. Statistical domain: strictly separate spatial domain (PNG) and frequency domain (JPEG)
     if view.is_whole() {
         let data = view.prefix;
-        match format.as_deref() {
-            Some("PNG") => {
+        match format {
+            Some(FileFormat::Png) => {
                 if let Some((px, width, channels)) = decode_png_pixels(data)
                     && !px.is_empty()
                 {
                     track_spatial_domain(&px, width, channels, &mut findings, &mut detectors);
                 }
             }
-            Some("JPEG") => {
+            Some(FileFormat::Jpeg) => {
                 track_jpeg_dct_domain(data, &mut findings, &mut detectors, &mut calibrated_signal);
             }
             _ => {}
@@ -484,7 +488,7 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
     };
 
     let mut notes = Vec::new();
-    if format.as_deref() == Some("JPEG") && matches!(verdict, "clean" | "low") && !calibrated_signal
+    if format == Some(FileFormat::Jpeg) && matches!(verdict, "clean" | "low") && !calibrated_signal
     {
         notes.push(
             "JPEG statistical detectors are weak against low-rate DCT embedding: a clean/low verdict is NOT evidence that nothing is hidden".to_string(),
@@ -501,7 +505,7 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
 
     ScanReport {
         carrier,
-        format,
+        format: format.map(|f| f.as_str().to_string()),
         file_size,
         findings,
         risk_score,
@@ -509,33 +513,6 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
         notes,
         detectors,
     }
-}
-
-// ---------------------------------------------------------------------------
-// Format sniffing (lightweight, independent of the adapter machinery so the
-// scanner can also classify files strhide itself would refuse to embed in).
-// ---------------------------------------------------------------------------
-
-fn sniff_format(data: &[u8]) -> Option<String> {
-    if data.len() >= 8 && &data[..8] == b"\x89PNG\r\n\x1a\n" {
-        return Some("PNG".into());
-    }
-    if data.len() >= 3 && data[..3] == [0xFF, 0xD8, 0xFF] {
-        return Some("JPEG".into());
-    }
-    if data.len() >= 12 && &data[4..8] == b"ftyp" {
-        return Some("MP4".into());
-    }
-    if data.len() >= 4 && &data[..4] == b"PK\x03\x04" {
-        return Some("ZIP".into());
-    }
-    if data.len() >= 5 && &data[..5] == b"%PDF-" {
-        return Some("PDF".into());
-    }
-    if data.len() >= 2 && &data[..2] == b"MZ" {
-        return Some("PE".into());
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -877,13 +854,15 @@ fn report_jpeg_tail(view: &ScanView, out: &mut Vec<Finding>) {
         return;
     }
     let ent = view.trailing_entropy(tail_offset);
-    let (trailing, detail) = match tail.windows(2).rposition(|w| w == JPEG_EOI) {
+    // A found EOI with bytes after it is confirmed trailing data; "no EOI in
+    // the window" may equally be a truncated carrier, so it stays Suspicious.
+    let (detail, severity) = match tail.windows(2).rposition(|w| w == JPEG_EOI) {
         Some(idx) => {
             let trailing = view.bytes_after(tail_offset + idx as u64 + 2);
             let detail = format!(
                 "file does not end with EOI; {trailing} trailing bytes present after the last EOI marker (entropy {ent:.2} bits/byte)"
             );
-            (trailing, detail)
+            (detail, Severity::Likely)
         }
         None => {
             let trailing = view.bytes_after(tail_offset);
@@ -891,13 +870,8 @@ fn report_jpeg_tail(view: &ScanView, out: &mut Vec<Finding>) {
                 "file does not end with EOI; no EOI marker in the last {} bytes, so at least {trailing} bytes follow the image data (entropy {ent:.2} bits/byte)",
                 STRUCT_TAIL_WINDOW
             );
-            (trailing, detail)
+            (detail, Severity::Suspicious)
         }
-    };
-    let severity = if ent >= 7.0 && trailing >= 32 {
-        Severity::Likely
-    } else {
-        Severity::Suspicious
     };
     out.push(Finding {
         detector: "jpeg:trailing-data".into(),
@@ -1072,9 +1046,53 @@ fn track_pe_structure(data: &[u8], out: &mut Vec<Finding>) {
     }
 }
 
-/// Shannon entropy of the last [`TAIL_WINDOW`] bytes, and whether it sits in
-/// the "looks like compressed/encrypted payload" band.
-fn track_trailing_entropy(view: &ScanView, format: Option<&str>, out: &mut Vec<Finding>) {
+/// Structural scan through the shared format adapters.
+///
+/// Only formats the structure domain actually supports reach here; PNG/JPEG/PE
+/// keep their dedicated scanners above. A stealth envelope carries no magic by
+/// design, so the adapter's `suspicious_structures` hints are the only
+/// structural signal the analyser can offer for it.
+fn track_container_structures(
+    view: &ScanView<'_>,
+    format: FileFormat,
+    findings: &mut Vec<Finding>,
+    detectors: &mut Vec<DetectorMetric>,
+) {
+    if !view.is_whole() || !format.supports_structure() {
+        return;
+    }
+    let mut cursor = Cursor::new(view.prefix);
+    let Some(adapter) = crate::structure::find_adapter(&mut cursor) else {
+        return;
+    };
+    let hints = adapter.suspicious_structures(&mut cursor);
+    let detector = format!("{}:structure", format.as_str().to_ascii_lowercase());
+    for hint in &hints {
+        findings.push(Finding {
+            detector: detector.clone(),
+            severity: Severity::Suspicious,
+            detail: hint.clone(),
+        });
+    }
+    detectors.push(DetectorMetric {
+        name: detector,
+        domain: "structural".into(),
+        status: if hints.is_empty() { "PASS" } else { "ALERT" }.into(),
+        metric: format!("{} hint(s)", hints.len()),
+        threshold: None,
+        detail: if hints.is_empty() {
+            "container structure matches its declared boxes".into()
+        } else {
+            hints.join("; ")
+        },
+    });
+}
+
+/// A trailing overlay is *structure*, not statistics: the container's own end
+/// marker says the file should end there. Severity no longer depends on the
+/// tail's entropy (an appended text file is still appended data); entropy only
+/// sharpens the detail line.
+fn track_trailing_entropy(view: &ScanView, format: Option<FileFormat>, out: &mut Vec<Finding>) {
     if view.file_size < TAIL_WINDOW as u64 {
         return;
     }
@@ -1084,9 +1102,22 @@ fn track_trailing_entropy(view: &ScanView, format: Option<&str>, out: &mut Vec<F
     // stops. High-entropy bytes after that are either compressed payload or
     // ciphertext — i.e. an appended envelope.
     let suspicious_tail = match format {
-        Some("PNG") => false,  // covered precisely by png:trailing-data
-        Some("JPEG") => false, // covered precisely by jpeg:trailing-data
-        Some("ZIP" | "MP4" | "PDF" | "HEIF" | "MKV") => false, // compressed native payload at EOF
+        // Dedicated scanners report the exact marker and already classify
+        // trailing bytes as structure.
+        Some(FileFormat::Png | FileFormat::Jpeg) => false,
+        // COMPRESSED / CONTAINER FORMATS routinely end with entropy-coded
+        // payload, so a high-entropy tail is not evidence of an overlay. The
+        // previous sniffer could not even name WEBP/WAV/MKV and flagged every
+        // clean one of them here.
+        Some(
+            FileFormat::Mp4
+            | FileFormat::Heif
+            | FileFormat::Mkv
+            | FileFormat::Webp
+            | FileFormat::Wav
+            | FileFormat::Zip
+            | FileFormat::Pdf,
+        ) => false,
         _ => entropy >= 7.5,
     };
     if suspicious_tail {
@@ -1576,7 +1607,11 @@ fn track_jpeg_dct_domain(
     calibrated_signal: &mut bool,
 ) {
     // 1. Calibrated DCT Analysis (Fridrich 2002)
-    if let Some(est) = calibration::estimate(data) {
+    let coefficients = dct_io::read_coefficients(data).ok();
+    if let Some(est) = coefficients
+        .as_ref()
+        .and_then(|c| calibration::estimate_with_coefficients(data, c))
+    {
         if est.rate >= CALIBRATION_FLAG_RATE {
             *calibrated_signal = true;
             findings.push(Finding {
@@ -1630,7 +1665,10 @@ fn track_jpeg_dct_domain(
     }
 
     // 2. DCT AC Pairs Chi-Square Analysis (Westfeld 2001)
-    if let Some(suspicion) = calibration::dct_chi2_suspicion(data) {
+    if let Some(suspicion) = coefficients
+        .as_ref()
+        .and_then(calibration::dct_chi2_suspicion_with_coefficients)
+    {
         if suspicion > 0.50 {
             findings.push(Finding {
                 detector: "dct:chi2".into(),
@@ -2374,6 +2412,66 @@ mod tests {
         }
         let est = rs_analysis(&plane, 16, 3);
         assert!(est.is_none() || est.unwrap() < 0.1);
+    }
+
+    #[test]
+    fn trailing_bytes_after_iend_are_a_likely_finding() {
+        let mut png = fake_png(8, 8, 2, |x, y| vec![(x * 20 + y) as u8, 128, 200]);
+        png.extend_from_slice(b"appended secret text");
+        let report = scan_bytes(&png, "trailing.png");
+        assert_eq!(report.format.as_deref(), Some("PNG"));
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.detector == "png:trailing-data")
+            .expect("trailing data must be reported");
+        assert_eq!(
+            finding.severity,
+            Severity::Likely,
+            "confirmed bytes after IEND are structural evidence, not a guess"
+        );
+        assert_eq!(report.verdict, "likely-hidden");
+    }
+
+    #[test]
+    fn heif_brands_are_not_mislabelled_as_mp4() {
+        // ftyp with a HEIC major brand: the private sniffer used to call every
+        // `ftyp` file MP4.
+        let mut heif = Vec::new();
+        heif.extend_from_slice(&24u32.to_be_bytes());
+        heif.extend_from_slice(b"ftyp");
+        heif.extend_from_slice(b"heic");
+        heif.extend_from_slice(&0u32.to_be_bytes());
+        heif.extend_from_slice(b"mif1heic");
+        let report = scan_bytes(&heif, "photo.heic");
+        assert_eq!(report.format.as_deref(), Some("HEIF"));
+    }
+
+    #[test]
+    fn clean_webp_payload_tail_is_not_an_overlay() {
+        // A valid RIFF/WebP whose compressed payload is high-entropy: the old
+        // sniffer returned None for WEBP, so the entropy rule fired on every
+        // clean file.
+        let payload: Vec<u8> = (0..(TAIL_WINDOW + 16))
+            .map(|i| (i.wrapping_mul(1103515245) >> 16) as u8)
+            .collect();
+        let mut webp = Vec::new();
+        webp.extend_from_slice(b"RIFF");
+        webp.extend_from_slice(&((payload.len() + 12) as u32).to_le_bytes());
+        webp.extend_from_slice(b"WEBP");
+        webp.extend_from_slice(b"VP8 ");
+        webp.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        webp.extend_from_slice(&payload);
+        let report = scan_bytes(&webp, "clean.webp");
+        assert_eq!(report.format.as_deref(), Some("WEBP"));
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.detector == "overlay:high-entropy"),
+            "a compressed container payload at EOF is not an overlay: {:?}",
+            report.findings
+        );
     }
 
     #[test]

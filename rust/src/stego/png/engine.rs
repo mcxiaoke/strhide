@@ -447,17 +447,19 @@ fn compress_raw_deflate_chunk(
 }
 
 /// Compress filtered PNG scanlines into an RFC 1950 compliant zlib datastream.
-/// Uses Rayon parallel multi-chunk Deflate for large images, falling back to single-thread
-/// for small payloads or single-core execution environments.
+/// Large images are split into a fixed number of row-aligned Deflate chunks
+/// (executed on whatever Rayon threads exist) so the produced bytes do not
+/// depend on the host's core count: `Freshness::Seeded` promises a
+/// byte-identical result, and a chunk boundary is a stream boundary.
 fn compress_scanlines_zlib(
     filtered: &[u8],
     row_len: usize,
     height: usize,
     level: u32,
 ) -> Result<Vec<u8>, StrHideError> {
-    let num_threads = rayon::current_num_threads().clamp(1, MAX_DEFLATE_WORKERS);
+    let num_threads = MAX_DEFLATE_WORKERS;
 
-    if num_threads <= 1 || filtered.len() < MIN_PARALLEL_SCANLINE_BYTES || height < num_threads {
+    if filtered.len() < MIN_PARALLEL_SCANLINE_BYTES || height < num_threads {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(level));
         encoder.write_all(filtered)?;
         return encoder.finish().map_err(Into::into);
@@ -1246,56 +1248,96 @@ pub fn embed_png_with_stats<'a>(
         }
     }
 
-    // Resolve matrix-coding strategy: Auto adaptively picks STC group size (u=3, 2, or 1)
-    let (resolved_codec, resolved_u) = match params.codec {
-        StegoCodec::Auto => crate::stego::coding::auto_select_codec(pool_green, ciphertext_bits),
-        StegoCodec::Stc if params.stc_u == 0 => {
-            crate::stego::coding::auto_select_codec(pool_green, ciphertext_bits)
+    // Resolve matrix-coding strategy and channel mode together.
+    //
+    // `Auto` (and STC with `stc_u = 0`) picks the group size from a slot pool,
+    // but the pool that actually carries the body depends on that group size:
+    // once the payload no longer fits one channel, the body moves to `Rgb`.
+    // Resolving `u` against `pool_green` and then switching to `Rgb` kept the
+    // degraded `u = 1` chosen for a pool that is never used, which is plain
+    // parity coding with no cost-model optimisation. Re-resolve against the
+    // pool the body will live in.
+    let (resolved_codec, resolved_u, mode, pool_max) = 'resolve: {
+        if matches!(params.codec, StegoCodec::Auto)
+            || (params.codec == StegoCodec::Stc && params.stc_u == 0)
+        {
+            let (codec, u) = crate::stego::coding::auto_select_codec(pool_green, ciphertext_bits);
+            let needed =
+                crate::stego::coding::slots_for_codec(ciphertext_bits, codec, params.stc_h, u)?;
+            if needed <= pool_green {
+                break 'resolve (codec, u, ChannelMode::Green, pool_green);
+            }
+            let Some(pool_rgb) =
+                (image.channels >= 3).then(|| plan.count_body_slots(&image, 1, ChannelMode::Rgb))
+            else {
+                return Err(StrHideError::General(format!(
+                    "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{})",
+                    needed,
+                    codec.describe(params.stc_h, u),
+                    pool_green,
+                    cost_model.id(),
+                )));
+            };
+            let (codec, u) = crate::stego::coding::auto_select_codec(pool_rgb, ciphertext_bits);
+            let rgb_needed =
+                crate::stego::coding::slots_for_codec(ciphertext_bits, codec, params.stc_h, u)?;
+            if rgb_needed <= pool_rgb {
+                break 'resolve (codec, u, ChannelMode::Rgb, pool_rgb);
+            }
+            return Err(StrHideError::General(format!(
+                "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{} {})",
+                rgb_needed,
+                codec.describe(params.stc_h, u),
+                pool_rgb,
+                cost_model.id(),
+                ChannelMode::Rgb.name(),
+            )));
         }
-        StegoCodec::Stc => (StegoCodec::Stc, params.stc_u),
-        StegoCodec::Hamming => (StegoCodec::Hamming, 0),
+
+        let (codec, u) = match params.codec {
+            StegoCodec::Stc => (StegoCodec::Stc, params.stc_u),
+            StegoCodec::Hamming => (StegoCodec::Hamming, 0),
+            StegoCodec::Auto => unreachable!("handled above"),
+        };
+        let needed =
+            crate::stego::coding::slots_for_codec(ciphertext_bits, codec, params.stc_h, u)?;
+        if needed <= pool_green {
+            break 'resolve (codec, u, ChannelMode::Green, pool_green);
+        }
+        if image.channels >= 3 {
+            let pool_rgb = plan.count_body_slots(&image, 1, ChannelMode::Rgb);
+            if needed <= pool_rgb {
+                break 'resolve (codec, u, ChannelMode::Rgb, pool_rgb);
+            }
+            return Err(StrHideError::General(format!(
+                "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{} {})",
+                needed,
+                codec.describe(params.stc_h, u),
+                pool_rgb,
+                cost_model.id(),
+                ChannelMode::Rgb.name(),
+            )));
+        }
+        return Err(StrHideError::General(format!(
+            "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{})",
+            needed,
+            codec.describe(params.stc_h, u),
+            pool_green,
+            cost_model.id(),
+        )));
     };
 
-    // The slot count follows from the payload and the codec, never from the
-    // pool, so `u` does not have to be re-resolved when the mode grows.
+    trace(&format!(
+        "plan pool_green={pool_green} pool_max={pool_max} mode={mode:?} codec={resolved_codec:?} u={resolved_u}"
+    ));
+
+    // Recompute the slot count from the resolved codec for the solve phase.
     let needed_body_slots = crate::stego::coding::slots_for_codec(
         ciphertext_bits,
         resolved_codec,
         params.stc_h,
         resolved_u,
     )?;
-
-    // Pick the smallest channel mode that fits. `Rgb` only adds slots, so the
-    // single-channel layout is used whenever it is sufficient.
-    let (mode, pool_max) = if needed_body_slots <= pool_green {
-        (ChannelMode::Green, pool_green)
-    } else if image.channels >= 3 {
-        let pool_rgb = plan.count_body_slots(&image, 1, ChannelMode::Rgb);
-        if needed_body_slots <= pool_rgb {
-            (ChannelMode::Rgb, pool_rgb)
-        } else {
-            return Err(StrHideError::General(format!(
-                "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{} {})",
-                needed_body_slots,
-                resolved_codec.describe(params.stc_h, resolved_u),
-                pool_rgb,
-                cost_model.id(),
-                ChannelMode::Rgb.name(),
-            )));
-        }
-    } else {
-        return Err(StrHideError::General(format!(
-            "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{})",
-            needed_body_slots,
-            resolved_codec.describe(params.stc_h, resolved_u),
-            pool_green,
-            cost_model.id(),
-        )));
-    };
-    trace(&format!(
-        "plan pool_green={pool_green} pool_max={pool_max} needed={needed_body_slots} mode={:?}",
-        mode
-    ));
 
     // Header word1 encodes total_len with HEADER_V2_ESCAPE_H (15) for stc_h
     let total_len = (crate::stego::envelope::HEADER_OVERHEAD + ciphertext_len) as u32;

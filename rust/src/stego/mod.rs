@@ -102,7 +102,11 @@ pub fn default_thread_count() -> usize {
 /// (`(cores / 2).max(4).min(cores)`), unless overridden by the `RAYON_NUM_THREADS`
 /// environment variable.
 ///
-/// Safe to call multiple times (idempotent via `std::sync::Once`).
+/// **Opt-in**: the library entry points no longer call this, because a library
+/// must not lock the host process's global Rayon pool to a policy it chose.
+/// The CLI calls it once at startup; an embedding application that wants the
+/// same headroom can call it explicitly. Safe to call multiple times
+/// (idempotent via `std::sync::Once`).
 pub fn init_default_thread_pool() {
     INIT_DEFAULT_POOL.call_once(|| {
         if std::env::var_os("RAYON_NUM_THREADS").is_none() {
@@ -225,7 +229,6 @@ pub fn embed_carrier_with_dialect_info(
     options: &EmbedOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<EmbedOutput, StrHideError> {
-    init_default_thread_pool();
     let engine = engine_for_carrier(carrier_bytes)?;
     // Private dialect resolution happens exactly once, inside the engine
     // adapter: a configured secret is indistinguishable from a user password
@@ -268,7 +271,6 @@ pub fn extract_carrier_payload(
     options: &ExtractOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<Payload<'static>, StrHideError> {
-    init_default_thread_pool();
     let engine = engine_for_carrier(carrier_bytes)?;
     engine.extract(carrier_bytes, options, dialect)
 }
@@ -287,7 +289,6 @@ pub fn inspect_carrier_with_dialect(
     options: &InspectOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<StegoHeaderInfo, StrHideError> {
-    init_default_thread_pool();
     let engine = engine_for_carrier(carrier_bytes)?;
     engine.inspect(carrier_bytes, options, dialect)
 }
@@ -306,7 +307,6 @@ pub fn verify_carrier_with_dialect(
     options: &VerifyOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<StegoVerifyResult, StrHideError> {
-    init_default_thread_pool();
     let engine = engine_for_carrier(carrier_bytes)?;
     engine.verify(carrier_bytes, options, dialect)
 }
@@ -419,7 +419,6 @@ pub fn probe_carrier_capacity_with_dialect(
     options: &ProbeOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<StegoCapacityInfo, StrHideError> {
-    init_default_thread_pool();
     let engine = engine_for_carrier(carrier_bytes)?;
     // Same resolution as embed: an explicit password wins, the profile's stego
     // secret is the fallback, `None` means the public constant downstream.

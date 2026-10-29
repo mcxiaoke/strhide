@@ -502,6 +502,15 @@ pub struct ScanArgs {
     /// Emit a JSON array of per-file reports (machine-readable).
     #[arg(long = "json")]
     pub json: bool,
+
+    /// Exit non-zero when any report reaches this verdict or higher.
+    #[arg(
+        long = "fail-on",
+        value_name = "LEVEL",
+        default_value = "likely",
+        value_parser = ["low", "suspicious", "likely"]
+    )]
+    pub fail_on: String,
 }
 
 const SCAN_AFTER_HELP: &str = crate::core::i18n::messages::SCAN_AFTER_HELP_EN;

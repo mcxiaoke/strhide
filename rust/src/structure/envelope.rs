@@ -206,6 +206,38 @@ impl EnvelopeHeader {
                 self.hint_len, self.meta_len, fixed, ube_total_size
             )));
         }
+        // The strategy id selects the strip path, so an unknown id must not
+        // reach an adapter's restore logic.
+        if crate::structure::STRATEGY_REGISTRY
+            .iter()
+            .all(|(_, id)| *id != self.strategy_id)
+        {
+            return Err(StrHideError::CorruptedData(format!(
+                "Unknown envelope strategy id {}",
+                self.strategy_id
+            )));
+        }
+        // Injection coordinates are masked with the public key rather than
+        // covered by the AAD (see WIRE_SPEC §5), so validate their shape:
+        // a non-zero inject_size can never be smaller than one envelope, and
+        // the end of the injected region must not overflow.
+        if self.inject_size != 0
+            && (self.inject_size < fixed
+                || self.inject_offset.checked_add(self.inject_size).is_none())
+        {
+            return Err(StrHideError::CorruptedData(format!(
+                "Inconsistent injection coordinates: offset {} size {}",
+                self.inject_offset, self.inject_size
+            )));
+        }
+        // A patch always overwrites a four-byte field, so offset 0 (the PE
+        // marker convention) is "no patch" and 1..=3 cannot hold one.
+        if self.patch_offset != 0 && self.patch_offset < 4 {
+            return Err(StrHideError::CorruptedData(format!(
+                "Patch offset {} cannot hold a four-byte field",
+                self.patch_offset
+            )));
+        }
         Ok(())
     }
 

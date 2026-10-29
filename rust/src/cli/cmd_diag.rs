@@ -440,12 +440,29 @@ pub(crate) fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideErr
         );
     }
 
-    // Gate-style exit code, independent of quiet: a "likely-hidden" verdict on
-    // any report fails the scan (exit 1); lower confidence ("low"/"suspicious")
-    // and per-file scan failures stay at 0 — they are reported in the JSON or
-    // in the human summary line instead.
-    let likely_hidden = reports.iter().any(|r| r.verdict == "likely-hidden");
-    Ok(if likely_hidden { 1 } else { 0 })
+    // Gate-style exit code, independent of quiet: `--fail-on` names the lowest
+    // verdict that fails the scan (default "likely", the historical behaviour),
+    // optionally widened to "suspicious" or "low" for stricter CI gates. Per-file
+    // scan failures stay at 0 — they are reported in the JSON/human output.
+    fn verdict_rank(verdict: &str) -> u8 {
+        match verdict {
+            "likely-hidden" => 3,
+            "suspicious" => 2,
+            "low" => 1,
+            _ => 0,
+        }
+    }
+    let fail_rank = match args.fail_on.as_str() {
+        "low" => 1,
+        "suspicious" => 2,
+        _ => 3,
+    };
+    let worst = reports
+        .iter()
+        .map(|r| verdict_rank(&r.verdict))
+        .max()
+        .unwrap_or(0);
+    Ok(if worst >= fail_rank { 1 } else { 0 })
 }
 
 /// Walk a directory non-recursively.

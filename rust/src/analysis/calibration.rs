@@ -146,6 +146,17 @@ fn luma_plane(pixels: &[u8], width: usize, height: usize, channels: usize) -> Op
 /// mean anything.
 pub fn estimate(data: &[u8]) -> Option<CalibrationEstimate> {
     let actual = dct_io::read_coefficients(data).ok()?;
+    estimate_with_coefficients(data, &actual)
+}
+
+/// [`estimate`] over coefficients the caller already decoded.
+///
+/// `track_jpeg_dct_domain` runs calibration and the DCT chi-square test on the
+/// same file; sharing one coefficient decode removes a full Huffman pass.
+pub fn estimate_with_coefficients(
+    data: &[u8],
+    actual: &dct_io::JpegCoefficients,
+) -> Option<CalibrationEstimate> {
     let luma_blocks: &[[i16; 64]] = &actual.components.first()?.blocks;
     if luma_blocks.is_empty() {
         return None;
@@ -337,6 +348,11 @@ pub fn estimate(data: &[u8]) -> Option<CalibrationEstimate> {
 /// Returns a suspicion score in 0.0..=1.0 (1.0 = heavily equalized/LSB embedded, 0.0 = natural decay).
 pub fn dct_chi2_suspicion(data: &[u8]) -> Option<f64> {
     let actual = dct_io::read_coefficients(data).ok()?;
+    dct_chi2_suspicion_with_coefficients(&actual)
+}
+
+/// [`dct_chi2_suspicion`] over coefficients the caller already decoded.
+pub fn dct_chi2_suspicion_with_coefficients(actual: &dct_io::JpegCoefficients) -> Option<f64> {
     let luma_blocks = &actual.components.first()?.blocks;
     if luma_blocks.len() < 64 {
         return None;
