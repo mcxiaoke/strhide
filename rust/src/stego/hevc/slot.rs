@@ -412,6 +412,46 @@ impl CabacRecorder {
         }
     }
 
+    /// [`Self::with_slice_mode`] with capacity preallocated based on slice byte length.
+    pub fn with_slice_capacity(
+        slice_idx: usize,
+        band: u8,
+        mode: RecordMode,
+        slice_len: usize,
+    ) -> Self {
+        let (ops_cap, slots_cap) = match mode {
+            RecordMode::Embed => (slice_len.saturating_mul(18), slice_len),
+            RecordMode::Slots => (0, slice_len),
+        };
+        CabacRecorder {
+            ops: Vec::with_capacity(ops_cap),
+            slots: Vec::with_capacity(slots_cap),
+            substreams: Vec::with_capacity(1),
+            pending_signs: if mode == RecordMode::Embed {
+                Vec::with_capacity(slots_cap)
+            } else {
+                Vec::new()
+            },
+            mode,
+            current_slice_idx: slice_idx,
+            current_substream_idx: 0,
+            current_band: band,
+            next_pending_slot: 0,
+        }
+    }
+
+    /// Number of slots awaiting level magnitude backfill.
+    #[inline]
+    pub fn next_pending_slot(&self) -> usize {
+        self.next_pending_slot
+    }
+
+    /// Current recording mode.
+    #[inline]
+    pub fn mode(&self) -> RecordMode {
+        self.mode
+    }
+
     /// Clear pending coordinate metadata and reset magnitude backfill cursor.
     pub fn reset_pending(&mut self) {
         self.pending_signs.clear();
@@ -476,7 +516,7 @@ impl CabacRecorder {
     pub fn record_stego_sign(
         &mut self,
         bit: u32,
-        qp: i32,
+        _qp: i32,
         trafo_size: u8,
         c_idx: u8,
         x_c: u8,
@@ -509,11 +549,12 @@ impl CabacRecorder {
         }
 
         // Provisional cost: sign bins decode before their levels, so the real
-        // magnitude is unknown here. `record_stego_level` overwrites this in the
-        // same coding group. Read-only passes never replay the journal and never
-        // rank slots, so they skip the cost model entirely.
+        // magnitude is unknown here. `record_stego_level` unconditionally overwrites
+        // this with the real distortion cost in the same coding group. Using
+        // HIGH_DISPLACEMENT_PENALTY avoids millions of redundant powf evaluations
+        // while safely penalising any incomplete slots if a slice is truncated.
         let cost = if journals {
-            provisional_sign_flip_cost(1, qp, trafo_size, c_idx, x_c, y_c) as f32
+            HIGH_DISPLACEMENT_PENALTY as f32
         } else {
             0.0
         };

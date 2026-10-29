@@ -8,7 +8,7 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use crc32fast::Hasher as Crc32;
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use crate::core::control::{Control, Event, Stage};
 use crate::core::media::MediaInfo;
@@ -197,30 +197,41 @@ pub fn superblock_positions(pool_size: usize) -> Vec<usize> {
 /// Partition non-Superblock slots within the window into Band 0 and Band 1 stream indices.
 fn get_body_slot_indices(
     total_slots: usize,
-    _pool_size: usize,
+    pool_size: usize,
     sb_positions: &[usize],
     slice_slot_ranges: &[(usize, u8)],
 ) -> (Vec<usize>, Vec<usize>) {
-    let mut is_sb = vec![false; total_slots];
+    let pool_limit = pool_size.min(total_slots);
+    let mut is_sb_small = vec![false; pool_limit];
     for &pos in sb_positions {
-        if pos < total_slots {
-            is_sb[pos] = true;
+        if pos < pool_limit {
+            is_sb_small[pos] = true;
         }
     }
     let mut band0 = Vec::new();
     let mut band1 = Vec::new();
     let mut current_slot = 0usize;
     for &(count, band) in slice_slot_ranges {
-        for _ in 0..count {
-            if current_slot < total_slots && !is_sb[current_slot] {
-                if band == 0 {
-                    band0.push(current_slot);
-                } else {
-                    band1.push(current_slot);
+        let end_slot = (current_slot + count).min(total_slots);
+        if current_slot >= end_slot {
+            current_slot += count;
+            continue;
+        }
+        let target = if band == 0 { &mut band0 } else { &mut band1 };
+        if current_slot < pool_limit {
+            let prefix_end = end_slot.min(pool_limit);
+            for (offset, &is_sb) in is_sb_small[current_slot..prefix_end].iter().enumerate() {
+                if !is_sb {
+                    target.push(current_slot + offset);
                 }
             }
-            current_slot += 1;
+            if end_slot > pool_limit {
+                target.extend(pool_limit..end_slot);
+            }
+        } else {
+            target.extend(current_slot..end_slot);
         }
+        current_slot += count;
     }
     (band0, band1)
 }
@@ -490,7 +501,12 @@ fn probe_hevc_pool(
             break;
         }
 
-        let mut recorder = CabacRecorder::with_slice_mode(recorded_slices, band, RecordMode::Slots);
+        let mut recorder = CabacRecorder::with_slice_capacity(
+            recorded_slices,
+            band,
+            RecordMode::Slots,
+            slice_bytes.len(),
+        );
         let decoded = decoder.decode_nal_with_observer(slice_bytes, &mut recorder);
         drain_frames(&mut decoder);
 
@@ -500,8 +516,12 @@ fn probe_hevc_pool(
             }
             Ok(_) if recorder.substreams.is_empty() => {}
             Ok(_) => {
-                let rbsp = nal_rbsp(slice_bytes);
-                let absorbed = count_absorbed_slots(&mut recorder, &rbsp);
+                let absorbed = if recorder.substreams.len() > 1 {
+                    let rbsp = nal_rbsp(slice_bytes);
+                    count_absorbed_slots(&mut recorder, &rbsp)
+                } else {
+                    count_absorbed_slots(&mut recorder, &[])
+                };
                 band_recorded_slots[band as usize] += absorbed;
                 band_sampled_bytes[band as usize] += cand.span.len();
                 recorded_slices += 1;
@@ -919,7 +939,6 @@ pub fn embed_hevc_patches_with_factor(
 
     let mut forbidden: HashSet<usize> = HashSet::new();
     let mut bad_substreams: HashSet<(usize, usize)> = HashSet::new();
-    let mut replay_ok: HashMap<(usize, usize), bool> = HashMap::new();
 
     for round in 0..MAX_EMBED_ROUNDS {
         control.check()?;
@@ -963,18 +982,12 @@ pub fn embed_hevc_patches_with_factor(
             });
         }
 
-        // 3b. Solve Body STC
+        // 3b. Solve Body STC using cost closure (zero-allocation for body_costs)
         let mut body_cover_bits = Vec::with_capacity(body_positions.len());
-        let mut body_costs = Vec::with_capacity(body_positions.len());
         let mut body_moves = Vec::with_capacity(body_positions.len());
         for &pos in &body_positions {
             let slot = &all_slots[pos];
             body_cover_bits.push(slot.original_bit);
-            body_costs.push(if forbidden.contains(&pos) {
-                HIGH_DISPLACEMENT_PENALTY
-            } else {
-                slot.cost as f64
-            });
             body_moves.push(if slot.original_bit == 0 {
                 Move::PlusOnly
             } else {
@@ -982,11 +995,18 @@ pub fn embed_hevc_patches_with_factor(
             });
         }
         let mut body_deltas = vec![0i8; body_positions.len()];
-        if let Err(e) = body_trellis.embed_with_deltas(
+        if let Err(e) = body_trellis.embed_with_cost_fn(
             &body_cover_bits,
             &body_moves,
-            &body_costs,
-            &body_costs,
+            |j| {
+                let pos = body_positions[j];
+                let cost = if forbidden.contains(&pos) {
+                    HIGH_DISPLACEMENT_PENALTY
+                } else {
+                    all_slots[pos].cost as f64
+                };
+                (cost, cost)
+            },
             &ciphertext,
             &mut body_deltas,
         ) {
@@ -1003,7 +1023,6 @@ pub fn embed_hevc_patches_with_factor(
         }
 
         let mut flips_per_slice: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
-        let mut touched: BTreeSet<(usize, usize)> = BTreeSet::new();
         for (i, &delta) in sb_deltas.iter().enumerate() {
             if delta != 0 {
                 let global_slot_idx = sb_positions[i];
@@ -1012,7 +1031,6 @@ pub fn embed_hevc_patches_with_factor(
                     .entry(slot.slice_idx as usize)
                     .or_default()
                     .push((slot.op_idx as usize, global_slot_idx));
-                touched.insert((slot.slice_idx as usize, slot.substream_idx as usize));
             }
         }
         for (i, &delta) in body_deltas.iter().enumerate() {
@@ -1023,41 +1041,13 @@ pub fn embed_hevc_patches_with_factor(
                     .entry(slot.slice_idx as usize)
                     .or_default()
                     .push((slot.op_idx as usize, global_slot_idx));
-                touched.insert((slot.slice_idx as usize, slot.substream_idx as usize));
             }
         }
         for entries in flips_per_slice.values_mut() {
             entries.sort_unstable_by_key(|(op_idx, _)| *op_idx);
         }
 
-        // 3c. Journal fidelity
-        let mut unsound = Vec::new();
-        for &(slice_idx, sub_idx) in &touched {
-            let ok = *replay_ok.entry((slice_idx, sub_idx)).or_insert_with(|| {
-                let slice_rec = &slice_contexts[slice_idx];
-                let sub = &slice_rec.substreams[sub_idx];
-                let cover = &slice_rec.orig_rbsp[sub.rbsp_byte_start..sub.rbsp_byte_end];
-                match encode_substream(slice_rec, sub, &[]) {
-                    Ok((replay, _)) => replay_matches_cover(&replay, cover),
-                    Err(_) => false,
-                }
-            });
-            if !ok && bad_substreams.insert((slice_idx, sub_idx)) {
-                unsound.push((slice_idx, sub_idx));
-            }
-        }
-        if !unsound.is_empty() {
-            for &pos in sb_positions.iter().chain(body_positions.iter()) {
-                let slot = &all_slots[pos];
-                if bad_substreams.contains(&(slot.slice_idx as usize, slot.substream_idx as usize))
-                {
-                    forbidden.insert(pos);
-                }
-            }
-            continue;
-        }
-
-        // 3b. Re-encode every touched slice in parallel using rayon
+        // 3c. Re-encode every touched slice in parallel using rayon (including journal fidelity checks)
         let mut conflicts: Vec<EpbConflict> = Vec::new();
         let mut reencoded_slices = Vec::new();
 
@@ -1331,6 +1321,12 @@ fn reencode_slice(
 
     for sub_idx in &substream_ids {
         let sub = &slice_rec.substreams[*sub_idx];
+        let cover = &slice_rec.orig_rbsp[sub.rbsp_byte_start..sub.rbsp_byte_end];
+        match encode_substream(slice_rec, sub, &[]) {
+            Ok((replay, _)) if replay_matches_cover(&replay, cover) => {}
+            _ => return SliceReencodeOutcome::BadSubstream(slice_idx, *sub_idx),
+        }
+
         let orig_sub_len = sub.rbsp_byte_end.saturating_sub(sub.rbsp_byte_start);
         let (reencoded, sub_trace) = match encode_substream(slice_rec, sub, flipped_entries) {
             Ok(pair) => pair,
@@ -2465,7 +2461,11 @@ fn record_carrier_state(
     // every per-picture budget by the slice count. A HEIF carrier is one image
     // by definition -- its grid tiles are separate items, each a standalone
     // picture, and they are all the same image.
-    let (pictures, band_pictures) = count_pictures(carrier, kind, &candidates, has_inter);
+    let (pictures, band_pictures) = if capture == Capture::Bits {
+        (1, [1, 0])
+    } else {
+        count_pictures(carrier, kind, &candidates, has_inter)
+    };
 
     let mut slice_contexts = Vec::new();
     let mut sink = SlotSink::new(capture);
@@ -2499,7 +2499,8 @@ fn record_carrier_state(
             drain_frames(&mut decoder);
             continue;
         };
-        let mut recorder = CabacRecorder::with_slice_mode(slice_idx, band, mode);
+        let mut recorder =
+            CabacRecorder::with_slice_capacity(slice_idx, band, mode, slice_bytes.len());
         let decoded = decoder.decode_nal_with_observer(slice_bytes, &mut recorder);
         drain_frames(&mut decoder);
         match decoded {
@@ -2510,7 +2511,12 @@ fn record_carrier_state(
             // IRAP) records nothing and must not consume a slice index.
             Ok(_) if recorder.substreams.is_empty() => {}
             Ok(_) => {
-                let rbsp = nal_rbsp(slice_bytes);
+                let is_multi_sub = recorder.substreams.len() > 1;
+                let rbsp = if is_multi_sub || capture == Capture::Full {
+                    nal_rbsp(slice_bytes)
+                } else {
+                    Vec::new()
+                };
                 // The EPB exclusion runs in every mode: it decides which slots
                 // enter the pool, so the pool layout has to be identical on the
                 // read side or the trellis would read different elements.
@@ -2708,13 +2714,7 @@ fn count_pictures(
 /// picture made of several slices must be counted once: the per-picture budgets
 /// are expressed per picture, not per slice.
 fn starts_picture(nal: &[u8]) -> bool {
-    if nal.len() <= 2 {
-        return false;
-    }
-    rusty_h265::nal::unescape(&nal[2..])
-        .data
-        .first()
-        .is_some_and(|first| (first & 0x80) != 0)
+    nal.get(2).is_some_and(|&first| (first & 0x80) != 0)
 }
 
 /// Drop every decoded picture the decoder has queued.
@@ -2739,6 +2739,15 @@ fn drain_frames(decoder: &mut Decoder) {
 /// carries a `00 00 xx<=3` window stays out of the pool: flipping near it could
 /// shift every following substream even when the total NAL length is preserved.
 fn absorb_recorder(recorder: &mut CabacRecorder, rbsp: &[u8], sink: &mut SlotSink) {
+    if recorder.mode() == RecordMode::Embed && recorder.next_pending_slot() != recorder.slots.len()
+    {
+        // Slice decoding was truncated mid-slice before levels backfilled signs.
+        // Discard all incomplete slots from this slice so desynced slots never enter the pool.
+        recorder.slots.clear();
+        recorder.reset_pending();
+        return;
+    }
+
     let is_multi_sub = recorder.substreams.len() > 1;
     let mut excluded = std::collections::HashSet::new();
     if is_multi_sub {
@@ -2757,6 +2766,16 @@ fn absorb_recorder(recorder: &mut CabacRecorder, rbsp: &[u8], sink: &mut SlotSin
 
     let band = recorder.current_band as usize;
     let start_count = sink.counts[0] + sink.counts[1];
+
+    if sink.capture == Capture::Count && (!is_multi_sub || excluded.is_empty()) {
+        let count = recorder.slots.len();
+        sink.counts[band] += count;
+        sink.slice_slot_ranges.push((count, recorder.current_band));
+        recorder.slots.clear();
+        recorder.reset_pending();
+        return;
+    }
+
     for slot in recorder.slots.drain(..) {
         if is_multi_sub && excluded.contains(&(slot.substream_idx as usize)) {
             continue;
