@@ -15,10 +15,10 @@
       {
         "label": "main",
         "title": "StrHide Studio",
-        "width": 1240,
-        "height": 820,
-        "minWidth": 960,
-        "minHeight": 640,
+        "width": 1380,
+        "height": 900,
+        "minWidth": 1080,
+        "minHeight": 700,
         "dragDropEnabled": true
       }
     ],

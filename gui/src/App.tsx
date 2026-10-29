@@ -6,6 +6,8 @@ import {
   Microscope,
   Sliders,
   Globe,
+  Sun,
+  Moon,
 } from "lucide-react";
 import { useWorkspaceStore } from "./store/workspaceStore";
 import { useSettingsStore } from "./store/settingsStore";
@@ -20,7 +22,7 @@ import { ForensicsBatchView } from "./views/ForensicsBatchView";
 
 export const App: React.FC = () => {
   const { activeTab, setActiveTab, carrierPath, loadCapabilities } = useWorkspaceStore();
-  const { lang, setLang } = useSettingsStore();
+  const { lang, setLang, theme, toggleTheme } = useSettingsStore();
 
   useEffect(() => {
     loadCapabilities();
@@ -38,24 +40,44 @@ export const App: React.FC = () => {
   return (
     <div className="flex h-screen w-screen flex-col bg-slate-950 text-slate-100 overflow-hidden font-sans">
       {/* Top Header */}
-      <header className="flex h-14 shrink-0 items-center justify-between border-b border-slate-800/80 bg-slate-900/60 px-6 backdrop-blur-md">
-        <div className="flex items-center gap-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-tr from-cyan-600 to-blue-500 font-bold text-white shadow-md shadow-cyan-950">
+      <header className="flex h-16 shrink-0 items-center justify-between border-b border-slate-700 bg-slate-900/80 px-6 backdrop-blur-md shadow-sm">
+        <div className="flex items-center gap-3.5">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-tr from-cyan-600 to-blue-500 font-bold text-white shadow-md shadow-cyan-950/20">
             S
           </div>
           <div>
-            <h1 className="text-sm font-bold tracking-tight text-slate-100">StrHide Studio</h1>
-            <p className="text-[10px] text-slate-500 leading-none">Smart Lossless Data Hiding</p>
+            <h1 className="text-base font-bold tracking-tight text-slate-100">StrHide Studio</h1>
+            <p className="text-[11px] text-slate-400 leading-none mt-0.5">Smart Lossless Data Hiding</p>
           </div>
         </div>
 
-        {/* Global Toolbar / Language Switch */}
-        <div className="flex items-center gap-3">
+        {/* Global Toolbar: Theme & Language Switch */}
+        <div className="flex items-center gap-2.5">
+          {/* Theme Toggle Button */}
+          <button
+            onClick={toggleTheme}
+            title={i18nText.common[theme === "light" ? "darkTheme" : "lightTheme"]}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800/80 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-700 hover:text-slate-100 transition-colors"
+          >
+            {theme === "light" ? (
+              <>
+                <Moon className="h-4 w-4 text-slate-500" />
+                <span className="hidden sm:inline">{i18nText.common.darkTheme}</span>
+              </>
+            ) : (
+              <>
+                <Sun className="h-4 w-4 text-amber-400" />
+                <span className="hidden sm:inline">{i18nText.common.lightTheme}</span>
+              </>
+            )}
+          </button>
+
+          {/* Language Switch */}
           <button
             onClick={() => setLang(lang === "zh" ? "en" : "zh")}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800/80 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-700 hover:text-slate-100 transition-colors"
           >
-            <Globe className="h-3.5 w-3.5 text-cyan-400" />
+            <Globe className="h-4 w-4 text-cyan-400" />
             <span>{lang === "zh" ? "中文" : "English"}</span>
           </button>
         </div>
@@ -64,9 +86,9 @@ export const App: React.FC = () => {
       {/* Main Body */}
       <div className="flex flex-1 overflow-hidden">
         {/* Left Navigation Sidebar */}
-        <nav className="flex w-60 shrink-0 flex-col justify-between border-r border-slate-800/80 bg-slate-900/40 p-4">
-          <div className="space-y-1.5">
-            <div className="px-2 pb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+        <nav className="flex w-64 shrink-0 flex-col justify-between border-r border-slate-700 bg-slate-900/60 p-4 shadow-sm">
+          <div className="space-y-2">
+            <div className="px-3 pb-1 text-[11px] font-bold uppercase tracking-wider text-slate-400">
               功能工作台
             </div>
             {tabs.map((tab) => {
@@ -76,25 +98,25 @@ export const App: React.FC = () => {
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`flex w-full items-center gap-3 rounded-xl px-3.5 py-2.5 text-xs font-semibold transition-all ${
+                  className={`flex w-full items-center gap-3.5 rounded-xl px-4 py-3 text-[13px] font-semibold border transition-colors outline-none focus:outline-none focus-visible:ring-1 focus-visible:ring-cyan-500/50 select-none ${
                     isActive
-                      ? "bg-cyan-500/10 text-cyan-400 border border-cyan-800/50 shadow-sm shadow-cyan-950/20"
-                      : "text-slate-400 hover:bg-slate-800/60 hover:text-slate-200"
+                      ? "bg-cyan-500/10 text-cyan-400 border-cyan-800/60 shadow-sm shadow-cyan-950/10"
+                      : "border-transparent text-slate-400 hover:bg-slate-800/70 hover:text-slate-200"
                   }`}
                 >
-                  <Icon className={`h-4 w-4 ${isActive ? "text-cyan-400" : "text-slate-500"}`} />
+                  <Icon className={`h-4.5 w-4.5 shrink-0 ${isActive ? "text-cyan-400" : "text-slate-400"}`} />
                   <span>{tab.label}</span>
                 </button>
               );
             })}
           </div>
 
-          <div className="rounded-xl border border-slate-800/80 bg-slate-900/80 p-3 text-[11px] text-slate-500 space-y-1">
-            <div className="flex items-center gap-1.5 text-slate-400 font-medium">
-              <Sliders className="h-3 w-3 text-cyan-400" />
+          <div className="rounded-xl border border-slate-700 bg-slate-900/90 p-3.5 text-xs text-slate-400 space-y-1.5">
+            <div className="flex items-center gap-1.5 text-slate-200 font-semibold">
+              <Sliders className="h-3.5 w-3.5 text-cyan-400" />
               <span>{i18nText.common.stageReady}</span>
             </div>
-            <p>{i18nText.common.features}</p>
+            <p className="leading-relaxed text-[11px]">{i18nText.common.features}</p>
           </div>
         </nav>
 

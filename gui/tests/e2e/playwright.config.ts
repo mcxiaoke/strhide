@@ -17,7 +17,7 @@ export default defineConfig({
   ],
   use: {
     headless: true,
-    viewport: { width: 1240, height: 820 },
+    viewport: { width: 1380, height: 900 },
     actionTimeout: 10000,
   },
   webServer: {

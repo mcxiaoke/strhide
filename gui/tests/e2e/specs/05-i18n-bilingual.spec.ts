@@ -34,4 +34,35 @@ test.describe("双语国际化与英文界面渲染截图", () => {
       fullPage: true,
     });
   });
+
+  test("13-默认亮色模式与深色主题无缝切换截图", async ({ page }) => {
+    await page.addInitScript(createTauriMockScript({
+      carrierPath: "C:\\Samples\\holiday_photo.png",
+    }));
+    await page.goto("http://localhost:1420");
+
+    // 验证默认亮色主题生效
+    const html = page.locator("html");
+    await expect(html).toHaveAttribute("data-theme", "light");
+
+    // 截屏 14: 默认浅色现代界面 (Light Mode)
+    await page.screenshot({
+      path: path.join(screenshotDir, "14-workbench-theme-light-default.png"),
+      fullPage: true,
+    });
+
+    // 点击右上角深色模式切换按钮
+    const themeBtn = page.locator("button:has-text('深色模式')");
+    await themeBtn.click();
+
+    // 验证主题变为 dark
+    await expect(html).toHaveAttribute("data-theme", "dark");
+    await expect(page.locator("button:has-text('浅色模式')")).toBeVisible();
+
+    // 截屏 15: 一键切换至科技感暗黑界面 (Dark Mode)
+    await page.screenshot({
+      path: path.join(screenshotDir, "15-workbench-theme-dark-switch.png"),
+      fullPage: true,
+    });
+  });
 });
