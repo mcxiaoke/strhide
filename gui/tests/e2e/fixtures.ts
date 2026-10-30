@@ -1,24 +1,29 @@
 import { test as base, expect, Page } from "@playwright/test";
 
 export interface MockDataOptions {
-  carrierPath?: string;
+  /** dialog 返回的文件列表（多选时不支持的文件也会被前端跳过） */
+  files?: string[];
+  format?: string;
   hasHiddenData?: boolean;
   passwordHint?: string;
-  suspiciousHints?: string[];
-  riskScore?: number;
-  verdict?: "clean" | "low" | "suspicious" | "likely-hidden";
-  alsoPresent?: "structure" | "content";
-  conflictOnEmbed?: boolean;
-  format?: string;
-  contentError?: string;
+  /** probe_stego_capacity_cmd 失败，模拟不支持的视频流 */
+  capacityError?: string;
+  /** embed_stego_file_cmd / write_structure_file_cmd 失败 */
+  embedError?: string;
+  /** inspect_carrier_cmd 失败 */
   inspectError?: string;
+  alsoPresent?: "structure" | "content";
+  /** smart_extract 返回二进制文件而不是文本 */
+  binaryPayload?: boolean;
 }
 
 export function createTauriMockScript(opts: MockDataOptions = {}) {
+  const files = (opts.files ?? ["C:\\\\Samples\\\\photo.png"]).map((p) => p.replace(/\\\\/g, "\\"));
+
   return `
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = window.__TAURI_EVENT_PLUGIN_INTERNALS__ || {};
-    
+
     window.__TAURI_INTERNALS__.metadata = {
       currentWindow: { label: "main" },
       currentWebview: { windowLabel: "main", label: "main" }
@@ -41,148 +46,53 @@ export function createTauriMockScript(opts: MockDataOptions = {}) {
     };
     window.__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener = () => {};
 
-    window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
-      // console.log("[MOCK IPC]", cmd, args);
+    const EXISTING = ${JSON.stringify(files)};
 
-      if (cmd === "plugin:event|listen") {
-        return 1;
-      }
+    window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+      if (cmd === "plugin:event|listen") return 1;
+
       if (cmd === "plugin:dialog|open") {
-        if (args && args.multiple) {
-          return ["${opts.carrierPath || "C:\\\\Samples\\\\secret_image.png"}"];
-        }
-        return "${opts.carrierPath || "C:\\\\Samples\\\\secret_image.png"}";
+        const dialogOpts = (args && args.options) || args || {};
+        if (dialogOpts.directory) return "C:\\\\Samples\\\\out";
+        if (dialogOpts.multiple) return EXISTING;
+        return EXISTING[0];
       }
-      if (cmd === "plugin:dialog|save") {
-        return "C:\\\\Samples\\\\extracted_payload.txt";
-      }
-      if (cmd === "plugin:opener|open_path" || cmd === "plugin:opener|reveal_item_in_dir") {
-        return null;
-      }
-      if (cmd === "set_ui_language_cmd") {
-        return args.lang;
-      }
-      if (cmd === "cancel_task_cmd") {
-        return true;
-      }
+      if (cmd === "plugin:dialog|save") return "C:\\\\Samples\\\\out\\\\payload.txt";
+      if (cmd === "plugin:opener|open_path" || cmd === "plugin:opener|reveal_item_in_dir") return null;
+      if (cmd === "set_ui_language_cmd") return args.lang;
+      if (cmd === "cancel_task_cmd") return true;
 
       if (cmd === "get_capabilities_cmd") {
         return [
-          {
-            format: "PNG",
-            structure: ["chunk", "eof"],
-            stego: ["png_spatial"],
-            extensions: ["png"],
-            memory: "whole_file"
-          },
-          {
-            format: "JPEG",
-            structure: ["eof"],
-            stego: ["jpeg_dct"],
-            extensions: ["jpg", "jpeg"],
-            memory: "whole_file"
-          },
-          {
-            format: "MP4",
-            structure: ["box", "eof"],
-            stego: ["hevc_cabac"],
-            extensions: ["mp4", "mov"],
-            memory: "streaming"
-          },
-          {
-            format: "ZIP",
-            structure: ["central_dir", "eof"],
-            stego: [],
-            extensions: ["zip"],
-            memory: "streaming"
-          }
+          { format: "PNG", structure: ["chunk", "eof"], stego: ["hill"], extensions: ["png"], memory: "whole_file" },
+          { format: "JPEG", structure: ["eof"], stego: ["uerd"], extensions: ["jpg", "jpeg"], memory: "whole_file" },
+          { format: "MP4", structure: ["box", "eof"], stego: ["hevc_cabac"], extensions: ["mp4", "mov"], memory: "streaming" },
+          { format: "ZIP", structure: ["central_dir", "eof"], stego: [], extensions: ["zip"], memory: "streaming" },
+          { format: "PDF", structure: ["eof"], stego: [], extensions: ["pdf"], memory: "streaming" }
         ];
       }
 
-      if (cmd === "inspect_carrier_cmd") {
-        if (${opts.inspectError ? `true` : `false`}) {
-          throw {
-            kind: "unsupported_format",
-            detail: "${opts.inspectError || "Unsupported format"}"
+      if (cmd === "get_file_metadata_cmd") {
+        if (EXISTING.includes(args.path)) {
+          return {
+            path: args.path,
+            filename: args.path.split(/[\\\\/]/).pop(),
+            size_bytes: 1234567,
+            exists: true,
+            is_file: true,
+            is_dir: false,
+            modified_ms: 1730000000000
           };
         }
-        return {
-          carrier: args.path || "C:\\\\Samples\\\\secret_image.png",
-          format: "${opts.format || "PNG"}",
-          has_hidden_data: ${opts.hasHiddenData !== undefined ? opts.hasHiddenData : true},
-          strategy: { id: 2, name: "chunk" },
-          ube_offset: 1420,
-          ube_total_size: 24576,
-          is_encrypted: true,
-          is_compressed: true,
-          is_stealth: false,
-          password_hint: "${opts.passwordHint || "my-safe-key"}",
-          orig_host_size: 1428570,
-          orig_host_sha256: "a1b2c3d4e5f67890123456789abcdef0123456789abcdef0123456789abcdef0",
-          metadata: {
-            filename: "secret_document.txt",
-            raw_size: 18420,
-            raw_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            created_at: 1730000000
-          },
-          suspicious_hints: ${JSON.stringify(opts.suspiciousHints || [])},
-          strategies: [
-            {
-              strategy: "chunk",
-              capacity_bytes: 2097152,
-              available: true,
-              limit: "≤ 2,097,152 B (2 MiB)"
-            },
-            {
-              strategy: "eof",
-              capacity_bytes: null,
-              available: true,
-              limit: "无上限 (文件增长)"
-            }
-          ],
-          content_stego: ${opts.contentError ? `null` : `{
-            format: "${opts.format || "PNG"}",
-            has_hidden_data: ${opts.hasHiddenData !== undefined ? opts.hasHiddenData : true},
-            algorithm: "HILL",
-            codec: "STC (h=7, u=2)",
-            payload_len: 18420,
-            media_info: {
-              width: 1920,
-              height: 1080
-            }
-          }`},
-          content_error: ${opts.contentError ? `{
-            kind: "unsupported_format",
-            detail: "${opts.contentError}"
-          }` : `null`},
-          media_info: {
-            width: 1920,
-            height: 1080
-          }
-        };
-      }
-
-      if (cmd === "get_file_metadata_cmd") {
-        return {
-          path: args.path || "C:\\\\Samples\\\\secret.txt",
-          filename: "secret.txt",
-          size_bytes: 4096,
-          exists: true,
-          is_file: true,
-          is_dir: false,
-          modified_ms: Date.now()
-        };
+        throw { kind: "io", detail: "No such file: " + args.path };
       }
 
       if (cmd === "probe_stego_capacity_cmd") {
-        if (${opts.contentError ? `true` : `false`}) {
-          throw {
-            kind: "unsupported_format",
-            detail: "${opts.contentError || "Unsupported format"}"
-          };
+        if (${opts.capacityError ? "true" : "false"}) {
+          throw { kind: "unsupported_format", detail: "${opts.capacityError || ""}" };
         }
         return {
-          format: "PNG",
+          format: "${opts.format || "PNG"}",
           algorithm: "HILL",
           total_elements: 2073600,
           available_slots: 1555200,
@@ -193,123 +103,100 @@ export function createTauriMockScript(opts: MockDataOptions = {}) {
           high_max_bytes: 25600,
           balanced_max_bytes: 38400,
           estimated_change_rate: 0.08,
-          safety_level: args.safety_level || "high",
-          safety_bpp_limit: 0.10,
+          safety_level: args.safetyLevel || "high",
+          safety_bpp_limit: 0.1,
           is_estimated: false,
           media_info: { width: 1920, height: 1080 }
         };
       }
 
-      if (cmd === "smart_extract_cmd") {
-        return {
-          source: "structure",
-          also_present: ${opts.alsoPresent ? `"${opts.alsoPresent}"` : "undefined"},
-          summary: {
-            carrier: args.path || "C:\\\\Samples\\\\secret_image.png",
-            is_file: false,
-            is_encrypted: true,
-            filename: "secret_document.txt",
-            raw_size: 1420,
-            text_preview: "Confidential Report 2026:\\nProject StrHide successfully implemented lossless format-preserving data hiding!\\nAll bytes verified bit-exact identical."
-          }
-        };
-      }
-
       if (cmd === "embed_stego_file_cmd") {
-        if (${opts.conflictOnEmbed === true}) {
-          throw {
-            kind: "already_exists",
-            detail: args.req.carrier
-          };
+        if (${opts.embedError ? "true" : "false"}) {
+          throw { kind: "rejection", detail: "${opts.embedError || ""}" };
         }
         return {
           carrier: args.req.carrier,
-          written_to: args.req.carrier,
-          format: "PNG",
+          written_to: args.req.output_path,
+          format: "${opts.format || "PNG"}",
           payload_bytes: 1420,
-          carrier_before_bytes: 1428570,
-          carrier_after_bytes: 1428570,
-          capacity: {
-            format: "PNG",
-            algorithm: "HILL",
-            total_elements: 2073600,
-            available_slots: 1555200,
-            max_raw_payload_bytes: 64000,
-            max_raw_is_grouped: false,
-            recommended_max_bytes: 25600,
-            estimated_change_rate: 0.08,
-            safety_level: "high",
-            safety_bpp_limit: 0.10,
-            is_estimated: false
-          },
-          stats: {
-            modified_slots: 1420,
-            total_candidate_slots: 2073600
-          },
+          carrier_before_bytes: 1234567,
+          carrier_after_bytes: 1234567,
+          stats: { modified_slots: 1420, total_candidate_slots: 2073600 },
           warnings: []
         };
       }
 
-      if (cmd === "verify_carrier_cmd") {
+      if (cmd === "write_structure_file_cmd") {
+        if (${opts.embedError ? "true" : "false"}) {
+          throw { kind: "rejection", detail: "${opts.embedError || ""}" };
+        }
         return {
-          carrier: args.path || "C:\\\\Samples\\\\secret_image.png",
-          format: "PNG",
-          level1_host: { ok: true, detail: "PNG structure valid (IHDR, IDAT, IEND CRCs verified bit-exact)", skipped: false },
-          level2_envelope: { ok: true, detail: "UBE Envelope Header & Trailer magic/CRC32 verified consistent", skipped: false },
-          level3_crypto: { ok: true, detail: "AES-256-GCM authentication tag and payload SHA-256 100% verified", skipped: false },
+          carrier: args.req.output_path,
+          format: "${opts.format || "PNG"}",
+          strategy: { id: 2, name: "chunk" },
+          raw_size: 18420,
+          ube_size: 20480,
+          is_encrypted: !!args.req.password,
+          is_stealth: !!args.req.stealth,
+          warnings: []
+        };
+      }
+
+      if (cmd === "inspect_carrier_cmd") {
+        if (${opts.inspectError ? "true" : "false"}) {
+          throw { kind: "unsupported_format", detail: "${opts.inspectError || ""}" };
+        }
+        return {
+          carrier: args.path,
+          format: "${opts.format || "PNG"}",
+          has_hidden_data: ${opts.hasHiddenData !== undefined ? opts.hasHiddenData : true},
+          strategy: { id: 2, name: "chunk" },
+          ube_offset: 1420,
+          ube_total_size: 24576,
+          is_encrypted: true,
+          is_compressed: true,
+          is_stealth: false,
+          password_hint: "${opts.passwordHint || "year-1990"}",
+          orig_host_size: 1234567,
+          orig_host_sha256: "a1b2c3d4e5f67890123456789abcdef0123456789abcdef0123456789abcdef0",
+          metadata: {
+            filename: "secret.txt",
+            raw_size: 18420,
+            raw_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            created_at: 1730000000
+          },
+          suspicious_hints: [],
+          strategies: [
+            { strategy: "chunk", capacity_bytes: 2097152, available: true, limit: "≤ 2 MiB" },
+            { strategy: "eof", capacity_bytes: null, available: true, limit: "无上限" }
+          ],
           content_stego: {
-            format: "PNG",
-            levels: [
-              { level: 1, name: "Header Signature", ok: true },
-              { level: 2, name: "STC Syndrome Parity", ok: true }
-            ]
+            format: "${opts.format || "PNG"}",
+            has_hidden_data: ${opts.hasHiddenData !== undefined ? opts.hasHiddenData : true},
+            algorithm: "HILL",
+            codec: "STC",
+            payload_len: 18420,
+            media_info: { width: 1920, height: 1080 }
+          },
+          content_error: null,
+          media_info: { width: 1920, height: 1080 }
+        };
+      }
+
+      if (cmd === "smart_extract_cmd") {
+        const isFile = ${opts.binaryPayload ? "true" : "false"} || !!args.outputPath;
+        return {
+          source: "structure",
+          also_present: ${opts.alsoPresent ? `"${opts.alsoPresent}"` : "null"},
+          summary: {
+            carrier: args.path,
+            is_file: isFile,
+            is_encrypted: true,
+            filename: "secret.txt",
+            raw_size: 1420,
+            written_file: args.outputPath || undefined,
+            text_preview: isFile ? undefined : "会议纪要：本周完成隐写链路联调。"
           }
-        };
-      }
-
-      if (cmd === "restore_structure_file_cmd") {
-        return {
-          carrier: args.path || "C:\\\\Samples\\\\secret_image.png",
-          restored_size: 1428570,
-          restored_sha256: "a1b2c3d4e5f67890123456789abcdef0123456789abcdef0123456789abcdef0",
-          verified_identical: true,
-          backup_file: (args.path || "C:\\\\Samples\\\\secret_image.png") + ".bak"
-        };
-      }
-
-      if (cmd === "scan_carrier_cmd") {
-        return {
-          carrier: args.path || "C:\\\\Samples\\\\secret_image.png",
-          format: "PNG",
-          file_size: 1428570,
-          risk_score: ${opts.riskScore !== undefined ? opts.riskScore : 18},
-          verdict: "${opts.verdict || "low"}",
-          findings: [
-            { detector: "png:trailing-data", severity: "info", detail: "No appended data after IEND" }
-          ],
-          notes: [
-            "Ternary +/-1 steganography (HILL/STC) produces minimal histogram distortion; RS analysis sensitivity is bounded."
-          ],
-          detectors: [
-            { name: "png:trailing-data", domain: "structural", status: "PASS", metric: "0 B", threshold: "> 0 B", detail: "Clean IEND terminator" },
-            { name: "png:known-signatures", domain: "signature", status: "PASS", metric: "0 hits", threshold: "0", detail: "No foreign tool signatures detected" },
-            { name: "png:chi2-spatial", domain: "spatial", status: "PASS", metric: "p=0.482", threshold: "p < 0.05", detail: "Pair of values distribution is uniform" },
-            { name: "png:rs-analysis", domain: "spatial", status: "PASS", metric: "alpha=0.012", threshold: "alpha > 0.05", detail: "Regular/Singular group smoothness variance is low" }
-          ]
-        };
-      }
-
-      if (cmd === "run_batch_job_cmd") {
-        return {
-          items: (args.items || []).map((it, idx) => ({
-            index: idx,
-            item: it,
-            result: { Ok: { status: "processed", format: "PNG" } },
-            elapsed_ms: 12 + idx * 8
-          })),
-          succeeded: (args.items || []).length,
-          failed: 0,
-          cancelled: false
         };
       }
 

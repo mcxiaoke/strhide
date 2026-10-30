@@ -1,5 +1,7 @@
 # `strhide` 桌面端 GUI（方案一：Tauri v2 + React + TypeScript）详细架构与实施计划
 
+> **2026-10-30 界面改版说明**：GUI 已改为顶部四页签 `隐写 / 隐藏 / 提取 / 扫描`，各页签的输入文件与参数完全独立，支持多文件批处理并自动跳过不支持的格式；三级校验与无损还原、反隐写取证两个工作台已从 GUI 移除，“自适应容量安全水位尺”改为安全等级下拉框。本文 §1.1 拓扑图、§2 工作台划分（`InspectExtractView` / `VerifyRestoreView` / `ForensicsBatchView` / `CapacityMeter` / `TuningDrawer`）属于改版前的设计与实施计划，保留作历史记录；当前实现见 `gui/src/App.tsx`、`gui/src/views/*`、`gui/src/hooks/*`，变更摘要见 `docs/CHANGES-20261030.md`。
+
 > **文档定位**：本文档是 `strhide` 桌面客户端（基于 **[Tauri v2](https://v2.tauri.app/) + React 19 + TypeScript + Tailwind CSS + shadcn/ui + Zustand**）的工程级架构设计与分阶段实施蓝图。可作为直接交付给研发人员或 AI 编码 Agent 的开发任务书。
 >
 > **前置基线**：`strhide` 核心库已完成 Stage A–E 全部 GUI 就绪度改造（`StrHide` 统一门面、`inspect_any` / `verify_any` / `smart_extract`、MP4 流式有界诊断、零拷贝原位补丁、`ProgressWriter` + `CancelToken`、结构化 `ErrorDetail`/`ErrorKind`、原子级 `i18n`、无打印批处理 `core::batch::run_batch` 及 `EmbedStats` 修改率统计）。

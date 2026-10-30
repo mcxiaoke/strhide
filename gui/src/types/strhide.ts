@@ -161,23 +161,7 @@ export interface ProgressEvent {
   percent: number | null;
 }
 
-export interface LevelStatus {
-  ok: boolean;
-  detail: string;
-  skipped: boolean;
-}
 
-export interface DualVerifyDto {
-  carrier: string;
-  format: string;
-  level1_host: LevelStatus;
-  level2_envelope: LevelStatus;
-  level3_crypto: LevelStatus;
-  content_stego?: {
-    format: string;
-    levels: Array<{ level: number; name: string; ok: boolean; message?: string }>;
-  };
-}
 
 export type WriteWarning =
   | { kind: "size_inflation"; ube_size: number; host_size: number; ratio_pct: number }
@@ -197,13 +181,6 @@ export interface WriteResult {
   warnings: WriteWarning[];
 }
 
-export interface RemoveResult {
-  carrier: string;
-  restored_size: number;
-  restored_sha256: string;
-  verified_identical: boolean;
-  backup_file?: string;
-}
 
 export type FormatName = string;
 
@@ -215,25 +192,7 @@ export interface Capability {
   memory: "streaming" | "whole_file";
 }
 
-export interface DetectorMetric {
-  name: string;
-  domain: string;
-  status: "PASS" | "ALERT";
-  metric: string;
-  threshold?: string;
-  detail: string;
-}
 
-export interface ScanReport {
-  carrier: string;
-  format?: FormatName | null;
-  file_size: number;
-  findings: Array<{ detector: string; severity: "info" | "suspicious" | "likely"; detail: string }>;
-  risk_score: number;
-  verdict: "clean" | "low" | "suspicious" | "likely-hidden";
-  notes: string[];
-  detectors: DetectorMetric[];
-}
 
 export type PayloadInputDto =
   | { kind: "text"; content: string }
@@ -271,24 +230,5 @@ export interface SmartExtractSummaryDto {
   summary: ReadSummary;
 }
 
-export interface ItemOutcome<T> {
-  index: number;
-  item: string;
-  result: { Ok: T } | { Err: ErrorDetail };
-  elapsed_ms: number;
-}
 
-export interface BatchOutcome<T> {
-  items: Array<ItemOutcome<T>>;
-  succeeded: number;
-  failed: number;
-  cancelled: boolean;
-}
 
-export interface BatchJobSpec {
-  job_type: "inspect" | "verify" | "scan" | "restore";
-  password?: string;
-  domain?: string;
-  continue_on_error: boolean;
-  max_concurrency: number;
-}

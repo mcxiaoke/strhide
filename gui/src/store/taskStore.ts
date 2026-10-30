@@ -20,7 +20,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   isRunning: false,
   statusText: "",
 
-  startTask: (taskId, initialStatus = "正在处理...") => {
+  startTask: (taskId, initialStatus = "") => {
     set({
       currentTaskId: taskId,
       progress: null,
@@ -30,10 +30,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   updateProgress: (ev) => {
-    set({
-      progress: ev,
-      statusText: `阶段: ${ev.stage} (${ev.done} / ${ev.total ?? "?"})`,
-    });
+    // 只保存进度事件，状态文案由调用方按页签给出（面向普通用户，不暴露内部阶段名）
+    set({ progress: ev });
   },
 
   finishTask: () => {
