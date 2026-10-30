@@ -8,7 +8,7 @@
 
 ## 0. 结论摘要
 
-> **处理状态（2026-10-30 20:35 更新）**：本报告 29 条已修复 20 条，9 条主动搁置（理由见文末「7. 处理状态」）。修复分 4 批提交：`caeafa2`、`1ae290a`、`d63a20b`、`0bac4c1`、`fb2991e`、`623fbbd`、`7df1bf5`、`770bf6b`、`1cefc77`；`fmt`/`clippy -D warnings`/全量测试/`baseline_hash --check`（58 例）全绿。
+> **处理状态（2026-10-30 21:12 更新）**：本报告 29 条已修复 23 条，6 条主动搁置（理由见文末「7. 处理状态」）。提交：`caeafa2`、`1ae290a`、`d63a20b`、`0bac4c1`、`fb2991e`、`623fbbd`、`7df1bf5`、`770bf6b`、`1cefc77`、`aa7d9b2`（wire format：`offset_delta` + verify 三级校验）、`634a773`（分析侧 JPEG 上限、`[stego]` 嵌套键告警、PDF xref 位数保护）。`fmt`/`clippy -D warnings`/全量测试/`local_ --ignored`/`baseline_hash --check`（58 例）/`import_lint.py` 全绿，另有 24 组跨策略 `write→verify→read→restore` 端到端脚本。
 
 上一轮 P0/P1 大部分已落地（C-1~C-4、H-1/H-2、M-1/M-2/M-4、M-23、M-26 等已确认修复）。本轮在**新代码路径与遗留 Medium** 上共确认 **7 项 P0、10 项 P1、12 项 P2**。
 
@@ -265,19 +265,23 @@
 | P1-4 `dct:chi2` 整行消失 / 文案写死 q100 | `1cefc77` | 输出 `SKIPPED` 并给真实原因 |
 | P2-6 inspect 内容域错误被吞 + 摘要计数口径 | `1cefc77` | 合并重复块并打印错误；`total` 改为处理总数 |
 | （测试）5 例回归 | `d63a20b` | `tests/test_regression/review_20261030.rs` |
+| P1-9 `verify` Level 2 套套逻辑 | `aa7d9b2` | header 第 11 字节改为 `offset_delta`（AAD 内、已认证），写入端在封装前算好；Level 2 改为 `inject_offset+delta == trailer.ube_offset`、`ube_total_size <= inject_size`、`inject+size <= 文件长` 三级校验 |
+| P1-7 分析侧 JPEG 无内存预算 | `634a773` | `jpeg-decoder` 的 `set_max_decoding_buffer_size` 默认 `usize::MAX`，现设 1 GiB |
+| P1-8 配置嵌套未知键静默忽略 | `634a773` | `[stego]` 段按同一告警机制报 `[stego].<key>`（仍只告警） |
+| （第 3 节小项）PDF xref 固定 10 位 | `634a773` | >10 GB 直接拒绝并提示 `--strategy eof` |
+| （测试）3 例坐标校验 | `aa7d9b2` | `envelope_coordinates` 子模块：位移与策略一致、未篡改通过、篡改 `inject_offset` 被拒 |
+| （测试）1 例配置告警 | `634a773` | `tests/test_cli/config.rs` |
 
 ### 主动搁置（未改，附理由）
 
 | 条目 | 搁置理由 |
 |---|---|
-| P1-9 `verify` Level 2 边界校验是套套逻辑 | 想做成"有意义"的交叉校验必须知道各适配器的 `inject_size`/`delta` 语义，而它们并不统一：JPEG `app_segment` 的 `inject_size` 含每段 4 字节头、PE `pe_codebits` 恒为 0、HEIF/MKV 有非零 `delta`。无论用哪个判据都会对某些策略产生假失败。需要先决定"把 `delta` 写进 header"还是"按 strategy_id 分派逐项校验"，属协议层改动 |
 | P1-5 RS/SPA 口径不一 | 会改变检测数值，进而影响 verdict；没有语料实测 FPR 前改口径等于盲调阈值 |
 | P1-6 JPEG EOI 取尾窗最后一个 `FF D9` | 需要先决定"用结构解析的真实 EOI 还是尾窗启发式"，且会改变 `trailing-data` 判定与既有语料结论 |
-| P1-7 分析侧不复用 `preflight_jpeg` | 依赖 `jpeg-decoder` 是否自带尺寸上限（待实测），且要确定超限时是 `SKIPPED` 还是硬拒 |
-| P1-8 配置未知键/合并/回退 | `deny_unknown_fields` 会让带注释或未来字段的现有配置全部报错，合并语义还涉及优先级重定义，属行为约定变更 |
+| P1-8 配置**合并**与**回退**语义 | 嵌套键告警已补（`634a773`）；但"候选配置合并"与"首个候选解析失败回退下一个"仍会重定义优先级，属行为约定变更，需单独定方案 |
 | P2-2 `isobmff_can_item_hidden` 读 1 GiB | 需要改成"按 box 头逐跳 seek + 只读 meta"，是函数重写而非数行修改；当前无正确性缺陷，只是内存浪费 |
 | P2-3 PE `.text` 整段读入 | 上限取值（64 MiB？）会影响大 PE 的策略可用性，需先确认目标载体规模 |
 | P2-4 CLI `capacity`/`dry-run` 全量读载体 | 要引入流式容量探测接口，属 API 设计；与 GUI 共用 |
 | P2-8 硬编码英文段 / `capacity --json` NDJSON | 统一 JSON 形状会破坏现有机器消费方（含 GUI 侧封装），需要一次性约定版本 |
 
-其余第 3 节末尾的小项（PDF xref 10 位、ZIP64 签名、strip 裸 `strategy_id`、MKV/RIFF magic、`sniff` 2 字节 JPEG、restore 重复 PBKDF2）均为"已知、影响窄"，留待各自模块专门处理。
+其余第 3 节末尾的小项（ZIP64 签名、strip 裸 `strategy_id`、MKV/RIFF magic、`sniff` 2 字节 JPEG、restore 重复 PBKDF2）均为"已知、影响窄"，留待各自模块专门处理；PDF xref 位数保护已随 `634a773` 落地。
