@@ -155,6 +155,17 @@ impl HevcSuperblock {
         let window_slices = u16::from_be_bytes([buf[6], buf[7]]);
         let total_windows = u16::from_be_bytes([buf[8], buf[9]]);
         let reserved = u16::from_be_bytes([buf[10], buf[11]]);
+        // The record is authenticated only by the magic (which the caller has
+        // already checked) plus the CRC/AEAD later on, so every field still has
+        // to be in range before it is used as an index or a length. `reserved`
+        // must stay 0 and this build only writes a single window; anything else
+        // means the header landed on the wrong slots, not that the carrier is
+        // in an interesting new format (review R2 P2-10).
+        if reserved != 0 || total_windows != 1 || version_and_flags & 0x01 != 0 {
+            return Err(StrHideError::NoHiddenData(
+                "No valid payload found (inconsistent superblock)".into(),
+            ));
+        }
         let payload_len = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
         let payload_crc32 = u32::from_be_bytes([buf[16], buf[17], buf[18], buf[19]]);
         let mut nonce = [0u8; 12];
@@ -1547,14 +1558,19 @@ fn extract_hevc_from_sb_record(
     }
     let mut sb_bytes = [0u8; HEVC_SUPERBLOCK_BYTES];
     sb_bytes.copy_from_slice(&sb_raw[0..HEVC_SUPERBLOCK_BYTES]);
-    let sb = HevcSuperblock::decode(&sb_bytes)?;
 
+    // Check the signature *before* parsing the record. The magic is derived
+    // from the credentials, so on a carrier that never held a payload these
+    // 32 bytes are noise and the version nibble is essentially random: reading
+    // the version first turned "nothing is hidden here" into "unsupported
+    // stego version" 15 times out of 16. Every other format reports this case
+    // as `NoHiddenData` (review R2 P1-1).
     let expected_magic = derive_magic(fmt.magic_label, effective_secret(secret).as_bytes());
-    if sb.magic != expected_magic {
-        return Err(StrHideError::CorruptedData(
-            "Invalid HEVC stego signature".into(),
-        ));
+    if sb_bytes[0..4] != expected_magic {
+        return Err(StrHideError::NoHiddenData("No valid payload found".into()));
     }
+    let sb = HevcSuperblock::decode(&sb_bytes)?;
+    debug_assert_eq!(sb.magic, expected_magic);
 
     // 2. Second stage: read Body
     let w0 = sb.window_slices as usize;
