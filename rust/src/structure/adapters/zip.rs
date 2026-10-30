@@ -11,6 +11,8 @@ pub const ZIP_LOCAL_MAGIC: [u8; 4] = *b"PK\x03\x04";
 pub const ZIP_EOCD_MAGIC: [u8; 4] = *b"PK\x05\x06";
 pub const ZIP_SPAN_MAGIC: [u8; 4] = *b"PK\x07\x08";
 
+pub const ZIP_CD_MAGIC: [u8; 4] = *b"PK\x01\x02";
+
 pub fn find_eocd_offset<R: Read + Seek + ?Sized>(
     reader: &mut R,
 ) -> Result<(u64, u64, u64), StrHideError> {
@@ -54,7 +56,10 @@ pub fn find_eocd_offset<R: Read + Seek + ?Sized>(
                         u32::from_le_bytes(tail[idx + 12..idx + 16].try_into().unwrap()) as u64;
                     let cd_offset =
                         u32::from_le_bytes(tail[idx + 16..idx + 20].try_into().unwrap()) as u64;
-                    if cd_offset + cd_size <= eocd_pos || (cd_offset == 0 && cd_size == 0) {
+                    let empty = cd_offset == 0 && cd_size == 0;
+                    if (cd_offset + cd_size <= eocd_pos || empty)
+                        && (empty || central_directory_starts_at(reader, cd_offset))
+                    {
                         return Ok((eocd_pos, cd_offset, cd_size));
                     }
                 }
@@ -66,6 +71,24 @@ pub fn find_eocd_offset<R: Read + Seek + ?Sized>(
     Err(StrHideError::CorruptedData(
         "Valid ZIP EOCD (End of Central Directory) record not found".into(),
     ))
+}
+
+/// Whether the bytes at `cd_offset` really start a central-directory record.
+///
+/// A 22-byte record shaped like an EOCD can sit anywhere in the file — in the
+/// EOCD comment, in the garbage an `eof`-strategy envelope leaves behind, or
+/// in a deliberately crafted tail. The old acceptance test only checked that
+/// `cd_offset + cd_size` fell before the record, so such a decoy was adopted
+/// as the real EOCD: injection then inserted the envelope at the decoy's
+/// offset, updated the decoy's own `cd_offset` field, and left the genuine
+/// EOCD pointing at the pre-shift central directory — a silently corrupted
+/// archive that `verify` still passed (review R2 P0-3).
+fn central_directory_starts_at<R: Read + Seek + ?Sized>(reader: &mut R, cd_offset: u64) -> bool {
+    if reader.seek(SeekFrom::Start(cd_offset)).is_err() {
+        return false;
+    }
+    let mut magic = [0u8; 4];
+    reader.read_exact(&mut magic).is_ok() && magic == ZIP_CD_MAGIC
 }
 
 /// Whether a ZIP64 EOCD locator sits immediately before the EOCD record.

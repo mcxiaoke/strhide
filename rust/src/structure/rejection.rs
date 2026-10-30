@@ -275,11 +275,24 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
         if cd_offset + cd_size > file_size || reader.seek(SeekFrom::Start(cd_offset)).is_err() {
             continue;
         }
+        if cd_size == 0 {
+            // No central directory to inspect: either an empty archive or a
+            // decoy record. Keep looking at earlier candidates.
+            continue;
+        }
         let mut cd_buf = vec![0u8; cd_size as usize];
         if reader.read_exact(&mut cd_buf).is_err() {
             continue;
         }
-        let mut offset = 0;
+        // The buffer must *be* the central directory, not merely be readable.
+        // Walking a decoy used to fall out of the loop at the first bad magic
+        // and then report "no signature", which let a crafted trailing EOCD
+        // hide `META-INF/*.SF` from this check entirely (review R2 P0-4).
+        if &cd_buf[0..4] != b"PK\x01\x02" {
+            continue;
+        }
+        let mut offset = 0usize;
+        let mut well_formed = false;
         while offset + 46 <= cd_buf.len() {
             if &cd_buf[offset..offset + 4] != b"PK\x01\x02" {
                 break;
@@ -292,22 +305,32 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
                 u16::from_le_bytes(cd_buf[offset + 32..offset + 34].try_into().unwrap()) as usize;
 
             let name_start = offset + 46;
-            if name_start + name_len <= cd_buf.len() {
-                let name = String::from_utf8_lossy(&cd_buf[name_start..name_start + name_len]);
-                let upper = name.to_uppercase();
-                if upper.starts_with("META-INF/")
-                    && (upper.ends_with(".SF")
-                        || upper.ends_with(".RSA")
-                        || upper.ends_with(".DSA"))
-                {
-                    reader.seek(SeekFrom::Start(start_pos))?;
-                    return Ok(Some(format!(
-                        "ZIP/JAR archive contains digital signature file ({name}). Modifying it will break JVM/signature verification."
-                    )));
-                }
+            let step = 46 + name_len + extra_len + comment_len;
+            if name_start + name_len > cd_buf.len() || offset + step > cd_buf.len() {
+                break;
             }
-            offset += 46 + name_len + extra_len + comment_len;
+            let name = String::from_utf8_lossy(&cd_buf[name_start..name_start + name_len]);
+            let upper = name.to_uppercase();
+            if upper.starts_with("META-INF/")
+                && (upper.ends_with(".SF") || upper.ends_with(".RSA") || upper.ends_with(".DSA"))
+            {
+                reader.seek(SeekFrom::Start(start_pos))?;
+                return Ok(Some(format!(
+                    "ZIP/JAR archive contains digital signature file ({name}). Modifying it will break JVM/signature verification."
+                )));
+            }
+            offset += step;
+            well_formed = offset == cd_buf.len();
         }
+        if !well_formed {
+            // Structurally inconsistent: not the archive's real EOCD. Try the
+            // next candidate instead of concluding "unsigned".
+            continue;
+        }
+        // A fully walked central directory with no signature entry is the
+        // honest "unsigned" answer.
+        reader.seek(SeekFrom::Start(start_pos))?;
+        return Ok(None);
     }
 
     reader.seek(SeekFrom::Start(start_pos))?;
