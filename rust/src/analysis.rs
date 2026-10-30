@@ -1297,7 +1297,14 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 /// computed on scrambled pixels and silently reported "clean").
 fn decode_jpeg_pixels(data: &[u8]) -> Option<(Vec<u8>, u32, usize)> {
     use jpeg_decoder::{Decoder, PixelFormat};
+    // `jpeg-decoder` allocates from the geometry declared in the header, not
+    // from the bytes it has read: a few-KB JPEG claiming 65535x65535 asks for
+    // ~12 GiB. The crate exposes a limit but defaults it to `usize::MAX`, so
+    // this is the one place a scan of an untrusted file could still exhaust
+    // memory (review R2 P1-7). 1 GiB still admits a 350 MP RGB frame.
+    const MAX_DECODED_BYTES: usize = 1 << 30;
     let mut decoder = Decoder::new(std::io::Cursor::new(data));
+    decoder.set_max_decoding_buffer_size(MAX_DECODED_BYTES);
     let pixels = decoder.decode().ok()?;
     let info = decoder.info()?;
     let channels = match info.pixel_format {

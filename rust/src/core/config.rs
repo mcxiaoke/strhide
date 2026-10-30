@@ -52,6 +52,9 @@ const KNOWN_KEYS: &[&str] = &[
     "stego",
 ];
 
+/// Recognized keys inside `[stego]`, checked the same way as [`KNOWN_KEYS`].
+const STEGO_KEYS: &[&str] = &["safety", "enforce_safety", "algorithm"];
+
 /// Parsed configuration file. Every field is optional; `None` means "not
 /// configured, fall back to the built-in CLI defaults".
 #[derive(Deserialize, Debug, Default, Clone)]
@@ -192,6 +195,28 @@ fn parse_config(text: &str, origin: &Path) -> Result<FileConfig, StrHideError> {
                 )
                 .to_string(),
             );
+        }
+    }
+    // The sections have their own key sets and were not checked at all, so
+    // `[stego] algoritm = "hill"` was silently ignored: the default stayed in
+    // force and nothing said why. Warn for those too (still warning-only —
+    // refusing would break every config that carries a comment-shaped extra
+    // key) (review R2 P1-8).
+    for (section, known) in [("stego", STEGO_KEYS)] {
+        let Some(sub) = table.get(section).and_then(|v| v.as_table()) else {
+            continue;
+        };
+        for key in sub.keys() {
+            if !known.contains(&key.as_str()) {
+                warnings.push(
+                    crate::t!(
+                        crate::core::i18n::Msg::WarnConfigUnknownKey,
+                        key = format!("[{section}].{key}"),
+                        path = origin.display()
+                    )
+                    .to_string(),
+                );
+            }
         }
     }
     // Deserialise from the table that was already validated, instead of

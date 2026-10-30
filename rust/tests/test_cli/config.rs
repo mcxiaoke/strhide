@@ -66,6 +66,43 @@ fn cwd_config_is_ignored() {
 }
 
 #[test]
+fn unknown_nested_key_in_stego_section_warns() {
+    // `[stego]` has its own key set and was not checked at all, so a typo like
+    // `algoritm` silently left the default in force (review R2 P1-8).
+    let dir = scratch("unknown_nested");
+    fs::write(dir.join("c.png"), make_png()).unwrap();
+    fs::write(
+        dir.join("custom.toml"),
+        "[stego]
+algoritm = \"hill\"
+",
+    )
+    .unwrap();
+    let out = run(&dir, &["--config", "custom.toml", "list"], None);
+    assert_eq!(code(&out), 0, "a warning must not fail the command");
+    let err = stderr(&out);
+    assert!(
+        err.contains("[stego].algoritm"),
+        "the warning must name the nested key, stderr: {err}"
+    );
+    // The correctly spelled key stays silent.
+    fs::write(
+        dir.join("ok.toml"),
+        "[stego]
+algorithm = \"hill\"
+",
+    )
+    .unwrap();
+    let out = run(&dir, &["--config", "ok.toml", "list"], None);
+    assert_eq!(code(&out), 0);
+    assert!(
+        !stderr(&out).contains("Unknown key"),
+        "a valid [stego] key must not warn: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
 fn unknown_key_warns_but_does_not_fail() {
     let dir = scratch("unknown");
     fs::write(dir.join("c.png"), make_png()).unwrap();

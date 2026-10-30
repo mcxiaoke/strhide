@@ -619,6 +619,19 @@ impl HostAdapter for PdfAdapter {
             + ube_size
             + b"\nendstream\nendobj\n".len() as u64;
 
+        // A classic xref entry is exactly 20 bytes: a fixed 10-digit offset,
+        // then ` ggggg n \n`. An offset past 10^10 grows the field and shifts
+        // every following entry, producing a file whose `startxref`/`%%EOF`
+        // still look right — so neither the write self-check nor
+        // `verify_structure` (which only parses the tail) notices (review R2
+        // P2 item, M-19). Refuse instead of writing a broken table.
+        if actual_obj_offset >= 10_000_000_000 {
+            return Err(StrHideError::UnsupportedFormat(
+                "Carrier is larger than 10 GB, which overflows the 10-digit offsets a classic PDF \
+                 xref table can hold. Use --strategy eof for this carrier."
+                    .into(),
+            ));
+        }
         let xref_str = format!(
             "xref\n{} 1\n{:010} 00000 n \n",
             info.new_obj_num, actual_obj_offset
