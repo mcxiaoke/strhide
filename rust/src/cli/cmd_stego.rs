@@ -599,7 +599,7 @@ fn extract_one(
             out_path.clone()
         };
         check_overwrite(&dest, args.overwrite)?;
-        std::fs::write(&dest, payload.as_bytes())?;
+        crate::core::commit::write_bytes_atomic(&dest, payload.as_bytes())?;
         if !quiet {
             let elapsed_str = format_duration(t_start.elapsed());
             println!(
@@ -618,7 +618,7 @@ fn extract_one(
         let clean_name = crate::core::fs::sanitize_filename(raw_name);
         let dest = PathBuf::from(clean_name);
         check_overwrite(&dest, args.overwrite)?;
-        std::fs::write(&dest, payload.as_bytes())?;
+        crate::core::commit::write_bytes_atomic(&dest, payload.as_bytes())?;
         if !quiet {
             let elapsed_str = format_duration(t_start.elapsed());
             println!(
@@ -639,7 +639,7 @@ fn extract_one(
     } else {
         let dest = PathBuf::from("extracted.bin");
         check_overwrite(&dest, args.overwrite)?;
-        std::fs::write(&dest, payload.as_bytes())?;
+        crate::core::commit::write_bytes_atomic(&dest, payload.as_bytes())?;
         if !quiet {
             let elapsed_str = format_duration(t_start.elapsed());
             println!(

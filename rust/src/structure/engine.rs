@@ -1689,18 +1689,25 @@ fn write_payload_to(
     // directory) used to replace user files silently.
     crate::core::pipeline::check_overwrite(&final_dest, overwrite)?;
 
-    let mut out_f = File::create(&final_dest).map_err(|e| {
-        let reason = match e.kind() {
-            std::io::ErrorKind::NotFound => "the output directory does not exist",
-            std::io::ErrorKind::PermissionDenied => "the output directory is not writable",
+    // Write through a sibling temp file and rename, exactly like every carrier
+    // commit does. A plain `File::create` left a half-written payload behind
+    // when the disk filled up or the process was killed, and it followed a
+    // pre-existing symlink at the destination instead of replacing the name
+    // (review R2 P0-7).
+    crate::core::commit::write_bytes_atomic(&final_dest, &core.data).map_err(|err| {
+        let reason = match &err {
+            StrHideError::Io(e) => match e.kind() {
+                std::io::ErrorKind::NotFound => "the output directory does not exist",
+                std::io::ErrorKind::PermissionDenied => "the output directory is not writable",
+                _ => "the output file could not be created",
+            },
             _ => "the output file could not be created",
         };
         StrHideError::General(format!(
-            "Cannot create '{}': {reason} [{e}]",
+            "Cannot create '{}': {reason} [{err}]",
             final_dest.display()
         ))
     })?;
-    out_f.write_all(&core.data)?;
     Ok(final_dest)
 }
 

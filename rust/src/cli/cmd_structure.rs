@@ -361,7 +361,7 @@ fn read_one(
         let name = crate::core::fs::batch_payload_name(carrier, &res.filename, res.is_file);
         let dest = dir.join(name);
         check_overwrite(&dest, args.overwrite)?;
-        std::fs::write(&dest, &res.data)?;
+        crate::core::commit::write_bytes_atomic(&dest, &res.data)?;
         if !quiet {
             let elapsed_str = format_duration(t_start.elapsed());
             println!(
