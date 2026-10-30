@@ -112,7 +112,7 @@ ube_total_size = HEADER_SIZE(112)
 | 8 | 1 | `version` | `u8` | 信封版本，当前 `0x02` |
 | 9 | 1 | `flags` | `u8` | 标志位（§4） |
 | 10 | 1 | `strategy_id` | `u8` | 策略 ID（§7 适配器表） |
-| 11 | 1 | `reserved` | `u8` | 保留，必须为 0 |
+| 11 | 1 | `offset_delta` | `u8` | 注入点到信封首字节的位移（§3.3），≤ `MAX_OFFSET_DELTA = 64` |
 | 12 | 16 | `salt` | `[u8; 16]` | KDF 随机盐 |
 | 28 | 12 | `base_nonce` | `[u8; 12]` | 随机基准 nonce |
 | 40 | 8 | `orig_host_size` | `u64` | 原始载体尺寸 |
@@ -138,7 +138,23 @@ ube_total_size = HEADER_SIZE(112)
 
 - `version` 必须等于 `CURRENT_VERSION`；
 - `hint_len` 不得超过 `MAX_HINT_LEN = 1024`；
-- `hint_len + meta_len + (112 + 24)` 不得超过 `ube_total_size`。
+- `hint_len + meta_len + (112 + 24)` 不得超过 `ube_total_size`；
+- `offset_delta` 不得超过 `MAX_OFFSET_DELTA = 64`；
+- `patch_offset` 为 0（无补丁）或 ≥ 4（补丁覆盖一个 4 字节字段）。
+
+### 3.3 `offset_delta`（注入点位移）
+
+多数策略会在信封前面写一段容器结构：PNG `prIv` chunk 头 8 字节、JPEG APP15 段头 4 字节、ISO-BMFF `meta`/`free` box 头 8 字节或 `uuid` box 头 24/32 字节、EBML Void ID + VINT 最多 9 字节。因此信封首字节并不固定在 `inject_offset`，而是位于 `inject_offset + offset_delta`。
+
+该字段位于 AAD 覆盖范围内（偏移 11 < 80），因此被元数据块与载荷分块的 AEAD 一同认证。写入端在封装 header **之前**由 `envelope_offset_delta(adapter, strategy, ube_size)` 求得并写入，所以它既参与认证，又能在 `verify` 时与 trailer 记录的 `ube_offset` 交叉核对：
+
+```
+inject_offset + offset_delta == trailer.ube_offset        （连续策略）
+ube_total_size <= inject_size                             （容器头只会让注入区域更大）
+inject_offset + inject_size <= 文件长度
+```
+
+散落策略（`pe_codebits`）没有连续注入区域，其 `inject_offset` / `inject_size` 按定义为 0，上述三条不适用（`inject_size == 0` 即跳过）。
 
 ---
 
@@ -170,7 +186,7 @@ header 的**前 80 字节**构成定长 AAD（`AAD_SIZE = 80`），被绑定进�
 AAD 即以下字段的拼接（与 §3 表中偏移 0..80 一致）：
 
 ```text
-magic_header (8) | version (1) | flags (1) | strategy_id (1) | reserved (1)
+magic_header (8) | version (1) | flags (1) | strategy_id (1) | offset_delta (1)
 | salt (16) | base_nonce (12) | orig_host_size (8) | orig_host_sha256 (32)
 ```
 
@@ -354,7 +370,7 @@ derive_header_mask(password, salt):
 掩码（写侧异或，读侧再异或还原）：
 
 ```text
-header bytes 8..12   XOR mask[0..4]    // version | flags | strategy_id | reserved
+header bytes 8..12   XOR mask[0..4]    // version | flags | strategy_id | offset_delta
 header bytes 40..112 XOR mask[4..76]   // orig_host_size 起的 72 字节
 ```
 
@@ -376,7 +392,7 @@ trailer_crc32(stealth) = raw_crc XOR mask
 `EnvelopeHeader::unpack_with_profile` 按序尝试：
 
 1. **密码 + stealth**：若密码派生的 header 魔数匹配（先认证密码），用密码去掩码，要求 `version = 0x02` 且 `FLAG_STEALTH` 置位；
-2. **Profile 默认密钥去掩码**：要求 `version = 0x02`、无 `FLAG_ENCRYPTED`、`strategy_id ≤ MAX_KNOWN_STRATEGY_ID`（当前 13）、`reserved = 0`；
+2. **Profile 默认密钥去掩码**：要求 `version = 0x02`、无 `FLAG_ENCRYPTED`、`strategy_id ≤ MAX_KNOWN_STRATEGY_ID`（当前 13）、`offset_delta ≤ 64`；
 3. **裸 header**：直接解析（`FLAG_ENCRYPTED` 信封不掩码）。
 
 ---

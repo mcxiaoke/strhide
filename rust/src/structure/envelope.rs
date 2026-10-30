@@ -71,6 +71,15 @@ pub const FLAG_HAS_HINT: u8 = 0x10;
 /// form.
 pub const FLAG_COMPACT_META: u8 = 0x20;
 
+/// Largest displacement the header may record between the injection point and
+/// the envelope's first byte.
+///
+/// The writers need 4 (JPEG APP15 segment header), 8 (PNG chunk header,
+/// ISO-BMFF `meta`/`free` box header), 9 (EBML Void ID + 9-byte VINT) or 24/32
+/// (ISO-BMFF `uuid` box header). 64 leaves room for a future strategy while
+/// keeping the "is this plausibly our header?" gate tight.
+pub const MAX_OFFSET_DELTA: u8 = 64;
+
 pub const HEADER_SIZE: usize = 112;
 pub const AAD_SIZE: usize = 80;
 pub const TRAILER_SIZE: usize = 24;
@@ -100,7 +109,16 @@ pub struct EnvelopeHeader {
     pub version: u8,
     pub flags: u8,
     pub strategy_id: u8,
-    pub reserved: u8,
+    /// Displacement from `inject_offset` to the envelope's first byte.
+    ///
+    /// Some strategies write a container header before the envelope itself
+    /// (a PNG chunk header, a JPEG APP15 segment header, an ISO-BMFF box
+    /// header + uuid, an EBML Void ID + VINT, a PDF object header), so the
+    /// envelope does not start at the injection point. Recording the shift
+    /// here — inside the AAD, so it is authenticated — is what lets `verify`
+    /// check the header's coordinates against the trailer's located offset
+    /// instead of comparing a value with itself.
+    pub offset_delta: u8,
     pub salt: [u8; 16],
     pub base_nonce: [u8; 12],
     pub orig_host_size: u64,
@@ -120,7 +138,7 @@ impl Default for EnvelopeHeader {
             version: CURRENT_VERSION,
             flags: 0,
             strategy_id: 1,
-            reserved: 0,
+            offset_delta: 0,
             salt: [0u8; 16],
             base_nonce: [0u8; 12],
             orig_host_size: 0,
@@ -230,6 +248,16 @@ impl EnvelopeHeader {
                 self.inject_offset, self.inject_size
             )));
         }
+        // `offset_delta` is authenticated (it lives inside the AAD), but a
+        // crafted non-encrypted header carries a public-key mask anyone can
+        // reproduce, so the range still has to be enforced before it is added
+        // to `inject_offset` by the verifier.
+        if self.offset_delta > MAX_OFFSET_DELTA {
+            return Err(StrHideError::CorruptedData(format!(
+                "Envelope offset delta {} exceeds maximum {}",
+                self.offset_delta, MAX_OFFSET_DELTA
+            )));
+        }
         // A patch always overwrites a four-byte field, so offset 0 (the PE
         // marker convention) is "no patch" and 1..=3 cannot hold one.
         if self.patch_offset != 0 && self.patch_offset < 4 {
@@ -248,7 +276,7 @@ impl EnvelopeHeader {
         aad[8] = self.version;
         aad[9] = self.flags;
         aad[10] = self.strategy_id;
-        aad[11] = self.reserved;
+        aad[11] = self.offset_delta;
         aad[12..28].copy_from_slice(&self.salt);
         aad[28..40].copy_from_slice(&self.base_nonce);
         aad[40..48].copy_from_slice(&self.orig_host_size.to_le_bytes());
@@ -336,7 +364,7 @@ impl EnvelopeHeader {
         let version = data[8];
         let flags = data[9];
         let strategy_id = data[10];
-        let reserved = data[11];
+        let offset_delta = data[11];
 
         let mut salt = [0u8; 16];
         salt.copy_from_slice(&data[12..28]);
@@ -361,7 +389,7 @@ impl EnvelopeHeader {
             version,
             flags,
             strategy_id,
-            reserved,
+            offset_delta,
             salt,
             base_nonce,
             orig_host_size,
@@ -391,9 +419,10 @@ impl EnvelopeHeader {
     ///    password, so a match authenticates the password before any masked
     ///    field is trusted.
     /// 2. **Default mode**: unmask with the profile's default secret and accept
-    ///    only if the unmasked `version` / `flags` / `strategy_id` / `reserved`
-    ///    bytes form a plausible header. This gate is what makes a wrong
-    ///    profile fail deterministically instead of yielding garbage fields.
+    ///    only if the unmasked `version` / `flags` / `strategy_id` /
+    ///    `offset_delta` bytes form a plausible header. This gate is what makes
+    ///    a wrong profile fail deterministically instead of yielding garbage
+    ///    fields.
     /// 3. **Bare header**: an already-plain header (encrypted mode is *not*
     ///    masked at all — the AEAD authenticates it).
     pub fn unpack_with_profile(
@@ -477,7 +506,7 @@ impl EnvelopeHeader {
             if unmasked[8] == CURRENT_VERSION
                 && (unmasked[9] & FLAG_ENCRYPTED) == 0
                 && unmasked[10] <= MAX_KNOWN_STRATEGY_ID
-                && unmasked[11] == 0
+                && unmasked[11] <= MAX_OFFSET_DELTA
             {
                 return Self::unpack(&unmasked);
             }

@@ -1081,10 +1081,31 @@ where
 
     // 8. Populate Header structure
     let strat_id = strategy_to_id(&selected_strategy)?;
+    // Where the envelope lands relative to the injection point. Strategies
+    // that prepend a container header (PNG chunk, JPEG APP15 segment, ISO-BMFF
+    // box, EBML Void, PDF object) shift it by 4..32 bytes. The shift only
+    // depends on the strategy and the envelope size, both known here, so it is
+    // computed *before* the header is sealed and therefore lands inside the
+    // AAD — that is what makes it tamper-evident, and what lets `verify`
+    // cross-check the header against the trailer instead of comparing a value
+    // with itself (review R2 P1-9).
+    let offset_delta = {
+        host.seek(SeekFrom::Start(0))?;
+        adapter.envelope_offset_delta(host, &selected_strategy, exact_ube_size)?
+    };
+    if offset_delta > crate::structure::envelope::MAX_OFFSET_DELTA as u64 {
+        return Err(StrHideError::General(format!(
+            "Strategy '{selected_strategy}' displaces the envelope by {offset_delta} bytes, which \
+             exceeds the {} bytes the header can record",
+            crate::structure::envelope::MAX_OFFSET_DELTA
+        )));
+    }
+    let offset_delta_u8 = offset_delta as u8;
     let mut header = EnvelopeHeader {
         magic_header: header_magic,
         flags,
         strategy_id: strat_id,
+        offset_delta: offset_delta_u8,
         salt,
         base_nonce,
         orig_host_size,
@@ -1169,12 +1190,22 @@ where
         adapter.inject(host, &mut ube_cursor, out, &selected_strategy)?
     };
 
-    // 10. Update real ube_offset in Header and Trailer
-    let delta = {
-        host.seek(SeekFrom::Start(0))?;
-        adapter.envelope_offset_delta(host, &selected_strategy, ube_total_size)?
-    };
-    let actual_ube_offset = inject_offset + delta;
+    // 10. Update real ube_offset in Header and Trailer.
+    //
+    // The shift was computed before the header was sealed (it is part of the
+    // AAD), so this only applies it. Recomputing it here would let the two
+    // disagree silently; the debug assertion keeps the pre-computation honest.
+    debug_assert_eq!(
+        {
+            host.seek(SeekFrom::Start(0))?;
+            offset_delta
+        },
+        adapter
+            .envelope_offset_delta(host, &selected_strategy, ube_total_size)
+            .unwrap_or(u64::MAX),
+        "envelope offset delta changed between pre-seal and post-inject"
+    );
+    let actual_ube_offset = inject_offset + offset_delta;
 
     header.inject_offset = inject_offset;
     header.inject_size = inject_size;
@@ -2264,6 +2295,65 @@ pub fn verify_carrier_bytes(
 
 /// Shared verify logic over any seekable reader (a `File` on the path path, a
 /// `Cursor` on the bytes path).
+/// Cross-check the header's injection coordinates against the located envelope.
+///
+/// Level 2 used to compare the trailer's `ube_offset`/`ube_total_size` with the
+/// values `locate_envelope` had just read out of that same trailer — true by
+/// construction. The header's own coordinates (`inject_offset` masked with a
+/// public key, `offset_delta` inside the AAD) were never checked against
+/// anything, so a carrier whose header disagreed with its body passed `verify`
+/// and only failed later, during `remove` (review R2 P1-9).
+///
+/// Relationships used, all of which hold for every registered strategy:
+/// the envelope starts `offset_delta` bytes after the injection point, the
+/// injected region is at least as large as the envelope it wraps (strategies
+/// add container headers), and the whole region lies inside the file.
+fn envelope_coordinates_agree(
+    header: &EnvelopeHeader,
+    ube_offset: u64,
+    ube_total_size: u64,
+    file_len: u64,
+) -> Result<(), String> {
+    // Scattered strategies (`pe_codebits`) record 0/0 by definition: there is
+    // no contiguous injected region to check.
+    if header.inject_size == 0 {
+        return Ok(());
+    }
+    let expected_offset = header
+        .inject_offset
+        .checked_add(header.offset_delta as u64)
+        .ok_or_else(|| {
+            format!(
+                "Header injection offset {} overflows once its {}-byte displacement is applied",
+                header.inject_offset, header.offset_delta
+            )
+        })?;
+    if expected_offset != ube_offset {
+        return Err(format!(
+            "Header coordinates disagree with the envelope: inject_offset {} + delta {} = {}, \
+             but the envelope sits at {}",
+            header.inject_offset, header.offset_delta, expected_offset, ube_offset
+        ));
+    }
+    if ube_total_size > header.inject_size {
+        return Err(format!(
+            "Envelope size {ube_total_size}B exceeds the injected region of {}B",
+            header.inject_size
+        ));
+    }
+    let injected_end = header
+        .inject_offset
+        .checked_add(header.inject_size)
+        .ok_or_else(|| "Header injection region overflows".to_string())?;
+    if injected_end > file_len {
+        return Err(format!(
+            "Header places the injected region at [{}..{}], past the end of the {file_len}B file",
+            header.inject_offset, injected_end
+        ));
+    }
+    Ok(())
+}
+
 fn verify_core(
     host: &mut dyn SeekRead,
     label: &str,
@@ -2275,6 +2365,10 @@ fn verify_core(
 
     // Level 1: Host format integrity
     let (l1_ok, l1_msg) = adapter.verify_structure(host)?;
+
+    // Needed by Level 2 to bound the injection coordinates the header claims.
+    // Captured before the envelope reader borrows `host`.
+    let file_len = host.seek(SeekFrom::End(0))?;
 
     let loc = locate_envelope(host, adapter, password, profile)?;
 
@@ -2321,6 +2415,10 @@ fn verify_core(
                             false,
                             false,
                         )
+                    } else if let Err(msg) =
+                        envelope_coordinates_agree(&header, ube_offset, ube_total_size, file_len)
+                    {
+                        (false, msg, header.is_encrypted(), header.is_stealth())
                     } else if ube_stream
                         .seek(SeekFrom::Start(ube_total_size - 24))
                         .is_err()
@@ -2353,25 +2451,23 @@ fn verify_core(
                         } else if let Ok(trailer) =
                             EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic.as_ref())
                         {
-                            if trailer.ube_offset != ube_offset
-                                || trailer.ube_total_size != ube_total_size
-                            {
-                                (
-                                    false,
-                                    "Envelope trailer boundary parameters mismatch".into(),
-                                    header.is_encrypted(),
-                                    header.is_stealth(),
-                                )
-                            } else {
-                                (
-                                    true,
-                                    format!(
-                                        "Envelope valid at offset {ube_offset}, size {ube_total_size}B (CRC32 OK)"
-                                    ),
-                                    header.is_encrypted(),
-                                    header.is_stealth(),
-                                )
-                            }
+                            // `locate_envelope` derived these numbers from this
+                            // very record, so comparing them with themselves
+                            // proved nothing (review R2 P1-9). What the trailer
+                            // still contributes is its magic + CRC32 check; the
+                            // coordinate check now happens above, against the
+                            // header's authenticated `inject_offset`/`offset_delta`.
+                            debug_assert_eq!(trailer.ube_offset, ube_offset);
+                            debug_assert_eq!(trailer.ube_total_size, ube_total_size);
+                            let _ = &trailer;
+                            (
+                                true,
+                                format!(
+                                    "Envelope valid at offset {ube_offset}, size {ube_total_size}B (CRC32 OK)"
+                                ),
+                                header.is_encrypted(),
+                                header.is_stealth(),
+                            )
                         } else {
                             (
                                 false,

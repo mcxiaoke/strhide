@@ -182,3 +182,120 @@ fn commit_carrier_patches_refuses_a_span_past_eof() {
     commit_carrier_patches(&carrier, &carrier, &patches, false, false).unwrap();
     assert_eq!(fs::read(&carrier).unwrap(), b"01XY456789".to_vec());
 }
+
+// ---------------------------------------------------------------------------
+// Wire format: the envelope records how far past the injection point it starts.
+// ---------------------------------------------------------------------------
+
+mod envelope_coordinates {
+    use super::*;
+    use strhide::core::params::LocalParams;
+    use strhide::structure::envelope::{EnvelopeHeader, HEADER_SIZE};
+    use strhide::structure::{
+        PayloadSource, StructureProfile, WriteOptions, read_carrier_bytes, verify_carrier_bytes,
+        write_carrier_bytes,
+    };
+
+    /// Byte offset of the envelope inside a carrier written with `png:chunk`:
+    /// the chunk is `[len:4][type:4][data]`, and the envelope starts at `data`.
+    fn png_chunk_envelope_offset(stego: &[u8]) -> usize {
+        let ty = stego
+            .windows(4)
+            .position(|w| w == b"prIv")
+            .expect("prIv chunk present");
+        // `prIv` is the chunk type; its 4-byte length precedes it and the data
+        // starts right after it.
+        ty + 4
+    }
+
+    fn write(png: &[u8], strategy: &str) -> Vec<u8> {
+        let opts = WriteOptions {
+            strategy,
+            ..WriteOptions::default()
+        };
+        let (stego, _) = write_carrier_bytes(
+            png,
+            PayloadSource::Bytes(b"offset delta payload"),
+            &opts,
+            &LocalParams::default(),
+            &StructureProfile::default(),
+        )
+        .expect("write");
+        stego
+    }
+
+    fn header_of(stego: &[u8], env: usize) -> EnvelopeHeader {
+        EnvelopeHeader::unpack_with_profile(
+            &stego[env..env + HEADER_SIZE],
+            None,
+            &StructureProfile::default(),
+        )
+        .expect("unpack header")
+    }
+
+    #[test]
+    fn offset_delta_matches_the_strategy_layout() {
+        let png = make_png();
+
+        // `chunk` writes the envelope after the 8-byte chunk header.
+        let chunked = write(&png, "chunk");
+        let hdr = header_of(&chunked, png_chunk_envelope_offset(&chunked));
+        assert_eq!(hdr.offset_delta, 8, "png:chunk displaces the envelope by 8");
+        assert_eq!(
+            hdr.inject_offset,
+            png_chunk_envelope_offset(&chunked) as u64 - 8
+        );
+
+        // `eof` appends the envelope exactly at the end of the original
+        // carrier, i.e. at its injection point, so the shift is zero.
+        let appended = write(&png, "eof");
+        let hdr = header_of(&appended, png.len());
+        assert_eq!(hdr.offset_delta, 0, "eof does not displace the envelope");
+        assert_eq!(hdr.inject_offset, png.len() as u64);
+    }
+
+    #[test]
+    fn verify_accepts_untampered_coordinates_and_reads_payload() {
+        let png = make_png();
+        for strategy in ["chunk", "eof"] {
+            let stego = write(&png, strategy);
+            let verify =
+                verify_carrier_bytes(&stego, None, &StructureProfile::default()).expect("verify");
+            assert!(
+                verify.level2_envelope.ok,
+                "{strategy}: {}",
+                verify.level2_envelope.detail
+            );
+            let read =
+                read_carrier_bytes(&stego, None, &StructureProfile::default()).expect("read back");
+            assert_eq!(read.data, b"offset delta payload");
+        }
+    }
+
+    #[test]
+    fn verify_rejects_a_header_whose_coordinates_disagree() {
+        let png = make_png();
+        let stego = write(&png, "chunk");
+        let env = png_chunk_envelope_offset(&stego);
+
+        // `inject_offset` lives at header bytes 80..88, outside the 80-byte AAD
+        // and inside the public-key mask, so flipping a raw bit there changes
+        // the unmasked value while leaving the metadata AEAD intact — exactly
+        // the shape the old verify waved through.
+        let mut tampered = stego.clone();
+        tampered[env + 80] ^= 0x01;
+
+        let verify = verify_carrier_bytes(&tampered, None, &StructureProfile::default())
+            .expect("verify still returns a report");
+        assert!(
+            !verify.level2_envelope.ok,
+            "Level 2 must reject coordinates that disagree with the envelope: {}",
+            verify.level2_envelope.detail
+        );
+        assert!(
+            verify.level2_envelope.detail.contains("disagree"),
+            "detail should name the mismatch, got: {}",
+            verify.level2_envelope.detail
+        );
+    }
+}
