@@ -174,13 +174,34 @@ pub fn format_msg(tpl: &str, args: &[(&str, &dyn std::fmt::Display)]) -> String 
                 rest = stripped;
             } else if let Some(end) = after.find('}') {
                 let raw_key = after[..end].trim();
-                let key = raw_key
-                    .split_once(':')
-                    .map(|(k, _)| k.trim())
-                    .unwrap_or(raw_key);
+                let (key, spec) = match raw_key.split_once(':') {
+                    Some((k, s)) => (k.trim(), Some(s.trim())),
+                    None => (raw_key, None),
+                };
                 match args.iter().find(|(k, _)| *k == key) {
                     Some((_, v)) => {
-                        let _ = write!(out, "{v}");
+                        // Argument values are type-erased to `&dyn Display`, so
+                        // a precision specifier cannot be forwarded to `write!`
+                        // directly. Numeric values are the only ones that use
+                        // one, and `f64::from_str` round-trips their `Display`
+                        // output, so honour `{x:.2}` by re-rendering the parsed
+                        // number; everything else keeps plain `Display`
+                        // (review R2 P2-7: the specifier used to be dropped and
+                        // dry-run percentages printed at full precision).
+                        let rendered = v.to_string();
+                        let mut wrote = false;
+                        if let Some(prec) = spec
+                            .and_then(|s| s.strip_prefix('.'))
+                            .filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+                            .and_then(|p| p.parse::<usize>().ok())
+                            && let Ok(num) = rendered.parse::<f64>()
+                            && num.is_finite()
+                        {
+                            wrote = write!(out, "{num:.prec$}").is_ok();
+                        }
+                        if !wrote {
+                            let _ = out.write_str(&rendered);
+                        }
                     }
                     None => {
                         debug_assert!(false, "i18n: missing arg `{key}` in template: {tpl}");
@@ -246,6 +267,18 @@ mod tests {
         let tpl = "Size: {kib:.1} KiB";
         let res = format_msg(tpl, &[("kib", &"12.3")]);
         assert_eq!(res, "Size: 12.3 KiB");
+    }
+
+    #[test]
+    fn test_format_msg_precision_applies_to_numbers() {
+        // A `f64` argument is rendered through `Display`, so the precision had
+        // to be honoured by re-rendering the parsed value; without it the
+        // dry-run line printed `12.345678901234567%`.
+        let value = 12.3456789_f64;
+        assert_eq!(format_msg("~{pct:.2}%", &[("pct", &value)]), "~12.35%");
+        assert_eq!(format_msg("{pct:.1}", &[("pct", &0.0_f64)]), "0.0");
+        // Text arguments are unaffected.
+        assert_eq!(format_msg("{name:.2}", &[("name", &"abc")]), "abc");
     }
 
     #[test]

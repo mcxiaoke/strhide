@@ -8,10 +8,15 @@
 //! through a side channel.
 //!
 //! [`Payload`] is that single shape: borrowed or owned bytes plus the metadata
-//! a caller already knows. **Metadata is not on the wire in this phase**
-//! (`name` / `kind` travel no further than the engine call); the content
-//! domain's micro-header that persists them arrives in stage 3. The signature
-//! is written once now so it does not have to change twice.
+//! a caller already knows.
+//!
+//! What the wire actually carries today: the content domain's micro-header
+//! persists the *file name* (tag `0x01`, see `stego::envelope`), so a file
+//! payload written by `embed` is recreated under its own name. The *kind* is
+//! not persisted — a decoded payload is either named (file) or anonymous
+//! (text/raw), and an anonymous one comes back as [`PayloadKind::Bytes`]. The
+//! structure domain still carries no payload metadata at all. The signature is
+//! written once so those two can catch up without an API change.
 //!
 //! ```no_run
 //! use strhide::core::payload::Payload;
@@ -27,8 +32,11 @@ use std::borrow::Cow;
 
 /// What the payload originally was.
 ///
-/// Only used for display today; stage 3 writes it into the content-domain
-/// micro-header so an extract can restore a file with the right name.
+/// Drives the content domain's micro-header tag: [`PayloadKind::File`] with a
+/// name is written as a named entry, everything else as an anonymous blob. The
+/// tag is not read back symmetrically — an anonymous entry decodes to
+/// [`PayloadKind::Bytes`] — so treat it as "how to store this", not as a field
+/// that survives a round trip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum PayloadKind {

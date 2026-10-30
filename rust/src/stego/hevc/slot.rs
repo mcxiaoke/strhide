@@ -134,10 +134,12 @@ impl core::fmt::Debug for BinOp {
 /// A candidate steganographic slot corresponding to an in-place CABAC bypass sign bit.
 ///
 /// Field widths are chosen for the pool, not for the arithmetic: a video
-/// carrier at 1080p60 yields ~17 M slots in a 13 s clip, so 32 bytes here
-/// (where four `usize` fields made it 56) is the difference between one and two
-/// gigabytes. `qp` stays an `i16` because the H.265 QP range for 8-bit video is
-/// -6..=51 and the value is only consumed as an `i32` by the cost model.
+/// carrier at 1080p60 yields ~17 M slots in a 13 s clip, so 16 bytes here
+/// (down from 56 when the fields were four `usize`s) keeps the pool at roughly
+/// a quarter of a gigabyte instead of nearly a gigabyte. The QP of a slot is
+/// not stored: the cost model only needs it while the slice is being decoded.
+/// Both the struct size and the `BinOp` width are asserted below so a field
+/// change that doubles the pool cannot slip through unnoticed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StegoSlot {
     /// Perceptual distortion cost for STC matrix coding.
@@ -226,8 +228,8 @@ pub struct CabacRecorder {
     pub current_slice_idx: usize,
     /// Current substream index.
     pub current_substream_idx: usize,
-    /// Drift band of the picture currently being decoded (see
-    /// [`StegoSlot::band`]); stamped onto every slot this recorder produces.
+    /// Drift band of the picture currently being decoded; recorded alongside
+    /// the slot ranges (`slice_slot_ranges`) rather than inside each slot.
     pub current_band: u8,
     /// Next slot awaiting its magnitude back-fill from `record_stego_level`.
     ///

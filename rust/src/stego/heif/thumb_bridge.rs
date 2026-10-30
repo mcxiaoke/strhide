@@ -1560,7 +1560,7 @@ mod tests {
         meta_body.extend_from_slice(&iloc);
         let meta = mk_large_box(b"meta", &meta_body);
 
-        let mut file = mk_box(b"ftyp", b"heic    ");
+        let mut file = mk_box(b"ftyp", b"heic\0\0\0\0");
         file.extend_from_slice(&meta);
 
         let parsed = parse_isobmff(&file).expect("large-size meta must parse");
