@@ -59,17 +59,26 @@ pub fn resolve_password(
         // Name the file in the error: the bare OS message ("file not found")
         // does not tell the user WHICH password file failed, and several
         // commands accept one.
-        let s = std::fs::read_to_string(pf).map_err(|e| {
+        //
+        // Only the first line is read, and only up to a sane length: a typo
+        // that points this flag at a log file or an image used to pull the
+        // whole thing into memory (and demand it be valid UTF-8).
+        const MAX_PASSWORD_LINE: u64 = 4096;
+        let file = std::fs::File::open(pf).map_err(|e| {
             StrHideError::General(format!(
                 "Failed to read password file '{}': {e}",
                 pf.display()
             ))
         })?;
-        let first_line = s
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .trim_end_matches(&['\r', '\n'][..]);
+        let mut first_line = String::new();
+        let mut reader = std::io::BufReader::new(std::io::Read::take(file, MAX_PASSWORD_LINE));
+        std::io::BufRead::read_line(&mut reader, &mut first_line).map_err(|e| {
+            StrHideError::General(format!(
+                "Failed to read password file '{}': {e}",
+                pf.display()
+            ))
+        })?;
+        let first_line = first_line.trim_end_matches(&['\r', '\n'][..]);
         if first_line.is_empty() {
             return Err(StrHideError::Password("Password cannot be empty".into()));
         }

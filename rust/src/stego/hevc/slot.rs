@@ -158,6 +158,13 @@ pub struct StegoSlot {
 const _: () = assert!(core::mem::size_of::<StegoSlot>() == 16);
 const _: () = assert!(core::mem::size_of::<BinOp>() == 2);
 
+/// Slice length, in carrier bytes, that the recorder preallocates for.
+///
+/// Anything longer still records correctly — `Vec` grows — but only this much
+/// is reserved up front, which bounds the per-decoder reservation at roughly
+/// 56 MiB no matter what the carrier claims.
+pub const CAPACITY_HINT_BYTES: usize = 1 << 20;
+
 /// Metadata and boundaries for a WPP/Tile substream within a slice.
 #[derive(Clone, Debug)]
 pub struct SubstreamRecord {
@@ -480,15 +487,25 @@ impl CabacRecorder {
     }
 
     /// [`Self::with_slice_mode`] with capacity preallocated based on slice byte length.
+    ///
+    /// The hint is capped: `slice_len` comes from the carrier, and the embed
+    /// mode reserves 18 `BinOp`s plus a slot and a pending sign per input byte
+    /// (~56 bytes of reservation per carrier byte). A single large NAL — an 8K
+    /// intra frame, or a deliberately fat one — turned that into gigabytes of
+    /// up-front reservation per recorder, multiplied by the batched GOP
+    /// decoders. Reserving for at most [`CAPACITY_HINT_BYTES`] and letting
+    /// `Vec` grow past it keeps the common case allocation-free without letting
+    /// the carrier dictate the allocation (review R2 P2-1).
     pub fn with_slice_capacity(
         slice_idx: usize,
         band: u8,
         mode: RecordMode,
         slice_len: usize,
     ) -> Self {
+        let hint = slice_len.min(CAPACITY_HINT_BYTES);
         let (ops_cap, slots_cap) = match mode {
-            RecordMode::Embed => (slice_len.saturating_mul(18), slice_len),
-            RecordMode::Slots => (0, slice_len),
+            RecordMode::Embed => (hint.saturating_mul(18), hint),
+            RecordMode::Slots => (0, hint),
         };
         CabacRecorder {
             ops: Vec::with_capacity(ops_cap),
