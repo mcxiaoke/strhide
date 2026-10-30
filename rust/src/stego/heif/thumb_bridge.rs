@@ -901,7 +901,12 @@ fn parse_isobmff(data: &[u8]) -> Result<IsobmffMeta, StrHideError> {
 
     while pos + 8 <= data.len() {
         let (bsize, bhdr) = read_box_header(data, pos)?;
-        if bsize == 0 || pos + bsize > data.len() {
+        // `bsize` comes straight from the file, so `pos + bsize` can overflow
+        // (a `largesize` of `u64::MAX` wraps it below `pos`) and let a bogus
+        // box through only to panic on the slice below. Compare against the
+        // remaining length instead: that cannot overflow and stays tolerant of
+        // a truncated tail.
+        if bsize == 0 || bsize > data.len() - pos {
             break;
         }
         let fcc: [u8; 4] = data[pos + 4..pos + 8].try_into().unwrap();
@@ -929,7 +934,7 @@ fn parse_isobmff(data: &[u8]) -> Result<IsobmffMeta, StrHideError> {
 
     while mpos + 8 <= meta_end {
         let (sb_sz, _) = read_box_header(data, mpos)?;
-        if sb_sz == 0 || mpos + sb_sz > meta_end {
+        if sb_sz == 0 || sb_sz > meta_end - mpos {
             break;
         }
         let sfcc = &data[mpos + 4..mpos + 8];
@@ -958,7 +963,7 @@ fn parse_isobmff(data: &[u8]) -> Result<IsobmffMeta, StrHideError> {
         let mut ipos = if iver == 0 { 14 } else { 16 };
         while ipos + 8 <= iinf_buf.len() {
             let (infe_sz, _) = read_box_header(iinf_buf, ipos)?;
-            if infe_sz == 0 || ipos + infe_sz > iinf_buf.len() {
+            if infe_sz == 0 || infe_sz > iinf_buf.len() - ipos {
                 break;
             }
             if &iinf_buf[ipos + 4..ipos + 8] == b"infe" && infe_sz >= 16 {
@@ -1159,7 +1164,7 @@ fn parse_pitm_and_iref(
         let mut p = 12usize;
         while p + 8 <= b.len() {
             let sub_sz = u32::from_be_bytes(b[p..p + 4].try_into().unwrap()) as usize;
-            if sub_sz < 8 || p + sub_sz > b.len() {
+            if sub_sz < 8 || sub_sz > b.len() - p {
                 break;
             }
             let ref_type = &b[p + 4..p + 8];
@@ -1192,7 +1197,15 @@ fn read_box_header(bytes: &[u8], pos: usize) -> Result<(usize, usize), StrHideEr
         if pos + 16 > bytes.len() {
             return Err(StrHideError::CorruptedData("Truncated 64-bit box".into()));
         }
-        let size_64 = u64::from_be_bytes(bytes[pos + 8..pos + 16].try_into().unwrap()) as usize;
+        let size_64 = u64::from_be_bytes(bytes[pos + 8..pos + 16].try_into().unwrap());
+        // A 64-bit size must at least cover its own 16-byte header. Anything
+        // smaller (including 0, which the 32-bit form uses for "to end of
+        // file") is malformed and would make the callers' `size > remaining`
+        // comparison meaningless.
+        let size_64 = usize::try_from(size_64)
+            .ok()
+            .filter(|&s| s >= 16)
+            .ok_or_else(|| StrHideError::CorruptedData("Invalid 64-bit box size".into()))?;
         Ok((size_64, 16))
     } else if size_32 == 0 {
         Ok((bytes.len() - pos, 8))

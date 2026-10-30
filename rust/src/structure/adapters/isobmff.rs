@@ -456,16 +456,19 @@ pub fn isobmff_can_item_hidden(reader: &mut dyn SeekRead) -> bool {
 
     let mut pos = 0usize;
     while pos + 8 <= data.len() {
-        let (bsize, _) = match read_box_size(&data, pos) {
+        let (bsize, bhdr) = match read_box_size(&data, pos) {
             Ok(s) => s,
             Err(_) => return false,
         };
-        if bsize == 0 || pos + bsize > data.len() {
+        if bsize == 0 || bsize > data.len() - pos {
             break;
         }
         if &data[pos + 4..pos + 8] == b"meta" {
             let m_end = pos + bsize;
-            let mut mpos = pos + 12;
+            // The `meta` box header is 8 bytes for the 32-bit form and 16 for
+            // a `largesize` one; hardcoding 8 put this walk 8 bytes into the
+            // first child of a large `meta` (review R2 P2-12).
+            let mut mpos = pos + bhdr + 4;
             let mut has_iinf = false;
             let mut has_iloc = false;
             while mpos + 8 <= m_end {
@@ -473,7 +476,7 @@ pub fn isobmff_can_item_hidden(reader: &mut dyn SeekRead) -> bool {
                     Ok(s) => s,
                     Err(_) => break,
                 };
-                if sb_size == 0 || mpos + sb_size > m_end {
+                if sb_size == 0 || sb_size > m_end - mpos {
                     break;
                 }
                 if &data[mpos + 4..mpos + 8] == b"iinf" {
@@ -525,7 +528,16 @@ fn read_box_size(bytes: &[u8], pos: usize) -> Result<(usize, usize), StrHideErro
                 "Truncated 64-bit box header".into(),
             ));
         }
-        let size64 = u64::from_be_bytes(bytes[pos + 8..pos + 16].try_into().unwrap()) as usize;
+        // `largesize` is attacker-controlled: a value that does not fit in
+        // `usize`, or one smaller than the 16-byte header it describes, must
+        // be rejected here. Callers compare `size > remaining`, so letting a
+        // wrapped value through would turn into a slice panic instead of an
+        // error (review R2 P0-5).
+        let size64 = u64::from_be_bytes(bytes[pos + 8..pos + 16].try_into().unwrap());
+        let size64 = usize::try_from(size64)
+            .ok()
+            .filter(|&s| s >= 16)
+            .ok_or_else(|| StrHideError::CorruptedData("Invalid 64-bit box size".into()))?;
         Ok((size64, 16))
     } else if size32 == 0 {
         Ok((bytes.len() - pos, 8))
@@ -617,7 +629,7 @@ fn heif_item_hidden_inject(
     let mut meta_span = None;
     while pos + 8 <= host_bytes.len() {
         let (bsize, hlen) = read_box_size(&host_bytes, pos)?;
-        if bsize < hlen || pos + bsize > host_bytes.len() {
+        if bsize < hlen || bsize > host_bytes.len() - pos {
             return Err(StrHideError::CorruptedData("Invalid box size".into()));
         }
         if &host_bytes[pos + 4..pos + 8] == b"meta" {
@@ -650,7 +662,7 @@ fn heif_item_hidden_inject(
     let mut bpos = m_body_start;
     while bpos + 8 <= m_end {
         let (s_size, s_hlen) = read_box_size(&host_bytes, bpos)?;
-        if s_size < s_hlen || bpos + s_size > m_end {
+        if s_size < s_hlen || s_size > m_end - bpos {
             return Err(StrHideError::CorruptedData(
                 "Invalid sub-box in meta".into(),
             ));
@@ -958,7 +970,7 @@ fn heif_item_hidden_strip(
     let mut meta_span = None;
     while pos + 8 <= stego_bytes.len() {
         let (bsize, hlen) = read_box_size(&stego_bytes, pos)?;
-        if bsize < hlen || pos + bsize > stego_bytes.len() {
+        if bsize < hlen || bsize > stego_bytes.len() - pos {
             return Err(StrHideError::CorruptedData("Invalid box size".into()));
         }
         if &stego_bytes[pos + 4..pos + 8] == b"meta" {
@@ -1004,7 +1016,7 @@ fn heif_item_hidden_strip(
     let mut bpos = m_body_start;
     while bpos + 8 <= m_end {
         let (s_size, s_hlen) = read_box_size(&stego_bytes, bpos)?;
-        if s_size < s_hlen || bpos + s_size > m_end {
+        if s_size < s_hlen || s_size > m_end - bpos {
             return Err(StrHideError::CorruptedData(
                 "Invalid sub-box in meta".into(),
             ));
@@ -1232,22 +1244,23 @@ fn isobmff_has_iloc_item(
 
     let mut pos = 0usize;
     while pos + 8 <= data.len() {
-        let (bsize, _) = match read_box_size(&data, pos) {
+        let (bsize, bhdr) = match read_box_size(&data, pos) {
             Ok(s) => s,
             Err(_) => return Ok(false),
         };
-        if bsize == 0 || pos + bsize > data.len() {
+        if bsize == 0 || bsize > data.len() - pos {
             break;
         }
         if &data[pos + 4..pos + 8] == b"meta" {
             let m_end = pos + bsize;
-            let mut mpos = pos + 12;
+            // Same header-length fix as `isobmff_can_item_hidden`.
+            let mut mpos = pos + bhdr + 4;
             while mpos + 8 <= m_end {
                 let (sb_size, _) = match read_box_size(&data, mpos) {
                     Ok(s) => s,
                     Err(_) => break,
                 };
-                if sb_size == 0 || mpos + sb_size > m_end {
+                if sb_size == 0 || sb_size > m_end - mpos {
                     break;
                 }
                 if &data[mpos + 4..mpos + 8] == b"iloc" {
