@@ -17,7 +17,10 @@
 
 ```bash
 cd rust
-cargo build --release       # 编译，产物在 target/release/strhide
+cargo build --release --all-features   # 编译，产物在 target/release/strhide
+# 注意：默认 feature 不含 cli，`cargo build --release` 只编库、**不会**更新
+# target/release/strhide(.exe)，跑 CLI 与 baseline_hash 前必须带 --all-features
+# （或 --features cli），否则会拿旧二进制验证新代码。
 cargo test --all-features --all-targets   # 全量测试（默认 feature 集不含 cli，CLI 测试按 feature 门控）
 cargo test local_ -- --ignored --all-features # 单独运行本地批量测试（约 3 分钟）
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings   # 提交前格式化并修复所有 lint
