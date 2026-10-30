@@ -460,18 +460,21 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
     // Set when the calibrated DCT test fired; used to decide whether the
     // "clean is not proof" caveat still applies to this report.
     let mut calibrated_signal = false;
+    // Set when a PNG could not be turned into pixels at all (16-bit, Adam7,
+    // oversized, corrupt). Without it the report showed zero spatial detectors
+    // and still read as `clean` (review R2 P1-3).
+    let mut png_stats_skipped = false;
 
     // 3. Statistical domain: strictly separate spatial domain (PNG) and frequency domain (JPEG)
     if view.is_whole() {
         let data = view.prefix;
         match format {
-            Some(FileFormat::Png) => {
-                if let Some((px, width, channels)) = decode_png_pixels(data)
-                    && !px.is_empty()
-                {
+            Some(FileFormat::Png) => match decode_png_pixels(data) {
+                Some((px, width, channels)) if !px.is_empty() => {
                     track_spatial_domain(&px, width, channels, &mut findings, &mut detectors);
                 }
-            }
+                _ => png_stats_skipped = true,
+            },
             Some(FileFormat::Jpeg) => {
                 track_jpeg_dct_domain(data, &mut findings, &mut detectors, &mut calibrated_signal);
             }
@@ -501,6 +504,12 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
             PREFIX_WINDOW / 1024,
             STRUCT_TAIL_WINDOW / 1024
         ));
+    }
+    if png_stats_skipped {
+        notes.push(
+            "PNG pixel statistics were skipped (16-bit depth, interlaced/Adam7, oversized, or undecodable): no spatial detector ran, so this verdict says nothing about pixel-domain embedding"
+                .to_string(),
+        );
     }
 
     ScanReport {
@@ -1660,7 +1669,13 @@ fn track_jpeg_dct_domain(
             status: "SKIPPED".into(),
             metric: "n/a".into(),
             threshold: Some(format!("{CALIBRATION_FLAG_RATE:.3}")),
-            detail: "carrier quantization not suitable for calibration (e.g. q100)".into(),
+            // Name the real gate. The old text said "e.g. q100", but the check
+            // is `mean step < 2`, which a quality≈95 table also trips, and the
+            // other exits (unreadable DQT, CMYK/16-bit, geometry mismatch) have
+            // nothing to do with quality (review R2 P1-4).
+            detail: "quantisation too fine for calibration (mean step < 2), \
+                     or the DQT/pixel data could not be read"
+                .into(),
         });
     }
 
@@ -1693,6 +1708,22 @@ fn track_jpeg_dct_domain(
                 detail: "natural Laplacian AC coefficient decay".into(),
             });
         }
+    } else {
+        // Reporting nothing at all made a skipped detector indistinguishable
+        // from a clean one. Say it was skipped, and why (review R2 P1-4).
+        let detail = if coefficients.is_none() {
+            "no readable DCT coefficient stream"
+        } else {
+            "too few AC coefficient pairs with enough samples for chi-square"
+        };
+        detectors.push(DetectorMetric {
+            name: "dct:chi2".into(),
+            domain: "dct".into(),
+            status: "SKIPPED".into(),
+            metric: "n/a".into(),
+            threshold: Some("0.500".into()),
+            detail: detail.into(),
+        });
     }
 }
 

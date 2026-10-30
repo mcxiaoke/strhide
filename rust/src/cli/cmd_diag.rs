@@ -16,6 +16,45 @@ use super::args::*;
 use super::helpers::*;
 use super::render::*;
 
+/// Print the content-domain half of an `inspect` result.
+///
+/// Shared by the single-carrier and batch paths (they used to duplicate this
+/// block), and prints the content-domain failure when there is one: a failed
+/// content probe used to be dropped entirely in text mode, leaving the reader
+/// to believe the content half had been checked and was clean (review R2 P2-6).
+fn print_content_domain(dual: &crate::facade::DualInspect) {
+    if let Some(ref cs) = dual.content
+        && cs.has_hidden_data
+    {
+        println!();
+        println!("Content Steganography Domain:");
+        println!("  Format: {}", cs.format);
+        println!("  Has Hidden Data: true");
+        if let Some(algo) = &cs.algorithm {
+            println!("  Algorithm: {}", algo);
+        }
+        if let Some(codec) = &cs.codec {
+            println!("  Codec: {}", codec);
+        }
+        if let Some(len) = cs.envelope_len {
+            println!("  Envelope Size: {} bytes", len);
+        }
+        if let Some(len) = cs.payload_len {
+            println!("  Payload Size: {} bytes", len);
+        }
+        if let Some(media) = &cs.media_info {
+            println!("  Dimensions: {}", media);
+        }
+        return;
+    }
+    if let Some(ref err) = dual.content_error {
+        println!(
+            "  ? content inspection failed: {}",
+            err.render(crate::core::i18n::lang())
+        );
+    }
+}
+
 pub(crate) fn handle_inspect(
     args: InspectArgs,
     _cfg: &FileConfig,
@@ -51,30 +90,7 @@ pub(crate) fn handle_inspect(
             print_json(&dual)?;
         } else if !quiet {
             print_inspect_result(&dual.structure);
-            #[cfg(feature = "content")]
-            if let Some(ref cs) = dual.content
-                && cs.has_hidden_data
-            {
-                println!();
-                println!("Content Steganography Domain:");
-                println!("  Format: {}", cs.format);
-                println!("  Has Hidden Data: true");
-                if let Some(algo) = &cs.algorithm {
-                    println!("  Algorithm: {}", algo);
-                }
-                if let Some(codec) = &cs.codec {
-                    println!("  Codec: {}", codec);
-                }
-                if let Some(len) = cs.envelope_len {
-                    println!("  Envelope Size: {} bytes", len);
-                }
-                if let Some(len) = cs.payload_len {
-                    println!("  Payload Size: {} bytes", len);
-                }
-                if let Some(media) = &cs.media_info {
-                    println!("  Dimensions: {}", media);
-                }
-            }
+            print_content_domain(&dual);
         }
         return Ok(());
     }
@@ -100,30 +116,7 @@ pub(crate) fn handle_inspect(
                         carrier.display()
                     );
                     print_inspect_result(&dual.structure);
-                    #[cfg(feature = "content")]
-                    if let Some(ref cs) = dual.content
-                        && cs.has_hidden_data
-                    {
-                        println!();
-                        println!("Content Steganography Domain:");
-                        println!("  Format: {}", cs.format);
-                        println!("  Has Hidden Data: true");
-                        if let Some(algo) = &cs.algorithm {
-                            println!("  Algorithm: {}", algo);
-                        }
-                        if let Some(codec) = &cs.codec {
-                            println!("  Codec: {}", codec);
-                        }
-                        if let Some(len) = cs.envelope_len {
-                            println!("  Envelope Size: {} bytes", len);
-                        }
-                        if let Some(len) = cs.payload_len {
-                            println!("  Payload Size: {} bytes", len);
-                        }
-                        if let Some(media) = &cs.media_info {
-                            println!("  Dimensions: {}", media);
-                        }
-                    }
+                    print_content_domain(&dual);
                     println!();
                 }
                 reports.push(dual);
@@ -166,7 +159,7 @@ pub(crate) fn handle_inspect(
             "{}",
             t!(
                 Msg::InspectSummary,
-                total = reports.len(),
+                total = reports.len() + failures,
                 hidden = hidden,
                 failed = failures,
                 elapsed = elapsed_str
@@ -337,7 +330,7 @@ pub(crate) fn handle_verify(
             "{}",
             t!(
                 Msg::VerifySummary,
-                total = reports.len(),
+                total = reports.len() + failures,
                 passed = passed,
                 failed = failed_cnt,
                 unreadable = failures,
@@ -432,7 +425,7 @@ pub(crate) fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideErr
             "{}",
             t!(
                 Msg::ScanSummary,
-                total = reports.len(),
+                total = reports.len() + failures,
                 findings = findings_cnt,
                 failed = failures,
                 elapsed = elapsed_str
