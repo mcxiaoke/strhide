@@ -124,7 +124,8 @@ fn scan_lang_flag(argv: &[std::ffi::OsString]) -> Option<&str> {
 
 fn scan_subcommand(argv: &[std::ffi::OsString]) -> Option<&str> {
     const SUBCOMMANDS: &[&str] = &[
-        "write", "read", "restore", "inspect", "verify", "scan", "embed", "extract", "list",
+        "write", "w", "read", "r", "restore", "s", "inspect", "verify", "scan", "embed", "e",
+        "extract", "x", "capacity", "c", "list", "l",
     ];
     let mut skip_next = false;
     for arg in argv.iter().skip(1) {

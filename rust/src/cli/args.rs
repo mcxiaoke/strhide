@@ -72,23 +72,23 @@ Run `sth <COMMAND> --help` for the options of one command.";
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Hide secret payload into carrier file
-    #[command(display_order = 10)]
+    #[command(display_order = 10, visible_alias = "w")]
     Write(WriteArgs),
     /// Read and extract hidden payload from carrier
-    #[command(display_order = 11)]
+    #[command(display_order = 11, visible_alias = "r")]
     Read(ReadArgs),
     /// 100% loss-free restoration of the original host file
-    #[command(display_order = 12)]
+    #[command(display_order = 12, visible_alias = "s")]
     Restore(RestoreArgs),
 
     /// Content-adaptive steganography: embed payload into image pixels or DCT coefficients (HILL/UERD)
-    #[command(display_order = 20)]
+    #[command(display_order = 20, visible_alias = "e")]
     Embed(EmbedArgs),
     /// Content-adaptive steganography: extract payload from image pixels or DCT coefficients
-    #[command(display_order = 21)]
+    #[command(display_order = 21, visible_alias = "x")]
     Extract(ExtractArgs),
     /// Probe maximum embedding capacity of image carrier(s)
-    #[command(display_order = 22)]
+    #[command(display_order = 22, visible_alias = "c")]
     Capacity(CapacityArgs),
 
     /// Inspect carrier structure and envelope metadata
@@ -101,7 +101,7 @@ pub enum Commands {
     #[command(display_order = 32)]
     Scan(ScanArgs),
     /// List all supported formats, strategies, and their capacity limits
-    #[command(display_order = 33)]
+    #[command(display_order = 33, visible_alias = "l")]
     List(ListArgs),
 }
 
@@ -116,10 +116,13 @@ pub enum Commands {
 #[derive(Subcommand, Debug)]
 pub enum ContainerCommands {
     /// Hide secret payload into carrier file
+    #[command(visible_alias = "w")]
     Write(WriteArgs),
     /// Read and extract hidden payload from carrier
+    #[command(visible_alias = "r")]
     Read(ReadArgs),
     /// 100% loss-free restoration of the original host file
+    #[command(visible_alias = "s")]
     Restore(RestoreArgs),
 }
 
@@ -127,10 +130,13 @@ pub enum ContainerCommands {
 #[derive(Subcommand, Debug)]
 pub enum StegoCommands {
     /// Content-adaptive steganography: embed payload into image pixels or DCT coefficients (HILL/UERD)
+    #[command(visible_alias = "e")]
     Embed(EmbedArgs),
     /// Content-adaptive steganography: extract payload from image pixels or DCT coefficients
+    #[command(visible_alias = "x")]
     Extract(ExtractArgs),
     /// Probe maximum embedding capacity of image carrier(s)
+    #[command(visible_alias = "c")]
     Capacity(CapacityArgs),
 }
 
@@ -144,6 +150,7 @@ pub enum DiagCommands {
     /// Black-box steganalysis: scan file(s) for hidden content, known or unknown
     Scan(ScanArgs),
     /// List all supported formats, strategies, and their capacity limits
+    #[command(visible_alias = "l")]
     List(ListArgs),
 }
 

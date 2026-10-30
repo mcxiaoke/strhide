@@ -69,7 +69,7 @@ required-features = ["cli"]
 
 [[bin]]
 name = "sth"
-path = "src/main.rs"
+path = "src/lite.rs"
 required-features = ["cli"]
 
 # Domain-specific entry points. Thin `main`s in src/bin/ share the same lib

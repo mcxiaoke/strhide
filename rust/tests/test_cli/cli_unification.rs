@@ -850,3 +850,56 @@ fn cross_domain_auto_fallback() {
     assert_eq!(code(&extract_auto), 0, "stderr: {}", stderr(&extract_auto));
     assert_eq!(stdout(&extract_auto).trim(), "cross domain struct payload");
 }
+
+#[test]
+fn subcommand_short_aliases_work() {
+    let dir = scratch("short_aliases");
+    seed(&dir, &["carrier.png"]);
+    seed_stego(&dir, &["stego.png"]);
+
+    // 1. Structure container domain: w (write), r (read), s (restore)
+    let w = run(
+        &dir,
+        &[
+            "w",
+            "carrier.png",
+            "-t",
+            "struct_secret",
+            "--in-place",
+            "--no-backup",
+        ],
+    );
+    assert_eq!(code(&w), 0, "stderr: {}", stderr(&w));
+
+    let r = run(&dir, &["r", "carrier.png", "--stdout"]);
+    assert_eq!(code(&r), 0, "stderr: {}", stderr(&r));
+    assert_eq!(stdout(&r).trim(), "struct_secret");
+
+    let s = run(&dir, &["s", "carrier.png", "--in-place", "--no-backup"]);
+    assert_eq!(code(&s), 0, "stderr: {}", stderr(&s));
+
+    // 2. Content adaptive steganography domain: c (capacity), e (embed), x (extract)
+    let c = run(&dir, &["c", "stego.png"]);
+    assert_eq!(code(&c), 0, "stderr: {}", stderr(&c));
+
+    let e = run(
+        &dir,
+        &[
+            "e",
+            "stego.png",
+            "-t",
+            "stego_secret",
+            "--in-place",
+            "--no-backup",
+        ],
+    );
+    assert_eq!(code(&e), 0, "stderr: {}", stderr(&e));
+
+    let x = run(&dir, &["x", "stego.png", "--stdout"]);
+    assert_eq!(code(&x), 0, "stderr: {}", stderr(&x));
+    assert_eq!(stdout(&x).trim(), "stego_secret");
+
+    // 3. Diagnostics domain: l (list)
+    let l = run(&dir, &["l"]);
+    assert_eq!(code(&l), 0, "stderr: {}", stderr(&l));
+}
