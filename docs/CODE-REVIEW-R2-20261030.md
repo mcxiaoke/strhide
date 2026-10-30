@@ -8,6 +8,8 @@
 
 ## 0. 结论摘要
 
+> **处理状态（2026-10-30 20:35 更新）**：本报告 29 条已修复 20 条，9 条主动搁置（理由见文末「7. 处理状态」）。修复分 4 批提交：`caeafa2`、`1ae290a`、`d63a20b`、`0bac4c1`、`fb2991e`、`623fbbd`、`7df1bf5`、`770bf6b`、`1cefc77`；`fmt`/`clippy -D warnings`/全量测试/`baseline_hash --check`（58 例）全绿。
+
 上一轮 P0/P1 大部分已落地（C-1~C-4、H-1/H-2、M-1/M-2/M-4、M-23、M-26 等已确认修复）。本轮在**新代码路径与遗留 Medium** 上共确认 **7 项 P0、10 项 P1、12 项 P2**。
 
 最要紧的三条：
@@ -234,3 +236,48 @@
 每批改完按 AGENTS.md 全流程验证：`cargo fmt && cargo clippy --all-targets --all-features -D warnings`、`cargo test --all-features --all-targets`、`cargo test local_ -- --ignored`、`python scripts/baseline_hash.py --check`。
 
 **必须标「待实测」的两项**：M-34 的检测器阈值标定（需语料跑 FPR）、`jpeg-decoder 0.3` 是否自带尺寸上限（影响 P1-7 的最终严重度）。
+
+---
+
+## 7. 处理状态（2026-10-30 20:35）
+
+### 已修复
+
+| 条目 | 提交 | 一句话 |
+|---|---|---|
+| P0-1 thumb_bridge 64 位 box 尺寸溢出 | `caeafa2` | 拒绝装不进 `usize` 或小于 16 字节头的 `largesize`，全部改成 `size > limit - pos` 比较 |
+| P0-5 isobmff 同类未 checked 运算 + P2-12 `pos + 12` | `caeafa2` | 同上；`meta` 子 box 用真实头长 |
+| P0-3 ZIP 伪 EOCD 被采纳 | `1ae290a` | 采纳前要求 `cd_offset` 处为 `PK\x01\x02` |
+| P0-4 JAR 签名检查可绕过 | `1ae290a` | CD 必须完整走完，失配换下一个候选而不是判"未签名" |
+| P0-6 补丁跨度不校验 | `d63a20b` | 越界返回 `CorruptedData`，不再静默延长文件 |
+| P0-2 `--strategy ask` 与 `--stdin` 抢 stdin | `d63a20b` | 直接拒绝该组合 |
+| P1-1 HEVC 干净载体报"版本不支持" | `0bac4c1` | 先验 magic（口令派生）再判版本 |
+| P2-10 Superblock `reserved`/`total_windows` 不校验 | `0bac4c1` | 非 0/非 1/多窗口标志 → `NoHiddenData` |
+| P1-2 `read --auto` 丢密码 | `fb2991e` | 把已解析口令带进重定向参数 |
+| P1-10 `scan` 干净报告吞提示 | `fb2991e` | notes 无条件打印 |
+| P2-7 `{x:.2}` 说明符被丢弃 | `623fbbd` | 数值参数按精度重新定点渲染 |
+| P2-11 slot 注释 32B / 悬空链接 / payload 文档 | `623fbbd` | 文档与实现对齐 |
+| （工程项）源码裸 NUL 字节 | `623fbbd` | 改 `\0` 转义，`grep`/`rg` 不再当二进制 |
+| P0-7 CLI 落盘非原子 + 跟随符号链接 | `7df1bf5` | 4 处统一走 `commit::write_bytes_atomic` |
+| P2-1 HEVC 记录器预分配无上限 | `770bf6b` | 提示值上限 1 MiB（预留约 56 MiB） |
+| P2-5 `--password-file` 整文件读 | `770bf6b` | `BufReader` + 4 KiB 上限读首行 |
+| P1-3 PNG 16-bit/Adam7 零检测器无提示 | `1cefc77` | 补 note 说明空间域未运行 |
+| P1-4 `dct:chi2` 整行消失 / 文案写死 q100 | `1cefc77` | 输出 `SKIPPED` 并给真实原因 |
+| P2-6 inspect 内容域错误被吞 + 摘要计数口径 | `1cefc77` | 合并重复块并打印错误；`total` 改为处理总数 |
+| （测试）5 例回归 | `d63a20b` | `tests/test_regression/review_20261030.rs` |
+
+### 主动搁置（未改，附理由）
+
+| 条目 | 搁置理由 |
+|---|---|
+| P1-9 `verify` Level 2 边界校验是套套逻辑 | 想做成"有意义"的交叉校验必须知道各适配器的 `inject_size`/`delta` 语义，而它们并不统一：JPEG `app_segment` 的 `inject_size` 含每段 4 字节头、PE `pe_codebits` 恒为 0、HEIF/MKV 有非零 `delta`。无论用哪个判据都会对某些策略产生假失败。需要先决定"把 `delta` 写进 header"还是"按 strategy_id 分派逐项校验"，属协议层改动 |
+| P1-5 RS/SPA 口径不一 | 会改变检测数值，进而影响 verdict；没有语料实测 FPR 前改口径等于盲调阈值 |
+| P1-6 JPEG EOI 取尾窗最后一个 `FF D9` | 需要先决定"用结构解析的真实 EOI 还是尾窗启发式"，且会改变 `trailing-data` 判定与既有语料结论 |
+| P1-7 分析侧不复用 `preflight_jpeg` | 依赖 `jpeg-decoder` 是否自带尺寸上限（待实测），且要确定超限时是 `SKIPPED` 还是硬拒 |
+| P1-8 配置未知键/合并/回退 | `deny_unknown_fields` 会让带注释或未来字段的现有配置全部报错，合并语义还涉及优先级重定义，属行为约定变更 |
+| P2-2 `isobmff_can_item_hidden` 读 1 GiB | 需要改成"按 box 头逐跳 seek + 只读 meta"，是函数重写而非数行修改；当前无正确性缺陷，只是内存浪费 |
+| P2-3 PE `.text` 整段读入 | 上限取值（64 MiB？）会影响大 PE 的策略可用性，需先确认目标载体规模 |
+| P2-4 CLI `capacity`/`dry-run` 全量读载体 | 要引入流式容量探测接口，属 API 设计；与 GUI 共用 |
+| P2-8 硬编码英文段 / `capacity --json` NDJSON | 统一 JSON 形状会破坏现有机器消费方（含 GUI 侧封装），需要一次性约定版本 |
+
+其余第 3 节末尾的小项（PDF xref 10 位、ZIP64 签名、strip 裸 `strategy_id`、MKV/RIFF magic、`sniff` 2 字节 JPEG、restore 重复 PBKDF2）均为"已知、影响窄"，留待各自模块专门处理。
