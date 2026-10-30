@@ -66,6 +66,18 @@ pub(crate) fn handle_write(
             ));
         }
         let carrier = &args.carrier[0];
+        // The prompt and `--stdin` both read standard input: whichever runs
+        // first eats the other's bytes. The prompt would swallow the payload's
+        // first line and the write would succeed with a truncated payload
+        // (review R2 P0-2), so this combination is refused outright.
+        if args.payload.stdin {
+            return Err(StrHideError::General(
+                "`--strategy ask` reads the choice from standard input, which `--stdin` is already \
+                 using for the payload. Name a strategy explicitly (or use `--strategy auto`) when \
+                 piping the payload in."
+                    .into(),
+            ));
+        }
         let mut cf = File::open(carrier)?;
         let adapter = find_adapter_or_reject(&mut cf, &carrier.display().to_string())?;
         let strats = adapter.supported_strategies();

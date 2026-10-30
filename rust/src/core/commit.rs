@@ -213,8 +213,24 @@ pub fn commit_carrier_patches(
     // 2. Open for in-place patch overwrite
     {
         let mut file = OpenOptions::new().read(true).write(true).open(&tmp_path)?;
+        // Every span comes from a byte stream that was read before the copy.
+        // If the carrier changed underneath us (or a caller ever hands us a
+        // bad span), `write_all` past EOF silently *extends* the file and the
+        // rename publishes a corrupted carrier with a truncated tail. Bound
+        // each write by the real length instead (review R2 P0-6).
+        let file_len = file.metadata()?.len();
         for (span, patch) in patches {
-            file.seek(SeekFrom::Start(span.start as u64))?;
+            let start = span.start as u64;
+            let end = start
+                .checked_add(patch.len() as u64)
+                .ok_or_else(|| StrHideError::CorruptedData("Patch span overflows".into()))?;
+            if end > file_len {
+                return Err(StrHideError::CorruptedData(format!(
+                    "Patch span [{start}, {end}) exceeds carrier length {file_len}; \
+                     the carrier changed while it was being modified"
+                )));
+            }
+            file.seek(SeekFrom::Start(start))?;
             file.write_all(patch)?;
         }
         file.sync_all()?;

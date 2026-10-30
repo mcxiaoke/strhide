@@ -6,6 +6,7 @@
 //! - `p2_protocol`: protocol-level envelope validation and PDF xref streams.
 //! - `review_20261019`: findings lockdown from comprehensive code reviews.
 //! - `review_20261025`: findings lockdown from the structure-domain deep review.
+//! - `review_20261030`: second-round review (box-size overflow, decoy EOCD, patch spans).
 //! - `real_samples`: integration checks against real-world media and executable files.
 
 #[path = "common/mod.rs"]
@@ -23,3 +24,5 @@ mod real_samples;
 mod review_20261019;
 #[path = "test_regression/review_20261025.rs"]
 mod review_20261025;
+#[path = "test_regression/review_20261030.rs"]
+mod review_20261030;
