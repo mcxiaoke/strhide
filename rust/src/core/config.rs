@@ -1,10 +1,16 @@
 //! TOML configuration file support.
 //!
-//! Lookup order: explicit `--config <path>`, then `./strhide.toml`, then
-//! `<home>/.strhide/config.toml` (`USERPROFILE` on Windows, `HOME` elsewhere).
+//! Lookup order: explicit `--config <path>`, then `<exe_dir>/strhide.toml`
+//! (or `<exe_dir>/config.toml`), then user configuration directory
+//! (`~/.config/strhide/config.toml`, `~/.strhide/config.toml`, or `%APPDATA%\strhide\config.toml`),
+//! then system configuration directory (`/etc/strhide/config.toml`,
+//! `%ProgramData%\strhide\config.toml`). Current working directory (CWD) is intentionally
+//! NOT searched to avoid security risks from untrusted directories.
+//!
 //! Every key is optional; values act as defaults and never override explicit
 //! CLI arguments or the `STRHIDE_PASSWORD` / `STRHIDE_TEXT` environment
-//! variables.
+//! variables. Hardcoded passwords and password files are NOT supported in
+//! configuration files.
 //!
 //! Recognized keys (all optional):
 //!
@@ -12,8 +18,6 @@
 //! strategy      = "auto"        # write: auto | ask | <adapter strategy name>
 //! stealth       = false         # write: stealth mode default
 //! encrypt       = false         # write: encryption default
-//! password      = "..."         # all: password default (plaintext on disk!)
-//! password_file = "..."         # all: password file default
 //! hint          = "..."         # write: password hint default
 //! preserve_time = true          # write: timestamp preservation default
 //! backup        = true          # write/remove: .bak backup default
@@ -40,8 +44,6 @@ const KNOWN_KEYS: &[&str] = &[
     "strategy",
     "stealth",
     "encrypt",
-    "password",
-    "password_file",
     "hint",
     "preserve_time",
     "backup",
@@ -57,8 +59,6 @@ pub struct FileConfig {
     pub strategy: Option<String>,
     pub stealth: Option<bool>,
     pub encrypt: Option<bool>,
-    pub password: Option<String>,
-    pub password_file: Option<PathBuf>,
     pub hint: Option<String>,
     pub preserve_time: Option<bool>,
     pub backup: Option<bool>,
@@ -67,9 +67,12 @@ pub struct FileConfig {
     pub lang: Option<String>,
     /// `[stego]` section: defaults for `embed` / `capacity`.
     pub stego: Option<StegoConfig>,
-    /// Warnings collected during parsing (e.g. unknown keys, sensitive credentials in CWD config).
+    /// Warnings collected during parsing (e.g. unknown keys).
     #[serde(skip)]
     pub warnings: Vec<String>,
+    /// Absolute path of the loaded configuration file, if one was found and loaded.
+    #[serde(skip)]
+    pub loaded_from: Option<PathBuf>,
 }
 
 /// `[stego]` section: content-domain defaults applied when the matching CLI
@@ -90,22 +93,86 @@ pub struct StegoConfig {
 }
 
 /// Candidate paths in lookup order, excluding an explicit `--config` path.
+/// Only searches:
+/// 1. Exe directory (`strhide.toml`, `config.toml`)
+/// 2. User config directory (`%APPDATA%/strhide/config.toml`, `~/.config/strhide/config.toml`, `~/.strhide/config.toml`)
+/// 3. System config directory (`%ProgramData%/strhide/config.toml`, `/etc/strhide/config.toml`, `/etc/strhide.toml`)
+///
+/// CWD is explicitly excluded.
 fn default_candidates() -> Vec<PathBuf> {
-    let mut out = vec![PathBuf::from("strhide.toml")];
+    let mut out = Vec::new();
+
+    // 1. Executable directory: <exe_dir>/strhide.toml, <exe_dir>/config.toml
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+    {
+        out.push(exe_dir.join("strhide.toml"));
+        out.push(exe_dir.join("config.toml"));
+    }
+
+    // 2. User configuration directory
+    if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+        out.push(appdata.join("strhide").join("config.toml"));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+        out.push(xdg.join("strhide").join("config.toml"));
+    }
     if let Some(home) = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
     {
+        out.push(home.join(".config").join("strhide").join("config.toml"));
         out.push(home.join(".strhide").join("config.toml"));
     }
-    out
+
+    // 3. System configuration directory
+    #[cfg(windows)]
+    {
+        let program_data = std::env::var_os("ProgramData")
+            .or_else(|| std::env::var_os("ALLUSERSPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+        out.push(program_data.join("strhide").join("config.toml"));
+    }
+    #[cfg(not(windows))]
+    {
+        out.push(PathBuf::from("/etc/strhide/config.toml"));
+        out.push(PathBuf::from("/etc/strhide.toml"));
+        #[cfg(target_os = "macos")]
+        {
+            out.push(PathBuf::from(
+                "/Library/Application Support/strhide/config.toml",
+            ));
+        }
+    }
+
+    let mut deduped = Vec::new();
+    for p in out {
+        if !deduped.contains(&p) {
+            deduped.push(p);
+        }
+    }
+    deduped
 }
 
-fn parse_config(
-    text: &str,
-    origin: &Path,
-    is_cwd_implicit: bool,
-) -> Result<FileConfig, StrHideError> {
+fn to_absolute_path(p: &Path) -> PathBuf {
+    if let Ok(canon) = std::fs::canonicalize(p) {
+        let s = canon.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            PathBuf::from(stripped)
+        } else {
+            canon
+        }
+    } else if p.is_absolute() {
+        p.to_path_buf()
+    } else if let Ok(cwd) = std::env::current_dir() {
+        cwd.join(p)
+    } else {
+        p.to_path_buf()
+    }
+}
+
+fn parse_config(text: &str, origin: &Path) -> Result<FileConfig, StrHideError> {
     let table: toml::Table = toml::from_str(text).map_err(|e| {
         StrHideError::General(format!(
             "Invalid TOML in config file '{}': {e}",
@@ -134,14 +201,8 @@ fn parse_config(
         StrHideError::General(format!("Invalid config file '{}': {e}", origin.display()))
     })?;
 
-    if is_cwd_implicit && (cfg.password.is_some() || cfg.password_file.is_some()) {
-        warnings.push(format!(
-            "[WARNING] Loaded sensitive password/secret keys from local CWD config '{}'. Ensure this file is trusted.",
-            origin.display()
-        ));
-    }
-
     cfg.warnings = warnings;
+    cfg.loaded_from = Some(to_absolute_path(origin));
     Ok(cfg)
 }
 
@@ -153,13 +214,12 @@ pub fn load(explicit: Option<&Path>) -> Result<FileConfig, StrHideError> {
         let text = std::fs::read_to_string(p).map_err(|e| {
             StrHideError::General(format!("Failed to read config file '{}': {e}", p.display()))
         })?;
-        return parse_config(&text, p, false);
+        return parse_config(&text, p);
     }
-    for (i, cand) in default_candidates().iter().enumerate() {
-        match std::fs::read_to_string(cand) {
+    for cand in default_candidates() {
+        match std::fs::read_to_string(&cand) {
             Ok(text) => {
-                let is_cwd_implicit = i == 0;
-                return parse_config(&text, cand, is_cwd_implicit);
+                return parse_config(&text, &cand);
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
@@ -178,25 +238,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cwd_implicit_loads_password() {
+    fn password_keys_trigger_unknown_warning() {
         let toml_str = r#"
             strategy = "pe_slack"
-            password = "test_injected_pwd"
+            password = "test_pwd"
+            password_file = "test.key"
             backup = true
         "#;
-        let cfg = parse_config(toml_str, Path::new("strhide.toml"), true).unwrap();
+        let cfg = parse_config(toml_str, Path::new("test.toml")).unwrap();
         assert_eq!(cfg.strategy.as_deref(), Some("pe_slack"));
         assert_eq!(cfg.backup, Some(true));
-        assert_eq!(cfg.password.as_deref(), Some("test_injected_pwd"));
-    }
-
-    #[test]
-    fn explicit_config_keeps_password() {
-        let toml_str = r#"
-            password = "valid_user_pwd"
-        "#;
-        let cfg = parse_config(toml_str, Path::new("explicit.toml"), false).unwrap();
-        assert_eq!(cfg.password.as_deref(), Some("valid_user_pwd"));
+        assert!(cfg.warnings.iter().any(|w| w.contains("password")));
+        assert!(cfg.warnings.iter().any(|w| w.contains("password_file")));
     }
 
     #[test]
@@ -207,7 +260,7 @@ mod tests {
             enforce_safety = true
             algorithm = "hill"
         "#;
-        let cfg = parse_config(toml_str, Path::new("explicit.toml"), false).unwrap();
+        let cfg = parse_config(toml_str, Path::new("explicit.toml")).unwrap();
         let stego = cfg.stego.expect("[stego] section must be captured");
         assert_eq!(stego.safety.as_deref(), Some("paranoid"));
         assert_eq!(stego.enforce_safety, Some(true));
@@ -216,8 +269,10 @@ mod tests {
 
     #[test]
     fn absent_stego_section_leaves_defaults_alone() {
-        let cfg = parse_config("backup = true", Path::new("explicit.toml"), false).unwrap();
+        let cfg = parse_config("backup = true", Path::new("explicit.toml")).unwrap();
         assert!(cfg.stego.is_none());
+        assert!(cfg.loaded_from.is_some());
+        assert!(cfg.loaded_from.unwrap().is_absolute());
     }
 
     #[test]
@@ -229,7 +284,8 @@ mod tests {
             stego_secret = "leftover"
             stego_domain = "leftover"
         "#;
-        let cfg = parse_config(toml_str, Path::new("explicit.toml"), false).unwrap();
-        assert_eq!(cfg.password, None);
+        let cfg = parse_config(toml_str, Path::new("explicit.toml")).unwrap();
+        assert!(cfg.warnings.iter().any(|w| w.contains("stego_secret")));
+        assert!(cfg.warnings.iter().any(|w| w.contains("stego_domain")));
     }
 }

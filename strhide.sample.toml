@@ -6,16 +6,23 @@
 #
 # HOW TO USE THIS FILE:
 # ---------------------
-# 1. Local (per-project/directory) configuration:
-#    Copy this file to `strhide.toml` in your current working directory:
-#      cp strhide.sample.toml strhide.toml
+# 1. Executable-adjacent configuration:
+#    Place this file as `strhide.toml` (or `config.toml`) in the directory
+#    next to the `strhide` binary.
 #
-# 2. Global (per-user) configuration:
-#    Copy this file to your user profile directory:
-#      - Linux / macOS: ~/.strhide/config.toml
-#      - Windows:       %USERPROFILE%\.strhide\config.toml
+# 2. User-level configuration:
+#    Copy this file to your user configuration directory:
+#      - Linux / macOS: ~/.config/strhide/config.toml (or ~/.strhide/config.toml)
+#      - Windows:       %APPDATA%\strhide\config.toml (or %USERPROFILE%\.strhide\config.toml)
 #
-# 3. Explicit path:
+# 3. System-wide configuration:
+#    Copy this file to the system configuration directory:
+#      - Linux / macOS: /etc/strhide/config.toml
+#      - Windows:       %ProgramData%\strhide\config.toml
+#
+#    Note: Current working directory (CWD) is intentionally NOT searched.
+#
+# 4. Explicit path:
 #    Specify any configuration file on the command line using -c or --config:
 #      strhide -c /path/to/custom-config.toml write carrier.png -t "secret"
 #
@@ -23,8 +30,13 @@
 # ---------------------------------------------
 # 1. Explicit CLI arguments & flags (e.g. -p, -s, --no-backup, --stealth)
 # 2. Environment variables (STRHIDE_PASSWORD, STRHIDE_TEXT)
-# 3. Configuration file (CLI -c / --config > ./strhide.toml > ~/.strhide/config.toml)
+# 3. Configuration file (CLI -c/--config > exe dir > user config > system config)
 # 4. Built-in application defaults
+#
+# NOTE ON CREDENTIALS:
+# Configuration files do NOT support storing passwords or password file paths.
+# Passwords must be provided via -p, --password-file, STRHIDE_PASSWORD, or
+# interactive terminal prompts.
 #
 # FORMAT RULES:
 # -------------
@@ -136,7 +148,7 @@
 # envelope without knowledge of the password.
 #
 # REQUIREMENTS:
-# - Stealth mode REQUIRES a password (via `password`, `password_file`, -p,
+# - Stealth mode REQUIRES a password (via -p, --password-file,
 #   or STRHIDE_PASSWORD).
 # - Stealth mode is INCOMPATIBLE with a password hint (`hint`).
 #
@@ -144,49 +156,18 @@
 
 
 # ------------------------------------------------------------------------------
-# 6. Default Password (Plaintext)
+# 6. Passwords and Credentials (NOT SUPPORTED IN CONFIG)
 # ------------------------------------------------------------------------------
-# Default password used for encryption and decryption.
-#
-# Applies to: `write`, `read`, `restore`, `inspect`, `verify`, `embed`, `extract`
-# Type: string
-# Default: not set (None)
-# CLI override: -p <PASSWORD>, --password <PASSWORD>
-#
-# SECURITY WARNING:
-# Storing passwords in plain text inside a configuration file on disk is
-# inherently insecure. Anyone with read access to this file can decrypt your
-# hidden envelopes.
-# PREFERRED ALTERNATIVES:
-# - Use `password_file` below pointing to a restricted-permission file.
-# - Use the `STRHIDE_PASSWORD` environment variable.
-# - Use the interactive prompt (`-e/--encrypt`).
-#
-# password = "example-password-change-me"
+# Hardcoded passwords (`password`) and password files (`password_file`) are NOT
+# supported in configuration files to prevent credential leakage on disk.
+# Supply credentials via:
+#   - Command line flag: -p <PASSWORD> or --password-file <FILE>
+#   - Environment variable: STRHIDE_PASSWORD
+#   - Interactive prompt: -e, --encrypt
 
 
 # ------------------------------------------------------------------------------
-# 7. Password File
-# ------------------------------------------------------------------------------
-# Path to a file containing the password.
-#
-# Applies to: `write`, `read`, `restore`, `inspect`, `verify`, `embed`, `extract`
-# Type: string (relative or absolute file path)
-# Default: not set (None)
-# CLI override: --password-file <FILE>
-#
-# strhide reads the password from the first line of the specified file,
-# stripping trailing CR and LF characters. This allows you to store the secret
-# in a file with strict filesystem permissions (e.g. chmod 600 / NTFS ACLs).
-#
-# Precedence: CLI -p > CLI --password-file > STRHIDE_PASSWORD > config password
-#             > config password_file.
-#
-# password_file = "~/.strhide/master.key"
-
-
-# ------------------------------------------------------------------------------
-# 8. Password Hint
+# 7. Password Hint
 # ------------------------------------------------------------------------------
 # Default hint stored alongside the encrypted envelope.
 #
@@ -206,7 +187,7 @@
 
 
 # ------------------------------------------------------------------------------
-# 9. Escape Sequence Decoding
+# 8. Escape Sequence Decoding
 # ------------------------------------------------------------------------------
 # Controls whether C-style escape sequences are decoded in -t/--text payloads.
 #
@@ -225,7 +206,7 @@
 
 
 # ------------------------------------------------------------------------------
-# 10. Stego Private Dialect (REMOVED FROM THE CLI/CONFIG SURFACE)
+# 9. Stego Private Dialect (REMOVED FROM THE CLI/CONFIG SURFACE)
 # ------------------------------------------------------------------------------
 # `stego_secret` and `stego_domain` are no longer recognized keys. A no-password
 # `embed` uses the public built-in constant, and `extract` needs nothing but the
@@ -237,7 +218,7 @@
 
 
 # ------------------------------------------------------------------------------
-# 11. Interface Language
+# 10. Interface Language
 # ------------------------------------------------------------------------------
 # User interface language for CLI help, status reports, and diagnostics.
 #
@@ -251,7 +232,7 @@
 
 
 # ------------------------------------------------------------------------------
-# 12. Content-Domain Defaults (`[stego]` table)
+# 11. Content-Domain Defaults (`[stego]` table)
 # ------------------------------------------------------------------------------
 # Defaults for `embed` and `capacity`. These mirror exactly three flags —
 # --safety, --enforce-safety, --algorithm — because those are the knobs a
@@ -275,10 +256,10 @@
 #
 # Profile A: High Stealth & Security
 # ----------------------------------
-# Maximum deniability, derived stealth signatures, password from a secure file:
+# Maximum deniability, derived stealth signatures.
+# Supply password via: STRHIDE_PASSWORD env var or CLI -p / --password-file.
 #
 # stealth = true
-# password_file = "~/.strhide/stealth.key"
 # preserve_time = true
 # backup = true
 #
@@ -289,7 +270,6 @@
 # strategy = "auto"
 # backup = false
 # unescape = true
-# password_file = "/etc/strhide/ci.key"
 #
 # Profile C: General Personal Vault
 # ----------------------------------

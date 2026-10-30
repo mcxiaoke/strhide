@@ -43,8 +43,8 @@ fn explicit_missing_config_is_a_hard_error() {
 fn invalid_toml_is_a_hard_error() {
     let dir = scratch("invalid");
     fs::write(dir.join("c.png"), make_png()).unwrap();
-    fs::write(dir.join("strhide.toml"), "strategy = [broken\n").unwrap();
-    let out = run(&dir, &["list"], None);
+    fs::write(dir.join("bad.toml"), "strategy = [broken\n").unwrap();
+    let out = run(&dir, &["--config", "bad.toml", "list"], None);
     assert_eq!(code(&out), 1);
     assert!(
         stderr(&out).contains("Invalid TOML"),
@@ -54,11 +54,23 @@ fn invalid_toml_is_a_hard_error() {
 }
 
 #[test]
+fn cwd_config_is_ignored() {
+    let dir = scratch("cwd_ignored");
+    fs::write(dir.join("c.png"), make_png()).unwrap();
+    // In CWD, write invalid TOML and bogus strategy:
+    fs::write(dir.join("strhide.toml"), "strategy = \"bogus\"\n").unwrap();
+    // Running without --config in CWD must ignore ./strhide.toml:
+    let out = run(&dir, &["list"], None);
+    assert_eq!(code(&out), 0);
+    assert!(!stderr(&out).contains("bogus"));
+}
+
+#[test]
 fn unknown_key_warns_but_does_not_fail() {
     let dir = scratch("unknown");
     fs::write(dir.join("c.png"), make_png()).unwrap();
-    fs::write(dir.join("strhide.toml"), "pasword = \"x\"\n").unwrap();
-    let out = run(&dir, &["list"], None);
+    fs::write(dir.join("custom.toml"), "pasword = \"x\"\n").unwrap();
+    let out = run(&dir, &["--config", "custom.toml", "list"], None);
     assert_eq!(code(&out), 0);
     assert!(
         stderr(&out).contains("Unknown key 'pasword'"),
@@ -70,68 +82,32 @@ fn unknown_key_warns_but_does_not_fail() {
 // --------------------------------------------------------------------------- defaults and precedence
 
 #[test]
-fn config_password_and_encrypt_apply_on_write_and_read() {
-    let dir = scratch("write_read");
+fn config_password_keys_are_warned_and_not_used() {
+    let dir = scratch("cfg_pwd_warn");
     fs::write(dir.join("c.png"), make_png()).unwrap();
     fs::write(
-        dir.join("strhide.toml"),
-        "encrypt = true\npassword = \"cfg-pass-1\"\n",
+        dir.join("custom.toml"),
+        "encrypt = true\npassword = \"cfg-pass-1\"\npassword_file = \"test.key\"\n",
     )
     .unwrap();
 
-    // Write with no CLI password/encrypt flags: both come from the config.
-    let out = run(&dir, &["write", "c.png", "-t", "hello", "--in-place"], None);
-    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
-
-    // Read without any password: the config supplies it.
-    let out = run(&dir, &["read", "c.png", "-o", "out1.bin"], None);
-    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
-    assert_eq!(fs::read_to_string(dir.join("out1.bin")).unwrap(), "hello");
-
-    // An explicit CLI password equal to the config one still works.
     let out = run(
         &dir,
-        &["read", "c.png", "-p", "cfg-pass-1", "-o", "out2.bin"],
-        None,
-    );
-    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
-
-    // A wrong CLI password fails even though the config holds the right one.
-    let out = run(
-        &dir,
-        &["read", "c.png", "-p", "wrong", "-o", "out3.bin"],
+        &[
+            "--config",
+            "custom.toml",
+            "write",
+            "c.png",
+            "-t",
+            "hello",
+            "--in-place",
+        ],
         None,
     );
     assert_eq!(code(&out), 1);
-    assert!(stderr(&out).contains("assword"), "stderr: {}", stderr(&out));
-}
-
-#[test]
-fn env_password_overrides_config_password() {
-    let dir = scratch("env");
-    fs::write(dir.join("c.png"), make_png()).unwrap();
-    fs::write(
-        dir.join("strhide.toml"),
-        "encrypt = true\npassword = \"cfg-pass-1\"\n",
-    )
-    .unwrap();
-
-    // Write with the env password (wins over the config password).
-    let out = run(
-        &dir,
-        &["write", "c.png", "-t", "hello", "--in-place"],
-        Some("env-pass-2"),
-    );
-    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
-
-    // Reading with only the config password fails (it is the wrong password).
-    let out = run(&dir, &["read", "c.png", "-o", "o1.bin"], None);
-    assert_eq!(code(&out), 1);
-
-    // Reading with the env password succeeds.
-    let out = run(&dir, &["read", "c.png", "-o", "o2.bin"], Some("env-pass-2"));
-    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
-    assert_eq!(fs::read_to_string(dir.join("o2.bin")).unwrap(), "hello");
+    assert!(stderr(&out).contains("Unknown key 'password'"));
+    assert!(stderr(&out).contains("Unknown key 'password_file'"));
+    assert!(stderr(&out).contains("Password required but no interactive terminal"));
 }
 
 #[test]
@@ -141,7 +117,7 @@ fn explicit_config_path_applies() {
     fs::write(dir.join("c.png"), make_png()).unwrap();
     fs::write(
         cfg_dir.join("custom.toml"),
-        "encrypt = true\npassword = \"cfg-pass-3\"\n",
+        "hint = \"custom-cfg-hint\"\nbackup = false\n",
     )
     .unwrap();
 
@@ -156,14 +132,27 @@ fn explicit_config_path_applies() {
             "-t",
             "hello",
             "--in-place",
+            "-p",
+            "test-pass",
         ],
         None,
     );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    // backup = false was applied:
+    assert!(!dir.join("c.png.bak").exists());
 
     let out = run(
         &dir,
-        &["--config", &cfg_arg, "read", "c.png", "-o", "out.bin"],
+        &[
+            "--config",
+            &cfg_arg,
+            "read",
+            "c.png",
+            "-o",
+            "out.bin",
+            "-p",
+            "test-pass",
+        ],
         None,
     );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
@@ -174,8 +163,12 @@ fn explicit_config_path_applies() {
 fn strategy_from_config_is_used_by_write() {
     let dir = scratch("strategy");
     fs::write(dir.join("c.png"), make_png()).unwrap();
-    fs::write(dir.join("strhide.toml"), "strategy = \"bogus-strategy\"\n").unwrap();
-    let out = run(&dir, &["write", "c.png", "-t", "hello"], None);
+    fs::write(dir.join("custom.toml"), "strategy = \"bogus-strategy\"\n").unwrap();
+    let out = run(
+        &dir,
+        &["--config", "custom.toml", "write", "c.png", "-t", "hello"],
+        None,
+    );
     assert_eq!(code(&out), 1);
     assert!(
         stderr(&out).contains("bogus-strategy"),
@@ -305,4 +298,113 @@ fn cli_json_run_embeds_banner_as_field_and_emits_valid_json() {
         .as_str()
         .expect("scan json item must contain banner string");
     assert_eq!(banner_scan, banner_inspect);
+}
+
+#[test]
+fn loaded_config_path_printed_on_stdout_in_normal_mode() {
+    let dir = scratch("cfg_print_normal");
+    fs::write(dir.join("c.png"), make_png()).unwrap();
+    let cfg_path = dir.join("my_config.toml");
+    fs::write(&cfg_path, "backup = false\n").unwrap();
+
+    let out = run(
+        &dir,
+        &["--config", cfg_path.to_str().unwrap(), "list"],
+        None,
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    let stdout_str = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout_str.contains("Loaded config:"),
+        "stdout must contain 'Loaded config:', got: {stdout_str}"
+    );
+    // Must contain absolute path (check filename and parent)
+    assert!(
+        stdout_str.contains("my_config.toml"),
+        "stdout must mention config filename: {stdout_str}"
+    );
+}
+
+#[test]
+fn loaded_config_path_not_printed_in_json_mode() {
+    let dir = scratch("cfg_print_json");
+    fs::write(dir.join("c.png"), make_png()).unwrap();
+    let cfg_path = dir.join("json_config.toml");
+    fs::write(&cfg_path, "backup = false\n").unwrap();
+
+    let out = run(
+        &dir,
+        &[
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "inspect",
+            "c.png",
+            "--json",
+        ],
+        None,
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+
+    // In JSON mode, loaded config path must NOT be printed to stderr or stdout
+    let stderr_str = stderr(&out);
+    assert!(
+        !stderr_str.contains("Loaded config:"),
+        "stderr must not contain 'Loaded config:' in json mode, got: {stderr_str}"
+    );
+
+    // Stdout MUST NOT contain 'Loaded config:' and MUST be valid JSON:
+    let stdout_str = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout_str.contains("Loaded config:"),
+        "stdout must not contain plain text in json mode: {stdout_str}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout_str)
+        .unwrap_or_else(|e| panic!("stdout must be valid JSON: {e}\n{stdout_str}"));
+    assert!(v.is_object());
+}
+
+#[test]
+fn loaded_config_path_suppressed_when_quiet() {
+    let dir = scratch("cfg_print_quiet");
+    fs::write(dir.join("c.png"), make_png()).unwrap();
+    let cfg_path = dir.join("quiet_config.toml");
+    fs::write(&cfg_path, "backup = false\n").unwrap();
+
+    let out = run(
+        &dir,
+        &[
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "inspect",
+            "c.png",
+            "-q",
+        ],
+        None,
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("Loaded config:"),
+        "quiet mode must suppress stdout config line"
+    );
+    assert!(
+        !stderr(&out).contains("Loaded config:"),
+        "quiet mode must suppress stderr config line"
+    );
+}
+
+#[test]
+fn loaded_config_path_not_printed_when_no_config_exists() {
+    let dir = scratch("cfg_none");
+    fs::write(dir.join("c.png"), make_png()).unwrap();
+
+    let out = run(&dir, &["list"], None);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("Loaded config:"),
+        "stdout must not mention Loaded config when no config loaded"
+    );
+    assert!(
+        !stderr(&out).contains("Loaded config:"),
+        "stderr must not mention Loaded config when no config loaded"
+    );
 }

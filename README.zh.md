@@ -19,7 +19,7 @@
 - **黑盒隐写分析**——`scan` 把文件视为未知对象，报告来自**任意工具**（不只是 strhide）的结构与统计特征异常；JPEG 额外走**校准式 DCT 检验**（`dct:calibration`），并明确标注 `clean` 不构成「无隐藏数据」的证据。
 - **密码提示**——可选（≤ 1 KiB）的提示信息随信封存储，在需要输入密码时展示。
 - **默认安全**——完整性/签名拒绝检查会拒绝修改不宜触碰的文件（如签名二进制）；`write`、`restore` 与 `embed` 默认输出至 `<stem>-out.<ext>` 新文件，原始宿主 100% 保持干净；提供显式 `--in-place` 选项进行原地修改（自动创建 `.bak` 备份）；`read`、`extract`、`write` 和 `restore` 默认拒绝覆盖已存在的输出文件（需 `--overwrite` 才允许）；保留原始文件时间戳。
-- **TOML 配置**——`./strhide.toml` 或 `~/.strhide/config.toml` 提供默认值，显式命令行参数（`-c, --config`）始终优先（详见注解模板 [`strhide.sample.toml`](strhide.sample.toml)）。
+- **TOML 配置**——exe 同目录、用户配置目录（`~/.config/strhide/config.toml`、`%APPDATA%\strhide\config.toml`）或系统配置目录提供默认值（不查找当前工作目录，且不支持在配置中写死密码/密钥文件），显式命令行参数（`-c, --config`）始终优先（详见注解模板 [`strhide.sample.toml`](strhide.sample.toml)）。
 - **批量与递归载体**——`write`、`restore`、`scan`、`inspect`、`verify`、`embed` 均支持一次处理多个文件或目录递归扫描（`-r, --recursive`）；`read` 针对单个载体。
 - **内容自适应隐写（HILL、UERD 与 Scheme C）**——`embed` 与 `extract` 命令直接在图像像素（PNG，按 HILL 成本模型选位）、DCT 频域系数（JPEG，通过 UERD 成本模型）或 H.265/HEVC 变换系数旁路符号位（HEIF/HEIC、HEVC Annex-B 裸流与 MP4/MOV 视频，Scheme C）中嵌入数据。与结构层注入不同，内容隐写修改的是最小失真纹理区，可抵御重封包与元数据剥离清洗。HEIF/HEIC 与 HEVC 隐写达成零字节膨胀（$\Delta = 0$）与标准句法合规，并内建 EPB 竞争防护。PNG 像素写入采用**三元 ±1 匹配**：修改被约束在像素所在的八值类内（`val & 0xF8`），因此概率质量会跨值对边界流动，而不是把每个值对压平——后者正是卡方/SPA 检测器攻击的目标。实测：本仓库语料满容量嵌入后自检分数由 50/100（SUSPICIOUS，RS+SPA）降到 25/100（LOW，仅 SPA）。
 
@@ -143,7 +143,7 @@ strhide restore done/a.png done/b.png done/c.png -o restored/
 strhide list --json
 ```
 
-密码来源（按顺序检查）：`-p/--password` → `--password-file` → 环境变量 `STRHIDE_PASSWORD` → 配置文件 → 交互式输入（`-e/--encrypt`）。`-p` 与 `--password-file` 互斥。
+密码来源（按顺序检查）：`-p/--password` → `--password-file` → 环境变量 `STRHIDE_PASSWORD` → 交互式输入（`-e/--encrypt`）。`-p` 与 `--password-file` 互斥（注意：配置文件出于安全原因不支持配置密码）。
 
 `write` 的载荷源同样互斥：`-d/--data`、`-t/--text`、`--text-file`、`--text-base64`、`--stdin` 不可同时使用。都不提供时，环境变量 `STRHIDE_TEXT` 作为最后兜底。
 

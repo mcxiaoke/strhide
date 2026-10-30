@@ -4,9 +4,9 @@
 //! Argument-to-value resolution shared by the subcommand handlers.
 //!
 //! Passwords, payload sources, and content-domain tuning all follow a
-//! precedence chain (explicit flag -> environment -> config -> prompt) that must
-//! be identical for every verb; keeping them here is what stops `write` and
-//! `embed` from drifting apart.
+//! precedence chain (explicit flag -> environment -> prompt; content tuning
+//! also falls back to config) that must be identical for every verb; keeping
+//! them here is what stops `write` and `embed` from drifting apart.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -46,7 +46,6 @@ pub fn prompt_password(confirm: bool) -> Result<String, StrHideError> {
 pub fn resolve_password(
     pwd_opt: Option<&str>,
     pwd_file: Option<&Path>,
-    cfg: &FileConfig,
     encrypt_flag: bool,
     confirm: bool,
 ) -> Result<Option<String>, StrHideError> {
@@ -59,7 +58,7 @@ pub fn resolve_password(
     if let Some(pf) = pwd_file {
         // Name the file in the error: the bare OS message ("file not found")
         // does not tell the user WHICH password file failed, and several
-        // commands accept one. Mirrors the config branch below.
+        // commands accept one.
         let s = std::fs::read_to_string(pf).map_err(|e| {
             StrHideError::General(format!(
                 "Failed to read password file '{}': {e}",
@@ -81,29 +80,6 @@ pub fn resolve_password(
         if !env_trimmed.is_empty() {
             return Ok(Some(env_trimmed.to_string()));
         }
-    }
-    // Config file sources come after CLI args and the environment variable.
-    if let Some(p) = cfg.password.as_deref()
-        && !p.is_empty()
-    {
-        return Ok(Some(p.to_string()));
-    }
-    if let Some(pf) = cfg.password_file.as_deref() {
-        let s = std::fs::read_to_string(pf).map_err(|e| {
-            StrHideError::General(format!(
-                "Failed to read password file from config '{}': {e}",
-                pf.display()
-            ))
-        })?;
-        let first_line = s
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .trim_end_matches(&['\r', '\n'][..]);
-        if first_line.is_empty() {
-            return Err(StrHideError::Password("Password cannot be empty".into()));
-        }
-        return Ok(Some(first_line.to_string()));
     }
     if encrypt_flag {
         // Only prompt when a terminal is actually attached; both stdin and

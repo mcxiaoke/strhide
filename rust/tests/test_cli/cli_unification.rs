@@ -549,6 +549,8 @@ fn removed_stego_credential_sources_are_inert() {
     let embed = run(
         &dir,
         &[
+            "--config",
+            "strhide.toml",
             "embed",
             "carrier.png",
             "-d",

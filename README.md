@@ -20,7 +20,7 @@ This repository ships two implementations:
 - **Black-box steganalysis** — `scan` treats files as unknown and reports structural + statistical signs of hidden data from *any* tool, not just strhide; JPEG carriers additionally go through a **calibrated DCT test** (`dct:calibration`), and a `clean` verdict is explicitly labelled as not being evidence of absence.
 - **Password hint** — an optional (≤ 1 KiB) hint is stored with the envelope and shown when the password is required.
 - **Safe by default** — integrity/signature rejection checks refuse to modify files that should not be touched (e.g. signed binaries); `write`, `restore`, and `embed` default to writing a new `<stem>-out.<ext>` file, leaving original carriers untouched; explicit `--in-place` modifies carriers directly (creating a `.bak` backup copy); `read`, `extract`, `write`, and `restore` refuse to overwrite existing output files unless `--overwrite` is explicitly specified; original file timestamps are preserved.
-- **TOML configuration** — `./strhide.toml` or `~/.strhide/config.toml` provides defaults; explicit CLI flags (`-c, --config`) always win (see [`strhide.sample.toml`](strhide.sample.toml) for an annotated template).
+- **TOML configuration** — Executable directory, user config directory (`~/.config/strhide/config.toml`, `%APPDATA%\strhide\config.toml`), or system config directory provides defaults (CWD is not searched, and hardcoded passwords are not supported in config); explicit CLI flags (`-c, --config`) always win (see [`strhide.sample.toml`](strhide.sample.toml) for an annotated template).
 - **Batch & recursive carriers** — `write`, `restore`, `scan`, `inspect`, `verify`, and `embed` accept several files (and directories with `-r, --recursive`) at once; `read` takes exactly one carrier.
 - **Content-adaptive steganography (HILL, UERD & Scheme C)** — `embed` and `extract` hide data directly in image pixels (PNG, HILL cost model), DCT frequency coefficients (JPEG, via UERD cost model), or H.265/HEVC transform coefficient bypass sign bits (HEIF/HEIC, HEVC Annex-B streams, and MP4/MOV video, Scheme C). Unlike structure-domain injection, content steganography modifies minimal-distortion texture regions and survives metadata stripping. HEIF/HEIC and HEVC embedding achieves zero byte inflation ($\Delta = 0$) and full syntax compliance while avoiding emulation prevention byte (EPB) hazards. Pixels in PNG are written by **ternary ±1 matching** inside the pixel's eight-value class (`val & 0xF8`), so probability mass crosses value-pair boundaries instead of flattening each pair — the specific pattern chi-square and SPA look for. Measured on the bundled corpus at full capacity the self-scan dropped from 50/100 (SUSPICIOUS, RS+SPA) to 25/100 (LOW, SPA only).
 
@@ -147,7 +147,7 @@ strhide restore done/a.png done/b.png done/c.png -o restored/
 strhide list --json
 ```
 
-Password sources (checked in order): `-p/--password` → `--password-file` → `STRHIDE_PASSWORD` env var → config file → interactive prompt (`-e/--encrypt`). `-p` and `--password-file` are mutually exclusive.
+Password sources (checked in order): `-p/--password` → `--password-file` → `STRHIDE_PASSWORD` env var → interactive prompt (`-e/--encrypt`). `-p` and `--password-file` are mutually exclusive (note: configuration files do not store passwords).
 
 Payload sources on `write` are mutually exclusive too: `-d/--data`, `-t/--text`, `--text-file`, `--text-base64`, `--stdin` cannot be combined. When none is given, the `STRHIDE_TEXT` env var is used as a last-resort fallback.
 

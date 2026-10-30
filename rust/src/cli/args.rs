@@ -22,7 +22,7 @@ pub const BANNER: &str = concat!("sth ", env!("STRHIDE_VERSION_INFO"));
 /// same ids and semantics everywhere instead of being copied per binary.
 #[derive(Args, Debug, Clone)]
 pub struct GlobalArgs {
-    /// Path to TOML config file (default: ./strhide.toml, then ~/.strhide/config.toml)
+    /// Path to TOML config file (searches <exe_dir>, user config dir, system config dir)
     #[arg(short = 'c', long, global = true, value_name = "FILE")]
     pub config: Option<PathBuf>,
 

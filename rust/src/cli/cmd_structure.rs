@@ -42,7 +42,6 @@ pub(crate) fn handle_write(
     let password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
-        cfg,
         encrypt || stealth,
         true,
     )?;
@@ -216,7 +215,6 @@ pub(crate) fn handle_read(
     let mut password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
-        cfg,
         false,
         false,
     )?;
@@ -424,7 +422,6 @@ pub(crate) fn handle_restore(
     let password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
-        cfg,
         false,
         false,
     )?;

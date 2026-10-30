@@ -267,6 +267,9 @@ pub(crate) fn run_domain_cli_with(engine: &StrHide, domain: Domain, argv: Vec<Os
 
     if should_print_banner(quiet, &command) {
         println!("{}", domain.banner());
+        if let Some(path) = &cfg.loaded_from {
+            println!("Loaded config: {}", path.display());
+        }
     }
 
     match command {

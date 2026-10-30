@@ -37,7 +37,6 @@ fn run_capacity_probe(
     let password = resolve_password(
         tuning.passwords.password.as_deref(),
         tuning.passwords.password_file.as_deref(),
-        cfg,
         false,
         false,
     )?;
@@ -193,7 +192,6 @@ pub(crate) fn handle_embed(
     let password = resolve_password(
         args.tuning.passwords.password.as_deref(),
         args.tuning.passwords.password_file.as_deref(),
-        cfg,
         encrypt,
         true,
     )?;
@@ -496,7 +494,6 @@ pub(crate) fn handle_extract(
     let password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
-        cfg,
         false,
         false,
     )?;

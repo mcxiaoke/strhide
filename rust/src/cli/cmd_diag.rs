@@ -18,14 +18,13 @@ use super::render::*;
 
 pub(crate) fn handle_inspect(
     args: InspectArgs,
-    cfg: &FileConfig,
+    _cfg: &FileConfig,
     quiet: bool,
     engine: &StrHide,
 ) -> Result<(), StrHideError> {
     let password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
-        cfg,
         false,
         false,
     )?;
@@ -180,14 +179,13 @@ pub(crate) fn handle_inspect(
 
 pub(crate) fn handle_verify(
     args: VerifyArgs,
-    cfg: &FileConfig,
+    _cfg: &FileConfig,
     quiet: bool,
     engine: &StrHide,
 ) -> Result<i32, StrHideError> {
     let password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
-        cfg,
         false,
         false,
     )?;

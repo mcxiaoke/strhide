@@ -371,8 +371,8 @@ Run `strhide <COMMAND> --help` for the options of one command.",
 
     // ---- Root / shared options help ----
     HelpRootConfig:
-        en = "Path to TOML config file (searches ./strhide.toml, ~/.strhide/config.toml)",
-        zh = "配置文件路径（默认按序查找 ./strhide.toml、~/.strhide/config.toml）";
+        en = "Path to TOML config file (searches <exe_dir>, user config dir, system config dir)",
+        zh = "配置文件路径（默认按序查找 exe 目录、用户配置目录、系统配置目录）";
     HelpRootQuiet:
         en = "Quiet mode: suppress progress and status reports (payload, --json, and errors still print)",
         zh = "静音模式：不输出普通状态与进度（错误、提取数据及 --json 仍正常输出）";

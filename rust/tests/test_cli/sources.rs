@@ -269,56 +269,31 @@ fn password_file_missing_is_a_hard_error() {
 }
 
 #[test]
-fn config_password_file_key_is_used() {
+fn config_password_file_key_is_warned_and_not_used() {
     let dir = scratch("cfg_pwfile");
     fs::write(dir.join("c.png"), make_png()).unwrap();
     fs::write(dir.join("pwd.txt"), "cfg-wd\n").unwrap();
-    fs::write(dir.join("strhide.toml"), "password_file = \"pwd.txt\"\n").unwrap();
+    fs::write(
+        dir.join("custom.toml"),
+        "encrypt = true\npassword_file = \"pwd.txt\"\n",
+    )
+    .unwrap();
 
-    let write = run(&dir, &["write", "c.png", "-t", "secret", "--in-place"]);
-    assert_ok(&write, &["write config_password_file"]);
-
-    // No CLI password anywhere: the config's password_file supplies it on read.
-    let read = run(&dir, &["read", "c.png", "--stdout"]);
-    assert_ok(&read, &["read config_password_file"]);
-    assert_eq!(stdout(&read), "secret");
-
-    // A wrong CLI password overrides the config file and fails.
-    let wrong = run(&dir, &["read", "c.png", "--stdout", "-p", "different"]);
-    assert_eq!(code(&wrong), 1);
-}
-
-#[test]
-fn cli_password_beats_config_password_file() {
-    let dir = scratch("cfg_pwfile_pre");
-    fs::write(dir.join("c.png"), make_png()).unwrap();
-    fs::write(dir.join("pwd.txt"), "cfg-wd\n").unwrap();
-    fs::write(dir.join("strhide.toml"), "password_file = \"pwd.txt\"\n").unwrap();
-
-    // -e with an explicit CLI password: the CLI argument must win over the
-    // config password_file (precedence: -p > --password-file > env > config).
-    let out = run(
+    let write = run(
         &dir,
         &[
+            "--config",
+            "custom.toml",
             "write",
             "c.png",
             "-t",
-            "s",
-            "-e",
-            "-p",
-            "cli-pass",
+            "secret",
             "--in-place",
         ],
     );
-    assert_ok(&out, &["write"]);
-
-    let read = run(&dir, &["read", "c.png", "--stdout", "-p", "cli-pass"]);
-    assert_ok(&read, &["read cli-pass"]);
-    assert_eq!(stdout(&read), "s");
-
-    // The config file password does not apply.
-    let wrong = run(&dir, &["read", "c.png", "--stdout", "-p", "cfg-wd"]);
-    assert_eq!(code(&wrong), 1);
+    assert_eq!(code(&write), 1);
+    assert!(stderr(&write).contains("Unknown key 'password_file'"));
+    assert!(stderr(&write).contains("Password required but no interactive terminal"));
 }
 
 // --------------------------------------------------------------------------- mutual exclusion
@@ -609,7 +584,7 @@ fn verify_quiet_suppresses_report_keeps_exit_code() {
 fn seeded_dir(name: &str, config: &str) -> PathBuf {
     let dir = scratch(name);
     fs::write(dir.join("c.png"), make_png()).unwrap();
-    fs::write(dir.join("strhide.toml"), config).unwrap();
+    fs::write(dir.join("custom.toml"), config).unwrap();
     dir
 }
 
@@ -622,6 +597,8 @@ fn config_hint_key_applies_on_write() {
     let write = run(
         &dir,
         &[
+            "--config",
+            "custom.toml",
             "write",
             "c.png",
             "-t",
@@ -660,7 +637,15 @@ fn config_unescape_key_applies() {
     // \u escapes decode to UTF-8 content before embedding.
     let write = run(
         &dir,
-        &["write", "c.png", "-t", r"\u4e2d\u6587ABC", "--in-place"],
+        &[
+            "--config",
+            "custom.toml",
+            "write",
+            "c.png",
+            "-t",
+            r"\u4e2d\u6587ABC",
+            "--in-place",
+        ],
     );
     assert_ok(&write, &["write unescape config"]);
     assert_eq!(read_stdout(&dir, "c.png"), "中文ABC");
@@ -669,7 +654,18 @@ fn config_unescape_key_applies() {
 #[test]
 fn config_backup_false_keeps_no_bak_file() {
     let dir = seeded_dir("cfg_backup", "backup = false\n");
-    let write = run(&dir, &["write", "c.png", "-t", "x", "--in-place"]);
+    let write = run(
+        &dir,
+        &[
+            "--config",
+            "custom.toml",
+            "write",
+            "c.png",
+            "-t",
+            "x",
+            "--in-place",
+        ],
+    );
     assert_ok(&write, &["write backup=false"]);
     assert!(
         !dir.join("c.png.bak").exists(),
@@ -682,7 +678,16 @@ fn config_backup_false_is_overridden_by_no_cli_flag() {
     let dir = seeded_dir("cfg_backup_pre", "backup = true\n");
     let write = run(
         &dir,
-        &["write", "c.png", "-t", "x", "--no-backup", "--in-place"],
+        &[
+            "--config",
+            "custom.toml",
+            "write",
+            "c.png",
+            "-t",
+            "x",
+            "--no-backup",
+            "--in-place",
+        ],
     );
     assert_ok(&write, &["write --no-backup"]);
     assert!(!dir.join("c.png.bak").exists());
@@ -691,7 +696,18 @@ fn config_backup_false_is_overridden_by_no_cli_flag() {
 #[test]
 fn config_backup_true_creates_bak_file() {
     let dir = seeded_dir("cfg_backup_on", "backup = true\n");
-    let write = run(&dir, &["write", "c.png", "-t", "x", "--in-place"]);
+    let write = run(
+        &dir,
+        &[
+            "--config",
+            "custom.toml",
+            "write",
+            "c.png",
+            "-t",
+            "x",
+            "--in-place",
+        ],
+    );
     assert_ok(&write, &["write backup=true"]);
     assert!(
         dir.join("c.png.bak").exists(),
@@ -703,10 +719,9 @@ fn config_backup_true_creates_bak_file() {
 fn config_valid_keys_print_no_unknown_key_warning() {
     let dir = seeded_dir(
         "cfg_all_keys",
-        "strategy = \"auto\"\nstealth = false\nencrypt = false\npassword = \"p\"\nhint = \"h\"\npreserve_time = true\nbackup = false\nunescape = false\npassword_file = \"pwd.txt\"\n",
+        "strategy = \"auto\"\nstealth = false\nencrypt = false\nhint = \"h\"\npreserve_time = true\nbackup = false\nunescape = false\n",
     );
-    fs::write(dir.join("pwd.txt"), "p\n").unwrap();
-    let out = run(&dir, &["list"]);
+    let out = run(&dir, &["--config", "custom.toml", "list"]);
     assert_ok(&out, &["list"]);
     assert!(
         !stderr(&out).contains("[WARNING] Unknown key"),
@@ -723,42 +738,42 @@ fn home_config_toml_is_discovered() {
     fs::create_dir_all(home.join(".strhide")).unwrap();
     fs::write(
         home.join(".strhide").join("config.toml"),
-        "encrypt = true\npassword = \"home-pass\"\n",
+        "backup = false\nhint = \"home-hint\"\n",
     )
     .unwrap();
 
-    // cwd holds no strhide.toml, so the home config must supply the password.
     let write = run_with_home(
         &dir,
         &home,
-        &["write", "c.png", "-t", "home secret", "--in-place"],
+        &[
+            "write",
+            "c.png",
+            "-t",
+            "home secret",
+            "-p",
+            "pwd",
+            "--in-place",
+        ],
     );
     assert_ok(&write, &["write home config"]);
-
-    let read = run_with_home(&dir, &home, &["read", "c.png", "--stdout"]);
-    assert_ok(&read, &["read home config"]);
-    assert_eq!(stdout(&read), "home secret");
-
-    // A different (empty) home cannot decrypt it.
-    let other_home = scratch("home_other");
-    let fail = run_with_home(&dir, &other_home, &["read", "c.png", "--stdout"]);
-    assert_eq!(code(&fail), 1);
+    assert!(
+        !dir.join("c.png.bak").exists(),
+        "home config backup=false must be applied"
+    );
+    assert!(stdout(&write).contains("Password Hint: 'home-hint'"));
 }
 
 #[test]
-fn cwd_strhide_toml_wins_over_home_config() {
+fn cwd_strhide_toml_is_ignored_and_home_config_applies() {
     let dir = scratch("both_cwd");
     fs::write(dir.join("c.png"), make_png()).unwrap();
-    fs::write(
-        dir.join("strhide.toml"),
-        "encrypt = true\npassword = \"cwd-pass\"\n",
-    )
-    .unwrap();
+    // In CWD, put backup = true
+    fs::write(dir.join("strhide.toml"), "backup = true\n").unwrap();
     let home = scratch("both_home");
     fs::create_dir_all(home.join(".strhide")).unwrap();
     fs::write(
         home.join(".strhide").join("config.toml"),
-        "encrypt = true\npassword = \"home-pass\"\n",
+        "backup = false\n",
     )
     .unwrap();
 
@@ -768,22 +783,10 @@ fn cwd_strhide_toml_wins_over_home_config() {
         &["write", "c.png", "-t", "secret", "--in-place"],
     );
     assert_ok(&write, &["write cwd vs home"]);
-
-    // The cwd config's password is the one that must be applied: reading with
-    // it succeeds, reading with the shadowed home password fails.
-    let ok = run_with_home(&dir, &home, &["read", "c.png", "--stdout"]);
-    assert_ok(&ok, &["read cwd config"]);
-
-    let shadowed = run_with_home(
-        &dir,
-        &home,
-        &["read", "c.png", "--stdout", "-p", "home-pass"],
-    );
-    assert_eq!(
-        code(&shadowed),
-        1,
-        "home config must be shadowed by ./strhide.toml, stderr: {}",
-        stderr(&shadowed)
+    // CWD is ignored, so home config backup=false applies!
+    assert!(
+        !dir.join("c.png.bak").exists(),
+        "CWD config must be ignored; home config must apply"
     );
 }
 
@@ -791,10 +794,10 @@ fn cwd_strhide_toml_wins_over_home_config() {
 fn config_file_that_cannot_be_read_is_a_hard_error() {
     let dir = scratch("cfg_dir");
     fs::write(dir.join("c.png"), make_png()).unwrap();
-    // Make ./strhide.toml a directory: read_to_string fails with an error that
+    // Make explicit config a directory: read_to_string fails with an error that
     // is not NotFound, so it must surface as a hard error.
-    fs::create_dir(dir.join("strhide.toml")).unwrap();
-    let out = run(&dir, &["list"]);
+    fs::create_dir(dir.join("bad_cfg")).unwrap();
+    let out = run(&dir, &["--config", "bad_cfg", "list"]);
     assert_eq!(code(&out), 1);
     assert!(
         stderr(&out).contains("Failed to read config file"),
