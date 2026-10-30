@@ -578,10 +578,37 @@ impl StrHide {
     /// `argv` must include the program name as its first element, exactly as
     /// [`std::env::args_os`] returns it; clap uses that element for help and
     /// error output, so callers assembling arguments manually must supply one.
+    /// Run a domain-restricted command tree ([`Domain::Structure`],
+    /// [`Domain::Stego`], [`Domain::Diagnostics`], or [`Domain::All`]) with
+    /// this engine's dialect and baseline parameters, returning the process
+    /// exit code **without** calling [`std::process::exit`].
+    ///
+    /// The dialect and writer-behaviour baseline bound on this engine replace
+    /// the hard-coded official defaults inside the CLI, so an embedding host
+    /// (such as CarrotHash or custom wrappers) can drive its own private
+    /// command line while restricting available subcommands. Explicit CLI flags
+    /// still take precedence over the bound configuration.
+    ///
+    /// `argv` must include the program name as its first element, exactly as
+    /// [`std::env::args_os`] returns it; clap uses that element for help and
+    /// error output, so callers assembling arguments manually must supply one.
+    #[cfg(feature = "cli")]
+    pub fn run_domain_cli_from(
+        &self,
+        domain: crate::cli::Domain,
+        argv: impl IntoIterator<Item = impl Into<OsString>>,
+    ) -> i32 {
+        let argv: Vec<OsString> = argv.into_iter().map(Into::into).collect();
+        crate::cli::run_domain_cli_with(self, domain, argv)
+    }
+
+    /// Run the full command-line interface (`Domain::All`) bound to this engine,
+    /// returning the process exit code **without** calling [`std::process::exit`].
+    ///
+    /// Equivalent to `self.run_domain_cli_from(crate::cli::Domain::All, argv)`.
     #[cfg(feature = "cli")]
     pub fn run_cli_from(&self, argv: impl IntoIterator<Item = impl Into<OsString>>) -> i32 {
-        let argv: Vec<OsString> = argv.into_iter().map(Into::into).collect();
-        crate::cli::run_cli_with(self, argv)
+        self.run_domain_cli_from(crate::cli::Domain::All, argv)
     }
 }
 
@@ -879,3 +906,6 @@ impl AnalysisFacade<'_> {
         crate::analysis::scan_file(path)
     }
 }
+
+#[cfg(feature = "cli")]
+pub use crate::cli::Domain as CliDomain;

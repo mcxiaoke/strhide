@@ -63,6 +63,11 @@ name = "strhide"
 path = "src/lib.rs"
 
 [[bin]]
+name = "strhide"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[[bin]]
 name = "sth"
 path = "src/main.rs"
 required-features = ["cli"]

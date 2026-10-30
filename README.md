@@ -186,7 +186,7 @@ Three details worth knowing before you integrate:
 - **Typed results.** `WriteResult.format` is a `FileFormat`, `strategy` is a `StrategyId` (registry id + name), `backup_file` is a `PathBuf`, and `warnings` is a list of tagged `Warning` values — no consumer has to parse prose.
 - **Typed errors for GUIs.** `StrHideError::detail_i18n()` returns `ErrorDetail { category, detail, hint }`, and `ErrorDetail::render(lang)` produces the same line the CLI prints; a UI thread can render it in its own language without scraping English text.
 
-A host can also drive its own command line with the bound dialect: `ENGINE.run_cli_from(std::env::args_os())` returns the exit code without calling `process::exit`. The underlying free functions (`write_carrier_bytes`, `embed_carrier`, ...) remain available for callers that prefer them, and `use strhide::prelude::*;` imports the common types in one line.
+A host can also drive its own command line with the bound dialect (either full or domain-scoped): `ENGINE.run_cli_from(...)` or `ENGINE.run_domain_cli_from(Domain::Stego, ...)` returns the exit code without calling `process::exit`. The underlying free functions (`write_carrier_bytes`, `embed_carrier`, ...) remain available for callers that prefer them, and `use strhide::prelude::*;` imports the common types in one line.
 
 Library documentation:
 

@@ -182,7 +182,7 @@ assert_eq!(payload.as_bytes(), b"secret");
 - **强类型结果。** `WriteResult.format` 是 `FileFormat`，`strategy` 是 `StrategyId`（注册表 id + 名称），`backup_file` 是 `PathBuf`，`warnings` 是带 `kind` 标签的 `Warning` 列表——前端不需要解析任何散文。
 - **给 GUI 的错误。** `StrHideError::detail_i18n()` 返回 `ErrorDetail { category, detail, hint }`，`ErrorDetail::render(lang)` 输出与 CLI 同一行；UI 线程可用自己的语言渲染，无需从英文文本里反解。
 
-宿主还可以用绑定的方言驱动自己的命令行：`ENGINE.run_cli_from(std::env::args_os())` 返回退出码而不调用 `process::exit`。底层自由函数（`write_carrier_bytes`、`embed_carrier` 等）仍对偏好直接调用的用户开放；`use strhide::prelude::*;` 一行导入常用类型。
+宿主还可以用绑定的方言驱动自己的命令行（支持全量或限定域）：`ENGINE.run_cli_from(...)` 或 `ENGINE.run_domain_cli_from(Domain::Stego, ...)` 返回退出码而不调用 `process::exit`。底层自由函数（`write_carrier_bytes`、`embed_carrier` 等）仍对偏好直接调用的用户开放；`use strhide::prelude::*;` 一行导入常用类型。
 
 库文档：
 

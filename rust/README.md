@@ -108,7 +108,7 @@ let payload = ENGINE.extract(&stego, &Default::default())?;
 assert_eq!(payload, b"payload");
 ```
 
-A host can also drive its own command line: `ENGINE.run_cli_from(std::env::args_os())` returns the exit code without calling `process::exit` (argv must include the program name as its first element).
+A host can also drive its own command line (full or domain-scoped): `ENGINE.run_cli_from(...)` or `ENGINE.run_domain_cli_from(Domain::Stego, ...)` returns the exit code without calling `process::exit` (argv must include the program name as its first element).
 
 ### Free-function entry points
 

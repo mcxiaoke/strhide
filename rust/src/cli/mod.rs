@@ -195,16 +195,10 @@ pub fn run_cli() -> i32 {
 /// `argv` must include the program name as its first element, exactly as
 /// [`std::env::args_os`] returns it.
 pub fn run_domain_cli(domain: Domain, argv: Vec<OsString>) -> i32 {
-    let engine = StrHide::new();
-    run_domain_cli_with(&engine, domain, argv)
+    StrHide::new().run_domain_cli_from(domain, argv)
 }
 
-/// Historical flat path used by [`StrHide::run_cli_from`]: the full command tree.
-pub(crate) fn run_cli_with(engine: &StrHide, argv: Vec<OsString>) -> i32 {
-    run_domain_cli_with(engine, Domain::All, argv)
-}
-
-fn run_domain_cli_with(engine: &StrHide, domain: Domain, argv: Vec<OsString>) -> i32 {
+pub(crate) fn run_domain_cli_with(engine: &StrHide, domain: Domain, argv: Vec<OsString>) -> i32 {
     #[cfg(feature = "content-base")]
     crate::stego::init_default_thread_pool();
 
