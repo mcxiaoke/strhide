@@ -319,7 +319,7 @@ fn read_one(
                                 "No structure hidden data found; auto-redirecting to content steganography extraction..."
                             );
                         }
-                        let extract_args = ExtractArgs {
+                        let mut extract_args = ExtractArgs {
                             carrier: vec![carrier.to_path_buf()],
                             output: args.output.clone(),
                             stdout: args.stdout,
@@ -327,6 +327,14 @@ fn read_one(
                             passwords: args.passwords.clone(),
                             auto: false,
                         };
+                        // Hand over the password already resolved here — the
+                        // hint-retry above may have just prompted for it. Without
+                        // this the redirect resolves an empty source, fails the
+                        // content-domain extract and blames the password the user
+                        // had typed a moment earlier (review R2 P1-2).
+                        if extract_args.passwords.password.is_none() {
+                            extract_args.passwords.password = password.clone();
+                        }
                         return handle_extract(extract_args, cfg, quiet, engine);
                     } else {
                         return Err(StrHideError::NoHiddenData(format!(

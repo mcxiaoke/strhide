@@ -419,9 +419,11 @@ pub(crate) fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideErr
                 }
             }
             for note in &r.notes {
-                if !r.findings.is_empty() || note.contains("Carrier is larger") {
-                    println!("    ? {note}");
-                }
+                // Notes explain how to read the verdict, so the "a clean
+                // result is not proof" caveat matters *most* when there are no
+                // findings. Filtering on `findings.is_empty()` dropped exactly
+                // those (review R2 P1-10).
+                println!("    ? {note}");
             }
         }
         let findings_cnt = reports.iter().filter(|r| !r.findings.is_empty()).count();
