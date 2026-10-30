@@ -7,7 +7,8 @@ release.py — StrHide CLI 与 GUI 一键打包与分发脚本
 1. 自动从 rust/Cargo.toml 与 gui/src-tauri/tauri.conf.json 解析版本号（支持命令行覆盖）；
 2. 编译 Rust CLI (cargo build --release --features cli)；
 3. 编译 Tauri v2 GUI (pnpm tauri build --no-bundle)；
-4. 将 CLI 单文件与文档打包为 release/v<version>/strhide-cli-v<version>-<platform>.zip；
+4. 将 4 个 CLI 入口（全量 sth + 三个域专用 sthc/sths/sthv）与文档打包为
+   release/v<version>/strhide-cli-v<version>-<platform>.zip；
 5. 将 GUI 便携式独立程序与文档打包为 release/v<version>/strhide-gui-v<version>-<platform>-portable.zip；
 6. 自动收集可能存在的安装包（.msi / .exe，若生成）；
 7. 自动生成 SHA256SUMS.txt 完整性校验和清单。
@@ -55,6 +56,21 @@ DOC_FILES = [
     ROOT / "README.md",
     ROOT / "LICENSE",
 ]
+
+# 四个 CLI 入口：全量 + 三个域专用。它们由同一个 Cargo package 的多个
+# [[bin]] 产出，共享 strhide lib crate，因此行为与参数定义完全一致。
+CLI_EXE_STEMS = ["sth", "sthc", "sths", "sthv"]
+
+
+def cli_exe_names() -> list[str]:
+    """四个 CLI 入口在 target/release 下的文件名（含平台扩展名）。"""
+    suffix = ".exe" if platform.system() == "Windows" else ""
+    return [f"{stem}{suffix}" for stem in CLI_EXE_STEMS]
+
+
+def cli_bins() -> list[Path]:
+    """四个 CLI 入口的 Release 产物路径。"""
+    return [RUST_DIR / "target" / "release" / name for name in cli_exe_names()]
 
 
 def print_banner(text: str) -> None:
@@ -121,11 +137,11 @@ def get_platform_tag() -> str:
 def clean_build(clean_cli: bool, clean_gui: bool, dry_run: bool) -> None:
     """清理 Release 目标产物。"""
     if clean_cli:
-        cli_bin = RUST_DIR / "target" / "release" / ("strhide.exe" if platform.system() == "Windows" else "strhide")
-        if cli_bin.exists():
-            print(f"-> 移除已有 CLI 产物: {cli_bin}")
-            if not dry_run:
-                cli_bin.unlink(missing_ok=True)
+        for cli_bin in cli_bins():
+            if cli_bin.exists():
+                print(f"-> 移除已有 CLI 产物: {cli_bin}")
+                if not dry_run:
+                    cli_bin.unlink(missing_ok=True)
 
     if clean_gui:
         gui_bin = GUI_TAURI_DIR / "target" / "release" / ("strhide-gui.exe" if platform.system() == "Windows" else "strhide-gui")
@@ -135,17 +151,22 @@ def clean_build(clean_cli: bool, clean_gui: bool, dry_run: bool) -> None:
                 gui_bin.unlink(missing_ok=True)
 
 
-def build_cli(dry_run: bool) -> Path:
-    """构建 Rust CLI Release 二进制。"""
-    print_banner("1/2 构建 Rust CLI Release 二进制")
+def build_cli(dry_run: bool) -> list[Path]:
+    """构建 Rust CLI Release 二进制（全量入口 + 三个域专用入口）。
+
+    `cargo build --release --features cli` 默认会构建 package 内所有满足
+    required-features 的 bin，因此四个入口一次构建即可全部产出。
+    """
+    print_banner("1/2 构建 Rust CLI Release 二进制（4 个入口）")
     cmd = "cargo build --release --features cli"
     run(cmd, cwd=RUST_DIR, dry_run=dry_run)
 
-    exe_name = "strhide.exe" if platform.system() == "Windows" else "strhide"
-    out_bin = RUST_DIR / "target" / "release" / exe_name
-    if not dry_run and not out_bin.exists():
-        raise SystemExit(f"[ERROR] 未找到 CLI 构建产物: {out_bin}")
-    return out_bin
+    bins = cli_bins()
+    if not dry_run:
+        for out_bin in bins:
+            if not out_bin.exists():
+                raise SystemExit(f"[ERROR] 未找到 CLI 构建产物: {out_bin}")
+    return bins
 
 
 def build_gui(dry_run: bool) -> Path:
@@ -168,9 +189,7 @@ def package_cli(
     platform_tag: str,
     dry_run: bool,
 ) -> Path:
-    """将 CLI 二进制及必要文档打包为 zip。"""
-    exe_name = "strhide.exe" if platform.system() == "Windows" else "strhide"
-    src_bin = RUST_DIR / "target" / "release" / exe_name
+    """将 4 个 CLI 入口及必要文档打包为 zip。"""
     zip_name = f"strhide-cli-v{version}-{platform_tag}.zip"
     zip_path = release_dir / zip_name
 
@@ -178,12 +197,15 @@ def package_cli(
     if dry_run:
         return zip_path
 
-    if not src_bin.exists():
-        raise SystemExit(f"[ERROR] 找不到待打包的 CLI 产物: {src_bin}")
+    bins = cli_bins()
+    for src_bin in bins:
+        if not src_bin.exists():
+            raise SystemExit(f"[ERROR] 找不到待打包的 CLI 产物: {src_bin}")
 
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-        # 写入可执行文件
-        zf.write(src_bin, arcname=exe_name)
+        # 写入全部 4 个可执行文件（全量 + 三个域专用入口）
+        for src_bin in bins:
+            zf.write(src_bin, arcname=src_bin.name)
         # 写入文档文件
         for doc in DOC_FILES:
             if doc.exists():

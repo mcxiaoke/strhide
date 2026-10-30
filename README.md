@@ -56,6 +56,27 @@ cargo build --release
 # binary at target/release/strhide
 ```
 
+### Domain-specific entry points
+
+The CLI zip also contains three thinner entry points built from the **same library** — identical
+behaviour and argument definitions, just a smaller command tree and a clearer `--help`:
+
+| Binary | Commands |
+| --- | --- |
+| `sth` | all ten verbs (full tool) |
+| `sthc` | `write`, `read`, `restore` — container envelopes |
+| `sths` | `embed`, `extract`, `capacity` — content-adaptive steganography |
+| `sthv` | `inspect`, `verify`, `scan`, `list` — read-only diagnostics |
+
+```bash
+sthc write photo.png -t "meet me at 7"
+sths embed photo.png -t "secret" -o stego.png
+sthv inspect report.pdf --json
+```
+
+All global options (`-c/--config`, `-q/--quiet`, `--lang`), every option definition and every
+handler are shared with the full `strhide`; the domain binaries only narrow the command list.
+
 ## CLI quick start
 
 ```bash

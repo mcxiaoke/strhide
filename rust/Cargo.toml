@@ -63,8 +63,27 @@ name = "strhide"
 path = "src/lib.rs"
 
 [[bin]]
-name = "strhide"
+name = "sth"
 path = "src/main.rs"
+required-features = ["cli"]
+
+# Domain-specific entry points. Thin `main`s in src/bin/ share the same lib
+# crate (and therefore the same cli module) with `strhide`; each exposes only
+# its own command group. All require the `cli` feature, so the minimal-feature
+# builds used in CI still compile just the library.
+[[bin]]
+name = "sthc"
+path = "src/bin/sthc.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "sths"
+path = "src/bin/sths.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "sthv"
+path = "src/bin/sthv.rs"
 required-features = ["cli"]
 
 [dependencies]

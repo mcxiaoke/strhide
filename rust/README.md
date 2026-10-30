@@ -9,6 +9,7 @@ See the [project README](../README.md) for the full documentation, and the [Chin
 ```bash
 cargo build --release
 # binary at target/release/strhide
+# domain entries: target/release/strhide-{struct,stego,diag}
 ```
 
 ## Usage
@@ -56,6 +57,28 @@ and quality-100 carriers (all quantization steps == 1) are out of scope.
 
 Supported carriers: PNG, JPEG, WebP, HEIC/HEIF, HEVC (Annex-B), MP4, WAV, MKV, ZIP, PDF, and Windows PE. Unrecognized files
 are rejected rather than appended to.
+
+### Domain-specific entry points
+
+`cargo build --release --features cli` produces four CLIs from one package. They all link the
+same `strhide` library, so argument definitions, handlers and output are identical — only the
+command tree differs:
+
+| Binary | Commands |
+| --- | --- |
+| `sth` | all ten verbs |
+| `sthc` | `write`, `read`, `restore` |
+| `sths` | `embed`, `extract`, `capacity` |
+| `sthv` | `inspect`, `verify`, `scan`, `list` |
+
+```bash
+sthc write photo.png -t "secret"
+sths embed photo.png -t "secret" -o stego.png
+sthv inspect report.pdf --json
+```
+
+All four share the global options (`-c/--config`, `-q/--quiet`, `--lang`); the release script
+packs all four into `strhide-cli-v<version>-<platform>.zip`.
 
 ## Library
 

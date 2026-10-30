@@ -14,16 +14,14 @@ use clap::{Args, Parser, Subcommand};
 pub const STRHIDE_VERSION_INFO: &str = env!("STRHIDE_VERSION_INFO");
 pub const STRHIDE_GIT_HASH: &str = env!("STRHIDE_GIT_HASH");
 pub const STRHIDE_BUILD_TIME: &str = env!("STRHIDE_BUILD_TIME");
-pub const BANNER: &str = concat!("strhide ", env!("STRHIDE_VERSION_INFO"));
+pub const BANNER: &str = concat!("sth ", env!("STRHIDE_VERSION_INFO"));
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "strhide",
-    version = STRHIDE_VERSION_INFO,
-    about = "Format-preserving lossless data hiding and steganography tool",
-    after_help = ROOT_AFTER_HELP
-)]
-pub struct Cli {
+/// Global options shared by the full entry point and every domain entry point.
+///
+/// Declared once and flattened into each `Parser`, so `-c/-q/--lang` keep the
+/// same ids and semantics everywhere instead of being copied per binary.
+#[derive(Args, Debug, Clone)]
+pub struct GlobalArgs {
     /// Path to TOML config file (default: ./strhide.toml, then ~/.strhide/config.toml)
     #[arg(short = 'c', long, global = true, value_name = "FILE")]
     pub config: Option<PathBuf>,
@@ -38,6 +36,18 @@ pub struct Cli {
         value_parser = ["en", "zh"]
     )]
     pub lang: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "sth",
+    version = STRHIDE_VERSION_INFO,
+    about = "Format-preserving lossless data hiding and steganography tool",
+    after_help = ROOT_AFTER_HELP
+)]
+pub struct Cli {
+    #[command(flatten)]
+    pub global: GlobalArgs,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -52,7 +62,7 @@ const ROOT_AFTER_HELP: &str = "Groups:
   Media Stego  embed | extract | capacity         payload inside pixels / DCT / CABAC
   Diagnostics  inspect | verify | scan | list      read-only analysis
 
-Run `strhide <COMMAND> --help` for the options of one command.";
+Run `sth <COMMAND> --help` for the options of one command.";
 
 /// The ten verbs, ordered by group: container, media stego, diagnostics.
 ///
@@ -93,6 +103,112 @@ pub enum Commands {
     /// List all supported formats, strategies, and their capacity limits
     #[command(display_order = 33)]
     List(ListArgs),
+}
+
+// ── Domain-specific command trees ──────────────────────────────────────────
+//
+// Each enum reuses the very same `WriteArgs`…`ScanArgs` structs as the full
+// `Commands` enum — only the variant declarations are repeated. Every domain
+// enum converts back into the full `Commands` in `cli::run_domain_cli_with`,
+// so all handlers, banner rules and error paths stay shared verbatim.
+
+/// Container / structure domain: envelopes inside the host file.
+#[derive(Subcommand, Debug)]
+pub enum ContainerCommands {
+    /// Hide secret payload into carrier file
+    Write(WriteArgs),
+    /// Read and extract hidden payload from carrier
+    Read(ReadArgs),
+    /// 100% loss-free restoration of the original host file
+    Restore(RestoreArgs),
+}
+
+/// Content / media steganography domain: payload inside pixels / DCT / CABAC.
+#[derive(Subcommand, Debug)]
+pub enum StegoCommands {
+    /// Content-adaptive steganography: embed payload into image pixels or DCT coefficients (HILL/UERD)
+    Embed(EmbedArgs),
+    /// Content-adaptive steganography: extract payload from image pixels or DCT coefficients
+    Extract(ExtractArgs),
+    /// Probe maximum embedding capacity of image carrier(s)
+    Capacity(CapacityArgs),
+}
+
+/// Diagnostics domain: read-only analysis.
+#[derive(Subcommand, Debug)]
+pub enum DiagCommands {
+    /// Inspect carrier structure and envelope metadata
+    Inspect(InspectArgs),
+    /// Diagnostic verification of host, envelope, and crypto
+    Verify(VerifyArgs),
+    /// Black-box steganalysis: scan file(s) for hidden content, known or unknown
+    Scan(ScanArgs),
+    /// List all supported formats, strategies, and their capacity limits
+    List(ListArgs),
+}
+
+impl From<ContainerCommands> for Commands {
+    fn from(c: ContainerCommands) -> Self {
+        match c {
+            ContainerCommands::Write(a) => Commands::Write(a),
+            ContainerCommands::Read(a) => Commands::Read(a),
+            ContainerCommands::Restore(a) => Commands::Restore(a),
+        }
+    }
+}
+
+impl From<StegoCommands> for Commands {
+    fn from(c: StegoCommands) -> Self {
+        match c {
+            StegoCommands::Embed(a) => Commands::Embed(a),
+            StegoCommands::Extract(a) => Commands::Extract(a),
+            StegoCommands::Capacity(a) => Commands::Capacity(a),
+        }
+    }
+}
+
+impl From<DiagCommands> for Commands {
+    fn from(c: DiagCommands) -> Self {
+        match c {
+            DiagCommands::Inspect(a) => Commands::Inspect(a),
+            DiagCommands::Verify(a) => Commands::Verify(a),
+            DiagCommands::Scan(a) => Commands::Scan(a),
+            DiagCommands::List(a) => Commands::List(a),
+        }
+    }
+}
+
+/// Container-domain entry point (`sthc`).
+#[derive(Parser, Debug)]
+#[command(name = "sthc", version = STRHIDE_VERSION_INFO)]
+pub struct StructCli {
+    #[command(flatten)]
+    pub global: GlobalArgs,
+
+    #[command(subcommand)]
+    pub command: ContainerCommands,
+}
+
+/// Content-steganography entry point (`sths`).
+#[derive(Parser, Debug)]
+#[command(name = "sths", version = STRHIDE_VERSION_INFO)]
+pub struct StegoCli {
+    #[command(flatten)]
+    pub global: GlobalArgs,
+
+    #[command(subcommand)]
+    pub command: StegoCommands,
+}
+
+/// Diagnostics entry point (`sthv`).
+#[derive(Parser, Debug)]
+#[command(name = "sthv", version = STRHIDE_VERSION_INFO)]
+pub struct DiagCli {
+    #[command(flatten)]
+    pub global: GlobalArgs,
+
+    #[command(subcommand)]
+    pub command: DiagCommands,
 }
 
 /// Arguments of the read-only capacity probe.

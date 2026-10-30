@@ -15,6 +15,8 @@ mod batch;
 mod cli_unification;
 #[path = "test_cli/config.rs"]
 mod config;
+#[path = "test_cli/domains.rs"]
+mod domains;
 #[path = "test_cli/i18n.rs"]
 mod i18n;
 #[path = "test_cli/p2.rs"]

@@ -55,6 +55,27 @@ cargo build --release
 # 产物位于 target/release/strhide
 ```
 
+### 域专用入口
+
+CLI 发布包内除全功能 `strhide` 外，还有 3 个"精简入口"，与全量入口**共用同一份 lib 代码**
+（行为、参数定义完全一致，只是命令树更小、`--help` 更清晰）：
+
+| 可执行文件 | 子命令 |
+| --- | --- |
+| `strhide` | 全部 10 个（全功能工具） |
+| `sthc` | `write`、`read`、`restore` —— 容器内封装信封 |
+| `sths` | `embed`、`extract`、`capacity` —— 内容自适应隐写 |
+| `sthv` | `inspect`、`verify`、`scan`、`list` —— 只读诊断分析 |
+
+```bash
+sthc write photo.png -t "meet me at 7"
+sths embed photo.png -t "机密信息" -o stego.png
+sthv inspect report.pdf --json
+```
+
+全局选项（`-c/--config`、`-q/--quiet`、`--lang`）、所有参数定义与全部处理逻辑都与全量 `strhide`
+共享，域入口只是收窄了命令列表。
+
 ## 命令行快速上手
 
 ```bash

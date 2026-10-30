@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 pub fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_strhide")
+    env!("CARGO_BIN_EXE_sth")
 }
 
 /// Standard Command builder for CLI integration tests.

@@ -110,4 +110,9 @@ workbuddy/
 *.pyc
 .NO_DELETE*
 
+# Cargo multi-bin sources: rust/src/bin/*.rs are source files, not build
+# output. The broad `bin/` and `**/bin/` rules above would ignore them.
+!rust/src/bin/
+!rust/src/bin/**
+
 

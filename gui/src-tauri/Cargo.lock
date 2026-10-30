@@ -3155,7 +3155,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "rusty_h265"
 version = "0.6.2"
-source = "git+https://github.com/mcxiaoke/rusty_h265.git?tag=v1-20261025-2#ba02bb529a12dcdf57b4c6ff2df535bc4f948422"
+source = "git+https://github.com/mcxiaoke/rusty_h265.git?tag=v1-20261029#c1f6aee07ae54d0c388bdbf0e1616e47f6a1143f"
 dependencies = [
  "rusty_h265-accel",
 ]
@@ -3163,7 +3163,7 @@ dependencies = [
 [[package]]
 name = "rusty_h265-accel"
 version = "0.6.2"
-source = "git+https://github.com/mcxiaoke/rusty_h265.git?tag=v1-20261025-2#ba02bb529a12dcdf57b4c6ff2df535bc4f948422"
+source = "git+https://github.com/mcxiaoke/rusty_h265.git?tag=v1-20261029#c1f6aee07ae54d0c388bdbf0e1616e47f6a1143f"
 
 [[package]]
 name = "same-file"
@@ -3553,7 +3553,7 @@ checksum = "ff7589a1859b09232522bb9edf076ca7fcf14ded96685d3fa629db73023ffbb7"
 
 [[package]]
 name = "strhide"
-version = "0.7.4"
+version = "0.8.1"
 dependencies = [
  "aes-gcm",
  "crc32fast",
@@ -3578,7 +3578,7 @@ dependencies = [
 
 [[package]]
 name = "strhide-gui"
-version = "0.7.4"
+version = "0.8.1"
 dependencies = [
  "rayon",
  "serde",

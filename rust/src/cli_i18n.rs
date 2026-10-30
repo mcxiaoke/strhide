@@ -36,7 +36,9 @@ fn walk(cmd: &mut Command, lang: Lang) {
 
 fn cmd_about(name: &str, lang: Lang) -> Option<&'static str> {
     let msg = match name {
-        "strhide" => Msg::CmdRoot,
+        // The three domain entry points share the root about text; their
+        // subcommand names are unchanged, so all subcommand help stays shared.
+        "strhide" | "sth" | "sthc" | "sths" | "sthv" => Msg::CmdRoot,
         "write" => Msg::CmdWrite,
         "read" => Msg::CmdRead,
         "restore" => Msg::CmdRestore,
@@ -54,7 +56,7 @@ fn cmd_about(name: &str, lang: Lang) -> Option<&'static str> {
 
 fn cmd_after_help(name: &str, lang: Lang) -> Option<&'static str> {
     let msg = match name {
-        "strhide" => Msg::AfterHelpRoot,
+        "strhide" | "sth" => Msg::AfterHelpRoot,
         "write" => Msg::AfterHelpWrite,
         "read" => Msg::AfterHelpRead,
         "embed" => Msg::AfterHelpEmbed,
@@ -74,9 +76,9 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
     let id = id_str.as_str();
     let msg = match (cmd, id) {
         // Root options
-        ("strhide", "config") => Msg::HelpRootConfig,
-        ("strhide", "quiet") => Msg::HelpRootQuiet,
-        ("strhide", "lang") => Msg::HelpRootLang,
+        ("strhide" | "sth" | "sthc" | "sths" | "sthv", "config") => Msg::HelpRootConfig,
+        ("strhide" | "sth" | "sthc" | "sths" | "sthv", "quiet") => Msg::HelpRootQuiet,
+        ("strhide" | "sth" | "sthc" | "sths" | "sthv", "lang") => Msg::HelpRootLang,
 
         // Built-in clap help / version on any level
         (_, "help") => Msg::HelpBuiltinHelp,

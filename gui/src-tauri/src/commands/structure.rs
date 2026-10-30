@@ -70,6 +70,9 @@ pub async fn write_structure_file_cmd(
                 stealth: req.stealth,
                 preserve_time: req.preserve_time,
                 backup: req.backup,
+                // Same value the pre-flight `check_overwrite` above used, so
+                // the engine's own guard agrees with the IPC-level check.
+                overwrite,
                 control: ctrl,
             };
 

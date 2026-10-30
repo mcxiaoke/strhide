@@ -23,7 +23,10 @@ pub mod render;
 
 // The historical flat paths (`strhide::cli::Cli`, `strhide::cli::run_cli`)
 // keep working: the split into submodules is an internal reorganisation.
-pub use args::{BANNER, Cli, Commands, STRHIDE_BUILD_TIME, STRHIDE_GIT_HASH, STRHIDE_VERSION_INFO};
+pub use args::{
+    BANNER, Cli, Commands, ContainerCommands, DiagCli, DiagCommands, GlobalArgs,
+    STRHIDE_BUILD_TIME, STRHIDE_GIT_HASH, STRHIDE_VERSION_INFO, StegoCli, StegoCommands, StructCli,
+};
 pub use helpers::{prompt_password, resolve_password};
 pub use render::print_error;
 
@@ -31,6 +34,51 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{CommandFactory, FromArgMatches};
+
+/// Which command tree a binary exposes.
+///
+/// The full entry point keeps all ten verbs; the three domain entry points
+/// expose only their own group. All four share the same handlers: a domain's
+/// parsed command is converted back into the full [`Commands`] enum before
+/// dispatch, so there is exactly one implementation of each verb.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Domain {
+    /// `sth` — all ten subcommands.
+    All,
+    /// `sthc` — `write`, `read`, `restore`.
+    Structure,
+    /// `sths` — `embed`, `extract`, `capacity`.
+    Stego,
+    /// `sthv` — `inspect`, `verify`, `scan`, `list`.
+    Diagnostics,
+}
+
+impl Domain {
+    /// Program name used in help, version and error output.
+    pub fn name(self) -> &'static str {
+        match self {
+            Domain::All => "sth",
+            Domain::Structure => "sthc",
+            Domain::Stego => "sths",
+            Domain::Diagnostics => "sthv",
+        }
+    }
+
+    /// Fresh clap `Command` for this entry point (clap consumes it on parse).
+    fn command(self) -> clap::Command {
+        match self {
+            Domain::All => Cli::command(),
+            Domain::Structure => StructCli::command(),
+            Domain::Stego => StegoCli::command(),
+            Domain::Diagnostics => DiagCli::command(),
+        }
+    }
+
+    /// Banner line (`--version` and normal status output).
+    fn banner(self) -> String {
+        format!("{} {}", self.name(), env!("STRHIDE_VERSION_INFO"))
+    }
+}
 
 use crate::core::config;
 use crate::core::i18n;
@@ -40,11 +88,11 @@ use crate::cli::cmd_diag::{handle_inspect, handle_list, handle_scan, handle_veri
 use crate::cli::cmd_stego::{handle_capacity, handle_embed, handle_extract};
 use crate::cli::cmd_structure::{handle_read, handle_restore, handle_write};
 
-fn should_print_banner(cli: &Cli) -> bool {
-    if cli.quiet {
+fn should_print_banner(quiet: bool, command: &Commands) -> bool {
+    if quiet {
         return false;
     }
-    match &cli.command {
+    match command {
         Commands::Inspect(args) if args.json => false,
         Commands::Verify(args) if args.json => false,
         Commands::Scan(args) if args.json => false,
@@ -102,14 +150,14 @@ fn scan_subcommand(argv: &[std::ffi::OsString]) -> Option<&str> {
     None
 }
 
-fn render_early_error(e: clap::Error, argv: &[std::ffi::OsString]) -> i32 {
+fn render_early_error(e: clap::Error, argv: &[std::ffi::OsString], domain: Domain) -> i32 {
     use clap::error::ErrorKind::*;
     let lang = i18n::locale::detect(scan_lang_flag(argv), None);
     i18n::set_lang(lang);
 
     match e.kind() {
         DisplayHelp | DisplayHelpOnMissingArgumentOrSubcommand | MissingSubcommand => {
-            let mut cmd = crate::cli_i18n::localize(Cli::command(), lang);
+            let mut cmd = crate::cli_i18n::localize(domain.command(), lang);
             if let Some(target) = scan_subcommand(argv)
                 && let Some(sub) = cmd.find_subcommand_mut(target)
             {
@@ -122,11 +170,11 @@ fn render_early_error(e: clap::Error, argv: &[std::ffi::OsString]) -> i32 {
             e.exit_code()
         }
         DisplayVersion => {
-            println!("{BANNER}");
+            println!("{}", domain.banner());
             0
         }
         _ => {
-            let mut cmd = crate::cli_i18n::localize(Cli::command(), lang);
+            let mut cmd = crate::cli_i18n::localize(domain.command(), lang);
             if let Err(loc_err) = cmd.try_get_matches_from_mut(argv.to_vec()) {
                 let _ = loc_err.print();
                 loc_err.exit_code()
@@ -142,14 +190,28 @@ pub fn run_cli() -> i32 {
     StrHide::new().run_cli_from(std::env::args_os())
 }
 
+/// Entry point for a domain-specific binary (`src/bin/strhide-*.rs`).
+///
+/// `argv` must include the program name as its first element, exactly as
+/// [`std::env::args_os`] returns it.
+pub fn run_domain_cli(domain: Domain, argv: Vec<OsString>) -> i32 {
+    let engine = StrHide::new();
+    run_domain_cli_with(&engine, domain, argv)
+}
+
+/// Historical flat path used by [`StrHide::run_cli_from`]: the full command tree.
 pub(crate) fn run_cli_with(engine: &StrHide, argv: Vec<OsString>) -> i32 {
+    run_domain_cli_with(engine, Domain::All, argv)
+}
+
+fn run_domain_cli_with(engine: &StrHide, domain: Domain, argv: Vec<OsString>) -> i32 {
     #[cfg(feature = "content-base")]
     crate::stego::init_default_thread_pool();
 
     // 1) 预解析（英文模板，仅用于取得 matches；不触发任何输出）
-    let pre = match Cli::command().try_get_matches_from(argv.clone()) {
+    let pre = match domain.command().try_get_matches_from(argv.clone()) {
         Ok(m) => m,
-        Err(e) => return render_early_error(e, &argv),
+        Err(e) => return render_early_error(e, &argv, domain),
     };
 
     // 2) 加载配置（失败也要按最终语言报错）
@@ -176,49 +238,73 @@ pub(crate) fn run_cli_with(engine: &StrHide, argv: Vec<OsString>) -> i32 {
         eprintln!("{warn}");
     }
 
-    // 4) 从 matches 构造 Cli
-    let cli = match Cli::from_arg_matches(&pre) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[ERROR] {e}");
-            return 2;
-        }
+    // 4) 从 matches 构造本入口的 Cli，并归一化为全量 Commands + quiet。
+    //    之后所有分派复用同一份实现，域入口不复制任何行为。
+    let (command, quiet): (Commands, bool) = match domain {
+        Domain::All => match Cli::from_arg_matches(&pre) {
+            Ok(c) => (c.command, c.global.quiet),
+            Err(e) => {
+                eprintln!("[ERROR] {e}");
+                return 2;
+            }
+        },
+        Domain::Structure => match StructCli::from_arg_matches(&pre) {
+            Ok(c) => (c.command.into(), c.global.quiet),
+            Err(e) => {
+                eprintln!("[ERROR] {e}");
+                return 2;
+            }
+        },
+        Domain::Stego => match StegoCli::from_arg_matches(&pre) {
+            Ok(c) => (c.command.into(), c.global.quiet),
+            Err(e) => {
+                eprintln!("[ERROR] {e}");
+                return 2;
+            }
+        },
+        Domain::Diagnostics => match DiagCli::from_arg_matches(&pre) {
+            Ok(c) => (c.command.into(), c.global.quiet),
+            Err(e) => {
+                eprintln!("[ERROR] {e}");
+                return 2;
+            }
+        },
     };
 
-    if should_print_banner(&cli) {
-        println!("{BANNER}");
+    if should_print_banner(quiet, &command) {
+        println!("{}", domain.banner());
     }
 
-    match cli.command {
-        Commands::Write(args) => match handle_write(args, &cfg, cli.quiet, engine) {
+    match command {
+        Commands::Write(args) => match handle_write(args, &cfg, quiet, engine) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);
                 1
             }
         },
-        Commands::Read(args) => match handle_read(args, &cfg, cli.quiet, engine) {
+        Commands::Read(args) => match handle_read(args, &cfg, quiet, engine) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);
                 1
             }
         },
-        Commands::Restore(args) => match handle_restore(args, &cfg, cli.quiet, engine) {
+        Commands::Restore(args) => match handle_restore(args, &cfg, quiet, engine) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);
                 1
             }
         },
-        Commands::Inspect(args) => match handle_inspect(args, &cfg, cli.quiet, engine) {
+        Commands::Inspect(args) => match handle_inspect(args, &cfg, quiet, engine) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);
                 1
             }
         },
-        Commands::Verify(args) => match handle_verify(args, &cfg, cli.quiet, engine) {
+        Commands::Verify(args) => match handle_verify(args, &cfg, quiet, engine) {
             Ok(code) => code,
             Err(e) => {
                 print_error(&e);
@@ -227,28 +313,28 @@ pub(crate) fn run_cli_with(engine: &StrHide, argv: Vec<OsString>) -> i32 {
         },
         // Like verify, scan owns its exit code: 1 when a scan verdict reaches
         // "likely-hidden" (see handle_scan), 0 otherwise, regardless of quiet.
-        Commands::Scan(args) => match handle_scan(args, cli.quiet) {
+        Commands::Scan(args) => match handle_scan(args, quiet) {
             Ok(code) => code,
             Err(e) => {
                 print_error(&e);
                 1
             }
         },
-        Commands::Embed(args) => match handle_embed(args, &cfg, cli.quiet, engine) {
+        Commands::Embed(args) => match handle_embed(args, &cfg, quiet, engine) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);
                 1
             }
         },
-        Commands::Capacity(args) => match handle_capacity(args, &cfg, cli.quiet, engine) {
+        Commands::Capacity(args) => match handle_capacity(args, &cfg, quiet, engine) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);
                 1
             }
         },
-        Commands::Extract(args) => match handle_extract(args, &cfg, cli.quiet, engine) {
+        Commands::Extract(args) => match handle_extract(args, &cfg, quiet, engine) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);

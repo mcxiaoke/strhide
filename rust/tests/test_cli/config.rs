@@ -215,7 +215,10 @@ fn cli_version_flag_contains_git_hash_and_build_time() {
     let out = run(&dir, &["--version"], None);
     assert_eq!(code(&out), 0);
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("strhide"), "version output: {s}");
+    assert!(
+        s.contains("sth") || s.contains("strhide"),
+        "version output: {s}"
+    );
     assert!(s.contains("commit:"), "must contain commit hash: {s}");
     assert!(s.contains("built:"), "must contain built time: {s}");
 }
@@ -230,7 +233,9 @@ fn cli_normal_run_prints_banner_and_quiet_suppresses_it() {
     assert_eq!(code(&out_list), 0);
     let s_list = String::from_utf8_lossy(&out_list.stdout);
     assert!(
-        s_list.starts_with("strhide ") && s_list.contains("commit:") && s_list.contains("built:"),
+        (s_list.starts_with("sth ") || s_list.starts_with("strhide "))
+            && s_list.contains("commit:")
+            && s_list.contains("built:"),
         "list output must start with banner: {s_list}"
     );
 
@@ -238,7 +243,8 @@ fn cli_normal_run_prints_banner_and_quiet_suppresses_it() {
     assert_eq!(code(&out_inspect), 0);
     let s_inspect = String::from_utf8_lossy(&out_inspect.stdout);
     assert!(
-        s_inspect.starts_with("strhide ") && s_inspect.contains("commit:"),
+        (s_inspect.starts_with("sth ") || s_inspect.starts_with("strhide "))
+            && s_inspect.contains("commit:"),
         "inspect output must start with banner: {s_inspect}"
     );
 
@@ -272,7 +278,7 @@ fn cli_json_run_embeds_banner_as_field_and_emits_valid_json() {
         .as_str()
         .expect("inspect json must contain banner string");
     assert!(
-        banner_inspect.starts_with("strhide ")
+        (banner_inspect.starts_with("sth ") || banner_inspect.starts_with("strhide "))
             && banner_inspect.contains("commit:")
             && banner_inspect.contains("built:"),
         "banner format: {banner_inspect}"
