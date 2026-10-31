@@ -416,14 +416,20 @@ fn read_one(
                 "Refusing to overwrite existing file '{fn_to_use}'. Choose another -o path or pass --overwrite."
             )));
         }
-        let mut f = File::create(&fn_to_use).map_err(|e| {
-            let reason = match e.kind() {
-                std::io::ErrorKind::PermissionDenied => "permission denied",
+        // Same atomic commit as the explicit `-o` path and the library: a plain
+        // `File::create` truncated the destination before writing, so a full
+        // disk or a killed process left half a payload behind, and an existing
+        // symlink at that name was followed instead of replaced (R3 P1-4, the
+        // same class as R2 P0-7, missed on this one branch).
+        crate::core::commit::write_bytes_atomic(Path::new(&fn_to_use), &res.data).map_err(|e| {
+            let reason = match &e {
+                StrHideError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied => {
+                    "permission denied"
+                }
                 _ => "the file could not be created",
             };
             StrHideError::General(format!("Cannot create '{fn_to_use}': {reason} [{e}]"))
         })?;
-        f.write_all(&res.data)?;
         if !quiet {
             let elapsed_str = format_duration(t_start.elapsed());
             println!(

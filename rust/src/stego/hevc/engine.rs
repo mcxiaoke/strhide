@@ -1534,8 +1534,12 @@ fn extract_hevc_from_sb_record(
     let total_slots = sb_record.total_slots();
     let pool_size = total_slots.min(HEVC_SUPERBLOCK_POOL_SLOTS);
     if pool_size < HEVC_SUPERBLOCK_MIN_SLOTS {
-        return Err(StrHideError::CorruptedData(
-            "Insufficient HEVC slots for Superblock".into(),
+        // A carrier this small simply cannot hold a Superblock, and `inspect`
+        // reports the very same condition as "nothing hidden". Answering
+        // `CorruptedData` here told the user a valid short clip was damaged
+        // (R3 P1-6).
+        return Err(StrHideError::NoHiddenData(
+            "No hidden data: carrier has too few HEVC slots for a Superblock".into(),
         ));
     }
 
