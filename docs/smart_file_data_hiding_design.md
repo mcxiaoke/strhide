@@ -466,7 +466,6 @@ $$\text{password} = \text{unicodedata.normalize}("NFC", \text{password})$$
 # 1. 写入隐藏数据 (Write)
 strhide write -c <carrier> -d <secret-file> [-o <out>] [-p <pass>] [-H <hint>] [--strategy auto|ask|<name>] [--stealth] [--no-preserve-time] [--no-backup]
 strhide write -c <carrier> -t "secret text" [--unescape] [-p <pass>] [-H <hint>]
-strhide write -c <carrier> --text-file <path.txt> [-p <pass>] [-H <hint>]
 strhide write -c <carrier> --text-base64 <b64_str> [-p <pass>]
 cat secret.bin | strhide write -c <carrier> --stdin -o output.png -p <pass>
 
@@ -504,7 +503,7 @@ strhide scan -c <file-or-dir> [<file-or-dir2> ...] [-r/--recursive] [--json]
 
 ### 跨平台非交互式通道
 * **密码传递**：支持 `STRHIDE_PASSWORD` 环境变量、`--password-file <path>`、`-p <password>` 及终端无回显交互输入。仅当 stdin 与 stdout 同时为 TTY 时才触发交互式提示；非交互环境（管道、CI、重定向）直接报错并提示改用上述非交互通道，避免阻塞。
-* **文本传递**：支持 `STRHIDE_TEXT` 环境变量、`--text-file <path>`、`--text-base64 <str>`、`-t <str>`。
+* **文本传递**：支持 `STRHIDE_TEXT` 环境变量、`--text-base64 <str>`、`-t <str>`，或通过 `--stdin` 从管道读取。
 * **二进制流管道**：`--stdin` 与 `--stdout` 走系统标准流缓冲，避开控制台编码代码页干扰。
 
 ### 提取路径安全（防目录穿越）

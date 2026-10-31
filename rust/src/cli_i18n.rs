@@ -91,7 +91,6 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         (_, "text") => Msg::HelpSharedText,
         (_, "file") => Msg::HelpSharedFile,
         (_, "stdin") => Msg::HelpSharedStdin,
-        (_, "text-file") => Msg::HelpSharedTextFile,
         (_, "text-base64") => Msg::HelpSharedTextBase64,
 
         // Stego options: one wording for embed / capacity, except where the

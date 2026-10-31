@@ -114,10 +114,6 @@ pub(crate) fn handle_write(
                 payload_path = f;
                 PayloadSource::File(&payload_path)
             }
-            ResolvedPayload::TextFile(p) => {
-                text_buf = std::fs::read_to_string(p)?;
-                PayloadSource::Text(&text_buf)
-            }
             ResolvedPayload::Text(t) => {
                 text_buf = t;
                 PayloadSource::Text(&text_buf)

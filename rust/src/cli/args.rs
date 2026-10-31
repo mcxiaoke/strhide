@@ -270,9 +270,6 @@ pub struct PayloadSourceArgs {
     #[arg(short = 't', long = "text", value_name = "TEXT")]
     pub text: Option<String>,
 
-    #[arg(long = "text-file", value_name = "FILE")]
-    pub text_file: Option<PathBuf>,
-
     #[arg(long = "text-base64", value_name = "BASE64")]
     pub text_base64: Option<String>,
 

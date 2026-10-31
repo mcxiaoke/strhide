@@ -85,7 +85,7 @@ strhide write photo.png -t "meet me at 7"
 # 或显式进行原地写入（修改原图并创建 photo.png.bak 备份）
 strhide write photo.png -t "meet me at 7" --in-place
 
-# 通过管道隐藏文本（其他载荷源：-d 文件、--text-file、--text-base64）
+# 通过管道隐藏文本（其他载荷源：-d 文件、--text-base64）
 cat secret.txt | strhide write image.jpg --stdin
 
 # 隐藏文件，加密并附加密码提示
@@ -145,7 +145,7 @@ strhide list --json
 
 密码来源（按顺序检查）：`-p/--password` → `--password-file` → 环境变量 `STRHIDE_PASSWORD` → 交互式输入（`-e/--encrypt`）。`-p` 与 `--password-file` 互斥（注意：配置文件出于安全原因不支持配置密码）。
 
-`write` 的载荷源同样互斥：`-d/--data`、`-t/--text`、`--text-file`、`--text-base64`、`--stdin` 不可同时使用。都不提供时，环境变量 `STRHIDE_TEXT` 作为最后兜底。
+`write` 的载荷源同样互斥：`-d/--data`、`-t/--text`、`--text-base64`、`--stdin` 不可同时使用。都不提供时，环境变量 `STRHIDE_TEXT` 作为最后兜底。
 
 > **安全提示**：通过 `-p` 传入的密码可能经 shell 历史和进程列表泄露，建议优先使用 `--password-file`、`STRHIDE_PASSWORD` 或交互式输入。
 

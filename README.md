@@ -86,7 +86,7 @@ strhide write photo.png -t "meet me at 7"
 # Or modify carrier in-place (creates photo.png.bak backup)
 strhide write photo.png -t "meet me at 7" --in-place
 
-# Hide text streamed from a pipe (other payload sources: -d file, --text-file, --text-base64)
+# Hide text streamed from a pipe (other payload sources: -d file, --text-base64)
 cat secret.txt | strhide write image.jpg --stdin
 
 # Hide a file, encrypted, with a password hint
@@ -149,7 +149,7 @@ strhide list --json
 
 Password sources (checked in order): `-p/--password` → `--password-file` → `STRHIDE_PASSWORD` env var → interactive prompt (`-e/--encrypt`). `-p` and `--password-file` are mutually exclusive (note: configuration files do not store passwords).
 
-Payload sources on `write` are mutually exclusive too: `-d/--data`, `-t/--text`, `--text-file`, `--text-base64`, `--stdin` cannot be combined. When none is given, the `STRHIDE_TEXT` env var is used as a last-resort fallback.
+Payload sources on `write` are mutually exclusive too: `-d/--data`, `-t/--text`, `--text-base64`, `--stdin` cannot be combined. When none is given, the `STRHIDE_TEXT` env var is used as a last-resort fallback.
 
 > **Security note:** a password passed via `-p` may leak through shell history and the process list. Prefer `--password-file`, `STRHIDE_PASSWORD`, or the interactive prompt.
 

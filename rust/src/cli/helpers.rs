@@ -142,9 +142,6 @@ pub(crate) enum ResolvedPayload {
     Stdin,
     /// A payload file (`-d`/`--data`): read as raw bytes.
     File(PathBuf),
-    /// A text file (`--text-file`): always read as UTF-8 text; the flavor only
-    /// decides how `--text-base64` is decoded.
-    TextFile(PathBuf),
     /// Text payload, already materialised (`-t`, `STRHIDE_TEXT`).
     Text(String),
     /// Raw bytes, already materialised (`--text-base64`).
@@ -154,27 +151,24 @@ pub(crate) enum ResolvedPayload {
 /// Resolve the payload source shared by `write` and `embed`.
 ///
 /// `write` and `embed` used to carry two copies of the same 40-line resolution
-/// chain (`--stdin` / `-d` / `-t` + `--unescape` / `--text-file` /
-/// `--text-base64` / `STRHIDE_TEXT`), and they had already drifted: only one of
-/// them validated that base64 content decodes to UTF-8. Both now funnel through
-/// here; the difference between them is the explicit [`PayloadFlavor`], not an
-/// accidental divergence. `--text-file` is text in both verbs.
+/// chain (`--stdin` / `-d` / `-t` + `--unescape` / `--text-base64` /
+/// `STRHIDE_TEXT`), and they had already drifted: only one of them validated
+/// that base64 content decodes to UTF-8. Both now funnel through here; the
+/// difference between them is the explicit [`PayloadFlavor`], not an
+/// accidental divergence.
 pub(crate) fn resolve_payload(
     payload: &PayloadSourceArgs,
     unescape: bool,
     cfg: &FileConfig,
     flavor: PayloadFlavor,
 ) -> Result<ResolvedPayload, StrHideError> {
-    const MISSING: &str = "Must provide either -d/--data, -t/--text, --text-file, --text-base64, or --stdin (or use --capacity to probe capacity)";
+    const MISSING: &str = "Must provide either -d/--data, -t/--text, --text-base64, or --stdin (or use --capacity to probe capacity)";
 
     if payload.stdin {
         return Ok(ResolvedPayload::Stdin);
     }
     if let Some(ref df) = payload.data {
         return Ok(ResolvedPayload::File(df.clone()));
-    }
-    if let Some(ref tf) = payload.text_file {
-        return Ok(ResolvedPayload::TextFile(tf.clone()));
     }
     if let Some(ref b64_str) = payload.text_base64 {
         use base64::Engine;

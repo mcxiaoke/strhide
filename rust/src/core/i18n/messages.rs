@@ -4,9 +4,9 @@
 //! Missing columns or variants cause compile-time failure.
 
 pub const WRITE_AFTER_HELP_EN: &str = "\
-Payload sources are mutually exclusive: -d/--data, -t/--text, --text-file,
---text-base64, or --stdin. When omitted, the STRHIDE_TEXT environment variable
-serves as fallback.
+Payload sources are mutually exclusive: -d/--data, -t/--text, --text-base64,
+or --stdin. When omitted, the STRHIDE_TEXT environment variable serves as
+fallback.
 
 Notes:
   * --stealth requires password protection (-p, --password-file, or STRHIDE_PASSWORD).
@@ -24,8 +24,8 @@ Examples:
 ";
 
 pub const WRITE_AFTER_HELP_ZH: &str = "\
-数据来源选项互斥：-d/--data、-t/--text、--text-file、
---text-base64 或 --stdin。若均未提供，则回退使用环境变量 STRHIDE_TEXT。
+数据来源选项互斥：-d/--data、-t/--text、--text-base64 或 --stdin。
+若均未提供，则回退使用环境变量 STRHIDE_TEXT。
 
 注意事项：
   * --stealth（潜行模式）必须配合密码使用（-p、--password-file 或 STRHIDE_PASSWORD）；
@@ -405,9 +405,6 @@ Run `strhide <COMMAND> --help` for the options of one command.",
     HelpSharedStdin:
         en = "Read payload from standard input until EOF",
         zh = "从标准输入 (stdin) 读取待隐藏数据直至 EOF";
-    HelpSharedTextFile:
-        en = "Path to UTF-8 text file to hide",
-        zh = "待隐藏的 UTF-8 文本文件路径";
     HelpSharedTextBase64:
         en = "Base64-encoded text payload (automatically decoded before hiding)",
         zh = "Base64 编码的文本载荷（隐藏前自动解码）";

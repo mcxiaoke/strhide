@@ -403,40 +403,6 @@ fn extract_stdout_and_overwrite() {
     assert_eq!(code(&out_force), 0, "stderr: {}", stderr(&out_force));
 }
 
-/// `--text-file` is documented as a text payload on every verb. `embed` used
-/// to read it as a binary `File` payload with a recorded filename, so extraction
-/// wrote a file named after the source instead of printing the text.
-#[test]
-fn embed_text_file_is_a_text_payload() {
-    let dir = scratch("unify_embed_text_file_text");
-    seed_stego(&dir, &["carrier.png"]);
-    let secret = "text payload from --text-file, not a file";
-    fs::write(dir.join("msg.txt"), secret).unwrap();
-
-    let embed = run(
-        &dir,
-        &[
-            "embed",
-            "carrier.png",
-            "--text-file",
-            "msg.txt",
-            "--in-place",
-            "--no-backup",
-        ],
-    );
-    assert_eq!(code(&embed), 0, "stderr: {}", stderr(&embed));
-
-    // Remove the source: a File payload would have to recreate it on extract.
-    fs::remove_file(dir.join("msg.txt")).unwrap();
-    let out = run(&dir, &["extract", "carrier.png"]);
-    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
-    assert_eq!(stdout(&out).trim_end_matches('\n'), secret);
-    assert!(
-        !dir.join("msg.txt").exists(),
-        "a text payload must not be written as a file"
-    );
-}
-
 #[test]
 fn list_json_output() {
     let dir = scratch("unify_list_json");

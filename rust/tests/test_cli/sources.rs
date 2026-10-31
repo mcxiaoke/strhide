@@ -2,7 +2,7 @@
 //!
 //! Previously untested source paths, all exercised through the real binary:
 //!
-//! - payload sources `--text-file`, `--text-base64`, `STRHIDE_TEXT`
+//! - payload sources `--text-base64`, `STRHIDE_TEXT`
 //!   (`cli.rs` payload resolution chain), including invalid-base64 /
 //!   non-UTF-8 errors and the `-t` vs `STRHIDE_TEXT` precedence;
 //! - password sources `--password-file` (CLI) and `config.password_file`
@@ -73,22 +73,6 @@ fn read_stdout(dir: &Path, carrier: &str) -> String {
 }
 
 // --------------------------------------------------------------------------- payload sources
-
-#[test]
-fn cli_text_file_source_roundtrip() {
-    let dir = scratch("text_file");
-    fs::write(dir.join("c.png"), make_png()).unwrap();
-    let secret = "秘密文件载荷 secret.txt line 2 with Emoji 🚀";
-    fs::write(dir.join("secret.txt"), secret).unwrap();
-
-    let out = run(
-        &dir,
-        &["write", "c.png", "--text-file", "secret.txt", "--in-place"],
-    );
-    assert_ok(&out, &["write", "--text-file"]);
-
-    assert_eq!(read_stdout(&dir, "c.png"), secret);
-}
 
 #[test]
 fn cli_text_base64_valid_roundtrip() {
@@ -298,7 +282,7 @@ fn config_password_file_key_is_warned_and_not_used() {
 
 // --------------------------------------------------------------------------- mutual exclusion
 
-/// Payload sources (`-d`, `-t`, `--text-file`, `--text-base64`, `--stdin`) are
+/// Payload sources (`-d`, `-t`, `--text-base64`, `--stdin`) are
 /// mutually exclusive at parse time (exit code 2): the old silent priority
 /// chain hid whichever source lost the fixed lookup order.
 #[test]
@@ -307,7 +291,7 @@ fn payload_sources_reject_conflicting_input() {
     fs::write(dir.join("c.png"), make_png()).unwrap();
 
     for args in [
-        vec!["write", "c.png", "-t", "x", "--text-file", "s.txt"],
+        vec!["write", "c.png", "-t", "x", "-d", "s.txt"],
         vec!["write", "c.png", "-d", "s.txt", "--stdin"],
         vec!["write", "c.png", "--text-base64", "aGk=", "-t", "x"],
     ] {
