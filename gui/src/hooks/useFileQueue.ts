@@ -2,7 +2,9 @@ import { useCallback, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Capability } from "../types/strhide";
 import { getFileMetadata } from "../api/commands";
+import { t } from "../lib/i18n";
 import { classifyFormat, makeItem, type QueueItem, type QueueNeed, type ReasonKey } from "../lib/queue";
+import { useSettingsStore } from "../store/settingsStore";
 
 export interface SkippedFile {
   name: string;
@@ -23,6 +25,7 @@ export interface FileQueueApi {
 
 /** 单个页签自己的文件队列，不支持的文件当场提示并跳过 */
 export function useFileQueue(need: QueueNeed, capabilities: Capability[]): FileQueueApi {
+  const lang = useSettingsStore((s) => s.lang);
   const [items, setItems] = useState<QueueItem[]>([]);
   const [skipped, setSkipped] = useState<SkippedFile[]>([]);
   const itemsRef = useRef<QueueItem[]>([]);
@@ -81,14 +84,14 @@ export function useFileQueue(need: QueueNeed, capabilities: Capability[]): FileQ
 
   const pick = useCallback(async () => {
     try {
-      const selected = await open({ multiple: true, title: "选择文件（可多选）" });
+      const selected = await open({ multiple: true, title: t(lang).common.pickFilesTitle });
       if (!selected) return;
       const paths = Array.isArray(selected) ? selected : [selected];
       await addPaths(paths);
     } catch (err) {
       console.error("File pick error:", err);
     }
-  }, [addPaths]);
+  }, [addPaths, lang]);
 
   const update = useCallback(
     (path: string, patch: Partial<QueueItem>) => {

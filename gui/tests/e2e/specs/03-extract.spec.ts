@@ -7,13 +7,13 @@ test.describe("提取页", () => {
     await page.locator("[data-testid=tab-extract]").click();
     const extract = panel(page, "extract");
 
-    await expect(extract.locator("p").first()).toHaveText("自动识别文件里藏的内容并取出来。");
+    await expect(extract.locator("p").first()).toHaveText("检测文件中的隐藏内容，并将其提取出来。");
 
     await extract.locator("button:has-text('添加文件')").click();
     await extract.locator("button:has-text('开始提取')").click();
 
     await expect(extract.locator("pre:has-text('会议纪要')")).toBeVisible();
-    await expect(extract.locator("text=附加 · 文字 1.4 KB")).toBeVisible();
+    await expect(extract.locator("text=嵌入内容 · 文字 1.4 KB")).toBeVisible();
     await expect(extract.locator("button:has-text('复制')")).toBeVisible();
   });
 
@@ -26,10 +26,10 @@ test.describe("提取页", () => {
     await extract.locator("button:has-text('开始提取')").click();
 
     await expect(extract.locator("text=C:\\Samples\\secret.txt")).toBeVisible();
-    await expect(extract.locator("text=附加 · 文件 1.4 KB")).toBeVisible();
+    await expect(extract.locator("text=嵌入内容 · 文件 1.4 KB")).toBeVisible();
   });
 
-  test("同时藏了两份内容时给出提示", async ({ page }) => {
+  test("同时含有两份内容时给出提示", async ({ page }) => {
     await openApp(page, { files: ["C:\\\\Samples\\\\photo.png"], alsoPresent: "content" });
     await page.locator("[data-testid=tab-extract]").click();
     const extract = panel(page, "extract");
@@ -37,7 +37,7 @@ test.describe("提取页", () => {
     await extract.locator("button:has-text('添加文件')").click();
     await extract.locator("button:has-text('开始提取')").click();
 
-    await expect(extract.locator("text=（另有一份嵌入）")).toBeVisible();
+    await expect(extract.locator("text=（另有隐写内容）")).toBeVisible();
   });
 
   test("没有文件时按钮不可点", async ({ page }) => {

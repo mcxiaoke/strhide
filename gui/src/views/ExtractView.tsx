@@ -106,7 +106,7 @@ export const ExtractView: React.FC<{ active: boolean }> = ({ active }) => {
             outputPath: saved.summary.written_file ?? target,
           });
         } catch (err) {
-          queue.update(item.path, { status: "error", message: parseStrHideError(err).message });
+          queue.update(item.path, { status: "error", message: parseStrHideError(err, c).message });
         }
       }
     } finally {

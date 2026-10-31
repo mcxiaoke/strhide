@@ -25,7 +25,7 @@ export const PasswordRow: React.FC<PasswordRowProps> = ({
   const c = useT();
   return (
     <div className="flex items-center gap-3">
-      <span className="w-14 shrink-0 text-xs text-slate-400">{label ?? c.common.password}</span>
+      <span className="w-[5.25rem] shrink-0 text-xs text-slate-400">{label ?? c.common.password}</span>
       <input
         type={masked ? "password" : "text"}
         value={value}

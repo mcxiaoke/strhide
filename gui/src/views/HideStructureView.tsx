@@ -97,7 +97,7 @@ export const HideStructureView: React.FC<{ active: boolean }> = ({ active }) => 
             outputPath: res.carrier,
           });
         } catch (err) {
-          queue.update(item.path, { status: "error", message: parseStrHideError(err).message });
+          queue.update(item.path, { status: "error", message: parseStrHideError(err, c).message });
         }
       }
     } finally {
@@ -158,7 +158,7 @@ export const HideStructureView: React.FC<{ active: boolean }> = ({ active }) => 
         )}
 
         {showAdvanced && (
-          <label className="flex cursor-pointer items-center gap-1.5 pl-[3.5rem] text-xs text-slate-300">
+          <label className="flex cursor-pointer items-center gap-1.5 pl-[6rem] text-xs text-slate-300">
             <input
               type="checkbox"
               checked={stealth}

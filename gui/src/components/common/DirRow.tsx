@@ -23,7 +23,7 @@ export const DirRow: React.FC<DirRowProps> = ({ value, onChange, disabled }) => 
 
   return (
     <div className="flex items-center gap-3">
-      <span className="w-14 shrink-0 text-xs text-slate-400">{c.common.saveTo}</span>
+      <span className="w-[5.25rem] shrink-0 text-xs text-slate-400">{c.common.saveTo}</span>
       <span
         className={`min-w-0 flex-1 truncate font-mono text-xs ${value ? "text-slate-300" : "text-slate-500"}`}
         title={value || c.common.sameDir}

@@ -113,7 +113,7 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
             capacityCache.current.set(cacheKey, capacity);
           }
         } catch (err) {
-          queue.update(item.path, { status: "skip", message: parseStrHideError(err).message });
+          queue.update(item.path, { status: "skip", message: parseStrHideError(err, c).message });
           continue;
         }
 
@@ -162,7 +162,7 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
             outputPath: res.written_to,
           });
         } catch (err) {
-          queue.update(item.path, { status: "error", message: parseStrHideError(err).message });
+          queue.update(item.path, { status: "error", message: parseStrHideError(err, c).message });
         }
       }
     } finally {
@@ -205,7 +205,7 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
         />
 
         <div className="flex flex-wrap items-center gap-3">
-          <span className="w-14 shrink-0 text-xs text-slate-400">{c.stego.safety}</span>
+          <span className="w-[5.25rem] shrink-0 text-xs text-slate-400">{c.stego.safety}</span>
           <select
             value={safety}
             onChange={(e) => {
@@ -243,7 +243,7 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
 
         {showAdvanced && (
           <div className="flex items-center gap-3">
-            <span className="w-14 shrink-0 text-xs text-slate-400">{c.stego.algorithm}</span>
+            <span className="w-[5.25rem] shrink-0 text-xs text-slate-400">{c.stego.algorithm}</span>
             <select
               value={algorithm}
               onChange={(e) => {

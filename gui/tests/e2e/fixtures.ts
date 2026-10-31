@@ -195,7 +195,7 @@ export function createTauriMockScript(opts: MockDataOptions = {}) {
             filename: "secret.txt",
             raw_size: 1420,
             written_file: args.outputPath || undefined,
-            text_preview: isFile ? undefined : "会议纪要：本周完成隐写链路联调。"
+            text_preview: isFile ? undefined : "会议纪要：下周二上午十点，三楼会议室。"
           }
         };
       }

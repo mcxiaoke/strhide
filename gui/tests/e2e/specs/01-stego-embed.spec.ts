@@ -6,8 +6,8 @@ test.describe("隐写页", () => {
     await openApp(page, { files: MIXED_FILES });
     const stego = panel(page, "stego");
 
-    await expect(stego.locator("p").first()).toHaveText("把内容写进图片或视频，画面看不出变化。");
-    await expect(stego.locator("text=拖入文件，或点击选择（可多选）")).toBeVisible();
+    await expect(stego.locator("p").first()).toHaveText("将文字或文件隐写进图片、视频的画面数据。文件外观不变，但无法还原为原文件。");
+    await expect(stego.locator("text=拖入文件，或点击此处选择（可多选）")).toBeVisible();
     await expect(stego.locator("text=开始隐写")).toBeDisabled();
 
     await stego.locator("button:has-text('添加文件')").click();
@@ -24,7 +24,7 @@ test.describe("隐写页", () => {
     await stego.locator("textarea").fill("hello stego");
     await stego.locator("button:has-text('开始隐写')").click();
 
-    await expect(stego.locator("text=可藏 25.0 KB")).toBeVisible();
+    await expect(stego.locator("text=容量 25.0 KB")).toBeVisible();
     await expect(stego.locator("text=photo_stego.png")).toBeVisible();
     await expect(stego.getByText("完成", { exact: true })).toBeVisible();
   });
@@ -40,7 +40,7 @@ test.describe("隐写页", () => {
 
     await stego.locator("button:has-text('开始隐写')").click();
 
-    await expect(stego.locator("text=内容太大，这份文件最多能藏 62.5 KB")).toBeVisible();
+    await expect(stego.locator("text=内容超出该文件的容量，最多可写入 62.5 KB")).toBeVisible();
     await expect(stego.getByText("跳过", { exact: true })).toHaveCount(1);
   });
 

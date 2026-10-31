@@ -8,17 +8,17 @@ test.describe("语言与主题", () => {
     await expect(page.locator("[data-testid=tab-stego]")).toHaveText("隐写");
     await expect(page.locator("[data-testid=tab-scan]")).toHaveText("扫描");
     await expect(panel(page, "stego").locator("p").first()).toHaveText(
-      "把内容写进图片或视频，画面看不出变化。",
+      "将文字或文件隐写进图片、视频的画面数据。文件外观不变，但无法还原为原文件。",
     );
 
     await page.locator("[data-testid=lang-toggle]").click();
 
     await expect(page.locator("[data-testid=tab-stego]")).toHaveText("Stego");
-    await expect(page.locator("[data-testid=tab-hide]")).toHaveText("Hide");
+    await expect(page.locator("[data-testid=tab-hide]")).toHaveText("Embed");
     await expect(page.locator("[data-testid=tab-extract]")).toHaveText("Extract");
     await expect(page.locator("[data-testid=tab-scan]")).toHaveText("Scan");
     await expect(panel(page, "stego").locator("p").first()).toHaveText(
-      "Writes your content into an image or video. The picture looks unchanged.",
+      "Writes text or files into the picture data of an image or video. The file looks unchanged, but cannot be restored.",
     );
     await expect(panel(page, "stego").locator("button:has-text('Add files')")).toBeVisible();
   });

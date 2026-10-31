@@ -10,7 +10,7 @@ test.describe("扫描页", () => {
     await page.locator("[data-testid=tab-scan]").click();
     const scan = panel(page, "scan");
 
-    await expect(scan.locator("p").first()).toHaveText("检查文件里有没有藏内容，以及能不能往里写。");
+    await expect(scan.locator("p").first()).toHaveText("检测文件是否含有隐藏内容，以及支持哪种写入方式。");
 
     await scan.locator("button:has-text('添加文件')").click();
     await expect(scan.locator("text=2 个文件")).toBeVisible();
@@ -18,9 +18,9 @@ test.describe("扫描页", () => {
     await scan.locator("button:has-text('开始扫描')").click();
 
     await expect(scan.locator("table")).toBeVisible();
-    await expect(scan.locator("th:has-text('能写入')")).toBeVisible();
-    await expect(scan.locator("th:has-text('藏了内容')")).toBeVisible();
-    await expect(scan.locator("td:has-text('附加 + 嵌入')").first()).toBeVisible();
+    await expect(scan.locator("th:has-text('写入方式')")).toBeVisible();
+    await expect(scan.locator("th:has-text('隐藏内容')")).toBeVisible();
+    await expect(scan.locator("td:has-text('隐写 + 嵌入')").first()).toBeVisible();
     await expect(scan.locator("td:has-text('18.0 KB')").first()).toBeVisible();
     await expect(scan.locator("td:has-text('2.00 MB')").first()).toBeVisible();
   });
@@ -36,7 +36,7 @@ test.describe("扫描页", () => {
     await expect(scan.locator("button:has-text('开始扫描')")).toBeDisabled();
   });
 
-  test("没有藏内容的文件显示为无", async ({ page }) => {
+  test("未含隐藏内容的文件显示为空", async ({ page }) => {
     await openApp(page, { files: ["C:\\\\Samples\\\\photo.png"], hasHiddenData: false });
     await page.locator("[data-testid=tab-scan]").click();
     const scan = panel(page, "scan");

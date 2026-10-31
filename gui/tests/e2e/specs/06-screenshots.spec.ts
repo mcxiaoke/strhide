@@ -38,7 +38,7 @@ test.describe("界面截图", () => {
     await stego.locator("button:has-text('高级选项')").click();
     await shot(page, "zh-light-04-stego-advanced");
 
-    // 隐藏：已添加 / 完成 / 高级（密码 + 提示 + 不留下痕迹）
+    // 嵌入：已添加 / 完成 / 高级（密码 + 提示 + 无痕模式）
     await page.locator("[data-testid=tab-hide]").click();
     const hide = panel(page, "hide");
     await shot(page, "zh-light-05-hide-empty");
@@ -46,9 +46,9 @@ test.describe("界面截图", () => {
     await hide.locator("textarea").fill("项目验收清单已放在共享盘。");
     await hide.locator("input[type=password]").fill("my-password");
     await hide.locator("button:has-text('高级选项')").click();
-    await hide.locator("label:has-text('不留下痕迹') input[type=checkbox]").check();
+    await hide.locator("label:has-text('无痕模式') input[type=checkbox]").check();
     await shot(page, "zh-light-06-hide-advanced");
-    await hide.locator("button:has-text('开始隐藏')").click();
+    await hide.locator("button:has-text('开始嵌入')").click();
     await hide.locator("text=完成").first().waitFor();
     await shot(page, "zh-light-07-hide-done");
 
@@ -96,7 +96,7 @@ test.describe("界面截图", () => {
     const hide = panel(page, "hide");
     await addFiles(page, "hide");
     await hide.locator("textarea").fill("项目验收清单已放在共享盘。");
-    await hide.locator("button:has-text('开始隐藏')").click();
+    await hide.locator("button:has-text('开始嵌入')").click();
     await hide.locator("text=完成").first().waitFor();
     await shot(page, "zh-dark-02-hide");
 

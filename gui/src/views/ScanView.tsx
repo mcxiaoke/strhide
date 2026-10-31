@@ -98,7 +98,7 @@ export const ScanView: React.FC<{ active: boolean }> = ({ active }) => {
             message: undefined,
           });
         } catch (err) {
-          queue.update(item.path, { status: "error", message: parseStrHideError(err).message });
+          queue.update(item.path, { status: "error", message: parseStrHideError(err, c).message });
         }
       }
     } finally {

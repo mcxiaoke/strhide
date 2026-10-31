@@ -144,7 +144,7 @@ def clean_build(clean_cli: bool, clean_gui: bool, dry_run: bool) -> None:
                     cli_bin.unlink(missing_ok=True)
 
     if clean_gui:
-        gui_bin = GUI_TAURI_DIR / "target" / "release" / ("strhide-gui.exe" if platform.system() == "Windows" else "strhide-gui")
+        gui_bin = GUI_TAURI_DIR / "target" / "release" / ("StrHideStudio.exe" if platform.system() == "Windows" else "StrHideStudio")
         if gui_bin.exists():
             print(f"-> 移除已有 GUI 产物: {gui_bin}")
             if not dry_run:
@@ -176,7 +176,7 @@ def build_gui(dry_run: bool) -> Path:
     cmd = "pnpm tauri build --no-bundle"
     run(cmd, cwd=GUI_DIR, dry_run=dry_run)
 
-    exe_name = "strhide-gui.exe" if platform.system() == "Windows" else "strhide-gui"
+    exe_name = "StrHideStudio.exe" if platform.system() == "Windows" else "StrHideStudio"
     out_bin = GUI_TAURI_DIR / "target" / "release" / exe_name
     if not dry_run and not out_bin.exists():
         raise SystemExit(f"[ERROR] 未找到 GUI 构建产物: {out_bin}")
@@ -223,7 +223,7 @@ def package_gui_portable(
     dry_run: bool,
 ) -> Path:
     """将 GUI 便携式单程序及必要文档打包为 portable zip。"""
-    exe_name = "strhide-gui.exe" if platform.system() == "Windows" else "strhide-gui"
+    exe_name = "StrHideStudio.exe" if platform.system() == "Windows" else "StrHideStudio"
     src_bin = GUI_TAURI_DIR / "target" / "release" / exe_name
     zip_name = f"strhide-gui-v{version}-{platform_tag}-portable.zip"
     zip_path = release_dir / zip_name
