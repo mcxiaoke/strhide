@@ -797,6 +797,22 @@ impl StcTrellis {
     }
 }
 
+/// Trellis backtracking-bitmap cost per element, in bytes, at height `h`.
+///
+/// The solver keeps one bit per (element, state) column, packed into `u64`
+/// words; `embed` allocates exactly this, so any caller that wants to check a
+/// memory budget before solving has to charge the same figure (JPEG and PNG
+/// both do).
+pub fn backtrack_bytes_per_slot(h: u8) -> u64 {
+    let words_per_col = (1u64 << h.min(10)).div_ceil(64);
+    words_per_col * 8
+}
+
+/// Total backtracking-bitmap bytes for an `n`-element solve at height `h`.
+pub fn backtrack_bitmap_bytes(n: usize, h: u8) -> u64 {
+    n as u64 * backtrack_bytes_per_slot(h)
+}
+
 /// Validate an STC constraint height at the API boundary.
 pub fn validate_h(h: u8) -> Result<(), StrHideError> {
     if !(MIN_STC_H..=MAX_STC_H).contains(&h) {

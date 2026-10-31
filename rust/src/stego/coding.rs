@@ -28,7 +28,8 @@ mod stc;
 
 pub use stc::{
     DEFAULT_STC_H, KERNEL_MAX_U, MAX_STC_H, MAX_STC_U, MIN_STC_H, StcTrellis,
-    validate_h as validate_stc_h, validate_u as validate_stc_u,
+    backtrack_bitmap_bytes, backtrack_bytes_per_slot, validate_h as validate_stc_h,
+    validate_u as validate_stc_u,
 };
 
 /// Default Hamming parameter k (7 slots carry 3 bits).

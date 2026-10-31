@@ -389,6 +389,57 @@ const MAX_DEFLATE_WORKERS: usize = 8;
 /// worst case bounded.
 const MAX_PNG_PIXELS: usize = 64 * 1024 * 1024;
 
+/// Whole-pipeline working-set ceiling for a spatial carrier, deliberately the
+/// same value the JPEG engine uses.
+///
+/// The 64 MP pixel cap alone does not bound memory: HILL keeps six full-image
+/// `f64` planes (~3 GiB at that size), and the trellis keeps one bitmap word per
+/// state per element, which on a 64 MP RGB carrier with the three-channel pool
+/// reaches tens of GiB. Without a budget, a large payload aborted the process
+/// (`panic = "abort"`) instead of returning an error.
+const MAX_PIPELINE_BYTES: u64 = 8 << 30;
+/// Bytes that exist for every spatial embed regardless of payload: the decoded
+/// image (up to 4 B/px), the six cost planes (48 B/px), the candidate list and
+/// the per-pixel header mask (9 B/px).
+const PIPELINE_BYTES_PER_PIXEL: u64 = 4 + 48 + 9;
+/// Per body slot: slot values, the move table, the two direction-cost rows and
+/// the body index. The trellis bitmap is charged separately.
+const PIPELINE_BYTES_PER_SLOT: u64 = 24;
+const PIPELINE_FIXED_BYTES: u64 = 64 << 20;
+
+fn pipeline_base_bytes(total_pixels: usize) -> u64 {
+    PIPELINE_FIXED_BYTES.saturating_add(total_pixels as u64 * PIPELINE_BYTES_PER_PIXEL)
+}
+
+/// Bytes of per-slot state, including the trellis bitmap when the STC codec runs.
+fn pipeline_bytes_per_slot(trellis_h: Option<u8>) -> u64 {
+    let bitmap = trellis_h.map_or(0, crate::stego::coding::backtrack_bytes_per_slot);
+    PIPELINE_BYTES_PER_SLOT.saturating_add(bitmap)
+}
+
+fn check_pipeline_budget(
+    total_pixels: usize,
+    body_n: usize,
+    trellis_h: Option<u8>,
+) -> Result<(), StrHideError> {
+    let total = pipeline_base_bytes(total_pixels)
+        .saturating_add(body_n as u64 * pipeline_bytes_per_slot(trellis_h));
+    if total > MAX_PIPELINE_BYTES {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "PNG carrier is too large for this payload: it needs about {} MiB of working memory and the {} MiB budget would be exceeded (use the Hamming codec, a smaller --stc-h, or a smaller payload)",
+            total >> 20,
+            MAX_PIPELINE_BYTES >> 20
+        )));
+    }
+    Ok(())
+}
+
+/// Body slots whose working set still fits the pipeline budget.
+fn max_body_slots_within_pipeline(total_pixels: usize, trellis_h: Option<u8>) -> usize {
+    let remaining = MAX_PIPELINE_BYTES.saturating_sub(pipeline_base_bytes(total_pixels));
+    usize::try_from(remaining / pipeline_bytes_per_slot(trellis_h)).unwrap_or(usize::MAX)
+}
+
 /// Payload ceiling the safety tier recommends for a spatial carrier.
 ///
 /// Shared by the embed-time enforcement and the capacity probe, so the number
@@ -1362,6 +1413,19 @@ pub fn embed_png_with_stats<'a>(
         resolved_u,
     )?;
 
+    // Refuse before the solve allocates anything: the trellis keeps one word per
+    // state per element, so a large payload on a large carrier is a multi-GiB
+    // allocation, and with `panic = "abort"` an OOM is a process kill rather
+    // than an error the user can act on.
+    check_pipeline_budget(
+        total_pixels,
+        needed_body_slots,
+        match resolved_codec {
+            StegoCodec::Hamming => None,
+            _ => Some(params.stc_h),
+        },
+    )?;
+
     // Header word1 encodes total_len with HEADER_V2_ESCAPE_H (15) for stc_h
     let total_len = (crate::stego::envelope::HEADER_OVERHEAD + ciphertext_len) as u32;
     if total_len > HEADER_LEN_MAX {
@@ -1727,6 +1791,18 @@ pub fn extract_png(
     let needed_body_slots =
         crate::stego::coding::slots_for_codec(ciphertext_bits, fw.codec, fw.h, fw.u)?;
 
+    // Same budget the writer applies: a header claiming a payload this large
+    // would otherwise have the reader allocate its way into an OOM abort before
+    // it ever gets to reject the carrier.
+    check_pipeline_budget(
+        image.width as usize * image.height as usize,
+        needed_body_slots,
+        match fw.codec {
+            StegoCodec::Hamming => None,
+            _ => Some(fw.h),
+        },
+    )?;
+
     // `body_slots_upto` stops as soon as `needed_body_slots` are collected and
     // its length check below rejects short pools, so a separate full-image
     // `count_body_slots` pass only doubled the scan without changing the
@@ -2048,20 +2124,28 @@ pub fn probe_png_capacity(
     // under STC). Reporting one codec's figure for the other would misstate the
     // capability in whichever direction the user is asking about, so the number
     // follows `params.codec`.
+    //
+    // Both are capped by the pipeline budget: a figure the writer would abort on
+    // is not capacity. Hamming has no trellis bitmap, so it gets the larger
+    // ceiling.
+    let hamming_slots =
+        available_body_slots.min(max_body_slots_within_pipeline(total_pixels, None));
+    let stc_slots = available_body_slots.min(max_body_slots_within_pipeline(
+        total_pixels,
+        Some(params.stc_h),
+    ));
     let max_ciphertext_bytes = match params.codec {
-        StegoCodec::Hamming => {
-            crate::stego::coding::max_payload_bytes(available_body_slots, hamming_k)
-        }
+        StegoCodec::Hamming => crate::stego::coding::max_payload_bytes(hamming_slots, hamming_k),
         StegoCodec::Stc if params.stc_u > 0 => {
             // `u * (bits + h - 1) = slots` -> `bits = slots/u - (h - 1)`.
             let trellis = StcTrellis::from_seed_grouped(0, params.stc_h, params.stc_u)?;
-            trellis.message_bits(available_body_slots) / 8
+            trellis.message_bits(stc_slots) / 8
         }
         StegoCodec::Stc | StegoCodec::Auto => {
             // In Auto mode (or STC with auto u), maximum raw capacity reaches up to STC u=1,
             // as the encoder adaptively drops to u=1 when large payloads are embedded.
             let trellis = StcTrellis::from_seed_grouped(0, params.stc_h, 1)?;
-            trellis.message_bits(available_body_slots) / 8
+            trellis.message_bits(stc_slots) / 8
         }
     };
     // Only the body-borne overhead comes off here: salt/nonce already paid for
@@ -2910,6 +2994,31 @@ mod tests {
         .expect("probe");
         assert!(cap.recommended_max_bytes > 0);
         assert!(cap.recommended_max_bytes <= cap.max_raw_payload_bytes / 2);
+    }
+
+    /// The budget has to be checked before the trellis allocates: 64 MP RGB with
+    /// a 1.5e8-slot body is the case the review measured, and its bitmap alone
+    /// runs to tens of GiB. The spatial cap (`MAX_PNG_PIXELS`) alone does not
+    /// bound it.
+    #[test]
+    fn pipeline_budget_rejects_oversized_trellis_work() {
+        let total_pixels = 64 * 1024 * 1024;
+
+        assert!(check_pipeline_budget(total_pixels, 1_000_000, Some(8)).is_ok());
+        assert!(
+            check_pipeline_budget(total_pixels, 150_000_000, Some(8)).is_err(),
+            "a 1.5e8-slot STC solve must be refused, not attempted"
+        );
+        // The same slot count is affordable for Hamming: no bitmap.
+        assert!(check_pipeline_budget(total_pixels, 50_000_000, None).is_ok());
+
+        let stc = max_body_slots_within_pipeline(total_pixels, Some(8));
+        let hamming = max_body_slots_within_pipeline(total_pixels, None);
+        assert!(stc < 150_000_000);
+        assert!(
+            stc < hamming,
+            "the bitmap must cost slots: {stc} vs {hamming}"
+        );
     }
 
     /// The tier table is what hosts read instead of re-deriving the budget, so

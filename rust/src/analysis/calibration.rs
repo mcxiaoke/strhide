@@ -119,24 +119,24 @@ fn forward_dct(block: &[[f64; 8]; 8], basis: &[[f64; 8]; 8]) -> [f64; 64] {
     natural
 }
 
-/// Luminance plane from decoded pixels (BT.601, matching the JPEG Y channel).
-fn luma_plane(pixels: &[u8], width: usize, height: usize, channels: usize) -> Option<Vec<f64>> {
-    if channels == 0 || width == 0 || height == 0 || pixels.len() < width * height * channels {
-        return None;
-    }
-    let mut out = Vec::with_capacity(width * height);
-    for i in 0..width * height {
-        let base = i * channels;
-        let y = if channels >= 3 {
-            0.299 * pixels[base] as f64
-                + 0.587 * pixels[base + 1] as f64
-                + 0.114 * pixels[base + 2] as f64
-        } else {
-            pixels[base] as f64
-        };
-        out.push(y - 128.0);
-    }
-    Some(out)
+/// Luminance of one pixel (BT.601, matching the JPEG Y channel), level-shifted
+/// by -128 so the following DCT sees a zero-mean block.
+///
+/// Computed per pixel instead of into a whole-image `Vec<f64>` plane: the
+/// calibration only ever reads `MAX_CALIBRATION_BLOCKS` strided 8x8 windows, but
+/// the plane cost 8 B per pixel — 8.6 GiB for a 1 GiB grayscale decode that
+/// passes the `MAX_DECODED_BYTES` gate, which with `panic = "abort"` is an
+/// instant process kill on a hostile carrier.
+fn luma_at(pixels: &[u8], width: usize, channels: usize, x: usize, y: usize) -> f64 {
+    let base = (y * width + x) * channels;
+    let y = if channels >= 3 {
+        0.299 * pixels[base] as f64
+            + 0.587 * pixels[base + 1] as f64
+            + 0.114 * pixels[base + 2] as f64
+    } else {
+        pixels[base] as f64
+    };
+    y - 128.0
 }
 
 /// Run the calibrated estimator on a JPEG.
@@ -197,7 +197,6 @@ pub fn estimate_with_coefficients(
     if height == 0 {
         return None;
     }
-    let plane = luma_plane(&pixels, width, height, channels)?;
 
     // Calibrated grid: shifted by half a block (4 px) from the embedding grid.
     let bx_count = width.saturating_sub(4) / 8;
@@ -220,7 +219,7 @@ pub fn estimate_with_coefficients(
             let mut block = [[0.0f64; 8]; 8];
             for (dy, row) in block.iter_mut().enumerate() {
                 for (dx, cell) in row.iter_mut().enumerate() {
-                    *cell = plane[(y0 + dy) * width + x0 + dx];
+                    *cell = luma_at(&pixels, width, channels, x0 + dx, y0 + dy);
                 }
             }
             let freq = forward_dct(&block, &basis);

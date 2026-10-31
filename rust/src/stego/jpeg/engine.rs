@@ -169,9 +169,7 @@ fn preflight_jpeg(carrier_bytes: &[u8]) -> Result<CarrierPreflight, StrHideError
 
 /// Backtracking-bitmap size for a body of `body_n` slots at height `h`.
 fn estimate_backtrack_bytes(body_n: usize, h: u8) -> u64 {
-    let states = 1u64 << h.min(10);
-    let words_per_col = states.div_ceil(64);
-    body_n as u64 * words_per_col * 8
+    crate::stego::coding::backtrack_bitmap_bytes(body_n, h)
 }
 
 fn check_pipeline_budget(base_bytes: u64, body_n: usize, h: u8) -> Result<(), StrHideError> {
