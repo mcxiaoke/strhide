@@ -12,6 +12,14 @@ export function useFileDrop(active: boolean, onPaths: (paths: string[]) => void)
     let unlisten: (() => void) | undefined;
     let disposed = false;
 
+    const customListener = (event: Event) => {
+      const custom = event as CustomEvent<{ paths?: string[] }>;
+      if (!activeRef.current) return;
+      const paths = custom.detail?.paths;
+      if (paths && paths.length > 0) handlerRef.current(paths);
+    };
+    window.addEventListener("strhide:drop-files", customListener);
+
     try {
       const webview = getCurrentWebview();
       if (webview && typeof webview.onDragDropEvent === "function") {
@@ -39,6 +47,7 @@ export function useFileDrop(active: boolean, onPaths: (paths: string[]) => void)
 
     return () => {
       disposed = true;
+      window.removeEventListener("strhide:drop-files", customListener);
       if (unlisten) unlisten();
     };
   }, []);

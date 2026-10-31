@@ -10,6 +10,7 @@
     "test:unit": "playwright test tests/unit",
     "test:cross": "cargo test --manifest-path src-tauri/Cargo.toml --test cross_validation",
     "test:e2e": "playwright test -c tests/e2e/playwright.config.ts",
+    "test:e2e:real": "playwright test -c tests/e2e-real/playwright.config.ts",
     "tauri": "tauri"
   },
   "dependencies": {
