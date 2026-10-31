@@ -6,7 +6,7 @@ use std::io::{Read, SeekFrom, Write};
 
 use crate::errors::StrHideError;
 use crate::structure::adapters::{SeekRead, SeekWrite, StrategyCapacity};
-use crate::structure::envelope::{EnvelopeHeader, EnvelopeTrailer};
+use crate::structure::envelope::{EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE, TRAILER_SIZE};
 
 pub const MP4_UUID_NEUTRAL: [u8; 16] = [
     0xd4, 0x1a, 0x8e, 0x9c, 0x4f, 0x21, 0x4e, 0x87, 0x9a, 0x33, 0x5b, 0x6d, 0x12, 0x84, 0xef, 0x70,
@@ -125,6 +125,25 @@ pub fn isobmff_locate(
         Some(t) => t,
         None => return Ok(None),
     };
+
+    // `ube_total_size` is attacker-controlled: the trailer is just 24 bytes at
+    // the end of the file and the box header in front of it is equally
+    // forgeable. Without this bound a 204-byte MP4 could declare a 1 TiB
+    // envelope, and the 112-byte header it "contains" could claim a ~4 GiB
+    // metadata block that `read` allocates before discovering the stream is
+    // short (review R3 P2-17/P2-18). The other adapters already compare the
+    // envelope end against the real file length; this one only compared it with
+    // its own box size.
+    let file_size = stego_in.seek(SeekFrom::End(0))?;
+    let min_envelope = (HEADER_SIZE + TRAILER_SIZE) as u64;
+    if trailer.ube_total_size < min_envelope
+        || trailer
+            .ube_offset
+            .checked_add(trailer.ube_total_size)
+            .is_none_or(|end| end > file_size)
+    {
+        return Ok(None);
+    }
 
     // 1. Check standard 32-bit uuid box (24-byte header before trailer.ube_offset)
     if trailer.ube_offset >= 24 {
@@ -1462,7 +1481,9 @@ mod tests {
     #[test]
     fn suspicious_structures_distinguishes_the_two_header_forms() {
         let host = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomiso2".to_vec();
-        let ube = vec![0x11u8; 96];
+        // At least HEADER_SIZE + TRAILER_SIZE: `isobmff_locate` refuses an
+        // envelope shorter than that, which a real one never is.
+        let ube = vec![0x11u8; 128];
 
         // 32-bit form
         let ube_offset = host.len() as u64 + 24;

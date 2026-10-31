@@ -144,3 +144,74 @@ fn content_domain_refuses_a_png_without_iend() {
         "the error must name the missing chunk, stderr: {stderr}"
     );
 }
+
+/// A 204-byte MP4 whose trailer claims a 1 TiB envelope and whose header claims
+/// a ~4 GiB metadata block.
+///
+/// `isobmff_locate` compared the envelope only with its own box size, so this
+/// was accepted as "hidden data present" and `read` allocated the metadata
+/// buffer before the short stream was noticed. The other adapters already
+/// bounded the envelope against the real file length (review R3 P2-17/P2-18).
+#[cfg(feature = "cli")]
+fn mp4_with_forged_trailer() -> Vec<u8> {
+    const MAGIC: [u8; 4] = [0x78, 0xe6, 0x66, 0xd2];
+    const UUID: [u8; 16] = [
+        0xd4, 0x1a, 0x8e, 0x9c, 0x4f, 0x21, 0x4e, 0x87, 0x9a, 0x33, 0x5b, 0x6d, 0x12, 0x84, 0xef,
+        0x70,
+    ];
+    let total: u64 = 1 << 40;
+
+    let mut host = Vec::new();
+    host.extend_from_slice(&24u32.to_be_bytes());
+    host.extend_from_slice(b"ftypmp42");
+    host.extend_from_slice(&0u32.to_be_bytes());
+    host.extend_from_slice(b"mp42");
+    host.extend_from_slice(&[0u8; 16]);
+
+    let envelope_offset = (host.len() + 32) as u64;
+    let mut box_header = Vec::new();
+    box_header.extend_from_slice(&1u32.to_be_bytes()); // 64-bit size follows
+    box_header.extend_from_slice(b"uuid");
+    box_header.extend_from_slice(&(32 + total).to_be_bytes());
+    box_header.extend_from_slice(&UUID);
+
+    let mut header = [0u8; 112];
+    header[0..8].copy_from_slice(b"STRHIDE\0");
+    header[8] = 0x02; // CURRENT_VERSION
+    header[10] = 3; // strategy: box_uuid
+    header[40..48].copy_from_slice(&40u64.to_le_bytes());
+    header[80..88].copy_from_slice(&envelope_offset.to_le_bytes());
+    header[88..96].copy_from_slice(&total.to_le_bytes());
+    header[104..108].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes()); // meta_len
+
+    let mut trailer = Vec::new();
+    trailer.extend_from_slice(&envelope_offset.to_le_bytes());
+    trailer.extend_from_slice(&total.to_le_bytes());
+    let crc = crc32fast::hash(&trailer);
+    trailer.extend_from_slice(&crc.to_le_bytes());
+    trailer.extend_from_slice(&MAGIC);
+
+    [host, box_header, header.to_vec(), trailer].concat()
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn isobmff_rejects_an_envelope_larger_than_the_file() {
+    let dir = crate::common::scratch("r3_isobmff_bounds");
+    let carrier = dir.join("forged.mp4");
+    std::fs::write(&carrier, mp4_with_forged_trailer()).unwrap();
+
+    let out = crate::common::base_cmd()
+        .args(["inspect", carrier.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("Has Hidden Data: true"),
+        "a forged 1 TiB trailer must not be adopted as an envelope:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Has Hidden Data: false"),
+        "inspect should report no hidden data:\n{stdout}"
+    );
+}
