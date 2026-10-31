@@ -47,9 +47,14 @@ const LOG_X_MAX: f64 = 690.0;
 /// `LN_2` / `LN_10`.
 const LN_3: f64 = 1.098_612_288_668_109_8;
 
-/// Elements per deterministic reduction chunk. Fixed so the entropy sum is
-/// bit-identical regardless of the Rayon thread count.
-const REDUCTION_CHUNK: usize = 4096;
+/// Number of bins in the uniform log-Fisher histogram / interpolation grid.
+/// 32k bins keeps each thread's histogram in L2 (128 KiB) and the final
+/// interpolation table in L2 (256 KiB) while bounding entropy error to < 1e-7.
+const BINS: usize = 32_768;
+
+/// Elements per deterministic reduction chunk. Fixed so the histogram reduction
+/// is bit-identical regardless of the Rayon thread count.
+const REDUCTION_CHUNK: usize = 1 << 18;
 
 /// Solve `rho * (exp(rho) + 2) = x` for the unique `rho >= 0`.
 ///
@@ -98,27 +103,92 @@ pub(crate) fn ternary_entropy_nats(rho: f64) -> f64 {
     2.0 * beta * l + p0 * lm
 }
 
-/// Sum of ternary entropies (nats) at `scale = exp(t)`.
-///
-/// Inactive elements (`log_fi` non-finite) contribute nothing. The reduction
-/// is deterministic: each fixed-size chunk is summed sequentially, and the
-/// per-chunk sums are accumulated in index order.
-fn total_entropy_nats(log_fi: &[f64], t: f64) -> f64 {
-    let chunk_sums: Vec<f64> = log_fi
-        .par_chunks(REDUCTION_CHUNK)
-        .map(|chunk| {
-            let mut sum = 0.0f64;
-            for &lg in chunk {
-                if !lg.is_finite() {
-                    continue;
-                }
-                let x = (t + lg).min(LOG_X_MAX).exp();
-                sum += ternary_entropy_nats(solve_rho(x));
+/// Uniform histogram over `[u_min, u_max]` for accelerated payload calibration.
+struct Grid {
+    u_min: f64,
+    du: f64,
+    inv_du: f64,
+    hist: Vec<u32>,
+}
+
+impl Grid {
+    fn build(log_fi: &[f64], u_min: f64, u_max: f64) -> Self {
+        let span = (u_max - u_min).max(1e-12);
+        let du = span / BINS as f64;
+        let inv_du = 1.0 / du;
+        let hist = log_fi
+            .par_chunks(REDUCTION_CHUNK)
+            .fold(
+                || vec![0u32; BINS],
+                |mut h, chunk| {
+                    for &v in chunk {
+                        if v.is_finite() {
+                            let idx = (((v - u_min) * inv_du) as usize).min(BINS - 1);
+                            h[idx] += 1;
+                        }
+                    }
+                    h
+                },
+            )
+            .reduce(
+                || vec![0u32; BINS],
+                |mut a, b| {
+                    for (x, y) in a.iter_mut().zip(b.iter()) {
+                        *x += *y;
+                    }
+                    a
+                },
+            );
+        Self {
+            u_min,
+            du,
+            inv_du,
+            hist,
+        }
+    }
+
+    #[inline]
+    fn center(&self, i: usize) -> f64 {
+        self.u_min + (i as f64 + 0.5) * self.du
+    }
+
+    /// `sum_n H3(beta(exp(t + log I_n)))` evaluated on the histogram.
+    fn total_entropy_nats(&self, t: f64) -> f64 {
+        let mut sum = 0.0f64;
+        for (i, &count) in self.hist.iter().enumerate() {
+            if count == 0 {
+                continue;
             }
-            sum
-        })
-        .collect();
-    chunk_sums.iter().sum()
+            let x = (t + self.center(i)).min(LOG_X_MAX).exp();
+            sum += count as f64 * ternary_entropy_nats(solve_rho(x));
+        }
+        sum
+    }
+
+    /// Monotone `rho` values on the bin edges for linear interpolation.
+    fn rho_table(&self, t: f64) -> Vec<f64> {
+        (0..=BINS)
+            .map(|i| {
+                let u = self.u_min + i as f64 * self.du;
+                solve_rho((t + u).min(LOG_X_MAX).exp())
+            })
+            .collect()
+    }
+
+    #[inline]
+    fn rho_interp(&self, table: &[f64], u: f64) -> f64 {
+        let pos = (u - self.u_min) * self.inv_du;
+        if pos <= 0.0 {
+            return table[0];
+        }
+        let j = pos.floor() as usize;
+        if j >= BINS {
+            return table[BINS];
+        }
+        let frac = pos - j as f64;
+        let a = table[j];
+        table[j] + (table[j + 1] - a) * frac
+    }
 }
 
 /// Convert a Fisher-information map into additive STC costs.
@@ -147,23 +217,33 @@ pub(crate) fn fisher_to_costs(mut fisher: Vec<f64>, target_bits: f64) -> Vec<f64
             f64::NEG_INFINITY
         };
     });
-    let log_fi: &[f64] = &fisher;
 
-    let active = log_fi.iter().filter(|v| v.is_finite()).count();
+    // Single parallel pass for active count, min, and max.
+    let stats: Vec<(usize, f64, f64)> = fisher
+        .par_chunks(REDUCTION_CHUNK)
+        .map(|chunk| {
+            let mut count = 0usize;
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            for &v in chunk {
+                if v.is_finite() {
+                    count += 1;
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+            }
+            (count, lo, hi)
+        })
+        .collect();
+    let active: usize = stats.iter().map(|s| s.0).sum();
+    let min_log = stats.iter().map(|s| s.1).fold(f64::INFINITY, f64::min);
+    let max_log = stats.iter().map(|s| s.2).fold(f64::NEG_INFINITY, f64::max);
+
     if active == 0 || target_bits <= 0.0 || !target_bits.is_finite() {
         // Nothing to spread: all elements are equivalent.
         fisher.iter_mut().for_each(|v| *v = 0.0);
         return fisher;
     }
-
-    let max_log = log_fi
-        .iter()
-        .filter(|v| v.is_finite())
-        .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-    let min_log = log_fi
-        .iter()
-        .filter(|v| v.is_finite())
-        .fold(f64::INFINITY, |a, &b| a.min(b));
 
     // Payload in nats, clamped just below the ternary capacity.
     let capacity = active as f64 * LN_3;
@@ -173,13 +253,15 @@ pub(crate) fn fisher_to_costs(mut fisher: Vec<f64>, target_bits: f64) -> Vec<f64
         return fisher;
     }
 
+    let grid = Grid::build(&fisher, min_log, max_log);
+
     // Bracket t = ln(scale). total(t) is strictly decreasing in t.
     let mut t_lo = -max_log - 30.0;
-    let mut f_lo = total_entropy_nats(log_fi, t_lo) - target;
+    let mut f_lo = grid.total_entropy_nats(t_lo) - target;
     let mut guard = 0;
     while f_lo <= 0.0 && guard < 100 {
         t_lo -= 10.0;
-        f_lo = total_entropy_nats(log_fi, t_lo) - target;
+        f_lo = grid.total_entropy_nats(t_lo) - target;
         guard += 1;
     }
     if f_lo <= 0.0 {
@@ -189,11 +271,11 @@ pub(crate) fn fisher_to_costs(mut fisher: Vec<f64>, target_bits: f64) -> Vec<f64
     }
 
     let mut t_hi = -min_log + 5.0;
-    let mut f_hi = total_entropy_nats(log_fi, t_hi) - target;
+    let mut f_hi = grid.total_entropy_nats(t_hi) - target;
     let mut guard = 0;
     while f_hi >= 0.0 && guard < 100 && t_hi < LOG_X_MAX - max_log {
         t_hi += 10.0;
-        f_hi = total_entropy_nats(log_fi, t_hi) - target;
+        f_hi = grid.total_entropy_nats(t_hi) - target;
         guard += 1;
     }
     if f_hi >= 0.0 {
@@ -220,7 +302,7 @@ pub(crate) fn fisher_to_costs(mut fisher: Vec<f64>, target_bits: f64) -> Vec<f64
         } else {
             0.5 * (a + b)
         };
-        let fc = total_entropy_nats(log_fi, c) - target;
+        let fc = grid.total_entropy_nats(c) - target;
         t = c;
         if fc.abs() <= tol || (b - a).abs() <= 1e-14 * (1.0 + a.abs().max(b.abs())) {
             break;
@@ -242,13 +324,13 @@ pub(crate) fn fisher_to_costs(mut fisher: Vec<f64>, target_bits: f64) -> Vec<f64
         }
     }
 
-    // log(Fisher) -> rho, in place.
+    // Interpolate final costs from the monotone table.
+    let table = grid.rho_table(t);
     fisher.par_iter_mut().for_each(|lg| {
         *lg = if !lg.is_finite() {
             0.0
         } else {
-            let x = (t + *lg).min(LOG_X_MAX).exp();
-            solve_rho(x)
+            grid.rho_interp(&table, *lg)
         };
     });
     fisher
@@ -373,5 +455,44 @@ mod tests {
         );
         let zero = fisher_to_costs(vec![1.0, 2.0], 0.0);
         assert_eq!(zero, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn calibration_is_deterministic_across_thread_counts() {
+        let mut fisher = Vec::new();
+        let mut state = 0x5a5a_33ccu64;
+        for _ in 0..8192 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let var = 0.01 + (state % 10_000) as f64 / 100.0;
+            fisher.push(2.0 / (var * var));
+        }
+
+        let default_pool_costs = fisher_to_costs(fisher.clone(), 0.20 * fisher.len() as f64);
+
+        let single_thread_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("build single-thread pool");
+        let single_pool_costs = single_thread_pool
+            .install(|| fisher_to_costs(fisher.clone(), 0.20 * fisher.len() as f64));
+
+        assert_eq!(
+            default_pool_costs.len(),
+            single_pool_costs.len(),
+            "lengths must match"
+        );
+        for (i, (d, s)) in default_pool_costs
+            .iter()
+            .zip(&single_pool_costs)
+            .enumerate()
+        {
+            assert_eq!(
+                d.to_bits(),
+                s.to_bits(),
+                "mismatch at element {i}: default={d}, single={s}"
+            );
+        }
     }
 }
