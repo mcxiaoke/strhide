@@ -149,6 +149,16 @@ pub struct DualVerify {
     #[cfg(feature = "content-base")]
     #[serde(rename = "content_stego", skip_serializing_if = "Option::is_none")]
     pub content: Option<crate::stego::StegoVerifyResult>,
+
+    /// Why the content domain produced no result, when it failed instead of
+    /// answering "nothing hidden".
+    ///
+    /// Without this the caller cannot tell "this HEIF layout is unsupported"
+    /// from "there is no payload", and the CLI reported every such failure as
+    /// success (review R3 P1-1, P1-12).
+    #[cfg(feature = "content-base")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_error: Option<crate::core::errors::ErrorDetail>,
 }
 
 impl DualVerify {
@@ -447,7 +457,7 @@ impl StrHide {
         };
 
         #[cfg(feature = "content-base")]
-        let content = {
+        let (content, content_error) = {
             let format = {
                 #[cfg(feature = "structure-base")]
                 {
@@ -465,9 +475,15 @@ impl StrHide {
                     limits: crate::stego::ExtractParams::default(),
                     control: opts.control,
                 };
-                self.stego().verify_file(carrier, &ver_opts).ok()
+                // Keep the failure instead of swallowing it with `.ok()`: the
+                // caller needs to distinguish "no payload" from "the verifier
+                // could not run" (review R3 P1-1).
+                match self.stego().verify_file(carrier, &ver_opts) {
+                    Ok(v) => (Some(v), None),
+                    Err(e) => (None, Some(e.detail_i18n())),
+                }
             } else {
-                None
+                (None, None)
             }
         };
 
@@ -476,6 +492,8 @@ impl StrHide {
             structure,
             #[cfg(feature = "content-base")]
             content,
+            #[cfg(feature = "content-base")]
+            content_error,
         })
     }
 
@@ -509,6 +527,18 @@ impl StrHide {
             (true, false) => (Domain::Structure, None),
             (false, true) => (Domain::Content, None),
             (false, false) => {
+                // A failed content inspection is not the same answer as "there
+                // is nothing hidden": an unsupported HEIF layout, a missing
+                // thumbnail bridge or an unbuilt engine all used to surface as
+                // "No hidden data found", which is the most expensive kind of
+                // misdirection to debug (review R3 P1-12).
+                if let Some(err) = &diag.content_error {
+                    return Err(StrHideError::General(format!(
+                        "Content-domain inspection of '{}' failed: {}",
+                        carrier.display(),
+                        err.detail
+                    )));
+                }
                 return Err(StrHideError::NoHiddenData(format!(
                     "No hidden data found in '{}'",
                     carrier.display()

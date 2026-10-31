@@ -149,6 +149,12 @@ pub(crate) struct DualVerifyResult {
     #[cfg(feature = "content")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) content_stego: Option<crate::stego::StegoVerifyResult>,
+    /// Present when the content-domain verifier failed to run. Serialized so
+    /// `--json` consumers see a failure instead of a missing field (review R3
+    /// P1-1).
+    #[cfg(feature = "content")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) content_error: Option<crate::core::errors::ErrorDetail>,
 }
 
 #[cfg(feature = "content")]

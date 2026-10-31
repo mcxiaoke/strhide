@@ -170,6 +170,41 @@ pub(crate) fn handle_inspect(
     Ok(())
 }
 
+/// Whether the structure domain actually ran for this carrier.
+///
+/// A content-only carrier (PNG/JPEG) comes back with every structure level
+/// `skipped`: that is "not applicable", not "failed", and must not be reported
+/// as a failure of its own. An all-skipped result used to be indistinguishable
+/// from a real verdict once the two domains were collapsed into one exit code.
+fn structure_domain_ran(res: &crate::structure::VerifyResult) -> bool {
+    !(res.level1_host.skipped && res.level2_envelope.skipped && res.level3_crypto.skipped)
+}
+
+/// Whether the content verifier actually found an envelope.
+///
+/// Every content engine emits the same three levels (container, header/
+/// superblock, payload). Level 2 failing means "nothing hidden here" — or a
+/// wrong password — which is not a verification *failure*; level 2 passing
+/// with level 3 failing is. Collapsing both into `!is_all_ok()` made every
+/// structure-only carrier look like a broken content envelope (review R3 P1-1).
+#[cfg(feature = "content")]
+fn content_envelope_present(res: &crate::stego::StegoVerifyResult) -> bool {
+    res.levels.iter().any(|l| l.level == 2 && l.ok)
+}
+
+/// The `verify` exit verdict for one carrier.
+///
+/// Split out of the two call sites so the rule is stated once and can be
+/// tested without building a carrier for every combination (review R3 P1-1).
+fn dual_verify_failed(
+    struct_ok: bool,
+    content_ok: bool,
+    content_present: bool,
+    content_errored: bool,
+) -> bool {
+    !(struct_ok || content_ok) || (content_present && !content_ok) || content_errored
+}
+
 pub(crate) fn handle_verify(
     args: VerifyArgs,
     _cfg: &FileConfig,
@@ -203,43 +238,68 @@ pub(crate) fn handle_verify(
         )?;
 
         let struct_ok = crate::structure::verify_passed(&dual.structure);
+        let struct_ran = structure_domain_ran(&dual.structure);
         #[cfg(feature = "content")]
-        let content_ok = dual
+        let (content_ok, content_present, content_errored) = match &dual.content {
+            Some(c) => (c.is_all_ok(), content_envelope_present(c), false),
+            None => (false, false, dual.content_error.is_some()),
+        };
+        #[cfg(not(feature = "content"))]
+        #[allow(unused_variables)]
+        let (content_ok, content_present, content_errored) = (false, false, false);
+
+        // A content envelope that was found but does not verify fails the file
+        // even when the structure domain is intact; a verifier that could not
+        // run does too. "Nothing hidden in the content domain" does not
+        // (review R3 P1-1).
+        let failed = dual_verify_failed(struct_ok, content_ok, content_present, content_errored);
+
+        #[cfg(feature = "content")]
+        let show_content = dual
             .content
             .as_ref()
-            .map(|c| c.is_all_ok())
-            .unwrap_or(false);
-        #[cfg(not(feature = "content"))]
-        let content_ok = false;
+            .is_some_and(|c| content_envelope_present(c) || c.is_all_ok());
 
         if args.json {
             let res = DualVerifyResult {
                 structure: dual.structure,
                 #[cfg(feature = "content")]
-                content_stego: dual.content.filter(|c| c.is_all_ok()),
+                content_stego: dual
+                    .content
+                    .filter(|c| content_envelope_present(c) || c.is_all_ok()),
+                #[cfg(feature = "content")]
+                content_error: dual.content_error,
             };
             print_json(&res)?;
         } else if !quiet {
-            if struct_ok || !content_ok {
+            if struct_ran {
                 print_verify_result(&dual.structure);
             }
             #[cfg(feature = "content")]
-            if let Some(ref cs) = dual.content
-                && cs.is_all_ok()
-            {
-                if struct_ok {
+            if show_content {
+                if struct_ran {
                     println!();
                 }
-                print_content_verify_result(cs);
+                if let Some(cs) = &dual.content {
+                    print_content_verify_result(cs);
+                }
+            }
+            #[cfg(feature = "content")]
+            if let Some(err) = &dual.content_error {
+                println!(
+                    "Content Steganography Domain Verification: FAIL - {}",
+                    err.detail
+                );
             }
         }
-        return Ok(if struct_ok || content_ok { 0 } else { 1 });
+        return Ok(if failed { 1 } else { 0 });
     }
 
     let t_start = std::time::Instant::now();
     let mut reports = Vec::with_capacity(files.len());
     let mut failures = 0usize;
     let mut any_failed = false;
+    let mut passed = 0usize;
     for carrier in &files {
         match engine.verify_any(
             carrier,
@@ -251,18 +311,29 @@ pub(crate) fn handle_verify(
         ) {
             Ok(dual) => {
                 let struct_ok = crate::structure::verify_passed(&dual.structure);
+                let struct_ran = structure_domain_ran(&dual.structure);
                 #[cfg(feature = "content")]
-                let content_ok = dual
+                let (content_ok, content_present, content_errored) = match &dual.content {
+                    Some(c) => (c.is_all_ok(), content_envelope_present(c), false),
+                    None => (false, false, dual.content_error.is_some()),
+                };
+                #[cfg(not(feature = "content"))]
+                #[allow(unused_variables)]
+                let (content_ok, content_present, content_errored) = (false, false, false);
+
+                // Same verdict rule as the single-carrier path.
+                let failed =
+                    dual_verify_failed(struct_ok, content_ok, content_present, content_errored);
+                if failed {
+                    any_failed = true;
+                } else {
+                    passed += 1;
+                }
+                #[cfg(feature = "content")]
+                let show_content = dual
                     .content
                     .as_ref()
-                    .map(|c| c.is_all_ok())
-                    .unwrap_or(false);
-                #[cfg(not(feature = "content"))]
-                let content_ok = false;
-
-                if !struct_ok && !content_ok {
-                    any_failed = true;
-                }
+                    .is_some_and(|c| content_envelope_present(c) || c.is_all_ok());
                 if !args.json && !quiet {
                     println!(
                         "=== [{}/{}] {} ===",
@@ -270,24 +341,35 @@ pub(crate) fn handle_verify(
                         files.len(),
                         carrier.display()
                     );
-                    if struct_ok || !content_ok {
+                    if struct_ran {
                         print_verify_result(&dual.structure);
                     }
                     #[cfg(feature = "content")]
-                    if let Some(ref cs) = dual.content
-                        && cs.is_all_ok()
-                    {
-                        if struct_ok {
+                    if show_content {
+                        if struct_ran {
                             println!();
                         }
-                        print_content_verify_result(cs);
+                        if let Some(cs) = &dual.content {
+                            print_content_verify_result(cs);
+                        }
+                    }
+                    #[cfg(feature = "content")]
+                    if let Some(err) = &dual.content_error {
+                        println!(
+                            "Content Steganography Domain Verification: FAIL - {}",
+                            err.detail
+                        );
                     }
                     println!();
                 }
                 reports.push(DualVerifyResult {
                     structure: dual.structure,
                     #[cfg(feature = "content")]
-                    content_stego: dual.content.filter(|c| c.is_all_ok()),
+                    content_stego: dual
+                        .content
+                        .filter(|c| content_envelope_present(c) || c.is_all_ok()),
+                    #[cfg(feature = "content")]
+                    content_error: dual.content_error,
                 });
             }
             Err(e) => {
@@ -306,24 +388,6 @@ pub(crate) fn handle_verify(
     if args.json {
         print_json(&reports)?;
     } else if !quiet {
-        let passed = reports
-            .iter()
-            .filter(|r| {
-                crate::structure::verify_passed(&r.structure) || {
-                    #[cfg(feature = "content")]
-                    {
-                        r.content_stego
-                            .as_ref()
-                            .map(|c| c.is_all_ok())
-                            .unwrap_or(false)
-                    }
-                    #[cfg(not(feature = "content"))]
-                    {
-                        false
-                    }
-                }
-            })
-            .count();
         let failed_cnt = reports.len() - passed;
         let elapsed_str = format_duration(t_start.elapsed());
         println!(
@@ -629,4 +693,42 @@ pub(crate) fn handle_list(args: ListArgs) -> Result<(), StrHideError> {
     println!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::dual_verify_failed;
+
+    /// A structure-only carrier also runs the content verifier, which answers
+    /// "no header here". That is not a failure.
+    #[test]
+    fn absent_content_envelope_is_not_a_failure() {
+        assert!(!dual_verify_failed(true, false, false, false));
+    }
+
+    /// The R3 P1-1 case: structure envelope intact, content envelope found but
+    /// failing its payload check, used to exit 0 and print only the structure
+    /// verdict.
+    #[test]
+    fn broken_content_envelope_fails_despite_structure_passing() {
+        assert!(dual_verify_failed(true, false, true, false));
+    }
+
+    /// A content verifier that could not run at all fails too.
+    #[test]
+    fn content_verifier_error_fails() {
+        assert!(dual_verify_failed(true, false, false, true));
+    }
+
+    /// Neither domain produced a passing verdict: a clean carrier still exits 1.
+    #[test]
+    fn nothing_verified_fails() {
+        assert!(dual_verify_failed(false, false, false, false));
+    }
+
+    /// Content-only carriers pass when their envelope verifies.
+    #[test]
+    fn verified_content_envelope_passes() {
+        assert!(!dual_verify_failed(false, true, true, false));
+    }
 }
