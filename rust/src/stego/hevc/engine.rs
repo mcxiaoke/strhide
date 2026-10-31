@@ -646,7 +646,18 @@ pub(crate) fn build_hevc_capacity_info(
                 .saturating_mul(pool.band_pictures[1])
                 .saturating_mul(SLOTS_PER_REF_FLIP)
                 .min(pool.band_slots[1]);
-            trellis.message_bits(non_ref_slots.saturating_add(ref_slots))
+            let ladder_slots = non_ref_slots.saturating_add(ref_slots);
+            // The writer's own gate (see `embed_hevc_patches_with_factor`) sizes
+            // the stream window as `body_needed * (1 / non_ref_fraction)`, so it
+            // only accepts `body_needed <= (total - SUPERBLOCK) * non_ref_fraction`.
+            // Without this clamp the ladder alone could advertise a payload the
+            // embedder then rejected: on an all-I/P stream every slot sits in the
+            // reference band, so `ref_slots` alone is a large promise the gate
+            // never honours.
+            let gate_slots = ((total_slots.saturating_sub(HEVC_SUPERBLOCK_MIN_SLOTS) as f64)
+                * budget.non_ref_fraction)
+                .floor() as usize;
+            trellis.message_bits(ladder_slots.min(gate_slots))
         } else {
             let bpp_bits = (total_elements as f64 * level.bpp_limit()).floor() as usize;
             let ratio_bits = (total_slots as f64 / level.target_ratio()).floor() as usize;

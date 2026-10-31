@@ -215,3 +215,58 @@ fn isobmff_rejects_an_envelope_larger_than_the_file() {
         "inspect should report no hidden data:\n{stdout}"
     );
 }
+
+/// Same blind spot as the PNG `IEND` case above, in the JPEG marker walk: a
+/// whole-file view that never reaches `EOI` reported nothing at all, the
+/// entropy detector exempts JPEG, and the metric still claimed "0 bytes /
+/// clean termination at EOI". Deleting the trailing `FF D9` and appending a
+/// payload therefore scanned clean (review R4 P1-7).
+#[cfg(feature = "analysis")]
+#[test]
+fn scan_flags_a_jpeg_without_eoi() {
+    let mut data = crate::common::make_jpeg();
+    assert!(data.ends_with(b"\xff\xd9"));
+    data.truncate(data.len() - 2);
+    data.extend_from_slice(b"\xff\xff\xff\x7fappended-payload");
+
+    let report = strhide::analysis::scan_bytes(&data, "noeoi.jpg");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.detector == "jpeg:trailing-data"),
+        "a JPEG whose terminator is gone must produce a finding: {:?}",
+        report.findings
+    );
+    assert_ne!(report.verdict, "clean", "verdict: {}", report.verdict);
+
+    let metric = report
+        .detectors
+        .iter()
+        .find(|d| d.name == "jpeg:trailing-data")
+        .expect("trailing-data metric must be reported");
+    assert_eq!(metric.status, "ALERT");
+    assert!(
+        !metric.detail.contains("clean termination"),
+        "detail still claims a clean EOI: {}",
+        metric.detail
+    );
+
+    // A clean JPEG must stay clean: no finding, PASS, "0 bytes".
+    let clean = strhide::analysis::scan_bytes(&crate::common::make_jpeg(), "clean.jpg");
+    assert!(
+        !clean
+            .findings
+            .iter()
+            .any(|f| f.detector == "jpeg:trailing-data"),
+        "a well-formed JPEG must not be flagged: {:?}",
+        clean.findings
+    );
+    let metric = clean
+        .detectors
+        .iter()
+        .find(|d| d.name == "jpeg:trailing-data")
+        .expect("metric present");
+    assert_eq!(metric.status, "PASS");
+    assert_eq!(metric.metric, "0 bytes");
+}

@@ -404,7 +404,7 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
         }
         Some(FileFormat::Jpeg) => {
             let before_cnt = findings.len();
-            track_jpeg_structure(view, &mut findings);
+            let terminated = track_jpeg_structure(view, &mut findings);
             let has_trailing = findings[before_cnt..]
                 .iter()
                 .any(|f| f.detector == "jpeg:trailing-data");
@@ -440,13 +440,17 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
                 } else {
                     "PASS".into()
                 },
-                metric: if has_trailing {
+                metric: if !terminated {
+                    "no terminator".into()
+                } else if has_trailing {
                     "trailing bytes present".into()
                 } else {
                     "0 bytes".into()
                 },
                 threshold: Some("0 bytes".into()),
-                detail: if has_trailing {
+                detail: if !terminated {
+                    "no EOI marker: the terminator is missing or was replaced".into()
+                } else if has_trailing {
                     "overlay data after EOI marker".into()
                 } else {
                     "clean termination at EOI".into()
@@ -862,19 +866,46 @@ fn walk_jpeg_markers(data: &[u8]) -> JpegWalk {
     walk
 }
 
-fn track_jpeg_structure(view: &ScanView, out: &mut Vec<Finding>) {
+/// Structural checks for a JPEG, returning whether the marker stream reached
+/// `EOI`.
+///
+/// The return value drives the `jpeg:trailing-data` metric: with no terminator
+/// the metric cannot claim "0 bytes / clean termination at EOI". Same contract
+/// as [`track_png_structure`], and for the same reason — a whole-file view with
+/// no EOI used to produce no finding at all, so deleting the last two bytes and
+/// appending a payload scored a clean verdict (review R4 P1).
+fn track_jpeg_structure(view: &ScanView, out: &mut Vec<Finding>) -> bool {
     let walk = walk_jpeg_markers(view.prefix);
-    match walk.eoi_end {
-        Some(end) => report_trailing(view, end, "jpeg:trailing-data", "EOI", out),
-        None => {
-            if !view.is_whole() {
-                report_jpeg_tail(view, out);
-            }
-            // A whole file without EOI is a truncated JPEG, not evidence of
-            // hidden data.
+    let terminated = match walk.eoi_end {
+        Some(end) => {
+            report_trailing(view, end, "jpeg:trailing-data", "EOI", out);
+            true
         }
-    }
+        None if view.is_whole() => {
+            // A conforming JPEG ends with FF D9; nothing else can terminate the
+            // entropy-coded scan. Either the file is truncated or the marker was
+            // removed and replaced with other bytes.
+            out.push(Finding {
+                detector: "jpeg:trailing-data".into(),
+                severity: Severity::Suspicious,
+                detail: format!(
+                    "no EOI marker (FF D9) anywhere in the {}-byte file: the marker stream is \
+                     truncated or the terminator was replaced by other data",
+                    view.file_size
+                ),
+            });
+            false
+        }
+        None => {
+            report_jpeg_tail(view, out);
+            // The tail window is where the real EOI would be, if the walk simply
+            // ran out of scanned bytes before reaching it.
+            view.tail
+                .is_some_and(|(_, tail)| tail.windows(2).any(|w| w == JPEG_EOI))
+        }
+    };
     emit_jpeg_findings(walk, out);
+    terminated
 }
 
 /// Trailing-data check for a JPEG too large to walk to its end.

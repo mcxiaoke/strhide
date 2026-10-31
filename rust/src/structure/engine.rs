@@ -2314,9 +2314,13 @@ fn envelope_coordinates_agree(
     ube_total_size: u64,
     file_len: u64,
 ) -> Result<(), String> {
-    // Scattered strategies (`pe_codebits`) record 0/0 by definition: there is
-    // no contiguous injected region to check.
-    if header.inject_size == 0 {
+    // Scattered strategies (`pe_codebits`) record 0/0 by definition: the payload
+    // is spread over instruction encodings and PE padding, so there is no
+    // contiguous injected region to check. Test the *strategy*, not
+    // `inject_size == 0`: the size field is inside the header but outside the
+    // AEAD's AAD, so accepting a zero there let anyone flip it in a contiguous
+    // strategy (`eof`, `chunk`, `box_uuid`) and skip Level 2 entirely.
+    if crate::structure::registry::id_to_strategy(header.strategy_id) == "pe_codebits" {
         return Ok(());
     }
     let expected_offset = header
@@ -2685,5 +2689,45 @@ mod compact_meta_tests {
         };
         let json_fail = serde_json::to_string(&fail).expect("serialize");
         assert!(json_fail.contains("Invalid password"));
+    }
+}
+
+#[cfg(test)]
+mod envelope_coordinate_tests {
+    use super::*;
+
+    /// `inject_size` lives in the header but outside the AEAD's AAD, so a zero
+    /// in that field must not be read as "this is a scattered strategy". Before
+    /// the fix, any contiguous strategy (`eof`, `chunk`, `box_uuid`) with the
+    /// field flipped to 0 skipped Level 2 entirely and `verify` passed a carrier
+    /// whose coordinates disagreed with its body.
+    #[test]
+    fn zero_inject_size_only_exempts_pe_codebits() {
+        let ube_total = 256u64;
+        let file_len = 4096u64;
+
+        let header = EnvelopeHeader {
+            strategy_id: crate::structure::registry::strategy_to_id("eof").expect("eof id"),
+            inject_offset: 0,
+            offset_delta: 0,
+            inject_size: 0,
+            ..Default::default()
+        };
+
+        assert!(
+            envelope_coordinates_agree(&header, 0, ube_total, file_len).is_err(),
+            "a zeroed inject_size on a contiguous strategy must be rejected"
+        );
+
+        // `pe_codebits` is the one strategy that records 0/0 by construction.
+        let header = EnvelopeHeader {
+            strategy_id: crate::structure::registry::strategy_to_id("pe_codebits")
+                .expect("codebits id"),
+            ..header
+        };
+        assert!(
+            envelope_coordinates_agree(&header, 0, ube_total, file_len).is_ok(),
+            "the scattered strategy must still be exempt"
+        );
     }
 }
