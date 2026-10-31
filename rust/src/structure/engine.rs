@@ -1120,16 +1120,29 @@ where
     let meta_block = encrypt_metadata(&meta_raw, &meta_key, &base_nonce, &fixed_header_aad)?;
     header.meta_len = meta_block.len() as u32;
 
-    // Encrypt payload stream
-    let mut payload_cipher_buf = Vec::new();
+    // Assemble the UBE prefix first, then append the ciphertext directly into
+    // the same buffer. The old path encrypted into a second full-size Vec and
+    // then copied it into the envelope, so plaintext, ciphertext and envelope
+    // were all resident at once (~3x the payload).
+    let mut tmp_ube = Vec::with_capacity(exact_ube_size as usize);
+    tmp_ube.extend_from_slice(&header.pack_masked(header_mask.as_ref()));
+    if !hint_bytes.is_empty() {
+        tmp_ube.extend_from_slice(&hint_bytes);
+    }
+    tmp_ube.extend_from_slice(&meta_block);
+
+    // Encrypt payload stream directly into the envelope buffer.
     let payload_written = encrypt_stream_to_chunks(
         &mut Cursor::new(&to_encrypt_bytes),
-        &mut payload_cipher_buf,
+        &mut tmp_ube,
         &payload_key,
         &base_nonce,
         &fixed_header_aad,
         local.chunk_size,
     )?;
+    // Release the plaintext before the injector reads the envelope: only the
+    // ciphertext copy is needed from here on.
+    drop(to_encrypt_bytes);
 
     let ube_total_size = HEADER_SIZE as u64
         + hint_bytes.len() as u64
@@ -1167,14 +1180,8 @@ where
         });
     }
 
-    // Assemble full UBE (payload buffer is moved in, not copied)
-    let mut tmp_ube = Vec::with_capacity(ube_total_size as usize);
-    tmp_ube.extend_from_slice(&header.pack_masked(header_mask.as_ref()));
-    if !hint_bytes.is_empty() {
-        tmp_ube.extend_from_slice(&hint_bytes);
-    }
-    tmp_ube.extend_from_slice(&meta_block);
-    tmp_ube.append(&mut payload_cipher_buf); // move bytes, no copy
+    // Finish the envelope: the dummy trailer carries placeholder coordinates
+    // that are patched into the written file after injection.
     let dummy_trailer = if stealth && has_custom_password {
         EnvelopeTrailer::create_stealth(0, ube_total_size, trailer_magic)
     } else {

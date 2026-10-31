@@ -545,6 +545,51 @@ fn box_header_is_64_bit(buf: &[u8]) -> bool {
     buf.len() >= 4 && u32::from_be_bytes(buf[0..4].try_into().unwrap()) == 1
 }
 
+/// Read one top-level box header without buffering the box body.
+///
+/// Used by the `item_hidden` paths, which only need the bytes up to the end of
+/// `meta`; everything after it is streamed.
+fn read_stream_box_header(
+    reader: &mut dyn SeekRead,
+    pos: u64,
+    file_size: u64,
+) -> Result<(u64, usize, [u8; 4]), StrHideError> {
+    if pos + 8 > file_size {
+        return Err(StrHideError::CorruptedData("Truncated box header".into()));
+    }
+    reader.seek(SeekFrom::Start(pos))?;
+    let mut hdr = [0u8; 8];
+    reader.read_exact(&mut hdr)?;
+    let mut tag = [0u8; 4];
+    tag.copy_from_slice(&hdr[4..8]);
+    let size32 = u32::from_be_bytes(hdr[0..4].try_into().unwrap());
+    let (size, header_len) = if size32 == 1 {
+        if pos + 16 > file_size {
+            return Err(StrHideError::CorruptedData(
+                "Truncated 64-bit box header".into(),
+            ));
+        }
+        reader.seek(SeekFrom::Start(pos + 8))?;
+        let mut largesize = [0u8; 8];
+        reader.read_exact(&mut largesize)?;
+        let size = u64::from_be_bytes(largesize);
+        if size < 16 {
+            return Err(StrHideError::CorruptedData(
+                "Invalid 64-bit box size".into(),
+            ));
+        }
+        (size, 16)
+    } else if size32 == 0 {
+        (file_size - pos, 8)
+    } else {
+        (size32 as u64, 8)
+    };
+    if size > file_size - pos {
+        return Err(StrHideError::CorruptedData("Invalid box size".into()));
+    }
+    Ok((size, header_len, tag))
+}
+
 fn read_box_size(bytes: &[u8], pos: usize) -> Result<(usize, usize), StrHideError> {
     if pos + 8 > bytes.len() {
         return Err(StrHideError::CorruptedData("Truncated box header".into()));
@@ -643,24 +688,18 @@ fn heif_item_hidden_inject(
     ube_in: &mut dyn SeekRead,
     out: &mut dyn Write,
 ) -> Result<(u64, u64, u32, u32), StrHideError> {
-    host_in.seek(SeekFrom::Start(0))?;
-    let mut host_bytes = Vec::new();
-    host_in.read_to_end(&mut host_bytes)?;
-
+    host_in.seek(SeekFrom::End(0))?;
+    let host_size = host_in.stream_position()?;
     let ube_size = ube_in.seek(SeekFrom::End(0))?;
-    ube_in.seek(SeekFrom::Start(0))?;
-    let mut ube_bytes = Vec::with_capacity(ube_size as usize);
-    ube_in.read_to_end(&mut ube_bytes)?;
 
-    // 1. Locate meta box
-    let mut pos = 0usize;
+    // 1. Locate the meta box by streaming its top-level header. Only the bytes
+    // up to the end of `meta` are needed in memory; the rest of the host is
+    // streamed straight into the output afterwards.
+    let mut pos = 0u64;
     let mut meta_span = None;
-    while pos + 8 <= host_bytes.len() {
-        let (bsize, hlen) = read_box_size(&host_bytes, pos)?;
-        if bsize < hlen || bsize > host_bytes.len() - pos {
-            return Err(StrHideError::CorruptedData("Invalid box size".into()));
-        }
-        if &host_bytes[pos + 4..pos + 8] == b"meta" {
+    while pos + 8 <= host_size {
+        let (bsize, hlen, tag) = read_stream_box_header(host_in, pos, host_size)?;
+        if tag == *b"meta" {
             meta_span = Some((pos, bsize, hlen));
             break;
         }
@@ -678,9 +717,23 @@ fn heif_item_hidden_inject(
             "HEIF carriers with a 64-bit meta box header are not supported for item_hidden".into(),
         ));
     }
+    let m_off = usize::try_from(m_off)
+        .map_err(|_| StrHideError::UnsupportedFormat("meta box offset exceeds usize".into()))?;
+    let m_size = usize::try_from(m_size)
+        .map_err(|_| StrHideError::UnsupportedFormat("meta box size exceeds usize".into()))?;
+    let m_end = m_off
+        .checked_add(m_size)
+        .ok_or_else(|| StrHideError::CorruptedData("meta box offset overflows".into()))?;
+    if m_end as u64 > MAX_ISOBMFF_META_SCAN {
+        return Err(StrHideError::UnsupportedFormat(
+            "HEIF meta box is too large for item_hidden".into(),
+        ));
+    }
+    host_in.seek(SeekFrom::Start(0))?;
+    let mut host_prefix = vec![0u8; m_end];
+    host_in.read_exact(&mut host_prefix)?;
 
     let m_body_start = m_off + m_hlen + 4; // FullBox version+flags
-    let m_end = m_off + m_size;
     if m_body_start > m_end {
         return Err(StrHideError::CorruptedData("Truncated meta box".into()));
     }
@@ -689,15 +742,15 @@ fn heif_item_hidden_inject(
     let mut subboxes: Vec<([u8; 4], Vec<u8>)> = Vec::new();
     let mut bpos = m_body_start;
     while bpos + 8 <= m_end {
-        let (s_size, s_hlen) = read_box_size(&host_bytes, bpos)?;
+        let (s_size, s_hlen) = read_box_size(&host_prefix, bpos)?;
         if s_size < s_hlen || s_size > m_end - bpos {
             return Err(StrHideError::CorruptedData(
                 "Invalid sub-box in meta".into(),
             ));
         }
         let mut tag = [0u8; 4];
-        tag.copy_from_slice(&host_bytes[bpos + 4..bpos + 8]);
-        subboxes.push((tag, host_bytes[bpos..bpos + s_size].to_vec()));
+        tag.copy_from_slice(&host_prefix[bpos + 4..bpos + 8]);
+        subboxes.push((tag, host_prefix[bpos..bpos + s_size].to_vec()));
         bpos += s_size;
     }
     // A meta body may end in <8 bytes that cannot start a box header (zero
@@ -705,7 +758,7 @@ fn heif_item_hidden_inject(
     // offset and surface as RestoreMismatch on removal, so it is carried
     // through verbatim on both the inject and strip sides (review P3-4).
     let meta_tail: Vec<u8> = if bpos < m_end {
-        host_bytes[bpos..m_end].to_vec()
+        host_prefix[bpos..m_end].to_vec()
     } else {
         Vec::new()
     };
@@ -847,7 +900,7 @@ fn heif_item_hidden_inject(
         ));
     }
     let delta_meta = infe_len + iloc_item_len;
-    let target_ext_off = host_bytes.len() as u64 + delta_meta as u64 + 8;
+    let target_ext_off = host_size + delta_meta as u64 + 8;
 
     // Build new iloc item
     let mut new_iloc_entry = Vec::with_capacity(iloc_item_len);
@@ -971,22 +1024,25 @@ fn heif_item_hidden_inject(
     let mut patched_meta = Vec::with_capacity(new_meta_size as usize);
     patched_meta.extend_from_slice(&new_meta_size.to_be_bytes());
     patched_meta.extend_from_slice(b"meta");
-    patched_meta.extend_from_slice(&host_bytes[m_off + 8..m_off + 12]);
+    patched_meta.extend_from_slice(&host_prefix[m_off + 8..m_off + 12]);
     patched_meta.extend_from_slice(&new_meta_body);
 
-    // 7. Write output stream
-    out.write_all(&host_bytes[..m_off])?;
+    // 7. Write output stream: the bytes before meta and everything after it
+    // are streamed, so a large HEIF is never fully buffered.
+    out.write_all(&host_prefix[..m_off])?;
     out.write_all(&patched_meta)?;
-    out.write_all(&host_bytes[m_off + m_size..])?;
+    host_in.seek(SeekFrom::Start((m_off + m_size) as u64))?;
+    crate::structure::adapters::io::copy_stream(host_in, out)?;
 
     // Second mdat box
+    ube_in.seek(SeekFrom::Start(0))?;
     let mdat2_size = u32::try_from(8 + ube_size)
         .map_err(|_| StrHideError::General("Envelope too large for 32-bit mdat box".into()))?;
     out.write_all(&mdat2_size.to_be_bytes())?;
     out.write_all(b"mdat")?;
-    out.write_all(&ube_bytes)?;
+    crate::structure::adapters::io::copy_exact(ube_in, out, ube_size)?;
 
-    let inject_offset = host_bytes.len() as u64 + delta_meta as u64;
+    let inject_offset = host_size + delta_meta as u64;
     let inject_size = 8 + ube_size;
 
     Ok((inject_offset, inject_size, 0, 0))
@@ -997,23 +1053,19 @@ fn heif_item_hidden_strip(
     out: &mut dyn SeekWrite,
     header: &EnvelopeHeader,
 ) -> Result<(), StrHideError> {
-    stego_in.seek(SeekFrom::Start(0))?;
-    let mut stego_bytes = Vec::new();
-    stego_in.read_to_end(&mut stego_bytes)?;
-
-    if (header.inject_offset as usize) > stego_bytes.len() {
+    stego_in.seek(SeekFrom::End(0))?;
+    let total_size = stego_in.stream_position()?;
+    if header.inject_offset > total_size {
         return Err(StrHideError::CorruptedData("Inject offset past EOF".into()));
     }
 
-    // 1. Locate meta box
-    let mut pos = 0usize;
+    // 1. Locate the meta box by streaming its header; only the bytes up to the
+    // end of meta stay in memory, the rest of the carrier is streamed back out.
+    let mut pos = 0u64;
     let mut meta_span = None;
-    while pos + 8 <= stego_bytes.len() {
-        let (bsize, hlen) = read_box_size(&stego_bytes, pos)?;
-        if bsize < hlen || bsize > stego_bytes.len() - pos {
-            return Err(StrHideError::CorruptedData("Invalid box size".into()));
-        }
-        if &stego_bytes[pos + 4..pos + 8] == b"meta" {
+    while pos + 8 <= total_size {
+        let (bsize, hlen, tag) = read_stream_box_header(stego_in, pos, total_size)?;
+        if tag == *b"meta" {
             meta_span = Some((pos, bsize, hlen));
             break;
         }
@@ -1022,9 +1074,28 @@ fn heif_item_hidden_strip(
     let (m_off, m_size, m_hlen) = meta_span.ok_or_else(|| {
         StrHideError::CorruptedData("No meta box found in HEIF carrier for strip".into())
     })?;
+    if m_hlen != 8 {
+        return Err(StrHideError::CorruptedData(
+            "64-bit meta box header is not supported for item_hidden strip".into(),
+        ));
+    }
+    let m_off = usize::try_from(m_off)
+        .map_err(|_| StrHideError::CorruptedData("meta box offset exceeds usize".into()))?;
+    let m_size = usize::try_from(m_size)
+        .map_err(|_| StrHideError::CorruptedData("meta box size exceeds usize".into()))?;
+    let m_end = m_off
+        .checked_add(m_size)
+        .ok_or_else(|| StrHideError::CorruptedData("meta box offset overflows".into()))?;
+    if m_end as u64 > MAX_ISOBMFF_META_SCAN {
+        return Err(StrHideError::CorruptedData(
+            "HEIF meta box is too large for item_hidden strip".into(),
+        ));
+    }
+    stego_in.seek(SeekFrom::Start(0))?;
+    let mut stego_prefix = vec![0u8; m_end];
+    stego_in.read_exact(&mut stego_prefix)?;
 
     let m_body_start = m_off + m_hlen + 4;
-    let m_end = m_off + m_size;
     if m_body_start > m_end {
         return Err(StrHideError::CorruptedData("Truncated meta box".into()));
     }
@@ -1034,7 +1105,7 @@ fn heif_item_hidden_strip(
     // meta box must end before the injected region and the injected region
     // (meta growth + the trailing mdat2 box) must run to the end of the file;
     // anything else would slice with start > end in step 7 below.
-    if (header.inject_offset as usize) < m_end {
+    if header.inject_offset < m_end as u64 {
         return Err(StrHideError::CorruptedData(
             "inject_offset precedes the end of the meta box".into(),
         ));
@@ -1045,7 +1116,7 @@ fn heif_item_hidden_strip(
         .ok_or_else(|| {
             StrHideError::CorruptedData("Injected region overflows u64 offsets".into())
         })?;
-    if inject_end != stego_bytes.len() as u64 {
+    if inject_end != total_size {
         return Err(StrHideError::CorruptedData(
             "inject_offset + inject_size does not match the stego file length".into(),
         ));
@@ -1055,21 +1126,21 @@ fn heif_item_hidden_strip(
     let mut subboxes: Vec<([u8; 4], Vec<u8>)> = Vec::new();
     let mut bpos = m_body_start;
     while bpos + 8 <= m_end {
-        let (s_size, s_hlen) = read_box_size(&stego_bytes, bpos)?;
+        let (s_size, s_hlen) = read_box_size(&stego_prefix, bpos)?;
         if s_size < s_hlen || s_size > m_end - bpos {
             return Err(StrHideError::CorruptedData(
                 "Invalid sub-box in meta".into(),
             ));
         }
         let mut tag = [0u8; 4];
-        tag.copy_from_slice(&stego_bytes[bpos + 4..bpos + 8]);
-        subboxes.push((tag, stego_bytes[bpos..bpos + s_size].to_vec()));
+        tag.copy_from_slice(&stego_prefix[bpos + 4..bpos + 8]);
+        subboxes.push((tag, stego_prefix[bpos..bpos + s_size].to_vec()));
         bpos += s_size;
     }
     // The <8-byte meta residue the inject side carried through verbatim
     // (review P3-4); it must re-enter the restored meta unchanged.
     let meta_tail: Vec<u8> = if bpos < m_end {
-        stego_bytes[bpos..m_end].to_vec()
+        stego_prefix[bpos..m_end].to_vec()
     } else {
         Vec::new()
     };
@@ -1288,13 +1359,22 @@ fn heif_item_hidden_strip(
     let mut restored_meta = Vec::with_capacity(restored_meta_size as usize);
     restored_meta.extend_from_slice(&restored_meta_size.to_be_bytes());
     restored_meta.extend_from_slice(b"meta");
-    restored_meta.extend_from_slice(&stego_bytes[m_off + 8..m_off + 12]);
+    restored_meta.extend_from_slice(&stego_prefix[m_off + 8..m_off + 12]);
     restored_meta.extend_from_slice(&restored_meta_body);
 
-    // 7. Write output
-    out.write_all(&stego_bytes[..m_off])?;
+    // 7. Write output: prefix, restored meta, then the untouched host bytes up
+    // to the injected mdat2, streamed instead of sliced from a whole-file Vec.
+    out.write_all(&stego_prefix[..m_off])?;
     out.write_all(&restored_meta)?;
-    out.write_all(&stego_bytes[m_off + m_size..header.inject_offset as usize])?;
+    let tail_start = (m_off + m_size) as u64;
+    let tail_len = header
+        .inject_offset
+        .checked_sub(tail_start)
+        .ok_or_else(|| {
+            StrHideError::CorruptedData("Restored tail starts past inject_offset".into())
+        })?;
+    stego_in.seek(SeekFrom::Start(tail_start))?;
+    crate::structure::adapters::io::copy_exact(stego_in, out, tail_len)?;
 
     Ok(())
 }

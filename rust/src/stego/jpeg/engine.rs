@@ -1123,10 +1123,27 @@ pub fn extract_jpeg(
     preflight_jpeg(carrier_bytes)?;
     let coeffs = dct_io::read_coefficients(carrier_bytes).map_err(map_dct_error)?;
     control.check()?;
+    extract_jpeg_from(&coeffs, password, domain, fmt, extract, control, None)
+}
+
+/// Body of [`extract_jpeg`] over already-decoded DCT coefficients.
+///
+/// `matched` carries the `(suite id, master key)` an earlier
+/// [`inspect_jpeg_from`] already derived, so `verify_jpeg` pays a single DCT
+/// decode and a single KDF instead of three and two.
+fn extract_jpeg_from(
+    coeffs: &JpegCoefficients,
+    password: Option<&str>,
+    domain: Option<&str>,
+    fmt: &JpegFormatProfile,
+    extract: &ExtractParams,
+    control: &Control<'_>,
+    matched: Option<(u16, [u8; 32])>,
+) -> Result<Payload<'static>, StrHideError> {
     if coeffs.components.is_empty() {
         return Err(StrHideError::NoHiddenData("JPEG has no components".into()));
     }
-    let cover = CoverFrame::read(fmt, &coeffs);
+    let cover = CoverFrame::read(fmt, coeffs);
     let n_total = cover.n_total();
     let no_hidden = || StrHideError::NoHiddenData("No valid payload found".into());
 
@@ -1151,8 +1168,13 @@ pub fn extract_jpeg(
         if suite.cost() > extract.max_pbkdf2_iterations {
             continue;
         }
-        let Ok(master) = derive_master(suite, password, &cover.digest) else {
-            continue;
+        let master = match matched {
+            Some((suite_id, master)) if suite_id == suite.id => master,
+            Some(_) => continue,
+            None => match derive_master(suite, password, &cover.digest) {
+                Ok(master) => master,
+                Err(_) => continue,
+            },
         };
         let hdr_seed = header_perm_seed(fmt, &master, domain);
 
@@ -1175,7 +1197,7 @@ pub fn extract_jpeg(
         let mut hdr_rng = ChaCha12Stream::from_seed(&hdr_seed);
         fisher_yates_prefix_from(&mut slots_buf, 0, hdr_min, &mut hdr_rng);
 
-        let Some(superblock) = read_superblock(&coeffs, &slots_buf[..sb_n], fmt, &hdr_seed, domain)
+        let Some(superblock) = read_superblock(coeffs, &slots_buf[..sb_n], fmt, &hdr_seed, domain)
         else {
             continue;
         };
@@ -1200,7 +1222,7 @@ pub fn extract_jpeg(
         let ext_slots = &hdr_slots[sb_n..hdr_n];
         let extension_area = if ext_bytes > 0 {
             let Some(area) = read_bits(
-                &coeffs,
+                coeffs,
                 ext_slots,
                 fmt.grid_rule,
                 extension_stc_seed(fmt, &hdr_seed, domain),
@@ -1232,7 +1254,7 @@ pub fn extract_jpeg(
         permute_prefix(&mut slots_buf, body_n, &perm_seed);
         slots_buf.truncate(body_n);
         let Some(ciphertext) = read_bits(
-            &coeffs,
+            coeffs,
             &slots_buf,
             fmt.grid_rule,
             stc_seed(fmt, &perm_seed, &superblock.salt),
@@ -1365,18 +1387,42 @@ pub fn inspect_jpeg(
         u32::from(preflight.info.width),
         u32::from(preflight.info.height),
     ));
-    let mut empty_info = StegoHeaderInfo::empty("JPEG");
-    empty_info.media_info = media_info;
-
     let coeffs = match dct_io::read_coefficients(carrier_bytes) {
         Ok(c) => c,
-        Err(_) => return Ok(empty_info),
+        Err(_) => {
+            let mut empty_info = StegoHeaderInfo::empty("JPEG");
+            empty_info.media_info = media_info;
+            return Ok(empty_info);
+        }
     };
+    Ok(inspect_jpeg_from(&coeffs, media_info, password, domain, fmt, control)?.info)
+}
+
+/// Header result plus the `(suite id, master)` needed to decrypt level 3.
+struct JpegInspection {
+    info: StegoHeaderInfo,
+    matched: Option<(u16, [u8; 32])>,
+}
+
+/// Superblock inspection over already-decoded DCT coefficients.
+fn inspect_jpeg_from(
+    coeffs: &JpegCoefficients,
+    media_info: Option<MediaInfo>,
+    password: Option<&str>,
+    domain: Option<&str>,
+    fmt: &JpegFormatProfile,
+    control: &Control<'_>,
+) -> Result<JpegInspection, StrHideError> {
+    let mut empty_info = StegoHeaderInfo::empty("JPEG");
+    empty_info.media_info = media_info;
     if coeffs.components.is_empty() {
-        return Ok(empty_info);
+        return Ok(JpegInspection {
+            info: empty_info,
+            matched: None,
+        });
     }
     control.check()?;
-    let cover = CoverFrame::read(fmt, &coeffs);
+    let cover = CoverFrame::read(fmt, coeffs);
 
     let password = password
         .filter(|s| !s.is_empty())
@@ -1402,7 +1448,7 @@ pub fn inspect_jpeg(
         let mut hdr_rng = ChaCha12Stream::from_seed(&hdr_seed);
         fisher_yates_prefix_from(&mut slots_buf, 0, hdr_min, &mut hdr_rng);
 
-        let Some(superblock) = read_superblock(&coeffs, &slots_buf[..sb_n], fmt, &hdr_seed, domain)
+        let Some(superblock) = read_superblock(coeffs, &slots_buf[..sb_n], fmt, &hdr_seed, domain)
         else {
             continue;
         };
@@ -1413,22 +1459,28 @@ pub fn inspect_jpeg(
             continue;
         }
 
-        return Ok(StegoHeaderInfo {
-            format: "JPEG".into(),
-            has_hidden_data: true,
-            algorithm: Some("UERD/J-UNIWARD".into()),
-            codec: Some(format!(
-                "Ternary STC (h={}, u={})",
-                superblock.h, superblock.u
-            )),
-            envelope_len: Some(superblock.envelope_len as usize),
-            payload_len: None,
-            media_info,
-            note: None,
+        return Ok(JpegInspection {
+            info: StegoHeaderInfo {
+                format: "JPEG".into(),
+                has_hidden_data: true,
+                algorithm: Some("UERD/J-UNIWARD".into()),
+                codec: Some(format!(
+                    "Ternary STC (h={}, u={})",
+                    superblock.h, superblock.u
+                )),
+                envelope_len: Some(superblock.envelope_len as usize),
+                payload_len: None,
+                media_info,
+                note: None,
+            },
+            matched: Some((suite.id, master)),
         });
     }
 
-    Ok(empty_info)
+    Ok(JpegInspection {
+        info: empty_info,
+        matched: None,
+    })
 }
 
 /// Three-level diagnostic verification for JPEG carriers.
@@ -1483,11 +1535,21 @@ pub fn verify_jpeg(
             return Ok(StegoVerifyResult::new("JPEG", levels));
         }
     };
-    let _ = (info, coeffs);
     control.check()?;
 
-    // Level 2: Superblock inspection
-    let header_info = inspect_jpeg(carrier_bytes, password, domain, fmt, control)?;
+    // Level 2: Superblock inspection, reusing the DCT decode from level 1.
+    let inspection = inspect_jpeg_from(
+        &coeffs,
+        Some(MediaInfo::new(
+            u32::from(info.width),
+            u32::from(info.height),
+        )),
+        password,
+        domain,
+        fmt,
+        control,
+    )?;
+    let header_info = &inspection.info;
     if !header_info.has_hidden_data {
         levels.push(VerifyLevel::fail(
             2,
@@ -1511,8 +1573,17 @@ pub fn verify_jpeg(
     ));
     control.check()?;
 
-    // Level 3: Payload Decryption & AEAD Authenticity
-    match extract_jpeg(carrier_bytes, password, domain, fmt, limits, control) {
+    // Level 3: Payload Decryption & AEAD Authenticity. The matched suite and
+    // master come from level 2, so no second KDF is paid here.
+    match extract_jpeg_from(
+        &coeffs,
+        password,
+        domain,
+        fmt,
+        limits,
+        control,
+        inspection.matched,
+    ) {
         Ok(payload) => {
             let desc = match payload.name() {
                 Some(name) => format!(

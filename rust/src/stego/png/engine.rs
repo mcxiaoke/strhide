@@ -1680,9 +1680,28 @@ pub fn extract_png(
     control.stage(Stage::Decode);
     let image = decode_png(carrier_bytes)?;
     control.check()?;
+    extract_png_image(
+        &image, password, domain, spatial, cost_model, params, control,
+    )
+}
+
+/// Body of [`extract_png`] for an already-decoded image.
+///
+/// `verify_png` decodes once and reuses the pixels across all three levels
+/// instead of running the full PNG decode three times.
+fn extract_png_image(
+    image: &RawImage,
+    password: Option<&str>,
+    domain: Option<&str>,
+    spatial: &crate::stego::format::PngFormatProfile,
+    cost_model: &dyn PngCostModel,
+    params: &PngParams,
+    control: &Control<'_>,
+) -> Result<Payload<'static>, StrHideError> {
+    params.validate()?;
     let w = image.width as usize;
     let h = image.height as usize;
-    let channel_offset = embed_channel(&image);
+    let channel_offset = embed_channel(image);
 
     // Read the header *before* touching any cost model.
     //
@@ -1691,7 +1710,7 @@ pub fn extract_png(
     // body. That is the whole point of placing the header without a cost map:
     // the model is named inside the feature word, and reading the feature word
     // must not require already knowing the model.
-    let header_layout = header_layout(&image, password, domain, spatial);
+    let header_layout = header_layout(image, password, domain, spatial);
     if header_layout.len() < HEADER_SLOTS {
         return Err(StrHideError::NoHiddenData(
             "Carrier has insufficient capacity for stego header".into(),
@@ -1790,7 +1809,7 @@ pub fn extract_png(
     control.check()?;
     // Body ranking needs costs; the header layout inside this plan is the same
     // cost-free one read above, so the two cannot disagree.
-    let plan = SlotPlan::build(&image, &costs, &effective_params, password, domain, spatial)?;
+    let plan = SlotPlan::build(image, &costs, &effective_params, password, domain, spatial)?;
     debug_assert_eq!(
         plan.permuted.get(..V2_TOTAL_HEADER_SLOTS),
         Some(&header_layout[..V2_TOTAL_HEADER_SLOTS]),
@@ -1833,7 +1852,7 @@ pub fn extract_png(
     )?;
     let (enc_key, perm_seed) = body_keys(spatial.body, &master, salt, domain);
 
-    let mut body_slots = plan.body_slots_upto(&image, fw.class_rule, mode, needed_body_slots);
+    let mut body_slots = plan.body_slots_upto(image, fw.class_rule, mode, needed_body_slots);
     trace(&format!(
         "extract mode={:?} class_rule={} total_len={total_len} needed={needed_body_slots} pool={}",
         mode,
@@ -1906,12 +1925,26 @@ pub fn inspect_png(
         }
     };
     control.check()?;
+    inspect_png_image(&image, password, domain, spatial, control)
+}
+
+/// Header inspection for an already-decoded image.
+///
+/// `verify_png` and `inspect_png` share this so the PNG decode runs once.
+fn inspect_png_image(
+    image: &RawImage,
+    password: Option<&str>,
+    domain: Option<&str>,
+    spatial: &crate::stego::format::PngFormatProfile,
+    control: &Control<'_>,
+) -> Result<StegoHeaderInfo, StrHideError> {
+    control.check()?;
     let media_info = Some(MediaInfo::new(image.width, image.height));
     let mut empty_info = StegoHeaderInfo::empty("PNG");
     empty_info.media_info = media_info;
 
-    let channel_offset = embed_channel(&image);
-    let header_layout = header_layout(&image, password, domain, spatial);
+    let channel_offset = embed_channel(image);
+    let header_layout = header_layout(image, password, domain, spatial);
     if header_layout.len() < V2_TOTAL_HEADER_SLOTS {
         return Ok(empty_info);
     }
@@ -2018,11 +2051,10 @@ pub fn verify_png(
             return Ok(StegoVerifyResult::new("PNG", levels));
         }
     };
-    let _ = image;
     control.check()?;
 
     // Level 2: Stego Header & FeatureWord
-    let header_info = inspect_png(carrier_bytes, password, domain, spatial, control)?;
+    let header_info = inspect_png_image(&image, password, domain, spatial, control)?;
     if !header_info.has_hidden_data {
         levels.push(VerifyLevel::fail(
             2,
@@ -2050,15 +2082,7 @@ pub fn verify_png(
     // Level 3: Payload Decryption & AEAD Authenticity
     let model = crate::stego::options::SpatialAlgorithm::default().model();
     let params = crate::stego::params::PngParams::default();
-    match extract_png(
-        carrier_bytes,
-        password,
-        domain,
-        spatial,
-        &*model,
-        &params,
-        control,
-    ) {
+    match extract_png_image(&image, password, domain, spatial, &*model, &params, control) {
         Ok(payload) => {
             let desc = match payload.name() {
                 Some(name) => format!(
