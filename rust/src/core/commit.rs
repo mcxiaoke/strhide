@@ -257,7 +257,12 @@ pub fn commit_carrier_patches(
 /// is journaled by NTFS and the call is a no-op.
 ///
 /// Errors leave no `*.strhide.tmp` behind (the guard removes it on unwind).
-pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), StrHideError> {
+///
+/// Public because every caller that writes a payload out — CLI `read`, the
+/// library, and the Tauri backend — must land it the same way. A plain
+/// `fs::write` truncates an existing target before the new bytes are durable
+/// (and follows a symlink instead of replacing it).
+pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), StrHideError> {
     use std::io::Write as _;
 
     let tmp_path = temp_path_for(path);

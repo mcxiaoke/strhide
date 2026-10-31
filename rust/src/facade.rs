@@ -184,7 +184,7 @@ impl DualVerify {
 
 /// Options for automatic domain selection extraction.
 #[cfg(all(feature = "structure-base", feature = "content-base"))]
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 pub struct SmartExtractOptions<'a> {
     pub password: Option<&'a str>,
     pub domain: Option<&'a str>,
@@ -193,6 +193,23 @@ pub struct SmartExtractOptions<'a> {
     /// Preferred domain when both domains hold hidden data (defaults to Structure).
     pub prefer: Option<Domain>,
     pub control: Control<'a>,
+    /// Pool the content-domain extractor runs on; `None` uses the global pool.
+    ///
+    /// Without this, a host that deliberately sizes its worker pool (the Tauri
+    /// backend does, to leave a core for the UI) would silently lose that
+    /// control the moment it moved from hand-rolled extraction to this facade.
+    pub pool: Option<std::sync::Arc<rayon::ThreadPool>>,
+}
+
+#[cfg(all(feature = "structure-base", feature = "content-base"))]
+impl PartialEq for SmartExtractOptions<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.password == other.password
+            && self.domain == other.domain
+            && self.limits == other.limits
+            && self.prefer == other.prefer
+            && self.control == other.control
+    }
 }
 
 #[cfg(all(feature = "structure-base", feature = "content-base"))]
@@ -204,6 +221,7 @@ impl std::fmt::Debug for SmartExtractOptions<'_> {
             .field("limits", &self.limits)
             .field("prefer", &self.prefer)
             .field("control", &self.control)
+            .field("pool", &self.pool.is_some())
             .finish()
     }
 }
@@ -579,7 +597,7 @@ impl StrHide {
                     domain: opts.domain,
                     limits: opts.limits.clone(),
                     control: opts.control,
-                    pool: None,
+                    pool: opts.pool.clone(),
                 };
                 let payload = crate::stego::io::extract_carrier_file_payload(
                     carrier,

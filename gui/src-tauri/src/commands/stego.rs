@@ -4,12 +4,11 @@ use std::sync::Arc;
 use tauri::State;
 use tauri::ipc::Channel;
 
-use strhide::core::commit::FileTarget;
+use strhide::core::commit::{FileTarget, write_bytes_atomic};
 use strhide::core::payload::{Payload, PayloadKind};
 use strhide::core::pipeline::check_overwrite;
 use strhide::errors::ErrorDetail;
 use strhide::facade::{Domain, SmartExtractOptions};
-use strhide::formats::sniff::{FileFormat, sniff_file};
 use strhide::stego::io::extract_carrier_file_payload;
 use strhide::stego::options::{
     EmbedOptions, ExtractOptions, JpegAlgorithm, ProbeOptions, SpatialAlgorithm, StegoEmbedResult,
@@ -255,7 +254,7 @@ pub async fn extract_stego_file_cmd(
             let raw_size = payload.data.len() as u64;
 
             if let Some(ref dest) = output_path {
-                std::fs::write(dest, &payload.data)?;
+                write_bytes_atomic(dest, &payload.data)?;
                 Ok(ReadSummary {
                     carrier: path,
                     is_file,
@@ -310,30 +309,20 @@ pub async fn smart_extract_cmd(
                 check_overwrite(dest, overwrite)?;
             }
 
-            let fmt = sniff_file(&path).ok().flatten();
-            let is_annexb = fmt == Some(FileFormat::HevcAnnexB);
-
-            let (payload, source, also_present) = if is_annexb {
-                let ex_opts = ExtractOptions {
-                    password: password.as_deref(),
-                    domain: domain.as_deref(),
-                    limits: strhide::stego::ExtractParams::default(),
-                    control: ctrl,
-                    pool: Some(Arc::clone(&pool)),
-                };
-                let p = extract_carrier_file_payload(&path, &ex_opts, &engine.dialect().stego)?;
-                (p, Domain::Content, None)
-            } else {
-                let smart_opts = SmartExtractOptions {
-                    password: password.as_deref(),
-                    domain: domain.as_deref(),
-                    limits: strhide::stego::ExtractParams::default(),
-                    prefer,
-                    control: ctrl,
-                };
-                let outcome = engine.smart_extract(&path, &smart_opts)?;
-                (outcome.payload, outcome.source, outcome.also_present)
+            // `smart_extract` inspects both domains and already treats Annex-B
+            // HEVC as content-only, so the hand-rolled branch is gone.
+            let smart_opts = SmartExtractOptions {
+                password: password.as_deref(),
+                domain: domain.as_deref(),
+                limits: strhide::stego::ExtractParams::default(),
+                prefer,
+                control: ctrl,
+                pool: Some(Arc::clone(&pool)),
             };
+            let outcome = engine.smart_extract(&path, &smart_opts)?;
+            let payload = outcome.payload;
+            let source = outcome.source;
+            let also_present = outcome.also_present;
 
             let is_file = payload.kind == PayloadKind::File;
             let is_encrypted = password.is_some();
@@ -348,7 +337,7 @@ pub async fn smart_extract_cmd(
             let raw_size = payload.data.len() as u64;
 
             let summary = if let Some(ref dest) = output_path {
-                std::fs::write(dest, &payload.data)?;
+                write_bytes_atomic(dest, &payload.data)?;
                 ReadSummary {
                     carrier: path,
                     is_file,
