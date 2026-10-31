@@ -90,8 +90,8 @@ pub const CAPACITY_AFTER_HELP_ZH: &str =
 
 pub const EMBED_AFTER_HELP_EN: &str = "\
 Content-adaptive steganography embeds data directly into image textures or frequency
-coefficients (HILL for PNG, UERD for JPEG by default; -a switches to suniward or
-juniward), rendering it immune to metadata stripping.
+coefficients (HILL for PNG, UERD for JPEG by default; -a also selects suniward, mipod,
+juniward or jmipod), rendering it immune to metadata stripping.
 Because pixel/coefficient values are subtly modified, this operation cannot be reversed
 to the original carrier bit-for-bit.
 
@@ -107,7 +107,7 @@ Examples:
 
 pub const EMBED_AFTER_HELP_ZH: &str = "\
 内容自适应隐写将数据直接嵌入到图像纹理或频域系数中（默认 PNG 用 HILL、JPEG 用 UERD，
-可用 -a 切换到 suniward / juniward），
+可用 -a 切换到 suniward / mipod / juniward / jmipod），
 可完全免疫容器元数据剥离攻击。
 由于对像素或频域系数值进行了微调，此操作无法 bit-for-bit 还原回原载体文件。
 
@@ -568,8 +568,8 @@ Run `strhide <COMMAND> --help` for the options of one command.",
 
     // ---- Stego tuning options help ----
     HelpStegoAlgorithm:
-        en = "Distortion cost algorithm (auto|hill|suniward|uerd|juniward; default: auto = hill for PNG, uerd for JPEG)",
-        zh = "失真代价评估算法（auto|hill|suniward|uerd|juniward；默认: auto，即 PNG 用 hill、JPEG 用 uerd）";
+        en = "Distortion cost algorithm (auto|hill|suniward|mipod|uerd|juniward|jmipod; default: auto = hill for PNG, uerd for JPEG)",
+        zh = "失真代价评估算法（auto|hill|suniward|mipod|uerd|juniward|jmipod；默认: auto，即 PNG 用 hill、JPEG 用 uerd）";
     HelpStegoNeighborWeight:
         en = "Fine-tune (JPEG UERD): weight applied to 8-neighborhood block energies (default: 0.25)",
         zh = "微调参数（JPEG UERD）：8 邻域块能量权重（默认: 0.25）";

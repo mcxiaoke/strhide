@@ -13,6 +13,8 @@
 
 #[doc(hidden)]
 pub mod coding;
+#[cfg(feature = "content-base")]
+pub(crate) mod cost_calibration;
 pub mod engine;
 #[doc(hidden)]
 pub mod envelope;
@@ -33,6 +35,8 @@ pub mod png;
 #[doc(hidden)]
 pub mod prng;
 pub mod registry;
+#[cfg(feature = "content-base")]
+pub(crate) mod spatial_variance;
 pub mod traits;
 #[cfg(any(feature = "content-png", feature = "content-jpeg"))]
 #[doc(hidden)]
@@ -42,7 +46,7 @@ pub mod wavelet;
 pub use crate::stego::jpeg::registry::get_jpeg_model;
 #[cfg(feature = "content-png")]
 pub use crate::stego::png::registry::{
-    SPATIAL_ALGORITHM_HILL, SPATIAL_ALGORITHM_SUNIWARD, get_spatial_model,
+    SPATIAL_ALGORITHM_HILL, SPATIAL_ALGORITHM_MIPOD, SPATIAL_ALGORITHM_SUNIWARD, get_spatial_model,
     spatial_model_from_wire_id, spatial_name_from_wire_id, spatial_wire_id,
 };
 pub use engine::{StegoEngine, engine_for, supported_formats};

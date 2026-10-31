@@ -52,8 +52,10 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
     auto: c.stego.algoAuto,
     hill: "HILL",
     suniward: "S-UNIWARD",
+    mipod: "MiPOD",
     uerd: "UERD",
     juniward: "J-UNIWARD",
+    jmipod: "J-MiPOD",
   };
 
   const payloadBytes =

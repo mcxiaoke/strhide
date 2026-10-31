@@ -248,8 +248,8 @@ pub(crate) fn stego_tuning(
                 return Ok(StegoTuning::hevc(mode));
             }
             return Err(StrHideError::General(format!(
-                "Unknown algorithm '{name}'. Supported: hill, suniward (PNG), uerd, juniward (JPEG), \
-                 hevc, cabac (HEIF/HEVC), auto"
+                "Unknown algorithm '{name}'. Supported: hill, suniward, mipod (PNG), uerd, juniward, \
+                 jmipod (JPEG), hevc, cabac (HEIF/HEVC), auto"
             )));
         }
         // `auto` with format-level tuning flags must still honour them; only a

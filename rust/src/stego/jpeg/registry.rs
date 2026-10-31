@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::stego::jpeg::cost::{JuniwardCostModel, UerdCostModel};
+use crate::stego::jpeg::cost::{JmipodCostModel, JuniwardCostModel, UerdCostModel};
 use crate::stego::traits::JpegCostModel;
 
 /// Look up a JPEG DCT cost model by algorithm identifier.
@@ -21,6 +21,7 @@ pub fn get_jpeg_model(name: Option<&str>) -> Option<Arc<dyn JpegCostModel>> {
     match name {
         None | Some("auto") | Some("uerd") => Some(Arc::new(UerdCostModel)),
         Some("juniward") => Some(Arc::new(JuniwardCostModel)),
+        Some("jmipod") => Some(Arc::new(JmipodCostModel)),
         _ => None,
     }
 }
@@ -37,6 +38,11 @@ pub fn list() -> Vec<(&'static str, &'static str, &'static str)> {
             "juniward",
             "JPEG (JPG)",
             "J-UNIWARD wavelet-relative distortion (Holub et al., EURASIP JIS 2014)",
+        ),
+        (
+            "jmipod",
+            "JPEG (JPG)",
+            "J-MiPOD statistical DCT detectability model (Cogranne et al., ACM IH&MMSec 2020)",
         ),
     ]
 }

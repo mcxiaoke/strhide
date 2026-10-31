@@ -9,6 +9,8 @@
 //! - `unicode_and_binary`: UTF-8/Unicode and arbitrary binary payloads.
 //! - `profile`: `LocalParams` / `StructureProfile` plumbing and dialect isolation (M1).
 //! - `jpeg_juniward`: J-UNIWARD cost model integration.
+//! - `jpeg_jmipod`: J-MiPOD cost model integration.
+//! - `png_mipod`: MiPOD cost model integration and self-describing carrier.
 //! - `jpeg_polarization`: Cost polarization end-to-end behavior.
 //! - `png_self_describing`: PNG self-describing wire format.
 //! - `reproducible`: Seeded deterministic embedding reproducibility.
@@ -26,6 +28,8 @@ mod cancellation;
 mod compact_meta;
 #[path = "test_lifecycle/facade.rs"]
 mod facade;
+#[path = "test_lifecycle/jpeg_jmipod.rs"]
+mod jpeg_jmipod;
 #[path = "test_lifecycle/jpeg_juniward.rs"]
 mod jpeg_juniward;
 #[path = "test_lifecycle/jpeg_multisegment.rs"]
@@ -34,6 +38,8 @@ mod jpeg_multisegment;
 mod jpeg_polarization;
 #[path = "test_lifecycle/matrix.rs"]
 mod matrix;
+#[path = "test_lifecycle/png_mipod.rs"]
+mod png_mipod;
 #[path = "test_lifecycle/png_self_describing.rs"]
 mod png_self_describing;
 #[path = "test_lifecycle/profile.rs"]

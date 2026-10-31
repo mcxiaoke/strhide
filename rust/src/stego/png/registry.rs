@@ -6,13 +6,15 @@
 
 use std::sync::Arc;
 
-use crate::stego::png::cost::{HillCostModel, SuniwardCostModel};
+use crate::stego::png::cost::{HillCostModel, MipodCostModel, SuniwardCostModel};
 use crate::stego::traits::PngCostModel;
 
 /// Wire id of [`HillCostModel`]. Reserved permanently.
 pub const SPATIAL_ALGORITHM_HILL: u8 = 1;
 /// Wire id of [`SuniwardCostModel`]. Reserved permanently.
 pub const SPATIAL_ALGORITHM_SUNIWARD: u8 = 2;
+/// Wire id of [`MipodCostModel`]. Reserved permanently.
+pub const SPATIAL_ALGORITHM_MIPOD: u8 = 3;
 
 /// Look up a spatial cost model by algorithm identifier.
 /// Default model is "hill" if None or "auto" is requested.
@@ -24,6 +26,7 @@ pub fn get_spatial_model(name: Option<&str>) -> Option<Arc<dyn PngCostModel>> {
     match name {
         None | Some("auto") | Some("hill") => Some(Arc::new(HillCostModel)),
         Some("suniward") => Some(Arc::new(SuniwardCostModel)),
+        Some("mipod") => Some(Arc::new(MipodCostModel)),
         _ => None,
     }
 }
@@ -36,6 +39,7 @@ pub fn spatial_wire_id(name: &str) -> Option<u8> {
     match name {
         "hill" => Some(SPATIAL_ALGORITHM_HILL),
         "suniward" => Some(SPATIAL_ALGORITHM_SUNIWARD),
+        "mipod" => Some(SPATIAL_ALGORITHM_MIPOD),
         _ => None,
     }
 }
@@ -45,6 +49,7 @@ pub fn spatial_name_from_wire_id(id: u8) -> Option<&'static str> {
     match id {
         SPATIAL_ALGORITHM_HILL => Some("hill"),
         SPATIAL_ALGORITHM_SUNIWARD => Some("suniward"),
+        SPATIAL_ALGORITHM_MIPOD => Some("mipod"),
         _ => None,
     }
 }
@@ -71,6 +76,11 @@ pub fn list() -> Vec<(&'static str, &'static str, &'static str)> {
             "suniward",
             "Spatial (PNG)",
             "S-UNIWARD wavelet-relative distortion (Holub et al., EURASIP JIS 2014)",
+        ),
+        (
+            "mipod",
+            "Spatial (PNG)",
+            "MiPOD statistical detectability model (Sedighi et al., IEEE TIFS 2016)",
         ),
     ]
 }

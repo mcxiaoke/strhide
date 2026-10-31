@@ -8,12 +8,15 @@
 //! cargo test local_batch_corpus -- --ignored --nocapture
 //! cargo test local_batch_stego -- --ignored --nocapture
 //! cargo test local_media -- --ignored --nocapture
+//! cargo test local_all_algorithms -- --ignored --nocapture
 //! cargo test local_bench -- --ignored --nocapture
 //! ```
 
 #[path = "common/mod.rs"]
 pub mod common;
 
+#[path = "local/local_algorithm_matrix.rs"]
+pub mod local_algorithm_matrix;
 #[path = "local/local_bench.rs"]
 pub mod local_bench;
 #[path = "local/local_corpus.rs"]

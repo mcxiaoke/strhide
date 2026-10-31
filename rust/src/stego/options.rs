@@ -67,6 +67,8 @@ pub enum SpatialAlgorithm {
     Hill,
     /// S-UNIWARD (Holub et al., EURASIP JIS 2014).
     Suniward,
+    /// MiPOD (Sedighi et al., IEEE TIFS 2016).
+    Mipod,
     /// A caller-supplied model. The engine treats it exactly like a built-in
     /// one, but a carrier written with it can only be read back by a build that
     /// registers the same model under a wire id.
@@ -82,6 +84,7 @@ impl SpatialAlgorithm {
         match name.trim() {
             "auto" | "hill" => Some(SpatialAlgorithm::Hill),
             "suniward" => Some(SpatialAlgorithm::Suniward),
+            "mipod" => Some(SpatialAlgorithm::Mipod),
             _ => None,
         }
     }
@@ -93,6 +96,8 @@ impl SpatialAlgorithm {
                 .expect("the built-in HILL model always resolves"),
             SpatialAlgorithm::Suniward => png_registry::get_spatial_model(Some("suniward"))
                 .expect("the built-in S-UNIWARD model always resolves"),
+            SpatialAlgorithm::Mipod => png_registry::get_spatial_model(Some("mipod"))
+                .expect("the built-in MiPOD model always resolves"),
             SpatialAlgorithm::Custom(model) => Arc::clone(model),
         }
     }
@@ -102,6 +107,7 @@ impl SpatialAlgorithm {
         match self {
             SpatialAlgorithm::Hill => "hill",
             SpatialAlgorithm::Suniward => "suniward",
+            SpatialAlgorithm::Mipod => "mipod",
             SpatialAlgorithm::Custom(model) => model.id(),
         }
     }
@@ -120,6 +126,7 @@ impl PartialEq for SpatialAlgorithm {
         match (self, other) {
             (Self::Hill, Self::Hill) => true,
             (Self::Suniward, Self::Suniward) => true,
+            (Self::Mipod, Self::Mipod) => true,
             (Self::Custom(a), Self::Custom(b)) => Arc::ptr_eq(a, b) || a.id() == b.id(),
             _ => false,
         }
@@ -138,6 +145,8 @@ pub enum JpegAlgorithm {
     Uerd,
     /// J-UNIWARD (Holub et al., EURASIP JIS 2014).
     Juniward,
+    /// J-MiPOD (Cogranne et al., ACM IH&MMSec 2020).
+    Jmipod,
     /// A caller-supplied model.
     Custom(Arc<dyn JpegCostModel>),
 }
@@ -150,6 +159,7 @@ impl JpegAlgorithm {
         match name.trim() {
             "auto" | "uerd" => Some(JpegAlgorithm::Uerd),
             "juniward" => Some(JpegAlgorithm::Juniward),
+            "jmipod" => Some(JpegAlgorithm::Jmipod),
             _ => None,
         }
     }
@@ -161,6 +171,8 @@ impl JpegAlgorithm {
                 .expect("the built-in UERD model always resolves"),
             JpegAlgorithm::Juniward => jpeg_registry::get_jpeg_model(Some("juniward"))
                 .expect("the built-in J-UNIWARD model always resolves"),
+            JpegAlgorithm::Jmipod => jpeg_registry::get_jpeg_model(Some("jmipod"))
+                .expect("the built-in J-MiPOD model always resolves"),
             JpegAlgorithm::Custom(model) => Arc::clone(model),
         }
     }
@@ -170,6 +182,7 @@ impl JpegAlgorithm {
         match self {
             JpegAlgorithm::Uerd => "uerd",
             JpegAlgorithm::Juniward => "juniward",
+            JpegAlgorithm::Jmipod => "jmipod",
             JpegAlgorithm::Custom(model) => model.id(),
         }
     }
@@ -188,6 +201,7 @@ impl PartialEq for JpegAlgorithm {
         match (self, other) {
             (Self::Uerd, Self::Uerd) => true,
             (Self::Juniward, Self::Juniward) => true,
+            (Self::Jmipod, Self::Jmipod) => true,
             (Self::Custom(a), Self::Custom(b)) => Arc::ptr_eq(a, b) || a.id() == b.id(),
             _ => false,
         }
@@ -1378,12 +1392,12 @@ mod tests {
 
     #[test]
     fn algorithm_names_round_trip_through_the_public_parsers() {
-        for name in ["hill", "suniward"] {
+        for name in ["hill", "suniward", "mipod"] {
             let model = SpatialAlgorithm::from_name(name).expect(name);
             assert_eq!(model.id(), name);
             assert_eq!(model.model().id(), name);
         }
-        for name in ["uerd", "juniward"] {
+        for name in ["uerd", "juniward", "jmipod"] {
             let model = JpegAlgorithm::from_name(name).expect(name);
             assert_eq!(model.id(), name);
             assert_eq!(model.model().id(), name);
