@@ -633,23 +633,33 @@ pub(crate) fn build_hevc_capacity_info(
         total_slots
     };
 
-    let target_bits = if picture_count > 1 {
-        let budget = safety_level.video_budget();
-        let non_ref_slots = (pool.band_slots[0] as f64 * budget.non_ref_fraction).floor() as usize;
-        let ref_slots = budget
-            .ref_flips_per_picture
-            .saturating_mul(pool.band_pictures[1])
-            .saturating_mul(SLOTS_PER_REF_FLIP)
-            .min(pool.band_slots[1]);
-        trellis.message_bits(non_ref_slots.saturating_add(ref_slots))
-    } else {
-        let bpp_bits = (total_elements as f64 * safety_level.bpp_limit()).floor() as usize;
-        let ratio_bits = (total_slots as f64 / safety_level.target_ratio()).floor() as usize;
-        bpp_bits.min(ratio_bits)
+    // Usable slots the tier's drift ladder allows, for one tier. Written once so
+    // the probe's recommendation and the `[paranoid, high, balanced]` table the
+    // GUI reads cannot drift apart.
+    let target_bits_for = |level: SafetyLevel| -> usize {
+        if picture_count > 1 {
+            let budget = level.video_budget();
+            let non_ref_slots =
+                (pool.band_slots[0] as f64 * budget.non_ref_fraction).floor() as usize;
+            let ref_slots = budget
+                .ref_flips_per_picture
+                .saturating_mul(pool.band_pictures[1])
+                .saturating_mul(SLOTS_PER_REF_FLIP)
+                .min(pool.band_slots[1]);
+            trellis.message_bits(non_ref_slots.saturating_add(ref_slots))
+        } else {
+            let bpp_bits = (total_elements as f64 * level.bpp_limit()).floor() as usize;
+            let ratio_bits = (total_slots as f64 / level.target_ratio()).floor() as usize;
+            bpp_bits.min(ratio_bits)
+        }
     };
-    let recommended_max_bytes = (target_bits / 8)
-        .saturating_sub(fmt.header_bytes + 1)
-        .min(max_raw_payload_bytes);
+    let recommended_for = |level: SafetyLevel| -> usize {
+        (target_bits_for(level) / 8)
+            .saturating_sub(fmt.header_bytes + 1)
+            .min(max_raw_payload_bytes)
+    };
+    let recommended_max_bytes = recommended_for(safety_level);
+    let tier_limits = SafetyLevel::ALL.map(recommended_for);
 
     let media_info = if width > 0 && height > 0 {
         let base = MediaInfo::new(width, height);
@@ -687,6 +697,7 @@ pub(crate) fn build_hevc_capacity_info(
         max_raw_payload_bytes,
         max_raw_is_grouped: false,
         recommended_max_bytes,
+        tier_limits,
         estimated_change_rate: 0.25,
         safety_level: safety_level.as_str().into(),
         safety_bpp_limit: safety_level.bpp_limit(),

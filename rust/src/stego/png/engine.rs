@@ -389,6 +389,23 @@ const MAX_DEFLATE_WORKERS: usize = 8;
 /// worst case bounded.
 const MAX_PNG_PIXELS: usize = 64 * 1024 * 1024;
 
+/// Payload ceiling the safety tier recommends for a spatial carrier.
+///
+/// Shared by the embed-time enforcement and the capacity probe, so the number
+/// the probe advertises is exactly the number the writer accepts. `ratio_slots`
+/// is deliberately the single-channel (green) pool: the tier is expressed in
+/// bits per *pixel*, and a three-channel pool would loosen the ratio bound
+/// without any calibration for the extra channels.
+fn recommended_bytes_for(
+    total_pixels: usize,
+    ratio_slots: usize,
+    level: crate::params::SafetyLevel,
+) -> usize {
+    let bpp_bits = (total_pixels as f64 * level.bpp_limit()).floor() as usize;
+    let ratio_bits = (ratio_slots as f64 / level.target_ratio()).floor() as usize;
+    (bpp_bits.min(ratio_bits) / 8).saturating_sub(crate::stego::envelope::BODY_OVERHEAD)
+}
+
 /// Minimum scanlines payload (in bytes) to trigger multi-threaded parallel Deflate.
 /// Below 2 MB, the single-thread path avoids thread pool dispatch overhead.
 const MIN_PARALLEL_SCANLINE_BYTES: usize = 2 * 1024 * 1024;
@@ -1243,14 +1260,7 @@ pub fn embed_png_with_stats<'a>(
 
     // Safety enforcement policy check
     if safety.is_enforced() {
-        let bpp_limit = safety.level.bpp_limit();
-        let bpp_bits = (total_pixels as f64 * bpp_limit).floor() as usize;
-        // Deliberately the single-channel pool: the tier is expressed in bits
-        // per *pixel*, and a three-channel pool would loosen the ratio bound
-        // without any calibration for the extra channels.
-        let ratio_bits = (pool_green as f64 / safety.level.target_ratio()).floor() as usize;
-        let recommended_max_bytes =
-            (bpp_bits.min(ratio_bits) / 8).saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
+        let recommended_max_bytes = recommended_bytes_for(total_pixels, pool_green, safety.level);
 
         if payload.len() > recommended_max_bytes {
             return Err(StrHideError::SafetyThreshold {
@@ -2061,11 +2071,9 @@ pub fn probe_png_capacity(
         max_ciphertext_bytes.saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
 
     // Recommended capacity bounded by safety tier bpp budget and candidate slot ratio r
-    let bpp_bits = (total_pixels as f64 * safety_level.bpp_limit()).floor() as usize;
-    let ratio_bits = (ratio_slots as f64 / safety_level.target_ratio()).floor() as usize;
-    let target_bits = bpp_bits.min(ratio_bits);
-    let recommended_max_bytes =
-        (target_bits / 8).saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
+    let recommended_max_bytes = recommended_bytes_for(total_pixels, ratio_slots, safety_level);
+    let tier_limits = crate::params::SafetyLevel::ALL
+        .map(|level| recommended_bytes_for(total_pixels, ratio_slots, level));
 
     Ok(StegoCapacityInfo {
         format: "PNG".into(),
@@ -2077,6 +2085,7 @@ pub fn probe_png_capacity(
         // always the geometric one.
         max_raw_is_grouped: false,
         recommended_max_bytes,
+        tier_limits,
         estimated_change_rate: match params.codec {
             StegoCodec::Hamming => crate::stego::coding::expected_change_rate(hamming_k),
             StegoCodec::Stc if params.stc_u > 0 => {
@@ -2901,6 +2910,47 @@ mod tests {
         .expect("probe");
         assert!(cap.recommended_max_bytes > 0);
         assert!(cap.recommended_max_bytes <= cap.max_raw_payload_bytes / 2);
+    }
+
+    /// The tier table is what hosts read instead of re-deriving the budget, so
+    /// it has to agree with `recommended_max_bytes` for the probed tier and be
+    /// ordered strictest-to-loosest. The Tauri capacity card used to keep its
+    /// own copy of these formulas and drifted (it matched `info.format` against
+    /// "hevc"/"mp4", which no engine ever reports).
+    #[test]
+    fn tier_limits_agree_with_probe_and_are_monotonic() {
+        use crate::stego::SafetyLevel;
+
+        let (w, h) = (128usize, 128usize);
+        let pixels = row_correlated_pixels(w, h);
+        let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
+        let params = PngParams::default();
+
+        for level in SafetyLevel::ALL {
+            let cap = probe_png_capacity(
+                &png,
+                &HillCostModel,
+                &params,
+                level,
+                Some("pw"),
+                None,
+                &crate::stego::format::OFFICIAL_PNG_FORMAT,
+                &Control::none(),
+            )
+            .expect("probe");
+
+            assert_eq!(
+                cap.tier_limit(level),
+                cap.recommended_max_bytes,
+                "probed tier {level:?} must match its slot in the table"
+            );
+            assert!(
+                cap.tier_limit(SafetyLevel::Paranoid) <= cap.tier_limit(SafetyLevel::High)
+                    && cap.tier_limit(SafetyLevel::High) <= cap.tier_limit(SafetyLevel::Balanced),
+                "tiers must widen from paranoid to balanced: {:?}",
+                cap.tier_limits
+            );
+        }
     }
 
     /// The probe's answer must be reachable by the embedder: they have to agree

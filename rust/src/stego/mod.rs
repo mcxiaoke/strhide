@@ -330,6 +330,18 @@ pub struct StegoCapacityInfo {
     #[serde(default)]
     pub max_raw_is_grouped: bool,
     pub recommended_max_bytes: usize,
+    /// What `recommended_max_bytes` would be at every tier, indexed by
+    /// [`crate::params::SafetyLevel::tier_index`] (paranoid, high, balanced).
+    ///
+    /// The budget formulas live in each engine and are *not* interchangeable —
+    /// video carriers spend a drift ladder per reference picture, the spatial
+    /// codec bounds itself by the single-channel pool, and JPEG pays
+    /// `BODY_OVERHEAD` on a grouped grid. A host that needs all three tiers at
+    /// once (the Tauri capacity card) must read them from here instead of
+    /// re-deriving them; the copy it used to keep drifted into comparing
+    /// `info.format` against `"hevc"`, a string no engine ever produces.
+    #[serde(default)]
+    pub tier_limits: [usize; 3],
     /// Expected modified slots per embedded payload bit under the matrix
     /// coding in use (0.2917 for the default Hamming k=3, 0.5 for plain LSB
     /// replacement). Tail bits embedded 1:1 push the true rate slightly
@@ -351,6 +363,11 @@ pub struct StegoCapacityInfo {
 }
 
 impl StegoCapacityInfo {
+    /// Recommended payload ceiling at `level`, from the engine-computed tier table.
+    pub fn tier_limit(&self, level: crate::params::SafetyLevel) -> usize {
+        self.tier_limits[level.tier_index()]
+    }
+
     /// Whether `payload_len` bytes fit inside the safety-tier recommendation.
     pub fn fits_recommended(&self, payload_len: usize) -> bool {
         payload_len <= self.recommended_max_bytes

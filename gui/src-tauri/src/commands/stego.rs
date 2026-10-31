@@ -105,35 +105,14 @@ pub async fn probe_stego_capacity_cmd(
 
             let info = engine.stego().probe_file(&path, &probe_opts)?;
 
-            // 计算该载体在 Paranoid、High、Balanced 三个档位下的精确上限 (bytes)
-            let (paranoid_max_bytes, high_max_bytes, balanced_max_bytes) =
-                if info.format.eq_ignore_ascii_case("hevc") || info.format.eq_ignore_ascii_case("mp4") {
-                    // 视频介质：基于 0.1 / 0.2 / 0.4 Video Budget
-                    let base_high = match safety_level {
-                        SafetyLevel::High => info.recommended_max_bytes,
-                        SafetyLevel::Paranoid => info.recommended_max_bytes * 2,
-                        SafetyLevel::Balanced => info.recommended_max_bytes / 2,
-                    };
-                    (base_high / 2, base_high, base_high.saturating_mul(2).min(info.max_raw_payload_bytes))
-                } else {
-                    // 图像介质：基于 0.06 / 0.10 / 0.15 bpp 限制与目标槽位比
-                    let pixels = info.total_elements;
-                    let ratio_slots = if info.format.eq_ignore_ascii_case("png") {
-                        (info.available_slots / 3).max(1)
-                    } else {
-                        info.available_slots.max(1)
-                    };
-                    let calc = |bpp: f64, ratio: f64| -> usize {
-                        let bpp_bits = (pixels as f64 * bpp).floor() as usize;
-                        let ratio_bits = (ratio_slots as f64 / ratio).floor() as usize;
-                        (bpp_bits.min(ratio_bits) / 8).saturating_sub(28).min(info.max_raw_payload_bytes)
-                    };
-                    (
-                        calc(0.06, 11.5),
-                        calc(0.10, 6.9),
-                        calc(0.15, 4.6),
-                    )
-                };
+            // The per-tier ceilings come from the engine that owns the budget
+            // formula. Deriving them here used to compare `info.format`
+            // against "hevc"/"mp4", strings no engine produces ("HEIF/HEVC",
+            // "HEVC-AnnexB", "MP4/HEVC"), so every HEVC carrier was measured
+            // with the image formula and the video tiers were never applied.
+            let paranoid_max_bytes = info.tier_limit(SafetyLevel::Paranoid);
+            let high_max_bytes = info.tier_limit(SafetyLevel::High);
+            let balanced_max_bytes = info.tier_limit(SafetyLevel::Balanced);
 
             Ok(StegoCapacityFullDto {
                 info,

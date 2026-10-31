@@ -258,6 +258,28 @@ impl std::fmt::Display for SafetyLevel {
 }
 
 impl SafetyLevel {
+    /// Every tier, in the index order [`Self::tier_index`] uses (strictest
+    /// first: paranoid, high, balanced).
+    ///
+    /// Callers that must report a capacity for *all* tiers at once — the Tauri
+    /// backend's capacity card is the reason this exists — should iterate this
+    /// instead of re-deriving the budget formulas, which is how the GUI ended up
+    /// with a stale copy of them.
+    pub const ALL: [SafetyLevel; 3] = [
+        SafetyLevel::Paranoid,
+        SafetyLevel::High,
+        SafetyLevel::Balanced,
+    ];
+
+    /// Position of this tier inside [`Self::ALL`] / a `[usize; 3]` tier table.
+    pub fn tier_index(self) -> usize {
+        match self {
+            SafetyLevel::Paranoid => 0,
+            SafetyLevel::High => 1,
+            SafetyLevel::Balanced => 2,
+        }
+    }
+
     /// Maximum bits per pixel (bpp) allowed under this safety level.
     pub fn bpp_limit(self) -> f64 {
         match self {

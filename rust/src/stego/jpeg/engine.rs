@@ -1086,14 +1086,26 @@ fn rollback(coeffs: &mut JpegCoefficients, applied: &[(u32, i8)], fmt: &JpegForm
 }
 
 /// Payload ceiling for the enforced safety tier.
+/// Payload ceiling the safety tier recommends for this coefficient grid.
+///
+/// The single source of truth for both the embed-time enforcement and the
+/// capacity probe; they used to spell the same two lines out separately.
+fn recommended_bytes(
+    total_coeffs: usize,
+    body_slots: usize,
+    level: crate::params::SafetyLevel,
+) -> usize {
+    let bpp_bits = (total_coeffs as f64 * level.bpp_limit()).floor() as usize;
+    let ratio_bits = (body_slots as f64 / level.target_ratio()).floor() as usize;
+    (bpp_bits.min(ratio_bits) / 8).saturating_sub(BODY_OVERHEAD)
+}
+
 fn enforced_payload_limit(
     total_coeffs: usize,
     body_slots: usize,
     safety: crate::stego::params::SafetyPolicy,
 ) -> usize {
-    let bpp_bits = (total_coeffs as f64 * safety.level.bpp_limit()).floor() as usize;
-    let ratio_bits = (body_slots as f64 / safety.level.target_ratio()).floor() as usize;
-    (bpp_bits.min(ratio_bits) / 8).saturating_sub(BODY_OVERHEAD)
+    recommended_bytes(total_coeffs, body_slots, safety.level)
 }
 
 /// Extract a payload from a V3 JPEG carrier.
@@ -1593,9 +1605,9 @@ pub fn probe_jpeg_capacity(
     let total_coeffs = block_count * 64;
     let effective_budget = params.effective_slot_budget(body_slots);
 
-    let bpp_bits = (total_coeffs as f64 * safety_level.bpp_limit()).floor() as usize;
-    let ratio_bits = (body_slots as f64 / safety_level.target_ratio()).floor() as usize;
-    let recommended_max_bytes = (bpp_bits.min(ratio_bits) / 8).saturating_sub(BODY_OVERHEAD);
+    let recommended_max_bytes = recommended_bytes(total_coeffs, body_slots, safety_level);
+    let tier_limits = crate::params::SafetyLevel::ALL
+        .map(|level| recommended_bytes(total_coeffs, body_slots, level));
 
     // Report the change rate of the group size the recommended payload would
     // actually use, which is what the user sees if they follow the advice.
@@ -1618,6 +1630,7 @@ pub fn probe_jpeg_capacity(
         max_raw_payload_bytes,
         max_raw_is_grouped,
         recommended_max_bytes,
+        tier_limits,
         estimated_change_rate: crate::stego::coding::expected_stc_change_rate(u),
         safety_level: safety_level.as_str().into(),
         safety_bpp_limit: safety_level.bpp_limit(),
