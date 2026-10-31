@@ -149,6 +149,7 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
     let mut chunks: Vec<PngChunk> = Vec::new();
     let mut idat_sizes: Vec<usize> = Vec::new();
     let mut tail: Vec<u8> = Vec::new();
+    let mut saw_iend = false;
 
     while pos + 8 <= data.len() {
         let len =
@@ -224,6 +225,7 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
                 if after < data.len() {
                     tail = data[after..].to_vec();
                 }
+                saw_iend = true;
                 break;
             }
             _ => {
@@ -236,6 +238,17 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
             }
         }
         pos = body_end + 4; // Skip CRC
+    }
+
+    if !saw_iend {
+        // Re-encoding always writes a fresh IEND, so a carrier without one
+        // cannot be reproduced byte-for-byte. Worse, the old parser left `tail`
+        // empty here and silently dropped every byte it could not read as a
+        // chunk (review R3 P2-11). Refusing is the only honest answer for a
+        // tool that promises format preservation.
+        return Err(StrHideError::CorruptedData(
+            "PNG is missing its IEND chunk; re-encoding it could not be lossless. Repair the file, or use 'strhide write' for structural hiding".into(),
+        ));
     }
 
     if bit_depth != 8 || width == 0 || height == 0 || idat.is_empty() {

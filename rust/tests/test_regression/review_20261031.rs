@@ -85,3 +85,62 @@ fn cancelled_writer_fails_instead_of_spinning() {
         Err(_) => panic!("write_all did not return: the cancel marker spins"),
     }
 }
+
+/// Deleting the last 12 bytes of a PNG and appending a payload used to produce
+/// a completely clean scan: the chunk walk never reached IEND, the whole-file
+/// branch said nothing, the entropy detector exempts PNG, and the metric still
+/// claimed "0 bytes / clean termination at IEND" (review R3 P1-2).
+#[cfg(feature = "analysis")]
+#[test]
+fn scan_flags_a_png_without_iend() {
+    let mut data = crate::common::make_png();
+    assert!(data.ends_with(b"IEND\xaeB`\x82"));
+    data.truncate(data.len() - 12);
+    data.extend_from_slice(b"\xff\xff\xff\x7fappended-payload");
+
+    let report = strhide::analysis::scan_bytes(&data, "noiend.png");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.detector == "png:trailing-data"),
+        "a PNG whose terminator is gone must produce a finding"
+    );
+    assert_ne!(report.verdict, "clean", "verdict: {}", report.verdict);
+
+    let metric = report
+        .detectors
+        .iter()
+        .find(|d| d.name == "png:trailing-data")
+        .expect("trailing-data metric must be reported");
+    assert_eq!(metric.status, "ALERT");
+    assert!(
+        !metric.detail.contains("clean termination"),
+        "detail still claims a clean IEND: {}",
+        metric.detail
+    );
+}
+
+/// A carrier without IEND cannot be re-encoded byte-for-byte, so the content
+/// domain refuses it instead of silently dropping everything it could not read
+/// as a chunk (review R3 P2-11).
+#[cfg(feature = "cli")]
+#[test]
+fn content_domain_refuses_a_png_without_iend() {
+    let dir = crate::common::scratch("r3_noiend_capacity");
+    let carrier = dir.join("noiend.png");
+    let mut data = crate::common::make_png();
+    data.truncate(data.len() - 12);
+    std::fs::write(&carrier, &data).unwrap();
+
+    let out = crate::common::base_cmd()
+        .args(["capacity", carrier.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a PNG without IEND must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("IEND"),
+        "the error must name the missing chunk, stderr: {stderr}"
+    );
+}

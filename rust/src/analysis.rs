@@ -349,7 +349,7 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
     match format {
         Some(FileFormat::Png) => {
             let before_cnt = findings.len();
-            track_png_structure(view, &mut findings);
+            let terminated = track_png_structure(view, &mut findings);
             let has_trailing = findings[before_cnt..]
                 .iter()
                 .any(|f| f.detector == "png:trailing-data");
@@ -385,13 +385,17 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
                 } else {
                     "PASS".into()
                 },
-                metric: if has_trailing {
+                metric: if !terminated {
+                    "no terminator".into()
+                } else if has_trailing {
                     "trailing bytes present".into()
                 } else {
                     "0 bytes".into()
                 },
                 threshold: Some("0 bytes".into()),
-                detail: if has_trailing {
+                detail: if !terminated {
+                    "no IEND chunk: the terminator is missing or was replaced".into()
+                } else if has_trailing {
                     "overlay data after IEND chunk".into()
                 } else {
                     "clean termination at IEND".into()
@@ -703,46 +707,70 @@ fn walk_png_chunks(data: &[u8]) -> PngWalk {
     walk
 }
 
-fn track_png_structure(view: &ScanView, out: &mut Vec<Finding>) {
+/// Structural checks for a PNG, returning whether the chunk stream reached
+/// `IEND`.
+///
+/// The return value drives the `png:trailing-data` metric: with no terminator
+/// the metric cannot claim "0 bytes / clean termination at IEND".
+fn track_png_structure(view: &ScanView, out: &mut Vec<Finding>) -> bool {
     let walk = walk_png_chunks(view.prefix);
-    match walk.iend_end {
+    let terminated = match walk.iend_end {
         // The whole chunk stream was inside the bytes we have.
-        Some(end) => report_trailing(view, end, "png:trailing-data", "IEND", out),
-        None => {
-            let Some((tail_offset, tail)) = view.tail else {
-                // Whole file without a terminating IEND: a truncated PNG. Not
-                // evidence of hidden data, so say nothing (as before).
-                walk.emit(out);
-                return;
-            };
-            match tail
-                .windows(PNG_IEND_FULL.len())
-                .rposition(|w| w == PNG_IEND_FULL)
-            {
-                Some(idx) => {
-                    let end = tail_offset + idx as u64 + PNG_IEND_FULL.len() as u64;
-                    report_trailing(view, end, "png:trailing-data", "IEND", out);
-                }
-                None => {
-                    // IEND is a fixed 12-byte pattern with a fixed CRC, so
-                    // "not in the last 64 KiB" means at least that much data
-                    // follows the chunk stream: the container does not end
-                    // where a PNG ends it.
-                    out.push(Finding {
-                        detector: "png:trailing-data".into(),
-                        severity: Severity::Suspicious,
-                        detail: format!(
-                            "no IEND chunk in the last {} bytes; at least {} bytes follow the chunk stream (tail entropy {:.2} bits/byte)",
-                            STRUCT_TAIL_WINDOW,
-                            view.bytes_after(tail_offset),
-                            view.trailing_entropy(tail_offset)
-                        ),
-                    });
+        Some(end) => {
+            report_trailing(view, end, "png:trailing-data", "IEND", out);
+            true
+        }
+        None => match view.tail {
+            None => {
+                // Whole file, and the walk never reached IEND. A conforming
+                // PNG always ends with it, so this is either a truncated file
+                // or an IEND that was removed and replaced with other bytes.
+                // Staying silent let anyone delete the last 12 bytes and append
+                // a payload with zero findings (review R3 P1-2).
+                out.push(Finding {
+                    detector: "png:trailing-data".into(),
+                    severity: Severity::Suspicious,
+                    detail: format!(
+                        "no IEND chunk anywhere in the {}-byte file: the chunk stream is \
+                         truncated or the terminator was replaced by other data",
+                        view.file_size
+                    ),
+                });
+                false
+            }
+            Some((tail_offset, tail)) => {
+                match tail
+                    .windows(PNG_IEND_FULL.len())
+                    .rposition(|w| w == PNG_IEND_FULL)
+                {
+                    Some(idx) => {
+                        let end = tail_offset + idx as u64 + PNG_IEND_FULL.len() as u64;
+                        report_trailing(view, end, "png:trailing-data", "IEND", out);
+                        true
+                    }
+                    None => {
+                        // IEND is a fixed 12-byte pattern with a fixed CRC, so
+                        // "not in the last 64 KiB" means at least that much data
+                        // follows the chunk stream: the container does not end
+                        // where a PNG ends it.
+                        out.push(Finding {
+                            detector: "png:trailing-data".into(),
+                            severity: Severity::Suspicious,
+                            detail: format!(
+                                "no IEND chunk in the last {} bytes; at least {} bytes follow the chunk stream (tail entropy {:.2} bits/byte)",
+                                STRUCT_TAIL_WINDOW,
+                                view.bytes_after(tail_offset),
+                                view.trailing_entropy(tail_offset)
+                            ),
+                        });
+                        false
+                    }
                 }
             }
-        }
-    }
+        },
+    };
     walk.emit(out);
+    terminated
 }
 
 /// Result of walking as much of a JPEG marker stream as the available bytes
