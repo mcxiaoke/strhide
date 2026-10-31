@@ -288,7 +288,12 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
         // Walking a decoy used to fall out of the loop at the first bad magic
         // and then report "no signature", which let a crafted trailing EOCD
         // hide `META-INF/*.SF` from this check entirely (review R2 P0-4).
-        if &cd_buf[0..4] != b"PK\x01\x02" {
+        //
+        // `starts_with`, not `&cd_buf[0..4]`: `cd_size` is untrusted and only
+        // "not zero" is filtered above, so a 1-to-3-byte central directory made
+        // this slice panic (review R3 P0-1). With `panic = "abort"` in release
+        // that killed the process before it had written anything.
+        if !cd_buf.starts_with(b"PK\x01\x02") {
             continue;
         }
         let mut offset = 0usize;

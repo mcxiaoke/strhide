@@ -284,7 +284,15 @@ fn read_one(
         // terminals only) and retry once.
         Err(e @ StrHideError::PasswordWithHint { .. }) if password.is_none() => {
             if !quiet && let Some(hint) = e.hint() {
-                println!("{}", t!(Msg::InfoPasswordHint, hint = hint));
+                // `--stdout` means the payload owns stdout, so the hint goes to
+                // stderr there; every other mode keeps the historical stdout
+                // placement (review R3 P1-8).
+                let line = t!(Msg::InfoPasswordHint, hint = hint);
+                if args.stdout {
+                    eprintln!("{line}");
+                } else {
+                    println!("{line}");
+                }
             }
             if !(std::io::IsTerminal::is_terminal(&std::io::stdin())
                 && std::io::IsTerminal::is_terminal(&std::io::stdout()))

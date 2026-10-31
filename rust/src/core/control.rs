@@ -286,10 +286,12 @@ impl<'a, 'c, W: Write + ?Sized> ProgressWriter<'a, 'c, W> {
 impl<W: Write + ?Sized> Write for ProgressWriter<'_, '_, W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.control.is_cancelled() {
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "strhide: cancelled",
-            ));
+            // Not `ErrorKind::Interrupted`: `Write::write_all` (used by every
+            // `copy_exact`/`copy_stream` in the adapters) retries that kind
+            // unconditionally with a bare `continue`, so a cancelled writer
+            // that keeps answering `Interrupted` spins forever at 100% CPU and
+            // `map_io_cancel` never sees an error (review R3 P1-5).
+            return Err(io::Error::other("strhide: cancelled"));
         }
         let n = self.inner.write(buf)?;
         self.done += n as u64;
@@ -321,11 +323,11 @@ impl<W: Write + Seek + ?Sized> Seek for ProgressWriter<'_, '_, W> {
 /// Convert an interrupted I/O error into StrHideError::Cancelled if cancelled.
 pub fn map_io_cancel(control: &Control<'_>, err: StrHideError) -> StrHideError {
     match err {
-        StrHideError::Io(ref io_err)
-            if io_err.kind() == io::ErrorKind::Interrupted && control.is_cancelled() =>
-        {
-            StrHideError::Cancelled
-        }
+        // Any I/O failure while the token is cancelled is the cancellation
+        // showing through, whatever `ErrorKind` the writer chose. Keying on
+        // `Interrupted` alone silently dropped the mapping once the cancel
+        // marker changed kind (review R3 P1-5).
+        StrHideError::Io(_) if control.is_cancelled() => StrHideError::Cancelled,
         other => other,
     }
 }

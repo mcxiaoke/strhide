@@ -739,10 +739,12 @@ fn test_progress_writer_and_cancellation() {
     let mut dest = Vec::new();
     let mut pw = ProgressWriter::new(&mut dest, control, Stage::Write, 100);
 
-    // Cancel before write
+    // Cancel before write. The marker must not be `Interrupted`: `write_all`
+    // retries that kind unconditionally, so answering it here is a busy loop
+    // rather than a cancellation (review R3 P1-5).
     cancel.cancel();
     let err = pw.write(b"hello world").expect_err("should be cancelled");
-    assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    assert_ne!(err.kind(), std::io::ErrorKind::Interrupted);
 
     let strhide_err = StrHideError::Io(err);
     let mapped = map_io_cancel(&control, strhide_err);

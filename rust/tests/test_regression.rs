@@ -7,6 +7,7 @@
 //! - `review_20261019`: findings lockdown from comprehensive code reviews.
 //! - `review_20261025`: findings lockdown from the structure-domain deep review.
 //! - `review_20261030`: second-round review (box-size overflow, decoy EOCD, patch spans).
+//! - `review_20261031`: third-round review (short CD slice panic, cancel spin).
 //! - `real_samples`: integration checks against real-world media and executable files.
 
 #[path = "common/mod.rs"]
@@ -26,3 +27,5 @@ mod review_20261019;
 mod review_20261025;
 #[path = "test_regression/review_20261030.rs"]
 mod review_20261030;
+#[path = "test_regression/review_20261031.rs"]
+mod review_20261031;

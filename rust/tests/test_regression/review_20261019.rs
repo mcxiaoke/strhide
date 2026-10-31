@@ -242,9 +242,16 @@ fn cli_password_hint_with_apostrophe_is_shown_verbatim() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&read.stdout);
+    let stderr = String::from_utf8_lossy(&read.stderr);
+    // `--stdout` reserves stdout for the payload, so the hint (apostrophe
+    // intact) belongs on stderr (review R3 P1-8).
     assert!(
-        stdout.contains("Password hint: Bob's usual one"),
-        "stdout: {stdout}"
+        stderr.contains("Password hint: Bob's usual one"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("Password hint"),
+        "stdout must stay payload-only, stdout: {stdout}"
     );
 }
 

@@ -615,13 +615,20 @@ fn config_hint_key_applies_on_write() {
         stdout(&write)
     );
 
-    // Reading without any password source surfaces the hint on stdout (the CLI
-    // prints "[INFO] Password hint: ..." before failing on the missing TTY).
+    // Reading without any password source surfaces the hint. With `--stdout`
+    // the payload owns stdout, so the hint must go to stderr instead: a banner
+    // or hint on stdout would prepend itself to the piped payload (review R3
+    // P1-8).
     let read = run(&dir, &["read", "c.png", "--stdout"]);
     assert_eq!(code(&read), 1);
     assert!(
-        stdout(&read).contains("[INFO] Password hint: 配置里的提示 3班1975"),
-        "hint must be surfaced to stdout, stdout: {}",
+        stderr(&read).contains("[INFO] Password hint: 配置里的提示 3班1975"),
+        "hint must be surfaced to stderr under --stdout, stderr: {}",
+        stderr(&read)
+    );
+    assert!(
+        !stdout(&read).contains("Password hint"),
+        "stdout must stay payload-only under --stdout, stdout: {}",
         stdout(&read)
     );
     assert!(
