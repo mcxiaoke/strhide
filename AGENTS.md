@@ -4,6 +4,7 @@
 `strhide` 是一个**智能、格式保持、无损的数据隐藏工具**：在普通文件中隐藏文本或文件，不改变格式、外观或功能，并能之后**还原**原始文件。
 
 - `rust/`：Rust实现，编译为单一静态二进制，开发和维护中。
+- `gui/`：基于 Tauri 2 + React + TypeScript 的桌面客户端（`StrHideStudio`），开发和维护中。
 - `python/` 目录已冻结，不再改动，不要新增和修改任何代码。
 - **上游依赖源码 (Vendor)**：本地存放在 `F:\Develop\github\strhide-vendor\`（包括 `rusty_h265`, `oxideav-h265`, `re_mp4`, `rust_h265` 等）。修改上游库代码时在此目录下进行。
 
@@ -26,6 +27,20 @@ cargo test local_ -- --ignored --all-features # 单独运行本地批量测试�
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings   # 提交前格式化并修复所有 lint
 ```
 
+### 桌面端开发与测试流程：`gui/`
+
+如果改动了 GUI 代码，**必须确保 GUI 的代码编译没有任何错误，并且 GUI 这边的测试全部通过**！提交代码前确保以下流程全部通过：
+
+```bash
+cd gui
+pnpm build                                     # 前端 TypeScript 类型检查与 Vite 打包，确保无编译错误
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings # 后端 Rust 代码编译与静态检查无 warning/error
+pnpm test:unit                                 # 核心 IPC 命令与参数组合单元测试（13 个用例）
+pnpm test:cross                                # GUI 与 CLI 双向交叉验证集成测试（5 个用例）
+pnpm test:e2e                                  # UI 交互与对比度测试（23 个用例）
+pnpm test:e2e:real                             # 真实进程与真实数据端到端测试（4 个用例，依赖 StrHideStudio.exe 产物）
+```
+
 ### 字节级基线（架构重构期间必跑）
 
 ```bash
@@ -44,6 +59,7 @@ python scripts/baseline_hash.py --check   # 与 temp/baseline/baseline.json 逐�
 
 ### 通用约定
 
+- 通用约定：改动 GUI 代码后，必须确保前后端编译无任何错误，且 GUI 侧的单元测试、交叉验证测试与 E2E 测试全绿通过。
 - 如果要用python，使用这个 `C:\Home\Develop\venv` 。
 - 改动代码前先核对影响面，不因修复旧问题引入新问题。
 - 不自发 `commit`/`push`，除非明确要求。
