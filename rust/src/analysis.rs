@@ -1402,7 +1402,7 @@ fn ws_analysis(pixels: &[u8], width: u32, channels: usize) -> f64 {
         return 0.0;
     }
 
-    let eval_channels = channels.min(3);
+    let eval_channels = color_channel_count(channels);
     let mut best_rate = 0.0f64;
 
     for ch in 0..eval_channels {
@@ -1519,6 +1519,22 @@ fn spatial_slabs(pixels: &[u8], stride: usize) -> Vec<&[u8]> {
     ]
 }
 
+/// Number of non-alpha colour/luma channels in an interleaved 8-bit buffer.
+///
+/// PNG colour types map to 1 (Gray), 2 (Gray+Alpha), 3 (RGB), 4 (RGBA). The
+/// trailing channel of the alpha-bearing forms is transparency, not image
+/// content: an opaque icon is almost all `255` (or all `0`), which would
+/// otherwise dominate chi-square and make RS/SPA/WS report phantom embedding
+/// in the alpha plane.
+#[inline]
+fn color_channel_count(channels: usize) -> usize {
+    match channels {
+        1 | 2 => 1,
+        3 | 4 => 3,
+        other => other.min(3),
+    }
+}
+
 fn track_spatial_domain(
     pixels: &[u8],
     width: u32,
@@ -1526,12 +1542,16 @@ fn track_spatial_domain(
     findings: &mut Vec<Finding>,
     detectors: &mut Vec<DetectorMetric>,
 ) {
+    if width == 0 || channels == 0 {
+        return;
+    }
     // Sample the whole height instead of the top of the image, and pool the
     // per-slab estimates by averaging: a payload spread over the carrier shows
     // up in every slab, while one anomalous band (sky, flat background) would
     // dominate a maximum.
     let stride = width as usize * channels;
     let slabs = spatial_slabs(pixels, stride);
+    let color_channels = color_channel_count(channels);
     let (mut ws_sum, mut spa_sum, mut rs_sum, mut rs_n) = (0.0f64, 0.0f64, 0.0f64, 0usize);
     let mut hist = [0u64; 256];
     for slab in &slabs {
@@ -1541,8 +1561,10 @@ fn track_spatial_domain(
             rs_sum += p;
             rs_n += 1;
         }
-        for &b in *slab {
-            hist[b as usize] += 1;
+        for (idx, &b) in slab.iter().enumerate() {
+            if idx % channels < color_channels {
+                hist[b as usize] += 1;
+            }
         }
     }
     let slabs_f = slabs.len().max(1) as f64;
@@ -1933,8 +1955,8 @@ fn rs_analysis(pixels: &[u8], width: u32, channels: usize) -> Option<f64> {
         return None;
     }
     let rows = (pixels.len() / stride).min(512);
-    let eval_channels = channels.min(3);
-    let mut best = 0.0f64;
+    let eval_channels = color_channel_count(channels);
+    let mut best: Option<f64> = None;
     for ch in 0..eval_channels {
         let mut plane = Vec::with_capacity(rows * width);
         for row in 0..rows {
@@ -1944,11 +1966,12 @@ fn rs_analysis(pixels: &[u8], width: u32, channels: usize) -> Option<f64> {
             }
         }
         let score = aletheia_rs(&plane, rows, width);
-        if score > best {
-            best = score;
-        }
+        best = Some(best.map_or(score, |b: f64| b.max(score)));
     }
-    if best > 0.0 { Some(best) } else { None }
+    // `Some(0.0)` is a valid estimate on a clean image: it means "no LSB
+    // replacement detected", not "the geometry was unsuitable". Only a true
+    // lack of samples returns `None`.
+    best
 }
 
 /// Sample Pair Analysis (Dumitrescu, Wu & Wang 2003), faithful to the
@@ -1966,7 +1989,7 @@ fn spa_estimate_dww(pixels: &[u8], width: u32, channels: usize) -> f64 {
         return 0.0;
     }
 
-    let eval_channels = channels.min(3);
+    let eval_channels = color_channel_count(channels);
     let mut best = 0.0_f64;
     for ch in 0..eval_channels {
         let (x, y, k, pair_count) = {
@@ -2512,8 +2535,25 @@ mod tests {
                 plane[idx + 2] = 100;
             }
         }
-        let est = rs_analysis(&plane, 16, 3);
-        assert!(est.is_none() || est.unwrap() < 0.1);
+        let est = rs_analysis(&plane, 16, 3)
+            .expect("a clean image must report 0.0, not skip as unsuitable");
+        assert!(est < 0.1);
+    }
+
+    #[test]
+    fn alpha_channels_are_excluded_from_colour_statistics() {
+        assert_eq!(color_channel_count(1), 1);
+        assert_eq!(
+            color_channel_count(2),
+            1,
+            "Grayscale+Alpha: only the luma plane is image content"
+        );
+        assert_eq!(color_channel_count(3), 3);
+        assert_eq!(
+            color_channel_count(4),
+            3,
+            "RGBA: alpha is not image content"
+        );
     }
 
     #[test]

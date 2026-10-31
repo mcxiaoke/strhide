@@ -149,6 +149,34 @@ fn sanitize_filename_unit() {
     assert_eq!(sanitize_filename("C:"), "extracted.bin");
 }
 
+/// `read_carrier*` must never hand back the raw metadata filename: every
+/// consumer (CLI, library, Tauri) writes the payload out under it.
+#[test]
+fn read_result_filename_is_sanitized() {
+    let dir = scratch("read_filename_sanitized");
+    let carrier = dir.join("c.png");
+    fs::write(&carrier, make_png()).unwrap();
+    let stego = dir.join("evil.png");
+    let data = b"poc".to_vec();
+    write_carrier_file(
+        &carrier,
+        PayloadSource::Buffered {
+            data: &data,
+            filename: "../../../evil.sh",
+            is_file: true,
+        },
+        None,
+        "chunk",
+        false,
+        &stego,
+    );
+    let res = read_carrier(&stego, &ReadOptions::default()).unwrap();
+    assert_eq!(
+        res.filename, "evil.sh",
+        "a recorded name must be reduced to its bare basename"
+    );
+}
+
 #[test]
 fn path_traversal_sanitized() {
     let dir = scratch("traversal");
@@ -218,7 +246,9 @@ fn path_traversal_sanitized() {
     .unwrap();
     assert!(outdir.join("EVIL.txt").exists());
     assert!(!dir.join("EVIL.txt").exists());
-    assert_eq!(res.filename, "../EVIL.txt"); // metadata preserved verbatim
+    // The API returns the sanitised basename, not the attacker-controlled raw
+    // field: Tauri and library callers write the payload out under it.
+    assert_eq!(res.filename, "EVIL.txt");
 }
 
 // --------------------------------------------------------------------------- R3 / P0-4

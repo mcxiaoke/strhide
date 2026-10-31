@@ -122,8 +122,8 @@ pub(crate) enum ResolvedPayload {
     Stdin,
     /// A payload file (`-d`/`--data`): read as raw bytes.
     File(PathBuf),
-    /// A text file (`--text-file`): UTF-8 for [`PayloadFlavor::Text`], raw
-    /// bytes for [`PayloadFlavor::Bytes`].
+    /// A text file (`--text-file`): always read as UTF-8 text; the flavor only
+    /// decides how `--text-base64` is decoded.
     TextFile(PathBuf),
     /// Text payload, already materialised (`-t`, `STRHIDE_TEXT`).
     Text(String),
@@ -136,10 +136,9 @@ pub(crate) enum ResolvedPayload {
 /// `write` and `embed` used to carry two copies of the same 40-line resolution
 /// chain (`--stdin` / `-d` / `-t` + `--unescape` / `--text-file` /
 /// `--text-base64` / `STRHIDE_TEXT`), and they had already drifted: only one of
-/// them validated that base64 content decodes to UTF-8, and they disagreed on
-/// whether `--text-file` may hold binary data. Both now funnel through here;
-/// the difference between them is the explicit [`PayloadFlavor`], not an
-/// accidental divergence.
+/// them validated that base64 content decodes to UTF-8. Both now funnel through
+/// here; the difference between them is the explicit [`PayloadFlavor`], not an
+/// accidental divergence. `--text-file` is text in both verbs.
 pub(crate) fn resolve_payload(
     payload: &PayloadSourceArgs,
     unescape: bool,

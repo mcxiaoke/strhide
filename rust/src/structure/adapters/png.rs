@@ -179,6 +179,7 @@ impl HostAdapter for PngAdapter {
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
     ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+        let file_size = stego_in.seek(SeekFrom::End(0))?;
         stego_in.seek(SeekFrom::Start(0))?;
         let mut magic = [0u8; 8];
         if stego_in.read_exact(&mut magic).is_err() || magic != PNG_MAGIC {
@@ -196,14 +197,34 @@ impl HostAdapter for PngAdapter {
             chunk_type.copy_from_slice(&hdr[4..8]);
             let chunk_data_offset = stego_in.stream_position()?;
 
+            // A truncated or crafted chunk must not send the scan past EOF or
+            // wrap the next-offset arithmetic.
+            let Some(next_pos) = chunk_data_offset
+                .checked_add(length)
+                .and_then(|v| v.checked_add(4))
+            else {
+                break;
+            };
+            if next_pos > file_size {
+                break;
+            }
+
             if (chunk_type == CHUNK_PRIV || chunk_type == CHUNK_STEG) && length >= 112 + 24 {
                 let trailer_offset = chunk_data_offset + length - 24;
                 stego_in.seek(SeekFrom::Start(trailer_offset))?;
                 let mut trailer_bytes = [0u8; 24];
                 if stego_in.read_exact(&mut trailer_bytes).is_ok()
-                    && EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic).is_ok()
+                    && let Ok(trailer) =
+                        EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic)
                 {
-                    return Ok(Some((chunk_data_offset, length, "chunk".into())));
+                    // A valid trailer alone is not enough: private chunks from
+                    // other tools (or an old envelope's leftover bytes) can
+                    // carry one that points somewhere else entirely. The
+                    // trailer must describe *this* chunk, exactly like RIFF
+                    // verifies its `SHRD` chunk.
+                    if trailer.ube_offset == chunk_data_offset && trailer.ube_total_size == length {
+                        return Ok(Some((chunk_data_offset, length, "chunk".into())));
+                    }
                 }
             }
 
@@ -211,7 +232,7 @@ impl HostAdapter for PngAdapter {
                 break;
             }
 
-            stego_in.seek(SeekFrom::Start(chunk_data_offset + length + 4))?;
+            stego_in.seek(SeekFrom::Start(next_pos))?;
         }
 
         // Fallback to EOF
@@ -394,5 +415,65 @@ impl HostAdapter for PngAdapter {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::structure::envelope::{STANDARD_TRAILER_MAGIC, TRAILER_SIZE};
+    use std::io::Cursor;
+
+    fn push_chunk(out: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(tag);
+        out.extend_from_slice(data);
+        // `locate` does not verify chunk CRCs, so zeros are fine in fixtures.
+        out.extend_from_slice(&[0u8; 4]);
+    }
+
+    /// Build a PNG carrying one `prIv` chunk with a valid trailer whose
+    /// `ube_offset` is `trailer_offset`.
+    fn png_with_private_chunk(trailer_offset: u64) -> (Vec<u8>, usize) {
+        let mut png = Vec::new();
+        png.extend_from_slice(&PNG_MAGIC);
+        push_chunk(&mut png, b"IHDR", &[0u8; 13]);
+
+        let body_len = 112usize;
+        let mut data = vec![0u8; body_len + TRAILER_SIZE];
+        let trailer =
+            EnvelopeTrailer::create(trailer_offset, data.len() as u64, STANDARD_TRAILER_MAGIC);
+        data[body_len..].copy_from_slice(&trailer.pack());
+        push_chunk(&mut png, &CHUNK_PRIV, &data);
+        push_chunk(&mut png, b"IEND", &[]);
+        (png, data.len())
+    }
+
+    /// A private chunk whose trailing 24 bytes look like a trailer but point at
+    /// another region must not be mistaken for an envelope.
+    #[test]
+    fn locate_rejects_a_trailer_that_describes_another_region() {
+        let (png, _) = png_with_private_chunk(0);
+        let mut cursor = Cursor::new(&png);
+        let located = PngAdapter
+            .locate(&mut cursor, Some(&STANDARD_TRAILER_MAGIC))
+            .expect("locate must not error");
+        assert!(located.is_none(), "foreign trailer must not match");
+    }
+
+    /// Positive control: the same bytes are found once the trailer describes
+    /// the chunk it sits in.
+    #[test]
+    fn locate_accepts_a_trailer_that_describes_its_chunk() {
+        // magic(8) + IHDR chunk(25) + the private chunk's own header(8).
+        let chunk_data_offset = 8 + 25 + 8;
+        let (png, data_len) = png_with_private_chunk(chunk_data_offset as u64);
+        let mut cursor = Cursor::new(&png);
+        let located = PngAdapter
+            .locate(&mut cursor, Some(&STANDARD_TRAILER_MAGIC))
+            .expect("locate must not error")
+            .expect("a self-describing trailer must be found");
+        assert_eq!(located.0, chunk_data_offset as u64);
+        assert_eq!(located.1, data_len as u64);
     }
 }

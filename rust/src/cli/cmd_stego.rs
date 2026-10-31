@@ -217,9 +217,11 @@ pub(crate) fn handle_embed(
             Payload::owned_file(name, data)
         }
         ResolvedPayload::TextFile(p) => {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let data = std::fs::read(&p)?;
-            Payload::owned_file(name, data)
+            // `--text-file` is documented as "path to UTF-8 text file to
+            // hide" and must behave like `write --text-file`: a text payload
+            // without a recorded filename, not a binary `File` payload.
+            let text = std::fs::read_to_string(&p)?;
+            Payload::owned(text.into_bytes()).with_kind(crate::core::payload::PayloadKind::Text)
         }
         ResolvedPayload::Text(t) => {
             Payload::owned(t.into_bytes()).with_kind(crate::core::payload::PayloadKind::Text)

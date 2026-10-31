@@ -56,7 +56,7 @@ pub fn sanitize_filename(name: &str) -> String {
     cleaned
 }
 
-const FALLBACK_NAME: &str = "extracted.bin";
+pub(crate) const FALLBACK_NAME: &str = "extracted.bin";
 
 fn is_windows_reserved_device(stem: &str) -> bool {
     let upper = stem.to_ascii_uppercase();

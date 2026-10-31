@@ -145,6 +145,24 @@ pub fn temp_path_for(path: &Path) -> PathBuf {
     PathBuf::from(os)
 }
 
+/// Copy `src` to `dst` and flush the copy before returning.
+///
+/// `std::fs::copy` does not `fsync` the destination, so a crash right after the
+/// caller renames the new carrier over the original could leave a zero-length
+/// or unwritten `.bak` next to an already overwritten carrier — both copies
+/// lost. The handle is opened for writing so `sync_all` works on Windows too.
+pub fn copy_file_durable(src: &Path, dst: &Path) -> Result<(), StrHideError> {
+    let mut input = std::fs::File::open(src)?;
+    let mut output = std::fs::File::create(dst)?;
+    std::io::copy(&mut input, &mut output)?;
+    output.sync_all()?;
+    drop(output);
+    // `std::fs::copy` also clones the source permissions; keep that behaviour.
+    let permissions = std::fs::metadata(src)?.permissions();
+    std::fs::set_permissions(dst, permissions)?;
+    Ok(())
+}
+
 /// Safely commit stego bytes to `target_path` with an atomic rename, a
 /// crash-safe temporary file guard, collision-free `.bak` backup on in-place
 /// writes, and preservation of the original carrier's permissions and timestamps.
@@ -164,7 +182,7 @@ pub fn commit_carrier_bytes(
     let mut backup_path = None;
     if is_inplace && backup {
         let bak = next_backup_path(carrier_path);
-        std::fs::copy(carrier_path, &bak)?;
+        copy_file_durable(carrier_path, &bak)?;
         backup_path = Some(bak);
     }
 
@@ -200,7 +218,7 @@ pub fn commit_carrier_patches(
     let mut backup_path = None;
     if is_inplace && backup {
         let bak = next_backup_path(carrier_path);
-        std::fs::copy(carrier_path, &bak)?;
+        copy_file_durable(carrier_path, &bak)?;
         backup_path = Some(bak);
     }
 

@@ -295,19 +295,27 @@ fn derive_seeded<const N: usize>(
 
 /// Sanitize a filename to prevent path traversal and ensure it fits in a u8 length byte (<= 255 bytes).
 pub fn sanitize_filename(name: &str) -> Option<String> {
-    let p = std::path::Path::new(name);
-    let base = p.file_name()?.to_str()?;
-    let norm = normalize_nfc(base);
+    let norm = normalize_nfc(name);
     let trimmed = norm.trim();
     if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
         return None;
     }
+    // One implementation for both domains: `Path::file_name` treats `\` as an
+    // ordinary character on Unix, so a Windows-style traversal name read on
+    // Linux used to survive verbatim, and control bytes / reserved devices
+    // were never filtered. `core::fs` handles separators on every platform.
+    let clean = crate::core::fs::sanitize_filename(trimmed);
+    if clean == crate::core::fs::FALLBACK_NAME && trimmed != crate::core::fs::FALLBACK_NAME {
+        // The name sanitised down to the fallback, i.e. nothing usable was
+        // left. Store no name at all instead of inventing "extracted.bin".
+        return None;
+    }
     // Truncate at UTF-8 boundary to at most 255 bytes
-    let mut byte_limit = 255.min(trimmed.len());
-    while !trimmed.is_char_boundary(byte_limit) {
+    let mut byte_limit = 255.min(clean.len());
+    while !clean.is_char_boundary(byte_limit) {
         byte_limit -= 1;
     }
-    let safe = &trimmed[..byte_limit];
+    let safe = &clean[..byte_limit];
     if safe.is_empty() {
         None
     } else {

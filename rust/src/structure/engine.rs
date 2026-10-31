@@ -27,7 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
-use crate::commit::{TmpGuard, next_backup_path, temp_path_for};
+use crate::commit::{TmpGuard, copy_file_durable, next_backup_path, temp_path_for};
 use crate::structure::adapters::{
     FinalizeCtx, HostAdapter, SeekRead, SeekWrite, StrategyCapacity, TrailerCtx,
 };
@@ -1378,7 +1378,7 @@ pub fn write_carrier_with(
     let mut backup_file = None;
     if is_inplace && options.backup {
         let bak = next_backup_path(carrier_path);
-        std::fs::copy(carrier_path, &bak)?;
+        copy_file_durable(carrier_path, &bak)?;
         backup_file = Some(bak);
     }
 
@@ -1669,11 +1669,20 @@ fn read_core(
         )));
     }
 
+    // The metadata filename is attacker-controlled input (unencrypted
+    // envelopes especially), and every caller that writes the payload out
+    // trusts it: sanitise once here so no consumer can turn it into a path.
+    let filename = if env.meta_obj.filename.is_empty() {
+        String::new()
+    } else {
+        sanitize_filename(&env.meta_obj.filename)
+    };
+
     Ok(ReadCore {
         data,
         is_file: env.header.is_file(),
         is_encrypted: env.header.is_encrypted(),
-        filename: env.meta_obj.filename,
+        filename,
         raw_size: env.meta_obj.raw_size,
     })
 }
@@ -1921,7 +1930,13 @@ fn verify_restored(
                         .and_then(|m| r_adapter.locate(restored, Some(&m.1)).ok().flatten())
                 })
             });
-        if remaining.is_some() {
+        // Removing an inner envelope shifts an outer one backwards, so its
+        // trailer no longer describes its own coordinates and `locate`
+        // correctly refuses it. The container is still there, though, and it
+        // is the real reason the hashes cannot match: fall back to the
+        // format's envelope-shaped-structure scan for the diagnosis.
+        let envelope_shaped = !r_adapter.suspicious_structures(restored).is_empty();
+        if remaining.is_some() || envelope_shaped {
             residual_envelope = true;
         }
     }
@@ -2021,7 +2036,7 @@ pub fn remove_carrier_with_dialect(
     let mut backup_file = None;
     if is_inplace && options.backup {
         let bak = next_backup_path(carrier_path);
-        std::fs::copy(carrier_path, &bak)?;
+        copy_file_durable(carrier_path, &bak)?;
         backup_file = Some(bak);
     }
 

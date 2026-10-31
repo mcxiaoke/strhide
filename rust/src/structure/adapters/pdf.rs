@@ -527,11 +527,21 @@ impl HostAdapter for PdfAdapter {
         vec!["incremental", "eof"]
     }
 
-    fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, _ube_size: u64) -> &'static str {
-        if parse_pdf_trailer_info(reader).is_ok() {
-            "incremental"
-        } else {
-            "eof"
+    fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, ube_size: u64) -> &'static str {
+        // The incremental object header (`\n<N> 0 obj\n<< /Type /Metadata
+        // /Length <L> >>\nstream\n`) shifts the envelope by its own length, and
+        // the sealed header can only record `MAX_OFFSET_DELTA` bytes. With a
+        // 10-digit object number and a 9-digit payload the template exceeds
+        // that, which the writer then rejects as a hard error instead of
+        // falling back. Pick `eof` up front when the shift cannot be recorded.
+        match parse_pdf_trailer_info(reader) {
+            Ok(info)
+                if pdf_obj_header(info.new_obj_num, ube_size).len()
+                    <= crate::structure::envelope::MAX_OFFSET_DELTA as usize =>
+            {
+                "incremental"
+            }
+            _ => "eof",
         }
     }
 
@@ -872,10 +882,17 @@ mod tests {
     /// Classic PDF with `/Size 2` and `/Root`: the smallest carrier the
     /// incremental strategy accepts.
     fn minimal_pdf() -> Vec<u8> {
-        b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
-          xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
-          trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n9\n%%EOF\n"
-            .to_vec()
+        minimal_pdf_with_size(2)
+    }
+
+    /// Minimal classic PDF whose `/Size` (i.e. next object number) is `size`.
+    fn minimal_pdf_with_size(size: u64) -> Vec<u8> {
+        format!(
+            "%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
+             xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
+             trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n9\n%%EOF\n"
+        )
+        .into_bytes()
     }
 
     /// Full UBE (payload + trailer) for `payload_len` bytes of body.
@@ -938,6 +955,28 @@ mod tests {
                 "inject_size must cover the object, the xref section and the new trailer"
             );
         }
+    }
+
+    /// Auto must fall back to the lossless EOF overlay when the incremental
+    /// object header would shift the envelope past `MAX_OFFSET_DELTA`, instead
+    /// of selecting a strategy the writer rejects later.
+    #[test]
+    fn auto_falls_back_to_eof_when_object_header_exceeds_offset_delta() {
+        // 10-digit object number + 9-digit /Length + the fixed template:
+        // 46 + 10 + 9 = 65 > 64.
+        let host = minimal_pdf_with_size(1_000_000_001);
+        let mut cursor = Cursor::new(&host);
+        assert_eq!(
+            PdfAdapter.choose_auto_strategy(&mut cursor, 100_000_000),
+            "eof"
+        );
+
+        let mut cursor = Cursor::new(&host);
+        assert_eq!(
+            PdfAdapter.choose_auto_strategy(&mut cursor, 1_000),
+            "incremental",
+            "a short /Length keeps the shift within the recordable range"
+        );
     }
 
     /// Two consecutive incremental updates: the second carrier's `/Size` has
