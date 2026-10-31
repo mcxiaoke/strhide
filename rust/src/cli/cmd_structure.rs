@@ -231,11 +231,15 @@ pub(crate) fn handle_read(
         false,
     )?;
 
+    // Track the outputs this batch already produced: two carriers may record
+    // the same payload filename, and writing both to one path would overwrite
+    // the first (with --overwrite) or abort the batch (without it).
+    let mut batch = BatchOutputs::new(output_dir);
     for_each_carrier(&args.carrier, quiet, |carrier| {
         read_one(
             carrier,
             &args,
-            output_dir,
+            &mut batch,
             &mut password,
             cfg,
             quiet,
@@ -252,7 +256,7 @@ pub(crate) fn handle_read(
 fn read_one(
     carrier: &Path,
     args: &ReadArgs,
-    output_dir: Option<&Path>,
+    batch: &mut BatchOutputs<'_>,
     password: &mut Option<String>,
     cfg: &FileConfig,
     quiet: bool,
@@ -263,7 +267,7 @@ fn read_one(
     // the engine can only name outputs after the recorded filename, which is
     // absent for text payloads, and two unnamed payloads would collide on
     // `extracted.bin`.
-    let output_path = match output_dir {
+    let output_path = match batch.dir {
         Some(_) => None,
         None => args.output.as_deref(),
     };
@@ -368,11 +372,12 @@ fn read_one(
         eprintln!("{}", t!(Msg::WarnEnvelopeNotEncrypted));
     }
 
-    if let Some(dir) = output_dir {
+    if let Some(dir) = batch.dir {
         let name = crate::core::fs::batch_payload_name(carrier, &res.filename, res.is_file);
-        let dest = dir.join(name);
+        let dest = crate::core::fs::unique_batch_path(dir, &name, &batch.used);
         check_overwrite(&dest, args.overwrite)?;
         crate::core::commit::write_bytes_atomic(&dest, &res.data)?;
+        batch.used.insert(dest.clone());
         if !quiet {
             let elapsed_str = format_duration(t_start.elapsed());
             println!(

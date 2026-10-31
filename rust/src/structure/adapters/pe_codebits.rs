@@ -54,6 +54,15 @@ const CHANNEL_HEADER_BITS: usize = CHANNEL_HEADER_LEN * 8;
 pub const MIN_UBE_LEN: u32 = crate::structure::envelope::HEADER_SIZE as u32
     + crate::structure::envelope::TRAILER_SIZE as u32;
 
+/// Upper bound for a channel payload read from an untrusted header.
+///
+/// A `codebits` channel needs eight reversible instruction slots per payload
+/// byte, so even a very large `.text` section cannot legitimately carry
+/// hundreds of megabytes. Without a ceiling, `total_bits`/`diff_len` can
+/// overflow on 32-bit targets and a forged header can ask the reader for an
+/// implausible allocation before the capacity check runs.
+pub const MAX_CODEBITS_UBE_LEN: u32 = 64 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Opcode tables (identical to steg86's SUPPORTED_OPCODES / SEMANTIC_PAIRS)
 // ---------------------------------------------------------------------------
@@ -419,12 +428,14 @@ impl ChannelHeader {
 
     /// Number of channel bits (header + UBE) this header describes.
     fn total_bits(&self) -> usize {
-        (CHANNEL_HEADER_LEN + self.ube_len as usize) * 8
+        (self.ube_len as usize)
+            .saturating_add(CHANNEL_HEADER_LEN)
+            .saturating_mul(8)
     }
 
     /// Length of the restore diff: one bit per channel position.
     fn diff_len(&self) -> usize {
-        CHANNEL_HEADER_LEN + self.ube_len as usize
+        (self.ube_len as usize).saturating_add(CHANNEL_HEADER_LEN)
     }
 }
 
@@ -456,6 +467,11 @@ fn validate_header_prefix(header: &ChannelHeader) -> Result<(), CodebitsError> {
     if header.ube_len < MIN_UBE_LEN {
         return Err(CodebitsError::Corrupted(
             "channel header payload length is below the minimum".into(),
+        ));
+    }
+    if header.ube_len > MAX_CODEBITS_UBE_LEN {
+        return Err(CodebitsError::Corrupted(
+            "channel header payload length exceeds the supported maximum".into(),
         ));
     }
     Ok(())
@@ -846,6 +862,26 @@ mod tests {
         assert_eq!(unmasked_bytes[4], CHANNEL_VERSION);
         let bogus = ChannelHeader::unpack_masked(&unmasked_bytes).expect("still 14 bytes");
         assert_ne!(bogus.version, CHANNEL_VERSION);
+    }
+
+    #[test]
+    fn oversized_ube_len_is_rejected() {
+        let header = ChannelHeader {
+            magic: CHANNEL_MAGIC,
+            version: CHANNEL_VERSION,
+            flags: 0,
+            ube_len: MAX_CODEBITS_UBE_LEN + 1,
+            slack_off: 0,
+        };
+        assert!(matches!(
+            validate_header_prefix(&header),
+            Err(CodebitsError::Corrupted(_))
+        ));
+        // The length helpers must never wrap, even for an absurd header.
+        assert_eq!(
+            header.diff_len(),
+            MAX_CODEBITS_UBE_LEN as usize + 1 + CHANNEL_HEADER_LEN
+        );
     }
 
     #[test]

@@ -146,6 +146,47 @@ fn batch_write_keeps_the_data_filename_for_every_carrier() {
 }
 
 #[test]
+fn batch_read_keeps_outputs_with_the_same_recorded_name_apart() {
+    let dir = scratch("batch_read_same_name");
+    seed(&dir, &["a.png", "b.png"]);
+    fs::write(dir.join("vault.dat"), b"file payload").unwrap();
+
+    let out = run(
+        &dir,
+        &["write", "a.png", "b.png", "-d", "vault.dat", "--in-place"],
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+
+    fs::create_dir_all(dir.join("out")).unwrap();
+    // Both carriers record `vault.dat`; without de-duplication the second
+    // write either overwrites the first (--overwrite) or aborts the batch.
+    let out = run(&dir, &["read", "a.png", "b.png", "-o", "out"]);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+
+    let mut names = Vec::new();
+    for entry in fs::read_dir(dir.join("out")).unwrap() {
+        let entry = entry.unwrap();
+        assert_eq!(
+            fs::read(entry.path()).unwrap(),
+            b"file payload",
+            "{} lost its payload",
+            entry.file_name().to_string_lossy()
+        );
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    names.sort();
+    assert_eq!(
+        names.len(),
+        2,
+        "both carriers must produce an output: {names:?}"
+    );
+    assert_eq!(
+        names,
+        vec!["vault (1).dat".to_string(), "vault.dat".to_string()]
+    );
+}
+
+#[test]
 fn single_carrier_output_still_has_no_summary_line() {
     let dir = scratch("no_summary");
     seed(&dir, &["a.png"]);

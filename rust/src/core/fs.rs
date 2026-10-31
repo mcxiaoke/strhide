@@ -89,6 +89,39 @@ pub fn batch_payload_name(carrier: &std::path::Path, recorded: &str, is_file: bo
     format!("{stem}.{ext}")
 }
 
+/// Pick a destination under `dir` for `desired` without colliding with an
+/// output this batch already produced.
+///
+/// Two carriers can record the *same* payload filename; writing both to
+/// `dir/name` would silently overwrite the first with `--overwrite` and abort
+/// the batch without it. Generated alternatives skip paths that already exist
+/// on disk as well, so a fresh name is used instead of clobbering an unrelated
+/// user file. A pre-existing `desired` itself is left to `check_overwrite`,
+/// which keeps the single-carrier behaviour unchanged.
+pub fn unique_batch_path(
+    dir: &std::path::Path,
+    desired: &str,
+    used: &std::collections::HashSet<std::path::PathBuf>,
+) -> std::path::PathBuf {
+    let initial = dir.join(desired);
+    if !used.contains(&initial) {
+        return initial;
+    }
+    let split = desired
+        .rfind('.')
+        .filter(|&i| i > 0)
+        .unwrap_or(desired.len());
+    let (stem, ext) = desired.split_at(split);
+    let mut n = 1u32;
+    loop {
+        let candidate = dir.join(format!("{stem} ({n}){ext}"));
+        if !used.contains(&candidate) && !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 /// Render attacker-controlled text safe for a terminal.
 ///
 /// The password hint lives in the envelope but is *not* covered by the header

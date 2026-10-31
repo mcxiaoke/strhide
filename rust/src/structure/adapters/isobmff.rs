@@ -536,6 +536,15 @@ pub fn isobmff_strip(
     Ok(())
 }
 
+/// Whether a stored box uses the 16-byte `largesize` header form.
+///
+/// The `item_hidden` rewrite patches the 32-bit size word and reads the box
+/// version at offset 8, which only describes an 8-byte header; a 64-bit header
+/// would be silently mangled.
+fn box_header_is_64_bit(buf: &[u8]) -> bool {
+    buf.len() >= 4 && u32::from_be_bytes(buf[0..4].try_into().unwrap()) == 1
+}
+
 fn read_box_size(bytes: &[u8], pos: usize) -> Result<(usize, usize), StrHideError> {
     if pos + 8 > bytes.len() {
         return Err(StrHideError::CorruptedData("Truncated box header".into()));
@@ -709,6 +718,15 @@ fn heif_item_hidden_inject(
         .iter()
         .position(|(tag, _)| tag == b"iloc")
         .ok_or_else(|| StrHideError::UnsupportedFormat("Missing iloc box in meta".into()))?;
+
+    // Both sub-boxes are rewritten in place at their parsed offsets; that is
+    // only valid for the 8-byte header form.
+    if box_header_is_64_bit(&subboxes[iloc_idx].1) || box_header_is_64_bit(&subboxes[iinf_idx].1) {
+        return Err(StrHideError::UnsupportedFormat(
+            "HEIF carriers with 64-bit iloc/iinf box headers are not supported for item_hidden"
+                .into(),
+        ));
+    }
 
     // 3. Parse iinf to find max_item_id
     let iinf_box = &subboxes[iinf_idx].1;
@@ -908,7 +926,8 @@ fn heif_item_hidden_inject(
             }
         }
 
-        let new_iloc_sz = (iloc_buf.len() + iloc_item_len) as u32;
+        let new_iloc_sz = u32::try_from(iloc_buf.len() + iloc_item_len)
+            .map_err(|_| StrHideError::General("iloc box exceeds its 32-bit size field".into()))?;
         iloc_buf[0..4].copy_from_slice(&new_iloc_sz.to_be_bytes());
         if iloc_ver < 2 {
             let new_cnt = (iloc_cnt + 1) as u16;
@@ -928,7 +947,8 @@ fn heif_item_hidden_inject(
                 "HEIF iinf v0 entry-count space is exhausted".into(),
             ));
         }
-        let new_iinf_sz = (iinf_buf.len() + infe_len) as u32;
+        let new_iinf_sz = u32::try_from(iinf_buf.len() + infe_len)
+            .map_err(|_| StrHideError::General("iinf box exceeds its 32-bit size field".into()))?;
         iinf_buf[0..4].copy_from_slice(&new_iinf_sz.to_be_bytes());
         if iinf_ver == 0 {
             let new_cnt = (entry_cnt + 1) as u16;
@@ -946,7 +966,8 @@ fn heif_item_hidden_inject(
         new_meta_body.extend_from_slice(b);
     }
     new_meta_body.extend_from_slice(&meta_tail);
-    let new_meta_size = (new_meta_body.len() + 12) as u32;
+    let new_meta_size = u32::try_from(new_meta_body.len() + 12)
+        .map_err(|_| StrHideError::General("meta box exceeds its 32-bit size field".into()))?;
     let mut patched_meta = Vec::with_capacity(new_meta_size as usize);
     patched_meta.extend_from_slice(&new_meta_size.to_be_bytes());
     patched_meta.extend_from_slice(b"meta");
@@ -1082,24 +1103,49 @@ fn heif_item_hidden_strip(
         let item_len = id_sz + cm_sz + 2 + base_sz + 2 + idx_sz + off_sz + len_sz;
 
         let iinf_box = &subboxes[iinf_idx].1;
-        if iinf_box.len() < 21 {
+        if iinf_box.len() < 12 {
             return Err(StrHideError::CorruptedData("Truncated iinf box".into()));
         }
-        let last_infe_pos = iinf_box.len().saturating_sub(21);
-        let infe_sz = u32::from_be_bytes(
-            iinf_box[last_infe_pos..last_infe_pos + 4]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        let actual_infe_len = if infe_sz == 21 {
-            21
-        } else if iinf_box.len() >= 23 {
-            let p23 = iinf_box.len() - 23;
-            let sz23 = u32::from_be_bytes(iinf_box[p23..p23 + 4].try_into().unwrap()) as usize;
-            if sz23 == 23 { 23 } else { infe_sz }
+        let iinf_ver = iinf_box[8];
+        if iinf_box.len() < if iinf_ver == 0 { 14 } else { 16 } {
+            return Err(StrHideError::CorruptedData("Truncated iinf box".into()));
+        }
+        let entry_cnt = if iinf_ver == 0 {
+            u16::from_be_bytes(iinf_box[12..14].try_into().unwrap()) as usize
         } else {
-            infe_sz
+            u32::from_be_bytes(iinf_box[12..16].try_into().unwrap()) as usize
         };
+        if entry_cnt == 0 {
+            return Err(StrHideError::CorruptedData("Empty iinf box".into()));
+        }
+        // Walk the entries by their own size fields instead of guessing the
+        // trailing entry's length from 21/23-byte templates: a third-party
+        // re-mux or a crafted `infe` used to mis-compute `delta_meta` and shift
+        // every post-meta `iloc` offset by the wrong amount.
+        let mut pos = if iinf_ver == 0 { 14 } else { 16 };
+        let mut trailing_infe_len = None;
+        for _ in 0..entry_cnt {
+            if pos + 8 > iinf_box.len() {
+                return Err(StrHideError::CorruptedData("Truncated iinf entry".into()));
+            }
+            let size = u32::from_be_bytes(iinf_box[pos..pos + 4].try_into().unwrap()) as usize;
+            let end = pos
+                .checked_add(size)
+                .filter(|&end| size >= 8 && end <= iinf_box.len())
+                .ok_or_else(|| StrHideError::CorruptedData("Invalid iinf entry size".into()))?;
+            if &iinf_box[pos + 4..pos + 8] == b"infe" && end == iinf_box.len() {
+                trailing_infe_len = Some(size);
+            }
+            pos = end;
+        }
+        if pos != iinf_box.len() {
+            return Err(StrHideError::CorruptedData(
+                "iinf entry count does not cover the box".into(),
+            ));
+        }
+        let actual_infe_len = trailing_infe_len.ok_or_else(|| {
+            StrHideError::CorruptedData("Could not locate the trailing infe entry".into())
+        })?;
         (item_len, actual_infe_len, actual_infe_len + item_len)
     };
 
@@ -1134,7 +1180,8 @@ fn heif_item_hidden_strip(
         }
 
         iloc_buf.truncate(iloc_buf.len() - iloc_item_len);
-        let new_iloc_sz = iloc_buf.len() as u32;
+        let new_iloc_sz = u32::try_from(iloc_buf.len())
+            .map_err(|_| StrHideError::CorruptedData("iloc box exceeds 32-bit size".into()))?;
         iloc_buf[0..4].copy_from_slice(&new_iloc_sz.to_be_bytes());
         if iloc_ver < 2 {
             let new_cnt = (iloc_cnt - 1) as u16;
@@ -1218,7 +1265,8 @@ fn heif_item_hidden_strip(
             return Err(StrHideError::CorruptedData("Invalid iinf for strip".into()));
         }
         iinf_buf.truncate(iinf_buf.len() - infe_len);
-        let new_iinf_sz = iinf_buf.len() as u32;
+        let new_iinf_sz = u32::try_from(iinf_buf.len())
+            .map_err(|_| StrHideError::CorruptedData("iinf box exceeds 32-bit size".into()))?;
         iinf_buf[0..4].copy_from_slice(&new_iinf_sz.to_be_bytes());
         if iinf_ver == 0 {
             let new_cnt = (entry_cnt - 1) as u16;
@@ -1235,7 +1283,8 @@ fn heif_item_hidden_strip(
         restored_meta_body.extend_from_slice(b);
     }
     restored_meta_body.extend_from_slice(&meta_tail);
-    let restored_meta_size = (restored_meta_body.len() + 12) as u32;
+    let restored_meta_size = u32::try_from(restored_meta_body.len() + 12)
+        .map_err(|_| StrHideError::CorruptedData("meta box exceeds 32-bit size".into()))?;
     let mut restored_meta = Vec::with_capacity(restored_meta_size as usize);
     restored_meta.extend_from_slice(&restored_meta_size.to_be_bytes());
     restored_meta.extend_from_slice(b"meta");
@@ -1648,6 +1697,45 @@ mod tests {
         let iinf = make_iinf(item_id, infe_version);
         let iloc = make_iloc_box(None);
         assemble_meta_heif(&iinf, &iloc)
+    }
+
+    /// Rewrite a normal box into the 16-byte `largesize` header form.
+    fn as_64_bit_box(box_bytes: &[u8]) -> Vec<u8> {
+        let body = &box_bytes[8..];
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u32.to_be_bytes());
+        out.extend_from_slice(&box_bytes[4..8]);
+        out.extend_from_slice(&((16 + body.len()) as u64).to_be_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// `item_hidden` patches `iloc`/`iinf` at their 8-byte-header offsets; a
+    /// 64-bit header must be refused instead of silently mangled.
+    #[test]
+    fn item_hidden_inject_rejects_64_bit_iloc_and_iinf_headers() {
+        let normal_iloc = make_iloc_box(None);
+        let normal_iinf = make_iinf(1, 2);
+        for (iloc, iinf) in [
+            (as_64_bit_box(&normal_iloc), normal_iinf.clone()),
+            (normal_iloc.clone(), as_64_bit_box(&normal_iinf)),
+        ] {
+            let host = assemble_meta_heif(&iinf, &iloc);
+            let mut ube = vec![0x77u8; 200];
+            ube.extend_from_slice(&EnvelopeTrailer::create(0, 224, STANDARD_TRAILER_MAGIC).pack());
+            let err = isobmff_inject(
+                "HEIF",
+                &mut Cursor::new(host),
+                &mut Cursor::new(ube),
+                &mut Vec::new(),
+                "item_hidden",
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, StrHideError::UnsupportedFormat(_)),
+                "expected UnsupportedFormat, got: {err}"
+            );
+        }
     }
 
     #[test]

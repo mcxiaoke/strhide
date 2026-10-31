@@ -500,11 +500,14 @@ pub(crate) fn handle_extract(
         false,
     )?;
 
+    // Two carriers may record the same payload filename; keep this batch's
+    // outputs distinct instead of overwriting or aborting halfway through.
+    let mut batch = BatchOutputs::new(output_dir);
     for_each_carrier(&args.carrier, quiet, |carrier| {
         extract_one(
             carrier,
             &args,
-            output_dir,
+            &mut batch,
             password.as_deref(),
             cfg,
             quiet,
@@ -521,7 +524,7 @@ pub(crate) fn handle_extract(
 fn extract_one(
     carrier: &Path,
     args: &ExtractArgs,
-    output_dir: Option<&Path>,
+    batch: &mut BatchOutputs<'_>,
     password: Option<&str>,
     cfg: &FileConfig,
     quiet: bool,
@@ -581,13 +584,12 @@ fn extract_one(
     // `-o <DIR>` wins over `-o <FILE>`: for a batch it is the only sensible
     // shape, and for a single carrier it means "keep the recorded name". An
     // unnamed payload is named after its carrier so a batch cannot collide.
-    let explicit = match output_dir {
+    let explicit = match batch.dir {
         Some(dir) => {
             let recorded = payload.name().unwrap_or_default();
             let is_file = !matches!(payload.kind(), crate::core::payload::PayloadKind::Text);
-            Some(dir.join(crate::core::fs::batch_payload_name(
-                carrier, recorded, is_file,
-            )))
+            let name = crate::core::fs::batch_payload_name(carrier, recorded, is_file);
+            Some(crate::core::fs::unique_batch_path(dir, &name, &batch.used))
         }
         None => args.output.clone(),
     };
@@ -602,6 +604,7 @@ fn extract_one(
         };
         check_overwrite(&dest, args.overwrite)?;
         crate::core::commit::write_bytes_atomic(&dest, payload.as_bytes())?;
+        batch.used.insert(dest.clone());
         if !quiet {
             let elapsed_str = format_duration(t_start.elapsed());
             println!(

@@ -8,6 +8,7 @@
 //! also falls back to config) that must be identical for every verb; keeping
 //! them here is what stops `write` and `embed` from drifting apart.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -105,6 +106,25 @@ pub fn resolve_password(
         ));
     }
     Ok(None)
+}
+
+/// Output directory for a batch plus the destinations it already produced.
+///
+/// Survives across `for_each_carrier` iterations so a second carrier recording
+/// the same payload filename gets a distinct output instead of overwriting the
+/// first (or aborting the batch).
+pub(crate) struct BatchOutputs<'a> {
+    pub dir: Option<&'a Path>,
+    pub used: HashSet<PathBuf>,
+}
+
+impl<'a> BatchOutputs<'a> {
+    pub(crate) fn new(dir: Option<&'a Path>) -> Self {
+        Self {
+            dir,
+            used: HashSet::new(),
+        }
+    }
 }
 
 /// How a payload source is materialised.
