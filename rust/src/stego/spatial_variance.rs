@@ -58,6 +58,7 @@ pub(crate) fn reflect_index(mut i: isize, n: isize) -> usize {
 }
 
 /// Orthonormal 1-D DCT-II basis: `basis[k][a] = phi_k(a)`, `a = 0..p`.
+#[cfg(test)]
 fn dct_basis(p: usize) -> Vec<Vec<f64>> {
     let scale0 = (1.0 / p as f64).sqrt();
     let scalek = (2.0 / p as f64).sqrt();
@@ -72,6 +73,18 @@ fn dct_basis(p: usize) -> Vec<Vec<f64>> {
                 .collect()
         })
         .collect()
+}
+
+/// Const-generic DCT basis for compile-time specialized block sizes.
+fn dct_basis_const<const P: usize>() -> [[f64; P]; P] {
+    let scale0 = (1.0 / P as f64).sqrt();
+    let scalek = (2.0 / P as f64).sqrt();
+    std::array::from_fn(|k| {
+        let s = if k == 0 { scale0 } else { scalek };
+        std::array::from_fn(|a| {
+            s * (std::f64::consts::PI * k as f64 * (2 * a + 1) as f64 / (2.0 * P as f64)).cos()
+        })
+    })
 }
 
 /// Matlab `wiener2` residual `r = z - wiener2(z)` with a `window x window`
@@ -150,19 +163,122 @@ pub(crate) fn wiener_residual(plane: &[f64], w: usize, h: usize, window: usize) 
     mean
 }
 
-/// `||P_G^perp r_n||^2` for every pixel of `residual`, with mirror padding.
-///
-/// `degree == p` is the configuration used by both models; the loops below
-/// also cover `degree < p` correctly because the complement explicitly
-/// includes the `ku = 0` / `kv = 0` pairs that fall outside the model.
-fn complement_energy(residual: &[f64], w: usize, h: usize, p: usize, degree: usize) -> Vec<f64> {
+#[inline]
+fn horizontal_row_p<const P: usize>(
+    src: &[f64],
+    w: usize,
+    dst: &mut [f64],
+    basis: &[[f64; P]; P],
+    half: usize,
+) {
+    let interior = w.saturating_sub(2 * half);
+    // Interior: window fits entirely within [0, w), read contiguous slice directly.
+    for x in half..half + interior {
+        let win = &src[x - half..x - half + P];
+        let out = &mut dst[x * P..(x + 1) * P];
+        for kv in 0..P {
+            let b = &basis[kv];
+            let mut sum = 0.0f64;
+            for a in 0..P {
+                sum += b[a] * win[a];
+            }
+            out[kv] = sum;
+        }
+    }
+    // Mirrored edges: x in [0, half) and [w - half, w).
+    let left_end = half.min(w);
+    let right_start = (half + interior).min(w);
+    for x in (0..left_end).chain(right_start..w) {
+        let out = &mut dst[x * P..(x + 1) * P];
+        for kv in 0..P {
+            let b = &basis[kv];
+            let mut sum = 0.0f64;
+            for a in 0..P {
+                sum +=
+                    b[a] * src[reflect_index(x as isize + a as isize - half as isize, w as isize)];
+            }
+            out[kv] = sum;
+        }
+    }
+}
+
+fn complement_energy_p<const P: usize>(
+    residual: &[f64],
+    w: usize,
+    h: usize,
+    degree: usize,
+) -> Vec<f64> {
+    let n = w * h;
+    let half = P / 2;
+    let stride = w * P;
+    let basis = dct_basis_const::<P>();
+
+    let per_row = stride * std::mem::size_of::<f64>();
+    let band = (BAND_BYTES / per_row.max(1)).max(1).min(h);
+
+    let mut energies = vec![0.0f64; n];
+    let mut y0 = 0usize;
+    let mut horiz = Vec::new();
+    while y0 < h {
+        let y1 = (y0 + band).min(h);
+        let rows = y1 - y0;
+        let src_rows = rows + 2 * half;
+
+        horiz.resize(src_rows * stride, 0.0);
+        horiz
+            .par_chunks_mut(stride)
+            .enumerate()
+            .for_each(|(bi, dst)| {
+                let sy = reflect_index(y0 as isize - half as isize + bi as isize, h as isize);
+                let src = &residual[sy * w..(sy + 1) * w];
+                horizontal_row_p::<P>(src, w, dst, &basis, half);
+            });
+
+        energies[y0 * w..y1 * w]
+            .par_chunks_mut(w)
+            .enumerate()
+            .for_each(|(li, row)| {
+                for (x, dst) in row.iter_mut().enumerate() {
+                    let mut norm_sq = 0.0f64;
+                    for kv in 0..P {
+                        // Load vertical taps once into local array, reuse across ku.
+                        let mut vals = [0.0f64; P];
+                        let idx = li * stride + x * P + kv;
+                        for a in 0..P {
+                            vals[a] = horiz[idx + a * stride];
+                        }
+                        let ku_start = degree.saturating_sub(kv);
+                        for b in &basis[ku_start..] {
+                            let mut proj = 0.0f64;
+                            for a in 0..P {
+                                proj += b[a] * vals[a];
+                            }
+                            norm_sq += proj * proj;
+                        }
+                    }
+                    *dst = norm_sq;
+                }
+            });
+
+        y0 = y1;
+    }
+    energies
+}
+
+/// Fallback path for arbitrary odd block size `p`.
+#[cfg(test)]
+fn complement_energy_generic(
+    residual: &[f64],
+    w: usize,
+    h: usize,
+    p: usize,
+    degree: usize,
+) -> Vec<f64> {
     let n = w * h;
     let half = (p - 1) / 2;
     let stride = w * p;
     let basis = dct_basis(p);
 
-    // One band of output rows needs horizontal projections for
-    // `[y0 - half, y1 - 1 + half]`, i.e. `rows + 2*half` source rows.
     let per_row = stride * std::mem::size_of::<f64>();
     let band = (BAND_BYTES / per_row.max(1)).max(1).min(h);
 
@@ -200,7 +316,6 @@ fn complement_energy(residual: &[f64], w: usize, h: usize, p: usize, degree: usi
                 for (x, dst) in row.iter_mut().enumerate() {
                     let mut norm_sq = 0.0f64;
                     for kv in 0..p {
-                        // Complement: ku + kv >= degree, with ku >= 0.
                         let ku_start = degree.saturating_sub(kv);
                         for b in basis.iter().skip(ku_start) {
                             let mut proj = 0.0f64;
@@ -217,6 +332,32 @@ fn complement_energy(residual: &[f64], w: usize, h: usize, p: usize, degree: usi
         y0 = y1;
     }
     energies
+}
+
+/// `||P_G^perp r_n||^2` for every pixel of `residual`, with mirror padding.
+///
+/// `degree == p` is the configuration used by both models; the loops below
+/// also cover `degree < p` correctly because the complement explicitly
+/// includes the `ku = 0` / `kv = 0` pairs that fall outside the model.
+pub(crate) fn complement_energy(
+    residual: &[f64],
+    w: usize,
+    h: usize,
+    p: usize,
+    degree: usize,
+) -> Vec<f64> {
+    match p {
+        3 => complement_energy_p::<3>(residual, w, h, degree),
+        5 => complement_energy_p::<5>(residual, w, h, degree),
+        7 => complement_energy_p::<7>(residual, w, h, degree),
+        9 => complement_energy_p::<9>(residual, w, h, degree),
+        11 => complement_energy_p::<11>(residual, w, h, degree),
+        17 => complement_energy_p::<17>(residual, w, h, degree),
+        #[cfg(test)]
+        _ => complement_energy_generic(residual, w, h, p, degree),
+        #[cfg(not(test))]
+        _ => panic!("unsupported block size p={p}"),
+    }
 }
 
 /// Per-pixel variance estimate `max(floor, ||P_G^perp r_n||^2 / dof)`.
@@ -271,25 +412,71 @@ pub(crate) fn box_smooth(mut plane: Vec<f64>, w: usize, h: usize, window: usize)
         return plane;
     }
     let half = (window / 2) as isize;
+    let hw = half as usize;
     let inv = 1.0 / window as f64;
 
     let mut tmp = vec![0.0f64; n];
-    tmp.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        let src = &plane[y * w..(y + 1) * w];
-        for (x, dst) in row.iter_mut().enumerate() {
-            let mut sum = 0.0f64;
-            for d in -half..=half {
-                sum += src[reflect_index(x as isize + d, w as isize)];
-            }
-            *dst = sum * inv;
-        }
-    });
 
+    // Horizontal pass: read contiguous interior slice when window fits in [0, w).
+    tmp.par_chunks_mut(w)
+        .zip(plane.par_chunks(w))
+        .for_each(|(dst, src)| {
+            if w < 2 * hw + 1 {
+                for x in 0..w {
+                    let mut sum = 0.0;
+                    for d in -half..=half {
+                        sum += src[reflect_index(x as isize + d, w as isize)];
+                    }
+                    dst[x] = sum * inv;
+                }
+                return;
+            }
+            for x in 0..hw {
+                let mut sum = 0.0;
+                for d in -half..=half {
+                    sum += src[reflect_index(x as isize + d, w as isize)];
+                }
+                dst[x] = sum * inv;
+            }
+            for x in hw..=w - hw - 1 {
+                let win = &src[x - hw..x + hw + 1];
+                let mut sum = 0.0;
+                for &v in win {
+                    sum += v;
+                }
+                dst[x] = sum * inv;
+            }
+            for x in w - hw..w {
+                let mut sum = 0.0;
+                for d in -half..=half {
+                    sum += src[reflect_index(x as isize + d, w as isize)];
+                }
+                dst[x] = sum * inv;
+            }
+        });
+
+    // Vertical pass: read contiguous interior rows when y is inside [hw, h - hw).
     plane.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        if h < 2 * hw + 1 {
+            for (x, dst) in row.iter_mut().enumerate() {
+                let mut sum = 0.0;
+                for d in -half..=half {
+                    sum += tmp[reflect_index(y as isize + d, h as isize) * w + x];
+                }
+                *dst = sum * inv;
+            }
+            return;
+        }
         for (x, dst) in row.iter_mut().enumerate() {
-            let mut sum = 0.0f64;
-            for d in -half..=half {
-                sum += tmp[reflect_index(y as isize + d, h as isize) * w + x];
+            let mut sum = 0.0;
+            if y < hw || y >= h - hw {
+                for d in -half..=half {
+                    sum += tmp[reflect_index(y as isize + d, h as isize) * w + x];
+                }
+            } else {
+                for d in -half..=half {
+                    sum += tmp[(y as isize + d) as usize * w + x];
+                }
             }
             *dst = sum * inv;
         }
@@ -474,5 +661,96 @@ mod tests {
         let plane = vec![7.5f64; w * h];
         let out = box_smooth(plane, w, h, 7);
         assert!(out.iter().all(|v| (*v - 7.5).abs() < 1e-12));
+    }
+
+    #[test]
+    fn specialized_and_generic_complement_energy_are_bit_identical() {
+        for &(w, h) in &[
+            (16usize, 13usize),
+            (37, 29),
+            (9, 5),
+            (5, 4),
+            (2, 2),
+            (64, 48),
+        ] {
+            let plane = random_plane(
+                w,
+                h,
+                0x1234_5678_9abc_def0 ^ ((w as u64) << 16) ^ (h as u64),
+            );
+            for &(p, degree) in &[
+                (3usize, 3usize),
+                (3, 2),
+                (5, 5),
+                (5, 4),
+                (7, 7),
+                (9, 9),
+                (9, 7),
+                (11, 11),
+                (17, 12),
+            ] {
+                let spec = complement_energy(&plane, w, h, p, degree);
+                let generic = complement_energy_generic(&plane, w, h, p, degree);
+                assert_eq!(spec.len(), generic.len());
+                for (i, (s, g)) in spec.iter().zip(generic.iter()).enumerate() {
+                    assert_eq!(
+                        s.to_bits(),
+                        g.to_bits(),
+                        "mismatch at {w}x{h} p={p} deg={degree} pixel {i}: {s} vs {g}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn box_smooth_matches_naive_reflection_bit_identically() {
+        for &(w, h) in &[
+            (16usize, 13usize),
+            (37, 29),
+            (7, 5),
+            (4, 4),
+            (2, 2),
+            (48, 36),
+        ] {
+            let plane = random_plane(
+                w,
+                h,
+                0xa5a5_5a5a_3333_cccc ^ ((w as u64) << 16) ^ (h as u64),
+            );
+            let optimized = box_smooth(plane.clone(), w, h, 7);
+
+            // Naive reference that routes every tap unconditionally through reflect_index.
+            let half = 3isize;
+            let inv = 1.0 / 7.0f64;
+            let mut tmp = vec![0.0f64; w * h];
+            for y in 0..h {
+                for x in 0..w {
+                    let mut sum = 0.0f64;
+                    for d in -half..=half {
+                        sum += plane[y * w + reflect_index(x as isize + d, w as isize)];
+                    }
+                    tmp[y * w + x] = sum * inv;
+                }
+            }
+            let mut reference = vec![0.0f64; w * h];
+            for y in 0..h {
+                for x in 0..w {
+                    let mut sum = 0.0f64;
+                    for d in -half..=half {
+                        sum += tmp[reflect_index(y as isize + d, h as isize) * w + x];
+                    }
+                    reference[y * w + x] = sum * inv;
+                }
+            }
+
+            for (i, (opt, r)) in optimized.iter().zip(reference.iter()).enumerate() {
+                assert_eq!(
+                    opt.to_bits(),
+                    r.to_bits(),
+                    "box_smooth mismatch at {w}x{h} index {i}: {opt} vs {r}"
+                );
+            }
+        }
     }
 }
