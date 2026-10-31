@@ -233,6 +233,24 @@ pub fn parse_heif_targets<'a>(bytes: &'a [u8]) -> Result<HeifHevcTarget<'a>> {
         }
     }
 
+    // `iloc` can list the same extent twice, or overlapping extents for
+    // different items. Two spans over the same bytes would have the CABAC
+    // rewrite applied to the output of the first pass, and `strip` would restore
+    // a region it had already restored — both silently corrupt the picture.
+    let mut ordered: Vec<&PhysicalNalSpan> = slice_spans.iter().collect();
+    ordered.sort_unstable_by_key(|span| span.start);
+    for pair in ordered.windows(2) {
+        let end = pair[0]
+            .start
+            .checked_add(pair[0].len)
+            .ok_or(HevcError::Truncated)?;
+        if end > pair[1].start {
+            return Err(HevcError::InvalidData(
+                "overlapping HEIC slice extents in iloc",
+            ));
+        }
+    }
+
     if slice_spans.is_empty() {
         return Err(HevcError::NoSlices);
     }

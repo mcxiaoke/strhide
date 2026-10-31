@@ -319,7 +319,7 @@ fn is_sharing_or_permission_error(err: &std::io::Error) -> bool {
 }
 
 /// Flush the directory entry created by a rename (no-op off unix).
-fn sync_parent_dir(path: &Path) {
+pub(crate) fn sync_parent_dir(path: &Path) {
     #[cfg(unix)]
     {
         let parent = match path.parent() {

@@ -41,15 +41,26 @@ fn jar_signature_check_survives_short_central_directory() {
         let mut cur = Cursor::new(data);
         let found = check_jar_signature(&mut cur, Some("tiny.zip"))
             .expect("a short central directory is not an I/O error");
-        assert!(
-            found.is_none(),
-            "cd_size={cd_size} must not invent a signature"
-        );
         assert_eq!(
             cur.position(),
             0,
             "the check must restore the reader position"
         );
+        if cd_size == 0 {
+            assert!(
+                found.is_none(),
+                "an archive with no central directory has nothing to sign"
+            );
+        } else {
+            // Behaviour change from the fourth round: a central directory that
+            // exists but cannot be parsed is no longer reported as "unsigned".
+            // A signed archive we cannot read is not the same as an unsigned one
+            // (ZIP64 keeps `0xFFFF_FFFF` in the 32-bit offset field).
+            assert!(
+                found.is_some(),
+                "cd_size={cd_size} is unparseable and must fail closed"
+            );
+        }
     }
 }
 

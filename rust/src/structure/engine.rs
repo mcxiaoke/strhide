@@ -1359,8 +1359,15 @@ pub fn write_carrier_with(
             crate::core::control::Stage::Write,
             meta.len(),
         );
-        write_core(&mut host, &mut pw, source, options, local, profile)
-            .map_err(|e| crate::core::control::map_io_cancel(&options.control, e))?
+        let core = write_core(&mut host, &mut pw, source, options, local, profile)
+            .map_err(|e| crate::core::control::map_io_cancel(&options.control, e))?;
+        // Durability before the rename, the same contract `commit.rs` applies to
+        // every payload write: renaming first and syncing later leaves a window
+        // where the new name exists with an unwritten tail. `pw` borrows
+        // `out_file`, and its last use is the `write_core` call above, so the
+        // borrow is already over here.
+        out_file.sync_all()?;
+        core
     };
 
     // Strict cancellation check before .bak creation and atomic commit
@@ -1377,6 +1384,7 @@ pub fn write_carrier_with(
 
     crate::commit::rename_with_retry(&tmp_target, target_path)?;
     tmp_guard.commit();
+    crate::commit::sync_parent_dir(target_path);
 
     // Restore original carrier permissions (mode/readonly) alongside timestamps.
     let _ = std::fs::set_permissions(target_path, orig_permissions);
@@ -1990,8 +1998,12 @@ pub fn remove_carrier_with_dialect(
             crate::core::control::Stage::Write,
             meta.len(),
         );
-        remove_core(&mut cf, &mut pw, &label, options.password, dialect)
-            .map_err(|e| crate::core::control::map_io_cancel(&options.control, e))?
+        let header = remove_core(&mut cf, &mut pw, &label, options.password, dialect)
+            .map_err(|e| crate::core::control::map_io_cancel(&options.control, e))?;
+        // Same durability contract as the write path: the restored file is
+        // fsynced before its temp name is renamed over the carrier.
+        out_f.sync_all()?;
+        header
     };
 
     // Verify restored file
@@ -2015,6 +2027,7 @@ pub fn remove_carrier_with_dialect(
 
     crate::commit::rename_with_retry(&tmp_target, target_path)?;
     tmp_guard.commit();
+    crate::commit::sync_parent_dir(target_path);
     let _ = std::fs::set_permissions(target_path, orig_permissions);
     let _ = filetime::set_file_times(target_path, orig_atime, orig_mtime);
 

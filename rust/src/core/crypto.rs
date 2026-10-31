@@ -61,7 +61,11 @@ pub const CHUNK_OVERHEAD: usize = 4 + AEAD_TAG_LEN;
 /// At least one, even for an empty payload: [`encrypt_stream_to_chunks`] always
 /// emits a final chunk so the reader can tell "no payload" from "truncated".
 pub fn chunk_count(plain_len: u64, chunk_size: usize) -> u64 {
-    plain_len.div_ceil(chunk_size as u64).max(1)
+    // `max(1)` on the *divisor*: this is a `pub fn`, and a caller outside the
+    // crate can pass 0. `LocalParams::validate` rejects that, but relying on it
+    // here made the function divide by zero (a panic, and with `panic = "abort"`
+    // a process kill) instead of degrading gracefully.
+    plain_len.div_ceil(chunk_size.max(1) as u64).max(1)
 }
 
 /// Ciphertext length of the framed payload for `plain_len` bytes of plaintext.
@@ -323,7 +327,14 @@ pub fn encrypt_stream_to_chunks<R: Read, W: Write>(
     fixed_header_aad: &[u8; AAD_SIZE],
     chunk_size: usize,
 ) -> Result<u64, StrHideError> {
-    debug_assert!(chunk_size > 0 && chunk_size <= MAX_CHUNK_SIZE);
+    if chunk_size == 0 || chunk_size > MAX_CHUNK_SIZE {
+        // A `debug_assert!` here was the only check: release builds silently
+        // emitted one empty chunk for `chunk_size == 0` and wrote an unreadable
+        // stream for an oversized one.
+        return Err(StrHideError::General(format!(
+            "chunk_size must be in 1..={MAX_CHUNK_SIZE} bytes, got {chunk_size}"
+        )));
+    }
     let cipher = Aes256Gcm::new_from_slice(payload_key)
         .map_err(|e| StrHideError::General(format!("Invalid key for AES-GCM: {e}")))?;
 
@@ -717,6 +728,30 @@ pub fn compute_file_sha256(path: &std::path::Path) -> Result<[u8; 32], StrHideEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both of these are `pub fn`s reachable from an embedding host, and both
+    /// used to assume a validated `chunk_size`. `chunk_count` divided by zero
+    /// (a panic, and `panic = "abort"` makes that a process kill) and
+    /// `encrypt_stream_to_chunks` only had a `debug_assert!`, so a release build
+    /// silently wrote a single empty chunk instead of failing.
+    #[test]
+    fn zero_chunk_size_is_rejected_or_degraded_not_a_panic() {
+        assert_eq!(chunk_count(100, 0), 100);
+        assert_eq!(chunk_count(0, 0), 1);
+
+        let key = [7u8; 32];
+        let nonce = [9u8; 12];
+        let aad = [0u8; AAD_SIZE];
+        let mut input: &[u8] = b"payload";
+        let mut out = Vec::new();
+        let err = encrypt_stream_to_chunks(&mut input, &mut out, &key, &nonce, &aad, 0)
+            .expect_err("a zero chunk size must be an error, not an empty chunk");
+        assert!(
+            err.to_string().contains("chunk_size"),
+            "error must name the knob: {err}"
+        );
+        assert!(out.is_empty(), "nothing may be written before the check");
+    }
 
     #[test]
     fn test_python_crypto_vector_compatibility() {

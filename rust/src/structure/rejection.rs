@@ -262,17 +262,29 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
         .filter(|(_, w)| *w == b"PK\x05\x06")
         .map(|(i, _)| i)
         .collect();
+    // Set whenever an EOCD candidate existed but its central directory could not
+    // be read. A signed archive whose CD we cannot parse is *not* the same thing
+    // as an unsigned one — treating it as unsigned let a ZIP64 archive (whose
+    // `cd_offset` is `0xFFFF_FFFF`, the value stored in a 32-bit field) pass this
+    // guard untouched.
+    let mut unresolved = false;
     for pos in candidates.into_iter().rev() {
         let eocd_pos = (file_size - scan_len) + pos as u64;
         reader.seek(SeekFrom::Start(eocd_pos + 12))?;
         let mut cd_info = [0u8; 8];
         if reader.read_exact(&mut cd_info).is_err() {
+            unresolved = true;
             continue;
         }
         let cd_size = u32::from_le_bytes(cd_info[0..4].try_into().unwrap()) as u64;
         let cd_offset = u32::from_le_bytes(cd_info[4..8].try_into().unwrap()) as u64;
 
-        if cd_offset + cd_size > file_size || reader.seek(SeekFrom::Start(cd_offset)).is_err() {
+        let Some(cd_end) = cd_offset.checked_add(cd_size) else {
+            unresolved = true;
+            continue;
+        };
+        if cd_end > file_size || reader.seek(SeekFrom::Start(cd_offset)).is_err() {
+            unresolved = true;
             continue;
         }
         if cd_size == 0 {
@@ -282,6 +294,7 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
         }
         let mut cd_buf = vec![0u8; cd_size as usize];
         if reader.read_exact(&mut cd_buf).is_err() {
+            unresolved = true;
             continue;
         }
         // The buffer must *be* the central directory, not merely be readable.
@@ -294,6 +307,7 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
         // this slice panic (review R3 P0-1). With `panic = "abort"` in release
         // that killed the process before it had written anything.
         if !cd_buf.starts_with(b"PK\x01\x02") {
+            unresolved = true;
             continue;
         }
         let mut offset = 0usize;
@@ -330,6 +344,7 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
         if !well_formed {
             // Structurally inconsistent: not the archive's real EOCD. Try the
             // next candidate instead of concluding "unsigned".
+            unresolved = true;
             continue;
         }
         // A fully walked central directory with no signature entry is the
@@ -339,6 +354,14 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
     }
 
     reader.seek(SeekFrom::Start(start_pos))?;
+    if unresolved {
+        // Every EOCD candidate was there but unreadable. Failing closed is the
+        // conservative answer: modifying an archive whose signature state we
+        // cannot see may break a signature we would have warned about.
+        return Ok(Some(
+            "ZIP/JAR central directory could not be parsed (possible ZIP64 or a decoy end-of-central-directory record). Modifying this archive might break its signature.".into(),
+        ));
+    }
     Ok(None)
 }
 

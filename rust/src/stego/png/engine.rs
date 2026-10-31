@@ -204,6 +204,25 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
                     data: body.to_vec(),
                 });
             }
+            b"tRNS" => {
+                // For colour types 0 and 2 the chunk is a transparent *colour
+                // key*, not an alpha channel: every pixel equal to that value
+                // becomes fully transparent. Class-internal `±1` embedding would
+                // move such a pixel off the key, making a transparent background
+                // opaque (or a solid pixel transparent) — visible damage in a
+                // tool that promises the image keeps its appearance. RGBA and
+                // grayscale+alpha carry real alpha and are unaffected.
+                if color_type == 0 || color_type == 2 {
+                    return Err(StrHideError::UnsupportedFormat(
+                        "PNG uses a tRNS transparent colour key (colour type 0/2), which ±1 pixel embedding would make visible; please use RGBA or grayscale+alpha, or 'strhide write' for structural hiding"
+                            .into(),
+                    ));
+                }
+                chunks.push(PngChunk {
+                    ty: *b"tRNS",
+                    data: body.to_vec(),
+                });
+            }
             b"IDAT" => {
                 idat.extend_from_slice(body);
                 // Placeholder marking where the re-compressed IDAT belongs;
@@ -2994,6 +3013,34 @@ mod tests {
         .expect("probe");
         assert!(cap.recommended_max_bytes > 0);
         assert!(cap.recommended_max_bytes <= cap.max_raw_payload_bytes / 2);
+    }
+
+    /// Colour types 0/2 use `tRNS` as a transparent colour key: every pixel
+    /// equal to the key is fully transparent, so a class-internal `±1` on one of
+    /// them makes it opaque. The engine used to keep the chunk verbatim and embed
+    /// anyway, i.e. visibly damage a carrier it promised to preserve.
+    #[test]
+    fn trns_colour_key_is_refused() {
+        let (w, h) = (32usize, 32usize);
+        let pixels = vec![0x80u8; w * h * 3];
+        // Six bytes: the RGB triple that is fully transparent.
+        let key = [0u8, 0x80, 0, 0x80, 0, 0x80];
+        let png = craft_png(
+            w as u32,
+            h as u32,
+            &pixels,
+            &vec![0u8; h],
+            &[(b"tRNS", &key)],
+            1,
+        );
+
+        match decode_png(&png) {
+            Ok(_) => panic!("a tRNS colour key must be refused, not embedded into"),
+            Err(StrHideError::UnsupportedFormat(msg)) => {
+                assert!(msg.contains("tRNS"), "error must name the chunk: {msg}");
+            }
+            Err(other) => panic!("unexpected error kind: {other}"),
+        }
     }
 
     /// The budget has to be checked before the trellis allocates: 64 MP RGB with
