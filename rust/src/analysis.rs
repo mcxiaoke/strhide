@@ -1527,13 +1527,18 @@ fn track_spatial_domain(
     if ws_rate > SPATIAL_RATE_THRESHOLD {
         findings.push(Finding {
             detector: "spatial:ws".into(),
+            // Deliberately informational: WS over-reports on content-adaptive
+            // embedding that keeps the visual statistics intact, and the scan
+            // verdict is calibrated against that. The *status* is INFO to match,
+            // instead of claiming ALERT while the verdict stays clean (review
+            // R3 P2-21).
             severity: Severity::Info,
             detail: format!("Weighted Stego-analysis (WS) estimates LSB rate ~{ws_rate:.2}"),
         });
         detectors.push(DetectorMetric {
             name: "spatial:ws".into(),
             domain: "spatial".into(),
-            status: "ALERT".into(),
+            status: "INFO".into(),
             metric: format!("rate: {ws_rate:.3}"),
             threshold: Some(format!("{SPATIAL_RATE_THRESHOLD:.3}")),
             detail: "prediction residual covariance elevated".into(),

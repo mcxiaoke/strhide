@@ -89,6 +89,40 @@ pub fn batch_payload_name(carrier: &std::path::Path, recorded: &str, is_file: bo
     format!("{stem}.{ext}")
 }
 
+/// Render attacker-controlled text safe for a terminal.
+///
+/// The password hint lives in the envelope but is *not* covered by the header
+/// AAD, so a crafted carrier can put `ESC [ ...` or OSC sequences in it and
+/// have the CLI print them verbatim: cursor movement, screen wipes, even an
+/// OSC 52 clipboard write (review R3 P2-2). Control characters become `\u{NN}`
+/// escapes; a tab survives because it cannot drive a terminal.
+pub fn escape_control_chars(text: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+
+    fn is_unsafe(c: char) -> bool {
+        (c.is_control() && c != '\t')
+            || matches!(
+                c,
+                '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            )
+    }
+
+    if !text.chars().any(is_unsafe) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    for c in text.chars() {
+        if is_unsafe(c) {
+            use std::fmt::Write;
+            // Writing into a String cannot fail.
+            let _ = write!(out, "\\u{{{:x}}}", c as u32);
+        } else {
+            out.push(c);
+        }
+    }
+    Cow::Owned(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +188,18 @@ mod tests {
             "COM0 is not a device name"
         );
         assert_eq!(sanitize_filename("\u{7}"), "_");
+    }
+
+    #[test]
+    fn escapes_terminal_control_sequences() {
+        assert_eq!(escape_control_chars("plain hint"), "plain hint");
+        assert_eq!(
+            escape_control_chars("evil\u{1b}[31mred"),
+            "evil\\u{1b}[31mred"
+        );
+        // Tabs cannot drive a terminal, so they survive.
+        assert_eq!(escape_control_chars("a\tb"), "a\tb");
+        // A right-to-left override is a formatting control, not `is_control()`.
+        assert_eq!(escape_control_chars("\u{202e}gpj.exe"), "\\u{202e}gpj.exe");
     }
 }

@@ -571,22 +571,43 @@ fn host_extent(item: &IsobmffItem, target_start: u64, target_end: u64) -> Option
 }
 
 fn patch_uint(buf: &mut [u8], pos: usize, size: usize, val: u64) -> Result<(), StrHideError> {
-    if pos + size > buf.len() {
+    let Some(end) = pos.checked_add(size) else {
+        return Err(StrHideError::CorruptedData(
+            "Out of bounds patch in iloc".into(),
+        ));
+    };
+    if end > buf.len() {
         return Err(StrHideError::CorruptedData(
             "Out of bounds patch in iloc".into(),
         ));
     }
-    match size {
-        1 => buf[pos] = val as u8,
-        2 => buf[pos..pos + 2].copy_from_slice(&(val as u16).to_be_bytes()),
-        4 => buf[pos..pos + 4].copy_from_slice(&(val as u32).to_be_bytes()),
-        8 => buf[pos..pos + 8].copy_from_slice(&val.to_be_bytes()),
+    // `iloc` stores extent lengths in a field whose width comes from
+    // `length_size` (1, 2, 4 or 8 bytes). Writing `val as u32` silently
+    // truncated anything wider, producing a container whose extent length no
+    // longer matched the bytes it described (review R3 P1-10).
+    let max = match size {
+        1 => u8::MAX as u64,
+        2 => u16::MAX as u64,
+        4 => u32::MAX as u64,
+        8 => u64::MAX,
         _ => {
             return Err(StrHideError::CorruptedData(format!(
                 "Unsupported integer size {}",
                 size
             )));
         }
+    };
+    if val > max {
+        return Err(StrHideError::CorruptedData(format!(
+            "iloc field value {val} does not fit in the {size}-byte length_size the carrier declares"
+        )));
+    }
+    match size {
+        1 => buf[pos] = val as u8,
+        2 => buf[pos..pos + 2].copy_from_slice(&(val as u16).to_be_bytes()),
+        4 => buf[pos..pos + 4].copy_from_slice(&(val as u32).to_be_bytes()),
+        8 => buf[pos..pos + 8].copy_from_slice(&val.to_be_bytes()),
+        _ => unreachable!("size was validated above"),
     }
     Ok(())
 }
@@ -1570,5 +1591,31 @@ mod tests {
         assert_eq!(parsed.items[0].extents.len(), 1);
         assert_eq!(parsed.items[0].extents[0].offset, 100);
         assert_eq!(parsed.items[0].extents[0].length, 8);
+    }
+
+    /// `iloc` extent lengths are written back through a field whose width comes
+    /// from `length_size`. A value that does not fit used to be truncated
+    /// silently, leaving a container whose extent length no longer described
+    /// the bytes it pointed at (review R3 P1-10).
+    #[test]
+    fn patch_uint_rejects_values_wider_than_the_field() {
+        for (size, bad) in [(1usize, 256u64), (2, 65_536), (4, u32::MAX as u64 + 1)] {
+            let mut buf = vec![0u8; 8];
+            assert!(
+                super::patch_uint(&mut buf, 0, size, bad).is_err(),
+                "{bad} must not fit in {size} byte(s)"
+            );
+        }
+
+        // The boundary values themselves still fit.
+        let mut buf = vec![0u8; 8];
+        super::patch_uint(&mut buf, 0, 2, u16::MAX as u64).unwrap();
+        assert_eq!(&buf[0..2], &[0xFF, 0xFF]);
+
+        // Out-of-range offsets are still rejected, including one that would
+        // wrap `pos + size`.
+        let mut buf = vec![0u8; 4];
+        assert!(super::patch_uint(&mut buf, 3, 2, 1).is_err());
+        assert!(super::patch_uint(&mut buf, usize::MAX, 1, 1).is_err());
     }
 }

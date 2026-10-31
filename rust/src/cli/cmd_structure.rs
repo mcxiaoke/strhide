@@ -286,8 +286,11 @@ fn read_one(
             if !quiet && let Some(hint) = e.hint() {
                 // `--stdout` means the payload owns stdout, so the hint goes to
                 // stderr there; every other mode keeps the historical stdout
-                // placement (review R3 P1-8).
-                let line = t!(Msg::InfoPasswordHint, hint = hint);
+                // placement (review R3 P1-8). The hint itself is untrusted and
+                // outside the AAD, so control characters are escaped before it
+                // reaches a terminal (review R3 P2-2).
+                let safe = crate::core::fs::escape_control_chars(hint);
+                let line = t!(Msg::InfoPasswordHint, hint = safe.as_ref());
                 if args.stdout {
                     eprintln!("{line}");
                 } else {

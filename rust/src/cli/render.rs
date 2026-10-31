@@ -41,7 +41,9 @@ pub(crate) fn print_inspect_result(res: &crate::structure::InspectResult) {
             println!("{}", t!(Msg::InspectStealth, val = stl));
         }
         if let Some(h) = &res.password_hint {
-            println!("{}", t!(Msg::InspectPasswordHint, val = h));
+            // The hint is attacker-controlled and outside the AAD.
+            let safe = crate::core::fs::escape_control_chars(h);
+            println!("{}", t!(Msg::InspectPasswordHint, val = safe.as_ref()));
         }
         if let Some(sz) = res.orig_host_size {
             println!("{}", t!(Msg::InspectOrigSize, val = sz));
@@ -206,7 +208,8 @@ pub(crate) fn print_write_result(res: &WriteResult, quiet: bool, elapsed: std::t
         println!("{}", t!(Msg::WriteStrategyNote, note = note));
     }
     if let Some(hint) = &res.password_hint {
-        println!("{}", t!(Msg::WritePasswordHint, hint = hint));
+        let safe = crate::core::fs::escape_control_chars(hint);
+        println!("{}", t!(Msg::WritePasswordHint, hint = safe.as_ref()));
     }
     for warn in &res.warnings {
         eprintln!("{}", t!(Msg::WriteWarningNote, warn = warn.message()));
