@@ -6,7 +6,7 @@
 
 | 实现 | 语言 | 状态 |
 | --- | --- | --- |
-| [`rust/`](rust/) | Rust (edition 2024) | **主力维护中（0.6.x）**——单文件静态二进制，从源码构建 |
+| [`rust/`](rust/) | Rust (edition 2024) | **主力维护中（0.8.x）**——单文件静态二进制，从源码构建 |
 
 > [English documentation (README.md)](README.md)
 

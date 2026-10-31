@@ -6,7 +6,7 @@ This repository ships two implementations:
 
 | Implementation | Language | Status |
 | --- | --- | --- |
-| [`rust/`](rust/) | Rust (edition 2024) | **Maintained (0.6.x)** — single static binary, built from source |
+| [`rust/`](rust/) | Rust (edition 2024) | **Maintained (0.8.x)** — single static binary, built from source |
 
 
 > [中文说明（README.zh.md）](README.zh.md)
