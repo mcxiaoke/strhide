@@ -147,7 +147,7 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
               payload,
               output_path: target,
               password: password || undefined,
-              domain: "content",
+              domain: undefined,
               safety_level: safety,
               enforce_safety: enforce,
               algorithm: algorithm !== "auto" ? algorithm : undefined,

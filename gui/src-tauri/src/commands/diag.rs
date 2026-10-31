@@ -15,9 +15,8 @@ pub fn get_capabilities_cmd() -> Vec<Capability> {
     CAPABILITIES.to_vec()
 }
 
-#[tauri::command]
-pub async fn inspect_carrier_cmd(
-    state: State<'_, GuiState>,
+pub async fn inspect_carrier_impl(
+    state: &GuiState,
     path: PathBuf,
     password: Option<String>,
     domain: Option<String>,
@@ -51,6 +50,16 @@ pub async fn inspect_carrier_cmd(
         strhide::errors::StrHideError::General(format!("Worker thread join error: {join_err}"))
             .detail_i18n_with_ctx(ctx)
     })?
+}
+
+#[tauri::command]
+pub async fn inspect_carrier_cmd(
+    state: State<'_, GuiState>,
+    path: PathBuf,
+    password: Option<String>,
+    domain: Option<String>,
+) -> Result<DualInspect, ErrorDetail> {
+    inspect_carrier_impl(&state, path, password, domain).await
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

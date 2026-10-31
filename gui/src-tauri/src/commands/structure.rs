@@ -25,9 +25,8 @@ pub struct StructureWriteRequest {
     pub overwrite: bool,
 }
 
-#[tauri::command]
-pub async fn write_structure_file_cmd(
-    state: State<'_, GuiState>,
+pub async fn write_structure_file_impl(
+    state: &GuiState,
     task_id: String,
     req: StructureWriteRequest,
     on_progress: Channel<ProgressEvent>,
@@ -37,52 +36,79 @@ pub async fn write_structure_file_cmd(
     let target_buf = target.to_path_buf();
     let overwrite = req.overwrite;
 
-    run_cancellable_task(
-        &state,
-        task_id,
-        on_progress,
-        move |engine, pool, ctrl, _| {
-            // Enforce overwrite check on output path
-            check_overwrite(&target_buf, overwrite)?;
+    run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
+        // Enforce overwrite check on output path
+        check_overwrite(&target_buf, overwrite)?;
 
-            let (buf, filename, is_file);
-            let source = match req.payload {
-                PayloadInputDto::Text { ref content } => {
-                    let res = PayloadSource::Text(content).into_buffered()?;
-                    buf = res.0;
-                    filename = res.1;
-                    is_file = res.2;
-                    PayloadSource::Buffered {
-                        data: &buf,
-                        filename: &filename,
-                        is_file,
-                    }
+        let (buf, filename, is_file);
+        let source = match req.payload {
+            PayloadInputDto::Text { ref content } => {
+                let res = PayloadSource::Text(content).into_buffered()?;
+                buf = res.0;
+                filename = res.1;
+                is_file = res.2;
+                PayloadSource::Buffered {
+                    data: &buf,
+                    filename: &filename,
+                    is_file,
                 }
-                PayloadInputDto::File { ref path } => PayloadSource::File(path),
-            };
+            }
+            PayloadInputDto::File { ref path } => PayloadSource::File(path),
+        };
 
-            let strategy_str = req.strategy.as_deref().unwrap_or("auto");
-            let write_opts = WriteOptions {
-                output_path: req.output_path.as_deref(),
-                password: req.password.as_deref(),
-                password_hint: req.password_hint.as_deref(),
-                strategy: strategy_str,
-                stealth: req.stealth,
-                preserve_time: req.preserve_time,
-                backup: req.backup,
-                // Same value the pre-flight `check_overwrite` above used, so
-                // the engine's own guard agrees with the IPC-level check.
-                overwrite,
-                control: ctrl,
-            };
+        let strategy_str = req.strategy.as_deref().unwrap_or("auto");
+        let write_opts = WriteOptions {
+            output_path: req.output_path.as_deref(),
+            password: req.password.as_deref(),
+            password_hint: req.password_hint.as_deref(),
+            strategy: strategy_str,
+            stealth: req.stealth,
+            preserve_time: req.preserve_time,
+            backup: req.backup,
+            // Same value the pre-flight `check_overwrite` above used, so
+            // the engine's own guard agrees with the IPC-level check.
+            overwrite,
+            control: ctrl,
+        };
 
-            pool.install(|| {
-                engine
-                    .structure()
-                    .write_file(&req.carrier, source, &write_opts)
-            })
-        },
-    )
+        pool.install(|| {
+            engine
+                .structure()
+                .write_file(&req.carrier, source, &write_opts)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn write_structure_file_cmd(
+    state: State<'_, GuiState>,
+    task_id: String,
+    req: StructureWriteRequest,
+    on_progress: Channel<ProgressEvent>,
+) -> Result<WriteResult, ErrorDetail> {
+    write_structure_file_impl(&state, task_id, req, on_progress).await
+}
+
+pub async fn read_structure_file_impl(
+    state: &GuiState,
+    task_id: String,
+    path: PathBuf,
+    output_path: Option<PathBuf>,
+    password: Option<String>,
+    overwrite: bool,
+    on_progress: Channel<ProgressEvent>,
+) -> Result<ReadSummary, ErrorDetail> {
+    run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
+        let opts = ReadOptions {
+            output_path: output_path.as_deref(),
+            password: password.as_deref(),
+            overwrite,
+            control: ctrl,
+        };
+        let res = pool.install(|| engine.structure().read_file(&path, &opts))?;
+        Ok(res.summary())
+    })
     .await
 }
 
@@ -96,21 +122,39 @@ pub async fn read_structure_file_cmd(
     overwrite: bool,
     on_progress: Channel<ProgressEvent>,
 ) -> Result<ReadSummary, ErrorDetail> {
-    run_cancellable_task(
+    read_structure_file_impl(
         &state,
         task_id,
+        path,
+        output_path,
+        password,
+        overwrite,
         on_progress,
-        move |engine, pool, ctrl, _| {
-            let opts = ReadOptions {
-                output_path: output_path.as_deref(),
-                password: password.as_deref(),
-                overwrite,
-                control: ctrl,
-            };
-            let res = pool.install(|| engine.structure().read_file(&path, &opts))?;
-            Ok(res.summary())
-        },
     )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn restore_structure_file_impl(
+    state: &GuiState,
+    task_id: String,
+    path: PathBuf,
+    output_path: Option<PathBuf>,
+    password: Option<String>,
+    backup: bool,
+    overwrite: bool,
+    on_progress: Channel<ProgressEvent>,
+) -> Result<RemoveResult, ErrorDetail> {
+    run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
+        let opts = RestoreOptions {
+            output_path: output_path.as_deref(),
+            password: password.as_deref(),
+            backup,
+            overwrite,
+            control: ctrl,
+        };
+        pool.install(|| engine.structure().restore_file(&path, &opts))
+    })
     .await
 }
 
@@ -126,20 +170,15 @@ pub async fn restore_structure_file_cmd(
     overwrite: bool,
     on_progress: Channel<ProgressEvent>,
 ) -> Result<RemoveResult, ErrorDetail> {
-    run_cancellable_task(
+    restore_structure_file_impl(
         &state,
         task_id,
+        path,
+        output_path,
+        password,
+        backup,
+        overwrite,
         on_progress,
-        move |engine, pool, ctrl, _| {
-            let opts = RestoreOptions {
-                output_path: output_path.as_deref(),
-                password: password.as_deref(),
-                backup,
-                overwrite,
-                control: ctrl,
-            };
-            pool.install(|| engine.structure().restore_file(&path, &opts))
-        },
     )
     .await
 }

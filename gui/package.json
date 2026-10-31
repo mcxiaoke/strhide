@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "test:unit": "playwright test tests/unit",
+    "test:cross": "cargo test --manifest-path src-tauri/Cargo.toml --test cross_validation",
     "test:e2e": "playwright test -c tests/e2e/playwright.config.ts",
     "tauri": "tauri"
   },
