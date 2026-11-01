@@ -156,6 +156,9 @@ fn flip_option(mv: Move, rho_plus: f64, rho_minus: f64) -> Flip {
                 (rho_minus, Kind::Minus)
             }
         }
+        // A slot that cannot move keeps its cover parity: it contributes a
+        // fixed value to the syndrome and simply offers no way to fix it.
+        Move::None => (f64::INFINITY, Kind::Keep),
     };
     Flip { cost, kind }
 }
@@ -990,11 +993,11 @@ mod tests {
             let y = self.vals[i];
             let upward = match self.moves[i] {
                 Move::Both | Move::PlusOnly => Some(self.rp[i]),
-                Move::MinusOnly => None,
+                Move::MinusOnly | Move::None => None,
             };
             let downward = match self.moves[i] {
                 Move::Both | Move::MinusOnly => Some(self.rm[i]),
-                Move::PlusOnly => None,
+                Move::PlusOnly | Move::None => None,
             };
             // Keep first, so `cur[i]` is already correct when we recurse.
             self.walk(i + 1, cur, cost, best);
@@ -1354,6 +1357,7 @@ mod tests {
                     Move::PlusOnly => assert!(deltas[i] >= 0, "case {case}: -1 on a +only slot"),
                     Move::MinusOnly => assert!(deltas[i] <= 0, "case {case}: +1 on a -only slot"),
                     Move::Both => {}
+                    Move::None => assert!(deltas[i] == 0, "case {case}: move on a stuck slot"),
                 }
             }
         }

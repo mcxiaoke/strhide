@@ -102,6 +102,8 @@ static ENGINES: &[&dyn StegoEngine] = &[
     &MkvEngine,
     #[cfg(feature = "content-audio")]
     &WavEngine,
+    #[cfg(feature = "content-audio")]
+    &FlacEngine,
 ];
 
 /// The engine that handles `format`, or `None` when the content domain cannot
@@ -953,6 +955,119 @@ impl StegoEngine for MkvEngine {
         dialect: &StegoProfile,
     ) -> Result<StegoVerifyResult, StrHideError> {
         hevc_verify(self.format(), carrier, opts, dialect)
+    }
+}
+
+/// FLAC: residual-domain coding that keeps every Rice codeword the same width.
+#[cfg(feature = "content-audio")]
+pub struct FlacEngine;
+
+#[cfg(feature = "content-audio")]
+impl StegoEngine for FlacEngine {
+    fn format(&self) -> FileFormat {
+        FileFormat::Flac
+    }
+
+    fn probe(
+        &self,
+        carrier: &[u8],
+        opts: &ProbeOptions<'_>,
+        _dialect: &StegoProfile,
+    ) -> Result<StegoCapacityInfo, StrHideError> {
+        opts.tuning.applicable_to(self.format())?;
+        opts.control.check()?;
+        with_pool(opts.pool.as_ref(), || {
+            crate::stego::audio::probe_flac(carrier, opts.safety.level, &opts.control)
+        })
+    }
+
+    fn embed(
+        &self,
+        carrier: &[u8],
+        payload: &Payload<'_>,
+        opts: &EmbedOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<EmbedOutput, StrHideError> {
+        opts.tuning.applicable_to(self.format())?;
+        let secret = opts.secret(dialect);
+        let domain = opts.domain(dialect);
+        opts.control.check()?;
+        let anon_payload;
+        let eff_payload = if opts.no_filename && payload.name().is_some() {
+            anon_payload = Payload::bytes(payload.as_bytes());
+            &anon_payload
+        } else {
+            payload
+        };
+        let (bytes, capacity, stats) = with_pool(opts.pool.as_ref(), || {
+            crate::stego::audio::embed_flac(
+                carrier,
+                eff_payload,
+                secret,
+                domain,
+                dialect.flac_format(),
+                opts.safety,
+                opts.freshness,
+                &opts.control,
+            )
+        })?;
+        Ok(EmbedOutput::with_capacity_and_stats(bytes, capacity, stats))
+    }
+
+    fn extract(
+        &self,
+        carrier: &[u8],
+        opts: &ExtractOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<Payload<'static>, StrHideError> {
+        let secret = opts.secret(dialect);
+        let domain = opts.domain(dialect);
+        opts.control.check()?;
+        with_pool(opts.pool.as_ref(), || {
+            crate::stego::audio::extract_flac(
+                carrier,
+                secret,
+                domain,
+                dialect.flac_format(),
+                &opts.control,
+            )
+        })
+    }
+
+    fn inspect(
+        &self,
+        carrier: &[u8],
+        opts: &InspectOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoHeaderInfo, StrHideError> {
+        let secret = opts.secret(dialect);
+        let domain = opts.domain(dialect);
+        opts.control.check()?;
+        crate::stego::audio::inspect_flac(
+            carrier,
+            secret,
+            domain,
+            dialect.flac_format(),
+            &opts.control,
+        )
+    }
+
+    fn verify(
+        &self,
+        carrier: &[u8],
+        opts: &VerifyOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoVerifyResult, StrHideError> {
+        let secret = opts.secret(dialect);
+        let domain = opts.domain(dialect);
+        opts.control.check()?;
+        crate::stego::audio::verify_flac(
+            carrier,
+            secret,
+            domain,
+            dialect.flac_format(),
+            &opts.control,
+        )
     }
 }
 

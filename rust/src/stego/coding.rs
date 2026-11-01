@@ -332,6 +332,17 @@ pub enum Move {
     PlusOnly,
     /// Only `-1` stays in the class (slot sits on the class ceiling).
     MinusOnly,
+    /// Neither direction is available.
+    ///
+    /// The FLAC residual carrier is the reason this variant exists: a Rice
+    /// codeword keeps its width only while the move stays inside the same
+    /// `u >> k` bucket, and the *compensating* codewords that absorb the
+    /// predictor's reaction carry the same requirement. A slot whose
+    /// compensation cannot be expressed in either direction keeps its parity
+    /// and is skipped by the trellis instead of being dropped from the plan --
+    /// dropping it would change every following plan position, and the
+    /// extractor derives that plan from the stego file alone.
+    None,
 }
 
 /// Class of eight consecutive values used by the spatial engine.
@@ -394,6 +405,9 @@ pub fn flip_with_cost(val: &mut u8, mv: Move, rho_plus: f64, rho_minus: f64) -> 
                 Move::MinusOnly
             }
         }
+        // No direction exists: the value stays put and the caller has to cope
+        // with a parity it cannot change.
+        Move::None => Move::None,
     }
 }
 
@@ -561,6 +575,7 @@ mod tests {
                 Move::PlusOnly => &[1],
                 Move::MinusOnly => &[-1],
                 Move::Both => &[1, -1],
+                Move::None => &[],
             };
             for &d in dirs {
                 let moved = (val as i16 + d) as u8;

@@ -123,6 +123,16 @@ pub(crate) trait SlotCarrier {
     /// Display label used in capacity reports.
     fn format_label(&self) -> &'static str;
 
+    /// Slots the *carrier* could offer, which is not always `slot_count()`.
+    ///
+    /// WAV materialises every sample, so the two agree. FLAC materialises only
+    /// the slots a given payload needs, but its capacity report must describe
+    /// the whole file, so it overrides this with the number of eligible
+    /// residuals.
+    fn capacity_slots(&self) -> usize {
+        self.slot_count()
+    }
+
     /// One-line human description of the carrier (depth, channels, duration),
     /// surfaced in `inspect` output. `None` when the format has nothing useful
     /// to add.
@@ -131,31 +141,65 @@ pub(crate) trait SlotCarrier {
     }
 }
 
-/// The keyed slot plan shared by writer and reader.
-struct SlotPlan {
-    perm: KeyedPermutation,
+/// How plan positions map onto carrier slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mapping {
+    /// Keyed pseudo-random permutation of the whole slot pool (WAV). Spreads the
+    /// payload over the file and hides its position without the password.
+    Permuted,
+    /// Header slots stay put, body positions are permuted within the body
+    /// region (FLAC).
+    ///
+    /// FLAC needs both halves of this: the 512 header slots must be the
+    /// subframe tails, because a header bit cannot be rerouted if its slot
+    /// cannot move, while the body wants the payload scattered so that the
+    /// residuals a given key skips are spread over the whole file instead of
+    /// clustering in one quiet passage.
+    BodyPermuted,
+}
+
+/// The slot plan shared by writer and reader.
+enum SlotPlan {
+    Permuted(KeyedPermutation),
+    BodyPermuted(KeyedPermutation),
 }
 
 impl SlotPlan {
-    fn new(slot_count: usize, header_seed: &[u8; 32]) -> Self {
-        Self {
-            perm: KeyedPermutation::new(header_seed, slot_count),
+    fn new(mapping: Mapping, slot_count: usize, header_seed: &[u8; 32]) -> Self {
+        match mapping {
+            Mapping::Permuted => SlotPlan::Permuted(KeyedPermutation::new(header_seed, slot_count)),
+            Mapping::BodyPermuted => {
+                let body = slot_count.saturating_sub(V2_TOTAL_HEADER_SLOTS);
+                SlotPlan::BodyPermuted(KeyedPermutation::new(header_seed, body))
+            }
+        }
+    }
+
+    #[inline]
+    fn at(&self, position: usize) -> usize {
+        match self {
+            SlotPlan::Permuted(perm) => perm.at(position),
+            // Header and feature positions are the plan positions themselves.
+            SlotPlan::BodyPermuted(_) => position,
         }
     }
 
     #[inline]
     fn header_slot(&self, i: usize) -> usize {
-        self.perm.at(i)
+        self.at(i)
     }
 
     #[inline]
     fn feature_slot(&self, i: usize) -> usize {
-        self.perm.at(BASE_HEADER_SLOTS + i)
+        self.at(BASE_HEADER_SLOTS + i)
     }
 
     #[inline]
     fn body_slot(&self, i: usize) -> usize {
-        self.perm.at(V2_TOTAL_HEADER_SLOTS + i)
+        match self {
+            SlotPlan::Permuted(perm) => perm.at(V2_TOTAL_HEADER_SLOTS + i),
+            SlotPlan::BodyPermuted(perm) => V2_TOTAL_HEADER_SLOTS + perm.at(i),
+        }
     }
 }
 
@@ -209,6 +253,15 @@ fn write_bit<C: SlotCarrier + ?Sized>(
             } else {
                 -1
             }
+        }
+        // The header and feature-word slots are written outside the trellis, so
+        // an immovable one cannot be routed around. Refuse rather than silently
+        // leaving the header bit unset -- a corrupt header would make the whole
+        // envelope unreadable instead of failing loudly.
+        Move::None => {
+            return Err(StrHideError::General(format!(
+                "slot {slot} cannot carry the required bit: no legal move preserves its class"
+            )));
         }
     };
     carrier.apply(slot, delta)
@@ -269,14 +322,14 @@ fn max_body_slots(h: u8, u: u8) -> usize {
 }
 
 /// Build the capacity report shared by `probe` and `embed`.
-fn capacity_info<C: SlotCarrier + ?Sized>(
-    carrier: &C,
+pub(crate) fn capacity_info(
+    total: usize,
+    label: &str,
     level: SafetyLevel,
     h: u8,
     u: u8,
     codec: StegoCodec,
 ) -> StegoCapacityInfo {
-    let total = carrier.slot_count();
     let available = total.saturating_sub(V2_TOTAL_HEADER_SLOTS);
 
     let ceiling = max_body_slots(h, u).min(available);
@@ -323,7 +376,7 @@ fn capacity_info<C: SlotCarrier + ?Sized>(
     let recommended_u = tier_u[level.tier_index()];
 
     StegoCapacityInfo {
-        format: carrier.format_label().to_string(),
+        format: label.to_string(),
         // `max_raw` is priced at `u = 1` (the widest but least efficient
         // coding); the recommended tier is what a caller should plan for.
         algorithm: format!("audio-stc-h{h}-u{recommended_u}"),
@@ -408,10 +461,48 @@ fn read_header<C: SlotCarrier + ?Sized>(
     })
 }
 
+/// Codec choice and slot budget for one payload against one carrier.
+///
+/// Both the audio driver and the FLAC carrier need this: the carrier has to
+/// materialise exactly `body_slots` slots *before* `embed` runs, and `embed`
+/// re-derives the identical shape from the same inputs (the computation is
+/// deterministic).
+pub(crate) struct PlanShape {
+    pub codec: StegoCodec,
+    pub u: u8,
+    pub h: u8,
+    /// Ciphertext length in bytes, tag included.
+    pub ciphertext_len: usize,
+    /// Body slots the matrix code will occupy.
+    pub body_slots: usize,
+}
+
+/// Compute the codec, group size and slot budget for `plaintext_len` bytes of
+/// envelope plaintext against `available` body slots.
+pub(crate) fn plan_body(
+    plaintext_len: usize,
+    tag_len: usize,
+    available: usize,
+    h: u8,
+) -> Result<PlanShape, StrHideError> {
+    let ciphertext_len = plaintext_len + tag_len;
+    let bits = ciphertext_len * 8;
+    let (codec, u) = auto_select_codec(available, bits);
+    let body_slots = body_slots(bits, codec, h, u)?;
+    Ok(PlanShape {
+        codec,
+        u,
+        h,
+        ciphertext_len,
+        body_slots,
+    })
+}
+
 /// Embed `payload` into `carrier`, returning capacity metadata and change stats.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn embed<C: SlotCarrier + ?Sized>(
     carrier: &mut C,
+    mapping: Mapping,
     payload: &Payload<'_>,
     secret: Option<&str>,
     domain: Option<&str>,
@@ -419,13 +510,18 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
     safety: SafetyPolicy,
     freshness: Freshness,
     binding: &[u8],
+    attempt: u32,
     control: &Control<'_>,
 ) -> Result<(StegoCapacityInfo, EmbedStats), StrHideError> {
     control.stage(Stage::Decode);
     control.check()?;
 
+    // `slot_count()` is what can be *written* (FLAC materialises only the slots
+    // a payload needs); `capacity_slots()` is what the carrier could offer and
+    // is what the capacity report and the codec choice must use.
     let total = carrier.slot_count();
-    if total < V2_TOTAL_HEADER_SLOTS + 64 {
+    let capacity_total = carrier.capacity_slots();
+    if total < V2_TOTAL_HEADER_SLOTS + 64 || capacity_total < V2_TOTAL_HEADER_SLOTS + 64 {
         return Err(StrHideError::General(format!(
             "Audio carrier too small: {total} slots, the header alone needs {V2_TOTAL_HEADER_SLOTS}"
         )));
@@ -433,8 +529,8 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
 
     let suite = profile.body.default_suite();
     let plaintext = build_plaintext(payload)?;
-    let salt = freshness.salt(0, binding);
-    let nonce = freshness.nonce(0, binding);
+    let salt = freshness.salt(attempt, binding);
+    let nonce = freshness.nonce(attempt, binding);
     let master = derive_master(suite, secret.unwrap_or(profile.fallback_secret), &salt)?;
     let (enc_key, perm_seed) = body_keys(profile.body, &master, &salt, domain);
 
@@ -446,12 +542,19 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
         )));
     }
 
-    let available = total - V2_TOTAL_HEADER_SLOTS;
-    let bits = ciphertext_len * 8;
-    let (codec, u) = auto_select_codec(available, bits);
-    let h = DEFAULT_STC_H;
-
-    let needed_slots = body_slots(bits, codec, h, u)?;
+    let available = capacity_total - V2_TOTAL_HEADER_SLOTS;
+    let shape = plan_body(plaintext.len(), suite.tag_len(), available, DEFAULT_STC_H)?;
+    let codec = shape.codec;
+    let u = shape.u;
+    let h = shape.h;
+    let needed_slots = shape.body_slots;
+    debug_assert_eq!(shape.ciphertext_len, ciphertext_len);
+    if V2_TOTAL_HEADER_SLOTS + needed_slots > total {
+        return Err(StrHideError::General(format!(
+            "Audio carrier capacity is too small: it exposes {total} slots but the payload needs {}",
+            V2_TOTAL_HEADER_SLOTS + needed_slots
+        )));
+    }
     if needed_slots > available {
         return Err(StrHideError::General(format!(
             "Audio carrier capacity insufficient: payload needs {needed_slots} body slots, {available} available"
@@ -466,7 +569,14 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
     }
 
     // Safety tier: refuse (or warn by returning the info) before touching bytes.
-    let info = capacity_info(carrier, safety.level, h, u, codec);
+    let info = capacity_info(
+        capacity_total,
+        carrier.format_label(),
+        safety.level,
+        h,
+        u,
+        codec,
+    );
     if safety.is_enforced() && payload.as_bytes().len() > info.recommended_max_bytes {
         return Err(StrHideError::SafetyThreshold {
             tier: safety.level,
@@ -517,7 +627,7 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
 
     let header_seed =
         crate::stego::envelope::derive_header_perm_seed_audio(secret, domain, profile);
-    let plan = SlotPlan::new(total, &header_seed);
+    let plan = SlotPlan::new(mapping, total, &header_seed);
 
     // Header and feature word: one bit per slot, no error correction (the AEAD
     // tag authenticates the whole envelope, so a flipped header bit surfaces as
@@ -606,9 +716,37 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
     Ok((info, stats))
 }
 
+/// Read `carrier`'s header and report how many body slots its envelope needs.
+///
+/// Used by the FLAC extractor, which has to size its slot array before the body
+/// can be addressed.
+pub(crate) fn body_slots_from_header<C: SlotCarrier + ?Sized>(
+    carrier: &C,
+    mapping: Mapping,
+    secret: Option<&str>,
+    domain: Option<&str>,
+    profile: &AudioFormatProfile,
+    control: &Control<'_>,
+) -> Result<usize, StrHideError> {
+    control.check()?;
+    let total = carrier.slot_count();
+    if total < V2_TOTAL_HEADER_SLOTS {
+        return Err(StrHideError::NoHiddenData(
+            "No valid payload found or incorrect password".into(),
+        ));
+    }
+    let header_seed =
+        crate::stego::envelope::derive_header_perm_seed_audio(secret, domain, profile);
+    let plan = SlotPlan::new(mapping, total, &header_seed);
+    let header = read_header(carrier, &plan)?;
+    let ciphertext_len = (header.total_len as usize).saturating_sub(HEADER_OVERHEAD);
+    body_slots(ciphertext_len * 8, header.codec, header.h, header.u)
+}
+
 /// Extract the payload from `carrier`.
 pub(crate) fn extract<C: SlotCarrier + ?Sized>(
     carrier: &C,
+    mapping: Mapping,
     secret: Option<&str>,
     domain: Option<&str>,
     profile: &AudioFormatProfile,
@@ -623,7 +761,7 @@ pub(crate) fn extract<C: SlotCarrier + ?Sized>(
     }
     let header_seed =
         crate::stego::envelope::derive_header_perm_seed_audio(secret, domain, profile);
-    let plan = SlotPlan::new(total, &header_seed);
+    let plan = SlotPlan::new(mapping, total, &header_seed);
     let header = read_header(carrier, &plan)?;
 
     let ciphertext_len = (header.total_len as usize).saturating_sub(HEADER_OVERHEAD);
@@ -678,23 +816,31 @@ pub(crate) fn probe<C: SlotCarrier + ?Sized>(
     control: &Control<'_>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     control.check()?;
-    let total = carrier.slot_count();
+    let total = carrier.capacity_slots();
     if total < V2_TOTAL_HEADER_SLOTS + 8 {
         return Err(StrHideError::General(format!(
             "Audio carrier too small: {total} slots, the header alone needs {V2_TOTAL_HEADER_SLOTS}"
         )));
     }
-    let available = total - V2_TOTAL_HEADER_SLOTS;
+    let available = total.saturating_sub(V2_TOTAL_HEADER_SLOTS);
     // Advertise the codec the embedder would pick for a payload that fills the
     // tier: `u` falls as the payload grows, and so does the change rate.
     let (codec, u) = auto_select_codec(available, available.max(1));
     let h = DEFAULT_STC_H;
-    Ok(capacity_info(carrier, level, h, u, codec))
+    Ok(capacity_info(
+        total,
+        carrier.format_label(),
+        level,
+        h,
+        u,
+        codec,
+    ))
 }
 
 /// Inspect the carrier header without extracting the payload.
 pub(crate) fn inspect<C: SlotCarrier + ?Sized>(
     carrier: &C,
+    mapping: Mapping,
     secret: Option<&str>,
     domain: Option<&str>,
     profile: &AudioFormatProfile,
@@ -708,7 +854,7 @@ pub(crate) fn inspect<C: SlotCarrier + ?Sized>(
     }
     let header_seed =
         crate::stego::envelope::derive_header_perm_seed_audio(secret, domain, profile);
-    let plan = SlotPlan::new(total, &header_seed);
+    let plan = SlotPlan::new(mapping, total, &header_seed);
     let header = match read_header(carrier, &plan) {
         Ok(h) => h,
         // A wrong password simply relocates the header; report "nothing here"
@@ -739,6 +885,7 @@ pub(crate) fn inspect<C: SlotCarrier + ?Sized>(
 /// Three-level verification: container sanity, header readability, payload integrity.
 pub(crate) fn verify<C: SlotCarrier + ?Sized>(
     carrier: &C,
+    mapping: Mapping,
     secret: Option<&str>,
     domain: Option<&str>,
     profile: &AudioFormatProfile,
@@ -758,7 +905,7 @@ pub(crate) fn verify<C: SlotCarrier + ?Sized>(
         )),
     });
 
-    let inspected = inspect(carrier, secret, domain, profile, control)?;
+    let inspected = inspect(carrier, mapping, secret, domain, profile, control)?;
     levels.push(VerifyLevel {
         level: 2,
         name: "header".into(),
@@ -773,7 +920,7 @@ pub(crate) fn verify<C: SlotCarrier + ?Sized>(
         }),
     });
 
-    let (ok, message) = match extract(carrier, secret, domain, profile, control) {
+    let (ok, message) = match extract(carrier, mapping, secret, domain, profile, control) {
         Ok(payload) => (
             true,
             format!("Payload authenticated: {} bytes", payload.as_bytes().len()),

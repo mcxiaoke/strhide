@@ -812,6 +812,19 @@ impl StegoProfile {
         }
     }
 
+    /// FLAC wire-format identity to use: the private [`audio`](Self::audio)
+    /// when set, otherwise the official FLAC default.
+    ///
+    /// FLAC has its own label set so a WAV and a FLAC embedded with one
+    /// password never share a key stream.
+    #[cfg(feature = "content-audio")]
+    pub fn flac_format(&self) -> &crate::stego::format::AudioFormatProfile {
+        match self.audio.as_ref() {
+            Some(audio) => audio,
+            None => &crate::stego::format::OFFICIAL_FLAC_FORMAT,
+        }
+    }
+
     /// Audio wire-format identity to use: the private [`audio`](Self::audio)
     /// when set, otherwise the official default.
     #[cfg(feature = "content-audio")]

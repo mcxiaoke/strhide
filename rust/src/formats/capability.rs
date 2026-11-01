@@ -43,6 +43,8 @@ pub enum StegoKind {
     HevcCabac,
     /// PCM sample-domain LSB matching (WAV).
     WavPcm,
+    /// FLAC residual-domain matching, codeword-length preserving.
+    FlacResidual,
     /// HEIF bridge: embed into an embedded JPEG thumbnail or `unci` item.
     HeifBridge,
 }
@@ -54,6 +56,7 @@ impl StegoKind {
             StegoKind::JpegDct => "jpeg-dct",
             StegoKind::HevcCabac => "hevc-cabac",
             StegoKind::WavPcm => "wav-pcm",
+            StegoKind::FlacResidual => "flac-residual",
             StegoKind::HeifBridge => "heif-bridge",
         }
     }
@@ -170,6 +173,18 @@ pub static CAPABILITIES: &[Capability] = &[
         memory: MemoryProfile::WholeFile,
     },
     Capability {
+        format: FileFormat::Flac,
+        // The structure domain owns no FLAC strategy: there is no defined
+        // padding area to borrow, so only the content engine can carry data.
+        structure: &[],
+        #[cfg(feature = "content-audio")]
+        stego: &[StegoKind::FlacResidual],
+        #[cfg(not(feature = "content-audio"))]
+        stego: &[],
+        extensions: &["flac"],
+        memory: MemoryProfile::WholeFile,
+    },
+    Capability {
         format: FileFormat::Zip,
         #[cfg(feature = "structure-base")]
         structure: &["pre_cd_inject", "eof"],
@@ -214,20 +229,16 @@ pub static CAPABILITIES: &[Capability] = &[
 ];
 
 /// The row for `format`.
+///
+/// Looked up by value rather than by a hand-maintained index: the previous
+/// `FileFormat::X => &CAPABILITIES[n]` table had to be renumbered every time a
+/// format was inserted, and a mismatch silently attributed one format's row to
+/// another.
 pub fn capability_of(format: FileFormat) -> &'static Capability {
-    match format {
-        FileFormat::Png => &CAPABILITIES[0],
-        FileFormat::Jpeg => &CAPABILITIES[1],
-        FileFormat::Webp => &CAPABILITIES[2],
-        FileFormat::Heif => &CAPABILITIES[3],
-        FileFormat::Mp4 => &CAPABILITIES[4],
-        FileFormat::Mkv => &CAPABILITIES[5],
-        FileFormat::Wav => &CAPABILITIES[6],
-        FileFormat::Zip => &CAPABILITIES[7],
-        FileFormat::Pdf => &CAPABILITIES[8],
-        FileFormat::Pe => &CAPABILITIES[9],
-        FileFormat::HevcAnnexB => &CAPABILITIES[10],
-    }
+    CAPABILITIES
+        .iter()
+        .find(|c| c.format == format)
+        .expect("every FileFormat has exactly one capability row")
 }
 
 impl FileFormat {
@@ -270,7 +281,10 @@ mod tests {
             let expected = {
                 #[cfg(feature = "structure-base")]
                 {
-                    *format != FileFormat::HevcAnnexB
+                    // FLAC is content-domain only: its metadata chain has no
+                    // fixed-size slot a payload could replace without changing
+                    // the file length, so the structure domain does not claim it.
+                    !matches!(*format, FileFormat::HevcAnnexB | FileFormat::Flac)
                 }
                 #[cfg(not(feature = "structure-base"))]
                 {
@@ -302,7 +316,10 @@ mod tests {
             expected.push(FileFormat::HevcAnnexB);
         }
         #[cfg(feature = "content-audio")]
-        expected.push(FileFormat::Wav);
+        {
+            expected.push(FileFormat::Wav);
+            expected.push(FileFormat::Flac);
+        }
         // Compare in `FileFormat::ALL` order: the assertion is about the *set*,
         // and the push order above follows the feature blocks, not the enum.
         let order = |f: &FileFormat| FileFormat::ALL.iter().position(|x| x == f).unwrap();

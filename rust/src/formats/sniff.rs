@@ -76,6 +76,7 @@ pub enum FileFormat {
     Mp4,
     Mkv,
     Wav,
+    Flac,
     Zip,
     Pdf,
     Pe,
@@ -94,6 +95,7 @@ impl FileFormat {
         FileFormat::Mp4,
         FileFormat::Mkv,
         FileFormat::Wav,
+        FileFormat::Flac,
         FileFormat::Zip,
         FileFormat::Pdf,
         FileFormat::Pe,
@@ -111,6 +113,7 @@ impl FileFormat {
             FileFormat::Mp4 => "MP4",
             FileFormat::Mkv => "MKV",
             FileFormat::Wav => "WAV",
+            FileFormat::Flac => "FLAC",
             FileFormat::Zip => "ZIP",
             FileFormat::Pdf => "PDF",
             FileFormat::Pe => "PE",
@@ -158,6 +161,7 @@ impl<'de> serde::Deserialize<'de> for FileFormat {
                         "MP4",
                         "MKV",
                         "WAV",
+                        "FLAC",
                         "ZIP",
                         "PDF",
                         "PE",
@@ -227,6 +231,11 @@ fn is_wav_bytes(bytes: &[u8]) -> bool {
     bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE"
 }
 
+/// Native FLAC stream marker (`fLaC`), which no other format shares.
+fn is_flac_bytes(bytes: &[u8]) -> bool {
+    bytes.len() >= 4 && &bytes[0..4] == b"fLaC"
+}
+
 fn is_mkv_bytes(bytes: &[u8]) -> bool {
     bytes.len() >= 5
         && u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) == EBML_HEADER_ID
@@ -278,6 +287,8 @@ pub fn sniff_bytes(bytes: &[u8]) -> Option<FileFormat> {
         Some(FileFormat::Webp)
     } else if is_wav_bytes(bytes) {
         Some(FileFormat::Wav)
+    } else if is_flac_bytes(bytes) {
+        Some(FileFormat::Flac)
     } else if is_mkv_bytes(bytes) {
         Some(FileFormat::Mkv)
     } else if is_zip_bytes(bytes) {
