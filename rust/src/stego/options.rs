@@ -1040,6 +1040,19 @@ impl EmbedOutput {
             stats: Some(stats),
         }
     }
+
+    /// An output with bytes, capacity metadata, and embed statistics.
+    pub fn with_capacity_and_stats(
+        bytes: Vec<u8>,
+        capacity: StegoCapacityInfo,
+        stats: EmbedStats,
+    ) -> Self {
+        Self {
+            bytes,
+            capacity: Some(capacity),
+            stats: Some(stats),
+        }
+    }
 }
 
 /// Advisory warnings produced during steganographic embedding.

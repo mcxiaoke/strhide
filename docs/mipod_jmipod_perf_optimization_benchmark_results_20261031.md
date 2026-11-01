@@ -18,7 +18,18 @@
 | **Step 0: Baseline** | 优化前基准起点 (commit `0234e31`) | **9,814.5 ms** | **29,646.6 ms** | **8,675.1 ms** | **47,519.6 ms** | **基线全绿通过** |
 | **Step 1: Batch 1** | P0: `cost_calibration.rs` 直方图化 + 单调插值表 | **1,785.4 ms**<br>(提速 5.50x) | **5,487.7 ms**<br>(提速 5.40x) | **496.6 ms**<br>(提速 17.47x) | **1,931.1 ms**<br>(提速 24.61x) | **100% 测试通过**<br>(精度误差 < 3e-8) |
 | **Step 2: Batch 2** | P0+P1: `spatial_variance.rs` 投影与平滑内点切片特化 | **794.7 ms**<br>(累计提速 12.35x) | **2,098.1 ms**<br>(累计提速 14.13x) | **401.8 ms**<br>(累计提速 21.59x) | **1,507.4 ms**<br>(累计提速 31.52x) | **100% 逐比特一致**<br>(跨尺寸等价全绿) |
-| **Step 3: Batch 3** | P1: `png/engine.rs` & `io.rs` 消除 PNG 嵌入后重复容量探测 | *待执行* | *待执行* | *待执行* | *待执行* | *待验证* |
+| **Step 3: Batch 3** | P1: `png/engine.rs` & `io.rs` 消除 PNG 嵌入后重复容量探测 | **794.7 ms**<br>(CLI embed **4.08 s**) | **2,098.1 ms**<br>(CLI embed **12.22 s**) | **401.8 ms**<br>(CLI embed **1.21 s**) | **1,507.4 ms**<br>(CLI embed **2.72 s**) | **100% 验证通过**<br>(容量数据 100% 吻合) |
+
+---
+
+## 端到端 CLI 嵌入实测对比 (Release exe)
+
+| 场景 / 载体 | 优化前基线 embed | Step 3 优化后 embed | 耗时缩减 | 加速比 |
+|---|---|---|---|---|
+| **MiPOD 24 MP PNG** (4000×6000) | 30.34 s | **4.08 s** | 净省 26.26 秒 | **7.44x** |
+| **MiPOD 66 MP PNG** (10752×6144) | 77.41 s | **12.22 s** | **净省 65.19 秒！** | **6.33x** |
+| **J-MiPOD 24 MP JPEG** (375k blocks) | 11.09 s | **1.21 s** | 净省 9.88 秒 | **9.17x** |
+| **J-MiPOD 100 MP JPEG** (1.57M blocks) | 55.17 s | **2.72 s** | **净省 52.45 秒！** | **20.28x** |
 
 ---
 
@@ -119,3 +130,27 @@
   - **J-MiPOD 100 MP**：总代价图降至 **`1,507.4 ms`（相比基线提速 31.52x）**；空域方差 (p=3) 阶段由 `1,095.8 ms` 降至 **`795.3 ms`（提速 1.38x）**。
 - **精度验证**：
   - 空间域投影与平滑结果与优化前完全**逐比特一致**（bit-identical），数学零漂移。
+
+### Step 3: Batch 3 消除 PNG 嵌入后重复容量探测（2026-11-01 08:25）
+
+- **改动文件**：`rust/src/stego/png/engine.rs`、`rust/src/stego/engine.rs`、`rust/src/stego/options.rs`
+- **主要实现**：
+  1. 抽取通用的 `build_png_capacity_info` 辅助函数，接收已有 `SlotPlan` 与图像几何信息直接构造 `StegoCapacityInfo`。
+  2. 让 `embed_png_with_stats` 在构建 `SlotPlan` 后直接产出 `StegoCapacityInfo`，并通过 `EmbedOutput::with_capacity_and_stats` 将其带回上层。
+  3. `stego::io::embed_carrier_file` 与 CLI `cmd_stego.rs` 检测到 `output.capacity` 已存在，彻底跳过原先额外的 `probe_carrier_capacity_with_dialect` 调用。
+  4. 消除 PNG 在每次嵌入时多执行一遍代价模型（以及第二次 PNG 图像解码）的巨大重复开销。
+  5. 补充单元测试 `embed_capacity_matches_probed_capacity`，断言嵌入产出的容量元数据各字段与探测接口计算值完全一致。
+- **测试门禁状态**：
+  - `cargo test --all-features --all-targets`：全部 511 个单元/集成测试 100% 通过。
+  - `cargo test local_algorithm_matrix --all-features -- --ignored`：全部通过。
+  - `cargo clippy --all-targets --all-features -- -D warnings`：零警告零错误。
+  - `cargo fmt -- --check`：通过。
+  - `python scripts/baseline_hash.py --check`：58/58 零改动全绿。
+- **实测性能与加速比（端到端 CLI Embed）**：
+  - **MiPOD 24 MP PNG**：CLI embed 从 `30.34 s` 降至 **`4.08 s`（净省 26.26 秒，提速 7.44x）**！
+  - **MiPOD 66 MP PNG**：CLI embed 从 `77.41 s` 降至 **`12.22 s`（净省 65.19 秒，提速 6.33x）**！
+  - **J-MiPOD 24 MP JPEG**：CLI embed 从 `11.09 s` 降至 **`1.21 s`（净省 9.88 秒，提速 9.17x）**！
+  - **J-MiPOD 100 MP JPEG**：CLI embed 从 `55.17 s` 降至 **`2.72 s`（净省 52.45 秒，提速 20.28x）**！
+- **功能验证**：
+  - 真实嵌入提取往返验证：24 MP PNG 与 24 MP JPEG 生成的隐写文件提取载荷 100% 匹配。
+  - 容量提示行正常输出，且安全告警门限检查逻辑与原行为严格一致。

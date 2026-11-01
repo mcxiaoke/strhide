@@ -1252,10 +1252,10 @@ pub fn embed_png<'a>(
         freshness,
         control,
     )
-    .map(|(bytes, _)| bytes)
+    .map(|(bytes, _, _)| bytes)
 }
 
-/// Embed a payload into a PNG carrier and return both modified bytes and embed statistics.
+/// Embed a payload into a PNG carrier and return modified bytes, embed statistics, and capacity info.
 #[allow(clippy::too_many_arguments)]
 pub fn embed_png_with_stats<'a>(
     carrier_bytes: &[u8],
@@ -1268,7 +1268,7 @@ pub fn embed_png_with_stats<'a>(
     safety: SafetyPolicy,
     freshness: Freshness,
     control: &Control<'_>,
-) -> Result<(Vec<u8>, crate::stego::EmbedStats), StrHideError> {
+) -> Result<(Vec<u8>, crate::stego::EmbedStats, StegoCapacityInfo), StrHideError> {
     let payload = payload.into();
     params.validate()?;
     control.stage(Stage::Decode);
@@ -1312,6 +1312,8 @@ pub fn embed_png_with_stats<'a>(
     let channel_offset = embed_channel(&image);
 
     let plan = SlotPlan::build(&image, &costs, &params, password, domain, spatial)?;
+    let capacity_info =
+        build_png_capacity_info(&image, &plan, &params, cost_model.id(), safety.level)?;
     if !plan.header_fits() {
         return Err(StrHideError::General(format!(
             "Carrier capacity insufficient: available {} slots, minimum header requires {} slots",
@@ -1658,7 +1660,7 @@ pub fn embed_png_with_stats<'a>(
         modified_slots,
         total_candidate_slots: total_pixels,
     };
-    Ok((encoded, stats))
+    Ok((encoded, stats, capacity_info))
 }
 
 /// Extract a payload from a PNG carrier with content-adaptive spatial steganography.
@@ -2109,6 +2111,82 @@ pub fn verify_png(
     Ok(StegoVerifyResult::new("PNG", levels))
 }
 
+/// Construct the capacity metadata directly from an already computed [`SlotPlan`].
+///
+/// Shared between embedding and probing so that embedding never has to decode
+/// the carrier or recompute the distortion cost map a second time to report capacity.
+fn build_png_capacity_info(
+    image: &RawImage,
+    plan: &SlotPlan,
+    params: &PngParams,
+    cost_model_id: &str,
+    safety_level: crate::stego::SafetyLevel,
+) -> Result<StegoCapacityInfo, StrHideError> {
+    let w = image.width as usize;
+    let h = image.height as usize;
+    let total_pixels = w * h;
+
+    let header_fits = plan.header_fits();
+    let pool_green = if header_fits {
+        plan.count_body_slots(image, 1, ChannelMode::Green)
+    } else {
+        0
+    };
+    let available_body_slots = match (header_fits, image.channels >= 3) {
+        (false, _) => 0,
+        (true, true) => plan.count_body_slots(image, 1, ChannelMode::Rgb),
+        (true, false) => pool_green,
+    };
+    let ratio_slots = pool_green;
+
+    let hamming_k = crate::stego::coding::DEFAULT_HAMMING_K;
+    let hamming_slots =
+        available_body_slots.min(max_body_slots_within_pipeline(total_pixels, None));
+    let stc_slots = available_body_slots.min(max_body_slots_within_pipeline(
+        total_pixels,
+        Some(params.stc_h),
+    ));
+    let max_ciphertext_bytes = match params.codec {
+        StegoCodec::Hamming => crate::stego::coding::max_payload_bytes(hamming_slots, hamming_k),
+        StegoCodec::Stc if params.stc_u > 0 => {
+            let trellis = StcTrellis::from_seed_grouped(0, params.stc_h, params.stc_u)?;
+            trellis.message_bits(stc_slots) / 8
+        }
+        StegoCodec::Stc | StegoCodec::Auto => {
+            let trellis = StcTrellis::from_seed_grouped(0, params.stc_h, 1)?;
+            trellis.message_bits(stc_slots) / 8
+        }
+    };
+    let max_raw_payload_bytes =
+        max_ciphertext_bytes.saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
+
+    let recommended_max_bytes = recommended_bytes_for(total_pixels, ratio_slots, safety_level);
+    let tier_limits = crate::params::SafetyLevel::ALL
+        .map(|level| recommended_bytes_for(total_pixels, ratio_slots, level));
+
+    Ok(StegoCapacityInfo {
+        format: "PNG".into(),
+        algorithm: cost_model_id.into(),
+        total_elements: total_pixels,
+        available_slots: available_body_slots,
+        max_raw_payload_bytes,
+        max_raw_is_grouped: false,
+        recommended_max_bytes,
+        tier_limits,
+        estimated_change_rate: match params.codec {
+            StegoCodec::Hamming => crate::stego::coding::expected_change_rate(hamming_k),
+            StegoCodec::Stc if params.stc_u > 0 => {
+                crate::stego::coding::expected_stc_change_rate(params.stc_u)
+            }
+            StegoCodec::Stc | StegoCodec::Auto => crate::stego::coding::expected_stc_change_rate(3),
+        },
+        safety_level: safety_level.as_str().into(),
+        safety_bpp_limit: safety_level.bpp_limit(),
+        is_estimated: false,
+        media_info: Some(MediaInfo::new(image.width, image.height)),
+    })
+}
+
 /// Probe the embedding capacity of a PNG carrier.
 ///
 /// The complete expert entry: `safety_level` picks the tier `recommended_max_bytes`
@@ -2131,100 +2209,19 @@ pub fn probe_png_capacity(
     let params = params.wire_quantized();
     control.stage(Stage::Decode);
     let image = decode_png(carrier_bytes)?;
-    let w = image.width as usize;
-    let h = image.height as usize;
-    let total_pixels = w * h;
 
     control.stage(Stage::CostMap);
-    let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, &params);
+    let costs = cost_model.compute_cost(
+        &image.pixels,
+        image.width as usize,
+        image.height as usize,
+        image.channels,
+        &params,
+    );
     control.check()?;
 
     let plan = SlotPlan::build(&image, &costs, &params, password, domain, spatial)?;
-
-    // Two pool sizes, for two different questions:
-    // - `available_body_slots` answers "how much can the writer actually
-    //   reach?", which is the three-channel pool when the carrier has one;
-    // - `ratio_slots` feeds the safety tier's `slots / bits` bound, which was
-    //   calibrated on single-channel carriers. Reporting the tripled pool there
-    //   would silently raise the recommended payload without any evidence that
-    //   three channels are equally safe, so it keeps the single-channel base.
-    let header_fits = plan.header_fits();
-    let pool_green = if header_fits {
-        plan.count_body_slots(&image, 1, ChannelMode::Green)
-    } else {
-        0
-    };
-    let available_body_slots = match (header_fits, image.channels >= 3) {
-        (false, _) => 0,
-        (true, true) => plan.count_body_slots(&image, 1, ChannelMode::Rgb),
-        (true, false) => pool_green,
-    };
-    let ratio_slots = pool_green;
-
-    let hamming_k = crate::stego::coding::DEFAULT_HAMMING_K;
-    // The two codecs buy different payload per slot, and the difference is
-    // real (measured: a carrier that cannot hold 33 KB under Hamming holds it
-    // under STC). Reporting one codec's figure for the other would misstate the
-    // capability in whichever direction the user is asking about, so the number
-    // follows `params.codec`.
-    //
-    // Both are capped by the pipeline budget: a figure the writer would abort on
-    // is not capacity. Hamming has no trellis bitmap, so it gets the larger
-    // ceiling.
-    let hamming_slots =
-        available_body_slots.min(max_body_slots_within_pipeline(total_pixels, None));
-    let stc_slots = available_body_slots.min(max_body_slots_within_pipeline(
-        total_pixels,
-        Some(params.stc_h),
-    ));
-    let max_ciphertext_bytes = match params.codec {
-        StegoCodec::Hamming => crate::stego::coding::max_payload_bytes(hamming_slots, hamming_k),
-        StegoCodec::Stc if params.stc_u > 0 => {
-            // `u * (bits + h - 1) = slots` -> `bits = slots/u - (h - 1)`.
-            let trellis = StcTrellis::from_seed_grouped(0, params.stc_h, params.stc_u)?;
-            trellis.message_bits(stc_slots) / 8
-        }
-        StegoCodec::Stc | StegoCodec::Auto => {
-            // In Auto mode (or STC with auto u), maximum raw capacity reaches up to STC u=1,
-            // as the encoder adaptively drops to u=1 when large payloads are embedded.
-            let trellis = StcTrellis::from_seed_grouped(0, params.stc_h, 1)?;
-            trellis.message_bits(stc_slots) / 8
-        }
-    };
-    // Only the body-borne overhead comes off here: salt/nonce already paid for
-    // by the 256 header slots. Subtracting MIN_ENVELOPE_LEN under-reported the
-    // capacity by exactly 28 bytes (measured on real carriers).
-    let max_raw_payload_bytes =
-        max_ciphertext_bytes.saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
-
-    // Recommended capacity bounded by safety tier bpp budget and candidate slot ratio r
-    let recommended_max_bytes = recommended_bytes_for(total_pixels, ratio_slots, safety_level);
-    let tier_limits = crate::params::SafetyLevel::ALL
-        .map(|level| recommended_bytes_for(total_pixels, ratio_slots, level));
-
-    Ok(StegoCapacityInfo {
-        format: "PNG".into(),
-        algorithm: cost_model.id().into(),
-        total_elements: total_pixels,
-        available_slots: available_body_slots,
-        max_raw_payload_bytes,
-        // The spatial codec has no Huffman-table hazard, so its ceiling is
-        // always the geometric one.
-        max_raw_is_grouped: false,
-        recommended_max_bytes,
-        tier_limits,
-        estimated_change_rate: match params.codec {
-            StegoCodec::Hamming => crate::stego::coding::expected_change_rate(hamming_k),
-            StegoCodec::Stc if params.stc_u > 0 => {
-                crate::stego::coding::expected_stc_change_rate(params.stc_u)
-            }
-            StegoCodec::Stc | StegoCodec::Auto => crate::stego::coding::expected_stc_change_rate(3),
-        },
-        safety_level: safety_level.as_str().into(),
-        safety_bpp_limit: safety_level.bpp_limit(),
-        is_estimated: false,
-        media_info: Some(MediaInfo::new(image.width, image.height)),
-    })
+    build_png_capacity_info(&image, &plan, &params, cost_model.id(), safety_level)
 }
 
 #[cfg(test)]
@@ -3709,5 +3706,59 @@ mod tests {
             matches!(private_err, Err(StrHideError::NoHiddenData(_))),
             "private reader must see official stego as NoHiddenData, got {private_err:?}"
         );
+    }
+
+    #[test]
+    fn embed_capacity_matches_probed_capacity() {
+        let (w, h) = (96usize, 96usize);
+        let pixels = row_correlated_pixels(w, h);
+        let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
+        let params = PngParams::default();
+        let spatial = crate::stego::format::OFFICIAL_PNG_FORMAT;
+        let cost_model = HillCostModel;
+
+        let probed = probe_png_capacity(
+            &png,
+            &cost_model,
+            &params,
+            crate::stego::SafetyLevel::High,
+            Some("pw"),
+            None,
+            &spatial,
+            &Control::none(),
+        )
+        .expect("probe capacity");
+
+        let (_stego, stats, embedded_cap) = embed_png_with_stats(
+            &png,
+            b"test payload",
+            Some("pw"),
+            None,
+            &spatial,
+            &cost_model,
+            &params,
+            SafetyPolicy {
+                level: crate::stego::SafetyLevel::High,
+                enforcement: crate::stego::SafetyEnforcement::Advisory,
+            },
+            Freshness::Random,
+            &Control::none(),
+        )
+        .expect("embed with stats");
+
+        assert_eq!(embedded_cap.format, probed.format);
+        assert_eq!(embedded_cap.algorithm, probed.algorithm);
+        assert_eq!(embedded_cap.total_elements, probed.total_elements);
+        assert_eq!(embedded_cap.available_slots, probed.available_slots);
+        assert_eq!(
+            embedded_cap.max_raw_payload_bytes,
+            probed.max_raw_payload_bytes
+        );
+        assert_eq!(
+            embedded_cap.recommended_max_bytes,
+            probed.recommended_max_bytes
+        );
+        assert_eq!(embedded_cap.tier_limits, probed.tier_limits);
+        assert_eq!(stats.total_candidate_slots, probed.total_elements);
     }
 }
