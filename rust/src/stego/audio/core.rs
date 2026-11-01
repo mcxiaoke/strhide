@@ -133,6 +133,17 @@ pub(crate) trait SlotCarrier {
         self.slot_count()
     }
 
+    /// Smallest STC group size `u` this carrier can encode with.
+    ///
+    /// `u = 1` pins every plan slot to a target parity, so a single slot that
+    /// cannot move breaks the whole code. Carriers whose slots are not all
+    /// equal -- FLAC's compensation chains make some residuals immovable --
+    /// return 2, and the capacity report is then priced at that group size
+    /// instead of promising the geometric maximum.
+    fn min_group(&self) -> u8 {
+        1
+    }
+
     /// One-line human description of the carrier (depth, channels, duration),
     /// surfaced in `inspect` output. `None` when the format has nothing useful
     /// to add.
@@ -329,8 +340,10 @@ pub(crate) fn capacity_info(
     h: u8,
     u: u8,
     codec: StegoCodec,
+    min_u: u8,
 ) -> StegoCapacityInfo {
     let available = total.saturating_sub(V2_TOTAL_HEADER_SLOTS);
+    let u = u.max(min_u);
 
     let ceiling = max_body_slots(h, u).min(available);
     let max_raw_payload_bytes = payload_bytes_from_slots(ceiling, codec, h, u);
@@ -350,11 +363,12 @@ pub(crate) fn capacity_info(
     .enumerate()
     {
         let budget = (total as f64 * change_percent(lvl) / 100.0) as usize;
-        let mut candidate_u = u;
+        let mut candidate_u = u.max(min_u);
         for _ in 0..3 {
             let rate_u = expected_stc_change_rate(candidate_u).max(1e-6);
             let bits = (budget as f64 / rate_u) as usize;
             let (_, next_u) = auto_select_codec(available, bits.max(1));
+            let next_u = next_u.max(min_u);
             if next_u == candidate_u {
                 break;
             }
@@ -484,10 +498,12 @@ pub(crate) fn plan_body(
     tag_len: usize,
     available: usize,
     h: u8,
+    min_u: u8,
 ) -> Result<PlanShape, StrHideError> {
     let ciphertext_len = plaintext_len + tag_len;
     let bits = ciphertext_len * 8;
     let (codec, u) = auto_select_codec(available, bits);
+    let u = u.max(min_u);
     let body_slots = body_slots(bits, codec, h, u)?;
     Ok(PlanShape {
         codec,
@@ -543,7 +559,13 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
     }
 
     let available = capacity_total - V2_TOTAL_HEADER_SLOTS;
-    let shape = plan_body(plaintext.len(), suite.tag_len(), available, DEFAULT_STC_H)?;
+    let shape = plan_body(
+        plaintext.len(),
+        suite.tag_len(),
+        available,
+        DEFAULT_STC_H,
+        carrier.min_group(),
+    )?;
     let codec = shape.codec;
     let u = shape.u;
     let h = shape.h;
@@ -576,6 +598,7 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
         h,
         u,
         codec,
+        carrier.min_group(),
     );
     if safety.is_enforced() && payload.as_bytes().len() > info.recommended_max_bytes {
         return Err(StrHideError::SafetyThreshold {
@@ -826,6 +849,7 @@ pub(crate) fn probe<C: SlotCarrier + ?Sized>(
     // Advertise the codec the embedder would pick for a payload that fills the
     // tier: `u` falls as the payload grows, and so does the change rate.
     let (codec, u) = auto_select_codec(available, available.max(1));
+    let u = u.max(carrier.min_group());
     let h = DEFAULT_STC_H;
     Ok(capacity_info(
         total,
@@ -834,6 +858,7 @@ pub(crate) fn probe<C: SlotCarrier + ?Sized>(
         h,
         u,
         codec,
+        carrier.min_group(),
     ))
 }
 

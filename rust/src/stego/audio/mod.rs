@@ -69,13 +69,26 @@ pub(crate) fn embed_flac(
                 .into(),
         ));
     }
+    let stuck_rate = 1.0 - (analysis.usable as f64 / analysis.slots.max(1) as f64);
+    if stuck_rate > flac::MAX_STUCK_RATE {
+        return Err(StrHideError::UnsupportedFormat(
+            concat!(
+                "This FLAC's predictor reacts too strongly for in-place residual ",
+                "coding: in a quiet stretch a one-unit residual move would need ",
+                "neighbouring codewords to change width, which FLAC cannot ",
+                "represent. Try a louder or longer carrier."
+            )
+            .into(),
+        ));
+    }
 
     // Size the carrier's slot array from the envelope the payload will produce.
     let suite = profile.body.default_suite();
     let plaintext = crate::stego::envelope::build_plaintext(payload)?;
     // Plan against what can actually move: a residual whose compensation
     // chain does not fit any Rice bucket keeps its parity, so counting it would
-    // promise capacity the trellis cannot reach.
+    // promise capacity the trellis cannot reach. `core::embed` re-derives the
+    // same number from `capacity_slots()`, which reports the same count.
     let available = analysis
         .usable
         .min(analysis.slots)
@@ -85,6 +98,7 @@ pub(crate) fn embed_flac(
         suite.tag_len(),
         available,
         crate::stego::coding::DEFAULT_STC_H,
+        flac::FlacCarrier::MIN_GROUP,
     )?;
 
     let mut bytes = carrier.to_vec();
@@ -119,6 +133,9 @@ pub(crate) fn embed_flac(
                 break;
             }
             Err(e @ StrHideError::TrellisInfeasible { .. }) => {
+                if std::env::var_os("STRHIDE_FLAC_ERR").is_some() {
+                    eprintln!("flac-err: attempt {attempt} failed: {e}");
+                }
                 last_error = Some(e);
                 bytes = carrier.to_vec();
             }
@@ -199,6 +216,18 @@ pub(crate) fn probe_flac(
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let info = flac::parse_stream_info(carrier)?;
     let analysis = flac::analyse(carrier, &info)?;
+    let stuck_rate = 1.0 - (analysis.usable as f64 / analysis.slots.max(1) as f64);
+    if stuck_rate > flac::MAX_STUCK_RATE {
+        return Err(StrHideError::UnsupportedFormat(
+            concat!(
+                "This FLAC's predictor reacts too strongly for in-place residual ",
+                "coding: in a quiet stretch a one-unit residual move would need ",
+                "neighbouring codewords to change width, which FLAC cannot ",
+                "represent. Try a louder or longer carrier."
+            )
+            .into(),
+        ));
+    }
     let mut scratch = carrier.to_vec();
     // An empty body still materialises the 512 header slots, which is the shape
     // `probe` measures.

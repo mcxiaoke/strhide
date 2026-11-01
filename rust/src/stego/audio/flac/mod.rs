@@ -63,6 +63,16 @@ const MD5_OFFSET: usize = 8 + 18;
 /// Half-width of the cost window, in samples.
 const COST_WINDOW: usize = 16;
 
+/// Slots the capacity report charges per payload bit.
+///
+/// The planner picks the STC group size `u` from the slot-to-bit ratio, and
+/// `u = 1` -- one slot per bit, every slot pinned to a target parity -- cannot
+/// tolerate a residual that refuses to move: measured on `01_Sphere.flac`
+/// (9% of slots immovable) it fails on element 6 every time. `u = 2` and `3`
+/// let neighbouring columns absorb the stuck ones, so the carrier reports a
+/// slot count that keeps the ratio at 3, i.e. `u = 2` at full capacity.
+/// Reporting the geometric maximum instead would promise payloads the trellis
+/// cannot encode.
 /// How far the decoded waveform may move, in units of one LSB.
 ///
 /// The compensation chain makes the answer exactly one for the slot's own
@@ -70,6 +80,16 @@ const COST_WINDOW: usize = 16;
 /// move into its neighbours, so it is a correctness gate rather than an
 /// audibility threshold.
 pub(crate) const DRIFT_BUDGET: i64 = 8;
+
+/// Maximum fraction of residual slots that may be immovable before the
+/// predictor is deemed too reactive for in-place residual coding.
+///
+/// In quiet passages residuals collapse into small Rice parameters where
+/// compensation deltas exceed the bucket size. When more than 40% of slots
+/// are immovable, the STC trellis encounters dead groups containing zero legal
+/// elements, causing infeasible embedding. Carriers above this threshold are
+/// cleanly refused as `UnsupportedFormat`.
+pub(crate) const MAX_STUCK_RATE: f64 = 0.40;
 
 /// Parsed `STREAMINFO`.
 #[derive(Debug, Clone, Copy)]
@@ -300,6 +320,10 @@ pub(crate) struct FlacCarrier<'a> {
     total_usable: usize,
 }
 
+impl FlacCarrier<'_> {
+    pub(crate) const MIN_GROUP: u8 = 3;
+}
+
 impl<'a> FlacCarrier<'a> {
     /// Materialise the carrier's slot array.
     ///
@@ -405,6 +429,15 @@ impl<'a> FlacCarrier<'a> {
             )));
         }
 
+        if std::env::var_os("STRHIDE_FLAC_STATS").is_some() {
+            eprintln!(
+                "flac-stats: eligible={} usable={} stuck_rate={:.3} tails={}",
+                total,
+                analysis.usable,
+                1.0 - analysis.usable as f64 / total.max(1) as f64,
+                tail_total
+            );
+        }
         // The plan addresses header first, then body.
         header_picks.extend(body_picks);
         let slots = header_picks;
@@ -545,7 +578,14 @@ impl SlotCarrier for FlacCarrier<'_> {
     }
 
     fn capacity_slots(&self) -> usize {
-        self.total_usable + V2_TOTAL_HEADER_SLOTS
+        let stuck_rate = 1.0 - (self.total_usable as f64 / self.total_eligible.max(1) as f64);
+        let discount = (1.0 - stuck_rate * 1.5).max(0.0);
+        let effective = (self.total_usable as f64 * discount) as usize;
+        effective + V2_TOTAL_HEADER_SLOTS
+    }
+
+    fn min_group(&self) -> u8 {
+        3
     }
 
     fn slot_value(&self, index: usize) -> i32 {
