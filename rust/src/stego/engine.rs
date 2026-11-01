@@ -98,6 +98,8 @@ static ENGINES: &[&dyn StegoEngine] = &[
     &Mp4Engine,
     #[cfg(feature = "content-hevc")]
     &AnnexBEngine,
+    #[cfg(feature = "content-hevc")]
+    &MkvEngine,
     #[cfg(feature = "content-audio")]
     &WavEngine,
 ];
@@ -857,6 +859,103 @@ impl StegoEngine for AnnexBEngine {
     }
 }
 
+/// Matroska (MKV/WebM) video: Scheme C on the HEVC track, plus a checksum
+/// refresh for the `CRC-32` elements the patch invalidates.
+#[cfg(feature = "content-hevc")]
+pub struct MkvEngine;
+
+#[cfg(feature = "content-hevc")]
+impl StegoEngine for MkvEngine {
+    fn format(&self) -> FileFormat {
+        FileFormat::Mkv
+    }
+
+    fn probe(
+        &self,
+        carrier: &[u8],
+        opts: &ProbeOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoCapacityInfo, StrHideError> {
+        opts.tuning.applicable_to(self.format())?;
+        hevc_probe(self.format(), carrier, opts, dialect)
+    }
+
+    fn embed(
+        &self,
+        carrier: &[u8],
+        payload: &Payload<'_>,
+        opts: &EmbedOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<EmbedOutput, StrHideError> {
+        opts.tuning.applicable_to(self.format())?;
+        let resolved = opts.tuning.resolve();
+        let secret = opts.secret(dialect);
+        let domain = opts.domain(dialect);
+        opts.control.check()?;
+
+        let anon_payload;
+        let eff_payload = if opts.no_filename && payload.name().is_some() {
+            anon_payload = Payload::bytes(payload.as_bytes());
+            &anon_payload
+        } else {
+            payload
+        };
+
+        let (mut bytes, info, stats) = with_pool(opts.pool.as_ref(), || {
+            crate::stego::hevc::embed_hevc_with_info(
+                carrier,
+                eff_payload,
+                secret,
+                domain,
+                dialect.hevc_format(),
+                opts.freshness,
+                opts.safety,
+                &opts.control,
+            )
+        })?;
+        let _ = resolved;
+
+        // A Matroska muxer writes a CRC-32 over every element it finalises;
+        // the patch invalidates any that covers a modified block.
+        crate::stego::hevc::mkv_boxes::refresh_mkv_crcs(carrier, &mut bytes).map_err(|e| {
+            StrHideError::CorruptedData(format!("MKV checksum refresh failed: {e}"))
+        })?;
+
+        Ok(EmbedOutput {
+            bytes,
+            capacity: Some(info),
+            stats: Some(stats),
+        })
+    }
+
+    fn extract(
+        &self,
+        carrier: &[u8],
+        opts: &ExtractOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<Payload<'static>, StrHideError> {
+        hevc_extract(self.format(), carrier, opts, dialect)
+    }
+
+    fn inspect(
+        &self,
+        carrier: &[u8],
+        opts: &InspectOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoHeaderInfo, StrHideError> {
+        hevc_inspect(self.format(), carrier, opts, dialect)
+    }
+
+    fn verify(
+        &self,
+        carrier: &[u8],
+        opts: &VerifyOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoVerifyResult, StrHideError> {
+        hevc_verify(self.format(), carrier, opts, dialect)
+    }
+}
+
 /// WAV PCM: `±1` LSB moves on the sample stream, in place.
 #[cfg(feature = "content-audio")]
 pub struct WavEngine;
@@ -1016,15 +1115,14 @@ mod tests {
 
     #[test]
     fn container_formats_without_a_content_engine_have_none() {
-        // Formats with no content engine. `Wav` left this list when the PCM
-        // engine landed; `Mkv` will leave it when the HEVC container support
-        // does.
+        // Formats with no content engine. Both WAV (PCM engine) and MKV (HEVC
+        // container) have left this list; a format only belongs here when the
+        // sniffer recognises it but the content domain refuses it.
         for format in [
             FileFormat::Zip,
             FileFormat::Pdf,
             FileFormat::Pe,
             FileFormat::Webp,
-            FileFormat::Mkv,
         ] {
             assert!(
                 engine_for(format).is_none(),

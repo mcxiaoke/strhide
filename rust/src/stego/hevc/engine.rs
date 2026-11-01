@@ -22,6 +22,7 @@ use crate::stego::envelope::{
 use crate::stego::format::HevcFormatProfile;
 use crate::stego::hevc::bitstream::{compute_hevc_cover_digest, parse_annex_b_spans, rbsp_to_nal};
 use crate::stego::hevc::heif_boxes::parse_heif_targets;
+use crate::stego::hevc::mkv_boxes::parse_mkv_targets;
 use crate::stego::hevc::mp4_boxes::parse_mp4_targets;
 use crate::stego::hevc::slot::{BinOp, CabacRecorder, RecordMode, StegoSlot, SubstreamRecord};
 use crate::stego::hevc::sniff::{
@@ -349,14 +350,29 @@ pub fn extract_hevc_dimensions(carrier: &[u8]) -> Result<(u32, u32), StrHideErro
                 }
             }
         }
-        HevcCarrierKind::Mp4Container => {
-            let target = parse_mp4_targets(carrier).map_err(|e| {
-                StrHideError::UnsupportedFormat(format!("MP4/MOV parse error: {e}"))
-            })?;
+        // MP4 and MKV both carry the authoritative SPS in their
+        // `HEVCDecoderConfigurationRecord`, so they share this arm.
+        HevcCarrierKind::Mp4Container | HevcCarrierKind::MkvContainer => {
+            let parameter_sets = match kind {
+                HevcCarrierKind::MkvContainer => {
+                    parse_mkv_targets(carrier)
+                        .map_err(|e| {
+                            StrHideError::UnsupportedFormat(format!("MKV parse error: {e}"))
+                        })?
+                        .parameter_sets
+                }
+                _ => {
+                    parse_mp4_targets(carrier)
+                        .map_err(|e| {
+                            StrHideError::UnsupportedFormat(format!("MP4/MOV parse error: {e}"))
+                        })?
+                        .parameter_sets
+                }
+            };
             // The sample entries carry no size of their own that can be
             // trusted (they duplicate the SPS, and some writers leave them
             // wrong); the `hvcC` SPS is the same one the decoder will use.
-            for ps in &target.parameter_sets {
+            for ps in &parameter_sets {
                 if ps.len() > 2
                     && (ps[0] >> 1) & 0x3F == NAL_SPS_NUT
                     && let Some(dims) = sps_dimensions(&nal_rbsp(ps))
@@ -603,11 +619,7 @@ pub(crate) fn build_hevc_capacity_info(
     pool: &PoolProfile,
     safety_level: SafetyLevel,
 ) -> Result<StegoCapacityInfo, StrHideError> {
-    let format_name = match kind {
-        HevcCarrierKind::HeifContainer => "HEIF/HEVC",
-        HevcCarrierKind::AnnexBStream => "HEVC-AnnexB",
-        HevcCarrierKind::Mp4Container => "MP4/HEVC",
-    };
+    let format_name = kind.label();
 
     let total_slots = pool.total_slots;
     let trellis = StcTrellis::from_seed_grouped(CAPACITY_PROBE_SEED, fmt.stc_h, fmt.stc_u)?;
@@ -885,7 +897,13 @@ pub fn embed_hevc_patches_with_factor(
         )));
     }
 
-    let is_video = kind == HevcCarrierKind::Mp4Container || record.pictures > 1;
+    // A container that only ever holds video is a video carrier regardless of
+    // how many pictures it has; an Annex-B stream or a HEIF still is judged by
+    // the picture count.
+    let is_video = matches!(
+        kind,
+        HevcCarrierKind::Mp4Container | HevcCarrierKind::MkvContainer
+    ) || record.pictures > 1;
     if is_video && total_slots < HEVC_SUPERBLOCK_MIN_SLOTS + desired_body_slots {
         let current_tier = safety.level.as_str();
         let hint = match safety.level {
@@ -1743,11 +1761,7 @@ fn inspect_hevc_record(
             None
         }
     });
-    let mut empty_info = StegoHeaderInfo::empty(match kind {
-        HevcCarrierKind::HeifContainer => "HEIF/HEVC",
-        HevcCarrierKind::AnnexBStream => "HEVC-AnnexB",
-        HevcCarrierKind::Mp4Container => "MP4/HEVC",
-    });
+    let mut empty_info = StegoHeaderInfo::empty(kind.label());
     empty_info.media_info = media_info;
 
     let total_slots = record.total_slots();
@@ -1788,11 +1802,7 @@ fn inspect_hevc_record(
 
     let payload_len = sb.payload_len as usize;
     Ok(StegoHeaderInfo {
-        format: match kind {
-            HevcCarrierKind::HeifContainer => "HEIF/HEVC".into(),
-            HevcCarrierKind::AnnexBStream => "HEVC-AnnexB".into(),
-            HevcCarrierKind::Mp4Container => "MP4/HEVC".into(),
-        },
+        format: kind.label().to_string(),
         has_hidden_data: true,
         algorithm: Some("HEVC-CABAC-InPlace".into()),
         codec: Some(format!("STC (h=7, u={})", sb.stc_u_body)),
@@ -1824,11 +1834,7 @@ pub fn inspect_hevc(
     } else {
         None
     };
-    let mut empty_info = StegoHeaderInfo::empty(match kind {
-        HevcCarrierKind::HeifContainer => "HEIF/HEVC",
-        HevcCarrierKind::AnnexBStream => "HEVC-AnnexB",
-        HevcCarrierKind::Mp4Container => "MP4/HEVC",
-    });
+    let mut empty_info = StegoHeaderInfo::empty(kind.label());
     empty_info.media_info = media_info;
 
     let record = match record_carrier_state(
@@ -2148,12 +2154,7 @@ pub fn verify_hevc(
 ) -> Result<StegoVerifyResult, StrHideError> {
     control.check()?;
     let mut levels = Vec::new();
-    let format_name = match sniff_hevc_carrier(carrier) {
-        Some(HevcCarrierKind::HeifContainer) => "HEIF/HEVC",
-        Some(HevcCarrierKind::AnnexBStream) => "HEVC-AnnexB",
-        Some(HevcCarrierKind::Mp4Container) => "MP4/HEVC",
-        None => "HEVC",
-    };
+    let format_name = sniff_hevc_carrier(carrier).map_or("HEVC", |k| k.label());
 
     let kind = match sniff_hevc_carrier(carrier) {
         Some(k) => k,
@@ -2770,6 +2771,25 @@ fn record_carrier_state(
             let target = parse_mp4_targets(carrier).map_err(|e| {
                 StrHideError::UnsupportedFormat(format!("MP4/MOV parse error: {e}"))
             })?;
+            let parameter_sets = owned_parameter_sets(&target.parameter_sets);
+            let mut candidates = Vec::with_capacity(target.slice_spans.len());
+            for span in &target.slice_spans {
+                if let Some(cand) = candidate_slice(carrier, span.start..span.end()) {
+                    candidates.push(cand);
+                }
+            }
+            (
+                candidates,
+                DigestInputs::ParameterSets {
+                    parameter_sets: parameter_sets.clone(),
+                },
+                parameter_sets,
+                None,
+            )
+        }
+        HevcCarrierKind::MkvContainer => {
+            let target = parse_mkv_targets(carrier)
+                .map_err(|e| StrHideError::UnsupportedFormat(format!("MKV parse error: {e}")))?;
             let parameter_sets = owned_parameter_sets(&target.parameter_sets);
             let mut candidates = Vec::with_capacity(target.slice_spans.len());
             for span in &target.slice_spans {

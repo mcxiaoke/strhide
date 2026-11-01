@@ -115,11 +115,12 @@ fn raw_annexb_is_content_only() {
 fn container_only_formats_are_rejected_by_the_content_domain() {
     for (name, bytes) in cases() {
         let format = sniff_bytes(&bytes).expect("recognised");
-        // WAV left this list when the PCM content engine landed; the structure
-        // domain still carries it too, so both domains now accept it.
+        // WAV left this list when the PCM content engine landed, and MKV when
+        // the HEVC container support did; both still have structure-domain
+        // strategies, so they are carriers for either domain now.
         if matches!(
             format,
-            FileFormat::Zip | FileFormat::Pdf | FileFormat::Pe | FileFormat::Webp | FileFormat::Mkv
+            FileFormat::Zip | FileFormat::Pdf | FileFormat::Pe | FileFormat::Webp
         ) {
             assert!(
                 !format.supports_stego(),

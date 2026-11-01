@@ -71,8 +71,15 @@ fn diag(path: &str) {
             let t = parse_heif_targets(&carrier).expect("parse heif");
             (t.parameter_sets, t.slice_spans)
         }
+        // The diagnostic probe predates the MKV carrier; the engine itself
+        // handles it. Keep the match exhaustive so a new carrier cannot be
+        // silently mis-diagnosed.
+        HevcCarrierKind::MkvContainer => {
+            eprintln!("{path}: MKV carriers are not supported by this probe");
+            return;
+        }
         HevcCarrierKind::AnnexBStream => {
-            eprintln!("{path}: only MP4/HEIF containers are supported by this probe");
+            eprintln!("{path}: only container carriers are supported by this probe");
             return;
         }
     };

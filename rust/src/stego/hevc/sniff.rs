@@ -18,8 +18,34 @@ pub enum HevcCarrierKind {
     HeifContainer,
     /// ISO BMFF MP4/MOV video container (holding `hvc1`/`hev1` tracks).
     Mp4Container,
+    /// Matroska (MKV/WebM) container holding a `V_MPEGH/ISO/HEVC` track.
+    MkvContainer,
     /// Raw Annex-B HEVC bitstream (delimited by `0x000001` or `0x00000001` start codes).
     AnnexBStream,
+}
+
+impl HevcCarrierKind {
+    /// Human-readable container label used in reports and verification output.
+    pub fn label(self) -> &'static str {
+        match self {
+            HevcCarrierKind::HeifContainer => "HEIF/HEVC",
+            HevcCarrierKind::Mp4Container => "MP4/HEVC",
+            HevcCarrierKind::MkvContainer => "MKV/HEVC",
+            HevcCarrierKind::AnnexBStream => "HEVC-AnnexB",
+        }
+    }
+
+    /// Whether the carrier is a container whose parameter sets live in an
+    /// `hvcC` record (as opposed to an Annex-B stream that carries them
+    /// in-band, possibly redefining them mid-file).
+    pub fn has_hvcc_parameter_sets(self) -> bool {
+        matches!(
+            self,
+            HevcCarrierKind::HeifContainer
+                | HevcCarrierKind::Mp4Container
+                | HevcCarrierKind::MkvContainer
+        )
+    }
 }
 
 /// Sniff byte slice to determine if it is an HEVC carrier.
@@ -27,6 +53,7 @@ pub fn sniff_hevc_carrier(bytes: &[u8]) -> Option<HevcCarrierKind> {
     match sniff_bytes(bytes)? {
         FileFormat::Heif => Some(HevcCarrierKind::HeifContainer),
         FileFormat::Mp4 => Some(HevcCarrierKind::Mp4Container),
+        FileFormat::Mkv => Some(HevcCarrierKind::MkvContainer),
         FileFormat::HevcAnnexB => Some(HevcCarrierKind::AnnexBStream),
         _ => None,
     }

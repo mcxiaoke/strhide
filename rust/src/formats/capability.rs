@@ -146,9 +146,13 @@ pub static CAPABILITIES: &[Capability] = &[
         structure: &["ebml_void", "eof"],
         #[cfg(not(feature = "structure-base"))]
         structure: &[],
+        #[cfg(feature = "content-hevc")]
+        stego: &[StegoKind::HevcCabac],
+        #[cfg(not(feature = "content-hevc"))]
         stego: &[],
         extensions: &["mkv", "webm"],
-        memory: MemoryProfile::Streaming,
+        // The CABAC engine holds the whole bitstream, exactly like MP4.
+        memory: MemoryProfile::WholeFile,
     },
     Capability {
         format: FileFormat::Wav,
@@ -294,6 +298,7 @@ mod tests {
         {
             expected.push(FileFormat::Heif);
             expected.push(FileFormat::Mp4);
+            expected.push(FileFormat::Mkv);
             expected.push(FileFormat::HevcAnnexB);
         }
         #[cfg(feature = "content-audio")]
