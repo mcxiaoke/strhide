@@ -24,14 +24,13 @@
 //!
 //! # The `alpha` knob
 //!
-//! `alpha` (bits per pixel, default `0.20`) is only the *reference payload*
+//! `alpha` (bits per pixel, default `0.20`) is the *reference payload*
 //! the Lagrange multiplier is calibrated for: MiPOD costs depend on the
 //! payload, and the engine does not hand the real payload to a cost model.
-//! Because `rho` is a strictly increasing function of `I` for every positive
-//! `lambda` (see [`crate::stego::cost_calibration`]), changing `alpha`
-//! rescales costs without changing their order. Extraction therefore does
-//! not need `alpha` (it is not carried in the feature word) and cannot
-//! desynchronise because of it.
+//! To ensure exact bit-identical cost maps on both embed and extract sides
+//! (preventing any tie-breaking divergence under floating-point interpolation),
+//! `alpha` is quantized to `f32` and carried in [`crate::stego::header::FeatureWord::sigma`]
+//! (clamped to `[0.01, 0.90]`).
 
 use rayon::prelude::*;
 

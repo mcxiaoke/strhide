@@ -151,10 +151,24 @@ impl JpegCostModel for JmipodCostModel {
         drop(plane);
         drop(spatial);
         let mut costs = fisher_to_costs(fisher, target_bits);
-        for bi in 0..total_blocks {
-            costs[bi * 64] = params.wet_cost;
+        for (i, c) in costs.iter_mut().enumerate() {
+            if i % 64 == 0 || !c.is_finite() || *c <= 0.0 || *c > params.wet_cost {
+                *c = params.wet_cost;
+            }
         }
         costs
+    }
+
+    fn direction_bias(
+        &self,
+        coeffs: &dct_io::JpegCoefficients,
+        geometry: &JpegGeometry,
+        params: &JpegParams,
+    ) -> Option<Vec<i8>> {
+        if (params.polarize_weight - 1.0).abs() <= f64::EPSILON {
+            return None;
+        }
+        precover::bias(coeffs, geometry, 0.0)
     }
 }
 
@@ -334,5 +348,51 @@ mod tests {
         for (x, y) in a.iter().zip(b.iter()) {
             assert_eq!(x.to_bits(), y.to_bits());
         }
+    }
+
+    #[test]
+    fn costs_respect_wet_cap_and_positive_finite_bounds() {
+        let coeffs = two_by_two();
+        let geometry = geometry_for(&coeffs);
+        let params = JpegParams {
+            wet_cost: 5.0, // tight wet cap to verify clamping
+            ..Default::default()
+        };
+        let costs = JmipodCostModel.compute_cost(&coeffs, &geometry, &params);
+        for (i, &c) in costs.iter().enumerate() {
+            assert!(c.is_finite(), "cost {i} must be finite");
+            assert!(c > 0.0, "cost {i} must be strictly positive");
+            assert!(c <= params.wet_cost, "cost {i} must not exceed wet cap");
+            if i % 64 == 0 {
+                assert_eq!(c, params.wet_cost, "DC {i} must be exactly wet");
+            }
+        }
+    }
+
+    #[test]
+    fn direction_bias_follows_polarize_weight() {
+        let coeffs = two_by_two();
+        let geometry = geometry_for(&coeffs);
+        let params = JpegParams::default();
+        assert_eq!(params.polarize_weight, 1.0);
+        assert!(
+            JmipodCostModel
+                .direction_bias(&coeffs, &geometry, &params)
+                .is_none(),
+            "polarize_weight=1.0 must produce None"
+        );
+
+        let polarized = JpegParams {
+            polarize_weight: 0.65,
+            ..Default::default()
+        };
+        let bias = JmipodCostModel
+            .direction_bias(&coeffs, &geometry, &polarized)
+            .expect("polarize_weight < 1.0 must produce bias");
+        assert_eq!(bias.len(), coeffs.components[0].blocks.len() * 64);
+        assert!(
+            bias.iter().any(|&b| b != 0),
+            "at least one mode should be polarized"
+        );
     }
 }

@@ -214,6 +214,9 @@ impl PngParams {
         if let Some(s) = p.algorithm_options.get_mut("sigma") {
             *s = *s as f32 as f64;
         }
+        if let Some(a) = p.algorithm_options.get_mut("alpha") {
+            *a = (*a as f32 as f64).clamp(0.01, 0.90);
+        }
         p
     }
 }

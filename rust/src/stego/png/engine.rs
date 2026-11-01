@@ -1489,11 +1489,20 @@ pub fn embed_png_with_stats<'a>(
                     cost_model.id()
                 ))
             })?,
-        sigma: params
-            .algorithm_options
-            .get("sigma")
-            .copied()
-            .unwrap_or(1.0) as f32,
+        sigma: if cost_model.id() == "mipod" {
+            params
+                .algorithm_options
+                .get("alpha")
+                .copied()
+                .unwrap_or(0.20)
+                .clamp(0.01, 0.90) as f32
+        } else {
+            params
+                .algorithm_options
+                .get("sigma")
+                .copied()
+                .unwrap_or(1.0) as f32
+        },
         kernel_id: 0, // the built-in KB kernel; custom kernels need matching configs
     };
     let feature_bytes = fw.encode();
@@ -1801,6 +1810,10 @@ fn extract_png_image(
         effective_params
             .algorithm_options
             .insert("sigma".to_string(), fw.sigma as f64);
+    } else if resolved.id() == "mipod" {
+        effective_params
+            .algorithm_options
+            .insert("alpha".to_string(), (fw.sigma as f64).clamp(0.01, 0.90));
     }
     effective_params.validate()?;
 

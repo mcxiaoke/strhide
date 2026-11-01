@@ -134,3 +134,33 @@ fn mipod_cost_map_separates_flat_from_textured_regions() {
         "flat region cost ({flat}) must clearly exceed textured ({textured})"
     );
 }
+
+#[test]
+fn mipod_custom_alpha_is_carried_in_feature_word_and_extracts_correctly() {
+    for alpha in [0.05, 0.45, 0.80] {
+        let png = texture_png(96, 96);
+        let payload = payload();
+        let mut params = PngParams::default();
+        params.algorithm_options.insert("alpha".into(), alpha);
+        let opts = EmbedOptions {
+            tuning: StegoTuning::Png {
+                model: SpatialAlgorithm::Mipod,
+                params,
+            },
+            ..Default::default()
+        };
+        let stego =
+            embed_carrier(&png, &Payload::bytes(&payload), &opts).expect("embed with custom alpha");
+        let fw = read_feature_word(&stego);
+        assert!(
+            (fw.sigma - alpha as f32).abs() < 1e-6,
+            "FeatureWord.sigma must carry alpha: got {}, expected {}",
+            fw.sigma,
+            alpha
+        );
+
+        // Extraction without passing alpha (default ExtractOptions) must succeed.
+        let back = extract_carrier(&stego, &ExtractOptions::default()).expect("extract");
+        assert_eq!(back, payload);
+    }
+}

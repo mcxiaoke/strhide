@@ -153,7 +153,8 @@ pub struct FeatureWord {
     /// Lives in `bytes[8]`, which v2 reserved as zero, so the packed `low64`
     /// layout is unchanged.
     pub algorithm_id: u8,
-    /// S-UNIWARD's `sigma` model option, rounded to `f32` precision. Other
+    /// S-UNIWARD's `sigma` model option or MiPOD's `alpha` reference payload,
+    /// rounded to `f32` precision. Other
     /// models ignore it.
     pub sigma: f32,
     /// High-pass kernel selector: 0 = the built-in normalized KB kernel.

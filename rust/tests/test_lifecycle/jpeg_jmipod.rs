@@ -134,3 +134,19 @@ fn jmipod_prices_all_ac_coefficients() {
         }
     }
 }
+
+#[test]
+fn jmipod_carrier_roundtrips_with_polarization() {
+    let payload = payload();
+    let mut opts = options(Some("jmipod"));
+    if let strhide::stego::StegoTuning::Jpeg { ref mut params, .. } = opts.tuning {
+        params.polarize_weight = 0.65;
+    }
+    let stego = embed_carrier(COVER, &Payload::bytes(&payload), &opts)
+        .expect("embed with polarized J-MiPOD");
+    assert_ne!(stego, COVER, "carrier must change");
+
+    let back = extract_carrier(&stego, &ExtractOptions::default())
+        .expect("extract polarized J-MiPOD carrier");
+    assert_eq!(back, payload);
+}
