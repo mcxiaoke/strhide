@@ -22,8 +22,10 @@ cargo build --release --all-features   # 编译，产物在 target/release/strhi
 # target/release/strhide(.exe)，跑 CLI 与 baseline_hash 前必须带 --all-features
 # （或 --features cli），否则会拿旧二进制验证新代码。
 cargo test --all-features --all-targets   # 全量测试（默认 feature 集不含 cli，CLI 测试按 feature 门控）
-cargo test local_ --all-features -- --ignored  #单独运行本地批量测试（约 3 分钟）
+cargo test local_ --all-features -- --ignored  # 单独运行本地快速批量测试（约 15-30 秒）
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings   # 提交前格式化并修复所有 lint
+# 下面这个平时不要运行，特别慢
+cargo test heavy_ --all-features -- --ignored  # 单独运行耗时评测与全语料矩阵测试（可选，约 7 分钟）
 ```
 
 ### 桌面端开发与测试流程：`gui/`

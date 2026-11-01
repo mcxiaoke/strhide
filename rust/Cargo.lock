@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "strhide"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "aes-gcm",
  "base64",

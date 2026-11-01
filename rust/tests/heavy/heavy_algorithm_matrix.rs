@@ -1,4 +1,4 @@
-//! Local (ignored) algorithm matrix: every PNG/JPEG carrier × every cost model.
+//! Heavy algorithm matrix: every PNG/JPEG carrier × every cost model.
 //!
 //! The default suite uses the two corpora under `temp/teststego` and
 //! `temp/testhighres`, embeds a small deterministic payload with each
@@ -7,7 +7,7 @@
 //!
 //! Run with:
 //! ```text
-//! cargo test --release --test local_tests local_all_algorithms -- --ignored --nocapture
+//! cargo test --release --test heavy_tests heavy_all_algorithms -- --ignored --nocapture
 //! ```
 //!
 //! Environment knobs:
@@ -184,7 +184,7 @@ fn megapixels(path: &Path, bytes: &[u8]) -> Option<f64> {
 
 #[test]
 #[ignore]
-pub fn local_all_algorithms_png_jpeg_matrix() {
+pub fn heavy_all_algorithms_png_jpeg_matrix() {
     let dirs = corpus_dirs();
     let only = algorithm_filter();
     let max_mp = max_megapixels();
