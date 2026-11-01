@@ -146,11 +146,53 @@ pub fn derive_header_perm_seed_with_profile(
     domain: Option<&str>,
     spatial: &crate::stego::format::PngFormatProfile,
 ) -> [u8; 32] {
-    let pw = password.unwrap_or(spatial.fallback_secret);
+    derive_header_perm_seed_impl(
+        password,
+        domain,
+        spatial.fallback_secret,
+        spatial.domain_label,
+        spatial.hpos_salt,
+        spatial.hpos_label,
+    )
+}
+
+/// [`derive_header_perm_seed`] with explicit audio profile settings.
+///
+/// Same construction as the spatial one, with the audio profile's own salt and
+/// label, so a WAV and a PNG carrying the same password place their headers in
+/// unrelated slot positions.
+pub fn derive_header_perm_seed_audio(
+    password: Option<&str>,
+    domain: Option<&str>,
+    audio: &crate::stego::format::AudioFormatProfile,
+) -> [u8; 32] {
+    derive_header_perm_seed_impl(
+        password,
+        domain,
+        audio.fallback_secret,
+        audio.domain_label,
+        audio.hpos_salt,
+        audio.hpos_label,
+    )
+}
+
+/// The shared header-seed construction behind both profile shapes.
+///
+/// Kept private: callers must go through a profile so no caller can invent salt
+/// or label material that the reader would not reproduce.
+fn derive_header_perm_seed_impl(
+    password: Option<&str>,
+    domain: Option<&str>,
+    fallback_secret: &str,
+    domain_label: &[u8],
+    hpos_salt: &[u8],
+    hpos_label: &[u8],
+) -> [u8; 32] {
+    let pw = password.unwrap_or(fallback_secret);
     let norm_pw = normalize_nfc(pw);
     let subkey_buf;
     let effective_ikm: &[u8] =
-        match derive_domain_subkey_with_label(norm_pw.as_bytes(), domain, spatial.domain_label) {
+        match derive_domain_subkey_with_label(norm_pw.as_bytes(), domain, domain_label) {
             Some(subkey) => {
                 subkey_buf = subkey;
                 &subkey_buf
@@ -158,8 +200,8 @@ pub fn derive_header_perm_seed_with_profile(
             None => norm_pw.as_bytes(),
         };
     let mut header_seed = [0u8; 32];
-    let hk = Hkdf::<Sha256>::new(Some(spatial.hpos_salt), effective_ikm);
-    hk.expand(spatial.hpos_label, &mut header_seed)
+    let hk = Hkdf::<Sha256>::new(Some(hpos_salt), effective_ikm);
+    hk.expand(hpos_label, &mut header_seed)
         .expect("HKDF expand header perm seed");
     header_seed
 }

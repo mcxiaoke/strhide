@@ -41,6 +41,8 @@ pub enum StegoKind {
     JpegDct,
     /// HEVC CABAC bypass channel (Annex-B, MP4/MOV, HEIF Scheme C).
     HevcCabac,
+    /// PCM sample-domain LSB matching (WAV).
+    WavPcm,
     /// HEIF bridge: embed into an embedded JPEG thumbnail or `unci` item.
     HeifBridge,
 }
@@ -51,6 +53,7 @@ impl StegoKind {
             StegoKind::PngSpatial => "png-spatial",
             StegoKind::JpegDct => "jpeg-dct",
             StegoKind::HevcCabac => "hevc-cabac",
+            StegoKind::WavPcm => "wav-pcm",
             StegoKind::HeifBridge => "heif-bridge",
         }
     }
@@ -153,9 +156,14 @@ pub static CAPABILITIES: &[Capability] = &[
         structure: &["riff_chunk", "eof"],
         #[cfg(not(feature = "structure-base"))]
         structure: &[],
+        #[cfg(feature = "content-audio")]
+        stego: &[StegoKind::WavPcm],
+        #[cfg(not(feature = "content-audio"))]
         stego: &[],
         extensions: &["wav"],
-        memory: MemoryProfile::Streaming,
+        // The engine buffers the whole file: it overwrites the `data` chunk in
+        // place and needs random access to any slot the permutation names.
+        memory: MemoryProfile::WholeFile,
     },
     Capability {
         format: FileFormat::Zip,
@@ -288,6 +296,12 @@ mod tests {
             expected.push(FileFormat::Mp4);
             expected.push(FileFormat::HevcAnnexB);
         }
+        #[cfg(feature = "content-audio")]
+        expected.push(FileFormat::Wav);
+        // Compare in `FileFormat::ALL` order: the assertion is about the *set*,
+        // and the push order above follows the feature blocks, not the enum.
+        let order = |f: &FileFormat| FileFormat::ALL.iter().position(|x| x == f).unwrap();
+        expected.sort_by_key(order);
         assert_eq!(stego, expected);
     }
 

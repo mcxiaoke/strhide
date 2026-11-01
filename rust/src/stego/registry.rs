@@ -25,6 +25,12 @@ pub fn list_algorithms() -> Vec<(&'static str, &'static str, &'static str)> {
         "HEIF/HEVC",
         "H.265 CABAC bypass sign bit in-place steganography (Scheme C, zero expansion)",
     ));
+    #[cfg(feature = "content-audio")]
+    out.push((
+        "audio",
+        "Audio (WAV)",
+        "Content-adaptive PCM sample matching (perceptual cost + STC, in-place +/-1 LSB)",
+    ));
     out
 }
 
@@ -41,6 +47,8 @@ mod tests {
         let mut jpeg_seen = 0usize;
         #[allow(unused_mut)]
         let mut hevc_seen = 0usize;
+        #[allow(unused_mut)]
+        let mut audio_seen = 0usize;
         for (name, domain, description) in listed {
             assert!(!description.is_empty(), "{name}: empty description");
             match domain {
@@ -68,6 +76,9 @@ mod tests {
                 // The HEVC Scheme C engine carries no cost-model selection, so
                 // this entry only needs to exist for the CLI listing.
                 "HEIF/HEVC" => hevc_seen += 1,
+                // Likewise the audio engine: one built-in cost model, no
+                // selectable algorithm id.
+                "Audio (WAV)" => audio_seen += 1,
                 other => panic!("{name}: unknown domain label {other:?}"),
             }
         }
@@ -78,5 +89,7 @@ mod tests {
         assert!(jpeg_seen > 0, "no JPEG algorithm listed");
         #[cfg(feature = "content-hevc")]
         assert!(hevc_seen > 0, "no HEVC algorithm listed");
+        #[cfg(feature = "content-audio")]
+        assert!(audio_seen > 0, "no audio algorithm listed");
     }
 }

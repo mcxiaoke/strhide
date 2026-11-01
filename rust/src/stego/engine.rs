@@ -98,6 +98,8 @@ static ENGINES: &[&dyn StegoEngine] = &[
     &Mp4Engine,
     #[cfg(feature = "content-hevc")]
     &AnnexBEngine,
+    #[cfg(feature = "content-audio")]
+    &WavEngine,
 ];
 
 /// The engine that handles `format`, or `None` when the content domain cannot
@@ -855,11 +857,123 @@ impl StegoEngine for AnnexBEngine {
     }
 }
 
+/// WAV PCM: `±1` LSB moves on the sample stream, in place.
+#[cfg(feature = "content-audio")]
+pub struct WavEngine;
+
+#[cfg(feature = "content-audio")]
+impl StegoEngine for WavEngine {
+    fn format(&self) -> FileFormat {
+        FileFormat::Wav
+    }
+
+    fn probe(
+        &self,
+        carrier: &[u8],
+        opts: &ProbeOptions<'_>,
+        _dialect: &StegoProfile,
+    ) -> Result<StegoCapacityInfo, StrHideError> {
+        opts.tuning.applicable_to(self.format())?;
+        opts.control.check()?;
+        with_pool(opts.pool.as_ref(), || {
+            crate::stego::audio::probe_wav(carrier, opts.safety.level, &opts.control)
+        })
+    }
+
+    fn embed(
+        &self,
+        carrier: &[u8],
+        payload: &Payload<'_>,
+        opts: &EmbedOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<EmbedOutput, StrHideError> {
+        opts.tuning.applicable_to(self.format())?;
+        let secret = opts.secret(dialect);
+        let domain = opts.domain(dialect);
+        opts.control.check()?;
+        let anon_payload;
+        let eff_payload = if opts.no_filename && payload.name().is_some() {
+            anon_payload = Payload::bytes(payload.as_bytes());
+            &anon_payload
+        } else {
+            payload
+        };
+        let (bytes, capacity, stats) = with_pool(opts.pool.as_ref(), || {
+            crate::stego::audio::embed_wav(
+                carrier,
+                eff_payload,
+                secret,
+                domain,
+                dialect.audio_format(),
+                opts.safety,
+                opts.freshness,
+                &opts.control,
+            )
+        })?;
+        Ok(EmbedOutput::with_capacity_and_stats(bytes, capacity, stats))
+    }
+
+    fn extract(
+        &self,
+        carrier: &[u8],
+        opts: &ExtractOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<Payload<'static>, StrHideError> {
+        let secret = opts.secret(dialect);
+        let domain = opts.domain(dialect);
+        opts.control.check()?;
+        with_pool(opts.pool.as_ref(), || {
+            crate::stego::audio::extract_wav(
+                carrier,
+                secret,
+                domain,
+                dialect.audio_format(),
+                &opts.control,
+            )
+        })
+    }
+
+    fn inspect(
+        &self,
+        carrier: &[u8],
+        opts: &InspectOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoHeaderInfo, StrHideError> {
+        let secret = opts.secret(dialect);
+        let domain = opts.domain(dialect);
+        opts.control.check()?;
+        crate::stego::audio::inspect_wav(
+            carrier,
+            secret,
+            domain,
+            dialect.audio_format(),
+            &opts.control,
+        )
+    }
+
+    fn verify(
+        &self,
+        carrier: &[u8],
+        opts: &VerifyOptions<'_>,
+        dialect: &StegoProfile,
+    ) -> Result<StegoVerifyResult, StrHideError> {
+        let secret = opts.secret(dialect);
+        let domain = opts.domain(dialect);
+        opts.control.check()?;
+        crate::stego::audio::verify_wav(
+            carrier,
+            secret,
+            domain,
+            dialect.audio_format(),
+            &opts.control,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::formats::capability::CAPABILITIES;
-
     #[test]
     #[cfg(feature = "content")]
     fn every_content_capable_format_has_an_engine() {
@@ -902,12 +1016,14 @@ mod tests {
 
     #[test]
     fn container_formats_without_a_content_engine_have_none() {
+        // Formats with no content engine. `Wav` left this list when the PCM
+        // engine landed; `Mkv` will leave it when the HEVC container support
+        // does.
         for format in [
             FileFormat::Zip,
             FileFormat::Pdf,
             FileFormat::Pe,
             FileFormat::Webp,
-            FileFormat::Wav,
             FileFormat::Mkv,
         ] {
             assert!(

@@ -455,6 +455,75 @@ pub const OFFICIAL_PNG_FORMAT: PngFormatProfile = PngFormatProfile {
     body: &DEFAULT_JPEG_FORMAT,
 };
 
+/// Identity and KDF derivation labels for audio (WAV / FLAC) steganography.
+///
+/// Mirrors [`PngFormatProfile`] field for field, but every label is distinct so
+/// the same password on a WAV and on a PNG derives independent keys. The
+/// `body` member reuses [`JpegFormatProfile`] because the AEAD suite list and
+/// the `enc`/`perm`/`stc` label layering are shared machinery, not a container
+/// property -- what changes is the label material, supplied by [`AUDIO_BODY_FORMAT`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioFormatProfile {
+    /// Stand-in secret used when neither a user password nor a private secret is provided.
+    pub fallback_secret: &'static str,
+    /// HKDF info label for domain subkey derivation.
+    pub domain_label: &'static [u8],
+    /// HKDF salt for the header slot permutation seed.
+    pub hpos_salt: &'static [u8],
+    /// HKDF info label for the header slot permutation seed.
+    pub hpos_label: &'static [u8],
+    /// HKDF info label for the STC trellis seed.
+    pub stc_label: &'static [u8],
+    /// Suite list and body key/permutation labels.
+    pub body: &'static JpegFormatProfile,
+}
+
+/// Body-level labels for audio carriers.
+///
+/// `sb_*` / `ext_*` / `grid_rule` describe the JPEG superblock geometry and are
+/// unused here; they keep the type shared rather than duplicating a near-copy
+/// of [`JpegFormatProfile`] that would drift the moment a suite is added.
+pub const AUDIO_BODY_FORMAT: JpegFormatProfile = JpegFormatProfile {
+    format_major: 1,
+    format_minor: 0,
+    cover_digest_tag: b"strhide-audio-cover-v1",
+    hpos_label: b"audio-hpos",
+    stc_label: b"audio-stc-trellis-v1",
+    enc_label: b"audio-enc-v1",
+    perm_label: b"audio-perm-v1",
+    sb_bytes: 44,
+    sb_h: 8,
+    sb_u: 2,
+    ext_h: 8,
+    ext_u: 4,
+    grid_rule: GridRule::ALL_AC,
+    suites: SUITES,
+};
+
+/// Official WAV profile.
+pub const OFFICIAL_WAV_FORMAT: AudioFormatProfile = AudioFormatProfile {
+    fallback_secret: "strhide-default-content-stego-key-2026",
+    domain_label: b"strhide-stego-domain-v1",
+    hpos_salt: b"strhide-audio-hpos-salt-v1",
+    hpos_label: b"strhide-audio-hpos-v1",
+    stc_label: b"strhide-audio-stc-v1",
+    body: &AUDIO_BODY_FORMAT,
+};
+
+/// Official FLAC profile.
+///
+/// A separate `hpos_salt` from WAV keeps the header permutation independent
+/// between the two carriers even when a caller reuses one password across a
+/// library of mixed formats.
+pub const OFFICIAL_FLAC_FORMAT: AudioFormatProfile = AudioFormatProfile {
+    fallback_secret: "strhide-default-content-stego-key-2026",
+    domain_label: b"strhide-stego-domain-v1",
+    hpos_salt: b"strhide-flac-hpos-salt-v1",
+    hpos_label: b"strhide-flac-hpos-v1",
+    stc_label: b"strhide-flac-stc-v1",
+    body: &AUDIO_BODY_FORMAT,
+};
+
 /// Domain-separated HKDF info string: `label || u64be(len) || domain`.
 ///
 /// The length prefix keeps `("ab", "c")` and `("a", "bc")` from colliding.

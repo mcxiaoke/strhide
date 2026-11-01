@@ -101,15 +101,15 @@ pub fn decode_header_word(word: u32) -> (u32, u32, u8) {
 pub const HEADER_V2_ESCAPE_H: u8 = 15;
 
 /// Size of the v2 feature word block in bytes.
-#[cfg(feature = "content-png")]
+#[cfg(any(feature = "content-png", feature = "content-audio"))]
 pub const FEATURE_WORD_BYTES: usize = 32;
 
 /// Number of candidate slots carrying the 32-byte feature word (1 bit per slot).
-#[cfg(feature = "content-png")]
+#[cfg(any(feature = "content-png", feature = "content-audio"))]
 pub const FEATURE_WORD_SLOTS: usize = FEATURE_WORD_BYTES * 8; // 256 slots
 
 /// Total slots occupied by v2 header (256 basic header slots + 256 feature word slots).
-#[cfg(feature = "content-png")]
+#[cfg(any(feature = "content-png", feature = "content-audio"))]
 pub const V2_TOTAL_HEADER_SLOTS: usize = 256 + FEATURE_WORD_SLOTS; // 512 slots
 
 /// Self-describing feature descriptor stored in the 32-byte feature word (v3).
@@ -126,7 +126,7 @@ pub const V2_TOTAL_HEADER_SLOTS: usize = 256 + FEATURE_WORD_SLOTS; // 512 slots
 /// 3x3 high-pass kernel is not carried: it does not fit, so a `kernel_id`
 /// names it instead (0 = the built-in KB kernel) and custom kernels remain
 /// a same-configuration-on-both-ends expert setting.
-#[cfg(feature = "content-png")]
+#[cfg(any(feature = "content-png", feature = "content-audio"))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FeatureWord {
     pub version: u8,
@@ -162,7 +162,7 @@ pub struct FeatureWord {
     pub kernel_id: u8,
 }
 
-#[cfg(feature = "content-png")]
+#[cfg(any(feature = "content-png", feature = "content-audio"))]
 impl Default for FeatureWord {
     fn default() -> Self {
         Self {
@@ -176,7 +176,13 @@ impl Default for FeatureWord {
             p2_window: 15,
             neg_log2_epsilon: 23,    // f32::EPSILON = 2^-23
             exclusion_permille: 300, // 30%
+            // The built-in spatial model in a PNG build; the audio engine
+            // overwrites this field with its own id, so an audio-only build
+            // needs no registry to construct a default word.
+            #[cfg(feature = "content-png")]
             algorithm_id: crate::stego::png::registry::SPATIAL_ALGORITHM_HILL,
+            #[cfg(not(feature = "content-png"))]
+            algorithm_id: 0,
             sigma: 1.0,
             kernel_id: 0,
         }
@@ -184,10 +190,10 @@ impl Default for FeatureWord {
 }
 
 /// Largest window size the feature word can carry (10 bits).
-#[cfg(feature = "content-png")]
+#[cfg(any(feature = "content-png", feature = "content-audio"))]
 pub const FEATURE_WORD_MAX_WINDOW: u16 = 63;
 
-#[cfg(feature = "content-png")]
+#[cfg(any(feature = "content-png", feature = "content-audio"))]
 impl FeatureWord {
     /// The `epsilon` value this word describes (`2^-k`).
     #[must_use]
@@ -342,7 +348,6 @@ impl FeatureWord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stego::png::registry::SPATIAL_ALGORITHM_HILL;
 
     #[test]
     fn length_round_trips_and_leaves_the_codec_bits_alone() {
@@ -385,7 +390,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "content-png")]
+    #[cfg(any(feature = "content-png", feature = "content-audio"))]
     #[test]
     fn feature_word_roundtrip_and_validation() {
         let fw = FeatureWord::default();
@@ -407,7 +412,7 @@ mod tests {
             p2_window: 31,
             neg_log2_epsilon: 27,
             exclusion_permille: 500,
-            algorithm_id: SPATIAL_ALGORITHM_HILL,
+            algorithm_id: 1,
             sigma: 0.75,
             kernel_id: 0,
             ..FeatureWord::default()

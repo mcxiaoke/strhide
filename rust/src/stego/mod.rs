@@ -11,6 +11,8 @@
 //! which is how a probe could end up advertising a different capacity than the
 //! writer filled.
 
+#[cfg(feature = "content-audio")]
+pub mod audio;
 #[doc(hidden)]
 pub mod coding;
 #[cfg(feature = "content-base")]
@@ -51,6 +53,8 @@ pub use crate::stego::png::registry::{
 };
 pub use engine::{StegoEngine, engine_for, supported_formats};
 pub use envelope::Freshness;
+#[cfg(feature = "content-audio")]
+pub use format::{AudioFormatProfile, OFFICIAL_WAV_FORMAT};
 pub use format::{CipherSuite, GridRule};
 #[cfg(feature = "content-hevc")]
 pub use format::{DEFAULT_HEVC_FORMAT, HevcFormatProfile};

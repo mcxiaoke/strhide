@@ -699,6 +699,10 @@ pub struct StegoProfile {
     /// [`DEFAULT_HEVC_FORMAT`](crate::stego::format::DEFAULT_HEVC_FORMAT).
     #[cfg(feature = "content-hevc")]
     pub hevc: Option<crate::stego::format::HevcFormatProfile>,
+    /// Private audio wire-format identity. `None` means the official
+    /// [`OFFICIAL_WAV_FORMAT`](crate::stego::format::OFFICIAL_WAV_FORMAT).
+    #[cfg(feature = "content-audio")]
+    pub audio: Option<crate::stego::format::AudioFormatProfile>,
 }
 
 impl StegoProfile {
@@ -713,6 +717,8 @@ impl StegoProfile {
             png: None,
             #[cfg(feature = "content-hevc")]
             hevc: None,
+            #[cfg(feature = "content-audio")]
+            audio: None,
         }
     }
 
@@ -751,6 +757,16 @@ impl StegoProfile {
     #[cfg(feature = "content-hevc")]
     pub const fn with_hevc_format(mut self, hevc: crate::stego::format::HevcFormatProfile) -> Self {
         self.hevc = Some(hevc);
+        self
+    }
+
+    /// Set [`audio`](Self::audio).
+    #[cfg(feature = "content-audio")]
+    pub const fn with_audio_format(
+        mut self,
+        audio: crate::stego::format::AudioFormatProfile,
+    ) -> Self {
+        self.audio = Some(audio);
         self
     }
 
@@ -796,6 +812,16 @@ impl StegoProfile {
         }
     }
 
+    /// Audio wire-format identity to use: the private [`audio`](Self::audio)
+    /// when set, otherwise the official default.
+    #[cfg(feature = "content-audio")]
+    pub fn audio_format(&self) -> &crate::stego::format::AudioFormatProfile {
+        match self.audio.as_ref() {
+            Some(audio) => audio,
+            None => &crate::stego::format::OFFICIAL_WAV_FORMAT,
+        }
+    }
+
     /// True when no private secret, domain, or format profile is set (official
     /// behaviour).
     pub fn is_official(&self) -> bool {
@@ -812,6 +838,10 @@ impl StegoProfile {
         #[cfg(feature = "content-hevc")]
         {
             ok = ok && self.hevc.is_none();
+        }
+        #[cfg(feature = "content-audio")]
+        {
+            ok = ok && self.audio.is_none();
         }
         ok
     }
