@@ -15,11 +15,14 @@
 //! * `STRHIDE_ALGO_MATRIX_ONLY` — comma-separated algorithm names.
 //! * `STRHIDE_ALGO_MATRIX_MAX_MP` — skip carriers above this megapixel count
 //!   (`0` = no limit, the default; useful for a quick pass over huge files).
+//! * `STRHIDE_ALGO_MATRIX_THREADS` — rayon thread pool size (default: 8).
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
+use rayon::prelude::*;
 use strhide::core::payload::Payload;
 use strhide::errors::StrHideError;
 use strhide::stego::{
@@ -55,6 +58,11 @@ fn corpus_dirs() -> Vec<PathBuf> {
         if !dirs.is_empty() {
             return dirs;
         }
+    }
+    let stego = root.join("testdata/stego");
+    let highres = root.join("testdata/highres");
+    if stego.is_dir() && highres.is_dir() {
+        return vec![stego, highres];
     }
     vec![root.join("temp/teststego"), root.join("temp/testhighres")]
 }
@@ -226,18 +234,33 @@ pub fn heavy_all_algorithms_png_jpeg_matrix() {
         }
     );
 
-    let mut passed = 0usize;
-    let mut skipped = 0usize;
-    let mut failed = 0usize;
+    struct MatrixTask {
+        path: PathBuf,
+        bytes: Arc<Vec<u8>>,
+        is_jpeg: bool,
+        algorithm: &'static str,
+        tuning: StegoTuning,
+    }
+
+    enum MatrixOutcome {
+        Pass {
+            filename: String,
+            algorithm: &'static str,
+            embed_s: f64,
+            extract_s: f64,
+        },
+        Skip(String),
+        Fail(String),
+    }
+
+    let mut tasks: Vec<MatrixTask> = Vec::new();
     let mut skipped_rows: Vec<String> = Vec::new();
     let mut failure_rows: Vec<String> = Vec::new();
-    let started = Instant::now();
 
     for path in &images {
         let bytes = match fs::read(path) {
-            Ok(b) => b,
+            Ok(b) => Arc::new(b),
             Err(e) => {
-                failed += 1;
                 failure_rows.push(format!("{}: read failed: {e}", path.display()));
                 continue;
             }
@@ -246,7 +269,6 @@ pub fn heavy_all_algorithms_png_jpeg_matrix() {
             && let Some(mp) = megapixels(path, &bytes)
             && mp > max_mp
         {
-            skipped += 1;
             skipped_rows.push(format!(
                 "{}: {mp:.1} MP above STRHIDE_ALGO_MATRIX_MAX_MP",
                 path.display()
@@ -267,96 +289,151 @@ pub fn heavy_all_algorithms_png_jpeg_matrix() {
             if !only.is_empty() && !only.iter().any(|name| name == algorithm) {
                 continue;
             }
-            let payload = payload_for(path, algorithm);
-            let opts = EmbedOptions {
-                tuning: tuning.clone(),
-                password: Some(PASSWORD),
-                ..Default::default()
-            };
+            tasks.push(MatrixTask {
+                path: path.clone(),
+                bytes: Arc::clone(&bytes),
+                is_jpeg,
+                algorithm,
+                tuning,
+            });
+        }
+    }
 
-            let t0 = Instant::now();
-            let stego = match embed_carrier(&bytes, &Payload::bytes(&payload), &opts) {
-                Ok(stego) => stego,
-                Err(StrHideError::UnsupportedFormat(message)) => {
-                    skipped += 1;
-                    skipped_rows.push(format!(
-                        "{} [{algorithm}]: unsupported carrier ({message})",
-                        path.file_name().unwrap().to_string_lossy()
+    let threads = std::env::var("STRHIDE_ALGO_MATRIX_THREADS")
+        .or_else(|_| std::env::var("STRHIDE_BATCH_THREADS"))
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+    println!(
+        "Rayon parallel threads: {threads} ({} tasks across {} images)",
+        tasks.len(),
+        images.len()
+    );
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .expect("build rayon thread pool");
+
+    let started = Instant::now();
+
+    let outcomes: Vec<MatrixOutcome> = pool.install(|| {
+        tasks
+            .into_par_iter()
+            .map(|task| {
+                let filename = task.path.file_name().unwrap().to_string_lossy().to_string();
+                let payload = payload_for(&task.path, task.algorithm);
+                let opts = EmbedOptions {
+                    tuning: task.tuning,
+                    password: Some(PASSWORD),
+                    ..Default::default()
+                };
+
+                let t0 = Instant::now();
+                let stego = match embed_carrier(&task.bytes, &Payload::bytes(&payload), &opts) {
+                    Ok(stego) => stego,
+                    Err(StrHideError::UnsupportedFormat(message)) => {
+                        return MatrixOutcome::Skip(format!(
+                            "{filename} [{}]: unsupported carrier ({message})",
+                            task.algorithm
+                        ));
+                    }
+                    Err(error) => {
+                        return MatrixOutcome::Fail(format!(
+                            "{} [{}]: embed failed: {error}",
+                            task.path.display(),
+                            task.algorithm
+                        ));
+                    }
+                };
+                let embed_s = t0.elapsed().as_secs_f64();
+
+                let t1 = Instant::now();
+                let recovered = match extract_carrier(&stego, &opts.extract_options()) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        return MatrixOutcome::Fail(format!(
+                            "{} [{}]: extract failed: {error}",
+                            task.path.display(),
+                            task.algorithm
+                        ));
+                    }
+                };
+                let extract_s = t1.elapsed().as_secs_f64();
+
+                if recovered != payload {
+                    return MatrixOutcome::Fail(format!(
+                        "{} [{}]: payload mismatch ({} vs {} bytes)",
+                        task.path.display(),
+                        task.algorithm,
+                        payload.len(),
+                        recovered.len()
                     ));
-                    continue;
                 }
-                Err(error) => {
-                    failed += 1;
-                    failure_rows.push(format!(
-                        "{} [{algorithm}]: embed failed: {error}",
-                        path.display()
-                    ));
-                    continue;
-                }
-            };
-            let embed_s = t0.elapsed().as_secs_f64();
 
-            let t1 = Instant::now();
-            let recovered = match extract_carrier(&stego, &opts.extract_options()) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    failed += 1;
-                    failure_rows.push(format!(
-                        "{} [{algorithm}]: extract failed: {error}",
-                        path.display()
-                    ));
-                    continue;
-                }
-            };
-            let extract_s = t1.elapsed().as_secs_f64();
-
-            if recovered != payload {
-                failed += 1;
-                failure_rows.push(format!(
-                    "{} [{algorithm}]: payload mismatch ({} vs {} bytes)",
-                    path.display(),
-                    payload.len(),
-                    recovered.len()
-                ));
-                continue;
-            }
-
-            if is_jpeg {
-                let before = dct_io::read_coefficients(&bytes);
-                let after = dct_io::read_coefficients(&stego);
-                match (before, after) {
-                    (Ok(before), Ok(after)) => {
-                        let dc_changed = before.components[0]
-                            .blocks
-                            .iter()
-                            .zip(after.components[0].blocks.iter())
-                            .any(|(b, a)| b[0] != a[0]);
-                        if dc_changed {
-                            failed += 1;
-                            failure_rows.push(format!(
-                                "{} [{algorithm}]: DC coefficient changed",
-                                path.display()
+                if task.is_jpeg {
+                    let before = dct_io::read_coefficients(&task.bytes);
+                    let after = dct_io::read_coefficients(&stego);
+                    match (before, after) {
+                        (Ok(before), Ok(after)) => {
+                            let dc_changed = before.components[0]
+                                .blocks
+                                .iter()
+                                .zip(after.components[0].blocks.iter())
+                                .any(|(b, a)| b[0] != a[0]);
+                            if dc_changed {
+                                return MatrixOutcome::Fail(format!(
+                                    "{} [{}]: DC coefficient changed",
+                                    task.path.display(),
+                                    task.algorithm
+                                ));
+                            }
+                        }
+                        (Err(e), _) | (_, Err(e)) => {
+                            return MatrixOutcome::Fail(format!(
+                                "{} [{}]: coefficient read failed: {e}",
+                                task.path.display(),
+                                task.algorithm
                             ));
-                            continue;
                         }
                     }
-                    (Err(e), _) | (_, Err(e)) => {
-                        failed += 1;
-                        failure_rows.push(format!(
-                            "{} [{algorithm}]: coefficient read failed: {e}",
-                            path.display()
-                        ));
-                        continue;
-                    }
                 }
-            }
 
-            passed += 1;
-            println!(
-                "[{passed:>3}] PASS {:<40} {:<9} embed {embed_s:.2}s extract {extract_s:.2}s",
-                path.file_name().unwrap().to_string_lossy(),
-                algorithm
-            );
+                MatrixOutcome::Pass {
+                    filename,
+                    algorithm: task.algorithm,
+                    embed_s,
+                    extract_s,
+                }
+            })
+            .collect()
+    });
+
+    let mut passed = 0usize;
+    let mut skipped = skipped_rows.len();
+    let mut failed = failure_rows.len();
+
+    for outcome in outcomes {
+        match outcome {
+            MatrixOutcome::Pass {
+                filename,
+                algorithm,
+                embed_s,
+                extract_s,
+            } => {
+                passed += 1;
+                println!(
+                    "[{passed:>3}] PASS {:<40} {:<9} embed {embed_s:.2}s extract {extract_s:.2}s",
+                    filename, algorithm
+                );
+            }
+            MatrixOutcome::Skip(msg) => {
+                skipped += 1;
+                skipped_rows.push(msg);
+            }
+            MatrixOutcome::Fail(msg) => {
+                failed += 1;
+                failure_rows.push(msg);
+            }
         }
     }
 

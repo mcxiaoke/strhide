@@ -21,6 +21,13 @@ pub mod mp4_container {
     const MIN_PSNR_DB: f64 = 30.0;
     const CORPUS: [&str; 2] = ["VID_20261002_154545.mp4", "IMG_0033.MOV"];
 
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .to_path_buf()
+    }
+
     fn corpus_dir() -> Option<PathBuf> {
         if let Ok(val) = std::env::var("STRHIDE_HEVC_DIR") {
             let p = PathBuf::from(val);
@@ -28,8 +35,21 @@ pub mod mp4_container {
                 return Some(p);
             }
         }
+        let root = repo_root();
+        let d_testdata = root.join("testdata/hevc");
+        if d_testdata.is_dir() {
+            return Some(d_testdata);
+        }
+        let d1 = PathBuf::from("testdata/hevc");
+        if d1.is_dir() {
+            return Some(d1);
+        }
         let dir = PathBuf::from("../temp/testhevc");
-        dir.is_dir().then_some(dir)
+        if dir.is_dir() {
+            return Some(dir);
+        }
+        let d2 = root.join("temp/testhevc");
+        d2.is_dir().then_some(d2)
     }
 
     fn ffmpeg_available() -> bool {
@@ -161,7 +181,12 @@ pub mod mp4_container {
         };
 
         let payload: Vec<u8> = (0..2048u32).map(|i| ((i * 37 + 11) % 256) as u8).collect();
-        for (index, name) in CORPUS.iter().enumerate() {
+        let corpus_files: Vec<&str> = if dir.join("vid_h265_002.mp4").is_file() {
+            vec!["vid_h265_002.mp4", "vid_h265_001.MOV"]
+        } else {
+            CORPUS.to_vec()
+        };
+        for (index, name) in corpus_files.iter().enumerate() {
             let cover_path = dir.join(name);
             if !cover_path.is_file() {
                 continue;
