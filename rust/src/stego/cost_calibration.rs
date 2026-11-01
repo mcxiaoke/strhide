@@ -273,7 +273,7 @@ pub(crate) fn fisher_to_costs(mut fisher: Vec<f64>, target_bits: f64) -> Vec<f64
     let mut t_hi = -min_log + 5.0;
     let mut f_hi = grid.total_entropy_nats(t_hi) - target;
     let mut guard = 0;
-    while f_hi >= 0.0 && guard < 100 && t_hi < LOG_X_MAX - max_log {
+    while f_hi >= 0.0 && guard < 100 {
         t_hi += 10.0;
         f_hi = grid.total_entropy_nats(t_hi) - target;
         guard += 1;
@@ -494,5 +494,19 @@ mod tests {
                 "mismatch at element {i}: default={d}, single={s}"
             );
         }
+    }
+
+    #[test]
+    fn calibration_handles_large_dynamic_range_without_zeroing() {
+        // High max_log (e.g. 500.0) with very tiny payload target.
+        // Under the old upper guard, t_hi < 690 - 500 = 190 would terminate prematurely.
+        let fisher = vec![1.0, (500.0f64).exp(), 2.0, 10.0];
+        let target_bits = 0.001;
+        let costs = fisher_to_costs(fisher, target_bits);
+        assert!(costs.iter().all(|c| c.is_finite() && *c >= 0.0));
+        assert!(
+            costs.iter().any(|c| *c > 0.0),
+            "costs must not be all zeroed out"
+        );
     }
 }

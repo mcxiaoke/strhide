@@ -411,6 +411,7 @@ pub(crate) fn box_smooth(mut plane: Vec<f64>, w: usize, h: usize, window: usize)
     if w == 0 || h == 0 || plane.len() < n || window <= 1 {
         return plane;
     }
+    assert!(window % 2 == 1, "box_smooth window must be odd");
     let half = (window / 2) as isize;
     let hw = half as usize;
     let inv = 1.0 / window as f64;
@@ -752,5 +753,12 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "box_smooth window must be odd")]
+    fn box_smooth_rejects_even_window() {
+        let plane = vec![1.0; 16];
+        let _ = box_smooth(plane, 4, 4, 4);
     }
 }
