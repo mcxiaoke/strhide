@@ -121,6 +121,16 @@ pub async fn read_structure_file_impl(
         let res = pool.install(|| engine.structure().read_file(&path, &opts))?;
         let summary = res.summary();
 
+        let log_data = serde_json::json!({
+            "carrier": summary.carrier,
+            "is_file": summary.is_file,
+            "is_encrypted": summary.is_encrypted,
+            "filename": summary.filename,
+            "raw_size": summary.raw_size,
+            "written_file": summary.written_file,
+            "has_text_preview": summary.text_preview.is_some(),
+        });
+
         crate::logger::record_custom_log(
             "info",
             "ipc::read_structure",
@@ -128,7 +138,7 @@ pub async fn read_structure_file_impl(
                 "Read structure: is_file={}, raw_size={}, filename={}",
                 summary.is_file, summary.raw_size, summary.filename
             ),
-            serde_json::to_value(&summary).ok(),
+            Some(log_data),
         );
 
         Ok(summary)

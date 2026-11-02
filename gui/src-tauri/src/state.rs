@@ -12,10 +12,19 @@ use strhide::core::i18n::{self, RenderCtx};
 use strhide::errors::{ErrorDetail, StrHideError};
 use strhide::facade::StrHide;
 
+#[derive(Clone)]
+pub struct CachedExtract {
+    pub path: std::path::PathBuf,
+    pub mtime: Option<std::time::SystemTime>,
+    pub password: Option<String>,
+    pub outcome: strhide::facade::ExtractOutcome,
+}
+
 pub struct GuiState {
     pub engine: StrHide,
     pub tasks: Mutex<HashMap<String, Arc<CancelToken>>>,
     pub pool: Arc<rayon::ThreadPool>,
+    pub extract_cache: Arc<Mutex<Option<CachedExtract>>>,
 }
 
 impl Default for GuiState {
@@ -35,6 +44,7 @@ impl Default for GuiState {
             engine: StrHide::new(),
             tasks: Mutex::new(HashMap::new()),
             pool: Arc::new(pool),
+            extract_cache: Arc::new(Mutex::new(None)),
         }
     }
 }

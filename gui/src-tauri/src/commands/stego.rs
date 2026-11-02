@@ -311,22 +311,49 @@ pub async fn smart_extract_impl(
     overwrite: bool,
     on_progress: Channel<ProgressEvent>,
 ) -> Result<SmartExtractSummaryDto, ErrorDetail> {
+    let cache = Arc::clone(&state.extract_cache);
     run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
         if let Some(ref dest) = output_path {
             check_overwrite(dest, overwrite)?;
         }
 
-        // `smart_extract` inspects both domains and already treats Annex-B
-        // HEVC as content-only, so the hand-rolled branch is gone.
-        let smart_opts = SmartExtractOptions {
-            password: password.as_deref(),
-            domain: domain.as_deref(),
-            limits: strhide::stego::ExtractParams::default(),
-            prefer,
-            control: ctrl,
-            pool: Some(Arc::clone(&pool)),
+        let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        let cached_hit = {
+            let guard = cache.lock().ok();
+            guard.and_then(|g| {
+                g.as_ref().and_then(|c| {
+                    if c.path == path && c.mtime == mtime && c.password == password {
+                        Some(c.outcome.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
         };
-        let outcome = engine.smart_extract(&path, &smart_opts)?;
+
+        let outcome = if let Some(hit) = cached_hit {
+            hit
+        } else {
+            let smart_opts = SmartExtractOptions {
+                password: password.as_deref(),
+                domain: domain.as_deref(),
+                limits: strhide::stego::ExtractParams::default(),
+                prefer,
+                control: ctrl,
+                pool: Some(Arc::clone(&pool)),
+            };
+            let fresh = engine.smart_extract(&path, &smart_opts)?;
+            if let Ok(mut guard) = cache.lock() {
+                *guard = Some(crate::state::CachedExtract {
+                    path: path.clone(),
+                    mtime,
+                    password: password.clone(),
+                    outcome: fresh.clone(),
+                });
+            }
+            fresh
+        };
+
         let payload = outcome.payload;
         let source = outcome.source;
         let also_present = outcome.also_present;
@@ -343,25 +370,61 @@ pub async fn smart_extract_impl(
         });
         let raw_size = payload.data.len() as u64;
 
+        let is_text = !is_file && payload.data.len() <= 64 * 1024;
+        let text_preview = if is_text {
+            std::str::from_utf8(&payload.data).ok().map(|s| s.to_string())
+        } else {
+            None
+        };
+
         let summary = if let Some(ref dest) = output_path {
-            write_bytes_atomic(dest, &payload.data)?;
-            ReadSummary {
-                carrier: path,
-                is_file,
-                is_encrypted,
-                filename,
-                raw_size,
-                written_file: Some(dest.clone()),
-                text_preview: None,
+            if text_preview.is_some() && dest.is_dir() {
+                // If it's short UTF-8 text and the caller gave a directory, prefer returning text_preview
+                // so the user can read it in the UI without cluttering the directory.
+                ReadSummary {
+                    carrier: path,
+                    is_file,
+                    is_encrypted,
+                    filename,
+                    raw_size,
+                    written_file: None,
+                    text_preview,
+                }
+            } else {
+                let target_file = if dest.is_dir() {
+                    let mut candidate = dest.join(&filename);
+                    if candidate.exists() {
+                        let path = std::path::Path::new(&filename);
+                        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(&filename);
+                        let ext = path.extension().and_then(|s| s.to_str());
+                        for i in 1..=9999 {
+                            let name = match ext {
+                                Some(e) => format!("{stem} ({i}).{e}"),
+                                None => format!("{stem} ({i})"),
+                            };
+                            let next = dest.join(name);
+                            if !next.exists() {
+                                candidate = next;
+                                break;
+                            }
+                        }
+                    }
+                    candidate
+                } else {
+                    dest.clone()
+                };
+                write_bytes_atomic(&target_file, &payload.data)?;
+                ReadSummary {
+                    carrier: path,
+                    is_file,
+                    is_encrypted,
+                    filename,
+                    raw_size,
+                    written_file: Some(target_file),
+                    text_preview: None,
+                }
             }
         } else {
-            let text_preview = if payload.data.len() <= 64 * 1024 {
-                std::str::from_utf8(&payload.data)
-                    .ok()
-                    .map(|s| s.to_string())
-            } else {
-                None
-            };
             ReadSummary {
                 carrier: path,
                 is_file,
@@ -379,6 +442,18 @@ pub async fn smart_extract_impl(
             summary,
         };
 
+        let log_data = serde_json::json!({
+            "source": res.source,
+            "also_present": res.also_present,
+            "carrier": res.summary.carrier,
+            "is_file": res.summary.is_file,
+            "is_encrypted": res.summary.is_encrypted,
+            "filename": res.summary.filename,
+            "raw_size": res.summary.raw_size,
+            "written_file": res.summary.written_file,
+            "has_text_preview": res.summary.text_preview.is_some(),
+        });
+
         crate::logger::record_custom_log(
             "info",
             "ipc::smart_extract",
@@ -388,7 +463,7 @@ pub async fn smart_extract_impl(
                 res.summary.is_file,
                 res.summary.raw_size
             ),
-            serde_json::to_value(&res).ok(),
+            Some(log_data),
         );
 
         Ok(res)

@@ -130,7 +130,11 @@ pub(crate) fn embed_flac(
         control,
     )?;
 
-    let drift = flac::max_sample_drift(carrier, &bytes, &info)?;
+    let drift = if flac.pcm_md5() == Some(analysis.pcm_md5) {
+        0
+    } else {
+        flac::max_sample_drift(carrier, &bytes, &info)?
+    };
     if drift > flac::DRIFT_BUDGET {
         return Err(StrHideError::General(format!(
             "FLAC embed would shift the decoded waveform by {drift} units, past the compensation budget; refusing to emit a carrier whose predictor is unstable"
@@ -212,14 +216,10 @@ pub(crate) fn probe_flac(
             analysis.usable
         )));
     }
-    let (header_phase, body_phase) =
-        flac_phases(None, None, &crate::stego::format::OFFICIAL_FLAC_FORMAT);
-    let mut scratch = carrier.to_vec();
-    // An empty body still materialises the 512 header slots, which is the shape
-    // `probe` measures.
-    let flac = flac::FlacCarrier::new(&mut scratch, info, &analysis, 0, header_phase, body_phase)?;
-    let _ = analysis;
-    core::probe(&flac, level, control)
+    let view = flac::FlacCapacityView {
+        total_usable: analysis.usable,
+    };
+    core::probe(&view, level, control)
 }
 
 /// Inspect a FLAC carrier's stego header.

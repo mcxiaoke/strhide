@@ -316,6 +316,8 @@ pub(crate) struct FlacCarrier<'a> {
     total_eligible: usize,
     /// Of those, how many can move in at least one direction. Reporting only.
     total_usable: usize,
+    /// Finalized PCM MD5 computed during refresh_checksums.
+    pcm_md5: Option<[u8; 16]>,
 }
 
 impl FlacCarrier<'_> {
@@ -325,6 +327,11 @@ impl FlacCarrier<'_> {
     #[allow(dead_code)]
     pub(crate) fn residuals_written(&self) -> usize {
         self.residuals_written
+    }
+
+    /// PCM MD5 computed when refreshing checksums after patch application.
+    pub(crate) fn pcm_md5(&self) -> Option<[u8; 16]> {
+        self.pcm_md5
     }
 }
 
@@ -466,6 +473,7 @@ impl<'a> FlacCarrier<'a> {
             residuals_written: 0,
             total_eligible: total,
             total_usable: analysis.usable,
+            pcm_md5: None,
         })
     }
 
@@ -523,6 +531,7 @@ impl<'a> FlacCarrier<'a> {
         }
 
         let md5 = hasher.finish();
+        self.pcm_md5 = Some(md5);
         if MD5_OFFSET + 16 <= self.bytes.len() {
             self.bytes[MD5_OFFSET..MD5_OFFSET + 16].copy_from_slice(&md5);
         }
@@ -710,7 +719,7 @@ impl SlotCarrier for FlacCarrier<'_> {
     }
 
     fn modified_slots(&self) -> usize {
-        self.modified
+        self.residuals_written
     }
 
     fn format_label(&self) -> &'static str {
@@ -725,6 +734,53 @@ impl SlotCarrier for FlacCarrier<'_> {
             self.info.sample_rate,
             self.info.total_samples
         ))
+    }
+}
+
+/// Lightweight, zero-copy, zero-residual-decode carrier view strictly for capacity probing.
+pub(crate) struct FlacCapacityView {
+    pub(crate) total_usable: usize,
+}
+
+impl SlotCarrier for FlacCapacityView {
+    fn slot_count(&self) -> usize {
+        0
+    }
+
+    fn capacity_slots(&self) -> usize {
+        self.total_usable + V2_TOTAL_HEADER_SLOTS
+    }
+
+    fn format_label(&self) -> &'static str {
+        "FLAC"
+    }
+
+    fn min_group(&self) -> u8 {
+        FlacCarrier::MIN_GROUP
+    }
+
+    fn cost(&self, _slot: usize, _params: &CostParams) -> f64 {
+        1.0
+    }
+
+    fn move_legality(&self, _index: usize) -> Move {
+        Move::None
+    }
+
+    fn slot_value(&self, _slot: usize) -> i32 {
+        0
+    }
+
+    fn apply(&mut self, _slot: usize, _delta: i8) -> Result<(), StrHideError> {
+        Ok(())
+    }
+
+    fn finalize(&mut self) -> Result<(), StrHideError> {
+        Ok(())
+    }
+
+    fn modified_slots(&self) -> usize {
+        0
     }
 }
 
@@ -801,6 +857,7 @@ fn write_remainder(
     let mask = if k == 0 { 0 } else { (1u32 << k) - 1 };
     let mut writer = BitWriter::new(bytes, bit_offset + unary_bits);
     writer.write(k, (new_u as u32) & mask);
+    #[cfg(debug_assertions)]
     if read_codeword(bytes, bit_offset, k) != Some(new as i32) {
         return Err(StrHideError::General(format!(
             "FLAC codeword readback mismatch at bit {bit_offset} (wrote {new})"

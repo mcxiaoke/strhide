@@ -132,13 +132,6 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
           });
           continue;
         }
-        if (enforce && payloadBytes > limit) {
-          queue.update(item.path, {
-            status: "skip",
-            message: fmt(c.stego.overLimit, { cap: formatBytes(limit) }),
-          });
-          continue;
-        }
 
         try {
           const target = await uniqueOutputPath(outputDir || item.dir, withSuffix(item.name, "_stego"));
@@ -160,11 +153,23 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
           );
           queue.update(item.path, {
             status: "ok",
+            capacityBytes: res.capacity?.recommended_max_bytes ?? limit,
             message: undefined,
             outputPath: res.written_to,
           });
         } catch (err) {
-          queue.update(item.path, { status: "error", message: parseStrHideError(err, c).message });
+          const parsed = parseStrHideError(err, c);
+          const isCapacityOrBudget =
+            parsed.message.toLowerCase().includes("capacity") ||
+            parsed.message.toLowerCase().includes("safety") ||
+            parsed.title.toLowerCase().includes("safety") ||
+            parsed.title.toLowerCase().includes("capacity") ||
+            parsed.message.includes("容量") ||
+            parsed.message.includes("预算");
+          queue.update(item.path, {
+            status: isCapacityOrBudget ? "skip" : "error",
+            message: parsed.message,
+          });
         }
       }
     } finally {

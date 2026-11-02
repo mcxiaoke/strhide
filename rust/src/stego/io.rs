@@ -109,7 +109,7 @@ pub fn embed_carrier_file(
                         recommended_max_bytes: capacity.recommended_max_bytes,
                         safety_level: options.safety.level.as_str().to_string(),
                         actual_bpp: bpp,
-                        limit_bpp: options.safety.level.bpp_limit(),
+                        limit_bpp: capacity.safety_bpp_limit,
                     });
                 }
 
@@ -168,7 +168,7 @@ pub fn embed_carrier_file(
             recommended_max_bytes: cap_ref.recommended_max_bytes,
             safety_level: options.safety.level.as_str().to_string(),
             actual_bpp: bpp,
-            limit_bpp: options.safety.level.bpp_limit(),
+            limit_bpp: cap_ref.safety_bpp_limit,
         });
     }
 

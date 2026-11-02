@@ -452,7 +452,7 @@ pub(crate) fn handle_embed(
                         limit_bpp,
                     } => {
                         eprintln!(
-                            "[WARN] Payload ({} bytes, bpp {:.4}) exceeds recommended safety threshold ({} bytes, tier: '{}', bpp <= {:.2}). Detection risk is elevated.",
+                            "[WARN] Payload ({} bytes, bpp {:.4}) exceeds recommended safety threshold ({} bytes, tier: '{}', bpp <= {:.4}). Detection risk is elevated.",
                             payload_bytes,
                             actual_bpp,
                             recommended_max_bytes,
