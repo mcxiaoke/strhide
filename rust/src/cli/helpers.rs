@@ -247,9 +247,12 @@ pub(crate) fn stego_tuning(
             if let Some(mode) = HevcMode::from_name(name) {
                 return Ok(StegoTuning::hevc(mode));
             }
+            if matches!(name, "audio" | "wav_pcm" | "flac_residual") {
+                return Ok(StegoTuning::Auto);
+            }
             return Err(StrHideError::General(format!(
                 "Unknown algorithm '{name}'. Supported: hill, suniward, mipod (PNG), uerd, juniward, \
-                 jmipod (JPEG), hevc, cabac (HEIF/HEVC), auto"
+                 jmipod (JPEG), hevc, cabac (HEIF/HEVC), wav_pcm, flac_residual (Audio), auto"
             )));
         }
         // `auto` with format-level tuning flags must still honour them; only a
@@ -689,7 +692,7 @@ pub(crate) fn format_stego_algorithm(
                 )
             }
             #[cfg(feature = "content-hevc")]
-            Some(FileFormat::Mp4 | FileFormat::Heif | FileFormat::HevcAnnexB) => {
+            Some(FileFormat::Mp4 | FileFormat::Heif | FileFormat::Mkv | FileFormat::HevcAnnexB) => {
                 let name = cap_algo.unwrap_or("HEVC-CABAC-InPlace");
                 format!("{name} (safety: {safety_str})")
             }

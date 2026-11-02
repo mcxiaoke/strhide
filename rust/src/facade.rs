@@ -385,6 +385,12 @@ impl StrHide {
         StegoFacade { engine: self }
     }
 
+    /// Return structured metadata for all available steganography algorithms.
+    #[cfg(feature = "content-base")]
+    pub fn list_stego_algorithms(&self) -> Vec<crate::stego::StegoAlgorithmInfo> {
+        self.stego().list_algorithms()
+    }
+
     /// The analysis (black-box steganalysis) domain.
     #[cfg(feature = "analysis")]
     pub const fn analysis(&self) -> AnalysisFacade<'_> {
@@ -802,6 +808,11 @@ pub struct StegoFacade<'a> {
 
 #[cfg(feature = "content-base")]
 impl StegoFacade<'_> {
+    /// Return structured metadata for all available steganography algorithms.
+    pub fn list_algorithms(&self) -> Vec<crate::stego::StegoAlgorithmInfo> {
+        crate::stego::list_stego_algorithms()
+    }
+
     /// Embed `payload` into an in-memory image carrier, returning stego bytes.
     pub fn embed(
         &self,

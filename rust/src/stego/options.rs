@@ -357,7 +357,9 @@ impl StegoTuning {
             #[cfg(feature = "content-jpeg")]
             (StegoTuning::Jpeg { .. }, FileFormat::Jpeg) => Ok(()),
             #[cfg(feature = "content-hevc")]
-            (StegoTuning::Hevc { .. }, FileFormat::Heif | FileFormat::Mp4) => Ok(()),
+            (StegoTuning::Hevc { .. }, FileFormat::Heif | FileFormat::Mp4 | FileFormat::Mkv) => {
+                Ok(())
+            }
             #[cfg(feature = "content-hevc")]
             (StegoTuning::Hevc { .. }, FileFormat::HevcAnnexB) => Ok(()),
             #[cfg(feature = "content-png")]
@@ -1340,7 +1342,12 @@ mod tests {
         assert!(jpeg.applicable_to(FileFormat::Png).is_err());
 
         let hevc = StegoTuning::hevc(HevcMode::Cabac);
-        for format in [FileFormat::Heif, FileFormat::Mp4, FileFormat::HevcAnnexB] {
+        for format in [
+            FileFormat::Heif,
+            FileFormat::Mp4,
+            FileFormat::Mkv,
+            FileFormat::HevcAnnexB,
+        ] {
             assert!(hevc.applicable_to(format).is_ok());
         }
         assert!(hevc.applicable_to(FileFormat::Png).is_err());

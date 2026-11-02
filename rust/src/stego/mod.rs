@@ -83,7 +83,9 @@ pub use params::JpegParams;
 pub use params::PngParams;
 pub use params::{ExtractParams, SafetyEnforcement, SafetyLevel, SafetyPolicy, StegoCodec};
 
-pub use registry::list_algorithms;
+pub use registry::{
+    StegoAlgorithmInfo, algorithms_for_format, list_algorithms, list_stego_algorithms,
+};
 
 static INIT_DEFAULT_POOL: std::sync::Once = std::sync::Once::new();
 
@@ -169,6 +171,11 @@ impl CostModelRegistry {
     /// See [`registry::list_algorithms`].
     pub fn list_algorithms() -> Vec<(&'static str, &'static str, &'static str)> {
         crate::stego::registry::list_algorithms()
+    }
+
+    /// See [`registry::list_stego_algorithms`].
+    pub fn list_stego_algorithms() -> Vec<crate::stego::registry::StegoAlgorithmInfo> {
+        crate::stego::registry::list_stego_algorithms()
     }
 }
 
