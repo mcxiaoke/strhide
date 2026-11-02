@@ -6,6 +6,7 @@ import { test, expect } from "@playwright/test";
 import { mockIPC, clearMocks } from "@tauri-apps/api/mocks";
 import {
   getCapabilities,
+  getStegoAlgorithms,
   getFileMetadata,
   inspectCarrier,
   writeStructureFile,
@@ -102,6 +103,9 @@ test.describe("GUI Core Commands & Parameters Verification", () => {
       }
       if (cmd === "get_capabilities_cmd") {
         return [{ format: "JPEG", structure: ["eof"], stego: ["uerd"], extensions: ["jpg"], memory: "whole_file" }];
+      }
+      if (cmd === "get_stego_algorithms_cmd") {
+        return [{ id: "hill", name: "HILL", desc: "test", domain: "spatial", formats: ["PNG"], extensions: ["png"], is_default: true }];
       }
       if (cmd === "get_file_metadata_cmd") {
         return { path: args.path, filename: "test.jpg", size_bytes: 50000, exists: true, is_file: true, is_dir: false };
@@ -399,6 +403,11 @@ test.describe("GUI Core Commands & Parameters Verification", () => {
       const caps = await getCapabilities();
       expect(capturedCmd).toBe("get_capabilities_cmd");
       expect(caps.length).toBeGreaterThan(0);
+
+      const algos = await getStegoAlgorithms();
+      expect(capturedCmd).toBe("get_stego_algorithms_cmd");
+      expect(algos.length).toBeGreaterThan(0);
+      expect(algos[0].id).toBe("hill");
 
       const meta = await getFileMetadata("test.jpg");
       expect(capturedCmd).toBe("get_file_metadata_cmd");

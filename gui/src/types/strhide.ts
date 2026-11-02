@@ -192,6 +192,16 @@ export interface Capability {
   memory: "streaming" | "whole_file";
 }
 
+export interface StegoAlgorithmInfo {
+  id: string;
+  name: string;
+  desc: string;
+  domain: string;
+  formats: string[];
+  extensions: string[];
+  is_default: boolean;
+}
+
 
 
 export type PayloadInputDto =

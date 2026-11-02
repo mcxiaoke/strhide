@@ -11,7 +11,8 @@ import { parseStrHideError } from "../lib/errorHandler";
 import { formatBytes, withSuffix } from "../lib/format";
 import { fmt } from "../lib/i18n";
 import { uniqueOutputPath } from "../lib/queue";
-import { ALGORITHMS, SAFETY_LEVELS, tierLimit } from "../lib/stego";
+import { SAFETY_LEVELS, tierLimit } from "../lib/stego";
+import { useStegoAlgorithms } from "../hooks/useStegoAlgorithms";
 import { FileQueue } from "../components/common/FileQueue";
 import { PasswordRow } from "../components/common/PasswordRow";
 import { DirRow } from "../components/common/DirRow";
@@ -39,6 +40,7 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
   const [error, setError] = useState<string | null>(null);
 
   const capacityCache = useRef(new Map<string, StegoCapacityFullDto>());
+  const allAlgorithms = useStegoAlgorithms();
 
   useFileDrop(active, queue.addPaths);
 
@@ -48,15 +50,43 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
     balanced: c.stego.safetyBalanced,
   };
 
-  const algorithmLabel: Record<string, string> = {
-    auto: c.stego.algoAuto,
-    hill: "HILL",
-    suniward: "S-UNIWARD",
-    mipod: "MiPOD",
-    uerd: "UERD",
-    juniward: "J-UNIWARD",
-    jmipod: "J-MiPOD",
-  };
+  // Determine formats in queue for context-aware algorithm filtering
+  const targetsInQueue = queue.items.filter((item) => item.supported);
+  const formatsInQueue = Array.from(
+    new Set(
+      targetsInQueue
+        .map((item) => item.format?.toUpperCase())
+        .filter((f): f is string => Boolean(f))
+    )
+  );
+
+  const isMultiFormat = formatsInQueue.length > 1;
+  const singleFormat = formatsInQueue.length === 1 ? formatsInQueue[0] : null;
+
+  // Filter applicable algorithms
+  const applicableAlgorithms = React.useMemo(() => {
+    if (singleFormat) {
+      return allAlgorithms.filter((a) =>
+        a.formats.some((f) => f.toUpperCase() === singleFormat)
+      );
+    }
+    return allAlgorithms;
+  }, [allAlgorithms, singleFormat]);
+
+  // Fallback to auto when selected algorithm is incompatible with current carrier format(s)
+  React.useEffect(() => {
+    if (isMultiFormat) {
+      if (algorithm !== "auto") {
+        setAlgorithm("auto");
+      }
+    } else if (singleFormat) {
+      if (algorithm !== "auto" && !applicableAlgorithms.some((a) => a.id === algorithm)) {
+        setAlgorithm("auto");
+      }
+    }
+  }, [isMultiFormat, singleFormat, applicableAlgorithms, algorithm]);
+
+  const selectedAlgoInfo = allAlgorithms.find((a) => a.id === algorithm);
 
   const payloadBytes =
     payloadKind === "text" ? new TextEncoder().encode(text).length : payloadSize ?? 0;
@@ -249,23 +279,36 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
         </div>
 
         {showAdvanced && (
-          <div className="flex items-center gap-3">
-            <span className="w-[5.25rem] shrink-0 text-xs text-slate-400">{c.stego.algorithm}</span>
-            <select
-              value={algorithm}
-              onChange={(e) => {
-                setAlgorithm(e.target.value);
-                clearCapacities();
-              }}
-              disabled={running}
-              className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-200 focus:border-cyan-500 focus:outline-none disabled:opacity-50"
-            >
-              {ALGORITHMS.map((algo) => (
-                <option key={algo} value={algo}>
-                  {algorithmLabel[algo]}
-                </option>
-              ))}
-            </select>
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-3">
+              <span className="w-[5.25rem] shrink-0 text-xs text-slate-400">{c.stego.algorithm}</span>
+              <select
+                value={isMultiFormat ? "auto" : algorithm}
+                onChange={(e) => {
+                  setAlgorithm(e.target.value);
+                  clearCapacities();
+                }}
+                disabled={running || isMultiFormat}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-200 focus:border-cyan-500 focus:outline-none disabled:opacity-50"
+              >
+                <option value="auto">{c.stego.algoAuto}</option>
+                {applicableAlgorithms.map((algo) => (
+                  <option key={algo.id} value={algo.id}>
+                    {singleFormat ? algo.name : `${algo.name} (${algo.formats.join("/")})`}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {isMultiFormat && (
+              <p className="ml-[6rem] text-[11px] text-cyan-400/90">
+                {c.stego.algoMultiFormatHint}
+              </p>
+            )}
+            {!isMultiFormat && selectedAlgoInfo && (
+              <p className="ml-[6rem] text-[11px] text-slate-400 italic">
+                {selectedAlgoInfo.desc}
+              </p>
+            )}
           </div>
         )}
 

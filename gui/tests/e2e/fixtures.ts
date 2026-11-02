@@ -72,6 +72,20 @@ export function createTauriMockScript(opts: MockDataOptions = {}) {
         ];
       }
 
+      if (cmd === "get_stego_algorithms_cmd") {
+        return [
+          { id: "hill", name: "HILL", desc: "HILL cost model", domain: "spatial", formats: ["PNG"], extensions: ["png"], is_default: true },
+          { id: "suniward", name: "S-UNIWARD", desc: "S-UNIWARD cost model", domain: "spatial", formats: ["PNG"], extensions: ["png"], is_default: false },
+          { id: "mipod", name: "MiPOD", desc: "MiPOD cost model", domain: "spatial", formats: ["PNG"], extensions: ["png"], is_default: false },
+          { id: "uerd", name: "UERD", desc: "UERD cost model", domain: "dct", formats: ["JPEG"], extensions: ["jpg", "jpeg"], is_default: true },
+          { id: "juniward", name: "J-UNIWARD", desc: "J-UNIWARD cost model", domain: "dct", formats: ["JPEG"], extensions: ["jpg", "jpeg"], is_default: false },
+          { id: "jmipod", name: "J-MiPOD", desc: "J-MiPOD cost model", domain: "dct", formats: ["JPEG"], extensions: ["jpg", "jpeg"], is_default: false },
+          { id: "hevc", name: "HEVC CABAC", desc: "HEVC CABAC in-place", domain: "hevc", formats: ["MP4", "HEIF", "MKV"], extensions: ["mp4", "mov", "heic", "mkv"], is_default: true },
+          { id: "wav_pcm", name: "WAV PCM LSB", desc: "WAV PCM matching", domain: "audio", formats: ["WAV"], extensions: ["wav"], is_default: true },
+          { id: "flac_residual", name: "FLAC Residual", desc: "FLAC residual matching", domain: "audio", formats: ["FLAC"], extensions: ["flac"], is_default: true }
+        ];
+      }
+
       if (cmd === "get_file_metadata_cmd") {
         if (EXISTING.includes(args.path)) {
           return {

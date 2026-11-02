@@ -1,6 +1,7 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import type {
   Capability,
+  StegoAlgorithmInfo,
   DualInspect,
   WriteResult,
   StegoCapacityFullDto,
@@ -16,6 +17,10 @@ import type {
 
 export async function getCapabilities(): Promise<Capability[]> {
   return invoke<Capability[]>("get_capabilities_cmd");
+}
+
+export async function getStegoAlgorithms(): Promise<StegoAlgorithmInfo[]> {
+  return invoke<StegoAlgorithmInfo[]>("get_stego_algorithms_cmd");
 }
 
 export async function getFileMetadata(path: string): Promise<FileMetadataDto> {
