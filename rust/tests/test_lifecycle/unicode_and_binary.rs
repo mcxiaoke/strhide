@@ -443,3 +443,69 @@ fn test_tiny_and_empty_payloads() {
     .expect("remove empty text");
     assert_eq!(compute_file_sha256(&restored2).unwrap(), orig_sha2);
 }
+
+#[test]
+fn test_office_docx_and_xlsx_carrier_lifecycle() {
+    let dir = scratch("office_carriers");
+    let content_types = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+</Types>"#;
+    let rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
+
+    let entries = [
+        ("[Content_Types].xml", &content_types[..]),
+        ("_rels/.rels", &rels[..]),
+    ];
+
+    for ext in ["docx", "xlsx", "pptx"] {
+        let carrier = dir.join(format!("sample.{ext}"));
+        std::fs::write(&carrier, make_zip_with_entries(&entries)).unwrap();
+        let orig_sha = compute_file_sha256(&carrier).unwrap();
+
+        // 1. inspect should identify it as ZIP format
+        let info = inspect_carrier(&carrier, None).expect("inspect carrier");
+        assert_eq!(info.format, strhide::formats::FileFormat::Zip);
+
+        // 2. write payload
+        let payload = format!("Office secret for .{ext} 载荷测试");
+        let password = "Office#Secret_2026";
+        let opts = WriteOptions {
+            password: Some(password),
+            password_hint: Some("office-test"),
+            backup: false,
+            ..Default::default()
+        };
+        write_carrier(&carrier, PayloadSource::Text(&payload), &opts).expect("write carrier");
+
+        // 3. read payload
+        let res = read_carrier(
+            &carrier,
+            &ReadOptions {
+                output_path: None,
+                password: Some(password),
+                overwrite: false,
+                ..Default::default()
+            },
+        )
+        .expect("read carrier");
+        assert_eq!(res.data, payload.as_bytes());
+
+        // 4. restore and verify SHA-256
+        let restored = dir.join(format!("sample.restored.{ext}"));
+        remove_carrier(
+            &carrier,
+            &RestoreOptions {
+                output_path: Some(&restored),
+                password: Some(password),
+                backup: false,
+                overwrite: false,
+                ..Default::default()
+            },
+        )
+        .expect("restore carrier");
+        assert_eq!(compute_file_sha256(&restored).unwrap(), orig_sha);
+    }
+}

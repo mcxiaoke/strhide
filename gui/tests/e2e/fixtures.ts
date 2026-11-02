@@ -67,7 +67,7 @@ export function createTauriMockScript(opts: MockDataOptions = {}) {
           { format: "PNG", structure: ["chunk", "eof"], stego: ["hill"], extensions: ["png"], memory: "whole_file" },
           { format: "JPEG", structure: ["eof"], stego: ["uerd"], extensions: ["jpg", "jpeg"], memory: "whole_file" },
           { format: "MP4", structure: ["box", "eof"], stego: ["hevc_cabac"], extensions: ["mp4", "mov"], memory: "streaming" },
-          { format: "ZIP", structure: ["central_dir", "eof"], stego: [], extensions: ["zip"], memory: "streaming" },
+          { format: "ZIP", structure: ["central_dir", "eof"], stego: [], extensions: ["zip", "jar", "docx", "xlsx", "pptx"], memory: "streaming" },
           { format: "PDF", structure: ["eof"], stego: [], extensions: ["pdf"], memory: "streaming" }
         ];
       }

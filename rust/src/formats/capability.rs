@@ -191,7 +191,7 @@ pub static CAPABILITIES: &[Capability] = &[
         #[cfg(not(feature = "structure-base"))]
         structure: &[],
         stego: &[],
-        extensions: &["zip", "jar"],
+        extensions: &["zip", "jar", "docx", "xlsx", "pptx"],
         memory: MemoryProfile::Streaming,
     },
     Capability {
@@ -341,5 +341,9 @@ mod tests {
                 );
             }
         }
+        let zip_exts = FileFormat::Zip.extensions();
+        assert!(zip_exts.contains(&"docx"));
+        assert!(zip_exts.contains(&"xlsx"));
+        assert!(zip_exts.contains(&"pptx"));
     }
 }

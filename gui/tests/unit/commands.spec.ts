@@ -18,6 +18,7 @@ import {
   getRecentLogs,
   clearLogs,
 } from "../../src/api/commands";
+import { classifyFormat } from "../../src/lib/queue";
 import { useLogStore } from "../../src/store/logStore";
 import type {
   PayloadInputDto,
@@ -102,7 +103,10 @@ test.describe("GUI Core Commands & Parameters Verification", () => {
         };
       }
       if (cmd === "get_capabilities_cmd") {
-        return [{ format: "JPEG", structure: ["eof"], stego: ["uerd"], extensions: ["jpg"], memory: "whole_file" }];
+        return [
+          { format: "JPEG", structure: ["eof"], stego: ["uerd"], extensions: ["jpg"], memory: "whole_file" },
+          { format: "ZIP", structure: ["pre_cd_inject", "eof"], stego: [], extensions: ["zip", "jar", "docx", "xlsx", "pptx"], memory: "streaming" },
+        ];
       }
       if (cmd === "get_stego_algorithms_cmd") {
         return [{ id: "hill", name: "HILL", desc: "test", domain: "spatial", formats: ["PNG"], extensions: ["png"], is_default: true }];
@@ -440,6 +444,19 @@ test.describe("GUI Core Commands & Parameters Verification", () => {
       expect(useLogStore.getState().entries.length).toBeGreaterThan(0);
       await store.clear();
       expect(useLogStore.getState().entries.length).toBe(0);
+    });
+
+    test("classifyFormat correctly identifies docx, xlsx, pptx as ZIP format", async () => {
+      const caps = await getCapabilities();
+      for (const ext of ["docx", "xlsx", "pptx"]) {
+        const vStructure = classifyFormat(`report.${ext}`, caps, "structure");
+        expect(vStructure.supported).toBe(true);
+        expect(vStructure.format).toBe("ZIP");
+
+        const vAny = classifyFormat(`document.${ext}`, caps, "any");
+        expect(vAny.supported).toBe(true);
+        expect(vAny.format).toBe("ZIP");
+      }
     });
   });
 });

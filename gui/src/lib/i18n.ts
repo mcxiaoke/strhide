@@ -80,7 +80,7 @@ const zh = {
   },
   hide: {
     desc: "将文字或文件嵌入到任意文件内部。文件可正常打开，并能完整还原为原文件。",
-    fileHint: "支持 PNG、JPG、MP4、PDF、ZIP 等格式",
+    fileHint: "支持 PNG、JPG、MP4、PDF、ZIP、Office 等格式",
     payloadLabel: "要隐藏的内容",
     textPlaceholder: "输入要隐藏的文字",
     passwordPlaceholder: "可留空；设置后，提取时需要输入",
@@ -250,7 +250,7 @@ const en: typeof zh = {
   },
   hide: {
     desc: "Embeds text or files inside any file. The file still opens normally and can be fully restored.",
-    fileHint: "PNG, JPG, MP4, PDF, ZIP and more",
+    fileHint: "PNG, JPG, MP4, PDF, ZIP, Office and more",
     payloadLabel: "Content to hide",
     textPlaceholder: "Enter the text to hide",
     passwordPlaceholder: "Optional; required to extract",
