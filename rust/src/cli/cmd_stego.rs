@@ -40,20 +40,64 @@ fn run_capacity_probe(
         false,
         false,
     )?;
+    let is_batch = carriers.len() > 1;
+    let mut failures = 0usize;
+    let mut last_error: Option<StrHideError> = None;
+
     for carrier in &carriers {
         let t_start = std::time::Instant::now();
-        let carrier_bytes = std::fs::read(carrier)?;
-        let (_, options) = stego_options(
+        let carrier_bytes = match std::fs::read(carrier) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                let err = StrHideError::Io(e);
+                if is_batch && !quiet {
+                    eprintln!(
+                        "{}",
+                        t!(Msg::WarnCapacityFailed, path = carrier.display(), err = err)
+                    );
+                }
+                failures += 1;
+                last_error = Some(err);
+                continue;
+            }
+        };
+        let (_, options) = match stego_options(
             tuning,
             password.as_deref(),
             carrier_format(&carrier_bytes),
             cfg,
-        )?;
-        let cap = crate::stego::probe_carrier_capacity_with_dialect(
+        ) {
+            Ok(opts) => opts,
+            Err(e) => {
+                if is_batch && !quiet {
+                    eprintln!(
+                        "{}",
+                        t!(Msg::WarnCapacityFailed, path = carrier.display(), err = e)
+                    );
+                }
+                failures += 1;
+                last_error = Some(e);
+                continue;
+            }
+        };
+        let cap = match crate::stego::probe_carrier_capacity_with_dialect(
             &carrier_bytes,
             &options,
             &engine.dialect().stego,
-        )?;
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                if is_batch && !quiet {
+                    eprintln!(
+                        "{}",
+                        t!(Msg::WarnCapacityFailed, path = carrier.display(), err = e)
+                    );
+                }
+                failures += 1;
+                last_error = Some(e);
+                continue;
+            }
+        };
         if json {
             println!(
                 "{}",
@@ -153,6 +197,19 @@ fn run_capacity_probe(
                 note = note
             )
         );
+    }
+    if failures > 0 {
+        if is_batch {
+            return Err(StrHideError::General(format!(
+                "{failures} of {} files failed to probe capacity",
+                carriers.len()
+            )));
+        } else if let Some(e) = last_error {
+            return Err(StrHideError::General(format!(
+                "{}: {e}",
+                carriers[0].display()
+            )));
+        }
     }
     Ok(())
 }

@@ -218,15 +218,21 @@ pub(crate) fn analyse(bytes: &[u8], info: &StreamInfo) -> Result<FlacAnalysis, S
     let mut slots = 0usize;
     let mut usable = 0usize;
     let mut tails = 0usize;
+    let mut samples_decoded = 0u64;
 
     while pos < bytes.len() {
-        // Some encoders pad the tail with zero bytes.
+        if info.total_samples > 0 && samples_decoded >= info.total_samples {
+            break;
+        }
+        // Some encoders pad the tail with zero bytes or non-audio tags.
         if bytes[pos] == 0 {
             break;
         }
         let parsed = frame::parse_frame(bytes, pos, &defaults).map_err(|_| {
             StrHideError::CorruptedData(format!("FLAC frame at byte {pos} could not be decoded"))
         })?;
+        let frame_samples = parsed.samples.first().map_or(0, Vec::len) as u64;
+        samples_decoded += frame_samples;
         hasher.absorb(&parsed.samples, info.md5_bytes_per_sample());
         slots += parsed.slots.len();
         tails += parsed.tails.len();
@@ -383,13 +389,19 @@ impl<'a> FlacCarrier<'a> {
         let mut tails_seen = 0usize;
         let mut body_seen = 0usize;
         let mut pos = info.audio_offset;
+        let mut samples_decoded = 0u64;
 
         while pos < bytes.len() && bytes[pos] != 0 {
+            if info.total_samples > 0 && samples_decoded >= info.total_samples {
+                break;
+            }
             let parsed = frame::parse_frame(bytes, pos, &defaults).map_err(|_| {
                 StrHideError::CorruptedData(format!(
                     "FLAC frame at byte {pos} could not be decoded"
                 ))
             })?;
+            let frame_samples = parsed.samples.first().map_or(0, Vec::len) as u64;
+            samples_decoded += frame_samples;
             for slot in parsed.tails.iter() {
                 let index = tails_seen;
                 tails_seen += 1;
@@ -463,6 +475,7 @@ impl<'a> FlacCarrier<'a> {
         let defaults = self.info.defaults();
         let mut hasher = Md5::new();
         let mut pos = self.info.audio_offset;
+        let mut samples_decoded = 0u64;
         // Slots were collected in file order for each half, so sort a copy of
         // the offsets once: the frame walk then advances a single cursor.
         let mut offsets: Vec<u32> = self
@@ -474,6 +487,9 @@ impl<'a> FlacCarrier<'a> {
         let mut cursor = 0usize;
 
         while pos < self.bytes.len() && self.bytes[pos] != 0 {
+            if self.info.total_samples > 0 && samples_decoded >= self.info.total_samples {
+                break;
+            }
             // Trusted parse: this frame's own checksum is stale until the line
             // below rewrites it.
             let parsed = frame::parse_frame_trusted(self.bytes, pos, &defaults).map_err(|_| {
@@ -481,6 +497,8 @@ impl<'a> FlacCarrier<'a> {
                     "FLAC frame at byte {pos} could not be re-decoded after patching"
                 ))
             })?;
+            let frame_samples = parsed.samples.first().map_or(0, Vec::len) as u64;
+            samples_decoded += frame_samples;
             hasher.absorb(&parsed.samples, self.info.md5_bytes_per_sample());
 
             let frame_start_bit = parsed.start * 8;
@@ -841,14 +859,20 @@ pub(crate) fn max_sample_drift(
     let mut pos_a = info.audio_offset;
     let mut pos_b = info.audio_offset;
     let mut worst = 0i64;
+    let mut samples_decoded = 0u64;
 
     while pos_a < cover.len() && pos_b < stego.len() && cover[pos_a] != 0 {
+        if info.total_samples > 0 && samples_decoded >= info.total_samples {
+            break;
+        }
         let a = frame::parse_frame(cover, pos_a, &defaults).map_err(|_| {
             StrHideError::CorruptedData(format!("cover frame at {pos_a} could not be decoded"))
         })?;
         let b = frame::parse_frame(stego, pos_b, &defaults).map_err(|_| {
             StrHideError::CorruptedData(format!("stego frame at {pos_b} could not be decoded"))
         })?;
+        let frame_samples = a.samples.first().map_or(0, Vec::len) as u64;
+        samples_decoded += frame_samples;
         if a.samples.len() != b.samples.len() {
             return Err(StrHideError::CorruptedData(
                 "cover and stego frames disagree on the channel count".into(),

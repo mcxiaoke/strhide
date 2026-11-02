@@ -432,3 +432,37 @@ fn flac_invariants_preserved_across_embed() {
         "tail slot count must be invariant across embed"
     );
 }
+
+#[test]
+fn flac_carrier_with_trailing_non_audio_bytes_roundtrips() {
+    let mut cover = flac_carrier(600, 256);
+    let trailer = b"\xf0\x00\xff\x0fG@8@HF<6##&b?)_d%:]dCd\x0eU\xff\xf0";
+    cover.extend_from_slice(trailer);
+
+    let info = super::parse_stream_info(&cover).expect("info");
+    let analysis = super::analyse(&cover, &info).expect("analyse with trailer");
+    assert!(analysis.slots > 0);
+
+    let raw = b"test secret payload";
+    let payload = Payload::bytes(raw);
+    let control = ctl();
+    let (stego, _, _) = embed_flac(
+        &cover,
+        &payload,
+        Some("pw"),
+        None,
+        profile(),
+        SafetyPolicy::new(),
+        Freshness::default(),
+        &control,
+    )
+    .expect("embed with trailer");
+
+    // Stego must retain the trailer untouched.
+    assert!(stego.ends_with(trailer));
+    assert_eq!(stego.len(), cover.len());
+
+    let extracted =
+        extract_flac(&stego, Some("pw"), None, profile(), &control).expect("extract with trailer");
+    assert_eq!(extracted.data.as_ref(), raw);
+}

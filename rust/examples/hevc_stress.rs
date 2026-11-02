@@ -330,12 +330,16 @@ pub fn main() -> ExitCode {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| job.path.display().to_string());
             if let Some(reason) = &job.skip {
-                rows.lock().unwrap().push(format!(
-                    "{:<44} {:>5.0}%  skipped ({reason})",
+                let done_now = done.fetch_add(1, Ordering::Relaxed) + 1;
+                let row = format!(
+                    "[{:>3}/{:<3}] {:<44} {:>5.0}%  skipped ({reason})",
+                    done_now,
+                    jobs.len(),
                     short(&label),
                     job.fill * 100.0
-                ));
-                done.fetch_add(1, Ordering::Relaxed);
+                );
+                println!("{row}");
+                rows.lock().unwrap().push(row);
                 return;
             }
             let cover = match std::fs::read(&job.path) {
@@ -386,8 +390,10 @@ pub fn main() -> ExitCode {
             }
 
             let done_now = done.fetch_add(1, Ordering::Relaxed) + 1;
-            rows.lock().unwrap().push(format!(
-                "{:<44} {:>5.0}%  {:>9}/{:<9} B  embed {:>6} ms  extract {:>6} ms  {}",
+            let row = format!(
+                "[{:>3}/{:<3}] {:<44} {:>5.0}%  {:>9}/{:<9} B  embed {:>6} ms  extract {:>6} ms  {}",
+                done_now,
+                jobs.len(),
                 short(&label),
                 job.fill * 100.0,
                 job.bytes,
@@ -399,18 +405,13 @@ pub fn main() -> ExitCode {
                 } else {
                     format!("FAIL {}", worst.detail)
                 }
-            ));
-            if done_now.is_multiple_of(10) || done_now == jobs.len() {
-                eprintln!("  … {done_now}/{} jobs completed", jobs.len());
-            }
+            );
+            println!("{row}");
+            rows.lock().unwrap().push(row);
         });
     });
 
-    let mut rows = rows.into_inner().unwrap();
-    rows.sort();
-    for row in rows {
-        println!("{row}");
-    }
+    let _rows = rows.into_inner().unwrap();
 
     let failures = failures.into_inner().unwrap();
     println!();

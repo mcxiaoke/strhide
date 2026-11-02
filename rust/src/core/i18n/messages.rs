@@ -760,6 +760,9 @@ Run `strhide <COMMAND> --help` for the options of one command.",
     StegoProbeNoteGrouped:
         en = " [grouped-code bound]",
         zh = " [分组码上限]";
+    WarnCapacityFailed:
+        en = "[ERROR] failed to probe capacity for '{path}': {err}",
+        zh = "[ERROR] 探测文件 '{path}' 的隐写容量失败: {err}";
 
     // ---- Embed execution ----
     EmbedOkDest:
