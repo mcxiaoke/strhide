@@ -1,8 +1,10 @@
 import React, { useState } from "react";
-import { Download, Globe, Layers, Moon, Search, Sparkles, Sun } from "lucide-react";
+import { Download, Globe, Layers, Moon, Search, Sparkles, Sun, Terminal } from "lucide-react";
 import { useSettingsStore } from "./store/settingsStore";
+import { useLogStore } from "./store/logStore";
 import { useT } from "./hooks/useT";
 import { ProgressBarOverlay } from "./components/common/ProgressBarOverlay";
+import { LogModal } from "./components/common/LogModal";
 import { StegoEmbedView } from "./views/StegoEmbedView";
 import { HideStructureView } from "./views/HideStructureView";
 import { ExtractView } from "./views/ExtractView";
@@ -13,6 +15,7 @@ type TabId = "stego" | "hide" | "extract" | "scan";
 export const App: React.FC = () => {
   const c = useT();
   const { lang, setLang, theme, toggleTheme } = useSettingsStore();
+  const { setModalOpen, unreadErrorCount } = useLogStore();
   const [activeTab, setActiveTab] = useState<TabId>("stego");
 
   const tabs = [
@@ -61,6 +64,19 @@ export const App: React.FC = () => {
         <div className="flex shrink-0 items-center gap-2">
           <button
             type="button"
+            data-testid="log-panel-toggle"
+            onClick={() => setModalOpen(true)}
+            title={c.logs.title}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-700 hover:text-slate-100"
+          >
+            <Terminal className="h-3.5 w-3.5 text-cyan-400" />
+            {c.logs.btnLabel}
+            {unreadErrorCount > 0 && (
+              <span className="flex h-1.5 w-1.5 rounded-full bg-rose-500" />
+            )}
+          </button>
+          <button
+            type="button"
             data-testid="theme-toggle"
             onClick={toggleTheme}
             title={themeTarget}
@@ -100,6 +116,7 @@ export const App: React.FC = () => {
       </main>
 
       <ProgressBarOverlay />
+      <LogModal />
     </div>
   );
 };
