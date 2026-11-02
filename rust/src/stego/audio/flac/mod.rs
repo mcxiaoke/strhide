@@ -81,16 +81,6 @@ const COST_WINDOW: usize = 16;
 /// audibility threshold.
 pub(crate) const DRIFT_BUDGET: i64 = 8;
 
-/// Maximum fraction of residual slots that may be immovable before the
-/// predictor is deemed too reactive for in-place residual coding.
-///
-/// In quiet passages residuals collapse into small Rice parameters where
-/// compensation deltas exceed the bucket size. When more than 40% of slots
-/// are immovable, the STC trellis encounters dead groups containing zero legal
-/// elements, causing infeasible embedding. Carriers above this threshold are
-/// cleanly refused as `UnsupportedFormat`.
-pub(crate) const MAX_STUCK_RATE: f64 = 0.40;
-
 /// Parsed `STREAMINFO`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StreamInfo {
@@ -360,6 +350,7 @@ impl<'a> FlacCarrier<'a> {
         //   * everything else feeds the body, where the trellis can route
         //     around a slot whose compensation chain does not fit.
         let total = analysis.slots;
+        let total_usable = analysis.usable;
         let tail_total = analysis.tails;
         if tail_total < V2_TOTAL_HEADER_SLOTS {
             return Err(StrHideError::General(format!(
@@ -372,10 +363,10 @@ impl<'a> FlacCarrier<'a> {
                 header = V2_TOTAL_HEADER_SLOTS
             )));
         }
-        if analysis.usable < body_slots {
+        if total_usable < body_slots {
             return Err(StrHideError::General(format!(
                 "FLAC carrier has {} usable residual slots, {body_slots} required",
-                analysis.usable
+                total_usable
             )));
         }
 
@@ -404,9 +395,15 @@ impl<'a> FlacCarrier<'a> {
             }
             if body_slots > 0 {
                 for slot in parsed.slots.iter() {
+                    // S1: Only sample over genuinely movable slots. Residuals whose
+                    // compensation chains cannot absorb movement (Move::None) are skipped
+                    // so that zero dead slots enter the STC trellis.
+                    if matches!(slot_legality_raw(slot, &parsed), Move::None) {
+                        continue;
+                    }
                     let index = body_seen;
                     body_seen += 1;
-                    if thin_pick(index, total, body_slots, body_phase)
+                    if thin_pick(index, total_usable, body_slots, body_phase)
                         && let Some(entry) = make_slot(slot, &parsed, &scale)
                     {
                         body_picks.push(entry);
@@ -578,10 +575,7 @@ impl SlotCarrier for FlacCarrier<'_> {
     }
 
     fn capacity_slots(&self) -> usize {
-        let stuck_rate = 1.0 - (self.total_usable as f64 / self.total_eligible.max(1) as f64);
-        let discount = (1.0 - stuck_rate * 1.5).max(0.0);
-        let effective = (self.total_usable as f64 * discount) as usize;
-        effective + V2_TOTAL_HEADER_SLOTS
+        self.total_usable + V2_TOTAL_HEADER_SLOTS
     }
 
     fn min_group(&self) -> u8 {

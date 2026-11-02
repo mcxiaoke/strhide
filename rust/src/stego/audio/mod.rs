@@ -36,6 +36,19 @@
 /// quiet stretches hold long runs of residuals that cannot be compensated.
 const FLAC_EMBED_ATTEMPTS: usize = 4;
 
+/// Derive keyed thinning phases from secret, domain, and format profile.
+fn flac_phases(
+    secret: Option<&str>,
+    domain: Option<&str>,
+    profile: &AudioFormatProfile,
+) -> (u64, u64) {
+    let header_seed =
+        crate::stego::envelope::derive_header_perm_seed_audio(secret, domain, profile);
+    let header_phase = u64::from_le_bytes(header_seed[0..8].try_into().unwrap());
+    let body_phase = u64::from_le_bytes(header_seed[8..16].try_into().unwrap());
+    (header_phase, body_phase)
+}
+
 /// Embed a payload into a FLAC carrier, returning the modified file.
 ///
 /// The output has exactly the same length as the input and every frame keeps
@@ -69,29 +82,21 @@ pub(crate) fn embed_flac(
                 .into(),
         ));
     }
-    let stuck_rate = 1.0 - (analysis.usable as f64 / analysis.slots.max(1) as f64);
-    if stuck_rate > flac::MAX_STUCK_RATE {
-        return Err(StrHideError::UnsupportedFormat(
-            concat!(
-                "This FLAC's predictor reacts too strongly for in-place residual ",
-                "coding: in a quiet stretch a one-unit residual move would need ",
-                "neighbouring codewords to change width, which FLAC cannot ",
-                "represent. Try a louder or longer carrier."
-            )
-            .into(),
-        ));
+    if analysis.usable < crate::stego::header::V2_TOTAL_HEADER_SLOTS + 8 {
+        return Err(StrHideError::General(format!(
+            "FLAC carrier has {} usable residual slots; at least {} are required",
+            analysis.usable,
+            crate::stego::header::V2_TOTAL_HEADER_SLOTS + 8
+        )));
     }
 
     // Size the carrier's slot array from the envelope the payload will produce.
     let suite = profile.body.default_suite();
     let plaintext = crate::stego::envelope::build_plaintext(payload)?;
-    // Plan against what can actually move: a residual whose compensation
-    // chain does not fit any Rice bucket keeps its parity, so counting it would
-    // promise capacity the trellis cannot reach. `core::embed` re-derives the
-    // same number from `capacity_slots()`, which reports the same count.
+    // S1: Plan against genuinely movable residuals. Thinning samples strictly
+    // from this usable pool, ensuring zero dead slots enter the STC trellis.
     let available = analysis
         .usable
-        .min(analysis.slots)
         .saturating_sub(crate::stego::header::V2_TOTAL_HEADER_SLOTS);
     let shape = core::plan_body(
         plaintext.len(),
@@ -102,13 +107,7 @@ pub(crate) fn embed_flac(
     )?;
 
     let mut bytes = carrier.to_vec();
-    let header_phase = 0x5EED_1234_ABCD_0001u64;
-    let body_phase = 0x1234_5678_9ABC_DEF0u64;
-    // A quiet passage leaves runs of residuals whose predictor reaction fits no
-    // Rice bucket. Those slots keep their parity, so an unlucky salt can strand
-    // a whole trellis group with nothing to flip even though the carrier as a
-    // whole has room. A fresh salt reshuffles only the trellis seed, so retrying
-    // is cheap in expectation and turns "sometimes fails" into "succeeds".
+    let (header_phase, body_phase) = flac_phases(secret, domain, profile);
     let binding = Freshness::seeded_binding(carrier, payload.as_bytes());
     let mut embedding = None;
     let mut last_error = None;
@@ -145,26 +144,16 @@ pub(crate) fn embed_flac(
     let (capacity, stats) = match embedding {
         Some(result) => result,
         None => {
-            return Err(match last_error {
-                // Name the cause instead of leaking the solver's vocabulary.
-                Some(_) => StrHideError::UnsupportedFormat(
-                    concat!(
-                        "This FLAC's predictor reacts too strongly for in-place residual ",
-                        "coding: in a quiet stretch a one-unit residual move would need ",
-                        "neighbouring codewords to change width, which FLAC cannot ",
-                        "represent. Try a louder or longer carrier."
-                    )
-                    .into(),
-                ),
-                None => StrHideError::General("FLAC embedding failed".into()),
-            });
+            return Err(
+                last_error.unwrap_or_else(|| StrHideError::General("FLAC embedding failed".into()))
+            );
         }
     };
 
     let drift = flac::max_sample_drift(carrier, &bytes, &info)?;
     if drift > flac::DRIFT_BUDGET {
         return Err(StrHideError::General(format!(
-            "FLAC embed would shift the decoded waveform by {drift} units, past the              compensation budget; refusing to emit a carrier whose predictor is unstable"
+            "FLAC embed would shift the decoded waveform by {drift} units, past the compensation budget; refusing to emit a carrier whose predictor is unstable"
         )));
     }
     Ok((bytes, capacity, stats))
@@ -179,8 +168,7 @@ pub(crate) fn extract_flac(
     control: &Control<'_>,
 ) -> Result<Payload<'static>, StrHideError> {
     let info = flac::parse_stream_info(carrier)?;
-    let header_phase = 0x5EED_1234_ABCD_0001u64;
-    let body_phase = 0x1234_5678_9ABC_DEF0u64;
+    let (header_phase, body_phase) = flac_phases(secret, domain, profile);
 
     // First read the header with an empty body, then rebuild with the body the
     // header advertises. The slot arrays differ, which is why this is two
@@ -216,28 +204,19 @@ pub(crate) fn probe_flac(
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let info = flac::parse_stream_info(carrier)?;
     let analysis = flac::analyse(carrier, &info)?;
-    let stuck_rate = 1.0 - (analysis.usable as f64 / analysis.slots.max(1) as f64);
-    if stuck_rate > flac::MAX_STUCK_RATE {
-        return Err(StrHideError::UnsupportedFormat(
-            concat!(
-                "This FLAC's predictor reacts too strongly for in-place residual ",
-                "coding: in a quiet stretch a one-unit residual move would need ",
-                "neighbouring codewords to change width, which FLAC cannot ",
-                "represent. Try a louder or longer carrier."
-            )
-            .into(),
-        ));
+    if analysis.usable < crate::stego::header::V2_TOTAL_HEADER_SLOTS + 8 {
+        return Err(StrHideError::General(format!(
+            "FLAC carrier has {} usable residual slots; at least {} are required",
+            analysis.usable,
+            crate::stego::header::V2_TOTAL_HEADER_SLOTS + 8
+        )));
     }
+    let (header_phase, body_phase) =
+        flac_phases(None, None, &crate::stego::format::OFFICIAL_FLAC_FORMAT);
     let mut scratch = carrier.to_vec();
     // An empty body still materialises the 512 header slots, which is the shape
     // `probe` measures.
-    let flac = flac::FlacCarrier::new(
-        &mut scratch,
-        info,
-        0,
-        0x5EED_1234_ABCD_0001u64,
-        0x1234_5678_9ABC_DEF0u64,
-    )?;
+    let flac = flac::FlacCarrier::new(&mut scratch, info, 0, header_phase, body_phase)?;
     let _ = analysis;
     core::probe(&flac, level, control)
 }
@@ -256,8 +235,7 @@ pub(crate) fn inspect_flac(
     control: &Control<'_>,
 ) -> Result<crate::stego::StegoHeaderInfo, StrHideError> {
     let info = flac::parse_stream_info(carrier)?;
-    let header_phase = 0x5EED_1234_ABCD_0001u64;
-    let body_phase = 0x1234_5678_9ABC_DEF0u64;
+    let (header_phase, body_phase) = flac_phases(secret, domain, profile);
 
     let mut scratch = carrier.to_vec();
     let header_view = flac::FlacCarrier::new(&mut scratch, info, 0, header_phase, body_phase)?;
@@ -294,8 +272,7 @@ pub(crate) fn verify_flac(
     control: &Control<'_>,
 ) -> Result<crate::stego::StegoVerifyResult, StrHideError> {
     let info = flac::parse_stream_info(carrier)?;
-    let header_phase = 0x5EED_1234_ABCD_0001u64;
-    let body_phase = 0x1234_5678_9ABC_DEF0u64;
+    let (header_phase, body_phase) = flac_phases(secret, domain, profile);
 
     // Same two-phase view as `inspect`/`extract`: verification reads the body,
     // which only exists once the carrier materialises the envelope's slots.
