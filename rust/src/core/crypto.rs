@@ -465,11 +465,12 @@ pub fn decrypt_stream_from_chunks<R: Read, W: Write>(
 
         // Upper bound: the declared payload region is authenticated, so whatever
         // is left in it is the true ceiling for this chunk (the last chunk ends
-        // exactly at the region boundary). MAX_CHUNK_SIZE additionally bounds a
-        // single allocation. Compute *after* consuming the 4-byte prefix, or a
-        // legitimate final chunk would look oversized.
+        // exactly at the region boundary). (MAX_CHUNK_SIZE + AEAD_TAG_LEN)
+        // additionally bounds a single allocation. Compute *after* consuming
+        // the 4-byte prefix, or a legitimate final chunk would look oversized.
         let remaining = total_payload_bytes.saturating_sub(bytes_consumed);
-        let max_chunk = remaining.min(MAX_CHUNK_SIZE as u64) as usize;
+        let max_cipher_chunk = (MAX_CHUNK_SIZE + AEAD_TAG_LEN) as u64;
+        let max_chunk = remaining.min(max_cipher_chunk) as usize;
         if chunk_len > max_chunk {
             return Err(StrHideError::CorruptedData(format!(
                 "Chunk length {chunk_len} exceeds maximum {max_chunk} at chunk {chunk_index}"
@@ -893,6 +894,48 @@ mod tests {
         assert!(total_cipher_len > orig_size as u64);
 
         // Decrypt
+        cipher_stream.set_position(0);
+        let mut plain_stream = std::io::Cursor::new(Vec::new());
+        let total_plain_len = decrypt_stream_from_chunks(
+            &mut cipher_stream,
+            &mut plain_stream,
+            &payload_key,
+            &base_nonce,
+            &aad,
+            total_cipher_len,
+        )
+        .unwrap();
+
+        assert_eq!(total_plain_len, orig_size as u64);
+        assert_eq!(plain_stream.into_inner(), original_data);
+    }
+
+    #[test]
+    fn test_chunk_size_max_boundary() {
+        let salt = b"salt_for_stream!";
+        let base_nonce = [4u8; 12];
+        let (payload_key, _) = derive_keys("MaxChunkPassword", salt).unwrap();
+        let aad = [0x55u8; AAD_SIZE];
+
+        let orig_size = MAX_CHUNK_SIZE;
+        let original_data = vec![0x7Au8; orig_size];
+
+        let mut in_stream = std::io::Cursor::new(&original_data);
+        let mut cipher_stream = std::io::Cursor::new(Vec::new());
+
+        let total_cipher_len = encrypt_stream_to_chunks(
+            &mut in_stream,
+            &mut cipher_stream,
+            &payload_key,
+            &base_nonce,
+            &aad,
+            MAX_CHUNK_SIZE,
+        )
+        .unwrap();
+
+        assert_eq!(total_cipher_len, (4 + MAX_CHUNK_SIZE + AEAD_TAG_LEN) as u64);
+
+        // Decrypt must succeed without hitting the previous "Chunk length exceeds maximum" bug
         cipher_stream.set_position(0);
         let mut plain_stream = std::io::Cursor::new(Vec::new());
         let total_plain_len = decrypt_stream_from_chunks(

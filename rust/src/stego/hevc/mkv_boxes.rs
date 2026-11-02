@@ -67,6 +67,33 @@ const ID_BLOCK: u32 = 0xA1;
 const ID_CRC32: u32 = 0xBF;
 /// `DocType` inside the EBML header.
 const ID_DOC_TYPE: u32 = 0x4282;
+/// `Info` master element (Level 1).
+const ID_INFO: u32 = 0x1549_A966;
+/// `SeekHead` master element (Level 1).
+const ID_SEEK_HEAD: u32 = 0x114D_9B74;
+/// `Cues` master element (Level 1).
+const ID_CUES: u32 = 0x1C53_BB6B;
+/// `Attachments` master element (Level 1).
+const ID_ATTACHMENTS: u32 = 0x1941_A469;
+/// `Chapters` master element (Level 1).
+const ID_CHAPTERS: u32 = 0x1043_A770;
+/// `Tags` master element (Level 1).
+const ID_TAGS: u32 = 0x1254_C367;
+
+#[inline]
+fn is_level1_element(id: u32) -> bool {
+    matches!(
+        id,
+        ID_CLUSTER
+            | ID_INFO
+            | ID_TRACKS
+            | ID_SEEK_HEAD
+            | ID_CUES
+            | ID_ATTACHMENTS
+            | ID_CHAPTERS
+            | ID_TAGS
+    )
+}
 
 /// The only `CodecID` this module accepts.
 const CODEC_ID_HEVC: &[u8] = b"V_MPEGH/ISO/HEVC";
@@ -117,10 +144,14 @@ pub(crate) struct MkvHevcTarget<'a> {
 #[derive(Debug, Clone, Copy)]
 struct Element {
     id: u32,
+    /// Absolute offset of the element's ID header.
+    header_at: usize,
     /// Offset of the first payload byte.
     payload: usize,
     /// Declared payload length, clamped to the parent's end.
     len: usize,
+    /// Whether the element had an "unknown" size VINT (streaming).
+    unknown_size: bool,
 }
 
 impl Element {
@@ -190,6 +221,7 @@ fn read_element(bytes: &[u8], pos: usize, parent_end: usize) -> Option<Element> 
     if payload > parent_end || payload > bytes.len() {
         return None;
     }
+    let unknown_size = size.is_none();
     let declared = match size {
         // Unknown size: the element runs to its parent's end. Only `Segment`
         // and `Cluster` legitimately do this (live/streaming muxers).
@@ -201,8 +233,10 @@ fn read_element(bytes: &[u8], pos: usize, parent_end: usize) -> Option<Element> 
     };
     Some(Element {
         id,
+        header_at: pos,
         payload,
         len: declared,
+        unknown_size,
     })
 }
 
@@ -390,23 +424,38 @@ pub(crate) fn parse_mkv_targets(bytes: &[u8]) -> Result<MkvHevcTarget<'_>> {
     let mut slice_spans = Vec::new();
     let mut crcs = Vec::new();
 
-    for element in Children::new(bytes, segment.payload, segment.end()) {
+    let mut seg_children = Children::new(bytes, segment.payload, segment.end());
+    while let Some(element) = seg_children.next() {
         match element.id {
             ID_CLUSTER => {
-                for item in Children::new(bytes, element.payload, element.end()) {
+                let cluster_children = Children::new(bytes, element.payload, element.end());
+                for item in cluster_children {
+                    if element.unknown_size && is_level1_element(item.id) {
+                        // In an unknown-size Cluster (streaming), encountering another Level-1
+                        // element marks the implicit end of this Cluster. Rewind the outer
+                        // iterator so it consumes this Level-1 element next.
+                        seg_children.pos = item.header_at;
+                        break;
+                    }
                     match item.id {
                         ID_SIMPLE_BLOCK => {
                             scan_block(bytes, &item, track.number, length_size, &mut slice_spans)?;
                         }
                         ID_BLOCK_GROUP => {
-                            if let Some(block) = child(bytes, &item, ID_BLOCK) {
-                                scan_block(
-                                    bytes,
-                                    &block,
-                                    track.number,
-                                    length_size,
-                                    &mut slice_spans,
-                                )?;
+                            for bg_item in Children::new(bytes, item.payload, item.end()) {
+                                match bg_item.id {
+                                    ID_BLOCK => {
+                                        scan_block(
+                                            bytes,
+                                            &bg_item,
+                                            track.number,
+                                            length_size,
+                                            &mut slice_spans,
+                                        )?;
+                                    }
+                                    ID_CRC32 => collect_crc(bytes, &bg_item, item.end(), &mut crcs),
+                                    _ => {}
+                                }
                             }
                         }
                         ID_CRC32 => collect_crc(bytes, &item, element.end(), &mut crcs),
@@ -465,7 +514,12 @@ pub(crate) fn refresh_crcs(original: &[u8], out: &mut [u8], crcs: &[MkvCrc]) {
     let Some(changed) = changed_ranges(original, out) else {
         return;
     };
-    for crc in crcs {
+    // Update innermost spans first (BlockGroup -> Cluster -> Segment) so that
+    // patches to inner CRC bytes are included in the hash of outer elements.
+    let mut ordered: Vec<&MkvCrc> = crcs.iter().collect();
+    ordered.sort_by_key(|c| c.covers.end.saturating_sub(c.covers.start));
+
+    for crc in ordered {
         // A checksum that was already stale stays stale: see `MkvCrc::endian`.
         let Some(endian) = crc.endian else { continue };
         let touched = changed
@@ -816,6 +870,54 @@ mod tests {
             &out[crc.value_offset..crc.value_offset + 4],
             &before[..],
             "a stale checksum must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn unknown_size_cluster_does_not_swallow_subsequent_clusters() {
+        let idr = [0x26u8, 0x01, 0xAA, 0xBB];
+        let trai = [0x02u8, 0x01, 0xCC, 0xDD];
+        let block1 = simple_block(1, &[&idr]);
+        let block2 = simple_block(1, &[&trai]);
+
+        // Cluster 1 with unknown size (0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF)
+        let mut cluster1 = vec![
+            0x1F, 0x43, 0xB6, 0x75, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+        cluster1.extend_from_slice(&block1);
+
+        // Cluster 2 with known size
+        let cluster2 = master(&[0x1F, 0x43, 0xB6, 0x75], &[block2]);
+
+        let tracks = master(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &[master(
+                &[0xAE],
+                &[
+                    element(&[0xD7], &[1]),
+                    element(&[0x83], &[1]),
+                    element(&[0x86], CODEC_ID_HEVC),
+                    element(&[0x63, 0xA2], &hvcc(&[0x40, 0x01, 0x00])),
+                ],
+            )],
+        );
+
+        let mut seg_payload = tracks;
+        seg_payload.extend_from_slice(&cluster1);
+        seg_payload.extend_from_slice(&cluster2);
+
+        let segment = element(&[0x18, 0x53, 0x80, 0x67], &seg_payload);
+        let mut file = element(
+            &[0x1A, 0x45, 0xDF, 0xA3],
+            &element(&[0x42, 0x82], b"matroska"),
+        );
+        file.extend_from_slice(&segment);
+
+        let target = parse_mkv_targets(&file).expect("parse");
+        assert_eq!(
+            target.slice_spans.len(),
+            2,
+            "both slices from both clusters must be located despite cluster 1 having unknown size"
         );
     }
 }

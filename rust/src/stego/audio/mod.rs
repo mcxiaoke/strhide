@@ -76,11 +76,17 @@ pub(crate) fn embed_flac(
                 .into(),
         ));
     }
-    if analysis.usable < crate::stego::header::V2_TOTAL_HEADER_SLOTS + 8 {
+    if analysis.tails < crate::stego::header::V2_TOTAL_HEADER_SLOTS {
         return Err(StrHideError::General(format!(
-            "FLAC carrier has {} usable residual slots; at least {} are required",
-            analysis.usable,
-            crate::stego::header::V2_TOTAL_HEADER_SLOTS + 8
+            "FLAC carrier has {} usable subframe tails; at least {} are required for the header",
+            analysis.tails,
+            crate::stego::header::V2_TOTAL_HEADER_SLOTS
+        )));
+    }
+    if analysis.usable < 8 {
+        return Err(StrHideError::General(format!(
+            "FLAC carrier has {} usable residual slots; at least 8 are required",
+            analysis.usable
         )));
     }
 
@@ -89,9 +95,8 @@ pub(crate) fn embed_flac(
     let plaintext = crate::stego::envelope::build_plaintext(payload)?;
     // S1: Plan against genuinely movable residuals. Thinning samples strictly
     // from this usable pool, ensuring zero dead slots enter the STC trellis.
-    let available = analysis
-        .usable
-        .saturating_sub(crate::stego::header::V2_TOTAL_HEADER_SLOTS);
+    // analysis.usable is already the pure body pool (disjoint from subframe tails).
+    let available = analysis.usable;
     let shape = core::plan_body(
         plaintext.len(),
         suite.tag_len(),
@@ -187,12 +192,24 @@ pub(crate) fn probe_flac(
     control: &Control<'_>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let info = flac::parse_stream_info(carrier)?;
+    if info.bits_per_sample > 24 {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "{}-bit FLAC is not supported for in-place residual coding (limit 24-bit)",
+            info.bits_per_sample
+        )));
+    }
     let analysis = flac::analyse(carrier, &info)?;
-    if analysis.usable < crate::stego::header::V2_TOTAL_HEADER_SLOTS + 8 {
+    if analysis.tails < crate::stego::header::V2_TOTAL_HEADER_SLOTS {
         return Err(StrHideError::General(format!(
-            "FLAC carrier has {} usable residual slots; at least {} are required",
-            analysis.usable,
-            crate::stego::header::V2_TOTAL_HEADER_SLOTS + 8
+            "FLAC carrier has {} usable subframe tails; at least {} are required for the header",
+            analysis.tails,
+            crate::stego::header::V2_TOTAL_HEADER_SLOTS
+        )));
+    }
+    if analysis.usable < 8 {
+        return Err(StrHideError::General(format!(
+            "FLAC carrier has {} usable residual slots; at least 8 are required",
+            analysis.usable
         )));
     }
     let (header_phase, body_phase) =
