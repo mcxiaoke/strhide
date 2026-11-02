@@ -104,13 +104,9 @@ fn fold(value: i64) -> u64 {
     }
 }
 
-/// Build a mono 16-bit 44.1 kHz FLAC of FIXED-order-2 frames.
-///
-/// `block` is the block size (power of two up to 8192, the header code table),
-/// and the sample sequence is a slow sine plus a one-unit ripple so the
-/// residuals are small but never all zero -- both properties the cost model
-/// distinguishes.
-fn flac_carrier(blocks: usize, block: usize) -> Vec<u8> {
+/// Build a mono 16-bit 44.1 kHz FLAC with configurable predictor order and Rice parameter k.
+fn flac_carrier_custom(blocks: usize, block: usize, order: usize, k: u32) -> Vec<u8> {
+    assert!(order <= 4, "FIXED orders 0..=4 supported");
     let block_code: u8 = match block {
         192 => 1,
         256 => 8,
@@ -126,8 +122,7 @@ fn flac_carrier(blocks: usize, block: usize) -> Vec<u8> {
     let mut state: u32 = 0x1234_5678;
     for i in 0..total as usize {
         // A tone plus deterministic noise: the tone keeps the waveform smooth,
-        // the noise keeps the second-difference residuals spread over several
-        // Rice buckets, which is what makes a residual eligible at all.
+        // the noise keeps the residuals spread over several Rice buckets.
         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let noise = ((state >> 16) as i32 % 2_000) - 1_000;
         let phase = (i % 733) as f64 / 733.0 * std::f64::consts::TAU;
@@ -137,8 +132,6 @@ fn flac_carrier(blocks: usize, block: usize) -> Vec<u8> {
 
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(b"fLaC");
-    // STREAMINFO: 34 bytes. The MD5 is left zero, which every decoder treats as
-    // "not computed"; the engine rewrites it after embedding.
     let mut info = Vec::with_capacity(34);
     info.extend_from_slice(&(block as u16).to_be_bytes());
     info.extend_from_slice(&(block as u16).to_be_bytes());
@@ -155,8 +148,6 @@ fn flac_carrier(blocks: usize, block: usize) -> Vec<u8> {
     for _ in 0..blocks {
         let samples = &pcm[number as usize..(number as usize + block)];
         let mut frame = BitSink::new();
-        // Sync 0xFFF8 (fixed block size), block code, rate code 9 (44.1 kHz),
-        // assignment 1 (two independent channels -> one, mono), sample size 4.
         frame.put(14, 0x3FFE);
         frame.put(1, 0); // reserved
         frame.put(1, 0); // not variable block size
@@ -165,27 +156,37 @@ fn flac_carrier(blocks: usize, block: usize) -> Vec<u8> {
         frame.put(4, 0); // mono
         frame.put(3, 4); // 16-bit
         frame.put(1, 0); // reserved
-        // UTF-8-coded frame number (frame 0..127 needs one byte).
         frame.put(8, number);
-        // Header CRC-8 over the bytes written so far.
         let header_crc = crc8(&frame.out);
         frame.put(8, header_crc as u64);
 
         for channel in 0..1 {
             let _ = channel;
             frame.put(1, 0); // zero padding bit
-            frame.put(6, 10); // subframe type 10 = FIXED, order 2
+            frame.put(6, (8 + order) as u64); // subframe type: 8 + order = FIXED order
             frame.put(1, 0); // no wasted bits
-            frame.put_signed(16, samples[0] as i64);
-            frame.put_signed(16, samples[1] as i64);
-            // Residual coding: method 0, partition order 0, Rice parameter 8.
+            for &sample in &samples[..order] {
+                frame.put_signed(16, sample as i64);
+            }
             frame.put(2, 0);
             frame.put(4, 0);
-            let k = 8u32;
             frame.put(4, k as u64);
-            for i in 2..block {
-                let residual =
-                    samples[i] as i64 - 2 * samples[i - 1] as i64 + samples[i - 2] as i64;
+            for i in order..block {
+                let residual = match order {
+                    0 => samples[i] as i64,
+                    1 => samples[i] as i64 - samples[i - 1] as i64,
+                    2 => samples[i] as i64 - 2 * samples[i - 1] as i64 + samples[i - 2] as i64,
+                    3 => {
+                        samples[i] as i64 - 3 * samples[i - 1] as i64 + 3 * samples[i - 2] as i64
+                            - samples[i - 3] as i64
+                    }
+                    4 => {
+                        samples[i] as i64 - 4 * samples[i - 1] as i64 + 6 * samples[i - 2] as i64
+                            - 4 * samples[i - 3] as i64
+                            + samples[i - 4] as i64
+                    }
+                    _ => unreachable!(),
+                };
                 let folded = fold(residual);
                 frame.put_unary((folded >> k) as u32);
                 frame.put(k, folded & ((1u64 << k) - 1));
@@ -198,6 +199,11 @@ fn flac_carrier(blocks: usize, block: usize) -> Vec<u8> {
         number += block as u64;
     }
     out
+}
+
+/// Synthesise a valid FLAC file containing `blocks` frames of `block` samples.
+fn flac_carrier(blocks: usize, block: usize) -> Vec<u8> {
+    flac_carrier_custom(blocks, block, 2, 8)
 }
 
 fn profile() -> &'static AudioFormatProfile {
@@ -353,4 +359,76 @@ fn flac_carrier_without_enough_tails_is_refused() {
     .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("subframe tails"), "{msg}");
+}
+
+#[test]
+fn flac_carrier_high_frozen_rate_embed_and_extract() {
+    // FIXED order 3 with Rice k=4 creates a high frozen rate (>20%)
+    // due to compensation deltas overflowing narrow Rice partitions.
+    let cover = flac_carrier_custom(600, 256, 3, 4);
+    let info = super::parse_stream_info(&cover).expect("info");
+    let analysis = super::analyse(&cover, &info).expect("analyse");
+    let stuck_rate = 1.0 - (analysis.usable as f64 / analysis.slots as f64);
+    assert!(
+        stuck_rate > 0.20,
+        "test carrier should exhibit noticeable frozen rate, got {stuck_rate:.3}"
+    );
+
+    let raw = vec![0x42u8; 128];
+    let payload = Payload::bytes(&raw);
+    let control = ctl();
+    let (stego, _, stats) = embed_flac(
+        &cover,
+        &payload,
+        Some("secret-pw"),
+        None,
+        profile(),
+        SafetyPolicy::new(),
+        Freshness::default(),
+        &control,
+    )
+    .expect("embed must succeed on carrier with high frozen rate");
+
+    assert!(stats.modified_slots > 0);
+    let extracted = extract_flac(&stego, Some("secret-pw"), None, profile(), &control)
+        .expect("extract must succeed");
+    assert_eq!(extracted.as_bytes(), &raw[..]);
+}
+
+#[test]
+fn flac_invariants_preserved_across_embed() {
+    // S1 invariant: slot count, usable count, and tail count must be
+    // 100% invariant before and after embedding.
+    let cover = flac_carrier_custom(600, 256, 3, 4);
+    let info = super::parse_stream_info(&cover).expect("info");
+    let before = super::analyse(&cover, &info).expect("analyse before");
+
+    let raw = vec![0x99u8; 256];
+    let payload = Payload::bytes(&raw);
+    let control = ctl();
+    let (stego, _, _) = embed_flac(
+        &cover,
+        &payload,
+        Some("pw"),
+        None,
+        profile(),
+        SafetyPolicy::new(),
+        Freshness::default(),
+        &control,
+    )
+    .expect("embed");
+
+    let after = super::analyse(&stego, &info).expect("analyse after");
+    assert_eq!(
+        before.slots, after.slots,
+        "candidate slot count must be invariant across embed"
+    );
+    assert_eq!(
+        before.usable, after.usable,
+        "usable movable slot count must be invariant across embed"
+    );
+    assert_eq!(
+        before.tails, after.tails,
+        "tail slot count must be invariant across embed"
+    );
 }

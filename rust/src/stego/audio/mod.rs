@@ -30,12 +30,6 @@
 //! length (the modification is chosen so the Rice codeword keeps its width).
 //! A carrier that cannot guarantee this is refused rather than degraded.
 
-/// Number of trellis seeds tried before a FLAC carrier is declared unusable.
-///
-/// One seed is enough on almost every file; the retries exist for carriers whose
-/// quiet stretches hold long runs of residuals that cannot be compensated.
-const FLAC_EMBED_ATTEMPTS: usize = 4;
-
 /// Derive keyed thinning phases from secret, domain, and format profile.
 fn flac_phases(
     secret: Option<&str>,
@@ -109,46 +103,27 @@ pub(crate) fn embed_flac(
     let mut bytes = carrier.to_vec();
     let (header_phase, body_phase) = flac_phases(secret, domain, profile);
     let binding = Freshness::seeded_binding(carrier, payload.as_bytes());
-    let mut embedding = None;
-    let mut last_error = None;
-    for attempt in 0..FLAC_EMBED_ATTEMPTS {
-        let mut flac =
-            flac::FlacCarrier::new(&mut bytes, info, shape.body_slots, header_phase, body_phase)?;
-        match core::embed(
-            &mut flac,
-            core::Mapping::BodyPermuted,
-            payload,
-            secret,
-            domain,
-            profile,
-            safety,
-            freshness,
-            &binding,
-            attempt as u32,
-            control,
-        ) {
-            Ok(result) => {
-                embedding = Some(result);
-                break;
-            }
-            Err(e @ StrHideError::TrellisInfeasible { .. }) => {
-                if std::env::var_os("STRHIDE_FLAC_ERR").is_some() {
-                    eprintln!("flac-err: attempt {attempt} failed: {e}");
-                }
-                last_error = Some(e);
-                bytes = carrier.to_vec();
-            }
-            Err(other) => return Err(other),
-        }
-    }
-    let (capacity, stats) = match embedding {
-        Some(result) => result,
-        None => {
-            return Err(
-                last_error.unwrap_or_else(|| StrHideError::General("FLAC embedding failed".into()))
-            );
-        }
-    };
+    let mut flac = flac::FlacCarrier::new(
+        &mut bytes,
+        info,
+        &analysis,
+        shape.body_slots,
+        header_phase,
+        body_phase,
+    )?;
+    let (capacity, stats) = core::embed(
+        &mut flac,
+        core::Mapping::BodyPermuted,
+        payload,
+        secret,
+        domain,
+        profile,
+        safety,
+        freshness,
+        &binding,
+        0,
+        control,
+    )?;
 
     let drift = flac::max_sample_drift(carrier, &bytes, &info)?;
     if drift > flac::DRIFT_BUDGET {
@@ -168,13 +143,15 @@ pub(crate) fn extract_flac(
     control: &Control<'_>,
 ) -> Result<Payload<'static>, StrHideError> {
     let info = flac::parse_stream_info(carrier)?;
+    let analysis = flac::analyse(carrier, &info)?;
     let (header_phase, body_phase) = flac_phases(secret, domain, profile);
 
     // First read the header with an empty body, then rebuild with the body the
     // header advertises. The slot arrays differ, which is why this is two
     // constructions rather than one.
     let mut scratch = carrier.to_vec();
-    let header_view = flac::FlacCarrier::new(&mut scratch, info, 0, header_phase, body_phase)?;
+    let header_view =
+        flac::FlacCarrier::new(&mut scratch, info, &analysis, 0, header_phase, body_phase)?;
     let body_slots = core::body_slots_from_header(
         &header_view,
         core::Mapping::BodyPermuted,
@@ -185,7 +162,14 @@ pub(crate) fn extract_flac(
     )?;
 
     let mut scratch = carrier.to_vec();
-    let flac = flac::FlacCarrier::new(&mut scratch, info, body_slots, header_phase, body_phase)?;
+    let flac = flac::FlacCarrier::new(
+        &mut scratch,
+        info,
+        &analysis,
+        body_slots,
+        header_phase,
+        body_phase,
+    )?;
     core::extract(
         &flac,
         core::Mapping::BodyPermuted,
@@ -216,7 +200,7 @@ pub(crate) fn probe_flac(
     let mut scratch = carrier.to_vec();
     // An empty body still materialises the 512 header slots, which is the shape
     // `probe` measures.
-    let flac = flac::FlacCarrier::new(&mut scratch, info, 0, header_phase, body_phase)?;
+    let flac = flac::FlacCarrier::new(&mut scratch, info, &analysis, 0, header_phase, body_phase)?;
     let _ = analysis;
     core::probe(&flac, level, control)
 }
@@ -235,10 +219,12 @@ pub(crate) fn inspect_flac(
     control: &Control<'_>,
 ) -> Result<crate::stego::StegoHeaderInfo, StrHideError> {
     let info = flac::parse_stream_info(carrier)?;
+    let analysis = flac::analyse(carrier, &info)?;
     let (header_phase, body_phase) = flac_phases(secret, domain, profile);
 
     let mut scratch = carrier.to_vec();
-    let header_view = flac::FlacCarrier::new(&mut scratch, info, 0, header_phase, body_phase)?;
+    let header_view =
+        flac::FlacCarrier::new(&mut scratch, info, &analysis, 0, header_phase, body_phase)?;
     // A wrong password makes the header unreadable; fall back to the header-only
     // view, which reports "nothing here" instead of an error.
     let body_slots = core::body_slots_from_header(
@@ -252,7 +238,14 @@ pub(crate) fn inspect_flac(
     .unwrap_or(0);
 
     let mut scratch = carrier.to_vec();
-    let flac = flac::FlacCarrier::new(&mut scratch, info, body_slots, header_phase, body_phase)?;
+    let flac = flac::FlacCarrier::new(
+        &mut scratch,
+        info,
+        &analysis,
+        body_slots,
+        header_phase,
+        body_phase,
+    )?;
     core::inspect(
         &flac,
         core::Mapping::BodyPermuted,
@@ -272,12 +265,14 @@ pub(crate) fn verify_flac(
     control: &Control<'_>,
 ) -> Result<crate::stego::StegoVerifyResult, StrHideError> {
     let info = flac::parse_stream_info(carrier)?;
+    let analysis = flac::analyse(carrier, &info)?;
     let (header_phase, body_phase) = flac_phases(secret, domain, profile);
 
     // Same two-phase view as `inspect`/`extract`: verification reads the body,
     // which only exists once the carrier materialises the envelope's slots.
     let mut scratch = carrier.to_vec();
-    let header_view = flac::FlacCarrier::new(&mut scratch, info, 0, header_phase, body_phase)?;
+    let header_view =
+        flac::FlacCarrier::new(&mut scratch, info, &analysis, 0, header_phase, body_phase)?;
     let body_slots = core::body_slots_from_header(
         &header_view,
         core::Mapping::BodyPermuted,
@@ -289,7 +284,14 @@ pub(crate) fn verify_flac(
     .unwrap_or(0);
 
     let mut scratch = carrier.to_vec();
-    let flac = flac::FlacCarrier::new(&mut scratch, info, body_slots, header_phase, body_phase)?;
+    let flac = flac::FlacCarrier::new(
+        &mut scratch,
+        info,
+        &analysis,
+        body_slots,
+        header_phase,
+        body_phase,
+    )?;
     core::verify(
         &flac,
         core::Mapping::BodyPermuted,

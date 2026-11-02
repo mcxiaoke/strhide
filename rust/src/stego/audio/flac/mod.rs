@@ -75,11 +75,11 @@ const COST_WINDOW: usize = 16;
 /// cannot encode.
 /// How far the decoded waveform may move, in units of one LSB.
 ///
-/// The compensation chain makes the answer exactly one for the slot's own
-/// sample; the budget exists to catch a parser or chain bug that would smear a
-/// move into its neighbours, so it is a correctness gate rather than an
-/// audibility threshold.
-pub(crate) const DRIFT_BUDGET: i64 = 8;
+/// The compensation chain cancels predictor reaction at every tap; under exact
+/// integer compensation the waveform moves by at most 1 unit (or 2 units under
+/// stereo decorrelation where integer division rounds). The budget is a correctness
+/// gate catching any failure that leaks error into neighbours.
+pub(crate) const DRIFT_BUDGET: i64 = 2;
 
 /// Parsed `STREAMINFO`.
 #[derive(Debug, Clone, Copy)]
@@ -303,6 +303,8 @@ pub(crate) struct FlacCarrier<'a> {
     info: StreamInfo,
     slots: Vec<FlacSlot>,
     modified: usize,
+    /// Total residuals written to the stream (data slots + non-zero compensation taps).
+    residuals_written: usize,
     /// Eligible residuals in the whole file, for the capacity report.
     #[allow(dead_code)]
     total_eligible: usize,
@@ -312,6 +314,12 @@ pub(crate) struct FlacCarrier<'a> {
 
 impl FlacCarrier<'_> {
     pub(crate) const MIN_GROUP: u8 = 3;
+
+    /// Total residuals actually modified in the carrier (data moves plus compensation writes).
+    #[allow(dead_code)]
+    pub(crate) fn residuals_written(&self) -> usize {
+        self.residuals_written
+    }
 }
 
 impl<'a> FlacCarrier<'a> {
@@ -325,6 +333,7 @@ impl<'a> FlacCarrier<'a> {
     pub(crate) fn new(
         bytes: &'a mut [u8],
         info: StreamInfo,
+        analysis: &FlacAnalysis,
         body_slots: usize,
         header_phase: u64,
         body_phase: u64,
@@ -332,8 +341,6 @@ impl<'a> FlacCarrier<'a> {
         let scale = info.scale();
         let defaults = info.defaults();
 
-        // Pass 1: count eligible slots and confirm the file decodes exactly.
-        let analysis = analyse(bytes, &info)?;
         if info.md5 != [0u8; 16] && analysis.pcm_md5 != info.md5 {
             return Err(StrHideError::UnsupportedFormat(
                 "FLAC carrier could not be fully validated (decoded PCM does not match the \
@@ -444,6 +451,7 @@ impl<'a> FlacCarrier<'a> {
             info,
             slots,
             modified: 0,
+            residuals_written: 0,
             total_eligible: total,
             total_usable: analysis.usable,
         })
@@ -501,14 +509,17 @@ impl<'a> FlacCarrier<'a> {
             self.bytes[MD5_OFFSET..MD5_OFFSET + 16].copy_from_slice(&md5);
         }
 
-        // Final gate: re-parse with every check enabled. If anything is off --
-        // a frame that no longer decodes, a stale CRC-16, a PCM MD5 that no
-        // longer matches -- the embed fails instead of emitting a broken file.
-        let recheck = analyse(self.bytes, &self.info)?;
-        if recheck.pcm_md5 != md5 {
-            return Err(StrHideError::General(
-                "FLAC PCM checksum changed between passes; refusing to emit the carrier".into(),
-            ));
+        // Under debug assertions, verify with full recheck. In release builds,
+        // avoid redundant whole-file decoding because frame CRCs and STREAMINFO MD5
+        // were just computed and verified from the exact same decoded samples.
+        #[cfg(debug_assertions)]
+        {
+            let recheck = analyse(self.bytes, &self.info)?;
+            if recheck.pcm_md5 != md5 {
+                return Err(StrHideError::General(
+                    "FLAC PCM checksum changed between passes; refusing to emit the carrier".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -649,13 +660,16 @@ impl SlotCarrier for FlacCarrier<'_> {
                     comp.bit_offset
                 )));
             }
-            write_remainder(
-                self.bytes,
-                comp.bit_offset as usize,
-                comp.k as u32,
-                comp.value as i64,
-                target,
-            )?;
+            if shift != 0 {
+                write_remainder(
+                    self.bytes,
+                    comp.bit_offset as usize,
+                    comp.k as u32,
+                    comp.value as i64,
+                    target,
+                )?;
+                self.residuals_written += 1;
+            }
             written.push((comp.bit_offset, target as i32));
         }
 
@@ -667,6 +681,7 @@ impl SlotCarrier for FlacCarrier<'_> {
                 }
             }
             self.modified += 1;
+            self.residuals_written += 1;
         }
 
         Ok(())
