@@ -230,5 +230,18 @@ export interface SmartExtractSummaryDto {
   summary: ReadSummary;
 }
 
+export type LogSource = "rust" | "frontend";
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+export interface LogEntry {
+  id: string;
+  timestamp: number;
+  source: LogSource;
+  level: LogLevel;
+  target: string;
+  message: string;
+  data?: unknown;
+}
+
 
 

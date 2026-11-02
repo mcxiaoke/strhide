@@ -14,7 +14,10 @@ import {
   smartExtract,
   setUiLanguage,
   cancelTask,
+  getRecentLogs,
+  clearLogs,
 } from "../../src/api/commands";
+import { useLogStore } from "../../src/store/logStore";
 import type {
   PayloadInputDto,
   StegoEmbedRequest,
@@ -108,6 +111,14 @@ test.describe("GUI Core Commands & Parameters Verification", () => {
       }
       if (cmd === "cancel_task_cmd") {
         return true;
+      }
+      if (cmd === "get_recent_logs_cmd") {
+        return [
+          { id: "1", timestamp: Date.now(), level: "INFO", target: "strhide::test", message: "Mock log line" },
+        ];
+      }
+      if (cmd === "clear_logs_cmd") {
+        return null;
       }
     });
   });
@@ -400,6 +411,26 @@ test.describe("GUI Core Commands & Parameters Verification", () => {
       const cancelled = await cancelTask("task-123");
       expect(capturedCmd).toBe("cancel_task_cmd");
       expect(cancelled).toBe(true);
+
+      const logs = await getRecentLogs();
+      expect(capturedCmd).toBe("get_recent_logs_cmd");
+      expect(logs.length).toBe(1);
+      expect(logs[0].message).toBe("Mock log line");
+
+      await clearLogs();
+      expect(capturedCmd).toBe("clear_logs_cmd");
+
+      // Verify useLogStore
+      const store = useLogStore.getState();
+      store.addEntry({
+        source: "frontend",
+        level: "info",
+        target: "test",
+        message: "Frontend test log",
+      });
+      expect(useLogStore.getState().entries.length).toBeGreaterThan(0);
+      await store.clear();
+      expect(useLogStore.getState().entries.length).toBe(0);
     });
   });
 });

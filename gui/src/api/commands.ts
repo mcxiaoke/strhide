@@ -121,3 +121,11 @@ export async function setUiLanguage(lang: Lang): Promise<Lang> {
 export async function cancelTask(taskId: string): Promise<boolean> {
   return invoke<boolean>("cancel_task_cmd", { taskId });
 }
+
+export async function getRecentLogs(): Promise<any[]> {
+  return invoke<any[]>("get_recent_logs_cmd");
+}
+
+export async function clearLogs(): Promise<void> {
+  return invoke<void>("clear_logs_cmd");
+}
