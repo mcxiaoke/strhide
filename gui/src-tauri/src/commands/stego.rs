@@ -11,18 +11,26 @@ use strhide::errors::ErrorDetail;
 use strhide::facade::{Domain, SmartExtractOptions};
 use strhide::stego::io::extract_carrier_file_payload;
 use strhide::stego::options::{
-    EmbedOptions, ExtractOptions, JpegAlgorithm, ProbeOptions, SpatialAlgorithm, StegoEmbedResult,
-    StegoTuning,
+    EmbedOptions, ExtractOptions, HevcMode, JpegAlgorithm, ProbeOptions, SpatialAlgorithm,
+    StegoEmbedResult, StegoTuning,
 };
 use strhide::stego::params::{JpegParams, PngParams};
-use strhide::stego::{SafetyEnforcement, SafetyLevel, SafetyPolicy, StegoCapacityInfo};
+use strhide::stego::{
+    SafetyEnforcement, SafetyLevel, SafetyPolicy, StegoAlgorithmInfo, StegoCapacityInfo,
+};
 use strhide::structure::engine::ReadSummary;
 
 use crate::commands::PayloadInputDto;
 use crate::state::{GuiState, ProgressEvent, run_cancellable_task};
 
+#[tauri::command]
+pub fn get_stego_algorithms_cmd() -> Vec<StegoAlgorithmInfo> {
+    strhide::stego::list_stego_algorithms()
+}
+
 fn resolve_tuning(algo: Option<&str>) -> StegoTuning {
     if let Some(name) = algo {
+        let name = name.trim();
         if let Some(m) = SpatialAlgorithm::from_name(name) {
             return StegoTuning::Png {
                 model: m,
@@ -34,6 +42,9 @@ fn resolve_tuning(algo: Option<&str>) -> StegoTuning {
                 model: m,
                 params: JpegParams::default(),
             };
+        }
+        if let Some(mode) = HevcMode::from_name(name) {
+            return StegoTuning::hevc(mode);
         }
     }
     StegoTuning::Auto

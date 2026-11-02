@@ -18,6 +18,7 @@ pub fn run() {
         .manage(GuiState::default())
         .invoke_handler(tauri::generate_handler![
             commands::diag::get_capabilities_cmd,
+            commands::stego::get_stego_algorithms_cmd,
             commands::diag::get_file_metadata_cmd,
             commands::diag::inspect_carrier_cmd,
             commands::diag::verify_carrier_cmd,
