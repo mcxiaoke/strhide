@@ -1280,6 +1280,12 @@ pub fn embed_png_with_stats<'a>(
     let h = image.height as usize;
     let total_pixels = w * h;
 
+    log::info!(
+        target: "stego::png",
+        "embed_png: image {}x{} ({} px), payload {} B",
+        w, h, total_pixels, payload.as_bytes().len()
+    );
+
     // Frame the payload and derive the per-carrier keys. The ciphertext itself
     // is produced further down: the finished 64-byte header is its associated
     // data, so it cannot exist until codec/h/u are settled.

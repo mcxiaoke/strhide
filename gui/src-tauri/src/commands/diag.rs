@@ -21,10 +21,19 @@ pub async fn inspect_carrier_impl(
     password: Option<String>,
     domain: Option<String>,
 ) -> Result<DualInspect, ErrorDetail> {
+    let start = std::time::Instant::now();
+    let path_display = path.display().to_string();
+    log::info!(
+        target: "ipc::inspect",
+        "Inspecting carrier: path={}, domain={:?}",
+        path_display,
+        domain
+    );
+
     let ctx = RenderCtx::new(i18n::lang());
     let engine = state.engine;
 
-    tauri::async_runtime::spawn_blocking(move || {
+    let res: Result<DualInspect, ErrorDetail> = tauri::async_runtime::spawn_blocking(move || {
         // `inspect_any` already exempts content-only carriers (Annex-B HEVC has
         // no structure adapter) and reports content-domain failures through
         // `content_error`. The hand-rolled Annex-B branch that used to live here
@@ -49,7 +58,35 @@ pub async fn inspect_carrier_impl(
     .map_err(|join_err| {
         strhide::errors::StrHideError::General(format!("Worker thread join error: {join_err}"))
             .detail_i18n_with_ctx(ctx)
-    })?
+    })?;
+
+    match &res {
+        Ok(dual) => {
+            crate::logger::record_custom_log(
+                "info",
+                "ipc::inspect",
+                &format!(
+                    "Inspected {} in {:?}: format={}, has_hidden_data={}",
+                    path_display,
+                    start.elapsed(),
+                    dual.structure.format,
+                    dual.structure.has_hidden_data
+                ),
+                serde_json::to_value(dual).ok(),
+            );
+        }
+        Err(err) => {
+            log::warn!(
+                target: "ipc::inspect",
+                "Inspect {} failed in {:?}: {}",
+                path_display,
+                start.elapsed(),
+                err.detail
+            );
+        }
+    }
+
+    res
 }
 
 #[tauri::command]
@@ -141,10 +178,14 @@ pub async fn scan_carrier_cmd(
     state: State<'_, GuiState>,
     path: PathBuf,
 ) -> Result<ScanReport, ErrorDetail> {
+    let start = std::time::Instant::now();
+    let path_display = path.display().to_string();
+    log::info!(target: "ipc::scan", "Scanning carrier: path={}", path_display);
+
     let ctx = RenderCtx::new(i18n::lang());
     let engine = state.engine;
 
-    tauri::async_runtime::spawn_blocking(move || {
+    let res: Result<ScanReport, ErrorDetail> = tauri::async_runtime::spawn_blocking(move || {
         engine
             .analysis()
             .scan_file(&path)
@@ -154,5 +195,34 @@ pub async fn scan_carrier_cmd(
     .map_err(|join_err| {
         strhide::errors::StrHideError::General(format!("Worker thread join error: {join_err}"))
             .detail_i18n_with_ctx(ctx)
-    })?
+    })?;
+
+    match &res {
+        Ok(report) => {
+            crate::logger::record_custom_log(
+                "info",
+                "ipc::scan",
+                &format!(
+                    "Scanned {} in {:?}: risk_score={}, verdict={}, findings={}",
+                    path_display,
+                    start.elapsed(),
+                    report.risk_score,
+                    report.verdict,
+                    report.findings.len()
+                ),
+                serde_json::to_value(report).ok(),
+            );
+        }
+        Err(err) => {
+            log::warn!(
+                target: "ipc::scan",
+                "Scan {} failed in {:?}: {}",
+                path_display,
+                start.elapsed(),
+                err.detail
+            );
+        }
+    }
+
+    res
 }

@@ -114,12 +114,27 @@ pub async fn probe_stego_capacity_cmd(
             let high_max_bytes = info.tier_limit(SafetyLevel::High);
             let balanced_max_bytes = info.tier_limit(SafetyLevel::Balanced);
 
-            Ok(StegoCapacityFullDto {
+            let res = StegoCapacityFullDto {
                 info,
                 paranoid_max_bytes,
                 high_max_bytes,
                 balanced_max_bytes,
-            })
+            };
+
+            crate::logger::record_custom_log(
+                "info",
+                "ipc::probe_capacity",
+                &format!(
+                    "Probed capacity for {}: high={} B, paranoid={} B, balanced={} B",
+                    path.display(),
+                    res.high_max_bytes,
+                    res.paranoid_max_bytes,
+                    res.balanced_max_bytes
+                ),
+                serde_json::to_value(&res).ok(),
+            );
+
+            Ok(res)
         },
     )
     .await
@@ -176,9 +191,23 @@ pub async fn embed_stego_file_impl(
             ..Default::default()
         };
 
-        engine
+        let res = engine
             .stego()
-            .embed_file(&req.carrier, &payload, &embed_opts, &target)
+            .embed_file(&req.carrier, &payload, &embed_opts, &target)?;
+
+        crate::logger::record_custom_log(
+            "info",
+            "ipc::embed_stego",
+            &format!(
+                "Embedded stego to {}: carrier_after_bytes={}, payload_bytes={}",
+                res.written_to.display(),
+                res.carrier_after_bytes,
+                res.payload_bytes
+            ),
+            serde_json::to_value(&res).ok(),
+        );
+
+        Ok(res)
     })
     .await
 }
@@ -344,11 +373,25 @@ pub async fn smart_extract_impl(
             }
         };
 
-        Ok(SmartExtractSummaryDto {
+        let res = SmartExtractSummaryDto {
             source,
             also_present,
             summary,
-        })
+        };
+
+        crate::logger::record_custom_log(
+            "info",
+            "ipc::smart_extract",
+            &format!(
+                "Smart extract succeeded from {:?}: is_file={}, size={}",
+                res.source,
+                res.summary.is_file,
+                res.summary.raw_size
+            ),
+            serde_json::to_value(&res).ok(),
+        );
+
+        Ok(res)
     })
     .await
 }

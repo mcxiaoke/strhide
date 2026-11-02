@@ -71,11 +71,23 @@ pub async fn write_structure_file_impl(
             control: ctrl,
         };
 
-        pool.install(|| {
+        let res = pool.install(|| {
             engine
                 .structure()
                 .write_file(&req.carrier, source, &write_opts)
-        })
+        })?;
+
+        crate::logger::record_custom_log(
+            "info",
+            "ipc::write_structure",
+            &format!(
+                "Wrote structure: strategy={}, ube_size={}, raw_size={}",
+                res.strategy, res.ube_size, res.raw_size
+            ),
+            serde_json::to_value(&res).ok(),
+        );
+
+        Ok(res)
     })
     .await
 }
@@ -107,7 +119,19 @@ pub async fn read_structure_file_impl(
             control: ctrl,
         };
         let res = pool.install(|| engine.structure().read_file(&path, &opts))?;
-        Ok(res.summary())
+        let summary = res.summary();
+
+        crate::logger::record_custom_log(
+            "info",
+            "ipc::read_structure",
+            &format!(
+                "Read structure: is_file={}, raw_size={}, filename={}",
+                summary.is_file, summary.raw_size, summary.filename
+            ),
+            serde_json::to_value(&summary).ok(),
+        );
+
+        Ok(summary)
     })
     .await
 }

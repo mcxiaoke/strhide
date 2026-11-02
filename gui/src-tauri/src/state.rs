@@ -94,6 +94,12 @@ impl Progress for ThrottledChannelProgress {
         let stage_changed = *prev_stage != stage_str;
         if stage_changed {
             *prev_stage = stage_str;
+            log::debug!(
+                target: "engine::progress",
+                "Task [{}] entered stage: {}",
+                self.task_id,
+                stage_str
+            );
         }
         drop(prev_stage);
 
@@ -144,6 +150,9 @@ where
     let engine = state.engine;
     let pool = Arc::clone(&state.pool);
     let token = Arc::new(CancelToken::new());
+    let start_time = Instant::now();
+    log::info!(target: "engine::task", "Task [{}] started", task_id);
+
     state
         .tasks
         .lock()
@@ -173,6 +182,35 @@ where
     .await;
 
     state.tasks.lock().unwrap().remove(&task_id);
+
+    match &join_res {
+        Ok(Ok(_)) => {
+            log::info!(
+                target: "engine::task",
+                "Task [{}] completed successfully in {:?}",
+                task_id,
+                start_time.elapsed()
+            );
+        }
+        Ok(Err(err)) => {
+            log::warn!(
+                target: "engine::task",
+                "Task [{}] failed in {:?}: {}",
+                task_id,
+                start_time.elapsed(),
+                err
+            );
+        }
+        Err(join_err) => {
+            log::error!(
+                target: "engine::task",
+                "Task [{}] thread join error in {:?}: {}",
+                task_id,
+                start_time.elapsed(),
+                join_err
+            );
+        }
+    }
 
     let ctx = RenderCtx::new(i18n::lang());
     match join_res {

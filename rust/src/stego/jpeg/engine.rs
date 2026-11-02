@@ -643,6 +643,14 @@ pub fn embed_jpeg_with_stats<'a>(
     }
     let cover = CoverFrame::read(fmt, &coeffs);
 
+    log::info!(
+        target: "stego::jpeg",
+        "embed_jpeg: image {}x{}, payload {} B",
+        preflight.info.width,
+        preflight.info.height,
+        payload.as_bytes().len()
+    );
+
     // Costs are an embed-side concept only: extraction never computes them.
     let geometry = crate::stego::jpeg::geometry::geometry_for_carrier(
         carrier_bytes,
