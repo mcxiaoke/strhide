@@ -45,7 +45,7 @@ function toRow(info: DualInspect): ScanRow {
     capacityBytes: capacities.length > 0 ? Math.max(...capacities) : undefined,
     appended,
     embedded,
-    encrypted: !!info.is_encrypted,
+    encrypted: !!info.is_encrypted || !!info.content_stego?.has_hidden_data,
     payloadBytes,
   };
 }

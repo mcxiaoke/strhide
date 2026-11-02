@@ -7,6 +7,8 @@
 //! stages of low-pass smoothing, assigning low costs to complex textures and
 //! high costs to smooth/flat areas.
 
+use rayon::prelude::*;
+
 use crate::stego::params::PngParams;
 use crate::stego::traits::PngCostModel;
 
@@ -89,17 +91,18 @@ impl PngCostModel for HillCostModel {
         let p2 = params.p2_window.max(1);
         let pad = 1 + (p1 - 1) / 2 + (p2 - 1) / 2;
         let (x_pad, hp, wp) = pad_symmetric(&gray, h, w, pad);
+        drop(gray);
 
         // Stage 1: High-pass filtering (KB 3x3 kernel)
         // High-pass residual: I1 = |x * KB|
         let (h1, w1) = (hp - 2, wp - 2);
         let mut i1 = vec![0.0f64; h1 * w1];
         let kb = &KB_HIGH_PASS_KERNEL;
-        for i in 0..h1 {
+        i1.par_chunks_mut(w1).enumerate().for_each(|(i, dst_row)| {
             let r0 = &x_pad[i * wp..(i + 1) * wp];
             let r1 = &x_pad[(i + 1) * wp..(i + 2) * wp];
             let r2 = &x_pad[(i + 2) * wp..(i + 3) * wp];
-            for (j, dst) in i1[i * w1..(i + 1) * w1].iter_mut().enumerate() {
+            for (j, dst) in dst_row.iter_mut().enumerate() {
                 let val = kb[0] * r0[j]
                     + kb[1] * r0[j + 1]
                     + kb[2] * r0[j + 2]
@@ -111,7 +114,8 @@ impl PngCostModel for HillCostModel {
                     + kb[8] * r2[j + 2];
                 *dst = val.abs();
             }
-        }
+        });
+        drop(x_pad);
 
         // Stage 2: Low-pass filtering (p1 x p1 box average), followed by reciprocal
         let l1 = 1.0f64 / (p1 * p1) as f64;
@@ -119,41 +123,42 @@ impl PngCostModel for HillCostModel {
         let mut i2 = vec![0.0f64; h2 * w2];
         let eps = params.epsilon.max(1e-12);
 
-        for i in 0..h2 {
-            for j in 0..w2 {
+        i2.par_chunks_mut(w2).enumerate().for_each(|(i, dst_row)| {
+            for (j, dst) in dst_row.iter_mut().enumerate() {
                 let mut sum = 0.0f64;
                 for u in 0..p1 {
                     let row = &i1[(i + u) * w1 + j..(i + u) * w1 + j + p1];
                     sum += row.iter().sum::<f64>();
                 }
                 let avg = sum * l1;
-                i2[i * w2 + j] = 1.0f64 / avg.max(eps);
+                *dst = 1.0f64 / avg.max(eps);
             }
-        }
+        });
+        drop(i1);
 
         // Stage 3: Low-pass filtering (p2 x p2 average), separable convolution
         let l2 = 1.0f64 / p2 as f64;
 
         // Vertical pass
         let mut tmp = vec![0.0f64; h * w2];
-        for i in 0..h {
-            let dst = &mut tmp[i * w2..(i + 1) * w2];
+        tmp.par_chunks_mut(w2).enumerate().for_each(|(i, dst)| {
             for u in 0..p2 {
                 let src = &i2[(i + u) * w2..(i + u + 1) * w2];
                 for (d, &s) in dst.iter_mut().zip(src) {
                     *d += s * l2;
                 }
             }
-        }
+        });
+        drop(i2);
 
         // Horizontal pass
         let mut cost = vec![0.0f64; h * w];
-        for i in 0..h {
+        cost.par_chunks_mut(w).enumerate().for_each(|(i, dst_row)| {
             let src = &tmp[i * w2..(i + 1) * w2];
-            for (j, dst) in cost[i * w..(i + 1) * w].iter_mut().enumerate() {
+            for (j, dst) in dst_row.iter_mut().enumerate() {
                 *dst = src[j..j + p2].iter().sum::<f64>() * l2;
             }
-        }
+        });
 
         cost
     }

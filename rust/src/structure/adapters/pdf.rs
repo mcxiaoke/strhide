@@ -158,9 +158,13 @@ fn read_xref_stream_dict<R: Read + Seek + ?Sized>(
         return None;
     }
 
-    // The dictionary ends at the `stream` keyword that introduces the data.
+    // The dictionary ends at the closing `>>` delimiter before `stream`.
     let text = String::from_utf8_lossy(&buf);
-    let dict_text = text.split("stream").next().unwrap_or(&text);
+    let dict_text = if let Some(idx) = text.find(">>") {
+        &text[..idx + 2]
+    } else {
+        text.split("stream").next().unwrap_or(&text)
+    };
     // Only accept an actual XRef stream: a `startxref` that points at something
     // else (a content stream, a classic xref table) must not be parsed as one.
     if !dict_text.contains("/XRef") {

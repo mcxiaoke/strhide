@@ -254,7 +254,8 @@ pub async fn extract_stego_file_cmd(
             let payload = extract_carrier_file_payload(&path, &ex_opts, &engine.dialect().stego)?;
 
             let is_file = payload.kind == PayloadKind::File;
-            let is_encrypted = password.is_some();
+            let is_encrypted = password.is_some_and(|p| !p.is_empty())
+                || engine.dialect().stego.secret().is_some();
             let filename = payload.name.clone().unwrap_or_else(|| {
                 (if is_file {
                     "payload.bin"
@@ -359,7 +360,7 @@ pub async fn smart_extract_impl(
         let also_present = outcome.also_present;
 
         let is_file = payload.kind == PayloadKind::File;
-        let is_encrypted = password.is_some();
+        let is_encrypted = outcome.is_encrypted;
         let filename = payload.name.clone().unwrap_or_else(|| {
             (if is_file {
                 "payload.bin"

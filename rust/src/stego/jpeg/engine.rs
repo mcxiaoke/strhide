@@ -604,10 +604,10 @@ pub fn embed_jpeg<'a>(
         freshness,
         control,
     )
-    .map(|(bytes, _)| bytes)
+    .map(|(bytes, _, _)| bytes)
 }
 
-/// Embed a payload into a JPEG carrier and return both modified bytes and embed statistics.
+/// Embed a payload into a JPEG carrier and return modified bytes, embed statistics, and capacity info.
 #[allow(clippy::too_many_arguments)]
 pub fn embed_jpeg_with_stats<'a>(
     carrier_bytes: &[u8],
@@ -620,7 +620,7 @@ pub fn embed_jpeg_with_stats<'a>(
     cost_model: &dyn JpegCostModel,
     freshness: Freshness,
     control: &Control<'_>,
-) -> Result<(Vec<u8>, crate::stego::EmbedStats), StrHideError> {
+) -> Result<(Vec<u8>, crate::stego::EmbedStats, StegoCapacityInfo), StrHideError> {
     let payload = payload.into();
     fmt.validate()?;
     params.validate()?;
@@ -701,6 +701,15 @@ pub fn embed_jpeg_with_stats<'a>(
         safety,
         payload: &payload,
     };
+    let capacity_info = build_jpeg_capacity_info(
+        &preflight.info,
+        preflight.base_bytes,
+        table.is_some(),
+        cost_model,
+        params,
+        safety.level,
+        fmt,
+    )?;
     let mut work = coeffs.clone();
     let mut last_error = None;
     for attempt_idx in 1..=EMBED_ATTEMPTS {
@@ -722,7 +731,7 @@ pub fn embed_jpeg_with_stats<'a>(
                     modified_slots: applied.len(),
                     total_candidate_slots: cover.n_total,
                 };
-                return Ok((bytes, stats));
+                return Ok((bytes, stats, capacity_info));
             }
             Err(attempt) => {
                 trace(&format!(
@@ -1471,7 +1480,7 @@ fn inspect_jpeg_from(
             info: StegoHeaderInfo {
                 format: "JPEG".into(),
                 has_hidden_data: true,
-                algorithm: Some("UERD/J-UNIWARD".into()),
+                algorithm: Some("UERD/J-UNIWARD/J-MiPOD".into()),
                 codec: Some(format!(
                     "Ternary STC (h={}, u={})",
                     superblock.h, superblock.u
@@ -1618,26 +1627,18 @@ pub fn verify_jpeg(
     Ok(StegoVerifyResult::new("JPEG", levels))
 }
 
-/// Probe the embedding capacity of a JPEG carrier.
-///
-/// The complete expert entry: `safety_level` picks the tier `recommended_max_bytes`
-/// is derived from, `fmt` supplies the grid geometry the budget is measured
-/// against.
-pub fn probe_jpeg_capacity(
-    carrier_bytes: &[u8],
+/// Shared capacity builder so that embedding never has to decode
+/// the carrier or parse DHT/geometry a second time to report capacity.
+pub(crate) fn build_jpeg_capacity_info(
+    info: &dct_io::JpegInfo,
+    base_bytes: u64,
+    has_incomplete_table: bool,
     cost_model: &dyn JpegCostModel,
     params: &JpegParams,
     safety_level: crate::stego::SafetyLevel,
     fmt: &JpegFormatProfile,
-    control: &Control<'_>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
-    fmt.validate()?;
-    params.validate()?;
-    control.stage(Stage::Decode);
-    control.check()?;
-    let preflight = preflight_jpeg(carrier_bytes)?;
-    let info = preflight.info;
-    let geom = crate::stego::jpeg::geometry::component_geometry(&info, 0, 0);
+    let geom = crate::stego::jpeg::geometry::component_geometry(info, 0, 0);
     let block_count = geom.grid_w * geom.grid_h;
     let n_total = block_count * fmt.grid_rule.slots_per_block();
     let ext_bytes = encode_extension(&params.extensions)?.len();
@@ -1651,10 +1652,7 @@ pub fn probe_jpeg_capacity(
     // The writer charges the trellis bitmap against the same 8 GiB pipeline
     // budget; a probe that ignored it advertised capacities the embedder
     // rejects outright.
-    let body_slots = body_slots.min(max_body_slots_within_pipeline(
-        preflight.base_bytes,
-        params.stc_h,
-    ));
+    let body_slots = body_slots.min(max_body_slots_within_pipeline(base_bytes, params.stc_h));
 
     // The physical ceiling is `u = 1`; `u` grows from there as the payload
     // shrinks, so this is the largest payload that fits at all.
@@ -1666,7 +1664,7 @@ pub fn probe_jpeg_capacity(
     // the embedder requires `u = 3` (`embed_once`) and the grouped bound is
     // the real ceiling. Reporting the geometric one here would advertise a
     // capacity that always fails.
-    if dht::luma_ac_symbols(carrier_bytes).is_some_and(|t| !t.is_complete()) {
+    if has_incomplete_table {
         let room = body_slots.min(crate::stego::params::max_grouped_backtrack_slots(
             params.stc_h,
         ));
@@ -1717,6 +1715,37 @@ pub fn probe_jpeg_capacity(
             u32::from(info.height),
         )),
     })
+}
+
+/// Probe the embedding capacity of a JPEG carrier.
+///
+/// The complete expert entry: `safety_level` picks the tier `recommended_max_bytes`
+/// is derived from, `fmt` supplies the grid geometry the budget is measured
+/// against.
+pub fn probe_jpeg_capacity(
+    carrier_bytes: &[u8],
+    cost_model: &dyn JpegCostModel,
+    params: &JpegParams,
+    safety_level: crate::stego::SafetyLevel,
+    fmt: &JpegFormatProfile,
+    control: &Control<'_>,
+) -> Result<StegoCapacityInfo, StrHideError> {
+    fmt.validate()?;
+    params.validate()?;
+    control.stage(Stage::Decode);
+    control.check()?;
+    let preflight = preflight_jpeg(carrier_bytes)?;
+    let has_incomplete_table =
+        dht::luma_ac_symbols(carrier_bytes).is_some_and(|t| !t.is_complete());
+    build_jpeg_capacity_info(
+        &preflight.info,
+        preflight.base_bytes,
+        has_incomplete_table,
+        cost_model,
+        params,
+        safety_level,
+        fmt,
+    )
 }
 
 /// Layout information for diagnostics and tests: the resolved group size and

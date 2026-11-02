@@ -60,6 +60,7 @@ pub fn embed_carrier_file(
         format,
         crate::formats::FileFormat::Mp4 | crate::formats::FileFormat::HevcAnnexB
     ) {
+        options.tuning.applicable_to(format)?;
         let domain = options.domain(dialect);
         options.control.check()?;
         let anon_payload;

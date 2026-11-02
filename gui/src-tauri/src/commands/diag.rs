@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::State;
 
 use strhide::analysis::ScanReport;
@@ -32,27 +33,36 @@ pub async fn inspect_carrier_impl(
 
     let ctx = RenderCtx::new(i18n::lang());
     let engine = state.engine;
+    let pool = Arc::clone(&state.pool);
 
     let res: Result<DualInspect, ErrorDetail> = tauri::async_runtime::spawn_blocking(move || {
-        // `inspect_any` already exempts content-only carriers (Annex-B HEVC has
-        // no structure adapter) and reports content-domain failures through
-        // `content_error`. The hand-rolled Annex-B branch that used to live here
-        // duplicated that logic and silently dropped the error.
-        let opts = DualOptions {
-            password: password.as_deref(),
-            domain: domain.as_deref(),
-            control: Control::none(),
-        };
-        let mut dual = engine
-            .inspect_any(&path, &opts)
-            .map_err(|e| e.detail_i18n_with_ctx(ctx))?;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pool.install(|| {
+                // `inspect_any` already exempts content-only carriers (Annex-B HEVC has
+                // no structure adapter) and reports content-domain failures through
+                // `content_error`. The hand-rolled Annex-B branch that used to live here
+                // duplicated that logic and silently dropped the error.
+                let opts = DualOptions {
+                    password: password.as_deref(),
+                    domain: domain.as_deref(),
+                    control: Control::none(),
+                };
+                let mut dual = engine
+                    .inspect_any(&path, &opts)
+                    .map_err(|e| e.detail_i18n_with_ctx(ctx))?;
 
-        // Localize strategy capacity limits
-        for strat in &mut dual.structure.strategies {
-            strat.limit = strat.render_limit(ctx);
-        }
+                // Localize strategy capacity limits
+                for strat in &mut dual.structure.strategies {
+                    strat.limit = strat.render_limit(ctx);
+                }
 
-        Ok(dual)
+                Ok(dual)
+            })
+        }))
+        .unwrap_or_else(|_| {
+            Err(strhide::errors::StrHideError::General("Worker thread panicked".into())
+                .detail_i18n_with_ctx(ctx))
+        })
     })
     .await
     .map_err(|join_err| {
@@ -152,19 +162,28 @@ pub async fn verify_carrier_cmd(
 ) -> Result<DualVerify, ErrorDetail> {
     let ctx = RenderCtx::new(i18n::lang());
     let engine = state.engine;
+    let pool = Arc::clone(&state.pool);
 
     tauri::async_runtime::spawn_blocking(move || {
-        // Same content-only exemption as `inspect_carrier_cmd`: `verify_any`
-        // returns `VerifyResult::not_applicable` for Annex-B HEVC and keeps the
-        // content-domain failure in `content_error`.
-        let opts = DualOptions {
-            password: password.as_deref(),
-            domain: domain.as_deref(),
-            control: Control::none(),
-        };
-        engine
-            .verify_any(&path, &opts)
-            .map_err(|e| e.detail_i18n_with_ctx(ctx))
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pool.install(|| {
+                // Same content-only exemption as `inspect_carrier_cmd`: `verify_any`
+                // returns `VerifyResult::not_applicable` for Annex-B HEVC and keeps the
+                // content-domain failure in `content_error`.
+                let opts = DualOptions {
+                    password: password.as_deref(),
+                    domain: domain.as_deref(),
+                    control: Control::none(),
+                };
+                engine
+                    .verify_any(&path, &opts)
+                    .map_err(|e| e.detail_i18n_with_ctx(ctx))
+            })
+        }))
+        .unwrap_or_else(|_| {
+            Err(strhide::errors::StrHideError::General("Worker thread panicked".into())
+                .detail_i18n_with_ctx(ctx))
+        })
     })
     .await
     .map_err(|join_err| {
@@ -184,12 +203,21 @@ pub async fn scan_carrier_cmd(
 
     let ctx = RenderCtx::new(i18n::lang());
     let engine = state.engine;
+    let pool = Arc::clone(&state.pool);
 
     let res: Result<ScanReport, ErrorDetail> = tauri::async_runtime::spawn_blocking(move || {
-        engine
-            .analysis()
-            .scan_file(&path)
-            .map_err(|e| e.detail_i18n_with_ctx(ctx))
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pool.install(|| {
+                engine
+                    .analysis()
+                    .scan_file(&path)
+                    .map_err(|e| e.detail_i18n_with_ctx(ctx))
+            })
+        }))
+        .unwrap_or_else(|_| {
+            Err(strhide::errors::StrHideError::General("Worker thread panicked".into())
+                .detail_i18n_with_ctx(ctx))
+        })
     })
     .await
     .map_err(|join_err| {

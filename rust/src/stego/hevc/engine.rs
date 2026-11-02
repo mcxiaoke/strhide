@@ -355,11 +355,9 @@ pub fn extract_hevc_dimensions(carrier: &[u8]) -> Result<(u32, u32), StrHideErro
         HevcCarrierKind::Mp4Container | HevcCarrierKind::MkvContainer => {
             let parameter_sets = match kind {
                 HevcCarrierKind::MkvContainer => {
-                    parse_mkv_targets(carrier)
-                        .map_err(|e| {
-                            StrHideError::UnsupportedFormat(format!("MKV parse error: {e}"))
-                        })?
-                        .parameter_sets
+                    crate::stego::hevc::mkv_boxes::parse_mkv_parameter_sets(carrier).map_err(
+                        |e| StrHideError::UnsupportedFormat(format!("MKV parse error: {e}")),
+                    )?
                 }
                 _ => {
                     parse_mp4_targets(carrier)

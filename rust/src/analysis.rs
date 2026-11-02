@@ -1388,66 +1388,72 @@ fn decode_jpeg_pixels(data: &[u8]) -> Option<(Vec<u8>, u32, usize)> {
 /// Uses local filtering with both orthogonal and diagonal neighbours to predict cover pixel values,
 /// balancing bipartite parity lattices, then estimates the LSB replacement rate alpha via weighted
 /// covariance between prediction residuals and LSB flips.
-fn ws_analysis(pixels: &[u8], width: u32, channels: usize) -> f64 {
-    let width = width as usize;
+fn ws_channel_stats(pixels: &[u8], width: usize, channels: usize, ch: usize) -> (f64, f64) {
     let stride = match width.checked_mul(channels) {
         Some(s) if s > 0 => s,
-        _ => return 0.0,
+        _ => return (0.0, 0.0),
     };
     if pixels.len() < stride * 3 || width < 3 {
-        return 0.0;
+        return (0.0, 0.0);
     }
     let rows = (pixels.len() / stride).min(512);
     if rows < 3 {
-        return 0.0;
+        return (0.0, 0.0);
     }
 
+    let mut numerator = 0.0f64;
+    let mut denominator = 0.0f64;
+
+    for r in 1..rows - 1 {
+        let row_curr = r * stride;
+        let row_prev = (r - 1) * stride;
+        let row_next = (r + 1) * stride;
+
+        for c in 1..width - 1 {
+            let off = c * channels + ch;
+            let p = pixels[row_curr + off] as f64;
+
+            // Orthogonal neighbours (weight 2 each)
+            let p_l = pixels[row_curr + off - channels] as f64;
+            let p_r = pixels[row_curr + off + channels] as f64;
+            let p_u = pixels[row_prev + off] as f64;
+            let p_d = pixels[row_next + off] as f64;
+
+            // Diagonal neighbours (weight 1 each, breaks bipartite checkerboard parity bias)
+            let p_lu = pixels[row_prev + off - channels] as f64;
+            let p_ru = pixels[row_prev + off + channels] as f64;
+            let p_ld = pixels[row_next + off - channels] as f64;
+            let p_rd = pixels[row_next + off + channels] as f64;
+
+            let pred = (2.0 * (p_l + p_r + p_u + p_d) + (p_lu + p_ru + p_ld + p_rd)) / 12.0;
+            let residual = p - pred;
+
+            let var = 0.25
+                * ((p_l - pred).powi(2)
+                    + (p_r - pred).powi(2)
+                    + (p_u - pred).powi(2)
+                    + (p_d - pred).powi(2));
+            let w = 1.0 / (1.0 + var).powi(2);
+
+            let p_int = pixels[row_curr + off] as i32;
+            let d = (p_int - (p_int ^ 1)) as f64;
+
+            numerator += w * residual * d;
+            denominator += w;
+        }
+    }
+
+    (numerator, denominator)
+}
+
+#[allow(dead_code)]
+fn ws_analysis(pixels: &[u8], width: u32, channels: usize) -> f64 {
+    let width = width as usize;
     let eval_channels = color_channel_count(channels);
     let mut best_rate = 0.0f64;
 
     for ch in 0..eval_channels {
-        let mut numerator = 0.0f64;
-        let mut denominator = 0.0f64;
-
-        for r in 1..rows - 1 {
-            let row_curr = r * stride;
-            let row_prev = (r - 1) * stride;
-            let row_next = (r + 1) * stride;
-
-            for c in 1..width - 1 {
-                let off = c * channels + ch;
-                let p = pixels[row_curr + off] as f64;
-
-                // Orthogonal neighbours (weight 2 each)
-                let p_l = pixels[row_curr + off - channels] as f64;
-                let p_r = pixels[row_curr + off + channels] as f64;
-                let p_u = pixels[row_prev + off] as f64;
-                let p_d = pixels[row_next + off] as f64;
-
-                // Diagonal neighbours (weight 1 each, breaks bipartite checkerboard parity bias)
-                let p_lu = pixels[row_prev + off - channels] as f64;
-                let p_ru = pixels[row_prev + off + channels] as f64;
-                let p_ld = pixels[row_next + off - channels] as f64;
-                let p_rd = pixels[row_next + off + channels] as f64;
-
-                let pred = (2.0 * (p_l + p_r + p_u + p_d) + (p_lu + p_ru + p_ld + p_rd)) / 12.0;
-                let residual = p - pred;
-
-                let var = 0.25
-                    * ((p_l - pred).powi(2)
-                        + (p_r - pred).powi(2)
-                        + (p_u - pred).powi(2)
-                        + (p_d - pred).powi(2));
-                let w = 1.0 / (1.0 + var).powi(2);
-
-                let p_int = pixels[row_curr + off] as i32;
-                let d = (p_int - (p_int ^ 1)) as f64;
-
-                numerator += w * residual * d;
-                denominator += w;
-            }
-        }
-
+        let (numerator, denominator) = ws_channel_stats(pixels, width, channels, ch);
         if denominator > 0.0 {
             let alpha = (2.0 * numerator / denominator).clamp(0.0, 1.0);
             if alpha > best_rate {
@@ -1552,24 +1558,49 @@ fn track_spatial_domain(
     let stride = width as usize * channels;
     let slabs = spatial_slabs(pixels, stride);
     let color_channels = color_channel_count(channels);
-    let (mut ws_sum, mut spa_sum, mut rs_sum, mut rs_n) = (0.0f64, 0.0f64, 0.0f64, 0usize);
     let mut hist = [0u64; 256];
     for slab in &slabs {
-        ws_sum += ws_analysis(slab, width, channels);
-        spa_sum += spa_estimate_dww(slab, width, channels);
-        if let Some(p) = rs_analysis(slab, width, channels) {
-            rs_sum += p;
-            rs_n += 1;
-        }
         for (idx, &b) in slab.iter().enumerate() {
             if idx % channels < color_channels {
                 hist[b as usize] += 1;
             }
         }
     }
-    let slabs_f = slabs.len().max(1) as f64;
-    let ws_rate = ws_sum / slabs_f;
-    let spa_rate = spa_sum / slabs_f;
+
+    let mut ws_rate = 0.0f64;
+    let mut spa_rate = 0.0f64;
+    for ch in 0..color_channels {
+        let (mut num, mut den) = (0.0f64, 0.0f64);
+        let (mut x, mut y, mut k, mut pairs) = (0i64, 0i64, 0i64, 0i64);
+        for slab in &slabs {
+            let (sn, sd) = ws_channel_stats(slab, width as usize, channels, ch);
+            num += sn;
+            den += sd;
+            let (sx, sy, sk, sp) = spa_channel_stats(slab, width as usize, channels, ch);
+            x += sx;
+            y += sy;
+            k += sk;
+            pairs += sp;
+        }
+        if den > 0.0 {
+            let r = (2.0 * num / den).clamp(0.0, 1.0);
+            if r > ws_rate {
+                ws_rate = r;
+            }
+        }
+        let sr = solve_spa(x, y, k, pairs);
+        if sr > spa_rate {
+            spa_rate = sr;
+        }
+    }
+
+    let (mut rs_sum, mut rs_n) = (0.0f64, 0usize);
+    for slab in &slabs {
+        if let Some(p) = rs_analysis(slab, width, channels) {
+            rs_sum += p;
+            rs_n += 1;
+        }
+    }
     let rs_rate = if rs_n > 0 {
         Some(rs_sum / rs_n as f64)
     } else {
@@ -1974,72 +2005,87 @@ fn rs_analysis(pixels: &[u8], width: u32, channels: usize) -> Option<f64> {
     best
 }
 
+fn spa_channel_stats(
+    pixels: &[u8],
+    width: usize,
+    channels: usize,
+    ch: usize,
+) -> (i64, i64, i64, i64) {
+    let stride = match width.checked_mul(channels) {
+        Some(s) if s > 0 => s,
+        _ => return (0, 0, 0, 0),
+    };
+    if pixels.len() < stride * 2 || width == 0 {
+        return (0, 0, 0, 0);
+    }
+    let rows = (pixels.len() / stride).min(512);
+    if rows < 2 {
+        return (0, 0, 0, 0);
+    }
+
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut k: i64 = 0;
+    let mut pair_count: i64 = 0;
+    for row in 0..rows - 1 {
+        let top = row * stride;
+        let bot = top + stride;
+        for col in 0..width {
+            let off = col * channels + ch;
+            let r = pixels[top + off] as i32;
+            let s = pixels[bot + off] as i32;
+            pair_count += 1;
+            let s_even = (s & 1) == 0;
+            let r_lt = r < s;
+            let r_gt = r > s;
+            if (s_even && r_lt) || (!s_even && r_gt) {
+                x += 1;
+            }
+            if (s_even && r_gt) || (!s_even && r_lt) {
+                y += 1;
+            }
+            if (r & 0xFE) == (s & 0xFE) {
+                k += 1;
+            }
+        }
+    }
+    (x, y, k, pair_count)
+}
+
+fn solve_spa(x: i64, y: i64, k: i64, pair_count: i64) -> f64 {
+    if k == 0 || pair_count == 0 {
+        return 0.0;
+    }
+    // DWW quadratic: a*beta^2 + b*beta + c = 0, alpha = 2*beta.
+    let a = (2 * k) as f64;
+    let b = (2 * (2 * x - pair_count)) as f64;
+    let c = (y - x) as f64;
+    let disc = b * b - 4.0 * a * c;
+    let beta = if disc < 0.0 {
+        -b / (2.0 * a)
+    } else {
+        (-b - disc.sqrt()) / (2.0 * a)
+    };
+    (2.0 * beta).clamp(0.0, 1.0)
+}
+
 /// Sample Pair Analysis (Dumitrescu, Wu & Wang 2003), faithful to the
 /// Aletheia `spa_image` reference. Walks vertically adjacent pixel pairs,
 /// accumulates the DWW trace-set counters (x, y, k), and solves the
 /// quadratic for the LSB-replacement embedding rate alpha.
+#[allow(dead_code)]
 fn spa_estimate_dww(pixels: &[u8], width: u32, channels: usize) -> f64 {
     let width = width as usize;
-    let stride = width.checked_mul(channels).unwrap_or(0);
-    if width == 0 || stride == 0 || pixels.len() < stride * 2 {
-        return 0.0;
-    }
-    let rows = (pixels.len() / stride).min(512);
-    if rows < 2 {
-        return 0.0;
-    }
-
     let eval_channels = color_channel_count(channels);
     let mut best = 0.0_f64;
     for ch in 0..eval_channels {
-        let (x, y, k, pair_count) = {
-            let mut x: i64 = 0;
-            let mut y: i64 = 0;
-            let mut k: i64 = 0;
-            let mut pair_count: i64 = 0;
-            for row in 0..rows - 1 {
-                let top = row * stride;
-                let bot = top + stride;
-                for col in 0..width {
-                    let off = col * channels + ch;
-                    let r = pixels[top + off] as i32;
-                    let s = pixels[bot + off] as i32;
-                    pair_count += 1;
-                    let s_even = (s & 1) == 0;
-                    let r_lt = r < s;
-                    let r_gt = r > s;
-                    if (s_even && r_lt) || (!s_even && r_gt) {
-                        x += 1;
-                    }
-                    if (s_even && r_gt) || (!s_even && r_lt) {
-                        y += 1;
-                    }
-                    if (r & 0xFE) == (s & 0xFE) {
-                        k += 1;
-                    }
-                }
-            }
-            (x, y, k, pair_count)
-        };
-        if k == 0 {
-            continue;
-        }
-        // DWW quadratic: a*beta^2 + b*beta + c = 0, alpha = 2*beta.
-        let a = (2 * k) as f64;
-        let b = (2 * (2 * x - pair_count)) as f64;
-        let c = (y - x) as f64;
-        let disc = b * b - 4.0 * a * c;
-        let beta = if disc < 0.0 {
-            -b / (2.0 * a)
-        } else {
-            (-b - disc.sqrt()) / (2.0 * a)
-        };
-        let alpha = 2.0 * beta;
+        let (x, y, k, pair_count) = spa_channel_stats(pixels, width, channels, ch);
+        let alpha = solve_spa(x, y, k, pair_count);
         if alpha > best {
             best = alpha;
         }
     }
-    best.clamp(0.0, 1.0)
+    best
 }
 
 // ---------------------------------------------------------------------------

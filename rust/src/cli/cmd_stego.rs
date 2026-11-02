@@ -363,7 +363,7 @@ pub(crate) fn handle_embed(
                         bpp,
                         cap.recommended_max_bytes,
                         options.safety.level.as_str(),
-                        options.safety.level.bpp_limit()
+                        cap.safety_bpp_limit
                     );
                 }
             }

@@ -172,8 +172,6 @@ pub fn check_pdf_signature<R: Read + Seek + ?Sized>(
     let overlap = 1024;
     let mut prev_tail = Vec::new();
     let mut buf = vec![0u8; chunk_size];
-    let mut has_byterange = false;
-    let mut has_sig = false;
 
     loop {
         let bytes_read = reader.read(&mut buf)?;
@@ -185,17 +183,12 @@ pub fn check_pdf_signature<R: Read + Seek + ?Sized>(
         window.extend_from_slice(&prev_tail);
         window.extend_from_slice(&buf[..bytes_read]);
 
-        if find_subsequence(&window, b"/ByteRange").is_some() {
-            has_byterange = true;
-        }
-        if find_subsequence(&window, b"/Sig").is_some()
+        let window_has_byterange = has_pdf_name_token(&window, b"/ByteRange");
+        let window_has_sig = has_pdf_name_token(&window, b"/Sig")
             || find_subsequence(&window, b"/Type /Sig").is_some()
-            || find_subsequence(&window, b"/Type/Sig").is_some()
-        {
-            has_sig = true;
-        }
+            || find_subsequence(&window, b"/Type/Sig").is_some();
 
-        if has_byterange && has_sig {
+        if window_has_byterange && window_has_sig {
             reader.seek(SeekFrom::Start(start_pos))?;
             return Ok(Some(
                 "PDF document contains a cryptographic digital signature. Modifying it will invalidate the signature.".into(),
@@ -213,6 +206,26 @@ pub fn check_pdf_signature<R: Read + Seek + ?Sized>(
 
     reader.seek(SeekFrom::Start(start_pos))?;
     Ok(None)
+}
+
+fn has_pdf_name_token(haystack: &[u8], token: &[u8]) -> bool {
+    haystack.windows(token.len() + 1).any(|w| {
+        &w[..token.len()] == token
+            && matches!(
+                w[token.len()],
+                b' ' | b'\t'
+                    | b'\r'
+                    | b'\n'
+                    | 0x0C
+                    | b'/'
+                    | b'['
+                    | b']'
+                    | b'<'
+                    | b'>'
+                    | b'('
+                    | b')'
+            )
+    })
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {

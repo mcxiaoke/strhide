@@ -1318,8 +1318,8 @@ pub fn embed_png_with_stats<'a>(
     let channel_offset = embed_channel(&image);
 
     let plan = SlotPlan::build(&image, &costs, &params, password, domain, spatial)?;
-    let capacity_info =
-        build_png_capacity_info(&image, &plan, &params, cost_model.id(), safety.level)?;
+    let (capacity_info, pool_green, pool_rgb) =
+        build_png_capacity_with_pools(&image, &plan, &params, cost_model.id(), safety.level)?;
     if !plan.header_fits() {
         return Err(StrHideError::General(format!(
             "Carrier capacity insufficient: available {} slots, minimum header requires {} slots",
@@ -1334,8 +1334,6 @@ pub fn embed_png_with_stats<'a>(
 
     // Single-channel body pool first. Small payloads therefore keep the exact
     // layout (and byte-for-byte output) they had before multi-channel existed.
-    let pool_green = plan.count_body_slots(&image, 1, ChannelMode::Green);
-
     // Safety enforcement policy check
     if safety.is_enforced() {
         let recommended_max_bytes = recommended_bytes_for(total_pixels, pool_green, safety.level);
@@ -1368,9 +1366,7 @@ pub fn embed_png_with_stats<'a>(
             if needed <= pool_green {
                 break 'resolve (codec, u, ChannelMode::Green, pool_green);
             }
-            let Some(pool_rgb) =
-                (image.channels >= 3).then(|| plan.count_body_slots(&image, 1, ChannelMode::Rgb))
-            else {
+            let Some(pool_rgb) = pool_rgb else {
                 return Err(StrHideError::General(format!(
                     "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{})",
                     needed,
@@ -1405,8 +1401,7 @@ pub fn embed_png_with_stats<'a>(
         if needed <= pool_green {
             break 'resolve (codec, u, ChannelMode::Green, pool_green);
         }
-        if image.channels >= 3 {
-            let pool_rgb = plan.count_body_slots(&image, 1, ChannelMode::Rgb);
+        if let Some(pool_rgb) = pool_rgb {
             if needed <= pool_rgb {
                 break 'resolve (codec, u, ChannelMode::Rgb, pool_rgb);
             }
@@ -2134,13 +2129,13 @@ pub fn verify_png(
 ///
 /// Shared between embedding and probing so that embedding never has to decode
 /// the carrier or recompute the distortion cost map a second time to report capacity.
-fn build_png_capacity_info(
+fn build_png_capacity_with_pools(
     image: &RawImage,
     plan: &SlotPlan,
     params: &PngParams,
     cost_model_id: &str,
     safety_level: crate::stego::SafetyLevel,
-) -> Result<StegoCapacityInfo, StrHideError> {
+) -> Result<(StegoCapacityInfo, usize, Option<usize>), StrHideError> {
     let w = image.width as usize;
     let h = image.height as usize;
     let total_pixels = w * h;
@@ -2151,10 +2146,11 @@ fn build_png_capacity_info(
     } else {
         0
     };
-    let available_body_slots = match (header_fits, image.channels >= 3) {
-        (false, _) => 0,
-        (true, true) => plan.count_body_slots(image, 1, ChannelMode::Rgb),
-        (true, false) => pool_green,
+    let pool_rgb = (header_fits && image.channels >= 3)
+        .then(|| plan.count_body_slots(image, 1, ChannelMode::Rgb));
+    let available_body_slots = match pool_rgb {
+        Some(rgb) => rgb,
+        None => pool_green,
     };
     let ratio_slots = pool_green;
 
@@ -2183,7 +2179,7 @@ fn build_png_capacity_info(
     let tier_limits = crate::params::SafetyLevel::ALL
         .map(|level| recommended_bytes_for(total_pixels, ratio_slots, level));
 
-    Ok(StegoCapacityInfo {
+    let info = StegoCapacityInfo {
         format: "PNG".into(),
         algorithm: cost_model_id.into(),
         total_elements: total_pixels,
@@ -2203,7 +2199,19 @@ fn build_png_capacity_info(
         safety_bpp_limit: safety_level.bpp_limit(),
         is_estimated: false,
         media_info: Some(MediaInfo::new(image.width, image.height)),
-    })
+    };
+    Ok((info, pool_green, pool_rgb))
+}
+
+fn build_png_capacity_info(
+    image: &RawImage,
+    plan: &SlotPlan,
+    params: &PngParams,
+    cost_model_id: &str,
+    safety_level: crate::stego::SafetyLevel,
+) -> Result<StegoCapacityInfo, StrHideError> {
+    build_png_capacity_with_pools(image, plan, params, cost_model_id, safety_level)
+        .map(|(info, _, _)| info)
 }
 
 /// Probe the embedding capacity of a PNG carrier.

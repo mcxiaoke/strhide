@@ -234,6 +234,7 @@ pub struct ExtractOutcome {
     pub source: Domain,
     /// Set if the other domain also contained hidden data.
     pub also_present: Option<Domain>,
+    pub is_encrypted: bool,
 }
 
 /// The private dialect for both domains, composed.
@@ -588,6 +589,7 @@ impl StrHide {
                 Ok(ExtractOutcome {
                     payload,
                     source: Domain::Structure,
+                    is_encrypted: read_res.is_encrypted,
                     also_present,
                 })
             }
@@ -607,6 +609,8 @@ impl StrHide {
                 Ok(ExtractOutcome {
                     payload,
                     source: Domain::Content,
+                    is_encrypted: opts.password.is_some_and(|p| !p.is_empty())
+                        || self.dialect().stego.secret().is_some(),
                     also_present,
                 })
             }

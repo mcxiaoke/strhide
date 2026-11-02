@@ -40,6 +40,8 @@
 //! eight-value class (`val & 0xF8` unchanged), so the cost must be computed on
 //! class-masked values -- exactly what HILL does, and for the same reason.
 
+use rayon::prelude::*;
+
 use crate::stego::params::PngParams;
 use crate::stego::traits::PngCostModel;
 use crate::stego::wavelet;
@@ -121,9 +123,9 @@ impl PngCostModel for SuniwardCostModel {
             residual_pass(&plane, w, h, &f1, &f2, &mut tmp, &mut residual);
 
             // 1 / (|R| + sigma), in place.
-            for v in residual.iter_mut() {
+            residual.par_iter_mut().for_each(|v| {
                 *v = 1.0 / (v.abs() + sigma);
-            }
+            });
 
             // Suitability: convolve that with |F|, which is separable into
             // `|f1| ⊗ |f2|`. Accumulate straight into the cost map.
@@ -154,9 +156,8 @@ fn residual_pass(
     tmp: &mut [f64],
     out: &mut [f64],
 ) {
-    for y in 0..h {
+    tmp.par_chunks_mut(w).enumerate().for_each(|(y, dst)| {
         let row = &plane[y * w..(y + 1) * w];
-        let dst = &mut tmp[y * w..(y + 1) * w];
         for (x, d) in dst.iter_mut().enumerate() {
             let mut acc = 0.0;
             for (b, &cb) in f2.iter().enumerate() {
@@ -166,22 +167,21 @@ fn residual_pass(
             }
             *d = acc;
         }
-    }
-    out.fill(0.0);
-    for (a, &ca) in f1.iter().enumerate() {
-        if ca == 0.0 {
-            continue;
-        }
-        for y in 0..h {
+    });
+    out.par_chunks_mut(w).enumerate().for_each(|(y, dst_row)| {
+        dst_row.fill(0.0);
+        for (a, &ca) in f1.iter().enumerate() {
+            if ca == 0.0 {
+                continue;
+            }
             let sy = (y as isize - a as isize + wavelet::HALF as isize).clamp(0, h as isize - 1)
                 as usize;
             let src_row = &tmp[sy * w..(sy + 1) * w];
-            let dst_row = &mut out[y * w..(y + 1) * w];
             for (d, &s) in dst_row.iter_mut().zip(src_row) {
                 *d += ca * s;
             }
         }
-    }
+    });
 }
 
 /// `out(y, x) += Σ_{a,b} |f1[a]| |f2[b]| · src(y + a - HALF, x + b - HALF)`.
@@ -202,9 +202,8 @@ fn suitability_pass(
     tmp: &mut [f64],
     out: &mut [f64],
 ) {
-    for y in 0..h {
+    tmp.par_chunks_mut(w).enumerate().for_each(|(y, dst)| {
         let row = &src[y * w..(y + 1) * w];
-        let dst = &mut tmp[y * w..(y + 1) * w];
         for (x, d) in dst.iter_mut().enumerate() {
             let mut acc = 0.0;
             for (b, &cb) in f2.iter().enumerate() {
@@ -214,22 +213,21 @@ fn suitability_pass(
             }
             *d = acc;
         }
-    }
-    for (a, &ca) in f1.iter().enumerate() {
-        let abs_ca = ca.abs();
-        if abs_ca == 0.0 {
-            continue;
-        }
-        for y in 0..h {
+    });
+    out.par_chunks_mut(w).enumerate().for_each(|(y, dst_row)| {
+        for (a, &ca) in f1.iter().enumerate() {
+            let abs_ca = ca.abs();
+            if abs_ca == 0.0 {
+                continue;
+            }
             let sy = (y as isize + a as isize - wavelet::HALF as isize).clamp(0, h as isize - 1)
                 as usize;
             let src_row = &tmp[sy * w..(sy + 1) * w];
-            let dst_row = &mut out[y * w..(y + 1) * w];
             for (d, &s) in dst_row.iter_mut().zip(src_row) {
                 *d += abs_ca * s;
             }
         }
-    }
+    });
 }
 
 #[cfg(test)]

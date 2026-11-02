@@ -324,7 +324,7 @@ impl StegoEngine for JpegEngine {
         } else {
             payload
         };
-        let (bytes, stats) = with_pool(opts.pool.as_ref(), || {
+        let (bytes, stats, capacity) = with_pool(opts.pool.as_ref(), || {
             crate::stego::jpeg::embed_jpeg_with_stats(
                 carrier,
                 eff_payload,
@@ -338,7 +338,7 @@ impl StegoEngine for JpegEngine {
                 &opts.control,
             )
         })?;
-        Ok(EmbedOutput::with_stats(bytes, stats))
+        Ok(EmbedOutput::with_capacity_and_stats(bytes, capacity, stats))
     }
 
     fn extract(

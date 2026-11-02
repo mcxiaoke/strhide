@@ -398,6 +398,32 @@ fn scan_block(
     Ok(true)
 }
 
+/// Parse only the EBML / Segment header and Track configuration to locate
+/// the HEVC parameter sets, without scanning Clusters or media blocks.
+pub(crate) fn parse_mkv_parameter_sets(bytes: &[u8]) -> Result<Vec<&[u8]>> {
+    let ebml = read_element(bytes, 0, bytes.len())
+        .ok_or(HevcError::ContainerMalformed("not an EBML file"))?;
+    if ebml.id != ID_EBML {
+        return Err(HevcError::ContainerMalformed("missing EBML header"));
+    }
+    if let Some(doc_type) =
+        child(bytes, &ebml, ID_DOC_TYPE).and_then(|e| bytes.get(e.payload..e.end()))
+        && !matches!(doc_type, b"matroska" | b"webm")
+    {
+        return Err(HevcError::Unsupported(
+            "EBML DocType is neither matroska nor webm",
+        ));
+    }
+
+    let segment = Children::new(bytes, ebml.end(), bytes.len())
+        .find(|e| e.id == ID_SEGMENT)
+        .ok_or(HevcError::ContainerMalformed("missing Segment element"))?;
+
+    let track = find_hevc_track(bytes, &segment)?;
+    let (parameter_sets, _length_size) = parse_hvcc_record(track.codec_private)?;
+    Ok(parameter_sets)
+}
+
 /// Parse a Matroska file and locate the HEVC parameter sets and every slice span.
 pub(crate) fn parse_mkv_targets(bytes: &[u8]) -> Result<MkvHevcTarget<'_>> {
     let ebml = read_element(bytes, 0, bytes.len())
