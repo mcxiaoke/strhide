@@ -219,11 +219,28 @@ impl HostAdapter for PngAdapter {
                 {
                     // A valid trailer alone is not enough: private chunks from
                     // other tools (or an old envelope's leftover bytes) can
-                    // carry one that points somewhere else entirely. The
-                    // trailer must describe *this* chunk, exactly like RIFF
-                    // verifies its `SHRD` chunk.
-                    if trailer.ube_offset == chunk_data_offset && trailer.ube_total_size == length {
-                        return Ok(Some((chunk_data_offset, length, "chunk".into())));
+                    // carry one that points somewhere else entirely.
+                    // When content-domain steganography embeds payload into the
+                    // preceding IDAT chunks, re-compression may shift the physical
+                    // file offset of this chunk. We accept the shifted chunk if
+                    // its declared size matches and its data begins with a valid header magic.
+                    if trailer.ube_total_size == length {
+                        let is_exact = trailer.ube_offset == chunk_data_offset;
+                        let is_valid_shifted = if !is_exact {
+                            stego_in.seek(SeekFrom::Start(chunk_data_offset))?;
+                            let mut hdr = [0u8; 8];
+                            if stego_in.read_exact(&mut hdr).is_ok() {
+                                hdr == crate::params::STANDARD_HEADER_MAGIC
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                        if is_exact || is_valid_shifted {
+                            return Ok(Some((chunk_data_offset, length, "chunk".into())));
+                        }
                     }
                 }
             }

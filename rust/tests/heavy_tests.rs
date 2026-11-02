@@ -13,6 +13,8 @@
 
 #[path = "heavy/heavy_algorithm_matrix.rs"]
 pub mod heavy_algorithm_matrix;
+#[path = "heavy/heavy_coexistence.rs"]
+pub mod heavy_coexistence;
 #[path = "heavy/heavy_media.rs"]
 pub mod heavy_media;
 #[path = "heavy/heavy_stego.rs"]
