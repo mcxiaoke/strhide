@@ -560,12 +560,21 @@ pub(crate) fn refresh_mkv_crcs(original: &[u8], out: &mut [u8]) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn encode_vint(val: u64) -> Vec<u8> {
+        for len in 1usize..=8 {
+            let marker = 1u64 << (7 * len);
+            if val < marker - 1 {
+                let v = marker | val;
+                return v.to_be_bytes()[8 - len..].to_vec();
+            }
+        }
+        panic!("value too large for EBML VINT");
+    }
+
     /// Build a minimal EBML element: id bytes + size VINT + payload.
     fn element(id: &[u8], payload: &[u8]) -> Vec<u8> {
         let mut out = id.to_vec();
-        out.extend_from_slice(
-            &crate::structure::adapters::ebml::encode_vint(payload.len() as u64).unwrap(),
-        );
+        out.extend_from_slice(&encode_vint(payload.len() as u64));
         out.extend_from_slice(payload);
         out
     }

@@ -26,6 +26,25 @@ cargo test local_ --all-features -- --ignored  # 单独运行本地快速批量�
 # 下面的heavy test 可选运行，平时小改动可以不运行
 cargo test heavy_ --all-features -- --ignored  # 单独运行耗时评测与矩阵测试（约 2 分钟）
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings   # 提交前格式化并修复所有 lint
+python ../scripts/import_lint.py       # 架构依赖边界检查（CI quality 必跑项，防止违规跨层引用）
+```
+
+### 隐写引擎全量并发压力测试 (Stress Tests)
+
+测试各多媒体内容隐写引擎在多线程（默认 8 线程）、多轮密钥旋转、动态真随机载荷（SHA-256 往返校验）及多档填充深度（20%、40%、80%、100%）下的并发稳定性与格式保持性：
+
+```bash
+cd rust
+cargo run --release --all-features --example jpg_stress   # JPEG 引擎：覆盖 uerd, juniward, jmipod 全量算法
+cargo run --release --all-features --example png_stress   # PNG 引擎：覆盖 hill, suniward, mipod 全量算法
+cargo run --release --all-features --example hevc_stress  # HEVC 引擎：覆盖 MOV/MP4 视频与 HEIC/HEIF 图像
+cargo run --release --all-features --example audio_stress # Audio 引擎：覆盖 WAV/FLAC PCM 采样域隐写
+```
+
+### 架构依赖边界检查 (CI Quality)
+
+```bash
+python scripts/import_lint.py   # 与 CI quality 一致，检查 stego !-> structure 等分层解耦红线
 ```
 
 ### 桌面端开发与测试流程：`gui/`

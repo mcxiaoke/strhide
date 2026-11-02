@@ -50,7 +50,8 @@ const VARIANCE_FLOOR: f64 = 0.01;
 /// Fisher-information smoothing window from Section VI-F.
 const FI_SMOOTH_WINDOW: usize = 7;
 /// Reference payload in bits per pixel used to calibrate `lambda`.
-const DEFAULT_TARGET_BPP: f64 = 0.20;
+/// Must be quantized to `f32` so embed and extract compute bit-identical costs.
+const DEFAULT_TARGET_BPP: f64 = 0.20f32 as f64;
 
 pub struct MipodCostModel;
 

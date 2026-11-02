@@ -30,7 +30,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use rand::RngExt;
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use strhide::core::payload::Payload;
 use strhide::errors::StrHideError;
 use strhide::stego::prng::deterministic_payload;
@@ -156,6 +158,7 @@ fn parse_config() -> Config {
 }
 
 fn main() -> ExitCode {
+    let total_started = Instant::now();
     let config = parse_config();
 
     let paths = match collect_audio(&config.path) {
@@ -187,7 +190,7 @@ fn main() -> ExitCode {
         if config.fixed_payload {
             "fixed"
         } else {
-            "deterministic-seeded"
+            "random (SHA-256 verified)"
         },
     );
 
@@ -414,11 +417,29 @@ fn main() -> ExitCode {
         for failure in setup_failures.iter().chain(failures.iter()) {
             println!("  FAIL {failure}");
         }
+        println!(
+            "\nTotal elapsed time: {:.2}s",
+            total_started.elapsed().as_secs_f64()
+        );
         ExitCode::FAILURE
     } else {
         println!("\nAll tested carriers passed 100%!");
+        println!(
+            "Total elapsed time: {:.2}s",
+            total_started.elapsed().as_secs_f64()
+        );
         ExitCode::SUCCESS
     }
+}
+
+fn sha256_digest(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize().into()
+}
+
+fn sha256_hex(digest: &[u8; 32]) -> String {
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// One embed/extract round with configurable password and payload.
@@ -429,18 +450,21 @@ fn run_round(cover: &[u8], job: &Job, round: usize, config: &Config) -> Round {
         format!(
             "{PASSWORD_PREFIX}-{:.0}-{round}-{}",
             job.fill * 100.0,
-            job.path
-                .file_name()
-                .map(|n| n.to_string_lossy().len())
-                .unwrap_or(0)
+            rand::rng().random::<u32>()
         )
     };
-    let seed = if config.fixed_payload {
-        seed_for(cover, job, 0)
+    let (payload, freshness) = if config.fixed_payload {
+        let seed = seed_for(cover, job, round);
+        (
+            deterministic_payload(job.bytes, seed),
+            Freshness::Seeded(seed_bytes(seed)),
+        )
     } else {
-        seed_for(cover, job, round)
+        let mut p = vec![0u8; job.bytes];
+        rand::rng().fill(&mut p[..]);
+        (p, Freshness::Random)
     };
-    let payload = deterministic_payload(job.bytes, seed);
+    let input_sha256 = sha256_digest(&payload);
 
     let started = Instant::now();
     let stego = match embed_carrier(
@@ -448,7 +472,7 @@ fn run_round(cover: &[u8], job: &Job, round: usize, config: &Config) -> Round {
         &Payload::bytes(&payload),
         &EmbedOptions {
             password: Some(&password),
-            freshness: Freshness::Seeded(seed_bytes(seed)),
+            freshness,
             ..EmbedOptions::default()
         },
     ) {
@@ -493,7 +517,8 @@ fn run_round(cover: &[u8], job: &Job, round: usize, config: &Config) -> Round {
     };
     let extract_ms = started.elapsed().as_millis();
 
-    if back != payload {
+    let back_sha256 = sha256_digest(&back);
+    if input_sha256 != back_sha256 || back != payload {
         let at = back
             .iter()
             .zip(payload.iter())
@@ -504,9 +529,11 @@ fn run_round(cover: &[u8], job: &Job, round: usize, config: &Config) -> Round {
             extract_ms,
             ok: false,
             detail: format!(
-                "payload mismatch at byte {at} ({} vs {} bytes)",
+                "hash/payload mismatch at byte {at} (len {} vs {}, sha256 {:.16}.. vs {:.16}..)",
                 back.len(),
-                payload.len()
+                payload.len(),
+                sha256_hex(&back_sha256),
+                sha256_hex(&input_sha256),
             ),
         };
     }
@@ -521,19 +548,29 @@ fn run_round(cover: &[u8], job: &Job, round: usize, config: &Config) -> Round {
 
 /// A wrong password must produce an error, never a different payload.
 fn wrong_password_is_rejected(cover: &[u8], job: &Job, config: &Config) -> Result<(), String> {
-    let seed = seed_for(cover, job, 0);
-    let payload = deterministic_payload(job.bytes.clamp(1, 64), seed);
-    let right_pw = if config.fixed_password {
-        FIXED_PASSWORD
+    let (payload, freshness) = if config.fixed_payload {
+        let seed = seed_for(cover, job, 0);
+        (
+            deterministic_payload(job.bytes.clamp(1, 64), seed),
+            Freshness::Seeded(seed_bytes(seed)),
+        )
     } else {
-        "stress-right"
+        let mut p = vec![0u8; job.bytes.clamp(1, 64)];
+        rand::rng().fill(&mut p[..]);
+        (p, Freshness::Random)
     };
+    let right_pw = if config.fixed_password {
+        FIXED_PASSWORD.to_string()
+    } else {
+        format!("stress-right-{}", rand::rng().random::<u32>())
+    };
+    let wrong_pw = format!("{right_pw}-wrong");
     let stego = embed_carrier(
         cover,
         &Payload::bytes(&payload),
         &EmbedOptions {
-            password: Some(right_pw),
-            freshness: Freshness::Seeded(seed_bytes(seed)),
+            password: Some(&right_pw),
+            freshness,
             ..EmbedOptions::default()
         },
     )
@@ -541,7 +578,7 @@ fn wrong_password_is_rejected(cover: &[u8], job: &Job, config: &Config) -> Resul
     match extract_carrier(
         &stego,
         &ExtractOptions {
-            password: Some("stress-wrong-password-never-matches"),
+            password: Some(&wrong_pw),
             ..ExtractOptions::default()
         },
     ) {
