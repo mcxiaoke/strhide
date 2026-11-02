@@ -1,6 +1,6 @@
 # strhide 线格式规范（Wire Specification）
 
-> 适用版本：crate `strhide` 0.7.x（Rust 实现）。
+> 适用版本：crate `strhide` 0.8.x（Rust 实现，当前 0.8.3）。
 > 本文是 strhide 隐写字节布局的**权威规范**，内容按当前源码核对：结构域 UBE 见 `src/envelope.rs`、`src/engine.rs`、`src/crypto.rs`；内容域微信封见 `src/stego/`。
 > 配套文档：[ARCHITECTURE.md](./ARCHITECTURE.md)（模块职责与数据流转）。
 
@@ -684,9 +684,9 @@ const ENGINE: StrHide = StrHide::new().with_profile(
               不能（>255B 或必须固定位置）→ 提升 major，超块不动，正文前置声明新布局
 ```
 
-### 13.11 CABAC 旁路域（HEIF / HEIC、HEVC Annex-B 与 MP4 / MOV，Scheme C）：线格式与协议规范
+### 13.11 CABAC 旁路域（HEIF / HEIC、HEVC Annex-B、MP4 / MOV 与 MKV，Scheme C）：线格式与协议规范
 
-Scheme C 专为 H.265/HEVC 压缩域原位隐写设计，直接在压缩比特流（NAL 单元内部的 CABAC 旁路区间）中调制高频变换系数的符号位，具备**零字节膨胀（$\Delta = 0$）**、**严格语法合规**与**极佳抗检鲁棒性**。
+Scheme C 专为 H.265/HEVC 压缩域原位隐写设计，直接在压缩比特流（NAL 单元内部的 CABAC 旁路区间）中调制高频变换系数的符号位，具备**零字节膨胀（$\Delta = 0$）**、**严格语法合规**与**极佳抗检鲁棒性**。支持 MP4 / MOV / MKV (Matroska) 视频容器、HEIF / HEIC 图像项以及原始 Annex-B 裸流。在 MKV 容器中，EBML 与 Segment 树的 CRC-32 校验和按 innermost-first 深度优先刷新，且未知大小 Cluster 会在遇到 Level-1 元素时精确截断。
 
 #### 13.11.1 微信封布局（40 字节固定头部 + 载荷）
 
@@ -829,6 +829,22 @@ recommended  = min(message_bits(usable_slots) / 8 - header, max_raw)
 
 ---
 
+### 13.12 音频内容域（WAV PCM 与 FLAC Residual）：线格式与协议规范
+
+音频引擎针对非压缩线性 PCM 采样与无损压缩音频残差流提供内容自适应隐写：
+
+#### 13.12.1 WAV PCM 采样域隐写（`wav_pcm`）
+- **载体对象**：16-bit 与 24-bit 线性 PCM 音频（RIFF/WAVE 容器）。
+- **调制机制**：采用听觉感知掩蔽代价模型，对采样值进行三元 $\pm 1$ 最低有效位（LSB）匹配；结合 STC 校验矩阵编码，最小化音频失真与可闻噪声。
+- **头部与正文**：前 512 槽位承载 40 字节微头，剩余槽位经置换后承载密文正文。
+
+#### 13.12.2 FLAC 预测残差域隐写（`flac_residual`）
+- **载体对象**：标准 FLAC 音频帧（16-bit / 24-bit，位深 >24 或残差槽位不足 512 的载体在前置检查中安全拒绝）。
+- **残差调制与零膨胀**：解析定域（Fixed）与 LPC 多项式预测子帧，在保持 Rice/熵编码残差码字长度不变（Codeword-Length Preserving）的前提下对残差数据进行原地调制，实现**严格零字节文件膨胀（$\Delta = 0$）**。
+- **完整性与短路校验**：利用 `FlacCapacityView` 零拷贝遍历残差槽位；在补偿应用后若未修改影响解码的样本，通过 `pcm_md5` 对比实现瞬时短路跳过全量重解码；严格约束每通道样本漂移预算。
+
+---
+
 ## 14. 常量速查表
 
 ### 14.1 结构域
@@ -893,7 +909,8 @@ recommended  = min(message_bits(usable_slots) / 8 - header, max_raw)
 | 读侧能力 \ 写侧产物 | 是否可读 | 结果 |
 |---|---|---|
 | UBE v2.2（当前，compact meta） | ✅ | 正常读取 |
-| Scheme C（HEIF/HEIC、HEVC Annex-B、MP4/MOV 原位 CABAC） | ✅ | v0.7.0 起原生支持（MP4/MOV 自 v0.7.1） |
+| Scheme C（HEIF/HEIC、HEVC Annex-B、MP4/MOV、MKV 原位 CABAC） | ✅ | 原生支持（MKV 支持在 v0.8.x 引入） |
+| Audio（WAV PCM LSB 与 FLAC 残差隐写） | ✅ | v0.8.x 起原生支持（content-audio 特性） |
 | UBE v2.2，`FLAG_COMPACT_META` 未置（旧 JSON 元数据） | ❌ | 报不支持的元数据布局 |
 | pre-v2（v0.2/v0.3，ASCII 魔数、明文/JSON 元数据） | ❌ | 报告"无隐藏数据"（旧 ASCII 魔数与明文布局已移除） |
 | 版本号 ≠ `0x02` | ❌ | 报不支持的信封版本 |

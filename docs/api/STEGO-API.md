@@ -17,8 +17,8 @@
 
 | 层 | 内容 | 稳定性承诺 |
 |---|---|---|
-| **稳定面 Stable** | 统一入口 `stego::{embed_carrier, embed_carrier_with_dialect, extract_carrier, extract_carrier_with_dialect, extract_carrier_payload, inspect_carrier[_with_dialect], verify_carrier[_with_dialect], probe_carrier_capacity[_with_dialect]}`；选项 `EmbedOptions` / `ProbeOptions` / `ExtractOptions` / `InspectOptions` / `VerifyOptions` / `StegoTuning` / `SafetyPolicy` / `SafetyLevel` / `SafetyEnforcement` / `PngParams` / `JpegParams` / `StegoCodec` / `ExtractParams` / `Freshness`；方言 `params::StegoProfile`；结果 `StegoCapacityInfo` / `StegoHeaderInfo` / `StegoVerifyResult` / `EmbedOutput` / `core::media::MediaInfo`；格式身份 `format::{JpegFormatProfile, PngFormatProfile, HevcFormatProfile, GridRule, CipherSuite, SUITES, DEFAULT_JPEG_FORMAT, OFFICIAL_PNG_FORMAT, DEFAULT_HEVC_FORMAT}`；`registry::CostModelRegistry`；`traits::{PngCostModel, JpegCostModel, JpegGeometry}`；`io::{embed_carrier_file, extract_carrier_file, extract_carrier_file_payload}`；`facade::StrHide::stego()` | 破坏性变更只随 major |
-| **专家面 Expert** | 域引擎入口 `png::engine::{embed_png, extract_png, probe_png_capacity}`、`jpeg::engine::{embed_jpeg, extract_jpeg, probe_jpeg_capacity}`、`heif::*`、`hevc::{embed_hevc, extract_hevc, probe_hevc_capacity}`；图像编解码 `png::engine::{decode_png, encode_png, RawImage, PngChunk}`；模型实现 `png::cost::*`、`jpeg::cost::*` | 小版本可演进，CHANGES 公告 |
+| **稳定面 Stable** | 统一入口 `stego::{embed_carrier, embed_carrier_with_dialect, extract_carrier, extract_carrier_with_dialect, extract_carrier_payload, inspect_carrier[_with_dialect], verify_carrier[_with_dialect], probe_carrier_capacity[_with_dialect], list_stego_algorithms, algorithms_for_format}`；选项 `EmbedOptions` / `ProbeOptions` / `ExtractOptions` / `InspectOptions` / `VerifyOptions` / `StegoTuning` / `SafetyPolicy` / `SafetyLevel` / `SafetyEnforcement` / `PngParams` / `JpegParams` / `StegoCodec` / `ExtractParams` / `Freshness`；方言 `params::StegoProfile`；结果 `StegoCapacityInfo` / `StegoHeaderInfo` / `StegoVerifyResult` / `EmbedOutput` / `StegoAlgorithmInfo` / `core::media::MediaInfo`；格式身份 `format::{JpegFormatProfile, PngFormatProfile, HevcFormatProfile, GridRule, CipherSuite, SUITES, DEFAULT_JPEG_FORMAT, OFFICIAL_PNG_FORMAT, DEFAULT_HEVC_FORMAT}`；`registry::CostModelRegistry`；`traits::{PngCostModel, JpegCostModel, JpegGeometry}`；`io::{embed_carrier_file, extract_carrier_file, extract_carrier_file_payload}`；`facade::StrHide::stego()` | 破坏性变更只随 major |
+| **专家面 Expert** | 域引擎入口 `png::engine::{embed_png, extract_png, probe_png_capacity}`、`jpeg::engine::{embed_jpeg, extract_jpeg, probe_jpeg_capacity}`、`heif::*`、`hevc::{embed_hevc, extract_hevc, probe_hevc_capacity}`、`audio::{embed_audio, extract_audio, probe_audio_capacity}`；图像/音频编解码与解析；模型实现 `png::cost::*`、`jpeg::cost::*`、`audio::flac::*`、`audio::wav::*` | 小版本可演进，CHANGES 公告 |
 | **内部面 Internal**（`#[doc(hidden)]`，无承诺） | `coding`、`envelope`、`header`、`prng`、`wavelet`、`jpeg::{dht, geometry, header_v3, v3_layout}`、`hevc::{bitstream, error, heif_boxes, slot, sniff}` | 路径可达但不入文档；随时可变 |
 
 **命名规范**：按载体格式命名（Jpeg / Png / Hevc 前缀），参数类型 `XxxParams`、
@@ -65,7 +65,7 @@ use strhide::stego::{
 let embed = EmbedOptions {
     password: Some("pw"),
     safety: SafetyPolicy::new(SafetyLevel::High, SafetyEnforcement::Advisory),
-    tuning: StegoTuning::Png { algorithm: SpatialAlgorithm::Hill, params: PngParams::default() },
+    tuning: StegoTuning::Png { model: SpatialAlgorithm::Hill, params: PngParams::default() },
     ..Default::default()
 };
 
@@ -81,9 +81,9 @@ let probe = ProbeOptions { tuning: embed.tuning.clone(), ..Default::default() };
 ```rust
 pub enum StegoTuning {
     #[default] Auto,
-    Png  { algorithm: SpatialAlgorithm, params: PngParams },
-    Jpeg { algorithm: JpegAlgorithm,    params: JpegParams },
-    Hevc { mode: HevcMode,              params: HevcParams },
+    Png  { model: SpatialAlgorithm, params: PngParams },
+    Jpeg { model: JpegAlgorithm,    params: JpegParams },
+    Hevc { mode: HevcMode,          params: HevcParams },
 }
 ```
 
@@ -142,7 +142,33 @@ pub const DIALECT: Dialect = Dialect::new()
 
 ---
 
-## 4. 扩展点
+## 4. 算法动态自省与元数据 API
+
+核心库提供算法元数据自省机制（`StegoAlgorithmInfo`），消除前端与调用方的硬编码：
+
+```rust
+use strhide::stego::{list_stego_algorithms, algorithms_for_format, StegoAlgorithmInfo};
+use strhide::formats::FileFormat;
+
+// 获取全量算法列表（覆盖 PNG, JPEG, HEVC, Audio）
+let all_algos: Vec<StegoAlgorithmInfo> = list_stego_algorithms();
+
+// 获取适用于特定格式的算法（如 PNG -> HILL, S-UNIWARD, MiPOD）
+let png_algos = algorithms_for_format(FileFormat::Png);
+for info in png_algos {
+    println!("{}: {} ({})", info.id, info.name, info.desc);
+}
+```
+
+支持算法矩阵：
+- **PNG**: `hill` (默认), `suniward`, `mipod`
+- **JPEG**: `uerd` (默认), `juniward`, `jmipod`
+- **HEVC**: `hevc` (CABAC 旁路符号位原位隐写，支持 MP4, MOV, MKV, HEIF/HEIC, Annex-B)
+- **Audio**: `wav_pcm` (WAV PCM LSB 匹配), `flac_residual` (FLAC 预测残差多项式匹配)
+
+---
+
+## 5. 扩展点
 
 - **自定义代价模型**：实现 `traits::PngCostModel` / `JpegCostModel`，
   经专家面域引擎入口以 `&dyn` 传入（见 `examples/stego_profile.rs`）。
@@ -155,7 +181,7 @@ pub const DIALECT: Dialect = Dialect::new()
 
 ---
 
-## 5. CLI 映射（命令 → 库入口）
+## 6. CLI 映射（命令 → 库入口）
 
 | 命令 | 库入口 | 说明 |
 |---|---|---|
@@ -180,7 +206,7 @@ algorithm      = "auto"
 
 ---
 
-## 6. 守卫
+## 7. 守卫
 
 - `tests/cli_help_guard.rs`：localize（en/zh）后全命令树每个可见参数 help
   非空——stego 参数 help 的事实源在 i18n 消息表，条目缺失即测试失败。

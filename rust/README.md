@@ -1,8 +1,8 @@
 # strhide (Rust)
 
-Rust implementation of **strhide** — smart, format-preserving, lossless data hiding and content-adaptive steganography. Compiles to a high-performance library crate (`strhide`) and static CLI binaries.
+Rust implementation of **strhide** — format-preserving, lossless data hiding and content-adaptive steganography. Compiles to a library crate (`strhide`) and static CLI binaries.
 
-See the [root README](../README.md) for project-wide architecture, and [README.zh.md](../README.zh.md) for the Chinese documentation.
+See the [root README](../README.md) for project-wide architecture, and [README.zh.md](../README.zh.md) for the Chinese overview.
 
 ---
 
@@ -16,7 +16,8 @@ See the [root README](../README.md) for project-wide architecture, and [README.z
   - [The Facade: `StrHide`](#the-facade-strhide)
   - [Private Dialects & Custom Profiles](#private-dialects--custom-profiles)
   - [Structure Domain (Container Hiding & 100% Bit-Exact Restore)](#structure-domain-container-hiding--100-bit-exact-restore)
-  - [Content Domain (Adaptive Image & Video Steganography)](#content-domain-adaptive-image--video-steganography)
+  - [Content Domain (Adaptive Image, Video, & Audio Steganography)](#content-domain-adaptive-image-video--audio-steganography)
+  - [Dynamic Algorithm Discovery](#dynamic-algorithm-discovery)
   - [Diagnostics: Cross-Domain Inspection & Verification](#diagnostics-cross-domain-inspection--verification)
   - [Steganalysis Domain (Black-Box Detection)](#steganalysis-domain-black-box-detection)
   - [Configuration File Management](#configuration-file-management)
@@ -35,44 +36,43 @@ See the [root README](../README.md) for project-wide architecture, and [README.z
 
 ### Design Philosophy
 - **Library defaults are lightweight**: `default = ["structure", "content", "analysis"]`.
-- `cargo add strhide` **never** drags in heavy CLI or terminal dependencies like `clap`, `rpassword`, or `base64`.
-- All features are strictly additive and compile without warnings under `-D warnings`.
+- `cargo add strhide` does not drag in CLI or terminal dependencies (`clap`, `rpassword`, `base64`).
+- All features compile without warnings under `-D warnings`.
 
 ### Feature Matrix
 
 | Feature | Description | Extra Dependencies |
-| --- | --- | --- |
-| **`default`** | Full library capabilities: both domains + steganalysis | — |
+| :--- | :--- | :--- |
+| **`default`** | Full library capabilities: structure + content + analysis | — |
 | `core-io` | Atomic filesystem commit & timestamp preservation | `filetime` |
-| **`structure-base`** | Container hiding for PNG, JPEG, MP4, ZIP, PDF, PE slack/overlay | `serde_json`, `core-io` |
-| **`structure-pe`** | Adds x86/x64 instruction substitution (`pe_codebits`) | `iced-x86`, `structure-base` |
+| **`structure-base`** | Container hiding for PNG, JPEG, MP4, WAV, MKV, ZIP (`.zip`, `.jar`, `.docx`, `.xlsx`, `.pptx`), PDF, PE slack/overlay | `serde_json`, `core-io` |
+| **`structure-pe`** | Adds x86/x64 instruction substitution (`pe_codebits`) via iced-x86 | `iced-x86`, `structure-base` |
 | **`structure`** | Meta-feature enabling the full structure domain | `structure-base`, `structure-pe` |
 | `content-base` | Steganography foundation: Rayon thread pool, cost model traits, generic STC | `rayon`, `core-io` |
-| **`content-png`** | Spatial image steganography (HILL, S-UNIWARD, ternary ±1 matching) | `content-base` |
-| **`content-jpeg`** | DCT frequency domain image steganography (UERD, ternary STC) | `dct-io`, `content-base` |
-| **`content-hevc`** | H.265/HEVC CABAC bypass sign-bit steganography (Annex-B & MP4/MOV bitstreams) | `oxideav-h265`, `rusty_h265`, `content-base` |
+| **`content-png`** | Spatial image steganography (HILL, S-UNIWARD, MiPOD) | `content-base` |
+| **`content-jpeg`** | DCT frequency domain image steganography (UERD, J-UNIWARD, J-MiPOD) | `dct-io`, `content-base` |
+| **`content-hevc`** | H.265/HEVC CABAC bypass sign-bit steganography (MP4, MOV, MKV, Annex-B) | `oxideav-h265`, `rusty_h265`, `content-base` |
+| **`content-audio`**| Audio steganography: WAV PCM sample domain & FLAC prediction residual domain | `content-base` |
 | **`content-heif-bridge`**| HEIF/HEIC container & thumbnail transcoding bridge | `content-hevc`, `content-png`, `content-jpeg` |
-| **`content`** | Meta-feature enabling all content steganography engines | `content-png`, `content-jpeg`, `content-hevc`, `content-heif-bridge` |
+| **`content`** | Meta-feature enabling all content steganography engines | `content-png`, `content-jpeg`, `content-hevc`, `content-audio`, `content-heif-bridge` |
 | **`analysis`** | Black-box steganalysis (JPEG calibrated DCT `dct:calibration`, UBE envelopes) | `jpeg-decoder`, `dct-io`, `structure` |
 | **`config`** | TOML configuration file support (`strhide.toml`, user/system configs) | `toml` |
 | **`cli`** | Command-line interface binaries (`sth`, `strhide`, `sthc`, `sths`, `sthv`) | `clap`, `rpassword`, `base64`, `config`, all domains |
 
 ### Adding strhide as a Dependency
 
-Choose the feature set suited for your deployment:
-
 ```toml
-# 1. Full library (default: structure + content + analysis; no CLI dependencies)
+# 1. Full library (default: structure + content + analysis; zero CLI dependencies)
 strhide = "0.8"
 
-# 2. Minimal container/structural hiding (lightweight, zero disassembly dependency)
+# 2. Container/structural hiding only (lightweight, zero disassembly dependency)
 strhide = { version = "0.8", default-features = false, features = ["structure-base"] }
 
-# 3. Structural hiding including PE code substitution
-strhide = { version = "0.8", default-features = false, features = ["structure"] }
-
-# 4. Pure image steganography (PNG + JPEG)
+# 3. Image steganography only (PNG + JPEG)
 strhide = { version = "0.8", default-features = false, features = ["content-png", "content-jpeg"] }
+
+# 4. Audio steganography only (WAV + FLAC)
+strhide = { version = "0.8", default-features = false, features = ["content-audio"] }
 
 # 5. Steganalysis & carrier forensics only
 strhide = { version = "0.8", default-features = false, features = ["analysis"] }
@@ -99,7 +99,7 @@ use strhide::prelude::*;
 
 ### The Facade: `StrHide`
 
-[`StrHide`] is cheap, thread-safe, and implements `Copy`. It binds:
+[`StrHide`] is thread-safe and implements `Copy`. It binds:
 1. One **`Dialect`** (the private deployment keys and wire identities).
 2. One **`LocalParams`** (writer baseline: chunk sizes, compression, rejection policies).
 
@@ -132,7 +132,7 @@ fn main() -> Result<(), strhide::errors::StrHideError> {
     assert_eq!(read_res.data, payload);
 
     // Restore original carrier bytes (bit-exact check against recorded SHA-256)
-    let (restored_bytes, _) = engine.structure().remove_bytes(&stego_bytes, Some("vault-pass"))?;
+    let (restored_bytes, _) = engine.structure().restore_bytes(&stego_bytes, Some("vault-pass"))?;
     assert_eq!(restored_bytes, cover_png);
 
     Ok(())
@@ -143,9 +143,9 @@ fn main() -> Result<(), strhide::errors::StrHideError> {
 
 ### Private Dialects & Custom Profiles
 
-By default, without a user password, carriers are encrypted under strhide's built-in public constants so that official binaries can interoperate. 
+By default, carriers without a user password are encrypted under strhide's built-in public key constants so that official binaries can interoperate. 
 
-For closed environments, you can define a **private dialect** at compile-time with **zero runtime cost**:
+For isolated environments, you can define a **private dialect** at compile-time with **zero runtime cost**:
 
 ```rust
 use strhide::facade::{Dialect, StrHide};
@@ -162,7 +162,7 @@ const ENGINE: StrHide = StrHide::new().with_dialect(
 
 ### Structure Domain (Container Hiding & 100% Bit-Exact Restore)
 
-The structure domain embeds payloads into container structures (e.g. PNG private ancillary chunks, JPEG APP15 segments, MP4 UUID boxes, ZIP pre-central-directory, PDF incremental revisions, PE slack/overlay/codebits).
+The structure domain embeds payloads into container structures (e.g. PNG private chunks, JPEG COM segments, MP4/MOV UUID boxes, ZIP pre-central-directory, PDF incremental revisions, PE slack/overlay/codebits).
 
 ```rust
 use std::path::Path;
@@ -177,7 +177,7 @@ fn run_structure() -> Result<(), strhide::errors::StrHideError> {
     let write_opts = WriteOptions {
         password: Some("my-password"),
         password_hint: Some("company project codename"),
-        stealth: false,         // Set true for plausible deniability (header magics derived from password)
+        stealth: false,         // Set true for plausible deniability (derived headers)
         output_path: Some(Path::new("report-out.pdf")),
         ..WriteOptions::default()
     };
@@ -196,7 +196,7 @@ fn run_structure() -> Result<(), strhide::errors::StrHideError> {
         output_path: Some(Path::new("report-restored.pdf")),
         ..RestoreOptions::default()
     };
-    engine.structure().remove_file(Path::new("report-out.pdf"), &restore_opts)?;
+    engine.structure().restore_file(Path::new("report-out.pdf"), &restore_opts)?;
 
     // Byte-for-byte identity guaranteed:
     assert_eq!(std::fs::read(carrier)?, std::fs::read("report-restored.pdf")?);
@@ -206,55 +206,54 @@ fn run_structure() -> Result<(), strhide::errors::StrHideError> {
 
 ---
 
-### Content Domain (Adaptive Image & Video Steganography)
+### Content Domain (Adaptive Image, Video, & Audio Steganography)
 
-The content domain modulates pixel values, DCT frequency coefficients, or H.265/HEVC CABAC bypass sign bits according to distortion cost models (HILL, UERD, Scheme C):
+The content domain modulates pixel values, DCT frequency coefficients, CABAC bypass sign bits, or audio samples/residuals according to distortion cost models:
 
-- **PNG**: Spatial domain HILL / S-UNIWARD with ternary $\pm 1$ matching constrained within eight-value classes (`val & 0xF8`) to evade SPA/RS detectors.
-- **JPEG**: DCT frequency domain UERD / J-UNIWARD with ternary STC and fixed-grid AC slots.
-- **HEIF / HEIC / HEVC**: CABAC bypass sign-bit steganography with EPB (anti-emulation) collision evasion, yielding **zero file size expansion** ($\Delta = 0$).
+- **PNG**: Spatial domain HILL / S-UNIWARD / MiPOD with ternary $\pm 1$ matching constrained within eight-value classes (`val & 0xF8`).
+- **JPEG**: DCT frequency domain UERD / J-UNIWARD / J-MiPOD with ternary STC and fixed-grid AC slots.
+- **HEVC / H.265**: CABAC bypass sign-bit steganography with anti-emulation byte (EPB) collision evasion, yielding **zero file size expansion** ($\Delta = 0$) across MP4, MOV, MKV, and HEIC/HEIF carriers.
+- **Audio (WAV & FLAC)**: WAV PCM sample-domain LSB matching, and FLAC residual prediction error steganography preserving Rice codeword lengths.
 
 ```rust
-use std::path::Path;
+use strhide::core::payload::Payload;
 use strhide::facade::StrHide;
-use strhide::stego::{EmbedOptions, ExtractOptions, ProbeOptions, SafetyLevel, SafetyPolicy};
+use strhide::stego::{
+    EmbedOptions, ExtractOptions, ProbeOptions, SafetyEnforcement, SafetyLevel,
+    SafetyPolicy, SpatialAlgorithm, StegoTuning, PngParams,
+};
 
-fn run_content_stego() -> Result<(), strhide::errors::StrHideError> {
+fn run_content_stego(carrier_bytes: &[u8]) -> Result<(), strhide::errors::StrHideError> {
     let engine = StrHide::new();
 
     // 1. Probe maximum embedding capacity
     let probe_opts = ProbeOptions::default();
-    let cap_info = engine.stego().probe_file(Path::new("photo.jpg"), &probe_opts)?;
+    let cap_info = engine.stego().probe(carrier_bytes, &probe_opts)?;
     println!("Carrier capacity: {} bytes (at safety tier: {:?})", cap_info.capacity, cap_info.safety_tier);
 
-    // 2. Embed payload into image DCT coefficients
+    // 2. Embed payload into image pixels / DCT coefficients / audio samples
     let embed_opts = EmbedOptions {
         password: Some("stego-secret"),
         safety: SafetyPolicy {
-            tier: SafetyLevel::High,     // Paranoid | High | Balanced
-            enforce: true,               // Refuse payload if it exceeds safety tier
+            level: SafetyLevel::High,
+            enforcement: SafetyEnforcement::Advisory,
+        },
+        tuning: StegoTuning::Png {
+            model: SpatialAlgorithm::Hill,
+            params: PngParams::default(),
         },
         ..EmbedOptions::default()
     };
-    let payload = b"Discreet message in frequency coefficients";
-    engine.stego().embed_file(
-        Path::new("photo.jpg"),
-        payload,
-        Some(Path::new("photo-stego.jpg")),
-        &embed_opts,
-    )?;
+    let payload = Payload::text("Discreet message embedded in carrier data");
+    let stego_bytes = engine.stego().embed(carrier_bytes, &payload, &embed_opts)?;
 
-    // 3. Extract payload from stego image
+    // 3. Extract payload from stego carrier
     let extract_opts = ExtractOptions {
         password: Some("stego-secret"),
         ..ExtractOptions::default()
     };
-    let extracted = engine.stego().extract_file(
-        Path::new("photo-stego.jpg"),
-        None, // In-memory extraction
-        &extract_opts,
-    )?;
-    assert_eq!(&extracted.data[..], payload);
+    let extracted_payload = engine.stego().extract(&stego_bytes, &extract_opts)?;
+    assert_eq!(extracted_payload.as_bytes(), payload.as_bytes());
 
     Ok(())
 }
@@ -262,9 +261,34 @@ fn run_content_stego() -> Result<(), strhide::errors::StrHideError> {
 
 ---
 
+### Dynamic Algorithm Discovery
+
+Query available algorithms dynamically at runtime without hardcoding algorithm identifiers:
+
+```rust
+use strhide::formats::FileFormat;
+use strhide::stego::{algorithms_for_format, list_stego_algorithms, StegoAlgorithmInfo};
+
+fn discover_algorithms() {
+    // List all registered steganography algorithms across all domains
+    let all_algos: Vec<StegoAlgorithmInfo> = list_stego_algorithms();
+    for info in all_algos {
+        println!("{}: {} ({})", info.id, info.name, info.domain);
+    }
+
+    // Filter algorithms applicable to a specific carrier format (e.g. JPEG)
+    let jpeg_algos = algorithms_for_format(FileFormat::Jpeg);
+    for info in jpeg_algos {
+        println!("JPEG Algorithm: {} (default: {})", info.name, info.is_default);
+    }
+}
+```
+
+---
+
 ### Diagnostics: Cross-Domain Inspection & Verification
 
-Inspect headers, detect envelopes, verify cryptographic tags, and probe capacities across both structure and content domains simultaneously:
+Inspect headers, detect envelopes, verify cryptographic tags, and probe capacities across both structure and content domains:
 
 ```rust
 use std::path::Path;
@@ -300,11 +324,11 @@ The `analysis` module inspects unknown carriers using structural anomaly detecti
 
 ```rust
 use std::path::Path;
-use strhide::analysis::{scan_carrier, ScanOptions};
+use strhide::facade::StrHide;
 
 fn run_steganalysis() -> Result<(), strhide::errors::StrHideError> {
-    let opts = ScanOptions::default();
-    let report = scan_carrier(Path::new("suspicious.jpg"), &opts)?;
+    let engine = StrHide::new();
+    let report = engine.analysis().scan_file(Path::new("suspicious.jpg"))?;
 
     println!("Carrier verdict: {:?}", report.verdict); // Clean | Low | Suspicious | LikelyHidden
     println!("Overall anomaly score: {}/100", report.anomaly_score);
@@ -327,7 +351,7 @@ use strhide::core::config;
 // Lookup order (CWD is explicitly excluded for security):
 // 1. Explicit path passed to load (if Some)
 // 2. Executable-adjacent directory (<exe_dir>/strhide.toml, <exe_dir>/config.toml)
-// 3. User configuration directory (~/.config/strhide/config.toml, ~/.strhide/config.toml, %APPDATA%\strhide\config.toml)
+// 3. User configuration directory (~/.config/strhide/config.toml, %APPDATA%\strhide\config.toml)
 // 4. System configuration directory (/etc/strhide/config.toml, %ProgramData%\strhide\config.toml)
 let cfg = config::load(None)?;
 
@@ -367,7 +391,7 @@ fn handle_errors(err: StrHideError) {
 ### Build CLI Binaries
 
 ```bash
-cargo build --release --features cli
+cargo build --release --all-features
 # Binaries placed in target/release/
 ```
 
@@ -376,7 +400,7 @@ cargo build --release --features cli
 `strhide` compiles four targeted CLI binaries from the same codebase:
 
 | Binary | Available Subcommands | Description |
-| --- | --- | --- |
+| :--- | :--- | :--- |
 | **`sth`** / **`strhide`** | `write`, `read`, `restore`, `embed`, `extract`, `capacity`, `inspect`, `verify`, `scan`, `list` | Full command set |
 | **`sthc`** | `write`, `read`, `restore` | Container structure hiding only |
 | **`sths`** | `embed`, `extract`, `capacity` | Content-adaptive steganography only |
@@ -386,33 +410,33 @@ cargo build --release --features cli
 
 ```bash
 # Hide text in a photo (writes to photo-out.png)
-strhide write photo.png -t "Secret message"
+sth write photo.png -t "Secret message"
 
 # Hide a ZIP file inside a PDF, encrypted with password and a hint
-strhide write document.pdf -d archive.zip -p "P@ss123" --hint "Company vault"
+sth write document.pdf -d archive.zip -p "P@ss123" -H "Company vault"
 
 # In-place hiding with automatic .bak backup
-strhide write photo.png -t "Secret" --in-place
+sth write photo.png -t "Secret" --in-place
 
 # Read payload back
-strhide read photo-out.png --stdout
-strhide read photo-out.png -o recovered/
+sth read photo-out.png --stdout
+sth read photo-out.png -o recovered/
 
 # 100% bit-exact carrier restoration
-strhide restore photo-out.png -o clean.png
+sth restore photo-out.png -o clean.png
 
 # Content-adaptive steganography (HILL for PNG, UERD for JPEG)
-strhide embed cover.jpg -t "Secret" -o stego.jpg
-strhide extract stego.jpg --stdout
+sth embed cover.jpg -t "Secret" -o stego.jpg
+sth extract stego.jpg --stdout
 
-# HEIF/HEIC CABAC bypass steganography (zero file size growth Δ=0)
-strhide embed photo.heic -t "Secret" -o stego.heic
+# HEVC CABAC bypass steganography (zero file size growth Δ=0)
+sth embed video.mp4 -t "Secret" -o stego.mp4
 
 # Probe stego embedding capacity without modifying the file
-strhide embed photo.png --capacity
+sth capacity photo.png
 
 # Black-box steganalysis inspection
-strhide scan suspicious.jpg
+sth scan suspicious.jpg
 ```
 
 ---
@@ -420,5 +444,4 @@ strhide scan suspicious.jpg
 ## Compatibility & License
 
 - **Wire Specification**: Detailed packet headers, crypto primitives, and wire specs are documented in [`docs/api/WIRE_SPEC.md`](../docs/api/WIRE_SPEC.md).
-- **Python Version**: The legacy Python implementation in `python/` is frozen at 0.2.0 and not compatible with modern 0.8+ UBE envelopes.
 - **License**: Apache-2.0. See [LICENSE](../LICENSE).

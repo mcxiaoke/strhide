@@ -1,6 +1,6 @@
 # strhide 架构与公开 API 说明
 
-> 适用版本：crate `strhide` 0.7.2（Rust 实现，`rust/`），含阶段 4 重构。
+> 适用版本：crate `strhide` 0.8.x（当前 0.8.3，Rust 实现，`rust/`）。
 > 本文描述模块职责、分层关系、公开 API 与内部数据流转，所有结论均按当前源码核对。
 > 配套文档：
 > - [WIRE_SPEC.md](./WIRE_SPEC.md) — UBE v2.2 二进制线格式规范；
@@ -51,13 +51,13 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
 ┌──────────────────────────────┐        ┌───────────────────────────────┐
 │ structure（UBE 信封编排）      │        │ stego（内容自适应隐写）         │
 │ write/read/remove/inspect/    │        │ embed/extract/probe/inspect/   │
-│ verify + adapters + envelope  │        │ verify + png/jpeg/hevc/heif    │
+│ verify + adapters + envelope  │        │ verify + png/jpeg/hevc/audio   │
 └───────┬───────────────┬──────┘        └───────────┬───────────────────┘
         │               │                            │
         ▼               ▼                            ▼
 ┌──────────────┐ ┌─────────────┐        ┌───────────────────────────────┐
 │ registry     │ │ rejection   │        │ stego 子模块：                 │
-│ 适配器路由    │ │ 预写安全检查 │        │ png / jpeg / hevc / heif      │
+│ 适配器路由    │ │ 预写安全检查 │        │ png/jpeg/hevc/heif/audio      │
 │ 策略名↔ID    │ └─────────────┘        │ coding / header / envelope    │
 │ StrategyId   │                        │ format / prng / params        │
 └──────┬───────┘                        └───────────┬───────────────────┘
@@ -125,7 +125,7 @@ let payload = ENGINE.stego().extract(&stego, &ExtractOptions::default())?;
 |---|---|---|
 | [`facade`] | 推荐入口：一个 `Dialect` + 一个 `LocalParams`，按域暴露子门面 | `StrHide`、`Dialect`、`StructureFacade`、`StegoFacade`、`run_cli_from` |
 | [`structure`] | 结构域：写入、读取、剥离、检查、验证 | `write_carrier*`、`read_carrier*`、`remove_carrier*`、`inspect_carrier*`、`verify_carrier*`、`PayloadSource`、`WriteOptions`/`ReadOptions`/`RestoreOptions`、`StructureProfile`、各 `*Result`、`StrategyId`、`Warning` |
-| [`stego`] | 内容域：嵌入、提取、容量探测、诊断（PNG/JPEG/HEIF/HEVC） | `embed_carrier*`、`extract_carrier*`、`probe_carrier_capacity*`、`inspect_carrier*`、`verify_carrier*`、`EmbedOptions`/`ExtractOptions`/`ProbeOptions`/`StegoTuning`、`StegoProfile`、`StegoCapacityInfo` |
+| [`stego`] | 内容域：嵌入、提取、容量探测、诊断（PNG/JPEG/HEIF/HEVC/Audio） | `embed_carrier*`、`extract_carrier*`、`probe_carrier_capacity*`、`inspect_carrier*`、`verify_carrier*`、`list_stego_algorithms`、`algorithms_for_format`、`EmbedOptions`/`ExtractOptions`/`ProbeOptions`/`StegoTuning`、`StegoProfile`、`StegoCapacityInfo`、`StegoAlgorithmInfo` |
 | [`params`] | 写侧调参旋钮与格式无关原语 | `LocalParams`、`MagicPair`、`CompressionStrategy`、`RejectionPolicy`、`STEALTH_DOMAIN` |
 | [`formats`] | 格式真值源与能力表 | `FileFormat`、`sniff_bytes`/`sniff_stream`、`capability::CAPABILITIES`、`annexb`、`jpeg_segments` |
 | [`core`] | 两域共用的地基 | `i18n`（`Msg`/`Lang`）、`control`（`Control`/`CancelToken`/`Stage`）、`payload`（`Payload`）、`media`（`MediaInfo`）、`fs`、`pipeline`（批量编排）、`config`（TOML，feature `config`） |
@@ -479,7 +479,7 @@ const MY_DIALECT: Dialect = Dialect::new()
 | `HeifAdapter` | `HEIF` | `item_hidden`、`free_box`、`box_uuid`、`eof` |
 | `Mp4Adapter` | `MP4` | `box_uuid`、`eof` |
 | `WavAdapter` | `WAV` | `riff_chunk`、`eof` |
-| `ZipAdapter` | `ZIP` | `pre_cd_inject`、`eof` |
+| `ZipAdapter` | `ZIP` | `pre_cd_inject`、`eof`（支持 `.zip`, `.jar`, `.docx`, `.xlsx`, `.pptx`） |
 | `PdfAdapter` | `PDF` | `incremental`、`eof` |
 | `PeAdapter` | `PE` | `pe_codebits`、`pe_slack`、`pe_overlay`、`eof` |
 | `MkvAdapter` | `MKV` | `ebml_void`、`eof` |
@@ -502,33 +502,40 @@ const MY_DIALECT: Dialect = Dialect::new()
 
 ### 7.3 内容域隐写
 
-内容域当前支持三大体系架构与可复现工程保障：
+内容域支持图像、视频容器与音频四大载体域，涵盖代价模型、自适应网格编码与可复现工程保障：
 
 1. **空间域（PNG，Scheme A）**：
-   - **算法支持**：由 `CostModelRegistry` 解析：默认/`hill` → `HillCostModel`（wire id 1）；`suniward` → `SuniwardCostModel`（wire id 2，自适应连续访存与 SIMD FMA 加速）。未知名**明确拒绝**。
-   - **参数自描述同步**：提取端自动从 `FeatureWord.algorithm_id` 与 `FeatureWord.exclusion_permille` 提取算法 ID 与排除分位数，原生支持自定义 `--exclusion-rate`。
-   - **矩阵编码 `StegoCodec`**：`Hamming`（(7,3)，每块至多动 1 槽）或 `Stc`（全局 Viterbi 网格，最小化代价加权失真，支持分组 u）；`Auto`（默认）按容量/载荷自适应选择 STC 分组或回退。
+   - **算法支持**：由 `CostModelRegistry` 解析：默认/`hill` → `HillCostModel`（wire id 1）；`suniward` → `SuniwardCostModel`（wire id 2，自适应行并行与 SIMD FMA 加速）；`mipod` → `MipodCostModel`（wire id 3，局部方差估计与最小化检测概率）。未知名明确拒绝。
+   - **参数自描述同步**：提取端自动从 `FeatureWord.algorithm_id` 与 `FeatureWord.exclusion_permille` 提取算法 ID 与排除分位数。
+   - **矩阵编码 `StegoCodec`**：`Hamming`（(7,3)，每块至多动 1 槽）或 `Stc`（全局 Viterbi 网格，最小化代价加权失真）；`Auto` 自动自适应选择。
    - **数值与边界约束**：像素值限制在 `[8, 247]`，采用 ternary ±1 匹配与八值类（`val & 0xF8`）约束，保证提取侧代价排序完全复现。
-   - **并行 Deflate 重编码**：利用纯 Rust SIMD（`zlib-rs`）结合 Rayon 按扫描线整行切分并发压缩，大图（14.8 MP）重编码耗时由 4 秒降低至 380 毫秒（提速 10.5 倍）。
+   - **并行加速**：代价计算与 Deflate 重编码全面采用 Rayon 行并行切分与即时内存释放。
 
 2. **DCT 频域（JPEG，Scheme B）**：
-   - **算法支持**：默认/`uerd` → `UerdCostModel`；`juniward` → `JuniwardCostModel`（多线程并行化与 Wiener 降噪两趟方差防溢出）。
-   - **固定网格真三元 STC（V3 协议）**：对全图所有 AC 位置（`k = 1..63`）计价并构建几何网格，提取无需代价图与重排序。
-   - **校准与分析加速**：`analysis/calibration` 盲校准采用单趟直方图重构，大幅缩减分析耗时并杜绝数值溢出。
-   - **44 字节超块**与套件 KDF 分层密钥派生，支持可选 TLV 扩展区与三种密码套件。
+   - **算法支持**：默认/`uerd` → `UerdCostModel`；`juniward` → `JuniwardCostModel`；`jmipod` → `JMipodCostModel`。
+   - **固定网格真三元 STC（V3 协议）**：对全图所有 AC 位置（`k = 1..63`）计价并构建几何网格，提取端无需重构代价图。
+   - **容量信息复用**：`embed_jpeg_with_stats` 直接传出 `StegoCapacityInfo`，消除嵌入后重复全量扫描的开销。
 
-3. **HEIF 容器桥接与 CABAC 旁路域（Scheme B / Scheme C）**：
-   - **载体识别与自动路由**：统一入口 `embed_carrier` / `extract_carrier` / `probe_carrier_capacity` 自动探测 ISOBMFF 结构中的 HEVC 图像项与原始 Annex-B 裸码流。HEIF 上三者同序：**先方案 C，失败再落方案 B**（桥接是早期方案，保留为兜底通道），因此"某个载体里读到的载荷"恒等于"写入端会产出的那份"。
-   - **方案 C（CABAC 旁路符号位原位隐写）**：HEIF/HEIC 的默认路径，也是不支持桥接的纯 HEVC 码流唯一路径。
-     - **旁路符号位编码（Bypass Coding）**：针对 H.265 变换系数的符号位（`coeff_sign_flag`，等概率 Bypass 模式，不影响上下文概率状态机更新），改变残差正负极性而不破坏宏块语法，感知失真极低。
-     - **零尺寸膨胀（$\Delta = 0$）与 EPB 避让**：直接在压缩比特流内部就地修改。通过至多 24 轮迭代检验，将破坏 `0x000000..=03` 防竞争窗口的冲突槽位置为无穷大代价（Cost = $\infty$）重新求解，确保文件尺寸 100% 绝对守恒。
-     - **空间均衡抽样（Weyl 离散置换）**：通过确定性互质步长离散抽样，避免载荷全量压在连拍首图导致局部画质失衡。
-     - **外部解耦与 Observer**：通过 `rust_h265` 的 `CabacObserver` 截获 bin 流与系数，通过 `oxideav-h265` 进行精确重编。
-   - **方案 B（内嵌缩略图桥接 `thumb_bridge`，兜底通道）**：当方案 C 不可用（无 HEVC 项、slice 语法不受支持）而容器包含独立 JPEG Item、未压缩像素项或 Exif TIFF IFD1 缩略图时，自动切片并桥接至 JPEG/空间域引擎，修补 Exif 与 `iloc`/`mdat` 偏移，**主图 100% bit-exact 零失真**。该性质是桥接自身的契约，只能在桥接 API 上验证（路由层会先走方案 C 并改动主图）。
+3. **HEVC 压缩域（Scheme C：MP4 / MOV / MKV / HEIF / Annex-B）**：
+   - **CABAC 旁路符号位原位隐写**：在变换单元（TU）内部调制 `coeff_sign_flag`（等概率 Bypass 模式，不影响状态机概率模型）。
+   - **零尺寸膨胀（$\Delta = 0$）与 EPB 避让**：就地直接改写，通过防竞争字节迭代检验，规避 `0x000000..=03` 冲突，确保文件总尺寸严格守恒。
+   - **MKV (Matroska) 支持**：解析 EBML 与 Segment 结构，提取视频帧进行原位调制；CRC-32 刷新按树深自内向外（innermost-first）排序执行；支持未知大小 Cluster 的正确截断。
+   - **空间均衡抽样（Weyl 离散置换）**：通过确定性互质步长离散抽样，避免载荷全量压在首帧。
+   - **HEIF 缩略图桥接（Scheme B，兜底通道）**：方案 C 不可用时自动桥接至独立 JPEG/未压缩缩略图项。
 
-4. **可复现嵌入机制（Freshness）**：
-   - 支持 `Freshness::Random`（默认）与 `Freshness::Seeded([u8; 32])`。
-   - 在 Seeded 模式下，salt、nonce 与 payload 均由主种子经 HKDF-SHA256 派生；同时强制浮点代价图走标量内核（避免 AVX2 FMA 舍入差异导致 slot 抖动），实现跨机器/跨 CI 的逐字节确定性可复现。
+4. **音频域（WAV & FLAC，content-audio 特性）**：
+   - **WAV PCM 采样域**：针对 16/24-bit 线性 PCM 音频，结合听觉掩蔽代价与 STC 网格编码执行最低有效位（LSB）匹配。
+   - **FLAC 预测残差域**：解析 FLAC 帧结构与多项式预测子帧，在保持残差码字长度不变的前提下进行残差调制（零字节膨胀）；引入 `FlacCapacityView` 零拷贝探测与 PCM MD5 完整性短路快速验证，严控采样漂移。
+
+5. **动态算法元数据自省（StegoAlgorithmInfo）**：
+   - 核心库暴露 `list_stego_algorithms()` 与 `algorithms_for_format(format)`，返回包含唯一 ID、名称、描述、所属域及格式扩展名的结构化元数据；
+   - 门面与 Tauri 后端直接映射该结构，实现 CLI 与 GUI 端的上下文动态感知与格式安全互斥。
+
+6. **双域复合共存测试体系**：
+   - 支持同一载体在多线程并发下同时施加内容域与结构域隐藏，验证双向（Content->Structure 与 Structure->Content）顺序无关性与 SHA-256 还原一致性。测试套件挂载于 `heavy_dual_domain_coexistence_matrix`。
+
+7. **可复现嵌入机制（Freshness）**：
+   - 支持 `Freshness::Random`（默认）与 `Freshness::Seeded([u8; 32])`，Seeded 模式下盐、Nonce 与载荷均由主种子确定性派生。
 
 ---
 
@@ -549,8 +556,8 @@ const MY_DIALECT: Dialect = Dialect::new()
 | 内容域 HKDF 域标签 | `StegoProfile::with_stego_domain` | P |
 | 私有图像线格式身份 | `StegoProfile::with_jpeg_format` / `with_png_format` / `with_hevc_format` | P |
 | 可复现随机源 / 确定性测试 | `EmbedOptions.freshness = Freshness::Seeded`（CLI `--seed`） | Stego |
-| 空间域成本模型选择 | `StegoTuning::Png { algorithm: SpatialAlgorithm::Hill, .. }` | Stego |
-| JPEG 频域成本模型选择 | `StegoTuning::Jpeg { algorithm: JpegAlgorithm::Uerd, .. }` | Stego |
+| 空间域成本模型选择 | `StegoTuning::Png { model: SpatialAlgorithm::Hill, params: PngParams::default() }` | Stego |
+| JPEG 频域成本模型选择 | `StegoTuning::Jpeg { model: JpegAlgorithm::Uerd, params: JpegParams::default() }` | Stego |
 | HEIF 结构域隐藏策略 | `-s item_hidden` / `-s free_box` | 结构域 |
 | 统一门面（绑定方言 + 基线） | `StrHide::new` / `with_dialect` / `with_local_params` | Facade |
 | 按域取动词 | `StrHide::structure()` / `StrHide::stego()` | Facade |
@@ -558,6 +565,7 @@ const MY_DIALECT: Dialect = Dialect::new()
 | 内存（免落盘）处理 | `*_carrier_bytes` | I/O |
 | 批量编排（GUI/HTTP 复用） | `core::pipeline::{preflight_batch, for_each_carrier, ...}` | Core |
 | 实现代价模型 trait | `PngCostModel` / `JpegCostModel` | 扩展 |
+| 动态算法自省与元数据 | `stego::list_stego_algorithms()` / `algorithms_for_format()` | Stego |
 
 ### 8.2 当前边界（按设计不做或暂缓）
 
