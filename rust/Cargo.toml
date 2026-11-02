@@ -99,6 +99,7 @@ crc32fast = "1.5.2"
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 hkdf = "0.13.0"
 hmac = "0.13.0"
+log = "0.4"
 oxideav-h265 = { git = "https://github.com/mcxiaoke/oxideav-h265.git", tag = "v1-20261024", optional = true }
 pbkdf2 = "0.13.0"
 rand = "0.10.3"

@@ -1,11 +1,18 @@
 pub mod commands;
+pub mod logger;
 pub mod state;
 
 use state::GuiState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    logger::init_logger();
     tauri::Builder::default()
+        .setup(|app| {
+            logger::set_app_handle(app.handle().clone());
+            log::info!("StrHide Studio initialized successfully");
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(GuiState::default())
@@ -25,6 +32,8 @@ pub fn run() {
             commands::batch::set_ui_language_cmd,
             commands::batch::cancel_task_cmd,
             commands::batch::run_batch_job_cmd,
+            logger::get_recent_logs_cmd,
+            logger::clear_logs_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running strhide studio application");
