@@ -50,7 +50,8 @@ const ACME_FORMAT: JpegFormatProfile = JpegFormatProfile {
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let carrier = std::fs::read("tests/fixtures/carrier_photo.jpg")?;
+    let carrier = std::fs::read("rust/tests/assets/small.jpg")
+        .or_else(|_| std::fs::read("tests/assets/small.jpg"))?;
     let payload = b"only the private build can read this";
     let password = "private-format-demo";
 

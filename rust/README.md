@@ -113,7 +113,7 @@ fn main() -> Result<(), strhide::errors::StrHideError> {
     let engine = StrHide::new();
 
     // --- In-Memory Byte API ---
-    let cover_png = std::fs::read("tests/fixtures/carrier.png")?;
+    let cover_png = std::fs::read("tests/assets/small.png")?;
     let payload = b"Secret payload content";
 
     // Write payload into carrier bytes

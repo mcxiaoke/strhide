@@ -52,11 +52,20 @@ fn find_cli_bin() -> PathBuf {
 }
 
 fn find_carrier(name: &str) -> PathBuf {
+    let mapped = match name {
+        "carrier.jpg" | "carrier_photo.jpg" | "carrier_q100.jpg" => "small.jpg",
+        "carrier.png" => "small.png",
+        other => other,
+    };
     let candidates = [
-        format!("rust/tests/fixtures/{name}"),
+        format!("rust/tests/assets/{mapped}"),
         format!("rust/tests/assets/{name}"),
-        format!("../../rust/tests/fixtures/{name}"),
+        format!("rust/tests/fixtures/{mapped}"),
+        format!("rust/tests/fixtures/{name}"),
+        format!("../../rust/tests/assets/{mapped}"),
         format!("../../rust/tests/assets/{name}"),
+        format!("../../rust/tests/fixtures/{mapped}"),
+        format!("../../rust/tests/fixtures/{name}"),
         format!("temp/jpgtest/{name}"),
         format!("../../temp/jpgtest/{name}"),
     ];

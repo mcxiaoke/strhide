@@ -9,8 +9,8 @@ use strhide::stego::prng::deterministic_payload;
 use strhide::stego::{EmbedOptions, ExtractOptions, Freshness, embed_carrier, extract_carrier};
 
 const JPG: &[u8] = include_bytes!("../assets/small.jpg");
-// `minimal.png` is 1x1 and has no capacity; this one is a real carrier.
-const PNG: &[u8] = include_bytes!("../fixtures/carrier.png");
+// `small.png` is a real carrier with sufficient capacity.
+const PNG: &[u8] = include_bytes!("../assets/small.png");
 
 fn seed() -> [u8; 32] {
     let mut s = [0u8; 32];

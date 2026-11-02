@@ -185,10 +185,12 @@ fn size_inflation_warning_is_raised_above_fifty_percent() {
     fs::write(&carrier, &tiny).unwrap();
     let out = dir.join("tiny.steg.png");
 
-    let payload: String = "X".repeat(64);
+    let payload: Vec<u8> = (0..800u32)
+        .map(|i| (i.wrapping_mul(1103515245).wrapping_add(12345) >> 16) as u8)
+        .collect();
     let res = write_carrier(
         &carrier,
-        PayloadSource::Text(&payload),
+        PayloadSource::Bytes(&payload),
         &WriteOptions {
             output_path: Some(&out),
             backup: false,

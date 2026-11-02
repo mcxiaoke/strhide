@@ -57,7 +57,7 @@ test.describe("Real Process & Real Data E2E Test Suite", () => {
   test("2. 结构嵌入与提取真实全链路闭环（PNG 结构域写入与提取）", async ({ realApp }) => {
     const { scratchDir, dropFiles, goTab, panel } = realApp;
 
-    const carrierSrc = path.resolve(projectRoot, "rust/tests/fixtures/carrier.png");
+    const carrierSrc = path.resolve(projectRoot, "rust/tests/assets/small.png");
     const testCarrier = path.join(scratchDir, "sample.png");
     fs.copyFileSync(carrierSrc, testCarrier);
 

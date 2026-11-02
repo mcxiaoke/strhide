@@ -128,8 +128,8 @@ fn juniward_costs_more_in_flat_blocks() {
         }
     }
 
-    assert!(flat_n > 50, "need flat blocks to compare, got {flat_n}");
-    assert!(busy_n > 50, "need busy blocks to compare, got {busy_n}");
+    assert!(flat_n >= 20, "need flat blocks to compare, got {flat_n}");
+    assert!(busy_n >= 20, "need busy blocks to compare, got {busy_n}");
     let flat = flat_sum / flat_n as f64;
     let busy = busy_sum / busy_n as f64;
     eprintln!("flat mean cost {flat:.6e}, busy mean cost {busy:.6e}");

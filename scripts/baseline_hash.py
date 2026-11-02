@@ -76,16 +76,14 @@ SEED_HEX = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 
 STRUCTURE_EXTS = {
     "png", "jpg", "jpeg", "webp", "wav", "heic", "heif", "avif",
-    "mp4", "mov", "m4v", "mkv", "zip", "jar", "pdf", "exe", "dll",
-    "h265", "hevc", "hevc10", "txt",
+    "mp4", "mov", "m4v", "mkv", "webm", "zip", "jar", "pdf", "exe", "dll",
 }
-CONTENT_EXTS_DEFAULT = {"png", "jpg", "jpeg"}
-CONTENT_EXTS_HEVC = {"heic", "heif", "avif", "mp4", "mov", "m4v", "h265", "hevc", "hevc10"}
+CONTENT_EXTS_DEFAULT = {"png", "jpg", "jpeg", "wav", "flac"}
+CONTENT_EXTS_HEVC = {"heic", "heif", "avif", "mp4", "mov", "m4v", "mkv", "webm", "h265", "hevc", "hevc10"}
+ALL_EXTS = STRUCTURE_EXTS | CONTENT_EXTS_DEFAULT | CONTENT_EXTS_HEVC
 
 CORPORA = [
-    ("fixtures", REPO / "rust" / "tests" / "fixtures"),
-    ("assets", REPO / "rust" / "tests" / "assets"),
-    ("testhevc", REPO / "temp" / "testhevc"),
+    ("baseline", REPO / "testdata" / "baseline"),
 ]
 
 
@@ -208,7 +206,7 @@ def collect_cases(only: str | None) -> list[tuple[str, Path]]:
             if not path.is_file():
                 continue
             ext = path.suffix.lower().lstrip(".")
-            if ext not in STRUCTURE_EXTS:
+            if ext not in ALL_EXTS:
                 continue
             cases.append((corpus, path))
     return cases
@@ -345,11 +343,14 @@ def build_report(bin_path: Path, args) -> dict:
             "orig_sha256": sha256_file(orig),
         }
 
-        started = time.time()
-        entry["structure"] = structure_pass(bin_path, orig, work, args.timeout)
-        entry["structure"]["elapsed_ms"] = int((time.time() - started) * 1000)
-
         ext = entry["ext"]
+        if ext in STRUCTURE_EXTS:
+            started = time.time()
+            entry["structure"] = structure_pass(bin_path, orig, work, args.timeout)
+            entry["structure"]["elapsed_ms"] = int((time.time() - started) * 1000)
+        else:
+            entry["structure"] = {"status": "skipped", "reason": "format_has_no_structure_domain"}
+
         content_exts = set(CONTENT_EXTS_DEFAULT)
         if args.include_content_hevc:
             content_exts |= CONTENT_EXTS_HEVC
@@ -369,7 +370,7 @@ def build_report(bin_path: Path, args) -> dict:
 
 
 # Volatile or informational keys that must not fail a `--check`.
-IGNORED_KEYS = {"elapsed_ms", "note", "unsupported"}
+IGNORED_KEYS = {"elapsed_ms", "note", "unsupported", "reason"}
 # Without a seed the content-domain salt is random, so its compressed length and
 # its bytes legitimately differ between runs (measured 6702 vs 6664 bytes on the
 # same JPEG). `check` drops these two keys only when the baseline itself was

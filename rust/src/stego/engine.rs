@@ -1250,7 +1250,7 @@ mod tests {
     #[test]
     #[cfg(feature = "content-png")]
     fn test_png_inspect_and_verify() {
-        let carrier_bytes = include_bytes!("../../tests/fixtures/carrier.png");
+        let carrier_bytes = include_bytes!("../../tests/assets/small.png");
         let profile = StegoProfile::default();
 
         // 1. Clean carrier
@@ -1307,7 +1307,7 @@ mod tests {
     #[test]
     #[cfg(feature = "content-jpeg")]
     fn test_jpeg_inspect_and_verify() {
-        let carrier_bytes = include_bytes!("../../tests/fixtures/carrier.jpg");
+        let carrier_bytes = include_bytes!("../../tests/assets/small.jpg");
         let profile = StegoProfile::default();
 
         // 1. Clean carrier
@@ -1364,7 +1364,7 @@ mod tests {
     #[test]
     #[cfg(feature = "content")]
     fn test_top_level_inspect_and_verify() {
-        let carrier_bytes = include_bytes!("../../tests/fixtures/carrier.png");
+        let carrier_bytes = include_bytes!("../../tests/assets/small.png");
         let payload = Payload::bytes(b"Top level content test");
         let embed_opts = EmbedOptions::default();
         let stego_bytes = crate::stego::embed_carrier(carrier_bytes, &payload, &embed_opts)

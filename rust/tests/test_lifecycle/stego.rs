@@ -39,12 +39,23 @@ fn stego_profile(secret: &'static str) -> StegoProfile {
     StegoProfile::default().with_default_secret(secret)
 }
 
-/// Resolves a fixture file bundled in `tests/fixtures/`.
+/// Resolves a test carrier file bundled in `tests/assets/` or `tests/fixtures/`.
 fn fixture_file(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(rel)
+    let mapped = match rel {
+        "carrier.jpg" | "carrier_photo.jpg" => "small.jpg",
+        "carrier.png" => "small.png",
+        other => other,
+    };
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let asset = base.join("assets").join(mapped);
+    if asset.exists() {
+        return asset;
+    }
+    let fixture = base.join("fixtures").join(mapped);
+    if fixture.exists() {
+        return fixture;
+    }
+    base.join("assets").join(rel)
 }
 
 /// Resolves a test corpus file from local temp/ or environment variables.
@@ -998,8 +1009,22 @@ fn test_scan_clean_jpeg_emits_caveat_note() {
 /// finding.
 #[test]
 fn test_jpeg_calibration_skips_unquantized_carrier() {
-    let candidate = fixture_file("carrier_q100.jpg");
-    let bytes = fs::read(&candidate).expect("read sample");
+    let p = fixture_file("carrier_q100.jpg");
+    let (candidate, bytes) = if p.exists() {
+        let b = fs::read(&p).expect("read sample");
+        (p, b)
+    } else {
+        let dir = scratch("q100_calibration");
+        let p = dir.join("carrier_q100.jpg");
+        let mut jpeg = crate::common::make_jpeg();
+        if let Some(idx) = jpeg.windows(5).position(|w| w == b"\xff\xdb\x00\x43\x00") {
+            for b in &mut jpeg[idx + 5..idx + 5 + 64] {
+                *b = 1;
+            }
+        }
+        fs::write(&p, &jpeg).unwrap();
+        (p, jpeg)
+    };
     assert!(
         strhide::analysis::calibration::estimate(&bytes).is_none(),
         "an all-ones quantization table must disable calibration, not produce an estimate"
