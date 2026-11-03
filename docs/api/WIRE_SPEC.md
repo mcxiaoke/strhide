@@ -457,7 +457,8 @@ channel_bytes[4..14] = unmasked[4..14] XOR mask[0..10]
 ### 13.1 总则
 
 - **正文无魔数、无明文标记**：载荷全部在 AEAD 密文内；没有口令的载体与未修改载体不可区分。
-- **头部位置密钥化**：基础头占用的槽位由 L2 `header_stc_seed` 选出；`magic4` 由 L2 派生，
+- **头部位置密钥化**：基础头占用的槽位由 L2 `locate_seed` 选出（`header_stc_seed` 只用于
+  基础头的 STC 编码，JPEG/HEVC）；`magic4` 由 L2 派生，
   不是固定常量。提取失败统一为 `NoHiddenData`，不泄露"是否存在/密码是否正确"。
 - **凭据**：`Credential::{Password(&str), FileKey(&[u8; 32])}`，二选一；空串密码视为未提供。
   未提供时回落到 `StegoProfile.default_secret`，再回落到公开常量 `PUBLIC_DEFAULT_SECRET`
@@ -521,19 +522,24 @@ body_len   = ciphertext.len()           // 只含密文+tag，不含 salt/nonce
 | 35 | 1 | algorithm_id（PNG 代价模型 wire id） |
 | 36 | 2 | suite_id |
 | 38 | 1 | codec_id（0=Hamming，1=STC） |
-| 39 | 1 | stc_h（4..=10） |
-| 40 | 1 | stc_u（1..=64） |
-| 41 | 1 | channel_mode（PNG） |
-| 42 | 1 | class_rule |
-| 43 | 2 | p1_window |
-| 45 | 2 | p2_window |
-| 47 | 2 | neg_log2_epsilon |
-| 49 | 2 | exclusion_permille |
-| 51 | 4 | sigma（f32 BE） |
-| 55 | 1 | kernel_id |
-| 56 | 2 | ext_len（TLV 字节数） |
-| 58 | 2 | reserved，必须 0 |
+| 39 | 1 | stc_h（4..=10；Hamming 时必须为 0） |
+| 40 | 1 | stc_u（1..=3；Hamming 时必须为 0） |
+| 41 | 1 | channel_mode（PNG：0 绿，1 RGB；音频 0） |
+| 42 | 1 | class_rule（PNG：0/1；音频 0） |
+| 43 | 1 | reserved，必须 0 |
+| 44 | 2 | p1_window（奇数 1..=63） |
+| 46 | 2 | p2_window（奇数 1..=63） |
+| 48 | 2 | neg_log2_epsilon（1..=127） |
+| 50 | 2 | exclusion_permille（0..=900） |
+| 52 | 4 | sigma（**f32 little-endian**，有限且 > 0） |
+| 56 | 1 | kernel_id（当前必须 0） |
+| 57 | 1 | reserved，必须 0 |
+| 58 | 2 | ext_len（TLV 字节数，0..=255） |
 | 60 | 4 | CRC32-IEEE over bytes[0..60] |
+
+> 音频（WAV/FLAC）只用 STC：`codec_id = 0`（Hamming）在音频域**保留未用**，
+> 音频 `extract` 遇到 Hamming 头直接 `NoHiddenData`。golden vectors 中的
+> Hamming 头只用于校验布局与 CRC，不代表音频引擎会写出的载体。
 
 #### 13.4.2 JPEG：44 字节
 
@@ -573,11 +579,16 @@ body_len   = ciphertext.len()           // 只含密文+tag，不含 salt/nonce
 - `EXT_PRESENT` 必须与 `ext_len > 0` 一致；`EXT_CRITICAL` 表示扩展区含 critical TLV。
 - TLV：`type_id(1B) | len(1B) | value(len B)`；`type_id` 高位 `0x80` 为 critical。
   `type 0` 仅用于 padding，值必须全 0 且解析时跳过。
+- **写侧拒绝 critical**：V4 尚未定义任何 critical TLV，`encode_extension_for_write`
+  直接拒绝（否则写出的载体连本构建都读不回）。critical 只能由负测/伪造载体产生。
 - **fail-closed**：未知 critical TLV → 立即拒绝；未知 non-critical TLV → 跳过；
   截断/长度越界 → `CorruptedData`；扩展区总字节数超上限 → 拒绝。
   上限：空间/JPEG `MAX_EXT_BYTES = 255`；HEVC `ext_len <= 64`。
-- **扩展槽位**：`ext_slots = stc_u * (8 * ext_len + stc_h - 1)`（`ext_len = 0` 时为 0）；
-  JPEG/空间域用头中的 `stc_h/stc_u`，HEVC 固定 `h=7, u=2`。
+- **扩展槽位**：
+  - 空间域（PNG/WAV/FLAC）：`ext_slots = 8 * ext_len`，一槽一 bit，不经过 STC；
+  - JPEG：`ext_slots = ext_u * (8 * ext_len + ext_h - 1)`（官方 `h=8, u=4`）；
+  - HEVC：`ext_slots = 2 * (8 * ext_len + 7 - 1)`，固定 `h=7, u=2`。
+  `ext_len = 0` 时一律为 0。
   **off-by-8 语义**：`ext_len` 是字节数，消息位是 `8 * ext_len`，不是 `ext_len`。
 
 ### 13.6 容量公式
@@ -592,7 +603,8 @@ max_payload  = message_bits(body_slots, stc_h) / 8 - BODY_OVERHEAD
 
 - **PNG**：`total_slots` 为可用绿色/RGB 槽；`base_slots = 512`（64B 头）。
 - **WAV / FLAC**：`total_slots` 为采样或残差槽；`base_slots = 512`。
-- **JPEG**：`total_slots` 为全图 AC（`k=1..63`）几何网格；`base_slots = 352`（44B 头）。
+- **JPEG**：`total_slots` 为全图 AC（`k=1..63`）几何网格；`base_slots = 718`
+  （44B 头 = 352 bit，`2 * (352 + 8 - 1)`）。
 - **HEVC**：`total_slots` 为窗口内可用 CABAC bin；
   `base_slots = 524`，`ext_slots = 2 * (8 * ext_len + 6)`，`stc_h = 7` 固定：
 
@@ -629,8 +641,9 @@ max_payload = message_bits(total_slots - (524 + ext_slots)) / 8 - 22
 
 - 只调制 TU 内 CABAC bypass 的 `coeff_sign_flag`；不改变码流尺寸与解码结果。
 - 32B 头固定 524 个基础槽；`window_slices` 记录主窗口候选切片数，控制提取成本。
-- `magic4 = SHA-256(magic_label || effective_secret)[..4]`，私有构建改 `magic_label`
-  即可消除开源指纹；头部槽位只由参数集决定，与密码无关（威胁模型已接受）。
+- `magic4 = HKDF-Expand(master, info(magic_label))[..4]`，即 L2 输出；私有构建改
+  `magic_label` 即可消除开源指纹。头部槽位由凭据派生的 `locate_seed` 决定，不再是
+  “只由参数集决定、与密码无关”。
 - 扩展区 `ext_len <= 64`；HEIF 在方案 C 不可用时桥接到缩略图 JPEG/未压缩项。
 
 ### 13.10 私有构建
@@ -676,16 +689,16 @@ max_payload = message_bits(total_slots - (524 + ext_slots)) / 8 - 22
 | `CONTENT_L1_PBKDF2_ITERATIONS` | `200_000` |
 | `CipherSuiteId` | `1 = AES-256-GCM`（默认），`2 = ChaCha20-Poly1305`，append-only |
 | **空间域基础头（PNG/WAV/FLAC）** | `64` 字节 / `512` 槽 |
-| **JPEG 基础头** | `44` 字节 / `352` 槽 |
+| **JPEG 基础头** | `44` 字节 / `352` bit = `718` 槽 |
 | **HEVC 基础头** | `32` 字节 / `524` 槽 |
 | **扩展槽位数** | `stc_u × (8 × ext_len + stc_h − 1)`；HEVC 固定 `h=7, u=2` |
 | **`MAX_EXT_BYTES`（空间/JPEG）** | `255`；HEVC `ext_len ≤ 64` |
 | **JPEG STC 参数** | 头中自描述，`h ∈ 4..=10`，`u ∈ 1..=64` |
 | **空间域默认 STC** | `h = 8`，`u ≤ 3`（Hamming (7,3) 为 `k=3`） |
 | **空间域可嵌入像素范围** | `[8, 247]` |
-| **HEVC 魔数** | `SHA-256(magic_label ‖ effective_secret)[..4]`（`magic_label = b"strhide-hevc-magic-v1"`） |
+| **HEVC 魔数** | `HKDF-Expand(master, info(magic_label))[..4]`（官方 `magic_label = b"strhide-hevc-magic-v4"`） |
 | **HEVC STC 参数** | `h = 7, u = 2`（来自 `DEFAULT_HEVC_FORMAT`） |
-| **HEVC 派生标签** | `cover_salt = b"strhide-hevc-cover-v1"`、domain 标签 `b"strhide-hevc-domain-v1"` |
+| **HEVC 派生标签** | `cover_salt = b"strhide-hevc-cover-v1"`、domain 标签与 JPEG/PNG 共享 `b"strhide-stego-domain-v1"` |
 | **HEVC 最大防竞争迭代轮数** | `24` |
 
 ### 14.3 最小信封口径

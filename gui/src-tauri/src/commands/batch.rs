@@ -66,6 +66,7 @@ pub async fn run_batch_job_cmd(
                     "inspect" => {
                         let opts = DualOptions {
                             password: password.as_deref(),
+                            key: None,
                             domain: domain.as_deref(),
                             control: *ctrl,
                         };
@@ -76,6 +77,7 @@ pub async fn run_batch_job_cmd(
                     "verify" => {
                         let opts = DualOptions {
                             password: password.as_deref(),
+                            key: None,
                             domain: domain.as_deref(),
                             control: *ctrl,
                         };

@@ -336,6 +336,8 @@ fn read_one(
                             stdout: args.stdout,
                             overwrite: args.overwrite,
                             passwords: args.passwords.clone(),
+                            key_file: None,
+                            max_payload: None,
                             auto: false,
                         };
                         // Hand over the password already resolved here — the

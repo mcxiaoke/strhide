@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let password = args.get(3).map(String::as_str);
     let cred = match password {
         Some(password) => Credential::Password(password),
-        None => Credential::Password(OFFICIAL_PNG_FORMAT.fallback_secret),
+        None => Credential::Password(strhide::stego::envelope::PUBLIC_DEFAULT_SECRET),
     };
 
     let carrier = std::fs::read(carrier_path)?;

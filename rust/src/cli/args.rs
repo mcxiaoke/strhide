@@ -412,6 +412,16 @@ pub struct StegoTuningArgs {
     #[command(flatten)]
     pub passwords: PasswordArgs,
 
+    /// 32-byte content-envelope file key: raw binary, or 64 hex characters.
+    /// Mutually exclusive with `-p` / `--password-file`.
+    #[arg(
+        long = "key-file",
+        value_name = "FILE",
+        help_heading = "Stego Envelope",
+        conflicts_with_all = ["password", "password_file"]
+    )]
+    pub key_file: Option<PathBuf>,
+
     #[arg(short = 'a', long = "algorithm", value_name = "NAME")]
     pub algorithm: Option<String>,
 
@@ -455,10 +465,12 @@ pub struct StegoTuningArgs {
     )]
     pub slot_budget: Option<usize>,
 
+    /// V4 AEAD suite: 1 = AES-256-GCM (default), 2 = ChaCha20-Poly1305.
+    /// Applies to every content format, not only JPEG.
     #[arg(
         long = "cipher-suite",
-        help_heading = "JPEG DCT Tuning",
-        hide = true,
+        alias = "suite",
+        help_heading = "Stego Envelope",
         value_name = "ID"
     )]
     pub cipher_suite: Option<u16>,
@@ -510,6 +522,20 @@ pub struct ExtractArgs {
     #[command(flatten)]
     pub passwords: PasswordArgs,
 
+    /// 32-byte content-envelope file key: raw binary, or 64 hex characters.
+    /// Mutually exclusive with `-p` / `--password-file`.
+    #[arg(
+        long = "key-file",
+        value_name = "FILE",
+        help_heading = "Stego Envelope",
+        conflicts_with_all = ["password", "password_file"]
+    )]
+    pub key_file: Option<PathBuf>,
+
+    /// Refuse to recover a payload larger than this many bytes.
+    #[arg(long = "max-payload", value_name = "BYTES")]
+    pub max_payload: Option<usize>,
+
     #[arg(
         long = "auto",
         help = "Automatically fall back to structure-domain read if no content steganography is found"
@@ -560,6 +586,15 @@ pub struct InspectArgs {
     #[command(flatten)]
     pub passwords: PasswordArgs,
 
+    /// 32-byte content-envelope file key: raw binary, or 64 hex characters.
+    #[arg(
+        long = "key-file",
+        value_name = "FILE",
+        help_heading = "Stego Envelope",
+        conflicts_with_all = ["password", "password_file"]
+    )]
+    pub key_file: Option<PathBuf>,
+
     /// Recursively descend into directories.
     #[arg(short = 'r', long = "recursive")]
     pub recursive: bool,
@@ -582,6 +617,15 @@ pub struct VerifyArgs {
 
     #[command(flatten)]
     pub passwords: PasswordArgs,
+
+    /// 32-byte content-envelope file key: raw binary, or 64 hex characters.
+    #[arg(
+        long = "key-file",
+        value_name = "FILE",
+        help_heading = "Stego Envelope",
+        conflicts_with_all = ["password", "password_file"]
+    )]
+    pub key_file: Option<PathBuf>,
 
     /// Recursively descend into directories.
     #[arg(short = 'r', long = "recursive")]

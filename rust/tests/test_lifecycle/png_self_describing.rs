@@ -112,9 +112,7 @@ fn extraction_follows_the_carrier_not_the_caller() {
     // The caller asks for a model that has nothing to do with this carrier.
     let got = strhide::stego::png::engine::extract_png(
         &stego,
-        strhide::crypto::Credential::Password(
-            strhide::stego::format::OFFICIAL_PNG_FORMAT.fallback_secret,
-        ),
+        strhide::crypto::Credential::Password(strhide::stego::envelope::PUBLIC_DEFAULT_SECRET),
         None,
         &strhide::stego::format::OFFICIAL_PNG_FORMAT,
         &ImpostorModel,

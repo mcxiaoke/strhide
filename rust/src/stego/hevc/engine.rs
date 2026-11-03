@@ -21,7 +21,7 @@ use crate::stego::format::{
 };
 use crate::stego::header::{
     CONTENT_ENVELOPE_VERSION, FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT, TLV_CRITICAL, Tlv,
-    encode_extension, parse_extension,
+    encode_extension_for_write, parse_extension,
 };
 use crate::stego::hevc::bitstream::{compute_hevc_cover_digest, parse_annex_b_spans, rbsp_to_nal};
 use crate::stego::hevc::heif_boxes::parse_heif_targets;
@@ -423,7 +423,7 @@ fn hevc_header_slots(ext_len: usize) -> usize {
 
 /// Serialize the extension area and enforce the HEVC upper bound.
 fn extension_len(extensions: &[Tlv]) -> Result<usize, StrHideError> {
-    let len = encode_extension(extensions)?.len();
+    let len = encode_extension_for_write(extensions)?.len();
     if len > HEVC_MAX_EXT_BYTES {
         return Err(StrHideError::UnsupportedFormat(format!(
             "HEVC extension area is {len} bytes, maximum is {HEVC_MAX_EXT_BYTES}"
@@ -1144,7 +1144,7 @@ pub fn embed_hevc_patches_with_factor_v4(
         StrHideError::UnsupportedVersion(format!("Unknown content cipher suite id {suite_id}"))
     })?;
     let ext_len = extension_len(extensions)?;
-    let extension = encode_extension(extensions)?;
+    let extension = encode_extension_for_write(extensions)?;
 
     let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
         StrHideError::UnsupportedFormat(
@@ -1233,7 +1233,8 @@ pub fn embed_hevc_patches_with_factor_v4(
     let master = derive_locator_master(cred, domain, fmt.cipher, &cover_digest)?;
     let locator = derive_l2_locator_keys(&master, fmt.cipher, fmt.magic_label, domain)?;
 
-    let fresh_binding = Freshness::seeded_binding(carrier, payload.as_bytes());
+    let fresh_binding =
+        Freshness::seeded_binding(carrier, payload.as_bytes(), HEVC_FORMAT_ID, &extension);
     let nonce_bytes = freshness.nonce(0, &fresh_binding);
     let session = derive_l3_session_keys(
         fmt.cipher,
@@ -2085,6 +2086,25 @@ fn extract_hevc_from_sb_record_v4(
 
     let header =
         read_hevc_header_v4(carrier, &sb_record, cred, domain, fmt, limits)?.ok_or_else(no_data)?;
+    extract_hevc_with_header(carrier, _kind, sb_record, &header, fmt, limits, control)
+}
+
+/// Body extraction over an already-read, policy-checked V4 header.
+///
+/// `verify` reads the header for its level-2 verdict and then needs the same
+/// header for level 3; re-deriving it would pay the 200k-iteration L1 twice for
+/// one request (plan M-14).
+#[allow(clippy::too_many_arguments)]
+fn extract_hevc_with_header(
+    carrier: &[u8],
+    kind: HevcCarrierKind,
+    sb_record: CarrierRecord,
+    header: &HevcHeaderRead,
+    fmt: &HevcFormatProfile,
+    limits: &ExtractParams,
+    control: &Control<'_>,
+) -> Result<Payload<'static>, StrHideError> {
+    let no_data = || StrHideError::NoHiddenData("No valid payload found".into());
 
     // 2. Second stage: read the Body, but only after the header passed policy.
     let w0 = header.sb.window_slices as usize;
@@ -2093,7 +2113,7 @@ fn extract_hevc_from_sb_record_v4(
     } else {
         record_carrier_state(
             carrier,
-            _kind,
+            kind,
             Capture::Bits,
             StopCondition::TargetSlices(w0),
             control,
@@ -2150,8 +2170,7 @@ fn extract_hevc_from_sb_record_v4(
         &aad,
         ciphertext,
         limits,
-    )
-    .map_err(|_| no_data())?;
+    )?;
 
     // Critical extension TLVs are only meaningful after AEAD proved the header
     // is authentic; an unknown critical tag means this build cannot honour the
@@ -2241,14 +2260,20 @@ fn inspect_hevc_record(
         Ok(None) | Err(_) => return Ok(empty_info),
     };
 
-    let suite = match CipherSuiteId::from_u16(header.sb.suite_id) {
-        Some(suite) => suite,
-        None => return Ok(empty_info),
-    };
+    Ok(hevc_header_info(kind, &header, media_info).unwrap_or(empty_info))
+}
+
+/// Header report shared by `inspect` and `verify`.
+fn hevc_header_info(
+    kind: HevcCarrierKind,
+    header: &HevcHeaderRead,
+    media_info: Option<MediaInfo>,
+) -> Option<StegoHeaderInfo> {
+    let suite = CipherSuiteId::from_u16(header.sb.suite_id)?;
     let payload_len = (header.sb.body_len as usize)
         .saturating_sub(suite.tag_len())
         .saturating_sub(5);
-    Ok(StegoHeaderInfo {
+    Some(StegoHeaderInfo {
         format: kind.label().to_string(),
         has_hidden_data: true,
         algorithm: Some("HEVC-CABAC-InPlace".into()),
@@ -2717,10 +2742,54 @@ pub fn verify_hevc_v4(
     };
     control.check()?;
 
-    let header_info = inspect_hevc_record(
-        carrier, kind, &record, None, cred, domain, fmt, limits, control,
-    )?;
-    if !header_info.has_hidden_data {
+    // The V4 L1 cost is fixed; a policy below it must fail with a policy
+    // verdict, not "wrong password" (plan §4.2), and it must not pay PBKDF2.
+    if matches!(cred, Credential::Password(_))
+        && limits.max_pbkdf2_iterations < CONTENT_L1_PBKDF2_ITERATIONS
+    {
+        levels.push(VerifyLevel::fail(
+            2,
+            "Stego header",
+            format!(
+                "PBKDF2 iteration limit {} is below the V4 L1 cost {}",
+                limits.max_pbkdf2_iterations, CONTENT_L1_PBKDF2_ITERATIONS
+            ),
+        ));
+        levels.push(VerifyLevel::fail(
+            3,
+            "Payload decryption",
+            "Skipped due to level 2 policy failure",
+        ));
+        return Ok(StegoVerifyResult::new(format_name, levels));
+    }
+
+    // One header read serves both level 2 and level 3: re-deriving it in the
+    // extract step paid the 200k-iteration L1 twice for one request (M-14).
+    let media_info = {
+        let (width, height) = extract_hevc_dimensions(carrier).unwrap_or((0, 0));
+        if width > 0 && height > 0 {
+            Some(MediaInfo::new(width, height))
+        } else {
+            None
+        }
+    };
+    let header = match read_hevc_header_v4(carrier, &record, cred, domain, fmt, limits) {
+        Ok(Some(header)) => header,
+        Ok(None) | Err(_) => {
+            levels.push(VerifyLevel::fail(
+                2,
+                "Stego header",
+                "No valid HEVC stego signature found (or wrong password)",
+            ));
+            levels.push(VerifyLevel::fail(
+                3,
+                "Payload decryption",
+                "No stego header to extract payload from",
+            ));
+            return Ok(StegoVerifyResult::new(format_name, levels));
+        }
+    };
+    let Some(header_info) = hevc_header_info(kind, &header, media_info) else {
         levels.push(VerifyLevel::fail(
             2,
             "Stego header",
@@ -2732,7 +2801,7 @@ pub fn verify_hevc_v4(
             "No stego header to extract payload from",
         ));
         return Ok(StegoVerifyResult::new(format_name, levels));
-    }
+    };
     levels.push(VerifyLevel::pass(
         2,
         format!(
@@ -2743,8 +2812,7 @@ pub fn verify_hevc_v4(
     ));
     control.check()?;
 
-    match extract_hevc_from_sb_record_v4(carrier, kind, record, cred, domain, fmt, limits, control)
-    {
+    match extract_hevc_with_header(carrier, kind, record, &header, fmt, limits, control) {
         Ok(payload) => {
             let desc = match payload.name() {
                 Some(name) => format!(

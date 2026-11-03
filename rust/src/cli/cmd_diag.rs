@@ -67,6 +67,7 @@ pub(crate) fn handle_inspect(
         false,
         false,
     )?;
+    let key = resolve_key_file(args.key_file.as_deref())?;
 
     let is_batch = args.carrier.len() > 1 || args.carrier.iter().any(|p| p.is_dir());
     let files = expand_input_paths(&args.carrier, args.recursive, quiet)?;
@@ -82,6 +83,7 @@ pub(crate) fn handle_inspect(
             carrier,
             &crate::facade::DualOptions {
                 password: password.as_deref(),
+                key: key.as_ref(),
                 domain: None,
                 control: crate::core::control::Control::none(),
             },
@@ -103,6 +105,7 @@ pub(crate) fn handle_inspect(
             carrier,
             &crate::facade::DualOptions {
                 password: password.as_deref(),
+                key: key.as_ref(),
                 domain: None,
                 control: crate::core::control::Control::none(),
             },
@@ -217,6 +220,7 @@ pub(crate) fn handle_verify(
         false,
         false,
     )?;
+    let key = resolve_key_file(args.key_file.as_deref())?;
 
     let is_batch = args.carrier.len() > 1 || args.carrier.iter().any(|p| p.is_dir());
     let files = expand_input_paths(&args.carrier, args.recursive, quiet)?;
@@ -232,6 +236,7 @@ pub(crate) fn handle_verify(
             carrier,
             &crate::facade::DualOptions {
                 password: password.as_deref(),
+                key: key.as_ref(),
                 domain: None,
                 control: crate::core::control::Control::none(),
             },
@@ -305,6 +310,7 @@ pub(crate) fn handle_verify(
             carrier,
             &crate::facade::DualOptions {
                 password: password.as_deref(),
+                key: key.as_ref(),
                 domain: None,
                 control: crate::core::control::Control::none(),
             },

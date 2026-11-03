@@ -208,7 +208,6 @@ pub(crate) fn has_per_format_flags(args: &StegoTuningArgs) -> bool {
     args.exclusion_rate.is_some()
         || args.neighbor_weight.is_some()
         || args.slot_budget.is_some()
-        || args.cipher_suite.is_some()
         || args.p1_window.is_some()
         || args.p2_window.is_some()
         || args.stc_h.is_some()
@@ -361,6 +360,48 @@ pub(crate) fn stego_safety(
     })
 }
 
+/// Read a 32-byte content-envelope file key.
+///
+/// Accepts the raw 32 bytes, or a text file holding 64 hex characters (with an
+/// optional `0x` prefix and surrounding whitespace). Anything else is rejected
+/// with the expected size in the message: a silently padded or hashed key would
+/// derive a different master and read every carrier as "no hidden data".
+pub fn resolve_key_file(path: Option<&Path>) -> Result<Option<[u8; 32]>, StrHideError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(path).map_err(|e| {
+        StrHideError::General(format!("Failed to read key file '{}': {e}", path.display()))
+    })?;
+    if bytes.len() == 32 {
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        return Ok(Some(key));
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| {
+            StrHideError::General(format!(
+                "Key file '{}' is neither 32 raw bytes nor hexadecimal text",
+                path.display()
+            ))
+        })?
+        .trim();
+    let digits = text.strip_prefix("0x").unwrap_or(text);
+    if digits.len() == 64 && digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let mut key = [0u8; 32];
+        for (i, slot) in key.iter_mut().enumerate() {
+            *slot = u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16)
+                .map_err(|e| StrHideError::General(format!("Key file is not valid hex: {e}")))?;
+        }
+        return Ok(Some(key));
+    }
+    Err(StrHideError::General(format!(
+        "Key file '{}' must hold exactly 32 raw bytes or 64 hex characters, found {} bytes",
+        path.display(),
+        bytes.len()
+    )))
+}
+
 /// Assemble the option sets for `embed` and the capacity probe.
 ///
 /// The `--capacity` probe and the real embed used to build this list twice, and
@@ -375,6 +416,7 @@ pub(crate) fn stego_safety(
 pub(crate) fn stego_options<'a>(
     args: &StegoTuningArgs,
     password: Option<&'a str>,
+    key: Option<&'a [u8; 32]>,
     format: Option<FileFormat>,
     cfg: &FileConfig,
 ) -> Result<(EmbedOptions<'a>, ProbeOptions<'a>), StrHideError> {
@@ -382,6 +424,7 @@ pub(crate) fn stego_options<'a>(
     let safety = stego_safety(args, cfg)?;
     let mut embed = EmbedOptions {
         password,
+        key,
         suite_id: args.cipher_suite,
         safety,
         tuning: tuning.clone(),
@@ -393,6 +436,7 @@ pub(crate) fn stego_options<'a>(
     }
     let probe = ProbeOptions {
         password,
+        key,
         safety,
         tuning,
         exact: args.exact,

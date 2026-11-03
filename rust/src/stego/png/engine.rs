@@ -52,13 +52,9 @@ use crate::stego::envelope::{
 };
 use crate::stego::format::{derive_l2_locator_keys, derive_l3_session_keys, derive_locator_master};
 use crate::stego::header::{
-    CONTENT_ENVELOPE_VERSION, FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT, MAX_EXT_BYTES,
+    CONTENT_ENVELOPE_VERSION, FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT, HEADER_LEN_MAX, MAX_EXT_BYTES,
     PNG_AUDIO_BASE_HEADER_BYTES, PNG_AUDIO_BASE_SLOTS, SpatialHeaderV4, TLV_CRITICAL, Tlv,
-    encode_extension, parse_extension,
-};
-pub use crate::stego::header::{
-    FeatureWord, HEADER_LEN_MASK, HEADER_LEN_MAX, HEADER_V2_ESCAPE_H, V2_TOTAL_HEADER_SLOTS,
-    decode_header_word, encode_header_word,
+    encode_extension_for_write, parse_extension, quantize_epsilon_k,
 };
 use crate::stego::options::{StegoHeaderInfo, StegoVerifyResult, VerifyLevel};
 use crate::stego::params::{ExtractParams, SafetyPolicy};
@@ -1348,7 +1344,7 @@ pub fn embed_png_with_stats<'a>(
     let suite = CipherSuiteId::from_u16(suite_id).ok_or_else(|| {
         StrHideError::UnsupportedVersion(format!("Unknown content cipher suite id {suite_id}"))
     })?;
-    let extension = encode_extension(extensions)?;
+    let extension = encode_extension_for_write(extensions)?;
     if extension.len() > MAX_EXT_BYTES {
         return Err(StrHideError::General(format!(
             "Extension area is {} bytes, the maximum is {MAX_EXT_BYTES}",
@@ -1374,16 +1370,15 @@ pub fn embed_png_with_stats<'a>(
     // is produced further down: the finished base header plus extension area is
     // its associated data, so it cannot exist until codec/h/u are settled.
     let plaintext = build_plaintext(&payload)?;
-    let cipher = &crate::stego::format::OFFICIAL_PNG_CIPHER;
+    let cipher = spatial.cipher;
     let pre_salt = png_pre_salt(&image, spatial);
     let master = derive_locator_master(cred, domain, cipher, &pre_salt)?;
     let locator = derive_l2_locator_keys(&master, cipher, b"strhide-v4-hdr-magic", domain)?;
-    // Seeded runs bind salt/nonce to the cover, payload, format and extension
-    // area, so a replay on different inputs can never reuse a (key, nonce) pair.
-    let mut fresh_binding = Freshness::seeded_binding(carrier_bytes, payload.as_bytes()).to_vec();
-    fresh_binding.push(PNG_FORMAT_ID);
-    fresh_binding.push(CONTENT_ENVELOPE_VERSION);
-    fresh_binding.extend_from_slice(&extension);
+    // Seeded runs bind salt/nonce to the cover, payload, format, version and
+    // extension area, so a replay on different inputs can never reuse a
+    // (key, nonce) pair.
+    let fresh_binding =
+        Freshness::seeded_binding(carrier_bytes, payload.as_bytes(), PNG_FORMAT_ID, &extension);
     let salt = freshness.salt(0, &fresh_binding);
     let nonce = freshness.nonce(0, &fresh_binding);
     let session = derive_l3_session_keys(cipher, suite, &master, &salt, domain)?;
@@ -1396,7 +1391,7 @@ pub fn embed_png_with_stats<'a>(
     // extractor can only ever reproduce these forms. The prober quantises
     // the same way, so advertised capacity and embedding pool agree.
     let params = params.wire_quantized();
-    let eps_k = FeatureWord::quantize_epsilon(params.epsilon);
+    let eps_k = quantize_epsilon_k(params.epsilon);
 
     // Compute distortion cost map
     let costs = cost_model.compute_cost(&image.pixels, w, h, image.channels, &params);
@@ -1794,6 +1789,36 @@ pub fn extract_png(
     )
 }
 
+/// L1/L2 outputs shared by extract, inspect and verify.
+///
+/// `verify` needs the locator keys for its header level *and* for its payload
+/// level; deriving them twice paid the 200k-iteration L1 twice for one user
+/// request. This value is derived once and passed down.
+struct PngKeys {
+    master: [u8; 32],
+    locator: crate::stego::format::HeaderLocatorKeys,
+}
+
+/// Derive the per-carrier L1 master and L2 locator keys.
+fn png_keys(
+    image: &RawImage,
+    cred: Credential<'_>,
+    domain: Option<&str>,
+    spatial: &crate::stego::format::PngFormatProfile,
+) -> Result<PngKeys, StrHideError> {
+    let cipher = spatial.cipher;
+    let pre_salt = png_pre_salt(image, spatial);
+    let master = derive_locator_master(cred, domain, cipher, &pre_salt)?;
+    let locator = derive_l2_locator_keys(&master, cipher, b"strhide-v4-hdr-magic", domain)?;
+    Ok(PngKeys { master, locator })
+}
+
+/// Whether a policy is willing to pay the fixed V4 L1 cost.
+fn l1_allowed(cred: &Credential<'_>, limits: &ExtractParams) -> bool {
+    !matches!(cred, Credential::Password(_))
+        || limits.max_pbkdf2_iterations >= crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS
+}
+
 /// Body of [`extract_png`] for an already-decoded image.
 ///
 /// `verify_png` decodes once and reuses the pixels across all three levels
@@ -1810,28 +1835,39 @@ fn extract_png_image(
     control: &Control<'_>,
 ) -> Result<Payload<'static>, StrHideError> {
     params.validate()?;
-    let no_hidden = || StrHideError::NoHiddenData("No valid payload found".into());
-
     // Refuse a policy that cannot pay the one fixed L1 cost before running it.
-    // `FileKey` never uses PBKDF2, so only the password path is gated.
-    if matches!(cred, Credential::Password(_))
-        && limits.max_pbkdf2_iterations < crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS
-    {
-        return Err(no_hidden());
+    if !l1_allowed(&cred, limits) {
+        return Err(StrHideError::NoHiddenData("No valid payload found".into()));
     }
+    let keys = png_keys(image, cred, domain, spatial)?;
+    extract_png_with_keys(
+        image, &keys, domain, spatial, cost_model, params, limits, control,
+    )
+}
+
+/// Extraction over a pre-derived L1/L2 key set.
+#[allow(clippy::too_many_arguments)]
+fn extract_png_with_keys(
+    image: &RawImage,
+    keys: &PngKeys,
+    domain: Option<&str>,
+    spatial: &crate::stego::format::PngFormatProfile,
+    cost_model: &dyn PngCostModel,
+    params: &PngParams,
+    limits: &ExtractParams,
+    control: &Control<'_>,
+) -> Result<Payload<'static>, StrHideError> {
+    params.validate()?;
+    let no_hidden = || StrHideError::NoHiddenData("No valid payload found".into());
+    let PngKeys { master, locator } = *keys;
 
     let w = image.width as usize;
     let h = image.height as usize;
-    let cipher = &crate::stego::format::OFFICIAL_PNG_CIPHER;
+    let cipher = spatial.cipher;
     let carrier_slots = header_pool(image).len();
     if carrier_slots < PNG_AUDIO_BASE_SLOTS {
         return Err(no_hidden());
     }
-
-    // L1 + L2: locator keys depend on the carrier identity, not on the salt.
-    let pre_salt = png_pre_salt(image, spatial);
-    let master = derive_locator_master(cred, domain, cipher, &pre_salt)?;
-    let locator = derive_l2_locator_keys(&master, cipher, b"strhide-v4-hdr-magic", domain)?;
 
     // Read the 64-byte base header from the first 512 keyed slots. The
     // prefix is stable, so this is the same permutation the writer used.
@@ -2007,6 +2043,10 @@ fn extract_png_image(
     };
 
     let aad = build_v4_aad(PNG_FORMAT_ID, &base_bytes, &extension);
+    // AEAD failure (and every structural failure before it) already collapsed
+    // to `NoHiddenData` inside the envelope code. Once the tag verifies the
+    // carrier is provably ours, so a broken frame / oversized payload must
+    // surface as `CorruptedData` / capacity instead of "no payload here".
     unpack_v4_envelope_parts(
         suite,
         &session.enc_key,
@@ -2015,7 +2055,6 @@ fn extract_png_image(
         &ciphertext,
         limits,
     )
-    .map_err(|_| no_hidden())
 }
 
 /// Inspect PNG for stego header and self-describing metadata without decoding body.
@@ -2058,30 +2097,32 @@ fn inspect_png_image(
     limits: &ExtractParams,
     control: &Control<'_>,
 ) -> Result<StegoHeaderInfo, StrHideError> {
+    if !l1_allowed(&cred, limits) {
+        let mut empty = StegoHeaderInfo::empty("PNG");
+        empty.media_info = Some(MediaInfo::new(image.width, image.height));
+        return Ok(empty);
+    }
+    let keys = png_keys(image, cred, domain, spatial)?;
+    inspect_png_with_keys(image, &keys, limits, control)
+}
+
+/// Header inspection over a pre-derived L1/L2 key set.
+fn inspect_png_with_keys(
+    image: &RawImage,
+    keys: &PngKeys,
+    limits: &ExtractParams,
+    control: &Control<'_>,
+) -> Result<StegoHeaderInfo, StrHideError> {
     control.check()?;
     let media_info = Some(MediaInfo::new(image.width, image.height));
     let mut empty_info = StegoHeaderInfo::empty("PNG");
     empty_info.media_info = media_info;
 
-    if matches!(cred, Credential::Password(_))
-        && limits.max_pbkdf2_iterations < crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS
-    {
-        return Ok(empty_info);
-    }
-
-    let cipher = &crate::stego::format::OFFICIAL_PNG_CIPHER;
+    let locator = &keys.locator;
     let carrier_slots = header_pool(image).len();
     if carrier_slots < PNG_AUDIO_BASE_SLOTS {
         return Ok(empty_info);
     }
-    let pre_salt = png_pre_salt(image, spatial);
-    let Ok(master) = derive_locator_master(cred, domain, cipher, &pre_salt) else {
-        return Ok(empty_info);
-    };
-    let Ok(locator) = derive_l2_locator_keys(&master, cipher, b"strhide-v4-hdr-magic", domain)
-    else {
-        return Ok(empty_info);
-    };
 
     let base_layout = header_layout(image, &locator.locate_seed, 0);
     let base_bytes: [u8; PNG_AUDIO_BASE_HEADER_BYTES] =
@@ -2209,13 +2250,15 @@ pub fn verify_png(
         return Ok(StegoVerifyResult::new("PNG", levels));
     }
 
-    // Level 2: Stego Header & Extension
-    let header_info = inspect_png_image(&image, cred, domain, spatial, limits, control)?;
+    // Level 2 and 3 share one L1/L2 derivation: `verify` is one user request,
+    // so it must not pay the 200k-iteration L1 twice (plan M-14).
+    let keys = png_keys(&image, cred, domain, spatial)?;
+    let header_info = inspect_png_with_keys(&image, &keys, limits, control)?;
     if !header_info.has_hidden_data {
         levels.push(VerifyLevel::fail(
             2,
             "Stego header",
-            "No valid stego header or FeatureWord found (or wrong password)",
+            "No valid V4 stego header found (or wrong password)",
         ));
         levels.push(VerifyLevel::fail(
             3,
@@ -2238,8 +2281,8 @@ pub fn verify_png(
     // Level 3: Payload Decryption & AEAD Authenticity
     let model = crate::stego::options::SpatialAlgorithm::default().model();
     let params = crate::stego::params::PngParams::default();
-    match extract_png_image(
-        &image, cred, domain, spatial, &*model, &params, limits, control,
+    match extract_png_with_keys(
+        &image, &keys, domain, spatial, &*model, &params, limits, control,
     ) {
         Ok(payload) => {
             let desc = match payload.name() {
@@ -2377,7 +2420,7 @@ pub fn probe_png_capacity(
     // Probe with the same wire-quantised hyperparameters the embedder will
     // use, so the advertised capacity matches the pool embedding sees.
     let params = params.wire_quantized();
-    let extension = encode_extension(extensions)?;
+    let extension = encode_extension_for_write(extensions)?;
     if extension.len() > MAX_EXT_BYTES {
         return Err(StrHideError::General(format!(
             "Extension area is {} bytes, the maximum is {MAX_EXT_BYTES}",
@@ -2399,7 +2442,7 @@ pub fn probe_png_capacity(
 
     // Same credential, carrier identity and extension area as the writer: the
     // header permutation (and therefore the body pool) must match exactly.
-    let cipher = &crate::stego::format::OFFICIAL_PNG_CIPHER;
+    let cipher = spatial.cipher;
     let pre_salt = png_pre_salt(&image, spatial);
     let master = derive_locator_master(cred, domain, cipher, &pre_salt)?;
     let locator = derive_l2_locator_keys(&master, cipher, b"strhide-v4-hdr-magic", domain)?;
@@ -2422,13 +2465,10 @@ mod tests {
     /// Test-side credential shim: the pre-V4 tests pass `None` to mean the
     /// profile's public fallback secret, which V4 expresses as a password
     /// credential.
-    fn test_cred<'a>(
-        password: Option<&'a str>,
-        spatial: &crate::stego::format::PngFormatProfile,
-    ) -> Credential<'a> {
+    fn test_cred<'a>(password: Option<&'a str>) -> Credential<'a> {
         match password {
             Some(password) => Credential::Password(password),
-            None => Credential::Password(spatial.fallback_secret),
+            None => Credential::Password(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
         }
     }
 
@@ -2448,7 +2488,7 @@ mod tests {
         super::embed_png(
             carrier_bytes,
             payload,
-            test_cred(password, spatial),
+            test_cred(password),
             domain,
             crate::stego::format::OFFICIAL_PNG_CIPHER
                 .default_suite
@@ -2474,7 +2514,7 @@ mod tests {
     ) -> Result<Vec<u8>, StrHideError> {
         super::extract_png(
             carrier_bytes,
-            test_cred(password, spatial),
+            test_cred(password),
             domain,
             spatial,
             cost_model,
@@ -2501,7 +2541,7 @@ mod tests {
             cost_model,
             params,
             safety_level,
-            test_cred(password, spatial),
+            test_cred(password),
             domain,
             &[],
             spatial,
@@ -2961,23 +3001,6 @@ mod tests {
         )
         .expect("extract");
         assert_eq!(extracted, payload, "the wire value must round-trip");
-    }
-
-    #[test]
-    fn hamming_and_stc_headers_differ_only_in_the_flag_bits() {
-        // The length field is shared by both codecs, so a reader that ignores
-        // the flags still sees the right length -- that is what makes the
-        // change backwards compatible with pre-existing carriers.
-        for (codec, stc_h) in [(StegoCodec::Hamming, 0u8), (StegoCodec::Stc, 8)] {
-            let word = encode_header_word(1234, codec, stc_h, 1);
-            let (len, codec_id, h) = decode_header_word(word);
-            assert_eq!(len, 1234, "{codec:?}: length must round-trip");
-            assert_eq!(codec_id, codec.id());
-            assert_eq!(h, if codec == StegoCodec::Hamming { 0 } else { 8 });
-        }
-        // Pre-existing carriers have zeros in every flag bit.
-        let legacy = encode_header_word(1234, StegoCodec::Hamming, 0, 1);
-        assert_eq!(legacy, 1234, "a legacy header is the bare length");
     }
 
     #[test]
@@ -3822,7 +3845,7 @@ mod tests {
         let costs = HillCostModel.compute_cost(&img.pixels, w, h, 3, &params);
         let pre_salt = png_pre_salt(&img, &crate::stego::format::OFFICIAL_PNG_FORMAT);
         let master = derive_locator_master(
-            Credential::Password(crate::stego::format::OFFICIAL_PNG_FORMAT.fallback_secret),
+            Credential::Password(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
             None,
             &crate::stego::format::OFFICIAL_PNG_CIPHER,
             &pre_salt,
@@ -3868,13 +3891,21 @@ mod tests {
         let payload = b"private-spatial-dialect-content-2026";
         let params = PngParams::default();
 
+        // A private build changes *every* derivation label, exactly as
+        // `WIRE_SPEC §13.10` promises. `hpos_salt` alone would leave the KDF
+        // labels official, which is what the old profile shape did.
+        const PRIVATE_CIPHER: crate::stego::format::WireCipherProfile =
+            crate::stego::format::WireCipherProfile {
+                domain_label: b"private-domain-label",
+                hpos_label: b"private-hpos-label-xyz",
+                enc_label: b"private-enc-label",
+                perm_label: b"private-perm-label",
+                stc_label: b"private-stc-label-xyz",
+                default_suite: crate::crypto::CipherSuiteId::Aes256Gcm,
+            };
         let private_spatial = crate::stego::format::PngFormatProfile {
-            fallback_secret: "private-secret-key-12345",
-            domain_label: b"private-domain-label",
             hpos_salt: b"private-hpos-salt-xyz",
-            hpos_label: b"private-hpos-label-xyz",
-            stc_label: b"private-stc-label-xyz",
-            body: &crate::stego::format::DEFAULT_JPEG_FORMAT,
+            cipher: &PRIVATE_CIPHER,
         };
 
         // 1. Embed with private dialect
@@ -3974,7 +4005,7 @@ mod tests {
         let (_stego, stats, embedded_cap) = embed_png_with_stats(
             &png,
             b"test payload",
-            test_cred(Some("pw"), &spatial),
+            test_cred(Some("pw")),
             None,
             crate::stego::format::OFFICIAL_PNG_CIPHER
                 .default_suite
@@ -4107,12 +4138,14 @@ mod tests {
         let got = extract_with(&stego, "pw", &ExtractParams::default()).expect("extract");
         assert_eq!(got, b"extension payload");
 
-        // Unknown critical TLV: the reader must refuse rather than skip it.
+        // Unknown critical TLV: the writer refuses it outright, because V4
+        // defines no critical extension and every reader (this one included)
+        // folds an unknown critical tag into `NoHiddenData`.
         let critical = [Tlv {
             type_id: 0x81,
             value: vec![9],
         }];
-        let stego_c = super::embed_png(
+        let err = super::embed_png(
             &png,
             b"critical extension payload",
             v4_cred("pw"),
@@ -4128,11 +4161,75 @@ mod tests {
             Freshness::Random,
             &Control::none(),
         )
-        .expect("embedding a critical extension is allowed");
-        assert!(matches!(
-            extract_with(&stego_c, "pw", &ExtractParams::default()),
-            Err(StrHideError::NoHiddenData(_))
-        ));
+        .unwrap_err();
+        assert!(matches!(err, StrHideError::General(_)), "{err:?}");
+
+        // A hostile writer bypasses that check; the reader must still refuse.
+        let forged = forge_header_area(&stego, &[0x81, 0x01, 9]);
+        assert!(
+            matches!(
+                extract_with(&forged, "pw", &ExtractParams::default()),
+                Err(StrHideError::NoHiddenData(_))
+            ),
+            "an unknown critical TLV must fail closed"
+        );
+    }
+
+    /// Rewrite a PNG carrier's base header and extension area so it declares
+    /// the given (critical) TLV bytes, the way a writer that ignored the
+    /// fail-closed validation would have produced it.
+    fn forge_header_area(stego: &[u8], extension: &[u8]) -> Vec<u8> {
+        use crate::stego::header::{
+            CONTENT_ENVELOPE_VERSION, FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT, SpatialHeaderV4,
+        };
+
+        let mut image = decode_png(stego).expect("decode");
+        let spatial = &crate::stego::format::OFFICIAL_PNG_FORMAT;
+        let keys = png_keys(&image, v4_cred("pw"), None, spatial).expect("keys");
+        let header = SpatialHeaderV4 {
+            salt: [1u8; 16],
+            nonce: [2u8; 12],
+            body_len: 64,
+            version: CONTENT_ENVELOPE_VERSION,
+            flags: FLAG_EXT_PRESENT | FLAG_EXT_CRITICAL,
+            format_id: PNG_FORMAT_ID,
+            algorithm_id: 1,
+            suite_id: 1,
+            codec_id: 1,
+            stc_h: 8,
+            stc_u: 1,
+            channel_mode: 0,
+            class_rule: 1,
+            p1_window: 3,
+            p2_window: 15,
+            neg_log2_epsilon: 23,
+            exclusion_permille: 300,
+            sigma: 1.0,
+            kernel_id: 0,
+            ext_len: extension.len() as u16,
+        };
+        let layout = header_layout(&image, &keys.locator.locate_seed, extension.len());
+        let channel = embed_channel(&image);
+        let bytes = header.encode();
+        for (i, slot) in layout[..PNG_AUDIO_BASE_SLOTS].iter().enumerate() {
+            let bit = (bytes[i / 8] >> (7 - (i % 8))) & 1;
+            set_parity(&mut image.pixels[slot * image.channels + channel], bit);
+        }
+        for (i, slot) in layout[PNG_AUDIO_BASE_SLOTS..PNG_AUDIO_BASE_SLOTS + 8 * extension.len()]
+            .iter()
+            .enumerate()
+        {
+            let bit = (extension[i / 8] >> (7 - (i % 8))) & 1;
+            set_parity(&mut image.pixels[slot * image.channels + channel], bit);
+        }
+        encode_png(&image).expect("encode")
+    }
+
+    /// Force the low bit of `value` without crossing the class-interior rule.
+    fn set_parity(value: &mut u8, bit: u8) {
+        if (*value & 1) != bit {
+            *value ^= 1;
+        }
     }
 
     #[test]

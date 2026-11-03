@@ -14,9 +14,11 @@
 > **V4 内容信封变更**：凭据统一为 `Credential::{Password, FileKey}`；
 > 套件枚举 `CipherSuiteId`（1 = AES-256-GCM 默认，2 = ChaCha20-Poly1305，
 > append-only）；选项新增 `key` / `suite_id` / `extensions: Vec<Tlv>`；
-> 旧 `CipherSuite` / `SUITES` / `FeatureWord` / `header_v3::Superblock` 已删除。
-> CLI 目前只暴露 `--cipher-suite`，`--key-file` / `--max-payload` /
-> `--extensions` **尚未实现**。
+> 旧 `CipherSuite` / `SUITES` / `FeatureWord` / `header_v3::Superblock` 已删除，
+> `FeatureWord` 的 epsilon 量化改为 `header::quantize_epsilon_k`。
+> CLI 暴露 `--cipher-suite`（别名 `--suite`）、`--key-file`（embed/capacity/
+> extract/inspect/verify，接受 32 原始字节或 64 位十六进制）与 `--max-payload`
+> （extract）；`--extensions` 仍未接线。
 
 ---
 
@@ -205,9 +207,10 @@ for info in png_algos {
 | `capacity` | `probe_carrier_capacity_with_dialect` | 独立只读探测子命令（与 `embed --capacity` 同一实现），`--json` 输出 `StegoCapacityInfo`；`--exact` 强制全量精确扫描（长视频默认开启前 20% 样本加权快速估算）；与 embed 共享同一组调参/凭据参数 |
 | `embed --capacity` | 同上 | 别名形式保留，支持 `--exact` |
 
-**未实现的 CLI 能力**（不要当成已有参数）：`--key-file`（`Credential::FileKey`）、
-`--max-payload`（`ExtractParams.max_payload_bytes`）、`--extensions`（TLV 扩展区）；
-库 API 已支持，CLI/GUI 尚未接线。套件只有隐藏参数 `--cipher-suite`（`1`/`2`）。
+**未实现的 CLI 能力**：`--extensions`（TLV 扩展区）；库 API 已支持，CLI/GUI 未接线。
+`--key-file`（`Credential::FileKey`）与 `--max-payload`（`ExtractParams.max_payload_bytes`）
+已接线（GUI 仍只有密码）。套件参数为 `--cipher-suite`（别名 `--suite`，`1`/`2`，
+对所有内容格式生效，归在 `Stego Envelope` 分组）。
 
 提取端自描述范围（无需在提取时重复）：算法 id、排除率（`exclusion_permille`）、
 codec、`h`、`u`、通道模式、`format_id`、`suite_id`、`body_len`、扩展区（64B/44B/32B 基础头）；

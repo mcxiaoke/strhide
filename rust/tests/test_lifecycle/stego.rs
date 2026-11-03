@@ -178,9 +178,9 @@ fn header_slots_of(png: &[u8], password: Option<&str>) -> Vec<usize> {
     );
     let cred = match password {
         Some(password) => strhide::crypto::Credential::Password(password),
-        None => strhide::crypto::Credential::Password(
-            strhide::stego::format::OFFICIAL_PNG_FORMAT.fallback_secret,
-        ),
+        None => {
+            strhide::crypto::Credential::Password(strhide::stego::envelope::PUBLIC_DEFAULT_SECRET)
+        }
     };
     let master = strhide::stego::format::derive_locator_master(
         cred,

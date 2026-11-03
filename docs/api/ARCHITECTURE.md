@@ -363,6 +363,10 @@ pub struct MediaInfo {               // 原 `media_info: Option<String>`（"1920
   - Level 2 信封头/尾定位与内部一致性（版本、长度、CRC、偏移）；
   - Level 3 载荷可解密且 SHA-256 与元数据一致。
 
+  内容域的 verify 复用同一次 L1/L2 派生（`PngKeys` / 已读 `HevcHeaderRead`），
+  不为 Level 3 重新派生；派生次数可用 `stego::format::locator_derivation_count()`
+  断言（方案 M-14）。
+
 ### 5.5 内容域嵌入 / 提取（V4 内容信封）
 
 ```text
@@ -373,7 +377,8 @@ embed（PNG→spatial，JPEG→jpeg，HEVC/HEIC→hevc，WAV/FLAC→audio）：
       → 32B 主密钥（Password 走 PBKDF2-200k；FileKey 直接进 HKDF）
  4. L2：derive_l2_locator_keys(master, cipher, magic_label, domain)
       → locate_seed / header_stc_seed / ext_stc_seed / magic4
- 5. 用 header_stc_seed 定位基础头（64/44/32B），解码并 validate_common()
+ 5. 用 locate_seed 定位基础头槽位（64/44/32B），基础头的 STC 编码用 header_stc_seed；
+    解码并 validate_common()
  6. L3：derive_l3_session_keys(cipher, suite, master, header_salt, domain)
       → enc_key / perm_seed / stc_seed
  7. AEAD 加密：AAD = "strhide-content-envelope-v4\0" || format_id || 基础头 || 扩展区

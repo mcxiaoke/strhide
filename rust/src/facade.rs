@@ -105,6 +105,8 @@ pub enum Domain {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct DualOptions<'a> {
     pub password: Option<&'a str>,
+    /// Content-domain file key; ignored by the structure domain.
+    pub key: Option<&'a [u8; 32]>,
     pub domain: Option<&'a str>,
     pub control: Control<'a>,
 }
@@ -113,6 +115,7 @@ impl std::fmt::Debug for DualOptions<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DualOptions")
             .field("password", &self.password.map(|_| "<redacted>"))
+            .field("key", &self.key.map(|_| "<redacted>"))
             .field("domain", &self.domain)
             .field("control", &self.control)
             .finish()
@@ -435,7 +438,7 @@ impl StrHide {
             if format.is_some_and(|f| f.supports_stego()) {
                 let stego_opts = crate::stego::InspectOptions {
                     password: opts.password,
-                    key: None,
+                    key: opts.key,
                     domain: opts.domain,
                     limits: crate::stego::ExtractParams::default(),
                     control: opts.control,
@@ -497,7 +500,7 @@ impl StrHide {
             if format.is_some_and(|f| f.supports_stego()) {
                 let ver_opts = crate::stego::VerifyOptions {
                     password: opts.password,
-                    key: None,
+                    key: opts.key,
                     domain: opts.domain,
                     limits: crate::stego::ExtractParams::default(),
                     control: opts.control,
@@ -535,6 +538,9 @@ impl StrHide {
             carrier,
             &DualOptions {
                 password: opts.password,
+                // `smart_extract` has no file-key input; callers that need one
+                // use the content-domain entry points directly.
+                key: None,
                 domain: opts.domain,
                 control: opts.control,
             },

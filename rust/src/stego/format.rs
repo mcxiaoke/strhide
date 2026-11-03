@@ -104,28 +104,27 @@ pub const DEFAULT_HEVC_FORMAT: HevcFormatProfile = HevcFormatProfile {
     stc_u: 2,
 };
 
-/// Identity of one wire format.
-///
-/// # Field effects (for private builds)
-///
-/// | field | change it and… |
-/// | :--- | :--- |
-/// | `format_major` / `format_minor` | the decoder accepts/rejects differently; the bytes stay readable |
-/// | `cover_digest_tag` | the header-location KDF salt changes, so no header can be found: unreadable |
-/// | `hpos_label` | header slots move: unreadable |
-/// | `stc_label` / `enc_label` / `perm_label` | body trellis / key / slot order change: unreadable |
-/// | `sb_bytes` / `sb_h` / `sb_u` | different superblock slot count; must stay self-consistent |
-/// | `ext_h` / `ext_u` | different extension-area slot count |
-/// | `grid_rule` | different slot set |
-/// | `suites` | which ids may be written and read |
-///
-/// A mismatch on any of the derivation labels behaves exactly like a wrong
-/// password (`NoHiddenData`), which is the point.
+/// Serialised JPEG superblock size in bytes (352 bits).
 pub const JPEG_SUPERBLOCK_BYTES: usize = 44;
 
 /// Bit slots of the default JPEG superblock (`2 * (44 * 8 + 8 - 1)`).
 pub const JPEG_SUPERBLOCK_SLOTS: usize = 718;
 
+/// Identity of one JPEG wire format.
+///
+/// # Field effects (for private builds)
+///
+/// | field | change it and… |
+/// | :--- | :--- |
+/// | `cover_digest_tag` | the L1 `pre_salt` changes, so no header can be found: unreadable |
+/// | `cipher` | the V4 label table and the default suite change: unreadable |
+/// | `sb_bytes` | must stay 44, the serialised superblock length |
+/// | `sb_h` / `sb_u` | different superblock slot count; must stay self-consistent |
+/// | `ext_h` / `ext_u` | different extension-area slot count |
+/// | `grid_rule` | different slot set |
+///
+/// A mismatch on any of the derivation labels behaves exactly like a wrong
+/// password (`NoHiddenData`), which is the point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JpegFormatProfile {
     /// KDF-salt tag of the cover digest (V4 `pre_salt` domain separation).
@@ -248,29 +247,23 @@ pub const DEFAULT_JPEG_FORMAT: JpegFormatProfile = JpegFormatProfile {
 };
 
 /// Identity and KDF derivation labels for spatial (PNG) steganography.
+///
+/// V4 keeps the same shape as [`AudioFormatProfile`]: the public `hpos_salt`
+/// feeds the carrier-derived `pre_salt`, and the private [`WireCipherProfile`]
+/// supplies every non-secret KDF label. Changing either produces a different
+/// wire format -- a carrier written with one build is unreadable with another,
+/// and the failure is indistinguishable from a wrong password.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PngFormatProfile {
-    /// Stand-in secret used when neither a user password nor a private secret is provided.
-    pub fallback_secret: &'static str,
-    /// HKDF info label for domain subkey derivation.
-    pub domain_label: &'static [u8],
-    /// HKDF salt for header position permutation seed derivation.
+    /// HKDF salt mixed into the carrier's `pre_salt`.
     pub hpos_salt: &'static [u8],
-    /// HKDF info label for header position permutation seed derivation.
-    pub hpos_label: &'static [u8],
-    /// HKDF info label for STC trellis seed derivation.
-    pub stc_label: &'static [u8],
-    /// Format settings for cipher suite and payload keys.
-    pub body: &'static JpegFormatProfile,
+    /// V4 label table and default suite.
+    pub cipher: &'static WireCipherProfile,
 }
 
 pub const OFFICIAL_PNG_FORMAT: PngFormatProfile = PngFormatProfile {
-    fallback_secret: "strhide-default-content-stego-key-2026",
-    domain_label: b"strhide-stego-domain-v1",
     hpos_salt: b"strhide-stego-hpos-salt-v2",
-    hpos_label: b"strhide-stego-hpos-v2",
-    stc_label: b"strhide-stc-trellis-v1",
-    body: &DEFAULT_JPEG_FORMAT,
+    cipher: &OFFICIAL_PNG_CIPHER,
 };
 
 /// Identity of audio (WAV / FLAC) steganography.
@@ -402,6 +395,29 @@ fn hkdf_expand_u64(ikm: &[u8], info: &[u8]) -> u64 {
     u64::from_be_bytes(out)
 }
 
+thread_local! {
+    /// Number of [`derive_locator_master`] calls on the current thread.
+    ///
+    /// One L1 derivation is the expensive half of every operation (200k PBKDF2
+    /// for a password), so "one derivation per request" is a testable contract
+    /// rather than a comment: `verify` used to re-run it for its payload level.
+    /// Thread-local on purpose -- the test harness runs cases concurrently in
+    /// one process, and a global counter would be noise.
+    static LOCATOR_DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Read the L1 derivation counter of the current thread.
+#[doc(hidden)]
+pub fn locator_derivation_count() -> usize {
+    LOCATOR_DERIVATIONS.with(std::cell::Cell::get)
+}
+
+/// Reset the L1 derivation counter of the current thread.
+#[doc(hidden)]
+pub fn reset_locator_derivation_count() {
+    LOCATOR_DERIVATIONS.with(|count| count.set(0));
+}
+
 /// L1: derive the locator master from a password or a 32-byte file key.
 ///
 /// A password costs exactly [`CONTENT_L1_PBKDF2_ITERATIONS`] PBKDF2 iterations;
@@ -414,6 +430,7 @@ pub fn derive_locator_master(
     cipher: &WireCipherProfile,
     pre_salt: &[u8; 32],
 ) -> Result<[u8; 32], StrHideError> {
+    LOCATOR_DERIVATIONS.with(|count| count.set(count.get() + 1));
     match cred {
         Credential::Password(password) => {
             let normalized = normalize_nfc(password);

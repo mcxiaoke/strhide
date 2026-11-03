@@ -97,7 +97,7 @@ fn eval_png(png_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::er
 
         // Probe capacity and decode cover
         let default_spatial = PngParams::default();
-        let cap = match probe_png_capacity(&carrier_bytes, &HillCostModel, &default_spatial, strhide::stego::SafetyLevel::High, Credential::Password(OFFICIAL_PNG_FORMAT.fallback_secret), None, &[], &OFFICIAL_PNG_FORMAT, &Control::none()) {
+        let cap = match probe_png_capacity(&carrier_bytes, &HillCostModel, &default_spatial, strhide::stego::SafetyLevel::High, Credential::Password(strhide::stego::envelope::PUBLIC_DEFAULT_SECRET), None, &[], &OFFICIAL_PNG_FORMAT, &Control::none()) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[SKIP] Capacity probe failed on {}: {e}", carrier_name);

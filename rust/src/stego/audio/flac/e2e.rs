@@ -498,7 +498,10 @@ fn flac_unknown_critical_extension_fails_closed() {
         type_id: 0x81,
         value: vec![1, 2],
     }];
-    let (stego, _, _) = embed_flac(
+    // The writer refuses a critical TLV: V4 defines none, and every reader
+    // folds an unknown one into `NoHiddenData`. The reader-side fail-closed
+    // path is covered by the WAV forging test, which shares `read_extension`.
+    let err = embed_flac(
         &cover,
         &payload,
         cred(None),
@@ -510,10 +513,8 @@ fn flac_unknown_critical_extension_fails_closed() {
         Freshness::default(),
         &control,
     )
-    .expect("embed");
-
-    let err = extract_flac(&stego, cred(None), None, profile(), &limits(), &control).unwrap_err();
-    assert!(matches!(err, StrHideError::NoHiddenData(_)), "{err:?}");
+    .unwrap_err();
+    assert!(matches!(err, StrHideError::General(_)), "{err:?}");
 }
 
 #[test]

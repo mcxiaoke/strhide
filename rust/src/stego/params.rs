@@ -202,7 +202,7 @@ impl PngParams {
     #[must_use]
     pub fn wire_quantized(&self) -> Self {
         let mut p = self.clone();
-        let k = crate::stego::header::FeatureWord::quantize_epsilon(p.epsilon);
+        let k = crate::stego::header::quantize_epsilon_k(p.epsilon);
         p.epsilon = (0.5f64).powi(k as i32);
         // The feature word records the percentile as integer permille, so the
         // embedder, prober and extractor must all run on exactly that value.

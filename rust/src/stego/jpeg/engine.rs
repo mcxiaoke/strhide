@@ -51,10 +51,10 @@ use crate::stego::format::{
 };
 use crate::stego::header::{
     CONTENT_ENVELOPE_VERSION, FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT, HEADER_LEN_MAX, MAX_EXT_BYTES,
-    TLV_CRITICAL, Tlv, encode_extension, parse_extension,
+    TLV_CRITICAL, Tlv, encode_extension_for_write, parse_extension,
 };
 use crate::stego::jpeg::dht::{self, AcSymbolSet};
-use crate::stego::jpeg::header_v3::{CODEC_TERNARY_STC, JpegSuperblockV4, SUPERBLOCK_BYTES};
+use crate::stego::jpeg::header_v4::{CODEC_TERNARY_STC, JpegSuperblockV4, SUPERBLOCK_BYTES};
 use crate::stego::jpeg::v3_layout::{self, Layout};
 use crate::stego::options::{StegoHeaderInfo, StegoVerifyResult, VerifyLevel};
 use crate::stego::params::{ExtractParams, JpegParams};
@@ -661,7 +661,7 @@ pub fn embed_jpeg_with_stats<'a>(
             "Cipher suite {suite_id} is not implemented by this build"
         ))
     })?;
-    let extension = encode_extension(extensions)?;
+    let extension = encode_extension_for_write(extensions)?;
     if extension.len() > MAX_EXT_BYTES {
         return Err(StrHideError::General(format!(
             "Extension area is {} bytes, the maximum is {MAX_EXT_BYTES}",
@@ -724,10 +724,12 @@ pub fn embed_jpeg_with_stats<'a>(
     let pre_salt = jpeg_pre_salt(fmt, &cover);
     let master = derive_locator_master(cred, domain, fmt.cipher, &pre_salt)?;
     let locator = derive_l2_locator_keys(&master, fmt.cipher, b"strhide-v4-hdr-magic", domain)?;
-    let mut fresh_binding = Freshness::seeded_binding(carrier_bytes, payload.as_bytes()).to_vec();
-    fresh_binding.push(JPEG_FORMAT_ID);
-    fresh_binding.push(CONTENT_ENVELOPE_VERSION);
-    fresh_binding.extend_from_slice(&extension);
+    let fresh_binding = Freshness::seeded_binding(
+        carrier_bytes,
+        payload.as_bytes(),
+        JPEG_FORMAT_ID,
+        &extension,
+    );
 
     let ctx = EmbedContext {
         fmt,
@@ -1335,8 +1337,7 @@ fn extract_jpeg_from(
         &aad,
         &ciphertext,
         extract,
-    )
-    .map_err(|_| no_hidden())?;
+    )?;
 
     // The AEAD passed, so the carrier really is ours. Unknown critical
     // extensions mean a newer writer, which extract must not pretend to serve.
@@ -1840,7 +1841,7 @@ pub fn probe_jpeg_capacity(
     params.validate()?;
     control.stage(Stage::Decode);
     control.check()?;
-    let extension = encode_extension(extensions)?;
+    let extension = encode_extension_for_write(extensions)?;
     if extension.len() > MAX_EXT_BYTES {
         return Err(StrHideError::General(format!(
             "Extension area is {} bytes, the maximum is {MAX_EXT_BYTES}",
@@ -1894,7 +1895,7 @@ pub fn layout_for_payload(
     }
     let block_count = coeffs.components[0].blocks.len();
     let n_total = block_count * fmt.grid_rule.slots_per_block();
-    let ext_bytes = encode_extension(extensions)?.len();
+    let ext_bytes = encode_extension_for_write(extensions)?.len();
     let hdr_n = fmt.header_slots(ext_bytes);
     let plaintext = build_plaintext_bytes(payload)?;
     let ciphertext_len = plaintext.len() + suite.tag_len();
@@ -2031,7 +2032,7 @@ mod v4_regressions {
         // so only the AEAD binding can reject the carrier.
         let mut forged_tlvs = tlv.clone();
         forged_tlvs[0].value = b"ext-b".to_vec();
-        let forged_ext = encode_extension(&forged_tlvs).expect("re-encode");
+        let forged_ext = crate::stego::header::encode_extension(&forged_tlvs).expect("re-encode");
         assert!(
             parse_extension(&forged_ext).is_ok(),
             "re-encoded extension must carry a valid CRC"

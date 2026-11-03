@@ -588,6 +588,12 @@ Run `strhide <COMMAND> --help` for the options of one command.",
     HelpStegoCipherSuite:
         en = "Cipher suite id (1 = AES-256-GCM, 2 = ChaCha20-Poly1305; default: 1)",
         zh = "密码套件编号（1 = AES-256-GCM，2 = ChaCha20-Poly1305；默认: 1）";
+    HelpStegoKeyFile:
+        en = "32-byte content-envelope file key: raw 32 bytes or 64 hex characters (mutually exclusive with -p/--password-file)",
+        zh = "32 字节内容信封文件密钥：32 个原始字节或 64 位十六进制（与 -p/--password-file 互斥）";
+    HelpExtractMaxPayload:
+        en = "Refuse to recover a payload larger than this many bytes",
+        zh = "拒绝恢复大于该字节数的载荷";
 
     // ---- Capacity probe command ----
     CmdCapacity:

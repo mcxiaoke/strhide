@@ -50,6 +50,8 @@ mod reproducible;
 mod sniff;
 #[path = "test_lifecycle/stego.rs"]
 mod stego;
+#[path = "test_lifecycle/stego_credentials.rs"]
+mod stego_credentials;
 #[path = "test_lifecycle/stego_jpeg_v4.rs"]
 mod stego_jpeg_v4;
 #[path = "test_lifecycle/unicode_and_binary.rs"]

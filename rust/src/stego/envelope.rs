@@ -186,18 +186,32 @@ impl Freshness {
         matches!(self, Self::Seeded(_))
     }
 
-    /// Binding context for seeded salt/nonce derivation: the SHA-256 of the
-    /// cover bytes followed by the SHA-256 of the raw payload.
+    /// Binding context for seeded salt/nonce derivation:
+    /// `SHA-256(carrier) || SHA-256(payload) || u8(format_id) || u8(major) ||
+    /// u8(minor) || encoded_extension`.
     ///
     /// Salt and nonce live in the carrier header and are read back on
     /// extraction, so binding them to the inputs costs the reader nothing --
     /// but it guarantees that a seeded run replayed on different inputs can
-    /// never reproduce an earlier `(key, nonce)` pair.
-    pub fn seeded_binding(carrier: &[u8], payload: &[u8]) -> [u8; 64] {
+    /// never reproduce an earlier `(key, nonce)` pair. The format id, envelope
+    /// version and extension area are part of the binding so that the same
+    /// cover/payload under the same seed still yields a different salt for a
+    /// different wire format, format version or TLV set (plan §3.5).
+    pub fn seeded_binding(
+        carrier: &[u8],
+        payload: &[u8],
+        format_id: u8,
+        extension: &[u8],
+    ) -> Vec<u8> {
         use sha2::Digest as _;
-        let mut out = [0u8; 64];
-        out[..32].copy_from_slice(&sha2::Sha256::digest(carrier));
-        out[32..].copy_from_slice(&sha2::Sha256::digest(payload));
+        let version = crate::stego::header::CONTENT_ENVELOPE_VERSION;
+        let mut out = Vec::with_capacity(64 + 3 + extension.len());
+        out.extend_from_slice(&sha2::Sha256::digest(carrier));
+        out.extend_from_slice(&sha2::Sha256::digest(payload));
+        out.push(format_id);
+        out.push(version >> 4);
+        out.push(version & 0x0F);
+        out.extend_from_slice(extension);
         out
     }
 
@@ -565,9 +579,11 @@ mod tests {
     #[test]
     fn seeded_derivations_bind_to_cover_and_payload() {
         let f = Freshness::Seeded([9u8; 32]);
-        let a = Freshness::seeded_binding(b"cover-1", b"payload");
-        let other_cover = Freshness::seeded_binding(b"cover-2", b"payload");
-        let other_payload = Freshness::seeded_binding(b"cover-1", b"other-payload");
+        let a = Freshness::seeded_binding(b"cover-1", b"payload", 1, &[]);
+        let other_cover = Freshness::seeded_binding(b"cover-2", b"payload", 1, &[]);
+        let other_payload = Freshness::seeded_binding(b"cover-1", b"other-payload", 1, &[]);
+        let other_format = Freshness::seeded_binding(b"cover-1", b"payload", 4, &[]);
+        let other_ext = Freshness::seeded_binding(b"cover-1", b"payload", 1, &[0x02, 0x01, 0xAA]);
 
         assert_eq!(
             f.salt(0, &a),
@@ -576,6 +592,16 @@ mod tests {
         );
         assert_ne!(f.salt(0, &a), f.salt(0, &other_cover));
         assert_ne!(f.salt(0, &a), f.salt(0, &other_payload));
+        assert_ne!(
+            f.salt(0, &a),
+            f.salt(0, &other_format),
+            "the wire format id must separate the binding"
+        );
+        assert_ne!(
+            f.salt(0, &a),
+            f.salt(0, &other_ext),
+            "the extension area must separate the binding"
+        );
         assert_ne!(f.nonce(0, &a), f.nonce(0, &other_cover));
         assert_ne!(f.nonce(0, &a), f.nonce(0, &other_payload));
         assert_ne!(

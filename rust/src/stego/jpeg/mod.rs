@@ -4,7 +4,7 @@ pub mod engine;
 #[doc(hidden)]
 pub mod geometry;
 #[doc(hidden)]
-pub mod header_v3;
+pub mod header_v4;
 #[doc(hidden)]
 pub mod v3_layout;
 

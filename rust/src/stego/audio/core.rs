@@ -53,7 +53,8 @@ use crate::stego::format::{
 };
 use crate::stego::header::{
     CONTENT_ENVELOPE_VERSION, FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT, MAX_EXT_BYTES,
-    PNG_AUDIO_BASE_SLOTS, SpatialHeaderV4, TLV_CRITICAL, Tlv, encode_extension, parse_extension,
+    PNG_AUDIO_BASE_SLOTS, SpatialHeaderV4, TLV_CRITICAL, Tlv, encode_extension_for_write,
+    parse_extension,
 };
 use crate::stego::options::{StegoHeaderInfo, StegoVerifyResult, VerifyLevel};
 use crate::stego::{EmbedStats, StegoCapacityInfo, StegoCodec};
@@ -491,9 +492,7 @@ pub(crate) fn read_base<C: SlotCarrier + ?Sized>(
         (0..PNG_AUDIO_BASE_SLOTS).map(|i| plan.header_slot(i)),
         PNG_AUDIO_BASE_BYTES,
     );
-    let base_bytes: [u8; PNG_AUDIO_BASE_BYTES] = bytes
-        .try_into()
-        .map_err(|_| corrupted("base header size mismatch"))?;
+    let base_bytes: [u8; PNG_AUDIO_BASE_BYTES] = bytes.try_into().map_err(|_| no_hidden())?;
     let header = SpatialHeaderV4::decode(&base_bytes, format_id).map_err(|_| no_hidden())?;
     Ok(HeaderView { header, base_bytes })
 }
@@ -521,6 +520,36 @@ pub(crate) fn rewrite_base_header<C: SlotCarrier + ?Sized>(
     Ok(())
 }
 
+/// Test-only: rewrite the extension area through the same keyed layout the
+/// reader uses.
+///
+/// The writer refuses critical TLVs, so the reader's fail-closed path can only
+/// be exercised by forging the area a hostile writer would have produced.
+#[cfg(test)]
+pub(crate) fn rewrite_extension<C: SlotCarrier + ?Sized>(
+    carrier: &mut C,
+    mapping: Mapping,
+    prepared: &PreparedCarrier,
+    header_slots: usize,
+    extension: &[u8],
+) -> Result<(), StrHideError> {
+    let plan = SlotPlan::new(
+        mapping,
+        carrier.slot_count(),
+        header_slots,
+        &prepared.locator.locate_seed,
+    );
+    let salt = u64::from_be_bytes(prepared.locator.locate_seed[..8].try_into().unwrap());
+    write_bytes(
+        carrier,
+        (0..extension.len() * 8)
+            .map(|i| plan.extension_slot(i))
+            .collect(),
+        extension,
+        salt,
+    )
+}
+
 /// Read and validate the extension area described by `header`.
 fn read_extension<C: SlotCarrier + ?Sized>(
     carrier: &C,
@@ -534,7 +563,7 @@ fn read_extension<C: SlotCarrier + ?Sized>(
     }
     let header_slots = PNG_AUDIO_BASE_SLOTS + 8 * ext_len;
     if header_slots > carrier.slot_count() {
-        return Err(corrupted("extension area does not fit the carrier"));
+        return Err(no_hidden());
     }
     let plan = SlotPlan::new(
         mapping,
@@ -549,8 +578,8 @@ fn read_extension<C: SlotCarrier + ?Sized>(
     );
     header
         .validate_ext_critical(&extension)
-        .map_err(|_| corrupted("invalid extension area"))?;
-    let records = parse_extension(&extension).map_err(|_| corrupted("invalid extension area"))?;
+        .map_err(|_| no_hidden())?;
+    let records = parse_extension(&extension).map_err(|_| no_hidden())?;
     if records
         .iter()
         .any(|(type_id, _)| type_id & TLV_CRITICAL != 0)
@@ -635,7 +664,7 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
     control.stage(Stage::Decode);
     control.check()?;
 
-    let extension = encode_extension(extensions)?;
+    let extension = encode_extension_for_write(extensions)?;
     let ext_len = extension.len();
     if ext_len > MAX_EXT_BYTES {
         return Err(StrHideError::General(format!(
@@ -656,10 +685,8 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
     }
 
     let plaintext = build_plaintext(payload)?;
-    let mut fresh_binding = Freshness::seeded_binding(binding_input, payload.as_bytes()).to_vec();
-    fresh_binding.push(format_id);
-    fresh_binding.push(CONTENT_ENVELOPE_VERSION);
-    fresh_binding.extend_from_slice(&extension);
+    let fresh_binding =
+        Freshness::seeded_binding(binding_input, payload.as_bytes(), format_id, &extension);
     let salt = freshness.salt(0, &fresh_binding);
     let nonce = freshness.nonce(0, &fresh_binding);
     let session = derive_l3_session_keys(cipher, suite, &prepared.master, &salt, domain)?;
@@ -932,7 +959,7 @@ pub(crate) fn probe<C: SlotCarrier + ?Sized>(
     // one credential / `pre_salt` / extension path by construction.
     let _ = prepared;
     control.check()?;
-    let extension = encode_extension(extensions)?;
+    let extension = encode_extension_for_write(extensions)?;
     if extension.len() > MAX_EXT_BYTES {
         return Err(StrHideError::General(format!(
             "Extension area of {} bytes exceeds the {MAX_EXT_BYTES}-byte header limit",
@@ -1138,9 +1165,4 @@ fn no_hidden() -> StrHideError {
 /// The same error as `no_hidden`, for callers outside this module.
 pub(crate) fn no_hidden_data() -> StrHideError {
     no_hidden()
-}
-
-#[inline]
-fn corrupted(message: &str) -> StrHideError {
-    StrHideError::CorruptedData(message.into())
 }

@@ -185,11 +185,9 @@ impl StegoEngine for PngEngine {
         let resolved = opts.tuning.resolve();
         let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
-        let suite_id = opts.suite_id.unwrap_or_else(|| {
-            crate::stego::format::OFFICIAL_PNG_CIPHER
-                .default_suite
-                .as_u16()
-        });
+        let suite_id = opts
+            .suite_id
+            .unwrap_or_else(|| dialect.png_format().cipher.default_suite.as_u16());
         opts.control.check()?;
         let anon_payload;
         let eff_payload = if opts.no_filename && payload.name().is_some() {
@@ -536,28 +534,23 @@ fn hevc_extract(
     match with_pool(opts.pool.as_ref(), direct) {
         Ok(payload) => Ok(payload),
         #[cfg(feature = "content-heif-bridge")]
-        Err(e) => {
-            match thumb_bridge::extract_heif_bridge(
-                carrier,
-                &crate::stego::options::BridgeOptions::new(dialect)
-                    .with_password(opts.password.unwrap_or_default())
-                    .with_domain(opts.domain.unwrap_or_default()),
-                &opts.limits,
-                &opts.control,
-            ) {
+        Err(_) => {
+            // The bridge reads the same V4 envelope, so it needs the same
+            // credential, domain and extension area the writer used. Dropping
+            // the file key here made every `FileKey` bridge carrier unreadable
+            // even with the correct key.
+            let mut bridge = crate::stego::options::BridgeOptions::new(dialect)
+                .with_password(opts.password.unwrap_or_default())
+                .with_domain(opts.domain.unwrap_or_default());
+            if let Some(key) = opts.key {
+                bridge = bridge.with_key(key);
+            }
+            match thumb_bridge::extract_heif_bridge(carrier, &bridge, &opts.limits, &opts.control) {
                 Ok(payload) => Ok(payload),
-                // A Scheme C authentication failure means the carrier really
-                // does carry a CABAC payload, so its password verdict is the
-                // honest one. Every other HEVC failure only says "this is not
-                // a Scheme C carrier", and the bridge's verdict describes the
-                // carrier better than the HEVC probe does.
-                Err(bridge_err) => {
-                    if matches!(e, StrHideError::Password(_)) {
-                        Err(e)
-                    } else {
-                        Err(bridge_err)
-                    }
-                }
+                // Every Scheme C failure only says "this is not a Scheme C
+                // carrier", so the bridge's verdict describes the carrier
+                // better than the HEVC probe does.
+                Err(bridge_err) => Err(bridge_err),
             }
         }
         #[cfg(not(feature = "content-heif-bridge"))]
@@ -1036,11 +1029,9 @@ impl StegoEngine for FlacEngine {
         opts.tuning.applicable_to(self.format())?;
         let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
-        let suite_id = opts.suite_id.unwrap_or_else(|| {
-            crate::stego::format::OFFICIAL_AUDIO_CIPHER
-                .default_suite
-                .as_u16()
-        });
+        let suite_id = opts
+            .suite_id
+            .unwrap_or_else(|| dialect.audio_format().cipher.default_suite.as_u16());
         opts.control.check()?;
         let anon_payload;
         let eff_payload = if opts.no_filename && payload.name().is_some() {
@@ -1169,11 +1160,9 @@ impl StegoEngine for WavEngine {
         opts.tuning.applicable_to(self.format())?;
         let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
-        let suite_id = opts.suite_id.unwrap_or_else(|| {
-            crate::stego::format::OFFICIAL_AUDIO_CIPHER
-                .default_suite
-                .as_u16()
-        });
+        let suite_id = opts
+            .suite_id
+            .unwrap_or_else(|| dialect.audio_format().cipher.default_suite.as_u16());
         opts.control.check()?;
         let anon_payload;
         let eff_payload = if opts.no_filename && payload.name().is_some() {

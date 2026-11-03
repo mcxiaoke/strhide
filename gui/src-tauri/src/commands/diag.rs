@@ -44,6 +44,7 @@ pub async fn inspect_carrier_impl(
                 // duplicated that logic and silently dropped the error.
                 let opts = DualOptions {
                     password: password.as_deref(),
+                    key: None,
                     domain: domain.as_deref(),
                     control: Control::none(),
                 };
@@ -172,6 +173,7 @@ pub async fn verify_carrier_cmd(
                 // content-domain failure in `content_error`.
                 let opts = DualOptions {
                     password: password.as_deref(),
+                    key: None,
                     domain: domain.as_deref(),
                     control: Control::none(),
                 };

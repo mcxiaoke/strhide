@@ -108,6 +108,82 @@ fn write_default_output_naming_and_integrity() {
     assert_eq!(stdout(&read_out), "hello world");
 }
 
+/// `--key-file` / `--max-payload`: the two V4 credentials/policies the CLI used
+/// to be missing entirely, so `Credential::FileKey` was library-only.
+#[test]
+fn key_file_and_max_payload_round_trip() {
+    let dir = scratch("unify_key_file");
+    seed_stego(&dir, &["sample.png"]);
+    let key = [0x11u8; 32];
+    fs::write(dir.join("key.bin"), key).unwrap();
+    // A text file of 64 hex characters is the same key.
+    fs::write(dir.join("key.hex"), "11".repeat(32)).unwrap();
+
+    let out = run(
+        &dir,
+        &[
+            "embed",
+            "sample.png",
+            "-t",
+            "keyed payload",
+            "--key-file",
+            "key.bin",
+            "-o",
+            "stego.png",
+        ],
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+
+    let out = run(
+        &dir,
+        &["extract", "stego.png", "--key-file", "key.hex", "--stdout"],
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "keyed payload");
+
+    // Without the key the carrier must look empty.
+    let out = run(&dir, &["extract", "stego.png", "--stdout"]);
+    assert_ne!(
+        code(&out),
+        0,
+        "a keyed carrier must not open without the key"
+    );
+
+    // `--key-file` and `-p` are mutually exclusive at the parser level.
+    let out = run(
+        &dir,
+        &[
+            "extract",
+            "stego.png",
+            "-p",
+            "pw",
+            "--key-file",
+            "key.bin",
+            "--stdout",
+        ],
+    );
+    assert_ne!(code(&out), 0);
+
+    // A ceiling below the payload size refuses to emit it.
+    let out = run(
+        &dir,
+        &[
+            "extract",
+            "stego.png",
+            "--key-file",
+            "key.bin",
+            "--max-payload",
+            "4",
+            "--stdout",
+        ],
+    );
+    assert_ne!(
+        code(&out),
+        0,
+        "max-payload must refuse an oversized payload"
+    );
+}
+
 #[test]
 fn write_refuses_to_overwrite_existing_file_without_flag() {
     let dir = scratch("unify_write_overwrite");

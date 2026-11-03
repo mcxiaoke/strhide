@@ -406,12 +406,70 @@ fn wav_unknown_suite_and_extension_criticality_fail_closed() {
         b"tlv"
     );
 
-    // A critical one is unreadable for a reader that does not know it.
-    let ext = [Tlv {
+    // The writer refuses a critical TLV outright: V4 defines no critical
+    // extension, so accepting one would emit a carrier this build cannot read.
+    let critical = [Tlv {
         type_id: 0x81,
         value: vec![9, 9],
     }];
-    assert_no_hidden(&embedded_wav(b"critical", &ext));
+    let err = embed_wav(
+        &cover,
+        &Payload::bytes(b"critical"),
+        cred(None),
+        None,
+        suite(),
+        &critical,
+        profile(),
+        SafetyPolicy::new(),
+        Freshness::default(),
+        &ctl(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, StrHideError::General(_)), "{err:?}");
+
+    // A hostile writer bypasses that check; the reader must still refuse the
+    // carrier instead of skipping the unknown critical tag.
+    let forged = forge_critical_extension(&stego, &[0x81, 0x02, 9, 9]);
+    assert_no_hidden(&forged);
+}
+
+/// Rewrite a WAV carrier's header and extension area so it declares the given
+/// (critical) TLV bytes, the way a writer that ignored the fail-closed
+/// validation would have produced it.
+fn forge_critical_extension(stego: &[u8], extension: &[u8]) -> Vec<u8> {
+    use crate::stego::header::{FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT};
+
+    let layout = wav::parse_wav(stego).expect("layout");
+    let pre_salt = super::wav_pre_salt(&layout, profile().hpos_salt);
+    let prepared = core::prepare(cred(None), None, profile().cipher, &pre_salt).expect("prepare");
+    let mut scratch = stego.to_vec();
+    {
+        let mut pcm = wav::PcmCarrier::new(&mut scratch, layout);
+        let view = core::read_base(
+            &pcm,
+            core::Mapping::Permuted,
+            &prepared,
+            super::WAV_FORMAT_ID,
+        )
+        .expect("base header");
+
+        let mut header = view.header;
+        header.ext_len = extension.len() as u16;
+        header.flags = FLAG_EXT_PRESENT | FLAG_EXT_CRITICAL;
+        let bytes = header.encode();
+        core::rewrite_base_header(&mut pcm, core::Mapping::Permuted, &prepared, &bytes)
+            .expect("rewrite header");
+        let header_slots = crate::stego::header::PNG_AUDIO_BASE_SLOTS + 8 * extension.len();
+        core::rewrite_extension(
+            &mut pcm,
+            core::Mapping::Permuted,
+            &prepared,
+            header_slots,
+            extension,
+        )
+        .expect("rewrite extension");
+    }
+    scratch
 }
 
 #[test]

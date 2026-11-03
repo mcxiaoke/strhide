@@ -40,6 +40,7 @@ fn run_capacity_probe(
         false,
         false,
     )?;
+    let key = resolve_key_file(tuning.key_file.as_deref())?;
     let is_batch = carriers.len() > 1;
     let mut failures = 0usize;
     let mut last_error: Option<StrHideError> = None;
@@ -64,6 +65,7 @@ fn run_capacity_probe(
         let (_, options) = match stego_options(
             tuning,
             password.as_deref(),
+            key.as_ref(),
             carrier_format(&carrier_bytes),
             cfg,
         ) {
@@ -252,6 +254,7 @@ pub(crate) fn handle_embed(
         encrypt,
         true,
     )?;
+    let key = resolve_key_file(args.tuning.key_file.as_deref())?;
     // The content half of the dialect is bound on the engine; both halves are
     // `Copy`, so taking a local copy keeps the call sites below simple.
     let dialect = engine.dialect().stego;
@@ -325,7 +328,7 @@ pub(crate) fn handle_embed(
         let format = crate::formats::sniff_file(carrier)?;
 
         let (mut options, probe_options) =
-            stego_options(&args.tuning, password.as_deref(), format, cfg)?;
+            stego_options(&args.tuning, password.as_deref(), key.as_ref(), format, cfg)?;
         options.no_filename = args.no_filename;
 
         if args.dry_run {
@@ -549,6 +552,7 @@ pub(crate) fn handle_extract(
         false,
         false,
     )?;
+    let key = resolve_key_file(args.key_file.as_deref())?;
 
     // Two carriers may record the same payload filename; keep this batch's
     // outputs distinct instead of overwriting or aborting halfway through.
@@ -559,6 +563,7 @@ pub(crate) fn handle_extract(
             &args,
             &mut batch,
             password.as_deref(),
+            key.as_ref(),
             cfg,
             quiet,
             engine,
@@ -569,13 +574,14 @@ pub(crate) fn handle_extract(
 /// Extract one content-domain payload (the body of the `extract` batch).
 ///
 /// Only the *path* decisions changed with batch support: the payload is still
-/// self-describing (format, algorithm, every cost-map hyperparameter), so the
-/// only credential is the password.
+/// self-describing, so the only credentials are the password or the file key.
+#[allow(clippy::too_many_arguments)]
 fn extract_one(
     carrier: &Path,
     args: &ExtractArgs,
     batch: &mut BatchOutputs<'_>,
     password: Option<&str>,
+    key: Option<&[u8; 32]>,
     cfg: &FileConfig,
     quiet: bool,
     engine: &StrHide,
@@ -586,10 +592,14 @@ fn extract_one(
     // A private no-password dialect is compile-time `Dialect` territory on the
     // engine, not a command-line flag.
     let dialect = engine.dialect().stego;
-    let options = crate::stego::ExtractOptions {
+    let mut options = crate::stego::ExtractOptions {
         password,
+        key,
         ..Default::default()
     };
+    if let Some(max_payload) = args.max_payload {
+        options.limits.max_payload_bytes = max_payload;
+    }
 
     let payload = match crate::stego::extract_carrier_payload(&carrier_bytes, &options, &dialect) {
         Ok(p) => p,

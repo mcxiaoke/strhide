@@ -173,18 +173,4 @@ mod tests {
             );
         }
     }
-
-    /// The feature word is the only place the algorithm is recorded, so its
-    /// round trip has to carry the id.
-    #[test]
-    fn feature_word_carries_the_algorithm_id() {
-        let id = SPATIAL_ALGORITHM_HILL;
-        let fw = crate::stego::header::FeatureWord {
-            algorithm_id: id,
-            ..Default::default()
-        };
-        let decoded = crate::stego::header::FeatureWord::decode(&fw.encode()).expect("decode");
-        assert_eq!(decoded.algorithm_id, id);
-        assert_eq!(decoded, fw);
-    }
 }

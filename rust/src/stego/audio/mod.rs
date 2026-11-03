@@ -41,7 +41,7 @@ use crate::errors::StrHideError;
 use crate::params::SafetyLevel;
 use crate::stego::envelope::Freshness;
 use crate::stego::format::AudioFormatProfile;
-use crate::stego::header::{PNG_AUDIO_BASE_SLOTS, Tlv, encode_extension};
+use crate::stego::header::{PNG_AUDIO_BASE_SLOTS, Tlv, encode_extension_for_write};
 use crate::stego::params::ExtractParams;
 use crate::stego::{EmbedStats, StegoCapacityInfo, StegoHeaderInfo, StegoVerifyResult};
 
@@ -134,7 +134,7 @@ pub(crate) fn embed_flac(
     }
 
     let suite = suite_from_id(suite_id)?;
-    let extension = encode_extension(extensions)?;
+    let extension = encode_extension_for_write(extensions)?;
     let header_slots = PNG_AUDIO_BASE_SLOTS + 8 * extension.len();
     if analysis.tails < header_slots {
         return Err(StrHideError::General(format!(
@@ -294,7 +294,7 @@ pub(crate) fn probe_flac(
         )));
     }
     let analysis = flac::analyse(carrier, &info)?;
-    let extension = encode_extension(extensions)?;
+    let extension = encode_extension_for_write(extensions)?;
     let header_slots = PNG_AUDIO_BASE_SLOTS + 8 * extension.len();
     if analysis.tails < header_slots {
         return Err(StrHideError::General(format!(
@@ -376,6 +376,14 @@ pub(crate) fn inspect_flac(
         Err(_) => (PNG_AUDIO_BASE_SLOTS, 0),
     };
 
+    // `ext_len` is unauthenticated until AEAD runs, so a forged value can ask
+    // for more header/body slots than the stream has. That is "no header",
+    // not an error: rejecting it here keeps inspect's documented surface
+    // (`has_hidden_data=false`) instead of leaking a structural failure.
+    if header_slots > analysis.tails || body_slots > analysis.usable {
+        return Ok(StegoHeaderInfo::empty("FLAC"));
+    }
+
     let mut scratch = carrier.to_vec();
     let flac = flac::FlacCarrier::new(
         &mut scratch,
@@ -393,6 +401,33 @@ pub(crate) fn inspect_flac(
         }
         Err(_) => StegoHeaderInfo::empty("FLAC"),
     })
+}
+
+/// Level-2/3 verdict for a FLAC carrier whose header cannot be decoded.
+fn flac_unreadable() -> StegoVerifyResult {
+    StegoVerifyResult::new(
+        "FLAC",
+        vec![
+            crate::stego::VerifyLevel {
+                level: 1,
+                name: "carrier".into(),
+                ok: true,
+                message: Some("FLAC carrier parsed".into()),
+            },
+            crate::stego::VerifyLevel {
+                level: 2,
+                name: "header".into(),
+                ok: false,
+                message: Some("No readable header (wrong password or no payload)".into()),
+            },
+            crate::stego::VerifyLevel {
+                level: 3,
+                name: "payload".into(),
+                ok: false,
+                message: Some("Skipped because the header could not be decoded".into()),
+            },
+        ],
+    )
 }
 
 /// Multi-tier verification of a FLAC carrier.
@@ -441,6 +476,11 @@ pub(crate) fn verify_flac(
         Err(_) => (PNG_AUDIO_BASE_SLOTS, 0),
     };
 
+    // Same unauthenticated-`ext_len` bound as `inspect_flac`.
+    if header_slots > analysis.tails || body_slots > analysis.usable {
+        return Ok(flac_unreadable());
+    }
+
     let mut scratch = carrier.to_vec();
     let flac = flac::FlacCarrier::new(
         &mut scratch,
@@ -463,29 +503,7 @@ pub(crate) fn verify_flac(
             limits,
             control,
         ),
-        Err(_) => Ok(StegoVerifyResult::new(
-            "FLAC",
-            vec![
-                crate::stego::VerifyLevel {
-                    level: 1,
-                    name: "carrier".into(),
-                    ok: true,
-                    message: Some("FLAC carrier parsed".into()),
-                },
-                crate::stego::VerifyLevel {
-                    level: 2,
-                    name: "header".into(),
-                    ok: false,
-                    message: Some("No readable header (wrong password or no payload)".into()),
-                },
-                crate::stego::VerifyLevel {
-                    level: 3,
-                    name: "payload".into(),
-                    ok: false,
-                    message: Some("Skipped because the header could not be decoded".into()),
-                },
-            ],
-        )),
+        Err(_) => Ok(flac_unreadable()),
     }
 }
 
