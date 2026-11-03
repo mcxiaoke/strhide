@@ -33,10 +33,12 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::core::control::Control;
+use crate::core::crypto::Credential;
 use crate::errors::StrHideError;
 use crate::formats::FileFormat;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::envelope::Freshness;
+use crate::stego::header::Tlv;
 #[cfg(feature = "content-jpeg")]
 use crate::stego::jpeg::registry as jpeg_registry;
 #[cfg(feature = "content-jpeg")]
@@ -301,7 +303,6 @@ impl std::fmt::Debug for StegoTuning {
             StegoTuning::Jpeg { model, params } => f
                 .debug_struct("Jpeg")
                 .field("model", model)
-                .field("cipher_suite", &params.cipher_suite)
                 .field("stc_h", &params.stc_h)
                 .finish(),
             #[cfg(feature = "content-hevc")]
@@ -441,6 +442,36 @@ impl Default for ResolvedTuning {
     }
 }
 
+/// Resolve the credential for a content-domain call.
+///
+/// One code path for every consumer: an explicit non-empty password and a
+/// file key are mutually exclusive, an empty password counts as "not supplied",
+/// and the dialect's private secret (then the public constant) is the fallback.
+pub fn resolve_credential<'a>(
+    password: Option<&'a str>,
+    key: Option<&'a [u8; 32]>,
+    dialect: &'a StegoProfile,
+) -> Result<Credential<'a>, StrHideError> {
+    let password = password.filter(|s| !s.is_empty());
+    if key.is_some() && password.is_some() {
+        return Err(StrHideError::General(
+            "password and key are mutually exclusive".into(),
+        ));
+    }
+    if let Some(key) = key {
+        return Ok(Credential::FileKey(key));
+    }
+    if let Some(password) = password {
+        return Ok(Credential::Password(password));
+    }
+    if let Some(secret) = dialect.secret() {
+        return Ok(Credential::Password(secret));
+    }
+    Ok(Credential::Password(
+        crate::stego::envelope::PUBLIC_DEFAULT_SECRET,
+    ))
+}
+
 /// Options for writing a payload into a carrier.
 ///
 /// Everything here is either a per-call choice ([`tuning`](Self::tuning)), a
@@ -452,8 +483,14 @@ pub struct EmbedOptions<'a> {
     /// User password. Winning over the dialect's private secret when non-empty;
     /// an empty string counts as "not supplied".
     pub password: Option<&'a str>,
+    /// 32-byte file key. Mutually exclusive with a non-empty password.
+    pub key: Option<&'a [u8; 32]>,
     /// HKDF domain-isolation tag; the dialect's tag is the fallback.
     pub domain: Option<&'a str>,
+    /// V4 cipher suite id override; `None` uses the format's default suite.
+    pub suite_id: Option<u16>,
+    /// Extension TLVs to write into the V4 header area.
+    pub extensions: Vec<Tlv>,
     /// Capacity safety tier and whether a breach is fatal.
     pub safety: SafetyPolicy,
     /// Cost model and per-format tuning.
@@ -473,7 +510,10 @@ pub struct EmbedOptions<'a> {
 impl PartialEq for EmbedOptions<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.password == other.password
+            && self.key == other.key
             && self.domain == other.domain
+            && self.suite_id == other.suite_id
+            && self.extensions == other.extensions
             && self.safety == other.safety
             && self.tuning == other.tuning
             && self.freshness == other.freshness
@@ -492,7 +532,10 @@ impl std::fmt::Debug for EmbedOptions<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EmbedOptions")
             .field("password", &self.password.map(|_| "<redacted>"))
+            .field("key", &self.key.map(|_| "<redacted>"))
             .field("domain", &self.domain)
+            .field("suite_id", &self.suite_id)
+            .field("extensions", &self.extensions)
             .field("safety", &self.safety)
             .field("tuning", &self.tuning)
             .field("freshness", &self.freshness)
@@ -516,9 +559,27 @@ impl<'a> EmbedOptions<'a> {
         self
     }
 
+    /// Set the 32-byte file key (mutually exclusive with a non-empty password).
+    pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
+        self.key = Some(key);
+        self
+    }
+
     /// Set the HKDF domain-isolation tag.
     pub fn with_domain(mut self, domain: &'a str) -> Self {
         self.domain = Some(domain);
+        self
+    }
+
+    /// Override the V4 cipher suite id.
+    pub fn with_suite_id(mut self, suite_id: u16) -> Self {
+        self.suite_id = Some(suite_id);
+        self
+    }
+
+    /// Replace the extension TLVs written into the V4 header area.
+    pub fn with_extensions(mut self, extensions: Vec<Tlv>) -> Self {
+        self.extensions = extensions;
         self
     }
 
@@ -647,6 +708,7 @@ impl<'a> EmbedOptions<'a> {
     pub fn extract_options(&self) -> ExtractOptions<'_> {
         ExtractOptions {
             password: self.password,
+            key: self.key,
             domain: self.domain,
             limits: ExtractParams::default(),
             control: self.control,
@@ -662,7 +724,9 @@ impl<'a> EmbedOptions<'a> {
     pub fn probe_options(&self) -> ProbeOptions<'_> {
         ProbeOptions {
             password: self.password,
+            key: self.key,
             domain: self.domain,
+            extensions: self.extensions.clone(),
             safety: self.safety,
             tuning: self.tuning.clone(),
             exact: self.exact,
@@ -683,8 +747,12 @@ impl<'a> EmbedOptions<'a> {
 pub struct ProbeOptions<'a> {
     /// User password; keys the spatial header permutation.
     pub password: Option<&'a str>,
+    /// 32-byte file key. Mutually exclusive with a non-empty password.
+    pub key: Option<&'a [u8; 32]>,
     /// HKDF domain-isolation tag.
     pub domain: Option<&'a str>,
+    /// Extension TLVs the caller plans to write.
+    pub extensions: Vec<Tlv>,
     /// Capacity safety tier the recommendation is derived from.
     pub safety: SafetyPolicy,
     /// Cost model and per-format tuning.
@@ -700,7 +768,9 @@ pub struct ProbeOptions<'a> {
 impl PartialEq for ProbeOptions<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.password == other.password
+            && self.key == other.key
             && self.domain == other.domain
+            && self.extensions == other.extensions
             && self.safety == other.safety
             && self.tuning == other.tuning
             && self.exact == other.exact
@@ -717,7 +787,9 @@ impl std::fmt::Debug for ProbeOptions<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProbeOptions")
             .field("password", &self.password.map(|_| "<redacted>"))
+            .field("key", &self.key.map(|_| "<redacted>"))
             .field("domain", &self.domain)
+            .field("extensions", &self.extensions)
             .field("safety", &self.safety)
             .field("tuning", &self.tuning)
             .field("exact", &self.exact)
@@ -734,9 +806,21 @@ impl<'a> ProbeOptions<'a> {
         self
     }
 
+    /// Set the 32-byte file key (mutually exclusive with a non-empty password).
+    pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
+        self.key = Some(key);
+        self
+    }
+
     /// Set the HKDF domain-isolation tag.
     pub fn with_domain(mut self, domain: &'a str) -> Self {
         self.domain = Some(domain);
+        self
+    }
+
+    /// Replace the extension TLVs the caller plans to write.
+    pub fn with_extensions(mut self, extensions: Vec<Tlv>) -> Self {
+        self.extensions = extensions;
         self
     }
 
@@ -812,6 +896,8 @@ impl<'a> ProbeOptions<'a> {
 pub struct ExtractOptions<'a> {
     /// User password.
     pub password: Option<&'a str>,
+    /// 32-byte file key. Mutually exclusive with a non-empty password.
+    pub key: Option<&'a [u8; 32]>,
     /// HKDF domain-isolation tag.
     pub domain: Option<&'a str>,
     /// Cipher suites to try and the KDF work ceiling.
@@ -825,6 +911,7 @@ pub struct ExtractOptions<'a> {
 impl PartialEq for ExtractOptions<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.password == other.password
+            && self.key == other.key
             && self.domain == other.domain
             && self.limits == other.limits
             && self.control == other.control
@@ -840,6 +927,7 @@ impl std::fmt::Debug for ExtractOptions<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExtractOptions")
             .field("password", &self.password.map(|_| "<redacted>"))
+            .field("key", &self.key.map(|_| "<redacted>"))
             .field("domain", &self.domain)
             .field("limits", &self.limits)
             .field("control", &self.control)
@@ -849,9 +937,20 @@ impl std::fmt::Debug for ExtractOptions<'_> {
 }
 
 impl<'a> ExtractOptions<'a> {
+    /// Every knob at its default.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Set the password.
     pub fn with_password(mut self, password: &'a str) -> Self {
         self.password = Some(password);
+        self
+    }
+
+    /// Set the 32-byte file key (mutually exclusive with a non-empty password).
+    pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
+        self.key = Some(key);
         self
     }
 
@@ -870,6 +969,12 @@ impl<'a> ExtractOptions<'a> {
     /// Cap the PBKDF2 iterations one attempt may spend.
     pub fn with_max_pbkdf2_iterations(mut self, iterations: u32) -> Self {
         self.limits.max_pbkdf2_iterations = iterations;
+        self
+    }
+
+    /// Cap the plaintext size this call will recover.
+    pub fn with_max_payload_bytes(mut self, n: usize) -> Self {
+        self.limits.max_payload_bytes = n;
         self
     }
 
@@ -912,14 +1017,20 @@ impl<'a> ExtractOptions<'a> {
 /// image alone" is a legitimate request the router does not expose: the router
 /// always tries Scheme C first.
 #[cfg(feature = "content-heif-bridge")]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BridgeOptions<'a> {
     /// Private-dialect wire-format identities and no-password secret.
     pub dialect: &'a StegoProfile,
     /// User password. Wins over the dialect's private secret when non-empty.
     pub password: Option<&'a str>,
+    /// 32-byte file key. Mutually exclusive with a non-empty password.
+    pub key: Option<&'a [u8; 32]>,
     /// HKDF domain-isolation tag.
     pub domain: Option<&'a str>,
+    /// V4 cipher suite id override; `None` uses the format's default suite.
+    pub suite_id: Option<u16>,
+    /// Extension TLVs to write into the V4 header area.
+    pub extensions: Vec<Tlv>,
     /// Cost model selection; see the type docs for how a mismatched half is
     /// resolved.
     pub tuning: StegoTuning,
@@ -930,6 +1041,24 @@ pub struct BridgeOptions<'a> {
     pub freshness: Freshness,
     /// Omit original filename from micro-header.
     pub no_filename: bool,
+}
+
+#[cfg(feature = "content-heif-bridge")]
+impl std::fmt::Debug for BridgeOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BridgeOptions")
+            .field("dialect", &self.dialect)
+            .field("password", &self.password.map(|_| "<redacted>"))
+            .field("key", &self.key.map(|_| "<redacted>"))
+            .field("domain", &self.domain)
+            .field("suite_id", &self.suite_id)
+            .field("extensions", &self.extensions)
+            .field("tuning", &self.tuning)
+            .field("safety", &self.safety)
+            .field("freshness", &self.freshness)
+            .field("no_filename", &self.no_filename)
+            .finish()
+    }
 }
 
 #[cfg(feature = "content-heif-bridge")]
@@ -952,7 +1081,10 @@ impl<'a> BridgeOptions<'a> {
         Self {
             dialect,
             password: None,
+            key: None,
             domain: None,
+            suite_id: None,
+            extensions: Vec::new(),
             tuning: StegoTuning::Auto,
             safety: SafetyPolicy::new(),
             freshness: Freshness::Random,
@@ -966,9 +1098,27 @@ impl<'a> BridgeOptions<'a> {
         self
     }
 
+    /// Set the 32-byte file key (mutually exclusive with a non-empty password).
+    pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
+        self.key = Some(key);
+        self
+    }
+
     /// Set the HKDF domain-isolation tag.
     pub fn with_domain(mut self, domain: &'a str) -> Self {
         self.domain = Some(domain);
+        self
+    }
+
+    /// Override the V4 cipher suite id.
+    pub fn with_suite_id(mut self, suite_id: u16) -> Self {
+        self.suite_id = Some(suite_id);
+        self
+    }
+
+    /// Replace the extension TLVs written into the V4 header area.
+    pub fn with_extensions(mut self, extensions: Vec<Tlv>) -> Self {
+        self.extensions = extensions;
         self
     }
 
@@ -1125,6 +1275,7 @@ impl StegoHeaderInfo {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct InspectOptions<'a> {
     pub password: Option<&'a str>,
+    pub key: Option<&'a [u8; 32]>,
     pub domain: Option<&'a str>,
     pub limits: ExtractParams,
     pub control: Control<'a>,
@@ -1134,6 +1285,7 @@ impl std::fmt::Debug for InspectOptions<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InspectOptions")
             .field("password", &self.password.map(|_| "<redacted>"))
+            .field("key", &self.key.map(|_| "<redacted>"))
             .field("domain", &self.domain)
             .field("limits", &self.limits)
             .field("control", &self.control)
@@ -1148,6 +1300,11 @@ impl<'a> InspectOptions<'a> {
 
     pub fn with_password(mut self, password: &'a str) -> Self {
         self.password = Some(password);
+        self
+    }
+
+    pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
+        self.key = Some(key);
         self
     }
 
@@ -1243,6 +1400,7 @@ impl StegoVerifyResult {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct VerifyOptions<'a> {
     pub password: Option<&'a str>,
+    pub key: Option<&'a [u8; 32]>,
     pub domain: Option<&'a str>,
     pub limits: ExtractParams,
     pub control: Control<'a>,
@@ -1252,6 +1410,7 @@ impl std::fmt::Debug for VerifyOptions<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VerifyOptions")
             .field("password", &self.password.map(|_| "<redacted>"))
+            .field("key", &self.key.map(|_| "<redacted>"))
             .field("domain", &self.domain)
             .field("limits", &self.limits)
             .field("control", &self.control)
@@ -1266,6 +1425,11 @@ impl<'a> VerifyOptions<'a> {
 
     pub fn with_password(mut self, password: &'a str) -> Self {
         self.password = Some(password);
+        self
+    }
+
+    pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
+        self.key = Some(key);
         self
     }
 
@@ -1456,5 +1620,59 @@ mod tests {
         let debug_verify = format!("{verify:?}");
         assert!(!debug_verify.contains("super-secret-password"));
         assert!(debug_verify.contains("<redacted>"));
+    }
+
+    #[test]
+    fn key_is_redacted_in_debug() {
+        let key = [0x11u8; 32];
+        for debug in [
+            format!("{:?}", EmbedOptions::default().with_key(&key)),
+            format!("{:?}", ProbeOptions::default().with_key(&key)),
+            format!("{:?}", ExtractOptions::default().with_key(&key)),
+            format!("{:?}", InspectOptions::default().with_key(&key)),
+            format!("{:?}", VerifyOptions::default().with_key(&key)),
+        ] {
+            assert!(!debug.contains("11111111"), "key bytes leaked: {debug}");
+            assert!(debug.contains("<redacted>"));
+        }
+    }
+
+    #[test]
+    fn resolve_credential_applies_the_documented_priority() {
+        let key = [0x11u8; 32];
+        let profile = StegoProfile::new();
+
+        let credential = resolve_credential(Some("pw"), None, &profile).unwrap();
+        assert!(matches!(credential, Credential::Password("pw")));
+
+        let credential = resolve_credential(None, Some(&key), &profile).unwrap();
+        assert!(matches!(credential, Credential::FileKey(&_)));
+
+        let err = match resolve_credential(Some("pw"), Some(&key), &profile) {
+            Ok(_) => panic!("password and key must be mutually exclusive"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("mutually exclusive"));
+
+        // An empty password counts as not supplied and falls back to the
+        // dialect secret, then to the public constant.
+        let credential = resolve_credential(Some(""), Some(&key), &profile).unwrap();
+        assert!(matches!(credential, Credential::FileKey(_)));
+
+        let private = StegoProfile::new().with_default_secret("dialect-secret");
+        let credential = resolve_credential(Some(""), None, &private).unwrap();
+        assert!(matches!(credential, Credential::Password("dialect-secret")));
+
+        let credential = resolve_credential(None, None, &profile).unwrap();
+        assert!(matches!(
+            credential,
+            Credential::Password(crate::stego::envelope::PUBLIC_DEFAULT_SECRET)
+        ));
+    }
+
+    #[test]
+    fn max_payload_builder_reaches_the_limits() {
+        let opts = ExtractOptions::new().with_max_payload_bytes(4096);
+        assert_eq!(opts.limits.max_payload_bytes, 4096);
     }
 }

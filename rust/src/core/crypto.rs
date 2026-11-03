@@ -95,6 +95,65 @@ pub const MAX_CHUNK_SIZE: usize = 64 * 1024 * 1024; // 64MB
 /// written with older versions, so it is treated as a wire-format constant.
 pub const PBKDF2_ITERATIONS: u32 = 100_000;
 
+/// Fixed L1 PBKDF2 cost of the content-domain V4 envelope.
+///
+/// The content envelope no longer has a per-suite KDF cost: `suite_id` only
+/// selects the AEAD. One password run always pays this many iterations, so a
+/// forged header cannot choose a cheaper (or hugely more expensive) KDF.
+pub const CONTENT_L1_PBKDF2_ITERATIONS: u32 = 200_000;
+
+/// Credential supplied to the content-domain key schedule.
+///
+/// Deliberately does **not** implement `Debug`: a password or file key must
+/// never end up in a log line. Options structs that hold one redact it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Credential<'a> {
+    /// Human password or deployment string; NFC-normalized and run through
+    /// PBKDF2 for [`CONTENT_L1_PBKDF2_ITERATIONS`] iterations.
+    Password(&'a str),
+    /// 32-byte high-entropy key; skips PBKDF2 and goes straight to HKDF.
+    FileKey(&'a [u8; 32]),
+}
+
+/// Wire ids for the content-domain AEAD suite table (append-only).
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CipherSuiteId {
+    /// AES-256-GCM, 16-byte tag.
+    Aes256Gcm = 1,
+    /// ChaCha20-Poly1305, 16-byte tag.
+    ChaCha20Poly1305 = 2,
+}
+
+impl CipherSuiteId {
+    /// Map a wire `suite_id` to a known suite. `0` and unknown ids are invalid.
+    pub const fn from_u16(id: u16) -> Option<Self> {
+        match id {
+            1 => Some(Self::Aes256Gcm),
+            2 => Some(Self::ChaCha20Poly1305),
+            _ => None,
+        }
+    }
+
+    /// Authentication tag length in bytes (both suites use a 16-byte tag).
+    pub const fn tag_len(self) -> usize {
+        16
+    }
+
+    /// Stable human-readable name for diagnostics.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Aes256Gcm => "aes-256-gcm",
+            Self::ChaCha20Poly1305 => "chacha20-poly1305",
+        }
+    }
+
+    /// Wire value written into the header.
+    pub const fn as_u16(self) -> u16 {
+        self as u16
+    }
+}
+
 /// Default internal secret used when the user does not specify a password.
 /// All envelopes are uniformly encrypted with AES-256-GCM and Deflate-compressed,
 /// eliminating plaintext leakage (no plaintext payload, metadata, or host SHA-256 in hex view).

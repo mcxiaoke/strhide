@@ -156,7 +156,7 @@ impl StegoEngine for PngEngine {
     ) -> Result<StegoCapacityInfo, StrHideError> {
         opts.tuning.applicable_to(self.format())?;
         let resolved = opts.tuning.resolve();
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
         with_pool(opts.pool.as_ref(), || {
@@ -165,8 +165,9 @@ impl StegoEngine for PngEngine {
                 &*resolved.png_model,
                 &resolved.png_params,
                 opts.safety.level,
-                secret,
+                cred,
                 domain,
+                &opts.extensions,
                 dialect.png_format(),
                 &opts.control,
             )
@@ -182,8 +183,13 @@ impl StegoEngine for PngEngine {
     ) -> Result<EmbedOutput, StrHideError> {
         opts.tuning.applicable_to(self.format())?;
         let resolved = opts.tuning.resolve();
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
+        let suite_id = opts.suite_id.unwrap_or_else(|| {
+            crate::stego::format::OFFICIAL_PNG_CIPHER
+                .default_suite
+                .as_u16()
+        });
         opts.control.check()?;
         let anon_payload;
         let eff_payload = if opts.no_filename && payload.name().is_some() {
@@ -196,8 +202,10 @@ impl StegoEngine for PngEngine {
             crate::stego::png::embed_png_with_stats(
                 carrier,
                 eff_payload,
-                secret,
+                cred,
                 domain,
+                suite_id,
+                &opts.extensions,
                 dialect.png_format(),
                 &*resolved.png_model,
                 &resolved.png_params,
@@ -215,23 +223,23 @@ impl StegoEngine for PngEngine {
         opts: &ExtractOptions<'_>,
         dialect: &StegoProfile,
     ) -> Result<Payload<'static>, StrHideError> {
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
-        // The carrier names its cost model in the feature word and describes
-        // every hyperparameter that shapes the cost map, so the extractor runs
-        // the default model and default params; see `stego::options` module
-        // docs and `extract_png`.
+        // The carrier names its cost model in the header and describes every
+        // hyperparameter that shapes the cost map, so the extractor runs the
+        // default model and default params; see `stego::options` module docs.
         let model = crate::stego::options::SpatialAlgorithm::default().model();
         let params = crate::stego::params::PngParams::default();
         with_pool(opts.pool.as_ref(), || {
             crate::stego::png::extract_png(
                 carrier,
-                secret,
+                cred,
                 domain,
                 dialect.png_format(),
                 &*model,
                 &params,
+                &opts.limits,
                 &opts.control,
             )
         })
@@ -243,10 +251,17 @@ impl StegoEngine for PngEngine {
         opts: &InspectOptions<'_>,
         dialect: &StegoProfile,
     ) -> Result<StegoHeaderInfo, StrHideError> {
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
-        crate::stego::png::inspect_png(carrier, secret, domain, dialect.png_format(), &opts.control)
+        crate::stego::png::inspect_png(
+            carrier,
+            cred,
+            domain,
+            dialect.png_format(),
+            &opts.limits,
+            &opts.control,
+        )
     }
 
     fn verify(
@@ -255,12 +270,12 @@ impl StegoEngine for PngEngine {
         opts: &VerifyOptions<'_>,
         dialect: &StegoProfile,
     ) -> Result<StegoVerifyResult, StrHideError> {
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
         crate::stego::png::verify_png(
             carrier,
-            secret,
+            cred,
             domain,
             dialect.png_format(),
             &opts.limits,
@@ -293,6 +308,7 @@ impl StegoEngine for JpegEngine {
                 carrier,
                 &*resolved.jpeg_model,
                 &resolved.jpeg_params,
+                &opts.extensions,
                 opts.safety.level,
                 dialect.jpeg_format(),
                 &opts.control,
@@ -309,8 +325,11 @@ impl StegoEngine for JpegEngine {
     ) -> Result<EmbedOutput, StrHideError> {
         opts.tuning.applicable_to(self.format())?;
         let resolved = opts.tuning.resolve();
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
+        let suite_id = opts
+            .suite_id
+            .unwrap_or_else(|| dialect.jpeg_format().default_suite().as_u16());
         let mut jpeg_params = resolved.jpeg_params.clone();
         // A seeded run must not take the FMA path: it rounds differently from
         // the scalar one, and a last-bit disagreement in a cost value can move
@@ -328,8 +347,10 @@ impl StegoEngine for JpegEngine {
             crate::stego::jpeg::embed_jpeg_with_stats(
                 carrier,
                 eff_payload,
-                secret,
+                cred,
                 domain,
+                suite_id,
+                &opts.extensions,
                 dialect.jpeg_format(),
                 &jpeg_params,
                 opts.safety,
@@ -347,15 +368,15 @@ impl StegoEngine for JpegEngine {
         opts: &ExtractOptions<'_>,
         dialect: &StegoProfile,
     ) -> Result<Payload<'static>, StrHideError> {
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
-        // No cost model on purpose: the V3 slot set is geometric, so extraction
+        // No cost model on purpose: the slot set is geometric, so extraction
         // must not depend on the embedder's cost function.
         with_pool(opts.pool.as_ref(), || {
             crate::stego::jpeg::extract_jpeg(
                 carrier,
-                secret,
+                cred,
                 domain,
                 dialect.jpeg_format(),
                 &opts.limits,
@@ -370,12 +391,12 @@ impl StegoEngine for JpegEngine {
         opts: &InspectOptions<'_>,
         dialect: &StegoProfile,
     ) -> Result<StegoHeaderInfo, StrHideError> {
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
         crate::stego::jpeg::inspect_jpeg(
             carrier,
-            secret,
+            cred,
             domain,
             dialect.jpeg_format(),
             &opts.control,
@@ -388,12 +409,12 @@ impl StegoEngine for JpegEngine {
         opts: &VerifyOptions<'_>,
         dialect: &StegoProfile,
     ) -> Result<StegoVerifyResult, StrHideError> {
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
         crate::stego::jpeg::verify_jpeg(
             carrier,
-            secret,
+            cred,
             domain,
             dialect.jpeg_format(),
             &opts.limits,
@@ -412,7 +433,6 @@ fn hevc_embed(
     dialect: &StegoProfile,
 ) -> Result<EmbedOutput, StrHideError> {
     let resolved = opts.tuning.resolve();
-    let secret = opts.secret(dialect);
     let domain = opts.domain(dialect);
     opts.control.check()?;
 
@@ -425,11 +445,14 @@ fn hevc_embed(
     };
 
     let direct = || {
-        crate::stego::hevc::embed_hevc_with_info(
+        crate::stego::hevc::embed_hevc_with_info_v4(
             carrier,
             eff_payload,
-            secret,
+            crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?,
             domain,
+            opts.suite_id
+                .unwrap_or_else(|| dialect.hevc_format().cipher.default_suite.as_u16()),
+            &opts.extensions,
             dialect.hevc_format(),
             opts.freshness,
             opts.safety,
@@ -467,7 +490,10 @@ fn hevc_embed(
                 &crate::stego::options::BridgeOptions {
                     dialect,
                     password: opts.password,
+                    key: opts.key,
                     domain: opts.domain,
+                    suite_id: opts.suite_id,
+                    extensions: opts.extensions.clone(),
                     tuning: opts.tuning.clone(),
                     safety: opts.safety,
                     freshness: opts.freshness,
@@ -489,16 +515,16 @@ fn hevc_extract(
     opts: &ExtractOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<Payload<'static>, StrHideError> {
-    let secret = opts.secret(dialect);
     let domain = opts.domain(dialect);
     opts.control.check()?;
 
     let direct = || {
-        crate::stego::hevc::extract_hevc(
+        crate::stego::hevc::extract_hevc_v4(
             carrier,
-            secret,
+            crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?,
             domain,
             dialect.hevc_format(),
+            &opts.limits,
             &opts.control,
         )
     };
@@ -552,6 +578,7 @@ fn hevc_probe(
     let direct = || {
         crate::stego::hevc::probe_hevc_capacity_info(
             carrier,
+            &opts.extensions,
             dialect.hevc_format(),
             opts.safety.level,
             opts.exact,
@@ -575,7 +602,10 @@ fn hevc_probe(
             &crate::stego::options::BridgeOptions {
                 dialect,
                 password: opts.password,
+                key: opts.key,
                 domain: opts.domain,
+                suite_id: None,
+                extensions: opts.extensions.clone(),
                 tuning: opts.tuning.clone(),
                 safety: opts.safety,
                 freshness: crate::stego::envelope::Freshness::Random,
@@ -595,16 +625,16 @@ fn hevc_inspect(
     opts: &InspectOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<StegoHeaderInfo, StrHideError> {
-    let secret = opts.secret(dialect);
     let domain = opts.domain(dialect);
     opts.control.check()?;
 
     let direct = || {
-        crate::stego::hevc::inspect_hevc(
+        crate::stego::hevc::inspect_hevc_v4(
             carrier,
-            secret,
+            crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?,
             domain,
             dialect.hevc_format(),
+            &opts.limits,
             &opts.control,
         )
     };
@@ -623,8 +653,10 @@ fn hevc_inspect(
         let bridge_info = thumb_bridge::inspect_heif_bridge(
             carrier,
             opts.password,
+            opts.key,
             opts.domain,
             dialect,
+            &opts.limits,
             &opts.control,
         )?;
         if bridge_info.has_hidden_data {
@@ -642,16 +674,16 @@ fn hevc_verify(
     opts: &VerifyOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<StegoVerifyResult, StrHideError> {
-    let secret = opts.secret(dialect);
     let domain = opts.domain(dialect);
     opts.control.check()?;
 
     let direct = || {
-        crate::stego::hevc::verify_hevc(
+        crate::stego::hevc::verify_hevc_v4(
             carrier,
-            secret,
+            crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?,
             domain,
             dialect.hevc_format(),
+            &opts.limits,
             &opts.control,
         )
     };
@@ -670,6 +702,7 @@ fn hevc_verify(
         let bridge_ver = thumb_bridge::verify_heif_bridge(
             carrier,
             opts.password,
+            opts.key,
             opts.domain,
             dialect,
             &opts.limits,
@@ -891,7 +924,6 @@ impl StegoEngine for MkvEngine {
     ) -> Result<EmbedOutput, StrHideError> {
         opts.tuning.applicable_to(self.format())?;
         let resolved = opts.tuning.resolve();
-        let secret = opts.secret(dialect);
         let domain = opts.domain(dialect);
         opts.control.check()?;
 
@@ -904,11 +936,14 @@ impl StegoEngine for MkvEngine {
         };
 
         let (mut bytes, info, stats) = with_pool(opts.pool.as_ref(), || {
-            crate::stego::hevc::embed_hevc_with_info(
+            crate::stego::hevc::embed_hevc_with_info_v4(
                 carrier,
                 eff_payload,
-                secret,
+                crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?,
                 domain,
+                opts.suite_id
+                    .unwrap_or_else(|| dialect.hevc_format().cipher.default_suite.as_u16()),
+                &opts.extensions,
                 dialect.hevc_format(),
                 opts.freshness,
                 opts.safety,
@@ -972,12 +1007,22 @@ impl StegoEngine for FlacEngine {
         &self,
         carrier: &[u8],
         opts: &ProbeOptions<'_>,
-        _dialect: &StegoProfile,
+        dialect: &StegoProfile,
     ) -> Result<StegoCapacityInfo, StrHideError> {
         opts.tuning.applicable_to(self.format())?;
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
+        let domain = opts.domain(dialect);
         opts.control.check()?;
         with_pool(opts.pool.as_ref(), || {
-            crate::stego::audio::probe_flac(carrier, opts.safety.level, &opts.control)
+            crate::stego::audio::probe_flac(
+                carrier,
+                cred,
+                domain,
+                &opts.extensions,
+                opts.safety.level,
+                dialect.flac_format(),
+                &opts.control,
+            )
         })
     }
 
@@ -989,8 +1034,13 @@ impl StegoEngine for FlacEngine {
         dialect: &StegoProfile,
     ) -> Result<EmbedOutput, StrHideError> {
         opts.tuning.applicable_to(self.format())?;
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
+        let suite_id = opts.suite_id.unwrap_or_else(|| {
+            crate::stego::format::OFFICIAL_AUDIO_CIPHER
+                .default_suite
+                .as_u16()
+        });
         opts.control.check()?;
         let anon_payload;
         let eff_payload = if opts.no_filename && payload.name().is_some() {
@@ -1003,8 +1053,10 @@ impl StegoEngine for FlacEngine {
             crate::stego::audio::embed_flac(
                 carrier,
                 eff_payload,
-                secret,
+                cred,
                 domain,
+                suite_id,
+                &opts.extensions,
                 dialect.flac_format(),
                 opts.safety,
                 opts.freshness,
@@ -1020,15 +1072,16 @@ impl StegoEngine for FlacEngine {
         opts: &ExtractOptions<'_>,
         dialect: &StegoProfile,
     ) -> Result<Payload<'static>, StrHideError> {
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
         with_pool(opts.pool.as_ref(), || {
             crate::stego::audio::extract_flac(
                 carrier,
-                secret,
+                cred,
                 domain,
                 dialect.flac_format(),
+                &opts.limits,
                 &opts.control,
             )
         })
@@ -1040,14 +1093,15 @@ impl StegoEngine for FlacEngine {
         opts: &InspectOptions<'_>,
         dialect: &StegoProfile,
     ) -> Result<StegoHeaderInfo, StrHideError> {
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
         crate::stego::audio::inspect_flac(
             carrier,
-            secret,
+            cred,
             domain,
             dialect.flac_format(),
+            &opts.limits,
             &opts.control,
         )
     }
@@ -1058,14 +1112,15 @@ impl StegoEngine for FlacEngine {
         opts: &VerifyOptions<'_>,
         dialect: &StegoProfile,
     ) -> Result<StegoVerifyResult, StrHideError> {
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
         crate::stego::audio::verify_flac(
             carrier,
-            secret,
+            cred,
             domain,
             dialect.flac_format(),
+            &opts.limits,
             &opts.control,
         )
     }
@@ -1085,12 +1140,22 @@ impl StegoEngine for WavEngine {
         &self,
         carrier: &[u8],
         opts: &ProbeOptions<'_>,
-        _dialect: &StegoProfile,
+        dialect: &StegoProfile,
     ) -> Result<StegoCapacityInfo, StrHideError> {
         opts.tuning.applicable_to(self.format())?;
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
+        let domain = opts.domain(dialect);
         opts.control.check()?;
         with_pool(opts.pool.as_ref(), || {
-            crate::stego::audio::probe_wav(carrier, opts.safety.level, &opts.control)
+            crate::stego::audio::probe_wav(
+                carrier,
+                cred,
+                domain,
+                &opts.extensions,
+                opts.safety.level,
+                dialect.audio_format(),
+                &opts.control,
+            )
         })
     }
 
@@ -1102,8 +1167,13 @@ impl StegoEngine for WavEngine {
         dialect: &StegoProfile,
     ) -> Result<EmbedOutput, StrHideError> {
         opts.tuning.applicable_to(self.format())?;
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
+        let suite_id = opts.suite_id.unwrap_or_else(|| {
+            crate::stego::format::OFFICIAL_AUDIO_CIPHER
+                .default_suite
+                .as_u16()
+        });
         opts.control.check()?;
         let anon_payload;
         let eff_payload = if opts.no_filename && payload.name().is_some() {
@@ -1116,8 +1186,10 @@ impl StegoEngine for WavEngine {
             crate::stego::audio::embed_wav(
                 carrier,
                 eff_payload,
-                secret,
+                cred,
                 domain,
+                suite_id,
+                &opts.extensions,
                 dialect.audio_format(),
                 opts.safety,
                 opts.freshness,
@@ -1133,15 +1205,16 @@ impl StegoEngine for WavEngine {
         opts: &ExtractOptions<'_>,
         dialect: &StegoProfile,
     ) -> Result<Payload<'static>, StrHideError> {
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
         with_pool(opts.pool.as_ref(), || {
             crate::stego::audio::extract_wav(
                 carrier,
-                secret,
+                cred,
                 domain,
                 dialect.audio_format(),
+                &opts.limits,
                 &opts.control,
             )
         })
@@ -1153,14 +1226,15 @@ impl StegoEngine for WavEngine {
         opts: &InspectOptions<'_>,
         dialect: &StegoProfile,
     ) -> Result<StegoHeaderInfo, StrHideError> {
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
         crate::stego::audio::inspect_wav(
             carrier,
-            secret,
+            cred,
             domain,
             dialect.audio_format(),
+            &opts.limits,
             &opts.control,
         )
     }
@@ -1171,14 +1245,15 @@ impl StegoEngine for WavEngine {
         opts: &VerifyOptions<'_>,
         dialect: &StegoProfile,
     ) -> Result<StegoVerifyResult, StrHideError> {
-        let secret = opts.secret(dialect);
+        let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
         crate::stego::audio::verify_wav(
             carrier,
-            secret,
+            cred,
             domain,
             dialect.audio_format(),
+            &opts.limits,
             &opts.control,
         )
     }

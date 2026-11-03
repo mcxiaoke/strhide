@@ -21,7 +21,9 @@
 use std::time::Instant;
 
 use strhide::core::control::Control;
-use strhide::stego::params::{PngParams, StegoCodec};
+use strhide::crypto::Credential;
+use strhide::stego::format::{OFFICIAL_PNG_CIPHER, OFFICIAL_PNG_FORMAT};
+use strhide::stego::params::{ExtractParams, PngParams, StegoCodec};
 use strhide::stego::png::cost::HillCostModel;
 use strhide::stego::png::engine::{decode_png, embed_png, extract_png};
 use strhide::stego::traits::PngCostModel;
@@ -35,6 +37,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(2)
         .ok_or("usage: codec_bench <carrier.png> <payload-file> [password]")?;
     let password = args.get(3).map(String::as_str);
+    let cred = match password {
+        Some(password) => Credential::Password(password),
+        None => Credential::Password(OFFICIAL_PNG_FORMAT.fallback_secret),
+    };
 
     let carrier = std::fs::read(carrier_path)?;
     let payload = std::fs::read(payload_path)?;
@@ -82,9 +88,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let stego = match embed_png(
             &carrier,
             &payload_obj,
-            password,
+            cred,
             None,
-            &strhide::stego::format::OFFICIAL_PNG_FORMAT,
+            OFFICIAL_PNG_CIPHER.default_suite.as_u16(),
+            &[],
+            &OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &params,
             strhide::stego::SafetyPolicy::default(),
@@ -114,11 +122,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let recovered = extract_png(
             &stego,
-            password,
+            cred,
             None,
-            &strhide::stego::format::OFFICIAL_PNG_FORMAT,
+            &OFFICIAL_PNG_FORMAT,
             &HillCostModel,
             &PngParams::default(),
+            &ExtractParams::default(),
             &Control::none(),
         )?;
         let ok = recovered == payload;

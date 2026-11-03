@@ -363,24 +363,31 @@ pub struct MediaInfo {               // 原 `media_info: Option<String>`（"1920
   - Level 2 信封头/尾定位与内部一致性（版本、长度、CRC、偏移）；
   - Level 3 载荷可解密且 SHA-256 与元数据一致。
 
-### 5.5 内容域嵌入 / 提取
+### 5.5 内容域嵌入 / 提取（V4 内容信封）
 
 ```text
-embed（PNG→spatial，JPEG→jpeg）：
- 1. validate png/jpeg params
- 2. 解析载体 → 候选元素（像素 / DCT 系数）
- 3. EmbedOptions::secret(&StegoProfile)：显式密码优先，否则 profile 的 stego 私钥
- 4. pack_envelope_ext(payload, secret)
-    → 微信封字节（salt/nonce/密文）+ perm_seed
- 5. 候选集合做 keyed permutation：前 256 个槽位承载 32B header
-    （避免"最便宜的 256 槽位"成为公开指纹）；body 按代价顺序取剩余槽位
- 6. header 直接 LSB 匹配；body 经矩阵编码（Hamming 或 STC），
-    空间域用 ternary ±1 匹配（八值类约束，保持代价排序可复现）
+embed（PNG→spatial，JPEG→jpeg，HEVC/HEIC→hevc，WAV/FLAC→audio）：
+ 1. 解析载体 → 候选元素（像素 / DCT 系数 / CABAC 槽 / PCM 采样或 FLAC 残差）
+ 2. Credential 解析：显式 password / key 互斥，否则 StegoProfile 私钥，再否则公开默认常量
+ 3. L1：derive_locator_master(cred, domain_label, cipher, pre_salt)
+      → 32B 主密钥（Password 走 PBKDF2-200k；FileKey 直接进 HKDF）
+ 4. L2：derive_l2_locator_keys(master, cipher, magic_label, domain)
+      → locate_seed / header_stc_seed / ext_stc_seed / magic4
+ 5. 用 header_stc_seed 定位基础头（64/44/32B），解码并 validate_common()
+ 6. L3：derive_l3_session_keys(cipher, suite, master, header_salt, domain)
+      → enc_key / perm_seed / stc_seed
+ 7. AEAD 加密：AAD = "strhide-content-envelope-v4\0" || format_id || 基础头 || 扩展区
+      suite 1 = AES-256-GCM，suite 2 = ChaCha20-Poly1305（都 16B tag）
+ 8. body 槽位 = 密钥化置换(剩余网格, perm_seed)；三元 STC 用 stc_seed 求解
+ 9. 回写载体，保持格式与解码行为不变
 
 extract：
- 重建 keyed permutation → 定位 256 个 header 槽位 → 读 32B header
- → 解码 header word（长度/codec/h/u）→ 重建 body 槽位 → 矩阵解码 → 微信封解封
+ 重建 L1/L2 → 定位基础头 → 校验 major / CRC / suite / ext_len
+ → 读扩展区 → L3 → 用 AAD 解封 body → 解压/还原微头 → Payload
+ 任一步失败统一 NoHiddenData（不区分"无数据/错密码/错方言"）
 ```
+
+认证与 CRC 的分工：header 的 CRC32 只拦意外损坏；任何被解码器采信的字段（头、扩展区、body 长度）都在 AEAD AAD 内，篡改只会得到 `NoHiddenData`，不会得到"另一种看似合理的解码"。
 
 ---
 
@@ -422,9 +429,9 @@ pub struct StructureProfile {
 pub struct StegoProfile {
     pub default_secret: Option<&'static str>,    // 无密码时的图像隐写私钥
     pub domain: Option<&'static str>,            // 图像隐写 HKDF 域标签
-    pub jpeg: Option<JpegFormatProfile>,         // 私有 JPEG V3 线格式身份（None=官方）
+    pub jpeg: Option<JpegFormatProfile>,         // 私有 JPEG V4 线格式身份（None=官方）
     pub png: Option<PngFormatProfile>,           // 私有 PNG 空间域线格式身份
-    pub hevc: Option<HevcFormatProfile>,         // 私有 HEVC Scheme C 线格式身份
+    pub hevc: Option<HevcFormatProfile>,         // 私有 HEVC V4 线格式身份
 }
 
 // facade —— 组合；每个半区随 feature 出现
@@ -456,12 +463,16 @@ const MY_DIALECT: Dialect = Dialect::new()
 - `StegoProfile::domain` 实现 HKDF 子密钥化域隔离（NFC 规范化 + 长度前缀防拼接），不同团队或系统即使密码相同也无法互读，杜绝开源共享指纹暴露。
 - 自定义 `magic` 在 stealth 下被忽略（stealth 的魔数由密码派生，固定魔数会破坏可否认性）。
 
-### 6.3 内容域密钥与域解析
+### 6.3 内容域凭据与密钥分层（V4）
 
-- `EmbedOptions::secret(&StegoProfile)`：显式密码（非空）优先，否则取 `StegoProfile::secret()`，都没有则在微信封层回落到公开常量。空字符串密码被视为"未提供"，不会掩盖 profile 私钥。
-- `EmbedOptions::domain(&StegoProfile)`：显式 `domain` 优先，否则取 `StegoProfile::stego_domain()`，未配置则走官方默认派生分支。
-- `SafetyLevel`：容量安全三档（`High` 默认 $\le 0.10$ bpp / $r \ge 6.9$；`Balanced` $\le 0.15$ bpp / $r \ge 4.6$；`Paranoid` $\le 0.06$ bpp / $r \ge 11.5$）。
-- `SafetyEnforcement`：默认 `Advisory`（超限报警不阻断）；指定 `Enforced` 时若载荷超标则安全拒绝。
+- **凭据**：`Credential` 只有两个变体——`Password(&str)`（NFC 规范化后 PBKDF2-HMAC-SHA256 200,000 轮）和 `FileKey(&[u8; 32])`（跳过 PBKDF2 直接进 HKDF）。`password` 与 `key` 互斥；空串视为未提供。
+- **优先级**：显式 `password`/`key` > `StegoProfile::secret()` > 公开默认常量（`envelope::PUBLIC_DEFAULT_SECRET`）。公开常量不提供对抗持有源码者的机密性。
+- **域**：显式 `domain` > `StegoProfile::stego_domain()` > 无域（官方默认派生）。域名做 NFC 规范化并以长度前缀拼接，防拼接碰撞。
+- **L1**：`derive_locator_master(cred, domain_label, cipher, pre_salt)`，每个格式一个 32B 主密钥；`pre_salt` 只取嵌入前后不变的载体元数据（WAV 排除 PCM 摘要、FLAC 排除 STREAMINFO MD5）。
+- **L2**：`derive_l2_locator_keys(&master, cipher, magic_label, domain)` → `locate_seed` / `header_stc_seed` / `ext_stc_seed` / `magic4`；只用于找头，不用于解密。
+- **L3**：`derive_l3_session_keys(cipher, suite, &master, salt, domain)` → `enc_key` / `perm_seed` / `stc_seed`；suite 只在这里参与派生并决定 AEAD 算法。
+- `suite_id` 是 append-only 枚举：1 = AES-256-GCM（默认），2 = ChaCha20-Poly1305；未知 id 在 `validate_common` 阶段直接失败。
+- `SafetyLevel`：容量安全三档（`High` 默认 \le 0.10 bpp / r \ge 6.9；`Balanced` \le 0.15 bpp / r \ge 4.6；`Paranoid` \le 0.06 bpp / r \ge 11.5）。`SafetyEnforcement` 默认 `Advisory`（超限报警不阻断），`Enforced` 时超限拒绝。
 
 ---
 
@@ -504,24 +515,25 @@ const MY_DIALECT: Dialect = Dialect::new()
 
 内容域支持图像、视频容器与音频四大载体域，涵盖代价模型、自适应网格编码与可复现工程保障：
 
-1. **空间域（PNG，Scheme A）**：
+1. **空间域（PNG）**：
    - **算法支持**：由 `CostModelRegistry` 解析：默认/`hill` → `HillCostModel`（wire id 1）；`suniward` → `SuniwardCostModel`（wire id 2，自适应行并行与 SIMD FMA 加速）；`mipod` → `MipodCostModel`（wire id 3，局部方差估计与最小化检测概率）。未知名明确拒绝。
-   - **参数自描述同步**：提取端自动从 `FeatureWord.algorithm_id` 与 `FeatureWord.exclusion_permille` 提取算法 ID 与排除分位数。
+   - **参数自描述同步**：提取端从 64 字节 V4 基础头读取 `algorithm_id`、`exclusion_permille`、`channel_mode`、`class_rule`、窗口与 `h/u`；不再有独立的 `FeatureWord`。
    - **矩阵编码 `StegoCodec`**：`Hamming`（(7,3)，每块至多动 1 槽）或 `Stc`（全局 Viterbi 网格，最小化代价加权失真）；`Auto` 自动自适应选择。
    - **数值与边界约束**：像素值限制在 `[8, 247]`，采用 ternary ±1 匹配与八值类（`val & 0xF8`）约束，保证提取侧代价排序完全复现。
    - **并行加速**：代价计算与 Deflate 重编码全面采用 Rayon 行并行切分与即时内存释放。
 
-2. **DCT 频域（JPEG，Scheme B）**：
+2. **DCT 频域（JPEG，V4）**：
    - **算法支持**：默认/`uerd` → `UerdCostModel`；`juniward` → `JuniwardCostModel`；`jmipod` → `JMipodCostModel`。
-   - **固定网格真三元 STC（V3 协议）**：对全图所有 AC 位置（`k = 1..63`）计价并构建几何网格，提取端无需重构代价图。
+   - **固定网格真三元 STC（V4 信封）**：对全图所有 AC 位置（`k = 1..63`）计价并构建几何网格；44B 头自描述 `stc_h/stc_u`，body 槽位由 L3 `perm_seed` 密钥化置换，提取端无需重构代价图。
    - **容量信息复用**：`embed_jpeg_with_stats` 直接传出 `StegoCapacityInfo`，消除嵌入后重复全量扫描的开销。
 
-3. **HEVC 压缩域（Scheme C：MP4 / MOV / MKV / HEIF / Annex-B）**：
+3. **HEVC 压缩域（MP4 / MOV / MKV / HEIF / Annex-B）**：
    - **CABAC 旁路符号位原位隐写**：在变换单元（TU）内部调制 `coeff_sign_flag`（等概率 Bypass 模式，不影响状态机概率模型）。
    - **零尺寸膨胀（$\Delta = 0$）与 EPB 避让**：就地直接改写，通过防竞争字节迭代检验，规避 `0x000000..=03` 冲突，确保文件总尺寸严格守恒。
    - **MKV (Matroska) 支持**：解析 EBML 与 Segment 结构，提取视频帧进行原位调制；CRC-32 刷新按树深自内向外（innermost-first）排序执行；支持未知大小 Cluster 的正确截断。
-   - **空间均衡抽样（Weyl 离散置换）**：通过确定性互质步长离散抽样，避免载荷全量压在首帧。
-   - **HEIF 缩略图桥接（Scheme B，兜底通道）**：方案 C 不可用时自动桥接至独立 JPEG/未压缩缩略图项。
+   - **密钥化窗口抽样**：band/window 候选位置由 L2/L3 种子驱动，避免载荷集中在前几帧（固定 Weyl 步长已移除）。
+   - **32B HEVC 头**：`magic4/version/flags/stc_u/window_slices/ext_len/suite_id/body_len/nonce/CRC`，头与扩展区全部纳入 AAD。
+   - **HEIF 缩略图桥接（兜底通道）**：方案 C 不可用时自动桥接至独立 JPEG/未压缩缩略图项。
 
 4. **音频域（WAV & FLAC，content-audio 特性）**：
    - **WAV PCM 采样域**：针对 16/24-bit 线性 PCM 音频，结合听觉掩蔽代价与 STC 网格编码执行最低有效位（LSB）匹配。
@@ -572,7 +584,7 @@ const MY_DIALECT: Dialect = Dialect::new()
 - **HostAdapter 动态注册**：`structure::registry::ADAPTERS` 与 `find_adapter` 目前是静态切片，自定义格式适配器无法在运行时注册进引擎。
 - **代价模型经统一入口注入**：`StegoTuning` 通过 `algorithm` 名称匹配 `CostModelRegistry`，入口没有 trait 对象字段；外部实现的 `PngCostModel/JpegCostModel` 可直接传给 `png/jpeg` 子模块的内部函数，但无法仅通过 `embed_carrier` 名称入口生效。
 - **策略 ID 段**：`STRATEGY_REGISTRY` 中 1–13 为官方保留（`MAX_KNOWN_STRATEGY_ID = 13`）；解掩码启发式会把未知 ID 当噪声。
-- **协议级参数不可配**：加密套件（仅 AES-256-GCM）、PBKDF2 轮数（100 000）、压缩算法（仅 raw deflate）、自定义元数据字段均为线格式常量，本期不开放（详见审计文档 §3.1 / §4.5）。
+- **协议级参数不可配**：结构域加密套件（仅 AES-256-GCM，PBKDF2 100 000 轮）为线格式常量；内容域 V4 使用固定 L1 成本 200 000 轮，suite 为 append-only 的 1=AES-256-GCM / 2=ChaCha20-Poly1305；压缩算法（仅 raw deflate）、自定义元数据字段均为线格式常量，本期不开放。
 
 > 上述边界随版本演进可能调整；以最新源码与审计/计划文档为准。
 

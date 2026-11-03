@@ -1,18 +1,18 @@
-//! Format identity and cipher-suite table for the image steganography formats.
+//! Format identities for the content-domain steganography formats.
 //!
-//! Two things live here, both of them *compile-time* facts rather than runtime
-//! options:
+//! The wire formats live here, all of them *compile-time* facts rather than
+//! runtime options:
 //!
-//! 1. [`JpegFormatProfile`] — the identity of a wire format: the domain-separation
-//!    labels that feed every KDF, the superblock / extension geometry, the slot
-//!    grid rule, and the suite whitelist. Changing any of it produces a
-//!    *different format*: two binaries built with different profiles cannot read
-//!    each other's carriers, and the failure is indistinguishable from a wrong
-//!    password.
-//! 2. [`CipherSuite`] — "one id, one full set of crypto parameters". The suite
-//!    id in the superblock indexes this table, so iterating PBKDF2, memory cost
-//!    or the AEAD algorithm only ever adds a table entry; it never reshapes the
-//!    header.
+//! [`JpegFormatProfile`] (and its HEVC / spatial / audio siblings) is the
+//! identity of a wire format: the domain-separation labels that feed every KDF,
+//! the superblock / extension geometry, the slot grid rule, and the default
+//! cipher suite. Changing any of it produces a *different format*: two binaries
+//! built with different profiles cannot read each other's carriers, and the
+//! failure is indistinguishable from a wrong password.
+//!
+//! [`CipherSuiteId`] is the runtime suite id stored in the superblock; it
+//! selects the AEAD algorithm and is validated against the compiled-in
+//! whitelist.
 //!
 //! # Why the profile is a value and not a pile of constants
 //!
@@ -32,115 +32,9 @@
 use hkdf::Hkdf;
 use sha2::Sha256;
 
-use crate::crypto::normalize_nfc;
+use crate::crypto::{CONTENT_L1_PBKDF2_ITERATIONS, CipherSuiteId, Credential, normalize_nfc};
 use crate::errors::StrHideError;
-
-/// Iteration ceiling the decoder is willing to execute for one PBKDF2 suite.
-///
-/// Decoding a hostile carrier is a DoS vector: a forged `suite_id` must not be
-/// able to make the extractor run an hour of KDF. Anything above this is
-/// refused *before* the KDF runs.
-pub const MAX_PBKDF2_ITERATIONS: u32 = 2_000_000;
-
-/// Key-derivation function of a cipher suite.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kdf {
-    /// PBKDF2-HMAC-SHA256 over the NFC-normalized password, 32-byte output.
-    Pbkdf2HmacSha256 {
-        /// Iteration count; the whole anti-brute-force cost of the suite.
-        iterations: u32,
-    },
-}
-
-/// Authenticated-encryption algorithm of a cipher suite.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Aead {
-    /// AES-256-GCM with a 16-byte tag (12-byte nonce, as the superblock allots).
-    Aes256Gcm,
-}
-
-impl Aead {
-    /// Authentication tag length in bytes.
-    pub fn tag_len(self) -> usize {
-        match self {
-            Aead::Aes256Gcm => 16,
-        }
-    }
-}
-
-/// One row of the cipher-suite table.
-///
-/// The table is a **code constant**: once published, an id's parameters never
-/// change. Raising the iteration count, switching the AEAD or adding a KDF
-/// family is a new id, never an edit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CipherSuite {
-    /// Wire id, 1..=0x00FF. `0` means "unset" and is always rejected.
-    pub id: u16,
-    /// Human-readable name for diagnostics.
-    pub name: &'static str,
-    /// Password-based KDF, also the per-guess cost an attacker pays.
-    pub kdf: Kdf,
-    /// Payload AEAD.
-    pub aead: Aead,
-}
-
-impl CipherSuite {
-    /// Bytes of salt the superblock reserves for this suite (fixed 16).
-    pub fn salt_len(&self) -> usize {
-        16
-    }
-
-    /// Bytes of nonce the superblock reserves for this suite (fixed 12).
-    pub fn nonce_len(&self) -> usize {
-        12
-    }
-
-    /// Authentication tag length in bytes.
-    pub fn tag_len(&self) -> usize {
-        self.aead.tag_len()
-    }
-
-    /// Work factor of one password guess: PBKDF2 iterations.
-    pub fn cost(&self) -> u32 {
-        match self.kdf {
-            Kdf::Pbkdf2HmacSha256 { iterations } => iterations,
-        }
-    }
-}
-
-/// v1 default suite: PBKDF2-HMAC-SHA256, 200k iterations, AES-256-GCM.
-pub const SUITE_PBKDF2_200K: CipherSuite = CipherSuite {
-    id: 1,
-    name: "pbkdf2-sha256-200k",
-    kdf: Kdf::Pbkdf2HmacSha256 {
-        iterations: 200_000,
-    },
-    aead: Aead::Aes256Gcm,
-};
-
-/// Optional slower suite: same construction, 600k iterations.
-pub const SUITE_PBKDF2_600K: CipherSuite = CipherSuite {
-    id: 2,
-    name: "pbkdf2-sha256-600k",
-    kdf: Kdf::Pbkdf2HmacSha256 {
-        iterations: 600_000,
-    },
-    aead: Aead::Aes256Gcm,
-};
-
-/// Reserved id for `argon2id-m64t2p2`; deliberately **not** implemented in v1.
-///
-/// A 64 MiB blind guess per suite attempt is exactly what the trial enumeration
-/// must avoid, so the id is reserved (a decoder says "unsupported suite") until
-/// the cost of enumeration is re-evaluated.
-pub const RESERVED_SUITE_ARGON2ID: u16 = 3;
-
-/// Suites this build implements, in trial order (ascending id).
-pub const SUITES: &[CipherSuite] = &[SUITE_PBKDF2_200K, SUITE_PBKDF2_600K];
-
-/// Default suite written by the embedder.
-pub const DEFAULT_SUITE_ID: u16 = SUITE_PBKDF2_200K.id;
+use crate::stego::envelope::derive_domain_subkey_with_label;
 
 /// Which coefficients of a block belong to the slot grid.
 ///
@@ -182,45 +76,32 @@ impl GridRule {
 ///
 /// | field | change it and… |
 /// | :--- | :--- |
-/// | `magic_label` | the derived 4-byte header magic changes |
+/// | `cipher` | the V4 label table, default suite and L1/L2/L3 derivations change |
+/// | `magic_label` | the L2-derivation label changes, so the derived magic and locator keys move |
 /// | `cover_salt` | the cover digest changes, so every key and the trellis seed move |
-/// | `kdf_info` | the AES key derivation changes: unreadable |
 /// | `stc_h` / `stc_u` | different trellis geometry; both sides must agree (the header does not carry them) |
-/// | `header_bytes` | different fixed header size |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HevcFormatProfile {
-    /// HKDF-style label the 4-byte header magic is derived from, together with
-    /// the effective secret. Unlike a fixed magic, a derived one cannot be
-    /// searched for without the credential, so a carrier no longer advertises
-    /// itself to anyone holding the public binary.
+    /// V4 label table and default suite.
+    pub cipher: &'static WireCipherProfile,
+    /// HKDF-style label the locator keys (and the derived 4-byte magic) are
+    /// derived from. V4 no longer mixes the secret into a separate magic hash.
     pub magic_label: &'static [u8],
-    /// Prefix mixed into the cover digest (`SHA-256(cover_salt ‖ parameter sets)`).
+    /// Prefix mixed into the cover digest (`SHA-256(cover_salt ‖ "hevc-v4" ‖ parameter sets)`).
     pub cover_salt: &'static [u8],
-    /// HKDF info label for the payload AES-256-GCM key.
-    pub kdf_info: &'static [u8],
     /// STC constraint height.
     pub stc_h: u8,
     /// STC group size (elements per syndrome row).
     pub stc_u: u8,
-    /// Fixed per-carrier overhead budget in bytes; must be >= 24 (the on-wire
-    /// message header: magic 4 + len 4 + crc 4 + nonce 12) and covers the
-    /// 16-byte GCM tag trailing the ciphertext for the default value of 40.
-    ///
-    /// This is *not* a header the embedder writes in one block: the tag sits
-    /// at the end of the message, after the ciphertext. The value sizes the
-    /// fixed prefix the extractor reads to learn the payload length, and the
-    /// header budget subtracted from capacity.
-    pub header_bytes: usize,
 }
 
-/// Official Scheme C wire format (Scheme C v2: Superblock + windowing).
+/// Official Scheme C wire format (V4 content envelope).
 pub const DEFAULT_HEVC_FORMAT: HevcFormatProfile = HevcFormatProfile {
-    magic_label: b"strhide-hevc-magic-v2",
+    cipher: &OFFICIAL_HEVC_CIPHER,
+    magic_label: b"strhide-hevc-magic-v4",
     cover_salt: b"strhide-hevc-cover-v1",
-    kdf_info: b"strhide-hevc-aes-key",
     stc_h: 7,
     stc_u: 2,
-    header_bytes: 48,
 };
 
 /// Identity of one wire format.
@@ -242,22 +123,15 @@ pub const DEFAULT_HEVC_FORMAT: HevcFormatProfile = HevcFormatProfile {
 /// password (`NoHiddenData`), which is the point.
 pub const JPEG_SUPERBLOCK_BYTES: usize = 44;
 
+/// Bit slots of the default JPEG superblock (`2 * (44 * 8 + 8 - 1)`).
+pub const JPEG_SUPERBLOCK_SLOTS: usize = 718;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JpegFormatProfile {
-    /// Major version; a different value is a different format.
-    pub format_major: u8,
-    /// Minor version; only optional extensions bump it.
-    pub format_minor: u8,
-    /// KDF-salt tag of the cover digest.
+    /// KDF-salt tag of the cover digest (V4 `pre_salt` domain separation).
     pub cover_digest_tag: &'static [u8],
-    /// HKDF info label for the header permutation seed.
-    pub hpos_label: &'static [u8],
-    /// HKDF info label for the STC trellis seed.
-    pub stc_label: &'static [u8],
-    /// HKDF info label for the AEAD key.
-    pub enc_label: &'static [u8],
-    /// HKDF info label for the body permutation seed.
-    pub perm_label: &'static [u8],
+    /// V4 label table and default suite.
+    pub cipher: &'static WireCipherProfile,
     /// Superblock size in bytes (44).
     pub sb_bytes: u8,
     /// Superblock STC constraint height (8).
@@ -270,8 +144,6 @@ pub struct JpegFormatProfile {
     pub ext_u: u8,
     /// Which AC positions form the slot grid.
     pub grid_rule: GridRule,
-    /// Suites this binary accepts, ascending by id.
-    pub suites: &'static [CipherSuite],
 }
 
 impl JpegFormatProfile {
@@ -295,16 +167,9 @@ impl JpegFormatProfile {
         self.superblock_slots() + self.extension_slots(ext_bytes)
     }
 
-    /// Suite with the given wire id, if this build implements it.
-    pub fn suite(&self, id: u16) -> Option<&'static CipherSuite> {
-        self.suites.iter().find(|s| s.id == id)
-    }
-
-    /// The suite a fresh carrier is written with.
-    pub fn default_suite(&self) -> &'static CipherSuite {
-        self.suite(DEFAULT_SUITE_ID)
-            .or_else(|| self.suites.first())
-            .expect("a JpegFormatProfile must list at least one cipher suite")
+    /// The suite a fresh carrier is written with when the caller is silent.
+    pub fn default_suite(&self) -> CipherSuiteId {
+        self.cipher.default_suite
     }
 
     /// First structural problem with this profile, if any.
@@ -349,49 +214,8 @@ impl JpegFormatProfile {
                 self.grid_rule.k_min, self.grid_rule.k_max
             ));
         }
-        for (name, label) in [
-            ("cover_digest_tag", self.cover_digest_tag),
-            ("hpos_label", self.hpos_label),
-            ("stc_label", self.stc_label),
-            ("enc_label", self.enc_label),
-            ("perm_label", self.perm_label),
-        ] {
-            if label.is_empty() {
-                return Some(format!("{name} must not be empty"));
-            }
-        }
-        let labels = [
-            self.cover_digest_tag,
-            self.hpos_label,
-            self.stc_label,
-            self.enc_label,
-            self.perm_label,
-        ];
-        for (i, a) in labels.iter().enumerate() {
-            for b in labels.iter().skip(i + 1) {
-                if a == b {
-                    return Some("derivation labels must be pairwise distinct".into());
-                }
-            }
-        }
-        if self.suites.is_empty() {
-            return Some("suites must not be empty".into());
-        }
-        let mut last = 0u16;
-        for suite in self.suites {
-            if suite.id == 0 {
-                return Some("suite id 0 is reserved for 'unset'".into());
-            }
-            if suite.id <= last {
-                return Some("suite ids must be unique and ascending".into());
-            }
-            if suite.id > 0x00FF {
-                return Some(format!(
-                    "suite id {:#06x} is in the experimental range and cannot be a default",
-                    suite.id
-                ));
-            }
-            last = suite.id;
+        if self.cover_digest_tag.is_empty() {
+            return Some("cover_digest_tag must not be empty".into());
         }
         None
     }
@@ -413,20 +237,14 @@ impl JpegFormatProfile {
 /// The v1 wire format: 44-byte superblock (718 slots), 4-way extension area,
 /// full AC grid, PBKDF2 suites 1 and 2.
 pub const DEFAULT_JPEG_FORMAT: JpegFormatProfile = JpegFormatProfile {
-    format_major: 1,
-    format_minor: 0,
     cover_digest_tag: b"strhide-cover-v1",
-    hpos_label: b"hpos",
-    stc_label: b"stc-trellis",
-    enc_label: b"enc",
-    perm_label: b"perm",
+    cipher: &OFFICIAL_JPEG_CIPHER,
     sb_bytes: 44,
     sb_h: 8,
     sb_u: 2,
     ext_h: 8,
     ext_u: 4,
     grid_rule: GridRule::ALL_AC,
-    suites: SUITES,
 };
 
 /// Identity and KDF derivation labels for spatial (PNG) steganography.
@@ -455,59 +273,24 @@ pub const OFFICIAL_PNG_FORMAT: PngFormatProfile = PngFormatProfile {
     body: &DEFAULT_JPEG_FORMAT,
 };
 
-/// Identity and KDF derivation labels for audio (WAV / FLAC) steganography.
+/// Identity of audio (WAV / FLAC) steganography.
 ///
-/// Mirrors [`PngFormatProfile`] field for field, but every label is distinct so
-/// the same password on a WAV and on a PNG derives independent keys. The
-/// `body` member reuses [`JpegFormatProfile`] because the AEAD suite list and
-/// the `enc`/`perm`/`stc` label layering are shared machinery, not a container
-/// property -- what changes is the label material, supplied by [`AUDIO_BODY_FORMAT`].
+/// V4 splits identity into two pieces: the public `hpos_salt` feeds the
+/// carrier-derived `pre_salt`, and the private [`WireCipherProfile`] supplies
+/// every non-secret KDF label. A private profile still changes both, so a
+/// carrier written with one build is unreadable with another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioFormatProfile {
-    /// Stand-in secret used when neither a user password nor a private secret is provided.
-    pub fallback_secret: &'static str,
-    /// HKDF info label for domain subkey derivation.
-    pub domain_label: &'static [u8],
-    /// HKDF salt for the header slot permutation seed.
+    /// HKDF salt mixed into the carrier's `pre_salt`.
     pub hpos_salt: &'static [u8],
-    /// HKDF info label for the header slot permutation seed.
-    pub hpos_label: &'static [u8],
-    /// HKDF info label for the STC trellis seed.
-    pub stc_label: &'static [u8],
-    /// Suite list and body key/permutation labels.
-    pub body: &'static JpegFormatProfile,
+    /// V4 label table and default suite.
+    pub cipher: &'static WireCipherProfile,
 }
-
-/// Body-level labels for audio carriers.
-///
-/// `sb_*` / `ext_*` / `grid_rule` describe the JPEG superblock geometry and are
-/// unused here; they keep the type shared rather than duplicating a near-copy
-/// of [`JpegFormatProfile`] that would drift the moment a suite is added.
-pub const AUDIO_BODY_FORMAT: JpegFormatProfile = JpegFormatProfile {
-    format_major: 1,
-    format_minor: 0,
-    cover_digest_tag: b"strhide-audio-cover-v1",
-    hpos_label: b"audio-hpos",
-    stc_label: b"audio-stc-trellis-v1",
-    enc_label: b"audio-enc-v1",
-    perm_label: b"audio-perm-v1",
-    sb_bytes: 44,
-    sb_h: 8,
-    sb_u: 2,
-    ext_h: 8,
-    ext_u: 4,
-    grid_rule: GridRule::ALL_AC,
-    suites: SUITES,
-};
 
 /// Official WAV profile.
 pub const OFFICIAL_WAV_FORMAT: AudioFormatProfile = AudioFormatProfile {
-    fallback_secret: "strhide-default-content-stego-key-2026",
-    domain_label: b"strhide-stego-domain-v1",
     hpos_salt: b"strhide-audio-hpos-salt-v1",
-    hpos_label: b"strhide-audio-hpos-v1",
-    stc_label: b"strhide-audio-stc-v1",
-    body: &AUDIO_BODY_FORMAT,
+    cipher: &OFFICIAL_AUDIO_CIPHER,
 };
 
 /// Official FLAC profile.
@@ -516,13 +299,198 @@ pub const OFFICIAL_WAV_FORMAT: AudioFormatProfile = AudioFormatProfile {
 /// between the two carriers even when a caller reuses one password across a
 /// library of mixed formats.
 pub const OFFICIAL_FLAC_FORMAT: AudioFormatProfile = AudioFormatProfile {
-    fallback_secret: "strhide-default-content-stego-key-2026",
-    domain_label: b"strhide-stego-domain-v1",
     hpos_salt: b"strhide-flac-hpos-salt-v1",
-    hpos_label: b"strhide-flac-hpos-v1",
-    stc_label: b"strhide-flac-stc-v1",
-    body: &AUDIO_BODY_FORMAT,
+    cipher: &OFFICIAL_AUDIO_CIPHER,
 };
+
+/// Non-secret cipher identity of a V4 wire format.
+///
+/// The V4 envelope derives everything from one symbol table: the L1 party label
+/// is the only per-format secret input, and the four remaining labels separate
+/// header location, payload key, permutation and trellis. `default_suite` is an
+/// opinion, not a policy: the carrier's `suite_id` always wins when reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireCipherProfile {
+    /// HKDF label of the L1 domain-subkey (also the `credential_kind` outcome's
+    /// domain separation input).
+    pub domain_label: &'static [u8],
+    /// HKDF label of the header-location seed (`locate_seed`).
+    pub hpos_label: &'static [u8],
+    /// HKDF label of the AEAD key (`enc_key`).
+    pub enc_label: &'static [u8],
+    /// HKDF label of the body permutation seed.
+    pub perm_label: &'static [u8],
+    /// HKDF label of the trellis seed.
+    pub stc_label: &'static [u8],
+    /// Suite id written when the caller does not override it.
+    pub default_suite: CipherSuiteId,
+}
+
+/// V4 official cipher for PNG carriers.
+pub const OFFICIAL_PNG_CIPHER: WireCipherProfile = WireCipherProfile {
+    domain_label: b"strhide-stego-domain-v1",
+    hpos_label: b"strhide-stego-hpos-v2",
+    enc_label: b"enc",
+    perm_label: b"perm",
+    stc_label: b"strhide-stc-trellis-v1",
+    default_suite: CipherSuiteId::Aes256Gcm,
+};
+
+/// V4 official cipher for WAV / FLAC carriers.
+pub const OFFICIAL_AUDIO_CIPHER: WireCipherProfile = WireCipherProfile {
+    domain_label: b"strhide-stego-domain-v1",
+    hpos_label: b"audio-hpos",
+    enc_label: b"audio-enc-v1",
+    perm_label: b"audio-perm-v1",
+    stc_label: b"audio-stc-trellis-v1",
+    default_suite: CipherSuiteId::Aes256Gcm,
+};
+
+/// V4 official cipher for JPEG carriers.
+pub const OFFICIAL_JPEG_CIPHER: WireCipherProfile = WireCipherProfile {
+    domain_label: b"strhide-stego-domain-v1",
+    hpos_label: b"hpos",
+    enc_label: b"enc",
+    perm_label: b"perm",
+    stc_label: b"stc-trellis",
+    default_suite: CipherSuiteId::Aes256Gcm,
+};
+
+/// V4 official cipher for HEVC carriers (MOV/MP4/HEIC/Annex B).
+pub const OFFICIAL_HEVC_CIPHER: WireCipherProfile = WireCipherProfile {
+    domain_label: b"strhide-stego-domain-v1",
+    hpos_label: b"strhide-hevc-hpos-v4",
+    enc_label: b"strhide-hevc-enc-v4",
+    perm_label: b"strhide-hevc-perm-v4",
+    stc_label: b"strhide-hevc-stc-v4",
+    default_suite: CipherSuiteId::Aes256Gcm,
+};
+
+/// Keys derived before the header is located (L2).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct HeaderLocatorKeys {
+    /// Slot permutation seed for the header block.
+    pub locate_seed: [u8; 32],
+    /// Trellis seed of the base header block.
+    pub header_stc_seed: u64,
+    /// Trellis seed of the extension area.
+    pub ext_stc_seed: u64,
+    /// Derived 4-byte HEVC magic (unused by the other formats).
+    pub magic4: [u8; 4],
+}
+
+/// Per-carrier payload keys (L3).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SessionKeys {
+    /// AEAD key.
+    pub enc_key: [u8; 32],
+    /// Body slot permutation seed.
+    pub perm_seed: [u8; 32],
+    /// Body trellis seed.
+    pub stc_seed: u64,
+}
+
+fn hkdf_expand(salt: Option<&[u8]>, ikm: &[u8], info: &[u8], out: &mut [u8]) {
+    let hk = Hkdf::<Sha256>::new(salt, ikm);
+    hk.expand(info, out)
+        .expect("HKDF expand fits the SHA-256 output budget");
+}
+
+fn hkdf_expand_u64(ikm: &[u8], info: &[u8]) -> u64 {
+    let mut out = [0u8; 8];
+    hkdf_expand(None, ikm, info, &mut out);
+    u64::from_be_bytes(out)
+}
+
+/// L1: derive the locator master from a password or a 32-byte file key.
+///
+/// A password costs exactly [`CONTENT_L1_PBKDF2_ITERATIONS`] PBKDF2 iterations;
+/// a file key is already high-entropy and only runs one HKDF expansion. The
+/// header location is derived from the result, so a password guess cannot be
+/// tested without paying the full L1 cost.
+pub fn derive_locator_master(
+    cred: Credential<'_>,
+    domain: Option<&str>,
+    cipher: &WireCipherProfile,
+    pre_salt: &[u8; 32],
+) -> Result<[u8; 32], StrHideError> {
+    match cred {
+        Credential::Password(password) => {
+            let normalized = normalize_nfc(password);
+            let subkey =
+                derive_domain_subkey_with_label(normalized.as_bytes(), domain, cipher.domain_label);
+            let effective_ikm: &[u8] = match &subkey {
+                Some(subkey) => subkey,
+                None => normalized.as_bytes(),
+            };
+            let mut master = [0u8; 32];
+            pbkdf2::pbkdf2_hmac::<Sha256>(
+                effective_ikm,
+                pre_salt,
+                CONTENT_L1_PBKDF2_ITERATIONS,
+                &mut master,
+            );
+            Ok(master)
+        }
+        Credential::FileKey(key) => {
+            let info = info_with_domain(cipher.domain_label, domain);
+            let mut master = [0u8; 32];
+            hkdf_expand(Some(pre_salt.as_slice()), key, &info, &mut master);
+            Ok(master)
+        }
+    }
+}
+
+/// L2: derive the header-locator keys without any random salt.
+pub fn derive_l2_locator_keys(
+    master: &[u8; 32],
+    cipher: &WireCipherProfile,
+    magic_label: &[u8],
+    domain: Option<&str>,
+) -> Result<HeaderLocatorKeys, StrHideError> {
+    let locate_info = info_with_domain(cipher.hpos_label, domain);
+    let magic_info = info_with_domain(magic_label, domain);
+    let mut locate_seed = [0u8; 32];
+    let mut magic4 = [0u8; 4];
+    hkdf_expand(None, master, &locate_info, &mut locate_seed);
+    hkdf_expand(None, master, &magic_info, &mut magic4);
+    Ok(HeaderLocatorKeys {
+        locate_seed,
+        header_stc_seed: hkdf_expand_u64(master, b"strhide-v4-hdr-stc"),
+        ext_stc_seed: hkdf_expand_u64(master, b"strhide-v4-ext-stc"),
+        magic4,
+    })
+}
+
+fn suite_info(label: &[u8], domain: Option<&str>, suite: CipherSuiteId) -> Vec<u8> {
+    let mut info = info_with_domain(label, domain);
+    info.extend_from_slice(&suite.as_u16().to_be_bytes());
+    info
+}
+
+/// L3: derive the per-carrier payload keys from the header salt or nonce.
+pub fn derive_l3_session_keys(
+    cipher: &WireCipherProfile,
+    suite: CipherSuiteId,
+    master: &[u8; 32],
+    session_salt: &[u8],
+    domain: Option<&str>,
+) -> Result<SessionKeys, StrHideError> {
+    let enc_info = suite_info(cipher.enc_label, domain, suite);
+    let perm_info = suite_info(cipher.perm_label, domain, suite);
+    let stc_info = suite_info(cipher.stc_label, domain, suite);
+    let mut enc_key = [0u8; 32];
+    let mut perm_seed = [0u8; 32];
+    let mut stc_seed = [0u8; 8];
+    hkdf_expand(Some(session_salt), master, &enc_info, &mut enc_key);
+    hkdf_expand(Some(session_salt), master, &perm_info, &mut perm_seed);
+    hkdf_expand(Some(session_salt), master, &stc_info, &mut stc_seed);
+    Ok(SessionKeys {
+        enc_key,
+        perm_seed,
+        stc_seed: u64::from_be_bytes(stc_seed),
+    })
+}
 
 /// Domain-separated HKDF info string: `label || u64be(len) || domain`.
 ///
@@ -539,121 +507,6 @@ pub fn info_with_domain(label: &[u8], domain: Option<&str>) -> Vec<u8> {
         }
         None => label.to_vec(),
     }
-}
-
-/// `master = SuiteKDF(password, salt_material)`.
-///
-/// This is the *only* place the (expensive) password KDF runs, and therefore
-/// the floor on what one password guess costs an attacker: the header location
-/// is derived from the result, so a guess cannot be tested without paying it.
-pub fn derive_master(
-    suite: &CipherSuite,
-    password: &str,
-    salt_material: &[u8],
-) -> Result<[u8; 32], StrHideError> {
-    let normalized = normalize_nfc(password);
-    let mut master = [0u8; 32];
-    match suite.kdf {
-        Kdf::Pbkdf2HmacSha256 { iterations } => {
-            if iterations == 0 || iterations > MAX_PBKDF2_ITERATIONS {
-                return Err(StrHideError::UnsupportedVersion(format!(
-                    "cipher suite {} asks for {iterations} PBKDF2 iterations, outside the supported 1..={MAX_PBKDF2_ITERATIONS}",
-                    suite.id
-                )));
-            }
-            pbkdf2::pbkdf2_hmac::<Sha256>(
-                normalized.as_bytes(),
-                salt_material,
-                iterations,
-                &mut master,
-            );
-        }
-    }
-    Ok(master)
-}
-
-/// Header permutation seed: decides which of the grid slots carry the superblock.
-///
-/// `master` already costs one KDF, so an offline guess cannot locate the header
-/// without paying the suite's full price -- this is what closes the "fast
-/// password oracle" hole a plain structural check would open.
-pub fn header_perm_seed(
-    fmt: &JpegFormatProfile,
-    master: &[u8; 32],
-    domain: Option<&str>,
-) -> [u8; 32] {
-    let info = info_with_domain(fmt.hpos_label, domain);
-    let hk = Hkdf::<Sha256>::new(None, master);
-    let mut out = [0u8; 32];
-    hk.expand(&info, &mut out)
-        .expect("HKDF expand header permutation seed");
-    out
-}
-
-/// `(enc_key, perm_seed)` for the payload, layered on the superblock salt.
-///
-/// The salt is public (it sits in the superblock), but it is no longer the KDF
-/// salt: it only splits the master into per-carrier subkeys, so a precomputed
-/// table cannot be reused across carriers.
-pub fn body_keys(
-    fmt: &JpegFormatProfile,
-    master: &[u8; 32],
-    salt: &[u8],
-    domain: Option<&str>,
-) -> ([u8; 32], [u8; 32]) {
-    let hk = Hkdf::<Sha256>::new(Some(salt), master);
-    let enc_info = info_with_domain(fmt.enc_label, domain);
-    let perm_info = info_with_domain(fmt.perm_label, domain);
-    let mut enc_key = [0u8; 32];
-    let mut perm_seed = [0u8; 32];
-    hk.expand(&enc_info, &mut enc_key)
-        .expect("HKDF expand payload key");
-    hk.expand(&perm_info, &mut perm_seed)
-        .expect("HKDF expand permutation seed");
-    (enc_key, perm_seed)
-}
-
-/// STC trellis seed, derived from the body permutation seed and the salt.
-pub fn stc_seed(fmt: &JpegFormatProfile, perm_seed: &[u8; 32], salt: &[u8]) -> u64 {
-    let hk = Hkdf::<Sha256>::new(Some(salt), perm_seed);
-    let mut out = [0u8; 8];
-    hk.expand(fmt.stc_label, &mut out)
-        .expect("HKDF expand STC trellis seed");
-    u64::from_be_bytes(out)
-}
-
-/// Seed of the superblock / header trellis.
-///
-/// Domain-separated from the body trellis by the header salt material
-/// (`"hpos"`-derived seed), so header and body never share a matrix.
-pub fn header_stc_seed(
-    fmt: &JpegFormatProfile,
-    header_seed: &[u8; 32],
-    domain: Option<&str>,
-) -> u64 {
-    let mut label = Vec::with_capacity(fmt.stc_label.len() + 4);
-    label.extend_from_slice(fmt.stc_label);
-    label.extend_from_slice(b"-hdr");
-    seed_u64(header_seed, &info_with_domain(&label, domain))
-}
-
-/// Seed of the extension-area trellis (separate from the superblock's).
-pub fn extension_stc_seed(
-    fmt: &JpegFormatProfile,
-    header_seed: &[u8; 32],
-    domain: Option<&str>,
-) -> u64 {
-    let mut label = Vec::with_capacity(fmt.stc_label.len() + 4);
-    label.extend_from_slice(fmt.stc_label);
-    label.extend_from_slice(b"-ext");
-    seed_u64(header_seed, &info_with_domain(&label, domain))
-}
-
-fn seed_u64(ikm: &[u8; 32], info: &[u8]) -> u64 {
-    let hk = Hkdf::<Sha256>::new(None, ikm);
-    let mut out = [0u8; 8];
-    hk.expand(info, &mut out).expect("HKDF expand trellis seed");
-    u64::from_be_bytes(out)
 }
 
 #[cfg(test)]
@@ -677,22 +530,6 @@ mod tests {
     }
 
     #[test]
-    fn suite_table_is_unique_and_ascending() {
-        let mut last = 0u16;
-        for suite in SUITES {
-            assert!(suite.id > last, "suite ids must ascend");
-            assert_ne!(suite.id, 0);
-            assert!(suite.cost() >= 200_000);
-            last = suite.id;
-        }
-        assert_eq!(DEFAULT_JPEG_FORMAT.default_suite().id, DEFAULT_SUITE_ID);
-        assert_eq!(DEFAULT_SUITE_ID, 1);
-        assert!(DEFAULT_JPEG_FORMAT.suite(0).is_none());
-        assert!(DEFAULT_JPEG_FORMAT.suite(RESERVED_SUITE_ARGON2ID).is_none());
-        assert!(DEFAULT_JPEG_FORMAT.suite(9999).is_none());
-    }
-
-    #[test]
     fn invalid_profiles_are_rejected() {
         let mut p = DEFAULT_JPEG_FORMAT;
         p.grid_rule = GridRule {
@@ -702,8 +539,8 @@ mod tests {
         assert!(p.validate().is_err(), "DC in the grid must be refused");
 
         let mut p = DEFAULT_JPEG_FORMAT;
-        p.hpos_label = b"enc";
-        assert!(p.validate().is_err(), "duplicate labels must be refused");
+        p.cover_digest_tag = b"";
+        assert!(p.validate().is_err(), "empty digest tag must be refused");
 
         let mut p = DEFAULT_JPEG_FORMAT;
         p.sb_h = 3;
@@ -719,10 +556,6 @@ mod tests {
         let mut p = DEFAULT_JPEG_FORMAT;
         p.sb_bytes = 45;
         assert!(p.validate().is_err(), "long superblock must be refused");
-
-        let mut p = DEFAULT_JPEG_FORMAT;
-        p.suites = &[];
-        assert!(p.validate().is_err());
 
         let mut p = DEFAULT_JPEG_FORMAT;
         p.grid_rule = GridRule {
@@ -745,48 +578,252 @@ mod tests {
             info_with_domain(b"enc", Some("cafe\u{0301}"))
         );
     }
+}
 
-    #[test]
-    fn key_layering_is_separated_and_stable() {
-        let master = derive_master(&SUITE_PBKDF2_200K, "password", b"cover-digest").unwrap();
-        let hdr_a = header_perm_seed(&DEFAULT_JPEG_FORMAT, &master, None);
-        let hdr_b = header_perm_seed(&DEFAULT_JPEG_FORMAT, &master, Some("domain-a"));
-        assert_ne!(hdr_a, hdr_b, "domain must separate the header seed");
+#[cfg(test)]
+mod v4_kdf_tests {
+    use super::*;
+    use sha2::Digest;
 
-        let salt = [7u8; 16];
-        let (enc_a, perm_a) = body_keys(&DEFAULT_JPEG_FORMAT, &master, &salt, None);
-        let (enc_b, perm_b) = body_keys(&DEFAULT_JPEG_FORMAT, &master, &salt, Some("domain-a"));
-        assert_ne!(enc_a, enc_b);
-        assert_ne!(perm_a, perm_b);
-        assert_ne!(enc_a, perm_a, "key and permutation seed must differ");
+    // Frozen values from docs/stego_content_envelope_v4_golden_vectors_20261103.md.
+    const PASSWORD: &str = "correct horse battery staple";
+    const DOMAIN: &str = "domain-a";
+    const PRE_SALT: [u8; 32] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        0x1e, 0x1f,
+    ];
+    const SALT16: [u8; 16] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
+    ];
+    const NONCE12: [u8; 12] = [
+        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b,
+    ];
 
-        // Stable across calls: this is the whole "same cover + password = same
-        // slot sequence" contract.
-        assert_eq!(
-            body_keys(&DEFAULT_JPEG_FORMAT, &master, &salt, None),
-            (enc_a, perm_a)
-        );
-        assert_eq!(
-            stc_seed(&DEFAULT_JPEG_FORMAT, &perm_a, &salt),
-            stc_seed(&DEFAULT_JPEG_FORMAT, &perm_a, &salt)
-        );
-        assert_ne!(
-            stc_seed(&DEFAULT_JPEG_FORMAT, &perm_a, &salt),
-            header_stc_seed(&DEFAULT_JPEG_FORMAT, &hdr_a, None),
-            "header and body trellis seeds must be domain-separated"
-        );
+    fn hex<const N: usize>(s: &str) -> [u8; N] {
+        assert_eq!(s.len(), N * 2, "hex length");
+        let mut out = [0u8; N];
+        for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+            out[i] = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
+        }
+        out
+    }
 
-        // A different password or cover digest must move everything.
-        let other = derive_master(&SUITE_PBKDF2_200K, "password2", b"cover-digest").unwrap();
-        assert_ne!(header_perm_seed(&DEFAULT_JPEG_FORMAT, &other, None), hdr_a);
+    fn file_key() -> [u8; 32] {
+        [0x11; 32]
     }
 
     #[test]
-    fn suite_cost_matches_the_table() {
-        assert_eq!(SUITE_PBKDF2_200K.cost(), 200_000);
-        assert_eq!(SUITE_PBKDF2_600K.cost(), 600_000);
-        assert_eq!(SUITE_PBKDF2_200K.salt_len(), 16);
-        assert_eq!(SUITE_PBKDF2_200K.nonce_len(), 12);
-        assert_eq!(SUITE_PBKDF2_200K.tag_len(), 16);
+    fn l1_password_and_file_key_match_frozen_vectors() {
+        let master = derive_locator_master(
+            Credential::Password(PASSWORD),
+            None,
+            &OFFICIAL_PNG_CIPHER,
+            &PRE_SALT,
+        )
+        .unwrap();
+        assert_eq!(
+            master,
+            hex::<32>("5c74266ed4bf466efdc5e45163cda9427ef19efc78a7e16ebff3399ce7100195")
+        );
+
+        let master = derive_locator_master(
+            Credential::Password(PASSWORD),
+            Some(DOMAIN),
+            &OFFICIAL_PNG_CIPHER,
+            &PRE_SALT,
+        )
+        .unwrap();
+        assert_eq!(
+            master,
+            hex::<32>("62446079c4653df74842c5ae42d381853084d6d9d9ee022f2b11a4c2b406614c")
+        );
+
+        let key = file_key();
+        let master = derive_locator_master(
+            Credential::FileKey(&key),
+            None,
+            &OFFICIAL_PNG_CIPHER,
+            &PRE_SALT,
+        )
+        .unwrap();
+        assert_eq!(
+            master,
+            hex::<32>("659fae03605b2874adac6d8d06a9be0d818a9bf206d4392111f7b6c24d27e614")
+        );
+    }
+
+    #[test]
+    fn l2_png_matches_frozen_vectors() {
+        let master = derive_locator_master(
+            Credential::Password(PASSWORD),
+            None,
+            &OFFICIAL_PNG_CIPHER,
+            &PRE_SALT,
+        )
+        .unwrap();
+        let keys =
+            derive_l2_locator_keys(&master, &OFFICIAL_PNG_CIPHER, b"strhide-v4-hdr-magic", None)
+                .unwrap();
+        assert_eq!(
+            keys.locate_seed,
+            hex::<32>("43a7f549fa24f4215b93e94db68a7e081766533451884574560b01139f798273")
+        );
+        assert_eq!(keys.header_stc_seed, 11887539032958310912);
+        assert_eq!(keys.ext_stc_seed, 14052583312398415470);
+        assert_eq!(keys.magic4, hex::<4>("6f361b87"));
+    }
+
+    #[test]
+    fn l2_domain_separation_matches_frozen_vectors() {
+        let master = derive_locator_master(
+            Credential::Password(PASSWORD),
+            Some(DOMAIN),
+            &OFFICIAL_PNG_CIPHER,
+            &PRE_SALT,
+        )
+        .unwrap();
+        let keys = derive_l2_locator_keys(
+            &master,
+            &OFFICIAL_PNG_CIPHER,
+            b"strhide-v4-hdr-magic",
+            Some(DOMAIN),
+        )
+        .unwrap();
+        assert_eq!(
+            keys.locate_seed,
+            hex::<32>("b10faf49f4cb177fc5b913249889d52345fb6a0143e52434b71201328bb00803")
+        );
+        assert_eq!(keys.header_stc_seed, 17242176147011615236);
+        assert_eq!(keys.ext_stc_seed, 5631860850739589937);
+        assert_eq!(keys.magic4, hex::<4>("9f9c9968"));
+    }
+
+    #[test]
+    fn l2_hevc_matches_frozen_vectors() {
+        let master = derive_locator_master(
+            Credential::Password(PASSWORD),
+            None,
+            &OFFICIAL_HEVC_CIPHER,
+            &PRE_SALT,
+        )
+        .unwrap();
+        let keys = derive_l2_locator_keys(
+            &master,
+            &OFFICIAL_HEVC_CIPHER,
+            b"strhide-v4-hdr-magic",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            keys.locate_seed,
+            hex::<32>("67ece4982f1805d48497a032b08f8cabb793513f592b7e1a603bb7589074978f")
+        );
+        assert_eq!(keys.header_stc_seed, 11887539032958310912);
+        assert_eq!(keys.ext_stc_seed, 14052583312398415470);
+        assert_eq!(keys.magic4, hex::<4>("6f361b87"));
+    }
+
+    #[test]
+    fn l3_png_suite_selection_and_values_match_frozen_vectors() {
+        let master = derive_locator_master(
+            Credential::Password(PASSWORD),
+            None,
+            &OFFICIAL_PNG_CIPHER,
+            &PRE_SALT,
+        )
+        .unwrap();
+
+        let aes = derive_l3_session_keys(
+            &OFFICIAL_PNG_CIPHER,
+            CipherSuiteId::Aes256Gcm,
+            &master,
+            &SALT16,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            aes.enc_key,
+            hex::<32>("944a517a1c450540bb22bc033bf78231661e151db9006c55dec7f0194fb11da8")
+        );
+        assert_eq!(
+            aes.perm_seed,
+            hex::<32>("620cd14dbd302ca5e63b2f984b07e90a69b9a26752c96cea460a90514b424ae0")
+        );
+        assert_eq!(aes.stc_seed, 13240335620252696060);
+
+        let chacha = derive_l3_session_keys(
+            &OFFICIAL_PNG_CIPHER,
+            CipherSuiteId::ChaCha20Poly1305,
+            &master,
+            &SALT16,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            chacha.enc_key,
+            hex::<32>("4f9c8db066b8d33ba5f6cdbe75c90bc693d2a093c6c0c9710dc6a705be4f6996")
+        );
+        assert_eq!(
+            chacha.perm_seed,
+            hex::<32>("b660a92fb3be3b6bb3f4bd4d9dc291ab46f393cf06c9a3e52be208648624b6a6")
+        );
+        assert_eq!(chacha.stc_seed, 7702655012707632498);
+    }
+
+    #[test]
+    fn l3_hevc_uses_sha256_of_label_and_nonce() {
+        let master = derive_locator_master(
+            Credential::Password(PASSWORD),
+            None,
+            &OFFICIAL_HEVC_CIPHER,
+            &PRE_SALT,
+        )
+        .unwrap();
+        let mut input = b"strhide-hevc-session-v4".to_vec();
+        input.extend_from_slice(&NONCE12);
+        let session_salt = sha2::Sha256::digest(&input);
+        assert_eq!(
+            session_salt.as_slice(),
+            hex::<32>("84b2263f7aa00ac331e6e64c26372559ed919e2a5020aff25535238242516e38")
+                .as_slice()
+        );
+        let keys = derive_l3_session_keys(
+            &OFFICIAL_HEVC_CIPHER,
+            CipherSuiteId::Aes256Gcm,
+            &master,
+            &session_salt,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            keys.enc_key,
+            hex::<32>("b3e72b4ec894dd16129e14edfa8293d6455692110336c9f4d87d2b0b1aa71230")
+        );
+        assert_eq!(
+            keys.perm_seed,
+            hex::<32>("08922a6bca4b5de63a74e4cd03eccb89464f71ed1fc76e0baeeaea2ceaa0c426")
+        );
+        assert_eq!(keys.stc_seed, 18245078319218299937);
+    }
+
+    #[test]
+    fn cipher_profiles_actually_separate_formats() {
+        let master = derive_locator_master(
+            Credential::Password(PASSWORD),
+            None,
+            &OFFICIAL_PNG_CIPHER,
+            &PRE_SALT,
+        )
+        .unwrap();
+        let png = derive_l2_locator_keys(&master, &OFFICIAL_PNG_CIPHER, b"magic", None).unwrap();
+        let hevc = derive_l2_locator_keys(&master, &OFFICIAL_HEVC_CIPHER, b"magic", None).unwrap();
+        assert_ne!(png.locate_seed, hevc.locate_seed);
+        assert_eq!(png.magic4, hevc.magic4, "magic label is not per-format");
+        let audio =
+            derive_l2_locator_keys(&master, &OFFICIAL_AUDIO_CIPHER, b"magic", None).unwrap();
+        let jpeg = derive_l2_locator_keys(&master, &OFFICIAL_JPEG_CIPHER, b"magic", None).unwrap();
+        assert_ne!(audio.locate_seed, jpeg.locate_seed);
     }
 }

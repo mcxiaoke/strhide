@@ -53,7 +53,7 @@ use crate::errors::StrHideError;
 use crate::stego::audio::core::SlotCarrier;
 use crate::stego::audio::cost::{CostParams, PcmScale};
 use crate::stego::coding::Move;
-use crate::stego::header::V2_TOTAL_HEADER_SLOTS;
+use crate::stego::header::PNG_AUDIO_BASE_SLOTS;
 use bits::BitWriter;
 use frame::{ParsedFrame, StreamDefaults};
 
@@ -343,12 +343,15 @@ impl<'a> FlacCarrier<'a> {
     /// length in the header). Header and body picks are disjoint by
     /// construction: the body thinning runs over the eligible stream *minus*
     /// the header's picks, so the two never address the same codeword.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         bytes: &'a mut [u8],
         info: StreamInfo,
         analysis: &FlacAnalysis,
         body_slots: usize,
+        header_slots: usize,
         header_phase: u64,
+        ext_phase: u64,
         body_phase: u64,
     ) -> Result<Self, StrHideError> {
         let scale = info.scale();
@@ -372,7 +375,13 @@ impl<'a> FlacCarrier<'a> {
         let total = analysis.slots;
         let total_usable = analysis.usable;
         let tail_total = analysis.tails;
-        if tail_total < V2_TOTAL_HEADER_SLOTS {
+        if header_slots < PNG_AUDIO_BASE_SLOTS {
+            return Err(StrHideError::General(format!(
+                "FLAC header area must be at least {PNG_AUDIO_BASE_SLOTS} slots, got {header_slots}"
+            )));
+        }
+        let ext_slots = header_slots - PNG_AUDIO_BASE_SLOTS;
+        if tail_total < header_slots {
             return Err(StrHideError::General(format!(
                 concat!(
                     "FLAC carrier has {tails} usable subframe tails but the ",
@@ -380,7 +389,7 @@ impl<'a> FlacCarrier<'a> {
                     "the file is too short for this carrier"
                 ),
                 tails = tail_total,
-                header = V2_TOTAL_HEADER_SLOTS
+                header = header_slots
             )));
         }
         if total_usable < body_slots {
@@ -391,9 +400,18 @@ impl<'a> FlacCarrier<'a> {
         }
 
         // Pass 2: collect header picks and body picks in one sweep.
-        let mut header_picks: Vec<FlacSlot> = Vec::with_capacity(V2_TOTAL_HEADER_SLOTS);
+        //
+        // The base 512 picks are thinned over *all* tails, and the extension
+        // picks are thinned independently over the remaining (`tail_total - 512`)
+        // tails. Keeping the base count fixed at 512 is what makes this stable:
+        // a variable `wanted` would shift every base index as soon as an
+        // extension was present, and the extraction pass that reads the base
+        // header (before it knows `ext_len`) would address the wrong slots.
+        let mut header_picks: Vec<FlacSlot> = Vec::with_capacity(header_slots);
+        let mut ext_picks: Vec<FlacSlot> = Vec::with_capacity(ext_slots);
         let mut body_picks: Vec<FlacSlot> = Vec::with_capacity(body_slots);
         let mut tails_seen = 0usize;
+        let mut nonbase_seen = 0usize;
         let mut body_seen = 0usize;
         let mut pos = info.audio_offset;
         let mut samples_decoded = 0u64;
@@ -412,11 +430,25 @@ impl<'a> FlacCarrier<'a> {
             for slot in parsed.tails.iter() {
                 let index = tails_seen;
                 tails_seen += 1;
-                if header_picks.len() < V2_TOTAL_HEADER_SLOTS
-                    && thin_pick(index, tail_total, V2_TOTAL_HEADER_SLOTS, header_phase)
-                    && let Some(entry) = make_slot(slot, &parsed, &scale)
-                {
-                    header_picks.push(entry);
+                if thin_pick(index, tail_total, PNG_AUDIO_BASE_SLOTS, header_phase) {
+                    if header_picks.len() < PNG_AUDIO_BASE_SLOTS
+                        && let Some(entry) = make_slot(slot, &parsed, &scale)
+                    {
+                        header_picks.push(entry);
+                    }
+                } else {
+                    if ext_slots > 0
+                        && thin_pick(
+                            nonbase_seen,
+                            tail_total.saturating_sub(PNG_AUDIO_BASE_SLOTS),
+                            ext_slots,
+                            ext_phase,
+                        )
+                        && let Some(entry) = make_slot(slot, &parsed, &scale)
+                    {
+                        ext_picks.push(entry);
+                    }
+                    nonbase_seen += 1;
                 }
             }
             if body_slots > 0 {
@@ -436,18 +468,26 @@ impl<'a> FlacCarrier<'a> {
                     }
                 }
             }
-            if header_picks.len() >= V2_TOTAL_HEADER_SLOTS && body_picks.len() >= body_slots {
+            if header_picks.len() >= PNG_AUDIO_BASE_SLOTS
+                && ext_picks.len() >= ext_slots
+                && body_picks.len() >= body_slots
+            {
                 break;
             }
             pos = parsed.crc16_offset + 2;
         }
 
-        if header_picks.len() != V2_TOTAL_HEADER_SLOTS || body_picks.len() != body_slots {
+        if header_picks.len() != PNG_AUDIO_BASE_SLOTS
+            || ext_picks.len() != ext_slots
+            || body_picks.len() != body_slots
+        {
             return Err(StrHideError::General(format!(
-                "FLAC slot selection produced {} header and {} body slots, expected {} and {}",
+                "FLAC slot selection produced {} base, {} extension and {} body slots, expected {} and {} and {}",
                 header_picks.len(),
+                ext_picks.len(),
                 body_picks.len(),
-                V2_TOTAL_HEADER_SLOTS,
+                PNG_AUDIO_BASE_SLOTS,
+                ext_slots,
                 body_slots
             )));
         }
@@ -461,7 +501,8 @@ impl<'a> FlacCarrier<'a> {
                 tail_total
             );
         }
-        // The plan addresses header first, then body.
+        // The plan addresses base header, extension, then body.
+        header_picks.extend(ext_picks);
         header_picks.extend(body_picks);
         let slots = header_picks;
 
@@ -613,7 +654,7 @@ impl SlotCarrier for FlacCarrier<'_> {
     }
 
     fn capacity_slots(&self) -> usize {
-        self.total_usable + V2_TOTAL_HEADER_SLOTS
+        self.total_usable + PNG_AUDIO_BASE_SLOTS
     }
 
     fn min_group(&self) -> u8 {
@@ -740,6 +781,7 @@ impl SlotCarrier for FlacCarrier<'_> {
 /// Lightweight, zero-copy, zero-residual-decode carrier view strictly for capacity probing.
 pub(crate) struct FlacCapacityView {
     pub(crate) total_usable: usize,
+    pub(crate) header_total: usize,
 }
 
 impl SlotCarrier for FlacCapacityView {
@@ -748,7 +790,11 @@ impl SlotCarrier for FlacCapacityView {
     }
 
     fn capacity_slots(&self) -> usize {
-        self.total_usable + V2_TOTAL_HEADER_SLOTS
+        self.total_usable + PNG_AUDIO_BASE_SLOTS
+    }
+
+    fn header_capacity(&self) -> usize {
+        self.header_total
     }
 
     fn format_label(&self) -> &'static str {

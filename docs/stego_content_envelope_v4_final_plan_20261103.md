@@ -888,3 +888,35 @@ python ../scripts/baseline_hash.py --check
 ---
 
 **最终执行原则：** 先做 §7 Step 0-4（不接线），再按 PNG → WAV/FLAC → JPEG → HEVC 顺序切换；每个 Step 独立提交/回滚；Step 9 才删除旧常量、重建基线、跑全质量门禁。任何未通过 §8.2 负面用例的 Step 不允许进入下一 Step。
+
+---
+
+## 13. 实施状态与偏差清单（Step 9 收尾，2026-11-03）
+
+**结论：Step 0–9 全部完成，代码只支持 V4；旧 V2/V3 suite、旧 header、旧派生 helper 已删除。**
+
+### 13.1 与方案的落地差异
+
+| 项目 | 方案要求 | 实际落地 | 状态 |
+|---|---|---|---|
+| `max_pbkdf2_iterations` | 默认 200,000 | `ExtractParams::default()` = `CONTENT_L1_PBKDF2_ITERATIONS`（200,000）；V3 `MAX_PBKDF2_ITERATIONS` 已删除 | 已收紧 |
+| suite 2 | 表内保留 ChaCha20-Poly1305 | 已实现：新增 `chacha20poly1305 = 0.11.0`，`encrypt_v4_with_aad` / `unpack_v4_envelope_parts` 按 `CipherSuiteId` 分发；无 feature gate | 已实现 |
+| 音频 `pre_salt` | 只用嵌入不改的元数据 | WAV 移除 `SHA-256(data)`，字段改大端；FLAC 移除 `STREAMINFO.md5`，字段改大端 | 已修复 |
+| HEVC 容量公式 | `H=524+8*ext_len` 量级的统一公式 | `hdr_slots = 524 + u*(8*ext_len + h - 1)`（`h=7,u=2`）；`body_len` = AEAD 密文（含 16B tag）；probe/embed 同式 | 已统一 |
+| 扩展槽 off-by-8 | 扩展区按消息位（`8*ext_len`）记账 | 音频与 HEVC 的读取/写入均按 `ext_bytes * 8` 位，槽数由 STC 几何单独计算 | 已修复 |
+| JPEG body STC 种子 | L3 `SessionKeys.stc_seed` | 引擎改用 `session.stc_seed`；删除旧 `stc_seed(fmt, perm_seed, salt)`（仅 JPEG 未走 L3，属 Step 7 遗漏） | 已修正 |
+| CLI | `--suite`/`--key-file`/`--max-payload` 等 | 仅有 `--cipher-suite`（写入 `EmbedOptions.suite_id`）；`--key-file`、`--max-payload`、`--extensions` **未实现** | 偏差 |
+| GUI | Tauri command 暴露 suite/extensions | `ProbeOptions`/`ExtractOptions` 已补齐 `key: None`、`extensions: Vec::new()` 以适配新 API；**未暴露** suite/extensions/key UI | 偏差 |
+| examples | 全部走新 `Credential` API | 已确认无 `CipherSuite`/`derive_master`/`body_keys`/旧 header 引用 | 一致 |
+
+### 13.2 V3/V2 删除清单
+
+- `stego::format`：`Kdf`、`Aead`、`CipherSuite`、`SUITE_PBKDF2_200K/600K`、`RESERVED_SUITE_ARGON2ID`、`SUITES`、`DEFAULT_SUITE_ID`、`MAX_PBKDF2_ITERATIONS`；`derive_master`、`body_keys`、`header_perm_seed`、`stc_seed`、`header_stc_seed`、`extension_stc_seed`、`seed_u64`。
+- `stego::envelope`：`HEADER_OVERHEAD`、`MIN_ENVELOPE_LEN`、`derive_domain_subkey`、`derive_header_perm_seed*`、`derive_stc_seed*`、V3 `encrypt_with_aad` / `unpack_envelope_parts` / `unpack_envelope_parts_raw`。
+- `stego::jpeg::header_v3`：V3 `Superblock` 及其 `encode/decode/validate_against/ciphertext_len`、`FIELD_LAYOUT`、`COMPONENT_Y`、`ENVELOPE_LEN_MAX`、TLV 重导出（引擎改从 `stego::header` 导入）。
+- 公共导出：`lib.rs` / `stego/mod.rs` 不再导出 `CipherSuite`。
+- 残留引用：仅 `tests/test_lifecycle/stego.rs` 一处注释提到 `MIN_ENVELOPE_LEN`，以及 CLI i18n 文案键名 `HelpStegoCipherSuite`；无代码引用。
+
+### 13.3 基线说明
+
+`baseline_hash.py --check` 在 Step 9 首次运行时，两个 JPEG 用例（`chenleicover_4.jpg`、`textures14.jpg`）的 `content.stego_sha256/size` 变化，原因是 JPEG body STC 种子从旧 helper 切到 L3 `session.stc_seed`（其余 26 例不变）。确认口径后 `--write` 重建 `temp/baseline/baseline.json`，`--check` 28/28 一致（旧 JSON 为生成产物，已被覆盖）。

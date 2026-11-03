@@ -1,4 +1,4 @@
-//! JPEG DCT-domain steganographic embedding and extraction (V3).
+//! JPEG DCT-domain steganographic embedding and extraction (V4 content envelope).
 //!
 //! # The shape of the code
 //!
@@ -36,29 +36,33 @@ use dct_io::JpegCoefficients;
 use sha2::{Digest, Sha256};
 
 use crate::core::control::{Control, Stage};
+use crate::core::crypto::{CipherSuiteId, Credential};
 use crate::core::media::MediaInfo;
 use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::coding::{Move, StcTrellis};
 use crate::stego::envelope::{
-    BODY_OVERHEAD, Freshness, HEADER_OVERHEAD, build_plaintext, build_plaintext_bytes,
-    encrypt_with_aad, unpack_envelope_parts,
+    BODY_OVERHEAD, Freshness, build_plaintext, build_plaintext_bytes, build_v4_aad,
+    encrypt_v4_with_aad, unpack_v4_envelope_parts,
 };
 use crate::stego::format::{
-    JpegFormatProfile, body_keys, derive_master, extension_stc_seed, header_perm_seed,
-    header_stc_seed, stc_seed,
+    JpegFormatProfile, derive_l2_locator_keys, derive_l3_session_keys, derive_locator_master,
+};
+use crate::stego::header::{
+    CONTENT_ENVELOPE_VERSION, FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT, HEADER_LEN_MAX, MAX_EXT_BYTES,
+    TLV_CRITICAL, Tlv, encode_extension, parse_extension,
 };
 use crate::stego::jpeg::dht::{self, AcSymbolSet};
-use crate::stego::jpeg::header_v3::{
-    CODEC_TERNARY_STC, COMPONENT_Y, ENVELOPE_LEN_MAX, SUPERBLOCK_BYTES, Superblock, TLV_CRITICAL,
-    encode_extension, parse_extension,
-};
+use crate::stego::jpeg::header_v3::{CODEC_TERNARY_STC, JpegSuperblockV4, SUPERBLOCK_BYTES};
 use crate::stego::jpeg::v3_layout::{self, Layout};
 use crate::stego::options::{StegoHeaderInfo, StegoVerifyResult, VerifyLevel};
 use crate::stego::params::{ExtractParams, JpegParams};
 use crate::stego::prng::{ChaCha12Stream, fisher_yates_prefix_from, permute_prefix};
 use crate::stego::traits::JpegCostModel;
+
+/// `format_id` of JPEG in the V4 AAD domain separator.
+const JPEG_FORMAT_ID: u8 = 4;
 
 /// Map a dct_io error to StrHideError.
 fn map_dct_error(e: dct_io::DctError) -> StrHideError {
@@ -248,6 +252,19 @@ fn cover_digest(fmt: &JpegFormatProfile, coeffs: &JpegCoefficients) -> [u8; 32] 
             hasher.update(block[0].to_be_bytes());
         }
     }
+    hasher.finalize().into()
+}
+
+/// Carrier identity mixed into the L1 PBKDF2 salt.
+///
+/// Only immutable metadata: the cover digest is computed from DC coefficients,
+/// which the DCT grid never modifies. Embedding therefore cannot move the salt,
+/// and probe/extract derive the same locator keys.
+fn jpeg_pre_salt(fmt: &JpegFormatProfile, cover: &CoverFrame) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(fmt.cover_digest_tag);
+    hasher.update(b"jpeg-v4");
+    hasher.update(cover.digest);
     hasher.finalize().into()
 }
 
@@ -496,7 +513,7 @@ fn apply_deltas(
 /// Everything the two attempts share.
 struct EmbedContext<'a> {
     fmt: &'a JpegFormatProfile,
-    suite: &'a crate::stego::format::CipherSuite,
+    suite: CipherSuiteId,
     params: &'a JpegParams,
     cover: &'a CoverFrame,
     costs: &'a [f64],
@@ -504,15 +521,22 @@ struct EmbedContext<'a> {
     /// model has no preference (symmetric costs). Embed-side only.
     directions: Option<&'a [i8]>,
     table: Option<&'a AcSymbolSet>,
-    password: &'a str,
+    /// L1 locator master and the L2 keys derived from it.
+    master: [u8; 32],
+    locate_seed: [u8; 32],
+    header_stc_seed: u64,
+    ext_stc_seed: u64,
     domain: Option<&'a str>,
+    /// Encoded extension TLV area, shared by probe and embed.
+    extension: Vec<u8>,
     /// Working-set estimate from [`preflight_jpeg`], before the trellis bitmap.
     base_bytes: u64,
     /// Source of the salt and nonce for each attempt.
     freshness: Freshness,
-    /// Cover+payload binding for seeded freshness, precomputed once per embed
-    /// (see [`Freshness::seeded_binding`]); stable across retry attempts.
-    fresh_binding: [u8; 64],
+    /// Cover+payload`+format+extension` binding for seeded freshness, computed
+    /// once per embed. The attempt index is folded in separately, so retries
+    /// never reuse a nonce.
+    fresh_binding: Vec<u8>,
     /// Capacity safety policy for the enforced-tier gate.
     safety: crate::stego::params::SafetyPolicy,
     payload: &'a Payload<'a>,
@@ -583,8 +607,10 @@ impl From<StrHideError> for Attempt {
 pub fn embed_jpeg<'a>(
     carrier_bytes: &[u8],
     payload: impl Into<Payload<'a>>,
-    secret: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
+    suite_id: u16,
+    extensions: &[Tlv],
     fmt: &JpegFormatProfile,
     params: &JpegParams,
     safety: crate::stego::params::SafetyPolicy,
@@ -595,8 +621,10 @@ pub fn embed_jpeg<'a>(
     embed_jpeg_with_stats(
         carrier_bytes,
         payload,
-        secret,
+        cred,
         domain,
+        suite_id,
+        extensions,
         fmt,
         params,
         safety,
@@ -612,8 +640,10 @@ pub fn embed_jpeg<'a>(
 pub fn embed_jpeg_with_stats<'a>(
     carrier_bytes: &[u8],
     payload: impl Into<Payload<'a>>,
-    secret: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
+    suite_id: u16,
+    extensions: &[Tlv],
     fmt: &JpegFormatProfile,
     params: &JpegParams,
     safety: crate::stego::params::SafetyPolicy,
@@ -626,13 +656,18 @@ pub fn embed_jpeg_with_stats<'a>(
     params.validate()?;
     control.stage(Stage::Decode);
     control.check()?;
-    let suite = fmt.suite(params.cipher_suite).ok_or_else(|| {
+    let suite = CipherSuiteId::from_u16(suite_id).ok_or_else(|| {
         StrHideError::UnsupportedVersion(format!(
-            "Cipher suite {} is not implemented by this build (known: {:?})",
-            params.cipher_suite,
-            fmt.suites.iter().map(|s| s.id).collect::<Vec<_>>()
+            "Cipher suite {suite_id} is not implemented by this build"
         ))
     })?;
+    let extension = encode_extension(extensions)?;
+    if extension.len() > MAX_EXT_BYTES {
+        return Err(StrHideError::General(format!(
+            "Extension area is {} bytes, the maximum is {MAX_EXT_BYTES}",
+            extension.len()
+        )));
+    }
 
     let preflight = preflight_jpeg(carrier_bytes)?;
     let coeffs = dct_io::read_coefficients(carrier_bytes).map_err(map_dct_error)?;
@@ -683,6 +718,17 @@ pub fn embed_jpeg_with_stats<'a>(
     // A complete table needs no per-slot symbol work; anything else takes the
     // slow path (~1% of real files).
     let table = dht::luma_ac_symbols(carrier_bytes).filter(|t| !t.is_complete());
+
+    // L1/L2 are carrier-derived and suite-independent; the suite only selects
+    // the AEAD and the L3 session keys.
+    let pre_salt = jpeg_pre_salt(fmt, &cover);
+    let master = derive_locator_master(cred, domain, fmt.cipher, &pre_salt)?;
+    let locator = derive_l2_locator_keys(&master, fmt.cipher, b"strhide-v4-hdr-magic", domain)?;
+    let mut fresh_binding = Freshness::seeded_binding(carrier_bytes, payload.as_bytes()).to_vec();
+    fresh_binding.push(JPEG_FORMAT_ID);
+    fresh_binding.push(CONTENT_ENVELOPE_VERSION);
+    fresh_binding.extend_from_slice(&extension);
+
     let ctx = EmbedContext {
         fmt,
         suite,
@@ -691,13 +737,15 @@ pub fn embed_jpeg_with_stats<'a>(
         costs: &costs,
         directions: directions.as_deref(),
         table: table.as_ref(),
-        password: secret
-            .filter(|s| !s.is_empty())
-            .unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET),
+        master,
+        locate_seed: locator.locate_seed,
+        header_stc_seed: locator.header_stc_seed,
+        ext_stc_seed: locator.ext_stc_seed,
         domain,
+        extension,
         base_bytes: preflight.base_bytes,
         freshness,
-        fresh_binding: Freshness::seeded_binding(carrier_bytes, payload.as_bytes()),
+        fresh_binding,
         safety,
         payload: &payload,
     };
@@ -709,6 +757,7 @@ pub fn embed_jpeg_with_stats<'a>(
         params,
         safety.level,
         fmt,
+        &ctx.extension,
     )?;
     let mut work = coeffs.clone();
     let mut last_error = None;
@@ -765,19 +814,13 @@ fn embed_once(
     let fmt = ctx.fmt;
     let params = ctx.params;
     let cover = ctx.cover;
-    let suite = ctx.suite;
     let safety = ctx.safety;
     let n_total = cover.n_total();
 
     // Header geometry: the extension area first, because it decides how many
     // slots the header takes away from the body.
-    let extension_area = encode_extension(&params.extensions)?;
+    let extension_area = &ctx.extension;
     let ext_bytes = extension_area.len();
-    if ext_bytes > u16::MAX as usize {
-        return Err(Attempt::from(StrHideError::General(format!(
-            "Extension area of {ext_bytes} bytes exceeds the 16-bit header field"
-        ))));
-    }
     let hdr_n = fmt.header_slots(ext_bytes);
     if n_total <= hdr_n {
         return Err(Attempt::from(StrHideError::General(format!(
@@ -790,22 +833,21 @@ fn embed_once(
     let total_coeffs = cover.block_count * 64;
 
     let plaintext = build_plaintext(ctx.payload)?;
-    let ciphertext_len = plaintext.len() + suite.tag_len();
-    let envelope_len = HEADER_OVERHEAD + ciphertext_len;
-    if envelope_len as u64 > ENVELOPE_LEN_MAX as u64 {
+    let ciphertext_len = plaintext.len() + ctx.suite.tag_len();
+    // V4 `body_len` is the ciphertext length including the AEAD tag; there is
+    // no legacy salt/nonce prefix in the body any more.
+    if ciphertext_len > HEADER_LEN_MAX as usize {
         return Err(Attempt::from(StrHideError::General(format!(
-            "Envelope of {envelope_len} bytes exceeds the 26-bit header length field"
+            "Envelope of {ciphertext_len} bytes exceeds the {HEADER_LEN_MAX}-byte header length field"
         ))));
     }
     let bits = ciphertext_len * 8;
 
-    let master = derive_master(suite, ctx.password, &cover.digest)?;
-    let hdr_seed = header_perm_seed(fmt, &master, ctx.domain);
-
     // Single working buffer for the carrier AC grid (eliminates 336 MB of redundant Vec clones).
     let mut slots_buf = v3_layout::grid_indices(cover.block_count, fmt.grid_rule);
-    permute_prefix(&mut slots_buf, hdr_n, &hdr_seed);
+    permute_prefix(&mut slots_buf, hdr_n, &ctx.locate_seed);
     let hdr_slots = slots_buf[..hdr_n].to_vec();
+    let superblock_slots = fmt.superblock_slots();
 
     // Reconstruct body grid in-place into the same allocated buffer!
     v3_layout::fill_body_grid(&mut slots_buf, &hdr_slots, cover.block_count, fmt.grid_rule);
@@ -859,26 +901,40 @@ fn embed_once(
         }
     }
 
+    // Attempts are zero-based for freshness so a retry always derives a fresh
+    // salt and nonce even with `Freshness::Seeded`.
+    let attempt = attempt.saturating_sub(1);
     let salt = ctx.freshness.salt(attempt, &ctx.fresh_binding);
     let nonce = ctx.freshness.nonce(attempt, &ctx.fresh_binding);
-    let superblock = Superblock {
-        version_major: fmt.format_major,
-        version_minor: fmt.format_minor,
-        flags: 0,
+    let flags = if ext_bytes == 0 {
+        0
+    } else if parse_extension(extension_area)
+        .map(|records| records.iter().any(|(t, _)| t & TLV_CRITICAL != 0))
+        .unwrap_or(false)
+    {
+        FLAG_EXT_PRESENT | FLAG_EXT_CRITICAL
+    } else {
+        FLAG_EXT_PRESENT
+    };
+    let superblock = JpegSuperblockV4 {
+        version: CONTENT_ENVELOPE_VERSION,
+        flags,
         salt,
         nonce,
-        envelope_len: envelope_len as u32,
-        suite_id: suite.id,
+        body_len: ciphertext_len as u32,
+        suite_id: ctx.suite.as_u16(),
         codec_id: CODEC_TERNARY_STC,
-        h: params.stc_h,
-        u: layout.u,
-        components_mask: COMPONENT_Y,
-        ext_bytes: ext_bytes as u16,
+        stc_h: params.stc_h,
+        stc_u: layout.u,
+        ext_len: ext_bytes as u8,
     };
     let superblock_bytes = superblock.encode();
 
-    let (enc_key, perm_seed) = body_keys(fmt, &master, &salt, ctx.domain);
-    let ciphertext = encrypt_with_aad(suite, &enc_key, &nonce, &superblock_bytes, &plaintext)?;
+    // The extension area is authenticated too: a bit flip there must break the
+    // AEAD even when the (untrusted) CRC is recomputed.
+    let aad = build_v4_aad(JPEG_FORMAT_ID, &superblock_bytes, extension_area);
+    let session = derive_l3_session_keys(fmt.cipher, ctx.suite, &ctx.master, &salt, ctx.domain)?;
+    let ciphertext = encrypt_v4_with_aad(ctx.suite, &session.enc_key, &nonce, &aad, &plaintext)?;
     debug_assert_eq!(ciphertext.len(), ciphertext_len);
 
     let mut touched = vec![false; cover.block_count];
@@ -886,13 +942,13 @@ fn embed_once(
     // 1) Superblock: 352 bits through STC(sb_h, sb_u).
     if let Err(e) = embed_slots(
         &mut *work,
-        &hdr_slots[..fmt.superblock_slots()],
+        &hdr_slots[..superblock_slots],
         fmt,
         ctx.costs,
         ctx.directions,
         ctx.table,
         params,
-        header_stc_seed(fmt, &hdr_seed, ctx.domain),
+        ctx.header_stc_seed,
         fmt.sb_h,
         fmt.sb_u,
         &superblock_bytes,
@@ -923,23 +979,23 @@ fn embed_once(
     if ext_bytes > 0 {
         embed_slots(
             &mut *work,
-            &hdr_slots[fmt.superblock_slots()..hdr_n],
+            &hdr_slots[superblock_slots..hdr_n],
             fmt,
             ctx.costs,
             ctx.directions,
             ctx.table,
             params,
-            extension_stc_seed(fmt, &hdr_seed, ctx.domain),
+            ctx.ext_stc_seed,
             fmt.ext_h,
             fmt.ext_u,
-            &extension_area,
+            extension_area,
             &mut touched,
             applied,
         )?;
     }
 
     // 3) Body: the ciphertext, over a keyed permutation of the body grid.
-    permute_prefix(&mut slots_buf, layout.body_n, &perm_seed);
+    permute_prefix(&mut slots_buf, layout.body_n, &session.perm_seed);
     slots_buf.truncate(layout.body_n);
     if let Err(e) = embed_slots(
         &mut *work,
@@ -949,7 +1005,7 @@ fn embed_once(
         ctx.directions,
         ctx.table,
         params,
-        stc_seed(fmt, &perm_seed, &salt),
+        session.stc_seed,
         params.stc_h,
         layout.u,
         &ciphertext,
@@ -1123,13 +1179,13 @@ fn enforced_payload_limit(
     recommended_bytes(total_coeffs, body_slots, safety.level)
 }
 
-/// Extract a payload from a V3 JPEG carrier.
+/// Extract a payload from a V4 JPEG carrier.
 ///
 /// The signature deliberately carries no cost model: everything the decoder
 /// needs (slot set, `u`, `h`, salt, nonce) comes from the key and the header.
 pub fn extract_jpeg(
     carrier_bytes: &[u8],
-    password: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     fmt: &JpegFormatProfile,
     extract: &ExtractParams,
@@ -1140,7 +1196,7 @@ pub fn extract_jpeg(
     preflight_jpeg(carrier_bytes)?;
     let coeffs = dct_io::read_coefficients(carrier_bytes).map_err(map_dct_error)?;
     control.check()?;
-    extract_jpeg_from(&coeffs, password, domain, fmt, extract, control, None)
+    extract_jpeg_from(&coeffs, cred, domain, fmt, extract, control, None)
 }
 
 /// Body of [`extract_jpeg`] over already-decoded DCT coefficients.
@@ -1148,177 +1204,146 @@ pub fn extract_jpeg(
 /// `matched` carries the `(suite id, master key)` an earlier
 /// [`inspect_jpeg_from`] already derived, so `verify_jpeg` pays a single DCT
 /// decode and a single KDF instead of three and two.
+#[allow(clippy::too_many_arguments)]
 fn extract_jpeg_from(
     coeffs: &JpegCoefficients,
-    password: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     fmt: &JpegFormatProfile,
     extract: &ExtractParams,
     control: &Control<'_>,
-    matched: Option<(u16, [u8; 32])>,
+    matched: Option<[u8; 32]>,
 ) -> Result<Payload<'static>, StrHideError> {
+    let no_hidden = || StrHideError::NoHiddenData("No valid payload found".into());
     if coeffs.components.is_empty() {
-        return Err(StrHideError::NoHiddenData("JPEG has no components".into()));
+        return Err(no_hidden());
     }
+    // A password below the V4 floor is rejected before any PBKDF2 work.
+    if matches!(cred, Credential::Password(_))
+        && extract.max_pbkdf2_iterations < crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS
+    {
+        return Err(no_hidden());
+    }
+    control.check()?;
     let cover = CoverFrame::read(fmt, coeffs);
     let n_total = cover.n_total();
-    let no_hidden = || StrHideError::NoHiddenData("No valid payload found".into());
 
-    let password = password
-        .filter(|s| !s.is_empty())
-        .unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET);
-
-    // The slot grid depends on the cover alone, so it is built once and copied
-    // back into the working buffer for every trial suite. Rebuilding it per
-    // trial (as this loop used to) re-ran the same double loop for a buffer that
-    // is immediately permuted in place anyway.
-    let grid_template = v3_layout::grid_indices(cover.block_count, fmt.grid_rule);
-    let mut slots_buf = grid_template.clone();
-
-    // Trial enumeration: ascending suite id, one KDF per attempt. A wrong
-    // password and a non-carrier both end here, with the same error.
-    for suite in fmt.suites {
-        control.check()?;
-        if !extract.allows_suite(suite.id) {
-            continue;
+    let pre_salt = jpeg_pre_salt(fmt, &cover);
+    let master = match matched {
+        Some(master) => master,
+        None => {
+            derive_locator_master(cred, domain, fmt.cipher, &pre_salt).map_err(|_| no_hidden())?
         }
-        if suite.cost() > extract.max_pbkdf2_iterations {
-            continue;
-        }
-        let master = match matched {
-            Some((suite_id, master)) if suite_id == suite.id => master,
-            Some(_) => continue,
-            None => match derive_master(suite, password, &cover.digest) {
-                Ok(master) => master,
-                Err(_) => continue,
-            },
-        };
-        let hdr_seed = header_perm_seed(fmt, &master, domain);
+    };
+    let locator = derive_l2_locator_keys(&master, fmt.cipher, b"strhide-v4-hdr-magic", domain)
+        .map_err(|_| no_hidden())?;
 
-        // Reset and reuse the single preallocated working buffer: `clear` keeps
-        // the capacity, so this is a memcpy rather than a rebuild.
-        slots_buf.clear();
-        slots_buf.extend_from_slice(&grid_template);
+    // The grid depends on the cover alone; the header prefix shuffle is driven
+    // by the locator seed.
+    let mut slots_buf = v3_layout::grid_indices(cover.block_count, fmt.grid_rule);
+    let sb_n = fmt.superblock_slots();
+    if slots_buf.len() < sb_n {
+        return Err(no_hidden());
+    }
+    let hdr_min = fmt.header_slots(0);
+    let mut hdr_rng = ChaCha12Stream::from_seed(&locator.locate_seed);
+    fisher_yates_prefix_from(&mut slots_buf, 0, hdr_min, &mut hdr_rng);
 
-        // The header prefix is at least the superblock plus the minimum
-        // extension area (746 slots with the default profile). `ext_bytes` is
-        // unknown until the superblock is read, so shuffle that minimum first
-        // and, if the declared extension is larger, continue the same RNG
-        // stream. A forward prefix shuffle only swaps `i` with an index in
-        // `[i, n)`, so positions below `i` stay final across the continuation.
-        let sb_n = fmt.superblock_slots();
-        if slots_buf.len() < sb_n {
-            continue;
-        }
-        let hdr_min = fmt.header_slots(0);
-        let mut hdr_rng = ChaCha12Stream::from_seed(&hdr_seed);
-        fisher_yates_prefix_from(&mut slots_buf, 0, hdr_min, &mut hdr_rng);
+    let superblock =
+        read_superblock(coeffs, &slots_buf[..sb_n], fmt, &locator).ok_or_else(no_hidden)?;
+    if superblock.version & 0xF0 != CONTENT_ENVELOPE_VERSION & 0xF0
+        || superblock.codec_id != CODEC_TERNARY_STC
+    {
+        return Err(no_hidden());
+    }
+    let ext_bytes = superblock.ext_len as usize;
+    let hdr_n = fmt.header_slots(ext_bytes);
+    if hdr_n > n_total {
+        return Err(no_hidden());
+    }
+    if hdr_n > hdr_min {
+        fisher_yates_prefix_from(&mut slots_buf, hdr_min, hdr_n, &mut hdr_rng);
+    }
+    let hdr_slots = slots_buf[..hdr_n].to_vec();
 
-        let Some(superblock) = read_superblock(coeffs, &slots_buf[..sb_n], fmt, &hdr_seed, domain)
-        else {
-            continue;
-        };
-        if superblock.validate_against(fmt, suite.id).is_err() {
-            continue;
-        }
-        if superblock.codec_id != CODEC_TERNARY_STC {
-            // Reserved for Hamming; no v1 writer produces it.
-            continue;
-        }
-
-        let ext_bytes = superblock.ext_bytes as usize;
-        let hdr_n = fmt.header_slots(ext_bytes);
-        if hdr_n > n_total {
-            continue;
-        }
-        if hdr_n > hdr_min {
-            fisher_yates_prefix_from(&mut slots_buf, hdr_min, hdr_n, &mut hdr_rng);
-        }
-        let hdr_slots = slots_buf[..hdr_n].to_vec();
-
-        let ext_slots = &hdr_slots[sb_n..hdr_n];
-        let extension_area = if ext_bytes > 0 {
-            let Some(area) = read_bits(
-                coeffs,
-                ext_slots,
-                fmt.grid_rule,
-                extension_stc_seed(fmt, &hdr_seed, domain),
-                fmt.ext_h,
-                fmt.ext_u,
-                8 * ext_bytes,
-            ) else {
-                continue;
-            };
-            area
-        } else {
-            Vec::new()
-        };
-
-        let ciphertext_len = superblock.ciphertext_len();
-        let bits = ciphertext_len * 8;
-
-        // Reconstruct body grid in-place into the same working buffer!
-        v3_layout::fill_body_grid(&mut slots_buf, &hdr_slots, cover.block_count, fmt.grid_rule);
-        let body_grid_len = slots_buf.len();
-        let window = bits + superblock.h as usize - 1;
-        let Some(body_n) = window.checked_mul(superblock.u as usize) else {
-            continue;
-        };
-        if body_n > body_grid_len {
-            continue;
-        }
-        let (enc_key, perm_seed) = body_keys(fmt, &master, &superblock.salt, domain);
-        permute_prefix(&mut slots_buf, body_n, &perm_seed);
-        slots_buf.truncate(body_n);
-        let Some(ciphertext) = read_bits(
+    let extension_area = if ext_bytes > 0 {
+        read_bits(
             coeffs,
-            &slots_buf,
+            &hdr_slots[sb_n..hdr_n],
             fmt.grid_rule,
-            stc_seed(fmt, &perm_seed, &superblock.salt),
-            superblock.h,
-            superblock.u,
-            bits,
-        ) else {
-            continue;
-        };
-        if ciphertext.len() != ciphertext_len {
-            continue;
-        }
+            locator.ext_stc_seed,
+            fmt.ext_h,
+            fmt.ext_u,
+            8 * ext_bytes,
+        )
+        .ok_or_else(no_hidden)?
+    } else {
+        Vec::new()
+    };
+    // Extension TLVs are authenticated by the AEAD as well, so a malformed or
+    // unknown-critical area must never surface as anything but "no payload".
+    let extension_ok = extension_area.is_empty() || parse_extension(&extension_area).is_ok();
+    let has_critical_ext = !extension_area.is_empty()
+        && parse_extension(&extension_area)
+            .map(|records| records.iter().any(|(t, _)| t & TLV_CRITICAL != 0))
+            .unwrap_or(true);
 
-        let aad = superblock.encode();
-        let payload =
-            match unpack_envelope_parts(suite, &enc_key, &superblock.nonce, &aad, &ciphertext) {
-                Ok(payload) => payload,
-                Err(StrHideError::CorruptedData(message)) => {
-                    // The AEAD passed, so this really is our carrier; a bad
-                    // field inside the plaintext is a genuine defect, not a
-                    // wrong guess.
-                    return Err(StrHideError::CorruptedData(message));
-                }
-                Err(StrHideError::UnsupportedVersion(message)) => {
-                    return Err(StrHideError::UnsupportedVersion(message));
-                }
-                Err(_) => continue,
-            };
+    // Authenticated header fields gate the body slot computation.
+    let suite = CipherSuiteId::from_u16(superblock.suite_id).ok_or_else(no_hidden)?;
+    if !extract.allows_suite(superblock.suite_id) {
+        return Err(no_hidden());
+    }
+    extract
+        .validate_header(superblock.suite_id, superblock.body_len, hdr_n, n_total)
+        .map_err(|_| no_hidden())?;
 
-        // The payload decrypted, so this carrier is ours with certainty. Only
-        // now is it safe to report precise problems with the extension area
-        // instead of folding them into "no payload here" -- doing it earlier
-        // would turn structural checks into a cheap password oracle.
-        if ext_bytes > 0 {
-            let records = parse_extension(&extension_area)?;
-            for (type_id, _) in &records {
-                if type_id & TLV_CRITICAL != 0 {
-                    return Err(StrHideError::UnsupportedVersion(format!(
-                        "Carrier uses critical extension type {type_id:#04x}, which this build does not implement"
-                    )));
-                }
-            }
-        }
-        return Ok(payload);
+    let bits = superblock.body_len as usize * 8;
+    v3_layout::fill_body_grid(&mut slots_buf, &hdr_slots, cover.block_count, fmt.grid_rule);
+    let body_grid_len = slots_buf.len();
+    let Some(window) = bits.checked_add(superblock.stc_h as usize - 1) else {
+        return Err(no_hidden());
+    };
+    let Some(body_n) = window.checked_mul(superblock.stc_u as usize) else {
+        return Err(no_hidden());
+    };
+    if body_n > body_grid_len {
+        return Err(no_hidden());
+    }
+    let session = derive_l3_session_keys(fmt.cipher, suite, &master, &superblock.salt, domain)
+        .map_err(|_| no_hidden())?;
+    permute_prefix(&mut slots_buf, body_n, &session.perm_seed);
+    slots_buf.truncate(body_n);
+    let ciphertext = read_bits(
+        coeffs,
+        &slots_buf,
+        fmt.grid_rule,
+        session.stc_seed,
+        superblock.stc_h,
+        superblock.stc_u,
+        bits,
+    )
+    .ok_or_else(no_hidden)?;
+    if ciphertext.len() != superblock.body_len as usize {
+        return Err(no_hidden());
     }
 
-    Err(no_hidden())
+    let aad = build_v4_aad(JPEG_FORMAT_ID, &superblock.encode(), &extension_area);
+    let payload = unpack_v4_envelope_parts(
+        suite,
+        &session.enc_key,
+        &superblock.nonce,
+        &aad,
+        &ciphertext,
+        extract,
+    )
+    .map_err(|_| no_hidden())?;
+
+    // The AEAD passed, so the carrier really is ours. Unknown critical
+    // extensions mean a newer writer, which extract must not pretend to serve.
+    if !extension_ok || has_critical_ext {
+        return Err(no_hidden());
+    }
+    Ok(payload)
 }
 
 /// Read and structurally validate the superblock.
@@ -1326,14 +1351,13 @@ fn read_superblock(
     coeffs: &JpegCoefficients,
     slots: &[u32],
     fmt: &JpegFormatProfile,
-    hdr_seed: &[u8; 32],
-    domain: Option<&str>,
-) -> Option<Superblock> {
+    locator: &crate::stego::format::HeaderLocatorKeys,
+) -> Option<JpegSuperblockV4> {
     let bits = read_bits(
         coeffs,
         slots,
         fmt.grid_rule,
-        header_stc_seed(fmt, hdr_seed, domain),
+        locator.header_stc_seed,
         fmt.sb_h,
         fmt.sb_u,
         fmt.superblock_bits(),
@@ -1343,7 +1367,7 @@ fn read_superblock(
     }
     let mut raw = [0u8; SUPERBLOCK_BYTES];
     raw.copy_from_slice(&bits[..SUPERBLOCK_BYTES]);
-    Superblock::decode(&raw).ok()
+    JpegSuperblockV4::decode(&raw).ok()
 }
 
 /// Run one STC pass in extraction mode: read the slot parities and return the
@@ -1374,10 +1398,10 @@ fn read_bits(
     Some(out)
 }
 
-/// Inspect JPEG for V3 superblock and stego metadata without solving trellis.
+/// Inspect a JPEG for the V4 superblock and stego metadata without solving trellis.
 pub fn inspect_jpeg(
     carrier_bytes: &[u8],
-    password: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     fmt: &JpegFormatProfile,
     control: &Control<'_>,
@@ -1412,20 +1436,20 @@ pub fn inspect_jpeg(
             return Ok(empty_info);
         }
     };
-    Ok(inspect_jpeg_from(&coeffs, media_info, password, domain, fmt, control)?.info)
+    Ok(inspect_jpeg_from(&coeffs, media_info, cred, domain, fmt, control)?.info)
 }
 
-/// Header result plus the `(suite id, master)` needed to decrypt level 3.
+/// Header result plus the locator master needed to decrypt level 3.
 struct JpegInspection {
     info: StegoHeaderInfo,
-    matched: Option<(u16, [u8; 32])>,
+    master: Option<[u8; 32]>,
 }
 
 /// Superblock inspection over already-decoded DCT coefficients.
 fn inspect_jpeg_from(
     coeffs: &JpegCoefficients,
     media_info: Option<MediaInfo>,
-    password: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     fmt: &JpegFormatProfile,
     control: &Control<'_>,
@@ -1435,75 +1459,130 @@ fn inspect_jpeg_from(
     if coeffs.components.is_empty() {
         return Ok(JpegInspection {
             info: empty_info,
-            matched: None,
+            master: None,
         });
     }
     control.check()?;
     let cover = CoverFrame::read(fmt, coeffs);
-
-    let password = password
-        .filter(|s| !s.is_empty())
-        .unwrap_or(crate::stego::envelope::PUBLIC_DEFAULT_SECRET);
-
-    let grid_template = v3_layout::grid_indices(cover.block_count, fmt.grid_rule);
-    let mut slots_buf = grid_template.clone();
-
-    for suite in fmt.suites {
-        control.check()?;
-        let Ok(master) = derive_master(suite, password, &cover.digest) else {
-            continue;
-        };
-        let hdr_seed = header_perm_seed(fmt, &master, domain);
-        slots_buf.clear();
-        slots_buf.extend_from_slice(&grid_template);
-
-        let sb_n = fmt.superblock_slots();
-        if slots_buf.len() < sb_n {
-            continue;
-        }
-        let hdr_min = fmt.header_slots(0);
-        let mut hdr_rng = ChaCha12Stream::from_seed(&hdr_seed);
-        fisher_yates_prefix_from(&mut slots_buf, 0, hdr_min, &mut hdr_rng);
-
-        let Some(superblock) = read_superblock(coeffs, &slots_buf[..sb_n], fmt, &hdr_seed, domain)
-        else {
-            continue;
-        };
-        if superblock.validate_against(fmt, suite.id).is_err() {
-            continue;
-        }
-        if superblock.codec_id != CODEC_TERNARY_STC {
-            continue;
-        }
-
+    let pre_salt = jpeg_pre_salt(fmt, &cover);
+    let Ok(master) = derive_locator_master(cred, domain, fmt.cipher, &pre_salt) else {
         return Ok(JpegInspection {
-            info: StegoHeaderInfo {
-                format: "JPEG".into(),
-                has_hidden_data: true,
-                algorithm: Some("UERD/J-UNIWARD/J-MiPOD".into()),
-                codec: Some(format!(
-                    "Ternary STC (h={}, u={})",
-                    superblock.h, superblock.u
-                )),
-                envelope_len: Some(superblock.envelope_len as usize),
-                payload_len: None,
-                media_info,
-                note: None,
-            },
-            matched: Some((suite.id, master)),
+            info: empty_info,
+            master: None,
         });
+    };
+    let Ok(locator) = derive_l2_locator_keys(&master, fmt.cipher, b"strhide-v4-hdr-magic", domain)
+    else {
+        return Ok(JpegInspection {
+            info: empty_info,
+            master: None,
+        });
+    };
+
+    let mut slots_buf = v3_layout::grid_indices(cover.block_count, fmt.grid_rule);
+    let sb_n = fmt.superblock_slots();
+    if slots_buf.len() < sb_n {
+        return Ok(JpegInspection {
+            info: empty_info,
+            master: None,
+        });
+    }
+    let hdr_min = fmt.header_slots(0);
+    let mut hdr_rng = ChaCha12Stream::from_seed(&locator.locate_seed);
+    fisher_yates_prefix_from(&mut slots_buf, 0, hdr_min, &mut hdr_rng);
+
+    let Some(superblock) = read_superblock(coeffs, &slots_buf[..sb_n], fmt, &locator) else {
+        return Ok(JpegInspection {
+            info: empty_info,
+            master: None,
+        });
+    };
+    if superblock.version & 0xF0 != CONTENT_ENVELOPE_VERSION & 0xF0
+        || superblock.codec_id != CODEC_TERNARY_STC
+    {
+        return Ok(JpegInspection {
+            info: empty_info,
+            master: None,
+        });
+    }
+    let ext_bytes = superblock.ext_len as usize;
+    let hdr_n = fmt.header_slots(ext_bytes);
+    if hdr_n > cover.n_total() {
+        return Ok(JpegInspection {
+            info: empty_info,
+            master: None,
+        });
+    }
+    if hdr_n > hdr_min {
+        fisher_yates_prefix_from(&mut slots_buf, hdr_min, hdr_n, &mut hdr_rng);
+    }
+    let extension_area = if ext_bytes > 0 {
+        match read_bits(
+            coeffs,
+            &slots_buf[sb_n..hdr_n],
+            fmt.grid_rule,
+            locator.ext_stc_seed,
+            fmt.ext_h,
+            fmt.ext_u,
+            8 * ext_bytes,
+        ) {
+            Some(area) => area,
+            None => {
+                empty_info.note = Some("Extension area is unreadable".into());
+                return Ok(JpegInspection {
+                    info: empty_info,
+                    master: None,
+                });
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    if ext_bytes > 0 {
+        match parse_extension(&extension_area) {
+            Ok(records) => {
+                if let Some((type_id, _)) = records.iter().find(|(t, _)| t & TLV_CRITICAL != 0) {
+                    empty_info.note = Some(format!(
+                        "Carrier uses critical extension type {type_id:#04x}, which this build does not implement"
+                    ));
+                    return Ok(JpegInspection {
+                        info: empty_info,
+                        master: None,
+                    });
+                }
+            }
+            Err(_) => {
+                empty_info.note = Some("Malformed extension area".into());
+                return Ok(JpegInspection {
+                    info: empty_info,
+                    master: None,
+                });
+            }
+        }
     }
 
     Ok(JpegInspection {
-        info: empty_info,
-        matched: None,
+        info: StegoHeaderInfo {
+            format: "JPEG".into(),
+            has_hidden_data: true,
+            algorithm: Some("UERD/J-UNIWARD/J-MiPOD".into()),
+            codec: Some(format!(
+                "Ternary STC (h={}, u={})",
+                superblock.stc_h, superblock.stc_u
+            )),
+            envelope_len: Some(superblock.body_len as usize),
+            payload_len: None,
+            media_info,
+            note: None,
+        },
+        master: Some(master),
     })
 }
 
 /// Three-level diagnostic verification for JPEG carriers.
 pub fn verify_jpeg(
     carrier_bytes: &[u8],
-    password: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     fmt: &JpegFormatProfile,
     limits: &ExtractParams,
@@ -1554,6 +1633,27 @@ pub fn verify_jpeg(
     };
     control.check()?;
 
+    // The V4 L1 cost is fixed; a policy below it fails before the header read.
+    if matches!(cred, Credential::Password(_))
+        && limits.max_pbkdf2_iterations < crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS
+    {
+        levels.push(VerifyLevel::fail(
+            2,
+            "Stego superblock",
+            format!(
+                "PBKDF2 iteration limit {} is below the V4 L1 cost {}",
+                limits.max_pbkdf2_iterations,
+                crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS
+            ),
+        ));
+        levels.push(VerifyLevel::fail(
+            3,
+            "Payload decryption",
+            "Skipped due to level 2 policy failure",
+        ));
+        return Ok(StegoVerifyResult::new("JPEG", levels));
+    }
+
     // Level 2: Superblock inspection, reusing the DCT decode from level 1.
     let inspection = inspect_jpeg_from(
         &coeffs,
@@ -1561,7 +1661,7 @@ pub fn verify_jpeg(
             u32::from(info.width),
             u32::from(info.height),
         )),
-        password,
+        cred,
         domain,
         fmt,
         control,
@@ -1571,7 +1671,10 @@ pub fn verify_jpeg(
         levels.push(VerifyLevel::fail(
             2,
             "Stego superblock",
-            "No valid V3 superblock found (or wrong password)",
+            header_info
+                .note
+                .clone()
+                .unwrap_or_else(|| "No valid V4 superblock found (or wrong password)".into()),
         ));
         levels.push(VerifyLevel::fail(
             3,
@@ -1594,12 +1697,12 @@ pub fn verify_jpeg(
     // master come from level 2, so no second KDF is paid here.
     match extract_jpeg_from(
         &coeffs,
-        password,
+        cred,
         domain,
         fmt,
         limits,
         control,
-        inspection.matched,
+        inspection.master,
     ) {
         Ok(payload) => {
             let desc = match payload.name() {
@@ -1629,6 +1732,7 @@ pub fn verify_jpeg(
 
 /// Shared capacity builder so that embedding never has to decode
 /// the carrier or parse DHT/geometry a second time to report capacity.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_jpeg_capacity_info(
     info: &dct_io::JpegInfo,
     base_bytes: u64,
@@ -1637,11 +1741,12 @@ pub(crate) fn build_jpeg_capacity_info(
     params: &JpegParams,
     safety_level: crate::stego::SafetyLevel,
     fmt: &JpegFormatProfile,
+    extension: &[u8],
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let geom = crate::stego::jpeg::geometry::component_geometry(info, 0, 0);
     let block_count = geom.grid_w * geom.grid_h;
     let n_total = block_count * fmt.grid_rule.slots_per_block();
-    let ext_bytes = encode_extension(&params.extensions)?.len();
+    let ext_bytes = extension.len();
     let hdr_n = fmt.header_slots(ext_bytes);
     if n_total <= hdr_n {
         return Err(StrHideError::General(format!(
@@ -1726,6 +1831,7 @@ pub fn probe_jpeg_capacity(
     carrier_bytes: &[u8],
     cost_model: &dyn JpegCostModel,
     params: &JpegParams,
+    extensions: &[Tlv],
     safety_level: crate::stego::SafetyLevel,
     fmt: &JpegFormatProfile,
     control: &Control<'_>,
@@ -1734,6 +1840,13 @@ pub fn probe_jpeg_capacity(
     params.validate()?;
     control.stage(Stage::Decode);
     control.check()?;
+    let extension = encode_extension(extensions)?;
+    if extension.len() > MAX_EXT_BYTES {
+        return Err(StrHideError::General(format!(
+            "Extension area is {} bytes, the maximum is {MAX_EXT_BYTES}",
+            extension.len()
+        )));
+    }
     let preflight = preflight_jpeg(carrier_bytes)?;
     let has_incomplete_table =
         dht::luma_ac_symbols(carrier_bytes).is_some_and(|t| !t.is_complete());
@@ -1745,6 +1858,7 @@ pub fn probe_jpeg_capacity(
         params,
         safety_level,
         fmt,
+        &extension,
     )
 }
 
@@ -1759,16 +1873,16 @@ pub fn probe_jpeg_capacity(
 pub fn layout_for_payload(
     carrier_bytes: &[u8],
     payload: &[u8],
+    suite_id: u16,
+    extensions: &[Tlv],
     params: &JpegParams,
     fmt: &JpegFormatProfile,
 ) -> Result<Layout, StrHideError> {
     fmt.validate()?;
     params.validate()?;
-    let suite = fmt.suite(params.cipher_suite).ok_or_else(|| {
+    let suite = CipherSuiteId::from_u16(suite_id).ok_or_else(|| {
         StrHideError::UnsupportedVersion(format!(
-            "Cipher suite {} is not implemented by this build (known: {:?})",
-            params.cipher_suite,
-            fmt.suites.iter().map(|s| s.id).collect::<Vec<_>>()
+            "Cipher suite {suite_id} is not implemented by this build"
         ))
     })?;
     let preflight = preflight_jpeg(carrier_bytes)?;
@@ -1780,7 +1894,7 @@ pub fn layout_for_payload(
     }
     let block_count = coeffs.components[0].blocks.len();
     let n_total = block_count * fmt.grid_rule.slots_per_block();
-    let ext_bytes = encode_extension(&params.extensions)?.len();
+    let ext_bytes = encode_extension(extensions)?.len();
     let hdr_n = fmt.header_slots(ext_bytes);
     let plaintext = build_plaintext_bytes(payload)?;
     let ciphertext_len = plaintext.len() + suite.tag_len();
@@ -1802,4 +1916,218 @@ pub fn layout_for_payload(
     let layout = v3_layout::compute(n_total, hdr_n, bits, params.stc_h, budget)?;
     check_pipeline_budget(preflight.base_bytes, layout.body_n, params.stc_h)?;
     Ok(layout)
+}
+
+#[cfg(test)]
+mod v4_regressions {
+    use super::*;
+    use crate::stego::params::{ExtractParams, JpegParams, SafetyPolicy};
+
+    const CARRIER: &[u8] = include_bytes!("../../../tests/assets/small.jpg");
+
+    fn decode_debug(stego: &[u8]) -> (JpegCoefficients, Vec<u32>, JpegSuperblockV4, Vec<u8>) {
+        let fmt = &crate::stego::format::DEFAULT_JPEG_FORMAT;
+        let coeffs = dct_io::read_coefficients(stego).expect("coefficients");
+        let cover = CoverFrame::read(fmt, &coeffs);
+        let pre_salt = jpeg_pre_salt(fmt, &cover);
+        let master = derive_locator_master(
+            Credential::Password("aad-test"),
+            None,
+            fmt.cipher,
+            &pre_salt,
+        )
+        .expect("master");
+        let locator =
+            derive_l2_locator_keys(&master, fmt.cipher, b"strhide-v4-hdr-magic", None).expect("l2");
+        let mut slots = v3_layout::grid_indices(cover.block_count, fmt.grid_rule);
+        let sb_n = fmt.superblock_slots();
+        let hdr_min = fmt.header_slots(0);
+        let mut rng = ChaCha12Stream::from_seed(&locator.locate_seed);
+        fisher_yates_prefix_from(&mut slots, 0, hdr_min, &mut rng);
+        let sb = read_superblock(&coeffs, &slots[..sb_n], fmt, &locator).expect("header");
+        let hdr_n = fmt.header_slots(sb.ext_len as usize);
+        fisher_yates_prefix_from(&mut slots, hdr_min, hdr_n, &mut rng);
+        let ext = read_bits(
+            &coeffs,
+            &slots[sb_n..hdr_n],
+            fmt.grid_rule,
+            locator.ext_stc_seed,
+            fmt.ext_h,
+            fmt.ext_u,
+            8 * sb.ext_len as usize,
+        )
+        .expect("extension");
+        (coeffs, slots, sb, ext)
+    }
+
+    #[test]
+    fn extension_area_is_authenticated_by_aad() {
+        let fmt = &crate::stego::format::DEFAULT_JPEG_FORMAT;
+        let tlv = vec![Tlv {
+            type_id: 0x01,
+            value: b"ext-a".to_vec(),
+        }];
+        let (stego, _, _) = embed_jpeg_with_stats(
+            CARRIER,
+            Payload::bytes(b"aad-extension-regression"),
+            Credential::Password("aad-test"),
+            None,
+            1,
+            &tlv,
+            fmt,
+            &JpegParams::default(),
+            SafetyPolicy::default(),
+            &crate::stego::jpeg::cost::UerdCostModel,
+            Freshness::Random,
+            &Control::none(),
+        )
+        .expect("embed");
+
+        let (coeffs, mut slots, sb, ext) = decode_debug(&stego);
+        let cover = CoverFrame::read(fmt, &coeffs);
+        let master = derive_locator_master(
+            Credential::Password("aad-test"),
+            None,
+            fmt.cipher,
+            &jpeg_pre_salt(fmt, &cover),
+        )
+        .expect("master");
+        let suite = CipherSuiteId::from_u16(sb.suite_id).expect("suite");
+        let session =
+            derive_l3_session_keys(fmt.cipher, suite, &master, &sb.salt, None).expect("l3");
+        let bits = sb.body_len as usize * 8;
+        let window = bits + sb.stc_h as usize - 1;
+        let body_n = window * sb.stc_u as usize;
+        let hdr_n = fmt.header_slots(sb.ext_len as usize);
+        let hdr_slots = slots[..hdr_n].to_vec();
+        v3_layout::fill_body_grid(&mut slots, &hdr_slots, cover.block_count, fmt.grid_rule);
+        permute_prefix(&mut slots, body_n, &session.perm_seed);
+        slots.truncate(body_n);
+        let ciphertext = read_bits(
+            &coeffs,
+            &slots,
+            fmt.grid_rule,
+            session.stc_seed,
+            sb.stc_h,
+            sb.stc_u,
+            bits,
+        )
+        .expect("body");
+
+        let aad = build_v4_aad(JPEG_FORMAT_ID, &sb.encode(), &ext);
+        assert!(
+            unpack_v4_envelope_parts(
+                suite,
+                &session.enc_key,
+                &sb.nonce,
+                &aad,
+                &ciphertext,
+                &ExtractParams::default(),
+            )
+            .is_ok()
+        );
+
+        // Change the extension value and re-encode it: the CRC is valid again,
+        // so only the AEAD binding can reject the carrier.
+        let mut forged_tlvs = tlv.clone();
+        forged_tlvs[0].value = b"ext-b".to_vec();
+        let forged_ext = encode_extension(&forged_tlvs).expect("re-encode");
+        assert!(
+            parse_extension(&forged_ext).is_ok(),
+            "re-encoded extension must carry a valid CRC"
+        );
+        let forged_aad = build_v4_aad(JPEG_FORMAT_ID, &sb.encode(), &forged_ext);
+        assert!(
+            unpack_v4_envelope_parts(
+                suite,
+                &session.enc_key,
+                &sb.nonce,
+                &forged_aad,
+                &ciphertext,
+                &ExtractParams::default(),
+            )
+            .is_err(),
+            "recomputed extension CRC must still fail AEAD"
+        );
+    }
+
+    #[test]
+    fn forged_header_fields_cannot_drive_allocation() {
+        let fmt = &crate::stego::format::DEFAULT_JPEG_FORMAT;
+        let (stego, _, _) = embed_jpeg_with_stats(
+            CARRIER,
+            Payload::bytes(b"header-bounds"),
+            Credential::Password("aad-test"),
+            None,
+            1,
+            &[],
+            fmt,
+            &JpegParams::default(),
+            SafetyPolicy::default(),
+            &crate::stego::jpeg::cost::UerdCostModel,
+            Freshness::Random,
+            &Control::none(),
+        )
+        .expect("embed");
+        let coeffs = dct_io::read_coefficients(&stego).expect("coefficients");
+        let cover = CoverFrame::read(fmt, &coeffs);
+        let limits = ExtractParams::default();
+        for body_len in [0u32, 1, 21] {
+            assert!(
+                limits
+                    .validate_header(1, body_len, fmt.header_slots(0), cover.n_total())
+                    .is_err(),
+                "body_len {body_len} must be rejected before any slot work"
+            );
+        }
+        // A forged upper-bound body_len may pass the byte-range gate, but its
+        // slot footprint must exceed the carrier before any allocation.
+        let huge_bits = 0x00FF_FFFFusize * 8;
+        let huge_slots = (huge_bits + fmt.sb_h as usize - 1) * fmt.sb_u as usize;
+        assert!(huge_slots > cover.n_total());
+    }
+
+    #[test]
+    fn truncated_header_slots_are_not_decodable() {
+        let fmt = &crate::stego::format::DEFAULT_JPEG_FORMAT;
+        let (stego, _, _) = embed_jpeg_with_stats(
+            CARRIER,
+            Payload::bytes(b"truncated-header"),
+            Credential::Password("aad-test"),
+            None,
+            1,
+            &[],
+            fmt,
+            &JpegParams::default(),
+            SafetyPolicy::default(),
+            &crate::stego::jpeg::cost::UerdCostModel,
+            Freshness::Random,
+            &Control::none(),
+        )
+        .expect("embed");
+        let coeffs = dct_io::read_coefficients(&stego).expect("coefficients");
+        let cover = CoverFrame::read(fmt, &coeffs);
+        let pre_salt = jpeg_pre_salt(fmt, &cover);
+        let master = derive_locator_master(
+            Credential::Password("aad-test"),
+            None,
+            fmt.cipher,
+            &pre_salt,
+        )
+        .expect("master");
+        let locator =
+            derive_l2_locator_keys(&master, fmt.cipher, b"strhide-v4-hdr-magic", None).expect("l2");
+        let mut slots = v3_layout::grid_indices(cover.block_count, fmt.grid_rule);
+        let sb_n = fmt.superblock_slots();
+        fisher_yates_prefix_from(
+            &mut slots,
+            0,
+            fmt.header_slots(0),
+            &mut ChaCha12Stream::from_seed(&locator.locate_seed),
+        );
+        assert!(
+            read_superblock(&coeffs, &slots[..sb_n - 1], fmt, &locator).is_none(),
+            "a truncated header slot slice must not decode"
+        );
+    }
 }

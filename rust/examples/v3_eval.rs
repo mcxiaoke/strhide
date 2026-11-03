@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use strhide::core::control::Control;
+use strhide::core::crypto::Credential;
 use strhide::stego::format::DEFAULT_JPEG_FORMAT;
 use strhide::stego::jpeg::cost::UerdCostModel;
 use strhide::stego::jpeg::engine::{embed_jpeg, extract_jpeg, layout_for_payload};
@@ -133,7 +134,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 slot_budget: Some(budget),
                 ..JpegParams::default()
             };
-            if let Ok(layout) = layout_for_payload(&cover, &payload, &params, &DEFAULT_JPEG_FORMAT)
+            if let Ok(layout) =
+                layout_for_payload(&cover, &payload, 0x0001, &[], &params, &DEFAULT_JPEG_FORMAT)
             {
                 u = layout.u;
             }
@@ -141,8 +143,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Ok(stego) = embed_jpeg(
                 &cover,
                 &payload,
-                Some(PASSWORD),
+                Credential::Password(PASSWORD),
                 None,
+                0x0001,
+                &[],
                 &DEFAULT_JPEG_FORMAT,
                 &params,
                 strhide::stego::SafetyPolicy::default(),
@@ -155,7 +159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let elapsed = started.elapsed().as_secs_f64() * 1000.0;
             let recovered = extract_jpeg(
                 &stego,
-                Some(PASSWORD),
+                Credential::Password(PASSWORD),
                 None,
                 &DEFAULT_JPEG_FORMAT,
                 &ExtractParams::default(),

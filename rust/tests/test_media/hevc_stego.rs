@@ -3,8 +3,17 @@ use std::path::Path;
 
 use rusty_h265::Decoder;
 use strhide::core::control::Control;
+use strhide::core::crypto::Credential;
+use strhide::core::payload::Payload;
+use strhide::stego::Freshness;
+use strhide::stego::header::Tlv;
 use strhide::stego::hevc::heif_boxes::parse_heif_targets;
-use strhide::stego::hevc::{embed_hevc, extract_hevc, probe_hevc_capacity};
+use strhide::stego::hevc::{
+    embed_hevc, embed_hevc_with_info_v4, extract_hevc, extract_hevc_v4, probe_hevc_capacity,
+    probe_hevc_capacity_ext,
+};
+use strhide::stego::params::{ExtractParams, SafetyPolicy};
+use strhide::{StrHideError, stego::format::DEFAULT_HEVC_FORMAT};
 
 /// Verify that an HEIC file can be decoded to a valid frame by rusty_h265.
 fn verify_frame_decodes(carrier_bytes: &[u8]) {
@@ -191,7 +200,9 @@ fn test_hevc_annexb_short_slice_header_roundtrip() {
     let annexb = fs::read(file_path).expect("read carrier");
     assert!(strhide::stego::hevc::sniff::is_hevc_annexb(&annexb));
 
-    let payload: Vec<u8> = (0..200usize).map(|i| (i * 37 % 251) as u8).collect();
+    // V4 body = frame (5 bytes) + payload + 16-byte tag inside the same
+    // capacity budget as the old v2 header; keep the payload under that.
+    let payload: Vec<u8> = (0..180usize).map(|i| (i * 37 % 251) as u8).collect();
     let password = "pw";
     let stego = embed_hevc(
         &annexb,
@@ -362,4 +373,100 @@ fn test_hevc_inspect_and_verify() {
     let verify_wrong =
         strhide::stego::verify_carrier(&stego, &verify_wrong_opts).expect("verify wrong password");
     assert!(!verify_wrong.is_all_ok());
+}
+
+/// V4: the capacity probe with an extension area must be exactly the budget the
+/// writer can fill; and a wrong credential must fold to `NoHiddenData`.
+#[test]
+fn test_hevc_v4_extension_probe_matches_embed() {
+    let file_path = "../temp/github/heic-rs/tests/fixtures/gradient-512.heic";
+    if !Path::new(file_path).exists() {
+        return;
+    }
+    let carrier = fs::read(file_path).expect("read carrier");
+    let fmt = &DEFAULT_HEVC_FORMAT;
+    let extensions = vec![Tlv {
+        type_id: 0x07,
+        value: vec![0xAA, 0xBB],
+    }];
+
+    let cap = probe_hevc_capacity_ext(&carrier, &extensions, fmt).expect("probe with ext");
+    assert!(cap > 0);
+
+    let payload = vec![0x5A; cap];
+    let suite = fmt.cipher.default_suite.as_u16();
+    let (stego, info, _stats) = embed_hevc_with_info_v4(
+        &carrier,
+        &Payload::bytes(&payload),
+        Credential::Password("v4-ext-pw"),
+        None,
+        suite,
+        &extensions,
+        fmt,
+        Freshness::Random,
+        SafetyPolicy::new(),
+        &Control::none(),
+    )
+    .expect("embed at the probed capacity");
+    assert_eq!(stego.len(), carrier.len(), "Δ = 0");
+    assert_eq!(info.max_raw_payload_bytes, cap);
+
+    let extracted = extract_hevc_v4(
+        &stego,
+        Credential::Password("v4-ext-pw"),
+        None,
+        fmt,
+        &ExtractParams::default(),
+        &Control::none(),
+    )
+    .expect("extract v4 with extensions");
+    assert_eq!(extracted.as_bytes(), payload.as_slice());
+
+    // Wrong password: never a `Password` oracle, always `NoHiddenData`.
+    let wrong = extract_hevc_v4(
+        &stego,
+        Credential::Password("wrong-pw"),
+        None,
+        fmt,
+        &ExtractParams::default(),
+        &Control::none(),
+    );
+    assert!(matches!(wrong, Err(StrHideError::NoHiddenData(_))));
+}
+
+/// V4 negative: a carrier whose trailing scan data was cut must never yield a
+/// payload. The header may still be readable, so this exercises the body
+/// budget/frame failure path rather than the container parser.
+#[test]
+fn test_hevc_v4_truncated_body_is_rejected() {
+    let file_path = "../temp/github/heic-rs/tests/fixtures/gradient-512.heic";
+    if !Path::new(file_path).exists() {
+        return;
+    }
+    let carrier = fs::read(file_path).expect("read carrier");
+    let fmt = &DEFAULT_HEVC_FORMAT;
+    let payload = vec![0x5A; 64];
+    let (stego, _, _) = embed_hevc_with_info_v4(
+        &carrier,
+        &Payload::bytes(&payload),
+        Credential::Password("v4-trunc-pw"),
+        None,
+        fmt.cipher.default_suite.as_u16(),
+        &[],
+        fmt,
+        Freshness::Random,
+        SafetyPolicy::new(),
+        &Control::none(),
+    )
+    .expect("embed");
+    let truncated = &stego[..stego.len() - stego.len() / 8];
+    let res = extract_hevc_v4(
+        truncated,
+        Credential::Password("v4-trunc-pw"),
+        None,
+        fmt,
+        &ExtractParams::default(),
+        &Control::none(),
+    );
+    assert!(res.is_err(), "truncated carrier must not extract");
 }

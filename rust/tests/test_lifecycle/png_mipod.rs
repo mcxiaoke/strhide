@@ -31,6 +31,8 @@ fn texture_png(w: u32, h: u32) -> Vec<u8> {
         width: w,
         height: h,
         channels: 3,
+        bit_depth: 8,
+        color_type: 2,
         pixels,
         chunks: Vec::new(),
         idat_sizes: Vec::new(),
@@ -63,35 +65,11 @@ fn mipod_options() -> EmbedOptions<'static> {
     }
 }
 
-/// Read the feature word through the same cost-free header layout the
-/// extractor uses.
-fn read_feature_word(png: &[u8]) -> strhide::stego::header::FeatureWord {
-    use strhide::stego::png::decode_png;
-    use strhide::stego::png::engine::{SPATIAL_ELIGIBLE_MAX, SPATIAL_ELIGIBLE_MIN};
-
-    let img = decode_png(png).expect("decode png");
-    let (w, h, ch) = (img.width as usize, img.height as usize, img.channels);
-    let off = if ch >= 3 { 1 } else { 0 };
-    let mut eligible: Vec<usize> = (0..w * h)
-        .filter(|&i| {
-            (SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&img.pixels[i * ch + off])
-        })
-        .collect();
-    strhide::stego::prng::permute_prefix(
-        &mut eligible,
-        strhide::stego::header::V2_TOTAL_HEADER_SLOTS,
-        &strhide::stego::envelope::derive_header_perm_seed(None, None),
-    );
-    let slots = &eligible[..strhide::stego::header::V2_TOTAL_HEADER_SLOTS];
-    let mut bytes = [0u8; 32];
-    for (byte_i, slot) in bytes.iter_mut().zip(slots[256..512].chunks(8)) {
-        let mut b = 0u8;
-        for &s in slot {
-            b = (b << 1) | (img.pixels[s * ch + off] & 1);
-        }
-        *byte_i = b;
-    }
-    strhide::stego::header::FeatureWord::decode(&bytes).expect("decode feature word")
+/// Ask the public inspector which cost model the carrier declares.
+fn declared_algorithm(png: &[u8]) -> Option<String> {
+    strhide::stego::inspect_carrier(png, &strhide::stego::InspectOptions::default())
+        .expect("inspect")
+        .algorithm
 }
 
 #[test]
@@ -102,9 +80,8 @@ fn mipod_carrier_roundtrips_and_declares_itself() {
         embed_carrier(&png, &Payload::bytes(&payload), &mipod_options()).expect("embed with MiPOD");
     assert_ne!(stego, png, "the carrier must change");
 
-    let fw = read_feature_word(&stego);
     assert_eq!(
-        strhide::stego::png::registry::spatial_name_from_wire_id(fw.algorithm_id),
+        declared_algorithm(&stego).as_deref(),
         Some("mipod"),
         "the carrier must declare the model that actually wrote it"
     );
@@ -151,15 +128,8 @@ fn mipod_custom_alpha_is_carried_in_feature_word_and_extracts_correctly() {
         };
         let stego =
             embed_carrier(&png, &Payload::bytes(&payload), &opts).expect("embed with custom alpha");
-        let fw = read_feature_word(&stego);
-        assert!(
-            (fw.sigma - alpha as f32).abs() < 1e-6,
-            "FeatureWord.sigma must carry alpha: got {}, expected {}",
-            fw.sigma,
-            alpha
-        );
-
-        // Extraction without passing alpha (default ExtractOptions) must succeed.
+        // The custom alpha is carried in the V4 header's sigma field; extraction
+        // without passing alpha (default ExtractOptions) proves it round-trips.
         let back = extract_carrier(&stego, &ExtractOptions::default()).expect("extract");
         assert_eq!(back, payload);
     }

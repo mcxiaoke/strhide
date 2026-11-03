@@ -10,6 +10,13 @@
 > `VerifyOptions` + `StegoTuning`）；方言类型由 `params::Profile` 改为
 > `stego::params::StegoProfile`（`facade::Dialect` 组合它）；统一入口的
 > `_with_profile` 后缀改为 `_with_dialect`。
+>
+> **V4 内容信封变更**：凭据统一为 `Credential::{Password, FileKey}`；
+> 套件枚举 `CipherSuiteId`（1 = AES-256-GCM 默认，2 = ChaCha20-Poly1305，
+> append-only）；选项新增 `key` / `suite_id` / `extensions: Vec<Tlv>`；
+> 旧 `CipherSuite` / `SUITES` / `FeatureWord` / `header_v3::Superblock` 已删除。
+> CLI 目前只暴露 `--cipher-suite`，`--key-file` / `--max-payload` /
+> `--extensions` **尚未实现**。
 
 ---
 
@@ -17,7 +24,7 @@
 
 | 层 | 内容 | 稳定性承诺 |
 |---|---|---|
-| **稳定面 Stable** | 统一入口 `stego::{embed_carrier, embed_carrier_with_dialect, extract_carrier, extract_carrier_with_dialect, extract_carrier_payload, inspect_carrier[_with_dialect], verify_carrier[_with_dialect], probe_carrier_capacity[_with_dialect], list_stego_algorithms, algorithms_for_format}`；选项 `EmbedOptions` / `ProbeOptions` / `ExtractOptions` / `InspectOptions` / `VerifyOptions` / `StegoTuning` / `SafetyPolicy` / `SafetyLevel` / `SafetyEnforcement` / `PngParams` / `JpegParams` / `StegoCodec` / `ExtractParams` / `Freshness`；方言 `params::StegoProfile`；结果 `StegoCapacityInfo` / `StegoHeaderInfo` / `StegoVerifyResult` / `EmbedOutput` / `StegoAlgorithmInfo` / `core::media::MediaInfo`；格式身份 `format::{JpegFormatProfile, PngFormatProfile, HevcFormatProfile, GridRule, CipherSuite, SUITES, DEFAULT_JPEG_FORMAT, OFFICIAL_PNG_FORMAT, DEFAULT_HEVC_FORMAT}`；`registry::CostModelRegistry`；`traits::{PngCostModel, JpegCostModel, JpegGeometry}`；`io::{embed_carrier_file, extract_carrier_file, extract_carrier_file_payload}`；`facade::StrHide::stego()` | 破坏性变更只随 major |
+| **稳定面 Stable** | 统一入口 `stego::{embed_carrier, embed_carrier_with_dialect, extract_carrier, extract_carrier_with_dialect, extract_carrier_payload, inspect_carrier[_with_dialect], verify_carrier[_with_dialect], probe_carrier_capacity[_with_dialect], list_stego_algorithms, algorithms_for_format}`；选项 `EmbedOptions` / `ProbeOptions` / `ExtractOptions` / `InspectOptions` / `VerifyOptions` / `StegoTuning` / `SafetyPolicy` / `SafetyLevel` / `SafetyEnforcement` / `PngParams` / `JpegParams` / `StegoCodec` / `ExtractParams` / `Freshness`；凭据 `Credential`（`Password` / `FileKey`）；套件 `CipherSuiteId`；扩展 `Tlv`；方言 `params::StegoProfile`；结果 `StegoCapacityInfo` / `StegoHeaderInfo` / `StegoVerifyResult` / `EmbedOutput` / `StegoAlgorithmInfo` / `core::media::MediaInfo`；格式身份 `format::{JpegFormatProfile, PngFormatProfile, HevcFormatProfile, GridRule, DEFAULT_JPEG_FORMAT, OFFICIAL_PNG_FORMAT, DEFAULT_HEVC_FORMAT}`；`registry::CostModelRegistry`；`traits::{PngCostModel, JpegCostModel, JpegGeometry}`；`io::{embed_carrier_file, extract_carrier_file, extract_carrier_file_payload}`；`facade::StrHide::stego()` | 破坏性变更只随 major |
 | **专家面 Expert** | 域引擎入口 `png::engine::{embed_png, extract_png, probe_png_capacity}`、`jpeg::engine::{embed_jpeg, extract_jpeg, probe_jpeg_capacity}`、`heif::*`、`hevc::{embed_hevc, extract_hevc, probe_hevc_capacity}`、`audio::{embed_audio, extract_audio, probe_audio_capacity}`；图像/音频编解码与解析；模型实现 `png::cost::*`、`jpeg::cost::*`、`audio::flac::*`、`audio::wav::*` | 小版本可演进，CHANGES 公告 |
 | **内部面 Internal**（`#[doc(hidden)]`，无承诺） | `coding`、`envelope`、`header`、`prng`、`wavelet`、`jpeg::{dht, geometry, header_v3, v3_layout}`、`hevc::{bitstream, error, heif_boxes, slot, sniff}` | 路径可达但不入文档；随时可变 |
 
@@ -41,10 +48,12 @@ stego::probe_carrier_capacity[_with_dialect](carrier_bytes, &options[, &dialect]
 
 | 旋钮 | 解析顺序 |
 |---|---|
-| **secret**（KDF 凭据） | `EmbedOptions.password`（显式，空串视为未提供）> `StegoProfile.default_secret`（编译期私有方言）> 公开默认常量（结构域 `BUILTIN_DEFAULT_KEY`、图像域 `PUBLIC_DEFAULT_SECRET`——两者独立、不同名） |
+| **credential**（KDF 凭据） | `Credential::{Password(str), FileKey(&[u8; 32])}`：`password` 与 `key` 互斥（同时给非空值报错）；都没有时取 `StegoProfile.default_secret`，再没有则公开默认常量 `PUBLIC_DEFAULT_SECRET`。空串密码视为未提供 |
+| **suite**（AEAD 套件） | `EmbedOptions.suite_id`（运行时覆盖）> `WireCipherProfile.default_suite`（编译期）。读取端始终以头部 `suite_id` 为准，`ExtractParams.allowed_suites` 只做试枚举白名单 |
 | **domain**（HKDF 域隔离） | `EmbedOptions.domain`（运行时）> `StegoProfile.domain`（编译期）> 官方默认派生 |
 | **safety**（容量策略） | `EmbedOptions.safety: SafetyPolicy { level, enforcement }`——**单一事实源**，tuning 不携带 safety |
 | **freshness** | `EmbedOptions.freshness: Freshness`（`Random` 生产默认；`Seeded([u8; 32])` 可复现运行，PNG/JPEG/HEVC 全部支持；CLI 为 `--seed`） |
+| **extensions** | `EmbedOptions.extensions: Vec<Tlv>`；`ProbeOptions.extensions` 必须与将要写入的一致 |
 | **线格式身份** | 仅来自 `StegoProfile.{jpeg, png, hevc}`（编译期），无运行时覆盖——可切换的格式就是可枚举的指纹 |
 
 规则：**读写必须一致的量（P 类）走 `StegoProfile` 或 `facade::Dialect` 并保持两侧相同；
@@ -58,22 +67,31 @@ stego::probe_carrier_capacity[_with_dialect](carrier_bytes, &options[, &dialect]
 ```rust
 use strhide::stego::{
     EmbedOptions, ExtractOptions, ProbeOptions, StegoTuning, SpatialAlgorithm, PngParams,
-    SafetyLevel, SafetyEnforcement,
+    SafetyLevel, SafetyEnforcement, Tlv, CipherSuiteId,
 };
 
 // 写侧：给算法与参数，二者绑在同一个枚举臂里，不可能错配格式。
 let embed = EmbedOptions {
     password: Some("pw"),
+    key: None,                       // 与 password 互斥
+    suite_id: Some(1),               // 1=AES-256-GCM（默认），2=ChaCha20-Poly1305
+    extensions: vec![Tlv { type_id: 0x01, value: b"x".to_vec() }],
     safety: SafetyPolicy::new(SafetyLevel::High, SafetyEnforcement::Advisory),
     tuning: StegoTuning::Png { model: SpatialAlgorithm::Hill, params: PngParams::default() },
     ..Default::default()
 };
 
-// 读侧：只有凭据与上限。
-let extract = ExtractOptions { password: Some("pw"), ..Default::default() };
+// 读侧：只有凭据与上限（默认 max_pbkdf2_iterations = 200,000）。
+let extract = ExtractOptions {
+    password: Some("pw"),
+    key: None,
+    domain: None,
+    limits: ExtractParams::default(),
+    ..Default::default()
+};
 
-// 只读探测：与 embed 同一组调参，容量答案才对得上将要执行的那次嵌入。
-let probe = ProbeOptions { tuning: embed.tuning.clone(), ..Default::default() };
+// 只读探测：与 embed 同一组调参、同一套扩展，容量答案才对得上将要执行的那次嵌入。
+let probe = ProbeOptions { tuning: embed.tuning.clone(), extensions: embed.extensions.clone(), ..Default::default() };
 ```
 
 `StegoTuning` 是 `Auto` 与三个按格式分臂的联合体：
@@ -98,20 +116,15 @@ pub enum StegoTuning {
 
 ```rust
 use strhide::facade::Dialect;
-use strhide::stego::format::{
-    GridRule, HevcFormatProfile, JpegFormatProfile, PngFormatProfile, SUITES,
-};
+use strhide::stego::format::{HevcFormatProfile, JpegFormatProfile, PngFormatProfile};
 use strhide::stego::params::StegoProfile;
 
-const STEGO_JPEG: JpegFormatProfile = JpegFormatProfile { /* 派生标签 + 几何 + suites */ };
-const STEGO_PNG: PngFormatProfile = PngFormatProfile { /* 派生标签 + body 引用 */ };
+// 以官方常量为模板，只替换派生标签/几何。
+// 字段全集与默认值见 format::JpegFormatProfile / HevcFormatProfile / PngFormatProfile 的 rustdoc。
+const STEGO_JPEG: JpegFormatProfile = JpegFormatProfile { /* cover_digest_tag + cipher + 44B 几何 */ };
+const STEGO_PNG: PngFormatProfile = PngFormatProfile { /* 派生标签 + cipher + body 引用 */ };
 const STEGO_HEVC: HevcFormatProfile = HevcFormatProfile {
-    magic_label: b"acme-hevc-magic-v1",   // 头部魔数 = SHA-256(label ‖ secret)[..4]
-    cover_salt: b"acme-hevc-cover-v1",    // cover digest 前缀
-    kdf_info: b"acme-hevc-aes-key",       // AES 密钥 HKDF info
-    stc_h: 7,
-    stc_u: 2,
-    header_bytes: 40,
+    /* cipher + magic_label + cover_salt + stc_h/stc_u */
 };
 
 pub const DIALECT: Dialect = Dialect::new()
@@ -128,10 +141,12 @@ pub const DIALECT: Dialect = Dialect::new()
 要点：
 - 改任意派生标签即产生不同线格式；官方二进制读私有载体报 `NoHiddenData`
   （与错密码不可区分），反之亦然。
-- **HEVC 的 `magic_label`**：官方格式已将魔数从固定 `SH25` 改为按
+- **HEVC 的 `magic_label`**：官方格式的魔数按
   `SHA-256(magic_label ‖ effective_secret)[..4]` 派生——私有构建改标签即可
   消除开源指纹，且无凭据者无法用固定魔数判定载体存在性（头部槽位仅由
-  参数集决定，与密码无关，这是设计要求；威胁模型见 WIRE_SPEC §13.11.2）。
+  参数集决定，与密码无关，这是设计要求；威胁模型见 WIRE_SPEC §13）。
+- 套件默认值在 `WireCipherProfile.default_suite` 中；私有构建可改默认套件，
+  但读写仍以头部 `suite_id` 为准（1=AES-256-GCM，2=ChaCha20-Poly1305）。
 - 只想私有化图像域时用 `StegoProfile`；`Dialect::with_default_secret` 会同时
   设置结构域与图像域两半，两域派生域不同，同一字符串得到两把不相关密钥。
 - 仅开启 `features = ["content-png"]` / `["content-jpeg"]` / `["content-hevc"]`
@@ -172,7 +187,7 @@ for info in png_algos {
 
 - **自定义代价模型**：实现 `traits::PngCostModel` / `JpegCostModel`，
   经专家面域引擎入口以 `&dyn` 传入（见 `examples/stego_profile.rs`）。
-  注意：PNG 提取端由载体头部（`FeatureWord.algorithm_id`）声明算法，
+  注意：PNG 提取端由 64B V4 基础头（`algorithm_id`）声明算法，
   统一入口不接受 trait 对象；自有模型请直接调用域引擎，并保证嵌入与
   提取传入同一模型实例。
 - **容量探测前置嗅探**：`formats::sniff::sniff_bytes(bytes) -> Option<FileFormat>`，
@@ -190,10 +205,14 @@ for info in png_algos {
 | `capacity` | `probe_carrier_capacity_with_dialect` | 独立只读探测子命令（与 `embed --capacity` 同一实现），`--json` 输出 `StegoCapacityInfo`；`--exact` 强制全量精确扫描（长视频默认开启前 20% 样本加权快速估算）；与 embed 共享同一组调参/凭据参数 |
 | `embed --capacity` | 同上 | 别名形式保留，支持 `--exact` |
 
+**未实现的 CLI 能力**（不要当成已有参数）：`--key-file`（`Credential::FileKey`）、
+`--max-payload`（`ExtractParams.max_payload_bytes`）、`--extensions`（TLV 扩展区）；
+库 API 已支持，CLI/GUI 尚未接线。套件只有隐藏参数 `--cipher-suite`（`1`/`2`）。
+
 提取端自描述范围（无需在提取时重复）：算法 id、排除率（`exclusion_permille`）、
-codec、`h`、`u`、通道模式（PNG `FeatureWord`）；`h`/`u`、套件 id（JPEG 超块）。
+codec、`h`、`u`、通道模式、`format_id`、`suite_id`、`body_len`、扩展区（64B/44B/32B 基础头）；
 **不自描述**、提取端必须重复：PNG 的 `--p1-window` / `--p2-window`、
-凭据（secret/domain）、方言（`Dialect`）。
+凭据（password/key/domain）、方言（`Dialect`）。
 
 配置文件中可用 `[stego]` 段固定三个部署策略项，命令行标志始终优先：
 
@@ -211,6 +230,6 @@ algorithm      = "auto"
 - `tests/cli_help_guard.rs`：localize（en/zh）后全命令树每个可见参数 help
   非空——stego 参数 help 的事实源在 i18n 消息表，条目缺失即测试失败。
 - `hevc::engine::dialect_tests`：`DEFAULT_HEVC_FORMAT` 字面量与
-  WIRE_SPEC §13.11 钉死；魔数随凭据变化；公开默认密钥唯一。
+  WIRE_SPEC §13 钉死；魔数随凭据变化；公开默认密钥唯一。
 - `tests/test_lifecycle/facade.rs`：一个 `Dialect::with_default_secret`
   必须同时隔离两域；只私有化图像域时结构域仍保持官方行为。

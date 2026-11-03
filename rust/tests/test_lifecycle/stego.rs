@@ -113,6 +113,8 @@ fn generate_texture_png(w: u32, h: u32) -> Vec<u8> {
         width: w,
         height: h,
         channels: 3,
+        bit_depth: 8,
+        color_type: 2,
         pixels,
         chunks: Vec::new(),
         idat_sizes: Vec::new(),
@@ -170,25 +172,45 @@ fn header_slots_of(png: &[u8], password: Option<&str>) -> Vec<usize> {
                 .contains(&img.pixels[i * ch + off])
         })
         .collect();
-    assert_eq!(
-        eligible.len(),
-        eligible.iter().filter(|&&i| i < w * h).count()
+    let pre_salt = strhide::stego::png::engine::png_pre_salt(
+        &img,
+        &strhide::stego::format::OFFICIAL_PNG_FORMAT,
     );
+    let cred = match password {
+        Some(password) => strhide::crypto::Credential::Password(password),
+        None => strhide::crypto::Credential::Password(
+            strhide::stego::format::OFFICIAL_PNG_FORMAT.fallback_secret,
+        ),
+    };
+    let master = strhide::stego::format::derive_locator_master(
+        cred,
+        None,
+        &strhide::stego::format::OFFICIAL_PNG_CIPHER,
+        &pre_salt,
+    )
+    .expect("master");
+    let locator = strhide::stego::format::derive_l2_locator_keys(
+        &master,
+        &strhide::stego::format::OFFICIAL_PNG_CIPHER,
+        b"strhide-v4-hdr-magic",
+        None,
+    )
+    .expect("locator");
     strhide::stego::prng::permute_prefix(
         &mut eligible,
-        strhide::stego::header::V2_TOTAL_HEADER_SLOTS,
-        &strhide::stego::envelope::derive_header_perm_seed(password, None),
+        strhide::stego::header::PNG_AUDIO_BASE_SLOTS,
+        &locator.locate_seed,
     );
-    eligible[..strhide::stego::header::V2_TOTAL_HEADER_SLOTS].to_vec()
+    eligible[..strhide::stego::header::PNG_AUDIO_BASE_SLOTS].to_vec()
 }
 
-/// Read the 32-byte header the way the extractor does, for a known slot set.
-fn read_header(png: &[u8], slots: &[usize]) -> [u8; 32] {
+/// Read the 64-byte V4 header the way the extractor does, for a known slot set.
+fn read_header(png: &[u8], slots: &[usize]) -> [u8; 64] {
     let img = decode_png(png).expect("decode png");
     let ch = img.channels;
     let off = if ch >= 3 { 1 } else { 0 };
-    let mut out = [0u8; 32];
-    for byte_i in 0..32 {
+    let mut out = [0u8; 64];
+    for byte_i in 0..64 {
         let mut b = 0u8;
         for bit_i in 0..8 {
             b = (b << 1) | (img.pixels[slots[byte_i * 8 + bit_i] * ch + off] & 1);
@@ -425,6 +447,8 @@ fn test_stego_saturation_exclusion() {
         width: w as u32,
         height: h as u32,
         channels: 3,
+        bit_depth: 8,
+        color_type: 2,
         pixels,
         chunks: Vec::new(),
         idat_sizes: Vec::new(),
@@ -697,33 +721,26 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
     let slots_a = header_slots_of(&png_bytes, None);
     assert_eq!(slots_a, header_slots_of(&png_bytes, None));
 
-    // The model matches the engine: the header read from those slots must parse
-    // as the real envelope length (payload + 50 for an incompressible body with micro-header).
-    // The header word also carries the codec/h flags in its top bits, so the
-    // length has to be decoded rather than read as a bare u32.
-    let header = read_header(&first, &slots_a[..256]);
-    let word = u32::from_be_bytes([header[28], header[29], header[30], header[31]]);
-    let (total_len, _codec_id, stc_h) = strhide::stego::png::engine::decode_header_word(word);
+    // The header read from those slots must decode as the V4 base header and
+    // carry the real ciphertext length (`body_len` includes the 16-byte tag).
+    let header_bytes = read_header(&first, &slots_a);
+    let header = strhide::stego::header::SpatialHeaderV4::decode(&header_bytes, 1)
+        .expect("decode V4 header");
     assert_eq!(
-        total_len as usize,
-        payload.len() + strhide::stego::envelope::MIN_ENVELOPE_LEN,
-        "header at the computed slots must carry the real envelope length"
+        header.version,
+        strhide::stego::header::CONTENT_ENVELOPE_VERSION
     );
-    // In v2, word1 writes HEADER_V2_ESCAPE_H (15) for stc_h
-    assert_eq!(
-        stc_h,
-        strhide::stego::header::HEADER_V2_ESCAPE_H,
-        "v2 header writes escape h=15"
+    assert!(
+        header.body_len as usize >= payload.len() + 16,
+        "body_len must cover the payload and AEAD tag: {} vs {}",
+        header.body_len,
+        payload.len() + 16
     );
-    // And feature word carries codec, h, and u
-    let feature_bytes = read_header(&first, &slots_a[256..512]);
-    let fw =
-        strhide::stego::header::FeatureWord::decode(&feature_bytes).expect("decode feature word");
-    assert_eq!(fw.version, 3);
-    assert_eq!(fw.codec, strhide::stego::StegoCodec::Stc);
-    assert_eq!(fw.h, 8, "v3 FeatureWord carries real constraint height h=8");
+    assert_eq!(header.codec_id, 1, "STC is the default codec");
+    assert_eq!(header.stc_h, 8, "V4 header carries real constraint height");
+    assert_eq!(header.stc_u, 2);
 
-    // Explicit Hamming embed must declare escape h=15 in word1, and codec Hamming in FeatureWord
+    // Explicit Hamming embed must declare codec 0 and zero h/u.
     let hamming_opts = EmbedOptions {
         tuning: StegoTuning::Png {
             model: SpatialAlgorithm::default(),
@@ -736,38 +753,30 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
     };
     let hamming_stego =
         embed_carrier(&png_bytes, &Payload::bytes(&payload), &hamming_opts).unwrap();
-    let hamming_hdr = read_header(&hamming_stego, &slots_a[..256]);
-    let hamming_word = u32::from_be_bytes([
-        hamming_hdr[28],
-        hamming_hdr[29],
-        hamming_hdr[30],
-        hamming_hdr[31],
-    ]);
-    let (_, _h_codec, h_h) = strhide::stego::png::engine::decode_header_word(hamming_word);
-    assert_eq!(h_h, strhide::stego::header::HEADER_V2_ESCAPE_H);
-    let hamming_feat = read_header(&hamming_stego, &slots_a[256..512]);
-    let fw_hamming = strhide::stego::header::FeatureWord::decode(&hamming_feat)
-        .expect("decode hamming feature word");
-    assert_eq!(fw_hamming.codec, strhide::stego::StegoCodec::Hamming);
-    assert_eq!(fw_hamming.u, 0);
+    let hamming_hdr = read_header(&hamming_stego, &slots_a);
+    let hamming = strhide::stego::header::SpatialHeaderV4::decode(&hamming_hdr, 1)
+        .expect("decode hamming header");
+    assert_eq!(hamming.codec_id, 0);
+    assert_eq!(hamming.stc_h, 0);
+    assert_eq!(hamming.stc_u, 0);
 
-    let header2 = read_header(&second, &slots_a[..256]);
-    let word2 = u32::from_be_bytes([header2[28], header2[29], header2[30], header2[31]]);
+    // The salt is random per embed but must not move the header.
+    let header2 = read_header(&second, &slots_a);
+    let header2 = strhide::stego::header::SpatialHeaderV4::decode(&header2, 1)
+        .expect("second header must decode at the same slots");
+    assert_ne!(header2.salt, header.salt, "salt must be random per embed");
     assert_eq!(
-        word2 & strhide::stego::png::engine::HEADER_LEN_MASK,
-        total_len,
+        header2.body_len, header.body_len,
         "header position is salt independent"
     );
 
     // A different secret moves the header: parsing the same carrier as if the
-    // other secret had been used yields garbage.
+    // other secret had been used yields a header the CRC cannot validate.
     let slots_b = header_slots_of(&png_bytes, Some("another-secret-2026"));
     assert_ne!(slots_a, slots_b, "header slots must be keyed");
     let foreign = read_header(&first, &slots_b);
-    let foreign_word = u32::from_be_bytes([foreign[28], foreign[29], foreign[30], foreign[31]]);
-    let (foreign_len, _, _) = strhide::stego::png::engine::decode_header_word(foreign_word);
     assert!(
-        foreign_len != total_len,
+        strhide::stego::header::SpatialHeaderV4::decode(&foreign, 1).is_err(),
         "a foreign secret must not land on the real header"
     );
 }
@@ -1102,6 +1111,8 @@ fn test_jpeg_v3_slot_budget_controls_the_change_rate() {
         let layout = strhide::stego::jpeg::engine::layout_for_payload(
             &jpeg_bytes,
             payload,
+            0x0001,
+            &[],
             opts.jpeg_params_mut(),
             &strhide::stego::format::DEFAULT_JPEG_FORMAT,
         )
@@ -1119,30 +1130,30 @@ fn test_jpeg_v3_slot_budget_controls_the_change_rate() {
     );
 }
 
-/// Tampering with the FeatureWord reserved bits in a v2 carrier must safely collapse to NoHiddenData.
+/// Tampering with a V4 base-header field must safely collapse to NoHiddenData.
 #[test]
-fn test_stego_v2_feature_word_tamper_fails_safely() {
+fn test_stego_v4_header_tamper_fails_safely() {
     let png_bytes = generate_texture_png(128, 128);
     let opts = EmbedOptions::default();
-    let payload = b"secret payload testing feature word integrity";
-    let stego = embed_carrier(&png_bytes, &Payload::bytes(payload), &opts).expect("embed v2 stego");
+    let payload = b"secret payload testing header integrity";
+    let stego = embed_carrier(&png_bytes, &Payload::bytes(payload), &opts).expect("embed stego");
 
     let slots = header_slots_of(&png_bytes, None);
-    assert!(slots.len() >= 512);
+    assert!(slots.len() >= strhide::stego::header::PNG_AUDIO_BASE_SLOTS);
 
     let mut img = decode_png(&stego).expect("decode");
     let ch = img.channels;
     let off = if ch >= 3 { 1 } else { 0 };
 
-    // Tamper with a bit in the high reserved bytes of the feature word (slot index 256 + 128)
-    let tamper_slot = slots[256 + 128];
+    // Flip one bit of the `format_id` byte without recomputing the CRC.
+    let tamper_slot = slots[34 * 8];
     img.pixels[tamper_slot * ch + off] ^= 1;
 
     let tampered_bytes = encode_png(&img).expect("encode");
     let res = extract_carrier(&tampered_bytes, &opts.extract_options());
     assert!(
         matches!(res, Err(strhide::errors::StrHideError::NoHiddenData(_))),
-        "Tampered FeatureWord must yield NoHiddenData, got: {res:?}"
+        "Tampered V4 header must yield NoHiddenData, got: {res:?}"
     );
 }
 

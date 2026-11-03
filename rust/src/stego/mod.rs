@@ -53,9 +53,9 @@ pub use crate::stego::png::registry::{
 };
 pub use engine::{StegoEngine, engine_for, supported_formats};
 pub use envelope::Freshness;
+pub use format::GridRule;
 #[cfg(feature = "content-audio")]
 pub use format::{AudioFormatProfile, OFFICIAL_WAV_FORMAT};
-pub use format::{CipherSuite, GridRule};
 #[cfg(feature = "content-hevc")]
 pub use format::{DEFAULT_HEVC_FORMAT, HevcFormatProfile};
 #[cfg(feature = "content-jpeg")]
@@ -335,7 +335,8 @@ pub struct StegoCapacityInfo {
     /// slots included. Useful as a "how big is the cover" number only.
     pub total_elements: usize,
     /// Slots actually available to the payload: the slot grid minus the header
-    /// slots (718 + extension area for JPEG V3, 512 for the spatial codec).
+    /// slots (the fixed JPEG superblock plus extension area, or 512 for the
+    /// spatial codec).
     pub available_slots: usize,
     pub max_raw_payload_bytes: usize,
     /// Whether `max_raw_payload_bytes` is the grouped-code (`u >= 2`) bound
@@ -428,7 +429,7 @@ fn default_safety_bpp_limit() -> f64 {
 /// Credentials matter, and they are taken from `options` exactly like
 /// [`embed_carrier`] does:
 ///
-/// - **JPEG V3** ignores them: the header budget is the fixed superblock +
+/// - **JPEG** ignores them: the header budget is the fixed superblock +
 ///   extension area and the body budget is the geometric grid, both
 ///   independent of the key.
 /// - **The spatial codec does not**: the 512 header/feature slots are chosen by

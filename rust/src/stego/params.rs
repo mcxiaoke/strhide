@@ -345,9 +345,6 @@ pub struct JpegParams {
     /// tuning override.
     #[serde(default)]
     pub slot_budget: Option<usize>,
-    /// Cipher suite written into the superblock (default: the profile's default).
-    #[serde(default = "default_cipher_suite")]
-    pub cipher_suite: u16,
     /// Cost polarization weight, i.e. the discount applied to the *preferred*
     /// direction of each coefficient.
     ///
@@ -371,9 +368,6 @@ pub struct JpegParams {
     /// [`JpegCostModel::direction_bias`]: crate::stego::traits::JpegCostModel::direction_bias
     #[serde(default = "default_polarize_weight")]
     pub polarize_weight: f64,
-    /// Extension records written into the TLV area (default: none).
-    #[serde(default)]
-    pub extensions: Vec<crate::stego::jpeg::header_v3::Tlv>,
     /// Scalar knobs belonging to a JPEG cost model that is **not** the built-in
     /// UERD.
     ///
@@ -508,11 +502,6 @@ pub fn grouped_body_budget(
 }
 
 #[allow(dead_code)]
-fn default_cipher_suite() -> u16 {
-    crate::stego::format::DEFAULT_SUITE_ID
-}
-
-#[allow(dead_code)]
 fn default_polarize_weight() -> f64 {
     1.0
 }
@@ -525,9 +514,7 @@ impl Default for JpegParams {
             wet_cost: 1e13,
             stc_h: default_stc_h(),
             slot_budget: None,
-            cipher_suite: default_cipher_suite(),
             polarize_weight: default_polarize_weight(),
-            extensions: Vec::new(),
             algorithm_options: std::collections::BTreeMap::new(),
             deterministic: false,
         }
@@ -573,11 +560,6 @@ impl JpegParams {
                 "JPEG parameter 'polarize_weight' must be <= 1.0 (1.0 disables polarization), got {}",
                 self.polarize_weight
             )));
-        }
-        if self.cipher_suite == 0 {
-            return Err(StrHideError::General(
-                "Cipher suite id 0 is reserved for 'unset'".into(),
-            ));
         }
         validate_algorithm_options(&self.algorithm_options, "JPEG")?;
         Ok(())
@@ -626,23 +608,33 @@ impl JpegParams {
 /// extractors with different policies still read the same carrier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractParams {
-    /// Suites to try, ascending. `None` means "every suite in the profile".
+    /// Suites to try, ascending. `None` means "every known V4 suite".
     ///
-    /// A private build may narrow this to keep a slow suite from being probed;
+    /// A private build may narrow this to keep a suite from being used;
     /// dropping a suite only makes carriers written with it unreadable.
     pub allowed_suites: Option<Vec<u16>>,
     /// Ceiling on PBKDF2 iterations the decoder will execute for one attempt.
     ///
-    /// A forged `suite_id` must not be able to turn the extractor into a space
-    /// heater, so the cost is checked before the KDF runs.
+    /// V4 has a single fixed L1 cost
+    /// ([`crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS`]); a value below it
+    /// refuses `Credential::Password` before the KDF runs. `FileKey` does not
+    /// use PBKDF2 and ignores this field.
     pub max_pbkdf2_iterations: u32,
+    /// Largest plaintext the caller is willing to recover.
+    ///
+    /// Compared against the decrypted `orig_len`, not `body_len`; it also
+    /// bounds `body_len` early as `max_payload_bytes + BODY_OVERHEAD`.
+    pub max_payload_bytes: usize,
 }
 
 impl Default for ExtractParams {
     fn default() -> Self {
         Self {
             allowed_suites: None,
-            max_pbkdf2_iterations: crate::stego::format::MAX_PBKDF2_ITERATIONS,
+            // V4 uses a single L1 cost, so the default ceiling is exactly the
+            // iteration count an embedded carrier was built with.
+            max_pbkdf2_iterations: crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS,
+            max_payload_bytes: crate::stego::envelope::MAX_PLAINTEXT_LEN,
         }
     }
 }
@@ -654,6 +646,52 @@ impl ExtractParams {
             Some(ids) => ids.contains(&suite_id),
             None => true,
         }
+    }
+
+    /// Set [`max_payload_bytes`](Self::max_payload_bytes).
+    pub fn with_max_payload_bytes(mut self, n: usize) -> Self {
+        self.max_payload_bytes = n;
+        self
+    }
+
+    /// Policy checks that must pass before any body slot is read.
+    ///
+    /// `header_slots` is the base slots plus the slots claimed by `ext_len`; it
+    /// must fit in the carrier before the extension area may be read at all.
+    pub fn validate_header(
+        &self,
+        suite_id: u16,
+        body_len: u32,
+        header_slots: usize,
+        carrier_slots: usize,
+    ) -> Result<(), StrHideError> {
+        if crate::crypto::CipherSuiteId::from_u16(suite_id).is_none() {
+            return Err(StrHideError::UnsupportedVersion(format!(
+                "Unknown content cipher suite id {suite_id}"
+            )));
+        }
+        if !self.allows_suite(suite_id) {
+            return Err(StrHideError::UnsupportedVersion(format!(
+                "Content cipher suite id {suite_id} is not allowed by this policy"
+            )));
+        }
+
+        let body_overhead = crate::stego::envelope::BODY_OVERHEAD as u32;
+        let max_body = (self
+            .max_payload_bytes
+            .saturating_add(crate::stego::envelope::BODY_OVERHEAD)
+            .min(crate::stego::header::HEADER_LEN_MAX as usize)) as u32;
+        if body_len < body_overhead || body_len > max_body {
+            return Err(StrHideError::CorruptedData(format!(
+                "Content body_len {body_len} is outside {body_overhead}..={max_body}"
+            )));
+        }
+        if header_slots > carrier_slots {
+            return Err(StrHideError::CorruptedData(format!(
+                "Content header needs {header_slots} slots, carrier has {carrier_slots}"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -683,7 +721,7 @@ pub struct StegoProfile {
     pub default_secret: Option<&'static str>,
     /// Custom stego domain tag for isolating the HKDF key derivation domain.
     pub domain: Option<&'static str>,
-    /// Private JPEG V3 wire-format identity. `None` means the official
+    /// Private JPEG V4 wire-format identity. `None` means the official
     /// [`DEFAULT_JPEG_FORMAT`](crate::stego::format::DEFAULT_JPEG_FORMAT).
     ///
     /// Because the format decides the superblock/extension geometry and the
@@ -1129,5 +1167,86 @@ mod tests {
             crate::stego::jpeg::v3_layout::compute(1024 * 63, 746, bits, 8, budget).unwrap();
         assert_eq!(layout.u, 3);
         assert!(layout.body_n <= body_slots);
+    }
+}
+
+#[cfg(test)]
+mod extract_policy_tests {
+    use super::ExtractParams;
+    use crate::errors::StrHideError;
+    use crate::stego::envelope::{BODY_OVERHEAD, MAX_PLAINTEXT_LEN};
+
+    #[test]
+    fn defaults_cover_the_whole_plaintext_range() {
+        let params = ExtractParams::default();
+        assert_eq!(
+            params.max_pbkdf2_iterations,
+            crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS
+        );
+        assert_eq!(params.max_payload_bytes, MAX_PLAINTEXT_LEN);
+        assert!(params.allows_suite(1));
+        assert!(params.allows_suite(2));
+    }
+
+    #[test]
+    fn builders_only_touch_their_own_field() {
+        let params = ExtractParams::default().with_max_payload_bytes(1024);
+        assert_eq!(params.max_payload_bytes, 1024);
+        assert_eq!(
+            params.max_pbkdf2_iterations,
+            crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS
+        );
+        let narrowed = ExtractParams {
+            allowed_suites: Some(vec![1]),
+            ..params
+        };
+        assert!(narrowed.allows_suite(1));
+        assert!(!narrowed.allows_suite(2));
+    }
+
+    #[test]
+    fn validate_header_rejects_unknown_or_disallowed_suites() {
+        let params = ExtractParams::default();
+        let err = params
+            .validate_header(0, 32, 512, 1024)
+            .expect_err("suite 0 must be unknown");
+        assert!(matches!(err, StrHideError::UnsupportedVersion(_)));
+
+        let params = ExtractParams {
+            allowed_suites: Some(vec![1]),
+            ..ExtractParams::default()
+        };
+        let err = params
+            .validate_header(2, 32, 512, 1024)
+            .expect_err("suite 2 must be disallowed");
+        assert!(matches!(err, StrHideError::UnsupportedVersion(_)));
+        assert!(
+            params
+                .validate_header(1, BODY_OVERHEAD as u32, 512, 1024)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_header_bounds_body_len_and_slots() {
+        let params = ExtractParams::default().with_max_payload_bytes(1024);
+        let max_body = 1024 + BODY_OVERHEAD;
+        assert!(
+            params
+                .validate_header(1, max_body as u32, 512, 1024)
+                .is_ok()
+        );
+        let err = params
+            .validate_header(1, max_body as u32 + 1, 512, 1024)
+            .expect_err("body_len above max_payload must fail");
+        assert!(matches!(err, StrHideError::CorruptedData(_)));
+        let err = params
+            .validate_header(1, (BODY_OVERHEAD - 1) as u32, 512, 1024)
+            .expect_err("body_len below the minimum must fail");
+        assert!(matches!(err, StrHideError::CorruptedData(_)));
+        let err = params
+            .validate_header(1, 64, 513, 512)
+            .expect_err("header slots must fit the carrier");
+        assert!(matches!(err, StrHideError::CorruptedData(_)));
     }
 }

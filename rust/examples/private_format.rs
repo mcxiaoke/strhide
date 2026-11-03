@@ -22,6 +22,7 @@
 //! public surface a private build actually needs.
 
 use strhide::core::control::Control;
+use strhide::core::crypto::Credential;
 use strhide::errors::StrHideError;
 use strhide::stego::format::{DEFAULT_JPEG_FORMAT, JpegFormatProfile};
 use strhide::stego::jpeg::cost::UerdCostModel;
@@ -32,21 +33,25 @@ use strhide::stego::params::{ExtractParams, JpegParams};
 ///
 /// In a real private build these strings would be yours alone; the geometry is
 /// only repeated here to keep the demo short.
+const ACME_CIPHER: strhide::stego::format::WireCipherProfile =
+    strhide::stego::format::WireCipherProfile {
+        domain_label: b"acme-domain",
+        hpos_label: b"acme-hpos",
+        enc_label: b"acme-enc",
+        perm_label: b"acme-perm",
+        stc_label: b"acme-trellis",
+        default_suite: strhide::core::crypto::CipherSuiteId::Aes256Gcm,
+    };
+
 const ACME_FORMAT: JpegFormatProfile = JpegFormatProfile {
-    format_major: 1,
-    format_minor: 0,
     cover_digest_tag: b"acme-cover-v1",
-    hpos_label: b"acme-hpos",
-    stc_label: b"acme-trellis",
-    enc_label: b"acme-enc",
-    perm_label: b"acme-perm",
+    cipher: &ACME_CIPHER,
     sb_bytes: 44,
     sb_h: 8,
     sb_u: 2,
     ext_h: 8,
     ext_u: 4,
     grid_rule: strhide::stego::format::GridRule::ALL_AC,
-    suites: DEFAULT_JPEG_FORMAT.suites,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -63,8 +68,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stego = embed_jpeg(
         &carrier,
         payload,
-        Some(password),
+        Credential::Password(password),
         None,
+        0x0001,
+        &[],
         &ACME_FORMAT,
         &params,
         strhide::stego::SafetyPolicy::default(),
@@ -82,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. The private build reads it back.
     let recovered = extract_jpeg(
         &stego,
-        Some(password),
+        Credential::Password(password),
         None,
         &ACME_FORMAT,
         &ExtractParams::default(),
@@ -95,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    carrier with no payload at all.
     match extract_jpeg(
         &stego,
-        Some(password),
+        Credential::Password(password),
         None,
         &DEFAULT_JPEG_FORMAT,
         &ExtractParams::default(),
@@ -111,8 +118,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let official = embed_jpeg(
         &carrier,
         payload,
-        Some(password),
+        Credential::Password(password),
         None,
+        0x0001,
+        &[],
         &DEFAULT_JPEG_FORMAT,
         &params,
         strhide::stego::SafetyPolicy::default(),
@@ -123,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(
         extract_jpeg(
             &official,
-            Some(password),
+            Credential::Password(password),
             None,
             &ACME_FORMAT,
             &ExtractParams::default(),

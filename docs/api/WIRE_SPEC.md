@@ -448,402 +448,197 @@ channel_bytes[4..14] = unmasked[4..14] XOR mask[0..10]
 
 ---
 
-## 13. 内容域：图像与视频隐写（JPEG / PNG / HEIF / HEVC）
+## 13. 内容域：V4 内容信封（PNG / WAV / FLAC / JPEG / HEVC）
 
-内容域没有结构化信封与静态魔数。载荷先被封成一个**微信封**，再通过矩阵编码把微信封比特分散到载体元素（JPEG 量化 DCT 系数、PNG 像素或 H.265/HEVC 变换系数旁路符号位）上。
+> 本节描述**当前实现**。V4 信封没有 V2/V3 兼容读路径：旧 `CipherSuite`、
+> 旧 `header_v3::Superblock`、`MIN_ENVELOPE_LEN` / `HEADER_OVERHEAD` 常量均已删除。
+> 旧的 V3 描述只存在于归档文档中。
 
-内容域包含**三套载体格式体系**，共用微信封与密钥分层思路，但头部与槽位规则针对载体物理特征深度特化：
+### 13.1 总则
 
-| | JPEG（V3，STC 三元码） | PNG（空间域，HILL） | HEIF / HEVC（Scheme C，CABAC Bypass） |
-|---|---|---|---|
-| 头部 | 44 字节超块 + 可选 TLV 扩展区 | 32 字节头 + 32 字节 FeatureWord | 40 字节固定头（Magic 4B + Len 4B + CRC 4B + Nonce 12B + Tag 16B） |
-| 头部槽位 | `718 + n_ext`（密钥置换前 K 槽） | 512（密钥置换前 K 槽） | 密文与头整体由 STC 编码入前置/离散槽位（无独立明文槽） |
-| 槽位集合 | 全图 AC 位置（几何网格，与系数值无关） | 分类候选像素（与像素值相关，需重算代价图） | 变换系数旁路符号位 `coeff_sign_flag`（避让 EPB 冲突） |
-| 每槽承载 | 三元 `±1`（`R = 1/24 .. 1/1` 自适应） | 由 `--codec` 决定（Hamming / STC `u ≤ 3`） | 二元符号位翻转（STC `h=7, u=2`，码率 1/2） |
-| 头部定位成本 | 一次套件 KDF（无快速口令预言机） | 一次 HKDF（无盐，避免循环依赖） | 一次 HKDF-SHA256（以参数集 Cover Digest 为盐） |
-| 提取是否需要代价图 | **不需要** | 需要 | **不需要**（仅需根据槽位数重建 Weyl 离散排列） |
-| 尺寸膨胀 | 极微（Huffman 重编码波动，≤ 1%） | 0（PNG 尺寸由压缩率微弱影响） | **绝对为 0（Δ = 0，纯原位字节改写）** |
+- **正文无魔数、无明文标记**：载荷全部在 AEAD 密文内；没有口令的载体与未修改载体不可区分。
+- **头部位置密钥化**：基础头占用的槽位由 L2 `header_stc_seed` 选出；`magic4` 由 L2 派生，
+  不是固定常量。提取失败统一为 `NoHiddenData`，不泄露"是否存在/密码是否正确"。
+- **凭据**：`Credential::{Password(&str), FileKey(&[u8; 32])}`，二选一；空串密码视为未提供。
+  未提供时回落到 `StegoProfile.default_secret`，再回落到公开常量 `PUBLIC_DEFAULT_SECRET`
+  （后者不提供对抗源码持有者的机密性）。
+- **域**：显式 `domain` > `StegoProfile.domain` > 官方默认。域名 NFC 规范化，长度前缀拼接。
 
-### 13.1 微信封与隐写微头（载体共用）
-
-```text
-plaintext = orig_len (4, BE) ‖ flags (1) ‖ micro_header ‖ payload_bytes
-ciphertext = AEAD(enc_key, nonce, plaintext, aad = 载体头部全部字节)
-```
-
-- AEAD：AES-256-GCM / ChaCha20-Poly1305，tag 16 字节；`nonce` 12 字节由载体头部承载。
-- **AAD = 载体头部全部字节**（JPEG：44 字节超块；PNG：32 字节头 + 32 字节 FeatureWord）。任何被解码器使用的头字段都被绑定，改写即校验失败，而不是"能解密但行为诡异"。
-- `flags` 位分配（密文内，唯一演进入口）：
-
-| 位 | 含义 |
-|---|---|
-| `bit0` | `1` = 微头与载荷经 raw deflate 压缩（仅当压缩后更短时才压缩） |
-| `bit1..3` | 压缩算法 id：`0 = deflate`（brotli/zstd 预留）；置非 0 而不压缩 → 拒绝 |
-| `bit4..7` | **必须为 0**；非 0 即拒绝（`CorruptedData`） |
-
-- **微头（Micro-Header，线格式与文件名保留）**：
-  位于压缩/解压与 AEAD 保护区内，对外部检测完全隐蔽（零静态指纹）：
-  - 纯文本、二进制裸字节、或指定 `--no-filename` 时：
-    `[0x00] ‖ payload_bytes`（微头开销仅 1 字节）
-  - 携带文件名且保留时：
-    `[0x01] ‖ name_len (1B, 1..255) ‖ sanitized_filename_utf8 ‖ payload_bytes`
-    文件名由 `sanitize_filename` 过滤路径穿越（去路径前缀、过滤非法控制字符与 Windows 危险字符，空或非法回退为提取默认名）。
-  - HEVC 原位隐写（Scheme C）在 AES-GCM 明文中同样使用上述微头格式（tag `0x00` / `0x01`）。
-
-- 常量：`SALT_LEN = 16`、`NONCE_LEN = 12`、`TAG_LEN = 16`、`HEADER_OVERHEAD = 28`、`MIN_ENVELOPE_LEN = 50`（含 1 字节微头最小开销）、`BODY_OVERHEAD = 22`（4 长度 + 1 标志 + 1 微头最小 + 16 tag）。28 字节 salt/nonce 物理上位于载体头部，不占正文槽位；`envelope_len` 仍是"逻辑信封长度"（含这 28 字节），正文比特数 = `8 × (envelope_len − 28)`。
-
-### 13.2 密码套件表（JPEG V3）
-
-套件 id 索引到代码里写死的参数集："一个 id 换一整套密码参数"，新增算法只加表项，不动超块。
-
-| id | 名称 | KDF | AEAD | 状态 |
-|---:|---|---|---|---|
-| 0 | — | — | — | 无效（零填充/未设置），一律拒绝 |
-| 1 | `pbkdf2-sha256-200k` | PBKDF2-HMAC-SHA256, 200,000 次, 32B | AES-256-GCM, 12B nonce, 16B tag | **v1 默认** |
-| 2 | `pbkdf2-sha256-600k` | 同上, 600,000 次 | 同上 | 可选 |
-| 3 | `argon2id-m64t2p2` | Argon2id m=64 MiB, t=2, p=2 | 同上 | **仅保留 id，v1 不实现** |
-
-规则：只增不改、id 不复用；提取端按 **id 升序试枚举**，每次尝试付一次该套件 KDF；`suite_id` 只作一致性校验（防实现错位），不作发现依据；提取端强制 KDF 成本上限（PBKDF2 迭代 ≤ 2,000,000）。
-
-### 13.3 JPEG V3：密钥派生分层
+### 13.2 微头与信封长度
 
 ```text
-cover_digest = SHA-256("strhide-cover-v1" ‖ u32(block_count) ‖ u32(component_count)
-                        ‖ 全部 DC 系数(i16 BE，分量/块顺序))
-              // DC 永不参与嵌入 → 嵌入前后恒定，两端可复算
-
-master            = SuiteKDF_i(password, salt = cover_digest)      // 每个候选套件一次
-header_perm_seed  = HKDF(master, info = "hpos"   ‖ domain)         // 定位头部槽位
-enc_key,perm_seed = HKDF(master, salt = 超块 salt, info = "enc" / "perm" ‖ domain)
-body_stc_seed     = HKDF(perm_seed, salt = 超块 salt, info = "stc-trellis")  // perm_seed 已包含 domain
-hdr_stc_seed      = HKDF(header_perm_seed, info = "stc-trellis-hdr" ‖ domain)
-ext_stc_seed      = HKDF(header_perm_seed, info = "stc-trellis-ext" ‖ domain)
+plaintext  = [4B BE original_len][1B flags][micro_header][payload]
+ciphertext = AEAD(plaintext)            // 末尾 16B tag
+body_len   = ciphertext.len()           // 只含密文+tag，不含 salt/nonce
 ```
 
-- **头部位置由套件 KDF 派生**：没有口令连头部槽位都算不出来，"读头 → 结构校验"这条微秒级口令预言机因此不存在；每次口令猜测的代价被锁死在该载体实际使用的套件 KDF 上。
-- `salt` 明文位于超块第 4..20 字节，但**不再是 KDF 的盐**（KDF 盐是 `cover_digest`），只用于 HKDF 分层分化，跨载体预计算表因此失效。
-- `domain`（`--stego-domain`）以 `label ‖ u64be(len) ‖ NFC(domain)` 形式折入每个派生值；异域提取在头部阶段即失配，折叠为 `NoHiddenData`。
+- `BODY_OVERHEAD = 22` = 4 长度 + 1 flags + 1 最小微头 + 16 tag。
+  `max_payload_bytes = message_bits / 8 - 22`。
+- `flags`：bit0 = 压缩；bit1..3 = 压缩算法 id（0 = Deflate，唯一实现）。
+- 微头：`0x00` 文本/原始字节；`0x01` 文件（含 ≤255 字节文件名）。
+- `MAX_PLAINTEXT_LEN = HEADER_LEN_MAX = 2^26 - 1`（26 位上限，超出直接拒绝）。
+- salt（16B）与 nonce（12B）**只存在载体头中**，不占正文槽位，也不计入 `body_len`。
 
-### 13.4 JPEG V3：44 字节超块（偏移永久冻结）
+### 13.3 套件与密钥分层（L1 / L2 / L3）
 
-```text
-off  size  field            说明
-0    1     version_major    主版本，不兼容变更才改（当前 1）
-1    1     version_minor    次版本，只加可选扩展时改（当前 0）
-2    2     flags            全部保留，必须为 0
-4    16    salt             正文密钥的 HKDF 盐（每载体随机）
-20   12    nonce            AEAD nonce
-32   4     envelope_len     BE，bit0..26 有效，bit26..32 必须为 0
-36   2     suite_id         密码套件 id（BE），须与试枚举出的套件一致
-38   1     codec_id         0 = 三元 STC（1 = Hamming 预留）
-39   1     h                STC 约束高度 4..=10
-40   1     u                格宽 1..=64
-41   1     components_mask  bit0 = Y；其余保留
-42   2     ext_bytes        扩展区字节数，0 = 无扩展
-```
+`CipherSuiteId`（`core::crypto`）是 append-only 枚举：
 
-- 超块 `h = 8, u = 2` → `n_sb = 2 × (352 + 7) = 718` 槽，`m = 718/2 − 7 = 352` 比特，精确填充。
-- 所有多字节整数 **big-endian**；保留位/字节写 0，解码时校验为 0。
-- 解码端字段校验（任一不满足即拒绝，不猜）：`envelope_len ∈ [49, 2²⁶)`、`suite_id` 等于当前试枚举套件、`codec_id` 已知、`h ∈ 4..=10`、`u ∈ 1..=64`、`components_mask & 0x01 != 0`。
-- **没有 `probe`**：不存在可被离线爆破利用的明文口令校验位。
-- **没有 `has_ext`**：`ext_bytes > 0` 已足够表达。
+| id | AEAD | nonce | tag | 状态 |
+|---|---|---|---|---|
+| 1 | AES-256-GCM | 12B | 16B | 默认 |
+| 2 | ChaCha20-Poly1305 | 12B | 16B | 可选 |
 
-### 13.5 JPEG V3：槽位契约与布局
+- **L1**：`derive_locator_master(cred, domain_label, cipher, pre_salt)` → 32B 主密钥。
+  `Password` 走 PBKDF2-HMAC-SHA256 **200,000 轮**（`CONTENT_L1_PBKDF2_ITERATIONS`）；
+  `FileKey` 跳过 PBKDF2 直接作为 IKM 进 HKDF。`pre_salt` 只用嵌入前后不变的元数据
+  （WAV 排除 PCM 摘要、FLAC 排除 STREAMINFO MD5；其他格式用参数集/像素布局摘要）。
+- **L2**：`derive_l2_locator_keys(&master, cipher, magic_label, domain)` →
+  `HeaderLocatorKeys { locate_seed, header_stc_seed, ext_stc_seed, magic4 }`。只用于找头。
+- **L3**：`derive_l3_session_keys(cipher, suite, &master, header_salt, domain)` →
+  `SessionKeys { enc_key, perm_seed, stc_seed }`。`suite` 只在这里参与派生并决定 AEAD 算法。
+- **AEAD 分发位置**：`stego::envelope::{encrypt_v4_with_aad, unpack_v4_envelope_parts}`；
+  两者按 `suite` 分别走 `Aes256Gcm` / `ChaCha20Poly1305`，失败一律 `NoHiddenData`。
+- **AAD**：`"strhide-content-envelope-v4\0" || format_id || base_header || extension`。
+  基础头的每个字段、扩展区每个 TLV 都被认证；篡改不会产生"另一种合理解码"。
+  基础头 CRC32 只用于提前拦意外损坏，**认证靠 AEAD**。
+- `ExtractParams.max_pbkdf2_iterations` 默认 **200,000**；上限内才做试解，超过直接拒绝。
 
-```text
-Grid      = { (bi, k) | 0 ≤ bi < block_count, 1 ≤ k ≤ 63 }      // 平坦索引 idx = bi*63 + (k−1)，升序
-HdrSlots  = permute(Grid, header_perm_seed)[0 .. 718 + n_ext]
-BodyGrid  = Grid \ HdrSlots
-BodySlots = permute(BodyGrid, perm_seed)[0 .. u×(bits+h−1)]
-```
+### 13.4 三套基础头（base header）
 
-三条不变量：**值不参与**（唯例外是 DC 作头部 KDF 盐，而 DC 永不嵌入）；**头部先扣**（`BodyGrid` 显式去掉头部槽位，否则同一系数被改两次）；**尾部落选可接受**（按密钥均匀抽样，不是按代价挑选）。
+三套头都由 L2 选槽；`format_id` 与部分隐含字段不存储，但在 AAD 前缀中绑定。
+多字节字段一律大端。
 
-布局（两端只在本处一致，提取端只信头部）：
+#### 13.4.1 空间域（PNG / WAV / FLAC）：64 字节
 
-```text
-u = max(1, min(64, floor(SlotBudget / (bits + h − 1)), floor(|BodyGrid| / (bits + h − 1))))
-n = u × (bits + h − 1)
-```
-
-`SlotBudget`（默认 1,200,000）是**纯嵌入端参数**，不属线格式；提取端只校验 `u ∈ 1..=64` 与 `n ≤ |BodyGrid|`，不比对本地预算推导值。
-
-三元合法性（仅嵌入端）：所有 AC 位置双向 `±1` 均可，仅在 `|c| = 1023` 处挡一个方向（`category(1024) = 11` 超出 baseline AC 的 10 档上限）。写回按回溯给出的 `−1/0/+1` 直接作用于 `i16` 系数。
-
-### 13.6 JPEG V3：扩展区 TLV 与版本策略
-
-```text
-type : u8   （bit7 = critical，bit0..6 = 类型号 0..127；类型 0 保留为补齐标记）
-len  : u8   （0..255）
-value: len 字节
-```
-
-- 扩展区槽数 `n_ext = 4 × (8·ext_bytes + 7)`，`STC(h=8, u=4)` 恰好承载 `8·ext_bytes` 比特，无残余；扩展区起点 = 第 718 槽。
-- 解码规则：未知识别号 + `critical=1` → 拒绝（`UnsupportedVersion`）；`critical=0` → 跳过；`len` 越界 → `CorruptedData`；尾部补齐字节非 0 → `CorruptedData`；`flags` 非 0 → 拒绝；`version_major != 1` → 拒绝；`version_minor > 本地` → 允许（解析已知 TLV，未知按上表处理）。
-- **扩展区的解析放在载荷解密成功之后**：此时载体已被证明是本工具的（AEAD 通过），才能给出"扩展区损坏/未知关键扩展"这类精确错误；提前报错会变成廉价口令预言机。
-
-### 13.7 空间域（PNG）：头部与槽位
-
-空间域本期未改槽位策略，仅两处适配：
-
-1. **AAD = 32 字节头 + 32 字节 FeatureWord**（共 64 字节），任何 codec/h/u 篡改都会让 tag 校验失败；
-2. **KDF 走同一套件**：`master = SuiteKDF_1(password, salt = 头内 16B salt)` → `enc_key/perm_seed = HKDF(master, salt, "enc"/"perm" ‖ domain)`。
-
-```text
-header_slots[0..256]    = salt (16B) ‖ nonce (12B) ‖ word1 (4B)
-header_slots[256..512]  = FeatureWord (32B / 256 bits)
-```
-
-#### 4 字节 Word1 控制字
-
-| 位 | 宽度 | 内容 |
+| off | size | 字段 |
 |---|---|---|
-| bit 0..26 | 26 | 逻辑微信封长度（`HEADER_LEN_MAX = 2^26 − 1`） |
-| bit 26..28 | 2 | 矩阵编码标识：`0 = Hamming`；`1..3 = STC u` |
-| bit 28..32 | 4 | `15`（`0x0F`）= v2 逃逸标记（本版本唯一写出的形态） |
+| 0 | 16 | salt（L3 HKDF salt） |
+| 16 | 12 | nonce |
+| 28 | 4 | body_len（密文含 tag） |
+| 32 | 1 | version = `(major << 4) | minor`，major 必须 4 |
+| 33 | 1 | flags（`EXT_PRESENT` / `EXT_CRITICAL`） |
+| 34 | 1 | format_id（1=PNG，2=WAV，3=FLAC） |
+| 35 | 1 | algorithm_id（PNG 代价模型 wire id） |
+| 36 | 2 | suite_id |
+| 38 | 1 | codec_id（0=Hamming，1=STC） |
+| 39 | 1 | stc_h（4..=10） |
+| 40 | 1 | stc_u（1..=64） |
+| 41 | 1 | channel_mode（PNG） |
+| 42 | 1 | class_rule |
+| 43 | 2 | p1_window |
+| 45 | 2 | p2_window |
+| 47 | 2 | neg_log2_epsilon |
+| 49 | 2 | exclusion_permille |
+| 51 | 4 | sigma（f32 BE） |
+| 55 | 1 | kernel_id |
+| 56 | 2 | ext_len（TLV 字节数） |
+| 58 | 2 | reserved，必须 0 |
+| 60 | 4 | CRC32-IEEE over bytes[0..60] |
 
-#### 32 字节 FeatureWord 自描述字（v3）
+#### 13.4.2 JPEG：44 字节
 
-- `bit 0..4` 版本 `= 3`；`bit 4..6` codec（0=Hamming，1=STC）；`bit 6..9` `u`（1..3）；`bit 9..13` `h`（4..10）
-- `bit 13..15` `channel_mode`；`bit 15..17` `class_rule`（1 = 安全非边界 `val % 8 ∈ [1,6]`）
-- `bit 17..27` `p1_window`（HILL 一阶低通窗，正奇数 ≤1023）；`bit 27..37` `p2_window`（二阶低通窗，同约束）
-- `bit 37..51` `neg_log2_epsilon`（`epsilon = 2^-k`，k ∈ 1..=127；嵌入端把非 2 的幂 epsilon 量化到最近 2 的幂再使用）
-- `bit 51..64` `exclusion_permille`（排除分位数，≤900）
-- `bytes[8]`：`algorithm_id`（1 = HILL，2 = S-UNIWARD；提取端据此自描述选择模型）
-- `bytes[9..13]`：`sigma`（f32 LE，S-UNIWARD 的 model option；嵌入端先舍入到 f32 精度再使用，其他模型忽略）
-- `bytes[13]`：`kernel_id`（0 = 内置 KB 高通核；自定义核不支持自描述，需两端同配置）
-- `bytes[14..32]` 保留为零（非 0 即 `NoHiddenData`）
-- v3 删除了 v2 的死字段 `kdf_id`/`eligible_min`/`eligible_max`（解码即弃，从未读回）
-- 量化语义：`epsilon`/`sigma` 在嵌入端**先**量化到 wire 可精确承载的形式**再**参与代价计算（`PngParams::wire_quantized`），探测容量同口径——提取端从 wire 重建的代价图与嵌入端逐位一致
+| off | size | 字段 |
+|---|---|---|
+| 0 | 1 | version（major 4） |
+| 1 | 1 | flags |
+| 2 | 2 | suite_id |
+| 4 | 16 | salt |
+| 20 | 12 | nonce |
+| 32 | 4 | body_len（密文含 tag） |
+| 36 | 1 | codec_id（0 = ternary STC） |
+| 37 | 1 | stc_h（4..=10） |
+| 38 | 1 | stc_u（1..=64） |
+| 39 | 1 | ext_len（0..=255） |
+| 40 | 4 | CRC32-IEEE over bytes[0..40] |
 
-#### 空间域残差赤字消除
+#### 13.4.3 HEVC / HEIF：32 字节
 
-- 前 512 槽（头部池）：`val ∈ [8, 247]` 且未被平滑排除的候选像素，经 `derive_header_perm_seed`（无盐）置换选出。
-- 正文候选池：排除头部 512 槽后，像素收敛至 `val % 8 ∈ [1, 6]`。
-- 单向门（`spatial_move_safe`）：`r = 1` 仅允许 `+1`；`r = 6` 仅允许 `−1`；`r ∈ [2,5]` 双向。边界频数 `ΔH[0] = ΔH[7] = 0`。
+| off | size | 字段 |
+|---|---|---|
+| 0 | 4 | magic4（L2 派生） |
+| 4 | 1 | version（major 4） |
+| 5 | 1 | flags |
+| 6 | 1 | stc_u（1..=64） |
+| 7 | 2 | window_slices（≥1） |
+| 9 | 1 | ext_len（0..=64） |
+| 10 | 2 | suite_id |
+| 12 | 4 | body_len（密文含 tag） |
+| 16 | 12 | nonce（同时作为 HEVC session salt 输入） |
+| 28 | 4 | CRC32-IEEE over bytes[0..28] |
 
-### 13.8 容量安全档位（SafetyLevel）
+隐含字段：`format_id = 5`、`stc_h`（来自 `HevcFormatProfile`，官方 7）、`total_windows = 1`。
 
-| 档位 | bpp 预算（bits/pixel） | 目标比例 `r = slots/bits` | 定位 |
-|---|---:|---:|---|
-| `Paranoid` | ≤ 0.06 | ≥ 11.5 | 极限高抗检 |
-| `High` | ≤ 0.10 | ≥ 6.9 | **默认推荐档** |
-| `Balanced` | ≤ 0.15 | ≥ 4.6 | 边界档位 |
+### 13.5 flags、ext_len 与 TLV
 
-- `Advisory`（默认）：超限仅打印警示，不中断；`Enforced`（`--enforce-safety`）：硬性拒绝并报错。
-- 载荷率是抗检最灵敏的变量。JPEG V3 实测（80 图语料）：推荐档位下载荷在标定检测器下 0 误报，满容量时检出 85%。
+- `EXT_PRESENT` 必须与 `ext_len > 0` 一致；`EXT_CRITICAL` 表示扩展区含 critical TLV。
+- TLV：`type_id(1B) | len(1B) | value(len B)`；`type_id` 高位 `0x80` 为 critical。
+  `type 0` 仅用于 padding，值必须全 0 且解析时跳过。
+- **fail-closed**：未知 critical TLV → 立即拒绝；未知 non-critical TLV → 跳过；
+  截断/长度越界 → `CorruptedData`；扩展区总字节数超上限 → 拒绝。
+  上限：空间/JPEG `MAX_EXT_BYTES = 255`；HEVC `ext_len <= 64`。
+- **扩展槽位**：`ext_slots = stc_u * (8 * ext_len + stc_h - 1)`（`ext_len = 0` 时为 0）；
+  JPEG/空间域用头中的 `stc_h/stc_u`，HEVC 固定 `h=7, u=2`。
+  **off-by-8 语义**：`ext_len` 是字节数，消息位是 `8 * ext_len`，不是 `ext_len`。
 
-### 13.9 私有版构建指引
+### 13.6 容量公式
 
-格式身份是**编译期**的 `JpegFormatProfile`（`stego::format`），不是 CLI 开关——可切换的格式就是可枚举的格式。
-
-**推荐方式：facade + const Profile。** 构造一个 `StrHide`，把私有 `JpegFormatProfile`（以及结构域/内容域私钥、域标签）通过 `const fn` 链绑定，然后在实例上调用动词或 `run_cli_from`，无需修改或重新编译 strhide 源码：
-
-```rust
-use strhide::facade::StrHide;
-use strhide::params::Profile;
-
-const ENGINE: StrHide = StrHide::new().with_profile(
-    Profile::new().with_jpeg_format(MY_PRIVATE_FORMAT),
-);
-// ENGINE.embed(...) / ENGINE.extract(...) / ENGINE.run_cli_from(...)
-```
-
-1. 复制 `DEFAULT_JPEG_FORMAT` 的字面量，至少改 5 个域分隔标签（`cover_digest_tag` / `hpos_label` / `stc_label` / `enc_label` / `perm_label`）；
-2. 需要时再改头部几何（`sb_bytes` / `sb_h` / `sb_u`，必须满足 `n = u·(8·bytes + 7)`、`m = 8·bytes`）或 `grid_rule`（`k_min ≥ 1`，DC 绝不能进池）；
-3. 按上面的 facade 方式绑定；若不使用 facade，也可在自己的 `main` 里直接把 `JpegFormatProfile` 传给 `stego::jpeg::embed` / `extract`，或用 `cargo build --features private-profile` 替换 `DEFAULT_JPEG_FORMAT`；
-4. 改完先跑 roundtrip，再跑检测评估（`docs/stc_v3_phase3_eval_20261021.md` 的脚本可直接复用）；
-5. **不要分发二进制**：常量会被逆向，私有标签一旦随二进制流出即失去意义。
-
-注意：A 层参数（标签/几何）只影响"谁能读、检测器怎么建模"，**不改变抗检上限**——上限仍由载荷率与代价函数决定，改标签躲得过针对上游格式的定向检测器，躲不过通用隐写分析。
-
-### 13.10 冻结清单与演进决策树
-
-**发布后永不改变（变了就是新格式）**
-
-1. `cover_digest` 的定义（`"strhide-cover-v1"` ‖ 块数 ‖ 分量数 ‖ 全部 DC）；**DC 永不得参与嵌入**；
-2. `header_perm_seed = HKDF(SuiteKDF(password, cover_digest), "hpos" ‖ domain)`；
-3. 头部置换算法（ChaCha12 + Fisher-Yates `permute_indices`）；
-4. 超块槽数 718、超块 STC 参数 `(h=8, u=2)`、超块比特数 352；
-5. 超块字段偏移与语义（新增字段一律走扩展区）；
-6. 扩展区起点 = 第 718 槽，扩展区 STC 参数 `u=4, h=8`；
-7. 正文起点 = `718 + n_ext`，正文置换与 trellis 种子派生 label；
-8. 密码套件表只增不改、id 不复用、试枚举顺序固定 id 升序。
-
-**每块网格**：`Grid` 只含 `k = 1..=63`；槽位一律用平坦索引 `idx = bi*63 + (k−1)`；`BodyGrid` 用 `bool` bitset 按 `idx` 正序收集，**严禁 `HashSet`/`HashMap`**（迭代顺序不稳会让 Fisher-Yates 序列两端错位）。
-
-**加字段的决策树**
+统一形式：
 
 ```text
-新需求 → 是否改变密钥派生 / AEAD（算法或成本参数）？
-  是 → 加一条套件表项 + 新 suite_id（不动超块、不升版本）
-  否 → 是否需要正文解码前就知道？
-        否 → 不进格式（如代价函数、极化权重：仅嵌入端使用）
-        是 → 能否用 1 个可选 TLV 表达？
-              能 → 加 TLV，minor + 1，critical 按需
-              不能（>255B 或必须固定位置）→ 提升 major，超块不动，正文前置声明新布局
+header_slots = base_slots + ext_slots
+body_slots   = total_slots - header_slots
+max_payload  = message_bits(body_slots, stc_h) / 8 - BODY_OVERHEAD
 ```
 
-### 13.11 CABAC 旁路域（HEIF / HEIC、HEVC Annex-B、MP4 / MOV 与 MKV，Scheme C）：线格式与协议规范
-
-Scheme C 专为 H.265/HEVC 压缩域原位隐写设计，直接在压缩比特流（NAL 单元内部的 CABAC 旁路区间）中调制高频变换系数的符号位，具备**零字节膨胀（$\Delta = 0$）**、**严格语法合规**与**极佳抗检鲁棒性**。支持 MP4 / MOV / MKV (Matroska) 视频容器、HEIF / HEIC 图像项以及原始 Annex-B 裸流。在 MKV 容器中，EBML 与 Segment 树的 CRC-32 校验和按 innermost-first 深度优先刷新，且未知大小 Cluster 会在遇到 Level-1 元素时精确截断。
-
-#### 13.11.1 微信封布局（40 字节固定头部 + 载荷）
+- **PNG**：`total_slots` 为可用绿色/RGB 槽；`base_slots = 512`（64B 头）。
+- **WAV / FLAC**：`total_slots` 为采样或残差槽；`base_slots = 512`。
+- **JPEG**：`total_slots` 为全图 AC（`k=1..63`）几何网格；`base_slots = 352`（44B 头）。
+- **HEVC**：`total_slots` 为窗口内可用 CABAC bin；
+  `base_slots = 524`，`ext_slots = 2 * (8 * ext_len + 6)`，`stc_h = 7` 固定：
 
 ```text
-message = magic (4, derived) ‖ payload_len (4, BE) ‖ payload_crc (4, BE) ‖ nonce (12) ‖ ciphertext (len + 16B tag)
+max_payload = message_bits(total_slots - (524 + ext_slots)) / 8 - 22
 ```
 
-- **`magic`（4 字节）**：由方言标签与有效凭据派生（见 13.11.2），**不是**固定常量。早期版本使用固定 ASCII `SH25`，但头部槽位仅由参数集决定、与密码无关，固定魔数构成"免密码存在性预言机"（任何分析者都能定位并比对魔数判定文件藏过数据）；派生化后，无凭据方的视角下头部与空载体同为噪声。
-- **`payload_len`（4 字节，Big-Endian）**：明文原始载荷字节长度。
-- **`payload_crc`（4 字节，Big-Endian）**：明文原始载荷的 IEEE 802.3 CRC32 校验和。提取端在 AEAD 解密后必须验证 CRC，杜绝伪阳性解码。
-- **`nonce`（12 字节）**：CSPRNG 生成的 96 位随机 Nonce。
-- **`ciphertext`（`payload_len + 16` 字节）**：使用 AES-256-GCM 对原始载荷进行的认证加密，包含 16 字节 GCM Tag。
-- **固定头部总长**：`4 + 4 + 4 + 12 + 16 = 40` 字节（320 比特）。
+`probe` 与 `embed` 必须复用同一公式、同一调参与同一扩展区（`ProbeOptions.extensions`
+必须等于即将写入的 `EmbedOptions.extensions`），否则容量与实际可嵌长度会不一致。
+长视频 `probe` 默认按前 20% 窗口加权估算；`--exact` / `exact=true` 才全量扫描。
 
-#### 13.11.2 参数集指纹（Cover Digest）与密钥派生
+### 13.7 行为语义
 
-为了彻底切断口令暴力枚举预言机，并保证密钥与载体内容强绑定：
+- **extract 统一失败面**：错密码、错域、错方言、无数据、头部损坏、AEAD 失败、
+  critical TLV 未知，全部返回 `NoHiddenData`（只有 `CorruptedData` /
+  `UnsupportedVersion` 用于明确的结构错误，由调用方决定是否外露）。
+- **verify 分级**：结构层（载体可解析）→ 头部层（长度/版本/CRC/suite 合法）→
+  载荷层（AEAD 通过）；每级给出独立结论，不把"头部存在"误报成"载荷可解"。
+- **未认证长度**：`body_len` 在解密前不可信，只用于在硬上限
+  （`max_payload_bytes` / `HEADER_LEN_MAX`）内裁剪计算；超过上限立即拒绝，
+  不按声明长度分配内存。
+- **fail-closed**：未知 major 版本、未知 critical TLV、suite id 不在枚举内、
+  CRC 不符、flags 预留位非 0，均在读 body 之前拒绝。
 
-```text
-// 0. 有效凭据解析（与 PNG/JPEG 引擎同一解析链）：
-//    显式密码 > Profile 私有默认密钥（stego_secret）> 公开默认常量
-//    PUBLIC_DEFAULT_SECRET = "strhide-default-content-stego-key-2026"
-//    口令在派生前做 NFC 规范化。
-effective_secret = NFC(password ?? profile.stego_secret ?? PUBLIC_DEFAULT_SECRET)
+### 13.8 音频（WAV / FLAC）
 
-// 1. 采集不可变参数集计算载体指纹：
-//    HEIF/HEIC：解析 ISO BMFF 树提取 Primary Item 的 hvcC 盒内的 VPS/SPS/PPS NAL 原始字节；
-//    Annex-B：扫描前 1MB 码流提取 VPS (type=32)、SPS (type=33)、PPS (type=34) NAL RBSP 字节。
-cover_digest = SHA-256(fmt.cover_salt ‖ vps_bytes ‖ sps_bytes ‖ pps_bytes)     // 官方 fmt.cover_salt = "strhide-hevc-cover-v1"
+- PCM 采样域（WAV）与 FLAC 残差域，16/24-bit 两种容器路径共用 64B 头。
+- `pre_salt` 只取嵌入前后不变的元数据：WAV 用采样率/声道/位深/数据长度等并**排除
+  实际 PCM 摘要**；FLAC 用 STREAMINFO 的非 MD5 字段并**排除 MD5**。两者字段编码为大端，
+  避免字节序差异造成跨平台 `NoHiddenData`。
+- 扩展区 TLV 与空间域同规则；`body_len` 语义同上（密文含 16B tag）。
 
-// 2. 域隔离（可选）：配置 stego_domain 时先做子密钥化
-ikm = derive_domain_subkey_with_label(effective_secret, domain, "strhide-hevc-domain-v1") ?? effective_secret
+### 13.9 HEVC / HEIF
 
-// 3. 派生 AES-256-GCM 密钥、STC Trellis 种子与头部魔数：
-key  = HKDF-SHA256(ikm = ikm, salt = cover_digest, info = fmt.kdf_info)        // 官方 fmt.kdf_info = "strhide-hevc-aes-key"
-seed = u64be(HKDF-SHA256(ikm = key, salt = cover_digest, info = "strhide-hevc-trellis-seed-v1")[..8])
-magic = SHA-256(fmt.magic_label ‖ effective_secret)[..4]                       // 官方 fmt.magic_label = "strhide-hevc-magic-v1"
-```
+- 只调制 TU 内 CABAC bypass 的 `coeff_sign_flag`；不改变码流尺寸与解码结果。
+- 32B 头固定 524 个基础槽；`window_slices` 记录主窗口候选切片数，控制提取成本。
+- `magic4 = SHA-256(magic_label || effective_secret)[..4]`，私有构建改 `magic_label`
+  即可消除开源指纹；头部槽位只由参数集决定，与密码无关（威胁模型已接受）。
+- 扩展区 `ext_len <= 64`；HEIF 在方案 C 不可用时桥接到缩略图 JPEG/未压缩项。
 
-- **凭据优先级**：显式运行时凭据 > Profile 编译期私有默认密钥 > 公开默认常量 `PUBLIC_DEFAULT_SECRET`。全仓仅此一份公开默认常量（结构域与 PNG/JPEG 域各自另有独立常量，三者不同名、互不替代）。
-- **派生标签全部来自 `HevcFormatProfile`**（`stego::format::DEFAULT_HEVC_FORMAT`）：私有编译期定制改标签重建即可消除开源指纹，无需 fork。
-- **trellis seed 经 key 派生（M11）**：槽位 Weyl 置换与 STC 码结构对无凭据者不可复现——与 PNG/JPEG 引擎的安全模型一致，同时关闭"无口令定位明文消息头 + CRC32 离线枚举"的预言机。
-- **威胁模型说明**：无凭据者既无法定位头部槽位（seed 密钥化），也无法通过魔数比对判定存在性；载体与空载体在其视角下不可区分。
-- 参数集在图片生命周期中不可变，提取端与嵌入端计算出的 `cover_digest` 严格一致。
+### 13.10 私有构建
 
-#### 13.11.3 槽位网格与矩阵编码（STC Trellis）
+`StegoProfile` 的 `jpeg/png/hevc` 线格式身份是编译期常量；改任一派生标签即产生
+不兼容线格式。运行时只能选 suite/domain/凭据，不能切换格式身份
+（可切换的格式就是可枚举的指纹）。
 
-- **槽位定义**：H.265 变换块（TU）残差系数编码（`residual_coding`）中的 `coeff_sign_flag`。
-- **编码器设置**：`StcTrellis::from_seed_grouped(seed, h=7, u=2)`；`h`/`u` 来自 `HevcFormatProfile`（官方 `DEFAULT_HEVC_FORMAT` 即 7/2）。头部不自描述 h/u，读写两侧必须持有同一方言——这与 JPEG 超块内自描述 h/u 不同。
-  - 约束高度 $h = 7$，分组格宽 $u = 2$（有效码率 $R = 1/2$）。
-  - 嵌入 $M$ 比特消息（头部 320 比特 + 密文正文比特）所需候选槽位为：
-    $$N_{\text{slots}} = u \times (M + h - 1) = 2 \times (M + 6)$$
-  - 每比特平均仅翻转约 0.25 个符号位，极大地降低了视觉失真。
-- **容量模型**：
-  $$\text{Capacity}_{\text{max}} = \left\lfloor \frac{\max(0, \lfloor N_{\text{total}} / 2 \rfloor - 320)}{8} \right\rfloor \text{ 字节}$$
-
-#### 13.11.4 分层（drift ladder）与空间均衡抽样（Weyl 离散置换）
-
-槽位池不是单一序列，而是按**漂移代价**分成两层的阶梯，见 §13.11.7。池的顺序恒为 `band 0 全部槽位 ‖ band 1 全部槽位`，两层各自独立置换：
-
-```text
-step = (N_band * 618034 / 1000000) | 1        // 约 0.618 倍，向上取到与 N_band 互质
-positions[i] = band.start + (i * step) % N_band   // i 为该层内的元素序号
-```
-
-两层不交错：元素 `i` 逐个消费 band 0，只有 band 0 用尽后才进入 band 1，因此**能装进 band 0 的载荷永远不会动到任何参考图**。
-
-两个性质必须同时成立，否则提取端无法复现：
-
-- **前缀稳定**：元素 `i` 的落点与请求的数量无关。提取端先用 320 bit（40 字节头）算一次置换读头部，再用完整长度算一次读正文，两次的前缀必须逐元素相同。
-- **只依赖载体**：`N_band` 由槽位池自身决定（不是由载荷决定），因此无需在码流中记录任何置换表。
-
-该置换用于避免多图像项（如 iPhone 连拍包含数十张独立 HEVC 图像项）或多切片载荷集中落在首图/首个 Slice，导致局部画质劣化。
-
-#### 13.11.5 EPB（Emulation Prevention Byte）防竞争消解机制
-
-H.265 标准规定，当 RBSP 出现连续两个 `0x00` 后接 `0x00..=0x03` 时，必须插入防竞争字节 `0x03`；在解码时剥离 `0x03`。
-
-- **潜在风险**：翻转某个旁路符号位会改变 RBSP 比特。若因此导致码流产生新的 `0x03` 或消除了原有的 `0x03`，NAL 单元字节数将发生变动（$\Delta \neq 0$），进而破坏 ISOBMFF 盒子的物理偏移。
-- **消解机制（最多 24 轮迭代）**：
-  1. 嵌入端执行 STC Viterbi 回溯，得到待翻转槽位；
-  2. 尝试回写 RBSP 并重新计算 EPB 注入点；
-  3. 若检测到任何 NAL 的 RBSP/NAL 字节长度发生变动，定位引起该窗口冲突的符号位槽位；
-  4. 将冲突槽位的翻转代价置为无穷大（`Cost = INFINITY`），保留在槽位池中但禁止翻转；
-  5. 重新运行 STC 求解；通常在 1–2 轮内即可完全消除 EPB 冲突，确保 $\Delta = 0$ 且码流严格符合 H.265 句法规范。
-
-#### 13.11.6 载体容器：HEIF、HEVC Annex-B 与 MP4 / MOV
-
-Scheme C 只关心「切片 NAL 的字节区间从哪来」，因此三种封装共用同一套引擎：
-
-| 容器 | 参数集来源 | 切片区间来源 | 说明 |
-| :--- | :--- | :--- | :--- |
-| HEIF / HEIC | `meta/iprp/ipco/hvcC` | `meta/iloc` 的项目区段（含 grid 分块） | 静图或连拍图集 |
-| HEVC Annex-B | 码流内 VPS/SPS/PPS | `0x000001` / `0x00000001` 起始码切分 | 裸元素流 |
-| MP4 / MOV | `moov/trak/mdia/minf/stbl/stsd` 中 `hvc1`/`hev1` 条目的 `hvcC` | `stsz` + `stco`/`co64` + `stsc` 展开出的样本区间，再按 `lengthSizeMinusOne` 拆 NAL | 视频容器，样本顺序即解码顺序 |
-
-MP4 / MOV 的三条真实世界约束（语料 5/5 命中，已实测）：`moov` 位于文件尾部（必须全文件走盒）；`co64` 与 `stco` 都可能作为 chunk 偏移表；参数集只在 `hvcC`、样本内零 in-band（即使 brand 为 `hvc1`）。
-
-因引擎保证 $\Delta = 0$（重编码后每个 NAL 字节数不变），`stsz`、`stco`/`co64`、`moov` 全部无需重写——隐写产物与原件的 `moov` 逐字节一致，仅 `mdat` 内字节被改写。
-
-**显式拒绝（诚实失败，不静默降级）**：碎片化文件（`moof`/`traf`、`moov.mvex`）、加密轨（`encv`、`sinf`）、压缩样本尺寸盒 `stz2`、非 HEVC 视频轨、样本表自相矛盾（`stsc` 与 `stsz` 计数不一致、chunk 偏移越界）。
-
-#### 13.11.7 视频载体的漂移阶梯（两层，无状态）
-
-阶梯只决定**哪些切片贡献槽位**以及**它们落在哪一层**，不决定喂给解码器的切片集合：P/B 图需要参考图在 DPB 中，且解码器在未见到 IRAP 前会跳过全部非 IRAP 切片（H.265 §8.1.3），只喂非参考帧会得到零槽位。全部候选 NAL 一律按解码顺序喂入，被排除者走无观察器的普通路径。
-
-| 码流情况 | 该图的 band | 依据 |
-| :--- | :--- | :--- |
-| **不存在任何非 IRAP 图**（静图、全帧内码流） | 全部为 band 0 | 没有任何图被参考，不存在漂移 |
-| 存在参考-预测关系，且该图是**非参考图**（`TRAIL_N`/`TSA_N`/`STSA_N`/`RADL_N`/`RASL_N`，nal_type 偶数且 ≤ 8） | band 0 | 不进 DPB，翻转不可能向后继帧传播（零时域漂移） |
-| 存在参考-预测关系，且该图是**非 IRAP 参考图**（`TRAIL_R`/`TSA_R`/`STSA_R`/`RADL_R`/`RASL_R`） | band 1 | 误差存活到下一个 IRAP；实测每比特代价约为非参考图的 8 倍 |
-| 该图是 **IRAP**（nal_type 16..=23，BLA/IDR/CRA） | **排除**（不贡献槽位） | 整个 GOP 的预测根；同等载荷下纳入会使 PSNR 下降 15~20 dB |
-
-判据仅依赖 `nal_unit_type` 序列（嵌入不改动它），两端推导一致，**不入 wire 头、不改 `HevcFormatProfile`**。
-
-**图片计数**用 `first_slice_segment_in_pic_flag`（H.265 §7.3.6.1，即首个 RBSP 字节的 MSB），不用切片数：多切片图片是一张图片，按切片计数会把每图预算按切片数放大。HEIF 载体恒为 1 张图片——grid 分块是独立图像项，但同属一张图。
-
-实测（`temp/testhevc`，见 `docs/hevc_video_capacity_quality_audit_20261026.md`）：
-
-| 载体 | 全帧槽位 | 旧门控收录 | 新阶梯池（band0+band1） |
-| :--- | ---: | ---: | ---: |
-| `IMG_0033.MOV` 1080p60 / 385 图 | 7,757,648 | 838,764（10.8%） | 5,806,350（74.9%） |
-| `VID_20250228_120825_C.mp4` 4K / 228 图 | 8,148,623 | 1,084,896（13.3%） | 7,746,731（95.1%） |
-| `VID_20261007_203536.mp4` 1080p60 / 816 图 | 38,417,066 | 38,417,066（旧 Tier B 全收） | 34,915,428（90.9%，IRAP 排除） |
-| `IMG_1133.HEIC` 4032x3024 | 6,021,921 | 6,021,921 | 5,976,722（不变） |
-
-**已知边界**：极短片段的 band 0 槽位可能不足 40 字节头部（320×180 / 15 个非参考图实测 368 槽），此时靠 band 1 补齐；若两层的池仍不足头部，`capacity` 报告 0 字节。
-
-#### 13.11.7.1 推荐容量（视频 ≠ 静图）
-
-静图沿用 `min(bpp_limit × 像素, 槽位 / target_ratio)`。视频不用这两项——`bpp × 单帧像素` 与时长无关（曾把任意 1080p 视频都钉在 25.3 KiB），`槽位 / target_ratio` 约束的是池的占用比例而非失真。视频的推荐值改为在阶梯上直接计价：
-
-```text
-usable_slots = non_ref_fraction × N_band0                       // 免漂移层
-             + min(ref_flips_per_picture × P_band1 × 4, N_band1) // 参考层，4 槽/次翻转
-recommended  = min(message_bits(usable_slots) / 8 - header, max_raw)
-```
-
-档位参数（`SafetyLevel::video_budget()`）：paranoid 0.35 / 110，high 0.60 / 220，balanced 0.95 / 450。语料标定：220 次/参考图约 44~48 dB，450 约 41 dB。
-
----
-
-### 13.12 音频内容域（WAV PCM 与 FLAC Residual）：线格式与协议规范
-
-音频引擎针对非压缩线性 PCM 采样与无损压缩音频残差流提供内容自适应隐写：
-
-#### 13.12.1 WAV PCM 采样域隐写（`wav_pcm`）
-- **载体对象**：16-bit 与 24-bit 线性 PCM 音频（RIFF/WAVE 容器）。
-- **调制机制**：采用听觉感知掩蔽代价模型，对采样值进行三元 $\pm 1$ 最低有效位（LSB）匹配；结合 STC 校验矩阵编码，最小化音频失真与可闻噪声。
-- **头部与正文**：前 512 槽位承载 40 字节微头，剩余槽位经置换后承载密文正文。
-
-#### 13.12.2 FLAC 预测残差域隐写（`flac_residual`）
-- **载体对象**：标准 FLAC 音频帧（16-bit / 24-bit，位深 >24 或残差槽位不足 512 的载体在前置检查中安全拒绝）。
-- **残差调制与零膨胀**：解析定域（Fixed）与 LPC 多项式预测子帧，在保持 Rice/熵编码残差码字长度不变（Codeword-Length Preserving）的前提下对残差数据进行原地调制，实现**严格零字节文件膨胀（$\Delta = 0$）**。
-- **完整性与短路校验**：利用 `FlacCapacityView` 零拷贝遍历残差槽位；在补偿应用后若未修改影响解码的样本，通过 `pcm_md5` 对比实现瞬时短路跳过全量重解码；严格约束每通道样本漂移预算。
-
----
 
 ## 14. 常量速查表
 
@@ -870,29 +665,27 @@ recommended  = min(message_bits(usable_slots) / 8 - header, max_raw)
 | `MIN_UBE_PLAIN` | `178`（见 §14.3） |
 | `MIN_UBE_ENCRYPTED` | `214`（见 §14.3） |
 
-### 14.2 内容域
+### 14.2 内容域（V4）
 
 | 常量 | 值 |
 |---|---|
 | `PUBLIC_DEFAULT_SECRET` | `"strhide-default-content-stego-key-2026"` |
 | `SALT_LEN` / `NONCE_LEN` / `TAG_LEN` | `16` / `12` / `16` |
-| `HEADER_OVERHEAD` / `BODY_OVERHEAD` | `28` / `21` |
-| `MIN_ENVELOPE_LEN` | `49` |
+| `BODY_OVERHEAD` | `22`（4 长度 + 1 flags + 1 微头 + 16 tag） |
 | `HEADER_LEN_MAX` | `67,108,863`（2²⁶ − 1） |
-| **JPEG V3 超块** | `44` 字节 / `352` 比特 / `718` 槽（`h=8, u=2`） |
-| **JPEG V3 扩展区** | `n_ext = 4·(8·ext_bytes + 7)` 槽（`h=8, u=4`） |
-| **JPEG V3 默认套件** | id 1 = PBKDF2-SHA256 200k + AES-256-GCM |
-| **JPEG V3 `SlotBudget`** | `1,200,000`（嵌入端参数，非线格式） |
-| **JPEG V3 `KERNEL_MAX_U`** | `64` |
-| **JPEG V3 系数上限** | `|c| ≤ 1023` |
-| 空间域 Header 槽位数 | `512`（256 头 + 256 FeatureWord） |
-| `DEFAULT_HAMMING_K` | `3`（Hamming (7,3)） |
-| `DEFAULT_STC_H` / `MAX_STC_U` | `8` / `3`（空间域） |
-| 空间域可嵌入像素范围 | `[8, 247]` |
-| **HEVC Scheme C 魔数** | 派生：`SHA-256(magic_label ‖ effective_secret)[..4]`（`magic_label = b"strhide-hevc-magic-v1"`） |
-| **HEVC 固定头部长度** | `40` 字节（Magic 4 + Len 4 + CRC 4 + Nonce 12 + Tag 16） |
-| **HEVC STC 参数** | `h = 7, u = 2`（码率 1/2，来自 `DEFAULT_HEVC_FORMAT`） |
-| **HEVC 派生标签** | `cover_salt = b"strhide-hevc-cover-v1"`、`kdf_info = b"strhide-hevc-aes-key"`、domain 标签 `b"strhide-hevc-domain-v1"` |
+| `CONTENT_L1_PBKDF2_ITERATIONS` | `200_000` |
+| `CipherSuiteId` | `1 = AES-256-GCM`（默认），`2 = ChaCha20-Poly1305`，append-only |
+| **空间域基础头（PNG/WAV/FLAC）** | `64` 字节 / `512` 槽 |
+| **JPEG 基础头** | `44` 字节 / `352` 槽 |
+| **HEVC 基础头** | `32` 字节 / `524` 槽 |
+| **扩展槽位数** | `stc_u × (8 × ext_len + stc_h − 1)`；HEVC 固定 `h=7, u=2` |
+| **`MAX_EXT_BYTES`（空间/JPEG）** | `255`；HEVC `ext_len ≤ 64` |
+| **JPEG STC 参数** | 头中自描述，`h ∈ 4..=10`，`u ∈ 1..=64` |
+| **空间域默认 STC** | `h = 8`，`u ≤ 3`（Hamming (7,3) 为 `k=3`） |
+| **空间域可嵌入像素范围** | `[8, 247]` |
+| **HEVC 魔数** | `SHA-256(magic_label ‖ effective_secret)[..4]`（`magic_label = b"strhide-hevc-magic-v1"`） |
+| **HEVC STC 参数** | `h = 7, u = 2`（来自 `DEFAULT_HEVC_FORMAT`） |
+| **HEVC 派生标签** | `cover_salt = b"strhide-hevc-cover-v1"`、domain 标签 `b"strhide-hevc-domain-v1"` |
 | **HEVC 最大防竞争迭代轮数** | `24` |
 
 ### 14.3 最小信封口径
@@ -926,7 +719,8 @@ recommended  = min(message_bits(usable_slots) / 8 - header, max_raw)
 | Stealth + 密码 | 仅持有同密码可读 | 持有同密码可读 | 域（domain）也必须一致 |
 | 内容域自定义 `stego_secret` | ❌ | ✅ | 错误密钥表现为 `NoHiddenData`（与错误密码不可区分） |
 | 内容域自定义 `stego_domain` | ❌ | ✅ | HKDF 域标签不同，密钥与 header 置换不一致 |
-| 内容域私有 `JpegFormatProfile` | ❌ | ✅ | 超块/槽位几何不同，官方无法解析 |
+| 内容域私有 `JpegFormatProfile` | ❌ | ✅ | 基础头几何/槽位不同，官方无法解析 |
+| 内容域 suite 2（ChaCha20-Poly1305） | ✅ | ✅ | 官方 0.8.5+ 已实现；0.8.5 之前的构建报不支持 |
 
 ### 15.3 写侧本地参数（L class）兼容
 

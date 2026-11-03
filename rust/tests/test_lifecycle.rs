@@ -3,7 +3,7 @@
 //! Submodules:
 //! - `matrix`: format-preserving injection & bit-for-bit restore matrix across carriers and strategies.
 //! - `stego`: content-adaptive pixel/DCT steganography lifecycle (HILL, UERD, STC).
-//! - `stego_v3`: STC-V3 wire-format contract (superblock, extensions, suites, slots).
+//! - `stego_jpeg_v4`: JPEG V4 envelope contract (superblock, extensions, suites, slots).
 //! - `compact_meta`: compact metadata envelope encoding on marginal carriers.
 //! - `jpeg_multisegment`: multi-segment JPEG APP15 payload splitting.
 //! - `unicode_and_binary`: UTF-8/Unicode and arbitrary binary payloads.
@@ -50,7 +50,7 @@ mod reproducible;
 mod sniff;
 #[path = "test_lifecycle/stego.rs"]
 mod stego;
-#[path = "test_lifecycle/stego_v3.rs"]
-mod stego_v3;
+#[path = "test_lifecycle/stego_jpeg_v4.rs"]
+mod stego_jpeg_v4;
 #[path = "test_lifecycle/unicode_and_binary.rs"]
 mod unicode_and_binary;

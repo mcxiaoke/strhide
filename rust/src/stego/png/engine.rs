@@ -41,19 +41,27 @@ use flate2::write::ZlibEncoder;
 use flate2::{Compress, Compression, FlushCompress, Status};
 use rayon::prelude::*;
 
+use crate::crypto::{CipherSuiteId, Credential};
 use crate::errors::StrHideError;
 use crate::stego::coding::{
     Move, StcTrellis, hamming_embed_ternary, hamming_extract_bytes, spatial_move_safe,
     write_bit_ternary,
 };
-use crate::stego::envelope::{Freshness, build_plaintext, encrypt_with_aad, unpack_envelope_parts};
-use crate::stego::format::{body_keys, derive_master};
+use crate::stego::envelope::{
+    Freshness, build_plaintext, build_v4_aad, encrypt_v4_with_aad, unpack_v4_envelope_parts,
+};
+use crate::stego::format::{derive_l2_locator_keys, derive_l3_session_keys, derive_locator_master};
+use crate::stego::header::{
+    CONTENT_ENVELOPE_VERSION, FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT, MAX_EXT_BYTES,
+    PNG_AUDIO_BASE_HEADER_BYTES, PNG_AUDIO_BASE_SLOTS, SpatialHeaderV4, TLV_CRITICAL, Tlv,
+    encode_extension, parse_extension,
+};
 pub use crate::stego::header::{
     FeatureWord, HEADER_LEN_MASK, HEADER_LEN_MAX, HEADER_V2_ESCAPE_H, V2_TOTAL_HEADER_SLOTS,
     decode_header_word, encode_header_word,
 };
 use crate::stego::options::{StegoHeaderInfo, StegoVerifyResult, VerifyLevel};
-use crate::stego::params::SafetyPolicy;
+use crate::stego::params::{ExtractParams, SafetyPolicy};
 use crate::stego::prng::{permute_indices, permute_prefix};
 use crate::stego::traits::PngCostModel;
 use crate::stego::{PngParams, StegoCapacityInfo, StegoCodec};
@@ -67,6 +75,9 @@ use crate::stego::{PngParams, StegoCapacityInfo, StegoCodec};
 /// instead of re-typing the bounds.
 pub const SPATIAL_ELIGIBLE_MIN: u8 = 8;
 pub const SPATIAL_ELIGIBLE_MAX: u8 = 247;
+
+/// `format_id` written into the V4 content envelope for PNG carriers.
+const PNG_FORMAT_ID: u8 = 1;
 
 // ---------------------------------------------------------------------------
 // Envelope header layout (32 bytes = 256 slots)
@@ -82,6 +93,10 @@ pub struct RawImage {
     pub width: u32,
     pub height: u32,
     pub channels: usize,
+    /// IHDR bit depth. The engine accepts only 8; kept for pre-salt derivation.
+    pub bit_depth: u8,
+    /// IHDR colour type (0/2/4/6). Part of the immutable carrier identity.
+    pub color_type: u8,
     pub pixels: Vec<u8>,
     /// Every chunk captured at decode time, in file order (IHDR first, IEND
     /// last). Re-encoded as-is so ancillary metadata -- iCCP, gAMA, sRGB,
@@ -371,6 +386,8 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
         width,
         height,
         channels,
+        bit_depth,
+        color_type,
         pixels: out,
         chunks,
         idat_sizes,
@@ -918,9 +935,6 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 // Slot plan: the single source of truth for "which pixels carry what"
 // ---------------------------------------------------------------------------
 
-/// Slots reserved for the 32-byte base header (salt | nonce | length word).
-const HEADER_SLOTS: usize = 256;
-
 /// Channel the base header and the feature word are written into: green for
 /// colour images (least visible), channel 0 for grayscale / gray+alpha.
 ///
@@ -995,15 +1009,18 @@ struct SlotPlan {
     /// Body candidates: cost-ranked, after the smooth-pixel exclusion, in
     /// ranking order. Never used to place the header.
     candidates: Vec<usize>,
-    /// Header layout: the eligible pixels in keyed order. The first 512 entries
-    /// are the header (256) and feature-word (256) slots.
+    /// Header layout: the eligible pixels in keyed order. The first
+    /// `header_slots` entries carry the 64-byte base header and the optional
+    /// extension area.
     ///
-    /// This vector is a pure function of the carrier's pixels, the credentials
-    /// and the format profile -- **not** of any cost map. That is what lets the
-    /// extractor read the header (and therefore the algorithm id inside the
-    /// feature word) before it knows which cost model wrote the carrier.
+    /// This vector is a pure function of the carrier's pixels and the locator
+    /// seed -- **not** of any cost map. That is what lets the extractor read
+    /// the header (and therefore the algorithm id inside it) before it knows
+    /// which cost model wrote the carrier.
     permuted: Vec<usize>,
-    /// `used_by_header[px]`: the pixel is one of those 512 slots.
+    /// Number of leading `permuted` entries reserved for header + extension.
+    header_slots: usize,
+    /// `used_by_header[px]`: the pixel is one of those header slots.
     used_by_header: Vec<bool>,
 }
 
@@ -1023,36 +1040,85 @@ fn header_pool(image: &RawImage) -> Vec<usize> {
         .collect()
 }
 
+/// Carrier identity mixed into the L1 PBKDF2 salt.
+///
+/// Both ends compute this from the decoded image only: dimensions, colour
+/// layout and the ancillary-chunk stream (excluding `IDAT` and the structural
+/// `prIv` chunk). Two carriers with different metadata therefore derive
+/// different locator keys even under the same password, and `probe` cannot
+/// accidentally model a different permutation than the writer.
+pub fn png_pre_salt(
+    image: &RawImage,
+    spatial: &crate::stego::format::PngFormatProfile,
+) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+
+    let mut meta = Sha256::new();
+    for chunk in &image.chunks {
+        if chunk.ty == *b"IDAT" || chunk.ty == *b"prIv" {
+            continue;
+        }
+        meta.update(chunk.ty);
+        meta.update((chunk.data.len() as u32).to_be_bytes());
+        meta.update(&chunk.data);
+    }
+    let meta: [u8; 32] = meta.finalize().into();
+
+    let mut out = Sha256::new();
+    out.update(spatial.hpos_salt);
+    out.update(b"png-v4");
+    out.update((image.width as u64).to_be_bytes());
+    out.update((image.height as u64).to_be_bytes());
+    out.update([image.bit_depth, image.color_type, image.channels as u8]);
+    out.update(meta);
+    out.finalize().into()
+}
+
 /// The keyed header layout, computed without a cost model.
 ///
-/// Both ends call this: the writer to place the header and the feature word, the
-/// reader to find them before it has resolved an algorithm.
-fn header_layout(
-    image: &RawImage,
-    password: Option<&str>,
-    domain: Option<&str>,
-    spatial: &crate::stego::format::PngFormatProfile,
-) -> Vec<usize> {
+/// `locate_seed` comes from L2; `ext_len` extends the permuted prefix by eight
+/// slots per extension byte. `permute_prefix` is prefix-stable, so the first
+/// 512 slots are identical whether or not the extension area is known — that
+/// is what lets the reader decode the base header before it learns `ext_len`.
+fn header_layout(image: &RawImage, locate_seed: &[u8; 32], ext_len: usize) -> Vec<usize> {
     let mut slots = header_pool(image);
-    let seed =
-        crate::stego::envelope::derive_header_perm_seed_with_profile(password, domain, spatial);
-    permute_prefix(&mut slots, V2_TOTAL_HEADER_SLOTS, &seed);
+    let header_slots = PNG_AUDIO_BASE_SLOTS + 8 * ext_len;
+    permute_prefix(&mut slots, header_slots, locate_seed);
     slots
+}
+
+/// Read `byte_count` bytes (MSB first) from the given pixel slots.
+///
+/// Callers guarantee `slots.len() == 8 * byte_count`; the base header path
+/// always has 512 slots and the extension path is sized from `ext_len`.
+fn read_slot_bytes(image: &RawImage, slots: &[usize], byte_count: usize) -> Vec<u8> {
+    let channel_offset = embed_channel(image);
+    let mut bytes = Vec::with_capacity(byte_count);
+    for byte_i in 0..byte_count {
+        let mut b = 0u8;
+        for bit_i in 0..8 {
+            let slot = slots[byte_i * 8 + bit_i];
+            let val = image.pixels[slot * image.channels + channel_offset];
+            b = (b << 1) | (val & 1);
+        }
+        bytes.push(b);
+    }
+    bytes
 }
 
 impl SlotPlan {
     /// Rank the body candidates and apply the keyed header layout.
     ///
-    /// `password` / `domain` key the header permutation, so they must be the
-    /// credentials the embedder will use — they change which pixels the header
-    /// occupies and therefore the body capacity.
+    /// `locate_seed` keys the header permutation and `ext_len` reserves the
+    /// extension slots, so the plan must be built from exactly the inputs the
+    /// writer will use — they change which pixels the header occupies and
+    /// therefore the body capacity.
     fn build(
         image: &RawImage,
         costs: &[f64],
         params: &PngParams,
-        password: Option<&str>,
-        domain: Option<&str>,
-        spatial: &crate::stego::format::PngFormatProfile,
+        locate_seed: &[u8; 32],
+        ext_len: usize,
     ) -> Result<Self, StrHideError> {
         let total_pixels = image.width as usize * image.height as usize;
         if costs.len() != total_pixels {
@@ -1096,37 +1162,39 @@ impl SlotPlan {
 
         // The header is placed from the cost-free layout, so a reader can find
         // it without knowing the algorithm.
-        let permuted = header_layout(image, password, domain, spatial);
+        let header_slots = PNG_AUDIO_BASE_SLOTS + 8 * ext_len;
+        let permuted = header_layout(image, locate_seed, ext_len);
 
         let mut used_by_header = vec![false; total_pixels];
-        for &s in permuted.iter().take(V2_TOTAL_HEADER_SLOTS) {
+        for &s in permuted.iter().take(header_slots) {
             used_by_header[s] = true;
         }
 
         Ok(Self {
             candidates,
             permuted,
+            header_slots,
             used_by_header,
         })
     }
 
-    /// True when there are enough candidates for the header *and* the feature
-    /// word.
+    /// True when there are enough candidates for the base header *and* the
+    /// extension area reserved by the plan.
     fn header_fits(&self) -> bool {
-        self.permuted.len() >= V2_TOTAL_HEADER_SLOTS
+        self.permuted.len() >= self.header_slots
     }
 
-    /// The 256 slots carrying salt | nonce | length word.
+    /// The [`PNG_AUDIO_BASE_SLOTS`] slots carrying the 64-byte base header.
     ///
-    /// Callers must have checked [`Self::header_fits`] (or, for the extractor's
-    /// first read, that there are at least [`HEADER_SLOTS`]).
-    fn header_slots(&self) -> &[usize] {
-        &self.permuted[..HEADER_SLOTS]
+    /// Callers must have checked [`Self::header_fits`].
+    fn base_header_slots(&self) -> &[usize] {
+        &self.permuted[..PNG_AUDIO_BASE_SLOTS]
     }
 
-    /// The 256 slots carrying the [`FeatureWord`].
-    fn feature_slots(&self) -> &[usize] {
-        &self.permuted[HEADER_SLOTS..V2_TOTAL_HEADER_SLOTS]
+    /// Slots `PNG_AUDIO_BASE_SLOTS .. header_slots` carrying the extension TLV
+    /// bytes, eight bit-slots per byte.
+    fn extension_slots(&self) -> &[usize] {
+        &self.permuted[PNG_AUDIO_BASE_SLOTS..self.header_slots]
     }
 
     /// Visit every body slot in ranking order.
@@ -1231,8 +1299,10 @@ impl SlotPlan {
 pub fn embed_png<'a>(
     carrier_bytes: &[u8],
     payload: impl Into<Payload<'a>>,
-    password: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
+    suite_id: u16,
+    extensions: &[Tlv],
     spatial: &crate::stego::format::PngFormatProfile,
     cost_model: &dyn PngCostModel,
     params: &PngParams,
@@ -1243,8 +1313,10 @@ pub fn embed_png<'a>(
     embed_png_with_stats(
         carrier_bytes,
         payload,
-        password,
+        cred,
         domain,
+        suite_id,
+        extensions,
         spatial,
         cost_model,
         params,
@@ -1260,8 +1332,10 @@ pub fn embed_png<'a>(
 pub fn embed_png_with_stats<'a>(
     carrier_bytes: &[u8],
     payload: impl Into<Payload<'a>>,
-    password: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
+    suite_id: u16,
+    extensions: &[Tlv],
     spatial: &crate::stego::format::PngFormatProfile,
     cost_model: &dyn PngCostModel,
     params: &PngParams,
@@ -1271,6 +1345,16 @@ pub fn embed_png_with_stats<'a>(
 ) -> Result<(Vec<u8>, crate::stego::EmbedStats, StegoCapacityInfo), StrHideError> {
     let payload = payload.into();
     params.validate()?;
+    let suite = CipherSuiteId::from_u16(suite_id).ok_or_else(|| {
+        StrHideError::UnsupportedVersion(format!("Unknown content cipher suite id {suite_id}"))
+    })?;
+    let extension = encode_extension(extensions)?;
+    if extension.len() > MAX_EXT_BYTES {
+        return Err(StrHideError::General(format!(
+            "Extension area is {} bytes, the maximum is {MAX_EXT_BYTES}",
+            extension.len()
+        )));
+    }
     control.stage(Stage::Decode);
     let mut image = decode_png(carrier_bytes)?;
     // Checkpoint after the decode: on a 50 MP carrier this alone is seconds.
@@ -1287,18 +1371,23 @@ pub fn embed_png_with_stats<'a>(
     );
 
     // Frame the payload and derive the per-carrier keys. The ciphertext itself
-    // is produced further down: the finished 64-byte header is its associated
-    // data, so it cannot exist until codec/h/u are settled.
-    let suite = spatial.body.default_suite();
+    // is produced further down: the finished base header plus extension area is
+    // its associated data, so it cannot exist until codec/h/u are settled.
     let plaintext = build_plaintext(&payload)?;
-    // The spatial writer makes a single pass, so the attempt index is always 0.
-    // Seeded runs bind the derivation to this (cover, payload) pair so a
-    // replay on different inputs can never reuse a (key, nonce) pair.
-    let fresh_binding = Freshness::seeded_binding(carrier_bytes, payload.as_bytes());
+    let cipher = &crate::stego::format::OFFICIAL_PNG_CIPHER;
+    let pre_salt = png_pre_salt(&image, spatial);
+    let master = derive_locator_master(cred, domain, cipher, &pre_salt)?;
+    let locator = derive_l2_locator_keys(&master, cipher, b"strhide-v4-hdr-magic", domain)?;
+    // Seeded runs bind salt/nonce to the cover, payload, format and extension
+    // area, so a replay on different inputs can never reuse a (key, nonce) pair.
+    let mut fresh_binding = Freshness::seeded_binding(carrier_bytes, payload.as_bytes()).to_vec();
+    fresh_binding.push(PNG_FORMAT_ID);
+    fresh_binding.push(CONTENT_ENVELOPE_VERSION);
+    fresh_binding.extend_from_slice(&extension);
     let salt = freshness.salt(0, &fresh_binding);
     let nonce = freshness.nonce(0, &fresh_binding);
-    let master = derive_master(suite, password.unwrap_or(spatial.fallback_secret), &salt)?;
-    let (enc_key, perm_seed) = body_keys(spatial.body, &master, &salt, domain);
+    let session = derive_l3_session_keys(cipher, suite, &master, &salt, domain)?;
+    let ext_len = extension.len();
     let ciphertext_len = plaintext.len() + suite.tag_len();
 
     // Quantise the hyperparameters to their wire-exact forms *before* any
@@ -1317,18 +1406,18 @@ pub fn embed_png_with_stats<'a>(
 
     let channel_offset = embed_channel(&image);
 
-    let plan = SlotPlan::build(&image, &costs, &params, password, domain, spatial)?;
+    let plan = SlotPlan::build(&image, &costs, &params, &locator.locate_seed, ext_len)?;
     let (capacity_info, pool_green, pool_rgb) =
         build_png_capacity_with_pools(&image, &plan, &params, cost_model.id(), safety.level)?;
     if !plan.header_fits() {
         return Err(StrHideError::General(format!(
             "Carrier capacity insufficient: available {} slots, minimum header requires {} slots",
             plan.permuted.len(),
-            V2_TOTAL_HEADER_SLOTS
+            plan.header_slots
         )));
     }
-    let header_slots = plan.header_slots();
-    let feature_slots = plan.feature_slots();
+    let header_slots = plan.base_header_slots();
+    let extension_slots = plan.extension_slots();
 
     let ciphertext_bits = ciphertext_len * 8;
 
@@ -1448,77 +1537,84 @@ pub fn embed_png_with_stats<'a>(
         },
     )?;
 
-    // Header word1 encodes total_len with HEADER_V2_ESCAPE_H (15) for stc_h
-    let total_len = (crate::stego::envelope::HEADER_OVERHEAD + ciphertext_len) as u32;
-    if total_len > HEADER_LEN_MAX {
+    // V4 base header: `body_len` is the AEAD ciphertext length including the
+    // tag, with no per-format padding adjustment.
+    if ciphertext_len > HEADER_LEN_MAX as usize {
         return Err(StrHideError::General(format!(
-            "Envelope of {total_len} bytes exceeds the {HEADER_LEN_MAX}-byte header length field"
+            "Envelope of {ciphertext_len} bytes exceeds the {HEADER_LEN_MAX}-byte header length field"
         )));
     }
-    let header_word = encode_header_word(total_len, resolved_codec, HEADER_V2_ESCAPE_H, resolved_u);
-    let mut header_bytes = Vec::with_capacity(32);
-    header_bytes.extend_from_slice(&salt); // Salt (16B)
-    header_bytes.extend_from_slice(&nonce); // Nonce (12B)
-    header_bytes.extend_from_slice(&header_word.to_be_bytes());
-
-    // The hyperparameters were quantised to wire-exact forms at the top of
-    // this function, so what the feature word records is exactly what the
-    // embedder computed with.
-    let fw = FeatureWord {
-        version: 3,
-        codec: resolved_codec,
-        u: resolved_u,
-        h: params.stc_h,
+    let algorithm_id = crate::stego::png::registry::spatial_wire_id(cost_model.id()).ok_or_else(
+        || {
+            StrHideError::General(format!(
+                "PNG cost model '{}' has no wire id; a carrier written with it could not be extracted",
+                cost_model.id()
+            ))
+        },
+    )?;
+    let sigma = if cost_model.id() == "mipod" {
+        params
+            .algorithm_options
+            .get("alpha")
+            .copied()
+            .unwrap_or(0.20)
+            .clamp(0.01, 0.90) as f32
+    } else {
+        params
+            .algorithm_options
+            .get("sigma")
+            .copied()
+            .unwrap_or(1.0) as f32
+    };
+    let flags = {
+        let mut flags = 0u8;
+        if !extension.is_empty() {
+            flags |= FLAG_EXT_PRESENT;
+        }
+        if extensions.iter().any(Tlv::is_critical) {
+            flags |= FLAG_EXT_CRITICAL;
+        }
+        flags
+    };
+    let (codec_id, wire_h, wire_u) = match resolved_codec {
+        StegoCodec::Hamming => (0u8, 0u8, 0u8),
+        StegoCodec::Stc | StegoCodec::Auto => (1u8, params.stc_h, resolved_u),
+    };
+    let header = SpatialHeaderV4 {
+        salt,
+        nonce,
+        body_len: ciphertext_len as u32,
+        version: CONTENT_ENVELOPE_VERSION,
+        flags,
+        format_id: PNG_FORMAT_ID,
+        algorithm_id,
+        suite_id: suite.as_u16(),
+        codec_id,
+        stc_h: wire_h,
+        stc_u: wire_u,
         // Self-describing: the extractor rebuilds the body pool from this and
         // nothing else, so a write here would desynchronise the two ends.
         channel_mode: mode as u8,
         class_rule: 1, // Safe [1, 6] non-boundary
-        // `params.validate()` guarantees odd windows <= 63, well inside the
-        // 10-bit wire field.
         p1_window: params.p1_window as u16,
         p2_window: params.p2_window as u16,
         neg_log2_epsilon: eps_k,
         exclusion_permille: (params.exclusion_percentile.clamp(0.0, 0.9) * 1000.0) as u16,
-        // The carrier has to name its own cost model: the extractor reads the
-        // header before it knows which algorithm wrote the body, so there is no
-        // out-of-band channel to rely on. A model without a wire id would
-        // produce a carrier nobody (including this build) could read back.
-        algorithm_id: crate::stego::png::registry::spatial_wire_id(cost_model.id())
-            .ok_or_else(|| {
-                StrHideError::General(format!(
-                    "PNG cost model '{}' has no wire id; a carrier written with it could not be extracted",
-                    cost_model.id()
-                ))
-            })?,
-        sigma: if cost_model.id() == "mipod" {
-            params
-                .algorithm_options
-                .get("alpha")
-                .copied()
-                .unwrap_or(0.20)
-                .clamp(0.01, 0.90) as f32
-        } else {
-            params
-                .algorithm_options
-                .get("sigma")
-                .copied()
-                .unwrap_or(1.0) as f32
-        },
+        sigma,
         kernel_id: 0, // the built-in KB kernel; custom kernels need matching configs
+        ext_len: ext_len as u16,
     };
-    let feature_bytes = fw.encode();
+    let header_bytes = header.encode();
+    let aad = build_v4_aad(PNG_FORMAT_ID, &header_bytes, &extension);
 
-    // Encrypt last: the whole 64-byte header (32B base header + 32B feature
-    // word) is the AEAD's associated data, so a tampered codec/h/u fails the
-    // tag instead of steering the decoder somewhere else.
-    let mut aad = Vec::with_capacity(64);
-    aad.extend_from_slice(&header_bytes);
-    aad.extend_from_slice(&feature_bytes);
-    let ciphertext_body = encrypt_with_aad(suite, &enc_key, &nonce, &aad, &plaintext)?;
+    // Encrypt last: the whole base header plus extension area is the AEAD's
+    // associated data, so a tampered field fails the tag instead of steering
+    // the decoder somewhere else.
+    let ciphertext_body = encrypt_v4_with_aad(suite, &session.enc_key, &nonce, &aad, &plaintext)?;
 
     // Phase 2: Keyed permutation of body slots.
-    let stc_seed =
-        crate::stego::envelope::derive_stc_seed_with_label(&perm_seed, &salt, spatial.stc_label);
+    let perm_seed = session.perm_seed;
+    let stc_seed = session.stc_seed;
 
     let mut body_slots = plan.body_slots_upto(&image, 1, mode, needed_body_slots);
     debug_assert_eq!(body_slots.len(), needed_body_slots, "pool counted above");
@@ -1531,13 +1627,13 @@ pub fn embed_png_with_stats<'a>(
     // payload-sized instead of materializing full-plane maps per channel.
     // Header slots are already pixel indices on the header channel; body
     // slots are byte offsets and become pixel indices per channel.
-    let mut header_rp = vec![0.0f64; V2_TOTAL_HEADER_SLOTS];
-    let mut header_rm = vec![0.0f64; V2_TOTAL_HEADER_SLOTS];
+    let mut header_rp = vec![0.0f64; plan.header_slots];
+    let mut header_rm = vec![0.0f64; plan.header_slots];
     let mut body_rp = vec![0.0f64; needed_body_slots];
     let mut body_rm = vec![0.0f64; needed_body_slots];
     let header_px: Vec<usize> = header_slots
         .iter()
-        .chain(feature_slots.iter())
+        .chain(extension_slots.iter())
         .copied()
         .collect();
     for &channel in mode.channels(image.channels) {
@@ -1598,7 +1694,8 @@ pub fn embed_png_with_stats<'a>(
 
     let mut modified_slots = 0;
 
-    // Embed Phase 1a: 32-byte header word1 (256 slots)
+    // Embed Phase 1: 64-byte base header (512 slots), then the optional
+    // extension area (8 slots per byte) from the same keyed permutation.
     for (byte_i, &b) in header_bytes.iter().enumerate() {
         for bit_i in 0..8 {
             let target_bit = (b >> (7 - bit_i)) & 1;
@@ -1616,13 +1713,11 @@ pub fn embed_png_with_stats<'a>(
             }
         }
     }
-
-    // Embed Phase 1b: 32-byte feature word (256 slots)
-    for (byte_i, &b) in feature_bytes.iter().enumerate() {
+    for (byte_i, &b) in extension.iter().enumerate() {
         for bit_i in 0..8 {
             let target_bit = (b >> (7 - bit_i)) & 1;
-            let bit_index = HEADER_SLOTS + byte_i * 8 + bit_i;
-            let byte_idx = feature_slots[byte_i * 8 + bit_i] * image.channels + channel_offset;
+            let bit_index = PNG_AUDIO_BASE_SLOTS + byte_i * 8 + bit_i;
+            let byte_idx = extension_slots[byte_i * 8 + bit_i] * image.channels + channel_offset;
             let prev = image.pixels[byte_idx];
             write_bit_ternary(
                 &mut image.pixels[byte_idx],
@@ -1679,13 +1774,15 @@ pub fn embed_png_with_stats<'a>(
 /// feature word, so `cost_model` is only a hint; `params` must repeat the
 /// embed-time filter windows because the body slot ranking is recomputed from
 /// the cost map.
+#[allow(clippy::too_many_arguments)]
 pub fn extract_png(
     carrier_bytes: &[u8],
-    password: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     spatial: &crate::stego::format::PngFormatProfile,
     cost_model: &dyn PngCostModel,
     params: &PngParams,
+    limits: &ExtractParams,
     control: &Control<'_>,
 ) -> Result<Payload<'static>, StrHideError> {
     params.validate()?;
@@ -1693,7 +1790,7 @@ pub fn extract_png(
     let image = decode_png(carrier_bytes)?;
     control.check()?;
     extract_png_image(
-        &image, password, domain, spatial, cost_model, params, control,
+        &image, cred, domain, spatial, cost_model, params, limits, control,
     )
 }
 
@@ -1701,93 +1798,91 @@ pub fn extract_png(
 ///
 /// `verify_png` decodes once and reuses the pixels across all three levels
 /// instead of running the full PNG decode three times.
+#[allow(clippy::too_many_arguments)]
 fn extract_png_image(
     image: &RawImage,
-    password: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     spatial: &crate::stego::format::PngFormatProfile,
     cost_model: &dyn PngCostModel,
     params: &PngParams,
+    limits: &ExtractParams,
     control: &Control<'_>,
 ) -> Result<Payload<'static>, StrHideError> {
     params.validate()?;
-    let w = image.width as usize;
-    let h = image.height as usize;
-    let channel_offset = embed_channel(image);
-
-    // Read the header *before* touching any cost model.
-    //
-    // The header layout is a pure function of the pixels, the credentials and
-    // the format profile, so the carrier can tell us which algorithm wrote the
-    // body. That is the whole point of placing the header without a cost map:
-    // the model is named inside the feature word, and reading the feature word
-    // must not require already knowing the model.
-    let header_layout = header_layout(image, password, domain, spatial);
-    if header_layout.len() < HEADER_SLOTS {
-        return Err(StrHideError::NoHiddenData(
-            "Carrier has insufficient capacity for stego header".into(),
-        ));
-    }
-    let header_slots = &header_layout[..HEADER_SLOTS];
-
-    // Read Phase 1: 32-byte Header ([16B Salt][12B Nonce][4B Total Len])
-    let mut header_bytes = [0u8; 32];
-    for byte_i in 0..32 {
-        let mut b = 0u8;
-        for bit_i in 0..8 {
-            let slot = header_slots[byte_i * 8 + bit_i];
-            let val = image.pixels[slot * image.channels + channel_offset];
-            b = (b << 1) | (val & 1);
-        }
-        header_bytes[byte_i] = b;
-    }
-
-    let salt = &header_bytes[..16];
-    let (total_len, _raw_codec_id, raw_stc_h) = {
-        let word = u32::from_be_bytes([
-            header_bytes[28],
-            header_bytes[29],
-            header_bytes[30],
-            header_bytes[31],
-        ]);
-        let (len, codec_id, stc_h) = decode_header_word(word);
-        (len as usize, codec_id, stc_h)
-    };
-
-    // A total length below the smallest envelope the writer can produce is
-    // indistinguishable from noise, so it is rejected here rather than
-    // allocating for a payload that cannot exist.
-    if !(crate::stego::envelope::MIN_ENVELOPE_LEN..=HEADER_LEN_MAX as usize).contains(&total_len) {
-        return Err(StrHideError::NoHiddenData("No valid payload found".into()));
-    }
-
     let no_hidden = || StrHideError::NoHiddenData("No valid payload found".into());
 
-    // Every carrier this build writes uses the v2 header. A different `h` field
-    // means the header landed on the wrong slots, i.e. wrong password or no
-    // payload -- report it exactly like an AEAD failure.
-    if raw_stc_h != HEADER_V2_ESCAPE_H || header_layout.len() < V2_TOTAL_HEADER_SLOTS {
+    // Refuse a policy that cannot pay the one fixed L1 cost before running it.
+    // `FileKey` never uses PBKDF2, so only the password path is gated.
+    if matches!(cred, Credential::Password(_))
+        && limits.max_pbkdf2_iterations < crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS
+    {
         return Err(no_hidden());
     }
 
-    let feature_slots = &header_layout[HEADER_SLOTS..V2_TOTAL_HEADER_SLOTS];
-    let mut feature_bytes = [0u8; 32];
-    for byte_i in 0..32 {
-        let mut b = 0u8;
-        for bit_i in 0..8 {
-            let slot = feature_slots[byte_i * 8 + bit_i];
-            let val = image.pixels[slot * image.channels + channel_offset];
-            b = (b << 1) | (val & 1);
-        }
-        feature_bytes[byte_i] = b;
+    let w = image.width as usize;
+    let h = image.height as usize;
+    let cipher = &crate::stego::format::OFFICIAL_PNG_CIPHER;
+    let carrier_slots = header_pool(image).len();
+    if carrier_slots < PNG_AUDIO_BASE_SLOTS {
+        return Err(no_hidden());
     }
 
-    let fw = FeatureWord::decode(&feature_bytes).map_err(|_| no_hidden())?;
+    // L1 + L2: locator keys depend on the carrier identity, not on the salt.
+    let pre_salt = png_pre_salt(image, spatial);
+    let master = derive_locator_master(cred, domain, cipher, &pre_salt)?;
+    let locator = derive_l2_locator_keys(&master, cipher, b"strhide-v4-hdr-magic", domain)?;
+
+    // Read the 64-byte base header from the first 512 keyed slots. The
+    // prefix is stable, so this is the same permutation the writer used.
+    let base_layout = header_layout(image, &locator.locate_seed, 0);
+    let base_bytes: [u8; PNG_AUDIO_BASE_HEADER_BYTES] =
+        read_slot_bytes(image, &base_layout[..PNG_AUDIO_BASE_SLOTS], 64)
+            .try_into()
+            .map_err(|_| no_hidden())?;
+    let header = SpatialHeaderV4::decode(&base_bytes, PNG_FORMAT_ID).map_err(|_| no_hidden())?;
+
+    let ext_len = header.ext_len as usize;
+    let header_slot_count = PNG_AUDIO_BASE_SLOTS + 8 * ext_len;
+    if header_slot_count > carrier_slots {
+        return Err(no_hidden());
+    }
+    let full_layout = header_layout(image, &locator.locate_seed, ext_len);
+    let extension = read_slot_bytes(
+        image,
+        &full_layout[PNG_AUDIO_BASE_SLOTS..header_slot_count],
+        ext_len,
+    );
+
+    // The extension area is authenticated by the AAD, but its structure must
+    // be sane first: an unknown critical TLV is fatal, non-critical ones are
+    // ignored. `validate_ext_critical` also cross-checks the flags.
+    header
+        .validate_ext_critical(&extension)
+        .map_err(|_| no_hidden())?;
+    let records = parse_extension(&extension).map_err(|_| no_hidden())?;
+    if records
+        .iter()
+        .any(|(type_id, _)| type_id & TLV_CRITICAL != 0)
+    {
+        return Err(no_hidden());
+    }
+
+    // Policy checks run after the base header and extension are decoded but
+    // before any body slot is computed or allocated.
+    limits
+        .validate_header(
+            header.suite_id,
+            header.body_len,
+            header_slot_count,
+            carrier_slots,
+        )
+        .map_err(|_| no_hidden())?;
 
     // The carrier names its cost model. An id this build does not know means a
     // carrier written by a newer tool -- reported exactly like "no payload",
     // because guessing a model would silently decode noise.
-    let resolved = crate::stego::png::registry::spatial_model_from_wire_id(fw.algorithm_id)
+    let resolved = crate::stego::png::registry::spatial_model_from_wire_id(header.algorithm_id)
         .ok_or_else(no_hidden)?;
     if resolved.id() != cost_model.id() {
         // The carrier is authoritative; the caller's choice is only a hint.
@@ -1803,18 +1898,18 @@ fn extract_png_image(
     // sigma model option. Whatever the caller configured is a hint only --
     // the wire values are what the embedder actually computed with.
     let mut effective_params = params.clone();
-    effective_params.exclusion_percentile = (fw.exclusion_permille as f64) / 1000.0;
-    effective_params.p1_window = fw.p1_window as usize;
-    effective_params.p2_window = fw.p2_window as usize;
-    effective_params.epsilon = fw.epsilon();
+    effective_params.exclusion_percentile = (header.exclusion_permille as f64) / 1000.0;
+    effective_params.p1_window = header.p1_window as usize;
+    effective_params.p2_window = header.p2_window as usize;
+    effective_params.epsilon = 2f64.powi(-(header.neg_log2_epsilon as i32));
     if resolved.id() == "suniward" {
         effective_params
             .algorithm_options
-            .insert("sigma".to_string(), fw.sigma as f64);
+            .insert("sigma".to_string(), header.sigma as f64);
     } else if resolved.id() == "mipod" {
         effective_params
             .algorithm_options
-            .insert("alpha".to_string(), (fw.sigma as f64).clamp(0.01, 0.90));
+            .insert("alpha".to_string(), (header.sigma as f64).clamp(0.01, 0.90));
     }
     effective_params.validate()?;
 
@@ -1825,25 +1920,42 @@ fn extract_png_image(
     control.check()?;
     // Body ranking needs costs; the header layout inside this plan is the same
     // cost-free one read above, so the two cannot disagree.
-    let plan = SlotPlan::build(image, &costs, &effective_params, password, domain, spatial)?;
+    let plan = SlotPlan::build(
+        image,
+        &costs,
+        &effective_params,
+        &locator.locate_seed,
+        ext_len,
+    )?;
     debug_assert_eq!(
-        plan.permuted.get(..V2_TOTAL_HEADER_SLOTS),
-        Some(&header_layout[..V2_TOTAL_HEADER_SLOTS]),
+        plan.permuted.get(..PNG_AUDIO_BASE_SLOTS),
+        Some(&base_layout[..PNG_AUDIO_BASE_SLOTS]),
         "the header layout must not depend on the cost map"
     );
 
-    // The body's channel mode arrives in the feature word. An unknown value, or
-    // one the carrier cannot support, means the header landed on the wrong
-    // slots -- folded into the same generic failure as an AEAD reject.
-    let mode = ChannelMode::from_wire(fw.channel_mode).ok_or_else(no_hidden)?;
+    // The body's channel mode arrives in the header. An unknown value, or one
+    // the carrier cannot support, means the header landed on the wrong slots --
+    // folded into the same generic failure as an AEAD reject.
+    let mode = ChannelMode::from_wire(header.channel_mode).ok_or_else(no_hidden)?;
     if !mode.available(image.channels) {
         return Err(no_hidden());
     }
+    let codec = match header.codec_id {
+        0 => StegoCodec::Hamming,
+        1 => StegoCodec::Stc,
+        _ => return Err(no_hidden()),
+    };
+    let suite = CipherSuiteId::from_u16(header.suite_id).ok_or_else(no_hidden)?;
+    if !limits.allows_suite(header.suite_id) {
+        return Err(no_hidden());
+    }
 
-    let ciphertext_len = total_len - crate::stego::envelope::HEADER_OVERHEAD;
+    // `body_len` is the AEAD ciphertext length including the 16-byte tag.
+    let ciphertext_len = header.body_len as usize;
     let ciphertext_bits = ciphertext_len * 8;
     let needed_body_slots =
-        crate::stego::coding::slots_for_codec(ciphertext_bits, fw.codec, fw.h, fw.u)?;
+        crate::stego::coding::slots_for_codec(ciphertext_bits, codec, header.stc_h, header.stc_u)
+            .map_err(|_| no_hidden())?;
 
     // Same budget the writer applies: a header claiming a payload this large
     // would otherwise have the reader allocate its way into an OOM abort before
@@ -1851,77 +1963,68 @@ fn extract_png_image(
     check_pipeline_budget(
         image.width as usize * image.height as usize,
         needed_body_slots,
-        match fw.codec {
+        match codec {
             StegoCodec::Hamming => None,
-            _ => Some(fw.h),
+            _ => Some(header.stc_h),
         },
-    )?;
+    )
+    .map_err(|_| no_hidden())?;
 
     // `body_slots_upto` stops as soon as `needed_body_slots` are collected and
     // its length check below rejects short pools, so a separate full-image
     // `count_body_slots` pass only doubled the scan without changing the
     // verdict.
-    let master = derive_master(
-        spatial.body.default_suite(),
-        password.unwrap_or(spatial.fallback_secret),
-        salt,
-    )?;
-    let (enc_key, perm_seed) = body_keys(spatial.body, &master, salt, domain);
-
-    let mut body_slots = plan.body_slots_upto(image, fw.class_rule, mode, needed_body_slots);
+    let mut body_slots = plan.body_slots_upto(image, header.class_rule, mode, needed_body_slots);
     trace(&format!(
-        "extract mode={:?} class_rule={} total_len={total_len} needed={needed_body_slots} pool={}",
+        "extract mode={:?} class_rule={} body_len={ciphertext_len} needed={needed_body_slots} pool={}",
         mode,
-        fw.class_rule,
+        header.class_rule,
         body_slots.len()
     ));
     // Short pool == the carrier is smaller than the header claims: no payload.
     if body_slots.len() < needed_body_slots {
         return Err(no_hidden());
     }
-    permute_indices(&mut body_slots, &perm_seed);
+    let session = derive_l3_session_keys(cipher, suite, &master, &header.salt, domain)
+        .map_err(|_| no_hidden())?;
+    permute_indices(&mut body_slots, &session.perm_seed);
 
     let slot_vals: Vec<u8> = body_slots.iter().map(|&slot| image.pixels[slot]).collect();
 
-    let ciphertext = match fw.codec {
+    let ciphertext = match codec {
         StegoCodec::Hamming => hamming_extract_bytes(
             &slot_vals,
             ciphertext_len,
             crate::stego::coding::DEFAULT_HAMMING_K,
-        )?,
+        )
+        .map_err(|_| no_hidden())?,
         StegoCodec::Stc | StegoCodec::Auto => {
-            let stc_seed = crate::stego::envelope::derive_stc_seed_with_label(
-                &perm_seed,
-                salt,
-                spatial.stc_label,
-            );
-            let trellis = StcTrellis::from_seed_grouped(stc_seed, fw.h, fw.u)?;
+            let trellis =
+                StcTrellis::from_seed_grouped(session.stc_seed, header.stc_h, header.stc_u)
+                    .map_err(|_| no_hidden())?;
             trellis.extract(&slot_vals, ciphertext_bits)
         }
     };
 
-    let nonce: [u8; crate::stego::envelope::NONCE_LEN] = header_bytes
-        [crate::stego::envelope::SALT_LEN..crate::stego::envelope::HEADER_OVERHEAD]
-        .try_into()
-        .map_err(|_| no_hidden())?;
-    let mut aad = Vec::with_capacity(64);
-    aad.extend_from_slice(&header_bytes);
-    aad.extend_from_slice(&feature_bytes);
-    unpack_envelope_parts(
-        spatial.body.default_suite(),
-        &enc_key,
-        &nonce,
+    let aad = build_v4_aad(PNG_FORMAT_ID, &base_bytes, &extension);
+    unpack_v4_envelope_parts(
+        suite,
+        &session.enc_key,
+        &header.nonce,
         &aad,
         &ciphertext,
+        limits,
     )
+    .map_err(|_| no_hidden())
 }
 
 /// Inspect PNG for stego header and self-describing metadata without decoding body.
 pub fn inspect_png(
     carrier_bytes: &[u8],
-    password: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     spatial: &crate::stego::format::PngFormatProfile,
+    limits: &ExtractParams,
     control: &Control<'_>,
 ) -> Result<StegoHeaderInfo, StrHideError> {
     control.check()?;
@@ -1941,7 +2044,7 @@ pub fn inspect_png(
         }
     };
     control.check()?;
-    inspect_png_image(&image, password, domain, spatial, control)
+    inspect_png_image(&image, cred, domain, spatial, limits, control)
 }
 
 /// Header inspection for an already-decoded image.
@@ -1949,9 +2052,10 @@ pub fn inspect_png(
 /// `verify_png` and `inspect_png` share this so the PNG decode runs once.
 fn inspect_png_image(
     image: &RawImage,
-    password: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     spatial: &crate::stego::format::PngFormatProfile,
+    limits: &ExtractParams,
     control: &Control<'_>,
 ) -> Result<StegoHeaderInfo, StrHideError> {
     control.check()?;
@@ -1959,69 +2063,83 @@ fn inspect_png_image(
     let mut empty_info = StegoHeaderInfo::empty("PNG");
     empty_info.media_info = media_info;
 
-    let channel_offset = embed_channel(image);
-    let header_layout = header_layout(image, password, domain, spatial);
-    if header_layout.len() < V2_TOTAL_HEADER_SLOTS {
+    if matches!(cred, Credential::Password(_))
+        && limits.max_pbkdf2_iterations < crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS
+    {
         return Ok(empty_info);
     }
-    let header_slots = &header_layout[..HEADER_SLOTS];
 
-    // Read Phase 1: 32-byte Header ([16B Salt][12B Nonce][4B Total Len])
-    let mut header_bytes = [0u8; 32];
-    for byte_i in 0..32 {
-        let mut b = 0u8;
-        for bit_i in 0..8 {
-            let slot = header_slots[byte_i * 8 + bit_i];
-            let val = image.pixels[slot * image.channels + channel_offset];
-            b = (b << 1) | (val & 1);
-        }
-        header_bytes[byte_i] = b;
+    let cipher = &crate::stego::format::OFFICIAL_PNG_CIPHER;
+    let carrier_slots = header_pool(image).len();
+    if carrier_slots < PNG_AUDIO_BASE_SLOTS {
+        return Ok(empty_info);
     }
-
-    let (total_len, raw_stc_h) = {
-        let word = u32::from_be_bytes([
-            header_bytes[28],
-            header_bytes[29],
-            header_bytes[30],
-            header_bytes[31],
-        ]);
-        let (len, _codec_id, stc_h) = decode_header_word(word);
-        (len as usize, stc_h)
+    let pre_salt = png_pre_salt(image, spatial);
+    let Ok(master) = derive_locator_master(cred, domain, cipher, &pre_salt) else {
+        return Ok(empty_info);
     };
-
-    if !(crate::stego::envelope::MIN_ENVELOPE_LEN..=HEADER_LEN_MAX as usize).contains(&total_len) {
-        return Ok(empty_info);
-    }
-    if raw_stc_h != HEADER_V2_ESCAPE_H {
-        return Ok(empty_info);
-    }
-
-    let feature_slots = &header_layout[HEADER_SLOTS..V2_TOTAL_HEADER_SLOTS];
-    let mut feature_bytes = [0u8; 32];
-    for byte_i in 0..32 {
-        let mut b = 0u8;
-        for bit_i in 0..8 {
-            let slot = feature_slots[byte_i * 8 + bit_i];
-            let val = image.pixels[slot * image.channels + channel_offset];
-            b = (b << 1) | (val & 1);
-        }
-        feature_bytes[byte_i] = b;
-    }
-
-    let Ok(fw) = FeatureWord::decode(&feature_bytes) else {
+    let Ok(locator) = derive_l2_locator_keys(&master, cipher, b"strhide-v4-hdr-magic", domain)
+    else {
         return Ok(empty_info);
     };
 
-    let algo_name = crate::stego::png::registry::spatial_model_from_wire_id(fw.algorithm_id)
+    let base_layout = header_layout(image, &locator.locate_seed, 0);
+    let base_bytes: [u8; PNG_AUDIO_BASE_HEADER_BYTES] =
+        match read_slot_bytes(image, &base_layout[..PNG_AUDIO_BASE_SLOTS], 64).try_into() {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(empty_info),
+        };
+    let Ok(header) = SpatialHeaderV4::decode(&base_bytes, PNG_FORMAT_ID) else {
+        return Ok(empty_info);
+    };
+
+    let ext_len = header.ext_len as usize;
+    let header_slot_count = PNG_AUDIO_BASE_SLOTS + 8 * ext_len;
+    if header_slot_count > carrier_slots {
+        return Ok(empty_info);
+    }
+    let full_layout = header_layout(image, &locator.locate_seed, ext_len);
+    let extension = read_slot_bytes(
+        image,
+        &full_layout[PNG_AUDIO_BASE_SLOTS..header_slot_count],
+        ext_len,
+    );
+    if header.validate_ext_critical(&extension).is_err() {
+        return Ok(empty_info);
+    }
+    if parse_extension(&extension)
+        .map(|records| records.iter().any(|(t, _)| t & TLV_CRITICAL != 0))
+        .unwrap_or(true)
+    {
+        return Ok(empty_info);
+    }
+    if limits
+        .validate_header(
+            header.suite_id,
+            header.body_len,
+            header_slot_count,
+            carrier_slots,
+        )
+        .is_err()
+    {
+        return Ok(empty_info);
+    }
+
+    let algo_name = crate::stego::png::registry::spatial_model_from_wire_id(header.algorithm_id)
         .map(|m| m.id().to_string())
-        .unwrap_or_else(|| format!("Unknown(0x{:02x})", fw.algorithm_id));
+        .unwrap_or_else(|| format!("Unknown(0x{:02x})", header.algorithm_id));
+    let codec = match header.codec_id {
+        0 => "Hamming".to_string(),
+        1 => format!("Stc (h={}, u={})", header.stc_h, header.stc_u),
+        other => format!("Unknown({other})"),
+    };
 
     Ok(StegoHeaderInfo {
         format: "PNG".into(),
         has_hidden_data: true,
         algorithm: Some(algo_name),
-        codec: Some(format!("{:?} (h={}, u={})", fw.codec, fw.h, fw.u)),
-        envelope_len: Some(total_len),
+        codec: Some(codec),
+        envelope_len: Some(header.body_len as usize),
         payload_len: None,
         media_info,
         note: None,
@@ -2031,10 +2149,10 @@ fn inspect_png_image(
 /// Three-level diagnostic verification for PNG carriers.
 pub fn verify_png(
     carrier_bytes: &[u8],
-    password: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     spatial: &crate::stego::format::PngFormatProfile,
-    _limits: &crate::stego::params::ExtractParams,
+    limits: &ExtractParams,
     control: &Control<'_>,
 ) -> Result<StegoVerifyResult, StrHideError> {
     control.check()?;
@@ -2069,8 +2187,30 @@ pub fn verify_png(
     };
     control.check()?;
 
-    // Level 2: Stego Header & FeatureWord
-    let header_info = inspect_png_image(&image, password, domain, spatial, control)?;
+    // The L1 cost is fixed by V4; a policy that cannot pay it must fail before
+    // the header read so the report says "policy", not "wrong password".
+    if matches!(cred, Credential::Password(_))
+        && limits.max_pbkdf2_iterations < crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS
+    {
+        levels.push(VerifyLevel::fail(
+            2,
+            "Stego header",
+            format!(
+                "PBKDF2 iteration limit {} is below the V4 L1 cost {}",
+                limits.max_pbkdf2_iterations,
+                crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS
+            ),
+        ));
+        levels.push(VerifyLevel::fail(
+            3,
+            "Payload decryption",
+            "Skipped due to level 2 policy failure",
+        ));
+        return Ok(StegoVerifyResult::new("PNG", levels));
+    }
+
+    // Level 2: Stego Header & Extension
+    let header_info = inspect_png_image(&image, cred, domain, spatial, limits, control)?;
     if !header_info.has_hidden_data {
         levels.push(VerifyLevel::fail(
             2,
@@ -2098,7 +2238,9 @@ pub fn verify_png(
     // Level 3: Payload Decryption & AEAD Authenticity
     let model = crate::stego::options::SpatialAlgorithm::default().model();
     let params = crate::stego::params::PngParams::default();
-    match extract_png_image(&image, password, domain, spatial, &*model, &params, control) {
+    match extract_png_image(
+        &image, cred, domain, spatial, &*model, &params, limits, control,
+    ) {
         Ok(payload) => {
             let desc = match payload.name() {
                 Some(name) => format!(
@@ -2225,8 +2367,9 @@ pub fn probe_png_capacity(
     cost_model: &dyn PngCostModel,
     params: &PngParams,
     safety_level: crate::stego::SafetyLevel,
-    password: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
+    extensions: &[Tlv],
     spatial: &crate::stego::format::PngFormatProfile,
     control: &Control<'_>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
@@ -2234,6 +2377,13 @@ pub fn probe_png_capacity(
     // Probe with the same wire-quantised hyperparameters the embedder will
     // use, so the advertised capacity matches the pool embedding sees.
     let params = params.wire_quantized();
+    let extension = encode_extension(extensions)?;
+    if extension.len() > MAX_EXT_BYTES {
+        return Err(StrHideError::General(format!(
+            "Extension area is {} bytes, the maximum is {MAX_EXT_BYTES}",
+            extension.len()
+        )));
+    }
     control.stage(Stage::Decode);
     let image = decode_png(carrier_bytes)?;
 
@@ -2247,7 +2397,19 @@ pub fn probe_png_capacity(
     );
     control.check()?;
 
-    let plan = SlotPlan::build(&image, &costs, &params, password, domain, spatial)?;
+    // Same credential, carrier identity and extension area as the writer: the
+    // header permutation (and therefore the body pool) must match exactly.
+    let cipher = &crate::stego::format::OFFICIAL_PNG_CIPHER;
+    let pre_salt = png_pre_salt(&image, spatial);
+    let master = derive_locator_master(cred, domain, cipher, &pre_salt)?;
+    let locator = derive_l2_locator_keys(&master, cipher, b"strhide-v4-hdr-magic", domain)?;
+    let plan = SlotPlan::build(
+        &image,
+        &costs,
+        &params,
+        &locator.locate_seed,
+        extension.len(),
+    )?;
     build_png_capacity_info(&image, &plan, &params, cost_model.id(), safety_level)
 }
 
@@ -2256,6 +2418,19 @@ mod tests {
     use super::*;
     use crate::stego::params::PngParams;
     use crate::stego::png::cost::HillCostModel;
+
+    /// Test-side credential shim: the pre-V4 tests pass `None` to mean the
+    /// profile's public fallback secret, which V4 expresses as a password
+    /// credential.
+    fn test_cred<'a>(
+        password: Option<&'a str>,
+        spatial: &crate::stego::format::PngFormatProfile,
+    ) -> Credential<'a> {
+        match password {
+            Some(password) => Credential::Password(password),
+            None => Credential::Password(spatial.fallback_secret),
+        }
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn embed_png(
@@ -2273,8 +2448,12 @@ mod tests {
         super::embed_png(
             carrier_bytes,
             payload,
-            password,
+            test_cred(password, spatial),
             domain,
+            crate::stego::format::OFFICIAL_PNG_CIPHER
+                .default_suite
+                .as_u16(),
+            &[],
             spatial,
             cost_model,
             params,
@@ -2295,14 +2474,39 @@ mod tests {
     ) -> Result<Vec<u8>, StrHideError> {
         super::extract_png(
             carrier_bytes,
-            password,
+            test_cred(password, spatial),
             domain,
             spatial,
             cost_model,
             params,
+            &ExtractParams::default(),
             control,
         )
         .map(Payload::into_bytes)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn probe_png_capacity(
+        carrier_bytes: &[u8],
+        cost_model: &dyn PngCostModel,
+        params: &PngParams,
+        safety_level: crate::stego::SafetyLevel,
+        password: Option<&str>,
+        domain: Option<&str>,
+        spatial: &crate::stego::format::PngFormatProfile,
+        control: &Control<'_>,
+    ) -> Result<StegoCapacityInfo, StrHideError> {
+        super::probe_png_capacity(
+            carrier_bytes,
+            cost_model,
+            params,
+            safety_level,
+            test_cred(password, spatial),
+            domain,
+            &[],
+            spatial,
+            control,
+        )
     }
 
     /// Craft a PNG: IHDR + ancillary chunks + one IDAT + IEND, with the
@@ -2830,6 +3034,8 @@ mod tests {
             width: 4,
             height: 4,
             channels: 3,
+            bit_depth: 8,
+            color_type: 2,
             pixels: vec![10u8; 4 * 4 * 3],
             chunks: Vec::new(),
             idat_sizes: Vec::new(),
@@ -3406,6 +3612,8 @@ mod tests {
             width: 4,
             height: 4,
             channels: 3,
+            bit_depth: 8,
+            color_type: 2,
             pixels: vec![10u8; 4 * 4 * 3],
             chunks: Vec::new(),
             idat_sizes: Vec::new(),
@@ -3612,15 +3820,22 @@ mod tests {
         let img = decode_png(&png).expect("decode");
         let params = PngParams::default();
         let costs = HillCostModel.compute_cost(&img.pixels, w, h, 3, &params);
-        let plan = SlotPlan::build(
-            &img,
-            &costs,
-            &params,
-            Some("pw"),
+        let pre_salt = png_pre_salt(&img, &crate::stego::format::OFFICIAL_PNG_FORMAT);
+        let master = derive_locator_master(
+            Credential::Password(crate::stego::format::OFFICIAL_PNG_FORMAT.fallback_secret),
             None,
-            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &crate::stego::format::OFFICIAL_PNG_CIPHER,
+            &pre_salt,
         )
-        .expect("plan");
+        .expect("master");
+        let locator = derive_l2_locator_keys(
+            &master,
+            &crate::stego::format::OFFICIAL_PNG_CIPHER,
+            b"strhide-v4-hdr-magic",
+            None,
+        )
+        .expect("locator");
+        let plan = SlotPlan::build(&img, &costs, &params, &locator.locate_seed, 0).expect("plan");
 
         let mut eligible: Vec<usize> = (0..w * h)
             .filter(|&i| {
@@ -3759,8 +3974,12 @@ mod tests {
         let (_stego, stats, embedded_cap) = embed_png_with_stats(
             &png,
             b"test payload",
-            Some("pw"),
+            test_cred(Some("pw"), &spatial),
             None,
+            crate::stego::format::OFFICIAL_PNG_CIPHER
+                .default_suite
+                .as_u16(),
+            &[],
             &spatial,
             &cost_model,
             &params,
@@ -3787,5 +4006,323 @@ mod tests {
         );
         assert_eq!(embedded_cap.tier_limits, probed.tier_limits);
         assert_eq!(stats.total_candidate_slots, probed.total_elements);
+    }
+
+    // -----------------------------------------------------------------
+    // V4 envelope: negative paths
+    // -----------------------------------------------------------------
+
+    fn v4_cred(password: &str) -> Credential<'_> {
+        Credential::Password(password)
+    }
+
+    fn base_header_slots_for(image: &RawImage, password: &str) -> Vec<usize> {
+        let spatial = crate::stego::format::OFFICIAL_PNG_FORMAT;
+        let pre_salt = png_pre_salt(image, &spatial);
+        let master = derive_locator_master(
+            v4_cred(password),
+            None,
+            &crate::stego::format::OFFICIAL_PNG_CIPHER,
+            &pre_salt,
+        )
+        .expect("master");
+        let locator = derive_l2_locator_keys(
+            &master,
+            &crate::stego::format::OFFICIAL_PNG_CIPHER,
+            b"strhide-v4-hdr-magic",
+            None,
+        )
+        .expect("locator");
+        header_layout(image, &locator.locate_seed, 0)[..PNG_AUDIO_BASE_SLOTS].to_vec()
+    }
+
+    fn rewrite_base_header(image: &mut RawImage, slots: &[usize], bytes: &[u8; 64]) {
+        let channel = embed_channel(image);
+        for byte_i in 0..64 {
+            for bit_i in 0..8 {
+                let bit = (bytes[byte_i] >> (7 - bit_i)) & 1;
+                let idx = slots[byte_i * 8 + bit_i] * image.channels + channel;
+                image.pixels[idx] = (image.pixels[idx] & 0xfe) | bit;
+            }
+        }
+    }
+
+    fn extract_with(
+        carrier: &[u8],
+        password: &str,
+        limits: &ExtractParams,
+    ) -> Result<Vec<u8>, StrHideError> {
+        super::extract_png(
+            carrier,
+            v4_cred(password),
+            None,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &PngParams::default(),
+            limits,
+            &Control::none(),
+        )
+        .map(Payload::into_bytes)
+    }
+
+    #[test]
+    fn v4_extension_roundtrip_and_unknown_critical_are_rejected() {
+        let (w, h) = (96usize, 96usize);
+        let png = craft_png(
+            w as u32,
+            h as u32,
+            &row_correlated_pixels(w, h),
+            &vec![2u8; h],
+            &[],
+            1,
+        );
+        let params = PngParams::default();
+        let safety = SafetyPolicy {
+            level: crate::stego::SafetyLevel::High,
+            enforcement: crate::stego::SafetyEnforcement::Advisory,
+        };
+
+        // Non-critical unknown TLV: ignored, payload still readable.
+        let ext = [Tlv {
+            type_id: 0x02,
+            value: vec![1, 2, 3],
+        }];
+        let stego = super::embed_png(
+            &png,
+            b"extension payload",
+            v4_cred("pw"),
+            None,
+            crate::stego::format::OFFICIAL_PNG_CIPHER
+                .default_suite
+                .as_u16(),
+            &ext,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &params,
+            safety,
+            Freshness::Random,
+            &Control::none(),
+        )
+        .expect("embed with non-critical extension");
+        let got = extract_with(&stego, "pw", &ExtractParams::default()).expect("extract");
+        assert_eq!(got, b"extension payload");
+
+        // Unknown critical TLV: the reader must refuse rather than skip it.
+        let critical = [Tlv {
+            type_id: 0x81,
+            value: vec![9],
+        }];
+        let stego_c = super::embed_png(
+            &png,
+            b"critical extension payload",
+            v4_cred("pw"),
+            None,
+            crate::stego::format::OFFICIAL_PNG_CIPHER
+                .default_suite
+                .as_u16(),
+            &critical,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &params,
+            safety,
+            Freshness::Random,
+            &Control::none(),
+        )
+        .expect("embedding a critical extension is allowed");
+        assert!(matches!(
+            extract_with(&stego_c, "pw", &ExtractParams::default()),
+            Err(StrHideError::NoHiddenData(_))
+        ));
+    }
+
+    #[test]
+    fn v4_unknown_suite_and_low_pbkdf2_policy_fail_closed() {
+        let (w, h) = (96usize, 96usize);
+        let png = craft_png(
+            w as u32,
+            h as u32,
+            &row_correlated_pixels(w, h),
+            &vec![2u8; h],
+            &[],
+            1,
+        );
+        let params = PngParams::default();
+        let safety = SafetyPolicy {
+            level: crate::stego::SafetyLevel::High,
+            enforcement: crate::stego::SafetyEnforcement::Advisory,
+        };
+        assert!(matches!(
+            super::embed_png(
+                &png,
+                b"x",
+                v4_cred("pw"),
+                None,
+                999,
+                &[],
+                &crate::stego::format::OFFICIAL_PNG_FORMAT,
+                &HillCostModel,
+                &params,
+                safety,
+                Freshness::Random,
+                &Control::none(),
+            ),
+            Err(StrHideError::UnsupportedVersion(_))
+        ));
+
+        let stego = super::embed_png(
+            &png,
+            b"policy",
+            v4_cred("pw"),
+            None,
+            crate::stego::format::OFFICIAL_PNG_CIPHER
+                .default_suite
+                .as_u16(),
+            &[],
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &params,
+            safety,
+            Freshness::Random,
+            &Control::none(),
+        )
+        .expect("embed");
+        let strict = ExtractParams {
+            max_pbkdf2_iterations: 100_000,
+            ..ExtractParams::default()
+        };
+        assert!(
+            matches!(
+                extract_with(&stego, "pw", &strict),
+                Err(StrHideError::NoHiddenData(_))
+            ),
+            "a policy below the fixed V4 L1 cost must fail before PBKDF2"
+        );
+    }
+
+    #[test]
+    fn v4_header_crc_and_aead_reject_tampering() {
+        let (w, h) = (96usize, 96usize);
+        let png = craft_png(
+            w as u32,
+            h as u32,
+            &row_correlated_pixels(w, h),
+            &vec![2u8; h],
+            &[],
+            1,
+        );
+        let params = PngParams::default();
+        let safety = SafetyPolicy {
+            level: crate::stego::SafetyLevel::High,
+            enforcement: crate::stego::SafetyEnforcement::Advisory,
+        };
+        let stego = super::embed_png(
+            &png,
+            b"tamper",
+            v4_cred("pw"),
+            None,
+            crate::stego::format::OFFICIAL_PNG_CIPHER
+                .default_suite
+                .as_u16(),
+            &[],
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &params,
+            safety,
+            Freshness::Random,
+            &Control::none(),
+        )
+        .expect("embed");
+
+        let mut image = decode_png(&stego).expect("decode");
+        let slots = base_header_slots_for(&image, "pw");
+        let mut header_bytes: [u8; 64] = read_slot_bytes(&image, &slots, 64)
+            .try_into()
+            .expect("64 bytes");
+        let mut header = SpatialHeaderV4::decode(&header_bytes, PNG_FORMAT_ID).expect("header");
+
+        // 1) Flip a byte without recomputing the CRC: caught before body slots.
+        header_bytes[32] ^= 0x01; // version
+        rewrite_base_header(&mut image, &slots, &header_bytes);
+        let tampered_crc = encode_png(&image).expect("encode");
+        assert!(matches!(
+            extract_with(&tampered_crc, "pw", &ExtractParams::default()),
+            Err(StrHideError::NoHiddenData(_))
+        ));
+
+        // 2) Flip an authenticated field and recompute the CRC: only the AEAD
+        //    tag can catch it, and it must look like "no payload".
+        header.salt[0] ^= 0x01;
+        let forged = header.encode();
+        rewrite_base_header(&mut image, &slots, &forged);
+        let tampered_aead = encode_png(&image).expect("encode");
+        assert!(matches!(
+            extract_with(&tampered_aead, "pw", &ExtractParams::default()),
+            Err(StrHideError::NoHiddenData(_))
+        ));
+    }
+
+    #[test]
+    fn v4_forged_body_len_is_rejected_before_body_allocation() {
+        let (w, h) = (96usize, 96usize);
+        let png = craft_png(
+            w as u32,
+            h as u32,
+            &row_correlated_pixels(w, h),
+            &vec![2u8; h],
+            &[],
+            1,
+        );
+        let params = PngParams::default();
+        let safety = SafetyPolicy {
+            level: crate::stego::SafetyLevel::High,
+            enforcement: crate::stego::SafetyEnforcement::Advisory,
+        };
+        let stego = super::embed_png(
+            &png,
+            b"body_len",
+            v4_cred("pw"),
+            None,
+            crate::stego::format::OFFICIAL_PNG_CIPHER
+                .default_suite
+                .as_u16(),
+            &[],
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &params,
+            safety,
+            Freshness::Random,
+            &Control::none(),
+        )
+        .expect("embed");
+
+        let mut image = decode_png(&stego).expect("decode");
+        let slots = base_header_slots_for(&image, "pw");
+        let header_bytes: [u8; 64] = read_slot_bytes(&image, &slots, 64)
+            .try_into()
+            .expect("64 bytes");
+        let header = SpatialHeaderV4::decode(&header_bytes, PNG_FORMAT_ID).expect("header");
+
+        for forged_len in [0u32, 21, 0x03ff_ffff] {
+            let mut forged = header;
+            forged.body_len = forged_len;
+            rewrite_base_header(&mut image, &slots, &forged.encode());
+            let carrier = encode_png(&image).expect("encode");
+            assert!(
+                matches!(
+                    extract_with(&carrier, "pw", &ExtractParams::default()),
+                    Err(StrHideError::NoHiddenData(_))
+                ),
+                "body_len={forged_len} must not be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn v4_truncated_or_tiny_carriers_report_no_payload() {
+        let tiny = craft_png(8, 8, &[120u8; 8 * 8 * 3], &[0u8; 8], &[], 1);
+        assert!(matches!(
+            extract_with(&tiny, "pw", &ExtractParams::default()),
+            Err(StrHideError::NoHiddenData(_))
+        ));
     }
 }

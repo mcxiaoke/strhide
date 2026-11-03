@@ -3,23 +3,26 @@
 //! Provides zero bitrate expansion (Δ = 0), content-adaptive distortion-minimized
 //! steganographic embedding and extraction directly within H.265/HEVC bitstreams.
 
-use aes_gcm::aead::{Aead, KeyInit, Payload as AeadPayload};
-use aes_gcm::{Aes256Gcm, Nonce};
-use crc32fast::Hasher as Crc32;
-use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 
 use crate::core::control::{Control, Event, Stage};
+use crate::core::crypto::{CONTENT_L1_PBKDF2_ITERATIONS, CipherSuiteId, Credential};
 use crate::core::media::MediaInfo;
 use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::stego::coding::{Move, StcTrellis};
 use crate::stego::envelope::{
-    Freshness, PUBLIC_DEFAULT_SECRET, decode_micro_header, derive_domain_subkey_with_label,
-    encode_micro_header,
+    BODY_OVERHEAD, Freshness, PUBLIC_DEFAULT_SECRET, build_plaintext, build_v4_aad,
+    encrypt_v4_with_aad, unpack_v4_envelope_parts,
 };
-use crate::stego::format::HevcFormatProfile;
+use crate::stego::format::{
+    HevcFormatProfile, derive_l2_locator_keys, derive_l3_session_keys, derive_locator_master,
+};
+use crate::stego::header::{
+    CONTENT_ENVELOPE_VERSION, FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT, TLV_CRITICAL, Tlv,
+    encode_extension, parse_extension,
+};
 use crate::stego::hevc::bitstream::{compute_hevc_cover_digest, parse_annex_b_spans, rbsp_to_nal};
 use crate::stego::hevc::heif_boxes::parse_heif_targets;
 use crate::stego::hevc::mkv_boxes::parse_mkv_targets;
@@ -30,6 +33,7 @@ use crate::stego::hevc::sniff::{
     NAL_TSA_N, sniff_hevc_carrier,
 };
 use crate::stego::options::{StegoHeaderInfo, StegoVerifyResult, VerifyLevel};
+use crate::stego::params::ExtractParams;
 use crate::stego::{SafetyLevel, SafetyPolicy, StegoCapacityInfo};
 use oxideav_h265::cabac::ContextModel;
 use oxideav_h265::encoder::bitwriter::BitWriter;
@@ -39,24 +43,6 @@ use rusty_h265::Decoder;
 use rusty_h265::ctu::Ablate;
 use rusty_h265::observer::ENCODER_CONTEXTS;
 use rusty_h265::ps::parse_sps;
-
-/// Derive the 4-byte header magic from the format's magic label and the
-/// effective secret.
-///
-/// A fixed magic (`SH25`) plus a password-independent header location was a
-/// presence oracle: anyone could locate the header slots from the parameter
-/// sets alone and check for the constant, without any credential. Deriving it
-/// from `label ‖ secret` means a carrier only "looks like Scheme C" to a
-/// holder of the same dialect; for everyone else the header reads as noise,
-/// exactly like an empty carrier.
-fn derive_magic(label: &[u8], secret: &[u8]) -> [u8; 4] {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(label);
-    hasher.update(secret);
-    let digest = hasher.finalize();
-    [digest[0], digest[1], digest[2], digest[3]]
-}
 
 /// The three header fields the writer needs back, read straight off the 2-byte
 /// NAL header (§7.3.1.2). The decoder hands us the same stream but not the
@@ -95,93 +81,204 @@ const MAX_EMBED_ROUNDS: usize = 24;
 /// penalty here made excluded slots *cheaper* and the trellis preferred them.
 const FORBIDDEN_SLOT_SURCHARGE: f64 = 1e9;
 
-/// Fixed 32-byte HEVC Superblock for Scheme C v2.
+/// Fixed 32-byte HEVC superblock.
 pub const HEVC_SUPERBLOCK_BYTES: usize = 32;
 /// Number of initial carrier slots that form the Superblock candidate pool.
 pub const HEVC_SUPERBLOCK_POOL_SLOTS: usize = 2048;
-/// Minimum slots needed to embed the 32-byte Superblock with STC h=7, u=2.
+/// Base header slots of the 32-byte Superblock under STC h=7, u=2.
 pub const HEVC_SUPERBLOCK_MIN_SLOTS: usize = 524;
-/// AES-256-GCM tag length appended to the ciphertext.
-pub const HEVC_TAG_BYTES: usize = 16;
 
-/// Fixed-size 32-byte header anchored in the initial carrier slots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HevcSuperblock {
-    /// 4-byte credential-derived magic.
+/// Format id bound into the V4 AAD (JPEG = 4, HEVC = 5).
+pub const HEVC_FORMAT_ID: u8 = 5;
+
+/// Legacy `Option<&str>` credential mapping used by the pre-V4 entry points.
+fn legacy_credential(secret: Option<&str>) -> Credential<'_> {
+    match secret.filter(|s| !s.is_empty()) {
+        Some(s) => Credential::Password(s),
+        None => Credential::Password(PUBLIC_DEFAULT_SECRET),
+    }
+}
+
+/// Refuse a password-mode L1 below the fixed V4 work factor before the KDF runs.
+///
+/// A caller that lowers `max_pbkdf2_iterations` is asking the extractor to run
+/// a cheaper (weaker) L1 than the writer used; every such carrier is simply
+/// unreadable, so the answer is `NoHiddenData` without paying any KDF cost.
+fn check_l1_floor(cred: &Credential<'_>, limits: &ExtractParams) -> Result<(), StrHideError> {
+    if matches!(cred, Credential::Password(_))
+        && limits.max_pbkdf2_iterations < CONTENT_L1_PBKDF2_ITERATIONS
+    {
+        return Err(StrHideError::NoHiddenData(
+            "No valid payload found (L1 work factor below the V4 floor)".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Upper bound of the HEVC V4 extension area.
+pub const HEVC_MAX_EXT_BYTES: usize = 64;
+
+/// Largest header slot pool the HEVC locator may use.
+pub const HEVC_HEADER_SLOTS_MAX: usize = 2048;
+
+/// STC height of the HEVC extension area.
+pub const HEVC_EXT_STC_H: u8 = 7;
+
+/// STC group size of the HEVC extension area.
+pub const HEVC_EXT_STC_U: u8 = 2;
+
+/// Slots used by `ext_len` extension bytes under STC `h=7, u=2`.
+pub fn hevc_extension_slots(ext_len: usize) -> usize {
+    if ext_len == 0 {
+        0
+    } else {
+        HEVC_EXT_STC_U as usize * (8 * ext_len + HEVC_EXT_STC_H as usize - 1)
+    }
+}
+
+/// CRC scope of the 32-byte HEVC V4 superblock.
+const HEVC_V4_CRC_SPAN: usize = 28;
+
+/// 32-byte content header of an HEVC carrier.
+///
+/// `format_id = 5`, `total_windows = 1` and `stc_h` (from
+/// [`HevcFormatProfile`]) are implied by the carrier and bound through the AAD
+/// prefix; they are not stored.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HevcSuperblockV4 {
+    /// L2-derived 4-byte magic.
     pub magic: [u8; 4],
-    /// High 4 bits: version (0x2); bit 0: multi-window flag.
-    pub version_and_flags: u8,
-    /// STC group size `u` used for the payload body.
-    pub stc_u_body: u8,
-    /// Number of recorded candidate slices in the primary window W0.
+    /// `(major << 4) | minor`.
+    pub version: u8,
+    /// `EXT_PRESENT` / `EXT_CRITICAL`.
+    pub flags: u8,
+    /// Trellis width of the body (1..=64).
+    pub stc_u: u8,
+    /// Recorded candidate slices in the primary window (>= 1).
     pub window_slices: u16,
-    /// Total number of windows M (1 for single-window).
-    pub total_windows: u16,
-    /// Reserved, must be 0.
-    pub reserved: u16,
-    /// Compressed/micro-header payload length in bytes.
-    pub payload_len: u32,
-    /// Payload CRC32.
-    pub payload_crc32: u32,
-    /// AES-256-GCM 12-byte nonce.
+    /// Extension TLV byte count (0..=64).
+    pub ext_len: u8,
+    /// AEAD suite id.
+    pub suite_id: u16,
+    /// Ciphertext length including the tag.
+    pub body_len: u32,
+    /// AEAD nonce; also the HEVC session-salt input.
     pub nonce: [u8; 12],
 }
 
-impl HevcSuperblock {
+impl HevcSuperblockV4 {
+    /// Serialize the superblock, including CRC32-IEEE over `bytes[0..28]`.
     pub fn encode(&self) -> [u8; HEVC_SUPERBLOCK_BYTES] {
-        let mut buf = [0u8; HEVC_SUPERBLOCK_BYTES];
-        buf[0..4].copy_from_slice(&self.magic);
-        buf[4] = self.version_and_flags;
-        buf[5] = self.stc_u_body;
-        buf[6..8].copy_from_slice(&self.window_slices.to_be_bytes());
-        buf[8..10].copy_from_slice(&self.total_windows.to_be_bytes());
-        buf[10..12].copy_from_slice(&self.reserved.to_be_bytes());
-        buf[12..16].copy_from_slice(&self.payload_len.to_be_bytes());
-        buf[16..20].copy_from_slice(&self.payload_crc32.to_be_bytes());
-        buf[20..32].copy_from_slice(&self.nonce);
-        buf
+        let mut out = [0u8; HEVC_SUPERBLOCK_BYTES];
+        out[0..4].copy_from_slice(&self.magic);
+        out[4] = self.version;
+        out[5] = self.flags;
+        out[6] = self.stc_u;
+        out[7..9].copy_from_slice(&self.window_slices.to_be_bytes());
+        out[9] = self.ext_len;
+        out[10..12].copy_from_slice(&self.suite_id.to_be_bytes());
+        out[12..16].copy_from_slice(&self.body_len.to_be_bytes());
+        out[16..28].copy_from_slice(&self.nonce);
+        let crc = crc32fast::hash(&out[..HEVC_V4_CRC_SPAN]);
+        out[HEVC_V4_CRC_SPAN..].copy_from_slice(&crc.to_be_bytes());
+        out
     }
 
-    pub fn decode(buf: &[u8; HEVC_SUPERBLOCK_BYTES]) -> Result<Self, StrHideError> {
-        let mut magic = [0u8; 4];
-        magic.copy_from_slice(&buf[0..4]);
-        let version_and_flags = buf[4];
-        let version = version_and_flags >> 4;
-        if version != 2 {
-            return Err(StrHideError::CorruptedData(format!(
-                "Unsupported HEVC stego version: {version}"
+    /// Parse and validate an HEVC V4 superblock for the expected magic.
+    pub fn decode(
+        bytes: &[u8; HEVC_SUPERBLOCK_BYTES],
+        expected_magic: [u8; 4],
+    ) -> Result<Self, StrHideError> {
+        use crate::stego::header::{FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT};
+
+        let magic: [u8; 4] = bytes[0..4].try_into().expect("4-byte magic");
+        let version = bytes[4];
+        let flags = bytes[5];
+        let stc_u = bytes[6];
+        let window_slices = u16::from_be_bytes(bytes[7..9].try_into().expect("2-byte slices"));
+        let ext_len = bytes[9];
+        let suite_id = u16::from_be_bytes(bytes[10..12].try_into().expect("2-byte suite"));
+        let body_len = u32::from_be_bytes(bytes[12..16].try_into().expect("4-byte body_len"));
+        let nonce = bytes[16..28].try_into().expect("12-byte nonce slice");
+
+        let (major, minor) = (version >> 4, version & 0x0F);
+        if major != 4 {
+            return Err(StrHideError::UnsupportedVersion(format!(
+                "HEVC content envelope major version {major}.{minor} is not supported"
             )));
         }
-        let stc_u_body = buf[5];
-        let window_slices = u16::from_be_bytes([buf[6], buf[7]]);
-        let total_windows = u16::from_be_bytes([buf[8], buf[9]]);
-        let reserved = u16::from_be_bytes([buf[10], buf[11]]);
-        // The record is authenticated only by the magic (which the caller has
-        // already checked) plus the CRC/AEAD later on, so every field still has
-        // to be in range before it is used as an index or a length. `reserved`
-        // must stay 0 and this build only writes a single window; anything else
-        // means the header landed on the wrong slots, not that the carrier is
-        // in an interesting new format (review R2 P2-10).
-        if reserved != 0 || total_windows != 1 || version_and_flags & 0x01 != 0 {
-            return Err(StrHideError::NoHiddenData(
-                "No valid payload found (inconsistent superblock)".into(),
+        if magic != expected_magic {
+            return Err(StrHideError::CorruptedData(
+                "HEVC content magic does not match the locator seed".into(),
             ));
         }
-        let payload_len = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
-        let payload_crc32 = u32::from_be_bytes([buf[16], buf[17], buf[18], buf[19]]);
-        let mut nonce = [0u8; 12];
-        nonce.copy_from_slice(&buf[20..32]);
-        Ok(HevcSuperblock {
+        if flags & !(FLAG_EXT_PRESENT | FLAG_EXT_CRITICAL) != 0 {
+            return Err(StrHideError::CorruptedData(format!(
+                "HEVC content envelope flags {flags:#04x} use reserved bits"
+            )));
+        }
+        if flags & FLAG_EXT_PRESENT != (ext_len > 0) as u8 {
+            return Err(StrHideError::CorruptedData(
+                "HEVC EXT_PRESENT does not match ext_len".into(),
+            ));
+        }
+        if !(1..=64).contains(&stc_u) {
+            return Err(StrHideError::CorruptedData(format!(
+                "HEVC content stc_u {stc_u} is outside 1..=64"
+            )));
+        }
+        if window_slices == 0 {
+            return Err(StrHideError::CorruptedData(
+                "HEVC content window_slices must be at least 1".into(),
+            ));
+        }
+        if ext_len as usize > HEVC_MAX_EXT_BYTES {
+            return Err(StrHideError::CorruptedData(format!(
+                "HEVC content ext_len {ext_len} is above {HEVC_MAX_EXT_BYTES}"
+            )));
+        }
+        if crate::crypto::CipherSuiteId::from_u16(suite_id).is_none() {
+            return Err(StrHideError::UnsupportedVersion(format!(
+                "Unknown HEVC content cipher suite id {suite_id}"
+            )));
+        }
+        let body_overhead = crate::stego::envelope::BODY_OVERHEAD as u32;
+        let body_max = crate::stego::header::HEADER_LEN_MAX;
+        if body_len < body_overhead || body_len > body_max {
+            return Err(StrHideError::CorruptedData(format!(
+                "HEVC content body_len {body_len} is outside {body_overhead}..={body_max}"
+            )));
+        }
+
+        let expected_crc = u32::from_be_bytes(bytes[28..32].try_into().expect("4-byte crc"));
+        let actual_crc = crc32fast::hash(&bytes[..HEVC_V4_CRC_SPAN]);
+        if actual_crc != expected_crc {
+            return Err(StrHideError::CorruptedData(format!(
+                "HEVC content header CRC mismatch: stored {expected_crc:08x}, computed {actual_crc:08x}"
+            )));
+        }
+
+        Ok(Self {
             magic,
-            version_and_flags,
-            stc_u_body,
+            version,
+            flags,
+            stc_u,
             window_slices,
-            total_windows,
-            reserved,
-            payload_len,
-            payload_crc32,
+            ext_len,
+            suite_id,
+            body_len,
             nonce,
         })
+    }
+
+    /// Whether the extension area is present.
+    pub fn ext_present(&self) -> bool {
+        self.flags & crate::stego::header::FLAG_EXT_PRESENT != 0
+    }
+
+    /// Whether at least one extension TLV is critical.
+    pub fn ext_critical(&self) -> bool {
+        self.flags & crate::stego::header::FLAG_EXT_CRITICAL != 0
     }
 }
 
@@ -198,16 +295,75 @@ enum StopCondition {
     TargetSlots(usize),
 }
 
-/// Select the deterministic Weyl slots for the 32-byte Superblock within candidate pool.
-pub fn superblock_positions(pool_size: usize) -> Vec<usize> {
-    assert!(pool_size >= HEVC_SUPERBLOCK_MIN_SLOTS);
-    let count = HEVC_SUPERBLOCK_MIN_SLOTS;
-    let stride = permutation_stride(pool_size);
-    let mut positions = Vec::with_capacity(count);
-    for i in 0..count {
-        positions.push(((i as u64 * stride as u64) % pool_size as u64) as usize);
+/// Keyed slot permutation of the header area.
+///
+/// The first `HEVC_SUPERBLOCK_MIN_SLOTS` slots carry the base header; the
+/// following `hevc_extension_slots(ext_len)` slots carry the extension TLV
+/// area. Both are the *prefix* of one permutation driven by the L2
+/// `locate_seed`, so the extractor reads the base first and can extend to the
+/// continuation slots only after learning `ext_len` from it.
+pub fn superblock_positions(
+    pool_size: usize,
+    locate_seed: &[u8; 32],
+    ext_len: usize,
+) -> Vec<usize> {
+    let count = HEVC_SUPERBLOCK_MIN_SLOTS + hevc_extension_slots(ext_len);
+    debug_assert!(count <= pool_size, "header area fits the candidate pool");
+    keyed_positions(pool_size, count, locate_seed)
+}
+
+/// Keyed permutation prefix over `0..len`: `(start + i * stride) mod len`.
+///
+/// `stride` is derived from the credential-bound seed and is coprime with
+/// `len`, so each requested prefix is distinct. Element `i` never depends on
+/// `count`, which keeps the header permutation prefix-stable in the same way
+/// [`band_positions`] keeps the body permutation stable.
+fn keyed_positions(len: usize, count: usize, seed: &[u8; 32]) -> Vec<usize> {
+    let count = count.min(len);
+    let mut out = Vec::with_capacity(count);
+    if len == 0 {
+        return out;
     }
-    positions
+    let (start, stride) = keyed_band_params(len, seed, 0);
+    for i in 0..count {
+        out.push(((start as u64 + i as u64 * stride as u64) % len as u64) as usize);
+    }
+    out
+}
+
+/// Start and stride of a keyed band permutation, derived from `perm_seed`.
+///
+/// `band_start` (not the band's ordinal) perturbs the derivation, so inserting
+/// an empty band never shifts the mapping of a later band.
+fn keyed_band_params(len: usize, perm_seed: &[u8; 32], band_start: usize) -> (usize, usize) {
+    // Fold the 32-byte key sequentially through SplitMix64. (A plain XOR of
+    // the four words cancels repeated blocks, so a low-entropy or patterned
+    // seed could collapse to the same permutation.)
+    let mut seed = 0x243F_6A88_85A3_08D3u64;
+    for chunk in perm_seed.as_chunks::<8>().0 {
+        seed = splitmix64(seed ^ u64::from_le_bytes(*chunk));
+    }
+    seed ^= (band_start as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let start = (splitmix64(seed) % len as u64) as usize;
+    let mut stride = (splitmix64(seed ^ 0xA5A5_5A5A_3C3C_C3C3) % len as u64) as usize;
+    stride = stride.max(1);
+    while gcd_usize(stride, len) != 1 {
+        stride += 1;
+        if stride >= len {
+            stride = 1;
+            break;
+        }
+    }
+    (start, stride)
+}
+
+/// SplitMix64 finalizer: a cheap, well-distributed 64-bit mixer.
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// Partition non-Superblock slots within the window into Band 0 and Band 1 stream indices.
@@ -252,17 +408,6 @@ fn get_body_slot_indices(
     (band0, band1)
 }
 
-/// `fmt.header_bytes` must at least cover the fixed Superblock.
-fn check_header_bytes(fmt: &HevcFormatProfile) -> Result<(), StrHideError> {
-    if fmt.header_bytes < HEVC_SUPERBLOCK_BYTES {
-        return Err(StrHideError::UnsupportedVersion(format!(
-            "HevcFormatProfile.header_bytes must be >= {HEVC_SUPERBLOCK_BYTES}, got {}",
-            fmt.header_bytes
-        )));
-    }
-    Ok(())
-}
-
 /// Where a flipped bypass bin landed in the codeword:
 /// `(global slot index, first affected RBSP byte, last affected RBSP byte)`.
 type SlotBitTrace = (usize, usize, usize);
@@ -271,25 +416,95 @@ type SlotBitTrace = (usize, usize, usize);
 /// `00 00 xx<=3` triple, plus the trace of every flipped slot in that slice.
 type EpbConflict = (usize, Vec<SlotBitTrace>);
 
-/// Capacity probe: returns the maximum embeddable payload size in bytes.
+/// Header slots of a carrier with `ext_len` extension bytes.
+fn hevc_header_slots(ext_len: usize) -> usize {
+    HEVC_SUPERBLOCK_MIN_SLOTS + hevc_extension_slots(ext_len)
+}
+
+/// Serialize the extension area and enforce the HEVC upper bound.
+fn extension_len(extensions: &[Tlv]) -> Result<usize, StrHideError> {
+    let len = encode_extension(extensions)?.len();
+    if len > HEVC_MAX_EXT_BYTES {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "HEVC extension area is {len} bytes, maximum is {HEVC_MAX_EXT_BYTES}"
+        )));
+    }
+    Ok(len)
+}
+
+/// L3 session salt: domain-separated SHA-256 of the header nonce.
+fn hevc_session_salt(nonce: &[u8; 12]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"strhide-hevc-session-v4");
+    hasher.update(nonce);
+    hasher.finalize().into()
+}
+
+fn has_critical_tlv(extensions: &[Tlv]) -> bool {
+    extensions.iter().any(Tlv::is_critical)
+}
+
+/// Critical-bit check over raw tag bytes read back from the extension area.
+fn tags_have_critical(tags: &[u8]) -> bool {
+    tags.iter().any(|tag| tag & TLV_CRITICAL != 0)
+}
+
+/// Maximum plaintext payload bytes a carrier can hold.
 ///
-/// `fmt` supplies the trellis geometry and header size the capacity is
-/// measured against, so a private dialect reports its own ceiling.
+/// This is the single capacity formula shared by `probe` and `embed`:
+///
+/// ```text
+/// hdr_slots   = HEVC_SUPERBLOCK_MIN_SLOTS + hevc_extension_slots(ext_len)
+/// body_slots  = total_slots - hdr_slots
+/// max_body    = message_bits(body_slots) / 8
+/// max_payload = max_body - BODY_OVERHEAD
+/// ```
+///
+/// `hevc_extension_slots(ext_len) = u * (8 * ext_len + h - 1)` with `h=7, u=2`,
+/// so the extension slots scale with the *message bits* (`8 * ext_len`), not
+/// with `ext_len` alone.
+///
+/// `body_len` on the wire is the AEAD ciphertext length *including the tag*,
+/// so `BODY_OVERHEAD` (4-byte length + flags + tag) is the whole bookkeeping
+/// cost. There is no separate `fmt.header_bytes + 1` or `HEVC_TAG_BYTES`
+/// subtraction anymore.
+fn hevc_max_raw_payload(
+    total_slots: usize,
+    ext_len: usize,
+    fmt: &HevcFormatProfile,
+) -> Result<usize, StrHideError> {
+    let hdr_slots = hevc_header_slots(ext_len);
+    if total_slots < hdr_slots {
+        return Ok(0);
+    }
+    let trellis = StcTrellis::from_seed_grouped(CAPACITY_PROBE_SEED, fmt.stc_h, fmt.stc_u)?;
+    let body_slots = total_slots - hdr_slots;
+    let available_bits = trellis.message_bits(body_slots);
+    Ok((available_bits / 8).saturating_sub(BODY_OVERHEAD))
+}
+
+/// Capacity probe: maximum embeddable payload size in bytes, without extensions.
 pub fn probe_hevc_capacity(carrier: &[u8], fmt: &HevcFormatProfile) -> Result<usize, StrHideError> {
+    probe_hevc_capacity_ext(carrier, &[], fmt)
+}
+
+/// Capacity probe with the same extension area the writer will use.
+///
+/// The `ext_len` is the decisive part of `probe == embed`: a probe that ignores
+/// the extension slots advertises bytes the writer cannot place.
+pub fn probe_hevc_capacity_ext(
+    carrier: &[u8],
+    extensions: &[Tlv],
+    fmt: &HevcFormatProfile,
+) -> Result<usize, StrHideError> {
     sniff_hevc_carrier(carrier).ok_or_else(|| {
         StrHideError::UnsupportedFormat(
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
+    let ext_len = extension_len(extensions)?;
     let total_slots = scan_hevc_slot_count(carrier)?;
-    let trellis = StcTrellis::from_seed_grouped(CAPACITY_PROBE_SEED, fmt.stc_h, fmt.stc_u)?;
-    if total_slots < HEVC_SUPERBLOCK_MIN_SLOTS {
-        return Ok(0);
-    }
-    let body_slots = total_slots.saturating_sub(HEVC_SUPERBLOCK_MIN_SLOTS);
-    let available_bits = trellis.message_bits(body_slots);
-    let available_bytes = (available_bits / 8).saturating_sub(HEVC_TAG_BYTES);
-    Ok(available_bytes.saturating_sub(1))
+    hevc_max_raw_payload(total_slots, ext_len, fmt)
 }
 
 /// Cropped output geometry of an SPS in luma samples (§7.4.3.2.1).
@@ -393,6 +608,7 @@ pub fn extract_hevc_dimensions(carrier: &[u8]) -> Result<(u32, u32), StrHideErro
 /// sample-weighted estimation to deliver sub-second probe responses.
 pub fn probe_hevc_capacity_info(
     carrier: &[u8],
+    extensions: &[Tlv],
     fmt: &HevcFormatProfile,
     safety_level: SafetyLevel,
     exact: bool,
@@ -403,13 +619,14 @@ pub fn probe_hevc_capacity_info(
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
+    let ext_len = extension_len(extensions)?;
     control.stage(Stage::Decode);
     let pool = probe_hevc_pool(carrier, kind, exact, control)?;
     // The pool scan is the long part of an exact probe; report before the
     // (cheap) summary is built so a cancellation lands after the scan, not
     // silently in the middle of it.
     control.check()?;
-    build_hevc_capacity_info(carrier, kind, fmt, &pool, safety_level)
+    build_hevc_capacity_info(carrier, kind, fmt, &pool, ext_len, safety_level)
 }
 
 fn count_absorbed_slots(recorder: &mut CabacRecorder, rbsp: &[u8]) -> usize {
@@ -615,21 +832,16 @@ pub(crate) fn build_hevc_capacity_info(
     kind: HevcCarrierKind,
     fmt: &HevcFormatProfile,
     pool: &PoolProfile,
+    ext_len: usize,
     safety_level: SafetyLevel,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let format_name = kind.label();
 
     let total_slots = pool.total_slots;
     let trellis = StcTrellis::from_seed_grouped(CAPACITY_PROBE_SEED, fmt.stc_h, fmt.stc_u)?;
+    let hdr_slots = hevc_header_slots(ext_len);
 
-    let max_raw_payload_bytes = if total_slots < HEVC_SUPERBLOCK_MIN_SLOTS {
-        0
-    } else {
-        let body_slots = total_slots.saturating_sub(HEVC_SUPERBLOCK_MIN_SLOTS);
-        let available_bits = trellis.message_bits(body_slots);
-        let available_bytes = (available_bits / 8).saturating_sub(HEVC_TAG_BYTES);
-        available_bytes.saturating_sub(1)
-    };
+    let max_raw_payload_bytes = hevc_max_raw_payload(total_slots, ext_len, fmt)?;
 
     // Extract picture dimensions from SPS to derive the true element count.
     // That count is pixels times pictures: the per-frame version was the bug
@@ -664,7 +876,7 @@ pub(crate) fn build_hevc_capacity_info(
             // embedder then rejected: on an all-I/P stream every slot sits in the
             // reference band, so `ref_slots` alone is a large promise the gate
             // never honours.
-            let gate_slots = ((total_slots.saturating_sub(HEVC_SUPERBLOCK_MIN_SLOTS) as f64)
+            let gate_slots = ((total_slots.saturating_sub(hdr_slots) as f64)
                 * budget.non_ref_fraction)
                 .floor() as usize;
             trellis.message_bits(ladder_slots.min(gate_slots))
@@ -676,7 +888,7 @@ pub(crate) fn build_hevc_capacity_info(
     };
     let recommended_for = |level: SafetyLevel| -> usize {
         (target_bits_for(level) / 8)
-            .saturating_sub(fmt.header_bytes + 1)
+            .saturating_sub(BODY_OVERHEAD)
             .min(max_raw_payload_bytes)
     };
     let recommended_max_bytes = recommended_for(safety_level);
@@ -779,8 +991,36 @@ pub fn embed_hevc_with_info(
     safety: SafetyPolicy,
     control: &Control<'_>,
 ) -> Result<(Vec<u8>, StegoCapacityInfo, crate::stego::EmbedStats), StrHideError> {
-    let (patches, capacity_info, stats) = embed_hevc_patches(
-        carrier, payload, secret, domain, fmt, freshness, safety, control,
+    embed_hevc_with_info_v4(
+        carrier,
+        payload,
+        legacy_credential(secret),
+        domain,
+        fmt.cipher.default_suite.as_u16(),
+        &[],
+        fmt,
+        freshness,
+        safety,
+        control,
+    )
+}
+
+/// Credential-aware embed with the full V4 options.
+#[allow(clippy::too_many_arguments)]
+pub fn embed_hevc_with_info_v4(
+    carrier: &[u8],
+    payload: &Payload<'_>,
+    cred: Credential<'_>,
+    domain: Option<&str>,
+    suite_id: u16,
+    extensions: &[Tlv],
+    fmt: &HevcFormatProfile,
+    freshness: Freshness,
+    safety: SafetyPolicy,
+    control: &Control<'_>,
+) -> Result<(Vec<u8>, StegoCapacityInfo, crate::stego::EmbedStats), StrHideError> {
+    let (patches, capacity_info, stats) = embed_hevc_patches_v4(
+        carrier, payload, cred, domain, suite_id, extensions, fmt, freshness, safety, control,
     )?;
     let mut out_carrier = carrier.to_vec();
     apply_hevc_patches(&mut out_carrier, &patches);
@@ -814,6 +1054,32 @@ pub fn embed_hevc_patches(
     )
 }
 
+/// Credential-aware patch embed with the full V4 options.
+#[allow(clippy::too_many_arguments)]
+pub fn embed_hevc_patches_v4(
+    carrier: &[u8],
+    payload: &Payload<'_>,
+    cred: Credential<'_>,
+    domain: Option<&str>,
+    suite_id: u16,
+    extensions: &[Tlv],
+    fmt: &HevcFormatProfile,
+    freshness: Freshness,
+    safety: SafetyPolicy,
+    control: &Control<'_>,
+) -> Result<
+    (
+        Vec<HevcCarrierPatch>,
+        StegoCapacityInfo,
+        crate::stego::EmbedStats,
+    ),
+    StrHideError,
+> {
+    embed_hevc_patches_with_factor_v4(
+        carrier, payload, cred, domain, suite_id, extensions, fmt, freshness, safety, control, 1.0,
+    )
+}
+
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn embed_hevc_patches_with_factor(
@@ -834,10 +1100,51 @@ pub fn embed_hevc_patches_with_factor(
     ),
     StrHideError,
 > {
+    embed_hevc_patches_with_factor_v4(
+        carrier,
+        payload,
+        legacy_credential(secret),
+        domain,
+        fmt.cipher.default_suite.as_u16(),
+        &[],
+        fmt,
+        freshness,
+        safety,
+        control,
+        window_factor,
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn embed_hevc_patches_with_factor_v4(
+    carrier: &[u8],
+    payload: &Payload<'_>,
+    cred: Credential<'_>,
+    domain: Option<&str>,
+    suite_id: u16,
+    extensions: &[Tlv],
+    fmt: &HevcFormatProfile,
+    freshness: Freshness,
+    safety: SafetyPolicy,
+    control: &Control<'_>,
+    window_factor: f64,
+) -> Result<
+    (
+        Vec<HevcCarrierPatch>,
+        StegoCapacityInfo,
+        crate::stego::EmbedStats,
+    ),
+    StrHideError,
+> {
     if payload.is_empty() {
         return Err(StrHideError::General("Cannot embed empty payload".into()));
     }
-    check_header_bytes(fmt)?;
+    let suite = CipherSuiteId::from_u16(suite_id).ok_or_else(|| {
+        StrHideError::UnsupportedVersion(format!("Unknown content cipher suite id {suite_id}"))
+    })?;
+    let ext_len = extension_len(extensions)?;
+    let extension = encode_extension(extensions)?;
 
     let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
         StrHideError::UnsupportedFormat(
@@ -846,9 +1153,10 @@ pub fn embed_hevc_patches_with_factor(
     })?;
 
     // 1. Calculate required capacity and stream window
-    let uncompressed = encode_micro_header(payload);
-    let body_msg_len = uncompressed.len() + HEVC_TAG_BYTES;
+    let plaintext = build_plaintext(payload)?;
+    let body_msg_len = plaintext.len() + suite.tag_len();
     let body_needed_slots = StcTrellis::slots_for_params(body_msg_len * 8, fmt.stc_h, fmt.stc_u);
+    let hdr_slots = hevc_header_slots(ext_len);
     let non_ref_fraction = safety.level.video_budget().non_ref_fraction;
     let factor = if window_factor > 1.0 {
         window_factor
@@ -858,7 +1166,7 @@ pub fn embed_hevc_patches_with_factor(
         (1.0 / non_ref_fraction).max(1.0)
     };
     let desired_body_slots = ((body_needed_slots as f64) * factor).ceil() as usize;
-    let target_slots = HEVC_SUPERBLOCK_POOL_SLOTS + desired_body_slots + 128;
+    let target_slots = hdr_slots + desired_body_slots + 128;
 
     control.stage(Stage::Decode);
     let record = record_carrier_state(
@@ -871,7 +1179,7 @@ pub fn embed_hevc_patches_with_factor(
     control.check()?;
     control.stage(Stage::Solve);
     let pool = PoolProfile::from_record(&record);
-    let capacity_info = build_hevc_capacity_info(carrier, kind, fmt, &pool, safety.level)?;
+    let capacity_info = build_hevc_capacity_info(carrier, kind, fmt, &pool, ext_len, safety.level)?;
 
     enforce_safety(
         payload.len(),
@@ -885,12 +1193,10 @@ pub fn embed_hevc_patches_with_factor(
     let total_slots = all_slots.len();
     let pool_size = total_slots.min(HEVC_SUPERBLOCK_POOL_SLOTS);
 
-    if pool_size < HEVC_SUPERBLOCK_MIN_SLOTS
-        || total_slots < HEVC_SUPERBLOCK_MIN_SLOTS + body_needed_slots
-    {
+    if pool_size < hdr_slots || total_slots < hdr_slots + body_needed_slots {
         return Err(StrHideError::General(format!(
             "HEVC carrier capacity exceeded: needed at least {} slots, but carrier only has {}",
-            HEVC_SUPERBLOCK_MIN_SLOTS + body_needed_slots,
+            hdr_slots + body_needed_slots,
             total_slots
         )));
     }
@@ -902,7 +1208,7 @@ pub fn embed_hevc_patches_with_factor(
         kind,
         HevcCarrierKind::Mp4Container | HevcCarrierKind::MkvContainer
     ) || record.pictures > 1;
-    if is_video && total_slots < HEVC_SUPERBLOCK_MIN_SLOTS + desired_body_slots {
+    if is_video && total_slots < hdr_slots + desired_body_slots {
         let current_tier = safety.level.as_str();
         let hint = match safety.level {
             SafetyLevel::Paranoid => {
@@ -917,17 +1223,31 @@ pub fn embed_hevc_patches_with_factor(
         };
         return Err(StrHideError::General(format!(
             "HEVC capacity insufficient for tier '{current_tier}': needed {needed} slots ({factor:.1}x sparsity), carrier only has {available} slots. Hint: {hint}",
-            needed = HEVC_SUPERBLOCK_MIN_SLOTS + desired_body_slots,
+            needed = hdr_slots + desired_body_slots,
             available = total_slots,
         )));
     }
 
-    // 2. Derive Superblock and Body slot positions
-    let sb_positions = superblock_positions(pool_size);
+    // 2. L1/L2 locator, session keys and keyed slot plans
+    let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);
+    let master = derive_locator_master(cred, domain, fmt.cipher, &cover_digest)?;
+    let locator = derive_l2_locator_keys(&master, fmt.cipher, fmt.magic_label, domain)?;
+
+    let fresh_binding = Freshness::seeded_binding(carrier, payload.as_bytes());
+    let nonce_bytes = freshness.nonce(0, &fresh_binding);
+    let session = derive_l3_session_keys(
+        fmt.cipher,
+        suite,
+        &master,
+        &hevc_session_salt(&nonce_bytes),
+        domain,
+    )?;
+
+    let header_positions = superblock_positions(pool_size, &locator.locate_seed, ext_len);
     let (body_band0, body_band1) = get_body_slot_indices(
         total_slots,
         pool_size,
-        &sb_positions,
+        &header_positions,
         &record.slice_slot_ranges,
     );
     let body_bands = vec![
@@ -936,27 +1256,13 @@ pub fn embed_hevc_patches_with_factor(
     ];
     let mut all_body_indices = body_band0;
     all_body_indices.extend(body_band1);
-    let body_positions_rel = band_positions(&body_bands, body_needed_slots);
+    let body_positions_rel = band_positions(&body_bands, body_needed_slots, &session.perm_seed);
     let body_positions: Vec<usize> = body_positions_rel
         .into_iter()
         .map(|rel| all_body_indices[rel])
         .collect();
 
-    // 3. Prepare Superblock and AEAD ciphertext
-    let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);
-    let key = derive_hevc_key(secret, domain, &cover_digest, fmt);
-    let magic = derive_magic(fmt.magic_label, effective_secret(secret).as_bytes());
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| StrHideError::General(format!("AES-GCM key init failed: {e}")))?;
-
-    let fresh_binding = Freshness::seeded_binding(carrier, payload.as_bytes());
-    let nonce_bytes = freshness.nonce(0, &fresh_binding);
-    let nonce = Nonce::from(nonce_bytes);
-
-    let mut crc = Crc32::new();
-    crc.update(&uncompressed);
-    let payload_crc = crc.finalize();
-
+    // 3. Prepare Superblock, extension area and AEAD ciphertext
     let window_slices = u16::try_from(slice_contexts.len()).map_err(|_| {
         StrHideError::UnsupportedFormat(format!(
             "HEVC carrier has {} slices, exceeding the superblock window slice limit (65535)",
@@ -964,32 +1270,37 @@ pub fn embed_hevc_patches_with_factor(
         ))
     })?;
 
-    let sb = HevcSuperblock {
-        magic,
-        version_and_flags: 0x20,
-        stc_u_body: fmt.stc_u,
+    let flags = (if ext_len > 0 { FLAG_EXT_PRESENT } else { 0 })
+        | (if has_critical_tlv(extensions) {
+            FLAG_EXT_CRITICAL
+        } else {
+            0
+        });
+    let body_len = u32::try_from(body_msg_len).map_err(|_| {
+        StrHideError::General("HEVC payload exceeds the 32-bit body length field".into())
+    })?;
+    let sb = HevcSuperblockV4 {
+        magic: locator.magic4,
+        version: CONTENT_ENVELOPE_VERSION,
+        flags,
+        stc_u: fmt.stc_u,
         window_slices,
-        total_windows: 1,
-        reserved: 0,
-        payload_len: uncompressed.len() as u32,
-        payload_crc32: payload_crc,
+        ext_len: ext_len as u8,
+        suite_id,
+        body_len,
         nonce: nonce_bytes,
     };
     let sb_bytes = sb.encode();
+    let aad = build_v4_aad(HEVC_FORMAT_ID, &sb_bytes, &extension);
+    let ciphertext = encrypt_v4_with_aad(suite, &session.enc_key, &nonce_bytes, &aad, &plaintext)?;
 
-    let ciphertext = cipher
-        .encrypt(
-            &nonce,
-            AeadPayload {
-                msg: uncompressed.as_slice(),
-                aad: &sb_bytes,
-            },
-        )
-        .map_err(|e| StrHideError::General(format!("HEVC payload encryption failed: {e}")))?;
-
-    let seed = trellis_seed_from_key(&key, &cover_digest);
-    let sb_trellis = StcTrellis::from_seed_grouped(seed, 7, 2)?;
-    let body_trellis = StcTrellis::from_seed_grouped(seed, fmt.stc_h, fmt.stc_u)?;
+    let sb_trellis =
+        StcTrellis::from_seed_grouped(locator.header_stc_seed, HEVC_EXT_STC_H, HEVC_EXT_STC_U)?;
+    let ext_trellis =
+        StcTrellis::from_seed_grouped(locator.ext_stc_seed, HEVC_EXT_STC_H, HEVC_EXT_STC_U)?;
+    let body_trellis = StcTrellis::from_seed_grouped(session.stc_seed, fmt.stc_h, fmt.stc_u)?;
+    let base_positions = &header_positions[..HEVC_SUPERBLOCK_MIN_SLOTS];
+    let ext_positions = &header_positions[HEVC_SUPERBLOCK_MIN_SLOTS..];
 
     let mut forbidden: HashSet<usize> = HashSet::new();
     let mut bad_substreams: HashSet<(usize, usize)> = HashSet::new();
@@ -998,10 +1309,10 @@ pub fn embed_hevc_patches_with_factor(
         control.check()?;
 
         // 3a. Solve Superblock STC
-        let mut sb_cover_bits = Vec::with_capacity(sb_positions.len());
-        let mut sb_costs = Vec::with_capacity(sb_positions.len());
-        let mut sb_moves = Vec::with_capacity(sb_positions.len());
-        for &pos in &sb_positions {
+        let mut sb_cover_bits = Vec::with_capacity(base_positions.len());
+        let mut sb_costs = Vec::with_capacity(base_positions.len());
+        let mut sb_moves = Vec::with_capacity(base_positions.len());
+        for &pos in base_positions {
             let slot = &all_slots[pos];
             sb_cover_bits.push(slot.original_bit);
             sb_costs.push(if forbidden.contains(&pos) {
@@ -1015,7 +1326,7 @@ pub fn embed_hevc_patches_with_factor(
                 Move::MinusOnly
             });
         }
-        let mut sb_deltas = vec![0i8; sb_positions.len()];
+        let mut sb_deltas = vec![0i8; base_positions.len()];
         if let Err(e) = sb_trellis.embed_with_deltas(
             &sb_cover_bits,
             &sb_moves,
@@ -1031,6 +1342,47 @@ pub fn embed_hevc_patches_with_factor(
                 cause: crate::errors::TrellisCause::ExhaustedSlots,
                 detail: format!(
                     "HEVC Superblock STC exhausted usable slots after {round} round(s) ({} slot(s) excluded): {e}",
+                    forbidden.len()
+                ),
+            });
+        }
+
+        // 3a-bis. Solve the extension TLV area STC (keyed by the L2 ext seed)
+        let mut ext_cover_bits = Vec::with_capacity(ext_positions.len());
+        let mut ext_costs = Vec::with_capacity(ext_positions.len());
+        let mut ext_moves = Vec::with_capacity(ext_positions.len());
+        for &pos in ext_positions {
+            let slot = &all_slots[pos];
+            ext_cover_bits.push(slot.original_bit);
+            ext_costs.push(if forbidden.contains(&pos) {
+                slot.cost as f64 + FORBIDDEN_SLOT_SURCHARGE
+            } else {
+                slot.cost as f64
+            });
+            ext_moves.push(if slot.original_bit == 0 {
+                Move::PlusOnly
+            } else {
+                Move::MinusOnly
+            });
+        }
+        let mut ext_deltas = vec![0i8; ext_positions.len()];
+        if ext_len > 0
+            && let Err(e) = ext_trellis.embed_with_deltas(
+                &ext_cover_bits,
+                &ext_moves,
+                &ext_costs,
+                &ext_costs,
+                &extension,
+                &mut ext_deltas,
+            )
+        {
+            if round == 0 {
+                return Err(e);
+            }
+            return Err(StrHideError::TrellisInfeasible {
+                cause: crate::errors::TrellisCause::ExhaustedSlots,
+                detail: format!(
+                    "HEVC extension area STC exhausted usable slots after {round} round(s) ({} slot(s) excluded): {e}",
                     forbidden.len()
                 ),
             });
@@ -1079,7 +1431,17 @@ pub fn embed_hevc_patches_with_factor(
         let mut flips_per_slice: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
         for (i, &delta) in sb_deltas.iter().enumerate() {
             if delta != 0 {
-                let global_slot_idx = sb_positions[i];
+                let global_slot_idx = base_positions[i];
+                let slot = &all_slots[global_slot_idx];
+                flips_per_slice
+                    .entry(slot.slice_idx as usize)
+                    .or_default()
+                    .push((slot.op_idx as usize, global_slot_idx));
+            }
+        }
+        for (i, &delta) in ext_deltas.iter().enumerate() {
+            if delta != 0 {
+                let global_slot_idx = ext_positions[i];
                 let slot = &all_slots[global_slot_idx];
                 flips_per_slice
                     .entry(slot.slice_idx as usize)
@@ -1143,7 +1505,7 @@ pub fn embed_hevc_patches_with_factor(
         }
 
         let mut had_bad_substream = false;
-        for &pos in sb_positions.iter().chain(body_positions.iter()) {
+        for &pos in header_positions.iter().chain(body_positions.iter()) {
             let slot = &all_slots[pos];
             if bad_substreams.contains(&(slot.slice_idx as usize, slot.substream_idx as usize))
                 && forbidden.insert(pos)
@@ -1157,6 +1519,7 @@ pub fn embed_hevc_patches_with_factor(
 
         if conflicts.is_empty() && reencoded_slices.len() == flips_per_slice.len() {
             let modified_slots = sb_deltas.iter().filter(|&&d| d != 0).count()
+                + ext_deltas.iter().filter(|&&d| d != 0).count()
                 + body_deltas.iter().filter(|&&d| d != 0).count();
             let stats = crate::stego::EmbedStats {
                 modified_slots,
@@ -1486,7 +1849,11 @@ fn replay_matches_cover(replay: &[u8], cover: &[u8]) -> bool {
 /// * Bands are never interleaved. A payload that fits in band 0 (pictures
 ///   nothing predicts from) never reaches band 1, so the drift-free rung is
 ///   exhausted before any reference picture is touched.
-fn band_positions(bands: &[std::ops::Range<usize>], count: usize) -> Vec<usize> {
+fn band_positions(
+    bands: &[std::ops::Range<usize>],
+    count: usize,
+    perm_seed: &[u8; 32],
+) -> Vec<usize> {
     let mut out = Vec::with_capacity(count);
     for band in bands {
         if out.len() >= count {
@@ -1496,7 +1863,7 @@ fn band_positions(bands: &[std::ops::Range<usize>], count: usize) -> Vec<usize> 
         if len == 0 {
             continue;
         }
-        let stride = permutation_stride(len);
+        let (start, stride) = keyed_band_params(len, perm_seed, band.start);
         for i in 0..len {
             if out.len() >= count {
                 break;
@@ -1504,23 +1871,12 @@ fn band_positions(bands: &[std::ops::Range<usize>], count: usize) -> Vec<usize> 
             // `i * stride` overflows `usize` on 32-bit targets once a burst
             // HEIC exposes a few billion slots; the modulus only needs the
             // product's low bits, so the multiply runs in `u64`.
-            out.push(band.start + ((i as u64 * stride as u64) % len as u64) as usize);
+            out.push(
+                band.start + ((start as u64 + i as u64 * stride as u64) % len as u64) as usize,
+            );
         }
     }
     out
-}
-
-/// Weyl stride for a band of `len` slots: ~0.618 of it and coprime with it.
-fn permutation_stride(len: usize) -> usize {
-    let mut stride = ((len as u64 * 618_034) / 1_000_000) as usize;
-    stride = stride.max(1);
-    while gcd_usize(stride, len) != 1 {
-        stride += 1;
-        if stride >= len {
-            return 1;
-        }
-    }
-    stride
 }
 
 fn gcd_usize(mut a: usize, mut b: usize) -> usize {
@@ -1540,15 +1896,34 @@ pub fn extract_hevc(
     fmt: &HevcFormatProfile,
     control: &Control<'_>,
 ) -> Result<Payload<'static>, StrHideError> {
+    extract_hevc_v4(
+        carrier,
+        legacy_credential(secret),
+        domain,
+        fmt,
+        &ExtractParams::default(),
+        control,
+    )
+}
+
+/// Credential-aware extraction with explicit policy limits.
+pub fn extract_hevc_v4(
+    carrier: &[u8],
+    cred: Credential<'_>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+    limits: &ExtractParams,
+    control: &Control<'_>,
+) -> Result<Payload<'static>, StrHideError> {
     control.check()?;
-    check_header_bytes(fmt)?;
+    check_l1_floor(&cred, limits)?;
     let kind = sniff_hevc_carrier(carrier).ok_or_else(|| {
         StrHideError::UnsupportedFormat(
             "Unrecognized HEVC carrier (not HEIF/HEIC, Annex-B, or MP4)".into(),
         )
     })?;
 
-    // 1. First stage: scan up to HEVC_SUPERBLOCK_POOL_SLOTS to read and verify Superblock
+    // 1. First stage: scan up to HEVC_SUPERBLOCK_POOL_SLOTS to read the header.
     let sb_record = record_carrier_state(
         carrier,
         kind,
@@ -1556,9 +1931,10 @@ pub fn extract_hevc(
         StopCondition::MinSlots(HEVC_SUPERBLOCK_POOL_SLOTS),
         control,
     )?;
-    extract_hevc_from_sb_record(carrier, kind, sb_record, secret, domain, fmt, control)
+    extract_hevc_from_sb_record_v4(carrier, kind, sb_record, cred, domain, fmt, limits, control)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_hevc_from_sb_record(
     carrier: &[u8],
     kind: HevcCarrierKind,
@@ -1568,60 +1944,156 @@ fn extract_hevc_from_sb_record(
     fmt: &HevcFormatProfile,
     control: &Control<'_>,
 ) -> Result<Payload<'static>, StrHideError> {
-    control.check()?;
-    let total_slots = sb_record.total_slots();
+    extract_hevc_from_sb_record_v4(
+        carrier,
+        kind,
+        sb_record,
+        legacy_credential(secret),
+        domain,
+        fmt,
+        &ExtractParams::default(),
+        control,
+    )
+}
+
+/// The header half of an extraction: everything read and validated before any
+/// body slot is touched.
+struct HevcHeaderRead {
+    sb: HevcSuperblockV4,
+    sb_bytes: [u8; HEVC_SUPERBLOCK_BYTES],
+    header_positions: Vec<usize>,
+    extension: Vec<u8>,
+    extension_tags: Vec<u8>,
+    session: crate::stego::format::SessionKeys,
+}
+
+/// Locate, decode and validate the V4 header (base + extension).
+///
+/// Order matters and is the same for `extract`, `inspect` and `verify`:
+/// CRC/version/magic → structural bounds → extension TLV → `validate_header`
+/// (suite/body_len/header slots) → L3 session keys. Every failure is folded to
+/// `NoHiddenData` so a wrong password and a tampered header are indistinguishable.
+fn read_hevc_header_v4(
+    carrier: &[u8],
+    record: &CarrierRecord,
+    cred: Credential<'_>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+    limits: &ExtractParams,
+) -> Result<Option<HevcHeaderRead>, StrHideError> {
+    let total_slots = record.total_slots();
     let pool_size = total_slots.min(HEVC_SUPERBLOCK_POOL_SLOTS);
     if pool_size < HEVC_SUPERBLOCK_MIN_SLOTS {
-        // A carrier this small simply cannot hold a Superblock, and `inspect`
-        // reports the very same condition as "nothing hidden". Answering
-        // `CorruptedData` here told the user a valid short clip was damaged
-        // (R3 P1-6).
-        return Err(StrHideError::NoHiddenData(
-            "No hidden data: carrier has too few HEVC slots for a Superblock".into(),
-        ));
+        return Ok(None);
     }
 
-    let cover_digest = derive_carrier_digest(carrier, &sb_record.digest_inputs, fmt);
-    let key = derive_hevc_key(secret, domain, &cover_digest, fmt);
-    let seed = trellis_seed_from_key(&key, &cover_digest);
+    let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);
+    let master = derive_locator_master(cred, domain, fmt.cipher, &cover_digest)
+        .map_err(|_| StrHideError::NoHiddenData("No valid payload found".into()))?;
+    let locator = derive_l2_locator_keys(&master, fmt.cipher, fmt.magic_label, domain)
+        .map_err(|_| StrHideError::NoHiddenData("No valid payload found".into()))?;
 
-    let sb_positions = superblock_positions(pool_size);
-    let sb_bits: Vec<u8> = sb_positions
+    let base_positions = superblock_positions(pool_size, &locator.locate_seed, 0);
+    let sb_bits: Vec<u8> = base_positions
         .iter()
-        .map(|&p| sb_record.raw_slot_bit(p))
+        .map(|&p| record.raw_slot_bit(p))
         .collect();
-
-    let sb_trellis = StcTrellis::from_seed_grouped(seed, 7, 2)?;
+    let sb_trellis =
+        StcTrellis::from_seed_grouped(locator.header_stc_seed, HEVC_EXT_STC_H, HEVC_EXT_STC_U)
+            .map_err(|_| StrHideError::NoHiddenData("No valid payload found".into()))?;
     let sb_raw = sb_trellis.extract(&sb_bits, HEVC_SUPERBLOCK_BYTES * 8);
     if sb_raw.len() < HEVC_SUPERBLOCK_BYTES {
-        return Err(StrHideError::CorruptedData(
-            "HEVC Superblock is truncated".into(),
-        ));
+        return Ok(None);
     }
     let mut sb_bytes = [0u8; HEVC_SUPERBLOCK_BYTES];
-    sb_bytes.copy_from_slice(&sb_raw[0..HEVC_SUPERBLOCK_BYTES]);
+    sb_bytes.copy_from_slice(&sb_raw[..HEVC_SUPERBLOCK_BYTES]);
 
-    // Check the signature *before* parsing the record. The magic is derived
-    // from the credentials, so on a carrier that never held a payload these
-    // 32 bytes are noise and the version nibble is essentially random: reading
-    // the version first turned "nothing is hidden here" into "unsupported
-    // stego version" 15 times out of 16. Every other format reports this case
-    // as `NoHiddenData` (review R2 P1-1).
-    let expected_magic = derive_magic(fmt.magic_label, effective_secret(secret).as_bytes());
-    if sb_bytes[0..4] != expected_magic {
-        return Err(StrHideError::NoHiddenData("No valid payload found".into()));
+    let Ok(sb) = HevcSuperblockV4::decode(&sb_bytes, locator.magic4) else {
+        return Ok(None);
+    };
+
+    let header_slots = hevc_header_slots(sb.ext_len as usize);
+    if header_slots > pool_size || header_slots > total_slots {
+        return Ok(None);
     }
-    let sb = HevcSuperblock::decode(&sb_bytes)?;
-    debug_assert_eq!(sb.magic, expected_magic);
+    if limits
+        .validate_header(sb.suite_id, sb.body_len, header_slots, total_slots)
+        .is_err()
+    {
+        return Ok(None);
+    }
 
-    // 2. Second stage: read Body
-    let w0 = sb.window_slices as usize;
+    let ext_bytes = sb.ext_len as usize;
+    let header_positions = superblock_positions(pool_size, &locator.locate_seed, ext_bytes);
+    let ext_slots = hevc_extension_slots(ext_bytes);
+    let mut extension = Vec::new();
+    let mut extension_tags = Vec::new();
+    if ext_slots > 0 {
+        let ext_positions = &header_positions[HEVC_SUPERBLOCK_MIN_SLOTS..];
+        let ext_bits: Vec<u8> = ext_positions
+            .iter()
+            .map(|&p| record.raw_slot_bit(p))
+            .collect();
+        let ext_trellis =
+            StcTrellis::from_seed_grouped(locator.ext_stc_seed, HEVC_EXT_STC_H, HEVC_EXT_STC_U)
+                .map_err(|_| StrHideError::NoHiddenData("No valid payload found".into()))?;
+        // The trellis message is the extension *bytes*, not the slot count.
+        extension = ext_trellis.extract(&ext_bits, ext_bytes * 8);
+        if extension.len() < ext_bytes {
+            return Ok(None);
+        }
+        let tlvs = parse_extension(&extension)
+            .map_err(|_| StrHideError::NoHiddenData("No valid payload found".into()))?;
+        extension_tags = tlvs.iter().map(|(tag, _)| *tag).collect();
+    }
+
+    let suite = CipherSuiteId::from_u16(sb.suite_id)
+        .ok_or_else(|| StrHideError::NoHiddenData("No valid payload found".into()))?;
+    let session = derive_l3_session_keys(
+        fmt.cipher,
+        suite,
+        &master,
+        &hevc_session_salt(&sb.nonce),
+        domain,
+    )
+    .map_err(|_| StrHideError::NoHiddenData("No valid payload found".into()))?;
+
+    Ok(Some(HevcHeaderRead {
+        sb,
+        sb_bytes,
+        header_positions,
+        extension,
+        extension_tags,
+        session,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn extract_hevc_from_sb_record_v4(
+    carrier: &[u8],
+    _kind: HevcCarrierKind,
+    sb_record: CarrierRecord,
+    cred: Credential<'_>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+    limits: &ExtractParams,
+    control: &Control<'_>,
+) -> Result<Payload<'static>, StrHideError> {
+    control.check()?;
+    check_l1_floor(&cred, limits)?;
+    let no_data = || StrHideError::NoHiddenData("No valid payload found".into());
+
+    let header =
+        read_hevc_header_v4(carrier, &sb_record, cred, domain, fmt, limits)?.ok_or_else(no_data)?;
+
+    // 2. Second stage: read the Body, but only after the header passed policy.
+    let w0 = header.sb.window_slices as usize;
     let body_record = if sb_record.recorded_slices >= w0 {
         sb_record
     } else {
         record_carrier_state(
             carrier,
-            kind,
+            _kind,
             Capture::Bits,
             StopCondition::TargetSlices(w0),
             control,
@@ -1629,24 +2101,25 @@ fn extract_hevc_from_sb_record(
     };
 
     let total_window_slots = body_record.total_slots();
+    let pool_size = total_window_slots.min(HEVC_SUPERBLOCK_POOL_SLOTS);
+    if pool_size < header.header_positions.len() {
+        return Err(no_data());
+    }
     let (body_band0, body_band1) = get_body_slot_indices(
         total_window_slots,
         pool_size,
-        &sb_positions,
+        &header.header_positions,
         &body_record.slice_slot_ranges,
     );
 
-    let body_msg_len = (sb.payload_len as usize)
-        .checked_add(HEVC_TAG_BYTES)
-        .ok_or_else(|| StrHideError::CorruptedData("HEVC payload length overflows".into()))?;
-    let body_trellis = StcTrellis::from_seed_grouped(seed, fmt.stc_h, sb.stc_u_body)?;
+    let body_trellis =
+        StcTrellis::from_seed_grouped(header.session.stc_seed, fmt.stc_h, header.sb.stc_u)?;
+    let body_msg_len = header.sb.body_len as usize;
     let body_needed_slots = body_trellis.slots_for(body_msg_len * 8);
 
     let available_body_slots = body_band0.len() + body_band1.len();
     if available_body_slots < body_needed_slots {
-        return Err(StrHideError::CorruptedData(
-            "Carrier window truncated for declared payload".into(),
-        ));
+        return Err(no_data());
     }
 
     let body_bands = vec![
@@ -1655,7 +2128,8 @@ fn extract_hevc_from_sb_record(
     ];
     let mut all_body_indices = body_band0;
     all_body_indices.extend(body_band1);
-    let body_positions_rel = band_positions(&body_bands, body_needed_slots);
+    let body_positions_rel =
+        band_positions(&body_bands, body_needed_slots, &header.session.perm_seed);
     let body_bits: Vec<u8> = body_positions_rel
         .into_iter()
         .map(|rel| body_record.raw_slot_bit(all_body_indices[rel]))
@@ -1663,36 +2137,32 @@ fn extract_hevc_from_sb_record(
 
     let ciphertext = body_trellis.extract(&body_bits, body_msg_len * 8);
     if ciphertext.len() < body_msg_len {
-        return Err(StrHideError::CorruptedData(
-            "Carrier truncated for declared payload".into(),
-        ));
+        return Err(no_data());
+    }
+    let ciphertext = &ciphertext[..body_msg_len];
+
+    let aad = build_v4_aad(HEVC_FORMAT_ID, &header.sb_bytes, &header.extension);
+    let suite = CipherSuiteId::from_u16(header.sb.suite_id).ok_or_else(no_data)?;
+    let payload = unpack_v4_envelope_parts(
+        suite,
+        &header.session.enc_key,
+        &header.sb.nonce,
+        &aad,
+        ciphertext,
+        limits,
+    )
+    .map_err(|_| no_data())?;
+
+    // Critical extension TLVs are only meaningful after AEAD proved the header
+    // is authentic; an unknown critical tag means this build cannot honour the
+    // carrier's contract.
+    let flag_critical = header.sb.flags & FLAG_EXT_CRITICAL != 0;
+    let has_critical = tags_have_critical(&header.extension_tags);
+    if flag_critical != has_critical || has_critical {
+        return Err(no_data());
     }
 
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| StrHideError::General(format!("AES-GCM key init failed: {e}")))?;
-    let nonce = Nonce::from(sb.nonce);
-
-    let decrypted = cipher
-        .decrypt(
-            &nonce,
-            AeadPayload {
-                msg: &ciphertext[0..body_msg_len],
-                aad: &sb_bytes,
-            },
-        )
-        .map_err(|_| {
-            StrHideError::Password("Authentication failed or incorrect password".into())
-        })?;
-
-    let mut crc = Crc32::new();
-    crc.update(&decrypted);
-    if crc.finalize() != sb.payload_crc32 {
-        return Err(StrHideError::CorruptedData(
-            "CRC32 mismatch in HEVC payload".into(),
-        ));
-    }
-
-    decode_micro_header(&decrypted)
+    Ok(payload)
 }
 
 #[allow(dead_code)]
@@ -1745,9 +2215,10 @@ fn inspect_hevc_record(
     kind: HevcCarrierKind,
     record: &CarrierRecord,
     media_info: Option<MediaInfo>,
-    secret: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     fmt: &HevcFormatProfile,
+    limits: &ExtractParams,
     control: &Control<'_>,
 ) -> Result<StegoHeaderInfo, StrHideError> {
     control.check()?;
@@ -1762,49 +2233,29 @@ fn inspect_hevc_record(
     let mut empty_info = StegoHeaderInfo::empty(kind.label());
     empty_info.media_info = media_info;
 
-    let total_slots = record.total_slots();
-    let pool_size = total_slots.min(HEVC_SUPERBLOCK_POOL_SLOTS);
-    if pool_size < HEVC_SUPERBLOCK_MIN_SLOTS {
+    if check_l1_floor(&cred, limits).is_err() {
         return Ok(empty_info);
     }
-
-    let cover_digest = derive_carrier_digest(carrier, &record.digest_inputs, fmt);
-    let key = derive_hevc_key(secret, domain, &cover_digest, fmt);
-    let seed = trellis_seed_from_key(&key, &cover_digest);
-
-    let sb_positions = superblock_positions(pool_size);
-    let sb_bits: Vec<u8> = sb_positions
-        .iter()
-        .map(|&p| record.raw_slot_bit(p))
-        .collect();
-
-    let sb_trellis = match StcTrellis::from_seed_grouped(seed, 7, 2) {
-        Ok(t) => t,
-        Err(_) => return Ok(empty_info),
-    };
-    let sb_raw = sb_trellis.extract(&sb_bits, HEVC_SUPERBLOCK_BYTES * 8);
-    if sb_raw.len() < HEVC_SUPERBLOCK_BYTES {
-        return Ok(empty_info);
-    }
-    let mut sb_bytes = [0u8; HEVC_SUPERBLOCK_BYTES];
-    sb_bytes.copy_from_slice(&sb_raw[0..HEVC_SUPERBLOCK_BYTES]);
-    let sb = match HevcSuperblock::decode(&sb_bytes) {
-        Ok(s) => s,
-        Err(_) => return Ok(empty_info),
+    let header = match read_hevc_header_v4(carrier, record, cred, domain, fmt, limits) {
+        Ok(Some(header)) => header,
+        Ok(None) | Err(_) => return Ok(empty_info),
     };
 
-    let expected_magic = derive_magic(fmt.magic_label, effective_secret(secret).as_bytes());
-    if sb.magic != expected_magic {
-        return Ok(empty_info);
-    }
-
-    let payload_len = sb.payload_len as usize;
+    let suite = match CipherSuiteId::from_u16(header.sb.suite_id) {
+        Some(suite) => suite,
+        None => return Ok(empty_info),
+    };
+    let payload_len = (header.sb.body_len as usize)
+        .saturating_sub(suite.tag_len())
+        .saturating_sub(5);
     Ok(StegoHeaderInfo {
         format: kind.label().to_string(),
         has_hidden_data: true,
         algorithm: Some("HEVC-CABAC-InPlace".into()),
-        codec: Some(format!("STC (h=7, u={})", sb.stc_u_body)),
-        envelope_len: Some(HEVC_SUPERBLOCK_BYTES + HEVC_TAG_BYTES + payload_len),
+        codec: Some(format!("STC (h=7, u={})", header.sb.stc_u)),
+        envelope_len: Some(
+            HEVC_SUPERBLOCK_BYTES + header.extension.len() + header.sb.body_len as usize,
+        ),
         payload_len: Some(payload_len),
         media_info,
         note: None,
@@ -1819,8 +2270,26 @@ pub fn inspect_hevc(
     fmt: &HevcFormatProfile,
     control: &Control<'_>,
 ) -> Result<StegoHeaderInfo, StrHideError> {
+    inspect_hevc_v4(
+        carrier,
+        legacy_credential(secret),
+        domain,
+        fmt,
+        &ExtractParams::default(),
+        control,
+    )
+}
+
+/// Credential-aware inspection with explicit policy limits.
+pub fn inspect_hevc_v4(
+    carrier: &[u8],
+    cred: Credential<'_>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+    limits: &ExtractParams,
+    control: &Control<'_>,
+) -> Result<StegoHeaderInfo, StrHideError> {
     control.check()?;
-    check_header_bytes(fmt)?;
     let kind = match sniff_hevc_carrier(carrier) {
         Some(k) => k,
         None => return Ok(StegoHeaderInfo::empty("HEVC")),
@@ -1846,7 +2315,7 @@ pub fn inspect_hevc(
         Err(_) => return Ok(empty_info),
     };
     inspect_hevc_record(
-        carrier, kind, &record, media_info, secret, domain, fmt, control,
+        carrier, kind, &record, media_info, cred, domain, fmt, limits, control,
     )
 }
 
@@ -1913,9 +2382,27 @@ pub fn inspect_hevc_mp4_file(
     fmt: &HevcFormatProfile,
     control: &Control<'_>,
 ) -> Result<StegoHeaderInfo, StrHideError> {
+    inspect_hevc_mp4_file_v4(
+        carrier_path,
+        legacy_credential(secret),
+        domain,
+        fmt,
+        &ExtractParams::default(),
+        control,
+    )
+}
+
+/// Credential-aware streaming MP4 inspection with explicit policy limits.
+pub fn inspect_hevc_mp4_file_v4(
+    carrier_path: &std::path::Path,
+    cred: Credential<'_>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+    limits: &ExtractParams,
+    control: &Control<'_>,
+) -> Result<StegoHeaderInfo, StrHideError> {
     use std::io::{Read, Seek, SeekFrom};
     control.check()?;
-    check_header_bytes(fmt)?;
 
     let mut file = std::fs::File::open(carrier_path)?;
     let file_len = file.metadata()?.len() as usize;
@@ -2135,9 +2622,10 @@ pub fn inspect_hevc_mp4_file(
         HevcCarrierKind::Mp4Container,
         &record,
         media_info,
-        secret,
+        cred,
         domain,
         fmt,
+        limits,
         control,
     )
 }
@@ -2148,6 +2636,25 @@ pub fn verify_hevc(
     secret: Option<&str>,
     domain: Option<&str>,
     fmt: &HevcFormatProfile,
+    control: &Control<'_>,
+) -> Result<StegoVerifyResult, StrHideError> {
+    verify_hevc_v4(
+        carrier,
+        legacy_credential(secret),
+        domain,
+        fmt,
+        &ExtractParams::default(),
+        control,
+    )
+}
+
+/// Credential-aware three-level verification with explicit policy limits.
+pub fn verify_hevc_v4(
+    carrier: &[u8],
+    cred: Credential<'_>,
+    domain: Option<&str>,
+    fmt: &HevcFormatProfile,
+    limits: &ExtractParams,
     control: &Control<'_>,
 ) -> Result<StegoVerifyResult, StrHideError> {
     control.check()?;
@@ -2210,8 +2717,9 @@ pub fn verify_hevc(
     };
     control.check()?;
 
-    let header_info =
-        inspect_hevc_record(carrier, kind, &record, None, secret, domain, fmt, control)?;
+    let header_info = inspect_hevc_record(
+        carrier, kind, &record, None, cred, domain, fmt, limits, control,
+    )?;
     if !header_info.has_hidden_data {
         levels.push(VerifyLevel::fail(
             2,
@@ -2235,7 +2743,8 @@ pub fn verify_hevc(
     ));
     control.check()?;
 
-    match extract_hevc_from_sb_record(carrier, kind, record, secret, domain, fmt, control) {
+    match extract_hevc_from_sb_record_v4(carrier, kind, record, cred, domain, fmt, limits, control)
+    {
         Ok(payload) => {
             let desc = match payload.name() {
                 Some(name) => format!(
@@ -3213,30 +3722,6 @@ fn scan_hevc_slot_count(carrier: &[u8]) -> Result<usize, StrHideError> {
     Ok(record.total_slots())
 }
 
-/// Derive the 64-bit STC trellis seed.
-///
-/// Keyed through the (secret-derived) HEVC key rather than through the public
-/// carrier digest alone, so the slot Weyl permutation and the STC code
-/// structure are reproducible only with the credential — the same security
-/// model as the PNG/JPEG engines. A passwordless analyst can then neither
-/// reproduce the permutation for structural detection nor locate the
-/// plaintext message header (whose CRC32 would otherwise be an offline
-/// guessing oracle for low-entropy payloads).
-///
-/// HKDF-SHA256 can always produce 8 bytes, so the error branch is defensive
-/// only, mirroring [`derive_hevc_key`]'s fallback style.
-fn trellis_seed_from_key(key: &[u8; 32], cover_digest: &[u8; 32]) -> u64 {
-    let hk = Hkdf::<Sha256>::new(Some(cover_digest), key);
-    let mut buf = [0u8; 8];
-    if hk
-        .expand(b"strhide-hevc-trellis-seed-v1", &mut buf)
-        .is_err()
-    {
-        return 0;
-    }
-    u64::from_be_bytes(buf)
-}
-
 /// Derive the cover digest from the container parse `record_carrier_state`
 /// already produced — the container is walked exactly once per operation
 /// (audit 2026-10-24 2.5).
@@ -3245,18 +3730,23 @@ fn derive_carrier_digest(
     inputs: &DigestInputs,
     fmt: &HevcFormatProfile,
 ) -> [u8; 32] {
+    // V4 pre_salt domain separation: only immutable metadata may enter, and
+    // the label keeps HEVC salts distinct from JPEG/PNG ones even if the same
+    // cover bytes are reused.
+    let mut salt = Vec::with_capacity(fmt.cover_salt.len() + 8);
+    salt.extend_from_slice(fmt.cover_salt);
+    salt.extend_from_slice(b"hevc-v4");
     match inputs {
         DigestInputs::ParameterSets { parameter_sets } => {
             // Hash the parameter set *contents*. They are immutable during
-            // embedding, which is what makes the digest — and therefore
-            // the AES key and the keyed trellis seed — identical on both
-            // ends.
+            // embedding, which is what makes the digest — and therefore the
+            // L1/L2/L3 keys and every keyed slot plan — identical on both ends.
             //
             // (Feeding them through `compute_hevc_cover_digest` would need
             // byte offsets into `carrier`; the parsed sets are copies, and
             // an offset of 0 quietly hashed the file header instead.)
             let mut hasher = Sha256::new();
-            hasher.update(fmt.cover_salt);
+            hasher.update(&salt);
             hasher.update((parameter_sets.len() as u64).to_be_bytes());
             for ps in parameter_sets {
                 hasher.update((ps.len() as u64).to_be_bytes());
@@ -3264,52 +3754,14 @@ fn derive_carrier_digest(
             }
             hasher.finalize().into()
         }
-        DigestInputs::AnnexB { spans } => compute_hevc_cover_digest(carrier, spans, fmt.cover_salt),
+        DigestInputs::AnnexB { spans } => compute_hevc_cover_digest(carrier, spans, &salt),
     }
-}
-
-/// The credential actually fed to key derivation: the explicit secret, else
-/// the shared public constant -- the same resolution the PNG/JPEG engines use,
-/// so there is exactly one public default key in the whole crate.
-fn effective_secret(secret: Option<&str>) -> String {
-    match secret.filter(|s| !s.is_empty()) {
-        Some(s) => crate::crypto::normalize_nfc(s),
-        None => PUBLIC_DEFAULT_SECRET.to_string(),
-    }
-}
-
-fn derive_hevc_key(
-    secret: Option<&str>,
-    domain: Option<&str>,
-    salt: &[u8; 32],
-    fmt: &HevcFormatProfile,
-) -> [u8; 32] {
-    let secret_bytes = effective_secret(secret);
-    // Optional domain isolation: subkey the secret first, exactly like the
-    // stego envelope layer, so the same password under two domains yields
-    // unrelated keys.
-    let ikm: Vec<u8> = match derive_domain_subkey_with_label(
-        secret_bytes.as_bytes(),
-        domain,
-        b"strhide-hevc-domain-v1",
-    ) {
-        Some(sub) => sub.to_vec(),
-        None => secret_bytes.into_bytes(),
-    };
-    let hk = Hkdf::<Sha256>::new(Some(salt), &ikm);
-    let mut key = [0u8; 32];
-    // HKDF-SHA256 can always produce 32 bytes (255 * 32 > 32), so this
-    // cannot fail. Use `unwrap_or_default` rather than `expect` so that a
-    // hypothetical future change of hash/len cannot abort the process.
-    if hk.expand(fmt.kdf_info, &mut key).is_err() {
-        return [0u8; 32];
-    }
-    key
 }
 
 #[cfg(test)]
 mod capture_tests {
     use super::*;
+    use crate::stego::format::DEFAULT_HEVC_FORMAT;
 
     fn record(bands: Vec<std::ops::Range<usize>>, band_bits: [Vec<u8>; 2]) -> CarrierRecord {
         let total = bands.iter().map(|r| r.len()).sum();
@@ -3375,33 +3827,207 @@ mod capture_tests {
     }
 
     #[test]
-    fn superblock_encode_decode_roundtrip() {
-        let sb = HevcSuperblock {
+    fn superblock_v4_encode_decode_roundtrip() {
+        let sb = HevcSuperblockV4 {
             magic: [0x53, 0x54, 0x52, 0x48],
-            version_and_flags: 0x20,
-            stc_u_body: 2,
+            version: CONTENT_ENVELOPE_VERSION,
+            flags: FLAG_EXT_PRESENT,
+            stc_u: 2,
             window_slices: 12,
-            total_windows: 1,
-            reserved: 0,
-            payload_len: 1024,
-            payload_crc32: 0xDEADBEEF,
+            ext_len: 8,
+            suite_id: 1,
+            body_len: 1040,
             nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         };
         let encoded = sb.encode();
         assert_eq!(encoded.len(), HEVC_SUPERBLOCK_BYTES);
-        let decoded = HevcSuperblock::decode(&encoded).expect("decode superblock");
-        assert_eq!(sb, decoded);
+        let decoded = HevcSuperblockV4::decode(&encoded, sb.magic).expect("decode superblock");
+        assert_eq!(decoded, sb);
     }
 
     #[test]
-    fn superblock_positions_are_distinct() {
-        let positions = superblock_positions(2048);
-        assert_eq!(positions.len(), HEVC_SUPERBLOCK_MIN_SLOTS);
-        let set: HashSet<usize> = positions.iter().copied().collect();
+    fn superblock_v4_rejects_truncated_or_tampered_headers() {
+        let sb = HevcSuperblockV4 {
+            magic: [0x53, 0x54, 0x52, 0x48],
+            version: CONTENT_ENVELOPE_VERSION,
+            flags: 0,
+            stc_u: 2,
+            window_slices: 1,
+            ext_len: 0,
+            suite_id: 1,
+            body_len: 64,
+            nonce: [0u8; 12],
+        };
+        let encoded = sb.encode();
+        // Wrong magic is "someone else's carrier", never a version error.
+        assert!(HevcSuperblockV4::decode(&encoded, [0, 0, 0, 0]).is_err());
+        // CRC mismatch is rejected before any field drives an allocation.
+        let mut flipped = encoded;
+        flipped[0] ^= 0x80;
+        assert!(HevcSuperblockV4::decode(&flipped, sb.magic).is_err());
+        // body_len bounds: 0, below BODY_OVERHEAD, and above HEADER_LEN_MAX.
+        let mut zero = encoded;
+        zero[12..16].copy_from_slice(&0u32.to_be_bytes());
+        let zero_crc = crc32_span(&zero);
+        zero[28..32].copy_from_slice(&zero_crc.to_be_bytes());
+        assert!(HevcSuperblockV4::decode(&zero, sb.magic).is_err());
+        let mut below = encoded;
+        below[12..16].copy_from_slice(&(BODY_OVERHEAD as u32 - 1).to_be_bytes());
+        let below_crc = crc32_span(&below);
+        below[28..32].copy_from_slice(&below_crc.to_be_bytes());
+        assert!(HevcSuperblockV4::decode(&below, sb.magic).is_err());
+        // A forged huge body_len inside the byte range must be rejected by the
+        // slot budget in extract; decode itself cannot know the carrier size.
+        let mut huge = encoded;
+        huge[12..16].copy_from_slice(&0x00FF_FFFFu32.to_be_bytes());
+        let huge_crc = crc32_span(&huge);
+        huge[28..32].copy_from_slice(&huge_crc.to_be_bytes());
+        assert!(HevcSuperblockV4::decode(&huge, sb.magic).is_ok());
+        // Above HEADER_LEN_MAX the length field itself is invalid.
+        let mut over = encoded;
+        over[12..16].copy_from_slice(&0x0400_0000u32.to_be_bytes());
+        let over_crc = crc32_span(&over);
+        over[28..32].copy_from_slice(&over_crc.to_be_bytes());
+        assert!(HevcSuperblockV4::decode(&over, sb.magic).is_err());
+        // Unknown suite is "no data", not an oracle.
+        let mut suite = encoded;
+        suite[10..12].copy_from_slice(&999u16.to_be_bytes());
+        let suite_crc = crc32_span(&suite);
+        suite[28..32].copy_from_slice(&suite_crc.to_be_bytes());
+        assert!(HevcSuperblockV4::decode(&suite, sb.magic).is_err());
+        // Truncation: `decode` takes a fixed 32-byte array, so a short buffer
+        // cannot reach it; the extractor's `sb_raw.len()` guard is the
+        // equivalent check and is covered by the caller contract.
+        assert!(encoded.len() == HEVC_SUPERBLOCK_BYTES);
+    }
+
+    fn crc32_span(bytes: &[u8; HEVC_SUPERBLOCK_BYTES]) -> u32 {
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&bytes[..HEVC_V4_CRC_SPAN]);
+        hasher.finalize()
+    }
+
+    /// Probe and embed must agree byte for byte: the payload the probe
+    /// advertises is exactly the largest body the writer can place, including
+    /// the extension area's slot cost.
+    #[test]
+    fn capacity_formula_is_the_written_body_budget() {
+        let fmt = &DEFAULT_HEVC_FORMAT;
+        for total_slots in [2048usize, 4096, 10000] {
+            for ext_len in [0usize, 8, 16] {
+                let cap =
+                    hevc_max_raw_payload(total_slots, ext_len, fmt).expect("capacity formula");
+                let fits = cap + BODY_OVERHEAD;
+                let slots = StcTrellis::slots_for_params(fits * 8, fmt.stc_h, fmt.stc_u);
+                assert!(hevc_header_slots(ext_len) + slots <= total_slots);
+                if cap > 0 {
+                    let over = cap + 1 + BODY_OVERHEAD;
+                    let over_slots = StcTrellis::slots_for_params(over * 8, fmt.stc_h, fmt.stc_u);
+                    assert!(hevc_header_slots(ext_len) + over_slots > total_slots);
+                }
+            }
+        }
+        // An extension area strictly reduces the payload budget.
+        let plain = hevc_max_raw_payload(4096, 0, fmt).expect("plain");
+        let ext = hevc_max_raw_payload(4096, 8, fmt).expect("ext");
+        assert!(ext < plain);
+    }
+
+    /// The extension area is part of the AAD; a carrier whose extension bytes
+    /// changed must fail authentication.
+    #[test]
+    fn extension_area_is_bound_into_the_aad() {
+        let header = [0x5Au8; HEVC_SUPERBLOCK_BYTES];
+        let without = build_v4_aad(HEVC_FORMAT_ID, &header, &[]);
+        let with = build_v4_aad(HEVC_FORMAT_ID, &header, &[0x01, 0x02, 0xAA, 0xBB]);
+        assert_ne!(without, with);
+        let changed = build_v4_aad(HEVC_FORMAT_ID, &header, &[0x01, 0x02, 0xAA, 0xBC]);
+        assert_ne!(with, changed);
+    }
+
+    #[test]
+    fn unknown_tlv_criticality_is_classified() {
+        assert!(!tags_have_critical(&[0x01, 0x02]));
+        assert!(tags_have_critical(&[0x81]));
+        assert!(tags_have_critical(&[0x01, 0x83]));
+    }
+
+    /// A forged header field with a *recomputed* CRC passes `decode` (the CRC
+    /// only protects against accidental damage), so authentication has to
+    /// reject it: the AAD is built over the exact 32 header bytes.
+    #[test]
+    fn header_tamper_with_recomputed_crc_is_rejected_by_aead() {
+        let sb = HevcSuperblockV4 {
+            magic: [0x53, 0x54, 0x52, 0x48],
+            version: CONTENT_ENVELOPE_VERSION,
+            flags: 0,
+            stc_u: 2,
+            window_slices: 1,
+            ext_len: 0,
+            suite_id: 1,
+            body_len: 32,
+            nonce: [9; 12],
+        };
+        let key = [0x11u8; 32];
+        let original = sb.encode();
+        let plaintext = build_plaintext(&Payload::bytes(b"hevc aead header")).expect("plaintext");
+        let ciphertext = encrypt_v4_with_aad(
+            CipherSuiteId::Aes256Gcm,
+            &key,
+            &sb.nonce,
+            &build_v4_aad(HEVC_FORMAT_ID, &original, &[]),
+            &plaintext,
+        )
+        .expect("encrypt");
+
+        let ok = unpack_v4_envelope_parts(
+            CipherSuiteId::Aes256Gcm,
+            &key,
+            &sb.nonce,
+            &build_v4_aad(HEVC_FORMAT_ID, &original, &[]),
+            &ciphertext,
+            &ExtractParams::default(),
+        )
+        .expect("authentic header decrypts");
+        assert_eq!(ok.as_bytes(), b"hevc aead header");
+
+        let mut forged = sb;
+        forged.window_slices = 999;
+        let forged_bytes = forged.encode();
+        // The CRC is recomputed, so the structural parser accepts it.
+        assert!(HevcSuperblockV4::decode(&forged_bytes, sb.magic).is_ok());
+        let res = unpack_v4_envelope_parts(
+            CipherSuiteId::Aes256Gcm,
+            &key,
+            &sb.nonce,
+            &build_v4_aad(HEVC_FORMAT_ID, &forged_bytes, &[]),
+            &ciphertext,
+            &ExtractParams::default(),
+        );
+        assert!(matches!(res, Err(StrHideError::NoHiddenData(_))));
+    }
+
+    #[test]
+    fn superblock_positions_are_distinct_and_prefix_stable() {
+        let seed = [7u8; 32];
+        let base = superblock_positions(2048, &seed, 0);
+        assert_eq!(base.len(), HEVC_SUPERBLOCK_MIN_SLOTS);
+        let set: HashSet<usize> = base.iter().copied().collect();
         assert_eq!(set.len(), HEVC_SUPERBLOCK_MIN_SLOTS);
-        for &p in &positions {
+        for &p in &base {
             assert!(p < 2048);
         }
+
+        let with_ext = superblock_positions(2048, &seed, 8);
+        assert_eq!(
+            with_ext.len(),
+            HEVC_SUPERBLOCK_MIN_SLOTS + hevc_extension_slots(8)
+        );
+        assert_eq!(with_ext[..base.len()], base[..]);
+
+        // Different credentials must not reproduce the header permutation.
+        let other = superblock_positions(2048, &[9u8; 32], 0);
+        assert_ne!(other, base);
     }
 
     #[test]
@@ -3467,27 +4093,31 @@ mod dialect_tests {
     #[test]
     fn default_format_literals_match_the_wire_spec() {
         let fmt = &DEFAULT_HEVC_FORMAT;
-        assert_eq!(fmt.magic_label, b"strhide-hevc-magic-v2");
+        assert_eq!(fmt.magic_label, b"strhide-hevc-magic-v4");
         assert_eq!(fmt.cover_salt, b"strhide-hevc-cover-v1");
-        assert_eq!(fmt.kdf_info, b"strhide-hevc-aes-key");
         assert_eq!(fmt.stc_h, 7);
         assert_eq!(fmt.stc_u, 2);
-        assert_eq!(fmt.header_bytes, 48);
+        assert_eq!(fmt.cipher.default_suite, CipherSuiteId::Aes256Gcm);
     }
 
-    /// The magic must depend on the credential. A fixed magic plus a
-    /// password-independent header location was a presence oracle; this test
-    /// locks in the fix.
+    /// The V4 magic comes out of the L2 locator keys, so it changes with the
+    /// credential and with the domain; it is not a searchable constant.
     #[test]
-    fn magic_is_derived_from_the_secret_not_a_constant() {
-        let m1 = derive_magic(DEFAULT_HEVC_FORMAT.magic_label, b"secret-one");
-        let m2 = derive_magic(DEFAULT_HEVC_FORMAT.magic_label, b"secret-two");
-        assert_ne!(m1, m2, "different secrets must yield different magics");
-        // Same inputs are stable (both ends derive the same value).
-        assert_eq!(
-            m1,
-            derive_magic(DEFAULT_HEVC_FORMAT.magic_label, b"secret-one")
-        );
+    fn magic_is_derived_from_the_credential_and_domain() {
+        let fmt = &DEFAULT_HEVC_FORMAT;
+        let salt = [0x11u8; 32];
+        let magic_for = |pw: &str, domain: Option<&str>| {
+            let master = derive_locator_master(Credential::Password(pw), domain, fmt.cipher, &salt)
+                .expect("master");
+            derive_l2_locator_keys(&master, fmt.cipher, fmt.magic_label, domain)
+                .expect("locator")
+                .magic4
+        };
+        let m1 = magic_for("secret-one", None);
+        let m2 = magic_for("secret-two", None);
+        assert_ne!(m1, m2, "different credentials must yield different magics");
+        assert_eq!(m1, magic_for("secret-one", None), "stable for same inputs");
+        assert_ne!(m1, magic_for("secret-one", Some("org.acme")));
     }
 
     /// The no-secret fallback is the shared public constant, not a
@@ -3495,27 +4125,35 @@ mod dialect_tests {
     /// the same chain as PNG/JPEG.
     #[test]
     fn no_secret_falls_back_to_the_public_constant() {
-        assert_eq!(
-            effective_secret(None),
-            PUBLIC_DEFAULT_SECRET,
-            "the third public default key constant must stay deleted"
-        );
-        assert_eq!(
-            effective_secret(Some("")),
-            PUBLIC_DEFAULT_SECRET,
-            "an empty secret counts as 'not supplied'"
-        );
-        assert_ne!(effective_secret(Some("pw")), PUBLIC_DEFAULT_SECRET);
+        assert!(matches!(
+            legacy_credential(None),
+            Credential::Password(pw) if pw == PUBLIC_DEFAULT_SECRET
+        ));
+        assert!(matches!(
+            legacy_credential(Some("")),
+            Credential::Password(pw) if pw == PUBLIC_DEFAULT_SECRET
+        ));
+        assert!(matches!(
+            legacy_credential(Some("pw")),
+            Credential::Password(pw) if pw != PUBLIC_DEFAULT_SECRET
+        ));
     }
 
     /// Domain isolation subkeys the credential: same secret, different domain,
-    /// unrelated key.
+    /// unrelated locator master.
     #[test]
-    fn domain_changes_the_derived_key() {
+    fn domain_changes_the_derived_keys() {
         let digest = [7u8; 32];
         let fmt = &DEFAULT_HEVC_FORMAT;
-        let k_none = derive_hevc_key(Some("pw"), None, &digest, fmt);
-        let k_domain = derive_hevc_key(Some("pw"), Some("org.acme"), &digest, fmt);
+        let k_none = derive_locator_master(Credential::Password("pw"), None, fmt.cipher, &digest)
+            .expect("master");
+        let k_domain = derive_locator_master(
+            Credential::Password("pw"),
+            Some("org.acme"),
+            fmt.cipher,
+            &digest,
+        )
+        .expect("master");
         assert_ne!(k_none, k_domain);
     }
 
@@ -3551,8 +4189,9 @@ mod dialect_tests {
     /// so a 40-byte header and a small payload never touch a reference picture.
     #[test]
     fn band_positions_exhaust_the_drift_free_rung_first() {
+        let seed = [3u8; 32];
         let bands = vec![0..10usize, 10..40];
-        let positions = band_positions(&bands, 10);
+        let positions = band_positions(&bands, 10, &seed);
         assert_eq!(positions.len(), 10);
         assert!(positions.iter().all(|p| *p < 10));
         // Every slot of the band is used exactly once (a permutation).
@@ -3561,9 +4200,27 @@ mod dialect_tests {
         assert_eq!(seen, (0..10).collect::<Vec<_>>());
 
         // Spilling into band 1 happens only after band 0 is exhausted.
-        let wide = band_positions(&bands, 25);
+        let wide = band_positions(&bands, 25, &seed);
         assert!(wide[..10].iter().all(|p| *p < 10));
         assert!(wide[10..].iter().all(|p| (10..40).contains(p)));
+    }
+
+    /// The body slot order must depend on the session `perm_seed`; a fixed
+    /// Weyl order would let an analyst reproduce it from the public build.
+    #[test]
+    fn band_positions_are_keyed_by_perm_seed() {
+        let bands = vec![0..16usize, 16..40];
+        let a = band_positions(&bands, 20, &[1u8; 32]);
+        let b = band_positions(&bands, 20, &[2u8; 32]);
+        assert_ne!(a, b, "different session seeds must reorder the slots");
+        // Both remain valid per-band permutations.
+        for (positions, band) in [(&a, &bands[0]), (&b, &bands[0])] {
+            let mut prefix = positions[..16].to_vec();
+            prefix.sort_unstable();
+            assert_eq!(prefix, (0..16).collect::<Vec<_>>());
+            assert!(positions[16..].iter().all(|p| (16..40).contains(p)));
+            let _ = band;
+        }
     }
 
     /// Element `i` must map to the same slot no matter how many elements are
@@ -3571,14 +4228,15 @@ mod dialect_tests {
     /// the whole message with a longer one.
     #[test]
     fn band_positions_are_prefix_stable() {
+        let seed = [5u8; 32];
         let bands = vec![0..7usize, 7..23, 23..24];
-        let full = band_positions(&bands, 24);
+        let full = band_positions(&bands, 24, &seed);
         for count in [1usize, 5, 7, 12, 23] {
-            assert_eq!(band_positions(&bands, count), full[..count].to_vec());
+            assert_eq!(band_positions(&bands, count, &seed), full[..count].to_vec());
         }
         // Empty bands (no slots recorded) must not shift the mapping.
         let with_empty = vec![0..0usize, 0..7, 7..7, 7..23];
-        assert_eq!(band_positions(&with_empty, 12), full[..12].to_vec());
+        assert_eq!(band_positions(&with_empty, 12, &seed), full[..12].to_vec());
     }
 
     #[test]
@@ -3727,4 +4385,99 @@ pub fn bench_scan_slices(
         band1_slots: band1,
         elapsed_micros: elapsed,
     })
+}
+
+#[cfg(test)]
+mod v4_superblock_tests {
+    use super::*;
+
+    // Frozen in docs/stego_content_envelope_v4_golden_vectors_20261103.md.
+    const GOLDEN: &str = concat!(
+        "1234567840010200010400010000012c",
+        "202122232425262728292a2b65db3bcb",
+    );
+    const MAGIC: [u8; 4] = [0x12, 0x34, 0x56, 0x78];
+
+    fn hex<const N: usize>(s: &str) -> [u8; N] {
+        assert_eq!(s.len(), N * 2, "hex length");
+        let mut out = [0u8; N];
+        for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+            out[i] = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn golden_superblock_round_trips_byte_for_byte() {
+        let raw = hex::<32>(GOLDEN);
+        let header = HevcSuperblockV4::decode(&raw, MAGIC).unwrap();
+        assert_eq!(
+            header.version,
+            crate::stego::header::CONTENT_ENVELOPE_VERSION
+        );
+        assert_eq!(header.stc_u, 2);
+        assert_eq!(header.window_slices, 1);
+        assert_eq!(header.ext_len, 4);
+        assert_eq!(header.suite_id, 1);
+        assert_eq!(header.body_len, 300);
+        assert!(header.ext_present());
+        assert!(!header.ext_critical());
+        assert_eq!(header.encode(), raw);
+    }
+
+    #[test]
+    fn magic_and_field_ranges_are_enforced() {
+        let raw = hex::<32>(GOLDEN);
+        let err =
+            HevcSuperblockV4::decode(&raw, [0x12, 0x34, 0x56, 0x79]).expect_err("wrong magic");
+        assert!(matches!(err, StrHideError::CorruptedData(_)));
+
+        let mut header = HevcSuperblockV4::decode(&raw, MAGIC).unwrap();
+        header.version = 0x30;
+        let err = HevcSuperblockV4::decode(&header.encode(), MAGIC).expect_err("v3 must fail");
+        assert!(matches!(err, StrHideError::UnsupportedVersion(_)));
+
+        let mut header = HevcSuperblockV4::decode(&raw, MAGIC).unwrap();
+        header.flags = 0x04;
+        assert!(HevcSuperblockV4::decode(&header.encode(), MAGIC).is_err());
+
+        let mut header = HevcSuperblockV4::decode(&raw, MAGIC).unwrap();
+        header.ext_len = 0;
+        assert!(HevcSuperblockV4::decode(&header.encode(), MAGIC).is_err());
+
+        let mut header = HevcSuperblockV4::decode(&raw, MAGIC).unwrap();
+        header.ext_len = 65;
+        assert!(HevcSuperblockV4::decode(&header.encode(), MAGIC).is_err());
+
+        let mut header = HevcSuperblockV4::decode(&raw, MAGIC).unwrap();
+        header.stc_u = 0;
+        assert!(HevcSuperblockV4::decode(&header.encode(), MAGIC).is_err());
+
+        let mut header = HevcSuperblockV4::decode(&raw, MAGIC).unwrap();
+        header.stc_u = 65;
+        assert!(HevcSuperblockV4::decode(&header.encode(), MAGIC).is_err());
+
+        let mut header = HevcSuperblockV4::decode(&raw, MAGIC).unwrap();
+        header.window_slices = 0;
+        assert!(HevcSuperblockV4::decode(&header.encode(), MAGIC).is_err());
+
+        let mut header = HevcSuperblockV4::decode(&raw, MAGIC).unwrap();
+        header.suite_id = 3;
+        let err = HevcSuperblockV4::decode(&header.encode(), MAGIC).expect_err("unknown suite");
+        assert!(matches!(err, StrHideError::UnsupportedVersion(_)));
+
+        let mut raw = hex::<32>(GOLDEN);
+        raw[16] ^= 0x01;
+        let err = HevcSuperblockV4::decode(&raw, MAGIC).expect_err("flip must fail CRC");
+        assert!(matches!(err, StrHideError::CorruptedData(_)));
+    }
+
+    #[test]
+    fn extension_slots_match_the_plan() {
+        assert_eq!(hevc_extension_slots(0), 0);
+        assert_eq!(hevc_extension_slots(1), 28);
+        assert_eq!(hevc_extension_slots(64), 1036);
+        assert_eq!(524 + hevc_extension_slots(64), 1560);
+        assert!(524 + hevc_extension_slots(HEVC_MAX_EXT_BYTES) <= HEVC_HEADER_SLOTS_MAX);
+    }
 }

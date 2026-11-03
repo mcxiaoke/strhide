@@ -106,7 +106,9 @@ pub async fn probe_stego_capacity_cmd(
 
             let probe_opts = ProbeOptions {
                 password: password.as_deref(),
+                key: None,
                 domain: domain.as_deref(),
+                extensions: Vec::new(),
                 safety,
                 tuning,
                 exact,
@@ -256,6 +258,7 @@ pub async fn extract_stego_file_cmd(
 
             let ex_opts = ExtractOptions {
                 password: password.as_deref(),
+                key: None,
                 domain: domain.as_deref(),
                 limits: strhide::stego::ExtractParams::default(),
                 control: ctrl,

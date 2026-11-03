@@ -1,19 +1,18 @@
-//! V3 superblock (44 bytes / 352 bits) and the extension TLV area.
+//! JPEG content-domain V4 superblock (44 bytes / 352 bits).
 //!
 //! ```text
 //! off  size  field
-//! 0    1     version_major        incompatible changes only (1)
-//! 1    1     version_minor        optional extensions only (0)
-//! 2    2     flags                reserved, must be 0
-//! 4    16    salt                 HKDF salt of the payload keys (not the KDF salt)
-//! 20   12    nonce                AEAD nonce
-//! 32   4     envelope_len         BE, bits 0..26; bits 26..32 must be 0
-//! 36   2     suite_id             BE, must equal the suite that located this header
-//! 38   1     codec_id             0 = ternary STC
-//! 39   1     h                    STC constraint height 4..=10
-//! 40   1     u                    body group size 1..=64
-//! 41   1     components_mask      bit0 = Y; others reserved
-//! 42   2     ext_bytes            extension-area byte count, 0 = none
+//! 0    1     version               (major << 4) | minor, major must be 4
+//! 1    1     flags                 EXT_PRESENT / EXT_CRITICAL
+//! 2    2     suite_id              AEAD suite id
+//! 4    16    salt                  L3 HKDF salt
+//! 20   12    nonce                 AEAD nonce
+//! 32   4     body_len              ciphertext length including the tag
+//! 36   1     codec_id              0 = ternary STC
+//! 37   1     stc_h                 STC constraint height 4..=10
+//! 38   1     stc_u                 body group size 1..=64
+//! 39   1     ext_len               extension TLV byte count, 0 = none
+//! 40   4     header_crc32          CRC32-IEEE over bytes[0..40]
 //! ```
 //!
 //! Every field is covered by the AEAD's associated data (the whole 44 bytes), so
@@ -24,465 +23,236 @@
 //!
 //! After release the offsets and their meaning never change. New fields go into
 //! the extension area as TLVs; only a `format_major` bump may reshape this
-//! struct. [`FIELD_LAYOUT`] is the machine-readable copy of the table above and
-//! is asserted against the encoder in the tests.
+//! struct.
 
 use crate::errors::StrHideError;
-use crate::stego::envelope::MIN_ENVELOPE_LEN;
-use crate::stego::format::JpegFormatProfile;
+use crate::stego::header::HEADER_LEN_MAX;
 
 /// Encoded superblock size in bytes.
 pub use crate::stego::format::JPEG_SUPERBLOCK_BYTES as SUPERBLOCK_BYTES;
 
-/// Largest envelope the 26-bit length field can express (64 MiB).
-pub const ENVELOPE_LEN_MAX: u32 = (1 << 26) - 1;
-
 /// Codec id: ternary syndrome-trellis codes.
 pub const CODEC_TERNARY_STC: u8 = 0;
 
-/// Byte offsets and widths of every superblock field, in wire order.
+// ---------------------------------------------------------------------------
+// Content-domain V4 superblock
+// ---------------------------------------------------------------------------
+
+/// CRC scope of the 44-byte JPEG superblock.
+const V4_CRC_SPAN: usize = 40;
+
+/// 44-byte content header of a JPEG carrier.
 ///
-/// "Documentation as a test": the unit tests encode a `Superblock`, read each
-/// field back out of the raw bytes at these offsets, and compare.
-pub const FIELD_LAYOUT: &[(&str, usize, usize)] = &[
-    ("version_major", 0, 1),
-    ("version_minor", 1, 1),
-    ("flags", 2, 2),
-    ("salt", 4, 16),
-    ("nonce", 20, 12),
-    ("envelope_len", 32, 4),
-    ("suite_id", 36, 2),
-    ("codec_id", 38, 1),
-    ("h", 39, 1),
-    ("u", 40, 1),
-    ("components_mask", 41, 1),
-    ("ext_bytes", 42, 2),
-];
-
-/// Bit 0 of `components_mask`: the luminance component carries the payload.
-pub const COMPONENT_Y: u8 = 0x01;
-
-/// Fixed-size V3 header that precedes the payload ciphertext.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Superblock {
-    /// Format major version.
-    pub version_major: u8,
-    /// Format minor version (forward-compatible: a newer minor is accepted).
-    pub version_minor: u8,
-    /// Reserved bits; must be zero.
-    pub flags: u16,
-    /// HKDF salt for the payload keys.
+/// `format_id = 4` and `components_mask = Y` are implied by the carrier and
+/// bound through the AAD prefix; they are not stored.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JpegSuperblockV4 {
+    /// `(major << 4) | minor`.
+    pub version: u8,
+    /// `EXT_PRESENT` / `EXT_CRITICAL`.
+    pub flags: u8,
+    /// AEAD suite id.
+    pub suite_id: u16,
+    /// L3 HKDF salt.
     pub salt: [u8; 16],
     /// AEAD nonce.
     pub nonce: [u8; 12],
-    /// Logical envelope length: 28-byte legacy salt/nonce header + ciphertext.
-    pub envelope_len: u32,
-    /// Cipher suite id; indexes the profile's suite table.
-    pub suite_id: u16,
-    /// Matrix-coding id.
+    /// Ciphertext length including the tag.
+    pub body_len: u32,
+    /// Ternary STC is the only V4 value.
     pub codec_id: u8,
-    /// STC constraint height.
-    pub h: u8,
-    /// STC group size of the body trellis.
-    pub u: u8,
-    /// Components carrying payload bits.
-    pub components_mask: u8,
-    /// Extension-area size in bytes.
-    pub ext_bytes: u16,
+    /// Trellis height (4..=10).
+    pub stc_h: u8,
+    /// Trellis width (1..=64).
+    pub stc_u: u8,
+    /// Extension TLV byte count (0..=255).
+    pub ext_len: u8,
 }
 
-impl Superblock {
-    /// Serialize to the 44-byte wire form.
+impl JpegSuperblockV4 {
+    /// Serialize the superblock, including CRC32-IEEE over `bytes[0..40]`.
     pub fn encode(&self) -> [u8; SUPERBLOCK_BYTES] {
         let mut out = [0u8; SUPERBLOCK_BYTES];
-        out[0] = self.version_major;
-        out[1] = self.version_minor;
-        out[2..4].copy_from_slice(&self.flags.to_be_bytes());
+        out[0] = self.version;
+        out[1] = self.flags;
+        out[2..4].copy_from_slice(&self.suite_id.to_be_bytes());
         out[4..20].copy_from_slice(&self.salt);
         out[20..32].copy_from_slice(&self.nonce);
-        out[32..36].copy_from_slice(&self.envelope_len.to_be_bytes());
-        out[36..38].copy_from_slice(&self.suite_id.to_be_bytes());
-        out[38] = self.codec_id;
-        out[39] = self.h;
-        out[40] = self.u;
-        out[41] = self.components_mask;
-        out[42..44].copy_from_slice(&self.ext_bytes.to_be_bytes());
+        out[32..36].copy_from_slice(&self.body_len.to_be_bytes());
+        out[36] = self.codec_id;
+        out[37] = self.stc_h;
+        out[38] = self.stc_u;
+        out[39] = self.ext_len;
+        let crc = crc32fast::hash(&out[..V4_CRC_SPAN]);
+        out[V4_CRC_SPAN..].copy_from_slice(&crc.to_be_bytes());
         out
     }
 
-    /// Parse the 44-byte wire form, enforcing every structural invariant that
-    /// does not depend on the profile.
-    ///
-    /// Version and suite agreement are checked by [`Self::validate_against`],
-    /// because the trial enumeration has to know which suite it just tried.
+    /// Parse and validate a JPEG superblock.
     pub fn decode(bytes: &[u8; SUPERBLOCK_BYTES]) -> Result<Self, StrHideError> {
-        let flags = u16::from_be_bytes([bytes[2], bytes[3]]);
-        let envelope_len = u32::from_be_bytes([bytes[32], bytes[33], bytes[34], bytes[35]]);
-        let sb = Self {
-            version_major: bytes[0],
-            version_minor: bytes[1],
+        use crate::stego::header::{FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT, MAX_EXT_BYTES};
+
+        let version = bytes[0];
+        let flags = bytes[1];
+        let suite_id = u16::from_be_bytes(bytes[2..4].try_into().expect("2-byte suite"));
+        let salt = bytes[4..20].try_into().expect("16-byte salt slice");
+        let nonce = bytes[20..32].try_into().expect("12-byte nonce slice");
+        let body_len = u32::from_be_bytes(bytes[32..36].try_into().expect("4-byte body_len"));
+        let codec_id = bytes[36];
+        let stc_h = bytes[37];
+        let stc_u = bytes[38];
+        let ext_len = bytes[39];
+
+        let (major, minor) = (version >> 4, version & 0x0F);
+        if major != 4 {
+            return Err(StrHideError::UnsupportedVersion(format!(
+                "JPEG content envelope major version {major}.{minor} is not supported"
+            )));
+        }
+        if flags & !(FLAG_EXT_PRESENT | FLAG_EXT_CRITICAL) != 0 {
+            return Err(StrHideError::CorruptedData(format!(
+                "JPEG content envelope flags {flags:#04x} use reserved bits"
+            )));
+        }
+        if flags & FLAG_EXT_PRESENT != (ext_len > 0) as u8 {
+            return Err(StrHideError::CorruptedData(
+                "JPEG EXT_PRESENT does not match ext_len".into(),
+            ));
+        }
+        if crate::crypto::CipherSuiteId::from_u16(suite_id).is_none() {
+            return Err(StrHideError::UnsupportedVersion(format!(
+                "Unknown JPEG content cipher suite id {suite_id}"
+            )));
+        }
+        let body_overhead = crate::stego::envelope::BODY_OVERHEAD as u32;
+        if body_len < body_overhead || body_len > HEADER_LEN_MAX {
+            return Err(StrHideError::CorruptedData(format!(
+                "JPEG content body_len {body_len} is outside {body_overhead}..={HEADER_LEN_MAX}"
+            )));
+        }
+        if codec_id != CODEC_TERNARY_STC {
+            return Err(StrHideError::CorruptedData(format!(
+                "JPEG content codec_id {codec_id} must be {CODEC_TERNARY_STC}"
+            )));
+        }
+        if !(4..=10).contains(&stc_h) || !(1..=64).contains(&stc_u) {
+            return Err(StrHideError::CorruptedData(format!(
+                "JPEG content STC parameters h={stc_h} u={stc_u} are out of range"
+            )));
+        }
+        if ext_len as usize > MAX_EXT_BYTES {
+            return Err(StrHideError::CorruptedData(format!(
+                "JPEG content ext_len {ext_len} is above {MAX_EXT_BYTES}"
+            )));
+        }
+
+        let expected_crc = u32::from_be_bytes(bytes[40..44].try_into().expect("4-byte crc"));
+        let actual_crc = crc32fast::hash(&bytes[..V4_CRC_SPAN]);
+        if actual_crc != expected_crc {
+            return Err(StrHideError::CorruptedData(format!(
+                "JPEG content header CRC mismatch: stored {expected_crc:08x}, computed {actual_crc:08x}"
+            )));
+        }
+
+        Ok(Self {
+            version,
             flags,
-            salt: bytes[4..20].try_into().expect("salt slice"),
-            nonce: bytes[20..32].try_into().expect("nonce slice"),
-            envelope_len,
-            suite_id: u16::from_be_bytes([bytes[36], bytes[37]]),
-            codec_id: bytes[38],
-            h: bytes[39],
-            u: bytes[40],
-            components_mask: bytes[41],
-            ext_bytes: u16::from_be_bytes([bytes[42], bytes[43]]),
-        };
-        sb.check_reserved()?;
-        Ok(sb)
+            suite_id,
+            salt,
+            nonce,
+            body_len,
+            codec_id,
+            stc_h,
+            stc_u,
+            ext_len,
+        })
     }
 
-    /// Field checks that must hold for any version: reserved bits zero, known
-    /// codec, in-range trellis parameters, plausible envelope length.
-    fn check_reserved(&self) -> Result<(), StrHideError> {
-        if self.flags != 0 {
-            return Err(StrHideError::CorruptedData(format!(
-                "Superblock flags {:#06x} are reserved and must be zero",
-                self.flags
-            )));
-        }
-        if self.envelope_len & !ENVELOPE_LEN_MAX != 0 {
-            return Err(StrHideError::CorruptedData(
-                "Superblock envelope_len has non-zero reserved bits".into(),
-            ));
-        }
-        if (self.envelope_len as usize) < MIN_ENVELOPE_LEN {
-            return Err(StrHideError::CorruptedData(format!(
-                "Superblock envelope_len {} is below the minimum {MIN_ENVELOPE_LEN}",
-                self.envelope_len
-            )));
-        }
-        if self.codec_id != CODEC_TERNARY_STC {
-            return Err(StrHideError::UnsupportedVersion(format!(
-                "Superblock codec_id {} is not supported by this build (expected {CODEC_TERNARY_STC})",
-                self.codec_id
-            )));
-        }
-        if !(4..=10).contains(&self.h) {
-            return Err(StrHideError::CorruptedData(format!(
-                "Superblock STC height {} is outside 4..=10",
-                self.h
-            )));
-        }
-        if !(1..=64).contains(&self.u) {
-            return Err(StrHideError::CorruptedData(format!(
-                "Superblock STC group size {} is outside 1..=64",
-                self.u
-            )));
-        }
-        if self.components_mask != COMPONENT_Y {
-            return Err(StrHideError::UnsupportedVersion(format!(
-                "Superblock components_mask {:#04x} uses unsupported channels",
-                self.components_mask
-            )));
-        }
-        Ok(())
+    /// Whether the extension area is present.
+    pub fn ext_present(&self) -> bool {
+        self.flags & crate::stego::header::FLAG_EXT_PRESENT != 0
     }
 
-    /// Version / suite checks that need the profile and the suite being tried.
-    pub fn validate_against(
-        &self,
-        fmt: &JpegFormatProfile,
-        tried_suite: u16,
-    ) -> Result<(), StrHideError> {
-        if self.version_major != fmt.format_major {
-            return Err(StrHideError::UnsupportedVersion(format!(
-                "Superblock major version {} is not supported by this build (expected {})",
-                self.version_major, fmt.format_major
-            )));
-        }
-        if self.suite_id != tried_suite {
-            return Err(StrHideError::CorruptedData(format!(
-                "Superblock suite {} does not match the suite that located it ({tried_suite})",
-                self.suite_id
-            )));
-        }
-        Ok(())
+    /// Whether at least one extension TLV is critical.
+    pub fn ext_critical(&self) -> bool {
+        self.flags & crate::stego::header::FLAG_EXT_CRITICAL != 0
     }
-
-    /// Ciphertext length carried by the body: envelope length minus the legacy
-    /// 28-byte salt/nonce prefix, which now lives in the superblock.
-    pub fn ciphertext_len(&self) -> usize {
-        self.envelope_len as usize - crate::stego::envelope::HEADER_OVERHEAD
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Extension area
-// ---------------------------------------------------------------------------
-
-/// Bit 7 of a TLV type: unknown types with it set are fatal.
-pub const TLV_CRITICAL: u8 = 0x80;
-
-/// Largest value a single TLV can carry.
-pub const TLV_MAX_VALUE: usize = 255;
-
-/// Type 0 is reserved for zero padding of the unused extension tail.
-pub const TLV_TYPE_PADDING: u8 = 0;
-
-/// One extension record.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Tlv {
-    /// Type id; bit 7 = critical.
-    pub type_id: u8,
-    /// Value bytes (0..=255).
-    pub value: Vec<u8>,
-}
-
-impl Tlv {
-    /// Whether an unknown reader must refuse the carrier.
-    pub fn is_critical(&self) -> bool {
-        self.type_id & TLV_CRITICAL != 0
-    }
-}
-
-/// Encode TLVs back to back into the extension area.
-///
-/// The area length is exactly the sum of the records: padding is legal on the
-/// wire but never produced here.
-pub fn encode_extension(tlvs: &[Tlv]) -> Result<Vec<u8>, StrHideError> {
-    let mut out = Vec::new();
-    for tlv in tlvs {
-        if tlv.type_id == TLV_TYPE_PADDING {
-            return Err(StrHideError::General(
-                "TLV type 0 is reserved for extension-area padding".into(),
-            ));
-        }
-        if tlv.value.len() > TLV_MAX_VALUE {
-            return Err(StrHideError::General(format!(
-                "TLV type {:#04x} carries {} bytes, the maximum is {TLV_MAX_VALUE}",
-                tlv.type_id,
-                tlv.value.len()
-            )));
-        }
-        out.push(tlv.type_id);
-        out.push(tlv.value.len() as u8);
-        out.extend_from_slice(&tlv.value);
-    }
-    Ok(out)
-}
-
-/// Parse the extension area into `(type, value)` records.
-///
-/// A `type` byte of 0 starts the padding tail: every remaining byte must then be
-/// zero, so a decoder that does not know a future field cannot silently skip
-/// over it. Truncated or over-long records are `CorruptedData`.
-pub fn parse_extension(area: &[u8]) -> Result<Vec<(u8, &[u8])>, StrHideError> {
-    let mut records = Vec::new();
-    let mut pos = 0usize;
-    while pos < area.len() {
-        let type_id = area[pos];
-        if type_id == TLV_TYPE_PADDING {
-            if area[pos..].iter().any(|&b| b != 0) {
-                return Err(StrHideError::CorruptedData(
-                    "Extension area has non-zero bytes after the padding marker".into(),
-                ));
-            }
-            break;
-        }
-        if pos + 2 > area.len() {
-            return Err(StrHideError::CorruptedData(
-                "Extension area ends inside a TLV header".into(),
-            ));
-        }
-        let len = area[pos + 1] as usize;
-        let end = pos + 2 + len;
-        if end > area.len() {
-            return Err(StrHideError::CorruptedData(format!(
-                "TLV type {type_id:#04x} claims {len} bytes past the end of the extension area"
-            )));
-        }
-        records.push((type_id, &area[pos + 2..end]));
-        pos = end;
-    }
-    Ok(records)
 }
 
 #[cfg(test)]
-mod tests {
+mod v4_superblock_tests {
     use super::*;
-    use crate::stego::format::DEFAULT_JPEG_FORMAT;
 
-    fn sample() -> Superblock {
-        Superblock {
-            version_major: 1,
-            version_minor: 0,
-            flags: 0,
-            salt: std::array::from_fn(|i| i as u8),
-            nonce: std::array::from_fn(|i| 0xA0 + i as u8),
-            envelope_len: 1234,
-            suite_id: 1,
-            codec_id: CODEC_TERNARY_STC,
-            h: 8,
-            u: 24,
-            components_mask: COMPONENT_Y,
-            ext_bytes: 5,
+    // Frozen in docs/stego_content_envelope_v4_golden_vectors_20261103.md.
+    const GOLDEN: &str = concat!(
+        "40010001000102030405060708090a0b",
+        "0c0d0e0f202122232425262728292a2b",
+        "0000012c000818044d475109",
+    );
+
+    fn hex<const N: usize>(s: &str) -> [u8; N] {
+        assert_eq!(s.len(), N * 2, "hex length");
+        let mut out = [0u8; N];
+        for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+            out[i] = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
         }
+        out
     }
 
     #[test]
-    fn every_field_round_trips_at_its_frozen_offset() {
-        let sb = sample();
-        let bytes = sb.encode();
-        assert_eq!(bytes.len(), SUPERBLOCK_BYTES);
-        // Documentation-as-test: read each field straight out of the bytes.
-        assert_eq!(bytes[0], 1);
-        assert_eq!(bytes[1], 0);
-        assert_eq!(&bytes[2..4], &[0, 0]);
-        assert_eq!(&bytes[4..20], &sb.salt);
-        assert_eq!(&bytes[20..32], &sb.nonce);
-        assert_eq!(u32::from_be_bytes(bytes[32..36].try_into().unwrap()), 1234);
-        assert_eq!(u16::from_be_bytes(bytes[36..38].try_into().unwrap()), 1);
-        assert_eq!(bytes[38], CODEC_TERNARY_STC);
-        assert_eq!(bytes[39], 8);
-        assert_eq!(bytes[40], 24);
-        assert_eq!(bytes[41], COMPONENT_Y);
-        assert_eq!(u16::from_be_bytes(bytes[42..44].try_into().unwrap()), 5);
-
-        assert_eq!(Superblock::decode(&bytes).unwrap(), sb);
-        // The layout table must cover the whole block, without gaps.
-        let mut cursor = 0;
-        for (name, off, size) in FIELD_LAYOUT {
-            assert_eq!(*off, cursor, "field {name} is not contiguous");
-            cursor += size;
-        }
-        assert_eq!(cursor, SUPERBLOCK_BYTES);
-    }
-
-    #[test]
-    fn reserved_and_out_of_range_fields_are_rejected() {
-        let mut bytes = sample().encode();
-        bytes[3] = 1; // flags
-        assert!(Superblock::decode(&bytes).is_err());
-
-        let mut bytes = sample().encode();
-        bytes[32] = 0x04; // envelope_len bit 26
-        assert!(Superblock::decode(&bytes).is_err());
-
-        let mut bytes = sample().encode();
-        bytes[32..36].copy_from_slice(&(MIN_ENVELOPE_LEN as u32 - 1).to_be_bytes());
-        assert!(Superblock::decode(&bytes).is_err());
-
-        let mut bytes = sample().encode();
-        bytes[38] = 9; // unknown codec
-        assert!(Superblock::decode(&bytes).is_err());
-
-        let mut bytes = sample().encode();
-        bytes[39] = 3; // h out of range
-        assert!(Superblock::decode(&bytes).is_err());
-
-        let mut bytes = sample().encode();
-        bytes[39] = 11;
-        assert!(Superblock::decode(&bytes).is_err());
-
-        let mut bytes = sample().encode();
-        bytes[40] = 0; // u out of range
-        assert!(Superblock::decode(&bytes).is_err());
-
-        let mut bytes = sample().encode();
-        bytes[41] = 0; // no Y component
-        assert!(Superblock::decode(&bytes).is_err());
-    }
-
-    #[test]
-    fn version_and_suite_are_checked_against_the_trial() {
-        let sb = sample();
-        assert!(sb.validate_against(&DEFAULT_JPEG_FORMAT, 1).is_ok());
-        assert!(matches!(
-            sb.validate_against(&DEFAULT_JPEG_FORMAT, 2),
-            Err(StrHideError::CorruptedData(_))
-        ));
-
-        let mut other_major = sb;
-        other_major.version_major = 2;
-        assert!(matches!(
-            other_major.validate_against(&DEFAULT_JPEG_FORMAT, 1),
-            Err(StrHideError::UnsupportedVersion(_))
-        ));
-
-        // A newer minor is forward-compatible.
-        let mut newer_minor = sb;
-        newer_minor.version_minor = 7;
-        assert!(
-            newer_minor
-                .validate_against(&DEFAULT_JPEG_FORMAT, 1)
-                .is_ok()
+    fn golden_superblock_round_trips_byte_for_byte() {
+        let raw = hex::<44>(GOLDEN);
+        let header = JpegSuperblockV4::decode(&raw).unwrap();
+        assert_eq!(
+            header.version,
+            crate::stego::header::CONTENT_ENVELOPE_VERSION
         );
+        assert_eq!(header.suite_id, 1);
+        assert_eq!(header.body_len, 300);
+        assert_eq!(header.codec_id, CODEC_TERNARY_STC);
+        assert_eq!((header.stc_h, header.stc_u), (8, 24));
+        assert_eq!(header.ext_len, 4);
+        assert!(header.ext_present());
+        assert!(!header.ext_critical());
+        assert_eq!(header.encode(), raw);
     }
 
     #[test]
-    fn envelope_len_accounts_for_the_legacy_prefix() {
-        let mut sb = sample();
-        sb.envelope_len = MIN_ENVELOPE_LEN as u32;
-        assert_eq!(sb.ciphertext_len(), MIN_ENVELOPE_LEN - 28);
-        assert_eq!(sb.ciphertext_len() + 28, MIN_ENVELOPE_LEN);
-    }
+    fn crc_and_field_ranges_are_enforced() {
+        let mut raw = hex::<44>(GOLDEN);
+        raw[4] ^= 0x01;
+        let err = JpegSuperblockV4::decode(&raw).expect_err("flip must fail CRC");
+        assert!(matches!(err, StrHideError::CorruptedData(_)));
 
-    #[test]
-    fn tlv_roundtrip_and_skipping() {
-        let tlvs = vec![
-            Tlv {
-                type_id: 0x81,
-                value: vec![1, 2, 3],
-            },
-            Tlv {
-                type_id: 0x02,
-                value: Vec::new(),
-            },
-        ];
-        let area = encode_extension(&tlvs).unwrap();
-        assert_eq!(area, vec![0x81, 3, 1, 2, 3, 0x02, 0]);
-        let parsed = parse_extension(&area).unwrap();
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0], (0x81, &[1u8, 2, 3][..]));
-        assert!(
-            Tlv {
-                type_id: 0x81,
-                value: vec![]
-            }
-            .is_critical()
-        );
-        assert!(!tlvs[1].is_critical());
-    }
+        let mut header = JpegSuperblockV4::decode(&hex::<44>(GOLDEN)).unwrap();
+        header.version = 0x30;
+        let err = JpegSuperblockV4::decode(&header.encode()).expect_err("v3 must fail");
+        assert!(matches!(err, StrHideError::UnsupportedVersion(_)));
 
-    #[test]
-    fn tlv_padding_must_be_zero() {
-        let area = [0x02, 1, 9, 0, 0, 0];
-        assert_eq!(parse_extension(&area).unwrap().len(), 1);
-        let bad = [0x02, 1, 9, 0, 7, 0];
-        assert!(matches!(
-            parse_extension(&bad),
-            Err(StrHideError::CorruptedData(_))
-        ));
-    }
+        let mut header = JpegSuperblockV4::decode(&hex::<44>(GOLDEN)).unwrap();
+        header.flags = 0x04;
+        assert!(JpegSuperblockV4::decode(&header.encode()).is_err());
 
-    #[test]
-    fn tlv_truncation_is_rejected() {
-        assert!(matches!(
-            parse_extension(&[0x02, 5, 1]),
-            Err(StrHideError::CorruptedData(_))
-        ));
-        assert!(matches!(
-            parse_extension(&[0x02]),
-            Err(StrHideError::CorruptedData(_))
-        ));
-    }
+        let mut header = JpegSuperblockV4::decode(&hex::<44>(GOLDEN)).unwrap();
+        header.ext_len = 0;
+        let err = JpegSuperblockV4::decode(&header.encode()).expect_err("EXT_PRESENT mismatch");
+        assert!(matches!(err, StrHideError::CorruptedData(_)));
 
-    #[test]
-    fn tlv_encode_rejects_oversize_and_padding_type() {
-        let big = Tlv {
-            type_id: 1,
-            value: vec![0; 256],
-        };
-        assert!(encode_extension(&[big]).is_err());
-        let padding = Tlv {
-            type_id: 0,
-            value: vec![1],
-        };
-        assert!(encode_extension(&[padding]).is_err());
+        let mut header = JpegSuperblockV4::decode(&hex::<44>(GOLDEN)).unwrap();
+        header.suite_id = 3;
+        let err = JpegSuperblockV4::decode(&header.encode()).expect_err("unknown suite");
+        assert!(matches!(err, StrHideError::UnsupportedVersion(_)));
+
+        let mut header = JpegSuperblockV4::decode(&hex::<44>(GOLDEN)).unwrap();
+        header.codec_id = 1;
+        assert!(JpegSuperblockV4::decode(&header.encode()).is_err());
+
+        let mut header = JpegSuperblockV4::decode(&hex::<44>(GOLDEN)).unwrap();
+        header.stc_u = 0;
+        assert!(JpegSuperblockV4::decode(&header.encode()).is_err());
+
+        let mut header = JpegSuperblockV4::decode(&hex::<44>(GOLDEN)).unwrap();
+        header.stc_h = 3;
+        assert!(JpegSuperblockV4::decode(&header.encode()).is_err());
     }
 }

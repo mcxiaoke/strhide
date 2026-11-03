@@ -1,5 +1,10 @@
 # strhide 库级接口审计与重构方案报告
 
+> **历史文档（已被取代）**：本文记录 2026-11-03 重构前的审计结论与旧 API 快照，
+> 其中的 `CipherSuite` / `SUITES` / `FeatureWord` / `header_bytes` 等均属旧设计，
+> 不代表当前实现。当前架构与 API 请以 [ARCHITECTURE.md](./api/ARCHITECTURE.md)、
+> [STEGO-API.md](./api/STEGO-API.md)、[WIRE_SPEC.md](./api/WIRE_SPEC.md) 为准。
+
 > 日期：2026-11-03  
 > 适用版本：strhide 0.8.x（开发中，未正式发布）  
 > 涉及模块：`rust/src/{lib.rs, facade.rs, stego/*, structure/*, core/*}`  

@@ -92,8 +92,12 @@ pub fn embed_heif_bridge<'a>(
 
     let mut jpeg_params = tuning.jpeg_params.clone();
     jpeg_params.deterministic = bridge.freshness.is_seeded();
-    let secret = bridge.resolved_secret(bridge.dialect);
+    let cred =
+        crate::stego::options::resolve_credential(bridge.password, bridge.key, bridge.dialect)?;
     let domain = bridge.resolved_domain(bridge.dialect);
+    let suite_id = bridge
+        .suite_id
+        .unwrap_or_else(|| bridge.dialect.jpeg_format().default_suite().as_u16());
 
     let anon_payload;
     let eff_payload = if bridge.no_filename && payload.name().is_some() {
@@ -108,8 +112,10 @@ pub fn embed_heif_bridge<'a>(
             let stego_bytes = jpeg::embed_jpeg(
                 carrier_slice,
                 eff_payload,
-                secret,
+                cred,
                 domain,
+                suite_id,
+                &bridge.extensions,
                 bridge.dialect.jpeg_format(),
                 &jpeg_params,
                 bridge.safety,
@@ -123,8 +129,14 @@ pub fn embed_heif_bridge<'a>(
             let stego_bytes = png::embed_png(
                 carrier_slice,
                 eff_payload,
-                secret,
+                cred,
                 domain,
+                bridge.suite_id.unwrap_or_else(|| {
+                    crate::stego::format::OFFICIAL_PNG_CIPHER
+                        .default_suite
+                        .as_u16()
+                }),
+                &bridge.extensions,
                 bridge.dialect.png_format(),
                 &*tuning.png_model,
                 &tuning.png_params,
@@ -160,14 +172,15 @@ pub fn extract_heif_bridge(
     // The carrier is self-describing, so the read path always resolves the
     // default tuning; `BridgeOptions::tuning` only shapes what is written.
     let tuning = StegoTuning::Auto.resolve();
-    let secret = bridge.resolved_secret(bridge.dialect);
+    let cred =
+        crate::stego::options::resolve_credential(bridge.password, bridge.key, bridge.dialect)?;
     let domain = bridge.resolved_domain(bridge.dialect);
 
     match target.kind {
         BridgeTargetKind::DirectJpeg { .. } | BridgeTargetKind::ExifJpeg { .. } => {
             jpeg::extract_jpeg(
                 carrier_slice,
-                secret,
+                cred,
                 domain,
                 bridge.dialect.jpeg_format(),
                 limits,
@@ -176,11 +189,12 @@ pub fn extract_heif_bridge(
         }
         BridgeTargetKind::DirectSpatial { .. } => png::extract_png(
             carrier_slice,
-            secret,
+            cred,
             domain,
             bridge.dialect.png_format(),
             &*tuning.png_model,
             &tuning.png_params,
+            limits,
             control,
         ),
     }
@@ -195,7 +209,8 @@ pub fn probe_heif_bridge_capacity(
     let target = find_bridge_target(carrier_bytes)?;
     let carrier_slice = &carrier_bytes[target.file_offset..target.file_offset + target.length];
     let tuning = bridge.tuning.resolve();
-    let secret = bridge.resolved_secret(bridge.dialect);
+    let cred =
+        crate::stego::options::resolve_credential(bridge.password, bridge.key, bridge.dialect)?;
     let domain = bridge.resolved_domain(bridge.dialect);
 
     match target.kind {
@@ -204,6 +219,7 @@ pub fn probe_heif_bridge_capacity(
                 carrier_slice,
                 &*tuning.jpeg_model,
                 &tuning.jpeg_params,
+                &bridge.extensions,
                 bridge.safety.level,
                 bridge.dialect.jpeg_format(),
                 control,
@@ -217,8 +233,9 @@ pub fn probe_heif_bridge_capacity(
                 &*tuning.png_model,
                 &tuning.png_params,
                 bridge.safety.level,
-                secret,
+                cred,
                 domain,
+                &bridge.extensions,
                 bridge.dialect.png_format(),
                 control,
             )?;
@@ -232,8 +249,10 @@ pub fn probe_heif_bridge_capacity(
 pub fn inspect_heif_bridge(
     carrier_bytes: &[u8],
     password: Option<&str>,
+    key: Option<&[u8; 32]>,
     domain: Option<&str>,
     dialect: &crate::stego::params::StegoProfile,
+    limits: &ExtractParams,
     control: &Control<'_>,
 ) -> Result<StegoHeaderInfo, StrHideError> {
     control.check()?;
@@ -242,30 +261,29 @@ pub fn inspect_heif_bridge(
         Err(_) => return Ok(StegoHeaderInfo::empty("HEIF-Bridge")),
     };
     let carrier_slice = &carrier_bytes[target.file_offset..target.file_offset + target.length];
-    let secret = password
-        .filter(|s| !s.is_empty())
-        .or_else(|| dialect.secret());
+    let cred = crate::stego::options::resolve_credential(password, key, dialect)?;
     let domain = domain
         .filter(|s| !s.is_empty())
         .or_else(|| dialect.stego_domain());
 
     match target.kind {
         BridgeTargetKind::DirectJpeg { .. } | BridgeTargetKind::ExifJpeg { .. } => {
-            let mut info = jpeg::inspect_jpeg(
-                carrier_slice,
-                secret,
-                domain,
-                dialect.jpeg_format(),
-                control,
-            )?;
+            let mut info =
+                jpeg::inspect_jpeg(carrier_slice, cred, domain, dialect.jpeg_format(), control)?;
             if info.has_hidden_data {
                 info.format = "HEIF (JPEG Thumbnail Bridge)".into();
             }
             Ok(info)
         }
         BridgeTargetKind::DirectSpatial { .. } => {
-            let mut info =
-                png::inspect_png(carrier_slice, secret, domain, dialect.png_format(), control)?;
+            let mut info = png::inspect_png(
+                carrier_slice,
+                cred,
+                domain,
+                dialect.png_format(),
+                limits,
+                control,
+            )?;
             if info.has_hidden_data {
                 info.format = "HEIF (Uncompressed Item Bridge)".into();
             }
@@ -278,6 +296,7 @@ pub fn inspect_heif_bridge(
 pub fn verify_heif_bridge(
     carrier_bytes: &[u8],
     password: Option<&str>,
+    key: Option<&[u8; 32]>,
     domain: Option<&str>,
     dialect: &crate::stego::params::StegoProfile,
     limits: &ExtractParams,
@@ -298,9 +317,7 @@ pub fn verify_heif_bridge(
         }
     };
     let carrier_slice = &carrier_bytes[target.file_offset..target.file_offset + target.length];
-    let secret = password
-        .filter(|s| !s.is_empty())
-        .or_else(|| dialect.secret());
+    let cred = crate::stego::options::resolve_credential(password, key, dialect)?;
     let domain = domain
         .filter(|s| !s.is_empty())
         .or_else(|| dialect.stego_domain());
@@ -309,7 +326,7 @@ pub fn verify_heif_bridge(
         BridgeTargetKind::DirectJpeg { .. } | BridgeTargetKind::ExifJpeg { .. } => {
             let mut res = jpeg::verify_jpeg(
                 carrier_slice,
-                secret,
+                cred,
                 domain,
                 dialect.jpeg_format(),
                 limits,
@@ -321,7 +338,7 @@ pub fn verify_heif_bridge(
         BridgeTargetKind::DirectSpatial { .. } => {
             let mut res = png::verify_png(
                 carrier_slice,
-                secret,
+                cred,
                 domain,
                 dialect.png_format(),
                 limits,

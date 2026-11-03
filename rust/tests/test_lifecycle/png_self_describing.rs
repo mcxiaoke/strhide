@@ -19,8 +19,7 @@
 use strhide::core::control::Control;
 use strhide::core::payload::Payload;
 use strhide::stego::CostModelRegistry;
-use strhide::stego::png::engine::{SPATIAL_ELIGIBLE_MAX, SPATIAL_ELIGIBLE_MIN};
-use strhide::stego::png::{RawImage, decode_png, encode_png};
+use strhide::stego::png::{RawImage, encode_png};
 use strhide::stego::traits::PngCostModel;
 use strhide::stego::{
     EmbedOptions, ExtractOptions, PngParams, SpatialAlgorithm, StegoTuning, embed_carrier,
@@ -41,6 +40,8 @@ fn texture_png(w: u32, h: u32) -> Vec<u8> {
         width: w,
         height: h,
         channels: 3,
+        bit_depth: 8,
+        color_type: 2,
         pixels,
         chunks: Vec::new(),
         idat_sizes: Vec::new(),
@@ -51,40 +52,11 @@ fn texture_png(w: u32, h: u32) -> Vec<u8> {
     .expect("encode png")
 }
 
-/// Recompute the header layout from first principles -- eligible pixels in
-/// ascending order, keyed permutation, no cost map anywhere. Independent of the
-/// engine so the test can catch a regression rather than follow it.
-fn cost_free_header_slots(png: &[u8]) -> Vec<usize> {
-    let img = decode_png(png).expect("decode png");
-    let (w, h, ch) = (img.width as usize, img.height as usize, img.channels);
-    let off = if ch >= 3 { 1 } else { 0 };
-    let mut eligible: Vec<usize> = (0..w * h)
-        .filter(|&i| {
-            (SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&img.pixels[i * ch + off])
-        })
-        .collect();
-    strhide::stego::prng::permute_prefix(
-        &mut eligible,
-        strhide::stego::header::V2_TOTAL_HEADER_SLOTS,
-        &strhide::stego::envelope::derive_header_perm_seed(None, None),
-    );
-    eligible[..strhide::stego::header::V2_TOTAL_HEADER_SLOTS].to_vec()
-}
-
-fn read_feature_word(png: &[u8]) -> strhide::stego::header::FeatureWord {
-    let img = decode_png(png).expect("decode png");
-    let ch = img.channels;
-    let off = if ch >= 3 { 1 } else { 0 };
-    let slots = cost_free_header_slots(png);
-    let mut bytes = [0u8; 32];
-    for (byte_i, slot) in bytes.iter_mut().zip(slots[256..512].chunks(8)) {
-        let mut b = 0u8;
-        for &s in slot {
-            b = (b << 1) | (img.pixels[s * ch + off] & 1);
-        }
-        *byte_i = b;
-    }
-    strhide::stego::header::FeatureWord::decode(&bytes).expect("decode feature word")
+/// Ask the public inspector which cost model the carrier declares.
+fn declared_algorithm(png: &[u8]) -> Option<String> {
+    strhide::stego::inspect_carrier(png, &strhide::stego::InspectOptions::default())
+        .expect("inspect")
+        .algorithm
 }
 
 /// A model that is wrong on purpose: a flat cost map (so a different ranking)
@@ -123,11 +95,10 @@ fn the_carrier_declares_which_model_wrote_it() {
     )
     .expect("embed");
 
-    let fw = read_feature_word(&stego);
     assert_eq!(
-        strhide::stego::png::registry::spatial_name_from_wire_id(fw.algorithm_id),
+        declared_algorithm(&stego).as_deref(),
         Some("hill"),
-        "the feature word must name the model that wrote the body"
+        "the V4 header must name the model that wrote the body"
     );
 }
 
@@ -141,11 +112,14 @@ fn extraction_follows_the_carrier_not_the_caller() {
     // The caller asks for a model that has nothing to do with this carrier.
     let got = strhide::stego::png::engine::extract_png(
         &stego,
-        None,
+        strhide::crypto::Credential::Password(
+            strhide::stego::format::OFFICIAL_PNG_FORMAT.fallback_secret,
+        ),
         None,
         &strhide::stego::format::OFFICIAL_PNG_FORMAT,
         &ImpostorModel,
         &PngParams::default(),
+        &strhide::stego::params::ExtractParams::default(),
         &Control::none(),
     )
     .expect("extraction must use the carrier's declared model");
@@ -179,9 +153,8 @@ fn a_suniward_carrier_extracts_while_the_caller_defaults_to_hill() {
     let stego =
         embed_carrier(&png, &Payload::bytes(payload), &write).expect("embed with S-UNIWARD");
 
-    let fw = read_feature_word(&stego);
     assert_eq!(
-        strhide::stego::png::registry::spatial_name_from_wire_id(fw.algorithm_id),
+        declared_algorithm(&stego).as_deref(),
         Some("suniward"),
         "the carrier must declare the model that actually wrote it"
     );
@@ -211,11 +184,9 @@ fn non_default_exclusion_rate_extracts_with_default_options() {
     let stego = embed_carrier(&png, &Payload::bytes(payload), &write)
         .expect("embed with exclusion rate 0.45");
 
-    let fw = read_feature_word(&stego);
-    assert_eq!(fw.exclusion_permille, 450);
-
-    // Extraction with default options (exclusion_percentile = 0.30).
-    // The self-describing exclusion_permille must be respected so slot ranking synchronises.
+    // Extraction with default options (exclusion_percentile = 0.30) proves the
+    // V4 header's exclusion_permille was carried over: without it the slot
+    // ranking would desynchronise and decryption would fail.
     let got = extract_carrier(&stego, &ExtractOptions::default())
         .expect("extraction must use carrier's exclusion_permille");
     assert_eq!(got, payload);

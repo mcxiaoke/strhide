@@ -502,21 +502,25 @@ fn verify_accepts_the_profile() {
 
 // --------------------------------------------------------------------------- stego private format
 
+const PRIVATE_CIPHER: strhide::stego::format::WireCipherProfile =
+    strhide::stego::format::WireCipherProfile {
+        domain_label: b"private-domain",
+        hpos_label: b"private-hpos",
+        enc_label: b"private-enc",
+        perm_label: b"private-perm",
+        stc_label: b"private-stc",
+        default_suite: strhide::core::crypto::CipherSuiteId::Aes256Gcm,
+    };
+
 const PRIVATE_FORMAT: strhide::JpegFormatProfile = strhide::JpegFormatProfile {
-    format_major: 1,
-    format_minor: 0,
     cover_digest_tag: b"private-cover-v1",
-    hpos_label: b"private-hpos",
-    stc_label: b"private-stc",
-    enc_label: b"private-enc",
-    perm_label: b"private-perm",
+    cipher: &PRIVATE_CIPHER,
     sb_bytes: 44,
     sb_h: 8,
     sb_u: 2,
     ext_h: 8,
     ext_u: 4,
     grid_rule: strhide::GridRule::ALL_AC,
-    suites: strhide::DEFAULT_JPEG_FORMAT.suites,
 };
 
 const PRIVATE_JPEG_PROFILE: StegoProfile = StegoProfile::new().with_jpeg_format(PRIVATE_FORMAT);

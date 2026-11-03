@@ -15,10 +15,18 @@
 //! - **Content-adaptive steganography** for PNG (HILL / S-UNIWARD), JPEG
 //!   (UERD / J-UNIWARD + ternary STC), and H.265/HEVC (CABAC bin flipping,
 //!   Annex-B or MP4/MOV).
+//! - **Content-domain V4 envelope** for PNG/JPEG/HEVC/WAV/FLAC: a keyed-locator
+//!   header (64 B spatial, 44 B JPEG, 32 B HEVC) carries the L3 salt, nonce and
+//!   `body_len`; the whole header plus the TLV extension area is the AEAD
+//!   associated data. `CipherSuiteId` is append-only: 1 = AES-256-GCM (default),
+//!   2 = ChaCha20-Poly1305.
 //! - **AES-256-GCM authenticated encryption** for both the payload and the
-//!   metadata; keys derived with PBKDF2-HMAC-SHA256 (100 000 iterations) +
-//!   HKDF-SHA256. Even without a password, envelopes are uniformly encrypted
-//!   under a built-in public key so no plaintext leaks into a hex dump.
+//!   metadata; keys derived with PBKDF2-HMAC-SHA256 + HKDF-SHA256. The structure
+//!   domain uses 100 000 PBKDF2 iterations; the content domain's L1 uses
+//!   `CONTENT_L1_PBKDF2_ITERATIONS` = 200 000 (or a caller-supplied
+//!   `Credential::FileKey`, which skips PBKDF2). Even without a password,
+//!   envelopes are uniformly encrypted under a built-in public key so no
+//!   plaintext leaks into a hex dump.
 //! - **Stealth mode**: header/trailer magics, header sensitive fields, and
 //!   trailer CRC are all derived from the password, so an envelope is
 //!   indistinguishable from random bytes without it (plausible deniability).
@@ -114,9 +122,11 @@
 //!   [`structure::adapters`] (one `HostAdapter` per container),
 //!   [`structure::registry`] (format routing, strategy IDs) and
 //!   [`structure::params::StructureProfile`].
-//! - [`stego`] — layer 3B, the content domain: PNG HILL, JPEG UERD + ternary
-//!   STC, HEVC CABAC. Its public surface is re-exported at the crate root:
+//! - [`stego`] — layer 3B, the content domain: V4 content envelopes over PNG
+//!   (HILL / S-UNIWARD), JPEG (UERD / J-UNIWARD + ternary STC), HEVC CABAC,
+//!   and WAV/FLAC PCM. Its public surface is re-exported at the crate root:
 //!   [`JpegFormatProfile`] / [`DEFAULT_JPEG_FORMAT`] (wire-format identity),
+//!   [`CipherSuiteId`] / [`Credential`] (suite and KDF credential),
 //!   [`JpegParams`] / [`ExtractParams`] (per-call tuning), and
 //!   [`embed_carrier`] / [`extract_carrier`] (entry points a private build
 //!   calls with its own [`stego::params::StegoProfile`]).
@@ -248,7 +258,7 @@ pub mod prelude {
 
 // Content-domain steganography surface.
 #[cfg(feature = "content-base")]
-pub use stego::format::{CipherSuite, GridRule};
+pub use stego::format::GridRule;
 #[cfg(feature = "content-hevc")]
 pub use stego::format::{DEFAULT_HEVC_FORMAT, HevcFormatProfile};
 #[cfg(feature = "content-jpeg")]

@@ -1,0 +1,284 @@
+//! JPEG V4 envelope contract.
+//!
+//! Pins the wire-level invariants that must hold while the JPEG engine moves
+//! from the V3 superblock to the shared V4 content envelope: authenticated
+//! header/extension, probe/embed agreement, and indistinguishable failures.
+
+use strhide::core::payload::Payload;
+use strhide::errors::StrHideError;
+use strhide::stego::header::Tlv;
+use strhide::stego::{
+    EmbedOptions, ExtractOptions, InspectOptions, ProbeOptions, VerifyOptions, embed_carrier,
+    extract_carrier, inspect_carrier, probe_carrier_capacity, verify_carrier,
+};
+
+const CARRIER: &[u8] = include_bytes!("../assets/small.jpg");
+const PASSWORD: &str = "jpeg-v4-test-password";
+const PAYLOAD: &[u8] = b"jpeg v4 envelope roundtrip payload";
+
+fn credits() -> EmbedOptions<'static> {
+    EmbedOptions {
+        password: Some(PASSWORD),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn v4_roundtrip_default_suite() {
+    let stego = embed_carrier(
+        CARRIER,
+        &Payload::bytes(PAYLOAD),
+        &EmbedOptions {
+            suite_id: Some(1),
+            ..credits()
+        },
+    )
+    .expect("suite 1 embed");
+    let extracted = extract_carrier(
+        &stego,
+        &ExtractOptions {
+            password: Some(PASSWORD),
+            ..Default::default()
+        },
+    )
+    .expect("suite 1 extract");
+    assert_eq!(extracted, PAYLOAD);
+}
+
+#[test]
+fn v4_chacha_suite_roundtrip_and_tamper_rejected() {
+    let stego = embed_carrier(
+        CARRIER,
+        &Payload::bytes(PAYLOAD),
+        &EmbedOptions {
+            suite_id: Some(2),
+            ..credits()
+        },
+    )
+    .expect("suite 2 embed");
+    let extracted = extract_carrier(
+        &stego,
+        &ExtractOptions {
+            password: Some(PASSWORD),
+            ..Default::default()
+        },
+    )
+    .expect("suite 2 extract");
+    assert_eq!(extracted, PAYLOAD);
+
+    // The suite id in the authenticated header must gate the trial: asking for
+    // AES only cannot return a ChaCha carrier's payload.
+    let only_aes = extract_carrier(
+        &stego,
+        &ExtractOptions {
+            password: Some(PASSWORD),
+            limits: strhide::stego::ExtractParams {
+                allowed_suites: Some(vec![1]),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(only_aes, Err(StrHideError::NoHiddenData(_))),
+        "{only_aes:?}"
+    );
+
+    // A scan-data flip invalidates the Poly1305 tag and must not leak bytes.
+    let mut flipped = stego;
+    let idx = (flipped_sos_offset(&flipped) + 16).min(flipped.len() - 1);
+    flipped[idx] ^= 0x01;
+    let result = extract_carrier(
+        &flipped,
+        &ExtractOptions {
+            password: Some(PASSWORD),
+            ..Default::default()
+        },
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn v4_extensions_roundtrip_and_inspect_reports_header() {
+    let options = EmbedOptions {
+        extensions: vec![Tlv {
+            type_id: 0x01,
+            value: b"jpeg-v4-ext".to_vec(),
+        }],
+        ..credits()
+    };
+    let stego = embed_carrier(CARRIER, &Payload::bytes(PAYLOAD), &options).expect("embed");
+
+    let info = inspect_carrier(
+        &stego,
+        &InspectOptions {
+            password: Some(PASSWORD),
+            ..Default::default()
+        },
+    )
+    .expect("inspect");
+    assert!(info.has_hidden_data);
+    assert_eq!(info.format, "JPEG");
+    assert!(
+        info.codec
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Ternary STC")
+    );
+    assert!(info.envelope_len.unwrap_or(0) >= PAYLOAD.len());
+
+    let extracted = extract_carrier(
+        &stego,
+        &ExtractOptions {
+            password: Some(PASSWORD),
+            ..Default::default()
+        },
+    )
+    .expect("extract");
+    assert_eq!(extracted, PAYLOAD);
+}
+
+#[test]
+fn v4_probe_and_embed_agree_on_extensions() {
+    let tlv = vec![Tlv {
+        type_id: 0x01,
+        value: b"probe-ext".to_vec(),
+    }];
+    let with_ext = probe_carrier_capacity(
+        CARRIER,
+        &ProbeOptions {
+            password: Some(PASSWORD),
+            extensions: tlv.clone(),
+            ..Default::default()
+        },
+    )
+    .expect("probe with extension");
+    let without_ext = probe_carrier_capacity(
+        CARRIER,
+        &ProbeOptions {
+            password: Some(PASSWORD),
+            ..Default::default()
+        },
+    )
+    .expect("probe without extension");
+    assert!(
+        with_ext.recommended_max_bytes <= without_ext.recommended_max_bytes,
+        "the extension area must not increase capacity"
+    );
+
+    let payload = vec![0x5Au8; with_ext.recommended_max_bytes];
+    let stego = embed_carrier(
+        CARRIER,
+        &Payload::bytes(&payload),
+        &EmbedOptions {
+            extensions: tlv,
+            ..credits()
+        },
+    )
+    .expect("embed at the probe size");
+    let extracted = extract_carrier(
+        &stego,
+        &ExtractOptions {
+            password: Some(PASSWORD),
+            ..Default::default()
+        },
+    )
+    .expect("extract");
+    assert_eq!(extracted, payload);
+}
+
+#[test]
+fn v4_wrong_password_and_clean_carrier_are_indistinguishable() {
+    let stego = embed_carrier(CARRIER, &Payload::bytes(PAYLOAD), &credits()).expect("embed");
+    let wrong = extract_carrier(
+        &stego,
+        &ExtractOptions {
+            password: Some("wrong-password"),
+            ..Default::default()
+        },
+    )
+    .expect_err("wrong password");
+    let clean = extract_carrier(
+        CARRIER,
+        &ExtractOptions {
+            password: Some(PASSWORD),
+            ..Default::default()
+        },
+    )
+    .expect_err("clean carrier");
+    assert!(
+        matches!(wrong, StrHideError::NoHiddenData(_)),
+        "wrong password must collapse to NoHiddenData: {wrong:?}"
+    );
+    assert!(
+        matches!(clean, StrHideError::NoHiddenData(_)),
+        "clean carrier must be NoHiddenData: {clean:?}"
+    );
+}
+
+#[test]
+fn v4_verify_explains_levels_and_wrong_password_fails_l2() {
+    let stego = embed_carrier(CARRIER, &Payload::bytes(PAYLOAD), &credits()).expect("embed");
+
+    let ok = verify_carrier(
+        &stego,
+        &VerifyOptions {
+            password: Some(PASSWORD),
+            ..Default::default()
+        },
+    )
+    .expect("verify");
+    assert!(ok.is_all_ok(), "levels: {:?}", ok.levels);
+
+    let bad = verify_carrier(
+        &stego,
+        &VerifyOptions {
+            password: Some("wrong-password"),
+            ..Default::default()
+        },
+    )
+    .expect("verify runs");
+    assert!(!bad.is_all_ok(), "levels: {:?}", bad.levels);
+}
+
+#[test]
+fn v4_tampered_carrier_never_panics() {
+    let stego = embed_carrier(CARRIER, &Payload::bytes(PAYLOAD), &credits()).expect("embed");
+    // Cut the scan data: the decoder must report an error, never panic.
+    let truncated = &stego[..stego.len().saturating_sub(32)];
+    assert!(
+        extract_carrier(
+            truncated,
+            &ExtractOptions {
+                password: Some(PASSWORD),
+                ..Default::default()
+            },
+        )
+        .is_err()
+    );
+
+    // A one-byte flip in the entropy-coded scan must not yield the payload.
+    // The flip has to land in scan data: the last bytes of a JPEG can be
+    // padding the decoder ignores, which made the old fixed tail offset
+    // intermittently inert. Start just past the SOS marker instead.
+    let sos = flipped_sos_offset(&stego);
+    let mut flipped = stego.clone();
+    let idx = (sos + 16).min(flipped.len() - 1);
+    flipped[idx] ^= 0x01;
+    let result = extract_carrier(
+        &flipped,
+        &ExtractOptions {
+            password: Some(PASSWORD),
+            ..Default::default()
+        },
+    );
+    assert!(result.is_err());
+}
+
+/// Byte offset of the first SOS (`FF DA`) marker, i.e. the start of the
+/// entropy-coded scan.
+fn flipped_sos_offset(jpeg: &[u8]) -> usize {
+    jpeg.windows(2)
+        .position(|w| w == [0xFF, 0xDA])
+        .expect("JPEG has an SOS marker")
+}

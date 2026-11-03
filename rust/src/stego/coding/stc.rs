@@ -86,7 +86,7 @@ pub const MAX_STC_H: u8 = 10;
 ///
 /// `u = 1` is the classic code; `u > 1` trades capacity for a lower change
 /// rate. The spatial codec id has room for three values, so that engine stays
-/// at `u <= 3`; the JPEG V3 superblock carries `u` in a full byte and uses
+/// at `u <= 3`; the JPEG V4 superblock carries `u` in a full byte and uses
 /// `KERNEL_MAX_U` instead.
 pub const MAX_STC_U: u8 = 3;
 

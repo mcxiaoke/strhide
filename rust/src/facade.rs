@@ -435,6 +435,7 @@ impl StrHide {
             if format.is_some_and(|f| f.supports_stego()) {
                 let stego_opts = crate::stego::InspectOptions {
                     password: opts.password,
+                    key: None,
                     domain: opts.domain,
                     limits: crate::stego::ExtractParams::default(),
                     control: opts.control,
@@ -496,6 +497,7 @@ impl StrHide {
             if format.is_some_and(|f| f.supports_stego()) {
                 let ver_opts = crate::stego::VerifyOptions {
                     password: opts.password,
+                    key: None,
                     domain: opts.domain,
                     limits: crate::stego::ExtractParams::default(),
                     control: opts.control,
@@ -602,6 +604,7 @@ impl StrHide {
             Domain::Content => {
                 let ex_opts = crate::stego::ExtractOptions {
                     password: opts.password,
+                    key: None,
                     domain: opts.domain,
                     limits: opts.limits.clone(),
                     control: opts.control,

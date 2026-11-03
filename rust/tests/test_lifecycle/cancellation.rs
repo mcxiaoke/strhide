@@ -34,6 +34,8 @@ fn texture_png() -> Vec<u8> {
         width: w,
         height: h,
         channels: 3,
+        bit_depth: 8,
+        color_type: 2,
         pixels,
         chunks: Vec::new(),
         idat_sizes: Vec::new(),

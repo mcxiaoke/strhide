@@ -9,10 +9,14 @@
 use crate::SafetyPolicy;
 use crate::core::control::Control;
 use crate::core::payload::Payload;
+use crate::crypto::Credential;
+use crate::errors::StrHideError;
 use crate::params::SafetyLevel;
 use crate::stego::audio::{embed_flac, extract_flac, inspect_flac, probe_flac, verify_flac};
-use crate::stego::envelope::Freshness;
-use crate::stego::format::AudioFormatProfile;
+use crate::stego::envelope::{Freshness, PUBLIC_DEFAULT_SECRET};
+use crate::stego::format::{AudioFormatProfile, OFFICIAL_AUDIO_CIPHER};
+use crate::stego::header::Tlv;
+use crate::stego::params::ExtractParams;
 
 /// Append `bits` of `value` MSB-first to a growable bit stream.
 struct BitSink {
@@ -216,6 +220,21 @@ fn ctl() -> Control<'static> {
     Control::default()
 }
 
+fn suite() -> u16 {
+    OFFICIAL_AUDIO_CIPHER.default_suite.as_u16()
+}
+
+fn cred(password: Option<&str>) -> Credential<'_> {
+    match password {
+        Some(password) => Credential::Password(password),
+        None => Credential::Password(PUBLIC_DEFAULT_SECRET),
+    }
+}
+
+fn limits() -> ExtractParams {
+    ExtractParams::default()
+}
+
 #[test]
 fn flac_roundtrip_preserves_length_and_payload() {
     let cover = flac_carrier(600, 256);
@@ -225,8 +244,10 @@ fn flac_roundtrip_preserves_length_and_payload() {
     let (stego, capacity, stats) = embed_flac(
         &cover,
         &payload,
-        Some("pw"),
+        cred(Some("pw")),
         None,
+        suite(),
+        &[],
         profile(),
         SafetyPolicy::new(),
         Freshness::default(),
@@ -237,10 +258,26 @@ fn flac_roundtrip_preserves_length_and_payload() {
     assert!(stats.modified_slots > 0, "nothing was written");
     assert!(capacity.recommended_max_bytes > 0);
 
-    let out = extract_flac(&stego, Some("pw"), None, profile(), &control).expect("extract");
+    let out = extract_flac(
+        &stego,
+        cred(Some("pw")),
+        None,
+        profile(),
+        &limits(),
+        &control,
+    )
+    .expect("extract");
     assert_eq!(out.as_bytes(), &raw[..]);
 
-    let err = extract_flac(&stego, Some("wrong"), None, profile(), &control).unwrap_err();
+    let err = extract_flac(
+        &stego,
+        cred(Some("wrong")),
+        None,
+        profile(),
+        &limits(),
+        &control,
+    )
+    .unwrap_err();
     assert!(
         err.to_string().to_lowercase().contains("no valid")
             || err.to_string().to_lowercase().contains("password"),
@@ -257,8 +294,10 @@ fn flac_waveform_moves_by_at_most_one_unit_per_changed_sample() {
     let (stego, _, _) = embed_flac(
         &cover,
         &payload,
-        Some("pw"),
+        cred(Some("pw")),
         None,
+        suite(),
+        &[],
         profile(),
         SafetyPolicy::new(),
         Freshness::default(),
@@ -286,8 +325,10 @@ fn flac_probe_and_inspect_agree_with_the_embedder() {
     let (stego, capacity, _) = embed_flac(
         &cover,
         &payload,
-        Some("pw"),
+        cred(Some("pw")),
         None,
+        suite(),
+        &[],
         profile(),
         SafetyPolicy::new(),
         Freshness::default(),
@@ -295,18 +336,51 @@ fn flac_probe_and_inspect_agree_with_the_embedder() {
     )
     .expect("embed");
 
-    let probed = probe_flac(&cover, SafetyLevel::High, &control).expect("probe");
+    let probed = probe_flac(
+        &cover,
+        cred(None),
+        None,
+        &[],
+        SafetyLevel::High,
+        profile(),
+        &control,
+    )
+    .expect("probe");
     assert!(probed.recommended_max_bytes > 0);
     assert!(probed.max_raw_payload_bytes >= capacity.recommended_max_bytes);
 
-    let header = inspect_flac(&stego, Some("pw"), None, profile(), &control).expect("inspect");
+    let header = inspect_flac(
+        &stego,
+        cred(Some("pw")),
+        None,
+        profile(),
+        &limits(),
+        &control,
+    )
+    .expect("inspect");
     assert!(header.has_hidden_data, "inspect must see the envelope");
     assert!(header.envelope_len.is_some());
     // A wrong password must not turn a read into an error; it just means the
     // payload cannot be recovered (asserted in the round-trip test).
-    inspect_flac(&stego, Some("nope"), None, profile(), &control).expect("inspect never errors");
+    inspect_flac(
+        &stego,
+        cred(Some("nope")),
+        None,
+        profile(),
+        &limits(),
+        &control,
+    )
+    .expect("inspect never errors");
 
-    let report = verify_flac(&stego, Some("pw"), None, profile(), &control).expect("verify");
+    let report = verify_flac(
+        &stego,
+        cred(Some("pw")),
+        None,
+        profile(),
+        &limits(),
+        &control,
+    )
+    .expect("verify");
     assert!(report.is_all_ok(), "envelope must verify: {report:?}");
 }
 
@@ -319,8 +393,10 @@ fn flac_tampering_is_detected_not_silently_accepted() {
     let (mut stego, _, _) = embed_flac(
         &cover,
         &payload,
-        Some("pw"),
+        cred(Some("pw")),
         None,
+        suite(),
+        &[],
         profile(),
         SafetyPolicy::new(),
         Freshness::default(),
@@ -332,7 +408,14 @@ fn flac_tampering_is_detected_not_silently_accepted() {
     // matches, so the file must be rejected rather than decoded into garbage.
     let at = stego.len() / 2;
     stego[at] ^= 0x01;
-    let result = extract_flac(&stego, Some("pw"), None, profile(), &control);
+    let result = extract_flac(
+        &stego,
+        cred(Some("pw")),
+        None,
+        profile(),
+        &limits(),
+        &control,
+    );
     assert!(
         result.is_err(),
         "a corrupted frame must not extract cleanly"
@@ -349,8 +432,10 @@ fn flac_carrier_without_enough_tails_is_refused() {
     let err = embed_flac(
         &cover,
         &payload,
-        Some("pw"),
+        cred(Some("pw")),
         None,
+        suite(),
+        &[],
         profile(),
         SafetyPolicy::new(),
         Freshness::default(),
@@ -380,8 +465,10 @@ fn flac_carrier_high_frozen_rate_embed_and_extract() {
     let (stego, _, stats) = embed_flac(
         &cover,
         &payload,
-        Some("secret-pw"),
+        cred(Some("secret-pw")),
         None,
+        suite(),
+        &[],
         profile(),
         SafetyPolicy::new(),
         Freshness::default(),
@@ -390,9 +477,78 @@ fn flac_carrier_high_frozen_rate_embed_and_extract() {
     .expect("embed must succeed on carrier with high frozen rate");
 
     assert!(stats.modified_slots > 0);
-    let extracted = extract_flac(&stego, Some("secret-pw"), None, profile(), &control)
-        .expect("extract must succeed");
+    let extracted = extract_flac(
+        &stego,
+        cred(Some("secret-pw")),
+        None,
+        profile(),
+        &limits(),
+        &control,
+    )
+    .expect("extract must succeed");
     assert_eq!(extracted.as_bytes(), &raw[..]);
+}
+
+#[test]
+fn flac_unknown_critical_extension_fails_closed() {
+    let cover = flac_carrier(600, 256);
+    let payload = Payload::bytes(b"critical");
+    let control = ctl();
+    let ext = [Tlv {
+        type_id: 0x81,
+        value: vec![1, 2],
+    }];
+    let (stego, _, _) = embed_flac(
+        &cover,
+        &payload,
+        cred(None),
+        None,
+        suite(),
+        &ext,
+        profile(),
+        SafetyPolicy::new(),
+        Freshness::default(),
+        &control,
+    )
+    .expect("embed");
+
+    let err = extract_flac(&stego, cred(None), None, profile(), &limits(), &control).unwrap_err();
+    assert!(matches!(err, StrHideError::NoHiddenData(_)), "{err:?}");
+}
+
+#[test]
+fn flac_probe_capacity_is_reachable_by_embed() {
+    let cover = flac_carrier(600, 256);
+    let control = ctl();
+    let probed = probe_flac(
+        &cover,
+        cred(None),
+        None,
+        &[],
+        SafetyLevel::High,
+        profile(),
+        &control,
+    )
+    .expect("probe");
+    assert!(probed.max_raw_payload_bytes > 0);
+
+    // Fill exactly the advertised capacity: a probe that overshoots would make
+    // this embed fail, and an undershoot would leave usable slots dark.
+    let raw = vec![0x5Au8; probed.max_raw_payload_bytes];
+    let payload = Payload::bytes(&raw);
+    embed_flac(
+        &cover,
+        &payload,
+        cred(None),
+        None,
+        suite(),
+        &[],
+        profile(),
+        SafetyPolicy::new(),
+        Freshness::default(),
+        &control,
+    )
+    .expect("advertised FLAC capacity must be embeddable");
 }
 
 #[test]
@@ -409,8 +565,10 @@ fn flac_invariants_preserved_across_embed() {
     let (stego, _, _) = embed_flac(
         &cover,
         &payload,
-        Some("pw"),
+        cred(Some("pw")),
         None,
+        suite(),
+        &[],
         profile(),
         SafetyPolicy::new(),
         Freshness::default(),
@@ -449,8 +607,10 @@ fn flac_carrier_with_trailing_non_audio_bytes_roundtrips() {
     let (stego, _, _) = embed_flac(
         &cover,
         &payload,
-        Some("pw"),
+        cred(Some("pw")),
         None,
+        suite(),
+        &[],
         profile(),
         SafetyPolicy::new(),
         Freshness::default(),
@@ -462,7 +622,14 @@ fn flac_carrier_with_trailing_non_audio_bytes_roundtrips() {
     assert!(stego.ends_with(trailer));
     assert_eq!(stego.len(), cover.len());
 
-    let extracted =
-        extract_flac(&stego, Some("pw"), None, profile(), &control).expect("extract with trailer");
+    let extracted = extract_flac(
+        &stego,
+        cred(Some("pw")),
+        None,
+        profile(),
+        &limits(),
+        &control,
+    )
+    .expect("extract with trailer");
     assert_eq!(extracted.data.as_ref(), raw);
 }

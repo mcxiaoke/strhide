@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use strhide::core::control::Control;
-use strhide::stego::format::DEFAULT_JPEG_FORMAT;
+use strhide::crypto::Credential;
+use strhide::stego::format::{DEFAULT_JPEG_FORMAT, OFFICIAL_PNG_CIPHER, OFFICIAL_PNG_FORMAT};
 use strhide::stego::jpeg::cost::{JuniwardCostModel, UerdCostModel};
 use strhide::stego::jpeg::engine::{embed_jpeg, extract_jpeg};
 use strhide::stego::jpeg::geometry::geometry_for_carrier;
@@ -194,14 +195,16 @@ fn profile_png_with_model(
         format_duration(d_dir)
     );
 
-    let password = Some(password);
+    let cred = Credential::Password(password);
     let t4 = Instant::now();
     let stego_png = match embed_png(
         file_bytes,
         payload,
-        password,
+        cred,
         None,
-        &strhide::stego::format::OFFICIAL_PNG_FORMAT,
+        OFFICIAL_PNG_CIPHER.default_suite.as_u16(),
+        &[],
+        &OFFICIAL_PNG_FORMAT,
         model,
         &png_params,
         strhide::stego::SafetyPolicy::default(),
@@ -239,11 +242,12 @@ fn profile_png_with_model(
     let t5 = Instant::now();
     let extracted = match extract_png(
         &stego_png,
-        password,
+        cred,
         None,
-        &strhide::stego::format::OFFICIAL_PNG_FORMAT,
+        &OFFICIAL_PNG_FORMAT,
         model,
         &png_params,
+        &ExtractParams::default(),
         &Control::none(),
     ) {
         Ok(bytes) => bytes,
@@ -376,13 +380,15 @@ fn profile_jpeg_with_model(
         format_duration(d_cost)
     );
 
-    let password = Some(password);
+    let cred = Credential::Password(password);
     let t4 = Instant::now();
     let stego_jpg = match embed_jpeg(
         file_bytes,
         payload,
-        password,
+        cred,
         None,
+        0x0001,
+        &[],
         &DEFAULT_JPEG_FORMAT,
         &jpeg_params,
         strhide::stego::SafetyPolicy::default(),
@@ -419,7 +425,7 @@ fn profile_jpeg_with_model(
     let t5 = Instant::now();
     let extracted = match extract_jpeg(
         &stego_jpg,
-        password,
+        cred,
         None,
         &DEFAULT_JPEG_FORMAT,
         &ExtractParams::default(),

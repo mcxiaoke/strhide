@@ -1,4 +1,4 @@
-//! Audio content-domain steganography (WAV PCM, FLAC residuals).
+//! Audio content-domain steganography (WAV PCM and FLAC residuals).
 //!
 //! # What makes this "content domain"
 //!
@@ -19,9 +19,10 @@
 //! | WAV | one PCM sample component | `±1` LSB, in place |
 //! | FLAC | one Rice-coded residual | `±1` residual, code-length preserving |
 //!
-//! Everything above the slot layer -- the AEAD envelope, the 512-slot header,
-//! the keyed slot permutation, the STC trellis -- is shared, which is why the
-//! two carriers differ only in their `SlotCarrier` implementation.
+//! Everything above the slot layer -- the AEAD envelope, the 64-byte V4 header,
+//! the extension TLV area, the keyed slot permutation, the STC trellis -- is
+//! shared, which is why the two carriers differ only in their `SlotCarrier`
+//! implementation and in their `pre_salt` source.
 //!
 //! # Zero expansion
 //!
@@ -30,17 +31,70 @@
 //! length (the modification is chosen so the Rice codeword keeps its width).
 //! A carrier that cannot guarantee this is refused rather than degraded.
 
-/// Derive keyed thinning phases from secret, domain, and format profile.
-fn flac_phases(
-    secret: Option<&str>,
-    domain: Option<&str>,
-    profile: &AudioFormatProfile,
-) -> (u64, u64) {
-    let header_seed =
-        crate::stego::envelope::derive_header_perm_seed_audio(secret, domain, profile);
-    let header_phase = u64::from_le_bytes(header_seed[0..8].try_into().unwrap());
-    let body_phase = u64::from_le_bytes(header_seed[8..16].try_into().unwrap());
-    (header_phase, body_phase)
+use sha2::{Digest, Sha256};
+
+use crate::SafetyPolicy;
+use crate::core::control::Control;
+use crate::core::payload::Payload;
+use crate::crypto::{CipherSuiteId, Credential};
+use crate::errors::StrHideError;
+use crate::params::SafetyLevel;
+use crate::stego::envelope::Freshness;
+use crate::stego::format::AudioFormatProfile;
+use crate::stego::header::{PNG_AUDIO_BASE_SLOTS, Tlv, encode_extension};
+use crate::stego::params::ExtractParams;
+use crate::stego::{EmbedStats, StegoCapacityInfo, StegoHeaderInfo, StegoVerifyResult};
+
+/// V4 format id for WAV carriers.
+const WAV_FORMAT_ID: u8 = 2;
+/// V4 format id for FLAC carriers.
+const FLAC_FORMAT_ID: u8 = 3;
+
+/// Carrier identity mixed into L1 for WAV.
+///
+/// The sample format and the PCM length define the carrier; chunk metadata and
+/// the PCM bytes themselves are deliberately excluded, because both the writer
+/// and the reader must derive the same salt before and after embedding.
+fn wav_pre_salt(layout: &wav::WavLayout, hpos_salt: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(hpos_salt);
+    h.update(b"wav-v4");
+    h.update(layout.channels.to_be_bytes());
+    h.update(layout.sample_rate.to_be_bytes());
+    h.update(layout.block_align.to_be_bytes());
+    h.update((layout.kind.bits() as u16).to_be_bytes());
+    h.update((layout.data_len as u32).to_be_bytes());
+    h.finalize().into()
+}
+
+/// Carrier identity mixed into L1 for FLAC.
+///
+/// STREAMINFO is the clear-text carrier identity: the decoder must parse it
+/// before it can locate any slot. The MD5 is deliberately excluded because
+/// embedding recomputes it, which would move the locator keys.
+fn flac_pre_salt(info: &flac::StreamInfo, hpos_salt: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(hpos_salt);
+    h.update(b"flac-v4");
+    h.update(info.sample_rate.to_be_bytes());
+    h.update([info.channels, info.bits_per_sample]);
+    h.update(info.total_samples.to_be_bytes());
+    h.finalize().into()
+}
+
+/// Derive the three keyed thinning phases the FLAC layout needs.
+fn flac_phases(locate_seed: &[u8; 32]) -> (u64, u64, u64) {
+    (
+        u64::from_le_bytes(locate_seed[0..8].try_into().unwrap()),
+        u64::from_le_bytes(locate_seed[8..16].try_into().unwrap()),
+        u64::from_le_bytes(locate_seed[16..24].try_into().unwrap()),
+    )
+}
+
+fn suite_from_id(suite_id: u16) -> Result<CipherSuiteId, StrHideError> {
+    CipherSuiteId::from_u16(suite_id).ok_or_else(|| {
+        StrHideError::UnsupportedVersion(format!("Unknown content cipher suite id {suite_id}"))
+    })
 }
 
 /// Embed a payload into a FLAC carrier, returning the modified file.
@@ -52,8 +106,10 @@ fn flac_phases(
 pub(crate) fn embed_flac(
     carrier: &[u8],
     payload: &Payload<'_>,
-    secret: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
+    suite_id: u16,
+    extensions: &[Tlv],
     profile: &AudioFormatProfile,
     safety: SafetyPolicy,
     freshness: Freshness,
@@ -76,11 +132,14 @@ pub(crate) fn embed_flac(
                 .into(),
         ));
     }
-    if analysis.tails < crate::stego::header::V2_TOTAL_HEADER_SLOTS {
+
+    let suite = suite_from_id(suite_id)?;
+    let extension = encode_extension(extensions)?;
+    let header_slots = PNG_AUDIO_BASE_SLOTS + 8 * extension.len();
+    if analysis.tails < header_slots {
         return Err(StrHideError::General(format!(
-            "FLAC carrier has {} usable subframe tails; at least {} are required for the header",
-            analysis.tails,
-            crate::stego::header::V2_TOTAL_HEADER_SLOTS
+            "FLAC carrier has {} usable subframe tails; the V4 header needs {header_slots}",
+            analysis.tails
         )));
     }
     if analysis.usable < 8 {
@@ -90,47 +149,49 @@ pub(crate) fn embed_flac(
         )));
     }
 
+    let pre_salt = flac_pre_salt(&info, profile.hpos_salt);
+    let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
+
     // Size the carrier's slot array from the envelope the payload will produce.
-    let suite = profile.body.default_suite();
     let plaintext = crate::stego::envelope::build_plaintext(payload)?;
-    // S1: Plan against genuinely movable residuals. Thinning samples strictly
-    // from this usable pool, ensuring zero dead slots enter the STC trellis.
-    // analysis.usable is already the pure body pool (disjoint from subframe tails).
-    let available = analysis.usable;
     let shape = core::plan_body(
-        plaintext.len(),
-        suite.tag_len(),
-        available,
+        plaintext.len() + suite.tag_len(),
+        analysis.usable,
         crate::stego::coding::DEFAULT_STC_H,
         flac::FlacCarrier::MIN_GROUP,
     )?;
 
+    let (header_phase, ext_phase, body_phase) = flac_phases(&prepared.locator.locate_seed);
     let mut bytes = carrier.to_vec();
-    let (header_phase, body_phase) = flac_phases(secret, domain, profile);
-    let binding = Freshness::seeded_binding(carrier, payload.as_bytes());
-    let mut flac = flac::FlacCarrier::new(
+    let mut carrier_view = flac::FlacCarrier::new(
         &mut bytes,
         info,
         &analysis,
         shape.body_slots,
+        header_slots,
         header_phase,
+        ext_phase,
         body_phase,
     )?;
-    let (capacity, stats) = core::embed(
-        &mut flac,
-        core::Mapping::BodyPermuted,
-        payload,
-        secret,
-        domain,
-        profile,
-        safety,
-        freshness,
-        &binding,
-        0,
-        control,
-    )?;
+    let (capacity, stats) = {
+        core::embed(
+            &mut carrier_view,
+            core::Mapping::BodyPermuted,
+            payload,
+            &prepared,
+            domain,
+            suite,
+            extensions,
+            profile.cipher,
+            FLAC_FORMAT_ID,
+            safety,
+            freshness,
+            carrier,
+            control,
+        )?
+    };
 
-    let drift = if flac.pcm_md5() == Some(analysis.pcm_md5) {
+    let drift = if carrier_view.pcm_md5() == Some(analysis.pcm_md5) {
         0
     } else {
         flac::max_sample_drift(carrier, &bytes, &info)?
@@ -146,29 +207,49 @@ pub(crate) fn embed_flac(
 /// Extract a payload from a FLAC carrier.
 pub(crate) fn extract_flac(
     carrier: &[u8],
-    secret: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     profile: &AudioFormatProfile,
+    limits: &ExtractParams,
     control: &Control<'_>,
 ) -> Result<Payload<'static>, StrHideError> {
+    if core::pbkdf2_policy_blocks(cred, limits) {
+        return Err(core::no_hidden_data());
+    }
     let info = flac::parse_stream_info(carrier)?;
     let analysis = flac::analyse(carrier, &info)?;
-    let (header_phase, body_phase) = flac_phases(secret, domain, profile);
+    let pre_salt = flac_pre_salt(&info, profile.hpos_salt);
+    let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
+    let (header_phase, ext_phase, body_phase) = flac_phases(&prepared.locator.locate_seed);
 
-    // First read the header with an empty body, then rebuild with the body the
-    // header advertises. The slot arrays differ, which is why this is two
+    // First read the base header with an empty body, then rebuild with the body
+    // the header advertises. The slot arrays differ, which is why this is two
     // constructions rather than one.
     let mut scratch = carrier.to_vec();
-    let header_view =
-        flac::FlacCarrier::new(&mut scratch, info, &analysis, 0, header_phase, body_phase)?;
-    let body_slots = core::body_slots_from_header(
+    let header_view = flac::FlacCarrier::new(
+        &mut scratch,
+        info,
+        &analysis,
+        0,
+        PNG_AUDIO_BASE_SLOTS,
+        header_phase,
+        ext_phase,
+        body_phase,
+    )?;
+    let view = core::read_base(
         &header_view,
         core::Mapping::BodyPermuted,
-        secret,
-        domain,
-        profile,
-        control,
+        &prepared,
+        FLAC_FORMAT_ID,
     )?;
+    let header_slots = PNG_AUDIO_BASE_SLOTS + 8 * view.header.ext_len as usize;
+    if header_slots > analysis.tails {
+        return Err(core::no_hidden_data());
+    }
+    let body_slots = core::body_slots_for(&view.header)?;
+    if body_slots > analysis.usable {
+        return Err(core::no_hidden_data());
+    }
 
     let mut scratch = carrier.to_vec();
     let flac = flac::FlacCarrier::new(
@@ -176,23 +257,33 @@ pub(crate) fn extract_flac(
         info,
         &analysis,
         body_slots,
+        header_slots,
         header_phase,
+        ext_phase,
         body_phase,
     )?;
-    core::extract(
+    core::extract_with_header(
         &flac,
         core::Mapping::BodyPermuted,
-        secret,
+        &prepared,
         domain,
-        profile,
+        profile.cipher,
+        FLAC_FORMAT_ID,
+        &view,
+        limits,
         control,
     )
 }
 
 /// Report a FLAC carrier's embedding capacity.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn probe_flac(
     carrier: &[u8],
-    level: crate::params::SafetyLevel,
+    cred: Credential<'_>,
+    domain: Option<&str>,
+    extensions: &[Tlv],
+    level: SafetyLevel,
+    profile: &AudioFormatProfile,
     control: &Control<'_>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let info = flac::parse_stream_info(carrier)?;
@@ -203,11 +294,12 @@ pub(crate) fn probe_flac(
         )));
     }
     let analysis = flac::analyse(carrier, &info)?;
-    if analysis.tails < crate::stego::header::V2_TOTAL_HEADER_SLOTS {
+    let extension = encode_extension(extensions)?;
+    let header_slots = PNG_AUDIO_BASE_SLOTS + 8 * extension.len();
+    if analysis.tails < header_slots {
         return Err(StrHideError::General(format!(
-            "FLAC carrier has {} usable subframe tails; at least {} are required for the header",
-            analysis.tails,
-            crate::stego::header::V2_TOTAL_HEADER_SLOTS
+            "FLAC carrier has {} usable subframe tails; the V4 header needs {header_slots}",
+            analysis.tails
         )));
     }
     if analysis.usable < 8 {
@@ -216,10 +308,20 @@ pub(crate) fn probe_flac(
             analysis.usable
         )));
     }
+    let pre_salt = flac_pre_salt(&info, profile.hpos_salt);
+    let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
     let view = flac::FlacCapacityView {
         total_usable: analysis.usable,
+        header_total: analysis.tails,
     };
-    core::probe(&view, level, control)
+    core::probe(
+        &view,
+        core::Mapping::BodyPermuted,
+        level,
+        &prepared,
+        extensions,
+        control,
+    )
 }
 
 /// Inspect a FLAC carrier's stego header.
@@ -230,29 +332,49 @@ pub(crate) fn probe_flac(
 /// the body does not fit.
 pub(crate) fn inspect_flac(
     carrier: &[u8],
-    secret: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     profile: &AudioFormatProfile,
+    limits: &ExtractParams,
     control: &Control<'_>,
-) -> Result<crate::stego::StegoHeaderInfo, StrHideError> {
+) -> Result<StegoHeaderInfo, StrHideError> {
+    if core::pbkdf2_policy_blocks(cred, limits) {
+        return Ok(StegoHeaderInfo::empty("FLAC"));
+    }
+    control.check()?;
     let info = flac::parse_stream_info(carrier)?;
     let analysis = flac::analyse(carrier, &info)?;
-    let (header_phase, body_phase) = flac_phases(secret, domain, profile);
+    let pre_salt = flac_pre_salt(&info, profile.hpos_salt);
+    let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
+    let (header_phase, ext_phase, body_phase) = flac_phases(&prepared.locator.locate_seed);
 
     let mut scratch = carrier.to_vec();
-    let header_view =
-        flac::FlacCarrier::new(&mut scratch, info, &analysis, 0, header_phase, body_phase)?;
+    let header_view = flac::FlacCarrier::new(
+        &mut scratch,
+        info,
+        &analysis,
+        0,
+        PNG_AUDIO_BASE_SLOTS,
+        header_phase,
+        ext_phase,
+        body_phase,
+    )?;
     // A wrong password makes the header unreadable; fall back to the header-only
     // view, which reports "nothing here" instead of an error.
-    let body_slots = core::body_slots_from_header(
+    let view = core::read_base(
         &header_view,
         core::Mapping::BodyPermuted,
-        secret,
-        domain,
-        profile,
-        control,
-    )
-    .unwrap_or(0);
+        &prepared,
+        FLAC_FORMAT_ID,
+    );
+    let (header_slots, body_slots) = match &view {
+        Ok(v) => {
+            let hs = PNG_AUDIO_BASE_SLOTS + 8 * v.header.ext_len as usize;
+            let bs = core::body_slots_for(&v.header).unwrap_or(0);
+            (hs, bs)
+        }
+        Err(_) => (PNG_AUDIO_BASE_SLOTS, 0),
+    };
 
     let mut scratch = carrier.to_vec();
     let flac = flac::FlacCarrier::new(
@@ -260,45 +382,64 @@ pub(crate) fn inspect_flac(
         info,
         &analysis,
         body_slots,
+        header_slots,
         header_phase,
+        ext_phase,
         body_phase,
     )?;
-    core::inspect(
-        &flac,
-        core::Mapping::BodyPermuted,
-        secret,
-        domain,
-        profile,
-        control,
-    )
+    Ok(match view {
+        Ok(view) => {
+            core::inspect_with_header(&flac, core::Mapping::BodyPermuted, &prepared, &view, limits)
+        }
+        Err(_) => StegoHeaderInfo::empty("FLAC"),
+    })
 }
 
 /// Multi-tier verification of a FLAC carrier.
 pub(crate) fn verify_flac(
     carrier: &[u8],
-    secret: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     profile: &AudioFormatProfile,
+    limits: &ExtractParams,
     control: &Control<'_>,
-) -> Result<crate::stego::StegoVerifyResult, StrHideError> {
+) -> Result<StegoVerifyResult, StrHideError> {
+    if core::pbkdf2_policy_blocks(cred, limits) {
+        return Ok(core::policy_failure_result("FLAC"));
+    }
     let info = flac::parse_stream_info(carrier)?;
     let analysis = flac::analyse(carrier, &info)?;
-    let (header_phase, body_phase) = flac_phases(secret, domain, profile);
+    let pre_salt = flac_pre_salt(&info, profile.hpos_salt);
+    let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
+    let (header_phase, ext_phase, body_phase) = flac_phases(&prepared.locator.locate_seed);
 
-    // Same two-phase view as `inspect`/`extract`: verification reads the body,
-    // which only exists once the carrier materialises the envelope's slots.
     let mut scratch = carrier.to_vec();
-    let header_view =
-        flac::FlacCarrier::new(&mut scratch, info, &analysis, 0, header_phase, body_phase)?;
-    let body_slots = core::body_slots_from_header(
+    let header_view = flac::FlacCarrier::new(
+        &mut scratch,
+        info,
+        &analysis,
+        0,
+        PNG_AUDIO_BASE_SLOTS,
+        header_phase,
+        ext_phase,
+        body_phase,
+    )?;
+    let view = core::read_base(
         &header_view,
         core::Mapping::BodyPermuted,
-        secret,
-        domain,
-        profile,
-        control,
-    )
-    .unwrap_or(0);
+        &prepared,
+        FLAC_FORMAT_ID,
+    );
+    let (header_slots, body_slots) = match &view {
+        Ok(v) => {
+            let hs = PNG_AUDIO_BASE_SLOTS + 8 * v.header.ext_len as usize;
+            let bs = core::body_slots_for(&v.header)
+                .unwrap_or(0)
+                .min(analysis.usable);
+            (hs, bs)
+        }
+        Err(_) => (PNG_AUDIO_BASE_SLOTS, 0),
+    };
 
     let mut scratch = carrier.to_vec();
     let flac = flac::FlacCarrier::new(
@@ -306,17 +447,46 @@ pub(crate) fn verify_flac(
         info,
         &analysis,
         body_slots,
+        header_slots,
         header_phase,
+        ext_phase,
         body_phase,
     )?;
-    core::verify(
-        &flac,
-        core::Mapping::BodyPermuted,
-        secret,
-        domain,
-        profile,
-        control,
-    )
+    match view {
+        Ok(_) => core::verify(
+            &flac,
+            core::Mapping::BodyPermuted,
+            &prepared,
+            domain,
+            profile.cipher,
+            FLAC_FORMAT_ID,
+            limits,
+            control,
+        ),
+        Err(_) => Ok(StegoVerifyResult::new(
+            "FLAC",
+            vec![
+                crate::stego::VerifyLevel {
+                    level: 1,
+                    name: "carrier".into(),
+                    ok: true,
+                    message: Some("FLAC carrier parsed".into()),
+                },
+                crate::stego::VerifyLevel {
+                    level: 2,
+                    name: "header".into(),
+                    ok: false,
+                    message: Some("No readable header (wrong password or no payload)".into()),
+                },
+                crate::stego::VerifyLevel {
+                    level: 3,
+                    name: "payload".into(),
+                    ok: false,
+                    message: Some("Skipped because the header could not be decoded".into()),
+                },
+            ],
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -329,52 +499,43 @@ mod perm;
 mod sample;
 mod wav;
 
-#[allow(unused_imports)]
-pub(crate) use core::{SlotCarrier, change_percent};
-
-use crate::SafetyPolicy;
-use crate::core::control::Control;
-use crate::core::payload::Payload;
-use crate::errors::StrHideError;
-use crate::stego::EmbedStats;
-use crate::stego::StegoCapacityInfo;
-use crate::stego::envelope::Freshness;
-use crate::stego::format::AudioFormatProfile;
-
 /// Embed a payload into a WAV carrier, returning the modified file.
 ///
 /// The returned bytes have exactly the same length as the input; only bytes
 /// inside the `data` chunk differ.
-// Eight parameters is the engine's own call shape (carrier, payload, secret,
-// domain, profile, safety, freshness, control); bundling them into a struct
-// would only move the list one level up.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn embed_wav(
     carrier: &[u8],
     payload: &Payload<'_>,
-    secret: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
+    suite_id: u16,
+    extensions: &[Tlv],
     profile: &AudioFormatProfile,
     safety: SafetyPolicy,
     freshness: Freshness,
     control: &Control<'_>,
 ) -> Result<(Vec<u8>, StegoCapacityInfo, EmbedStats), StrHideError> {
     let layout = wav::parse_wav(carrier)?;
+    let suite = suite_from_id(suite_id)?;
+    let pre_salt = wav_pre_salt(&layout, profile.hpos_salt);
+    let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
     let mut bytes = carrier.to_vec();
-    let binding = Freshness::seeded_binding(carrier, payload.as_bytes());
     let (info, stats) = {
         let mut pcm = wav::PcmCarrier::new(&mut bytes, layout);
         core::embed(
             &mut pcm,
             core::Mapping::Permuted,
             payload,
-            secret,
+            &prepared,
             domain,
-            profile,
+            suite,
+            extensions,
+            profile.cipher,
+            WAV_FORMAT_ID,
             safety,
             freshness,
-            &binding,
-            0,
+            carrier,
             control,
         )?
     };
@@ -384,75 +545,111 @@ pub(crate) fn embed_wav(
 /// Extract a payload from a WAV carrier.
 pub(crate) fn extract_wav(
     carrier: &[u8],
-    secret: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     profile: &AudioFormatProfile,
+    limits: &ExtractParams,
     control: &Control<'_>,
 ) -> Result<Payload<'static>, StrHideError> {
+    if core::pbkdf2_policy_blocks(cred, limits) {
+        return Err(core::no_hidden_data());
+    }
     let layout = wav::parse_wav(carrier)?;
+    let pre_salt = wav_pre_salt(&layout, profile.hpos_salt);
+    let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
     // Extraction never mutates: present the file as an immutable slot array.
     let mut scratch = carrier.to_vec();
     let pcm = wav::PcmCarrier::new(&mut scratch, layout);
     core::extract(
         &pcm,
         core::Mapping::Permuted,
-        secret,
+        &prepared,
         domain,
-        profile,
+        profile.cipher,
+        WAV_FORMAT_ID,
+        limits,
         control,
     )
 }
 
 /// Report a WAV carrier's embedding capacity.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn probe_wav(
     carrier: &[u8],
-    level: crate::params::SafetyLevel,
+    cred: Credential<'_>,
+    domain: Option<&str>,
+    extensions: &[Tlv],
+    level: SafetyLevel,
+    profile: &AudioFormatProfile,
     control: &Control<'_>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let layout = wav::parse_wav(carrier)?;
+    let pre_salt = wav_pre_salt(&layout, profile.hpos_salt);
+    let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
     let mut scratch = carrier.to_vec();
     let pcm = wav::PcmCarrier::new(&mut scratch, layout);
-    core::probe(&pcm, level, control)
+    core::probe(
+        &pcm,
+        core::Mapping::Permuted,
+        level,
+        &prepared,
+        extensions,
+        control,
+    )
 }
 
 /// Inspect a WAV carrier's stego header.
 pub(crate) fn inspect_wav(
     carrier: &[u8],
-    secret: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     profile: &AudioFormatProfile,
+    limits: &ExtractParams,
     control: &Control<'_>,
-) -> Result<crate::stego::StegoHeaderInfo, StrHideError> {
+) -> Result<StegoHeaderInfo, StrHideError> {
+    if core::pbkdf2_policy_blocks(cred, limits) {
+        return Ok(StegoHeaderInfo::empty("WAV"));
+    }
+    control.check()?;
     let layout = wav::parse_wav(carrier)?;
+    let pre_salt = wav_pre_salt(&layout, profile.hpos_salt);
+    let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
     let mut scratch = carrier.to_vec();
     let pcm = wav::PcmCarrier::new(&mut scratch, layout);
-    core::inspect(
+    Ok(core::inspect(
         &pcm,
         core::Mapping::Permuted,
-        secret,
-        domain,
-        profile,
-        control,
-    )
+        &prepared,
+        WAV_FORMAT_ID,
+        limits,
+    ))
 }
 
 /// Multi-tier verification of a WAV carrier.
 pub(crate) fn verify_wav(
     carrier: &[u8],
-    secret: Option<&str>,
+    cred: Credential<'_>,
     domain: Option<&str>,
     profile: &AudioFormatProfile,
+    limits: &ExtractParams,
     control: &Control<'_>,
-) -> Result<crate::stego::StegoVerifyResult, StrHideError> {
+) -> Result<StegoVerifyResult, StrHideError> {
+    if core::pbkdf2_policy_blocks(cred, limits) {
+        return Ok(core::policy_failure_result("WAV"));
+    }
     let layout = wav::parse_wav(carrier)?;
+    let pre_salt = wav_pre_salt(&layout, profile.hpos_salt);
+    let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
     let mut scratch = carrier.to_vec();
     let pcm = wav::PcmCarrier::new(&mut scratch, layout);
     core::verify(
         &pcm,
         core::Mapping::Permuted,
-        secret,
+        &prepared,
         domain,
-        profile,
+        profile.cipher,
+        WAV_FORMAT_ID,
+        limits,
         control,
     )
 }

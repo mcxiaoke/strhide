@@ -70,13 +70,16 @@ pub fn embed_carrier_file(
         } else {
             payload
         };
-        let secret = options.secret(dialect);
         let direct = || {
-            crate::stego::hevc::embed_hevc_patches(
+            crate::stego::hevc::embed_hevc_patches_v4(
                 &carrier_bytes,
                 eff_payload,
-                secret,
+                crate::stego::options::resolve_credential(options.password, options.key, dialect)?,
                 domain,
+                options
+                    .suite_id
+                    .unwrap_or_else(|| dialect.hevc_format().cipher.default_suite.as_u16()),
+                &options.extensions,
                 dialect.hevc_format(),
                 options.freshness,
                 options.safety,
@@ -137,7 +140,9 @@ pub fn embed_carrier_file(
         None => {
             let probe_opts = crate::stego::ProbeOptions {
                 password: options.password,
+                key: options.key,
                 domain: options.domain,
+                extensions: options.extensions.clone(),
                 safety: options.safety,
                 tuning: options.tuning.clone(),
                 exact: false,
@@ -223,15 +228,12 @@ pub fn inspect_carrier_file(
         drop(file);
 
         if format == Some(crate::formats::FileFormat::Mp4) {
-            return crate::stego::hevc::inspect_hevc_mp4_file(
+            return crate::stego::hevc::inspect_hevc_mp4_file_v4(
                 carrier_path,
-                // Resolve credentials exactly like the bytes-level entry
-                // points: an explicit password wins, the profile's private
-                // secret/domain are the fallback. Passing `options.password`
-                // raw silently ignored a custom `StegoProfile`.
-                options.secret(dialect),
+                crate::stego::options::resolve_credential(options.password, options.key, dialect)?,
                 options.domain(dialect),
                 dialect.hevc_format(),
+                &options.limits,
                 &options.control,
             );
         }

@@ -322,9 +322,6 @@ pub(crate) fn apply_jpeg_flags(params: &mut JpegParams, args: &StegoTuningArgs) 
     if let Some(budget) = args.slot_budget {
         params.slot_budget = Some(budget);
     }
-    if let Some(suite) = args.cipher_suite {
-        params.cipher_suite = suite;
-    }
     if let Some(h) = args.stc_h {
         params.stc_h = h;
     }
@@ -385,6 +382,7 @@ pub(crate) fn stego_options<'a>(
     let safety = stego_safety(args, cfg)?;
     let mut embed = EmbedOptions {
         password,
+        suite_id: args.cipher_suite,
         safety,
         tuning: tuning.clone(),
         exact: args.exact,
