@@ -14,41 +14,81 @@ pub const CHUNK_PRIV: [u8; 4] = *b"prIv";
 pub const CHUNK_STEG: [u8; 4] = *b"stEg";
 pub const PNG_MAX_CHUNK_LEN: u64 = 0x7FFFFFFF; // 2GB
 
-/// Offset of the last IEND chunk and the total file size.
+/// Offset of the standard IEND chunk and the total file size.
 ///
-/// IEND is not required to sit inside a fixed tail window: PNGs are commonly
-/// followed by arbitrary bytes (watermarks, vendor metadata, anti-scraping
-/// padding, and for strhide specifically an EOF-overlay envelope). A 64 KiB
-/// tail window made `write -s chunk` — and `auto` for small payloads — fail on
-/// otherwise valid PNGs.
+/// Follows the standard PNG chunk stream from offset 8 forward: each chunk's
+/// 4-byte big-endian length dictates the jump to the next chunk. The scan stops
+/// at the first `IEND` chunk encountered. Any arbitrary bytes following `IEND`
+/// (such as an EOF-overlay envelope or dirty tail metadata) are preserved as part
+/// of `total_size`.
 ///
-/// The scan walks backwards in 64 KiB chunks with an `IEND_FULL.len() - 1`
-/// byte overlap (so a marker straddling a chunk boundary is still seen) and
-/// stops at the first hit, i.e. the last marker in file order — the one that
-/// terminates the chunk stream. Matching the full 12-byte chunk
-/// (`length = 0`, `IEND`, CRC `AE 42 60 82`) instead of a short magic keeps
-/// accidental hits inside compressed image data negligible (~2^-96).
+/// If any chunk header is truncated or malformed, or if the file does not begin
+/// with the PNG signature, the function immediately rejects the carrier.
 pub fn find_iend_offset<R: Read + Seek + ?Sized>(
     reader: &mut R,
 ) -> Result<(u64, u64), StrHideError> {
-    const CHUNK: u64 = 64 * 1024;
     let total_size = reader.seek(SeekFrom::End(0))?;
-    let mut end = total_size;
-    while end > 0 {
-        let start = end.saturating_sub(CHUNK);
-        let read_start = start.saturating_sub(IEND_FULL.len() as u64 - 1);
-        let mut buf = vec![0u8; (end - read_start) as usize];
-        reader.seek(SeekFrom::Start(read_start))?;
-        reader.read_exact(&mut buf)?;
-        if let Some(idx) = buf.windows(IEND_FULL.len()).rposition(|w| w == IEND_FULL) {
-            return Ok((read_start + idx as u64, total_size));
-        }
-        end = start;
+    if total_size < 8 + 12 {
+        return Err(StrHideError::CorruptedData(
+            "File too small to be a valid PNG".into(),
+        ));
+    }
+    reader.seek(SeekFrom::Start(0))?;
+    let mut sig = [0u8; 8];
+    reader.read_exact(&mut sig)?;
+    if sig != PNG_MAGIC {
+        return Err(StrHideError::UnsupportedFormat(
+            "Invalid PNG magic signature".into(),
+        ));
     }
 
-    Err(StrHideError::CorruptedData(
-        "Valid PNG IEND chunk not found".into(),
-    ))
+    let mut last_iend = None;
+    let mut pos = 8u64;
+
+    while pos + 8 <= total_size {
+        reader.seek(SeekFrom::Start(pos))?;
+        let mut hdr = [0u8; 8];
+        if reader.read_exact(&mut hdr).is_err() {
+            break;
+        }
+
+        // If a concatenated PNG stream is encountered, skip its 8-byte magic
+        if hdr == PNG_MAGIC {
+            pos += 8;
+            continue;
+        }
+
+        let length = u32::from_be_bytes(hdr[0..4].try_into().unwrap()) as u64;
+        let chunk_type = &hdr[4..8];
+
+        if length > PNG_MAX_CHUNK_LEN {
+            break;
+        }
+
+        let Some(chunk_total_len) = length.checked_add(12) else {
+            break;
+        };
+        let Some(next_pos) = pos.checked_add(chunk_total_len) else {
+            break;
+        };
+        if next_pos > total_size {
+            break;
+        }
+
+        if chunk_type == b"IEND" && length == 0 {
+            last_iend = Some(pos);
+        }
+
+        pos = next_pos;
+    }
+
+    if let Some(iend_pos) = last_iend {
+        Ok((iend_pos, total_size))
+    } else {
+        Err(StrHideError::CorruptedData(
+            "Valid PNG IEND chunk not found".into(),
+        ))
+    }
 }
 
 pub struct PngAdapter;

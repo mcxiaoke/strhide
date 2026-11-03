@@ -84,26 +84,45 @@ pub fn parse_pdf_trailer_info<R: Read + Seek + ?Sized>(
     })
 }
 
-/// Offset of the last `%%EOF` marker in the file.
+/// Offset of the last `%%EOF` marker in the PDF document.
 ///
-/// The marker is not required to sit inside a fixed tail window: PDFs may
-/// legally be followed by arbitrary bytes (appended data, and for strhide
-/// specifically an EOF-overlay envelope). A 64 KiB tail window made `verify`
-/// report a carrier strhide itself had just written as "corrupted" as soon as
-/// the envelope exceeded the window. The scan walks backwards in 64 KiB chunks
-/// with a 4-byte overlap (so a marker straddling a chunk boundary is still
-/// seen) and stops at the first hit, i.e. the last marker in file order — the
-/// one a reader following `startxref` from the end would use.
+/// Under ISO 32000-1 §7.5.5, a conforming reader searches the end of the file
+/// for the `%%EOF` marker. When an EOF-overlay envelope is present at the physical
+/// end of the carrier, the PDF boundary sits at `trailer.ube_offset` rather than
+/// `file_size`.
+///
+/// To prevent scanning arbitrary file bodies or random high-entropy payloads,
+/// the backward search is bounded to a maximum window of 1 MiB from the effective
+/// PDF tail. Files lacking a valid `%%EOF` within this window are rejected.
 fn find_last_eof<R: Read + Seek + ?Sized>(
     reader: &mut R,
     file_size: u64,
 ) -> Result<u64, StrHideError> {
     const CHUNK: u64 = 64 * 1024;
+    const MAX_SEARCH_DEPTH: u64 = 1024 * 1024; // 1 MiB cap on trailing data
     const MARKER: &[u8] = b"%%EOF";
 
-    let mut end = file_size;
-    while end > 0 {
-        let start = end.saturating_sub(CHUNK);
+    // 1. If an EOF overlay envelope sits at the tail, the PDF ends before it.
+    let search_end = if file_size >= 24 {
+        let restore = reader.stream_position().unwrap_or(0);
+        let maybe_trailer = EnvelopeTrailer::read_from_tail(reader, None).ok().flatten();
+        let _ = reader.seek(SeekFrom::Start(restore));
+        if let Some(t) = maybe_trailer
+            && t.ube_offset.checked_add(t.ube_total_size) == Some(file_size)
+            && t.ube_offset < file_size
+        {
+            t.ube_offset
+        } else {
+            file_size
+        }
+    } else {
+        file_size
+    };
+
+    let floor = search_end.saturating_sub(MAX_SEARCH_DEPTH);
+    let mut end = search_end;
+    while end > floor {
+        let start = end.saturating_sub(CHUNK).max(floor);
         let read_start = start.saturating_sub(MARKER.len() as u64 - 1);
         let mut buf = vec![0u8; (end - read_start) as usize];
         reader.seek(SeekFrom::Start(read_start))?;
@@ -115,7 +134,7 @@ fn find_last_eof<R: Read + Seek + ?Sized>(
     }
 
     Err(StrHideError::CorruptedData(
-        "Valid PDF %%EOF marker not found".into(),
+        "Valid PDF %%EOF marker not found within tail window".into(),
     ))
 }
 
@@ -680,29 +699,21 @@ impl HostAdapter for PdfAdapter {
 
         // 1. Check incremental update object stream first.
         //
-        // The written structure is `[original %%EOF][obj + xref + trailer +
-        // %%EOF][dirty tail]`, and the writer preserves an arbitrary dirty
-        // tail byte-exactly, so the injected markers can sit arbitrarily far
-        // from the physical end of the file. The scan therefore walks backwards
-        // in fixed 64 KiB chunks from the last `%%EOF`: memory stays bounded no
-        // matter how large the document is, instead of materialising a
-        // file-sized tail window on the last iteration of a growth loop.
+        // An incremental update written by strhide places the stream object
+        // directly inside the newest revision (before the final %%EOF).
+        // The metadata between `endstream` and `%%EOF` (endobj, xref, trailer,
+        // startxref, %%EOF) is compact (a few hundred bytes). We search only
+        // within a single 64 KiB window immediately before the final %%EOF.
+        // We do NOT scan backward past this window into earlier revisions or host streams.
         let total_size = stego_in.seek(SeekFrom::End(0))?;
         if let Ok(eof_offset) = find_last_eof(stego_in, total_size) {
             const CHUNK: u64 = 64 * 1024;
             const ENDSTREAM: &[u8] = b"endstream";
-            let mut end = eof_offset;
-            while end > 0 {
-                let start = end.saturating_sub(CHUNK);
-                let read_start = start.saturating_sub(ENDSTREAM.len() as u64 - 1);
-                let mut buf = vec![0u8; (end - read_start) as usize];
-                stego_in.seek(SeekFrom::Start(read_start))?;
-                if stego_in.read_exact(&mut buf).is_err() {
-                    break;
-                }
-                // Right-to-left: the last `endstream` before the final `%%EOF`
-                // is the injected stream's terminator. Every hit is validated
-                // independently, so an earlier content stream cannot win.
+            let start = eof_offset.saturating_sub(CHUNK);
+            let read_start = start.saturating_sub(ENDSTREAM.len() as u64 - 1);
+            let mut buf = vec![0u8; (eof_offset - read_start) as usize];
+            stego_in.seek(SeekFrom::Start(read_start))?;
+            if stego_in.read_exact(&mut buf).is_ok() {
                 let mut search_end = buf.len();
                 while search_end > 0 {
                     let Some(idx) = buf[..search_end]
@@ -719,7 +730,6 @@ impl HostAdapter for PdfAdapter {
                     }
                     search_end = idx;
                 }
-                end = start;
             }
         }
 

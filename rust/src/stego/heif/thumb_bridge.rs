@@ -35,8 +35,6 @@ pub enum BridgeTargetKind {
         /// Is the TIFF header little-endian (true) or big-endian (false).
         is_little_endian: bool,
     },
-    /// Direct container-level JPEG fallback.
-    ContainerJpegFallback,
 }
 
 /// A located bridge carrier target with its byte range in the HEIF file.
@@ -106,9 +104,7 @@ pub fn embed_heif_bridge<'a>(
     };
 
     match target.kind {
-        BridgeTargetKind::DirectJpeg { .. }
-        | BridgeTargetKind::ExifJpeg { .. }
-        | BridgeTargetKind::ContainerJpegFallback => {
+        BridgeTargetKind::DirectJpeg { .. } | BridgeTargetKind::ExifJpeg { .. } => {
             let stego_bytes = jpeg::embed_jpeg(
                 carrier_slice,
                 eff_payload,
@@ -168,16 +164,16 @@ pub fn extract_heif_bridge(
     let domain = bridge.resolved_domain(bridge.dialect);
 
     match target.kind {
-        BridgeTargetKind::DirectJpeg { .. }
-        | BridgeTargetKind::ExifJpeg { .. }
-        | BridgeTargetKind::ContainerJpegFallback => jpeg::extract_jpeg(
-            carrier_slice,
-            secret,
-            domain,
-            bridge.dialect.jpeg_format(),
-            limits,
-            control,
-        ),
+        BridgeTargetKind::DirectJpeg { .. } | BridgeTargetKind::ExifJpeg { .. } => {
+            jpeg::extract_jpeg(
+                carrier_slice,
+                secret,
+                domain,
+                bridge.dialect.jpeg_format(),
+                limits,
+                control,
+            )
+        }
         BridgeTargetKind::DirectSpatial { .. } => png::extract_png(
             carrier_slice,
             secret,
@@ -203,9 +199,7 @@ pub fn probe_heif_bridge_capacity(
     let domain = bridge.resolved_domain(bridge.dialect);
 
     match target.kind {
-        BridgeTargetKind::DirectJpeg { .. }
-        | BridgeTargetKind::ExifJpeg { .. }
-        | BridgeTargetKind::ContainerJpegFallback => {
+        BridgeTargetKind::DirectJpeg { .. } | BridgeTargetKind::ExifJpeg { .. } => {
             let mut info = jpeg::probe_jpeg_capacity(
                 carrier_slice,
                 &*tuning.jpeg_model,
@@ -256,9 +250,7 @@ pub fn inspect_heif_bridge(
         .or_else(|| dialect.stego_domain());
 
     match target.kind {
-        BridgeTargetKind::DirectJpeg { .. }
-        | BridgeTargetKind::ExifJpeg { .. }
-        | BridgeTargetKind::ContainerJpegFallback => {
+        BridgeTargetKind::DirectJpeg { .. } | BridgeTargetKind::ExifJpeg { .. } => {
             let mut info = jpeg::inspect_jpeg(
                 carrier_slice,
                 secret,
@@ -314,9 +306,7 @@ pub fn verify_heif_bridge(
         .or_else(|| dialect.stego_domain());
 
     match target.kind {
-        BridgeTargetKind::DirectJpeg { .. }
-        | BridgeTargetKind::ExifJpeg { .. }
-        | BridgeTargetKind::ContainerJpegFallback => {
+        BridgeTargetKind::DirectJpeg { .. } | BridgeTargetKind::ExifJpeg { .. } => {
             let mut res = jpeg::verify_jpeg(
                 carrier_slice,
                 secret,
@@ -471,11 +461,6 @@ fn reconstruct_heif(
             BridgeTargetKind::DirectJpeg { item_id } => item.item_id == item_id,
             BridgeTargetKind::DirectSpatial { item_id } => item.item_id == item_id,
             BridgeTargetKind::ExifJpeg { exif_item_id, .. } => item.item_id == exif_item_id,
-            // The container fallback has no item id: the host is whatever
-            // file-offset item's extent physically covers the target region.
-            BridgeTargetKind::ContainerJpegFallback => {
-                host_extent(item, target_start_u64, target_end_orig).is_some()
-            }
         };
 
         if is_target_item {
@@ -718,11 +703,6 @@ pub fn find_bridge_target(data: &[u8]) -> Result<BridgeTarget, StrHideError> {
         }
     }
 
-    // Priority 3: Fallback scan for standalone embedded JPEG (>= 4096 bytes)
-    if let Some(target) = fallback_scan_jpeg(data) {
-        return Ok(target);
-    }
-
     Err(StrHideError::UnsupportedFormat(
         "No bridgeable image carrier (JPEG thumbnail or uncompressed item) found in HEIF container"
             .into(),
@@ -835,83 +815,7 @@ fn parse_exif_embedded_jpeg(
         }
     }
 
-    // Fallback within Exif: scan for valid JPEGs and pick the largest one >= 4096 bytes
-    let mut best_jpeg: Option<(usize, usize)> = None;
-    let mut p = 0;
-    while p + 4 <= exif_slice.len() {
-        if &exif_slice[p..p + 2] == b"\xFF\xD8" && exif_slice[p + 2] == 0xFF {
-            // Check valid JPEG marker
-            let marker = exif_slice[p + 3];
-            if matches!(marker, 0xE0..=0xEF | 0xDB | 0xC0..=0xC4) {
-                // Find matching EOI
-                let mut eoi_pos = None;
-                let mut search_p = p + 4;
-                while search_p + 2 <= exif_slice.len() {
-                    if &exif_slice[search_p..search_p + 2] == b"\xFF\xD9" {
-                        eoi_pos = Some(search_p + 2);
-                        break;
-                    }
-                    search_p += 1;
-                }
-                if let Some(end) = eoi_pos {
-                    let len = end - p;
-                    if len >= 4096 && best_jpeg.is_none_or(|(_, best_len)| len > best_len) {
-                        best_jpeg = Some((p, len));
-                    }
-                    p = end;
-                    continue;
-                }
-            }
-        }
-        p += 1;
-    }
-
-    best_jpeg.map(|(rel_off, len)| BridgeTarget {
-        kind: BridgeTargetKind::ExifJpeg {
-            exif_item_id,
-            tag_0202_file_offset: None,
-            is_little_endian: true,
-        },
-        file_offset: exif_file_offset + rel_off,
-        length: len,
-    })
-}
-
-/// Fallback scanner for a standalone valid JPEG in the whole container.
-fn fallback_scan_jpeg(data: &[u8]) -> Option<BridgeTarget> {
-    let mut best_jpeg: Option<(usize, usize)> = None;
-    let mut p = 0;
-    while p + 4 <= data.len() {
-        if &data[p..p + 2] == b"\xFF\xD8" && data[p + 2] == 0xFF {
-            let marker = data[p + 3];
-            if matches!(marker, 0xE0..=0xEF | 0xDB | 0xC0..=0xC4) {
-                let mut search_p = p + 4;
-                let mut eoi_pos = None;
-                while search_p + 2 <= data.len() {
-                    if &data[search_p..search_p + 2] == b"\xFF\xD9" {
-                        eoi_pos = Some(search_p + 2);
-                        break;
-                    }
-                    search_p += 1;
-                }
-                if let Some(end) = eoi_pos {
-                    let len = end - p;
-                    if len >= 4096 && best_jpeg.is_none_or(|(_, best_len)| len > best_len) {
-                        best_jpeg = Some((p, len));
-                    }
-                    p = end;
-                    continue;
-                }
-            }
-        }
-        p += 1;
-    }
-
-    best_jpeg.map(|(file_offset, length)| BridgeTarget {
-        kind: BridgeTargetKind::ContainerJpegFallback,
-        file_offset,
-        length,
-    })
+    None
 }
 
 /// Lightweight ISO BMFF parser for meta box, iinf, and iloc.
