@@ -12,7 +12,7 @@
 
 use crate::common::*;
 use std::fs;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::Stdio;
 
 use strhide::errors::StrHideError;
@@ -78,14 +78,20 @@ fn make_minimal_png() -> Vec<u8> {
     include_bytes!("../assets/minimal.png").to_vec()
 }
 
-fn patch_header_field(out: &std::path::Path, ube_offset: u64, field_offset: u64, bytes: &[u8]) {
-    let mut f = fs::OpenOptions::new()
+/// Tamper the envelope version field at `ube_offset + 8` ensuring the write is
+/// never a no-op against a masked byte and always yields an unsupported version.
+fn tamper_version_field(out: &std::path::Path, ube_offset: u64) {
+    let mut f = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(out)
         .unwrap();
-    f.seek(SeekFrom::Start(ube_offset + field_offset)).unwrap();
-    f.write_all(bytes).unwrap();
+    f.seek(SeekFrom::Start(ube_offset + 8)).unwrap();
+    let mut orig = [0u8; 1];
+    f.read_exact(&mut orig).unwrap();
+    let tampered = if orig[0] == 0x09 { 0x0A } else { 0x09 };
+    f.seek(SeekFrom::Start(ube_offset + 8)).unwrap();
+    f.write_all(&[tampered]).unwrap();
 }
 
 // --------------------------------------------------------------------------- #15 verify exit code
@@ -136,7 +142,7 @@ fn verify_exit_code_one_when_envelope_header_invalid() {
     .unwrap();
     let ube_offset = fs::metadata(&carrier).unwrap().len();
     // Unsupported version -> Level 2 fails.
-    patch_header_field(&out, ube_offset, 8, &[0x09]);
+    tamper_version_field(&out, ube_offset);
 
     let status = base_cmd()
         .args(["verify", out.to_str().unwrap()])

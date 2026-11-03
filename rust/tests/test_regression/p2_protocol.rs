@@ -9,7 +9,7 @@
 
 use crate::common::*;
 use std::fs;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use strhide::structure::adapters::pdf::parse_pdf_trailer_info;
@@ -70,6 +70,21 @@ fn patch_header_field(out: &Path, ube_offset: u64, field_offset: u64, bytes: &[u
         .unwrap();
     f.seek(SeekFrom::Start(ube_offset + field_offset)).unwrap();
     f.write_all(bytes).unwrap();
+}
+/// Tamper the envelope version field at `ube_offset + 8` ensuring the write is
+/// never a no-op against a masked byte and always yields an unsupported version.
+fn tamper_version_field(out: &Path, ube_offset: u64) {
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(out)
+        .unwrap();
+    f.seek(SeekFrom::Start(ube_offset + 8)).unwrap();
+    let mut orig = [0u8; 1];
+    f.read_exact(&mut orig).unwrap();
+    let tampered = if orig[0] == 0x09 { 0x0A } else { 0x09 };
+    f.seek(SeekFrom::Start(ube_offset + 8)).unwrap();
+    f.write_all(&[tampered]).unwrap();
 }
 
 // --------------------------------------------------------------------------- #14: PDF object number derivation
@@ -269,7 +284,7 @@ fn verify_detects_unsupported_envelope_version() {
     let (out, ube_offset) = write_eof_envelope(&dir, "v");
 
     // version field sits at header offset 8
-    patch_header_field(&out, ube_offset, 8, &[0x09]);
+    tamper_version_field(&out, ube_offset);
 
     let res = verify_carrier(&out, None).unwrap();
     assert!(
