@@ -3242,6 +3242,14 @@ fn estimate_gops_for_slices(
     remaining_gops.len().max(1)
 }
 
+/// Decode one GOP, stopping after `slot_budget` recorded slots when given.
+///
+/// The budget is the batch's remaining target: a GOP that reaches it on its own
+/// has already supplied everything the window needs, and the merge truncates to
+/// the exact slice anyway. Stopping here instead of decoding the GOP out turns
+/// the embed's transient footprint from "every slice of the batch" into "the
+/// slices that survive truncation" — the difference between decoding 1200
+/// frames and 1 for a 4 KiB payload.
 fn decode_gop_slice_range(
     carrier: &[u8],
     candidates: &[CandidateSlice],
@@ -3249,6 +3257,7 @@ fn decode_gop_slice_range(
     has_inter: bool,
     mode: RecordMode,
     capture: Capture,
+    slot_budget: Option<usize>,
 ) -> Result<GopSliceRecord, String> {
     let mut decoder = Decoder::new();
     decoder.skip_loop_filters = true;
@@ -3312,6 +3321,11 @@ fn decode_gop_slice_range(
                     });
                 }
                 local_slice_idx += 1;
+                if let Some(budget) = slot_budget
+                    && record.sink.counts[0] + record.sink.counts[1] >= budget
+                {
+                    break;
+                }
             }
         }
     }
@@ -3488,7 +3502,8 @@ fn parse_carrier_layout(
     })
 }
 
-/// The recorded window: carrier bytes and group count of the first batch.
+/// One batch's ceiling: the carrier bytes and group count of the first
+/// [`EMBED_WINDOW_GOPS`] GOPs, or of the whole carrier when it has fewer.
 ///
 /// `None` when the carrier is not HEVC or has no decodable slice.
 fn embed_window(carrier: &[u8]) -> Option<(u64, usize)> {
@@ -3544,11 +3559,12 @@ fn embed_peak_for_window(window: u64, carrier_len: u64) -> u64 {
 
 /// Peak estimate for embedding `payload_len` bytes into `carrier`.
 ///
-/// The engine records whole GOP batches, so the peak is set by the first
-/// [`EMBED_WINDOW_GOPS`] GOPs — or by however much has to be recorded to reach
-/// the payload's slot target, whichever is larger, capped at the carrier.
-/// A `file_size × constant` estimate over-rejects long videos by ~12×: a
-/// 24-minute film only ever records ~3% of itself.
+/// The embed stops at the slice that meets the payload's slot target and keeps
+/// only that window; the batch it was decoded in doubles from one GOP up to
+/// [`EMBED_WINDOW_GOPS`], so at most one more window's worth is live beside it.
+/// A `file_size × constant` estimate over-rejects long videos by ~12×, and a
+/// whole-batch estimate over-rejects small payloads by 50×: a 4 KiB payload on
+/// a 104 MB clip peaks at 129 MiB, not 6,759 MiB.
 ///
 /// Returns `None` for carriers this engine does not decode.
 pub fn estimate_embed_peak_bytes(
@@ -3557,18 +3573,32 @@ pub fn estimate_embed_peak_bytes(
     safety: SafetyPolicy,
     fmt: &HevcFormatProfile,
 ) -> Option<EmbedPeakEstimate> {
-    let (mut window, window_gops) = embed_window(carrier)?;
-    // Header + payload + AEAD tag, with the flag/name area rounded up: the
-    // target only matters for payloads large enough to outgrow one batch.
+    let (batch_bytes, window_gops) = embed_window(carrier)?;
+    // Header + payload + AEAD tag, with the flag/name area rounded up.
     let body_msg_len = payload_len.saturating_add(256);
     let body_slots = StcTrellis::slots_for_params(body_msg_len * 8, fmt.stc_h, fmt.stc_u);
     let factor = (1.0 / safety.level.video_budget().non_ref_fraction).max(1.0);
-    let target_bytes = (body_slots as f64 * factor).ceil() as u64;
-    window = window.max(target_bytes.min(carrier.len() as u64));
+    let target_bytes = ((body_slots as f64 * factor).ceil() as u64).min(carrier.len() as u64);
+    // One batch's worth on top of the window: the ramp decodes at most as much
+    // again as it had already recorded before it can stop.
+    let overshoot = target_bytes.min(batch_bytes);
+    let window = target_bytes.saturating_add(overshoot);
+    // Matroska and HEIF are committed as a whole rewritten file, so they hold a
+    // second copy of the carrier beside the original. MP4 and Annex-B stream
+    // their patches and never do. Once the window stopped dominating, this copy
+    // became the peak: a 429.5 MB MKV peaks at 831 MiB, its 405.6 MB MP4 twin
+    // at 443 MiB.
+    let rewrite_copy = match sniff_hevc_carrier(carrier) {
+        Some(HevcCarrierKind::MkvContainer | HevcCarrierKind::HeifContainer) => {
+            carrier.len() as u64
+        }
+        _ => 0,
+    };
     Some(EmbedPeakEstimate {
         window_bytes: window,
         window_gops,
-        peak_bytes: embed_peak_for_window(window, carrier.len() as u64),
+        peak_bytes: embed_peak_for_window(window, carrier.len() as u64)
+            .saturating_add(rewrite_copy),
     })
 }
 
@@ -3610,6 +3640,10 @@ fn record_carrier_state(
     let mut decode_error: Option<String> = None;
 
     let mut gop_idx = 0;
+    // A payload that fits in one GOP must not pay for sixteen: start at one and
+    // double until the window batch is reached. `capacity --exact` (All) keeps
+    // its fixed 32 and never ramps.
+    let mut batch_cap = 1usize;
     while gop_idx < gop_ranges.len() {
         control.check()?;
         let batch_size = match stop {
@@ -3631,11 +3665,23 @@ fn record_carrier_state(
                 );
                 est_gops.clamp(1, 48)
             }
-            StopCondition::TargetSlots(_) => EMBED_WINDOW_GOPS,
+            StopCondition::TargetSlots(_) => batch_cap,
         };
 
         let end_idx = (gop_idx + batch_size).min(gop_ranges.len());
         let batch_ranges = &gop_ranges[gop_idx..end_idx];
+
+        // Slots still missing before the window can stop. Every GOP in the
+        // batch may record up to this; a GOP that reaches it stops decoding,
+        // and the merge truncates to the exact slice either way.
+        let slot_budget = match stop {
+            StopCondition::TargetSlots(target) => Some(
+                target
+                    .saturating_sub(global_sink.counts[0] + global_sink.counts[1])
+                    .max(1),
+            ),
+            _ => None,
+        };
 
         let batch_results: Vec<Result<GopSliceRecord, String>> = batch_ranges
             .par_iter()
@@ -3655,6 +3701,7 @@ fn record_carrier_state(
                     has_inter,
                     mode,
                     capture,
+                    slot_budget,
                 )
             })
             .collect();
@@ -3718,6 +3765,9 @@ fn record_carrier_state(
 
         if finished {
             break;
+        }
+        if matches!(stop, StopCondition::TargetSlots(_)) {
+            batch_cap = (batch_cap * 2).min(EMBED_WINDOW_GOPS);
         }
         gop_idx = end_idx;
     }

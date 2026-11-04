@@ -379,13 +379,13 @@ fn check_hevc_embed_budget(
     };
     if estimate.peak_bytes > budget {
         return Err(budget_rejection(format!(
-            "Refusing to embed: this {format:?} carrier is {:.1} MiB; the first {} group(s) of \
-             pictures ({:.1} MiB) stay recorded while the payload is solved, at an estimated peak \
-             of {:.1} MiB, above the {:.1} MiB budget (60% of currently available physical memory). \
-             Free memory or use a longer carrier, where the window is a smaller share of the file.",
+            "Refusing to embed: this {format:?} carrier is {:.1} MiB; about {:.1} MiB of it stays \
+             recorded while the payload is solved (batches of up to {} groups of pictures), at an \
+             estimated peak of {:.1} MiB, above the {:.1} MiB budget (60% of currently available \
+             physical memory). Free memory or use a smaller payload.",
             carrier.len() as f64 / (1024.0 * 1024.0),
-            estimate.window_gops,
             estimate.window_bytes as f64 / (1024.0 * 1024.0),
+            estimate.window_gops,
             estimate.peak_bytes as f64 / (1024.0 * 1024.0),
             budget as f64 / (1024.0 * 1024.0),
         )));
@@ -532,6 +532,48 @@ mod tests {
             long_window <= short_window + short_window / 2,
             "same content, same first batch: {long_window} vs {short_window}"
         );
+    }
+
+    /// The embed stops at the slice that meets the payload's target, so the
+    /// estimate must follow the payload, not the batch it was decoded in. This
+    /// pins the regression that made a 4 KiB payload cost 6,759 MiB.
+    #[test]
+    #[cfg(feature = "content-hevc")]
+    fn embed_peak_follows_the_payload_not_the_batch() {
+        use crate::stego::params::{SafetyPolicy, StegoProfile};
+        let sample = Path::new("../temp/mem_probe/a_480s.mp4");
+        let Ok(bytes) = std::fs::read(sample) else {
+            return;
+        };
+        let profile = StegoProfile::default();
+        let peak = |payload: usize| {
+            crate::stego::hevc::estimate_embed_peak_bytes(
+                &bytes,
+                payload,
+                SafetyPolicy::new(),
+                profile.hevc_format(),
+            )
+            .expect("the 480 s sample is an HEVC carrier")
+        };
+
+        let small = peak(4096);
+        assert!(
+            small.window_bytes < (bytes.len() as u64) / 20,
+            "a 4 KiB payload records a tiny window, not a batch: {}",
+            small.window_bytes
+        );
+        // 80 carrier bytes per payload byte at the default tier (stc_u 2 x
+        // sparsity 5), plus at most one batch's worth for the GOP that decoded
+        // it -- never the 16-GOP batch the recorder used to hold.
+        let big = peak(1 << 20);
+        let needed = (1u64 << 20) * 80;
+        assert!(
+            big.window_bytes >= needed && big.window_bytes <= needed * 2,
+            "1 MiB payload window {} vs needed {needed}",
+            big.window_bytes
+        );
+        assert!(big.window_bytes <= bytes.len() as u64);
+        assert!(small.peak_bytes < big.peak_bytes / 10);
     }
 
     #[test]
