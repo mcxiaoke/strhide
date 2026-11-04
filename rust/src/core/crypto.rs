@@ -318,13 +318,21 @@ pub fn derive_trailer_crc_mask(trailer_magic: &[u8; 4]) -> u32 {
     ])
 }
 
-/// Derive a 10-byte deterministic keystream from the 4-byte channel magic to mask
-/// the remaining fields of ChannelHeader (version, flags, ube_len, slack_off).
-/// This eliminates raw version numbers and zero-filled padding integers in PE codebits.
-pub fn derive_channel_header_mask(magic: &[u8; 4]) -> [u8; 10] {
-    let hk = hkdf::Hkdf::<Sha256>::new(None, magic);
+/// Derive a 10-byte deterministic keystream from the **8-byte envelope header
+/// magic** to mask the remaining fields of `ChannelHeader` (version, flags,
+/// `ube_len`, `slack_off`).
+///
+/// The old layout derived this from the 4-byte trailer magic that is written
+/// verbatim at `ChannelHeader[0..4]`, so any observer could unmask the
+/// lengths without a password (review P1-5). The envelope header magic lives
+/// in the UBE header at channel positions `112..176`; in stealth mode it is
+/// password-derived and is *not* the 4-byte value visible in the channel
+/// header. In standard mode it is the public `STANDARD_HEADER_MAGIC`, which is
+/// format obfuscation only — never a secrecy claim.
+pub fn derive_channel_header_mask(envelope_header_magic: &[u8; 8]) -> [u8; 10] {
+    let hk = hkdf::Hkdf::<Sha256>::new(None, envelope_header_magic);
     let mut mask = [0u8; 10];
-    hk.expand(b"strhide-pe-channel-mask-v1", &mut mask)
+    hk.expand(b"strhide-pe-channel-mask-v2", &mut mask)
         .expect("HKDF-Expand for 10-byte channel mask never fails");
     mask
 }

@@ -45,6 +45,11 @@ pub const CHANNEL_HEADER_LEN: usize = 14;
 
 const CHANNEL_HEADER_BITS: usize = CHANNEL_HEADER_LEN * 8;
 
+/// Channel positions needed before the header can be unpacked: the 14 header
+/// bytes plus the first 8 UBE bytes, which hold the envelope header magic that
+/// keys the channel-header mask (review P1-5).
+const CHANNEL_PREFIX_BITS: usize = CHANNEL_HEADER_BITS + 64;
+
 /// Structural lower bound for a channel payload: a bare envelope is a 112-byte
 /// header plus a 24-byte trailer, so anything smaller means a corrupt header
 /// rather than a real envelope. Capacity reporting must use the writer-side
@@ -375,16 +380,19 @@ impl ChannelHeader {
     }
 
     /// Serializes the channel header with deterministic keystream masking on
-    /// bytes [4..14] (version, flags, ube_len, slack_off) derived from `magic`.
+    /// bytes [4..14] (version, flags, ube_len, slack_off) derived from the
+    /// **8-byte envelope header magic**.
     ///
-    /// NOTE: Under standard mode where `magic` is a public constant, this masking serves
-    /// as format/heuristic obfuscation to prevent naive byte-signature scanners, NOT
-    /// cryptographic secrecy of header lengths. In stealth mode (`--stealth`), `magic` is
-    /// derived from the user's password HMAC, achieving cryptographic blinding. True secrecy
-    /// of the hidden payload is always provided by AEAD encryption of the payload itself.
-    pub fn pack_masked(&self) -> [u8; CHANNEL_HEADER_LEN] {
+    /// `buf[0..4]` only carries the 4-byte trailer magic; the mask IKM is the
+    /// different 8-byte header magic stored in the UBE (channel positions
+    /// `112..176`). In stealth mode that value is password-derived, so an
+    /// observer holding only `buf[0..4]` cannot unmask the lengths. In standard
+    /// mode the IKM is the public `STANDARD_HEADER_MAGIC`: this is format
+    /// obfuscation, explicitly **not** secrecy. Payload secrecy is always the
+    /// AEAD layer.
+    pub fn pack_masked(&self, envelope_header_magic: &[u8; 8]) -> [u8; CHANNEL_HEADER_LEN] {
         let mut buf = self.pack_unmasked();
-        let mask = crate::crypto::derive_channel_header_mask(&self.magic);
+        let mask = crate::crypto::derive_channel_header_mask(envelope_header_magic);
         for i in 0..10 {
             buf[4 + i] ^= mask[i];
         }
@@ -392,23 +400,26 @@ impl ChannelHeader {
     }
 
     /// Default pack method uses masked encoding.
-    pub fn pack(&self) -> [u8; CHANNEL_HEADER_LEN] {
-        self.pack_masked()
+    pub fn pack(&self, envelope_header_magic: &[u8; 8]) -> [u8; CHANNEL_HEADER_LEN] {
+        self.pack_masked(envelope_header_magic)
     }
 
     /// Unpacks a 14-byte slice. The version/flags/lengths fields are always
-    /// masked with the keystream derived from `magic`; there is no unmasked
-    /// (pre-v1) layout any more.
-    pub fn unpack(bytes: &[u8]) -> Result<Self, CodebitsError> {
-        Self::unpack_masked(bytes)
+    /// masked with the keystream derived from `envelope_header_magic`; there is
+    /// no unmasked (pre-v1) layout any more.
+    pub fn unpack(bytes: &[u8], envelope_header_magic: &[u8; 8]) -> Result<Self, CodebitsError> {
+        Self::unpack_masked(bytes, envelope_header_magic)
     }
 
-    pub fn unpack_masked(bytes: &[u8]) -> Result<Self, CodebitsError> {
+    pub fn unpack_masked(
+        bytes: &[u8],
+        envelope_header_magic: &[u8; 8],
+    ) -> Result<Self, CodebitsError> {
         if bytes.len() < CHANNEL_HEADER_LEN {
             return Err(CodebitsError::Corrupted("short channel header".into()));
         }
         let magic: [u8; 4] = bytes[0..4].try_into().unwrap();
-        let mask = crate::crypto::derive_channel_header_mask(&magic);
+        let mask = crate::crypto::derive_channel_header_mask(envelope_header_magic);
         let mut unmasked = [0u8; 10];
         for i in 0..10 {
             unmasked[i] = bytes[4 + i] ^ mask[i];
@@ -442,8 +453,12 @@ impl ChannelHeader {
 /// version/capacity checks: on a carrier with no channel the first 112 bits
 /// are arbitrary host instruction bits, and a repetitive code pattern can
 /// otherwise produce a plausible-looking but bogus header.
+///
+/// The mask is keyed by the envelope header magic in the immediately following
+/// 8 UBE bytes (`prof[112..176]`, see [`CHANNEL_PREFIX_BITS`]), so a profile
+/// that does not reach that far cannot contain a channel.
 fn header_from_positions(prof: &[CodePosition]) -> Result<ChannelHeader, CodebitsError> {
-    if prof.len() < CHANNEL_HEADER_BITS {
+    if prof.len() < CHANNEL_PREFIX_BITS {
         return Err(CodebitsError::ChannelNotFound);
     }
     let header_bits: Vec<bool> = prof
@@ -451,7 +466,14 @@ fn header_from_positions(prof: &[CodePosition]) -> Result<ChannelHeader, Codebit
         .take(CHANNEL_HEADER_BITS)
         .map(|p| p.bit)
         .collect();
-    ChannelHeader::unpack(&bits_to_bytes(&header_bits))
+    let envelope_magic_bits: Vec<bool> = prof[CHANNEL_HEADER_BITS..CHANNEL_PREFIX_BITS]
+        .iter()
+        .map(|p| p.bit)
+        .collect();
+    let envelope_magic: [u8; 8] = bits_to_bytes(&envelope_magic_bits)
+        .try_into()
+        .expect("64 bits assemble into 8 bytes");
+    ChannelHeader::unpack(&bits_to_bytes(&header_bits), &envelope_magic)
 }
 
 /// Version + payload-floor sanity for a header whose capacity is not yet known.
@@ -503,7 +525,7 @@ pub fn parse_channel_header_from_profile(
 /// [`parse_channel_header_from_profile`] with a full profile; this entry point
 /// is for "does a header already exist?" and post-`locate` field reads.
 pub fn parse_channel_header(text: &[u8], bitness: u32) -> Result<ChannelHeader, CodebitsError> {
-    let prof = profile_upto(text, bitness, Some(CHANNEL_HEADER_BITS));
+    let prof = profile_upto(text, bitness, Some(CHANNEL_PREFIX_BITS));
     let header = header_from_positions(&prof)?;
     validate_header_prefix(&header)?;
     Ok(header)
@@ -521,7 +543,7 @@ pub fn read_channel_header(
     bitness: u32,
     expected_magic: Option<[u8; 4]>,
 ) -> Result<ChannelHeader, CodebitsError> {
-    let prof = profile_upto(text, bitness, Some(CHANNEL_HEADER_BITS));
+    let prof = profile_upto(text, bitness, Some(CHANNEL_PREFIX_BITS));
     let header = header_from_positions(&prof)?;
     let want = expected_magic.unwrap_or(CHANNEL_MAGIC);
     if header.magic != want {
@@ -535,7 +557,7 @@ pub fn read_channel_header(
 /// range. The returned `Vec<u8>` is the opaque UBE byte stream. Does not
 /// filter by magic — callers must have located the channel first.
 pub fn extract_ube(text: &[u8], bitness: u32) -> Result<(ChannelHeader, Vec<u8>), CodebitsError> {
-    let prefix = profile_upto(text, bitness, Some(CHANNEL_HEADER_BITS));
+    let prefix = profile_upto(text, bitness, Some(CHANNEL_PREFIX_BITS));
     let header = header_from_positions(&prefix)?;
     validate_header_prefix(&header)?;
     let total_bits = header.total_bits();
@@ -580,6 +602,14 @@ pub fn embed(
     let magic = *ube.last_chunk::<4>().ok_or_else(|| {
         CodebitsError::Corrupted("UBE is too short for a 4-byte trailer magic".into())
     })?;
+    // The mask key is the 8-byte envelope header magic at the very start of the
+    // UBE, which the reader can recover from the channel prefix without a
+    // password (review P1-5). It is deliberately *not* `magic`.
+    let envelope_header_magic: [u8; 8] = ube
+        .get(0..8)
+        .ok_or_else(|| CodebitsError::Corrupted("UBE is too short for its header magic".into()))?
+        .try_into()
+        .expect("8-byte slice");
     let header = ChannelHeader {
         magic,
         version: CHANNEL_VERSION,
@@ -587,7 +617,7 @@ pub fn embed(
         ube_len: ube.len() as u32,
         slack_off,
     };
-    channel.extend_from_slice(&header.pack());
+    channel.extend_from_slice(&header.pack(&envelope_header_magic));
     channel.extend_from_slice(ube);
 
     let bits = bytes_to_bits(&channel);
@@ -639,7 +669,7 @@ pub fn apply_diff(
 ) -> Result<ChannelHeader, CodebitsError> {
     // The header rides inside the diff-covered region; read it from the text
     // itself so that a stale/short diff is caught by the length check below.
-    let prefix = profile_upto(text, bitness, Some(CHANNEL_HEADER_BITS));
+    let prefix = profile_upto(text, bitness, Some(CHANNEL_PREFIX_BITS));
     let header = header_from_positions(&prefix)?;
     validate_header_prefix(&header)?;
 
@@ -834,6 +864,7 @@ mod tests {
     #[test]
     fn channel_header_masking_roundtrip_only() {
         let magic = CHANNEL_MAGIC;
+        let envelope_magic = crate::structure::envelope::STANDARD_HEADER_MAGIC;
         let header = ChannelHeader {
             magic,
             version: CHANNEL_VERSION,
@@ -842,15 +873,17 @@ mod tests {
             slack_off: 0x1000,
         };
 
-        // 1. Masked packing
-        let masked_bytes = header.pack_masked();
+        // 1. Masked packing: bytes 0..4 stay visible, the rest is keyed by the
+        //    8-byte envelope header magic.
+        let masked_bytes = header.pack_masked(&envelope_magic);
         assert_eq!(&masked_bytes[0..4], &magic);
-        let mask = crate::crypto::derive_channel_header_mask(&magic);
+        let mask = crate::crypto::derive_channel_header_mask(&envelope_magic);
         assert_eq!(masked_bytes[4], CHANNEL_VERSION ^ mask[0]);
         assert_ne!(masked_bytes[4], CHANNEL_VERSION);
 
         // Unpack masked bytes
-        let unpacked = ChannelHeader::unpack_masked(&masked_bytes).expect("unpack masked");
+        let unpacked =
+            ChannelHeader::unpack_masked(&masked_bytes, &envelope_magic).expect("unpack masked");
         assert_eq!(unpacked, header);
 
         // 2. An unmasked (pre-v1) header no longer parses: the version byte is
@@ -858,8 +891,76 @@ mod tests {
         //    accepted verbatim.
         let unmasked_bytes = header.pack_unmasked();
         assert_eq!(unmasked_bytes[4], CHANNEL_VERSION);
-        let bogus = ChannelHeader::unpack_masked(&unmasked_bytes).expect("still 14 bytes");
+        let bogus =
+            ChannelHeader::unpack_masked(&unmasked_bytes, &envelope_magic).expect("still 14 bytes");
         assert_ne!(bogus.version, CHANNEL_VERSION);
+    }
+
+    /// Review P1-5 regression: the pre-fix implementation derived the mask from
+    /// the 4-byte magic written verbatim in `ChannelHeader[0..4]`, so anyone
+    /// could unmask `version/flags/ube_len/slack_off` without a password.
+    ///
+    /// This test reproduces that old derivation locally: a header masked the
+    /// old way must *not* parse under the new reader, and the visible magic
+    /// alone must not reproduce the real mask.
+    #[test]
+    fn channel_header_mask_is_not_derivable_from_the_visible_magic() {
+        use hkdf::Hkdf;
+        use sha2::Sha256;
+
+        let visible_magic = CHANNEL_MAGIC;
+        let envelope_magic = crate::structure::envelope::STANDARD_HEADER_MAGIC;
+        let header = ChannelHeader {
+            magic: visible_magic,
+            version: CHANNEL_VERSION,
+            flags: 0,
+            ube_len: 256,
+            slack_off: 0x1000,
+        };
+
+        // The old P1-5 derivation: HKDF over the 4 visible magic bytes.
+        let old_mask = {
+            let hk = Hkdf::<Sha256>::new(None, &visible_magic);
+            let mut mask = [0u8; 10];
+            hk.expand(b"strhide-pe-channel-mask-v1", &mut mask)
+                .expect("HKDF-Expand for 10-byte channel mask never fails");
+            mask
+        };
+        let mut old_bytes = header.pack_unmasked();
+        for (i, m) in old_mask.iter().enumerate() {
+            old_bytes[4 + i] ^= *m;
+        }
+        // Sanity check: under the old scheme the visible magic alone restored
+        // the real header fields (this is the bypass P1-5 removes).
+        assert_eq!(old_bytes[4] ^ old_mask[0], CHANNEL_VERSION);
+
+        // The new reader keys the mask from the envelope header magic, so an
+        // old-format header does not unmask into a usable channel header.
+        let wrong =
+            ChannelHeader::unpack_masked(&old_bytes, &envelope_magic).expect("still 14 bytes");
+        assert_ne!(
+            wrong.version, CHANNEL_VERSION,
+            "old v1 masking must no longer parse"
+        );
+        assert!(matches!(
+            validate_header_prefix(&wrong),
+            Err(CodebitsError::Corrupted(_))
+        ));
+
+        // The visible 4-byte magic cannot reproduce the real mask: same first
+        // four bytes, different remaining four, different keystream.
+        let real_mask = crate::crypto::derive_channel_header_mask(&envelope_magic);
+        assert_ne!(old_mask, real_mask);
+        let mut other_ikm = envelope_magic;
+        other_ikm[4..8].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        assert_ne!(
+            crate::crypto::derive_channel_header_mask(&other_ikm),
+            real_mask
+        );
+
+        // The visible bytes are not a prefix of the real IKM in standard mode,
+        // which is what stops a `derive_channel_header_mask(visible)` caller.
+        assert_ne!(&envelope_magic[0..4], &visible_magic);
     }
 
     #[test]
@@ -899,7 +1000,10 @@ mod tests {
             slack_off: 0x1000,
         };
         let mut channel = Vec::new();
-        channel.extend_from_slice(&foreign_header.pack_masked());
+        // The mask IKM is the first 8 bytes of the fake UBE payload below
+        // (channel positions 112..176); a foreign magic only fails the magic
+        // check, so the header still has to unmask cleanly.
+        channel.extend_from_slice(&foreign_header.pack_masked(&[0x42u8; 8]));
         channel.extend_from_slice(&[0x42u8; 200]);
 
         let bits = bytes_to_bits(&channel);

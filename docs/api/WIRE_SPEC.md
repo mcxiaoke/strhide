@@ -50,7 +50,7 @@ strhide 有两个相互独立的隐写域，各自有不同的字节布局：
 | 字节序 | 小端 | 外层无整数；密文内部长度为**大端** |
 | AEAD AAD | header 前 80B + `meta_len`/`hint_len` + hint 正文；分块再追加 `chunk_index/is_last` | `salt ‖ nonce`（28B） |
 | 无密码默认密钥 | `BUILTIN_DEFAULT_KEY` | `PUBLIC_DEFAULT_SECRET` |
-| HKDF 子密钥标签 | `strhide-payload`、`strhide-metadata`（掩码：`strhide-header-mask-v1`、`strhide-pe-channel-mask-v1`） | `strhide-stego-enc-v1`、`strhide-stego-perm-v1`、`strhide-stego-hpos-v2`、`strhide-stc-trellis-v1` |
+| HKDF 子密钥标签 | `strhide-payload`、`strhide-metadata`（掩码：`strhide-header-mask-v1`、`strhide-pe-channel-mask-v2`） | `strhide-stego-enc-v1`、`strhide-stego-perm-v1`、`strhide-stego-hpos-v2`、`strhide-stc-trellis-v1` |
 | 额外派生 | stealth 魔数与 76B/10B 字段掩码 | header 槽位置换种子（无 salt）、STC 网格种子 |
 | 宿主还原 | 记录宿主 size + SHA-256，支持 bit-for-bit 还原（散落策略依赖 slack diff） | **无宿主还原**：像素/系数被改即不可逆，只能重嵌或覆盖 |
 | 最终承载 | 注入容器结构空隙（chunk/段/box/overlay 等）或指令编码散落 | 矩阵编码分散到像素 / DCT 系数 / H.265 变换系数符号位 |
@@ -428,6 +428,8 @@ trailer_crc32(stealth) = raw_crc XOR mask
 
 为使读侧定位器（`locate`）与提取器（`open_ube_reader`）能够在不反汇编整段代码的前提下快速确定嵌入 UBE 的字节数、版本以及 100% 还原所需的原指令差异信息，`pe_codebits` 在代码流的前 112 个可用指令槽位中承载了一个定长 14 字节的信道头（`ChannelHeader`，14 字节 = 112 比特）。
 
+信道头的掩码密钥取自紧随其后的 UBE 头魔数（UBE 字节 0..8，对应通道 bit 位置 112..176），因此读侧在解掩码前必须扫描并组装前 **176** 个可用指令槽位（见 §12.3）。
+
 ### 12.2 信道头布局（14 字节，小端）
 
 ```text
@@ -439,29 +441,34 @@ trailer_crc32(stealth) = raw_crc XOR mask
 
 | 相对偏移 | 长度 | 字段 | 类型 | 说明 |
 |---|---|---|---|---|
-| 0 | 4 | `magic` | `[u8; 4]` | 信道魔数（见下） |
-| 4 | 1 | `version` | `u8` | 信道版本，当前固定为 `0x01`（`CHANNEL_VERSION`） |
-| 5 | 1 | `flags` | `u8` | 标志位，保留，当前为 0 |
-| 6 | 4 | `ube_len` | `u32` | 散落嵌入的代码段 UBE 信封总字节数 |
-| 10 | 4 | `slack_off` | `u32` | 存放原指令还原差异（instruction diff）的 PE Slack 区域绝对文件偏移 |
+| 0 | 4 | `magic` | `[u8; 4]` | 信道魔数（见下）；明文可见 |
+| 4 | 1 | `version` | `u8` | 信道版本，当前固定为 `0x01`（`CHANNEL_VERSION`）；经掩码 |
+| 5 | 1 | `flags` | `u8` | 标志位，保留，当前为 0；经掩码 |
+| 6 | 4 | `ube_len` | `u32` | 散落嵌入的代码段 UBE 信封总字节数；经掩码 |
+| 10 | 4 | `slack_off` | `u32` | 存放原指令还原差异（instruction diff）的 PE Slack 区域绝对文件偏移；经掩码 |
 
 - **信道魔数**：
   - 标准模式：`CHANNEL_MAGIC = STANDARD_TRAILER_MAGIC = [0x78, 0xe6, 0x66, 0xd2]`。
-  - Stealth 模式：采用用户密码派生的 trailer magic。
+  - Stealth 模式：采用用户密码派生的 trailer magic（`strhide-stealth-trailer`）。
+- **掩码密钥**：不是上面的 4 字节 `magic`，而是 UBE 头部的 8 字节 envelope header magic（标准模式为公开常量 `STANDARD_HEADER_MAGIC`，Stealth 模式为密码派生的 `strhide-stealth-header`），见 §12.3。
 
 ### 12.3 确定性掩码混淆（Masking）
 
 为避免明文版本号、标志与零填充长度成为特征扫描器的指纹，`ChannelHeader` 的**字节 4..14**（共 10 字节）始终经过确定性密钥流掩码异或混淆：
 
 ```text
-derive_channel_header_mask(magic):
-  HKDF-SHA256(salt = None, ikm = magic)
-  expand info = b"strhide-pe-channel-mask-v1" → mask (10 字节)
+derive_channel_header_mask(envelope_header_magic):        // 8 字节 IKM
+  HKDF-SHA256(salt = None, ikm = envelope_header_magic)
+  expand info = b"strhide-pe-channel-mask-v2" → mask (10 字节)
 
 channel_bytes[4..14] = unmasked[4..14] XOR mask[0..10]
 ```
 
-- **混淆效果**：在标准模式下，消除了 `0x01` 版本号和高位为 0 的整数填充；在 Stealth 模式下，因 `magic` 由密码派生，实现了对信道头的密码学盲化。
+- **IKM 来源**：UBE 头魔数位于通道 bit 位置 112..176（即 UBE 字节 0..8）。写侧在 `embed` 时直接从 UBE 前 8 字节取值；读侧从 `.text` 前 176 个可用指令槽位读取，`profile_upto` 只需扫描该前缀。
+- **标准模式（非机密）**：IKM 是公开常量 `STANDARD_HEADER_MAGIC`（`b7 54 2c 82 7e 31 1d 6e`），任何知道格式的人都能解掩码。该掩码在此模式下**仅是格式混淆**，不构成机密性承诺；载荷机密性始终由 AEAD（§10）提供。
+- **Stealth 模式**：IKM 是密码派生的 8 字节 header magic，与 `ChannelHeader[0..4]` 中可见的 4 字节 trailer magic **不是同一个值**。只持有 `ChannelHeader[0..4]` 的观察者无法推导掩码；能解码通道位流并读取位置 112..176 的观察者仍可恢复 IKM，因此这里的改进是“不再由明文可见字段直接派生”，不是对通道位流分析者的绝对机密。
+- **与旧实现的差异（P1-5）**：旧实现使用 `ikm = ChannelHeader[0..4]`（明文可见的 4 字节 magic）与 `info = strhide-pe-channel-mask-v1`，无密码观察者可直接解出 `version/flags/ube_len/slack_off`。新实现已改为上述 8 字节 IKM + `v2` 标签。
+- **兼容性**：本项目未发布，不提供旧版读取路径。用旧掩码实现写出的 PE `pe_codebits` 载具在本版本中无法通过信道头校验，表现为 `NoHiddenData` / 读取失败；需用原版本剥离后重新写入。
 
 ### 12.4 宿主 100% 还原机制（Slack Diff）
 

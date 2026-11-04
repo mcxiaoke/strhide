@@ -918,11 +918,13 @@ fn codebits_channel_header_keystream_masking_verified() {
         [layout.text_offset as usize..(layout.text_offset + layout.text_scan_len) as usize];
     let prof = strhide::structure::adapters::pe_codebits::profile(text, layout.bitness);
 
-    // Extract the 112 bits (14 bytes) of ChannelHeader directly from the code positions
+    // Extract the first 176 bits: 14 bytes of ChannelHeader plus the first 8
+    // UBE bytes, which hold the envelope header magic that keys the mask
+    // (review P1-5).
     let mut header_bytes = Vec::new();
     for chunk in prof
         .iter()
-        .take(112)
+        .take(176)
         .map(|p| p.bit)
         .collect::<Vec<_>>()
         .chunks(8)
@@ -935,7 +937,7 @@ fn codebits_channel_header_keystream_masking_verified() {
         }
         header_bytes.push(b);
     }
-    assert_eq!(header_bytes.len(), 14);
+    assert_eq!(header_bytes.len(), 22);
 
     // 1. Magic must match CHANNEL_MAGIC
     let magic: [u8; 4] = header_bytes[0..4].try_into().unwrap();
@@ -944,8 +946,18 @@ fn codebits_channel_header_keystream_masking_verified() {
         strhide::structure::adapters::pe_codebits::CHANNEL_MAGIC
     );
 
-    // 2. Version byte at index 4 must be keystream-masked (NOT raw 0x01)
-    let mask = strhide::crypto::derive_channel_header_mask(&magic);
+    // 2. The mask key is the 8-byte envelope header magic at channel
+    //    positions 112..176, not the visible 4-byte trailer magic. In standard
+    //    mode it is the public constant (obfuscation only); in stealth mode it
+    //    is password-derived.
+    let envelope_magic: [u8; 8] = header_bytes[14..22].try_into().unwrap();
+    assert_eq!(
+        envelope_magic,
+        strhide::structure::envelope::STANDARD_HEADER_MAGIC
+    );
+
+    // 3. Version byte at index 4 must be keystream-masked (NOT raw 0x01)
+    let mask = strhide::crypto::derive_channel_header_mask(&envelope_magic);
     assert_ne!(
         header_bytes[4],
         strhide::structure::adapters::pe_codebits::CHANNEL_VERSION
@@ -955,10 +967,25 @@ fn codebits_channel_header_keystream_masking_verified() {
         strhide::structure::adapters::pe_codebits::CHANNEL_VERSION
     );
 
-    // 3. Flags byte at index 5 must unmask to 0
+    // 4. Flags byte at index 5 must unmask to 0
     assert_eq!(header_bytes[5] ^ mask[1], 0);
 
-    // 4. Engine lifecycle (read, verify, strip) must succeed 100% and be bit-exact
+    // 5. The visible 4-byte magic cannot reproduce the mask: an IKM that only
+    //    repeats those bytes yields a different keystream (P1-5 regression).
+    let visible_ikm = {
+        let mut ikm = [0u8; 8];
+        ikm[0..4].copy_from_slice(&magic);
+        ikm[4..8].copy_from_slice(&magic);
+        ikm
+    };
+    let visible_mask = strhide::crypto::derive_channel_header_mask(&visible_ikm);
+    assert_ne!(visible_mask, mask, "visible magic must not key the mask");
+    assert_ne!(
+        header_bytes[4] ^ visible_mask[0],
+        strhide::structure::adapters::pe_codebits::CHANNEL_VERSION
+    );
+
+    // 6. Engine lifecycle (read, verify, strip) must succeed 100% and be bit-exact
     let read = read_carrier(
         &out,
         &ReadOptions {
