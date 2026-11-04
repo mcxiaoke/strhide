@@ -10,7 +10,7 @@ use strhide::stego::header::Tlv;
 use strhide::stego::hevc::heif_boxes::parse_heif_targets;
 use strhide::stego::hevc::{
     embed_hevc, embed_hevc_with_info_v4, extract_hevc, extract_hevc_v4, probe_hevc_capacity,
-    probe_hevc_capacity_ext,
+    probe_hevc_capacity_ext, probe_hevc_capacity_info,
 };
 use strhide::stego::params::{ExtractParams, SafetyPolicy};
 use strhide::{StrHideError, stego::format::DEFAULT_HEVC_FORMAT};
@@ -469,4 +469,42 @@ fn test_hevc_v4_truncated_body_is_rejected() {
         &Control::none(),
     );
     assert!(res.is_err(), "truncated carrier must not extract");
+}
+
+/// The capacity report an embed returns must come from the same whole-carrier
+/// pool as the probe. The write window stops recording once the payload fits,
+/// so reporting that window made a 59-byte payload on a 12 MB MKV claim
+/// 117,000 slots / 1.40 KiB safe against a real 13,141,628 slots / 70.04 KiB
+/// (112x under-report), and let `--enforce-safety` reject payloads the carrier
+/// could hold.
+#[test]
+fn test_hevc_embed_capacity_report_matches_probe() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/assets/small.heic");
+    let carrier = fs::read(&path).expect("read small.heic");
+    let fmt = &DEFAULT_HEVC_FORMAT;
+    let policy = SafetyPolicy::new();
+
+    let probe = probe_hevc_capacity_info(&carrier, &[], fmt, policy.level, false, &Control::none())
+        .expect("probe capacity");
+
+    let payload = b"abc";
+    let (_, info, _stats) = embed_hevc_with_info_v4(
+        &carrier,
+        &Payload::bytes(payload),
+        Credential::Password("l02-pw"),
+        None,
+        fmt.cipher.default_suite.as_u16(),
+        &[],
+        fmt,
+        Freshness::Random,
+        policy,
+        &Control::none(),
+    )
+    .expect("embed");
+
+    assert_eq!(info.total_elements, probe.total_elements);
+    assert_eq!(info.available_slots, probe.available_slots);
+    assert_eq!(info.max_raw_payload_bytes, probe.max_raw_payload_bytes);
+    assert_eq!(info.tier_limits, probe.tier_limits);
+    assert_eq!(info.recommended_max_bytes, probe.recommended_max_bytes);
 }

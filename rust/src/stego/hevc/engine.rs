@@ -1216,7 +1216,24 @@ pub fn embed_hevc_patches_with_factor_v4(
     control.check()?;
     control.stage(Stage::Solve);
     let pool = PoolProfile::from_record(&record);
-    let capacity_info = build_hevc_capacity_info(carrier, kind, fmt, &pool, ext_len, safety.level)?;
+    // Capacity is a property of the whole carrier, not of the write window:
+    // `TargetSlots` deliberately stops recording once the payload needs are
+    // met, so building the report from `pool` under-reports by the ratio of
+    // carrier capacity to the window (measured 112x on a 12 MB MKV). Reuse the
+    // same pool the probe uses instead of inventing a second estimator.
+    //
+    // A record whose slot count stayed below `target_slots` cannot have hit the
+    // early stop, so it already covers the whole carrier and needs no second
+    // decode pass.
+    let capacity_pool;
+    let capacity_source = if record.total_slots() < target_slots {
+        &pool
+    } else {
+        capacity_pool = probe_hevc_pool(carrier, kind, false, control)?;
+        &capacity_pool
+    };
+    let capacity_info =
+        build_hevc_capacity_info(carrier, kind, fmt, capacity_source, ext_len, safety.level)?;
 
     enforce_safety(
         payload.len(),
