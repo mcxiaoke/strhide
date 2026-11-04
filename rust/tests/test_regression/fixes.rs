@@ -819,3 +819,66 @@ fn error_type_is_still_strhide_error() {
     .unwrap_err();
     assert!(matches!(err, StrHideError::General(_)));
 }
+
+// --------------------------------------------------------------------------- P0-1 write-path host verification
+
+/// Detection is magic-only: any file starting with `FF D8` is routed to the
+/// JPEG adapter. Before the fix, `write_core` never called `verify_structure`,
+/// so `auto` fell back to `eof` and appended an envelope to a file that was not
+/// a JPEG at all. The malformed host must now be rejected before any output is
+/// produced.
+#[test]
+fn write_rejects_truncated_jpeg_lookalike() {
+    let dir = scratch("write_verify_jpeg");
+    let carrier = dir.join("fake.jpg");
+    fs::write(&carrier, [0xFF, 0xD8, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55]).unwrap();
+    let out = dir.join("out.jpg");
+    let err = write_carrier(
+        &carrier,
+        PayloadSource::Text("payload"),
+        &WriteOptions {
+            output_path: Some(&out),
+            strategy: "auto",
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    let message = err.to_string().to_lowercase();
+    assert!(
+        message.contains("malformed") && message.contains("jpeg"),
+        "unexpected error: {err}"
+    );
+    assert!(!out.exists(), "a rejected host must not produce output");
+}
+
+/// `size == 0` means "this box extends to EOF", so a file consisting only of
+/// such a box cannot safely receive another top-level box. The old verifier
+/// accepted `[size=0][ftyp]` because it only required `ftyp` somewhere.
+#[test]
+fn write_rejects_bmff_host_without_explicit_sized_box() {
+    let dir = scratch("write_verify_bmff");
+    let carrier = dir.join("fake.mp4");
+    let mut fake = Vec::new();
+    fake.extend_from_slice(&0u32.to_be_bytes());
+    fake.extend_from_slice(b"ftyp");
+    fs::write(&carrier, &fake).unwrap();
+    let out = dir.join("out.mp4");
+    let err = write_carrier(
+        &carrier,
+        PayloadSource::Text("payload"),
+        &WriteOptions {
+            output_path: Some(&out),
+            strategy: "auto",
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    let message = err.to_string().to_lowercase();
+    assert!(
+        message.contains("malformed") && message.contains("explicitly sized"),
+        "unexpected error: {err}"
+    );
+    assert!(!out.exists(), "a rejected host must not produce output");
+}

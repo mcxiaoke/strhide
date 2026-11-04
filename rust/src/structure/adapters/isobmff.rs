@@ -241,6 +241,12 @@ pub fn isobmff_verify_structure(
 
     let mut offset = 0u64;
     let mut box_count = 0u64;
+    // A `size == 0` box means "until EOF" and carries no length of its own.
+    // Real ISO BMFF files also contain at least one explicitly sized box (the
+    // `ftyp` at minimum); a file made only of a size-0 box is not a container
+    // we can safely inject into, because any box appended after it would be
+    // swallowed by it.
+    let mut explicit_boxes = 0u64;
     let mut has_ftyp = false;
 
     while offset < total_size {
@@ -274,10 +280,12 @@ pub fn isobmff_verify_structure(
                     ),
                 ));
             }
+            explicit_boxes += 1;
             (u64::from_be_bytes(large), 16u64)
         } else if size == 0 {
             (total_size - offset, 8u64)
         } else {
+            explicit_boxes += 1;
             (size as u64, 8u64)
         };
 
@@ -322,6 +330,15 @@ pub fn isobmff_verify_structure(
             ));
         }
         stego_in.seek(SeekFrom::Start(offset))?;
+    }
+
+    if explicit_boxes == 0 {
+        return Ok((
+            false,
+            format!(
+                "{format_name} has no explicitly sized top-level box (every box uses size 0 / extends to EOF)"
+            ),
+        ));
     }
 
     if !has_ftyp {

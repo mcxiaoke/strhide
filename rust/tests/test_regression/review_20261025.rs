@@ -544,7 +544,7 @@ fn heif_auto_routes_oversized_envelopes_to_box_uuid() {
 /// declared boundary, u32 headroom) and route everything else to eof, whose
 /// write and read are symmetric by construction (P3-17 / P1-2 auto half).
 #[test]
-fn wav_webp_auto_falls_back_to_eof_on_boundary_mismatch() {
+fn wav_webp_auto_probe_reports_eof_but_write_rejects_mismatch() {
     assert_eq!(
         WavAdapter.choose_auto_strategy(&mut Cursor::new(make_wav()), 128),
         "riff_chunk"
@@ -575,55 +575,39 @@ fn wav_webp_auto_falls_back_to_eof_on_boundary_mismatch() {
         "envelopes beyond the u32 RIFF size must route to eof"
     );
 
-    // End-to-end: the mismatched carrier now writes an eof envelope that
-    // reads and restores cleanly instead of failing mid-write.
+    // End-to-end: the probe above still reports "eof", but the write path now
+    // verifies the host structure first, so a carrier whose chunk table runs
+    // past EOF is refused before any output is produced.
     let dir = scratch("rv25_wav_auto");
     let mut carrier_bytes = make_wav();
     carrier_bytes.extend_from_slice(b"ID3JUNK");
     let carrier = dir.join("c.wav");
     fs::write(&carrier, &carrier_bytes).unwrap();
     let stego = dir.join("s.wav");
-    let res = write_carrier_file(
+    let err = write_carrier(
         &carrier,
         PayloadSource::Text("wav auto secret"),
-        None,
-        "auto",
-        false,
-        &stego,
-    );
-    assert_eq!(res.strategy.name(), "eof");
-    let out = read_carrier(
-        &stego,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(out.data, b"wav auto secret");
-    let restored = dir.join("r.wav");
-    remove_carrier(
-        &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
+        &WriteOptions {
+            output_path: Some(&stego),
+            strategy: "auto",
             backup: false,
-            overwrite: false,
             ..Default::default()
         },
     )
-    .unwrap();
-    assert_eq!(fs::read(&restored).unwrap(), carrier_bytes);
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("malformed"),
+        "unexpected error: {err}"
+    );
+    assert!(!stego.exists(), "a rejected host must not produce output");
 }
 
 // ------------------------------------------------------------------ batch 5
 
 /// A JPEG whose header chain (EXIF/ICC/…) runs past the 16 MiB marker-scan
-/// limit never reaches SOS, so `app_segment` used to be selected by auto and
-/// then fail inside inject with no fallback (P3-19). Auto must probe SOS
-/// reachability and route to the EOF overlay instead.
+/// limit never reaches SOS. The auto probe reports `eof` (P3-19), but the write
+/// path's host verification now refuses the malformed carrier outright instead
+/// of appending an envelope to a file that cannot be parsed as JPEG.
 fn make_jpeg_with_giant_header() -> Vec<u8> {
     // 257 max-size APP1 segments: the SOS marker would start at 2 + 256*65535
     // + 65535 = 16,842,497 > MAX_JPEG_HEADER_SCAN (16,777,216).
@@ -642,7 +626,7 @@ fn make_jpeg_with_giant_header() -> Vec<u8> {
 }
 
 #[test]
-fn jpeg_auto_falls_back_to_eof_when_sos_unreachable() {
+fn jpeg_auto_probe_reports_eof_but_write_rejects_unreachable_sos() {
     let giant = make_jpeg_with_giant_header();
     assert_eq!(
         JpegAdapter.choose_auto_strategy(&mut Cursor::new(giant.clone()), 128),
@@ -655,44 +639,30 @@ fn jpeg_auto_falls_back_to_eof_when_sos_unreachable() {
         "app_segment"
     );
 
-    // End-to-end: auto writes an EOF envelope that reads and restores cleanly.
+    // End-to-end: the probe above still reports "eof", but write_core now
+    // verifies the host first. A JPEG whose SOS marker is unreachable is
+    // malformed as far as strhide is concerned and must be refused rather than
+    // have an envelope appended to it.
     let dir = scratch("rv25_jpeg_bigheader");
     let carrier = dir.join("big.jpeg");
     fs::write(&carrier, &giant).unwrap();
     let stego = dir.join("s.jpeg");
-    let res = write_carrier_file(
+    let err = write_carrier(
         &carrier,
         PayloadSource::Text("jpeg tail secret"),
-        None,
-        "auto",
-        false,
-        &stego,
-    );
-    assert_eq!(res.strategy.name(), "eof");
-    let out = read_carrier(
-        &stego,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(out.data, b"jpeg tail secret");
-    let restored = dir.join("r.jpeg");
-    remove_carrier(
-        &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
+        &WriteOptions {
+            output_path: Some(&stego),
+            strategy: "auto",
             backup: false,
-            overwrite: false,
             ..Default::default()
         },
     )
-    .unwrap();
-    assert_eq!(fs::read(&restored).unwrap(), giant);
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("malformed"),
+        "unexpected error: {err}"
+    );
+    assert!(!stego.exists(), "a rejected host must not produce output");
 }
 
 /// [`make_heif_with_meta`] with `pad` zero bytes appended inside the meta box

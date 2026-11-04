@@ -921,6 +921,23 @@ where
     host.seek(SeekFrom::Start(0))?;
     let adapter = find_adapter_or_reject(host, "<carrier>")?;
 
+    // 3a. Refuse malformed hosts before touching them. Detection is deliberately
+    // cheap (a JPEG is "anything starting with FF D8"), so without this a
+    // truncated or forged header followed by arbitrary bytes used to be turned
+    // into a stego carrier by the `auto` -> `eof` fallback: strhide would report
+    // success while the output was no longer a valid container. Only recognized
+    // formats reach this point (unknown files are already rejected), and each
+    // adapter's verifier accepts plain, un-stegoed carriers.
+    host.seek(SeekFrom::Start(0))?;
+    let (structure_ok, detail) = adapter.verify_structure(host)?;
+    if !structure_ok {
+        return Err(StrHideError::CorruptedData(format!(
+            "Refusing to write into a malformed {} carrier: {}",
+            adapter.format_name(),
+            detail
+        )));
+    }
+
     // Reject carriers that already contain an envelope. A standard-magic
     // scan catches plain/standard-encrypted envelopes; when a password is
     // available, a second scan with the derived stealth magic also catches
