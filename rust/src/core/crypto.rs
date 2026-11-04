@@ -729,6 +729,12 @@ pub fn verify_payload_stream<R: Read>(
     expected_sha256: &str,
     limit: u64,
 ) -> Result<u64, StrHideError> {
+    if limit == 0 {
+        return Err(StrHideError::General(
+            "Verification limit must be greater than zero".into(),
+        ));
+    }
+    let limit = limit.min(MAX_VERIFY_PAYLOAD_SIZE);
     if total_payload_bytes > limit || expected_raw_size > limit {
         return Err(StrHideError::General(format!(
             "Payload size (declared raw: {expected_raw_size}B, encrypted: {total_payload_bytes}B) exceeds verification limit ({limit}B)"
@@ -738,7 +744,11 @@ pub fn verify_payload_stream<R: Read>(
     let sha_writer = VerifySha256Writer {
         hasher: Sha256::new(),
         total_bytes: 0,
-        limit,
+        limit: if is_compressed {
+            expected_raw_size.min(limit)
+        } else {
+            limit
+        },
     };
 
     let final_writer = if is_compressed {

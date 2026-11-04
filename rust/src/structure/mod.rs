@@ -10,12 +10,8 @@
 //!
 //! Dependency direction (see `docs/strhide_architecture_and_refactoring_plan.md`
 //! §2.1): this domain depends on [`crate::core`] and [`crate::formats`] and
-//! **must not** reference [`crate::stego`]. One exception remains: `inspect`
-//! measures content capacity inline behind `#[cfg(feature = "content")]`. It
-//! now at least asks [`crate::formats::capability`] whether the format has a
-//! content engine instead of carrying a per-adapter flag; stage 3 moves the
-//! whole aggregation up to the CLI, which is where cross-domain reporting
-//! belongs.
+//! **must not** reference [`crate::stego`]. There are no cross-domain exceptions:
+//! content capacity reporting is strictly aggregated at the facade and CLI layers.
 
 pub mod adapters;
 pub mod engine;

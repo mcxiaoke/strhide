@@ -338,6 +338,36 @@ fn test_verify_payload_stream_limit_rejection() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("exceeds verification limit"));
+
+    // Limit 0 rejects immediately
+    let err_zero = strhide::crypto::verify_payload_stream(
+        &mut std::io::Cursor::new(&cipher),
+        &key,
+        &nonce,
+        &aad,
+        cipher_len,
+        false,
+        payload.len() as u64,
+        &sha_str,
+        0,
+    )
+    .unwrap_err();
+    assert!(err_zero.to_string().contains("greater than zero"));
+
+    // Limit exceeding MAX_VERIFY_PAYLOAD_SIZE is clamped
+    let err_huge = strhide::crypto::verify_payload_stream(
+        &mut std::io::Cursor::new(&cipher),
+        &key,
+        &nonce,
+        &aad,
+        cipher_len,
+        false,
+        strhide::crypto::MAX_VERIFY_PAYLOAD_SIZE + 1,
+        &sha_str,
+        u64::MAX,
+    )
+    .unwrap_err();
+    assert!(err_huge.to_string().contains("exceeds verification limit"));
 }
 
 #[test]

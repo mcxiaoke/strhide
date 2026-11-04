@@ -62,7 +62,7 @@ use crate::stego::traits::PngCostModel;
 /// [`Custom`](Self::Custom) closes the "a private build cannot inject its own
 /// cost model" gap the registry-only lookup had.
 #[cfg(feature = "content-png")]
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum SpatialAlgorithm {
     /// HILL (Li et al., ICIP 2014) -- the default.
     #[default]
@@ -71,10 +71,6 @@ pub enum SpatialAlgorithm {
     Suniward,
     /// MiPOD (Sedighi et al., IEEE TIFS 2016).
     Mipod,
-    /// A caller-supplied model. The engine treats it exactly like a built-in
-    /// one, but a carrier written with it can only be read back by a build that
-    /// registers the same model under a wire id.
-    Custom(Arc<dyn PngCostModel>),
 }
 
 #[cfg(feature = "content-png")]
@@ -100,7 +96,6 @@ impl SpatialAlgorithm {
                 .expect("the built-in S-UNIWARD model always resolves"),
             SpatialAlgorithm::Mipod => png_registry::get_spatial_model(Some("mipod"))
                 .expect("the built-in MiPOD model always resolves"),
-            SpatialAlgorithm::Custom(model) => Arc::clone(model),
         }
     }
 
@@ -110,39 +105,15 @@ impl SpatialAlgorithm {
             SpatialAlgorithm::Hill => "hill",
             SpatialAlgorithm::Suniward => "suniward",
             SpatialAlgorithm::Mipod => "mipod",
-            SpatialAlgorithm::Custom(model) => model.id(),
         }
     }
 }
-
-#[cfg(feature = "content-png")]
-impl std::fmt::Debug for SpatialAlgorithm {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.id())
-    }
-}
-
-#[cfg(feature = "content-png")]
-impl PartialEq for SpatialAlgorithm {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Hill, Self::Hill) => true,
-            (Self::Suniward, Self::Suniward) => true,
-            (Self::Mipod, Self::Mipod) => true,
-            (Self::Custom(a), Self::Custom(b)) => Arc::ptr_eq(a, b) || a.id() == b.id(),
-            _ => false,
-        }
-    }
-}
-
-#[cfg(feature = "content-png")]
-impl Eq for SpatialAlgorithm {}
 
 /// JPEG DCT-domain cost model selection.
 #[cfg(feature = "content-jpeg")]
 #[derive(Clone, Default)]
 pub enum JpegAlgorithm {
-    /// UERD (Guo et al., IEEE TIFS 2015) -- the default.
+    /// UERD-inspired variant (Q^1, 8-neighbour average; deviates from Guo et al. 2015) -- the default.
     #[default]
     Uerd,
     /// J-UNIWARD (Holub et al., EURASIP JIS 2014).

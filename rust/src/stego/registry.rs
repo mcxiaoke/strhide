@@ -74,7 +74,7 @@ pub fn list_stego_algorithms() -> Vec<StegoAlgorithmInfo> {
         out.push(StegoAlgorithmInfo {
             id: "uerd".into(),
             name: "UERD".into(),
-            desc: "Uniform Embedding Revisited Distortion for JPEG DCT coefficients (Guo et al., IEEE TIFS 2015)".into(),
+            desc: "UERD-inspired variant for JPEG DCT coefficients (Q^1, 8-neighbour average; deviates from Guo et al. 2015)".into(),
             domain: "dct".into(),
             formats: vec![FileFormat::Jpeg.as_str().into()],
             extensions: vec!["jpg".into(), "jpeg".into(), "jpe".into()],

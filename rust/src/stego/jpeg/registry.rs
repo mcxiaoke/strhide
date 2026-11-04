@@ -32,7 +32,7 @@ pub fn list() -> Vec<(&'static str, &'static str, &'static str)> {
         (
             "uerd",
             "JPEG (JPG)",
-            "Uniform Embedding Revisited Distortion model (Guo et al., IEEE TIFS 2015)",
+            "UERD-inspired variant (Q^1, 8-neighbour average; deviates from Guo et al. 2015)",
         ),
         (
             "juniward",

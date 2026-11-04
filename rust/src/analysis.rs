@@ -505,6 +505,12 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
             "JPEG statistical detectors are weak against low-rate DCT embedding: a clean/low verdict is NOT evidence that nothing is hidden".to_string(),
         );
     }
+    if matches!(format, Some(FileFormat::Wav | FileFormat::Flac)) {
+        notes.push(
+            "Content-domain audio steganography detectors are not implemented for WAV/FLAC: a clean/low verdict only reflects structural integrity and says nothing about sample-domain embedding"
+                .to_string(),
+        );
+    }
     if !view.is_whole() {
         notes.push(format!(
             "Carrier is larger than {} MiB: only the first {} KiB and the last {} KiB were inspected, and pixel/DCT statistics were skipped",
@@ -2670,5 +2676,34 @@ mod tests {
             let f2 = if f1 & 1 == 0 { f1 - 1 } else { f1 + 1 };
             assert_eq!(f2, x, "F_(-1) must be an involution for x = {x}");
         }
+    }
+
+    #[test]
+    fn audio_format_emits_disclaimer_note() {
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&36u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&44100u32.to_le_bytes());
+        wav.extend_from_slice(&88200u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&0u32.to_le_bytes());
+        let report = scan_bytes(&wav, "test.wav");
+        assert_eq!(report.format.as_deref(), Some("WAV"));
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n
+                    .contains("Content-domain audio steganography detectors are not implemented")),
+            "WAV scan must include audio content detector disclaimer note: {:?}",
+            report.notes
+        );
     }
 }

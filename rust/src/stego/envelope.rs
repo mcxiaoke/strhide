@@ -82,8 +82,9 @@ pub const MICRO_OVERHEAD_MIN: usize = 1;
 pub const BODY_OVERHEAD: usize = 4 + 1 + MICRO_OVERHEAD_MIN + TAG_LEN; // 22 bytes
 
 /// Largest payload a decoded envelope may expand to (matches the header's
-/// 26-bit length field).
-pub const MAX_PLAINTEXT_LEN: usize = crate::stego::header::HEADER_LEN_MAX as usize;
+/// 26-bit length field, minus the minimal framing overhead and AEAD tag).
+pub const MAX_PLAINTEXT_LEN: usize =
+    (crate::stego::header::HEADER_LEN_MAX as usize).saturating_sub(BODY_OVERHEAD);
 
 /// Domain separator of the V4 associated data.
 const V4_AAD_PREFIX: &[u8] = b"strhide-content-envelope-v4\0";

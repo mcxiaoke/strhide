@@ -52,7 +52,7 @@ use crate::stego::format::{
     derive_locator_master,
 };
 use crate::stego::header::{
-    CONTENT_ENVELOPE_VERSION, FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT, MAX_EXT_BYTES,
+    CONTENT_ENVELOPE_VERSION, FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT, HEADER_LEN_MAX, MAX_EXT_BYTES,
     PNG_AUDIO_BASE_SLOTS, SpatialHeaderV4, TLV_CRITICAL, Tlv, encode_extension_for_write,
     parse_extension,
 };
@@ -694,6 +694,11 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
     let session = derive_l3_session_keys(cipher, suite, &prepared.master, &salt, domain)?;
 
     let ciphertext_len = plaintext.len() + suite.tag_len();
+    if ciphertext_len > HEADER_LEN_MAX as usize {
+        return Err(StrHideError::General(format!(
+            "Envelope of {ciphertext_len} bytes exceeds the {HEADER_LEN_MAX}-byte header length field"
+        )));
+    }
     let available = match mapping {
         // The header and extension are carved out of the same permuted pool.
         Mapping::Permuted => capacity_total.saturating_sub(header_slots),
