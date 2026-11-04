@@ -47,16 +47,8 @@ pub fn embed_carrier_file(
         check_overwrite(dest, target.overwrite)?;
     }
 
-    // Whole-file engines (Matroska, WAV, FLAC) hold the carrier, a rewrite
-    // copy and a decoder side table whose size scales with the file. Refuse an
-    // over-budget job here, before `fs::read` even commits the first copy, so
-    // the failure is a clear message instead of an allocator abort.
-    if let Some(format) = crate::formats::sniff::sniff_file(carrier_path)? {
-        check_buffered_embed_budget(format, carrier_meta.len())?;
-    }
-
-    let carrier_bytes = std::fs::read(carrier_path)?;
-    let format = crate::formats::sniff::sniff_bytes(&carrier_bytes).ok_or_else(|| {
+    let (carrier_bytes, format) = read_carrier_for_embed(carrier_path, payload, options, dialect)?;
+    let format = format.ok_or_else(|| {
         StrHideError::UnsupportedFormat(format!(
             "Failed to identify carrier format for '{}'",
             carrier_path.display()
@@ -274,10 +266,10 @@ pub fn verify_carrier_file(
 /// Fixed decoder/pool overhead added to every whole-file estimate.
 const BUFFERED_FIXED_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Measured peak/input ratios (private bytes, Windows): Matroska 61x on a
-/// 103.4 MB sample, WAV 2.0x on 96 MB, FLAC 2.1x on 39.7 MB. Round each up;
-/// Matroska also carries the per-slot recording table that dominates its peak.
-const MKV_PEAK_FACTOR: u64 = 64;
+/// Measured peak/input ratios (private bytes, Windows) for the audio carriers
+/// the engine rewrites whole: WAV 2.0x on 96 MB, FLAC 2.1x on 39.7 MB. Round
+/// each up. Matroska is deliberately absent: its peak is set by the HEVC
+/// recording window, not by the file size (see `hevc::estimate_embed_peak_bytes`).
 const WAV_PEAK_FACTOR: u64 = 4;
 const FLAC_PEAK_FACTOR: u64 = 4;
 
@@ -290,11 +282,10 @@ fn buffered_embed_budget() -> u64 {
         .unwrap_or(4 * 1024 * 1024 * 1024)
 }
 
-/// Peak estimate for a carrier the engine must buffer whole, or `None` when
-/// the format is handled by streaming patches.
+/// Peak estimate for a carrier with no recording window to bound the work,
+/// or `None` for formats that are not buffered whole.
 fn whole_file_peak_bytes(format: crate::formats::FileFormat, file_size: u64) -> Option<u64> {
     let factor = match format {
-        crate::formats::FileFormat::Mkv => MKV_PEAK_FACTOR,
         crate::formats::FileFormat::Wav => WAV_PEAK_FACTOR,
         crate::formats::FileFormat::Flac => FLAC_PEAK_FACTOR,
         _ => return None,
@@ -306,11 +297,28 @@ fn whole_file_peak_bytes(format: crate::formats::FileFormat, file_size: u64) -> 
     )
 }
 
-pub(crate) fn check_buffered_embed_budget(
-    format: crate::formats::FileFormat,
-    file_size: u64,
-) -> Result<(), StrHideError> {
-    check_buffered_embed_budget_against(format, file_size, buffered_embed_budget())
+fn budget_rejection(message: String) -> StrHideError {
+    StrHideError::Rejection(message)
+}
+
+/// Refuse a carrier that cannot be held in a single buffer at all.
+///
+/// This is the only gate that can run before the file is read, and it is never
+/// a false positive: the embed path calls `fs::read` on every carrier, so a
+/// file larger than the budget cannot be embedded whatever the engine does
+/// with it afterwards.
+fn check_carrier_fits_budget(file_size: u64, budget: u64) -> Result<(), StrHideError> {
+    let needed = file_size.saturating_add(BUFFERED_FIXED_BYTES);
+    if needed > budget {
+        return Err(budget_rejection(format!(
+            "Refusing to embed: this carrier is {:.1} MiB and does not fit the {:.1} MiB budget \
+             (60% of currently available physical memory) even before decoding. \
+             Free memory or use a smaller carrier.",
+            file_size as f64 / (1024.0 * 1024.0),
+            budget as f64 / (1024.0 * 1024.0),
+        )));
+    }
+    Ok(())
 }
 
 fn check_buffered_embed_budget_against(
@@ -322,7 +330,7 @@ fn check_buffered_embed_budget_against(
         return Ok(());
     };
     if peak > budget {
-        return Err(StrHideError::Rejection(format!(
+        return Err(budget_rejection(format!(
             "Refusing to embed: this {format:?} carrier is {:.1} MiB and needs an estimated {:.1} MiB \
              at peak, above the {:.1} MiB budget (60% of currently available physical memory). \
              Free memory or use a smaller carrier.",
@@ -334,18 +342,97 @@ fn check_buffered_embed_budget_against(
     Ok(())
 }
 
+/// HEVC peak estimate against the budget, using the recording window.
+///
+/// The engine records whole GOP batches and holds every recorded slice journal
+/// for re-encoding, so the peak follows the window (the first
+/// [`hevc::EMBED_WINDOW_GOPS`] groups of pictures), not the file size. A
+/// whole-file factor here rejected a 429.5 MB film at 26,279 MiB while the
+/// embed actually peaked at 2,243 MiB.
+#[cfg(feature = "content-hevc")]
+fn check_hevc_embed_budget(
+    format: crate::formats::FileFormat,
+    carrier: &[u8],
+    payload: &Payload<'_>,
+    options: &EmbedOptions<'_>,
+    dialect: &StegoProfile,
+    budget: u64,
+) -> Result<(), StrHideError> {
+    use crate::formats::FileFormat;
+    if !matches!(
+        format,
+        FileFormat::Mp4 | FileFormat::Mkv | FileFormat::HevcAnnexB | FileFormat::Heif
+    ) {
+        return Ok(());
+    }
+    let Some(estimate) = crate::stego::hevc::estimate_embed_peak_bytes(
+        carrier,
+        payload.as_bytes().len(),
+        options.safety,
+        dialect.hevc_format(),
+    ) else {
+        return Ok(());
+    };
+    if estimate.peak_bytes > budget {
+        return Err(budget_rejection(format!(
+            "Refusing to embed: this {format:?} carrier is {:.1} MiB; the first {} group(s) of \
+             pictures ({:.1} MiB) stay recorded while the payload is solved, at an estimated peak \
+             of {:.1} MiB, above the {:.1} MiB budget (60% of currently available physical memory). \
+             Free memory or use a longer carrier, where the window is a smaller share of the file.",
+            carrier.len() as f64 / (1024.0 * 1024.0),
+            estimate.window_gops,
+            estimate.window_bytes as f64 / (1024.0 * 1024.0),
+            estimate.peak_bytes as f64 / (1024.0 * 1024.0),
+            budget as f64 / (1024.0 * 1024.0),
+        )));
+    }
+    Ok(())
+}
+
+/// Read `carrier_path` after proving the embed can afford to hold it.
+///
+/// Two gates, both before the expensive part: the carrier must fit one buffer,
+/// and the engine's recorded window must fit the budget. Both fail with a
+/// `Rejection` that names the numbers instead of letting the allocator abort.
+/// `--dry-run` runs the same in-memory embed, so it goes through here too and
+/// cannot drift from a real write.
+pub(crate) fn read_carrier_for_embed(
+    carrier_path: &Path,
+    payload: &Payload<'_>,
+    options: &EmbedOptions<'_>,
+    dialect: &StegoProfile,
+) -> Result<(Vec<u8>, Option<crate::formats::FileFormat>), StrHideError> {
+    let file_size = std::fs::metadata(carrier_path)?.len();
+    let budget = buffered_embed_budget();
+    check_carrier_fits_budget(file_size, budget)?;
+
+    // Audio has no GOP window, so its whole-file ratio is still the right
+    // estimate and can be applied before the read allocates anything.
+    if let Some(format) = crate::formats::sniff::sniff_file(carrier_path)? {
+        check_buffered_embed_budget_against(format, file_size, budget)?;
+    }
+
+    let bytes = std::fs::read(carrier_path)?;
+    let format = crate::formats::sniff::sniff_bytes(&bytes);
+
+    #[cfg(feature = "content-hevc")]
+    if let Some(format) = format {
+        check_hevc_embed_budget(format, &bytes, payload, options, dialect, budget)?;
+    }
+    #[cfg(not(feature = "content-hevc"))]
+    let _ = (payload, options, dialect);
+
+    Ok((bytes, format))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::stego::{EmbedOptions, ExtractOptions};
 
     #[test]
-    fn whole_file_peak_uses_the_measured_factors() {
+    fn whole_file_peak_covers_audio_but_not_matroska() {
         use crate::formats::FileFormat;
-        assert_eq!(
-            whole_file_peak_bytes(FileFormat::Mkv, 12_360_000).unwrap(),
-            12_360_000 * MKV_PEAK_FACTOR + BUFFERED_FIXED_BYTES
-        );
         assert_eq!(
             whole_file_peak_bytes(FileFormat::Wav, 10_000_000).unwrap(),
             10_000_000 * WAV_PEAK_FACTOR + BUFFERED_FIXED_BYTES
@@ -354,6 +441,12 @@ mod tests {
             whole_file_peak_bytes(FileFormat::Flac, 5_000_000).unwrap(),
             5_000_000 * FLAC_PEAK_FACTOR + BUFFERED_FIXED_BYTES
         );
+        // Matroska peaks with the HEVC recording window, not with the file;
+        // a whole-file factor here was what rejected a 429.5 MB film by 12x.
+        assert!(
+            whole_file_peak_bytes(FileFormat::Mkv, 12_360_000).is_none(),
+            "Matroska is judged by the GOP window, not by the file size"
+        );
         assert!(
             whole_file_peak_bytes(FileFormat::Jpeg, 5_000_000).is_none(),
             "patch engines stream instead of buffering the whole carrier"
@@ -361,15 +454,15 @@ mod tests {
     }
 
     #[test]
-    fn over_budget_carrier_is_rejected_with_the_reason() {
+    fn over_budget_audio_carrier_is_rejected_with_the_reason() {
         use crate::formats::FileFormat;
         let budget = 1u64 << 30;
         let err =
-            check_buffered_embed_budget_against(FileFormat::Mkv, 40_000_000, budget).unwrap_err();
+            check_buffered_embed_budget_against(FileFormat::Wav, 400_000_000, budget).unwrap_err();
         match err {
             StrHideError::Rejection(message) => {
                 assert!(
-                    message.contains("38.1 MiB"),
+                    message.contains("381.5 MiB"),
                     "states the input size: {message}"
                 );
                 assert!(message.contains("budget"), "states the limit: {message}");
@@ -378,12 +471,66 @@ mod tests {
         }
 
         assert!(
-            check_buffered_embed_budget_against(FileFormat::Mkv, 12_360_000, budget).is_ok(),
-            "the 12.36 MB sample is inside a 1 GiB budget"
+            check_buffered_embed_budget_against(FileFormat::Flac, 40_000_000, budget).is_ok(),
+            "a 40 MB FLAC sample is inside a 1 GiB budget"
         );
         assert!(
-            check_buffered_embed_budget_against(FileFormat::Jpeg, 40_000_000, budget).is_ok(),
-            "streaming formats are never rejected by this check"
+            check_buffered_embed_budget_against(FileFormat::Jpeg, 400_000_000, budget).is_ok(),
+            "formats without a whole-file estimate are not rejected here"
+        );
+    }
+
+    #[test]
+    fn a_carrier_that_cannot_be_read_at_all_is_refused_before_the_read() {
+        let budget = 1u64 << 30;
+        let err = check_carrier_fits_budget(budget, budget).unwrap_err();
+        match err {
+            StrHideError::Rejection(message) => {
+                assert!(
+                    message.contains("before decoding"),
+                    "explains that this is the unavoidable copy: {message}"
+                );
+            }
+            other => panic!("expected Rejection, got {other:?}"),
+        }
+        assert!(
+            check_carrier_fits_budget(budget / 2, budget).is_ok(),
+            "a carrier that fits one buffer passes this gate"
+        );
+    }
+
+    /// The window, not the file, decides the peak: a long video records the
+    /// same first-batch bytes however long it is, so the estimate must not grow
+    /// with the file. The 24-minute sample is in `temp/` and not committed, so
+    /// this skips when it is absent.
+    #[test]
+    #[cfg(feature = "content-hevc")]
+    fn embed_window_is_bounded_by_the_gop_batch_not_the_file() {
+        let short = Path::new("../temp/mem_probe/a_480s.mp4");
+        let long = Path::new("../temp/bighevc/anime-a.mp4");
+        let (Ok(short_bytes), Ok(long_bytes)) = (std::fs::read(short), std::fs::read(long)) else {
+            return;
+        };
+        assert!(long_bytes.len() > 3 * short_bytes.len());
+        let short_window = crate::stego::hevc::embed_window_bytes(&short_bytes)
+            .expect("the 480 s sample is an HEVC carrier");
+        let long_window = crate::stego::hevc::embed_window_bytes(&long_bytes)
+            .expect("the 24-minute sample is an HEVC carrier");
+        assert!(
+            long_window < (long_bytes.len() as u64) / 4,
+            "the window must stay a small share of a long film: {long_window}"
+        );
+        assert!(
+            long_window <= short_window + short_window / 2,
+            "same content, same first batch: {long_window} vs {short_window}"
+        );
+    }
+
+    #[test]
+    fn non_hevc_carriers_have_no_window() {
+        assert!(
+            crate::stego::hevc::embed_window_bytes(b"not a video at all").is_none(),
+            "a non-HEVC carrier cannot be estimated this way"
         );
     }
 

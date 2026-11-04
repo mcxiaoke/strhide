@@ -3374,20 +3374,31 @@ fn active_parameter_sets<'a>(
     }
 }
 
-fn record_carrier_state(
+/// Carrier bytes an embed keeps recorded at once, in groups of pictures.
+///
+/// `record_carrier_state` decodes a batch of this many GOPs and only then
+/// merges it, checks the stopping condition and truncates the window. Every
+/// slot, CABAC bin and RBSP in that batch is live at the same time, so this
+/// constant — not the carrier size — sets the embed's memory peak.
+pub const EMBED_WINDOW_GOPS: usize = 16;
+
+/// Container facts `record_carrier_state` needs before it can decode.
+///
+/// Parsed once so the peak estimator and the recorder see exactly the same
+/// slice spans and GOP boundaries; a second, cheaper parser would be free to
+/// disagree with the one that decides where memory goes.
+struct CarrierLayout {
+    candidates: Vec<CandidateSlice>,
+    parameter_sets: Vec<Vec<u8>>,
+    ps_end_offsets: Option<Vec<usize>>,
+    digest_inputs: DigestInputs,
+}
+
+fn parse_carrier_layout(
     carrier: &[u8],
     kind: HevcCarrierKind,
-    capture: Capture,
-    stop: StopCondition,
-    control: &Control<'_>,
-) -> Result<CarrierRecord, StrHideError> {
-    let mode = if capture == Capture::Full {
-        RecordMode::Embed
-    } else {
-        RecordMode::Slots
-    };
-
-    let (candidates, digest_inputs, parameter_sets, ps_end_offsets) = match kind {
+) -> Result<CarrierLayout, StrHideError> {
+    let (candidates, parameter_sets, ps_end_offsets, digest_inputs) = match kind {
         HevcCarrierKind::HeifContainer => {
             let target = parse_heif_targets(carrier)
                 .map_err(|e| StrHideError::UnsupportedFormat(format!("HEIF parse error: {e}")))?;
@@ -3400,11 +3411,9 @@ fn record_carrier_state(
             }
             (
                 candidates,
-                DigestInputs::ParameterSets {
-                    parameter_sets: parameter_sets.clone(),
-                },
-                parameter_sets,
+                parameter_sets.clone(),
                 None,
+                DigestInputs::ParameterSets { parameter_sets },
             )
         }
         HevcCarrierKind::Mp4Container => {
@@ -3420,11 +3429,9 @@ fn record_carrier_state(
             }
             (
                 candidates,
-                DigestInputs::ParameterSets {
-                    parameter_sets: parameter_sets.clone(),
-                },
-                parameter_sets,
+                parameter_sets.clone(),
                 None,
+                DigestInputs::ParameterSets { parameter_sets },
             )
         }
         HevcCarrierKind::MkvContainer => {
@@ -3439,11 +3446,9 @@ fn record_carrier_state(
             }
             (
                 candidates,
-                DigestInputs::ParameterSets {
-                    parameter_sets: parameter_sets.clone(),
-                },
-                parameter_sets,
+                parameter_sets.clone(),
                 None,
+                DigestInputs::ParameterSets { parameter_sets },
             )
         }
         HevcCarrierKind::AnnexBStream => {
@@ -3469,12 +3474,123 @@ fn record_carrier_state(
             }
             (
                 candidates,
-                DigestInputs::AnnexB { spans },
                 parameter_sets,
                 Some(ps_end_offsets),
+                DigestInputs::AnnexB { spans },
             )
         }
     };
+    Ok(CarrierLayout {
+        candidates,
+        parameter_sets,
+        ps_end_offsets,
+        digest_inputs,
+    })
+}
+
+/// The recorded window: carrier bytes and group count of the first batch.
+///
+/// `None` when the carrier is not HEVC or has no decodable slice.
+fn embed_window(carrier: &[u8]) -> Option<(u64, usize)> {
+    let kind = sniff_hevc_carrier(carrier)?;
+    let layout = parse_carrier_layout(carrier, kind).ok()?;
+    if layout.candidates.is_empty() {
+        return None;
+    }
+    let gops = find_gop_ranges(carrier, &layout.candidates);
+    let taken = gops.len().min(EMBED_WINDOW_GOPS);
+    let first = gops.first()?;
+    let last = gops.get(taken.checked_sub(1)?)?;
+    let start = layout.candidates.get(first.start)?.span.start;
+    let end = layout.candidates.get(last.end.checked_sub(1)?)?.span.end;
+    Some((end.saturating_sub(start).min(carrier.len()) as u64, taken))
+}
+
+/// Carrier bytes the first batch of an embed records, measured over VCL spans.
+pub fn embed_window_bytes(carrier: &[u8]) -> Option<u64> {
+    embed_window(carrier).map(|(bytes, _)| bytes)
+}
+
+/// Predicted peak of an in-place embed, split into the part that scales with
+/// the recorded window and the part that does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EmbedPeakEstimate {
+    /// Carrier bytes the recorder holds at once (the recorded window).
+    pub window_bytes: u64,
+    /// Groups of pictures that window covers.
+    pub window_gops: usize,
+    /// Predicted peak private bytes.
+    pub peak_bytes: u64,
+}
+
+/// Measured private-byte peak per carrier byte of the recorded window.
+///
+/// Fitted at 66 on Windows (24-minute 1080p film, 40 s 720p 21 Mbps clip);
+/// rounded up because the window is measured over VCL spans, which are
+/// slightly smaller than the file the fit was taken against.
+const EMBED_WINDOW_BYTES_PER_CARRIER_BYTE: u64 = 70;
+
+/// Fixed decoder/pool overhead of an in-place embed.
+const EMBED_FIXED_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Peak private bytes for a recorded window of `window` carrier bytes.
+#[inline]
+fn embed_peak_for_window(window: u64, carrier_len: u64) -> u64 {
+    window
+        .saturating_mul(EMBED_WINDOW_BYTES_PER_CARRIER_BYTE)
+        .saturating_add(carrier_len)
+        .saturating_add(EMBED_FIXED_BYTES)
+}
+
+/// Peak estimate for embedding `payload_len` bytes into `carrier`.
+///
+/// The engine records whole GOP batches, so the peak is set by the first
+/// [`EMBED_WINDOW_GOPS`] GOPs — or by however much has to be recorded to reach
+/// the payload's slot target, whichever is larger, capped at the carrier.
+/// A `file_size × constant` estimate over-rejects long videos by ~12×: a
+/// 24-minute film only ever records ~3% of itself.
+///
+/// Returns `None` for carriers this engine does not decode.
+pub fn estimate_embed_peak_bytes(
+    carrier: &[u8],
+    payload_len: usize,
+    safety: SafetyPolicy,
+    fmt: &HevcFormatProfile,
+) -> Option<EmbedPeakEstimate> {
+    let (mut window, window_gops) = embed_window(carrier)?;
+    // Header + payload + AEAD tag, with the flag/name area rounded up: the
+    // target only matters for payloads large enough to outgrow one batch.
+    let body_msg_len = payload_len.saturating_add(256);
+    let body_slots = StcTrellis::slots_for_params(body_msg_len * 8, fmt.stc_h, fmt.stc_u);
+    let factor = (1.0 / safety.level.video_budget().non_ref_fraction).max(1.0);
+    let target_bytes = (body_slots as f64 * factor).ceil() as u64;
+    window = window.max(target_bytes.min(carrier.len() as u64));
+    Some(EmbedPeakEstimate {
+        window_bytes: window,
+        window_gops,
+        peak_bytes: embed_peak_for_window(window, carrier.len() as u64),
+    })
+}
+
+fn record_carrier_state(
+    carrier: &[u8],
+    kind: HevcCarrierKind,
+    capture: Capture,
+    stop: StopCondition,
+    control: &Control<'_>,
+) -> Result<CarrierRecord, StrHideError> {
+    let mode = if capture == Capture::Full {
+        RecordMode::Embed
+    } else {
+        RecordMode::Slots
+    };
+
+    let CarrierLayout {
+        candidates,
+        parameter_sets,
+        ps_end_offsets,
+        digest_inputs,
+    } = parse_carrier_layout(carrier, kind)?;
 
     let has_inter = candidates.iter().any(|c| !is_irap(c.nal_type));
 
@@ -3515,7 +3631,7 @@ fn record_carrier_state(
                 );
                 est_gops.clamp(1, 48)
             }
-            StopCondition::TargetSlots(_) => 16,
+            StopCondition::TargetSlots(_) => EMBED_WINDOW_GOPS,
         };
 
         let end_idx = (gop_idx + batch_size).min(gop_ranges.len());

@@ -332,15 +332,11 @@ pub(crate) fn handle_embed(
         options.no_filename = args.no_filename;
 
         if args.dry_run {
-            // Dry-run still runs the whole in-memory embed, so it needs the
-            // same whole-file budget preflight as a real write.
-            if let Some(format) = format {
-                crate::stego::io::check_buffered_embed_budget(
-                    format,
-                    std::fs::metadata(carrier)?.len(),
-                )?;
-            }
-            let carrier_bytes = std::fs::read(carrier)?;
+            // Dry-run still runs the whole in-memory embed, so it must pass the
+            // same budget gate as a real write; sharing the reader keeps the
+            // two paths from drifting apart.
+            let (carrier_bytes, _) =
+                crate::stego::io::read_carrier_for_embed(carrier, &payload, &options, &dialect)?;
             let output = crate::stego::embed_carrier_with_dialect_info(
                 &carrier_bytes,
                 &payload,
