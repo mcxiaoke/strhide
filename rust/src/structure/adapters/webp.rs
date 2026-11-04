@@ -59,16 +59,30 @@ impl HostAdapter for WebpAdapter {
         &self,
         stego_in: &mut dyn SeekRead,
     ) -> Result<(bool, String), StrHideError> {
-        riff_verify_structure(self.format_name(), stego_in, b"WEBP", |chunks| {
-            let has_image_chunk = chunks
-                .iter()
-                .any(|(tag, _)| tag == b"VP8 " || tag == b"VP8L" || tag == b"VP8X");
-            if !has_image_chunk {
-                Err("WebP missing primary image chunk (VP8, VP8L, or VP8X)".into())
-            } else {
-                Ok(())
-            }
-        })
+        self.verify_structure_with_magic(stego_in, None)
+    }
+
+    fn verify_structure_with_magic(
+        &self,
+        stego_in: &mut dyn SeekRead,
+        locator_magic: Option<&[u8; 4]>,
+    ) -> Result<(bool, String), StrHideError> {
+        riff_verify_structure(
+            self.format_name(),
+            stego_in,
+            b"WEBP",
+            locator_magic,
+            |chunks| {
+                let has_image_chunk = chunks
+                    .iter()
+                    .any(|(tag, _)| tag == b"VP8 " || tag == b"VP8L" || tag == b"VP8X");
+                if !has_image_chunk {
+                    Err("WebP missing primary image chunk (VP8, VP8L, or VP8X)".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )
     }
 
     fn suspicious_structures(&self, stego_in: &mut dyn SeekRead) -> Vec<String> {

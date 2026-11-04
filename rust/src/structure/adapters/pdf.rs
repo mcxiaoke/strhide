@@ -98,6 +98,14 @@ fn find_last_eof<R: Read + Seek + ?Sized>(
     reader: &mut R,
     file_size: u64,
 ) -> Result<u64, StrHideError> {
+    find_last_eof_with_magic(reader, file_size, None)
+}
+
+fn find_last_eof_with_magic<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+    file_size: u64,
+    expected_trailer_magic: Option<&[u8; 4]>,
+) -> Result<u64, StrHideError> {
     const CHUNK: u64 = 64 * 1024;
     const MAX_SEARCH_DEPTH: u64 = 1024 * 1024; // 1 MiB cap on trailing data
     const MARKER: &[u8] = b"%%EOF";
@@ -105,7 +113,9 @@ fn find_last_eof<R: Read + Seek + ?Sized>(
     // 1. If an EOF overlay envelope sits at the tail, the PDF ends before it.
     let search_end = if file_size >= 24 {
         let restore = reader.stream_position().unwrap_or(0);
-        let maybe_trailer = EnvelopeTrailer::read_from_tail(reader, None).ok().flatten();
+        let maybe_trailer = EnvelopeTrailer::read_from_tail(reader, expected_trailer_magic)
+            .ok()
+            .flatten();
         let _ = reader.seek(SeekFrom::Start(restore));
         if let Some(t) = maybe_trailer
             && t.ube_offset.checked_add(t.ube_total_size) == Some(file_size)
@@ -201,8 +211,15 @@ fn read_xref_stream_dict<R: Read + Seek + ?Sized>(
 pub fn parse_pdf_tail_info<R: Read + Seek + ?Sized>(
     reader: &mut R,
 ) -> Result<PdfTailInfo, StrHideError> {
+    parse_pdf_tail_info_with_magic(reader, None)
+}
+
+pub fn parse_pdf_tail_info_with_magic<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+    expected_trailer_magic: Option<&[u8; 4]>,
+) -> Result<PdfTailInfo, StrHideError> {
     let file_size = reader.seek(SeekFrom::End(0))?;
-    let eof_idx = find_last_eof(reader, file_size)?;
+    let eof_idx = find_last_eof_with_magic(reader, file_size, expected_trailer_magic)?;
     let abs_eof_pos = eof_idx + 5;
 
     // Trailer facts live *before* the marker, so the window ends at it instead
@@ -748,11 +765,19 @@ impl HostAdapter for PdfAdapter {
         &self,
         stego_in: &mut dyn SeekRead,
     ) -> Result<(bool, String), StrHideError> {
+        self.verify_structure_with_magic(stego_in, None)
+    }
+
+    fn verify_structure_with_magic(
+        &self,
+        stego_in: &mut dyn SeekRead,
+        locator_magic: Option<&[u8; 4]>,
+    ) -> Result<(bool, String), StrHideError> {
         // Structural validity only: `%%EOF`/`startxref` must be intact. A
         // newest trailer without `/Root` is legal (it inherits the reference
         // from an earlier revision via `/Prev`), it merely rules out an
         // incremental update — so it must not be reported as corruption.
-        match parse_pdf_tail_info(stego_in) {
+        match parse_pdf_tail_info_with_magic(stego_in, locator_magic) {
             Ok(info) => {
                 let root = match info.root_ref {
                     Some(_) => "trailer /Root resolved",

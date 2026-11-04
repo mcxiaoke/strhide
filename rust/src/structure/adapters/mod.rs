@@ -292,6 +292,19 @@ pub trait HostAdapter: Send + Sync {
     fn verify_structure(&self, stego_in: &mut dyn SeekRead)
     -> Result<(bool, String), StrHideError>;
 
+    /// Like [`HostAdapter::verify_structure`], but carried with the trailer
+    /// magic the caller expects from this envelope's dialect (`None` means the
+    /// standard magic). Formats that locate an EOF overlay by tail scanning
+    /// must forward it so stealth/private envelopes still pass L1; adapters
+    /// that never tail-scan can keep the default and ignore it.
+    fn verify_structure_with_magic(
+        &self,
+        stego_in: &mut dyn SeekRead,
+        _locator_magic: Option<&[u8; 4]>,
+    ) -> Result<(bool, String), StrHideError> {
+        self.verify_structure(stego_in)
+    }
+
     /// Password-independent structural scan for containers that only a strhide
     /// envelope would produce (oversized private chunks, COM segments, uuid
     /// boxes, PE overlays). Stealth envelopes written with an unknown password

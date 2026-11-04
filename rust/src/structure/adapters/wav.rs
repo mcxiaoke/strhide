@@ -60,17 +60,31 @@ impl HostAdapter for WavAdapter {
         &self,
         stego_in: &mut dyn SeekRead,
     ) -> Result<(bool, String), StrHideError> {
-        riff_verify_structure(self.format_name(), stego_in, b"WAVE", |chunks| {
-            let has_fmt = chunks.iter().any(|(tag, _)| tag == b"fmt ");
-            let has_data = chunks.iter().any(|(tag, _)| tag == b"data");
-            if !has_fmt {
-                Err("WAV missing 'fmt ' chunk".into())
-            } else if !has_data {
-                Err("WAV missing 'data' chunk".into())
-            } else {
-                Ok(())
-            }
-        })
+        self.verify_structure_with_magic(stego_in, None)
+    }
+
+    fn verify_structure_with_magic(
+        &self,
+        stego_in: &mut dyn SeekRead,
+        locator_magic: Option<&[u8; 4]>,
+    ) -> Result<(bool, String), StrHideError> {
+        riff_verify_structure(
+            self.format_name(),
+            stego_in,
+            b"WAVE",
+            locator_magic,
+            |chunks| {
+                let has_fmt = chunks.iter().any(|(tag, _)| tag == b"fmt ");
+                let has_data = chunks.iter().any(|(tag, _)| tag == b"data");
+                if !has_fmt {
+                    Err("WAV missing 'fmt ' chunk".into())
+                } else if !has_data {
+                    Err("WAV missing 'data' chunk".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )
     }
 
     fn suspicious_structures(&self, stego_in: &mut dyn SeekRead) -> Vec<String> {

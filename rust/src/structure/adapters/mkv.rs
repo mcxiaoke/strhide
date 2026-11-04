@@ -154,6 +154,14 @@ impl HostAdapter for MkvAdapter {
         &self,
         stego_in: &mut dyn SeekRead,
     ) -> Result<(bool, String), StrHideError> {
+        self.verify_structure_with_magic(stego_in, None)
+    }
+
+    fn verify_structure_with_magic(
+        &self,
+        stego_in: &mut dyn SeekRead,
+        locator_magic: Option<&[u8; 4]>,
+    ) -> Result<(bool, String), StrHideError> {
         let file_size = stego_in.seek(SeekFrom::End(0))?;
         if file_size < 12 {
             return Ok((false, "MKV file too small for EBML container".into()));
@@ -167,7 +175,7 @@ impl HostAdapter for MkvAdapter {
 
         while offset < file_size {
             // Check trailing EOF envelope
-            let tail_envelope = EnvelopeTrailer::read_from_tail(stego_in, None)
+            let tail_envelope = EnvelopeTrailer::read_from_tail(stego_in, locator_magic)
                 .ok()
                 .flatten()
                 .filter(|t| {

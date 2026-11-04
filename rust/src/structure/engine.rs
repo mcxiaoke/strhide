@@ -936,8 +936,19 @@ where
     // success while the output was no longer a valid container. Only recognized
     // formats reach this point (unknown files are already rejected), and each
     // adapter's verifier accepts plain, un-stegoed carriers.
+    // Derive once: the pre-write verifier needs the same magic the new
+    // envelope will use, and the occupied scans below reuse the pair.
+    let stealth_magics = match password {
+        Some(pwd) => Some(derive_stealth_magics(pwd, profile.domain())?),
+        None => None,
+    };
+    let write_trailer_magic = if stealth {
+        stealth_magics.as_ref().map(|m| &m.1)
+    } else {
+        profile.locator_magic()
+    };
     host.seek(SeekFrom::Start(0))?;
-    let (structure_ok, detail) = adapter.verify_structure(host)?;
+    let (structure_ok, detail) = adapter.verify_structure_with_magic(host, write_trailer_magic)?;
     if !structure_ok {
         return Err(StrHideError::CorruptedData(format!(
             "Refusing to write into a malformed {} carrier: {}",
@@ -969,10 +980,6 @@ where
                 .into(),
         ));
     }
-    let stealth_magics = match password {
-        Some(pwd) => Some(derive_stealth_magics(pwd, profile.domain())?),
-        None => None,
-    };
     if let Some((_, ref tr_magic)) = stealth_magics {
         host.seek(SeekFrom::Start(0))?;
         if adapter.locate(host, Some(tr_magic))?.is_some() {
@@ -2568,6 +2575,47 @@ fn envelope_coordinates_agree(
     Ok(())
 }
 
+fn attempt_l1(
+    host: &mut dyn SeekRead,
+    adapter: &dyn HostAdapter,
+    magic: Option<&[u8; 4]>,
+) -> Result<(bool, String), StrHideError> {
+    host.seek(SeekFrom::Start(0))?;
+    adapter.verify_structure_with_magic(host, magic)
+}
+
+/// Level 1 with every dialect the caller could be verifying: the profile's
+/// own magic, the standard magic, and — only when a password is available —
+/// the password-derived stealth magic. EOF-overlay formats need the right
+/// trailer magic to step over the envelope; trying them in order avoids a
+/// false "corrupted host" for stealth/private carriers.
+fn verify_structure_for_dialects(
+    host: &mut dyn SeekRead,
+    adapter: &dyn HostAdapter,
+    password: Option<&str>,
+    profile: &StructureProfile,
+) -> Result<(bool, String), StrHideError> {
+    if let Some(magic) = profile.locator_magic() {
+        let result = attempt_l1(host, adapter, Some(magic))?;
+        if result.0 {
+            return Ok(result);
+        }
+    }
+    let mut last = attempt_l1(host, adapter, None)?;
+    if last.0 {
+        return Ok(last);
+    }
+    if let Some(pwd) = password {
+        let magics = derive_stealth_magics(pwd, profile.domain())?;
+        let result = attempt_l1(host, adapter, Some(&magics.1))?;
+        if result.0 {
+            return Ok(result);
+        }
+        last = result;
+    }
+    Ok(last)
+}
+
 fn verify_core(
     host: &mut dyn SeekRead,
     label: &str,
@@ -2578,7 +2626,7 @@ fn verify_core(
     let adapter = find_adapter_or_reject(host, label)?;
 
     // Level 1: Host format integrity
-    let (l1_ok, l1_msg) = adapter.verify_structure(host)?;
+    let (l1_ok, l1_msg) = verify_structure_for_dialects(host, adapter, password, profile)?;
 
     // Needed by Level 2 to bound the injection coordinates the header claims.
     // Captured before the envelope reader borrows `host`.

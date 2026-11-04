@@ -219,6 +219,7 @@ pub fn riff_verify_structure<F>(
     format_name: &str,
     stego_in: &mut dyn SeekRead,
     expected_form_type: &[u8; 4],
+    expected_trailer_magic: Option<&[u8; 4]>,
     validate_specific: F,
 ) -> Result<(bool, String), StrHideError>
 where
@@ -258,7 +259,7 @@ where
     while offset < file_size {
         // Check if remaining bytes at/after declared RIFF boundary are an EOF envelope
         if offset >= boundary {
-            let tail_envelope = EnvelopeTrailer::read_from_tail(stego_in, None)
+            let tail_envelope = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)
                 .ok()
                 .flatten()
                 .filter(|t| {

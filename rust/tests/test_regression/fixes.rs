@@ -880,6 +880,66 @@ fn remove_png_chunk(data: &[u8], chunk_start: usize, len: u32) -> Vec<u8> {
     out
 }
 
+/// P1-6: EOF-overlay carriers (RIFF/WAV, MKV, PDF) must pass L1 for stealth
+/// and private envelopes. `verify_structure` used to tail-scan with the
+/// standard trailer magic only, so `verify` reported the host as corrupted
+/// even though `read`/`restore` worked.
+#[test]
+fn eof_overlay_dialects_pass_l1_on_riff_mkv_pdf() {
+    let private = StructureProfile::new()
+        .with_default_secret("p1-6-private-secret")
+        .with_magic(MagicPair {
+            header: *b"p1six-hd",
+            trailer: *b"p1s6",
+        });
+    let official = StructureProfile::default();
+
+    for (label, bytes) in [
+        ("wav", make_wav()),
+        ("mkv", make_mkv()),
+        ("pdf", make_pdf()),
+    ] {
+        for (dialect, password, profile) in [
+            ("stealth", Some("p1-6-stealth"), &official),
+            ("private", None, &private),
+        ] {
+            let (stego, _) = write_carrier_bytes(
+                &bytes,
+                PayloadSource::Text("eof dialect secret"),
+                &WriteOptions {
+                    output_path: None,
+                    password,
+                    strategy: "eof",
+                    stealth: password.is_some(),
+                    backup: false,
+                    ..Default::default()
+                },
+                &LocalParams::new(),
+                profile,
+            )
+            .unwrap_or_else(|e| panic!("{label}/{dialect}: write failed: {e}"));
+
+            let result = verify_carrier_bytes(&stego, password, profile)
+                .unwrap_or_else(|e| panic!("{label}/{dialect}: verify failed: {e}"));
+            assert!(
+                result.level1_host.ok,
+                "{label}/{dialect}: L1 must accept the EOF envelope: {}",
+                result.level1_host.detail
+            );
+            assert!(
+                result.level2_envelope.ok,
+                "{label}/{dialect}: L2 must accept the envelope: {}",
+                result.level2_envelope.detail
+            );
+            assert!(
+                result.level3_crypto.ok,
+                "{label}/{dialect}: L3 must accept the payload: {}",
+                result.level3_crypto.detail
+            );
+        }
+    }
+}
+
 /// P0-2: a PNG `chunk` envelope written first, then content-domain embedding,
 /// re-compresses IDAT and moves the private chunk. Before the fix the shifted
 /// chunk was only recognised with the *standard* header magic (stealth and
