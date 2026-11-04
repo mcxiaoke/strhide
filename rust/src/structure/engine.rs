@@ -27,7 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
-use crate::commit::{TmpGuard, copy_file_durable, next_backup_path, temp_path_for};
+use crate::commit::{TmpGuard, temp_path_for};
 use crate::structure::adapters::{
     FinalizeCtx, HostAdapter, SeekRead, SeekWrite, StrategyCapacity, TrailerCtx,
 };
@@ -224,11 +224,26 @@ fn put_varint(out: &mut Vec<u8>, mut value: u64) {
 fn take_varint(input: &[u8], pos: &mut usize) -> Result<u64, StrHideError> {
     let mut value: u64 = 0;
     let mut shift: u32 = 0;
-    for _ in 0..10 {
+    for i in 0..10 {
         let byte = *input.get(*pos).ok_or_else(|| {
             StrHideError::CorruptedData("Corrupted compact metadata block: truncated varint".into())
         })?;
         *pos += 1;
+        // A 10-byte u64 varint may only use bit 0 of its last byte; the other
+        // payload bits would be shifted past bit 63 and silently dropped (review
+        // P2-6), producing a "valid but wrong" raw_size/created_at.
+        if i == 9 {
+            if byte & 0x80 != 0 {
+                return Err(StrHideError::CorruptedData(
+                    "Corrupted compact metadata block: varint too long".into(),
+                ));
+            }
+            if byte & 0x7e != 0 {
+                return Err(StrHideError::CorruptedData(
+                    "Corrupted compact metadata block: varint overflows u64".into(),
+                ));
+            }
+        }
         value |= ((byte & 0x7f) as u64) << shift;
         if byte & 0x80 == 0 {
             return Ok(value);
@@ -1476,9 +1491,7 @@ pub fn write_carrier_with(
     let is_inplace = same_file(target_path, carrier_path);
     let mut backup_file = None;
     if is_inplace && options.backup {
-        let bak = next_backup_path(carrier_path);
-        copy_file_durable(carrier_path, &bak)?;
-        backup_file = Some(bak);
+        backup_file = Some(crate::commit::create_carrier_backup(carrier_path)?);
     }
 
     crate::commit::rename_with_retry(&tmp_target, target_path)?;
@@ -2234,9 +2247,7 @@ pub fn remove_carrier_with_dialect(
     let is_inplace = same_file(target_path, carrier_path);
     let mut backup_file = None;
     if is_inplace && options.backup {
-        let bak = next_backup_path(carrier_path);
-        copy_file_durable(carrier_path, &bak)?;
-        backup_file = Some(bak);
+        backup_file = Some(crate::commit::create_carrier_backup(carrier_path)?);
     }
 
     crate::commit::rename_with_retry(&tmp_target, target_path)?;
@@ -2930,6 +2941,32 @@ mod compact_meta_tests {
         );
         // 1 version + 2 name_len + 5 name + 1 size + 32 digest + 5 timestamp
         assert_eq!(compact.len(), 46);
+    }
+
+    #[test]
+    fn varint_rejects_values_that_overflow_u64() {
+        // 9 continuation bytes followed by 0x02: the old loop shifted the
+        // payload bit past bit 63 and returned 0 instead of reporting an error
+        // (review P2-6).
+        let mut overflowing = vec![0x80u8; 9];
+        overflowing.push(0x02);
+        let mut pos = 0;
+        assert!(matches!(
+            take_varint(&overflowing, &mut pos),
+            Err(StrHideError::CorruptedData(_))
+        ));
+
+        // The canonical 10-byte encoding of u64::MAX still parses.
+        let mut max = vec![0xffu8; 9];
+        max.push(0x01);
+        let mut pos = 0;
+        assert_eq!(take_varint(&max, &mut pos).unwrap(), u64::MAX);
+
+        // A 10th byte with the continuation bit set is "too long": it must not
+        // be silently accepted either.
+        let too_long = vec![0xffu8; 10];
+        let mut pos = 0;
+        assert!(take_varint(&too_long, &mut pos).is_err());
     }
 
     #[test]

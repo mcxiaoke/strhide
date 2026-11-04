@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use crate::core::control::Control;
+use crate::errors::StrHideError;
 use crate::structure::registry::StrategyId;
 
 /// Strongly typed strategy selection: either automatic selection or an explicit named strategy.
@@ -32,16 +33,21 @@ impl StrategyChoice {
     }
 }
 
-impl From<&str> for StrategyChoice {
-    fn from(s: &str) -> Self {
+impl TryFrom<&str> for StrategyChoice {
+    type Error = StrHideError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
         let trimmed = s.trim();
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
-            Self::Auto
-        } else if let Some(id) = StrategyId::from_name(trimmed) {
-            Self::Named(id)
-        } else {
-            Self::Auto
+            return Ok(Self::Auto);
         }
+        StrategyId::from_name(trimmed)
+            .map(Self::Named)
+            .ok_or_else(|| {
+                StrHideError::General(format!(
+                    "unknown strategy '{trimmed}'; expected 'auto' or a supported strategy name"
+                ))
+            })
     }
 }
 
@@ -325,13 +331,21 @@ mod tests {
     }
 
     #[test]
-    fn strategy_choice_roundtrips() {
-        assert_eq!(StrategyChoice::from("auto"), StrategyChoice::Auto);
-        assert_eq!(StrategyChoice::from(""), StrategyChoice::Auto);
+    fn strategy_choice_roundtrips_and_rejects_unknown_names() {
         assert_eq!(
-            StrategyChoice::from("eof"),
+            StrategyChoice::try_from("auto").unwrap(),
+            StrategyChoice::Auto
+        );
+        assert_eq!(StrategyChoice::try_from("").unwrap(), StrategyChoice::Auto);
+        assert_eq!(
+            StrategyChoice::try_from("eof").unwrap(),
             StrategyChoice::Named(StrategyId::from_u8(1))
         );
         assert_eq!(StrategyChoice::Auto.as_str(), "auto");
+        let err = StrategyChoice::try_from("eoff").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown strategy 'eoff'"),
+            "typos must not silently fall back to auto: {err}"
+        );
     }
 }

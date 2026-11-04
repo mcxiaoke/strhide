@@ -145,15 +145,15 @@ pub fn temp_path_for(path: &Path) -> PathBuf {
     PathBuf::from(os)
 }
 
-/// Copy `src` to `dst` and flush the copy before returning.
+/// Copy `src` into a freshly created `dst`.
 ///
-/// `std::fs::copy` does not `fsync` the destination, so a crash right after the
-/// caller renames the new carrier over the original could leave a zero-length
-/// or unwritten `.bak` next to an already overwritten carrier — both copies
-/// lost. The handle is opened for writing so `sync_all` works on Windows too.
-pub fn copy_file_durable(src: &Path, dst: &Path) -> Result<(), StrHideError> {
+/// `create_new` refuses to follow a pre-existing file or symlink (review P2-2);
+/// callers that race on a backup name retry with another candidate via
+/// [`create_carrier_backup`].
+fn copy_file_to_new(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
     let mut input = std::fs::File::open(src)?;
-    let mut output = std::fs::File::create(dst)?;
+    let mut output = OpenOptions::new().write(true).create_new(true).open(dst)?;
     std::io::copy(&mut input, &mut output)?;
     output.sync_all()?;
     drop(output);
@@ -161,6 +161,34 @@ pub fn copy_file_durable(src: &Path, dst: &Path) -> Result<(), StrHideError> {
     let permissions = std::fs::metadata(src)?.permissions();
     std::fs::set_permissions(dst, permissions)?;
     Ok(())
+}
+
+/// Copy `src` to `dst` and flush the copy before returning.
+///
+/// `std::fs::copy` does not `fsync` the destination, so a crash right after the
+/// caller renames the new carrier over the original could leave a zero-length
+/// or unwritten `.bak` next to an already overwritten carrier — both copies
+/// lost. The handle is opened for writing so `sync_all` works on Windows too.
+pub fn copy_file_durable(src: &Path, dst: &Path) -> Result<(), StrHideError> {
+    copy_file_to_new(src, dst).map_err(StrHideError::from)
+}
+
+/// Create the `<carrier>.bak` for an in-place commit, retrying when the name
+/// chosen by [`next_backup_path`] is created concurrently before `create_new`
+/// runs. The retry re-runs the collision check, so a second writer can never
+/// truncate the first writer's backup (review P2-2).
+pub(crate) fn create_carrier_backup(carrier: &Path) -> Result<PathBuf, StrHideError> {
+    for _ in 0..16 {
+        let candidate = next_backup_path(carrier);
+        match copy_file_to_new(carrier, &candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(StrHideError::General(
+        "could not allocate a unique backup path".into(),
+    ))
 }
 
 /// Safely commit stego bytes to `target_path` with an atomic rename, a
@@ -181,9 +209,7 @@ pub fn commit_carrier_bytes(
     let is_inplace = same_file(target_path, carrier_path);
     let mut backup_path = None;
     if is_inplace && backup {
-        let bak = next_backup_path(carrier_path);
-        copy_file_durable(carrier_path, &bak)?;
-        backup_path = Some(bak);
+        backup_path = Some(create_carrier_backup(carrier_path)?);
     }
 
     write_bytes_atomic(target_path, stego_bytes)?;
@@ -225,9 +251,7 @@ pub fn commit_carrier_patches(
     let is_inplace = same_file(target_path, carrier_path);
     let mut backup_path = None;
     if is_inplace && backup {
-        let bak = next_backup_path(carrier_path);
-        copy_file_durable(carrier_path, &bak)?;
-        backup_path = Some(bak);
+        backup_path = Some(create_carrier_backup(carrier_path)?);
     }
 
     let tmp_path = temp_path_for(target_path);
@@ -374,11 +398,55 @@ pub(crate) fn sync_parent_dir(path: &Path) {
 mod tests {
     use super::*;
 
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "strhide_test_{tag}_{}",
+            rand::rng().random::<u32>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn copy_file_durable_never_overwrites_an_existing_destination() {
+        let dir = scratch_dir("copy_new");
+        let src = dir.join("source.bin");
+        let dst = dir.join("destination.bin");
+        std::fs::write(&src, b"source").unwrap();
+        std::fs::write(&dst, b"sentinel").unwrap();
+
+        let err = copy_file_durable(&src, &dst).unwrap_err();
+        assert!(
+            matches!(&err, StrHideError::Io(e) if e.kind() == std::io::ErrorKind::AlreadyExists),
+            "create_new must refuse an existing target: {err:?}"
+        );
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            b"sentinel",
+            "the existing destination must be left untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn carrier_backups_never_collide_or_overwrite() {
+        let dir = scratch_dir("backup_collision");
+        let carrier = dir.join("carrier.bin");
+        std::fs::write(&carrier, b"payload").unwrap();
+
+        let first = create_carrier_backup(&carrier).unwrap();
+        let second = create_carrier_backup(&carrier).unwrap();
+        assert_ne!(first, second, "each backup must get a fresh path");
+        assert_eq!(std::fs::read(&first).unwrap(), b"payload");
+        assert_eq!(std::fs::read(&second).unwrap(), b"payload");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn commit_carrier_patches_applies_correctly() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("strhide_test_{}", rand::rng().random::<u32>()));
-        std::fs::create_dir_all(&temp_dir).unwrap();
+        let temp_dir = scratch_dir("patches");
         let src_file = temp_dir.join("carrier.bin");
         let dst_file = temp_dir.join("carrier_out.bin");
 
