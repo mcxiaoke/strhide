@@ -209,6 +209,20 @@ pub trait HostAdapter: Send + Sync {
         expected_trailer_magic: Option<&[u8; 4]>,
     ) -> Result<Option<(u64, u64, String)>, StrHideError>;
 
+    /// Like [`locate`](Self::locate), but with the header magic expected for
+    /// this dialect. Adapters that accept a relocated envelope (PNG `chunk`
+    /// after content-domain re-compression moves its physical offset) need it
+    /// to distinguish a shifted strhide envelope from a stale/foreign trailer.
+    /// Default: ignore the hint.
+    fn locate_with_hint(
+        &self,
+        stego_in: &mut dyn SeekRead,
+        expected_trailer_magic: Option<&[u8; 4]>,
+        _expected_header_magic: Option<&[u8; 8]>,
+    ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+        self.locate(stego_in, expected_trailer_magic)
+    }
+
     /// Strips embedded data and restores original carrier bits.
     ///
     /// Coordinate convention: `header.patch_offset` (when non-zero) is an

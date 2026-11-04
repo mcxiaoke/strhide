@@ -275,8 +275,11 @@ mod envelope_coordinates {
     #[test]
     fn verify_rejects_a_header_whose_coordinates_disagree() {
         let png = make_png();
-        let stego = write(&png, "chunk");
-        let env = png_chunk_envelope_offset(&stego);
+        // `eof` is anchored at the original carrier size and cannot be
+        // legitimately relocated, unlike PNG `chunk` (which content-domain
+        // re-compression may move; see the dual-domain regression test).
+        let stego = write(&png, "eof");
+        let env = png.len();
 
         // `inject_offset` lives at header bytes 80..88, outside the 80-byte AAD
         // and inside the public-key mask, so flipping a raw bit there changes

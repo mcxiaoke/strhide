@@ -140,12 +140,20 @@ fn locate_envelope_with_magic(
         // header unpack needs it to rule out the stealth branch, and dropping it
         // here would cost a second PBKDF2.
         stealth_header_magic = Some(magics.0);
-        match adapter.locate(carrier, Some(&magics.1))? {
+        match adapter.locate_with_hint(carrier, Some(&magics.1), Some(&magics.0))? {
             Some(location) => Some(location),
-            None => adapter.locate(carrier, profile.locator_magic())?,
+            None => adapter.locate_with_hint(
+                carrier,
+                profile.locator_magic(),
+                Some(&profile.header_magic()),
+            )?,
         }
     } else {
-        adapter.locate(carrier, profile.locator_magic())?
+        adapter.locate_with_hint(
+            carrier,
+            profile.locator_magic(),
+            Some(&profile.header_magic()),
+        )?
     };
 
     Ok(Located {
@@ -2002,8 +2010,47 @@ fn remove_core(
         header
     };
 
-    adapter.strip(host, out, &header)?;
+    let strip_header = strip_coordinates_for_location(&header, ube_offset, &strategy_name)?;
+    adapter.strip(host, out, &strip_header)?;
     Ok(header)
+}
+
+/// Return header coordinates translated to the *located* envelope position.
+///
+/// A PNG `chunk` envelope can move after it was written: content-domain
+/// embedding re-compresses IDAT, which changes the length of the chunk stream
+/// preceding the private chunk and therefore its physical offset. The envelope
+/// trailer is authenticated, but its `ube_offset` is the coordinate from write
+/// time, so `strip` must be told where the envelope really is. All other
+/// strategies are anchored at write time; a mismatch there means corruption.
+fn strip_coordinates_for_location(
+    header: &EnvelopeHeader,
+    ube_offset: u64,
+    strategy: &str,
+) -> Result<EnvelopeHeader, StrHideError> {
+    let declared = header
+        .inject_offset
+        .checked_add(header.offset_delta as u64)
+        .ok_or_else(|| StrHideError::CorruptedData("inject_offset overflow".into()))?;
+    if declared == ube_offset {
+        return Ok(header.clone());
+    }
+    if strategy != "chunk" {
+        return Err(StrHideError::CorruptedData(format!(
+            "envelope coordinates disagree: header declares {declared}, located at {ube_offset}"
+        )));
+    }
+    let shift = i128::from(ube_offset) - i128::from(declared);
+    let adjusted = i128::from(header.inject_offset) + shift;
+    let adjusted: u64 = adjusted.try_into().map_err(|_| {
+        StrHideError::CorruptedData(format!(
+            "relocated envelope underflows inject_offset {}",
+            header.inject_offset
+        ))
+    })?;
+    let mut relocated = header.clone();
+    relocated.inject_offset = adjusted;
+    Ok(relocated)
 }
 
 /// Check the restored carrier against the hashes recorded in the envelope.
@@ -2453,6 +2500,7 @@ pub fn verify_carrier_bytes(
 /// add container headers), and the whole region lies inside the file.
 fn envelope_coordinates_agree(
     header: &EnvelopeHeader,
+    strategy: &str,
     ube_offset: u64,
     ube_total_size: u64,
     file_len: u64,
@@ -2477,7 +2525,14 @@ fn envelope_coordinates_agree(
                 header.inject_offset, header.offset_delta
             )
         })?;
-    if expected_offset != ube_offset {
+    // PNG `chunk` envelopes can be physically relocated by content-domain
+    // embedding: re-compressing IDAT changes the length of the stream before the
+    // private chunk, so the envelope trailer still carries the write-time
+    // coordinate. The trailer and header are authenticated, so accept a shift
+    // for that strategy only and bound the relocated region against EOF. Every
+    // other strategy is anchored at write time and a mismatch is corruption.
+    let relocated = expected_offset != ube_offset;
+    if relocated && strategy != "chunk" {
         return Err(format!(
             "Header coordinates disagree with the envelope: inject_offset {} + delta {} = {}, \
              but the envelope sits at {}",
@@ -2490,10 +2545,20 @@ fn envelope_coordinates_agree(
             header.inject_size
         ));
     }
-    let injected_end = header
-        .inject_offset
-        .checked_add(header.inject_size)
-        .ok_or_else(|| "Header injection region overflows".to_string())?;
+    let injected_end = if relocated {
+        let wrapped = header
+            .inject_size
+            .checked_sub(header.offset_delta as u64)
+            .ok_or_else(|| "Header displacement exceeds injected region".to_string())?;
+        ube_offset
+            .checked_add(wrapped)
+            .ok_or_else(|| "Relocated injection region overflows".to_string())?
+    } else {
+        header
+            .inject_offset
+            .checked_add(header.inject_size)
+            .ok_or_else(|| "Header injection region overflows".to_string())?
+    };
     if injected_end > file_len {
         return Err(format!(
             "Header places the injected region at [{}..{}], past the end of the {file_len}B file",
@@ -2564,9 +2629,13 @@ fn verify_core(
                             false,
                             false,
                         )
-                    } else if let Err(msg) =
-                        envelope_coordinates_agree(&header, ube_offset, ube_total_size, file_len)
-                    {
+                    } else if let Err(msg) = envelope_coordinates_agree(
+                        &header,
+                        &strategy_name,
+                        ube_offset,
+                        ube_total_size,
+                        file_len,
+                    ) {
                         (false, msg, header.is_encrypted(), header.is_stealth())
                     } else if ube_stream
                         .seek(SeekFrom::Start(ube_total_size - 24))
@@ -2608,7 +2677,12 @@ fn verify_core(
                             // authenticated `offset_delta` anchors the envelope
                             // start and `confine_location` anchored the end to
                             // the physical file.
-                            debug_assert_eq!(trailer.ube_offset, ube_offset);
+                            // A relocated PNG `chunk` envelope keeps its
+                            // write-time `ube_offset` in the trailer while
+                            // `locate` reports the new physical offset, so the
+                            // two are intentionally different here. The
+                            // coordinate check lives in
+                            // `envelope_coordinates_agree`.
                             debug_assert_eq!(trailer.ube_total_size, ube_total_size);
                             let _ = &trailer;
                             (
@@ -2862,7 +2936,7 @@ mod envelope_coordinate_tests {
         };
 
         assert!(
-            envelope_coordinates_agree(&header, 0, ube_total, file_len).is_err(),
+            envelope_coordinates_agree(&header, "eof", 0, ube_total, file_len).is_err(),
             "a zeroed inject_size on a contiguous strategy must be rejected"
         );
 
@@ -2873,7 +2947,7 @@ mod envelope_coordinate_tests {
             ..header
         };
         assert!(
-            envelope_coordinates_agree(&header, 0, ube_total, file_len).is_ok(),
+            envelope_coordinates_agree(&header, "pe_codebits", 0, ube_total, file_len).is_ok(),
             "the scattered strategy must still be exempt"
         );
     }

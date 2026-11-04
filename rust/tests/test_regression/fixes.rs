@@ -17,12 +17,18 @@ fn make_minimal_png() -> Vec<u8> {
 
 use rand::RngExt;
 
+use strhide::core::payload::Payload;
+use strhide::crypto::compute_sha256;
 use strhide::errors::StrHideError;
+use strhide::params::{LocalParams, MagicPair};
+use strhide::stego::{EmbedOptions, embed_carrier};
 use strhide::structure::adapters::zip::find_eocd_offset;
 use strhide::structure::envelope::{EnvelopeHeader, EnvelopeTrailer, MAX_HINT_LEN};
+use strhide::structure::params::StructureProfile;
 use strhide::structure::{
-    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, read_carrier, remove_carrier,
-    sanitize_filename, verify_carrier, write_carrier,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, read_carrier, read_carrier_bytes,
+    remove_carrier, remove_carrier_bytes, sanitize_filename, verify_carrier, verify_carrier_bytes,
+    write_carrier, write_carrier_bytes,
 };
 
 // --------------------------------------------------------------------------- helpers
@@ -850,6 +856,147 @@ fn write_rejects_truncated_jpeg_lookalike() {
         "unexpected error: {err}"
     );
     assert!(!out.exists(), "a rejected host must not produce output");
+}
+
+/// Locate a PNG chunk by type: `(chunk_start, data_start, data_len)`.
+fn find_png_chunk(data: &[u8], wanted: &[u8; 4]) -> Option<(usize, usize, u32)> {
+    let mut pos = 8usize;
+    while pos.checked_add(8)? <= data.len() {
+        let len = u32::from_be_bytes(data[pos..pos + 4].try_into().ok()?);
+        if &data[pos + 4..pos + 8] == wanted {
+            return Some((pos, pos + 8, len));
+        }
+        pos = pos.checked_add(12 + len as usize)?;
+    }
+    None
+}
+
+/// Remove one complete PNG chunk (`length + type + data + crc`).
+fn remove_png_chunk(data: &[u8], chunk_start: usize, len: u32) -> Vec<u8> {
+    let end = chunk_start + 12 + len as usize;
+    let mut out = Vec::with_capacity(data.len().saturating_sub(end - chunk_start));
+    out.extend_from_slice(&data[..chunk_start]);
+    out.extend_from_slice(&data[end..]);
+    out
+}
+
+/// P0-2: a PNG `chunk` envelope written first, then content-domain embedding,
+/// re-compresses IDAT and moves the private chunk. Before the fix the shifted
+/// chunk was only recognised with the *standard* header magic (stealth and
+/// private dialects became unreadable), Level 2 rejected the stale coordinates,
+/// and `strip` cut at the old offset. Read/verify/restore must work in all
+/// three dialects.
+#[test]
+fn png_chunk_envelope_survives_content_recompression_in_all_dialects() {
+    let private = StructureProfile::new()
+        .with_default_secret("p0-2-private-secret")
+        .with_magic(MagicPair {
+            header: *b"p0two-hd",
+            trailer: *b"p0t2",
+        });
+    let official = StructureProfile::default();
+    let cover = include_bytes!("../assets/small.png").to_vec();
+    let struct_payload = b"structure payload under content";
+
+    for (label, password, profile) in [
+        ("official", None, &official),
+        ("stealth", Some("p0-2-stealth"), &official),
+        ("private", None, &private),
+    ] {
+        let (stego1, _) = write_carrier_bytes(
+            &cover,
+            PayloadSource::Text("structure payload under content"),
+            &WriteOptions {
+                output_path: None,
+                password,
+                strategy: "chunk",
+                stealth: password.is_some(),
+                backup: false,
+                ..Default::default()
+            },
+            &LocalParams::new(),
+            profile,
+        )
+        .unwrap_or_else(|e| panic!("{label}: write failed: {e}"));
+
+        let stego2 = embed_carrier(
+            &stego1,
+            &Payload::bytes(b"content"),
+            &EmbedOptions::default(),
+        )
+        .unwrap_or_else(|e| panic!("{label}: content embed failed: {e}"));
+
+        let (chunk_start, data_off, chunk_len) =
+            find_png_chunk(&stego2, b"prIv").expect("private chunk in stego2");
+        let (_, data_off_before, _) =
+            find_png_chunk(&stego1, b"prIv").expect("private chunk in stego1");
+        let header1 = EnvelopeHeader::unpack_with_profile(
+            &stego1[data_off_before..data_off_before + 112],
+            password,
+            profile,
+        )
+        .expect("unpack header1");
+        assert_eq!(
+            header1.inject_offset + header1.offset_delta as u64,
+            data_off_before as u64
+        );
+        assert_ne!(
+            data_off, data_off_before,
+            "{label}: content embedding did not relocate the chunk; the test would not exercise the fix"
+        );
+
+        // Read: stealth/custom-magic dialects must find the relocated chunk.
+        let read = read_carrier_bytes(&stego2, password, profile)
+            .unwrap_or_else(|e| panic!("{label}: read failed: {e}"));
+        assert_eq!(read.data, struct_payload, "{label}: payload mismatch");
+
+        // Verify: Level 2 must accept the write-time coordinates plus shift.
+        let verified = verify_carrier_bytes(&stego2, password, profile).unwrap();
+        assert!(
+            verified.level1_host.ok,
+            "{label}: L1 failed: {}",
+            verified.level1_host.detail
+        );
+        assert!(
+            verified.level2_envelope.ok,
+            "{label}: L2 failed: {}",
+            verified.level2_envelope.detail
+        );
+
+        // The content envelope changed the host, so only the unmodified header
+        // can be honestly reported as a mismatch.
+        let err = remove_carrier_bytes(&stego2, password, profile).unwrap_err();
+        assert!(
+            matches!(err, StrHideError::RestoreMismatch { .. }),
+            "{label}: expected RestoreMismatch, got {err}"
+        );
+
+        // Prove `strip` uses the *located* offset: rewrite the recorded host to
+        // the content-stego carrier (stego2 minus the private chunk) and retry.
+        // Stale coordinates would cut at the old offset and still mismatch.
+        let expected_host = remove_png_chunk(&stego2, chunk_start, chunk_len);
+        let mut patched = stego2.clone();
+        let mut header2 = EnvelopeHeader::unpack_with_profile(
+            &patched[data_off..data_off + 112],
+            password,
+            profile,
+        )
+        .expect("unpack header2");
+        header2.orig_host_size = expected_host.len() as u64;
+        header2.orig_host_sha256 = compute_sha256(&expected_host);
+        let packed = header2
+            .pack_with_profile(password, profile)
+            .expect("repack header");
+        patched[data_off..data_off + 112].copy_from_slice(&packed);
+
+        let (restored, result) = remove_carrier_bytes(&patched, password, profile)
+            .unwrap_or_else(|e| panic!("{label}: restore failed after header patch: {e}"));
+        assert_eq!(
+            restored, expected_host,
+            "{label}: strip used stale coordinates"
+        );
+        assert_eq!(result.restored_size, expected_host.len() as u64);
+    }
 }
 
 /// `size == 0` means "this box extends to EOF", so a file consisting only of

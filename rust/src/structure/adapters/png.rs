@@ -219,6 +219,22 @@ impl HostAdapter for PngAdapter {
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
     ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+        self.locate_with_hint(stego_in, expected_trailer_magic, None)
+    }
+
+    fn locate_with_hint(
+        &self,
+        stego_in: &mut dyn SeekRead,
+        expected_trailer_magic: Option<&[u8; 4]>,
+        expected_header_magic: Option<&[u8; 8]>,
+    ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+        // Stealth and custom-magic dialects use a password/seed-derived 8-byte
+        // header magic, not the standard one. Without the caller's hint the
+        // shifted-chunk check below would reject every shifted non-official
+        // envelope (the original P0-2 failure).
+        let expected_header_magic = expected_header_magic
+            .copied()
+            .unwrap_or(crate::params::STANDARD_HEADER_MAGIC);
         let file_size = stego_in.seek(SeekFrom::End(0))?;
         stego_in.seek(SeekFrom::Start(0))?;
         let mut magic = [0u8; 8];
@@ -270,7 +286,7 @@ impl HostAdapter for PngAdapter {
                             stego_in.seek(SeekFrom::Start(chunk_data_offset))?;
                             let mut hdr = [0u8; 8];
                             if stego_in.read_exact(&mut hdr).is_ok() {
-                                hdr == crate::params::STANDARD_HEADER_MAGIC
+                                hdr == expected_header_magic
                             } else {
                                 false
                             }
