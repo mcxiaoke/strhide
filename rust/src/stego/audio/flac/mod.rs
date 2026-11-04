@@ -58,6 +58,9 @@ use bits::BitWriter;
 use frame::{ParsedFrame, StreamDefaults};
 
 /// Offset of the MD5 field inside the file: `fLaC` + block header + 18 bytes.
+///
+/// [`parse_stream_info`] rejects any stream whose STREAMINFO is not the first
+/// metadata block, so this constant is the only place the MD5 can live.
 const MD5_OFFSET: usize = 8 + 18;
 
 /// Half-width of the cost window, in samples.
@@ -139,12 +142,31 @@ pub(crate) fn parse_stream_info(bytes: &[u8]) -> Result<StreamInfo, StrHideError
             ));
         }
         if block_type == 0 {
+            // The spec makes STREAMINFO the first metadata block, and the
+            // writer rewrites the MD5 at the fixed [`MD5_OFFSET`]. Accepting a
+            // STREAMINFO anywhere else let `refresh_checksums` overwrite the
+            // first block's payload while the real MD5 stayed stale, which
+            // produced carriers that embed fine and never extract again.
+            if pos != 4 {
+                return Err(StrHideError::CorruptedData(
+                    "FLAC STREAMINFO must be the first metadata block".into(),
+                ));
+            }
+            if length != 34 {
+                return Err(StrHideError::CorruptedData(format!(
+                    "FLAC STREAMINFO block is {length} bytes, expected 34"
+                )));
+            }
             let slice = bytes
                 .get(payload..payload + 34)
                 .ok_or_else(|| StrHideError::CorruptedData("STREAMINFO is truncated".into()))?;
             let mut info = [0u8; 34];
             info.copy_from_slice(slice);
             streaminfo = Some(info);
+        } else if pos == 4 {
+            return Err(StrHideError::CorruptedData(
+                "FLAC metadata chain does not start with STREAMINFO".into(),
+            ));
         }
         pos = payload + length;
         if last {
@@ -589,10 +611,14 @@ impl<'a> FlacCarrier<'a> {
             self.bytes[MD5_OFFSET..MD5_OFFSET + 16].copy_from_slice(&md5);
         }
 
-        // Under debug assertions, verify with full recheck. In release builds,
-        // avoid redundant whole-file decoding because frame CRCs and STREAMINFO MD5
-        // were just computed and verified from the exact same decoded samples.
-        #[cfg(debug_assertions)]
+        // Re-decode the patched file with frame CRC verification enabled and
+        // compare the PCM digest. The pass above wrote those CRCs and this MD5
+        // from samples it decoded with `verify_crc = false`, so on its own it
+        // can only agree with itself: if a patch desynchronised the frame walk,
+        // the wrong samples and their self-consistent checksums both ship. Only
+        // this checked re-decode can tell the difference, so it runs in release
+        // builds too -- one extra decode is cheaper than a carrier that decodes
+        // to different audio than its STREAMINFO claims.
         {
             let recheck = analyse(self.bytes, &self.info)?;
             if recheck.pcm_md5 != md5 {
@@ -1214,6 +1240,39 @@ mod tests {
         let mut hasher = Md5::new();
         hasher.update(data);
         hex(&hasher.finish())
+    }
+
+    /// The writer rewrites the STREAMINFO MD5 at the fixed `MD5_OFFSET`, so a
+    /// stream whose STREAMINFO sits anywhere else must be refused: patching its
+    /// MD5 at offset 26 would overwrite the first block's payload and leave the
+    /// real MD5 stale, giving a carrier that embeds fine and never extracts.
+    #[test]
+    fn streaminfo_must_be_the_first_metadata_block() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"fLaC");
+        bytes.push(0x04); // VORBIS_COMMENT, not last, length 0
+        bytes.extend_from_slice(&[0, 0, 0]);
+        bytes.push(0x80); // STREAMINFO, last
+        bytes.extend_from_slice(&[0, 0, 34]);
+        bytes.extend_from_slice(&[7u8; 34]);
+
+        let err = parse_stream_info(&bytes).expect_err("non-leading STREAMINFO must be refused");
+        assert!(
+            matches!(err, StrHideError::CorruptedData(_)),
+            "unexpected error: {err:?}"
+        );
+
+        // A leading STREAMINFO of the wrong length cannot be trusted either.
+        let mut short = Vec::new();
+        short.extend_from_slice(b"fLaC");
+        short.push(0x80);
+        short.extend_from_slice(&[0, 0, 33]);
+        short.extend_from_slice(&[7u8; 34]);
+        let err = parse_stream_info(&short).expect_err("short STREAMINFO must be refused");
+        assert!(
+            matches!(err, StrHideError::CorruptedData(_)),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]

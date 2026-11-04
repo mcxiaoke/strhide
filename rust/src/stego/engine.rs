@@ -421,6 +421,29 @@ impl StegoEngine for JpegEngine {
     }
 }
 
+/// Whether a failed Scheme C attempt may be retried through the HEIF thumbnail
+/// bridge.
+///
+/// The bridge is only a better answer when Scheme C says "this carrier is not
+/// a Scheme C carrier". `Cancelled`, credential conflicts, `Io`, policy
+/// refusals, version mismatches and container-parse failures describe
+/// something the bridge cannot fix, and replacing them with the bridge's own
+/// "no bridgeable item" verdict hid the real cause -- a cancelled operation
+/// used to surface as "no hidden data", which is exactly the kind of lie that
+/// costs the user an hour of retrying.
+#[cfg(feature = "content-hevc")]
+fn should_try_bridge(err: &StrHideError) -> bool {
+    match err {
+        // "Not a Scheme C carrier": the common case for a HEIF whose primary
+        // item is a JPEG thumbnail.
+        StrHideError::NoHiddenData(_) | StrHideError::UnsupportedFormat(_) => true,
+        // The carrier *is* Scheme C but has no encodable CABAC bypass run left.
+        // The bridge is the documented fallback for exactly this shape.
+        StrHideError::TrellisInfeasible { .. } => true,
+        _ => false,
+    }
+}
+
 /// Shared Scheme C implementation behind the three HEVC carriers.
 #[cfg(feature = "content-hevc")]
 fn hevc_embed(
@@ -432,6 +455,7 @@ fn hevc_embed(
 ) -> Result<EmbedOutput, StrHideError> {
     let resolved = opts.tuning.resolve();
     let domain = opts.domain(dialect);
+    let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
     opts.control.check()?;
 
     let anon_payload;
@@ -446,7 +470,7 @@ fn hevc_embed(
         crate::stego::hevc::embed_hevc_with_info_v4(
             carrier,
             eff_payload,
-            crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?,
+            cred,
             domain,
             opts.suite_id
                 .unwrap_or_else(|| dialect.hevc_format().cipher.default_suite.as_u16()),
@@ -475,10 +499,9 @@ fn hevc_embed(
             capacity: Some(info),
             stats: Some(stats),
         }),
-        // A safety-policy refusal is final: retrying through the thumbnail
-        // bridge would replace it with the bridge's own "no bridgeable item"
-        // error and hide the real reason.
-        Err(e @ StrHideError::SafetyThreshold { .. }) => Err(e),
+        // Anything the bridge cannot fix keeps its own diagnosis; this covers
+        // the safety-policy refusal that used to be special-cased here.
+        Err(e) if !should_try_bridge(&e) => Err(e),
         Err(e) if resolved.hevc_mode == HevcMode::Cabac => Err(e),
         #[cfg(feature = "content-heif-bridge")]
         Err(_) => {
@@ -514,12 +537,13 @@ fn hevc_extract(
     dialect: &StegoProfile,
 ) -> Result<Payload<'static>, StrHideError> {
     let domain = opts.domain(dialect);
+    let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
     opts.control.check()?;
 
     let direct = || {
         crate::stego::hevc::extract_hevc_v4(
             carrier,
-            crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?,
+            cred,
             domain,
             dialect.hevc_format(),
             &opts.limits,
@@ -533,6 +557,7 @@ fn hevc_extract(
 
     match with_pool(opts.pool.as_ref(), direct) {
         Ok(payload) => Ok(payload),
+        Err(e) if !should_try_bridge(&e) => Err(e),
         #[cfg(feature = "content-heif-bridge")]
         Err(_) => {
             // The bridge reads the same V4 envelope, so it needs the same
@@ -547,9 +572,8 @@ fn hevc_extract(
             }
             match thumb_bridge::extract_heif_bridge(carrier, &bridge, &opts.limits, &opts.control) {
                 Ok(payload) => Ok(payload),
-                // Every Scheme C failure only says "this is not a Scheme C
-                // carrier", so the bridge's verdict describes the carrier
-                // better than the HEVC probe does.
+                // Scheme C only got here because it decided this is not a
+                // Scheme C carrier, so the bridge's verdict is the better one.
                 Err(bridge_err) => Err(bridge_err),
             }
         }
@@ -585,6 +609,7 @@ fn hevc_probe(
 
     match with_pool(opts.pool.as_ref(), direct) {
         Ok(info) => Ok(info),
+        Err(e) if !should_try_bridge(&e) => Err(e),
         Err(e) if resolved.hevc_mode == HevcMode::Cabac => Err(e),
         // Same order as embed and extract: a probe that advertises the
         // bridge's capacity while the writer fills the CABAC stream (or the
@@ -1423,6 +1448,39 @@ mod tests {
             .verify(&stego_bytes, &verify_wrong_opts, &profile)
             .expect("verify wrong password");
         assert!(!verify_wrong.is_all_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "content-hevc")]
+    fn only_a_not_a_scheme_c_carrier_may_fall_back_to_the_bridge() {
+        // "Not a Scheme C carrier" and "no CABAC bypass run left": the bridge
+        // is the documented second choice for both.
+        assert!(should_try_bridge(&StrHideError::NoHiddenData("x".into())));
+        assert!(should_try_bridge(&StrHideError::UnsupportedFormat(
+            "x".into()
+        )));
+        assert!(should_try_bridge(&StrHideError::TrellisInfeasible {
+            cause: crate::errors::TrellisCause::ExhaustedSlots,
+            detail: "x".into(),
+        }));
+
+        // Everything else keeps its own diagnosis instead of being replaced by
+        // the bridge's "no bridgeable item".
+        assert!(!should_try_bridge(&StrHideError::Cancelled));
+        assert!(!should_try_bridge(&StrHideError::General("x".into())));
+        assert!(!should_try_bridge(&StrHideError::CorruptedData("x".into())));
+        assert!(!should_try_bridge(&StrHideError::UnsupportedVersion(
+            "x".into()
+        )));
+        assert!(!should_try_bridge(&StrHideError::Password("x".into())));
+        assert!(!should_try_bridge(&StrHideError::Io(
+            std::io::Error::other("x")
+        )));
+        assert!(!should_try_bridge(&StrHideError::SafetyThreshold {
+            tier: crate::stego::SafetyLevel::Balanced,
+            required_bytes: 10,
+            available_bytes: 1,
+        }));
     }
 
     #[test]

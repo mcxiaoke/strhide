@@ -176,6 +176,27 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
         }
 
         let body = &data[body_start..body_end];
+        // Verify every chunk's CRC before trusting it. Ignoring the field let a
+        // corrupt or tampered carrier through, and because `png_pre_salt` feeds
+        // `chunk.ty`/`chunk.data` into the KDF salt, the embedder then derived a
+        // different locator key and emitted a carrier whose identity had
+        // silently changed. `write_chunk` recomputes the CRC from the same
+        // `ty || body`, so a legal carrier still round-trips byte for byte.
+        let stored_crc = u32::from_be_bytes([
+            data[body_end],
+            data[body_end + 1],
+            data[body_end + 2],
+            data[body_end + 3],
+        ]);
+        let mut crc = Crc32::new();
+        crc.update(ty);
+        crc.update(body);
+        if crc.finalize() != stored_crc {
+            return Err(StrHideError::CorruptedData(format!(
+                "PNG chunk '{}' at byte {pos} failed its CRC-32 check; the file is corrupt or was modified after it was written",
+                String::from_utf8_lossy(ty)
+            )));
+        }
         match ty {
             b"IHDR" => {
                 if len < 13 {
@@ -267,7 +288,7 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
                 });
             }
         }
-        pos = body_end + 4; // Skip CRC
+        pos = body_end + 4; // Skip the CRC, already verified above
     }
 
     if !saw_iend {
@@ -3049,6 +3070,49 @@ mod tests {
         )
         .expect("extract");
         assert_eq!(extracted, payload);
+    }
+
+    #[test]
+    fn decode_rejects_a_chunk_whose_crc_no_longer_matches() {
+        let img = RawImage {
+            width: 4,
+            height: 4,
+            channels: 3,
+            bit_depth: 8,
+            color_type: 2,
+            pixels: vec![10u8; 4 * 4 * 3],
+            chunks: Vec::new(),
+            idat_sizes: Vec::new(),
+            row_filters: Vec::new(),
+            idat_info: None,
+            tail: Vec::new(),
+        };
+        let png = encode_png(&img).expect("encode");
+        assert!(
+            decode_png(&png).is_ok(),
+            "the untouched carrier must decode"
+        );
+
+        // Flip one bit inside the IDAT body and leave its CRC alone -- exactly
+        // what a truncated download or a byte-level tamper looks like.
+        let mut pos = 8usize;
+        let mut tampered = None;
+        while pos + 12 <= png.len() {
+            let len =
+                u32::from_be_bytes([png[pos], png[pos + 1], png[pos + 2], png[pos + 3]]) as usize;
+            if &png[pos + 4..pos + 8] == b"IDAT" && len > 0 {
+                let mut copy = png.clone();
+                copy[pos + 8] ^= 0x01;
+                tampered = Some(copy);
+                break;
+            }
+            pos += 12 + len;
+        }
+        let tampered = tampered.expect("the encoder must emit a non-empty IDAT");
+        assert!(matches!(
+            decode_png(&tampered),
+            Err(StrHideError::CorruptedData(_))
+        ));
     }
 
     #[test]
