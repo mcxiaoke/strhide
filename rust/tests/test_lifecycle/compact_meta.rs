@@ -73,7 +73,11 @@ fn smallest_envelopes_match_the_documented_minimums() {
         &dir.join("enc.png"),
     );
     assert_eq!(enc, 219, "encrypted envelope size changed: {enc}");
-    assert!(enc <= strhide::structure::envelope::MIN_UBE_ENCRYPTED as u64 + 10);
+    assert_eq!(
+        enc,
+        strhide::structure::envelope::min_ube_len(1) + 5,
+        "envelope size must match the derived minimum plus the 5-byte 's.txt' filename"
+    );
 
     // Hint bytes are stored verbatim in front of the metadata block.
     let hinted = write(

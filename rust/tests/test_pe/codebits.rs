@@ -1311,3 +1311,41 @@ mod address_boundary {
         );
     }
 }
+
+/// P1-8: a 213-byte codebits channel must not be advertised as available.
+/// 213 B is the *empty*-payload envelope; the smallest write the CLI accepts
+/// (1 byte) needs 214 B. Before the derived minimum, `inspect` promised the
+/// channel would fit and the subsequent write failed in the injector.
+#[test]
+fn codebits_zero_payload_capacity_is_not_available() {
+    let dir = scratch("cap_213");
+    let mut found = None;
+    for text_len in 5900..6400 {
+        let carrier = dir.join(format!("c{text_len}.exe"));
+        fs::write(&carrier, make_pe(0x8664, 0x20B, text_len, false)).unwrap();
+        let res = inspect_carrier(&carrier, None).unwrap();
+        let cb = &res.strategies[0];
+        if cb.strategy.as_str() == "pe_codebits" && cb.capacity_bytes == Some(213) {
+            found = Some((carrier, cb.available));
+            break;
+        }
+    }
+    let Some((carrier, available)) = found else {
+        panic!("no synthetic PE yields a 213-byte codebits capacity in 5900..6400");
+    };
+    assert!(
+        !available,
+        "213 B only fits an empty payload, and the CLI rejects empty payloads"
+    );
+
+    // A one-byte write must fail fast instead of after `inspect` promised it
+    // would fit; any error is fine as long as it is not a success.
+    let out = dir.join("cap.steg.exe");
+    let err = write_carrier(
+        &carrier,
+        PayloadSource::Text("x"),
+        &write_opts(&out, "pe_codebits"),
+    )
+    .unwrap_err();
+    assert!(!err.to_string().is_empty(), "{err}");
+}

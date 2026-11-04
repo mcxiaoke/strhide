@@ -47,10 +47,8 @@ const CHANNEL_HEADER_BITS: usize = CHANNEL_HEADER_LEN * 8;
 
 /// Structural lower bound for a channel payload: a bare envelope is a 112-byte
 /// header plus a 24-byte trailer, so anything smaller means a corrupt header
-/// rather than a real envelope. Writer-side minimums (which depend on the
-/// metadata layout and on whether the payload is encrypted) live in
-/// [`crate::structure::envelope::MIN_UBE_PLAIN`] and [`crate::structure::envelope::MIN_UBE_ENCRYPTED`];
-/// capacity reporting must use those, not this.
+/// rather than a real envelope. Capacity reporting must use the writer-side
+/// minimum instead ([`crate::structure::envelope::min_ube_len`]), not this.
 pub const MIN_UBE_LEN: u32 = crate::structure::envelope::HEADER_SIZE as u32
     + crate::structure::envelope::TRAILER_SIZE as u32;
 

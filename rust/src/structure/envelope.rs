@@ -99,15 +99,47 @@ pub const MAX_HINT_LEN: u32 = 1024;
 /// a field-range error instead of a multi-gigabyte allocation.
 pub const MAX_META_LEN: u32 = 256 * 1024;
 
-/// Smallest envelope the writer can currently produce with compact metadata,
-/// an empty filename and a 1-byte payload:
-/// `header 112 + meta 41 + payload 1 + trailer 24`.
+/// Smallest envelope the writer emits for a payload of `payload_len` bytes
+/// with compact metadata, an empty filename and a fresh timestamp.
 ///
-/// Used by capacity reporting (`pe_codebits`) so `inspect` stops advertising a
-/// capacity that cannot hold even the smallest real envelope (`MIN_UBE_LEN` of
-/// 136 only covers header + trailer, which no writer ever emits).
-pub const MIN_UBE_ENCRYPTED: u32 = 213;
-pub const MIN_UBE_PLAIN: u32 = MIN_UBE_ENCRYPTED;
+/// The compact metadata block is
+/// `version(1) + name_len(2) + varint(raw_size) + digest(32) + varint(created_at)`,
+/// then sealed with an AEAD tag. Every payload is stored as a framed,
+/// AEAD-sealed chunk stream — `framed_len` always emits at least one chunk, so
+/// an empty payload still costs one 20-byte frame.
+///
+/// Capacity reporting must use the smallest payload the caller can actually
+/// write (the CLI rejects empty payloads, so one byte), not the theoretical
+/// zero-byte envelope: a channel that fits 213 bytes cannot fit the 214-byte
+/// envelope produced by a 1-byte write (`MIN_UBE_LEN` of 136 only covers
+/// header + trailer, which no writer ever emits).
+pub fn min_ube_len(payload_len: u64) -> u64 {
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // version(1) + name_len(2) + digest(32); empty filename contributes no
+    // bytes of its own.
+    let meta_fixed = 1 + 2 + 32;
+    let meta_len = meta_fixed
+        + varint_len(payload_len)
+        + varint_len(created_at)
+        + crate::crypto::AEAD_TAG_LEN as u64;
+    HEADER_SIZE as u64
+        + meta_len
+        + crate::crypto::framed_len(payload_len, crate::crypto::CHUNK_SIZE)
+        + TRAILER_SIZE as u64
+}
+
+/// Byte width of the 7-bit varint used by the compact metadata block.
+fn varint_len(mut value: u64) -> u64 {
+    let mut len = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        len += 1;
+    }
+    len
+}
 
 /// Fixed 112-byte envelope header, serialized little-endian.
 ///
@@ -745,5 +777,30 @@ impl EnvelopeTrailer {
             Ok(trailer) => Ok(Some(trailer)),
             Err(_) => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P1-8: the old constants advertised 213 B as the smallest writable
+    /// envelope, but that is the *empty*-payload size. A one-byte write (the
+    /// smallest payload the CLI accepts) needs 214 B, so a 213-byte channel
+    /// was reported available and then rejected by the injector.
+    #[test]
+    fn min_ube_len_tracks_the_smallest_writable_payload() {
+        assert_eq!(min_ube_len(0), 213, "zero-byte envelope is 213 B");
+        assert_eq!(min_ube_len(1), 214, "one-byte envelope is 214 B");
+        assert_eq!(
+            min_ube_len(1) - min_ube_len(0),
+            1,
+            "one payload byte costs exactly one byte at this size"
+        );
+        assert_eq!(
+            min_ube_len(128),
+            min_ube_len(127) + 2,
+            "a varint boundary and a payload byte each add one byte"
+        );
     }
 }

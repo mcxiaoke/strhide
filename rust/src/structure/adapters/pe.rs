@@ -249,34 +249,28 @@ impl HostAdapter for PeAdapter {
                         let cap_slack = slack.saturating_sub(pe_codebits::CHANNEL_HEADER_LEN);
                         let cap = cap_bits.min(cap_slack);
                         codebits.capacity_bytes = Some(cap as u64);
-                        // Report against the *real* smallest envelope the writer
-                        // emits, not the 136-byte structural bound: otherwise
+                        // Report against the real smallest envelope the writer
+                        // emits for a *writable* payload (one byte: the CLI
+                        // rejects empty payloads), not the zero-byte envelope
+                        // and not the 136-byte structural bound. Otherwise
                         // `inspect` advertises a capacity that every `write`
                         // rejects.
-                        let plain_ok = cap >= crate::structure::envelope::MIN_UBE_PLAIN as usize;
-                        let encrypted_ok =
-                            cap >= crate::structure::envelope::MIN_UBE_ENCRYPTED as usize;
-                        codebits.available = plain_ok;
+                        let min_ube = crate::structure::envelope::min_ube_len(1) as usize;
+                        let usable = cap >= min_ube;
+                        codebits.available = usable;
                         codebits.limit =
                             format!("<= {} B (file size unchanged)", format_bytes(cap as u64));
-                        codebits.note = Some(if encrypted_ok {
+                        codebits.note = Some(if usable {
                             format!(
-                                "instruction-encoding channel; fits an encrypted envelope (smallest {} B); longest zero-value slack run is {} B, which caps the restore diff",
-                                format_bytes(crate::structure::envelope::MIN_UBE_ENCRYPTED as u64),
-                                format_bytes(slack as u64)
-                            )
-                        } else if plain_ok {
-                            format!(
-                                "instruction-encoding channel; fits an unencrypted envelope only (encrypted needs >= {} B); longest zero-value slack run is {} B, which caps the restore diff",
-                                format_bytes(crate::structure::envelope::MIN_UBE_ENCRYPTED as u64),
+                                "instruction-encoding channel; smallest writable envelope needs {} B; longest zero-value slack run is {} B, which caps the restore diff",
+                                format_bytes(min_ube as u64),
                                 format_bytes(slack as u64)
                             )
                         } else {
                             format!(
-                                "not usable on this .text: at most {} B (unencrypted needs >= {} B, encrypted >= {} B)",
+                                "not usable on this .text: at most {} B (smallest writable envelope needs {} B)",
                                 format_bytes(cap as u64),
-                                format_bytes(crate::structure::envelope::MIN_UBE_PLAIN as u64),
-                                format_bytes(crate::structure::envelope::MIN_UBE_ENCRYPTED as u64)
+                                format_bytes(min_ube as u64)
                             )
                         });
                     }
@@ -307,11 +301,12 @@ impl HostAdapter for PeAdapter {
                 Ok(layout) => {
                     let run =
                         pe_layout::max_zero_run_streaming(r, &layout.slack_ranges).unwrap_or(0);
+                    let min_ube = crate::structure::envelope::min_ube_len(1) as usize;
                     pad.capacity_bytes = Some(run as u64);
-                    let plain_ok = run >= crate::structure::envelope::MIN_UBE_PLAIN as usize;
-                    pad.available = plain_ok;
+                    let usable = run >= min_ube;
+                    pad.available = usable;
                     pad.limit = format!("<= {} B (file size unchanged)", format_bytes(run as u64));
-                    pad.note = Some(if plain_ok {
+                    pad.note = Some(if usable {
                         format!(
                             "envelope written into PE alignment padding (largest zero run {} B over {} padding range(s)); file size unchanged, nothing appended",
                             format_bytes(run as u64),
@@ -319,9 +314,9 @@ impl HostAdapter for PeAdapter {
                         )
                     } else {
                         format!(
-                            "not usable on this carrier: largest zero run is {} B (smallest envelope is {} B)",
+                            "not usable on this carrier: largest zero run is {} B (smallest writable envelope needs {} B)",
                             format_bytes(run as u64),
-                            format_bytes(crate::structure::envelope::MIN_UBE_PLAIN as u64)
+                            format_bytes(min_ube as u64)
                         )
                     });
                 }

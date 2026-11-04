@@ -20,7 +20,7 @@
 use crate::errors::StrHideError;
 use crate::structure::adapters::{SeekRead, SeekWrite, format_bytes, pe_layout};
 use crate::structure::envelope::{
-    EnvelopeHeader, EnvelopeTrailer, MIN_UBE_PLAIN, STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC,
+    EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE, STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC,
     TRAILER_SIZE,
 };
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -190,7 +190,9 @@ fn validate_trailer_at(
     {
         return Ok(None);
     }
-    if trailer.ube_total_size < MIN_UBE_PLAIN as u64 {
+    // Structural lower bound only: a bare header + trailer. Metadata and
+    // payload lengths are validated by the envelope reader.
+    if trailer.ube_total_size < (HEADER_SIZE + TRAILER_SIZE) as u64 {
         return Ok(None);
     }
     // The envelope must be contained in this single padding range: `pe_slack`
