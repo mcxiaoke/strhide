@@ -111,9 +111,18 @@ impl HostAdapter for MkvAdapter {
         };
 
         // 1. Check ebml_void element
+        //
+        // The Void prefix only proves that *some* Void of the right length sits
+        // in front of the declared offset; it says nothing about the declared
+        // size, which the trailer protects with CRC-32 alone. `ebml_void`
+        // appends, so the envelope has to end exactly at the file end — without
+        // that equation a forged size reached the metadata allocation
+        // (review P0-2).
         if let Some(vint) = encode_vint(trailer.ube_total_size) {
             let prefix_len = 1 + vint.len() as u64;
-            if trailer.ube_offset >= prefix_len {
+            if trailer.ube_offset >= prefix_len
+                && trailer.ube_offset.checked_add(trailer.ube_total_size) == Some(file_size)
+            {
                 stego_in.seek(SeekFrom::Start(trailer.ube_offset - prefix_len))?;
                 let mut prefix = vec![0u8; prefix_len as usize];
                 if stego_in.read_exact(&mut prefix).is_ok()

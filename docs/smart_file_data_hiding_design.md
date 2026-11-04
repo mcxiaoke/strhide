@@ -51,7 +51,7 @@
 ```text
 +--------------------------------------------------------------------------------+
 | 1. 固定头部 (Fixed Header, 112 字节, 8 字节对齐)                               |
-|    - 0x00 ~ 0x4F (80 字节): 不可变鉴权区 (Immutable AAD) - 绑定 AES-256-GCM 认证 |
+|    - 0x00 ~ 0x4F (80 字节): 定长 AAD 前缀 - 绑定 AES-256-GCM 认证（§3.4）         |
 |    - 0x50 ~ 0x6F (32 字节): 物理偏移、尺寸与元数据长度参数                     |
 +--------------------------------------------------------------------------------+
 | 2. 密码提示块 (Password Hint Block, 可选, 变长 UTF-8, 长度 ≤ 1024 字节)        |
@@ -79,7 +79,7 @@
 | `0x1C` | `base_nonce` | 12B | `bytes` | CSPRNG 生成的 96 位 Nonce 基础值 |
 | `0x28` | `orig_host_size` | 8B | `uint64` | 原始宿主文件的精确字节大小 |
 | `0x30` | `orig_host_sha256` | 32B | `bytes` | **原始宿主全量 SHA-256 指纹**，用于还原校验 |
-| *(0x00 ~ 0x4F)* | *(AAD 区)* | *80B* | | *上述前 80 字节作为 AES-256-GCM 不可变 AAD 参与完整性鉴权* |
+| *(0x00 ~ 0x4F)* | *(AAD 前缀)* | *80B* | | *上述前 80 字节是 AES-256-GCM AAD 的定长前缀；`meta_len`/`hint_len` 与提示正文另行追加（§3.4）* |
 | `0x50` | `inject_offset` | 8B | `uint64` | 宿主文件被修改或切开插入的绝对物理字节偏移 |
 | `0x58` | `inject_size` | 8B | `uint64` | 向宿主注入的总字节数（外层格式容器头 + UBE 整体长度） |
 | `0x60` | `patch_offset` | 4B | `uint32` | 宿主头部被修改的字段物理偏移（无修改则填 0） |
@@ -102,7 +102,7 @@
    - `0x03`: `filename` (`name_len` 字节 UTF-8，提取端强制做路径净化)
    - 随附：`raw_size` (LEB128)、`raw_sha256` (32B 二进制)、`created_at` (LEB128 Unix 时间戳)。
 2. **旧版 JSON 布局**：JSON 字典的 UTF-8 字节流。
-3. **加密绑定**：AAD 为固定头部前 80 字节，Tag 占用 16 字节。
+3. **加密绑定**：AAD 为 `header[0..80] || meta_len || hint_len || hint`（变长），Tag 占用 16 字节。`meta_len`/`hint_len`/提示正文因此也被认证；只有四个注入后坐标（`inject_offset`/`inject_size`/`patch_offset`/`orig_patch_val`）在 AAD 之外，改由物理边界、坐标交叉与还原 SHA-256 三重结构校验兜底（见 `docs/api/WIRE_SPEC.md` §3.4、§5）。
 
 ### 3.5 载荷数据流（Payload Stream）
 数据流采用分块 AEAD 封装：

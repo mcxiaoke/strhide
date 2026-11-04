@@ -554,8 +554,14 @@ fn flac_probe_capacity_is_reachable_by_embed() {
 
 #[test]
 fn flac_invariants_preserved_across_embed() {
-    // S1 invariant: slot count, usable count, and tail count must be
-    // 100% invariant before and after embedding.
+    // S1 invariant: the *structural* pools -- body candidates and subframe
+    // tails -- must be invariant before and after embedding, because both ends
+    // derive the plan from them.
+    //
+    // `usable` is deliberately NOT asserted: it counts slots that are legal for
+    // the current residual values, and the embedding rewrites those values, so
+    // it may legitimately move. Nothing in the write or read path may use it
+    // (see `flac_body_plan_ignores_the_movable_slot_count`).
     let cover = flac_carrier_custom(600, 256, 3, 4);
     let info = super::parse_stream_info(&cover).expect("info");
     let before = super::analyse(&cover, &info).expect("analyse before");
@@ -581,10 +587,6 @@ fn flac_invariants_preserved_across_embed() {
     assert_eq!(
         before.slots, after.slots,
         "candidate slot count must be invariant across embed"
-    );
-    assert_eq!(
-        before.usable, after.usable,
-        "usable movable slot count must be invariant across embed"
     );
     assert_eq!(
         before.tails, after.tails,
@@ -633,4 +635,60 @@ fn flac_carrier_with_trailing_non_audio_bytes_roundtrips() {
     )
     .expect("extract with trailer");
     assert_eq!(extracted.data.as_ref(), raw);
+}
+
+/// Body slot offsets one plan construction addresses.
+fn body_plan_offsets(
+    cover: &[u8],
+    info: super::StreamInfo,
+    analysis: &super::FlacAnalysis,
+    body_slots: usize,
+) -> Vec<u32> {
+    let mut buf = cover.to_vec();
+    let carrier = super::FlacCarrier::new(
+        &mut buf,
+        info,
+        analysis,
+        body_slots,
+        crate::stego::header::PNG_AUDIO_BASE_SLOTS,
+        0x1111_2222_3333_4444,
+        0x5555_6666_7777_8888,
+        0x9999_aaaa_bbbb_cccc,
+    )
+    .expect("plan construction");
+    carrier.slots[crate::stego::header::PNG_AUDIO_BASE_SLOTS..]
+        .iter()
+        .map(|slot| slot.bit_offset)
+        .collect()
+}
+
+#[test]
+fn flac_body_plan_ignores_the_movable_slot_count() {
+    // `analysis.usable` is value-dependent by construction: legality reads the
+    // residual values, and embedding rewrites them. The writer analyses the
+    // cover while the reader analyses the stego, so any dependence on `usable`
+    // makes the two thin over different denominators, select different
+    // codewords, and land on an AEAD failure with the right password.
+    // Selection must therefore be a function of the structural pool alone.
+    let cover = flac_carrier_custom(600, 256, 3, 4);
+    let info = super::parse_stream_info(&cover).expect("info");
+    let analysis = super::analyse(&cover, &info).expect("analyse");
+    let body_slots = 200;
+    assert!(
+        analysis.slots > body_slots,
+        "carrier must have a body pool, got {}",
+        analysis.slots
+    );
+
+    let expected = body_plan_offsets(&cover, info, &analysis, body_slots);
+    assert_eq!(expected.len(), body_slots);
+
+    for usable in [0usize, 1, analysis.usable / 3, analysis.usable / 2] {
+        let perturbed = super::FlacAnalysis { usable, ..analysis };
+        assert_eq!(
+            body_plan_offsets(&cover, info, &perturbed, body_slots),
+            expected,
+            "the body plan moved with usable={usable}; slot selection is not structural"
+        );
+    }
 }

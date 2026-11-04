@@ -363,10 +363,11 @@ impl HostAdapter for ZipAdapter {
 
         // Copy Central Directory and EOCD up to patch_offset.
         //
-        // Every offset below comes from the envelope header, which is not
-        // covered by the AEAD (see `EnvelopeHeader::get_aad`): a corrupted or
-        // tampered header must fail as `CorruptedData`, never panic in a debug
-        // build or wrap around into a bogus seek in release.
+        // Every offset below comes from the envelope header, and the four
+        // post-injection coordinates are the one part of it the AEAD cannot
+        // cover (see `EnvelopeHeader::auth_aad`): a corrupted or tampered header
+        // must fail as `CorruptedData`, never panic in a debug build or wrap
+        // around into a bogus seek in release.
         let inject_end = header
             .inject_offset
             .checked_add(header.inject_size)

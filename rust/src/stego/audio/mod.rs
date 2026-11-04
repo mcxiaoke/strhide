@@ -142,10 +142,10 @@ pub(crate) fn embed_flac(
             analysis.tails
         )));
     }
-    if analysis.usable < 8 {
+    if analysis.slots < 8 {
         return Err(StrHideError::General(format!(
-            "FLAC carrier has {} usable residual slots; at least 8 are required",
-            analysis.usable
+            "FLAC carrier has {} residual slots; at least 8 are required",
+            analysis.slots
         )));
     }
 
@@ -247,7 +247,9 @@ pub(crate) fn extract_flac(
         return Err(core::no_hidden_data());
     }
     let body_slots = core::body_slots_for(&view.header)?;
-    if body_slots > analysis.usable {
+    // Structural pool, not `usable`: embedding rewrites residual values, so the
+    // stego file's movable count is not the one the writer planned with.
+    if body_slots > analysis.slots {
         return Err(core::no_hidden_data());
     }
 
@@ -302,10 +304,10 @@ pub(crate) fn probe_flac(
             analysis.tails
         )));
     }
-    if analysis.usable < 8 {
+    if analysis.slots < 8 {
         return Err(StrHideError::General(format!(
-            "FLAC carrier has {} usable residual slots; at least 8 are required",
-            analysis.usable
+            "FLAC carrier has {} residual slots; at least 8 are required",
+            analysis.slots
         )));
     }
     let pre_salt = flac_pre_salt(&info, profile.hpos_salt);
@@ -380,7 +382,7 @@ pub(crate) fn inspect_flac(
     // for more header/body slots than the stream has. That is "no header",
     // not an error: rejecting it here keeps inspect's documented surface
     // (`has_hidden_data=false`) instead of leaking a structural failure.
-    if header_slots > analysis.tails || body_slots > analysis.usable {
+    if header_slots > analysis.tails || body_slots > analysis.slots {
         return Ok(StegoHeaderInfo::empty("FLAC"));
     }
 
@@ -470,14 +472,14 @@ pub(crate) fn verify_flac(
             let hs = PNG_AUDIO_BASE_SLOTS + 8 * v.header.ext_len as usize;
             let bs = core::body_slots_for(&v.header)
                 .unwrap_or(0)
-                .min(analysis.usable);
+                .min(analysis.slots);
             (hs, bs)
         }
         Err(_) => (PNG_AUDIO_BASE_SLOTS, 0),
     };
 
     // Same unauthenticated-`ext_len` bound as `inspect_flac`.
-    if header_slots > analysis.tails || body_slots > analysis.usable {
+    if header_slots > analysis.tails || body_slots > analysis.slots {
         return Ok(flac_unreadable());
     }
 

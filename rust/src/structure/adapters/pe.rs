@@ -436,10 +436,17 @@ impl HostAdapter for PeAdapter {
         // envelopes unwrap outermost-first: whatever was appended sits after
         // everything else and can be removed without touching the padding.
         let trailer = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)?;
+        let file_size = stego_in.seek(SeekFrom::End(0))?;
 
+        // `pe_overlay` always appends, so the envelope must end exactly at the
+        // file end. Accepting "starts after the image" was a hole: the trailer's
+        // size field is CRC-32 only, so a forged 1 TiB envelope passed this
+        // check and `read` then allocated a multi-gigabyte metadata block
+        // (review P0-2).
         if let Some(trailer) = &trailer
             && let Ok(pe_info) = parse_pe_headers(stego_in)
             && trailer.ube_offset >= pe_info.pe_image_end
+            && trailer.ube_offset.checked_add(trailer.ube_total_size) == Some(file_size)
         {
             return Ok(Some((
                 trailer.ube_offset,
@@ -458,15 +465,14 @@ impl HostAdapter for PeAdapter {
             return Ok(Some((ube_offset, ube_total_size, "pe_slack".into())));
         }
 
-        if let Some(trailer) = &trailer {
-            let file_size = stego_in.seek(SeekFrom::End(0))?;
-            if trailer.ube_offset.checked_add(trailer.ube_total_size) == Some(file_size) {
-                return Ok(Some((
-                    trailer.ube_offset,
-                    trailer.ube_total_size,
-                    "eof".into(),
-                )));
-            }
+        if let Some(trailer) = &trailer
+            && trailer.ube_offset.checked_add(trailer.ube_total_size) == Some(file_size)
+        {
+            return Ok(Some((
+                trailer.ube_offset,
+                trailer.ube_total_size,
+                "eof".into(),
+            )));
         }
 
         Ok(None)

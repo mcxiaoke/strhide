@@ -13,6 +13,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use strhide::structure::adapters::pdf::parse_pdf_trailer_info;
+use strhide::structure::envelope::EnvelopeHeader;
 use strhide::structure::{
     PayloadSource, ReadOptions, RestoreOptions, WriteOptions, read_carrier, remove_carrier,
     verify_carrier, write_carrier,
@@ -61,16 +62,27 @@ fn write_eof_envelope(dir: &Path, name: &str) -> (PathBuf, u64) {
     (out, ube_offset)
 }
 
-/// Patch `len` bytes at `ube_offset + field_offset` inside a written carrier.
-fn patch_header_field(out: &Path, ube_offset: u64, field_offset: u64, bytes: &[u8]) {
-    let mut f = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(out)
+/// Rewrite one header field *logically*.
+///
+/// The default-mode header is XOR-masked, so writing raw bytes at a field
+/// offset does not produce a predictable logical value. This unpacks with the
+/// official profile, applies `mutate`, and repacks with the same mask, which is
+/// what a forger with the public default key could do.
+fn repack_header_field(out: &Path, ube_offset: u64, mutate: impl FnOnce(&mut EnvelopeHeader)) {
+    use strhide::structure::envelope::HEADER_SIZE;
+    use strhide::structure::params::StructureProfile;
+    let mut data = fs::read(out).unwrap();
+    let start = ube_offset as usize;
+    let mut header =
+        EnvelopeHeader::unpack_with_password(&data[start..start + HEADER_SIZE], None).unwrap();
+    mutate(&mut header);
+    let packed = header
+        .pack_with_profile(None, &StructureProfile::default())
         .unwrap();
-    f.seek(SeekFrom::Start(ube_offset + field_offset)).unwrap();
-    f.write_all(bytes).unwrap();
+    data[start..start + HEADER_SIZE].copy_from_slice(&packed);
+    fs::write(out, data).unwrap();
 }
+
 /// Tamper the envelope version field at `ube_offset + 8` ensuring the write is
 /// never a no-op against a masked byte and always yields an unsupported version.
 fn tamper_version_field(out: &Path, ube_offset: u64) {
@@ -303,9 +315,11 @@ fn verify_detects_inconsistent_meta_len() {
     let dir = scratch("verify_metalen");
     let (out, ube_offset) = write_eof_envelope(&dir, "m");
 
-    // meta_len field sits at header offset 104; claim far more than the
-    // envelope carries so hint+meta+136 exceeds the total size.
-    patch_header_field(&out, ube_offset, 104, &0xFFFFFFF0u32.to_le_bytes());
+    // Claim far more than the envelope carries so hint+meta+136 exceeds the
+    // total size. The value stays below `MAX_META_LEN` on purpose: this case is
+    // about the size consistency check, not the field-range cap (covered by
+    // `verify_rejects_a_meta_len_above_the_metadata_cap`).
+    repack_header_field(&out, ube_offset, |header| header.meta_len = 100_000);
 
     let res = verify_carrier(&out, None).unwrap();
     assert!(
@@ -314,6 +328,30 @@ fn verify_detects_inconsistent_meta_len() {
     );
     assert!(
         res.level2_envelope.detail.contains("inconsistent"),
+        "unexpected detail: {}",
+        res.level2_envelope.detail
+    );
+}
+
+#[test]
+fn verify_rejects_a_meta_len_above_the_metadata_cap() {
+    // A metadata block is at most a filename plus a fixed tail, so the reader
+    // refuses anything past `MAX_META_LEN` before it sizes a buffer from the
+    // field. Without this cap a forged 4 GiB `meta_len` reached
+    // `vec![0u8; meta_len]` and an allocation failure aborted the process
+    // (review P0-2).
+    let dir = scratch("verify_metalen_cap");
+    let (out, ube_offset) = write_eof_envelope(&dir, "mc");
+
+    repack_header_field(&out, ube_offset, |header| header.meta_len = u32::MAX);
+
+    let res = verify_carrier(&out, None).unwrap();
+    assert!(
+        !res.level2_envelope.ok,
+        "meta_len above the metadata cap passed Level 2"
+    );
+    assert!(
+        res.level2_envelope.detail.contains("exceeds maximum"),
         "unexpected detail: {}",
         res.level2_envelope.detail
     );

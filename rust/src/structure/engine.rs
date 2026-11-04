@@ -133,28 +133,59 @@ fn locate_envelope_with_magic(
     password: Option<&str>,
     profile: &StructureProfile,
 ) -> Result<Located, StrHideError> {
-    if let Some(pwd) = password {
+    let mut stealth_header_magic = None;
+    let found = if let Some(pwd) = password {
         let magics = derive_stealth_magics(pwd, profile.domain())?;
-        if let Some(location) = adapter.locate(carrier, Some(&magics.1))? {
-            return Ok(Located {
-                location: Some(location),
-                stealth_header_magic: Some(magics.0),
-            });
+        // The derived magic is kept even when the stealth scan misses: the
+        // header unpack needs it to rule out the stealth branch, and dropping it
+        // here would cost a second PBKDF2.
+        stealth_header_magic = Some(magics.0);
+        match adapter.locate(carrier, Some(&magics.1))? {
+            Some(location) => Some(location),
+            None => adapter.locate(carrier, profile.locator_magic())?,
         }
-        // The stealth magic did not match, so this is an official-dialect
-        // envelope. The derived magic is still returned: the header unpack needs
-        // it to rule out the stealth branch, and dropping it here would cost a
-        // second PBKDF2.
-        let location = adapter.locate(carrier, profile.locator_magic())?;
-        return Ok(Located {
-            location,
-            stealth_header_magic: Some(magics.0),
-        });
-    }
+    } else {
+        adapter.locate(carrier, profile.locator_magic())?
+    };
+
     Ok(Located {
-        location: adapter.locate(carrier, profile.locator_magic())?,
-        stealth_header_magic: None,
+        location: confine_location(carrier, found)?,
+        stealth_header_magic,
     })
+}
+
+/// Reject a located envelope that cannot physically fit inside the carrier.
+///
+/// Adapters only *propose* a location: they find it by trusting a 24-byte
+/// trailer at the end of the file, whose `ube_offset` / `ube_total_size` are
+/// protected by CRC-32 and nothing else — both fields are trivially forgeable,
+/// and so is whatever container header precedes them. A forged
+/// `ube_total_size` used to survive as far as `vec![0u8; meta_len]`, where the
+/// metadata length could claim ~4 GiB: the allocation failure aborts the
+/// process, so a few hundred forged bytes were a password-free denial of
+/// service (review P0-2).
+///
+/// This is the single place that decides whether a carrier really contains the
+/// envelope an adapter claims, and it runs before any buffer is sized from the
+/// header. `<= file_len` (rather than `== file_len`) is what the strategies
+/// need: only the EOF-appending ones end at the file end, while chunk, box and
+/// padding strategies are followed by the rest of the container.
+fn confine_location(
+    carrier: &mut dyn SeekRead,
+    location: Option<(u64, u64, String)>,
+) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    let Some((ube_offset, ube_total_size, strategy)) = location else {
+        return Ok(None);
+    };
+    let file_len = carrier.seek(SeekFrom::End(0))?;
+    let min_envelope = (HEADER_SIZE + TRAILER_SIZE) as u64;
+    let end = ube_offset.checked_add(ube_total_size);
+    if ube_total_size < min_envelope || end.is_none_or(|end| end > file_len) {
+        // Not an error: a trailer-shaped tail that points outside the file is
+        // exactly what a carrier without a (readable) envelope looks like.
+        return Ok(None);
+    }
+    Ok(Some((ube_offset, ube_total_size, strategy)))
 }
 
 /// Version of the compact (binary) metadata block. The JSON form carries no
@@ -1005,7 +1036,11 @@ where
     let (payload_key, meta_key) = (secrets.payload_key, secrets.meta_key);
     // The mask only applies when the keying secret is the profile default
     // (no user password) or when stealth mode uses the user password. A
-    // non-stealth encrypted header is *not* masked: the AEAD authenticates it.
+    // non-stealth encrypted header stays readable on purpose: without that, a
+    // reader given no password could not tell an encrypted envelope from a
+    // corrupted file, and the password hint would be unreachable. Its integrity
+    // does not depend on the mask -- `EnvelopeHeader::auth_aad` binds the
+    // header prefix, the two lengths and the hint into every AEAD seal.
     let header_mask = if !has_custom_password || stealth {
         Some(secrets.header_mask)
     } else {
@@ -1101,6 +1136,9 @@ where
         )));
     }
     let offset_delta_u8 = offset_delta as u8;
+    let exact_meta_len_u32 = u32::try_from(exact_meta_len).map_err(|_| {
+        StrHideError::General("Metadata block exceeds the 4 GiB envelope field".into())
+    })?;
     let mut header = EnvelopeHeader {
         magic_header: header_magic,
         flags,
@@ -1111,14 +1149,28 @@ where
         orig_host_size,
         orig_host_sha256,
         hint_len: hint_bytes.len() as u32,
+        // The metadata ciphertext length is `plaintext + tag`, both known here,
+        // so the field can be filled *before* the seal and take part in the AAD.
+        meta_len: exact_meta_len_u32,
         ..Default::default()
     };
 
-    let fixed_header_aad = header.get_aad();
+    // The authenticated set: header prefix, the two length fields and the hint
+    // body. Everything in it is known before the first byte is sealed, and
+    // everything a reader must trust before it can check a tag is in it.
+    let aad = header.auth_aad(&hint_bytes);
 
     // Encrypt metadata
-    let meta_block = encrypt_metadata(&meta_raw, &meta_key, &base_nonce, &fixed_header_aad)?;
-    header.meta_len = meta_block.len() as u32;
+    let meta_block = encrypt_metadata(&meta_raw, &meta_key, &base_nonce, &aad)?;
+    // `meta_len` was sealed into the AAD above, so a length that disagreed with
+    // reality would emit an envelope whose header, metadata block and AAD no
+    // longer line up. Fail loudly instead of trusting the pre-computation.
+    if meta_block.len() as u64 != exact_meta_len {
+        return Err(StrHideError::General(format!(
+            "Internal metadata size mismatch: sealed {} bytes, header declares {exact_meta_len}",
+            meta_block.len()
+        )));
+    }
 
     // Assemble the UBE prefix first, then append the ciphertext directly into
     // the same buffer. The old path encrypted into a second full-size Vec and
@@ -1137,7 +1189,7 @@ where
         &mut tmp_ube,
         &payload_key,
         &base_nonce,
-        &fixed_header_aad,
+        &aad,
         local.chunk_size,
     )?;
     // Release the plaintext before the injector reads the envelope: only the
@@ -1513,7 +1565,9 @@ struct AuthenticatedEnvelope<'a> {
     header: EnvelopeHeader,
     meta_obj: CarrierMetadata,
     payload_key: [u8; 32],
-    fixed_header_aad: [u8; crate::structure::envelope::AAD_SIZE],
+    /// Authenticated associated data this envelope's seals were bound to:
+    /// header prefix + the two length fields + the hint body.
+    aad: Vec<u8>,
     total_payload_bytes: u64,
 }
 
@@ -1565,14 +1619,21 @@ fn open_and_authenticate_envelope<'a>(
     let header = EnvelopeHeader::unpack_with_secrets(&header_bytes, password, profile, &secrets)?;
     header.validate_against(ube_total_size)?;
 
-    let mut hint_str = None;
+    // `hint_len` is capped at `MAX_HINT_LEN` by `validate_against`, so this
+    // allocation is bounded. The raw bytes are kept: they are part of the AAD,
+    // while `hint_str` exists only for display.
+    let mut hint_bytes: Vec<u8> = Vec::new();
     if header.hint_len > 0 {
-        let mut hint_buf = vec![0u8; header.hint_len as usize];
-        ube_stream.read_exact(&mut hint_buf)?;
-        hint_str = Some(String::from_utf8_lossy(&hint_buf).to_string());
+        hint_bytes = vec![0u8; header.hint_len as usize];
+        ube_stream.read_exact(&mut hint_bytes)?;
     }
+    let hint_str = if hint_bytes.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&hint_bytes).to_string())
+    };
 
-    let fixed_header_aad = header.get_aad();
+    let aad = header.auth_aad(&hint_bytes);
 
     let (payload_key, meta_key) = if header.is_encrypted() {
         secrets.password.as_ref().map_or_else(
@@ -1595,17 +1656,14 @@ fn open_and_authenticate_envelope<'a>(
         }
     };
 
+    // `validate_against` capped `meta_len` at `MAX_META_LEN`, so the buffer a
+    // forged field can request is 256 KiB, not 4 GiB.
     let mut meta_bytes = vec![0u8; header.meta_len as usize];
     ube_stream.read_exact(&mut meta_bytes)?;
 
-    let meta_obj = decrypt_metadata(
-        &meta_bytes,
-        &meta_key,
-        &header.base_nonce,
-        &fixed_header_aad,
-    )
-    .map_err(|_| StrHideError::Password("Invalid password or corrupted metadata".into()))
-    .and_then(|plain| decode_metadata(&plain, header.is_compact_meta()))?;
+    let meta_obj = decrypt_metadata(&meta_bytes, &meta_key, &header.base_nonce, &aad)
+        .map_err(|_| StrHideError::Password("Invalid password or corrupted metadata".into()))
+        .and_then(|plain| decode_metadata(&plain, header.is_compact_meta()))?;
 
     let total_payload_bytes = ube_total_size
         - (HEADER_SIZE as u64
@@ -1618,7 +1676,7 @@ fn open_and_authenticate_envelope<'a>(
         header,
         meta_obj,
         payload_key,
-        fixed_header_aad,
+        aad,
         total_payload_bytes,
     })
 }
@@ -1640,7 +1698,7 @@ fn read_core(
         &mut decrypted_payload,
         &env.payload_key,
         &env.header.base_nonce,
-        &env.fixed_header_aad,
+        &env.aad,
         env.total_payload_bytes,
     )?;
 
@@ -1709,7 +1767,7 @@ fn verify_l3_stream(
         &mut env.ube_stream,
         &env.payload_key,
         &env.header.base_nonce,
-        &env.fixed_header_aad,
+        &env.aad,
         env.total_payload_bytes,
         env.header.is_compressed(),
         env.meta_obj.raw_size,
@@ -2200,24 +2258,26 @@ fn inspect_core(
     let header = EnvelopeHeader::unpack_with_profile(&header_bytes, password, profile)?;
     header.validate_against(ube_total_size)?;
 
-    let mut hint_str = None;
+    let mut hint_bytes: Vec<u8> = Vec::new();
     if header.hint_len > 0 {
-        let mut hint_buf = vec![0u8; header.hint_len as usize];
-        ube_stream.read_exact(&mut hint_buf)?;
-        hint_str = Some(String::from_utf8_lossy(&hint_buf).to_string());
+        hint_bytes = vec![0u8; header.hint_len as usize];
+        ube_stream.read_exact(&mut hint_bytes)?;
     }
+    let hint_str = if hint_bytes.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&hint_bytes).to_string())
+    };
+    // The same AAD the writer sealed: header prefix + lengths + hint.
+    let aad = header.auth_aad(&hint_bytes);
 
     let mut meta_val = None;
     if !header.is_encrypted() {
         let mut meta_bytes = vec![0u8; header.meta_len as usize];
         if ube_stream.read_exact(&mut meta_bytes).is_ok() {
             let decoded = if let Ok((_, meta_key)) = derive_keys(profile.secret(), &header.salt)
-                && let Ok(dec) = decrypt_metadata(
-                    &meta_bytes,
-                    &meta_key,
-                    &header.base_nonce,
-                    &header.get_aad(),
-                ) {
+                && let Ok(dec) = decrypt_metadata(&meta_bytes, &meta_key, &header.base_nonce, &aad)
+            {
                 decode_metadata(&dec, header.is_compact_meta()).ok()
             } else {
                 None
@@ -2231,12 +2291,7 @@ fn inspect_core(
         if ube_stream.read_exact(&mut meta_bytes).is_ok()
             && let Ok((_, meta_key)) = derive_keys(pwd, &header.salt)
         {
-            if let Ok(dec) = decrypt_metadata(
-                &meta_bytes,
-                &meta_key,
-                &header.base_nonce,
-                &header.get_aad(),
-            ) {
+            if let Ok(dec) = decrypt_metadata(&meta_bytes, &meta_key, &header.base_nonce, &aad) {
                 if let Ok(meta_obj) = decode_metadata(&dec, header.is_compact_meta()) {
                     meta_val = Some(MetadataInspection::Decrypted(meta_obj));
                 }
@@ -2334,10 +2389,17 @@ pub fn verify_carrier_bytes(
 ///
 /// Level 2 used to compare the trailer's `ube_offset`/`ube_total_size` with the
 /// values `locate_envelope` had just read out of that same trailer — true by
-/// construction. The header's own coordinates (`inject_offset` masked with a
-/// public key, `offset_delta` inside the AAD) were never checked against
+/// construction. The header's own coordinates were never checked against
 /// anything, so a carrier whose header disagreed with its body passed `verify`
 /// and only failed later, during `remove` (review R2 P1-9).
+///
+/// These four fields are the only header bytes the AEAD cannot cover: they are
+/// filled in after the injector has run, i.e. after the metadata block and every
+/// payload chunk were sealed (see `EnvelopeHeader`). Nothing here is trusted on
+/// its own, though: `offset_delta` *is* inside the AAD, the envelope end is
+/// pinned to the physical file by `confine_location`, and a wrong answer here
+/// makes `remove` reproduce a carrier whose SHA-256 mismatches the
+/// authenticated `orig_host_sha256`.
 ///
 /// Relationships used, all of which hold for every registered strategy:
 /// the envelope starts `offset_delta` bytes after the injection point, the
@@ -2494,8 +2556,10 @@ fn verify_core(
                             // very record, so comparing them with themselves
                             // proved nothing (review R2 P1-9). What the trailer
                             // still contributes is its magic + CRC32 check; the
-                            // coordinate check now happens above, against the
-                            // header's authenticated `inject_offset`/`offset_delta`.
+                            // coordinate check happens above, where the
+                            // authenticated `offset_delta` anchors the envelope
+                            // start and `confine_location` anchored the end to
+                            // the physical file.
                             debug_assert_eq!(trailer.ube_offset, ube_offset);
                             debug_assert_eq!(trailer.ube_total_size, ube_total_size);
                             let _ = &trailer;

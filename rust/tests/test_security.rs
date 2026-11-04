@@ -3,11 +3,14 @@
 //! Submodules:
 //! - `rejection`: carrier safety checks and refusal of signed binaries, JARs, and APKs.
 //! - `stealth`: uniform encryption, magic masking, and plausible deniability.
+//! - `forge`: forged trailers / header lengths must never drive allocations.
 //! - `password_hint`: security boundaries and mutual exclusion of password hints.
 
 #[path = "common/mod.rs"]
 pub mod common;
 
+#[path = "test_security/forge.rs"]
+mod forge;
 #[path = "test_security/password_hint.rs"]
 mod password_hint;
 #[path = "test_security/rejection.rs"]

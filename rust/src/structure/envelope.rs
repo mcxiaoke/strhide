@@ -81,9 +81,23 @@ pub const FLAG_COMPACT_META: u8 = 0x20;
 pub const MAX_OFFSET_DELTA: u8 = 64;
 
 pub const HEADER_SIZE: usize = 112;
+/// Bytes of the header that are known before the envelope is sealed.
+///
+/// This prefix is the fixed part of the AEAD associated data; the variable
+/// lengths and the hint body are appended by [`EnvelopeHeader::auth_aad`].
 pub const AAD_SIZE: usize = 80;
 pub const TRAILER_SIZE: usize = 24;
 pub const MAX_HINT_LEN: u32 = 1024;
+
+/// Largest metadata block a reader will accept.
+///
+/// The compact layout is `version(1) + name_len(2) + name + varint raw_size +
+/// digest(32) + varint created_at`, so the only unbounded part is the filename,
+/// which the writer caps at `u16::MAX` bytes. 256 KiB leaves room for that plus
+/// the AEAD tag many times over and turns an attacker-controlled `meta_len` (a
+/// field a reader must size a buffer from *before* the tag can be checked) into
+/// a field-range error instead of a multi-gigabyte allocation.
+pub const MAX_META_LEN: u32 = 256 * 1024;
 
 /// Smallest envelope the writer can currently produce with compact metadata,
 /// an empty filename and a 1-byte payload:
@@ -97,12 +111,20 @@ pub const MIN_UBE_PLAIN: u32 = MIN_UBE_ENCRYPTED;
 
 /// Fixed 112-byte envelope header, serialized little-endian.
 ///
-/// The first 80 bytes are exactly the AAD ([`Self::get_aad`]) bound into the
-/// AEAD seals of both the metadata block and every payload chunk — tampering
-/// with any of them breaks authentication. The trailing 32 bytes
-/// (`inject_offset` / `inject_size` / `patch_offset` / `orig_patch_val` /
-/// `meta_len` / `hint_len`) are stored after injection because the injector
-/// does not know the final offset until it has placed the envelope.
+/// What is authenticated, and what is not:
+///
+/// * The first 80 bytes are the fixed AAD prefix ([`Self::get_aad`]).
+/// * `meta_len` / `hint_len` (offsets 104..112) and the hint body are appended
+///   by [`Self::auth_aad`], so they are authenticated too even though they sit
+///   outside the 80-byte prefix on the wire.
+/// * The four post-injection coordinates (`inject_offset` / `inject_size` /
+///   `patch_offset` / `orig_patch_val`) are **not** authenticated: they do not
+///   exist until the injector has placed the envelope, which happens after the
+///   AEAD seals. They are validated structurally instead — bounded by the
+///   located envelope and the physical file length
+///   (`envelope_coordinates_agree`, `locate_envelope_with_magic`), and any
+///   forgery that changes where bytes are cut or restored makes `remove`
+///   reproduce a host whose SHA-256 (authenticated) no longer matches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvelopeHeader {
     pub magic_header: [u8; 8],
@@ -216,6 +238,12 @@ impl EnvelopeHeader {
                 self.hint_len, MAX_HINT_LEN
             )));
         }
+        if self.meta_len > MAX_META_LEN {
+            return Err(StrHideError::CorruptedData(format!(
+                "Metadata block length {} exceeds maximum {}",
+                self.meta_len, MAX_META_LEN
+            )));
+        }
         let fixed = HEADER_SIZE as u64 + 24; // header + trailer
         let variable = self.hint_len as u64 + self.meta_len as u64;
         if variable + fixed > ube_total_size {
@@ -235,8 +263,9 @@ impl EnvelopeHeader {
                 self.strategy_id
             )));
         }
-        // Injection coordinates are masked with the public key rather than
-        // covered by the AAD (see WIRE_SPEC §5), so validate their shape:
+        // The four post-injection coordinates cannot be covered by the AAD
+        // (they do not exist until the injector has placed the envelope, which
+        // runs after the seals), so validate their shape instead:
         // a non-zero inject_size can never be smaller than one envelope, and
         // the end of the injected region must not overflow.
         if self.inject_size != 0
@@ -269,7 +298,10 @@ impl EnvelopeHeader {
         Ok(())
     }
 
-    /// Return the immutable 80-byte AAD binding header fields for AEAD.
+    /// Return the immutable 80-byte AAD prefix binding header fields for AEAD.
+    ///
+    /// This is the fixed part only; every seal uses [`Self::auth_aad`], which
+    /// extends it with the two length fields and the hint body.
     pub fn get_aad(&self) -> [u8; AAD_SIZE] {
         let mut aad = [0u8; AAD_SIZE];
         aad[0..8].copy_from_slice(&self.magic_header);
@@ -281,6 +313,37 @@ impl EnvelopeHeader {
         aad[28..40].copy_from_slice(&self.base_nonce);
         aad[40..48].copy_from_slice(&self.orig_host_size.to_le_bytes());
         aad[48..80].copy_from_slice(&self.orig_host_sha256);
+        aad
+    }
+
+    /// Associated data bound into the metadata seal and every payload chunk.
+    ///
+    /// ```text
+    /// header[0..80] | meta_len (4, LE) | hint_len (4, LE) | hint bytes
+    /// ```
+    ///
+    /// The two lengths are the fields a reader must trust *before* it can check
+    /// any tag: `meta_len` sizes a buffer and `hint_len` decides where the
+    /// metadata block starts. Leaving them outside the AAD let a forged carrier
+    /// drive a `vec![0u8; meta_len]` allocation and shift the metadata split
+    /// while every tag still verified (review P0-2).
+    ///
+    /// The hint is plaintext by design — it has to be readable without the
+    /// password — so binding its bytes here is what makes a tampered hint break
+    /// authentication instead of being silently displayed. Both ends can build
+    /// this value: the writer knows `meta_len` exactly before sealing (`compact
+    /// metadata + tag`), the reader reads it back from the header, and both
+    /// hold the same hint bytes.
+    ///
+    /// The four post-injection coordinates stay out of the AAD by necessity
+    /// (they are only known after `inject`); see the type-level docs for how
+    /// they are validated instead.
+    pub fn auth_aad(&self, hint: &[u8]) -> Vec<u8> {
+        let mut aad = Vec::with_capacity(AAD_SIZE + 8 + hint.len());
+        aad.extend_from_slice(&self.get_aad());
+        aad.extend_from_slice(&self.meta_len.to_le_bytes());
+        aad.extend_from_slice(&self.hint_len.to_le_bytes());
+        aad.extend_from_slice(hint);
         aad
     }
 
@@ -300,8 +363,13 @@ impl EnvelopeHeader {
     /// Pack fixed header into 112 bytes with masking applied from a mask the
     /// caller already derived.
     ///
-    /// `None` means "no masking" — the encrypted non-stealth case, where the
-    /// AEAD authenticates the header instead.
+    /// `None` means "no masking", which is the encrypted non-stealth case. That
+    /// header is deliberately left readable: a reader must recognise "this is a
+    /// password-protected envelope" *without* the password, otherwise `read`
+    /// could not answer `PasswordWithHint` (and the hint itself would be
+    /// unreachable). Its integrity comes from [`Self::auth_aad`], not from the
+    /// mask — a mask derived from a secret the reader does not have cannot be a
+    /// integrity check anyway.
     pub fn pack_masked(&self, mask: Option<&[u8; 76]>) -> [u8; HEADER_SIZE] {
         let mut buf = self.pack();
         if let Some(mask) = mask {
@@ -423,8 +491,10 @@ impl EnvelopeHeader {
     ///    `offset_delta` bytes form a plausible header. This gate is what makes
     ///    a wrong profile fail deterministically instead of yielding garbage
     ///    fields.
-    /// 3. **Bare header**: an already-plain header (encrypted mode is *not*
-    ///    masked at all — the AEAD authenticates it).
+    /// 3. **Bare header**: an already-plain header. This is the encrypted
+    ///    non-stealth case, whose header is intentionally readable without the
+    ///    password so that `read` can report "password required" (plus the
+    ///    hint) instead of "corrupted".
     pub fn unpack_with_profile(
         data: &[u8],
         password: Option<&str>,
@@ -512,8 +582,9 @@ impl EnvelopeHeader {
             }
         }
 
-        // 3. Bare header: an already-plain header (encrypted mode is *not*
-        //    masked at all — the AEAD authenticates it).
+        // 3. Bare header: an already-plain header. This is the encrypted
+        //    non-stealth case, kept readable on purpose so a reader without the
+        //    password can still recognise it and answer `PasswordWithHint`.
         Self::unpack(data)
     }
 }

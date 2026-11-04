@@ -46,7 +46,12 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::errors::StrHideError;
 
-/// Associated data size for the envelope fixed header.
+/// Size of the fixed AAD prefix the structure envelope binds into every seal.
+///
+/// The associated data itself is variable length — the structure envelope
+/// appends its two length fields and the hint body, the content domain builds
+/// its own V4 AAD — so the sealing functions take a plain slice. This constant
+/// only describes the fixed prefix, and is what the tests below exercise.
 pub const AAD_SIZE: usize = 80;
 
 /// Length of an AES-GCM authentication tag.
@@ -326,13 +331,17 @@ pub fn make_meta_nonce(base_nonce: &[u8; 12]) -> [u8; 12] {
 }
 
 /// Seal the (compact or JSON) metadata block with the metadata subkey.
-/// The 80-byte header fields are bound as AAD so any later tamper of the
-/// header that survives this decrypt also breaks the metadata tag.
+///
+/// `aad` is the caller's associated data. The structure domain passes
+/// `EnvelopeHeader::auth_aad` (header prefix + lengths + hint), so any later
+/// tamper of those fields breaks this tag; the content domain passes its own
+/// V4 AAD. The length is deliberately not fixed here: the authenticated set is
+/// whatever the envelope layout says it is.
 pub fn encrypt_metadata(
     meta_bytes: &[u8],
     meta_key: &[u8; 32],
     base_nonce: &[u8; 12],
-    aad: &[u8; AAD_SIZE],
+    aad: &[u8],
 ) -> Result<Vec<u8>, StrHideError> {
     let nonce = make_meta_nonce(base_nonce);
     let cipher = Aes256Gcm::new_from_slice(meta_key)
@@ -353,7 +362,7 @@ pub fn decrypt_metadata(
     meta_ciphertext: &[u8],
     meta_key: &[u8; 32],
     base_nonce: &[u8; 12],
-    aad: &[u8; AAD_SIZE],
+    aad: &[u8],
 ) -> Result<Vec<u8>, StrHideError> {
     let nonce = make_meta_nonce(base_nonce);
     let cipher = Aes256Gcm::new_from_slice(meta_key)
@@ -383,7 +392,7 @@ pub fn encrypt_stream_to_chunks<R: Read, W: Write>(
     writer: &mut W,
     payload_key: &[u8; 32],
     base_nonce: &[u8; 12],
-    fixed_header_aad: &[u8; AAD_SIZE],
+    fixed_header_aad: &[u8],
     chunk_size: usize,
 ) -> Result<u64, StrHideError> {
     if chunk_size == 0 || chunk_size > MAX_CHUNK_SIZE {
@@ -416,7 +425,7 @@ pub fn encrypt_stream_to_chunks<R: Read, W: Write>(
     if current_chunk.is_empty() {
         // Empty stream, write a single empty final chunk
         let chunk_nonce = make_chunk_nonce(base_nonce, 0);
-        let mut chunk_aad = Vec::with_capacity(AAD_SIZE + 9);
+        let mut chunk_aad = Vec::with_capacity(fixed_header_aad.len() + 9);
         chunk_aad.extend_from_slice(fixed_header_aad);
         chunk_aad.extend_from_slice(&(0u64).to_le_bytes());
         chunk_aad.push(1u8); // is_last = 1
@@ -454,7 +463,7 @@ pub fn encrypt_stream_to_chunks<R: Read, W: Write>(
         let is_last = next_chunk.is_empty();
         let chunk_nonce = make_chunk_nonce(base_nonce, chunk_index);
 
-        let mut chunk_aad = Vec::with_capacity(AAD_SIZE + 9);
+        let mut chunk_aad = Vec::with_capacity(fixed_header_aad.len() + 9);
         chunk_aad.extend_from_slice(fixed_header_aad);
         chunk_aad.extend_from_slice(&(chunk_index as u64).to_le_bytes());
         chunk_aad.push(if is_last { 1u8 } else { 0u8 });
@@ -503,7 +512,7 @@ pub fn decrypt_stream_from_chunks<R: Read, W: Write>(
     writer: &mut W,
     payload_key: &[u8; 32],
     base_nonce: &[u8; 12],
-    fixed_header_aad: &[u8; AAD_SIZE],
+    fixed_header_aad: &[u8],
     total_payload_bytes: u64,
 ) -> Result<u64, StrHideError> {
     let cipher = Aes256Gcm::new_from_slice(payload_key)
@@ -548,7 +557,7 @@ pub fn decrypt_stream_from_chunks<R: Read, W: Write>(
         }
 
         let chunk_nonce = make_chunk_nonce(base_nonce, chunk_index);
-        let mut chunk_aad = Vec::with_capacity(AAD_SIZE + 9);
+        let mut chunk_aad = Vec::with_capacity(fixed_header_aad.len() + 9);
         chunk_aad.extend_from_slice(fixed_header_aad);
         chunk_aad.extend_from_slice(&(chunk_index as u64).to_le_bytes());
         chunk_aad.push(if is_last { 1u8 } else { 0u8 });
@@ -713,7 +722,7 @@ pub fn verify_payload_stream<R: Read>(
     reader: &mut R,
     payload_key: &[u8; 32],
     base_nonce: &[u8; 12],
-    fixed_header_aad: &[u8; AAD_SIZE],
+    fixed_header_aad: &[u8],
     total_payload_bytes: u64,
     is_compressed: bool,
     expected_raw_size: u64,

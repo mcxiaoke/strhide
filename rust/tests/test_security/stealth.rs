@@ -189,10 +189,13 @@ fn test_pre_v2_stealth_unmasked_envelope_is_rejected() {
         orig_host_sha256: host_sha,
         ..Default::default()
     };
-    let aad = header.get_aad();
+    // `meta_len` is `plaintext + tag` and has to be in the AAD, so it is filled
+    // before the seal (the writer does the same).
+    header.meta_len = (meta_raw.len() + strhide::crypto::AEAD_TAG_LEN) as u32;
+    let aad = header.auth_aad(&[]);
 
     let meta_cipher = encrypt_metadata(&meta_raw, &meta_key, &base_nonce, &aad).unwrap();
-    header.meta_len = meta_cipher.len() as u32;
+    assert_eq!(meta_cipher.len(), header.meta_len as usize);
 
     let secret_payload = b"legacy payload";
     let mut payload_cipher = Vec::new();

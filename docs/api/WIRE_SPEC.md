@@ -48,7 +48,7 @@ strhide 有两个相互独立的隐写域，各自有不同的字节布局：
 | 元数据 | 文件名、原始大小、原始 SHA-256、创建时间（独立 AEAD 块） | 无文件名/时间戳；仅密文内 4B 长度 + 1B 标志 |
 | 载荷密封 | 分块：每块 `u32 LE` 长度前缀 + 密文，chunk AAD 含 index/is_last | 一次性整体密封，无分块 |
 | 字节序 | 小端 | 外层无整数；密文内部长度为**大端** |
-| AEAD AAD | 前 80B header；分块再追加 `chunk_index/is_last` | `salt ‖ nonce`（28B） |
+| AEAD AAD | header 前 80B + `meta_len`/`hint_len` + hint 正文；分块再追加 `chunk_index/is_last` | `salt ‖ nonce`（28B） |
 | 无密码默认密钥 | `BUILTIN_DEFAULT_KEY` | `PUBLIC_DEFAULT_SECRET` |
 | HKDF 子密钥标签 | `strhide-payload`、`strhide-metadata`（掩码：`strhide-header-mask-v1`、`strhide-pe-channel-mask-v1`） | `strhide-stego-enc-v1`、`strhide-stego-perm-v1`、`strhide-stego-hpos-v2`、`strhide-stc-trellis-v1` |
 | 额外派生 | stealth 魔数与 76B/10B 字段掩码 | header 槽位置换种子（无 salt）、STC 网格种子 |
@@ -104,7 +104,7 @@ ube_total_size = HEADER_SIZE(112)
 
 ## 3. Envelope Header（112 字节）
 
-定长 112 字节，小端序列化。前 80 字节即 AAD（§5）；后 32 字节在注入完成后才填入（注入器在放置信封前不知道最终偏移）。
+定长 112 字节，小端序列化。前 80 字节是 AAD 的定长前缀（§5），`meta_len` / `hint_len` 与提示正文另行追加进 AAD；只有后 32 字节里的四个**注入后坐标**（`inject_offset` / `inject_size` / `patch_offset` / `orig_patch_val`）不在 AAD 内 —— 它们在密封之后才由注入器写入，只能做结构校验（§3.4）。
 
 | 相对偏移 | 长度 | 字段 | 类型 | 说明 |
 |---|---|---|---|---|
@@ -138,6 +138,7 @@ ube_total_size = HEADER_SIZE(112)
 
 - `version` 必须等于 `CURRENT_VERSION`；
 - `hint_len` 不得超过 `MAX_HINT_LEN = 1024`；
+- `meta_len` 不得超过 `MAX_META_LEN = 256 KiB`（元数据块最大是"文件名 + 定长尾巴"，这个上限让读取侧不必按不可信字段申请大缓冲）；
 - `hint_len + meta_len + (112 + 24)` 不得超过 `ube_total_size`；
 - `offset_delta` 不得超过 `MAX_OFFSET_DELTA = 64`；
 - `patch_offset` 为 0（无补丁）或 ≥ 4（补丁覆盖一个 4 字节字段）。
@@ -155,6 +156,20 @@ inject_offset + inject_size <= 文件长度
 ```
 
 散落策略（`pe_codebits`）没有连续注入区域，其 `inject_offset` / `inject_size` 按定义为 0，上述三条不适用（`inject_size == 0` 即跳过）。
+
+### 3.4 未认证字段与物理边界
+
+`inject_offset` / `inject_size` / `patch_offset` / `orig_patch_val` 是 header 中唯一不被 AEAD 覆盖的部分：它们在注入完成后才写入，而注入发生在元数据块与全部分块密封之后。因此这四个字段**不承担任何安全判断**，改由三条结构约束兜底：
+
+1. **物理包含**：`locate` 只提出候选位置；`locate_envelope` 统一校验
+   `ube_total_size >= 112 + 24` 且 `ube_offset + ube_total_size <= 文件长度`，
+   不满足即视为"无信封"。追加型策略（`eof` / `pe_overlay` / `ebml_void`）额外要求
+   `ube_offset + ube_total_size == 文件长度`。
+2. **坐标交叉**：`inject_offset + offset_delta == trailer.ube_offset`（`offset_delta` 在 AAD 内）。
+3. **还原校验**：`remove` 会把还原出的载体重新哈希，与 AAD 内的 `orig_host_sha256` 比对，
+   不一致返回 `RestoreMismatch`，因此篡改上述任一字段都无法产出"看起来成功"的错误载体。
+
+任何绕过上述约束的伪造都只能得到 `NoHiddenData`，不会驱动按不可信长度分配缓冲区。
 
 ---
 
@@ -181,14 +196,20 @@ inject_offset + inject_size <= 文件长度
 
 ## 5. AAD（认证附加数据）
 
-header 的**前 80 字节**构成定长 AAD（`AAD_SIZE = 80`），被绑定进元数据块与每个载荷分块的 AEAD 密封。篡改其中任何字节都会使认证失败。
-
-AAD 即以下字段的拼接（与 §3 表中偏移 0..80 一致）：
+元数据块与每个载荷分块的 AEAD 使用**变长 AAD**（`EnvelopeHeader::auth_aad`）：
 
 ```text
 magic_header (8) | version (1) | flags (1) | strategy_id (1) | offset_delta (1)
-| salt (16) | base_nonce (12) | orig_host_size (8) | orig_host_sha256 (32)
+| salt (16) | base_nonce (12) | orig_host_size (8) | orig_host_sha256 (32)   // 前 80 字节
+| meta_len (4, LE) | hint_len (4, LE) | hint bytes (hint_len)
 ```
+
+- 前 80 字节是定长前缀（`AAD_SIZE = 80`）。
+- `meta_len` / `hint_len` 是读取端在验证任何 tag **之前**就必须信任的两个长度：前者决定元数据缓冲大小，后者决定元数据块从哪里开始。把它们纳入 AAD 后，伪造的长度只会导致认证失败，而不再能驱动分配或挪动切割点。
+- 提示正文（`hint`）是明文（必须无密码可读），纳入 AAD 后，篡改提示会同时破坏元数据块与所有载荷分块的 tag。
+- 四个注入后坐标不在 AAD 内，见 §3.4。
+
+分块 AAD 在此基础上再追加 `chunk_index` / `is_last`（§8.2）。
 
 ---
 
@@ -230,7 +251,7 @@ magic_header (8) | version (1) | flags (1) | strategy_id (1) | offset_delta (1)
 
 - 密钥：`meta_key`（§10）。
 - Nonce：`make_meta_nonce(base_nonce)` —— 与载荷分块 nonce 域分离（§10.2）。
-- AAD：§5 的 80 字节 header AAD。
+- AAD：§5 的变长 AAD（80 字节前缀 + `meta_len` + `hint_len` + hint 正文）。
 - 线格式长度：`meta_len = len(compact 明文) + 16`（tag）。
 
 ### 7.4 最小明文尺寸
@@ -375,7 +396,7 @@ header bytes 40..112 XOR mask[4..76]   // orig_host_size 起的 72 字节
 ```
 
 - `salt`（12..28）与 `base_nonce`（28..40）不掩码（本就是随机值，且是派生输入）。
-- **非 stealth 的无密码信封**也采用相同掩码机制，但掩码密钥为 `Profile::secret()`；`FLAG_ENCRYPTED` 信封不掩码（由 AEAD 认证）。
+- **非 stealth 的无密码信封**也采用相同掩码机制，但掩码密钥为 `Profile::secret()`；`FLAG_ENCRYPTED` 信封**不掩码** —— 读侧必须能在没有密码时识别出"这是一个需要密码的信封"，才能给出带提示的 `PasswordWithHint`，否则提示本身永远读不到。这类 header 的完整性由 AAD（§5）保证，与掩码无关。
 
 ### 11.3 Trailer CRC 掩码
 
@@ -393,7 +414,7 @@ trailer_crc32(stealth) = raw_crc XOR mask
 
 1. **密码 + stealth**：若密码派生的 header 魔数匹配（先认证密码），用密码去掩码，要求 `version = 0x02` 且 `FLAG_STEALTH` 置位；
 2. **Profile 默认密钥去掩码**：要求 `version = 0x02`、无 `FLAG_ENCRYPTED`、`strategy_id ≤ MAX_KNOWN_STRATEGY_ID`（当前 13）、`offset_delta ≤ 64`；
-3. **裸 header**：直接解析（`FLAG_ENCRYPTED` 信封不掩码）。
+3. **裸 header**：直接解析（`FLAG_ENCRYPTED` 信封不掩码，理由见 §11.3）。
 
 ---
 
@@ -664,6 +685,7 @@ max_payload = message_bits(total_slots - (524 + ext_slots)) / 8 - 22
 | `AAD_SIZE` | `80` |
 | `TRAILER_SIZE` | `24` |
 | `MAX_HINT_LEN` | `1024` |
+| `MAX_META_LEN` | `262144`（256 KiB） |
 | `FLAG_ENCRYPTED` / `FLAG_COMPRESSED` / `FLAG_IS_FILE` | `0x01` / `0x02` / `0x04` |
 | `FLAG_STEALTH` / `FLAG_HAS_HINT` / `FLAG_COMPACT_META` | `0x08` / `0x10` / `0x20` |
 | `STANDARD_HEADER_MAGIC` | `b7 54 2c 82 7e 31 1d 6e` |

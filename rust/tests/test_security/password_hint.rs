@@ -237,3 +237,89 @@ fn test_hint_size_limit() {
         other => panic!("expected size limit error, got {other:?}"),
     }
 }
+
+/// P0-3: the hint is plaintext (it has to be readable without the password),
+/// so it is bound into the AEAD instead of being trusted as-is. Its bytes are
+/// part of `EnvelopeHeader::auth_aad`, which means an attacker who rewrites the
+/// hint -- the classic social-engineering / terminal-escape vector -- breaks
+/// both the metadata seal and every payload chunk seal.
+#[test]
+fn tampered_hint_breaks_authentication() {
+    use strhide::structure::envelope::{EnvelopeTrailer, HEADER_SIZE, TRAILER_SIZE};
+
+    let dir = scratch("hint_tamper");
+    let carrier = dir.join("c.png");
+    let stego = dir.join("s.png");
+    fs::write(&carrier, make_dummy_png()).unwrap();
+    write_carrier(
+        &carrier,
+        PayloadSource::Text("hint-bound payload"),
+        &WriteOptions {
+            output_path: Some(&stego),
+            password: Some("hint-pw"),
+            password_hint: Some("remember the cat"),
+            strategy: "eof",
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // Flip one byte of the hint body, keeping everything else (offsets, lengths,
+    // trailer) untouched -- the tamper the AAD extension has to catch.
+    let mut data = fs::read(&stego).unwrap();
+    let n = data.len();
+    let trailer = EnvelopeTrailer::unpack(&data[n - TRAILER_SIZE..], None).unwrap();
+    let hint_pos = trailer.ube_offset as usize + HEADER_SIZE + 2;
+    data[hint_pos] ^= 0x01;
+    fs::write(&stego, data).unwrap();
+
+    let err = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: Some(&dir.join("out.bin")),
+            password: Some("hint-pw"),
+            ..Default::default()
+        },
+    )
+    .expect_err("a tampered hint must not decrypt");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("password") || msg.contains("corrupt"),
+        "unexpected error: {msg}"
+    );
+
+    let verified = strhide::structure::verify_carrier(&stego, Some("hint-pw")).unwrap();
+    assert!(
+        !verified.level3_crypto.ok,
+        "verify accepted a tampered hint: {}",
+        verified.level3_crypto.detail
+    );
+
+    // The untampered carrier still works: the change is about tamper evidence,
+    // not about rejecting hints in general.
+    let clean = dir.join("clean.png");
+    write_carrier(
+        &carrier,
+        PayloadSource::Text("hint-bound payload"),
+        &WriteOptions {
+            output_path: Some(&clean),
+            password: Some("hint-pw"),
+            password_hint: Some("remember the cat"),
+            strategy: "eof",
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let res = read_carrier(
+        &clean,
+        &ReadOptions {
+            output_path: Some(&dir.join("clean.out")),
+            password: Some("hint-pw"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res.data.as_slice(), b"hint-bound payload");
+}

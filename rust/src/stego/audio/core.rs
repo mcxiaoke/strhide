@@ -122,8 +122,10 @@ pub(crate) trait SlotCarrier {
     ///
     /// WAV materialises every sample, so the two agree. FLAC materialises only
     /// the slots a given payload needs, but its capacity report must describe
-    /// the whole file, so it overrides this with the number of eligible
-    /// residuals plus the fixed header slots.
+    /// the whole file, so it overrides this with the count of residuals that can
+    /// currently move plus the fixed header slots. Reporting only: the slot
+    /// *plan* thins over FLAC's structural pool instead, which is the count both
+    /// ends derive (see `flac::FlacAnalysis`).
     fn capacity_slots(&self) -> usize {
         self.slot_count()
     }

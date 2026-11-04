@@ -218,11 +218,13 @@ fn path_traversal_sanitized() {
         created_at: 1_700_000_000,
     };
     let evil_compact = evil_meta.encode_compact().unwrap();
+    let hint_start = offset as usize + strhide::structure::envelope::HEADER_SIZE;
+    let hint = &data[hint_start..hint_start + header.hint_len as usize];
     let enc_meta = strhide::crypto::encrypt_metadata(
         &evil_compact,
         &meta_key,
         &header.base_nonce,
-        &header.get_aad(),
+        &header.auth_aad(hint),
     )
     .unwrap();
     assert_eq!(enc_meta.len(), header.meta_len as usize);

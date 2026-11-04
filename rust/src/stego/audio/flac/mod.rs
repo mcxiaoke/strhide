@@ -190,17 +190,25 @@ pub(crate) fn parse_stream_info(bytes: &[u8]) -> Result<StreamInfo, StrHideError
 }
 
 /// Outcome of a validating decode pass.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct FlacAnalysis {
     /// MD5 of the decoded PCM, to be compared with `STREAMINFO`.
     pub pcm_md5: [u8; 16],
     /// Body candidates: residuals with a full compensation chain.
-    pub slots: usize,
-    /// Of those, how many can actually move in at least one direction.
     ///
-    /// Only the capacity report uses this -- it must never take part in slot
-    /// selection, because the compensation chain is computed from residuals
-    /// that the embedding itself rewrites, and the reader derives the plan from
-    /// the stego file alone.
+    /// This is a **structural** count: it depends only on the frame's subframe
+    /// types, predictor orders and Rice parameters, all of which a legal move
+    /// preserves. Both ends therefore derive the same number, which is what
+    /// makes it the only admissible denominator for slot selection.
+    pub slots: usize,
+    /// Of those, how many can actually move in at least one direction *right
+    /// now*.
+    ///
+    /// Value-dependent by definition: a move rewrites residual values, and the
+    /// bucket/compensation tests that decide legality read those values. Both
+    /// the cover and its stego can therefore report different numbers. Only the
+    /// capacity report uses this -- it must never take part in slot selection,
+    /// because the plan has to be derived from the stego file alone.
     pub usable: usize,
     /// Subframe tails, the header's pool.
     pub tails: usize,
@@ -311,10 +319,9 @@ pub(crate) struct FlacCarrier<'a> {
     modified: usize,
     /// Total residuals written to the stream (data slots + non-zero compensation taps).
     residuals_written: usize,
-    /// Eligible residuals in the whole file, for the capacity report.
-    #[allow(dead_code)]
-    total_eligible: usize,
-    /// Of those, how many can move in at least one direction. Reporting only.
+    /// Of the structural pool, how many can move in at least one direction.
+    /// Reporting only -- selection never reads it (`analysis.slots` is the
+    /// cross-end denominator).
     total_usable: usize,
     /// Finalized PCM MD5 computed during refresh_checksums.
     pcm_md5: Option<[u8; 16]>,
@@ -372,6 +379,12 @@ impl<'a> FlacCarrier<'a> {
         //     slot cannot be moved;
         //   * everything else feeds the body, where the trellis can route
         //     around a slot whose compensation chain does not fit.
+        //
+        // The body's denominator is `analysis.slots`, never `analysis.usable`:
+        // the latter counts slots that are legal *for the current residual
+        // values*, and embedding rewrites exactly those values. A reader that
+        // thinned over a different denominator would address a different set of
+        // codewords and the payload would never decrypt (review P0-1).
         let total = analysis.slots;
         let total_usable = analysis.usable;
         let tail_total = analysis.tails;
@@ -392,10 +405,10 @@ impl<'a> FlacCarrier<'a> {
                 header = header_slots
             )));
         }
-        if total_usable < body_slots {
+        if total < body_slots {
             return Err(StrHideError::General(format!(
-                "FLAC carrier has {} usable residual slots, {body_slots} required",
-                total_usable
+                "FLAC carrier has {} residual slots, {body_slots} required",
+                total
             )));
         }
 
@@ -453,15 +466,15 @@ impl<'a> FlacCarrier<'a> {
             }
             if body_slots > 0 {
                 for slot in parsed.slots.iter() {
-                    // S1: Only sample over genuinely movable slots. Residuals whose
-                    // compensation chains cannot absorb movement (Move::None) are skipped
-                    // so that zero dead slots enter the STC trellis.
-                    if matches!(slot_legality_raw(slot, &parsed), Move::None) {
-                        continue;
-                    }
+                    // Membership is structural: every residual with a full
+                    // compensation chain is in the pool, movable or not. A
+                    // residual that cannot move today keeps its parity and the
+                    // trellis routes around it (`move_legality` reports
+                    // `Move::None`); dropping it here would renumber every
+                    // following plan slot differently on the two ends.
                     let index = body_seen;
                     body_seen += 1;
-                    if thin_pick(index, total_usable, body_slots, body_phase)
+                    if thin_pick(index, total, body_slots, body_phase)
                         && let Some(entry) = make_slot(slot, &parsed, &scale)
                     {
                         body_picks.push(entry);
@@ -512,8 +525,7 @@ impl<'a> FlacCarrier<'a> {
             slots,
             modified: 0,
             residuals_written: 0,
-            total_eligible: total,
-            total_usable: analysis.usable,
+            total_usable,
             pcm_md5: None,
         })
     }
@@ -653,6 +665,10 @@ impl SlotCarrier for FlacCarrier<'_> {
         self.slots.len()
     }
 
+    /// Capacity stays priced on the *movable* count: a report must not promise
+    /// payloads the trellis cannot encode. The plan itself thins over the
+    /// structural pool, so the two numbers serve different purposes and neither
+    /// one feeds slot selection.
     fn capacity_slots(&self) -> usize {
         self.total_usable + PNG_AUDIO_BASE_SLOTS
     }
