@@ -230,6 +230,28 @@ pub fn commit_carrier_bytes(
     Ok(backup_path)
 }
 
+/// Clear the write protection `fs::copy` cloned from the source.
+///
+/// `commit_carrier_patches` copies the carrier to a temp file before opening it
+/// for writing. A read-only carrier (mode `0o444`, Windows read-only attribute)
+/// would otherwise make that open fail with `PermissionDenied` even when the
+/// caller asked for a fresh `-o <path>` target (review P2-18). The original
+/// permissions are restored on the committed target afterwards.
+// `set_readonly(false)` is Windows-only here; the Unix branch below adds the
+// owner write bit instead of making the file world-writable.
+#[allow(clippy::permissions_set_readonly_false)]
+fn make_writable(path: &Path) -> std::io::Result<()> {
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(permissions.mode() | 0o200);
+    }
+    #[cfg(windows)]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(path, permissions)
+}
+
 /// Safely commit in-place stego patches to `target_path` by streaming the original
 /// carrier via `fs::copy` and rewriting only the modified spans, with an atomic rename,
 /// crash-safe temporary file guard, and `.bak` backup.
@@ -259,6 +281,9 @@ pub fn commit_carrier_patches(
 
     // 1. Kernel-level stream copy (zero user-space heap allocation)
     std::fs::copy(carrier_path, &tmp_path)?;
+    // The copy inherits the carrier's read-only bits; the patch step needs to
+    // write it, and the original permissions are restored after the rename.
+    make_writable(&tmp_path)?;
 
     // 2. Open for in-place patch overwrite
     {
@@ -442,6 +467,44 @@ mod tests {
         assert_eq!(std::fs::read(&second).unwrap(), b"payload");
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Remove every write-protection bit the test set, so the scratch
+    /// directory can be deleted on Windows.
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn clear_read_only(path: &Path) {
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mut permissions = meta.permissions();
+            permissions.set_readonly(false);
+            let _ = std::fs::set_permissions(path, permissions);
+        }
+    }
+
+    #[test]
+    fn commit_carrier_patches_accepts_a_read_only_carrier() {
+        let dir = scratch_dir("read_only_patches");
+        let src = dir.join("carrier.bin");
+        let dst = dir.join("out.bin");
+        std::fs::write(&src, vec![0x11u8; 64]).unwrap();
+
+        let mut permissions = std::fs::metadata(&src).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&src, permissions).unwrap();
+
+        // A fresh `-o <path>` target must still work: the temp copy inherits
+        // the carrier's read-only bits, and the patch step opens it for
+        // writing (review P2-18).
+        let patches = vec![(0..2usize, vec![0xAA, 0xBB])];
+        let result = commit_carrier_patches(&src, &dst, &patches, false, false);
+        let backup = result.expect("a read-only carrier must not block patching a new target");
+        let committed = std::fs::read(&dst).unwrap();
+
+        clear_read_only(&dst);
+        clear_read_only(&src);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(backup.is_none());
+        assert_eq!(committed[0..2], [0xAA, 0xBB]);
     }
 
     #[test]
