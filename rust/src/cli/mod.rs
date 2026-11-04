@@ -332,7 +332,7 @@ pub(crate) fn run_domain_cli_with(engine: &StrHide, domain: Domain, argv: Vec<Os
                 1
             }
         },
-        Commands::Extract(args) => match handle_extract(args, &cfg, quiet, engine) {
+        Commands::Extract(args) => match handle_extract(args, &cfg, quiet, engine, None) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);

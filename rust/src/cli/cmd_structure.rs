@@ -348,7 +348,7 @@ fn read_one(
                         if extract_args.passwords.password.is_none() {
                             extract_args.passwords.password = password.clone();
                         }
-                        return handle_extract(extract_args, cfg, quiet, engine);
+                        return handle_extract(extract_args, cfg, quiet, engine, Some(batch));
                     } else {
                         return Err(StrHideError::NoHiddenData(format!(
                             "No structure-domain envelope found, but detected content-adaptive steganography ({}, {}). Use `strhide extract` or add `--auto` to extract.",

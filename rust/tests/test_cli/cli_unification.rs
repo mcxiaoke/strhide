@@ -978,6 +978,47 @@ fn cross_domain_auto_fallback() {
     assert_eq!(stdout(&extract_auto).trim(), "cross domain struct payload");
 }
 
+/// P2-13: in a multi-carrier `read --auto -o <DIR>`, every redirected content
+/// extraction used to start its own empty output set. Two carriers with the
+/// same stem ("x/a.png" and "y/a.png") both tried "a.bin": the first won and
+/// the second failed with "Refusing to overwrite". The redirect must reuse the
+/// outer batch's reserved names.
+#[test]
+fn auto_redirect_in_batch_read_shares_output_names() {
+    let dir = scratch("auto_redirect_batch");
+    seed_stego(&dir, &["stego.png"]);
+    for sub in ["x", "y", "out"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    for (sub, text) in [("x", "first"), ("y", "second")] {
+        let carrier = dir.join(sub).join("a.png");
+        std::fs::copy(dir.join("stego.png"), &carrier).unwrap();
+        let name = format!("{sub}/a.png");
+        let embed = run(
+            &dir,
+            &[
+                "embed",
+                name.as_str(),
+                "-t",
+                text,
+                "--in-place",
+                "--no-backup",
+            ],
+        );
+        assert_eq!(code(&embed), 0, "stderr: {}", stderr(&embed));
+    }
+
+    let read = run(&dir, &["read", "x/a.png", "y/a.png", "--auto", "-o", "out"]);
+    assert_eq!(code(&read), 0, "stderr: {}", stderr(&read));
+    let mut payloads = Vec::new();
+    for entry in std::fs::read_dir(dir.join("out")).unwrap() {
+        let path = entry.unwrap().path();
+        payloads.push(std::fs::read_to_string(path).unwrap());
+    }
+    payloads.sort();
+    assert_eq!(payloads, vec!["first".to_string(), "second".to_string()]);
+}
+
 #[test]
 fn subcommand_short_aliases_work() {
     let dir = scratch("short_aliases");

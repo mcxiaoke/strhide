@@ -530,6 +530,7 @@ pub(crate) fn handle_extract(
     cfg: &FileConfig,
     quiet: bool,
     engine: &StrHide,
+    shared_batch: Option<&mut BatchOutputs<'_>>,
 ) -> Result<(), StrHideError> {
     let multi = args.carrier.len() > 1;
     if multi && args.stdout {
@@ -538,7 +539,6 @@ pub(crate) fn handle_extract(
                 .into(),
         ));
     }
-    let output_dir = batch_output_dir(args.output.as_deref(), multi, "extracting from")?;
     if multi && args.output.is_none() {
         return Err(StrHideError::General(
             "Extracting from several carriers needs `-o <DIR>`: the payload filenames can collide."
@@ -556,19 +556,29 @@ pub(crate) fn handle_extract(
 
     // Two carriers may record the same payload filename; keep this batch's
     // outputs distinct instead of overwriting or aborting halfway through.
-    let mut batch = BatchOutputs::new(output_dir);
-    for_each_carrier(&args.carrier, quiet, |carrier| {
-        extract_one(
-            carrier,
-            &args,
-            &mut batch,
-            password.as_deref(),
-            key.as_ref(),
-            cfg,
-            quiet,
-            engine,
-        )
-    })
+    // `read --auto` hands over the outer batch so a redirected content payload
+    // cannot collide with a name the structure side already reserved.
+    let run = |batch: &mut BatchOutputs<'_>| {
+        for_each_carrier(&args.carrier, quiet, |carrier| {
+            extract_one(
+                carrier,
+                &args,
+                batch,
+                password.as_deref(),
+                key.as_ref(),
+                cfg,
+                quiet,
+                engine,
+            )
+        })
+    };
+    match shared_batch {
+        Some(batch) => run(batch),
+        None => {
+            let output_dir = batch_output_dir(args.output.as_deref(), multi, "extracting from")?;
+            run(&mut BatchOutputs::new(output_dir))
+        }
+    }
 }
 
 /// Extract one content-domain payload (the body of the `extract` batch).
