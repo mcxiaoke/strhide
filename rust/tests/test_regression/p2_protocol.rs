@@ -40,6 +40,33 @@ fn make_minimal_png() -> Vec<u8> {
     include_bytes!("../assets/minimal.png").to_vec()
 }
 
+/// XRef-stream PDF whose dictionary nests `/DecodeParms << ... >>` *before*
+/// `/Size`, `/Root` (and an optional `/Encrypt`). `/Size 20` is deliberately
+/// larger than the highest `N G obj` in the tail (4), so a scanner that
+/// truncates at the nested `>>` derives the wrong next object number (review
+/// P1-3).
+fn make_xref_stream_pdf_nested_decode_parms(encrypt: Option<&str>) -> Vec<u8> {
+    let mut doc = b"%PDF-1.5\n\
+        1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+        2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\
+        3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n"
+        .to_vec();
+    let xref_offset = doc.len();
+    let enc = encrypt
+        .map(|e| format!("/Encrypt {e}\n"))
+        .unwrap_or_default();
+    let dict = format!(
+        "<< /Type /XRef\n/DecodeParms << /Columns 5 /Predictor 12 >>\n\
+         /Size 20\n/Root 1 0 R\n{enc}/Length 20\n>>"
+    );
+    doc.extend_from_slice(format!("4 0 obj\n{dict}\nstream\n").as_bytes());
+    doc.extend_from_slice(&[0u8; 20]);
+    doc.extend_from_slice(
+        format!("\nendstream\nendobj\nstartxref\n{xref_offset}\n%%EOF\n").as_bytes(),
+    );
+    doc
+}
+
 /// Write a plaintext EOF-strategy envelope and return (output path, ube offset).
 fn write_eof_envelope(dir: &Path, name: &str) -> (PathBuf, u64) {
     let carrier = dir.join(format!("{name}.png"));
@@ -109,6 +136,37 @@ fn pdf_xref_stream_object_number_from_tail() {
 }
 
 #[test]
+fn pdf_xref_stream_nested_decode_parms_is_not_truncated() {
+    let info = parse_pdf_trailer_info(&mut std::io::Cursor::new(
+        make_xref_stream_pdf_nested_decode_parms(None),
+    ))
+    .unwrap();
+    assert_eq!(
+        info.new_obj_num, 20,
+        "/Size must be read past the nested /DecodeParms dictionary"
+    );
+    assert_eq!(info.root_ref.as_deref(), Some("1 0 R"));
+    assert!(
+        info.uses_xref_stream,
+        "the newest section is an XRef stream, so the update must be one too"
+    );
+}
+
+#[test]
+fn pdf_xref_stream_nested_decode_parms_still_detects_encryption() {
+    let err = match parse_pdf_trailer_info(&mut std::io::Cursor::new(
+        make_xref_stream_pdf_nested_decode_parms(Some("9 0 R")),
+    )) {
+        Ok(_) => panic!("an encrypted XRef-stream document must refuse the incremental update"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("encrypted"),
+        "a /Encrypt after a nested dictionary must still refuse the update: {err}"
+    );
+}
+
+#[test]
 fn pdf_xref_stream_incremental_write_roundtrip() {
     let dir = scratch("pdf_xref");
     let carrier = dir.join("c.pdf");
@@ -137,6 +195,20 @@ fn pdf_xref_stream_incremental_write_roundtrip() {
     assert!(
         stego.windows(11).any(|w| w == b"/Root 1 0 R"),
         "incremental trailer missing recovered /Root"
+    );
+    // The update must repeat the document's dialect: an XRef stream object,
+    // never a classic `xref` table after an XRef-stream section (P1-3).
+    assert!(
+        stego.windows(11).any(|w| w == b"/Type /XRef"),
+        "xref-stream document received a classic update"
+    );
+    assert!(
+        stego.windows(9).any(|w| w == b"\n6 0 obj\n"),
+        "the new XRef stream object must follow the envelope object"
+    );
+    assert!(
+        !stego.windows(9).any(|w| w == b"\nxref\n5 1\n"),
+        "a pure XRef-stream document must not receive a classic xref table"
     );
 
     // Full lossless lifecycle still holds.
@@ -288,7 +360,68 @@ fn pdf_l1_survives_an_overlay_larger_than_the_tail_window() {
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
 }
 
-// --------------------------------------------------------------------------- #11: verify L2 header validation
+/// The backward `%%EOF` scan is capped at 1 MiB from the effective PDF tail.
+/// An overlay *larger* than that cap must still be excluded, otherwise the
+/// host's marker sits outside the window and L1 calls a freshly written carrier
+/// corrupted (review P1-3, defect 3).
+#[test]
+fn pdf_l1_survives_an_overlay_beyond_the_one_mib_search_depth() {
+    let dir = scratch("pdf_huge_overlay");
+    let carrier = dir.join("c.pdf");
+    let out = dir.join("o.pdf");
+    let restored = dir.join("r.pdf");
+    fs::write(&carrier, make_pdf_without_root()).unwrap();
+
+    // 1.3 MiB plaintext → the sealed envelope exceeds the 1 MiB scan depth.
+    let payload: Vec<u8> = (0..1300 * 1024).map(|i| (i % 251) as u8).collect();
+    let res = write_carrier(
+        &carrier,
+        PayloadSource::Bytes(&payload),
+        &WriteOptions {
+            output_path: Some(&out),
+            strategy: "eof",
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res.strategy.name(), "eof");
+
+    let v = verify_carrier(&out, None).unwrap();
+    assert!(
+        v.level1_host.ok,
+        "L1 must anchor the search at the envelope, not at the physical tail: {}",
+        v.level1_host.detail
+    );
+    assert!(v.level2_envelope.ok, "{}", v.level2_envelope.detail);
+
+    assert_eq!(
+        read_carrier(
+            &out,
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+                ..Default::default()
+            }
+        )
+        .unwrap()
+        .data,
+        payload
+    );
+    remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
+}
 
 #[test]
 fn verify_detects_unsupported_envelope_version() {

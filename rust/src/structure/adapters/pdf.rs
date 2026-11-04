@@ -13,6 +13,13 @@ pub struct PdfTrailerInfo {
     pub new_obj_num: u64,
     pub root_ref: Option<String>,
     pub info_ref: Option<String>,
+    /// Whether the newest cross-reference section is an XRef *stream* rather
+    /// than a classic `xref` table. A conforming incremental update must repeat
+    /// the document's dialect: appending `xref`/`trailer` after an XRef stream
+    /// leaves `/Prev` pointing at an indirect object (`N 0 obj << /Type /XRef
+    /// ... >>`) where strict parsers expect the `xref` keyword (ISO 32000-1
+    /// §7.5.8.4, review P1-3).
+    pub uses_xref_stream: bool,
 }
 
 /// Raw tail facts of a PDF, before the two "can we write an incremental
@@ -35,6 +42,9 @@ pub struct PdfTailInfo {
     /// update that does not carry the key forward leaves every encrypted
     /// string/stream unreadable (review P1-3).
     pub encrypt_ref: Option<String>,
+    /// Newest cross-reference section is an XRef stream (see
+    /// [`PdfTrailerInfo::uses_xref_stream`]).
+    pub uses_xref_stream: bool,
 }
 
 pub fn parse_pdf_trailer_info<R: Read + Seek + ?Sized>(
@@ -81,6 +91,7 @@ pub fn parse_pdf_trailer_info<R: Read + Seek + ?Sized>(
         new_obj_num,
         root_ref: Some(root_ref),
         info_ref: tail.info_ref,
+        uses_xref_stream: tail.uses_xref_stream,
     })
 }
 
@@ -157,6 +168,35 @@ struct XRefStreamDict {
     encrypt_ref: Option<String>,
 }
 
+/// End offset of the first balanced `<< ... >>` dictionary in `text`.
+///
+/// A plain `find(">>")` stops at the first *nested* dictionary, e.g.
+/// `/DecodeParms << /Columns 5 /Predictor 12 >>`, truncating every key after
+/// it (`/Size`, `/Root`, `/Encrypt`). Encrypted documents then look
+/// unencrypted to the incremental writer (review P1-3).
+fn balanced_dict_end(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = text.find("<<")?;
+    let mut depth = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'<' && bytes.get(i + 1) == Some(&b'<') {
+            depth += 1;
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'>' && bytes.get(i + 1) == Some(&b'>') {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i + 2);
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Read the dictionary of the XRef stream that `startxref` points at.
 ///
 /// This is the only reliable source of the next object number in a
@@ -187,13 +227,11 @@ fn read_xref_stream_dict<R: Read + Seek + ?Sized>(
         return None;
     }
 
-    // The dictionary ends at the closing `>>` delimiter before `stream`.
+    // The dictionary ends at the `>>` that closes the outermost `<<`, not at
+    // the first `>>` (which may belong to a nested `/DecodeParms`).
     let text = String::from_utf8_lossy(&buf);
-    let dict_text = if let Some(idx) = text.find(">>") {
-        &text[..idx + 2]
-    } else {
-        text.split("stream").next().unwrap_or(&text)
-    };
+    let end = balanced_dict_end(&text)?;
+    let dict_text = &text[..end];
     // Only accept an actual XRef stream: a `startxref` that points at something
     // else (a content stream, a classic xref table) must not be parsed as one.
     if !dict_text.contains("/XRef") {
@@ -265,6 +303,7 @@ pub fn parse_pdf_tail_info_with_magic<R: Read + Seek + ?Sized>(
     let mut root_ref = None;
     let mut info_ref = None;
     let mut encrypt_ref = None;
+    let mut uses_xref_stream = false;
 
     if let Some(trailer_idx) = text_before_eof[..sx_idx].rfind("trailer") {
         let trailer_str = &text_before_eof[trailer_idx..sx_idx];
@@ -281,6 +320,7 @@ pub fn parse_pdf_tail_info_with_magic<R: Read + Seek + ?Sized>(
     if new_obj_num.is_none()
         && let Some(dict) = read_xref_stream_dict(reader, prev_startxref)
     {
+        uses_xref_stream = true;
         new_obj_num = dict.size;
         if root_ref.is_none() {
             root_ref = dict.root_ref;
@@ -317,6 +357,7 @@ pub fn parse_pdf_tail_info_with_magic<R: Read + Seek + ?Sized>(
         root_ref,
         info_ref,
         encrypt_ref,
+        uses_xref_stream,
     })
 }
 
@@ -646,52 +687,90 @@ impl HostAdapter for PdfAdapter {
         crate::structure::adapters::io::copy_exact(ube_in, out, ube_size)?;
 
         // 4. End object stream
-        out.write_all(b"\nendstream\nendobj\n")?;
+        const END_OBJ: &[u8] = b"\nendstream\nendobj\n";
+        out.write_all(END_OBJ)?;
 
-        // 5. Write incremental xref
-        let xref_offset = inject_offset
-            + obj_header.len() as u64
-            + ube_size
-            + b"\nendstream\nendobj\n".len() as u64;
+        // 5. Write the incremental cross-reference section in the document's
+        // own dialect. A classic `xref`/`trailer` appended to an XRef-stream
+        // document leaves `/Prev` pointing at an indirect object, which strict
+        // parsers reject (ISO 32000-1 §7.5.8.4, review P1-3).
+        let xref_offset = inject_offset + obj_header.len() as u64 + ube_size + END_OBJ.len() as u64;
 
-        // A classic xref entry is exactly 20 bytes: a fixed 10-digit offset,
-        // then ` ggggg n \n`. An offset past 10^10 grows the field and shifts
-        // every following entry, producing a file whose `startxref`/`%%EOF`
-        // still look right — so neither the write self-check nor
-        // `verify_structure` (which only parses the tail) notices (review R2
-        // P2 item, M-19). Refuse instead of writing a broken table.
-        if actual_obj_offset >= 10_000_000_000 {
-            return Err(StrHideError::UnsupportedFormat(
-                "Carrier is larger than 10 GB, which overflows the 10-digit offsets a classic PDF \
-                 xref table can hold. Use --strategy eof for this carrier."
-                    .into(),
+        let section_len: u64 = if info.uses_xref_stream {
+            const W_OFFSET: usize = 4;
+            if xref_offset >= 1u64 << (8 * W_OFFSET) {
+                return Err(StrHideError::UnsupportedFormat(
+                    "Carrier is larger than 4 GB, which overflows the 4-byte offsets an XRef \
+                     stream entry can hold. Use --strategy eof for this carrier."
+                        .into(),
+                ));
+            }
+            let xref_obj_num = info.new_obj_num + 1;
+            let entry_len = 1 + W_OFFSET + 2;
+            let stream_data_len = entry_len * 2;
+            let mut header = format!(
+                "{xref_obj_num} 0 obj\n<<\n/Type /XRef\n/Size {}\n/W [1 {W_OFFSET} 2]\n\
+                 /Index [{} 2]\n",
+                xref_obj_num + 1,
+                info.new_obj_num
+            );
+            if let Some(root) = &info.root_ref {
+                header.push_str(&format!("/Root {root}\n"));
+            }
+            if let Some(info_r) = &info.info_ref {
+                header.push_str(&format!("/Info {info_r}\n"));
+            }
+            header.push_str(&format!(
+                "/Prev {}\n/Length {stream_data_len}\n>>\nstream\n",
+                info.prev_startxref
             ));
-        }
-        let xref_str = format!(
-            "xref\n{} 1\n{:010} 00000 n \n",
-            info.new_obj_num, actual_obj_offset
-        );
-        out.write_all(xref_str.as_bytes())?;
+            let mut data = Vec::with_capacity(stream_data_len);
+            for offset in [actual_obj_offset, xref_offset] {
+                data.push(1u8); // entry type 1: used, uncompressed
+                data.extend_from_slice(&(offset as u32).to_be_bytes());
+                data.extend_from_slice(&[0u8, 0u8]); // generation 0
+            }
+            let footer = format!("\nendstream\nendobj\nstartxref\n{xref_offset}\n%%EOF\n");
+            out.write_all(header.as_bytes())?;
+            out.write_all(&data)?;
+            out.write_all(footer.as_bytes())?;
+            (header.len() + data.len() + footer.len()) as u64
+        } else {
+            // A classic xref entry is exactly 20 bytes: a fixed 10-digit offset,
+            // then ` ggggg n \n`. An offset past 10^10 grows the field and shifts
+            // every following entry, producing a file whose `startxref`/`%%EOF`
+            // still look right — so neither the write self-check nor
+            // `verify_structure` (which only parses the tail) notices (review R2
+            // P2 item, M-19). Refuse instead of writing a broken table.
+            if actual_obj_offset >= 10_000_000_000 {
+                return Err(StrHideError::UnsupportedFormat(
+                    "Carrier is larger than 10 GB, which overflows the 10-digit offsets a classic \
+                     PDF xref table can hold. Use --strategy eof for this carrier."
+                        .into(),
+                ));
+            }
+            let xref_str = format!(
+                "xref\n{} 1\n{:010} 00000 n \n",
+                info.new_obj_num, actual_obj_offset
+            );
+            out.write_all(xref_str.as_bytes())?;
 
-        // 6. Write incremental trailer
-        let mut trailer_str = format!("trailer\n<<\n/Size {}\n", info.new_obj_num + 1);
-        if let Some(root) = &info.root_ref {
-            trailer_str.push_str(&format!("/Root {root}\n"));
-        }
-        if let Some(info_r) = &info.info_ref {
-            trailer_str.push_str(&format!("/Info {info_r}\n"));
-        }
-        trailer_str.push_str(&format!(
-            "/Prev {}\n>>\nstartxref\n{}\n%%EOF\n",
-            info.prev_startxref, xref_offset
-        ));
-        out.write_all(trailer_str.as_bytes())?;
+            let mut trailer_str = format!("trailer\n<<\n/Size {}\n", info.new_obj_num + 1);
+            if let Some(root) = &info.root_ref {
+                trailer_str.push_str(&format!("/Root {root}\n"));
+            }
+            if let Some(info_r) = &info.info_ref {
+                trailer_str.push_str(&format!("/Info {info_r}\n"));
+            }
+            trailer_str.push_str(&format!(
+                "/Prev {}\n>>\nstartxref\n{}\n%%EOF\n",
+                info.prev_startxref, xref_offset
+            ));
+            out.write_all(trailer_str.as_bytes())?;
+            (xref_str.len() + trailer_str.len()) as u64
+        };
 
-        let inject_size = obj_header.len() as u64
-            + ube_size
-            + b"\nendstream\nendobj\n".len() as u64
-            + xref_str.len() as u64
-            + trailer_str.len() as u64;
+        let inject_size = obj_header.len() as u64 + ube_size + END_OBJ.len() as u64 + section_len;
 
         // 7. Preserve any bytes the original host carried after its final
         // %%EOF (non-standard "dirty tail"). Dropping them would silently
