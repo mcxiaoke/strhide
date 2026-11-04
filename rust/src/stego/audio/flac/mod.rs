@@ -944,8 +944,7 @@ fn write_remainder(
     let unary_bits = (old_u >> k) as usize + 1;
     let mask = if k == 0 { 0 } else { (1u32 << k) - 1 };
     let mut writer = BitWriter::new(bytes, bit_offset + unary_bits);
-    writer.write(k, (new_u as u32) & mask);
-    #[cfg(debug_assertions)]
+    writer.write(k, (new_u as u32) & mask)?;
     if read_codeword(bytes, bit_offset, k) != Some(new as i32) {
         return Err(StrHideError::General(format!(
             "FLAC codeword readback mismatch at bit {bit_offset} (wrote {new})"

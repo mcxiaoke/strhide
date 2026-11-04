@@ -2417,7 +2417,9 @@ fn envelope_coordinates_agree(
     // `inject_size == 0`: the size field is inside the header but outside the
     // AEAD's AAD, so accepting a zero there let anyone flip it in a contiguous
     // strategy (`eof`, `chunk`, `box_uuid`) and skip Level 2 entirely.
-    if crate::structure::registry::id_to_strategy(header.strategy_id) == "pe_codebits" {
+    if cfg!(feature = "structure-pe")
+        && crate::structure::registry::id_to_strategy(header.strategy_id) == "pe_codebits"
+    {
         return Ok(());
     }
     let expected_offset = header

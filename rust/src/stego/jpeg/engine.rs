@@ -490,7 +490,7 @@ fn apply_deltas(
     slots: &[u32],
     deltas: &[i8],
     rule: crate::stego::format::GridRule,
-) {
+) -> Result<(), StrHideError> {
     for (&idx, &delta) in slots.iter().zip(deltas.iter()) {
         if delta == 0 {
             continue;
@@ -502,12 +502,14 @@ fn apply_deltas(
         // legally carry category 11-15 magnitudes (a custom Huffman table can
         // define them), and shrinking such a coefficient stays above 1023.
         // Only flag a move that grows beyond ±1023.
-        debug_assert!(
-            updated.abs() <= 1023 || updated.abs() < before.unsigned_abs() as i32,
-            "AC coefficient grew past the baseline range"
-        );
+        if updated.abs() > 1023 && updated.abs() >= before.unsigned_abs() as i32 {
+            return Err(StrHideError::CorruptedData(
+                "AC coefficient grew past the baseline range".into(),
+            ));
+        }
         blocks[bi][k] = updated as i16;
     }
+    Ok(())
 }
 
 /// Everything the two attempts share.
@@ -1142,7 +1144,7 @@ fn embed_slots(
         slots,
         &deltas,
         fmt.grid_rule,
-    );
+    )?;
     Ok(())
 }
 

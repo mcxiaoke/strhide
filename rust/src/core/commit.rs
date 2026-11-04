@@ -188,9 +188,17 @@ pub fn commit_carrier_bytes(
 
     write_bytes_atomic(target_path, stego_bytes)?;
 
-    let _ = std::fs::set_permissions(target_path, orig_permissions);
-    if preserve_time {
-        let _ = filetime::set_file_times(target_path, orig_atime, orig_mtime);
+    if let Err(e) = std::fs::set_permissions(target_path, orig_permissions) {
+        eprintln!(
+            "warning: failed to restore file permissions for '{}': {e}",
+            target_path.display()
+        );
+    }
+    if preserve_time && let Err(e) = filetime::set_file_times(target_path, orig_atime, orig_mtime) {
+        eprintln!(
+            "warning: failed to preserve file timestamps for '{}': {e}",
+            target_path.display()
+        );
     }
 
     Ok(backup_path)
@@ -258,9 +266,17 @@ pub fn commit_carrier_patches(
     guard.commit();
     sync_parent_dir(target_path);
 
-    let _ = std::fs::set_permissions(target_path, orig_permissions);
-    if preserve_time {
-        let _ = filetime::set_file_times(target_path, orig_atime, orig_mtime);
+    if let Err(e) = std::fs::set_permissions(target_path, orig_permissions) {
+        eprintln!(
+            "warning: failed to restore file permissions for '{}': {e}",
+            target_path.display()
+        );
+    }
+    if preserve_time && let Err(e) = filetime::set_file_times(target_path, orig_atime, orig_mtime) {
+        eprintln!(
+            "warning: failed to preserve file timestamps for '{}': {e}",
+            target_path.display()
+        );
     }
 
     Ok(backup_path)

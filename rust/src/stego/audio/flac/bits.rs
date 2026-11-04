@@ -10,6 +10,8 @@
 //! per-frame buffer: a slot's address has to survive the frame-by-frame walk
 //! so the writer can patch the original carrier bytes directly.
 
+use crate::errors::StrHideError;
+
 /// Read side of the bit stream.
 #[derive(Debug, Clone)]
 pub(crate) struct BitReader<'a> {
@@ -134,18 +136,18 @@ impl<'a> BitWriter<'a> {
     }
 
     /// Overwrite `bits` (0..=32) MSB-first at the current position.
-    pub(crate) fn write(&mut self, bits: u32, value: u32) {
-        debug_assert!(bits <= 32);
+    pub(crate) fn write(&mut self, bits: u32, value: u32) -> Result<(), StrHideError> {
+        if bits > 32 {
+            return Err(StrHideError::General("BitWriter: bits exceeds 32".into()));
+        }
         for i in (0..bits).rev() {
             let bit = ((value >> i) & 1) as u8;
             let index = self.pos;
-            let byte = self.bytes.get_mut(index >> 3);
-            let Some(byte) = byte else {
-                // Callers guarantee the range; refusing to write past the end
-                // keeps a malformed carrier from panicking.
-                self.pos += 1;
-                continue;
-            };
+            let byte = self.bytes.get_mut(index >> 3).ok_or_else(|| {
+                StrHideError::CorruptedData(format!(
+                    "FLAC bitstream write out of bounds at bit {index}"
+                ))
+            })?;
             let mask = 1u8 << (7 - (index & 7));
             if bit == 1 {
                 *byte |= mask;
@@ -154,6 +156,7 @@ impl<'a> BitWriter<'a> {
             }
             self.pos += 1;
         }
+        Ok(())
     }
 }
 
@@ -174,7 +177,7 @@ mod tests {
 
         let mut copy = data;
         let mut writer = BitWriter::new(&mut copy, 3);
-        writer.write(5, 0b00011);
+        writer.write(5, 0b00011).unwrap();
         assert_eq!(copy[0], 0b1010_0011);
         let mut reader = BitReader::new(&copy, 3);
         assert_eq!(
@@ -236,7 +239,7 @@ mod tests {
         // A 3-bit remainder followed by marker bits.
         let mut data = [0b1010_1100u8, 0b1111_0000];
         let mut writer = BitWriter::new(&mut data, 5);
-        writer.write(3, 0b011);
+        writer.write(3, 0b011).unwrap();
         assert_eq!(data[0], 0b1010_1011);
         assert_eq!(data[1], 0b1111_0000);
     }

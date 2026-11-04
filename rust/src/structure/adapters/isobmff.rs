@@ -517,7 +517,7 @@ pub fn isobmff_strip(
     out: &mut dyn SeekWrite,
     header: &EnvelopeHeader,
 ) -> Result<(), StrHideError> {
-    if header.strategy_id == 12 {
+    if crate::structure::registry::id_to_strategy(header.strategy_id) == "item_hidden" {
         return heif_item_hidden_strip(stego_in, out, header);
     }
     stego_in.seek(SeekFrom::Start(0))?;

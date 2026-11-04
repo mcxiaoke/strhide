@@ -48,7 +48,9 @@ use rusty_h265::ps::parse_sps;
 /// NAL header (§7.3.1.2). The decoder hands us the same stream but not the
 /// envelope, and the span table only covers Annex-B carriers.
 fn nal_header_fields(nal: &[u8]) -> (u8, u8, u8) {
-    debug_assert!(nal.len() >= 2, "a NAL header is two bytes");
+    if nal.len() < 2 {
+        return (0, 0, 0);
+    }
     let (b0, b1) = (nal[0], nal[1]);
     (
         (b0 >> 1) & 0x3F,
@@ -62,6 +64,9 @@ fn nal_header_fields(nal: &[u8]) -> (u8, u8, u8) {
 /// The decoder applies exactly this transform before CABAC, so the substream
 /// byte offsets in the journal index the buffer this returns.
 fn nal_rbsp(nal: &[u8]) -> Vec<u8> {
+    if nal.len() < 2 {
+        return Vec::new();
+    }
     rusty_h265::nal::unescape(&nal[2..]).data
 }
 

@@ -87,8 +87,19 @@ impl PngCostModel for HillCostModel {
         // every p1 + p2 > 18 combination index out of bounds.
         // `p1`/`p2` are validated as positive odd numbers by
         // `PngParams::validate`, so the halving below is exact.
-        let p1 = params.p1_window.max(1);
-        let p2 = params.p2_window.max(1);
+        // Ensure p1 and p2 are positive odd integers so the pad halving below
+        // is exact even when called through the trait directly without
+        // `PngParams::validate`.
+        let p1 = if params.p1_window >= 1 && params.p1_window % 2 == 1 {
+            params.p1_window
+        } else {
+            params.p1_window.max(1) | 1
+        };
+        let p2 = if params.p2_window >= 1 && params.p2_window % 2 == 1 {
+            params.p2_window
+        } else {
+            params.p2_window.max(1) | 1
+        };
         let pad = 1 + (p1 - 1) / 2 + (p2 - 1) / 2;
         let (x_pad, hp, wp) = pad_symmetric(&gray, h, w, pad);
         drop(gray);
@@ -121,7 +132,11 @@ impl PngCostModel for HillCostModel {
         let l1 = 1.0f64 / (p1 * p1) as f64;
         let (h2, w2) = (h1 - (p1 - 1), w1 - (p1 - 1));
         let mut i2 = vec![0.0f64; h2 * w2];
-        let eps = params.epsilon.max(1e-12);
+        let eps = if params.epsilon > 0.0 && params.epsilon.is_finite() {
+            params.epsilon
+        } else {
+            1e-12
+        };
 
         i2.par_chunks_mut(w2).enumerate().for_each(|(i, dst_row)| {
             for (j, dst) in dst_row.iter_mut().enumerate() {

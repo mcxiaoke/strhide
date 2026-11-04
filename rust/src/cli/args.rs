@@ -301,8 +301,12 @@ pub struct WriteArgs {
 
     #[command(flatten)]
     pub passwords: PasswordArgs,
-
-    #[arg(short = 'e', long = "encrypt")]
+    #[arg(
+        short = 'e',
+        long = "encrypt",
+        alias = "prompt-password",
+        help = "Prompt interactively for an encryption password"
+    )]
     pub encrypt: bool,
 
     #[arg(
@@ -388,8 +392,12 @@ pub struct EmbedArgs {
 
     #[arg(long = "dry-run")]
     pub dry_run: bool,
-
-    #[arg(short = 'e', long = "encrypt")]
+    #[arg(
+        short = 'e',
+        long = "encrypt",
+        alias = "prompt-password",
+        help = "Prompt interactively for an encryption password"
+    )]
     pub encrypt: bool,
 
     #[command(flatten)]

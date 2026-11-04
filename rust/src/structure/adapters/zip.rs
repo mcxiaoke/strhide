@@ -353,7 +353,7 @@ impl HostAdapter for ZipAdapter {
         out: &mut dyn SeekWrite,
         header: &EnvelopeHeader,
     ) -> Result<(), StrHideError> {
-        if header.strategy_id == 1 {
+        if crate::structure::registry::id_to_strategy(header.strategy_id) == "eof" {
             return EofAdapter.strip(stego_in, out, header);
         }
 

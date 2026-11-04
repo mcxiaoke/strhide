@@ -162,6 +162,7 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
     let mut tail: Vec<u8> = Vec::new();
     let mut saw_iend = false;
     let mut saw_ihdr = false;
+    let mut saw_plte = false;
 
     while pos + 8 <= data.len() {
         let len =
@@ -262,6 +263,22 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
                 ));
             }
             b"PLTE" => {
+                if saw_plte {
+                    return Err(StrHideError::CorruptedData(
+                        "Multiple PLTE chunks in PNG".into(),
+                    ));
+                }
+                saw_plte = true;
+                if color_type == 0 || color_type == 4 {
+                    return Err(StrHideError::CorruptedData(
+                        "PNG PLTE chunk is forbidden for grayscale colour types (0 and 4)".into(),
+                    ));
+                }
+                if !len.is_multiple_of(3) || len == 0 || len > 256 * 3 {
+                    return Err(StrHideError::CorruptedData(format!(
+                        "PNG PLTE chunk length {len} is invalid; must be 3..=768 and divisible by 3"
+                    )));
+                }
                 if color_type == 3 {
                     return Err(StrHideError::UnsupportedFormat(
                         "Indexed/palette PNG is not supported for content-adaptive pixel steganography; please use RGB/RGBA/Grayscale PNG".into(),
@@ -313,6 +330,13 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
                 // not chunk data. Keep it so `encode_png` can put it back.
                 let after = body_end + 4;
                 if after < data.len() {
+                    let tail_len = data.len() - after;
+                    const MAX_TAIL_BYTES: usize = 16 * 1024 * 1024;
+                    if tail_len > MAX_TAIL_BYTES {
+                        return Err(StrHideError::CorruptedData(format!(
+                            "PNG trailer of {tail_len} bytes exceeds the {MAX_TAIL_BYTES}-byte safety ceiling"
+                        )));
+                    }
                     tail = data[after..].to_vec();
                 }
                 saw_iend = true;
