@@ -604,10 +604,80 @@ fn wav_webp_auto_probe_reports_eof_but_write_rejects_mismatch() {
 
 // ------------------------------------------------------------------ batch 5
 
-/// A JPEG whose header chain (EXIF/ICC/…) runs past the 16 MiB marker-scan
-/// limit never reaches SOS. The auto probe reports `eof` (P3-19), but the write
-/// path's host verification now refuses the malformed carrier outright instead
-/// of appending an envelope to a file that cannot be parsed as JPEG.
+/// P1-1: the APP15 chain is inserted *before* SOS, so a large chain pushes SOS
+/// past the adapter's 16 MiB marker-scan window. Capacity must be measured
+/// against the relocated SOS, and auto must fall back to `eof` instead of
+/// producing a carrier that its own verifier cannot locate.
+#[test]
+fn jpeg_app_segment_capacity_keeps_relocated_sos_in_scan_window() {
+    use strhide::structure::adapters::jpeg::{JPEG_MAX_TOTAL_CAPACITY, MAX_JPEG_HEADER_SCAN};
+
+    let carrier = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/assets/minimal.jpg");
+    let bytes = fs::read(&carrier).unwrap();
+    let adapter = JpegAdapter;
+    let two_mib = 2 * 1024 * 1024u64;
+
+    let mut cursor = Cursor::new(&bytes);
+    assert_eq!(
+        adapter.choose_auto_strategy(&mut cursor, two_mib),
+        "app_segment"
+    );
+
+    let mut cursor = Cursor::new(&bytes);
+    let capacity = adapter
+        .strategy_capacities(Some(&mut cursor))
+        .into_iter()
+        .find(|cap| cap.strategy == "app_segment")
+        .and_then(|cap| cap.capacity_bytes)
+        .expect("measured APP15 capacity");
+    assert!(capacity >= two_mib, "capacity {capacity} below 2 MiB");
+    assert!(
+        capacity < MAX_JPEG_HEADER_SCAN,
+        "capacity {capacity} must account for the relocated SOS"
+    );
+
+    for size in [16 * 1024 * 1024u64, JPEG_MAX_TOTAL_CAPACITY + 1] {
+        let mut cursor = Cursor::new(&bytes);
+        assert_eq!(
+            adapter.choose_auto_strategy(&mut cursor, size),
+            "eof",
+            "a {size}-byte chain would push SOS past the scan window"
+        );
+    }
+
+    // 2 MiB is inside the measured window: a real write must land in
+    // app_segment and still read back, proving the capacity is reachable.
+    let dir = scratch("rv25_jpeg_capacity_2mib");
+    let stego = dir.join("s.jpg");
+    let payload: Vec<u8> = (0..two_mib)
+        .map(|i| (i.wrapping_mul(31) % 251) as u8)
+        .collect();
+    let written = write_carrier(
+        &carrier,
+        PayloadSource::Bytes(&payload),
+        &WriteOptions {
+            output_path: Some(&stego),
+            strategy: "auto",
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(written.strategy.name(), "app_segment");
+    let out = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(out.data, payload);
+}
+
+/// Build a JPEG whose header chain runs past the 16 MiB marker-scan limit.
 fn make_jpeg_with_giant_header() -> Vec<u8> {
     // 257 max-size APP1 segments: the SOS marker would start at 2 + 256*65535
     // + 65535 = 16,842,497 > MAX_JPEG_HEADER_SCAN (16,777,216).
@@ -625,6 +695,10 @@ fn make_jpeg_with_giant_header() -> Vec<u8> {
     out
 }
 
+/// A JPEG whose header chain (EXIF/ICC/…) runs past the 16 MiB marker-scan
+/// limit never reaches SOS. The auto probe reports `eof` (P3-19), but the write
+/// path's host verification now refuses the malformed carrier outright instead
+/// of appending an envelope to a file that cannot be parsed as JPEG.
 #[test]
 fn jpeg_auto_probe_reports_eof_but_write_rejects_unreachable_sos() {
     let giant = make_jpeg_with_giant_header();

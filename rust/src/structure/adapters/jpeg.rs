@@ -194,6 +194,36 @@ pub fn partition_jpeg_payload_lengths(mut total_size: u64) -> Vec<u64> {
     lengths
 }
 
+/// Largest APP15 chain payload whose *post-injection* SOS marker still falls
+/// inside [`MAX_JPEG_HEADER_SCAN`].
+///
+/// The adapter walks markers from offset 0, so when the chain is inserted
+/// before SOS the SOS moves to `sos_offset + payload + 4 * segments`. The old
+/// 64 MiB capacity ignored that move: a 16–64 MiB payload produced a file that
+/// every later `locate`/`verify` scan rejected at the 16 MiB scan limit, even
+/// though the write itself reported success.
+fn app_segment_payload_capacity(sos_offset: u64) -> u64 {
+    let budget = MAX_JPEG_HEADER_SCAN.saturating_sub(sos_offset);
+    let fits = |payload: u64| {
+        let segments = payload.div_ceil(JPEG_MAX_SEG_PAYLOAD);
+        payload.saturating_add(4 * segments) <= budget
+    };
+    if !fits(0) {
+        return 0;
+    }
+    let mut low = 0u64;
+    let mut high = budget.min(JPEG_MAX_TOTAL_CAPACITY);
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        if fits(mid) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    low
+}
+
 pub struct JpegAdapter;
 
 impl HostAdapter for JpegAdapter {
@@ -227,23 +257,59 @@ impl HostAdapter for JpegAdapter {
         // MAX_JPEG_HEADER_SCAN (or a malformed marker stream) leaves SOS
         // unreachable, and engine auto is single-shot with no fallback, so the
         // probe happens here instead of failing inside inject (review P3-19).
-        if find_jpeg_sos_offset(reader).is_err() {
+        let Ok(sos_offset) = find_jpeg_sos_offset(reader) else {
+            return "eof";
+        };
+        // Inserting the chain moves SOS by `payload + segment headers`; only
+        // pick app_segment when the relocated SOS stays inside the scan window.
+        if ube_size > app_segment_payload_capacity(sos_offset) {
             return "eof";
         }
         "app_segment"
     }
 
-    fn strategy_capacities(&self, _reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
+    fn strategy_capacities(&self, reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
+        let (capacity_bytes, limit, note, available) = match reader {
+            Some(reader) => match find_jpeg_sos_offset(reader) {
+                Ok(sos_offset) => {
+                    let capacity = app_segment_payload_capacity(sos_offset);
+                    (
+                        Some(capacity),
+                        format!(
+                            "<= {} B (post-injection SOS at {} + payload + headers must stay within {} B)",
+                            format_bytes(capacity),
+                            sos_offset,
+                            format_bytes(MAX_JPEG_HEADER_SCAN)
+                        ),
+                        "APP15 segment chain before SOS; per-segment payload capped at 65,533 B; file grows"
+                            .into(),
+                        capacity > 0,
+                    )
+                }
+                Err(_) => (
+                    Some(0),
+                    "unavailable (SOS not found within the 16 MiB header scan)".into(),
+                    "Malformed JPEG header chain; repair the file or write with --strategy eof"
+                        .into(),
+                    false,
+                ),
+            },
+            None => (
+                None,
+                "<= 16 MiB - SOS offset - segment headers (run `inspect` for the exact limit)"
+                    .into(),
+                "APP15 segment chain before SOS; per-segment payload capped at 65,533 B; file grows"
+                    .into(),
+                true,
+            ),
+        };
         vec![
             StrategyCapacity {
                 strategy: "app_segment".into(),
-                capacity_bytes: Some(JPEG_MAX_TOTAL_CAPACITY),
-                available: true,
-                limit: format!("<= {} B (64 MiB)", format_bytes(JPEG_MAX_TOTAL_CAPACITY)),
-                note: Some(
-                    "APP15 segment chain before SOS; per-segment payload capped at 65,533 B; requires SOS within the 16 MiB header scan; file grows"
-                        .into(),
-                ),
+                capacity_bytes,
+                available,
+                limit,
+                note: Some(note),
             },
             StrategyCapacity {
                 strategy: "eof".into(),
@@ -275,13 +341,13 @@ impl HostAdapter for JpegAdapter {
         let ube_size = ube_in.seek(SeekFrom::End(0))?;
         ube_in.seek(SeekFrom::Start(0))?;
 
-        if ube_size > JPEG_MAX_TOTAL_CAPACITY {
+        let sos_offset = find_jpeg_sos_offset(host_in)?;
+        let capacity = app_segment_payload_capacity(sos_offset);
+        if ube_size > capacity {
             return Err(StrHideError::UnsupportedFormat(format!(
-                "Payload size ({ube_size} bytes) exceeds JPEG maximum chain capacity ({JPEG_MAX_TOTAL_CAPACITY} bytes). Please specify --strategy eof."
+                "Payload size ({ube_size} bytes) exceeds JPEG APP15 capacity ({capacity} bytes) while keeping the post-injection SOS within the 16 MiB header scan. Please specify --strategy eof."
             )));
         }
-
-        let sos_offset = find_jpeg_sos_offset(host_in)?;
 
         // 1. Write host before SOS
         host_in.seek(SeekFrom::Start(0))?;
