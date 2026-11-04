@@ -978,9 +978,40 @@ fn enforce_safety(
 /// An in-place modification patch for an HEVC carrier: `(byte_range, replacement_nal_bytes)`.
 pub type HevcCarrierPatch = (std::ops::Range<usize>, Vec<u8>);
 
+/// Check that every patch fits the carrier it will be applied to.
+///
+/// The patch list is produced by the HEVC scanner itself, so a mismatch here
+/// means an engine invariant broke. Validating before the copy keeps that
+/// internal failure a normal error instead of a slice-index panic, which
+/// `panic = "abort"` would turn into process termination.
+fn validate_hevc_patches(
+    carrier_len: usize,
+    patches: &[HevcCarrierPatch],
+) -> Result<(), StrHideError> {
+    for (index, (span, re_nal)) in patches.iter().enumerate() {
+        if span.start > span.end || span.end > carrier_len || re_nal.len() != span.len() {
+            return Err(StrHideError::General(format!(
+                "HEVC patch {index} does not fit the carrier: span {span:?}, {} replacement bytes, carrier {carrier_len} bytes",
+                re_nal.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Apply in-place NAL patches to a mutable carrier buffer.
+///
+/// Panics on a patch whose span falls outside `carrier` or whose replacement
+/// length differs from the span length; callers that build patches dynamically
+/// must verify them first (`validate_hevc_patches`). The production embed path
+/// does exactly that, so this panic is reachable only for direct misuse.
 pub fn apply_hevc_patches(carrier: &mut [u8], patches: &[HevcCarrierPatch]) {
     for (span, re_nal) in patches {
+        debug_assert!(
+            span.start <= span.end && span.end <= carrier.len() && re_nal.len() == span.len(),
+            "HEVC patch {span:?} does not fit the {} byte carrier",
+            carrier.len()
+        );
         carrier[span.clone()].copy_from_slice(re_nal);
     }
 }
@@ -1028,6 +1059,7 @@ pub fn embed_hevc_with_info_v4(
         carrier, payload, cred, domain, suite_id, extensions, fmt, freshness, safety, control,
     )?;
     let mut out_carrier = carrier.to_vec();
+    validate_hevc_patches(out_carrier.len(), &patches)?;
     apply_hevc_patches(&mut out_carrier, &patches);
     Ok((out_carrier, capacity_info, stats))
 }
@@ -4552,5 +4584,43 @@ mod v4_superblock_tests {
         assert_eq!(hevc_extension_slots(64), 1036);
         assert_eq!(524 + hevc_extension_slots(64), 1560);
         assert!(524 + hevc_extension_slots(HEVC_MAX_EXT_BYTES) <= HEVC_HEADER_SLOTS_MAX);
+    }
+
+    /// Patch validation is the release-build guard for a mismatched internal
+    /// patch list: it rejects the three shapes that used to panic inside
+    /// `apply_hevc_patches` (reversed span, end past the carrier, replacement
+    /// length differing from the span). Runs in every profile, unlike the
+    /// debug assertion in the apply loop.
+    #[test]
+    fn patch_validation_rejects_malformed_spans() {
+        let carrier_len = 16;
+        assert!(validate_hevc_patches(carrier_len, &[(2..6, vec![9; 4])]).is_ok());
+        assert!(validate_hevc_patches(carrier_len, &[]).is_ok());
+
+        for (span, re_nal) in [
+            (0..8, vec![9; 4]),   // replacement too short
+            (0..4, vec![9; 5]),   // replacement too long
+            (8..20, vec![9; 12]), // end beyond the carrier
+            // Built as a struct literal: `6..2` is rejected by clippy's
+            // `reversed_empty_ranges` before the test can observe it.
+            (std::ops::Range { start: 6, end: 2 }, vec![9; 4]),
+        ] {
+            let err = validate_hevc_patches(carrier_len, &[(span, re_nal)])
+                .expect_err("malformed patch must be rejected");
+            assert!(
+                matches!(err, StrHideError::General(ref msg) if msg.contains("does not fit")),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    /// The debug assertion fires before the copy, so a direct caller gets a
+    /// message naming the span instead of `range end index out of range`.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "does not fit")]
+    fn patch_apply_asserts_before_copying_in_debug() {
+        let mut carrier = vec![0u8; 8];
+        apply_hevc_patches(&mut carrier, &[(0..4, vec![1; 3])]);
     }
 }
