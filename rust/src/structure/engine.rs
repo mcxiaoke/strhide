@@ -901,6 +901,7 @@ fn write_core<H, W>(
     options: &WriteOptions<'_>,
     local: &LocalParams,
     profile: &StructureProfile,
+    carrier_label: &str,
 ) -> Result<WriteCoreResult, StrHideError>
 where
     H: Read + Seek,
@@ -953,7 +954,7 @@ where
 
     // 3. Detect adapter & check existing envelope
     host.seek(SeekFrom::Start(0))?;
-    let adapter = find_adapter_or_reject(host, "<carrier>")?;
+    let adapter = find_adapter_or_reject(host, carrier_label)?;
 
     // 3a. Refuse malformed hosts before touching them. Detection is deliberately
     // cheap (a JPEG is "anything starting with FF D8"), so without this a
@@ -1476,8 +1477,17 @@ pub fn write_carrier_with(
             crate::core::control::Stage::Write,
             meta.len(),
         );
-        let core = write_core(&mut host, &mut pw, source, options, local, profile)
-            .map_err(|e| crate::core::control::map_io_cancel(&options.control, e))?;
+        let carrier_label = carrier_path.display().to_string();
+        let core = write_core(
+            &mut host,
+            &mut pw,
+            source,
+            options,
+            local,
+            profile,
+            &carrier_label,
+        )
+        .map_err(|e| crate::core::control::map_io_cancel(&options.control, e))?;
         // Durability before the rename, the same contract `commit.rs` applies to
         // every payload write: renaming first and syncing later leaves a window
         // where the new name exists with an unwritten tail. `pw` borrows
@@ -1568,7 +1578,9 @@ pub fn write_carrier_bytes(
     }
 
     let mut out = Cursor::new(Vec::new());
-    let core = write_core(&mut host, &mut out, source, options, local, profile)?;
+    let core = write_core(
+        &mut host, &mut out, source, options, local, profile, "<memory>",
+    )?;
     let bytes = out.into_inner();
 
     let result = WriteResult {

@@ -262,10 +262,6 @@ const SAFE_MAX_SAMPLE_DELTA: f64 = 32.0;
 /// them when the payload genuinely needs every slot.
 pub(crate) const HIGH_DISPLACEMENT_PENALTY: f64 = 1_000_000.0;
 
-/// Provisional bit depth assumed by `record_stego_sign`, whose call site does
-/// not carry one. Always superseded by the real value in `record_stego_level`.
-const PROVISIONAL_BIT_DEPTH: u8 = 8;
-
 /// Where a coefficient sits and whether the block was transformed.
 ///
 /// Bundled rather than passed as six arguments: the cost model reads all of
@@ -310,38 +306,6 @@ pub struct FlipGeometry {
 pub fn compute_sign_flip_cost(abs_level: u32, abs_dq: i32, geom: FlipGeometry) -> f64 {
     let dq = if abs_dq > 0 { abs_dq as f64 } else { 1.0 };
     cost_from_dq(abs_level, dq, geom)
-}
-
-/// Provisional cost for `record_stego_sign`, where the level has not been
-/// decoded yet and only the §8.6.3 quantizer step is available.
-#[inline]
-pub fn provisional_sign_flip_cost(
-    abs_level: u32,
-    qp: i32,
-    trafo_size: u8,
-    c_idx: u8,
-    x_c: u8,
-    y_c: u8,
-) -> f64 {
-    let n = trafo_size.max(4) as f64;
-    let q_step = 2.0_f64.powf((qp - 4) as f64 / 6.0);
-    let dq = abs_level.max(1) as f64 * q_step * (64.0 / n);
-    cost_from_dq(
-        abs_level,
-        dq,
-        FlipGeometry {
-            trafo_size,
-            c_idx,
-            x_c,
-            y_c,
-            bit_depth: PROVISIONAL_BIT_DEPTH,
-            // The sign callback fires before `transform_skip_flag` is used to
-            // report a level, so assume the transform path here; the level
-            // callback overwrites this cost for every coefficient that carries
-            // a sign.
-            sample_domain: false,
-        },
-    )
 }
 
 #[derive(Clone, Copy, Debug)]
