@@ -954,7 +954,7 @@ impl StegoEngine for MkvEngine {
             payload
         };
 
-        let (mut bytes, info, stats) = with_pool(opts.pool.as_ref(), || {
+        let (bytes, info, stats) = with_pool(opts.pool.as_ref(), || {
             crate::stego::hevc::embed_hevc_with_info_v4(
                 carrier,
                 eff_payload,
@@ -970,12 +970,6 @@ impl StegoEngine for MkvEngine {
             )
         })?;
         let _ = resolved;
-
-        // A Matroska muxer writes a CRC-32 over every element it finalises;
-        // the patch invalidates any that covers a modified block.
-        crate::stego::hevc::mkv_boxes::refresh_mkv_crcs(carrier, &mut bytes).map_err(|e| {
-            StrHideError::CorruptedData(format!("MKV checksum refresh failed: {e}"))
-        })?;
 
         Ok(EmbedOutput {
             bytes,

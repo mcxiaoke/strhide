@@ -25,7 +25,7 @@ use crate::stego::header::{
 };
 use crate::stego::hevc::bitstream::{compute_hevc_cover_digest, parse_annex_b_spans, rbsp_to_nal};
 use crate::stego::hevc::heif_boxes::parse_heif_targets;
-use crate::stego::hevc::mkv_boxes::parse_mkv_targets;
+use crate::stego::hevc::mkv_boxes::{parse_mkv_targets, refresh_mkv_crcs};
 use crate::stego::hevc::mp4_boxes::parse_mp4_targets;
 use crate::stego::hevc::slot::{BinOp, CabacRecorder, RecordMode, StegoSlot, SubstreamRecord};
 use crate::stego::hevc::sniff::{
@@ -1061,6 +1061,17 @@ pub fn embed_hevc_with_info_v4(
     let mut out_carrier = carrier.to_vec();
     validate_hevc_patches(out_carrier.len(), &patches)?;
     apply_hevc_patches(&mut out_carrier, &patches);
+
+    // A Matroska muxer covers every finalised element with a CRC-32; the
+    // patches above invalidate any checksum that covers a modified block.
+    // Refresh here, on the single in-memory entry every caller reaches, so a
+    // direct library user gets the same valid file as `MkvEngine` did.
+    if sniff_hevc_carrier(carrier) == Some(HevcCarrierKind::MkvContainer) {
+        refresh_mkv_crcs(carrier, &mut out_carrier).map_err(|e| {
+            StrHideError::CorruptedData(format!("MKV checksum refresh failed: {e}"))
+        })?;
+    }
+
     Ok((out_carrier, capacity_info, stats))
 }
 
@@ -4639,5 +4650,63 @@ mod v4_superblock_tests {
     fn patch_apply_asserts_before_copying_in_debug() {
         let mut carrier = vec![0u8; 8];
         apply_hevc_patches(&mut carrier, &[(0..4, vec![1; 3])]);
+    }
+}
+
+#[cfg(test)]
+mod mkv_crc_tests {
+    use super::*;
+    use crate::stego::format::DEFAULT_HEVC_FORMAT;
+    use crate::stego::hevc::mkv_boxes::parse_mkv_targets;
+
+    /// Count checksums `parse_mkv_targets` accepts as consistent. A patched
+    /// cluster whose CRC was left stale is no longer recognised, so the count
+    /// drops when a caller skips the refresh.
+    fn valid_crc_count(bytes: &[u8]) -> usize {
+        parse_mkv_targets(bytes)
+            .expect("parse Matroska")
+            .crcs
+            .iter()
+            .filter(|crc| crc.endian.is_some())
+            .count()
+    }
+
+    /// A caller that writes MKV through the library entry point, not
+    /// `MkvEngine`, must still get a file whose Matroska CRC-32 elements match.
+    /// The refresh lives in `embed_hevc_with_info_v4` so both paths share it.
+    #[test]
+    fn library_embed_refreshes_mkv_crcs() {
+        let path = "../temp/videosamples/TEST2__hevc_mkv_1080.mkv";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let carrier = std::fs::read(path).expect("read MKV sample");
+        assert!(
+            !parse_mkv_targets(&carrier)
+                .expect("parse Matroska")
+                .crcs
+                .is_empty(),
+            "sample must carry CRC-32 elements"
+        );
+        let before = valid_crc_count(&carrier);
+        assert!(
+            before > 0,
+            "sample must have a consistent CRC-32 to compare"
+        );
+
+        let (out, _, _) = embed_hevc_with_info(
+            &carrier,
+            &Payload::bytes(b"mkv-crc"),
+            Some("mkv-crc-pw"),
+            None,
+            &DEFAULT_HEVC_FORMAT,
+            Freshness::Random,
+            SafetyPolicy::new(),
+            &Control::none(),
+        )
+        .expect("library embed");
+
+        assert_eq!(out.len(), carrier.len(), "patch embed keeps the length");
+        assert_eq!(valid_crc_count(&out), before, "CRC-32 refreshed");
     }
 }

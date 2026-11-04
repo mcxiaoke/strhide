@@ -149,6 +149,7 @@
   - **实际损害**：`mkvmerge`/严格解析器报告 CRC mismatch，部分工具拒绝复用或重新封装；播放器通常忽略 CRC，但这属于对外交付文件不合规。CLI/GUI 不受影响，因此只影响库 API 的直接使用者。
   - **最小方案**：在 `embed_hevc_with_info_v4` 返回前按 `kind == HevcCarrierKind::Mkv` 调用一次 `refresh_mkv_crcs`，并删除 `stego/engine.rs:976` 的重复调用；测试直接调用 HEVC 层写 MKV 后用 CRC 复算断言无需二次刷新。
   - **依据**：上述导出列表、`stego/engine.rs:976`、`hevc/engine.rs:1046/1157`。
+  - **修复状态（2026-11-04 18:23）**：已修复。`embed_hevc_with_info_v4` 在 `apply_hevc_patches` 之后按 `sniff_hevc_carrier == MkvContainer` 调用一次 `refresh_mkv_crcs`；`stego/engine.rs` 中的重复调用已删除。库级测试 `library_embed_refreshes_mkv_crcs`（不经 `MkvEngine`）在 822 KB MKV 上断言 embed 前后一致 CRC 数量不下降；`video_12mb.mkv` 经 CLI 写出后被 `ffprobe`/`ffmpeg -f null` 正常读取（exit 0），`strhide verify` Level 1–3 全 OK。
 
 ### L-05 PNG >2 MiB 并行 deflate 无测试
 
