@@ -38,8 +38,9 @@ pub enum StegoCodec {
 }
 
 impl StegoCodec {
-    /// Stable identifier written into the envelope header.
-    pub fn id(self) -> u32 {
+    /// Stable identifier written into the envelope header (the wire format
+    /// value, not the Rust API's `Auto`/`Stc` distinction: both map to 1).
+    pub fn wire_id(self) -> u32 {
         match self {
             StegoCodec::Hamming => 0,
             StegoCodec::Stc | StegoCodec::Auto => 1,

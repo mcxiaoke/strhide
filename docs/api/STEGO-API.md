@@ -19,6 +19,11 @@
 > CLI 暴露 `--cipher-suite`（别名 `--suite`）、`--key-file`（embed/capacity/
 > extract/inspect/verify，接受 32 原始字节或 64 位十六进制）与 `--max-payload`
 > （extract）；`--extensions` 仍未接线。
+>
+> **2026-11-04 API 整理**：`StegoCodec::id()` 更名为
+> `StegoCodec::wire_id()`，明确它返回信封头部的线格式 id（`Auto` 与 `Stc`
+> 都为 1），不是 Rust 层的算法区分；`heif::BridgeTargetKind::DirectSpatial`
+> 已删除（全仓从未构造该变体，`unci` 原始像素并非 PNG 流）。
 
 ---
 

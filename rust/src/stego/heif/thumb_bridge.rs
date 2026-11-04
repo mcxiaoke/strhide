@@ -2,8 +2,8 @@
 
 //! Content-domain bridge steganography for HEIF/HEIC containers.
 //!
-//! Bridges embedded JPEG thumbnails or uncompressed auxiliary items within ISO BMFF containers
-//! to existing content-adaptive steganography engines (`stego::jpeg` and `stego::png`).
+//! Bridges embedded JPEG thumbnails within ISO BMFF containers to the existing
+//! content-adaptive JPEG engine (`stego::jpeg`).
 //!
 //! The primary HEVC/AVIF photo stream remains 100% bit-exact and untouched.
 
@@ -14,19 +14,14 @@ use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::jpeg;
-use crate::stego::options::{
-    BridgeOptions, StegoHeaderInfo, StegoTuning, StegoVerifyResult, VerifyLevel,
-};
+use crate::stego::options::{BridgeOptions, StegoHeaderInfo, StegoVerifyResult, VerifyLevel};
 use crate::stego::params::ExtractParams;
-use crate::stego::png;
 
 /// Kind of bridge carrier target located in the HEIF container.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BridgeTargetKind {
     /// Independent item with `item_type == b"jpeg"`.
     DirectJpeg { item_id: u32 },
-    /// Independent item with `item_type == b"unci"` (uncompressed spatial item).
-    DirectSpatial { item_id: u32 },
     /// Embedded JPEG stream within an Exif metadata item.
     ExifJpeg {
         exif_item_id: u32,
@@ -125,27 +120,6 @@ pub fn embed_heif_bridge<'a>(
             )?;
             reconstruct_heif(carrier_bytes, &target, &stego_bytes)
         }
-        BridgeTargetKind::DirectSpatial { .. } => {
-            let stego_bytes = png::embed_png(
-                carrier_slice,
-                eff_payload,
-                cred,
-                domain,
-                bridge.suite_id.unwrap_or_else(|| {
-                    crate::stego::format::OFFICIAL_PNG_CIPHER
-                        .default_suite
-                        .as_u16()
-                }),
-                &bridge.extensions,
-                bridge.dialect.png_format(),
-                &*tuning.png_model,
-                &tuning.png_params,
-                bridge.safety,
-                bridge.freshness,
-                control,
-            )?;
-            reconstruct_heif(carrier_bytes, &target, &stego_bytes)
-        }
     }
 }
 
@@ -169,9 +143,6 @@ pub fn extract_heif_bridge(
         }
     };
     let carrier_slice = &carrier_bytes[target.file_offset..target.file_offset + target.length];
-    // The carrier is self-describing, so the read path always resolves the
-    // default tuning; `BridgeOptions::tuning` only shapes what is written.
-    let tuning = StegoTuning::Auto.resolve();
     let cred =
         crate::stego::options::resolve_credential(bridge.password, bridge.key, bridge.dialect)?;
     let domain = bridge.resolved_domain(bridge.dialect);
@@ -187,16 +158,6 @@ pub fn extract_heif_bridge(
                 control,
             )
         }
-        BridgeTargetKind::DirectSpatial { .. } => png::extract_png(
-            carrier_slice,
-            cred,
-            domain,
-            bridge.dialect.png_format(),
-            &*tuning.png_model,
-            &tuning.png_params,
-            limits,
-            control,
-        ),
     }
 }
 
@@ -209,9 +170,10 @@ pub fn probe_heif_bridge_capacity(
     let target = find_bridge_target(carrier_bytes)?;
     let carrier_slice = &carrier_bytes[target.file_offset..target.file_offset + target.length];
     let tuning = bridge.tuning.resolve();
-    let cred =
+    // Resolve the credential even though the JPEG probe does not take one:
+    // this keeps "password and key are mutually exclusive" enforced here.
+    let _cred =
         crate::stego::options::resolve_credential(bridge.password, bridge.key, bridge.dialect)?;
-    let domain = bridge.resolved_domain(bridge.dialect);
 
     match target.kind {
         BridgeTargetKind::DirectJpeg { .. } | BridgeTargetKind::ExifJpeg { .. } => {
@@ -225,21 +187,6 @@ pub fn probe_heif_bridge_capacity(
                 control,
             )?;
             info.format = "HEIF (JPEG Thumbnail Bridge)".into();
-            Ok(info)
-        }
-        BridgeTargetKind::DirectSpatial { .. } => {
-            let mut info = png::probe_png_capacity(
-                carrier_slice,
-                &*tuning.png_model,
-                &tuning.png_params,
-                bridge.safety.level,
-                cred,
-                domain,
-                &bridge.extensions,
-                bridge.dialect.png_format(),
-                control,
-            )?;
-            info.format = "HEIF (Uncompressed Item Bridge)".into();
             Ok(info)
         }
     }
@@ -278,20 +225,6 @@ pub fn inspect_heif_bridge(
             )?;
             if info.has_hidden_data {
                 info.format = "HEIF (JPEG Thumbnail Bridge)".into();
-            }
-            Ok(info)
-        }
-        BridgeTargetKind::DirectSpatial { .. } => {
-            let mut info = png::inspect_png(
-                carrier_slice,
-                cred,
-                domain,
-                dialect.png_format(),
-                limits,
-                control,
-            )?;
-            if info.has_hidden_data {
-                info.format = "HEIF (Uncompressed Item Bridge)".into();
             }
             Ok(info)
         }
@@ -339,18 +272,6 @@ pub fn verify_heif_bridge(
                 control,
             )?;
             res.format = "HEIF (JPEG Thumbnail Bridge)".into();
-            Ok(res)
-        }
-        BridgeTargetKind::DirectSpatial { .. } => {
-            let mut res = png::verify_png(
-                carrier_slice,
-                cred,
-                domain,
-                dialect.png_format(),
-                limits,
-                control,
-            )?;
-            res.format = "HEIF (Uncompressed Item Bridge)".into();
             Ok(res)
         }
     }
@@ -482,7 +403,6 @@ fn reconstruct_heif(
         // Is this the item containing the target?
         let is_target_item = match target.kind {
             BridgeTargetKind::DirectJpeg { item_id } => item.item_id == item_id,
-            BridgeTargetKind::DirectSpatial { item_id } => item.item_id == item_id,
             BridgeTargetKind::ExifJpeg { exif_item_id, .. } => item.item_id == exif_item_id,
         };
 
