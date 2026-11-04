@@ -160,8 +160,12 @@ pub async fn embed_stego_file_impl(
     on_progress: Channel<ProgressEvent>,
 ) -> Result<StegoEmbedResult, ErrorDetail> {
     run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
-        let dest = req.output_path.as_deref().unwrap_or(&req.carrier);
-        check_overwrite(dest, req.overwrite)?;
+        // An omitted `-o` means "write in place": the carrier is the
+        // destination, and `overwrite=false` must not reject the user's
+        // in-place embed. Only an explicit different destination is checked.
+        if let Some(dest) = overwrite_target(req.output_path.as_deref(), &req.carrier) {
+            check_overwrite(dest, req.overwrite)?;
+        }
 
         let payload = match req.payload {
             PayloadInputDto::Text { content } => {
@@ -334,6 +338,18 @@ fn safe_output_filename(name: Option<&str>, is_file: bool) -> String {
         })
 }
 
+/// The destination that needs an overwrite check.
+///
+/// No `-o` (or `-o` naming the carrier itself) is an in-place write and must
+/// not be rejected by `overwrite=false`; only a different explicit destination
+/// can clobber an unrelated file.
+fn overwrite_target<'a>(
+    output: Option<&'a std::path::Path>,
+    carrier: &'a std::path::Path,
+) -> Option<&'a std::path::Path> {
+    output.filter(|dest| *dest != carrier)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn smart_extract_impl(
     state: &GuiState,
@@ -357,7 +373,7 @@ pub async fn smart_extract_impl(
             let guard = cache.lock().ok();
             guard.and_then(|g| {
                 g.as_ref().and_then(|c| {
-                    if c.path == path && c.mtime == mtime && c.password == password {
+                    if c.matches(&path, mtime, &password, &domain, prefer) {
                         Some(c.outcome.clone())
                     } else {
                         None
@@ -383,6 +399,8 @@ pub async fn smart_extract_impl(
                     path: path.clone(),
                     mtime,
                     password: password.clone(),
+                    domain: domain.clone(),
+                    prefer,
                     outcome: fresh.clone(),
                 });
             }
@@ -528,7 +546,22 @@ pub async fn smart_extract_cmd(
 
 #[cfg(test)]
 mod tests {
-    use super::safe_output_filename;
+    use super::{overwrite_target, safe_output_filename};
+    use std::path::Path;
+
+    /// P2-7: an in-place embed (no `-o`, or `-o` equal to the carrier) used to
+    /// call `check_overwrite` on the carrier itself, so `overwrite=false`
+    /// failed before writing. Only a different destination may be checked.
+    #[test]
+    fn in_place_embed_is_not_an_overwrite_target() {
+        let carrier = Path::new("carrier.png");
+        assert_eq!(overwrite_target(None, carrier), None);
+        assert_eq!(overwrite_target(Some(carrier), carrier), None);
+        assert_eq!(
+            overwrite_target(Some(Path::new("other.png")), carrier),
+            Some(Path::new("other.png"))
+        );
+    }
 
     #[test]
     fn smart_extract_recorded_filename_cannot_traverse() {

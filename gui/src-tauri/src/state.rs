@@ -17,7 +17,34 @@ pub struct CachedExtract {
     pub path: std::path::PathBuf,
     pub mtime: Option<std::time::SystemTime>,
     pub password: Option<String>,
+    /// The extraction parameters are part of the key: a probe made for one
+    /// domain or preference must not answer a different request on the same
+    /// unchanged file.
+    pub domain: Option<String>,
+    pub prefer: Option<strhide::facade::Domain>,
     pub outcome: strhide::facade::ExtractOutcome,
+}
+
+impl CachedExtract {
+    /// The cache is only reusable when every input that changes the result is
+    /// identical. `domain` and `prefer` are part of that input: without them a
+    /// result probed for one domain answers a different request on the same
+    /// unchanged carrier.
+    #[allow(clippy::too_many_arguments)]
+    pub fn matches(
+        &self,
+        path: &std::path::Path,
+        mtime: Option<std::time::SystemTime>,
+        password: &Option<String>,
+        domain: &Option<String>,
+        prefer: Option<strhide::facade::Domain>,
+    ) -> bool {
+        self.path == path
+            && self.mtime == mtime
+            && &self.password == password
+            && &self.domain == domain
+            && self.prefer == prefer
+    }
 }
 
 pub struct GuiState {
@@ -237,6 +264,51 @@ where
 mod tests {
     use super::*;
     use strhide::core::control::{Event, Stage};
+
+    /// P2-7: the extraction cache used to key only on path/mtime/password, so
+    /// switching the requested domain or preference on an unchanged carrier
+    /// returned the previous probe's result.
+    #[test]
+    fn extract_cache_key_includes_domain_and_prefer() {
+        use strhide::core::payload::Payload;
+        use strhide::facade::{Domain, ExtractOutcome};
+
+        let path = std::path::PathBuf::from("carrier.png");
+        let cached = CachedExtract {
+            path: path.clone(),
+            mtime: None,
+            password: None,
+            domain: Some("structure".to_string()),
+            prefer: Some(Domain::Structure),
+            outcome: ExtractOutcome {
+                payload: Payload::bytes(b"x"),
+                source: Domain::Structure,
+                also_present: None,
+                is_encrypted: false,
+            },
+        };
+        assert!(cached.matches(
+            &path,
+            None,
+            &None,
+            &Some("structure".to_string()),
+            Some(Domain::Structure)
+        ));
+        assert!(!cached.matches(
+            &path,
+            None,
+            &None,
+            &Some("content".to_string()),
+            Some(Domain::Structure)
+        ));
+        assert!(!cached.matches(
+            &path,
+            None,
+            &None,
+            &Some("structure".to_string()),
+            Some(Domain::Content)
+        ));
+    }
 
     #[test]
     fn test_should_emit_throttle_pure_logic() {
