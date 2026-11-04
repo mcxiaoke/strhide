@@ -590,7 +590,19 @@ impl EnvelopeHeader {
             }
         }
 
-        // 2. De-mask with the profile's default secret (the public built-in key
+        // 2. Bare encrypted header: the encrypted non-stealth header is written
+        //    without a mask so a passwordless reader can report "password
+        //    required" without decrypting. Test this *before* the default
+        //    de-mask: otherwise the default mask can coincidentally turn a
+        //    custom-password header into a plausible unencrypted one.
+        if data[8] == CURRENT_VERSION
+            && (data[9] & FLAG_ENCRYPTED) != 0
+            && Self::is_plausible_bare_header(data)
+        {
+            return Self::unpack(data);
+        }
+
+        // 3. De-mask with the profile's default secret (the public built-in key
         //    for the official dialect).
         let default_mask = match &secrets.default {
             Some(s) => Some(s.header_mask),
@@ -605,19 +617,42 @@ impl EnvelopeHeader {
             for i in 0..72 {
                 unmasked[40 + i] ^= mask[4 + i];
             }
-            if unmasked[8] == CURRENT_VERSION
-                && (unmasked[9] & FLAG_ENCRYPTED) == 0
-                && unmasked[10] <= MAX_KNOWN_STRATEGY_ID
+            // The version is checked by the level-2 verifier, not here, so a
+            // forged header with an unsupported version still gets the specific
+            // "unsupported version" diagnostic.
+            if (unmasked[9] & FLAG_ENCRYPTED) == 0
+                && (1..=MAX_KNOWN_STRATEGY_ID).contains(&unmasked[10])
                 && unmasked[11] <= MAX_OFFSET_DELTA
             {
                 return Self::unpack(&unmasked);
             }
         }
 
-        // 3. Bare header: an already-plain header. This is the encrypted
+        // 4. Bare header: an already-plain header. This is the encrypted
         //    non-stealth case, kept readable on purpose so a reader without the
         //    password can still recognise it and answer `PasswordWithHint`.
-        Self::unpack(data)
+        //    Reject bytes that fail the same plausibility gate, so a masked
+        //    header is never returned as a garbage-but-structurally-valid one.
+        if Self::is_plausible_bare_header(data) {
+            Self::unpack(data)
+        } else {
+            Err(StrHideError::CorruptedData(
+                "Not a recognizable strhide envelope header".into(),
+            ))
+        }
+    }
+
+    /// Whether `data` looks like an unmasked envelope header.
+    ///
+    /// The version is deliberately not checked here: a forged header with an
+    /// unsupported version must still reach the level-2 check so the user gets
+    /// an "unsupported version" diagnostic instead of a generic parse failure.
+    /// `strategy_id` starts at 1: 0 is not a registered strategy and accepting
+    /// it widens the coincidental-match window on the de-mask path.
+    fn is_plausible_bare_header(data: &[u8]) -> bool {
+        data.len() >= HEADER_SIZE
+            && (1..=MAX_KNOWN_STRATEGY_ID).contains(&data[10])
+            && data[11] <= MAX_OFFSET_DELTA
     }
 }
 
@@ -783,6 +818,45 @@ impl EnvelopeTrailer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P2-21: strategy IDs start at 1, but the default de-mask path used
+    /// `<= MAX`, so an id of 0 passed the plausibility gate. A header with id 0
+    /// is not writable by any build and must be rejected instead of returned.
+    #[test]
+    fn default_demask_rejects_the_unregistered_strategy_id_zero() {
+        let profile = StructureProfile::default();
+        let header = EnvelopeHeader {
+            strategy_id: 0,
+            ..Default::default()
+        };
+        let mask = crate::crypto::derive_header_mask(profile.secret(), &header.salt).unwrap();
+        let packed = header.pack_masked(Some(&mask));
+        match EnvelopeHeader::unpack_with_profile(&packed, None, &profile) {
+            Err(_) => {}
+            Ok(parsed) => assert_ne!(
+                parsed.strategy_id, 0,
+                "an id of 0 must not be accepted as an envelope"
+            ),
+        }
+    }
+
+    /// P2-21: the encrypted non-stealth header is stored unmasked, so its flag
+    /// is readable without a password. It must be recognised before the default
+    /// de-mask runs; otherwise the default mask can turn it into a plausible
+    /// "unencrypted" header.
+    #[test]
+    fn bare_encrypted_header_is_recognised_before_the_default_mask() {
+        let profile = StructureProfile::default();
+        let header = EnvelopeHeader {
+            flags: FLAG_ENCRYPTED,
+            strategy_id: 5,
+            ..Default::default()
+        };
+        let packed = header.pack_masked(None);
+        let parsed = EnvelopeHeader::unpack_with_profile(&packed, None, &profile).unwrap();
+        assert_eq!(parsed.strategy_id, 5);
+        assert!(parsed.is_encrypted());
+    }
 
     /// P1-8: the old constants advertised 213 B as the smallest writable
     /// envelope, but that is the *empty*-payload size. A one-byte write (the

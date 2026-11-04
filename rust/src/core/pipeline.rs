@@ -181,12 +181,36 @@ pub struct BatchPreflight<'a> {
     pub validate: Option<CarrierValidator<'a>>,
 }
 
+/// Resolve a path to a stable identity for overlap checks.
+///
+/// An existing path uses `canonicalize`; a not-yet-created output uses its
+/// canonicalized parent plus the file name, so `out/../a.png` and `a.png` still
+/// compare equal when they name the same destination.
+fn canonical_identity(path: &Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+            std::fs::canonicalize(parent)
+                .map(|dir| dir.join(name))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+        _ => path.to_path_buf(),
+    }
+}
+
 /// Validate a whole batch before the first carrier is modified: every carrier
 /// must exist, be a regular file, pass the caller's validation, and resolve to a
-/// unique output.
+/// unique output that is not another carrier in the same batch.
+///
+/// The output check matters because carriers are processed in order: if the
+/// first carrier's target is the second carrier's input, the second file is
+/// overwritten before it is read. Only paths that resolve to the same file are
+/// rejected; an output that equals its own carrier is an in-place write.
 pub fn preflight_batch(batch: BatchPreflight<'_>) -> Result<(), StrHideError> {
     let mut seen_carriers = HashSet::new();
-    let mut seen_targets = HashSet::new();
+    let mut carrier_identities = Vec::with_capacity(batch.carriers.len());
     for carrier in batch.carriers {
         if !carrier.exists() {
             return Err(StrHideError::General(format!(
@@ -203,13 +227,18 @@ pub fn preflight_batch(batch: BatchPreflight<'_>) -> Result<(), StrHideError> {
         if let Some(validate) = batch.validate {
             validate(carrier)?;
         }
-        let identity = std::fs::canonicalize(carrier).unwrap_or_else(|_| carrier.clone());
+        let identity = canonical_identity(carrier);
         if !seen_carriers.insert(identity.clone()) {
             return Err(StrHideError::General(format!(
                 "Carrier '{}' is listed more than once",
                 carrier.display()
             )));
         }
+        carrier_identities.push(identity);
+    }
+
+    let mut seen_targets = HashSet::new();
+    for (carrier, identity) in batch.carriers.iter().zip(&carrier_identities) {
         let target = match resolve_carrier_target(
             carrier,
             batch.in_place,
@@ -217,12 +246,23 @@ pub fn preflight_batch(batch: BatchPreflight<'_>) -> Result<(), StrHideError> {
             batch.output_dir,
         )? {
             Some(t) => t,
-            None => identity,
+            None => identity.clone(),
         };
+        let target_identity = canonical_identity(&target);
+        if !batch.in_place
+            && &target_identity != identity
+            && seen_carriers.contains(&target_identity)
+        {
+            return Err(StrHideError::General(format!(
+                "Output '{}' for carrier '{}' would overwrite another carrier in the same batch. Choose a different output directory or rename one of them.",
+                target.display(),
+                carrier.display()
+            )));
+        }
         if !batch.in_place {
             check_overwrite(&target, batch.overwrite)?;
         }
-        if !seen_targets.insert(target.clone()) {
+        if !seen_targets.insert(target_identity) {
             return Err(StrHideError::General(format!(
                 "Two carriers would write to the same file '{}'. Rename one of them or keep them in separate directories.",
                 target.display()
@@ -380,6 +420,33 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.to_string().contains("same file"));
+    }
+
+    #[test]
+    fn preflight_rejects_an_output_that_is_another_batch_input() {
+        let dir = scratch("preflight_overlap");
+        let carrier = dir.join("a.png");
+        // This file is both the default `-out` target of `a.png` and an input
+        // carrier of its own: processing `a.png` first would erase it before
+        // the batch reads it.
+        let second_input = dir.join("a-out.png");
+        fs::write(&carrier, b"a").unwrap();
+        fs::write(&second_input, b"b").unwrap();
+
+        let carriers = vec![carrier, second_input];
+        let err = preflight_batch(BatchPreflight {
+            carriers: &carriers,
+            in_place: false,
+            output: None,
+            output_dir: None,
+            overwrite: true,
+            validate: None,
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("overwrite another carrier"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

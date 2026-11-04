@@ -907,7 +907,10 @@ where
     W: Read + Write + Seek,
 {
     local.validate()?;
-    let password = options.password;
+    // An empty string means "no password", matching the content domain: a
+    // caller who passes `Some("")` must not get a stealth envelope derived from
+    // an empty secret.
+    let password = options.password.filter(|s| !s.is_empty());
     let password_hint = options.password_hint;
     let strategy = options.strategy;
     let stealth = options.stealth;
@@ -1631,6 +1634,7 @@ fn open_and_authenticate_envelope<'a>(
     password: Option<&str>,
     profile: &StructureProfile,
 ) -> Result<AuthenticatedEnvelope<'a>, StrHideError> {
+    let password = password.filter(|s| !s.is_empty());
     let adapter = find_adapter_or_reject(host, label)?;
 
     let Located {
@@ -2036,6 +2040,7 @@ fn remove_core(
     password: Option<&str>,
     profile: &StructureProfile,
 ) -> Result<EnvelopeHeader, StrHideError> {
+    let password = password.filter(|s| !s.is_empty());
     let adapter = find_adapter_or_reject(host, label)?;
     let loc = locate_envelope(host, adapter, password, profile)?;
     let (ube_offset, ube_total_size, strategy_name) = match loc {
@@ -2674,6 +2679,7 @@ fn verify_core(
     password: Option<&str>,
     profile: &StructureProfile,
 ) -> Result<VerifyResult, StrHideError> {
+    let password = password.filter(|s| !s.is_empty());
     host.seek(SeekFrom::Start(0))?;
     let adapter = find_adapter_or_reject(host, label)?;
 
@@ -3139,6 +3145,30 @@ mod pbkdf2_budget_tests {
         let res = verify_carrier_bytes(&bytes, Some("pw"), &StructureProfile::new()).unwrap();
         assert!(verify_passed(&res), "{res:?}");
         assert_eq!(crate::crypto::pbkdf2_calls(), 2, "unexpected PBKDF2 count");
+    }
+
+    /// P2-12: the content domain already treats `Some("")` as "no password";
+    /// the structure domain used it as a stealth credential. An empty string
+    /// must not create an envelope whose secrecy rests on an empty secret.
+    #[test]
+    fn empty_password_does_not_create_a_stealth_envelope() {
+        let carrier = include_bytes!("../../tests/assets/minimal.png").to_vec();
+        let err = write_carrier_bytes(
+            &carrier,
+            PayloadSource::Text("p2-12"),
+            &WriteOptions {
+                password: Some(""),
+                stealth: true,
+                ..Default::default()
+            },
+            &LocalParams::default(),
+            &StructureProfile::new(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("Stealth mode requires a password"),
+            "unexpected error: {err}"
+        );
     }
 
     /// The no-password path used to derive the profile default secret twice:
