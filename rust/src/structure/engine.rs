@@ -113,20 +113,25 @@ fn locate_envelope(
     Ok(locate_envelope_with_magic(carrier, adapter, password, profile)?.location)
 }
 
-/// Outcome of a locate scan: where the envelope is, plus the stealth header
-/// magic the scan derived on the way (if a password was supplied).
+/// Outcome of a locate scan: where the envelope is, plus the stealth magics the
+/// scan derived on the way (if a password was supplied).
 struct Located {
     location: Option<(u64, u64, String)>,
     /// Header magic derived from password + profile domain.
     stealth_header_magic: Option<[u8; 8]>,
+    /// Trailer magic derived from the same PBKDF2 run. Level 1 and Level 2
+    /// both need it for stealth overlays; re-deriving it per consumer was
+    /// several extra 100k-iteration PBKDF2 runs per `verify` (review P1-7).
+    stealth_trailer_magic: Option<[u8; 4]>,
 }
 
-/// [`locate_envelope`], also returning the stealth header magic it had to derive
+/// [`locate_envelope`], also returning the stealth magics it had to derive
 /// on the way.
 ///
-/// `unpack_with_profile` needs exactly that magic to decide whether the header
-/// is a stealth one, and deriving it twice costs a full PBKDF2 (100k HMAC-SHA256
-/// iterations) — so the locator hands its result over instead of recomputing it.
+/// `unpack_with_secrets` needs exactly the header magic to decide whether the
+/// header is a stealth one, and the trailer check needs its counterpart —
+/// deriving them twice costs a full PBKDF2 (100k HMAC-SHA256 iterations) — so
+/// the locator hands its result over instead of recomputing it.
 fn locate_envelope_with_magic(
     carrier: &mut dyn SeekRead,
     adapter: &dyn HostAdapter,
@@ -134,12 +139,14 @@ fn locate_envelope_with_magic(
     profile: &StructureProfile,
 ) -> Result<Located, StrHideError> {
     let mut stealth_header_magic = None;
+    let mut stealth_trailer_magic = None;
     let found = if let Some(pwd) = password {
         let magics = derive_stealth_magics(pwd, profile.domain())?;
-        // The derived magic is kept even when the stealth scan misses: the
-        // header unpack needs it to rule out the stealth branch, and dropping it
-        // here would cost a second PBKDF2.
+        // The derived magics are kept even when the stealth scan misses: the
+        // header/trailer unpack need them to rule out the stealth branch, and
+        // dropping them here would cost a second PBKDF2.
         stealth_header_magic = Some(magics.0);
+        stealth_trailer_magic = Some(magics.1);
         match adapter.locate_with_hint(carrier, Some(&magics.1), Some(&magics.0))? {
             Some(location) => Some(location),
             None => adapter.locate_with_hint(
@@ -159,6 +166,7 @@ fn locate_envelope_with_magic(
     Ok(Located {
         location: confine_location(carrier, found)?,
         stealth_header_magic,
+        stealth_trailer_magic,
     })
 }
 
@@ -1615,9 +1623,10 @@ fn open_and_authenticate_envelope<'a>(
     let Located {
         location,
         stealth_header_magic,
+        ..
     } = locate_envelope_with_magic(host, adapter, password, profile)?;
 
-    let (ube_offset, ube_total_size, strategy_name) = match location {
+    let location = match location {
         Some(l) => l,
         None => {
             return Err(no_hidden_data_error(
@@ -1629,24 +1638,57 @@ fn open_and_authenticate_envelope<'a>(
         }
     };
 
+    open_authenticated_at(
+        host,
+        adapter,
+        location,
+        password,
+        profile,
+        stealth_header_magic,
+        None,
+    )
+}
+
+/// [`open_and_authenticate_envelope`] for an envelope the caller already
+/// located.
+///
+/// `precomputed` lets `verify` hand over the `UnpackSecrets` it derived for
+/// Level 2, so Level 3 does not repeat PBKDF2 over the same (password, salt)
+/// pair (review P1-7).
+fn open_authenticated_at<'a>(
+    host: &'a mut dyn SeekRead,
+    adapter: &dyn HostAdapter,
+    location: (u64, u64, String),
+    password: Option<&str>,
+    profile: &StructureProfile,
+    stealth_header_magic: Option<[u8; 8]>,
+    precomputed: Option<&UnpackSecrets>,
+) -> Result<AuthenticatedEnvelope<'a>, StrHideError> {
+    let (ube_offset, ube_total_size, strategy_name) = location;
+
     let mut ube_stream =
         adapter.open_ube_reader(host, ube_offset, ube_total_size, &strategy_name)?;
 
     let mut header_bytes = [0u8; HEADER_SIZE];
     ube_stream.read_exact(&mut header_bytes)?;
 
-    let salt = EnvelopeHeader::salt_of(&header_bytes).unwrap_or([0u8; 16]);
-    let secrets = UnpackSecrets {
-        password: match password {
-            Some(pwd) => Some(derive_all(pwd, &salt)?),
-            None => None,
-        },
-        default: if password.is_none() {
-            Some(derive_all(profile.secret(), &salt)?)
-        } else {
-            None
-        },
-        stealth_header_magic,
+    let secrets = match precomputed {
+        Some(s) => *s,
+        None => {
+            let salt = EnvelopeHeader::salt_of(&header_bytes).unwrap_or([0u8; 16]);
+            UnpackSecrets {
+                password: match password {
+                    Some(pwd) => Some(derive_all(pwd, &salt)?),
+                    None => None,
+                },
+                default: if password.is_none() {
+                    Some(derive_all(profile.secret(), &salt)?)
+                } else {
+                    None
+                },
+                stealth_header_magic,
+            }
+        }
     };
     let header = EnvelopeHeader::unpack_with_secrets(&header_bytes, password, profile, &secrets)?;
     header.validate_against(ube_total_size)?;
@@ -1813,17 +1855,9 @@ fn read_core(
     })
 }
 
-/// Streamingly verify Level 3 payload decryption and SHA-256 for `host`,
-/// enforcing a 1 GiB limit and using minimal memory (~4 MiB chunk buffer).
-fn verify_l3_stream(
-    host: &mut dyn SeekRead,
-    label: &str,
-    password: Option<&str>,
-    profile: &StructureProfile,
-) -> Result<u64, StrHideError> {
-    host.seek(SeekFrom::Start(0))?;
-    let mut env = open_and_authenticate_envelope(host, label, password, profile)?;
-
+/// Streamingly verify Level 3 payload decryption and SHA-256, enforcing a
+/// 1 GiB limit and using minimal memory (~4 MiB chunk buffer).
+fn verify_authenticated_payload(env: &mut AuthenticatedEnvelope<'_>) -> Result<u64, StrHideError> {
     crate::crypto::verify_payload_stream(
         &mut env.ube_stream,
         &env.payload_key,
@@ -2594,6 +2628,7 @@ fn verify_structure_for_dialects(
     adapter: &dyn HostAdapter,
     password: Option<&str>,
     profile: &StructureProfile,
+    known_stealth_trailer_magic: Option<[u8; 4]>,
 ) -> Result<(bool, String), StrHideError> {
     if let Some(magic) = profile.locator_magic() {
         let result = attempt_l1(host, adapter, Some(magic))?;
@@ -2605,9 +2640,15 @@ fn verify_structure_for_dialects(
     if last.0 {
         return Ok(last);
     }
-    if let Some(pwd) = password {
-        let magics = derive_stealth_magics(pwd, profile.domain())?;
-        let result = attempt_l1(host, adapter, Some(&magics.1))?;
+    let stealth_trailer_magic = match known_stealth_trailer_magic {
+        Some(magic) => Some(magic),
+        None => match password {
+            Some(pwd) => Some(derive_stealth_magics(pwd, profile.domain())?.1),
+            None => None,
+        },
+    };
+    if let Some(magic) = stealth_trailer_magic {
+        let result = attempt_l1(host, adapter, Some(&magic))?;
         if result.0 {
             return Ok(result);
         }
@@ -2625,16 +2666,25 @@ fn verify_core(
     host.seek(SeekFrom::Start(0))?;
     let adapter = find_adapter_or_reject(host, label)?;
 
-    // Level 1: Host format integrity
-    let (l1_ok, l1_msg) = verify_structure_for_dialects(host, adapter, password, profile)?;
-
     // Needed by Level 2 to bound the injection coordinates the header claims.
     // Captured before the envelope reader borrows `host`.
     let file_len = host.seek(SeekFrom::End(0))?;
 
-    let loc = locate_envelope(host, adapter, password, profile)?;
+    // A single locate scan feeds Level 1's stealth trailer magic, Level 2's
+    // header unpack and its trailer check, and Level 3's authentication.
+    // Deriving the magics once instead of per consumer removes several
+    // 100k-iteration PBKDF2 runs from every `verify` (review P1-7).
+    let Located {
+        location,
+        stealth_header_magic,
+        stealth_trailer_magic,
+    } = locate_envelope_with_magic(host, adapter, password, profile)?;
 
-    let (ube_offset, ube_total_size, strategy_name) = match loc {
+    // Level 1: Host format integrity
+    let (l1_ok, l1_msg) =
+        verify_structure_for_dialects(host, adapter, password, profile, stealth_trailer_magic)?;
+
+    let (ube_offset, ube_total_size, strategy_name) = match location {
         Some(l) => l,
         None => {
             return Ok(VerifyResult {
@@ -2651,112 +2701,120 @@ fn verify_core(
         }
     };
 
-    let (l2_ok, l2_msg, is_encrypted, _is_stealth) = {
+    let mut secrets: Option<UnpackSecrets> = None;
+    let (l2_ok, l2_msg, is_encrypted) = {
         match adapter.open_ube_reader(host, ube_offset, ube_total_size, &strategy_name) {
-            Err(e) => (
-                false,
-                format!("Cannot open envelope reader: {e}"),
-                false,
-                false,
-            ),
+            Err(e) => (false, format!("Cannot open envelope reader: {e}"), false),
             Ok(mut ube_stream) => {
                 let mut header_bytes = [0u8; HEADER_SIZE];
                 if ube_stream.read_exact(&mut header_bytes).is_err() {
-                    (false, "Cannot read header".into(), false, false)
-                } else if let Ok(header) =
-                    EnvelopeHeader::unpack_with_profile(&header_bytes, password, profile)
-                {
-                    // Validate header field ranges against the located envelope size
-                    // (version / hint_len / meta_len consistency) before trusting any
-                    // downstream reads — a crafted or corrupted header must fail Level
-                    // 2 with a domain error instead of being silently accepted.
-                    if let Err(e) = header.validate_against(ube_total_size) {
-                        (
-                            false,
-                            format!("Envelope header validation failed: {e}"),
-                            false,
-                            false,
-                        )
-                    } else if let Err(msg) = envelope_coordinates_agree(
-                        &header,
-                        &strategy_name,
-                        ube_offset,
-                        ube_total_size,
-                        file_len,
-                    ) {
-                        (false, msg, header.is_encrypted(), header.is_stealth())
-                    } else if ube_stream
-                        .seek(SeekFrom::Start(ube_total_size - 24))
-                        .is_err()
-                    {
-                        (
-                            false,
-                            "Cannot seek to trailer".into(),
-                            header.is_encrypted(),
-                            header.is_stealth(),
-                        )
-                    } else {
-                        let mut trailer_bytes = [0u8; 24];
-                        let expected_trailer_magic = match (header.is_stealth(), password) {
-                            (true, Some(pwd)) => {
-                                let magics = derive_stealth_magics(pwd, profile.domain())?;
-                                Some(magics.1)
-                            }
-                            // Official dialect: `None` keeps the legacy magics
-                            // acceptable. Private dialect: only its own magic.
-                            _ => profile.locator_magic().copied(),
-                        };
-
-                        if ube_stream.read_exact(&mut trailer_bytes).is_err() {
-                            (
-                                false,
-                                "Cannot read trailer".into(),
-                                header.is_encrypted(),
-                                header.is_stealth(),
-                            )
-                        } else if let Ok(trailer) =
-                            EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic.as_ref())
-                        {
-                            // `locate_envelope` derived these numbers from this
-                            // very record, so comparing them with themselves
-                            // proved nothing (review R2 P1-9). What the trailer
-                            // still contributes is its magic + CRC32 check; the
-                            // coordinate check happens above, where the
-                            // authenticated `offset_delta` anchors the envelope
-                            // start and `confine_location` anchored the end to
-                            // the physical file.
-                            // A relocated PNG `chunk` envelope keeps its
-                            // write-time `ube_offset` in the trailer while
-                            // `locate` reports the new physical offset, so the
-                            // two are intentionally different here. The
-                            // coordinate check lives in
-                            // `envelope_coordinates_agree`.
-                            debug_assert_eq!(trailer.ube_total_size, ube_total_size);
-                            let _ = &trailer;
-                            (
-                                true,
-                                format!(
-                                    "Envelope valid at offset {ube_offset}, size {ube_total_size}B (CRC32 OK)"
-                                ),
-                                header.is_encrypted(),
-                                header.is_stealth(),
-                            )
+                    (false, "Cannot read header".into(), false)
+                } else {
+                    // Derive once for Level 2 and hand the same material to
+                    // Level 3; `open_authenticated_at` would otherwise repeat
+                    // PBKDF2 over the identical (password, salt) pair.
+                    let salt = EnvelopeHeader::salt_of(&header_bytes).unwrap_or([0u8; 16]);
+                    let built = UnpackSecrets {
+                        password: match password {
+                            Some(pwd) => Some(derive_all(pwd, &salt)?),
+                            None => None,
+                        },
+                        default: if password.is_none() {
+                            Some(derive_all(profile.secret(), &salt)?)
                         } else {
-                            (
-                                false,
-                                "Envelope trailer unpacking failed".into(),
-                                header.is_encrypted(),
-                                header.is_stealth(),
-                            )
+                            None
+                        },
+                        stealth_header_magic,
+                    };
+                    secrets = Some(built);
+
+                    match EnvelopeHeader::unpack_with_secrets(
+                        &header_bytes,
+                        password,
+                        profile,
+                        &built,
+                    ) {
+                        Err(_) => (false, "Envelope header unpacking failed".into(), false),
+                        Ok(header) => {
+                            // Validate header field ranges against the located
+                            // envelope size (version / hint_len / meta_len
+                            // consistency) before trusting any downstream reads —
+                            // a crafted or corrupted header must fail Level 2 with
+                            // a domain error instead of being silently accepted.
+                            if let Err(e) = header.validate_against(ube_total_size) {
+                                (
+                                    false,
+                                    format!("Envelope header validation failed: {e}"),
+                                    false,
+                                )
+                            } else if let Err(msg) = envelope_coordinates_agree(
+                                &header,
+                                &strategy_name,
+                                ube_offset,
+                                ube_total_size,
+                                file_len,
+                            ) {
+                                (false, msg, header.is_encrypted())
+                            } else if ube_stream
+                                .seek(SeekFrom::Start(ube_total_size - 24))
+                                .is_err()
+                            {
+                                (
+                                    false,
+                                    "Cannot seek to trailer".into(),
+                                    header.is_encrypted(),
+                                )
+                            } else {
+                                let mut trailer_bytes = [0u8; 24];
+                                // Stealth: the locator already derived this magic.
+                                // Official dialect: `None` keeps the legacy magics
+                                // acceptable. Private dialect: only its own magic.
+                                let expected_trailer_magic = if header.is_stealth() {
+                                    stealth_trailer_magic
+                                } else {
+                                    profile.locator_magic().copied()
+                                };
+
+                                if ube_stream.read_exact(&mut trailer_bytes).is_err() {
+                                    (false, "Cannot read trailer".into(), header.is_encrypted())
+                                } else if let Ok(trailer) = EnvelopeTrailer::unpack(
+                                    &trailer_bytes,
+                                    expected_trailer_magic.as_ref(),
+                                ) {
+                                    // `locate_envelope` derived these numbers from
+                                    // this very record, so comparing them with
+                                    // themselves proved nothing (review R2 P1-9).
+                                    // What the trailer still contributes is its
+                                    // magic + CRC32 check; the coordinate check
+                                    // happens above, where the authenticated
+                                    // `offset_delta` anchors the envelope start and
+                                    // `confine_location` anchored the end to the
+                                    // physical file.
+                                    // A relocated PNG `chunk` envelope keeps its
+                                    // write-time `ube_offset` in the trailer while
+                                    // `locate` reports the new physical offset, so
+                                    // the two are intentionally different here. The
+                                    // coordinate check lives in
+                                    // `envelope_coordinates_agree`.
+                                    debug_assert_eq!(trailer.ube_total_size, ube_total_size);
+                                    let _ = &trailer;
+                                    (
+                                        true,
+                                        format!(
+                                            "Envelope valid at offset {ube_offset}, size {ube_total_size}B (CRC32 OK)"
+                                        ),
+                                        header.is_encrypted(),
+                                    )
+                                } else {
+                                    (
+                                        false,
+                                        "Envelope trailer unpacking failed".into(),
+                                        header.is_encrypted(),
+                                    )
+                                }
+                            }
                         }
                     }
-                } else {
-                    (
-                        false,
-                        "Envelope header unpacking failed".into(),
-                        false,
-                        false,
-                    )
                 }
             }
         }
@@ -2769,10 +2827,21 @@ fn verify_core(
     // *did* run and failed (wrong password, corrupted payload) behind the same
     // boolean as this one.
     let l3 = if !is_encrypted || password.is_some() {
-        match verify_l3_stream(host, label, password, profile) {
-            Ok(raw_size) => LevelStatus::pass(format!(
-                "Decryption and SHA-256 verified successfully (payload {raw_size} bytes)"
-            )),
+        match open_authenticated_at(
+            host,
+            adapter,
+            (ube_offset, ube_total_size, strategy_name),
+            password,
+            profile,
+            stealth_header_magic,
+            secrets.as_ref(),
+        ) {
+            Ok(mut env) => match verify_authenticated_payload(&mut env) {
+                Ok(raw_size) => LevelStatus::pass(format!(
+                    "Decryption and SHA-256 verified successfully (payload {raw_size} bytes)"
+                )),
+                Err(e) => LevelStatus::fail(e.to_string()),
+            },
             Err(e) => LevelStatus::fail(e.to_string()),
         }
     } else {
@@ -2998,5 +3067,52 @@ mod envelope_coordinate_tests {
             envelope_coordinates_agree(&header, "pe_codebits", 0, ube_total, file_len).is_ok(),
             "the scattered strategy must still be exempt"
         );
+    }
+}
+
+#[cfg(test)]
+mod pbkdf2_budget_tests {
+    use super::*;
+
+    fn stego(payload: PayloadSource<'_>, password: Option<&str>, stealth: bool) -> Vec<u8> {
+        let carrier = include_bytes!("../../tests/assets/minimal.png").to_vec();
+        let (bytes, _) = write_carrier_bytes(
+            &carrier,
+            payload,
+            &WriteOptions {
+                password,
+                stealth,
+                ..Default::default()
+            },
+            &LocalParams::default(),
+            &StructureProfile::new(),
+        )
+        .unwrap();
+        bytes
+    }
+
+    /// Locating a stealth carrier derives the magics (one PBKDF2); Level 2
+    /// derives the password material once and Level 3 reuses it. Before P1-7
+    /// Level 1, Level 2's header unpack, its trailer check and Level 3 each
+    /// repeated that work (six runs, ~300 ms for a 5-byte payload).
+    #[test]
+    fn verify_derives_the_password_pair_once_beyond_the_locator() {
+        let bytes = stego(PayloadSource::Text("p1-7"), Some("pw"), true);
+        crate::crypto::reset_pbkdf2_calls();
+        let res = verify_carrier_bytes(&bytes, Some("pw"), &StructureProfile::new()).unwrap();
+        assert!(verify_passed(&res), "{res:?}");
+        assert_eq!(crate::crypto::pbkdf2_calls(), 2, "unexpected PBKDF2 count");
+    }
+
+    /// The no-password path used to derive the profile default secret twice:
+    /// once inside Level 2's header unpack and once again to authenticate the
+    /// metadata in Level 3.
+    #[test]
+    fn verify_derives_the_default_pair_once() {
+        let bytes = stego(PayloadSource::Text("p1-7"), None, false);
+        crate::crypto::reset_pbkdf2_calls();
+        let res = verify_carrier_bytes(&bytes, None, &StructureProfile::new()).unwrap();
+        assert!(verify_passed(&res), "{res:?}");
+        assert_eq!(crate::crypto::pbkdf2_calls(), 1, "unexpected PBKDF2 count");
     }
 }

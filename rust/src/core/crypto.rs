@@ -174,6 +174,26 @@ pub fn normalize_nfc(s: &str) -> String {
     s.nfc().collect::<String>()
 }
 
+// Test-only count of PBKDF2 runs, used to prove that a single `verify` does
+// not re-derive the same (password, salt) pair per consumer (review P1-7).
+//
+// Thread-local rather than global so the rest of the test suite (which also
+// derives keys, in parallel) cannot pollute a measurement.
+#[cfg(test)]
+thread_local! {
+    static PBKDF2_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_pbkdf2_calls() {
+    PBKDF2_CALLS.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn pbkdf2_calls() -> usize {
+    PBKDF2_CALLS.with(std::cell::Cell::get)
+}
+
 /// PBKDF2 over the NFC-normalised password, followed by HKDF-SHA256 with the
 /// salt as the HKDF salt.
 ///
@@ -181,6 +201,8 @@ pub fn normalize_nfc(s: &str) -> String {
 /// iterations, 30–60 ms), and every consumer below shares the same
 /// (password, salt) pair — so it is computed exactly once per pair.
 fn derive_ikm(password: &str, salt: &[u8]) -> [u8; 32] {
+    #[cfg(test)]
+    PBKDF2_CALLS.with(|c| c.set(c.get() + 1));
     let norm_pwd = normalize_nfc(password);
     let mut ikm = [0u8; 32];
     pbkdf2::pbkdf2_hmac::<Sha256>(norm_pwd.as_bytes(), salt, PBKDF2_ITERATIONS, &mut ikm);
