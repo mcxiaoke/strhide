@@ -47,6 +47,14 @@ pub fn embed_carrier_file(
         check_overwrite(dest, target.overwrite)?;
     }
 
+    // Whole-file engines (Matroska, WAV, FLAC) hold the carrier, a rewrite
+    // copy and a decoder side table whose size scales with the file. Refuse an
+    // over-budget job here, before `fs::read` even commits the first copy, so
+    // the failure is a clear message instead of an allocator abort.
+    if let Some(format) = crate::formats::sniff::sniff_file(carrier_path)? {
+        check_buffered_embed_budget(format, carrier_meta.len())?;
+    }
+
     let carrier_bytes = std::fs::read(carrier_path)?;
     let format = crate::formats::sniff::sniff_bytes(&carrier_bytes).ok_or_else(|| {
         StrHideError::UnsupportedFormat(format!(
@@ -263,10 +271,121 @@ pub fn verify_carrier_file(
     crate::stego::verify_carrier_with_dialect(&carrier_bytes, options, dialect)
 }
 
+/// Fixed decoder/pool overhead added to every whole-file estimate.
+const BUFFERED_FIXED_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Measured peak/input ratios (private bytes, Windows): Matroska 61x on a
+/// 103.4 MB sample, WAV 2.0x on 96 MB, FLAC 2.1x on 39.7 MB. Round each up;
+/// Matroska also carries the per-slot recording table that dominates its peak.
+const MKV_PEAK_FACTOR: u64 = 64;
+const WAV_PEAK_FACTOR: u64 = 4;
+const FLAC_PEAK_FACTOR: u64 = 4;
+
+/// Embeds keep 40% of free physical memory for the WebView, OS and other
+/// jobs; this is the same 60% share the GUI admission uses.
+fn buffered_embed_budget() -> u64 {
+    crate::core::sysmem::available_physical_memory()
+        .map(|available| available.saturating_mul(3) / 5)
+        // Platforms without a memory query keep a conservative 4 GiB ceiling.
+        .unwrap_or(4 * 1024 * 1024 * 1024)
+}
+
+/// Peak estimate for a carrier the engine must buffer whole, or `None` when
+/// the format is handled by streaming patches.
+fn whole_file_peak_bytes(format: crate::formats::FileFormat, file_size: u64) -> Option<u64> {
+    let factor = match format {
+        crate::formats::FileFormat::Mkv => MKV_PEAK_FACTOR,
+        crate::formats::FileFormat::Wav => WAV_PEAK_FACTOR,
+        crate::formats::FileFormat::Flac => FLAC_PEAK_FACTOR,
+        _ => return None,
+    };
+    Some(
+        file_size
+            .saturating_mul(factor)
+            .saturating_add(BUFFERED_FIXED_BYTES),
+    )
+}
+
+pub(crate) fn check_buffered_embed_budget(
+    format: crate::formats::FileFormat,
+    file_size: u64,
+) -> Result<(), StrHideError> {
+    check_buffered_embed_budget_against(format, file_size, buffered_embed_budget())
+}
+
+fn check_buffered_embed_budget_against(
+    format: crate::formats::FileFormat,
+    file_size: u64,
+    budget: u64,
+) -> Result<(), StrHideError> {
+    let Some(peak) = whole_file_peak_bytes(format, file_size) else {
+        return Ok(());
+    };
+    if peak > budget {
+        return Err(StrHideError::Rejection(format!(
+            "Refusing to embed: this {format:?} carrier is {:.1} MiB and needs an estimated {:.1} MiB \
+             at peak, above the {:.1} MiB budget (60% of currently available physical memory). \
+             Free memory or use a smaller carrier.",
+            file_size as f64 / (1024.0 * 1024.0),
+            peak as f64 / (1024.0 * 1024.0),
+            budget as f64 / (1024.0 * 1024.0),
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::stego::{EmbedOptions, ExtractOptions};
+
+    #[test]
+    fn whole_file_peak_uses_the_measured_factors() {
+        use crate::formats::FileFormat;
+        assert_eq!(
+            whole_file_peak_bytes(FileFormat::Mkv, 12_360_000).unwrap(),
+            12_360_000 * MKV_PEAK_FACTOR + BUFFERED_FIXED_BYTES
+        );
+        assert_eq!(
+            whole_file_peak_bytes(FileFormat::Wav, 10_000_000).unwrap(),
+            10_000_000 * WAV_PEAK_FACTOR + BUFFERED_FIXED_BYTES
+        );
+        assert_eq!(
+            whole_file_peak_bytes(FileFormat::Flac, 5_000_000).unwrap(),
+            5_000_000 * FLAC_PEAK_FACTOR + BUFFERED_FIXED_BYTES
+        );
+        assert!(
+            whole_file_peak_bytes(FileFormat::Jpeg, 5_000_000).is_none(),
+            "patch engines stream instead of buffering the whole carrier"
+        );
+    }
+
+    #[test]
+    fn over_budget_carrier_is_rejected_with_the_reason() {
+        use crate::formats::FileFormat;
+        let budget = 1u64 << 30;
+        let err =
+            check_buffered_embed_budget_against(FileFormat::Mkv, 40_000_000, budget).unwrap_err();
+        match err {
+            StrHideError::Rejection(message) => {
+                assert!(
+                    message.contains("38.1 MiB"),
+                    "states the input size: {message}"
+                );
+                assert!(message.contains("budget"), "states the limit: {message}");
+            }
+            other => panic!("expected Rejection, got {other:?}"),
+        }
+
+        assert!(
+            check_buffered_embed_budget_against(FileFormat::Mkv, 12_360_000, budget).is_ok(),
+            "the 12.36 MB sample is inside a 1 GiB budget"
+        );
+        assert!(
+            check_buffered_embed_budget_against(FileFormat::Jpeg, 40_000_000, budget).is_ok(),
+            "streaming formats are never rejected by this check"
+        );
+    }
 
     #[test]
     fn unsupported_carrier_is_refused_without_touching_the_file() {
