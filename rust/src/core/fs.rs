@@ -156,6 +156,41 @@ pub fn escape_control_chars(text: &str) -> std::borrow::Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// Render attacker-controlled **payload text** safe for a terminal.
+///
+/// Same threat as [`escape_control_chars`], different constraint: an extracted
+/// payload is usually a text document, so line breaks and tabs have to survive
+/// or `extract --stdout` becomes unreadable. Everything a terminal can act on
+/// (C0/C1 controls except `\n`, `\r`, `\t`, plus the bidi overrides) is escaped
+/// as `\u{NN}`, which blocks `ESC [ ...` sequences and OSC 52 clipboard writes
+/// without touching legitimate multi-line text.
+pub fn escape_terminal_text(text: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+
+    fn is_unsafe(c: char) -> bool {
+        (c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+            || matches!(
+                c,
+                '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            )
+    }
+
+    if !text.chars().any(is_unsafe) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    for c in text.chars() {
+        if is_unsafe(c) {
+            use std::fmt::Write;
+            // Writing into a String cannot fail.
+            let _ = write!(out, "\\u{{{:x}}}", c as u32);
+        } else {
+            out.push(c);
+        }
+    }
+    Cow::Owned(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +269,22 @@ mod tests {
         assert_eq!(escape_control_chars("a\tb"), "a\tb");
         // A right-to-left override is a formatting control, not `is_control()`.
         assert_eq!(escape_control_chars("\u{202e}gpj.exe"), "\\u{202e}gpj.exe");
+    }
+
+    #[test]
+    fn payload_text_keeps_its_line_structure_but_loses_escapes() {
+        // A text payload must still print as text.
+        assert_eq!(
+            escape_terminal_text("line one\nline two\tcol\r\nend"),
+            "line one\nline two\tcol\r\nend"
+        );
+        // Terminal drivers do not: CSI, OSC 52 and the C1 CSI alias all die.
+        assert_eq!(
+            escape_terminal_text("\u{1b}[31mred\u{1b}]52;c;aGk=\u{7}"),
+            "\\u{1b}[31mred\\u{1b}]52;c;aGk=\\u{7}"
+        );
+        assert_eq!(escape_terminal_text("\u{9b}2J"), "\\u{9b}2J");
+        // Bidi overrides stay escaped, as in the hint renderer.
+        assert_eq!(escape_terminal_text("a\u{202e}b"), "a\\u{202e}b");
     }
 }

@@ -268,8 +268,14 @@ pub fn inspect_heif_bridge(
 
     match target.kind {
         BridgeTargetKind::DirectJpeg { .. } | BridgeTargetKind::ExifJpeg { .. } => {
-            let mut info =
-                jpeg::inspect_jpeg(carrier_slice, cred, domain, dialect.jpeg_format(), control)?;
+            let mut info = jpeg::inspect_jpeg(
+                carrier_slice,
+                cred,
+                domain,
+                dialect.jpeg_format(),
+                limits,
+                control,
+            )?;
             if info.has_hidden_data {
                 info.format = "HEIF (JPEG Thumbnail Bridge)".into();
             }

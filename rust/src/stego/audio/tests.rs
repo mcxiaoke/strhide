@@ -223,10 +223,15 @@ fn probe_reports_a_capacity_the_embedder_can_actually_fill() {
     assert!(info.tier_limits[0] <= info.tier_limits[1]);
     assert!(info.tier_limits[1] <= info.tier_limits[2]);
 
-    // A payload at the advertised raw capacity must actually fit.
-    let raw = vec![0x5Au8; info.max_raw_payload_bytes.min(2_000)];
+    // A payload at the advertised raw capacity must actually fit, and the
+    // result must read back. Capping this at a few kilobytes (the old
+    // `min(2_000)`) left the top of the range -- where the planner switches STC
+    // group size -- completely untested.
+    let raw: Vec<u8> = (0..info.max_raw_payload_bytes)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
     let payload = Payload::bytes(&raw);
-    embed_wav(
+    let (stego, _, _) = embed_wav(
         &cover,
         &payload,
         cred(None),
@@ -239,6 +244,16 @@ fn probe_reports_a_capacity_the_embedder_can_actually_fill() {
         &control,
     )
     .expect("advertised capacity must be embeddable");
+    let extracted = extract_wav(
+        &stego,
+        cred(None),
+        None,
+        profile(),
+        &ExtractParams::default(),
+        &control,
+    )
+    .expect("the carrier written at full capacity must extract");
+    assert_eq!(extracted, raw);
 }
 
 #[test]

@@ -161,6 +161,7 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
     let mut idat_sizes: Vec<usize> = Vec::new();
     let mut tail: Vec<u8> = Vec::new();
     let mut saw_iend = false;
+    let mut saw_ihdr = false;
 
     while pos + 8 <= data.len() {
         let len =
@@ -171,8 +172,41 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
             .checked_add(len)
             .ok_or_else(|| StrHideError::CorruptedData("PNG chunk length overflow".into()))?;
 
+        if len > MAX_CHUNK_BYTES {
+            return Err(StrHideError::CorruptedData(format!(
+                "PNG chunk '{}' at byte {pos} declares {len} bytes, above the {MAX_CHUNK_BYTES}-byte ceiling",
+                String::from_utf8_lossy(ty)
+            )));
+        }
         if body_end + 4 > data.len() {
             return Err(StrHideError::CorruptedData("Unexpected EOF in PNG".into()));
+        }
+        // Chunk types are ASCII letters by specification; anything else means
+        // the length field or the type field is already garbage.
+        if !ty.iter().all(u8::is_ascii_alphabetic) {
+            return Err(StrHideError::CorruptedData(format!(
+                "PNG chunk at byte {pos} has a non-alphabetic type field"
+            )));
+        }
+        // IHDR is required, exactly 13 bytes, and must come first: `pixel
+        // format` decisions below read width/height/colour type out of it, and
+        // a later IHDR would silently overwrite them after data was collected.
+        if ty == b"IHDR" {
+            if saw_ihdr || pos != 8 {
+                return Err(StrHideError::CorruptedData(
+                    "PNG IHDR must be the first and only image header".into(),
+                ));
+            }
+            if len != 13 {
+                return Err(StrHideError::CorruptedData(format!(
+                    "PNG IHDR is {len} bytes, expected 13"
+                )));
+            }
+            saw_ihdr = true;
+        } else if !saw_ihdr {
+            return Err(StrHideError::CorruptedData(
+                "PNG chunk found before IHDR".into(),
+            ));
         }
 
         let body = &data[body_start..body_end];
@@ -199,13 +233,18 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
         }
         match ty {
             b"IHDR" => {
-                if len < 13 {
-                    return Err(StrHideError::CorruptedData("Truncated IHDR".into()));
-                }
                 width = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
                 height = u32::from_be_bytes([body[4], body[5], body[6], body[7]]);
                 bit_depth = body[8];
                 color_type = body[9];
+                // Both methods are fixed by the specification; a file that
+                // says otherwise is not one this decoder can reproduce.
+                if body[10] != 0 || body[11] != 0 {
+                    return Err(StrHideError::UnsupportedFormat(format!(
+                        "PNG declares compression method {} / filter method {}, only 0/0 exists",
+                        body[10], body[11]
+                    )));
+                }
                 if body[12] != 0 {
                     return Err(StrHideError::UnsupportedFormat(
                         "Interlaced PNG (Adam7) is not supported for content-adaptive pixel steganography; please use non-interlaced PNG or use 'strhide write' for structural hiding"
@@ -724,9 +763,9 @@ pub fn encode_png(image: &RawImage) -> Result<Vec<u8>, StrHideError> {
         ihdr.push(0); // Compression (deflate)
         ihdr.push(0); // Filter (standard)
         ihdr.push(0); // Interlace (none)
-        write_chunk(&mut out, b"IHDR", &ihdr);
-        write_chunk(&mut out, b"IDAT", &compressed_idat);
-        write_chunk(&mut out, b"IEND", &[]);
+        write_chunk(&mut out, b"IHDR", &ihdr)?;
+        write_chunk(&mut out, b"IDAT", &compressed_idat)?;
+        write_chunk(&mut out, b"IEND", &[])?;
         out.extend_from_slice(&image.tail);
         return Ok(out);
     }
@@ -766,7 +805,7 @@ pub fn encode_png(image: &RawImage) -> Result<Vec<u8>, StrHideError> {
             if !idat_written {
                 idat_written = true;
                 for piece in &pieces {
-                    write_chunk(&mut out, b"IDAT", piece);
+                    write_chunk(&mut out, b"IDAT", piece)?;
                 }
             }
             continue;
@@ -774,17 +813,17 @@ pub fn encode_png(image: &RawImage) -> Result<Vec<u8>, StrHideError> {
         if &chunk.ty == b"IEND" {
             saw_iend = true;
         }
-        write_chunk(&mut out, &chunk.ty, &chunk.data);
+        write_chunk(&mut out, &chunk.ty, &chunk.data)?;
     }
     if !idat_written {
         // No IDAT placeholder at all (malformed source): still emit the data.
         for piece in &pieces {
-            write_chunk(&mut out, b"IDAT", piece);
+            write_chunk(&mut out, b"IDAT", piece)?;
         }
     }
     if !saw_iend {
         // Truncated source without IEND: still emit a well-formed file.
-        write_chunk(&mut out, b"IEND", &[]);
+        write_chunk(&mut out, b"IEND", &[])?;
     }
     // Producer-appended trailer (signature, vendor index, ...) goes back after
     // IEND exactly where it was found.
@@ -920,8 +959,24 @@ fn filter_row(prev: &[u8], cur: &[u8], filter: u8, bpp: usize) -> Vec<u8> {
     out
 }
 
-fn write_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
-    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+/// Longest chunk body a carrier may carry, in bytes.
+///
+/// The PNG length field is a `u32`, so anything larger cannot be expressed at
+/// all; 256 MiB is a much tighter bound that still leaves room for huge IDAT
+/// runs while keeping a corrupt length from driving a giant allocation.
+const MAX_CHUNK_BYTES: usize = 256 * 1024 * 1024;
+
+fn write_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) -> Result<(), StrHideError> {
+    // A chunk over 4 GiB used to be truncated by `as u32`, writing a length
+    // field that disagreed with the bytes that followed.
+    let len = u32::try_from(data.len()).map_err(|_| {
+        StrHideError::General(format!(
+            "PNG chunk '{}' is {} bytes, more than the format's 4 GiB length field",
+            String::from_utf8_lossy(chunk_type),
+            data.len()
+        ))
+    })?;
+    out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(chunk_type);
     out.extend_from_slice(data);
 
@@ -929,6 +984,7 @@ fn write_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
     crc.update(chunk_type);
     crc.update(data);
     out.extend_from_slice(&crc.finalize().to_be_bytes());
+    Ok(())
 }
 
 fn paeth(a: u8, b: u8, c: u8) -> u8 {
@@ -2612,9 +2668,9 @@ mod tests {
         ihdr.push(0); // compression
         ihdr.push(0); // filter method
         ihdr.push(0); // interlace
-        write_chunk(&mut out, b"IHDR", &ihdr);
+        write_chunk(&mut out, b"IHDR", &ihdr).expect("IHDR");
         for (ty, body) in ancillary {
-            write_chunk(&mut out, ty, body);
+            write_chunk(&mut out, ty, body).expect("ancillary chunk");
         }
         let stride = width as usize * 3;
         let zero_row = vec![0u8; stride];
@@ -2635,9 +2691,9 @@ mod tests {
         let parts = idat_parts.max(1);
         let chunk_len = idat.len().div_ceil(parts);
         for piece in idat.chunks(chunk_len.max(1)) {
-            write_chunk(&mut out, b"IDAT", piece);
+            write_chunk(&mut out, b"IDAT", piece).expect("IDAT");
         }
-        write_chunk(&mut out, b"IEND", &[]);
+        write_chunk(&mut out, b"IEND", &[]).expect("IEND");
         out
     }
 
@@ -3111,6 +3167,69 @@ mod tests {
         let tampered = tampered.expect("the encoder must emit a non-empty IDAT");
         assert!(matches!(
             decode_png(&tampered),
+            Err(StrHideError::CorruptedData(_))
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_structurally_impossible_chunks() {
+        let sig: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+        // 1) A chunk before IHDR. `decode_png` reads width/height out of the
+        //    header, so anything earlier means the stream is not a PNG.
+        let mut out_of_order = Vec::from(sig);
+        let text = PngChunk {
+            ty: *b"tEXt",
+            data: b"k\0v".to_vec(),
+        };
+        write_chunk(&mut out_of_order, &text.ty, &text.data).unwrap();
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&4u32.to_be_bytes());
+        ihdr.extend_from_slice(&4u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        write_chunk(&mut out_of_order, b"IHDR", &ihdr).unwrap();
+        assert!(matches!(
+            decode_png(&out_of_order),
+            Err(StrHideError::CorruptedData(_))
+        ));
+
+        // 2) IHDR with a 14-byte body.
+        let mut long_ihdr = Vec::from(sig);
+        let mut body = ihdr.clone();
+        body.push(0);
+        write_chunk(&mut long_ihdr, b"IHDR", &body).unwrap();
+        assert!(matches!(
+            decode_png(&long_ihdr),
+            Err(StrHideError::CorruptedData(_))
+        ));
+
+        // 3) A compression method other than 0.
+        let mut bad_method = Vec::from(sig);
+        let mut body = ihdr.clone();
+        body[10] = 1;
+        write_chunk(&mut bad_method, b"IHDR", &body).unwrap();
+        assert!(matches!(
+            decode_png(&bad_method),
+            Err(StrHideError::UnsupportedFormat(_))
+        ));
+
+        // 4) A declared length over the ceiling is rejected from the header
+        //    alone, without waiting for (or allocating) the body.
+        let mut huge = Vec::from(sig);
+        huge.extend_from_slice(&0x7FFF_FFFFu32.to_be_bytes());
+        huge.extend_from_slice(b"IDAT");
+        assert!(matches!(
+            decode_png(&huge),
+            Err(StrHideError::CorruptedData(_))
+        ));
+
+        // 5) A non-alphabetic chunk type.
+        let mut bad_type = Vec::from(sig);
+        bad_type.extend_from_slice(&0u32.to_be_bytes());
+        bad_type.extend_from_slice(b"IH1R");
+        bad_type.extend_from_slice(&[0, 0, 0, 0]);
+        assert!(matches!(
+            decode_png(&bad_type),
             Err(StrHideError::CorruptedData(_))
         ));
     }

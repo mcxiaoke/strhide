@@ -401,12 +401,12 @@ fn read_one(
                 )
             );
         }
-    } else if args.stdout || !res.is_file {
-        if let Ok(text) = std::str::from_utf8(&res.data) {
-            print!("{text}");
-        } else {
-            std::io::stdout().write_all(&res.data)?;
-        }
+    } else if args.stdout {
+        crate::cli::render::write_payload_stdout(&res.data, false)?;
+    } else if !res.is_file {
+        // Nothing to write to a file and no explicit `--stdout`: this is the
+        // "show me the payload" path, so the terminal gets escaped text.
+        crate::cli::render::write_payload_stdout(&res.data, true)?;
     } else {
         // Default filename in current dir; the metadata filename is untrusted
         // input, so sanitize it to a bare name (no traversal, no absolute path).

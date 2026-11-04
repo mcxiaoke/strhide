@@ -106,6 +106,32 @@ pub(crate) fn print_json<T: serde::Serialize>(val: &T) -> Result<(), StrHideErro
     Ok(())
 }
 
+/// Write an extracted payload to stdout.
+///
+/// The bytes come from whoever built the carrier, so printing them verbatim
+/// lets a crafted file drive the terminal (`CSI` cursor games, `OSC 52`
+/// clipboard writes). Two modes, because the two callers have opposite needs:
+///
+/// * `escape_on_pipe = true` for the implicit "just show me the payload"
+///   branches, which always end up on a screen.
+/// * `escape_on_pipe = false` for an explicit `--stdout`, where piping must stay
+///   byte-exact (`extract --stdout > out.bin`); only a real terminal gets the
+///   escaped text.
+pub(crate) fn write_payload_stdout(data: &[u8], escape_on_pipe: bool) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let stdout = std::io::stdout();
+    let escape = escape_on_pipe || std::io::IsTerminal::is_terminal(&stdout);
+    let mut out = stdout.lock();
+    match std::str::from_utf8(data) {
+        Ok(text) if escape => {
+            out.write_all(crate::core::fs::escape_terminal_text(text).as_bytes())?;
+        }
+        _ => out.write_all(data)?,
+    }
+    out.flush()
+}
+
 pub(crate) fn print_verify_result(res: &crate::structure::VerifyResult) {
     fn status(level: &crate::structure::LevelStatus) -> &'static str {
         if level.skipped {

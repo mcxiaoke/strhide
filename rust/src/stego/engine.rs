@@ -397,6 +397,7 @@ impl StegoEngine for JpegEngine {
             cred,
             domain,
             dialect.jpeg_format(),
+            &opts.limits,
             &opts.control,
         )
     }

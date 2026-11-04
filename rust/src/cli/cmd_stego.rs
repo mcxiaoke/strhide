@@ -3,7 +3,7 @@
 
 //! Content-domain verbs: `embed`, `extract`, `capacity`.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::core::config::FileConfig;
@@ -678,7 +678,7 @@ fn extract_one(
             );
         }
     } else if args.stdout {
-        std::io::stdout().write_all(payload.as_bytes())?;
+        crate::cli::render::write_payload_stdout(payload.as_bytes(), false)?;
     } else if let Some(raw_name) = payload.name() {
         let clean_name = crate::core::fs::sanitize_filename(raw_name);
         let dest = PathBuf::from(clean_name);
@@ -697,7 +697,10 @@ fn extract_one(
             );
         }
     } else if let Ok(text) = std::str::from_utf8(payload.as_bytes()) {
-        print!("{text}");
+        // Implicit display path: untrusted text, so the terminal gets the
+        // escaped form while ordinary line breaks stay readable.
+        let safe = crate::core::fs::escape_terminal_text(text);
+        print!("{safe}");
         if !text.ends_with('\n') {
             println!();
         }

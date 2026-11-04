@@ -1400,11 +1400,16 @@ fn read_bits(
 }
 
 /// Inspect a JPEG for the V4 superblock and stego metadata without solving trellis.
+///
+/// Carries the same `limits` as [`extract_jpeg`] on purpose: inspecting under a
+/// tightened policy used to report `has_hidden_data = true` for a carrier the
+/// extractor then refused, and it paid the full PBKDF2 cost first.
 pub fn inspect_jpeg(
     carrier_bytes: &[u8],
     cred: Credential<'_>,
     domain: Option<&str>,
     fmt: &JpegFormatProfile,
+    limits: &ExtractParams,
     control: &Control<'_>,
 ) -> Result<StegoHeaderInfo, StrHideError> {
     control.check()?;
@@ -1437,7 +1442,7 @@ pub fn inspect_jpeg(
             return Ok(empty_info);
         }
     };
-    Ok(inspect_jpeg_from(&coeffs, media_info, cred, domain, fmt, control)?.info)
+    Ok(inspect_jpeg_from(&coeffs, media_info, cred, domain, fmt, limits, control)?.info)
 }
 
 /// Header result plus the locator master needed to decrypt level 3.
@@ -1447,17 +1452,30 @@ struct JpegInspection {
 }
 
 /// Superblock inspection over already-decoded DCT coefficients.
+#[allow(clippy::too_many_arguments)]
 fn inspect_jpeg_from(
     coeffs: &JpegCoefficients,
     media_info: Option<MediaInfo>,
     cred: Credential<'_>,
     domain: Option<&str>,
     fmt: &JpegFormatProfile,
+    limits: &ExtractParams,
     control: &Control<'_>,
 ) -> Result<JpegInspection, StrHideError> {
     let mut empty_info = StegoHeaderInfo::empty("JPEG");
     empty_info.media_info = media_info;
     if coeffs.components.is_empty() {
+        return Ok(JpegInspection {
+            info: empty_info,
+            master: None,
+        });
+    }
+    // The V4 L1 cost is fixed, and the extractor refuses a policy that cannot
+    // pay it *before* any PBKDF2 work. Inspect has to refuse at the same point,
+    // or it reports a payload nobody can read after burning the 200k rounds.
+    if matches!(cred, Credential::Password(_))
+        && limits.max_pbkdf2_iterations < crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS
+    {
         return Ok(JpegInspection {
             info: empty_info,
             master: None,
@@ -1509,6 +1527,24 @@ fn inspect_jpeg_from(
     let ext_bytes = superblock.ext_len as usize;
     let hdr_n = fmt.header_slots(ext_bytes);
     if hdr_n > cover.n_total() {
+        return Ok(JpegInspection {
+            info: empty_info,
+            master: None,
+        });
+    }
+    // The same policy gate `extract_jpeg_from` applies, in the same order and
+    // before the extension area is read: inspect and extract must never
+    // disagree about whether one carrier holds a readable payload.
+    if !limits.allows_suite(superblock.suite_id)
+        || limits
+            .validate_header(
+                superblock.suite_id,
+                superblock.body_len,
+                hdr_n,
+                cover.n_total(),
+            )
+            .is_err()
+    {
         return Ok(JpegInspection {
             info: empty_info,
             master: None,
@@ -1665,6 +1701,7 @@ pub fn verify_jpeg(
         cred,
         domain,
         fmt,
+        limits,
         control,
     )?;
     let header_info = &inspection.info;

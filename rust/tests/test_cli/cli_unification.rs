@@ -81,6 +81,55 @@ fn stderr(out: &Output) -> String {
 }
 
 #[test]
+fn untrusted_payload_text_is_escaped_before_hitting_the_terminal() {
+    // The payload is written by whoever built the carrier. Printing it verbatim
+    // let a crafted file drive the terminal (CSI cursor games, OSC 52 clipboard
+    // writes), so both the structure-domain `read` and the content-domain
+    // `extract` must sanitise it while keeping ordinary line breaks.
+    let dir = scratch("unify_terminal_escape");
+    seed(&dir, &["sample.png"]);
+    let payload = "\u{1b}]52;c;SGk=\u{7}two\nlines";
+
+    let written = run(&dir, &["write", "sample.png", "-t", payload, "--no-backup"]);
+    assert_eq!(code(&written), 0, "stderr: {}", stderr(&written));
+    let read_out = run(&dir, &["read", "sample-out.png"]);
+    assert_eq!(code(&read_out), 0, "stderr: {}", stderr(&read_out));
+    let text = stdout(&read_out);
+    assert!(
+        !text.contains('\u{1b}'),
+        "structure payload must not reach the terminal raw: {text:?}"
+    );
+    assert!(
+        text.contains("\\u{1b}]52;c;SGk=\\u{7}"),
+        "the escape sequence must be rendered visibly: {text:?}"
+    );
+    assert!(
+        text.contains("two\nlines"),
+        "line breaks must survive: {text:?}"
+    );
+
+    // A 1x1 carrier has no body slots, so use a 128x128 texture for the
+    // content-domain half of this test.
+    fs::write(dir.join("big.png"), make_stego_png()).unwrap();
+    let embedded = run(
+        &dir,
+        &["embed", "big.png", "-t", payload, "-o", "stego.png"],
+    );
+    assert_eq!(code(&embedded), 0, "stderr: {}", stderr(&embedded));
+    let extracted = run(&dir, &["extract", "stego.png"]);
+    assert_eq!(code(&extracted), 0, "stderr: {}", stderr(&extracted));
+    let text = stdout(&extracted);
+    assert!(
+        !text.contains('\u{1b}'),
+        "content payload must not reach the terminal raw: {text:?}"
+    );
+    assert!(
+        text.contains("two\nlines"),
+        "content payload line breaks must survive: {text:?}"
+    );
+}
+
+#[test]
 fn write_default_output_naming_and_integrity() {
     let dir = scratch("unify_write_default");
     seed(&dir, &["sample.png"]);
@@ -103,7 +152,7 @@ fn write_default_output_naming_and_integrity() {
     let out_file = dir.join("sample-out.png");
     assert!(out_file.exists(), "sample-out.png was not created");
 
-    let read_out = run(&dir, &["read", "sample-out.png", "--stdout"]);
+    let read_out = run(&dir, &["read", "sample-out.png"]);
     assert_eq!(code(&read_out), 0, "stderr: {}", stderr(&read_out));
     assert_eq!(stdout(&read_out), "hello world");
 }
@@ -210,7 +259,7 @@ fn write_refuses_to_overwrite_existing_file_without_flag() {
         &["write", "sample.png", "-t", "secret", "--overwrite"],
     );
     assert_eq!(code(&out_force), 0, "stderr: {}", stderr(&out_force));
-    let read_out = run(&dir, &["read", "sample-out.png", "--stdout"]);
+    let read_out = run(&dir, &["read", "sample-out.png"]);
     assert_eq!(stdout(&read_out), "secret");
 }
 

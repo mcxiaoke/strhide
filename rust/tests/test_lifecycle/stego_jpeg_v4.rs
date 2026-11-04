@@ -217,6 +217,91 @@ fn v4_wrong_password_and_clean_carrier_are_indistinguishable() {
 }
 
 #[test]
+fn v4_inspect_and_extract_agree_under_a_tightened_policy() {
+    // P1-1: inspect used to ignore `max_payload_bytes`/`allowed_suites` while
+    // extract enforced them, so a tightened policy produced "inspect says yes,
+    // extract says no" on the same carrier -- after inspect had already paid
+    // the 200k-round PBKDF2.
+    use strhide::stego::params::ExtractParams;
+
+    let stego = embed_carrier(CARRIER, &Payload::bytes(PAYLOAD), &credits()).expect("embed");
+    let tight = ExtractParams {
+        max_payload_bytes: 1,
+        ..ExtractParams::default()
+    };
+
+    let open = inspect_carrier(
+        &stego,
+        &InspectOptions {
+            password: Some(PASSWORD),
+            ..Default::default()
+        },
+    )
+    .expect("inspect with the default policy");
+    assert!(open.has_hidden_data);
+
+    let refused = inspect_carrier(
+        &stego,
+        &InspectOptions {
+            password: Some(PASSWORD),
+            limits: tight.clone(),
+            ..Default::default()
+        },
+    )
+    .expect("inspect with a tight policy");
+    assert!(
+        !refused.has_hidden_data,
+        "inspect must not advertise a payload the extractor refuses"
+    );
+
+    let extracted = extract_carrier(
+        &stego,
+        &ExtractOptions {
+            password: Some(PASSWORD),
+            limits: tight,
+            ..Default::default()
+        },
+    )
+    .expect_err("extract under the same tight policy");
+    assert!(
+        matches!(extracted, StrHideError::NoHiddenData(_)),
+        "extract must collapse to NoHiddenData: {extracted:?}"
+    );
+
+    // Same disagreement check for the PBKDF2 ceiling: both ends refuse before
+    // doing any key derivation.
+    let low_kdf = ExtractParams {
+        max_pbkdf2_iterations: 1_000,
+        ..ExtractParams::default()
+    };
+    let refused = inspect_carrier(
+        &stego,
+        &InspectOptions {
+            password: Some(PASSWORD),
+            limits: low_kdf.clone(),
+            ..Default::default()
+        },
+    )
+    .expect("inspect with a low KDF ceiling");
+    assert!(
+        !refused.has_hidden_data,
+        "inspect must honour the KDF ceiling"
+    );
+    assert!(
+        extract_carrier(
+            &stego,
+            &ExtractOptions {
+                password: Some(PASSWORD),
+                limits: low_kdf,
+                ..Default::default()
+            },
+        )
+        .is_err(),
+        "extract must refuse the same carrier"
+    );
+}
+
+#[test]
 fn v4_verify_explains_levels_and_wrong_password_fails_l2() {
     let stego = embed_carrier(CARRIER, &Payload::bytes(PAYLOAD), &credits()).expect("embed");
 
