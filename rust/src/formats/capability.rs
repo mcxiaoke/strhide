@@ -213,7 +213,7 @@ pub static CAPABILITIES: &[Capability] = &[
         #[cfg(not(feature = "structure-base"))]
         structure: &[],
         stego: &[],
-        extensions: &["exe", "dll"],
+        extensions: &["exe", "dll", "sys", "scr"],
         memory: MemoryProfile::Streaming,
     },
     Capability {

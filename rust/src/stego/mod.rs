@@ -90,7 +90,8 @@ pub use registry::{
 static INIT_DEFAULT_POOL: std::sync::Once = std::sync::Once::new();
 
 /// Computes the default worker thread count from the total available parallelism:
-/// minimum 4, maximum half of the total cores, clamped to `total`.
+/// 4 when `total` is at least 4 but below 8, otherwise half of the total cores,
+/// clamped to `total` (so a 4-core machine gets 4 workers, not 2).
 #[inline]
 pub fn compute_default_threads(total: usize) -> usize {
     if total == 0 {
