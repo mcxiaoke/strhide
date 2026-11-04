@@ -201,12 +201,13 @@ fn max_body_slots_within_pipeline(base_bytes: u64, h: u8) -> usize {
     usize::try_from(remaining / bytes_per_slot).unwrap_or(usize::MAX)
 }
 
-/// Optional tracing enabled with `STRHIDE_STEGO_TRACE=1`.
+/// No-op tracer hook.
 ///
-/// Deliberately stderr-only and off by default: the library has no logging
-/// dependency, and the matrix script is the main consumer.
+/// Callers pass `format_args!` rather than `format!`: building the message
+/// eagerly heap-allocated on every embed/extract even though this build never
+/// emits it (review P2-14).
 #[inline(always)]
-fn trace(_msg: &str) {}
+fn trace(_args: std::fmt::Arguments<'_>) {}
 
 /// Everything both ends derive from the carrier alone.
 struct CoverFrame {
@@ -779,7 +780,7 @@ pub fn embed_jpeg_with_stats<'a>(
             attempt_idx as u32,
         ) {
             Ok(bytes) => {
-                trace(&format!("attempt {attempt_idx}/{EMBED_ATTEMPTS} ok"));
+                trace(format_args!("attempt {attempt_idx}/{EMBED_ATTEMPTS} ok"));
                 let stats = crate::stego::EmbedStats {
                     modified_slots: applied.len(),
                     total_candidate_slots: cover.n_total,
@@ -787,7 +788,7 @@ pub fn embed_jpeg_with_stats<'a>(
                 return Ok((bytes, stats, capacity_info));
             }
             Err(attempt) => {
-                trace(&format!(
+                trace(format_args!(
                     "attempt {attempt_idx}/{EMBED_ATTEMPTS} retryable={} error={}",
                     attempt.retryable, attempt.error
                 ));
@@ -1039,7 +1040,7 @@ fn embed_once(
     if let Some(table) = ctx.table
         && let Some((symbol, block, bad_blocks)) = missing_symbol_stats(&*work, &touched, table)
     {
-        trace(&format!(
+        trace(format_args!(
             "missing symbol {} in block {block}; {bad_blocks} bad block(s)",
             dht::describe_symbol(symbol)
         ));
@@ -1964,6 +1965,20 @@ mod v4_regressions {
     use crate::stego::params::{ExtractParams, JpegParams, SafetyPolicy};
 
     const CARRIER: &[u8] = include_bytes!("../../../tests/assets/small.jpg");
+
+    #[test]
+    fn trace_call_sites_do_not_format_eagerly() {
+        // `trace` is a no-op outside tracing builds. Passing `format!` to it
+        // built the message unconditionally, heap allocation included
+        // (review P2-14); `format_args!` defers that work.
+        let source = include_str!("engine.rs");
+        // Split so this test's own source does not contain the needle.
+        let eager_pattern = concat!("trace", "(&format!(");
+        assert!(
+            !source.contains(eager_pattern),
+            "trace must receive format_args!, not an eagerly formatted String"
+        );
+    }
 
     fn decode_debug(stego: &[u8]) -> (JpegCoefficients, Vec<u32>, JpegSuperblockV4, Vec<u8>) {
         let fmt = &crate::stego::format::DEFAULT_JPEG_FORMAT;

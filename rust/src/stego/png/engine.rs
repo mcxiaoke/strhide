@@ -756,7 +756,7 @@ pub fn encode_png(image: &RawImage) -> Result<Vec<u8>, StrHideError> {
     if let Some(info) = image.idat_info {
         let delta = (compressed_idat.len() as f64 - info.orig_len as f64) * 100.0
             / info.orig_len.max(1) as f64;
-        trace(&format!(
+        trace(format_args!(
             "idat orig={} final={} delta={delta:+.2}% level={level} flevel={} probe_l1={} probe_l6={}",
             info.orig_len,
             compressed_idat.len(),
@@ -953,12 +953,13 @@ fn deflate_len(data: &[u8], level: u32) -> usize {
     encoder.finish().map(|v| v.len()).unwrap_or(usize::MAX)
 }
 
-/// Optional tracing enabled with `STRHIDE_STEGO_TRACE=1`.
+/// No-op tracer hook, mirroring the JPEG engine's `[stego]` lines.
 ///
-/// Deliberately stderr-only and off by default, mirroring the JPEG engine's
-/// `[stego]` lines; the `[png]` prefix says which carrier produced the line.
+/// Callers pass `format_args!` rather than `format!`: building the message
+/// eagerly heap-allocated on every embed/extract even though this build never
+/// emits it (review P2-14).
 #[inline(always)]
-fn trace(_msg: &str) {}
+fn trace(_args: std::fmt::Arguments<'_>) {}
 
 /// Apply PNG filter `filter` to one reconstructed scanline (`cur`), given
 /// the previous reconstructed row (`prev`). Inverse of the unfilter step in
@@ -1608,7 +1609,7 @@ pub fn embed_png_with_stats<'a>(
         )));
     };
 
-    trace(&format!(
+    trace(format_args!(
         "plan pool_green={pool_green} pool_max={pool_max} mode={mode:?} codec={resolved_codec:?} u={resolved_u}"
     ));
 
@@ -2023,7 +2024,7 @@ fn extract_png_with_keys(
         .ok_or_else(no_hidden)?;
     if resolved.id() != cost_model.id() {
         // The carrier is authoritative; the caller's choice is only a hint.
-        trace(&format!(
+        trace(format_args!(
             "carrier declares '{}', caller asked for '{}': using the carrier's",
             resolved.id(),
             cost_model.id()
@@ -2112,7 +2113,7 @@ fn extract_png_with_keys(
     // `count_body_slots` pass only doubled the scan without changing the
     // verdict.
     let mut body_slots = plan.body_slots_upto(image, header.class_rule, mode, needed_body_slots);
-    trace(&format!(
+    trace(format_args!(
         "extract mode={:?} class_rule={} body_len={ciphertext_len} needed={needed_body_slots} pool={}",
         mode,
         header.class_rule,
@@ -2562,6 +2563,20 @@ mod tests {
     use super::*;
     use crate::stego::params::PngParams;
     use crate::stego::png::cost::HillCostModel;
+
+    #[test]
+    fn trace_call_sites_do_not_format_eagerly() {
+        // `trace` is a no-op outside tracing builds. Passing `format!` to it
+        // built the message unconditionally, heap allocation included
+        // (review P2-14); `format_args!` defers that work.
+        let source = include_str!("engine.rs");
+        // Split so this test's own source does not contain the needle.
+        let eager_pattern = concat!("trace", "(&format!(");
+        assert!(
+            !source.contains(eager_pattern),
+            "trace must receive format_args!, not an eagerly formatted String"
+        );
+    }
 
     /// Test-side credential shim: the pre-V4 tests pass `None` to mean the
     /// profile's public fallback secret, which V4 expresses as a password
