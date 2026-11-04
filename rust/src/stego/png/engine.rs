@@ -4023,6 +4023,58 @@ mod tests {
         );
     }
 
+    /// Evidence for LOGIC-07 (P2-22): the candidate pool is keyed on the
+    /// header channel (green), but `for_each_body_slot` re-checks **each**
+    /// body channel against the same `[8, 247]` rule. So R/B values are never
+    /// written outside the eligible class, and a pixel whose green is out of
+    /// range is simply not a candidate -- a capacity asymmetry that embed and
+    /// extract share, not a corruption path.
+    #[test]
+    fn rgb_body_slots_filter_each_channel_but_share_the_green_candidate_pool() {
+        let image = RawImage {
+            width: 4,
+            height: 1,
+            channels: 3,
+            bit_depth: 8,
+            color_type: 2,
+            pixels: vec![
+                0, 100, 100, // R ineligible, B eligible
+                100, 0, 100, // green ineligible: whole pixel is not a candidate
+                100, 100, 0, // R eligible, B ineligible
+                0, 0, 0, // nothing eligible
+            ],
+            chunks: Vec::new(),
+            idat_sizes: Vec::new(),
+            row_filters: vec![0],
+            idat_info: None,
+            tail: Vec::new(),
+        };
+
+        // Pixel 1 carries legal R/B values but fails the green precondition,
+        // so it never enters the candidate pool (the reported "miss").
+        assert_eq!(header_pool(&image), vec![0, 2]);
+
+        let params = PngParams {
+            exclusion_percentile: 0.0,
+            ..PngParams::default()
+        };
+        let costs = vec![0.0; image.width as usize];
+        let seed = [7u8; 32];
+        let plan = SlotPlan::build(&image, &costs, &params, &seed, 0).expect("plan");
+        assert_eq!(plan.candidates, vec![0, 2]);
+
+        // Both candidates are header pixels, so their green slots are
+        // reserved; only the per-channel-eligible R/B slots remain.
+        let slots = plan.body_slots_upto(&image, 0, ChannelMode::Rgb, usize::MAX);
+        assert_eq!(slots, vec![2, 6], "only the eligible R/B slots are used");
+        for slot in slots {
+            assert!(
+                (SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&image.pixels[slot]),
+                "every body slot must stay class-interior"
+            );
+        }
+    }
+
     #[test]
     fn unknown_channel_modes_are_rejected() {
         assert_eq!(ChannelMode::from_wire(0), Some(ChannelMode::Green));
