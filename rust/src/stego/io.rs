@@ -267,11 +267,14 @@ pub fn verify_carrier_file(
 const BUFFERED_FIXED_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Measured peak/input ratios (private bytes, Windows) for the audio carriers
-/// the engine rewrites whole: WAV 2.0x on 96 MB, FLAC 2.1x on 39.7 MB. Round
-/// each up. Matroska is deliberately absent: its peak is set by the HEVC
-/// recording window, not by the file size (see `hevc::estimate_embed_peak_bytes`).
-const WAV_PEAK_FACTOR: u64 = 4;
-const FLAC_PEAK_FACTOR: u64 = 4;
+/// the engine rewrites whole: WAV 2.06x on 11.5 MB, 2.02x on 96 MB, 2.01x on
+/// 366 MB; FLAC 2.01x on 39.7 MB. The peak is exactly the carrier plus one
+/// rewrite copy (`carrier.to_vec()`), so 5/2 keeps ~20% headroom instead of
+/// the 2x margin a factor of 4 charged. Matroska is deliberately absent: its
+/// peak is set by the HEVC recording window, not by the file size (see
+/// `hevc::estimate_embed_peak_bytes`).
+const WAV_PEAK: (u64, u64) = (5, 2);
+const FLAC_PEAK: (u64, u64) = (5, 2);
 
 /// Embeds keep 40% of free physical memory for the WebView, OS and other
 /// jobs; this is the same 60% share the GUI admission uses.
@@ -285,14 +288,15 @@ fn buffered_embed_budget() -> u64 {
 /// Peak estimate for a carrier with no recording window to bound the work,
 /// or `None` for formats that are not buffered whole.
 fn whole_file_peak_bytes(format: crate::formats::FileFormat, file_size: u64) -> Option<u64> {
-    let factor = match format {
-        crate::formats::FileFormat::Wav => WAV_PEAK_FACTOR,
-        crate::formats::FileFormat::Flac => FLAC_PEAK_FACTOR,
+    let (num, den) = match format {
+        crate::formats::FileFormat::Wav => WAV_PEAK,
+        crate::formats::FileFormat::Flac => FLAC_PEAK,
         _ => return None,
     };
     Some(
         file_size
-            .saturating_mul(factor)
+            .saturating_mul(num)
+            .saturating_div(den)
             .saturating_add(BUFFERED_FIXED_BYTES),
     )
 }
@@ -435,11 +439,11 @@ mod tests {
         use crate::formats::FileFormat;
         assert_eq!(
             whole_file_peak_bytes(FileFormat::Wav, 10_000_000).unwrap(),
-            10_000_000 * WAV_PEAK_FACTOR + BUFFERED_FIXED_BYTES
+            25_000_000 + BUFFERED_FIXED_BYTES
         );
         assert_eq!(
             whole_file_peak_bytes(FileFormat::Flac, 5_000_000).unwrap(),
-            5_000_000 * FLAC_PEAK_FACTOR + BUFFERED_FIXED_BYTES
+            12_500_000 + BUFFERED_FIXED_BYTES
         );
         // Matroska peaks with the HEVC recording window, not with the file;
         // a whole-file factor here was what rejected a 429.5 MB film by 12x.
@@ -458,11 +462,11 @@ mod tests {
         use crate::formats::FileFormat;
         let budget = 1u64 << 30;
         let err =
-            check_buffered_embed_budget_against(FileFormat::Wav, 400_000_000, budget).unwrap_err();
+            check_buffered_embed_budget_against(FileFormat::Wav, 450_000_000, budget).unwrap_err();
         match err {
             StrHideError::Rejection(message) => {
                 assert!(
-                    message.contains("381.5 MiB"),
+                    message.contains("429.2 MiB"),
                     "states the input size: {message}"
                 );
                 assert!(message.contains("budget"), "states the limit: {message}");
@@ -470,6 +474,10 @@ mod tests {
             other => panic!("expected Rejection, got {other:?}"),
         }
 
+        assert!(
+            check_buffered_embed_budget_against(FileFormat::Wav, 400_000_000, budget).is_ok(),
+            "measured peak is 2x, not 4x: a 400 MB WAV fits where the old factor refused it"
+        );
         assert!(
             check_buffered_embed_budget_against(FileFormat::Flac, 40_000_000, budget).is_ok(),
             "a 40 MB FLAC sample is inside a 1 GiB budget"
