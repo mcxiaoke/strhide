@@ -1681,6 +1681,21 @@ fn open_and_authenticate_envelope<'a>(
     })
 }
 
+/// Upper bound on the payload a carrier of `carrier_len` bytes may declare.
+///
+/// `MAX_VERIFY_PAYLOAD_SIZE` (1 GiB) used to be the only check, and it ran *after*
+/// the whole ciphertext had been decrypted into memory. A small carrier holding
+/// a high-ratio compressed stream could therefore make the reader allocate up to
+/// 1 GiB before rejecting anything. Scale the limit with the physical carrier
+/// size instead, keep a 64 MiB floor for legitimate payloads in small carriers,
+/// and keep the absolute cap as the ceiling.
+fn structure_payload_limit(carrier_len: u64) -> u64 {
+    const FLOOR: u64 = 64 * 1024 * 1024;
+    carrier_len
+        .saturating_mul(256)
+        .clamp(FLOOR, crate::crypto::MAX_VERIFY_PAYLOAD_SIZE)
+}
+
 /// Locate, authenticate and decrypt the envelope in `host`.
 ///
 /// `label` only appears in error messages ("'photo.png'" vs "'<memory>'").
@@ -1690,7 +1705,29 @@ fn read_core(
     password: Option<&str>,
     profile: &StructureProfile,
 ) -> Result<ReadCore, StrHideError> {
+    // Captured before the envelope reader borrows `host`; `open_and_authenticate`
+    // seeks around while locating the envelope.
+    let carrier_len = host.seek(SeekFrom::End(0))?;
     let mut env = open_and_authenticate_envelope(host, label, password, profile)?;
+
+    // Bound the declared output size *before* decrypting: the chunk ciphertext
+    // itself is already bounded by the carrier, but `raw_size` drives the
+    // decompression buffer and is only protected by the (public-key) metadata
+    // seal on non-password envelopes. One MiB of slack covers chunk framing for
+    // a genuinely large uncompressed payload.
+    let max_safe_size = structure_payload_limit(carrier_len);
+    if env.meta_obj.raw_size > max_safe_size {
+        return Err(StrHideError::General(format!(
+            "Declared payload size ({} bytes) exceeds the safe decompression limit ({} bytes)",
+            env.meta_obj.raw_size, max_safe_size
+        )));
+    }
+    if env.total_payload_bytes > max_safe_size.saturating_add(1 << 20) {
+        return Err(StrHideError::General(format!(
+            "Envelope payload stream ({} bytes) exceeds the safe decompression limit ({} bytes)",
+            env.total_payload_bytes, max_safe_size
+        )));
+    }
 
     let mut decrypted_payload = Vec::new();
     decrypt_stream_from_chunks(
@@ -1701,14 +1738,6 @@ fn read_core(
         &env.aad,
         env.total_payload_bytes,
     )?;
-
-    let max_safe_size = crate::crypto::MAX_VERIFY_PAYLOAD_SIZE;
-    if env.meta_obj.raw_size > max_safe_size {
-        return Err(StrHideError::General(format!(
-            "Declared payload size ({} bytes) exceeds the safe decompression limit ({} bytes)",
-            env.meta_obj.raw_size, max_safe_size
-        )));
-    }
 
     let data = if env.header.is_compressed() {
         let mut decomp = Vec::with_capacity(env.meta_obj.raw_size.min(1024 * 1024) as usize);

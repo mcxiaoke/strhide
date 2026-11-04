@@ -118,6 +118,52 @@ fn forged_eof_envelope_size_is_rejected_without_allocating() {
     assert_forged_envelope_is_inert(&stego, "eof");
 }
 
+/// A legitimate envelope can still declare a high-ratio compressed payload.
+/// Before the fix `raw_size` was only checked against the 1 GiB absolute cap
+/// *after* decrypting, so a tiny carrier could force the reader to decrypt and
+/// then start decompressing up to 1 GiB. The limit must now be derived from the
+/// physical carrier size and checked before decryption.
+#[test]
+fn oversized_declared_payload_is_rejected_before_decrypt() {
+    let dir = scratch("forge_declared_size");
+    let carrier = dir.join("carrier.png");
+    fs::write(&carrier, make_png()).unwrap();
+    // Compresses to well under 100 KiB, so the envelope easily fits in the PNG
+    // while `raw_size` is above the 64 MiB floor of the dynamic limit.
+    let payload = vec![0u8; 65 * 1024 * 1024];
+    let stego = dir.join("stego.png");
+    write_carrier(
+        &carrier,
+        PayloadSource::Bytes(&payload),
+        &WriteOptions {
+            output_path: Some(&stego),
+            strategy: "eof",
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        fs::metadata(&stego).unwrap().len() < 1024 * 1024,
+        "test payload should compress into a small envelope"
+    );
+
+    let out = dir.join("out.bin");
+    let err = read_carrier(
+        &stego,
+        &ReadOptions {
+            output_path: Some(&out),
+            ..Default::default()
+        },
+    )
+    .expect_err("a 65 MiB declared payload must not be decrypted from a tiny carrier");
+    let err = err.to_string().to_lowercase();
+    assert!(
+        err.contains("decompression limit"),
+        "unexpected error: {err}"
+    );
+}
+
 #[test]
 fn forged_ebml_void_envelope_size_is_rejected_without_allocating() {
     let dir = scratch("forge_mkv");

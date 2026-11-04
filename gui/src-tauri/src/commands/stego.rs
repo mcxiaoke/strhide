@@ -314,6 +314,26 @@ pub async fn extract_stego_file_cmd(
     .await
 }
 
+/// Bare file name to use for a payload whose recorded name is attacker input.
+///
+/// The envelope metadata (especially for unencrypted envelopes) is untrusted:
+/// a name like `../../evil.sh` must never escape the directory the user picked.
+/// `sanitize_filename` keeps only the last path component, rejects drive
+/// prefixes, control characters and Windows device names, so joining it to the
+/// destination cannot traverse outside it.
+fn safe_output_filename(name: Option<&str>, is_file: bool) -> String {
+    name.map(strhide::structure::engine::sanitize_filename)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| {
+            (if is_file {
+                "payload.bin"
+            } else {
+                "payload.txt"
+            })
+            .to_string()
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn smart_extract_impl(
     state: &GuiState,
@@ -375,14 +395,7 @@ pub async fn smart_extract_impl(
 
         let is_file = payload.kind == PayloadKind::File;
         let is_encrypted = outcome.is_encrypted;
-        let filename = payload.name.clone().unwrap_or_else(|| {
-            (if is_file {
-                "payload.bin"
-            } else {
-                "payload.txt"
-            })
-            .to_string()
-        });
+        let filename = safe_output_filename(payload.name.as_deref(), is_file);
         let raw_size = payload.data.len() as u64;
 
         let is_text = !is_file && payload.data.len() <= 64 * 1024;
@@ -511,4 +524,43 @@ pub async fn smart_extract_cmd(
         on_progress,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_output_filename;
+
+    #[test]
+    fn smart_extract_recorded_filename_cannot_traverse() {
+        for recorded in [
+            "../../evil.sh",
+            r"..\..\Windows\evil.dll",
+            "sub/dir/evil.bin",
+            "C:evil.txt",
+            "..",
+            ".",
+            "CON.txt",
+            "\u{1b}[31mevil.txt",
+            "/absolute/evil.txt",
+        ] {
+            let name = safe_output_filename(Some(recorded), true);
+            assert!(
+                !name.contains('/') && !name.contains('\\') && !name.contains(':'),
+                "recorded name {recorded:?} produced a path-like output {name:?}"
+            );
+            assert_ne!(name, "..", "recorded name {recorded:?} escaped to ..");
+            assert!(
+                !name.starts_with(".."),
+                "recorded name {recorded:?} kept a parent prefix: {name:?}"
+            );
+        }
+        assert_eq!(safe_output_filename(Some("../../evil.sh"), true), "evil.sh");
+        assert_eq!(
+            safe_output_filename(Some(r"..\..\Windows\evil.dll"), true),
+            "evil.dll"
+        );
+        assert_eq!(safe_output_filename(Some("CON.txt"), true), "_CON.txt");
+        assert_eq!(safe_output_filename(None, true), "payload.bin");
+        assert_eq!(safe_output_filename(None, false), "payload.txt");
+    }
 }
