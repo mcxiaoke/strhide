@@ -1,12 +1,14 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::async_runtime::block_on;
 use tauri::ipc::Channel;
 
 use strhide_gui_lib::commands::PayloadInputDto;
+use strhide_gui_lib::commands::batch::{BatchJobSpec, run_batch_job_impl};
 use strhide_gui_lib::commands::diag::inspect_carrier_impl;
 use strhide_gui_lib::commands::stego::{
     StegoEmbedRequest, embed_stego_file_impl, smart_extract_impl,
@@ -15,7 +17,7 @@ use strhide_gui_lib::commands::structure::{
     StructureWriteRequest, read_structure_file_impl, restore_structure_file_impl,
     write_structure_file_impl,
 };
-use strhide_gui_lib::state::GuiState;
+use strhide_gui_lib::state::{GuiState, ProgressEvent};
 
 fn find_cli_bin() -> PathBuf {
     if let Ok(p) = std::env::var("STRHIDE_CLI_PATH") {
@@ -238,6 +240,72 @@ fn test_cross_content_cli_embed_gui_extract() {
         let dual = inspect_res.unwrap();
         assert!(dual.content.is_some(), "content stego should be present");
         assert!(dual.content.unwrap().has_hidden_data);
+
+        let _ = fs::remove_dir_all(&dir);
+    });
+}
+
+/// A batch of N items must push exactly N `batch`-stage events through the
+/// same channel the GUI progress bar consumes; a failed item still counts
+/// because otherwise the bar never reaches 100%.
+#[test]
+fn test_cross_batch_reports_one_progress_event_per_item() {
+    block_on(async {
+        let state = GuiState::default();
+        let dir = temp_dir("batch_progress");
+        let carrier_src = find_carrier("carrier.jpg");
+        let first = dir.join("a.jpg");
+        let second = dir.join("b.jpg");
+        fs::copy(&carrier_src, &first).unwrap();
+        fs::copy(&carrier_src, &second).unwrap();
+        let missing = dir.join("missing.jpg");
+
+        let events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let sink = Arc::clone(&events);
+        let channel: Channel<ProgressEvent> = Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(text) = body
+                && let Ok(event) = serde_json::from_str::<serde_json::Value>(&text)
+            {
+                sink.lock().unwrap().push(event);
+            }
+            Ok(())
+        });
+
+        let job = BatchJobSpec {
+            job_type: "inspect".into(),
+            password: None,
+            domain: None,
+            continue_on_error: true,
+            max_concurrency: 2,
+        };
+        let outcome = run_batch_job_impl(
+            &state,
+            "task-batch-progress".into(),
+            vec![first, second, missing],
+            job,
+            channel,
+        )
+        .await
+        .expect("batch job");
+
+        assert_eq!(outcome.items.len(), 3);
+        assert_eq!(outcome.failed, 1, "the missing carrier must fail one item");
+        let batch: Vec<serde_json::Value> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event["stage"] == "batch")
+            .cloned()
+            .collect();
+        assert_eq!(batch.len(), 3, "one event per item, failure included");
+        assert!(batch.iter().all(|event| event["total"].as_u64() == Some(3)));
+        assert_eq!(
+            batch
+                .iter()
+                .filter_map(|event| event["done"].as_u64())
+                .max(),
+            Some(3)
+        );
 
         let _ = fs::remove_dir_all(&dir);
     });

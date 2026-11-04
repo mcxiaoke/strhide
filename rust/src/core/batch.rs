@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::control::{CancelToken, Control};
+use crate::core::control::{CancelToken, Control, Event, Progress, Stage};
 use crate::errors::{ErrorDetail, StrHideError};
 
 /// Configuration and control policy for a batch run.
@@ -59,8 +59,18 @@ pub struct BatchOutcome<R> {
 
 /// Execute `worker` against each item in `items` according to `plan`.
 ///
+/// `progress` receives one [`Stage::Batch`] event per finished item (success
+/// or failure), with `done` counting completed items and `total` the item
+/// count. Per-item engines also report their own stage events through the
+/// [`Control`] handed to `worker`.
+///
 /// Pure library operation with zero stdout/stderr output.
-pub fn run_batch<T, R, F>(items: &[T], plan: &BatchPlan, worker: F) -> BatchOutcome<R>
+pub fn run_batch<T, R, F>(
+    items: &[T],
+    plan: &BatchPlan,
+    progress: &dyn Progress,
+    worker: F,
+) -> BatchOutcome<R>
 where
     T: AsRef<Path> + Sync,
     R: Send + 'static,
@@ -86,6 +96,7 @@ where
 
     let stopped = AtomicBool::new(false);
     let cancelled_flag = AtomicBool::new(false);
+    let completed = AtomicUsize::new(0);
 
     let outcomes = std::sync::Mutex::new(
         (0..total)
@@ -104,9 +115,9 @@ where
             }
 
             let path = item.as_ref();
-            let ctrl = match &plan.cancel {
-                Some(tok) => Control::with_cancel(tok),
-                None => Control::none(),
+            let ctrl = Control {
+                progress,
+                cancel: plan.cancel.as_deref(),
             };
 
             let start = Instant::now();
@@ -126,6 +137,12 @@ where
             };
 
             outcomes.lock().unwrap()[idx] = Some(outcome);
+            let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
+            progress.report(Event::progress(
+                Stage::Batch,
+                done as u64,
+                Some(total as u64),
+            ));
 
             if is_err && !plan.continue_on_error {
                 stopped.store(true, Ordering::SeqCst);
@@ -153,9 +170,9 @@ where
                         }
 
                         let path = items[idx].as_ref();
-                        let ctrl = match &plan.cancel {
-                            Some(tok) => Control::with_cancel(tok),
-                            None => Control::none(),
+                        let ctrl = Control {
+                            progress,
+                            cancel: plan.cancel.as_deref(),
                         };
 
                         let start = Instant::now();
@@ -175,6 +192,12 @@ where
                         };
 
                         outcomes.lock().unwrap()[idx] = Some(outcome);
+                        let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                        progress.report(Event::progress(
+                            Stage::Batch,
+                            done as u64,
+                            Some(total as u64),
+                        ));
 
                         if is_err && !plan.continue_on_error {
                             stopped.store(true, Ordering::SeqCst);
@@ -213,6 +236,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::control::NoProgress;
 
     #[test]
     fn batch_continues_on_error_when_flagged() {
@@ -226,7 +250,7 @@ mod tests {
             ctx: None,
         };
 
-        let outcome = run_batch(&items, &plan, |idx, _path, _ctrl| {
+        let outcome = run_batch(&items, &plan, &NoProgress, |idx, _path, _ctrl| {
             if idx == 2 {
                 Err(StrHideError::General("item 2 failed".into()))
             } else {
@@ -254,7 +278,7 @@ mod tests {
             ctx: None,
         };
 
-        let outcome = run_batch(&items, &plan, |idx, _path, _ctrl| {
+        let outcome = run_batch(&items, &plan, &NoProgress, |idx, _path, _ctrl| {
             if idx == 2 {
                 Err(StrHideError::General("item 2 failed".into()))
             } else {
@@ -279,9 +303,57 @@ mod tests {
             ctx: None,
         };
 
-        let outcome = run_batch(&items, &plan, |idx, _path, _ctrl| Ok(idx));
+        let outcome = run_batch(&items, &plan, &NoProgress, |idx, _path, _ctrl| Ok(idx));
         assert_eq!(outcome.items.len(), 20);
         assert_eq!(outcome.succeeded, 20);
         assert_eq!(outcome.failed, 0);
+    }
+
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<Event>>);
+
+    impl Progress for Recorder {
+        fn report(&self, event: Event) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    /// A batch of two or more items must announce every finished item, failures
+    /// included: the GUI progress bar is driven by this count, and a failed
+    /// item that reported nothing would leave the bar short of 100%.
+    #[test]
+    fn batch_reports_one_event_per_item_including_failures() {
+        let items: Vec<PathBuf> = (0..8).map(|i| PathBuf::from(format!("item_{i}"))).collect();
+        let plan = BatchPlan {
+            continue_on_error: true,
+            max_concurrency: 1,
+            cancel: None,
+            ctx: None,
+        };
+        let recorder = Recorder::default();
+
+        let outcome = run_batch(&items, &plan, &recorder, |idx, _path, _ctrl| {
+            if idx % 3 == 0 {
+                Err(StrHideError::General("failed".into()))
+            } else {
+                Ok(idx)
+            }
+        });
+
+        assert_eq!(outcome.items.len(), 8);
+        assert_eq!(outcome.failed, 3);
+        let batch: Vec<Event> = recorder
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|event| event.stage == Stage::Batch)
+            .collect();
+        assert_eq!(batch.len(), 8, "one event per item, failures included");
+        for (n, event) in batch.iter().enumerate() {
+            assert_eq!(event.total, Some(8));
+            assert_eq!(event.done, n as u64 + 1);
+        }
     }
 }

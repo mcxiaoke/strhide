@@ -155,7 +155,7 @@ export interface ReadSummary {
 
 export interface ProgressEvent {
   taskId: string;
-  stage: "read" | "decode" | "cost_map" | "solve" | "encode" | "write" | "verify";
+  stage: "read" | "decode" | "cost_map" | "solve" | "encode" | "write" | "verify" | "batch";
   done: number;
   total: number | null;
   percent: number | null;

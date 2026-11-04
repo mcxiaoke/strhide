@@ -274,6 +274,7 @@
   - **实际损害**：大批量（例如 100 张 50 MP 图片，单张数秒到数十秒）前端在整个耗时区间无反馈，用户会重复提交或强制退出；失败定位被推迟到全部结束。不损坏已成功项。
   - **最小方案**：循环每项发 `batch-progress {current,total,path,status,error}`；失败立即携带错误但继续批处理；不改 restore 备份默认。
   - **依据**：`gui/src-tauri/src/commands/batch.rs:41-96`、`rust/src/core/batch.rs` 的返回式结果收集。
+  - **修复状态（2026-11-04 18:50）**：已修复。`run_batch` 新增 `progress: &dyn Progress`，每完成一项（含失败）发一个 `Stage::Batch` 事件（`done`/`total`），失败项仍写入 `BatchOutcome`；`run_batch_job_impl` 复用现有 `Control`/`ThrottledChannelProgress`，`Stage::Batch` 不受 16 ms 节流合并。交叉测试 `test_cross_batch_reports_one_progress_event_per_item` 断言 3 项（1 失败）恰好 3 个事件、`total=3`、最大 `done=3`；核心单测覆盖 8 项/3 失败的事件计数。未新增 UI 控件或事件结构。
 
 ### L-11 `from_seed_grouped` 列去重循环无上限
 

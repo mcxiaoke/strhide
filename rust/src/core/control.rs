@@ -53,6 +53,9 @@ pub enum Stage {
     Write,
     /// A verification pass (restore check, AEAD tag re-check, structure scan).
     Verify,
+    /// One item of a [`crate::core::batch`] run finished. `done` counts
+    /// completed items (successes and failures), `total` is the item count.
+    Batch,
 }
 
 impl Stage {
@@ -66,6 +69,7 @@ impl Stage {
             Stage::Encode => "encode",
             Stage::Write => "write",
             Stage::Verify => "verify",
+            Stage::Batch => "batch",
         }
     }
 }

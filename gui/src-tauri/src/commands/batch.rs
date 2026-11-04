@@ -45,11 +45,24 @@ pub async fn run_batch_job_cmd(
     job: BatchJobSpec,
     on_progress: Channel<ProgressEvent>,
 ) -> Result<BatchOutcome<serde_json::Value>, ErrorDetail> {
+    run_batch_job_impl(&state, task_id, items, job, on_progress).await
+}
+
+/// Testable core of [`run_batch_job_cmd`]: the Tauri command only unwraps
+/// `State`, so cross-validation can drive the same path with a recording
+/// channel.
+pub async fn run_batch_job_impl(
+    state: &GuiState,
+    task_id: String,
+    items: Vec<PathBuf>,
+    job: BatchJobSpec,
+    on_progress: Channel<ProgressEvent>,
+) -> Result<BatchOutcome<serde_json::Value>, ErrorDetail> {
     run_cancellable_task(
-        &state,
+        state,
         task_id,
         on_progress,
-        move |engine, pool, _ctrl, token| {
+        move |engine, pool, batch_ctrl, token| {
             let plan = BatchPlan {
                 continue_on_error: job.continue_on_error,
                 max_concurrency: job.max_concurrency.max(1),
@@ -62,50 +75,55 @@ pub async fn run_batch_job_cmd(
             let domain = job.domain.clone();
 
             let outcome = pool.install(|| {
-                run_batch(&items, &plan, |_idx, path, ctrl| match job_type.as_str() {
-                    "inspect" => {
-                        let opts = DualOptions {
-                            password: password.as_deref(),
-                            key: None,
-                            domain: domain.as_deref(),
-                            control: *ctrl,
-                        };
-                        let res = engine.inspect_any(path, &opts)?;
-                        serde_json::to_value(res)
-                            .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))
-                    }
-                    "verify" => {
-                        let opts = DualOptions {
-                            password: password.as_deref(),
-                            key: None,
-                            domain: domain.as_deref(),
-                            control: *ctrl,
-                        };
-                        let res = engine.verify_any(path, &opts)?;
-                        serde_json::to_value(res)
-                            .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))
-                    }
-                    "scan" => {
-                        let res = engine.analysis().scan_file(path)?;
-                        serde_json::to_value(res)
-                            .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))
-                    }
-                    "restore" => {
-                        let opts = RestoreOptions {
-                            output_path: None,
-                            password: password.as_deref(),
-                            backup: true,
-                            overwrite: true,
-                            control: *ctrl,
-                        };
-                        let res = engine.structure().restore_file(path, &opts)?;
-                        serde_json::to_value(res)
-                            .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))
-                    }
-                    other => Err(strhide::errors::StrHideError::General(format!(
-                        "Unknown batch job type: {other}"
-                    ))),
-                })
+                run_batch(
+                    &items,
+                    &plan,
+                    batch_ctrl.progress,
+                    |_idx, path, ctrl| match job_type.as_str() {
+                        "inspect" => {
+                            let opts = DualOptions {
+                                password: password.as_deref(),
+                                key: None,
+                                domain: domain.as_deref(),
+                                control: *ctrl,
+                            };
+                            let res = engine.inspect_any(path, &opts)?;
+                            serde_json::to_value(res)
+                                .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))
+                        }
+                        "verify" => {
+                            let opts = DualOptions {
+                                password: password.as_deref(),
+                                key: None,
+                                domain: domain.as_deref(),
+                                control: *ctrl,
+                            };
+                            let res = engine.verify_any(path, &opts)?;
+                            serde_json::to_value(res)
+                                .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))
+                        }
+                        "scan" => {
+                            let res = engine.analysis().scan_file(path)?;
+                            serde_json::to_value(res)
+                                .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))
+                        }
+                        "restore" => {
+                            let opts = RestoreOptions {
+                                output_path: None,
+                                password: password.as_deref(),
+                                backup: true,
+                                overwrite: true,
+                                control: *ctrl,
+                            };
+                            let res = engine.structure().restore_file(path, &opts)?;
+                            serde_json::to_value(res)
+                                .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))
+                        }
+                        other => Err(strhide::errors::StrHideError::General(format!(
+                            "Unknown batch job type: {other}"
+                        ))),
+                    },
+                )
             });
 
             Ok(outcome)

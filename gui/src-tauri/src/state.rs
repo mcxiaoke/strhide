@@ -7,7 +7,7 @@ use std::time::Instant;
 use serde::Serialize;
 use tauri::ipc::Channel;
 
-use strhide::core::control::{CancelToken, Control, Event, Progress};
+use strhide::core::control::{CancelToken, Control, Event, Progress, Stage};
 use strhide::core::i18n::{self, RenderCtx};
 use strhide::errors::{ErrorDetail, StrHideError};
 use strhide::facade::StrHide;
@@ -99,8 +99,8 @@ pub fn embed_concurrency_limit(available_bytes: Option<u64>) -> usize {
     let Some(available) = available_bytes else {
         return 1;
     };
-    let budget = (available as usize).saturating_mul(EMBED_MEMORY_NUMERATOR)
-        / EMBED_MEMORY_DENOMINATOR;
+    let budget =
+        (available as usize).saturating_mul(EMBED_MEMORY_NUMERATOR) / EMBED_MEMORY_DENOMINATOR;
     (budget / EMBED_PEAK_BYTES).max(1)
 }
 
@@ -117,9 +117,7 @@ impl Drop for EmbedReservation<'_> {
 
 /// Reserve one embed slot against the machine's free memory, or reject the
 /// command with a reason instead of starting a job that would OOM.
-pub fn reserve_embed_slot(
-    reserved: &AtomicUsize,
-) -> Result<EmbedReservation<'_>, StrHideError> {
+pub fn reserve_embed_slot(reserved: &AtomicUsize) -> Result<EmbedReservation<'_>, StrHideError> {
     reserve_embed_slot_with_limit(
         reserved,
         embed_concurrency_limit(strhide::core::sysmem::available_physical_memory()),
@@ -203,7 +201,11 @@ impl ThrottledChannelProgress {
 impl Progress for ThrottledChannelProgress {
     fn report(&self, ev: Event) {
         let stage_str = ev.stage.as_str();
-        let is_boundary = ev.done == 0 || ev.total.is_some_and(|t| ev.done >= t);
+        // Per-item batch events are the progress bar's unit of truth; throttle
+        // must not merge two finished items into one report.
+        let is_boundary = matches!(ev.stage, Stage::Batch)
+            || ev.done == 0
+            || ev.total.is_some_and(|t| ev.done >= t);
         let now_ms = self.start_instant.elapsed().as_millis() as u64;
 
         let mut prev_stage = self.last_stage.lock().unwrap();

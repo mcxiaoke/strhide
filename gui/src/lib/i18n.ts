@@ -142,6 +142,7 @@ const zh = {
     encode: "写入",
     write: "保存",
     verify: "校验",
+    batch: "批量",
     saving: "保存中",
   },
   errors: {
@@ -312,6 +313,7 @@ const en: typeof zh = {
     encode: "write",
     write: "save",
     verify: "verify",
+    batch: "batch",
     saving: "Saving",
   },
   errors: {
