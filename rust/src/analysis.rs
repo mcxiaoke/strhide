@@ -1927,8 +1927,10 @@ fn rs_difference(plane: &[i32], rows: usize, cols: usize, mask: RsMask) -> f64 {
         return 0.0;
     }
     let (mut r_count, mut s_count, mut n) = (0i64, 0i64, 0i64);
-    for i in 0..rows - 3 {
-        for j in 0..cols - 3 {
+    // A 3x3 window starting at `i` needs `i + 2 < rows`, so the last start is
+    // `rows - 3`; `0..rows - 3` stopped one window short (review P2-23).
+    for i in 0..rows - 2 {
+        for j in 0..cols - 2 {
             let mut w = [0i32; 9];
             for dr in 0..3 {
                 for dc in 0..3 {
@@ -2118,6 +2120,25 @@ fn aggregate_risk(findings: &[Finding]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rs_difference_includes_the_trailing_window() {
+        // A 4x4 plane has two 3x3 window starts per axis (0 and 1). The loop
+        // bound used to stop one short, so the window containing the only
+        // non-zero sample was never scored (review P2-23).
+        let mut plane = vec![0i32; 16];
+        plane[2 * 4 + 2] = 1; // centre of the bottom-right 3x3 window
+
+        // Three windows flip a zero centre to 1 (worse smoothness -> +1 each)
+        // and the trailing window flips that lone 1 to 0 (better -> -1), so the
+        // mean over all four windows is 0.5. The old bound scored only the
+        // top-left window and returned 1.0.
+        let d = rs_difference(&plane, 4, 4, RsMask::Plus);
+        assert!(
+            (d - 0.5).abs() < 1e-12,
+            "all four 3x3 windows must be counted, got difference {d}"
+        );
+    }
 
     fn fake_png(
         width: u32,

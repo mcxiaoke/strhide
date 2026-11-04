@@ -37,6 +37,22 @@ const ZIGZAG: [usize; 64] = [
     52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
+/// Skip `0xFF` fill bytes and return the marker code byte's index plus its
+/// value.
+///
+/// JPEG permits any number of extra `0xFF` bytes before a marker code. Reading
+/// the second `0xFF` as the code (and the following bytes as its length) made
+/// every legal file with fill bytes unparsable (review P2-23).
+fn marker_at(data: &[u8], mut i: usize) -> Option<(usize, u8)> {
+    while i < data.len() && data[i] == 0xFF {
+        i += 1;
+    }
+    if i >= data.len() {
+        return None;
+    }
+    Some((i, data[i]))
+}
+
 /// Parse every DQT segment that appears before the scan starts.
 ///
 /// Returns the tables in file order, or `None` when the marker structure is
@@ -44,27 +60,30 @@ const ZIGZAG: [usize; 64] = [
 pub fn parse_dqt_tables(data: &[u8]) -> Option<Vec<QuantTable>> {
     let mut i = 2usize; // skip SOI
     let mut tables = Vec::new();
-    while i + 4 <= data.len() {
+    while i < data.len() {
         if data[i] != 0xFF {
             i += 1;
             continue;
         }
-        let marker = data[i + 1];
+        let (code_at, marker) = marker_at(data, i)?;
         if marker == 0xD8 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
-            i += 2;
+            i = code_at + 1;
             continue;
         }
         if marker == 0xDA || marker == 0xD9 {
             // Scan started / image ended: no (more) DQT to find.
             break;
         }
-        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-        if len < 2 || i + 2 + len > data.len() {
+        if code_at + 3 > data.len() {
+            return None;
+        }
+        let len = u16::from_be_bytes([data[code_at + 1], data[code_at + 2]]) as usize;
+        if len < 2 || code_at + 1 + len > data.len() {
             return None;
         }
         if marker == 0xDB {
-            let mut p = i + 4;
-            let end = i + 2 + len;
+            let mut p = code_at + 3;
+            let end = code_at + 1 + len;
             while p < end {
                 let pq_tq = data[p];
                 let precision = pq_tq >> 4;
@@ -93,7 +112,7 @@ pub fn parse_dqt_tables(data: &[u8]) -> Option<Vec<QuantTable>> {
                 p += 1 + 64 * bytes_per;
             }
         }
-        i += 2 + len;
+        i = code_at + 1 + len;
     }
     if tables.is_empty() {
         None
@@ -107,22 +126,25 @@ pub fn parse_dqt_tables(data: &[u8]) -> Option<Vec<QuantTable>> {
 /// SOF markers: SOF0..SOF3, SOF5..SOF7, SOF9..SOF11.
 pub fn parse_component_tq(data: &[u8], comp_idx: usize) -> Option<u8> {
     let mut i = 2usize; // skip SOI
-    while i + 4 <= data.len() {
+    while i < data.len() {
         if data[i] != 0xFF {
             i += 1;
             continue;
         }
-        let marker = data[i + 1];
+        let (code_at, marker) = marker_at(data, i)?;
         if marker == 0xD8 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
-            i += 2;
+            i = code_at + 1;
             continue;
         }
         if marker == 0xDA || marker == 0xD9 {
             // Scan started or EOI: no SOF found before scan
             break;
         }
-        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-        if len < 2 || i + 2 + len > data.len() {
+        if code_at + 3 > data.len() {
+            return None;
+        }
+        let len = u16::from_be_bytes([data[code_at + 1], data[code_at + 2]]) as usize;
+        if len < 2 || code_at + 1 + len > data.len() {
             return None;
         }
         if matches!(marker, 0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB) {
@@ -130,17 +152,17 @@ pub fn parse_component_tq(data: &[u8], comp_idx: usize) -> Option<u8> {
             if len < 8 {
                 return None;
             }
-            let num_components = data[i + 9] as usize;
+            let num_components = data[code_at + 8] as usize;
             if comp_idx >= num_components {
                 return None;
             }
-            let comp_offset = i + 10 + comp_idx * 3;
-            if comp_offset + 3 > i + 2 + len {
+            let comp_offset = code_at + 9 + comp_idx * 3;
+            if comp_offset + 3 > code_at + 1 + len {
                 return None;
             }
             return Some(data[comp_offset + 2]);
         }
-        i += 2 + len;
+        i = code_at + 1 + len;
     }
     None
 }
@@ -181,6 +203,23 @@ mod tests {
         out.extend_from_slice(&len.to_be_bytes());
         out.extend_from_slice(&seg);
         out
+    }
+
+    #[test]
+    fn parses_dqt_after_marker_fill_bytes() {
+        let mut q = [0u16; 64];
+        for (nat, slot) in q.iter_mut().enumerate() {
+            *slot = (nat as u16) + 1;
+        }
+        // JPEG allows extra 0xFF fill bytes before a marker code. The parser
+        // used to treat the second 0xFF as the marker and misread the length
+        // bytes as part of it, rejecting a legal file (review P2-23).
+        let mut data = vec![0xFF, 0xD8, 0xFF];
+        data.extend(dqt_segment(&[QuantTable { id: 0, q }]));
+        data.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02]);
+
+        assert_eq!(parse_luma_dqt(&data), Some(q));
+        assert_eq!(parse_dqt_tables(&data).map(|tables| tables.len()), Some(1));
     }
 
     #[test]
