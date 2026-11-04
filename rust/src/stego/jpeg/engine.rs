@@ -764,7 +764,11 @@ pub fn embed_jpeg_with_stats<'a>(
         fmt,
         &ctx.extension,
     )?;
-    let mut work = coeffs.clone();
+    // `work` is the only mutable coefficient view: failed attempts are undone
+    // in place by `rollback(work, applied)`, and nothing reads the pristine
+    // original after costs/directions were built, so the second full copy was
+    // dead weight (128 B per coded block, ~150 MB on a 50 MP 4:2:0 image).
+    let mut work = coeffs;
     let mut last_error = None;
     for attempt_idx in 1..=EMBED_ATTEMPTS {
         // Checkpoint per attempt: embed_once ends in dct_io::write_coefficients,

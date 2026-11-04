@@ -195,6 +195,7 @@
   - **关键纠正**：默认 4 GiB 回溯预算**不是**本条的约束源。自动预算 `effective_slot_budget = min(body_slots/4, 4 GiB)`，而 `body_slots ≤ 63·Y ≤ 264M`，`body_slots/4 ≤ 66M`，位图最多 **2.1 GiB**（h=8,u>1）；真正随分辨率增长的是 `coeffs`+`work`+代价表（4:4:4 约 1.25 KiB/亮度块）。只下调 `MAX_AUTO_BACKTRACK_BYTES` 不会降低 50/100 MP 的峰值。
   - **最小方案**：优先去掉 `coeffs.clone()`（用原系数 + `Move` 增量写回，失败走已有回滚），其次给 GUI `max_concurrency` 设上限（建议按 `可用内存 / 单任务估算`），最后才考虑预算字段展示；`MAX_PIPELINE_BYTES` 应改为可配置且默认不高于实际可用内存。
   - **依据**：上述常量、公式与 6 组实测（样本在 `temp/legacy_issues_samples/`，未入库）。
+  - **修复状态（2026-11-04 18:39）**：已修复。`jpeg/engine.rs` 删除 `coeffs.clone()`（`work` 直接取得原系数，失败仍由既有 `rollback` 原地恢复），`baseline_hash --check` 28 例字节不变；GUI 嵌入命令按 `embed_concurrency_limit`（可用物理内存 60% / 1.43 GiB 档位，最少 1）预留槽位，超限直接返回 `Rejection` 而不是硬跑。实测 4:2:0、4 KiB 载荷（Private/WS MiB）：12 MP 242.3/235.7 → 197.5/198.7（-18.5%/-15.7%）；24 MP 460.7/461.1 → 391.7/393.9（-15.0%/-14.6%）；50 MP 958.2/958.5 → 815.2/815.8（-14.9%/-14.9%）；100 MP 1931.1/1929.4 → 1642.0/1640.6（-15.0%/-15.0%）。GUI 单测 `concurrent_embeds_beyond_the_limit_are_rejected` 断言第 3 个并发被拒绝。
 
 ### L-07 HEVC/MKV 整文件缓冲，长视频峰值内存数 GB
 

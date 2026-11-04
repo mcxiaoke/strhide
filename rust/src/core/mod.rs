@@ -31,6 +31,7 @@ pub mod media;
 pub mod params;
 pub mod payload;
 pub mod pipeline;
+pub mod sysmem;
 
 pub use batch::{BatchOutcome, BatchPlan, ItemOutcome, run_batch};
 

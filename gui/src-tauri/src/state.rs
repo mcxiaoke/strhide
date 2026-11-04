@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -52,6 +52,10 @@ pub struct GuiState {
     pub tasks: Mutex<HashMap<String, Arc<CancelToken>>>,
     pub pool: Arc<rayon::ThreadPool>,
     pub extract_cache: Arc<Mutex<Option<CachedExtract>>>,
+    /// Bytes reserved by in-flight embed tasks. Admission compares this with
+    /// [`embed_concurrency_limit`] so a burst of large JPEGs cannot exhaust
+    /// the machine before the allocator reports it.
+    pub embed_reserved: AtomicUsize,
 }
 
 impl Default for GuiState {
@@ -72,6 +76,81 @@ impl Default for GuiState {
             tasks: Mutex::new(HashMap::new()),
             pool: Arc::new(pool),
             extract_cache: Arc::new(Mutex::new(None)),
+            embed_reserved: AtomicUsize::new(0),
+        }
+    }
+}
+
+/// Per-task reservation for the largest measured JPEG peak: 50 MP 4:4:4 with
+/// a 4 KiB payload used 1,427 MiB private bytes; round up to 1.43 GiB so the
+/// tier also covers ordinary metadata overhead.
+pub const EMBED_PEAK_BYTES: usize = 1_535_000_000;
+
+/// Embeds may use 60% of the free physical memory; the rest stays with the
+/// WebView, the engine's rayon pool and the OS.
+const EMBED_MEMORY_NUMERATOR: usize = 3;
+const EMBED_MEMORY_DENOMINATOR: usize = 5;
+
+/// Number of embed slots that fit `available_bytes` of free physical memory
+/// at the [`EMBED_PEAK_BYTES`] tier. One slot is always allowed so a small
+/// machine can still run a single small image; a platform that cannot report
+/// memory is treated as single-slot.
+pub fn embed_concurrency_limit(available_bytes: Option<u64>) -> usize {
+    let Some(available) = available_bytes else {
+        return 1;
+    };
+    let budget = (available as usize).saturating_mul(EMBED_MEMORY_NUMERATOR)
+        / EMBED_MEMORY_DENOMINATOR;
+    (budget / EMBED_PEAK_BYTES).max(1)
+}
+
+/// Reservation held for the lifetime of one embed command.
+pub struct EmbedReservation<'a> {
+    reserved: &'a AtomicUsize,
+}
+
+impl Drop for EmbedReservation<'_> {
+    fn drop(&mut self) {
+        self.reserved.fetch_sub(EMBED_PEAK_BYTES, Ordering::SeqCst);
+    }
+}
+
+/// Reserve one embed slot against the machine's free memory, or reject the
+/// command with a reason instead of starting a job that would OOM.
+pub fn reserve_embed_slot(
+    reserved: &AtomicUsize,
+) -> Result<EmbedReservation<'_>, StrHideError> {
+    reserve_embed_slot_with_limit(
+        reserved,
+        embed_concurrency_limit(strhide::core::sysmem::available_physical_memory()),
+    )
+}
+
+fn reserve_embed_slot_with_limit(
+    reserved: &AtomicUsize,
+    limit: usize,
+) -> Result<EmbedReservation<'_>, StrHideError> {
+    loop {
+        let current = reserved.load(Ordering::SeqCst);
+        let active = current / EMBED_PEAK_BYTES;
+        if active >= limit {
+            return Err(StrHideError::Rejection(format!(
+                "Not enough memory for another concurrent embed: {active} of {limit} slots are in use \
+                 (each reserves {:.2} GiB, the budget is 60% of free physical memory). \
+                 Wait for a running embed to finish.",
+                EMBED_PEAK_BYTES as f64 / (1024.0 * 1024.0 * 1024.0)
+            )));
+        }
+        if reserved
+            .compare_exchange(
+                current,
+                current + EMBED_PEAK_BYTES,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            return Ok(EmbedReservation { reserved });
         }
     }
 }
@@ -322,6 +401,33 @@ mod tests {
         // >= 16ms intermediate events emit
         assert!(should_emit_throttle(false, false, 16, 0, 16));
         assert!(should_emit_throttle(false, false, 100, 50, 16));
+    }
+
+    #[test]
+    fn embed_concurrency_limit_uses_60_percent_of_free_memory() {
+        assert_eq!(embed_concurrency_limit(None), 1);
+        assert_eq!(embed_concurrency_limit(Some(1 << 30)), 1);
+        assert_eq!(embed_concurrency_limit(Some(4 << 30)), 1);
+        assert_eq!(embed_concurrency_limit(Some(8 << 30)), 3);
+        assert_eq!(embed_concurrency_limit(Some(16 << 30)), 6);
+    }
+
+    #[test]
+    fn concurrent_embeds_beyond_the_limit_are_rejected() {
+        let reserved = AtomicUsize::new(0);
+        let first = reserve_embed_slot_with_limit(&reserved, 2).expect("first slot");
+        let second = reserve_embed_slot_with_limit(&reserved, 2).expect("second slot");
+        assert!(
+            matches!(
+                reserve_embed_slot_with_limit(&reserved, 2),
+                Err(StrHideError::Rejection(_))
+            ),
+            "a third concurrent embed must be rejected, not started"
+        );
+        drop(first);
+        assert!(reserve_embed_slot_with_limit(&reserved, 2).is_ok());
+        drop(second);
+        assert_eq!(reserved.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -159,6 +159,11 @@ pub async fn embed_stego_file_impl(
     req: StegoEmbedRequest,
     on_progress: Channel<ProgressEvent>,
 ) -> Result<StegoEmbedResult, ErrorDetail> {
+    // Admission before the worker starts: a batch of large JPEGs otherwise
+    // asks for one full coefficient set each and the allocator decides, which
+    // is an OOM abort rather than a message the user can act on.
+    let _embed_slot =
+        crate::state::reserve_embed_slot(&state.embed_reserved).map_err(|e| e.detail_i18n())?;
     run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
         // An omitted `-o` means "write in place": the carrier is the
         // destination, and `overwrite=false` must not reject the user's
