@@ -180,6 +180,90 @@ fn wav_riff_chunk_rejected_when_declared_boundary_mismatches() {
     assert_eq!((lo, ls), (clean.len() as u64 + 8, ube_total));
 }
 
+/// P1-2: a declared RIFF size can match the file length even when the final
+/// odd-sized chunk lacks its mandatory pad byte. A spec-compliant walker then
+/// steps one byte past EOF, so the SHRD chunk appended by `riff_chunk` would
+/// be parsed from its second byte and L1 would reject the stego we just wrote
+/// (write succeeded, read/restore worked via the EOF fallback, verify stayed
+/// broken). L1 now calls the table malformed, the chunk-table probe routes
+/// `auto` away from `riff_chunk`, and the P0-1 pre-write gate rejects every
+/// strategy instead of emitting a file we cannot verify.
+#[test]
+fn wav_missing_final_pad_is_refused_before_write() {
+    fn make_odd_wav() -> Vec<u8> {
+        let mut out = Vec::new();
+        let data = [1u8, 2, 3]; // odd size, pad byte deliberately absent
+        let file_size = 12 + (8 + 16) + (8 + data.len());
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&((file_size - 8) as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        out.extend_from_slice(&1u16.to_le_bytes()); // mono
+        out.extend_from_slice(&8000u32.to_le_bytes());
+        out.extend_from_slice(&16000u32.to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+        out
+    }
+
+    let wav = make_odd_wav();
+    assert_eq!(
+        WavAdapter.choose_auto_strategy(&mut Cursor::new(wav.clone()), 128),
+        "eof",
+        "auto must not pick a chunk layout its own verifier cannot walk"
+    );
+
+    let err = WavAdapter
+        .inject(
+            &mut Cursor::new(wav.clone()),
+            &mut Cursor::new(vec![0u8; 128]),
+            &mut Vec::new(),
+            "riff_chunk",
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("missing its pad byte"), "{err}");
+
+    // L1 must call the table malformed, so the P0-1 pre-write gate refuses
+    // every strategy: the carrier cannot host an envelope that our own
+    // verifier would accept.
+    let (ok, detail) = WavAdapter
+        .verify_structure(&mut Cursor::new(wav.clone()))
+        .unwrap();
+    assert!(!ok, "missing final pad must fail L1");
+    assert!(detail.contains("missing its pad byte"), "{detail}");
+
+    let dir = scratch("rv25_wav_missing_pad");
+    let carrier = dir.join("odd.wav");
+    fs::write(&carrier, &wav).unwrap();
+    let stego = dir.join("s.wav");
+    let err = write_carrier(
+        &carrier,
+        PayloadSource::Text("odd wav secret"),
+        &WriteOptions {
+            output_path: Some(&stego),
+            password: None,
+            strategy: "auto",
+            stealth: false,
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("malformed WAV carrier"),
+        "write must refuse the malformed host: {err}"
+    );
+    assert!(
+        !stego.exists(),
+        "a rejected host must not leave an output file behind"
+    );
+}
+
 /// End-to-end roundtrip over the item_hidden iinf/iloc patch and restore core
 /// on the only in-CI carrier shape that reaches it (a synthetic meta-HEIF).
 /// Covers review finding §7.1: without this fixture the whole strategy had

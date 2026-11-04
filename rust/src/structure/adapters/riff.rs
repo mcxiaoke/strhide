@@ -82,6 +82,28 @@ pub fn riff_inject(
         )));
     }
 
+    // The declared size can agree with the file length while the chunk table
+    // still does not tile it exactly (P1-2): an odd-sized final chunk whose
+    // mandatory pad byte is absent makes a spec-compliant walker step one byte
+    // past EOF, so the SHRD chunk appended here would be parsed from its
+    // second byte onward and L1 would reject every stego we write. Reject such
+    // carriers instead of emitting a file our own verifier cannot read.
+    match riff_chunk_table(host_in, host_len)? {
+        Some(RiffChunkTable::Exact) => {}
+        Some(RiffChunkTable::MissingFinalPad) => {
+            return Err(StrHideError::CorruptedData(format!(
+                "{format_name} final chunk has an odd size but is missing its pad byte; \
+                 the chunk table cannot reach the end of the file. Please specify --strategy eof"
+            )));
+        }
+        None => {
+            return Err(StrHideError::CorruptedData(format!(
+                "{format_name} chunk table is truncated or inconsistent; \
+                 please specify --strategy eof"
+            )));
+        }
+    }
+
     let pad_len = ube_size % 2;
     let inject_size = 8 + ube_size + pad_len;
 
@@ -99,7 +121,9 @@ pub fn riff_inject(
     out.write_all(&(new_riff_size as u32).to_le_bytes())?;
     out.write_all(&header[8..12])?;
 
-    // 2. Copy remainder of original host carrier
+    // 2. Copy remainder of original host carrier (the chunk-table walk above
+    // left the cursor at the last chunk; restart right after the header).
+    host_in.seek(SeekFrom::Start(12))?;
     crate::structure::adapters::io::copy_stream(host_in, out)?;
 
     let inject_offset = host_len;
@@ -276,7 +300,18 @@ where
             None => return Ok((false, "Chunk offset arithmetic overflow".into())),
         };
 
-        if offset > file_size && offset != file_size + pad {
+        if offset > file_size {
+            if offset == file_size + 1 && pad == 1 {
+                return Ok((
+                    false,
+                    format!(
+                        "Chunk '{}' at offset {} has an odd size but is missing its pad byte; \
+                         the chunk table cannot reach the end of the file",
+                        String::from_utf8_lossy(&tag),
+                        offset - (8 + size + pad)
+                    ),
+                ));
+            }
             return Ok((
                 false,
                 format!(
@@ -338,11 +373,72 @@ pub fn riff_suspicious_structures(stego_in: &mut dyn SeekRead) -> Vec<String> {
     found
 }
 
+/// How the chunk table terminates relative to the declared RIFF end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RiffChunkTable {
+    /// Chunks tile the file exactly up to the declared end.
+    Exact,
+    /// The final odd-sized chunk lacks the mandatory pad byte, so a walker
+    /// stepping `8 + size + pad` lands one byte past the physical end.
+    MissingFinalPad,
+}
+
+/// Walk the chunk table from offset 12 to `host_len`.
+///
+/// Returns `None` when the table cannot be walked to the declared end (a
+/// truncated header, a chunk that overruns the file, or trailing bytes that
+/// are not a chunk). `Some(Exact)` means the SHRD chunk can be appended at
+/// `host_len` and still be found by the same walk; `Some(MissingFinalPad)`
+/// means the carrier is malformed in a way that would make our own L1/L2
+/// disagree after injection.
+fn riff_chunk_table(
+    reader: &mut dyn SeekRead,
+    host_len: u64,
+) -> Result<Option<RiffChunkTable>, StrHideError> {
+    if host_len < 12 {
+        return Ok(None);
+    }
+    reader.seek(SeekFrom::Start(12))?;
+    let mut offset = 12u64;
+    while offset < host_len {
+        if offset + 8 > host_len {
+            return Ok(None);
+        }
+        if reader.seek(SeekFrom::Start(offset)).is_err() {
+            return Ok(None);
+        }
+        let mut hdr = [0u8; 8];
+        if reader.read_exact(&mut hdr).is_err() {
+            return Ok(None);
+        }
+        let size = u32::from_le_bytes(hdr[4..8].try_into().unwrap()) as u64;
+        let pad = size % 2;
+        let next = match offset.checked_add(8 + size + pad) {
+            Some(next) => next,
+            None => return Ok(None),
+        };
+        if next > host_len {
+            return Ok(if next == host_len + 1 && pad == 1 {
+                Some(RiffChunkTable::MissingFinalPad)
+            } else {
+                None
+            });
+        }
+        offset = next;
+    }
+    Ok(if offset == host_len {
+        Some(RiffChunkTable::Exact)
+    } else {
+        None
+    })
+}
+
 /// Whether `riff_chunk` can accept this carrier and envelope: the declared
-/// RIFF boundary must coincide with the physical end of the file, and the
-/// patched size field must stay inside u32. Mirrors the hard checks in
-/// [`riff_inject`] so the auto decision and the capacity table share one
-/// predicate instead of drifting (review P3-17).
+/// RIFF boundary must coincide with the physical end of the file, the chunk
+/// table must tile it exactly, and the patched size field must stay inside
+/// u32. Mirrors the hard checks in [`riff_inject`] so the auto decision and
+/// the capacity table share one predicate instead of drifting (review P3-17,
+/// P1-2).
 pub fn riff_can_chunk(reader: &mut dyn SeekRead, ube_size: u64) -> bool {
     let start = reader.stream_position().unwrap_or(0);
     let host_len = match reader.seek(SeekFrom::End(0)) {
@@ -357,7 +453,12 @@ pub fn riff_can_chunk(reader: &mut dyn SeekRead, ube_size: u64) -> bool {
         let old_riff_size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as u64;
         let pad = ube_size % 2;
         let inject_size = 8 + ube_size + pad;
-        host_len == 8 + old_riff_size && old_riff_size + inject_size <= u32::MAX as u64
+        host_len == 8 + old_riff_size
+            && matches!(
+                riff_chunk_table(reader, host_len),
+                Ok(Some(RiffChunkTable::Exact))
+            )
+            && old_riff_size + inject_size <= u32::MAX as u64
     } else {
         false
     };
