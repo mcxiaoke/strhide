@@ -1559,11 +1559,12 @@ pub fn embed_hevc_patches_with_factor_v4(
             .into_par_iter()
             .map(|(slice_idx, flipped_entries)| {
                 control.check()?;
-                Ok(reencode_slice(
-                    slice_idx,
-                    &slice_contexts[slice_idx],
-                    flipped_entries,
-                ))
+                let ctx = slice_contexts.get(slice_idx).ok_or_else(|| {
+                    StrHideError::General(format!(
+                        "HEVC slice index {slice_idx} has no recorded context"
+                    ))
+                })?;
+                Ok(reencode_slice(slice_idx, ctx, flipped_entries))
             })
             .collect();
         let outcomes = outcomes?;
@@ -2676,12 +2677,13 @@ pub fn inspect_hevc_mp4_file_v4(
             drain_frames(&mut decoder);
             if decoded.is_ok() && !recorder.substreams.is_empty() {
                 let rbsp = nal_rbsp(slice_bytes);
-                absorb_recorder(&mut recorder, &rbsp, &mut sink);
-                recorded_slices += 1;
-                slice_idx += 1;
-                let current_slots = sink.counts[0] + sink.counts[1];
-                if current_slots >= HEVC_SUPERBLOCK_POOL_SLOTS {
-                    break;
+                if absorb_recorder(&mut recorder, &rbsp, &mut sink) {
+                    recorded_slices += 1;
+                    slice_idx += 1;
+                    let current_slots = sink.counts[0] + sink.counts[1];
+                    if current_slots >= HEVC_SUPERBLOCK_POOL_SLOTS {
+                        break;
+                    }
                 }
             }
         }
@@ -3321,21 +3323,25 @@ fn decode_gop_slice_range(
                 } else {
                     Vec::new()
                 };
-                absorb_recorder(&mut recorder, &rbsp, &mut record.sink);
-                record.recorded_slices += 1;
-                if capture == Capture::Full {
-                    record.slice_contexts.push(SliceContext {
-                        carrier_span: cand.span.clone(),
-                        nal_type: cand.nal_type,
-                        layer_id: cand.layer_id,
-                        temporal_id: cand.temporal_id,
-                        band,
-                        orig_rbsp: rbsp,
-                        ops: recorder.ops,
-                        substreams: recorder.substreams,
-                    });
+                // A slice that decoded only part-way has its slots discarded
+                // inside `absorb_recorder`; it must not advance the slice
+                // counter either, or later slots point at the wrong context.
+                if absorb_recorder(&mut recorder, &rbsp, &mut record.sink) {
+                    record.recorded_slices += 1;
+                    if capture == Capture::Full {
+                        record.slice_contexts.push(SliceContext {
+                            carrier_span: cand.span.clone(),
+                            nal_type: cand.nal_type,
+                            layer_id: cand.layer_id,
+                            temporal_id: cand.temporal_id,
+                            band,
+                            orig_rbsp: rbsp,
+                            ops: recorder.ops,
+                            substreams: recorder.substreams,
+                        });
+                    }
+                    local_slice_idx += 1;
                 }
-                local_slice_idx += 1;
                 if let Some(budget) = slot_budget
                     && record.sink.counts[0] + record.sink.counts[1] >= budget
                 {
@@ -3969,7 +3975,7 @@ fn drain_frames(decoder: &mut Decoder) {
 /// `entry_point_offset`s expressed in **NAL** bytes, so a substream that already
 /// carries a `00 00 xx<=3` window stays out of the pool: flipping near it could
 /// shift every following substream even when the total NAL length is preserved.
-fn absorb_recorder(recorder: &mut CabacRecorder, rbsp: &[u8], sink: &mut SlotSink) {
+fn absorb_recorder(recorder: &mut CabacRecorder, rbsp: &[u8], sink: &mut SlotSink) -> bool {
     if recorder.next_pending_slot() != recorder.slots.len() {
         // Slice decoding was truncated mid-slice before every sign got its
         // level back-fill. Discard all incomplete slots from this slice so
@@ -3978,7 +3984,7 @@ fn absorb_recorder(recorder: &mut CabacRecorder, rbsp: &[u8], sink: &mut SlotSin
         // kept its slots, which shifted every later global slot index.
         recorder.slots.clear();
         recorder.reset_pending();
-        return;
+        return false;
     }
 
     let is_multi_sub = recorder.substreams.len() > 1;
@@ -4006,7 +4012,7 @@ fn absorb_recorder(recorder: &mut CabacRecorder, rbsp: &[u8], sink: &mut SlotSin
         sink.slice_slot_ranges.push((count, recorder.current_band));
         recorder.slots.clear();
         recorder.reset_pending();
-        return;
+        return true;
     }
 
     for slot in recorder.slots.drain(..) {
@@ -4018,6 +4024,7 @@ fn absorb_recorder(recorder: &mut CabacRecorder, rbsp: &[u8], sink: &mut SlotSin
     let added = (sink.counts[0] + sink.counts[1]) - start_count;
     sink.slice_slot_ranges.push((added, recorder.current_band));
     recorder.reset_pending();
+    true
 }
 
 fn scan_hevc_slot_count(carrier: &[u8]) -> Result<usize, StrHideError> {

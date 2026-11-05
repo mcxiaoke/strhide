@@ -149,8 +149,19 @@ pub fn embed_carrier_file(
                 control: options.control,
                 pool: options.pool.clone(),
             };
-            crate::stego::probe_carrier_capacity_with_dialect(&carrier_bytes, &probe_opts, dialect)
-                .ok()
+            // A carrier whose format simply has no capacity concept is the
+            // only reason to report "unknown": every other error here is a
+            // real decode failure that `embed` also hit, and swallowing it as
+            // `None` would present a broken carrier as valid.
+            match crate::stego::probe_carrier_capacity_with_dialect(
+                &carrier_bytes,
+                &probe_opts,
+                dialect,
+            ) {
+                Ok(c) => Some(c),
+                Err(StrHideError::UnsupportedFormat(_)) => None,
+                Err(e) => return Err(e),
+            }
         }
     };
     drop(carrier_bytes);

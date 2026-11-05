@@ -253,7 +253,10 @@ pub(crate) fn extract_flac(
         return Err(core::no_hidden_data());
     }
 
-    let mut scratch = carrier.to_vec();
+    // Reuse `scratch`: the header view borrows it only until `read_base`
+    // returns, and the body view needs the same bytes, so a second full-file
+    // clone is pure waste (F-26). The third `analyse` CRC recheck elsewhere
+    // stays as-is.
     let flac = flac::FlacCarrier::new(
         &mut scratch,
         info,

@@ -533,7 +533,22 @@ fn parse_sample_sizes(bytes: &[u8], stsz: &BoxRef) -> Result<Vec<u32>> {
         ));
     }
     if fixed != 0 {
-        return Ok(vec![fixed; count]);
+        // Every sample lives inside an `mdat` box, so a table whose implied
+        // total exceeds the whole file cannot be real. This also replaces the
+        // 16 M-sample ceiling (64 MiB) as the allocation bound: a 20-byte
+        // `stsz` in a small file must not request a 64 MiB buffer.
+        let implied_total = (fixed as u64).saturating_mul(count as u64);
+        if implied_total > bytes.len() as u64 {
+            return Err(HevcError::ContainerMalformed(
+                "stsz sample sizes exceed the file size",
+            ));
+        }
+        let mut sizes = Vec::new();
+        sizes.try_reserve_exact(count).map_err(|_| {
+            HevcError::ContainerMalformed("stsz sample table is too large to allocate")
+        })?;
+        sizes.resize(count, fixed);
+        return Ok(sizes);
     }
     // A declared count larger than the box can hold is malformed: `sizes`
     // would silently end short and every later sample would shift.
@@ -541,7 +556,10 @@ fn parse_sample_sizes(bytes: &[u8], stsz: &BoxRef) -> Result<Vec<u32>> {
     if count > available {
         return Err(HevcError::Truncated);
     }
-    let mut sizes = Vec::with_capacity(count);
+    let mut sizes = Vec::new();
+    sizes
+        .try_reserve_exact(count)
+        .map_err(|_| HevcError::ContainerMalformed("stsz sample table is too large to allocate"))?;
     for i in 0..count {
         let off = 12 + i * 4;
         sizes.push(u32::from_be_bytes([
@@ -975,6 +993,44 @@ mod tests {
         for cut in 0..file.len() {
             let _ = parse_mp4_targets(&file[..cut]);
         }
+    }
+
+    /// A fixed-size `stsz` used to allocate `count` entries straight from the
+    /// file field. A 20-byte box declaring 16 M samples requested a 64 MiB
+    /// vector even though the whole carrier was smaller.
+    #[test]
+    fn fixed_size_stsz_is_bounded_by_the_file_size() {
+        let mut stsz = vec![0u8; 12];
+        stsz[4..8].copy_from_slice(&4096u32.to_be_bytes());
+        stsz[8..12].copy_from_slice(&(MAX_MP4_SAMPLES as u32).to_be_bytes());
+        let box_bytes = be_box(b"stsz", &stsz);
+        let stsz_ref = BoxRef {
+            tag: *b"stsz",
+            payload_start: 8,
+            end: box_bytes.len(),
+        };
+
+        let err = parse_sample_sizes(&box_bytes, &stsz_ref).unwrap_err();
+        assert!(
+            matches!(err, HevcError::ContainerMalformed(_)),
+            "a table larger than the file must be refused: {err:?}"
+        );
+
+        let mut small = stsz.clone();
+        small[4..8].copy_from_slice(&8u32.to_be_bytes());
+        small[8..12].copy_from_slice(&2u32.to_be_bytes());
+        let small_box = be_box(b"stsz", &small);
+        let small_ref = BoxRef {
+            tag: *b"stsz",
+            payload_start: 8,
+            end: small_box.len(),
+        };
+        // Padding stands in for the mdat so the implied total fits the file.
+        let file = [small_box, vec![0u8; 32]].concat();
+        assert_eq!(
+            parse_sample_sizes(&file, &small_ref).unwrap(),
+            vec![8u32, 8]
+        );
     }
 
     #[test]
