@@ -979,6 +979,11 @@ impl StegoFacade<'_> {
         } else {
             output.to_path_buf()
         };
+        // `read -o <carrier>` would replace the only copy of the hidden data
+        // with the payload it contains. The CLI already refuses this; the
+        // facade must too, or an API caller silently destroys the carrier
+        // (review B-07).
+        crate::commit::reject_carrier_output(&final_dest, &[carrier.to_path_buf()])?;
         crate::core::pipeline::check_overwrite(&final_dest, overwrite)?;
         if let Some(parent) = final_dest.parent()
             && !parent.as_os_str().is_empty()

@@ -517,6 +517,103 @@ fn read_meta_box_bytes(reader: &mut dyn SeekRead) -> Result<Option<Vec<u8>>, Str
     Ok(None)
 }
 
+/// Admission check for the `item_hidden` rewrite.
+///
+/// `meta` must start at its own box header. The conditions here mirror what
+/// [`heif_item_hidden_inject`] and [`heif_item_hidden_strip`] can physically
+/// rewrite — an 8-byte `meta` header, 8-byte `iloc`/`iinf` headers, and the
+/// 4/8-byte field widths those writers emit. Both the probe (which `inspect`
+/// and `auto` consult) and the writer call it, so a strategy can no longer be
+/// advertised and then refused for the same carrier (review A-10).
+fn check_item_hidden_layout(meta: &[u8]) -> Result<(), StrHideError> {
+    if meta.len() < 12 {
+        return Err(StrHideError::CorruptedData("Truncated meta box".into()));
+    }
+    if box_header_is_64_bit(meta) {
+        return Err(StrHideError::UnsupportedFormat(
+            "HEIF carriers with a 64-bit meta box header are not supported for item_hidden".into(),
+        ));
+    }
+    let m_end = meta.len();
+    let mut mpos = 12; // size + "meta" + version/flags
+    let mut iloc: Option<&[u8]> = None;
+    let mut iinf: Option<&[u8]> = None;
+    while mpos + 8 <= m_end {
+        let (sb_size, _) = read_box_size(meta, mpos)?;
+        if sb_size < 8 || sb_size > m_end - mpos {
+            return Err(StrHideError::CorruptedData(
+                "Invalid sub-box in meta".into(),
+            ));
+        }
+        match &meta[mpos + 4..mpos + 8] {
+            b"iloc" => iloc = Some(&meta[mpos..mpos + sb_size]),
+            b"iinf" => iinf = Some(&meta[mpos..mpos + sb_size]),
+            _ => {}
+        }
+        mpos += sb_size;
+    }
+    let iloc =
+        iloc.ok_or_else(|| StrHideError::UnsupportedFormat("Missing iloc box in meta".into()))?;
+    let iinf =
+        iinf.ok_or_else(|| StrHideError::UnsupportedFormat("Missing iinf box in meta".into()))?;
+    if box_header_is_64_bit(iloc) || box_header_is_64_bit(iinf) {
+        return Err(StrHideError::UnsupportedFormat(
+            "HEIF carriers with 64-bit iloc/iinf box headers are not supported for item_hidden"
+                .into(),
+        ));
+    }
+
+    // iloc: v0/v1/v2 are the only layouts the rewriter understands.
+    if iloc.len() < 14 {
+        return Err(StrHideError::CorruptedData("Truncated iloc box".into()));
+    }
+    let iloc_ver = iloc[8];
+    if iloc_ver > 2 {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "Unsupported HEIF iloc version {iloc_ver} for item_hidden"
+        )));
+    }
+    if iloc.len() < if iloc_ver < 2 { 16 } else { 18 } {
+        return Err(StrHideError::CorruptedData("Truncated iloc box".into()));
+    }
+    let off_sz = ((iloc[12] >> 4) & 0x0F) as usize;
+    let len_sz = (iloc[12] & 0x0F) as usize;
+    let base_sz = ((iloc[13] >> 4) & 0x0F) as usize;
+    // The writer can only emit 4/8-byte fields (a zero-width offset or length
+    // cannot hold the new extent), and `base_offset` may additionally be 0.
+    if !matches!(off_sz, 4 | 8) {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "Unsupported iloc offset field width {off_sz}"
+        )));
+    }
+    if !matches!(len_sz, 4 | 8) {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "Unsupported iloc length field width {len_sz}"
+        )));
+    }
+    if !matches!(base_sz, 0 | 4 | 8) {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "Unsupported iloc base-offset field width {base_sz}"
+        )));
+    }
+
+    // iinf: v0 uses a 16-bit entry count, v1 a 32-bit one; anything else would
+    // be read with the wrong width.
+    if iinf.len() < 14 {
+        return Err(StrHideError::CorruptedData("Truncated iinf box".into()));
+    }
+    let iinf_ver = iinf[8];
+    if iinf_ver > 1 {
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "Unsupported HEIF iinf version {iinf_ver} for item_hidden"
+        )));
+    }
+    if iinf.len() < if iinf_ver == 0 { 14 } else { 16 } {
+        return Err(StrHideError::CorruptedData("Truncated iinf box".into()));
+    }
+    Ok(())
+}
+
 pub fn isobmff_can_item_hidden(reader: &mut dyn SeekRead) -> bool {
     let start_pos = match reader.stream_position() {
         Ok(p) => p,
@@ -535,31 +632,10 @@ pub fn isobmff_can_item_hidden(reader: &mut dyn SeekRead) -> bool {
     };
     let _ = reader.seek(SeekFrom::Start(start_pos));
 
-    // `data` starts at the `meta` box header, so its own size is the length
-    // the old top-level walk derived from `pos`.
-    let m_end = data.len();
-    // The `meta` box header is 8 bytes for the 32-bit form and 16 for a
-    // `largesize` one; hardcoding 8 put this walk 8 bytes into the first child
-    // of a large `meta` (review R2 P2-12).
-    let mut mpos = if box_header_is_64_bit(&data) { 16 } else { 8 } + 4;
-    let mut has_iinf = false;
-    let mut has_iloc = false;
-    while mpos + 8 <= m_end {
-        let (sb_size, _) = match read_box_size(&data, mpos) {
-            Ok(s) => s,
-            Err(_) => break,
-        };
-        if sb_size == 0 || sb_size > m_end - mpos {
-            break;
-        }
-        if &data[mpos + 4..mpos + 8] == b"iinf" {
-            has_iinf = true;
-        } else if &data[mpos + 4..mpos + 8] == b"iloc" {
-            has_iloc = true;
-        }
-        mpos += sb_size;
-    }
-    has_iinf && has_iloc
+    // `data` starts at the `meta` box header. Use the same admission the
+    // writer applies, so a carrier that injection would refuse (64-bit header,
+    // unsupported field width/version) is not advertised as embeddable.
+    check_item_hidden_layout(&data).is_ok()
 }
 
 pub fn isobmff_strip(
@@ -771,14 +847,10 @@ fn heif_item_hidden_inject(
         StrHideError::UnsupportedFormat("No meta box found in HEIF carrier for item_hidden".into())
     })?;
     // The rewrite below rebuilds the meta header as `size32 + "meta" +
-    // version/flags` (12 bytes). A 64-bit (`largesize`) meta header would have
-    // its largesize high word overwritten with those version/flags bytes, so
-    // refuse the carrier instead of emitting a structurally broken file.
-    if m_hlen != 8 {
-        return Err(StrHideError::UnsupportedFormat(
-            "HEIF carriers with a 64-bit meta box header are not supported for item_hidden".into(),
-        ));
-    }
+    // version/flags` (12 bytes); a 64-bit (`largesize`) header would have its
+    // largesize high word overwritten. `check_item_hidden_layout` (called once
+    // the prefix is buffered) rejects that and every other layout the writer
+    // cannot rewrite, and the probe uses the same function.
     let m_off = usize::try_from(m_off)
         .map_err(|_| StrHideError::UnsupportedFormat("meta box offset exceeds usize".into()))?;
     let m_size = usize::try_from(m_size)
@@ -794,6 +866,7 @@ fn heif_item_hidden_inject(
     host_in.seek(SeekFrom::Start(0))?;
     let mut host_prefix = vec![0u8; m_end];
     host_in.read_exact(&mut host_prefix)?;
+    check_item_hidden_layout(&host_prefix[m_off..m_end])?;
 
     let m_body_start = m_off + m_hlen + 4; // FullBox version+flags
     if m_body_start > m_end {
@@ -835,13 +908,8 @@ fn heif_item_hidden_inject(
         .ok_or_else(|| StrHideError::UnsupportedFormat("Missing iloc box in meta".into()))?;
 
     // Both sub-boxes are rewritten in place at their parsed offsets; that is
-    // only valid for the 8-byte header form.
-    if box_header_is_64_bit(&subboxes[iloc_idx].1) || box_header_is_64_bit(&subboxes[iinf_idx].1) {
-        return Err(StrHideError::UnsupportedFormat(
-            "HEIF carriers with 64-bit iloc/iinf box headers are not supported for item_hidden"
-                .into(),
-        ));
-    }
+    // only valid for the 8-byte header form. `check_item_hidden_layout` has
+    // already rejected a 64-bit `iloc`/`iinf` header above.
 
     // 3. Parse iinf to find max_item_id
     let iinf_box = &subboxes[iinf_idx].1;
@@ -1031,10 +1099,16 @@ fn heif_item_hidden_inject(
                 let ext_off = read_sized_uint(iloc_buf, cpos, off_sz)?;
                 cpos += off_sz + len_sz;
                 if cm == 0 {
+                    // The base offset is rewritten below only when it points
+                    // outside the pre-growth `meta`. When it points *inside*,
+                    // the base stays put and the absolute extent position is
+                    // what decides whether the data moved: skipping the extent
+                    // merely because a base existed left items whose base sits
+                    // in `meta` but whose data lives past its end unshifted
+                    // (review A-02).
+                    let base_patched = base_sz > 0 && b_off > 0 && b_off >= m_end as u64;
                     let abs_off = b_off.saturating_add(ext_off);
-                    if base_sz > 0 && b_off > 0 {
-                        // patched via base_pos
-                    } else if abs_off >= m_end as u64 {
+                    if !base_patched && abs_off >= m_end as u64 {
                         // Only extents that physically live after the old meta
                         // moved by `delta_meta`; an item inside an `mdat` that
                         // precedes `meta` keeps its absolute offset. The old
@@ -1383,12 +1457,12 @@ fn heif_item_hidden_strip(
                 let ext_off = read_sized_uint(iloc_buf, cpos, off_sz)?;
                 cpos += off_sz + len_sz;
                 if cm == 0 {
+                    // Mirror the inject-side condition exactly: an extent is
+                    // reverted when its absolute position moved, which is not
+                    // the same as "a base offset exists" (review A-02).
+                    let base_patched = base_sz > 0 && b_off > 0 && b_off >= m_end as u64;
                     let abs_off = b_off.saturating_add(ext_off);
-                    if base_sz > 0 && b_off > 0 {
-                        // handled at base_pos
-                    } else if abs_off >= m_end as u64 {
-                        // Mirror the inject-side condition: only offsets that
-                        // were shifted forward when the meta grew come back.
+                    if !base_patched && abs_off >= m_end as u64 {
                         patch_sized_uint(
                             iloc_buf,
                             ext_pos,
@@ -1592,6 +1666,7 @@ fn check_iloc_has_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structure::adapters::{HeifAdapter, HostAdapter};
     use crate::structure::envelope::{EnvelopeHeader, STANDARD_TRAILER_MAGIC, TRAILER_SIZE};
     use std::io::Cursor;
 
@@ -1969,6 +2044,91 @@ mod tests {
         assert_eq!(restored.into_inner(), host);
     }
 
+    /// A legal but unusual encoding: `base_offset` lies *inside* `meta`
+    /// (12, the meta header) while the extent offset places the item data in
+    /// the following `mdat`. The base is not rewritten (it is inside the
+    /// untouched prefix), so the extent must be shifted or the item ends up
+    /// 41 bytes short after the meta grows (review A-02).
+    #[test]
+    fn item_hidden_shifts_extents_when_the_base_offset_sits_inside_meta() {
+        let iinf = make_iinf(1, 2);
+        let iloc = make_iloc_box(None);
+        let mut host = assemble_meta_heif(&iinf, &iloc);
+
+        let meta_len = 12 + iinf.len() + iloc.len();
+        let mdat_payload = (24 + meta_len + 8) as u32;
+        let base: u32 = 12;
+        let extent = mdat_payload - base;
+        let base_pos = 24 + 12 + iinf.len() + 22;
+        host[base_pos..base_pos + 4].copy_from_slice(&base.to_be_bytes());
+        host[base_pos + 6..base_pos + 10].copy_from_slice(&extent.to_be_bytes());
+
+        let delta_meta = 41u64;
+        let inject_offset = host.len() as u64 + delta_meta;
+        let ube_data_len = 200u64;
+        let ube_total = ube_data_len + TRAILER_SIZE as u64;
+        let mut ube = vec![0x77u8; ube_data_len as usize];
+        ube.extend_from_slice(
+            &EnvelopeTrailer::create(inject_offset + 8, ube_total, STANDARD_TRAILER_MAGIC).pack(),
+        );
+
+        let mut out = Vec::new();
+        isobmff_inject(
+            "HEIF",
+            &mut Cursor::new(host.clone()),
+            &mut Cursor::new(ube),
+            &mut out,
+            "item_hidden",
+        )
+        .unwrap();
+
+        // iinf grew by a 21-byte infe, so the iloc base field (and the extent
+        // fields after it) moved by that much inside the box.
+        let base_pos = 24 + 12 + iinf.len() + 21 + 22;
+        let new_base = u32::from_be_bytes(out[base_pos..base_pos + 4].try_into().unwrap());
+        let new_extent = u32::from_be_bytes(out[base_pos + 6..base_pos + 10].try_into().unwrap());
+        assert_eq!(new_base, base, "a base inside meta must stay put");
+        assert_eq!(
+            new_extent as u64,
+            extent as u64 + delta_meta,
+            "the extent must absorb the meta growth"
+        );
+
+        let header = EnvelopeHeader {
+            strategy_id: 12,
+            inject_offset,
+            inject_size: 8 + ube_total,
+            ..Default::default()
+        };
+        let mut restored = Cursor::new(Vec::new());
+        isobmff_strip(&mut Cursor::new(out), &mut restored, &header).unwrap();
+        assert_eq!(restored.into_inner(), host);
+    }
+
+    /// `inspect`, `auto` and the writer must agree: a 64-bit `meta` header is
+    /// refused by the writer, so the probe must not advertise `item_hidden`
+    /// for it (review A-10).
+    #[test]
+    fn item_hidden_probe_rejects_a_64_bit_meta_header() {
+        let host = synthetic_meta_heif(1, 2);
+        let meta_len = u32::from_be_bytes(host[24..28].try_into().unwrap()) as usize;
+        let mut wide = host[..24].to_vec();
+        wide.extend_from_slice(&1u32.to_be_bytes());
+        wide.extend_from_slice(b"meta");
+        wide.extend_from_slice(&((meta_len + 8) as u64).to_be_bytes());
+        wide.extend_from_slice(&host[32..24 + meta_len]);
+        wide.extend_from_slice(&host[24 + meta_len..]);
+
+        assert!(
+            !isobmff_can_item_hidden(&mut Cursor::new(wide.clone())),
+            "a 64-bit meta header cannot be rewritten in place"
+        );
+        assert_eq!(
+            HeifAdapter.choose_auto_strategy(&mut Cursor::new(wide), 1024),
+            "box_uuid"
+        );
+    }
+
     #[test]
     fn item_hidden_roundtrips_on_a_synthetic_meta_heif() {
         let host = synthetic_meta_heif(1, 2);
@@ -2265,8 +2425,10 @@ mod tests {
     fn meta_probes_seek_over_the_mdat_body() {
         let meta = {
             let mut body = vec![0u8; 4]; // version + flags
-            body.extend_from_slice(&box_bytes(b"iinf", &[0u8; 8]));
-            body.extend_from_slice(&box_bytes(b"iloc", &[0u8; 8]));
+            // Empty but structurally valid iinf/iloc: version 0, zero entries,
+            // and 4-byte offset/length/base field widths.
+            body.extend_from_slice(&box_bytes(b"iinf", &[0, 0, 0, 0, 0, 0]));
+            body.extend_from_slice(&box_bytes(b"iloc", &[0, 0, 0, 0, 0x44, 0x40, 0, 0]));
             box_bytes(b"meta", &body)
         };
         let mut file = box_bytes(b"ftyp", &[0u8; 16]);

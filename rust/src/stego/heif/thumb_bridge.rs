@@ -27,6 +27,19 @@ pub enum BridgeTargetKind {
         exif_item_id: u32,
         /// File offset of the TIFF Tag 0x0202 (JPEGInterchangeFormatLength) value field, if present.
         tag_0202_file_offset: Option<usize>,
+        /// TIFF type of tag 0x0202 (`3` = SHORT, `4` = LONG). The value must be
+        /// written back with its original width: a 4-byte write into a SHORT
+        /// entry overwrote the neighbouring bytes, and reading one as `u32`
+        /// turned a BE SHORT length into `len << 16` (review A-01).
+        tag_0202_type: u16,
+        /// File offset of IFD0's 4-byte next-IFD pointer. IFD1 is allowed to
+        /// live after the JPEG, in which case resizing the JPEG moves it and
+        /// this pointer has to follow.
+        next_ifd_ptr_file_offset: Option<usize>,
+        /// IFD1's offset relative to the TIFF header.
+        ifd1_rel_offset: usize,
+        /// The embedded JPEG's offset relative to the TIFF header.
+        jpeg_rel_offset: usize,
         /// Is the TIFF header little-endian (true) or big-endian (false).
         is_little_endian: bool,
     },
@@ -354,29 +367,60 @@ fn reconstruct_heif(
     let target_end = target.file_offset + target.length;
     let map = |pos: usize| map_reconstructed_pos(pos, target_start, target_end, delta);
 
-    // 1. If Exif TIFF Tag 0x0202 is present, patch its 4-byte value. The tag
-    // lives in the Exif item and may be before *or* after the embedded JPEG
-    // (IFD1 is allowed at the end of the TIFF block), so its position has to
-    // be mapped like every other field.
+    // 1. The Exif tags live in the Exif item and may be before *or* after the
+    // embedded JPEG (IFD1 is allowed at the end of the TIFF block), so every
+    // field position has to be mapped like any other moved byte.
     if let BridgeTargetKind::ExifJpeg {
-        tag_0202_file_offset: Some(tag_pos),
+        tag_0202_file_offset,
+        tag_0202_type,
+        next_ifd_ptr_file_offset,
+        ifd1_rel_offset,
+        jpeg_rel_offset,
         is_little_endian,
         ..
     } = target.kind
     {
-        let mapped = map(tag_pos)?;
-        if mapped + 4 > out.len() {
-            return Err(StrHideError::CorruptedData(
-                "Exif 0x0202 tag lies outside the reconstructed file".into(),
-            ));
+        if let Some(tag_pos) = tag_0202_file_offset {
+            let width = match tag_0202_type {
+                3 => 2usize,
+                4 => 4usize,
+                other => {
+                    return Err(StrHideError::UnsupportedFormat(format!(
+                        "Exif tag 0x0202 has unsupported TIFF type {other}"
+                    )));
+                }
+            };
+            let new_len = new_carrier.len() as u64;
+            if width == 2 && new_len > u16::MAX as u64 {
+                // Upgrading the entry to LONG would mean relocating it and
+                // rewriting the type field; a predictable refusal is preferable
+                // to a half-migrated directory.
+                return Err(StrHideError::UnsupportedFormat(format!(
+                    "Exif tag 0x0202 is SHORT but the resized JPEG is {new_len} bytes"
+                )));
+            }
+            let mapped = map(tag_pos)?;
+            write_tiff_uint(&mut out, mapped, width, is_little_endian, new_len)?;
         }
-        let new_len_u32 = new_carrier.len() as u32;
-        let val_bytes = if is_little_endian {
-            new_len_u32.to_le_bytes()
-        } else {
-            new_len_u32.to_be_bytes()
-        };
-        out[mapped..mapped + 4].copy_from_slice(&val_bytes);
+
+        // IFD1 after the JPEG moves by `delta`, but IFD0's next-IFD pointer is
+        // stored before the replaced region and keeps its old value; a strict
+        // reader then lands `delta` bytes short of IFD1 and loses the
+        // thumbnail (review A-01).
+        if let Some(ptr_pos) = next_ifd_ptr_file_offset
+            && ifd1_rel_offset > jpeg_rel_offset
+        {
+            let new_ifd1 = (ifd1_rel_offset as i64)
+                .checked_add(delta)
+                .filter(|&v| (0..=u32::MAX as i64).contains(&v))
+                .ok_or_else(|| {
+                    StrHideError::CorruptedData(
+                        "Exif IFD1 offset does not fit after the resize".into(),
+                    )
+                })?;
+            let mapped = map(ptr_pos)?;
+            write_tiff_uint(&mut out, mapped, 4, is_little_endian, new_ifd1 as u64)?;
+        }
     }
 
     // 2. Parse ISOBMFF meta and patch iloc and top boxes
@@ -540,6 +584,38 @@ fn patch_uint(buf: &mut [u8], pos: usize, size: usize, val: u64) -> Result<(), S
     Ok(())
 }
 
+/// Write a TIFF value field of 2 (SHORT) or 4 (LONG) bytes.
+fn write_tiff_uint(
+    buf: &mut [u8],
+    pos: usize,
+    width: usize,
+    le: bool,
+    val: u64,
+) -> Result<(), StrHideError> {
+    let Some(end) = pos.checked_add(width) else {
+        return Err(StrHideError::CorruptedData(
+            "Exif value field offset overflows".into(),
+        ));
+    };
+    if end > buf.len() {
+        return Err(StrHideError::CorruptedData(
+            "Exif value field lies outside the reconstructed file".into(),
+        ));
+    }
+    match (width, le) {
+        (2, true) => buf[pos..end].copy_from_slice(&(val as u16).to_le_bytes()),
+        (2, false) => buf[pos..end].copy_from_slice(&(val as u16).to_be_bytes()),
+        (4, true) => buf[pos..end].copy_from_slice(&(val as u32).to_le_bytes()),
+        (4, false) => buf[pos..end].copy_from_slice(&(val as u32).to_be_bytes()),
+        _ => {
+            return Err(StrHideError::CorruptedData(format!(
+                "Unsupported Exif value width {width}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn read_uint(buf: &[u8], pos: usize, size: usize) -> Result<u64, StrHideError> {
     if pos + size > buf.len() {
         return Err(StrHideError::CorruptedData(
@@ -580,7 +656,10 @@ pub fn find_bridge_target(data: &[u8]) -> Result<BridgeTarget, StrHideError> {
     // declared non-primary JPEG item is the fallback within this priority.
     let mut non_thumb_jpeg = None;
     for item in &isobmff.items {
-        if &item.item_type == b"jpeg" && !item.extents.is_empty() {
+        // Only items stored as a single file extent can be rewritten by
+        // `host_extent`; advertising an `idat`-relative or multi-extent item
+        // made the probe succeed and the write fail (review B-03).
+        if &item.item_type == b"jpeg" && item.construction_method == 0 && item.extents.len() == 1 {
             if isobmff.primary_item_id == Some(item.item_id) {
                 continue; // the primary image stays bit-exact
             }
@@ -621,7 +700,7 @@ pub fn find_bridge_target(data: &[u8]) -> Result<BridgeTarget, StrHideError> {
 
     // Priority 2: Embedded JPEG inside an Exif metadata item
     for item in &isobmff.items {
-        if &item.item_type == b"Exif" && !item.extents.is_empty() {
+        if &item.item_type == b"Exif" && item.construction_method == 0 && item.extents.len() == 1 {
             let ext = &item.extents[0];
             let Some(exif_start) = item
                 .base_offset
@@ -667,98 +746,95 @@ fn parse_exif_embedded_jpeg(
         }
     }
 
-    if let Some(t_pos) = tiff_pos {
-        let is_le = &exif_slice[t_pos..t_pos + 2] == b"II";
-        let tiff_buf = &exif_slice[t_pos..];
+    let t_pos = tiff_pos?;
+    let is_le = &exif_slice[t_pos..t_pos + 2] == b"II";
+    let tiff_buf = &exif_slice[t_pos..];
+    if tiff_buf.len() < 8 {
+        return None;
+    }
+    let read_u16_at = |pos: usize| -> Option<u16> {
+        let b: [u8; 2] = tiff_buf.get(pos..pos + 2)?.try_into().ok()?;
+        Some(if is_le {
+            u16::from_le_bytes(b)
+        } else {
+            u16::from_be_bytes(b)
+        })
+    };
+    let read_u32_at = |pos: usize| -> Option<u32> {
+        let b: [u8; 4] = tiff_buf.get(pos..pos + 4)?.try_into().ok()?;
+        Some(if is_le {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        })
+    };
 
-        // Read IFD0 offset
-        if tiff_buf.len() >= 8 {
-            let ifd0_off = if is_le {
-                u32::from_le_bytes(tiff_buf[4..8].try_into().unwrap()) as usize
-            } else {
-                u32::from_be_bytes(tiff_buf[4..8].try_into().unwrap()) as usize
-            };
+    let ifd0_off = read_u32_at(4)? as usize;
+    let cnt0 = read_u16_at(ifd0_off)? as usize;
+    let next_ifd_pos = ifd0_off.checked_add(2 + cnt0.checked_mul(12)?)?;
+    let ifd1_off = read_u32_at(next_ifd_pos)? as usize;
+    if ifd1_off == 0 {
+        return None;
+    }
+    let cnt1 = read_u16_at(ifd1_off)? as usize;
 
-            if ifd0_off + 2 <= tiff_buf.len() {
-                let cnt0 = if is_le {
-                    u16::from_le_bytes(tiff_buf[ifd0_off..ifd0_off + 2].try_into().unwrap())
-                        as usize
-                } else {
-                    u16::from_be_bytes(tiff_buf[ifd0_off..ifd0_off + 2].try_into().unwrap())
-                        as usize
-                };
-                let next_ifd_pos = ifd0_off + 2 + cnt0 * 12;
+    let mut tag_0201_val: Option<u64> = None;
+    let mut tag_0202_val: Option<u64> = None;
+    let mut tag_0202_pos: Option<usize> = None;
+    let mut tag_0202_type: u16 = 4;
 
-                if next_ifd_pos + 4 <= tiff_buf.len() {
-                    let ifd1_off = if is_le {
-                        u32::from_le_bytes(
-                            tiff_buf[next_ifd_pos..next_ifd_pos + 4].try_into().unwrap(),
-                        ) as usize
-                    } else {
-                        u32::from_be_bytes(
-                            tiff_buf[next_ifd_pos..next_ifd_pos + 4].try_into().unwrap(),
-                        ) as usize
-                    };
-
-                    if ifd1_off > 0 && ifd1_off + 2 <= tiff_buf.len() {
-                        let cnt1 = if is_le {
-                            u16::from_le_bytes(tiff_buf[ifd1_off..ifd1_off + 2].try_into().unwrap())
-                                as usize
-                        } else {
-                            u16::from_be_bytes(tiff_buf[ifd1_off..ifd1_off + 2].try_into().unwrap())
-                                as usize
-                        };
-
-                        let mut tag_0201_val = None;
-                        let mut tag_0202_val = None;
-                        let mut tag_0202_pos = None;
-
-                        for idx in 0..cnt1 {
-                            let ep = ifd1_off + 2 + idx * 12;
-                            if ep + 12 > tiff_buf.len() {
-                                break;
-                            }
-                            let tag = if is_le {
-                                u16::from_le_bytes(tiff_buf[ep..ep + 2].try_into().unwrap())
-                            } else {
-                                u16::from_be_bytes(tiff_buf[ep..ep + 2].try_into().unwrap())
-                            };
-                            let val = if is_le {
-                                u32::from_le_bytes(tiff_buf[ep + 8..ep + 12].try_into().unwrap())
-                            } else {
-                                u32::from_be_bytes(tiff_buf[ep + 8..ep + 12].try_into().unwrap())
-                            };
-
-                            if tag == 0x0201 {
-                                tag_0201_val = Some(val as usize);
-                            } else if tag == 0x0202 {
-                                tag_0202_val = Some(val as usize);
-                                tag_0202_pos = Some(exif_file_offset + t_pos + ep + 8);
-                            }
-                        }
-
-                        if let (Some(rel_off), Some(len)) = (tag_0201_val, tag_0202_val)
-                            && rel_off + len <= tiff_buf.len()
-                            && len >= 64
-                            && &tiff_buf[rel_off..rel_off + 2] == b"\xFF\xD8"
-                        {
-                            return Some(BridgeTarget {
-                                kind: BridgeTargetKind::ExifJpeg {
-                                    exif_item_id,
-                                    tag_0202_file_offset: tag_0202_pos,
-                                    is_little_endian: is_le,
-                                },
-                                file_offset: exif_file_offset + t_pos + rel_off,
-                                length: len,
-                            });
-                        }
-                    }
-                }
-            }
+    for idx in 0..cnt1 {
+        let ep = ifd1_off + 2 + idx * 12;
+        if ep + 12 > tiff_buf.len() {
+            break;
+        }
+        let tag = read_u16_at(ep)?;
+        if tag != 0x0201 && tag != 0x0202 {
+            continue;
+        }
+        // The TIFF entry declares its own width; reading all four value bytes
+        // as a u32 turned a big-endian SHORT into `value << 16` (review A-01).
+        let typ = read_u16_at(ep + 2)?;
+        let count = read_u32_at(ep + 4)?;
+        if count != 1 {
+            continue;
+        }
+        let value = match typ {
+            3 => read_u16_at(ep + 8)? as u64,
+            4 => read_u32_at(ep + 8)? as u64,
+            _ => continue,
+        };
+        if tag == 0x0201 {
+            tag_0201_val = Some(value);
+        } else {
+            tag_0202_val = Some(value);
+            tag_0202_type = typ;
+            tag_0202_pos = Some(exif_file_offset + t_pos + ep + 8);
         }
     }
 
-    None
+    let rel_off = usize::try_from(tag_0201_val?).ok()?;
+    let len = usize::try_from(tag_0202_val?).ok()?;
+    if rel_off.checked_add(len)? > tiff_buf.len()
+        || len < 64
+        || tiff_buf.get(rel_off..rel_off + 2)? != b"\xFF\xD8"
+    {
+        return None;
+    }
+
+    Some(BridgeTarget {
+        kind: BridgeTargetKind::ExifJpeg {
+            exif_item_id,
+            tag_0202_file_offset: tag_0202_pos,
+            tag_0202_type,
+            next_ifd_ptr_file_offset: Some(exif_file_offset + t_pos + next_ifd_pos),
+            ifd1_rel_offset: ifd1_off,
+            jpeg_rel_offset: rel_off,
+            is_little_endian: is_le,
+        },
+        file_offset: exif_file_offset + t_pos + rel_off,
+        length: len,
+    })
 }
 
 /// Lightweight ISO BMFF parser for meta box, iinf, and iloc.

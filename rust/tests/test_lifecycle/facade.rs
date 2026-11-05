@@ -239,6 +239,82 @@ fn content_file_embed_to_target_leaves_original_untouched() {
     assert!(target.exists());
 }
 
+/// `-o <carrier>` and "no `-o` at all" describe the same in-place write; the
+/// explicit spelling must not fail just because the destination exists, even
+/// with `overwrite = false` (review B-07).
+#[test]
+fn explicit_same_path_output_is_an_in_place_embed() {
+    let dir = scratch("facade_explicit_same_output");
+    let carrier = dir.join("carrier.jpg");
+    std::fs::write(&carrier, JPG).expect("seed carrier");
+
+    let engine = StrHide::new();
+    let target_cfg = strhide::commit::FileTarget {
+        output_path: Some(&carrier),
+        backup: false,
+        preserve_time: true,
+        overwrite: false,
+    };
+    engine
+        .stego()
+        .embed_file(
+            &carrier,
+            &Payload::bytes(CONTENT_PAYLOAD),
+            &EmbedOptions::default(),
+            &target_cfg,
+        )
+        .expect("an explicit same-path output is an in-place embed");
+
+    let out = dir.join("out.bin");
+    engine
+        .stego()
+        .extract_file(&carrier, &out, &ExtractOptions::default(), false)
+        .expect("extract_file");
+    assert_eq!(std::fs::read(&out).expect("read output"), CONTENT_PAYLOAD);
+}
+
+/// `read -o <carrier>` would replace the only copy of the hidden data with the
+/// payload it contains; `overwrite = true` must not override that (review
+/// B-07). The carrier bytes must be bit-identical afterwards.
+#[test]
+fn extract_file_refuses_to_write_over_its_carrier() {
+    let dir = scratch("facade_extract_onto_carrier");
+    let carrier = dir.join("carrier.jpg");
+    std::fs::write(&carrier, JPG).expect("seed carrier");
+
+    let engine = StrHide::new();
+    let target_cfg = strhide::commit::FileTarget {
+        output_path: None,
+        backup: false,
+        preserve_time: true,
+        overwrite: true,
+    };
+    engine
+        .stego()
+        .embed_file(
+            &carrier,
+            &Payload::bytes(CONTENT_PAYLOAD),
+            &EmbedOptions::default(),
+            &target_cfg,
+        )
+        .expect("embed in place");
+    let stego = std::fs::read(&carrier).expect("read stego");
+
+    let err = engine
+        .stego()
+        .extract_file(&carrier, &carrier, &ExtractOptions::default(), true)
+        .expect_err("extracting onto the carrier must be refused");
+    assert!(
+        matches!(err, strhide::errors::StrHideError::Rejection(_)),
+        "expected Rejection, got: {err}"
+    );
+    assert_eq!(
+        std::fs::read(&carrier).expect("read carrier"),
+        stego,
+        "the refused extract must leave the carrier untouched"
+    );
+}
+
 // ───────────────────────── private dialect isolation ────────────────────────
 
 #[test]

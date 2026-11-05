@@ -13,7 +13,7 @@ use std::path::Path;
 
 #[cfg(feature = "content-hevc")]
 use crate::commit::commit_carrier_patches;
-use crate::commit::{FileTarget, commit_carrier_bytes};
+use crate::commit::{FileTarget, commit_carrier_bytes, same_file};
 use crate::core::payload::Payload;
 use crate::core::pipeline::check_overwrite;
 use crate::errors::StrHideError;
@@ -43,7 +43,11 @@ pub fn embed_carrier_file(
     let carrier_meta = std::fs::metadata(carrier_path)?;
     let carrier_before_bytes = carrier_meta.len();
     let dest = target.output_path.unwrap_or(carrier_path);
-    if target.output_path.is_some() {
+    // `-o <same path as the carrier>` is an in-place write, not an overwrite of
+    // a *different* file: refusing it because the destination exists would make
+    // the explicit and implicit spellings of the same request behave
+    // differently (review B-07). Other destinations keep the overwrite gate.
+    if target.output_path.is_some() && !same_file(carrier_path, dest) {
         check_overwrite(dest, target.overwrite)?;
     }
     // Held until the commit finishes: a concurrent writer to the same target

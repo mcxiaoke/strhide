@@ -237,6 +237,102 @@ fn pdf_xref_stream_incremental_write_roundtrip() {
     assert_eq!(fs::read(&out).unwrap(), make_xref_stream_pdf());
 }
 
+/// Revision 1 is a classic `xref`/`trailer` document, revision 2 replaces the
+/// cross-reference with an XRef stream (object 4, `/Size 5`). The stale rev-1
+/// trailer still sits in the 64 KiB tail window and declares `/Size 4`, i.e.
+/// exactly the object rev 2 occupies (review A-06).
+fn make_classic_then_xref_stream_pdf() -> Vec<u8> {
+    let mut pdf = b"%PDF-1.4\n\
+        1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+        2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\
+        3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n"
+        .to_vec();
+    let rev1_xref = pdf.len();
+    pdf.extend_from_slice(
+        format!(
+            "xref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n\
+             0000000063 00000 n \n0000000120 00000 n \n\
+             trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{rev1_xref}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+    let rev2_xref = pdf.len();
+    pdf.extend_from_slice(b"4 0 obj\n<< /Type /XRef /Root 1 0 R /Size 5 /Length 20 >>\nstream\n");
+    pdf.extend_from_slice(&[0u8; 20]);
+    pdf.extend_from_slice(
+        format!("\nendstream\nendobj\nstartxref\n{rev2_xref}\n%%EOF\n").as_bytes(),
+    );
+    pdf
+}
+
+#[test]
+fn pdf_xref_stream_revision_after_a_classic_one_stays_in_its_dialect() {
+    let original = make_classic_then_xref_stream_pdf();
+    let info = parse_pdf_trailer_info(&mut std::io::Cursor::new(original.clone())).unwrap();
+    assert_eq!(
+        info.new_obj_num, 5,
+        "the newest XRef stream's /Size must win over the stale classic trailer"
+    );
+    assert!(info.uses_xref_stream);
+
+    let dir = scratch("pdf_mixed_rev");
+    let carrier = dir.join("c.pdf");
+    let out = dir.join("o.pdf");
+    fs::write(&carrier, &original).unwrap();
+
+    let res = write_carrier(
+        &carrier,
+        PayloadSource::Text("mixed revision secret"),
+        &WriteOptions {
+            output_path: Some(&out),
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res.strategy.name(), "incremental");
+
+    let stego = fs::read(&out).unwrap();
+    let appended = &stego[original.len()..];
+    assert!(
+        appended.windows(9).any(|w| w == b"\n5 0 obj\n"),
+        "the envelope object must avoid rev 2's object number 4"
+    );
+    assert!(
+        appended.windows(11).any(|w| w == b"/Type /XRef"),
+        "an XRef-stream revision must receive an XRef-stream update"
+    );
+    assert!(
+        !appended.windows(6).any(|w| w == b"\nxref\n"),
+        "a classic xref table must not be appended to an XRef-stream revision"
+    );
+
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(read.data, b"mixed revision secret");
+
+    remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: None,
+            password: None,
+            backup: false,
+            overwrite: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(fs::read(&out).unwrap(), original);
+}
+
 #[test]
 fn pdf_without_root_is_rejected_for_incremental() {
     let broken = make_pdf_without_root();

@@ -246,6 +246,48 @@ fn read_xref_stream_dict<R: Read + Seek + ?Sized>(
     })
 }
 
+/// Which cross-reference dialect the newest revision uses, judged only by the
+/// bytes at `startxref`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XrefAnchor {
+    /// The offset points at the `xref` keyword of a classic table.
+    Classic,
+    /// The offset points at an indirect object (`N G obj`), i.e. an XRef stream.
+    Stream,
+    /// The offset is out of range or points at something unrecognised.
+    Unknown,
+}
+
+/// Classify the cross-reference section that begins at `startxref`.
+fn xref_anchor<R: Read + Seek + ?Sized>(
+    reader: &mut R,
+    startxref: u64,
+    file_size: u64,
+) -> XrefAnchor {
+    if startxref == 0 || startxref >= file_size {
+        return XrefAnchor::Unknown;
+    }
+    let Ok(restore) = reader.stream_position() else {
+        return XrefAnchor::Unknown;
+    };
+    if reader.seek(SeekFrom::Start(startxref)).is_err() {
+        return XrefAnchor::Unknown;
+    }
+    let mut buf = [0u8; 32];
+    let n = reader.read(&mut buf).unwrap_or(0);
+    let _ = reader.seek(SeekFrom::Start(restore));
+    let text = String::from_utf8_lossy(&buf[..n]);
+    let t = text
+        .trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '\u{0B}' || c == '\u{0C}');
+    if t.starts_with("xref") {
+        XrefAnchor::Classic
+    } else if t.starts_with(|c: char| c.is_ascii_digit()) {
+        XrefAnchor::Stream
+    } else {
+        XrefAnchor::Unknown
+    }
+}
+
 pub fn parse_pdf_tail_info<R: Read + Seek + ?Sized>(
     reader: &mut R,
 ) -> Result<PdfTailInfo, StrHideError> {
@@ -305,20 +347,63 @@ pub fn parse_pdf_tail_info_with_magic<R: Read + Seek + ?Sized>(
     let mut encrypt_ref = None;
     let mut uses_xref_stream = false;
 
-    if let Some(trailer_idx) = text_before_eof[..sx_idx].rfind("trailer") {
-        let trailer_str = &text_before_eof[trailer_idx..sx_idx];
-        new_obj_num = find_int_after(trailer_str, "/Size");
-        root_ref = find_indirect_ref(trailer_str, "/Root", false);
-        info_ref = find_indirect_ref(trailer_str, "/Info", false);
-        encrypt_ref = find_indirect_ref(trailer_str, "/Encrypt", false);
+    // The dialect of the *newest* cross-reference section is decided by the
+    // object `startxref` points at, not by what the last 64 KiB happen to
+    // contain: a document that began with a classic `xref`/`trailer` and was
+    // later updated with an XRef stream still carries rev1's trailer in that
+    // window, and its `/Size` is stale. Adopting it mints an object number that
+    // rev2 already uses, so the incremental update silently collides (review
+    // A-06). For a classic table the trailer must be searched only from
+    // `startxref` onwards (the trailer follows the table it describes).
+    let mut anchor = xref_anchor(reader, prev_startxref, file_size);
+    // A `N G obj` anchor only proves the offset lands on *an* object. Treat it
+    // as an XRef stream only when its dictionary really says `/Type /XRef`;
+    // anything else keeps the lenient path so slightly-off `startxref` offsets
+    // in third-party writers still parse.
+    let stream_dict = if anchor == XrefAnchor::Stream {
+        read_xref_stream_dict(reader, prev_startxref)
+    } else {
+        None
+    };
+    if anchor == XrefAnchor::Stream && stream_dict.is_none() {
+        anchor = XrefAnchor::Unknown;
+    }
+    if anchor != XrefAnchor::Stream {
+        let from = match anchor {
+            XrefAnchor::Classic => prev_startxref.saturating_sub(window_start) as usize,
+            // Unknown anchors keep the lenient whole-window search so a carrier
+            // whose `startxref` is not exactly on the section start still parses.
+            _ => 0,
+        };
+        // `before` is lossy UTF-8: a file offset can land inside a replacement
+        // character, so snap it forward to a char boundary before slicing.
+        let mut start_idx = from.min(sx_idx);
+        while start_idx < sx_idx && !text_before_eof.is_char_boundary(start_idx) {
+            start_idx += 1;
+        }
+        if let Some(rel) = text_before_eof[start_idx..sx_idx].rfind("trailer") {
+            let trailer_idx = start_idx + rel;
+            let trailer_str = &text_before_eof[trailer_idx..sx_idx];
+            new_obj_num = find_int_after(trailer_str, "/Size");
+            root_ref = find_indirect_ref(trailer_str, "/Root", false);
+            info_ref = find_indirect_ref(trailer_str, "/Info", false);
+            encrypt_ref = find_indirect_ref(trailer_str, "/Encrypt", false);
+        }
     }
 
     // No classic trailer dictionary (xref-stream PDF): read /Size (and /Root,
     // /Info, /Encrypt) from the XRef stream that `startxref` points at. Only
     // when that is unavailable does the tail-window `N G obj` scan remain as a
     // last resort.
+    let stream_dict = stream_dict.or_else(|| {
+        if new_obj_num.is_none() {
+            read_xref_stream_dict(reader, prev_startxref)
+        } else {
+            None
+        }
+    });
     if new_obj_num.is_none()
-        && let Some(dict) = read_xref_stream_dict(reader, prev_startxref)
+        && let Some(dict) = stream_dict
     {
         uses_xref_stream = true;
         new_obj_num = dict.size;
@@ -334,6 +419,15 @@ pub fn parse_pdf_tail_info_with_magic<R: Read + Seek + ?Sized>(
     }
     if new_obj_num.is_none() {
         new_obj_num = scan_max_object_number(&text_before_eof).and_then(|n| n.checked_add(1));
+    } else if anchor != XrefAnchor::Classic
+        && let Some(scanned) =
+            scan_max_object_number(&text_before_eof).and_then(|n| n.checked_add(1))
+        && let Some(current) = new_obj_num
+    {
+        // An XRef stream's `/Size` is the authoritative next object number, but
+        // a stale one must never under-report: taking the larger of `/Size` and
+        // `max(objnum) + 1` cannot collide either way.
+        new_obj_num = Some(current.max(scanned));
     }
 
     // /Root and /Info may live inside an xref-stream trailer dict (or an older
@@ -1221,8 +1315,9 @@ endobj
 
     #[test]
     fn classic_trailer_still_wins_over_the_xref_stream_scan() {
-        // A hybrid document: the newest trailer dictionary is a classic one, so
-        // its /Size must not be overridden by the XRef stream's.
+        // A hybrid document whose newest section is a classic table: an older
+        // XRef stream sits in the tail window, but /Size must come from the
+        // trailer that follows the table `startxref` points at.
         let mut pdf = Vec::new();
         pdf.extend_from_slice(
             b"%PDF-1.4
@@ -1231,7 +1326,6 @@ endobj
 endobj
 ",
         );
-        let xref_obj_offset = pdf.len() as u64;
         pdf.extend_from_slice(
             b"2 0 obj
 << /Length 4 /Type /XRef /Size 3 >>
@@ -1241,15 +1335,20 @@ endstream
 endobj
 ",
         );
+        let classic_xref_offset = pdf.len() as u64;
         pdf.extend_from_slice(
-            b"trailer
+            b"xref
+0 2
+0000000000 65535 f 
+0000000009 00000 n 
+trailer
 << /Size 7 /Root 1 0 R >>
 ",
         );
         pdf.extend_from_slice(
             format!(
                 "startxref
-{xref_obj_offset}
+{classic_xref_offset}
 %%EOF
 "
             )
@@ -1259,6 +1358,94 @@ endobj
         let info = parse_pdf_tail_info(&mut Cursor::new(pdf)).expect("must parse");
         assert_eq!(info.new_obj_num, Some(7));
         assert_eq!(info.root_ref.as_deref(), Some("1 0 R"));
+        assert!(!info.uses_xref_stream);
+    }
+
+    /// Revision 1 is a classic `xref`/`trailer` document, revision 2 replaces
+    /// the cross-reference with an XRef stream. The stale rev-1 trailer is
+    /// still inside the 64 KiB tail window, and its `/Size` (3) names the
+    /// object that rev 2 itself occupies. Searching that window for `trailer`
+    /// used to pick it up, so the incremental envelope collided with the XRef
+    /// stream object (review A-06).
+    #[test]
+    fn xref_stream_revision_ignores_the_earlier_classic_trailer() {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(
+            b"%PDF-1.4
+1 0 obj
+<< /Type /Catalog >>
+endobj
+",
+        );
+        let rev1_xref = pdf.len() as u64;
+        pdf.extend_from_slice(
+            format!(
+                "xref
+0 2
+0000000000 65535 f 
+0000000009 00000 n 
+trailer
+<< /Size 2 /Root 1 0 R >>
+startxref
+{rev1_xref}
+%%EOF
+"
+            )
+            .as_bytes(),
+        );
+        let rev2_xref = pdf.len() as u64;
+        pdf.extend_from_slice(
+            b"2 0 obj
+<< /Type /XRef /Root 1 0 R /Size 3 /Length 7 >>
+stream
+",
+        );
+        pdf.extend_from_slice(&[1u8, 0, 0, 0, 0, 0, 0]);
+        pdf.extend_from_slice(
+            format!(
+                "
+endstream
+endobj
+startxref
+{rev2_xref}
+%%EOF
+"
+            )
+            .as_bytes(),
+        );
+
+        let info = parse_pdf_tail_info(&mut Cursor::new(pdf.clone())).expect("must parse");
+        assert_eq!(
+            info.new_obj_num,
+            Some(3),
+            "the XRef stream's /Size must win over the stale rev-1 trailer"
+        );
+        assert!(info.uses_xref_stream);
+
+        let original_len = pdf.len();
+        let ube = ube_of(32, 0);
+        let mut out = Vec::new();
+        PdfAdapter
+            .inject(
+                &mut Cursor::new(pdf),
+                &mut Cursor::new(ube),
+                &mut out,
+                "incremental",
+            )
+            .unwrap();
+        let tail = &out[original_len..];
+        assert!(
+            tail.windows(9).any(|w| w == b"\n3 0 obj\n"),
+            "the envelope object must take /Size 3, not the colliding rev-1 value"
+        );
+        assert!(
+            tail.windows(11).any(|w| w == b"/Type /XRef"),
+            "an XRef-stream revision must receive an XRef-stream update"
+        );
+        assert!(
+            !tail.windows(6).any(|w| w == b"\nxref\n"),
+            "a classic xref table must not be appended to an XRef-stream revision"
+        );
     }
 
     #[test]
