@@ -58,9 +58,9 @@ use crate::stego::traits::PngCostModel;
 ///
 /// Replaces the `"hill"` / `"suniward"` strings the old options carried. A typo
 /// is now a compile error or a [`from_name`](Self::from_name) `None`, not a
-/// runtime "unknown algorithm" from inside the engine -- and
-/// [`Custom`](Self::Custom) closes the "a private build cannot inject its own
-/// cost model" gap the registry-only lookup had.
+/// runtime "unknown algorithm" from inside the engine. The enum is closed: a
+/// private build that needs its own cost model goes through the PNG registry
+/// (`stego::png::registry`) rather than a caller-supplied variant.
 #[cfg(feature = "content-png")]
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum SpatialAlgorithm {
@@ -1136,10 +1136,10 @@ pub struct EmbedOutput {
     pub bytes: Vec<u8>,
     /// Capacity metadata, when the engine computed it while embedding.
     ///
-    /// `None` when the engine does not run the capacity model during embed
-    /// (the HEIF thumbnail bridge falls back to a separate encode). PNG, JPEG,
-    /// HEVC and the structure domain do report it from the same pool they
-    /// embed with, so callers must not re-probe those carriers.
+    /// `None` when the engine does not run the capacity model during embed.
+    /// PNG, JPEG, HEVC, the HEIF thumbnail bridge and the structure domain all
+    /// report it from the same pool they embed with, so callers must not
+    /// re-probe those carriers.
     pub capacity: Option<StegoCapacityInfo>,
     /// Exact modification statistics from the embedder, when available.
     pub stats: Option<EmbedStats>,

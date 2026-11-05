@@ -347,12 +347,13 @@ fn safe_output_filename(name: Option<&str>, is_file: bool) -> String {
 ///
 /// No `-o` (or `-o` naming the carrier itself) is an in-place write and must
 /// not be rejected by `overwrite=false`; only a different explicit destination
-/// can clobber an unrelated file.
-fn overwrite_target<'a>(
+/// can clobber an unrelated file. `same_file` catches the same file addressed
+/// through a different spelling (relative vs absolute, Windows letter case).
+pub(crate) fn overwrite_target<'a>(
     output: Option<&'a std::path::Path>,
     carrier: &'a std::path::Path,
 ) -> Option<&'a std::path::Path> {
-    output.filter(|dest| *dest != carrier)
+    output.filter(|dest| !strhide::core::commit::same_file(dest, carrier))
 }
 
 #[allow(clippy::too_many_arguments)]

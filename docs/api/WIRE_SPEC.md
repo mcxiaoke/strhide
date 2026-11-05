@@ -41,16 +41,16 @@ strhide 有两个相互独立的隐写域，各自有不同的字节布局：
 
 | 维度 | 结构域信封（`write`，UBE） | 内容域微信封（`embed`） |
 |---|---|---|
-| 代码 | `envelope.rs` + `engine.rs` + `pe_codebits.rs` | `stego/envelope.rs` |
-| 总体结构 | `112B header` + 可选 hint + 元数据块 + 分块载荷 + `24B trailer`（散落策略外包 `14B ChannelHeader`） | `16B salt` + `12B nonce` + 单个密文块 |
-| 静态魔数 | 有：8B 头魔数 + 4B 尾魔数 | **无**，整体呈高熵随机数据 |
+| 代码 | `envelope.rs` + `engine.rs` + `pe_codebits.rs` | `stego/envelope.rs` + `stego/header.rs` + `stego/format.rs` |
+| 总体结构 | `112B header` + 可选 hint + 元数据块 + 分块载荷 + `24B trailer`（散落策略外包 `14B ChannelHeader`） | 密钥化基础头（空间 64B / JPEG 44B / HEVC 32B）+ 可选 TLV 扩展区 + 单个 AEAD 密文正文（见 §13） |
+| 静态魔数 | 有：8B 头魔数 + 4B 尾魔数 | **无固定魔数**：`magic4` 由 L2 派生，整体呈高熵随机数据 |
 | 定位尾标（trailer） | 有 24B（offset/size/CRC/magic） | 无 |
-| 元数据 | 文件名、原始大小、原始 SHA-256、创建时间（独立 AEAD 块） | 无文件名/时间戳；仅密文内 4B 长度 + 1B 标志 |
+| 元数据 | 文件名、原始大小、原始 SHA-256、创建时间（独立 AEAD 块） | 无时间戳；密文内微头为 4B 原始长度 + 1B flags + 1B 类型（文件另带 ≤255B 文件名，见 §13.2） |
 | 载荷密封 | 分块：每块 `u32 LE` 长度前缀 + 密文，chunk AAD 含 index/is_last | 一次性整体密封，无分块 |
-| 字节序 | 小端 | 外层无整数；密文内部长度为**大端** |
-| AEAD AAD | header 前 80B + `meta_len`/`hint_len` + hint 正文；分块再追加 `chunk_index/is_last` | `salt ‖ nonce`（28B） |
+| 字节序 | 小端 | 基础头多字节字段为**大端** |
+| AEAD AAD | header 前 80B + `meta_len`/`hint_len` + hint 正文；分块再追加 `chunk_index/is_last` | `"strhide-content-envelope-v4\0" ‖ format_id ‖ base_header ‖ extension`（见 §13.3） |
 | 无密码默认密钥 | `BUILTIN_DEFAULT_KEY` | `PUBLIC_DEFAULT_SECRET` |
-| HKDF 子密钥标签 | `strhide-payload`、`strhide-metadata`（掩码：`strhide-header-mask-v1`、`strhide-pe-channel-mask-v2`） | `strhide-stego-enc-v1`、`strhide-stego-perm-v1`、`strhide-stego-hpos-v2`、`strhide-stc-trellis-v1` |
+| HKDF 子密钥标签 | `strhide-payload`、`strhide-metadata`（掩码：`strhide-header-mask-v1`、`strhide-pe-channel-mask-v2`） | L1 `strhide-stego-domain-v1`；L2 `strhide-stego-hpos-v2` + `strhide-v4-hdr-magic` / `strhide-v4-hdr-stc` / `strhide-v4-ext-stc`；L3 的 enc/perm/stc 标签随格式方言不同（见 §13.3） |
 | 额外派生 | stealth 魔数与 76B/10B 字段掩码 | header 槽位置换种子（无 salt）、STC 网格种子 |
 | 宿主还原 | 记录宿主 size + SHA-256，支持 bit-for-bit 还原（散落策略依赖 slack diff） | **无宿主还原**：像素/系数被改即不可逆，只能重嵌或覆盖 |
 | 最终承载 | 注入容器结构空隙（chunk/段/box/overlay 等）或指令编码散落 | 矩阵编码分散到像素 / DCT 系数 / H.265 变换系数符号位 |
@@ -288,9 +288,13 @@ magic_header (8) | version (1) | flags (1) | strategy_id (1) | offset_delta (1)
 每个分块的 AAD 为：
 
 ```text
-header AAD (80) | chunk_index (u64 LE, 8) | is_last (u8, 1)     // 共 89 字节
+header AAD (80) | meta_len (u32 LE, 4) | hint_len (u32 LE, 4) | hint (hint_len)
+                | chunk_index (u64 LE, 8) | is_last (u8, 1)
+// 总长 = 97 + hint_len
 ```
 
+- `meta_len` / `hint_len` 与 hint 正文由 `EnvelopeHeader::auth_aad` 追加（88 + hint_len）；
+  分块层再追加 `chunk_index` 和 `is_last`（`core/crypto.rs`），故为 `97 + hint_len`。
 - `chunk_index` 从 0 起递增。
 - `is_last`：最后一块为 1，其余为 0。
 
@@ -709,7 +713,7 @@ max_payload = message_bits(total_slots - (524 + ext_slots)) / 8 - 22
 | `CHUNK_SIZE`（默认） | `2 MiB = 2,097,152` |
 | `MAX_CHUNK_SIZE` | `64 MiB = 67,108,864` |
 | `MAX_KNOWN_STRATEGY_ID` | `13` |
-| `BUILTIN_DEFAULT_KEY` | `"strhide::envelope::v2::default::builtin::public::secret"` |
+| `BUILTIN_DEFAULT_KEY` | `"strhide::structure::envelope::v2::default::builtin::public::secret"` |
 | `MIN_UBE_PLAIN` | `178`（见 §14.3） |
 | `MIN_UBE_ENCRYPTED` | `214`（见 §14.3） |
 

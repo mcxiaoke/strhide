@@ -31,14 +31,19 @@ pub async fn write_structure_file_impl(
     req: StructureWriteRequest,
     on_progress: Channel<ProgressEvent>,
 ) -> Result<WriteResult, ErrorDetail> {
-    // Check destination file overwrite policy before entering the engine
-    let target = req.output_path.as_deref().unwrap_or(&req.carrier);
-    let target_buf = target.to_path_buf();
+    // Check destination file overwrite policy before entering the engine.
+    // An omitted `output_path` means "write in place": the carrier is the
+    // destination, and `overwrite=false` must not reject the user's in-place
+    // write. Only a different explicit destination is checked.
     let overwrite = req.overwrite;
 
     run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
-        // Enforce overwrite check on output path
-        check_overwrite(&target_buf, overwrite)?;
+        if let Some(dest) = crate::commands::stego::overwrite_target(
+            req.output_path.as_deref(),
+            &req.carrier,
+        ) {
+            check_overwrite(dest, overwrite)?;
+        }
 
         let (buf, filename, is_file);
         let source = match req.payload {

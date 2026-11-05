@@ -498,14 +498,6 @@ fn parse_sample_description<'a>(
         .get(hvcc.payload_start..hvcc.end)
         .ok_or(HevcError::Truncated)?;
     let (parameter_sets, length_size) = parse_hvcc_record(hvcc_bytes)?;
-    // Some writers put a prefix SEI array in `hvcC` too (both sample files in
-    // the corpus do). Only VPS/SPS/PPS are parameter sets in the sense the
-    // decoder and the cover digest need; feeding the SEI array would duplicate
-    // metadata that is not part of the carrier's identity.
-    let parameter_sets: Vec<&[u8]> = parameter_sets
-        .into_iter()
-        .filter(|ps| ps.len() > 2 && matches!((ps[0] >> 1) & 0x3F, 32..=34))
-        .collect();
     if parameter_sets.is_empty() {
         return Err(HevcError::ContainerMalformed("hvcC carries no VPS/SPS/PPS"));
     }

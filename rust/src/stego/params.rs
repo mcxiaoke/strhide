@@ -749,10 +749,18 @@ pub struct StegoProfile {
     /// [`DEFAULT_HEVC_FORMAT`](crate::stego::format::DEFAULT_HEVC_FORMAT).
     #[cfg(feature = "content-hevc")]
     pub hevc: Option<crate::stego::format::HevcFormatProfile>,
-    /// Private audio wire-format identity. `None` means the official
+    /// Private WAV wire-format identity. `None` means the official
     /// [`OFFICIAL_WAV_FORMAT`](crate::stego::format::OFFICIAL_WAV_FORMAT).
     #[cfg(feature = "content-audio")]
     pub audio: Option<crate::stego::format::AudioFormatProfile>,
+    /// Private FLAC wire-format identity. `None` means the official
+    /// [`OFFICIAL_FLAC_FORMAT`](crate::stego::format::OFFICIAL_FLAC_FORMAT).
+    ///
+    /// Deliberately separate from [`audio`](Self::audio): the two carriers have
+    /// different official `hpos_salt` values, so one custom profile must not
+    /// silently make a WAV and a FLAC share the same header permutation seed.
+    #[cfg(feature = "content-audio")]
+    pub flac: Option<crate::stego::format::AudioFormatProfile>,
 }
 
 impl StegoProfile {
@@ -769,6 +777,8 @@ impl StegoProfile {
             hevc: None,
             #[cfg(feature = "content-audio")]
             audio: None,
+            #[cfg(feature = "content-audio")]
+            flac: None,
         }
     }
 
@@ -820,6 +830,16 @@ impl StegoProfile {
         self
     }
 
+    /// Set [`flac`](Self::flac).
+    #[cfg(feature = "content-audio")]
+    pub const fn with_flac_format(
+        mut self,
+        flac: crate::stego::format::AudioFormatProfile,
+    ) -> Self {
+        self.flac = Some(flac);
+        self
+    }
+
     /// Private secret, or `None` when the official public constant must be
     /// used. An empty string counts as "not configured", so a blank config
     /// value cannot silently *disable* confidentiality by looking configured.
@@ -862,15 +882,17 @@ impl StegoProfile {
         }
     }
 
-    /// FLAC wire-format identity to use: the private [`audio`](Self::audio)
+    /// FLAC wire-format identity to use: the private [`flac`](Self::flac)
     /// when set, otherwise the official FLAC default.
     ///
     /// FLAC has its own label set so a WAV and a FLAC embedded with one
-    /// password never share a key stream.
+    /// password never share a key stream. A custom [`audio`](Self::audio)
+    /// profile applies to WAV only; use [`with_flac_format`](Self::with_flac_format)
+    /// to customise FLAC.
     #[cfg(feature = "content-audio")]
     pub fn flac_format(&self) -> &crate::stego::format::AudioFormatProfile {
-        match self.audio.as_ref() {
-            Some(audio) => audio,
+        match self.flac.as_ref() {
+            Some(flac) => flac,
             None => &crate::stego::format::OFFICIAL_FLAC_FORMAT,
         }
     }
@@ -904,7 +926,7 @@ impl StegoProfile {
         }
         #[cfg(feature = "content-audio")]
         {
-            ok = ok && self.audio.is_none();
+            ok = ok && self.audio.is_none() && self.flac.is_none();
         }
         ok
     }
@@ -913,6 +935,42 @@ impl StegoProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B-06: a custom WAV profile used to leak into FLAC, giving both carriers
+    /// the same `hpos_salt` and therefore the same header permutation seed.
+    #[cfg(feature = "content-audio")]
+    #[test]
+    fn wav_and_flac_profiles_are_independent() {
+        use crate::stego::format::{AudioFormatProfile, OFFICIAL_FLAC_FORMAT, OFFICIAL_WAV_FORMAT};
+        const CUSTOM_WAV: AudioFormatProfile = AudioFormatProfile {
+            hpos_salt: b"test-custom-wav-salt",
+            cipher: OFFICIAL_WAV_FORMAT.cipher,
+        };
+        const CUSTOM_FLAC: AudioFormatProfile = AudioFormatProfile {
+            hpos_salt: b"test-custom-flac-salt",
+            cipher: OFFICIAL_FLAC_FORMAT.cipher,
+        };
+
+        let wav_only = StegoProfile::new().with_audio_format(CUSTOM_WAV);
+        assert_eq!(wav_only.audio_format().hpos_salt, CUSTOM_WAV.hpos_salt);
+        assert_eq!(
+            wav_only.flac_format().hpos_salt,
+            OFFICIAL_FLAC_FORMAT.hpos_salt,
+            "a WAV-only profile must not change FLAC key derivation"
+        );
+
+        let flac_only = StegoProfile::new().with_flac_format(CUSTOM_FLAC);
+        assert_eq!(flac_only.flac_format().hpos_salt, CUSTOM_FLAC.hpos_salt);
+        assert_eq!(
+            flac_only.audio_format().hpos_salt,
+            OFFICIAL_WAV_FORMAT.hpos_salt,
+            "a FLAC-only profile must not change WAV key derivation"
+        );
+
+        assert!(!wav_only.is_official());
+        assert!(!flac_only.is_official());
+        assert!(StegoProfile::new().is_official());
+    }
 
     /// The options bag is the extension point that keeps a new cost model out
     /// of this file, so its accessor and validation have to behave predictably.

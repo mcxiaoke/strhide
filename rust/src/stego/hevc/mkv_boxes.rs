@@ -383,9 +383,14 @@ fn scan_block(
         }
         if let Some(&header) = bytes.get(start) {
             let nal_type = (header >> 1) & 0x3F;
-            // VCL types only: everything else is a parameter set / SEI /
-            // filler and must not be treated as a slice.
-            if (0..=31).contains(&nal_type) && stop > start + 2 {
+            // Same acceptance rule as the MP4/HEIF parsers: VCL only,
+            // `forbidden_zero_bit` clear, non-zero temporal id.
+            let second = bytes.get(start + 1).copied().unwrap_or(0);
+            if (0..=31).contains(&nal_type)
+                && (header & 0x80) == 0
+                && (second & 0x07) > 0
+                && stop > start + 2
+            {
                 spans.push(PhysicalNalSpan {
                     start,
                     len: stop - start,

@@ -336,7 +336,7 @@ pub mod heif_bridge {
 
         // 2. Embed payload
         let payload = b"Hello from strhide content-domain bridge steganography in HEIC thumbnail!";
-        let stego_bytes = embed_heif_bridge(
+        let (stego_bytes, _stats, capacity) = embed_heif_bridge(
             &orig_bytes,
             payload,
             &BridgeOptions::new(&profile).with_password("bridge_pass_2026"),
@@ -345,6 +345,11 @@ pub mod heif_bridge {
         .expect("embed carrier into HEIF thumbnail bridge");
 
         assert!(!stego_bytes.is_empty());
+        assert_eq!(
+            capacity.max_raw_payload_bytes, cap.max_raw_payload_bytes,
+            "embed must report the same capacity a standalone probe does"
+        );
+        assert_eq!(capacity.format, "HEIF (JPEG Thumbnail Bridge)");
         // Primary content is preserved; file size should remain close to original (slight delta for JPEG Huffman re-encoding)
         let delta = (stego_bytes.len() as i64) - (orig_bytes.len() as i64);
         assert!(
@@ -536,7 +541,7 @@ pub mod heif_bridge {
         // Bridge API, not the router: the router prefers Scheme C, which by
         // design perturbs the primary image. "Primary stays bit-exact" is the
         // bridge's own guarantee and has to be tested where it is implemented.
-        let stego_bytes = embed_heif_bridge(
+        let (stego_bytes, _, _) = embed_heif_bridge(
             &orig_bytes,
             payload,
             &BridgeOptions::new(&profile).with_password("fidelity_pw"),

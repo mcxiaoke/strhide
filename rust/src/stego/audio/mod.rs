@@ -414,25 +414,30 @@ pub(crate) fn inspect_flac(
     let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
     let (header_phase, ext_phase, body_phase) = flac_phases(&prepared.locator.locate_seed);
 
+    // One scratch for both passes: `read_base` releases its borrow when it
+    // returns, and the body view needs the same bytes, so a second full-file
+    // clone is pure waste (C-07). Mirrors `extract_flac`.
     let mut scratch = carrier.to_vec();
-    let header_view = flac::FlacCarrier::new(
-        &mut scratch,
-        info,
-        &analysis,
-        0,
-        PNG_AUDIO_BASE_SLOTS,
-        header_phase,
-        ext_phase,
-        body_phase,
-    )?;
-    // A wrong password makes the header unreadable; fall back to the header-only
-    // view, which reports "nothing here" instead of an error.
-    let view = core::read_base(
-        &header_view,
-        core::Mapping::BodyPermuted,
-        &prepared,
-        FLAC_FORMAT_ID,
-    );
+    let view = {
+        let header_view = flac::FlacCarrier::new(
+            &mut scratch,
+            info,
+            &analysis,
+            0,
+            PNG_AUDIO_BASE_SLOTS,
+            header_phase,
+            ext_phase,
+            body_phase,
+        )?;
+        // A wrong password makes the header unreadable; fall back to the
+        // header-only view, which reports "nothing here" instead of an error.
+        core::read_base(
+            &header_view,
+            core::Mapping::BodyPermuted,
+            &prepared,
+            FLAC_FORMAT_ID,
+        )
+    };
     let (header_slots, body_slots) = match &view {
         Ok(v) => {
             let hs = PNG_AUDIO_BASE_SLOTS + 8 * v.header.ext_len as usize;
@@ -450,7 +455,7 @@ pub(crate) fn inspect_flac(
         return Ok(StegoHeaderInfo::empty("FLAC"));
     }
 
-    let mut scratch = carrier.to_vec();
+    // Reuse `scratch` for the body view; see `inspect_flac`.
     // A wrong/unreadable header leaves the body phase at its password-derived
     // base; the caller reports "no hidden data" and never reads the body.
     let body_phase = match &view {
@@ -520,23 +525,26 @@ pub(crate) fn verify_flac(
     let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
     let (header_phase, ext_phase, body_phase) = flac_phases(&prepared.locator.locate_seed);
 
+    // One scratch for both passes (C-07); `read_base` does not keep a borrow.
     let mut scratch = carrier.to_vec();
-    let header_view = flac::FlacCarrier::new(
-        &mut scratch,
-        info,
-        &analysis,
-        0,
-        PNG_AUDIO_BASE_SLOTS,
-        header_phase,
-        ext_phase,
-        body_phase,
-    )?;
-    let view = core::read_base(
-        &header_view,
-        core::Mapping::BodyPermuted,
-        &prepared,
-        FLAC_FORMAT_ID,
-    );
+    let view = {
+        let header_view = flac::FlacCarrier::new(
+            &mut scratch,
+            info,
+            &analysis,
+            0,
+            PNG_AUDIO_BASE_SLOTS,
+            header_phase,
+            ext_phase,
+            body_phase,
+        )?;
+        core::read_base(
+            &header_view,
+            core::Mapping::BodyPermuted,
+            &prepared,
+            FLAC_FORMAT_ID,
+        )
+    };
     let (header_slots, body_slots) = match &view {
         Ok(v) => {
             let hs = PNG_AUDIO_BASE_SLOTS + 8 * v.header.ext_len as usize;
@@ -553,7 +561,7 @@ pub(crate) fn verify_flac(
         return Ok(flac_unreadable());
     }
 
-    let mut scratch = carrier.to_vec();
+    // Reuse `scratch` for the body view; see `inspect_flac`.
     // A wrong/unreadable header leaves the body phase at its password-derived
     // base; the caller reports "no hidden data" and never reads the body.
     let body_phase = match &view {

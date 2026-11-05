@@ -197,40 +197,7 @@ pub fn parse_heif_targets<'a>(bytes: &'a [u8]) -> Result<HeifHevcTarget<'a>> {
     // 7. For each target item extent, split into NAL unit physical spans
     let mut slice_spans = Vec::new();
     for (item_offset, item_len) in item_extents {
-        let Some(item_end) = item_offset.checked_add(item_len) else {
-            return Err(HevcError::Truncated);
-        };
-        if item_end > bytes.len() {
-            return Err(HevcError::Truncated);
-        }
-        let mut curr = item_offset;
-        while curr + length_size <= item_end {
-            let nal_len = match length_size {
-                4 => be_u32(bytes, curr).ok_or(HevcError::Truncated)? as usize,
-                2 => be_u16(bytes, curr).ok_or(HevcError::Truncated)? as usize,
-                1 => bytes[curr] as usize,
-                _ => return Err(HevcError::InvalidData("unsupported length_size")),
-            };
-            let nal_start = curr + length_size;
-            let Some(nal_end) = nal_start.checked_add(nal_len) else {
-                return Err(HevcError::Truncated);
-            };
-            if nal_end > item_end {
-                return Err(HevcError::Truncated);
-            }
-            if nal_len >= 2 {
-                let b0 = bytes[nal_start];
-                let nal_type = (b0 >> 1) & 0x3F;
-                // VCL slices are types 0..=31
-                if nal_type <= 31 {
-                    slice_spans.push(PhysicalNalSpan {
-                        start: nal_start,
-                        len: nal_len,
-                    });
-                }
-            }
-            curr = nal_end;
-        }
+        collect_item_slice_spans(bytes, item_offset, item_len, length_size, &mut slice_spans)?;
     }
 
     // `iloc` can list the same extent twice, or overlapping extents for
@@ -261,6 +228,61 @@ pub fn parse_heif_targets<'a>(bytes: &'a [u8]) -> Result<HeifHevcTarget<'a>> {
         slice_spans,
         dimensions,
     })
+}
+
+/// Split one `iloc` extent into the physical spans of its length-prefixed NALs.
+///
+/// Extracted from `parse_heif_targets` so the `length_size` branches (notably
+/// the 3-byte form some HEIF writers emit) can be tested without building a
+/// full `meta`/`iprp`/`iloc` container.
+fn collect_item_slice_spans(
+    bytes: &[u8],
+    item_offset: usize,
+    item_len: usize,
+    length_size: usize,
+    out: &mut Vec<PhysicalNalSpan>,
+) -> Result<()> {
+    let Some(item_end) = item_offset.checked_add(item_len) else {
+        return Err(HevcError::Truncated);
+    };
+    if item_end > bytes.len() {
+        return Err(HevcError::Truncated);
+    }
+    let mut curr = item_offset;
+    while curr + length_size <= item_end {
+        let nal_len = match length_size {
+            4 => be_u32(bytes, curr).ok_or(HevcError::Truncated)? as usize,
+            3 => {
+                let b = bytes.get(curr..curr + 3).ok_or(HevcError::Truncated)?;
+                ((b[0] as usize) << 16) | ((b[1] as usize) << 8) | b[2] as usize
+            }
+            2 => be_u16(bytes, curr).ok_or(HevcError::Truncated)? as usize,
+            1 => bytes[curr] as usize,
+            _ => return Err(HevcError::InvalidData("unsupported length_size")),
+        };
+        let nal_start = curr + length_size;
+        let Some(nal_end) = nal_start.checked_add(nal_len) else {
+            return Err(HevcError::Truncated);
+        };
+        if nal_end > item_end {
+            return Err(HevcError::Truncated);
+        }
+        if nal_len >= 2 {
+            let b0 = bytes[nal_start];
+            let b1 = bytes[nal_start + 1];
+            let nal_type = (b0 >> 1) & 0x3F;
+            // Same acceptance rule as the MP4 and Annex-B parsers: VCL only,
+            // `forbidden_zero_bit` clear, non-zero temporal id.
+            if nal_type <= 31 && (b0 & 0x80) == 0 && (b1 & 0x07) > 0 {
+                out.push(PhysicalNalSpan {
+                    start: nal_start,
+                    len: nal_len,
+                });
+            }
+        }
+        curr = nal_end;
+    }
+    Ok(())
 }
 
 fn check_is_grid(iinf: &[u8], target_id: u32) -> bool {
@@ -489,6 +511,13 @@ fn parse_ispe(payload: &[u8]) -> Option<(u32, u32)> {
 ///
 /// Returns the VPS/SPS/PPS NAL units (no length prefixes) plus the NAL length
 /// prefix size used by the samples that reference this configuration.
+///
+/// Non-parameter-set arrays are dropped here, not by individual callers: some
+/// writers put a prefix SEI in `hvcC`, and that array is metadata rather than
+/// part of the carrier's identity. Filtering centrally keeps the cover digest,
+/// the HEIF rebuild and the Matroska path agreeing on what "parameter sets"
+/// means; previously only the MP4 path filtered, so the same file digested
+/// differently depending on its container.
 pub fn parse_hvcc_record(hvcc: &[u8]) -> Result<(Vec<&[u8]>, usize)> {
     if hvcc.len() < 23 {
         return Err(HevcError::Truncated);
@@ -522,7 +551,13 @@ pub fn parse_hvcc_record(hvcc: &[u8]) -> Result<(Vec<&[u8]>, usize)> {
             if end > hvcc.len() {
                 break;
             }
-            parameter_sets.push(&hvcc[rpos..end]);
+            let Some(nal) = hvcc.get(rpos..end) else {
+                break;
+            };
+            let nal_type = nal.first().map_or(0, |b| (b >> 1) & 0x3F);
+            if nal.len() > 2 && matches!(nal_type, 32..=34) {
+                parameter_sets.push(nal);
+            }
             rpos = end;
         }
     }
@@ -929,14 +964,14 @@ mod tests {
         v
     }
 
-    /// A minimal hvcC property whose single array carries one 2-byte NAL.
-    fn hvcc_prop(nal: [u8; 2]) -> Vec<u8> {
+    /// A minimal hvcC property whose single array carries one 3-byte VPS NAL.
+    fn hvcc_prop(nal: [u8; 3]) -> Vec<u8> {
         let mut p = vec![0u8; 23];
         p[21] = 3; // lengthSizeMinusOne -> 4-byte NAL lengths
         p[22] = 1; // one array
         p.push(32); // array NAL type (VPS)
         p.extend_from_slice(&1u16.to_be_bytes()); // numNalus
-        p.extend_from_slice(&2u16.to_be_bytes()); // nalLength
+        p.extend_from_slice(&3u16.to_be_bytes()); // nalLength
         p.extend_from_slice(&nal);
         box_of(b"hvcC", &p)
     }
@@ -949,7 +984,7 @@ mod tests {
     fn ipma_selects_the_associated_hvcc() {
         let ipco = box_of(
             b"ipco",
-            &[hvcc_prop([0xAA, 0xBB]), hvcc_prop([0xCC, 0xDD])].concat(),
+            &[hvcc_prop([0x40, 0x01, 0xAA]), hvcc_prop([0x42, 0x01, 0xCC])].concat(),
         );
         // item 1 associated with property #2 (essential bit set).
         let mut ipma = vec![0u8, 0, 0, 0];
@@ -961,11 +996,52 @@ mod tests {
 
         let iprp = [ipco.clone(), ipma].concat();
         let info = parse_hvcc_from_iprp(&iprp, 1, &[1]).unwrap();
-        assert_eq!(info.parameter_sets, vec![&[0xCCu8, 0xDD][..]]);
+        assert_eq!(info.parameter_sets, vec![&[0x42u8, 0x01, 0xCC][..]]);
         assert_eq!(info.length_size, 4);
 
         // No ipma at all: fall back to the first hvcC.
         let info = parse_hvcc_from_iprp(&ipco, 1, &[1]).unwrap();
-        assert_eq!(info.parameter_sets, vec![&[0xAAu8, 0xBB][..]]);
+        assert_eq!(info.parameter_sets, vec![&[0x40u8, 0x01, 0xAA][..]]);
+    }
+
+    /// A-04: only the MP4 path filtered non-parameter-set arrays, so a prefix
+    /// SEI in `hvcC` changed the cover digest of an HEIF/MKV but not of an MP4.
+    #[test]
+    fn hvcc_drops_prefix_sei_arrays() {
+        let mut hvcc = vec![0u8; 23];
+        hvcc[21] = 3; // lengthSizeMinusOne -> 4-byte NAL lengths
+        hvcc[22] = 2; // two arrays
+        hvcc.extend_from_slice(&[32, 0, 1]); // VPS, one NAL
+        hvcc.extend_from_slice(&4u16.to_be_bytes());
+        hvcc.extend_from_slice(&[(32u8 << 1), 0x01, 0xAA, 0xBB]);
+        hvcc.extend_from_slice(&[39, 0, 1]); // prefix SEI, one NAL
+        hvcc.extend_from_slice(&3u16.to_be_bytes());
+        hvcc.extend_from_slice(&[(39u8 << 1), 0x01, 0xCC]);
+
+        let (sets, length_size) = parse_hvcc_record(&hvcc).unwrap();
+        assert_eq!(length_size, 4);
+        assert_eq!(
+            sets.len(),
+            1,
+            "the SEI array must not become a parameter set"
+        );
+        assert_eq!((sets[0][0] >> 1) & 0x3F, 32);
+    }
+
+    /// A-04: `length_size == 3` used to fall into the "unsupported" arm on the
+    /// HEIF path while the MP4 path accepted it.
+    #[test]
+    fn three_byte_nal_lengths_are_parsed() {
+        let mut buf = vec![0, 0, 4];
+        buf.extend_from_slice(&[(1u8 << 1), 0x01, 0xAA, 0xBB]);
+        let mut spans = Vec::new();
+        collect_item_slice_spans(&buf, 0, buf.len(), 3, &mut spans).unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!((spans[0].start, spans[0].len), (3, 4));
+
+        // A declared length past the extent is an error, not a silent drop.
+        let bad = vec![0u8, 0, 9, 0x02, 0x01];
+        let mut spans = Vec::new();
+        assert!(collect_item_slice_spans(&bad, 0, bad.len(), 3, &mut spans).is_err());
     }
 }

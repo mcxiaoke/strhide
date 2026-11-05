@@ -249,7 +249,30 @@ pub fn embed_carrier_with_dialect_info(
     // Private dialect resolution happens exactly once, inside the engine
     // adapter: a configured secret is indistinguishable from a user password
     // downstream, which is what keeps the two engine families byte-compatible.
-    engine.embed(carrier_bytes, payload, options, dialect)
+    let mut output = engine.embed(carrier_bytes, payload, options, dialect)?;
+    if let Some(capacity) = output.capacity.take() {
+        output.capacity = Some(filename_safe_capacity(capacity));
+    }
+    Ok(output)
+}
+
+/// Shrink a capacity report by the longest possible file micro-header.
+///
+/// Engines compute capacity for the minimal raw payload. A `Payload::file`
+/// spends `1 + name_len` more bytes inside the plaintext, so an advertised
+/// maximum the user fills with file content used to fail by exactly that much
+/// (B-03). Reserving the worst case (a 255-byte name) makes the number usable
+/// for both kinds of payload; raw embeds still accept the larger true amount.
+fn filename_safe_capacity(mut info: StegoCapacityInfo) -> StegoCapacityInfo {
+    use crate::stego::envelope::MAX_FILENAME_OVERHEAD;
+    info.max_raw_payload_bytes = info
+        .max_raw_payload_bytes
+        .saturating_sub(MAX_FILENAME_OVERHEAD);
+    info.recommended_max_bytes = info.recommended_max_bytes.min(info.max_raw_payload_bytes);
+    for limit in &mut info.tier_limits {
+        *limit = (*limit).min(info.max_raw_payload_bytes);
+    }
+    info
 }
 
 /// Automatically sniff the carrier format and extract the payload.
@@ -339,6 +362,10 @@ pub struct StegoCapacityInfo {
     /// slots (the fixed JPEG superblock plus extension area, or 512 for the
     /// spatial codec).
     pub available_slots: usize,
+    /// Largest payload **content** that a file payload can carry even when its
+    /// name is the maximum 255 bytes. Raw/text payloads can carry
+    /// [`MAX_FILENAME_OVERHEAD`](crate::stego::envelope::MAX_FILENAME_OVERHEAD)
+    /// more at embed time.
     pub max_raw_payload_bytes: usize,
     /// Whether `max_raw_payload_bytes` is the grouped-code (`u >= 2`) bound
     /// rather than the `u = 1` geometric one. True exactly when the carrier's
@@ -456,7 +483,9 @@ pub fn probe_carrier_capacity_with_dialect(
     let engine = engine_for_carrier(carrier_bytes)?;
     // Same resolution as embed: an explicit password wins, the profile's stego
     // secret is the fallback, `None` means the public constant downstream.
-    engine.probe(carrier_bytes, options, dialect)
+    engine
+        .probe(carrier_bytes, options, dialect)
+        .map(filename_safe_capacity)
 }
 
 #[cfg(test)]

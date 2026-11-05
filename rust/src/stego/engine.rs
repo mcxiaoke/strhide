@@ -506,7 +506,7 @@ fn hevc_embed(
         Err(e) if resolved.hevc_mode == HevcMode::Cabac => Err(e),
         #[cfg(feature = "content-heif-bridge")]
         Err(_) => {
-            let bridge = thumb_bridge::embed_heif_bridge(
+            let (bridge, stats, capacity) = thumb_bridge::embed_heif_bridge(
                 carrier,
                 payload,
                 &crate::stego::options::BridgeOptions {
@@ -523,7 +523,9 @@ fn hevc_embed(
                 },
                 &opts.control,
             )?;
-            Ok(EmbedOutput::bytes_only(bridge))
+            Ok(EmbedOutput::with_capacity_and_stats(
+                bridge, capacity, stats,
+            ))
         }
         #[cfg(not(feature = "content-heif-bridge"))]
         Err(e) => Err(e),

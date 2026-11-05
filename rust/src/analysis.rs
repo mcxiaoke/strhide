@@ -138,7 +138,7 @@ pub struct ScanReport {
     pub format: Option<String>,
     pub file_size: u64,
     pub findings: Vec<Finding>,
-    /// 0 (clean) .. 10 (very likely hidden).
+    /// 0 (clean) ..= 100 (very likely hidden); `aggregate_risk` saturates at 100.
     pub risk_score: u32,
     /// One of `clean` / `low` / `suspicious` / `likely-hidden`.
     pub verdict: String,

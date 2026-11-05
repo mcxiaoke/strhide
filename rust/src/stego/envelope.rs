@@ -74,13 +74,26 @@ pub const MICRO_TAG_FILE: u8 = 0x01;
 /// Minimal micro-header overhead: 1 byte (`0x00`) for text/raw payload.
 pub const MICRO_OVERHEAD_MIN: usize = 1;
 
+/// Longest filename the file micro-header can carry.
+pub const MAX_FILENAME_LEN: usize = 255;
+
+/// Bytes a **file** payload spends beyond what [`BODY_OVERHEAD`] already
+/// accounts for. The raw micro-header is one byte; the file micro-header is a
+/// tag, a length byte and the name, so the overhang is `1 + name_len`, at most
+/// `1 + MAX_FILENAME_LEN`.
+///
+/// Capacity probes subtract this so `max_raw_payload_bytes` is usable as the
+/// content size of a `Payload::file` even when its name is the maximum length;
+/// the raw-bytes path keeps its larger true capacity at embed time.
+pub const MAX_FILENAME_OVERHEAD: usize = 1 + MAX_FILENAME_LEN;
+
 /// Bytes the **ciphertext** spends on things that are not raw payload:
 /// `[4-byte original length][1-byte flags]` plus the 1-byte minimal micro-header
 /// inside the plaintext, plus the 16-byte AEAD tag.
 ///
 /// Note: this constant reflects minimal overhead for raw/text payloads without
-/// a filename. When a payload carries a filename, the micro-header spends an additional
-/// `1 + name_len` bytes. Capacity reports (`max_raw_payload_bytes`) reflect this minimal baseline.
+/// a filename. A file payload spends an additional [`MAX_FILENAME_OVERHEAD`];
+/// capacity probes reserve that so the advertised maximum is filename-safe.
 pub const BODY_OVERHEAD: usize = 4 + 1 + MICRO_OVERHEAD_MIN + TAG_LEN; // 22 bytes
 
 /// Largest payload a decoded envelope may expand to (matches the header's

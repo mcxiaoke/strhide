@@ -87,12 +87,15 @@ struct IsobmffMeta {
 }
 
 /// Embed payload into an embedded JPEG or uncompressed carrier within a HEIF container.
+///
+/// Returns the rebuilt container together with the JPEG engine's exact embed
+/// statistics and capacity, so callers do not have to re-probe the thumbnail.
 pub fn embed_heif_bridge<'a>(
     carrier_bytes: &[u8],
     payload: impl Into<Payload<'a>>,
     bridge: &BridgeOptions<'_>,
     control: &Control<'_>,
-) -> Result<Vec<u8>, StrHideError> {
+) -> Result<(Vec<u8>, crate::stego::EmbedStats, StegoCapacityInfo), StrHideError> {
     let payload = payload.into();
     let target = find_bridge_target(carrier_bytes)?;
     let carrier_slice = &carrier_bytes[target.file_offset..target.file_offset + target.length];
@@ -117,7 +120,7 @@ pub fn embed_heif_bridge<'a>(
 
     match target.kind {
         BridgeTargetKind::DirectJpeg { .. } | BridgeTargetKind::ExifJpeg { .. } => {
-            let stego_bytes = jpeg::embed_jpeg(
+            let (stego_bytes, stats, mut capacity) = jpeg::embed_jpeg_with_stats(
                 carrier_slice,
                 eff_payload,
                 cred,
@@ -131,7 +134,14 @@ pub fn embed_heif_bridge<'a>(
                 bridge.freshness,
                 control,
             )?;
-            reconstruct_heif(carrier_bytes, &target, &stego_bytes)
+            // Same label `probe_heif_bridge_capacity` reports, so an embed's
+            // capacity and a standalone probe cannot disagree on the format.
+            capacity.format = "HEIF (JPEG Thumbnail Bridge)".into();
+            Ok((
+                reconstruct_heif(carrier_bytes, &target, &stego_bytes)?,
+                stats,
+                capacity,
+            ))
         }
     }
 }

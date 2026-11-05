@@ -615,12 +615,40 @@ fn test_stego_capacity_model_is_tight() {
         exact
     );
 
-    let over = incompressible(cap.max_raw_payload_bytes + 1, 0x1234);
+    // `max_raw_payload_bytes` now reserves the worst-case file name, so the
+    // raw-bytes ceiling is that reserve above it; one byte past the ceiling
+    // must still be rejected.
+    let ceiling = cap.max_raw_payload_bytes + strhide::stego::envelope::MAX_FILENAME_OVERHEAD;
+    let at_ceiling = incompressible(ceiling, 0x1234);
+    embed_carrier(&png_bytes, &Payload::bytes(&at_ceiling), &opts)
+        .expect("raw payload may use the filename reserve");
+
+    let over = incompressible(ceiling + 1, 0x1234);
     let res = embed_carrier(&png_bytes, &Payload::bytes(&over), &opts);
     assert!(
         matches!(res, Err(strhide::errors::StrHideError::PayloadTooLarge(_)))
             || matches!(res, Err(strhide::errors::StrHideError::General(ref m)) if m.contains("capacity exceeded")),
-        "probe max + 1 byte must be rejected as over capacity, got: {res:?}"
+        "raw ceiling + 1 byte must be rejected as over capacity, got: {res:?}"
+    );
+}
+
+/// B-03 / T-09: the advertised maximum is a **file** maximum too. A 255-byte
+/// name used to push the body 256 bytes over and make the advertised size
+/// unusable for `Payload::file`.
+#[test]
+fn test_stego_capacity_is_reachable_with_a_max_length_filename() {
+    let png_bytes = generate_texture_png(128, 128);
+    let opts = EmbedOptions::default();
+    let cap = probe_carrier_capacity(&png_bytes, &opts.probe_options()).expect("probe");
+    assert!(cap.max_raw_payload_bytes > 0);
+
+    let content = incompressible(cap.max_raw_payload_bytes, 0xBEEF);
+    let payload = Payload::file("n".repeat(255), &content);
+    let stego = embed_carrier(&png_bytes, &payload, &opts)
+        .expect("advertised max must embed a file payload with a 255-byte name");
+    assert_eq!(
+        extract_carrier(&stego, &opts.extract_options()).expect("extract"),
+        content
     );
 }
 

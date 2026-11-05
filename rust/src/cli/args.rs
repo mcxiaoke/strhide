@@ -296,6 +296,11 @@ pub struct WriteArgs {
     #[arg(long = "in-place", conflicts_with = "output")]
     pub in_place: bool,
 
+    /// Allow replacing an existing output file.
+    ///
+    /// This only covers the destination file and the dual-domain occupancy
+    /// pre-check; it cannot replace an envelope already inside the carrier.
+    /// Run `restore` first to strip that envelope.
     #[arg(long = "overwrite")]
     pub overwrite: bool,
 

@@ -401,6 +401,61 @@ fn test_cross_structure_gui_write_cli_read_and_restore() {
     });
 }
 
+/// A-07: an omitted `output_path` is an in-place write and must not be
+/// rejected by `overwrite=false`; only a different explicit destination may be.
+#[test]
+fn test_cross_structure_gui_in_place_write_ignores_overwrite_flag() {
+    block_on(async {
+        let carrier_src = find_carrier("carrier.png");
+        let state = GuiState::default();
+        let dir = temp_dir("gui_write_struct_inplace");
+
+        let carrier = dir.join("carrier.png");
+        fs::copy(&carrier_src, &carrier).unwrap();
+
+        let payload_content = "In-place structure payload";
+        let password = "inplace_struct_pw";
+        let req = StructureWriteRequest {
+            carrier: carrier.clone(),
+            payload: PayloadInputDto::Text {
+                content: payload_content.to_string(),
+            },
+            output_path: None,
+            password: Some(password.to_string()),
+            password_hint: None,
+            strategy: None,
+            stealth: false,
+            preserve_time: true,
+            backup: false,
+            overwrite: false,
+        };
+
+        let write_res =
+            write_structure_file_impl(&state, "task-write-struct-inplace".into(), req, noop_channel())
+                .await;
+        assert!(
+            write_res.is_ok(),
+            "in-place structure write with overwrite=false must succeed: {:?}",
+            write_res.err()
+        );
+
+        let read_res = read_structure_file_impl(
+            &state,
+            "task-read-struct-inplace".into(),
+            carrier.clone(),
+            None,
+            Some(password.to_string()),
+            false,
+            noop_channel(),
+        )
+        .await
+        .expect("read back in-place structure payload");
+        assert_eq!(read_res.text_preview.as_deref(), Some(payload_content));
+
+        let _ = fs::remove_dir_all(&dir);
+    });
+}
+
 #[test]
 fn test_cross_structure_cli_write_gui_read_and_restore() {
     block_on(async {

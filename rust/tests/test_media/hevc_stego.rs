@@ -15,6 +15,13 @@ use strhide::stego::hevc::{
 use strhide::stego::params::{ExtractParams, SafetyPolicy};
 use strhide::{StrHideError, stego::format::DEFAULT_HEVC_FORMAT};
 
+/// In-repo fixture, independent of the developer's `../temp` corpus.
+fn asset(name: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/assets")
+        .join(name)
+}
+
 /// Verify that an HEIC file can be decoded to a valid frame by rusty_h265.
 fn verify_frame_decodes(carrier_bytes: &[u8]) {
     let target = parse_heif_targets(carrier_bytes).expect("parse targets");
@@ -33,21 +40,18 @@ fn verify_frame_decodes(carrier_bytes: &[u8]) {
 }
 
 #[test]
-fn test_hevc_capacity_and_roundtrip_gradient() {
-    let file_path = "../temp/github/heic-rs/tests/fixtures/gradient-512.heic";
-    if !Path::new(file_path).exists() {
-        return;
-    }
-    let orig_carrier = fs::read(file_path).expect("read carrier");
+fn test_hevc_capacity_and_roundtrip_small_heic() {
+    let file_path = asset("small.heic");
+    let orig_carrier = fs::read(&file_path).expect("read small.heic");
     let orig_len = orig_carrier.len();
 
     // 1. Probe capacity
     let cap = probe_hevc_capacity(&orig_carrier, &strhide::stego::format::DEFAULT_HEVC_FORMAT)
         .expect("probe capacity");
-    println!("gradient-512.heic capacity: {} bytes", cap);
+    println!("small.heic capacity: {} bytes", cap);
     assert!(
         cap >= 100,
-        "Capacity should be at least 100 bytes for gradient-512"
+        "Capacity should be at least 100 bytes for small.heic"
     );
 
     // 2. Test multiple payload sizes
@@ -108,7 +112,7 @@ fn test_hevc_capacity_and_roundtrip_gradient() {
         // D. Verify stego carrier decodes cleanly to video frame without crashing
         verify_frame_decodes(&stego_carrier);
     }
-    println!("gradient-512.heic ALL PAYLOAD SIZES PASSED!");
+    println!("small.heic ALL PAYLOAD SIZES PASSED!");
 }
 
 /// A raw Annex-B stream rebuilt from the HEIC fixture's NAL units must survive
@@ -124,11 +128,8 @@ fn test_hevc_capacity_and_roundtrip_gradient() {
 /// first slice -- exactly the region the old digest wrongly covered.
 #[test]
 fn test_hevc_annexb_roundtrip_from_heic_nals() {
-    let file_path = "../temp/github/heic-rs/tests/fixtures/gradient-512.heic";
-    if !Path::new(file_path).exists() {
-        return;
-    }
-    let heic = fs::read(file_path).expect("read carrier");
+    let file_path = asset("small.heic");
+    let heic = fs::read(&file_path).expect("read small.heic");
 
     // Rebuild the HEVC bitstream as Annex-B: parameter sets first, then the
     // slice segments, each behind a 4-byte start code.
@@ -149,7 +150,7 @@ fn test_hevc_annexb_roundtrip_from_heic_nals() {
 
     let cap = probe_hevc_capacity(&annexb, &strhide::stego::format::DEFAULT_HEVC_FORMAT)
         .expect("probe annex-b capacity");
-    assert!(cap >= 64, "gradient fixture should offer real capacity");
+    assert!(cap >= 64, "small.heic should offer real capacity");
     let len = cap.min(120);
     let payload: Vec<u8> = (0..len).map(|i| (i * 37 % 251) as u8).collect();
     let password = "AnnexBRoundTrip#2026";
@@ -191,13 +192,17 @@ fn test_hevc_annexb_roundtrip_from_heic_nals() {
 /// CTU's CABAC payload. With this carrier, payload and seed the STC solution
 /// flips a sign bit inside that window: on the old code extraction fails with
 /// "Invalid HEVC stego signature" even though the password is correct.
+#[ignore = "requires the external oxideav-h265 fixture henc-133.hevc"]
 #[test]
 fn test_hevc_annexb_short_slice_header_roundtrip() {
-    let file_path = "../temp/github/oxideav-h265/tests/fixture_bytes/r460/henc-133.hevc";
-    if !Path::new(file_path).exists() {
-        return;
-    }
-    let annexb = fs::read(file_path).expect("read carrier");
+    let file_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../temp/github/oxideav-h265/tests/fixture_bytes/r460/henc-133.hevc");
+    assert!(
+        file_path.exists(),
+        "external corpus missing: {}",
+        file_path.display()
+    );
+    let annexb = fs::read(&file_path).expect("read carrier");
     assert!(strhide::stego::hevc::sniff::is_hevc_annexb(&annexb));
 
     // V4 body = frame (5 bytes) + payload + 16-byte tag inside the same
@@ -232,18 +237,12 @@ fn test_hevc_annexb_short_slice_header_roundtrip() {
 /// most carriers -- 9 of 14 corpus files advertised one byte too many).
 #[test]
 fn test_hevc_capacity_is_reachable() {
-    let fixtures = [
-        "../temp/github/heic-rs/tests/fixtures/gradient-512.heic",
-        "../temp/github/oxideav-h265/tests/fixture_bytes/r460/henc-133.hevc",
-    ];
+    let fixtures = [asset("small.heic"), asset("minimal.heic")];
     for file_path in fixtures {
-        if !Path::new(file_path).exists() {
-            continue;
-        }
-        let carrier = fs::read(file_path).expect("read carrier");
+        let carrier = fs::read(&file_path).expect("read fixture");
         let cap = probe_hevc_capacity(&carrier, &strhide::stego::format::DEFAULT_HEVC_FORMAT)
             .expect("probe capacity");
-        assert!(cap >= 1, "{file_path}: expected real capacity");
+        assert!(cap >= 1, "{}: expected real capacity", file_path.display());
 
         // A payload of exactly the advertised capacity must embed.
         let payload: Vec<u8> = (0..cap).map(|i| (i * 37 % 251) as u8).collect();
@@ -256,7 +255,10 @@ fn test_hevc_capacity_is_reachable() {
             strhide::stego::Freshness::Random,
         )
         .unwrap_or_else(|e| {
-            panic!("{file_path}: embedding the advertised {cap} bytes failed: {e}")
+            panic!(
+                "{}: embedding the advertised {cap} bytes failed: {e}",
+                file_path.display()
+            )
         });
         let back = extract_hevc(
             &stego,
@@ -266,7 +268,10 @@ fn test_hevc_capacity_is_reachable() {
             &Control::none(),
         )
         .unwrap_or_else(|e| {
-            panic!("{file_path}: extracting the full-capacity carrier failed: {e}")
+            panic!(
+                "{}: extracting the full-capacity carrier failed: {e}",
+                file_path.display()
+            )
         });
         assert_eq!(back, payload);
     }
@@ -274,19 +279,16 @@ fn test_hevc_capacity_is_reachable() {
 
 #[test]
 fn test_hevc_capacity_safety_scaling_and_sps_dimensions() {
-    let file_path = "../temp/github/heic-rs/tests/fixtures/gradient-512.heic";
-    if !Path::new(file_path).exists() {
-        return;
-    }
-    let orig_carrier = fs::read(file_path).expect("read carrier");
+    let file_path = asset("small.heic");
+    let orig_carrier = fs::read(&file_path).expect("read small.heic");
 
     // 1. Dimensions parsed from SPS
     let (w, h) = strhide::stego::hevc::extract_hevc_dimensions(&orig_carrier)
         .expect("extract hevc dimensions from SPS");
     assert_eq!(
         (w, h),
-        (512, 512),
-        "Expected 512x512 from gradient-512 fixture"
+        (320, 240),
+        "Expected 320x240 from small.heic fixture"
     );
 
     // 2. Capacity probe info with different safety levels
@@ -308,7 +310,7 @@ fn test_hevc_capacity_safety_scaling_and_sps_dimensions() {
             strhide::stego::probe_carrier_capacity_with_dialect(&orig_carrier, &options, &profile)
                 .expect("probe capacity info");
 
-        assert_eq!(info.total_elements, 512 * 512);
+        assert_eq!(info.total_elements, 320 * 240);
         assert!(info.available_slots > 0);
         assert!(info.max_raw_payload_bytes > 0);
         assert!(info.recommended_max_bytes <= info.max_raw_payload_bytes);
@@ -319,11 +321,8 @@ fn test_hevc_capacity_safety_scaling_and_sps_dimensions() {
 
 #[test]
 fn test_hevc_inspect_and_verify() {
-    let file_path = "../temp/github/heic-rs/tests/fixtures/gradient-512.heic";
-    if !Path::new(file_path).exists() {
-        return;
-    }
-    let orig_carrier = fs::read(file_path).expect("read carrier");
+    let file_path = asset("small.heic");
+    let orig_carrier = fs::read(&file_path).expect("read small.heic");
 
     // 1. Clean carrier
     let inspect_clean =
@@ -332,7 +331,7 @@ fn test_hevc_inspect_and_verify() {
     assert!(!inspect_clean.has_hidden_data);
     assert_eq!(
         inspect_clean.media_info.map(|m| m.to_string()).as_deref(),
-        Some("512x512")
+        Some("320x240")
     );
 
     let verify_clean =
@@ -359,7 +358,7 @@ fn test_hevc_inspect_and_verify() {
     assert!(inspect_stego.algorithm.is_some());
     assert_eq!(
         inspect_stego.media_info.map(|m| m.to_string()).as_deref(),
-        Some("512x512")
+        Some("320x240")
     );
 
     // Verify with password
@@ -379,11 +378,8 @@ fn test_hevc_inspect_and_verify() {
 /// writer can fill; and a wrong credential must fold to `NoHiddenData`.
 #[test]
 fn test_hevc_v4_extension_probe_matches_embed() {
-    let file_path = "../temp/github/heic-rs/tests/fixtures/gradient-512.heic";
-    if !Path::new(file_path).exists() {
-        return;
-    }
-    let carrier = fs::read(file_path).expect("read carrier");
+    let file_path = asset("small.heic");
+    let carrier = fs::read(&file_path).expect("read small.heic");
     let fmt = &DEFAULT_HEVC_FORMAT;
     let extensions = vec![Tlv {
         type_id: 0x07,
@@ -439,11 +435,8 @@ fn test_hevc_v4_extension_probe_matches_embed() {
 /// budget/frame failure path rather than the container parser.
 #[test]
 fn test_hevc_v4_truncated_body_is_rejected() {
-    let file_path = "../temp/github/heic-rs/tests/fixtures/gradient-512.heic";
-    if !Path::new(file_path).exists() {
-        return;
-    }
-    let carrier = fs::read(file_path).expect("read carrier");
+    let file_path = asset("small.heic");
+    let carrier = fs::read(&file_path).expect("read small.heic");
     let fmt = &DEFAULT_HEVC_FORMAT;
     let payload = vec![0x5A; 64];
     let (stego, _, _) = embed_hevc_with_info_v4(
