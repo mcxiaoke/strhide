@@ -643,7 +643,7 @@ fn body_plan_offsets(
     info: super::StreamInfo,
     analysis: &super::FlacAnalysis,
     body_slots: usize,
-) -> Vec<u32> {
+) -> Vec<u64> {
     let mut buf = cover.to_vec();
     let carrier = super::FlacCarrier::new(
         &mut buf,

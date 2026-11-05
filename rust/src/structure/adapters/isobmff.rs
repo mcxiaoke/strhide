@@ -35,27 +35,37 @@ pub fn trailing_envelope_len(
     stego_in: &mut dyn SeekRead,
     offset: u64,
     total_size: u64,
+    expected_trailer_magic: Option<&[u8; 4]>,
 ) -> Option<u64> {
     let remaining = total_size.checked_sub(offset)?;
-    if remaining < 24 {
+    if remaining < TRAILER_SIZE as u64 {
         return None;
     }
-    if stego_in.seek(SeekFrom::End(-24)).is_err() {
+    if stego_in
+        .seek(SeekFrom::End(-(TRAILER_SIZE as i64)))
+        .is_err()
+    {
         return None;
     }
-    let mut tail = [0u8; 24];
+    let mut tail = [0u8; TRAILER_SIZE];
     if stego_in.read_exact(&mut tail).is_err() {
         return None;
     }
     if stego_in.seek(SeekFrom::Start(offset)).is_err() {
         return None;
     }
-    let ube_offset = u64::from_le_bytes(tail[0..8].try_into().ok()?);
-    let ube_total_size = u64::from_le_bytes(tail[8..16].try_into().ok()?);
-    if ube_offset != offset || ube_offset.checked_add(ube_total_size) != Some(total_size) {
+    // The 24-byte tail must be an authenticated-shape trailer, not merely
+    // plausible integers: any file whose last 16 bytes say "offset 0, total
+    // file size" used to make L1 report a hidden envelope. `unpack` checks
+    // the magic and the CRC, so a forged tail now falls through to the box
+    // walk instead.
+    let trailer = EnvelopeTrailer::unpack(&tail, expected_trailer_magic).ok()?;
+    if trailer.ube_offset != offset
+        || trailer.ube_offset.checked_add(trailer.ube_total_size) != Some(total_size)
+    {
         return None;
     }
-    Some(ube_total_size)
+    Some(trailer.ube_total_size)
 }
 
 pub fn isobmff_inject(
@@ -235,6 +245,7 @@ pub fn isobmff_locate(
 pub fn isobmff_verify_structure(
     format_name: &str,
     stego_in: &mut dyn SeekRead,
+    expected_trailer_magic: Option<&[u8; 4]>,
 ) -> Result<(bool, String), StrHideError> {
     let total_size = stego_in.seek(SeekFrom::End(0))?;
     stego_in.seek(SeekFrom::Start(0))?;
@@ -250,7 +261,9 @@ pub fn isobmff_verify_structure(
     let mut has_ftyp = false;
 
     while offset < total_size {
-        if let Some(envelope_len) = trailing_envelope_len(stego_in, offset, total_size) {
+        if let Some(envelope_len) =
+            trailing_envelope_len(stego_in, offset, total_size, expected_trailer_magic)
+        {
             return Ok((
                 true,
                 format!(
@@ -1598,6 +1611,22 @@ mod tests {
     }
 
     #[test]
+    fn verify_rejects_a_forged_24_byte_trailer_tail() {
+        // Any >= 24-byte file whose last 16 bytes say "offset 0, total = file
+        // length" used to make L1 report a hidden envelope. The trailer magic
+        // and CRC must also match before the tail is accepted.
+        let mut forged = vec![0u8; TRAILER_SIZE];
+        forged[8..16].copy_from_slice(&(TRAILER_SIZE as u64).to_le_bytes());
+        forged[20..24].copy_from_slice(b"FAKE");
+        let mut cursor = Cursor::new(forged);
+        let (ok, detail) = isobmff_verify_structure("MP4", &mut cursor, None).unwrap();
+        assert!(
+            !ok,
+            "a forged 24-byte tail must not verify as an envelope: {detail}"
+        );
+    }
+
+    #[test]
     fn locate_and_verify_accept_a_64_bit_box() {
         let host = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomiso2".to_vec();
         let ube = vec![0xA5u8; 128];
@@ -1611,7 +1640,7 @@ mod tests {
         assert_eq!(size, ube.len() as u64 + 24);
 
         let mut cursor = Cursor::new(stego.clone());
-        let (ok, detail) = isobmff_verify_structure("MP4", &mut cursor).unwrap();
+        let (ok, detail) = isobmff_verify_structure("MP4", &mut cursor, None).unwrap();
         assert!(ok, "64-bit box container must verify: {detail}");
 
         let mut cursor = Cursor::new(stego);
@@ -1921,7 +1950,7 @@ mod tests {
         assert_eq!(ls, ube_total);
 
         let mut cur = Cursor::new(out.clone());
-        let (ok, detail) = isobmff_verify_structure("HEIF", &mut cur).unwrap();
+        let (ok, detail) = isobmff_verify_structure("HEIF", &mut cur, None).unwrap();
         assert!(ok, "synthetic item_hidden stego must verify: {detail}");
 
         let header = EnvelopeHeader {

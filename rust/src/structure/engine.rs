@@ -1029,6 +1029,19 @@ where
     let (payload_raw_bytes, filename, is_file) = source.into_buffered()?;
 
     let raw_size = payload_raw_bytes.len() as u64;
+    // The reader rejects any declared `raw_size` above `structure_payload_limit`
+    // before decrypting. Applying the same bound here (with the same function)
+    // means a payload that would be unreadable forever is refused up front
+    // instead of producing a carrier that `read` can never extract. The input
+    // host is at most as large as the post-injection carrier, so its limit is
+    // the stricter of the two and the read path is guaranteed to pass.
+    let max_payload = structure_payload_limit(orig_host_size);
+    if raw_size > max_payload {
+        return Err(StrHideError::General(format!(
+            "Payload ({} bytes) exceeds the maximum supported by this carrier ({} bytes for a {} byte host); use a larger carrier or a smaller payload",
+            raw_size, max_payload, orig_host_size
+        )));
+    }
     let raw_sha256 = {
         let h = crate::crypto::compute_sha256(&payload_raw_bytes);
         h.iter().map(|b| format!("{b:02x}")).collect::<String>()
@@ -1911,6 +1924,7 @@ fn verify_authenticated_payload(env: &mut AuthenticatedEnvelope<'_>) -> Result<u
 /// carrier cannot write outside that directory.
 fn write_payload_to(
     out_p: &Path,
+    carrier_path: &Path,
     core: &ReadCore,
     overwrite: bool,
 ) -> Result<PathBuf, StrHideError> {
@@ -1924,6 +1938,15 @@ fn write_payload_to(
     } else {
         out_p.to_path_buf()
     };
+
+    // Writing the payload over its own carrier truncates the file that still
+    // holds the hidden data, so the extraction would destroy its own source.
+    if same_file(&final_dest, carrier_path) {
+        return Err(StrHideError::Rejection(format!(
+            "Refusing to write the extracted payload over carrier '{}': choose a different output path",
+            carrier_path.display()
+        )));
+    }
 
     // Never truncate an existing file by accident: extracting several
     // carriers that contain the same payload name (or reading into a busy
@@ -1980,7 +2003,12 @@ pub fn read_carrier_with_dialect(
     let written_file = match options.output_path {
         Some(out_p) => {
             options.control.stage(crate::core::control::Stage::Write);
-            Some(write_payload_to(out_p, &core, options.overwrite)?)
+            Some(write_payload_to(
+                out_p,
+                carrier_path,
+                &core,
+                options.overwrite,
+            )?)
         }
         None => None,
     };

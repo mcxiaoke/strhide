@@ -16,14 +16,15 @@ use crate::common::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use strhide::crypto::{decrypt_metadata, derive_keys, encrypt_metadata};
 use strhide::structure::envelope::{
     EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE, MAX_META_LEN, STANDARD_TRAILER_MAGIC,
     TRAILER_SIZE,
 };
 use strhide::structure::params::StructureProfile;
 use strhide::structure::{
-    PayloadSource, ReadOptions, WriteOptions, inspect_carrier, read_carrier, verify_carrier,
-    write_carrier,
+    CarrierMetadata, PayloadSource, ReadOptions, WriteOptions, inspect_carrier, read_carrier,
+    verify_carrier, write_carrier,
 };
 
 /// Offset of the envelope inside a freshly written `eof`/append-strategy carrier.
@@ -128,9 +129,11 @@ fn oversized_declared_payload_is_rejected_before_decrypt() {
     let dir = scratch("forge_declared_size");
     let carrier = dir.join("carrier.png");
     fs::write(&carrier, make_png()).unwrap();
-    // Compresses to well under 100 KiB, so the envelope easily fits in the PNG
-    // while `raw_size` is above the 64 MiB floor of the dynamic limit.
-    let payload = vec![0u8; 65 * 1024 * 1024];
+    // 10 MB compresses to well under 1 MiB and is still inside the 64 MiB
+    // floor of the writer's limit, so the envelope is legitimately writable.
+    // Its `raw_size` has the same number of JSON digits as the forged value
+    // below, which lets us swap it without changing the metadata length.
+    let payload = vec![0u8; 10_000_000];
     let stego = dir.join("stego.png");
     write_carrier(
         &carrier,
@@ -147,6 +150,40 @@ fn oversized_declared_payload_is_rejected_before_decrypt() {
         fs::metadata(&stego).unwrap().len() < 1024 * 1024,
         "test payload should compress into a small envelope"
     );
+
+    // Forge `raw_size` to 65 MiB (> the 64 MiB floor for this physical size)
+    // and re-seal the metadata with the public default key, so only the
+    // limit check stands between the reader and a 65 MiB decompression.
+    let offset = envelope_offset(&stego);
+    let mut data = fs::read(&stego).unwrap();
+    let start = offset as usize;
+    let header =
+        EnvelopeHeader::unpack_with_password(&data[start..start + HEADER_SIZE], None).unwrap();
+    let hint_len = header.hint_len as usize;
+    let meta_off = start + HEADER_SIZE + hint_len;
+    let meta_end = meta_off + header.meta_len as usize;
+    let hint = &data[start + HEADER_SIZE..meta_off];
+    let meta_key = derive_keys(StructureProfile::default().secret(), &header.salt)
+        .expect("derive default keys")
+        .1;
+    let aad = header.auth_aad(hint);
+    let plain = decrypt_metadata(
+        &data[meta_off..meta_end],
+        &meta_key,
+        &header.base_nonce,
+        &aad,
+    )
+    .expect("decrypt metadata with the public default key");
+    let mut meta = CarrierMetadata::decode_compact(&plain).expect("decode compact metadata");
+    meta.raw_size = 65 * 1024 * 1024;
+    let forged_plain = meta.encode_compact().expect("encode compact metadata");
+    // The varint for both sizes is four bytes, so the seal keeps `meta_len`.
+    assert_eq!(forged_plain.len(), plain.len());
+    let sealed = encrypt_metadata(forged_plain.as_slice(), &meta_key, &header.base_nonce, &aad)
+        .expect("re-seal forged metadata");
+    assert_eq!(sealed.len(), header.meta_len as usize);
+    data[meta_off..meta_end].copy_from_slice(&sealed);
+    fs::write(&stego, data).unwrap();
 
     let out = dir.join("out.bin");
     let err = read_carrier(

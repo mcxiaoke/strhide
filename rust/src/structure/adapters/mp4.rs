@@ -93,7 +93,15 @@ impl HostAdapter for Mp4Adapter {
         &self,
         stego_in: &mut dyn SeekRead,
     ) -> Result<(bool, String), StrHideError> {
-        isobmff_verify_structure(self.format_name(), stego_in)
+        isobmff_verify_structure(self.format_name(), stego_in, None)
+    }
+
+    fn verify_structure_with_magic(
+        &self,
+        stego_in: &mut dyn SeekRead,
+        locator_magic: Option<&[u8; 4]>,
+    ) -> Result<(bool, String), StrHideError> {
+        isobmff_verify_structure(self.format_name(), stego_in, locator_magic)
     }
 
     fn suspicious_structures(&self, stego_in: &mut dyn SeekRead) -> Vec<String> {

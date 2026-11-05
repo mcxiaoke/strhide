@@ -274,6 +274,17 @@ impl PngParams {
                 self.epsilon
             )));
         }
+        // `sigma` is written into the feature word as an f32; NaN, infinity and
+        // values outside this range would either poison the cost map or be
+        // re-read as a different number on extraction, so reject them here
+        // instead of producing a carrier whose payload cannot be recovered.
+        if let Some(&sigma) = self.algorithm_options.get("sigma")
+            && (!sigma.is_finite() || !(0.1..=10.0).contains(&sigma))
+        {
+            return Err(StrHideError::General(format!(
+                "PNG cost model parameter 'sigma' must be finite and in 0.1..=10.0, got {sigma}"
+            )));
+        }
         // Out-of-range values used to be silently clamped while ranking and
         // then truncated to permille on the wire: reject them at the boundary
         // instead of hiding the disagreement.

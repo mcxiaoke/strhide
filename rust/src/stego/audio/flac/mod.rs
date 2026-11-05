@@ -293,7 +293,11 @@ pub(crate) fn analyse(bytes: &[u8], info: &StreamInfo) -> Result<FlacAnalysis, S
 #[derive(Debug, Clone)]
 struct FlacSlot {
     /// Absolute bit offset of the codeword's first bit.
-    bit_offset: u32,
+    ///
+    /// `u64` rather than `u32`: a 16-bit mono carrier larger than ~512 MiB
+    /// gives sample offsets beyond 2^32 bits, and the old `u32` wrapped,
+    /// making later frames address the wrong codewords (review F-07).
+    bit_offset: u64,
     /// Rice parameter of its partition.
     k: u8,
     /// Current residual value.
@@ -309,7 +313,7 @@ struct FlacSlot {
 /// One link of that chain.
 #[derive(Debug, Clone, Copy)]
 struct CompSlot {
-    bit_offset: u32,
+    bit_offset: u64,
     k: u8,
     value: i32,
     /// Rice-coded rather than escape-coded.
@@ -561,7 +565,7 @@ impl<'a> FlacCarrier<'a> {
         let mut samples_decoded = 0u64;
         // Slots were collected in file order for each half, so sort a copy of
         // the offsets once: the frame walk then advances a single cursor.
-        let mut offsets: Vec<u32> = self
+        let mut offsets: Vec<u64> = self
             .slots
             .iter()
             .flat_map(|s| std::iter::once(s.bit_offset).chain(s.comp.iter().map(|c| c.bit_offset)))
@@ -588,11 +592,11 @@ impl<'a> FlacCarrier<'a> {
             let frame_end_bit = (parsed.crc16_offset + 2) * 8;
             let mut touched = false;
             while cursor < offsets.len() {
-                let bit = offsets[cursor] as usize;
-                if bit >= frame_end_bit {
+                let bit = offsets[cursor];
+                if bit >= frame_end_bit as u64 {
                     break;
                 }
-                if bit >= frame_start_bit {
+                if bit >= frame_start_bit as u64 {
                     touched = true;
                 }
                 cursor += 1;
@@ -900,14 +904,14 @@ fn make_slot(
     let end = start.checked_add(slot.comp_len as usize)?;
     let chain = parsed.comps.get(start..end)?;
     Some(FlacSlot {
-        bit_offset: slot.bit_offset as u32,
+        bit_offset: slot.bit_offset as u64,
         k: slot.k as u8,
         value: slot.value as i32,
         cost: slot_cost(parsed, slot, scale),
         comp: chain
             .iter()
             .map(|c| CompSlot {
-                bit_offset: c.bit_offset as u32,
+                bit_offset: c.bit_offset as u64,
                 k: c.k as u8,
                 value: c.value as i32,
                 rice: c.rice,
@@ -1375,5 +1379,45 @@ mod tests {
     fn rejects_a_file_without_the_flac_marker() {
         let err = parse_stream_info(b"RIFF....WAVE................").unwrap_err();
         assert!(err.to_string().contains("fLaC"));
+    }
+
+    #[test]
+    fn slot_offsets_keep_bits_above_u32() {
+        // Simulating a >512 MiB carrier: a 16-bit mono stream stores one bit
+        // per sample in the residual domain, so offsets above 2^32 only occur
+        // past ~512 MiB. Writing such a file in a unit test is wasteful, and
+        // the arithmetic under test (`usize` -> slot offset) is identical at
+        // any magnitude, so a synthetic offset just over u32::MAX stands in
+        // for the real one. The old `as u32` wrapped here and addressed the
+        // wrong codeword.
+        let big = u32::MAX as usize + 8;
+        let parsed = frame::ParsedFrame {
+            start: 0,
+            samples: vec![vec![0i64; 4]],
+            crc16_offset: 0,
+            slots: Vec::new(),
+            comps: vec![frame::Compensation {
+                bit_offset: big,
+                k: 0,
+                value: 0,
+                plus: 0,
+                minus: 0,
+                rice: true,
+            }],
+            tails: Vec::new(),
+        };
+        let slot = frame::ResidualSlot {
+            bit_offset: big,
+            k: 0,
+            value: 0,
+            channel: 0,
+            sample_index: 0,
+            comp_start: 0,
+            comp_len: 1,
+        };
+        let scale = PcmScale::new(16, 0);
+        let made = make_slot(&slot, &parsed, &scale).expect("slot");
+        assert_eq!(made.bit_offset, big as u64);
+        assert_eq!(made.comp[0].bit_offset, big as u64);
     }
 }

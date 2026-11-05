@@ -392,6 +392,10 @@ fn read_one(
     if let Some(dir) = batch.dir {
         let name = crate::core::fs::batch_payload_name(carrier, &res.filename, res.is_file);
         let dest = crate::core::fs::unique_batch_path(dir, &name, &batch.used);
+        // The batch output name may match any carrier in the batch, not just
+        // this one; overwriting a carrier before all reads finish would destroy
+        // a payload that is still scheduled for extraction.
+        crate::core::commit::reject_carrier_output(&dest, &args.carrier)?;
         check_overwrite(&dest, args.overwrite)?;
         crate::core::commit::write_bytes_atomic(&dest, &res.data)?;
         batch.used.insert(dest.clone());

@@ -1219,3 +1219,91 @@ fn embed_rejects_content_on_structure_domain_without_overwrite() {
     assert_eq!(code(&read), 0, "stderr: {}", stderr(&read));
     assert_eq!(stdout(&read).trim(), "structure payload");
 }
+
+fn sha256_of(dir: &Path, name: &str) -> [u8; 32] {
+    strhide::crypto::compute_sha256(&fs::read(dir.join(name)).unwrap())
+}
+
+#[test]
+fn read_refuses_to_overwrite_its_own_carrier() {
+    // `read -o carrier.png` used to truncate the carrier before the payload was
+    // written: the extraction destroyed its own source. Even `--overwrite`
+    // must not allow this, and the carrier bytes must stay untouched.
+    let dir = scratch("f04_read_self");
+    fs::write(dir.join("src.png"), make_png()).unwrap();
+    let written = run(
+        &dir,
+        &[
+            "write",
+            "src.png",
+            "-t",
+            "structure payload",
+            "-o",
+            "carrier.png",
+            "--no-backup",
+        ],
+    );
+    assert_eq!(code(&written), 0, "stderr: {}", stderr(&written));
+
+    let before = sha256_of(&dir, "carrier.png");
+    // A relative spelling of the same file must be caught by normalisation.
+    let read = run(
+        &dir,
+        &["read", "carrier.png", "-o", "./carrier.png", "--overwrite"],
+    );
+    assert_eq!(code(&read), 1, "stderr: {}", stderr(&read));
+    let err = stderr(&read);
+    assert!(
+        err.contains("Refusing to write the extracted payload over carrier"),
+        "must name the carrier conflict: {err}"
+    );
+    assert_eq!(
+        sha256_of(&dir, "carrier.png"),
+        before,
+        "carrier bytes must not change"
+    );
+
+    // The payload is still extractable afterwards.
+    let after = run(&dir, &["read", "carrier.png", "--stdout"]);
+    assert_eq!(code(&after), 0, "stderr: {}", stderr(&after));
+    assert_eq!(stdout(&after).trim(), "structure payload");
+}
+
+#[test]
+fn extract_refuses_to_overwrite_its_own_carrier() {
+    let dir = scratch("f04_extract_self");
+    fs::write(dir.join("big.png"), make_stego_png()).unwrap();
+    let embedded = run(
+        &dir,
+        &[
+            "embed",
+            "big.png",
+            "-t",
+            "content payload",
+            "-o",
+            "stego.png",
+        ],
+    );
+    assert_eq!(code(&embedded), 0, "stderr: {}", stderr(&embedded));
+
+    let before = sha256_of(&dir, "stego.png");
+    let extract = run(
+        &dir,
+        &["extract", "stego.png", "-o", "stego.png", "--overwrite"],
+    );
+    assert_eq!(code(&extract), 1, "stderr: {}", stderr(&extract));
+    let err = stderr(&extract);
+    assert!(
+        err.contains("Refusing to write the extracted payload over carrier"),
+        "must name the carrier conflict: {err}"
+    );
+    assert_eq!(
+        sha256_of(&dir, "stego.png"),
+        before,
+        "carrier bytes must not change"
+    );
+
+    let after = run(&dir, &["extract", "stego.png", "--stdout"]);
+    assert_eq!(code(&after), 0, "stderr: {}", stderr(&after));
+    assert_eq!(stdout(&after).trim(), "content payload");
+}

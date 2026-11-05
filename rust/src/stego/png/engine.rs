@@ -551,6 +551,7 @@ fn check_pipeline_budget(
 }
 
 /// Body slots whose working set still fits the pipeline budget.
+#[cfg(test)]
 fn max_body_slots_within_pipeline(total_pixels: usize, trellis_h: Option<u8>) -> usize {
     let remaining = MAX_PIPELINE_BYTES.saturating_sub(pipeline_base_bytes(total_pixels));
     usize::try_from(remaining / pipeline_bytes_per_slot(trellis_h)).unwrap_or(usize::MAX)
@@ -2412,6 +2413,75 @@ pub fn verify_png(
     Ok(StegoVerifyResult::new("PNG", levels))
 }
 
+/// Would the embedder accept `raw_bytes` on the green or RGB body pool?
+///
+/// This mirrors the codec/`u` resolution in [`embed_png_with_stats`] exactly:
+/// `Auto` (and `Stc` with `stc_u = 0`) re-resolve the group size against each
+/// candidate pool, while fixed codecs use the configured group size. Capacity
+/// probing and embedding therefore share one accounting rule instead of the
+/// probe assuming `u = 1` and the writer using whatever the pool resolves to.
+fn body_payload_fits(
+    params: &PngParams,
+    pool_green: usize,
+    pool_rgb: Option<usize>,
+    raw_bytes: usize,
+) -> Result<bool, StrHideError> {
+    let ciphertext_bytes = raw_bytes.saturating_add(crate::stego::envelope::BODY_OVERHEAD);
+    let Some(bits) = ciphertext_bytes.checked_mul(8) else {
+        return Ok(false);
+    };
+    for pool in std::iter::once(pool_green).chain(pool_rgb) {
+        if pool == 0 {
+            continue;
+        }
+        let (codec, u) = if matches!(params.codec, StegoCodec::Auto)
+            || (params.codec == StegoCodec::Stc && params.stc_u == 0)
+        {
+            crate::stego::coding::auto_select_codec(pool, bits)
+        } else {
+            match params.codec {
+                StegoCodec::Stc => (StegoCodec::Stc, params.stc_u),
+                StegoCodec::Hamming => (StegoCodec::Hamming, 0),
+                StegoCodec::Auto => unreachable!("handled above"),
+            }
+        };
+        if crate::stego::coding::slots_for_codec(bits, codec, params.stc_h, u)? <= pool {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Largest raw payload the writer accepts on the given body pools.
+///
+/// Binary search over `body_payload_fits`, so it uses the *same* slot
+/// accounting as the embedder. The previous closed-form inverse assumed
+/// `u = 1` and overshot by a few bytes whenever the pool resolved a larger
+/// group size or a codec whose warm-up rows do not invert exactly.
+fn max_raw_payload_for_pools(
+    params: &PngParams,
+    pool_green: usize,
+    pool_rgb: Option<usize>,
+) -> Result<usize, StrHideError> {
+    let largest_pool = pool_green.max(pool_rgb.unwrap_or(0));
+    if largest_pool == 0 {
+        return Ok(0);
+    }
+    // Even the densest codec (Hamming) needs more than one slot per byte of
+    // ciphertext, so `8 * slots` is a safe, generous upper bound.
+    let mut lo = 0usize;
+    let mut hi = largest_pool.saturating_mul(8);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if body_payload_fits(params, pool_green, pool_rgb, mid)? {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    Ok(lo)
+}
+
 /// Construct the capacity metadata directly from an already computed [`SlotPlan`].
 ///
 /// Shared between embedding and probing so that embedding never has to decode
@@ -2441,28 +2511,10 @@ fn build_png_capacity_with_pools(
     };
     let ratio_slots = pool_green;
 
-    let hamming_k = crate::stego::coding::DEFAULT_HAMMING_K;
-    let hamming_slots =
-        available_body_slots.min(max_body_slots_within_pipeline(total_pixels, None));
-    let stc_slots = available_body_slots.min(max_body_slots_within_pipeline(
-        total_pixels,
-        Some(params.stc_h),
-    ));
-    let max_ciphertext_bytes = match params.codec {
-        StegoCodec::Hamming => crate::stego::coding::max_payload_bytes(hamming_slots, hamming_k),
-        StegoCodec::Stc if params.stc_u > 0 => {
-            let trellis = StcTrellis::from_seed_grouped(0, params.stc_h, params.stc_u)?;
-            trellis.message_bits(stc_slots) / 8
-        }
-        StegoCodec::Stc | StegoCodec::Auto => {
-            let trellis = StcTrellis::from_seed_grouped(0, params.stc_h, 1)?;
-            trellis.message_bits(stc_slots) / 8
-        }
-    };
-    let max_raw_payload_bytes =
-        max_ciphertext_bytes.saturating_sub(crate::stego::envelope::BODY_OVERHEAD);
+    let max_raw_payload_bytes = max_raw_payload_for_pools(params, pool_green, pool_rgb)?;
 
     let recommended_max_bytes = recommended_bytes_for(total_pixels, ratio_slots, safety_level);
+    let hamming_k = crate::stego::coding::DEFAULT_HAMMING_K;
     let tier_limits = crate::params::SafetyLevel::ALL
         .map(|level| recommended_bytes_for(total_pixels, ratio_slots, level));
 
@@ -2936,6 +2988,64 @@ mod tests {
         )
         .expect("extract rebuilds sigma from the feature word");
         assert_eq!(extracted, payload);
+    }
+
+    #[test]
+    fn out_of_range_sigma_is_rejected_before_embedding() {
+        // `sigma` is stored in the feature word as an f32. NaN, infinities and
+        // values outside the supported range used to be written as-is, which
+        // made the cost map unusable or made extraction read a different
+        // number, so embedding succeeded but the payload could never be read.
+        let mut params = PngParams::default();
+        for bad in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -1.0,
+            1e300,
+            0.05,
+            11.0,
+        ] {
+            params.algorithm_options.insert("sigma".to_string(), bad);
+            let err = params.validate().unwrap_err();
+            assert!(
+                err.to_string().contains("'sigma'"),
+                "sigma={bad} must name the parameter: {err}"
+            );
+        }
+
+        let (w, h) = (64usize, 64usize);
+        let pixels = row_correlated_pixels(w, h);
+        let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
+        let payload = b"sigma-boundary";
+        for sigma in [0.1, 1.0, 10.0] {
+            let mut legal = PngParams::default();
+            legal.algorithm_options.insert("sigma".to_string(), sigma);
+            let stego = embed_png(
+                &png,
+                payload,
+                None,
+                None,
+                &crate::stego::format::OFFICIAL_PNG_FORMAT,
+                &crate::stego::png::cost::SuniwardCostModel,
+                &legal,
+                SafetyPolicy::default(),
+                Freshness::Random,
+                &Control::none(),
+            )
+            .unwrap_or_else(|e| panic!("sigma={sigma} must embed: {e}"));
+            let extracted = extract_png(
+                &stego,
+                None,
+                None,
+                &crate::stego::format::OFFICIAL_PNG_FORMAT,
+                &crate::stego::png::cost::SuniwardCostModel,
+                &PngParams::default(),
+                &Control::none(),
+            )
+            .unwrap_or_else(|e| panic!("sigma={sigma} must extract: {e}"));
+            assert_eq!(extracted, payload, "sigma={sigma} must round-trip");
+        }
     }
 
     #[test]
@@ -3631,8 +3741,11 @@ mod tests {
             )
             .expect("probe");
             assert!(cap.max_raw_payload_bytes > 0);
-            let payload = vec![0x5Au8; cap.max_raw_payload_bytes];
-            embed_png(
+            // Noise does not compress, so this exercises the raw boundary that
+            // the capacity accounting claims. The probe and the embedder now
+            // share `body_payload_fits`, so the value must be exactly reachable.
+            let payload = noise_payload(cap.max_raw_payload_bytes);
+            let stego = embed_png(
                 &png,
                 &payload,
                 password,
@@ -3650,6 +3763,35 @@ mod tests {
                     payload.len()
                 )
             });
+            let extracted = extract_png(
+                &stego,
+                password,
+                None,
+                &crate::stego::format::OFFICIAL_PNG_FORMAT,
+                &HillCostModel,
+                &params,
+                &Control::none(),
+            )
+            .expect("payload at the advertised capacity must be readable");
+            assert_eq!(extracted, payload);
+
+            let over = noise_payload(cap.max_raw_payload_bytes + 1);
+            let rejected = embed_png(
+                &png,
+                &over,
+                password,
+                None,
+                &crate::stego::format::OFFICIAL_PNG_FORMAT,
+                &HillCostModel,
+                &params,
+                SafetyPolicy::default(),
+                Freshness::Random,
+                &Control::none(),
+            );
+            assert!(
+                rejected.is_err(),
+                "password {password:?}: capacity+1 must not fit"
+            );
         }
     }
 

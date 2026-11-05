@@ -77,6 +77,24 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
     false
 }
 
+/// Reject an extracted-payload destination that resolves to an input carrier.
+///
+/// `read -i carrier -o carrier` (or a batch whose output name matches another
+/// input carrier) truncates the carrier before the payload is written, which
+/// destroys the only copy of the hidden data. `same_file` normalises symlinks,
+/// relative paths and Windows case differences, so all of them are covered.
+pub fn reject_carrier_output(dest: &Path, carriers: &[PathBuf]) -> Result<(), StrHideError> {
+    for carrier in carriers {
+        if same_file(dest, carrier) {
+            return Err(StrHideError::Rejection(format!(
+                "Refusing to write the extracted payload over carrier '{}': choose a different output path",
+                carrier.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// RAII guard removing an uncommitted temporary file on drop.
 ///
 /// Any error return between creating the temp file and the successful atomic

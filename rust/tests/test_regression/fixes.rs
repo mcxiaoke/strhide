@@ -1260,3 +1260,62 @@ fn remove_rejects_out_of_bounds_patch_offset_and_injection_region() {
     assert_eq!(restored, zip);
     assert!(result.verified_identical);
 }
+
+// --------------------------------------------------------------------------- F-05
+
+#[test]
+fn write_rejects_payload_above_the_reader_limit_and_accepts_the_boundary() {
+    // `structure_payload_limit` floors at 64 MiB for small carriers. The
+    // writer applies the same bound the reader enforces; without it a
+    // highly-compressible payload could be written and then never read back.
+    const LIMIT: usize = 64 * 1024 * 1024;
+
+    let dir = scratch("f05_payload_limit");
+    let carrier = dir.join("small.zip");
+    fs::write(&carrier, include_bytes!("../assets/small.zip")).unwrap();
+
+    let too_big = vec![b'a'; LIMIT + 1];
+    let rejected = dir.join("too-big.zip");
+    let err = write_carrier(
+        &carrier,
+        PayloadSource::Bytes(&too_big),
+        &WriteOptions {
+            output_path: Some(&rejected),
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("exceeds the maximum supported by this carrier"),
+        "over-limit payload must be refused with the shared limit: {err}"
+    );
+    assert!(!rejected.exists(), "no output on rejection");
+
+    // Exactly at the limit. Compressible zeros keep the injected stream small
+    // while still exercising the 64 MiB raw-size boundary on read.
+    let boundary = vec![0u8; LIMIT];
+    let accepted = dir.join("boundary.zip");
+    write_carrier(
+        &carrier,
+        PayloadSource::Bytes(&boundary),
+        &WriteOptions {
+            output_path: Some(&accepted),
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .expect("boundary payload must be writable");
+    let read_back = read_carrier(
+        &accepted,
+        &ReadOptions {
+            output_path: None,
+            overwrite: false,
+            ..Default::default()
+        },
+    )
+    .expect("boundary payload must be readable");
+    assert_eq!(read_back.data.len(), LIMIT);
+    assert!(read_back.data.iter().all(|b| *b == 0));
+}
