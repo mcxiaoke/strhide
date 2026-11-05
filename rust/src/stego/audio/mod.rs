@@ -37,7 +37,7 @@ use crate::SafetyPolicy;
 use crate::core::control::Control;
 use crate::core::payload::Payload;
 use crate::crypto::{CipherSuiteId, Credential};
-use crate::errors::StrHideError;
+use crate::errors::{StrHideError, TrellisCause};
 use crate::params::SafetyLevel;
 use crate::stego::envelope::Freshness;
 use crate::stego::format::AudioFormatProfile;
@@ -91,6 +91,40 @@ fn flac_phases(locate_seed: &[u8; 32]) -> (u64, u64, u64) {
     )
 }
 
+/// How many body-phase/salt draws a FLAC embed may try before giving up.
+/// Mirrors the JPEG engine's bounded retry budget.
+const FLAC_EMBED_ATTEMPTS: u32 = 6;
+
+/// Body thinning phase for one embed attempt.
+///
+/// Header and extension phases stay password-derived so a reader can decode the
+/// base header before it knows anything about the payload. Only the body phase
+/// is folded with the session salt/nonce -- both already live in the V4 header,
+/// so the extractor can reproduce the exact slot subset without a new wire
+/// field. Varying them per attempt is what lets a retry escape a `DeadGroup`
+/// caused by an unlucky run of immovable residuals.
+fn flac_body_phase(base: u64, salt: &[u8], nonce: &[u8]) -> u64 {
+    let mut h = Sha256::new();
+    h.update(b"strhide-v4-flac-body-phase");
+    h.update(base.to_le_bytes());
+    h.update(salt);
+    h.update(nonce);
+    let digest = h.finalize();
+    u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 yields 32 bytes"))
+}
+
+/// A trellis that ran out of reachable states is worth another phase draw;
+/// every other failure is structural and must not be masked by a retry.
+fn flac_retryable(err: &StrHideError) -> bool {
+    matches!(
+        err,
+        StrHideError::TrellisInfeasible {
+            cause: TrellisCause::DeadGroup | TrellisCause::DeadElement,
+            ..
+        }
+    )
+}
+
 fn suite_from_id(suite_id: u16) -> Result<CipherSuiteId, StrHideError> {
     CipherSuiteId::from_u16(suite_id).ok_or_else(|| {
         StrHideError::UnsupportedVersion(format!("Unknown content cipher suite id {suite_id}"))
@@ -102,6 +136,12 @@ fn suite_from_id(suite_id: u16) -> Result<CipherSuiteId, StrHideError> {
 /// The output has exactly the same length as the input and every frame keeps
 /// its byte size: only the last bits of selected Rice codewords, the affected
 /// frame checksums and the `STREAMINFO` MD5 differ.
+///
+/// A keyed thinning can pick a body subset whose early groups contain no
+/// movable residual at all, leaving the trellis no way to steer its warm-up
+/// rows. The body phase is folded with the session salt/nonce that the V4
+/// header already carries, so a bounded retry draws a different subset and the
+/// extractor can reproduce it without any new wire field.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn embed_flac(
     carrier: &[u8],
@@ -152,7 +192,8 @@ pub(crate) fn embed_flac(
     let pre_salt = flac_pre_salt(&info, profile.hpos_salt);
     let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
 
-    // Size the carrier's slot array from the envelope the payload will produce.
+    // Everything up to here is attempt-independent: parsing a 20 MB FLAC and
+    // recomputing its PCM MD5 once per retry would dominate the retry cost.
     let plaintext = crate::stego::envelope::build_plaintext(payload)?;
     let shape = core::plan_body(
         plaintext.len() + suite.tag_len(),
@@ -160,21 +201,30 @@ pub(crate) fn embed_flac(
         crate::stego::coding::DEFAULT_STC_H,
         flac::FlacCarrier::MIN_GROUP,
     )?;
+    let (header_phase, ext_phase, body_phase_base) = flac_phases(&prepared.locator.locate_seed);
+    let binding = core::fresh_binding_for(carrier, payload, FLAC_FORMAT_ID, extensions)?;
 
-    let (header_phase, ext_phase, body_phase) = flac_phases(&prepared.locator.locate_seed);
-    let mut bytes = carrier.to_vec();
-    let mut carrier_view = flac::FlacCarrier::new(
-        &mut bytes,
-        info,
-        &analysis,
-        shape.body_slots,
-        header_slots,
-        header_phase,
-        ext_phase,
-        body_phase,
-    )?;
-    let (capacity, stats) = {
-        core::embed(
+    let mut last_error: Option<StrHideError> = None;
+    for attempt in 0..FLAC_EMBED_ATTEMPTS {
+        control.check()?;
+        let salt = freshness.salt(attempt, &binding);
+        let nonce = freshness.nonce(attempt, &binding);
+        let body_phase = flac_body_phase(body_phase_base, &salt, &nonce);
+
+        // Fresh clone per attempt: a failed solve leaves header writes behind
+        // in `bytes`, and the next attempt must start from the pristine cover.
+        let mut bytes = carrier.to_vec();
+        let mut carrier_view = flac::FlacCarrier::new(
+            &mut bytes,
+            info,
+            &analysis,
+            shape.body_slots,
+            header_slots,
+            header_phase,
+            ext_phase,
+            body_phase,
+        )?;
+        let result = core::embed(
             &mut carrier_view,
             core::Mapping::BodyPermuted,
             payload,
@@ -185,23 +235,31 @@ pub(crate) fn embed_flac(
             profile.cipher,
             FLAC_FORMAT_ID,
             safety,
-            freshness,
-            carrier,
+            salt,
+            nonce,
             control,
-        )?
-    };
-
-    let drift = if carrier_view.pcm_md5() == Some(analysis.pcm_md5) {
-        0
-    } else {
-        flac::max_sample_drift(carrier, &bytes, &info)?
-    };
-    if drift > flac::DRIFT_BUDGET {
-        return Err(StrHideError::General(format!(
-            "FLAC embed would shift the decoded waveform by {drift} units, past the compensation budget; refusing to emit a carrier whose predictor is unstable"
-        )));
+        );
+        match result {
+            Ok((capacity, stats)) => {
+                let drift = if carrier_view.pcm_md5() == Some(analysis.pcm_md5) {
+                    0
+                } else {
+                    flac::max_sample_drift(carrier, &bytes, &info)?
+                };
+                if drift > flac::DRIFT_BUDGET {
+                    return Err(StrHideError::General(format!(
+                        "FLAC embed would shift the decoded waveform by {drift} units, past the compensation budget; refusing to emit a carrier whose predictor is unstable"
+                    )));
+                }
+                return Ok((bytes, capacity, stats));
+            }
+            Err(err) if flac_retryable(&err) => last_error = Some(err),
+            Err(err) => return Err(err),
+        }
     }
-    Ok((bytes, capacity, stats))
+    Err(last_error.unwrap_or_else(|| {
+        StrHideError::General("FLAC embedding exhausted its retry budget".into())
+    }))
 }
 
 /// Extract a payload from a FLAC carrier.
@@ -220,11 +278,13 @@ pub(crate) fn extract_flac(
     let analysis = flac::analyse(carrier, &info)?;
     let pre_salt = flac_pre_salt(&info, profile.hpos_salt);
     let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
-    let (header_phase, ext_phase, body_phase) = flac_phases(&prepared.locator.locate_seed);
+    let (header_phase, ext_phase, body_phase_base) = flac_phases(&prepared.locator.locate_seed);
 
     // First read the base header with an empty body, then rebuild with the body
     // the header advertises. The slot arrays differ, which is why this is two
-    // constructions rather than one.
+    // constructions rather than one. The base header carries the salt/nonce
+    // that selected this attempt's body subset, so the second pass can derive
+    // exactly the phase the writer used.
     let mut scratch = carrier.to_vec();
     let header_view = flac::FlacCarrier::new(
         &mut scratch,
@@ -234,7 +294,7 @@ pub(crate) fn extract_flac(
         PNG_AUDIO_BASE_SLOTS,
         header_phase,
         ext_phase,
-        body_phase,
+        body_phase_base,
     )?;
     let view = core::read_base(
         &header_view,
@@ -257,6 +317,7 @@ pub(crate) fn extract_flac(
     // returns, and the body view needs the same bytes, so a second full-file
     // clone is pure waste (F-26). The third `analyse` CRC recheck elsewhere
     // stays as-is.
+    let body_phase = flac_body_phase(body_phase_base, &view.header.salt, &view.header.nonce);
     let flac = flac::FlacCarrier::new(
         &mut scratch,
         info,
@@ -390,6 +451,12 @@ pub(crate) fn inspect_flac(
     }
 
     let mut scratch = carrier.to_vec();
+    // A wrong/unreadable header leaves the body phase at its password-derived
+    // base; the caller reports "no hidden data" and never reads the body.
+    let body_phase = match &view {
+        Ok(v) => flac_body_phase(body_phase, &v.header.salt, &v.header.nonce),
+        Err(_) => body_phase,
+    };
     let flac = flac::FlacCarrier::new(
         &mut scratch,
         info,
@@ -487,6 +554,12 @@ pub(crate) fn verify_flac(
     }
 
     let mut scratch = carrier.to_vec();
+    // A wrong/unreadable header leaves the body phase at its password-derived
+    // base; the caller reports "no hidden data" and never reads the body.
+    let body_phase = match &view {
+        Ok(v) => flac_body_phase(body_phase, &v.header.salt, &v.header.nonce),
+        Err(_) => body_phase,
+    };
     let flac = flac::FlacCarrier::new(
         &mut scratch,
         info,
@@ -543,6 +616,9 @@ pub(crate) fn embed_wav(
     let suite = suite_from_id(suite_id)?;
     let pre_salt = wav_pre_salt(&layout, profile.hpos_salt);
     let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
+    let binding = core::fresh_binding_for(carrier, payload, WAV_FORMAT_ID, extensions)?;
+    let salt = freshness.salt(0, &binding);
+    let nonce = freshness.nonce(0, &binding);
     let mut bytes = carrier.to_vec();
     let (info, stats) = {
         let mut pcm = wav::PcmCarrier::new(&mut bytes, layout);
@@ -557,8 +633,8 @@ pub(crate) fn embed_wav(
             profile.cipher,
             WAV_FORMAT_ID,
             safety,
-            freshness,
-            carrier,
+            salt,
+            nonce,
             control,
         )?
     };

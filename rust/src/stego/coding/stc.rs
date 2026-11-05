@@ -617,8 +617,15 @@ impl StcTrellis {
         let extra_shift = h - 1;
         let inf = f64::INFINITY;
 
+        // `extract` starts at syndrome row `h - 1`, so the first `h - 1` rows
+        // are never observed. Pinning the trellis to the single initial state 0
+        // needlessly constrains those unread rows, and it is actively harmful
+        // when the first groups hold no movable element: the reachable set
+        // collapses to empty before a single message bit has been seen. Free
+        // every state whose `extra` bit (row `h - 1`, which *is* read) is still
+        // zero; the enlarged search space can only lower the optimum cost.
         let mut cost = vec![inf; states];
-        cost[0] = 0.0;
+        cost[..(states >> 1)].fill(0.0);
         let mut next = vec![inf; states];
         // One bit per (column, state): 1 = this element's parity was flipped.
         //
@@ -731,10 +738,12 @@ impl StcTrellis {
             }
         }
         if best_state == usize::MAX {
-            // Not a retryable condition: re-seeding would leave the extractor
-            // unable to know which round was used, i.e. it would brick the
-            // carrier. It can only happen when a caller hands over an element
-            // with no legal direction at all (both `rho` values infinite).
+            // No state survived: some window needed a parity flip that none of
+            // its elements could provide. This is a property of the *selected*
+            // cover subset, not of the payload size. A caller that can re-derive
+            // that subset from the header (FLAC's keyed thinning does) may retry
+            // with a different phase, provided the extractor can reproduce the
+            // attempt that succeeded.
             return Err(StrHideError::TrellisInfeasible {
                 cause: crate::errors::TrellisCause::DeadGroup,
                 detail: "a group has no legal element (both directions illegal for every element)"
@@ -961,14 +970,16 @@ mod tests {
     }
 
     impl Oracle<'_> {
-        /// Every row of `H` must hold: the warm-up rows decode as zero (the
-        /// encoder constrains them too) and the rest carry the message. Row
-        /// `h - 1` is the *first* message row (message bit 0, see `extract`),
-        /// so the warm-up rows are exactly `0..h-1`.
+        /// Rows `h - 1 ..` carry the message (row `h - 1` is message bit 0, see
+        /// `extract`). With `u = 1` the encoder still starts from state 0, so
+        /// the warm-up rows must decode as zero there. With `u > 1` the initial
+        /// warm-up state is free and those rows are unobservable, so the oracle
+        /// must not constrain them either.
         fn matches(&self, cur: &[u8]) -> bool {
             let groups = self.vals.len() / self.t.u() as usize;
             let h = self.t.h() as usize;
-            (0..groups).all(|row| {
+            let first_row = if self.t.u() > 1 { h - 1 } else { 0 };
+            (first_row..groups).all(|row| {
                 let want = if row + 1 >= h {
                     message_bit(self.message, row - (h - 1))
                 } else {
@@ -1155,6 +1166,47 @@ mod tests {
                     .filter(|(a, b)| a != b)
                     .count()
             );
+        }
+    }
+
+    /// A grouped trellis whose very first group is entirely immovable must
+    /// still embed. Those warm-up rows are never read by `extract`, so pinning
+    /// the state register to zero was an unnecessary constraint: with an odd
+    /// cover in that group the first deciding column had no predecessor and
+    /// the whole solve reported `DeadGroup` (seen on real FLAC carriers).
+    #[test]
+    fn grouped_trellis_survives_an_all_stuck_first_group() {
+        for (h, u) in [(4u8, 2u8), (4, 3), (8, 3)] {
+            let groups = 24usize;
+            let n = groups * u as usize;
+            for seed in 0..24u64 {
+                let t = StcTrellis::from_seed_grouped(seed, h, u).unwrap();
+                let mut vals = vec![0u8; n];
+                vals[0] = 1; // odd cover in group 0: the collapsing parity pattern
+                let mut moves = vec![Move::Both; n];
+                for m in moves.iter_mut().take(u as usize) {
+                    *m = Move::None;
+                }
+                let rp = vec![1.0f64; n];
+                let rm = vec![1.0f64; n];
+                let bits = t.message_bits(n);
+                let message: Vec<u8> = (0..bits.div_ceil(8))
+                    .map(|i| 0xA5u8.wrapping_mul(i as u8 + 1))
+                    .collect();
+
+                let mut stego = vals.clone();
+                t.embed(&mut stego, &moves, &rp, &rm, &message)
+                    .unwrap_or_else(|e| panic!("h={h} u={u} seed={seed}: {e}"));
+                assert!(
+                    bits_equal(&t.extract(&stego, bits), &message, bits),
+                    "h={h} u={u} seed={seed}: roundtrip mismatch"
+                );
+                for (i, (&a, &b)) in vals.iter().zip(stego.iter()).enumerate() {
+                    if moves[i] == Move::None {
+                        assert_eq!(a, b, "h={h} u={u} seed={seed}: stuck slot {i} moved");
+                    }
+                }
+            }
         }
     }
 

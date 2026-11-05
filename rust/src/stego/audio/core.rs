@@ -44,8 +44,8 @@ use crate::stego::coding::{
     expected_stc_change_rate, required_slots, slots_for_codec,
 };
 use crate::stego::envelope::{
-    BODY_OVERHEAD, Freshness, build_plaintext, build_v4_aad, encrypt_v4_with_aad,
-    unpack_v4_envelope_parts,
+    BODY_OVERHEAD, Freshness, NONCE_LEN, SALT_LEN, build_plaintext, build_v4_aad,
+    encrypt_v4_with_aad, unpack_v4_envelope_parts,
 };
 use crate::stego::format::{
     HeaderLocatorKeys, WireCipherProfile, derive_l2_locator_keys, derive_l3_session_keys,
@@ -646,6 +646,27 @@ pub(crate) fn body_slots_for(header: &SpatialHeaderV4) -> Result<usize, StrHideE
     .map_err(|_| no_hidden())
 }
 
+/// Binding context for the per-attempt session salt/nonce.
+///
+/// The FLAC carrier has to derive its body thinning phase *before* the envelope
+/// is written, and that phase is folded with exactly the salt/nonce the header
+/// will carry. Keeping the derivation here means the carrier builder and the
+/// envelope writer cannot disagree about the pair used for one attempt.
+pub(crate) fn fresh_binding_for(
+    binding_input: &[u8],
+    payload: &Payload<'_>,
+    format_id: u8,
+    extensions: &[Tlv],
+) -> Result<Vec<u8>, StrHideError> {
+    let extension = encode_extension_for_write(extensions)?;
+    Ok(Freshness::seeded_binding(
+        binding_input,
+        payload.as_bytes(),
+        format_id,
+        &extension,
+    ))
+}
+
 /// Embed `payload` into `carrier`, returning capacity metadata and change stats.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn embed<C: SlotCarrier + ?Sized>(
@@ -659,8 +680,8 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
     cipher: &WireCipherProfile,
     format_id: u8,
     safety: SafetyPolicy,
-    freshness: Freshness,
-    binding_input: &[u8],
+    salt: [u8; SALT_LEN],
+    nonce: [u8; NONCE_LEN],
     control: &Control<'_>,
 ) -> Result<(StegoCapacityInfo, EmbedStats), StrHideError> {
     control.stage(Stage::Decode);
@@ -687,10 +708,6 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
     }
 
     let plaintext = build_plaintext(payload)?;
-    let fresh_binding =
-        Freshness::seeded_binding(binding_input, payload.as_bytes(), format_id, &extension);
-    let salt = freshness.salt(0, &fresh_binding);
-    let nonce = freshness.nonce(0, &fresh_binding);
     let session = derive_l3_session_keys(cipher, suite, &prepared.master, &salt, domain)?;
 
     let ciphertext_len = plaintext.len() + suite.tag_len();

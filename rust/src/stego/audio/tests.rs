@@ -529,3 +529,52 @@ fn written_directions_are_balanced_across_the_carrier() {
         "direction skew {skew:.3} too large: +{plus} / -{minus}"
     );
 }
+
+/// The body phase is the only thing a FLAC retry changes about slot selection,
+/// and the extractor rebuilds it from the header's salt/nonce. It must be
+/// deterministic for a given pair and must actually change when a retry draws
+/// a new one -- otherwise the retry would keep hitting the same dead group.
+#[test]
+fn flac_body_phase_is_reproducible_and_attempt_sensitive() {
+    use super::{flac_body_phase, flac_retryable};
+    use crate::errors::{StrHideError, TrellisCause};
+
+    let base = 0x1234_5678_9ABC_DEF0u64;
+    let salt = [1u8; 16];
+    let nonce = [2u8; 12];
+    let first = flac_body_phase(base, &salt, &nonce);
+    assert_eq!(first, flac_body_phase(base, &salt, &nonce));
+
+    let mut salt2 = salt;
+    salt2[0] ^= 1;
+    assert_ne!(first, flac_body_phase(base, &salt2, &nonce));
+    let mut nonce2 = nonce;
+    nonce2[0] ^= 1;
+    assert_ne!(first, flac_body_phase(base, &salt, &nonce2));
+
+    // Two successive attempts with a seeded freshness must not collapse onto
+    // the same phase (6 attempts, all distinct on this seed).
+    let binding = b"deterministic binding context";
+    let fresh = Freshness::Seeded([7u8; 32]);
+    let mut seen = std::collections::HashSet::new();
+    for attempt in 0..6u32 {
+        let s = fresh.salt(attempt, binding);
+        let n = fresh.nonce(attempt, binding);
+        assert!(
+            seen.insert(flac_body_phase(base, &s, &n)),
+            "attempt {attempt} reused a phase"
+        );
+    }
+
+    // Only a collapsed trellis is worth another attempt; structural failures
+    // must surface immediately instead of being masked by six retries.
+    assert!(flac_retryable(&StrHideError::TrellisInfeasible {
+        cause: TrellisCause::DeadGroup,
+        detail: "x".into(),
+    }));
+    assert!(flac_retryable(&StrHideError::TrellisInfeasible {
+        cause: TrellisCause::DeadElement,
+        detail: "x".into(),
+    }));
+    assert!(!flac_retryable(&StrHideError::General("x".into())));
+}
