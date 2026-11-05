@@ -651,6 +651,14 @@ fn read_box_size(bytes: &[u8], pos: usize) -> Result<(usize, usize), StrHideErro
 
 fn write_sized_uint(buf: &mut Vec<u8>, val: u64, width: usize) -> Result<(), StrHideError> {
     match width {
+        // ISO/IEC 14496-12 permits a zero width, which stores the value 0
+        // implicitly and occupies no bytes. A non-zero value cannot be
+        // represented that way, and silently dropping it would corrupt the
+        // iloc table, so refuse instead.
+        0 if val == 0 => Ok(()),
+        0 => Err(StrHideError::UnsupportedFormat(
+            "A zero-width iloc field cannot hold a non-zero value".into(),
+        )),
         4 => {
             let v32 = u32::try_from(val).map_err(|_| {
                 StrHideError::General(format!("Offset {val} overflows 32-bit iloc field"))
@@ -675,6 +683,10 @@ fn patch_sized_uint(
     val: u64,
 ) -> Result<(), StrHideError> {
     match width {
+        0 if val == 0 => Ok(()),
+        0 => Err(StrHideError::UnsupportedFormat(
+            "A zero-width iloc field cannot hold a non-zero value".into(),
+        )),
         4 => {
             let v32 = u32::try_from(val).map_err(|_| {
                 StrHideError::General(format!("Offset {val} overflows 32-bit iloc field"))
@@ -956,7 +968,17 @@ fn heif_item_hidden_inject(
     {
         let iloc_buf = &mut subboxes[iloc_idx].1;
         let mut cpos = if iloc_ver < 2 { 16 } else { 18 };
+        // Same budget as the read-side scan: declared counts are
+        // attacker-controlled and zero-width fields make extent iterations
+        // consume no bytes.
+        let mut budget = iloc_buf.len();
         for _ in 0..iloc_cnt {
+            if budget == 0 {
+                return Err(StrHideError::CorruptedData(
+                    "iloc item count exceeds the box size".into(),
+                ));
+            }
+            budget -= 1;
             cpos += id_sz;
             let cm = if iloc_ver >= 1 {
                 if cpos + 2 > iloc_buf.len() {
@@ -978,6 +1000,12 @@ fn heif_item_hidden_inject(
             let e_cnt = u16::from_be_bytes(iloc_buf[cpos..cpos + 2].try_into().unwrap()) as usize;
             cpos += 2;
             for _ in 0..e_cnt {
+                if budget == 0 {
+                    return Err(StrHideError::CorruptedData(
+                        "iloc extent count exceeds the box size".into(),
+                    ));
+                }
+                budget -= 1;
                 cpos += idx_sz;
                 let ext_pos = cpos;
                 let ext_off = read_sized_uint(iloc_buf, cpos, off_sz)?;
@@ -1294,7 +1322,15 @@ fn heif_item_hidden_strip(
 
         // Shift remaining items back
         let mut cpos = if iloc_ver < 2 { 16 } else { 18 };
+        // Same per-byte iteration budget as the other iloc scans.
+        let mut budget = iloc_buf.len();
         for _ in 0..iloc_cnt - 1 {
+            if budget == 0 {
+                return Err(StrHideError::CorruptedData(
+                    "iloc item count exceeds the box size".into(),
+                ));
+            }
+            budget -= 1;
             cpos += id_sz;
             let cm = if iloc_ver >= 1 {
                 if cpos + 2 > iloc_buf.len() {
@@ -1316,6 +1352,12 @@ fn heif_item_hidden_strip(
             let e_cnt = u16::from_be_bytes(iloc_buf[cpos..cpos + 2].try_into().unwrap()) as usize;
             cpos += 2;
             for _ in 0..e_cnt {
+                if budget == 0 {
+                    return Err(StrHideError::CorruptedData(
+                        "iloc extent count exceeds the box size".into(),
+                    ));
+                }
+                budget -= 1;
                 cpos += idx_sz;
                 let ext_pos = cpos;
                 let ext_off = read_sized_uint(iloc_buf, cpos, off_sz)?;
@@ -1487,10 +1529,16 @@ fn check_iloc_has_target(
 
     let id_sz = if iloc_ver < 2 { 2 } else { 4 };
     let mut cpos = if iloc_ver < 2 { 16 } else { 18 };
+    // A declared item/extent count is attacker-controlled, and zero-width
+    // fields make an extent iteration consume no bytes, so the declared counts
+    // alone can drive billions of iterations. Charge one unit per iteration
+    // against the box size: every real entry consumes at least that much.
+    let mut budget = iloc_box.len();
     for _ in 0..iloc_cnt {
-        if cpos + id_sz > iloc_box.len() {
+        if budget == 0 || cpos + id_sz > iloc_box.len() {
             break;
         }
+        budget -= 1;
         cpos += id_sz;
         let cm = if iloc_ver >= 1 {
             if cpos + 2 > iloc_box.len() {
@@ -1511,6 +1559,10 @@ fn check_iloc_has_target(
         let e_cnt = u16::from_be_bytes(iloc_box[cpos..cpos + 2].try_into().unwrap()) as usize;
         cpos += 2;
         for _ in 0..e_cnt {
+            if budget == 0 {
+                break;
+            }
+            budget -= 1;
             cpos += idx_sz;
             let ext_off = read_sized_uint(iloc_box, cpos, off_sz)?;
             cpos += off_sz;
@@ -2051,6 +2103,58 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("Truncated iloc entry"), "{err}");
+    }
+
+    /// The declared item/extent counts are attacker-controlled. With all field
+    /// widths zero an extent iteration consumes no bytes, so 8,000 items x
+    /// 65,535 extents used to drive ~524 million iterations on a 64 KiB box.
+    /// The per-byte budget keeps the walk linear in the box size.
+    #[test]
+    fn iloc_with_absurd_counts_is_scanned_within_a_byte_budget() {
+        const ITEMS: usize = 8_000;
+        let mut iloc = vec![0u8; 16 + ITEMS * 8];
+        let box_len = iloc.len() as u32;
+        iloc[0..4].copy_from_slice(&box_len.to_be_bytes());
+        iloc[4..8].copy_from_slice(b"iloc");
+        iloc[8] = 1; // version 1
+        iloc[12] = 0; // offset/length width 0
+        iloc[13] = 0; // base/index width 0
+        iloc[14..16].copy_from_slice(&u16::MAX.to_be_bytes());
+        for i in 0..ITEMS {
+            let at = 16 + i * 8;
+            iloc[at..at + 2].copy_from_slice(&(i as u16).to_be_bytes());
+            iloc[at + 6..at + 8].copy_from_slice(&u16::MAX.to_be_bytes());
+        }
+
+        let start = std::time::Instant::now();
+        let found = check_iloc_has_target(&iloc, 1, 1).unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(!found);
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "the iloc walk must be bounded by the box size, took {elapsed:?}"
+        );
+    }
+
+    /// ISO/IEC 14496-12 allows a zero field width, which encodes the value 0
+    /// in no bytes. Writing or patching a non-zero value into such a field
+    /// would silently drop it, so both helpers must refuse.
+    #[test]
+    fn zero_width_iloc_fields_accept_only_the_implicit_zero() {
+        let mut buf = Vec::new();
+        write_sized_uint(&mut buf, 0, 0).unwrap();
+        assert!(buf.is_empty());
+        assert!(write_sized_uint(&mut buf, 1, 0).is_err());
+
+        let mut buf = vec![0xAAu8; 8];
+        patch_sized_uint(&mut buf, 0, 0, 0).unwrap();
+        assert_eq!(buf, vec![0xAAu8; 8]);
+        assert!(patch_sized_uint(&mut buf, 0, 0, 1).is_err());
+
+        // Widths other than 0/4/8 stay unsupported.
+        assert!(write_sized_uint(&mut buf, 0, 2).is_err());
+        assert!(write_sized_uint(&mut buf, 0, 16).is_err());
     }
 
     /// An infe entry declaring `item_id = u32::MAX` must refuse the carrier:
