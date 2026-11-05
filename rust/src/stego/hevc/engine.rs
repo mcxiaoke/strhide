@@ -3701,6 +3701,15 @@ fn record_carrier_state(
                     .saturating_sub(global_sink.counts[0] + global_sink.counts[1])
                     .max(1),
             ),
+            // The header read (`MinSlots`) needs only the pool prefix; without a
+            // budget every GOP in the wave decodes all of its slices, even though
+            // the first slice already crosses the threshold. The budget makes the
+            // GOP stop at exactly the slice where the outer merge would truncate,
+            // so the recorded pool is unchanged.
+            StopCondition::MinSlots(min) => Some(
+                min.saturating_sub(global_sink.counts[0] + global_sink.counts[1])
+                    .max(1),
+            ),
             _ => None,
         };
 
@@ -4715,6 +4724,55 @@ mod window_tests {
             write.total_slots().min(HEVC_SUPERBLOCK_POOL_SLOTS),
             read.total_slots().min(HEVC_SUPERBLOCK_POOL_SLOTS),
             "writer and reader must derive the header permutation from the same pool"
+        );
+    }
+
+    /// The header read stops scanning at the first slice that crosses the pool
+    /// threshold. `slot_budget` lets a GOP stop decoding there instead of
+    /// decoding every slice of its wave; the resulting pool must be byte-for-byte
+    /// the same one a `TargetSlots` window records.
+    #[test]
+    fn header_read_and_target_window_record_the_same_pool() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/assets/tiny40.hevc");
+        let frame = std::fs::read(&path).expect("read tiny40.hevc");
+        let mut carrier = Vec::new();
+        for _ in 0..64 {
+            carrier.extend_from_slice(&frame);
+        }
+        let kind = sniff_hevc_carrier(&carrier).expect("annex-b carrier");
+        let read = record_carrier_state(
+            &carrier,
+            kind,
+            Capture::Bits,
+            StopCondition::MinSlots(HEVC_SUPERBLOCK_POOL_SLOTS),
+            &Control::none(),
+        )
+        .expect("header record");
+        let window = record_carrier_state(
+            &carrier,
+            kind,
+            Capture::Bits,
+            StopCondition::TargetSlots(HEVC_SUPERBLOCK_POOL_SLOTS),
+            &Control::none(),
+        )
+        .expect("window record");
+        assert_eq!(read.total_slots(), window.total_slots());
+        assert_eq!(read.slice_slot_ranges, window.slice_slot_ranges);
+        assert_eq!(read.raw_bits, window.raw_bits);
+        assert!(
+            read.total_slots() >= HEVC_SUPERBLOCK_POOL_SLOTS,
+            "fixture must cross the header pool so the stop path is exercised"
+        );
+        let last = read
+            .slice_slot_ranges
+            .last()
+            .expect("non-empty recording")
+            .0;
+        let before_last = read.total_slots() - last;
+        assert!(
+            before_last < HEVC_SUPERBLOCK_POOL_SLOTS,
+            "the read must stop at the crossing slice: {before_last} slots before the last one"
         );
     }
 }
