@@ -2,7 +2,7 @@
 //!
 //! Used by [`super::mp4::Mp4Adapter`] and [`super::heif::HeifAdapter`].
 
-use std::io::{Read, SeekFrom, Write};
+use std::io::{SeekFrom, Write};
 
 use crate::errors::StrHideError;
 use crate::structure::adapters::{SeekRead, SeekWrite, StrategyCapacity};
@@ -477,69 +477,89 @@ pub fn heif_strategy_capacities() -> Vec<StrategyCapacity> {
     ]
 }
 
-/// Upper bound for the whole-file scans in [`isobmff_can_item_hidden`] and
-/// `isobmff_has_iloc_item`. Both only need the boxes up to and including the
-/// `meta` box, which sits near the file start in every real carrier, so the
-/// cap keeps a multi-GB host from being buffered whole (review P3-6). Past the
-/// cap the scans answer "no": auto steers to `box_uuid` on the write path, and
-/// locate falls through to its EOF branch on the read path.
+/// Upper bound on the `meta` box body buffered by
+/// [`read_meta_box_bytes`]. Both `iinf`/`iloc` probes only need that one box,
+/// which sits near the file start in every real carrier, so the cap bounds a
+/// hostile container while a multi-GB `mdat` is raced over with `seek`
+/// instead of being buffered (review A P2-08). Past the cap the probes answer
+/// "no": auto steers to `box_uuid` on the write path, and locate falls through
+/// to its EOF branch on the read path.
 pub const MAX_ISOBMFF_META_SCAN: u64 = 1024 * 1024 * 1024;
+
+/// Read the top-level `meta` box only, without buffering the file prefix.
+///
+/// The probes below used to `read_to_end` up to `MAX_ISOBMFF_META_SCAN` bytes
+/// of the whole file, so a 1 GiB `mdat` in front of `meta` cost 1 GiB peak
+/// RSS for bytes the walk never looks at (review A P2-08). Walking the
+/// top-level headers with [`read_stream_box_header`] keeps the read to the
+/// header chain plus the `meta` body.
+fn read_meta_box_bytes(reader: &mut dyn SeekRead) -> Result<Option<Vec<u8>>, StrHideError> {
+    let file_size = reader.seek(SeekFrom::End(0))?;
+    let mut pos = 0u64;
+    while pos < file_size {
+        let (size, _header_len, tag) = match read_stream_box_header(reader, pos, file_size) {
+            Ok(header) => header,
+            // A malformed top-level chain means there is no reliable `meta`.
+            Err(StrHideError::CorruptedData(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if tag == *b"meta" {
+            if size > MAX_ISOBMFF_META_SCAN {
+                return Ok(None);
+            }
+            let mut data = vec![0u8; size as usize];
+            reader.seek(SeekFrom::Start(pos))?;
+            reader.read_exact(&mut data)?;
+            return Ok(Some(data));
+        }
+        pos += size;
+    }
+    Ok(None)
+}
 
 pub fn isobmff_can_item_hidden(reader: &mut dyn SeekRead) -> bool {
     let start_pos = match reader.stream_position() {
         Ok(p) => p,
         Err(_) => return false,
     };
-    if reader.seek(SeekFrom::Start(0)).is_err() {
-        return false;
-    }
-    let mut data = Vec::new();
-    if Read::take(&mut *reader, MAX_ISOBMFF_META_SCAN)
-        .read_to_end(&mut data)
-        .is_err()
-    {
-        let _ = reader.seek(SeekFrom::Start(start_pos));
-        return false;
-    }
+    let data = match read_meta_box_bytes(reader) {
+        Ok(Some(data)) => data,
+        Ok(None) => {
+            let _ = reader.seek(SeekFrom::Start(start_pos));
+            return false;
+        }
+        Err(_) => {
+            let _ = reader.seek(SeekFrom::Start(start_pos));
+            return false;
+        }
+    };
     let _ = reader.seek(SeekFrom::Start(start_pos));
 
-    let mut pos = 0usize;
-    while pos + 8 <= data.len() {
-        let (bsize, bhdr) = match read_box_size(&data, pos) {
+    // `data` starts at the `meta` box header, so its own size is the length
+    // the old top-level walk derived from `pos`.
+    let m_end = data.len();
+    // The `meta` box header is 8 bytes for the 32-bit form and 16 for a
+    // `largesize` one; hardcoding 8 put this walk 8 bytes into the first child
+    // of a large `meta` (review R2 P2-12).
+    let mut mpos = if box_header_is_64_bit(&data) { 16 } else { 8 } + 4;
+    let mut has_iinf = false;
+    let mut has_iloc = false;
+    while mpos + 8 <= m_end {
+        let (sb_size, _) = match read_box_size(&data, mpos) {
             Ok(s) => s,
-            Err(_) => return false,
+            Err(_) => break,
         };
-        if bsize == 0 || bsize > data.len() - pos {
+        if sb_size == 0 || sb_size > m_end - mpos {
             break;
         }
-        if &data[pos + 4..pos + 8] == b"meta" {
-            let m_end = pos + bsize;
-            // The `meta` box header is 8 bytes for the 32-bit form and 16 for
-            // a `largesize` one; hardcoding 8 put this walk 8 bytes into the
-            // first child of a large `meta` (review R2 P2-12).
-            let mut mpos = pos + bhdr + 4;
-            let mut has_iinf = false;
-            let mut has_iloc = false;
-            while mpos + 8 <= m_end {
-                let (sb_size, _) = match read_box_size(&data, mpos) {
-                    Ok(s) => s,
-                    Err(_) => break,
-                };
-                if sb_size == 0 || sb_size > m_end - mpos {
-                    break;
-                }
-                if &data[mpos + 4..mpos + 8] == b"iinf" {
-                    has_iinf = true;
-                } else if &data[mpos + 4..mpos + 8] == b"iloc" {
-                    has_iloc = true;
-                }
-                mpos += sb_size;
-            }
-            return has_iinf && has_iloc;
+        if &data[mpos + 4..mpos + 8] == b"iinf" {
+            has_iinf = true;
+        } else if &data[mpos + 4..mpos + 8] == b"iloc" {
+            has_iloc = true;
         }
-        pos += bsize;
+        mpos += sb_size;
     }
-    false
+    has_iinf && has_iloc
 }
 
 pub fn isobmff_strip(
@@ -1457,44 +1477,30 @@ fn isobmff_has_iloc_item(
     target_len: u64,
 ) -> Result<bool, StrHideError> {
     let cur_pos = stego_in.stream_position().unwrap_or(0);
-    stego_in.seek(SeekFrom::Start(0))?;
-    let mut data = Vec::new();
-    Read::take(&mut *stego_in, MAX_ISOBMFF_META_SCAN).read_to_end(&mut data)?;
+    let data = match read_meta_box_bytes(stego_in)? {
+        Some(data) => data,
+        None => {
+            let _ = stego_in.seek(SeekFrom::Start(cur_pos));
+            return Ok(false);
+        }
+    };
     let _ = stego_in.seek(SeekFrom::Start(cur_pos));
 
-    let mut pos = 0usize;
-    while pos + 8 <= data.len() {
-        let (bsize, bhdr) = match read_box_size(&data, pos) {
+    // Same header-length fix as `isobmff_can_item_hidden`.
+    let m_end = data.len();
+    let mut mpos = if box_header_is_64_bit(&data) { 16 } else { 8 } + 4;
+    while mpos + 8 <= m_end {
+        let (sb_size, _) = match read_box_size(&data, mpos) {
             Ok(s) => s,
-            Err(_) => return Ok(false),
+            Err(_) => break,
         };
-        if bsize == 0 || bsize > data.len() - pos {
+        if sb_size == 0 || sb_size > m_end - mpos {
             break;
         }
-        if &data[pos + 4..pos + 8] == b"meta" {
-            let m_end = pos + bsize;
-            // Same header-length fix as `isobmff_can_item_hidden`.
-            let mut mpos = pos + bhdr + 4;
-            while mpos + 8 <= m_end {
-                let (sb_size, _) = match read_box_size(&data, mpos) {
-                    Ok(s) => s,
-                    Err(_) => break,
-                };
-                if sb_size == 0 || sb_size > m_end - mpos {
-                    break;
-                }
-                if &data[mpos + 4..mpos + 8] == b"iloc" {
-                    return check_iloc_has_target(
-                        &data[mpos..mpos + sb_size],
-                        target_off,
-                        target_len,
-                    );
-                }
-                mpos += sb_size;
-            }
-            break;
+        if &data[mpos + 4..mpos + 8] == b"iloc" {
+            return check_iloc_has_target(&data[mpos..mpos + sb_size], target_off, target_len);
         }
-        pos += bsize;
+        mpos += sb_size;
     }
     Ok(false)
 }
@@ -2221,6 +2227,73 @@ mod tests {
             err.to_string()
                 .contains("does not match the stego file length"),
             "{err}"
+        );
+    }
+
+    /// Records every byte handed to `read`, so a test can assert that the
+    /// `meta` probes skip a large box body instead of buffering the file.
+    struct ByteCounter {
+        inner: Cursor<Vec<u8>>,
+        read_bytes: usize,
+    }
+
+    impl std::io::Read for ByteCounter {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.inner.read(buf)?;
+            self.read_bytes += read;
+            Ok(read)
+        }
+    }
+
+    impl std::io::Seek for ByteCounter {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    fn box_bytes(tag: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + body.len());
+        out.extend_from_slice(&((8 + body.len()) as u32).to_be_bytes());
+        out.extend_from_slice(tag);
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// A `meta` box behind an 8 MiB `mdat` must be reached by seeking over the
+    /// box body, not by reading the prefix into memory (review A P2-08).
+    #[test]
+    fn meta_probes_seek_over_the_mdat_body() {
+        let meta = {
+            let mut body = vec![0u8; 4]; // version + flags
+            body.extend_from_slice(&box_bytes(b"iinf", &[0u8; 8]));
+            body.extend_from_slice(&box_bytes(b"iloc", &[0u8; 8]));
+            box_bytes(b"meta", &body)
+        };
+        let mut file = box_bytes(b"ftyp", &[0u8; 16]);
+        file.extend_from_slice(&box_bytes(b"mdat", &vec![0u8; 8 * 1024 * 1024]));
+        file.extend_from_slice(&meta);
+        let meta_len = meta.len();
+
+        let mut counter = ByteCounter {
+            inner: Cursor::new(file.clone()),
+            read_bytes: 0,
+        };
+        assert!(isobmff_can_item_hidden(&mut counter));
+        assert!(
+            counter.read_bytes < meta_len + 64,
+            "read {} bytes; a whole-prefix scan would read the 8 MiB mdat",
+            counter.read_bytes
+        );
+
+        let mut counter = ByteCounter {
+            inner: Cursor::new(file),
+            read_bytes: 0,
+        };
+        assert!(!isobmff_has_iloc_item(&mut counter, 0, 0).unwrap());
+        assert!(
+            counter.read_bytes < meta_len + 64,
+            "iloc probe read {} bytes",
+            counter.read_bytes
         );
     }
 }
