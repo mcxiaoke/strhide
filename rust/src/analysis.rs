@@ -44,7 +44,9 @@ pub mod calibration;
 
 use crate::errors::StrHideError;
 use crate::structure::adapters::{pe_layout, pe_slack};
-use crate::structure::envelope::STANDARD_HEADER_MAGIC;
+use crate::structure::envelope::{
+    EnvelopeTrailer, STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC, TRAILER_SIZE,
+};
 
 /// Hard cap on file size we fully load for scanning. Larger files still get
 /// magic-byte and structural scanning on a prefix+tail window, but pixel
@@ -190,6 +192,20 @@ impl<'a> ScanView<'a> {
             tail: Some((tail_offset, tail)),
             file_size,
         }
+    }
+
+    /// Read `len` bytes starting at file offset `start`, if they are fully
+    /// contained in either scanned window.
+    fn slice(&self, start: u64, len: usize) -> Option<&'a [u8]> {
+        let end = start.checked_add(len as u64)?;
+        if end <= self.prefix.len() as u64 {
+            return Some(&self.prefix[start as usize..end as usize]);
+        }
+        let (tail_offset, tail) = self.tail?;
+        if start >= tail_offset && end <= tail_offset + tail.len() as u64 {
+            return Some(&tail[(start - tail_offset) as usize..(end - tail_offset) as usize]);
+        }
+        None
     }
 
     fn is_whole(&self) -> bool {
@@ -567,28 +583,37 @@ fn find_all(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
 struct KnownSignature {
     tool: &'static str,
     pattern: &'static [u8],
+    /// Four-byte patterns are far too common in compressed or random data
+    /// (1.56% per 64 MiB window), so they only count when the surrounding
+    /// trailer is self-consistent (review B-03).
+    needs_trailer_context: bool,
 }
 
 const KNOWN_TOOL_SIGNATURES: &[KnownSignature] = &[
     KnownSignature {
         tool: "strhide (standard v2)",
         pattern: &[0xb7, 0x54, 0x2c, 0x82, 0x7e, 0x31, 0x1d, 0x6e],
+        needs_trailer_context: false,
     },
     KnownSignature {
         tool: "strhide (legacy v0)",
         pattern: b"\x89STRHIDE",
+        needs_trailer_context: false,
     },
     KnownSignature {
         tool: "strhide (trailer mark)",
         pattern: &[0x78, 0xe6, 0x66, 0xd2],
+        needs_trailer_context: true,
     },
     KnownSignature {
         tool: "OpenStego",
         pattern: b"OPENSTEGO",
+        needs_trailer_context: false,
     },
     KnownSignature {
         tool: "Camouflage",
         pattern: b"\x1a\x00\x00\x00CAMOUFLAGE",
+        needs_trailer_context: false,
     },
 ];
 
@@ -596,11 +621,15 @@ fn track_tool_signatures(view: &ScanView, out: &mut Vec<Finding>) {
     for sig in KNOWN_TOOL_SIGNATURES {
         // An appended envelope lives in the tail of an oversized carrier, so
         // both windows have to be searched.
-        let in_prefix = !find_all(view.prefix, sig.pattern).is_empty();
-        let in_tail = view
-            .tail
-            .is_some_and(|(_, t)| !find_all(t, sig.pattern).is_empty());
-        if in_prefix || in_tail {
+        let prefix_hit = find_all(view.prefix, sig.pattern)
+            .into_iter()
+            .any(|pos| !sig.needs_trailer_context || trailer_context_ok(view, pos as u64));
+        let tail_hit = view.tail.is_some_and(|(offset, bytes)| {
+            find_all(bytes, sig.pattern).into_iter().any(|pos| {
+                !sig.needs_trailer_context || trailer_context_ok(view, offset + pos as u64)
+            })
+        });
+        if prefix_hit || tail_hit {
             out.push(Finding {
                 detector: "signature:known-tool".into(),
                 severity: Severity::Likely,
@@ -608,6 +637,26 @@ fn track_tool_signatures(view: &ScanView, out: &mut Vec<Finding>) {
             });
         }
     }
+}
+
+/// Is the 4-byte trailer magic at `magic_pos` backed by a self-consistent
+/// 24-byte trailer? Used to demote accidental 4-byte matches in random data
+/// (review B-03): the offset/size must stay within the file and the CRC must
+/// verify, which a coincidental pattern cannot satisfy.
+fn trailer_context_ok(view: &ScanView<'_>, magic_pos: u64) -> bool {
+    let Some(start) = magic_pos.checked_sub((TRAILER_SIZE - 4) as u64) else {
+        return false;
+    };
+    let Some(bytes) = view.slice(start, TRAILER_SIZE) else {
+        return false;
+    };
+    let Ok(trailer) = EnvelopeTrailer::unpack(bytes, Some(&STANDARD_TRAILER_MAGIC)) else {
+        return false;
+    };
+    trailer
+        .ube_offset
+        .checked_add(trailer.ube_total_size)
+        .is_some_and(|end| end <= view.file_size)
 }
 
 // ---------------------------------------------------------------------------
@@ -2122,6 +2171,35 @@ fn aggregate_risk(findings: &[Finding]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Four coincidental magic bytes used to be enough for a `Likely` finding;
+    /// at 1.56% per 64 MiB window that is a false positive on ordinary data.
+    #[test]
+    fn four_byte_trailer_mark_needs_a_consistent_trailer() {
+        let mut junk = vec![0u8; 4096];
+        junk[100..104].copy_from_slice(&[0x78, 0xe6, 0x66, 0xd2]);
+        let report = scan_bytes(&junk, "junk");
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.detail.contains("trailer mark")),
+            "a lone 4-byte magic must not be reported as a known tool"
+        );
+
+        // A coherent trailer (valid CRC, in-range offset/size) still counts.
+        let mut carrier = vec![0x41u8; 4096];
+        let trailer = EnvelopeTrailer::create(3000, 200, STANDARD_TRAILER_MAGIC).pack();
+        carrier.extend_from_slice(&trailer);
+        let report = scan_bytes(&carrier, "carrier");
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.detail.contains("trailer mark")),
+            "a self-consistent trailer must still be reported"
+        );
+    }
 
     #[test]
     fn rs_difference_includes_the_trailing_window() {

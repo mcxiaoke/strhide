@@ -41,7 +41,7 @@ use crate::core::media::MediaInfo;
 use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::stego::StegoCapacityInfo;
-use crate::stego::coding::{Move, StcTrellis};
+use crate::stego::coding::{MAX_STC_H, Move, StcTrellis};
 use crate::stego::envelope::{
     BODY_OVERHEAD, Freshness, build_plaintext, build_plaintext_bytes, build_v4_aad,
     encrypt_v4_with_aad, unpack_v4_envelope_parts,
@@ -51,7 +51,7 @@ use crate::stego::format::{
 };
 use crate::stego::header::{
     CONTENT_ENVELOPE_VERSION, FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT, HEADER_LEN_MAX, MAX_EXT_BYTES,
-    TLV_CRITICAL, Tlv, encode_extension_for_write, parse_extension,
+    TLV_CRITICAL, Tlv, encode_extension_for_write, parse_extension, validate_ext_critical_flag,
 };
 use crate::stego::jpeg::dht::{self, AcSymbolSet};
 use crate::stego::jpeg::header_v4::{CODEC_TERNARY_STC, JpegSuperblockV4, SUPERBLOCK_BYTES};
@@ -1315,9 +1315,16 @@ fn extract_jpeg_from(
     let Some(body_n) = window.checked_mul(superblock.stc_u as usize) else {
         return Err(no_hidden());
     };
-    if body_n > body_grid_len {
+    if body_n > body_grid_len || superblock.stc_h > MAX_STC_H {
         return Err(no_hidden());
     }
+    // Charge extraction the same backtracking bitmap the writer charged: a
+    // crafted header could otherwise declare a body whose solve allocates
+    // hundreds of MB before any limit is consulted (review B-02).
+    let total_blocks: usize = coeffs.components.iter().map(|c| c.blocks.len()).sum();
+    let base_bytes =
+        PIPELINE_FIXED_BYTES.saturating_add(total_blocks as u64 * PIPELINE_BYTES_PER_BLOCK);
+    check_pipeline_budget(base_bytes, body_n, superblock.stc_h)?;
     let session = derive_l3_session_keys(fmt.cipher, suite, &master, &superblock.salt, domain)
         .map_err(|_| no_hidden())?;
     permute_prefix(&mut slots_buf, body_n, &session.perm_seed);
@@ -1348,7 +1355,12 @@ fn extract_jpeg_from(
 
     // The AEAD passed, so the carrier really is ours. Unknown critical
     // extensions mean a newer writer, which extract must not pretend to serve.
-    if !extension_ok || has_critical_ext {
+    // The flag must also agree with the TLVs, including the "flag set but no
+    // extension area" case (review B-05).
+    if !extension_ok
+        || has_critical_ext
+        || validate_ext_critical_flag(superblock.flags, &extension_area).is_err()
+    {
         return Err(no_hidden());
     }
     Ok(payload)
@@ -1582,6 +1594,16 @@ fn inspect_jpeg_from(
     } else {
         Vec::new()
     };
+    // `inspect` must apply the same flag/TLV contract as extract, including the
+    // empty-extension case, so a mismatched header is never reported as a
+    // readable carrier (review B-05).
+    if validate_ext_critical_flag(superblock.flags, &extension_area).is_err() {
+        empty_info.note = Some("Critical-extension flag does not match the TLVs".into());
+        return Ok(JpegInspection {
+            info: empty_info,
+            master: None,
+        });
+    }
     if ext_bytes > 0 {
         match parse_extension(&extension_area) {
             Ok(records) => {

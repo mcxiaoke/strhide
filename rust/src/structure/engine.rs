@@ -2508,6 +2508,38 @@ pub fn inspect_carrier_bytes(
     inspect_core(&mut host, "<memory>", password, profile)
 }
 
+/// Build the "no readable envelope" inspect result.
+///
+/// Shared by the genuinely-empty carrier and the carrier whose envelope cannot
+/// be opened with the caller's profile: both are indistinguishable from the
+/// outside, which is the point of a private dialect.
+fn empty_inspect_result(
+    host: &mut dyn SeekRead,
+    adapter: &dyn HostAdapter,
+    label: &str,
+    strategies: Vec<StrategyCapacity>,
+) -> Result<InspectResult, StrHideError> {
+    let _ = host.seek(SeekFrom::Start(0));
+    let suspicious_hints = adapter.suspicious_structures(host);
+    Ok(InspectResult {
+        carrier: PathBuf::from(label),
+        format: adapter_format(adapter)?,
+        has_hidden_data: false,
+        strategy: None,
+        ube_offset: None,
+        ube_total_size: None,
+        is_encrypted: None,
+        is_compressed: None,
+        is_stealth: None,
+        password_hint: None,
+        orig_host_size: None,
+        orig_host_sha256: None,
+        metadata: None,
+        suspicious_hints,
+        strategies,
+    })
+}
+
 /// Shared inspect logic over any seekable reader (a `File` on the path path, a
 /// `Cursor` on the bytes path).
 fn inspect_core(
@@ -2536,27 +2568,7 @@ fn inspect_core(
 
     let (ube_offset, ube_total_size, strategy_name) = match loc {
         Some(l) => l,
-        None => {
-            let _ = host.seek(std::io::SeekFrom::Start(0));
-            let suspicious_hints = adapter.suspicious_structures(host);
-            return Ok(InspectResult {
-                carrier: PathBuf::from(label),
-                format: adapter_format(adapter)?,
-                has_hidden_data: false,
-                strategy: None,
-                ube_offset: None,
-                ube_total_size: None,
-                is_encrypted: None,
-                is_compressed: None,
-                is_stealth: None,
-                password_hint: None,
-                orig_host_size: None,
-                orig_host_sha256: None,
-                metadata: None,
-                suspicious_hints,
-                strategies,
-            });
-        }
+        None => return empty_inspect_result(host, adapter, label, strategies),
     };
 
     let mut ube_stream =
@@ -2564,7 +2576,18 @@ fn inspect_core(
 
     let mut header_bytes = [0u8; HEADER_SIZE];
     ube_stream.read_exact(&mut header_bytes)?;
-    let header = EnvelopeHeader::unpack_with_profile(&header_bytes, password, profile)?;
+    // An envelope we can see but cannot open with this profile is a private
+    // dialect, and a private dialect is supposed to be invisible to readers
+    // that do not know it. Surfacing `CorruptedData` told an outsider that
+    // something is hidden and crashed `inspect_any`/`smart_extract` instead of
+    // letting the content domain answer (review B-06).
+    let header = match EnvelopeHeader::unpack_with_profile(&header_bytes, password, profile) {
+        Ok(h) => h,
+        Err(_) => {
+            drop(ube_stream);
+            return empty_inspect_result(host, adapter, label, strategies);
+        }
+    };
     header.validate_against(ube_total_size, host_len)?;
 
     let mut hint_bytes: Vec<u8> = Vec::new();
@@ -2727,8 +2750,13 @@ fn envelope_coordinates_agree(
     // `inject_size == 0`: the size field is inside the header but outside the
     // AEAD's AAD, so accepting a zero there let anyone flip it in a contiguous
     // strategy (`eof`, `chunk`, `box_uuid`) and skip Level 2 entirely.
+    // Both the caller's strategy name and the header's id must name
+    // `pe_codebits`: trusting only the header-derived id let a header claim the
+    // exemption while the caller was verifying a contiguous strategy, skipping
+    // the coordinate check entirely (review C-01).
     if cfg!(feature = "structure-pe")
-        && crate::structure::registry::id_to_strategy(header.strategy_id) == "pe_codebits"
+        && strategy == "pe_codebits"
+        && crate::structure::registry::id_to_strategy(header.strategy_id) == strategy
     {
         return Ok(());
     }

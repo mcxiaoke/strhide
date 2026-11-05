@@ -21,7 +21,7 @@ use crate::stego::format::{
 };
 use crate::stego::header::{
     CONTENT_ENVELOPE_VERSION, FLAG_EXT_CRITICAL, FLAG_EXT_PRESENT, TLV_CRITICAL, Tlv,
-    encode_extension_for_write, parse_extension,
+    encode_extension_for_write, parse_extension, validate_ext_critical_flag,
 };
 use crate::stego::hevc::bitstream::{compute_hevc_cover_digest, parse_annex_b_spans, rbsp_to_nal};
 use crate::stego::hevc::heif_boxes::parse_heif_targets;
@@ -2144,6 +2144,12 @@ fn read_hevc_header_v4(
             .map_err(|_| StrHideError::NoHiddenData("No valid payload found".into()))?;
         extension_tags = tlvs.iter().map(|(tag, _)| *tag).collect();
     }
+    // The flag and the TLVs must agree before any caller trusts the header:
+    // `inspect`/`verify` never reach the post-decrypt check below, so a header
+    // that merely sets the bit used to look like a critical carrier (review
+    // B-05).
+    validate_ext_critical_flag(sb.flags, &extension)
+        .map_err(|_| StrHideError::NoHiddenData("No valid payload found".into()))?;
 
     let suite = CipherSuiteId::from_u16(sb.suite_id)
         .ok_or_else(|| StrHideError::NoHiddenData("No valid payload found".into()))?;
@@ -2367,10 +2373,11 @@ fn hevc_header_info(
     header: &HevcHeaderRead,
     media_info: Option<MediaInfo>,
 ) -> Option<StegoHeaderInfo> {
-    let suite = CipherSuiteId::from_u16(header.sb.suite_id)?;
-    let payload_len = (header.sb.body_len as usize)
-        .saturating_sub(suite.tag_len())
-        .saturating_sub(5);
+    let _suite = CipherSuiteId::from_u16(header.sb.suite_id)?;
+    // The plaintext length lives inside the AEAD body: what remains after the
+    // tag and the compact header includes the optional filename micro-header
+    // and any compression, so it is not the payload length. Report `None`
+    // until the body is decrypted, like the PNG/JPEG engines (review B-04).
     Some(StegoHeaderInfo {
         format: kind.label().to_string(),
         has_hidden_data: true,
@@ -2379,7 +2386,7 @@ fn hevc_header_info(
         envelope_len: Some(
             HEVC_SUPERBLOCK_BYTES + header.extension.len() + header.sb.body_len as usize,
         ),
-        payload_len: Some(payload_len),
+        payload_len: None,
         media_info,
         note: None,
     })

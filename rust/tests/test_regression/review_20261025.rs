@@ -15,7 +15,7 @@ use strhide::structure::adapters::{
 use strhide::structure::envelope::{EnvelopeTrailer, STANDARD_TRAILER_MAGIC};
 use strhide::structure::{
     PayloadSource, ReadOptions, RestoreOptions, WriteOptions, read_carrier, remove_carrier,
-    write_carrier,
+    verify_carrier, write_carrier,
 };
 
 fn write_carrier_file(
@@ -935,28 +935,61 @@ fn heif_iloc_offset_overflow_rejected() {
     assert!(err.to_string().contains("overflow"), "{err}");
 }
 
-/// Two concatenated PNGs: the write side picks the LAST IEND while locate
-/// walks chunks up to the FIRST one, so the write used to report success for
-/// an envelope nothing could ever read back (P3-18, root cause still open).
-/// The §5.2 post-write locate self-check must turn that into a clean write
-/// failure instead of orphaned data.
+/// Two concatenated PNGs. The write side inserts before the LAST IEND while
+/// locate/verify/suspicious used to stop at the FIRST one, so the payload was
+/// written into a place nothing scanned (P3-18). A single traversal now walks
+/// every stream and the whole lifecycle must round-trip.
 #[test]
-fn png_concatenated_iend_write_fails_self_check() {
+fn png_concatenated_streams_roundtrip_through_the_last_iend() {
     let mut concatenated = make_png();
     concatenated.extend_from_slice(&make_png());
     let dir = scratch("rv25_png_concat");
     let carrier = dir.join("c.png");
+    let out = dir.join("o.png");
     fs::write(&carrier, &concatenated).unwrap();
-    let err = write_carrier(
+
+    let res = write_carrier(
         &carrier,
         PayloadSource::Text("png secret"),
         &WriteOptions {
-            output_path: Some(&dir.join("o.png")),
+            output_path: Some(&out),
             strategy: "chunk",
             backup: false,
             ..Default::default()
         },
     )
-    .unwrap_err();
-    assert!(err.to_string().contains("self-check"), "{err}");
+    .expect("concatenated PNG must accept a chunk envelope");
+    assert_eq!(res.strategy.name(), "chunk");
+
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+            ..Default::default()
+        },
+    )
+    .expect("locate must reach the chunk before the last IEND");
+    assert_eq!(read.data, b"png secret");
+
+    let verified = verify_carrier(&out, None).expect("verify");
+    assert!(
+        verified.level1_host.ok && verified.level2_envelope.ok && verified.level3_crypto.ok,
+        "structure verification failed: {:?}",
+        verified
+    );
+
+    remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: None,
+            password: None,
+            backup: false,
+            overwrite: false,
+            ..Default::default()
+        },
+    )
+    .expect("restore");
+    assert_eq!(fs::read(&out).unwrap(), concatenated);
 }

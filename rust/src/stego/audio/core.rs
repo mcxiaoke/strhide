@@ -1067,7 +1067,11 @@ pub(crate) fn inspect_with_header<C: SlotCarrier + ?Sized>(
     info.algorithm = Some("audio-stc".into());
     info.codec = Some(format!("stc-h{}-u{}", header.stc_h, header.stc_u));
     info.envelope_len = Some(header.body_len as usize);
-    info.payload_len = Some((header.body_len as usize).saturating_sub(BODY_OVERHEAD));
+    // The body length includes the AEAD tag, the optional filename micro-header
+    // and any compression, so subtracting only BODY_OVERHEAD reported a number
+    // that was never the plaintext size. It is unknowable before decryption
+    // (review B-04).
+    info.payload_len = None;
     info
 }
 

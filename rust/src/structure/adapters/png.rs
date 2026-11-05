@@ -301,11 +301,18 @@ impl HostAdapter for PngAdapter {
                 }
             }
 
+            stego_in.seek(SeekFrom::Start(next_pos))?;
             if chunk_type == *b"IEND" {
+                // Concatenated PNG streams are legal input. The next stream's
+                // 8-byte magic sits exactly where a chunk header would; skip it
+                // and keep scanning instead of stopping at the first IEND, which
+                // hid envelopes written before the *last* one (review B-01).
+                let mut next_magic = [0u8; 8];
+                if stego_in.read_exact(&mut next_magic).is_ok() && next_magic == PNG_MAGIC {
+                    continue;
+                }
                 break;
             }
-
-            stego_in.seek(SeekFrom::Start(next_pos))?;
         }
 
         // Fallback to EOF
@@ -387,6 +394,13 @@ impl HostAdapter for PngAdapter {
             }
 
             if chunk_type == *b"IEND" {
+                // Keep verifying a concatenated stream too: hiding before the
+                // last IEND is legal, so the first IEND is not the end of the
+                // chunk stream (review B-01).
+                let mut next_magic = [0u8; 8];
+                if stego_in.read_exact(&mut next_magic).is_ok() && next_magic == PNG_MAGIC {
+                    continue;
+                }
                 break;
             }
         }
@@ -427,13 +441,18 @@ impl HostAdapter for PngAdapter {
                     data_offset - 8
                 ));
             }
-            if chunk_type == *b"IEND" {
-                break;
-            }
             if stego_in
                 .seek(SeekFrom::Start(data_offset + length + 4))
                 .is_err()
             {
+                break;
+            }
+            if chunk_type == *b"IEND" {
+                // Continue through a concatenated PNG stream (review B-01).
+                let mut next_magic = [0u8; 8];
+                if stego_in.read_exact(&mut next_magic).is_ok() && next_magic == PNG_MAGIC {
+                    continue;
+                }
                 break;
             }
         }

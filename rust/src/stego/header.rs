@@ -464,19 +464,37 @@ impl SpatialHeaderV4 {
 
     /// Cross-check `FLAG_EXT_CRITICAL` against the parsed TLV list.
     pub fn validate_ext_critical(&self, extension: &[u8]) -> Result<(), StrHideError> {
-        let mut any_critical = false;
-        for (type_id, _) in parse_extension(extension)? {
-            if type_id & TLV_CRITICAL != 0 {
-                any_critical = true;
-            }
-        }
-        if any_critical != self.ext_critical() {
-            return Err(StrHideError::CorruptedData(
-                "EXT_CRITICAL does not match the extension TLVs".into(),
-            ));
-        }
-        Ok(())
+        validate_ext_critical_flag(self.flags, extension)
     }
+}
+
+/// Cross-check a header's `FLAG_EXT_CRITICAL` bit against its extension TLVs.
+///
+/// Shared by every v4 dialect (spatial PNG/audio, HEVC, JPEG) so a header that
+/// declares a critical contract without carrying one — or carries one without
+/// declaring it — is rejected identically on extract, inspect and verify
+/// (review B-05). An empty extension area with the bit set is invalid on its
+/// own: `FLAG_EXT_PRESENT` must be clear in that case.
+pub fn validate_ext_critical_flag(flags: u8, extension: &[u8]) -> Result<(), StrHideError> {
+    let declared = flags & FLAG_EXT_CRITICAL != 0;
+    if extension.is_empty() {
+        return if declared {
+            Err(StrHideError::CorruptedData(
+                "EXT_CRITICAL is set but there is no extension area".into(),
+            ))
+        } else {
+            Ok(())
+        };
+    }
+    let any_critical = parse_extension(extension)?
+        .iter()
+        .any(|(type_id, _)| type_id & TLV_CRITICAL != 0);
+    if any_critical != declared {
+        return Err(StrHideError::CorruptedData(
+            "EXT_CRITICAL does not match the extension TLVs".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -129,8 +129,24 @@ fn private_default_secret_is_unreadable_with_the_official_profile() {
     // mask and both keys derive from the other secret, so nothing decodes.
     assert_unreadable(&stego, None, &StructureProfile::default());
 
+    // Inspect must report "nothing here" for a dialect it cannot open, not an
+    // error: a private dialect is meant to be invisible (review B-06), and
+    // `inspect_any`/`smart_extract` must be able to fall through to the content
+    // domain instead of aborting.
+    let inspected = inspect_carrier_with(&stego, None, &StructureProfile::default())
+        .expect("inspect must not fail on a foreign private dialect");
+    assert!(
+        !inspected.has_hidden_data,
+        "a foreign private dialect must not be reported as hidden data"
+    );
+    assert!(inspected.strategy.is_none());
+    assert!(inspected.ube_offset.is_none());
+
     // A different private dialect is equally locked out.
     assert_unreadable(&stego, None, &profile_with_secret("another-dialect"));
+    let inspected = inspect_carrier_with(&stego, None, &profile_with_secret("another-dialect"))
+        .expect("inspect must not fail on a foreign private dialect");
+    assert!(!inspected.has_hidden_data);
 
     // The carrier still restores bit-for-bit through the dialect.
     let restored = dir.join("restored.png");
