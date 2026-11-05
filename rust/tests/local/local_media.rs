@@ -622,7 +622,10 @@ pub mod hevc_stego {
 
     use rusty_h265::Decoder;
     use strhide::stego::hevc::heif_boxes::parse_heif_targets;
-    use strhide::stego::hevc::{embed_hevc, extract_hevc, probe_hevc_capacity};
+    use strhide::stego::hevc::{
+        embed_hevc, embed_hevc_with_info, extract_hevc, probe_hevc_capacity,
+        probe_hevc_capacity_info,
+    };
 
     /// Verify that an HEIC file can be decoded to a valid frame by rusty_h265.
     fn verify_frame_decodes(carrier_bytes: &[u8]) {
@@ -703,6 +706,44 @@ pub mod hevc_stego {
 
             verify_frame_decodes(&stego);
             println!("  100% roundtrip & frame decode OK for {}", path);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires local testhevc corpus"]
+    pub fn local_hevc_embed_capacity_matches_probe() {
+        for path in [
+            "../temp/testhevc/HDRSample.mkv",
+            "../temp/testhevc/IMG_5887.HEIC",
+        ] {
+            if !Path::new(path).exists() {
+                println!("Skipping missing: {path}");
+                continue;
+            }
+            let orig = fs::read(path).expect("read carrier");
+            let fmt = &strhide::stego::format::DEFAULT_HEVC_FORMAT;
+            let safety = strhide::stego::SafetyPolicy::default();
+            let control = strhide::core::control::Control::none();
+            let probed = probe_hevc_capacity_info(&orig, &[], fmt, safety.level, true, &control)
+                .expect("probe capacity");
+            let payload = b"F-24 exact capacity parity";
+            let (_stego, info, _stats) = embed_hevc_with_info(
+                &orig,
+                &strhide::core::payload::Payload::bytes(payload),
+                Some("F24Parity#2026"),
+                None,
+                fmt,
+                strhide::stego::Freshness::Random,
+                safety,
+                &control,
+            )
+            .expect("embed");
+            // The dual-mode window pass must report the same whole-carrier slots
+            // as the exact probe; otherwise the capacity contract changed.
+            println!("{path}: capacity parity checked");
+            assert_eq!(info.available_slots, probed.available_slots);
+            assert_eq!(info.max_raw_payload_bytes, probed.max_raw_payload_bytes);
+            assert_eq!(info.recommended_max_bytes, probed.recommended_max_bytes);
         }
     }
 

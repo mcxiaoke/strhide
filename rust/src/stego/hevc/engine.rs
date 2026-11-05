@@ -1232,13 +1232,27 @@ pub fn embed_hevc_patches_with_factor_v4(
     let target_slots = hevc_window_target_slots(hdr_slots, desired_body_slots);
 
     control.stage(Stage::Decode);
-    let record = record_carrier_state(
-        carrier,
-        kind,
-        Capture::Full,
-        StopCondition::TargetSlots(target_slots),
-        control,
-    )?;
+    // MP4 keeps the sampled probe as the capacity contract; every other
+    // container reports exact slots, so the window pass can count the rest of
+    // the carrier itself and skip the second full decode.
+    let exact_capacity = kind != HevcCarrierKind::Mp4Container;
+    let record = if exact_capacity {
+        record_carrier_state_with_capacity(
+            carrier,
+            kind,
+            Capture::Full,
+            StopCondition::TargetSlots(target_slots),
+            control,
+        )?
+    } else {
+        record_carrier_state(
+            carrier,
+            kind,
+            Capture::Full,
+            StopCondition::TargetSlots(target_slots),
+            control,
+        )?
+    };
     control.check()?;
     control.stage(Stage::Solve);
     let pool = PoolProfile::from_record(&record);
@@ -1250,14 +1264,16 @@ pub fn embed_hevc_patches_with_factor_v4(
     //
     // A record whose slot count stayed below `target_slots` cannot have hit the
     // early stop, so it already covers the whole carrier and needs no second
-    // decode pass.
+    // decode pass. The same is true when the recording pass kept counting after
+    // the stop (`capacity_band_counts` is whole-carrier by construction).
     let capacity_pool;
-    let capacity_source = if record.total_slots() < target_slots {
-        &pool
-    } else {
-        capacity_pool = probe_hevc_pool(carrier, kind, false, control)?;
-        &capacity_pool
-    };
+    let capacity_source =
+        if record.capacity_band_counts.is_some() || record.total_slots() < target_slots {
+            &pool
+        } else {
+            capacity_pool = probe_hevc_pool(carrier, kind, false, control)?;
+            &capacity_pool
+        };
     let capacity_info =
         build_hevc_capacity_info(carrier, kind, fmt, capacity_source, ext_len, safety.level)?;
 
@@ -2300,6 +2316,7 @@ fn extract_hevc_record(
             recorded_slices: record.recorded_slices,
             raw_bits: record.raw_bits.clone(),
             slice_slot_ranges: record.slice_slot_ranges.clone(),
+            capacity_band_counts: record.capacity_band_counts,
         },
         secret,
         domain,
@@ -2722,6 +2739,7 @@ pub fn inspect_hevc_mp4_file_v4(
         recorded_slices,
         raw_bits: raw_bits.bytes,
         slice_slot_ranges,
+        capacity_band_counts: None,
     };
 
     inspect_hevc_record(
@@ -2977,6 +2995,10 @@ struct CarrierRecord {
     raw_bits: Vec<u8>,
     /// (slot_count, band) for each recorded slice.
     slice_slot_ranges: Vec<(usize, u8)>,
+    /// Whole-carrier slot counts per band when the recording pass continued
+    /// counting after the write window stopped (`record_carrier_state_with_capacity`).
+    /// `None` means `bands` only covers the write window.
+    capacity_band_counts: Option<[usize; 2]>,
 }
 
 impl CarrierRecord {
@@ -3122,6 +3144,15 @@ pub(crate) struct PoolProfile {
 
 impl PoolProfile {
     fn from_record(record: &CarrierRecord) -> Self {
+        if let Some(band_slots) = record.capacity_band_counts {
+            return PoolProfile {
+                total_slots: band_slots[0] + band_slots[1],
+                band_slots,
+                band_pictures: record.band_pictures,
+                pictures: record.pictures,
+                is_estimated: false,
+            };
+        }
         let mut band_slots = [0usize; 2];
         // `bands` is [band 0, band 1] in that order. Index by position, not by
         // `range.start`: an empty band 0 makes both ranges start at 0, and
@@ -3630,6 +3661,32 @@ fn record_carrier_state(
     stop: StopCondition,
     control: &Control<'_>,
 ) -> Result<CarrierRecord, StrHideError> {
+    record_carrier_state_inner(carrier, kind, capture, stop, control, false)
+}
+
+/// Like [`record_carrier_state`], but when a `TargetSlots` window stops early
+/// the remaining GOPs are decoded once more in slot-only mode and counted, so
+/// the whole-carrier capacity needs no second pass. The capacity is exact:
+/// slot counts do not depend on the capture level.
+fn record_carrier_state_with_capacity(
+    carrier: &[u8],
+    kind: HevcCarrierKind,
+    capture: Capture,
+    stop: StopCondition,
+    control: &Control<'_>,
+) -> Result<CarrierRecord, StrHideError> {
+    record_carrier_state_inner(carrier, kind, capture, stop, control, true)
+}
+
+fn record_carrier_state_inner(
+    carrier: &[u8],
+    kind: HevcCarrierKind,
+    capture: Capture,
+    stop: StopCondition,
+    control: &Control<'_>,
+    count_after_stop: bool,
+) -> Result<CarrierRecord, StrHideError> {
+    let count_remaining = count_after_stop && matches!(stop, StopCondition::TargetSlots(_));
     let mode = if capture == Capture::Full {
         RecordMode::Embed
     } else {
@@ -3659,6 +3716,11 @@ fn record_carrier_state(
     let mut global_slice_contexts = Vec::new();
     let mut global_recorded_slices = 0usize;
     let mut decode_error: Option<String> = None;
+    // Whole-carrier counts, filled from every GOP the window pass completes and
+    // then from the slot-only continuation after the window stops.
+    let mut capacity_counts = count_remaining.then_some([0usize; 2]);
+    let mut counting_remaining = false;
+    let mut reported_gops = 0usize;
 
     let mut gop_idx = 0;
     // A payload that fits in one GOP must not pay for sixteen: start at one and
@@ -3667,6 +3729,53 @@ fn record_carrier_state(
     let mut batch_cap = 1usize;
     while gop_idx < gop_ranges.len() {
         control.check()?;
+        if counting_remaining {
+            // The write window is complete; decode the rest slot-only. The
+            // first GOP here is the one the window truncated (or completed on
+            // its last slice), so decoding it again keeps the count exact.
+            let end_idx = (gop_idx + 32).min(gop_ranges.len());
+            let batch_ranges = &gop_ranges[gop_idx..end_idx];
+            let batch_results: Vec<Result<GopSliceRecord, String>> = batch_ranges
+                .par_iter()
+                .map(|range| {
+                    let gop_start_byte = candidates
+                        .get(range.start)
+                        .map_or(0, |cand| cand.span.start);
+                    let active_sets = active_parameter_sets(
+                        &parameter_sets,
+                        ps_end_offsets.as_deref(),
+                        gop_start_byte,
+                    );
+                    decode_gop_slice_range(
+                        carrier,
+                        &candidates[range.clone()],
+                        &active_sets,
+                        has_inter,
+                        RecordMode::Slots,
+                        Capture::Count,
+                        None,
+                    )
+                })
+                .collect();
+            for gop_res in batch_results {
+                if let Ok(gop) = gop_res
+                    && let Some(counts) = capacity_counts.as_mut()
+                {
+                    counts[0] += gop.sink.counts[0];
+                    counts[1] += gop.sink.counts[1];
+                }
+            }
+            if end_idx > reported_gops {
+                reported_gops = end_idx;
+                control.report(Event::progress(
+                    Stage::Decode,
+                    gop_ranges[..end_idx].iter().map(|r| r.len()).sum::<usize>() as u64,
+                    Some(total_slices as u64),
+                ));
+            }
+            gop_idx = end_idx;
+            continue;
+        }
         let batch_size = match stop {
             StopCondition::All => 32,
             StopCondition::MinSlots(min) => {
@@ -3737,7 +3846,8 @@ fn record_carrier_state(
             .collect();
 
         let mut finished = false;
-        for gop_res in batch_results {
+        let mut resume_counting_at = None;
+        for (batch_i, gop_res) in batch_results.into_iter().enumerate() {
             let mut gop = match gop_res {
                 Ok(g) => g,
                 Err(e) => {
@@ -3748,6 +3858,7 @@ fn record_carrier_state(
             if let Some(err) = gop.decode_error.take() {
                 decode_error.get_or_insert(err);
             }
+            let gop_counts = gop.sink.counts;
 
             let mut current_slots = global_sink.counts[0] + global_sink.counts[1];
             let mut current_slices = global_recorded_slices;
@@ -3774,6 +3885,16 @@ fn record_carrier_state(
                 gop.truncate_to_slices(slices_to_take);
             }
 
+            // A GOP that does not stop the window was decoded completely (the
+            // slot budget only truncates the GOP that crosses the target), so
+            // its counts belong to the whole-carrier capacity. The stopping GOP
+            // is re-decoded in the counting phase instead of being counted
+            // twice.
+            if !stop_now && let Some(counts) = capacity_counts.as_mut() {
+                counts[0] += gop_counts[0];
+                counts[1] += gop_counts[1];
+            }
+
             merge_gop_record(
                 &mut global_sink,
                 &mut global_slice_contexts,
@@ -3782,18 +3903,29 @@ fn record_carrier_state(
             );
 
             if stop_now {
+                if capacity_counts.is_some() {
+                    resume_counting_at = Some(gop_idx + batch_i);
+                }
                 finished = true;
                 break;
             }
         }
 
-        control.report(Event::progress(
-            Stage::Decode,
-            gop_ranges[..end_idx].iter().map(|r| r.len()).sum::<usize>() as u64,
-            Some(total_slices as u64),
-        ));
+        if end_idx > reported_gops {
+            reported_gops = end_idx;
+            control.report(Event::progress(
+                Stage::Decode,
+                gop_ranges[..end_idx].iter().map(|r| r.len()).sum::<usize>() as u64,
+                Some(total_slices as u64),
+            ));
+        }
 
         if finished {
+            if let Some(start) = resume_counting_at {
+                counting_remaining = true;
+                gop_idx = start;
+                continue;
+            }
             break;
         }
         if matches!(stop, StopCondition::TargetSlots(_)) {
@@ -3835,6 +3967,7 @@ fn record_carrier_state(
         recorded_slices: global_recorded_slices,
         raw_bits: raw_bits.bytes,
         slice_slot_ranges,
+        capacity_band_counts: capacity_counts,
     })
 }
 
@@ -4108,6 +4241,7 @@ mod capture_tests {
             recorded_slices: 1,
             raw_bits: Vec::new(),
             slice_slot_ranges: vec![(total, 0)],
+            capacity_band_counts: None,
         }
     }
 
