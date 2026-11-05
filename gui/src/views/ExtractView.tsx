@@ -90,13 +90,17 @@ export const ExtractView: React.FC<{ active: boolean }> = ({ active }) => {
             outputDir || item.dir,
             summary.filename || withSuffix(item.name, "_payload"),
           );
+          // Keep `prefer` out of the second call: the backend cache key
+          // includes it, and the probe already established `first.source`.
+          // Repeating the same inputs lets the extraction reuse the cached
+          // outcome instead of decoding the carrier a second time.
           const saved = await smartExtract(
             taskId,
             item.path,
             target,
             password || undefined,
             undefined,
-            first.source,
+            undefined,
             false,
             updateProgress,
           );
