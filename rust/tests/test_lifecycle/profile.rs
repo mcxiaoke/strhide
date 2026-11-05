@@ -382,6 +382,237 @@ fn compression_strategy_is_a_writer_only_knob() {
 }
 
 #[test]
+fn large_incompressible_payload_is_stored_without_the_compressed_flag() {
+    let dir = scratch("local_compress_probe_incompressible");
+    let carrier = dir.join("c.png");
+    fs::write(&carrier, make_png()).unwrap();
+    let payload = pseudo_random(2 * 1024 * 1024);
+
+    let out = dir.join("out.png");
+    write(
+        &carrier,
+        &out,
+        &payload,
+        None,
+        &LocalParams::default(),
+        &StructureProfile::default(),
+    );
+
+    let info = inspect_carrier_with(&out, None, &StructureProfile::default()).unwrap();
+    assert_eq!(
+        info.is_compressed,
+        Some(false),
+        "a payload whose sample does not beat the 2% rule must be stored raw"
+    );
+    let read = read_carrier_with_dialect(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+            ..Default::default()
+        },
+        &StructureProfile::default(),
+    )
+    .unwrap();
+    assert_eq!(read.data, payload);
+}
+
+#[test]
+fn large_compressible_payload_is_still_deflated() {
+    let dir = scratch("local_compress_probe_compressible");
+    let carrier = dir.join("c.png");
+    fs::write(&carrier, make_png()).unwrap();
+    let payload = vec![b'a'; 2 * 1024 * 1024];
+
+    let out = dir.join("out.png");
+    write(
+        &carrier,
+        &out,
+        &payload,
+        None,
+        &LocalParams::default(),
+        &StructureProfile::default(),
+    );
+
+    let info = inspect_carrier_with(&out, None, &StructureProfile::default()).unwrap();
+    assert_eq!(
+        info.is_compressed,
+        Some(true),
+        "a payload whose sample beats the 2% rule must still be deflated"
+    );
+    let read = read_carrier_with_dialect(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+            ..Default::default()
+        },
+        &StructureProfile::default(),
+    )
+    .unwrap();
+    assert_eq!(read.data, payload);
+}
+
+#[test]
+fn compressibility_probe_sees_a_compressible_tail() {
+    let dir = scratch("local_compress_probe_tail");
+    let carrier = dir.join("c.png");
+    fs::write(&carrier, make_png()).unwrap();
+
+    // Random prefix, compressible suffix: a prefix-only probe would call this
+    // incompressible, but the stratified sample includes the tail.
+    let mut payload = pseudo_random(1024 * 1024);
+    payload.extend_from_slice(&vec![b'b'; 1024 * 1024]);
+
+    let out = dir.join("out.png");
+    write(
+        &carrier,
+        &out,
+        &payload,
+        None,
+        &LocalParams::default(),
+        &StructureProfile::default(),
+    );
+
+    let info = inspect_carrier_with(&out, None, &StructureProfile::default()).unwrap();
+    assert_eq!(info.is_compressed, Some(true));
+    let read = read_carrier_with_dialect(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+            ..Default::default()
+        },
+        &StructureProfile::default(),
+    )
+    .unwrap();
+    assert_eq!(read.data, payload);
+}
+
+#[test]
+fn compressed_envelopes_remain_readable_after_the_probe_gate() {
+    let dir = scratch("local_compress_probe_legacy_read");
+    let carrier = dir.join("c.png");
+    fs::write(&carrier, make_png()).unwrap();
+    // `Always` produces a compressed stream exactly as the pre-probe writer
+    // did; the reader follows FLAG_COMPRESSED and never learns the decision.
+    let payload = pseudo_random(2 * 1024 * 1024);
+
+    let out = dir.join("out.png");
+    write(
+        &carrier,
+        &out,
+        &payload,
+        None,
+        &LocalParams::default().with_compression(CompressionStrategy::Always { level: 6 }),
+        &StructureProfile::default(),
+    );
+
+    let info = inspect_carrier_with(&out, None, &StructureProfile::default()).unwrap();
+    assert_eq!(info.is_compressed, Some(true));
+    let read = read_carrier_with_dialect(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+            ..Default::default()
+        },
+        &StructureProfile::default(),
+    )
+    .unwrap();
+    assert_eq!(read.data, payload);
+}
+
+#[test]
+fn tiny_payloads_keep_the_historical_compression_decision() {
+    let dir = scratch("local_compress_probe_tiny");
+    let carrier = dir.join("c.png");
+    fs::write(&carrier, make_png()).unwrap();
+
+    // Below COMPRESSION_PROBE_MIN_BYTES the full deflate pass runs as before:
+    // incompressible stays raw, compressible is deflated.
+    for (name, payload, expected) in [
+        ("random.png", pseudo_random(1024), false),
+        ("text.png", vec![b'a'; 1024], true),
+    ] {
+        let out = dir.join(name);
+        write(
+            &carrier,
+            &out,
+            &payload,
+            None,
+            &LocalParams::default(),
+            &StructureProfile::default(),
+        );
+        let info = inspect_carrier_with(&out, None, &StructureProfile::default()).unwrap();
+        assert_eq!(info.is_compressed, Some(expected), "{name}");
+        let read = read_carrier_with_dialect(
+            &out,
+            &ReadOptions {
+                output_path: None,
+                password: None,
+                overwrite: false,
+                ..Default::default()
+            },
+            &StructureProfile::default(),
+        )
+        .unwrap();
+        assert_eq!(read.data, payload, "{name}");
+    }
+}
+
+#[test]
+#[ignore = "writes a 64 MiB payload; run with the local_ suite"]
+fn local_large_incompressible_payload_at_the_payload_limit_is_uncompressed() {
+    const LIMIT: usize = 64 * 1024 * 1024;
+    let dir = scratch("local_compress_probe_limit");
+    let carrier = dir.join("c.zip");
+    fs::write(&carrier, include_bytes!("../assets/small.zip")).unwrap();
+    let payload = pseudo_random(LIMIT);
+
+    let out = dir.join("out.zip");
+    write(
+        &carrier,
+        &out,
+        &payload,
+        None,
+        &LocalParams::default(),
+        &StructureProfile::default(),
+    );
+
+    let info = inspect_carrier_with(&out, None, &StructureProfile::default()).unwrap();
+    assert_eq!(info.is_compressed, Some(false));
+    let read = read_carrier_with_dialect(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+            ..Default::default()
+        },
+        &StructureProfile::default(),
+    )
+    .unwrap();
+    assert_eq!(read.data, payload);
+}
+
+fn pseudo_random(len: usize) -> Vec<u8> {
+    let mut v = Vec::with_capacity(len);
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    while v.len() < len {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        v.push((x >> 24) as u8);
+    }
+    v
+}
+
+#[test]
 fn invalid_local_params_fail_before_touching_the_carrier() {
     let dir = scratch("local_invalid");
     let carrier = dir.join("c.png");

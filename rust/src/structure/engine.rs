@@ -1052,29 +1052,49 @@ where
     // only when it saves at least 2%: comp_len * 100 < raw_size * 98). The
     // level and the decision are writer-only; the reader just inflates raw
     // deflate when FLAG_COMPRESSED is set.
-    let (to_encrypt_bytes, is_compressed) =
-        if local.compression == crate::params::CompressionStrategy::Never {
-            (payload_raw_bytes, false)
-        } else {
-            let mut compressed_buf = Vec::new();
-            let (_, comp_len) = compress_stream(
-                &mut Cursor::new(&payload_raw_bytes),
-                &mut compressed_buf,
-                local.compression.level(),
-            )?;
+    //
+    // Large payloads are probed first: a full deflate pass over incompressible
+    // data costs ~17 ms/MiB and is discarded, so a fixed 256 KiB stratified
+    // sample decides whether the full pass is worth starting. The same
+    // `should_compress` rule is applied to the sample, so the flag written
+    // below always reflects the bytes actually kept.
+    let (to_encrypt_bytes, is_compressed) = match local.compression {
+        crate::params::CompressionStrategy::Never => (payload_raw_bytes, false),
+        strategy => {
+            let level = strategy.level();
+            let worth_full_pass =
+                if payload_raw_bytes.len() > crate::crypto::COMPRESSION_PROBE_MIN_BYTES {
+                    let (sample_raw, sample_comp) =
+                        crate::crypto::probe_compressibility(&payload_raw_bytes, level)?;
+                    strategy.should_compress(sample_raw, sample_comp)
+                } else {
+                    true
+                };
 
-            if local.compression.should_compress(raw_size, comp_len) {
-                // Keep the compressed stream and release the raw payload buffer early.
-                let mut raw = payload_raw_bytes;
-                raw.clear();
-                raw.shrink_to_fit();
-                (compressed_buf, true)
-            } else {
-                // Keep the raw payload and release the compressed buffer early.
-                drop(compressed_buf);
+            if !worth_full_pass {
                 (payload_raw_bytes, false)
+            } else {
+                let mut compressed_buf = Vec::new();
+                let (_, comp_len) = compress_stream(
+                    &mut Cursor::new(&payload_raw_bytes),
+                    &mut compressed_buf,
+                    level,
+                )?;
+
+                if strategy.should_compress(raw_size, comp_len) {
+                    // Keep the compressed stream and release the raw payload buffer early.
+                    let mut raw = payload_raw_bytes;
+                    raw.clear();
+                    raw.shrink_to_fit();
+                    (compressed_buf, true)
+                } else {
+                    // Keep the raw payload and release the compressed buffer early.
+                    drop(compressed_buf);
+                    (payload_raw_bytes, false)
+                }
             }
-        };
+        }
+    };
 
     // 6. Keys and Magics
     // `FLAG_ENCRYPTED` means "a user password is required", not "the payload is

@@ -77,6 +77,11 @@ impl MagicPair {
 #[non_exhaustive]
 pub enum CompressionStrategy {
     /// Compress when it saves at least 2% (the historical rule) at level 6.
+    ///
+    /// Payloads above 1 MiB are probed with a fixed 256 KiB stratified sample
+    /// first; if the sample does not meet the 2% rule, the payload is stored
+    /// uncompressed without a full deflate pass. The written flag always
+    /// matches the bytes actually kept.
     #[default]
     Auto,
     /// Never compress, even when it would help.

@@ -54,7 +54,7 @@ strhide 有两个相互独立的隐写域，各自有不同的字节布局：
 | 额外派生 | stealth 魔数与 76B/10B 字段掩码 | header 槽位置换种子（无 salt）、STC 网格种子 |
 | 宿主还原 | 记录宿主 size + SHA-256，支持 bit-for-bit 还原（散落策略依赖 slack diff） | **无宿主还原**：像素/系数被改即不可逆，只能重嵌或覆盖 |
 | 最终承载 | 注入容器结构空隙（chunk/段/box/overlay 等）或指令编码散落 | 矩阵编码分散到像素 / DCT 系数 / H.265 变换系数符号位 |
-| 压缩 | raw deflate；`Auto` 需节省 ≥2% 才保留 | raw deflate；`compressed.len() < raw.len()` 才保留 |
+| 压缩 | raw deflate；`Auto` 需节省 ≥2% 才保留（>1 MiB 先按 256 KiB 分层样本判定） | raw deflate；`compressed.len() < raw.len()` 才保留 |
 | 密码 NFC 归一化 | 统一做 Unicode NFC 归一化 | 统一做 Unicode NFC 归一化 |
 
 > 旧设计文档 §1.2 曾把"像素域 LSB"列为非目标；内容域是在该边界调整后新增的，因此其信封格式没有沿用 UBE，而是独立设计的极简伪随机结构。
@@ -361,6 +361,7 @@ make_meta_nonce(base_nonce):         低 32 位 = base_nonce[8..12] XOR 0xFFFFFF
 
 - 算法为 **raw deflate**（无 zlib 头/尾），级别默认 6（范围 0..=9）。
 - 是否保留压缩由 `CompressionStrategy` 决定（`Auto` 时需 `comp_len*100 < raw_size*98`，即至少节省 2%）；该决策为写侧行为，读侧只看 `FLAG_COMPRESSED` 并以元数据 `raw_size` 作为解压硬上限。
+- 超过 1 MiB 的载荷在整份压缩前，先对固定的 256 KiB 分层样本（8 × 32 KiB，首尾均匀分布）应用同一 2% 判据；样本判为不可压缩时直接写未压缩流并置 `FLAG_COMPRESSED = 0`，跳过整份 deflate。标志始终描述实际写入的字节，读侧仍只看该标志。
 
 ---
 

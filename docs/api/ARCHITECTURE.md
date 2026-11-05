@@ -300,7 +300,7 @@ pub struct MediaInfo {               // 原 `media_info: Option<String>`（"1920
     （本方言魔数；私有方言再扫官方魔数；有密码再扫 stealth 魔数）
     suspicious_structures 产出结构告警（不拒绝）
  4. source.into_buffered() → (payload bytes, filename, is_file)
- 5. raw deflate 压缩；按 local.compression 决定保留压缩还是原文
+ 5. raw deflate 压缩；按 local.compression 决定保留压缩还是原文（`Auto` 对 >1 MiB 载荷先用 256 KiB 分层样本判定）
  6. 生成 salt / base_nonce；derive_keys(effective_password, salt)
     按 stealth 与否决定魔数：derive_stealth_magics 或 profile.*_magic
  7. 构造 CarrierMetadata → encode_metadata（compact 布局），置 FLAG_COMPACT_META
