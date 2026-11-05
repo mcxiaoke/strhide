@@ -30,16 +30,18 @@ pub fn find_eocd_offset<R: Read + Seek + ?Sized>(
     // inside the file (the shape left by an EOF-strategy envelope appended
     // past the EOCD). Both passes additionally require the declared central
     // directory to lie before the record.
+    // Collect every candidate offset once, right-to-left. Rescanning the tail
+    // for each candidate made a comment full of EOCD-shaped bytes quadratic.
+    let candidates: Vec<usize> = tail
+        .windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == ZIP_EOCD_MAGIC)
+        .map(|(i, _)| i)
+        .rev()
+        .collect();
+
     for require_exact_eof in [true, false] {
-        let mut search_end = tail.len();
-        while search_end >= 4 {
-            let idx = match tail[..search_end]
-                .windows(4)
-                .rposition(|w| w == ZIP_EOCD_MAGIC)
-            {
-                Some(i) => i,
-                None => break,
-            };
+        for &idx in &candidates {
             let eocd_pos = (file_size - scan_len) + idx as u64;
 
             if idx + 22 <= tail.len() {
@@ -64,7 +66,6 @@ pub fn find_eocd_offset<R: Read + Seek + ?Sized>(
                     }
                 }
             }
-            search_end = idx;
         }
     }
 
