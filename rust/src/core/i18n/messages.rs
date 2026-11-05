@@ -267,6 +267,9 @@ crate::i18n_messages! {
     ErrUnsupported:
         en = "Unsupported format",
         zh = "不支持的文件格式";
+    ErrCapacity:
+        en = "Capacity exceeded",
+        zh = "容量不足";
 
     // ---- Error rendering templates ----
     ErrorLine:

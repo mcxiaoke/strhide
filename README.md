@@ -75,6 +75,21 @@ sth scan target_folder/ -r                                          # Black-box 
 sth list                                                            # List formats and capacity limits [alias: l]
 ```
 
+> [!NOTE]
+> **Content-domain payloads are bound to the carrier's metadata.** The
+> steganographic locator keys are derived from the container's metadata
+> summary, so a stego file must be kept exactly as produced: editing metadata
+> or re-saving with a tool that rewrites ancillary chunks (e.g. PNG
+> `tEXt`/`gAMA`/`iCCP`, JPEG APPn) makes the payload unreadable —
+> indistinguishable from a wrong password. A pure IDAT/recompression pass that
+> preserves metadata is safe. Always keep the original stego file.
+>
+> **Capacity reports** (`sth capacity`) reflect the minimal envelope framing
+> (no filename; carrying a filename costs `1 + name_len` extra bytes) and are
+> additionally bounded by the engine's working-memory budget, so the reported
+> maximum is always writable. Exceeding it fails before any write with a
+> "capacity exceeded" error.
+
 ---
 
 ## 4. Desktop Client (`StrHideStudio`)

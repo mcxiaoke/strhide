@@ -541,7 +541,7 @@ fn check_pipeline_budget(
     let total = pipeline_base_bytes(total_pixels)
         .saturating_add(body_n as u64 * pipeline_bytes_per_slot(trellis_h));
     if total > MAX_PIPELINE_BYTES {
-        return Err(StrHideError::UnsupportedFormat(format!(
+        return Err(StrHideError::PayloadTooLarge(format!(
             "PNG carrier is too large for this payload: it needs about {} MiB of working memory and the {} MiB budget would be exceeded (use the Hamming codec, a smaller --stc-h, or a smaller payload)",
             total >> 20,
             MAX_PIPELINE_BYTES >> 20
@@ -551,7 +551,10 @@ fn check_pipeline_budget(
 }
 
 /// Body slots whose working set still fits the pipeline budget.
-#[cfg(test)]
+///
+/// Used by the capacity probe (via [`body_payload_fits`]) so the advertised
+/// `max_raw_payload_bytes` never exceeds what the embedder's
+/// [`check_pipeline_budget`] will accept.
 fn max_body_slots_within_pipeline(total_pixels: usize, trellis_h: Option<u8>) -> usize {
     let remaining = MAX_PIPELINE_BYTES.saturating_sub(pipeline_base_bytes(total_pixels));
     usize::try_from(remaining / pipeline_bytes_per_slot(trellis_h)).unwrap_or(usize::MAX)
@@ -1554,7 +1557,7 @@ pub fn embed_png_with_stats<'a>(
                 break 'resolve (codec, u, ChannelMode::Green, pool_green);
             }
             let Some(pool_rgb) = pool_rgb else {
-                return Err(StrHideError::General(format!(
+                return Err(StrHideError::PayloadTooLarge(format!(
                     "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{})",
                     needed,
                     codec.describe(params.stc_h, u),
@@ -1568,7 +1571,7 @@ pub fn embed_png_with_stats<'a>(
             if rgb_needed <= pool_rgb {
                 break 'resolve (codec, u, ChannelMode::Rgb, pool_rgb);
             }
-            return Err(StrHideError::General(format!(
+            return Err(StrHideError::PayloadTooLarge(format!(
                 "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{} {})",
                 rgb_needed,
                 codec.describe(params.stc_h, u),
@@ -1592,7 +1595,7 @@ pub fn embed_png_with_stats<'a>(
             if needed <= pool_rgb {
                 break 'resolve (codec, u, ChannelMode::Rgb, pool_rgb);
             }
-            return Err(StrHideError::General(format!(
+            return Err(StrHideError::PayloadTooLarge(format!(
                 "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{} {})",
                 needed,
                 codec.describe(params.stc_h, u),
@@ -1601,7 +1604,7 @@ pub fn embed_png_with_stats<'a>(
                 ChannelMode::Rgb.name(),
             )));
         }
-        return Err(StrHideError::General(format!(
+        return Err(StrHideError::PayloadTooLarge(format!(
             "Carrier capacity exceeded: needed {} body slots ({}), available {} slots (strategy: spatial-{})",
             needed,
             codec.describe(params.stc_h, u),
@@ -2420,11 +2423,17 @@ pub fn verify_png(
 /// candidate pool, while fixed codecs use the configured group size. Capacity
 /// probing and embedding therefore share one accounting rule instead of the
 /// probe assuming `u = 1` and the writer using whatever the pool resolves to.
+///
+/// `total_pixels` feeds the same pipeline-memory budget the embedder enforces
+/// in [`check_pipeline_budget`]: a payload whose slots fit the pool but whose
+/// working set would exceed [`MAX_PIPELINE_BYTES`] is reported as not fitting,
+/// so the probe never advertises a size the writer must refuse.
 fn body_payload_fits(
     params: &PngParams,
     pool_green: usize,
     pool_rgb: Option<usize>,
     raw_bytes: usize,
+    total_pixels: usize,
 ) -> Result<bool, StrHideError> {
     let ciphertext_bytes = raw_bytes.saturating_add(crate::stego::envelope::BODY_OVERHEAD);
     let Some(bits) = ciphertext_bytes.checked_mul(8) else {
@@ -2445,7 +2454,17 @@ fn body_payload_fits(
                 StegoCodec::Auto => unreachable!("handled above"),
             }
         };
-        if crate::stego::coding::slots_for_codec(bits, codec, params.stc_h, u)? <= pool {
+        let slots = crate::stego::coding::slots_for_codec(bits, codec, params.stc_h, u)?;
+        if slots > pool {
+            continue;
+        }
+        // Same budget rule as the embedder: the trellis bitmap is only
+        // charged when the STC codec runs (Hamming has no trellis).
+        let trellis_h = match codec {
+            StegoCodec::Hamming => None,
+            _ => Some(params.stc_h),
+        };
+        if slots <= max_body_slots_within_pipeline(total_pixels, trellis_h) {
             return Ok(true);
         }
     }
@@ -2462,6 +2481,7 @@ fn max_raw_payload_for_pools(
     params: &PngParams,
     pool_green: usize,
     pool_rgb: Option<usize>,
+    total_pixels: usize,
 ) -> Result<usize, StrHideError> {
     let largest_pool = pool_green.max(pool_rgb.unwrap_or(0));
     if largest_pool == 0 {
@@ -2473,7 +2493,7 @@ fn max_raw_payload_for_pools(
     let mut hi = largest_pool.saturating_mul(8);
     while lo < hi {
         let mid = lo + (hi - lo).div_ceil(2);
-        if body_payload_fits(params, pool_green, pool_rgb, mid)? {
+        if body_payload_fits(params, pool_green, pool_rgb, mid, total_pixels)? {
             lo = mid;
         } else {
             hi = mid - 1;
@@ -2511,7 +2531,8 @@ fn build_png_capacity_with_pools(
     };
     let ratio_slots = pool_green;
 
-    let max_raw_payload_bytes = max_raw_payload_for_pools(params, pool_green, pool_rgb)?;
+    let max_raw_payload_bytes =
+        max_raw_payload_for_pools(params, pool_green, pool_rgb, total_pixels)?;
 
     let recommended_max_bytes = recommended_bytes_for(total_pixels, ratio_slots, safety_level);
     let hamming_k = crate::stego::coding::DEFAULT_HAMMING_K;
@@ -3675,6 +3696,171 @@ mod tests {
             stc < hamming,
             "the bitmap must cost slots: {stc} vs {hamming}"
         );
+    }
+
+    /// Review G1 (P2-1): the probe's `max_raw_payload_bytes` must never exceed
+    /// what the embedder's pipeline budget accepts. The 8192x7680 RGB carrier
+    /// from the independent review was advertised `12_385_345` bytes and then
+    /// refused to write them ("needs about 9015 MiB ... 8192 MiB budget").
+    #[test]
+    fn probe_capacity_never_exceeds_pipeline_budget() {
+        let params = PngParams::default();
+        let total_pixels = 8192 * 7680; // 62,914,560
+        let pool_green = 40_000_000usize;
+        let pool_rgb = Some(99_082_944usize); // as measured on the review carrier
+
+        // The exact size the pre-fix probe advertised: slots fit the pool, but
+        // the STC working set does not fit the budget.
+        assert!(
+            !body_payload_fits(&params, pool_green, pool_rgb, 12_385_345, total_pixels)
+                .expect("fits check"),
+            "a payload whose solve needs ~9 GiB must not be advertised"
+        );
+
+        let max = max_raw_payload_for_pools(&params, pool_green, pool_rgb, total_pixels)
+            .expect("max raw payload");
+        assert!(max > 0, "the carrier still holds a large payload: {max}");
+        assert!(max < 12_385_345, "budget clamps the advertised max: {max}");
+
+        // The advertised maximum must pass the same budget gate the embedder
+        // enforces, under the same codec/u resolution.
+        let bits = (max + crate::stego::envelope::BODY_OVERHEAD) * 8;
+        let (codec, u) = crate::stego::coding::auto_select_codec(99_082_944, bits);
+        let slots =
+            crate::stego::coding::slots_for_codec(bits, codec, params.stc_h, u).expect("slots");
+        let trellis_h = match codec {
+            StegoCodec::Hamming => None,
+            _ => Some(params.stc_h),
+        };
+        check_pipeline_budget(total_pixels, slots, trellis_h)
+            .expect("advertised maximum must pass the embedder's budget gate");
+    }
+
+    /// G1 regression for small carriers: the budget clamp must not shrink a
+    /// carrier whose working set is far below the budget (pool-limited, not
+    /// budget-limited).
+    #[test]
+    fn probe_capacity_stays_pool_limited_below_the_budget() {
+        let params = PngParams::default();
+        let total_pixels = 600 * 600;
+        let pool_green = 100_000usize;
+        let pool_rgb = Some(250_000usize);
+
+        let max = max_raw_payload_for_pools(&params, pool_green, pool_rgb, total_pixels)
+            .expect("max raw payload");
+        assert!(max > 0);
+        assert!(body_payload_fits(&params, pool_green, pool_rgb, max, total_pixels).expect("fits"));
+        assert!(
+            !body_payload_fits(&params, pool_green, pool_rgb, max + 1, total_pixels).expect("fits"),
+            "max + 1 must not fit, by definition of the binary search"
+        );
+    }
+
+    /// Review G4 (P2-4): `png_pre_salt` binds the locator keys to the ancillary
+    /// chunk stream. An IDAT-only recompression (chunk metadata untouched) must
+    /// keep the payload readable.
+    #[test]
+    fn idat_only_recompression_keeps_payload_readable() {
+        let (w, h) = (96usize, 96usize);
+        let pixels = row_correlated_pixels(w, h);
+        let text = b"Comment\0keep-me".to_vec();
+        let png = craft_png(
+            w as u32,
+            h as u32,
+            &pixels,
+            &vec![2u8; h],
+            &[(b"tEXt", &text)],
+            1,
+        );
+        let params = PngParams::default();
+        let payload = b"re-encode me".to_vec();
+
+        let stego = embed_png(
+            &png,
+            &payload,
+            Some("pw"),
+            None,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &params,
+            SafetyPolicy::default(),
+            Freshness::Random,
+            &Control::none(),
+        )
+        .expect("embed");
+
+        let img = decode_png(&stego).expect("decode stego");
+        let reencoded = encode_png(&img).expect("IDAT-only recompression");
+        let out = extract_png(
+            &reencoded,
+            Some("pw"),
+            None,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &params,
+            &Control::none(),
+        )
+        .expect("payload must survive an IDAT-only recompression");
+        assert_eq!(out, payload);
+    }
+
+    /// Review G4 (P2-4): any ancillary-chunk edit changes `pre_salt`, so the
+    /// payload must become unreadable and the failure must be
+    /// indistinguishable from a wrong password (`NoHiddenData`).
+    #[test]
+    fn ancillary_chunk_change_makes_payload_unreadable() {
+        let (w, h) = (96usize, 96usize);
+        let pixels = row_correlated_pixels(w, h);
+        let text = b"Comment\0original".to_vec();
+        let png = craft_png(
+            w as u32,
+            h as u32,
+            &pixels,
+            &vec![2u8; h],
+            &[(b"tEXt", &text)],
+            1,
+        );
+        let params = PngParams::default();
+        let payload = b"metadata-bound".to_vec();
+
+        let stego = embed_png(
+            &png,
+            &payload,
+            Some("pw"),
+            None,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &params,
+            SafetyPolicy::default(),
+            Freshness::Random,
+            &Control::none(),
+        )
+        .expect("embed");
+
+        let mut img = decode_png(&stego).expect("decode stego");
+        // Same pixels, same dimensions: only the metadata stream changes.
+        let chunk = img
+            .chunks
+            .iter_mut()
+            .find(|c| c.ty == *b"tEXt")
+            .expect("tEXt chunk present");
+        chunk.data = b"Comment\0edited-afterwards".to_vec();
+        let reencoded = encode_png(&img).expect("re-encode");
+
+        match extract_png(
+            &reencoded,
+            Some("pw"),
+            None,
+            &crate::stego::format::OFFICIAL_PNG_FORMAT,
+            &HillCostModel,
+            &params,
+            &Control::none(),
+        ) {
+            Err(StrHideError::NoHiddenData(_)) => {}
+            other => {
+                panic!("ancillary edits must look exactly like a wrong password, got {other:?}")
+            }
+        }
     }
 
     /// The tier table is what hosts read instead of re-deriving the budget, so

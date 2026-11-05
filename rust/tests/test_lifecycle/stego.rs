@@ -618,7 +618,8 @@ fn test_stego_capacity_model_is_tight() {
     let over = incompressible(cap.max_raw_payload_bytes + 1, 0x1234);
     let res = embed_carrier(&png_bytes, &Payload::bytes(&over), &opts);
     assert!(
-        matches!(res, Err(strhide::errors::StrHideError::General(ref m)) if m.contains("capacity exceeded")),
+        matches!(res, Err(strhide::errors::StrHideError::PayloadTooLarge(_)))
+            || matches!(res, Err(strhide::errors::StrHideError::General(ref m)) if m.contains("capacity exceeded")),
         "probe max + 1 byte must be rejected as over capacity, got: {res:?}"
     );
 }

@@ -388,7 +388,10 @@ pub mod batch_stego {
                 // refuses on the geometric (u = 1) bound, an over-optimised one
                 // on the grouped bound reported by `--capacity` -- both are
                 // "beyond the advertised maximum", which is what this pins.
+                // Capacity-class failures are `PayloadTooLarge` (review P2-3/P2-5);
+                // the legacy arms stay for engines that still report them so.
                 let rejected = match &oversize_res {
+                    Err(StrHideError::PayloadTooLarge(_)) => true,
                     Err(StrHideError::General(msg)) => {
                         msg.to_lowercase().contains("capacity exceeded")
                     }
@@ -447,7 +450,17 @@ pub mod batch_stego {
                         // zero runs of their block. The engine refuses with an
                         // actionable diagnostic instead of writing a carrier it
                         // cannot re-encode; count it and skip the detection
-                        // assertion rather than pretending it passed.
+                        // assertion rather than pretending it passed. The
+                        // capacity-shaped refusal is `PayloadTooLarge`
+                        // (review P2-3), a genuine dead-symbol failure stays
+                        // `UnsupportedFormat`.
+                        Err(StrHideError::PayloadTooLarge(msg))
+                            if msg.contains("over-optimised Huffman table") =>
+                        {
+                            huffman_limited = true;
+                            eprintln!("note: {filename}: high load skipped ({msg})");
+                            (low_scan.risk_score, low_scan.verdict.clone())
+                        }
                         Err(StrHideError::UnsupportedFormat(msg))
                             if msg.contains("Huffman table is over-optimised") =>
                         {

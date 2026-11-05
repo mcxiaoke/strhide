@@ -1290,7 +1290,7 @@ pub fn embed_hevc_patches_with_factor_v4(
     let pool_size = total_slots.min(HEVC_SUPERBLOCK_POOL_SLOTS);
 
     if pool_size < hdr_slots || total_slots < hdr_slots + body_needed_slots {
-        return Err(StrHideError::General(format!(
+        return Err(StrHideError::PayloadTooLarge(format!(
             "HEVC carrier capacity exceeded: needed at least {} slots, but carrier only has {}",
             hdr_slots + body_needed_slots,
             total_slots

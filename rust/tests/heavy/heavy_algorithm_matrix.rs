@@ -337,6 +337,15 @@ pub fn heavy_all_algorithms_png_jpeg_matrix() {
                             task.algorithm
                         ));
                     }
+                    // Working-set budget / capacity refusal (review P2-1): a
+                    // documented, non-corrupting refusal, same skip semantics
+                    // as an unsupported carrier.
+                    Err(StrHideError::PayloadTooLarge(message)) => {
+                        return MatrixOutcome::Skip(format!(
+                            "{filename} [{}]: over capacity/budget ({message})",
+                            task.algorithm
+                        ));
+                    }
                     Err(error) => {
                         return MatrixOutcome::Fail(format!(
                             "{} [{}]: embed failed: {error}",

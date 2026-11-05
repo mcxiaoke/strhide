@@ -179,8 +179,8 @@ fn estimate_backtrack_bytes(body_n: usize, h: u8) -> u64 {
 fn check_pipeline_budget(base_bytes: u64, body_n: usize, h: u8) -> Result<(), StrHideError> {
     let total = base_bytes.saturating_add(estimate_backtrack_bytes(body_n, h));
     if total > MAX_PIPELINE_BYTES {
-        return Err(StrHideError::UnsupportedFormat(format!(
-            "Unsupported JPEG variant: this payload needs about {} MiB of working memory; the {} MiB budget would be exceeded",
+        return Err(StrHideError::PayloadTooLarge(format!(
+            "This payload needs about {} MiB of working memory; the {} MiB budget would be exceeded (use a smaller payload or a smaller --stc-h)",
             total >> 20,
             MAX_PIPELINE_BYTES >> 20
         )));
@@ -832,7 +832,7 @@ fn embed_once(
     let ext_bytes = extension_area.len();
     let hdr_n = fmt.header_slots(ext_bytes);
     if n_total <= hdr_n {
-        return Err(Attempt::from(StrHideError::General(format!(
+        return Err(Attempt::from(StrHideError::PayloadTooLarge(format!(
             "Capacity exceeded: header needs {hdr_n} slots, the carrier grid has {n_total}"
         ))));
     }
@@ -887,8 +887,8 @@ fn embed_once(
             }
             None => {
                 return Err(Attempt {
-                    error: StrHideError::UnsupportedFormat(
-                        "This JPEG's Huffman table is over-optimised: it cannot encode the modifications required for this payload size. Please reduce payload or re-save the carrier with a standard (Annex K) table.".into(),
+                    error: StrHideError::PayloadTooLarge(
+                        "Payload too large for this carrier: its over-optimised Huffman table forces a less dense encoding (u >= 3) and the payload does not fit. Reduce the payload or re-save the carrier with a standard (Annex K) table.".into(),
                     ),
                     retryable: false,
                 });
@@ -1794,7 +1794,7 @@ pub(crate) fn build_jpeg_capacity_info(
     let ext_bytes = extension.len();
     let hdr_n = fmt.header_slots(ext_bytes);
     if n_total <= hdr_n {
-        return Err(StrHideError::General(format!(
+        return Err(StrHideError::PayloadTooLarge(format!(
             "Capacity exceeded: header needs {hdr_n} slots, the carrier grid has {n_total}"
         )));
     }
@@ -1951,8 +1951,8 @@ pub fn layout_for_payload(
     let budget = if dht::luma_ac_symbols(carrier_bytes).is_some_and(|t| !t.is_complete()) {
         crate::stego::params::grouped_body_budget(body_slots, bits, params.stc_h, effective_budget)
             .ok_or_else(|| {
-                StrHideError::UnsupportedFormat(
-                    "This JPEG's Huffman table is over-optimised: it cannot encode the modifications required for this payload size. Please reduce payload or re-save the carrier with a standard (Annex K) table.".into(),
+                StrHideError::PayloadTooLarge(
+                    "Payload too large for this carrier: its over-optimised Huffman table forces a less dense encoding (u >= 3) and the payload does not fit. Reduce the payload or re-save the carrier with a standard (Annex K) table.".into(),
                 )
             })?
     } else {

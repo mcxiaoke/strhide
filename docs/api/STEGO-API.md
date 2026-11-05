@@ -212,6 +212,11 @@ for info in png_algos {
 | `capacity` | `probe_carrier_capacity_with_dialect` | 独立只读探测子命令（与 `embed --capacity` 同一实现），`--json` 输出 `StegoCapacityInfo`；`--exact` 强制全量精确扫描（长视频默认开启前 20% 样本加权快速估算）；与 embed 共享同一组调参/凭据参数 |
 | `embed --capacity` | 同上 | 别名形式保留，支持 `--exact` |
 
+**容量口径（`max_raw_payload_bytes`）**：按最小信封开销（`BODY_OVERHEAD = 22`，
+不含文件名；携带文件名额外消耗 `1 + name_len` 字节，见
+`docs/CHANGES-20261104.md` P2-8）；且已按引擎工作内存预算折算（PNG 8 GiB），
+报告值即为写入端可接受的最大值，超出按 `PayloadTooLarge` 拒绝。
+
 **未实现的 CLI 能力**：`--extensions`（TLV 扩展区）；库 API 已支持，CLI/GUI 未接线。
 `--key-file`（`Credential::FileKey`）与 `--max-payload`（`ExtractParams.max_payload_bytes`）
 已接线（GUI 仍只有密码）。套件参数为 `--cipher-suite`（别名 `--suite`，`1`/`2`，

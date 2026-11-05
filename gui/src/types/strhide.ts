@@ -13,6 +13,7 @@ export type ErrorKind =
   | "target_busy"
   | "safety_threshold"
   | "restore_mismatch"
+  | "payload_too_large"
   | "unsupported_format"
   | "no_hidden_data"
   | "unsupported_version"

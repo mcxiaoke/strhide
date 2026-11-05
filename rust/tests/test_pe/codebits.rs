@@ -752,24 +752,33 @@ fn inspect_marks_codebits_unavailable_on_tiny_text() {
     assert_eq!(first_available.strategy, "pe_overlay");
 }
 
-/// Static capacities of formats with fixed limits survive without a carrier,
-/// and the JSON schema exposes the `strategies` array.
+/// Static capacities of formats with fixed limits are clamped to the engine
+/// payload limit for the actual host, and the JSON schema exposes the
+/// `strategies` array.
 #[test]
 fn inspect_reports_png_capacity_and_json_schema() {
     let dir = scratch("capacity_png");
     let carrier = dir.join("c.png");
     fs::write(&carrier, include_bytes!("../assets/minimal.png")).unwrap();
 
+    // The engine enforces `256 x host`, clamped to [64 MiB, 1 GiB]; the
+    // advertised per-strategy capacity must equal that effective limit
+    // (review P2-2), not the container's native 2 GiB - 1 chunk ceiling.
+    let host_len = fs::metadata(&carrier).unwrap().len();
+    let expected = host_len
+        .saturating_mul(256)
+        .clamp(64 * 1024 * 1024, 1 << 30);
+
     let res = inspect_carrier(&carrier, None).expect("inspect");
     assert_eq!(res.format.as_str(), "PNG");
     assert_eq!(res.strategies[0].strategy, "chunk");
-    assert_eq!(res.strategies[0].capacity_bytes, Some(0x7FFF_FFFF));
+    assert_eq!(res.strategies[0].capacity_bytes, Some(expected));
     assert!(res.strategies[0].available);
 
     let json = serde_json::to_value(&res).expect("serialize");
     assert!(json.get("strategies").is_some());
     assert!(json.get("supported_strategies").is_none());
-    assert_eq!(json["strategies"][0]["capacity_bytes"], 0x7FFF_FFFFu64);
+    assert_eq!(json["strategies"][0]["capacity_bytes"], expected);
 }
 
 /// The static `list` table is generated from the adapters, not hard-coded:

@@ -79,7 +79,7 @@ pub fn compute(
         )));
     }
     if n_total <= hdr_n {
-        return Err(StrHideError::General(format!(
+        return Err(StrHideError::PayloadTooLarge(format!(
             "Capacity exceeded: header needs {hdr_n} slots, the grid only has {n_total}"
         )));
     }
@@ -98,7 +98,7 @@ pub fn compute(
     let window = bits + h as usize - 1;
     let u_capacity = body_grid_len / window;
     if u_capacity == 0 {
-        return Err(StrHideError::General(format!(
+        return Err(StrHideError::PayloadTooLarge(format!(
             "Capacity exceeded: need {window} slots for {bits} payload bits (h={h}), have {body_grid_len}"
         )));
     }

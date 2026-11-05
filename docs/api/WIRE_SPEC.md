@@ -506,7 +506,8 @@ body_len   = ciphertext.len()           // 只含密文+tag，不含 salt/nonce
   `max_payload_bytes = message_bits / 8 - 22`。
 - `flags`：bit0 = 压缩；bit1..3 = 压缩算法 id（0 = Deflate，唯一实现）。
 - 微头：`0x00` 文本/原始字节；`0x01` 文件（含 ≤255 字节文件名）。
-- `MAX_PLAINTEXT_LEN = HEADER_LEN_MAX = 2^26 - 1`（26 位上限，超出直接拒绝）。
+- `MAX_PLAINTEXT_LEN = HEADER_LEN_MAX - BODY_OVERHEAD = 67,108,841`（`body_len`
+  的 26 位上限作用于含 tag 的密文，明文再扣除 22B 框架开销，超出直接拒绝）。
 - salt（16B）与 nonce（12B）**只存在载体头中**，不占正文槽位，也不计入 `body_len`。
 
 ### 13.3 套件与密钥分层（L1 / L2 / L3）
@@ -643,6 +644,10 @@ max_payload = message_bits(total_slots - (524 + ext_slots)) / 8 - 22
 
 `probe` 与 `embed` 必须复用同一公式、同一调参与同一扩展区（`ProbeOptions.extensions`
 必须等于即将写入的 `EmbedOptions.extensions`），否则容量与实际可嵌长度会不一致。
+**工作内存预算同为公式的一部分**：PNG/JPEG 的 STC 求解有统一预算（PNG 8 GiB，
+含像素/代价图/槽位/trellis 位图），`probe` 上报的 `max_raw_payload_bytes` 已经预算
+折算，`embed` 对同一载荷套用同一预算门；超出预算按容量不足（`PayloadTooLarge`）
+拒绝，而不是报"不支持的文件格式"。
 长视频 `probe` 默认按前 20% 窗口加权估算；`--exact` / `exact=true` 才全量扫描。
 
 ### 13.7 行为语义

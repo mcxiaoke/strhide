@@ -1046,7 +1046,7 @@ where
     // the stricter of the two and the read path is guaranteed to pass.
     let max_payload = structure_payload_limit(orig_host_size);
     if raw_size > max_payload {
-        return Err(StrHideError::General(format!(
+        return Err(StrHideError::PayloadTooLarge(format!(
             "Payload ({} bytes) exceeds the maximum supported by this carrier ({} bytes for a {} byte host); use a larger carrier or a smaller payload",
             raw_size, max_payload, orig_host_size
         )));
@@ -1861,6 +1861,33 @@ fn structure_payload_limit(carrier_len: u64) -> u64 {
         .clamp(FLOOR, crate::crypto::MAX_VERIFY_PAYLOAD_SIZE)
 }
 
+/// Clamp every advertised strategy capacity to the payload limit the engine
+/// actually enforces for a host of `host_len` bytes.
+///
+/// A strategy whose native ceiling is lower than the engine limit keeps its
+/// own value and text; an unbounded (`None`, "file grows") or higher ceiling
+/// is rewritten to the effective limit so the report is the number the writer
+/// accepts, not the theoretical container maximum.
+fn apply_engine_payload_limit(
+    strategies: &mut [crate::structure::adapters::StrategyCapacity],
+    host_len: u64,
+) {
+    let engine_limit = structure_payload_limit(host_len);
+    for cap in strategies.iter_mut() {
+        let exceeds = match cap.capacity_bytes {
+            Some(native) => native > engine_limit,
+            None => true,
+        };
+        if exceeds {
+            cap.capacity_bytes = Some(engine_limit);
+            cap.limit = format!(
+                "<= {} B (engine payload limit for this host)",
+                crate::structure::adapters::format_bytes(engine_limit)
+            );
+        }
+    }
+}
+
 /// Locate, authenticate and decrypt the envelope in `host`.
 ///
 /// `label` only appears in error messages ("'photo.png'" vs "'<memory>'").
@@ -2496,7 +2523,14 @@ fn inspect_core(
     // Measured strategy capacities (design: folds the former `check` command
     // into `inspect`). Adapters that can answer statically ignore the reader;
     // PE measures `.text` density and zero slack, ZIP measures the EOCD offset.
-    let strategies = adapter.strategy_capacities(Some(host));
+    let mut strategies = adapter.strategy_capacities(Some(host));
+    // Adapter ceilings describe the *container* mechanism only; the engine
+    // itself refuses payloads above `structure_payload_limit(host_len)` on both
+    // the write and the read path. Clamp every advertised capacity to that
+    // effective limit so `inspect` never promises a payload the writer would
+    // reject (an "unlimited (file grows)" EOF strategy is still bounded by the
+    // 256x-host / 64 MiB-floor / 1 GiB-ceiling rule).
+    apply_engine_payload_limit(&mut strategies, host_len);
 
     let loc = locate_envelope(host, adapter, password, profile)?;
 
@@ -3306,5 +3340,48 @@ mod pbkdf2_budget_tests {
         let res = verify_carrier_bytes(&bytes, None, &StructureProfile::new()).unwrap();
         assert!(verify_passed(&res), "{res:?}");
         assert_eq!(crate::crypto::pbkdf2_calls(), 1, "unexpected PBKDF2 count");
+    }
+
+    /// Review G2 (P2-2): advertised strategy capacities never exceed the
+    /// payload limit the engine enforces for the host. The review measured an
+    /// 86,854-byte PNG whose `inspect` reported `unlimited (file grows)` /
+    /// `2 GiB - 1` while the writer refused anything above 64 MiB.
+    #[test]
+    fn strategy_capacities_never_exceed_engine_payload_limit() {
+        use crate::structure::adapters::StrategyCapacity;
+
+        let mk = |capacity_bytes: Option<u64>| StrategyCapacity {
+            strategy: "x".into(),
+            capacity_bytes,
+            available: true,
+            limit: "native".into(),
+            note: None,
+        };
+
+        // 86,854-byte host: 256x is below the 64 MiB floor, so every strategy
+        // is capped at 64 MiB; lower native ceilings keep their own text.
+        let mut caps = vec![mk(None), mk(Some(u32::MAX as u64)), mk(Some(100))];
+        apply_engine_payload_limit(&mut caps, 86_854);
+        assert_eq!(caps[0].capacity_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(caps[1].capacity_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(caps[2].capacity_bytes, Some(100), "lower native stays");
+        assert!(caps[0].limit.contains("67,108,864"), "{}", caps[0].limit);
+        assert_eq!(caps[2].limit, "native");
+
+        // 8 MiB host: 256x = 2 GiB, clamped to the 1 GiB ceiling.
+        let mut caps = vec![mk(None)];
+        apply_engine_payload_limit(&mut caps, 8 * 1024 * 1024);
+        assert_eq!(
+            caps[0].capacity_bytes,
+            Some(crate::crypto::MAX_VERIFY_PAYLOAD_SIZE)
+        );
+
+        // 8 GiB host: 256x is above the ceiling; still the ceiling.
+        let mut caps = vec![mk(None)];
+        apply_engine_payload_limit(&mut caps, 8u64 << 30);
+        assert_eq!(
+            caps[0].capacity_bytes,
+            Some(crate::crypto::MAX_VERIFY_PAYLOAD_SIZE)
+        );
     }
 }

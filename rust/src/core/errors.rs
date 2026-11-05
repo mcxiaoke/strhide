@@ -111,6 +111,14 @@ pub enum StrHideError {
         residual_envelope: bool,
     },
 
+    /// The payload (with envelope framing) exceeds what this carrier can hold
+    /// under the selected codec and parameters, or the solve would exceed the
+    /// working-memory budget. Distinct from [`UnsupportedFormat`](Self::UnsupportedFormat)
+    /// so a capacity shortfall is never reported as "unsupported file format":
+    /// the file is fine, the payload is simply too large for it.
+    #[error("Payload too large: {0}")]
+    PayloadTooLarge(String),
+
     /// The carrier bytes do not match any supported format magic
     /// (PNG / JPEG / MP4 / ZIP / PDF / PE).
     #[error("Unsupported format: {0}")]
@@ -188,6 +196,7 @@ impl StrHideError {
             StrHideError::TargetBusy(_) => ErrorKind::TargetBusy,
             StrHideError::SafetyThreshold { .. } => ErrorKind::SafetyThreshold,
             StrHideError::RestoreMismatch { .. } => ErrorKind::RestoreMismatch,
+            StrHideError::PayloadTooLarge(_) => ErrorKind::PayloadTooLarge,
             StrHideError::UnsupportedFormat(_) => ErrorKind::UnsupportedFormat,
             StrHideError::NoHiddenData(_) => ErrorKind::NoHiddenData,
             StrHideError::UnsupportedVersion(_) => ErrorKind::UnsupportedVersion,
@@ -213,6 +222,7 @@ impl StrHideError {
             StrHideError::RestoreMismatch { .. } => {
                 Some(crate::core::i18n::Msg::ErrRestoreMismatch)
             }
+            StrHideError::PayloadTooLarge(_) => Some(crate::core::i18n::Msg::ErrCapacity),
             StrHideError::UnsupportedFormat(_) | StrHideError::UnsupportedVersion(_) => {
                 Some(crate::core::i18n::Msg::ErrUnsupported)
             }
@@ -231,6 +241,7 @@ impl StrHideError {
             StrHideError::CorruptedData(s)
             | StrHideError::Password(s)
             | StrHideError::Rejection(s)
+            | StrHideError::PayloadTooLarge(s)
             | StrHideError::UnsupportedFormat(s)
             | StrHideError::UnsupportedVersion(s)
             | StrHideError::NoHiddenData(s)
@@ -318,6 +329,7 @@ pub enum ErrorKind {
     TargetBusy,
     SafetyThreshold,
     RestoreMismatch,
+    PayloadTooLarge,
     UnsupportedFormat,
     NoHiddenData,
     UnsupportedVersion,
