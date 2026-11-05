@@ -33,6 +33,9 @@ RAW_STRING_RE = re.compile(r'[bc]?r(#*)"')
 CHAR_LITERAL_RE = re.compile(r"'(?:\\.|[^\\'\n])'")
 IDENT_CHAR_RE = re.compile(r"[A-Za-z0-9_]")
 SUPER_REF_RE = re.compile(r"\bsuper::(?:super::)*([A-Za-z_][A-Za-z0-9_]*)")
+# `use crate::{stego::Thing, ...}` / `use strhide::{...}`: the layer name is
+# one level below the crate root, so the plain `crate::layer` pattern misses it.
+BRACE_GROUP_RE = re.compile(r"\b(?:crate|strhide)::\s*\{")
 
 
 def _blank(text: str) -> str:
@@ -116,6 +119,46 @@ def module_parts(rs_file: Path, src_root: Path) -> list[str]:
     return parts
 
 
+def _matching_brace(code: str, open_index: int) -> int:
+    """Index of the `}` closing the group opened at `open_index`, or -1."""
+    depth = 0
+    for index in range(open_index, len(code)):
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
+
+
+def brace_group_violations(
+    code: str,
+    src_path: str,
+    forbidden_layers: set[str],
+    rule_desc: str,
+) -> list[str]:
+    """Report forbidden layers imported through a `crate::{...}` group."""
+    violations: list[str] = []
+    lines = code.splitlines()
+    for match in BRACE_GROUP_RE.finditer(code):
+        open_index = code.index("{", match.start())
+        close_index = _matching_brace(code, open_index)
+        if close_index < 0:
+            continue
+        group = code[open_index : close_index + 1]
+        for layer in sorted(forbidden_layers):
+            if not re.search(rf"\b{layer}\b", group):
+                continue
+            line_no = code.count("\n", 0, match.start()) + 1
+            violations.append(
+                f"{src_path}:{line_no}: violation of rule '{rule_desc}':\n"
+                f"  {lines[line_no - 1].strip()}"
+            )
+            break
+    return violations
+
+
 def rust_files(root: Path) -> list[Path]:
     if root.is_file():
         return [root]
@@ -163,6 +206,12 @@ def check_tree(
                         f"  {line.strip()}"
                     )
                     break
+
+        violations.extend(
+            brace_group_violations(
+                clean_code, rs_file.as_posix(), forbidden_layers, rule_desc
+            )
+        )
 
     return violations
 
@@ -238,6 +287,39 @@ def run_self_tests() -> int:
             self.write(
                 "core/mod.rs",
                 "// use crate::stego::X;\nlet _ = \"crate::stego\";\n/* crate::stego */\n",
+            )
+            found = check_tree(self.src, self.src / "core", {"stego"}, "core !-> stego")
+            self.assertEqual(found, [])
+
+        def test_brace_group_reference_is_flagged(self) -> None:
+            self.write("core/mod.rs", "use crate::{stego::Thing};\n")
+            found = check_tree(self.src, self.src / "core", {"stego"}, "core !-> stego")
+            self.assertEqual(len(found), 1)
+            self.assertIn("core/mod.rs:1", found[0])
+
+        def test_multiline_brace_group_reports_the_opening_line(self) -> None:
+            self.write(
+                "core/mod.rs",
+                "use crate::{\n    formats::Thing,\n    stego::Other,\n};\n",
+            )
+            found = check_tree(self.src, self.src / "core", {"stego"}, "core !-> stego")
+            self.assertEqual(len(found), 1)
+            self.assertIn("core/mod.rs:1", found[0])
+
+        def test_nested_brace_group_is_flagged(self) -> None:
+            self.write("core/mod.rs", "use crate::{stego::{X, Y}};\n")
+            found = check_tree(self.src, self.src / "core", {"stego"}, "core !-> stego")
+            self.assertEqual(len(found), 1)
+
+        def test_strhide_prefix_brace_group_is_flagged(self) -> None:
+            self.write("analysis.rs", "use strhide::{cli::args};\n")
+            found = check_tree(self.src, self.src / "analysis.rs", {"cli"}, "analysis !-> cli")
+            self.assertEqual(len(found), 1)
+
+        def test_brace_group_without_forbidden_layer_is_allowed(self) -> None:
+            self.write(
+                "core/mod.rs",
+                "use crate::{commit::Thing, stego_like::Other};\n",
             )
             found = check_tree(self.src, self.src / "core", {"stego"}, "core !-> stego")
             self.assertEqual(found, [])

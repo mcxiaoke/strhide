@@ -427,7 +427,8 @@ def check(report: dict, baseline: dict) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--write", action="store_true", help="freeze the current behaviour into baseline.json")
+    ap.add_argument("--write", action="store_true",
+                    help="freeze the current behaviour into baseline.json (full corpus only)")
     ap.add_argument("--check", action="store_true", help="recompute and diff against baseline.json")
     ap.add_argument("--bin", default=None, help="path to the strhide binary")
     ap.add_argument("--out", default=str(DEFAULT_OUT), help="baseline directory (default: temp/baseline)")
@@ -448,6 +449,14 @@ def main() -> int:
     if not args.write and not args.check:
         ap.print_help()
         return 2
+
+    # A filtered run only knows a subset of the corpus; freezing it would
+    # replace the full baseline and make every other case look "missing".
+    if args.write and (args.only or args.limit):
+        ap.error(
+            "--write cannot be combined with --only/--limit: it would replace "
+            "the full baseline with a filtered subset"
+        )
 
     if args.no_seed:
         args.seed = ""
