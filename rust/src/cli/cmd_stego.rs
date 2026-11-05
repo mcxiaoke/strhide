@@ -48,10 +48,9 @@ fn run_capacity_probe(
 
     for carrier in &carriers {
         let t_start = std::time::Instant::now();
-        let carrier_bytes = match std::fs::read(carrier) {
+        let carrier_bytes = match crate::stego::io::read_carrier_file(carrier) {
             Ok(bytes) => bytes,
-            Err(e) => {
-                let err = StrHideError::Io(e);
+            Err(err) => {
                 if is_batch && !quiet {
                     eprintln!(
                         "{}",
@@ -618,7 +617,7 @@ fn extract_one(
     engine: &StrHide,
 ) -> Result<(), StrHideError> {
     let t_start = std::time::Instant::now();
-    let carrier_bytes = std::fs::read(carrier)?;
+    let carrier_bytes = crate::stego::io::read_carrier_file(carrier)?;
 
     // A private no-password dialect is compile-time `Dialect` territory on the
     // engine, not a command-line flag.

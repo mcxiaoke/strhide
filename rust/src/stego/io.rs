@@ -225,7 +225,7 @@ pub fn extract_carrier_file_payload(
     options: &ExtractOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<Payload<'static>, StrHideError> {
-    let carrier_bytes = std::fs::read(carrier_path)?;
+    let carrier_bytes = read_carrier_file(carrier_path)?;
     crate::stego::extract_carrier_payload(&carrier_bytes, options, dialect)
 }
 
@@ -253,7 +253,7 @@ pub fn inspect_carrier_file(
         }
     }
 
-    let carrier_bytes = std::fs::read(carrier_path)?;
+    let carrier_bytes = read_carrier_file(carrier_path)?;
     crate::stego::inspect_carrier_with_dialect(&carrier_bytes, options, dialect)
 }
 
@@ -263,7 +263,7 @@ pub fn probe_carrier_file(
     options: &crate::stego::ProbeOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<crate::stego::StegoCapacityInfo, StrHideError> {
-    let carrier_bytes = std::fs::read(carrier_path)?;
+    let carrier_bytes = read_carrier_file(carrier_path)?;
     crate::stego::probe_carrier_capacity_with_dialect(&carrier_bytes, options, dialect)
 }
 
@@ -273,7 +273,7 @@ pub fn verify_carrier_file(
     options: &crate::stego::VerifyOptions<'_>,
     dialect: &StegoProfile,
 ) -> Result<crate::stego::StegoVerifyResult, StrHideError> {
-    let carrier_bytes = std::fs::read(carrier_path)?;
+    let carrier_bytes = read_carrier_file(carrier_path)?;
     crate::stego::verify_carrier_with_dialect(&carrier_bytes, options, dialect)
 }
 
@@ -322,14 +322,14 @@ fn budget_rejection(message: String) -> StrHideError {
 /// Refuse a carrier that cannot be held in a single buffer at all.
 ///
 /// This is the only gate that can run before the file is read, and it is never
-/// a false positive: the embed path calls `fs::read` on every carrier, so a
-/// file larger than the budget cannot be embedded whatever the engine does
-/// with it afterwards.
+/// a false positive: every whole-file path (embed, extract, inspect, probe,
+/// verify) calls `fs::read` on the carrier, so a file larger than the budget
+/// cannot be processed whatever the engine does with it afterwards.
 fn check_carrier_fits_budget(file_size: u64, budget: u64) -> Result<(), StrHideError> {
     let needed = file_size.saturating_add(BUFFERED_FIXED_BYTES);
     if needed > budget {
         return Err(budget_rejection(format!(
-            "Refusing to embed: this carrier is {:.1} MiB and does not fit the {:.1} MiB budget \
+            "Refusing to process: this carrier is {:.1} MiB and does not fit the {:.1} MiB budget \
              (60% of currently available physical memory) even before decoding. \
              Free memory or use a smaller carrier.",
             file_size as f64 / (1024.0 * 1024.0),
@@ -337,6 +337,20 @@ fn check_carrier_fits_budget(file_size: u64, budget: u64) -> Result<(), StrHideE
         )));
     }
     Ok(())
+}
+
+/// Read a whole carrier file after proving it fits one buffer.
+///
+/// [`read_carrier_for_embed`] applies the same first gate plus the engine's
+/// window estimate; the read-only entry points below only need this one.
+pub(crate) fn read_carrier_file(path: &Path) -> Result<Vec<u8>, StrHideError> {
+    read_carrier_file_with_budget(path, buffered_embed_budget())
+}
+
+fn read_carrier_file_with_budget(path: &Path, budget: u64) -> Result<Vec<u8>, StrHideError> {
+    let file_size = std::fs::metadata(path)?.len();
+    check_carrier_fits_budget(file_size, budget)?;
+    Ok(std::fs::read(path)?)
 }
 
 fn check_buffered_embed_budget_against(
@@ -519,6 +533,27 @@ mod tests {
             check_carrier_fits_budget(budget / 2, budget).is_ok(),
             "a carrier that fits one buffer passes this gate"
         );
+    }
+
+    #[test]
+    fn a_carrier_file_above_the_budget_is_refused_before_the_read() {
+        let path = std::env::temp_dir().join(format!("strhide-budget-{}.bin", std::process::id()));
+        std::fs::write(&path, b"carrier").expect("write scratch carrier");
+        let err = read_carrier_file_with_budget(&path, BUFFERED_FIXED_BYTES - 1).unwrap_err();
+        match err {
+            StrHideError::Rejection(message) => {
+                assert!(
+                    message.contains("does not fit") && message.contains("MiB"),
+                    "names the size and the limit: {message}"
+                );
+            }
+            other => panic!("expected Rejection, got {other:?}"),
+        }
+        assert!(
+            read_carrier_file_with_budget(&path, BUFFERED_FIXED_BYTES + 8).is_ok(),
+            "a carrier that fits one buffer is read normally"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The window, not the file, decides the peak: a long video records the
