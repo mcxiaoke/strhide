@@ -699,13 +699,14 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
             "Envelope of {ciphertext_len} bytes exceeds the {HEADER_LEN_MAX}-byte header length field"
         )));
     }
-    let available = match mapping {
-        // The header and extension are carved out of the same permuted pool.
-        Mapping::Permuted => capacity_total.saturating_sub(header_slots),
-        // FLAC's header lives in subframe tails, a pool disjoint from the body
-        // residuals, so extension slots do not shrink the body budget.
-        Mapping::BodyPermuted => capacity_total.saturating_sub(PNG_AUDIO_BASE_SLOTS),
+    // The header and extension are carved out of the same permuted pool for
+    // WAV. FLAC's header lives in subframe tails, a pool disjoint from the body
+    // residuals, so extension slots do not shrink the body budget.
+    let body_header_slots = match mapping {
+        Mapping::Permuted => header_slots,
+        Mapping::BodyPermuted => PNG_AUDIO_BASE_SLOTS,
     };
+    let available = capacity_total.saturating_sub(body_header_slots);
     let shape = plan_body(
         ciphertext_len,
         available,
@@ -740,7 +741,7 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
     // Safety tier: refuse (or warn by returning the info) before touching bytes.
     let info = capacity_info(
         capacity_total,
-        header_slots,
+        body_header_slots,
         carrier.format_label(),
         safety.level,
         shape.h,
@@ -981,12 +982,13 @@ pub(crate) fn probe<C: SlotCarrier + ?Sized>(
         )));
     }
     let total = carrier.capacity_slots();
-    let available = match mapping {
-        // The header is carved out of the same permuted pool as the body.
-        Mapping::Permuted => total.saturating_sub(header_slots),
-        // FLAC's header lives in subframe tails; the body budget is unchanged.
-        Mapping::BodyPermuted => total.saturating_sub(PNG_AUDIO_BASE_SLOTS),
+    // Mirror `embed`: the report must price the same header slots the writer
+    // carves out, otherwise FLAC with an extension under-reports its body.
+    let body_header_slots = match mapping {
+        Mapping::Permuted => header_slots,
+        Mapping::BodyPermuted => PNG_AUDIO_BASE_SLOTS,
     };
+    let available = total.saturating_sub(body_header_slots);
     if available < 8 {
         return Err(StrHideError::General(format!(
             "Audio carrier too small: {available} body slots available"
@@ -999,7 +1001,7 @@ pub(crate) fn probe<C: SlotCarrier + ?Sized>(
     let h = DEFAULT_STC_H;
     Ok(capacity_info(
         total,
-        header_slots,
+        body_header_slots,
         carrier.format_label(),
         level,
         h,

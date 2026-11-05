@@ -6,7 +6,6 @@
 //! of only that it did. Real-file coverage lives in the ignored
 //! `flac_corpus_validates` harness.
 
-use crate::SafetyPolicy;
 use crate::core::control::Control;
 use crate::core::payload::Payload;
 use crate::crypto::Credential;
@@ -17,6 +16,7 @@ use crate::stego::envelope::{Freshness, PUBLIC_DEFAULT_SECRET};
 use crate::stego::format::{AudioFormatProfile, OFFICIAL_AUDIO_CIPHER};
 use crate::stego::header::Tlv;
 use crate::stego::params::ExtractParams;
+use crate::{SafetyEnforcement, SafetyPolicy};
 
 /// Append `bits` of `value` MSB-first to a growable bit stream.
 struct BitSink {
@@ -550,6 +550,90 @@ fn flac_probe_capacity_is_reachable_by_embed() {
         &control,
     )
     .expect("advertised FLAC capacity must be embeddable");
+}
+
+#[test]
+fn flac_extension_does_not_shrink_reported_body_capacity() {
+    let cover = flac_carrier(600, 256);
+    let control = ctl();
+    let ext = [Tlv {
+        type_id: 0x01,
+        value: vec![0xAB],
+    }];
+    let plain = probe_flac(
+        &cover,
+        cred(None),
+        None,
+        &[],
+        SafetyLevel::High,
+        profile(),
+        &control,
+    )
+    .expect("probe without extension");
+    let with_ext = probe_flac(
+        &cover,
+        cred(None),
+        None,
+        &ext,
+        SafetyLevel::High,
+        profile(),
+        &control,
+    )
+    .expect("probe with extension");
+
+    // FLAC stores the header and extension in subframe tails, a pool disjoint
+    // from the body, so an extension must not shrink the advertised body.
+    assert_eq!(
+        with_ext.max_raw_payload_bytes, plain.max_raw_payload_bytes,
+        "extension slots must not reduce the FLAC body budget"
+    );
+    assert_eq!(
+        with_ext.recommended_max_bytes, plain.recommended_max_bytes,
+        "extension slots must not reduce the FLAC safety tier"
+    );
+
+    // Pass path: the reported tier is still embeddable and extractable.
+    let enforced = SafetyPolicy {
+        level: SafetyLevel::High,
+        enforcement: SafetyEnforcement::Enforced,
+    };
+    let raw = vec![0x5Au8; with_ext.recommended_max_bytes];
+    let (stego, _, _) = embed_flac(
+        &cover,
+        &Payload::bytes(&raw),
+        cred(None),
+        None,
+        suite(),
+        &ext,
+        profile(),
+        enforced,
+        Freshness::default(),
+        &control,
+    )
+    .expect("advertised capacity with an extension must be embeddable");
+    let out =
+        extract_flac(&stego, cred(None), None, profile(), &limits(), &control).expect("extract");
+    assert_eq!(out.as_bytes(), &raw[..]);
+
+    // Reject path: one byte beyond the enforced tier is refused.
+    let too_big = vec![0x5Au8; with_ext.recommended_max_bytes + 1];
+    let err = embed_flac(
+        &cover,
+        &Payload::bytes(&too_big),
+        cred(None),
+        None,
+        suite(),
+        &ext,
+        profile(),
+        enforced,
+        Freshness::default(),
+        &control,
+    )
+    .expect_err("one byte beyond the enforced FLAC tier must fail");
+    assert!(
+        matches!(err, StrHideError::SafetyThreshold { .. }),
+        "{err:?}"
+    );
 }
 
 #[test]
