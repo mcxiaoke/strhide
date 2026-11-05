@@ -1444,6 +1444,9 @@ pub fn write_carrier_with(
     // Fail before the envelope work: a read-only target would otherwise fail
     // the final rename with a misleading `TargetBusy`.
     crate::commit::reject_read_only_target(target_path)?;
+    // Held until the commit finishes: a concurrent writer to the same target
+    // must fail instead of silently replacing this envelope.
+    let _target_lock = crate::commit::TargetLock::acquire(target_path)?;
 
     // 1. Run security rejection checks (carrier policy + target permissions)
     run_rejection_checks(carrier_path, target_path, local.rejection)?;
@@ -2292,6 +2295,8 @@ pub fn remove_carrier_with_dialect(
         crate::core::pipeline::check_overwrite(target_path, options.overwrite)?;
     }
     crate::commit::reject_read_only_target(target_path)?;
+    // Same contract as the write path: one writer per target at a time.
+    let _target_lock = crate::commit::TargetLock::acquire(target_path)?;
 
     let label = carrier_path.display().to_string();
     let tmp_target = temp_path_for(target_path);

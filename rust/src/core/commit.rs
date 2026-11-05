@@ -235,6 +235,73 @@ pub fn reject_read_only_target(target: &Path) -> Result<(), StrHideError> {
     }
 }
 
+/// Cross-process writer lock beside the target.
+///
+/// Two writers that raced on the same carrier each staged a temp file and
+/// renamed it over the target, so the later rename silently replaced the
+/// earlier envelope while both reported success. A hidden
+/// `.<name>.strhide.lock` marker created with `create_new` makes the second
+/// writer fail with [`StrHideError::TargetBusy`] instead.
+///
+/// `create_new` is the mutex: only the creator can remove the marker, so there
+/// is no unlink race, and the guard deletes it on every normal return. An
+/// abnormal exit (kill, panic in a subprocess that owns the guard) leaves the
+/// marker behind; it is diagnostic only, so deleting it when no writer is
+/// running is safe.
+///
+/// Creating the marker can fail for reasons the commit itself will report
+/// better (a missing or read-only output directory), so those failures fall
+/// back to "unlocked" rather than aborting with a lock-specific error.
+#[derive(Debug)]
+pub struct TargetLock {
+    /// `None` when the marker could not be created; the write then runs
+    /// unguarded and fails later with the real filesystem error.
+    path: Option<PathBuf>,
+}
+
+impl TargetLock {
+    /// Lock `target` for the duration of a carrier commit.
+    pub fn acquire(target: &Path) -> Result<Self, StrHideError> {
+        let path = lock_path_for(target);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write as _;
+                let _ = writeln!(file, "{}", std::process::id());
+                Ok(Self { path: Some(path) })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(StrHideError::TargetBusy(target.to_path_buf()))
+            }
+            Err(_) => Ok(Self { path: None }),
+        }
+    }
+}
+
+impl Drop for TargetLock {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// `.<name>.strhide.lock` next to `target`.
+fn lock_path_for(target: &Path) -> PathBuf {
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "carrier".to_string());
+    let dir = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    dir.join(format!(".{name}.strhide.lock"))
+}
+
 /// Safely commit stego bytes to `target_path` with an atomic rename, a
 /// crash-safe temporary file guard, collision-free `.bak` backup on in-place
 /// writes, and preservation of the original carrier's permissions and timestamps.
@@ -557,6 +624,44 @@ mod tests {
 
         assert!(backup.is_none());
         assert_eq!(committed[0..2], [0xAA, 0xBB]);
+    }
+
+    /// Two writers that pick the same target must not both stage and rename:
+    /// the second one fails fast instead of silently replacing the first
+    /// envelope. Releasing the guard makes the target writable again.
+    #[test]
+    fn a_second_writer_on_the_same_target_is_reported_busy() {
+        let dir = scratch_dir("target_lock");
+        let target = dir.join("carrier.bin");
+        std::fs::write(&target, b"carrier").unwrap();
+
+        let marker = dir.join(".carrier.bin.strhide.lock");
+        let first = TargetLock::acquire(&target).expect("first lock");
+        assert!(marker.exists(), "the marker must appear while held");
+        let busy = TargetLock::acquire(&target).expect_err("second lock must fail");
+        drop(first);
+        assert!(!marker.exists(), "the marker must go away on drop");
+        let again = TargetLock::acquire(&target).expect("drop releases the lock");
+        drop(again);
+
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(
+            matches!(busy, StrHideError::TargetBusy(ref path) if path == &target),
+            "expected TargetBusy for the contested target, got {busy:?}"
+        );
+    }
+
+    /// A missing output directory cannot host the marker; acquisition falls
+    /// back to unlocked so the commit reports the real filesystem error.
+    #[test]
+    fn locking_a_target_in_a_missing_directory_is_best_effort() {
+        let dir = scratch_dir("target_lock_missing");
+        let target = dir.join("absent-dir").join("brand-new.bin");
+
+        let lock = TargetLock::acquire(&target).expect("a missing directory is not fatal");
+        drop(lock);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A read-only target used to fail inside `rename_with_retry`, which

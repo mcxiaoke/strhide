@@ -46,6 +46,9 @@ pub fn embed_carrier_file(
     if target.output_path.is_some() {
         check_overwrite(dest, target.overwrite)?;
     }
+    // Held until the commit finishes: a concurrent writer to the same target
+    // must fail instead of silently replacing this payload.
+    let _target_lock = crate::commit::TargetLock::acquire(dest)?;
 
     let (carrier_bytes, format) = read_carrier_for_embed(carrier_path, payload, options, dialect)?;
     let format = format.ok_or_else(|| {
