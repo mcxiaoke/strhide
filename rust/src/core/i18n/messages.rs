@@ -814,6 +814,9 @@ Run `strhide <COMMAND> --help` for the options of one command.",
     WriteWarningNote:
         en = "[WARNING] {warn}",
         zh = "[WARNING] {warn}";
+    WarnUnencryptedWrite:
+        en = "[WARNING] Writing without a password: the envelope uses the built-in public key, so it only hides the payload from casual browsing, not from anyone who knows strhide.",
+        zh = "[WARNING] 未设置密码写入: 信封使用源码内置的公开密钥，仅能防止无意浏览，无法阻止知道 strhide 的人读取。";
     RestoreOk:
         en = "[OK] Hidden data removed, carrier restored: '{carrier}' ({bytes}, took {elapsed})",
         zh = "[OK] 成功清除隐藏数据，宿主已还原: '{carrier}' ({bytes}, 耗时 {elapsed})";

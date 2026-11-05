@@ -184,6 +184,14 @@ pub(crate) fn handle_write(
     let preserve_time = args.preserve_time && cfg.preserve_time.unwrap_or(true);
     let backup = !args.no_backup && cfg.backup.unwrap_or(true);
 
+    // Say it once per run, before any carrier is written: with no password the
+    // envelope falls back to the built-in public key, which is in the source
+    // and therefore grants no confidentiality. stderr keeps this out of
+    // `--quiet` and piped machine output.
+    if password.is_none() && !quiet {
+        eprintln!("{}", t!(Msg::WarnUnencryptedWrite));
+    }
+
     for_each_carrier(&args.carrier, quiet, |carrier| {
         let t_start = std::time::Instant::now();
         let output =

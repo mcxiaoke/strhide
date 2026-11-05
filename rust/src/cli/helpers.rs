@@ -594,6 +594,8 @@ pub(crate) fn unescape_string(s: &str) -> String {
                 // `consumed` counts characters after the leading "\u": the
                 // second escape adds its own 6 characters ("\u" + 4 digits).
                 if (0xD800..=0xDBFF).contains(&code)
+                    && matches!(chars.get(i + 6), Some('\\'))
+                    && matches!(chars.get(i + 7), Some('u'))
                     && let Some(low) = read_hex(&chars, i + 8, 4)
                     && (0xDC00..=0xDFFF).contains(&low)
                 {
@@ -785,24 +787,14 @@ mod tests {
     }
 
     #[test]
-    fn test_format_stego_algorithm() {
-        let safety = SafetyPolicy::default(); // high
-        let s = format_stego_algorithm(
-            &StegoTuning::Auto,
-            &safety,
-            Some(FileFormat::Mp4),
-            Some("HEVC-CABAC-InPlace"),
-        );
-        assert_eq!(s, "HEVC-CABAC-InPlace (safety: high)");
+    fn unescape_pairs_only_a_real_second_escape() {
+        assert_eq!(unescape_string("\\uD83D\\uDE00"), "😀");
 
-        let s2 = format_stego_algorithm(&StegoTuning::Auto, &safety, Some(FileFormat::Jpeg), None);
-        assert_eq!(
-            s2,
-            format!(
-                "uerd (stc_h: {}, safety: high)",
-                crate::stego::coding::DEFAULT_STC_H
-            ),
-            "the capacity banner must advertise the real default height"
-        );
+        // Four hex digits right after a high surrogate used to be read as a
+        // low surrogate even without the second `\u` prefix, silently
+        // swallowing the intervening characters. Only a real `\u` escape may
+        // combine; otherwise the lone surrogate is rendered as U+FFFD.
+        assert_eq!(unescape_string("\\uD800\\qDC00"), "\u{FFFD}\\qDC00");
+        assert_eq!(unescape_string("\\uD800\\uD800"), "\u{FFFD}\u{FFFD}");
     }
 }

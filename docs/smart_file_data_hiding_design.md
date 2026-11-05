@@ -131,7 +131,7 @@
 
 ### 4.2 结构域密钥派生流水线（PBKDF2 + HKDF-SHA256）
 所有落盘信封的元数据与载荷流一律经 AES-256-GCM 密封。
-* 未提供密码时使用内置公开默认密钥：
+* 未提供密码时使用内置公开默认密钥（CLI `write` 会向 stderr 打印警告：无密码信封仅防止无意浏览，不提供机密性）：
   `BUILTIN_DEFAULT_KEY = "strhide::structure::envelope::v2::default::builtin::public::secret"`
 * **派生阶段**：
   1. $\text{IKM} = \text{PBKDF2-HMAC-SHA256}(\text{pwd}_{\text{nfc}} \text{ 或 BUILTIN\_DEFAULT\_KEY}, \text{salt}, 100000, 32)$

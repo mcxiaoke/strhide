@@ -168,6 +168,13 @@ where
                         if idx >= total {
                             break;
                         }
+                        // Re-check after claiming the index: a failure may have
+                        // set `stopped` between the loop-top check and the
+                        // fetch, and `continue_on_error=false` means no new
+                        // work should start once that happens.
+                        if stopped.load(Ordering::SeqCst) {
+                            break;
+                        }
 
                         let path = items[idx].as_ref();
                         let ctrl = Control {
@@ -307,6 +314,48 @@ mod tests {
         assert_eq!(outcome.items.len(), 20);
         assert_eq!(outcome.succeeded, 20);
         assert_eq!(outcome.failed, 0);
+    }
+
+    /// With `continue_on_error = false` several workers can only promise "no
+    /// new work is dispatched"; items already in flight must finish. The
+    /// barrier puts exactly one item on every worker before any of them
+    /// returns, and the failing item returns immediately while the others
+    /// sleep, so the batch that actually runs is the set already dispatched.
+    #[test]
+    fn batch_parallel_stops_dispatching_after_a_failure() {
+        let total = 20;
+        let items: Vec<PathBuf> = (0..total)
+            .map(|i| PathBuf::from(format!("item_{i}")))
+            .collect();
+        let plan = BatchPlan {
+            continue_on_error: false,
+            max_concurrency: 4,
+            cancel: None,
+            ctx: None,
+        };
+        let barrier = std::sync::Barrier::new(plan.max_concurrency);
+
+        let outcome = run_batch(&items, &plan, &NoProgress, |idx, _path, _ctrl| {
+            if idx < plan.max_concurrency {
+                // The first `max_concurrency` claimed indices are one per
+                // worker; waiting here guarantees they are all in flight.
+                barrier.wait();
+            }
+            if idx == 0 {
+                return Err(StrHideError::General("item 0 failed".into()));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            Ok(idx)
+        });
+
+        assert_eq!(outcome.failed, 1);
+        assert_eq!(outcome.succeeded, plan.max_concurrency - 1);
+        assert_eq!(
+            outcome.items.len(),
+            plan.max_concurrency,
+            "no item beyond the ones already dispatched may be started"
+        );
+        assert!(!outcome.cancelled);
     }
 
     #[derive(Default)]
