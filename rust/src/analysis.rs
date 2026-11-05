@@ -287,9 +287,11 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
     // Read whole file (bounded). Above the cap we keep the first
     // `PREFIX_WINDOW` and the last `STRUCT_TAIL_WINDOW` bytes *separately*.
     let (prefix, tail): (Vec<u8>, Option<(u64, Vec<u8>)>) = if file_size <= MAX_FULL_SCAN {
-        let mut f = File::open(path)?;
+        let f = File::open(path)?;
         let mut buf = Vec::with_capacity(file_size as usize);
-        f.read_to_end(&mut buf)?;
+        // The size was checked above, but the file may grow while it is read;
+        // cap the read so a concurrent writer cannot blow past the scan budget.
+        f.take(MAX_FULL_SCAN).read_to_end(&mut buf)?;
         (buf, None)
     } else {
         let mut f = File::open(path)?;
@@ -300,7 +302,7 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
         let tail_offset = file_size.saturating_sub(STRUCT_TAIL_WINDOW as u64);
         f.seek(SeekFrom::Start(tail_offset))?;
         let mut tail = Vec::with_capacity(STRUCT_TAIL_WINDOW);
-        f.read_to_end(&mut tail)?;
+        f.take(STRUCT_TAIL_WINDOW as u64).read_to_end(&mut tail)?;
         (head, Some((tail_offset, tail)))
     };
 

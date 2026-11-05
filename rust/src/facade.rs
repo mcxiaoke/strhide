@@ -962,7 +962,12 @@ impl StegoFacade<'_> {
         overwrite: bool,
     ) -> Result<PathBuf, StrHideError> {
         let payload = extract_carrier_file_payload(carrier, options, &self.engine.dialect().stego)?;
-        let data = payload.data.to_vec();
+        // The extractor usually hands back an owned buffer; taking it avoids a
+        // full payload copy (review B P-10).
+        let data = match payload.data {
+            std::borrow::Cow::Owned(v) => v,
+            std::borrow::Cow::Borrowed(s) => s.to_vec(),
+        };
 
         let final_dest = if output.is_dir() {
             let name = payload

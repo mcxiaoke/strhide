@@ -19,6 +19,7 @@
 //! result against the SHA-256 recorded in the header** before committing. Any
 //! mismatch leaves the original carrier untouched.
 
+use std::borrow::Cow;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -390,9 +391,13 @@ impl<'a> PayloadSource<'a> {
     /// NFC normalization and `Stdin`'s read-once behavior cannot drift between
     /// the one-carrier and many-carrier paths. `Stdin` is consumed by the first
     /// call: buffer it once, then pass [`PayloadSource::Buffered`] per carrier.
-    pub fn into_buffered(self) -> Result<(Vec<u8>, String, bool), StrHideError> {
+    ///
+    /// Already-materialized bytes are returned as [`Cow::Borrowed`]: the write
+    /// path only reads them, so copying a multi-megabyte payload here used to
+    /// double the peak for every carrier (review A P2-09).
+    pub fn into_buffered(self) -> Result<(Cow<'a, [u8]>, String, bool), StrHideError> {
         Ok(match self {
-            PayloadSource::Bytes(b) => (b.to_vec(), "payload.bin".to_string(), true),
+            PayloadSource::Bytes(b) => (Cow::Borrowed(b), "payload.bin".to_string(), true),
             PayloadSource::File(p) => {
                 let mut f = File::open(p)?;
                 let mut b = Vec::new();
@@ -402,19 +407,23 @@ impl<'a> PayloadSource<'a> {
                     .and_then(|s| s.to_str())
                     .unwrap_or("payload.bin")
                     .to_string();
-                (b, name, true)
+                (Cow::Owned(b), name, true)
             }
-            PayloadSource::Text(t) => (normalize_nfc(t).into_bytes(), String::new(), false),
+            PayloadSource::Text(t) => (
+                Cow::Owned(normalize_nfc(t).into_bytes()),
+                String::new(),
+                false,
+            ),
             PayloadSource::Stdin => {
                 let mut b = Vec::new();
                 std::io::stdin().read_to_end(&mut b)?;
-                (b, String::new(), false)
+                (Cow::Owned(b), String::new(), false)
             }
             PayloadSource::Buffered {
                 data,
                 filename,
                 is_file,
-            } => (data.to_vec(), filename.to_string(), is_file),
+            } => (Cow::Borrowed(data), filename.to_string(), is_file),
         })
     }
 }
@@ -1083,10 +1092,8 @@ where
 
                 if strategy.should_compress(raw_size, comp_len) {
                     // Keep the compressed stream and release the raw payload buffer early.
-                    let mut raw = payload_raw_bytes;
-                    raw.clear();
-                    raw.shrink_to_fit();
-                    (compressed_buf, true)
+                    drop(payload_raw_bytes);
+                    (Cow::Owned(compressed_buf), true)
                 } else {
                     // Keep the raw payload and release the compressed buffer early.
                     drop(compressed_buf);

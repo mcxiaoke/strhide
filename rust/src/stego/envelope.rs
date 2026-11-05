@@ -368,17 +368,20 @@ pub fn build_plaintext(payload: &Payload<'_>) -> Result<Vec<u8>, StrHideError> {
     encoder.write_all(&uncompressed)?;
     let compressed = encoder.finish()?;
 
-    let (body, flags) = if compressed.len() < uncompressed.len() {
+    let raw_len = uncompressed.len();
+    let (body, flags) = if compressed.len() < raw_len {
         (
             compressed,
             FLAG_COMPRESSED | (COMPRESSION_DEFLATE << COMPRESSION_SHIFT),
         )
     } else {
-        (uncompressed.clone(), 0u8)
+        // Keep the payload we already built instead of cloning it; `raw_len`
+        // was captured above so the length prefix does not need the buffer.
+        (uncompressed, 0u8)
     };
 
     let mut plaintext = Vec::with_capacity(5 + body.len());
-    plaintext.extend_from_slice(&(uncompressed.len() as u32).to_be_bytes());
+    plaintext.extend_from_slice(&(raw_len as u32).to_be_bytes());
     plaintext.push(flags);
     plaintext.extend_from_slice(&body);
     Ok(plaintext)

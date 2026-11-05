@@ -314,7 +314,6 @@ where
     R: Read + Seek + ?Sized,
 {
     let restore = reader.stream_position()?;
-    let mut buf = Vec::with_capacity(SNIFF_PREFIX_BYTES);
     let outcome = (|| -> std::io::Result<Option<FileFormat>> {
         reader.seek(SeekFrom::Start(0))?;
         let mut chunk = vec![0u8; SNIFF_PREFIX_BYTES];
@@ -327,8 +326,7 @@ where
             filled += n;
         }
         chunk.truncate(filled);
-        buf = chunk;
-        Ok(sniff_bytes(&buf))
+        Ok(sniff_bytes(&chunk))
     })();
     let _ = reader.seek(SeekFrom::Start(restore));
     outcome
