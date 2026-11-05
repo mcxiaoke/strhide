@@ -55,6 +55,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -78,9 +79,33 @@ STRUCTURE_EXTS = {
     "png", "jpg", "jpeg", "webp", "wav", "heic", "heif", "avif",
     "mp4", "mov", "m4v", "mkv", "webm", "zip", "jar", "pdf", "exe", "dll",
 }
-CONTENT_EXTS_DEFAULT = {"png", "jpg", "jpeg", "wav", "flac"}
-CONTENT_EXTS_HEVC = {"heic", "heif", "avif", "mp4", "mov", "m4v", "mkv", "webm", "h265", "hevc", "hevc10"}
-ALL_EXTS = STRUCTURE_EXTS | CONTENT_EXTS_DEFAULT | CONTENT_EXTS_HEVC
+
+# Content-domain algorithms matrix:
+# PNG: HILL (default), S-UNIWARD, MiPOD
+# JPEG: UERD (default), J-UNIWARD, J-MiPOD
+# HEVC: CABAC in-place steganography
+# Audio: PCM / residual steganography
+CONTENT_ALGORITHMS: dict[str, list[str]] = {
+    "png": ["hill", "suniward", "mipod"],
+    "jpg": ["uerd", "juniward", "jmipod"],
+    "jpeg": ["uerd", "juniward", "jmipod"],
+    "hevc": ["cabac"],
+    "h265": ["cabac"],
+    "hevc10": ["cabac"],
+    "heic": ["cabac"],
+    "heif": ["cabac"],
+    "mp4": ["cabac"],
+    "mov": ["cabac"],
+    "m4v": ["cabac"],
+    "mkv": ["cabac"],
+    "webm": ["cabac"],
+    "wav": ["wav_pcm"],
+    "flac": ["flac_residual"],
+}
+
+CONTENT_EXTS_HEVC = {"heic", "heif", "mp4", "mov", "m4v", "mkv", "webm", "h265", "hevc", "hevc10"}
+CONTENT_EXTS = set(CONTENT_ALGORITHMS.keys())
+ALL_EXTS = STRUCTURE_EXTS | CONTENT_EXTS
 
 CORPORA = [
     ("baseline", REPO / "testdata" / "baseline"),
@@ -131,6 +156,29 @@ def run(cmd: list[str], timeout: int) -> tuple[int, str, str]:
         return proc.returncode, proc.stdout, proc.stderr
     except subprocess.TimeoutExpired:
         return 124, "", f"timeout after {timeout}s"
+
+
+def get_binary_version(bin_path: Path) -> str:
+    code, out, err = run([str(bin_path), "-V"], timeout=10)
+    if code == 0 and out.strip():
+        return out.strip()
+    code, out, err = run([str(bin_path), "--version"], timeout=10)
+    if code == 0 and out.strip():
+        return out.strip()
+    return "unknown"
+
+
+def extract_version_hash(version_str: str) -> str | None:
+    # Matches commit: <hash>, e.g. "sth 0.9.0 (commit: 4371dab, built: 2026-11-05T11:41:56Z)"
+    m = re.search(r"commit:\s*([^\s,\)]+)", version_str)
+    if m:
+        val = m.group(1).strip()
+        if val and val.lower() != "unknown":
+            return val
+    m = re.search(r"\b([0-9a-fA-F]{7,40})\b", version_str)
+    if m:
+        return m.group(1)
+    return None
 
 
 def first_error(err: str) -> str:
@@ -267,13 +315,19 @@ def structure_pass(bin_path: Path, orig: Path, work: Path, timeout: int) -> dict
 
 
 def content_pass(
-    bin_path: Path, orig: Path, work: Path, timeout: int, seed: str | None
+    bin_path: Path,
+    orig: Path,
+    work: Path,
+    timeout: int,
+    seed: str | None,
+    algos: list[str],
 ) -> dict:
-    stego = work / f"cstego{orig.suffix}"
-
     code, out, err = run([str(bin_path), "capacity", str(orig), "--json"], timeout)
     if code != 0:
+        if is_unsupported(err):
+            return {"status": "unsupported", "note": first_error(err)}
         return {"status": "failed", "note": first_error(err)}
+
     cap = load_json_line(out)
     result: dict = {"status": "ok"}
     if cap:
@@ -285,27 +339,63 @@ def content_pass(
             result["status"] = "insufficient_capacity"
             return result
 
-    embed_cmd = [str(bin_path), "embed", str(orig), "-t", PAYLOAD_CONTENT,
-                 "-o", str(stego), "--no-backup", "--quiet"]
-    if seed:
-        embed_cmd += ["--seed", seed]
-    code, out, err = run(embed_cmd, timeout)
-    if code != 0:
-        return {"status": "embed_failed", "note": first_error(err), **result}
-    result["stego_size"] = stego.stat().st_size
-    if seed:
-        result["stego_sha256"] = sha256_file(stego)
+    algorithms: dict[str, dict] = {}
+    for algo in algos:
+        stego = work / f"cstego_{algo}{orig.suffix}"
+        embed_cmd = [
+            str(bin_path), "embed", str(orig),
+            "-a", algo,
+            "-t", PAYLOAD_CONTENT,
+            "-o", str(stego),
+            "--no-backup", "--quiet",
+        ]
+        if seed:
+            embed_cmd += ["--seed", seed]
 
-    code, out, err = run(
-        [str(bin_path), "extract", str(stego), "--stdout", "--quiet"], timeout
-    )
-    if code != 0:
-        result["status"] = "extract_failed"
-        result["note"] = first_error(err)
-        return result
-    got = out.strip()
-    result["payload_matches"] = got == PAYLOAD_CONTENT
-    result["payload_sha256"] = hashlib.sha256(got.encode()).hexdigest()
+        code, out, err = run(embed_cmd, timeout)
+        if code != 0:
+            algorithms[algo] = {
+                "status": "embed_failed",
+                "note": first_error(err),
+            }
+            continue
+
+        algo_res: dict = {
+            "status": "ok",
+            "stego_size": stego.stat().st_size,
+        }
+        if seed:
+            algo_res["stego_sha256"] = sha256_file(stego)
+
+        code, out, err = run(
+            [str(bin_path), "extract", str(stego), "--stdout", "--quiet"],
+            timeout,
+        )
+        if code != 0:
+            algo_res["status"] = "extract_failed"
+            algo_res["note"] = first_error(err)
+            algorithms[algo] = algo_res
+            continue
+
+        got = out.strip()
+        algo_res["payload_matches"] = (got == PAYLOAD_CONTENT)
+        algo_res["payload_sha256"] = hashlib.sha256(got.encode()).hexdigest()
+        algorithms[algo] = algo_res
+
+    result["algorithms"] = algorithms
+
+    default_algo = algos[0]
+    if default_algo in algorithms and algorithms[default_algo].get("status") == "ok":
+        result["stego_size"] = algorithms[default_algo]["stego_size"]
+        if seed and "stego_sha256" in algorithms[default_algo]:
+            result["stego_sha256"] = algorithms[default_algo]["stego_sha256"]
+        result["payload_matches"] = algorithms[default_algo].get("payload_matches", True)
+        result["payload_sha256"] = algorithms[default_algo].get("payload_sha256")
+    elif any(a.get("status") == "ok" for a in algorithms.values()):
+        result["status"] = "ok"
+    else:
+        result["status"] = "algorithms_failed"
+
     return result
 
 
@@ -318,12 +408,14 @@ def build_report(bin_path: Path, args) -> dict:
         shutil.rmtree(work_root, ignore_errors=True)
     work_root.mkdir(parents=True, exist_ok=True)
 
+    include_hevc = not args.skip_content_hevc
+
     report = {
-        "schema": 2,
+        "schema": 3,
         "payload_structure": PAYLOAD_STRUCTURE,
         "payload_content": PAYLOAD_CONTENT,
         "seed": args.seed or None,
-        "include_content_hevc": bool(args.include_content_hevc),
+        "include_content_hevc": bool(include_hevc),
         "cases": [],
     }
     total = len(cases)
@@ -351,18 +443,24 @@ def build_report(bin_path: Path, args) -> dict:
         else:
             entry["structure"] = {"status": "skipped", "reason": "format_has_no_structure_domain"}
 
-        content_exts = set(CONTENT_EXTS_DEFAULT)
-        if args.include_content_hevc:
-            content_exts |= CONTENT_EXTS_HEVC
-        if ext in content_exts and entry["orig_size"] <= args.content_max_mb * 1024 * 1024:
+        algos = CONTENT_ALGORITHMS.get(ext)
+        is_hevc = ext in CONTENT_EXTS_HEVC
+        skip_hevc = is_hevc and not include_hevc
+
+        if algos and not skip_hevc and entry["orig_size"] <= args.content_max_mb * 1024 * 1024:
             started = time.time()
-            entry["content"] = content_pass(bin_path, orig, work, args.timeout, args.seed)
+            entry["content"] = content_pass(bin_path, orig, work, args.timeout, args.seed, algos)
             entry["content"]["elapsed_ms"] = int((time.time() - started) * 1000)
 
         report["cases"].append(entry)
         flag = entry["structure"]["status"]
         extra = entry.get("content", {}).get("status", "-")
-        print(f"[{idx}/{total}] {cid}: structure={flag} content={extra}", flush=True)
+        algos_info = ""
+        if "algorithms" in entry.get("content", {}):
+            ok_cnt = sum(1 for a in entry["content"]["algorithms"].values() if a.get("status") == "ok")
+            tot_cnt = len(entry["content"]["algorithms"])
+            algos_info = f" ({ok_cnt}/{tot_cnt} algos)"
+        print(f"[{idx}/{total}] {cid}: structure={flag} content={extra}{algos_info}", flush=True)
 
     if not args.keep_work:
         shutil.rmtree(work_root, ignore_errors=True)
@@ -371,21 +469,22 @@ def build_report(bin_path: Path, args) -> dict:
 
 # Volatile or informational keys that must not fail a `--check`.
 IGNORED_KEYS = {"elapsed_ms", "note", "unsupported", "reason"}
-# Without a seed the content-domain salt is random, so its compressed length and
-# its bytes legitimately differ between runs (measured 6702 vs 6664 bytes on the
-# same JPEG). `check` drops these two keys only when the baseline itself was
-# recorded with `--no-seed`; a seeded baseline compares them strictly.
-UNSEEDED_VOLATILE = {"content.stego_size", "content.stego_sha256"}
 
 
-def flatten(obj: dict, ignored_paths: set[str], prefix: str = "") -> dict:
+def is_unseeded_volatile(path: str) -> bool:
+    return path.endswith(".stego_size") or path.endswith(".stego_sha256") or path in {"stego_size", "stego_sha256"}
+
+
+def flatten(obj: dict, is_seeded: bool, prefix: str = "") -> dict:
     flat = {}
     for key, value in obj.items():
         path = f"{prefix}{key}"
-        if key in IGNORED_KEYS or path in ignored_paths:
+        if key in IGNORED_KEYS:
+            continue
+        if not is_seeded and is_unseeded_volatile(path):
             continue
         if isinstance(value, dict):
-            flat.update(flatten(value, ignored_paths, f"{path}."))
+            flat.update(flatten(value, is_seeded, f"{path}."))
         else:
             flat[path] = value
     return flat
@@ -400,9 +499,9 @@ def check(report: dict, baseline: dict) -> int:
         )
         return 2
 
-    ignored_paths = set() if baseline.get("seed") else set(UNSEEDED_VOLATILE)
-    old = {c["id"]: flatten(c, ignored_paths) for c in baseline["cases"]}
-    new = {c["id"]: flatten(c, ignored_paths) for c in report["cases"]}
+    is_seeded = bool(baseline.get("seed"))
+    old = {c["id"]: flatten(c, is_seeded) for c in baseline["cases"]}
+    new = {c["id"]: flatten(c, is_seeded) for c in report["cases"]}
     diffs = 0
 
     for cid in sorted(set(old) - set(new)):
@@ -434,8 +533,10 @@ def main() -> int:
     ap.add_argument("--out", default=str(DEFAULT_OUT), help="baseline directory (default: temp/baseline)")
     ap.add_argument("--only", default=None, help="only corpora whose name contains this substring")
     ap.add_argument("--limit", type=int, default=0, help="only the first N cases (smoke test)")
-    ap.add_argument("--include-content-hevc", action="store_true",
-                    help="also run content-domain roundtrips on HEVC/HEIF/MP4 (slow, ~12 GB RSS)")
+    ap.add_argument("--skip-content-hevc", action="store_true",
+                    help="skip content-domain roundtrips on HEVC/HEIF/MP4")
+    ap.add_argument("--include-content-hevc", action="store_true", default=True,
+                    help="(default on) include HEVC/HEIF/MP4 content roundtrips")
     ap.add_argument("--content-max-mb", type=int, default=64,
                     help="skip content roundtrips on files larger than this (MB)")
     ap.add_argument("--seed", default=SEED_HEX,
@@ -463,7 +564,14 @@ def main() -> int:
     args.out = Path(args.out)
     args.out.mkdir(parents=True, exist_ok=True)
     bin_path = find_bin(args.bin)
-    print(f"binary: {bin_path}")
+    bin_sha256 = sha256_file(bin_path)
+    bin_version = get_binary_version(bin_path)
+    version_hash = extract_version_hash(bin_version)
+
+    print(f"binary:  {bin_path}")
+    print(f"version: {bin_version}")
+    print(f"sha256:  {bin_sha256}")
+
     src_mtime = newest_source_mtime()
     if bin_path.stat().st_mtime < src_mtime:
         print("warning: binary is older than rust/src — rebuild before freezing a baseline")
@@ -475,6 +583,22 @@ def main() -> int:
             print(f"error: {target} not found; run --write first")
             return 2
         baseline = json.loads(target.read_text(encoding="utf-8"))
+        base_bin = baseline.get("binary")
+        base_path = baseline.get("binary_path") or (base_bin.get("path") if isinstance(base_bin, dict) else base_bin)
+        base_sha = baseline.get("binary_sha256") or (base_bin.get("sha256") if isinstance(base_bin, dict) else None)
+        base_ver = baseline.get("binary_version") or (base_bin.get("version") if isinstance(base_bin, dict) else None)
+        base_copy = baseline.get("binary_copy") or (base_bin.get("copy") if isinstance(base_bin, dict) else None)
+        if base_ver:
+            print(f"baseline version: {base_ver}")
+        if base_sha:
+            print(f"baseline sha256:  {base_sha}")
+        if base_copy:
+            copy_path = args.out / base_copy
+            exists_tag = "present" if copy_path.exists() else "not found"
+            print(f"baseline copy:    {base_copy} ({exists_tag})")
+        if base_sha and base_sha != bin_sha256:
+            print("note: current binary differs from baseline binary (expected when testing refactors)")
+
         # Fail before spending a minute on the corpus: content hashes recorded
         # under a different seed are not comparable at all.
         if baseline.get("seed") != (args.seed or None):
@@ -489,9 +613,31 @@ def main() -> int:
     if args.write:
         report["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         try:
-            report["binary"] = bin_path.relative_to(REPO).as_posix()
+            rel_path = bin_path.relative_to(REPO).as_posix()
         except ValueError:
-            report["binary"] = str(bin_path)
+            rel_path = str(bin_path)
+
+        hash_tag = version_hash or bin_sha256[:8]
+        ext = bin_path.suffix if bin_path.suffix else (".exe" if os.name == "nt" else "")
+        copy_name = f"strhide-{hash_tag}{ext}"
+        copy_dest = args.out / copy_name
+        if bin_path.resolve() != copy_dest.resolve():
+            shutil.copy2(bin_path, copy_dest)
+            print(f"copied binary to {copy_dest}")
+        else:
+            print(f"binary already at {copy_dest}")
+
+        report["binary_path"] = rel_path
+        report["binary_sha256"] = bin_sha256
+        report["binary_version"] = bin_version
+        report["binary_copy"] = copy_name
+        report["binary"] = {
+            "copy": copy_name,
+            "hash": hash_tag,
+            "path": rel_path,
+            "sha256": bin_sha256,
+            "version": bin_version,
+        }
         target = args.out / "baseline.json"
         target.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(f"\nwrote {target} ({len(report['cases'])} cases)")
