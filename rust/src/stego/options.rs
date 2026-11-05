@@ -1136,10 +1136,10 @@ pub struct EmbedOutput {
     pub bytes: Vec<u8>,
     /// Capacity metadata, when the engine computed it while embedding.
     ///
-    /// `None` for PNG and JPEG on purpose: their embedders do not run the
-    /// capacity model, and inventing numbers here (as an earlier sketch did)
-    /// would report a budget nobody actually checked. Call
-    /// [`probe`](crate::stego::probe_carrier_capacity) when the number matters.
+    /// `None` when the engine does not run the capacity model during embed
+    /// (the HEIF thumbnail bridge falls back to a separate encode). PNG, JPEG,
+    /// HEVC and the structure domain do report it from the same pool they
+    /// embed with, so callers must not re-probe those carriers.
     pub capacity: Option<StegoCapacityInfo>,
     /// Exact modification statistics from the embedder, when available.
     pub stats: Option<EmbedStats>,
