@@ -467,6 +467,39 @@ impl StrHide {
         })
     }
 
+    /// Reject a domain write when the carrier already carries payload in either
+    /// domain. This lives here, in the orchestration layer, because `structure`
+    /// and `stego` may not import each other (see `scripts/import_lint.py`).
+    ///
+    /// Silent overwrite is the failure mode this prevents: a second content
+    /// embed replaces the first payload, a structure envelope written on top
+    /// of content payload is lost on the next re-compression, and a dual
+    /// composite carrier no longer restores its original host. Callers that
+    /// genuinely intend to replace an existing payload opt in with `--overwrite`.
+    #[cfg(all(feature = "structure-base", feature = "content-base"))]
+    pub fn ensure_domains_free(
+        &self,
+        carrier: &Path,
+        opts: &DualOptions<'_>,
+    ) -> Result<(), StrHideError> {
+        let diag = self.inspect_any(carrier, opts)?;
+        let mut occupied = Vec::new();
+        if diag.structure.has_hidden_data {
+            occupied.push("structure");
+        }
+        if diag.content.as_ref().is_some_and(|c| c.has_hidden_data) {
+            occupied.push("content");
+        }
+        if occupied.is_empty() {
+            return Ok(());
+        }
+        Err(StrHideError::Rejection(format!(
+            "'{}' already contains {}-domain payload; remove it first (restore/extract) or pass --overwrite to replace it",
+            carrier.display(),
+            occupied.join(" and ")
+        )))
+    }
+
     /// Cross-domain verification.
     pub fn verify_any(
         &self,

@@ -15,7 +15,7 @@ use crate::core::pipeline::{
     resolve_carrier_target,
 };
 use crate::errors::StrHideError;
-use crate::facade::StrHide;
+use crate::facade::{DualOptions, StrHide};
 use crate::structure::registry::find_adapter_or_reject;
 use crate::structure::{
     PayloadSource, ReadOptions, RestoreOptions, WriteOptions, read_carrier_with_dialect,
@@ -131,6 +131,24 @@ pub(crate) fn handle_write(
     // stored filename / is_file flags byte-identical to single-carrier writes.
     let (payload, payload_name, payload_is_file) = payload_source.into_buffered()?;
 
+    // Cross-domain occupancy is decided here, not inside either engine: a
+    // structure envelope layered on content payload makes restore fail, and a
+    // content double-embed silently replaces the earlier payload. Failing in
+    // preflight keeps a multi-carrier batch from half-writing.
+    let dual_opts = DualOptions {
+        password: password.as_deref(),
+        key: None,
+        domain: None,
+        control: Control::none(),
+    };
+    let carrier_ready = |carrier: &Path| -> Result<(), StrHideError> {
+        validate_carrier_format(carrier)?;
+        if !args.overwrite {
+            engine.ensure_domains_free(carrier, &dual_opts)?;
+        }
+        Ok(())
+    };
+
     // Fail before the first carrier is modified when a batch is obviously bad
     // (missing/unrecognized files, duplicate targets, unpermitted overwrites).
     if multi {
@@ -140,7 +158,7 @@ pub(crate) fn handle_write(
             output: args.output.as_deref(),
             output_dir,
             overwrite: args.overwrite,
-            validate: Some(&validate_carrier_format),
+            validate: Some(&carrier_ready),
         })?;
     } else {
         let carrier = &args.carrier[0];
@@ -149,6 +167,7 @@ pub(crate) fn handle_write(
         if let Some(ref t) = target {
             check_overwrite(t, args.overwrite)?;
         }
+        carrier_ready(carrier)?;
     }
 
     // A password hint is incompatible with --stealth: stealth mode requires the

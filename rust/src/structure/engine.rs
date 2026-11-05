@@ -1695,6 +1695,10 @@ fn open_authenticated_at<'a>(
 ) -> Result<AuthenticatedEnvelope<'a>, StrHideError> {
     let (ube_offset, ube_total_size, strategy_name) = location;
 
+    // Captured before the envelope reader borrows `host`; the strip path needs
+    // the physical carrier bound to reject out-of-range header coordinates.
+    let host_len = host.seek(SeekFrom::End(0))?;
+
     let mut ube_stream =
         adapter.open_ube_reader(host, ube_offset, ube_total_size, &strategy_name)?;
 
@@ -1720,7 +1724,7 @@ fn open_authenticated_at<'a>(
         }
     };
     let header = EnvelopeHeader::unpack_with_secrets(&header_bytes, password, profile, &secrets)?;
-    header.validate_against(ube_total_size)?;
+    header.validate_against(ube_total_size, host_len)?;
 
     // `hint_len` is capped at `MAX_HINT_LEN` by `validate_against`, so this
     // allocation is bounded. The raw bytes are kept: they are part of the AAD,
@@ -2027,8 +2031,10 @@ pub fn read_carrier_bytes(
 /// discarded and [`StrHideError::RestoreMismatch`] is returned — usually
 /// because a second envelope was layered on top and must be removed first.
 ///
-/// A password is required only when the envelope was written in stealth mode;
-/// a non-stealth envelope is stripped regardless of password.
+/// A password is required when the envelope was written either encrypted or in
+/// stealth mode: the metadata seal is authenticated before anything is stripped,
+/// and that needs the derived key. A plaintext, non-stealth envelope still
+/// restores without a password.
 ///
 /// When [`RestoreOptions::backup`] is true and the write is in place, a
 /// `<carrier>.bak` file is kept before overwriting.
@@ -2053,9 +2059,10 @@ fn remove_core(
     profile: &StructureProfile,
 ) -> Result<EnvelopeHeader, StrHideError> {
     let password = password.filter(|s| !s.is_empty());
+    let host_len = host.seek(SeekFrom::End(0))?;
     let adapter = find_adapter_or_reject(host, label)?;
-    let loc = locate_envelope(host, adapter, password, profile)?;
-    let (ube_offset, ube_total_size, strategy_name) = match loc {
+    let located = locate_envelope_with_magic(host, adapter, password, profile)?;
+    let (ube_offset, ube_total_size, strategy_name) = match located.location {
         Some(l) => l,
         None => {
             return Err(no_hidden_data_error(
@@ -2067,21 +2074,39 @@ fn remove_core(
         }
     };
 
-    // Read the header through the adapter's virtual envelope stream: for
-    // contiguous envelopes this is a bounded slice of the same bytes the old
-    // seek+read produced; for scattered strategies (pe_codebits) the envelope
-    // has no file offset to seek to.
+    // Decrypt the metadata AEAD before trusting any coordinate from the header.
+    // `patch_offset` and the injection geometry are not covered by the seal, and
+    // the old remove path stripped straight from an unauthenticated header, so a
+    // forged `patch_offset` could drive `strip` outside the carrier. This also
+    // makes `verified_identical` truthful: a header whose metadata seal does not
+    // open is rejected before anything is written.
     let header = {
-        let mut header_bytes = [0u8; HEADER_SIZE];
-        let mut ube_stream =
-            adapter.open_ube_reader(host, ube_offset, ube_total_size, &strategy_name)?;
-        ube_stream.read_exact(&mut header_bytes)?;
-        let header = EnvelopeHeader::unpack_with_profile(&header_bytes, password, profile)?;
-        header.validate_against(ube_total_size)?;
-        header
+        let env = open_authenticated_at(
+            host,
+            adapter,
+            (ube_offset, ube_total_size, strategy_name.clone()),
+            password,
+            profile,
+            located.stealth_header_magic,
+            None,
+        )?;
+        env.header.clone()
     };
 
     let strip_header = strip_coordinates_for_location(&header, ube_offset, &strategy_name)?;
+    // Bound the (possibly relocated) injected region against the physical
+    // carrier. The post-injection coordinates are outside any AEAD, so this is
+    // what stops a forged `inject_offset`/`inject_size` from driving `strip`
+    // past EOF. `envelope_coordinates_agree` also accepts the legitimate shift
+    // of a PNG `chunk` envelope moved by content re-compression.
+    envelope_coordinates_agree(
+        &header,
+        &strategy_name,
+        ube_offset,
+        ube_total_size,
+        host_len,
+    )
+    .map_err(StrHideError::CorruptedData)?;
     adapter.strip(host, out, &strip_header)?;
     Ok(header)
 }
@@ -2379,6 +2404,7 @@ fn inspect_core(
 ) -> Result<InspectResult, StrHideError> {
     host.seek(SeekFrom::Start(0))?;
     let adapter = find_adapter_or_reject(host, label)?;
+    let host_len = host.seek(SeekFrom::End(0))?;
 
     // Measured strategy capacities (design: folds the former `check` command
     // into `inspect`). Adapters that can answer statically ignore the reader;
@@ -2418,7 +2444,7 @@ fn inspect_core(
     let mut header_bytes = [0u8; HEADER_SIZE];
     ube_stream.read_exact(&mut header_bytes)?;
     let header = EnvelopeHeader::unpack_with_profile(&header_bytes, password, profile)?;
-    header.validate_against(ube_total_size)?;
+    header.validate_against(ube_total_size, host_len)?;
 
     let mut hint_bytes: Vec<u8> = Vec::new();
     if header.hint_len > 0 {
@@ -2770,7 +2796,7 @@ fn verify_core(
                             // consistency) before trusting any downstream reads —
                             // a crafted or corrupted header must fail Level 2 with
                             // a domain error instead of being silently accepted.
-                            if let Err(e) = header.validate_against(ube_total_size) {
+                            if let Err(e) = header.validate_against(ube_total_size, file_len) {
                                 (
                                     false,
                                     format!("Envelope header validation failed: {e}"),

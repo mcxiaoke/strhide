@@ -13,7 +13,8 @@ use std::path::Path;
 
 use strhide::errors::StrHideError;
 use strhide::structure::adapters::pe_codebits;
-use strhide::structure::envelope::EnvelopeHeader;
+use strhide::structure::envelope::{EnvelopeHeader, HEADER_SIZE};
+use strhide::structure::params::StructureProfile;
 use strhide::structure::{
     PayloadSource, ReadOptions, RestoreOptions, WriteOptions, inspect_carrier, read_carrier,
     remove_carrier, verify_carrier, write_carrier,
@@ -625,11 +626,25 @@ fn tampered_envelope_fails_cleanly() {
     )
     .expect("write");
 
-    // Flip a byte in the middle of the ciphertext (well past header and meta).
+    // Flip a byte in the payload ciphertext, past the header, hint and the
+    // authenticated metadata seal. Tampering the metadata now fails the AEAD
+    // (F-02), which is a different property from "restore ignores payload
+    // damage", so the byte must land strictly inside the payload region.
     let ins = inspect_carrier(&out, None).expect("inspect");
     let envelope_off = ins.ube_offset.expect("envelope offset") as usize;
+    let header = EnvelopeHeader::unpack_with_profile(
+        &fs::read(&out).unwrap()[envelope_off..envelope_off + HEADER_SIZE],
+        None,
+        &StructureProfile::default(),
+    )
+    .expect("unpack header");
+    let payload_off =
+        envelope_off + HEADER_SIZE + header.hint_len as usize + header.meta_len as usize;
+    let payload_len =
+        res.ube_size as usize - HEADER_SIZE - header.hint_len as usize - header.meta_len as usize;
+    assert!(payload_len > 0, "payload region must exist");
     let mut bytes = fs::read(&out).unwrap();
-    bytes[envelope_off + res.ube_size as usize / 2] ^= 0xFF;
+    bytes[payload_off + payload_len / 2] ^= 0xFF;
     let tampered = dir.join("c.tampered.exe");
     fs::write(&tampered, &bytes).unwrap();
 

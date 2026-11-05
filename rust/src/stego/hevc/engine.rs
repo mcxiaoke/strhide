@@ -426,6 +426,16 @@ fn hevc_header_slots(ext_len: usize) -> usize {
     HEVC_SUPERBLOCK_MIN_SLOTS + hevc_extension_slots(ext_len)
 }
 
+/// Slots the writer must decode before it can place the header and body.
+///
+/// The floor is `HEVC_SUPERBLOCK_POOL_SLOTS`, the same upper bound the reader
+/// records in its first pass. Both sides derive the keyed header permutation
+/// from `recorded_slots.min(POOL_SLOTS)`, so a smaller write window would move
+/// the header to different slot positions and make the carrier unreadable.
+fn hevc_window_target_slots(hdr_slots: usize, desired_body_slots: usize) -> usize {
+    (hdr_slots + desired_body_slots + 128).max(HEVC_SUPERBLOCK_POOL_SLOTS)
+}
+
 /// Serialize the extension area and enforce the HEVC upper bound.
 fn extension_len(extensions: &[Tlv]) -> Result<usize, StrHideError> {
     let len = encode_extension_for_write(extensions)?.len();
@@ -1214,7 +1224,12 @@ pub fn embed_hevc_patches_with_factor_v4(
         (1.0 / non_ref_fraction).max(1.0)
     };
     let desired_body_slots = ((body_needed_slots as f64) * factor).ceil() as usize;
-    let target_slots = hdr_slots + desired_body_slots + 128;
+    // The writer must decode at least as many slots as the reader's first pass
+    // (`StopCondition::MinSlots(HEVC_SUPERBLOCK_POOL_SLOTS)`). Both sides derive
+    // the header permutation from `pool_size = recorded_slots.min(POOL_SLOTS)`;
+    // a smaller write window would place the header over a different pool size
+    // and make small payloads unreadable on large carriers.
+    let target_slots = hevc_window_target_slots(hdr_slots, desired_body_slots);
 
     control.stage(Stage::Decode);
     let record = record_carrier_state(
@@ -4640,6 +4655,60 @@ mod annex_b_parameter_set_tests {
         let mut huge = 0xFFFF_FFFFu32.to_be_bytes().to_vec();
         huge.push(0);
         assert!(!sample_prefix_has_inter(&huge, 4));
+    }
+}
+
+/// F-01 regression: the writer's decode window must never fall below the
+/// reader's fixed `HEVC_SUPERBLOCK_POOL_SLOTS` header pool.
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    #[test]
+    fn writer_window_never_drops_below_the_reader_pool() {
+        let hdr = hevc_header_slots(0);
+        // Even with no body at all the window must cover the reader's pool.
+        assert_eq!(hevc_window_target_slots(hdr, 0), HEVC_SUPERBLOCK_POOL_SLOTS);
+        // A body larger than the pool keeps its own demand.
+        assert_eq!(hevc_window_target_slots(hdr, 4096), hdr + 4096 + 128);
+    }
+
+    /// A multi-picture carrier where one picture is smaller than the reader
+    /// pool: without the floor, `TargetSlots(652)` stops after the first
+    /// picture (~650 slots) and places the header over a 650-slot permutation,
+    /// while extraction scans 2048 slots and reads nothing.
+    #[test]
+    fn write_and_read_record_the_same_pool_for_a_multipicture_carrier() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/assets/tiny40.hevc");
+        let frame = std::fs::read(&path).expect("read tiny40.hevc");
+        let mut carrier = Vec::new();
+        for _ in 0..64 {
+            carrier.extend_from_slice(&frame);
+        }
+        let kind = sniff_hevc_carrier(&carrier).expect("annex-b carrier");
+        let target = hevc_window_target_slots(hevc_header_slots(0), 0);
+        let write = record_carrier_state(
+            &carrier,
+            kind,
+            Capture::Full,
+            StopCondition::TargetSlots(target),
+            &Control::none(),
+        )
+        .expect("write record");
+        let read = record_carrier_state(
+            &carrier,
+            kind,
+            Capture::Bits,
+            StopCondition::MinSlots(HEVC_SUPERBLOCK_POOL_SLOTS),
+            &Control::none(),
+        )
+        .expect("read record");
+        assert_eq!(
+            write.total_slots().min(HEVC_SUPERBLOCK_POOL_SLOTS),
+            read.total_slots().min(HEVC_SUPERBLOCK_POOL_SLOTS),
+            "writer and reader must derive the header permutation from the same pool"
+        );
     }
 }
 

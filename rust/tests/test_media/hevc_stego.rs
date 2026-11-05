@@ -9,8 +9,8 @@ use strhide::stego::Freshness;
 use strhide::stego::header::Tlv;
 use strhide::stego::hevc::heif_boxes::parse_heif_targets;
 use strhide::stego::hevc::{
-    embed_hevc, embed_hevc_with_info_v4, extract_hevc, extract_hevc_v4, probe_hevc_capacity,
-    probe_hevc_capacity_ext, probe_hevc_capacity_info,
+    embed_hevc, embed_hevc_with_info, embed_hevc_with_info_v4, extract_hevc, extract_hevc_v4,
+    probe_hevc_capacity, probe_hevc_capacity_ext, probe_hevc_capacity_info,
 };
 use strhide::stego::params::{ExtractParams, SafetyPolicy};
 use strhide::{StrHideError, stego::format::DEFAULT_HEVC_FORMAT};
@@ -507,4 +507,54 @@ fn test_hevc_embed_capacity_report_matches_probe() {
     assert_eq!(info.max_raw_payload_bytes, probe.max_raw_payload_bytes);
     assert_eq!(info.tier_limits, probe.tier_limits);
     assert_eq!(info.recommended_max_bytes, probe.recommended_max_bytes);
+}
+
+/// Regression (F-01): the writer's decode window must never stop below the
+/// reader's fixed `HEVC_SUPERBLOCK_POOL_SLOTS` (2048) header pool. On a carrier
+/// with more slots than a small payload needs, the old balanced window stopped
+/// early and derived the header permutation from a smaller pool than extraction
+/// did, so embedding returned success but the payload was unreadable forever.
+///
+/// The assertion on `available_slots > 2048` keeps the case honest: a fixture
+/// that fits inside the reader pool cannot exercise the mismatch at all.
+#[test]
+fn test_hevc_balanced_small_payload_roundtrip() {
+    // Build a multi-picture Annex-B stream by repeating a 40x40 HEVC picture
+    // (~650 sign slots). A single picture is smaller than the reader's 2048-slot
+    // pool, so the old write window stopped after one picture and derived the
+    // header permutation from ~650 slots, while extraction derived it from 2048.
+    // A single still image cannot stop the window early at all, so the mismatch
+    // needs a multi-picture carrier.
+    let frame_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/assets/tiny40.hevc");
+    let frame = fs::read(&frame_path).expect("read tiny40.hevc");
+    let mut carrier = Vec::new();
+    for _ in 0..64 {
+        carrier.extend_from_slice(&frame);
+    }
+    let fmt = &DEFAULT_HEVC_FORMAT;
+    let policy = SafetyPolicy {
+        level: strhide::stego::SafetyLevel::Balanced,
+        ..SafetyPolicy::new()
+    };
+    let payload = b"balanced-small";
+    let (stego, info, _stats) = embed_hevc_with_info(
+        &carrier,
+        &Payload::bytes(payload),
+        Some("balanced-pw"),
+        None,
+        fmt,
+        Freshness::Random,
+        policy,
+        &Control::none(),
+    )
+    .expect("balanced small payload must embed");
+    assert!(
+        info.available_slots > 2048,
+        "fixture must exceed the reader pool to exercise the window/pool mismatch, got {} slots",
+        info.available_slots
+    );
+    assert_eq!(stego.len(), carrier.len(), "Δ = 0 must hold");
+    let extracted = extract_hevc(&stego, Some("balanced-pw"), None, fmt, &Control::none())
+        .expect("balanced small payload must be extractable");
+    assert_eq!(extracted.as_bytes(), payload);
 }

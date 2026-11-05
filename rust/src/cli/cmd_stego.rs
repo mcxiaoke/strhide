@@ -7,6 +7,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::core::config::FileConfig;
+use crate::core::control::Control;
 use crate::core::i18n::Msg;
 use crate::core::payload::Payload;
 use crate::core::pipeline::{
@@ -14,7 +15,7 @@ use crate::core::pipeline::{
     resolve_carrier_target,
 };
 use crate::errors::StrHideError;
-use crate::facade::StrHide;
+use crate::facade::{DualOptions, StrHide};
 use crate::stego::SafetyEnforcement;
 use crate::t;
 
@@ -289,6 +290,22 @@ pub(crate) fn handle_embed(
 
     let multi = args.carrier.len() > 1;
     let output_dir = batch_output_dir(args.output.as_deref(), multi, "embedding into")?;
+    // Cross-domain occupancy is an orchestration decision: the structure and
+    // content engines cannot inspect each other. Do it in preflight so a
+    // multi-carrier batch fails before the first carrier is modified.
+    let dual_opts = DualOptions {
+        password: password.as_deref(),
+        key: key.as_ref(),
+        domain: None,
+        control: Control::none(),
+    };
+    let carrier_ready = |carrier: &Path| -> Result<(), StrHideError> {
+        validate_stego_carrier_format(carrier)?;
+        if !args.overwrite {
+            engine.ensure_domains_free(carrier, &dual_opts)?;
+        }
+        Ok(())
+    };
     if multi {
         preflight_batch(BatchPreflight {
             carriers: &args.carrier,
@@ -297,7 +314,7 @@ pub(crate) fn handle_embed(
             output_dir,
             // A dry run writes nothing, so the overwrite pre-check does not apply.
             overwrite: args.dry_run || args.overwrite,
-            validate: Some(&validate_stego_carrier_format),
+            validate: Some(&carrier_ready),
         })?;
     } else {
         let carrier = &args.carrier[0];
@@ -313,7 +330,7 @@ pub(crate) fn handle_embed(
                 carrier.display()
             )));
         }
-        validate_stego_carrier_format(carrier)?;
+        carrier_ready(carrier)?;
         if !args.dry_run {
             let target =
                 resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;

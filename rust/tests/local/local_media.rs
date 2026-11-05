@@ -122,12 +122,14 @@ pub mod heif_hidden_item {
                 .expect("read");
                 assert_eq!(read_res.data, payload);
 
-                // Strip / remove and check 100% bit-exact restoration
+                // Strip / remove and check 100% bit-exact restoration. The
+                // metadata seal is authenticated before stripping (F-02), so
+                // an encrypted envelope now needs the same password as `read`.
                 let remove_res = remove_carrier(
                     &target_path,
                     &RestoreOptions {
                         output_path: None,
-                        password: None,
+                        password: Some("heif-pass"),
                         backup: false,
                         overwrite: false,
                         ..Default::default()
@@ -177,11 +179,13 @@ pub mod heif_hidden_item {
                 .expect("read");
                 assert_eq!(read_res.data, payload);
 
+                // Encrypted envelope: the metadata seal is checked before
+                // stripping (F-02), so restore needs the password.
                 let remove_res = remove_carrier(
                     &target_path,
                     &RestoreOptions {
                         output_path: None,
-                        password: None,
+                        password: Some("heif-pass"),
                         backup: false,
                         overwrite: false,
                         ..Default::default()

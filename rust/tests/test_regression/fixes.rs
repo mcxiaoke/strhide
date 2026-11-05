@@ -18,17 +18,19 @@ fn make_minimal_png() -> Vec<u8> {
 use rand::RngExt;
 
 use strhide::core::payload::Payload;
-use strhide::crypto::compute_sha256;
+use strhide::crypto::{compute_sha256, decrypt_metadata, derive_keys, encrypt_metadata};
 use strhide::errors::StrHideError;
 use strhide::params::{LocalParams, MagicPair};
 use strhide::stego::{EmbedOptions, embed_carrier};
 use strhide::structure::adapters::zip::find_eocd_offset;
-use strhide::structure::envelope::{EnvelopeHeader, EnvelopeTrailer, MAX_HINT_LEN};
+use strhide::structure::envelope::{
+    EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE as ENVELOPE_HEADER_SIZE, MAX_HINT_LEN,
+};
 use strhide::structure::params::StructureProfile;
 use strhide::structure::{
-    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, read_carrier, read_carrier_bytes,
-    remove_carrier, remove_carrier_bytes, sanitize_filename, verify_carrier, verify_carrier_bytes,
-    write_carrier, write_carrier_bytes,
+    PayloadSource, ReadOptions, RestoreOptions, WriteOptions, inspect_carrier_bytes, read_carrier,
+    read_carrier_bytes, remove_carrier, remove_carrier_bytes, sanitize_filename, verify_carrier,
+    verify_carrier_bytes, write_carrier, write_carrier_bytes,
 };
 
 // --------------------------------------------------------------------------- helpers
@@ -732,7 +734,7 @@ fn header_validate_against_rejects_oversized_hint() {
         hint_len: MAX_HINT_LEN + 1,
         ..Default::default()
     };
-    assert!(h.validate_against(1 << 20).is_err());
+    assert!(h.validate_against(1 << 20, 1 << 21).is_err());
 }
 
 #[test]
@@ -1034,6 +1036,8 @@ fn png_chunk_envelope_survives_content_recompression_in_all_dialects() {
         // Prove `strip` uses the *located* offset: rewrite the recorded host to
         // the content-stego carrier (stego2 minus the private chunk) and retry.
         // Stale coordinates would cut at the old offset and still mismatch.
+        // The digest sits inside the metadata AAD, so re-sealing is mandatory:
+        // remove rejects a header whose metadata tag no longer opens.
         let expected_host = remove_png_chunk(&stego2, chunk_start, chunk_len);
         let mut patched = stego2.clone();
         let mut header2 = EnvelopeHeader::unpack_with_profile(
@@ -1042,12 +1046,34 @@ fn png_chunk_envelope_survives_content_recompression_in_all_dialects() {
             profile,
         )
         .expect("unpack header2");
+        let old_aad = header2.auth_aad(&[]);
+        let meta_off = data_off + 112;
+        let meta_len = header2.meta_len as usize;
+        let meta_key = match password {
+            Some(pwd) => derive_keys(pwd, &header2.salt).expect("derive keys").1,
+            None => {
+                derive_keys(profile.secret(), &header2.salt)
+                    .expect("derive keys")
+                    .1
+            }
+        };
+        let meta_plain = decrypt_metadata(
+            &patched[meta_off..meta_off + meta_len],
+            &meta_key,
+            &header2.base_nonce,
+            &old_aad,
+        )
+        .expect("decrypt metadata");
         header2.orig_host_size = expected_host.len() as u64;
         header2.orig_host_sha256 = compute_sha256(&expected_host);
+        let new_aad = header2.auth_aad(&[]);
+        let meta_cipher = encrypt_metadata(&meta_plain, &meta_key, &header2.base_nonce, &new_aad)
+            .expect("re-seal metadata");
         let packed = header2
             .pack_with_profile(password, profile)
             .expect("repack header");
         patched[data_off..data_off + 112].copy_from_slice(&packed);
+        patched[meta_off..meta_off + meta_len].copy_from_slice(&meta_cipher);
 
         let (restored, result) = remove_carrier_bytes(&patched, password, profile)
             .unwrap_or_else(|e| panic!("{label}: restore failed after header patch: {e}"));
@@ -1088,4 +1114,149 @@ fn write_rejects_bmff_host_without_explicit_sized_box() {
         "unexpected error: {err}"
     );
     assert!(!out.exists(), "a rejected host must not produce output");
+}
+
+/// F-02: the restored output is committed only after the envelope metadata
+/// AEAD opens. A forged `orig_host_sha256` (which is inside the AAD) must be
+/// rejected before the temp file replaces the carrier.
+#[test]
+fn remove_rejects_forged_host_digest_before_rename() {
+    let dir = scratch("f02_forged_digest");
+    let profile = StructureProfile::default();
+    let cover = include_bytes!("../assets/small.png").to_vec();
+    let (stego, _) = write_carrier_bytes(
+        &cover,
+        PayloadSource::Text("f02 digest payload"),
+        &WriteOptions {
+            output_path: None,
+            strategy: "auto",
+            ..Default::default()
+        },
+        &LocalParams::new(),
+        &profile,
+    )
+    .expect("write envelope");
+
+    let inspected =
+        inspect_carrier_bytes(&stego, None, &profile).expect("inspect forged-free carrier");
+    let ube_offset = inspected.ube_offset.expect("envelope offset") as usize;
+    let mut header = EnvelopeHeader::unpack_with_profile(
+        &stego[ube_offset..ube_offset + ENVELOPE_HEADER_SIZE],
+        None,
+        &profile,
+    )
+    .expect("unpack header");
+    header.orig_host_sha256[0] ^= 0x01;
+    let mut forged = stego.clone();
+    forged[ube_offset..ube_offset + ENVELOPE_HEADER_SIZE]
+        .copy_from_slice(&header.pack_with_profile(None, &profile).expect("repack"));
+
+    let carrier = dir.join("carrier.png");
+    fs::write(&carrier, &forged).unwrap();
+    let forged_sha = compute_sha256(&fs::read(&carrier).unwrap());
+    let out = dir.join("restored.png");
+
+    let err = remove_carrier(
+        &carrier,
+        &RestoreOptions {
+            output_path: Some(&out),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, StrHideError::Password(_)),
+        "forged digest must fail metadata authentication, got {err}"
+    );
+    assert!(!out.exists(), "no restored file may exist after rejection");
+    assert_eq!(
+        compute_sha256(&fs::read(&carrier).unwrap()),
+        forged_sha,
+        "the carrier must not be modified before authentication"
+    );
+}
+
+/// F-02: `patch_offset` and the injection geometry are outside the AAD, so
+/// they need explicit physical bounds. Values at or near 4 GiB must be
+/// rejected by `validate_against`, never handed to `strip`.
+#[test]
+fn remove_rejects_out_of_bounds_patch_offset_and_injection_region() {
+    let profile = StructureProfile::default();
+    let zip = include_bytes!("../assets/small.zip").to_vec();
+    let (stego, _) = write_carrier_bytes(
+        &zip,
+        PayloadSource::Text("f02 zip payload"),
+        &WriteOptions {
+            output_path: None,
+            password: Some("f02-zip-pw"),
+            strategy: "auto",
+            ..Default::default()
+        },
+        &LocalParams::new(),
+        &profile,
+    )
+    .expect("write zip envelope");
+    let inspected =
+        inspect_carrier_bytes(&stego, Some("f02-zip-pw"), &profile).expect("inspect zip carrier");
+    let ube_offset = inspected.ube_offset.expect("envelope offset") as usize;
+    let base_header = EnvelopeHeader::unpack_with_profile(
+        &stego[ube_offset..ube_offset + ENVELOPE_HEADER_SIZE],
+        Some("f02-zip-pw"),
+        &profile,
+    )
+    .expect("unpack zip header");
+    assert_ne!(base_header.patch_offset, 0, "zip must carry a patch field");
+
+    let host_len = stego.len() as u32;
+    for forged_patch in [u32::MAX - 3, u32::MAX, host_len + 100] {
+        let mut header = base_header.clone();
+        header.patch_offset = forged_patch;
+        let mut forged = stego.clone();
+        forged[ube_offset..ube_offset + ENVELOPE_HEADER_SIZE].copy_from_slice(
+            &header
+                .pack_with_profile(Some("f02-zip-pw"), &profile)
+                .unwrap(),
+        );
+        let err = remove_carrier_bytes(&forged, Some("f02-zip-pw"), &profile).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("Patch field at offset"),
+            "patch_offset {forged_patch} must fail the physical bound, got {err}"
+        );
+    }
+
+    // A geometry whose end overflows or lands past the carrier must also fail.
+    // The offset must still agree with the located envelope; only the size is
+    // inflated, so the rejection comes from the EOF bound rather than the
+    // coordinate-agreement check.
+    let declared_offset = ube_offset as u64 - u64::from(base_header.offset_delta);
+    for (inject_offset, inject_size) in [
+        (u64::MAX - 63, 200u64),
+        (declared_offset, stego.len() as u64 + 1000),
+    ] {
+        let mut header = base_header.clone();
+        header.inject_offset = inject_offset;
+        header.inject_size = inject_size;
+        let mut forged = stego.clone();
+        forged[ube_offset..ube_offset + ENVELOPE_HEADER_SIZE].copy_from_slice(
+            &header
+                .pack_with_profile(Some("f02-zip-pw"), &profile)
+                .unwrap(),
+        );
+        let err = remove_carrier_bytes(&forged, Some("f02-zip-pw"), &profile).unwrap_err();
+        let message = err.to_string().to_lowercase();
+        assert!(
+            (message.contains("injected") || message.contains("injection"))
+                && (message.contains("past the end")
+                    || message.contains("overflow")
+                    || message.contains("inconsistent injection coordinates")),
+            "injection ({inject_offset}, {inject_size}) must fail the physical bound, got {err}"
+        );
+    }
+
+    // The untouched carrier still restores normally.
+    let (restored, result) =
+        remove_carrier_bytes(&stego, Some("f02-zip-pw"), &profile).expect("normal restore");
+    assert_eq!(restored, zip);
+    assert!(result.verified_identical);
 }

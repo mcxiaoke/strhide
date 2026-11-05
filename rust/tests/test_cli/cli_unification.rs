@@ -1071,3 +1071,151 @@ fn subcommand_short_aliases_work() {
     let l = run(&dir, &["l"]);
     assert_eq!(code(&l), 0, "stderr: {}", stderr(&l));
 }
+
+/// F-03: a carrier that already holds content payload must not be embedded a
+/// second time without `--overwrite`; the old path silently replaced the first
+/// payload while reporting success.
+#[test]
+fn embed_rejects_second_content_payload_without_overwrite() {
+    let dir = scratch("f03_content_double_embed");
+    seed_stego(&dir, &["carrier.png"]);
+
+    let first = run(
+        &dir,
+        &[
+            "embed",
+            "carrier.png",
+            "-t",
+            "first payload",
+            "-o",
+            "first.png",
+        ],
+    );
+    assert_eq!(code(&first), 0, "stderr: {}", stderr(&first));
+
+    let second = run(
+        &dir,
+        &[
+            "embed",
+            "first.png",
+            "-t",
+            "second payload",
+            "-o",
+            "second.png",
+        ],
+    );
+    assert_eq!(code(&second), 1, "stderr: {}", stderr(&second));
+    let err = stderr(&second);
+    assert!(
+        err.contains("content-domain payload") && err.contains("--overwrite"),
+        "conflict must name the content domain: {err}"
+    );
+    assert!(!dir.join("second.png").exists(), "no output on rejection");
+
+    // The original payload is still readable and untouched.
+    let extract = run(&dir, &["extract", "first.png", "--stdout"]);
+    assert_eq!(code(&extract), 0, "stderr: {}", stderr(&extract));
+    assert_eq!(stdout(&extract).trim(), "first payload");
+
+    // Explicit opt-in still replaces the payload.
+    let forced = run(
+        &dir,
+        &[
+            "embed",
+            "first.png",
+            "-t",
+            "second payload",
+            "-o",
+            "second.png",
+            "--overwrite",
+        ],
+    );
+    assert_eq!(code(&forced), 0, "stderr: {}", stderr(&forced));
+    let extract_forced = run(&dir, &["extract", "second.png", "--stdout"]);
+    assert_eq!(
+        code(&extract_forced),
+        0,
+        "stderr: {}",
+        stderr(&extract_forced)
+    );
+    assert_eq!(stdout(&extract_forced).trim(), "second payload");
+}
+
+/// F-03: a structure envelope written on top of content payload produces a
+/// composite carrier whose `restore` no longer verifies. Reject it in
+/// preflight, before any output is created.
+#[test]
+fn write_rejects_structure_on_content_domain_without_overwrite() {
+    let dir = scratch("f03_structure_on_content");
+    seed_stego(&dir, &["carrier.png"]);
+
+    let embed = run(
+        &dir,
+        &[
+            "embed",
+            "carrier.png",
+            "-t",
+            "content payload",
+            "-o",
+            "stego.png",
+        ],
+    );
+    assert_eq!(code(&embed), 0, "stderr: {}", stderr(&embed));
+
+    let write = run(&dir, &["write", "stego.png", "-t", "structure payload"]);
+    assert_eq!(code(&write), 1, "stderr: {}", stderr(&write));
+    let err = stderr(&write);
+    assert!(
+        err.contains("content-domain payload") && err.contains("--overwrite"),
+        "conflict must name the content domain: {err}"
+    );
+    assert!(
+        !dir.join("stego-out.png").exists(),
+        "no structure output may be created on rejection"
+    );
+}
+
+/// F-03: content payload embedded on top of a structure envelope also builds a
+/// dual composite, which then loses the structure domain on re-compression.
+#[test]
+fn embed_rejects_content_on_structure_domain_without_overwrite() {
+    let dir = scratch("f03_content_on_structure");
+    seed(&dir, &["carrier.png"]);
+
+    let write = run(
+        &dir,
+        &[
+            "write",
+            "carrier.png",
+            "-t",
+            "structure payload",
+            "--in-place",
+            "--no-backup",
+        ],
+    );
+    assert_eq!(code(&write), 0, "stderr: {}", stderr(&write));
+
+    let embed = run(
+        &dir,
+        &[
+            "embed",
+            "carrier.png",
+            "-t",
+            "content payload",
+            "-o",
+            "stego.png",
+        ],
+    );
+    assert_eq!(code(&embed), 1, "stderr: {}", stderr(&embed));
+    let err = stderr(&embed);
+    assert!(
+        err.contains("structure-domain payload") && err.contains("--overwrite"),
+        "conflict must name the structure domain: {err}"
+    );
+    assert!(!dir.join("stego.png").exists(), "no output on rejection");
+
+    // The single-domain structure payload still reads normally.
+    let read = run(&dir, &["read", "carrier.png", "--stdout"]);
+    assert_eq!(code(&read), 0, "stderr: {}", stderr(&read));
+    assert_eq!(stdout(&read).trim(), "structure payload");
+}

@@ -257,7 +257,12 @@ impl EnvelopeHeader {
     /// Envelope metadata is untrusted input: a corrupted or crafted header must
     /// never drive huge allocations or unsigned underflow downstream. Callers
     /// must invoke this before sizing any buffer from `hint_len` / `meta_len`.
-    pub fn validate_against(&self, ube_total_size: u64) -> Result<(), StrHideError> {
+    ///
+    /// `host_len` is the physical size of the carrier the header came from.
+    /// The post-injection coordinates are not covered by any AEAD, so this is
+    /// the only place that can reject a `patch_offset` or injection range that
+    /// points outside the carrier before a strip uses it.
+    pub fn validate_against(&self, ube_total_size: u64, host_len: u64) -> Result<(), StrHideError> {
         if self.version != CURRENT_VERSION {
             return Err(StrHideError::CorruptedData(format!(
                 "Unsupported envelope version {:#04x} (expected {:#04x})",
@@ -326,6 +331,18 @@ impl EnvelopeHeader {
                 "Patch offset {} cannot hold a four-byte field",
                 self.patch_offset
             )));
+        }
+        // `patch_offset` is a carrier-file coordinate chosen at write time and
+        // is not authenticated. A forged value must never make `strip` seek or
+        // write past the carrier; the 4-byte field has to fit in `host_len`.
+        if self.patch_offset != 0 {
+            let patch_end = u64::from(self.patch_offset) + 4;
+            if patch_end > host_len {
+                return Err(StrHideError::CorruptedData(format!(
+                    "Patch field at offset {} (+4) exceeds carrier length {}",
+                    self.patch_offset, host_len
+                )));
+            }
         }
         Ok(())
     }
