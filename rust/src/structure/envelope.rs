@@ -661,15 +661,29 @@ impl EnvelopeHeader {
 
     /// Whether `data` looks like an unmasked envelope header.
     ///
-    /// The version is deliberately not checked here: a forged header with an
-    /// unsupported version must still reach the level-2 check so the user gets
-    /// an "unsupported version" diagnostic instead of a generic parse failure.
-    /// `strategy_id` starts at 1: 0 is not a registered strategy and accepting
-    /// it widens the coincidental-match window on the de-mask path.
+    /// The gate must be strong enough that a *masked* default header cannot
+    /// slip through by coincidence: the mask covers version/flags/strategy/
+    /// offset_delta and every numeric field checked here, and the old
+    /// two-field form (`strategy_id`, `offset_delta`) had roughly a 1-in-40k
+    /// chance of matching masked bytes, which made an unreadable envelope.
+    ///
+    /// A bare header with an unsupported version no longer passes; masked
+    /// headers still reach the level-2 verifier through the default de-mask
+    /// path, where the specific "unsupported version" diagnostic is produced.
     fn is_plausible_bare_header(data: &[u8]) -> bool {
+        const KNOWN_FLAGS: u8 = FLAG_ENCRYPTED
+            | FLAG_COMPRESSED
+            | FLAG_IS_FILE
+            | FLAG_STEALTH
+            | FLAG_HAS_HINT
+            | FLAG_COMPACT_META;
         data.len() >= HEADER_SIZE
+            && data[8] == CURRENT_VERSION
+            && data[9] & !KNOWN_FLAGS == 0
             && (1..=MAX_KNOWN_STRATEGY_ID).contains(&data[10])
             && data[11] <= MAX_OFFSET_DELTA
+            && u32::from_le_bytes([data[104], data[105], data[106], data[107]]) <= MAX_META_LEN
+            && u32::from_le_bytes([data[108], data[109], data[110], data[111]]) <= MAX_HINT_LEN
     }
 }
 
@@ -873,6 +887,55 @@ mod tests {
         let parsed = EnvelopeHeader::unpack_with_profile(&packed, None, &profile).unwrap();
         assert_eq!(parsed.strategy_id, 5);
         assert!(parsed.is_encrypted());
+    }
+
+    /// P2 F-14: masked default headers used to pass the bare gate on
+    /// `strategy_id`/`offset_delta` alone, so ~1 in 40k password-less envelopes
+    /// were read as a garbage "bare" header. The strengthened gate also checks
+    /// version, known flags, `meta_len` and `hint_len`; a masked header must
+    /// still be recognised through the default de-mask, and none of the
+    /// out-of-range fields may qualify as bare.
+    #[test]
+    fn masked_header_does_not_pass_the_bare_gate_on_shape_alone() {
+        let profile = StructureProfile::default();
+        let header = EnvelopeHeader {
+            strategy_id: 5,
+            meta_len: 4096,
+            hint_len: 32,
+            ..Default::default()
+        };
+        let mask = crate::crypto::derive_header_mask(profile.secret(), &header.salt).unwrap();
+        let packed = header.pack_masked(Some(&mask));
+
+        let parsed = EnvelopeHeader::unpack_with_profile(&packed, None, &profile).unwrap();
+        assert_eq!(parsed.strategy_id, 5);
+        assert_eq!(parsed.meta_len, 4096);
+
+        // Fields a bare header can plausibly carry: everything in range.
+        let mut forged = [0u8; HEADER_SIZE];
+        forged[8] = CURRENT_VERSION;
+        forged[9] = FLAG_ENCRYPTED;
+        forged[10] = 5;
+        forged[11] = 0;
+
+        forged[104..108].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(!EnvelopeHeader::is_plausible_bare_header(&forged));
+        forged[104..108].copy_from_slice(&(MAX_META_LEN + 1).to_le_bytes());
+        assert!(!EnvelopeHeader::is_plausible_bare_header(&forged));
+        forged[104..108].copy_from_slice(&0u32.to_le_bytes());
+
+        forged[108..112].copy_from_slice(&(MAX_HINT_LEN + 1).to_le_bytes());
+        assert!(!EnvelopeHeader::is_plausible_bare_header(&forged));
+        forged[108..112].copy_from_slice(&0u32.to_le_bytes());
+
+        forged[9] = 0x40;
+        assert!(
+            !EnvelopeHeader::is_plausible_bare_header(&forged),
+            "an unknown flag bit must not qualify"
+        );
+
+        forged[9] = FLAG_ENCRYPTED;
+        assert!(EnvelopeHeader::is_plausible_bare_header(&forged));
     }
 
     /// P1-8: the old constants advertised 213 B as the smallest writable

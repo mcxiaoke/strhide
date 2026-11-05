@@ -1441,6 +1441,9 @@ pub fn write_carrier_with(
     if !same_file(target_path, carrier_path) {
         crate::core::pipeline::check_overwrite(target_path, options.overwrite)?;
     }
+    // Fail before the envelope work: a read-only target would otherwise fail
+    // the final rename with a misleading `TargetBusy`.
+    crate::commit::reject_read_only_target(target_path)?;
 
     // 1. Run security rejection checks (carrier policy + target permissions)
     run_rejection_checks(carrier_path, target_path, local.rejection)?;
@@ -1524,11 +1527,23 @@ pub fn write_carrier_with(
     tmp_guard.commit();
     crate::commit::sync_parent_dir(target_path);
 
-    // Restore original carrier permissions (mode/readonly) alongside timestamps.
-    let _ = std::fs::set_permissions(target_path, orig_permissions);
-
-    if options.preserve_time {
-        let _ = filetime::set_file_times(target_path, orig_atime, orig_mtime);
+    // Timestamps first, permissions second: restoring the carrier's read-only
+    // attribute first would make the timestamp update fail on Windows and be
+    // dropped silently. Warn instead of swallowing the failure (the write
+    // itself succeeded).
+    if options.preserve_time
+        && let Err(e) = filetime::set_file_times(target_path, orig_atime, orig_mtime)
+    {
+        eprintln!(
+            "warning: failed to preserve file timestamps for '{}': {e}",
+            target_path.display()
+        );
+    }
+    if let Err(e) = std::fs::set_permissions(target_path, orig_permissions) {
+        eprintln!(
+            "warning: failed to restore file permissions for '{}': {e}",
+            target_path.display()
+        );
     }
 
     Ok(WriteResult {
@@ -2276,6 +2291,7 @@ pub fn remove_carrier_with_dialect(
     if !same_file(target_path, carrier_path) {
         crate::core::pipeline::check_overwrite(target_path, options.overwrite)?;
     }
+    crate::commit::reject_read_only_target(target_path)?;
 
     let label = carrier_path.display().to_string();
     let tmp_target = temp_path_for(target_path);
@@ -2323,8 +2339,19 @@ pub fn remove_carrier_with_dialect(
     crate::commit::rename_with_retry(&tmp_target, target_path)?;
     tmp_guard.commit();
     crate::commit::sync_parent_dir(target_path);
-    let _ = std::fs::set_permissions(target_path, orig_permissions);
-    let _ = filetime::set_file_times(target_path, orig_atime, orig_mtime);
+    // Same order as the write path: stamp, then restore permissions.
+    if let Err(e) = filetime::set_file_times(target_path, orig_atime, orig_mtime) {
+        eprintln!(
+            "warning: failed to preserve file timestamps for '{}': {e}",
+            target_path.display()
+        );
+    }
+    if let Err(e) = std::fs::set_permissions(target_path, orig_permissions) {
+        eprintln!(
+            "warning: failed to restore file permissions for '{}': {e}",
+            target_path.display()
+        );
+    }
 
     Ok(RemoveResult {
         carrier: target_path.to_path_buf(),

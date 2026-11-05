@@ -1263,6 +1263,47 @@ fn remove_rejects_out_of_bounds_patch_offset_and_injection_region() {
 
 // --------------------------------------------------------------------------- F-05
 
+#[allow(clippy::permissions_set_readonly_false)]
+#[test]
+fn in_place_write_to_a_read_only_carrier_reports_a_permission_error() {
+    // Windows rejects a rename over a read-only file with ERROR_ACCESS_DENIED,
+    // which the retry loop used to surface as "target busy". The write is
+    // refused up front with a permission error, and the carrier is untouched.
+    let dir = scratch("f16_read_only_carrier");
+    let carrier = dir.join("small.zip");
+    fs::write(&carrier, include_bytes!("../assets/small.zip")).unwrap();
+
+    let mut permissions = fs::metadata(&carrier).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&carrier, permissions).unwrap();
+    let before = fs::read(&carrier).unwrap();
+
+    let err = write_carrier(
+        &carrier,
+        PayloadSource::Text("payload"),
+        &WriteOptions {
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+
+    let mut permissions = fs::metadata(&carrier).unwrap().permissions();
+    permissions.set_readonly(false);
+    fs::set_permissions(&carrier, permissions).unwrap();
+    let after = fs::read(&carrier).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        matches!(&err, StrHideError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+        "a read-only carrier must not be reported as busy: {err:?}"
+    );
+    assert_eq!(
+        after, before,
+        "the refused write must leave the carrier intact"
+    );
+}
+
 #[test]
 fn write_rejects_payload_above_the_reader_limit_and_accepts_the_boundary() {
     // `structure_payload_limit` floors at 64 MiB for small carriers. The

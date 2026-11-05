@@ -209,6 +209,32 @@ pub(crate) fn create_carrier_backup(carrier: &Path) -> Result<PathBuf, StrHideEr
     ))
 }
 
+/// Refuse a target the OS marks read-only before a temp copy is built.
+///
+/// On Windows renaming over a read-only file fails with `ERROR_ACCESS_DENIED`
+/// (raw OS error 5). [`rename_with_retry`] treats that code like a sharing
+/// violation, retries it, and finally reports [`StrHideError::TargetBusy`] —
+/// "in use by another process" — which sends the user looking for a phantom
+/// lock instead of the file attribute. Detect the attribute up front and report
+/// it as the permission problem it is. A target that does not exist yet is
+/// fine: the rename creates it.
+pub fn reject_read_only_target(target: &Path) -> Result<(), StrHideError> {
+    if !target.exists() {
+        return Ok(());
+    }
+    match std::fs::metadata(target) {
+        Ok(meta) if meta.permissions().readonly() => Err(StrHideError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "Target file '{}' is read-only; make it writable or choose another -o path",
+                target.display()
+            ),
+        ))),
+        Ok(_) => Ok(()),
+        Err(e) => Err(StrHideError::Io(e)),
+    }
+}
+
 /// Safely commit stego bytes to `target_path` with an atomic rename, a
 /// crash-safe temporary file guard, collision-free `.bak` backup on in-place
 /// writes, and preservation of the original carrier's permissions and timestamps.
@@ -219,6 +245,7 @@ pub fn commit_carrier_bytes(
     backup: bool,
     preserve_time: bool,
 ) -> Result<Option<PathBuf>, StrHideError> {
+    reject_read_only_target(target_path)?;
     let meta = std::fs::metadata(carrier_path)?;
     let orig_permissions = meta.permissions();
     let orig_atime = filetime::FileTime::from_last_access_time(&meta);
@@ -232,15 +259,18 @@ pub fn commit_carrier_bytes(
 
     write_bytes_atomic(target_path, stego_bytes)?;
 
-    if let Err(e) = std::fs::set_permissions(target_path, orig_permissions) {
-        eprintln!(
-            "warning: failed to restore file permissions for '{}': {e}",
-            target_path.display()
-        );
-    }
+    // Timestamps first, permissions second: a read-only target cannot have its
+    // timestamps changed, so restoring the carrier's read-only attribute before
+    // this point would drop them silently even though the write succeeded.
     if preserve_time && let Err(e) = filetime::set_file_times(target_path, orig_atime, orig_mtime) {
         eprintln!(
             "warning: failed to preserve file timestamps for '{}': {e}",
+            target_path.display()
+        );
+    }
+    if let Err(e) = std::fs::set_permissions(target_path, orig_permissions) {
+        eprintln!(
+            "warning: failed to restore file permissions for '{}': {e}",
             target_path.display()
         );
     }
@@ -283,6 +313,7 @@ pub fn commit_carrier_patches(
     use std::fs::OpenOptions;
     use std::io::{Seek, SeekFrom, Write};
 
+    reject_read_only_target(target_path)?;
     let meta = std::fs::metadata(carrier_path)?;
     let orig_permissions = meta.permissions();
     let orig_atime = filetime::FileTime::from_last_access_time(&meta);
@@ -333,15 +364,17 @@ pub fn commit_carrier_patches(
     guard.commit();
     sync_parent_dir(target_path);
 
-    if let Err(e) = std::fs::set_permissions(target_path, orig_permissions) {
-        eprintln!(
-            "warning: failed to restore file permissions for '{}': {e}",
-            target_path.display()
-        );
-    }
+    // Same order as `commit_carrier_bytes`: stamp first, then restore the
+    // carrier's read-only attribute.
     if preserve_time && let Err(e) = filetime::set_file_times(target_path, orig_atime, orig_mtime) {
         eprintln!(
             "warning: failed to preserve file timestamps for '{}': {e}",
+            target_path.display()
+        );
+    }
+    if let Err(e) = std::fs::set_permissions(target_path, orig_permissions) {
+        eprintln!(
+            "warning: failed to restore file permissions for '{}': {e}",
             target_path.display()
         );
     }
@@ -366,6 +399,7 @@ pub fn commit_carrier_patches(
 pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), StrHideError> {
     use std::io::Write as _;
 
+    reject_read_only_target(path)?;
     let tmp_path = temp_path_for(path);
     let mut guard = TmpGuard::new(tmp_path.clone());
 
@@ -523,6 +557,66 @@ mod tests {
 
         assert!(backup.is_none());
         assert_eq!(committed[0..2], [0xAA, 0xBB]);
+    }
+
+    /// A read-only target used to fail inside `rename_with_retry`, which
+    /// treats Windows' `ERROR_ACCESS_DENIED` like a sharing violation and
+    /// finally reports `TargetBusy`. The attribute is detected up front so
+    /// callers get a permission error instead of a phantom lock.
+    #[test]
+    fn read_only_target_is_reported_as_a_permission_problem() {
+        let dir = scratch_dir("read_only_target");
+        let target = dir.join("target.bin");
+        std::fs::write(&target, b"existing").unwrap();
+        let mut permissions = std::fs::metadata(&target).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&target, permissions).unwrap();
+
+        let err = reject_read_only_target(&target).unwrap_err();
+
+        clear_read_only(&target);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            matches!(&err, StrHideError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "a read-only target must not be reported as busy: {err:?}"
+        );
+        assert!(err.to_string().contains("read-only"), "{err}");
+    }
+
+    /// The carrier's read-only attribute is cloned onto the output; stamping
+    /// the timestamps after that restore makes the update fail on Windows. The
+    /// stamp must happen first, so the cloned timestamps survive.
+    #[test]
+    fn timestamps_are_stamped_before_restoring_read_only_permissions() {
+        let dir = scratch_dir("read_only_time");
+        let carrier = dir.join("carrier.bin");
+        let out = dir.join("out.bin");
+        std::fs::write(&carrier, b"carrier").unwrap();
+
+        let old = filetime::FileTime::from_unix_time(1_000_000_000, 0);
+        filetime::set_file_times(&carrier, old, old).unwrap();
+        let mut permissions = std::fs::metadata(&carrier).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&carrier, permissions).unwrap();
+
+        commit_carrier_bytes(&carrier, &out, b"stego", false, true)
+            .expect("a read-only carrier must not block a fresh target output");
+
+        let out_meta = std::fs::metadata(&out).unwrap();
+        let out_mtime = filetime::FileTime::from_last_modification_time(&out_meta);
+        let out_read_only = out_meta.permissions().readonly();
+
+        clear_read_only(&out);
+        clear_read_only(&carrier);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            out_mtime.unix_seconds(),
+            old.unix_seconds(),
+            "the carrier's timestamps must be stamped before the read-only bit is restored"
+        );
+        assert!(out_read_only, "the read-only attribute must be cloned");
     }
 
     #[test]
