@@ -25,11 +25,11 @@ strhide/
 
 ## 2. 核心能力与工作域
 
-strhide 具备两个相互独立的工作域，并在多媒体载体上支持双向对称的双域复合共存：
+strhide 具备两个相互独立的工作域。库层可在同一载体上组合两个域，但 CLI 默认拒绝第二个域（需显式 `--overwrite`），且还原保证只适用于结构域信封：
 
 | 工作域 | 支持载体格式 | 技术机制与算法模型 | 还原特性 |
 | :--- | :--- | :--- | :--- |
-| **结构域**（容器空隙隐藏） | PNG、JPEG、WebP、MP4、MOV、WAV、MKV、ZIP（含 `.zip`、`.jar`、`.docx`、`.xlsx`、`.pptx`）、PDF、Windows PE（`.exe`、`.dll`） | 容器结构空隙注入（私有块、注释段、未引用流对象、中央目录前置、PE 节表零填充与代码等价替换） | **100% 逐比特无损还原**（全量 SHA-256 强校验） |
+| **结构域**（容器空隙隐藏） | PNG、JPEG、WebP、MP4、MOV、WAV、MKV、ZIP（含 `.zip`、`.jar`、`.docx`、`.xlsx`、`.pptx`）、PDF、Windows PE（`.exe`、`.dll`） | 容器结构空隙注入（私有块、注释段、未引用流对象、中央目录前置、PE 节表零填充与代码等价替换） | **100% 逐比特无损还原**写入前的宿主（全量 SHA-256 强校验）；若写入后载体被重编码（例如叠加内容域隐写），则以 `RestoreMismatch` 失败关闭 |
 | **内容域**（多媒体自适应隐写） | PNG、JPEG、HEVC/H.265（MP4、MOV、MKV、HEIC/HEIF、Annex-B）、音频（WAV、FLAC） | 自适应代价模型（PNG: HILL/S-UNIWARD/MiPOD；JPEG: UERD/J-UNIWARD/J-MiPOD；HEVC: CABAC 旁路符号位 Scheme C，$\Delta = 0$；Audio: WAV PCM LSB、FLAC 残差匹配） | 单向调制（不可逐比特逆向还原原始载体） |
 | **诊断与取证** | 全部受支持格式 | 结构解析、密码学完整性校验、黑盒隐写分析（`scan`） | 只读分析 |
 
@@ -55,7 +55,7 @@ sth write report.pdf -d secret.zip -p "password" -H "提示文本"      # [别�
 # 提取隐藏数据（默认拒绝覆盖已有文件，需 --overwrite 才允许覆盖）
 sth read report-out.pdf -o out/ -p "password"                       # [别名: r]
 
-# 100% 逐比特无损还原原始载体文件
+# 逐比特还原写入前的宿主（仅结构域；载体被重编码后失败关闭）
 sth restore report-out.pdf -o report-restored.pdf                   # [别名: s]
 
 # ── 多媒体内容隐写域 (Media Stego) ──

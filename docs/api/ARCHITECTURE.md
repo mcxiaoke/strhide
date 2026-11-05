@@ -548,8 +548,10 @@ const MY_DIALECT: Dialect = Dialect::new()
    - 核心库暴露 `list_stego_algorithms()` 与 `algorithms_for_format(format)`，返回包含唯一 ID、名称、描述、所属域及格式扩展名的结构化元数据；
    - 门面与 Tauri 后端直接映射该结构，实现 CLI 与 GUI 端的上下文动态感知与格式安全互斥。
 
-6. **双域复合共存测试体系**：
-   - 支持同一载体在多线程并发下同时施加内容域与结构域隐藏，验证双向（Content->Structure 与 Structure->Content）顺序无关性与 SHA-256 还原一致性。测试套件挂载于 `heavy_dual_domain_coexistence_matrix`。
+6. **双域复合的边界与测试**：
+   - 两个域互不引用（`structure ↛ stego`，见 `scripts/import_lint.py`），组合由编排层负责；CLI 的 `write`/`embed` 在预检阶段调用 `StrHide::ensure_domains_free()`，同一载体已有任一域载荷时默认拒绝，需先 `restore`/`extract` 或显式 `--overwrite`。
+   - 库层仍可对同一载体依次施加两个域：`heavy_dual_domain_coexistence_matrix` 覆盖 Content→Structure 与 Structure→Content 两种顺序，验证两个载荷都能各自提取；该测试**不**调用 `restore`。
+   - 内容域隐写会重编码载体字节，因此复合后不保证还原写入前的宿主：`restore` 以全量 SHA-256 比对后失败关闭（`RestoreMismatch`），不输出不一致的文件。需要原始宿主时必须单域使用。
 
 7. **可复现嵌入机制（Freshness）**：
    - 支持 `Freshness::Random`（默认）与 `Freshness::Seeded([u8; 32])`，Seeded 模式下盐、Nonce 与载荷均由主种子确定性派生。

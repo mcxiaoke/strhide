@@ -25,11 +25,11 @@ strhide/
 
 ## 2. Capabilities & Domains
 
-strhide operates across two independent domains, with full support for bidirectional dual-domain coexistence on multimedia files:
+strhide operates across two independent domains. They can be composed on one carrier at the library level, but the CLI rejects a second domain unless `--overwrite` is given, and restoration guarantees apply to the structure-domain envelope only:
 
 | Domain | Carrier Formats | Techniques & Models | Restoration |
 | :--- | :--- | :--- | :--- |
-| **Structure Domain** (Container Envelope) | PNG, JPEG, WebP, MP4, MOV, WAV, MKV, ZIP (`.zip`, `.jar`, `.docx`, `.xlsx`, `.pptx`), PDF, Windows PE (`.exe`, `.dll`) | Structural gap injection (private chunks, comment markers, unreferenced stream objects, central directory pre-injection, PE slack/codebits) | **100% bit-exact restoration** (verified via full SHA-256) |
+| **Structure Domain** (Container Envelope) | PNG, JPEG, WebP, MP4, MOV, WAV, MKV, ZIP (`.zip`, `.jar`, `.docx`, `.xlsx`, `.pptx`), PDF, Windows PE (`.exe`, `.dll`) | Structural gap injection (private chunks, comment markers, unreferenced stream objects, central directory pre-injection, PE slack/codebits) | **100% bit-exact restoration** of the pre-write host (verified via full SHA-256); fails closed with `RestoreMismatch` if the carrier was re-encoded after the write, e.g. by a content-domain embed |
 | **Content Domain** (Media Steganography) | PNG, JPEG, HEVC/H.265 (MP4, MOV, MKV, HEIC/HEIF, Annex-B), Audio (WAV, FLAC) | Adaptive cost models (PNG: HILL/S-UNIWARD/MiPOD; JPEG: UERD/J-UNIWARD/J-MiPOD; HEVC: CABAC bypass sign-bit Scheme C, $\Delta = 0$; Audio: WAV PCM LSB, FLAC residual matching) | Irreversible modification (lossless restoration not applicable) |
 | **Diagnostics** | All supported formats | Structural inspection, cryptographic verification, and black-box steganalysis (`scan`) | Read-only analysis |
 
@@ -55,7 +55,7 @@ sth write report.pdf -d secret.zip -p "password" -H "hint text"     # [alias: w]
 # Read/extract hidden payload (refuses overwrite unless --overwrite)
 sth read report-out.pdf -o out/ -p "password"                       # [alias: r]
 
-# 100% bit-exact restoration of original host file
+# Restore the pre-write host bit-exactly (structure domain; fails closed if the carrier was re-encoded)
 sth restore report-out.pdf -o report-restored.pdf                   # [alias: s]
 
 # ── Content Domain (Adaptive Steganography) ──

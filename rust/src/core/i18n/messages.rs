@@ -309,8 +309,8 @@ crate::i18n_messages! {
         en = "Extract hidden payload from carrier files",
         zh = "从载体文件中提取隐藏数据";
     CmdRestore:
-        en = "Restore carrier file to its original state (100% lossless)",
-        zh = "彻底还原载体文件，恢复原始宿主（100% 无损）";
+        en = "Restore the original host file bit-exactly (structure domain; fails closed if re-encoded)",
+        zh = "逐比特还原原始宿主文件（仅结构域；载体被重编码后失败关闭）";
     CmdInspect:
         en = "Inspect carrier structure and hidden metadata",
         zh = "查看载体文件结构与隐藏元数据";

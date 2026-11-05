@@ -100,8 +100,9 @@ pub enum StrHideError {
     /// [`crate::structure::remove_carrier`] restored a file whose size or SHA-256
     /// does not match the original recorded in the envelope header. This
     /// usually means a second envelope was layered on top and must be removed
-    /// first, most-recently-written first.
-    #[error("100% restore verification failed: restored size {restored_size} (expected {expected_size}) or SHA256 mismatch{}", if *.residual_envelope { "\nDiagnosis: the restored file still contains another hidden envelope. Remove envelopes in reverse order of injection (most recently written first)." } else { "" })]
+    /// first, most-recently-written first, or that the carrier was re-encoded
+    /// after the write (for example by a content-domain embed).
+    #[error("Restore verification failed: restored size {restored_size} (expected {expected_size}) or SHA256 mismatch{}", if *.residual_envelope { "\nDiagnosis: the restored file still contains another hidden envelope. Remove envelopes in reverse order of injection (most recently written first)." } else { "\nDiagnosis: the carrier bytes changed after the envelope was written (for example a content-domain embed re-encodes the media), so the pre-write host cannot be recovered. Restore refuses to emit a non-matching file." })]
     RestoreMismatch {
         restored_size: u64,
         expected_size: u64,
@@ -262,7 +263,7 @@ impl StrHideError {
                 let diag = if *residual_envelope {
                     "\nDiagnosis: the restored file still contains another hidden envelope. Remove envelopes in reverse order of injection (most recently written first)."
                 } else {
-                    ""
+                    "\nDiagnosis: the carrier bytes changed after the envelope was written (for example a content-domain embed re-encodes the media), so the pre-write host cannot be recovered. Restore refuses to emit a non-matching file."
                 };
                 format!(
                     "Restored size: {restored_size} (expected {expected_size})\nRestored SHA256: {restored_sha256}\nExpected SHA256: {expected_sha256}{diag}"

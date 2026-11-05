@@ -77,7 +77,7 @@ pub enum Commands {
     /// Read and extract hidden payload from carrier
     #[command(display_order = 11, visible_alias = "r")]
     Read(ReadArgs),
-    /// 100% loss-free restoration of the original host file
+    /// Restore the original host file bit-exactly (structure domain; fails closed if the carrier was re-encoded)
     #[command(display_order = 12, visible_alias = "s")]
     Restore(RestoreArgs),
 
@@ -121,7 +121,7 @@ pub enum ContainerCommands {
     /// Read and extract hidden payload from carrier
     #[command(visible_alias = "r")]
     Read(ReadArgs),
-    /// 100% loss-free restoration of the original host file
+    /// Restore the original host file bit-exactly (structure domain; fails closed if the carrier was re-encoded)
     #[command(visible_alias = "s")]
     Restore(RestoreArgs),
 }

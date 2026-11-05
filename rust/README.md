@@ -164,6 +164,8 @@ const ENGINE: StrHide = StrHide::new().with_dialect(
 
 The structure domain embeds payloads into container structures (e.g. PNG private chunks, JPEG COM segments, MP4/MOV UUID boxes, ZIP pre-central-directory, PDF incremental revisions, PE slack/overlay/codebits).
 
+The bit-exact guarantee covers the structure-domain envelope only. A content-domain embed re-encodes the media in place, so a carrier written and then re-encoded cannot be restored: `restore` compares the full SHA-256 and fails closed with `RestoreMismatch` instead of emitting a non-matching file. The CLI also refuses to add a second domain to an occupied carrier unless `--overwrite` is explicit.
+
 ```rust
 use std::path::Path;
 use strhide::facade::StrHide;
@@ -422,7 +424,7 @@ sth write photo.png -t "Secret" --in-place
 sth read photo-out.png --stdout
 sth read photo-out.png -o recovered/
 
-# 100% bit-exact carrier restoration
+# 100% bit-exact carrier restoration (structure domain; fails closed after a content embed)
 sth restore photo-out.png -o clean.png
 
 # Content-adaptive steganography (HILL for PNG, UERD for JPEG)
