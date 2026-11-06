@@ -263,15 +263,17 @@ pub fn embed_carrier_with_dialect_info(
 /// maximum the user fills with file content used to fail by exactly that much
 /// (B-03). Reserving the worst case (a 255-byte name) makes the number usable
 /// for both kinds of payload; raw embeds still accept the larger true amount.
-fn filename_safe_capacity(mut info: StegoCapacityInfo) -> StegoCapacityInfo {
+///
+/// Only `max_raw_payload_bytes` is adjusted. The safety-tier numbers are the
+/// exact values every engine feeds to its Enforced gate; clamping them here
+/// made the file-level Advisory warning use a smaller threshold than the
+/// engine's hard gate, so a small carrier warned in Advisory mode yet passed
+/// in Enforced mode.
+pub(crate) fn filename_safe_capacity(mut info: StegoCapacityInfo) -> StegoCapacityInfo {
     use crate::stego::envelope::MAX_FILENAME_OVERHEAD;
     info.max_raw_payload_bytes = info
         .max_raw_payload_bytes
         .saturating_sub(MAX_FILENAME_OVERHEAD);
-    info.recommended_max_bytes = info.recommended_max_bytes.min(info.max_raw_payload_bytes);
-    for limit in &mut info.tier_limits {
-        *limit = (*limit).min(info.max_raw_payload_bytes);
-    }
     info
 }
 
@@ -491,6 +493,34 @@ pub fn probe_carrier_capacity_with_dialect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filename_safe_capacity_only_shrinks_the_raw_ceiling() {
+        let info = StegoCapacityInfo {
+            format: "png".into(),
+            algorithm: "hill".into(),
+            total_elements: 1000,
+            available_slots: 1000,
+            max_raw_payload_bytes: 300,
+            max_raw_is_grouped: false,
+            recommended_max_bytes: 280,
+            tier_limits: [100, 200, 280],
+            estimated_change_rate: 0.5,
+            safety_level: "high".into(),
+            safety_bpp_limit: 0.1,
+            is_estimated: false,
+            media_info: None,
+        };
+        let safe = filename_safe_capacity(info.clone());
+        assert_eq!(
+            safe.max_raw_payload_bytes,
+            300 - crate::stego::envelope::MAX_FILENAME_OVERHEAD
+        );
+        // The engine's Enforced gate uses these unmodified values; clamping
+        // them here used to make Advisory and Enforced disagree.
+        assert_eq!(safe.recommended_max_bytes, info.recommended_max_bytes);
+        assert_eq!(safe.tier_limits, info.tier_limits);
+    }
 
     #[test]
     fn test_compute_default_threads() {

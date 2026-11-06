@@ -99,6 +99,11 @@ pub fn embed_carrier_file(
         };
         match patches_res {
             Ok((patches, capacity, stats)) => {
+                // The unified embed/probe entries reserve the worst-case
+                // filename overhead in their capacity report. The patch path
+                // must do the same or `sth embed x.mp4` and `sth capacity x.mp4`
+                // disagree by MAX_FILENAME_OVERHEAD bytes.
+                let capacity = crate::stego::filename_safe_capacity(capacity);
                 drop(carrier_bytes);
                 let backup_file = commit_carrier_patches(
                     carrier_path,

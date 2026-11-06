@@ -551,3 +551,50 @@ fn test_hevc_balanced_small_payload_roundtrip() {
         .expect("balanced small payload must be extractable");
     assert_eq!(extracted.as_bytes(), payload);
 }
+
+/// N-01: the file-level MP4/Annex-B patch branch must apply the same
+/// filename-safe capacity adjustment as the unified `probe` entry, otherwise
+/// `sth embed x.mp4` and `sth capacity x.mp4` disagree by 256 bytes.
+#[test]
+fn file_level_patch_capacity_matches_the_unified_probe() {
+    use strhide::commit::FileTarget;
+    use strhide::core::payload::Payload;
+    use strhide::stego::io::embed_carrier_file;
+    use strhide::stego::params::StegoProfile;
+    use strhide::stego::{EmbedOptions, ProbeOptions, probe_carrier_capacity_with_dialect};
+
+    let dir = crate::common::scratch("patch_capacity");
+    let carrier = dir.join("carrier.hevc");
+    // One 40x40 frame is below the reader's 2048-slot header pool; repeat it
+    // so the Annex-B carrier can actually carry the V4 envelope.
+    let frame = fs::read(asset("tiny40.hevc")).expect("read tiny40.hevc");
+    let mut orig = Vec::new();
+    for _ in 0..64 {
+        orig.extend_from_slice(&frame);
+    }
+    fs::write(&carrier, &orig).unwrap();
+
+    let dialect = StegoProfile::default();
+    let probe = probe_carrier_capacity_with_dialect(&orig, &ProbeOptions::default(), &dialect)
+        .expect("probe");
+
+    let target = FileTarget {
+        output_path: None,
+        backup: false,
+        preserve_time: false,
+        overwrite: true,
+    };
+    let res = embed_carrier_file(
+        &carrier,
+        &Payload::bytes(b"n-01"),
+        &EmbedOptions::default(),
+        &dialect,
+        &target,
+    )
+    .expect("embed");
+    let reported = res.capacity.expect("capacity report");
+    assert_eq!(reported.max_raw_payload_bytes, probe.max_raw_payload_bytes);
+    assert_eq!(reported.recommended_max_bytes, probe.recommended_max_bytes);
+
+    let _ = fs::remove_dir_all(&dir);
+}
