@@ -47,12 +47,33 @@ fn print_content_domain(dual: &crate::facade::DualInspect) {
         }
         return;
     }
-    if let Some(ref err) = dual.content_error {
-        println!(
-            "  ? content inspection failed: {}",
-            err.render(crate::core::i18n::lang())
-        );
+    for line in content_domain_diagnostics(dual.content.as_ref(), dual.content_error.as_ref()) {
+        println!("  ? {line}");
     }
+}
+
+/// Diagnostic lines for a content half that produced no verdict.
+///
+/// Split out from printing so the "a note the engine produced is actually
+/// shown" contract can be tested without capturing stdout. The engines write a
+/// `note` when a probe could not reach a verdict (JPEG preflight failure,
+/// malformed extension area, unreadable header); text mode used to drop it, so
+/// "verified empty" and "could not read the file" printed the same thing.
+fn content_domain_diagnostics(
+    content: Option<&crate::stego::StegoHeaderInfo>,
+    content_error: Option<&crate::errors::ErrorDetail>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(err) = content_error {
+        lines.push(format!(
+            "content inspection failed: {}",
+            err.render(crate::core::i18n::lang())
+        ));
+    }
+    if let Some(note) = content.and_then(|cs| cs.note.as_deref()) {
+        lines.push(format!("content inspection note: {note}"));
+    }
+    lines
 }
 
 pub(crate) fn handle_inspect(
@@ -703,7 +724,49 @@ pub(crate) fn handle_list(args: ListArgs) -> Result<(), StrHideError> {
 
 #[cfg(test)]
 mod verdict_tests {
-    use super::dual_verify_failed;
+    use super::{content_domain_diagnostics, dual_verify_failed};
+
+    /// A probe that could not reach a verdict leaves a `note` behind; text mode
+    /// must show it, otherwise "nothing hidden" and "could not read the file"
+    /// look identical to the user.
+    #[test]
+    fn content_note_is_reported() {
+        let mut info = crate::stego::StegoHeaderInfo::empty("JPEG");
+        info.note = Some("Preflight failed: truncated scan".into());
+        let lines = content_domain_diagnostics(Some(&info), None);
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("Preflight failed: truncated scan"),
+            "{lines:?}"
+        );
+    }
+
+    /// No note, no line: a clean probe stays quiet.
+    #[test]
+    fn silent_probe_prints_nothing() {
+        let info = crate::stego::StegoHeaderInfo::empty("JPEG");
+        assert!(content_domain_diagnostics(Some(&info), None).is_empty());
+        assert!(content_domain_diagnostics(None, None).is_empty());
+    }
+
+    /// A content verifier that could not run is reported before the note, so a
+    /// hard failure and a soft "inconclusive" stay distinguishable.
+    #[test]
+    fn content_error_is_reported_first() {
+        let err = crate::errors::ErrorDetail {
+            kind: crate::errors::ErrorKind::General,
+            category: None,
+            category_label: None,
+            detail: "decoder unavailable".into(),
+            hint: None,
+        };
+        let mut info = crate::stego::StegoHeaderInfo::empty("JPEG");
+        info.note = Some("header unreadable".into());
+        let lines = content_domain_diagnostics(Some(&info), Some(&err));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("decoder unavailable"), "{lines:?}");
+        assert!(lines[1].contains("header unreadable"), "{lines:?}");
+    }
 
     /// A structure-only carrier also runs the content verifier, which answers
     /// "no header here". That is not a failure.

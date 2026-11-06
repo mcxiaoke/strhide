@@ -21,6 +21,15 @@ interface ScanRow {
   embedded: boolean;
   encrypted: boolean;
   payloadBytes?: number;
+  /**
+   * Why a "nothing hidden" verdict may not mean "checked and clean".
+   *
+   * The engines report an inconclusive probe through `note` (JPEG preflight or
+   * extension parsing failed, header unreadable) and a domain-level failure
+   * through `content_error`. Both used to be dropped on the floor, so the user
+   * saw the same "No" for "verified empty" and "could not read the file".
+   */
+  inconclusive?: string;
 }
 
 function toRow(info: DualInspect): ScanRow {
@@ -38,6 +47,10 @@ function toRow(info: DualInspect): ScanRow {
       : undefined) ||
     (info.ube_total_size ?? undefined);
 
+  // A note attached to a confirmed hit is informational (the audio engines use
+  // it to describe the carrier), so only surface it when the verdict is "no".
+  const inconclusive = info.content_error?.detail ?? (embedded ? undefined : info.content_stego?.note);
+
   return {
     format: info.format ?? null,
     canEmbed: !!info.content_stego,
@@ -47,6 +60,7 @@ function toRow(info: DualInspect): ScanRow {
     embedded,
     encrypted: !!info.is_encrypted || !!info.content_stego?.has_hidden_data,
     payloadBytes,
+    inconclusive,
   };
 }
 
@@ -174,6 +188,15 @@ export const ScanView: React.FC<{ active: boolean }> = ({ active }) => {
                     </td>
                     <td className={`p-2.5 ${hasHidden ? "text-emerald-400" : "text-slate-400"}`}>
                       {hiddenText(row)}
+                      {row.inconclusive && (
+                        <span
+                          className="ml-1 inline-flex cursor-help align-middle text-amber-400"
+                          title={row.inconclusive}
+                          aria-label={row.inconclusive}
+                        >
+                          <TriangleAlert className="h-3 w-3" />
+                        </span>
+                      )}
                     </td>
                     <td className="p-2.5 text-slate-300">{row.encrypted ? c.scan.yes : c.scan.no}</td>
                     <td className="p-2.5 font-mono text-slate-300">{formatBytes(row.payloadBytes)}</td>
