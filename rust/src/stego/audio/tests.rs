@@ -578,3 +578,41 @@ fn flac_body_phase_is_reproducible_and_attempt_sensitive() {
     }));
     assert!(!flac_retryable(&StrHideError::General("x".into())));
 }
+
+/// Regression for the 40 % refusal on `07.朔漠南望.wav` (stereo 16-bit,
+/// 24,205,608 samples, 24,205,096 body slots after the 512-slot V4 header).
+///
+/// At 40 % of the advertised 3,025,358-byte capacity the slot abundance picks
+/// STC `u = 2`, but `u = 2` costs one extra state bit per column, so its
+/// working-set ceiling (18,728,055 slots) is below the 24,205,096 slots the
+/// carrier exposes. The planner accepted `u = 2`, produced 19,362,654 body
+/// slots, and the embedder then refused a payload the capacity report had
+/// promised. `plan_body` must fall back to `u = 1`, whose narrower per-slot
+/// trellis fits the same payload.
+///
+/// The numbers are the ones the failing `audio_stress` run printed, so this
+/// pins the exact `u = 2`/`u = 1` boundary instead of approximating it.
+#[test]
+fn wav_plan_falls_back_to_u1_when_u2_exceeds_the_working_set() {
+    use crate::stego::coding::DEFAULT_STC_H;
+
+    const AVAILABLE: usize = 24_205_608 - 512;
+    // 3,025,358 bytes at 40 %, plus the 22-byte envelope expansion.
+    let ciphertext = 1_210_143 + 22;
+    let shape = core::plan_body(ciphertext, AVAILABLE, DEFAULT_STC_H, 1).expect("plan");
+    assert_eq!(
+        shape.u, 1,
+        "a payload beyond the u = 2 ceiling must fall back to u = 1"
+    );
+    assert_eq!(shape.body_slots, ciphertext * 8 + 7);
+
+    // Boundary probes: 1,170,480 bytes still fits the u = 2 ceiling
+    // (18,728,046 <= 18,728,055 slots), one byte more does not.
+    let fits = core::plan_body(1_170_480 + 22, AVAILABLE, DEFAULT_STC_H, 1).expect("plan");
+    assert_eq!(
+        fits.u, 2,
+        "the fitting side of the boundary must keep u = 2"
+    );
+    let over = core::plan_body(1_170_481 + 22, AVAILABLE, DEFAULT_STC_H, 1).expect("plan");
+    assert_eq!(over.u, 1, "the failing side of the boundary must fall back");
+}

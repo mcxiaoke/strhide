@@ -609,14 +609,26 @@ pub(crate) fn plan_body(
     min_u: u8,
 ) -> Result<PlanShape, StrHideError> {
     let bits = ciphertext_len.saturating_mul(8);
-    let (codec, u) = auto_select_codec(available, bits.max(1));
-    let u = u.max(min_u);
-    let body_slots = body_slots(bits, codec, h, u)?;
+    let (codec, mut u) = auto_select_codec(available, bits.max(1));
+    u = u.max(min_u);
+    let mut slots = body_slots(bits, codec, h, u)?;
+    // `u > 1` adds one state bit per column, which doubles the trellis
+    // working set per slot: a fixed memory ceiling therefore covers fewer
+    // slots at `u = 2` than at `u = 1`. `auto_select_codec` only looks at the
+    // slot abundance, so a payload in the narrow band where the ratio picks
+    // `u = 2` but the `u = 2` ceiling is below the slot count used to be
+    // planned and then refused -- a payload size the capacity report had
+    // already promised. Falling back to the narrowest group keeps the same
+    // steps-per-bit ceiling and lets the payload fit.
+    if slots > max_body_slots(h, u) && u > min_u {
+        u = min_u;
+        slots = body_slots(bits, codec, h, u)?;
+    }
     Ok(PlanShape {
         codec,
         u,
         h,
-        body_slots,
+        body_slots: slots,
     })
 }
 
