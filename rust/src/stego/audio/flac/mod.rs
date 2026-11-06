@@ -247,7 +247,29 @@ pub(crate) struct FlacAnalysis {
 /// Touches nothing; this is the pass that decides whether the carrier is
 /// trustworthy enough to modify.
 pub(crate) fn analyse(bytes: &[u8], info: &StreamInfo) -> Result<FlacAnalysis, StrHideError> {
+    Ok(scan_stream(bytes, info, false)?.0)
+}
+
+/// Same validating scan, but also retains the subframe-tail pool.
+///
+/// The header slots are thinned over *all* tails, so their denominator is only
+/// known once the walk is over. Tails are one per subframe (thousands, not
+/// millions) and carry no compensation chain, so keeping them lets the caller
+/// select the header picks without a second decode pass.
+pub(crate) fn analyse_with_tails(
+    bytes: &[u8],
+    info: &StreamInfo,
+) -> Result<(FlacAnalysis, Vec<FlacTail>), StrHideError> {
+    scan_stream(bytes, info, true)
+}
+
+fn scan_stream(
+    bytes: &[u8],
+    info: &StreamInfo,
+    keep_tails: bool,
+) -> Result<(FlacAnalysis, Vec<FlacTail>), StrHideError> {
     let defaults = info.defaults();
+    let scale = info.scale();
     let mut hasher = Md5::new();
     let mut pos = info.audio_offset;
     let mut frames = 0usize;
@@ -255,6 +277,7 @@ pub(crate) fn analyse(bytes: &[u8], info: &StreamInfo) -> Result<FlacAnalysis, S
     let mut usable = 0usize;
     let mut tails = 0usize;
     let mut samples_decoded = 0u64;
+    let mut tail_pool: Vec<FlacTail> = Vec::new();
 
     while pos < bytes.len() {
         if info.total_samples > 0 && samples_decoded >= info.total_samples {
@@ -277,6 +300,16 @@ pub(crate) fn analyse(bytes: &[u8], info: &StreamInfo) -> Result<FlacAnalysis, S
             .iter()
             .filter(|slot| !matches!(slot_legality_raw(slot, &parsed), Move::None))
             .count();
+        if keep_tails {
+            for tail in &parsed.tails {
+                tail_pool.push(FlacTail {
+                    bit_offset: tail.bit_offset as u64,
+                    k: tail.k as u8,
+                    value: tail.value as i32,
+                    cost: slot_cost(&parsed, tail, &scale),
+                });
+            }
+        }
         frames += 1;
         pos = parsed.crc16_offset + 2;
     }
@@ -287,12 +320,15 @@ pub(crate) fn analyse(bytes: &[u8], info: &StreamInfo) -> Result<FlacAnalysis, S
         ));
     }
 
-    Ok(FlacAnalysis {
-        pcm_md5: hasher.finish(),
-        slots,
-        usable,
-        tails,
-    })
+    Ok((
+        FlacAnalysis {
+            pcm_md5: hasher.finish(),
+            slots,
+            usable,
+            tails,
+        },
+        tail_pool,
+    ))
 }
 
 /// One addressable residual.
@@ -338,6 +374,31 @@ impl CompSlot {
     }
 }
 
+/// A subframe tail retained from the validating scan.
+///
+/// Tails carry no compensation chain, so one is a fixed handful of bytes rather
+/// than a heap allocation, and there is exactly one per subframe. Keeping the
+/// whole pool is therefore cheap and lets the header picks be selected once the
+/// walk has revealed the thinning denominator.
+pub(crate) struct FlacTail {
+    bit_offset: u64,
+    k: u8,
+    value: i32,
+    cost: f32,
+}
+
+impl FlacTail {
+    fn to_slot(&self) -> FlacSlot {
+        FlacSlot {
+            bit_offset: self.bit_offset,
+            k: self.k,
+            value: self.value,
+            cost: self.cost,
+            comp: Vec::new(),
+        }
+    }
+}
+
 /// A FLAC carrier presented as an array of already-selected residual slots.
 ///
 /// Unlike the WAV carrier, the slot array is materialised: the trellis
@@ -357,6 +418,11 @@ pub(crate) struct FlacCarrier<'a> {
     total_usable: usize,
     /// Finalized PCM MD5 computed during refresh_checksums.
     pcm_md5: Option<[u8; 16]>,
+    /// Cover bytes, when the decoded-waveform drift is measured during
+    /// finalize instead of by a second decode of both files afterwards.
+    cover: Option<&'a [u8]>,
+    /// Largest per-sample difference from the cover, in stored sample units.
+    drift: i64,
 }
 
 impl FlacCarrier<'_> {
@@ -368,13 +434,133 @@ impl FlacCarrier<'_> {
         self.residuals_written
     }
 
-    /// PCM MD5 computed when refreshing checksums after patch application.
-    pub(crate) fn pcm_md5(&self) -> Option<[u8; 16]> {
-        self.pcm_md5
+    /// Largest per-sample difference from the cover measured during the
+    /// finalize pass; zero when no cover was tracked.
+    pub(crate) fn pcm_max_drift(&self) -> i64 {
+        self.drift
     }
 }
 
 impl<'a> FlacCarrier<'a> {
+    /// Compare the decoded waveform against `cover` during the next finalize.
+    ///
+    /// The finalize pass already decodes the patched file to recompute the
+    /// `STREAMINFO` MD5, so measuring the drift there costs one cover decode
+    /// instead of a second decode of both files.
+    pub(crate) fn track_drift(&mut self, cover: &'a [u8]) {
+        self.cover = Some(cover);
+    }
+
+    /// Fail-closed: refuse a carrier this build cannot decode exactly.
+    fn ensure_decodable(info: &StreamInfo, analysis: &FlacAnalysis) -> Result<(), StrHideError> {
+        if info.md5 != [0u8; 16] && analysis.pcm_md5 != info.md5 {
+            return Err(StrHideError::UnsupportedFormat(
+                "FLAC carrier could not be fully validated (decoded PCM does not match the \
+                 STREAMINFO MD5); refusing to modify a file this build cannot decode exactly"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Both pools must be large enough for the header and the requested body.
+    fn ensure_pools(
+        analysis: &FlacAnalysis,
+        body_slots: usize,
+        header_slots: usize,
+    ) -> Result<(), StrHideError> {
+        // Two disjoint pools, both derived from structural predicates plus the
+        // bucket tests a legal move preserves:
+        //   * subframe tails -- the last residual of every subframe -- need no
+        //     compensation, so they are always writable; the fixed 512-slot
+        //     header lives here because a header bit has nowhere to go if its
+        //     slot cannot be moved;
+        //   * everything else feeds the body, where the trellis can route
+        //     around a slot whose compensation chain does not fit.
+        //
+        // The body's denominator is `analysis.slots`, never `analysis.usable`:
+        // the latter counts slots that are legal *for the current residual
+        // values*, and embedding rewrites exactly those values. A reader that
+        // thinned over a different denominator would address a different set of
+        // codewords and the payload would never decrypt (review P0-1).
+        if header_slots < PNG_AUDIO_BASE_SLOTS {
+            return Err(StrHideError::General(format!(
+                "FLAC header area must be at least {PNG_AUDIO_BASE_SLOTS} slots, got {header_slots}"
+            )));
+        }
+        if analysis.tails < header_slots {
+            return Err(StrHideError::General(format!(
+                concat!(
+                    "FLAC carrier has {tails} usable subframe tails but the ",
+                    "{header}-slot header needs that many; ",
+                    "the file is too short for this carrier"
+                ),
+                tails = analysis.tails,
+                header = header_slots
+            )));
+        }
+        if analysis.slots < body_slots {
+            return Err(StrHideError::General(format!(
+                "FLAC carrier has {} residual slots, {body_slots} required",
+                analysis.slots
+            )));
+        }
+        Ok(())
+    }
+
+    /// Materialise a carrier that exposes only the header area (base + extension
+    /// picks, no body).
+    ///
+    /// The extraction side reads the base header before it knows `ext_len`, so
+    /// its first view needs nothing but the tail pool. When the validating scan
+    /// already retained that pool (`analyse_with_tails`), this constructor
+    /// selects the picks without walking the file a second time. The resulting
+    /// slot array is exactly what [`FlacCarrier::new`] would have built for
+    /// `body_slots = 0`.
+    pub(crate) fn header_view(
+        bytes: &'a mut [u8],
+        info: StreamInfo,
+        analysis: &FlacAnalysis,
+        tails: &[FlacTail],
+        header_slots: usize,
+        header_phase: u64,
+        ext_phase: u64,
+    ) -> Result<Self, StrHideError> {
+        Self::ensure_decodable(&info, analysis)?;
+        Self::ensure_pools(analysis, 0, header_slots)?;
+        if tails.len() != analysis.tails {
+            return Err(StrHideError::General(format!(
+                "FLAC tail pool has {} entries, the analysis counted {}",
+                tails.len(),
+                analysis.tails
+            )));
+        }
+        let ext_slots = header_slots - PNG_AUDIO_BASE_SLOTS;
+        let (mut header_picks, ext_picks) =
+            pick_tails(tails, header_slots, header_phase, ext_phase);
+        if header_picks.len() != PNG_AUDIO_BASE_SLOTS || ext_picks.len() != ext_slots {
+            return Err(StrHideError::General(format!(
+                "FLAC slot selection produced {} base and {} extension slots, expected {} and {}",
+                header_picks.len(),
+                ext_picks.len(),
+                PNG_AUDIO_BASE_SLOTS,
+                ext_slots
+            )));
+        }
+        header_picks.extend(ext_picks);
+        Ok(Self {
+            bytes,
+            info,
+            slots: header_picks,
+            modified: 0,
+            residuals_written: 0,
+            total_usable: analysis.usable,
+            pcm_md5: None,
+            cover: None,
+            drift: 0,
+        })
+    }
+
     /// Materialise the carrier's slot array.
     ///
     /// `body_slots` is the number of trellis slots the payload needs; both ends
@@ -395,68 +581,25 @@ impl<'a> FlacCarrier<'a> {
     ) -> Result<Self, StrHideError> {
         let scale = info.scale();
         let defaults = info.defaults();
-
-        if info.md5 != [0u8; 16] && analysis.pcm_md5 != info.md5 {
-            return Err(StrHideError::UnsupportedFormat(
-                "FLAC carrier could not be fully validated (decoded PCM does not match the \
-                 STREAMINFO MD5); refusing to modify a file this build cannot decode exactly"
-                    .into(),
-            ));
-        }
-        // Two disjoint pools, both derived from structural predicates plus the
-        // bucket tests a legal move preserves:
-        //   * subframe tails -- the last residual of every subframe -- need no
-        //     compensation, so they are always writable; the fixed 512-slot
-        //     header lives here because a header bit has nowhere to go if its
-        //     slot cannot be moved;
-        //   * everything else feeds the body, where the trellis can route
-        //     around a slot whose compensation chain does not fit.
-        //
-        // The body's denominator is `analysis.slots`, never `analysis.usable`:
-        // the latter counts slots that are legal *for the current residual
-        // values*, and embedding rewrites exactly those values. A reader that
-        // thinned over a different denominator would address a different set of
-        // codewords and the payload would never decrypt (review P0-1).
+        Self::ensure_decodable(&info, analysis)?;
+        Self::ensure_pools(analysis, body_slots, header_slots)?;
         let total = analysis.slots;
         let total_usable = analysis.usable;
         let tail_total = analysis.tails;
-        if header_slots < PNG_AUDIO_BASE_SLOTS {
-            return Err(StrHideError::General(format!(
-                "FLAC header area must be at least {PNG_AUDIO_BASE_SLOTS} slots, got {header_slots}"
-            )));
-        }
         let ext_slots = header_slots - PNG_AUDIO_BASE_SLOTS;
-        if tail_total < header_slots {
-            return Err(StrHideError::General(format!(
-                concat!(
-                    "FLAC carrier has {tails} usable subframe tails but the ",
-                    "{header}-slot header needs that many; ",
-                    "the file is too short for this carrier"
-                ),
-                tails = tail_total,
-                header = header_slots
-            )));
-        }
-        if total < body_slots {
-            return Err(StrHideError::General(format!(
-                "FLAC carrier has {} residual slots, {body_slots} required",
-                total
-            )));
-        }
 
-        // Pass 2: collect header picks and body picks in one sweep.
+        // Pass 2: collect the tail pool and the body picks in one sweep.
         //
-        // The base 512 picks are thinned over *all* tails, and the extension
-        // picks are thinned independently over the remaining (`tail_total - 512`)
-        // tails. Keeping the base count fixed at 512 is what makes this stable:
-        // a variable `wanted` would shift every base index as soon as an
-        // extension was present, and the extraction pass that reads the base
-        // header (before it knows `ext_len`) would address the wrong slots.
-        let mut header_picks: Vec<FlacSlot> = Vec::with_capacity(header_slots);
-        let mut ext_picks: Vec<FlacSlot> = Vec::with_capacity(ext_slots);
+        // The base 512 picks are thinned over *all* tails, so their denominator
+        // is only known when the sweep is over; retaining the (small) tail pool
+        // is what lets `pick_tails` apply the same rules afterwards. Body picks
+        // need `total`, which came from the validating pass, so they can be
+        // decided inline. The base count stays fixed at 512: a variable
+        // `wanted` would shift every base index as soon as an extension was
+        // present, and the extraction pass that reads the base header (before
+        // it knows `ext_len`) would address the wrong slots.
+        let mut tail_pool: Vec<FlacTail> = Vec::with_capacity(tail_total);
         let mut body_picks: Vec<FlacSlot> = Vec::with_capacity(body_slots);
-        let mut tails_seen = 0usize;
-        let mut nonbase_seen = 0usize;
         let mut body_seen = 0usize;
         let mut pos = info.audio_offset;
         let mut samples_decoded = 0u64;
@@ -473,28 +616,12 @@ impl<'a> FlacCarrier<'a> {
             let frame_samples = parsed.samples.first().map_or(0, Vec::len) as u64;
             samples_decoded += frame_samples;
             for slot in parsed.tails.iter() {
-                let index = tails_seen;
-                tails_seen += 1;
-                if thin_pick(index, tail_total, PNG_AUDIO_BASE_SLOTS, header_phase) {
-                    if header_picks.len() < PNG_AUDIO_BASE_SLOTS
-                        && let Some(entry) = make_slot(slot, &parsed, &scale)
-                    {
-                        header_picks.push(entry);
-                    }
-                } else {
-                    if ext_slots > 0
-                        && thin_pick(
-                            nonbase_seen,
-                            tail_total.saturating_sub(PNG_AUDIO_BASE_SLOTS),
-                            ext_slots,
-                            ext_phase,
-                        )
-                        && let Some(entry) = make_slot(slot, &parsed, &scale)
-                    {
-                        ext_picks.push(entry);
-                    }
-                    nonbase_seen += 1;
-                }
+                tail_pool.push(FlacTail {
+                    bit_offset: slot.bit_offset as u64,
+                    k: slot.k as u8,
+                    value: slot.value as i32,
+                    cost: slot_cost(&parsed, slot, &scale),
+                });
             }
             if body_slots > 0 {
                 for slot in parsed.slots.iter() {
@@ -513,14 +640,11 @@ impl<'a> FlacCarrier<'a> {
                     }
                 }
             }
-            if header_picks.len() >= PNG_AUDIO_BASE_SLOTS
-                && ext_picks.len() >= ext_slots
-                && body_picks.len() >= body_slots
-            {
-                break;
-            }
             pos = parsed.crc16_offset + 2;
         }
+
+        let (mut header_picks, ext_picks) =
+            pick_tails(&tail_pool, header_slots, header_phase, ext_phase);
 
         if header_picks.len() != PNG_AUDIO_BASE_SLOTS
             || ext_picks.len() != ext_slots
@@ -559,6 +683,8 @@ impl<'a> FlacCarrier<'a> {
             residuals_written: 0,
             total_usable,
             pcm_md5: None,
+            cover: None,
+            drift: 0,
         })
     }
 
@@ -569,6 +695,12 @@ impl<'a> FlacCarrier<'a> {
         let mut hasher = Md5::new();
         let mut pos = self.info.audio_offset;
         let mut samples_decoded = 0u64;
+        // The drift gate compares the decoded waveform against the cover. This
+        // pass already decodes the patched file, so comparing frame by frame
+        // here saves decoding the stego file a second time.
+        let cover = self.cover;
+        let mut cover_pos = self.info.audio_offset;
+        let mut drift = 0i64;
         // Slots were collected in file order for each half, so sort a copy of
         // the offsets once: the frame walk then advances a single cursor.
         let mut offsets: Vec<u64> = self
@@ -593,6 +725,17 @@ impl<'a> FlacCarrier<'a> {
             let frame_samples = parsed.samples.first().map_or(0, Vec::len) as u64;
             samples_decoded += frame_samples;
             hasher.absorb(&parsed.samples, self.info.md5_bytes_per_sample());
+            if let Some(cover_bytes) = cover
+                && self.residuals_written > 0
+            {
+                let original = frame::parse_frame(cover_bytes, cover_pos, &defaults).map_err(|_| {
+                    StrHideError::CorruptedData(format!(
+                        "FLAC cover frame at byte {cover_pos} could not be decoded while measuring drift"
+                    ))
+                })?;
+                cover_pos = original.crc16_offset + 2;
+                drift = drift.max(decoded_drift_units(&original, &parsed)?);
+            }
 
             let frame_start_bit = parsed.start * 8;
             let frame_end_bit = (parsed.crc16_offset + 2) * 8;
@@ -617,6 +760,7 @@ impl<'a> FlacCarrier<'a> {
 
         let md5 = hasher.finish();
         self.pcm_md5 = Some(md5);
+        self.drift = drift;
         if MD5_OFFSET + 16 <= self.bytes.len() {
             self.bytes[MD5_OFFSET..MD5_OFFSET + 16].copy_from_slice(&md5);
         }
@@ -694,6 +838,44 @@ fn thin_pick(index: usize, range: usize, wanted: usize, phase: u64) -> bool {
     let before = ((index as u128 * wanted as u128) + phase as u128) / range as u128;
     let after = (((index + 1) as u128 * wanted as u128) + phase as u128) / range as u128;
     after != before
+}
+
+/// Select the base and extension header picks from a retained tail pool.
+///
+/// Base picks are thinned over the whole pool; extension picks are thinned
+/// independently over the tails the base pass left behind. Both keep the pool's
+/// file order, which is what the plan layout expects.
+fn pick_tails(
+    tails: &[FlacTail],
+    header_slots: usize,
+    header_phase: u64,
+    ext_phase: u64,
+) -> (Vec<FlacSlot>, Vec<FlacSlot>) {
+    let tail_total = tails.len();
+    let ext_slots = header_slots.saturating_sub(PNG_AUDIO_BASE_SLOTS);
+    let mut base_picks: Vec<FlacSlot> = Vec::with_capacity(PNG_AUDIO_BASE_SLOTS);
+    let mut ext_picks: Vec<FlacSlot> = Vec::with_capacity(ext_slots);
+    let mut nonbase_seen = 0usize;
+    for (index, tail) in tails.iter().enumerate() {
+        if thin_pick(index, tail_total, PNG_AUDIO_BASE_SLOTS, header_phase) {
+            if base_picks.len() < PNG_AUDIO_BASE_SLOTS {
+                base_picks.push(tail.to_slot());
+            }
+        } else {
+            if ext_slots > 0
+                && thin_pick(
+                    nonbase_seen,
+                    tail_total.saturating_sub(PNG_AUDIO_BASE_SLOTS),
+                    ext_slots,
+                    ext_phase,
+                )
+            {
+                ext_picks.push(tail.to_slot());
+            }
+            nonbase_seen += 1;
+        }
+    }
+    (base_picks, ext_picks)
 }
 
 impl SlotCarrier for FlacCarrier<'_> {
@@ -999,19 +1181,86 @@ fn slot_cost(parsed: &ParsedFrame, slot: &frame::ResidualSlot, scale: &PcmScale)
     (1.0 / (1e-3 + energy_metric)) as f32
 }
 
+/// Largest decoded-sample difference between two versions of one frame, in
+/// units of one **stored** sample step.
+///
+/// The decoded values are output units, but the compensation chain moves stored
+/// values. A subframe with `w` wasted bits stores samples shifted right by `w`,
+/// so one stored step is `2^w` output units; the frame's worst difference is
+/// divided by that factor (rounded up) before it is compared with
+/// [`DRIFT_BUDGET`]. Without this, a perfectly compensated embed in a
+/// `wasted_bits > 0` carrier was reported as a `2^w`-unit smear and refused.
+///
+/// Shared by the embed-time gate and [`max_sample_drift`] so both measure the
+/// waveform the same way.
+fn decoded_drift_units(a: &ParsedFrame, b: &ParsedFrame) -> Result<i64, StrHideError> {
+    if a.samples.len() != b.samples.len() {
+        return Err(StrHideError::CorruptedData(
+            "cover and stego frames disagree on the channel count".into(),
+        ));
+    }
+    let mut frame_worst = 0i64;
+    let mut frame_at = (0usize, 0usize);
+    let mut first: Option<(usize, usize, i64, i64)> = None;
+    let mut count = 0usize;
+    for (ci, (plane_a, plane_b)) in a.samples.iter().zip(b.samples.iter()).enumerate() {
+        for (si, (x, y)) in plane_a.iter().zip(plane_b.iter()).enumerate() {
+            if x != y {
+                count += 1;
+                if first.is_none() {
+                    first = Some((ci, si, *x, *y));
+                }
+            }
+            if (x - y).abs() > frame_worst {
+                frame_worst = (x - y).abs();
+                frame_at = (ci, si);
+            }
+        }
+    }
+    // One stored step is `2^w` output units. Mixed wasted counts inside one
+    // frame are rare (real encoders pick them per subframe from the same
+    // signal, so they normally agree); taking the largest keeps the gate
+    // in stored units and can only be *more* lenient for such files.
+    let wasted = a
+        .wasted
+        .iter()
+        .chain(b.wasted.iter())
+        .max()
+        .copied()
+        .unwrap_or(0)
+        .min(31);
+    let scale = 1i64 << wasted;
+    let frame_units = if frame_worst == 0 {
+        0
+    } else {
+        (frame_worst + scale - 1) / scale
+    };
+    if frame_units > DRIFT_BUDGET && std::env::var_os("STRHIDE_FLAC_DEBUG").is_some() {
+        let f = first.unwrap_or((0, 0, 0, 0));
+        eprintln!(
+            "flac-debug: drift {frame_worst} output units = {frame_units} stored units (wasted {wasted}) at frame@{} ch{} sample{} (cover {} vs stego {}) | first ch{} sample{} {}->{} | {count} diffs",
+            a.start,
+            frame_at.0,
+            frame_at.1,
+            a.samples[frame_at.0][frame_at.1],
+            b.samples[frame_at.0][frame_at.1],
+            f.0,
+            f.1,
+            f.2,
+            f.3
+        );
+    }
+    Ok(frame_units)
+}
+
 /// Largest per-sample difference between two versions of the same FLAC file,
 /// measured in units of one **stored** sample step.
 ///
 /// Walks both files frame by frame so the working set stays one frame, and
-/// compares the *decoded* planes -- which is what a listener hears. The embedder
-/// uses it to prove that the residual moves it made did not smear the waveform.
-///
-/// The decoded values are output units, but the compensation chain moves stored
-/// values. A subframe with `w` wasted bits stores samples shifted right by `w`,
-/// so one stored step is `2^w` output units; each frame's worst difference is
-/// divided by that factor (rounded up) before it is compared with
-/// [`DRIFT_BUDGET`]. Without this, a perfectly compensated embed in a
-/// `wasted_bits > 0` carrier was reported as a `2^w`-unit smear and refused.
+/// compares the *decoded* planes -- which is what a listener hears. Embedding
+/// measures this during the finalize pass; this standalone walk remains for
+/// tests that compare two finished files.
+#[cfg(test)]
 pub(crate) fn max_sample_drift(
     cover: &[u8],
     stego: &[u8],
@@ -1035,63 +1284,7 @@ pub(crate) fn max_sample_drift(
         })?;
         let frame_samples = a.samples.first().map_or(0, Vec::len) as u64;
         samples_decoded += frame_samples;
-        if a.samples.len() != b.samples.len() {
-            return Err(StrHideError::CorruptedData(
-                "cover and stego frames disagree on the channel count".into(),
-            ));
-        }
-        let mut frame_worst = 0i64;
-        let mut frame_at = (0usize, 0usize);
-        let mut first: Option<(usize, usize, i64, i64)> = None;
-        let mut count = 0usize;
-        for (ci, (plane_a, plane_b)) in a.samples.iter().zip(b.samples.iter()).enumerate() {
-            for (si, (x, y)) in plane_a.iter().zip(plane_b.iter()).enumerate() {
-                if x != y {
-                    count += 1;
-                    if first.is_none() {
-                        first = Some((ci, si, *x, *y));
-                    }
-                }
-                if (x - y).abs() > frame_worst {
-                    frame_worst = (x - y).abs();
-                    frame_at = (ci, si);
-                }
-            }
-        }
-        // One stored step is `2^w` output units. Mixed wasted counts inside one
-        // frame are rare (real encoders pick them per subframe from the same
-        // signal, so they normally agree); taking the largest keeps the gate
-        // in stored units and can only be *more* lenient for such files.
-        let wasted = a
-            .wasted
-            .iter()
-            .chain(b.wasted.iter())
-            .max()
-            .copied()
-            .unwrap_or(0)
-            .min(31);
-        let scale = 1i64 << wasted;
-        let frame_units = if frame_worst == 0 {
-            0
-        } else {
-            (frame_worst + scale - 1) / scale
-        };
-        if frame_units > DRIFT_BUDGET && std::env::var_os("STRHIDE_FLAC_DEBUG").is_some() {
-            let f = first.unwrap_or((0, 0, 0, 0));
-            eprintln!(
-                "flac-debug: drift {frame_worst} output units = {frame_units} stored units (wasted {wasted}) at frame@{} ch{} sample{} (cover {} vs stego {}) | first ch{} sample{} {}->{} | {count} diffs",
-                a.start,
-                frame_at.0,
-                frame_at.1,
-                a.samples[frame_at.0][frame_at.1],
-                b.samples[frame_at.0][frame_at.1],
-                f.0,
-                f.1,
-                f.2,
-                f.3
-            );
-        }
-        worst = worst.max(frame_units);
+        worst = worst.max(decoded_drift_units(&a, &b)?);
         pos_a = a.crc16_offset + 2;
         pos_b = b.crc16_offset + 2;
     }

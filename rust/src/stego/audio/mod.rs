@@ -224,6 +224,10 @@ pub(crate) fn embed_flac(
             ext_phase,
             body_phase,
         )?;
+        // The finalize pass decodes the patched file to rebuild the MD5; let it
+        // compare the waveform against the cover in the same walk instead of
+        // decoding both files again afterwards.
+        carrier_view.track_drift(carrier);
         let result = core::embed(
             &mut carrier_view,
             core::Mapping::BodyPermuted,
@@ -241,11 +245,7 @@ pub(crate) fn embed_flac(
         );
         match result {
             Ok((capacity, stats)) => {
-                let drift = if carrier_view.pcm_md5() == Some(analysis.pcm_md5) {
-                    0
-                } else {
-                    flac::max_sample_drift(carrier, &bytes, &info)?
-                };
+                let drift = carrier_view.pcm_max_drift();
                 if drift > flac::DRIFT_BUDGET {
                     return Err(StrHideError::General(format!(
                         "FLAC embed would shift the decoded waveform by {drift} units, past the compensation budget; refusing to emit a carrier whose predictor is unstable"
@@ -275,7 +275,7 @@ pub(crate) fn extract_flac(
         return Err(core::no_hidden_data());
     }
     let info = flac::parse_stream_info(carrier)?;
-    let analysis = flac::analyse(carrier, &info)?;
+    let (analysis, tails) = flac::analyse_with_tails(carrier, &info)?;
     let pre_salt = flac_pre_salt(&info, profile.hpos_salt);
     let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
     let (header_phase, ext_phase, body_phase_base) = flac_phases(&prepared.locator.locate_seed);
@@ -284,17 +284,17 @@ pub(crate) fn extract_flac(
     // the header advertises. The slot arrays differ, which is why this is two
     // constructions rather than one. The base header carries the salt/nonce
     // that selected this attempt's body subset, so the second pass can derive
-    // exactly the phase the writer used.
+    // exactly the phase the writer used. The validating scan above already
+    // retained the tail pool, so the header view costs no second decode.
     let mut scratch = carrier.to_vec();
-    let header_view = flac::FlacCarrier::new(
+    let header_view = flac::FlacCarrier::header_view(
         &mut scratch,
         info,
         &analysis,
-        0,
+        &tails,
         PNG_AUDIO_BASE_SLOTS,
         header_phase,
         ext_phase,
-        body_phase_base,
     )?;
     let view = core::read_base(
         &header_view,
@@ -302,6 +302,7 @@ pub(crate) fn extract_flac(
         &prepared,
         FLAC_FORMAT_ID,
     )?;
+    drop(header_view);
     let header_slots = PNG_AUDIO_BASE_SLOTS + 8 * view.header.ext_len as usize;
     if header_slots > analysis.tails {
         return Err(core::no_hidden_data());
@@ -409,25 +410,25 @@ pub(crate) fn inspect_flac(
     }
     control.check()?;
     let info = flac::parse_stream_info(carrier)?;
-    let analysis = flac::analyse(carrier, &info)?;
+    let (analysis, tails) = flac::analyse_with_tails(carrier, &info)?;
     let pre_salt = flac_pre_salt(&info, profile.hpos_salt);
     let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
     let (header_phase, ext_phase, body_phase) = flac_phases(&prepared.locator.locate_seed);
 
     // One scratch for both passes: `read_base` releases its borrow when it
     // returns, and the body view needs the same bytes, so a second full-file
-    // clone is pure waste (C-07). Mirrors `extract_flac`.
+    // clone is pure waste (C-07). Mirrors `extract_flac`. The header view reuses
+    // the tail pool retained by the validating scan.
     let mut scratch = carrier.to_vec();
     let view = {
-        let header_view = flac::FlacCarrier::new(
+        let header_view = flac::FlacCarrier::header_view(
             &mut scratch,
             info,
             &analysis,
-            0,
+            &tails,
             PNG_AUDIO_BASE_SLOTS,
             header_phase,
             ext_phase,
-            body_phase,
         )?;
         // A wrong password makes the header unreadable; fall back to the
         // header-only view, which reports "nothing here" instead of an error.
@@ -520,23 +521,23 @@ pub(crate) fn verify_flac(
         return Ok(core::policy_failure_result("FLAC"));
     }
     let info = flac::parse_stream_info(carrier)?;
-    let analysis = flac::analyse(carrier, &info)?;
+    let (analysis, tails) = flac::analyse_with_tails(carrier, &info)?;
     let pre_salt = flac_pre_salt(&info, profile.hpos_salt);
     let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
     let (header_phase, ext_phase, body_phase) = flac_phases(&prepared.locator.locate_seed);
 
     // One scratch for both passes (C-07); `read_base` does not keep a borrow.
+    // The header view reuses the tail pool retained by the validating scan.
     let mut scratch = carrier.to_vec();
     let view = {
-        let header_view = flac::FlacCarrier::new(
+        let header_view = flac::FlacCarrier::header_view(
             &mut scratch,
             info,
             &analysis,
-            0,
+            &tails,
             PNG_AUDIO_BASE_SLOTS,
             header_phase,
             ext_phase,
-            body_phase,
         )?;
         core::read_base(
             &header_view,
