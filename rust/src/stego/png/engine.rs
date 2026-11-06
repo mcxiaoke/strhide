@@ -1126,6 +1126,16 @@ struct SlotPlan {
     used_by_header: Vec<bool>,
 }
 
+/// Wire form of the smooth-area exclusion: permille in `0..=900`.
+///
+/// The base header stores `exclusion_permille`, and both ends must cut the
+/// candidate list with the same integer, so the percentile never enters the
+/// arithmetic. `(k / 1000.0) * 1000.0` round-trips exactly for every
+/// `k in 0..=900`, so re-quantising the header value is lossless.
+fn exclusion_permille(percentile: f64) -> u16 {
+    (percentile.clamp(0.0, 0.9) * 1000.0) as u16
+}
+
 /// Pixels eligible to carry the header channel, in ascending pixel order.
 ///
 /// Eligibility is the class-interior test on the header channel: `val` in
@@ -1218,9 +1228,9 @@ impl SlotPlan {
     fn build(
         image: &RawImage,
         costs: &[f64],
-        params: &PngParams,
         locate_seed: &[u8; 32],
         ext_len: usize,
+        exclusion_permille: u16,
     ) -> Result<Self, StrHideError> {
         let total_pixels = image.width as usize * image.height as usize;
         if costs.len() != total_pixels {
@@ -1253,8 +1263,14 @@ impl SlotPlan {
         // Exclude the smoothest fraction (e.g. 30%). Only the kept prefix is
         // needed, so partition first (O(n)) and sort just that prefix; the
         // candidate list grows ~3x when the body spans three channels.
-        let allowed_count =
-            ((ranked.len() as f64) * (1.0 - params.exclusion_percentile.clamp(0.0, 0.9))) as usize;
+        //
+        // The cut is integer arithmetic on the *wire* permille, not on the
+        // float percentile: `(len * (1000 - k)) / 1000` is exactly reproducible
+        // by any reader, whereas `len * (1.0 - k / 1000.0)` rounds in the last
+        // bit and can land one element short (k = 900, len = 1000 gives 99
+        // instead of 100). Extraction must rebuild the same candidate list, so
+        // this formula is part of the wire format, not an implementation detail.
+        let allowed_count = ranked.len() * (1000 - exclusion_permille as usize) / 1000;
         if allowed_count < ranked.len() {
             ranked.select_nth_unstable(allowed_count);
             ranked.truncate(allowed_count);
@@ -1507,7 +1523,13 @@ pub fn embed_png_with_stats<'a>(
 
     let channel_offset = embed_channel(&image);
 
-    let plan = SlotPlan::build(&image, &costs, &params, &locator.locate_seed, ext_len)?;
+    let plan = SlotPlan::build(
+        &image,
+        &costs,
+        &locator.locate_seed,
+        ext_len,
+        exclusion_permille(params.exclusion_percentile),
+    )?;
     let (capacity_info, pool_green, pool_rgb) =
         build_png_capacity_with_pools(&image, &plan, &params, cost_model.id(), safety.level)?;
     if !plan.header_fits() {
@@ -1700,7 +1722,7 @@ pub fn embed_png_with_stats<'a>(
         p1_window: params.p1_window as u16,
         p2_window: params.p2_window as u16,
         neg_log2_epsilon: eps_k,
-        exclusion_permille: (params.exclusion_percentile.clamp(0.0, 0.9) * 1000.0) as u16,
+        exclusion_permille: exclusion_permille(params.exclusion_percentile),
         sigma,
         kernel_id: 0, // the built-in KB kernel; custom kernels need matching configs
         ext_len: ext_len as u16,
@@ -2065,9 +2087,9 @@ fn extract_png_with_keys(
     let plan = SlotPlan::build(
         image,
         &costs,
-        &effective_params,
         &locator.locate_seed,
         ext_len,
+        header.exclusion_permille,
     )?;
     debug_assert_eq!(
         plan.permuted.get(..PNG_AUDIO_BASE_SLOTS),
@@ -2643,9 +2665,9 @@ pub fn probe_png_capacity(
     let plan = SlotPlan::build(
         &image,
         &costs,
-        &params,
         &locator.locate_seed,
         extension.len(),
+        exclusion_permille(params.exclusion_percentile),
     )?;
     build_png_capacity_info(&image, &plan, &params, cost_model.id(), safety_level)
 }
@@ -4401,13 +4423,10 @@ mod tests {
         // so it never enters the candidate pool (the reported "miss").
         assert_eq!(header_pool(&image), vec![0, 2]);
 
-        let params = PngParams {
-            exclusion_percentile: 0.0,
-            ..PngParams::default()
-        };
         let costs = vec![0.0; image.width as usize];
         let seed = [7u8; 32];
-        let plan = SlotPlan::build(&image, &costs, &params, &seed, 0).expect("plan");
+        // permutation id 0, then exclusion permille 0 (keep every candidate).
+        let plan = SlotPlan::build(&image, &costs, &seed, 0, 0).expect("plan");
         assert_eq!(plan.candidates, vec![0, 2]);
 
         // Both candidates are header pixels, so their green slots are
@@ -4419,6 +4438,46 @@ mod tests {
                 (SPATIAL_ELIGIBLE_MIN..=SPATIAL_ELIGIBLE_MAX).contains(&image.pixels[slot]),
                 "every body slot must stay class-interior"
             );
+        }
+    }
+
+    /// The smooth-area cut is integer arithmetic on the wire permille.
+    ///
+    /// `WIRE_SPEC_CONTENT §13.11.3` fixes `allowed = n * (1000 - p) / 1000`.
+    /// The previous `n * (1.0 - p/1000.0)` rounds in the last bit and lands one
+    /// element short exactly when the true quotient is an integer: with
+    /// `p = 900‰` and `n = 1000` it selects 99 candidates instead of 100, so a
+    /// reader following the spec would rebuild a different body pool.
+    #[test]
+    fn exclusion_cut_uses_integer_arithmetic() {
+        let w = 1000usize;
+        let image = RawImage {
+            width: w as u32,
+            height: 1,
+            bit_depth: 8,
+            color_type: 0,
+            channels: 1,
+            pixels: vec![128u8; w],
+            chunks: Vec::new(),
+            idat_sizes: Vec::new(),
+            row_filters: Vec::new(),
+            idat_info: None,
+            tail: Vec::new(),
+        };
+        let costs = vec![0.0f64; w];
+        let seed = [9u8; 32];
+
+        // 900‰ excluded, 1000 eligible -> 100 candidates (not 99).
+        let plan = SlotPlan::build(&image, &costs, &seed, 0, 900).expect("plan");
+        assert_eq!(plan.candidates.len(), 100);
+
+        // Degenerate end: nothing excluded keeps every eligible pixel.
+        let plan = SlotPlan::build(&image, &costs, &seed, 0, 0).expect("plan");
+        assert_eq!(plan.candidates.len(), 1000);
+
+        // The helper is the inverse of the header field, for every value it can carry.
+        for permille in 0..=900u16 {
+            assert_eq!(exclusion_permille(f64::from(permille) / 1000.0), permille);
         }
     }
 
@@ -4479,7 +4538,14 @@ mod tests {
             None,
         )
         .expect("locator");
-        let plan = SlotPlan::build(&img, &costs, &params, &locator.locate_seed, 0).expect("plan");
+        let plan = SlotPlan::build(
+            &img,
+            &costs,
+            &locator.locate_seed,
+            0,
+            exclusion_permille(params.exclusion_percentile),
+        )
+        .expect("plan");
 
         let mut eligible: Vec<usize> = (0..w * h)
             .filter(|&i| {
@@ -4491,8 +4557,9 @@ mod tests {
                 .partial_cmp(&costs[b])
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let allowed = ((eligible.len() as f64)
-            * (1.0 - params.exclusion_percentile.clamp(0.0, 0.9))) as usize;
+        let allowed = eligible.len()
+            * (1000 - exclusion_permille(params.exclusion_percentile) as usize)
+            / 1000;
         assert_eq!(
             plan.candidates,
             eligible[..allowed].to_vec(),
@@ -4513,7 +4580,7 @@ mod tests {
         let params = PngParams::default();
 
         // A private build changes *every* derivation label, exactly as
-        // `WIRE_SPEC §13.10` promises. `hpos_salt` alone would leave the KDF
+        // `WIRE_SPEC_CONTENT §13.11` promises. `hpos_salt` alone would leave the KDF
         // labels official, which is what the old profile shape did.
         const PRIVATE_CIPHER: crate::stego::format::WireCipherProfile =
             crate::stego::format::WireCipherProfile {

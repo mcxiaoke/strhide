@@ -4613,7 +4613,7 @@ mod dialect_tests {
     use crate::stego::format::DEFAULT_HEVC_FORMAT;
     use crate::stego::hevc::sniff::{NAL_IDR_W_RADL, NAL_TRAIL_R};
 
-    /// The literals below are pinned to `docs/api/WIRE_SPEC.md` §13.11.2. The
+    /// The literals below are pinned to `docs/api/WIRE_SPEC_CONTENT.md` §13.4.5. The
     /// spec is the only reproduction recipe a private build has; if an
     /// implementation constant changes without the doc (or vice versa),
     /// third-party rebuilds silently produce mutually unreadable carriers.

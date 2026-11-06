@@ -15,7 +15,9 @@ strhide/
 │   ├── api/
 │   │   ├── ARCHITECTURE.md                # System architecture, facades, and modules
 │   │   ├── STEGO-API.md                   # Content domain steganography API guide
-│   │   └── WIRE_SPEC.md                   # Binary wire format specifications
+│   │   ├── WIRE_SPEC.md                   # Wire format index (both domains)
+│   │   ├── WIRE_SPEC_STRUCTURE.md         # Structure domain UBE v2.2 wire format
+│   │   └── WIRE_SPEC_CONTENT.md           # Content domain V4 envelope wire format
 │   └── CHANGES-*.md                       # Chronological engineering change logs
 ├── scripts/     # Baseline hash verification, regression testing, and CI scripts
 └── testdata/    # Test fixtures and baseline multi-format corpus
@@ -114,6 +116,8 @@ The desktop client is located in `gui/`, developed with **Tauri 2**, **React**, 
 * [Technical Implementation Specification](docs/smart_file_data_hiding_design.md): In-depth protocol specification, adapter algorithms, and safety matrices.
 * [System Architecture & Public API](docs/api/ARCHITECTURE.md): Crate module topology, facade APIs, and pipeline designs.
 * [Stego Content Domain API Guide](docs/api/STEGO-API.md): API reference for content-adaptive steganography and algorithm introspection.
-* [Wire Format Specification](docs/api/WIRE_SPEC.md): Binary layouts of UBE v2.2 and content micro-envelopes.
+* [Wire Format Specification (index)](docs/api/WIRE_SPEC.md): Which document covers which domain.
+* [Structure Domain Wire Format](docs/api/WIRE_SPEC_STRUCTURE.md): UBE v2.2 binary layouts, AAD, stealth masks, compat matrix.
+* [Content Domain Wire Format](docs/api/WIRE_SPEC_CONTENT.md): V4 envelope, stability classes (frozen / dialect / free), key derivation, slot selection, STC syndrome, HILL cost ranking.
 * [Rust Library Usage Guide](rust/README.md): Detailed documentation on using `strhide` as a Rust crate dependency.
 * [Chinese Documentation / 中文文档](README.zh.md)
