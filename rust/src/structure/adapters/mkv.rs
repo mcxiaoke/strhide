@@ -110,44 +110,30 @@ impl HostAdapter for MkvAdapter {
             None => return Ok(None),
         };
 
-        // 1. Check ebml_void element
-        //
-        // The Void prefix only proves that *some* Void of the right length sits
-        // in front of the declared offset; it says nothing about the declared
-        // size, which the trailer protects with CRC-32 alone. `ebml_void`
-        // appends, so the envelope has to end exactly at the file end — without
-        // that equation a forged size reached the metadata allocation
-        // (review P0-2).
+        // `ebml_void` appends, so the envelope has to end exactly at the file
+        // end — without that equation a forged size reached the metadata
+        // allocation (review P0-2). A content-domain HEVC re-encode rewrites the
+        // segment and slides the whole appended region, so resolve the physical
+        // start from the tail instead of trusting the write-time coordinate.
+        let Some(start) = trailer.locate_start(file_size) else {
+            return Ok(None);
+        };
         if let Some(vint) = encode_vint(trailer.ube_total_size) {
             let prefix_len = 1 + vint.len() as u64;
-            if trailer.ube_offset >= prefix_len
-                && trailer.ube_offset.checked_add(trailer.ube_total_size) == Some(file_size)
-            {
-                stego_in.seek(SeekFrom::Start(trailer.ube_offset - prefix_len))?;
+            if start >= prefix_len {
+                stego_in.seek(SeekFrom::Start(start - prefix_len))?;
                 let mut prefix = vec![0u8; prefix_len as usize];
                 if stego_in.read_exact(&mut prefix).is_ok()
                     && prefix[0] == EBML_VOID_ID
                     && prefix[1..] == *vint
                 {
-                    return Ok(Some((
-                        trailer.ube_offset,
-                        trailer.ube_total_size,
-                        "ebml_void".into(),
-                    )));
+                    return Ok(Some((start, trailer.ube_total_size, "ebml_void".into())));
                 }
             }
         }
 
         // 2. Fallback to EOF
-        if trailer.ube_offset.checked_add(trailer.ube_total_size) == Some(file_size) {
-            return Ok(Some((
-                trailer.ube_offset,
-                trailer.ube_total_size,
-                "eof".into(),
-            )));
-        }
-
-        Ok(None)
+        Ok(Some((start, trailer.ube_total_size, "eof".into())))
     }
 
     fn verify_structure(
@@ -178,10 +164,7 @@ impl HostAdapter for MkvAdapter {
             let tail_envelope = EnvelopeTrailer::read_from_tail(stego_in, locator_magic)
                 .ok()
                 .flatten()
-                .filter(|t| {
-                    t.ube_offset == offset
-                        && offset.checked_add(t.ube_total_size) == Some(file_size)
-                });
+                .filter(|t| matches!(t.locate_start(file_size), Some(start) if start == offset));
             if let Some(trailer) = tail_envelope.filter(|_| has_ebml_hdr && has_segment) {
                 return Ok((
                     true,

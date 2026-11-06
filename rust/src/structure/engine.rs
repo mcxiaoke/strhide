@@ -2217,12 +2217,13 @@ fn remove_core(
 
 /// Return header coordinates translated to the *located* envelope position.
 ///
-/// A PNG `chunk` envelope can move after it was written: content-domain
-/// embedding re-compresses IDAT, which changes the length of the chunk stream
-/// preceding the private chunk and therefore its physical offset. The envelope
-/// trailer is authenticated, but its `ube_offset` is the coordinate from write
-/// time, so `strip` must be told where the envelope really is. All other
-/// strategies are anchored at write time; a mismatch there means corruption.
+/// A PNG `chunk` or appended EOF envelope can move after it was written:
+/// content-domain embedding re-compresses IDAT (or re-encodes the media), which
+/// changes the length of the stream preceding the envelope and therefore its
+/// physical offset. The envelope trailer is authenticated, but its `ube_offset`
+/// is the coordinate from write time, so `strip` must be told where the envelope
+/// really is. All other strategies are anchored at write time; a mismatch there
+/// means corruption.
 fn strip_coordinates_for_location(
     header: &EnvelopeHeader,
     ube_offset: u64,
@@ -2235,7 +2236,7 @@ fn strip_coordinates_for_location(
     if declared == ube_offset {
         return Ok(header.clone());
     }
-    if strategy != "chunk" {
+    if !matches!(strategy, "chunk" | "eof") {
         return Err(StrHideError::CorruptedData(format!(
             "envelope coordinates disagree: header declares {declared}, located at {ube_offset}"
         )));
@@ -2781,14 +2782,15 @@ fn envelope_coordinates_agree(
                 header.inject_offset, header.offset_delta
             )
         })?;
-    // PNG `chunk` envelopes can be physically relocated by content-domain
-    // embedding: re-compressing IDAT changes the length of the stream before the
-    // private chunk, so the envelope trailer still carries the write-time
-    // coordinate. The trailer and header are authenticated, so accept a shift
-    // for that strategy only and bound the relocated region against EOF. Every
-    // other strategy is anchored at write time and a mismatch is corruption.
+    // PNG `chunk` and appended EOF envelopes can be physically relocated by
+    // content-domain embedding: re-compressing IDAT (or re-encoding the media)
+    // changes the length of the stream before the envelope, so the trailer
+    // still carries the write-time coordinate. The trailer and header are
+    // authenticated, so accept a shift for those strategies and bound the
+    // relocated region against EOF. Every other strategy is anchored at write
+    // time and a mismatch is corruption.
     let relocated = expected_offset != ube_offset;
-    if relocated && strategy != "chunk" {
+    if relocated && !matches!(strategy, "chunk" | "eof") {
         return Err(format!(
             "Header coordinates disagree with the envelope: inject_offset {} + delta {} = {}, \
              but the envelope sits at {}",

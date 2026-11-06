@@ -60,9 +60,7 @@ pub fn trailing_envelope_len(
     // the magic and the CRC, so a forged tail now falls through to the box
     // walk instead.
     let trailer = EnvelopeTrailer::unpack(&tail, expected_trailer_magic).ok()?;
-    if trailer.ube_offset != offset
-        || trailer.ube_offset.checked_add(trailer.ube_total_size) != Some(total_size)
-    {
+    if trailer.locate_start(total_size) != Some(offset) {
         return None;
     }
     Some(trailer.ube_total_size)
@@ -231,12 +229,8 @@ pub fn isobmff_locate(
 
     // 4. Fallback to EOF
     let file_size = stego_in.seek(SeekFrom::End(0))?;
-    if trailer.ube_offset.checked_add(trailer.ube_total_size) == Some(file_size) {
-        return Ok(Some((
-            trailer.ube_offset,
-            trailer.ube_total_size,
-            "eof".into(),
-        )));
+    if let Some(start) = trailer.locate_start(file_size) {
+        return Ok(Some((start, trailer.ube_total_size, "eof".into())));
     }
 
     Ok(None)

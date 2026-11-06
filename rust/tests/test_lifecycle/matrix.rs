@@ -877,3 +877,67 @@ fn streaming_wav_sentinel_size_verifies_after_eof_overlay() {
     assert!(rem.verified_identical);
     assert_eq!(fs::read(&restored).unwrap(), original);
 }
+
+/// A later content-domain rewrite (PNG/JPEG re-encode) changes the length of
+/// the carrier prefix while leaving an appended EOF envelope untouched. The
+/// trailer's write-time offset then no longer matches, but the envelope is
+/// still tail-aligned and must stay readable.
+#[test]
+fn eof_envelope_survives_carrier_rewrite_relocation() {
+    for &fmt in &[Fmt::Png, Fmt::Jpeg] {
+        let label = format!("relocated_{}", fmt.ext());
+        let dir = scratch(&label);
+        let carrier = dir.join(format!("c.{}", fmt.ext()));
+        let original = fmt.carrier();
+        fs::write(&carrier, &original).unwrap();
+
+        let out = dir.join(format!("c.steg.{}", fmt.ext()));
+        let write = write_carrier(
+            &carrier,
+            PayloadSource::Text("relocated payload"),
+            &WriteOptions {
+                output_path: Some(&out),
+                password: Some("reloc-pw"),
+                strategy: "eof",
+                stealth: false,
+                backup: false,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{label}: write failed: {e}"));
+        assert_eq!(write.strategy.name(), "eof");
+
+        // Shift the appended envelope by inserting bytes between the host and
+        // the envelope, exactly like a shorter/longer re-encoded prefix would.
+        let stem = fs::read(&out).unwrap();
+        let mut displaced = stem[..original.len()].to_vec();
+        displaced.extend_from_slice(&[0x00; 37]);
+        displaced.extend_from_slice(&stem[original.len()..]);
+        let moved = dir.join(format!("c.moved.{}", fmt.ext()));
+        fs::write(&moved, &displaced).unwrap();
+
+        let read = read_carrier(
+            &moved,
+            &ReadOptions {
+                output_path: None,
+                password: Some("reloc-pw"),
+                overwrite: false,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{label}: read failed after relocation: {e}"));
+        assert_eq!(
+            String::from_utf8(read.data).unwrap(),
+            "relocated payload",
+            "{label}: payload after relocation"
+        );
+
+        let v = verify_carrier(&moved, Some("reloc-pw"))
+            .unwrap_or_else(|e| panic!("{label}: verify failed after relocation: {e}"));
+        assert!(
+            v.level2_envelope.ok,
+            "{label}: L2 {}",
+            v.level2_envelope.detail
+        );
+    }
+}

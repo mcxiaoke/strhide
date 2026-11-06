@@ -273,31 +273,57 @@ mod envelope_coordinates {
     }
 
     #[test]
-    fn verify_rejects_a_header_whose_coordinates_disagree() {
+    fn verify_translates_a_tail_aligned_eof_relocation() {
         let png = make_png();
-        // `eof` is anchored at the original carrier size and cannot be
-        // legitimately relocated, unlike PNG `chunk` (which content-domain
-        // re-compression may move; see the dual-domain regression test).
+        // An appended EOF envelope can be slid by a later carrier rewrite, so
+        // the located start is derived from the tail rather than from the
+        // write-time `inject_offset`. Tampering with that unauthenticated field
+        // must not change where read/verify look.
         let stego = write(&png, "eof");
         let env = png.len();
 
         // `inject_offset` lives at header bytes 80..88, outside the 80-byte AAD
         // and inside the public-key mask, so flipping a raw bit there changes
-        // the unmasked value while leaving the metadata AEAD intact — exactly
-        // the shape the old verify waved through.
+        // the unmasked value while leaving the metadata AEAD intact.
         let mut tampered = stego.clone();
         tampered[env + 80] ^= 0x01;
 
         let verify = verify_carrier_bytes(&tampered, None, &StructureProfile::default())
             .expect("verify still returns a report");
         assert!(
+            verify.level2_envelope.ok,
+            "tail-aligned envelope must be located from the tail: {}",
+            verify.level2_envelope.detail
+        );
+        let read = read_carrier_bytes(&tampered, None, &StructureProfile::default())
+            .expect("read still uses the real location");
+        assert_eq!(read.data, b"offset delta payload");
+    }
+
+    #[test]
+    fn verify_rejects_an_injected_region_past_eof() {
+        let png = make_png();
+        let stego = write(&png, "eof");
+        let env = png.len();
+
+        // `inject_size` (header bytes 88..96) is also outside the AAD. Even
+        // though the physical start is taken from the tail, the injected region
+        // must stay inside the file.
+        let mut tampered = stego.clone();
+        let past_eof = (stego.len() as u64 + 1).to_le_bytes();
+        tampered[env + 88..env + 96].copy_from_slice(&past_eof);
+
+        let verify = verify_carrier_bytes(&tampered, None, &StructureProfile::default())
+            .expect("verify still returns a report");
+        assert!(
             !verify.level2_envelope.ok,
-            "Level 2 must reject coordinates that disagree with the envelope: {}",
+            "Level 2 must reject an injected region past EOF: {}",
             verify.level2_envelope.detail
         );
         assert!(
-            verify.level2_envelope.detail.contains("disagree"),
-            "detail should name the mismatch, got: {}",
+            verify.level2_envelope.detail.contains("past the end")
+                || verify.level2_envelope.detail.contains("exceeds"),
+            "detail should name the bounds failure, got: {}",
             verify.level2_envelope.detail
         );
     }

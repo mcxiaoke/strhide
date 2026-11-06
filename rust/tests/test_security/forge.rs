@@ -252,20 +252,18 @@ fn meta_len_above_the_cap_is_rejected_even_with_a_consistent_trailer() {
 }
 
 #[test]
-fn a_forged_trailer_pointing_past_the_file_end_is_ignored() {
-    // Same idea as the allocation tests but without touching the header: if the
-    // locator accepted a region that runs past EOF, `open_ube_reader` would
-    // build a reader over bytes that do not exist.
+fn a_forged_trailer_with_an_oversized_envelope_is_ignored() {
+    // Same idea as the allocation tests but without touching the header: a
+    // trailer whose declared envelope is larger than the whole file cannot be
+    // tail-aligned, so locate must not build a reader over bytes that do not
+    // exist. A forged *offset* alone is harmless: the real start is derived
+    // from the tail so a later carrier rewrite can slide an appended envelope.
     let dir = scratch("forge_past_eof");
     let stego = write_carrier_with(&dir, "past", make_png(), "eof");
     let mut data = fs::read(&stego).unwrap();
     let n = data.len();
     let trailer = EnvelopeTrailer::unpack(&data[n - TRAILER_SIZE..], None).unwrap();
-    let forged = EnvelopeTrailer::create(
-        trailer.ube_offset + 1,
-        trailer.ube_total_size,
-        STANDARD_TRAILER_MAGIC,
-    );
+    let forged = EnvelopeTrailer::create(trailer.ube_offset, n as u64 + 1, STANDARD_TRAILER_MAGIC);
     data[n - TRAILER_SIZE..].copy_from_slice(&forged.pack());
     fs::write(&stego, data).unwrap();
 

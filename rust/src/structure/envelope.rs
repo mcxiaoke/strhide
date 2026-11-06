@@ -857,6 +857,26 @@ impl EnvelopeTrailer {
         }
         Self::unpack(&tail_bytes, expected_magic).map(Some)
     }
+
+    /// Physical start of this envelope when its trailer still sits at the end
+    /// of a `file_size`-byte carrier.
+    ///
+    /// `ube_offset` is the coordinate recorded at write time. A later
+    /// content-domain pass can rewrite the carrier prefix (PNG/JPEG
+    /// re-compression, HEVC re-encode) without touching the appended envelope:
+    /// the envelope then keeps its size but slides to
+    /// `file_size - ube_total_size`. Callers must still authenticate the header
+    /// found at the returned offset before trusting the location.
+    pub fn locate_start(&self, file_size: u64) -> Option<u64> {
+        if self.ube_offset.checked_add(self.ube_total_size) == Some(file_size) {
+            return Some(self.ube_offset);
+        }
+        let min_envelope = (HEADER_SIZE + TRAILER_SIZE) as u64;
+        if self.ube_total_size < min_envelope {
+            return None;
+        }
+        file_size.checked_sub(self.ube_total_size)
+    }
 }
 
 #[cfg(test)]

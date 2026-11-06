@@ -219,13 +219,9 @@ pub fn riff_locate(
 
     // Check EOF fallback
     if let Some(trailer) = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)?
-        .filter(|t| t.ube_offset.checked_add(t.ube_total_size) == Some(file_size))
+        && let Some(start) = trailer.locate_start(file_size)
     {
-        return Ok(Some((
-            trailer.ube_offset,
-            trailer.ube_total_size,
-            "eof".into(),
-        )));
+        return Ok(Some((start, trailer.ube_total_size, "eof".into())));
     }
 
     Ok(None)
@@ -279,9 +275,10 @@ where
 
     while offset < file_size {
         // Remaining bytes at this chunk boundary may be an EOF overlay.
-        if let Some(trailer) = tail_envelope.as_ref().filter(|t| {
-            t.ube_offset == offset && offset.checked_add(t.ube_total_size) == Some(file_size)
-        }) {
+        if let Some(trailer) = tail_envelope
+            .as_ref()
+            .filter(|t| matches!(t.locate_start(file_size), Some(start) if start == offset))
+        {
             validate_specific(&chunks).map_err(StrHideError::CorruptedData)?;
             return Ok((
                 true,

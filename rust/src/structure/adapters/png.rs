@@ -318,8 +318,21 @@ impl HostAdapter for PngAdapter {
         // Fallback to EOF
         if let Some(t) = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {
             let file_size = stego_in.seek(SeekFrom::End(0))?;
-            if t.ube_offset.checked_add(t.ube_total_size) == Some(file_size) {
-                return Ok(Some((t.ube_offset, t.ube_total_size, "eof".into())));
+            if let Some(start) = t.locate_start(file_size) {
+                // Content-domain re-compression rewrites IDAT and changes the
+                // physical offset of an appended overlay while leaving the
+                // envelope itself untouched. Accept that relocation only when
+                // the expected header magic sits at the recovered start.
+                let magic_ok = if start == t.ube_offset {
+                    true
+                } else {
+                    stego_in.seek(SeekFrom::Start(start))?;
+                    let mut hdr = [0u8; 8];
+                    stego_in.read_exact(&mut hdr).is_ok() && hdr == expected_header_magic
+                };
+                if magic_ok {
+                    return Ok(Some((start, t.ube_total_size, "eof".into())));
+                }
             }
         }
 
