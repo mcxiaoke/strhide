@@ -947,3 +947,41 @@ python scripts/cost_vectors_check.py                    # 另一语言：五段�
 
 新增一个 F 级数值阶段（例如换代价模型）时，应同时扩一份这样的向量：它比字节比对早一步定位问题，
 也是"另一个语言实现是否对齐"的唯一低成本判据。
+
+### A.4 第二实现：`scripts/spec_extract_png.py`
+
+一份只读的 Python 实现，用来验证本文是否足够写出一个能读出 Rust 产物的读取器。它不复用任何
+Rust 代码，全部按 §13.3–§13.11 重写：
+
+| 组成 | 覆盖的章节 |
+|---|---|
+| PNG 解码（8-bit、非隔行、filter 0–4） | —（载体编解码，不属于线格式） |
+| `pre_salt`、L1/L2/L3、`info(label, domain)` | §13.4 |
+| ChaCha12 + 拒绝采样 + 前缀/整段 Fisher–Yates | §13.5（含 KAT 自检） |
+| 头部池、正文候选与排序、槽位展开 | §13.6、§13.11.1–13.11.3（HILL） |
+| STC 列向量与 syndrome | §13.7 |
+| AEAD AAD、微头、`body_len` 语义 | §13.2、§13.3、§13.8 |
+
+实测（2026-11-06/07）：
+
+| 用例 | 结果 |
+|---|---|
+| `hill` + 文本载荷（无密码） | 读出 |
+| `hill` + 密码 | 读出 |
+| `hill` + 文件载荷（`u = 1` 路径，300 B） | 逐字节一致 |
+| **`mipod` + 文本，Rust 在 Windows 嵌入、Python 在 Windows 读取** | 读出 |
+| **`mipod` + 文本，Rust 在 Windows 嵌入、Python 在 Ubuntu/glibc 读取** | 读出 |
+| 错误密码 | `header CRC mismatch`，与"没有数据"不可区分 |
+
+`mipod` 那两行是关键：读取只需要**排序**一致，而排序经 §13.11.4 的量化后对 libm 差异不敏感，
+所以**不需要先自己实现 `exp`/`ln`/`cos`**——那是"产出同样字节"才需要的。
+
+未覆盖（有意留白，不是遗漏）：S-UNIWARD 代价模型、JPEG / HEVC / 音频载体、扩展 TLV、
+suite 2、Hamming 编码、16-bit PNG。想扩到这些地方时，按上表逐块补即可，键派生与 STC
+这两层不需要再动。
+
+```bash
+python scripts/spec_extract_png.py carrier.png            # 默认公开密钥
+python scripts/spec_extract_png.py carrier.png --password pw --out payload.bin
+python scripts/spec_extract_png.py --self-test            # ChaCha12 KAT
+```
