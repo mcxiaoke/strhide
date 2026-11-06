@@ -540,6 +540,28 @@ fn verify_detects_unsupported_envelope_version() {
 }
 
 #[test]
+fn inspect_degrades_an_invalid_header_to_no_envelope() {
+    let dir = scratch("inspect_version");
+    let (out, ube_offset) = write_eof_envelope(&dir, "iv");
+    tamper_version_field(&out, ube_offset);
+
+    // `verify` still reports the precise Level-2 diagnostic (test above), but
+    // `inspect` / `smart_extract` must not abort the whole flow just because
+    // one envelope header fails its shape check (review B-06 / N-02).
+    let bytes = fs::read(&out).unwrap();
+    let res = strhide::structure::inspect_carrier_bytes(
+        &bytes,
+        None,
+        &strhide::StructureProfile::default(),
+    )
+    .unwrap();
+    assert!(
+        !res.has_hidden_data,
+        "an unreadable header must degrade to 'no envelope', not an error"
+    );
+}
+
+#[test]
 fn verify_detects_inconsistent_meta_len() {
     let dir = scratch("verify_metalen");
     let (out, ube_offset) = write_eof_envelope(&dir, "m");

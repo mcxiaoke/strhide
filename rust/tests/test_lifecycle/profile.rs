@@ -638,6 +638,8 @@ fn invalid_local_params_fail_before_touching_the_carrier() {
 
     for bad in [
         LocalParams::default().with_chunk_size(0),
+        LocalParams::default().with_chunk_size(1),
+        LocalParams::default().with_chunk_size(strhide::params::MIN_CHUNK_SIZE - 1),
         LocalParams::default().with_chunk_size(strhide::crypto::MAX_CHUNK_SIZE + 1),
         LocalParams::default().with_compression(CompressionStrategy::Always { level: 10 }),
     ] {

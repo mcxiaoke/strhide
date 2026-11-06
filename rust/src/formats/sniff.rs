@@ -263,7 +263,7 @@ fn is_pe_bytes(bytes: &[u8]) -> bool {
         return false;
     }
     let lfanew = u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
-    if lfanew < 0x40 || lfanew + 4 > bytes.len() {
+    if lfanew < 0x40 || lfanew.checked_add(4).is_none_or(|end| end > bytes.len()) {
         return false;
     }
     &bytes[lfanew..lfanew + 4] == b"PE\0\0"

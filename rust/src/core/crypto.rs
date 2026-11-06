@@ -684,7 +684,15 @@ pub(crate) fn probe_compressibility(
     payload: &[u8],
     level: u32,
 ) -> Result<(u64, u64), StrHideError> {
-    debug_assert!(payload.len() > COMPRESSION_PROBE_MIN_BYTES);
+    // A real check, not a debug_assert: release builds would otherwise underflow
+    // `span` and slice out of bounds if a future caller passes a short payload.
+    if payload.len() <= COMPRESSION_PROBE_MIN_BYTES {
+        return Err(StrHideError::General(format!(
+            "compression probe needs more than {} bytes, got {}",
+            COMPRESSION_PROBE_MIN_BYTES,
+            payload.len()
+        )));
+    }
     const SAMPLE_BYTES: usize = COMPRESSION_PROBE_SEGMENTS * COMPRESSION_PROBE_SEGMENT_BYTES;
 
     let mut sample = Vec::with_capacity(SAMPLE_BYTES);
@@ -884,6 +892,15 @@ pub fn compute_file_sha256(path: &std::path::Path) -> Result<[u8; 32], StrHideEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compression_probe_rejects_short_input_in_release_too() {
+        // The old `debug_assert!` disappeared in release builds, where a short
+        // payload would underflow `span` and slice out of bounds.
+        assert!(probe_compressibility(&[0u8; 32 * 1024], 6).is_err());
+        assert!(probe_compressibility(&[], 6).is_err());
+        assert!(probe_compressibility(&vec![0u8; COMPRESSION_PROBE_MIN_BYTES + 1], 6).is_ok());
+    }
 
     /// Both of these are `pub fn`s reachable from an embedding host, and both
     /// used to assume a validated `chunk_size`. `chunk_count` divided by zero

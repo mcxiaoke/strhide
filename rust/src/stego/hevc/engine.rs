@@ -1859,17 +1859,14 @@ fn reencode_slice(
             Err(_) => return SliceReencodeOutcome::BadSubstream(slice_idx, *sub_idx),
         };
 
-        if reencoded.len() == orig_sub_len {
-            modified_rbsp[sub.rbsp_byte_start..sub.rbsp_byte_end].copy_from_slice(&reencoded);
-        } else if reencoded.len() < orig_sub_len && orig_sub_len - reencoded.len() <= 4 {
-            modified_rbsp[sub.rbsp_byte_start..sub.rbsp_byte_start + reencoded.len()]
-                .copy_from_slice(&reencoded);
-            for b in &mut modified_rbsp[sub.rbsp_byte_start + reencoded.len()..sub.rbsp_byte_end] {
-                *b = 0;
-            }
-        } else {
+        // A bypass-bit flip must preserve the substream length. Zero-padding a
+        // shorter replay could overwrite rbsp_trailing_bits / cabac_zero_word
+        // and still pass the final length check, publishing a NAL that
+        // decoders reject. Fail closed on any length change instead.
+        if reencoded.len() != orig_sub_len {
             return SliceReencodeOutcome::BadSubstream(slice_idx, *sub_idx);
         }
+        modified_rbsp[sub.rbsp_byte_start..sub.rbsp_byte_end].copy_from_slice(&reencoded);
 
         for (global, bit_lo, bit_hi) in sub_trace {
             trace.push((

@@ -43,6 +43,14 @@ pub const DEFAULT_COMPRESSION_LEVEL: u32 = 6;
 /// Reject anything above this: raw deflate takes 0..=9.
 pub const MAX_COMPRESSION_LEVEL: u32 = 9;
 
+/// Smallest accepted payload chunk.
+///
+/// Each chunk costs `CHUNK_OVERHEAD` (4-byte length + 16-byte tag) on the wire,
+/// so a one-byte chunk would inflate a 64 MiB payload into a ~1.3 GiB envelope
+/// and force ~67 million AEAD seals. Writers that want smaller framing for
+/// tests still have 512 bytes, which keeps the framing overhead under 4%.
+pub const MIN_CHUNK_SIZE: usize = 512;
+
 /// Historical compression trigger: keep the deflate stream only when it saves
 /// at least 2% (`comp_len * 100 < raw_size * 98`).
 pub const AUTO_COMPRESSION_SAVING_PERCENT: u128 = 2;
@@ -208,6 +216,12 @@ impl LocalParams {
             return Err(crate::errors::StrHideError::General(
                 "chunk_size must be greater than zero".into(),
             ));
+        }
+        if self.chunk_size < MIN_CHUNK_SIZE {
+            return Err(crate::errors::StrHideError::General(format!(
+                "chunk_size {} is below the {} byte minimum (framing overhead would dominate)",
+                self.chunk_size, MIN_CHUNK_SIZE
+            )));
         }
         if self.chunk_size > MAX_CHUNK_SIZE {
             return Err(crate::errors::StrHideError::General(format!(

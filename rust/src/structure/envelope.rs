@@ -636,7 +636,9 @@ impl EnvelopeHeader {
             }
             // The version is checked by the level-2 verifier, not here, so a
             // forged header with an unsupported version still gets the specific
-            // "unsupported version" diagnostic.
+            // "unsupported version" diagnostic. `inspect_core` now treats a
+            // failed level-2 check as "no readable envelope", so a coincidental
+            // de-mask hit cannot abort an inspection (review N-02).
             if (unmasked[9] & FLAG_ENCRYPTED) == 0
                 && (1..=MAX_KNOWN_STRATEGY_ID).contains(&unmasked[10])
                 && unmasked[11] <= MAX_OFFSET_DELTA
@@ -839,16 +841,58 @@ impl EnvelopeTrailer {
         let mut tail_bytes = [0u8; TRAILER_SIZE];
         reader.read_exact(&mut tail_bytes)?;
 
-        match Self::unpack(&tail_bytes, expected_magic) {
-            Ok(trailer) => Ok(Some(trailer)),
-            Err(_) => Ok(None),
+        // A magic mismatch is the normal "no envelope here" outcome. A matching
+        // magic with a bad CRC (or any other parse failure) means the carrier
+        // really contains a damaged envelope: report it instead of silently
+        // answering `None`, which used to make callers overwrite or discard a
+        // file whose hidden data was merely corrupted.
+        let mut magic = [0u8; 4];
+        magic.copy_from_slice(&tail_bytes[20..24]);
+        let magic_matches = match expected_magic {
+            Some(target) => &magic == target,
+            None => magic == STANDARD_TRAILER_MAGIC,
+        };
+        if !magic_matches {
+            return Ok(None);
         }
+        Self::unpack(&tail_bytes, expected_magic).map(Some)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trailer_crc_damage_is_reported_instead_of_no_envelope() {
+        use std::io::Cursor;
+
+        let trailer = EnvelopeTrailer::create(4096, 512, STANDARD_TRAILER_MAGIC);
+        let mut bytes = trailer.pack().to_vec();
+        let mut reader = Cursor::new(bytes.clone());
+        assert!(
+            EnvelopeTrailer::read_from_tail(&mut reader, None)
+                .unwrap()
+                .is_some()
+        );
+
+        // One flipped bit in the CRC means "this envelope is damaged", not
+        // "there is no envelope here".
+        bytes[16] ^= 1;
+        let mut reader = Cursor::new(bytes);
+        let err = EnvelopeTrailer::read_from_tail(&mut reader, None).unwrap_err();
+        assert!(matches!(err, StrHideError::CorruptedData(_)), "{err:?}");
+        assert!(err.to_string().contains("CRC32"), "{err}");
+
+        // A different magic remains the ordinary "nothing here" outcome.
+        let foreign = EnvelopeTrailer::create(4096, 512, *b"NONE");
+        let mut reader = Cursor::new(foreign.pack().to_vec());
+        assert!(
+            EnvelopeTrailer::read_from_tail(&mut reader, None)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     /// P2-21: strategy IDs start at 1, but the default de-mask path used
     /// `<= MAX`, so an id of 0 passed the plausibility gate. A header with id 0

@@ -2588,7 +2588,15 @@ fn inspect_core(
             return empty_inspect_result(host, adapter, label, strategies);
         }
     };
-    header.validate_against(ube_total_size, host_len)?;
+    // A header that fails the level-2 shape check is not a readable envelope;
+    // treat it exactly like an unparseable one instead of propagating
+    // `CorruptedData` out of `inspect` / `smart_extract` (review B-06). This
+    // also stops a coincidental de-mask hit on a foreign-key envelope from
+    // aborting the whole inspection.
+    if header.validate_against(ube_total_size, host_len).is_err() {
+        drop(ube_stream);
+        return empty_inspect_result(host, adapter, label, strategies);
+    }
 
     let mut hint_bytes: Vec<u8> = Vec::new();
     if header.hint_len > 0 {
