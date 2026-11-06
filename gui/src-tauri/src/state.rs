@@ -245,6 +245,37 @@ impl Progress for ThrottledChannelProgress {
     }
 }
 
+/// Recover the message a panic carried.
+///
+/// `catch_unwind` hands back `Box<dyn Any + Send>`, and the previous
+/// `Err(_) =>` arms discarded it: the log and the user were both left with
+/// "Worker thread panicked", which is the one piece of information that
+/// cannot be reconstructed after the fact.
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    const MAX: usize = 512;
+    let raw = if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    };
+    if raw.chars().count() <= MAX {
+        return raw;
+    }
+    let mut truncated: String = raw.chars().take(MAX).collect();
+    truncated.push('…');
+    truncated
+}
+
+/// Build the user-facing error for a panic caught at a worker boundary while
+/// keeping the payload in the log.
+pub fn panic_error(payload: &(dyn std::any::Any + Send), target: &str) -> StrHideError {
+    let msg = panic_message(payload);
+    log::error!(target: "engine::panic", "{target}: {msg}");
+    StrHideError::General(format!("Internal engine panic: {msg}"))
+}
+
 /// Unified cancellable background task executor:
 /// registers/unregisters CancelToken, executes with catch_unwind protection,
 /// and localizes StrHideError to ErrorDetail.
@@ -292,9 +323,7 @@ where
 
         match unwind_res {
             Ok(res) => res,
-            Err(_) => Err(StrHideError::General(
-                "Internal engine panic caught safely at GUI worker boundary".into(),
-            )),
+            Err(payload) => Err(panic_error(payload.as_ref(), "cancellable worker")),
         }
     })
     .await;
@@ -389,6 +418,33 @@ mod tests {
             &Some("structure".to_string()),
             Some(Domain::Content)
         ));
+    }
+
+    /// The panic payload used to be discarded at every worker boundary, so a
+    /// panic surfaced as "Worker thread panicked" with nothing to act on.
+    #[test]
+    fn panic_message_keeps_the_text_the_panic_carried() {
+        let str_payload: Box<dyn std::any::Any + Send> = Box::new("index out of bounds");
+        assert_eq!(panic_message(str_payload.as_ref()), "index out of bounds");
+
+        let string_payload: Box<dyn std::any::Any + Send> =
+            Box::new(String::from("assertion failed: coeffs.len() == expected"));
+        assert_eq!(
+            panic_message(string_payload.as_ref()),
+            "assertion failed: coeffs.len() == expected"
+        );
+
+        let opaque: Box<dyn std::any::Any + Send> = Box::new(7u32);
+        assert_eq!(panic_message(opaque.as_ref()), "non-string panic payload");
+    }
+
+    #[test]
+    fn panic_message_truncates_oversized_payloads() {
+        let long = "x".repeat(600);
+        let payload: Box<dyn std::any::Any + Send> = Box::new(long);
+        let msg = panic_message(payload.as_ref());
+        assert_eq!(msg.chars().count(), 513);
+        assert!(msg.ends_with('…'));
     }
 
     #[test]

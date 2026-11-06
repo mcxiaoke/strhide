@@ -60,8 +60,8 @@ pub async fn inspect_carrier_impl(
                 Ok(dual)
             })
         }))
-        .unwrap_or_else(|_| {
-            Err(strhide::errors::StrHideError::General("Worker thread panicked".into())
+        .unwrap_or_else(|payload| {
+            Err(crate::state::panic_error(payload.as_ref(), "ipc::inspect")
                 .detail_i18n_with_ctx(ctx))
         })
     })
@@ -182,8 +182,8 @@ pub async fn verify_carrier_cmd(
                     .map_err(|e| e.detail_i18n_with_ctx(ctx))
             })
         }))
-        .unwrap_or_else(|_| {
-            Err(strhide::errors::StrHideError::General("Worker thread panicked".into())
+        .unwrap_or_else(|payload| {
+            Err(crate::state::panic_error(payload.as_ref(), "ipc::verify")
                 .detail_i18n_with_ctx(ctx))
         })
     })
@@ -216,8 +216,8 @@ pub async fn scan_carrier_cmd(
                     .map_err(|e| e.detail_i18n_with_ctx(ctx))
             })
         }))
-        .unwrap_or_else(|_| {
-            Err(strhide::errors::StrHideError::General("Worker thread panicked".into())
+        .unwrap_or_else(|payload| {
+            Err(crate::state::panic_error(payload.as_ref(), "ipc::scan")
                 .detail_i18n_with_ctx(ctx))
         })
     })
