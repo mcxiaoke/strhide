@@ -38,6 +38,9 @@ export const LogModal: React.FC = () => {
   const [isMaximized, setIsMaximized] = useState(false);
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedEntryId, setCopiedEntryId] = useState<string | null>(null);
+  // Clipboard writes fail for reasons the user cannot see (no permission, an
+  // unfocused document). Without this the button simply did nothing.
+  const [copyFailedId, setCopyFailedId] = useState<string | null>(null);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -125,9 +128,13 @@ export const LogModal: React.FC = () => {
     try {
       await navigator.clipboard.writeText(text);
       setCopiedEntryId(e.id);
+      setCopyFailedId(null);
       setTimeout(() => setCopiedEntryId(null), 1500);
-    } catch {
-      // Ignore
+    } catch (err) {
+      console.error("Clipboard write failed:", err);
+      setCopiedEntryId(null);
+      setCopyFailedId(e.id);
+      setTimeout(() => setCopyFailedId(null), 2000);
     }
   };
 
@@ -405,13 +412,15 @@ export const LogModal: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => handleCopySingle(e)}
-                          title="Copy entry"
+                          title={copyFailedId === e.id ? c.logs.copyError : c.common.copy}
                           className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
                         >
                           {copiedEntryId === e.id ? (
                             <Check className="h-3 w-3 text-emerald-400" />
                           ) : (
-                            <Copy className="h-3 w-3" />
+                            <Copy
+                              className={`h-3 w-3 ${copyFailedId === e.id ? "text-rose-400" : ""}`}
+                            />
                           )}
                         </button>
                       </div>
@@ -432,9 +441,13 @@ export const LogModal: React.FC = () => {
                                   JSON.stringify(e.data, null, 2),
                                 );
                                 setCopiedEntryId(e.id);
+                                setCopyFailedId(null);
                                 setTimeout(() => setCopiedEntryId(null), 1500);
-                              } catch {
-                                // Ignore
+                              } catch (err) {
+                                console.error("Clipboard write failed:", err);
+                                setCopiedEntryId(null);
+                                setCopyFailedId(e.id);
+                                setTimeout(() => setCopyFailedId(null), 2000);
                               }
                             }}
                             className="inline-flex items-center gap-1 rounded bg-slate-800 px-2 py-0.5 text-[10px] text-slate-300 hover:bg-slate-700"
@@ -442,9 +455,11 @@ export const LogModal: React.FC = () => {
                             {copiedEntryId === e.id ? (
                               <Check className="h-3 w-3 text-emerald-400" />
                             ) : (
-                              <Copy className="h-3 w-3" />
+                              <Copy
+                                className={`h-3 w-3 ${copyFailedId === e.id ? "text-rose-400" : ""}`}
+                              />
                             )}
-                            {c.logs.copyJson}
+                            {copyFailedId === e.id ? c.logs.copyError : c.logs.copyJson}
                           </button>
                         </div>
                         <pre className="overflow-x-auto text-[11px] text-emerald-300 select-text leading-tight">

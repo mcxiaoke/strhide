@@ -82,14 +82,14 @@ pub async fn write_structure_file_impl(
                 .write_file(&req.carrier, source, &write_opts)
         })?;
 
-        crate::logger::record_custom_log(
+        crate::logger::record_json(
             "info",
             "ipc::write_structure",
             &format!(
                 "Wrote structure: strategy={}, ube_size={}, raw_size={}",
                 res.strategy, res.ube_size, res.raw_size
             ),
-            serde_json::to_value(&res).ok(),
+            &res,
         );
 
         Ok(res)

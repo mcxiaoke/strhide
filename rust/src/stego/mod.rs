@@ -122,9 +122,17 @@ pub fn init_default_thread_pool() {
     INIT_DEFAULT_POOL.call_once(|| {
         if std::env::var_os("RAYON_NUM_THREADS").is_none() {
             let threads = default_thread_count();
-            let _ = rayon::ThreadPoolBuilder::new()
+            if let Err(e) = rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
-                .build_global();
+                .build_global()
+            {
+                // Falls back to rayon's own default sizing, which can exceed
+                // the memory budget the embed admission assumes.
+                log::warn!(
+                    target: "stego::pool",
+                    "cannot build the default rayon pool with {threads} threads: {e}"
+                );
+            }
         }
     });
 }

@@ -116,8 +116,16 @@ impl TmpGuard {
 
 impl Drop for TmpGuard {
     fn drop(&mut self) {
-        if let Some(p) = &self.path {
-            let _ = std::fs::remove_file(p);
+        if let Some(p) = &self.path
+            && let Err(e) = std::fs::remove_file(p)
+        {
+            // Leaving a stray temp file is harmless but should be
+            // traceable: it is the only evidence of a failed rollback.
+            log::debug!(
+                target: "core::commit",
+                "cannot remove temp file {}: {e}",
+                p.display()
+            );
         }
     }
 }
@@ -274,7 +282,20 @@ impl TargetLock {
             {
                 Ok(mut file) => {
                     use std::io::Write as _;
-                    let _ = writeln!(file, "{}", std::process::id());
+                    if let Err(e) = writeln!(file, "{}", std::process::id()) {
+                        // `reclaim_if_stale` decides liveness from the PID in
+                        // this file. A marker without one can never be proven
+                        // stale, so it would block every later write with
+                        // `TargetBusy`; give the marker up instead.
+                        log::warn!(
+                            target: "core::commit",
+                            "cannot write the PID into lock marker {}: {e}",
+                            path.display()
+                        );
+                        drop(file);
+                        let _ = std::fs::remove_file(&path);
+                        return Ok(Self { path: None });
+                    }
                     return Ok(Self { path: Some(path) });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -284,7 +305,18 @@ impl TargetLock {
                     }
                     return Err(StrHideError::TargetBusy(target.to_path_buf()));
                 }
-                Err(_) => return Ok(Self { path: None }),
+                // Documented fallback: the commit itself reports the real
+                // filesystem problem better than a lock-specific error would.
+                // It still deserves a record, because the write is now running
+                // without cross-process exclusion.
+                Err(e) => {
+                    log::warn!(
+                        target: "core::commit",
+                        "cannot create lock marker {} ({e}); proceeding unguarded",
+                        path.display()
+                    );
+                    return Ok(Self { path: None });
+                }
             }
         }
     }
@@ -302,10 +334,21 @@ fn reclaim_if_stale(path: &Path) -> bool {
         return false;
     }
     let quarantine = quarantine_path(path);
-    if std::fs::rename(path, &quarantine).is_err() {
+    if let Err(e) = std::fs::rename(path, &quarantine) {
+        log::debug!(
+            target: "core::commit",
+            "cannot quarantine the stale lock {}: {e}",
+            path.display()
+        );
         return false;
     }
-    let _ = std::fs::remove_file(&quarantine);
+    if let Err(e) = std::fs::remove_file(&quarantine) {
+        log::debug!(
+            target: "core::commit",
+            "cannot remove the quarantined lock {}: {e}",
+            quarantine.display()
+        );
+    }
     true
 }
 
@@ -641,8 +684,16 @@ pub(crate) fn sync_parent_dir(path: &Path) {
             Some(p) if !p.as_os_str().is_empty() => p,
             _ => Path::new("."),
         };
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
+        if let Ok(dir) = std::fs::File::open(parent)
+            && let Err(e) = dir.sync_all()
+        {
+            // The rename is already visible in the directory entry; only the
+            // durability guarantee is weaker, and that is worth a record.
+            log::debug!(
+                target: "core::commit",
+                "cannot fsync the parent directory {}: {e}",
+                parent.display()
+            );
         }
     }
     #[cfg(not(unix))]

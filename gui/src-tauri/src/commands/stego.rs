@@ -134,7 +134,7 @@ pub async fn probe_stego_capacity_cmd(
                 balanced_max_bytes,
             };
 
-            crate::logger::record_custom_log(
+            crate::logger::record_json(
                 "info",
                 "ipc::probe_capacity",
                 &format!(
@@ -144,7 +144,7 @@ pub async fn probe_stego_capacity_cmd(
                     res.paranoid_max_bytes,
                     res.balanced_max_bytes
                 ),
-                serde_json::to_value(&res).ok(),
+                &res,
             );
 
             Ok(res)
@@ -217,7 +217,7 @@ pub async fn embed_stego_file_impl(
             .stego()
             .embed_file(&req.carrier, &payload, &embed_opts, &target)?;
 
-        crate::logger::record_custom_log(
+        crate::logger::record_json(
             "info",
             "ipc::embed_stego",
             &format!(
@@ -226,7 +226,7 @@ pub async fn embed_stego_file_impl(
                 res.carrier_after_bytes,
                 res.payload_bytes
             ),
-            serde_json::to_value(&res).ok(),
+            &res,
         );
 
         Ok(res)
@@ -374,17 +374,39 @@ pub async fn smart_extract_impl(
             check_overwrite(dest, overwrite)?;
         }
 
-        let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        let mtime = match std::fs::metadata(&path).and_then(|m| m.modified()) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                // Without an mtime the cache key is weaker, not invalid: the
+                // extract below reports any real file problem.
+                log::debug!(
+                    target: "ipc::smart_extract",
+                    "carrier mtime unavailable for {}: {e}",
+                    path.display()
+                );
+                None
+            }
+        };
         let cached_hit = {
-            let guard = cache.lock().ok();
-            guard.and_then(|g| {
-                g.as_ref().and_then(|c| {
-                    if c.matches(&path, mtime, &password, &domain, prefer) {
-                        Some(c.outcome.clone())
-                    } else {
-                        None
-                    }
-                })
+            let guard = match cache.lock() {
+                Ok(g) => g,
+                Err(poisoned) => {
+                    // A poisoned lock means a previous task panicked while
+                    // holding it; the cache stays disabled for the rest of the
+                    // session, and that must not happen silently.
+                    log::warn!(
+                        target: "ipc::smart_extract",
+                        "extraction cache lock poisoned, continuing without it"
+                    );
+                    poisoned.into_inner()
+                }
+            };
+            guard.as_ref().and_then(|c| {
+                if c.matches(&path, mtime, &password, &domain, prefer) {
+                    Some(c.outcome.clone())
+                } else {
+                    None
+                }
             })
         };
 
@@ -400,7 +422,11 @@ pub async fn smart_extract_impl(
                 pool: Some(Arc::clone(&pool)),
             };
             let fresh = engine.smart_extract(&path, &smart_opts)?;
-            if let Ok(mut guard) = cache.lock() {
+            {
+                let mut guard = match cache.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
                 *guard = Some(crate::state::CachedExtract {
                     path: path.clone(),
                     mtime,

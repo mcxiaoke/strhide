@@ -370,13 +370,28 @@ pub(crate) fn handle_embed(
                 let cap = match cap_info.as_ref() {
                     Some(c) => Some(c),
                     None => {
-                        cap_fallback = crate::stego::probe_carrier_capacity_with_dialect(
+                        // This probe only feeds the advisory warning below.
+                        // Dropping its failure silently meant the user lost the
+                        // "payload exceeds the safe tier" warning without being
+                        // told why.
+                        match crate::stego::probe_carrier_capacity_with_dialect(
                             &carrier_bytes,
                             &probe_options,
                             &dialect,
-                        )
-                        .ok();
-                        cap_fallback.as_ref()
+                        ) {
+                            Ok(c) => {
+                                cap_fallback = c;
+                                Some(&cap_fallback)
+                            }
+                            Err(e) => {
+                                if !quiet {
+                                    eprintln!(
+                                        "[WARN] safety-threshold check skipped: capacity probe failed: {e}"
+                                    );
+                                }
+                                None
+                            }
+                        }
                     }
                 };
                 if let Some(cap) = cap

@@ -73,7 +73,7 @@ pub async fn inspect_carrier_impl(
 
     match &res {
         Ok(dual) => {
-            crate::logger::record_custom_log(
+            crate::logger::record_json(
                 "info",
                 "ipc::inspect",
                 &format!(
@@ -83,7 +83,7 @@ pub async fn inspect_carrier_impl(
                     dual.structure.format,
                     dual.structure.has_hidden_data
                 ),
-                serde_json::to_value(dual).ok(),
+                dual,
             );
         }
         Err(err) => {
@@ -242,7 +242,7 @@ pub async fn scan_carrier_cmd(
 
     match &res {
         Ok(report) => {
-            crate::logger::record_custom_log(
+            crate::logger::record_json(
                 "info",
                 "ipc::scan",
                 &format!(
@@ -253,7 +253,7 @@ pub async fn scan_carrier_cmd(
                     report.verdict,
                     report.findings.len()
                 ),
-                serde_json::to_value(report).ok(),
+                report,
             );
         }
         Err(err) => {

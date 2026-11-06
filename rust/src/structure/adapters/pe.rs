@@ -235,6 +235,14 @@ impl HostAdapter for PeAdapter {
             let start = r.stream_position().ok();
             if let Ok(info) = parse_pe_headers(r) {
                 signed = info.has_authenticode;
+            } else {
+                // The write path re-parses with `?` and refuses a signed PE, so
+                // reporting the capacity as usable here only makes `inspect`
+                // disagree with what `write` will accept.
+                log::debug!(
+                    target: "structure::pe",
+                    "capacity query could not read the PE headers; signature state unknown"
+                );
             }
             #[cfg(feature = "structure-pe")]
             match pe_codebits::parse_pe_code_layout_streaming(r) {

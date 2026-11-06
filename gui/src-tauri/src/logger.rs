@@ -93,8 +93,34 @@ impl log::Log for RingBufferLogger {
 static LOGGER_INSTANCE: RingBufferLogger = RingBufferLogger;
 
 pub fn init_logger() {
-    let _ = log::set_logger(&LOGGER_INSTANCE);
+    if log::set_logger(&LOGGER_INSTANCE).is_err() {
+        // Another logger already owns the process. Say so: otherwise every
+        // engine record silently disappears from the log panel.
+        eprintln!(
+            "[WARN] a global logger is already installed; StrHide Studio will not capture engine logs"
+        );
+        return;
+    }
     log::set_max_level(LevelFilter::Debug);
+}
+
+/// Record a structured payload, keeping a serialization failure visible.
+///
+/// The call sites used `serde_json::to_value(&res).ok()`, which turned "this
+/// result could not be represented" into "there was nothing worth recording"
+/// — the log entry still appeared, just without the data that explains it.
+pub fn record_json<T: Serialize>(level: &str, target: &str, message: &str, data: &T) {
+    let value = match serde_json::to_value(data) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            log::warn!(
+                target: "app::log",
+                "failed to serialize the {target} payload: {e}"
+            );
+            None
+        }
+    };
+    record_custom_log(level, target, message, value);
 }
 
 pub fn set_app_handle(app: AppHandle) {

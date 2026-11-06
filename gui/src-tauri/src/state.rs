@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -184,6 +184,9 @@ pub struct ThrottledChannelProgress {
     pub start_instant: Instant,
     pub last_emit_ms: AtomicU64,
     pub last_stage: Mutex<&'static str>,
+    /// Set the first time a progress send fails, so the closed channel is
+    /// logged once instead of on every throttled report.
+    pub channel_closed: AtomicBool,
 }
 
 impl ThrottledChannelProgress {
@@ -194,6 +197,7 @@ impl ThrottledChannelProgress {
             start_instant: Instant::now(),
             last_emit_ms: AtomicU64::new(0),
             last_stage: Mutex::new(""),
+            channel_closed: AtomicBool::new(false),
         }
     }
 }
@@ -235,13 +239,24 @@ impl Progress for ThrottledChannelProgress {
             }
         });
 
-        let _ = self.channel.send(ProgressEvent {
+        if let Err(e) = self.channel.send(ProgressEvent {
             task_id: self.task_id.clone(),
             stage: stage_str,
             done: ev.done,
             total: ev.total,
             percent,
-        });
+        }) {
+            // The window is gone or the task was abandoned. Report it once per
+            // task: a closed channel fails on every report, and the interesting
+            // fact is that it closed, not how often.
+            if !self.channel_closed.swap(true, Ordering::Relaxed) {
+                log::debug!(
+                    target: "engine::progress",
+                    "Task [{}] progress channel closed: {e}",
+                    self.task_id
+                );
+            }
+        }
     }
 }
 
