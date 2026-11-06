@@ -379,6 +379,9 @@ Run `strhide <COMMAND> --help` for the options of one command.",
     HelpRootQuiet:
         en = "Quiet mode: suppress progress and status reports (payload, --json, and errors still print)",
         zh = "静音模式：不输出普通状态与进度（错误、提取数据及 --json 仍正常输出）";
+    HelpRootVerbose:
+        en = "Raise the diagnostic level on stderr: -v for debug, -vv for trace (default: warnings only)",
+        zh = "提高 stderr 诊断级别：-v 输出 debug，-vv 输出 trace（默认只输出警告）";
     HelpRootLang:
         en = "Interface language: en or zh (default: detect from STRHIDE_LANG or system locale)",
         zh = "界面语言：en（英文）或 zh（中文）[默认检测环境变量或系统语言]";

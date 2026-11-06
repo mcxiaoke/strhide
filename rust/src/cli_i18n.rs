@@ -78,6 +78,7 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         // Root options
         ("strhide" | "sth" | "sthc" | "sths" | "sthv", "config") => Msg::HelpRootConfig,
         ("strhide" | "sth" | "sthc" | "sths" | "sthv", "quiet") => Msg::HelpRootQuiet,
+        ("strhide" | "sth" | "sthc" | "sths" | "sthv", "verbose") => Msg::HelpRootVerbose,
         ("strhide" | "sth" | "sthc" | "sths" | "sthv", "lang") => Msg::HelpRootLang,
 
         // Built-in clap help / version on any level

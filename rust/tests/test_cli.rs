@@ -19,6 +19,8 @@ mod config;
 mod domains;
 #[path = "test_cli/i18n.rs"]
 mod i18n;
+#[path = "test_cli/logging.rs"]
+mod logging;
 #[path = "test_cli/p2.rs"]
 mod p2;
 #[path = "test_cli/scan.rs"]

@@ -29,6 +29,19 @@ pub struct GlobalArgs {
     #[arg(short = 'q', long = "quiet", global = true)]
     pub quiet: bool,
 
+    /// Raise the diagnostic level written to stderr: `-v` for debug, `-vv` for trace.
+    ///
+    /// Engines report recoverable degradations (a fallback probe that failed, a
+    /// disabled cache, a skipped fsync) through the `log` crate. Without this
+    /// flag only warnings are printed; `-q` silences even those.
+    #[arg(
+        short = 'v',
+        long = "verbose",
+        global = true,
+        action = clap::ArgAction::Count
+    )]
+    pub verbose: u8,
+
     #[arg(
         long = "lang",
         global = true,

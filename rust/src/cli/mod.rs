@@ -19,6 +19,7 @@ pub mod cmd_diag;
 pub mod cmd_stego;
 pub mod cmd_structure;
 pub mod helpers;
+pub mod logging;
 pub mod render;
 
 // The historical flat paths (`strhide::cli::Cli`, `strhide::cli::run_cli`)
@@ -200,14 +201,19 @@ pub fn run_domain_cli(domain: Domain, argv: Vec<OsString>) -> i32 {
 }
 
 pub(crate) fn run_domain_cli_with(engine: &StrHide, domain: Domain, argv: Vec<OsString>) -> i32 {
-    #[cfg(feature = "content-base")]
-    crate::stego::init_default_thread_pool();
-
     // 1) 预解析（英文模板，仅用于取得 matches；不触发任何输出）
     let pre = match domain.command().try_get_matches_from(argv.clone()) {
         Ok(m) => m,
         Err(e) => return render_early_error(e, &argv, domain),
     };
+
+    // 1b) 装日志。库里的 log::warn!/debug! 在此之前没有任何出口，等于空操作；
+    //     这里按 -q / -v 定级，写 stderr，不污染 --json / --stdout。
+    logging::install(pre.get_flag("quiet"), pre.get_count("verbose"));
+
+    // 1c) 线程池（CLI 专属的 opt-in：库入口不锁宿主进程的全局 Rayon 池）
+    #[cfg(feature = "content-base")]
+    crate::stego::init_default_thread_pool();
 
     // 2) 加载配置（失败也要按最终语言报错）
     let cfg_path = pre.get_one::<PathBuf>("config");
