@@ -10,7 +10,7 @@
 //! isolated from the official engine.
 
 use strhide::core::payload::Payload;
-use strhide::facade::{Dialect, StrHide};
+use strhide::facade::{Dialect, DualOptions, StrHide};
 use strhide::stego::params::StegoProfile;
 use strhide::stego::{EmbedOptions, ExtractOptions, ProbeOptions};
 use strhide::structure::params::StructureProfile;
@@ -721,6 +721,40 @@ fn test_inspect_any_and_smart_extract_cross_domain() {
     assert_eq!(outcome.source, strhide::facade::Domain::Structure);
     assert_eq!(outcome.payload.as_bytes(), b"structure secret");
     assert!(outcome.also_present.is_none());
+}
+
+#[test]
+fn structure_occupancy_error_does_not_suggest_overwrite() {
+    let dir = scratch("structure_occupancy_hint");
+    let carrier = dir.join("carrier.png");
+    std::fs::write(&carrier, PNG).expect("seed png");
+
+    let engine = StrHide::new();
+    engine
+        .structure()
+        .write_file(
+            &carrier,
+            PayloadSource::Text("first"),
+            &WriteOptions::default(),
+        )
+        .expect("structure write_file");
+
+    let opts = DualOptions::default();
+    let structure_err = engine
+        .ensure_domains_free_for_structure(&carrier, &opts)
+        .expect_err("carrier is occupied");
+    let message = structure_err.to_string();
+    assert!(message.contains("structure-domain payload"), "{message}");
+    assert!(
+        !message.contains("--overwrite"),
+        "structure payload cannot be replaced by --overwrite: {message}"
+    );
+
+    // The content-domain preflight keeps advertising the replace path.
+    let content_err = engine
+        .ensure_domains_free(&carrier, &opts)
+        .expect_err("carrier is occupied");
+    assert!(content_err.to_string().contains("--overwrite"));
 }
 
 #[test]

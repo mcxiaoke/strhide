@@ -146,7 +146,7 @@ pub(crate) fn handle_write(
     let carrier_ready = |carrier: &Path| -> Result<(), StrHideError> {
         validate_carrier_format(carrier)?;
         if !args.overwrite {
-            engine.ensure_domains_free(carrier, &dual_opts)?;
+            engine.ensure_domains_free_for_structure(carrier, &dual_opts)?;
         }
         Ok(())
     };

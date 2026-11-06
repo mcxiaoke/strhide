@@ -474,13 +474,41 @@ impl StrHide {
     /// Silent overwrite is the failure mode this prevents: a second content
     /// embed replaces the first payload, a structure envelope written on top
     /// of content payload is lost on the next re-compression, and a dual
-    /// composite carrier no longer restores its original host. Callers that
-    /// genuinely intend to replace an existing payload opt in with `--overwrite`.
+    /// composite carrier no longer restores its original host. Content-domain
+    /// callers that genuinely intend to replace an existing payload opt in with
+    /// `--overwrite`; structure-domain callers must use
+    /// [`Self::ensure_domains_free_for_structure`], because an existing
+    /// structure envelope can be neither stacked nor replaced.
     #[cfg(all(feature = "structure-base", feature = "content-base"))]
     pub fn ensure_domains_free(
         &self,
         carrier: &Path,
         opts: &DualOptions<'_>,
+    ) -> Result<(), StrHideError> {
+        self.ensure_domains_free_impl(carrier, opts, true)
+    }
+
+    /// Structure-domain variant of [`Self::ensure_domains_free`].
+    ///
+    /// `--overwrite` only permits replacing the output file, so it can replace
+    /// hidden content payload but never an existing structure envelope. When
+    /// only content payload occupies the carrier, the hint is still surfaced
+    /// because composing the structure envelope on top of it is supported.
+    #[cfg(all(feature = "structure-base", feature = "content-base"))]
+    pub fn ensure_domains_free_for_structure(
+        &self,
+        carrier: &Path,
+        opts: &DualOptions<'_>,
+    ) -> Result<(), StrHideError> {
+        self.ensure_domains_free_impl(carrier, opts, false)
+    }
+
+    #[cfg(all(feature = "structure-base", feature = "content-base"))]
+    fn ensure_domains_free_impl(
+        &self,
+        carrier: &Path,
+        opts: &DualOptions<'_>,
+        suggest_overwrite: bool,
     ) -> Result<(), StrHideError> {
         let diag = self.inspect_any(carrier, opts)?;
         let mut occupied = Vec::new();
@@ -493,10 +521,18 @@ impl StrHide {
         if occupied.is_empty() {
             return Ok(());
         }
+        let guidance = if suggest_overwrite {
+            "pass --overwrite to replace it"
+        } else if occupied.len() == 1 && occupied[0] == "content" {
+            "pass --overwrite to keep the content payload"
+        } else {
+            "specify another file"
+        };
         Err(StrHideError::Rejection(format!(
-            "'{}' already contains {}-domain payload; remove it first (restore/extract) or pass --overwrite to replace it",
+            "'{}' already contains {}-domain payload; remove it first (restore/extract) or {}",
             carrier.display(),
-            occupied.join(" and ")
+            occupied.join(" and "),
+            guidance
         )))
     }
 
