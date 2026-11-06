@@ -511,6 +511,23 @@ fn run_cli_from_content_domain_private_isolation() {
     // Private extraction succeeds.
     let extract_private = PRIVATE.run_cli_from(["strhide", "extract", carrier_str, "--stdout"]);
     assert_eq!(extract_private, 0, "private CLI extract must succeed");
+
+    // A second embed must be refused by the cross-domain preflight. The
+    // preflight has to probe with the engine's bound private domain; probing
+    // with the official one would miss the payload and overwrite it.
+    let second_embed = PRIVATE.run_cli_from([
+        "strhide",
+        "embed",
+        carrier_str,
+        "-t",
+        "second payload",
+        "--in-place",
+        "--no-backup",
+    ]);
+    assert_ne!(
+        second_embed, 0,
+        "private-domain payload must be detected by the private CLI preflight"
+    );
 }
 
 // ───────────────────────── overwrite policy ─────────────────────────

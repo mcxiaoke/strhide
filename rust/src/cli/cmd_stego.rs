@@ -295,7 +295,10 @@ pub(crate) fn handle_embed(
     let dual_opts = DualOptions {
         password: password.as_deref(),
         key: key.as_ref(),
-        domain: None,
+        // Use the engine's bound content domain, not the official one: a
+        // caller-supplied private dialect must be able to detect its own
+        // payload in the cross-domain occupancy preflight.
+        domain: engine.dialect().stego.stego_domain(),
         control: Control::none(),
     };
     let carrier_ready = |carrier: &Path| -> Result<(), StrHideError> {
@@ -658,7 +661,7 @@ fn extract_one(
                         overwrite: args.overwrite,
                         auto: false,
                     };
-                    return handle_read(read_args, cfg, quiet, engine);
+                    return handle_read(read_args, cfg, quiet, engine, Some(batch));
                 } else {
                     return Err(StrHideError::NoHiddenData(format!(
                         "No content-adaptive steganography found, but detected structure-domain hidden data ({}, strategy: {}). Use `strhide read` or add `--auto` to read.",

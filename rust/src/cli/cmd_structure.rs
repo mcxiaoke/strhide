@@ -138,7 +138,9 @@ pub(crate) fn handle_write(
     let dual_opts = DualOptions {
         password: password.as_deref(),
         key: None,
-        domain: None,
+        // Same rule as `embed`: a private content dialect bound to this engine
+        // owns the preflight's content-domain probe.
+        domain: engine.dialect().stego.stego_domain(),
         control: Control::none(),
     };
     let carrier_ready = |carrier: &Path| -> Result<(), StrHideError> {
@@ -230,6 +232,7 @@ pub(crate) fn handle_read(
     cfg: &FileConfig,
     quiet: bool,
     engine: &StrHide,
+    shared_batch: Option<&mut BatchOutputs<'_>>,
 ) -> Result<(), StrHideError> {
     let multi = args.carrier.len() > 1;
     if multi && args.stdout {
@@ -257,18 +260,19 @@ pub(crate) fn handle_read(
     // Track the outputs this batch already produced: two carriers may record
     // the same payload filename, and writing both to one path would overwrite
     // the first (with --overwrite) or abort the batch (without it).
-    let mut batch = BatchOutputs::new(output_dir);
-    for_each_carrier(&args.carrier, quiet, |carrier| {
-        read_one(
-            carrier,
-            &args,
-            &mut batch,
-            &mut password,
-            cfg,
-            quiet,
-            engine,
-        )
-    })
+    //
+    // `extract --auto` hands over the outer batch for the same reason:
+    // re-creating it here would forget names reserved by the carriers that
+    // already went through the content-domain path.
+    let mut run = |batch: &mut BatchOutputs<'_>| {
+        for_each_carrier(&args.carrier, quiet, |carrier| {
+            read_one(carrier, &args, batch, &mut password, cfg, quiet, engine)
+        })
+    };
+    match shared_batch {
+        Some(batch) => run(batch),
+        None => run(&mut BatchOutputs::new(output_dir)),
+    }
 }
 
 /// Extract one carrier's payload (the body of the `read` batch).

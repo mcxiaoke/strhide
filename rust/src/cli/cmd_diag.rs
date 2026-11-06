@@ -84,7 +84,7 @@ pub(crate) fn handle_inspect(
             &crate::facade::DualOptions {
                 password: password.as_deref(),
                 key: key.as_ref(),
-                domain: None,
+                domain: engine.dialect().stego.stego_domain(),
                 control: crate::core::control::Control::none(),
             },
         )?;
@@ -106,7 +106,7 @@ pub(crate) fn handle_inspect(
             &crate::facade::DualOptions {
                 password: password.as_deref(),
                 key: key.as_ref(),
-                domain: None,
+                domain: engine.dialect().stego.stego_domain(),
                 control: crate::core::control::Control::none(),
             },
         ) {
@@ -237,7 +237,7 @@ pub(crate) fn handle_verify(
             &crate::facade::DualOptions {
                 password: password.as_deref(),
                 key: key.as_ref(),
-                domain: None,
+                domain: engine.dialect().stego.stego_domain(),
                 control: crate::core::control::Control::none(),
             },
         )?;
@@ -311,7 +311,7 @@ pub(crate) fn handle_verify(
             &crate::facade::DualOptions {
                 password: password.as_deref(),
                 key: key.as_ref(),
-                domain: None,
+                domain: engine.dialect().stego.stego_domain(),
                 control: crate::core::control::Control::none(),
             },
         ) {

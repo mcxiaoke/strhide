@@ -20,6 +20,40 @@ fn seed(dir: &Path, names: &[&str]) {
     }
 }
 
+/// A PNG large enough for content-domain payloads.
+fn make_stego_png() -> Vec<u8> {
+    let (w, h) = (128, 128);
+    let mut pixels = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            pixels.push(((x * 17) ^ (y * 31) ^ ((x + y) * 7)) as u8);
+            pixels.push(((x * 23 + y * 19) % 256) as u8);
+            pixels.push(((x * 13) ^ (y * 29)) as u8);
+        }
+    }
+    let img = strhide::stego::png::RawImage {
+        width: w,
+        height: h,
+        channels: 3,
+        bit_depth: 8,
+        color_type: 2,
+        pixels,
+        chunks: Vec::new(),
+        idat_sizes: Vec::new(),
+        row_filters: Vec::new(),
+        idat_info: None,
+        tail: Vec::new(),
+    };
+    strhide::stego::png::encode_png(&img).expect("encode png")
+}
+
+fn seed_stego(dir: &Path, names: &[&str]) {
+    let png = make_stego_png();
+    for name in names {
+        fs::write(dir.join(name), &png).unwrap();
+    }
+}
+
 /// Run the binary inside `dir`, isolated from the caller's config file and
 /// payload environment variables.
 fn run(dir: &Path, args: &[&str]) -> Output {
@@ -471,4 +505,52 @@ fn batch_read_refuses_to_overwrite_without_the_flag() {
     );
     assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
     assert_eq!(fs::read_to_string(out_dir.join("a.txt")).unwrap(), "x");
+}
+
+/// `extract --auto` must hand the outer batch state to the structure-domain
+/// fallback. Otherwise a redirected structure payload may re-claim a name the
+/// content-domain side already reserved and the batch aborts halfway.
+#[test]
+fn batch_extract_auto_keeps_structure_outputs_from_colliding() {
+    let dir = scratch("extract_auto_batch");
+    seed_stego(&dir, &["a.png"]);
+    seed(&dir, &["b.png"]);
+
+    // The content payload deliberately records the name `b.txt`, which is also
+    // the name an unnamed structure payload on carrier `b.png` derives.
+    fs::write(dir.join("b.txt"), "content payload").unwrap();
+    let out = run(&dir, &["embed", "a.png", "-d", "b.txt", "--in-place"]);
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    let out = run(
+        &dir,
+        &["write", "b.png", "-t", "structure payload", "--in-place"],
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+
+    let out_dir = dir.join("out");
+    fs::create_dir(&out_dir).unwrap();
+    let out = run(
+        &dir,
+        &[
+            "extract", "a.png", "b.png", "-o", "out", "--auto", "--lang", "en",
+        ],
+    );
+    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
+    assert!(
+        stdout(&out).contains("[SUMMARY] 2/2 carriers succeeded."),
+        "stdout: {}",
+        stdout(&out)
+    );
+
+    let mut extracted = Vec::new();
+    for entry in fs::read_dir(&out_dir).unwrap() {
+        let path = entry.unwrap().path();
+        extracted.push(fs::read_to_string(&path).unwrap());
+    }
+    extracted.sort();
+    assert_eq!(extracted, vec!["content payload", "structure payload"]);
+    assert!(
+        !out_dir.join("extracted.bin").exists(),
+        "auto redirect must not fall back to a shared default name"
+    );
 }

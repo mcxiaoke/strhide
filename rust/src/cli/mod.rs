@@ -281,7 +281,7 @@ pub(crate) fn run_domain_cli_with(engine: &StrHide, domain: Domain, argv: Vec<Os
                 1
             }
         },
-        Commands::Read(args) => match handle_read(args, &cfg, quiet, engine) {
+        Commands::Read(args) => match handle_read(args, &cfg, quiet, engine, None) {
             Ok(_) => 0,
             Err(e) => {
                 print_error(&e);
