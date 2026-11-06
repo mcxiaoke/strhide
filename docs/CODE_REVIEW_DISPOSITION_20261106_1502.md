@@ -1,6 +1,6 @@
 # strhide 代码审查 issue 处置台账
 
-> 生成时间：2026-11-06 15:02:05 ｜ **最后更新：2026-11-06 15:11:16**（补入 F-02 回退与基线校验方法修正）
+> 生成时间：2026-11-06 15:02:05 ｜ **最后更新：2026-11-06 16:30**（复审：F-08 加固、N-08、N-05 修复，其余逐项复核理由见 §11）
 > 关联报告：`docs/CODE_REVIEW_20261106_1325.md`（v2，含 v1 `F-01~F-33` 与 v2 `N-01~N-14`、`T-01~T-21`）
 > 处置原则（用户给定）：**目的是修 bug；不引入新问题；不导致性能大幅下降；风险大收益不明显就搁置；这是个人用的 CLI 工具，不考虑极端情况与第三方恶意构造/攻击，不做过度设计。**
 > 结果：**v1 33 项 + v2 14 项 + 21 组测试缺口 + 文档偏差，全部有确定落点。**
@@ -79,7 +79,7 @@
 | F-10(c) | 时间戳/权限恢复失败只写 stderr、结果对象无 warning；加 `warnings` 变体要动多个返回结构 | 有明确调用方需要感知该失败时再加 |
 | F-16 | `body_len` 硬上限是全局常量，但已有 `needed_body_slots`/工作集预算兜底，不产生错误数据 | 与 V4 头语义重构一起做 |
 | F-18 | JPEG probe 只读 SOF 几何、embed 读实际系数；让 probe 也读系数会明显拖慢快速探测 | 找到 `grid_w*grid_h != blocks.len()` 的真实载体夹具后加断言 |
-| F-19 | 渐进式 JPEG 分类依赖 `dct-io` 错误文案 | 上游提供结构化错误码 |
+| F-19 | 渐进式 JPEG 分类依赖 `dct-io` 错误文案 | 上游提供结构化错误码。**复审实证**：用 Pillow 生成 4 个真实渐进式 JPEG（基线尺寸 / 4:4:4 / 灰度 / 640x480 噪声），`capacity` 全部正确返回 `UnsupportedFormat: Progressive JPEG (SOF2)…`；未找到 inspect 通过而 read 失败的真实载体，继续搁置 |
 | F-20（代码） | 桥接失败丢弃原诊断；改错误类型会影响调用方的错误分类，收益仅是文本 | 需要 `StrHideError` 支持附加上下文时统一做 |
 | F-23 / F-33 | `NoHiddenData` 折叠掉 `CorruptedData`/`PayloadTooLarge`；内容域"错密码不可区分"是有意设计，拆分会影响多引擎与大量测试 | 先定义哪些错误可以外露且不破坏不可区分性 |
 | F-24（逻辑） | 只读入口按"60% 可用物理内存"准入，内存紧张时结果非确定；改成固定上限会削弱大文件保护 | 有真实的误拒案例与明确内存策略再改 |
@@ -87,12 +87,12 @@
 | F-27（死代码） | `is_epb_safe_flip` 无生产调用，但有 3 处内联测试引用，删除要连带改测试 | 与 EPB 规则收敛一起做 |
 | F-29 / N-11 | isobmff / mkv 校验循环内重复 seek，正常容器 box 数少、收益不明显 | 有碎片化大 MP4 的实测性能数据再做 |
 | F-30 | PNG 并行 deflate 用 `Z_SYNC_FLUSH` 拼接独立流；改法会改变输出字节与压缩率 | 需要大图尺寸回归基线 |
-| N-03 | HEIF `item_hidden` 的 iinf 注入/剥离/预检三处判据不对称 | 先补带 iinf/iloc padding 的 HEIF 夹具与完整生命周期测试（T-16） |
+| N-03 | HEIF `item_hidden` 的 iinf 注入/剥离/预检三处判据不对称 | **复审复核**：`heif.rs:57-68` 的 auto 已调用 `isobmff_can_item_hidden` 后才选 `item_hidden`，容量表失真只影响展示；剩余风险需 iinf 尾部填充或约 65535 个 item 才触发，无真实夹具，继续搁置 |
 | N-04 | PDF 尾部盲搜 `obj`、内联 `/Encrypt` 漏检、`find_int_after` 前缀碰撞 | 需要 PDF 词法解析器或一组合法边界夹具 |
-| N-05 | RIFF 哨兵导致 `verify` 把 eof 信封当 chunk；Simple WebP 无 `VP8X` 门槛就追加 `SHRD` | 改动 `riff_verify_structure` / `riff_inject` 核心路径，需 WAV/WebP 全量夹具 |
+| N-05 | RIFF 哨兵导致 `verify` 把 eof 信封当 chunk；Simple WebP 无 `VP8X` 门槛就追加 `SHRD` | **本次复审已修（见 §11）**：`07e8062`。哨兵长度下 verify 无条件比对尾部信封；Simple WebP 自动改用 `eof`，显式 `riff_chunk` 拒绝。新增 T-21 对应回归与基线重建 |
 | N-06 | PE 线性反汇编无函数边界、`DataDirectory[11]` 未排除、64 KiB 头部窗口不一致 | PE 改动可能破坏可执行程序，需 `.pdata` 与真实 PE 语料 |
 | N-07 | MP4 文件级 inspect 单 Decoder 跨 GOP、1 MiB 前缀截断 | 改动解码器生命周期风险大，需多 GOP 夹具（T-20） |
-| N-08 | CLI `extract --auto` 回退丢弃共享 `BatchOutputs`；但 `unique_batch_path` 已防覆盖 | 改 `handle_read` 签名 + 批量状态，需混合批量夹具（T-19） |
+| N-08 | CLI `extract --auto` 回退丢弃共享 `BatchOutputs`；但 `unique_batch_path` 已防覆盖 | **本次复审已修（见 §11）**：`9aae522`。`handle_read` 接收 `shared_batch`，冲突名分配 `b-1.txt`；新增 T-19 对应回归 |
 | N-13 | `png_pre_salt` 绑定全部非 IDAT/prIv 辅助块；改它会改变所有 PNG 输出的线格式派生并重建基线 | 项目发布前统一线格式时一并处理 |
 | N-14 | 双域 + `eof` 策略在内容域重编码后定位失配；`README.zh.md:28,32` 已声明"重编码后 RestoreMismatch 失败关闭" | 在支持矩阵中排除 `eof`，或为 `eof` 增加与 `chunk` 对称的重定位逻辑 |
 | F-21（专家面） | 专家面 `probe_*_capacity` 不预留 256 B | 与引擎容量模型重构一起做，已文档化 |
@@ -104,7 +104,7 @@
 | F-01 | 畸形/被篡改 MP4 的 `stco` 指向 `moov`——恶意构造；加 mdat 归属校验有误拒合法文件的风险 |
 | F-04 | 公开 patch API 漏刷 MKV CRC：CLI 的 patch 分支限定 MP4/Annex-B，个人 CLI 工具不触发 |
 | F-05 | 分卷/多磁盘 ZIP 未校验盘号——极端载体 |
-| F-08 | 私有 domain 方言驱动 CLI 时双域预检失效；官方二进制用 `StrHide::new()` 不受影响 |
+| F-08 | 私有 domain 方言驱动 CLI 时双域预检失效；官方二进制用 `StrHide::new()` 不受影响 | **本次复审已按指令处理**：实测当前代码经 `InspectOptions::domain(dialect)` 回退已能正确识别私有域载荷，原"失效"描述不可复现；仍把 6 处 `DualOptions.domain` 显式接为 `engine.dialect().stego.stego_domain()`，去掉对隐式回退的依赖并加回归断言（见 §11） |
 | F-10(a)(b) | 临时文件符号链接预置、备份→rename 之间的 TOCTOU——攻击面/竞态，项目已有 `TargetLock` 与 `create_new` 备份 |
 | F-12 | 伪造 header 注入坐标越界；已有 `confine_location`、`verify_restored` 全量 SHA-256 兜底，不产出损坏文件 |
 | F-13 | `make_chunk_nonce` 的 `as u32` 回绕：载荷上限 1 GiB + 分块下限 512 B 下不可达 |
@@ -139,9 +139,9 @@
 | T-16 HEIF `item_hidden` 生命周期 | 搁置 | 同 N-03 |
 | T-17 PDF dirty tail / 内联 Encrypt | 搁置 | 同 N-04 |
 | T-18 PE 跳转表 / Bound Import | 忽略 | 同 N-06，属极端 PE 变体 |
-| T-19 CLI 混合批量 `--auto` | 搁置 | 同 N-08 |
+| T-19 CLI 混合批量 `--auto` | 已补 | 同 N-08；`test_cli::batch_extract_auto_keeps_structure_outputs_from_colliding` |
 | T-20 MP4 多 GOP 流式 inspect | 搁置 | 同 N-07 |
-| T-21 RIFF 哨兵 / Simple WebP 合规 | 搁置 | 同 N-05 |
+| T-21 RIFF 哨兵 / Simple WebP 合规 | 已补 | 同 N-05；`simple_webp_auto_uses_eof_and_refuses_riff_chunk`、`streaming_wav_sentinel_size_verifies_after_eof_overlay` |
 
 ## 9. 最终门禁（重建 release 二进制后复验）
 
@@ -161,16 +161,63 @@ python scripts/baseline_hash.py --check              28/28 逐字节一致（F-0
 
 ## 10. 剩余风险（如实记录）
 
-1. **搁置项仍是真实问题**：N-03/N-05/N-07 等容器路径在特殊但合法的文件上仍可能给出错误结果或诊断；本轮按"风险大收益不明显"未动，台账已记录前置条件。
+1. **搁置项仍是真实问题**：N-03/N-07 等容器路径在特殊但合法的文件上仍可能给出错误结果或诊断；N-05 已在本次复审修复，其余按"风险大收益不明显"未动，台账已记录前置条件。
 2. **测试覆盖仍偏薄**：HEVC EPB 重试、真实 MKV、FLAC 非 FIXED 子帧、HEIF `item_hidden` 生命周期仍是空白；`heavy/` `local/` 套件在无外部语料时静默跳过。
 3. **第三方报告本身不可信**：约半数断言基于不存在的标识符或过时代码，本报告已把其成立部分合并、不成立部分列入 §12.5；后续若再引用该报告须重新核实。
 4. **未触及的发布前事项**：`png_pre_salt` 绑定过宽（N-13）与公开面收敛（N-09）会改变线格式/API，应在项目发布前统一决策。
 5. **F-02 的风险仍在**：零填充分支理论上可能覆盖 `rbsp_trailing_bits`（审查报告 §3 F-02），但当前没有可行且不破坏真实 HEIC 载体的替代实现；已加注释标注，并保留 EPB 冲突扫描与 NAL 长度门两道兜底。
 6. **基线校验依赖正确的二进制**：CI/本地若跳过 `cargo build --release --all-features`，`baseline_hash.py --check` 会拿旧 CLI 验证新代码，产生假绿。
 
+## 11. 复审记录（2026-11-06 16:30，按"真实存在 + 正常路径可触发"重新评估）
+
+### 11.1 本次新增修复
+
+| 批次 | commit | 首行 | 条目 |
+|---|---|---|---|
+| cli | `9aae522` | `fix(cli): probe preflight with the bound dialect and share batch state on auto redirect` | F-08（显式接线 + 回归）、N-08 |
+| structure | `07e8062` | `fix(structure): keep RIFF chunks off Simple WebP and accept EOF envelopes despite sentinel sizes` | N-05（Simple WebP 合规 + RIFF 哨兵 verify） |
+| docs | 本提交 | `docs: record the re-review disposition` | §6/§7 状态与理由同步 |
+
+**F-08 的方法学更正**：处置文档原判据是"`domain: None` 会用官方域派生"，但 `struct/options.rs` 的 `domain(dialect)` 本就会回退到 `Dialect::stego_domain()`。实测（私有 `StegoProfile::with_stego_domain("probe-domain")` 的 `run_cli_from` 连续 embed 两次）第二次在修复前即被 `already contains content-domain payload` 拒绝，说明**原描述的问题不存在**。按指令仍把 6 处 `DualOptions.domain` 显式接到引擎方言，并通过 `run_cli_from_content_domain_private_isolation` 的新增断言锁定行为；此改动行为等价，属于消除隐式依赖的加固。
+
+### 11.2 复核后继续搁置（按条件逐项）
+
+- **无数据损坏 / 无正常路径触发**：F-09（写读一致，仅 NAL 长度口径）、F-16（有槽位预算兜底）、F-26（诊断误报）、F-31（微优化/展示）。
+- **仅诊断或文案收益**：F-10(c)（时间戳/权限恢复失败静默；加 `warnings` 需改多个返回结构）、F-20（桥接错误文本）、F-27（`is_epb_safe_flip` 死代码，删除需连带 3 处内联测试）。
+- **安全参数/线格式取舍，非日常缺陷**：F-23/F-33（错误折叠是内容域不可区分性设计）、F-24（内存准入策略）、F-30（并行 deflate 拼接会改输出与压缩率）、N-13（`png_pre_salt` 绑定范围会改所有 PNG 线格式）、N-14（`eof` 双域重编码失配已在 README 声明失败关闭）、F-21（专家面容量差已文档化）。
+- **证据不足 / 需真实夹具，收益与风险不匹配**：
+  - F-02：已尝试并回退；真实 HEIC 会因删除零填充而失败，风险高于收益。
+  - F-03：unknown-size MKV Cluster 的 CRC 端到端夹具缺失。
+  - F-18：未找到 `grid_w*grid_h != blocks.len()` 的真实载体。
+  - F-19：4 个真实渐进式 JPEG 均被正确归类（见 §6 行内实证），未复现错误归类。
+  - N-03：auto 已调用 `isobmff_can_item_hidden`；剩余触发需 iinf 尾部填充或约 65535 个 item，无真实夹具。
+  - N-04：PDF 需词法解析器；内联 `/Encrypt` 属加密 PDF 场景，改动风险高。
+  - N-06：PE 改动可能破坏可执行程序，需真实 PE 语料。
+  - N-07：MP4 文件级 inspect 的解码器生命周期重构风险大，且仅影响 `inspect` 诊断。
+- **纯性能**：F-29/N-11 重复 seek，正常容器收益不明显。
+
+### 11.3 复审判据
+
+本次只改同时满足"真实存在"和"正常路径或日常使用可触发"的条目：F-08（按指令即使复现失败也显式化）、N-08（混合批量 `--auto` 命名冲突真实可触发）、N-05（Simple WebP 与流式 WAV 都是常见载体）。其余条目在 §6/§7 已逐行补上复核结论与触发条件，未新增代码。
+
+### 11.4 复审判据下新增的验收
+
+```
+cargo fmt --all --check                                  通过
+cargo clippy --all-targets --all-features -- -D warnings  通过
+cargo build --release --all-features                     通过（基线校验前先重建）
+cargo test --all-features --all-targets                  通过（lib 554 / lifecycle 154 / cli 140 / regression 117 等）
+cargo test local_ --all-features -- --ignored            20 passed
+cargo test heavy_ --all-features -- --ignored            5 passed（61s）
+python scripts/import_lint.py                            OK
+python scripts/baseline_hash.py --check                  28/28（Simple WebP 两例已说明重建）
+cargo run --release --all-features --example audio_stress 44/44 jobs, 0 failed
+```
+
 ---
 
 **结论**：47 项代码/接口/算法/文档类 issue 与 21 组测试缺口全部有明确落点——
 **修复 7 项 + 文案/注释 3 项 + 部分修复 1 项 + 文档修正 6 组 + 勘误 1 项 + 搁置 25 项 + 忽略 11 项 + 测试缺口 21 组全部决定**，
 共 **5 个 git commit**（其中 `16e3dd1` 为按"不引入新问题"原则做的回退）、**5 个新测试**；
+**复审（§11）另加 3 个 commit**（F-08 加固、N-08、N-05）与 4 组回归断言，
 重建 release 二进制后的 `baseline_hash --check` 28/28 逐字节一致，全部门禁通过。
