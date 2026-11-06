@@ -208,14 +208,21 @@ for info in png_algos {
 | 命令 | 库入口 | 说明 |
 |---|---|---|
 | `embed` | `embed_carrier_with_dialect` | 日常层：`-t/-d/-p/-o/--in-place/-a/--safety/--enforce-safety`；专家层按格式分成两节——`PNG Spatial Tuning`（`--exclusion-rate/--p1-window/--p2-window`）与 `JPEG DCT Tuning`（`--neighbor-weight/--stc-h`）；隐藏参数：`--slot-budget/--cipher-suite`；`Reproducibility` 节：`--seed`；`--dry-run` 全内存演练不落盘 |
-| `extract` | `extract_carrier_with_dialect` | 仅保留活参数：`--p1-window/--p2-window`（PNG 代价图重算必需）；`-a` 仅 `hevc/cabac` 影响路由；算法/排除率等由载体自描述；支持 `CARRIER...` + `-o <DIR>` 批量 |
+| `extract` | `extract_carrier_with_dialect` | 只有凭据与上限参数：`-p`/`--key-file`/`--max-payload`；PNG 代价图参数、算法、排除率、codec、`h`/`u` 等全部由载体头自描述，`ExtractArgs` **不暴露** `--p1-window`/`--p2-window`，提取端也无需重复；`-a/--auto` 在无内容域载荷时回退结构域 `read`；支持 `CARRIER...` + `-o <DIR>` 批量 |
 | `capacity` | `probe_carrier_capacity_with_dialect` | 独立只读探测子命令（与 `embed --capacity` 同一实现），`--json` 输出 `StegoCapacityInfo`；`--exact` 强制全量精确扫描（长视频默认开启前 20% 样本加权快速估算）；与 embed 共享同一组调参/凭据参数 |
 | `embed --capacity` | 同上 | 别名形式保留，支持 `--exact` |
 
 **容量口径（`max_raw_payload_bytes`）**：按最小信封开销（`BODY_OVERHEAD = 22`，
 不含文件名；携带文件名额外消耗 `1 + name_len` 字节，见
-`docs/CHANGES-20261104.md` P2-8）；且已按引擎工作内存预算折算（PNG 8 GiB），
-报告值即为写入端可接受的最大值，超出按 `PayloadTooLarge` 拒绝。
+`docs/CHANGES-20261104.md` P2-8）；且已按引擎工作内存预算折算（PNG 8 GiB）。
+统一入口（`probe_carrier_capacity[_with_dialect]` / `embed_carrier[_with_dialect]` /
+`embed_carrier_file` / facade）还会为最长 255 字节文件名预留
+`MAX_FILENAME_OVERHEAD = 256` 字节，因此报告值是**对文件载荷安全**的上限；
+`Payload::bytes` 裸载荷实际可多写 256 字节（见
+`tests/test_lifecycle/stego.rs::test_stego_capacity_model_is_tight`）。
+专家面域引擎（`probe_png_capacity` / `probe_jpeg_capacity` 等）不做该预留，
+两条 API 的数值相差 256 字节。`recommended_max_bytes` / `tier_limits`
+是各引擎 `enforce_safety` 使用的原值，不参与该预留。
 
 **未实现的 CLI 能力**：`--extensions`（TLV 扩展区）；库 API 已支持，CLI/GUI 未接线。
 `--key-file`（`Credential::FileKey`）与 `--max-payload`（`ExtractParams.max_payload_bytes`）
@@ -223,9 +230,12 @@ for info in png_algos {
 对所有内容格式生效，归在 `Stego Envelope` 分组）。
 
 提取端自描述范围（无需在提取时重复）：算法 id、排除率（`exclusion_permille`）、
-codec、`h`、`u`、通道模式、`format_id`、`suite_id`、`body_len`、扩展区（64B/44B/32B 基础头）；
-**不自描述**、提取端必须重复：PNG 的 `--p1-window` / `--p2-window`、
-凭据（password/key/domain）、方言（`Dialect`）。
+PNG 的 `p1_window` / `p2_window` / `neg_log2_epsilon` / `sigma`、codec、`h`、`u`、
+通道模式、`format_id`、`suite_id`、`body_len`、扩展区（64B/44B/32B 基础头）。
+`png::engine::extract_png_with_keys` 直接用头部值覆盖传入的 `PngParams`
+（`png/engine.rs:2042-2046`）。
+调用方仍需提供：凭据（password/key/domain）、方言（`Dialect`）、
+以及可选的 `ExtractParams::max_payload_bytes` 上限。
 
 配置文件中可用 `[stego]` 段固定三个部署策略项，命令行标志始终优先：
 

@@ -1,6 +1,6 @@
 # strhide 线格式规范（Wire Specification）
 
-> 适用版本：crate `strhide` 0.8.x（Rust 实现，当前 0.8.3）。
+> 适用版本：crate `strhide` 0.9.1（Rust 实现，`rust/Cargo.toml`）。
 > 本文是 strhide 隐写字节布局的**权威规范**，内容按当前源码核对：结构域 UBE 见 `src/envelope.rs`、`src/engine.rs`、`src/crypto.rs`；内容域微信封见 `src/stego/`。
 > 配套文档：[ARCHITECTURE.md](./ARCHITECTURE.md)（模块职责与数据流转）。
 
@@ -622,7 +622,7 @@ body_len   = ciphertext.len()           // 只含密文+tag，不含 salt/nonce
   - 空间域（PNG/WAV/FLAC）：`ext_slots = 8 * ext_len`，一槽一 bit，不经过 STC；
   - JPEG：`ext_slots = ext_u * (8 * ext_len + ext_h - 1)`（官方 `h=8, u=4`）；
   - HEVC：`ext_slots = 2 * (8 * ext_len + 7 - 1)`，固定 `h=7, u=2`。
-  `ext_len = 0` 时一律为 0。
+  `ext_len = 0` 时：HEVC 与空间域为 0；**JPEG 例外**——按上式仍占 `ext_u * (ext_h - 1) = 4 * 7 = 28` 槽（官方 h=8, u=4），因为扩展区 STC 网格在零 TLV 时仍保留 trellis 尾长；该值由 `stego/format.rs::extension_slots` 与同文件内联测试固定，写读两侧一致。
   **off-by-8 语义**：`ext_len` 是字节数，消息位是 `8 * ext_len`，不是 `ext_len`。
 
 ### 13.6 容量公式

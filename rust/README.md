@@ -63,19 +63,19 @@ See the [root README](../README.md) for project-wide architecture, and [README.z
 
 ```toml
 # 1. Full library (default: structure + content + analysis; zero CLI dependencies)
-strhide = "0.8"
+strhide = "0.9.1"
 
 # 2. Container/structural hiding only (lightweight, zero disassembly dependency)
-strhide = { version = "0.8", default-features = false, features = ["structure-base"] }
+strhide = { version = "0.9.1", default-features = false, features = ["structure-base"] }
 
 # 3. Image steganography only (PNG + JPEG)
-strhide = { version = "0.8", default-features = false, features = ["content-png", "content-jpeg"] }
+strhide = { version = "0.9.1", default-features = false, features = ["content-png", "content-jpeg"] }
 
 # 4. Audio steganography only (WAV + FLAC)
-strhide = { version = "0.8", default-features = false, features = ["content-audio"] }
+strhide = { version = "0.9.1", default-features = false, features = ["content-audio"] }
 
 # 5. Steganalysis & carrier forensics only
-strhide = { version = "0.8", default-features = false, features = ["analysis"] }
+strhide = { version = "0.9.1", default-features = false, features = ["analysis"] }
 ```
 
 ---
@@ -125,7 +125,7 @@ fn main() -> Result<(), strhide::errors::StrHideError> {
             ..WriteOptions::default()
         },
     )?;
-    println!("Embedded {} bytes into envelope", write_res.envelope_size);
+    println!("Embedded {} bytes into envelope", write_res.ube_size);
 
     // Read payload back from carrier bytes
     let read_res = engine.structure().read_bytes(&stego_bytes, Some("vault-pass"))?;
@@ -231,7 +231,7 @@ fn run_content_stego(carrier_bytes: &[u8]) -> Result<(), strhide::errors::StrHid
     // 1. Probe maximum embedding capacity
     let probe_opts = ProbeOptions::default();
     let cap_info = engine.stego().probe(carrier_bytes, &probe_opts)?;
-    println!("Carrier capacity: {} bytes (at safety tier: {:?})", cap_info.capacity, cap_info.safety_tier);
+    println!("Carrier capacity: {} bytes (at safety tier: {})", cap_info.max_raw_payload_bytes, cap_info.safety_level);
 
     // 2. Embed payload into image pixels / DCT coefficients / audio samples
     let embed_opts = EmbedOptions {

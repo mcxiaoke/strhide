@@ -70,10 +70,10 @@
 
 | 偏移 | 字段名 | 长度 | 类型 | 取值范围与说明 |
 | :--- | :--- | :--- | :--- | :--- |
-| `0x00` | `magic_header` | 8B | `bytes` | 标准模式：高熵二进制 `b7 54 2c 82 7e 31 1d 6e`（`SHA-256("strhide-standard-header-v2")[..8]`）；stealth 模式：口令派生的 8 字节伪随机值。**旧版** `89 53 54 52 48 49 44 45`（`\x89STRHIDE`）仅作向下读取兼容识别。 |
+| `0x00` | `magic_header` | 8B | `bytes` | 标准模式：高熵二进制 `b7 54 2c 82 7e 31 1d 6e`（`SHA-256("strhide-standard-header-v2")[..8]`）；stealth 模式：口令派生的 8 字节伪随机值。**旧版** `89 53 54 52 48 49 44 45`（`\x89STRHIDE`）已于 2026-10-21 移除读取兼容，现仅作为 `analysis` 取证扫描的历史特征；pre-v2 载体一律报「无隐藏数据」。 |
 | `0x08` | `version` | 1B | `uint8` | 协议版本号，当前固定为 `0x02` |
-| `0x09` | `flags` | 1B | `uint8` | `bit 0`: **是否使用用户口令密钥**（`0`=内置密钥模式，落盘加密，读取无需输入口令；`1`=用户口令模式，读取需口令）<br>`bit 1`: 是否压缩（`0`=无, `1`=Deflate）<br>`bit 2`: 载荷类型（`0`=文本, `1`=文件）<br>`bit 3`: stealth 模式（`0`=标准, `1`=Stealth，须与 bit0 同时置位）<br>`bit 4`: 含密码提示<br>`bit 5`: 紧凑二进制元数据（`0`=JSON, `1`=紧凑 v1）<br>`bit 6`: 流式分块载荷<br>`bit 7`: 保留，填 `0` |
-| `0x0A` | `strategy_id` | 1B | `uint8` | `1`=eof, `2`=chunk, `3`=box_uuid, `4`=pre_cd_inject, `5`=app_segment, `6`=incremental, `7`=pe_overlay, `8`=pe_codebits, `9`=pe_slack |
+| `0x09` | `flags` | 1B | `uint8` | `bit 0`: **是否使用用户口令密钥**（`0`=内置密钥模式，落盘加密，读取无需输入口令；`1`=用户口令模式，读取需口令）<br>`bit 1`: 是否压缩（`0`=无, `1`=Deflate）<br>`bit 2`: 载荷类型（`0`=文本, `1`=文件）<br>`bit 3`: stealth 模式（`0`=标准, `1`=Stealth，须与 bit0 同时置位）<br>`bit 4`: 含密码提示<br>`bit 5`: 紧凑二进制元数据（`0`=JSON, `1`=紧凑 v1）<br>`bit 6` / `bit 7`: 保留，必须为 `0`（载荷流始终按块 AEAD 封装，无需标志位） |
+| `0x0A` | `strategy_id` | 1B | `uint8` | `1`=eof, `2`=chunk, `3`=box_uuid, `4`=pre_cd_inject, `5`=app_segment, `6`=incremental, `7`=pe_overlay, `8`=pe_codebits, `9`=pe_slack, `10`=riff_chunk, `11`=ebml_void, `12`=item_hidden, `13`=free_box（与 `structure/registry.rs::STRATEGY_REGISTRY` 一致） |
 | `0x0B` | `offset_delta` | 1B | `uint8` | 注入点到信封首字节的物理位移（取值范围 0..=64，用于三级坐标校验，如适配器外层容器包装头偏移补偿） |
 | `0x0C` | `salt` | 16B | `bytes` | CSPRNG 生成的 128 位随机盐 |
 | `0x1C` | `base_nonce` | 12B | `bytes` | CSPRNG 生成的 96 位 Nonce 基础值 |

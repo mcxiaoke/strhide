@@ -1,6 +1,6 @@
 # strhide 架构与公开 API 说明
 
-> 适用版本：crate `strhide` 0.8.x（当前 0.8.5，Rust 实现，`rust/`）。
+> 适用版本：crate `strhide` 0.9.1（Rust 实现，`rust/`）。
 > 本文描述模块职责、分层关系、公开 API 与内部数据流转，所有结论均按当前源码核对。
 > 配套文档：
 > - [WIRE_SPEC.md](./WIRE_SPEC.md) — UBE v2.2 二进制线格式规范；
