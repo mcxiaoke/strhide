@@ -272,3 +272,138 @@ mod tests {
         );
     }
 }
+
+/// Cross-implementation conformance vector for the MiPOD cost pipeline.
+///
+/// The digests pin every stage (`sigma^2`, `I_n`, the smoothed map and the
+/// quantised cost) for one fixed image, so anyone re-implementing this pipeline
+/// in another language can check each step instead of diffing stego bytes.
+/// `scripts/cost_vectors_check.py` is the reference reader; set
+/// `STHIDE_WRITE_COST_VECTOR=1` to regenerate `docs/api/cost-vectors.json`.
+#[cfg(test)]
+mod vectors {
+    use super::*;
+    use crate::stego::cost_calibration::fisher_to_costs;
+
+    const W: usize = 32;
+    const H: usize = 32;
+    const CHANNELS: usize = 3;
+    /// `DEFAULT_TARGET_BPP` is `0.20f32 as f64`, so the vector records the
+    /// widened value rather than `0.2`: they differ in the last digits.
+    const ALPHA_F32: f64 = 0.20f32 as f64;
+    const BLOCK_P: usize = 9;
+    const DEGREE: usize = 9;
+    const WIENER_WINDOW: usize = 2;
+    const VARIANCE_FLOOR: f64 = 0.01;
+    const FI_SMOOTH_WINDOW: usize = 7;
+    const QUANTISE_BITS: u32 = 20;
+
+    /// Deterministic texture shared with the Python reader: a low-frequency
+    /// XOR pattern plus a linear gradient, all in integers.
+    fn reference_pixels() -> Vec<u8> {
+        let mut out = Vec::with_capacity(W * H * CHANNELS);
+        for y in 0..H {
+            for x in 0..W {
+                let v = (((x * 7 + y * 13) ^ (x * y)) & 0xFF) as u8;
+                out.push(v);
+                out.push(v.wrapping_mul(3));
+                out.push(255 - ((x * 5 + y * 3) & 0xFF) as u8);
+            }
+        }
+        out
+    }
+
+    /// FNV-1a over the little-endian bit patterns, so one changed ulp anywhere
+    /// shows up. Kept trivial to re-implement in any language.
+    fn digest(vals: &[f64]) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for v in vals {
+            for byte in v.to_bits().to_le_bytes() {
+                h ^= byte as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        h
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        const T: &[u8; 16] = b"0123456789abcdef";
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for &b in bytes {
+            s.push(T[(b >> 4) as usize] as char);
+            s.push(T[(b & 0xF) as usize] as char);
+        }
+        s
+    }
+
+    /// The five stage maps, in pipeline order.
+    fn stages() -> [Vec<f64>; 5] {
+        let pixels = reference_pixels();
+        let plane = class_masked_luminance(&pixels, W, H, CHANNELS);
+        let var = estimate_variance(&plane, W, H, BLOCK_P, DEGREE, WIENER_WINDOW, VARIANCE_FLOOR);
+        let fisher: Vec<f64> = var.iter().map(|v| 2.0 / (*v * *v)).collect();
+        let smoothed = box_smooth(fisher.clone(), W, H, FI_SMOOTH_WINDOW);
+        let cost = fisher_to_costs(smoothed.clone(), ALPHA_F32 * (W * H) as f64);
+        [plane, var, fisher, smoothed, cost]
+    }
+
+    /// Regenerate with `STHIDE_WRITE_COST_VECTOR=1 cargo test --lib cost_vector`.
+    const PINNED: [u64; 5] = [
+        0x38ac_ac9a_ee18_c045, // plane (class-masked luminance)
+        0xa9a8_2a38_5f1e_4aaf, // sigma^2
+        0x56e5_be58_b657_9778, // I = 2 / sigma^4
+        0xdde3_9010_4ca4_7b1b, // 7x7 box smooth
+        0xce8f_ef0e_a0f8_90e9, // quantised STC cost
+    ];
+
+    #[test]
+    fn cost_vector_digests_are_pinned() {
+        let s = stages();
+        let got = [
+            digest(&s[0]),
+            digest(&s[1]),
+            digest(&s[2]),
+            digest(&s[3]),
+            digest(&s[4]),
+        ];
+        if std::env::var_os("STHIDE_WRITE_COST_VECTOR").is_some() {
+            let json = render(&s, &got);
+            let path = std::path::Path::new("../docs/api/cost-vectors.json");
+            std::fs::write(path, json).expect("write cost vector");
+            println!("wrote {}", path.display());
+            return;
+        }
+        assert_eq!(
+            got, PINNED,
+            "cost pipeline digests moved; if the change is intended, regenerate \
+             docs/api/cost-vectors.json and re-run scripts/cost_vectors_check.py"
+        );
+        assert_eq!(s[4].len(), W * H);
+    }
+
+    fn render(s: &[Vec<f64>; 5], d: &[u64; 5]) -> String {
+        let head: Vec<String> = s[4]
+            .iter()
+            .take(4)
+            .map(|v| v.to_bits().to_string())
+            .collect();
+        format!(
+            "{{\n  \"format\": \"strhide-cost-vector/1\",\n  \"pipeline\": \"mipod\",\n  \
+             \"case\": {{ \"w\": {W}, \"h\": {H}, \"channels\": {CHANNELS}, \"pixels_hex\": \"{}\" }},\n  \
+             \"params\": {{ \"block_p\": {BLOCK_P}, \"degree\": {DEGREE}, \"wiener_window\": {WIENER_WINDOW}, \
+             \"variance_floor\": {VARIANCE_FLOOR}, \"fi_smooth_window\": {FI_SMOOTH_WINDOW}, \
+             \"alpha_f32\": {ALPHA_F32:?}, \"quantise_bits\": {QUANTISE_BITS} }},\n  \
+             \"digests\": {{ \"plane\": \"{:016x}\", \"variance\": \"{:016x}\", \"fisher\": \"{:016x}\", \
+             \"smoothed\": \"{:016x}\", \"cost\": \"{:016x}\" }},\n  \
+             \"cost_head_bits\": [{}],\n  \
+             \"digest\": \"fnv1a-64 over little-endian f64 bit patterns, one value per stage element\"\n}}\n",
+            hex(&reference_pixels()),
+            d[0],
+            d[1],
+            d[2],
+            d[3],
+            d[4],
+            head.join(", ")
+        )
+    }
+}

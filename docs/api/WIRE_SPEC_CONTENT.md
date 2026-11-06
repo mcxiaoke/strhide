@@ -742,6 +742,9 @@ candidates = eligible 中按 (cost.to_bits(), px) 升序排序后的前 `allowed
 - 量化位数属于 **F 级**：改它会同时改候选集与 trellis 取舍，等于改格式，必须重建基线；
 - `u = 1` 与 Hamming 路径不吃代价，只有 STC 路径受影响。
 
+这条管线的五个阶段都有固定摘要，见附录 A.3：改任何一段都会让 `cost_vector_digests_are_pinned`
+变红，并在 `scripts/cost_vectors_check.py` 里指出是哪一段开始分叉。
+
 ---
 
 ### 13.12 行为语义
@@ -920,3 +923,27 @@ Ubuntu 22.04 / x86_64（1 核）实机验证：
 复现方式：两边各跑一次 `scripts/baseline_hash.py --check`，再用同一张图、同一 `--seed` 各
 `embed -a mipod` 一次比对 `sha256`。**没有把这一步放进 CI**：`testdata/` 有 845 MB，只适合本地
 或专用跑机；想让它在 CI 里生效，得先挑一小组（≤ 5 MB）进入仓库。
+
+### A.3 跨实现向量（`cost-vectors.json`）
+
+字节比对只能告诉你"最后不一致"，说不出是哪一步。所以 MiPOD 的代价管线另有一组**逐阶段摘要**：
+
+| 文件 | 作用 |
+|---|---|
+| `docs/api/cost-vectors.json` | 固定输入（32×32 RGB，像素以 hex 内联）+ 五个阶段的 FNV-1a 摘要 |
+| `rust/src/stego/png/cost/mipod.rs` 的 `vectors` 测试 | 重算并与摘要比对；`STHIDE_WRITE_COST_VECTOR=1` 时重新生成 JSON |
+| `scripts/cost_vectors_check.py` | 纯标准库的第二实现（Python），从 JSON 复算全部五段 |
+
+阶段：`plane`（`pixel & 0xF8` 的亮度）→ `variance`（`σ²`，Wiener 残差 + 局部余弦补空间）→
+`fisher`（`2/σ⁴`）→ `smoothed`（7×7 盒滤波）→ `cost`（标定 + 量化，**这条是契约**）。
+
+实测（2026-11-06）：Windows 上的 Python 与 Linux/glibc 上的 Python **五段全部逐位相同**，
+无需任何容差；脚本耗时 0.3 秒。用法：
+
+```bash
+cargo test --release --all-features --lib cost_vector   # Rust 侧：摘要未漂移
+python scripts/cost_vectors_check.py                    # 另一语言：五段是否一致
+```
+
+新增一个 F 级数值阶段（例如换代价模型）时，应同时扩一份这样的向量：它比字节比对早一步定位问题，
+也是"另一个语言实现是否对齐"的唯一低成本判据。
