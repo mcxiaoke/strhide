@@ -445,7 +445,13 @@ pub(crate) fn inspect_flac(
             let bs = core::body_slots_for(&v.header).unwrap_or(0);
             (hs, bs)
         }
-        Err(_) => (PNG_AUDIO_BASE_SLOTS, 0),
+        Err(e) => {
+            // A clean FLAC has no readable header, so this is the normal
+            // "nothing here" answer — keep `has_hidden_data = false`, but leave
+            // a record so "cannot read" stays distinguishable in the logs.
+            log::debug!(target: "stego::inspect", "flac header view unreadable: {e}");
+            (PNG_AUDIO_BASE_SLOTS, 0)
+        }
     };
 
     // `ext_len` is unauthenticated until AEAD runs, so a forged value can ask
@@ -461,7 +467,13 @@ pub(crate) fn inspect_flac(
     // base; the caller reports "no hidden data" and never reads the body.
     let body_phase = match &view {
         Ok(v) => flac_body_phase(body_phase, &v.header.salt, &v.header.nonce),
-        Err(_) => body_phase,
+        Err(e) => {
+            log::debug!(
+                target: "stego::inspect",
+                "flac body phase stays at its password-derived base: {e}"
+            );
+            body_phase
+        }
     };
     let flac = flac::FlacCarrier::new(
         &mut scratch,
@@ -477,7 +489,10 @@ pub(crate) fn inspect_flac(
         Ok(view) => {
             core::inspect_with_header(&flac, core::Mapping::BodyPermuted, &prepared, &view, limits)
         }
-        Err(_) => StegoHeaderInfo::empty("FLAC"),
+        Err(e) => {
+            log::debug!(target: "stego::inspect", "flac yields no header: {e}");
+            StegoHeaderInfo::empty("FLAC")
+        }
     })
 }
 
@@ -554,7 +569,10 @@ pub(crate) fn verify_flac(
                 .min(analysis.slots);
             (hs, bs)
         }
-        Err(_) => (PNG_AUDIO_BASE_SLOTS, 0),
+        Err(e) => {
+            log::debug!(target: "stego::verify", "flac header view unreadable: {e}");
+            (PNG_AUDIO_BASE_SLOTS, 0)
+        }
     };
 
     // Same unauthenticated-`ext_len` bound as `inspect_flac`.
@@ -567,7 +585,13 @@ pub(crate) fn verify_flac(
     // base; the caller reports "no hidden data" and never reads the body.
     let body_phase = match &view {
         Ok(v) => flac_body_phase(body_phase, &v.header.salt, &v.header.nonce),
-        Err(_) => body_phase,
+        Err(e) => {
+            log::debug!(
+                target: "stego::verify",
+                "flac body phase stays at its password-derived base: {e}"
+            );
+            body_phase
+        }
     };
     let flac = flac::FlacCarrier::new(
         &mut scratch,
@@ -590,7 +614,10 @@ pub(crate) fn verify_flac(
             limits,
             control,
         ),
-        Err(_) => Ok(flac_unreadable()),
+        Err(e) => {
+            log::debug!(target: "stego::verify", "flac header unreadable: {e}");
+            Ok(flac_unreadable())
+        }
     }
 }
 

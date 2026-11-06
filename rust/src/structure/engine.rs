@@ -2588,7 +2588,14 @@ fn inspect_core(
     // letting the content domain answer (review B-06).
     let header = match EnvelopeHeader::unpack_with_profile(&header_bytes, password, profile) {
         Ok(h) => h,
-        Err(_) => {
+        Err(e) => {
+            // Staying invisible to a reader that does not hold the dialect is
+            // the point (B-06), so the result must not change — but the reason
+            // still belongs in the log.
+            log::debug!(
+                target: "structure::inspect",
+                "envelope header does not open under this profile: {e}"
+            );
             drop(ube_stream);
             return empty_inspect_result(host, adapter, label, strategies);
         }
@@ -2598,7 +2605,11 @@ fn inspect_core(
     // `CorruptedData` out of `inspect` / `smart_extract` (review B-06). This
     // also stops a coincidental de-mask hit on a foreign-key envelope from
     // aborting the whole inspection.
-    if header.validate_against(ube_total_size, host_len).is_err() {
+    if let Err(e) = header.validate_against(ube_total_size, host_len) {
+        log::debug!(
+            target: "structure::inspect",
+            "envelope header failed the level-2 shape check: {e}"
+        );
         drop(ube_stream);
         return empty_inspect_result(host, adapter, label, strategies);
     }
@@ -2629,7 +2640,19 @@ fn inspect_core(
             };
             if let Some(meta_obj) = decoded {
                 meta_val = Some(MetadataInspection::Decrypted(meta_obj));
+            } else {
+                log::debug!(
+                    target: "structure::inspect",
+                    "metadata block ({} B) present but did not decrypt/decode",
+                    header.meta_len
+                );
             }
+        } else {
+            log::debug!(
+                target: "structure::inspect",
+                "metadata block ({} B) could not be read",
+                header.meta_len
+            );
         }
     } else if let Some(pwd) = password {
         let mut meta_bytes = vec![0u8; header.meta_len as usize];
@@ -2639,12 +2662,23 @@ fn inspect_core(
             if let Ok(dec) = decrypt_metadata(&meta_bytes, &meta_key, &header.base_nonce, &aad) {
                 if let Ok(meta_obj) = decode_metadata(&dec, header.is_compact_meta()) {
                     meta_val = Some(MetadataInspection::Decrypted(meta_obj));
+                } else {
+                    log::debug!(
+                        target: "structure::inspect",
+                        "metadata block decrypted but did not decode"
+                    );
                 }
             } else {
                 meta_val = Some(MetadataInspection::DecryptFailed {
                     error: "Invalid password".to_string(),
                 });
             }
+        } else {
+            log::debug!(
+                target: "structure::inspect",
+                "metadata block ({} B) unreadable or key derivation failed",
+                header.meta_len
+            );
         }
     }
 
@@ -2952,7 +2986,17 @@ fn verify_core(
                         profile,
                         &built,
                     ) {
-                        Err(_) => (false, "Envelope header unpacking failed".into(), false),
+                        Err(e) => {
+                            log::debug!(
+                                target: "structure::verify",
+                                "envelope header unpacking failed: {e}"
+                            );
+                            (
+                                false,
+                                format!("Envelope header unpacking failed: {e}"),
+                                false,
+                            )
+                        }
                         Ok(header) => {
                             // Validate header field ranges against the located
                             // envelope size (version / hint_len / meta_len

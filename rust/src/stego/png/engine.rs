@@ -2231,11 +2231,30 @@ fn inspect_png_with_keys(
     }
 
     let base_layout = header_layout(image, &locator.locate_seed, 0);
-    let base_bytes: [u8; PNG_AUDIO_BASE_HEADER_BYTES] =
-        match read_slot_bytes(image, &base_layout[..PNG_AUDIO_BASE_SLOTS], 64).try_into() {
-            Ok(bytes) => bytes,
-            Err(_) => return Ok(empty_info),
-        };
+    let base_bytes: [u8; PNG_AUDIO_BASE_HEADER_BYTES] = match read_slot_bytes(
+        image,
+        &base_layout[..PNG_AUDIO_BASE_SLOTS],
+        64,
+    )
+    .try_into()
+    {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            // The pool length was checked above, so a short read means the
+            // slot mapping disagrees with the image — an anomaly, not the
+            // "no header here" answer every clean PNG gives below.
+            log::debug!(
+                target: "stego::inspect",
+                "png header slots could not be read (pool {} slots, need {})",
+                carrier_slots,
+                PNG_AUDIO_BASE_SLOTS
+            );
+            empty_info.note = Some(format!(
+                "Header slots could not be read: pool has {carrier_slots} slots, the header needs {PNG_AUDIO_BASE_SLOTS}"
+            ));
+            return Ok(empty_info);
+        }
+    };
     let Ok(header) = SpatialHeaderV4::decode(&base_bytes, PNG_FORMAT_ID) else {
         return Ok(empty_info);
     };

@@ -1073,7 +1073,12 @@ pub(crate) fn inspect_with_header<C: SlotCarrier + ?Sized>(
     }
     let needed = match body_slots_for(header) {
         Ok(needed) => needed,
-        Err(_) => return info,
+        Err(e) => {
+            // The header passed `validate_header` just above, so slot
+            // arithmetic failing here is unexpected rather than "no payload".
+            log::debug!(target: "stego::inspect", "audio body slot count failed: {e}");
+            return info;
+        }
     };
     if header_slots + needed > carrier.slot_count() {
         return info;
@@ -1102,7 +1107,16 @@ pub(crate) fn inspect<C: SlotCarrier + ?Sized>(
 ) -> StegoHeaderInfo {
     let view = match read_base(carrier, mapping, prepared, format_id) {
         Ok(view) => view,
-        Err(_) => return StegoHeaderInfo::empty(carrier.format_label()),
+        Err(e) => {
+            // A clean carrier has no readable base header; this is the normal
+            // "nothing here" answer, recorded for diagnosis only.
+            log::debug!(
+                target: "stego::inspect",
+                "audio base header unreadable for {}: {e}",
+                carrier.format_label()
+            );
+            return StegoHeaderInfo::empty(carrier.format_label());
+        }
     };
     inspect_with_header(carrier, mapping, prepared, &view, limits)
 }

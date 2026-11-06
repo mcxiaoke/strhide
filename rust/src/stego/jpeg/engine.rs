@@ -1455,9 +1455,15 @@ pub fn inspect_jpeg(
     ));
     let coeffs = match dct_io::read_coefficients(carrier_bytes) {
         Ok(c) => c,
-        Err(_) => {
+        Err(e) => {
+            // Preflight just succeeded, so the coefficient reader failing here
+            // is a real anomaly rather than "no envelope". The sibling
+            // preflight arm above already reports its reason through `note`;
+            // this one used to drop it.
+            log::debug!(target: "stego::inspect", "jpeg coefficient read failed: {e}");
             let mut empty_info = StegoHeaderInfo::empty("JPEG");
             empty_info.media_info = media_info;
+            empty_info.note = Some(format!("Coefficient read failed: {e}"));
             return Ok(empty_info);
         }
     };

@@ -2365,11 +2365,25 @@ fn inspect_hevc_record(
     empty_info.media_info = media_info;
 
     if check_l1_floor(&cred, limits).is_err() {
+        log::debug!(
+            target: "stego::inspect",
+            "hevc inspect skipped: level-1 key derivation exceeds the configured PBKDF2 budget"
+        );
         return Ok(empty_info);
     }
     let header = match read_hevc_header_v4(carrier, record, cred, domain, fmt, limits) {
         Ok(Some(header)) => header,
-        Ok(None) | Err(_) => return Ok(empty_info),
+        // "No header here" is the normal answer for a clean carrier and must
+        // stay silent; only a failure to *read* one is worth a record.
+        Ok(None) => return Ok(empty_info),
+        Err(e) => {
+            log::debug!(
+                target: "stego::inspect",
+                "hevc header read failed for {}: {e}",
+                kind.label()
+            );
+            return Ok(empty_info);
+        }
     };
 
     Ok(hevc_header_info(kind, &header, media_info).unwrap_or(empty_info))
@@ -2450,7 +2464,16 @@ pub fn inspect_hevc_v4(
         control,
     ) {
         Ok(r) => r,
-        Err(_) => return Ok(empty_info),
+        Err(e) => {
+            // Reaching a carrier that sniffs as HEVC and then fails to record
+            // its structure is a parse failure, not "nothing hidden".
+            log::debug!(
+                target: "stego::inspect",
+                "hevc carrier record failed for {}: {e}",
+                kind.label()
+            );
+            return Ok(empty_info);
+        }
     };
     inspect_hevc_record(
         carrier, kind, &record, media_info, cred, domain, fmt, limits, control,
@@ -2597,7 +2620,15 @@ pub fn inspect_hevc_mp4_file_v4(
 
     let target = match crate::stego::hevc::mp4_boxes::parse_moov_target(&moov_bytes, file_len) {
         Ok(t) => t,
-        Err(_) => return Ok(StegoHeaderInfo::empty("MP4/HEVC")),
+        Err(e) => {
+            // The moov box was located and read; failing to parse its targets
+            // is a malformed container, not an empty carrier.
+            log::debug!(
+                target: "stego::inspect",
+                "mp4 moov target parse failed: {e}"
+            );
+            return Ok(StegoHeaderInfo::empty("MP4/HEVC"));
+        }
     };
 
     let mut media_info = None;
@@ -2890,7 +2921,10 @@ pub fn verify_hevc_v4(
     };
     let header = match read_hevc_header_v4(carrier, &record, cred, domain, fmt, limits) {
         Ok(Some(header)) => header,
-        Ok(None) | Err(_) => {
+        // Split from the `Err` arm on purpose: reporting "wrong password" for
+        // a carrier the reader could not parse sends the user chasing a
+        // credential that was never the problem.
+        Ok(None) => {
             levels.push(VerifyLevel::fail(
                 2,
                 "Stego header",
@@ -2900,6 +2934,20 @@ pub fn verify_hevc_v4(
                 3,
                 "Payload decryption",
                 "No stego header to extract payload from",
+            ));
+            return Ok(StegoVerifyResult::new(format_name, levels));
+        }
+        Err(e) => {
+            log::debug!(target: "stego::verify", "hevc header read failed: {e}");
+            levels.push(VerifyLevel::fail(
+                2,
+                "Stego header",
+                format!("Stego header could not be read: {e}"),
+            ));
+            levels.push(VerifyLevel::fail(
+                3,
+                "Payload decryption",
+                "Skipped because the header could not be read",
             ));
             return Ok(StegoVerifyResult::new(format_name, levels));
         }

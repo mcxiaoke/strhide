@@ -506,7 +506,13 @@ fn hevc_embed(
         Err(e) if !should_try_bridge(&e) => Err(e),
         Err(e) if resolved.hevc_mode == HevcMode::Cabac => Err(e),
         #[cfg(feature = "content-heif-bridge")]
-        Err(_) => {
+        Err(direct_err) => {
+            // The bridge's verdict replaces this one, but the reason the direct
+            // path gave up is the only record of why the fallback was needed.
+            log::debug!(
+                target: "stego::hevc",
+                "embed falling back to the HEIF thumbnail bridge after: {direct_err}"
+            );
             let (bridge, stats, capacity) = thumb_bridge::embed_heif_bridge(
                 carrier,
                 payload,
@@ -563,7 +569,11 @@ fn hevc_extract(
         Ok(payload) => Ok(payload),
         Err(e) if !should_try_bridge(&e) => Err(e),
         #[cfg(feature = "content-heif-bridge")]
-        Err(_) => {
+        Err(direct_err) => {
+            log::debug!(
+                target: "stego::hevc",
+                "extract falling back to the HEIF thumbnail bridge after: {direct_err}"
+            );
             // The bridge reads the same V4 envelope, so it needs the same
             // credential, domain and extension area the writer used. Dropping
             // the file key here made every `FileKey` bridge carrier unreadable
@@ -619,22 +629,28 @@ fn hevc_probe(
         // bridge's capacity while the writer fills the CABAC stream (or the
         // other way round) is worse than useless.
         #[cfg(feature = "content-heif-bridge")]
-        Err(_) => thumb_bridge::probe_heif_bridge_capacity(
-            carrier,
-            &crate::stego::options::BridgeOptions {
-                dialect,
-                password: opts.password,
-                key: opts.key,
-                domain: opts.domain,
-                suite_id: None,
-                extensions: opts.extensions.clone(),
-                tuning: opts.tuning.clone(),
-                safety: opts.safety,
-                freshness: crate::stego::envelope::Freshness::Random,
-                no_filename: false,
-            },
-            &opts.control,
-        ),
+        Err(direct_err) => {
+            log::debug!(
+                target: "stego::hevc",
+                "probe falling back to the HEIF thumbnail bridge after: {direct_err}"
+            );
+            thumb_bridge::probe_heif_bridge_capacity(
+                carrier,
+                &crate::stego::options::BridgeOptions {
+                    dialect,
+                    password: opts.password,
+                    key: opts.key,
+                    domain: opts.domain,
+                    suite_id: None,
+                    extensions: opts.extensions.clone(),
+                    tuning: opts.tuning.clone(),
+                    safety: opts.safety,
+                    freshness: crate::stego::envelope::Freshness::Random,
+                    no_filename: false,
+                },
+                &opts.control,
+            )
+        }
         #[cfg(not(feature = "content-heif-bridge"))]
         Err(e) => Err(e),
     }
