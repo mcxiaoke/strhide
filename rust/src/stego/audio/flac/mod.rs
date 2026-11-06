@@ -76,12 +76,18 @@ const COST_WINDOW: usize = 16;
 /// slot count that keeps the ratio at 3, i.e. `u = 2` at full capacity.
 /// Reporting the geometric maximum instead would promise payloads the trellis
 /// cannot encode.
-/// How far the decoded waveform may move, in units of one LSB.
+/// How far the decoded waveform may move, in units of one **stored** sample step.
 ///
 /// The compensation chain cancels predictor reaction at every tap; under exact
 /// integer compensation the waveform moves by at most 1 unit (or 2 units under
 /// stereo decorrelation where integer division rounds). The budget is a correctness
 /// gate catching any failure that leaks error into neighbours.
+///
+/// A subframe that declares `w` wasted bits stores its samples shifted right by
+/// `w`, so one residual step moves the decoded waveform by `2^w` output units.
+/// `max_sample_drift` normalises each frame by that factor before comparing, so
+/// this budget keeps its meaning (`1` = one stored step) for every carrier, not
+/// only for files with `wasted_bits == 0`.
 pub(crate) const DRIFT_BUDGET: i64 = 2;
 
 /// Parsed `STREAMINFO`.
@@ -993,11 +999,19 @@ fn slot_cost(parsed: &ParsedFrame, slot: &frame::ResidualSlot, scale: &PcmScale)
     (1.0 / (1e-3 + energy_metric)) as f32
 }
 
-/// Largest per-sample difference between two versions of the same FLAC file.
+/// Largest per-sample difference between two versions of the same FLAC file,
+/// measured in units of one **stored** sample step.
 ///
 /// Walks both files frame by frame so the working set stays one frame, and
 /// compares the *decoded* planes -- which is what a listener hears. The embedder
 /// uses it to prove that the residual moves it made did not smear the waveform.
+///
+/// The decoded values are output units, but the compensation chain moves stored
+/// values. A subframe with `w` wasted bits stores samples shifted right by `w`,
+/// so one stored step is `2^w` output units; each frame's worst difference is
+/// divided by that factor (rounded up) before it is compared with
+/// [`DRIFT_BUDGET`]. Without this, a perfectly compensated embed in a
+/// `wasted_bits > 0` carrier was reported as a `2^w`-unit smear and refused.
 pub(crate) fn max_sample_drift(
     cover: &[u8],
     stego: &[u8],
@@ -1044,10 +1058,28 @@ pub(crate) fn max_sample_drift(
                 }
             }
         }
-        if frame_worst > 8 && std::env::var_os("STRHIDE_FLAC_DEBUG").is_some() {
+        // One stored step is `2^w` output units. Mixed wasted counts inside one
+        // frame are rare (real encoders pick them per subframe from the same
+        // signal, so they normally agree); taking the largest keeps the gate
+        // in stored units and can only be *more* lenient for such files.
+        let wasted = a
+            .wasted
+            .iter()
+            .chain(b.wasted.iter())
+            .max()
+            .copied()
+            .unwrap_or(0)
+            .min(31);
+        let scale = 1i64 << wasted;
+        let frame_units = if frame_worst == 0 {
+            0
+        } else {
+            (frame_worst + scale - 1) / scale
+        };
+        if frame_units > DRIFT_BUDGET && std::env::var_os("STRHIDE_FLAC_DEBUG").is_some() {
             let f = first.unwrap_or((0, 0, 0, 0));
             eprintln!(
-                "flac-debug: drift {frame_worst} at frame@{} ch{} sample{} (cover {} vs stego {}) | first ch{} sample{} {}->{} | {count} diffs",
+                "flac-debug: drift {frame_worst} output units = {frame_units} stored units (wasted {wasted}) at frame@{} ch{} sample{} (cover {} vs stego {}) | first ch{} sample{} {}->{} | {count} diffs",
                 a.start,
                 frame_at.0,
                 frame_at.1,
@@ -1059,7 +1091,7 @@ pub(crate) fn max_sample_drift(
                 f.3
             );
         }
-        worst = worst.max(frame_worst);
+        worst = worst.max(frame_units);
         pos_a = a.crc16_offset + 2;
         pos_b = b.crc16_offset + 2;
     }
@@ -1394,6 +1426,7 @@ mod tests {
         let parsed = frame::ParsedFrame {
             start: 0,
             samples: vec![vec![0i64; 4]],
+            wasted: vec![0],
             crc16_offset: 0,
             slots: Vec::new(),
             comps: vec![frame::Compensation {

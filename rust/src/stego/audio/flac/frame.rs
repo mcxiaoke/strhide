@@ -119,6 +119,13 @@ pub(crate) struct ParsedFrame {
     pub start: usize,
     /// Interleaved-free sample planes: `samples[channel][frame_sample]`.
     pub samples: Vec<Vec<i64>>,
+    /// Wasted bits each subframe declared, in subframe order.
+    ///
+    /// A subframe with `w` wasted bits stores its samples shifted right by `w`,
+    /// so every value in the decoded plane is a multiple of `2^w` and one
+    /// residual step moves the waveform by `2^w`. The drift gate needs this to
+    /// compare moves in the units the compensation chain actually works in.
+    pub wasted: Vec<u8>,
     /// Byte offset of the frame's CRC-16 (frame ends two bytes later).
     pub crc16_offset: usize,
     /// Usable residual codewords, in decode order.
@@ -355,6 +362,7 @@ fn parse_frame_inner(
     }
     let mut reader = BitReader::new(bytes, pos * 8);
     let mut planes: Vec<Vec<i64>> = Vec::with_capacity(channels);
+    let mut wasted: Vec<u8> = Vec::with_capacity(channels);
     let mut slots: Vec<ResidualSlot> = Vec::new();
     let mut comps: Vec<Compensation> = Vec::new();
     let mut tails: Vec<ResidualSlot> = Vec::new();
@@ -376,7 +384,7 @@ fn parse_frame_inner(
         } else {
             bits_per_sample
         };
-        let plane = decode_subframe(
+        let (plane, frame_wasted) = decode_subframe(
             &mut reader,
             block_size,
             &mut channel_bps,
@@ -385,6 +393,7 @@ fn parse_frame_inner(
             &mut comps,
             &mut tails,
         )?;
+        wasted.push(frame_wasted);
         planes.push(plane);
     }
 
@@ -399,6 +408,7 @@ fn parse_frame_inner(
     Ok(ParsedFrame {
         start,
         samples,
+        wasted,
         crc16_offset,
         slots,
         comps,
@@ -407,6 +417,9 @@ fn parse_frame_inner(
 }
 
 /// Decode one subframe into `block_size` samples.
+///
+/// Also returns the wasted-bit count the subframe declared: the caller needs it
+/// to interpret the decoded values in the units a residual move operates on.
 fn decode_subframe(
     reader: &mut BitReader<'_>,
     block_size: usize,
@@ -415,7 +428,7 @@ fn decode_subframe(
     slots: &mut Vec<ResidualSlot>,
     comps: &mut Vec<Compensation>,
     tails: &mut Vec<ResidualSlot>,
-) -> Result<Vec<i64>, BitEof> {
+) -> Result<(Vec<i64>, u8), BitEof> {
     if reader.read(1)? != 0 {
         return Err(bad("subframe padding bit set", reader.position()));
     }
@@ -470,7 +483,7 @@ fn decode_subframe(
             *sample *= 1i64 << wasted;
         }
     }
-    Ok(samples)
+    Ok((samples, wasted as u8))
 }
 
 /// Shared FIXED/LPC body: warm-up samples, residuals, then the predictor.

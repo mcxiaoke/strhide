@@ -317,6 +317,61 @@ fn flac_waveform_moves_by_at_most_one_unit_per_changed_sample() {
 }
 
 #[test]
+fn flac_carrier_with_wasted_bits_roundtrips() {
+    // A real 24-bit stereo file whose every subframe declares 8 wasted bits: the
+    // stored samples are multiples of 256, so one residual step moves the
+    // decoded waveform by 256 output units. Before `max_sample_drift` compared
+    // in stored units, this embed was refused for "drifting 512 units".
+    const COVER: &[u8] = include_bytes!("../../../../tests/assets/small-wasted.flac");
+
+    let info = super::parse_stream_info(COVER).expect("info");
+    let first =
+        super::frame::parse_frame(COVER, info.audio_offset, &info.defaults()).expect("first frame");
+    assert_eq!(
+        first.wasted,
+        vec![8, 8],
+        "fixture must declare 8 wasted bits on both subframes"
+    );
+
+    let raw = b"wasted bits carrier payload";
+    let payload = Payload::bytes(raw);
+    let control = ctl();
+    let (stego, _, _) = embed_flac(
+        COVER,
+        &payload,
+        cred(Some("pw")),
+        None,
+        suite(),
+        &[],
+        profile(),
+        SafetyPolicy::new(),
+        Freshness::default(),
+        &control,
+    )
+    .expect("embed into a wasted-bits carrier");
+
+    assert_eq!(stego.len(), COVER.len(), "FLAC length must not change");
+    let out = extract_flac(
+        &stego,
+        cred(Some("pw")),
+        None,
+        profile(),
+        &limits(),
+        &control,
+    )
+    .expect("extract");
+    assert_eq!(out.as_bytes(), raw);
+
+    // The gate must see the moves in stored units: 2^8 output units per step.
+    let drift = super::max_sample_drift(COVER, &stego, &info).expect("drift");
+    assert!(
+        drift <= super::DRIFT_BUDGET,
+        "waveform drifted by {drift} stored units (budget {})",
+        super::DRIFT_BUDGET
+    );
+}
+
+#[test]
 fn flac_probe_and_inspect_agree_with_the_embedder() {
     let cover = flac_carrier(600, 256);
     let raw = vec![0x11u8; 128];
