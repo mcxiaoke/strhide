@@ -245,9 +245,11 @@ pub fn reject_read_only_target(target: &Path) -> Result<(), StrHideError> {
 ///
 /// `create_new` is the mutex: only the creator can remove the marker, so there
 /// is no unlink race, and the guard deletes it on every normal return. An
-/// abnormal exit (kill, panic in a subprocess that owns the guard) leaves the
-/// marker behind; it is diagnostic only, so deleting it when no writer is
-/// running is safe.
+/// abnormal exit (kill, Ctrl+C, crash) leaves the marker behind with the
+/// writer's PID inside; a later writer reclaims it only when that PID is
+/// provably dead. Reclamation renames the stale marker out of the way instead
+/// of unlinking it, so two reclaimers cannot delete each other's newly
+/// acquired lock.
 ///
 /// Creating the marker can fail for reasons the commit itself will report
 /// better (a missing or read-only output directory), so those failures fall
@@ -263,22 +265,133 @@ impl TargetLock {
     /// Lock `target` for the duration of a carrier commit.
     pub fn acquire(target: &Path) -> Result<Self, StrHideError> {
         let path = lock_path_for(target);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                use std::io::Write as _;
-                let _ = writeln!(file, "{}", std::process::id());
-                Ok(Self { path: Some(path) })
+        let mut reclaimed = false;
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write as _;
+                    let _ = writeln!(file, "{}", std::process::id());
+                    return Ok(Self { path: Some(path) });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if !reclaimed && reclaim_if_stale(&path) {
+                        reclaimed = true;
+                        continue;
+                    }
+                    return Err(StrHideError::TargetBusy(target.to_path_buf()));
+                }
+                Err(_) => return Ok(Self { path: None }),
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                Err(StrHideError::TargetBusy(target.to_path_buf()))
-            }
-            Err(_) => Ok(Self { path: None }),
         }
     }
+}
+
+/// Move a marker left by a dead writer out of the way, then report whether it
+/// was reclaimed. The rename (not unlink) sequence lets concurrent reclaimers
+/// race safely: only one of them can move the stale file, and the winner then
+/// competes for `create_new` like any other writer.
+fn reclaim_if_stale(path: &Path) -> bool {
+    let Some(pid) = read_lock_pid(path) else {
+        return false;
+    };
+    if pid == 0 || process_is_alive(pid) {
+        return false;
+    }
+    let quarantine = quarantine_path(path);
+    if std::fs::rename(path, &quarantine).is_err() {
+        return false;
+    }
+    let _ = std::fs::remove_file(&quarantine);
+    true
+}
+
+fn read_lock_pid(path: &Path) -> Option<u32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+fn quarantine_path(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static QUARANTINE_SEQ: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "lock".to_string());
+    let seq = QUARANTINE_SEQ.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!("{name}.stale-{}-{seq}", std::process::id()))
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    use std::ffi::c_void;
+
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;
+    const WAIT_FAILED: u32 = 0xFFFF_FFFF;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(
+            dw_desired_access: u32,
+            b_inherit_handle: i32,
+            dw_process_id: u32,
+        ) -> *mut c_void;
+        fn WaitForSingleObject(h_handle: *mut c_void, dw_milliseconds: u32) -> u32;
+        fn CloseHandle(h_object: *mut c_void) -> i32;
+    }
+
+    // SAFETY: `OpenProcess` only requests a synchronize handle. A null return
+    // means either the PID does not exist (`ERROR_INVALID_PARAMETER`, dead) or
+    // it belongs to a process we may not inspect (`ERROR_ACCESS_DENIED`, alive).
+    // `WaitForSingleObject(0)` is a non-blocking liveness probe and the handle
+    // is closed before returning.
+    unsafe {
+        let handle = OpenProcess(SYNCHRONIZE, 0, pid);
+        if handle.is_null() {
+            // 5 = ERROR_ACCESS_DENIED: the process exists but is not ours.
+            return std::io::Error::last_os_error().raw_os_error() == Some(5);
+        }
+        let state = WaitForSingleObject(handle, 0);
+        let _ = CloseHandle(handle);
+        // WAIT_TIMEOUT (258) means running; WAIT_OBJECT_0 (0) means exited.
+        // WAIT_FAILED is unknown, so stay conservative and keep the marker.
+        state == WAIT_TIMEOUT || state == WAIT_FAILED
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_is_alive(pid: u32) -> bool {
+    const EPERM: i32 = 1;
+    const SIG_NONE: i32 = 0;
+
+    #[link(name = "c")]
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+
+    // SAFETY: signal 0 performs permission/existence checking only; it never
+    // delivers a signal.
+    if unsafe { kill(pid as i32, SIG_NONE) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(EPERM)
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return true;
+    }
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(not(any(windows, unix)))]
+fn process_is_alive(_pid: u32) -> bool {
+    // Unknown platform: never reclaim a marker, since liveness cannot be proven.
+    true
 }
 
 impl Drop for TargetLock {
@@ -748,6 +861,54 @@ mod tests {
         assert_eq!(&result[100..102], &[0x99, 0x88]);
         assert_eq!(&result[0..10], &[0x11; 10]);
         assert_eq!(&result[15..100], &[0x11; 85]);
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn stale_lock_from_a_dead_writer_is_reclaimed() {
+        let temp_dir = scratch_dir("stale_lock_reclaim");
+        let target = temp_dir.join("carrier.png");
+        std::fs::write(&target, b"carrier").unwrap();
+        let lock = lock_path_for(&target);
+        // u32::MAX is never a live writer on either supported platform.
+        std::fs::write(&lock, format!("{}", u32::MAX)).unwrap();
+
+        let guard = TargetLock::acquire(&target).expect("stale marker must not block the write");
+        assert!(lock.exists(), "the reclaimed target must be locked again");
+        drop(guard);
+        assert!(!lock.exists(), "the new guard must remove its marker");
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn lock_owned_by_a_live_pid_is_kept() {
+        let temp_dir = scratch_dir("live_lock_kept");
+        let target = temp_dir.join("carrier.png");
+        std::fs::write(&target, b"carrier").unwrap();
+        let lock = lock_path_for(&target);
+        std::fs::write(&lock, format!("{}", std::process::id())).unwrap();
+
+        let err = TargetLock::acquire(&target).expect_err("a live owner must keep the lock");
+        assert!(matches!(err, StrHideError::TargetBusy(_)), "got: {err}");
+        assert!(lock.exists(), "the live marker must not be touched");
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn unreadable_lock_payload_is_not_reclaimed() {
+        let temp_dir = scratch_dir("garbage_lock_kept");
+        let target = temp_dir.join("carrier.png");
+        std::fs::write(&target, b"carrier").unwrap();
+        let lock = lock_path_for(&target);
+        // A writer that was killed between `create_new` and writing its PID
+        // leaves an empty/garbage marker; liveness cannot be proven, so keep it.
+        std::fs::write(&lock, b"not-a-pid").unwrap();
+
+        let err = TargetLock::acquire(&target).expect_err("unknown marker stays");
+        assert!(matches!(err, StrHideError::TargetBusy(_)), "got: {err}");
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }
