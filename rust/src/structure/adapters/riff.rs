@@ -30,6 +30,22 @@ pub fn riff_detect(reader: &mut dyn SeekRead, expected_form_type: &[u8; 4]) -> b
     detected
 }
 
+/// Whether the chunk immediately after the 12-byte RIFF header starts with
+/// `tag`. Used by the WebP adapter: only the Extended Format begins with a
+/// `VP8X` chunk, and only that form may carry a spec-compliant private chunk.
+pub fn riff_starts_with(reader: &mut dyn SeekRead, tag: &[u8; 4]) -> bool {
+    let Ok(start_pos) = reader.stream_position() else {
+        return false;
+    };
+    if reader.seek(SeekFrom::Start(12)).is_err() {
+        return false;
+    }
+    let mut chunk_tag = [0u8; 4];
+    let matched = reader.read_exact(&mut chunk_tag).is_ok() && &chunk_tag == tag;
+    let _ = reader.seek(SeekFrom::Start(start_pos));
+    matched
+}
+
 pub fn riff_inject(
     format_name: &str,
     host_in: &mut dyn SeekRead,
@@ -248,34 +264,32 @@ where
             ),
         ));
     }
-    let riff_size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as u64;
+    // Read the tail trailer once. A streaming RIFF writer may leave the size
+    // field at 0xFFFFFFFF (or any value past the physical end), so an envelope
+    // appended at a chunk boundary is valid regardless of the declared
+    // boundary; gating this check on `offset >= boundary` would make write and
+    // read disagree for exactly those carriers.
+    let tail_envelope = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)
+        .ok()
+        .flatten();
 
     let mut offset = 12u64;
     let mut chunk_count = 0u64;
     let mut chunks = Vec::new();
 
-    let boundary = 8 + riff_size;
-
     while offset < file_size {
-        // Check if remaining bytes at/after declared RIFF boundary are an EOF envelope
-        if offset >= boundary {
-            let tail_envelope = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)
-                .ok()
-                .flatten()
-                .filter(|t| {
-                    t.ube_offset == offset
-                        && offset.checked_add(t.ube_total_size) == Some(file_size)
-                });
-            if let Some(trailer) = tail_envelope {
-                validate_specific(&chunks).map_err(StrHideError::CorruptedData)?;
-                return Ok((
-                    true,
-                    format!(
-                        "Valid {format_name} RIFF container ({chunk_count} chunks, {} bytes appended after RIFF boundary)",
-                        trailer.ube_total_size
-                    ),
-                ));
-            }
+        // Remaining bytes at this chunk boundary may be an EOF overlay.
+        if let Some(trailer) = tail_envelope.as_ref().filter(|t| {
+            t.ube_offset == offset && offset.checked_add(t.ube_total_size) == Some(file_size)
+        }) {
+            validate_specific(&chunks).map_err(StrHideError::CorruptedData)?;
+            return Ok((
+                true,
+                format!(
+                    "Valid {format_name} RIFF container ({chunk_count} chunks, {} bytes appended after RIFF boundary)",
+                    trailer.ube_total_size
+                ),
+            ));
         }
 
         if offset + 8 > file_size {

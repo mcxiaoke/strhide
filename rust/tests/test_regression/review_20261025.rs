@@ -634,8 +634,14 @@ fn wav_webp_auto_probe_reports_eof_but_write_rejects_mismatch() {
         "riff_chunk"
     );
     assert_eq!(
+        WebpAdapter.choose_auto_strategy(&mut Cursor::new(make_webp_extended()), 128),
+        "riff_chunk",
+        "Extended Format WebP has the VP8X chunk a compliant SHRD chunk needs"
+    );
+    assert_eq!(
         WebpAdapter.choose_auto_strategy(&mut Cursor::new(make_webp()), 128),
-        "riff_chunk"
+        "eof",
+        "Simple Format WebP must not receive a non-compliant private chunk"
     );
 
     let mut wav = make_wav();
@@ -645,7 +651,7 @@ fn wav_webp_auto_probe_reports_eof_but_write_rejects_mismatch() {
         "eof",
         "trailing bytes past the declared boundary must route to eof"
     );
-    let mut webp = make_webp();
+    let mut webp = make_webp_extended();
     webp.extend_from_slice(b"JUNK");
     assert_eq!(
         WebpAdapter.choose_auto_strategy(&mut Cursor::new(webp), 128),

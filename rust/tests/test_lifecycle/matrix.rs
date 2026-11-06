@@ -90,7 +90,7 @@ impl Fmt {
         match self {
             Fmt::Png => make_png(),
             Fmt::Jpeg => make_jpeg(),
-            Fmt::Webp => make_webp(),
+            Fmt::Webp => make_webp_extended(),
             Fmt::Heif => make_heif(),
             Fmt::Mp4 => make_mp4(),
             Fmt::Wav => make_wav(),
@@ -757,4 +757,123 @@ fn verify_structure_passes_for_a_pristine_carrier_of_every_format() {
         );
         assert!(!v.level2_envelope.ok, "{}: no envelope yet", fmt.name());
     }
+}
+
+/// A Simple Format WebP has no VP8X chunk, so a private RIFF chunk ('SHRD')
+/// would be invalid per RFC 9649. Auto must use the EOF overlay, and an explicit
+/// `riff_chunk` request must be refused rather than emitting a broken file.
+#[test]
+fn simple_webp_auto_uses_eof_and_refuses_riff_chunk() {
+    let dir = scratch("simple_webp_eof");
+    let carrier = dir.join("c.webp");
+    let original = make_webp();
+    fs::write(&carrier, &original).unwrap();
+    let out = dir.join("c.steg.webp");
+
+    let write = write_carrier(
+        &carrier,
+        PayloadSource::Text("simple webp payload"),
+        &WriteOptions {
+            output_path: Some(&out),
+            strategy: "auto",
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .expect("auto write on simple WebP");
+    assert_eq!(write.strategy.name(), "eof");
+
+    let v = verify_carrier(&out, None).expect("verify");
+    assert!(v.level1_host.ok, "L1: {}", v.level1_host.detail);
+    assert!(v.level2_envelope.ok, "L2: {}", v.level2_envelope.detail);
+    assert!(v.level3_crypto.ok, "L3: {}", v.level3_crypto.detail);
+
+    let read = read_carrier(
+        &out,
+        &ReadOptions {
+            output_path: None,
+            password: None,
+            overwrite: false,
+            ..Default::default()
+        },
+    )
+    .expect("read");
+    assert_eq!(String::from_utf8(read.data).unwrap(), "simple webp payload");
+
+    let restored = dir.join("c.restored.webp");
+    let rem = remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+            ..Default::default()
+        },
+    )
+    .expect("remove");
+    assert!(rem.verified_identical);
+    assert_eq!(fs::read(&restored).unwrap(), original);
+
+    let rejected = write_carrier(
+        &carrier,
+        PayloadSource::Text("x"),
+        &WriteOptions {
+            output_path: Some(&dir.join("c.rejected.webp")),
+            strategy: "riff_chunk",
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        rejected.to_string().contains("eof"),
+        "explicit riff_chunk on Simple WebP must point at eof: {rejected}"
+    );
+}
+
+/// Streaming WAV writers leave the RIFF size field at 0xFFFFFFFF. Writing falls
+/// back to the EOF overlay; verification must still accept it even though the
+/// declared boundary lies far past the physical end.
+#[test]
+fn streaming_wav_sentinel_size_verifies_after_eof_overlay() {
+    let dir = scratch("streaming_wav_eof");
+    let carrier = dir.join("c.wav");
+    let mut original = make_wav();
+    original[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    fs::write(&carrier, &original).unwrap();
+    let out = dir.join("c.steg.wav");
+
+    let write = write_carrier(
+        &carrier,
+        PayloadSource::Text("streaming wav payload"),
+        &WriteOptions {
+            output_path: Some(&out),
+            strategy: "auto",
+            backup: false,
+            ..Default::default()
+        },
+    )
+    .expect("auto write on sentinel WAV");
+    assert_eq!(write.strategy.name(), "eof");
+
+    let v = verify_carrier(&out, None).expect("verify");
+    assert!(v.level1_host.ok, "L1: {}", v.level1_host.detail);
+    assert!(v.level2_envelope.ok, "L2: {}", v.level2_envelope.detail);
+    assert!(v.level3_crypto.ok, "L3: {}", v.level3_crypto.detail);
+
+    let restored = dir.join("c.restored.wav");
+    let rem = remove_carrier(
+        &out,
+        &RestoreOptions {
+            output_path: Some(&restored),
+            password: None,
+            backup: false,
+            overwrite: false,
+            ..Default::default()
+        },
+    )
+    .expect("remove");
+    assert!(rem.verified_identical);
+    assert_eq!(fs::read(&restored).unwrap(), original);
 }

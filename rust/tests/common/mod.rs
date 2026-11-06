@@ -216,6 +216,30 @@ pub fn make_webp() -> Vec<u8> {
     out
 }
 
+/// Minimal WebP in the Extended Format: a VP8X chunk precedes the bitstream.
+/// Required for a spec-compliant private RIFF chunk ('SHRD'); a Simple Format
+/// file has no VP8X and must fall back to EOF overlay.
+pub fn make_webp_extended() -> Vec<u8> {
+    let mut out = Vec::new();
+    let vp8_data = b"\x00\x00\x00\x9d\x01\x2a\x01\x00\x01\x00";
+    // VP8X: flags (1) + reserved (3) + canvas width-1 (3) + canvas height-1 (3).
+    let mut vp8x = vec![0u8; 10];
+    vp8x[4..7].copy_from_slice(&0u32.to_le_bytes()[..3]);
+    vp8x[7..10].copy_from_slice(&0u32.to_le_bytes()[..3]);
+
+    let file_size = 12 + (8 + vp8x.len()) + (8 + vp8_data.len());
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&((file_size - 8) as u32).to_le_bytes());
+    out.extend_from_slice(b"WEBP");
+    out.extend_from_slice(b"VP8X");
+    out.extend_from_slice(&(vp8x.len() as u32).to_le_bytes());
+    out.extend_from_slice(&vp8x);
+    out.extend_from_slice(b"VP8 ");
+    out.extend_from_slice(&(vp8_data.len() as u32).to_le_bytes());
+    out.extend_from_slice(vp8_data);
+    out
+}
+
 /// Minimal valid WAV: RIFF header with 'WAVE', 'fmt ' chunk, and 'data' chunk.
 pub fn make_wav() -> Vec<u8> {
     let mut out = Vec::new();

@@ -2,8 +2,8 @@ use std::io::Write;
 
 use crate::errors::StrHideError;
 use crate::structure::adapters::riff::{
-    riff_can_chunk, riff_detect, riff_inject, riff_locate, riff_strategy_capacities,
-    riff_suspicious_structures, riff_verify_structure,
+    riff_can_chunk, riff_detect, riff_inject, riff_locate, riff_starts_with,
+    riff_strategy_capacities, riff_suspicious_structures, riff_verify_structure,
 };
 use crate::structure::adapters::{HostAdapter, SeekRead, StrategyCapacity};
 
@@ -23,18 +23,31 @@ impl HostAdapter for WebpAdapter {
     }
 
     fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, ube_size: u64) -> &'static str {
-        // Mirrors WAV: keep riff_chunk only when write and read agree (declared
-        // boundary = physical end, u32 size headroom), else EOF overlay
-        // (review P1-2 / P3-17).
-        if riff_can_chunk(reader, ube_size) {
+        // Simple Format WebP (first chunk VP8 or VP8L) has no VP8X; RFC 9649
+        // reserves new chunks for the Extended Format, so a private 'SHRD'
+        // chunk there would be non-compliant. Keep riff_chunk only for the
+        // Extended Format and only when write/read agree (declared boundary =
+        // physical end, u32 headroom); everything else uses the EOF overlay.
+        if riff_starts_with(reader, b"VP8X") && riff_can_chunk(reader, ube_size) {
             "riff_chunk"
         } else {
             "eof"
         }
     }
 
-    fn strategy_capacities(&self, reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
-        riff_strategy_capacities("WebP", reader)
+    fn strategy_capacities(&self, mut reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
+        let simple = match reader.as_mut() {
+            Some(r) => !riff_starts_with(&mut **r, b"VP8X"),
+            None => false,
+        };
+        let mut caps = riff_strategy_capacities("WebP", reader);
+        if simple {
+            caps[0].available = false;
+            caps[0].capacity_bytes = None;
+            caps[0].note =
+                Some("Simple Format WebP has no VP8X chunk; auto falls back to eof".into());
+        }
+        caps
     }
 
     fn inject(
@@ -44,6 +57,13 @@ impl HostAdapter for WebpAdapter {
         out: &mut dyn Write,
         strategy: &str,
     ) -> Result<(u64, u64, u32, u32), StrHideError> {
+        if strategy == "riff_chunk" && !riff_starts_with(host_in, b"VP8X") {
+            return Err(StrHideError::UnsupportedFormat(
+                "Simple Format WebP has no VP8X chunk; a private RIFF chunk would be invalid \
+                 (RFC 9649). Please specify --strategy eof"
+                    .into(),
+            ));
+        }
         riff_inject(self.format_name(), host_in, ube_in, out, strategy)
     }
 
