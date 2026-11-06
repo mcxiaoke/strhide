@@ -1419,10 +1419,14 @@ where
     out.flush()?;
     out.seek(SeekFrom::Start(0))?;
     let self_located = adapter.locate(out, Some(&trailer_magic))?;
-    if self_located.is_none() {
+    // `Some` alone is not enough: a second envelope with the same trailer magic
+    // could satisfy `locate` while `read` / `remove` would then reach the *old*
+    // one. Require the coordinates this very write sealed into the trailer.
+    let located_at = self_located.as_ref().map(|(o, s, _)| (*o, *s));
+    if located_at != Some((actual_ube_offset, ube_total_size)) {
         return Err(StrHideError::General(format!(
-            "Post-write self-check failed: the envelope written via strategy '{}' cannot be located again in the output; aborting so no unreadable stego is committed",
-            selected_strategy
+            "Post-write self-check failed: strategy '{}' wrote the envelope at {} ({} bytes), but locate returned {:?}; aborting so no unreadable stego is committed",
+            selected_strategy, actual_ube_offset, ube_total_size, located_at
         )));
     }
 

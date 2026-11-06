@@ -339,10 +339,13 @@ fn check_carrier_fits_budget(file_size: u64, budget: u64) -> Result<(), StrHideE
     if needed > budget {
         return Err(budget_rejection(format!(
             "Refusing to process: this carrier is {:.1} MiB and does not fit the {:.1} MiB budget \
-             (60% of currently available physical memory) even before decoding. \
-             Free memory or use a smaller carrier.",
+             even before decoding. Reading it needs about {:.1} MiB of working memory \
+             (file + decoder overhead); the budget is 60% of the physical memory available \
+             right now, so this is a memory-pressure limit, not a problem with the carrier. \
+             Free memory or retry when the machine is idle.",
             file_size as f64 / (1024.0 * 1024.0),
             budget as f64 / (1024.0 * 1024.0),
+            needed as f64 / (1024.0 * 1024.0),
         )));
     }
     Ok(())

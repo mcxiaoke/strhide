@@ -1926,12 +1926,14 @@ fn replay_matches_cover(replay: &[u8], cover: &[u8]) -> bool {
         && cover[replay.len()..].iter().all(|b| *b == 0)
 }
 
-/// Deterministic Weyl permutation of each drift band, consumed band by band.
+/// Keyed stride permutation of each drift band, consumed band by band.
 ///
 /// Element `i` maps to slot `band.start + (j * stride) mod len` where `j` is the
-/// element's index inside that band. `stride` is ~0.618 of the band and coprime
-/// with it, so consecutive elements land in different slices, different pictures
-/// and different corners of the frame. Consuming slots in recording order
+/// element's index inside that band. `stride` is derived per band from the
+/// payload key (SplitMix64, see `keyed_band_params`); the fixed Weyl step of
+/// earlier builds was removed. Consecutive elements therefore land in
+/// different slices, different pictures and different corners of the frame.
+/// Consuming slots in recording order
 /// instead concentrates the whole payload on the first item -- for a burst
 /// `.heic` (dozens of independent pictures in one file) that flattens the
 /// primary image while the other 40-odd pictures stay pristine.

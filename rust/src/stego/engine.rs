@@ -500,8 +500,9 @@ fn hevc_embed(
             capacity: Some(info),
             stats: Some(stats),
         }),
-        // Anything the bridge cannot fix keeps its own diagnosis; this covers
-        // the safety-policy refusal that used to be special-cased here.
+        // Errors the bridge cannot fix keep their own diagnosis; this covers
+        // the safety-policy refusal that used to be special-cased here. Errors
+        // that do reach the bridge are replaced by the bridge's own outcome.
         Err(e) if !should_try_bridge(&e) => Err(e),
         Err(e) if resolved.hevc_mode == HevcMode::Cabac => Err(e),
         #[cfg(feature = "content-heif-bridge")]
