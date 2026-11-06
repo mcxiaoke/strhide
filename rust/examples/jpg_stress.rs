@@ -40,6 +40,9 @@ use strhide::stego::{
     embed_carrier, extract_carrier, probe_carrier_capacity,
 };
 
+#[path = "common/mod.rs"]
+mod common;
+
 /// Prefix of every password this harness uses.
 const PASSWORD_PREFIX: &str = "jpg-stress";
 const FIXED_PASSWORD: &str = "jpg-stress-fixed-password-2026";
@@ -188,16 +191,18 @@ fn parse_config() -> Config {
 pub fn main() -> ExitCode {
     let total_started = Instant::now();
     let config = parse_config();
+    let log_path = common::init_stress_logger("jpg_stress");
+    log::info!("jpg_stress: log file -> {}", log_path.display());
 
     let paths = match collect_jpg(&config.path) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("jpg_stress: {e}");
+            log::error!("jpg_stress: {e}");
             return ExitCode::FAILURE;
         }
     };
     if paths.is_empty() {
-        eprintln!(
+        log::error!(
             "jpg_stress: no .jpg/.jpeg carriers found under {}",
             config.path.display()
         );
@@ -205,7 +210,7 @@ pub fn main() -> ExitCode {
     }
 
     let algo_names: Vec<&'static str> = config.algorithms.iter().map(|a| a.id()).collect();
-    println!(
+    log::info!(
         "jpg_stress: {} carriers, algorithms {:?}, fills {:?}, {} rounds each, {} threads (password={}, payload={})",
         paths.len(),
         algo_names,
@@ -230,7 +235,7 @@ pub fn main() -> ExitCode {
     {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("jpg_stress: cannot build thread pool: {e}");
+            log::error!("jpg_stress: cannot build thread pool: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -342,17 +347,17 @@ pub fn main() -> ExitCode {
         }
     }
 
-    println!(
+    log::info!(
         "jpg_stress: {} active jobs across supported carriers & algorithms",
         jobs.len()
     );
     if !skipped_carriers.is_empty() {
-        println!(
+        log::info!(
             "jpg_stress: {} carrier/algorithm combinations skipped due to format constraints",
             skipped_carriers.len()
         );
     }
-    println!();
+    log::info!("");
 
     let done = AtomicUsize::new(0);
     let failures: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -376,7 +381,7 @@ pub fn main() -> ExitCode {
                     short(&label),
                     job.fill * 100.0
                 );
-                println!("{row}");
+                log::info!("{row}");
                 rows.lock().unwrap().push(row);
                 return;
             }
@@ -445,7 +450,7 @@ pub fn main() -> ExitCode {
                     format!("FAIL {}", worst.detail)
                 }
             );
-            println!("{row}");
+            log::info!("{row}");
             rows.lock().unwrap().push(row);
         });
     });
@@ -453,8 +458,8 @@ pub fn main() -> ExitCode {
     let _rows = rows.into_inner().unwrap();
 
     let failures = failures.into_inner().unwrap();
-    println!();
-    println!(
+    log::info!("");
+    log::info!(
         "jpg_stress: {} jobs executed in {:.1}s across {} carriers ({} failed, {} skipped)",
         jobs.len(),
         started.elapsed().as_secs_f64(),
@@ -464,28 +469,30 @@ pub fn main() -> ExitCode {
     );
 
     if !skipped_carriers.is_empty() {
-        println!("\nSkipped carriers (format constraints):");
+        log::info!("\nSkipped carriers (format constraints):");
         for line in &skipped_carriers {
-            println!("  SKIP {line}");
+            log::info!("  SKIP {line}");
         }
     }
 
     if !setup_failures.is_empty() || !failures.is_empty() {
-        println!("\nFailures:");
+        log::info!("\nFailures:");
         for failure in setup_failures.iter().chain(failures.iter()) {
-            println!("  FAIL {failure}");
+            log::info!("  FAIL {failure}");
         }
-        println!(
+        log::info!(
             "\nTotal elapsed time: {:.2}s",
             total_started.elapsed().as_secs_f64()
         );
+        log::info!("Log saved to: {}", log_path.display());
         ExitCode::FAILURE
     } else {
-        println!("\nAll tested carriers passed 100%!");
-        println!(
+        log::info!("\nAll tested carriers passed 100%!");
+        log::info!(
             "Total elapsed time: {:.2}s",
             total_started.elapsed().as_secs_f64()
         );
+        log::info!("Log saved to: {}", log_path.display());
         ExitCode::SUCCESS
     }
 }
