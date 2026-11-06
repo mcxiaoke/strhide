@@ -22,7 +22,11 @@ export interface QueueItem {
   capacityBytes?: number;
 }
 
-export type ReasonKey = "formatUnsupported" | "noStego" | "noStructure";
+export type ReasonKey =
+  | "formatUnsupported"
+  | "noStego"
+  | "noStructure"
+  | "capabilitiesUnavailable";
 
 export interface SupportVerdict {
   supported: boolean;
@@ -30,7 +34,19 @@ export interface SupportVerdict {
   reason?: ReasonKey;
 }
 
-export function classifyFormat(path: string, capabilities: Capability[], need: QueueNeed): SupportVerdict {
+export function classifyFormat(
+  path: string,
+  capabilities: Capability[] | null,
+  need: QueueNeed,
+): SupportVerdict {
+  // `null` means the capability table could not be loaded, which is not the
+  // same answer as "this extension is unsupported". They used to be merged
+  // (`getCapabilities()` failed → `[]` → every file rejected as
+  // "unsupported format"), so an IPC hiccup told the user their files were
+  // the problem.
+  if (capabilities === null) {
+    return { supported: false, format: null, reason: "capabilitiesUnavailable" };
+  }
   const name = baseName(path);
   const ext = extOf(name);
   const cap = capabilities.find((c) => c.extensions.some((e) => e.toLowerCase() === ext));
@@ -62,12 +78,11 @@ export function makeItem(path: string, verdict: SupportVerdict): QueueItem {
 }
 
 export async function pathExists(path: string): Promise<boolean> {
-  try {
-    const meta = await getFileMetadata(path);
-    return meta.is_file;
-  } catch {
-    return false;
-  }
+  // A missing file is an answer, not a failure (the backend reports it as
+  // `exists: false`). Any other error must propagate: silently answering
+  // "free" would hand `uniqueOutputPath` a colliding name.
+  const meta = await getFileMetadata(path);
+  return meta.exists;
 }
 
 /** 目标目录内挑一个不冲突的文件名，重名时追加 (1)、(2)… */

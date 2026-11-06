@@ -19,7 +19,7 @@ import type { PayloadInputDto } from "../types/strhide";
 
 export const HideStructureView: React.FC<{ active: boolean }> = ({ active }) => {
   const c = useT();
-  const capabilities = useCapabilities();
+  const { capabilities } = useCapabilities();
   const queue = useFileQueue("structure", capabilities);
   const { startTask, updateProgress, finishTask } = useTaskStore();
 

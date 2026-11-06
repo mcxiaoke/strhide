@@ -66,7 +66,7 @@ function toRow(info: DualInspect): ScanRow {
 
 export const ScanView: React.FC<{ active: boolean }> = ({ active }) => {
   const c = useT();
-  const capabilities = useCapabilities();
+  const { capabilities } = useCapabilities();
   const queue = useFileQueue("any", capabilities);
   const { startTask, finishTask } = useTaskStore();
 

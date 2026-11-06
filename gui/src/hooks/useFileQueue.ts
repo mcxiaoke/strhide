@@ -24,12 +24,15 @@ export interface FileQueueApi {
 }
 
 /** 单个页签自己的文件队列，不支持的文件当场提示并跳过 */
-export function useFileQueue(need: QueueNeed, capabilities: Capability[]): FileQueueApi {
+export function useFileQueue(
+  need: QueueNeed,
+  capabilities: Capability[] | null,
+): FileQueueApi {
   const lang = useSettingsStore((s) => s.lang);
   const [items, setItems] = useState<QueueItem[]>([]);
   const [skipped, setSkipped] = useState<SkippedFile[]>([]);
   const itemsRef = useRef<QueueItem[]>([]);
-  const capsRef = useRef<Capability[]>(capabilities);
+  const capsRef = useRef<Capability[] | null>(capabilities);
   capsRef.current = capabilities;
 
   const commit = useCallback((next: QueueItem[]) => {

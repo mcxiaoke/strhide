@@ -21,7 +21,7 @@ import type { PayloadInputDto, SafetyLevel, StegoCapacityFullDto } from "../type
 
 export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
   const c = useT();
-  const capabilities = useCapabilities();
+  const { capabilities } = useCapabilities();
   const queue = useFileQueue("stego", capabilities);
   const { startTask, updateProgress, finishTask } = useTaskStore();
 

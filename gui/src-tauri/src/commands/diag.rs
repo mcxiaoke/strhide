@@ -147,6 +147,19 @@ pub fn get_file_metadata_cmd(path: PathBuf) -> Result<FileMetadataDto, ErrorDeta
                 modified_ms,
             })
         }
+        // "The file is not there" is an answer this DTO can express, not an
+        // error: the caller uses it to pick a non-colliding output name, and
+        // reporting an error made it treat *every* failure (permission denied,
+        // IPC hiccup) as "path is free".
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(FileMetadataDto {
+            path: path.to_string_lossy().into_owned(),
+            filename,
+            size_bytes: 0,
+            exists: false,
+            is_file: false,
+            is_dir: false,
+            modified_ms: None,
+        }),
         Err(err) => {
             let ctx = RenderCtx::new(i18n::lang());
             Err(strhide::errors::StrHideError::Io(err).detail_i18n_with_ctx(ctx))

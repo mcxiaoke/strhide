@@ -12,6 +12,8 @@ export interface MockDataOptions {
   embedError?: string;
   /** inspect_carrier_cmd 失败 */
   inspectError?: string;
+  /** get_capabilities_cmd 失败，模拟 IPC 抖动 */
+  capabilitiesError?: string;
   alsoPresent?: "structure" | "content";
   /** smart_extract 返回二进制文件而不是文本 */
   binaryPayload?: boolean;
@@ -63,6 +65,11 @@ export function createTauriMockScript(opts: MockDataOptions = {}) {
       if (cmd === "cancel_task_cmd") return true;
 
       if (cmd === "get_capabilities_cmd") {
+        ${
+          opts.capabilitiesError
+            ? `throw { kind: "general", detail: ${JSON.stringify(opts.capabilitiesError)} };`
+            : ""
+        }
         return [
           { format: "PNG", structure: ["chunk", "eof"], stego: ["hill"], extensions: ["png"], memory: "whole_file" },
           { format: "JPEG", structure: ["eof"], stego: ["uerd"], extensions: ["jpg", "jpeg"], memory: "whole_file" },
@@ -87,18 +94,19 @@ export function createTauriMockScript(opts: MockDataOptions = {}) {
       }
 
       if (cmd === "get_file_metadata_cmd") {
-        if (EXISTING.includes(args.path)) {
-          return {
-            path: args.path,
-            filename: args.path.split(/[\\\\/]/).pop(),
-            size_bytes: 1234567,
-            exists: true,
-            is_file: true,
-            is_dir: false,
-            modified_ms: 1730000000000
-          };
-        }
-        throw { kind: "io", detail: "No such file: " + args.path };
+        // Mirrors the backend contract: a missing file answers exists:false,
+        // not an error. Reporting an error here made the front end treat it
+        // as a failure and abort the output-name search.
+        const known = EXISTING.includes(args.path);
+        return {
+          path: args.path,
+          filename: args.path.split(/[\\\\/]/).pop(),
+          size_bytes: known ? 1234567 : 0,
+          exists: known,
+          is_file: known,
+          is_dir: false,
+          modified_ms: known ? 1730000000000 : null
+        };
       }
 
       if (cmd === "probe_stego_capacity_cmd") {
