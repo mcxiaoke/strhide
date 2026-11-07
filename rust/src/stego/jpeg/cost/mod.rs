@@ -1,5 +1,6 @@
 pub mod jmipod;
 pub mod juniward;
+#[doc(hidden)]
 pub mod precover;
 pub mod uerd;
 

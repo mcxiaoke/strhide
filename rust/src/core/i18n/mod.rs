@@ -4,6 +4,7 @@
 //! formatting utilities for named placeholders, and message catalogs.
 
 pub mod locale;
+#[doc(hidden)]
 pub mod messages;
 
 pub use messages::Msg;

@@ -148,7 +148,7 @@ let payload = ENGINE.stego().extract(&stego, &ExtractOptions::default())?;
 | [`cli_i18n`] | clap 帮助文案的本地化遍历 |
 | [`commit`] | 原子提交与 `.bak` 备份（`TmpGuard`、`commit_carrier_bytes`） |
 
-> 注意：当前所有模块均以 `pub mod` 导出，内部模块**可见但不代表稳定 API**。需要稳定承诺的面应以 [§9](#9-稳定性约定) 为准。
+> 注意：模块仍以 `pub mod` 导出，但内部模块（`structure::{adapters,envelope,registry,rejection}`、`analysis::calibration`、`cli::args`、`core::i18n::messages`、`formats::{annexb,jpeg_segments}`、`stego::jpeg::cost::precover`）已标注 `#[doc(hidden)]`：路径可达但**不出现在 rustdoc，也不代表稳定 API**。需要稳定承诺的面应以 [§9](#9-稳定性约定) 为准。
 
 ---
 

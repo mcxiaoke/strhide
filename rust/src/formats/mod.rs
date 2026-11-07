@@ -11,8 +11,10 @@
 //!   [`sniff`](sniff::sniff_bytes) consults last.
 //! - [`capability`] answers "what can be done with it?" — one row per format.
 
+#[doc(hidden)]
 pub mod annexb;
 pub mod capability;
+#[doc(hidden)]
 pub mod jpeg_segments;
 pub mod sniff;
 

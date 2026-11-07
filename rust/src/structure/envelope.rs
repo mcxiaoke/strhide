@@ -291,7 +291,7 @@ impl EnvelopeHeader {
         }
         // The strategy id selects the strip path, so an unknown id must not
         // reach an adapter's restore logic.
-        if crate::structure::STRATEGY_REGISTRY
+        if crate::structure::registry::STRATEGY_REGISTRY
             .iter()
             .all(|(_, id)| *id != self.strategy_id)
         {

@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::formats::FileFormat;
 
+#[doc(hidden)]
 pub mod calibration;
 
 use crate::errors::StrHideError;
@@ -1187,7 +1188,7 @@ fn track_container_structures(
         return;
     }
     let mut cursor = Cursor::new(view.prefix);
-    let Some(adapter) = crate::structure::find_adapter(&mut cursor) else {
+    let Some(adapter) = crate::structure::registry::find_adapter(&mut cursor) else {
         return;
     };
     let hints = adapter.suspicious_structures(&mut cursor);

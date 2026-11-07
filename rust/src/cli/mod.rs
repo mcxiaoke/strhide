@@ -14,6 +14,7 @@
 //! in [`crate::core::pipeline`], and the message catalogue in
 //! [`crate::core::i18n`] — all reusable without the `cli` feature.
 
+#[doc(hidden)]
 pub mod args;
 pub mod cmd_diag;
 pub mod cmd_stego;

@@ -13,16 +13,20 @@
 //! **must not** reference [`crate::stego`]. There are no cross-domain exceptions:
 //! content capacity reporting is strictly aggregated at the facade and CLI layers.
 
+#[doc(hidden)]
 pub mod adapters;
 pub mod engine;
+#[doc(hidden)]
 pub mod envelope;
 pub mod options;
 pub mod params;
+#[doc(hidden)]
 pub mod registry;
+#[doc(hidden)]
 pub mod rejection;
 
 pub use adapters::StrategyCapacity;
 pub use engine::*;
 pub use options::{ReadOptions, RestoreOptions, StrategyChoice, WriteOptions};
 pub use params::StructureProfile;
-pub use registry::{ADAPTERS, STRATEGY_REGISTRY, StrategyId, find_adapter, find_adapter_or_reject};
+pub use registry::StrategyId;
