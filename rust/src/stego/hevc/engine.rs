@@ -87,14 +87,14 @@ const MAX_EMBED_ROUNDS: usize = 24;
 const FORBIDDEN_SLOT_SURCHARGE: f64 = 1e9;
 
 /// Fixed 32-byte HEVC superblock.
-pub const HEVC_SUPERBLOCK_BYTES: usize = 32;
+pub(crate) const HEVC_SUPERBLOCK_BYTES: usize = 32;
 /// Number of initial carrier slots that form the Superblock candidate pool.
 pub const HEVC_SUPERBLOCK_POOL_SLOTS: usize = 2048;
 /// Base header slots of the 32-byte Superblock under STC h=7, u=2.
-pub const HEVC_SUPERBLOCK_MIN_SLOTS: usize = 524;
+pub(crate) const HEVC_SUPERBLOCK_MIN_SLOTS: usize = 524;
 
 /// Format id bound into the V4 AAD (JPEG = 4, HEVC = 5).
-pub const HEVC_FORMAT_ID: u8 = 5;
+pub(crate) const HEVC_FORMAT_ID: u8 = 5;
 
 /// Legacy `Option<&str>` credential mapping used by the pre-V4 entry points.
 fn legacy_credential(secret: Option<&str>) -> Credential<'_> {
@@ -121,19 +121,20 @@ fn check_l1_floor(cred: &Credential<'_>, limits: &ExtractParams) -> Result<(), S
 }
 
 /// Upper bound of the HEVC V4 extension area.
-pub const HEVC_MAX_EXT_BYTES: usize = 64;
+pub(crate) const HEVC_MAX_EXT_BYTES: usize = 64;
 
 /// Largest header slot pool the HEVC locator may use.
-pub const HEVC_HEADER_SLOTS_MAX: usize = 2048;
+#[allow(dead_code)]
+pub(crate) const HEVC_HEADER_SLOTS_MAX: usize = 2048;
 
 /// STC height of the HEVC extension area.
-pub const HEVC_EXT_STC_H: u8 = 7;
+pub(crate) const HEVC_EXT_STC_H: u8 = 7;
 
 /// STC group size of the HEVC extension area.
-pub const HEVC_EXT_STC_U: u8 = 2;
+pub(crate) const HEVC_EXT_STC_U: u8 = 2;
 
 /// Slots used by `ext_len` extension bytes under STC `h=7, u=2`.
-pub fn hevc_extension_slots(ext_len: usize) -> usize {
+pub(crate) fn hevc_extension_slots(ext_len: usize) -> usize {
     if ext_len == 0 {
         0
     } else {
@@ -307,7 +308,7 @@ enum StopCondition {
 /// area. Both are the *prefix* of one permutation driven by the L2
 /// `locate_seed`, so the extractor reads the base first and can extend to the
 /// continuation slots only after learning `ext_len` from it.
-pub fn superblock_positions(
+pub(crate) fn superblock_positions(
     pool_size: usize,
     locate_seed: &[u8; 32],
     ext_len: usize,
@@ -1090,7 +1091,8 @@ pub fn embed_hevc_with_info_v4(
 /// This avoids cloning or mutating the entire carrier in memory, allowing zero-heap-overhead
 /// streaming commit to disk via `commit_carrier_patches`.
 #[allow(clippy::too_many_arguments)]
-pub fn embed_hevc_patches(
+#[allow(dead_code)]
+pub(crate) fn embed_hevc_patches(
     carrier: &[u8],
     payload: &Payload<'_>,
     secret: Option<&str>,
@@ -1114,7 +1116,7 @@ pub fn embed_hevc_patches(
 
 /// Credential-aware patch embed with the full V4 options.
 #[allow(clippy::too_many_arguments)]
-pub fn embed_hevc_patches_v4(
+pub(crate) fn embed_hevc_patches_v4(
     carrier: &[u8],
     payload: &Payload<'_>,
     cred: Credential<'_>,
@@ -1686,7 +1688,7 @@ pub fn embed_hevc_patches_with_factor_v4(
     )))
 }
 
-pub fn embed_hevc_payload(
+pub(crate) fn embed_hevc_payload(
     carrier: &[u8],
     payload: &Payload<'_>,
     secret: Option<&str>,
@@ -2415,7 +2417,8 @@ fn hevc_header_info(
 }
 
 /// Inspect HEVC carrier for steganographic header.
-pub fn inspect_hevc(
+#[allow(dead_code)]
+pub(crate) fn inspect_hevc(
     carrier: &[u8],
     secret: Option<&str>,
     domain: Option<&str>,
@@ -2433,7 +2436,7 @@ pub fn inspect_hevc(
 }
 
 /// Credential-aware inspection with explicit policy limits.
-pub fn inspect_hevc_v4(
+pub(crate) fn inspect_hevc_v4(
     carrier: &[u8],
     cred: Credential<'_>,
     domain: Option<&str>,
@@ -2536,7 +2539,8 @@ fn sample_prefix_has_inter(prefix: &[u8], length_size: usize) -> bool {
 /// Stream-inspect an MP4 carrier directly from disk using Seek + Read, so peak
 /// memory stays bounded by the `moov` (<= 32 MiB) plus one sample
 /// (<= `MAX_HEVC_SAMPLE_BYTES`) even for multi-gigabyte video files.
-pub fn inspect_hevc_mp4_file(
+#[allow(dead_code)]
+pub(crate) fn inspect_hevc_mp4_file(
     carrier_path: &std::path::Path,
     secret: Option<&str>,
     domain: Option<&str>,
@@ -2554,7 +2558,7 @@ pub fn inspect_hevc_mp4_file(
 }
 
 /// Credential-aware streaming MP4 inspection with explicit policy limits.
-pub fn inspect_hevc_mp4_file_v4(
+pub(crate) fn inspect_hevc_mp4_file_v4(
     carrier_path: &std::path::Path,
     cred: Credential<'_>,
     domain: Option<&str>,
@@ -2802,7 +2806,8 @@ pub fn inspect_hevc_mp4_file_v4(
 }
 
 /// Three-level diagnostic verification for HEVC carriers.
-pub fn verify_hevc(
+#[allow(dead_code)]
+pub(crate) fn verify_hevc(
     carrier: &[u8],
     secret: Option<&str>,
     domain: Option<&str>,
@@ -2820,7 +2825,7 @@ pub fn verify_hevc(
 }
 
 /// Credential-aware three-level verification with explicit policy limits.
-pub fn verify_hevc_v4(
+pub(crate) fn verify_hevc_v4(
     carrier: &[u8],
     cred: Credential<'_>,
     domain: Option<&str>,
@@ -3509,7 +3514,7 @@ fn active_parameter_sets<'a>(
 /// merges it, checks the stopping condition and truncates the window. Every
 /// slot, CABAC bin and RBSP in that batch is live at the same time, so this
 /// constant — not the carrier size — sets the embed's memory peak.
-pub const EMBED_WINDOW_GOPS: usize = 16;
+pub(crate) const EMBED_WINDOW_GOPS: usize = 16;
 
 /// Container facts `record_carrier_state` needs before it can decode.
 ///
@@ -3637,7 +3642,8 @@ fn embed_window(carrier: &[u8]) -> Option<(u64, usize)> {
 }
 
 /// Carrier bytes the first batch of an embed records, measured over VCL spans.
-pub fn embed_window_bytes(carrier: &[u8]) -> Option<u64> {
+#[allow(dead_code)]
+pub(crate) fn embed_window_bytes(carrier: &[u8]) -> Option<u64> {
     embed_window(carrier).map(|(bytes, _)| bytes)
 }
 
@@ -3682,7 +3688,7 @@ fn embed_peak_for_window(window: u64, carrier_len: u64) -> u64 {
 /// a 104 MB clip peaks at 129 MiB, not 6,759 MiB.
 ///
 /// Returns `None` for carriers this engine does not decode.
-pub fn estimate_embed_peak_bytes(
+pub(crate) fn estimate_embed_peak_bytes(
     carrier: &[u8],
     payload_len: usize,
     safety: SafetyPolicy,

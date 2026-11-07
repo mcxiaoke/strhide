@@ -215,8 +215,8 @@ pub use stego::{
 };
 #[cfg(feature = "content-base")]
 pub use stego::{
-    compute_default_threads, default_thread_count, embed_carrier_with_dialect,
-    extract_carrier_with_dialect, init_default_thread_pool, probe_carrier_capacity_with_dialect,
+    embed_carrier_with_dialect, extract_carrier_with_dialect, init_default_thread_pool,
+    probe_carrier_capacity_with_dialect,
 };
 
 // ── Prelude ────────────────────────────────────────────────────────────────

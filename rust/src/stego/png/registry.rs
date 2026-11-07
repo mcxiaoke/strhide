@@ -10,11 +10,11 @@ use crate::stego::png::cost::{HillCostModel, MipodCostModel, SuniwardCostModel};
 use crate::stego::traits::PngCostModel;
 
 /// Wire id of [`HillCostModel`]. Reserved permanently.
-pub const SPATIAL_ALGORITHM_HILL: u8 = 1;
+pub(crate) const SPATIAL_ALGORITHM_HILL: u8 = 1;
 /// Wire id of [`SuniwardCostModel`]. Reserved permanently.
-pub const SPATIAL_ALGORITHM_SUNIWARD: u8 = 2;
+pub(crate) const SPATIAL_ALGORITHM_SUNIWARD: u8 = 2;
 /// Wire id of [`MipodCostModel`]. Reserved permanently.
-pub const SPATIAL_ALGORITHM_MIPOD: u8 = 3;
+pub(crate) const SPATIAL_ALGORITHM_MIPOD: u8 = 3;
 
 /// Look up a spatial cost model by algorithm identifier.
 /// Default model is "hill" if None or "auto" is requested.
@@ -22,7 +22,7 @@ pub const SPATIAL_ALGORITHM_MIPOD: u8 = 3;
 /// "auto" stays on HILL. S-UNIWARD is available but the 2025-2026 CNN
 /// evaluations put HILL's detection rate *below* the UNIWARD family, so
 /// promoting it to the default would be a change with no evidence behind it.
-pub fn get_spatial_model(name: Option<&str>) -> Option<Arc<dyn PngCostModel>> {
+pub(crate) fn get_spatial_model(name: Option<&str>) -> Option<Arc<dyn PngCostModel>> {
     match name {
         None | Some("auto") | Some("hill") => Some(Arc::new(HillCostModel)),
         Some("suniward") => Some(Arc::new(SuniwardCostModel)),
@@ -35,7 +35,7 @@ pub fn get_spatial_model(name: Option<&str>) -> Option<Arc<dyn PngCostModel>> {
 ///
 /// `None` for an unknown name, so a caller that failed to resolve a model
 /// cannot silently stamp another algorithm's id onto the carrier.
-pub fn spatial_wire_id(name: &str) -> Option<u8> {
+pub(crate) fn spatial_wire_id(name: &str) -> Option<u8> {
     match name {
         "hill" => Some(SPATIAL_ALGORITHM_HILL),
         "suniward" => Some(SPATIAL_ALGORITHM_SUNIWARD),
@@ -45,7 +45,7 @@ pub fn spatial_wire_id(name: &str) -> Option<u8> {
 }
 
 /// Inverse of [`spatial_wire_id`]: the algorithm a carrier claims.
-pub fn spatial_name_from_wire_id(id: u8) -> Option<&'static str> {
+pub(crate) fn spatial_name_from_wire_id(id: u8) -> Option<&'static str> {
     match id {
         SPATIAL_ALGORITHM_HILL => Some("hill"),
         SPATIAL_ALGORITHM_SUNIWARD => Some("suniward"),

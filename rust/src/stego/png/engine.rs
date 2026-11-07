@@ -1052,7 +1052,7 @@ fn embed_channel(image: &RawImage) -> usize {
 /// The embedder chooses the mode from capacity need and records it in the
 /// feature word, so the extractor never guesses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChannelMode {
+pub(crate) enum ChannelMode {
     /// Green (or the carrier's only channel): the single-channel layout.
     Green = 0,
     /// Red, green and blue. Alpha is never touched.
@@ -1447,7 +1447,7 @@ pub fn embed_png<'a>(
 
 /// Embed a payload into a PNG carrier and return modified bytes, embed statistics, and capacity info.
 #[allow(clippy::too_many_arguments)]
-pub fn embed_png_with_stats<'a>(
+pub(crate) fn embed_png_with_stats<'a>(
     carrier_bytes: &[u8],
     payload: impl Into<Payload<'a>>,
     cred: Credential<'_>,
@@ -2186,7 +2186,7 @@ fn extract_png_with_keys(
 }
 
 /// Inspect PNG for stego header and self-describing metadata without decoding body.
-pub fn inspect_png(
+pub(crate) fn inspect_png(
     carrier_bytes: &[u8],
     cred: Credential<'_>,
     domain: Option<&str>,
@@ -2335,7 +2335,7 @@ fn inspect_png_with_keys(
 }
 
 /// Three-level diagnostic verification for PNG carriers.
-pub fn verify_png(
+pub(crate) fn verify_png(
     carrier_bytes: &[u8],
     cred: Credential<'_>,
     domain: Option<&str>,

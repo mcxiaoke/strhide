@@ -129,7 +129,7 @@ let payload = ENGINE.stego().extract(&stego, &ExtractOptions::default())?;
 | [`structure`] | 结构域：写入、读取、剥离、检查、验证 | `write_carrier*`、`read_carrier*`、`remove_carrier*`、`inspect_carrier*`、`verify_carrier*`、`PayloadSource`、`WriteOptions`/`ReadOptions`/`RestoreOptions`、`StructureProfile`、各 `*Result`、`StrategyId`、`Warning` |
 | [`stego`] | 内容域：嵌入、提取、容量探测、诊断（PNG/JPEG/HEIF/HEVC/Audio） | `embed_carrier*`、`extract_carrier*`、`probe_carrier_capacity*`、`inspect_carrier*`、`verify_carrier*`、`list_stego_algorithms`、`algorithms_for_format`、`EmbedOptions`/`ExtractOptions`/`ProbeOptions`/`StegoTuning`、`StegoProfile`、`StegoCapacityInfo`、`StegoAlgorithmInfo` |
 | [`params`] | 写侧调参旋钮与格式无关原语 | `LocalParams`、`MagicPair`、`CompressionStrategy`、`RejectionPolicy`、`STEALTH_DOMAIN` |
-| [`formats`] | 格式真值源与能力表 | `FileFormat`、`sniff_bytes`/`sniff_stream`、`capability::CAPABILITIES`、`annexb`、`jpeg_segments` |
+| [`formats`] | 格式真值源与能力表 | `FileFormat`、`sniff_bytes`/`sniff_stream`、`capability::CAPABILITIES`、`annexb`/`jpeg_segments`（`#[doc(hidden)]`） |
 | [`core`] | 两域共用的地基 | `i18n`（`Msg`/`Lang`）、`control`（`Control`/`CancelToken`/`Stage`）、`payload`（`Payload`）、`media`（`MediaInfo`）、`fs`、`pipeline`（批量编排）、`config`（TOML，feature `config`） |
 | [`errors`] | 全 crate 唯一错误类型与结构化详情 | `StrHideError`、`ErrorDetail`、`TrellisCause` |
 | [`crypto`] | 加密、KDF、压缩、哈希原语 | `derive_keys`、`encrypt_stream_to_chunks`、`decrypt_stream_from_chunks`、`compress_stream`、`decompress_stream`、`derive_stealth_magics` |

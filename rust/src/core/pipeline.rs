@@ -27,7 +27,8 @@ use crate::t;
 /// failure and report how far they got — each write/restore is atomic per
 /// carrier, so "N succeeded, M not attempted" is accurate, but earlier carriers
 /// stay modified.
-pub fn for_each_carrier<F>(
+#[allow(dead_code)]
+pub(crate) fn for_each_carrier<F>(
     carriers: &[PathBuf],
     quiet: bool,
     mut action: F,
@@ -73,7 +74,8 @@ where
 ///
 /// `action` is a verb phrase used in the error message ("writing to 3
 /// carriers").
-pub fn batch_output_dir<'a>(
+#[allow(dead_code)]
+pub(crate) fn batch_output_dir<'a>(
     output: Option<&'a Path>,
     multi: bool,
     action: &str,
@@ -95,7 +97,8 @@ pub fn batch_output_dir<'a>(
 
 /// Derive a default output path by appending `suffix` before the extension,
 /// e.g. `photo.png` -> `photo-out.png`.
-pub fn derive_default_output_path(carrier: &Path, suffix: &str) -> PathBuf {
+#[allow(dead_code)]
+pub(crate) fn derive_default_output_path(carrier: &Path, suffix: &str) -> PathBuf {
     let parent = carrier.parent();
     let file_name = carrier
         .file_name()
@@ -134,7 +137,8 @@ pub fn check_overwrite(target: &Path, overwrite: bool) -> Result<(), StrHideErro
 /// - `output_dir`: `Some(dir.join(carrier.file_name()))`;
 /// - explicit `output`: `Some(output)`;
 /// - otherwise the `-out` default from [`derive_default_output_path`].
-pub fn resolve_carrier_target(
+#[allow(dead_code)]
+pub(crate) fn resolve_carrier_target(
     carrier: &Path,
     in_place: bool,
     output: Option<&Path>,
@@ -161,11 +165,13 @@ pub fn resolve_carrier_target(
 /// Carrier validation supplied by the caller: existence and "is this a format
 /// we can handle" are format knowledge, so the caller injects it rather than
 /// `core` depending on a format registry.
-pub type CarrierValidator<'a> = &'a dyn Fn(&Path) -> Result<(), StrHideError>;
+#[allow(dead_code)]
+pub(crate) type CarrierValidator<'a> = &'a dyn Fn(&Path) -> Result<(), StrHideError>;
 
 /// Everything `preflight_batch` needs, including the caller's own carrier
 /// validation callback.
-pub struct BatchPreflight<'a> {
+#[allow(dead_code)]
+pub(crate) struct BatchPreflight<'a> {
     /// Carriers the command was given, in command-line order.
     pub carriers: &'a [PathBuf],
     /// Whether the command rewrites carriers in place.
@@ -186,6 +192,7 @@ pub struct BatchPreflight<'a> {
 /// An existing path uses `canonicalize`; a not-yet-created output uses its
 /// canonicalized parent plus the file name, so `out/../a.png` and `a.png` still
 /// compare equal when they name the same destination.
+#[allow(dead_code)]
 fn canonical_identity(path: &Path) -> PathBuf {
     if let Ok(real) = std::fs::canonicalize(path) {
         return real;
@@ -208,7 +215,8 @@ fn canonical_identity(path: &Path) -> PathBuf {
 /// first carrier's target is the second carrier's input, the second file is
 /// overwritten before it is read. Only paths that resolve to the same file are
 /// rejected; an output that equals its own carrier is an in-place write.
-pub fn preflight_batch(batch: BatchPreflight<'_>) -> Result<(), StrHideError> {
+#[allow(dead_code)]
+pub(crate) fn preflight_batch(batch: BatchPreflight<'_>) -> Result<(), StrHideError> {
     let mut seen_carriers = HashSet::new();
     let mut carrier_identities = Vec::with_capacity(batch.carriers.len());
     for carrier in batch.carriers {

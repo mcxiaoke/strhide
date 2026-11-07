@@ -262,6 +262,7 @@ impl PartialEq for Control<'_> {
 
 impl Eq for Control<'_> {}
 
+#[doc(hidden)]
 pub const PROGRESS_STEP_BYTES: u64 = 4 * 1024 * 1024; // Every 4 MiB trigger a progress report
 
 pub struct ProgressWriter<'a, 'c, W: Write + ?Sized> {
@@ -341,11 +342,13 @@ pub fn map_io_cancel(control: &Control<'_>, err: StrHideError) -> StrHideError {
 /// Preserves the lightweight `Copy` semantics of [`Control<'_>`] while providing an owned,
 /// thread-safe container that can be safely moved across thread boundaries.
 #[derive(Clone, Default)]
-pub struct TaskControl {
+#[allow(dead_code)]
+pub(crate) struct TaskControl {
     pub progress: Option<std::sync::Arc<dyn Progress>>,
     pub cancel: std::sync::Arc<CancelToken>,
 }
 
+#[allow(dead_code)]
 impl TaskControl {
     pub fn new(progress: impl Progress + 'static) -> Self {
         Self {

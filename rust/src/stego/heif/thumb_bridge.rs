@@ -120,7 +120,7 @@ pub fn embed_heif_bridge<'a>(
 
     match target.kind {
         BridgeTargetKind::DirectJpeg { .. } | BridgeTargetKind::ExifJpeg { .. } => {
-            let (stego_bytes, stats, mut capacity) = jpeg::embed_jpeg_with_stats(
+            let (stego_bytes, stats, mut capacity) = jpeg::engine::embed_jpeg_with_stats(
                 carrier_slice,
                 eff_payload,
                 cred,
@@ -238,7 +238,7 @@ pub fn inspect_heif_bridge(
 
     match target.kind {
         BridgeTargetKind::DirectJpeg { .. } | BridgeTargetKind::ExifJpeg { .. } => {
-            let mut info = jpeg::inspect_jpeg(
+            let mut info = jpeg::engine::inspect_jpeg(
                 carrier_slice,
                 cred,
                 domain,
@@ -286,7 +286,7 @@ pub fn verify_heif_bridge(
 
     match target.kind {
         BridgeTargetKind::DirectJpeg { .. } | BridgeTargetKind::ExifJpeg { .. } => {
-            let mut res = jpeg::verify_jpeg(
+            let mut res = jpeg::engine::verify_jpeg(
                 carrier_slice,
                 cred,
                 domain,

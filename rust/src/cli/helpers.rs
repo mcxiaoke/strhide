@@ -25,7 +25,7 @@ use crate::t;
 
 use super::args::{PayloadSourceArgs, StegoTuningArgs};
 
-pub fn prompt_password(confirm: bool) -> Result<String, StrHideError> {
+pub(crate) fn prompt_password(confirm: bool) -> Result<String, StrHideError> {
     let p1 = t!(Msg::PromptEnterPassword);
     let pwd = rpassword::prompt_password(&p1)
         .map_err(|e| StrHideError::General(format!("Failed to read password: {e}")))?;
@@ -366,7 +366,7 @@ pub(crate) fn stego_safety(
 /// optional `0x` prefix and surrounding whitespace). Anything else is rejected
 /// with the expected size in the message: a silently padded or hashed key would
 /// derive a different master and read every carrier as "no hidden data".
-pub fn resolve_key_file(path: Option<&Path>) -> Result<Option<[u8; 32]>, StrHideError> {
+pub(crate) fn resolve_key_file(path: Option<&Path>) -> Result<Option<[u8; 32]>, StrHideError> {
     let Some(path) = path else {
         return Ok(None);
     };

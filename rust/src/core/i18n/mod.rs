@@ -153,7 +153,7 @@ pub(crate) use t;
 /// Render named placeholders `{name}`; `{{` / `}}` are escaped to literal `{` / `}`.
 /// Stream-parsed so argument values containing `}}` or `{}` are not corrupted.
 /// Missing arguments panic in debug mode and retain literal placeholder text in release mode.
-pub fn format_msg(tpl: &str, args: &[(&str, &dyn std::fmt::Display)]) -> String {
+pub(crate) fn format_msg(tpl: &str, args: &[(&str, &dyn std::fmt::Display)]) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(tpl.len());
     let mut rest = tpl;

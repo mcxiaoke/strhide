@@ -239,7 +239,7 @@ pub fn extract_carrier_file_payload(
 }
 
 /// Inspect the carrier file at `carrier_path`.
-pub fn inspect_carrier_file(
+pub(crate) fn inspect_carrier_file(
     carrier_path: &Path,
     options: &crate::stego::InspectOptions<'_>,
     dialect: &StegoProfile,
@@ -267,7 +267,7 @@ pub fn inspect_carrier_file(
 }
 
 /// Probe the carrier file capacity at `carrier_path`.
-pub fn probe_carrier_file(
+pub(crate) fn probe_carrier_file(
     carrier_path: &Path,
     options: &crate::stego::ProbeOptions<'_>,
     dialect: &StegoProfile,
@@ -277,7 +277,7 @@ pub fn probe_carrier_file(
 }
 
 /// Verify the carrier file at `carrier_path`.
-pub fn verify_carrier_file(
+pub(crate) fn verify_carrier_file(
     carrier_path: &Path,
     options: &crate::stego::VerifyOptions<'_>,
     dialect: &StegoProfile,

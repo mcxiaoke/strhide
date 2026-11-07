@@ -17,7 +17,7 @@ use crate::stego::traits::JpegCostModel;
 /// J-UNIWARD costs roughly two orders of magnitude more per embed for a
 /// distortion difference that the literature does not show to be a win, so
 /// it is opt-in only.
-pub fn get_jpeg_model(name: Option<&str>) -> Option<Arc<dyn JpegCostModel>> {
+pub(crate) fn get_jpeg_model(name: Option<&str>) -> Option<Arc<dyn JpegCostModel>> {
     match name {
         None | Some("auto") | Some("uerd") => Some(Arc::new(UerdCostModel)),
         Some("juniward") => Some(Arc::new(JuniwardCostModel)),

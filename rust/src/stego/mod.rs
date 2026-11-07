@@ -5,14 +5,14 @@
 //! entry points with automatic format sniffing and extensible algorithm
 //! selection.
 //!
-//! Dispatch is one registry lookup ([`engine::engine_for`]) on the format the
+//! Dispatch is one registry lookup (`engine::engine_for`) on the format the
 //! sniffer reported; the engines own what happens next. Until stage 2 this file
 //! held three parallel `if format == ...` waterfalls -- one per entry point --
 //! which is how a probe could end up advertising a different capacity than the
 //! writer filled.
 
 #[cfg(feature = "content-audio")]
-pub mod audio;
+pub(crate) mod audio;
 #[doc(hidden)]
 pub mod coding;
 #[cfg(feature = "content-base")]
@@ -22,7 +22,7 @@ pub(crate) mod cost_calibration;
 /// `ln_1p`, `cos`). Kept in-tree so the numbers do not depend on the platform
 /// libm; `scripts/detmath/` holds the Go and Python ports to check against.
 pub(crate) mod detmath;
-pub mod engine;
+pub(crate) mod engine;
 #[doc(hidden)]
 pub mod envelope;
 pub mod format;
@@ -53,14 +53,8 @@ pub mod traits;
 #[doc(hidden)]
 pub mod wavelet;
 
-#[cfg(feature = "content-jpeg")]
-pub use crate::stego::jpeg::registry::get_jpeg_model;
 #[cfg(feature = "content-png")]
-pub use crate::stego::png::registry::{
-    SPATIAL_ALGORITHM_HILL, SPATIAL_ALGORITHM_MIPOD, SPATIAL_ALGORITHM_SUNIWARD, get_spatial_model,
-    spatial_model_from_wire_id, spatial_name_from_wire_id, spatial_wire_id,
-};
-pub use engine::{StegoEngine, engine_for, supported_formats};
+pub use crate::stego::png::registry::spatial_model_from_wire_id;
 pub use envelope::Freshness;
 pub use format::GridRule;
 #[cfg(feature = "content-audio")]
@@ -102,7 +96,7 @@ static INIT_DEFAULT_POOL: std::sync::Once = std::sync::Once::new();
 /// 4 when `total` is at least 4 but below 8, otherwise half of the total cores,
 /// clamped to `total` (so a 4-core machine gets 4 workers, not 2).
 #[inline]
-pub fn compute_default_threads(total: usize) -> usize {
+pub(crate) fn compute_default_threads(total: usize) -> usize {
     if total == 0 {
         1
     } else {
@@ -111,7 +105,7 @@ pub fn compute_default_threads(total: usize) -> usize {
 }
 
 /// Returns the calculated default worker thread count for the current machine.
-pub fn default_thread_count() -> usize {
+pub(crate) fn default_thread_count() -> usize {
     let total = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
@@ -150,7 +144,7 @@ pub fn init_default_thread_pool() {
 pub struct CostModelRegistry;
 
 impl CostModelRegistry {
-    /// See [`crate::stego::png::registry::get_spatial_model`].
+    /// See `crate::stego::png::registry::get_spatial_model`.
     #[cfg(feature = "content-png")]
     pub fn get_spatial_model(
         name: Option<&str>,
@@ -158,7 +152,7 @@ impl CostModelRegistry {
         crate::stego::png::registry::get_spatial_model(name)
     }
 
-    /// See [`crate::stego::jpeg::registry::get_jpeg_model`].
+    /// See `crate::stego::jpeg::registry::get_jpeg_model`.
     #[cfg(feature = "content-jpeg")]
     pub fn get_jpeg_model(
         name: Option<&str>,
@@ -166,19 +160,19 @@ impl CostModelRegistry {
         crate::stego::jpeg::registry::get_jpeg_model(name)
     }
 
-    /// See [`crate::stego::png::registry::spatial_wire_id`].
+    /// See `crate::stego::png::registry::spatial_wire_id`.
     #[cfg(feature = "content-png")]
     pub fn spatial_wire_id(name: &str) -> Option<u8> {
         crate::stego::png::registry::spatial_wire_id(name)
     }
 
-    /// See [`crate::stego::png::registry::spatial_name_from_wire_id`].
+    /// See `crate::stego::png::registry::spatial_name_from_wire_id`.
     #[cfg(feature = "content-png")]
     pub fn spatial_name_from_wire_id(id: u8) -> Option<&'static str> {
         crate::stego::png::registry::spatial_name_from_wire_id(id)
     }
 
-    /// See [`crate::stego::png::registry::spatial_model_from_wire_id`].
+    /// See `crate::stego::png::registry::spatial_model_from_wire_id`.
     #[cfg(feature = "content-png")]
     pub fn spatial_model_from_wire_id(
         id: u8,
@@ -200,6 +194,7 @@ impl CostModelRegistry {
 use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::formats::sniff::{FileFormat, sniff_bytes};
+use crate::stego::engine::StegoEngine;
 use crate::stego::params::StegoProfile;
 
 /// Resolve the engine for a carrier, or fail with the one unsupported-format

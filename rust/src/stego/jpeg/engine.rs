@@ -597,7 +597,7 @@ impl From<StrHideError> for Attempt {
 ///
 /// 0. the body layout keeps a grouped trellis (`u >= 3`) so the search can
 ///    route around dead slots and cross-zero chains at all -- see
-///    [`grouped_body_budget`](crate::stego::params::grouped_body_budget);
+///    `crate::stego::params::grouped_body_budget`;
 /// 1. moves within the non-zero range whose `(run, category)` is missing are
 ///    closed, and cross-zero moves are priced at the wet cost so the trellis only
 ///    uses them when a whole group window has nothing else;
@@ -640,7 +640,7 @@ pub fn embed_jpeg<'a>(
 
 /// Embed a payload into a JPEG carrier and return modified bytes, embed statistics, and capacity info.
 #[allow(clippy::too_many_arguments)]
-pub fn embed_jpeg_with_stats<'a>(
+pub(crate) fn embed_jpeg_with_stats<'a>(
     carrier_bytes: &[u8],
     payload: impl Into<Payload<'a>>,
     cred: Credential<'_>,
@@ -1423,7 +1423,7 @@ fn read_bits(
 /// Carries the same `limits` as [`extract_jpeg`] on purpose: inspecting under a
 /// tightened policy used to report `has_hidden_data = true` for a carrier the
 /// extractor then refused, and it paid the full PBKDF2 cost first.
-pub fn inspect_jpeg(
+pub(crate) fn inspect_jpeg(
     carrier_bytes: &[u8],
     cred: Credential<'_>,
     domain: Option<&str>,
@@ -1652,7 +1652,7 @@ fn inspect_jpeg_from(
 }
 
 /// Three-level diagnostic verification for JPEG carriers.
-pub fn verify_jpeg(
+pub(crate) fn verify_jpeg(
     carrier_bytes: &[u8],
     cred: Credential<'_>,
     domain: Option<&str>,

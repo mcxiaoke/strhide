@@ -38,7 +38,7 @@ use crate::stego::params::StegoProfile;
 /// Implementations are stateless: every knob arrives in the options, every
 /// secret in the dialect. That is what lets the registry hand out `&'static`
 /// instances and lets two calls run concurrently on the same engine.
-pub trait StegoEngine: Send + Sync {
+pub(crate) trait StegoEngine: Send + Sync {
     /// The carrier format this engine handles.
     fn format(&self) -> FileFormat;
 
@@ -108,7 +108,7 @@ static ENGINES: &[&dyn StegoEngine] = &[
 
 /// The engine that handles `format`, or `None` when the content domain cannot
 /// read it at all.
-pub fn engine_for(format: FileFormat) -> Option<&'static dyn StegoEngine> {
+pub(crate) fn engine_for(format: FileFormat) -> Option<&'static dyn StegoEngine> {
     ENGINES.iter().copied().find(|e| e.format() == format)
 }
 
@@ -117,7 +117,8 @@ pub fn engine_for(format: FileFormat) -> Option<&'static dyn StegoEngine> {
 /// `stego::mod` and the capability table both derive from this; a test asserts
 /// the two agree, so a format cannot be claimed by one and forgotten by the
 /// other.
-pub fn supported_formats() -> impl Iterator<Item = FileFormat> {
+#[allow(dead_code)]
+pub(crate) fn supported_formats() -> impl Iterator<Item = FileFormat> {
     ENGINES.iter().map(|e| e.format())
 }
 
@@ -140,7 +141,7 @@ where
 
 /// PNG spatial-domain engine (HILL / S-UNIWARD, STC or Hamming).
 #[cfg(feature = "content-png")]
-pub struct PngEngine;
+pub(crate) struct PngEngine;
 
 #[cfg(feature = "content-png")]
 impl StegoEngine for PngEngine {
@@ -197,7 +198,7 @@ impl StegoEngine for PngEngine {
             payload
         };
         let (bytes, stats, capacity) = with_pool(opts.pool.as_ref(), || {
-            crate::stego::png::embed_png_with_stats(
+            crate::stego::png::engine::embed_png_with_stats(
                 carrier,
                 eff_payload,
                 cred,
@@ -252,7 +253,7 @@ impl StegoEngine for PngEngine {
         let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
-        crate::stego::png::inspect_png(
+        crate::stego::png::engine::inspect_png(
             carrier,
             cred,
             domain,
@@ -271,7 +272,7 @@ impl StegoEngine for PngEngine {
         let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
-        crate::stego::png::verify_png(
+        crate::stego::png::engine::verify_png(
             carrier,
             cred,
             domain,
@@ -284,7 +285,7 @@ impl StegoEngine for PngEngine {
 
 /// JPEG DCT-domain engine (UERD / J-UNIWARD, ternary STC).
 #[cfg(feature = "content-jpeg")]
-pub struct JpegEngine;
+pub(crate) struct JpegEngine;
 
 #[cfg(feature = "content-jpeg")]
 impl StegoEngine for JpegEngine {
@@ -342,7 +343,7 @@ impl StegoEngine for JpegEngine {
             payload
         };
         let (bytes, stats, capacity) = with_pool(opts.pool.as_ref(), || {
-            crate::stego::jpeg::embed_jpeg_with_stats(
+            crate::stego::jpeg::engine::embed_jpeg_with_stats(
                 carrier,
                 eff_payload,
                 cred,
@@ -392,7 +393,7 @@ impl StegoEngine for JpegEngine {
         let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
-        crate::stego::jpeg::inspect_jpeg(
+        crate::stego::jpeg::engine::inspect_jpeg(
             carrier,
             cred,
             domain,
@@ -411,7 +412,7 @@ impl StegoEngine for JpegEngine {
         let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
         opts.control.check()?;
-        crate::stego::jpeg::verify_jpeg(
+        crate::stego::jpeg::engine::verify_jpeg(
             carrier,
             cred,
             domain,
@@ -756,7 +757,7 @@ fn hevc_verify(
 
 /// HEIF/HEIC still image: Scheme C, with the thumbnail bridge as fallback.
 #[cfg(feature = "content-hevc")]
-pub struct HeifEngine;
+pub(crate) struct HeifEngine;
 
 #[cfg(feature = "content-hevc")]
 impl StegoEngine for HeifEngine {
@@ -816,7 +817,7 @@ impl StegoEngine for HeifEngine {
 
 /// MP4/MOV video: Scheme C on the sample table, no bridge.
 #[cfg(feature = "content-hevc")]
-pub struct Mp4Engine;
+pub(crate) struct Mp4Engine;
 
 #[cfg(feature = "content-hevc")]
 impl StegoEngine for Mp4Engine {
@@ -875,7 +876,7 @@ impl StegoEngine for Mp4Engine {
 
 /// Raw Annex-B HEVC bitstream: Scheme C only.
 #[cfg(feature = "content-hevc")]
-pub struct AnnexBEngine;
+pub(crate) struct AnnexBEngine;
 
 #[cfg(feature = "content-hevc")]
 impl StegoEngine for AnnexBEngine {
@@ -935,7 +936,7 @@ impl StegoEngine for AnnexBEngine {
 /// Matroska (MKV/WebM) video: Scheme C on the HEVC track, plus a checksum
 /// refresh for the `CRC-32` elements the patch invalidates.
 #[cfg(feature = "content-hevc")]
-pub struct MkvEngine;
+pub(crate) struct MkvEngine;
 
 #[cfg(feature = "content-hevc")]
 impl StegoEngine for MkvEngine {
@@ -1027,7 +1028,7 @@ impl StegoEngine for MkvEngine {
 
 /// FLAC: residual-domain coding that keeps every Rice codeword the same width.
 #[cfg(feature = "content-audio")]
-pub struct FlacEngine;
+pub(crate) struct FlacEngine;
 
 #[cfg(feature = "content-audio")]
 impl StegoEngine for FlacEngine {
@@ -1158,7 +1159,7 @@ impl StegoEngine for FlacEngine {
 
 /// WAV PCM: `±1` LSB moves on the sample stream, in place.
 #[cfg(feature = "content-audio")]
-pub struct WavEngine;
+pub(crate) struct WavEngine;
 
 #[cfg(feature = "content-audio")]
 impl StegoEngine for WavEngine {

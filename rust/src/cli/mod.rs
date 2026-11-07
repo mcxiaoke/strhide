@@ -29,8 +29,8 @@ pub use args::{
     BANNER, Cli, Commands, ContainerCommands, DiagCli, DiagCommands, GlobalArgs,
     STRHIDE_BUILD_TIME, STRHIDE_GIT_HASH, STRHIDE_VERSION_INFO, StegoCli, StegoCommands, StructCli,
 };
-pub use helpers::{prompt_password, resolve_password};
-pub use render::print_error;
+pub use helpers::resolve_password;
+use render::print_error;
 
 use std::ffi::OsString;
 use std::path::PathBuf;

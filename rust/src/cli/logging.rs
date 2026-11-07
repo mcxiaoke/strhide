@@ -66,7 +66,7 @@ fn filter() -> LevelFilter {
 ///
 /// `quiet` wins over `verbose`: `-q -v` stays silent, otherwise a script that
 /// asked for silence would start leaking debug output into stderr.
-pub fn level_for(quiet: bool, verbose: u8) -> LevelFilter {
+pub(crate) fn level_for(quiet: bool, verbose: u8) -> LevelFilter {
     if quiet {
         return LevelFilter::Off;
     }

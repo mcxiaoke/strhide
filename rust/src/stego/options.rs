@@ -418,7 +418,7 @@ impl Default for ResolvedTuning {
 /// One code path for every consumer: an explicit non-empty password and a
 /// file key are mutually exclusive, an empty password counts as "not supplied",
 /// and the dialect's private secret (then the public constant) is the fallback.
-pub fn resolve_credential<'a>(
+pub(crate) fn resolve_credential<'a>(
     password: Option<&'a str>,
     key: Option<&'a [u8; 32]>,
     dialect: &'a StegoProfile,

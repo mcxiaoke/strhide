@@ -19,26 +19,34 @@ use std::path::Path;
 use crate::formats::annexb::is_hevc_annexb;
 
 /// ISO-BMFF `ftyp` brands that identify an HEIF/HEIC (or AVIF) image file.
+#[doc(hidden)]
 pub const HEIF_BRANDS: &[[u8; 4]] = &[
     *b"heic", *b"heix", *b"hevc", *b"hevx", *b"mif1", *b"msf1", *b"heim", *b"heis", *b"avif",
     *b"avis",
 ];
 
 /// PNG magic (8-byte signature).
+#[doc(hidden)]
 pub const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
 /// JPEG SOI marker (first two bytes of a JPEG file).
+#[doc(hidden)]
 pub const JPEG_MAGIC: &[u8; 2] = b"\xFF\xD8";
 
 /// PDF header magic.
+#[doc(hidden)]
 pub const PDF_MAGIC: [u8; 5] = *b"%PDF-";
 
 /// ZIP local-file header, end-of-central-directory, and spanned-archive markers.
+#[doc(hidden)]
 pub const ZIP_LOCAL_MAGIC: [u8; 4] = *b"PK\x03\x04";
+#[doc(hidden)]
 pub const ZIP_EOCD_MAGIC: [u8; 4] = *b"PK\x05\x06";
+#[doc(hidden)]
 pub const ZIP_SPAN_MAGIC: [u8; 4] = *b"PK\x07\x08";
 
 /// EBML header element ID that starts a Matroska/WebM file.
+#[doc(hidden)]
 pub const EBML_HEADER_ID: u32 = 0x1A45_DFA3;
 
 /// Top-level ISO-BMFF box types that identify an MP4/MOV-style container.
@@ -60,6 +68,7 @@ const MP4_TOP_LEVEL_BOXES: &[[u8; 4]] = &[
 /// `ftyp` of up to 4096 bytes, PE reads the DOS header plus the PE signature),
 /// so 64 KiB is generous; `sniff_bytes` only ever looks at the first few
 /// hundred bytes.
+#[doc(hidden)]
 pub const SNIFF_PREFIX_BYTES: usize = 64 * 1024;
 
 /// Carrier container formats the tool understands, plus the raw Annex-B stream.
@@ -176,6 +185,7 @@ impl<'de> serde::Deserialize<'de> for FileFormat {
 ///
 /// The first box must be a well-formed `ftyp` whose size is sane, and at least
 /// one brand after the major brand must be a known HEIF/AVIF brand.
+#[doc(hidden)]
 pub fn is_heif_bytes(bytes: &[u8]) -> bool {
     if bytes.len() < 12 {
         return false;
@@ -202,16 +212,19 @@ pub fn is_heif_bytes(bytes: &[u8]) -> bool {
 }
 
 /// Whether the bytes start with the PNG signature.
+#[doc(hidden)]
 pub fn is_png_bytes(bytes: &[u8]) -> bool {
     bytes.len() >= PNG_MAGIC.len() && &bytes[..PNG_MAGIC.len()] == PNG_MAGIC
 }
 
 /// Whether the bytes start with the JPEG SOI marker.
+#[doc(hidden)]
 pub fn is_jpeg_bytes(bytes: &[u8]) -> bool {
     bytes.len() >= JPEG_MAGIC.len() && &bytes[..JPEG_MAGIC.len()] == JPEG_MAGIC
 }
 
 /// Whether the bytes look like an MP4/MOV-style container (and not a HEIF image).
+#[doc(hidden)]
 pub fn is_mp4_bytes(bytes: &[u8]) -> bool {
     if bytes.len() < 8 {
         return false;

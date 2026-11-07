@@ -76,7 +76,12 @@ fn is_windows_reserved_device(stem: &str) -> bool {
 /// Deriving from the *carrier* is what makes `read a.png b.png -o out/` write
 /// two distinct files instead of colliding on `extracted.bin` (and then
 /// silently overwriting the first with the second).
-pub fn batch_payload_name(carrier: &std::path::Path, recorded: &str, is_file: bool) -> String {
+#[allow(dead_code)]
+pub(crate) fn batch_payload_name(
+    carrier: &std::path::Path,
+    recorded: &str,
+    is_file: bool,
+) -> String {
     if !recorded.is_empty() {
         return sanitize_filename(recorded);
     }
@@ -98,7 +103,8 @@ pub fn batch_payload_name(carrier: &std::path::Path, recorded: &str, is_file: bo
 /// on disk as well, so a fresh name is used instead of clobbering an unrelated
 /// user file. A pre-existing `desired` itself is left to `check_overwrite`,
 /// which keeps the single-carrier behaviour unchanged.
-pub fn unique_batch_path(
+#[allow(dead_code)]
+pub(crate) fn unique_batch_path(
     dir: &std::path::Path,
     desired: &str,
     used: &std::collections::HashSet<std::path::PathBuf>,
@@ -129,7 +135,8 @@ pub fn unique_batch_path(
 /// have the CLI print them verbatim: cursor movement, screen wipes, even an
 /// OSC 52 clipboard write (review R3 P2-2). Control characters become `\u{NN}`
 /// escapes; a tab survives because it cannot drive a terminal.
-pub fn escape_control_chars(text: &str) -> std::borrow::Cow<'_, str> {
+#[allow(dead_code)]
+pub(crate) fn escape_control_chars(text: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
 
     fn is_unsafe(c: char) -> bool {
@@ -164,7 +171,8 @@ pub fn escape_control_chars(text: &str) -> std::borrow::Cow<'_, str> {
 /// (C0/C1 controls except `\n`, `\r`, `\t`, plus the bidi overrides) is escaped
 /// as `\u{NN}`, which blocks `ESC [ ...` sequences and OSC 52 clipboard writes
 /// without touching legitimate multi-line text.
-pub fn escape_terminal_text(text: &str) -> std::borrow::Cow<'_, str> {
+#[allow(dead_code)]
+pub(crate) fn escape_terminal_text(text: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
 
     fn is_unsafe(c: char) -> bool {

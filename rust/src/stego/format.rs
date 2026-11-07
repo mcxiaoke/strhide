@@ -374,7 +374,7 @@ pub struct HeaderLocatorKeys {
 
 /// Per-carrier payload keys (L3).
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct SessionKeys {
+pub(crate) struct SessionKeys {
     /// AEAD key.
     pub enc_key: [u8; 32],
     /// Body slot permutation seed.
@@ -486,7 +486,7 @@ fn suite_info(label: &[u8], domain: Option<&str>, suite: CipherSuiteId) -> Vec<u
 }
 
 /// L3: derive the per-carrier payload keys from the header salt or nonce.
-pub fn derive_l3_session_keys(
+pub(crate) fn derive_l3_session_keys(
     cipher: &WireCipherProfile,
     suite: CipherSuiteId,
     master: &[u8; 32],
@@ -512,7 +512,7 @@ pub fn derive_l3_session_keys(
 /// Domain-separated HKDF info string: `label || u64be(len) || domain`.
 ///
 /// The length prefix keeps `("ab", "c")` and `("a", "bc")` from colliding.
-pub fn info_with_domain(label: &[u8], domain: Option<&str>) -> Vec<u8> {
+pub(crate) fn info_with_domain(label: &[u8], domain: Option<&str>) -> Vec<u8> {
     match domain.filter(|d| !d.is_empty()) {
         Some(domain) => {
             let normalized = normalize_nfc(domain);

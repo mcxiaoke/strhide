@@ -13,7 +13,7 @@ use crate::t;
 
 use super::args::BANNER;
 
-pub fn print_error(e: &StrHideError) {
+pub(crate) fn print_error(e: &StrHideError) {
     // One renderer, shared with every other front end: `detail_i18n` returns the
     // structured parts and `render` applies the current language, so the CLI no
     // longer owns a private copy of the "[ERROR] prefix: detail" layout.

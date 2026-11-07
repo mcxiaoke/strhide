@@ -83,7 +83,7 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
 /// input carrier) truncates the carrier before the payload is written, which
 /// destroys the only copy of the hidden data. `same_file` normalises symlinks,
 /// relative paths and Windows case differences, so all of them are covered.
-pub fn reject_carrier_output(dest: &Path, carriers: &[PathBuf]) -> Result<(), StrHideError> {
+pub(crate) fn reject_carrier_output(dest: &Path, carriers: &[PathBuf]) -> Result<(), StrHideError> {
     for carrier in carriers {
         if same_file(dest, carrier) {
             return Err(StrHideError::Rejection(format!(
@@ -163,7 +163,7 @@ pub(crate) fn next_backup_path(carrier: &Path) -> PathBuf {
 }
 
 /// Generate a collision-free temporary file path alongside `path` using process ID and random salt.
-pub fn temp_path_for(path: &Path) -> PathBuf {
+pub(crate) fn temp_path_for(path: &Path) -> PathBuf {
     let mut os = path.as_os_str().to_os_string();
     let pid = std::process::id();
     let r: u32 = rand::rng().random();
@@ -195,7 +195,8 @@ fn copy_file_to_new(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// caller renames the new carrier over the original could leave a zero-length
 /// or unwritten `.bak` next to an already overwritten carrier — both copies
 /// lost. The handle is opened for writing so `sync_all` works on Windows too.
-pub fn copy_file_durable(src: &Path, dst: &Path) -> Result<(), StrHideError> {
+#[allow(dead_code)]
+pub(crate) fn copy_file_durable(src: &Path, dst: &Path) -> Result<(), StrHideError> {
     copy_file_to_new(src, dst).map_err(StrHideError::from)
 }
 
@@ -226,7 +227,7 @@ pub(crate) fn create_carrier_backup(carrier: &Path) -> Result<PathBuf, StrHideEr
 /// lock instead of the file attribute. Detect the attribute up front and report
 /// it as the permission problem it is. A target that does not exist yet is
 /// fine: the rename creates it.
-pub fn reject_read_only_target(target: &Path) -> Result<(), StrHideError> {
+pub(crate) fn reject_read_only_target(target: &Path) -> Result<(), StrHideError> {
     if !target.exists() {
         return Ok(());
     }
@@ -263,7 +264,7 @@ pub fn reject_read_only_target(target: &Path) -> Result<(), StrHideError> {
 /// better (a missing or read-only output directory), so those failures fall
 /// back to "unlocked" rather than aborting with a lock-specific error.
 #[derive(Debug)]
-pub struct TargetLock {
+pub(crate) struct TargetLock {
     /// `None` when the marker could not be created; the write then runs
     /// unguarded and fails later with the real filesystem error.
     path: Option<PathBuf>,
@@ -640,7 +641,7 @@ pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), StrHideError>
 /// Rename `from` to `to` with bounded exponential backoff retries when encountering
 /// file sharing violations (Windows error 32 / 33) or permission denied errors caused
 /// by media preview components or external processes holding open handles.
-pub fn rename_with_retry(from: &Path, to: &Path) -> Result<(), StrHideError> {
+pub(crate) fn rename_with_retry(from: &Path, to: &Path) -> Result<(), StrHideError> {
     const BACKOFF_MS: [u64; 3] = [20, 50, 100];
     match std::fs::rename(from, to) {
         Ok(()) => return Ok(()),

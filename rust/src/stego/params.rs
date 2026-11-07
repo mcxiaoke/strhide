@@ -344,14 +344,14 @@ pub struct JpegParams {
     /// the superblock, so carriers written with a different budget still decode.
     ///
     /// `None` means "not configured", which is **not** the same as configuring
-    /// [`DEFAULT_SLOT_BUDGET`]: the default scales with the carrier, an explicit
+    /// `DEFAULT_SLOT_BUDGET`: the default scales with the carrier, an explicit
     /// value is used as given. Comparing by value made `--slot-budget 1200000`
     /// (exactly the default number) behave as "unset" and silently rescale,
     /// contradicting the documented meaning of the flag.
     ///
     /// One exception: on a carrier whose Huffman table is over-optimised the
     /// value is still raised when needed to keep the body group size at
-    /// `u >= 3` (see [`grouped_body_budget`]). That is a correctness
+    /// `u >= 3` (see `grouped_body_budget`). That is a correctness
     /// constraint, like the grid bound -- `u = 1` cannot route around dead
     /// slots, and `u = 2` is still a coin flip at these loads -- not a
     /// tuning override.
@@ -439,7 +439,7 @@ fn validate_algorithm_options(
 /// [`JpegParams::effective_slot_budget`]. See
 /// `docs/stc_v3_phase3_eval_20261021.md`.
 #[allow(dead_code)]
-pub const DEFAULT_SLOT_BUDGET: usize = 1_200_000;
+pub(crate) const DEFAULT_SLOT_BUDGET: usize = 1_200_000;
 
 /// Ceiling on the STC backtracking bitmap, i.e. on an automatically scaled
 /// trellis size.
@@ -456,7 +456,7 @@ pub const DEFAULT_SLOT_BUDGET: usize = 1_200_000;
 /// * time -- bytes per slot and states per slot are the same power of two, so
 ///   they cancel and the worst case is ~1 s of kernel time for *any* `h`.
 #[allow(dead_code)]
-pub const MAX_AUTO_BACKTRACK_BYTES: usize = 4 << 30; // 4 GiB
+pub(crate) const MAX_AUTO_BACKTRACK_BYTES: usize = 4 << 30; // 4 GiB
 
 /// Ceiling on the STC backtracking bitmap for the *correctness-driven* group
 /// size on carriers whose Huffman table is over-optimised.
@@ -466,14 +466,14 @@ pub const MAX_AUTO_BACKTRACK_BYTES: usize = 4 << 30; // 4 GiB
 /// carrying large payloads (512 KiB .. 4+ MiB) need room for `u >= 3` without
 /// arbitrary artificial ceilings. At `h = 8` (32 B/slot) 4 GiB accommodates
 /// 134M slots, fully unlocking the geometric capacity of massive carriers.
-pub const MAX_GROUPED_BACKTRACK_BYTES: usize = 4 << 30; // 4 GiB
+pub(crate) const MAX_GROUPED_BACKTRACK_BYTES: usize = 4 << 30; // 4 GiB
 
 /// Slot ceiling implied by [`MAX_GROUPED_BACKTRACK_BYTES`] at height `h`.
 ///
 /// One slot costs `2^h / 64` words of traceback state (32 B at `h = 8`,
 /// 128 B at `h = 10`).
 #[allow(dead_code)]
-pub fn max_grouped_backtrack_slots(h: u8) -> usize {
+pub(crate) fn max_grouped_backtrack_slots(h: u8) -> usize {
     let states = 1usize << h;
     let bytes_per_slot = states.div_ceil(64) * 8;
     MAX_GROUPED_BACKTRACK_BYTES / bytes_per_slot
@@ -496,7 +496,7 @@ pub fn max_grouped_backtrack_slots(h: u8) -> usize {
 ///
 /// `window` is `bits + h - 1`: the number of elements one STC pass covers.
 #[allow(dead_code)]
-pub fn grouped_body_budget(
+pub(crate) fn grouped_body_budget(
     body_grid_len: usize,
     bits: usize,
     h: u8,
@@ -588,10 +588,10 @@ impl JpegParams {
     /// grid, so a body grid holding `r` slots per payload bit yields `u = r / 4`
     /// -- the group size follows how much room the carrier actually has instead
     /// of being pinned by a flat slot count. Two clamps keep it sane:
-    /// [`DEFAULT_SLOT_BUDGET`] as a floor (small carriers stay generous) and
-    /// [`MAX_AUTO_BACKTRACK_BYTES`] as a memory ceiling (huge carriers stop
+    /// `DEFAULT_SLOT_BUDGET` as a floor (small carriers stay generous) and
+    /// `MAX_AUTO_BACKTRACK_BYTES` as a memory ceiling (huge carriers stop
     /// growing the traceback bitmap). An explicit value is respected exactly,
-    /// even when it happens to equal [`DEFAULT_SLOT_BUDGET`].
+    /// even when it happens to equal `DEFAULT_SLOT_BUDGET`.
     ///
     /// Worked example: a 24 MP carrier (23.6M-slot grid) with a 200 KB payload
     /// has `r = 14.7`, so the budget is `23.6M / 4 = 5.9M` and `u = 3`; the old
