@@ -15,7 +15,7 @@
 //! What is left is the walk below: ~300 lines over `&[u8]`, no allocation per
 //! block, reusing the VINT semantics already implemented for the structure
 //! domain in [`crate::structure::adapters::ebml`] (`encode_vint` there is the
-//! inverse of [`read_vint_size`] here).
+//! inverse of `read_vint_size` here).
 //!
 //! # Robustness contract
 //!

@@ -29,7 +29,8 @@
 //! payload, and the engine does not hand the real payload to a cost model.
 //! To ensure exact bit-identical cost maps on both embed and extract sides
 //! (preventing any tie-breaking divergence under floating-point interpolation),
-//! `alpha` is quantized to `f32` and carried in [`crate::stego::header::FeatureWord::sigma`]
+//! `alpha` is quantized to `f32` and carried in
+//! [`crate::stego::header::SpatialHeaderV4::sigma`]
 //! (clamped to `[0.01, 0.90]`).
 
 use rayon::prelude::*;

@@ -28,6 +28,10 @@ pub mod envelope;
 pub mod format;
 #[doc(hidden)]
 pub mod header;
+/// Extension record used by `EmbedOptions::extensions` and the HEVC expert
+/// entry points. Re-exported here so callers do not have to name the
+/// `#[doc(hidden)]` `header` module.
+pub use header::Tlv;
 #[cfg(feature = "content-hevc")]
 pub mod heif;
 #[cfg(feature = "content-hevc")]

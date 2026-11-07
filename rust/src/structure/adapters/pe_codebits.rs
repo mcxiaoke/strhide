@@ -519,7 +519,7 @@ pub fn parse_channel_header_from_profile(
 }
 
 /// Reads the channel header from a code range, scanning only the first
-/// [`CHANNEL_HEADER_BITS`] candidate positions.
+/// `CHANNEL_HEADER_BITS` candidate positions.
 ///
 /// Callers that need capacity validation use
 /// [`parse_channel_header_from_profile`] with a full profile; this entry point

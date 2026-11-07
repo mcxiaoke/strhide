@@ -21,6 +21,7 @@ pub mod params;
 pub mod registry;
 pub mod rejection;
 
+pub use adapters::StrategyCapacity;
 pub use engine::*;
 pub use options::{ReadOptions, RestoreOptions, StrategyChoice, WriteOptions};
 pub use params::StructureProfile;

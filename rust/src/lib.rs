@@ -126,7 +126,7 @@
 //!   (HILL / S-UNIWARD), JPEG (UERD / J-UNIWARD + ternary STC), HEVC CABAC,
 //!   and WAV/FLAC PCM. Its public surface is re-exported at the crate root:
 //!   [`JpegFormatProfile`] / [`DEFAULT_JPEG_FORMAT`] (wire-format identity),
-//!   [`CipherSuiteId`] / [`Credential`] (suite and KDF credential),
+//!   [`crypto::CipherSuiteId`] / [`crypto::Credential`] (suite and KDF credential),
 //!   [`JpegParams`] / [`ExtractParams`] (per-call tuning), and
 //!   [`embed_carrier`] / [`extract_carrier`] (entry points a private build
 //!   calls with its own [`stego::params::StegoProfile`]).

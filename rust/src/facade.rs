@@ -715,7 +715,7 @@ impl StrHide {
     /// [`std::env::args_os`] returns it; clap uses that element for help and
     /// error output, so callers assembling arguments manually must supply one.
     /// Run a domain-restricted command tree ([`Domain::Structure`],
-    /// [`Domain::Stego`], [`Domain::Diagnostics`], or [`Domain::All`]) with
+    /// [`Domain::Content`], or [`crate::cli::Domain::All`]) with
     /// this engine's dialect and baseline parameters, returning the process
     /// exit code **without** calling [`std::process::exit`].
     ///

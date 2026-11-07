@@ -472,7 +472,7 @@ pub fn heif_strategy_capacities() -> Vec<StrategyCapacity> {
 }
 
 /// Upper bound on the `meta` box body buffered by
-/// [`read_meta_box_bytes`]. Both `iinf`/`iloc` probes only need that one box,
+/// `read_meta_box_bytes`. Both `iinf`/`iloc` probes only need that one box,
 /// which sits near the file start in every real carrier, so the cap bounds a
 /// hostile container while a multi-GB `mdat` is raced over with `seek`
 /// instead of being buffered (review A P2-08). Past the cap the probes answer
