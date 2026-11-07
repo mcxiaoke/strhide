@@ -757,6 +757,7 @@ IEEE-754 只约束 `+ - * /` 与 `sqrt`，libm 的超越函数在 glibc / UCRT /
 | `ln` | `frexp` 取指数，尾数归一到 `[√2/2, √2)`，`2·atanh(s)` 级数到 `z^10/21` | ~1 ulp |
 | `ln_1p` | `|x| < 2^-4` 走 12 项级数，否则回落 `ln(1+x)` | ~1 ulp |
 | `cos` | 三词 `π/2` 归约（首个 33 位，`n·hi` 精确），象限选择，`r^16`/`r^17` 多项式 | ~1 ulp |
+| `log2` | `ln(x) · log2(e)`；只用于把 `epsilon` 量化成头里的指数，取整前的一点点误差不影响 `k` | ~1 ulp |
 
 只用 `+ - * /`、位级 `frexp`/`ldexp`、固定项数与固定顺序，因此结果是输入位模式的纯函数，
 与平台数学库无关。精度比 libm 差一点无所谓——这里的契约是可复现，不是正确舍入。
@@ -774,7 +775,12 @@ exp    68107bf871d53df2
 ln     6021ef64db0e27ef
 cos    55f3c5acb971153a
 ln_1p  23e6e71dccf69b20
+log2   d97b86f58ee1dfba
 ```
+
+覆盖范围：空间域的 DCT 基与全域标定、JPEG 的 `precover` DCT 基（J-UNIWARD / J-MiPOD 用）、
+以及 `header::quantize_epsilon_k` / 音频的同名函数（决定头里的 `neg_log2_epsilon`）。
+`analysis` 域另有一份相同的 DCT 基，但那是检测分析、不参与写格式，仍用 libm。
 
 已验证（2026-11-07）：**x86_64/MSVC、x86_64/glibc、aarch64/glibc 三个平台**的 Rust 实现给出同样的四组摘要，
 Python 在两个 x86 平台、Go 在 x86_64 上也相同；28 例字节基线在三个平台上都是 **28/28 一致**。

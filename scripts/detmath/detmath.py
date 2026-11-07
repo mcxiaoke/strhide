@@ -175,6 +175,17 @@ def ln_1p(x: float) -> float:
     return ln(1.0 + x)
 
 
+def log2(x: float) -> float:
+    """`ln(x) * log2(e)`: only used to quantise epsilon, then rounded to int."""
+    if x != x or x < 0.0:
+        return float("nan")
+    if x == 0.0:
+        return float("-inf")
+    if x == float("inf"):
+        return float("inf")
+    return ln(x) * 1.4426950408889634
+
+
 def _sin_small(r: float) -> float:
     z = r * r
     p = SIN_C[-1]
@@ -240,6 +251,7 @@ def digests() -> dict[str, int]:
     d["ln"] = _fnv([ln(i * 0.71) for i in range(1, 401)] + [ln(1e-12 * (i + 1)) for i in range(60)])
     d["cos"] = _fnv([cos(math.pi * k * (2 * a + 1) / 18.0) for k in range(9) for a in range(9)])
     d["ln_1p"] = _fnv([ln_1p(i * 0.003) for i in range(200)])
+    d["log2"] = _fnv([log2(2.0 ** -k) for k in range(1, 61)] + [log2(i * 0.37) for i in range(1, 201)])
     return d
 
 
@@ -248,13 +260,14 @@ EXPECTED = {
     "ln": 0x6021EF64DB0E27EF,
     "cos": 0x55F3C5ACB971153A,
     "ln_1p": 0x23E6E71DCCF69B20,
+    "log2": 0xD97B86F58EE1DFBA,
 }
 
 
 def main() -> int:
     got = digests()
     ok = True
-    for name in ("exp", "ln", "cos", "ln_1p"):
+    for name in ("exp", "ln", "cos", "ln_1p", "log2"):
         good = got[name] == EXPECTED[name]
         ok = ok and good
         print(f"{name:<7} {got[name]:016x} {'ok' if good else 'MISMATCH'} (rust {EXPECTED[name]:016x})")

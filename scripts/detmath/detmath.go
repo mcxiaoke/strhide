@@ -174,6 +174,21 @@ func ln1p(x float64) float64 {
 	return ln(1.0 + x)
 }
 
+// log2 is ln(x) * log2(e); it is only used to turn epsilon into the header's
+// exponent field, where the value is rounded to an integer straight away.
+func log2(x float64) float64 {
+	if math.IsNaN(x) || x < 0 {
+		return math.NaN()
+	}
+	if x == 0 {
+		return math.Inf(-1)
+	}
+	if math.IsInf(x, 1) {
+		return math.Inf(1)
+	}
+	return ln(x) * 1.4426950408889634
+}
+
 func sinSmall(r float64) float64 {
 	z := r * r
 	p := sinC[len(sinC)-1]
@@ -225,8 +240,8 @@ func fnv1a(f func(index int) float64, n int) uint64 {
 	return h
 }
 
-func digests() [4]uint64 {
-	var d [4]uint64
+func digests() [5]uint64 {
+	var d [5]uint64
 
 	expInputs := make([]float64, 0, 481+120)
 	for i := -240; i <= 240; i++ {
@@ -261,12 +276,19 @@ func digests() [4]uint64 {
 	}, 81)
 
 	d[3] = fnv1a(func(i int) float64 { return ln1p(float64(i) * 0.003) }, 200)
+
+	d[4] = fnv1a(func(i int) float64 {
+		if i < 60 {
+			return log2(math.Pow(2, -float64(i+1)))
+		}
+		return log2(float64(i-60+1) * 0.37)
+	}, 260)
 	return d
 }
 
 func main() {
-	want := [4]uint64{0x68107BF871D53DF2, 0x6021EF64DB0E27EF, 0x55F3C5ACB971153A, 0x23E6E71DCCF69B20}
-	names := [4]string{"exp", "ln", "cos", "ln_1p"}
+	want := [5]uint64{0x68107BF871D53DF2, 0x6021EF64DB0E27EF, 0x55F3C5ACB971153A, 0x23E6E71DCCF69B20, 0xD97B86F58EE1DFBA}
+	names := [5]string{"exp", "ln", "cos", "ln_1p", "log2"}
 	got := digests()
 	ok := true
 	for i, name := range names {

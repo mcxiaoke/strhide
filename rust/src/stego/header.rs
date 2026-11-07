@@ -31,7 +31,9 @@ pub fn quantize_epsilon_k(epsilon: f64) -> u16 {
     if !epsilon.is_finite() || epsilon <= 0.0 {
         return 23;
     }
-    (-epsilon.log2()).round().clamp(1.0, 127.0) as u16
+    (-crate::stego::detmath::log2(epsilon))
+        .round()
+        .clamp(1.0, 127.0) as u16
 }
 
 // ---------------------------------------------------------------------------

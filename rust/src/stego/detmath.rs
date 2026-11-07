@@ -230,6 +230,25 @@ fn cos_small(r: f64) -> f64 {
     1.0 + z * q
 }
 
+/// `log2(x)`.
+///
+/// Only used to turn `epsilon` into the header's exponent field, where the
+/// result is immediately rounded to an integer -- so sharing `ln`'s
+/// determinism is enough, and a last-bit difference from libm's `log2` cannot
+/// change the stored `k` unless it lands exactly on a half-integer.
+pub fn log2(x: f64) -> f64 {
+    if x.is_nan() || x < 0.0 {
+        return f64::NAN;
+    }
+    if x == 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if x.is_infinite() {
+        return f64::INFINITY;
+    }
+    ln(x) * std::f64::consts::LOG2_E
+}
+
 /// `cos(x)`.
 pub fn cos(x: f64) -> f64 {
     if !x.is_finite() {
@@ -320,9 +339,17 @@ mod tests {
                     }
                 }
             }
-            _ => {
+            3 => {
                 for i in 0..200 {
                     push(ln_1p(i as f64 * 0.003));
+                }
+            }
+            _ => {
+                for k in 1..=60 {
+                    push(log2(2f64.powi(-k)));
+                }
+                for i in 1..=200 {
+                    push(log2(i as f64 * 0.37));
                 }
             }
         }
@@ -335,14 +362,16 @@ mod tests {
         assert_eq!(digest(1), PINNED[1], "ln digest moved");
         assert_eq!(digest(2), PINNED[2], "cos digest moved");
         assert_eq!(digest(3), PINNED[3], "ln_1p digest moved");
+        assert_eq!(digest(4), PINNED[4], "log2 digest moved");
     }
 
     /// Pinned so a change to the arithmetic cannot slip through: the Go and
     /// Python ports in `scripts/detmath/` carry the same four numbers.
-    const PINNED: [u64; 4] = [
+    const PINNED: [u64; 5] = [
         0x6810_7bf8_71d5_3df2, // exp
         0x6021_ef64_db0e_27ef, // ln
         0x55f3_c5ac_b971_153a, // cos
         0x23e6_e71d_ccf6_9b20, // ln_1p
+        0xd97b_86f5_8ee1_dfba, // log2
     ];
 }

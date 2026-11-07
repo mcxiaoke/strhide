@@ -57,7 +57,8 @@ pub(crate) fn dct_basis() -> [[f64; N]; N] {
             } else {
                 1.0
             };
-            *v = 0.5 * cu * (((2 * x + 1) as f64) * (u as f64) * std::f64::consts::PI / 16.0).cos();
+            let angle = ((2 * x + 1) as f64) * (u as f64) * std::f64::consts::PI / 16.0;
+            *v = 0.5 * cu * crate::stego::detmath::cos(angle);
         }
     }
     m
