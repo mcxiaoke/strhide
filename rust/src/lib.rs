@@ -131,10 +131,10 @@
 //! - [`core`] — layer 1: [`core::i18n`] (message catalogue),
 //!   [`core::control`] (progress + cancellation), [`core::payload`],
 //!   [`core::media`], [`core::fs`], [`core::pipeline`] (batch orchestration)
-//!   and, when the `config` feature is on, [`core::config`] (TOML settings).
+//!   and, when the `config` feature is on, `core::config` (TOML settings).
 //! - [`crypto`] / [`errors`] / [`params`] / [`commit`] — crate-root residents
 //!   that a later batch moves under [`core`].
-//! - [`cli`] — layer 5: the command line (feature `cli`).
+//! - `cli` — layer 5: the command line (feature `cli`).
 //!
 //! ## Prelude
 //!
