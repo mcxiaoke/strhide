@@ -85,35 +85,74 @@ pub fn check_pe_authenticode<R: Read + Seek + ?Sized>(
     }
     let opt_magic = u16::from_le_bytes(opt_magic_bytes);
 
-    let sec_dir_offset = match opt_magic {
-        0x10B => e_lfanew + 24 + 128,
-        0x20B => e_lfanew + 24 + 144,
+    let sec_dir_rel = match opt_magic {
+        0x10B => 128u64,
+        0x20B => 144u64,
         _ => {
             reader.seek(SeekFrom::Start(start_pos))?;
             return Ok(None);
         }
     };
 
-    if reader.seek(SeekFrom::Start(sec_dir_offset)).is_err() {
+    // The directory is only meaningful when the optional header actually
+    // declares room for it. Without this bound a truncated header silently
+    // read whatever bytes happened to sit at the fixed +128/+144 slot.
+    if u64::from(size_of_opt_header) >= sec_dir_rel + 8 {
+        let sec_dir_offset = e_lfanew + 24 + sec_dir_rel;
+        if reader.seek(SeekFrom::Start(sec_dir_offset)).is_err() {
+            reader.seek(SeekFrom::Start(start_pos))?;
+            return Ok(None);
+        }
+
+        let mut sec_dir_bytes = [0u8; 8];
+        if reader.read_exact(&mut sec_dir_bytes).is_err() {
+            // The header promised a directory that cannot be read: fail closed
+            // rather than reporting "unsigned" for an unparseable PE.
+            reader.seek(SeekFrom::Start(start_pos))?;
+            return Ok(Some(
+                "Windows PE security directory could not be read; refusing to modify a PE whose signature state is unknown.".into(),
+            ));
+        }
+
+        let virt_addr = u32::from_le_bytes(sec_dir_bytes[0..4].try_into().unwrap());
+        let size = u32::from_le_bytes(sec_dir_bytes[4..8].try_into().unwrap());
+
         reader.seek(SeekFrom::Start(start_pos))?;
-        return Ok(None);
+
+        if virt_addr != 0 && size != 0 {
+            return Ok(Some(
+                "Windows PE contains an Authenticode digital signature. Modification will invalidate the signature.".into(),
+            ));
+        }
     }
 
-    let mut sec_dir_bytes = [0u8; 8];
-    if reader.read_exact(&mut sec_dir_bytes).is_err() {
+    // Integrity fields live in the first 72 bytes of the optional header:
+    // CheckSum at +64, DllCharacteristics at +70. A non-zero checksum becomes
+    // stale on any modification, and FORCE_INTEGRITY makes the loader enforce it.
+    if size_of_opt_header >= 72 {
+        if reader.seek(SeekFrom::Start(e_lfanew + 24 + 64)).is_err() {
+            reader.seek(SeekFrom::Start(start_pos))?;
+            return Ok(None);
+        }
+        let mut integrity = [0u8; 8];
+        if reader.read_exact(&mut integrity).is_err() {
+            reader.seek(SeekFrom::Start(start_pos))?;
+            return Ok(None);
+        }
+        let check_sum = u32::from_le_bytes(integrity[0..4].try_into().unwrap());
+        let dll_chars = u16::from_le_bytes(integrity[6..8].try_into().unwrap());
         reader.seek(SeekFrom::Start(start_pos))?;
-        return Ok(None);
-    }
 
-    let virt_addr = u32::from_le_bytes(sec_dir_bytes[0..4].try_into().unwrap());
-    let size = u32::from_le_bytes(sec_dir_bytes[4..8].try_into().unwrap());
-
-    reader.seek(SeekFrom::Start(start_pos))?;
-
-    if virt_addr != 0 && size != 0 {
-        return Ok(Some(
-            "Windows PE contains an Authenticode digital signature. Modification will invalidate the signature.".into(),
-        ));
+        if dll_chars & 0x0080 != 0 {
+            return Ok(Some(
+                "Windows PE declares FORCE_INTEGRITY (DllCharacteristics 0x0080); the loader verifies its checksum, which any modification invalidates.".into(),
+            ));
+        }
+        if check_sum != 0 {
+            return Ok(Some(
+                "Windows PE carries a non-zero CheckSum; modifying it would leave the checksum stale.".into(),
+            ));
+        }
     }
 
     Ok(None)
@@ -446,6 +485,24 @@ pub fn run_rejection_checks(
         // images, C:\Program Files\...), so only reject a read-only carrier for
         // in-place writes.
         let in_place = crate::structure::same_file(carrier, target);
+        let link_metadata = std::fs::symlink_metadata(carrier)?;
+        if in_place && link_metadata.file_type().is_symlink() {
+            return Err(StrHideError::Rejection(format!(
+                "Carrier '{}' is a symbolic link. In-place writing replaces the link itself, not its target; use -o to write elsewhere.",
+                carrier.display()
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if in_place && link_metadata.nlink() > 1 {
+                return Err(StrHideError::Rejection(format!(
+                    "Carrier '{}' has {} hard links. In-place writing would leave the other names pointing at stale content; use -o to write elsewhere.",
+                    carrier.display(),
+                    link_metadata.nlink()
+                )));
+            }
+        }
         let metadata = std::fs::metadata(carrier)?;
         if in_place && metadata.permissions().readonly() {
             return Err(StrHideError::Rejection(format!(

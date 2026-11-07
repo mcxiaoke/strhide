@@ -97,6 +97,11 @@ pub fn parse_pe_headers<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<PeInf
                 if sec_va != 0 && sec_sz != 0 {
                     has_authenticode = true;
                 }
+            } else {
+                // The header declares room for the directory but the bytes are
+                // unreadable: treat the PE as signed rather than injecting into
+                // one whose signature state cannot be determined.
+                has_authenticode = true;
             }
         }
     }
