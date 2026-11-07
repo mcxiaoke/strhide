@@ -26,7 +26,15 @@ pub mod registry;
 pub mod rejection;
 
 pub use adapters::StrategyCapacity;
-pub use engine::*;
+pub use engine::{
+    CarrierMetadata, InspectResult, LevelStatus, MetadataInspection, PayloadSource, ReadResult,
+    ReadSummary, RemoveResult, STEALTH_DOMAIN, VerifyResult, Warning, WriteResult,
+    commit_carrier_bytes, inspect_carrier, inspect_carrier_bytes, inspect_carrier_with,
+    read_carrier, read_carrier_bytes, read_carrier_with_dialect, remove_carrier,
+    remove_carrier_bytes, remove_carrier_with_dialect, same_file, sanitize_filename,
+    verify_carrier, verify_carrier_bytes, verify_carrier_with, verify_passed, write_carrier,
+    write_carrier_bytes, write_carrier_with,
+};
 pub use options::{ReadOptions, RestoreOptions, StrategyChoice, WriteOptions};
 pub use params::StructureProfile;
 pub use registry::StrategyId;
