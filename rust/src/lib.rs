@@ -132,8 +132,9 @@
 //!   [`core::control`] (progress + cancellation), [`core::payload`],
 //!   [`core::media`], [`core::fs`], [`core::pipeline`] (batch orchestration)
 //!   and, when the `config` feature is on, `core::config` (TOML settings).
-//! - [`crypto`] / [`errors`] / [`params`] / [`commit`] — crate-root residents
-//!   that a later batch moves under [`core`].
+//! - [`crypto`] / [`errors`] / [`params`] — layer 1, implemented under
+//!   [`core`] and re-exported at the crate root for compatibility; the same
+//!   applies to `commit` when a domain base feature is enabled.
 //! - `cli` — layer 5: the command line (feature `cli`).
 //!
 //! ## Prelude

@@ -12,7 +12,6 @@ documentation = "https://docs.rs/strhide"
 readme = "README.md"
 keywords = ["steganography", "stego", "data-hiding", "security", "lossless"]
 categories = ["cryptography", "multimedia", "command-line-utilities"]
-exclude = ["tests/"]
 
 [features]
 # Library defaults: both domains plus steganalysis, but not the CLI. `cargo add

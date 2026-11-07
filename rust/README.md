@@ -399,7 +399,7 @@ cargo build --release --all-features
 
 ### Domain-Specific Entry Points
 
-`strhide` compiles four targeted CLI binaries from the same codebase:
+`strhide` compiles five targeted CLI binaries from the same codebase:
 
 | Binary | Available Subcommands | Description |
 | :--- | :--- | :--- |
@@ -412,33 +412,33 @@ cargo build --release --all-features
 
 ```bash
 # Hide text in a photo (writes to photo-out.png)
-sth write photo.png -t "Secret message"
+strhide write photo.png -t "Secret message"
 
-# Hide a ZIP file inside a PDF, encrypted with password and a hint
-sth write document.pdf -d archive.zip -p "P@ss123" -H "Company vault"
+# Hide a ZIP file inside a PDF, encrypted with a password file and a hint
+strhide write document.pdf -d archive.zip --password-file vault-pass.txt -H "Company vault"
 
 # In-place hiding with automatic .bak backup
-sth write photo.png -t "Secret" --in-place
+strhide write photo.png -t "Secret" --in-place
 
 # Read payload back
-sth read photo-out.png --stdout
-sth read photo-out.png -o recovered/
+strhide read photo-out.png --stdout
+strhide read photo-out.png -o recovered/
 
 # 100% bit-exact carrier restoration (structure domain; fails closed after a content embed)
-sth restore photo-out.png -o clean.png
+strhide restore photo-out.png -o clean.png
 
 # Content-adaptive steganography (HILL for PNG, UERD for JPEG)
-sth embed cover.jpg -t "Secret" -o stego.jpg
-sth extract stego.jpg --stdout
+strhide embed cover.jpg -t "Secret" -o stego.jpg
+strhide extract stego.jpg --stdout
 
 # HEVC CABAC bypass steganography (zero file size growth Δ=0)
-sth embed video.mp4 -t "Secret" -o stego.mp4
+strhide embed video.mp4 -t "Secret" -o stego.mp4
 
 # Probe stego embedding capacity without modifying the file
-sth capacity photo.png
+strhide capacity photo.png
 
 # Black-box steganalysis inspection
-sth scan suspicious.jpg
+strhide scan suspicious.jpg
 ```
 
 ---

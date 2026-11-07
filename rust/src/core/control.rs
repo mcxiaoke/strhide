@@ -17,8 +17,8 @@
 //!   is not achievable while one CABAC round can take tens of seconds, and not
 //!   needed either -- "the stage changed" is what tells a user it is alive.
 //! - **Cancellation returns an error**. Engines must not call
-//!   `std::process::exit`: that skips `Drop`, so the temp file a
-//!   [`crate::commit`] guard created would survive as a half-written carrier.
+//!   `std::process::exit`: that skips `Drop`, so the temp-file guard a commit
+//!   created would survive as a half-written carrier.
 //!   Returning [`StrHideError::Cancelled`] unwinds normally and lets the guard
 //!   clean up.
 //!

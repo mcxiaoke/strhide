@@ -15,9 +15,6 @@
 //! - [`pipeline`] — batch orchestration (multi-carrier rules, output-path
 //!   derivation, preflight), also usable by a GUI or an HTTP service;
 //! - `config` — the TOML settings model (feature `config`).
-//!
-//! The remaining crate-root residents (`crypto`, `errors`, `params`, `commit`)
-//! move here in a later batch so each commit stays reviewable.
 
 pub mod batch;
 #[cfg(any(feature = "structure-base", feature = "content-base"))]

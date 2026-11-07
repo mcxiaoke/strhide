@@ -2,8 +2,8 @@
 //!
 //! Both `engine::write_carrier_with` and `stego::io::embed_carrier_file` need
 //! the same "write a temp file, rename over the target, keep a backup, clone
-//! timestamps" behaviour, so it lives here ungated and is re-exported from
-//! `engine` for compatibility.
+//! timestamps" behaviour, so it lives here behind the domain base features and
+//! is re-exported from `engine` for compatibility.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
