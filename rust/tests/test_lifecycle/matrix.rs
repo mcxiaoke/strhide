@@ -113,7 +113,9 @@ impl Fmt {
             Fmt::Mkv => "ebml_void",
             Fmt::Zip => "pre_cd_inject",
             Fmt::Pdf => "incremental",
-            Fmt::Pe => "pe_codebits",
+            // `pe_codebits` is opt-in: it rewrites instruction encodings in
+            // `.text`, so `auto` stops at section padding / overlay.
+            Fmt::Pe => "pe_slack",
         }
     }
 
@@ -128,7 +130,7 @@ impl Fmt {
             Fmt::Mkv => &["ebml_void", "eof"],
             Fmt::Zip => &["pre_cd_inject", "eof"],
             Fmt::Pdf => &["incremental", "eof"],
-            Fmt::Pe => &["pe_codebits", "pe_slack", "pe_overlay", "eof"],
+            Fmt::Pe => &["pe_slack", "pe_overlay", "pe_codebits", "eof"],
         }
     }
 

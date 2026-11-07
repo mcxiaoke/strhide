@@ -207,7 +207,7 @@ pub static CAPABILITIES: &[Capability] = &[
     Capability {
         format: FileFormat::Pe,
         #[cfg(all(feature = "structure-base", feature = "structure-pe"))]
-        structure: &["pe_codebits", "pe_slack", "pe_overlay", "eof"],
+        structure: &["pe_slack", "pe_overlay", "pe_codebits", "eof"],
         #[cfg(all(feature = "structure-base", not(feature = "structure-pe")))]
         structure: &["pe_slack", "pe_overlay", "eof"],
         #[cfg(not(feature = "structure-base"))]

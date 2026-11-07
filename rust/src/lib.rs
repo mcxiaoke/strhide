@@ -45,7 +45,7 @@
 //! | MP4 | `box_uuid` (ISO BMFF uuid box) | `eof` |
 //! | ZIP | `pre_cd_inject` (before central directory) | `eof` |
 //! | PDF | `incremental` (append updates) | `eof` |
-//! | PE | `pe_codebits` / `pe_slack` / `pe_overlay` | `eof` |
+//! | PE | `pe_slack` (section padding) | `pe_overlay` (then `eof`); `pe_codebits` is opt-in only |
 //!
 //! `strategy = "auto"` (the [`structure::WriteOptions`] default) picks the
 //! primary strategy when it fits and falls back to `eof` transparently.

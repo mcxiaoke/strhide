@@ -38,11 +38,12 @@ F 级改动会令既有载体不可读或破坏字节级基线；D 级换值产�
 
 三种策略互斥使用，不组合写入：`pe_overlay` 为连续追加型，UBE 位于文件尾部，隐蔽性最差但容量无限；`pe_slack` 为连续覆盖型，UBE 必须完整落在**单个**零值 padding 区间内，文件大小不变；`pe_codebits` 为散落型，UBE 没有连续文件偏移，`inject_offset = inject_size = 0`，引擎不得按文件偏移回写信头/尾标（`mod.rs:196-204`、`engine.rs:1420-1452`）。
 
-`choose_auto_strategy` 对 PE 的实际优先级是 **`pe_codebits` → `pe_slack` → `pe_overlay`**（`pe.rs:171-206`）：
+`choose_auto_strategy` 对 PE 的实际优先级是 **`pe_slack` → `pe_overlay`**（`pe.rs:176-210`）；`pe_codebits` **不在 `auto` 的候选内**，只能显式 `-s pe_codebits`：
 
-1. 若 `structure-pe` 可用、能解析 x86/x64 `.text`，且可用槽位数 `>= (14 + ube_len) * 8`，同时存在长度 `>= 14 + ube_len` 的连续零值 slack，选 `pe_codebits`（`pe.rs:184-195`）。
-2. 否则若能解析节表且存在长度 `>= ube_len` 的连续零值 slack，选 `pe_slack`（`pe.rs:196-204`）。
-3. 否则选 `pe_overlay`（`pe.rs:205`）。
+1. 若能解析节表且存在长度 `>= ube_len` 的连续零值 slack，选 `pe_slack`。
+2. 否则选 `pe_overlay`。
+
+为什么排除 `pe_codebits`：它用 iced 线性扫描 `.text`，只过滤 `Code::INVALID`，不建 CFG、不识别内联跳转表/常量表；被误判为指令的数据字节一旦落在改写槽位上，程序只会在读取该表的那条分支上出错，任何“写入后仍能运行”的冒烟测试都看不出来。它因此被定为**高级/显式**策略：`supported_strategies` 与 `inspect` 的列表都把它排在最后，并在 note 中标注 opt-in。
 
 `auto` **不会**选择 `eof`；`eof` 仅在显式指定时使用，且注入行为与 `pe_overlay` 相同，只是 `strategy_id = 1` 且 locate 时不做“位于映像边界之后”的检查。`auto` 只做一次判定，失败不回退、不重试；显式策略不支持时由引擎返回 `UnsupportedFormat`（`engine.rs:1242-1255`）。
 
@@ -143,7 +144,7 @@ available = capacity >= min_ube_len(1)        （1 字节载荷的最小可写 U
 - 对 .NET / CLR IL、UPX 或加壳后的压缩数据、把数据混在 `.text` 中的自修改/跳转表代码仍能保持可执行语义；代码只按 `iced` 线性解码过滤，不建 CFG，也不识别 CLR/加壳。
 - 对非 x86/x64 的机器类型可用；`Machine` 不是 `0x14C`/`0x8664` 时直接 `UnsupportedMachine`（`pe_layout.rs:229-233`）。
 
-失败与重试：显式 `pe_codebits` 在容量/零值 slack 不足时返回硬错误，不自动改写为其他策略（`pe.rs:705-710`）；`auto` 会在选型阶段落到 `pe_slack` 或 `pe_overlay`，但不会重试同一载体上的同一策略。载体已有合法通道时，第二次 `pe_codebits` 注入被拒绝（`pe.rs:692-703`）。
+失败与重试：显式 `pe_codebits` 在容量/零值 slack 不足时返回硬错误，不自动改写为其他策略（`pe.rs:705-710`）。载体已有合法通道时，第二次 `pe_codebits` 注入被拒绝（`pe.rs:692-703`）。`auto` 根本不进入本策略，因此在默认路径上不存在“选错 `pe_codebits`”的可能。
 
 ## 6 pe_slack
 

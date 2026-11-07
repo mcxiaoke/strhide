@@ -38,10 +38,13 @@ fn write_opts<'a>(out: &'a Path, strategy: &'a str) -> WriteOptions<'a> {
 
 // --------------------------------------------------------------------------- tests
 
-/// T4: auto selects pe_codebits, the full flow round-trips, the carrier size
-/// is unchanged, and remove restores the carrier byte-for-byte.
+/// T4: an explicit `pe_codebits` write round-trips, the carrier size is
+/// unchanged, and remove restores the carrier byte-for-byte.
+///
+/// `auto` no longer selects this strategy (it rewrites `.text`, see
+/// `choose_auto_strategy`), so the caller has to name it.
 #[test]
-fn codebits_auto_roundtrip_and_byte_exact_restore() {
+fn codebits_explicit_roundtrip_and_byte_exact_restore() {
     let dir = scratch("auto");
     let carrier = dir.join("app.exe");
     let original = make_pe(0x8664, 0x20B, 0x3000, false); // ~2.4k positions
@@ -52,13 +55,13 @@ fn codebits_auto_roundtrip_and_byte_exact_restore() {
     let result = write_carrier(
         &carrier,
         PayloadSource::Text("meet at the old bridge, 9pm"),
-        &write_opts(&out, "auto"),
+        &write_opts(&out, "pe_codebits"),
     )
     .expect("write");
     assert_eq!(
         result.strategy.name(),
         "pe_codebits",
-        "auto must pick pe_codebits: {:?}",
+        "explicit pe_codebits must be honoured: {:?}",
         result.strategy_note
     );
     assert_eq!(
@@ -112,7 +115,7 @@ fn codebits_auto_roundtrip_and_byte_exact_restore() {
     let r2 = write_carrier(
         &restored,
         PayloadSource::Text("again"),
-        &write_opts(&out2, "auto"),
+        &write_opts(&out2, "pe_codebits"),
     )
     .expect("re-write after remove");
     assert_eq!(r2.strategy.name(), "pe_codebits");
@@ -344,7 +347,7 @@ fn double_write_refused() {
         write_carrier(
             &out,
             PayloadSource::Text("second"),
-            &write_opts(&out2, "auto")
+            &write_opts(&out2, "pe_codebits")
         )
         .is_err(),
         "writing over an existing envelope must be refused"
@@ -412,7 +415,7 @@ fn codebits_32bit_pe_roundtrip() {
     let result = write_carrier(
         &carrier,
         PayloadSource::Text("thirty-two bits"),
-        &write_opts(&out, "auto"),
+        &write_opts(&out, "pe_codebits"),
     )
     .expect("write");
     assert_eq!(result.strategy.name(), "pe_codebits");
@@ -647,11 +650,16 @@ fn inspect_reports_exact_codebits_capacity() {
             .iter()
             .map(|c| c.strategy.as_str())
             .collect::<Vec<_>>(),
-        vec!["pe_codebits", "pe_slack", "pe_overlay", "eof"],
+        vec!["pe_slack", "pe_overlay", "pe_codebits", "eof"],
         "priority order must match supported_strategies"
     );
-    let codebits = &res.strategies[0];
+    let codebits = &res.strategies[2];
     assert!(codebits.available);
+    assert!(
+        codebits.note.as_deref().unwrap_or("").contains("opt-in"),
+        "the list must say the channel is opt-in: {:?}",
+        codebits.note
+    );
     let cap = codebits.capacity_bytes.expect("measured capacity");
     assert!(
         cap >= 136,
@@ -665,7 +673,7 @@ fn inspect_reports_exact_codebits_capacity() {
     let written = write_carrier(
         &carrier,
         PayloadSource::Text("fits"),
-        &write_opts(&out, "auto"),
+        &write_opts(&out, "pe_codebits"),
     )
     .expect("write");
     assert_eq!(written.strategy.name(), "pe_codebits");
@@ -688,8 +696,12 @@ fn inspect_marks_codebits_unavailable_on_tiny_text() {
     fs::write(&carrier, make_pe(0x8664, 0x20B, 0x200, true)).unwrap();
 
     let res = inspect_carrier(&carrier, None).expect("inspect");
-    let codebits = &res.strategies[0];
-    assert_eq!(codebits.strategy, "pe_codebits");
+    let codebits = res
+        .strategies
+        .iter()
+        .find(|c| c.strategy == "pe_codebits")
+        .expect("pe_codebits is listed");
+    assert!(!codebits.available, "tiny .text cannot host a channel");
     assert!(!codebits.available, "tiny .text cannot host a channel");
     assert!(
         codebits.capacity_bytes.is_some(),
@@ -1298,8 +1310,12 @@ fn codebits_zero_payload_capacity_is_not_available() {
         let carrier = dir.join(format!("c{text_len}.exe"));
         fs::write(&carrier, make_pe(0x8664, 0x20B, text_len, false)).unwrap();
         let res = inspect_carrier(&carrier, None).unwrap();
-        let cb = &res.strategies[0];
-        if cb.strategy.as_str() == "pe_codebits" && cb.capacity_bytes == Some(213) {
+        let cb = res
+            .strategies
+            .iter()
+            .find(|c| c.strategy == "pe_codebits")
+            .expect("pe_codebits is listed");
+        if cb.capacity_bytes == Some(213) {
             found = Some((carrier, cb.available));
             break;
         }
@@ -1322,4 +1338,41 @@ fn codebits_zero_payload_capacity_is_not_available() {
     )
     .unwrap_err();
     assert!(!err.to_string().is_empty(), "{err}");
+}
+
+/// Guard for the 2026-11-07 policy change: `auto` must never rewrite `.text`.
+///
+/// A carrier with a perfectly usable instruction channel (this fixture has
+/// thousands of positions) still has to land on `pe_slack` or `pe_overlay`:
+/// the channel swaps instruction encodings via a linear sweep, so a byte that
+/// is really a switch/jump-table entry can be rewritten and only the branch
+/// that reads it breaks.
+#[test]
+fn auto_never_selects_the_instruction_channel() {
+    let dir = scratch("auto_no_codebits");
+    let carrier = dir.join("app.exe");
+    fs::write(&carrier, make_pe(0x8664, 0x20B, 0x3000, false)).unwrap();
+
+    for (idx, payload) in ["x", "a slightly longer payload for slack"]
+        .iter()
+        .enumerate()
+    {
+        let out = dir.join(format!("app{idx}.steg.exe"));
+        let result = write_carrier(
+            &carrier,
+            PayloadSource::Text(payload),
+            &write_opts(&out, "auto"),
+        )
+        .expect("write");
+        let chosen = result.strategy.name();
+        assert_ne!(
+            chosen, "pe_codebits",
+            "auto must not touch .text: {:?}",
+            result.strategy_note
+        );
+        assert!(
+            matches!(chosen, "pe_slack" | "pe_overlay"),
+            "unexpected auto strategy {chosen}"
+        );
+    }
 }

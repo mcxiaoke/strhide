@@ -151,9 +151,13 @@ impl HostAdapter for PeAdapter {
     }
 
     fn supported_strategies(&self) -> Vec<&'static str> {
+        // Order matters: the first *available* entry is what `inspect` marks as
+        // the auto preference, so the list has to mirror `choose_auto_strategy`.
+        // `pe_codebits` is last because it rewrites instruction encodings in
+        // `.text` and is therefore opt-in only.
         #[cfg(feature = "structure-pe")]
         {
-            vec!["pe_codebits", "pe_slack", "pe_overlay", "eof"]
+            vec!["pe_slack", "pe_overlay", "pe_codebits", "eof"]
         }
         #[cfg(not(feature = "structure-pe"))]
         {
@@ -174,30 +178,26 @@ impl HostAdapter for PeAdapter {
     }
 
     fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, ube_size: u64) -> &'static str {
-        // Priority: instruction channel -> section padding -> overlay.
+        // Priority: section padding -> overlay -> (never) instruction channel.
         //
-        // Both zero-growth strategies are tried first because `pe_overlay`
-        // grows the file and leaves the single most obvious PE stego trace
-        // (data past the last section).
+        // Both zero-growth strategies are tried before `pe_overlay` because the
+        // overlay grows the file and leaves the single most obvious PE stego
+        // trace (data past the last section).
         //
-        // `pe_codebits` needs (a) an x86/x64 `.text` with enough instrumentable
-        // positions and (b) a contiguous zero-value slack run for the restore
-        // diff. `pe_slack` needs only a zero run, and a *smaller* one: the
-        // envelope is written in place, while the code-bit channel must park
-        // its `14 + ube` restore diff in padding. So any carrier that fits
-        // `pe_codebits` also fits `pe_slack` — the reverse is not true.
-        #[cfg(feature = "structure-pe")]
-        if let Ok(layout) = pe_codebits::parse_pe_code_layout_streaming(reader)
-            && let Ok(text) = pe_codebits::read_text_range(reader, &layout)
-        {
-            let (need_bits, need_slack) = pe_codebits::channel_requirement(ube_size as usize);
-            if pe_codebits::profile(&text, layout.bitness).len() >= need_bits
-                && let Ok(Some(_)) =
-                    pe_codebits::find_slack_run_streaming(reader, &layout.slack_ranges, need_slack)
-            {
-                return "pe_codebits";
-            }
-        }
+        // `pe_codebits` is deliberately *not* part of `auto`. It decodes `.text`
+        // with a linear sweep and swaps instruction encodings; bytes that are
+        // not instructions (inline jump tables, switch tables, constants) can
+        // decode as instrumentable forms and get rewritten, which breaks the
+        // program only on the branch that reads them -- no round-trip test can
+        // see it. Measured on a real carrier (whoami.exe: 320 B channel) the
+        // write succeeded and the file still ran, which is exactly the problem:
+        // the risk is invisible until a specific input hits the corrupted
+        // table. Callers that want it must name it: `write -s pe_codebits`.
+        //
+        // `pe_slack` needs a contiguous zero-value run; `pe_codebits` additionally
+        // needs an x86/x64 `.text` with enough instrumentable positions plus a
+        // `14 + ube` restore diff parked in padding. Any carrier that fits
+        // `pe_codebits` fits `pe_slack`, so the fallback covers it.
         if let Ok(layout) = pe_layout::parse_slack_layout_streaming(reader)
             && let Ok(Some(_)) = pe_slack::find_slack_run(
                 reader,
@@ -220,7 +220,7 @@ impl HostAdapter for PeAdapter {
             available: true,
             limit: "carrier-dependent (.text density + zero slack)".into(),
             note: Some(
-                "x86/x64 instruction-encoding channel; file size unchanged; run `inspect <carrier>` for the exact limit"
+                "x86/x64 instruction-encoding channel; opt-in only (`-s pe_codebits`); file size unchanged; run `inspect <carrier>` for the exact limit"
                     .into(),
             ),
         };
@@ -275,7 +275,7 @@ impl HostAdapter for PeAdapter {
                             format!("<= {} B (file size unchanged)", format_bytes(cap as u64));
                         codebits.note = Some(if usable {
                             format!(
-                                "instruction-encoding channel; smallest writable envelope needs {} B; longest zero-value slack run is {} B, which caps the restore diff",
+                                "instruction-encoding channel; opt-in only (`-s pe_codebits`) because it rewrites `.text`; smallest writable envelope needs {} B; longest zero-value slack run is {} B, which caps the restore diff",
                                 format_bytes(min_ube as u64),
                                 format_bytes(slack as u64)
                             )
@@ -345,8 +345,6 @@ impl HostAdapter for PeAdapter {
         }
 
         let mut caps = vec![
-            #[cfg(feature = "structure-pe")]
-            codebits,
             pad,
             StrategyCapacity {
                 strategy: "pe_overlay".into(),
@@ -355,6 +353,10 @@ impl HostAdapter for PeAdapter {
                 limit: "unlimited (file grows)".into(),
                 note: Some("appended beyond the PE image boundary".into()),
             },
+            // Listed last, and only advertised as usable when a caller names it:
+            // `auto` never picks it (see `choose_auto_strategy`).
+            #[cfg(feature = "structure-pe")]
+            codebits,
             StrategyCapacity {
                 strategy: "eof".into(),
                 capacity_bytes: None,

@@ -263,7 +263,7 @@ fn restored_sha(path: &Path) -> String {
 
 /// T2: `auto` keeps pe_codebits ahead of pe_slack when both are usable.
 #[test]
-fn auto_prefers_codebits_over_slack() {
+fn auto_never_prefers_codebits_over_slack() {
     let dir = scratch("priority");
     let carrier = dir.join("big.exe");
     fs::write(
@@ -277,6 +277,22 @@ fn auto_prefers_codebits_over_slack() {
     )
     .unwrap();
 
+    // The instruction channel is usable on this carrier, which is exactly the
+    // case that used to be rewritten by default. It must stay opt-in: the
+    // channel swaps instruction encodings via a linear sweep, so inline data
+    // tables can be rewritten silently.
+    let ins = inspect_carrier(&carrier, None).expect("inspect");
+    let codebits = ins
+        .strategies
+        .iter()
+        .find(|c| c.strategy == "pe_codebits")
+        .expect("pe_codebits is listed");
+    assert!(
+        codebits.available,
+        "fixture must expose a usable instruction channel: {:?}",
+        codebits.note
+    );
+
     let out = dir.join("big.steg.exe");
     let res = write_carrier(
         &carrier,
@@ -286,8 +302,8 @@ fn auto_prefers_codebits_over_slack() {
     .expect("write");
     assert_eq!(
         res.strategy.name(),
-        "pe_codebits",
-        "auto order is codebits -> slack -> overlay"
+        "pe_slack",
+        "auto order is slack -> overlay; codebits is explicit only"
     );
 }
 
@@ -697,7 +713,7 @@ fn inspect_reports_padding_capacity() {
     let names: Vec<&str> = res.strategies.iter().map(|c| c.strategy.as_str()).collect();
     assert_eq!(
         names,
-        vec!["pe_codebits", "pe_slack", "pe_overlay", "eof"],
+        vec!["pe_slack", "pe_overlay", "pe_codebits", "eof"],
         "priority order"
     );
 

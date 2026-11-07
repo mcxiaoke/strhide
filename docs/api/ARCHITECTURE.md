@@ -499,7 +499,7 @@ const MY_DIALECT: Dialect = Dialect::new()
 | `WavAdapter` | `WAV` | `riff_chunk`、`eof` |
 | `ZipAdapter` | `ZIP` | `pre_cd_inject`、`eof`（支持 `.zip`, `.jar`, `.docx`, `.xlsx`, `.pptx`） |
 | `PdfAdapter` | `PDF` | `incremental`、`eof` |
-| `PeAdapter` | `PE` | `pe_codebits`、`pe_slack`、`pe_overlay`、`eof` |
+| `PeAdapter` | `PE` | `pe_slack`、`pe_overlay`、`pe_codebits`（仅显式）、`eof` |
 | `MkvAdapter` | `MKV` | `ebml_void`、`eof` |
 
 - `strategy = "auto"`（默认）由 `choose_auto_strategy` 按 UBE 尺寸选主策略，放不下时透明回退 `eof`；回退会在 `strategy_note` 中说明。

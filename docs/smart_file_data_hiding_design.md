@@ -166,7 +166,7 @@
 | **MP4 / MOV** | `.mp4`, `.mov`, `.m4v` | `box_uuid` (默认), `eof` | 追加顶层 `uuid` Box（RFC 4122 v4 UUID，32/64位双模头部） |
 | **ZIP 归档** | `.zip`, `.jar`, `.docx`, `.xlsx`, `.pptx` | `pre_cd_inject` (默认), `eof` | 在中央目录（Central Directory）前切开插入信封，并修正 EOCD 记录中的 `cd_offset` |
 | **PDF 文档** | `.pdf` | `incremental` (默认), `eof` | ISO 32000-1 增量更新段（追加 Metadata 流对象、增量 xref 表与 trailer） |
-| **PE 可执行文件** | `.exe`, `.dll`, `.sys`, `.scr` | `pe_codebits`, `pe_slack`, `pe_overlay`, `eof` | 指令编码置换 / 节尾零填充填充（零文件增长）/ 镜像尾部 Overlay 追加 |
+| **PE 可执行文件** | `.exe`, `.dll`, `.sys`, `.scr` | `pe_slack`（默认）, `pe_overlay`, `pe_codebits`（需显式 `-s`）, `eof` | 节尾零填充（零文件增长）/ 镜像尾部 Overlay 追加 / 指令编码置换（改写 `.text`，高级） |
 | **EOF 适配器** | 上述格式超限或损坏时降级 | `eof` | 文件物理末尾追加（不作为未知格式兜底，未知格式直接拒绝） |
 
 ---

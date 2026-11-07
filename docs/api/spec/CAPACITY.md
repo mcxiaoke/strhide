@@ -113,7 +113,7 @@ payload    = framed_len(n, chunk_size) = n + chunks*20, chunks = ceil(n/chunk_si
 - PNG：`ube > 0x7FFFFFFF` 才退 `eof`；JPEG：`ube > 64 MiB`、`ube > app_segment_payload_capacity(sos)` 或 SOS 扫描失败退 `eof`。
 - PDF：对象头长度 `> MAX_OFFSET_DELTA(64)` 退 `eof`；这不是容量上限，而是信封头无法记录的位移。
 - HEIF：仅当 `ube <= u32::MAX-8` 且 `isobmff_can_item_hidden` 才选 `item_hidden`，否则 `box_uuid`（`heif.rs:57-68`）。
-- PE：优先级 `pe_codebits → pe_slack → pe_overlay`（`pe.rs:171-215`）。
+- PE：优先级 `pe_slack → pe_overlay`（`pe.rs:176-210`）；`pe_codebits` 是显式策略（`-s pe_codebits`），`auto` 不会选它。
 - ZIP：`cd_offset==0`、ZIP64 locator、`patch_limit + ube >= 0xFFFFFFFF`、EOCD 缺失均退 `eof`。
 - WAV/WebP：RIFF 声明边界必须等于物理长度且 4 GiB 头寸足够，否则 `eof`（`wav.rs:25-35`、`webp.rs:25-35`）。
 
