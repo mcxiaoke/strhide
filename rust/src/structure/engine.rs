@@ -1609,14 +1609,14 @@ pub fn write_carrier_with(
     if options.preserve_time
         && let Err(e) = filetime::set_file_times(target_path, orig_atime, orig_mtime)
     {
-        eprintln!(
-            "warning: failed to preserve file timestamps for '{}': {e}",
+        log::warn!(
+            "failed to preserve file timestamps for '{}': {e}",
             target_path.display()
         );
     }
     if let Err(e) = std::fs::set_permissions(target_path, orig_permissions) {
-        eprintln!(
-            "warning: failed to restore file permissions for '{}': {e}",
+        log::warn!(
+            "failed to restore file permissions for '{}': {e}",
             target_path.display()
         );
     }
@@ -2446,14 +2446,14 @@ pub fn remove_carrier_with_dialect(
     crate::commit::sync_parent_dir(target_path);
     // Same order as the write path: stamp, then restore permissions.
     if let Err(e) = filetime::set_file_times(target_path, orig_atime, orig_mtime) {
-        eprintln!(
-            "warning: failed to preserve file timestamps for '{}': {e}",
+        log::warn!(
+            "failed to preserve file timestamps for '{}': {e}",
             target_path.display()
         );
     }
     if let Err(e) = std::fs::set_permissions(target_path, orig_permissions) {
-        eprintln!(
-            "warning: failed to restore file permissions for '{}': {e}",
+        log::warn!(
+            "failed to restore file permissions for '{}': {e}",
             target_path.display()
         );
     }

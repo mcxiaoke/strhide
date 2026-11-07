@@ -11,8 +11,7 @@ use crate::core::config::FileConfig;
 use crate::core::control::Control;
 use crate::core::i18n::Msg;
 use crate::core::pipeline::{
-    BatchPreflight, batch_output_dir, check_overwrite, for_each_carrier, preflight_batch,
-    resolve_carrier_target,
+    BatchPreflight, batch_output_dir, check_overwrite, preflight_batch, resolve_carrier_target,
 };
 use crate::errors::StrHideError;
 use crate::facade::{DualOptions, StrHide};

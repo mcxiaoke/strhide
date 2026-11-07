@@ -487,14 +487,14 @@ pub fn commit_carrier_bytes(
     // timestamps changed, so restoring the carrier's read-only attribute before
     // this point would drop them silently even though the write succeeded.
     if preserve_time && let Err(e) = filetime::set_file_times(target_path, orig_atime, orig_mtime) {
-        eprintln!(
-            "warning: failed to preserve file timestamps for '{}': {e}",
+        log::warn!(
+            "failed to preserve file timestamps for '{}': {e}",
             target_path.display()
         );
     }
     if let Err(e) = std::fs::set_permissions(target_path, orig_permissions) {
-        eprintln!(
-            "warning: failed to restore file permissions for '{}': {e}",
+        log::warn!(
+            "failed to restore file permissions for '{}': {e}",
             target_path.display()
         );
     }
@@ -591,14 +591,14 @@ pub fn commit_carrier_patches(
     // Same order as `commit_carrier_bytes`: stamp first, then restore the
     // carrier's read-only attribute.
     if preserve_time && let Err(e) = filetime::set_file_times(target_path, orig_atime, orig_mtime) {
-        eprintln!(
-            "warning: failed to preserve file timestamps for '{}': {e}",
+        log::warn!(
+            "failed to preserve file timestamps for '{}': {e}",
             target_path.display()
         );
     }
     if let Err(e) = std::fs::set_permissions(target_path, orig_permissions) {
-        eprintln!(
-            "warning: failed to restore file permissions for '{}': {e}",
+        log::warn!(
+            "failed to restore file permissions for '{}': {e}",
             target_path.display()
         );
     }

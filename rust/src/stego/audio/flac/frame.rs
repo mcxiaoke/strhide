@@ -30,17 +30,13 @@
 use crate::stego::audio::flac::bits::{BitEof, BitReader};
 
 /// Report a malformed field, optionally with its bit position.
-///
-/// `STRHIDE_FLAC_DEBUG=1` turns the diagnostics on; the lookup is cached so the
-/// branch costs nothing when it is off. Kept next to the parser because every
-/// call site knows the position it was reading.
 #[inline]
 fn bad(reason: &'static str, pos: usize) -> BitEof {
-    use std::sync::OnceLock;
-    static DEBUG: OnceLock<bool> = OnceLock::new();
-    if *DEBUG.get_or_init(|| std::env::var_os("STRHIDE_FLAC_DEBUG").is_some()) {
-        eprintln!("flac-debug: {reason} at bit {pos} (byte {})", pos / 8);
-    }
+    log::trace!(
+        target: "stego::audio::flac",
+        "{reason} at bit {pos} (byte {})",
+        pos / 8
+    );
     BitEof
 }
 
@@ -245,21 +241,18 @@ fn parse_frame_with(
     verify_crc: bool,
 ) -> Result<ParsedFrame, BitEof> {
     let result = parse_frame_inner(bytes, start, defaults, verify_crc);
-    if result.is_err() {
-        use std::sync::OnceLock;
-        static DEBUG: OnceLock<bool> = OnceLock::new();
-        if *DEBUG.get_or_init(|| std::env::var_os("STRHIDE_FLAC_DEBUG").is_some()) {
-            let head: Vec<String> = bytes
-                .get(start..(start + 8).min(bytes.len()))
-                .unwrap_or(&[])
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
-            eprintln!(
-                "flac-debug: frame at byte {start} failed, head=[{}]",
-                head.join(" ")
-            );
-        }
+    if result.is_err() && log::log_enabled!(target: "stego::audio::flac", log::Level::Debug) {
+        let head: Vec<String> = bytes
+            .get(start..(start + 8).min(bytes.len()))
+            .unwrap_or(&[])
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        log::debug!(
+            target: "stego::audio::flac",
+            "frame at byte {start} failed, head=[{}]",
+            head.join(" ")
+        );
     }
     result
 }
@@ -355,11 +348,10 @@ fn parse_frame_inner(
     // needs them once the subframes are read.
     let _ = (sample_rate, number, bits_per_sample);
 
-    if std::env::var_os("STRHIDE_FLAC_DEBUG").is_some() {
-        eprintln!(
-            "flac-debug: frame@{start} block={block_size} bits={bits_per_sample} assign={assignment} ch={channels} subframe_at={pos}"
-        );
-    }
+    log::trace!(
+        target: "stego::audio::flac",
+        "frame@{start} block={block_size} bits={bits_per_sample} assign={assignment} ch={channels} subframe_at={pos}"
+    );
     let mut reader = BitReader::new(bytes, pos * 8);
     let mut planes: Vec<Vec<i64>> = Vec::with_capacity(channels);
     let mut wasted: Vec<u8> = Vec::with_capacity(channels);
@@ -434,12 +426,11 @@ fn decode_subframe(
     }
     let sub_type = reader.read(6)?;
     let wasted_flag = reader.read(1)?;
-    if std::env::var_os("STRHIDE_FLAC_DEBUG").is_some() {
-        eprintln!(
-            "flac-debug:   subframe type={sub_type} wasted={wasted_flag} bps={bps} at bit {}",
-            reader.position() - 8
-        );
-    }
+    log::trace!(
+        target: "stego::audio::flac",
+        "subframe type={sub_type} wasted={wasted_flag} bps={bps} at bit {}",
+        reader.position() - 8
+    );
     let wasted = if wasted_flag == 1 {
         let count = reader.unary()? + 1;
         if count >= *bps {
@@ -549,12 +540,11 @@ fn decode_predictive(
     let per_partition = block_size / partitions;
     let param_bits = 4 + method;
     let escape = (1u32 << param_bits) - 1;
-    if std::env::var_os("STRHIDE_FLAC_DEBUG").is_some() {
-        eprintln!(
-            "flac-debug:     residual method={method} porder={partition_order} per={per_partition} order={order} at bit {}",
-            reader.position()
-        );
-    }
+    log::trace!(
+        target: "stego::audio::flac",
+        "residual method={method} porder={partition_order} per={per_partition} order={order} at bit {}",
+        reader.position()
+    );
 
     for partition in 0..partitions {
         let count = if partition == 0 {

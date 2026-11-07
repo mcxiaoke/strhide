@@ -25,15 +25,12 @@ pub(crate) struct BitReader<'a> {
 pub(crate) struct BitEof;
 
 /// Report a read past the end of the buffer, optionally with its position.
-///
-/// `STRHIDE_FLAC_DEBUG=1` turns the diagnostics on. The lookup is cached, so the
-/// check costs nothing when debugging is off.
 pub(crate) fn eof(pos: usize) -> BitEof {
-    use std::sync::OnceLock;
-    static DEBUG: OnceLock<bool> = OnceLock::new();
-    if *DEBUG.get_or_init(|| std::env::var_os("STRHIDE_FLAC_DEBUG").is_some()) {
-        eprintln!("flac-debug: read past end at bit {pos} (byte {})", pos / 8);
-    }
+    log::trace!(
+        target: "stego::audio::flac",
+        "read past end at bit {pos} (byte {})",
+        pos / 8
+    );
     BitEof
 }
 

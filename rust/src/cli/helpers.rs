@@ -751,6 +751,50 @@ pub(crate) fn format_stego_algorithm(
     }
 }
 
+/// Run `action` over every carrier.
+///
+/// Single-carrier runs keep the plain behaviour: no summary line, and the
+/// caller still prints `[ERROR]` once. Multi-carrier runs stop at the first
+/// failure and report how far they got — each write/restore is atomic per
+/// carrier, so "N succeeded, M not attempted" is accurate, but earlier carriers
+/// stay modified.
+pub(crate) fn for_each_carrier<F>(
+    carriers: &[PathBuf],
+    quiet: bool,
+    mut action: F,
+) -> Result<(), StrHideError>
+where
+    F: FnMut(&Path) -> Result<(), StrHideError>,
+{
+    let total = carriers.len();
+    let mut done = 0usize;
+    for carrier in carriers {
+        match action(carrier) {
+            Ok(()) => done += 1,
+            Err(e) => {
+                if total > 1 && !quiet {
+                    eprintln!("{}", t!(Msg::FailCarrier, path = carrier.display()));
+                    let unattempted = total - done - 1;
+                    println!(
+                        "{}",
+                        t!(
+                            Msg::SummaryBatchPartial,
+                            done = done,
+                            total = total,
+                            unattempted = unattempted
+                        )
+                    );
+                }
+                return Err(e);
+            }
+        }
+    }
+    if total > 1 && !quiet {
+        println!("{}", t!(Msg::SummaryBatchAll, done = done, total = total));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,5 +840,25 @@ mod tests {
         // combine; otherwise the lone surrogate is rendered as U+FFFD.
         assert_eq!(unescape_string("\\uD800\\qDC00"), "\u{FFFD}\\qDC00");
         assert_eq!(unescape_string("\\uD800\\uD800"), "\u{FFFD}\u{FFFD}");
+    }
+
+    #[test]
+    fn for_each_carrier_stops_at_the_first_failure() {
+        let carriers = vec![PathBuf::from("a"), PathBuf::from("b"), PathBuf::from("c")];
+        let mut seen = Vec::new();
+        let err = for_each_carrier(&carriers, true, |c| {
+            seen.push(c.to_path_buf());
+            if c == Path::new("b") {
+                return Err(StrHideError::General("boom".into()));
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("boom"));
+        assert_eq!(
+            seen,
+            vec![PathBuf::from("a"), PathBuf::from("b")],
+            "carriers after the failure must not run"
+        );
     }
 }

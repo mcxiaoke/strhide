@@ -661,15 +661,14 @@ impl<'a> FlacCarrier<'a> {
             )));
         }
 
-        if std::env::var_os("STRHIDE_FLAC_STATS").is_some() {
-            eprintln!(
-                "flac-stats: eligible={} usable={} stuck_rate={:.3} tails={}",
-                total,
-                analysis.usable,
-                1.0 - analysis.usable as f64 / total.max(1) as f64,
-                tail_total
-            );
-        }
+        log::debug!(
+            target: "stego::audio::flac",
+            "flac-stats: eligible={} usable={} stuck_rate={:.3} tails={}",
+            total,
+            analysis.usable,
+            1.0 - analysis.usable as f64 / total.max(1) as f64,
+            tail_total
+        );
         // The plan addresses base header, extension, then body.
         header_picks.extend(ext_picks);
         header_picks.extend(body_picks);
@@ -1235,10 +1234,11 @@ fn decoded_drift_units(a: &ParsedFrame, b: &ParsedFrame) -> Result<i64, StrHideE
     } else {
         (frame_worst + scale - 1) / scale
     };
-    if frame_units > DRIFT_BUDGET && std::env::var_os("STRHIDE_FLAC_DEBUG").is_some() {
+    if frame_units > DRIFT_BUDGET {
         let f = first.unwrap_or((0, 0, 0, 0));
-        eprintln!(
-            "flac-debug: drift {frame_worst} output units = {frame_units} stored units (wasted {wasted}) at frame@{} ch{} sample{} (cover {} vs stego {}) | first ch{} sample{} {}->{} | {count} diffs",
+        log::debug!(
+            target: "stego::audio::flac",
+            "drift {frame_worst} output units = {frame_units} stored units (wasted {wasted}) at frame@{} ch{} sample{} (cover {} vs stego {}) | first ch{} sample{} {}->{} | {count} diffs",
             a.start,
             frame_at.0,
             frame_at.1,
