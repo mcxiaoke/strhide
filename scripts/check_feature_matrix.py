@@ -13,7 +13,7 @@ Every command is run from the repository's `rust/` directory regardless of
 where the script is invoked from.
 
 Usage:
-    python scripts/check_feature_matrix.py                 # all eight rows
+    python scripts/check_feature_matrix.py                 # all eleven rows
     python scripts/check_feature_matrix.py content-png     # one row
     python scripts/check_feature_matrix.py structure analysis
     python scripts/check_feature_matrix.py none            # no-default-features
@@ -44,11 +44,14 @@ MATRIX: list[tuple[str, ...]] = [
     (),
     ("structure-base",),
     ("structure",),
+    ("content-base",),
     ("content-png",),
     ("content-jpeg",),
     ("content-hevc",),
     ("content",),
     ("analysis",),
+    ("core-io",),
+    ("config",),
 ]
 
 

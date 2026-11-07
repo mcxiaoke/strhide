@@ -51,7 +51,7 @@ jobs:
         working-directory: rust
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked --features cli --target ${{ matrix.target }}
 
       - name: Stage artifact
         shell: pwsh
@@ -108,7 +108,7 @@ jobs:
           CC_aarch64_unknown_linux_musl: musl-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
           RUSTFLAGS: ${{ matrix.rustflags }}
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked --features cli --target ${{ matrix.target }}
 
       - name: Verify static linking
         run: |
@@ -145,8 +145,8 @@ jobs:
       - name: Build both architectures
         working-directory: rust
         run: |
-          cargo build --release --locked --target aarch64-apple-darwin
-          cargo build --release --locked --target x86_64-apple-darwin
+          cargo build --release --locked --features cli --target aarch64-apple-darwin
+          cargo build --release --locked --features cli --target x86_64-apple-darwin
 
       - name: Create universal binary
         run: |

@@ -32,6 +32,13 @@ jobs:
         run: |
           VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="strhide") | .version')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # A tag release must match the version in Cargo.toml: publishing v1.2.3
+          # with the 0.9.3 manifest would either ship the wrong crate or hit the
+          # "already published" skip below with no visible failure.
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "v$VERSION" != "$GITHUB_REF_NAME" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match rust/Cargo.toml version $VERSION"
+            exit 1
+          fi
           if curl -sf "https://crates.io/api/v1/crates/strhide" | jq -e --arg v "$VERSION" '.versions[]?.num == $v' > /dev/null; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "::warning::strhide@$VERSION already exists on crates.io, skipping publish (bump version in rust/Cargo.toml to release)"
