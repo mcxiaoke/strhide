@@ -2631,8 +2631,9 @@ dependencies = [
 
 [[package]]
 name = "oxideav-h265"
-version = "0.0.15"
-source = "git+https://github.com/mcxiaoke/oxideav-h265.git?tag=v1-20261024#db02660f057e036bff7f0c044a439b875597ed21"
+version = "0.0.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e3a6b34d2c009977b06424cc1cede2fdf5a54b4ff63848a5b9e0deed3433d16"
 dependencies = [
  "oxideav-core",
 ]
@@ -3176,17 +3177,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
-name = "rusty_h265"
-version = "0.6.2"
-source = "git+https://github.com/mcxiaoke/rusty_h265.git?tag=v1-20261029#c1f6aee07ae54d0c388bdbf0e1616e47f6a1143f"
-dependencies = [
- "rusty_h265-accel",
-]
-
-[[package]]
 name = "rusty_h265-accel"
 version = "0.6.2"
-source = "git+https://github.com/mcxiaoke/rusty_h265.git?tag=v1-20261029#c1f6aee07ae54d0c388bdbf0e1616e47f6a1143f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f62022e27b5db632a5738a6c0b542e74d290f0b588140bd06bd5ed05005157b"
 
 [[package]]
 name = "same-file"
@@ -3576,7 +3570,7 @@ checksum = "ff7589a1859b09232522bb9edf076ca7fcf14ded96685d3fa629db73023ffbb7"
 
 [[package]]
 name = "strhide"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "aes-gcm",
  "chacha20poly1305",
@@ -3593,17 +3587,17 @@ dependencies = [
  "pbkdf2",
  "rand",
  "rayon",
- "rusty_h265",
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "strhide-rusty-h265",
  "thiserror 2.0.21",
  "unicode-normalization",
 ]
 
 [[package]]
 name = "strhide-gui"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "log",
  "rayon",
@@ -3614,6 +3608,15 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+]
+
+[[package]]
+name = "strhide-rusty-h265"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01784a4018e048fb9234f90676c7b88b7ce157919d5171d343751c0fe472257f"
+dependencies = [
+ "rusty_h265-accel",
 ]
 
 [[package]]
