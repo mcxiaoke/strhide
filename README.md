@@ -86,13 +86,16 @@ sth list                                                            # List forma
 ```
 
 > [!NOTE]
-> **Content-domain payloads are bound to the carrier's metadata.** The
-> steganographic locator keys are derived from the container's metadata
-> summary, so a stego file must be kept exactly as produced: editing metadata
-> or re-saving with a tool that rewrites ancillary chunks (e.g. PNG
-> `tEXt`/`gAMA`/`iCCP`, JPEG APPn) makes the payload unreadable —
-> indistinguishable from a wrong password. A pure IDAT/recompression pass that
-> preserves metadata is safe. Always keep the original stego file.
+> **Content-domain payloads are bound to the carrier's pixels, not its tags.**
+> The steganographic locator keys are derived from the image identity (PNG:
+> geometry plus critical chunks; JPEG: DC coefficients; WAV/FLAC: stream
+> parameters), so metadata-only edits are safe: adding or rewriting PNG
+> `tEXt`/`iCCP`/`tIME`/`gAMA` chunks (exiftool, image optimisers, an editor's
+> "save as") no longer makes the payload unreadable, and a lossless
+> IDAT/recompression pass that keeps the pixels is safe too. Anything that
+> changes the pixels does destroy it — lossy re-encoding, cropping, resizing —
+> and the failure is indistinguishable from a wrong password. Keep the original
+> stego file.
 >
 > **Capacity reports** (`sth capacity`) reflect the minimal envelope framing
 > (no filename; carrying a filename costs `1 + name_len` extra bytes) and are

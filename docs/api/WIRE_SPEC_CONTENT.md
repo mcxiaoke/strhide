@@ -207,7 +207,7 @@ info(label, domain) = label                         若 domain 为 None 或空�
 
 | 载体 | 输入 | 说明 |
 |---|---|---|
-| PNG | `hpos_salt ‖ "png-v4" ‖ u64be(width) ‖ u64be(height) ‖ [bit_depth, color_type, channels] ‖ meta_digest` | `meta_digest = SHA-256` over 除 `IDAT`、`prIv` 外的每个块：`ty(4B) ‖ u32be(len) ‖ data`，按文件顺序 |
+| PNG | `hpos_salt ‖ "png-v4" ‖ u64be(width) ‖ u64be(height) ‖ [bit_depth, color_type, channels] ‖ meta_digest` | `meta_digest = SHA-256` over 每个**关键块**：`ty(4B) ‖ u32be(len) ‖ data`，按文件顺序。排除 `IDAT`、`prIv` 与全部辅助块（首字母小写：`tEXt`/`zTXt`/`iTXt`/`tIME`/`eXIf`/`iCCP`/`gAMA`/`sRGB`/`pHYs`…），即只有 `IHDR`/`PLTE`/`IEND` 参与。辅助块是第三方工具（exiftool、压缩器、编辑器另存）随时会改的元数据，纳入盐会导致一次元数据编辑就把载荷变成不可恢复（2026-11-07 修复） |
 | JPEG | `cover_digest_tag ‖ "jpeg-v4" ‖ cover_digest` | `cover_digest_tag = b"strhide-cover-v1"`；`cover_digest = SHA-256(tag ‖ u32be(block_count) ‖ u32be(component_count) ‖ 各 component 各 block 的 DC 系数 i16be)`，DC 不是嵌入目标，故嵌入后不变 |
 | WAV | `hpos_salt ‖ "wav-v4" ‖ u16be(channels) ‖ u32be(sample_rate) ‖ u16be(block_align) ‖ u16be(bits) ‖ u32be(data_len)` | `bits` 为 PCM 位深（16/24） |
 | FLAC | `hpos_salt ‖ "flac-v4" ‖ u32be(sample_rate) ‖ [channels, bits_per_sample] ‖ u64be(total_samples)` | **排除** STREAMINFO 的 MD5（嵌入会重算它） |

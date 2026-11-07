@@ -38,7 +38,7 @@ FileKey k[32]:
 
 | 载体 | 公式（`‖` 为顺序拼接） | 出处 |
 |---|---|---|
-| PNG | `hpos_salt ‖ "png-v4" ‖ u64be(w) ‖ u64be(h) ‖ [bit_depth, color_type, channels] ‖ meta_digest`；`meta_digest=SHA-256` over 每个非 `IDAT`/`prIv` 块：`ty(4B) ‖ u32be(len) ‖ data`（文件顺序） | `stego/png/engine.rs:1162-1187` |
+| PNG | `hpos_salt ‖ "png-v4" ‖ u64be(w) ‖ u64be(h) ‖ [bit_depth, color_type, channels] ‖ meta_digest`；`meta_digest=SHA-256` over 每个**关键块**：`ty(4B) ‖ u32be(len) ‖ data`（文件顺序）；排除 `IDAT`/`prIv`，并排除全部辅助块（首字母小写：`tEXt`/`zTXt`/`iTXt`/`tIME`/`eXIf`/`iCCP`/`gAMA`/`sRGB`/`pHYs`…），只有 `IHDR`/`PLTE`/`IEND` 参与。辅助块是第三方工具随时会改的元数据，纳入盐会让一次元数据编辑把载荷变成不可恢复（2026-11-07 修复） | `stego/png/engine.rs:1155-1204` |
 | JPEG | `cover_digest_tag ‖ "jpeg-v4" ‖ cover_digest`；tag=`b"strhide-cover-v1"`（`stego/format.rs:241`）；`cover_digest=SHA-256(tag ‖ u32be(block_count) ‖ u32be(component_count) ‖ 每 component 每 block 的 DC i16be)`，`block_count` 取 component 0 | `stego/jpeg/engine.rs:243-270` |
 | WAV | `hpos_salt ‖ "wav-v4" ‖ u16be(channels) ‖ u32be(sample_rate) ‖ u16be(block_align) ‖ u16be(bits) ‖ u32be(data_len)`，bits=16/24 | `stego/audio/mod.rs:58-68` |
 | FLAC | `hpos_salt ‖ "flac-v4" ‖ u32be(sample_rate) ‖ [channels, bits_per_sample] ‖ u64be(total_samples)`，排除 STREAMINFO MD5 | `stego/audio/mod.rs:75-83` |

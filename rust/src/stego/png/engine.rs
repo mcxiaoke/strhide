@@ -1155,10 +1155,22 @@ fn header_pool(image: &RawImage) -> Vec<usize> {
 /// Carrier identity mixed into the L1 PBKDF2 salt.
 ///
 /// Both ends compute this from the decoded image only: dimensions, colour
-/// layout and the ancillary-chunk stream (excluding `IDAT` and the structural
-/// `prIv` chunk). Two carriers with different metadata therefore derive
-/// different locator keys even under the same password, and `probe` cannot
-/// accidentally model a different permutation than the writer.
+/// layout and the **critical**-chunk stream. `IDAT` is excluded (it is what the
+/// embedder rewrites) and so is every ancillary chunk.
+///
+/// Only critical chunks may take part (first letter uppercase per the PNG
+/// spec: `IHDR`, `PLTE`, `IEND`). They are exactly what defines the pixels; the
+/// ancillary ones (`tEXt`, `zTXt`, `iTXt`, `tIME`, `eXIf`, `iCCP`, `gAMA`,
+/// `sRGB`, `pHYs`, our own `prIv`, ...) are metadata that other tools rewrite
+/// at will. Hashing those used to mean that adding one `tEXt` chunk after an
+/// embed -- exiftool, an optimiser, an editor's "save as" -- re-derived the
+/// locator keys and turned the payload into unrecoverable garbage
+/// (`No valid payload found`). A carrier is identified by its pixels, not by
+/// its tags.
+///
+/// A standard `IHDR`/`IDAT`/`IEND` file hashes identically under the old and
+/// new rule, so payloads written before this change stay readable as long as
+/// their metadata was not touched.
 pub fn png_pre_salt(
     image: &RawImage,
     spatial: &crate::stego::format::PngFormatProfile,
@@ -1167,7 +1179,12 @@ pub fn png_pre_salt(
 
     let mut meta = Sha256::new();
     for chunk in &image.chunks {
+        // IDAT is rewritten by the embedder; `prIv` carries the envelope itself.
         if chunk.ty == *b"IDAT" || chunk.ty == *b"prIv" {
+            continue;
+        }
+        // Ancillary chunk: metadata, not image identity (see the doc comment).
+        if chunk.ty[0].is_ascii_lowercase() {
             continue;
         }
         meta.update(chunk.ty);
@@ -3833,11 +3850,16 @@ mod tests {
         assert_eq!(out, payload);
     }
 
-    /// Review G4 (P2-4): any ancillary-chunk edit changes `pre_salt`, so the
-    /// payload must become unreadable and the failure must be
-    /// indistinguishable from a wrong password (`NoHiddenData`).
+    /// Review G4 (P2-4) used to pin the opposite behaviour: any ancillary-chunk
+    /// edit changed `pre_salt`, so the payload became unreadable and the
+    /// failure looked exactly like a wrong password.
+    ///
+    /// That turned a routine metadata edit (exiftool, `tinypng`, an editor's
+    /// "save as") into silent, unrecoverable data loss. The carrier identity is
+    /// now the critical-chunk stream only, so a `tEXt`/`iCCP`/`tIME` rewrite
+    /// must leave the payload readable.
     #[test]
-    fn ancillary_chunk_change_makes_payload_unreadable() {
+    fn ancillary_chunk_change_keeps_payload_readable() {
         let (w, h) = (96usize, 96usize);
         let pixels = row_correlated_pixels(w, h);
         let text = b"Comment\0original".to_vec();
@@ -3850,7 +3872,7 @@ mod tests {
             1,
         );
         let params = PngParams::default();
-        let payload = b"metadata-bound".to_vec();
+        let payload = b"metadata-independent".to_vec();
 
         let stego = embed_png(
             &png,
@@ -3867,16 +3889,21 @@ mod tests {
         .expect("embed");
 
         let mut img = decode_png(&stego).expect("decode stego");
-        // Same pixels, same dimensions: only the metadata stream changes.
+        // Same pixels, same geometry: only the metadata stream changes.
         let chunk = img
             .chunks
             .iter_mut()
             .find(|c| c.ty == *b"tEXt")
             .expect("tEXt chunk present");
         chunk.data = b"Comment\0edited-afterwards".to_vec();
+        // Something an ICC-aware tool might also add while it is there.
+        img.chunks.push(PngChunk {
+            ty: *b"iCCP",
+            data: b"profile\0\0fake-icc".to_vec(),
+        });
         let reencoded = encode_png(&img).expect("re-encode");
 
-        match extract_png(
+        let out = extract_png(
             &reencoded,
             Some("pw"),
             None,
@@ -3884,12 +3911,58 @@ mod tests {
             &HillCostModel,
             &params,
             &Control::none(),
-        ) {
-            Err(StrHideError::NoHiddenData(_)) => {}
-            other => {
-                panic!("ancillary edits must look exactly like a wrong password, got {other:?}")
-            }
-        }
+        )
+        .expect("metadata edits must not destroy the payload");
+        assert_eq!(out, payload);
+    }
+
+    /// The narrowed salt still has to bind something: geometry and palette are
+    /// part of the carrier's identity, so changing them must break locators.
+    #[test]
+    fn pre_salt_ignores_ancillary_chunks_but_binds_geometry_and_palette() {
+        let (w, h) = (16usize, 16usize);
+        let pixels = row_correlated_pixels(w, h);
+        let base = decode_png(&craft_png(
+            w as u32,
+            h as u32,
+            &pixels,
+            &vec![0u8; h],
+            &[(b"tEXt", b"K\0v")],
+            1,
+        ))
+        .expect("decode");
+        let spatial = crate::stego::format::OFFICIAL_PNG_FORMAT;
+        let reference = png_pre_salt(&base, &spatial);
+
+        // 1. Metadata only: same salt.
+        let mut metadata_edit = base.clone();
+        metadata_edit
+            .chunks
+            .iter_mut()
+            .find(|c| c.ty == *b"tEXt")
+            .expect("tEXt")
+            .data = b"K\0different".to_vec();
+        metadata_edit.chunks.push(PngChunk {
+            ty: *b"tIME",
+            data: vec![7, 230, 11, 7, 12, 0, 0],
+        });
+        assert_eq!(png_pre_salt(&metadata_edit, &spatial), reference);
+
+        // 2. Geometry: different salt, or the locator would survive a crop.
+        let mut resized = base.clone();
+        resized.width -= 1;
+        assert_ne!(png_pre_salt(&resized, &spatial), reference);
+
+        // 3. Palette: different salt.
+        let mut repalettised = base.clone();
+        repalettised.chunks.insert(
+            1,
+            PngChunk {
+                ty: *b"PLTE",
+                data: vec![0, 0, 0, 255, 255, 255],
+            },
+        );
+        assert_ne!(png_pre_salt(&repalettised, &spatial), reference);
     }
 
     /// The tier table is what hosts read instead of re-deriving the budget, so

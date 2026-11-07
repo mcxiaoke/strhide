@@ -309,9 +309,19 @@ def derive_l3(master: bytes, salt: bytes, suite: int, domain: str | None):
 
 
 def png_pre_salt(img: Image) -> bytes:
+    """Carrier identity: geometry plus the *critical*-chunk stream only.
+
+    IDAT is rewritten by the embedder and prIv carries the envelope. Every
+    ancillary chunk (lowercase first letter: tEXt/zTXt/iTXt/tIME/eXIf/iCCP/
+    gAMA/sRGB/pHYs/...) is metadata that third-party tools rewrite, so it must
+    not take part: hashing it made a routine metadata edit destroy the payload
+    (see the 2026-11-07 triage).
+    """
     meta = hashlib.sha256()
     for ty, body in img.chunks:
         if ty in (b"IDAT", b"prIv"):
+            continue
+        if ty[:1].islower():
             continue
         meta.update(ty)
         meta.update(struct.pack(">I", len(body)))
