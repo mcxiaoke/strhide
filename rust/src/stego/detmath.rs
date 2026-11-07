@@ -16,12 +16,23 @@
 //! bit. `tests` pins a digest of the outputs so a change cannot slip through.
 
 /// `ln 2` as a correctly rounded hi/lo pair (~75 significant bits).
+///
+/// `LN2_HI` carries 33 significant bits with the low 20 bits of the mantissa
+/// zeroed (`0x3FE6_2E42_FEE0_0000`). Consequently, for any integer `|k| < 2^20`,
+/// the floating-point multiplication `kf * LN2_HI` is strictly exact with zero
+/// rounding error. `LN2_LO` compensates the remaining tail so `(x - k*LN2_HI) - k*LN2_LO`
+/// eliminates catastrophic cancellation during range reduction.
 const LN2_HI: f64 = 6.931_471_803_691_238e-1;
 const LN2_LO: f64 = 1.908_214_929_270_587_7e-10;
 const INV_LN2: f64 = std::f64::consts::LOG2_E;
-/// `pi/2` in three words. The first carries 33 significant bits, so
-/// `n * PIO2_1` is exact for every `|n| < 2^20` and the reduction below stays
-/// accurate even though `x - n*pi/2` cancels catastrophically.
+
+/// `pi/2` in three words (~139 significant bits, classical fdlibm constants).
+///
+/// The first word carries 33 significant bits with mantissa low 20 bits zeroed
+/// (`0x3FF9_21FB_5440_0000`), so `n * PIO2_1` is exact with zero rounding error
+/// for every `|n| < 2^20` (~1.05e6). The subsequent words `PIO2_2` and `PIO2_3`
+/// provide 53 and 53 bits of precision respectively, ensuring high precision
+/// even though `x - n*pi/2` cancels catastrophically.
 const PIO2_1: f64 = 1.570_796_326_734_125_6;
 const PIO2_2: f64 = 6.077_100_506_303_966e-11;
 const PIO2_3: f64 = 2.022_266_248_795_951e-21;
@@ -29,10 +40,16 @@ const TWO_OVER_PI: f64 = 0.636_619_772_367_581_3;
 /// `sqrt(2)`, the `ln` reduction cut.
 const SQRT2: f64 = std::f64::consts::SQRT_2;
 
+/// Domain bounds for `exp(x)`:
+/// - `EXP_HI`: `ln(f64::MAX) ~= 709.7827`. Inputs above this overflow to `+inf`.
+/// - `EXP_LO`: `ln(2^-1074) ~= -745.1332` (smallest subnormal double). Inputs below
+///   this underflow completely to `0.0`.
 const EXP_HI: f64 = 709.782_712_893_384;
 const EXP_LO: f64 = -745.133_219_101_941_1;
 
-/// `1/k!` for k = 1..=14 (`exp` on `|r| <= ln2/2`; truncation ~1e-20).
+/// `1/k!` for k = 1..=14 (`exp` on `|r| <= ln2/2 ~= 0.34657`).
+/// The first truncated term is `r^15 / 15! <= 1.07e-19`, well below double precision
+/// machine epsilon (~2.22e-16).
 const EXP_C: [f64; 14] = [
     1.0,
     0.5,
@@ -51,7 +68,8 @@ const EXP_C: [f64; 14] = [
 ];
 
 /// `sin` coefficients: `sin(r) = r * (1 + z*(c1 + z*(c2 + ...)))`, `z = r*r`.
-/// Terms through `r^17`: on `|r| <= pi/4` the truncation is ~3e-17.
+/// Alternating terms `(-1)^((k-1)/2) / k!` through `r^17`: on `|r| <= pi/4 ~= 0.7854`
+/// the truncation `r^19 / 19!` is ~7.7e-20.
 const SIN_C: [f64; 8] = [
     -1.0 / 6.0,
     1.0 / 120.0,
@@ -63,7 +81,9 @@ const SIN_C: [f64; 8] = [
     1.0 / 355687428096000.0,
 ];
 
-/// `cos` coefficients: `cos(r) = 1 + z*(d1 + z*(d2 + ...))`, through `r^16`.
+/// `cos` coefficients: `cos(r) = 1 + z*(d1 + z*(d2 + ...))`.
+/// Alternating terms `(-1)^(k/2) / k!` through `r^16`: on `|r| <= pi/4 ~= 0.7854`
+/// the truncation `r^18 / 18!` is ~2.9e-18.
 const COS_C: [f64; 8] = [
     -0.5,
     1.0 / 24.0,
@@ -76,6 +96,11 @@ const COS_C: [f64; 8] = [
 ];
 
 /// `y * 2^k` by exponent-field addition, split so no intermediate overflows.
+///
+/// - `0x7FE0_0000_0000_0000` is `2^1023` (biased exponent 2046 - 1023).
+/// - `0x0010_0000_0000_0000` is `2^-1022` (smallest normal positive power, exponent 1 - 1023).
+/// - After looping, `k` is bounded in `[-1022, 1023]`, so `1023 + k` lands in `[1, 2046]`,
+///   forming a valid normal IEEE-754 exponent field.
 #[inline]
 fn ldexp(y: f64, mut k: i32) -> f64 {
     let mut y = y;
@@ -91,6 +116,12 @@ fn ldexp(y: f64, mut k: i32) -> f64 {
 }
 
 /// `x = m * 2^e` with `m` in `[0.5, 1)`.
+///
+/// - Subnormals have exponent field `0`. Multiplying by `0x4350_0000_0000_0000` (`2^54`)
+///   lifts the 52-bit mantissa into the normal range without subnormal truncation.
+/// - `0x800F_FFFF_FFFF_FFFF` isolates the sign bit and the 52-bit mantissa.
+/// - `0x3FE0_0000_0000_0000` injects biased exponent 1022 (`2^-1 = 0.5`), placing `m`
+///   in `[-1.0, -0.5] U [0.5, 1.0)`.
 #[inline]
 fn frexp(x: f64) -> (f64, i32) {
     let bits = x.to_bits();
@@ -250,6 +281,20 @@ pub fn log2(x: f64) -> f64 {
 }
 
 /// `cos(x)`.
+///
+/// # Domain and Overflow Boundaries
+/// - **Intended Domain**: Assumes `|x| < 2^20 ~= 1.05e6`. Within this range,
+///   `n * PIO2_1` is strictly exact with zero floating-point rounding error.
+/// - **Extreme Input Overflow**: If `|x| >= 2^31 * (pi/2) ~= 3.37e9`, `x * TWO_OVER_PI`
+///   exceeds the range of `i32`, causing integer cast saturation in Rust (and implementation-
+///   defined cast truncation in Go).
+/// - **Precision Degradation**: For `2^20 <= |x| < 3.37e9`, `n * PIO2_1` is no longer
+///   exact, leading to gradual loss of reduction accuracy.
+/// - **Pipeline Scope**: In `strhide`, `cos` is exclusively called to compute 8x8 DCT basis
+///   matrices (`x = pi * k * (2a + 1) / 16 <= pi`), which strictly remains in `[0, pi]`,
+///   far below any reduction or integer cast boundary.
+/// - **Quadrant Selection**: Uses two's complement bitwise `n & 3`, which correctly yields
+///   mathematical `(n mod 4 + 4) mod 4` even for negative integers.
 pub fn cos(x: f64) -> f64 {
     if !x.is_finite() {
         return f64::NAN;
