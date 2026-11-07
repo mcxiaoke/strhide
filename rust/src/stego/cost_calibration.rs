@@ -65,9 +65,9 @@ pub(crate) fn solve_rho(x: f64) -> f64 {
         return 0.0;
     }
     let x = x.min(1e300);
-    let mut rho = (1.0 + x).ln();
+    let mut rho = crate::stego::detmath::ln_1p(x);
     for _ in 0..32 {
-        let e = rho.exp();
+        let e = crate::stego::detmath::exp(rho);
         let f = rho * (e + 2.0) - x;
         let df = e * (1.0 + rho) + 2.0;
         let next = (rho - f / df).max(0.0);
@@ -84,7 +84,7 @@ pub(crate) fn solve_rho(x: f64) -> f64 {
 #[cfg(test)]
 #[inline]
 pub(crate) fn beta_from_rho(rho: f64) -> f64 {
-    1.0 / (rho.exp() + 2.0)
+    1.0 / (crate::stego::detmath::exp(rho) + 2.0)
 }
 
 /// Ternary entropy `H3(beta) = -2 beta ln beta - (1 - 2 beta) ln(1 - 2 beta)`
@@ -96,10 +96,10 @@ pub(crate) fn ternary_entropy_nats(rho: f64) -> f64 {
     }
     // beta = exp(-L), 1 - 2 beta = exp(-Lm), with L = rho + Lm and
     // Lm = ln(1 + 2 exp(-rho)).
-    let lm = (2.0 * (-rho).exp()).ln_1p();
+    let lm = crate::stego::detmath::ln_1p(2.0 * crate::stego::detmath::exp(-rho));
     let l = rho + lm;
-    let beta = (-l).exp();
-    let p0 = (-lm).exp();
+    let beta = crate::stego::detmath::exp(-l);
+    let p0 = crate::stego::detmath::exp(-lm);
     2.0 * beta * l + p0 * lm
 }
 
@@ -159,7 +159,8 @@ impl Grid {
             if count == 0 {
                 continue;
             }
-            let x = (t + self.center(i)).min(LOG_X_MAX).exp();
+            let x = (t + self.center(i)).min(LOG_X_MAX);
+            let x = crate::stego::detmath::exp(x);
             sum += count as f64 * ternary_entropy_nats(solve_rho(x));
         }
         sum
@@ -170,7 +171,7 @@ impl Grid {
         (0..=BINS)
             .map(|i| {
                 let u = self.u_min + i as f64 * self.du;
-                solve_rho((t + u).min(LOG_X_MAX).exp())
+                solve_rho(crate::stego::detmath::exp((t + u).min(LOG_X_MAX)))
             })
             .collect()
     }
@@ -212,7 +213,7 @@ pub(crate) fn fisher_to_costs(mut fisher: Vec<f64>, target_bits: f64) -> Vec<f64
     // cost map would triple the working set on 100 MP carriers.
     fisher.par_iter_mut().for_each(|f| {
         *f = if f.is_finite() && *f > 0.0 {
-            f.ln()
+            crate::stego::detmath::ln(*f)
         } else {
             f64::NEG_INFINITY
         };

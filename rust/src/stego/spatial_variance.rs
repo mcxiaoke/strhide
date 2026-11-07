@@ -67,8 +67,9 @@ fn dct_basis(p: usize) -> Vec<Vec<f64>> {
             let s = if k == 0 { scale0 } else { scalek };
             (0..p)
                 .map(|a| {
-                    s * (std::f64::consts::PI * k as f64 * (2 * a + 1) as f64 / (2.0 * p as f64))
-                        .cos()
+                    s * crate::stego::detmath::cos(
+                        std::f64::consts::PI * k as f64 * (2 * a + 1) as f64 / (2.0 * p as f64),
+                    )
                 })
                 .collect()
         })
@@ -82,7 +83,9 @@ fn dct_basis_const<const P: usize>() -> [[f64; P]; P] {
     std::array::from_fn(|k| {
         let s = if k == 0 { scale0 } else { scalek };
         std::array::from_fn(|a| {
-            s * (std::f64::consts::PI * k as f64 * (2 * a + 1) as f64 / (2.0 * P as f64)).cos()
+            s * crate::stego::detmath::cos(
+                std::f64::consts::PI * k as f64 * (2 * a + 1) as f64 / (2.0 * P as f64),
+            )
         })
     })
 }

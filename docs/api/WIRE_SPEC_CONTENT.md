@@ -745,6 +745,43 @@ candidates = eligible 中按 (cost.to_bits(), px) 升序排序后的前 `allowed
 这条管线的五个阶段都有固定摘要，见附录 A.3：改任何一段都会让 `cost_vector_digests_are_pinned`
 变红，并在 `scripts/cost_vectors_check.py` 里指出是哪一段开始分叉。
 
+#### 13.11.5 初等函数：不调用 libm
+
+代价管线的每一步都会影响排序，所以 `exp` / `ln` / `ln_1p` / `cos` 不能来自平台数学库：
+IEEE-754 只约束 `+ - * /` 与 `sqrt`，libm 的超越函数在 glibc / UCRT / musl 之间可以差 1–2 ulp，
+经过 `1e-14` 的 Newton 容差放大后实测可达 255 ulp（§13.11.4）。`stego/detmath.rs` 因此自带实现：
+
+| 函数 | 做法 | 精度 |
+|---|---|---|
+| `exp` | `k = round(x/ln2)`，两词 `ln2` 归约，14 项 Taylor（`|r| <= ln2/2`），指数域移位还原 | ~1 ulp |
+| `ln` | `frexp` 取指数，尾数归一到 `[√2/2, √2)`，`2·atanh(s)` 级数到 `z^10/21` | ~1 ulp |
+| `ln_1p` | `|x| < 2^-4` 走 12 项级数，否则回落 `ln(1+x)` | ~1 ulp |
+| `cos` | 三词 `π/2` 归约（首个 33 位，`n·hi` 精确），象限选择，`r^16`/`r^17` 多项式 | ~1 ulp |
+
+只用 `+ - * /`、位级 `frexp`/`ldexp`、固定项数与固定顺序，因此结果是输入位模式的纯函数，
+与平台数学库无关。精度比 libm 差一点无所谓——这里的契约是可复现，不是正确舍入。
+
+三份实现必须逐位一致，各自跑一遍即可自检（摘要相同）：
+
+| 语言 | 文件 | 命令 |
+|---|---|---|
+| Rust | `rust/src/stego/detmath.rs` | `cargo test --lib detmath` |
+| Python | `scripts/detmath/detmath.py` | `python scripts/detmath/detmath.py` |
+| Go | `scripts/detmath/detmath.go` | `go run scripts/detmath/detmath.go` |
+
+```text
+exp    68107bf871d53df2
+ln     6021ef64db0e27ef
+cos    55f3c5acb971153a
+ln_1p  23e6e71dccf69b20
+```
+
+已验证：Rust（Windows/MSVC 与 Ubuntu/glibc）、Python（同两平台）、Go（Windows/amd64）四组摘要全部相同；
+把 libm 换成这套实现后，28 例字节基线**一例未变**，说明中间量的 ulp 级差异本来就被量化吸收。
+
+**未验证**：ARM（arm64 上浮点仍应一致，但 Go 在 arm64 可能把 `a*b + c` 融合成 FMA，
+需要显式禁止后才谈逐位一致）。这一条属于"换平台前必须复测"的项目，不是已确立的结论。
+
 ---
 
 ### 13.12 行为语义
@@ -933,6 +970,7 @@ Ubuntu 22.04 / x86_64（1 核）实机验证：
 | `docs/api/cost-vectors.json` | 固定输入（32×32 RGB，像素以 hex 内联）+ 五个阶段的 FNV-1a 摘要 |
 | `rust/src/stego/png/cost/mipod.rs` 的 `vectors` 测试 | 重算并与摘要比对；`STHIDE_WRITE_COST_VECTOR=1` 时重新生成 JSON |
 | `scripts/cost_vectors_check.py` | 纯标准库的第二实现（Python），从 JSON 复算全部五段 |
+| `scripts/detmath/{detmath.py,detmath.go}` | 两份 `exp`/`ln`/`ln_1p`/`cos` 移植，摘要必须与 §13.11.5 的四个值相同 |
 
 阶段：`plane`（`pixel & 0xF8` 的亮度）→ `variance`（`σ²`，Wiener 残差 + 局部余弦补空间）→
 `fisher`（`2/σ⁴`）→ `smoothed`（7×7 盒滤波）→ `cost`（标定 + 量化，**这条是契约**）。

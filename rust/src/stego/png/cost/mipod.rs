@@ -350,9 +350,9 @@ mod vectors {
     /// Regenerate with `STHIDE_WRITE_COST_VECTOR=1 cargo test --lib cost_vector`.
     const PINNED: [u64; 5] = [
         0x38ac_ac9a_ee18_c045, // plane (class-masked luminance)
-        0xa9a8_2a38_5f1e_4aaf, // sigma^2
-        0x56e5_be58_b657_9778, // I = 2 / sigma^4
-        0xdde3_9010_4ca4_7b1b, // 7x7 box smooth
+        0xdbc7_ca84_26b6_8843, // sigma^2
+        0x7967_aba5_dc3c_1d8d, // I = 2 / sigma^4
+        0x6222_319f_9fc0_590d, // 7x7 box smooth
         0xce8f_ef0e_a0f8_90e9, // quantised STC cost
     ];
 

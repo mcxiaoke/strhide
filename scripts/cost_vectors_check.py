@@ -36,6 +36,11 @@ import struct
 import sys
 from pathlib import Path
 
+# The pipeline uses its own elementary functions so the numbers do not depend on
+# the platform libm; the Python port lives next to this file.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "detmath"))
+import detmath as dm  # noqa: E402
+
 BINS = 32_768
 LOG_X_MAX = 690.0
 LN_3 = 1.0986122886681098
@@ -152,7 +157,7 @@ def dct_basis(p: int) -> list[list[float]]:
         row = []
         for a in range(p):
             angle = math.pi * k * (2 * a + 1) / (2.0 * p)
-            row.append(s * math.cos(angle))
+            row.append(s * dm.cos(angle))
         basis.append(row)
     return basis
 
@@ -259,9 +264,9 @@ def solve_rho(x: float) -> float:
     if math.isnan(x) or x <= 0.0:
         return 0.0
     x = min(x, 1e300)
-    rho = math.log(1.0 + x)
+    rho = dm.ln_1p(x)
     for _ in range(32):
-        e = math.exp(rho)
+        e = dm.exp(rho)
         f = rho * (e + 2.0) - x
         df = e * (1.0 + rho) + 2.0
         nxt = max(rho - f / df, 0.0)
@@ -273,10 +278,10 @@ def solve_rho(x: float) -> float:
 
 
 def ternary_entropy_nats(rho: float) -> float:
-    lm = math.log1p(2.0 * math.exp(-rho))
+    lm = dm.ln_1p(2.0 * dm.exp(-rho))
     ell = rho + lm
-    beta = math.exp(-ell)
-    p0 = math.exp(-lm)
+    beta = dm.exp(-ell)
+    p0 = dm.exp(-lm)
     return 2.0 * beta * ell + p0 * lm
 
 
@@ -287,7 +292,7 @@ def entropy_at(hist: list[int], u_min: float, du: float, t: float) -> float:
             continue
         center = u_min + (i + 0.5) * du
         x = min(t + center, LOG_X_MAX)
-        total += float(count) * ternary_entropy_nats(solve_rho(math.exp(x)))
+        total += float(count) * ternary_entropy_nats(solve_rho(dm.exp(x)))
     return total
 
 
@@ -296,7 +301,7 @@ def fisher_to_costs(fisher: list[float], target_bits: float, quantise_bits: int)
     if n == 0:
         return fisher
 
-    logs = [math.log(f) if (math.isfinite(f) and f > 0.0) else -math.inf for f in fisher]
+    logs = [dm.ln(f) if (math.isfinite(f) and f > 0.0) else -math.inf for f in fisher]
     active = sum(1 for v in logs if math.isfinite(v))
     finite = [v for v in logs if math.isfinite(v)]
     if active == 0 or target_bits <= 0.0 or not math.isfinite(target_bits) or not finite:
@@ -367,7 +372,7 @@ def fisher_to_costs(fisher: list[float], target_bits: float, quantise_bits: int)
     table = []
     for i in range(BINS + 1):
         u = min_log + i * du
-        table.append(solve_rho(math.exp(min(t + u, LOG_X_MAX))))
+        table.append(solve_rho(dm.exp(min(t + u, LOG_X_MAX))))
 
     drop = (1 << quantise_bits) - 1
     out = []

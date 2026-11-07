@@ -17,6 +17,11 @@ pub mod audio;
 pub mod coding;
 #[cfg(feature = "content-base")]
 pub(crate) mod cost_calibration;
+
+/// Deterministic elementary functions for the cost pipeline (`exp`, `ln`,
+/// `ln_1p`, `cos`). Kept in-tree so the numbers do not depend on the platform
+/// libm; `scripts/detmath/` holds the Go and Python ports to check against.
+pub(crate) mod detmath;
 pub mod engine;
 #[doc(hidden)]
 pub mod envelope;
