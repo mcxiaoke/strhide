@@ -62,19 +62,18 @@ pub async fn write_structure_file_impl(
         };
 
         let strategy_str = req.strategy.as_deref().unwrap_or("auto");
-        let write_opts = WriteOptions {
-            output_path: req.output_path.as_deref(),
-            password: req.password.as_deref(),
-            password_hint: req.password_hint.as_deref(),
-            strategy: strategy_str,
-            stealth: req.stealth,
-            preserve_time: req.preserve_time,
-            backup: req.backup,
+        let write_opts = WriteOptions::default()
+            .with_output_option(req.output_path.as_deref())
+            .with_password_option(req.password.as_deref())
+            .with_password_hint_option(req.password_hint.as_deref())
+            .with_strategy(strategy_str)
+            .with_stealth(req.stealth)
+            .with_preserve_time(req.preserve_time)
+            .with_backup(req.backup)
             // Same value the pre-flight `check_overwrite` above used, so
             // the engine's own guard agrees with the IPC-level check.
-            overwrite,
-            control: ctrl,
-        };
+            .with_overwrite(overwrite)
+            .with_control(ctrl);
 
         let res = pool.install(|| {
             engine
@@ -117,12 +116,7 @@ pub async fn read_structure_file_impl(
     on_progress: Channel<ProgressEvent>,
 ) -> Result<ReadSummary, ErrorDetail> {
     run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
-        let opts = ReadOptions {
-            output_path: output_path.as_deref(),
-            password: password.as_deref(),
-            overwrite,
-            control: ctrl,
-        };
+        let opts = ReadOptions::default().with_output_option(output_path.as_deref()).with_password_option(password.as_deref()).with_overwrite(overwrite).with_control(ctrl);
         let res = pool.install(|| engine.structure().read_file(&path, &opts))?;
         let summary = res.summary();
 
@@ -185,13 +179,7 @@ pub async fn restore_structure_file_impl(
     on_progress: Channel<ProgressEvent>,
 ) -> Result<RemoveResult, ErrorDetail> {
     run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
-        let opts = RestoreOptions {
-            output_path: output_path.as_deref(),
-            password: password.as_deref(),
-            backup,
-            overwrite,
-            control: ctrl,
-        };
+        let opts = RestoreOptions::default().with_output_option(output_path.as_deref()).with_password_option(password.as_deref()).with_backup(backup).with_overwrite(overwrite).with_control(ctrl);
         pool.install(|| engine.structure().restore_file(&path, &opts))
     })
     .await

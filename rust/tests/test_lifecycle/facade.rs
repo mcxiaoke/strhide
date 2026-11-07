@@ -88,10 +88,7 @@ fn structure_path_write_read_restore_roundtrip() {
     std::fs::write(&carrier, PNG).expect("seed carrier");
 
     let engine = StrHide::new();
-    let options = WriteOptions {
-        backup: false,
-        ..WriteOptions::default()
-    };
+    let options = WriteOptions::default().with_backup(false);
 
     engine
         .structure()
@@ -122,10 +119,7 @@ fn structure_path_inspect_and_verify() {
     std::fs::write(&carrier, PNG).expect("seed carrier");
 
     let engine = StrHide::new();
-    let options = WriteOptions {
-        backup: false,
-        ..WriteOptions::default()
-    };
+    let options = WriteOptions::default().with_backup(false);
     engine
         .structure()
         .write_file(&carrier, PayloadSource::Bytes(STRUCT_PAYLOAD), &options)
@@ -636,10 +630,7 @@ fn gui_front_end_smoke() {
     // 1. Progress: an embed reports at least one stage event.
     let recorder = Recorder::default();
     let control = Control::with_progress(&recorder);
-    let options = EmbedOptions {
-        control,
-        ..Default::default()
-    };
+    let options = EmbedOptions::default().with_control(control);
     let _ = StrHide::new()
         .stego()
         .embed(JPG, &Payload::bytes(CONTENT_PAYLOAD), &options)
@@ -652,10 +643,7 @@ fn gui_front_end_smoke() {
     // 2. Cancellation: a pre-cancelled token stops before any output.
     let token = CancelToken::new();
     token.cancel();
-    let cancelled_options = EmbedOptions {
-        control: Control::with_cancel(&token),
-        ..Default::default()
-    };
+    let cancelled_options = EmbedOptions::default().with_control(Control::with_cancel(&token));
     let err = StrHide::new()
         .stego()
         .embed(JPG, &Payload::bytes(CONTENT_PAYLOAD), &cancelled_options)
@@ -699,10 +687,7 @@ fn test_inspect_any_and_smart_extract_cross_domain() {
 
     // 2. Inject structural payload
     let source = PayloadSource::Text("structure secret");
-    let write_opts = WriteOptions {
-        output_path: None,
-        ..Default::default()
-    };
+    let write_opts = WriteOptions::default().with_output_option(None);
     engine
         .structure()
         .write_file(&carrier, source, &write_opts)
@@ -777,10 +762,7 @@ fn test_verify_any_clean_and_stego() {
         .write_file(
             &carrier,
             PayloadSource::Text("secret"),
-            &WriteOptions {
-                output_path: None,
-                ..Default::default()
-            },
+            &WriteOptions::default().with_output_option(None),
         )
         .expect("write_file");
 
@@ -907,10 +889,7 @@ fn facade_embed_stats_populated() {
     let carrier = dir.join("carrier.jpg");
     std::fs::write(&carrier, JPG).expect("write carrier");
 
-    let options = EmbedOptions {
-        password: Some("pw"),
-        ..EmbedOptions::default()
-    };
+    let options = EmbedOptions::default().with_password("pw");
     let target = strhide::core::commit::FileTarget {
         output_path: None,
         backup: false,

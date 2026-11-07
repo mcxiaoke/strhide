@@ -322,11 +322,9 @@ pub fn heavy_all_algorithms_png_jpeg_matrix() {
             .map(|task| {
                 let filename = task.path.file_name().unwrap().to_string_lossy().to_string();
                 let payload = payload_for(&task.path, task.algorithm);
-                let opts = EmbedOptions {
-                    tuning: task.tuning,
-                    password: Some(PASSWORD),
-                    ..Default::default()
-                };
+                let opts = EmbedOptions::default()
+                    .with_tuning(task.tuning)
+                    .with_password(PASSWORD);
 
                 let t0 = Instant::now();
                 let stego = match embed_carrier(&task.bytes, &Payload::bytes(&payload), &opts) {

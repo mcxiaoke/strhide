@@ -525,10 +525,7 @@ fn test_hevc_balanced_small_payload_roundtrip() {
         carrier.extend_from_slice(&frame);
     }
     let fmt = &DEFAULT_HEVC_FORMAT;
-    let policy = SafetyPolicy {
-        level: strhide::stego::SafetyLevel::Balanced,
-        ..SafetyPolicy::new()
-    };
+    let policy = (SafetyPolicy::new()).with_level(strhide::stego::SafetyLevel::Balanced);
     let payload = b"balanced-small";
     let (stego, info, _stats) = embed_hevc_with_info(
         &carrier,

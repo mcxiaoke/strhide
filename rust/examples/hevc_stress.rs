@@ -238,14 +238,9 @@ pub fn main() -> ExitCode {
                         );
                     }
                 };
-                let options = ProbeOptions {
-                    safety: SafetyPolicy {
-                        level: SafetyLevel::High,
-                        ..SafetyPolicy::default()
-                    },
-                    exact: true,
-                    ..Default::default()
-                };
+                let options = ProbeOptions::default()
+                    .with_safety_policy(SafetyPolicy::default().with_level(SafetyLevel::High))
+                    .with_exact(true);
                 match probe_carrier_capacity(&cover, &options) {
                     Ok(c) => {
                         // For video containers (MP4/MOV), the HEVC engine enforces a
@@ -496,11 +491,9 @@ fn run_round(cover: &[u8], job: &Job, round: usize, config: &Config) -> Round {
     let stego = match embed_carrier(
         cover,
         &Payload::bytes(&payload),
-        &EmbedOptions {
-            password: Some(&password),
-            freshness,
-            ..EmbedOptions::default()
-        },
+        &EmbedOptions::default()
+            .with_password(&password)
+            .with_freshness(freshness),
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -537,13 +530,7 @@ fn run_round(cover: &[u8], job: &Job, round: usize, config: &Config) -> Round {
     }
 
     let started = Instant::now();
-    let back = match extract_carrier(
-        &stego,
-        &ExtractOptions {
-            password: Some(&password),
-            ..ExtractOptions::default()
-        },
-    ) {
+    let back = match extract_carrier(&stego, &ExtractOptions::default().with_password(&password)) {
         Ok(p) => p,
         Err(e) => {
             return Round {
@@ -617,20 +604,12 @@ fn wrong_password_is_rejected(cover: &[u8], job: &Job, config: &Config) -> Resul
     let stego = embed_carrier(
         cover,
         &Payload::bytes(&payload),
-        &EmbedOptions {
-            password: Some(&right_pw),
-            freshness,
-            ..EmbedOptions::default()
-        },
+        &EmbedOptions::default()
+            .with_password(&right_pw)
+            .with_freshness(freshness),
     )
     .map_err(|e| format!("embed failed: {e}"))?;
-    match extract_carrier(
-        &stego,
-        &ExtractOptions {
-            password: Some(&wrong_pw),
-            ..ExtractOptions::default()
-        },
-    ) {
+    match extract_carrier(&stego, &ExtractOptions::default().with_password(&wrong_pw)) {
         Ok(p) => Err(format!(
             "a wrong password returned {} bytes instead of failing",
             p.len()

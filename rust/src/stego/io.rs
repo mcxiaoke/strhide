@@ -705,10 +705,7 @@ mod tests {
 
         let secret = "io-patch-test-pwd";
         let payload = Payload::bytes(b"hello patches from io");
-        let opts = EmbedOptions {
-            password: Some(secret),
-            ..EmbedOptions::default()
-        };
+        let opts = EmbedOptions::default().with_password(secret);
         let profile = StegoProfile::default();
 
         let target = FileTarget {
@@ -722,10 +719,7 @@ mod tests {
         assert!(res.backup_file.is_none());
         assert!(dest.is_file());
 
-        let extract_opts = ExtractOptions {
-            password: Some(secret),
-            ..ExtractOptions::default()
-        };
+        let extract_opts = ExtractOptions::default().with_password(secret);
         let extracted =
             extract_carrier_file(&dest, &extract_opts, &profile).expect("extract_carrier_file");
         assert_eq!(extracted, b"hello patches from io");

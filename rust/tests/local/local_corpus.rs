@@ -204,11 +204,9 @@ fn assert_payload(actual: &[u8], expected: &[u8], mode: &str) -> Result<(), Stri
 fn rejection_case(src: &Path, dir: &Path, reason: &str) -> Result<String, String> {
     let carrier = copy_carrier(src, dir, "rej")?;
     let before = compute_file_sha256(&carrier).map_err(|e| e.to_string())?;
-    let opts = WriteOptions {
-        password: Some("123"),
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password("123")
+        .with_backup(false);
     match write_carrier(&carrier, PayloadSource::Text("payload"), &opts) {
         Err(StrHideError::Rejection(msg)) | Err(StrHideError::UnsupportedFormat(msg)) => {
             let after = compute_file_sha256(&carrier).map_err(|e| e.to_string())?;
@@ -233,11 +231,9 @@ fn plain_mode(
     payload: &[u8],
 ) -> Result<String, String> {
     let carrier = copy_carrier(src, dir, &format!("plain{}", case.label))?;
-    let opts = WriteOptions {
-        password: None,
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password_option(None)
+        .with_backup(false);
     let w = write_carrier(&carrier, PayloadSource::Bytes(payload), &opts)
         .map_err(|e| format!("write: {e}"))?;
 
@@ -245,25 +241,21 @@ fn plain_mode(
 
     let r = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .map_err(|e| format!("read: {e}"))?;
     assert_payload(&r.data, payload, "plaintext")?;
 
     remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: None,
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .map_err(|e| format!("remove: {e}"))?;
     assert_restored(&carrier, orig_sha, "remove")?;
@@ -281,11 +273,9 @@ fn encrypted_mode(
     payload: &[u8],
 ) -> Result<String, String> {
     let carrier = copy_carrier(src, dir, &format!("enc{}", case.label))?;
-    let opts = WriteOptions {
-        password: Some(ENC_PASSWORD),
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password(ENC_PASSWORD)
+        .with_backup(false);
     let w = write_carrier(&carrier, PayloadSource::Bytes(payload), &opts)
         .map_err(|e| format!("write: {e}"))?;
 
@@ -294,12 +284,10 @@ fn encrypted_mode(
     // A wrong password must be a clean Password error, never garbage output.
     match read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: Some("WrongPassword!"),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("WrongPassword!")
+            .with_overwrite(false),
     ) {
         Err(StrHideError::Password(_)) => {}
         Err(e) => return Err(format!("wrong password gave an unexpected error: {e}")),
@@ -307,12 +295,10 @@ fn encrypted_mode(
     }
     if read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .is_ok()
     {
@@ -321,12 +307,10 @@ fn encrypted_mode(
 
     let r = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: Some(ENC_PASSWORD),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password(ENC_PASSWORD)
+            .with_overwrite(false),
     )
     .map_err(|e| format!("read: {e}"))?;
     assert_payload(&r.data, payload, "encrypted")?;
@@ -335,13 +319,11 @@ fn encrypted_mode(
     // encrypted envelope can no longer be removed without its password.
     let no_pw = remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: None,
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     );
     if no_pw.is_ok() {
         return Err("encrypted envelope was removed without the password".into());
@@ -349,13 +331,11 @@ fn encrypted_mode(
 
     remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: None,
-            password: Some(ENC_PASSWORD),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output_option(None)
+            .with_password(ENC_PASSWORD)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .map_err(|e| format!("remove: {e}"))?;
     assert_restored(&carrier, orig_sha, "remove")?;
@@ -373,12 +353,10 @@ fn stealth_mode(
     payload: &[u8],
 ) -> Result<String, String> {
     let carrier = copy_carrier(src, dir, &format!("stl{}", case.label))?;
-    let opts = WriteOptions {
-        password: Some(STEALTH_PASSWORD),
-        stealth: true,
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password(STEALTH_PASSWORD)
+        .with_stealth(true)
+        .with_backup(false);
     let w = write_carrier(&carrier, PayloadSource::Bytes(payload), &opts)
         .map_err(|e| format!("write: {e}"))?;
 
@@ -393,25 +371,21 @@ fn stealth_mode(
 
     let r = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: Some(STEALTH_PASSWORD),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password(STEALTH_PASSWORD)
+            .with_overwrite(false),
     )
     .map_err(|e| format!("read: {e}"))?;
     assert_payload(&r.data, payload, "stealth")?;
 
     remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: None,
-            password: Some(STEALTH_PASSWORD),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output_option(None)
+            .with_password(STEALTH_PASSWORD)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .map_err(|e| format!("remove: {e}"))?;
     assert_restored(&carrier, orig_sha, "remove")?;

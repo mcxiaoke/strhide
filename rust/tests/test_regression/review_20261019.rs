@@ -32,14 +32,12 @@ fn write_carrier_file(
     write_carrier(
         carrier,
         payload,
-        &WriteOptions {
-            output_path: Some(out),
-            password,
-            strategy,
-            stealth,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(out)
+            .with_password_option(password)
+            .with_strategy(strategy)
+            .with_stealth(stealth)
+            .with_backup(false),
     )
     .unwrap()
 }
@@ -129,25 +127,21 @@ fn zip_tampered_patch_offset_returns_corrupted_data() {
 
     let err = remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&dir.join("o.zip")),
-            password: Some("pw"),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&dir.join("o.zip"))
+            .with_password("pw")
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap_err();
     assert!(matches!(err, StrHideError::CorruptedData(_)), "{err}");
     assert!(
         read_carrier(
             &stego,
-            &ReadOptions {
-                output_path: None,
-                password: Some("pw"),
-                overwrite: false,
-                ..Default::default()
-            }
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password("pw")
+                .with_overwrite(false)
         )
         .is_ok(),
         "payload itself must stay readable"
@@ -363,12 +357,10 @@ fn backup_path_handles_non_utf8_names() {
     write_carrier(
         &carrier,
         PayloadSource::Text("x"),
-        &WriteOptions {
-            password: None,
-            strategy: "auto",
-            backup: true,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_password_option(None)
+            .with_strategy("auto")
+            .with_backup(true),
     )
     .unwrap();
     let mut bak = carrier.as_os_str().to_os_string();
@@ -400,12 +392,10 @@ fn png_dirty_tail_beyond_64k_is_supported() {
     assert_eq!(
         read_carrier(
             &stego,
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            }
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false)
         )
         .unwrap()
         .data,
@@ -414,13 +404,11 @@ fn png_dirty_tail_beyond_64k_is_supported() {
     let restored = dir.join("r.png");
     remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), data);
@@ -448,12 +436,10 @@ fn png_dirty_tail_auto_strategy() {
     assert_eq!(
         read_carrier(
             &stego,
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            }
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false)
         )
         .unwrap()
         .data,
@@ -488,12 +474,10 @@ fn extract_refuses_to_overwrite_existing_file() {
 
     let err = read_carrier(
         &stego,
-        &ReadOptions {
-            output_path: Some(&outdir),
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output(&outdir)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap_err();
     assert!(matches!(err, StrHideError::AlreadyExists(_)), "{err}");
@@ -505,12 +489,10 @@ fn extract_refuses_to_overwrite_existing_file() {
 
     let res = strhide::structure::read_carrier(
         &stego,
-        &strhide::structure::ReadOptions {
-            output_path: Some(&outdir),
-            password: None,
-            overwrite: true,
-            ..Default::default()
-        },
+        &strhide::structure::ReadOptions::default()
+            .with_output(&outdir)
+            .with_password_option(None)
+            .with_overwrite(true),
     )
     .unwrap();
     assert!(res.written_file.is_some());
@@ -758,12 +740,10 @@ fn a15_unencrypted_corrupted_metadata_reports_corrupted_not_password() {
     );
     let err_enc = read_carrier(
         &stego_enc,
-        &ReadOptions {
-            output_path: None,
-            password: Some("WrongPass123"),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("WrongPass123")
+            .with_overwrite(false),
     )
     .unwrap_err();
     assert!(
@@ -792,12 +772,10 @@ fn a15_unencrypted_corrupted_metadata_reports_corrupted_not_password() {
 
     let err_plain = read_carrier(
         &tampered,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     );
     if let Err(e) = err_plain {
         assert!(

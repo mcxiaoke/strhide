@@ -35,10 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|_| std::fs::read("tests/assets/minimal.png"))?;
     let secret_message = b"the payload can just as well be a ZIP or a JSON blob";
 
-    let options = WriteOptions {
-        password: Some("correct horse battery staple"),
-        ..WriteOptions::default()
-    };
+    let options = WriteOptions::default().with_password("correct horse battery staple");
 
     let (stego, wrote) = write_carrier_bytes(
         &cover,

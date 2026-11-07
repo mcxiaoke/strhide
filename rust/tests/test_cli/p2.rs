@@ -105,11 +105,7 @@ fn verify_exit_code_zero_for_valid_carrier() {
     write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
-        &WriteOptions {
-            output_path: Some(&out),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default().with_output(&out).with_backup(false),
     )
     .unwrap();
 
@@ -132,12 +128,10 @@ fn verify_exit_code_one_when_envelope_header_invalid() {
     write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
-        &WriteOptions {
-            output_path: Some(&out),
-            strategy: "eof",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_strategy("eof")
+            .with_backup(false),
     )
     .unwrap();
     let ube_offset = fs::metadata(&carrier).unwrap().len();
@@ -163,11 +157,7 @@ fn verify_exit_code_one_when_host_structure_broken() {
     write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
-        &WriteOptions {
-            output_path: Some(&out),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default().with_output(&out).with_backup(false),
     )
     .unwrap();
     // Flip a byte inside the injected IHDR-like region of the host: simplest
@@ -199,25 +189,21 @@ fn read_stealth_without_password_reports_guidance() {
     write_carrier(
         &carrier,
         PayloadSource::Text("stealth secret"),
-        &WriteOptions {
-            output_path: Some(&out),
-            password: Some("pw12345"),
-            stealth: true,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_password("pw12345")
+            .with_stealth(true)
+            .with_backup(false),
     )
     .unwrap();
 
     // Engine level: NoHiddenDataError carrying actionable guidance.
     let err = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap_err();
     assert!(
@@ -255,24 +241,20 @@ fn read_encrypted_without_password_raises_password_variant() {
     write_carrier(
         &carrier,
         PayloadSource::Text("encrypted secret"),
-        &WriteOptions {
-            output_path: Some(&out),
-            password: Some("pw12345"),
-            password_hint: Some("the hint"),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_password("pw12345")
+            .with_password_hint("the hint")
+            .with_backup(false),
     )
     .unwrap();
 
     let err = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap_err();
     assert!(
@@ -299,11 +281,9 @@ fn signed_zip_renamed_to_zip_is_rejected() {
     let err = write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
-        &WriteOptions {
-            output_path: Some(&dir.join("o.zip")),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&dir.join("o.zip"))
+            .with_backup(false),
     )
     .unwrap_err();
     assert!(
@@ -328,22 +308,16 @@ fn clean_zip_is_still_accepted() {
     let res = write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
-        &WriteOptions {
-            output_path: Some(&out),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default().with_output(&out).with_backup(false),
     )
     .unwrap();
     assert_eq!(res.strategy.name(), "pre_cd_inject");
     let read = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(read.data, b"payload");
@@ -385,12 +359,10 @@ fn cli_unescape_supports_full_escape_set() {
 
     let read = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     // \x42 -> 'B', \u4E2D -> '中', \101 -> 'A' (octal), \t -> tab,
@@ -436,12 +408,10 @@ fn cli_unescape_combines_surrogate_pair() {
 
     let read = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(read.data, "P\u{1F680}Q\u{FFFD}\\uZZZZ".as_bytes().to_vec());
@@ -474,12 +444,10 @@ fn cli_unescape_keeps_non_ascii_input_intact() {
 
     let read = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     // NFC normalization applies to the text payload; the escapes are decoded
@@ -504,10 +472,7 @@ fn readonly_parent_directory_is_rejected() {
     let res = write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
-        &WriteOptions {
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default().with_backup(false),
     );
     // Restore permissions so the scratch dir can be cleaned up.
     fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
@@ -549,13 +514,11 @@ fn backup_collision_uses_timestamped_name() {
     // only pre-write copy of the carrier.
     let r1 = remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: None,
-            password: None,
-            backup: true,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_backup(true)
+            .with_overwrite(false),
     )
     .unwrap();
     let bak2 = r1.backup_file.expect("backup created");

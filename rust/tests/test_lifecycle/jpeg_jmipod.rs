@@ -34,16 +34,13 @@ fn payload() -> Vec<u8> {
 }
 
 fn options(algorithm: Option<&str>) -> EmbedOptions<'static> {
-    EmbedOptions {
-        tuning: match algorithm {
-            None => StegoTuning::Auto,
-            Some(name) => StegoTuning::Jpeg {
-                model: JpegAlgorithm::from_name(name).expect("a known JPEG model"),
-                params: JpegParams::default(),
-            },
+    EmbedOptions::default().with_tuning(match algorithm {
+        None => StegoTuning::Auto,
+        Some(name) => StegoTuning::Jpeg {
+            model: JpegAlgorithm::from_name(name).expect("a known JPEG model"),
+            params: JpegParams::default(),
         },
-        ..Default::default()
-    }
+    })
 }
 
 #[test]

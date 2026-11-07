@@ -56,10 +56,7 @@ pub mod v3_corpus {
     }
 
     fn password_options(password: &str) -> EmbedOptions<'_> {
-        EmbedOptions {
-            password: Some(password),
-            ..Default::default()
-        }
+        EmbedOptions::default().with_password(password)
     }
 
     #[test]
@@ -86,14 +83,12 @@ pub mod v3_corpus {
         }
 
         let password = "MatrixGate#2026";
-        let opts = EmbedOptions {
-            tuning: StegoTuning::Jpeg {
+        let opts = EmbedOptions::default()
+            .with_tuning(StegoTuning::Jpeg {
                 model: JpegAlgorithm::Uerd,
                 params: JpegParams::default(),
-            },
-            password: Some(password),
-            ..Default::default()
-        };
+            })
+            .with_password(password);
         let done = AtomicUsize::new(0);
         files.par_iter().for_each(|path| {
             let cover = std::fs::read(path).expect("read cover");

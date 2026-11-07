@@ -59,12 +59,10 @@ fn test_password_hint_lifecycle() {
     let secret = "This is a very top secret message.";
 
     // 1. Write with password and hint
-    let opts = WriteOptions {
-        password: Some(pwd),
-        password_hint: Some(hint_text),
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password(pwd)
+        .with_password_hint(hint_text)
+        .with_backup(false);
     let res_w =
         write_carrier(&carrier, PayloadSource::Text(secret), &opts).expect("write with hint");
     assert_eq!(res_w.password_hint.as_deref(), Some(hint_text));
@@ -79,12 +77,10 @@ fn test_password_hint_lifecycle() {
     // structured field (and still renders it into the message).
     let err = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap_err();
     assert_eq!(err.hint(), Some(hint_text), "structured hint: {err:?}");
@@ -96,12 +92,10 @@ fn test_password_hint_lifecycle() {
     // 4. Read carrier with correct password: must extract successfully!
     let res_r = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: Some(pwd),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password(pwd)
+            .with_overwrite(false),
     )
     .expect("read");
     assert_eq!(String::from_utf8(res_r.data).unwrap(), secret);
@@ -110,13 +104,11 @@ fn test_password_hint_lifecycle() {
     let restored = dir.join("test.restored.png");
     remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some(pwd),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password(pwd)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove");
     assert_eq!(compute_file_sha256(&restored).unwrap(), orig_sha);
@@ -128,13 +120,11 @@ fn test_stealth_mode_rejects_hint() {
     let carrier = dir.join("test.png");
     fs::write(&carrier, make_dummy_png()).unwrap();
 
-    let opts = WriteOptions {
-        password: Some("pwd"),
-        password_hint: Some("some hint"),
-        stealth: true,
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password("pwd")
+        .with_password_hint("some hint")
+        .with_stealth(true)
+        .with_backup(false);
     let err = write_carrier(&carrier, PayloadSource::Text("secret"), &opts).unwrap_err();
     match err {
         StrHideError::General(msg) => {
@@ -154,12 +144,10 @@ fn test_no_hint_behavior() {
     fs::write(&carrier, make_dummy_png()).unwrap();
     let orig_sha = compute_file_sha256(&carrier).unwrap();
 
-    let opts = WriteOptions {
-        password: Some("pwd123"),
-        password_hint: None,
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password("pwd123")
+        .with_password_hint_option(None)
+        .with_backup(false);
     write_carrier(&carrier, PayloadSource::Text("no hint secret"), &opts).expect("write");
 
     // Inspect without password: password_hint is None
@@ -169,12 +157,10 @@ fn test_no_hint_behavior() {
     // Read without password: fails with password required, but NO hint
     let err = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap_err();
     assert_eq!(err.hint(), None, "no hint should be present: {err:?}");
@@ -186,12 +172,10 @@ fn test_no_hint_behavior() {
     // Read with password
     let res_r = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: Some("pwd123"),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("pwd123")
+            .with_overwrite(false),
     )
     .expect("read");
     assert_eq!(String::from_utf8(res_r.data).unwrap(), "no hint secret");
@@ -200,13 +184,11 @@ fn test_no_hint_behavior() {
     let restored = dir.join("test.restored.png");
     remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some("pwd123"),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password("pwd123")
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove");
     assert_eq!(compute_file_sha256(&restored).unwrap(), orig_sha);
@@ -220,12 +202,10 @@ fn test_hint_size_limit() {
 
     // Oversized hint (> 1024 bytes)
     let long_hint = "H".repeat(1025);
-    let opts = WriteOptions {
-        password: Some("pwd"),
-        password_hint: Some(&long_hint),
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password("pwd")
+        .with_password_hint(&long_hint)
+        .with_backup(false);
     let err = write_carrier(&carrier, PayloadSource::Text("secret"), &opts).unwrap_err();
     match err {
         StrHideError::General(msg) => {
@@ -254,14 +234,12 @@ fn tampered_hint_breaks_authentication() {
     write_carrier(
         &carrier,
         PayloadSource::Text("hint-bound payload"),
-        &WriteOptions {
-            output_path: Some(&stego),
-            password: Some("hint-pw"),
-            password_hint: Some("remember the cat"),
-            strategy: "eof",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&stego)
+            .with_password("hint-pw")
+            .with_password_hint("remember the cat")
+            .with_strategy("eof")
+            .with_backup(false),
     )
     .unwrap();
 
@@ -276,11 +254,9 @@ fn tampered_hint_breaks_authentication() {
 
     let err = read_carrier(
         &stego,
-        &ReadOptions {
-            output_path: Some(&dir.join("out.bin")),
-            password: Some("hint-pw"),
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output(&dir.join("out.bin"))
+            .with_password("hint-pw"),
     )
     .expect_err("a tampered hint must not decrypt");
     let msg = err.to_string().to_lowercase();
@@ -302,23 +278,19 @@ fn tampered_hint_breaks_authentication() {
     write_carrier(
         &carrier,
         PayloadSource::Text("hint-bound payload"),
-        &WriteOptions {
-            output_path: Some(&clean),
-            password: Some("hint-pw"),
-            password_hint: Some("remember the cat"),
-            strategy: "eof",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&clean)
+            .with_password("hint-pw")
+            .with_password_hint("remember the cat")
+            .with_strategy("eof")
+            .with_backup(false),
     )
     .unwrap();
     let res = read_carrier(
         &clean,
-        &ReadOptions {
-            output_path: Some(&dir.join("clean.out")),
-            password: Some("hint-pw"),
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output(&dir.join("clean.out"))
+            .with_password("hint-pw"),
     )
     .unwrap();
     assert_eq!(res.data.as_slice(), b"hint-bound payload");

@@ -269,18 +269,13 @@ pub fn main() -> ExitCode {
                         );
                     }
                 };
-                let options = ProbeOptions {
-                    safety: SafetyPolicy {
-                        level: SafetyLevel::High,
-                        ..SafetyPolicy::default()
-                    },
-                    tuning: StegoTuning::Jpeg {
+                let options = ProbeOptions::default()
+                    .with_safety_policy(SafetyPolicy::default().with_level(SafetyLevel::High))
+                    .with_tuning(StegoTuning::Jpeg {
                         model: algo.clone(),
                         params: JpegParams::default(),
-                    },
-                    exact: true,
-                    ..Default::default()
-                };
+                    })
+                    .with_exact(true);
                 match probe_carrier_capacity(&cover, &options) {
                     Ok(c) => (
                         path.clone(),
@@ -536,15 +531,13 @@ fn run_round(cover: &[u8], job: &Job, round: usize, config: &Config) -> Round {
     let stego = match embed_carrier(
         cover,
         &Payload::bytes(&payload),
-        &EmbedOptions {
-            password: Some(&password),
-            freshness,
-            tuning: StegoTuning::Jpeg {
+        &EmbedOptions::default()
+            .with_password(&password)
+            .with_freshness(freshness)
+            .with_tuning(StegoTuning::Jpeg {
                 model: job.algorithm.clone(),
                 params: JpegParams::default(),
-            },
-            ..EmbedOptions::default()
-        },
+            }),
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -578,13 +571,7 @@ fn run_round(cover: &[u8], job: &Job, round: usize, config: &Config) -> Round {
     }
 
     let started = Instant::now();
-    let back = match extract_carrier(
-        &stego,
-        &ExtractOptions {
-            password: Some(&password),
-            ..ExtractOptions::default()
-        },
-    ) {
+    let back = match extract_carrier(&stego, &ExtractOptions::default().with_password(&password)) {
         Ok(p) => p,
         Err(e) => {
             return Round {
@@ -648,24 +635,16 @@ fn wrong_password_is_rejected(cover: &[u8], job: &Job, config: &Config) -> Resul
     let stego = embed_carrier(
         cover,
         &Payload::bytes(&payload),
-        &EmbedOptions {
-            password: Some(&right_pw),
-            freshness,
-            tuning: StegoTuning::Jpeg {
+        &EmbedOptions::default()
+            .with_password(&right_pw)
+            .with_freshness(freshness)
+            .with_tuning(StegoTuning::Jpeg {
                 model: job.algorithm.clone(),
                 params: JpegParams::default(),
-            },
-            ..EmbedOptions::default()
-        },
+            }),
     )
     .map_err(|e| format!("embed failed: {e}"))?;
-    match extract_carrier(
-        &stego,
-        &ExtractOptions {
-            password: Some(&wrong_pw),
-            ..ExtractOptions::default()
-        },
-    ) {
+    match extract_carrier(&stego, &ExtractOptions::default().with_password(&wrong_pw)) {
         Ok(p) => Err(format!(
             "a wrong password returned {} bytes instead of failing",
             p.len()

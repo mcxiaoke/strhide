@@ -29,14 +29,12 @@ fn write_carrier_file(
     write_carrier(
         carrier,
         payload,
-        &WriteOptions {
-            output_path: Some(out),
-            password,
-            strategy,
-            stealth,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(out)
+            .with_password_option(password)
+            .with_strategy(strategy)
+            .with_stealth(stealth)
+            .with_backup(false),
     )
     .unwrap()
 }
@@ -97,25 +95,21 @@ fn zip_empty_archive_auto_falls_back_to_eof() {
     assert_eq!(res.strategy.name(), "eof");
     let out = read_carrier(
         &stego,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(out.data, b"empty zip secret");
     let restored = dir.join("r.zip");
     remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), zip);
@@ -244,14 +238,12 @@ fn wav_missing_final_pad_is_refused_before_write() {
     let err = write_carrier(
         &carrier,
         PayloadSource::Text("odd wav secret"),
-        &WriteOptions {
-            output_path: Some(&stego),
-            password: None,
-            strategy: "auto",
-            stealth: false,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&stego)
+            .with_password_option(None)
+            .with_strategy("auto")
+            .with_stealth(false)
+            .with_backup(false),
     )
     .unwrap_err();
     assert!(
@@ -289,25 +281,21 @@ fn heif_item_hidden_synthetic_roundtrip() {
     );
     let out = read_carrier(
         &stego,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(out.data, b"meta heif secret");
     let restored = dir.join("r.heif");
     remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
@@ -332,25 +320,21 @@ fn heif_without_meta_still_uses_box_uuid() {
     assert_eq!(res.strategy.name(), "box_uuid");
     let out = read_carrier(
         &stego,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(out.data, b"plain heif secret");
     let restored = dir.join("r.heif");
     remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
@@ -381,25 +365,21 @@ fn pdf_dirty_tail_beyond_128k_window_still_locates() {
     assert_eq!(res.strategy.name(), "incremental");
     let out = read_carrier(
         &stego,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(out.data, b"deep tail secret");
     let restored = dir.join("r.pdf");
     remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), pdf);
@@ -473,12 +453,10 @@ fn pdf_encrypted_document_rejects_incremental_and_roundtrips_via_eof() {
     let err = write_carrier(
         &carrier,
         PayloadSource::Text("x"),
-        &WriteOptions {
-            output_path: Some(&dir.join("o.pdf")),
-            strategy: "incremental",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&dir.join("o.pdf"))
+            .with_strategy("incremental")
+            .with_backup(false),
     )
     .unwrap_err();
     assert!(err.to_string().contains("encrypted"), "{err}");
@@ -495,25 +473,21 @@ fn pdf_encrypted_document_rejects_incremental_and_roundtrips_via_eof() {
     assert_eq!(res.strategy.name(), "eof");
     let out = read_carrier(
         &stego,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(out.data, b"enc secret");
     let restored = dir.join("r.pdf");
     remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), pdf);
@@ -577,25 +551,21 @@ fn zip64_locator_routes_auto_to_eof() {
     assert_eq!(res.strategy.name(), "eof");
     let out = read_carrier(
         &stego,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(out.data, b"zip64 secret");
     let restored = dir.join("r.zip");
     remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), zip);
@@ -677,12 +647,10 @@ fn wav_webp_auto_probe_reports_eof_but_write_rejects_mismatch() {
     let err = write_carrier(
         &carrier,
         PayloadSource::Text("wav auto secret"),
-        &WriteOptions {
-            output_path: Some(&stego),
-            strategy: "auto",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&stego)
+            .with_strategy("auto")
+            .with_backup(false),
     )
     .unwrap_err();
     assert!(
@@ -745,23 +713,19 @@ fn jpeg_app_segment_capacity_keeps_relocated_sos_in_scan_window() {
     let written = write_carrier(
         &carrier,
         PayloadSource::Bytes(&payload),
-        &WriteOptions {
-            output_path: Some(&stego),
-            strategy: "auto",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&stego)
+            .with_strategy("auto")
+            .with_backup(false),
     )
     .unwrap();
     assert_eq!(written.strategy.name(), "app_segment");
     let out = read_carrier(
         &stego,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(out.data, payload);
@@ -814,12 +778,10 @@ fn jpeg_auto_probe_reports_eof_but_write_rejects_unreachable_sos() {
     let err = write_carrier(
         &carrier,
         PayloadSource::Text("jpeg tail secret"),
-        &WriteOptions {
-            output_path: Some(&stego),
-            strategy: "auto",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&stego)
+            .with_strategy("auto")
+            .with_backup(false),
     )
     .unwrap_err();
     assert!(
@@ -869,25 +831,21 @@ fn heif_meta_tail_residual_roundtrips() {
     assert_eq!(res.strategy.name(), "item_hidden");
     let out = read_carrier(
         &stego,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(out.data, b"tail secret");
     let restored = dir.join("r.heif");
     remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), carrier_bytes);
@@ -957,24 +915,20 @@ fn png_concatenated_streams_roundtrip_through_the_last_iend() {
     let res = write_carrier(
         &carrier,
         PayloadSource::Text("png secret"),
-        &WriteOptions {
-            output_path: Some(&out),
-            strategy: "chunk",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_strategy("chunk")
+            .with_backup(false),
     )
     .expect("concatenated PNG must accept a chunk envelope");
     assert_eq!(res.strategy.name(), "chunk");
 
     let read = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .expect("locate must reach the chunk before the last IEND");
     assert_eq!(read.data, b"png secret");
@@ -988,13 +942,11 @@ fn png_concatenated_streams_roundtrip_through_the_last_iend() {
 
     remove_carrier(
         &out,
-        &RestoreOptions {
-            output_path: None,
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("restore");
     assert_eq!(fs::read(&out).unwrap(), concatenated);

@@ -1142,10 +1142,7 @@ mod tests {
     #[test]
     fn png_params_reject_out_of_range_exclusion() {
         for bad in [-0.1, 0.95, f64::NAN] {
-            let params = PngParams {
-                exclusion_percentile: bad,
-                ..PngParams::default()
-            };
+            let params = PngParams::default().with_exclusion_percentile(bad);
             let err = params
                 .validate()
                 .expect_err("an out-of-range exclusion rate must be rejected");
@@ -1154,10 +1151,7 @@ mod tests {
                 "got: {err}"
             );
         }
-        let params = PngParams {
-            exclusion_percentile: 0.0123,
-            ..PngParams::default()
-        };
+        let params = PngParams::default().with_exclusion_percentile(0.0123);
         assert_eq!(
             params.wire_quantized().exclusion_percentile,
             0.012,
@@ -1184,10 +1178,7 @@ mod tests {
         // Comparing the value to `DEFAULT_SLOT_BUDGET` conflated the two, so
         // `--slot-budget 1200000` silently rescaled like the default.
         let body_slots = 8_000_000; // body/4 = 2M, above the default
-        let explicit = JpegParams {
-            slot_budget: Some(DEFAULT_SLOT_BUDGET),
-            ..JpegParams::default()
-        };
+        let explicit = JpegParams::default().with_slot_budget(Some(DEFAULT_SLOT_BUDGET));
         assert_eq!(
             explicit.effective_slot_budget(body_slots),
             DEFAULT_SLOT_BUDGET
@@ -1398,10 +1389,7 @@ mod extract_policy_tests {
             params.max_pbkdf2_iterations,
             crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS
         );
-        let narrowed = ExtractParams {
-            allowed_suites: Some(vec![1]),
-            ..params
-        };
+        let narrowed = (params).with_allowed_suites(Some(vec![1]));
         assert!(narrowed.allows_suite(1));
         assert!(!narrowed.allows_suite(2));
     }
@@ -1414,10 +1402,7 @@ mod extract_policy_tests {
             .expect_err("suite 0 must be unknown");
         assert!(matches!(err, StrHideError::UnsupportedVersion(_)));
 
-        let params = ExtractParams {
-            allowed_suites: Some(vec![1]),
-            ..ExtractParams::default()
-        };
+        let params = ExtractParams::default().with_allowed_suites(Some(vec![1]));
         let err = params
             .validate_header(2, 32, 512, 1024)
             .expect_err("suite 2 must be disallowed");

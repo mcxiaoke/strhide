@@ -136,11 +136,7 @@ fn eval_png(png_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::er
                 let tid = task_id_counter.fetch_add(1, Ordering::Relaxed);
                 let tmp_stego_path = std::env::temp_dir().join(format!("eval_stego_{tid}.png"));
 
-                let params = PngParams {
-                    codec,
-                    stc_u: u.max(1),
-                    ..PngParams::default()
-                };
+                let params = PngParams::default().with_codec(codec).with_stc_u(u.max(1));
 
                 let started_embed = Instant::now();
                 let embed_res = embed_png(&carrier_bytes, payload.as_slice(), Credential::Password(TEST_PASSWORD), None, OFFICIAL_PNG_CIPHER.default_suite.as_u16(), &[], &OFFICIAL_PNG_FORMAT, &HillCostModel, &params, strhide::stego::SafetyPolicy::default(), strhide::stego::Freshness::Random, &Control::none());
@@ -307,10 +303,7 @@ fn eval_jpeg(jpg_paths: &[PathBuf], out_csv: &Path) -> Result<(), Box<dyn std::e
                 let tid = task_id_counter.fetch_add(1, Ordering::Relaxed);
                 let tmp_stego_path = std::env::temp_dir().join(format!("eval_stego_{tid}.jpg"));
 
-                let params = JpegParams {
-                    slot_budget: Some(budget),
-                    ..JpegParams::default()
-                };
+                let params = JpegParams::default().with_slot_budget(Some(budget));
                 let u = layout_for_payload(
                     &carrier_bytes,
                     &payload,

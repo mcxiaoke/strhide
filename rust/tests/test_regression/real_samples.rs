@@ -37,11 +37,9 @@ fn test_real_apk_rejection() {
     let carrier = dir.join("test.apk");
     fs::copy(&apk_src, &carrier).unwrap();
 
-    let opts = WriteOptions {
-        password: Some("pwd"),
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password("pwd")
+        .with_backup(false);
     let res = write_carrier(&carrier, PayloadSource::Text("Secret to APK"), &opts);
     match res {
         Err(StrHideError::Rejection(msg)) | Err(StrHideError::UnsupportedFormat(msg)) => {
@@ -69,11 +67,9 @@ fn test_real_signed_pe_rejection() {
     let carrier = dir.join("signed_test.exe");
     fs::copy(&exe_src, &carrier).unwrap();
 
-    let opts = WriteOptions {
-        password: Some("pwd"),
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password("pwd")
+        .with_backup(false);
     let res = write_carrier(&carrier, PayloadSource::Text("Secret to signed EXE"), &opts);
     match res {
         Err(StrHideError::Rejection(msg)) | Err(StrHideError::UnsupportedFormat(msg)) => {
@@ -105,11 +101,9 @@ fn test_real_png_full_lifecycle() {
     let pwd = "RealPass!PNG";
 
     // 1. Write
-    let opts = WriteOptions {
-        password: Some(pwd),
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password(pwd)
+        .with_backup(false);
     let res_w = write_carrier(&carrier, PayloadSource::Text(secret), &opts).expect("write PNG");
     assert_eq!(res_w.format.as_str(), "PNG");
     assert_eq!(res_w.strategy.name(), "chunk");
@@ -132,12 +126,10 @@ fn test_real_png_full_lifecycle() {
     // 4. Read
     let res_r = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: Some(pwd),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password(pwd)
+            .with_overwrite(false),
     )
     .expect("read PNG");
     assert_eq!(String::from_utf8(res_r.data).unwrap(), secret);
@@ -146,13 +138,11 @@ fn test_real_png_full_lifecycle() {
     let restored = dir.join("sample.restored.png");
     remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some(pwd),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password(pwd)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove PNG");
     let restored_sha = compute_file_sha256(&restored).unwrap();
@@ -178,11 +168,9 @@ fn test_real_jpg_full_lifecycle() {
     let pwd = "RealPass!JPG";
 
     // 1. Write
-    let opts = WriteOptions {
-        password: Some(pwd),
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password(pwd)
+        .with_backup(false);
     let res_w = write_carrier(&carrier, PayloadSource::Text(secret), &opts).expect("write JPG");
     assert_eq!(res_w.format.as_str(), "JPEG");
 
@@ -199,12 +187,10 @@ fn test_real_jpg_full_lifecycle() {
     // 3. Read
     let res_r = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: Some(pwd),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password(pwd)
+            .with_overwrite(false),
     )
     .expect("read JPG");
     assert_eq!(String::from_utf8(res_r.data).unwrap(), secret);
@@ -213,13 +199,11 @@ fn test_real_jpg_full_lifecycle() {
     let restored = dir.join("sample.restored.jpg");
     remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some(pwd),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password(pwd)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove JPG");
     let restored_sha = compute_file_sha256(&restored).unwrap();
@@ -245,11 +229,9 @@ fn test_real_mp4_full_lifecycle() {
     let pwd = "RealPass!MP4";
 
     // 1. Write
-    let opts = WriteOptions {
-        password: Some(pwd),
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password(pwd)
+        .with_backup(false);
     let res_w = write_carrier(&carrier, PayloadSource::Text(secret), &opts).expect("write MP4");
     assert_eq!(res_w.format.as_str(), "MP4");
     assert_eq!(res_w.strategy.name(), "box_uuid");
@@ -267,12 +249,10 @@ fn test_real_mp4_full_lifecycle() {
     // 3. Read
     let res_r = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: Some(pwd),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password(pwd)
+            .with_overwrite(false),
     )
     .expect("read MP4");
     assert_eq!(String::from_utf8(res_r.data).unwrap(), secret);
@@ -281,13 +261,11 @@ fn test_real_mp4_full_lifecycle() {
     let restored = dir.join("sample.restored.mp4");
     remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some(pwd),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password(pwd)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove MP4");
     let restored_sha = compute_file_sha256(&restored).unwrap();
@@ -313,11 +291,9 @@ fn test_real_zip_full_lifecycle() {
     let pwd = "RealPass!ZIP";
 
     // 1. Write
-    let opts = WriteOptions {
-        password: Some(pwd),
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password(pwd)
+        .with_backup(false);
     let res_w = write_carrier(&carrier, PayloadSource::Text(secret), &opts).expect("write ZIP");
     assert_eq!(res_w.format.as_str(), "ZIP");
     assert_eq!(res_w.strategy.name(), "pre_cd_inject");
@@ -335,12 +311,10 @@ fn test_real_zip_full_lifecycle() {
     // 3. Read
     let res_r = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: Some(pwd),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password(pwd)
+            .with_overwrite(false),
     )
     .expect("read ZIP");
     assert_eq!(String::from_utf8(res_r.data).unwrap(), secret);
@@ -349,13 +323,11 @@ fn test_real_zip_full_lifecycle() {
     let restored = dir.join("sample.restored.zip");
     remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some(pwd),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password(pwd)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove ZIP");
     let restored_sha = compute_file_sha256(&restored).unwrap();
@@ -381,11 +353,9 @@ fn test_real_pdf_full_lifecycle() {
     let pwd = "RealPass!PDF";
 
     // 1. Write
-    let opts = WriteOptions {
-        password: Some(pwd),
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password(pwd)
+        .with_backup(false);
     let res_w = write_carrier(&carrier, PayloadSource::Text(secret), &opts).expect("write PDF");
     assert_eq!(res_w.format.as_str(), "PDF");
     assert_eq!(res_w.strategy.name(), "incremental");
@@ -403,12 +373,10 @@ fn test_real_pdf_full_lifecycle() {
     // 3. Read
     let res_r = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: Some(pwd),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password(pwd)
+            .with_overwrite(false),
     )
     .expect("read PDF");
     assert_eq!(String::from_utf8(res_r.data).unwrap(), secret);
@@ -417,13 +385,11 @@ fn test_real_pdf_full_lifecycle() {
     let restored = dir.join("sample.restored.pdf");
     remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some(pwd),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password(pwd)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove PDF");
     let restored_sha = compute_file_sha256(&restored).unwrap();

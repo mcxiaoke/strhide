@@ -29,14 +29,12 @@ fn write(
     write_carrier(
         carrier,
         PayloadSource::File(payload),
-        &WriteOptions {
-            output_path: Some(out),
-            password,
-            password_hint: hint,
-            strategy,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(out)
+            .with_password_option(password)
+            .with_password_hint_option(hint)
+            .with_strategy(strategy)
+            .with_backup(false),
     )
     .unwrap()
     .ube_size
@@ -104,12 +102,10 @@ fn compact_metadata_survives_the_full_cycle() {
 
     let out = read_carrier(
         &stego,
-        &ReadOptions {
-            output_path: None,
-            password: Some("pw"),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("pw")
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(out.data, b"hello compact metadata");
@@ -123,13 +119,11 @@ fn compact_metadata_survives_the_full_cycle() {
     let restored = dir.join("restored.png");
     remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some("pw"),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password("pw")
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), png());

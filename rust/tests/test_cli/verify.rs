@@ -121,12 +121,10 @@ fn verify_encrypted_envelope_without_password_skips_level3() {
     write_carrier(
         &carrier,
         PayloadSource::Text("secret"),
-        &WriteOptions {
-            output_path: Some(&out),
-            password: Some("pw-l3"),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_password("pw-l3")
+            .with_backup(false),
     )
     .expect("write");
 
@@ -191,11 +189,7 @@ fn size_inflation_warning_is_raised_above_fifty_percent() {
     let res = write_carrier(
         &carrier,
         PayloadSource::Bytes(&payload),
-        &WriteOptions {
-            output_path: Some(&out),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default().with_output(&out).with_backup(false),
     )
     .expect("write");
 
@@ -250,11 +244,7 @@ fn small_payload_in_large_carrier_does_not_warn() {
     let res = write_carrier(
         &carrier,
         PayloadSource::Text("small"),
-        &WriteOptions {
-            output_path: Some(&out),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default().with_output(&out).with_backup(false),
     )
     .expect("write");
     assert!(
@@ -277,13 +267,11 @@ fn inflation_and_structural_warnings_are_merged() {
     write_carrier(
         &carrier,
         PayloadSource::Text("first"),
-        &WriteOptions {
-            output_path: Some(&stego),
-            password: Some("unknown-pw-1"),
-            stealth: true,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&stego)
+            .with_password("unknown-pw-1")
+            .with_stealth(true)
+            .with_backup(false),
     )
     .expect("first write");
 
@@ -293,11 +281,9 @@ fn inflation_and_structural_warnings_are_merged() {
     let res = write_carrier(
         &stego,
         PayloadSource::Text(&big),
-        &WriteOptions {
-            output_path: Some(&dir.join("w2.png")),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&dir.join("w2.png"))
+            .with_backup(false),
     )
     .expect("second write");
 
@@ -514,12 +500,10 @@ fn strategy_ask_selects_the_chosen_entry() {
     );
     let read = read_carrier(
         &dir.join("c.png"),
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .expect("read");
     assert_eq!(read.data, b"asked payload");
@@ -556,25 +540,21 @@ fn strategy_ask_out_of_range_and_non_numeric_fall_back_to_first() {
         // chunk embeds before IEND: the file must NOT end with the envelope.
         let read = read_carrier(
             &dir.join("c.png"),
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            },
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false),
         )
         .expect("read");
         assert_eq!(read.data, b"fallback");
         let restored = dir.join("restored.png");
         remove_carrier(
             &dir.join("c.png"),
-            &RestoreOptions {
-                output_path: Some(&restored),
-                password: None,
-                backup: false,
-                overwrite: false,
-                ..Default::default()
-            },
+            &RestoreOptions::default()
+                .with_output(&restored)
+                .with_password_option(None)
+                .with_backup(false)
+                .with_overwrite(false),
         )
         .expect("remove");
         assert_eq!(fs::read(&restored).unwrap(), make_png());
@@ -618,24 +598,20 @@ fn read_encrypted_without_password_returns_password_variant_with_hint() {
     write_carrier(
         &carrier,
         PayloadSource::Text("secret"),
-        &WriteOptions {
-            output_path: Some(&out),
-            password: Some("pw"),
-            password_hint: Some("3班1975"),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_password("pw")
+            .with_password_hint("3班1975")
+            .with_backup(false),
     )
     .expect("write");
 
     let err = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap_err();
     assert!(

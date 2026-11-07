@@ -648,10 +648,9 @@ fn flac_extension_does_not_shrink_reported_body_capacity() {
     );
 
     // Pass path: the reported tier is still embeddable and extractable.
-    let enforced = SafetyPolicy {
-        level: SafetyLevel::High,
-        enforcement: SafetyEnforcement::Enforced,
-    };
+    let enforced = SafetyPolicy::default()
+        .with_level(SafetyLevel::High)
+        .with_enforcement(SafetyEnforcement::Enforced);
     let raw = vec![0x5Au8; with_ext.recommended_max_bytes];
     let (stego, _, _) = embed_flac(
         &cover,

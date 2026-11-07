@@ -46,14 +46,12 @@ fn write_carrier_file(
     write_carrier(
         carrier,
         payload,
-        &WriteOptions {
-            output_path: Some(out),
-            password,
-            strategy,
-            stealth,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(out)
+            .with_password_option(password)
+            .with_strategy(strategy)
+            .with_stealth(stealth)
+            .with_backup(false),
     )
     .unwrap()
 }
@@ -68,12 +66,10 @@ fn stealth_requires_password() {
     let err = write_carrier(
         &carrier,
         PayloadSource::Text("x"),
-        &WriteOptions {
-            output_path: Some(&dir.join("o.png")),
-            stealth: true,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&dir.join("o.png"))
+            .with_stealth(true)
+            .with_backup(false),
     )
     .unwrap_err();
     assert!(err.to_string().contains("requires a password"), "{err}");
@@ -246,12 +242,10 @@ fn path_traversal_sanitized() {
     fs::create_dir_all(&outdir).unwrap();
     let res = read_carrier(
         &stego,
-        &ReadOptions {
-            output_path: Some(&outdir),
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output(&outdir)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert!(outdir.join("EVIL.txt").exists());
@@ -280,13 +274,11 @@ fn double_injection_rejected_same_password() {
     let err = write_carrier(
         &stego,
         PayloadSource::Text("second"),
-        &WriteOptions {
-            output_path: Some(&stego),
-            password: Some("pw1"),
-            stealth: true,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&stego)
+            .with_password("pw1")
+            .with_stealth(true)
+            .with_backup(false),
     )
     .unwrap_err();
     assert!(
@@ -353,25 +345,21 @@ fn double_envelope_reverse_order_removal() {
     let s1 = dir.join("s1.png");
     remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&s1),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&s1)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     let s2 = dir.join("s2.png");
     remove_carrier(
         &s1,
-        &RestoreOptions {
-            output_path: Some(&s2),
-            password: Some("pw1"),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&s2)
+            .with_password("pw1")
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&s2).unwrap(), orig);
@@ -401,13 +389,11 @@ fn double_envelope_inner_first_removal_diagnosed() {
     );
     let err = remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&dir.join("x.png")),
-            password: Some("pw1"),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&dir.join("x.png"))
+            .with_password("pw1")
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap_err();
     assert!(
@@ -434,25 +420,21 @@ fn pdf_dirty_tail_lossless() {
     );
     let res = read_carrier(
         &stego,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(res.data, b"hello secret");
     let restored = dir.join("r.pdf");
     remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
@@ -521,12 +503,10 @@ fn auto_capacity_boundary_uses_multisegment_app15() {
     assert_eq!(res.ube_size, target);
     let out = read_carrier(
         &dir.join("bs.jpg"),
-        &ReadOptions {
-            output_path: None,
-            password: Some("pw"),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("pw")
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(out.data.len(), payload_len);
@@ -535,13 +515,11 @@ fn auto_capacity_boundary_uses_multisegment_app15() {
     let restored = dir.join("restored.jpg");
     remove_carrier(
         &dir.join("bs.jpg"),
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some("pw"),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password("pw")
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
@@ -558,13 +536,11 @@ fn explicit_oversize_strategy_rejected_without_tmp() {
     let err = write_carrier(
         &carrier,
         PayloadSource::File(&payload),
-        &WriteOptions {
-            output_path: Some(&out),
-            password: Some("pw"),
-            strategy: "invalid_strat",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_password("pw")
+            .with_strategy("invalid_strat")
+            .with_backup(false),
     )
     .unwrap_err();
     assert!(
@@ -613,13 +589,11 @@ fn zip_fake_eocd_comment_lifecycle() {
     let restored = dir.join("fcr.zip");
     remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
@@ -641,25 +615,21 @@ fn zip_eof_stego_still_locatable() {
     );
     let res = read_carrier(
         &stego,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(res.data, b"x");
     let restored = dir.join("er.zip");
     remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
@@ -697,12 +667,10 @@ fn tampered_meta_len_rejected() {
     assert!(
         read_carrier(
             &dir.join("t.zip"),
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            }
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false)
         )
         .is_err()
     );
@@ -717,12 +685,10 @@ fn tampered_hint_len_rejected() {
     assert!(
         read_carrier(
             &dir.join("t.zip"),
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            }
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false)
         )
         .is_err()
     );
@@ -795,13 +761,11 @@ fn tmp_guard_removes_uncommitted_temp() {
     let _ = write_carrier(
         &carrier,
         PayloadSource::File(&payload),
-        &WriteOptions {
-            output_path: Some(&out),
-            password: Some("pw"),
-            strategy: "app_segment",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_password("pw")
+            .with_strategy("app_segment")
+            .with_backup(false),
     );
     for entry in fs::read_dir(&dir).unwrap() {
         let name = entry.unwrap().file_name();
@@ -817,12 +781,10 @@ fn error_type_is_still_strhide_error() {
     let dir = scratch("errtype");
     let err = read_carrier(
         &dir.join("nonexistent.bin"),
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap_err();
     assert!(matches!(err, StrHideError::General(_)));
@@ -844,12 +806,10 @@ fn write_rejects_truncated_jpeg_lookalike() {
     let err = write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
-        &WriteOptions {
-            output_path: Some(&out),
-            strategy: "auto",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_strategy("auto")
+            .with_backup(false),
     )
     .unwrap_err();
     let message = err.to_string().to_lowercase();
@@ -908,14 +868,12 @@ fn eof_overlay_dialects_pass_l1_on_riff_mkv_pdf() {
             let (stego, _) = write_carrier_bytes(
                 &bytes,
                 PayloadSource::Text("eof dialect secret"),
-                &WriteOptions {
-                    output_path: None,
-                    password,
-                    strategy: "eof",
-                    stealth: password.is_some(),
-                    backup: false,
-                    ..Default::default()
-                },
+                &WriteOptions::default()
+                    .with_output_option(None)
+                    .with_password_option(password)
+                    .with_strategy("eof")
+                    .with_stealth(password.is_some())
+                    .with_backup(false),
                 &LocalParams::new(),
                 profile,
             )
@@ -968,14 +926,12 @@ fn png_chunk_envelope_survives_content_recompression_in_all_dialects() {
         let (stego1, _) = write_carrier_bytes(
             &cover,
             PayloadSource::Text("structure payload under content"),
-            &WriteOptions {
-                output_path: None,
-                password,
-                strategy: "chunk",
-                stealth: password.is_some(),
-                backup: false,
-                ..Default::default()
-            },
+            &WriteOptions::default()
+                .with_output_option(None)
+                .with_password_option(password)
+                .with_strategy("chunk")
+                .with_stealth(password.is_some())
+                .with_backup(false),
             &LocalParams::new(),
             profile,
         )
@@ -1100,12 +1056,10 @@ fn write_rejects_bmff_host_without_explicit_sized_box() {
     let err = write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
-        &WriteOptions {
-            output_path: Some(&out),
-            strategy: "auto",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_strategy("auto")
+            .with_backup(false),
     )
     .unwrap_err();
     let message = err.to_string().to_lowercase();
@@ -1127,11 +1081,9 @@ fn remove_rejects_forged_host_digest_before_rename() {
     let (stego, _) = write_carrier_bytes(
         &cover,
         PayloadSource::Text("f02 digest payload"),
-        &WriteOptions {
-            output_path: None,
-            strategy: "auto",
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output_option(None)
+            .with_strategy("auto"),
         &LocalParams::new(),
         &profile,
     )
@@ -1156,14 +1108,7 @@ fn remove_rejects_forged_host_digest_before_rename() {
     let forged_sha = compute_sha256(&fs::read(&carrier).unwrap());
     let out = dir.join("restored.png");
 
-    let err = remove_carrier(
-        &carrier,
-        &RestoreOptions {
-            output_path: Some(&out),
-            ..Default::default()
-        },
-    )
-    .unwrap_err();
+    let err = remove_carrier(&carrier, &RestoreOptions::default().with_output(&out)).unwrap_err();
     assert!(
         matches!(err, StrHideError::Password(_)),
         "forged digest must fail metadata authentication, got {err}"
@@ -1186,12 +1131,10 @@ fn remove_rejects_out_of_bounds_patch_offset_and_injection_region() {
     let (stego, _) = write_carrier_bytes(
         &zip,
         PayloadSource::Text("f02 zip payload"),
-        &WriteOptions {
-            output_path: None,
-            password: Some("f02-zip-pw"),
-            strategy: "auto",
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output_option(None)
+            .with_password("f02-zip-pw")
+            .with_strategy("auto"),
         &LocalParams::new(),
         &profile,
     )
@@ -1281,10 +1224,7 @@ fn in_place_write_to_a_read_only_carrier_reports_a_permission_error() {
     let err = write_carrier(
         &carrier,
         PayloadSource::Text("payload"),
-        &WriteOptions {
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default().with_backup(false),
     )
     .unwrap_err();
 
@@ -1320,11 +1260,9 @@ fn write_rejects_payload_above_the_reader_limit_and_accepts_the_boundary() {
     let err = write_carrier(
         &carrier,
         PayloadSource::Bytes(&too_big),
-        &WriteOptions {
-            output_path: Some(&rejected),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&rejected)
+            .with_backup(false),
     )
     .unwrap_err();
     assert!(
@@ -1341,20 +1279,16 @@ fn write_rejects_payload_above_the_reader_limit_and_accepts_the_boundary() {
     write_carrier(
         &carrier,
         PayloadSource::Bytes(&boundary),
-        &WriteOptions {
-            output_path: Some(&accepted),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&accepted)
+            .with_backup(false),
     )
     .expect("boundary payload must be writable");
     let read_back = read_carrier(
         &accepted,
-        &ReadOptions {
-            output_path: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_overwrite(false),
     )
     .expect("boundary payload must be readable");
     assert_eq!(read_back.data.len(), LIMIT);

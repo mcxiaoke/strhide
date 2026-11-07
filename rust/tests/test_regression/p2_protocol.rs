@@ -75,12 +75,10 @@ fn write_eof_envelope(dir: &Path, name: &str) -> (PathBuf, u64) {
     write_carrier(
         &carrier,
         PayloadSource::Text("x"),
-        &WriteOptions {
-            output_path: Some(&out),
-            strategy: "eof",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_strategy("eof")
+            .with_backup(false),
     )
     .unwrap();
     // EOF strategy appends at the end of the host, so the envelope starts at
@@ -177,11 +175,7 @@ fn pdf_xref_stream_incremental_write_roundtrip() {
     let res = write_carrier(
         &carrier,
         PayloadSource::Text("xref stream secret"),
-        &WriteOptions {
-            output_path: Some(&out),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default().with_output(&out).with_backup(false),
     )
     .unwrap();
     assert_eq!(res.strategy.name(), "incremental");
@@ -214,24 +208,20 @@ fn pdf_xref_stream_incremental_write_roundtrip() {
     // Full lossless lifecycle still holds.
     let read = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(read.data, b"xref stream secret");
     remove_carrier(
         &out,
-        &RestoreOptions {
-            output_path: None,
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&out).unwrap(), make_xref_stream_pdf());
@@ -283,11 +273,7 @@ fn pdf_xref_stream_revision_after_a_classic_one_stays_in_its_dialect() {
     let res = write_carrier(
         &carrier,
         PayloadSource::Text("mixed revision secret"),
-        &WriteOptions {
-            output_path: Some(&out),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default().with_output(&out).with_backup(false),
     )
     .unwrap();
     assert_eq!(res.strategy.name(), "incremental");
@@ -309,25 +295,21 @@ fn pdf_xref_stream_revision_after_a_classic_one_stays_in_its_dialect() {
 
     let read = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(read.data, b"mixed revision secret");
 
     remove_carrier(
         &out,
-        &RestoreOptions {
-            output_path: None,
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&out).unwrap(), original);
@@ -362,11 +344,7 @@ fn pdf_without_root_is_rejected_for_incremental() {
     let res = write_carrier(
         &carrier,
         PayloadSource::Text("noroot"),
-        &WriteOptions {
-            output_path: Some(&out),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default().with_output(&out).with_backup(false),
     )
     .unwrap();
     assert_eq!(res.strategy.name(), "eof");
@@ -375,13 +353,11 @@ fn pdf_without_root_is_rejected_for_incremental() {
     let err = write_carrier(
         &carrier,
         PayloadSource::Text("noroot"),
-        &WriteOptions {
-            output_path: Some(&out),
-            strategy: "incremental",
-            backup: false,
-            overwrite: true,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_strategy("incremental")
+            .with_backup(false)
+            .with_overwrite(true),
     )
     .unwrap_err();
     assert!(err.to_string().contains("/Root"), "{err}");
@@ -407,11 +383,7 @@ fn pdf_l1_survives_an_overlay_larger_than_the_tail_window() {
     let res = write_carrier(
         &carrier,
         PayloadSource::Bytes(&payload),
-        &WriteOptions {
-            output_path: Some(&out),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default().with_output(&out).with_backup(false),
     )
     .unwrap();
     assert_eq!(res.strategy.name(), "eof");
@@ -431,12 +403,10 @@ fn pdf_l1_survives_an_overlay_larger_than_the_tail_window() {
     assert_eq!(
         read_carrier(
             &out,
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            }
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false)
         )
         .unwrap()
         .data,
@@ -444,13 +414,11 @@ fn pdf_l1_survives_an_overlay_larger_than_the_tail_window() {
     );
     remove_carrier(
         &out,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
@@ -473,12 +441,10 @@ fn pdf_l1_survives_an_overlay_beyond_the_one_mib_search_depth() {
     let res = write_carrier(
         &carrier,
         PayloadSource::Bytes(&payload),
-        &WriteOptions {
-            output_path: Some(&out),
-            strategy: "eof",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_strategy("eof")
+            .with_backup(false),
     )
     .unwrap();
     assert_eq!(res.strategy.name(), "eof");
@@ -494,12 +460,10 @@ fn pdf_l1_survives_an_overlay_beyond_the_one_mib_search_depth() {
     assert_eq!(
         read_carrier(
             &out,
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            }
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false)
         )
         .unwrap()
         .data,
@@ -507,13 +471,11 @@ fn pdf_l1_survives_an_overlay_beyond_the_one_mib_search_depth() {
     );
     remove_carrier(
         &out,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());

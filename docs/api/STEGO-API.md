@@ -81,28 +81,29 @@ use strhide::stego::{
 };
 
 // 写侧：给算法与参数，二者绑在同一个枚举臂里，不可能错配格式。
-let embed = EmbedOptions {
-    password: Some("pw"),
-    key: None,                       // 与 password 互斥
-    suite_id: Some(1),               // 1=AES-256-GCM（默认），2=ChaCha20-Poly1305
-    extensions: vec![Tlv { type_id: 0x01, value: b"x".to_vec() }],
-    safety: SafetyPolicy::new(SafetyLevel::High, SafetyEnforcement::Advisory),
-    tuning: StegoTuning::Png { model: SpatialAlgorithm::Hill, params: PngParams::default() },
-    ..Default::default()
-};
+let embed = EmbedOptions::default()
+    .with_password("pw")
+    .with_suite_id(1)                // 1=AES-256-GCM（默认），2=ChaCha20-Poly1305
+    .with_extensions(vec![Tlv { type_id: 0x01, value: b"x".to_vec() }])
+    .with_safety(SafetyLevel::High, SafetyEnforcement::Advisory)
+    .with_tuning(StegoTuning::Png { model: SpatialAlgorithm::Hill, params: PngParams::default() });
 
 // 读侧：只有凭据与上限（默认 max_pbkdf2_iterations = 200,000）。
-let extract = ExtractOptions {
-    password: Some("pw"),
-    key: None,
-    domain: None,
-    limits: ExtractParams::default(),
-    ..Default::default()
-};
+let extract = ExtractOptions::default()
+    .with_password("pw")
+    .with_limits(ExtractParams::default());
 
 // 只读探测：与 embed 同一组调参、同一套扩展，容量答案才对得上将要执行的那次嵌入。
-let probe = ProbeOptions { tuning: embed.tuning.clone(), extensions: embed.extensions.clone(), ..Default::default() };
+let probe = ProbeOptions::default()
+    .with_tuning(embed.tuning.clone())
+    .with_extensions(embed.extensions.clone());
 ```
+
+所有选项与参数类型（`EmbedOptions` / `ProbeOptions` / `ExtractOptions` /
+`InspectOptions` / `VerifyOptions`、`PngParams` / `JpegParams` /
+`ExtractParams` / `SafetyPolicy`，以及结构域 `ReadOptions` / `WriteOptions` /
+`RestoreOptions`）都以 `Default` 起步、用 `with_*` 逐项设置；字段为 `Option`
+的可选量另有 `with_*_option(Option<T>)` 形式。
 
 `StegoTuning` 是 `Auto` 与三个按格式分臂的联合体：
 

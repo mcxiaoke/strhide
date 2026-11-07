@@ -184,11 +184,7 @@ fn png_verify_accepts_valid_carrier_with_envelope() {
     write_carrier(
         &carrier,
         PayloadSource::Text("batch1 png"),
-        &WriteOptions {
-            output_path: Some(&out),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default().with_output(&out).with_backup(false),
     )
     .unwrap();
 
@@ -271,11 +267,7 @@ fn mp4_verify_accepts_valid_carrier_with_envelope() {
     write_carrier(
         &carrier,
         PayloadSource::Text("batch1 mp4"),
-        &WriteOptions {
-            output_path: Some(&out),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default().with_output(&out).with_backup(false),
     )
     .unwrap();
 

@@ -129,11 +129,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (i, path) in files.iter().enumerate() {
             let cover = std::fs::read(path)?;
             let payload = incompressible(payload_len, 17 + i as u64);
-            let params = JpegParams {
-                stc_h: h,
-                slot_budget: Some(budget),
-                ..JpegParams::default()
-            };
+            let params = JpegParams::default()
+                .with_stc_h(h)
+                .with_slot_budget(Some(budget));
             if let Ok(layout) =
                 layout_for_payload(&cover, &payload, 0x0001, &[], &params, &DEFAULT_JPEG_FORMAT)
             {

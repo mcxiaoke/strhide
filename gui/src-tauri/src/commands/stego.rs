@@ -99,22 +99,9 @@ pub async fn probe_stego_capacity_cmd(
         on_progress,
         move |engine, pool, ctrl, _| {
             let tuning = resolve_tuning(algorithm.as_deref());
-            let safety = SafetyPolicy {
-                level: safety_level,
-                enforcement: SafetyEnforcement::Advisory,
-            };
+            let safety = SafetyPolicy::default().with_level(safety_level).with_enforcement(SafetyEnforcement::Advisory);
 
-            let probe_opts = ProbeOptions {
-                password: password.as_deref(),
-                key: None,
-                domain: domain.as_deref(),
-                extensions: Vec::new(),
-                safety,
-                tuning,
-                exact,
-                control: ctrl,
-                pool: Some(Arc::clone(&pool)),
-            };
+            let probe_opts = ProbeOptions::default().with_password_option(password.as_deref()).with_key_option(None).with_domain_option(domain.as_deref()).with_extensions(Vec::new()).with_safety_policy(safety).with_tuning(tuning).with_exact(exact).with_control(ctrl).with_pool(Arc::clone(&pool));
 
             let info = engine.stego().probe_file(&path, &probe_opts)?;
 
@@ -200,18 +187,7 @@ pub async fn embed_stego_file_impl(
             SafetyEnforcement::Advisory
         };
 
-        let embed_opts = EmbedOptions {
-            password: req.password.as_deref(),
-            domain: req.domain.as_deref(),
-            safety: SafetyPolicy {
-                level: req.safety_level,
-                enforcement,
-            },
-            tuning: resolve_tuning(req.algorithm.as_deref()),
-            control: ctrl,
-            pool: Some(Arc::clone(&pool)),
-            ..Default::default()
-        };
+        let embed_opts = EmbedOptions::default().with_password_option(req.password.as_deref()).with_domain_option(req.domain.as_deref()).with_safety_policy(SafetyPolicy::default().with_level(req.safety_level).with_enforcement(enforcement)).with_tuning(resolve_tuning(req.algorithm.as_deref())).with_control(ctrl).with_pool(Arc::clone(&pool));
 
         let res = engine
             .stego()
@@ -265,14 +241,7 @@ pub async fn extract_stego_file_cmd(
                 check_overwrite(dest, overwrite)?;
             }
 
-            let ex_opts = ExtractOptions {
-                password: password.as_deref(),
-                key: None,
-                domain: domain.as_deref(),
-                limits: strhide::stego::ExtractParams::default(),
-                control: ctrl,
-                pool: Some(Arc::clone(&pool)),
-            };
+            let ex_opts = ExtractOptions::default().with_password_option(password.as_deref()).with_key_option(None).with_domain_option(domain.as_deref()).with_limits(strhide::stego::ExtractParams::default()).with_control(ctrl).with_pool(Arc::clone(&pool));
 
             let payload = extract_carrier_file_payload(&path, &ex_opts, &engine.dialect().stego)?;
 
@@ -291,15 +260,8 @@ pub async fn extract_stego_file_cmd(
 
             if let Some(ref dest) = output_path {
                 write_bytes_atomic(dest, &payload.data)?;
-                Ok(ReadSummary {
-                    carrier: path,
-                    is_file,
-                    is_encrypted,
-                    filename,
-                    raw_size,
-                    written_file: Some(dest.clone()),
-                    text_preview: None,
-                })
+                Ok(ReadSummary::new(path, is_file, is_encrypted, filename, raw_size)
+                    .with_written_file(Some(dest.clone())))
             } else {
                 let text_preview = if payload.data.len() <= 64 * 1024 {
                     std::str::from_utf8(&payload.data)
@@ -308,15 +270,9 @@ pub async fn extract_stego_file_cmd(
                 } else {
                     None
                 };
-                Ok(ReadSummary {
-                    carrier: path,
-                    is_file,
-                    is_encrypted,
-                    filename,
-                    raw_size,
-                    written_file: None,
-                    text_preview,
-                })
+                Ok(ReadSummary::new(path, is_file, is_encrypted, filename, raw_size)
+                    .with_written_file(None)
+                    .with_text_preview(text_preview))
             }
         },
     )
@@ -459,15 +415,9 @@ pub async fn smart_extract_impl(
             if text_preview.is_some() && dest.is_dir() {
                 // If it's short UTF-8 text and the caller gave a directory, prefer returning text_preview
                 // so the user can read it in the UI without cluttering the directory.
-                ReadSummary {
-                    carrier: path,
-                    is_file,
-                    is_encrypted,
-                    filename,
-                    raw_size,
-                    written_file: None,
-                    text_preview,
-                }
+                ReadSummary::new(path, is_file, is_encrypted, filename, raw_size)
+                    .with_written_file(None)
+                    .with_text_preview(text_preview)
             } else {
                 let target_file = if dest.is_dir() {
                     let mut candidate = dest.join(&filename);
@@ -492,26 +442,13 @@ pub async fn smart_extract_impl(
                     dest.clone()
                 };
                 write_bytes_atomic(&target_file, &payload.data)?;
-                ReadSummary {
-                    carrier: path,
-                    is_file,
-                    is_encrypted,
-                    filename,
-                    raw_size,
-                    written_file: Some(target_file),
-                    text_preview: None,
-                }
+                ReadSummary::new(path, is_file, is_encrypted, filename, raw_size)
+                    .with_written_file(Some(target_file))
             }
         } else {
-            ReadSummary {
-                carrier: path,
-                is_file,
-                is_encrypted,
-                filename,
-                raw_size,
-                written_file: None,
-                text_preview,
-            }
+            ReadSummary::new(path, is_file, is_encrypted, filename, raw_size)
+                .with_written_file(None)
+                .with_text_preview(text_preview)
         };
 
         let res = SmartExtractSummaryDto {

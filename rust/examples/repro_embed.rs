@@ -118,12 +118,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let options = EmbedOptions {
-        password: args.password.as_deref(),
-        tuning,
-        freshness: Freshness::Seeded(seed_bytes(args.seed)),
-        ..Default::default()
-    };
+    let options = EmbedOptions::default()
+        .with_password_option(args.password.as_deref())
+        .with_tuning(tuning)
+        .with_freshness(Freshness::Seeded(seed_bytes(args.seed)));
 
     let stego = match embed_carrier(&carrier, &Payload::bytes(&payload), &options) {
         Ok(s) => s,
@@ -135,10 +133,7 @@ fn main() -> ExitCode {
 
     // Round-trip immediately: a reproducible digest of the wrong payload is
     // worse than no digest at all.
-    let read_options = ExtractOptions {
-        password: args.password.as_deref(),
-        ..Default::default()
-    };
+    let read_options = ExtractOptions::default().with_password_option(args.password.as_deref());
     match extract_carrier(&stego, &read_options) {
         Ok(back) if back == payload => {}
         Ok(_) => {

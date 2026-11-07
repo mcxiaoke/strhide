@@ -118,20 +118,38 @@ impl<'a> WriteOptions<'a> {
     }
 
     /// Set [`output_path`](Self::output_path).
-    pub const fn with_output(mut self, path: &'a Path) -> Self {
+    pub fn with_output(mut self, path: &'a Path) -> Self {
         self.output_path = Some(path);
         self
     }
 
+    /// Set [`output_path`](Self::output_path) from an optional value.
+    pub fn with_output_option(mut self, path: Option<&'a Path>) -> Self {
+        self.output_path = path;
+        self
+    }
+
     /// Set [`password`](Self::password).
-    pub const fn with_password(mut self, password: &'a str) -> Self {
+    pub fn with_password(mut self, password: &'a str) -> Self {
         self.password = Some(password);
         self
     }
 
+    /// Set [`password`](Self::password) from an optional value.
+    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
+        self.password = password;
+        self
+    }
+
     /// Set [`password_hint`](Self::password_hint).
-    pub const fn with_password_hint(mut self, hint: &'a str) -> Self {
+    pub fn with_password_hint(mut self, hint: &'a str) -> Self {
         self.password_hint = Some(hint);
+        self
+    }
+
+    /// Set [`password_hint`](Self::password_hint) from an optional value.
+    pub fn with_password_hint_option(mut self, hint: Option<&'a str>) -> Self {
+        self.password_hint = hint;
         self
     }
 
@@ -219,14 +237,26 @@ impl<'a> ReadOptions<'a> {
     }
 
     /// Set [`output_path`](Self::output_path).
-    pub const fn with_output(mut self, path: &'a Path) -> Self {
+    pub fn with_output(mut self, path: &'a Path) -> Self {
         self.output_path = Some(path);
         self
     }
 
+    /// Set [`output_path`](Self::output_path) from an optional value.
+    pub fn with_output_option(mut self, path: Option<&'a Path>) -> Self {
+        self.output_path = path;
+        self
+    }
+
     /// Set [`password`](Self::password).
-    pub const fn with_password(mut self, password: &'a str) -> Self {
+    pub fn with_password(mut self, password: &'a str) -> Self {
         self.password = Some(password);
+        self
+    }
+
+    /// Set [`password`](Self::password) from an optional value.
+    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
+        self.password = password;
         self
     }
 
@@ -287,14 +317,26 @@ impl<'a> RestoreOptions<'a> {
     }
 
     /// Set [`output_path`](Self::output_path).
-    pub const fn with_output(mut self, path: &'a Path) -> Self {
+    pub fn with_output(mut self, path: &'a Path) -> Self {
         self.output_path = Some(path);
         self
     }
 
+    /// Set [`output_path`](Self::output_path) from an optional value.
+    pub fn with_output_option(mut self, path: Option<&'a Path>) -> Self {
+        self.output_path = path;
+        self
+    }
+
     /// Set [`password`](Self::password).
-    pub const fn with_password(mut self, password: &'a str) -> Self {
+    pub fn with_password(mut self, password: &'a str) -> Self {
         self.password = Some(password);
+        self
+    }
+
+    /// Set [`password`](Self::password) from an optional value.
+    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
+        self.password = password;
         self
     }
 
@@ -352,10 +394,7 @@ mod tests {
 
     #[test]
     fn password_is_redacted_in_debug() {
-        let write_opts = WriteOptions {
-            password: Some("super-secret-password"),
-            ..WriteOptions::default()
-        };
+        let write_opts = WriteOptions::default().with_password("super-secret-password");
         let debug = format!("{write_opts:?}");
         assert!(!debug.contains("super-secret-password"));
         assert!(debug.contains("<redacted>"));

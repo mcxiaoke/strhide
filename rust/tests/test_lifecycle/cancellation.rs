@@ -167,13 +167,10 @@ fn the_default_control_behaves_like_none() {
     let plain = EmbedOptions::default()
         .with_password("pw")
         .with_freshness(strhide::stego::Freshness::Seeded([7u8; 32]));
-    let explicit = EmbedOptions {
-        control: Control {
-            progress: &NoProgress,
-            cancel: None,
-        },
-        ..plain.clone()
-    };
+    let explicit = (plain.clone()).with_control(Control {
+        progress: &NoProgress,
+        cancel: None,
+    });
 
     let a = embed_carrier(&png, &Payload::bytes(payload), &plain).expect("embed");
     let b = embed_carrier(&png, &Payload::bytes(payload), &explicit).expect("embed");

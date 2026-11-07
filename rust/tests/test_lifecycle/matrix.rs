@@ -173,14 +173,12 @@ fn run_cell(
     let write = write_carrier(
         &carrier,
         PayloadSource::Text("matrix payload 中文 🚀"),
-        &WriteOptions {
-            output_path: Some(&out),
-            password,
-            strategy,
-            stealth,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_password_option(password)
+            .with_strategy(strategy)
+            .with_stealth(stealth)
+            .with_backup(false),
     )
     .unwrap_or_else(|e| panic!("{label}: write failed: {e}"));
 
@@ -237,12 +235,10 @@ fn run_cell(
     // read
     let read = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(password)
+            .with_overwrite(false),
     )
     .unwrap_or_else(|e| panic!("{label}: read failed: {e}"));
     assert_eq!(
@@ -255,13 +251,11 @@ fn run_cell(
     let restored = dir.join(format!("c.restored.{}", fmt.ext()));
     let rem = remove_carrier(
         &out,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(password)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap_or_else(|e| panic!("{label}: remove failed: {e}"));
     assert!(rem.verified_identical, "{label}: remove must verify");
@@ -298,14 +292,12 @@ fn run_cell_any_reported_strategy(
     let write = write_carrier(
         &carrier,
         PayloadSource::Text("matrix payload"),
-        &WriteOptions {
-            output_path: Some(&out),
-            password,
-            strategy: write_strategy,
-            stealth,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_password_option(password)
+            .with_strategy(write_strategy)
+            .with_stealth(stealth)
+            .with_backup(false),
     )
     .unwrap_or_else(|e| panic!("{label}: write failed: {e}"));
     assert_eq!(
@@ -316,12 +308,10 @@ fn run_cell_any_reported_strategy(
 
     let read = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(password)
+            .with_overwrite(false),
     )
     .unwrap_or_else(|e| panic!("{label}: read failed: {e}"));
     assert_eq!(
@@ -333,13 +323,11 @@ fn run_cell_any_reported_strategy(
     let restored = dir.join(format!("c.restored.{}", fmt.ext()));
     remove_carrier(
         &out,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(password)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap_or_else(|e| panic!("{label}: remove failed: {e}"));
     assert_eq!(
@@ -483,24 +471,20 @@ fn stealth_envelope_is_invisible_without_its_password() {
         write_carrier(
             &carrier,
             PayloadSource::Text("deniable"),
-            &WriteOptions {
-                output_path: Some(&out),
-                password: Some("secret-stealth-pw"),
-                stealth: true,
-                backup: false,
-                ..Default::default()
-            },
+            &WriteOptions::default()
+                .with_output(&out)
+                .with_password("secret-stealth-pw")
+                .with_stealth(true)
+                .with_backup(false),
         )
         .unwrap_or_else(|e| panic!("{label}: write failed: {e}"));
 
         let err = read_carrier(
             &out,
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            },
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false),
         )
         .unwrap_err();
         assert!(
@@ -521,12 +505,10 @@ fn stealth_envelope_is_invisible_without_its_password() {
         // The wrong password is equally invisible (not a Password error).
         let wrong = read_carrier(
             &out,
-            &ReadOptions {
-                output_path: None,
-                password: Some("wrong-pw"),
-                overwrite: false,
-                ..Default::default()
-            },
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password("wrong-pw")
+                .with_overwrite(false),
         )
         .unwrap_err();
         assert!(
@@ -547,12 +529,10 @@ fn stealth_requires_a_password_on_every_format() {
         let err = write_carrier(
             &carrier,
             PayloadSource::Text("x"),
-            &WriteOptions {
-                output_path: Some(&out),
-                stealth: true,
-                backup: false,
-                ..Default::default()
-            },
+            &WriteOptions::default()
+                .with_output(&out)
+                .with_stealth(true)
+                .with_backup(false),
         )
         .unwrap_err();
         assert!(
@@ -575,14 +555,12 @@ fn stealth_and_password_hint_are_mutually_exclusive_on_every_format() {
         let err = write_carrier(
             &carrier,
             PayloadSource::Text("x"),
-            &WriteOptions {
-                output_path: Some(&out),
-                password: Some("pw"),
-                password_hint: Some("a hint"),
-                stealth: true,
-                backup: false,
-                ..Default::default()
-            },
+            &WriteOptions::default()
+                .with_output(&out)
+                .with_password("pw")
+                .with_password_hint("a hint")
+                .with_stealth(true)
+                .with_backup(false),
         )
         .unwrap_err();
         assert!(
@@ -608,13 +586,11 @@ fn password_hint_roundtrips_on_every_format() {
         let res = write_carrier(
             &carrier,
             PayloadSource::Text("hinted"),
-            &WriteOptions {
-                output_path: Some(&out),
-                password: Some("hint-pw"),
-                password_hint: Some(hint),
-                backup: false,
-                ..Default::default()
-            },
+            &WriteOptions::default()
+                .with_output(&out)
+                .with_password("hint-pw")
+                .with_password_hint(hint)
+                .with_backup(false),
         )
         .unwrap_or_else(|e| panic!("{label}: write failed: {e}"));
         assert_eq!(res.password_hint.as_deref(), Some(hint), "{label}");
@@ -630,12 +606,10 @@ fn password_hint_roundtrips_on_every_format() {
         // ...and appears in the password error.
         let err = read_carrier(
             &out,
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            },
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false),
         )
         .unwrap_err();
         assert!(
@@ -651,12 +625,10 @@ fn password_hint_roundtrips_on_every_format() {
         // With the password the payload still reads back.
         let read = read_carrier(
             &out,
-            &ReadOptions {
-                output_path: None,
-                password: Some("hint-pw"),
-                overwrite: false,
-                ..Default::default()
-            },
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password("hint-pw")
+                .with_overwrite(false),
         )
         .expect("read");
         assert_eq!(String::from_utf8(read.data).unwrap(), "hinted", "{label}");
@@ -685,11 +657,7 @@ fn second_write_into_a_filled_carrier_is_refused_on_every_format() {
         let second = dir.join(format!("c2.{}", fmt.ext()));
 
         fn opts(out: &Path) -> WriteOptions<'_> {
-            WriteOptions {
-                output_path: Some(out),
-                backup: false,
-                ..Default::default()
-            }
+            WriteOptions::default().with_output(out).with_backup(false)
         }
         write_carrier(&carrier, PayloadSource::Text("first"), &opts(&first))
             .unwrap_or_else(|e| panic!("{label}: first write failed: {e}"));
@@ -773,12 +741,10 @@ fn simple_webp_auto_uses_eof_and_refuses_riff_chunk() {
     let write = write_carrier(
         &carrier,
         PayloadSource::Text("simple webp payload"),
-        &WriteOptions {
-            output_path: Some(&out),
-            strategy: "auto",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_strategy("auto")
+            .with_backup(false),
     )
     .expect("auto write on simple WebP");
     assert_eq!(write.strategy.name(), "eof");
@@ -790,12 +756,10 @@ fn simple_webp_auto_uses_eof_and_refuses_riff_chunk() {
 
     let read = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .expect("read");
     assert_eq!(String::from_utf8(read.data).unwrap(), "simple webp payload");
@@ -803,13 +767,11 @@ fn simple_webp_auto_uses_eof_and_refuses_riff_chunk() {
     let restored = dir.join("c.restored.webp");
     let rem = remove_carrier(
         &out,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove");
     assert!(rem.verified_identical);
@@ -818,12 +780,10 @@ fn simple_webp_auto_uses_eof_and_refuses_riff_chunk() {
     let rejected = write_carrier(
         &carrier,
         PayloadSource::Text("x"),
-        &WriteOptions {
-            output_path: Some(&dir.join("c.rejected.webp")),
-            strategy: "riff_chunk",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&dir.join("c.rejected.webp"))
+            .with_strategy("riff_chunk")
+            .with_backup(false),
     )
     .unwrap_err();
     assert!(
@@ -847,12 +807,10 @@ fn streaming_wav_sentinel_size_verifies_after_eof_overlay() {
     let write = write_carrier(
         &carrier,
         PayloadSource::Text("streaming wav payload"),
-        &WriteOptions {
-            output_path: Some(&out),
-            strategy: "auto",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_strategy("auto")
+            .with_backup(false),
     )
     .expect("auto write on sentinel WAV");
     assert_eq!(write.strategy.name(), "eof");
@@ -865,13 +823,11 @@ fn streaming_wav_sentinel_size_verifies_after_eof_overlay() {
     let restored = dir.join("c.restored.wav");
     let rem = remove_carrier(
         &out,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove");
     assert!(rem.verified_identical);
@@ -895,14 +851,12 @@ fn eof_envelope_survives_carrier_rewrite_relocation() {
         let write = write_carrier(
             &carrier,
             PayloadSource::Text("relocated payload"),
-            &WriteOptions {
-                output_path: Some(&out),
-                password: Some("reloc-pw"),
-                strategy: "eof",
-                stealth: false,
-                backup: false,
-                ..Default::default()
-            },
+            &WriteOptions::default()
+                .with_output(&out)
+                .with_password("reloc-pw")
+                .with_strategy("eof")
+                .with_stealth(false)
+                .with_backup(false),
         )
         .unwrap_or_else(|e| panic!("{label}: write failed: {e}"));
         assert_eq!(write.strategy.name(), "eof");
@@ -918,12 +872,10 @@ fn eof_envelope_survives_carrier_rewrite_relocation() {
 
         let read = read_carrier(
             &moved,
-            &ReadOptions {
-                output_path: None,
-                password: Some("reloc-pw"),
-                overwrite: false,
-                ..Default::default()
-            },
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password("reloc-pw")
+                .with_overwrite(false),
         )
         .unwrap_or_else(|e| panic!("{label}: read failed after relocation: {e}"));
         assert_eq!(

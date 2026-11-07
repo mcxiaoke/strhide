@@ -66,12 +66,10 @@ fn write_carrier_with(dir: &Path, name: &str, carrier: Vec<u8>, strategy: &str) 
     write_carrier(
         &carrier_path,
         PayloadSource::Text("forged"),
-        &WriteOptions {
-            output_path: Some(&out),
-            strategy,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out)
+            .with_strategy(strategy)
+            .with_backup(false),
     )
     .unwrap();
     out
@@ -82,10 +80,7 @@ fn write_carrier_with(dir: &Path, name: &str, carrier: Vec<u8>, strategy: &str) 
 fn assert_forged_envelope_is_inert(path: &Path, label: &str) {
     let err = read_carrier(
         path,
-        &ReadOptions {
-            output_path: Some(&path.with_extension("out")),
-            ..Default::default()
-        },
+        &ReadOptions::default().with_output(&path.with_extension("out")),
     )
     .expect_err("a forged envelope must not be readable");
     let err = err.to_string().to_lowercase();
@@ -138,12 +133,10 @@ fn oversized_declared_payload_is_rejected_before_decrypt() {
     write_carrier(
         &carrier,
         PayloadSource::Bytes(&payload),
-        &WriteOptions {
-            output_path: Some(&stego),
-            strategy: "eof",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&stego)
+            .with_strategy("eof")
+            .with_backup(false),
     )
     .unwrap();
     assert!(
@@ -186,14 +179,8 @@ fn oversized_declared_payload_is_rejected_before_decrypt() {
     fs::write(&stego, data).unwrap();
 
     let out = dir.join("out.bin");
-    let err = read_carrier(
-        &stego,
-        &ReadOptions {
-            output_path: Some(&out),
-            ..Default::default()
-        },
-    )
-    .expect_err("a 65 MiB declared payload must not be decrypted from a tiny carrier");
+    let err = read_carrier(&stego, &ReadOptions::default().with_output(&out))
+        .expect_err("a 65 MiB declared payload must not be decrypted from a tiny carrier");
     let err = err.to_string().to_lowercase();
     assert!(
         err.contains("decompression limit"),

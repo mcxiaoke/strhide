@@ -20,10 +20,7 @@ fn seed() -> [u8; 32] {
 }
 
 fn seeded() -> EmbedOptions<'static> {
-    EmbedOptions {
-        freshness: Freshness::Seeded(seed()),
-        ..Default::default()
-    }
+    EmbedOptions::default().with_freshness(Freshness::Seeded(seed()))
 }
 
 #[test]
@@ -58,10 +55,7 @@ fn seeds_select_different_embeddings() {
 
     let mut other = seed();
     other[0] ^= 0xff;
-    let options = EmbedOptions {
-        freshness: Freshness::Seeded(other),
-        ..Default::default()
-    };
+    let options = EmbedOptions::default().with_freshness(Freshness::Seeded(other));
 
     let a = embed_carrier(JPG, &Payload::bytes(&payload), &seeded()).expect("seed A");
     let b = embed_carrier(JPG, &Payload::bytes(&payload), &options).expect("seed B");

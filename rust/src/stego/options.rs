@@ -535,9 +535,21 @@ impl<'a> EmbedOptions<'a> {
         self
     }
 
+    /// Set the password from an optional value (`None` clears it).
+    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
+        self.password = password;
+        self
+    }
+
     /// Set the 32-byte file key (mutually exclusive with a non-empty password).
     pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
         self.key = Some(key);
+        self
+    }
+
+    /// Set the file key from an optional value (`None` clears it).
+    pub fn with_key_option(mut self, key: Option<&'a [u8; 32]>) -> Self {
+        self.key = key;
         self
     }
 
@@ -547,9 +559,21 @@ impl<'a> EmbedOptions<'a> {
         self
     }
 
+    /// Set the domain tag from an optional value (`None` clears it).
+    pub fn with_domain_option(mut self, domain: Option<&'a str>) -> Self {
+        self.domain = domain;
+        self
+    }
+
     /// Override the V4 cipher suite id.
     pub fn with_suite_id(mut self, suite_id: u16) -> Self {
         self.suite_id = Some(suite_id);
+        self
+    }
+
+    /// Override the cipher suite from an optional value (`None` keeps the default).
+    pub fn with_suite_id_option(mut self, suite_id: Option<u16>) -> Self {
+        self.suite_id = suite_id;
         self
     }
 
@@ -616,6 +640,12 @@ impl<'a> EmbedOptions<'a> {
     /// Run the engine on `pool` instead of the global rayon pool.
     pub fn with_pool(mut self, pool: Arc<rayon::ThreadPool>) -> Self {
         self.pool = Some(pool);
+        self
+    }
+
+    /// Set the rayon pool from an optional value (`None` uses the global pool).
+    pub fn with_pool_option(mut self, pool: Option<Arc<rayon::ThreadPool>>) -> Self {
+        self.pool = pool;
         self
     }
 
@@ -793,15 +823,33 @@ impl<'a> ProbeOptions<'a> {
         self
     }
 
+    /// Set the password from an optional value (`None` clears it).
+    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
+        self.password = password;
+        self
+    }
+
     /// Set the 32-byte file key (mutually exclusive with a non-empty password).
     pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
         self.key = Some(key);
         self
     }
 
+    /// Set the file key from an optional value (`None` clears it).
+    pub fn with_key_option(mut self, key: Option<&'a [u8; 32]>) -> Self {
+        self.key = key;
+        self
+    }
+
     /// Set the HKDF domain-isolation tag.
     pub fn with_domain(mut self, domain: &'a str) -> Self {
         self.domain = Some(domain);
+        self
+    }
+
+    /// Set the domain tag from an optional value (`None` clears it).
+    pub fn with_domain_option(mut self, domain: Option<&'a str>) -> Self {
+        self.domain = domain;
         self
     }
 
@@ -884,6 +932,12 @@ impl<'a> ProbeOptions<'a> {
         self.pool = Some(pool);
         self
     }
+
+    /// Set the rayon pool from an optional value (`None` uses the global pool).
+    pub fn with_pool_option(mut self, pool: Option<Arc<rayon::ThreadPool>>) -> Self {
+        self.pool = pool;
+        self
+    }
 }
 
 /// Options for reading a payload back out.
@@ -947,15 +1001,33 @@ impl<'a> ExtractOptions<'a> {
         self
     }
 
+    /// Set the password from an optional value (`None` clears it).
+    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
+        self.password = password;
+        self
+    }
+
     /// Set the 32-byte file key (mutually exclusive with a non-empty password).
     pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
         self.key = Some(key);
         self
     }
 
+    /// Set the file key from an optional value (`None` clears it).
+    pub fn with_key_option(mut self, key: Option<&'a [u8; 32]>) -> Self {
+        self.key = key;
+        self
+    }
+
     /// Set the HKDF domain-isolation tag.
     pub fn with_domain(mut self, domain: &'a str) -> Self {
         self.domain = Some(domain);
+        self
+    }
+
+    /// Set the domain tag from an optional value (`None` clears it).
+    pub fn with_domain_option(mut self, domain: Option<&'a str>) -> Self {
+        self.domain = domain;
         self
     }
 
@@ -1012,6 +1084,12 @@ impl<'a> ExtractOptions<'a> {
     /// Run the extraction on `pool` instead of the global rayon pool.
     pub fn with_pool(mut self, pool: Arc<rayon::ThreadPool>) -> Self {
         self.pool = Some(pool);
+        self
+    }
+
+    /// Set the rayon pool from an optional value (`None` uses the global pool).
+    pub fn with_pool_option(mut self, pool: Option<Arc<rayon::ThreadPool>>) -> Self {
+        self.pool = pool;
         self
     }
 }
@@ -1109,9 +1187,21 @@ impl<'a> BridgeOptions<'a> {
         self
     }
 
+    /// Set the password from an optional value (`None` clears it).
+    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
+        self.password = password;
+        self
+    }
+
     /// Set the 32-byte file key (mutually exclusive with a non-empty password).
     pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
         self.key = Some(key);
+        self
+    }
+
+    /// Set the file key from an optional value (`None` clears it).
+    pub fn with_key_option(mut self, key: Option<&'a [u8; 32]>) -> Self {
+        self.key = key;
         self
     }
 
@@ -1121,9 +1211,21 @@ impl<'a> BridgeOptions<'a> {
         self
     }
 
+    /// Set the domain tag from an optional value (`None` clears it).
+    pub fn with_domain_option(mut self, domain: Option<&'a str>) -> Self {
+        self.domain = domain;
+        self
+    }
+
     /// Override the V4 cipher suite id.
     pub fn with_suite_id(mut self, suite_id: u16) -> Self {
         self.suite_id = Some(suite_id);
+        self
+    }
+
+    /// Override the cipher suite from an optional value (`None` keeps the default).
+    pub fn with_suite_id_option(mut self, suite_id: Option<u16>) -> Self {
+        self.suite_id = suite_id;
         self
     }
 
@@ -1318,13 +1420,31 @@ impl<'a> InspectOptions<'a> {
         self
     }
 
+    /// Set the password from an optional value (`None` clears it).
+    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
+        self.password = password;
+        self
+    }
+
     pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
         self.key = Some(key);
         self
     }
 
+    /// Set the file key from an optional value (`None` clears it).
+    pub fn with_key_option(mut self, key: Option<&'a [u8; 32]>) -> Self {
+        self.key = key;
+        self
+    }
+
     pub fn with_domain(mut self, domain: &'a str) -> Self {
         self.domain = Some(domain);
+        self
+    }
+
+    /// Set the domain tag from an optional value (`None` clears it).
+    pub fn with_domain_option(mut self, domain: Option<&'a str>) -> Self {
+        self.domain = domain;
         self
     }
 
@@ -1444,13 +1564,31 @@ impl<'a> VerifyOptions<'a> {
         self
     }
 
+    /// Set the password from an optional value (`None` clears it).
+    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
+        self.password = password;
+        self
+    }
+
     pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
         self.key = Some(key);
         self
     }
 
+    /// Set the file key from an optional value (`None` clears it).
+    pub fn with_key_option(mut self, key: Option<&'a [u8; 32]>) -> Self {
+        self.key = key;
+        self
+    }
+
     pub fn with_domain(mut self, domain: &'a str) -> Self {
         self.domain = Some(domain);
+        self
+    }
+
+    /// Set the domain tag from an optional value (`None` clears it).
+    pub fn with_domain_option(mut self, domain: Option<&'a str>) -> Self {
+        self.domain = domain;
         self
     }
 
@@ -1537,10 +1675,7 @@ mod tests {
     fn resolve_fills_the_halves_the_tuning_does_not_name() {
         let tuning = StegoTuning::Png {
             model: SpatialAlgorithm::Suniward,
-            params: PngParams {
-                stc_h: 6,
-                ..PngParams::default()
-            },
+            params: PngParams::default().with_stc_h(6),
         };
         let resolved = tuning.resolve();
         assert_eq!(resolved.png_model.id(), "suniward");

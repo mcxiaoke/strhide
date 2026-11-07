@@ -87,11 +87,9 @@ pub mod heif_hidden_item {
                 let write_res = write_carrier(
                     &target_path,
                     PayloadSource::Bytes(payload),
-                    &WriteOptions {
-                        password: Some("heif-pass"),
-                        strategy: "item_hidden",
-                        ..Default::default()
-                    },
+                    &WriteOptions::default()
+                        .with_password("heif-pass")
+                        .with_strategy("item_hidden"),
                 )
                 .unwrap_or_else(|e| panic!("Failed to write item_hidden into {sample_name}: {e}"));
 
@@ -112,12 +110,10 @@ pub mod heif_hidden_item {
                 // Read
                 let read_res = read_carrier(
                     &target_path,
-                    &ReadOptions {
-                        output_path: None,
-                        password: Some("heif-pass"),
-                        overwrite: false,
-                        ..Default::default()
-                    },
+                    &ReadOptions::default()
+                        .with_output_option(None)
+                        .with_password("heif-pass")
+                        .with_overwrite(false),
                 )
                 .expect("read");
                 assert_eq!(read_res.data, payload);
@@ -127,13 +123,11 @@ pub mod heif_hidden_item {
                 // an encrypted envelope now needs the same password as `read`.
                 let remove_res = remove_carrier(
                     &target_path,
-                    &RestoreOptions {
-                        output_path: None,
-                        password: Some("heif-pass"),
-                        backup: false,
-                        overwrite: false,
-                        ..Default::default()
-                    },
+                    &RestoreOptions::default()
+                        .with_output_option(None)
+                        .with_password("heif-pass")
+                        .with_backup(false)
+                        .with_overwrite(false),
                 )
                 .expect("remove");
                 assert!(remove_res.verified_identical);
@@ -157,11 +151,9 @@ pub mod heif_hidden_item {
                 let write_res = write_carrier(
                     &target_path,
                     PayloadSource::Bytes(payload),
-                    &WriteOptions {
-                        password: Some("heif-pass"),
-                        strategy: "free_box",
-                        ..Default::default()
-                    },
+                    &WriteOptions::default()
+                        .with_password("heif-pass")
+                        .with_strategy("free_box"),
                 )
                 .unwrap_or_else(|e| panic!("Failed to write free_box into {sample_name}: {e}"));
 
@@ -169,12 +161,10 @@ pub mod heif_hidden_item {
 
                 let read_res = read_carrier(
                     &target_path,
-                    &ReadOptions {
-                        output_path: None,
-                        password: Some("heif-pass"),
-                        overwrite: false,
-                        ..Default::default()
-                    },
+                    &ReadOptions::default()
+                        .with_output_option(None)
+                        .with_password("heif-pass")
+                        .with_overwrite(false),
                 )
                 .expect("read");
                 assert_eq!(read_res.data, payload);
@@ -183,13 +173,11 @@ pub mod heif_hidden_item {
                 // stripping (F-02), so restore needs the password.
                 let remove_res = remove_carrier(
                     &target_path,
-                    &RestoreOptions {
-                        output_path: None,
-                        password: Some("heif-pass"),
-                        backup: false,
-                        overwrite: false,
-                        ..Default::default()
-                    },
+                    &RestoreOptions::default()
+                        .with_output_option(None)
+                        .with_password("heif-pass")
+                        .with_backup(false)
+                        .with_overwrite(false),
                 )
                 .expect("remove");
                 assert!(remove_res.verified_identical);
@@ -213,11 +201,9 @@ pub mod heif_hidden_item {
                 let write_res = write_carrier(
                     &target_path,
                     PayloadSource::Bytes(payload),
-                    &WriteOptions {
-                        password: Some("heif-pass"),
-                        strategy: "auto",
-                        ..Default::default()
-                    },
+                    &WriteOptions::default()
+                        .with_password("heif-pass")
+                        .with_strategy("auto"),
                 )
                 .unwrap_or_else(|e| panic!("Failed to write auto into {sample_name}: {e}"));
 
@@ -229,12 +215,10 @@ pub mod heif_hidden_item {
 
                 let read_res = read_carrier(
                     &target_path,
-                    &ReadOptions {
-                        output_path: None,
-                        password: Some("heif-pass"),
-                        overwrite: false,
-                        ..Default::default()
-                    },
+                    &ReadOptions::default()
+                        .with_output_option(None)
+                        .with_password("heif-pass")
+                        .with_overwrite(false),
                 )
                 .expect("read");
                 assert_eq!(read_res.data, payload);
@@ -418,10 +402,7 @@ pub mod heif_bridge {
         let orig_bytes = fs::read(sample_path).expect("read original HEIC");
         let profile = StegoProfile::default();
         let payload = b"router-prefers-scheme-c-2026";
-        let opts = EmbedOptions {
-            password: Some("scheme_c_priority"),
-            ..Default::default()
-        };
+        let opts = EmbedOptions::default().with_password("scheme_c_priority");
 
         let cap =
             probe_carrier_capacity(&orig_bytes, &opts.probe_options()).expect("probe capacity");
@@ -437,10 +418,7 @@ pub mod heif_bridge {
             "Scheme C rewrites CABAC bins in place; the file size must not move"
         );
 
-        let explicit = EmbedOptions {
-            tuning: StegoTuning::hevc(HevcMode::Cabac),
-            ..opts.clone()
-        };
+        let explicit = (opts.clone()).with_tuning(StegoTuning::hevc(HevcMode::Cabac));
         let cabac = extract_carrier(&stego, &explicit.extract_options())
             .expect("explicit Scheme C extraction must find the payload");
         assert_eq!(cabac, payload);
@@ -491,18 +469,12 @@ pub mod heif_bridge {
             let orig_bytes = fs::read(&sample_path).expect("read sample");
             let payload = format!("Batch test payload for {}", name).into_bytes();
 
-            let embed_opts = EmbedOptions {
-                password: Some("batch_test_pass"),
-                ..Default::default()
-            };
+            let embed_opts = EmbedOptions::default().with_password("batch_test_pass");
 
             let stego_bytes = embed_carrier(&orig_bytes, &Payload::bytes(&payload), &embed_opts)
                 .unwrap_or_else(|e| panic!("Failed to embed in {}: {}", name, e));
 
-            let extract_opts = EmbedOptions {
-                password: Some("batch_test_pass"),
-                ..Default::default()
-            };
+            let extract_opts = EmbedOptions::default().with_password("batch_test_pass");
             let extracted = extract_carrier(&stego_bytes, &extract_opts.extract_options())
                 .unwrap_or_else(|e| panic!("Failed to extract from {}: {}", name, e));
 
@@ -1733,10 +1705,7 @@ pub mod annexb_sniff {
         };
 
         let payload = b"annexb-real-stream-roundtrip-2026";
-        let options = EmbedOptions {
-            password: Some("annexb#corpus"),
-            ..EmbedOptions::default()
-        };
+        let options = EmbedOptions::default().with_password("annexb#corpus");
 
         // The frame-type gate (non-reference pictures only) leaves a short
         // clip such as `bear.hevc` (320x180, 15 non-reference frames, 368

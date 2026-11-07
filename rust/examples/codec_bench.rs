@@ -74,15 +74,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     for (codec, u) in runs {
-        let params = PngParams {
-            codec: if codec == "Stc" {
+        let params = PngParams::default()
+            .with_codec(if codec == "Stc" {
                 StegoCodec::Stc
             } else {
                 StegoCodec::Hamming
-            },
-            stc_u: u.max(1),
-            ..PngParams::default()
-        };
+            })
+            .with_stc_u(u.max(1));
         let started = Instant::now();
         let payload_obj = strhide::core::payload::Payload::bytes(&payload);
         let stego = match embed_png(

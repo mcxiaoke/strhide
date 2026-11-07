@@ -41,13 +41,11 @@ fn test_stealth_carrier_leaks_no_host_sha256() {
     write_carrier(
         &carrier_path,
         PayloadSource::Text(secret),
-        &WriteOptions {
-            output_path: Some(&out_path),
-            password: Some(password),
-            stealth: true,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out_path)
+            .with_password(password)
+            .with_stealth(true)
+            .with_backup(false),
     )
     .unwrap();
 
@@ -63,12 +61,10 @@ fn test_stealth_carrier_leaks_no_host_sha256() {
     // 2. Read with password succeeds and verifies payload
     let read_res = read_carrier(
         &out_path,
-        &ReadOptions {
-            output_path: None,
-            password: Some(password),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password(password)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(read_res.data, secret.as_bytes());
@@ -82,13 +78,11 @@ fn test_stealth_carrier_leaks_no_host_sha256() {
     // 4. Remove restores exact byte-for-byte carrier
     let rem_res = remove_carrier(
         &out_path,
-        &RestoreOptions {
-            output_path: None,
-            password: Some(password),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output_option(None)
+            .with_password(password)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert!(rem_res.verified_identical);
@@ -111,13 +105,11 @@ fn test_stealth_trailer_breaks_public_crc32_scan() {
     write_carrier(
         &carrier_path,
         PayloadSource::Text(secret),
-        &WriteOptions {
-            output_path: Some(&out_path),
-            password: Some(password),
-            stealth: true,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out_path)
+            .with_password(password)
+            .with_stealth(true)
+            .with_backup(false),
     )
     .unwrap();
 
@@ -245,12 +237,10 @@ fn test_pre_v2_stealth_unmasked_envelope_is_rejected() {
     // partially-parsed data, and the carrier must be left untouched.
     let read_err = read_carrier(
         &carrier_path,
-        &ReadOptions {
-            output_path: None,
-            password: Some(password),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password(password)
+            .with_overwrite(false),
     )
     .expect_err("pre-v2 unmasked stealth envelope must not be readable");
     let _ = read_err;
@@ -276,13 +266,11 @@ fn test_default_carrier_uniform_encryption_and_zero_plaintext() {
     write_carrier(
         &carrier_path,
         PayloadSource::File(&payload_file),
-        &WriteOptions {
-            output_path: Some(&out_path),
-            password: None,
-            stealth: false,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out_path)
+            .with_password_option(None)
+            .with_stealth(false)
+            .with_backup(false),
     )
     .unwrap();
 
@@ -314,12 +302,10 @@ fn test_default_carrier_uniform_encryption_and_zero_plaintext() {
     // 4. Read without password extracts seamlessly and 100% deterministically
     let read_res = read_carrier(
         &out_path,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(read_res.data, secret);
@@ -340,13 +326,11 @@ fn test_default_carrier_uniform_encryption_and_zero_plaintext() {
     // 7. Remove carrier restores 100% byte-for-byte exact host
     let rem_res = remove_carrier(
         &out_path,
-        &RestoreOptions {
-            output_path: None,
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert!(rem_res.verified_identical);
@@ -421,12 +405,10 @@ fn test_pre_v2_plaintext_metadata_envelope_is_rejected() {
     // no longer accepted, so `read` fails and the carrier stays byte-identical.
     read_carrier(
         &carrier_path,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .expect_err("pre-v2 plaintext metadata must not be readable");
     assert_eq!(fs::read(&carrier_path).unwrap(), stego_png);
@@ -447,13 +429,11 @@ fn test_standard_carrier_has_zero_ascii_magics() {
     write_carrier(
         &carrier_path,
         PayloadSource::Text(secret),
-        &WriteOptions {
-            output_path: Some(&out_path),
-            password: None,
-            stealth: false,
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&out_path)
+            .with_password_option(None)
+            .with_stealth(false)
+            .with_backup(false),
     )
     .unwrap();
 
@@ -475,12 +455,10 @@ fn test_standard_carrier_has_zero_ascii_magics() {
     // 2. Read extracts payload 100% deterministically
     let read_res = read_carrier(
         &out_path,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(read_res.data, secret.as_bytes());
@@ -494,13 +472,11 @@ fn test_standard_carrier_has_zero_ascii_magics() {
     // 4. Remove restores original carrier byte-for-byte
     let rem_res = remove_carrier(
         &out_path,
-        &RestoreOptions {
-            output_path: None,
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert!(rem_res.verified_identical);

@@ -77,10 +77,7 @@
 //! engine.structure().write_file(
 //!     std::path::Path::new("photo.png"),
 //!     PayloadSource::Text("hello from strhide"),
-//!     &WriteOptions {
-//!         password: Some("s3cret"),
-//!         ..WriteOptions::default()
-//!     },
+//!     &WriteOptions::default().with_password("s3cret"),
 //! )?;
 //!
 //! // Extract it back (in memory: no `output_path`).

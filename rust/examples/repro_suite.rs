@@ -168,14 +168,12 @@ fn main() -> ExitCode {
                     eprintln!("repro_suite: {name}: unknown algorithm '{algo}'");
                     continue;
                 };
-                let options = EmbedOptions {
-                    tuning: StegoTuning::Jpeg {
+                let options = EmbedOptions::default()
+                    .with_tuning(StegoTuning::Jpeg {
                         model,
                         params: Default::default(),
-                    },
-                    freshness: Freshness::Seeded(seed),
-                    ..Default::default()
-                };
+                    })
+                    .with_freshness(Freshness::Seeded(seed));
                 let payload = deterministic_payload(len, args.seed);
                 match embed_carrier(&bytes, &Payload::bytes(&payload), &options) {
                     Ok(stego) => {

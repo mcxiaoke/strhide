@@ -56,13 +56,10 @@ fn payload() -> Vec<u8> {
 }
 
 fn mipod_options() -> EmbedOptions<'static> {
-    EmbedOptions {
-        tuning: StegoTuning::Png {
-            model: SpatialAlgorithm::Mipod,
-            params: PngParams::default(),
-        },
-        ..Default::default()
-    }
+    EmbedOptions::default().with_tuning(StegoTuning::Png {
+        model: SpatialAlgorithm::Mipod,
+        params: PngParams::default(),
+    })
 }
 
 /// Ask the public inspector which cost model the carrier declares.
@@ -119,13 +116,10 @@ fn mipod_custom_alpha_is_carried_in_feature_word_and_extracts_correctly() {
         let payload = payload();
         let mut params = PngParams::default();
         params.algorithm_options.insert("alpha".into(), alpha);
-        let opts = EmbedOptions {
-            tuning: StegoTuning::Png {
-                model: SpatialAlgorithm::Mipod,
-                params,
-            },
-            ..Default::default()
-        };
+        let opts = EmbedOptions::default().with_tuning(StegoTuning::Png {
+            model: SpatialAlgorithm::Mipod,
+            params,
+        });
         let stego =
             embed_carrier(&png, &Payload::bytes(&payload), &opts).expect("embed with custom alpha");
         // The custom alpha is carried in the V4 header's sigma field; extraction

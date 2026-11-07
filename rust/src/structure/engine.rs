@@ -874,7 +874,7 @@ fn no_hidden_data_error(
 /// write_carrier(
 ///     std::path::Path::new("photo.png"),
 ///     PayloadSource::Text("secret"),
-///     &WriteOptions { password: Some("pw"), ..WriteOptions::default() },
+///     &WriteOptions::default().with_password("pw"),
 /// )?;
 /// # Ok(()) }
 /// ```
@@ -3407,11 +3407,9 @@ mod pbkdf2_budget_tests {
         let (bytes, _) = write_carrier_bytes(
             &carrier,
             payload,
-            &WriteOptions {
-                password,
-                stealth,
-                ..Default::default()
-            },
+            &WriteOptions::default()
+                .with_password_option(password)
+                .with_stealth(stealth),
             &LocalParams::default(),
             &StructureProfile::new(),
         )
@@ -3441,11 +3439,7 @@ mod pbkdf2_budget_tests {
         let err = write_carrier_bytes(
             &carrier,
             PayloadSource::Text("p2-12"),
-            &WriteOptions {
-                password: Some(""),
-                stealth: true,
-                ..Default::default()
-            },
+            &WriteOptions::default().with_password("").with_stealth(true),
             &LocalParams::default(),
             &StructureProfile::new(),
         )

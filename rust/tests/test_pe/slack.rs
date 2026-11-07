@@ -166,12 +166,10 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 fn write_opts<'a>(out: &'a Path, strategy: &'a str) -> WriteOptions<'a> {
-    WriteOptions {
-        output_path: Some(out),
-        strategy,
-        backup: false,
-        ..Default::default()
-    }
+    WriteOptions::default()
+        .with_output(out)
+        .with_strategy(strategy)
+        .with_backup(false)
 }
 
 fn slack_ranges(data: &[u8]) -> Vec<(u64, u64)> {
@@ -214,12 +212,10 @@ fn auto_prefers_slack_and_restores_bit_exact() {
 
     let read = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .expect("read");
     assert_eq!(read.data, b"meet at the old bridge, 9pm");
@@ -236,13 +232,11 @@ fn auto_prefers_slack_and_restores_bit_exact() {
     let restored = dir.join("app.restored.exe");
     let rem = remove_carrier(
         &out,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove");
     assert!(rem.verified_identical);
@@ -401,12 +395,10 @@ fn arm64_pe_uses_padding() {
 
     let read = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .expect("read");
     assert_eq!(read.data, b"arm64 secret");
@@ -414,13 +406,11 @@ fn arm64_pe_uses_padding() {
     let restored = dir.join("arm64.restored.exe");
     let rem = remove_carrier(
         &out,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove");
     assert!(rem.verified_identical);
@@ -436,24 +426,20 @@ fn slack_encrypted_roundtrip() {
     fs::write(&carrier, &original).unwrap();
 
     let out = dir.join("enc.steg.exe");
-    let opts = WriteOptions {
-        output_path: Some(&out),
-        strategy: "pe_slack",
-        password: Some("correct horse battery staple"),
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_output(&out)
+        .with_strategy("pe_slack")
+        .with_password("correct horse battery staple")
+        .with_backup(false);
     write_carrier(&carrier, PayloadSource::Text("encrypted secret"), &opts).expect("write");
 
     assert!(
         read_carrier(
             &out,
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            }
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false)
         )
         .is_err(),
         "password required"
@@ -461,24 +447,20 @@ fn slack_encrypted_roundtrip() {
     assert!(
         read_carrier(
             &out,
-            &ReadOptions {
-                output_path: None,
-                password: Some("wrong pw"),
-                overwrite: false,
-                ..Default::default()
-            }
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password("wrong pw")
+                .with_overwrite(false)
         )
         .is_err()
     );
 
     let read = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: Some("correct horse battery staple"),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("correct horse battery staple")
+            .with_overwrite(false),
     )
     .expect("read");
     assert_eq!(read.data, b"encrypted secret");
@@ -486,13 +468,11 @@ fn slack_encrypted_roundtrip() {
     let restored = dir.join("enc.restored.exe");
     remove_carrier(
         &out,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some("correct horse battery staple"),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password("correct horse battery staple")
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove");
     assert_eq!(fs::read(&restored).unwrap(), original);
@@ -508,24 +488,20 @@ fn slack_stealth_denies_without_password() {
     fs::write(&carrier, &original).unwrap();
 
     let out = dir.join("s.steg.exe");
-    let opts = WriteOptions {
-        output_path: Some(&out),
-        strategy: "pe_slack",
-        password: Some("stealth pw"),
-        stealth: true,
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_output(&out)
+        .with_strategy("pe_slack")
+        .with_password("stealth pw")
+        .with_stealth(true)
+        .with_backup(false);
     write_carrier(&carrier, PayloadSource::Text("invisible"), &opts).expect("write");
 
     let err = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .unwrap_err();
     assert!(
@@ -540,37 +516,31 @@ fn slack_stealth_denies_without_password() {
     assert!(
         read_carrier(
             &out,
-            &ReadOptions {
-                output_path: None,
-                password: Some("nope"),
-                overwrite: false,
-                ..Default::default()
-            }
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password("nope")
+                .with_overwrite(false)
         )
         .is_err()
     );
 
     let read = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: Some("stealth pw"),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("stealth pw")
+            .with_overwrite(false),
     )
     .expect("read");
     assert_eq!(read.data, b"invisible");
     let restored = dir.join("s.restored.exe");
     let rem = remove_carrier(
         &out,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some("stealth pw"),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password("stealth pw")
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove");
     assert!(rem.verified_identical);
@@ -651,12 +621,10 @@ fn tampered_envelope_fails_cleanly() {
     assert!(
         read_carrier(
             &tampered,
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            }
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false)
         )
         .is_err(),
         "read must fail on tampered ciphertext"
@@ -664,13 +632,11 @@ fn tampered_envelope_fails_cleanly() {
     let restored = dir.join("c.tampered.restored.exe");
     let rem = remove_carrier(
         &tampered,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("restore must still succeed");
     assert!(rem.verified_identical);
@@ -875,12 +841,10 @@ fn envelope_ending_at_eof_is_still_reported_as_slack() {
 
     let read = read_carrier(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     )
     .expect("read");
     assert_eq!(read.data, b"tail placement");
@@ -888,13 +852,11 @@ fn envelope_ending_at_eof_is_still_reported_as_slack() {
     let restored = dir.join("tail.restored.exe");
     let rem = remove_carrier(
         &out,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove");
     assert!(rem.verified_identical);

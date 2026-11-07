@@ -45,11 +45,9 @@ fn test_chinese_and_emoji_text_with_chinese_password() {
     let chinese_password = "芝麻开门！🔑🔒测试密码_2026年";
 
     // 1. Write
-    let opts = WriteOptions {
-        password: Some(chinese_password),
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password(chinese_password)
+        .with_backup(false);
     let res_w = write_carrier(&carrier, PayloadSource::Text(chinese_text), &opts)
         .expect("write chinese text");
     assert!(res_w.is_encrypted);
@@ -72,12 +70,10 @@ fn test_chinese_and_emoji_text_with_chinese_password() {
     // 4. Wrong password test
     let err = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: Some("错误的密码_2026"),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("错误的密码_2026")
+            .with_overwrite(false),
     )
     .unwrap_err();
     match err {
@@ -88,12 +84,10 @@ fn test_chinese_and_emoji_text_with_chinese_password() {
     // 5. Read and check 100% exact byte and string match
     let res_r = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: Some(chinese_password),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password(chinese_password)
+            .with_overwrite(false),
     )
     .expect("read");
     let extracted_str = String::from_utf8(res_r.data.clone()).expect("valid utf-8");
@@ -104,13 +98,11 @@ fn test_chinese_and_emoji_text_with_chinese_password() {
     let restored = dir.join("test_chinese.restored.png");
     remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some(chinese_password),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password(chinese_password)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove");
     let restored_sha = compute_file_sha256(&restored).unwrap();
@@ -147,11 +139,9 @@ fn test_arbitrary_binary_payload_with_all_bytes() {
     let unicode_password = "P@ss_Пароль_مرحبا_🔐";
 
     // Write binary
-    let opts = WriteOptions {
-        password: Some(unicode_password),
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password(unicode_password)
+        .with_backup(false);
     let res_w = write_carrier(&carrier, PayloadSource::Bytes(&raw_binary), &opts)
         .expect("write raw binary");
     assert_eq!(res_w.raw_size, raw_binary.len() as u64);
@@ -159,12 +149,10 @@ fn test_arbitrary_binary_payload_with_all_bytes() {
     // Read binary
     let res_r = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: Some(unicode_password),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password(unicode_password)
+            .with_overwrite(false),
     )
     .expect("read raw binary");
     assert_eq!(res_r.data.len(), raw_binary.len());
@@ -174,13 +162,11 @@ fn test_arbitrary_binary_payload_with_all_bytes() {
     let restored = dir.join("test_binary.restored.jpg");
     remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some(unicode_password),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password(unicode_password)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove");
     assert_eq!(compute_file_sha256(&restored).unwrap(), orig_sha);
@@ -215,11 +201,9 @@ fn test_large_binary_file_crossing_chunks() {
     let payload_sha = compute_file_sha256(&payload_file).unwrap();
 
     // 1. Write large file
-    let opts = WriteOptions {
-        password: Some(complex_password),
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password(complex_password)
+        .with_backup(false);
     let res_w = write_carrier(&carrier, PayloadSource::File(&payload_file), &opts)
         .expect("write large file");
     assert_eq!(res_w.raw_size, large_size as u64);
@@ -239,12 +223,10 @@ fn test_large_binary_file_crossing_chunks() {
     fs::create_dir_all(&extract_dir).unwrap();
     let res_r = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: Some(&extract_dir),
-            password: Some(complex_password),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output(&extract_dir)
+            .with_password(complex_password)
+            .with_overwrite(false),
     )
     .expect("read large file");
     let written_str = res_r.written_file.expect("written file path");
@@ -270,13 +252,11 @@ fn test_large_binary_file_crossing_chunks() {
     let restored = dir.join("test_large.restored.mp4");
     remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some(complex_password),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password(complex_password)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove");
     assert_eq!(compute_file_sha256(&restored).unwrap(), orig_carrier_sha);
@@ -311,12 +291,10 @@ fn test_chinese_filename_and_unicode_stealth_mode() {
     fs::write(&secret_file, &secret_bytes).unwrap();
 
     // 1. Write in stealth mode with File payload source (preserves filename)
-    let opts = WriteOptions {
-        password: Some(stealth_password),
-        stealth: true,
-        backup: false,
-        ..Default::default()
-    };
+    let opts = WriteOptions::default()
+        .with_password(stealth_password)
+        .with_stealth(true)
+        .with_backup(false);
     let res_w = write_carrier(&carrier, PayloadSource::File(&secret_file), &opts)
         .expect("write stealth ZIP");
     assert!(res_w.is_stealth);
@@ -329,12 +307,10 @@ fn test_chinese_filename_and_unicode_stealth_mode() {
     // 3. Read in stealth mode
     let res_r = read_carrier(
         &carrier,
-        &ReadOptions {
-            output_path: None,
-            password: Some(stealth_password),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password(stealth_password)
+            .with_overwrite(false),
     )
     .expect("read stealth");
     assert_eq!(res_r.data, secret_bytes);
@@ -344,13 +320,11 @@ fn test_chinese_filename_and_unicode_stealth_mode() {
     let restored = dir.join("test_stealth.restored.zip");
     remove_carrier(
         &carrier,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some(stealth_password),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password(stealth_password)
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove");
     assert_eq!(compute_file_sha256(&restored).unwrap(), orig_sha);
@@ -378,20 +352,16 @@ fn test_tiny_and_empty_payloads() {
     let orig_sha2 = compute_file_sha256(&carrier2).unwrap();
 
     // Test 1 byte
-    let opts1 = WriteOptions {
-        password: Some("密_1"),
-        backup: false,
-        ..Default::default()
-    };
+    let opts1 = WriteOptions::default()
+        .with_password("密_1")
+        .with_backup(false);
     write_carrier(&carrier1, PayloadSource::Bytes(b"X"), &opts1).expect("write 1 byte");
     let res1 = read_carrier(
         &carrier1,
-        &ReadOptions {
-            output_path: None,
-            password: Some("密_1"),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("密_1")
+            .with_overwrite(false),
     )
     .expect("read 1 byte");
     assert_eq!(res1.data, b"X");
@@ -399,32 +369,26 @@ fn test_tiny_and_empty_payloads() {
     let restored1 = dir.join("tiny1.restored.exe");
     remove_carrier(
         &carrier1,
-        &RestoreOptions {
-            output_path: Some(&restored1),
-            password: Some("密_1"),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored1)
+            .with_password("密_1")
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove 1 byte");
     assert_eq!(compute_file_sha256(&restored1).unwrap(), orig_sha1);
 
     // Test empty text
-    let opts2 = WriteOptions {
-        password: Some("密_2"),
-        backup: false,
-        ..Default::default()
-    };
+    let opts2 = WriteOptions::default()
+        .with_password("密_2")
+        .with_backup(false);
     write_carrier(&carrier2, PayloadSource::Text(""), &opts2).expect("write empty text");
     let res2 = read_carrier(
         &carrier2,
-        &ReadOptions {
-            output_path: None,
-            password: Some("密_2"),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("密_2")
+            .with_overwrite(false),
     )
     .expect("read empty text");
     assert_eq!(res2.data, b"");
@@ -432,13 +396,11 @@ fn test_tiny_and_empty_payloads() {
     let restored2 = dir.join("empty.restored.exe");
     remove_carrier(
         &carrier2,
-        &RestoreOptions {
-            output_path: Some(&restored2),
-            password: Some("密_2"),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored2)
+            .with_password("密_2")
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .expect("remove empty text");
     assert_eq!(compute_file_sha256(&restored2).unwrap(), orig_sha2);
@@ -472,23 +434,19 @@ fn test_office_docx_and_xlsx_carrier_lifecycle() {
         // 2. write payload
         let payload = format!("Office secret for .{ext} 载荷测试");
         let password = "Office#Secret_2026";
-        let opts = WriteOptions {
-            password: Some(password),
-            password_hint: Some("office-test"),
-            backup: false,
-            ..Default::default()
-        };
+        let opts = WriteOptions::default()
+            .with_password(password)
+            .with_password_hint("office-test")
+            .with_backup(false);
         write_carrier(&carrier, PayloadSource::Text(&payload), &opts).expect("write carrier");
 
         // 3. read payload
         let res = read_carrier(
             &carrier,
-            &ReadOptions {
-                output_path: None,
-                password: Some(password),
-                overwrite: false,
-                ..Default::default()
-            },
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password(password)
+                .with_overwrite(false),
         )
         .expect("read carrier");
         assert_eq!(res.data, payload.as_bytes());
@@ -497,13 +455,11 @@ fn test_office_docx_and_xlsx_carrier_lifecycle() {
         let restored = dir.join(format!("sample.restored.{ext}"));
         remove_carrier(
             &carrier,
-            &RestoreOptions {
-                output_path: Some(&restored),
-                password: Some(password),
-                backup: false,
-                overwrite: false,
-                ..Default::default()
-            },
+            &RestoreOptions::default()
+                .with_output(&restored)
+                .with_password(password)
+                .with_backup(false)
+                .with_overwrite(false),
         )
         .expect("restore carrier");
         assert_eq!(compute_file_sha256(&restored).unwrap(), orig_sha);

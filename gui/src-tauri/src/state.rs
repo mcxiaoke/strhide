@@ -405,12 +405,7 @@ mod tests {
             password: None,
             domain: Some("structure".to_string()),
             prefer: Some(Domain::Structure),
-            outcome: ExtractOutcome {
-                payload: Payload::bytes(b"x"),
-                source: Domain::Structure,
-                also_present: None,
-                is_encrypted: false,
-            },
+            outcome: ExtractOutcome::new(Payload::bytes(b"x"), Domain::Structure, None, false),
         };
         assert!(cached.matches(
             &path,

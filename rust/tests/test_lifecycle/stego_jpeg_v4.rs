@@ -17,10 +17,7 @@ const PASSWORD: &str = "jpeg-v4-test-password";
 const PAYLOAD: &[u8] = b"jpeg v4 envelope roundtrip payload";
 
 fn credits() -> EmbedOptions<'static> {
-    EmbedOptions {
-        password: Some(PASSWORD),
-        ..Default::default()
-    }
+    EmbedOptions::default().with_password(PASSWORD)
 }
 
 #[test]
@@ -28,20 +25,11 @@ fn v4_roundtrip_default_suite() {
     let stego = embed_carrier(
         CARRIER,
         &Payload::bytes(PAYLOAD),
-        &EmbedOptions {
-            suite_id: Some(1),
-            ..credits()
-        },
+        &(credits()).with_suite_id(1),
     )
     .expect("suite 1 embed");
-    let extracted = extract_carrier(
-        &stego,
-        &ExtractOptions {
-            password: Some(PASSWORD),
-            ..Default::default()
-        },
-    )
-    .expect("suite 1 extract");
+    let extracted = extract_carrier(&stego, &ExtractOptions::default().with_password(PASSWORD))
+        .expect("suite 1 extract");
     assert_eq!(extracted, PAYLOAD);
 }
 
@@ -50,34 +38,22 @@ fn v4_chacha_suite_roundtrip_and_tamper_rejected() {
     let stego = embed_carrier(
         CARRIER,
         &Payload::bytes(PAYLOAD),
-        &EmbedOptions {
-            suite_id: Some(2),
-            ..credits()
-        },
+        &(credits()).with_suite_id(2),
     )
     .expect("suite 2 embed");
-    let extracted = extract_carrier(
-        &stego,
-        &ExtractOptions {
-            password: Some(PASSWORD),
-            ..Default::default()
-        },
-    )
-    .expect("suite 2 extract");
+    let extracted = extract_carrier(&stego, &ExtractOptions::default().with_password(PASSWORD))
+        .expect("suite 2 extract");
     assert_eq!(extracted, PAYLOAD);
 
     // The suite id in the authenticated header must gate the trial: asking for
     // AES only cannot return a ChaCha carrier's payload.
     let only_aes = extract_carrier(
         &stego,
-        &ExtractOptions {
-            password: Some(PASSWORD),
-            limits: strhide::stego::ExtractParams {
-                allowed_suites: Some(vec![1]),
-                ..Default::default()
-            },
-            ..Default::default()
-        },
+        &ExtractOptions::default()
+            .with_password(PASSWORD)
+            .with_limits(
+                strhide::stego::ExtractParams::default().with_allowed_suites(Some(vec![1])),
+            ),
     );
     assert!(
         matches!(only_aes, Err(StrHideError::NoHiddenData(_))),
@@ -88,35 +64,20 @@ fn v4_chacha_suite_roundtrip_and_tamper_rejected() {
     let mut flipped = stego;
     let idx = (flipped_sos_offset(&flipped) + 16).min(flipped.len() - 1);
     flipped[idx] ^= 0x01;
-    let result = extract_carrier(
-        &flipped,
-        &ExtractOptions {
-            password: Some(PASSWORD),
-            ..Default::default()
-        },
-    );
+    let result = extract_carrier(&flipped, &ExtractOptions::default().with_password(PASSWORD));
     assert!(result.is_err());
 }
 
 #[test]
 fn v4_extensions_roundtrip_and_inspect_reports_header() {
-    let options = EmbedOptions {
-        extensions: vec![Tlv {
-            type_id: 0x01,
-            value: b"jpeg-v4-ext".to_vec(),
-        }],
-        ..credits()
-    };
+    let options = (credits()).with_extensions(vec![Tlv {
+        type_id: 0x01,
+        value: b"jpeg-v4-ext".to_vec(),
+    }]);
     let stego = embed_carrier(CARRIER, &Payload::bytes(PAYLOAD), &options).expect("embed");
 
-    let info = inspect_carrier(
-        &stego,
-        &InspectOptions {
-            password: Some(PASSWORD),
-            ..Default::default()
-        },
-    )
-    .expect("inspect");
+    let info = inspect_carrier(&stego, &InspectOptions::default().with_password(PASSWORD))
+        .expect("inspect");
     assert!(info.has_hidden_data);
     assert_eq!(info.format, "JPEG");
     assert!(
@@ -127,14 +88,8 @@ fn v4_extensions_roundtrip_and_inspect_reports_header() {
     );
     assert!(info.envelope_len.unwrap_or(0) >= PAYLOAD.len());
 
-    let extracted = extract_carrier(
-        &stego,
-        &ExtractOptions {
-            password: Some(PASSWORD),
-            ..Default::default()
-        },
-    )
-    .expect("extract");
+    let extracted = extract_carrier(&stego, &ExtractOptions::default().with_password(PASSWORD))
+        .expect("extract");
     assert_eq!(extracted, PAYLOAD);
 }
 
@@ -146,21 +101,14 @@ fn v4_probe_and_embed_agree_on_extensions() {
     }];
     let with_ext = probe_carrier_capacity(
         CARRIER,
-        &ProbeOptions {
-            password: Some(PASSWORD),
-            extensions: tlv.clone(),
-            ..Default::default()
-        },
+        &ProbeOptions::default()
+            .with_password(PASSWORD)
+            .with_extensions(tlv.clone()),
     )
     .expect("probe with extension");
-    let without_ext = probe_carrier_capacity(
-        CARRIER,
-        &ProbeOptions {
-            password: Some(PASSWORD),
-            ..Default::default()
-        },
-    )
-    .expect("probe without extension");
+    let without_ext =
+        probe_carrier_capacity(CARRIER, &ProbeOptions::default().with_password(PASSWORD))
+            .expect("probe without extension");
     assert!(
         with_ext.recommended_max_bytes <= without_ext.recommended_max_bytes,
         "the extension area must not increase capacity"
@@ -170,20 +118,11 @@ fn v4_probe_and_embed_agree_on_extensions() {
     let stego = embed_carrier(
         CARRIER,
         &Payload::bytes(&payload),
-        &EmbedOptions {
-            extensions: tlv,
-            ..credits()
-        },
+        &(credits()).with_extensions(tlv),
     )
     .expect("embed at the probe size");
-    let extracted = extract_carrier(
-        &stego,
-        &ExtractOptions {
-            password: Some(PASSWORD),
-            ..Default::default()
-        },
-    )
-    .expect("extract");
+    let extracted = extract_carrier(&stego, &ExtractOptions::default().with_password(PASSWORD))
+        .expect("extract");
     assert_eq!(extracted, payload);
 }
 
@@ -192,20 +131,11 @@ fn v4_wrong_password_and_clean_carrier_are_indistinguishable() {
     let stego = embed_carrier(CARRIER, &Payload::bytes(PAYLOAD), &credits()).expect("embed");
     let wrong = extract_carrier(
         &stego,
-        &ExtractOptions {
-            password: Some("wrong-password"),
-            ..Default::default()
-        },
+        &ExtractOptions::default().with_password("wrong-password"),
     )
     .expect_err("wrong password");
-    let clean = extract_carrier(
-        CARRIER,
-        &ExtractOptions {
-            password: Some(PASSWORD),
-            ..Default::default()
-        },
-    )
-    .expect_err("clean carrier");
+    let clean = extract_carrier(CARRIER, &ExtractOptions::default().with_password(PASSWORD))
+        .expect_err("clean carrier");
     assert!(
         matches!(wrong, StrHideError::NoHiddenData(_)),
         "wrong password must collapse to NoHiddenData: {wrong:?}"
@@ -225,28 +155,17 @@ fn v4_inspect_and_extract_agree_under_a_tightened_policy() {
     use strhide::stego::params::ExtractParams;
 
     let stego = embed_carrier(CARRIER, &Payload::bytes(PAYLOAD), &credits()).expect("embed");
-    let tight = ExtractParams {
-        max_payload_bytes: 1,
-        ..ExtractParams::default()
-    };
+    let tight = ExtractParams::default().with_max_payload_bytes(1);
 
-    let open = inspect_carrier(
-        &stego,
-        &InspectOptions {
-            password: Some(PASSWORD),
-            ..Default::default()
-        },
-    )
-    .expect("inspect with the default policy");
+    let open = inspect_carrier(&stego, &InspectOptions::default().with_password(PASSWORD))
+        .expect("inspect with the default policy");
     assert!(open.has_hidden_data);
 
     let refused = inspect_carrier(
         &stego,
-        &InspectOptions {
-            password: Some(PASSWORD),
-            limits: tight.clone(),
-            ..Default::default()
-        },
+        &InspectOptions::default()
+            .with_password(PASSWORD)
+            .with_limits(tight.clone()),
     )
     .expect("inspect with a tight policy");
     assert!(
@@ -256,11 +175,9 @@ fn v4_inspect_and_extract_agree_under_a_tightened_policy() {
 
     let extracted = extract_carrier(
         &stego,
-        &ExtractOptions {
-            password: Some(PASSWORD),
-            limits: tight,
-            ..Default::default()
-        },
+        &ExtractOptions::default()
+            .with_password(PASSWORD)
+            .with_limits(tight),
     )
     .expect_err("extract under the same tight policy");
     assert!(
@@ -270,17 +187,12 @@ fn v4_inspect_and_extract_agree_under_a_tightened_policy() {
 
     // Same disagreement check for the PBKDF2 ceiling: both ends refuse before
     // doing any key derivation.
-    let low_kdf = ExtractParams {
-        max_pbkdf2_iterations: 1_000,
-        ..ExtractParams::default()
-    };
+    let low_kdf = ExtractParams::default().with_max_pbkdf2_iterations(1_000);
     let refused = inspect_carrier(
         &stego,
-        &InspectOptions {
-            password: Some(PASSWORD),
-            limits: low_kdf.clone(),
-            ..Default::default()
-        },
+        &InspectOptions::default()
+            .with_password(PASSWORD)
+            .with_limits(low_kdf.clone()),
     )
     .expect("inspect with a low KDF ceiling");
     assert!(
@@ -290,11 +202,9 @@ fn v4_inspect_and_extract_agree_under_a_tightened_policy() {
     assert!(
         extract_carrier(
             &stego,
-            &ExtractOptions {
-                password: Some(PASSWORD),
-                limits: low_kdf,
-                ..Default::default()
-            },
+            &ExtractOptions::default()
+                .with_password(PASSWORD)
+                .with_limits(low_kdf),
         )
         .is_err(),
         "extract must refuse the same carrier"
@@ -305,22 +215,13 @@ fn v4_inspect_and_extract_agree_under_a_tightened_policy() {
 fn v4_verify_explains_levels_and_wrong_password_fails_l2() {
     let stego = embed_carrier(CARRIER, &Payload::bytes(PAYLOAD), &credits()).expect("embed");
 
-    let ok = verify_carrier(
-        &stego,
-        &VerifyOptions {
-            password: Some(PASSWORD),
-            ..Default::default()
-        },
-    )
-    .expect("verify");
+    let ok =
+        verify_carrier(&stego, &VerifyOptions::default().with_password(PASSWORD)).expect("verify");
     assert!(ok.is_all_ok(), "levels: {:?}", ok.levels);
 
     let bad = verify_carrier(
         &stego,
-        &VerifyOptions {
-            password: Some("wrong-password"),
-            ..Default::default()
-        },
+        &VerifyOptions::default().with_password("wrong-password"),
     )
     .expect("verify runs");
     assert!(!bad.is_all_ok(), "levels: {:?}", bad.levels);
@@ -334,10 +235,7 @@ fn v4_tampered_carrier_never_panics() {
     assert!(
         extract_carrier(
             truncated,
-            &ExtractOptions {
-                password: Some(PASSWORD),
-                ..Default::default()
-            },
+            &ExtractOptions::default().with_password(PASSWORD),
         )
         .is_err()
     );
@@ -350,13 +248,7 @@ fn v4_tampered_carrier_never_panics() {
     let mut flipped = stego.clone();
     let idx = (sos + 16).min(flipped.len() - 1);
     flipped[idx] ^= 0x01;
-    let result = extract_carrier(
-        &flipped,
-        &ExtractOptions {
-            password: Some(PASSWORD),
-            ..Default::default()
-        },
-    );
+    let result = extract_carrier(&flipped, &ExtractOptions::default().with_password(PASSWORD));
     assert!(result.is_err());
 }
 

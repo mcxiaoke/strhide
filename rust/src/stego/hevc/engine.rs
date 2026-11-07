@@ -4793,10 +4793,9 @@ mod safety_policy_tests {
     use crate::stego::{SafetyEnforcement, SafetyLevel, SafetyPolicy};
 
     fn policy(enforcement: SafetyEnforcement) -> SafetyPolicy {
-        SafetyPolicy {
-            level: SafetyLevel::High,
-            enforcement,
-        }
+        SafetyPolicy::default()
+            .with_level(SafetyLevel::High)
+            .with_enforcement(enforcement)
     }
 
     #[test]

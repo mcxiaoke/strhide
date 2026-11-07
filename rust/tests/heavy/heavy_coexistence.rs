@@ -168,13 +168,8 @@ fn pick_two_different_sized_samples(
         // Check stego capacity under Balanced safety policy: must be >= 32 bytes
         let cap_info = match engine.stego().probe_file(
             &path,
-            &ProbeOptions {
-                safety: SafetyPolicy {
-                    level: SafetyLevel::Balanced,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
+            &ProbeOptions::default()
+                .with_safety_policy(SafetyPolicy::default().with_level(SafetyLevel::Balanced)),
         ) {
             Ok(c) => c,
             Err(_) => continue,
@@ -304,25 +299,18 @@ fn run_single_coexistence_case(
                 preserve_time: false,
                 overwrite: true,
             };
-            let embed_opts = EmbedOptions {
-                password: Some(&pass_content),
-                safety: SafetyPolicy {
-                    level: SafetyLevel::Balanced,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
+            let embed_opts = EmbedOptions::default()
+                .with_password(&pass_content)
+                .with_safety_policy(SafetyPolicy::default().with_level(SafetyLevel::Balanced));
             engine
                 .stego()
                 .embed_file(&work_file, &content_payload, &embed_opts, &embed_target)
                 .map_err(|e| format!("[{}] Step 1 embed failed: {e}", job.order.label()))?;
 
             // Step 2: Structure domain write (in-place)
-            let write_opts = WriteOptions {
-                password: Some(&pass_struct),
-                backup: false,
-                ..Default::default()
-            };
+            let write_opts = WriteOptions::default()
+                .with_password(&pass_struct)
+                .with_backup(false);
             engine
                 .structure()
                 .write_file(
@@ -334,11 +322,9 @@ fn run_single_coexistence_case(
         }
         InjectionOrder::StructureThenContent => {
             // Step 1: Structure domain write (in-place)
-            let write_opts = WriteOptions {
-                password: Some(&pass_struct),
-                backup: false,
-                ..Default::default()
-            };
+            let write_opts = WriteOptions::default()
+                .with_password(&pass_struct)
+                .with_backup(false);
             engine
                 .structure()
                 .write_file(
@@ -355,14 +341,9 @@ fn run_single_coexistence_case(
                 preserve_time: false,
                 overwrite: true,
             };
-            let embed_opts = EmbedOptions {
-                password: Some(&pass_content),
-                safety: SafetyPolicy {
-                    level: SafetyLevel::Balanced,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
+            let embed_opts = EmbedOptions::default()
+                .with_password(&pass_content)
+                .with_safety_policy(SafetyPolicy::default().with_level(SafetyLevel::Balanced));
             engine
                 .stego()
                 .embed_file(&work_file, &content_payload, &embed_opts, &embed_target)
@@ -374,10 +355,7 @@ fn run_single_coexistence_case(
 
     // ─────────────────────── Verification: Extract both domains ───────────────────────
     // 1. Extract Structure domain payload
-    let read_opts = ReadOptions {
-        password: Some(&pass_struct),
-        ..Default::default()
-    };
+    let read_opts = ReadOptions::default().with_password(&pass_struct);
     let read_res = engine
         .structure()
         .read_file(&work_file, &read_opts)
@@ -394,10 +372,7 @@ fn run_single_coexistence_case(
     }
 
     // 2. Extract Content domain payload
-    let extract_opts = ExtractOptions {
-        password: Some(&pass_content),
-        ..Default::default()
-    };
+    let extract_opts = ExtractOptions::default().with_password(&pass_content);
     let extracted_content =
         extract_carrier_file_payload(&work_file, &extract_opts, &engine.dialect().stego)
             .map_err(|e| format!("[{}] Extract content failed: {e}", job.order.label()))?;
@@ -431,10 +406,7 @@ fn run_single_coexistence_case(
     // 4. Cross-domain password isolation checks
     let wrong_struct_res = engine.structure().read_file(
         &work_file,
-        &ReadOptions {
-            password: Some(&pass_content),
-            ..Default::default()
-        },
+        &ReadOptions::default().with_password(&pass_content),
     );
     if wrong_struct_res.is_ok() {
         return Err("Structure extraction with wrong password unexpectedly succeeded".into());
@@ -442,10 +414,7 @@ fn run_single_coexistence_case(
 
     let wrong_content_res = extract_carrier_file_payload(
         &work_file,
-        &ExtractOptions {
-            password: Some(&pass_struct),
-            ..Default::default()
-        },
+        &ExtractOptions::default().with_password(&pass_struct),
         &engine.dialect().stego,
     );
     if !matches!(wrong_content_res, Err(StrHideError::NoHiddenData(_))) {

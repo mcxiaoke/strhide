@@ -209,10 +209,7 @@ mod envelope_coordinates {
     }
 
     fn write(png: &[u8], strategy: &str) -> Vec<u8> {
-        let opts = WriteOptions {
-            strategy,
-            ..WriteOptions::default()
-        };
+        let opts = WriteOptions::default().with_strategy(strategy);
         let (stego, _) = write_carrier_bytes(
             png,
             PayloadSource::Bytes(b"offset delta payload"),

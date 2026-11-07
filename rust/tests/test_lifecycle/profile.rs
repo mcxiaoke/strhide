@@ -48,12 +48,10 @@ fn write(
     write_carrier_with(
         carrier,
         PayloadSource::Bytes(payload),
-        &WriteOptions {
-            output_path: Some(out),
-            password,
-            backup: false,
-            ..WriteOptions::default()
-        },
+        &WriteOptions::default()
+            .with_output(out)
+            .with_password_option(password)
+            .with_backup(false),
         local,
         profile,
     )
@@ -70,12 +68,10 @@ fn write(
 fn assert_unreadable(carrier: &Path, password: Option<&str>, profile: &StructureProfile) {
     match read_carrier_with_dialect(
         carrier,
-        &ReadOptions {
-            output_path: None,
-            password,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(password)
+            .with_overwrite(false),
         profile,
     ) {
         Ok(res) => panic!(
@@ -114,12 +110,10 @@ fn private_default_secret_is_unreadable_with_the_official_profile() {
     // Same profile: normal round trip.
     let res = read_carrier_with_dialect(
         &stego,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
         &profile,
     )
     .unwrap();
@@ -152,13 +146,11 @@ fn private_default_secret_is_unreadable_with_the_official_profile() {
     let restored = dir.join("restored.png");
     let removed = remove_carrier_with_dialect(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
         &profile,
     )
     .unwrap();
@@ -188,12 +180,10 @@ fn explicit_password_still_wins_over_the_private_secret() {
 
     let res = read_carrier_with_dialect(
         &stego,
-        &ReadOptions {
-            output_path: None,
-            password: Some("pw"),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("pw")
+            .with_overwrite(false),
         &StructureProfile::default(),
     )
     .expect("explicit password must not depend on the profile's default secret");
@@ -232,12 +222,10 @@ fn custom_magic_is_invisible_to_the_official_reader() {
     assert_eq!(
         read_carrier_with_dialect(
             &stego,
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            },
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false),
             &profile
         )
         .unwrap()
@@ -257,13 +245,11 @@ fn custom_stealth_domain_changes_the_derived_magic() {
     write_carrier_with(
         &carrier,
         PayloadSource::Bytes(b"stealth payload"),
-        &WriteOptions {
-            output_path: Some(&stego),
-            password: Some("pw"),
-            stealth: true,
-            backup: false,
-            ..WriteOptions::default()
-        },
+        &WriteOptions::default()
+            .with_output(&stego)
+            .with_password("pw")
+            .with_stealth(true)
+            .with_backup(false),
         &LocalParams::default(),
         &profile,
     )
@@ -273,12 +259,10 @@ fn custom_stealth_domain_changes_the_derived_magic() {
     assert_eq!(
         read_carrier_with_dialect(
             &stego,
-            &ReadOptions {
-                output_path: None,
-                password: Some("pw"),
-                overwrite: false,
-                ..Default::default()
-            },
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password("pw")
+                .with_overwrite(false),
             &profile
         )
         .unwrap()
@@ -329,12 +313,10 @@ fn chunk_size_is_a_writer_only_knob() {
     for path in [&baseline, &chunked] {
         let res = read_carrier_with_dialect(
             path,
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            },
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false),
             &StructureProfile::default(),
         )
         .unwrap();
@@ -383,12 +365,10 @@ fn compression_strategy_is_a_writer_only_knob() {
     assert_eq!(
         read_carrier_with_dialect(
             &out,
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            },
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false),
             &StructureProfile::default()
         )
         .unwrap()
@@ -422,12 +402,10 @@ fn large_incompressible_payload_is_stored_without_the_compressed_flag() {
     );
     let read = read_carrier_with_dialect(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
         &StructureProfile::default(),
     )
     .unwrap();
@@ -459,12 +437,10 @@ fn large_compressible_payload_is_still_deflated() {
     );
     let read = read_carrier_with_dialect(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
         &StructureProfile::default(),
     )
     .unwrap();
@@ -496,12 +472,10 @@ fn compressibility_probe_sees_a_compressible_tail() {
     assert_eq!(info.is_compressed, Some(true));
     let read = read_carrier_with_dialect(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
         &StructureProfile::default(),
     )
     .unwrap();
@@ -531,12 +505,10 @@ fn compressed_envelopes_remain_readable_after_the_probe_gate() {
     assert_eq!(info.is_compressed, Some(true));
     let read = read_carrier_with_dialect(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
         &StructureProfile::default(),
     )
     .unwrap();
@@ -568,12 +540,10 @@ fn tiny_payloads_keep_the_historical_compression_decision() {
         assert_eq!(info.is_compressed, Some(expected), "{name}");
         let read = read_carrier_with_dialect(
             &out,
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            },
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false),
             &StructureProfile::default(),
         )
         .unwrap();
@@ -604,12 +574,10 @@ fn local_large_incompressible_payload_at_the_payload_limit_is_uncompressed() {
     assert_eq!(info.is_compressed, Some(false));
     let read = read_carrier_with_dialect(
         &out,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
         &StructureProfile::default(),
     )
     .unwrap();
@@ -646,10 +614,7 @@ fn invalid_local_params_fail_before_touching_the_carrier() {
         let err = write_carrier_with(
             &carrier,
             PayloadSource::Bytes(payload),
-            &WriteOptions {
-                backup: false,
-                ..WriteOptions::default()
-            },
+            &WriteOptions::default().with_backup(false),
             &bad,
             &StructureProfile::default(),
         )
@@ -674,10 +639,7 @@ fn rejection_policy_governs_filename_checks() {
     let err = write_carrier_with(
         &carrier,
         PayloadSource::Bytes(b"x"),
-        &WriteOptions {
-            backup: false,
-            ..WriteOptions::default()
-        },
+        &WriteOptions::default().with_backup(false),
         &LocalParams::default(),
         &StructureProfile::default(),
     )
@@ -688,10 +650,7 @@ fn rejection_policy_governs_filename_checks() {
     write_carrier_with(
         &carrier,
         PayloadSource::Bytes(b"x"),
-        &WriteOptions {
-            backup: false,
-            ..WriteOptions::default()
-        },
+        &WriteOptions::default().with_backup(false),
         &skip,
         &StructureProfile::default(),
     )
@@ -699,12 +658,10 @@ fn rejection_policy_governs_filename_checks() {
     assert_eq!(
         read_carrier_with_dialect(
             &carrier,
-            &ReadOptions {
-                output_path: None,
-                password: None,
-                overwrite: false,
-                ..Default::default()
-            },
+            &ReadOptions::default()
+                .with_output_option(None)
+                .with_password_option(None)
+                .with_overwrite(false),
             &StructureProfile::default()
         )
         .unwrap()

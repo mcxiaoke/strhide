@@ -41,12 +41,10 @@ fn test_heif_synthetic_stub_auto_strategy_fallback() {
 
     let read_res = read_carrier(
         &target,
-        &ReadOptions {
-            output_path: None,
-            password: None,
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
     );
     assert!(
         read_res.is_ok(),

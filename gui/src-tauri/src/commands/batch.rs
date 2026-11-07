@@ -108,13 +108,7 @@ pub async fn run_batch_job_impl(
                                 .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))
                         }
                         "restore" => {
-                            let opts = RestoreOptions {
-                                output_path: None,
-                                password: password.as_deref(),
-                                backup: true,
-                                overwrite: true,
-                                control: *ctrl,
-                            };
+                            let opts = RestoreOptions::default().with_output_option(None).with_password_option(password.as_deref()).with_backup(true).with_overwrite(true).with_control(*ctrl);
                             let res = engine.structure().restore_file(path, &opts)?;
                             serde_json::to_value(res)
                                 .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))

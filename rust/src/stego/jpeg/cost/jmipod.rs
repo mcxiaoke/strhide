@@ -354,10 +354,8 @@ mod tests {
     fn costs_respect_wet_cap_and_positive_finite_bounds() {
         let coeffs = two_by_two();
         let geometry = geometry_for(&coeffs);
-        let params = JpegParams {
-            wet_cost: 5.0, // tight wet cap to verify clamping
-            ..Default::default()
-        };
+        // tight wet cap to verify clamping
+        let params = JpegParams::default().with_wet_cost(5.0);
         let costs = JmipodCostModel.compute_cost(&coeffs, &geometry, &params);
         for (i, &c) in costs.iter().enumerate() {
             assert!(c.is_finite(), "cost {i} must be finite");
@@ -382,10 +380,7 @@ mod tests {
             "polarize_weight=1.0 must produce None"
         );
 
-        let polarized = JpegParams {
-            polarize_weight: 0.65,
-            ..Default::default()
-        };
+        let polarized = JpegParams::default().with_polarize_weight(0.65);
         let bias = JmipodCostModel
             .direction_bias(&coeffs, &geometry, &polarized)
             .expect("polarize_weight < 1.0 must produce bias");

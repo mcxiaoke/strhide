@@ -1115,10 +1115,7 @@ pub mod eval {
                     }
 
                     let payload = generate_pseudo_payload(payload_len, 0xACE1234 + idx as u64);
-                    let opts = EmbedOptions {
-                        password: Some(TEST_PASSWORD),
-                        ..Default::default()
-                    };
+                    let opts = EmbedOptions::default().with_password(TEST_PASSWORD);
 
                     let t0 = Instant::now();
                     let stego_bytes =

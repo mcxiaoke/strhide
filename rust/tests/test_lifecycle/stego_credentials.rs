@@ -136,10 +136,7 @@ fn verify_derives_the_l1_master_exactly_once() {
     strhide::stego::format::reset_locator_derivation_count();
     let result = verify_carrier(
         &stego,
-        &strhide::stego::VerifyOptions {
-            password: Some("verify-once"),
-            ..Default::default()
-        },
+        &strhide::stego::VerifyOptions::default().with_password("verify-once"),
     )
     .expect("verify");
     assert!(result.is_all_ok(), "verify must pass: {result:?}");

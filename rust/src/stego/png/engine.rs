@@ -2989,13 +2989,11 @@ mod tests {
         let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
         let payload = b"v3-hyperparameters";
 
-        let hill_params = PngParams {
-            p1_window: 5,
-            p2_window: 7,
+        let hill_params = PngParams::default()
+            .with_p1_window(5)
+            .with_p2_window(7)
             // not a power of two: must be quantised on both ends
-            epsilon: 1e-8,
-            ..PngParams::default()
-        };
+            .with_epsilon(1e-8);
         let stego = embed_png(
             &png,
             payload,
@@ -3194,11 +3192,9 @@ mod tests {
         );
 
         let payload = b"stc-roundtrip-payload";
-        let params = PngParams {
-            codec: StegoCodec::Stc,
-            stc_h: 8,
-            ..PngParams::default()
-        };
+        let params = PngParams::default()
+            .with_codec(StegoCodec::Stc)
+            .with_stc_h(8);
         let stego = embed_png(
             &png,
             payload,
@@ -3215,10 +3211,7 @@ mod tests {
 
         // The codec travels in the header, so an extractor configured with Hamming
         // must still read the carrier correctly via header self-description.
-        let extract_params = PngParams {
-            codec: StegoCodec::Hamming,
-            ..PngParams::default()
-        };
+        let extract_params = PngParams::default().with_codec(StegoCodec::Hamming);
         let extracted = extract_png(
             &stego,
             Some("pw"),
@@ -3261,10 +3254,7 @@ mod tests {
         let pixels = row_correlated_pixels(w, h);
         let png = craft_png(w as u32, h as u32, &pixels, &vec![2u8; h], &[], 1);
         let payload = b"permille-quantised-roundtrip";
-        let params = PngParams {
-            exclusion_percentile: 0.0123,
-            ..PngParams::default()
-        };
+        let params = PngParams::default().with_exclusion_percentile(0.0123);
         let stego = embed_png(
             &png,
             payload,
@@ -3552,12 +3542,10 @@ mod tests {
         let mut change_rates = Vec::new();
         let mut capacities = Vec::new();
         for stc_u in [1u8, 2, 3] {
-            let params = PngParams {
-                codec: StegoCodec::Stc,
-                stc_h: 8,
-                stc_u,
-                ..PngParams::default()
-            };
+            let params = PngParams::default()
+                .with_codec(StegoCodec::Stc)
+                .with_stc_h(8)
+                .with_stc_u(stc_u);
             // Seeded, not random: the salt drives the slot permutation and the
             // trellis columns, so a random draw left the change counts (and
             // this test's outcome) to luck. Same inputs now give the same file.
@@ -4142,10 +4130,9 @@ mod tests {
         );
 
         // Test enforcement: the policy is a call argument now, not a params field.
-        let enforced = SafetyPolicy {
-            level: SafetyLevel::Paranoid,
-            enforcement: SafetyEnforcement::Enforced,
-        };
+        let enforced = SafetyPolicy::default()
+            .with_level(SafetyLevel::Paranoid)
+            .with_enforcement(SafetyEnforcement::Enforced);
 
         // Oversize for Paranoid
         let large_payload = vec![0x42; cap_balanced.recommended_max_bytes];
@@ -4702,10 +4689,9 @@ mod tests {
             &spatial,
             &cost_model,
             &params,
-            SafetyPolicy {
-                level: crate::stego::SafetyLevel::High,
-                enforcement: crate::stego::SafetyEnforcement::Advisory,
-            },
+            SafetyPolicy::default()
+                .with_level(crate::stego::SafetyLevel::High)
+                .with_enforcement(crate::stego::SafetyEnforcement::Advisory),
             Freshness::Random,
             &Control::none(),
         )
@@ -4796,10 +4782,9 @@ mod tests {
             1,
         );
         let params = PngParams::default();
-        let safety = SafetyPolicy {
-            level: crate::stego::SafetyLevel::High,
-            enforcement: crate::stego::SafetyEnforcement::Advisory,
-        };
+        let safety = SafetyPolicy::default()
+            .with_level(crate::stego::SafetyLevel::High)
+            .with_enforcement(crate::stego::SafetyEnforcement::Advisory);
 
         // Non-critical unknown TLV: ignored, payload still readable.
         let ext = [Tlv {
@@ -4932,10 +4917,9 @@ mod tests {
             1,
         );
         let params = PngParams::default();
-        let safety = SafetyPolicy {
-            level: crate::stego::SafetyLevel::High,
-            enforcement: crate::stego::SafetyEnforcement::Advisory,
-        };
+        let safety = SafetyPolicy::default()
+            .with_level(crate::stego::SafetyLevel::High)
+            .with_enforcement(crate::stego::SafetyEnforcement::Advisory);
         assert!(matches!(
             super::embed_png(
                 &png,
@@ -4971,10 +4955,7 @@ mod tests {
             &Control::none(),
         )
         .expect("embed");
-        let strict = ExtractParams {
-            max_pbkdf2_iterations: 100_000,
-            ..ExtractParams::default()
-        };
+        let strict = ExtractParams::default().with_max_pbkdf2_iterations(100_000);
         assert!(
             matches!(
                 extract_with(&stego, "pw", &strict),
@@ -4996,10 +4977,9 @@ mod tests {
             1,
         );
         let params = PngParams::default();
-        let safety = SafetyPolicy {
-            level: crate::stego::SafetyLevel::High,
-            enforcement: crate::stego::SafetyEnforcement::Advisory,
-        };
+        let safety = SafetyPolicy::default()
+            .with_level(crate::stego::SafetyLevel::High)
+            .with_enforcement(crate::stego::SafetyEnforcement::Advisory);
         let stego = super::embed_png(
             &png,
             b"tamper",
@@ -5058,10 +5038,9 @@ mod tests {
             1,
         );
         let params = PngParams::default();
-        let safety = SafetyPolicy {
-            level: crate::stego::SafetyLevel::High,
-            enforcement: crate::stego::SafetyEnforcement::Advisory,
-        };
+        let safety = SafetyPolicy::default()
+            .with_level(crate::stego::SafetyLevel::High)
+            .with_enforcement(crate::stego::SafetyEnforcement::Advisory);
         let stego = super::embed_png(
             &png,
             b"body_len",

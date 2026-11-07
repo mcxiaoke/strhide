@@ -141,13 +141,10 @@ fn a_suniward_carrier_extracts_while_the_caller_defaults_to_hill() {
     let png = texture_png(96, 96);
     let payload = b"written by suniward, read by hill defaults";
 
-    let write = EmbedOptions {
-        tuning: StegoTuning::Png {
-            model: SpatialAlgorithm::Suniward,
-            params: PngParams::default(),
-        },
-        ..Default::default()
-    };
+    let write = EmbedOptions::default().with_tuning(StegoTuning::Png {
+        model: SpatialAlgorithm::Suniward,
+        params: PngParams::default(),
+    });
     let stego =
         embed_carrier(&png, &Payload::bytes(payload), &write).expect("embed with S-UNIWARD");
 
@@ -169,16 +166,10 @@ fn non_default_exclusion_rate_extracts_with_default_options() {
     let png = texture_png(96, 96);
     let payload = b"written with non-default exclusion rate 0.45";
 
-    let write = EmbedOptions {
-        tuning: StegoTuning::Png {
-            model: SpatialAlgorithm::default(),
-            params: PngParams {
-                exclusion_percentile: 0.45,
-                ..Default::default()
-            },
-        },
-        ..Default::default()
-    };
+    let write = EmbedOptions::default().with_tuning(StegoTuning::Png {
+        model: SpatialAlgorithm::default(),
+        params: PngParams::default().with_exclusion_percentile(0.45),
+    });
     let stego = embed_carrier(&png, &Payload::bytes(payload), &write)
         .expect("embed with exclusion rate 0.45");
 

@@ -52,13 +52,11 @@ fn test_jpeg_multisegment_chain_boundary_and_lossless_restore() {
     let res = write_carrier(
         &carrier,
         PayloadSource::File(&payload_file),
-        &WriteOptions {
-            output_path: Some(&stego),
-            password: Some("secret123"),
-            strategy: "auto",
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&stego)
+            .with_password("secret123")
+            .with_strategy("auto")
+            .with_backup(false),
     )
     .unwrap();
 
@@ -132,12 +130,10 @@ fn test_jpeg_multisegment_chain_boundary_and_lossless_restore() {
     // 4. Read back payload
     let read_res = read_carrier(
         &stego,
-        &ReadOptions {
-            output_path: None,
-            password: Some("secret123"),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("secret123")
+            .with_overwrite(false),
     )
     .unwrap();
     assert_eq!(read_res.data, payload);
@@ -146,13 +142,11 @@ fn test_jpeg_multisegment_chain_boundary_and_lossless_restore() {
     let restored = dir.join("restored.jpg");
     let rem_res = remove_carrier(
         &stego,
-        &RestoreOptions {
-            output_path: Some(&restored),
-            password: Some("secret123"),
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&restored)
+            .with_password("secret123")
+            .with_backup(false)
+            .with_overwrite(false),
     )
     .unwrap();
     assert!(rem_res.verified_identical);

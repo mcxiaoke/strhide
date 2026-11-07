@@ -226,11 +226,9 @@ fn test_png_hill_content_stego_roundtrip() {
     let secret = b"Hello from HILL content-adaptive steganography! 2026";
     let password = "SecretPassword123!";
 
-    let mut opts = EmbedOptions {
-        tuning: tuning_for("hill"),
-        password: Some(password),
-        ..Default::default()
-    };
+    let mut opts = EmbedOptions::default()
+        .with_tuning(tuning_for("hill"))
+        .with_password(password);
 
     // 1. Embed
     let stego_png = embed_carrier(&png_bytes, &Payload::bytes(secret), &opts).expect("embed png");
@@ -253,11 +251,9 @@ fn test_png_hill_fine_tuning_parameters() {
     let png_bytes = generate_texture_png(128, 128);
     let secret = b"Fine-tuned parameters test";
 
-    let mut opts = EmbedOptions {
-        tuning: tuning_for("hill"),
-        password: Some("pwd"),
-        ..Default::default()
-    };
+    let mut opts = EmbedOptions::default()
+        .with_tuning(tuning_for("hill"))
+        .with_password("pwd");
     // Customize parameters: exclude top 40% smoothest pixels, customize filters
     opts.png_params_mut().exclusion_percentile = 0.40;
     opts.png_params_mut().p1_window = 3;
@@ -273,11 +269,9 @@ fn test_png_hill_scan_analysis_pass() {
     let png_bytes = generate_texture_png(160, 160);
     let secret = b"Steganalysis resistance test under scan_file";
 
-    let opts = EmbedOptions {
-        tuning: tuning_for("hill"),
-        password: Some("Pass!"),
-        ..Default::default()
-    };
+    let opts = EmbedOptions::default()
+        .with_tuning(tuning_for("hill"))
+        .with_password("Pass!");
 
     let stego_png = embed_carrier(&png_bytes, &Payload::bytes(secret), &opts).expect("embed");
 
@@ -310,11 +304,9 @@ fn test_jpeg_uerd_content_stego_roundtrip() {
     let secret = b"JPEG UERD content-adaptive secret message 2026!";
     let password = "JpegPassword2026#";
 
-    let mut opts = EmbedOptions {
-        tuning: tuning_for("uerd"),
-        password: Some(password),
-        ..Default::default()
-    };
+    let mut opts = EmbedOptions::default()
+        .with_tuning(tuning_for("uerd"))
+        .with_password(password);
 
     // 1. Embed into JPEG DCT coefficients
     let stego_jpeg =
@@ -352,11 +344,9 @@ fn test_jpeg_uerd_fine_tuning() {
     let jpeg_bytes = fs::read(&candidate).unwrap();
     let secret = b"Customized UERD neighbor weight test";
 
-    let mut opts = EmbedOptions {
-        tuning: tuning_for("uerd"),
-        password: Some("p1"),
-        ..Default::default()
-    };
+    let mut opts = EmbedOptions::default()
+        .with_tuning(tuning_for("uerd"))
+        .with_password("p1");
     opts.jpeg_params_mut().neighbor_weight = 0.35;
     // The V3 knob that replaces the old pool/truncation parameters: a larger
     // slot budget spreads the payload over more coefficients.
@@ -459,10 +449,7 @@ fn test_stego_saturation_exclusion() {
     .unwrap();
 
     let secret = b"Saturation boundary protection verified!";
-    let opts = EmbedOptions {
-        password: Some("SaturationSecret123"),
-        ..Default::default()
-    };
+    let opts = EmbedOptions::default().with_password("SaturationSecret123");
 
     let stego_png =
         embed_carrier(&png_bytes, &Payload::bytes(secret), &opts).expect("embed carrier");
@@ -505,14 +492,8 @@ fn test_stego_keyed_permutation_property() {
     let png_bytes = generate_texture_png(64, 64);
     let secret = b"Keyed permutation isolates passwords completely";
 
-    let opts_a = EmbedOptions {
-        password: Some("AliceSecret2026"),
-        ..Default::default()
-    };
-    let opts_b = EmbedOptions {
-        password: Some("BobSecret2026"),
-        ..Default::default()
-    };
+    let opts_a = EmbedOptions::default().with_password("AliceSecret2026");
+    let opts_b = EmbedOptions::default().with_password("BobSecret2026");
 
     let stego_a =
         embed_carrier(&png_bytes, &Payload::bytes(secret), &opts_a).expect("embed with Alice");
@@ -770,16 +751,10 @@ fn test_stego_header_slots_are_keyed_and_salt_independent() {
     assert_eq!(header.stc_u, 2);
 
     // Explicit Hamming embed must declare codec 0 and zero h/u.
-    let hamming_opts = EmbedOptions {
-        tuning: StegoTuning::Png {
-            model: SpatialAlgorithm::default(),
-            params: PngParams {
-                codec: strhide::stego::StegoCodec::Hamming,
-                ..PngParams::default()
-            },
-        },
-        ..EmbedOptions::default()
-    };
+    let hamming_opts = EmbedOptions::default().with_tuning(StegoTuning::Png {
+        model: SpatialAlgorithm::default(),
+        params: PngParams::default().with_codec(strhide::stego::StegoCodec::Hamming),
+    });
     let hamming_stego =
         embed_carrier(&png_bytes, &Payload::bytes(&payload), &hamming_opts).unwrap();
     let hamming_hdr = read_header(&hamming_stego, &slots_a);
@@ -876,10 +851,7 @@ fn test_stego_private_default_secret_isolation() {
     );
 
     // 5. An explicit password outranks the private default secret.
-    let with_password = EmbedOptions {
-        password: Some("UserChosenPassword1"),
-        ..Default::default()
-    };
+    let with_password = EmbedOptions::default().with_password("UserChosenPassword1");
     let pw_stego = embed_carrier_with_dialect(
         &png_bytes,
         &Payload::bytes(secret),
@@ -937,10 +909,7 @@ fn test_jpeg_private_default_secret_isolation() {
     let jpeg_bytes = fs::read(&candidate).expect("read carrier jpeg");
     let secret = b"Private JPEG dialect payload";
 
-    let opts = EmbedOptions {
-        tuning: tuning_for("uerd"),
-        ..Default::default()
-    };
+    let opts = EmbedOptions::default().with_tuning(tuning_for("uerd"));
     let official = StegoProfile::default();
     let private = stego_profile("acme-jpeg-dialect-2026");
 
@@ -1092,19 +1061,14 @@ fn test_jpeg_v3_slot_budget_controls_the_change_rate() {
     let payload = b"JPEG V3 ternary STC payload 2026!";
     let password = "JpegStcPassword#2026";
 
-    let extract_opts = ExtractOptions {
-        password: Some(password),
-        ..Default::default()
-    };
+    let extract_opts = ExtractOptions::default().with_password(password);
 
     let mut changed_counts = Vec::new();
     let mut group_sizes = Vec::new();
     for budget in [2_000usize, 800_000] {
-        let mut opts = EmbedOptions {
-            tuning: tuning_for("uerd"),
-            password: Some(password),
-            ..Default::default()
-        };
+        let mut opts = EmbedOptions::default()
+            .with_tuning(tuning_for("uerd"))
+            .with_password(password);
         opts.jpeg_params_mut().stc_h = 8;
         opts.jpeg_params_mut().slot_budget = Some(budget);
 
@@ -1220,10 +1184,7 @@ fn stego_domain_isolation_lifecycle() {
     );
 
     // 2. Options stego_domain overrides profile stego_domain
-    let opts_override = EmbedOptions {
-        domain: Some("org.enterprise.vault-a"),
-        ..Default::default()
-    };
+    let opts_override = EmbedOptions::default().with_domain("org.enterprise.vault-a");
     // Even if prof_b is passed, opts_override wins
     let rec_override =
         extract_carrier_with_dialect(&stego_a, &opts_override.extract_options(), &prof_b)
@@ -1231,11 +1192,9 @@ fn stego_domain_isolation_lifecycle() {
     assert_eq!(rec_override, payload);
 
     // 3. Password + domain isolation
-    let opts_pwd_a = EmbedOptions {
-        password: Some("SharedPassword123"),
-        domain: Some("org.enterprise.vault-a"),
-        ..Default::default()
-    };
+    let opts_pwd_a = EmbedOptions::default()
+        .with_password("SharedPassword123")
+        .with_domain("org.enterprise.vault-a");
     let stego_pwd_a = embed_carrier(&png, &Payload::bytes(payload), &opts_pwd_a)
         .expect("embed with password + domain");
 
@@ -1243,11 +1202,9 @@ fn stego_domain_isolation_lifecycle() {
         .expect("extract with same password + domain");
     assert_eq!(rec_pwd_a, payload);
 
-    let opts_pwd_b = EmbedOptions {
-        password: Some("SharedPassword123"),
-        domain: Some("org.enterprise.vault-b"),
-        ..Default::default()
-    };
+    let opts_pwd_b = EmbedOptions::default()
+        .with_password("SharedPassword123")
+        .with_domain("org.enterprise.vault-b");
     let err_pwd_b = extract_carrier(&stego_pwd_a, &opts_pwd_b.extract_options());
     assert!(
         matches!(
@@ -1266,37 +1223,22 @@ fn stego_safety_level_and_enforcement_lifecycle() {
 
     let cap_paranoid = probe_carrier_capacity(
         &png,
-        &ProbeOptions {
-            safety: SafetyPolicy {
-                level: SafetyLevel::Paranoid,
-                ..SafetyPolicy::default()
-            },
-            ..Default::default()
-        },
+        &ProbeOptions::default()
+            .with_safety_policy(SafetyPolicy::default().with_level(SafetyLevel::Paranoid)),
     )
     .expect("probe paranoid");
 
     let cap_high = probe_carrier_capacity(
         &png,
-        &ProbeOptions {
-            safety: SafetyPolicy {
-                level: SafetyLevel::High,
-                ..SafetyPolicy::default()
-            },
-            ..Default::default()
-        },
+        &ProbeOptions::default()
+            .with_safety_policy(SafetyPolicy::default().with_level(SafetyLevel::High)),
     )
     .expect("probe high");
 
     let cap_balanced = probe_carrier_capacity(
         &png,
-        &ProbeOptions {
-            safety: SafetyPolicy {
-                level: SafetyLevel::Balanced,
-                ..SafetyPolicy::default()
-            },
-            ..Default::default()
-        },
+        &ProbeOptions::default()
+            .with_safety_policy(SafetyPolicy::default().with_level(SafetyLevel::Balanced)),
     )
     .expect("probe balanced");
 
@@ -1309,13 +1251,11 @@ fn stego_safety_level_and_enforcement_lifecycle() {
     let payload = vec![0x33; cap_balanced.recommended_max_bytes];
 
     // Enforced mode on Paranoid tier MUST reject
-    let opts_enforced = EmbedOptions {
-        safety: SafetyPolicy {
-            level: SafetyLevel::Paranoid,
-            enforcement: SafetyEnforcement::Enforced,
-        },
-        ..Default::default()
-    };
+    let opts_enforced = EmbedOptions::default().with_safety_policy(
+        SafetyPolicy::default()
+            .with_level(SafetyLevel::Paranoid)
+            .with_enforcement(SafetyEnforcement::Enforced),
+    );
     let res_enforced = embed_carrier(&png, &Payload::bytes(&payload), &opts_enforced);
     assert!(
         res_enforced.is_err(),
@@ -1323,13 +1263,11 @@ fn stego_safety_level_and_enforcement_lifecycle() {
     );
 
     // Advisory mode on Paranoid tier MUST succeed
-    let opts_advisory = EmbedOptions {
-        safety: SafetyPolicy {
-            level: SafetyLevel::Paranoid,
-            enforcement: SafetyEnforcement::Advisory,
-        },
-        ..Default::default()
-    };
+    let opts_advisory = EmbedOptions::default().with_safety_policy(
+        SafetyPolicy::default()
+            .with_level(SafetyLevel::Paranoid)
+            .with_enforcement(SafetyEnforcement::Advisory),
+    );
     let res_advisory = embed_carrier(&png, &Payload::bytes(&payload), &opts_advisory);
     assert!(
         res_advisory.is_ok(),

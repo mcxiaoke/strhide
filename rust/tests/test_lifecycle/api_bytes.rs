@@ -69,10 +69,7 @@ fn byte_api_and_file_api_are_cross_readable() {
     let (stego_bytes, _) = write_carrier_bytes(
         PNG,
         payload(b"cross-readable"),
-        &WriteOptions {
-            password: Some(PASSWORD),
-            ..WriteOptions::default()
-        },
+        &WriteOptions::default().with_password(PASSWORD),
         &LocalParams::default(),
         &StructureProfile::default(),
     )
@@ -81,12 +78,10 @@ fn byte_api_and_file_api_are_cross_readable() {
     std::fs::write(&stego_path, &stego_bytes).expect("write stego");
     let from_disk = read_carrier_with_dialect(
         &stego_path,
-        &ReadOptions {
-            output_path: None,
-            password: Some(PASSWORD),
-            overwrite: false,
-            ..Default::default()
-        },
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password(PASSWORD)
+            .with_overwrite(false),
         &StructureProfile::default(),
     )
     .expect("file read of memory-written carrier");
@@ -97,11 +92,9 @@ fn byte_api_and_file_api_are_cross_readable() {
     write_carrier_with(
         &carrier_path,
         payload(b"other-way-around"),
-        &WriteOptions {
-            output_path: Some(&file_stego),
-            password: Some(PASSWORD),
-            ..WriteOptions::default()
-        },
+        &WriteOptions::default()
+            .with_output(&file_stego)
+            .with_password(PASSWORD),
         &LocalParams::default(),
         &StructureProfile::default(),
     )
@@ -149,11 +142,9 @@ fn file_restore_refuses_to_overwrite_an_existing_output() {
     write_carrier_with(
         &carrier,
         PayloadSource::Bytes(b"keep me"),
-        &WriteOptions {
-            output_path: Some(&carrier),
-            backup: false,
-            ..Default::default()
-        },
+        &WriteOptions::default()
+            .with_output(&carrier)
+            .with_backup(false),
         &LocalParams::default(),
         &StructureProfile::default(),
     )
@@ -164,13 +155,11 @@ fn file_restore_refuses_to_overwrite_an_existing_output() {
 
     let err = remove_carrier_with_dialect(
         &carrier,
-        &RestoreOptions {
-            output_path: Some(&out),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&out)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
         &StructureProfile::default(),
     )
     .expect_err("restore must refuse an occupied output path");
@@ -194,10 +183,7 @@ fn wrong_password_is_rejected() {
     let (stego, _) = write_carrier_bytes(
         PNG,
         payload(b"secret"),
-        &WriteOptions {
-            password: Some(PASSWORD),
-            ..WriteOptions::default()
-        },
+        &WriteOptions::default().with_password(PASSWORD),
         &LocalParams::default(),
         &StructureProfile::default(),
     )
@@ -243,10 +229,7 @@ fn output_path_is_rejected_in_the_bytes_api() {
     let err = write_carrier_bytes(
         PNG,
         payload(b"x"),
-        &WriteOptions {
-            output_path: Some(&out),
-            ..WriteOptions::default()
-        },
+        &WriteOptions::default().with_output(&out),
         &LocalParams::default(),
         &StructureProfile::default(),
     )
@@ -293,10 +276,7 @@ fn stealth_works_in_memory_and_requires_a_password() {
     let err = write_carrier_bytes(
         PNG,
         payload(b"x"),
-        &WriteOptions {
-            stealth: true,
-            ..WriteOptions::default()
-        },
+        &WriteOptions::default().with_stealth(true),
         &LocalParams::default(),
         &StructureProfile::default(),
     )
@@ -306,11 +286,9 @@ fn stealth_works_in_memory_and_requires_a_password() {
     let (stego, result) = write_carrier_bytes(
         PNG,
         payload(b"stealth payload"),
-        &WriteOptions {
-            stealth: true,
-            password: Some(PASSWORD),
-            ..WriteOptions::default()
-        },
+        &WriteOptions::default()
+            .with_stealth(true)
+            .with_password(PASSWORD),
         &LocalParams::default(),
         &StructureProfile::default(),
     )
@@ -340,10 +318,7 @@ fn byte_and_file_remove_agree() {
     write_carrier_with(
         &carrier_path,
         payload(b"agree"),
-        &WriteOptions {
-            output_path: Some(&stego_path),
-            ..WriteOptions::default()
-        },
+        &WriteOptions::default().with_output(&stego_path),
         &LocalParams::default(),
         &StructureProfile::default(),
     )
@@ -352,13 +327,11 @@ fn byte_and_file_remove_agree() {
     let file_restored = dir.join("restored.png");
     remove_carrier_with_dialect(
         &stego_path,
-        &RestoreOptions {
-            output_path: Some(&file_restored),
-            password: None,
-            backup: false,
-            overwrite: false,
-            ..Default::default()
-        },
+        &RestoreOptions::default()
+            .with_output(&file_restored)
+            .with_password_option(None)
+            .with_backup(false)
+            .with_overwrite(false),
         &StructureProfile::default(),
     )
     .expect("file remove");
