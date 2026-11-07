@@ -3168,12 +3168,15 @@ fn verify_core(
     })
 }
 
-/// Did a [`VerifyResult` pass every level it was able to check?
+/// Did a [`VerifyResult`] pass every level it was able to check?
 ///
-/// Levels 1 and 2 must pass outright. Level 3 must either pass or have been
-/// skipped for want of a password: a level that *ran* and failed (wrong
-/// password, corrupted payload, SHA-256 mismatch) is a failure, which is what
-/// makes `verify` usable as a gate.
+/// Levels 1-3 cover container structure, the envelope header and the
+/// authenticated payload. Host *restorability* is deliberately not part of this
+/// gate: only `remove` reproduces the host and compares its SHA-256 with the
+/// authenticated `orig_host_sha256` (see `verify_restored`), so `verify` can
+/// pass while `remove` still refuses a carrier whose host bytes were altered.
+/// If you need that check before touching the carrier, run `read`/`restore`
+/// into a throwaway destination.
 pub fn verify_passed(res: &VerifyResult) -> bool {
     res.level1_host.ok
         && res.level2_envelope.ok
