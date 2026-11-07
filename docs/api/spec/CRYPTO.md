@@ -1,5 +1,5 @@
 # CRYPTO：密钥派生与 AEAD（内容域 V4 / 结构域 UBE v2.2）
-适用 `strhide` 0.9.1（`rust/src`）。范围：两套信封的凭据、域分离、L1/L2/L3、nonce、AEAD 的 AAD 与字段掩码；不讲字节布局。导航：[WIRE_SPEC.md](../WIRE_SPEC.md) · [WIRE_SPEC_CONTENT.md](../WIRE_SPEC_CONTENT.md) · [WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md) · [ARCHITECTURE.md](../ARCHITECTURE.md)。本文按代码编写，引用均写作 `文件:行`（相对仓库根）。
+适用 `strhide` 0.9.3（`rust/src`）。范围：两套信封的凭据、域分离、L1/L2/L3、nonce、AEAD 的 AAD 与字段掩码；不讲字节布局。导航：[规范总览](./README.md) · [内容域信封](./CONTENT-ENVELOPE.md) · [结构域信封](./STRUCTURE-ENVELOPE.md) · [架构与公开 API](../ARCHITECTURE.md)。本文按代码编写，引用均写作 `文件:行`（相对仓库根）。
 
 ## 0. 约定与稳定性
 "实现必须"= 互通必需。哈希全为 SHA-256；HKDF 为 RFC 5869 的 HKDF-SHA256（`L`=目标字节数，`salt=None` 按 §2.2 视为 32 字节全 0）；PBKDF2 为 PBKDF2-HMAC-SHA256，输出 32B。**字节序按域相反**：内容域多字节字段大端，结构域小端。

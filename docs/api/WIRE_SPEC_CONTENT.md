@@ -6,7 +6,7 @@
 > [CONTENT-HEVC.md](./spec/CONTENT-HEVC.md) / [CONTENT-AUDIO.md](./spec/CONTENT-AUDIO.md)。
 > 本文与实现冲突时**以新规范为准**；旧文勘误清单见 [CORRECTIONS.md](./spec/CORRECTIONS.md)。
 
-> 适用版本：crate `strhide` 0.9.1（Rust 实现，`rust/Cargo.toml`）。
+> 适用版本：crate `strhide` 0.9.3（Rust 实现，`rust/Cargo.toml`）。
 > **范围**：仅内容域——`embed` / `extract` 在 PNG、JPEG、WAV、FLAC、HEVC/HEIF 载体内部写出的
 > V4 微信封。结构域（UBE 信封，`write` / `restore` 使用）见
 > [WIRE_SPEC_STRUCTURE.md](./WIRE_SPEC_STRUCTURE.md)。

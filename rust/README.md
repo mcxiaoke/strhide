@@ -63,19 +63,19 @@ See the [root README](../README.md) for project-wide architecture, and [README.z
 
 ```toml
 # 1. Full library (default: structure + content + analysis; zero CLI dependencies)
-strhide = "0.9.1"
+strhide = "0.9.3"
 
 # 2. Container/structural hiding only (lightweight, zero disassembly dependency)
-strhide = { version = "0.9.1", default-features = false, features = ["structure-base"] }
+strhide = { version = "0.9.3", default-features = false, features = ["structure-base"] }
 
 # 3. Image steganography only (PNG + JPEG)
-strhide = { version = "0.9.1", default-features = false, features = ["content-png", "content-jpeg"] }
+strhide = { version = "0.9.3", default-features = false, features = ["content-png", "content-jpeg"] }
 
 # 4. Audio steganography only (WAV + FLAC)
-strhide = { version = "0.9.1", default-features = false, features = ["content-audio"] }
+strhide = { version = "0.9.3", default-features = false, features = ["content-audio"] }
 
 # 5. Steganalysis & carrier forensics only
-strhide = { version = "0.9.1", default-features = false, features = ["analysis"] }
+strhide = { version = "0.9.3", default-features = false, features = ["analysis"] }
 ```
 
 ---

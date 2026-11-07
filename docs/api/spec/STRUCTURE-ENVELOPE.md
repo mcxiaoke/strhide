@@ -1,6 +1,6 @@
 # STRUCTURE-ENVELOPE：结构域公共信封 UBE v2.2
 
-适用 `strhide` 0.9.1，以 `rust/src/structure` 的可执行代码为准。本文定义结构域所有载体共用的 **UBE**（Universal Byte Envelope）字节流；适配器如何把该字节流放进宿主容器，见 [STRUCTURE-PNG](./STRUCTURE-PNG.md)、[STRUCTURE-JPEG](./STRUCTURE-JPEG.md)、[STRUCTURE-RIFF](./STRUCTURE-RIFF.md)、[STRUCTURE-ISOBMFF](./STRUCTURE-ISOBMFF.md)、[STRUCTURE-ZIP](./STRUCTURE-ZIP.md)、[STRUCTURE-PDF](./STRUCTURE-PDF.md)、[STRUCTURE-PE](./STRUCTURE-PE.md)、[STRUCTURE-MKV](./STRUCTURE-MKV.md)。密钥派生细节见 [CRYPTO](./CRYPTO.md)。所有引用写作 `文件:行`（相对仓库根）。
+适用 `strhide` 0.9.3，以 `rust/src/structure` 的可执行代码为准。本文定义结构域所有载体共用的 **UBE**（Universal Byte Envelope）字节流；适配器如何把该字节流放进宿主容器，见 [STRUCTURE-PNG](./STRUCTURE-PNG.md)、[STRUCTURE-JPEG](./STRUCTURE-JPEG.md)、[STRUCTURE-RIFF](./STRUCTURE-RIFF.md)、[STRUCTURE-ISOBMFF](./STRUCTURE-ISOBMFF.md)、[STRUCTURE-ZIP](./STRUCTURE-ZIP.md)、[STRUCTURE-PDF](./STRUCTURE-PDF.md)、[STRUCTURE-PE](./STRUCTURE-PE.md)、[STRUCTURE-MKV](./STRUCTURE-MKV.md)。密钥派生细节见 [CRYPTO](./CRYPTO.md)。所有引用写作 `文件:行`（相对仓库根）。
 
 ## 1. 范围与稳定性
 

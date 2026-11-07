@@ -8,7 +8,7 @@
 > [STRUCTURE-PE.md](./spec/STRUCTURE-PE.md) / [STRUCTURE-MKV.md](./spec/STRUCTURE-MKV.md)。
 > 本文与实现冲突时**以新规范为准**；旧文勘误清单见 [CORRECTIONS.md](./spec/CORRECTIONS.md)。
 
-> 适用版本：crate `strhide` 0.9.1（Rust 实现，`rust/Cargo.toml`）。
+> 适用版本：crate `strhide` 0.9.3（Rust 实现，`rust/Cargo.toml`）。
 > **范围**：仅结构域（`engine` / `envelope` / `pe_codebits` 产出的 UBE 信封）。
 > 内容域（`embed` 产出的图像/音频/视频微信封）见 [WIRE_SPEC_CONTENT.md](./WIRE_SPEC_CONTENT.md)。
 > 两域共用 `crypto`、`errors`、`params`，但**信封格式与派生域完全独立，互不可读**，差异清单见
