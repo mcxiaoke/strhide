@@ -3,9 +3,9 @@
 > 适用版本：crate `strhide` 0.9.1（Rust 实现，`rust/`）。
 > 本文描述模块职责、分层关系、公开 API 与内部数据流转，所有结论均按当前源码核对。
 > 配套文档：
-> - [WIRE_SPEC.md](./WIRE_SPEC.md) — 线格式规范索引与两域对比；
-> - [WIRE_SPEC_STRUCTURE.md](./WIRE_SPEC_STRUCTURE.md) — 结构域 UBE v2.2 线格式规范；
-> - [WIRE_SPEC_CONTENT.md](./WIRE_SPEC_CONTENT.md) — 内容域 V4 信封线格式参考（稳定性分级、派生、槽位、STC）；
+> - [spec/README.md](./spec/README.md) — 线格式规范总览、术语与两域对比；
+> - [spec/STRUCTURE-ENVELOPE.md](./spec/STRUCTURE-ENVELOPE.md) — 结构域 UBE v2.2 线格式规范；
+> - [spec/CONTENT-ENVELOPE.md](./spec/CONTENT-ENVELOPE.md) — 内容域 V4 信封公共层（稳定性分级、槽位、STC）；
 > - 上层背景：`docs/strhide_facade_api_evaluation_and_industry_standards_20261022.md`（Facade 方案评估与业界标准）、`docs/library_extensibility_and_public_api_audit_20261020.md`、`docs/library_api_practical_plan_20261020.md`。
 
 ---
@@ -88,7 +88,7 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
 - **结构域**把一个完整的 UBE 信封（有头、有尾、有魔数）放进容器的结构性空隙（私有 chunk、段、盒子、目录前间隙等），入口在 [`structure`]。
 - **内容域**把数据嵌入图像像素（PNG）、DCT 系数（JPEG）或 H.265/HEVC 变换系数旁路符号位（HEIF/HEIC 与 HEVC Annex-B），没有结构化信封，入口在 [`stego`]。
 
-两域共用 [`crypto`]、[`errors`]、[`params`] 与 `core`，但**密钥派生域相互隔离，信封格式本身就是两套不同结构**（结构域 UBE 有头/尾/元数据，内容域是极简伪随机微信封），互不可读。差异清单见 [WIRE_SPEC §1.1](./WIRE_SPEC.md#11-两种信封格式对比重要)，内容域机制见 [§7.3](#73-内容域隐写)。
+两域共用 [`crypto`]、[`errors`]、[`params`] 与 `core`，但**密钥派生域相互隔离，信封格式本身就是两套不同结构**（结构域 UBE 有头/尾/元数据，内容域是极简伪随机微信封），互不可读。差异清单见 [spec/README.md §1](./spec/README.md)，内容域机制见 [§7.3](#73-内容域隐写)。
 
 ### 2.1 门面：一个 Dialect，两个子门面
 
@@ -604,8 +604,8 @@ const MY_DIALECT: Dialect = Dialect::new()
 - 所有 fallible 入口统一返回 `StrHideError`，变体按失败类别粗粒度划分，便于按判别式分支而非字符串匹配。
 - 错误信息与国际化：`StrHideError::detail()` 与 `Display` 始终提供稳定的英文底层诊断；`detail_i18n()` 返回结构化的 `ErrorDetail { category: Option<Msg>, detail, hint }`，`ErrorDetail::render(lang)` 渲染成一行，GUI/服务端无需解析文本。库调用者无需关心 i18n 内部机制。
 - 多个公开枚举/结构体（`LocalParams`、`StructureProfile`、`StegoProfile`、`Warning`、`CompressionStrategy`、`RejectionPolicy`、`HevcParams`，入参 `EmbedOptions`/`ProbeOptions`/`ExtractOptions`/`InspectOptions`/`VerifyOptions`/`PngParams`/`JpegParams`/`ExtractParams`/`SafetyPolicy`/`ReadOptions`/`WriteOptions`/`RestoreOptions`，以及结构/内容域只读结果 `WriteResult`/`ReadResult`/`InspectResult`/`VerifyResult`/`RemoveResult`/`ReadSummary`/`LevelStatus`/`MetadataInspection`/`StrategyCapacity`/`EmbedStats`/`EmbedOutput`/`StegoEmbedResult`/`StegoHeaderInfo`/`StegoVerifyResult`/`DualInspect`/`DualVerify`/`ExtractOutcome`/`ScanReport`/`Finding`）标注 `#[non_exhaustive]`：下游应使用 `default()` + `with_*`/`with_*_option` 构建入参，结果类型只读字段；未来新增字段/变体不构成破坏性变更。例外：`Dialect` 仍是公开字段 + `const fn` builder 的普通结构体；`StegoTuning` 是保留全部变体可构造的普通枚举，均未标注 `#[non_exhaustive]`。
-- 线格式（UBE v2.2）的稳定性与读写兼容关系见 [WIRE_SPEC_STRUCTURE.md](./WIRE_SPEC_STRUCTURE.md) 的兼容矩阵；
-  内容域（V4 信封）的稳定性分级与兼容矩阵见 [WIRE_SPEC_CONTENT.md](./WIRE_SPEC_CONTENT.md)。
+- 线格式（UBE v2.2）的稳定性与读写兼容关系见 [spec/STRUCTURE-ENVELOPE.md](./spec/STRUCTURE-ENVELOPE.md)；
+  内容域（V4 信封）的稳定性分级与兼容矩阵见 [spec/CONTENT-ENVELOPE.md](./spec/CONTENT-ENVELOPE.md)。
 - 可运行示例：`rust/examples/`（`in_memory`、`private_profile`、`codec_bench`）；公共 API 文档中的代码块由 `cargo test --doc` 守护，示例由 `cargo build --examples` 守护。
 - **推荐入口是 `StrHide`（facade）**：新接入的库使用者应构造 `StrHide` 并调用其方法，而非直接调用多个自由函数；facade 是薄转发层，底层自由函数仍公开并长期维护，二者不构成两套互斥的 API。
 - 方言字段使用 `'static` 借用以支持 `const fn` 编译期构造；不提供运行时 `String`/`Vec` 构造方言的能力，运行时凭据走 `WriteOptions`/`ReadOptions`/`RestoreOptions`/`EmbedOptions`/`ExtractOptions`。

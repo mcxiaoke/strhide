@@ -1,10 +1,16 @@
 # strhide 内容域线格式参考（V4 内容信封）
 
+> **本文已拆分（2026-11-07），保留为历史参考，非规范。**
+> 新规范见 [`docs/api/spec/`](./spec/README.md)：公共层 [CONTENT-ENVELOPE.md](./spec/CONTENT-ENVELOPE.md)、
+> 载体文档 [CONTENT-PNG.md](./spec/CONTENT-PNG.md) / [CONTENT-JPEG.md](./spec/CONTENT-JPEG.md) /
+> [CONTENT-HEVC.md](./spec/CONTENT-HEVC.md) / [CONTENT-AUDIO.md](./spec/CONTENT-AUDIO.md)。
+> 本文与实现冲突时**以新规范为准**；旧文勘误清单见 [CORRECTIONS.md](./spec/CORRECTIONS.md)。
+
 > 适用版本：crate `strhide` 0.9.1（Rust 实现，`rust/Cargo.toml`）。
 > **范围**：仅内容域——`embed` / `extract` 在 PNG、JPEG、WAV、FLAC、HEVC/HEIF 载体内部写出的
 > V4 微信封。结构域（UBE 信封，`write` / `restore` 使用）见
 > [WIRE_SPEC_STRUCTURE.md](./WIRE_SPEC_STRUCTURE.md)。
-> 两域的信封格式与派生域相互独立、互不可读，差异清单见 [WIRE_SPEC.md](./WIRE_SPEC.md#11-两种信封格式对比重要)。
+> 两域的信封格式与派生域相互独立、互不可读，差异清单见 [spec/README.md §1](./spec/README.md)。
 
 > **本文的定位（请先读这一段）**
 >

@@ -1,10 +1,18 @@
 # strhide 结构域线格式参考（UBE v2.2）
 
+> **本文已拆分（2026-11-07），保留为历史参考，非规范。**
+> 新规范见 [`docs/api/spec/`](./spec/README.md)：信封 [STRUCTURE-ENVELOPE.md](./spec/STRUCTURE-ENVELOPE.md)，
+> 适配器 [STRUCTURE-PNG.md](./spec/STRUCTURE-PNG.md) / [STRUCTURE-JPEG.md](./spec/STRUCTURE-JPEG.md) /
+> [STRUCTURE-RIFF.md](./spec/STRUCTURE-RIFF.md) / [STRUCTURE-ISOBMFF.md](./spec/STRUCTURE-ISOBMFF.md) /
+> [STRUCTURE-ZIP.md](./spec/STRUCTURE-ZIP.md) / [STRUCTURE-PDF.md](./spec/STRUCTURE-PDF.md) /
+> [STRUCTURE-PE.md](./spec/STRUCTURE-PE.md) / [STRUCTURE-MKV.md](./spec/STRUCTURE-MKV.md)。
+> 本文与实现冲突时**以新规范为准**；旧文勘误清单见 [CORRECTIONS.md](./spec/CORRECTIONS.md)。
+
 > 适用版本：crate `strhide` 0.9.1（Rust 实现，`rust/Cargo.toml`）。
 > **范围**：仅结构域（`engine` / `envelope` / `pe_codebits` 产出的 UBE 信封）。
 > 内容域（`embed` 产出的图像/音频/视频微信封）见 [WIRE_SPEC_CONTENT.md](./WIRE_SPEC_CONTENT.md)。
 > 两域共用 `crypto`、`errors`、`params`，但**信封格式与派生域完全独立，互不可读**，差异清单见
-> [WIRE_SPEC.md](./WIRE_SPEC.md#11-两种信封格式对比重要)。
+> [spec/README.md §1](./spec/README.md)。
 
 > **本文的定位**：给**本项目的开发**用，不是对外标准。它要留住三样东西：每个字段由谁派生
 > （避免"改了一处、旧载体读不回"）、每条不显然写法的**理由**、以及哪些旋钮可换、换了会怎样

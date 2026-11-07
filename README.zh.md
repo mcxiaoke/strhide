@@ -15,9 +15,17 @@ strhide/
 │   ├── api/
 │   │   ├── ARCHITECTURE.md                # 系统分层架构、门面与模块拓扑
 │   │   ├── STEGO-API.md                   # 内容域隐写对外 API 规范
-│   │   ├── WIRE_SPEC.md                   # 线格式规范索引（两域对比）
-│   │   ├── WIRE_SPEC_STRUCTURE.md         # 结构域 UBE v2.2 线格式规范
-│   │   └── WIRE_SPEC_CONTENT.md           # 内容域 V4 信封线格式规范
+│   │   ├── WIRE_SPEC.md                   # 线格式索引（重定向到 spec/）
+│   │   ├── spec/                          # 按主题拆分的规范性线格式文档
+│   │   │   ├── README.md                  # 总览、术语、文档地图
+│   │   │   ├── CRYPTO.md                  # 两域密钥派生与 AEAD
+│   │   │   ├── DETMATH.md                 # 确定性数学语义
+│   │   │   ├── CAPACITY.md                # 容量公式与限额
+│   │   │   ├── CONTENT-*.md               # 内容域（信封 + 各载体）
+│   │   │   ├── STRUCTURE-*.md             # 结构域（UBE + 各适配器）
+│   │   │   └── CORRECTIONS.md             # 旧 WIRE_SPEC 勘误
+│   │   ├── WIRE_SPEC_STRUCTURE.md         # 旧结构域文档（非规范）
+│   │   └── WIRE_SPEC_CONTENT.md           # 旧内容域文档（非规范）
 │   └── CHANGES-*.md                       # 按日期记录的工程变更日志
 ├── scripts/     # 基线哈希校验、CI 检查与打包发布脚本
 └── testdata/    # 测试样本集与全格式基线语料库
@@ -101,7 +109,7 @@ sth list                                                            # 列出受�
 * [技术实现综合规范](docs/smart_file_data_hiding_design.md)：协议细节、适配器算法、预检拦截矩阵与还原流水线。
 * [系统架构与公开 API 说明](docs/api/ARCHITECTURE.md)：分层拓扑、统一门面、方言机制与管线设计。
 * [内容域隐写 API 规范](docs/api/STEGO-API.md)：媒体自适应隐写对外接口与算法自省指南。
-* [二进制线格式规范（索引）](docs/api/WIRE_SPEC.md)：两域划分与格式对比。
-* [结构域线格式规范](docs/api/WIRE_SPEC_STRUCTURE.md)：UBE v2.2 字节布局、AAD、stealth 掩码与兼容矩阵。
-* [内容域线格式参考](docs/api/WIRE_SPEC_CONTENT.md)：V4 信封、稳定性分级（冻结/方言/自由）、密钥派生、槽位选择、STC syndrome 与 HILL 代价排序。
+* [二进制线格式规范（索引）](docs/api/spec/README.md)：文档地图、术语、字节序、版本策略与各主题规范。
+* [结构域线格式规范](docs/api/spec/STRUCTURE-ENVELOPE.md)：UBE v2.2 信封，以及 `docs/api/spec/STRUCTURE-*.md` 下的各格式适配器。
+* [内容域线格式规范](docs/api/spec/CONTENT-ENVELOPE.md)：V4 信封、稳定性分级（冻结/方言/自由）、密钥派生、槽位选择、STC syndrome，以及 `docs/api/spec/CONTENT-*.md` 下各载体的代价模型。
 * [Rust 库使用指南](rust/README.md)：作为 Rust crate 引入项目的依赖配置与核心 API 示例。

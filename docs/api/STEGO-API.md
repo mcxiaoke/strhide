@@ -2,8 +2,10 @@
 
 > 本文档是 `strhide::stego` 对外接口的权威说明：公开面分层、命名规范、
 > 凭据优先级、第三方编译期定制配方（以 CarrotHash 为范本）与 CLI 映射。
-> 线格式细节见 [WIRE_SPEC_CONTENT.md](./WIRE_SPEC_CONTENT.md)（稳定性分级见其 §13.0），架构总览见
-> [ARCHITECTURE.md](./ARCHITECTURE.md)。随接口变更同步更新。
+> 线格式细节见 [spec/CONTENT-ENVELOPE.md](./spec/CONTENT-ENVELOPE.md) 及其载体文档
+> [CONTENT-PNG](./spec/CONTENT-PNG.md) / [CONTENT-JPEG](./spec/CONTENT-JPEG.md) /
+> [CONTENT-HEVC](./spec/CONTENT-HEVC.md) / [CONTENT-AUDIO](./spec/CONTENT-AUDIO.md)，
+> 密钥派生见 [spec/CRYPTO.md](./spec/CRYPTO.md)，架构总览见 [ARCHITECTURE.md](./ARCHITECTURE.md)。随接口变更同步更新。
 >
 > **阶段 4 变更**：`StegoOptions` 已删除并拆成强类型选项
 > （`EmbedOptions` / `ProbeOptions` / `ExtractOptions` / `InspectOptions` /
@@ -156,7 +158,7 @@ pub const DIALECT: Dialect = Dialect::new()
 - **HEVC 的 `magic_label`**：官方格式的魔数按
   `SHA-256(magic_label ‖ effective_secret)[..4]` 派生——私有构建改标签即可
   消除开源指纹，且无凭据者无法用固定魔数判定载体存在性（头部槽位仅由
-  参数集决定，与密码无关，这是设计要求；威胁模型见 WIRE_SPEC_CONTENT §13.4）。
+  参数集决定，与密码无关，这是设计要求；威胁模型见 [spec/CONTENT-HEVC.md](./spec/CONTENT-HEVC.md)）。
 - 套件默认值在 `WireCipherProfile.default_suite` 中；私有构建可改默认套件，
   但读写仍以头部 `suite_id` 为准（1=AES-256-GCM，2=ChaCha20-Poly1305）。
 - 只想私有化图像域时用 `StegoProfile`；`Dialect::with_default_secret` 会同时
@@ -258,6 +260,6 @@ algorithm      = "auto"
 - `tests/cli_help_guard.rs`：localize（en/zh）后全命令树每个可见参数 help
   非空——stego 参数 help 的事实源在 i18n 消息表，条目缺失即测试失败。
 - `hevc::engine::dialect_tests`：`DEFAULT_HEVC_FORMAT` 字面量与
-  WIRE_SPEC_CONTENT §13.14 钉死；魔数随凭据变化；公开默认密钥唯一。
+  [spec/CONTENT-HEVC.md](./spec/CONTENT-HEVC.md) 钉死；魔数随凭据变化；公开默认密钥唯一。
 - `tests/test_lifecycle/facade.rs`：一个 `Dialect::with_default_secret`
   必须同时隔离两域；只私有化图像域时结构域仍保持官方行为。

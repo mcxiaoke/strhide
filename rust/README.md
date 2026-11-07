@@ -445,7 +445,8 @@ sth scan suspicious.jpg
 
 ## Compatibility & License
 
-- **Wire Specification**: Detailed packet headers, crypto primitives, and wire specs are documented in [`docs/api/WIRE_SPEC_STRUCTURE.md`](../docs/api/WIRE_SPEC_STRUCTURE.md) (UBE v2.2) and
-  [`docs/api/WIRE_SPEC_CONTENT.md`](../docs/api/WIRE_SPEC_CONTENT.md) (V4 content envelope, incl. which
-  parts are frozen wire format and which are free to change).
+- **Wire Specification**: Detailed packet headers, crypto primitives, and wire specs are documented in [`docs/api/spec/STRUCTURE-ENVELOPE.md`](../docs/api/spec/STRUCTURE-ENVELOPE.md) (UBE v2.2) and
+  [`docs/api/spec/CONTENT-ENVELOPE.md`](../docs/api/spec/CONTENT-ENVELOPE.md) (V4 content envelope, incl. which
+  parts are frozen wire format and which are free to change). The full document map is in
+  [`docs/api/spec/README.md`](../docs/api/spec/README.md).
 - **License**: Apache-2.0. See [LICENSE](../LICENSE).
