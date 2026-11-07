@@ -450,6 +450,7 @@ pub(crate) fn resolve_credential<'a>(
 /// is dialect state ([`StegoProfile`]) and travels as its own argument, so there
 /// is exactly one object to store and pass around.
 #[derive(Clone, Default)]
+#[non_exhaustive]
 pub struct EmbedOptions<'a> {
     /// User password. Winning over the dialect's private secret when non-empty;
     /// an empty string counts as "not supplied".
@@ -756,6 +757,7 @@ impl<'a> EmbedOptions<'a> {
 /// the capacity of a different configuration than the writer is worse than
 /// useless).
 #[derive(Clone, Default)]
+#[non_exhaustive]
 pub struct ProbeOptions<'a> {
     /// User password; keys the spatial header permutation.
     pub password: Option<&'a str>,
@@ -946,6 +948,7 @@ impl<'a> ProbeOptions<'a> {
 /// source, no safety policy -- a reader that refuses a carrier because it
 /// exceeds a write-side tier would be inventing a failure.
 #[derive(Clone, Default)]
+#[non_exhaustive]
 pub struct ExtractOptions<'a> {
     /// User password.
     pub password: Option<&'a str>,
@@ -1390,6 +1393,7 @@ impl StegoHeaderInfo {
 
 /// Options for inspecting a content carrier for steganographic headers.
 #[derive(Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct InspectOptions<'a> {
     pub password: Option<&'a str>,
     pub key: Option<&'a [u8; 32]>,
@@ -1534,6 +1538,7 @@ impl StegoVerifyResult {
 
 /// Options for verifying a content carrier through diagnostic levels.
 #[derive(Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VerifyOptions<'a> {
     pub password: Option<&'a str>,
     pub key: Option<&'a [u8; 32]>,

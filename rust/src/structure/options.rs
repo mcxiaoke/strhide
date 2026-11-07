@@ -58,6 +58,7 @@ impl TryFrom<&str> for StrategyChoice {
 /// The `Default` values match the CLI defaults: `auto` strategy, timestamps and
 /// in-place backup preserved, no encryption, no stealth.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WriteOptions<'a> {
     /// Write the stego carrier here instead of overwriting the carrier.
     pub output_path: Option<&'a Path>,
@@ -203,6 +204,7 @@ impl<'a> WriteOptions<'a> {
 /// a file. Without [`overwrite`](Self::overwrite) an existing destination is an
 /// error: silently truncating it would lose a user file.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReadOptions<'a> {
     /// Write the payload here; `None` keeps it in memory.
     pub output_path: Option<&'a Path>,
@@ -279,6 +281,7 @@ impl<'a> ReadOptions<'a> {
 /// path never overwrites an existing file unless
 /// [`overwrite`](Self::overwrite) is set.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RestoreOptions<'a> {
     /// Write the restored carrier here; `None` restores in place.
     pub output_path: Option<&'a Path>,

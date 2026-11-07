@@ -558,6 +558,7 @@ pub struct ReadResult {
 
 /// Lightweight IPC read outcome summary omitting raw payload bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ReadSummary {
     pub carrier: PathBuf,
     pub is_file: bool,

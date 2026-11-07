@@ -234,6 +234,7 @@ impl std::fmt::Debug for SmartExtractOptions<'_> {
 /// Structured outcome of automatic domain selection extraction.
 #[cfg(all(feature = "structure-base", feature = "content-base"))]
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ExtractOutcome {
     pub payload: crate::core::payload::Payload<'static>,
     pub source: Domain,

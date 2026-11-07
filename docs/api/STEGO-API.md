@@ -103,7 +103,8 @@ let probe = ProbeOptions::default()
 `InspectOptions` / `VerifyOptions`、`PngParams` / `JpegParams` /
 `ExtractParams` / `SafetyPolicy`，以及结构域 `ReadOptions` / `WriteOptions` /
 `RestoreOptions`）都以 `Default` 起步、用 `with_*` 逐项设置；字段为 `Option`
-的可选量另有 `with_*_option(Option<T>)` 形式。
+的可选量另有 `with_*_option(Option<T>)` 形式。它们均为 `#[non_exhaustive]`，
+下游不要使用结构体字面量构造或穷尽解构。
 
 `StegoTuning` 是 `Auto` 与三个按格式分臂的联合体：
 

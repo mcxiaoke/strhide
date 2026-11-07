@@ -94,6 +94,7 @@ pub enum SafetyEnforcement {
 /// caller that set `PngParams::safety_enforcement` alone could believe it had
 /// enabled enforcement while the default advisory policy was in force.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct SafetyPolicy {
     /// Target capacity tier (default [`SafetyLevel::High`]).
     pub level: SafetyLevel,
@@ -140,6 +141,7 @@ impl SafetyPolicy {
 /// silently produce carriers the default extractor cannot read.
 #[cfg(feature = "content-png")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PngParams {
     /// First-stage low-pass filter window size (odd, default 3).
     pub p1_window: usize,
@@ -397,6 +399,7 @@ impl PngParams {
 /// superblock carries `h` and `u`, and the slot set is derived from the key.
 #[cfg(feature = "content-jpeg")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct JpegParams {
     /// Weight applied to the 8-neighborhood block energies (default 0.25).
     pub neighbor_weight: f64,
@@ -739,6 +742,7 @@ impl JpegParams {
 /// much work this call is willing to spend and which suites it trusts. Two
 /// extractors with different policies still read the same carrier.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExtractParams {
     /// Suites to try, ascending. `None` means "every known V4 suite".
     ///
