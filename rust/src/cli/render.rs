@@ -106,6 +106,34 @@ pub(crate) fn print_json<T: serde::Serialize>(val: &T) -> Result<(), StrHideErro
     Ok(())
 }
 
+/// What [`write_payload_stdout`] should emit for a payload.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StdoutPlan<'a> {
+    /// Bytes go out verbatim. Only for an explicit `--stdout` on a pipe, where
+    /// `> out.bin` must stay byte-exact.
+    Raw(&'a [u8]),
+    /// Payload is text and the destination is a screen: control characters are
+    /// escaped before they reach the terminal.
+    Escaped(std::borrow::Cow<'a, str>),
+    /// Payload is binary and the destination is a screen. The bytes are *not*
+    /// written: a non-UTF-8 stream would sail straight past the escape above
+    /// (the terminal does not care about UTF-8 when it sees `ESC`), so a
+    /// crafted carrier could still drive `CSI`/`OSC 52` through it.
+    BinaryNotice(usize),
+}
+
+/// Decide what to write for `data`.
+///
+/// Split out from the writer so the decision is testable without capturing a
+/// real terminal.
+pub(crate) fn plan_payload_stdout(data: &[u8], escape: bool) -> StdoutPlan<'_> {
+    match std::str::from_utf8(data) {
+        Ok(text) if escape => StdoutPlan::Escaped(crate::core::fs::escape_terminal_text(text)),
+        Err(_) if escape => StdoutPlan::BinaryNotice(data.len()),
+        _ => StdoutPlan::Raw(data),
+    }
+}
+
 /// Write an extracted payload to stdout.
 ///
 /// The bytes come from whoever built the carrier, so printing them verbatim
@@ -117,19 +145,31 @@ pub(crate) fn print_json<T: serde::Serialize>(val: &T) -> Result<(), StrHideErro
 /// * `escape_on_pipe = false` for an explicit `--stdout`, where piping must stay
 ///   byte-exact (`extract --stdout > out.bin`); only a real terminal gets the
 ///   escaped text.
+///
+/// A binary payload aimed at a screen produces a one-line notice on **stderr**
+/// instead of bytes, so a redirect never receives a partial payload and a
+/// terminal never receives unescaped control sequences.
 pub(crate) fn write_payload_stdout(data: &[u8], escape_on_pipe: bool) -> std::io::Result<()> {
     use std::io::Write as _;
 
     let stdout = std::io::stdout();
     let escape = escape_on_pipe || std::io::IsTerminal::is_terminal(&stdout);
-    let mut out = stdout.lock();
-    match std::str::from_utf8(data) {
-        Ok(text) if escape => {
-            out.write_all(crate::core::fs::escape_terminal_text(text).as_bytes())?;
+    match plan_payload_stdout(data, escape) {
+        StdoutPlan::Raw(bytes) => {
+            let mut out = stdout.lock();
+            out.write_all(bytes)?;
+            out.flush()
         }
-        _ => out.write_all(data)?,
+        StdoutPlan::Escaped(text) => {
+            let mut out = stdout.lock();
+            out.write_all(text.as_bytes())?;
+            out.flush()
+        }
+        StdoutPlan::BinaryNotice(len) => {
+            eprintln!("{}", t!(Msg::PayloadStdoutBinary, bytes = len));
+            Ok(())
+        }
     }
-    out.flush()
 }
 
 pub(crate) fn print_verify_result(res: &crate::structure::VerifyResult) {
@@ -269,4 +309,49 @@ pub(crate) fn print_remove_result(res: &RemoveResult, quiet: bool, elapsed: std:
             backup = backup_str
         )
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StdoutPlan, plan_payload_stdout};
+
+    #[test]
+    fn text_on_a_screen_is_escaped() {
+        let plan = plan_payload_stdout(b"a\x1b[2Jb", true);
+        match plan {
+            StdoutPlan::Escaped(text) => {
+                // The escaper writes a literal `\u{1b}` in place of the byte.
+                assert_eq!(text, r"a\u{1b}[2Jb");
+            }
+            other => panic!("expected escaped text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_on_a_pipe_is_byte_exact() {
+        assert_eq!(
+            plan_payload_stdout(b"plain\n", false),
+            StdoutPlan::Raw(b"plain\n")
+        );
+    }
+
+    #[test]
+    fn binary_on_a_screen_is_never_written_raw() {
+        // `ESC[2J` hides inside a stream that is not valid UTF-8; a terminal
+        // still executes it, so the escaper must not fall through to a raw
+        // write (review 2026-11-07, P1).
+        let mut data = b"\x1b[2J".to_vec();
+        data.push(0xff);
+        match plan_payload_stdout(&data, true) {
+            StdoutPlan::BinaryNotice(len) => assert_eq!(len, data.len()),
+            other => panic!("expected a binary notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn binary_on_an_explicit_stdout_pipe_stays_raw() {
+        // `extract --stdout > out.bin` must keep every byte.
+        let data = [0xff_u8, 0x00, 0x1b];
+        assert_eq!(plan_payload_stdout(&data, false), StdoutPlan::Raw(&data));
+    }
 }

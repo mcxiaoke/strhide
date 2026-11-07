@@ -642,6 +642,9 @@ Run `strhide <COMMAND> --help` for the options of one command.",
     ExtractBinaryDetected:
         en = "[OK] Extracted binary payload {bytes} to 'extracted.bin' (took {elapsed})",
         zh = "[OK] 检测到二进制载荷 {bytes}，已保存至 'extracted.bin' (耗时 {elapsed})";
+    PayloadStdoutBinary:
+        en = "[INFO] Payload is binary ({bytes}) and was not written to the terminal; use -o <path> to save it or --stdout to pipe the exact bytes.",
+        zh = "[INFO] 载荷为二进制（{bytes}），未输出到终端；请用 -o <路径> 保存，或用 --stdout 管道输出原始字节。";
 
     // ---- Inspect report ----
     InspectCarrier:
