@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 420" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="12">
+<rect width="760" height="420" fill="#ffffff"/>
+<text x="78" y="26" font-size="14" font-weight="600" fill="#1a1a1a">结构域：写入耗时中位数 vs 载荷大小</text>
+<line x1="78" y1="364.0" x2="570" y2="364.0" stroke="#e6e6e6"/>
+<text x="70" y="368.0" text-anchor="end" fill="#666">10</text>
+<line x1="78" y1="268.9" x2="570" y2="268.9" stroke="#e6e6e6" stroke-dasharray="2 4"/>
+<line x1="78" y1="143.1" x2="570" y2="143.1" stroke="#e6e6e6" stroke-dasharray="2 4"/>
+<line x1="78" y1="48.0" x2="570" y2="48.0" stroke="#e6e6e6"/>
+<text x="70" y="52.0" text-anchor="end" fill="#666">100</text>
+<line x1="78.0" y1="364" x2="78.0" y2="369" stroke="#999"/>
+<text x="78.0" y="384" text-anchor="middle" fill="#666">4 KiB</text>
+<line x1="274.8" y1="364" x2="274.8" y2="369" stroke="#999"/>
+<text x="274.8" y="384" text-anchor="middle" fill="#666">64 KiB</text>
+<line x1="373.2" y1="364" x2="373.2" y2="369" stroke="#999"/>
+<text x="373.2" y="384" text-anchor="middle" fill="#666">256 KiB</text>
+<line x1="471.6" y1="364" x2="471.6" y2="369" stroke="#999"/>
+<text x="471.6" y="384" text-anchor="middle" fill="#666">1 MiB</text>
+<line x1="570.0" y1="364" x2="570.0" y2="369" stroke="#999"/>
+<text x="570.0" y="384" text-anchor="middle" fill="#666">4 MiB</text>
+<line x1="78" y1="364" x2="570" y2="364" stroke="#999"/>
+<text x="324.0" y="406" text-anchor="middle" fill="#666">payload 大小（对数轴）</text>
+<text x="16" y="206.0" fill="#666" transform="rotate(-90 16 206.0)" text-anchor="middle">毫秒（对数轴）</text>
+<path d="M78.0,267.5 L274.8,260.2 L373.2,236.0 L471.6,166.7 L570.0,196.2" fill="none" stroke="#c0392b" stroke-width="2"/>
+<circle cx="78.0" cy="267.5" r="3" fill="#c0392b"/>
+<circle cx="274.8" cy="260.2" r="3" fill="#c0392b"/>
+<circle cx="373.2" cy="236.0" r="3" fill="#c0392b"/>
+<circle cx="471.6" cy="166.7" r="3" fill="#c0392b"/>
+<circle cx="570.0" cy="196.2" r="3" fill="#c0392b"/>
+<line x1="588" y1="54" x2="608" y2="54" stroke="#c0392b" stroke-width="2"/>
+<text x="614" y="58" fill="#333">PNG</text>
+<path d="M78.0,260.8 L274.8,250.5 L373.2,229.2 L471.6,161.1 L570.0,194.2" fill="none" stroke="#2c7fb8" stroke-width="2"/>
+<circle cx="78.0" cy="260.8" r="3" fill="#2c7fb8"/>
+<circle cx="274.8" cy="250.5" r="3" fill="#2c7fb8"/>
+<circle cx="373.2" cy="229.2" r="3" fill="#2c7fb8"/>
+<circle cx="471.6" cy="161.1" r="3" fill="#2c7fb8"/>
+<circle cx="570.0" cy="194.2" r="3" fill="#2c7fb8"/>
+<line x1="588" y1="72" x2="608" y2="72" stroke="#2c7fb8" stroke-width="2"/>
+<text x="614" y="76" fill="#333">JPEG</text>
+<path d="M78.0,258.9 L274.8,263.3 L373.2,239.6 L471.6,175.9 L570.0,207.8" fill="none" stroke="#27ae60" stroke-width="2"/>
+<circle cx="78.0" cy="258.9" r="3" fill="#27ae60"/>
+<circle cx="274.8" cy="263.3" r="3" fill="#27ae60"/>
+<circle cx="373.2" cy="239.6" r="3" fill="#27ae60"/>
+<circle cx="471.6" cy="175.9" r="3" fill="#27ae60"/>
+<circle cx="570.0" cy="207.8" r="3" fill="#27ae60"/>
+<line x1="588" y1="90" x2="608" y2="90" stroke="#27ae60" stroke-width="2"/>
+<text x="614" y="94" fill="#333">WEBP</text>
+<path d="M78.0,231.9 L274.8,227.2 L373.2,212.9 L471.6,154.2 L570.0,179.0" fill="none" stroke="#8e44ad" stroke-width="2"/>
+<circle cx="78.0" cy="231.9" r="3" fill="#8e44ad"/>
+<circle cx="274.8" cy="227.2" r="3" fill="#8e44ad"/>
+<circle cx="373.2" cy="212.9" r="3" fill="#8e44ad"/>
+<circle cx="471.6" cy="154.2" r="3" fill="#8e44ad"/>
+<circle cx="570.0" cy="179.0" r="3" fill="#8e44ad"/>
+<line x1="588" y1="108" x2="608" y2="108" stroke="#8e44ad" stroke-width="2"/>
+<text x="614" y="112" fill="#333">WAV</text>
+<path d="M78.0,265.2 L274.8,251.7 L373.2,233.7 L471.6,172.8 L570.0,195.5" fill="none" stroke="#d68910" stroke-width="2"/>
+<circle cx="78.0" cy="265.2" r="3" fill="#d68910"/>
+<circle cx="274.8" cy="251.7" r="3" fill="#d68910"/>
+<circle cx="373.2" cy="233.7" r="3" fill="#d68910"/>
+<circle cx="471.6" cy="172.8" r="3" fill="#d68910"/>
+<circle cx="570.0" cy="195.5" r="3" fill="#d68910"/>
+<line x1="588" y1="126" x2="608" y2="126" stroke="#d68910" stroke-width="2"/>
+<text x="614" y="130" fill="#333">MP4</text>
+<path d="M78.0,245.2 L274.8,242.9 L373.2,223.9 L471.6,156.8 L570.0,188.3" fill="none" stroke="#16a085" stroke-width="2"/>
+<circle cx="78.0" cy="245.2" r="3" fill="#16a085"/>
+<circle cx="274.8" cy="242.9" r="3" fill="#16a085"/>
+<circle cx="373.2" cy="223.9" r="3" fill="#16a085"/>
+<circle cx="471.6" cy="156.8" r="3" fill="#16a085"/>
+<circle cx="570.0" cy="188.3" r="3" fill="#16a085"/>
+<line x1="588" y1="144" x2="608" y2="144" stroke="#16a085" stroke-width="2"/>
+<text x="614" y="148" fill="#333">MKV</text>
+<path d="M78.0,264.7 L274.8,258.6 L373.2,234.7 L471.6,173.3 L570.0,199.4" fill="none" stroke="#7f8c8d" stroke-width="2"/>
+<circle cx="78.0" cy="264.7" r="3" fill="#7f8c8d"/>
+<circle cx="274.8" cy="258.6" r="3" fill="#7f8c8d"/>
+<circle cx="373.2" cy="234.7" r="3" fill="#7f8c8d"/>
+<circle cx="471.6" cy="173.3" r="3" fill="#7f8c8d"/>
+<circle cx="570.0" cy="199.4" r="3" fill="#7f8c8d"/>
+<line x1="588" y1="162" x2="608" y2="162" stroke="#7f8c8d" stroke-width="2"/>
+<text x="614" y="166" fill="#333">ZIP</text>
+<path d="M78.0,240.4 L274.8,232.3 L373.2,214.6 L471.6,157.7 L570.0,184.0" fill="none" stroke="#b03a2e" stroke-width="2"/>
+<circle cx="78.0" cy="240.4" r="3" fill="#b03a2e"/>
+<circle cx="274.8" cy="232.3" r="3" fill="#b03a2e"/>
+<circle cx="373.2" cy="214.6" r="3" fill="#b03a2e"/>
+<circle cx="471.6" cy="157.7" r="3" fill="#b03a2e"/>
+<circle cx="570.0" cy="184.0" r="3" fill="#b03a2e"/>
+<line x1="588" y1="180" x2="608" y2="180" stroke="#b03a2e" stroke-width="2"/>
+<text x="614" y="184" fill="#333">PDF</text>
+<path d="M78.0,253.1 L274.8,258.3 L373.2,226.5 L471.6,172.6 L570.0,191.6" fill="none" stroke="#2e86c1" stroke-width="2"/>
+<circle cx="78.0" cy="253.1" r="3" fill="#2e86c1"/>
+<circle cx="274.8" cy="258.3" r="3" fill="#2e86c1"/>
+<circle cx="373.2" cy="226.5" r="3" fill="#2e86c1"/>
+<circle cx="471.6" cy="172.6" r="3" fill="#2e86c1"/>
+<circle cx="570.0" cy="191.6" r="3" fill="#2e86c1"/>
+<line x1="588" y1="198" x2="608" y2="198" stroke="#2e86c1" stroke-width="2"/>
+<text x="614" y="202" fill="#333">PE</text>
+</svg>

@@ -102,7 +102,25 @@ sth list                                                            # List forma
 
 ---
 
-## 4. Desktop Client (`StrHideStudio`)
+## 4. Performance
+
+Measured with in-memory library APIs on an Intel i7-11700 (8C/16T) / Windows 10 / `--release` (LTO) build:
+fixed password, fixed seed, 20 samples per cell, **includes PBKDF2, excludes disk I/O**.
+
+* **Structure domain** — **20–46 ms** write, **20–28 ms** read across 9 container formats and 4 KiB–4 MiB payloads.
+  Dominated by the fixed key-derivation cost; payload and carrier size barely move the number.
+* **Content domain** — **0.06–14.6 s** embed (extraction is 16–73 % of that) across all 9 stego algorithms
+  (PNG ×3, JPEG ×3, HEVC video/still, WAV, FLAC). The engine/container path sets the order of magnitude;
+  payload size sets the slope within one engine. Carrier size, resolution and duration alone do **not** predict
+  cross-engine cost.
+
+See [BENCHMARK.md](BENCHMARK.md) for the two summary tables, plus the full
+[structure](docs/BENCH_STRUCTURE_20261107.md) and [content](docs/BENCH_CONTENT_20261107.md) reports
+for methodology, variance and raw samples.
+
+---
+
+## 5. Desktop Client (`StrHideStudio`)
 
 The desktop client is located in `gui/`, developed with **Tauri 2**, **React**, **TypeScript**, and **Tailwind CSS**.
 
@@ -119,8 +137,10 @@ The desktop client is located in `gui/`, developed with **Tauri 2**, **React**, 
 
 ---
 
-## 5. Further Documentation
+## 6. Further Documentation
 
+* [Performance Baseline (short)](BENCHMARK.md): Two summary tables + the dominant cost factors.
+* [Structure Domain Benchmark](docs/BENCH_STRUCTURE_20261107.md) / [Content Domain Benchmark](docs/BENCH_CONTENT_20261107.md): Full methodology, per-cell statistics and raw samples.
 * [Technical Implementation Specification](docs/smart_file_data_hiding_design.md): In-depth protocol specification, adapter algorithms, and safety matrices.
 * [System Architecture & Public API](docs/api/ARCHITECTURE.md): Crate module topology, facade APIs, and pipeline designs.
 * [Stego Content Domain API Guide](docs/api/STEGO-API.md): API reference for content-adaptive steganography and algorithm introspection.

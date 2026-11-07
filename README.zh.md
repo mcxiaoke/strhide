@@ -87,7 +87,23 @@ sth list                                                            # 列出受�
 
 ---
 
-## 4. 桌面客户端（`StrHideStudio`）
+## 4. 性能基线
+
+测量环境：Intel i7-11700（8 核 / 16 线程）、Windows 10、`--release`（LTO）构建，走内存 API；
+固定密码 / 固定 seed / 固定载荷，每格 20 次采样，**含 PBKDF2、不含磁盘 I/O**。
+
+* **结构域（容器信封）**：9 种载体、4 KiB–4 MiB 载荷下写入 **20–46 ms**、读取 **20–28 ms**。
+  主要成本是固定的密钥派生，载荷与载体大小影响很小。
+* **内容域（媒体隐写）**：覆盖全部 9 种算法（PNG 3 种、JPEG 3 种、HEVC 视频/静图、WAV、FLAC），
+  嵌入 **0.06–14.6 s**，提取约为嵌入的 16–73 %。**引擎/容器路径决定数量级**，载荷大小决定同一引擎内的斜率；
+  载体大小、分辨率、时长单独都不能预测跨引擎耗时。
+
+两张汇总表见 [BENCHMARK.md](BENCHMARK.md)；完整方法、逐格方差与原始样本见
+[结构域报告](docs/BENCH_STRUCTURE_20261107.md) 与 [内容域报告](docs/BENCH_CONTENT_20261107.md)。
+
+---
+
+## 5. 桌面客户端（`StrHideStudio`）
 
 桌面端位于 `gui/` 目录，基于 **Tauri 2**、**React**、**TypeScript** 与 **Tailwind CSS** 构建：
 
@@ -104,8 +120,10 @@ sth list                                                            # 列出受�
 
 ---
 
-## 5. 关联技术文档
+## 6. 关联技术文档
 
+* [性能基线（简明版）](BENCHMARK.md)：两张汇总表与主要耗时因素。
+* [结构域基准报告](docs/BENCH_STRUCTURE_20261107.md) / [内容域基准报告](docs/BENCH_CONTENT_20261107.md)：完整方法、逐格统计与原始样本。
 * [技术实现综合规范](docs/smart_file_data_hiding_design.md)：协议细节、适配器算法、预检拦截矩阵与还原流水线。
 * [系统架构与公开 API 说明](docs/api/ARCHITECTURE.md)：分层拓扑、统一门面、方言机制与管线设计。
 * [内容域隐写 API 规范](docs/api/STEGO-API.md)：媒体自适应隐写对外接口与算法自省指南。

@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 420" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="12">
+<rect width="760" height="420" fill="#ffffff"/>
+<text x="78" y="26" font-size="14" font-weight="600" fill="#1a1a1a">内容域：嵌入耗时中位数 vs 载荷大小</text>
+<line x1="78" y1="364.0" x2="570" y2="364.0" stroke="#e6e6e6"/>
+<text x="70" y="368.0" text-anchor="end" fill="#666">10</text>
+<line x1="78" y1="340.2" x2="570" y2="340.2" stroke="#e6e6e6" stroke-dasharray="2 4"/>
+<line x1="78" y1="308.8" x2="570" y2="308.8" stroke="#e6e6e6" stroke-dasharray="2 4"/>
+<line x1="78" y1="285.0" x2="570" y2="285.0" stroke="#e6e6e6"/>
+<text x="70" y="289.0" text-anchor="end" fill="#666">100</text>
+<line x1="78" y1="261.2" x2="570" y2="261.2" stroke="#e6e6e6" stroke-dasharray="2 4"/>
+<line x1="78" y1="229.8" x2="570" y2="229.8" stroke="#e6e6e6" stroke-dasharray="2 4"/>
+<line x1="78" y1="206.0" x2="570" y2="206.0" stroke="#e6e6e6"/>
+<text x="70" y="210.0" text-anchor="end" fill="#666">1000</text>
+<line x1="78" y1="182.2" x2="570" y2="182.2" stroke="#e6e6e6" stroke-dasharray="2 4"/>
+<line x1="78" y1="150.8" x2="570" y2="150.8" stroke="#e6e6e6" stroke-dasharray="2 4"/>
+<line x1="78" y1="127.0" x2="570" y2="127.0" stroke="#e6e6e6"/>
+<text x="70" y="131.0" text-anchor="end" fill="#666">10000</text>
+<line x1="78" y1="103.2" x2="570" y2="103.2" stroke="#e6e6e6" stroke-dasharray="2 4"/>
+<line x1="78" y1="71.8" x2="570" y2="71.8" stroke="#e6e6e6" stroke-dasharray="2 4"/>
+<line x1="78" y1="48.0" x2="570" y2="48.0" stroke="#e6e6e6"/>
+<text x="70" y="52.0" text-anchor="end" fill="#666">100000</text>
+<line x1="78.0" y1="364" x2="78.0" y2="369" stroke="#999"/>
+<text x="78.0" y="384" text-anchor="middle" fill="#666">1 KiB</text>
+<line x1="288.9" y1="364" x2="288.9" y2="369" stroke="#999"/>
+<text x="288.9" y="384" text-anchor="middle" fill="#666">8 KiB</text>
+<line x1="429.4" y1="364" x2="429.4" y2="369" stroke="#999"/>
+<text x="429.4" y="384" text-anchor="middle" fill="#666">32 KiB</text>
+<line x1="570.0" y1="364" x2="570.0" y2="369" stroke="#999"/>
+<text x="570.0" y="384" text-anchor="middle" fill="#666">128 KiB</text>
+<line x1="78" y1="364" x2="570" y2="364" stroke="#999"/>
+<text x="324.0" y="406" text-anchor="middle" fill="#666">payload 大小（对数轴）</text>
+<text x="16" y="206.0" fill="#666" transform="rotate(-90 16 206.0)" text-anchor="middle">毫秒（对数轴）</text>
+<path d="M78.0,190.8 L288.9,188.2 L429.4,186.1 L570.0,173.5" fill="none" stroke="#c0392b" stroke-width="2"/>
+<circle cx="78.0" cy="190.8" r="3" fill="#c0392b"/>
+<circle cx="288.9" cy="188.2" r="3" fill="#c0392b"/>
+<circle cx="429.4" cy="186.1" r="3" fill="#c0392b"/>
+<circle cx="570.0" cy="173.5" r="3" fill="#c0392b"/>
+<line x1="588" y1="54" x2="608" y2="54" stroke="#c0392b" stroke-width="2"/>
+<text x="614" y="58" fill="#333">png_hill</text>
+<path d="M78.0,186.7 L288.9,186.4 L429.4,186.3 L570.0,176.8" fill="none" stroke="#2c7fb8" stroke-width="2"/>
+<circle cx="78.0" cy="186.7" r="3" fill="#2c7fb8"/>
+<circle cx="288.9" cy="186.4" r="3" fill="#2c7fb8"/>
+<circle cx="429.4" cy="186.3" r="3" fill="#2c7fb8"/>
+<circle cx="570.0" cy="176.8" r="3" fill="#2c7fb8"/>
+<line x1="588" y1="72" x2="608" y2="72" stroke="#2c7fb8" stroke-width="2"/>
+<text x="614" y="76" fill="#333">png_suniward</text>
+<path d="M78.0,183.1 L288.9,181.8 L429.4,178.7 L570.0,171.6" fill="none" stroke="#27ae60" stroke-width="2"/>
+<circle cx="78.0" cy="183.1" r="3" fill="#27ae60"/>
+<circle cx="288.9" cy="181.8" r="3" fill="#27ae60"/>
+<circle cx="429.4" cy="178.7" r="3" fill="#27ae60"/>
+<circle cx="570.0" cy="171.6" r="3" fill="#27ae60"/>
+<line x1="588" y1="90" x2="608" y2="90" stroke="#27ae60" stroke-width="2"/>
+<text x="614" y="94" fill="#333">png_mipod</text>
+<path d="M78.0,226.4 L288.9,192.0 L429.4,187.2 L570.0,184.7" fill="none" stroke="#8e44ad" stroke-width="2"/>
+<circle cx="78.0" cy="226.4" r="3" fill="#8e44ad"/>
+<circle cx="288.9" cy="192.0" r="3" fill="#8e44ad"/>
+<circle cx="429.4" cy="187.2" r="3" fill="#8e44ad"/>
+<circle cx="570.0" cy="184.7" r="3" fill="#8e44ad"/>
+<line x1="588" y1="108" x2="608" y2="108" stroke="#8e44ad" stroke-width="2"/>
+<text x="614" y="112" fill="#333">jpeg_uerd</text>
+<path d="M78.0,203.2 L288.9,181.6 L429.4,176.3 L570.0,175.4" fill="none" stroke="#d68910" stroke-width="2"/>
+<circle cx="78.0" cy="203.2" r="3" fill="#d68910"/>
+<circle cx="288.9" cy="181.6" r="3" fill="#d68910"/>
+<circle cx="429.4" cy="176.3" r="3" fill="#d68910"/>
+<circle cx="570.0" cy="175.4" r="3" fill="#d68910"/>
+<line x1="588" y1="126" x2="608" y2="126" stroke="#d68910" stroke-width="2"/>
+<text x="614" y="130" fill="#333">jpeg_juniward</text>
+<path d="M78.0,204.7 L288.9,182.9 L429.4,179.1 L570.0,177.0" fill="none" stroke="#16a085" stroke-width="2"/>
+<circle cx="78.0" cy="204.7" r="3" fill="#16a085"/>
+<circle cx="288.9" cy="182.9" r="3" fill="#16a085"/>
+<circle cx="429.4" cy="179.1" r="3" fill="#16a085"/>
+<circle cx="570.0" cy="177.0" r="3" fill="#16a085"/>
+<line x1="588" y1="144" x2="608" y2="144" stroke="#16a085" stroke-width="2"/>
+<text x="614" y="148" fill="#333">jpeg_jmipod</text>
+<path d="M78.0,197.1 L288.9,193.3 L429.4,181.7 L570.0,168.9" fill="none" stroke="#7f8c8d" stroke-width="2"/>
+<circle cx="78.0" cy="197.1" r="3" fill="#7f8c8d"/>
+<circle cx="288.9" cy="193.3" r="3" fill="#7f8c8d"/>
+<circle cx="429.4" cy="181.7" r="3" fill="#7f8c8d"/>
+<circle cx="570.0" cy="168.9" r="3" fill="#7f8c8d"/>
+<line x1="588" y1="162" x2="608" y2="162" stroke="#7f8c8d" stroke-width="2"/>
+<text x="614" y="166" fill="#333">hevc_mp4</text>
+<path d="M78.0,289.4 L288.9,281.4 L429.4,255.0 L570.0,223.4" fill="none" stroke="#b03a2e" stroke-width="2"/>
+<circle cx="78.0" cy="289.4" r="3" fill="#b03a2e"/>
+<circle cx="288.9" cy="281.4" r="3" fill="#b03a2e"/>
+<circle cx="429.4" cy="255.0" r="3" fill="#b03a2e"/>
+<circle cx="570.0" cy="223.4" r="3" fill="#b03a2e"/>
+<line x1="588" y1="180" x2="608" y2="180" stroke="#b03a2e" stroke-width="2"/>
+<text x="614" y="184" fill="#333">heic</text>
+<path d="M78.0,302.3 L288.9,276.2 L429.4,238.6 L570.0,194.7" fill="none" stroke="#2e86c1" stroke-width="2"/>
+<circle cx="78.0" cy="302.3" r="3" fill="#2e86c1"/>
+<circle cx="288.9" cy="276.2" r="3" fill="#2e86c1"/>
+<circle cx="429.4" cy="238.6" r="3" fill="#2e86c1"/>
+<circle cx="570.0" cy="194.7" r="3" fill="#2e86c1"/>
+<line x1="588" y1="198" x2="608" y2="198" stroke="#2e86c1" stroke-width="2"/>
+<text x="614" y="202" fill="#333">wav_pcm</text>
+<path d="M78.0,144.9 L288.9,144.0 L429.4,141.5" fill="none" stroke="#1e8449" stroke-width="2"/>
+<circle cx="78.0" cy="144.9" r="3" fill="#1e8449"/>
+<circle cx="288.9" cy="144.0" r="3" fill="#1e8449"/>
+<circle cx="429.4" cy="141.5" r="3" fill="#1e8449"/>
+<line x1="588" y1="216" x2="608" y2="216" stroke="#1e8449" stroke-width="2"/>
+<text x="614" y="220" fill="#333">flac_residual</text>
+<path d="M570.0,114.0" fill="none" stroke="#c0392b" stroke-width="2"/>
+<circle cx="570.0" cy="114.0" r="3" fill="#c0392b"/>
+<line x1="588" y1="234" x2="608" y2="234" stroke="#c0392b" stroke-width="2"/>
+<text x="614" y="238" fill="#333">flac128</text>
+</svg>
