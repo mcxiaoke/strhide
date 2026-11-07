@@ -1,14 +1,9 @@
-//! Regression tests for P2 CLI/security alignment (2026-10-17), batch 3.
+//! Regression tests for CLI diagnostics and security behaviors:
 //!
-//! - #15: `verify` must exit non-zero when Level 1 or Level 2 fails, matching
-//!   the Python CLI (Level 3 crypto failures are reported only).
-//! - #16: the read password retry must discriminate on the error variant, not
-//!   on message text; a stealth envelope read without its password must
-//!   produce actionable guidance instead of a bare "not found".
-//! - #18: the JAR signature guard must be content-based so a signed archive
-//!   renamed to `.zip` cannot bypass it.
-//! - #19: `--unescape` must support the full escape set (\xHH, \uXXXX, \U...,
-//!   octal, \a\b\f\v) identically in both implementations.
+//! - `verify` exit codes on Level 1 / Level 2 failures.
+//! - Read password retry handling for encrypted/stealth envelopes.
+//! - Content-based JAR signature guard on renamed archives.
+//! - `--unescape` support for escape sequences (\xHH, \uXXXX, \U..., octal, \a\b\f\v).
 
 use crate::common::*;
 use std::fs;

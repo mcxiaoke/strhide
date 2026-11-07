@@ -1,12 +1,10 @@
-//! P0-2: the envelope locator must not be usable as an allocation primitive.
+//! Security tests: envelope locator must not be usable as an allocation primitive.
 //!
 //! An attacker who can edit a carrier can rewrite the 24-byte trailer at EOF.
 //! Its `ube_offset` / `ube_total_size` are protected by CRC-32 only — a
 //! checksum, not a MAC — so both are free to change. Combined with a forged
-//! `meta_len` in the (equally editable) header, the read path used to reach
-//! `vec![0u8; meta_len]` with a length of ~4 GiB on a few-hundred-byte file:
-//! Rust aborts the process on allocation failure, so the result was a
-//! password-free denial of service.
+//! `meta_len` in the (equally editable) header, uncontrolled allocation
+//! must be prevented to avoid denial of service.
 //!
 //! The fix has two independent layers, and these tests exercise both: every
 //! located envelope must fit inside the physical file before any buffer is

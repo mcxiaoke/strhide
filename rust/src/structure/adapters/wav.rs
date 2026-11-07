@@ -23,10 +23,8 @@ impl HostAdapter for WavAdapter {
     }
 
     fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, ube_size: u64) -> &'static str {
-        // riff_chunk must stay symmetric: the declared boundary must be the
-        // physical end and the patched size must stay inside u32. Anything
-        // else routes to the EOF overlay, whose write and read agree by
-        // construction (review P1-2 / P3-17).
+        // riff_chunk requires the declared boundary to match the physical file end
+        // and patched size to stay within u32. Other carriers route to eof.
         if riff_can_chunk(reader, ube_size) {
             "riff_chunk"
         } else {

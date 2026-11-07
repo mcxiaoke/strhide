@@ -181,11 +181,10 @@ pub fn normalize_nfc(s: &str) -> String {
     s.nfc().collect::<String>()
 }
 
-// Test-only count of PBKDF2 runs, used to prove that a single `verify` does
-// not re-derive the same (password, salt) pair per consumer (review P1-7).
+// Test-only count of PBKDF2 runs, used to verify that operations do
+// not redundantly re-derive keys for the same (password, salt) pair.
 //
-// Thread-local rather than global so the rest of the test suite (which also
-// derives keys, in parallel) cannot pollute a measurement.
+// Thread-local rather than global so parallel tests cannot pollute measurements.
 #[cfg(test)]
 thread_local! {
     static PBKDF2_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -332,13 +331,10 @@ pub fn derive_trailer_crc_mask(trailer_magic: &[u8; 4]) -> u32 {
 /// magic** to mask the remaining fields of `ChannelHeader` (version, flags,
 /// `ube_len`, `slack_off`).
 ///
-/// The old layout derived this from the 4-byte trailer magic that is written
-/// verbatim at `ChannelHeader[0..4]`, so any observer could unmask the
-/// lengths without a password (review P1-5). The envelope header magic lives
-/// in the UBE header at channel positions `112..176`; in stealth mode it is
-/// password-derived and is *not* the 4-byte value visible in the channel
-/// header. In standard mode it is the public `STANDARD_HEADER_MAGIC`, which is
-/// format obfuscation only — never a secrecy claim.
+/// Derived from the envelope header magic in the UBE header at channel positions
+/// `112..176`. In stealth mode it is password-derived and distinct from the
+/// visible 4-byte channel magic, preventing unauthenticated unmasking of lengths.
+/// In standard mode it uses `STANDARD_HEADER_MAGIC` for format obfuscation.
 pub fn derive_channel_header_mask(envelope_header_magic: &[u8; 8]) -> [u8; 10] {
     let hk = hkdf::Hkdf::<Sha256>::new(None, envelope_header_magic);
     let mut mask = [0u8; 10];

@@ -76,14 +76,8 @@ pub fn find_eocd_offset<R: Read + Seek + ?Sized>(
 
 /// Whether the bytes at `cd_offset` really start a central-directory record.
 ///
-/// A 22-byte record shaped like an EOCD can sit anywhere in the file — in the
-/// EOCD comment, in the garbage an `eof`-strategy envelope leaves behind, or
-/// in a deliberately crafted tail. The old acceptance test only checked that
-/// `cd_offset + cd_size` fell before the record, so such a decoy was adopted
-/// as the real EOCD: injection then inserted the envelope at the decoy's
-/// offset, updated the decoy's own `cd_offset` field, and left the genuine
-/// EOCD pointing at the pre-shift central directory — a silently corrupted
-/// archive that `verify` still passed (review R2 P0-3).
+/// Confirms that `cd_offset` points to a genuine central-directory header,
+/// preventing decoy records from corrupting archive offsets.
 fn central_directory_starts_at<R: Read + Seek + ?Sized>(reader: &mut R, cd_offset: u64) -> bool {
     if reader.seek(SeekFrom::Start(cd_offset)).is_err() {
         return false;
@@ -94,14 +88,9 @@ fn central_directory_starts_at<R: Read + Seek + ?Sized>(reader: &mut R, cd_offse
 
 /// Whether a ZIP64 EOCD locator sits immediately before the EOCD record.
 ///
-/// Per APPNOTE the tail order is `[zip64 EOCD record][zip64 EOCD locator][EOCD]`
-/// and the locator is fixed-size, so a 20-byte probe at the exact position
-/// decides. Injection shifts the Central Directory and every record after it
-/// without updating the locator's "offset of zip64 EOCD record" field, which
-/// breaks strict third-party readers, so the classic strategy refuses such
-/// archives (review P2-7); `--strategy eof` stays available. A comment may
-/// legally contain the magic, but only at the exact position can it be a real
-/// chain element.
+/// Per APPNOTE the tail order is `[zip64 EOCD record][zip64 EOCD locator][EOCD]`.
+/// ZIP64 archives are refused by the classic strategy to prevent shifting offsets
+/// without updating the 64-bit locator; `--strategy eof` is used instead.
 fn has_zip64_locator<R: Read + Seek + ?Sized>(reader: &mut R, eocd_pos: u64) -> bool {
     if eocd_pos < 20 {
         return false;

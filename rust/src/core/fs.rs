@@ -130,11 +130,10 @@ pub(crate) fn unique_batch_path(
 
 /// Render attacker-controlled text safe for a terminal.
 ///
-/// The password hint lives in the envelope but is *not* covered by the header
-/// AAD, so a crafted carrier can put `ESC [ ...` or OSC sequences in it and
-/// have the CLI print them verbatim: cursor movement, screen wipes, even an
-/// OSC 52 clipboard write (review R3 P2-2). Control characters become `\u{NN}`
-/// escapes; a tab survives because it cannot drive a terminal.
+/// The password hint lives in the envelope but is not covered by the header
+/// AAD, so an untrusted carrier could contain escape or OSC sequences
+/// (e.g. cursor movement, screen clears, OSC 52 clipboard writes).
+/// Control characters become `\u{NN}` escapes; tabs are preserved.
 #[allow(dead_code)]
 pub(crate) fn escape_control_chars(text: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;

@@ -122,8 +122,7 @@ struct Located {
     /// Header magic derived from password + profile domain.
     stealth_header_magic: Option<[u8; 8]>,
     /// Trailer magic derived from the same PBKDF2 run. Level 1 and Level 2
-    /// both need it for stealth overlays; re-deriving it per consumer was
-    /// several extra 100k-iteration PBKDF2 runs per `verify` (review P1-7).
+    /// both need it for stealth overlays; cached here to avoid redundant key derivations.
     stealth_trailer_magic: Option<[u8; 4]>,
 }
 
@@ -174,14 +173,10 @@ fn locate_envelope_with_magic(
 
 /// Reject a located envelope that cannot physically fit inside the carrier.
 ///
-/// Adapters only *propose* a location: they find it by trusting a 24-byte
-/// trailer at the end of the file, whose `ube_offset` / `ube_total_size` are
-/// protected by CRC-32 and nothing else — both fields are trivially forgeable,
-/// and so is whatever container header precedes them. A forged
-/// `ube_total_size` used to survive as far as `vec![0u8; meta_len]`, where the
-/// metadata length could claim ~4 GiB: the allocation failure aborts the
-/// process, so a few hundred forged bytes were a password-free denial of
-/// service (review P0-2).
+/// Adapters only propose candidate locations based on the 24-byte trailer.
+/// Because trailer fields are untrusted, this check bounds the envelope to
+/// the physical carrier size before allocating buffers from declared header geometry,
+/// preventing out-of-bounds reads and denial-of-service from forged container headers.
 ///
 /// This is the single place that decides whether a carrier really contains the
 /// envelope an adapter claims, and it runs before any buffer is sized from the
@@ -231,9 +226,8 @@ fn take_varint(input: &[u8], pos: &mut usize) -> Result<u64, StrHideError> {
             StrHideError::CorruptedData("Corrupted compact metadata block: truncated varint".into())
         })?;
         *pos += 1;
-        // A 10-byte u64 varint may only use bit 0 of its last byte; the other
-        // payload bits would be shifted past bit 63 and silently dropped (review
-        // P2-6), producing a "valid but wrong" raw_size/created_at.
+        // A 10-byte u64 varint may only use bit 0 of its last byte; additional
+        // bits would overflow bit 63, corrupting decoded fields.
         if i == 9 {
             if byte & 0x80 != 0 {
                 return Err(StrHideError::CorruptedData(
@@ -393,9 +387,8 @@ impl<'a> PayloadSource<'a> {
     /// the one-carrier and many-carrier paths. `Stdin` is consumed by the first
     /// call: buffer it once, then pass [`PayloadSource::Buffered`] per carrier.
     ///
-    /// Already-materialized bytes are returned as [`Cow::Borrowed`]: the write
-    /// path only reads them, so copying a multi-megabyte payload here used to
-    /// double the peak for every carrier (review A P2-09).
+    /// Already-materialized bytes are returned as [`Cow::Borrowed`] to avoid
+    /// payload copies in the write path.
     pub fn into_buffered(self) -> Result<(Cow<'a, [u8]>, String, bool), StrHideError> {
         Ok(match self {
             PayloadSource::Bytes(b) => (Cow::Borrowed(b), "payload.bin".to_string(), true),
@@ -458,7 +451,7 @@ pub enum Warning {
 }
 
 impl Warning {
-    /// The English sentence this warning used to be, kept for CLI rendering.
+    /// Warning message formatted for CLI rendering.
     pub fn message(&self) -> String {
         match self {
             Warning::SizeInflation {
@@ -1259,11 +1252,8 @@ where
     // Where the envelope lands relative to the injection point. Strategies
     // that prepend a container header (PNG chunk, JPEG APP15 segment, ISO-BMFF
     // box, EBML Void, PDF object) shift it by 4..32 bytes. The shift only
-    // depends on the strategy and the envelope size, both known here, so it is
-    // computed *before* the header is sealed and therefore lands inside the
-    // AAD — that is what makes it tamper-evident, and what lets `verify`
-    // cross-check the header against the trailer instead of comparing a value
-    // with itself (review R2 P1-9).
+    // depends on the strategy and the envelope size, so it is computed *before*
+    // the header is sealed and therefore protected inside the AAD.
     let offset_delta = {
         host.seek(SeekFrom::Start(0))?;
         adapter.envelope_offset_delta(host, &selected_strategy, exact_ube_size)?
@@ -1451,7 +1441,7 @@ where
         adapter.finalize(out, &fin_ctx)?;
     }
 
-    // Post-write self-check (review §5.2): inject and locate must agree on
+    // Post-write self-check: inject and locate must agree on
     // where the envelope landed, or the write reports success for data that
     // read/inspect/remove can never reach. Matching against the trailer magic
     // this write produced is exactly what the read path demands, so a fresh
@@ -1785,8 +1775,7 @@ fn open_and_authenticate_envelope<'a>(
 /// located.
 ///
 /// `precomputed` lets `verify` hand over the `UnpackSecrets` it derived for
-/// Level 2, so Level 3 does not repeat PBKDF2 over the same (password, salt)
-/// pair (review P1-7).
+/// Level 2, so Level 3 does not repeat PBKDF2 over the same (password, salt) pair.
 fn open_authenticated_at<'a>(
     host: &'a mut dyn SeekRead,
     adapter: &dyn HostAdapter,
@@ -2070,11 +2059,8 @@ fn write_payload_to(
     // directory) used to replace user files silently.
     crate::core::pipeline::check_overwrite(&final_dest, overwrite)?;
 
-    // Write through a sibling temp file and rename, exactly like every carrier
-    // commit does. A plain `File::create` left a half-written payload behind
-    // when the disk filled up or the process was killed, and it followed a
-    // pre-existing symlink at the destination instead of replacing the name
-    // (review R2 P0-7).
+    // Write through a sibling temp file and rename atomically, preventing partially
+    // written files on failure and avoiding symlink traversal at the destination.
     crate::core::commit::write_bytes_atomic(&final_dest, &core.data).map_err(|err| {
         let reason = match &err {
             StrHideError::Io(e) => match e.kind() {
@@ -2622,17 +2608,12 @@ fn inspect_core(
 
     let mut header_bytes = [0u8; HEADER_SIZE];
     ube_stream.read_exact(&mut header_bytes)?;
-    // An envelope we can see but cannot open with this profile is a private
-    // dialect, and a private dialect is supposed to be invisible to readers
-    // that do not know it. Surfacing `CorruptedData` told an outsider that
-    // something is hidden and crashed `inspect_any`/`smart_extract` instead of
-    // letting the content domain answer (review B-06).
+    // Envelopes unopenable under this profile represent unknown dialects or mismatched keys;
+    // treat as not hidden to maintain dialect invisibility.
     let header = match EnvelopeHeader::unpack_with_profile(&header_bytes, password, profile) {
         Ok(h) => h,
         Err(e) => {
-            // Staying invisible to a reader that does not hold the dialect is
-            // the point (B-06), so the result must not change — but the reason
-            // still belongs in the log.
+            // Maintain dialect invisibility by reporting empty result, while logging diagnostic detail.
             log::debug!(
                 target: "structure::inspect",
                 "envelope header does not open under this profile: {e}"
@@ -2641,11 +2622,8 @@ fn inspect_core(
             return empty_inspect_result(host, adapter, label, strategies);
         }
     };
-    // A header that fails the level-2 shape check is not a readable envelope;
-    // treat it exactly like an unparseable one instead of propagating
-    // `CorruptedData` out of `inspect` / `smart_extract` (review B-06). This
-    // also stops a coincidental de-mask hit on a foreign-key envelope from
-    // aborting the whole inspection.
+    // Treat shape check failures as unparseable/empty rather than fatal CorruptedData,
+    // preventing false aborts in inspect_any/smart_extract.
     if let Err(e) = header.validate_against(ube_total_size, host_len) {
         log::debug!(
             target: "structure::inspect",
@@ -2803,15 +2781,10 @@ pub fn verify_carrier_bytes(
     verify_core(&mut host, "<memory>", password, profile)
 }
 
-/// Shared verify logic over any seekable reader (a `File` on the path path, a
-/// `Cursor` on the bytes path).
 /// Cross-check the header's injection coordinates against the located envelope.
 ///
-/// Level 2 used to compare the trailer's `ube_offset`/`ube_total_size` with the
-/// values `locate_envelope` had just read out of that same trailer — true by
-/// construction. The header's own coordinates were never checked against
-/// anything, so a carrier whose header disagreed with its body passed `verify`
-/// and only failed later, during `remove` (review R2 P1-9).
+/// Validates that the header's injection coordinates match the located envelope
+/// to detect header/body mismatches early during verification rather than during removal.
 ///
 /// These four fields are the only header bytes the AEAD cannot cover: they are
 /// filled in after the injector has run, i.e. after the metadata block and every
@@ -2832,16 +2805,9 @@ fn envelope_coordinates_agree(
     ube_total_size: u64,
     file_len: u64,
 ) -> Result<(), String> {
-    // Scattered strategies (`pe_codebits`) record 0/0 by definition: the payload
-    // is spread over instruction encodings and PE padding, so there is no
-    // contiguous injected region to check. Test the *strategy*, not
-    // `inject_size == 0`: the size field is inside the header but outside the
-    // AEAD's AAD, so accepting a zero there let anyone flip it in a contiguous
-    // strategy (`eof`, `chunk`, `box_uuid`) and skip Level 2 entirely.
-    // Both the caller's strategy name and the header's id must name
-    // `pe_codebits`: trusting only the header-derived id let a header claim the
-    // exemption while the caller was verifying a contiguous strategy, skipping
-    // the coordinate check entirely (review C-01).
+    // Scattered strategies (`pe_codebits`) record 0/0 by definition as payloads are
+    // distributed rather than contiguous. Both caller strategy and header id must
+    // agree on `pe_codebits` to prevent contiguous strategies from bypassing coordinate checks.
     if cfg!(feature = "structure-pe")
         && strategy == "pe_codebits"
         && crate::structure::registry::id_to_strategy(header.strategy_id) == strategy
@@ -2965,8 +2931,7 @@ fn verify_core(
 
     // A single locate scan feeds Level 1's stealth trailer magic, Level 2's
     // header unpack and its trailer check, and Level 3's authentication.
-    // Deriving the magics once instead of per consumer removes several
-    // 100k-iteration PBKDF2 runs from every `verify` (review P1-7).
+    // Secrets are derived once to avoid redundant PBKDF2 runs during verification.
     let Located {
         location,
         stealth_header_magic,
@@ -3084,21 +3049,10 @@ fn verify_core(
                                     &trailer_bytes,
                                     expected_trailer_magic.as_ref(),
                                 ) {
-                                    // `locate_envelope` derived these numbers from
-                                    // this very record, so comparing them with
-                                    // themselves proved nothing (review R2 P1-9).
-                                    // What the trailer still contributes is its
-                                    // magic + CRC32 check; the coordinate check
-                                    // happens above, where the authenticated
-                                    // `offset_delta` anchors the envelope start and
-                                    // `confine_location` anchored the end to the
-                                    // physical file.
-                                    // A relocated PNG `chunk` envelope keeps its
-                                    // write-time `ube_offset` in the trailer while
-                                    // `locate` reports the new physical offset, so
-                                    // the two are intentionally different here. The
-                                    // coordinate check lives in
-                                    // `envelope_coordinates_agree`.
+                                    // The trailer provides magic + CRC32 verification; physical coordinate checks
+                                    // are enforced via authenticated offset_delta and confine_location above.
+                                    // A relocated PNG chunk envelope preserves its write-time ube_offset in the trailer,
+                                    // so coordinate validation is handled in envelope_coordinates_agree.
                                     debug_assert_eq!(trailer.ube_total_size, ube_total_size);
                                     let _ = &trailer;
                                     (
@@ -3240,9 +3194,7 @@ mod compact_meta_tests {
 
     #[test]
     fn varint_rejects_values_that_overflow_u64() {
-        // 9 continuation bytes followed by 0x02: the old loop shifted the
-        // payload bit past bit 63 and returned 0 instead of reporting an error
-        // (review P2-6).
+        // 9 continuation bytes followed by 0x02: bits past 63 must trigger an error.
         let mut overflowing = vec![0x80u8; 9];
         overflowing.push(0x02);
         let mut pos = 0;
@@ -3421,10 +3373,8 @@ mod pbkdf2_budget_tests {
         bytes
     }
 
-    /// Locating a stealth carrier derives the magics (one PBKDF2); Level 2
-    /// derives the password material once and Level 3 reuses it. Before P1-7
-    /// Level 1, Level 2's header unpack, its trailer check and Level 3 each
-    /// repeated that work (six runs, ~300 ms for a 5-byte payload).
+    /// Verifies that verification derives password secrets once and reuses them
+    /// across Level 2 and Level 3 checks.
     #[test]
     fn verify_derives_the_password_pair_once_beyond_the_locator() {
         let bytes = stego(PayloadSource::Text("p1-7"), Some("pw"), true);
@@ -3434,9 +3384,7 @@ mod pbkdf2_budget_tests {
         assert_eq!(crate::crypto::pbkdf2_calls(), 2, "unexpected PBKDF2 count");
     }
 
-    /// P2-12: the content domain already treats `Some("")` as "no password";
-    /// the structure domain used it as a stealth credential. An empty string
-    /// must not create an envelope whose secrecy rests on an empty secret.
+    /// Verifies that an empty password string does not create a stealth envelope.
     #[test]
     fn empty_password_does_not_create_a_stealth_envelope() {
         let carrier = include_bytes!("../../tests/assets/minimal.png").to_vec();
@@ -3454,9 +3402,7 @@ mod pbkdf2_budget_tests {
         );
     }
 
-    /// The no-password path used to derive the profile default secret twice:
-    /// once inside Level 2's header unpack and once again to authenticate the
-    /// metadata in Level 3.
+    /// Verifies that the unencrypted path derives default secrets once across checks.
     #[test]
     fn verify_derives_the_default_pair_once() {
         let bytes = stego(PayloadSource::Text("p1-7"), None, false);
@@ -3466,10 +3412,8 @@ mod pbkdf2_budget_tests {
         assert_eq!(crate::crypto::pbkdf2_calls(), 1, "unexpected PBKDF2 count");
     }
 
-    /// Review G2 (P2-2): advertised strategy capacities never exceed the
-    /// payload limit the engine enforces for the host. The review measured an
-    /// 86,854-byte PNG whose `inspect` reported `unlimited (file grows)` /
-    /// `2 GiB - 1` while the writer refused anything above 64 MiB.
+    /// Verifies that advertised strategy capacities never exceed the payload limit
+    /// enforced by the engine for the host format.
     #[test]
     fn strategy_capacities_never_exceed_engine_payload_limit() {
         use crate::structure::adapters::StrategyCapacity;

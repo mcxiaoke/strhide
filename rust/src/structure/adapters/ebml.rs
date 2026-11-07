@@ -11,17 +11,9 @@ pub const MATROSKA_SEGMENT_ID: u32 = 0x1853_8067;
 
 /// Encode an unsigned integer as an EBML VINT.
 ///
-/// The per-length thresholds exclude the all-ones payload: a Data Size VINT
-/// whose bits are all 1 means "unknown size" (RFC 8794), so the boundary
-/// values 127/16383/… must spill into the next length instead of taking the
-/// shorter encoding. (Review P3-15 called those thresholds an RFC SHOULD
-/// violation, but the unknown-size rule makes the longer form mandatory —
-/// the original thresholds were right.)
-///
-/// Returns `None` for `val >= 2^56 - 1`: the 8-byte length is exhausted, and
-/// `2^56 - 1` is itself the unknown-size sentinel. The old code emitted
-/// malformed bytes there; no strhide envelope can reach that size, and
-/// callers treat `None` as "not our envelope".
+/// Per RFC 8794, an all-ones payload represents an "unknown size" sentinel.
+/// Boundary values (127, 16383, etc.) spill into the next width to avoid this sentinel.
+/// Returns `None` for values >= 2^56 - 1.
 pub fn encode_vint(val: u64) -> Option<Vec<u8>> {
     for len in 1usize..=8 {
         let marker = 1u64 << (7 * len);
@@ -103,10 +95,7 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    /// Boundary values must avoid the all-ones "unknown size" payload of each
-    /// length: 127/16383/… spill into the next length, and everything from
-    /// `2^56 - 1` up is unrepresentable (the old code emitted malformed
-    /// bytes there — review P3-15).
+    /// Verifies that boundary values avoid the RFC 8794 unknown-size all-ones sentinel.
     #[test]
     fn encode_vint_avoids_unknown_size_sentinel() {
         assert_eq!(encode_vint(0).unwrap(), vec![0x80]);

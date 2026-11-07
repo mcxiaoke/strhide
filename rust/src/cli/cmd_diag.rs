@@ -18,10 +18,8 @@ use super::render::*;
 
 /// Print the content-domain half of an `inspect` result.
 ///
-/// Shared by the single-carrier and batch paths (they used to duplicate this
-/// block), and prints the content-domain failure when there is one: a failed
-/// content probe used to be dropped entirely in text mode, leaving the reader
-/// to believe the content half had been checked and was clean (review R2 P2-6).
+/// Shared by single-carrier and batch paths, printing content-domain failures
+/// when present to ensure failed content probes are explicitly reported.
 fn print_content_domain(dual: &crate::facade::DualInspect) {
     if let Some(ref cs) = dual.content
         && cs.has_hidden_data
@@ -228,9 +226,8 @@ fn structure_domain_ran(res: &crate::structure::VerifyResult) -> bool {
 ///
 /// Every content engine emits the same three levels (container, header/
 /// superblock, payload). Level 2 failing means "nothing hidden here" — or a
-/// wrong password — which is not a verification *failure*; level 2 passing
-/// with level 3 failing is. Collapsing both into `!is_all_ok()` made every
-/// structure-only carrier look like a broken content envelope (review R3 P1-1).
+/// wrong password — which is not a verification failure; level 2 passing
+/// with level 3 failing is, distinguishing structure-only carriers from broken content envelopes.
 #[cfg(feature = "content")]
 fn content_envelope_present(res: &crate::stego::StegoVerifyResult) -> bool {
     res.levels.iter().any(|l| l.level == 2 && l.ok)
@@ -238,8 +235,7 @@ fn content_envelope_present(res: &crate::stego::StegoVerifyResult) -> bool {
 
 /// The `verify` exit verdict for one carrier.
 ///
-/// Split out of the two call sites so the rule is stated once and can be
-/// tested without building a carrier for every combination (review R3 P1-1).
+/// Factored out so verification rules are consolidated and unit-testable.
 fn dual_verify_failed(
     struct_ok: bool,
     content_ok: bool,
@@ -297,8 +293,7 @@ pub(crate) fn handle_verify(
 
         // A content envelope that was found but does not verify fails the file
         // even when the structure domain is intact; a verifier that could not
-        // run does too. "Nothing hidden in the content domain" does not
-        // (review R3 P1-1).
+        // run does too. "Nothing hidden in the content domain" does not fail.
         let failed = dual_verify_failed(struct_ok, content_ok, content_present, content_errored);
 
         #[cfg(feature = "content")]
@@ -557,10 +552,8 @@ pub(crate) fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideErr
                 }
             }
             for note in &r.notes {
-                // Notes explain how to read the verdict, so the "a clean
-                // result is not proof" caveat matters *most* when there are no
-                // findings. Filtering on `findings.is_empty()` dropped exactly
-                // those (review R2 P1-10).
+                // Notes explain how to interpret the verdict; caveats such as
+                // "clean result is not proof" apply even when findings are empty.
                 println!("    ? {note}");
             }
         }
@@ -686,8 +679,7 @@ struct ExpandedInputs {
 }
 
 /// Append one `{"path", "error"}` item per missing input, matching the shape
-/// used for in-loop failures (`inspect`/`verify` were fixed to keep those in
-/// the array, see review P2-9).
+/// used for in-loop failures.
 fn push_missing_items(json_items: &mut Vec<serde_json::Value>, missing: &[PathBuf]) {
     for path in missing {
         json_items.push(serde_json::json!({
@@ -858,9 +850,8 @@ mod verdict_tests {
         assert!(!dual_verify_failed(true, false, false, false));
     }
 
-    /// The R3 P1-1 case: structure envelope intact, content envelope found but
-    /// failing its payload check, used to exit 0 and print only the structure
-    /// verdict.
+    /// Structure envelope intact, but content envelope found and failing its
+    /// payload check must fail overall verification.
     #[test]
     fn broken_content_envelope_fails_despite_structure_passing() {
         assert!(dual_verify_failed(true, false, true, false));

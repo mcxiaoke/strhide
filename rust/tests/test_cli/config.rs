@@ -67,8 +67,8 @@ fn cwd_config_is_ignored() {
 
 #[test]
 fn unknown_nested_key_in_stego_section_warns() {
-    // `[stego]` has its own key set and was not checked at all, so a typo like
-    // `algoritm` silently left the default in force (review R2 P1-8).
+    // `[stego]` has its own key set; verify that typos like `algoritm`
+    // generate warnings instead of being silently ignored.
     let dir = scratch("unknown_nested");
     fs::write(dir.join("c.png"), make_png()).unwrap();
     fs::write(

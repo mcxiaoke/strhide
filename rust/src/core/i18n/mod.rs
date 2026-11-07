@@ -186,12 +186,9 @@ pub(crate) fn format_msg(tpl: &str, args: &[(&str, &dyn std::fmt::Display)]) -> 
                     Some((_, v)) => {
                         // Argument values are type-erased to `&dyn Display`, so
                         // a precision specifier cannot be forwarded to `write!`
-                        // directly. Numeric values are the only ones that use
-                        // one, and `f64::from_str` round-trips their `Display`
-                        // output, so honour `{x:.2}` by re-rendering the parsed
-                        // number; everything else keeps plain `Display`
-                        // (review R2 P2-7: the specifier used to be dropped and
-                        // dry-run percentages printed at full precision).
+                        // directly. Numeric values round-trip through `f64::from_str`,
+                        // so honour `{x:.2}` by re-rendering the parsed number;
+                        // non-numeric values fall back to plain `Display`.
                         let rendered = v.to_string();
                         let mut wrote = false;
                         if let Some(prec) = spec

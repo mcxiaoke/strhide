@@ -401,7 +401,7 @@ fn test_cross_structure_gui_write_cli_read_and_restore() {
     });
 }
 
-/// A-07: an omitted `output_path` is an in-place write and must not be
+/// An omitted `output_path` is an in-place write and must not be
 /// rejected by `overwrite=false`; only a different explicit destination may be.
 #[test]
 fn test_cross_structure_gui_in_place_write_ignores_overwrite_flag() {

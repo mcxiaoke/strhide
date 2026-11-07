@@ -110,8 +110,8 @@ fn test_jar_signature_rejection() {
 }
 
 /// Garbage trailing an archive may itself contain `PK\x05\x06`; taking the
-/// last magic match as THE EOCD used to read cd_offset from the garbage and
-/// miss the signature file (review P3-22). The scan must keep walking until
+/// last magic match as THE EOCD would read cd_offset from the garbage and
+/// miss the signature file. The scan must keep walking until
 /// the central directory actually resolves.
 #[test]
 fn test_jar_signature_survives_trailing_eocd_magic_garbage() {

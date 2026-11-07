@@ -185,9 +185,9 @@ pub fn is_epb_safe_flip(data: &[u8], pos: usize, bit_idx: u8) -> bool {
 /// fixed window over the slice header bytes is *not* safe: the first CABAC
 /// payload byte sits at `2 + slice_segment_header_bytes` and single-slice
 /// I-frame headers are routinely 3-8 bytes, so an 18-byte window covers
-/// rewritable CABAC data of the first CTU -- flipping a sign bit there drifted
-/// the digest and bricked extraction with the correct password
-/// (review 2026-10-25, S2). NAL lengths are stable because the re-encoder
+/// rewritable CABAC data of the first CTU -- flipping a sign bit there would
+/// drift the digest and break extraction with the correct password.
+/// NAL lengths are stable because the re-encoder
 /// guarantees byte-length preservation (Delta = 0).
 pub fn compute_hevc_cover_digest(data: &[u8], spans: &[HevcNalSpan], salt: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();

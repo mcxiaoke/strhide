@@ -148,10 +148,8 @@ fn v4_wrong_password_and_clean_carrier_are_indistinguishable() {
 
 #[test]
 fn v4_inspect_and_extract_agree_under_a_tightened_policy() {
-    // P1-1: inspect used to ignore `max_payload_bytes`/`allowed_suites` while
-    // extract enforced them, so a tightened policy produced "inspect says yes,
-    // extract says no" on the same carrier -- after inspect had already paid
-    // the 200k-round PBKDF2.
+    // Ensure `inspect` and `extract` enforce limits consistently (e.g. `max_payload_bytes`),
+    // preventing inspect from reporting success when extract would reject the policy.
     use strhide::stego::params::ExtractParams;
 
     let stego = embed_carrier(CARRIER, &Payload::bytes(PAYLOAD), &credits()).expect("embed");

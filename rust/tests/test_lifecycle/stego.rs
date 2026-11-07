@@ -613,9 +613,8 @@ fn test_stego_capacity_model_is_tight() {
     );
 }
 
-/// B-03 / T-09: the advertised maximum is a **file** maximum too. A 255-byte
-/// name used to push the body 256 bytes over and make the advertised size
-/// unusable for `Payload::file`.
+/// The advertised maximum is reachable for files as well: a maximum-length (255-byte)
+/// filename must not cause `Payload::file` to exceed capacity.
 #[test]
 fn test_stego_capacity_is_reachable_with_a_max_length_filename() {
     let png_bytes = generate_texture_png(128, 128);

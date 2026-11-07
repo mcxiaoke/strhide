@@ -730,8 +730,8 @@ fn inspect_reports_png_capacity_and_json_schema() {
     fs::write(&carrier, include_bytes!("../assets/minimal.png")).unwrap();
 
     // The engine enforces `256 x host`, clamped to [64 MiB, 1 GiB]; the
-    // advertised per-strategy capacity must equal that effective limit
-    // (review P2-2), not the container's native 2 GiB - 1 chunk ceiling.
+    // advertised per-strategy capacity must equal that effective limit,
+    // not the container's native 2 GiB - 1 chunk ceiling.
     let host_len = fs::metadata(&carrier).unwrap().len();
     let expected = host_len
         .saturating_mul(256)
@@ -888,8 +888,7 @@ fn codebits_channel_header_keystream_masking_verified() {
     let prof = strhide::structure::adapters::pe_codebits::profile(text, layout.bitness);
 
     // Extract the first 176 bits: 14 bytes of ChannelHeader plus the first 8
-    // UBE bytes, which hold the envelope header magic that keys the mask
-    // (review P1-5).
+    // UBE bytes, which hold the envelope header magic that keys the mask.
     let mut header_bytes = Vec::new();
     for chunk in prof
         .iter()
@@ -940,7 +939,7 @@ fn codebits_channel_header_keystream_masking_verified() {
     assert_eq!(header_bytes[5] ^ mask[1], 0);
 
     // 5. The visible 4-byte magic cannot reproduce the mask: an IKM that only
-    //    repeats those bytes yields a different keystream (P1-5 regression).
+    //    repeats those bytes yields a different keystream.
     let visible_ikm = {
         let mut ikm = [0u8; 8];
         ikm[0..4].copy_from_slice(&magic);
@@ -1058,7 +1057,7 @@ fn codebits_double_injection_stealth_fails_safely_and_preserves_carrier() {
     write_carrier(&carrier, PayloadSource::Text("first secret"), &opts1).unwrap();
 
     // 2. Second injection without knowledge of first password (explicit pe_codebits)
-    // Must be rejected because slack ranges contain non-zero data (P1-1 protection)
+    // Must be rejected because slack ranges contain non-zero data
     let steg2 = dir.join("steg2.exe");
     let mut opts2 = write_opts(&steg2, "pe_codebits");
     opts2.stealth = true;
@@ -1298,7 +1297,7 @@ mod address_boundary {
     }
 }
 
-/// P1-8: a 213-byte codebits channel must not be advertised as available.
+/// A 213-byte codebits channel must not be advertised as available.
 /// 213 B is the *empty*-payload envelope; the smallest write the CLI accepts
 /// (1 byte) needs 214 B. Before the derived minimum, `inspect` promised the
 /// channel would fit and the subsequent write failed in the injector.

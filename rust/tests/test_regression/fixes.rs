@@ -1,7 +1,6 @@
-// Regression tests for the P0/P1 security and correctness fixes (2026-10-17).
+// Regression tests for security and correctness fixes.
 //
-// Mirrors `python/tests/test_security_fixes.py`. All CLI invocations use
-// piped/null stdio so a password prompt can never block the test run.
+// All CLI invocations use piped/null stdio so a password prompt cannot block tests.
 
 use crate::common::*;
 use std::fs;
@@ -55,8 +54,6 @@ fn write_carrier_file(
     )
     .unwrap()
 }
-
-// --------------------------------------------------------------------------- R1 / P0-3
 
 #[test]
 fn stealth_requires_password() {
@@ -130,8 +127,6 @@ fn cli_no_preserve_time_flag_accepted() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
-
-// --------------------------------------------------------------------------- R2 / P0-2
 
 #[test]
 fn sanitize_filename_unit() {
@@ -254,8 +249,6 @@ fn path_traversal_sanitized() {
     // field: Tauri and library callers write the payload out under it.
     assert_eq!(res.filename, "EVIL.txt");
 }
-
-// --------------------------------------------------------------------------- R3 / P0-4
 
 #[test]
 fn double_injection_rejected_same_password() {
@@ -402,8 +395,6 @@ fn double_envelope_inner_first_removal_diagnosed() {
     );
 }
 
-// --------------------------------------------------------------------------- P0-1
-
 #[test]
 fn pdf_dirty_tail_lossless() {
     let dir = scratch("pdf_dirty");
@@ -439,8 +430,6 @@ fn pdf_dirty_tail_lossless() {
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
 }
-
-// --------------------------------------------------------------------------- R4 / P1-5
 
 /// Envelope size for an encrypted write of `payload_len` incompressible bytes,
 /// measured against the *current* writer. The metadata block is now the compact
@@ -551,8 +540,6 @@ fn explicit_oversize_strategy_rejected_without_tmp() {
     assert!(!PathBuf::from(format!("{}.strhide.tmp", out.display())).exists());
 }
 
-// --------------------------------------------------------------------------- P1-6
-
 #[test]
 fn zip_fake_eocd_comment_located_correctly() {
     let dir = scratch("zip_fake");
@@ -634,8 +621,6 @@ fn zip_eof_stego_still_locatable() {
     .unwrap();
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&carrier).unwrap());
 }
-
-// --------------------------------------------------------------------------- R6
 
 fn stego_with_trailer(name: &str) -> (PathBuf, Vec<u8>, u64) {
     let dir = scratch(name);
@@ -790,7 +775,7 @@ fn error_type_is_still_strhide_error() {
     assert!(matches!(err, StrHideError::General(_)));
 }
 
-// --------------------------------------------------------------------------- P0-1 write-path host verification
+// --------------------------------------------------------------------------- write-path host verification
 
 /// Detection is magic-only: any file starting with `FF D8` is routed to the
 /// JPEG adapter. Before the fix, `write_core` never called `verify_structure`,
@@ -842,7 +827,7 @@ fn remove_png_chunk(data: &[u8], chunk_start: usize, len: u32) -> Vec<u8> {
     out
 }
 
-/// P1-6: EOF-overlay carriers (RIFF/WAV, MKV, PDF) must pass L1 for stealth
+/// EOF-overlay carriers (RIFF/WAV, MKV, PDF) must pass L1 for stealth
 /// and private envelopes. `verify_structure` used to tail-scan with the
 /// standard trailer magic only, so `verify` reported the host as corrupted
 /// even though `read`/`restore` worked.
@@ -900,7 +885,7 @@ fn eof_overlay_dialects_pass_l1_on_riff_mkv_pdf() {
     }
 }
 
-/// P0-2: a PNG `chunk` envelope written first, then content-domain embedding,
+/// A PNG `chunk` envelope written first, then content-domain embedding,
 /// re-compresses IDAT and moves the private chunk. Before the fix the shifted
 /// chunk was only recognised with the *standard* header magic (stealth and
 /// private dialects became unreadable), Level 2 rejected the stale coordinates,
@@ -1070,7 +1055,7 @@ fn write_rejects_bmff_host_without_explicit_sized_box() {
     assert!(!out.exists(), "a rejected host must not produce output");
 }
 
-/// F-02: the restored output is committed only after the envelope metadata
+/// The restored output is committed only after the envelope metadata
 /// AEAD opens. A forged `orig_host_sha256` (which is inside the AAD) must be
 /// rejected before the temp file replaces the carrier.
 #[test]
@@ -1121,9 +1106,8 @@ fn remove_rejects_forged_host_digest_before_rename() {
     );
 }
 
-/// F-02: `patch_offset` and the injection geometry are outside the AAD, so
-/// they need explicit physical bounds. Values at or near 4 GiB must be
-/// rejected by `validate_against`, never handed to `strip`.
+/// Explicit physical bounds verification for `patch_offset` and injection geometry:
+/// values at or near 4 GiB must be rejected by `validate_against`, never handed to `strip`.
 #[test]
 fn remove_rejects_out_of_bounds_patch_offset_and_injection_region() {
     let profile = StructureProfile::default();
@@ -1203,8 +1187,6 @@ fn remove_rejects_out_of_bounds_patch_offset_and_injection_region() {
     assert_eq!(restored, zip);
     assert!(result.verified_identical);
 }
-
-// --------------------------------------------------------------------------- F-05
 
 #[allow(clippy::permissions_set_readonly_false)]
 #[test]

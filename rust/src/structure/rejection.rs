@@ -302,12 +302,8 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
     let mut tail = vec![0u8; scan_len as usize];
     reader.read_exact(&mut tail)?;
 
-    // Find the EOCD. Garbage appended after a valid archive may itself contain
-    // `PK\x05\x06`, so the last match is not necessarily the record the
-    // central directory agrees with (review P3-22): walk candidates from the
-    // tail and keep going while they fail to resolve a readable central
-    // directory. Stopping only at a detected signature keeps the guard
-    // conservative.
+    // Find the EOCD. Trailing garbage may contain false `PK\x05\x06` matches;
+    // walk candidates from the tail until finding one backed by a valid central directory.
     let candidates: Vec<usize> = tail
         .windows(4)
         .enumerate()
@@ -349,15 +345,8 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
             unresolved = true;
             continue;
         }
-        // The buffer must *be* the central directory, not merely be readable.
-        // Walking a decoy used to fall out of the loop at the first bad magic
-        // and then report "no signature", which let a crafted trailing EOCD
-        // hide `META-INF/*.SF` from this check entirely (review R2 P0-4).
-        //
-        // `starts_with`, not `&cd_buf[0..4]`: `cd_size` is untrusted and only
-        // "not zero" is filtered above, so a 1-to-3-byte central directory made
-        // this slice panic (review R3 P0-1). With `panic = "abort"` in release
-        // that killed the process before it had written anything.
+        // The buffer must start with genuine central directory magic (`PK\x01\x02`).
+        // Use `starts_with` to guard against 1..=3 byte slice panics.
         if !cd_buf.starts_with(b"PK\x01\x02") {
             unresolved = true;
             continue;

@@ -122,10 +122,9 @@ fn test_hevc_capacity_and_roundtrip_small_heic() {
 /// on the assumption that the first 16 bytes after the NAL header are slice
 /// header. On short slice headers (single-slice I frames: typically 3-6
 /// bytes) most of that window is the first CTU's CABAC payload, which
-/// embedding *does* rewrite, so the digest drifted and extraction failed with
-/// the correct password (review 2026-10-25, S2). The payload here is large
-/// enough that the STC solution flips sign bits inside the first CTU of the
-/// first slice -- exactly the region the old digest wrongly covered.
+/// embedding rewrites, which would cause digest drift and extraction failure.
+/// The payload here verifies that STC modifications in the first CTU of the
+/// first slice do not affect cover digest stability.
 #[test]
 fn test_hevc_annexb_roundtrip_from_heic_nals() {
     let file_path = asset("small.heic");
@@ -186,12 +185,8 @@ fn test_hevc_annexb_roundtrip_from_heic_nals() {
     assert!(wrong.is_err(), "wrong password must be rejected");
 }
 
-/// Deterministic regression for the Annex-B cover-digest window bug
-/// (review 2026-10-25, S2): `henc-133.hevc` has a 5-byte slice segment
-/// header, so the old 18-byte hash window covered ~11 bytes of the first
-/// CTU's CABAC payload. With this carrier, payload and seed the STC solution
-/// flips a sign bit inside that window: on the old code extraction fails with
-/// "Invalid HEVC stego signature" even though the password is correct.
+/// Verifies Annex-B cover-digest stability on short slice segment headers
+/// where the first CTU's CABAC payload begins early.
 #[ignore = "requires the external oxideav-h265 fixture henc-133.hevc"]
 #[test]
 fn test_hevc_annexb_short_slice_header_roundtrip() {
@@ -502,11 +497,8 @@ fn test_hevc_embed_capacity_report_matches_probe() {
     assert_eq!(info.recommended_max_bytes, probe.recommended_max_bytes);
 }
 
-/// Regression (F-01): the writer's decode window must never stop below the
-/// reader's fixed `HEVC_SUPERBLOCK_POOL_SLOTS` (2048) header pool. On a carrier
-/// with more slots than a small payload needs, the old balanced window stopped
-/// early and derived the header permutation from a smaller pool than extraction
-/// did, so embedding returned success but the payload was unreadable forever.
+/// Verifies the writer's decode window does not stop below the reader's fixed
+/// `HEVC_SUPERBLOCK_POOL_SLOTS` (2048) header pool on small payloads.
 ///
 /// The assertion on `available_slots > 2048` keeps the case honest: a fixture
 /// that fits inside the reader pool cannot exercise the mismatch at all.

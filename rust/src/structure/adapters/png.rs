@@ -228,10 +228,8 @@ impl HostAdapter for PngAdapter {
         expected_trailer_magic: Option<&[u8; 4]>,
         expected_header_magic: Option<&[u8; 8]>,
     ) -> Result<Option<(u64, u64, String)>, StrHideError> {
-        // Stealth and custom-magic dialects use a password/seed-derived 8-byte
-        // header magic, not the standard one. Without the caller's hint the
-        // shifted-chunk check below would reject every shifted non-official
-        // envelope (the original P0-2 failure).
+        // Stealth and custom-magic dialects use a derived header magic.
+        // Fall back to standard header magic when none is supplied.
         let expected_header_magic = expected_header_magic
             .copied()
             .unwrap_or(crate::params::STANDARD_HEADER_MAGIC);
@@ -303,10 +301,8 @@ impl HostAdapter for PngAdapter {
 
             stego_in.seek(SeekFrom::Start(next_pos))?;
             if chunk_type == *b"IEND" {
-                // Concatenated PNG streams are legal input. The next stream's
-                // 8-byte magic sits exactly where a chunk header would; skip it
-                // and keep scanning instead of stopping at the first IEND, which
-                // hid envelopes written before the *last* one (review B-01).
+                // Concatenated PNG streams are valid; continue scanning through subsequent streams
+                // rather than stopping at the first IEND.
                 let mut next_magic = [0u8; 8];
                 if stego_in.read_exact(&mut next_magic).is_ok() && next_magic == PNG_MAGIC {
                     continue;
@@ -407,9 +403,7 @@ impl HostAdapter for PngAdapter {
             }
 
             if chunk_type == *b"IEND" {
-                // Keep verifying a concatenated stream too: hiding before the
-                // last IEND is legal, so the first IEND is not the end of the
-                // chunk stream (review B-01).
+                // Continue verifying concatenated streams through to the final IEND.
                 let mut next_magic = [0u8; 8];
                 if stego_in.read_exact(&mut next_magic).is_ok() && next_magic == PNG_MAGIC {
                     continue;
@@ -461,7 +455,7 @@ impl HostAdapter for PngAdapter {
                 break;
             }
             if chunk_type == *b"IEND" {
-                // Continue through a concatenated PNG stream (review B-01).
+                // Continue through concatenated PNG streams.
                 let mut next_magic = [0u8; 8];
                 if stego_in.read_exact(&mut next_magic).is_ok() && next_magic == PNG_MAGIC {
                     continue;

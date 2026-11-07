@@ -183,7 +183,7 @@ impl JpegSuperblockV4 {
 mod v4_superblock_tests {
     use super::*;
 
-    // Frozen in docs/stego_content_envelope_v4_golden_vectors_20261103.md.
+    // Frozen golden test vectors (see docs/api/WIRE_SPEC_CONTENT.md).
     const GOLDEN: &str = concat!(
         "40010001000102030405060708090a0b",
         "0c0d0e0f202122232425262728292a2b",

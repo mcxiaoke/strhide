@@ -235,7 +235,7 @@ fn content_file_embed_to_target_leaves_original_untouched() {
 
 /// `-o <carrier>` and "no `-o` at all" describe the same in-place write; the
 /// explicit spelling must not fail just because the destination exists, even
-/// with `overwrite = false` (review B-07).
+/// with `overwrite = false`.
 #[test]
 fn explicit_same_path_output_is_an_in_place_embed() {
     let dir = scratch("facade_explicit_same_output");
@@ -268,8 +268,8 @@ fn explicit_same_path_output_is_an_in_place_embed() {
 }
 
 /// `read -o <carrier>` would replace the only copy of the hidden data with the
-/// payload it contains; `overwrite = true` must not override that (review
-/// B-07). The carrier bytes must be bit-identical afterwards.
+/// payload it contains; `overwrite = true` must not override that.
+/// The carrier bytes must be bit-identical afterwards.
 #[test]
 fn extract_file_refuses_to_write_over_its_carrier() {
     let dir = scratch("facade_extract_onto_carrier");
@@ -850,7 +850,7 @@ fn test_progress_writer_and_cancellation() {
 
     // Cancel before write. The marker must not be `Interrupted`: `write_all`
     // retries that kind unconditionally, so answering it here is a busy loop
-    // rather than a cancellation (review R3 P1-5).
+    // rather than a cancellation.
     cancel.cancel();
     let err = pw.write(b"hello world").expect_err("should be cancelled");
     assert_ne!(err.kind(), std::io::ErrorKind::Interrupted);

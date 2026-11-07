@@ -1,8 +1,7 @@
-// Regression tests for the second-round review (docs/CODE-REVIEW-R2-20261030.md).
+// Regression tests for silent failure edge cases:
 //
-// Every case here started life as a *silent* failure: a slice panic on a
-// crafted ISO-BMFF box, a decoy end-of-central-directory record adopted as the
-// real one, or a patch span that quietly grew the carrier instead of failing.
+// Box-size integer overflow, decoy end-of-central-directory records,
+// and out-of-bounds patch spans.
 
 use crate::common::*;
 use std::fs;

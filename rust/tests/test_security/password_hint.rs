@@ -218,11 +218,10 @@ fn test_hint_size_limit() {
     }
 }
 
-/// P0-3: the hint is plaintext (it has to be readable without the password),
+/// The hint is plaintext (it has to be readable without the password),
 /// so it is bound into the AEAD instead of being trusted as-is. Its bytes are
 /// part of `EnvelopeHeader::auth_aad`, which means an attacker who rewrites the
-/// hint -- the classic social-engineering / terminal-escape vector -- breaks
-/// both the metadata seal and every payload chunk seal.
+/// hint breaks both the metadata seal and every payload chunk seal.
 #[test]
 fn tampered_hint_breaks_authentication() {
     use strhide::structure::envelope::{EnvelopeTrailer, HEADER_SIZE, TRAILER_SIZE};

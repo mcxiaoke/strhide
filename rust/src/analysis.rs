@@ -24,8 +24,7 @@
 //!   JPEG-derived blockiness) at least as strongly as to a payload. They are
 //!   also blind to ternary `±1` matching by construction -- embedding this
 //!   project's own PNG carriers leaves the estimates unchanged at low load and
-//!   *lowers* them at full load. See
-//!   `docs/png_blind_calibration_20261023.md`.
+//!   *lowers* them at full load.
 //!
 //! All findings carry a `severity` and the report aggregates a 0–100
 //! `risk_score` plus a coarse `verdict`. This is a heuristic triage tool, not
@@ -86,8 +85,7 @@ const JPEG_EOI: [u8; 2] = [0xFF, 0xD9];
 ///
 /// `0.05` is 4.5x above the highest clean value and detects 85% of
 /// full-capacity carriers; the recommended load stays undetected by design.
-/// This is a heuristic with a measured false-negative rate, not a proof
-/// procedure -- see `docs/stego_keyed_parameters_plan_20261020.md` §13.
+/// This is a heuristic with a measured false-negative rate, not a proof procedure.
 const CALIBRATION_FLAG_RATE: f64 = 0.05;
 /// Estimate above which the finding is raised to `Likely`.
 const CALIBRATION_STRONG_RATE: f64 = 0.15;
@@ -264,10 +262,7 @@ fn report_trailing(
         return;
     }
     let ent = view.trailing_entropy(end_offset);
-    // Bytes after the container's own end marker are a structural fact, not a
-    // statistical guess: an appended text file is still appended data. Entropy
-    // only refines the detail; it no longer downgrades the finding to
-    // "suspicious" (which left confirmed overlays below the CI gate).
+    // Trailing bytes after container end markers indicate overlay data; entropy refines details.
     out.push(Finding {
         detector: detector.into(),
         severity: Severity::Likely,
@@ -490,8 +485,7 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
     // "clean is not proof" caveat still applies to this report.
     let mut calibrated_signal = false;
     // Set when a PNG could not be turned into pixels at all (16-bit, Adam7,
-    // oversized, corrupt). Without it the report showed zero spatial detectors
-    // and still read as `clean` (review R2 P1-3).
+    // oversized, corrupt), preventing false clean reports when spatial analysis cannot run.
     let mut png_stats_skipped = false;
 
     // 3. Statistical domain: strictly separate spatial domain (PNG) and frequency domain (JPEG)
@@ -586,9 +580,7 @@ fn find_all(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
 struct KnownSignature {
     tool: &'static str,
     pattern: &'static [u8],
-    /// Four-byte patterns are far too common in compressed or random data
-    /// (1.56% per 64 MiB window), so they only count when the surrounding
-    /// trailer is self-consistent (review B-03).
+    /// Four-byte patterns require self-consistent trailer context to avoid false positives in compressed data.
     needs_trailer_context: bool,
 }
 
@@ -642,10 +634,8 @@ fn track_tool_signatures(view: &ScanView, out: &mut Vec<Finding>) {
     }
 }
 
-/// Is the 4-byte trailer magic at `magic_pos` backed by a self-consistent
-/// 24-byte trailer? Used to demote accidental 4-byte matches in random data
-/// (review B-03): the offset/size must stay within the file and the CRC must
-/// verify, which a coincidental pattern cannot satisfy.
+/// Checks whether the 4-byte trailer magic at `magic_pos` is backed by a
+/// self-consistent 24-byte trailer and valid CRC to eliminate accidental false positives.
 fn trailer_context_ok(view: &ScanView<'_>, magic_pos: u64) -> bool {
     let Some(start) = magic_pos.checked_sub((TRAILER_SIZE - 4) as u64) else {
         return false;
@@ -789,8 +779,8 @@ fn track_png_structure(view: &ScanView, out: &mut Vec<Finding>) -> bool {
                 // Whole file, and the walk never reached IEND. A conforming
                 // PNG always ends with it, so this is either a truncated file
                 // or an IEND that was removed and replaced with other bytes.
-                // Staying silent let anyone delete the last 12 bytes and append
-                // a payload with zero findings (review R3 P1-2).
+                // An absent IEND must be reported to prevent appending payloads
+                // without detection.
                 out.push(Finding {
                     detector: "png:trailing-data".into(),
                     severity: Severity::Suspicious,
@@ -932,8 +922,8 @@ fn walk_jpeg_markers(data: &[u8]) -> JpegWalk {
 /// The return value drives the `jpeg:trailing-data` metric: with no terminator
 /// the metric cannot claim "0 bytes / clean termination at EOI". Same contract
 /// as [`track_png_structure`], and for the same reason — a whole-file view with
-/// no EOI used to produce no finding at all, so deleting the last two bytes and
-/// appending a payload scored a clean verdict (review R4 P1).
+/// no EOI must produce a finding, preventing payloads from being appended after
+/// removing the terminator.
 fn track_jpeg_structure(view: &ScanView, out: &mut Vec<Finding>) -> bool {
     let walk = walk_jpeg_markers(view.prefix);
     let terminated = match walk.eoi_end {
@@ -1418,9 +1408,8 @@ fn decode_jpeg_pixels(data: &[u8]) -> Option<(Vec<u8>, u32, usize)> {
     use jpeg_decoder::{Decoder, PixelFormat};
     // `jpeg-decoder` allocates from the geometry declared in the header, not
     // from the bytes it has read: a few-KB JPEG claiming 65535x65535 asks for
-    // ~12 GiB. The crate exposes a limit but defaults it to `usize::MAX`, so
-    // this is the one place a scan of an untrusted file could still exhaust
-    // memory (review R2 P1-7). 1 GiB still admits a 350 MP RGB frame.
+    // ~12 GiB. Limit the maximum decoded buffer size to 1 GiB to defend
+    // against memory exhaustion on untrusted files (admits up to a 350 MP RGB frame).
     const MAX_DECODED_BYTES: usize = 1 << 30;
     let mut decoder = Decoder::new(std::io::Cursor::new(data));
     decoder.set_max_decoding_buffer_size(MAX_DECODED_BYTES);
@@ -1532,8 +1521,7 @@ fn ws_analysis(pixels: &[u8], width: u32, channels: usize) -> f64 {
 /// estimators report 0.2-0.5 on *untouched* images (texture, saturation,
 /// compression artifacts), which flagged 25-34% of a 216-cover corpus.
 ///
-/// Measured on that corpus -- 160 DIV2K images plus 56 camera photos stored as
-/// PNG (`docs/png_blind_calibration_20261023.md`):
+/// Measured on that corpus -- 160 DIV2K images plus 56 camera photos stored as PNG:
 /// - clean covers: median 0.016-0.022, p90 0.13-0.22, max 0.42-0.73;
 /// - the same covers with every LSB *replaced* (the rule these estimators
 ///   model): median 0.96-1.00;
@@ -1673,9 +1661,8 @@ fn track_spatial_domain(
             detector: "spatial:ws".into(),
             // Deliberately informational: WS over-reports on content-adaptive
             // embedding that keeps the visual statistics intact, and the scan
-            // verdict is calibrated against that. The *status* is INFO to match,
-            // instead of claiming ALERT while the verdict stays clean (review
-            // R3 P2-21).
+            // verdict is calibrated against that. The status is INFO to match,
+            // instead of claiming ALERT while the verdict stays clean.
             severity: Severity::Info,
             detail: format!("Weighted Stego-analysis (WS) estimates LSB rate ~{ws_rate:.2}"),
         });
@@ -1853,10 +1840,8 @@ fn track_jpeg_dct_domain(
             status: "SKIPPED".into(),
             metric: "n/a".into(),
             threshold: Some(format!("{CALIBRATION_FLAG_RATE:.3}")),
-            // Name the real gate. The old text said "e.g. q100", but the check
-            // is `mean step < 2`, which a quality≈95 table also trips, and the
-            // other exits (unreadable DQT, CMYK/16-bit, geometry mismatch) have
-            // nothing to do with quality (review R2 P1-4).
+            // The check is `mean step < 2` (which fine quantization tables trip),
+            // or other unreadable states (unreadable DQT, CMYK/16-bit, geometry mismatch).
             detail: "quantisation too fine for calibration (mean step < 2), \
                      or the DQT/pixel data could not be read"
                 .into(),
@@ -1893,8 +1878,8 @@ fn track_jpeg_dct_domain(
             });
         }
     } else {
-        // Reporting nothing at all made a skipped detector indistinguishable
-        // from a clean one. Say it was skipped, and why (review R2 P1-4).
+        // Explicitly report skipped detector status and reason to distinguish
+        // from a passing detector.
         let detail = if coefficients.is_none() {
             "no readable DCT coefficient stream"
         } else {
@@ -1981,8 +1966,7 @@ fn rs_difference(plane: &[i32], rows: usize, cols: usize, mask: RsMask) -> f64 {
         return 0.0;
     }
     let (mut r_count, mut s_count, mut n) = (0i64, 0i64, 0i64);
-    // A 3x3 window starting at `i` needs `i + 2 < rows`, so the last start is
-    // `rows - 3`; `0..rows - 3` stopped one window short (review P2-23).
+    // A 3x3 window starting at `i` needs `i + 2 < rows`, so the last valid starting index is `rows - 3`.
     for i in 0..rows - 2 {
         for j in 0..cols - 2 {
             let mut w = [0i32; 9];
@@ -2206,9 +2190,8 @@ mod tests {
 
     #[test]
     fn rs_difference_includes_the_trailing_window() {
-        // A 4x4 plane has two 3x3 window starts per axis (0 and 1). The loop
-        // bound used to stop one short, so the window containing the only
-        // non-zero sample was never scored (review P2-23).
+        // A 4x4 plane has two 3x3 window starts per axis (0 and 1). Ensure
+        // the trailing window containing the non-zero sample is scored.
         let mut plane = vec![0i32; 16];
         plane[2 * 4 + 2] = 1; // centre of the bottom-right 3x3 window
 

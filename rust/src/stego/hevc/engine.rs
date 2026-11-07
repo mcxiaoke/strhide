@@ -2154,10 +2154,7 @@ fn read_hevc_header_v4(
             .map_err(|_| StrHideError::NoHiddenData("No valid payload found".into()))?;
         extension_tags = tlvs.iter().map(|(tag, _)| *tag).collect();
     }
-    // The flag and the TLVs must agree before any caller trusts the header:
-    // `inspect`/`verify` never reach the post-decrypt check below, so a header
-    // that merely sets the bit used to look like a critical carrier (review
-    // B-05).
+    // The flag and the TLVs must agree before any caller trusts the header.
     validate_ext_critical_flag(sb.flags, &extension)
         .map_err(|_| StrHideError::NoHiddenData("No valid payload found".into()))?;
 
@@ -2398,10 +2395,8 @@ fn hevc_header_info(
     media_info: Option<MediaInfo>,
 ) -> Option<StegoHeaderInfo> {
     let _suite = CipherSuiteId::from_u16(header.sb.suite_id)?;
-    // The plaintext length lives inside the AEAD body: what remains after the
-    // tag and the compact header includes the optional filename micro-header
-    // and any compression, so it is not the payload length. Report `None`
-    // until the body is decrypted, like the PNG/JPEG engines (review B-04).
+    // Plaintext length is unknowable prior to decryption due to variable compression,
+    // optional filename micro-headers, and AEAD overhead. Report `None` until decrypted.
     Some(StegoHeaderInfo {
         format: kind.label().to_string(),
         has_hidden_data: true,
@@ -4084,8 +4079,7 @@ fn is_non_reference_vcl(nal_type: u8) -> bool {
 ///
 /// These are the prediction roots of a GOP. A flip in one of them is seen by
 /// every picture that follows until the next IRAP, which is why they are the
-/// one class the ladder never spends: measured at equal payload, including them
-/// costs 15-20 dB (`docs/hevc_video_capacity_quality_audit_20261026.md` §2).
+/// one class the ladder never spends (avoiding severe quality degradation).
 fn is_irap(nal_type: u8) -> bool {
     (16..=23).contains(&nal_type)
 }
@@ -4784,8 +4778,8 @@ mod dialect_tests {
     }
 }
 
-/// Regression tests for the safety-policy gate (bug B1: the HEVC path used to
-/// receive only the tier's level, so `--enforce-safety` never blocked).
+/// Regression tests for the safety-policy gate: verify that `--enforce-safety`
+/// blocks appropriately on the HEVC path.
 #[cfg(test)]
 mod safety_policy_tests {
     use super::enforce_safety;
@@ -4876,7 +4870,7 @@ mod annex_b_parameter_set_tests {
     }
 }
 
-/// F-01 regression: the writer's decode window must never fall below the
+/// Regression test: the writer's decode window must never fall below the
 /// reader's fixed `HEVC_SUPERBLOCK_POOL_SLOTS` header pool.
 #[cfg(test)]
 mod window_tests {
@@ -5026,7 +5020,7 @@ pub fn bench_scan_slices(
 mod v4_superblock_tests {
     use super::*;
 
-    // Frozen in docs/stego_content_envelope_v4_golden_vectors_20261103.md.
+    // Frozen golden test vectors (see docs/api/WIRE_SPEC_CONTENT.md).
     const GOLDEN: &str = concat!(
         "1234567840010200010400010000012c",
         "202122232425262728292a2b65db3bcb",

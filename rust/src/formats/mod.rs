@@ -2,8 +2,7 @@
 //!
 //! Format identification and the capability matrix live here, with no knowledge
 //! of either domain's engines: `structure` and `stego` both depend on this
-//! module and never on each other (see
-//! `docs/strhide_architecture_and_refactoring_plan.md` §2.1).
+//! module and never on each other.
 //!
 //! - [`sniff`] answers "what file is this?" — [`FileFormat`],
 //!   [`sniff_bytes`], [`sniff_stream`].

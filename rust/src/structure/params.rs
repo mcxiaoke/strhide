@@ -1,8 +1,7 @@
 //! The structure-domain half of a dialect.
 //!
-//! Split out of the old all-in-one `Profile` (stage 4, see
-//! `docs/strhide_architecture_and_refactoring_plan.md` §3.5): the structure
-//! engine only ever needed these three fields, and the content-domain half
+//! Split out of the all-in-one `Profile`: the structure
+//! engine only needs these three fields, and the content-domain half
 //! lives in [`crate::stego::params::StegoProfile`]. [`crate::facade::Dialect`]
 //! composes the two so a host still stores and passes **one** object.
 //!

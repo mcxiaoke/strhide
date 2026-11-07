@@ -314,10 +314,7 @@ pub(crate) fn extract_flac(
         return Err(core::no_hidden_data());
     }
 
-    // Reuse `scratch`: the header view borrows it only until `read_base`
-    // returns, and the body view needs the same bytes, so a second full-file
-    // clone is pure waste (F-26). The third `analyse` CRC recheck elsewhere
-    // stays as-is.
+    // Reuse `scratch` buffer to avoid redundant full-file memory allocations.
     let body_phase = flac_body_phase(body_phase_base, &view.header.salt, &view.header.nonce);
     let flac = flac::FlacCarrier::new(
         &mut scratch,

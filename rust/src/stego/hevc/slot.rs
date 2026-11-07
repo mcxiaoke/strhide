@@ -452,14 +452,8 @@ impl CabacRecorder {
 
     /// [`Self::with_slice_mode`] with capacity preallocated based on slice byte length.
     ///
-    /// The hint is capped: `slice_len` comes from the carrier, and the embed
-    /// mode reserves 18 `BinOp`s plus a slot and a pending sign per input byte
-    /// (~56 bytes of reservation per carrier byte). A single large NAL — an 8K
-    /// intra frame, or a deliberately fat one — turned that into gigabytes of
-    /// up-front reservation per recorder, multiplied by the batched GOP
-    /// decoders. Reserving for at most [`CAPACITY_HINT_BYTES`] and letting
-    /// `Vec` grow past it keeps the common case allocation-free without letting
-    /// the carrier dictate the allocation (review R2 P2-1).
+    /// The allocation hint is capped by [`CAPACITY_HINT_BYTES`] to prevent large
+    /// NAL units from triggering multi-gigabyte up-front reservations.
     pub fn with_slice_capacity(
         slice_idx: usize,
         band: u8,

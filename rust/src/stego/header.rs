@@ -474,9 +474,9 @@ impl SpatialHeaderV4 {
 ///
 /// Shared by every v4 dialect (spatial PNG/audio, HEVC, JPEG) so a header that
 /// declares a critical contract without carrying one — or carries one without
-/// declaring it — is rejected identically on extract, inspect and verify
-/// (review B-05). An empty extension area with the bit set is invalid on its
-/// own: `FLAG_EXT_PRESENT` must be clear in that case.
+/// declaring it — is rejected identically on extract, inspect and verify.
+/// An empty extension area with the bit set is invalid on its own:
+/// `FLAG_EXT_PRESENT` must be clear in that case.
 pub fn validate_ext_critical_flag(flags: u8, extension: &[u8]) -> Result<(), StrHideError> {
     let declared = flags & FLAG_EXT_CRITICAL != 0;
     if extension.is_empty() {
@@ -541,7 +541,7 @@ mod tests {
 mod v4_header_tests {
     use super::*;
 
-    // Frozen in docs/stego_content_envelope_v4_golden_vectors_20261103.md.
+    // Frozen golden test vectors (see docs/api/WIRE_SPEC_CONTENT.md).
     const PNG: &str = concat!(
         "000102030405060708090a0b0c0d0e0f",
         "202122232425262728292a2b0000012c",

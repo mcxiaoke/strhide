@@ -1,8 +1,7 @@
-// Regression tests for the third-round review (docs/CODE-REVIEW-R3-20261031.md).
+// Regression tests for third-round edge cases:
 //
-// The cases here are the findings that survived re-verification against the
-// source: a slice panic reachable from an 86-byte archive, and a cancel marker
-// that made `write_all` spin instead of returning.
+// Truncated central-directory slices, cancel-token spin loops,
+// and missing format terminators.
 
 use std::io::{Cursor, ErrorKind, Write};
 use std::sync::mpsc;
@@ -17,7 +16,7 @@ use strhide::structure::rejection::check_jar_signature;
 /// `check_jar_signature` only filtered `cd_size == 0` and then sliced
 /// `cd_buf[0..4]`, so a 1-to-3-byte central directory panicked. Release builds
 /// use `panic = "abort"`, so the whole process died before anything was written
-/// (review R3 P0-1).
+/// preventing panic on malformed headers.
 fn jar_with_tiny_central_directory(cd_size: u32) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"PK\x03\x04");
@@ -37,7 +36,11 @@ fn jar_with_tiny_central_directory(cd_size: u32) -> Vec<u8> {
 fn jar_signature_check_survives_short_central_directory() {
     for cd_size in 0..=4u32 {
         let data = jar_with_tiny_central_directory(cd_size);
-        assert_eq!(data.len(), 86, "fixture shape must match the review");
+        assert_eq!(
+            data.len(),
+            86,
+            "fixture shape must match expected test bounds"
+        );
         let mut cur = Cursor::new(data);
         let found = check_jar_signature(&mut cur, Some("tiny.zip"))
             .expect("a short central directory is not an I/O error");
@@ -68,7 +71,7 @@ fn jar_signature_check_survives_short_central_directory() {
 ///
 /// It used to answer `ErrorKind::Interrupted`, which `Write::write_all` retries
 /// with a bare `continue`: the write stage spun at 100% CPU forever and
-/// `map_io_cancel` never saw an error (review R3 P1-5). The write runs on a
+/// `map_io_cancel` never saw an error. The write runs on a
 /// worker thread so a regression fails the test instead of hanging the suite.
 #[test]
 fn cancelled_writer_fails_instead_of_spinning() {
@@ -100,7 +103,7 @@ fn cancelled_writer_fails_instead_of_spinning() {
 /// Deleting the last 12 bytes of a PNG and appending a payload used to produce
 /// a completely clean scan: the chunk walk never reached IEND, the whole-file
 /// branch said nothing, the entropy detector exempts PNG, and the metric still
-/// claimed "0 bytes / clean termination at IEND" (review R3 P1-2).
+/// claimed "0 bytes / clean termination at IEND".
 #[cfg(feature = "analysis")]
 #[test]
 fn scan_flags_a_png_without_iend() {
@@ -134,7 +137,7 @@ fn scan_flags_a_png_without_iend() {
 
 /// A carrier without IEND cannot be re-encoded byte-for-byte, so the content
 /// domain refuses it instead of silently dropping everything it could not read
-/// as a chunk (review R3 P2-11).
+/// as a chunk.
 #[cfg(feature = "cli")]
 #[test]
 fn content_domain_refuses_a_png_without_iend() {
@@ -162,7 +165,7 @@ fn content_domain_refuses_a_png_without_iend() {
 /// `isobmff_locate` compared the envelope only with its own box size, so this
 /// was accepted as "hidden data present" and `read` allocated the metadata
 /// buffer before the short stream was noticed. The other adapters already
-/// bounded the envelope against the real file length (review R3 P2-17/P2-18).
+/// bounded the envelope against the real file length.
 #[cfg(feature = "cli")]
 fn mp4_with_forged_trailer() -> Vec<u8> {
     const MAGIC: [u8; 4] = [0x78, 0xe6, 0x66, 0xd2];
@@ -231,7 +234,7 @@ fn isobmff_rejects_an_envelope_larger_than_the_file() {
 /// whole-file view that never reaches `EOI` reported nothing at all, the
 /// entropy detector exempts JPEG, and the metric still claimed "0 bytes /
 /// clean termination at EOI". Deleting the trailing `FF D9` and appending a
-/// payload therefore scanned clean (review R4 P1-7).
+/// payload therefore scanned clean.
 #[cfg(feature = "analysis")]
 #[test]
 fn scan_flags_a_jpeg_without_eoi() {

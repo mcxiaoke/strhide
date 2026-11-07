@@ -9,8 +9,6 @@
 //! carrier file size is unchanged and every rewritten instruction is
 //! semantically identical to the original.
 //!
-//! Design document: `docs/pe_codebits_plugin_design.md` (v1.0).
-//!
 //! Layer split:
 //! - [`profile`], [`embed`], [`extract_ube`], [`apply_diff`] are format
 //!   agnostic: they operate on a code byte range plus a bitness, so future
@@ -47,7 +45,7 @@ const CHANNEL_HEADER_BITS: usize = CHANNEL_HEADER_LEN * 8;
 
 /// Channel positions needed before the header can be unpacked: the 14 header
 /// bytes plus the first 8 UBE bytes, which hold the envelope header magic that
-/// keys the channel-header mask (review P1-5).
+/// keys the channel-header mask.
 const CHANNEL_PREFIX_BITS: usize = CHANNEL_HEADER_BITS + 64;
 
 /// Structural lower bound for a channel payload: a bare envelope is a 112-byte
@@ -603,8 +601,8 @@ pub fn embed(
         CodebitsError::Corrupted("UBE is too short for a 4-byte trailer magic".into())
     })?;
     // The mask key is the 8-byte envelope header magic at the very start of the
-    // UBE, which the reader can recover from the channel prefix without a
-    // password (review P1-5). It is deliberately *not* `magic`.
+    // UBE, which the reader can recover from the channel prefix without a password.
+    // It is deliberately *not* `magic`.
     let envelope_header_magic: [u8; 8] = ube
         .get(0..8)
         .ok_or_else(|| CodebitsError::Corrupted("UBE is too short for its header magic".into()))?
@@ -896,13 +894,8 @@ mod tests {
         assert_ne!(bogus.version, CHANNEL_VERSION);
     }
 
-    /// Review P1-5 regression: the pre-fix implementation derived the mask from
-    /// the 4-byte magic written verbatim in `ChannelHeader[0..4]`, so anyone
-    /// could unmask `version/flags/ube_len/slack_off` without a password.
-    ///
-    /// This test reproduces that old derivation locally: a header masked the
-    /// old way must *not* parse under the new reader, and the visible magic
-    /// alone must not reproduce the real mask.
+    /// Regression test: validates that channel mask derivation relies on envelope header
+    /// magic rather than visible channel magic, preventing unauthenticated header unpacking.
     #[test]
     fn channel_header_mask_is_not_derivable_from_the_visible_magic() {
         use hkdf::Hkdf;
@@ -918,7 +911,7 @@ mod tests {
             slack_off: 0x1000,
         };
 
-        // The old P1-5 derivation: HKDF over the 4 visible magic bytes.
+        // Legacy derivation for negative regression: HKDF over the 4 visible magic bytes.
         let old_mask = {
             let hk = Hkdf::<Sha256>::new(None, &visible_magic);
             let mut mask = [0u8; 10];
@@ -930,8 +923,7 @@ mod tests {
         for (i, m) in old_mask.iter().enumerate() {
             old_bytes[4 + i] ^= *m;
         }
-        // Sanity check: under the old scheme the visible magic alone restored
-        // the real header fields (this is the bypass P1-5 removes).
+        // Verify legacy mask behavior against raw bytes.
         assert_eq!(old_bytes[4] ^ old_mask[0], CHANNEL_VERSION);
 
         // The new reader keys the mask from the envelope header magic, so an

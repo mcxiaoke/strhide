@@ -1,18 +1,9 @@
-//! verify / warning / CLI-output coverage (gap report 2026-10-19, gaps #3 #4 #6 #7).
+//! Verification, warning, and CLI output format integration coverage:
 //!
-//! Previously untested paths:
-//!
-//! - `verify_carrier` early-return branch: no envelope at all (Level 2
-//!   "No envelope found", Level 3 "Skipped (no envelope)") and the
-//!   Level 3 "Password required for cryptographic verification" skip for an
-//!   encrypted envelope verified without its password;
-//! - the >50% size-inflation warning and its merge with the structural
-//!   "carrier already looks like a hidden envelope" warning;
-//! - `inspect --json` / `verify --json` stdout (schema + the `[auto
-//!   preference]` capacity marker is only in the human output, so it is
-//!   checked there);
-//! - `--strategy ask` interactive selection for a single carrier, including
-//!   out-of-range and non-numeric answers falling back to the first strategy.
+//! - `verify_carrier` early-return branches (missing envelope, password required).
+//! - Size inflation warnings and coexistence diagnostics.
+//! - JSON output schemas and stdout formatting for `inspect` and `verify`.
+//! - Interactive strategy selection (`--strategy ask`).
 
 use crate::common::*;
 use std::fs;

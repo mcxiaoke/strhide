@@ -355,11 +355,8 @@ pub fn decode_png(data: &[u8]) -> Result<RawImage, StrHideError> {
     }
 
     if !saw_iend {
-        // Re-encoding always writes a fresh IEND, so a carrier without one
-        // cannot be reproduced byte-for-byte. Worse, the old parser left `tail`
-        // empty here and silently dropped every byte it could not read as a
-        // chunk (review R3 P2-11). Refusing is the only honest answer for a
-        // tool that promises format preservation.
+        // Re-encoding requires an existing IEND chunk to preserve format structure.
+        // Carriers missing IEND cannot be reproduced losslessly and must be rejected.
         return Err(StrHideError::CorruptedData(
             "PNG is missing its IEND chunk; re-encoding it could not be lossless. Repair the file, or use 'strhide write' for structural hiding".into(),
         ));
@@ -957,11 +954,7 @@ fn deflate_len(data: &[u8], level: u32) -> usize {
     encoder.finish().map(|v| v.len()).unwrap_or(usize::MAX)
 }
 
-/// No-op tracer hook, mirroring the JPEG engine's `[stego]` lines.
-///
-/// Callers pass `format_args!` rather than `format!`: building the message
-/// eagerly heap-allocated on every embed/extract even though this build never
-/// emits it (review P2-14).
+/// No-op tracer hook using `format_args!` to avoid eager heap allocation.
 #[inline(always)]
 fn trace(_args: std::fmt::Arguments<'_>) {}
 
@@ -2697,9 +2690,7 @@ mod tests {
 
     #[test]
     fn trace_call_sites_do_not_format_eagerly() {
-        // `trace` is a no-op outside tracing builds. Passing `format!` to it
-        // built the message unconditionally, heap allocation included
-        // (review P2-14); `format_args!` defers that work.
+        // Verifies trace call sites pass `format_args!` rather than allocating eagerly with `format!`.
         let source = include_str!("engine.rs");
         // Split so this test's own source does not contain the needle.
         let eager_pattern = concat!("trace", "(&format!(");
@@ -3719,10 +3710,9 @@ mod tests {
         }
     }
 
-    /// The budget has to be checked before the trellis allocates: 64 MP RGB with
-    /// a 1.5e8-slot body is the case the review measured, and its bitmap alone
-    /// runs to tens of GiB. The spatial cap (`MAX_PNG_PIXELS`) alone does not
-    /// bound it.
+    /// The budget must be checked before trellis allocation: 64 MP RGB with
+    /// a 1.5e8-slot body would allocate tens of GiB for bitmap alone.
+    /// The spatial cap (`MAX_PNG_PIXELS`) alone does not bound it.
     #[test]
     fn pipeline_budget_rejects_oversized_trellis_work() {
         let total_pixels = 64 * 1024 * 1024;
@@ -3744,16 +3734,13 @@ mod tests {
         );
     }
 
-    /// Review G1 (P2-1): the probe's `max_raw_payload_bytes` must never exceed
-    /// what the embedder's pipeline budget accepts. The 8192x7680 RGB carrier
-    /// from the independent review was advertised `12_385_345` bytes and then
-    /// refused to write them ("needs about 9015 MiB ... 8192 MiB budget").
+    /// Verifies that probe `max_raw_payload_bytes` never exceeds what the pipeline budget accepts.
     #[test]
     fn probe_capacity_never_exceeds_pipeline_budget() {
         let params = PngParams::default();
         let total_pixels = 8192 * 7680; // 62,914,560
         let pool_green = 40_000_000usize;
-        let pool_rgb = Some(99_082_944usize); // as measured on the review carrier
+        let pool_rgb = Some(99_082_944usize); // test carrier pool size
 
         // The exact size the pre-fix probe advertised: slots fit the pool, but
         // the STC working set does not fit the budget.
@@ -3802,9 +3789,7 @@ mod tests {
         );
     }
 
-    /// Review G4 (P2-4): `png_pre_salt` binds the locator keys to the ancillary
-    /// chunk stream. An IDAT-only recompression (chunk metadata untouched) must
-    /// keep the payload readable.
+    /// Verifies that IDAT-only recompression preserves payload readability.
     #[test]
     fn idat_only_recompression_keeps_payload_readable() {
         let (w, h) = (96usize, 96usize);
@@ -3850,14 +3835,8 @@ mod tests {
         assert_eq!(out, payload);
     }
 
-    /// Review G4 (P2-4) used to pin the opposite behaviour: any ancillary-chunk
-    /// edit changed `pre_salt`, so the payload became unreadable and the
-    /// failure looked exactly like a wrong password.
-    ///
-    /// That turned a routine metadata edit (exiftool, `tinypng`, an editor's
-    /// "save as") into silent, unrecoverable data loss. The carrier identity is
-    /// now the critical-chunk stream only, so a `tEXt`/`iCCP`/`tIME` rewrite
-    /// must leave the payload readable.
+    /// Verifies that ancillary chunk changes (e.g. metadata edits via exiftool/tinypng)
+    /// leave the stego payload intact and readable.
     #[test]
     fn ancillary_chunk_change_keeps_payload_readable() {
         let (w, h) = (96usize, 96usize);
@@ -4452,12 +4431,7 @@ mod tests {
         );
     }
 
-    /// Evidence for LOGIC-07 (P2-22): the candidate pool is keyed on the
-    /// header channel (green), but `for_each_body_slot` re-checks **each**
-    /// body channel against the same `[8, 247]` rule. So R/B values are never
-    /// written outside the eligible class, and a pixel whose green is out of
-    /// range is simply not a candidate -- a capacity asymmetry that embed and
-    /// extract share, not a corruption path.
+    /// Verifies that RGB body slots filter each channel while sharing the candidate pool.
     #[test]
     fn rgb_body_slots_filter_each_channel_but_share_the_green_candidate_pool() {
         let image = RawImage {

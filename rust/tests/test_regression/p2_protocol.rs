@@ -1,11 +1,8 @@
-// Regression tests for P2 protocol/diagnostic fixes (2026-10-17), batch 2.
+// Regression tests for protocol and diagnostic behaviors:
 //
-// - #11: `verify_carrier` Level 2 must validate the envelope header (version
-//   / hint_len / meta_len consistency) instead of only checking the trailer.
-// - #14: xref-stream PDFs (no `trailer` keyword) must derive the next object
-//   number from the tail's `N G obj` definitions instead of a hardcoded 9999,
-//   must recover `/Root` from the tail, and must be refused when no `/Root`
-//   exists at all (incremental would break the document tree).
+// - Level 2 verification validates envelope header fields (version, hint_len, meta_len).
+// - XRef-stream PDFs derive object numbers dynamically, recover `/Root`, and
+//   reject documents without a valid catalog root.
 
 use crate::common::*;
 use std::fs;
@@ -43,8 +40,7 @@ fn make_minimal_png() -> Vec<u8> {
 /// XRef-stream PDF whose dictionary nests `/DecodeParms << ... >>` *before*
 /// `/Size`, `/Root` (and an optional `/Encrypt`). `/Size 20` is deliberately
 /// larger than the highest `N G obj` in the tail (4), so a scanner that
-/// truncates at the nested `>>` derives the wrong next object number (review
-/// P1-3).
+/// truncates at the nested `>>` derives the wrong next object number.
 fn make_xref_stream_pdf_nested_decode_parms(encrypt: Option<&str>) -> Vec<u8> {
     let mut doc = b"%PDF-1.5\n\
         1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
@@ -191,7 +187,7 @@ fn pdf_xref_stream_incremental_write_roundtrip() {
         "incremental trailer missing recovered /Root"
     );
     // The update must repeat the document's dialect: an XRef stream object,
-    // never a classic `xref` table after an XRef-stream section (P1-3).
+    // never a classic `xref` table after an XRef-stream section.
     assert!(
         stego.windows(11).any(|w| w == b"/Type /XRef"),
         "xref-stream document received a classic update"
@@ -230,7 +226,7 @@ fn pdf_xref_stream_incremental_write_roundtrip() {
 /// Revision 1 is a classic `xref`/`trailer` document, revision 2 replaces the
 /// cross-reference with an XRef stream (object 4, `/Size 5`). The stale rev-1
 /// trailer still sits in the 64 KiB tail window and declares `/Size 4`, i.e.
-/// exactly the object rev 2 occupies (review A-06).
+/// exactly the object rev 2 occupies.
 fn make_classic_then_xref_stream_pdf() -> Vec<u8> {
     let mut pdf = b"%PDF-1.4\n\
         1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
@@ -427,7 +423,7 @@ fn pdf_l1_survives_an_overlay_larger_than_the_tail_window() {
 /// The backward `%%EOF` scan is capped at 1 MiB from the effective PDF tail.
 /// An overlay *larger* than that cap must still be excluded, otherwise the
 /// host's marker sits outside the window and L1 calls a freshly written carrier
-/// corrupted (review P1-3, defect 3).
+/// corrupted.
 #[test]
 fn pdf_l1_survives_an_overlay_beyond_the_one_mib_search_depth() {
     let dir = scratch("pdf_huge_overlay");
@@ -509,7 +505,7 @@ fn inspect_degrades_an_invalid_header_to_no_envelope() {
 
     // `verify` still reports the precise Level-2 diagnostic (test above), but
     // `inspect` / `smart_extract` must not abort the whole flow just because
-    // one envelope header fails its shape check (review B-06 / N-02).
+    // one envelope header fails its shape check.
     let bytes = fs::read(&out).unwrap();
     let res = strhide::structure::inspect_carrier_bytes(
         &bytes,
@@ -551,8 +547,7 @@ fn verify_rejects_a_meta_len_above_the_metadata_cap() {
     // A metadata block is at most a filename plus a fixed tail, so the reader
     // refuses anything past `MAX_META_LEN` before it sizes a buffer from the
     // field. Without this cap a forged 4 GiB `meta_len` reached
-    // `vec![0u8; meta_len]` and an allocation failure aborted the process
-    // (review P0-2).
+    // `vec![0u8; meta_len]` and an allocation failure aborted the process.
     let dir = scratch("verify_metalen_cap");
     let (out, ube_offset) = write_eof_envelope(&dir, "mc");
 

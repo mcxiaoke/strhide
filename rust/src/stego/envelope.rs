@@ -176,8 +176,7 @@ pub fn random_nonce() -> [u8; NONCE_LEN] {
 /// `(password, salt)` and the PNG engine uses the salt as the KDF salt
 /// directly: without a payload/cover binding, the same password and seed on
 /// two inputs would reuse the whole `(key, nonce)` pair, and AES-GCM under a
-/// repeated pair with different plaintexts is a two-time pad
-/// (review 2026-10-25, M1).
+/// repeated pair with different plaintexts is a two-time pad vulnerability.
 ///
 /// Reproducibility holds for a fixed `git` revision and target triple. Two
 /// things narrow it further:
@@ -593,8 +592,7 @@ mod tests {
     /// Seeded derivations must reproduce for identical inputs and must move
     /// with either half of the (cover, payload) binding: the PNG engine uses
     /// the salt directly as the KDF salt, so an unbound seeded salt/nonce
-    /// replayed on different inputs would reuse an AEAD (key, nonce) pair
-    /// (review 2026-10-25, M1).
+    /// replayed on different inputs would reuse an AEAD (key, nonce) pair.
     #[test]
     fn seeded_derivations_bind_to_cover_and_payload() {
         let f = Freshness::Seeded([9u8; 32]);

@@ -613,8 +613,8 @@ fn tampered_envelope_fails_cleanly() {
     .expect("write");
 
     // Flip a byte in the payload ciphertext, past the header, hint and the
-    // authenticated metadata seal. Tampering the metadata now fails the AEAD
-    // (F-02), which is a different property from "restore ignores payload
+    // authenticated metadata seal. Tampering the metadata fails the AEAD,
+    // which is a different property from "restore ignores payload
     // damage", so the byte must land strictly inside the payload region.
     let ins = inspect_carrier(&out, None).expect("inspect");
     let envelope_off = ins.ube_offset.expect("envelope offset") as usize;

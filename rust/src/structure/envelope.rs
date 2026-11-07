@@ -371,18 +371,11 @@ impl EnvelopeHeader {
     /// header[0..80] | meta_len (4, LE) | hint_len (4, LE) | hint bytes
     /// ```
     ///
-    /// The two lengths are the fields a reader must trust *before* it can check
-    /// any tag: `meta_len` sizes a buffer and `hint_len` decides where the
-    /// metadata block starts. Leaving them outside the AAD let a forged carrier
-    /// drive a `vec![0u8; meta_len]` allocation and shift the metadata split
-    /// while every tag still verified (review P0-2).
+    /// Lengths are bound into the AAD to prevent attackers from tampering with
+    /// buffer allocations or metadata boundaries.
     ///
-    /// The hint is plaintext by design — it has to be readable without the
-    /// password — so binding its bytes here is what makes a tampered hint break
-    /// authentication instead of being silently displayed. Both ends can build
-    /// this value: the writer knows `meta_len` exactly before sealing (`compact
-    /// metadata + tag`), the reader reads it back from the header, and both
-    /// hold the same hint bytes.
+    /// Plaintext password hints are also bound here so any tampering fails
+    /// authentication rather than being displayed.
     ///
     /// The four post-injection coordinates stay out of the AAD by necessity
     /// (they are only known after `inject`); see the type-level docs for how
@@ -634,11 +627,9 @@ impl EnvelopeHeader {
             for i in 0..72 {
                 unmasked[40 + i] ^= mask[4 + i];
             }
-            // The version is checked by the level-2 verifier, not here, so a
-            // forged header with an unsupported version still gets the specific
-            // "unsupported version" diagnostic. `inspect_core` now treats a
-            // failed level-2 check as "no readable envelope", so a coincidental
-            // de-mask hit cannot abort an inspection (review N-02).
+            // The version is checked by the level-2 verifier rather than here, allowing
+            // unsupported versions to produce explicit diagnostics while failed checks
+            // are safely treated as no envelope found.
             if (unmasked[9] & FLAG_ENCRYPTED) == 0
                 && (1..=MAX_KNOWN_STRATEGY_ID).contains(&unmasked[10])
                 && unmasked[11] <= MAX_OFFSET_DELTA
@@ -914,9 +905,7 @@ mod tests {
         );
     }
 
-    /// P2-21: strategy IDs start at 1, but the default de-mask path used
-    /// `<= MAX`, so an id of 0 passed the plausibility gate. A header with id 0
-    /// is not writable by any build and must be rejected instead of returned.
+    /// Verifies that default de-mask rejects unregistered strategy ID 0.
     #[test]
     fn default_demask_rejects_the_unregistered_strategy_id_zero() {
         let profile = StructureProfile::default();
@@ -935,10 +924,7 @@ mod tests {
         }
     }
 
-    /// P2-21: the encrypted non-stealth header is stored unmasked, so its flag
-    /// is readable without a password. It must be recognised before the default
-    /// de-mask runs; otherwise the default mask can turn it into a plausible
-    /// "unencrypted" header.
+    /// Verifies that bare encrypted headers are recognised before default de-masking.
     #[test]
     fn bare_encrypted_header_is_recognised_before_the_default_mask() {
         let profile = StructureProfile::default();
@@ -953,12 +939,7 @@ mod tests {
         assert!(parsed.is_encrypted());
     }
 
-    /// P2 F-14: masked default headers used to pass the bare gate on
-    /// `strategy_id`/`offset_delta` alone, so ~1 in 40k password-less envelopes
-    /// were read as a garbage "bare" header. The strengthened gate also checks
-    /// version, known flags, `meta_len` and `hint_len`; a masked header must
-    /// still be recognised through the default de-mask, and none of the
-    /// out-of-range fields may qualify as bare.
+    /// Verifies that masked default headers do not pass the bare gate on shape alone.
     #[test]
     fn masked_header_does_not_pass_the_bare_gate_on_shape_alone() {
         let profile = StructureProfile::default();
@@ -1002,10 +983,7 @@ mod tests {
         assert!(EnvelopeHeader::is_plausible_bare_header(&forged));
     }
 
-    /// P1-8: the old constants advertised 213 B as the smallest writable
-    /// envelope, but that is the *empty*-payload size. A one-byte write (the
-    /// smallest payload the CLI accepts) needs 214 B, so a 213-byte channel
-    /// was reported available and then rejected by the injector.
+    /// Verifies that min_ube_len tracks the smallest writable payload size correctly.
     #[test]
     fn min_ube_len_tracks_the_smallest_writable_payload() {
         assert_eq!(min_ube_len(0), 213, "zero-byte envelope is 213 B");

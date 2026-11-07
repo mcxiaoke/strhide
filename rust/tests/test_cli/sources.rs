@@ -1,15 +1,10 @@
-//! CLI payload/password source coverage (gap report 2026-10-19, gaps #1 #2 #5).
+//! CLI payload and password source integration coverage:
 //!
-//! Previously untested source paths, all exercised through the real binary:
-//!
-//! - payload sources `--text-base64`, `STRHIDE_TEXT`
-//!   (`cli.rs` payload resolution chain), including invalid-base64 /
-//!   non-UTF-8 errors and the `-t` vs `STRHIDE_TEXT` precedence;
-//! - password sources `--password-file` (CLI) and `config.password_file`
-//!   (`resolve_password` precedence), including trailing-newline trimming;
-//! - previously untested config keys `unescape`, `backup`, `hint`,
-//!   `password_file` plus the `<home>/.strhide/config.toml` discovery path
-//!   and the "exists but unreadable" hard-error branch.
+//! - Payload sources `--text-base64` and `STRHIDE_TEXT` resolution,
+//!   including validation and precedence rules.
+//! - Password sources `--password-file` and `config.password_file` precedence.
+//! - Configuration options (`unescape`, `backup`, `hint`, `password_file`)
+//!   and config discovery error handling.
 
 use crate::common::*;
 use std::fs;
@@ -601,8 +596,7 @@ fn config_hint_key_applies_on_write() {
 
     // Reading without any password source surfaces the hint. With `--stdout`
     // the payload owns stdout, so the hint must go to stderr instead: a banner
-    // or hint on stdout would prepend itself to the piped payload (review R3
-    // P1-8).
+    // or hint on stdout would prepend itself to the piped payload.
     let read = run(&dir, &["read", "c.png", "--stdout"]);
     assert_eq!(code(&read), 1);
     assert!(

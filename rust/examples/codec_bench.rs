@@ -3,11 +3,10 @@
 
 //! Compare the matrix-coding layers on a real carrier.
 //!
-//! The review asked for four numbers before STC is ever allowed to become the
-//! default (see `docs/stc_coding_design_20261021.md`): change count,
-//! cost-weighted distortion, detection score and wall-clock time. This binary
-//! produces the first two and the timing; the detection score comes from
-//! `strhide scan` on the files it writes.
+//! Compares four key metrics between coding schemes: change count,
+//! cost-weighted distortion, detection score, and wall-clock time. This binary
+//! measures the changes, distortion, and timing; detection scores can be evaluated
+//! via `strhide scan` on the written carriers.
 //!
 //! ```text
 //! cargo run --release --example codec_bench -- carrier.png payload.bin [password]

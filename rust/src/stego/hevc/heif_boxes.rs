@@ -1004,8 +1004,8 @@ mod tests {
         assert_eq!(info.parameter_sets, vec![&[0x40u8, 0x01, 0xAA][..]]);
     }
 
-    /// A-04: only the MP4 path filtered non-parameter-set arrays, so a prefix
-    /// SEI in `hvcC` changed the cover digest of an HEIF/MKV but not of an MP4.
+    /// Verifies non-parameter-set arrays (such as prefix SEI) in `hvcC` are filtered
+    /// out consistently across formats.
     #[test]
     fn hvcc_drops_prefix_sei_arrays() {
         let mut hvcc = vec![0u8; 23];
@@ -1028,8 +1028,7 @@ mod tests {
         assert_eq!((sets[0][0] >> 1) & 0x3F, 32);
     }
 
-    /// A-04: `length_size == 3` used to fall into the "unsupported" arm on the
-    /// HEIF path while the MP4 path accepted it.
+    /// Verifies 3-byte NAL lengths are accepted and parsed on the HEIF path.
     #[test]
     fn three_byte_nal_lengths_are_parsed() {
         let mut buf = vec![0, 0, 4];

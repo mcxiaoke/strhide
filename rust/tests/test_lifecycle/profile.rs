@@ -1,8 +1,7 @@
 //! Library parameters and private-dialect profiles.
 //!
-//! M1 of `docs/library_api_practical_plan_20261020.md`: `LocalParams` (L class,
-//! writer-only) and `StructureProfile` (P class, read/write must agree) threaded through
-//! every engine entry point, with **zero** wire-format changes.
+//! `LocalParams` (writer-only) and `StructureProfile` (read/write agreement)
+//! configured across engine entry points, maintaining full format compatibility.
 //!
 //! The central claim under test is the *separation*, not just the round trip:
 //!
@@ -124,7 +123,7 @@ fn private_default_secret_is_unreadable_with_the_official_profile() {
     assert_unreadable(&stego, None, &StructureProfile::default());
 
     // Inspect must report "nothing here" for a dialect it cannot open, not an
-    // error: a private dialect is meant to be invisible (review B-06), and
+    // error: a private dialect is meant to be invisible, and
     // `inspect_any`/`smart_extract` must be able to fall through to the content
     // domain instead of aborting.
     let inspected = inspect_carrier_with(&stego, None, &StructureProfile::default())

@@ -9,7 +9,7 @@
 //!    PE, …) are refused by the *writer* and left byte-identical;
 //! 2. **plaintext** — write → verify(L1/L2/L3) → read → remove → SHA-256 equal;
 //! 3. **encrypted** — same, plus a wrong password must yield `Password` and
-//!    `remove` without the password must fail authentication (F-02: the
+//!    `remove` without the password must fail authentication (the
 //!    metadata seal is verified before stripping, so it needs the key);
 //! 4. **stealth** — same, plus `inspect` must report `is_stealth`, and removal
 //!    needs the password (the magic is derived from it).
@@ -315,7 +315,7 @@ fn encrypted_mode(
     .map_err(|e| format!("read: {e}"))?;
     assert_payload(&r.data, payload, "encrypted")?;
 
-    // The metadata seal is authenticated before stripping (F-02), so an
+    // The metadata seal is authenticated before stripping, so an
     // encrypted envelope can no longer be removed without its password.
     let no_pw = remove_carrier(
         &carrier,

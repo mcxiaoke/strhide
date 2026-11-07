@@ -179,10 +179,8 @@ fn build_exif_heif(exif_payload: &[u8]) -> Vec<u8> {
     file
 }
 
-/// Review A-01: every legal Exif thumbnail encoding must survive an embed and
-/// be readable again. The BE-SHORT × IFD1-after-JPEG cell used to embed and
-/// then fail extraction because the length was read as `len << 16` and IFD0's
-/// next-IFD pointer was left at its pre-resize value.
+/// Verifies every legal Exif thumbnail encoding survives embedding and is readable,
+/// across little/big-endian TIFF and SHORT/LONG tag lengths.
 #[test]
 fn heif_exif_thumbnail_roundtrips_for_every_tiff_encoding() {
     let payload = b"exif bridge payload";

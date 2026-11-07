@@ -110,11 +110,8 @@ impl HostAdapter for MkvAdapter {
             None => return Ok(None),
         };
 
-        // `ebml_void` appends, so the envelope has to end exactly at the file
-        // end — without that equation a forged size reached the metadata
-        // allocation (review P0-2). A content-domain HEVC re-encode rewrites the
-        // segment and slides the whole appended region, so resolve the physical
-        // start from the tail instead of trusting the write-time coordinate.
+        // `ebml_void` appends, so the envelope must end exactly at the file end.
+        // Resolve physical start from the tail to tolerate preceding segment size shifts.
         let Some(start) = trailer.locate_start(file_size) else {
             return Ok(None);
         };

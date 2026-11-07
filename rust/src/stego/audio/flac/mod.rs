@@ -334,11 +334,7 @@ fn scan_stream(
 /// One addressable residual.
 #[derive(Debug, Clone)]
 struct FlacSlot {
-    /// Absolute bit offset of the codeword's first bit.
-    ///
-    /// `u64` rather than `u32`: a 16-bit mono carrier larger than ~512 MiB
-    /// gives sample offsets beyond 2^32 bits, and the old `u32` wrapped,
-    /// making later frames address the wrong codewords (review F-07).
+    /// Absolute bit offset of the codeword's first bit (`u64` to prevent overflow on large audio files).
     bit_offset: u64,
     /// Rice parameter of its partition.
     k: u8,
@@ -478,11 +474,8 @@ impl<'a> FlacCarrier<'a> {
         //   * everything else feeds the body, where the trellis can route
         //     around a slot whose compensation chain does not fit.
         //
-        // The body's denominator is `analysis.slots`, never `analysis.usable`:
-        // the latter counts slots that are legal *for the current residual
-        // values*, and embedding rewrites exactly those values. A reader that
-        // thinned over a different denominator would address a different set of
-        // codewords and the payload would never decrypt (review P0-1).
+        // The body's denominator is `analysis.slots` (invariant across embedding) rather
+        // than `usable`, ensuring encoder and decoder address the identical codeword pool.
         if header_slots < PNG_AUDIO_BASE_SLOTS {
             return Err(StrHideError::General(format!(
                 "FLAC header area must be at least {PNG_AUDIO_BASE_SLOTS} slots, got {header_slots}"

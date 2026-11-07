@@ -608,7 +608,7 @@ mod v4_kdf_tests {
     use super::*;
     use sha2::Digest;
 
-    // Frozen values from docs/stego_content_envelope_v4_golden_vectors_20261103.md.
+    // Frozen golden test vectors (see docs/api/WIRE_SPEC_CONTENT.md).
     const PASSWORD: &str = "correct horse battery staple";
     const DOMAIN: &str = "domain-a";
     const PRE_SALT: [u8; 32] = [

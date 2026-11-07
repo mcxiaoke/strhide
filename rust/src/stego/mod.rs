@@ -271,17 +271,8 @@ pub fn embed_carrier_with_dialect_info(
 
 /// Shrink a capacity report by the longest possible file micro-header.
 ///
-/// Engines compute capacity for the minimal raw payload. A `Payload::file`
-/// spends `1 + name_len` more bytes inside the plaintext, so an advertised
-/// maximum the user fills with file content used to fail by exactly that much
-/// (B-03). Reserving the worst case (a 255-byte name) makes the number usable
-/// for both kinds of payload; raw embeds still accept the larger true amount.
-///
-/// Only `max_raw_payload_bytes` is adjusted. The safety-tier numbers are the
-/// exact values every engine feeds to its Enforced gate; clamping them here
-/// made the file-level Advisory warning use a smaller threshold than the
-/// engine's hard gate, so a small carrier warned in Advisory mode yet passed
-/// in Enforced mode.
+/// Engines compute capacity for minimal raw payloads. Reserving overhead for the worst-case
+/// filename ensures capacity numbers remain safe for both raw and file payloads.
 pub(crate) fn filename_safe_capacity(mut info: StegoCapacityInfo) -> StegoCapacityInfo {
     use crate::stego::envelope::MAX_FILENAME_OVERHEAD;
     info.max_raw_payload_bytes = info

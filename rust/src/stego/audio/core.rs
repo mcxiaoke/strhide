@@ -915,11 +915,9 @@ pub(crate) fn extract_with_header<C: SlotCarrier + ?Sized>(
     let extension = read_extension(carrier, mapping, prepared, header)?;
     let header_slots = PNG_AUDIO_BASE_SLOTS + 8 * header.ext_len as usize;
     limits
-        // `slot_count()` is the pool actually materialised for this header.
-        // `capacity_slots()` is the carrier's theoretical offer (and for FLAC
-        // deliberately excludes extension tails), so a forged `body_len` used
-        // to pass this bound by comparing against slots that were never built
-        // (review A-03).
+        // Validate against `slot_count()` (the actually materialized pool)
+        // rather than `capacity_slots()` (theoretical capacity) to prevent
+        // invalid `body_len` values from passing slot bounds.
         .validate_header(
             header.suite_id,
             header.body_len,
@@ -1091,10 +1089,8 @@ pub(crate) fn inspect_with_header<C: SlotCarrier + ?Sized>(
     info.algorithm = Some("audio-stc".into());
     info.codec = Some(format!("stc-h{}-u{}", header.stc_h, header.stc_u));
     info.envelope_len = Some(header.body_len as usize);
-    // The body length includes the AEAD tag, the optional filename micro-header
-    // and any compression, so subtracting only BODY_OVERHEAD reported a number
-    // that was never the plaintext size. It is unknowable before decryption
-    // (review B-04).
+    // Plaintext size is unknowable prior to decryption due to variable compression,
+    // optional filename micro-headers, and AEAD tags.
     info.payload_len = None;
     info
 }

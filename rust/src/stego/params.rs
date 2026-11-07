@@ -507,24 +507,18 @@ fn validate_algorithm_options(
 /// lowest distortion and file growth of every configuration that stays under the
 /// 3 s embed gate, at ~38 MB of backtracking bitmap (one bit per column and
 /// state: `n * 2^h / 8`, `h = 8`). 800k is 40% faster and 13 MB lighter for ~6%
-/// more changes. It is now only the *floor* of the automatic budget -- see
-/// [`JpegParams::effective_slot_budget`]. See
-/// `docs/stc_v3_phase3_eval_20261021.md`.
+/// Floor of the automatic budget -- see [`JpegParams::effective_slot_budget`].
 #[allow(dead_code)]
 pub(crate) const DEFAULT_SLOT_BUDGET: usize = 1_200_000;
 
 /// Ceiling on the STC backtracking bitmap, i.e. on an automatically scaled
 /// trellis size.
 ///
-/// This replaces the flat 2.4M-slot ceiling the code used to apply. That ceiling
-/// pinned a 24 MP carrier holding 200 KB to `u = 1`, which is the one group size
-/// with *no* freedom at all -- a `(1,1)` parity code whose solution is unique, so
-/// the UERD cost map cannot move a single flip, and the weighted distortion is
-/// ~29x that of `u = 3`. Sizing by the bitmap instead keeps the trellis
-/// proportional to the carrier and bounds what actually matters:
+/// Sizing by the bitmap keeps the trellis proportional to the carrier and bounds
+/// what actually matters:
 ///
 /// * memory -- one slot costs `2^h / 64` words of traceback state (32 B at
-///   `h = 8`, 128 B at `h = 10`), so 256 MiB allows 8.4M slots at `h = 8`;
+///   `h = 8`, 128 B at `h = 10`), so 4 GiB allows 134M slots at `h = 8`;
 /// * time -- bytes per slot and states per slot are the same power of two, so
 ///   they cancel and the worst case is ~1 s of kernel time for *any* `h`.
 #[allow(dead_code)]
@@ -1072,8 +1066,7 @@ impl StegoProfile {
 mod tests {
     use super::*;
 
-    /// B-06: a custom WAV profile used to leak into FLAC, giving both carriers
-    /// the same `hpos_salt` and therefore the same header permutation seed.
+    /// Verifies that custom WAV and FLAC profiles remain strictly isolated.
     #[cfg(feature = "content-audio")]
     #[test]
     fn wav_and_flac_profiles_are_independent() {

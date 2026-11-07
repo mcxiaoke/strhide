@@ -155,12 +155,10 @@ pub struct DualVerify {
     #[serde(rename = "content_stego", skip_serializing_if = "Option::is_none")]
     pub content: Option<crate::stego::StegoVerifyResult>,
 
-    /// Why the content domain produced no result, when it failed instead of
-    /// answering "nothing hidden".
+    /// Why the content domain produced no result, when it encountered an error
+    /// instead of reporting that no payload was found.
     ///
-    /// Without this the caller cannot tell "this HEIF layout is unsupported"
-    /// from "there is no payload", and the CLI reported every such failure as
-    /// success (review R3 P1-1, P1-12).
+    /// Distinguishes between unsupported layouts/formats and absent payloads.
     #[cfg(feature = "content-base")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_error: Option<crate::core::errors::ErrorDetail>,
@@ -601,9 +599,8 @@ impl StrHide {
                     limits: crate::stego::ExtractParams::default(),
                     control: opts.control,
                 };
-                // Keep the failure instead of swallowing it with `.ok()`: the
-                // caller needs to distinguish "no payload" from "the verifier
-                // could not run" (review R3 P1-1).
+                // Preserve the failure error detail so callers can distinguish
+                // "no payload found" from "verifier could not execute".
                 match self.stego().verify_file(carrier, &ver_opts) {
                     Ok(v) => (Some(v), None),
                     Err(e) => (None, Some(e.detail_i18n())),
@@ -656,11 +653,8 @@ impl StrHide {
             (true, false) => (Domain::Structure, None),
             (false, true) => (Domain::Content, None),
             (false, false) => {
-                // A failed content inspection is not the same answer as "there
-                // is nothing hidden": an unsupported HEIF layout, a missing
-                // thumbnail bridge or an unbuilt engine all used to surface as
-                // "No hidden data found", which is the most expensive kind of
-                // misdirection to debug (review R3 P1-12).
+                // Propagate content inspection failure rather than reporting
+                // that no hidden data was found (e.g. unsupported layout or engine errors).
                 if let Some(err) = &diag.content_error {
                     return Err(StrHideError::General(format!(
                         "Content-domain inspection of '{}' failed: {}",
@@ -1025,8 +1019,7 @@ impl StegoFacade<'_> {
         overwrite: bool,
     ) -> Result<PathBuf, StrHideError> {
         let payload = extract_carrier_file_payload(carrier, options, &self.engine.dialect().stego)?;
-        // The extractor usually hands back an owned buffer; taking it avoids a
-        // full payload copy (review B P-10).
+        // The extractor usually hands back an owned buffer; take it directly to avoid cloning.
         let data = match payload.data {
             std::borrow::Cow::Owned(v) => v,
             std::borrow::Cow::Borrowed(s) => s.to_vec(),
@@ -1042,10 +1035,8 @@ impl StegoFacade<'_> {
         } else {
             output.to_path_buf()
         };
-        // `read -o <carrier>` would replace the only copy of the hidden data
-        // with the payload it contains. The CLI already refuses this; the
-        // facade must too, or an API caller silently destroys the carrier
-        // (review B-07).
+        // Reject output path pointing to carrier file to prevent overwriting
+        // and destroying the source carrier with its extracted payload.
         crate::commit::reject_carrier_output(&final_dest, &[carrier.to_path_buf()])?;
         crate::core::pipeline::check_overwrite(&final_dest, overwrite)?;
         if let Some(parent) = final_dest.parent()

@@ -119,7 +119,7 @@ pub mod heif_hidden_item {
                 assert_eq!(read_res.data, payload);
 
                 // Strip / remove and check 100% bit-exact restoration. The
-                // metadata seal is authenticated before stripping (F-02), so
+                // metadata seal is authenticated before stripping, so
                 // an encrypted envelope now needs the same password as `read`.
                 let remove_res = remove_carrier(
                     &target_path,
@@ -170,7 +170,7 @@ pub mod heif_hidden_item {
                 assert_eq!(read_res.data, payload);
 
                 // Encrypted envelope: the metadata seal is checked before
-                // stripping (F-02), so restore needs the password.
+                // stripping, so restore needs the password.
                 let remove_res = remove_carrier(
                     &target_path,
                     &RestoreOptions::default()
@@ -798,8 +798,7 @@ pub mod hevc_external {
     /// set either rejects healthy video for being "too busy" or waves through a
     /// still picture with a wrecked block.
     ///
-    /// Baselines and the reasoning behind each number live in
-    /// `docs/hevc_steganalysis_and_quality_spec_20261026.md`.
+    /// Quality criteria thresholds for PSNR, patch distortion, and sample deviation.
     struct QualityGate {
         /// Whole-buffer PSNR floor (all planes, all frames).
         min_psnr: f64,

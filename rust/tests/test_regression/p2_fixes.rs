@@ -1,11 +1,8 @@
-// Regression tests for P2 engineering-quality fixes (2026-10-17).
+// Regression tests for adapter quality and container validation:
 //
-// Batch 1:
-// - #10: adapter inject must propagate I/O errors instead of silently
-//   treating a failed read as EOF (which produced truncated envelopes).
-// - #23: MP4/PNG `verify_structure` must walk the full container (box tree /
-//   all chunks with CRC verification), not just the first box or the tail
-//   IEND. Mirrors the Python adapter behavior.
+// - Adapter inject propagates I/O errors instead of treating failed reads as EOF.
+// - MP4 and PNG `verify_structure` walks full container structures (box trees /
+//   all chunks with CRC verification).
 
 use crate::common::*;
 use std::fs;

@@ -173,7 +173,7 @@ pub(crate) fn temp_path_for(path: &Path) -> PathBuf {
 
 /// Copy `src` into a freshly created `dst`.
 ///
-/// `create_new` refuses to follow a pre-existing file or symlink (review P2-2);
+/// `create_new` refuses to follow a pre-existing file or symlink;
 /// callers that race on a backup name retry with another candidate via
 /// [`create_carrier_backup`].
 fn copy_file_to_new(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -202,8 +202,8 @@ pub(crate) fn copy_file_durable(src: &Path, dst: &Path) -> Result<(), StrHideErr
 
 /// Create the `<carrier>.bak` for an in-place commit, retrying when the name
 /// chosen by [`next_backup_path`] is created concurrently before `create_new`
-/// runs. The retry re-runs the collision check, so a second writer can never
-/// truncate the first writer's backup (review P2-2).
+/// runs. The retry re-runs the collision check, preventing concurrent writers
+/// from truncating an existing backup.
 pub(crate) fn create_carrier_backup(carrier: &Path) -> Result<PathBuf, StrHideError> {
     for _ in 0..16 {
         let candidate = next_backup_path(carrier);
@@ -507,8 +507,8 @@ pub fn commit_carrier_bytes(
 /// `commit_carrier_patches` copies the carrier to a temp file before opening it
 /// for writing. A read-only carrier (mode `0o444`, Windows read-only attribute)
 /// would otherwise make that open fail with `PermissionDenied` even when the
-/// caller asked for a fresh `-o <path>` target (review P2-18). The original
-/// permissions are restored on the committed target afterwards.
+/// caller asked for a fresh `-o <path>` target. The original permissions
+/// are restored on the committed target afterwards.
 // `set_readonly(false)` is Windows-only here; the Unix branch below adds the
 // owner write bit instead of making the file world-writable.
 #[allow(clippy::permissions_set_readonly_false)]
@@ -565,7 +565,7 @@ pub fn commit_carrier_patches(
         // If the carrier changed underneath us (or a caller ever hands us a
         // bad span), `write_all` past EOF silently *extends* the file and the
         // rename publishes a corrupted carrier with a truncated tail. Bound
-        // each write by the real length instead (review R2 P0-6).
+        // each write by the real length instead.
         let file_len = file.metadata()?.len();
         for (span, patch) in patches {
             let start = span.start as u64;
@@ -776,8 +776,7 @@ mod tests {
         std::fs::set_permissions(&src, permissions).unwrap();
 
         // A fresh `-o <path>` target must still work: the temp copy inherits
-        // the carrier's read-only bits, and the patch step opens it for
-        // writing (review P2-18).
+        // the carrier's read-only bits, and the patch step opens it for writing.
         let patches = vec![(0..2usize, vec![0xAA, 0xBB])];
         let result = commit_carrier_patches(&src, &dst, &patches, false, false);
         let backup = result.expect("a read-only carrier must not block patching a new target");

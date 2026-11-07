@@ -12,10 +12,8 @@
 //! cargo run --release --example v3_eval -- [N_IMAGES] [PAYLOAD_BYTES]
 //! ```
 //!
-//! Reads `../temp/images/jpg` (override with `STRHIDE_CORPUS`). The results are
-//! recorded in `docs/stc_v3_phase3_eval_20261021.md`; re-run this after changing
-//! the cost model or the legality rules, since every number there is a
-//! measurement, not an estimate.
+//! Reads `../temp/images/jpg` (override with `STRHIDE_CORPUS`). Re-run this after
+//! changing the cost model or legality rules to benchmark against the corpus.
 
 use std::path::PathBuf;
 use std::time::Instant;

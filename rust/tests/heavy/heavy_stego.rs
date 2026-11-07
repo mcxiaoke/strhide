@@ -39,14 +39,14 @@ pub mod batch_stego {
     //!      relative change over three channels, so `Special11.png`/`SSD20210218.png`
     //!      read 0/clean at full load; (b) APNG chunk names are no longer reported as
     //!      private chunks; (c) the spatial rate thresholds were recalibrated from
-    //!      0.05 to 0.70 (see `docs/png_blind_calibration_20261023.md`), which removed
+    //!      0.05 to 0.70, which removed
     //!      `jiangsuviews.jpg`'s false alarm -- a spatial RS/SPA hit on a clean JPEG.
     //!      Five of the 18 (DSC_20140315, DSC_20260403, pexels-matreding, pexels-nguy,
     //!      zaiv-puddle) used to refuse full-load embeds as "over-optimised Huffman"
     //!      and were excluded from the denominator, giving 4/13 = 31%; the P2 zeroing
     //!      ban and conservative cross-slot check now make them embeddable.
     //!      The calibrated DCT detector does not flag those five at full load; that is
-    //!      a detector gap (see `docs/stego_remediation_plan_20261023_1815.md`), not a
+    //!      a known detector limitation, not a
     //!      payload regression. The ratio floor below guards analyser wiring, not
     //!      invisibility. Full capacity is the assertion point; 50% load is below what
     //!      any LSB-domain detector can see reliably.
@@ -388,7 +388,7 @@ pub mod batch_stego {
                 // refuses on the geometric (u = 1) bound, an over-optimised one
                 // on the grouped bound reported by `--capacity` -- both are
                 // "beyond the advertised maximum", which is what this pins.
-                // Capacity-class failures are `PayloadTooLarge` (review P2-3/P2-5);
+                // Capacity-class failures are `PayloadTooLarge`;
                 // the legacy arms stay for engines that still report them so.
                 let rejected = match &oversize_res {
                     Err(StrHideError::PayloadTooLarge(_)) => true,
@@ -451,9 +451,8 @@ pub mod batch_stego {
                         // actionable diagnostic instead of writing a carrier it
                         // cannot re-encode; count it and skip the detection
                         // assertion rather than pretending it passed. The
-                        // capacity-shaped refusal is `PayloadTooLarge`
-                        // (review P2-3), a genuine dead-symbol failure stays
-                        // `UnsupportedFormat`.
+                        // capacity-shaped refusal is `PayloadTooLarge`,
+                        // while a genuine dead-symbol failure stays `UnsupportedFormat`.
                         Err(StrHideError::PayloadTooLarge(msg))
                             if msg.contains("over-optimised Huffman table") =>
                         {
@@ -657,7 +656,7 @@ pub mod batch_stego {
         // a collapse toward zero), not the invisibility of the payload. The
         // undetected list is printed so any new miss is visible even when the floor
         // passes; raising the floor back to 0.90 requires a detector that models
-        // ±1 matching (see docs/embed_png_jpeg_algorithm_review_20261020_db.md §9.3).
+        // ±1 matching.
         if report.high_measured > 0 {
             let ratio = report.high_flagged as f64 / report.high_measured as f64;
             println!(

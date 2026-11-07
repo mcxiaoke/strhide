@@ -201,11 +201,7 @@ fn max_body_slots_within_pipeline(base_bytes: u64, h: u8) -> usize {
     usize::try_from(remaining / bytes_per_slot).unwrap_or(usize::MAX)
 }
 
-/// No-op tracer hook.
-///
-/// Callers pass `format_args!` rather than `format!`: building the message
-/// eagerly heap-allocated on every embed/extract even though this build never
-/// emits it (review P2-14).
+/// No-op tracer hook using `format_args!` to avoid eager heap allocation.
 #[inline(always)]
 fn trace(_args: std::fmt::Arguments<'_>) {}
 
@@ -1318,9 +1314,7 @@ fn extract_jpeg_from(
     if body_n > body_grid_len || superblock.stc_h > MAX_STC_H {
         return Err(no_hidden());
     }
-    // Charge extraction the same backtracking bitmap the writer charged: a
-    // crafted header could otherwise declare a body whose solve allocates
-    // hundreds of MB before any limit is consulted (review B-02).
+    // Enforce the same pipeline budget checks during extraction to prevent unbounded memory allocation.
     let total_blocks: usize = coeffs.components.iter().map(|c| c.blocks.len()).sum();
     let base_bytes =
         PIPELINE_FIXED_BYTES.saturating_add(total_blocks as u64 * PIPELINE_BYTES_PER_BLOCK);
@@ -1353,10 +1347,7 @@ fn extract_jpeg_from(
         extract,
     )?;
 
-    // The AEAD passed, so the carrier really is ours. Unknown critical
-    // extensions mean a newer writer, which extract must not pretend to serve.
-    // The flag must also agree with the TLVs, including the "flag set but no
-    // extension area" case (review B-05).
+    // Ensure extension TLVs are known and critical flags match extension contents.
     if !extension_ok
         || has_critical_ext
         || validate_ext_critical_flag(superblock.flags, &extension_area).is_err()
@@ -1600,9 +1591,7 @@ fn inspect_jpeg_from(
     } else {
         Vec::new()
     };
-    // `inspect` must apply the same flag/TLV contract as extract, including the
-    // empty-extension case, so a mismatched header is never reported as a
-    // readable carrier (review B-05).
+    // Ensure inspect enforces identical flag/TLV validation as extraction.
     if validate_ext_critical_flag(superblock.flags, &extension_area).is_err() {
         empty_info.note = Some("Critical-extension flag does not match the TLVs".into());
         return Ok(JpegInspection {
@@ -2000,9 +1989,7 @@ mod v4_regressions {
 
     #[test]
     fn trace_call_sites_do_not_format_eagerly() {
-        // `trace` is a no-op outside tracing builds. Passing `format!` to it
-        // built the message unconditionally, heap allocation included
-        // (review P2-14); `format_args!` defers that work.
+        // Verifies trace call sites pass `format_args!` rather than allocating eagerly with `format!`.
         let source = include_str!("engine.rs");
         // Split so this test's own source does not contain the needle.
         let eager_pattern = concat!("trace", "(&format!(");

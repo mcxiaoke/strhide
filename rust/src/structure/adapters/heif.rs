@@ -56,10 +56,7 @@ impl HostAdapter for HeifAdapter {
 
     fn choose_auto_strategy(&self, reader: &mut dyn SeekRead, ube_size: u64) -> &'static str {
         // item_hidden registers the envelope through 32-bit iloc fields and a
-        // 32-bit mdat box size, so it has a hard ~4 GiB ceiling the capacity
-        // table must not overstate (review P2-4). box_uuid switches to a
-        // 64-bit large header and is genuinely unlimited; engine auto is
-        // single-shot, so the size check has to happen here.
+        // 32-bit mdat box size (~4 GiB limit). Larger envelopes fall back to box_uuid.
         if ube_size <= ITEM_HIDDEN_MAX_ENVELOPE && isobmff_can_item_hidden(reader) {
             "item_hidden"
         } else {

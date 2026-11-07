@@ -1,9 +1,7 @@
-// Findings lockdown for the structure-domain code review of 2026-10-25
-// (docs/structure_domain_code_review_20261025.md).
+// Regression tests for structure-domain security and edge-case carriers.
 //
-// Each test pins one P1/P2 finding: the review's malicious/edge-case carriers
-// must fail as clean errors (never panic) or fall back to a lossless
-// strategy, and the fixed paths must still roundtrip byte-exactly.
+// Verifies that malicious and edge-case carriers fail as clean errors (never panic)
+// or fall back to lossless strategies, and fixed paths roundtrip byte-exactly.
 
 use crate::common::*;
 use std::fs;
@@ -42,7 +40,7 @@ fn write_carrier_file(
 /// A 22-byte ZIP consisting of nothing but an EOCD record with a zero Central
 /// Directory offset: a legal empty archive whose pre-CD injection point would
 /// be file offset 0, overwriting the archive's own magic and leaving the
-/// stego undetectable by any adapter (P2-6).
+/// stego undetectable by any adapter.
 fn make_empty_zip() -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"PK\x05\x06");
@@ -118,7 +116,7 @@ fn zip_empty_archive_auto_falls_back_to_eof() {
 /// A WAV whose declared RIFF boundary is not the physical end of the file
 /// (trailing garbage, or a streaming size = 0 header) must be rejected for
 /// `riff_chunk`: the SHRD chunk lands past the declared boundary where locate
-/// cannot reach it for odd-sized envelopes (P1-2).
+/// cannot reach it for odd-sized envelopes.
 #[test]
 fn wav_riff_chunk_rejected_when_declared_boundary_mismatches() {
     let mut trailing = make_wav();
@@ -174,13 +172,13 @@ fn wav_riff_chunk_rejected_when_declared_boundary_mismatches() {
     assert_eq!((lo, ls), (clean.len() as u64 + 8, ube_total));
 }
 
-/// P1-2: a declared RIFF size can match the file length even when the final
+/// A declared RIFF size can match the file length even when the final
 /// odd-sized chunk lacks its mandatory pad byte. A spec-compliant walker then
 /// steps one byte past EOF, so the SHRD chunk appended by `riff_chunk` would
 /// be parsed from its second byte and L1 would reject the stego we just wrote
 /// (write succeeded, read/restore worked via the EOF fallback, verify stayed
 /// broken). L1 now calls the table malformed, the chunk-table probe routes
-/// `auto` away from `riff_chunk`, and the P0-1 pre-write gate rejects every
+/// `auto` away from `riff_chunk`, and pre-write validation rejects every
 /// strategy instead of emitting a file we cannot verify.
 #[test]
 fn wav_missing_final_pad_is_refused_before_write() {
@@ -222,7 +220,7 @@ fn wav_missing_final_pad_is_refused_before_write() {
         .unwrap_err();
     assert!(err.to_string().contains("missing its pad byte"), "{err}");
 
-    // L1 must call the table malformed, so the P0-1 pre-write gate refuses
+    // L1 must call the table malformed, so pre-write validation refuses
     // every strategy: the carrier cannot host an envelope that our own
     // verifier would accept.
     let (ok, detail) = WavAdapter
@@ -258,8 +256,7 @@ fn wav_missing_final_pad_is_refused_before_write() {
 
 /// End-to-end roundtrip over the item_hidden iinf/iloc patch and restore core
 /// on the only in-CI carrier shape that reaches it (a synthetic meta-HEIF).
-/// Covers review finding §7.1: without this fixture the whole strategy had
-/// zero regular-suite coverage (P1-1/P2-1/P2-2/P2-3 all live on this path).
+/// Fixture providing end-to-end roundtrip coverage across edge cases.
 #[test]
 fn heif_item_hidden_synthetic_roundtrip() {
     let dir = scratch("rv25_heif_meta");
@@ -344,7 +341,7 @@ fn heif_without_meta_still_uses_box_uuid() {
 
 /// A PDF whose dirty tail pushes the injected `%%EOF`/`endstream` pair beyond
 /// the old fixed 128 KiB locate window used to be written successfully and
-/// then be unreadable (P1-4). The growing window must locate it, and remove
+/// then be unreadable. The growing window must locate it, and remove
 /// must still restore byte-exactly.
 #[test]
 fn pdf_dirty_tail_beyond_128k_window_still_locates() {
@@ -402,7 +399,7 @@ fn craft_incremental_stego(magic: [u8; 4]) -> Vec<u8> {
 /// The writer emits `UBE + "\nendstream"`, so the trailer always ends exactly
 /// one EOL before `endstream`. A stealth magic whose own last byte is `\r` or
 /// `\n` made the old trim-all loop eat one byte too many, misaligning the
-/// trailer window and making the stego unreadable ~0.78% of the time (P2-5).
+/// trailer window and making the stego unreadable ~0.78% of the time.
 #[test]
 fn pdf_locate_tolerates_eol_terminated_trailer_magic() {
     for last in [0x0Au8, 0x0Du8] {
@@ -430,7 +427,7 @@ fn pdf_locate_tolerates_eol_terminated_trailer_magic() {
 /// An encrypted document (`/Encrypt` in the newest trailer) must refuse the
 /// incremental strategy — the new trailer would not carry the key forward and
 /// readers do not inherit it through `/Prev`, leaving ciphertext bodies
-/// undecryptable (P1-3). Auto falls back to the lossless EOF overlay.
+/// undecryptable. Auto falls back to the lossless EOF overlay.
 fn make_pdf_encrypted() -> Vec<u8> {
     b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n\
       xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
@@ -498,7 +495,7 @@ fn pdf_encrypted_document_rejects_incremental_and_roundtrips_via_eof() {
 /// A ZIP64 archive with an EOCD64 locator before the classic EOCD (classic
 /// fields real, not sentinel). Injection would shift the zip64 records
 /// without patching the locator's offset field, so auto must route to eof and
-/// explicit pre_cd_inject must be refused (P2-7).
+/// explicit pre_cd_inject must be refused.
 fn make_zip64() -> Vec<u8> {
     let mut zip = make_zip();
     // The zero-comment EOCD is the last 22 bytes; insert before it so the
@@ -573,7 +570,7 @@ fn zip64_locator_routes_auto_to_eof() {
 
 /// item_hidden tops out at a ~4 GiB envelope (32-bit mdat size + iloc
 /// fields); auto must route anything larger to the genuinely unlimited
-/// box_uuid strategy instead of failing the write (P2-4). The threshold is a
+/// box_uuid strategy instead of failing the write. The threshold is a
 /// plain number on a small carrier, so the test needs no huge allocation.
 #[test]
 fn heif_auto_routes_oversized_envelopes_to_box_uuid() {
@@ -596,7 +593,7 @@ fn heif_auto_routes_oversized_envelopes_to_box_uuid() {
 
 /// WAV/WebP auto must keep riff_chunk only when write and read agree (clean
 /// declared boundary, u32 headroom) and route everything else to eof, whose
-/// write and read are symmetric by construction (P3-17 / P1-2 auto half).
+/// write and read are symmetric by construction.
 #[test]
 fn wav_webp_auto_probe_reports_eof_but_write_rejects_mismatch() {
     assert_eq!(
@@ -662,7 +659,7 @@ fn wav_webp_auto_probe_reports_eof_but_write_rejects_mismatch() {
 
 // ------------------------------------------------------------------ batch 5
 
-/// P1-1: the APP15 chain is inserted *before* SOS, so a large chain pushes SOS
+/// The APP15 chain is inserted *before* SOS, so a large chain pushes SOS
 /// past the adapter's 16 MiB marker-scan window. Capacity must be measured
 /// against the relocated SOS, and auto must fall back to `eof` instead of
 /// producing a carrier that its own verifier cannot locate.
@@ -750,7 +747,7 @@ fn make_jpeg_with_giant_header() -> Vec<u8> {
 }
 
 /// A JPEG whose header chain (EXIF/ICC/…) runs past the 16 MiB marker-scan
-/// limit never reaches SOS. The auto probe reports `eof` (P3-19), but the write
+/// limit never reaches SOS. The auto probe reports `eof`, but the write
 /// path's host verification now refuses the malformed carrier outright instead
 /// of appending an envelope to a file that cannot be parsed as JPEG.
 #[test]
@@ -793,7 +790,7 @@ fn jpeg_auto_probe_reports_eof_but_write_rejects_unreachable_sos() {
 
 /// [`make_heif_with_meta`] with `pad` zero bytes appended inside the meta box
 /// (after iloc, before mdat): the <8-byte residue the inject/strip pair must
-/// carry through verbatim (P3-4).
+/// carry through verbatim.
 fn make_heif_with_meta_tail(pad: usize) -> Vec<u8> {
     let mut v = make_heif_with_meta();
     // Layout: [ftyp 24][meta][mdat 8+64]; meta starts at 24.
@@ -812,7 +809,7 @@ fn make_heif_with_meta_tail(pad: usize) -> Vec<u8> {
 
 /// Dropping the meta residue used to shift every later offset: inject
 /// succeeded but remove hit RestoreMismatch. The residue must roundtrip
-/// byte-exactly (P3-4).
+/// byte-exactly.
 #[test]
 fn heif_meta_tail_residual_roundtrips() {
     let carrier_bytes = make_heif_with_meta_tail(5);
@@ -853,7 +850,7 @@ fn heif_meta_tail_residual_roundtrips() {
 
 /// An iinf declaring more entries than it carries used to end the max_id scan
 /// silently, and the minted new_id could collide with an item declared after
-/// the break. The walk must reject the carrier instead (P3-5).
+/// the break. The walk must reject the carrier instead.
 #[test]
 fn heif_truncated_iinf_entry_rejected() {
     let mut v = make_heif_with_meta();
@@ -876,7 +873,7 @@ fn heif_truncated_iinf_entry_rejected() {
 }
 
 /// A 64-bit iloc extent offset with no headroom for the meta growth used to
-/// wrap silently and write a bogus offset into the stego (P3-3, inject-side
+/// wrap silently and write a bogus offset into the stego (inject-side
 /// add). The carrier must be rejected as corrupted.
 #[test]
 fn heif_iloc_offset_overflow_rejected() {
@@ -901,7 +898,7 @@ fn heif_iloc_offset_overflow_rejected() {
 
 /// Two concatenated PNGs. The write side inserts before the LAST IEND while
 /// locate/verify/suspicious used to stop at the FIRST one, so the payload was
-/// written into a place nothing scanned (P3-18). A single traversal now walks
+/// written into a place nothing scanned. A single traversal now walks
 /// every stream and the whole lifecycle must round-trip.
 #[test]
 fn png_concatenated_streams_roundtrip_through_the_last_iend() {

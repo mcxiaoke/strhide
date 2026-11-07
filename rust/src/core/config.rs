@@ -197,11 +197,9 @@ fn parse_config(text: &str, origin: &Path) -> Result<FileConfig, StrHideError> {
             );
         }
     }
-    // The sections have their own key sets and were not checked at all, so
-    // `[stego] algoritm = "hill"` was silently ignored: the default stayed in
-    // force and nothing said why. Warn for those too (still warning-only —
-    // refusing would break every config that carries a comment-shaped extra
-    // key) (review R2 P1-8).
+    // Validate known keys within specific sections (e.g. [stego]) to warn
+    // about typos that would otherwise be silently ignored. Kept as warning-only
+    // to avoid breaking configs with custom metadata keys.
     for (section, known) in [("stego", STEGO_KEYS)] {
         let Some(sub) = table.get(section).and_then(|v| v.as_table()) else {
             continue;

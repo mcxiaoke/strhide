@@ -978,7 +978,7 @@ fn cross_domain_auto_fallback() {
     assert_eq!(stdout(&extract_auto).trim(), "cross domain struct payload");
 }
 
-/// P2-13: in a multi-carrier `read --auto -o <DIR>`, every redirected content
+/// In a multi-carrier `read --auto -o <DIR>`, every redirected content
 /// extraction used to start its own empty output set. Two carriers with the
 /// same stem ("x/a.png" and "y/a.png") both tried "a.bin": the first won and
 /// the second failed with "Refusing to overwrite". The redirect must reuse the
@@ -1072,7 +1072,7 @@ fn subcommand_short_aliases_work() {
     assert_eq!(code(&l), 0, "stderr: {}", stderr(&l));
 }
 
-/// F-03: a carrier that already holds content payload must not be embedded a
+/// A carrier that already holds content payload must not be embedded a
 /// second time without `--overwrite`; the old path silently replaced the first
 /// payload while reporting success.
 #[test]
@@ -1141,7 +1141,7 @@ fn embed_rejects_second_content_payload_without_overwrite() {
     assert_eq!(stdout(&extract_forced).trim(), "second payload");
 }
 
-/// F-03: a structure envelope written on top of content payload produces a
+/// A structure envelope written on top of content payload produces a
 /// composite carrier whose `restore` no longer verifies. Reject it in
 /// preflight, before any output is created.
 #[test]
@@ -1175,7 +1175,7 @@ fn write_rejects_structure_on_content_domain_without_overwrite() {
     );
 }
 
-/// F-03: content payload embedded on top of a structure envelope also builds a
+/// Content payload embedded on top of a structure envelope also builds a
 /// dual composite, which then loses the structure domain on re-compression.
 #[test]
 fn embed_rejects_content_on_structure_domain_without_overwrite() {

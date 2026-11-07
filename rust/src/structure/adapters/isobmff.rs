@@ -15,7 +15,7 @@ pub const MP4_UUID_NEUTRAL: [u8; 16] = [
 /// Largest envelope the `item_hidden` strategy can carry: the second `mdat`
 /// box writes its size into a 32-bit field (`8 + ube_size <= u32::MAX`) and
 /// registers the extent through 32-bit iloc offset/length fields. Capacity
-/// text and the auto strategy both derive from this constant (review P2-4).
+/// text and the auto strategy both derive from this constant.
 pub const ITEM_HIDDEN_MAX_ENVELOPE: u64 = u32::MAX as u64 - 8;
 
 /// Bytes of Box header written before the envelope for the `box_uuid`
@@ -134,14 +134,8 @@ pub fn isobmff_locate(
         None => return Ok(None),
     };
 
-    // `ube_total_size` is attacker-controlled: the trailer is just 24 bytes at
-    // the end of the file and the box header in front of it is equally
-    // forgeable. Without this bound a 204-byte MP4 could declare a 1 TiB
-    // envelope, and the 112-byte header it "contains" could claim a ~4 GiB
-    // metadata block that `read` allocates before discovering the stream is
-    // short (review R3 P2-17/P2-18). The other adapters already compare the
-    // envelope end against the real file length; this one only compared it with
-    // its own box size.
+    // Validate that the envelope lies completely within physical file boundaries.
+    // ube_total_size and offset are untrusted; unverified offsets could cause OOM or out-of-bounds reads.
     let file_size = stego_in.seek(SeekFrom::End(0))?;
     let min_envelope = (HEADER_SIZE + TRAILER_SIZE) as u64;
     if trailer.ube_total_size < min_envelope
@@ -471,22 +465,13 @@ pub fn heif_strategy_capacities() -> Vec<StrategyCapacity> {
     ]
 }
 
-/// Upper bound on the `meta` box body buffered by
-/// `read_meta_box_bytes`. Both `iinf`/`iloc` probes only need that one box,
-/// which sits near the file start in every real carrier, so the cap bounds a
-/// hostile container while a multi-GB `mdat` is raced over with `seek`
-/// instead of being buffered (review A P2-08). Past the cap the probes answer
-/// "no": auto steers to `box_uuid` on the write path, and locate falls through
-/// to its EOF branch on the read path.
+/// Upper bound on the `meta` box body buffered by `read_meta_box_bytes`.
+/// Probes only need the `meta` box, so this bounds memory usage on hostile
+/// containers while large `mdat` bodies are skipped with seek.
 pub const MAX_ISOBMFF_META_SCAN: u64 = 1024 * 1024 * 1024;
 
 /// Read the top-level `meta` box only, without buffering the file prefix.
-///
-/// The probes below used to `read_to_end` up to `MAX_ISOBMFF_META_SCAN` bytes
-/// of the whole file, so a 1 GiB `mdat` in front of `meta` cost 1 GiB peak
-/// RSS for bytes the walk never looks at (review A P2-08). Walking the
-/// top-level headers with [`read_stream_box_header`] keeps the read to the
-/// header chain plus the `meta` body.
+/// Walking top-level headers with [`read_stream_box_header`] avoids buffering large preceding boxes.
 fn read_meta_box_bytes(reader: &mut dyn SeekRead) -> Result<Option<Vec<u8>>, StrHideError> {
     let file_size = reader.seek(SeekFrom::End(0))?;
     let mut pos = 0u64;
@@ -517,8 +502,8 @@ fn read_meta_box_bytes(reader: &mut dyn SeekRead) -> Result<Option<Vec<u8>>, Str
 /// [`heif_item_hidden_inject`] and [`heif_item_hidden_strip`] can physically
 /// rewrite — an 8-byte `meta` header, 8-byte `iloc`/`iinf` headers, and the
 /// 4/8-byte field widths those writers emit. Both the probe (which `inspect`
-/// and `auto` consult) and the writer call it, so a strategy can no longer be
-/// advertised and then refused for the same carrier (review A-10).
+/// and `auto` consult) and the writer call it, ensuring strategy compatibility
+/// between probing and injection.
 fn check_item_hidden_layout(meta: &[u8]) -> Result<(), StrHideError> {
     if meta.len() < 12 {
         return Err(StrHideError::CorruptedData("Truncated meta box".into()));
@@ -721,11 +706,8 @@ fn read_box_size(bytes: &[u8], pos: usize) -> Result<(usize, usize), StrHideErro
                 "Truncated 64-bit box header".into(),
             ));
         }
-        // `largesize` is attacker-controlled: a value that does not fit in
-        // `usize`, or one smaller than the 16-byte header it describes, must
-        // be rejected here. Callers compare `size > remaining`, so letting a
-        // wrapped value through would turn into a slice panic instead of an
-        // error (review R2 P0-5).
+        // `largesize` is attacker-controlled: values exceeding `usize` or smaller
+        // than the 16-byte header must be rejected to prevent slice panics.
         let size64 = u64::from_be_bytes(bytes[pos + 8..pos + 16].try_into().unwrap());
         let size64 = usize::try_from(size64)
             .ok()
@@ -882,10 +864,8 @@ fn heif_item_hidden_inject(
         subboxes.push((tag, host_prefix[bpos..bpos + s_size].to_vec()));
         bpos += s_size;
     }
-    // A meta body may end in <8 bytes that cannot start a box header (zero
-    // padding or plain residue). Silently dropping it would shift every later
-    // offset and surface as RestoreMismatch on removal, so it is carried
-    // through verbatim on both the inject and strip sides (review P3-4).
+    // Meta bodies ending in <8 bytes (padding/residue) cannot start a box header;
+    // preserve them verbatim on inject and strip to ensure exact bit-level restore.
     let meta_tail: Vec<u8> = if bpos < m_end {
         host_prefix[bpos..m_end].to_vec()
     } else {
@@ -922,13 +902,8 @@ fn heif_item_hidden_inject(
     let mut ipos = if iinf_ver == 0 { 14 } else { 16 };
     let mut max_id = 0u32;
     for _ in 0..entry_cnt {
-        // Entry header: size/type (8) + version (1); the item id sits at +12
-        // (u16 for infe v2, u32 for v3). The old `ipos + 8` gate allowed an
-        // off-by-one on `[ipos + 8]` and did not cover the +12..+16 reads at
-        // all, so a truncated iinf panicked. These are hard rejects rather
-        // than scan-shortening breaks: continuing with a partial `max_id`
-        // could mint a `new_id` that collides with an item declared after
-        // the break point (review P3-5).
+        // Entry header bounds check: size/type (8) + version (1), with item id at +12.
+        // Truncated entries must be rejected early to prevent id collisions on partial max_id.
         if ipos + 9 > iinf_box.len() {
             return Err(StrHideError::CorruptedData("Truncated iinf entry".into()));
         }
@@ -1093,23 +1068,13 @@ fn heif_item_hidden_inject(
                 let ext_off = read_sized_uint(iloc_buf, cpos, off_sz)?;
                 cpos += off_sz + len_sz;
                 if cm == 0 {
-                    // The base offset is rewritten below only when it points
-                    // outside the pre-growth `meta`. When it points *inside*,
-                    // the base stays put and the absolute extent position is
-                    // what decides whether the data moved: skipping the extent
-                    // merely because a base existed left items whose base sits
-                    // in `meta` but whose data lives past its end unshifted
-                    // (review A-02).
+                    // Rewrite base offset only when pointing outside pre-growth `meta`.
+                    // When base is inside `meta`, absolute extent offset determines if data moved.
                     let base_patched = base_sz > 0 && b_off > 0 && b_off >= m_end as u64;
                     let abs_off = b_off.saturating_add(ext_off);
                     if !base_patched && abs_off >= m_end as u64 {
-                        // Only extents that physically live after the old meta
-                        // moved by `delta_meta`; an item inside an `mdat` that
-                        // precedes `meta` keeps its absolute offset. The old
-                        // unconditional shift rewrote those to bogus values.
-                        // A crafted host can name an extent offset that has no
-                        // headroom for the meta growth; wrapping would write a
-                        // bogus offset into the stego (review P3-3).
+                        // Only extents physically located after old meta are shifted by `delta_meta`.
+                        // Extents must have sufficient headroom for expansion to prevent overflow.
                         let shifted = ext_off.checked_add(delta_meta as u64).ok_or_else(|| {
                             StrHideError::CorruptedData("iloc extent offset overflows".into())
                         })?;
@@ -1283,8 +1248,7 @@ fn heif_item_hidden_strip(
         subboxes.push((tag, stego_prefix[bpos..bpos + s_size].to_vec()));
         bpos += s_size;
     }
-    // The <8-byte meta residue the inject side carried through verbatim
-    // (review P3-4); it must re-enter the restored meta unchanged.
+    // Preserve trailing meta residue (<8 bytes) verbatim during restoration.
     let meta_tail: Vec<u8> = if bpos < m_end {
         stego_prefix[bpos..m_end].to_vec()
     } else {
@@ -1382,8 +1346,7 @@ fn heif_item_hidden_strip(
             0
         };
         let id_sz = if iloc_ver < 2 { 2 } else { 4 };
-        // The count read needs 16 bytes (v0/v1) or 18 (v2+); checking it only
-        // after the read let a short box panic first (review 2026-10-25).
+        // The count read requires 16 bytes (v0/v1) or 18 bytes (v2+); check before reading.
         if iloc_buf.len() < if iloc_ver < 2 { 16 } else { 18 } {
             return Err(StrHideError::CorruptedData("Truncated iloc box".into()));
         }
@@ -1453,7 +1416,7 @@ fn heif_item_hidden_strip(
                 if cm == 0 {
                     // Mirror the inject-side condition exactly: an extent is
                     // reverted when its absolute position moved, which is not
-                    // the same as "a base offset exists" (review A-02).
+                    // the same as "a base offset exists".
                     let base_patched = base_sz > 0 && b_off > 0 && b_off >= m_end as u64;
                     let abs_off = b_off.saturating_add(ext_off);
                     if !base_patched && abs_off >= m_end as u64 {
@@ -1590,8 +1553,8 @@ fn check_iloc_has_target(
     } else {
         0
     };
-    // v2+ carries a 32-bit count at +14..18; the old `>= 16` gate let a 16-
-    // or 17-byte box panic on the wider read (review 2026-10-25).
+    // v2+ carries a 32-bit count at +14..18; ensure sufficient buffer length
+    // before reading to prevent out-of-bounds access.
     if iloc_box.len() < if iloc_ver < 2 { 16 } else { 18 } {
         return Ok(false);
     }
@@ -1811,9 +1774,7 @@ mod tests {
         assert_eq!(offset, ube_offset);
     }
 
-    /// A v2+ iloc box of 16 or 17 bytes cannot hold the 32-bit item count at
-    /// +14..18; the old `>= 16` gate let the wider read panic. Every short
-    /// form must return `Ok(false)`, never abort (review 2026-10-25).
+    /// Verifies that truncated iloc boxes across all versions return Ok(false) without aborting.
     #[test]
     fn short_iloc_boxes_of_every_version_do_not_panic() {
         for len in 0..24usize {
@@ -2042,7 +2003,7 @@ mod tests {
     /// (12, the meta header) while the extent offset places the item data in
     /// the following `mdat`. The base is not rewritten (it is inside the
     /// untouched prefix), so the extent must be shifted or the item ends up
-    /// 41 bytes short after the meta grows (review A-02).
+    /// 41 bytes short after the meta grows.
     #[test]
     fn item_hidden_shifts_extents_when_the_base_offset_sits_inside_meta() {
         let iinf = make_iinf(1, 2);
@@ -2101,7 +2062,7 @@ mod tests {
 
     /// `inspect`, `auto` and the writer must agree: a 64-bit `meta` header is
     /// refused by the writer, so the probe must not advertise `item_hidden`
-    /// for it (review A-10).
+    /// for it.
     #[test]
     fn item_hidden_probe_rejects_a_64_bit_meta_header() {
         let host = synthetic_meta_heif(1, 2);
@@ -2180,9 +2141,7 @@ mod tests {
         );
     }
 
-    /// A crafted ultra-short `iloc` (the meta sub-box walk only guarantees
-    /// `size >= header_len`) must fail as CorruptedData, never panic on the
-    /// bare index reads of the inject-side geometry parse (P1-1).
+    /// Verifies that ultra-short iloc boxes fail gracefully as CorruptedData rather than panicking.
     #[test]
     fn item_hidden_inject_rejects_an_ultra_short_iloc() {
         let iinf = make_iinf(1, 2);
@@ -2217,9 +2176,7 @@ mod tests {
         }
     }
 
-    /// An iloc item count larger than the box contents must be rejected by
-    /// both the inject and the strip walk, not panic on the u16 entry reads
-    /// (P2-1).
+    /// Verifies that iloc item counts exceeding box boundaries are rejected by inject and strip walks.
     #[test]
     fn item_hidden_walks_reject_iloc_count_beyond_data() {
         let iinf = make_iinf(1, 2);
@@ -2317,9 +2274,7 @@ mod tests {
         assert!(write_sized_uint(&mut buf, 0, 16).is_err());
     }
 
-    /// An infe entry declaring `item_id = u32::MAX` must refuse the carrier:
-    /// the old `(max_id + 1).max(1)` wrapped to 1 in release and collided with
-    /// the primary image's item id (P2-2).
+    /// Verifies that an infe entry declaring `item_id = u32::MAX` is safely rejected.
     #[test]
     fn item_hidden_inject_rejects_item_id_u32_max() {
         let host = synthetic_meta_heif(u32::MAX, 3);
@@ -2334,8 +2289,7 @@ mod tests {
         assert!(err.to_string().contains("item_id space exhausted"), "{err}");
     }
 
-    /// The non-AEAD header can be fully forged, so strip must cross-check the
-    /// declared coordinates against the actual layout before slicing (P2-3).
+    /// Verifies that strip validates declared coordinates against physical layout before slicing.
     #[test]
     fn item_hidden_strip_rejects_forged_coordinates() {
         let host = synthetic_meta_heif(1, 2);
@@ -2413,8 +2367,7 @@ mod tests {
         out
     }
 
-    /// A `meta` box behind an 8 MiB `mdat` must be reached by seeking over the
-    /// box body, not by reading the prefix into memory (review A P2-08).
+    /// Verifies that meta box probes seek over preceding mdat boxes without whole-file buffering.
     #[test]
     fn meta_probes_seek_over_the_mdat_body() {
         let meta = {

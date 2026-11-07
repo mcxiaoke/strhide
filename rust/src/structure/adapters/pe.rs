@@ -449,10 +449,7 @@ impl HostAdapter for PeAdapter {
         let file_size = stego_in.seek(SeekFrom::End(0))?;
 
         // `pe_overlay` always appends, so the envelope must end exactly at the
-        // file end. Accepting "starts after the image" was a hole: the trailer's
-        // size field is CRC-32 only, so a forged 1 TiB envelope passed this
-        // check and `read` then allocated a multi-gigabyte metadata block
-        // (review P0-2).
+        // file end to prevent out-of-bounds reads or forged size fields from triggering DoS.
         if let Some(trailer) = &trailer
             && let Ok(pe_info) = parse_pe_headers(stego_in)
             && trailer.ube_offset >= pe_info.pe_image_end
@@ -682,13 +679,8 @@ fn inject_codebits(
 
     let (_need_bits, need_slack) = pe_codebits::channel_requirement(ube.len());
 
-    // Defensive check: carrier must not already contain a pe_codebits channel.
-    // A second codebits injection would overwrite the first channel's header in .text,
-    // permanently orphaning the first restore diff in slack (P1-1). The header
-    // parse alone (version whitelist + capacity) decides, without
-    // requiring the recorded slack_off to fall inside the *current* slack
-    // ranges — a section table edited after injection would otherwise slip
-    // past this second line of defense (review P3-10).
+    // Defensive check: carrier must not already contain a pe_codebits channel,
+    // preventing a second injection from overwriting the first channel's header in .text.
     //
     // `parse_channel_header` deliberately does not check the magic (it also
     // serves the post-`locate` extraction path), and on a clean `.text` the
@@ -720,8 +712,7 @@ fn inject_codebits(
     // original bytes bit-for-bit.
     let _zeroed = pe_codebits::verify_zero_slack(host_in, slack_off, need_slack)?;
 
-    // The channel header stores the slack offset as u32; a run beyond 4 GiB
-    // would truncate silently and send strip to the wrong region (P3-7).
+    // The channel header stores the slack offset as u32; runs beyond 4 GiB must be rejected.
     let slack_off_u32 = u32::try_from(slack_off).map_err(|_| {
         StrHideError::UnsupportedFormat(
             "pe_codebits slack run lies beyond 4 GiB; the channel header cannot address it".into(),

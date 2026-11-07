@@ -20,7 +20,7 @@
 //! These change the *ordering* between modes/blocks relative to the paper's
 //! UERD while keeping its qualitative shape (high-energy textured blocks are
 //! cheap, flat blocks expensive). Aligning the formula requires a detection
-//! evaluation to justify (see the review report M4), which has not been run;
+//! evaluation to justify, which has not been run;
 //! until then this module claims fidelity to the idea, not the arithmetic.
 //!
 //! Evaluates embedding distortion directly on quantized DCT coefficients and

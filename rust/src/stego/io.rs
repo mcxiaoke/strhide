@@ -44,9 +44,7 @@ pub fn embed_carrier_file(
     let carrier_before_bytes = carrier_meta.len();
     let dest = target.output_path.unwrap_or(carrier_path);
     // `-o <same path as the carrier>` is an in-place write, not an overwrite of
-    // a *different* file: refusing it because the destination exists would make
-    // the explicit and implicit spellings of the same request behave
-    // differently (review B-07). Other destinations keep the overwrite gate.
+    // a different file. Only separate destinations require overwrite validation.
     if target.output_path.is_some() && !same_file(carrier_path, dest) {
         check_overwrite(dest, target.overwrite)?;
     }

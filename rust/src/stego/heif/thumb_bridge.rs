@@ -28,9 +28,8 @@ pub enum BridgeTargetKind {
         /// File offset of the TIFF Tag 0x0202 (JPEGInterchangeFormatLength) value field, if present.
         tag_0202_file_offset: Option<usize>,
         /// TIFF type of tag 0x0202 (`3` = SHORT, `4` = LONG). The value must be
-        /// written back with its original width: a 4-byte write into a SHORT
-        /// entry overwrote the neighbouring bytes, and reading one as `u32`
-        /// turned a BE SHORT length into `len << 16` (review A-01).
+        /// written back with its original width to avoid corrupting adjacent entries
+        /// or misinterpreting big-endian SHORT values.
         tag_0202_type: u16,
         /// File offset of IFD0's 4-byte next-IFD pointer. IFD1 is allowed to
         /// live after the JPEG, in which case resizing the JPEG moves it and
@@ -413,10 +412,8 @@ fn reconstruct_heif(
             write_tiff_uint(&mut out, mapped, width, is_little_endian, new_len)?;
         }
 
-        // IFD1 after the JPEG moves by `delta`, but IFD0's next-IFD pointer is
-        // stored before the replaced region and keeps its old value; a strict
-        // reader then lands `delta` bytes short of IFD1 and loses the
-        // thumbnail (review A-01).
+        // IFD1 after the JPEG moves by `delta`; update IFD0's next-IFD pointer
+        // so readers do not land `delta` bytes short of IFD1.
         if let Some(ptr_pos) = next_ifd_ptr_file_offset
             && ifd1_rel_offset > jpeg_rel_offset
         {
@@ -447,11 +444,7 @@ fn reconstruct_heif(
     let target_start_u64 = target_start as u64;
 
     // The extent that physically contains the replaced region: only its
-    // declared length may change, by exactly one delta. The old code patched
-    // *every* extent of the target item (adding delta N times on multi-extent
-    // items) and never identified a host item for the container fallback,
-    // leaving its iloc length stale while the bytes had already moved
-    // (audit 2026-10-24 5.2, review 2026-10-25 M9).
+    // declared length may change, by exactly one delta.
 
     for item in &isobmff.items {
         // Is this the item containing the target?
@@ -563,10 +556,8 @@ fn patch_uint(buf: &mut [u8], pos: usize, size: usize, val: u64) -> Result<(), S
             "Out of bounds patch in iloc".into(),
         ));
     }
-    // `iloc` stores extent lengths in a field whose width comes from
-    // `length_size` (1, 2, 4 or 8 bytes). Writing `val as u32` silently
-    // truncated anything wider, producing a container whose extent length no
-    // longer matched the bytes it described (review R3 P1-10).
+    // `iloc` stores extent lengths in variable-width fields (1, 2, 4 or 8 bytes);
+    // ensure the value fits within the target field width to prevent truncation.
     let max = match size {
         1 => u8::MAX as u64,
         2 => u16::MAX as u64,
@@ -666,9 +657,7 @@ pub fn find_bridge_target(data: &[u8]) -> Result<BridgeTarget, StrHideError> {
     // declared non-primary JPEG item is the fallback within this priority.
     let mut non_thumb_jpeg = None;
     for item in &isobmff.items {
-        // Only items stored as a single file extent can be rewritten by
-        // `host_extent`; advertising an `idat`-relative or multi-extent item
-        // made the probe succeed and the write fail (review B-03).
+        // Only items stored as a single file extent can be rewritten by `host_extent`.
         if &item.item_type == b"jpeg" && item.construction_method == 0 && item.extents.len() == 1 {
             if isobmff.primary_item_id == Some(item.item_id) {
                 continue; // the primary image stays bit-exact
@@ -802,8 +791,7 @@ fn parse_exif_embedded_jpeg(
         if tag != 0x0201 && tag != 0x0202 {
             continue;
         }
-        // The TIFF entry declares its own width; reading all four value bytes
-        // as a u32 turned a big-endian SHORT into `value << 16` (review A-01).
+        // The TIFF entry declares its own width (SHORT vs LONG); decode accordingly.
         let typ = read_u16_at(ep + 2)?;
         let count = read_u32_at(ep + 4)?;
         if count != 1 {
@@ -1183,12 +1171,8 @@ mod tests {
         }
     }
 
-    /// The host-extent selection that drives the iloc length patch: the
-    /// extent that physically covers the replaced region, on file-offset
-    /// items only. A multi-extent item must select exactly the covering
-    /// extent -- the old code added the length delta to every extent,
-    /// corrupting the declared total (audit 2026-10-24 5.2) -- and idat
-    /// construction can never host the bridge target (review 2026-10-25 M9).
+    /// Verifies host-extent selection selects the exact covering extent on
+    /// multi-extent items, and rejects construction methods that cannot host bridge targets.
     #[test]
     fn host_extent_selects_the_covering_extent() {
         let item = IsobmffItem {
@@ -1526,10 +1510,7 @@ mod tests {
         assert_eq!(parsed.items[0].extents[0].length, 8);
     }
 
-    /// `iloc` extent lengths are written back through a field whose width comes
-    /// from `length_size`. A value that does not fit used to be truncated
-    /// silently, leaving a container whose extent length no longer described
-    /// the bytes it pointed at (review R3 P1-10).
+    /// Verifies that patch_uint rejects values wider than the target field width.
     #[test]
     fn patch_uint_rejects_values_wider_than_the_field() {
         for (size, bad) in [(1usize, 256u64), (2, 65_536), (4, u32::MAX as u64 + 1)] {

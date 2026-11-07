@@ -518,9 +518,8 @@ mod tests {
     use super::{overwrite_target, safe_output_filename};
     use std::path::Path;
 
-    /// P2-7: an in-place embed (no `-o`, or `-o` equal to the carrier) used to
-    /// call `check_overwrite` on the carrier itself, so `overwrite=false`
-    /// failed before writing. Only a different destination may be checked.
+    /// Verifies in-place embed targets do not trigger destination overwrite checks
+    /// against the carrier itself when overwrite is false.
     #[test]
     fn in_place_embed_is_not_an_overwrite_target() {
         let carrier = Path::new("carrier.png");

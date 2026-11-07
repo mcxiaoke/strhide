@@ -1,8 +1,6 @@
-// Regression tests for the fixes made after the 2026-10-19 reviews
-// (`docs/VERIFY-REVIEWS-AND-FIX-PLAN-20261019.md`, P0 items).
+// Regression test suite covering security boundaries and edge-case fixes.
 //
-// Every test names the finding it locks down. CLI invocations use piped/null
-// stdio so a password prompt can never block the run.
+// All CLI invocations use piped/null stdio so a password prompt cannot block test execution.
 
 use crate::common::*;
 use std::fs;
@@ -42,8 +40,6 @@ fn write_carrier_file(
     .unwrap()
 }
 
-// --------------------------------------------------------------------------- P1-1
-
 /// A stealth envelope appended at EOF must not be reported as a damaged box
 /// tree: `verify_structure` has no password, so both the trailer magic and its
 /// CRC are password-derived, and only the boundary equality can identify it.
@@ -80,8 +76,6 @@ fn mp4_truncated_box_still_fails_level1() {
     assert!(!v.level1_host.ok, "{}", v.level1_host.detail);
 }
 
-// --------------------------------------------------------------------------- A-7
-
 /// Fragmented / CMAF media does not necessarily start with `ftyp`.
 #[test]
 fn fragmented_mp4_first_box_is_recognized() {
@@ -97,8 +91,6 @@ fn fragmented_mp4_first_box_is_recognized() {
         );
     }
 }
-
-// --------------------------------------------------------------------------- P2-2 / A-11
 
 /// A tampered `patch_offset` must surface as `CorruptedData`: debug builds used
 /// to panic on the subtraction and release builds wrapped around.
@@ -148,8 +140,6 @@ fn zip_tampered_patch_offset_returns_corrupted_data() {
     );
 }
 
-// --------------------------------------------------------------------------- A-4
-
 /// `remove` must honour the configured `backup` default, like `write` does.
 #[cfg(feature = "cli")]
 #[test]
@@ -192,8 +182,6 @@ fn remove_honours_config_backup_false() {
         "remove created a backup despite backup = false"
     );
 }
-
-// --------------------------------------------------------------------------- A-5
 
 /// A hint containing an apostrophe must be shown verbatim.
 #[cfg(feature = "cli")]
@@ -238,7 +226,7 @@ fn cli_password_hint_with_apostrophe_is_shown_verbatim() {
     let stdout = String::from_utf8_lossy(&read.stdout);
     let stderr = String::from_utf8_lossy(&read.stderr);
     // `--stdout` reserves stdout for the payload, so the hint (apostrophe
-    // intact) belongs on stderr (review R3 P1-8).
+    // intact) belongs on stderr.
     assert!(
         stderr.contains("Password hint: Bob's usual one"),
         "stderr: {stderr}"
@@ -248,8 +236,6 @@ fn cli_password_hint_with_apostrophe_is_shown_verbatim() {
         "stdout must stay payload-only, stdout: {stdout}"
     );
 }
-
-// --------------------------------------------------------------------------- A-3
 
 /// A hint coming from the config file must not block `--stealth`.
 #[cfg(feature = "cli")]
@@ -322,8 +308,6 @@ fn cli_stealth_rejects_explicit_hint() {
     );
 }
 
-// --------------------------------------------------------------------------- A-6
-
 /// Console output must be pure ASCII so it survives a CP936 console.
 #[cfg(feature = "cli")]
 #[test]
@@ -343,8 +327,6 @@ fn list_output_is_pure_ascii() {
         );
     }
 }
-
-// --------------------------------------------------------------------------- A-12
 
 /// Backup paths must be built from the OsString, not `Path::display()`.
 #[cfg(unix)]
@@ -367,8 +349,6 @@ fn backup_path_handles_non_utf8_names() {
     bak.push(".bak");
     assert!(PathBuf::from(bak).exists(), "backup for a non-UTF-8 name");
 }
-
-// --------------------------------------------------------------------------- P1-2
 
 /// PNGs may carry more than 64 KiB after IEND; `chunk` and `auto` must still
 /// find the real terminator instead of failing.
@@ -447,8 +427,6 @@ fn png_dirty_tail_auto_strategy() {
     );
 }
 
-// --------------------------------------------------------------------------- P2-3
-
 /// Extraction must never truncate an existing file unless `--overwrite` is
 /// given.
 #[test]
@@ -499,8 +477,6 @@ fn extract_refuses_to_overwrite_existing_file() {
     assert_eq!(fs::read(outdir.join("important.txt")).unwrap(), b"PAYLOAD");
 }
 
-// --------------------------------------------------------------------------- A-9
-
 /// Decompression is bounded by the declared raw size: a crafted carrier cannot
 /// expand a few kilobytes into an arbitrary amount of memory.
 #[test]
@@ -521,8 +497,6 @@ fn decompression_limit_is_enforced() {
         .unwrap_err();
     assert!(matches!(err, StrHideError::CorruptedData(_)), "{err}");
 }
-
-// --------------------------------------------------------------------------- A-8
 
 /// A single carrier with `-o <dir>` writes into the directory, like batch mode
 /// and like `read -o <dir>`; previously it failed with a bare OS error.
@@ -560,8 +534,6 @@ fn single_carrier_output_directory() {
     );
 }
 
-// --------------------------------------------------------------------------- P2-4
-
 /// Reading a no-password envelope with `-p` must warn that the password was
 /// not used (the envelope is masked with the public built-in key).
 #[cfg(feature = "cli")]
@@ -597,8 +569,6 @@ fn read_warns_when_password_is_unused() {
     assert!(stderr.contains("not encrypted"), "stderr: {stderr}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "plain");
 }
-
-// --------------------------------------------------------------------------- P2-1
 
 /// PE written with `-s eof` must be attributed as "eof" in inspect_carrier,
 /// and `-s pe_overlay` must be attributed as "pe_overlay".
@@ -647,8 +617,6 @@ fn pe_eof_strategy_inspect_attribution() {
         inspect_ovl.strategy
     );
 }
-
-// --------------------------------------------------------------------------- A-13
 
 /// PDF and ZIP stealth envelopes must be detected by suspicious_structures,
 /// while clean carriers must not trigger false positives.
@@ -717,8 +685,6 @@ fn a13_zip_and_pdf_suspicious_structures_detection() {
         "stealth PDF envelope must be detected by suspicious_structures"
     );
 }
-
-// --------------------------------------------------------------------------- A-15
 
 /// An unencrypted envelope whose metadata is corrupted must fail as CorruptedData,
 /// never as Password. An encrypted envelope with a wrong password must fail as Password.

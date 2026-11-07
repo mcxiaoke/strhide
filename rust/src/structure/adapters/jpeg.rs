@@ -253,10 +253,8 @@ impl HostAdapter for JpegAdapter {
         if ube_size > JPEG_MAX_TOTAL_CAPACITY {
             return "eof";
         }
-        // app_segment hides the chain before SOS. A header chain past
-        // MAX_JPEG_HEADER_SCAN (or a malformed marker stream) leaves SOS
-        // unreachable, and engine auto is single-shot with no fallback, so the
-        // probe happens here instead of failing inside inject (review P3-19).
+        // app_segment inserts segments before SOS. If SOS is unreachable within
+        // MAX_JPEG_HEADER_SCAN or malformed, fall back to EOF.
         let Ok(sos_offset) = find_jpeg_sos_offset(reader) else {
             return "eof";
         };

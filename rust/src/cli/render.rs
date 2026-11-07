@@ -218,8 +218,7 @@ pub(crate) struct DualVerifyResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) content_stego: Option<crate::stego::StegoVerifyResult>,
     /// Present when the content-domain verifier failed to run. Serialized so
-    /// `--json` consumers see a failure instead of a missing field (review R3
-    /// P1-1).
+    /// `--json` consumers see the error detail explicitly.
     #[cfg(feature = "content")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) content_error: Option<crate::core::errors::ErrorDetail>,
@@ -337,9 +336,8 @@ mod tests {
 
     #[test]
     fn binary_on_a_screen_is_never_written_raw() {
-        // `ESC[2J` hides inside a stream that is not valid UTF-8; a terminal
-        // still executes it, so the escaper must not fall through to a raw
-        // write (review 2026-11-07, P1).
+        // Even if terminal escape sequences hide inside non-UTF-8 bytes,
+        // terminal output must not fall through to an unescaped raw write.
         let mut data = b"\x1b[2J".to_vec();
         data.push(0xff);
         match plan_payload_stdout(&data, true) {

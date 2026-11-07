@@ -18,7 +18,7 @@ pub struct PdfTrailerInfo {
     /// the document's dialect: appending `xref`/`trailer` after an XRef stream
     /// leaves `/Prev` pointing at an indirect object (`N 0 obj << /Type /XRef
     /// ... >>`) where strict parsers expect the `xref` keyword (ISO 32000-1
-    /// §7.5.8.4, review P1-3).
+    /// §7.5.8.4).
     pub uses_xref_stream: bool,
 }
 
@@ -40,7 +40,7 @@ pub struct PdfTailInfo {
     /// if any. Mainstream readers take `/Encrypt` only from the trailer that
     /// `startxref` points at, without walking `/Prev`, so an incremental
     /// update that does not carry the key forward leaves every encrypted
-    /// string/stream unreadable (review P1-3).
+    /// string/stream unreadable.
     pub encrypt_ref: Option<String>,
     /// Newest cross-reference section is an XRef stream (see
     /// [`PdfTrailerInfo::uses_xref_stream`]).
@@ -53,8 +53,7 @@ pub fn parse_pdf_trailer_info<R: Read + Seek + ?Sized>(
     let tail = parse_pdf_tail_info(reader)?;
 
     // An encrypted document cannot be extended incrementally: the new trailer
-    // would not carry /Encrypt, and readers do not inherit it through /Prev —
-    // the document would flip to "unencrypted" with ciphertext bodies (P1-3).
+    // would not carry /Encrypt, and readers do not inherit it through /Prev.
     // The lossless EOF overlay never touches the trailer, so auto falls back
     // to it through the same parse failure.
     if tail.encrypt_ref.is_some() {
@@ -173,7 +172,7 @@ struct XRefStreamDict {
 /// A plain `find(">>")` stops at the first *nested* dictionary, e.g.
 /// `/DecodeParms << /Columns 5 /Predictor 12 >>`, truncating every key after
 /// it (`/Size`, `/Root`, `/Encrypt`). Encrypted documents then look
-/// unencrypted to the incremental writer (review P1-3).
+/// unencrypted to the incremental writer.
 fn balanced_dict_end(text: &str) -> Option<usize> {
     let bytes = text.as_bytes();
     let mut i = text.find("<<")?;
@@ -352,8 +351,8 @@ pub fn parse_pdf_tail_info_with_magic<R: Read + Seek + ?Sized>(
     // contain: a document that began with a classic `xref`/`trailer` and was
     // later updated with an XRef stream still carries rev1's trailer in that
     // window, and its `/Size` is stale. Adopting it mints an object number that
-    // rev2 already uses, so the incremental update silently collides (review
-    // A-06). For a classic table the trailer must be searched only from
+    // rev2 already uses, so the incremental update would collide.
+    // For a classic table the trailer must be searched only from
     // `startxref` onwards (the trailer follows the table it describes).
     let mut anchor = xref_anchor(reader, prev_startxref, file_size);
     // A `N G obj` anchor only proves the offset lands on *an* object. Treat it
@@ -787,7 +786,7 @@ impl HostAdapter for PdfAdapter {
         // 5. Write the incremental cross-reference section in the document's
         // own dialect. A classic `xref`/`trailer` appended to an XRef-stream
         // document leaves `/Prev` pointing at an indirect object, which strict
-        // parsers reject (ISO 32000-1 §7.5.8.4, review P1-3).
+        // parsers reject (ISO 32000-1 §7.5.8.4).
         let xref_offset = inject_offset + obj_header.len() as u64 + ube_size + END_OBJ.len() as u64;
 
         let section_len: u64 = if info.uses_xref_stream {
@@ -834,8 +833,8 @@ impl HostAdapter for PdfAdapter {
             // then ` ggggg n \n`. An offset past 10^10 grows the field and shifts
             // every following entry, producing a file whose `startxref`/`%%EOF`
             // still look right — so neither the write self-check nor
-            // `verify_structure` (which only parses the tail) notices (review R2
-            // P2 item, M-19). Refuse instead of writing a broken table.
+            // `verify_structure` (which only parses the tail) notices.
+            // Refuse instead of writing a broken table.
             if actual_obj_offset >= 10_000_000_000 {
                 return Err(StrHideError::UnsupportedFormat(
                     "Carrier is larger than 10 GB, which overflows the 10-digit offsets a classic \
@@ -1362,11 +1361,7 @@ trailer
     }
 
     /// Revision 1 is a classic `xref`/`trailer` document, revision 2 replaces
-    /// the cross-reference with an XRef stream. The stale rev-1 trailer is
-    /// still inside the 64 KiB tail window, and its `/Size` (3) names the
-    /// object that rev 2 itself occupies. Searching that window for `trailer`
-    /// used to pick it up, so the incremental envelope collided with the XRef
-    /// stream object (review A-06).
+    /// Verifies that incremental updates on XRef-stream documents ignore earlier classic trailers.
     #[test]
     fn xref_stream_revision_ignores_the_earlier_classic_trailer() {
         let mut pdf = Vec::new();

@@ -65,10 +65,8 @@ pub(crate) fn handle_write(
             ));
         }
         let carrier = &args.carrier[0];
-        // The prompt and `--stdin` both read standard input: whichever runs
-        // first eats the other's bytes. The prompt would swallow the payload's
-        // first line and the write would succeed with a truncated payload
-        // (review R2 P0-2), so this combination is refused outright.
+        // The prompt and `--stdin` both read standard input, which would cause
+        // race conditions and payload truncation. Refuse this combination outright.
         if args.payload.stdin {
             return Err(StrHideError::General(
                 "`--strategy ask` reads the choice from standard input, which `--stdin` is already \
@@ -314,11 +312,9 @@ fn read_one(
         // terminals only) and retry once.
         Err(e @ StrHideError::PasswordWithHint { .. }) if password.is_none() => {
             if !quiet && let Some(hint) = e.hint() {
-                // `--stdout` means the payload owns stdout, so the hint goes to
-                // stderr there; every other mode keeps the historical stdout
-                // placement (review R3 P1-8). The hint itself is untrusted and
-                // outside the AAD, so control characters are escaped before it
-                // reaches a terminal (review R3 P2-2).
+                // `--stdout` reserves stdout for the payload, so hint is printed
+                // to stderr; other modes use stdout. Control characters in untrusted
+                // hints are escaped before printing to a terminal.
                 let safe = crate::core::fs::escape_control_chars(hint);
                 let line = t!(Msg::InfoPasswordHint, hint = safe.as_ref());
                 if args.stdout {
@@ -370,11 +366,8 @@ fn read_one(
                             max_payload: None,
                             auto: false,
                         };
-                        // Hand over the password already resolved here — the
-                        // hint-retry above may have just prompted for it. Without
-                        // this the redirect resolves an empty source, fails the
-                        // content-domain extract and blames the password the user
-                        // had typed a moment earlier (review R2 P1-2).
+                        // Hand over the password already resolved above (which may have
+                        // been entered via hint prompt) to the content-domain extract.
                         if extract_args.passwords.password.is_none() {
                             extract_args.passwords.password = password.clone();
                         }
@@ -456,11 +449,8 @@ fn read_one(
                 "Refusing to overwrite existing file '{fn_to_use}'. Choose another -o path or pass --overwrite."
             )));
         }
-        // Same atomic commit as the explicit `-o` path and the library: a plain
-        // `File::create` truncated the destination before writing, so a full
-        // disk or a killed process left half a payload behind, and an existing
-        // symlink at that name was followed instead of replaced (R3 P1-4, the
-        // same class as R2 P0-7, missed on this one branch).
+        // Use atomic commit: avoids partial writes on disk full / process abort,
+        // and safely replaces existing symlinks instead of following them.
         crate::core::commit::write_bytes_atomic(Path::new(&fn_to_use), &res.data).map_err(|e| {
             let reason = match &e {
                 StrHideError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied => {

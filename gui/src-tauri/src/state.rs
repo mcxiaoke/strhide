@@ -390,9 +390,8 @@ mod tests {
     use super::*;
     use strhide::core::control::{Event, Stage};
 
-    /// P2-7: the extraction cache used to key only on path/mtime/password, so
-    /// switching the requested domain or preference on an unchanged carrier
-    /// returned the previous probe's result.
+    /// Verifies the extraction cache key includes domain and preference, preventing
+    /// stale results when switching requested domain on an unchanged carrier.
     #[test]
     fn extract_cache_key_includes_domain_and_prefer() {
         use strhide::core::payload::Payload;

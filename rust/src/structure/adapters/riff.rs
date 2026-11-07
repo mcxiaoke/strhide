@@ -88,8 +88,8 @@ pub fn riff_inject(
     // carrier that violates this (streaming WAV with size = 0, trailing ID3
     // or garbage) would leave locate walking junk past the declared boundary
     // — for odd ube sizes the envelope becomes unreachable and the occupied
-    // check double-injects — so refuse such carriers up front (review
-    // 2026-10-25); `--strategy eof` stays available and symmetric.
+    // check double-injects — so refuse such carriers up front;
+    // `--strategy eof` stays available and symmetric.
     let declared_end = 8u64 + old_riff_size as u64;
     if host_len != declared_end {
         return Err(StrHideError::CorruptedData(format!(
@@ -98,12 +98,8 @@ pub fn riff_inject(
         )));
     }
 
-    // The declared size can agree with the file length while the chunk table
-    // still does not tile it exactly (P1-2): an odd-sized final chunk whose
-    // mandatory pad byte is absent makes a spec-compliant walker step one byte
-    // past EOF, so the SHRD chunk appended here would be parsed from its
-    // second byte onward and L1 would reject every stego we write. Reject such
-    // carriers instead of emitting a file our own verifier cannot read.
+    // Verify that the chunk table tiles the declared RIFF boundary exactly,
+    // rejecting carriers with missing mandatory pad bytes on odd-sized final chunks.
     match riff_chunk_table(host_in, host_len)? {
         Some(RiffChunkTable::Exact) => {}
         Some(RiffChunkTable::MissingFinalPad) => {
@@ -447,10 +443,8 @@ fn riff_chunk_table(
 
 /// Whether `riff_chunk` can accept this carrier and envelope: the declared
 /// RIFF boundary must coincide with the physical end of the file, the chunk
-/// table must tile it exactly, and the patched size field must stay inside
-/// u32. Mirrors the hard checks in [`riff_inject`] so the auto decision and
-/// the capacity table share one predicate instead of drifting (review P3-17,
-/// P1-2).
+/// table must tile it exactly, and the patched size field must stay inside u32.
+/// Mirrors the hard checks in [`riff_inject`].
 pub fn riff_can_chunk(reader: &mut dyn SeekRead, ube_size: u64) -> bool {
     let start = reader.stream_position().unwrap_or(0);
     let host_len = match reader.seek(SeekFrom::End(0)) {

@@ -40,9 +40,7 @@ const ZIGZAG: [usize; 64] = [
 /// Skip `0xFF` fill bytes and return the marker code byte's index plus its
 /// value.
 ///
-/// JPEG permits any number of extra `0xFF` bytes before a marker code. Reading
-/// the second `0xFF` as the code (and the following bytes as its length) made
-/// every legal file with fill bytes unparsable (review P2-23).
+/// JPEG specifications permit arbitrary leading `0xFF` fill bytes before marker codes.
 fn marker_at(data: &[u8], mut i: usize) -> Option<(usize, u8)> {
     while i < data.len() && data[i] == 0xFF {
         i += 1;
@@ -211,9 +209,7 @@ mod tests {
         for (nat, slot) in q.iter_mut().enumerate() {
             *slot = (nat as u16) + 1;
         }
-        // JPEG allows extra 0xFF fill bytes before a marker code. The parser
-        // used to treat the second 0xFF as the marker and misread the length
-        // bytes as part of it, rejecting a legal file (review P2-23).
+        // Verifies handling of optional leading 0xFF fill bytes before marker codes.
         let mut data = vec![0xFF, 0xD8, 0xFF];
         data.extend(dqt_segment(&[QuantTable { id: 0, q }]));
         data.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02]);
