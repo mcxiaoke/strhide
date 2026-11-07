@@ -251,6 +251,7 @@ pub fn embed_carrier_with_dialect(
 /// Automatically sniff the carrier format, embed `payload`, and return the
 /// modified carrier together with whatever capacity metadata the engine
 /// produced while embedding.
+#[doc(hidden)]
 pub fn embed_carrier_with_dialect_info(
     carrier_bytes: &[u8],
     payload: &Payload<'_>,

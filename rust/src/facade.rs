@@ -1057,6 +1057,3 @@ impl AnalysisFacade<'_> {
         crate::analysis::scan_file(path)
     }
 }
-
-#[cfg(feature = "cli")]
-pub use crate::cli::Domain as CliDomain;

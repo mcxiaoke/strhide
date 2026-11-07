@@ -52,6 +52,7 @@ use crate::errors::StrHideError;
 /// appends its two length fields and the hint body, the content domain builds
 /// its own V4 AAD — so the sealing functions take a plain slice. This constant
 /// only describes the fixed prefix, and is what the tests below exercise.
+#[doc(hidden)]
 pub const AAD_SIZE: usize = 80;
 
 /// Length of an AES-GCM authentication tag.
@@ -59,12 +60,14 @@ pub const AEAD_TAG_LEN: usize = 16;
 
 /// Wire overhead of one framed payload chunk: the 4-byte length prefix plus the
 /// AES-GCM tag.
+#[doc(hidden)]
 pub const CHUNK_OVERHEAD: usize = 4 + AEAD_TAG_LEN;
 
 /// Number of chunks `plain_len` bytes occupy at `chunk_size`.
 ///
 /// At least one, even for an empty payload: [`encrypt_stream_to_chunks`] always
 /// emits a final chunk so the reader can tell "no payload" from "truncated".
+#[doc(hidden)]
 pub fn chunk_count(plain_len: u64, chunk_size: usize) -> u64 {
     // `max(1)` on the *divisor*: this is a `pub fn`, and a caller outside the
     // crate can pass 0. `LocalParams::validate` rejects that, but relying on it
@@ -79,6 +82,7 @@ pub fn chunk_count(plain_len: u64, chunk_size: usize) -> u64 {
 /// needs it *before* writing anything, to size the envelope and pick a strategy;
 /// when it spelled the constants out itself, any change to the framing would
 /// have made `auto` choose a strategy the injector then rejected.
+#[doc(hidden)]
 pub fn framed_len(plain_len: u64, chunk_size: usize) -> u64 {
     plain_len + chunk_count(plain_len, chunk_size) * CHUNK_OVERHEAD as u64
 }
@@ -98,6 +102,7 @@ pub const MAX_CHUNK_SIZE: usize = 64 * 1024 * 1024; // 64MB
 
 /// PBKDF2-HMAC-SHA256 iteration count. Raising this invalidates envelopes
 /// written with older versions, so it is treated as a wire-format constant.
+#[doc(hidden)]
 pub const PBKDF2_ITERATIONS: u32 = 100_000;
 
 /// Fixed L1 PBKDF2 cost of the content-domain V4 envelope.
@@ -105,6 +110,7 @@ pub const PBKDF2_ITERATIONS: u32 = 100_000;
 /// The content envelope no longer has a per-suite KDF cost: `suite_id` only
 /// selects the AEAD. One password run always pays this many iterations, so a
 /// forged header cannot choose a cheaper (or hugely more expensive) KDF.
+#[doc(hidden)]
 pub const CONTENT_L1_PBKDF2_ITERATIONS: u32 = 200_000;
 
 /// Credential supplied to the content-domain key schedule.
@@ -170,6 +176,7 @@ pub const BUILTIN_DEFAULT_KEY: &str =
 /// Passwords typed on macOS / iOS may arrive as NFD decomposed form; deriving
 /// keys from the raw bytes would silently produce different envelopes on
 /// different platforms. All password-bearing call sites funnel through here.
+#[doc(hidden)]
 pub fn normalize_nfc(s: &str) -> String {
     s.nfc().collect::<String>()
 }
@@ -245,6 +252,7 @@ pub fn derive_keys(password: &str, salt: &[u8]) -> Result<([u8; 32], [u8; 32]), 
 }
 
 /// Derive every secret one (password, salt) pair yields, with a single PBKDF2.
+#[doc(hidden)]
 pub fn derive_all(password: &str, salt: &[u8]) -> Result<PasswordSecrets, StrHideError> {
     let ikm = derive_ikm(password, salt);
     let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm);
@@ -293,6 +301,7 @@ pub fn derive_stealth_magics(
 
 /// Derive a 76-byte deterministic keystream from password and salt to mask
 /// the sensitive fields of EnvelopeHeader in stealth mode.
+#[doc(hidden)]
 pub fn derive_header_mask(password: &str, salt: &[u8]) -> Result<[u8; 76], StrHideError> {
     let ikm = derive_ikm(password, salt);
     let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm);
@@ -305,6 +314,7 @@ pub fn derive_header_mask(password: &str, salt: &[u8]) -> Result<[u8; 76], StrHi
 /// Derive a 4-byte CRC mask from trailer magic in stealth mode.
 /// This prevents public IEEE 802.3 CRC32 scanning from detecting the trailer
 /// without knowledge of the password.
+#[doc(hidden)]
 pub fn derive_trailer_crc_mask(trailer_magic: &[u8; 4]) -> u32 {
     crc32fast::hash(&[
         trailer_magic[0],
@@ -340,6 +350,7 @@ pub fn derive_channel_header_mask(envelope_header_magic: &[u8; 8]) -> [u8; 10] {
 /// Per-chunk nonce: the 8-byte prefix of `base_nonce` is preserved, and the
 /// low 4 bytes are XOR-ed with `chunk_index`. Reusing `base_nonce` across
 /// chunks is safe because every resulting nonce is distinct.
+#[doc(hidden)]
 pub fn make_chunk_nonce(base_nonce: &[u8; 12], chunk_index: usize) -> [u8; 12] {
     let counter_bytes: [u8; 4] = base_nonce[8..12].try_into().unwrap();
     let counter = u32::from_le_bytes(counter_bytes) ^ (chunk_index as u32);
@@ -351,6 +362,7 @@ pub fn make_chunk_nonce(base_nonce: &[u8; 12], chunk_index: usize) -> [u8; 12] {
 
 /// Metadata nonce: same scheme as [`make_chunk_nonce`] but XOR-ed with
 /// `0xFFFF_FFFF` so the metadata seal never shares a nonce with chunk 0.
+#[doc(hidden)]
 pub fn make_meta_nonce(base_nonce: &[u8; 12]) -> [u8; 12] {
     let counter_bytes: [u8; 4] = base_nonce[8..12].try_into().unwrap();
     let counter = u32::from_le_bytes(counter_bytes) ^ 0xFFFFFFFF;
@@ -755,6 +767,7 @@ pub fn compute_sha256(data: &[u8]) -> [u8; 32] {
 ///
 /// `R: ?Sized` so a `&mut dyn Read`/`&mut dyn SeekRead` can be passed straight
 /// through (the in-memory engine hands it a trait object).
+#[doc(hidden)]
 pub fn compute_stream_sha256<R: Read + ?Sized>(reader: &mut R) -> Result<[u8; 32], StrHideError> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];

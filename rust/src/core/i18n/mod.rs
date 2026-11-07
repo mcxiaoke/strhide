@@ -7,6 +7,7 @@ pub mod locale;
 #[doc(hidden)]
 pub mod messages;
 
+#[doc(hidden)]
 pub use messages::Msg;
 
 /// Supported user interface languages.
@@ -87,6 +88,7 @@ impl RenderCtx {
 /// Declare the bilingual message catalog.
 /// Generates `enum Msg` and `(Msg, Lang) -> &'static str` lookup table.
 #[macro_export]
+#[doc(hidden)]
 macro_rules! i18n_messages {
     (
         $(
@@ -127,6 +129,7 @@ macro_rules! i18n_messages {
 
 /// Retrieve message text (without arguments) or render with named arguments.
 #[macro_export]
+#[doc(hidden)]
 macro_rules! t {
     (ctx = $ctx:expr, $msg:path) => {
         $msg.text($ctx.lang).to_string()

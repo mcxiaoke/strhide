@@ -105,9 +105,11 @@ pub const DEFAULT_HEVC_FORMAT: HevcFormatProfile = HevcFormatProfile {
 };
 
 /// Serialised JPEG superblock size in bytes (352 bits).
+#[doc(hidden)]
 pub const JPEG_SUPERBLOCK_BYTES: usize = 44;
 
 /// Bit slots of the default JPEG superblock (`2 * (44 * 8 + 8 - 1)`).
+#[doc(hidden)]
 pub const JPEG_SUPERBLOCK_SLOTS: usize = 718;
 
 /// Identity of one JPEG wire format.
@@ -320,6 +322,7 @@ pub struct WireCipherProfile {
 }
 
 /// V4 official cipher for PNG carriers.
+#[doc(hidden)]
 pub const OFFICIAL_PNG_CIPHER: WireCipherProfile = WireCipherProfile {
     domain_label: b"strhide-stego-domain-v1",
     hpos_label: b"strhide-stego-hpos-v2",
@@ -330,6 +333,7 @@ pub const OFFICIAL_PNG_CIPHER: WireCipherProfile = WireCipherProfile {
 };
 
 /// V4 official cipher for WAV / FLAC carriers.
+#[doc(hidden)]
 pub const OFFICIAL_AUDIO_CIPHER: WireCipherProfile = WireCipherProfile {
     domain_label: b"strhide-stego-domain-v1",
     hpos_label: b"audio-hpos",
@@ -340,6 +344,7 @@ pub const OFFICIAL_AUDIO_CIPHER: WireCipherProfile = WireCipherProfile {
 };
 
 /// V4 official cipher for JPEG carriers.
+#[doc(hidden)]
 pub const OFFICIAL_JPEG_CIPHER: WireCipherProfile = WireCipherProfile {
     domain_label: b"strhide-stego-domain-v1",
     hpos_label: b"hpos",
@@ -350,6 +355,7 @@ pub const OFFICIAL_JPEG_CIPHER: WireCipherProfile = WireCipherProfile {
 };
 
 /// V4 official cipher for HEVC carriers (MOV/MP4/HEIC/Annex B).
+#[doc(hidden)]
 pub const OFFICIAL_HEVC_CIPHER: WireCipherProfile = WireCipherProfile {
     domain_label: b"strhide-stego-domain-v1",
     hpos_label: b"strhide-hevc-hpos-v4",

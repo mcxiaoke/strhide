@@ -38,9 +38,11 @@ pub const STEALTH_DOMAIN: &[u8] = b"strhide-stealth-v1";
 
 /// Default raw-deflate level used by [`CompressionStrategy::Auto`] and
 /// [`CompressionStrategy::Always`] when no level is given.
+#[doc(hidden)]
 pub const DEFAULT_COMPRESSION_LEVEL: u32 = 6;
 
 /// Reject anything above this: raw deflate takes 0..=9.
+#[doc(hidden)]
 pub const MAX_COMPRESSION_LEVEL: u32 = 9;
 
 /// Smallest accepted payload chunk.
@@ -53,6 +55,7 @@ pub const MIN_CHUNK_SIZE: usize = 512;
 
 /// Historical compression trigger: keep the deflate stream only when it saves
 /// at least 2% (`comp_len * 100 < raw_size * 98`).
+#[doc(hidden)]
 pub const AUTO_COMPRESSION_SAVING_PERCENT: u128 = 2;
 
 /// A header/trailer magic pair identifying a private dialect.

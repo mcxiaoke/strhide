@@ -25,6 +25,7 @@ pub mod render;
 
 // The historical flat paths (`strhide::cli::Cli`, `strhide::cli::run_cli`)
 // keep working: the split into submodules is an internal reorganisation.
+#[doc(hidden)]
 pub use args::{
     BANNER, Cli, Commands, ContainerCommands, DiagCli, DiagCommands, GlobalArgs,
     STRHIDE_BUILD_TIME, STRHIDE_GIT_HASH, STRHIDE_VERSION_INFO, StegoCli, StegoCommands, StructCli,
