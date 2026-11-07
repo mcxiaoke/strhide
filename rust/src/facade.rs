@@ -124,6 +124,7 @@ impl std::fmt::Debug for DualOptions<'_> {
 
 /// Cross-domain inspection diagnosis.
 #[derive(Debug, Serialize)]
+#[non_exhaustive]
 pub struct DualInspect {
     #[cfg(feature = "structure-base")]
     #[serde(flatten)]
@@ -144,6 +145,7 @@ pub struct DualInspect {
 
 /// Cross-domain verification result.
 #[derive(Debug, Serialize)]
+#[non_exhaustive]
 pub struct DualVerify {
     #[cfg(feature = "structure-base")]
     #[serde(flatten)]

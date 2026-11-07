@@ -94,6 +94,7 @@ pub struct FinalizeCtx<'a> {
 /// adapter is ordered by **recommended priority**, matching the order in which
 /// the auto strategy prefers them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct StrategyCapacity {
     pub strategy: String,
     /// Exact maximum UBE envelope size in bytes, when it can be stated as a

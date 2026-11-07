@@ -106,6 +106,7 @@ pub enum Severity {
 
 /// One detector's verdict on the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Finding {
     /// Detector id, e.g. "magic:strhide-header", "png:unknown-chunk", "chi2-lsb".
     pub detector: String,
@@ -133,6 +134,7 @@ pub struct DetectorMetric {
 
 /// Aggregated scan result for one file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ScanReport {
     pub carrier: String,
     /// Detected container format, or `None` for unrecognized files.

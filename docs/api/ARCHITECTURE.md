@@ -603,7 +603,7 @@ const MY_DIALECT: Dialect = Dialect::new()
 
 - 所有 fallible 入口统一返回 `StrHideError`，变体按失败类别粗粒度划分，便于按判别式分支而非字符串匹配。
 - 错误信息与国际化：`StrHideError::detail()` 与 `Display` 始终提供稳定的英文底层诊断；`detail_i18n()` 返回结构化的 `ErrorDetail { category: Option<Msg>, detail, hint }`，`ErrorDetail::render(lang)` 渲染成一行，GUI/服务端无需解析文本。库调用者无需关心 i18n 内部机制。
-- 多个公开枚举/结构体（`LocalParams`、`StructureProfile`、`StegoProfile`、`Warning`、`CompressionStrategy`、`RejectionPolicy`、`HevcParams` 等）标注 `#[non_exhaustive]`：下游应使用 `default()` + setter 构建，避免结构体字面量；未来新增字段/变体不构成破坏性变更。`Dialect` 仍是普通结构体（公开字段 + `const fn` builder），未标注 `#[non_exhaustive]`。
+- 多个公开枚举/结构体（`LocalParams`、`StructureProfile`、`StegoProfile`、`Warning`、`CompressionStrategy`、`RejectionPolicy`、`HevcParams`，以及结构/内容域只读结果 `WriteResult`/`ReadResult`/`InspectResult`/`VerifyResult`/`RemoveResult`/`LevelStatus`/`MetadataInspection`/`StrategyCapacity`/`EmbedStats`/`EmbedOutput`/`StegoEmbedResult`/`StegoHeaderInfo`/`StegoVerifyResult`/`DualInspect`/`DualVerify`/`ScanReport`/`Finding`）标注 `#[non_exhaustive]`：下游应使用 `default()` + setter 构建入参，结果类型只读字段；未来新增字段/变体不构成破坏性变更。例外：`structure::ReadSummary` 与 `facade::ExtractOutcome` 仍为普通结构体（GUI 直接构造），`Dialect` 仍是公开字段 + `const fn` builder 的普通结构体，均未标注 `#[non_exhaustive]`。
 - 线格式（UBE v2.2）的稳定性与读写兼容关系见 [WIRE_SPEC_STRUCTURE.md](./WIRE_SPEC_STRUCTURE.md) 的兼容矩阵；
   内容域（V4 信封）的稳定性分级与兼容矩阵见 [WIRE_SPEC_CONTENT.md](./WIRE_SPEC_CONTENT.md)。
 - 可运行示例：`rust/examples/`（`in_memory`、`private_profile`、`codec_bench`）；公共 API 文档中的代码块由 `cargo test --doc` 守护，示例由 `cargo build --examples` 守护。

@@ -71,6 +71,7 @@ pub struct CarrierMetadata {
 /// Inspection status of the envelope's encrypted metadata block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum MetadataInspection {
     Decrypted(CarrierMetadata),
     DecryptFailed { error: String },
@@ -505,6 +506,7 @@ impl std::fmt::Display for Warning {
 /// `Ok` already means success, so there is no `status` field; every field is
 /// typed (format, strategy, paths) instead of being a pre-rendered string.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct WriteResult {
     /// Path the (possibly stego) carrier was written to, or `<memory>` for the
     /// byte-level entry points.
@@ -535,6 +537,7 @@ pub struct WriteResult {
 
 /// Outcome of a successful [`read_carrier`] / [`read_carrier_with_dialect`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ReadResult {
     /// Path the carrier was read from, or `<memory>` for the byte-level
     /// entry points.
@@ -592,6 +595,7 @@ impl ReadResult {
 /// with no envelope: `has_hidden_data == false`, and all envelope-derived
 /// fields are `None`. `strategies` is always populated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct InspectResult {
     /// Path inspected.
     pub carrier: PathBuf,
@@ -661,6 +665,7 @@ impl InspectResult {
 
 /// Result of one verification level.
 #[derive(Debug, Serialize)]
+#[non_exhaustive]
 pub struct LevelStatus {
     /// Whether the level passed.
     pub ok: bool,
@@ -713,6 +718,7 @@ impl LevelStatus {
 
 /// Outcome of [`verify_carrier`]: three independent checks.
 #[derive(Debug, Serialize)]
+#[non_exhaustive]
 pub struct VerifyResult {
     pub carrier: PathBuf,
     pub format: FileFormat,
@@ -746,6 +752,7 @@ impl VerifyResult {
 
 /// Outcome of a successful [`remove_carrier`].
 #[derive(Debug, Serialize)]
+#[non_exhaustive]
 pub struct RemoveResult {
     /// Path the restored carrier was written to.
     pub carrier: PathBuf,

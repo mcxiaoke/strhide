@@ -1122,6 +1122,7 @@ impl<'a> BridgeOptions<'a> {
 
 /// Exact carrier modification statistics reported by the embedder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct EmbedStats {
     /// Number of elements (pixels, DCT coefficients, or CABAC bins) modified.
     pub modified_slots: usize,
@@ -1131,6 +1132,7 @@ pub struct EmbedStats {
 
 /// What an embed produced.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EmbedOutput {
     /// The modified carrier.
     pub bytes: Vec<u8>,
@@ -1193,6 +1195,7 @@ pub enum StegoWarning {
 
 /// Structured outcome of embedding into a carrier file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct StegoEmbedResult {
     pub carrier: PathBuf,
     pub written_to: PathBuf,
@@ -1208,6 +1211,7 @@ pub struct StegoEmbedResult {
 
 /// Read-only steganographic header diagnostics obtained without full payload decoding.
 #[derive(Debug, Clone, Serialize, PartialEq)]
+#[non_exhaustive]
 pub struct StegoHeaderInfo {
     pub format: String,
     pub has_hidden_data: bool,
@@ -1349,6 +1353,7 @@ impl VerifyLevel {
 
 /// Three-tier diagnostic verification result for content carriers.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StegoVerifyResult {
     pub format: String,
     pub levels: Vec<VerifyLevel>,

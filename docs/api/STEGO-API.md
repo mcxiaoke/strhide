@@ -39,6 +39,8 @@
 线格式身份 `XxxFormatProfile`、常量 `DEFAULT_XXX_FORMAT` / `OFFICIAL_XXX_FORMAT`。
 统一入口以 carrier（载体）命名，域引擎与 facade 与之一致。
 
+**只读结果**：公开结果结构体（`EmbedStats`、`EmbedOutput`、`StegoEmbedResult`、`StegoHeaderInfo`、`StegoVerifyResult` 等）标注 `#[non_exhaustive]`，下游只读字段、不使用结构体字面量构造或穷尽解构；未来新增字段不构成破坏性变更。
+
 ---
 
 ## 2. 统一入口与凭据优先级
