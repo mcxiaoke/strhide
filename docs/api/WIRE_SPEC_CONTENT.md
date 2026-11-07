@@ -776,11 +776,16 @@ cos    55f3c5acb971153a
 ln_1p  23e6e71dccf69b20
 ```
 
-已验证：Rust（Windows/MSVC 与 Ubuntu/glibc）、Python（同两平台）、Go（Windows/amd64）四组摘要全部相同；
-把 libm 换成这套实现后，28 例字节基线**一例未变**，说明中间量的 ulp 级差异本来就被量化吸收。
+已验证（2026-11-07）：**x86_64/MSVC、x86_64/glibc、aarch64/glibc 三个平台**的 Rust 实现给出同样的四组摘要，
+Python 在两个 x86 平台、Go 在 x86_64 上也相同；28 例字节基线在三个平台上都是 **28/28 一致**。
+把 libm 换成这套实现后基线一例未变，说明中间量的 ulp 级差异本来就被量化吸收。
 
-**未验证**：ARM（arm64 上浮点仍应一致，但 Go 在 arm64 可能把 `a*b + c` 融合成 FMA，
-需要显式禁止后才谈逐位一致）。这一条属于"换平台前必须复测"的项目，不是已确立的结论。
+arm64 的验证方式是交叉编译后免工具链运行：
+`rustup target add aarch64-unknown-linux-musl` + `-C linker=rust-lld`（sysroot 里的 lld，无需外部工具链），
+产出 ~3.3 MB 静态二进制，Debian 11 arm64 上直接 `--check` 全绿。
+
+**移植注意**：别的语言在 arm64 上可能把 `a*b + c` 融合成 FMA（Go 就允许），那样逐位一致不成立；
+移植时必须显式关闭收缩，或用不产生乘加的写法。
 
 ---
 
@@ -952,7 +957,7 @@ Ubuntu 22.04 / x86_64（1 核）实机验证：
 
 | 项 | 结果 |
 |---|---|
-| 28 例真实语料 `--check` | **28/28 逐例一致**（含 PNG 的 hill/suniward/mipod、JPEG 的 uerd/juniward/jmipod、HEVC、FLAC、WAV） |
+| 28 例真实语料 `--check` | **x86_64/Windows、x86_64/Ubuntu、aarch64/Debian 11 三个平台均 28/28 逐例一致**（含 PNG 的 hill/suniward/mipod、JPEG 的 uerd/juniward/jmipod、HEVC、FLAC、WAV） |
 | 合成图矩阵（4 图 × 3 算法，800×800，32 KiB 载荷，固定 `--seed`） | 修复前 11/12；修复后 **12/12** |
 | 唯一不一致 | `mipod` + 纯渐变图：Windows `62f4bc8d5d29` / Linux `e852749beeb6` |
 | 差异定位 | `σ²`、`I_n`、`box_smooth` 逐位相同；只有 `fisher_to_costs` 的输出不同，≤ 255 ulp |
