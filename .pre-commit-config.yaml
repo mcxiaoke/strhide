@@ -14,3 +14,14 @@ repos:
         language: system
         pass_filenames: false
         types: [rust]
+
+      # A feature-gate mismatch (a gated type definition with an ungated `impl`)
+      # only shows up in the trimmed builds, which neither the default nor the
+      # `--all-features` pass exercises. Cheap enough once the target dir is
+      # warm; run it by hand when editing `cfg` attributes.
+      - id: check-feature-matrix
+        name: feature matrix (no-default + single-feature builds)
+        entry: pwsh -c "python scripts/check_feature_matrix.py"
+        language: system
+        pass_filenames: false
+        types: [rust]

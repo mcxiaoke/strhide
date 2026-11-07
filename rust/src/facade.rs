@@ -243,6 +243,7 @@ pub struct ExtractOutcome {
     pub is_encrypted: bool,
 }
 
+#[cfg(all(feature = "structure-base", feature = "content-base"))]
 impl ExtractOutcome {
     /// An outcome for one domain, with the other domain absent.
     pub fn new(

@@ -27,6 +27,7 @@ cargo test local_ --all-features -- --ignored  # 单独运行本地快速批量�
 cargo test heavy_ --all-features -- --ignored  # 单独运行耗时评测与矩阵测试（约 2 分钟）
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings   # 提交前格式化并修复所有 lint
 python ../scripts/import_lint.py       # 架构依赖边界检查（CI quality 必跑项，防止违规跨层引用）
+python ../scripts/check_feature_matrix.py  # 特性矩阵编译（改动 cfg/feature 门控或模块结构必跑）
 ```
 
 ### 隐写引擎全量并发压力测试 (Stress Tests)
