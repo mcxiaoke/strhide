@@ -81,7 +81,7 @@ pub(crate) fn handle_inspect(
     _cfg: &FileConfig,
     quiet: bool,
     engine: &StrHide,
-) -> Result<(), StrHideError> {
+) -> Result<i32, StrHideError> {
     let password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
@@ -91,8 +91,9 @@ pub(crate) fn handle_inspect(
     let key = resolve_key_file(args.key_file.as_deref())?;
 
     let is_batch = args.carrier.len() > 1 || args.carrier.iter().any(|p| p.is_dir());
-    let files = expand_input_paths(&args.carrier, args.recursive, quiet)?;
-    if files.is_empty() {
+    let ExpandedInputs { files, missing } =
+        expand_input_paths(&args.carrier, args.recursive, quiet)?;
+    if files.is_empty() && missing.is_empty() {
         return Err(StrHideError::General(
             "No files to inspect (empty input or empty directory)".into(),
         ));
@@ -115,13 +116,17 @@ pub(crate) fn handle_inspect(
             print_inspect_result(&dual.structure);
             print_content_domain(&dual);
         }
-        return Ok(());
+        return Ok(0);
     }
 
     let t_start = std::time::Instant::now();
     let mut reports = Vec::with_capacity(files.len());
-    let mut json_items: Vec<serde_json::Value> = Vec::with_capacity(files.len());
-    let mut failures = 0usize;
+    let mut json_items: Vec<serde_json::Value> = Vec::with_capacity(files.len() + missing.len());
+    // A path the caller named but that does not exist is a failure, not a
+    // no-op: otherwise `inspect good.png stale.png` reports success.
+    let mut failures = missing.len();
+    push_missing_items(&mut json_items, &missing);
+    let mut any_failed = !missing.is_empty();
     for carrier in &files {
         match engine.inspect_any(
             carrier,
@@ -153,6 +158,7 @@ pub(crate) fn handle_inspect(
             }
             Err(e) => {
                 failures += 1;
+                any_failed = true;
                 if args.json {
                     json_items.push(serde_json::json!({
                         "path": carrier.display().to_string(),
@@ -203,7 +209,9 @@ pub(crate) fn handle_inspect(
         );
     }
 
-    Ok(())
+    // Same contract as `verify`: an unreadable or missing input fails the
+    // batch. The per-file warnings above already say which ones.
+    Ok(if any_failed { 1 } else { 0 })
 }
 
 /// Whether the structure domain actually ran for this carrier.
@@ -256,8 +264,9 @@ pub(crate) fn handle_verify(
     let key = resolve_key_file(args.key_file.as_deref())?;
 
     let is_batch = args.carrier.len() > 1 || args.carrier.iter().any(|p| p.is_dir());
-    let files = expand_input_paths(&args.carrier, args.recursive, quiet)?;
-    if files.is_empty() {
+    let ExpandedInputs { files, missing } =
+        expand_input_paths(&args.carrier, args.recursive, quiet)?;
+    if files.is_empty() && missing.is_empty() {
         return Err(StrHideError::General(
             "No files to verify (empty input or empty directory)".into(),
         ));
@@ -335,9 +344,12 @@ pub(crate) fn handle_verify(
 
     let t_start = std::time::Instant::now();
     let mut reports = Vec::with_capacity(files.len());
-    let mut json_items: Vec<serde_json::Value> = Vec::with_capacity(files.len());
-    let mut failures = 0usize;
-    let mut any_failed = false;
+    let mut json_items: Vec<serde_json::Value> = Vec::with_capacity(files.len() + missing.len());
+    // Missing inputs are failures here too: `verify a.png stale.png` used to
+    // exit 0 because only in-loop errors were counted.
+    let mut failures = missing.len();
+    let mut any_failed = !missing.is_empty();
+    push_missing_items(&mut json_items, &missing);
     let mut passed = 0usize;
     for carrier in &files {
         match engine.verify_any(
@@ -461,9 +473,9 @@ pub(crate) fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideErr
     use crate::analysis::scan_file;
 
     // Expand inputs: directories become file lists.
-    let files = expand_input_paths(&args.input, args.recursive, quiet)?;
+    let ExpandedInputs { files, missing } = expand_input_paths(&args.input, args.recursive, quiet)?;
 
-    if files.is_empty() {
+    if files.is_empty() && missing.is_empty() {
         return Err(StrHideError::General(
             "No files to scan (empty input or empty directory)".into(),
         ));
@@ -471,8 +483,12 @@ pub(crate) fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideErr
 
     let t_start = std::time::Instant::now();
     let mut reports = Vec::with_capacity(files.len());
-    let mut json_items: Vec<serde_json::Value> = Vec::with_capacity(files.len());
-    let mut failures = 0usize;
+    let mut json_items: Vec<serde_json::Value> = Vec::with_capacity(files.len() + missing.len());
+    // Counted and reported, but (unlike `inspect`/`verify`) they do not move
+    // the exit code: `scan`'s exit status is the verdict gate, and unreadable
+    // files were already documented as report-only.
+    let mut failures = missing.len();
+    push_missing_items(&mut json_items, &missing);
     for f in &files {
         match scan_file(f) {
             Ok(r) => {
@@ -656,12 +672,38 @@ fn push_files_recursive(
     Ok(())
 }
 
+/// Result of expanding the positional arguments into concrete inputs.
+struct ExpandedInputs {
+    /// Paths that exist and will be processed.
+    files: Vec<PathBuf>,
+    /// Paths the caller named that do not exist (or are a dangling symlink).
+    ///
+    /// They used to be dropped with a stderr warning only, so a batch that
+    /// silently lost an input still looked fully successful: `--json` carried
+    /// no trace of the path and the exit code stayed 0. Scripts that pass a
+    /// stale path must be able to see that.
+    missing: Vec<PathBuf>,
+}
+
+/// Append one `{"path", "error"}` item per missing input, matching the shape
+/// used for in-loop failures (`inspect`/`verify` were fixed to keep those in
+/// the array, see review P2-9).
+fn push_missing_items(json_items: &mut Vec<serde_json::Value>, missing: &[PathBuf]) {
+    for path in missing {
+        json_items.push(serde_json::json!({
+            "path": path.display().to_string(),
+            "error": "file does not exist",
+        }));
+    }
+}
+
 fn expand_input_paths(
     inputs: &[PathBuf],
     recursive: bool,
     quiet: bool,
-) -> Result<Vec<PathBuf>, StrHideError> {
+) -> Result<ExpandedInputs, StrHideError> {
     let mut files = Vec::new();
+    let mut missing = Vec::new();
     for entry in inputs {
         if entry.is_dir() {
             files.extend(if recursive {
@@ -671,11 +713,14 @@ fn expand_input_paths(
             });
         } else if entry.is_file() {
             files.push(entry.clone());
-        } else if !quiet {
-            eprintln!("{}", t!(Msg::WarnSkippedMissing, path = entry.display()));
+        } else {
+            if !quiet {
+                eprintln!("{}", t!(Msg::WarnSkippedMissing, path = entry.display()));
+            }
+            missing.push(entry.clone());
         }
     }
-    Ok(files)
+    Ok(ExpandedInputs { files, missing })
 }
 
 pub(crate) fn handle_list(args: ListArgs) -> Result<(), StrHideError> {

@@ -308,7 +308,7 @@ pub(crate) fn run_domain_cli_with(engine: &StrHide, domain: Domain, argv: Vec<Os
             }
         },
         Commands::Inspect(args) => match handle_inspect(args, &cfg, quiet, engine) {
-            Ok(_) => 0,
+            Ok(code) => code,
             Err(e) => {
                 print_error(&e);
                 1

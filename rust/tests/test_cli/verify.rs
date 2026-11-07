@@ -626,3 +626,86 @@ fn read_encrypted_without_password_returns_password_variant_with_hint() {
     assert!(insp.has_hidden_data);
     assert_eq!(insp.password_hint.as_deref(), Some("3班1975"));
 }
+
+// ------------------------------------------------- batch exit codes (2026-11-07)
+
+/// A path the caller named but that does not exist used to be dropped with a
+/// stderr warning only: `--json` had no trace of it and the exit code stayed 0,
+/// so `inspect good.png stale.png || exit 1` never fired.
+#[test]
+fn batch_inspect_fails_when_an_input_is_missing() {
+    let dir = scratch("inspect_missing");
+    fs::write(dir.join("clean.png"), make_png()).unwrap();
+
+    let out = run(&dir, &["inspect", "clean.png", "ghost.png"]);
+    assert_eq!(code(&out), 1, "missing input must fail the batch");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("ghost.png"),
+        "stderr must name the path: {err}"
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("1") && text.contains("failed"),
+        "summary must count the missing input: {text}"
+    );
+
+    let json = run(&dir, &["inspect", "clean.png", "ghost.png", "--json"]);
+    assert_eq!(code(&json), 1, "missing input must fail the JSON batch too");
+    let v: serde_json::Value = serde_json::from_slice(&json.stdout).expect("json array");
+    let arr = v.as_array().expect("batch inspect emits an array");
+    assert!(
+        arr.iter().any(
+            |item| item.get("path").and_then(|p| p.as_str()) == Some("ghost.png")
+                && item.get("error").is_some()
+        ),
+        "missing input must appear as a failure item: {v}"
+    );
+}
+
+/// Same contract for `verify`, which already failed on in-loop errors but not
+/// on inputs that never reached the loop.
+#[test]
+fn batch_verify_fails_when_an_input_is_missing() {
+    let dir = scratch("verify_missing");
+    fs::write(dir.join("clean.png"), make_png()).unwrap();
+
+    let out = run(&dir, &["verify", "clean.png", "ghost.png"]);
+    assert_eq!(code(&out), 1, "missing input must fail the batch");
+
+    let json = run(&dir, &["verify", "clean.png", "ghost.png", "--json"]);
+    assert_eq!(code(&json), 1);
+    let v: serde_json::Value = serde_json::from_slice(&json.stdout).expect("json array");
+    assert!(
+        v.as_array()
+            .is_some_and(|arr| arr.iter().any(|item| item.get("error").is_some())),
+        "missing input must appear as a failure item: {v}"
+    );
+}
+
+/// The exit code must stay 0 when every named input exists, otherwise the fix
+/// above would turn batches into false alarms.
+#[test]
+fn batch_inspect_and_verify_stay_zero_when_all_inputs_exist() {
+    let dir = scratch("inspect_all_present");
+    fs::write(dir.join("a.png"), make_png()).unwrap();
+    fs::write(dir.join("b.png"), make_png()).unwrap();
+
+    let insp = run(&dir, &["inspect", "a.png", "b.png"]);
+    assert_eq!(code(&insp), 0, "{}", String::from_utf8_lossy(&insp.stderr));
+
+    // `verify` reports "no envelope" as a failed file, so the passing case
+    // needs real envelopes: two carriers that actually verify must exit 0.
+    for name in ["a", "b"] {
+        write_carrier(
+            &dir.join(format!("{name}.png")),
+            PayloadSource::Text("payload"),
+            &WriteOptions::default()
+                .with_output(&dir.join(format!("{name}-out.png")))
+                .with_backup(false),
+        )
+        .expect("write envelope");
+    }
+    let ver = run(&dir, &["verify", "a-out.png", "b-out.png"]);
+    assert_eq!(code(&ver), 0, "{}", String::from_utf8_lossy(&ver.stderr));
+}
