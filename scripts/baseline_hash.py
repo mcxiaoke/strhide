@@ -328,7 +328,9 @@ def content_pass(
             return {"status": "unsupported", "note": first_error(err)}
         return {"status": "failed", "note": first_error(err)}
 
-    cap = load_json_line(out)
+    # `capacity --json` is a pretty-printed single document (same printer as the
+    # other diagnostics); parsing it as a one-line record silently yielded None.
+    cap = load_json_block(out)
     result: dict = {"status": "ok"}
     if cap:
         result["capacity_max_bytes"] = cap.get("max_raw_payload_bytes")

@@ -120,6 +120,7 @@ pub(crate) fn handle_inspect(
 
     let t_start = std::time::Instant::now();
     let mut reports = Vec::with_capacity(files.len());
+    let mut json_items: Vec<serde_json::Value> = Vec::with_capacity(files.len());
     let mut failures = 0usize;
     for carrier in &files {
         match engine.inspect_any(
@@ -143,10 +144,21 @@ pub(crate) fn handle_inspect(
                     print_content_domain(&dual);
                     println!();
                 }
+                if args.json {
+                    json_items.push(serde_json::to_value(&dual).map_err(|e| {
+                        StrHideError::General(format!("inspect serialization failed: {e}"))
+                    })?);
+                }
                 reports.push(dual);
             }
             Err(e) => {
                 failures += 1;
+                if args.json {
+                    json_items.push(serde_json::json!({
+                        "path": carrier.display().to_string(),
+                        "error": e.to_string(),
+                    }));
+                }
                 if !quiet {
                     eprintln!(
                         "{}",
@@ -158,7 +170,7 @@ pub(crate) fn handle_inspect(
     }
 
     if args.json {
-        print_json(&reports)?;
+        print_json(&json_items)?;
     } else if !quiet {
         let hidden = reports
             .iter()
@@ -323,6 +335,7 @@ pub(crate) fn handle_verify(
 
     let t_start = std::time::Instant::now();
     let mut reports = Vec::with_capacity(files.len());
+    let mut json_items: Vec<serde_json::Value> = Vec::with_capacity(files.len());
     let mut failures = 0usize;
     let mut any_failed = false;
     let mut passed = 0usize;
@@ -398,10 +411,21 @@ pub(crate) fn handle_verify(
                     #[cfg(feature = "content")]
                     content_error: dual.content_error,
                 });
+                if args.json {
+                    json_items.push(serde_json::to_value(&reports[reports.len() - 1]).map_err(
+                        |e| StrHideError::General(format!("verify serialization failed: {e}")),
+                    )?);
+                }
             }
             Err(e) => {
                 failures += 1;
                 any_failed = true;
+                if args.json {
+                    json_items.push(serde_json::json!({
+                        "path": carrier.display().to_string(),
+                        "error": e.to_string(),
+                    }));
+                }
                 if !quiet {
                     eprintln!(
                         "{}",
@@ -413,7 +437,7 @@ pub(crate) fn handle_verify(
     }
 
     if args.json {
-        print_json(&reports)?;
+        print_json(&json_items)?;
     } else if !quiet {
         let failed_cnt = reports.len() - passed;
         let elapsed_str = format_duration(t_start.elapsed());
@@ -447,12 +471,26 @@ pub(crate) fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideErr
 
     let t_start = std::time::Instant::now();
     let mut reports = Vec::with_capacity(files.len());
+    let mut json_items: Vec<serde_json::Value> = Vec::with_capacity(files.len());
     let mut failures = 0usize;
     for f in &files {
         match scan_file(f) {
-            Ok(r) => reports.push(r),
+            Ok(r) => {
+                if args.json {
+                    json_items.push(serde_json::to_value(&r).map_err(|e| {
+                        StrHideError::General(format!("scan serialization failed: {e}"))
+                    })?);
+                }
+                reports.push(r);
+            }
             Err(e) => {
                 failures += 1;
+                if args.json {
+                    json_items.push(serde_json::json!({
+                        "path": f.display().to_string(),
+                        "error": e.to_string(),
+                    }));
+                }
                 if !quiet {
                     eprintln!("{}", t!(Msg::WarnScanFailed, path = f.display(), err = e));
                 }
@@ -461,7 +499,7 @@ pub(crate) fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideErr
     }
 
     if args.json {
-        print_json(&reports)?;
+        print_json(&json_items)?;
     } else if quiet {
         // The exit code below is the entire quiet output: 1 when any report
         // reached "likely-hidden", 0 otherwise.

@@ -126,7 +126,7 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         ("write", "encrypt") => Msg::HelpWriteEncrypt,
         ("write", "no-encrypt") => Msg::HelpWriteNoEncrypt,
         ("write", "hint") => Msg::HelpWriteHint,
-        ("write", "preserve-time") => Msg::HelpWriteNoPreserveTime,
+        ("write", "preserve-time") => Msg::HelpWritePreserveTime,
         ("write", "no-preserve-time") => Msg::HelpWriteNoPreserveTime,
         ("write", "no-backup") => Msg::HelpWriteNoBackup,
         (_, "unescape") => Msg::HelpWriteUnescape,

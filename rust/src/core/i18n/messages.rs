@@ -436,8 +436,8 @@ Run `strhide <COMMAND> --help` for the options of one command.",
         en = "Enable stealth mode (envelope appears as random bytes without password)",
         zh = "启用潜行隐蔽模式（无密码时信封特征完全呈现为随机噪声）";
     HelpWriteEncrypt:
-        en = "Require password (fails immediately if password is not supplied, skips prompt)",
-        zh = "要求密码加密（若未提供密码则直接失败，不进入交互输入）";
+        en = "Require password (prompts in an interactive terminal; fails instead when no terminal is available)",
+        zh = "要求密码加密（在交互终端下提示输入；无可用终端时直接失败）";
     HelpWriteNoEncrypt:
         en = "Do not encrypt payload (allows writing without personal password)",
         zh = "不使用密码加密（允许直接写入未设置个人密码的数据）";

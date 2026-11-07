@@ -237,8 +237,12 @@ pub(crate) fn run_domain_cli_with(engine: &StrHide, domain: Domain, argv: Vec<Os
     );
     i18n::set_lang(lang);
 
-    for warn in &cfg.warnings {
-        eprintln!("{warn}");
+    // `-q` means "no output unless an operation fails"; config warnings are
+    // informational, so they must respect it like every other non-error line.
+    if !pre.get_flag("quiet") {
+        for warn in &cfg.warnings {
+            eprintln!("{warn}");
+        }
     }
 
     // 4) 从 matches 构造本入口的 Cli，并归一化为全量 Commands + quiet。

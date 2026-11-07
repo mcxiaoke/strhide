@@ -397,9 +397,12 @@ pub fn encrypt_metadata(
         .map_err(|e| StrHideError::General(format!("Metadata encryption failed: {e}")))
 }
 
-/// Open the metadata block. A failed tag is reported as
-/// [`StrHideError::CorruptedData`]; callers that want to distinguish "wrong
-/// password" from "corrupted" must match on this at the engine layer.
+/// Open the metadata block. The AEAD tag authenticates both the key and the
+/// ciphertext, so a wrong password and tampered bytes are indistinguishable:
+/// a failed tag is reported as
+/// [`CorruptedData`](StrHideError::CorruptedData) with the message
+/// "Wrong password or corrupted metadata", rather than pretending callers can
+/// tell the two apart.
 pub fn decrypt_metadata(
     meta_ciphertext: &[u8],
     meta_key: &[u8; 32],
@@ -415,7 +418,7 @@ pub fn decrypt_metadata(
     };
     cipher
         .decrypt(&Nonce::from(nonce), payload)
-        .map_err(|_| StrHideError::CorruptedData("Metadata authentication failed".into()))
+        .map_err(|_| StrHideError::CorruptedData("Wrong password or corrupted metadata".into()))
 }
 
 /// Read `reader` to EOF, seal it in `chunk_size`-byte AES-256-GCM chunks,

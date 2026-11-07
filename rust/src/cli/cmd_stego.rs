@@ -21,6 +21,7 @@ use crate::t;
 use super::args::*;
 use super::cmd_structure::handle_read;
 use super::helpers::*;
+use super::render::print_json;
 
 /// Read-only capacity probe shared by `strhide capacity` and `embed --capacity`.
 ///
@@ -44,13 +45,19 @@ fn run_capacity_probe(
     let is_batch = carriers.len() > 1;
     let mut failures = 0usize;
     let mut last_error: Option<StrHideError> = None;
+    let mut json_items: Vec<serde_json::Value> = Vec::new();
 
     for carrier in &carriers {
         let t_start = std::time::Instant::now();
         let carrier_bytes = match crate::stego::io::read_carrier_file(carrier) {
             Ok(bytes) => bytes,
             Err(err) => {
-                if is_batch && !quiet {
+                if json {
+                    json_items.push(serde_json::json!({
+                        "path": carrier.display().to_string(),
+                        "error": err.to_string(),
+                    }));
+                } else if is_batch && !quiet {
                     eprintln!(
                         "{}",
                         t!(Msg::WarnCapacityFailed, path = carrier.display(), err = err)
@@ -70,7 +77,12 @@ fn run_capacity_probe(
         ) {
             Ok(opts) => opts,
             Err(e) => {
-                if is_batch && !quiet {
+                if json {
+                    json_items.push(serde_json::json!({
+                        "path": carrier.display().to_string(),
+                        "error": e.to_string(),
+                    }));
+                } else if is_batch && !quiet {
                     eprintln!(
                         "{}",
                         t!(Msg::WarnCapacityFailed, path = carrier.display(), err = e)
@@ -88,7 +100,12 @@ fn run_capacity_probe(
         ) {
             Ok(c) => c,
             Err(e) => {
-                if is_batch && !quiet {
+                if json {
+                    json_items.push(serde_json::json!({
+                        "path": carrier.display().to_string(),
+                        "error": e.to_string(),
+                    }));
+                } else if is_batch && !quiet {
                     eprintln!(
                         "{}",
                         t!(Msg::WarnCapacityFailed, path = carrier.display(), err = e)
@@ -100,12 +117,9 @@ fn run_capacity_probe(
             }
         };
         if json {
-            println!(
-                "{}",
-                serde_json::to_string(&cap).map_err(|e| {
-                    StrHideError::General(format!("capacity serialization failed: {e}"))
-                })?
-            );
+            json_items.push(serde_json::to_value(&cap).map_err(|e| {
+                StrHideError::General(format!("capacity serialization failed: {e}"))
+            })?);
             continue;
         }
         if quiet {
@@ -199,6 +213,15 @@ fn run_capacity_probe(
             )
         );
     }
+    if json {
+        // Single carrier keeps the historical top-level object shape; a batch
+        // must be one JSON document, not one concatenated object per line.
+        if json_items.len() == 1 {
+            print_json(&json_items[0])?;
+        } else {
+            print_json(&json_items)?;
+        }
+    }
     if failures > 0 {
         if is_batch {
             return Err(StrHideError::General(format!(
@@ -266,8 +289,19 @@ pub(crate) fn handle_embed(
         PayloadFlavor::Bytes,
     )? {
         ResolvedPayload::Stdin => {
+            // A pipe can be arbitrarily large; reading it unbounded lets a
+            // mistyped redirect exhaust memory before the carrier's own capacity
+            // check ever runs. 1 GiB matches the extraction-side payload ceiling.
+            const MAX_STDIN_PAYLOAD: u64 = 1 << 30;
             let mut buf = Vec::new();
-            std::io::stdin().read_to_end(&mut buf)?;
+            let read = std::io::stdin()
+                .take(MAX_STDIN_PAYLOAD + 1)
+                .read_to_end(&mut buf)?;
+            if read as u64 > MAX_STDIN_PAYLOAD {
+                return Err(StrHideError::General(
+                    "Payload from --stdin exceeds the 1 GiB limit".into(),
+                ));
+            }
             Payload::owned(buf)
         }
         ResolvedPayload::File(f) => {
