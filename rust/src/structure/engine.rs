@@ -569,6 +569,39 @@ pub struct ReadSummary {
     pub text_preview: Option<String>,
 }
 
+impl ReadSummary {
+    /// A summary with no written file and no text preview.
+    pub fn new(
+        carrier: PathBuf,
+        is_file: bool,
+        is_encrypted: bool,
+        filename: impl Into<String>,
+        raw_size: u64,
+    ) -> Self {
+        Self {
+            carrier,
+            is_file,
+            is_encrypted,
+            filename: filename.into(),
+            raw_size,
+            written_file: None,
+            text_preview: None,
+        }
+    }
+
+    /// Set [`written_file`](Self::written_file).
+    pub fn with_written_file(mut self, written_file: Option<PathBuf>) -> Self {
+        self.written_file = written_file;
+        self
+    }
+
+    /// Set [`text_preview`](Self::text_preview).
+    pub fn with_text_preview(mut self, text_preview: Option<String>) -> Self {
+        self.text_preview = text_preview;
+        self
+    }
+}
+
 impl ReadResult {
     /// Convert to a lightweight [`ReadSummary`] suitable for IPC transfer across WebView/IPC boundaries.
     pub fn summary(&self) -> ReadSummary {

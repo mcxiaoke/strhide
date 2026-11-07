@@ -519,6 +519,11 @@ impl std::fmt::Debug for EmbedOptions<'_> {
 }
 
 impl<'a> EmbedOptions<'a> {
+    /// Every knob at its default.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Omit original filename from micro-header.
     pub fn with_no_filename(mut self, no_filename: bool) -> Self {
         self.no_filename = no_filename;
@@ -561,6 +566,12 @@ impl<'a> EmbedOptions<'a> {
         enforcement: crate::stego::params::SafetyEnforcement,
     ) -> Self {
         self.safety = SafetyPolicy { level, enforcement };
+        self
+    }
+
+    /// Replace the whole safety policy.
+    pub fn with_safety_policy(mut self, policy: SafetyPolicy) -> Self {
+        self.safety = policy;
         self
     }
 
@@ -771,6 +782,11 @@ impl std::fmt::Debug for ProbeOptions<'_> {
 }
 
 impl<'a> ProbeOptions<'a> {
+    /// Every knob at its default.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Set the password.
     pub fn with_password(mut self, password: &'a str) -> Self {
         self.password = Some(password);
@@ -802,6 +818,12 @@ impl<'a> ProbeOptions<'a> {
         enforcement: crate::stego::params::SafetyEnforcement,
     ) -> Self {
         self.safety = SafetyPolicy { level, enforcement };
+        self
+    }
+
+    /// Replace the whole safety policy.
+    pub fn with_safety_policy(mut self, policy: SafetyPolicy) -> Self {
+        self.safety = policy;
         self
     }
 
@@ -855,6 +877,12 @@ impl<'a> ProbeOptions<'a> {
         self.domain
             .filter(|s| !s.is_empty())
             .or_else(|| dialect.stego_domain())
+    }
+
+    /// Run the probe on `pool` instead of the global rayon pool.
+    pub fn with_pool(mut self, pool: Arc<rayon::ThreadPool>) -> Self {
+        self.pool = Some(pool);
+        self
     }
 }
 
@@ -931,6 +959,12 @@ impl<'a> ExtractOptions<'a> {
         self
     }
 
+    /// Replace the extraction policy.
+    pub fn with_limits(mut self, limits: ExtractParams) -> Self {
+        self.limits = limits;
+        self
+    }
+
     /// Restrict the cipher suites this call will try.
     pub fn with_allowed_suites(mut self, suites: Vec<u16>) -> Self {
         self.limits.allowed_suites = Some(suites);
@@ -973,6 +1007,12 @@ impl<'a> ExtractOptions<'a> {
         self.domain
             .filter(|s| !s.is_empty())
             .or_else(|| dialect.stego_domain())
+    }
+
+    /// Run the extraction on `pool` instead of the global rayon pool.
+    pub fn with_pool(mut self, pool: Arc<rayon::ThreadPool>) -> Self {
+        self.pool = Some(pool);
+        self
     }
 }
 

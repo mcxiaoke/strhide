@@ -111,6 +111,18 @@ impl SafetyPolicy {
         }
     }
 
+    /// Set [`level`](Self::level).
+    pub const fn with_level(mut self, level: SafetyLevel) -> Self {
+        self.level = level;
+        self
+    }
+
+    /// Set [`enforcement`](Self::enforcement).
+    pub const fn with_enforcement(mut self, enforcement: SafetyEnforcement) -> Self {
+        self.enforcement = enforcement;
+        self
+    }
+
     /// Whether this policy blocks an over-tier payload instead of warning.
     pub fn is_enforced(self) -> bool {
         matches!(self.enforcement, SafetyEnforcement::Enforced)
@@ -240,6 +252,63 @@ impl Default for PngParams {
 
 #[cfg(feature = "content-png")]
 impl PngParams {
+    /// Set [`p1_window`](Self::p1_window).
+    pub fn with_p1_window(mut self, window: usize) -> Self {
+        self.p1_window = window;
+        self
+    }
+
+    /// Set [`p2_window`](Self::p2_window).
+    pub fn with_p2_window(mut self, window: usize) -> Self {
+        self.p2_window = window;
+        self
+    }
+
+    /// Set [`epsilon`](Self::epsilon).
+    pub fn with_epsilon(mut self, epsilon: f64) -> Self {
+        self.epsilon = epsilon;
+        self
+    }
+
+    /// Set [`exclusion_percentile`](Self::exclusion_percentile).
+    pub fn with_exclusion_percentile(mut self, percentile: f64) -> Self {
+        self.exclusion_percentile = percentile;
+        self
+    }
+
+    /// Set [`codec`](Self::codec).
+    pub fn with_codec(mut self, codec: StegoCodec) -> Self {
+        self.codec = codec;
+        self
+    }
+
+    /// Set [`stc_h`](Self::stc_h).
+    pub fn with_stc_h(mut self, stc_h: u8) -> Self {
+        self.stc_h = stc_h;
+        self
+    }
+
+    /// Set [`stc_u`](Self::stc_u).
+    pub fn with_stc_u(mut self, stc_u: u8) -> Self {
+        self.stc_u = stc_u;
+        self
+    }
+
+    /// Replace [`algorithm_options`](Self::algorithm_options).
+    pub fn with_algorithm_options(
+        mut self,
+        options: std::collections::BTreeMap<String, f64>,
+    ) -> Self {
+        self.algorithm_options = options;
+        self
+    }
+
+    /// Insert one model-private knob into [`algorithm_options`](Self::algorithm_options).
+    pub fn with_algorithm_option(mut self, key: impl Into<String>, value: f64) -> Self {
+        self.algorithm_options.insert(key.into(), value);
+        self
+    }
+
     /// Reject parameter combinations that the HILL pipeline cannot serve.
     ///
     /// Both low-pass windows must be **positive odd** numbers: the symmetric
@@ -535,6 +604,57 @@ impl Default for JpegParams {
 
 #[cfg(feature = "content-jpeg")]
 impl JpegParams {
+    /// Set [`neighbor_weight`](Self::neighbor_weight).
+    pub fn with_neighbor_weight(mut self, weight: f64) -> Self {
+        self.neighbor_weight = weight;
+        self
+    }
+
+    /// Set [`wet_cost`](Self::wet_cost).
+    pub fn with_wet_cost(mut self, cost: f64) -> Self {
+        self.wet_cost = cost;
+        self
+    }
+
+    /// Set [`stc_h`](Self::stc_h).
+    pub fn with_stc_h(mut self, stc_h: u8) -> Self {
+        self.stc_h = stc_h;
+        self
+    }
+
+    /// Set [`slot_budget`](Self::slot_budget).
+    pub fn with_slot_budget(mut self, budget: Option<usize>) -> Self {
+        self.slot_budget = budget;
+        self
+    }
+
+    /// Set [`polarize_weight`](Self::polarize_weight).
+    pub fn with_polarize_weight(mut self, weight: f64) -> Self {
+        self.polarize_weight = weight;
+        self
+    }
+
+    /// Replace [`algorithm_options`](Self::algorithm_options).
+    pub fn with_algorithm_options(
+        mut self,
+        options: std::collections::BTreeMap<String, f64>,
+    ) -> Self {
+        self.algorithm_options = options;
+        self
+    }
+
+    /// Insert one model-private knob into [`algorithm_options`](Self::algorithm_options).
+    pub fn with_algorithm_option(mut self, key: impl Into<String>, value: f64) -> Self {
+        self.algorithm_options.insert(key.into(), value);
+        self
+    }
+
+    /// Set [`deterministic`](Self::deterministic).
+    pub fn with_deterministic(mut self, deterministic: bool) -> Self {
+        self.deterministic = deterministic;
+        self
+    }
+
     /// Reject parameter values that would produce a NaN/Inf cost map, an empty
     /// search or a header field the decoder rejects.
     pub fn validate(&self) -> Result<(), StrHideError> {
@@ -658,6 +778,18 @@ impl ExtractParams {
             Some(ids) => ids.contains(&suite_id),
             None => true,
         }
+    }
+
+    /// Restrict the suites this policy will try (`None` means every known suite).
+    pub fn with_allowed_suites(mut self, suites: Option<Vec<u16>>) -> Self {
+        self.allowed_suites = suites;
+        self
+    }
+
+    /// Set [`max_pbkdf2_iterations`](Self::max_pbkdf2_iterations).
+    pub fn with_max_pbkdf2_iterations(mut self, iterations: u32) -> Self {
+        self.max_pbkdf2_iterations = iterations;
+        self
     }
 
     /// Set [`max_payload_bytes`](Self::max_payload_bytes).

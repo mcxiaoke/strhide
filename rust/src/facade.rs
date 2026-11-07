@@ -242,6 +242,29 @@ pub struct ExtractOutcome {
     pub is_encrypted: bool,
 }
 
+impl ExtractOutcome {
+    /// An outcome for one domain, with the other domain absent.
+    pub fn new(
+        payload: crate::core::payload::Payload<'static>,
+        source: Domain,
+        also_present: Option<Domain>,
+        is_encrypted: bool,
+    ) -> Self {
+        Self {
+            payload,
+            source,
+            also_present,
+            is_encrypted,
+        }
+    }
+
+    /// Set [`also_present`](Self::also_present).
+    pub fn with_also_present(mut self, also_present: Option<Domain>) -> Self {
+        self.also_present = also_present;
+        self
+    }
+}
+
 /// The private dialect for both domains, composed.
 ///
 /// This is the one object a host stores: the structure half drives the UBE

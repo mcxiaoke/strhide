@@ -112,6 +112,47 @@ impl Default for WriteOptions<'_> {
 }
 
 impl<'a> WriteOptions<'a> {
+    /// Default options (same as [`Default`]: `auto`, timestamps and backup kept).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set [`output_path`](Self::output_path).
+    pub const fn with_output(mut self, path: &'a Path) -> Self {
+        self.output_path = Some(path);
+        self
+    }
+
+    /// Set [`password`](Self::password).
+    pub const fn with_password(mut self, password: &'a str) -> Self {
+        self.password = Some(password);
+        self
+    }
+
+    /// Set [`password_hint`](Self::password_hint).
+    pub const fn with_password_hint(mut self, hint: &'a str) -> Self {
+        self.password_hint = Some(hint);
+        self
+    }
+
+    /// Set [`stealth`](Self::stealth).
+    pub const fn with_stealth(mut self, stealth: bool) -> Self {
+        self.stealth = stealth;
+        self
+    }
+
+    /// Set [`preserve_time`](Self::preserve_time).
+    pub const fn with_preserve_time(mut self, preserve_time: bool) -> Self {
+        self.preserve_time = preserve_time;
+        self
+    }
+
+    /// Set [`backup`](Self::backup).
+    pub const fn with_backup(mut self, backup: bool) -> Self {
+        self.backup = backup;
+        self
+    }
+
     /// Set strategy name.
     pub const fn with_strategy(mut self, strategy: &'a str) -> Self {
         self.strategy = strategy;
