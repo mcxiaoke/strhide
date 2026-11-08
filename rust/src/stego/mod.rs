@@ -275,11 +275,17 @@ pub fn embed_carrier_with_dialect_info(
 ///
 /// Engines compute capacity for minimal raw payloads. Reserving overhead for the worst-case
 /// filename ensures capacity numbers remain safe for both raw and file payloads.
+/// Recommended limits and tier ceilings are clamped to `max_raw_payload_bytes` to preserve
+/// the invariant `recommended_max_bytes <= max_raw_payload_bytes`.
 pub(crate) fn filename_safe_capacity(mut info: StegoCapacityInfo) -> StegoCapacityInfo {
     use crate::stego::envelope::MAX_FILENAME_OVERHEAD;
     info.max_raw_payload_bytes = info
         .max_raw_payload_bytes
         .saturating_sub(MAX_FILENAME_OVERHEAD);
+    info.recommended_max_bytes = info.recommended_max_bytes.min(info.max_raw_payload_bytes);
+    for limit in &mut info.tier_limits {
+        *limit = (*limit).min(info.max_raw_payload_bytes);
+    }
     info
 }
 
@@ -502,31 +508,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn filename_safe_capacity_only_shrinks_the_raw_ceiling() {
-        let info = StegoCapacityInfo {
+    fn filename_safe_capacity_clamps_recommended_and_tier_limits_to_raw_ceiling() {
+        use crate::stego::envelope::MAX_FILENAME_OVERHEAD;
+
+        // Case 1: Small carrier where filename overhead reduces raw ceiling below recommended
+        let small_info = StegoCapacityInfo {
+            format: "hevc".into(),
+            algorithm: "HEVC-CABAC-InPlace".into(),
+            total_elements: 6144,
+            available_slots: 5061,
+            max_raw_payload_bytes: 260,
+            max_raw_is_grouped: false,
+            recommended_max_bytes: 54,
+            tier_limits: [24, 54, 93],
+            estimated_change_rate: 0.25,
+            safety_level: "high".into(),
+            safety_bpp_limit: 0.1,
+            is_estimated: false,
+            media_info: None,
+        };
+        let safe_small = filename_safe_capacity(small_info);
+        assert_eq!(safe_small.max_raw_payload_bytes, 4);
+        // Recommended and tier limits must be clamped so recommended <= max_raw invariant holds
+        assert_eq!(safe_small.recommended_max_bytes, 4);
+        assert_eq!(safe_small.tier_limits, [4, 4, 4]);
+        assert!(safe_small.recommended_max_bytes <= safe_small.max_raw_payload_bytes);
+
+        // Case 2: Normal carrier where raw ceiling minus overhead still exceeds recommended
+        let normal_info = StegoCapacityInfo {
             format: "png".into(),
             algorithm: "hill".into(),
-            total_elements: 1000,
-            available_slots: 1000,
-            max_raw_payload_bytes: 300,
+            total_elements: 100_000,
+            available_slots: 100_000,
+            max_raw_payload_bytes: 10_000,
             max_raw_is_grouped: false,
-            recommended_max_bytes: 280,
-            tier_limits: [100, 200, 280],
+            recommended_max_bytes: 500,
+            tier_limits: [200, 500, 800],
             estimated_change_rate: 0.5,
             safety_level: "high".into(),
             safety_bpp_limit: 0.1,
             is_estimated: false,
             media_info: None,
         };
-        let safe = filename_safe_capacity(info.clone());
+        let safe_normal = filename_safe_capacity(normal_info.clone());
         assert_eq!(
-            safe.max_raw_payload_bytes,
-            300 - crate::stego::envelope::MAX_FILENAME_OVERHEAD
+            safe_normal.max_raw_payload_bytes,
+            10_000 - MAX_FILENAME_OVERHEAD
         );
-        // The engine's Enforced gate uses these unmodified values; clamping
-        // them here used to make Advisory and Enforced disagree.
-        assert_eq!(safe.recommended_max_bytes, info.recommended_max_bytes);
-        assert_eq!(safe.tier_limits, info.tier_limits);
+        assert_eq!(
+            safe_normal.recommended_max_bytes,
+            normal_info.recommended_max_bytes
+        );
+        assert_eq!(safe_normal.tier_limits, normal_info.tier_limits);
+        assert!(safe_normal.recommended_max_bytes <= safe_normal.max_raw_payload_bytes);
     }
 
     #[test]
