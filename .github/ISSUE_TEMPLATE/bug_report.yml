@@ -1,0 +1,107 @@
+name: Bug report
+description: Something does not work as documented (crash, wrong output, unreadable payload)
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Two questions decide most cases, so they are mandatory below:
+        **which version**, and **was the carrier transferred or re-encoded** between write and read.
+
+        Do **not** paste real passwords or confidential payloads. A synthetic reproducer
+        (any PNG/JPEG plus a short message) is enough.
+
+        Security issues go to [SECURITY.md](https://github.com/mcxiaoke/strhide/blob/main/SECURITY.md), not here.
+
+  - type: textarea
+    id: version
+    attributes:
+      label: Version and platform
+      description: Output of `strhide --version`, plus OS and architecture.
+      placeholder: |
+        strhide 0.9.3 (commit ..., built ...)
+        Windows 11 23H2, x86_64, baseline build (not the avx2 one)
+    validations:
+      required: true
+
+  - type: input
+    id: install
+    attributes:
+      label: How did you install it?
+      placeholder: prebuilt binary from the release page / cargo install / built from source / desktop app
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or UI steps
+      description: Exact command line (redact the password) or the tab and settings used in the desktop app.
+      render: shell
+    validations:
+      required: true
+
+  - type: dropdown
+    id: carrier
+    attributes:
+      label: Carrier format
+      multiple: true
+      options:
+        - PNG
+        - JPEG
+        - WebP
+        - HEIC / HEIF
+        - MP4 / MOV
+        - MKV
+        - WAV
+        - FLAC
+        - ZIP / JAR / DOCX / XLSX / PPTX
+        - PDF
+        - PE (EXE / DLL)
+        - not applicable
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transferred
+    attributes:
+      label: Was the carrier modified by another tool between write and read?
+      description: Chat apps, image hosts, editors, "save as", re-compression, or a second embed all count.
+      options:
+        - "No — read straight from the file that was written"
+        - "Yes — it passed through a chat app / image host / editor"
+        - "Not sure"
+        - "The problem happens on write, not read"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+      description: Full error text if there is one. `Rejection`, `NoHiddenData`, `RestoreMismatch` and `PayloadTooLarge` mean very different things.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: |
+        CLI: rerun with `-v` (DEBUG) or `-vv` (TRACE) — output goes to stderr.
+        Desktop app: open the 日志 panel and copy the relevant entries.
+        Remove paths, passwords, and payloads before pasting.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: I searched existing issues and the FAQ (docs/FAQ.md).
+          required: true
+        - label: This is not a security vulnerability (those go to SECURITY.md).
+          required: true

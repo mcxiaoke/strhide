@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: "If you use strhide in academic work, please cite it as below."
+title: "strhide: format-preserving lossless data hiding and content-adaptive steganography"
+abstract: >-
+  strhide is a Rust library, CLI, and desktop application for hiding data inside
+  carrier files. Its structure domain injects an encrypted envelope into
+  format-legal gaps (PNG chunks, JPEG APPn segments, ISO-BMFF boxes, RIFF chunks,
+  ZIP central-directory slack, PDF incremental revisions, PE overlay/slack/instruction
+  slots) and restores the pre-write host bit-exactly. Its content domain embeds
+  payloads into pixels, DCT coefficients, HEVC CABAC bypass sign bits, and PCM/FLAC
+  residuals using adaptive distortion cost models (HILL, S-UNIWARD, MiPOD, UERD,
+  J-UNIWARD, J-MiPOD). Both domains use PBKDF2/HKDF key derivation and AEAD
+  (AES-256-GCM, ChaCha20-Poly1305), and the wire formats are specified publicly for
+  third-party implementations.
+type: software
+authors:
+  - family-names: mcxiaoke
+    email: mcxiaoke@live.com
+license: Apache-2.0
+repository-code: "https://github.com/mcxiaoke/strhide"
+url: "https://github.com/mcxiaoke/strhide"
+version: 0.9.3
+keywords:
+  - steganography
+  - data hiding
+  - format-preserving
+  - lossless
+  - AES-256-GCM
+  - steganalysis
+  - Rust

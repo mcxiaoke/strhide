@@ -1,0 +1,69 @@
+name: Feature request
+description: Propose a capability, a carrier format, or an algorithm
+title: "[feat] "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read [ROADMAP.md](https://github.com/mcxiaoke/strhide/blob/main/ROADMAP.md) first — mobile apps,
+        hosted services, network features, and "resistance to targeted forensics" are explicitly out of scope.
+
+        Describe the **problem**, not the implementation. Anything touching the wire format needs
+        agreement before code is written.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Concrete use case. Which carrier, how much data, which threat are you defending against?
+      placeholder: |
+        I need to attach a 200 KB signed audit trail to a PDF that must still open in Acrobat,
+        and the original must be restorable bit-exactly months later.
+    validations:
+      required: true
+
+  - type: textarea
+    id: today
+    attributes:
+      label: What happens today?
+      description: What have you tried, and where does it fall short (capacity, format, speed, restore, detection)?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Structure domain (write / read / restore)
+        - Content domain (embed / extract / capacity)
+        - New carrier format
+        - New cost model / algorithm
+        - CLI ergonomics
+        - Desktop app
+        - Documentation
+        - Build / packaging
+    validations:
+      required: true
+
+  - type: dropdown
+    id: wire
+    attributes:
+      label: Does this change the wire format?
+      description: If unsure, say so — reviewers will work it out.
+      options:
+        - "No — behaviour/UI/tooling only"
+        - "Yes — new or changed bytes on the carrier"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing flags, other tools, or why the current workaround is unacceptable.
+    validations:
+      required: false

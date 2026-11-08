@@ -1,0 +1,12 @@
+# Default owners for everything in the repository.
+# Wire format, cryptography, and release workflow changes need the maintainer.
+
+*                       @mcxiaoke
+
+# Specs are normative: a change here is a format change.
+/docs/api/spec/         @mcxiaoke
+/rust/src/core/crypto.rs @mcxiaoke
+
+# Release and CI plumbing.
+/.github/workflows/     @mcxiaoke
+/scripts/               @mcxiaoke

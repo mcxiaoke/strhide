@@ -1,0 +1,23 @@
+strhide
+Copyright 2026 mcxiaoke
+
+This product includes software developed by third parties. The full
+inventory, with versions and licence identifiers, is in
+THIRD_PARTY_LICENSES.md and under docs/licenses/.
+
+Notable bundled components:
+
+  * strhide-rusty-h265, the Apache-2.0 fork of rusty_h265
+    (https://github.com/Remade-With-Rust/rusty_h265) maintained by this
+    project. Upstream copyright notices are retained.
+
+  * oxideav-h265 (https://github.com/OxideAV/oxideav-h265), MIT.
+
+  * The desktop client is built with Tauri (https://tauri.app), MIT or
+    Apache-2.0, and React (https://react.dev), MIT.
+
+The H.265/HEVC functionality is subject to patent considerations that the
+MIT and Apache-2.0 licences above do not address; see LEGAL.md section 4.
+
+This product is provided "AS IS", without warranty of any kind, as stated
+in the Apache License 2.0, sections 7 and 8.
