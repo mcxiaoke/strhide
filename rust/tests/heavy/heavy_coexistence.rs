@@ -388,13 +388,7 @@ fn run_single_coexistence_case(
 
     // 3. Dual inspection check
     let diag = engine
-        .inspect_any(
-            &work_file,
-            &DualOptions {
-                password: Some(&pass_content),
-                ..Default::default()
-            },
-        )
+        .inspect_any(&work_file, &DualOptions::new().with_password(&pass_content))
         .map_err(|e| format!("inspect_any failed: {e}"))?;
     if !diag.structure.has_hidden_data {
         return Err("Structure hidden data was not detected in inspect_any".into());

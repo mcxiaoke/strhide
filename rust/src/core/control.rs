@@ -81,6 +81,7 @@ impl Stage {
 /// `done >= total` always means the stage finished, whether or not `total` was
 /// known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Event {
     /// The stage this report belongs to.
     pub stage: Stage,

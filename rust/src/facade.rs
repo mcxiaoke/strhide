@@ -104,12 +104,62 @@ pub enum Domain {
 
 /// Options controlling a dual-domain inspection pass.
 #[derive(Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DualOptions<'a> {
     pub password: Option<&'a str>,
     /// Content-domain file key; ignored by the structure domain.
     pub key: Option<&'a [u8; 32]>,
     pub domain: Option<&'a str>,
     pub control: Control<'a>,
+}
+
+impl<'a> DualOptions<'a> {
+    /// All defaults: no credential, no domain label, no cancellation.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Envelope password, honoured by both domains.
+    pub fn with_password(mut self, password: &'a str) -> Self {
+        self.password = Some(password);
+        self
+    }
+
+    /// [`with_password`](Self::with_password) for an `Option` caller.
+    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
+        self.password = password;
+        self
+    }
+
+    /// Content-domain file key; the structure domain ignores it.
+    pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    /// [`with_key`](Self::with_key) for an `Option` caller.
+    pub fn with_key_option(mut self, key: Option<&'a [u8; 32]>) -> Self {
+        self.key = key;
+        self
+    }
+
+    /// Envelope domain label.
+    pub fn with_domain(mut self, domain: &'a str) -> Self {
+        self.domain = Some(domain);
+        self
+    }
+
+    /// [`with_domain`](Self::with_domain) for an `Option` caller.
+    pub fn with_domain_option(mut self, domain: Option<&'a str>) -> Self {
+        self.domain = domain;
+        self
+    }
+
+    /// Cancellation and progress channel shared with the caller.
+    pub fn with_control(mut self, control: Control<'a>) -> Self {
+        self.control = control;
+        self
+    }
 }
 
 impl std::fmt::Debug for DualOptions<'_> {
@@ -189,6 +239,7 @@ impl DualVerify {
 /// Options for automatic domain selection extraction.
 #[cfg(all(feature = "structure-base", feature = "content-base"))]
 #[derive(Clone, Default)]
+#[non_exhaustive]
 pub struct SmartExtractOptions<'a> {
     pub password: Option<&'a str>,
     pub domain: Option<&'a str>,
@@ -203,6 +254,74 @@ pub struct SmartExtractOptions<'a> {
     /// backend does, to leave a core for the UI) would silently lose that
     /// control the moment it moved from hand-rolled extraction to this facade.
     pub pool: Option<std::sync::Arc<rayon::ThreadPool>>,
+}
+
+#[cfg(all(feature = "structure-base", feature = "content-base"))]
+impl<'a> SmartExtractOptions<'a> {
+    /// All defaults: no credential, no domain label, Structure preferred.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Envelope password, honoured by both domains.
+    pub fn with_password(mut self, password: &'a str) -> Self {
+        self.password = Some(password);
+        self
+    }
+
+    /// [`with_password`](Self::with_password) for an `Option` caller.
+    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
+        self.password = password;
+        self
+    }
+
+    /// Envelope domain label.
+    pub fn with_domain(mut self, domain: &'a str) -> Self {
+        self.domain = Some(domain);
+        self
+    }
+
+    /// [`with_domain`](Self::with_domain) for an `Option` caller.
+    pub fn with_domain_option(mut self, domain: Option<&'a str>) -> Self {
+        self.domain = domain;
+        self
+    }
+
+    /// Work limits for the content-domain extractor.
+    pub fn with_limits(mut self, limits: crate::stego::ExtractParams) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Domain to prefer when both domains hold hidden data.
+    pub fn with_prefer(mut self, prefer: Domain) -> Self {
+        self.prefer = Some(prefer);
+        self
+    }
+
+    /// [`with_prefer`](Self::with_prefer) for an `Option` caller.
+    pub fn with_prefer_option(mut self, prefer: Option<Domain>) -> Self {
+        self.prefer = prefer;
+        self
+    }
+
+    /// Worker pool the content-domain extractor runs on.
+    pub fn with_pool(mut self, pool: std::sync::Arc<rayon::ThreadPool>) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
+    /// [`with_pool`](Self::with_pool) for an `Option` caller.
+    pub fn with_pool_option(mut self, pool: Option<std::sync::Arc<rayon::ThreadPool>>) -> Self {
+        self.pool = pool;
+        self
+    }
+
+    /// Cancellation and progress channel shared with the caller.
+    pub fn with_control(mut self, control: Control<'a>) -> Self {
+        self.control = control;
+        self
+    }
 }
 
 #[cfg(all(feature = "structure-base", feature = "content-base"))]

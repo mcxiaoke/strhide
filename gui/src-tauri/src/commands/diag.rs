@@ -42,12 +42,10 @@ pub async fn inspect_carrier_impl(
                 // no structure adapter) and reports content-domain failures through
                 // `content_error`. The hand-rolled Annex-B branch that used to live here
                 // duplicated that logic and silently dropped the error.
-                let opts = DualOptions {
-                    password: password.as_deref(),
-                    key: None,
-                    domain: domain.as_deref(),
-                    control: Control::none(),
-                };
+                let opts = DualOptions::new()
+                    .with_password_option(password.as_deref())
+                    .with_domain_option(domain.as_deref())
+                    .with_control(Control::none());
                 let mut dual = engine
                     .inspect_any(&path, &opts)
                     .map_err(|e| e.detail_i18n_with_ctx(ctx))?;
@@ -184,12 +182,10 @@ pub async fn verify_carrier_cmd(
                 // Same content-only exemption as `inspect_carrier_cmd`: `verify_any`
                 // returns `VerifyResult::not_applicable` for Annex-B HEVC and keeps the
                 // content-domain failure in `content_error`.
-                let opts = DualOptions {
-                    password: password.as_deref(),
-                    key: None,
-                    domain: domain.as_deref(),
-                    control: Control::none(),
-                };
+                let opts = DualOptions::new()
+                    .with_password_option(password.as_deref())
+                    .with_domain_option(domain.as_deref())
+                    .with_control(Control::none());
                 engine
                     .verify_any(&path, &opts)
                     .map_err(|e| e.detail_i18n_with_ctx(ctx))

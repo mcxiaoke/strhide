@@ -369,14 +369,13 @@ pub async fn smart_extract_impl(
         let outcome = if let Some(hit) = cached_hit {
             hit
         } else {
-            let smart_opts = SmartExtractOptions {
-                password: password.as_deref(),
-                domain: domain.as_deref(),
-                limits: strhide::stego::ExtractParams::default(),
-                prefer,
-                control: ctrl,
-                pool: Some(Arc::clone(&pool)),
-            };
+            let smart_opts = SmartExtractOptions::new()
+                .with_password_option(password.as_deref())
+                .with_domain_option(domain.as_deref())
+                .with_limits(strhide::stego::ExtractParams::default())
+                .with_prefer_option(prefer)
+                .with_control(ctrl)
+                .with_pool(Arc::clone(&pool));
             let fresh = engine.smart_extract(&path, &smart_opts)?;
             {
                 let mut guard = match cache.lock() {

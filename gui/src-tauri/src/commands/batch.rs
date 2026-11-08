@@ -63,12 +63,11 @@ pub async fn run_batch_job_impl(
         task_id,
         on_progress,
         move |engine, pool, batch_ctrl, token| {
-            let plan = BatchPlan {
-                continue_on_error: job.continue_on_error,
-                max_concurrency: job.max_concurrency.max(1),
-                cancel: Some(token),
-                ctx: Some(RenderCtx::new(i18n::lang())),
-            };
+            let plan = BatchPlan::new()
+                .with_continue_on_error(job.continue_on_error)
+                .with_max_concurrency(job.max_concurrency.max(1))
+                .with_cancel(token)
+                .with_ctx(RenderCtx::new(i18n::lang()));
 
             let job_type = job.job_type.clone();
             let password = job.password.clone();
@@ -81,23 +80,19 @@ pub async fn run_batch_job_impl(
                     batch_ctrl.progress,
                     |_idx, path, ctrl| match job_type.as_str() {
                         "inspect" => {
-                            let opts = DualOptions {
-                                password: password.as_deref(),
-                                key: None,
-                                domain: domain.as_deref(),
-                                control: *ctrl,
-                            };
+                        let opts = DualOptions::new()
+                            .with_password_option(password.as_deref())
+                            .with_domain_option(domain.as_deref())
+                            .with_control(*ctrl);
                             let res = engine.inspect_any(path, &opts)?;
                             serde_json::to_value(res)
                                 .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))
                         }
                         "verify" => {
-                            let opts = DualOptions {
-                                password: password.as_deref(),
-                                key: None,
-                                domain: domain.as_deref(),
-                                control: *ctrl,
-                            };
+                        let opts = DualOptions::new()
+                            .with_password_option(password.as_deref())
+                            .with_domain_option(domain.as_deref())
+                            .with_control(*ctrl);
                             let res = engine.verify_any(path, &opts)?;
                             serde_json::to_value(res)
                                 .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))

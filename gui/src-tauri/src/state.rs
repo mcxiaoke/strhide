@@ -536,34 +536,18 @@ mod tests {
         let progress = ThrottledChannelProgress::new("task-test".into(), channel);
 
         // 1. Initial event (boundary: done == 0)
-        progress.report(Event {
-            stage: Stage::Read,
-            done: 0,
-            total: Some(100),
-        });
+        progress.report(Event::progress(Stage::Read, 0, Some(100)));
 
         // 2. Rapid intermediate events (< 16ms)
         for d in 1..10 {
-            progress.report(Event {
-                stage: Stage::Read,
-                done: d,
-                total: Some(100),
-            });
+            progress.report(Event::progress(Stage::Read, d, Some(100)));
         }
 
         // 3. Stage boundary event (stage changed to Decode)
-        progress.report(Event {
-            stage: Stage::Decode,
-            done: 0,
-            total: Some(200),
-        });
+        progress.report(Event::progress(Stage::Decode, 0, Some(200)));
 
         // 4. Completion event (done == total)
-        progress.report(Event {
-            stage: Stage::Decode,
-            done: 200,
-            total: Some(200),
-        });
+        progress.report(Event::progress(Stage::Decode, 200, Some(200)));
 
         let msgs = received.lock().unwrap();
         // Boundary events and stage change must be received

@@ -15,6 +15,7 @@ use crate::errors::{ErrorDetail, StrHideError};
 
 /// Configuration and control policy for a batch run.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct BatchPlan {
     /// When true, records item errors and continues processing remaining items.
     /// When false, stops immediately on the first error.
@@ -36,6 +37,37 @@ impl Default for BatchPlan {
             cancel: None,
             ctx: None,
         }
+    }
+}
+
+impl BatchPlan {
+    /// Defaults: continue on error, one worker, no cancellation, English errors.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether an item failure stops the run.
+    pub fn with_continue_on_error(mut self, continue_on_error: bool) -> Self {
+        self.continue_on_error = continue_on_error;
+        self
+    }
+
+    /// Worker count; `1` keeps the run sequential.
+    pub fn with_max_concurrency(mut self, max_concurrency: usize) -> Self {
+        self.max_concurrency = max_concurrency;
+        self
+    }
+
+    /// Cancellation token shared with a GUI controller or worker manager.
+    pub fn with_cancel(mut self, cancel: Arc<CancelToken>) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    /// Render context used for error details.
+    pub fn with_ctx(mut self, ctx: crate::core::i18n::RenderCtx) -> Self {
+        self.ctx = Some(ctx);
+        self
     }
 }
 
