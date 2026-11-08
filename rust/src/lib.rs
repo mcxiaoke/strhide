@@ -137,6 +137,12 @@
 //!   applies to `commit` when a domain base feature is enabled.
 //! - `cli` — layer 5: the command line (feature `cli`).
 //!
+//! Modules marked `#[doc(hidden)]` (`structure::{adapters,envelope,rejection,
+//! registry}`, `stego::{hevc,jpeg,png,coding,header,wavelet,prng}`) exist so
+//! the integration tests can reach the engines directly. They are **not** part
+//! of the stable surface and may be restructured in any `1.x` release; the
+//! contract lives in this file's re-exports and in [`prelude`].
+//!
 //! ## Prelude
 //!
 //! [`prelude`] re-exports the types most callers need, so a first integration

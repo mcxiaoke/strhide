@@ -603,13 +603,20 @@ const MY_DIALECT: Dialect = Dialect::new()
 
 - 所有 fallible 入口统一返回 `StrHideError`，变体按失败类别粗粒度划分，便于按判别式分支而非字符串匹配。
 - 错误信息与国际化：`StrHideError::detail()` 与 `Display` 始终提供稳定的英文底层诊断；`detail_i18n()` 返回结构化的 `ErrorDetail { category: Option<Msg>, detail, hint }`，`ErrorDetail::render(lang)` 渲染成一行，GUI/服务端无需解析文本。库调用者无需关心 i18n 内部机制。
-- 多个公开枚举/结构体（`LocalParams`、`StructureProfile`、`StegoProfile`、`Warning`、`CompressionStrategy`、`RejectionPolicy`、`HevcParams`，入参 `EmbedOptions`/`ProbeOptions`/`ExtractOptions`/`InspectOptions`/`VerifyOptions`/`PngParams`/`JpegParams`/`ExtractParams`/`SafetyPolicy`/`ReadOptions`/`WriteOptions`/`RestoreOptions`，以及结构/内容域只读结果 `WriteResult`/`ReadResult`/`InspectResult`/`VerifyResult`/`RemoveResult`/`ReadSummary`/`LevelStatus`/`MetadataInspection`/`StrategyCapacity`/`EmbedStats`/`EmbedOutput`/`StegoEmbedResult`/`StegoHeaderInfo`/`StegoVerifyResult`/`DualInspect`/`DualVerify`/`ExtractOutcome`/`ScanReport`/`Finding`）标注 `#[non_exhaustive]`：下游应使用 `default()` + `with_*`/`with_*_option` 构建入参，结果类型只读字段；未来新增字段/变体不构成破坏性变更。例外：`Dialect` 仍是公开字段 + `const fn` builder 的普通结构体；`StegoTuning` 是保留全部变体可构造的普通枚举，均未标注 `#[non_exhaustive]`。
+- **公开类型统一加 `#[non_exhaustive]`**，按三类划分：
+  - **入参**：`ReadOptions` / `WriteOptions` / `RestoreOptions` / `EmbedOptions` / `ProbeOptions` / `ExtractOptions` / `InspectOptions` / `VerifyOptions` / `DualOptions` / `SmartExtractOptions` / `BatchPlan` / `PngParams` / `JpegParams` / `AudioParams` / `ExtractParams` / `SafetyPolicy` / `StegoTuning` / `LocalParams` / `StructureProfile` / `StegoProfile` / `HevcParams` / `Dialect`；
+  - **结果**：`WriteResult` / `ReadResult` / `InspectResult` / `VerifyResult` / `RemoveResult` / `ReadSummary` / `LevelStatus` / `MetadataInspection` / `StrategyCapacity` / `EmbedStats` / `EmbedOutput` / `StegoEmbedResult` / `StegoCapacityInfo` / `StegoAlgorithmInfo` / `StegoHeaderInfo` / `StegoVerifyResult` / `DualInspect` / `DualVerify` / `ExtractOutcome` / `ScanReport` / `Finding` / `MediaInfo` / `Capability` / `BatchOutcome` / `ItemOutcome` / `Event`；
+  - **错误与枚举**：`StrHideError` / `ErrorKind` / `ErrorDetail` / `Domain` / `SpatialAlgorithm` / `JpegAlgorithm` / `HevcMode` / `Warning` / `CompressionStrategy` / `RejectionPolicy`。
+
+  下游应使用 `default()` / `new()` + `with_*` / `with_*_option` 构建入参（`non_exhaustive` 同时禁止跨 crate 的结构体字面量与 `..Default::default()`），结果类型只读字段；未来新增字段或变体不构成破坏性变更。
+- **故意不加护栏的例外**：`PngFormatProfile` / `JpegFormatProfile` / `HevcFormatProfile` / `AudioFormatProfile` / `WireCipherProfile` / `HeaderLocatorKeys` / `GridRule` 是私有方言配方，文档要求以结构体字面量构造（见 [STEGO-API.md](./STEGO-API.md) §3），加 `non_exhaustive` 会使其在 crate 外无法使用；`MagicPair` 是物理定型的 8 字节前后魔数，不扩展。
+- **`#[doc(hidden)]` 模块不构成稳定面**：`structure::{adapters,envelope,rejection,registry}`、`stego::{hevc,jpeg,png,coding,header,wavelet,prng,envelope}` 等实现模块为了支撑 `rust/tests` 的白盒验证仍是 `pub`，但已统一标注 `#[doc(hidden)]`。它们**不属于 SemVer 承诺范围**，1.x 内可自由重构，下游不应依赖这些路径。稳定面以 `lib.rs` 的重导出与 `prelude` 为准。
 - 线格式（UBE v2.2）的稳定性与读写兼容关系见 [spec/STRUCTURE-ENVELOPE.md](./spec/STRUCTURE-ENVELOPE.md)；
   内容域（V4 信封）的稳定性分级与兼容矩阵见 [spec/CONTENT-ENVELOPE.md](./spec/CONTENT-ENVELOPE.md)。
 - 可运行示例：`rust/examples/`（`in_memory`、`private_profile`、`codec_bench`）；公共 API 文档中的代码块由 `cargo test --doc` 守护，示例由 `cargo build --examples` 守护。
 - **推荐入口是 `StrHide`（facade）**：新接入的库使用者应构造 `StrHide` 并调用其方法，而非直接调用多个自由函数；facade 是薄转发层，底层自由函数仍公开并长期维护，二者不构成两套互斥的 API。
 - 方言字段使用 `'static` 借用以支持 `const fn` 编译期构造；不提供运行时 `String`/`Vec` 构造方言的能力，运行时凭据走 `WriteOptions`/`ReadOptions`/`RestoreOptions`/`EmbedOptions`/`ExtractOptions`。
-- 结果结构体的字段名与 `--json` 输出自阶段 4 起固定：`format` 是 `FileFormat`（序列化为 `"PNG"` 等），`strategy` 是 `{"id": N, "name": "..."}`，`warnings` 是带 `kind` 标签的对象数组。
+- 结果结构体的字段名与 `--json` 输出自阶段 4 起固定：结构域 `WriteResult.format` 是 `FileFormat`（序列化为 `"PNG"` 等），`strategy` 是 `{"id": N, "name": "..."}`，`warnings` 是带 `kind` 标签的对象数组。内容域 `StegoCapacityInfo.format` 则是**人类可读的载体描述字符串**（如 `"HEIF (JPEG Thumbnail Bridge)"`、`"HEIF/HEVC"`），**不是** `FileFormat`，也不保证可解析——需要机器可读的格式标识请用 `FileFormat`、`formats::sniff::*` 或 `MediaInfo`。该字段在 1.0 后保持 `String` 定型，不要按枚举值去匹配它。
 
 ---
 
