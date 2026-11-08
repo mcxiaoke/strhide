@@ -25,7 +25,7 @@
 | 缺口 | 为什么 | 状态 |
 | :--- | :--- | :--- |
 | 安全披露政策 | 加密 + 隐写工具必然被审；无渠道等于放弃漏洞管理 | ✅ `SECURITY.md`（含"已知设计边界"表，防止把设计当漏洞报） |
-| 法律与合规 | 全仓库此前 grep 不到 `patent`/`disclaimer`/出口管制表述；HEVC 涉专利池，工具有双用途属性 | ✅ `LEGAL.md` |
+| 法律与合规 | 全仓库此前 grep 不到 `patent`/`disclaimer`/出口管制表述；HEVC 涉专利池，工具有双用途属性 | ✅ `LEGAL.md`（许可证/专利/出口管制）+ `DISCLAIMER.md` / `DISCLAIMER.zh.md`（使用风险与责任限制，两份 README 均已引用） |
 | 第三方许可 | 依赖含 MIT/Apache-2.0/BSD/ISC/Zlib/MPL-2.0 多族；fork 需保留署名 | ✅ `THIRD_PARTY_LICENSES.md` + `NOTICE` + `docs/licenses/` 三份生成清单 + 生成脚本 |
 | 安装与首跑 | README 只讲架构与命令示例，没有"下载哪个包、怎么验证、未签名怎么办" | ✅ `INSTALL.md` |
 | 贡献流程 | `AGENTS.md` 面向 AI，`CLI_GUIDE` 面向用户，没有面向人贡献者的入口 | ✅ `CONTRIBUTING.md` + `CODE_OF_CONDUCT.md` |

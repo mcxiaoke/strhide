@@ -87,4 +87,4 @@ The implementation has not been through an independent third-party cryptographic
 - Remember that `--in-place` writes a `.bak` next to the carrier by default; that backup is an unencrypted copy of the original, and deleting it is on you.
 - Keep the original stego carrier. Any lossy re-encode, crop, resize, or recompression destroys content-domain payloads permanently.
 - If you need isolation from stock builds rather than confidentiality with the maintainers, build a private dialect as described in [docs/PRIVATE_BUILD.md](docs/PRIVATE_BUILD.md).
-- Legal and dual-use considerations are in [LEGAL.md](LEGAL.md).
+- Legal and dual-use considerations are in [LEGAL.md](LEGAL.md); the risk and liability statement is in the [DISCLAIMER](DISCLAIMER.md) ([中文](DISCLAIMER.zh.md)).

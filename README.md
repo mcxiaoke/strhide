@@ -2,6 +2,10 @@
 
 **Format-preserving, lossless data hiding and steganography tool.** Hide data inside carrier files (PNG, JPEG, WebP, HEIC/HEIF, MP4, MOV, MKV, WAV, FLAC, ZIP, Office documents, PDF, Windows PE executables) while preserving file format compliance and visual/auditory integrity.
 
+> [!WARNING]
+> **Research and engineering tool, not a product — it rewrites the bytes of your files.**
+> Content-domain edits are irreversible, structure-domain restore only works while the carrier is untouched, and the software is provided "as is" with no warranty: the authors are not responsible for data loss, file corruption, or any consequence of your use, and use for unlawful purposes is prohibited. **Back up your originals** and read the full [DISCLAIMER.md](DISCLAIMER.md) / [免责声明](DISCLAIMER.zh.md) before you start.
+
 ---
 
 ## 1. Project Structure
@@ -152,3 +156,16 @@ The desktop client is located in `gui/`, developed with **Tauri 2**, **React**, 
 * [Content Domain Wire Format](docs/api/spec/CONTENT-ENVELOPE.md): V4 envelope, stability classes (frozen / dialect / free), key derivation, slot selection, STC syndrome, and per-carrier cost models under `docs/api/spec/CONTENT-*.md`.
 * [Rust Library Usage Guide](rust/README.md): Detailed documentation on using `strhide` as a Rust crate dependency.
 * [Chinese Documentation / 中文文档](README.zh.md)
+
+---
+
+## 7. Disclaimer
+
+`strhide` is a **dual-use research and engineering tool** that modifies the bytes of the files you feed it. It is provided "as is", without warranty of any kind, and the authors and contributors accept **no liability** for data loss, file corruption, business interruption, or any legal consequence of your use.
+
+- **Research, teaching, and lawful use only.** Use for illegal activity, infringing others' rights, tampering with evidence, or circumventing DRM, access controls, or security products is prohibited.
+- **Back up first.** Content-domain edits are irreversible; structure-domain restore only works while the carrier is untouched. The tool is not a backup and cannot recover a damaged file.
+- **You own the consequences.** Confirm your legal position, your right to modify each carrier, and your organization's approval before you start.
+- **Signatures and hashes will change.** Signed carriers are refused for this reason; downstream systems that compare hashes will see a modified file.
+
+Read the full statement before use: **[DISCLAIMER.md](DISCLAIMER.md)** (English) · **[DISCLAIMER.zh.md](DISCLAIMER.zh.md)** (中文，如有不一致以中文版为准).

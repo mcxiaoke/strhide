@@ -8,6 +8,7 @@
 
 ### A. 我只要用它
 
+0. [免责声明](../DISCLAIMER.zh.md) / [DISCLAIMER](../DISCLAIMER.md) — **先读**：研究用途、禁止用途、备份义务、无担保与责任限制
 1. [INSTALL.md](../INSTALL.md) — 下载、校验、首次运行
 2. [CLI_GUIDE.md](CLI_GUIDE.md) — 十个子命令与常用参数组合
 3. [GUI_GUIDE.md](GUI_GUIDE.md) — 桌面端（先看术语映射表，"隐写"与"嵌入"是交叉的）
@@ -52,7 +53,8 @@
 | [INSTALL.md](../INSTALL.md) | 安装、校验、未签名产物的处理、排错 | EN |
 | [SECURITY.md](../SECURITY.md) | 漏洞披露、支持版本、**已知设计边界**、安全属性 | EN |
 | [THREAT_MODEL.md](THREAT_MODEL.md) | 对手模型、失效条件表、侧信道清单、威胁→对策 | ZH |
-| [LEGAL.md](../LEGAL.md) | 合法用途、无担保、HEVC 专利、出口管制 | EN |
+| [DISCLAIMER.md](../DISCLAIMER.md) / [DISCLAIMER.zh.md](../DISCLAIMER.zh.md) | **使用风险与责任限制**：研究用途、禁止用途、备份义务、无担保、责任限制、赔偿、条款变更 | EN / ZH |
+| [LEGAL.md](../LEGAL.md) | 许可证、HEVC 专利、出口管制、商标、第三方组件 | EN |
 | [THIRD_PARTY_LICENSES.md](../THIRD_PARTY_LICENSES.md) | 依赖许可汇总与再分发义务 | EN |
 | [CONTRIBUTING.md](../CONTRIBUTING.md) / [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) | 贡献流程、门禁、行为准则 | EN |
 | [SUPPORT.md](../SUPPORT.md) | 提问渠道与"先看这里"清单 | EN |

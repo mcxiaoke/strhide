@@ -4,28 +4,17 @@
 
 ---
 
-## 1. License and warranty
+## 1. License, warranty, and liability
 
 The source code is licensed under the **Apache License 2.0** — see [LICENSE](LICENSE). Third-party components and their licenses are listed in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
-The software is provided **"AS IS", without warranties or conditions of any kind**, express or implied, including merchantability, fitness for a particular purpose, title, and non-infringement (Apache-2.0 §7). The authors are not liable for any claim, damage, or other liability arising from the software or its use (Apache-2.0 §8).
+The software is provided **"AS IS", without warranties or conditions of any kind**, express or implied (Apache-2.0 §7), and the authors are not liable for any claim, damage, or other liability arising from the software or its use (Apache-2.0 §8).
 
-In particular, no warranty is given that:
-
-- a hidden payload will remain extractable (lossy re-encoding, cropping, resizing, format conversion, "optimisation" tools, and metadata rewrites can destroy it);
-- a carrier will remain undetectable by steganalysis or by forensic tooling;
-- `restore` can recover a carrier that was modified after the write (it fails closed rather than emitting a wrong file);
-- a modified carrier still passes the integrity checks of its original format (signatures, checksums embedded by other tools).
+The full warranty disclaimer, the liability limitation, the backup obligation, and the indemnity clause are stated in the **[DISCLAIMER](DISCLAIMER.md)** ([中文](DISCLAIMER.zh.md)). That document is the authoritative statement of risk; this page does not repeat it, so the two cannot drift apart.
 
 ## 2. Acceptable use
 
-The project is published for legitimate purposes: privacy engineering, digital watermarking research, format-preservation engineering, forensics education and tooling, and red-team/blue-team work performed with authorisation. Do not use it to:
-
-- distribute content that is illegal in your jurisdiction, or to conceal such content;
-- circumvent digital rights management, license enforcement, or access controls;
-- interfere with a criminal, regulatory, or internal investigation, or tamper with evidence;
-- hide malicious payloads, or modify files you do not own or have no permission to modify;
-- misrepresent a modified file as unmodified where that misrepresentation causes harm (for example signed software, financial documents, or records of origin).
+Intended use is research, teaching, digital watermarking, format-preservation engineering, forensics education, and authorized red-team/blue-team work. Prohibited uses — illegal activity, infringing others' rights, tampering with evidence, circumventing DRM or access controls, and modifying files you have no right to modify — are enumerated in [DISCLAIMER.md](DISCLAIMER.md) §2.
 
 You are responsible for having the right to modify any carrier you process, and for the legality of the data you hide. The maintainers do not endorse, and are not responsible for, downstream use.
 

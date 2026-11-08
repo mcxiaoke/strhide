@@ -2,6 +2,9 @@
 
 `strhide` ships as a single static binary per platform, as a Rust crate, and as a desktop app (`StrHide Studio`). Pick the path that matches what you need.
 
+> [!WARNING]
+> This tool rewrites the bytes of the files you feed it, and its content-domain edits are irreversible. Read the [DISCLAIMER](DISCLAIMER.md) first — in particular the backup obligation in §4 — and keep your own copy of every carrier.
+
 - [1. Prebuilt binaries](#1-prebuilt-binaries)
 - [2. Verify the download](#2-verify-the-download)
 - [3. First-run smoke test](#3-first-run-smoke-test)
