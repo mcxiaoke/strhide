@@ -396,6 +396,7 @@ impl ExtractOutcome {
 /// `structure` field, and a `structure`-only build has no `stego` field. The
 /// all-default dialect is the official one, byte-compatible with every release.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Dialect {
     /// Structure-domain (UBE envelope) dialect.
     #[cfg(feature = "structure-base")]
