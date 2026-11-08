@@ -97,6 +97,10 @@ macro_rules! i18n_messages {
                 zh = $zh:expr;
         )*
     ) => {
+        /// Serialized only as a stable id; the variant list is CLI prompt
+        /// text, not part of the API surface.
+        #[doc(hidden)]
+        #[non_exhaustive]
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
         pub enum Msg {
             $($name,)*

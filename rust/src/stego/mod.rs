@@ -35,13 +35,16 @@ pub use header::Tlv;
 #[cfg(feature = "content-hevc")]
 pub mod heif;
 #[cfg(feature = "content-hevc")]
+#[doc(hidden)]
 pub mod hevc;
 pub mod io;
 #[cfg(feature = "content-jpeg")]
+#[doc(hidden)]
 pub mod jpeg;
 pub mod options;
 pub mod params;
 #[cfg(feature = "content-png")]
+#[doc(hidden)]
 pub mod png;
 #[doc(hidden)]
 pub mod prng;

@@ -138,10 +138,12 @@
 //! - `cli` — layer 5: the command line (feature `cli`).
 //!
 //! Modules marked `#[doc(hidden)]` (`structure::{adapters,envelope,rejection,
-//! registry}`, `stego::{hevc,jpeg,png,coding,header,wavelet,prng}`) exist so
-//! the integration tests can reach the engines directly. They are **not** part
-//! of the stable surface and may be restructured in any `1.x` release; the
-//! contract lives in this file's re-exports and in [`prelude`].
+//! registry}`, `stego::{hevc,jpeg,png,coding,header,wavelet,prng}`,
+//! `cli::{args,cmd_*,helpers,logging,render}`, `cli_i18n`) exist so the
+//! integration tests can reach the engines directly, or so the binary entry
+//! points can share plumbing. They are **not** part of the stable surface and
+//! may be restructured in any `1.x` release; the contract lives in this file's
+//! re-exports and in [`prelude`].
 //!
 //! ## Prelude
 //!
@@ -180,7 +182,9 @@ pub mod analysis;
 // Layer 5: command line.
 #[cfg(feature = "cli")]
 pub mod cli;
+/// Historical path: the clap-tree localiser used to be a separate crate.
 #[cfg(feature = "cli")]
+#[doc(hidden)]
 pub mod cli_i18n;
 
 pub mod facade;

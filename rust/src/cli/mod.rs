@@ -16,11 +16,17 @@
 
 #[doc(hidden)]
 pub mod args;
+#[doc(hidden)]
 pub mod cmd_diag;
+#[doc(hidden)]
 pub mod cmd_stego;
+#[doc(hidden)]
 pub mod cmd_structure;
+#[doc(hidden)]
 pub mod helpers;
+#[doc(hidden)]
 pub mod logging;
+#[doc(hidden)]
 pub mod render;
 
 // The historical flat paths (`strhide::cli::Cli`, `strhide::cli::run_cli`)
