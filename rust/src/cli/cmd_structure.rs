@@ -104,24 +104,17 @@ pub(crate) fn handle_write(
     // Resolve payload source (shared with `embed`).
     let text_buf: String;
     let payload_path: PathBuf;
-    let payload_source: PayloadSource =
-        match resolve_payload(&args.payload, args.unescape, cfg, PayloadFlavor::Text)? {
-            ResolvedPayload::Stdin => PayloadSource::Stdin,
-            ResolvedPayload::File(f) => {
-                payload_path = f;
-                PayloadSource::File(&payload_path)
-            }
-            ResolvedPayload::Text(t) => {
-                text_buf = t;
-                PayloadSource::Text(&text_buf)
-            }
-            ResolvedPayload::Bytes(b) => {
-                text_buf = String::from_utf8(b).map_err(|e| {
-                    StrHideError::General(format!("Base64 content is not valid UTF-8: {e}"))
-                })?;
-                PayloadSource::Text(&text_buf)
-            }
-        };
+    let payload_source: PayloadSource = match resolve_payload(&args.payload, args.unescape, cfg)? {
+        ResolvedPayload::Stdin => PayloadSource::Stdin,
+        ResolvedPayload::File(f) => {
+            payload_path = f;
+            PayloadSource::File(&payload_path)
+        }
+        ResolvedPayload::Text(t) => {
+            text_buf = t;
+            PayloadSource::Text(&text_buf)
+        }
+    };
 
     // Buffer the payload once. Sources are resolved here rather than per
     // carrier because --stdin can only be read once, and because this keeps the

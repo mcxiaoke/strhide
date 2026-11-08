@@ -1,6 +1,6 @@
 //! CLI payload and password source integration coverage:
 //!
-//! - Payload sources `--text-base64` and `STRHIDE_TEXT` resolution,
+//! - Payload sources `-d`, `-t`, `--stdin`, and `STRHIDE_TEXT` resolution,
 //!   including validation and precedence rules.
 //! - Password sources `--password-file` and `-p` precedence.
 //! - Configuration options (`unescape`, `backup`, `hint`) and config discovery
@@ -68,55 +68,6 @@ fn read_stdout(dir: &Path, carrier: &str) -> String {
 }
 
 // --------------------------------------------------------------------------- payload sources
-
-#[test]
-fn cli_text_base64_valid_roundtrip() {
-    let dir = scratch("b64_ok");
-    fs::write(dir.join("c.png"), make_png()).unwrap();
-    // base64("用户可见的真实内容") — valid UTF-8 after decoding.
-    let b64 = "55So5oi35Y+v6KeB55qE55yf5a6e5YaF5a65";
-
-    let out = run(
-        &dir,
-        &["write", "c.png", "--text-base64", b64, "--in-place"],
-    );
-    assert_ok(&out, &["write", "--text-base64"]);
-
-    assert_eq!(read_stdout(&dir, "c.png"), "用户可见的真实内容");
-}
-
-#[test]
-fn cli_text_base64_invalid_encoding_is_rejected() {
-    let dir = scratch("b64_bad");
-    fs::write(dir.join("c.png"), make_png()).unwrap();
-
-    let out = run(&dir, &["write", "c.png", "--text-base64", "not_base64!!"]);
-    assert_eq!(code(&out), 1);
-    assert!(
-        stderr(&out).contains("Invalid base64 string"),
-        "stderr: {}",
-        stderr(&out)
-    );
-    // The carrier must be untouched after the failure.
-    assert_eq!(fs::read(dir.join("c.png")).unwrap(), make_png());
-}
-
-#[test]
-fn cli_text_base64_non_utf8_is_rejected() {
-    let dir = scratch("b64_utf8");
-    fs::write(dir.join("c.png"), make_png()).unwrap();
-    // Valid base64 of raw bytes [0xFF 0xFE 0xFF] — not valid UTF-8.
-    let b64 = "//7/";
-
-    let out = run(&dir, &["write", "c.png", "--text-base64", b64]);
-    assert_eq!(code(&out), 1);
-    assert!(
-        stderr(&out).contains("not valid UTF-8"),
-        "stderr: {}",
-        stderr(&out)
-    );
-    assert_eq!(fs::read(dir.join("c.png")).unwrap(), make_png());
-}
 
 /// `STRHIDE_TEXT` is the payload fallback when no CLI source is given; it still
 /// applies after the payload-source mutex group was introduced.
@@ -267,7 +218,7 @@ fn password_file_missing_is_a_hard_error() {
 
 // --------------------------------------------------------------------------- mutual exclusion
 
-/// Payload sources (`-d`, `-t`, `--text-base64`, `--stdin`) are
+/// Payload sources (`-d`, `-t`, `--stdin`) are
 /// mutually exclusive at parse time (exit code 2): the old silent priority
 /// chain hid whichever source lost the fixed lookup order.
 #[test]
@@ -278,7 +229,7 @@ fn payload_sources_reject_conflicting_input() {
     for args in [
         vec!["write", "c.png", "-t", "x", "-d", "s.txt"],
         vec!["write", "c.png", "-d", "s.txt", "--stdin"],
-        vec!["write", "c.png", "--text-base64", "aGk=", "-t", "x"],
+        vec!["write", "c.png", "-t", "x", "--stdin"],
     ] {
         let out = run(&dir, &args);
         assert_eq!(

@@ -92,7 +92,6 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         (_, "text") => Msg::HelpSharedText,
         (_, "file") => Msg::HelpSharedFile,
         (_, "stdin") => Msg::HelpSharedStdin,
-        (_, "text-base64") => Msg::HelpSharedTextBase64,
 
         // Stego options: one wording for embed / capacity, except where the
         // command context changes the meaning (the capacity probe has its own
@@ -111,7 +110,6 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         (_, "suite") => Msg::HelpStegoCipherSuite,
         (_, "key-file") => Msg::HelpStegoKeyFile,
         (_, "max-payload") => Msg::HelpExtractMaxPayload,
-        ("embed", "capacity") => Msg::HelpEmbedCapacity,
         ("embed", "dry-run") => Msg::HelpEmbedDryRun,
         ("capacity", "carrier") => Msg::HelpCapacityCarrier,
         ("capacity", "json") => Msg::HelpCapacityJson,

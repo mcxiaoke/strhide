@@ -4,7 +4,7 @@
 //! Missing columns or variants cause compile-time failure.
 
 pub const WRITE_AFTER_HELP_EN: &str = "\
-Payload sources are mutually exclusive: -d/--data, -t/--text, --text-base64,
+Payload sources are mutually exclusive: -d/--data, -t/--text,
 or --stdin. When omitted, the STRHIDE_TEXT environment variable serves as
 fallback.
 
@@ -24,7 +24,7 @@ Examples:
 ";
 
 pub const WRITE_AFTER_HELP_ZH: &str = "\
-数据来源选项互斥：-d/--data、-t/--text、--text-base64 或 --stdin。
+数据来源选项互斥：-d/--data、-t/--text 或 --stdin。
 若均未提供，则回退使用环境变量 STRHIDE_TEXT。
 
 注意事项：
@@ -69,8 +69,7 @@ pub const READ_AFTER_HELP_ZH: &str = "\
 
 pub const CAPACITY_AFTER_HELP_EN: &str =
     "Probes the maximum embedding capacity of image carrier(s) without modifying
-them. The same probe backs `strhide embed --capacity`; this command exists so
-a read-only question has a read-only verb.
+them.
 
 Examples:
   strhide capacity photo.png photo.jpg       # Text report per carrier
@@ -78,8 +77,7 @@ Examples:
   strhide capacity photo.png --safety paranoid
 ";
 
-pub const CAPACITY_AFTER_HELP_ZH: &str =
-    "探测图像载体的最大嵌入容量（不修改文件）。与 `strhide embed --capacity` 使用同一探测：
+pub const CAPACITY_AFTER_HELP_ZH: &str = "探测图像载体的最大嵌入容量（不修改文件）。
 答案只对探测时的调参组合有效，因此本命令暴露与 embed 相同的调参与凭据参数。
 
 示例：
@@ -411,9 +409,6 @@ Run `strhide <COMMAND> --help` for the options of one command.",
     HelpSharedStdin:
         en = "Read payload from standard input until EOF",
         zh = "从标准输入 (stdin) 读取待隐藏数据直至 EOF";
-    HelpSharedTextBase64:
-        en = "Base64-encoded text payload (automatically decoded before hiding)",
-        zh = "Base64 编码的文本载荷（隐藏前自动解码）";
 
     // ---- Command specific arguments help ----
     // write
@@ -612,9 +607,6 @@ Run `strhide <COMMAND> --help` for the options of one command.",
     HelpCapacityJson:
         en = "Print structured JSON output (one StegoCapacityInfo object per carrier)",
         zh = "以结构化 JSON 格式输出（每个载体一个 StegoCapacityInfo 对象）";
-    HelpEmbedCapacity:
-        en = "Probe and display maximum embedding capacity for the carrier image, then exit without modifying the carrier",
-        zh = "探测并显示载体的最大嵌入容量，然后退出（不修改载体）";
     HelpEmbedDryRun:
         en = "Run the full embed in memory (capacity, safety gate, password path) and report the resulting size without writing any file",
         zh = "在内存中完整执行嵌入（容量、安全门、密码路径）并报告产物大小，不写入任何文件";

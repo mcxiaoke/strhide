@@ -719,10 +719,7 @@ fn embed_safety_tiers_probe_and_enforcement() {
     seed_stego(&dir, &["carrier.png"]);
 
     // 1. Capacity probe outputs selected safety tier and bpp
-    let probe = run(
-        &dir,
-        &["embed", "carrier.png", "--capacity", "--safety", "paranoid"],
-    );
+    let probe = run(&dir, &["capacity", "carrier.png", "--safety", "paranoid"]);
     assert_eq!(code(&probe), 0, "stderr: {}", stderr(&probe));
     let out = stdout(&probe);
     assert!(

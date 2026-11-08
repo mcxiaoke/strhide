@@ -254,20 +254,6 @@ pub(crate) fn handle_embed(
     quiet: bool,
     engine: &StrHide,
 ) -> Result<(), StrHideError> {
-    // The user password is the only runtime credential: a private no-password
-    // dialect (secret, domain, wire-format identity) is compile-time Profile
-    // territory and is bound on the engine, not populated from runtime data.
-    if args.capacity {
-        return run_capacity_probe(
-            args.carrier.clone(),
-            &args.tuning,
-            cfg,
-            quiet,
-            engine,
-            false,
-        );
-    }
-
     // 1. Resolve password
     let encrypt = args.encrypt || cfg.encrypt.unwrap_or(false);
     let password = resolve_password(
@@ -282,12 +268,7 @@ pub(crate) fn handle_embed(
     let dialect = engine.dialect().stego;
 
     // 2. Resolve payload (shared with `write`).
-    let payload = match resolve_payload(
-        &args.payload,
-        args.tuning.unescape,
-        cfg,
-        PayloadFlavor::Bytes,
-    )? {
+    let payload = match resolve_payload(&args.payload, args.unescape, cfg)? {
         ResolvedPayload::Stdin => {
             // A pipe can be arbitrarily large; reading it unbounded lets a
             // mistyped redirect exhaust memory before the carrier's own capacity
@@ -312,7 +293,6 @@ pub(crate) fn handle_embed(
         ResolvedPayload::Text(t) => {
             Payload::owned(t.into_bytes()).with_kind(crate::core::payload::PayloadKind::Text)
         }
-        ResolvedPayload::Bytes(b) => Payload::owned(b),
     };
 
     if payload.is_empty() {

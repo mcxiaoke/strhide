@@ -283,9 +283,6 @@ pub struct PayloadSourceArgs {
     #[arg(short = 't', long = "text", value_name = "TEXT")]
     pub text: Option<String>,
 
-    #[arg(long = "text-base64", value_name = "BASE64")]
-    pub text_base64: Option<String>,
-
     #[arg(long = "stdin")]
     pub stdin: bool,
 }
@@ -341,7 +338,7 @@ pub struct WriteArgs {
     #[arg(long = "stealth")]
     pub stealth: bool,
 
-    #[arg(long = "no-preserve-time", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    #[arg(long = "no-preserve-time", hide = true, default_value_t = true, action = clap::ArgAction::SetFalse)]
     pub preserve_time: bool,
 
     #[arg(long = "no-backup")]
@@ -405,9 +402,6 @@ pub struct EmbedArgs {
     #[arg(long = "no-backup")]
     pub no_backup: bool,
 
-    #[arg(long = "capacity", conflicts_with = "dry_run")]
-    pub capacity: bool,
-
     #[arg(long = "dry-run")]
     pub dry_run: bool,
     #[arg(
@@ -417,6 +411,9 @@ pub struct EmbedArgs {
         help = "Prompt interactively for an encryption password"
     )]
     pub encrypt: bool,
+
+    #[arg(long = "unescape")]
+    pub unescape: bool,
 
     #[command(flatten)]
     pub tuning: StegoTuningArgs,
@@ -457,9 +454,6 @@ pub struct StegoTuningArgs {
     #[arg(long = "enforce-safety")]
     pub enforce_safety: bool,
 
-    #[arg(long = "unescape")]
-    pub unescape: bool,
-
     #[arg(
         long = "exact",
         help = "Disable fast sampling estimation and force exact full-carrier capacity scan"
@@ -472,6 +466,7 @@ pub struct StegoTuningArgs {
     #[arg(
         long = "exclusion-rate",
         help_heading = "PNG Spatial Tuning",
+        hide = true,
         value_name = "FLOAT"
     )]
     pub exclusion_rate: Option<f64>,
@@ -479,6 +474,7 @@ pub struct StegoTuningArgs {
     #[arg(
         long = "neighbor-weight",
         help_heading = "JPEG DCT Tuning",
+        hide = true,
         value_name = "FLOAT"
     )]
     pub neighbor_weight: Option<f64>,
@@ -504,6 +500,7 @@ pub struct StegoTuningArgs {
     #[arg(
         long = "p1-window",
         help_heading = "PNG Spatial Tuning",
+        hide = true,
         value_name = "INT"
     )]
     pub p1_window: Option<usize>,
@@ -511,11 +508,17 @@ pub struct StegoTuningArgs {
     #[arg(
         long = "p2-window",
         help_heading = "PNG Spatial Tuning",
+        hide = true,
         value_name = "INT"
     )]
     pub p2_window: Option<usize>,
 
-    #[arg(long = "stc-h", help_heading = "JPEG DCT Tuning", value_name = "INT")]
+    #[arg(
+        long = "stc-h",
+        help_heading = "JPEG DCT Tuning",
+        hide = true,
+        value_name = "INT"
+    )]
     pub stc_h: Option<u8>,
 
     /// Deterministic embedding seed as 64 hex digits (32 bytes).

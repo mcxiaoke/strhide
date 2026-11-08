@@ -127,15 +127,6 @@ impl<'a> BatchOutputs<'a> {
     }
 }
 
-/// How a payload source is materialised.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PayloadFlavor {
-    /// Text payload: every source must be valid UTF-8 and is stored as text.
-    Text,
-    /// Raw bytes: any source is accepted exactly as it is.
-    Bytes,
-}
-
 /// A payload source resolved from the CLI.
 pub(crate) enum ResolvedPayload {
     /// Read the payload from standard input.
@@ -144,46 +135,21 @@ pub(crate) enum ResolvedPayload {
     File(PathBuf),
     /// Text payload, already materialised (`-t`, `STRHIDE_TEXT`).
     Text(String),
-    /// Raw bytes, already materialised (`--text-base64`).
-    Bytes(Vec<u8>),
 }
 
 /// Resolve the payload source shared by `write` and `embed`.
-///
-/// `write` and `embed` used to carry two copies of the same 40-line resolution
-/// chain (`--stdin` / `-d` / `-t` + `--unescape` / `--text-base64` /
-/// `STRHIDE_TEXT`), and they had already drifted: only one of them validated
-/// that base64 content decodes to UTF-8. Both now funnel through here; the
-/// difference between them is the explicit [`PayloadFlavor`], not an
-/// accidental divergence.
 pub(crate) fn resolve_payload(
     payload: &PayloadSourceArgs,
     unescape: bool,
     cfg: &FileConfig,
-    flavor: PayloadFlavor,
 ) -> Result<ResolvedPayload, StrHideError> {
-    const MISSING: &str = "Must provide either -d/--data, -t/--text, --text-base64, or --stdin (or use --capacity to probe capacity)";
+    const MISSING: &str = "Must provide either -d/--data, -t/--text, or --stdin";
 
     if payload.stdin {
         return Ok(ResolvedPayload::Stdin);
     }
     if let Some(ref df) = payload.data {
         return Ok(ResolvedPayload::File(df.clone()));
-    }
-    if let Some(ref b64_str) = payload.text_base64 {
-        use base64::Engine;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(b64_str.trim())
-            .map_err(|e| StrHideError::General(format!("Invalid base64 string: {e}")))?;
-        return Ok(match flavor {
-            PayloadFlavor::Text => {
-                let text = String::from_utf8(bytes).map_err(|e| {
-                    StrHideError::General(format!("Base64 content is not valid UTF-8: {e}"))
-                })?;
-                ResolvedPayload::Text(text)
-            }
-            PayloadFlavor::Bytes => ResolvedPayload::Bytes(bytes),
-        });
     }
     if let Some(ref t) = payload.text {
         if unescape || cfg.unescape.unwrap_or(false) {
