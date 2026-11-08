@@ -53,6 +53,18 @@ jobs:
       - name: Test
         run: cargo test --release --locked --all-features --all-targets
 
+      # docs.rs is the crate's front page. A broken intra-doc link or a
+      # private-item reference is invisible to `cargo test`, so gate it here.
+      - name: Rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --all-features --no-deps
+
+      # Doctests are the only executable form of the documented API examples,
+      # and `--all-targets` does not run them.
+      - name: Doc tests
+        run: cargo test --release --locked --all-features --doc
+
       # The two domains must compile without each other (stage 1 of
       # docs/strhide_architecture_and_refactoring_plan.md). Blocking since
       # stage 1 landed; fine-grained builds ensure light-weight GUIs can compile
