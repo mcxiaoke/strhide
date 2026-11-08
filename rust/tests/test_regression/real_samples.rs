@@ -12,26 +12,48 @@ use strhide::structure::{
     remove_carrier, verify_carrier, write_carrier,
 };
 
-fn samples_dir() -> Option<PathBuf> {
+/// Directory holding the real-world corpus.
+///
+/// The corpus lives under the git-ignored `temp/real_samples`, so a clean
+/// checkout (including CI) does not have it. Every test below is therefore
+/// `#[ignore]`d and must be run explicitly with `--ignored` on a machine that
+/// has the corpus. Reaching this helper without the corpus is a test failure,
+/// never a silent pass.
+fn samples_dir() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidate = manifest_dir.parent()?.join("temp").join("real_samples");
-    if candidate.exists() {
-        Some(candidate)
-    } else {
-        None
-    }
+    let candidate = manifest_dir
+        .parent()
+        .expect("the rust crate must have a parent directory")
+        .join("temp")
+        .join("real_samples");
+    assert!(
+        candidate.is_dir(),
+        "real-world sample corpus missing: {} (populate temp/real_samples, or skip these {} tests)",
+        candidate.display(),
+        REAL_SAMPLE_TESTS
+    );
+    candidate
+}
+
+/// Number of tests gated on [`samples_dir`], quoted in the missing-corpus
+/// message so the failure states its blast radius.
+const REAL_SAMPLE_TESTS: usize = 7;
+
+/// Resolve one corpus file, failing loudly when the corpus is incomplete.
+fn sample(name: &str) -> PathBuf {
+    let path = samples_dir().join(name);
+    assert!(
+        path.is_file(),
+        "required real-world sample missing: {}",
+        path.display()
+    );
+    path
 }
 
 #[test]
+#[ignore = "requires the git-ignored temp/real_samples corpus; run with --ignored"]
 fn test_real_apk_rejection() {
-    let sdir = match samples_dir() {
-        Some(d) => d,
-        None => return,
-    };
-    let apk_src = sdir.join("sample.apk");
-    if !apk_src.exists() {
-        return;
-    }
+    let apk_src = sample("sample.apk");
 
     let dir = scratch("apk_reject");
     let carrier = dir.join("test.apk");
@@ -53,15 +75,9 @@ fn test_real_apk_rejection() {
 }
 
 #[test]
+#[ignore = "requires the git-ignored temp/real_samples corpus; run with --ignored"]
 fn test_real_signed_pe_rejection() {
-    let sdir = match samples_dir() {
-        Some(d) => d,
-        None => return,
-    };
-    let exe_src = sdir.join("signed_sample.exe");
-    if !exe_src.exists() {
-        return;
-    }
+    let exe_src = sample("signed_sample.exe");
 
     let dir = scratch("signed_pe_reject");
     let carrier = dir.join("signed_test.exe");
@@ -83,15 +99,9 @@ fn test_real_signed_pe_rejection() {
 }
 
 #[test]
+#[ignore = "requires the git-ignored temp/real_samples corpus; run with --ignored"]
 fn test_real_png_full_lifecycle() {
-    let sdir = match samples_dir() {
-        Some(d) => d,
-        None => return,
-    };
-    let png_src = sdir.join("sample.png");
-    if !png_src.exists() {
-        return;
-    }
+    let png_src = sample("sample.png");
 
     let dir = scratch("real_png");
     let carrier = dir.join("sample.png");
@@ -150,15 +160,9 @@ fn test_real_png_full_lifecycle() {
 }
 
 #[test]
+#[ignore = "requires the git-ignored temp/real_samples corpus; run with --ignored"]
 fn test_real_jpg_full_lifecycle() {
-    let sdir = match samples_dir() {
-        Some(d) => d,
-        None => return,
-    };
-    let jpg_src = sdir.join("sample.jpg");
-    if !jpg_src.exists() {
-        return;
-    }
+    let jpg_src = sample("sample.jpg");
 
     let dir = scratch("real_jpg");
     let carrier = dir.join("sample.jpg");
@@ -211,15 +215,9 @@ fn test_real_jpg_full_lifecycle() {
 }
 
 #[test]
+#[ignore = "requires the git-ignored temp/real_samples corpus; run with --ignored"]
 fn test_real_mp4_full_lifecycle() {
-    let sdir = match samples_dir() {
-        Some(d) => d,
-        None => return,
-    };
-    let mp4_src = sdir.join("sample.mp4");
-    if !mp4_src.exists() {
-        return;
-    }
+    let mp4_src = sample("sample.mp4");
 
     let dir = scratch("real_mp4");
     let carrier = dir.join("sample.mp4");
@@ -273,15 +271,9 @@ fn test_real_mp4_full_lifecycle() {
 }
 
 #[test]
+#[ignore = "requires the git-ignored temp/real_samples corpus; run with --ignored"]
 fn test_real_zip_full_lifecycle() {
-    let sdir = match samples_dir() {
-        Some(d) => d,
-        None => return,
-    };
-    let zip_src = sdir.join("sample.zip");
-    if !zip_src.exists() {
-        return;
-    }
+    let zip_src = sample("sample.zip");
 
     let dir = scratch("real_zip");
     let carrier = dir.join("sample.zip");
@@ -335,15 +327,9 @@ fn test_real_zip_full_lifecycle() {
 }
 
 #[test]
+#[ignore = "requires the git-ignored temp/real_samples corpus; run with --ignored"]
 fn test_real_pdf_full_lifecycle() {
-    let sdir = match samples_dir() {
-        Some(d) => d,
-        None => return,
-    };
-    let pdf_src = sdir.join("sample.pdf");
-    if !pdf_src.exists() {
-        return;
-    }
+    let pdf_src = sample("sample.pdf");
 
     let dir = scratch("real_pdf");
     let carrier = dir.join("sample.pdf");

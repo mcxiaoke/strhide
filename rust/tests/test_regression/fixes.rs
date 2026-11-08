@@ -24,6 +24,7 @@ use strhide::stego::{EmbedOptions, embed_carrier};
 use strhide::structure::adapters::zip::find_eocd_offset;
 use strhide::structure::envelope::{
     EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE as ENVELOPE_HEADER_SIZE, MAX_HINT_LEN,
+    MAX_META_LEN,
 };
 use strhide::structure::params::StructureProfile;
 use strhide::structure::{
@@ -643,39 +644,60 @@ fn stego_with_trailer(name: &str) -> (PathBuf, Vec<u8>, u64) {
     (dir, raw, trailer.ube_offset)
 }
 
+/// Rewrite one header field *logically* through the header mask.
+///
+/// The default-mode header is XOR-masked (`pack_masked`), so poking raw bytes
+/// at a field offset produces an unpredictable logical value: the test would
+/// reach the field-range cap only when the masked value happens to land above
+/// it. Unpacking, mutating and repacking with the official profile makes the
+/// written value exact and the covered branch deterministic.
+fn tamper_header(raw: &mut [u8], ube_offset: u64, mutate: impl FnOnce(&mut EnvelopeHeader)) {
+    let start = ube_offset as usize;
+    let mut header =
+        EnvelopeHeader::unpack_with_password(&raw[start..start + ENVELOPE_HEADER_SIZE], None)
+            .expect("unpack header");
+    mutate(&mut header);
+    let packed = header
+        .pack_with_profile(None, &StructureProfile::default())
+        .expect("repack header");
+    raw[start..start + ENVELOPE_HEADER_SIZE].copy_from_slice(&packed);
+}
+
 #[test]
 fn tampered_meta_len_rejected() {
     let (dir, mut raw, off) = stego_with_trailer("tamper_meta");
-    let p = off as usize + 104;
-    raw[p..p + 4].copy_from_slice(&0xFFFFFFF0u32.to_le_bytes());
+    tamper_header(&mut raw, off, |h| h.meta_len = MAX_META_LEN + 1);
     fs::write(dir.join("t.zip"), &raw).unwrap();
+    let err = read_carrier(
+        &dir.join("t.zip"),
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
+    )
+    .unwrap_err();
     assert!(
-        read_carrier(
-            &dir.join("t.zip"),
-            &ReadOptions::default()
-                .with_output_option(None)
-                .with_password_option(None)
-                .with_overwrite(false)
-        )
-        .is_err()
+        err.to_string().contains("Metadata block length"),
+        "expected the meta_len cap to reject, got: {err}"
     );
 }
 
 #[test]
 fn tampered_hint_len_rejected() {
     let (dir, mut raw, off) = stego_with_trailer("tamper_hint");
-    let p = off as usize + 108;
-    raw[p..p + 4].copy_from_slice(&0xFFFFFFF0u32.to_le_bytes());
+    tamper_header(&mut raw, off, |h| h.hint_len = MAX_HINT_LEN + 1);
     fs::write(dir.join("t.zip"), &raw).unwrap();
+    let err = read_carrier(
+        &dir.join("t.zip"),
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
+    )
+    .unwrap_err();
     assert!(
-        read_carrier(
-            &dir.join("t.zip"),
-            &ReadOptions::default()
-                .with_output_option(None)
-                .with_password_option(None)
-                .with_overwrite(false)
-        )
-        .is_err()
+        err.to_string().contains("Password hint length"),
+        "expected the hint_len cap to reject, got: {err}"
     );
 }
 

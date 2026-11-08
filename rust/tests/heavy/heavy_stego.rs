@@ -184,15 +184,15 @@ pub mod batch_stego {
     #[test]
     #[ignore]
     pub fn heavy_batch_stego_corpus() {
-        let corpus_dir = match find_corpus_dir() {
-            Some(d) => d,
-            None => {
-                eprintln!(
-                    "[SKIP] Stego test corpus not found (checked temp/teststego and $STRHIDE_STEGO_CORPUS)"
-                );
-                return;
-            }
-        };
+        // This test is `#[ignore]`d precisely because it needs an external
+        // corpus. Running it with `--ignored` on a machine without one must
+        // fail, not report a skipped-but-green test.
+        let corpus_dir = find_corpus_dir().unwrap_or_else(|| {
+            panic!(
+                "stego corpus not found (checked temp/teststego, ../temp/teststego and $STRHIDE_STEGO_CORPUS); \
+                 the batch sweep cannot run without carriers"
+            )
+        });
 
         println!(
             "\n=== Starting Batch Stego Corpus Test on {:?} ===",
@@ -225,8 +225,10 @@ pub mod batch_stego {
 
         entries.sort();
         if entries.is_empty() {
-            eprintln!("[SKIP] No image files found in corpus directory");
-            return;
+            panic!(
+                "stego corpus directory {} contains no PNG/JPEG carriers; refusing to report a green run with zero coverage",
+                corpus_dir.display()
+            );
         }
 
         let threads = std::env::var("STRHIDE_BATCH_THREADS")
@@ -585,6 +587,14 @@ pub mod batch_stego {
 
         let _ = fs::remove_dir_all(&sandbox);
 
+        // Every carrier yields exactly one outcome; a failed carrier panics
+        // inside the parallel map and aborts the sweep. `failed` therefore
+        // counts carriers that produced no outcome, so the assertion below
+        // pins that no carrier silently disappeared from the report.
+        report.failed = report
+            .total
+            .saturating_sub(report.passed_lifecycle + report.passed_rejection);
+
         // Print summary table
         let total_elapsed = total_start.elapsed();
         println!(
@@ -704,7 +714,11 @@ pub mod batch_stego {
             );
         }
 
-        assert_eq!(report.failed, 0, "All stego batch tests must pass");
+        assert_eq!(
+            report.failed, 0,
+            "every carrier must yield a pass/reject outcome; {} carrier(s) produced none",
+            report.failed
+        );
     }
 }
 
@@ -1104,12 +1118,21 @@ pub mod eval {
                 .par_iter()
                 .enumerate()
                 .filter_map(|(idx, img_path)| {
-                    let raw_bytes = fs::read(img_path).ok()?;
-                    let cover_decoded = decode_png(&raw_bytes).ok()?;
+                    // A carrier that cannot be read, decoded or embedded is a
+                    // failure, not a row to silently drop: dropping them used to
+                    // let the aggregate fall through to the empty-sample
+                    // bootstrap below and pass with zero measurements.
+                    let name = img_path.display();
+                    let raw_bytes =
+                        fs::read(img_path).unwrap_or_else(|e| panic!("{name}: read failed: {e}"));
+                    let cover_decoded = decode_png(&raw_bytes)
+                        .unwrap_or_else(|e| panic!("{name}: decode failed: {e}"));
                     let total_pixels = cover_decoded.width as usize * cover_decoded.height as usize;
                     let needed_bits = (total_pixels as f64 * target_bpp) as usize;
                     let payload_len = (needed_bits / 8).saturating_sub(21); // deduct BODY_OVERHEAD
                     if payload_len == 0 {
+                        // Legitimate: the carrier is too small for this bpp.
+                        // Counted by the non-empty assertion after `collect`.
                         return None;
                     }
 
@@ -1117,11 +1140,14 @@ pub mod eval {
                     let opts = EmbedOptions::default().with_password(TEST_PASSWORD);
 
                     let t0 = Instant::now();
-                    let stego_bytes =
-                        embed_carrier(&raw_bytes, &Payload::bytes(&payload), &opts).ok()?;
+                    let stego_bytes = embed_carrier(&raw_bytes, &Payload::bytes(&payload), &opts)
+                        .unwrap_or_else(|e| {
+                            panic!("{name}: embed failed at bpp={target_bpp}: {e}")
+                        });
                     let embed_dur = t0.elapsed();
 
-                    let stego_decoded = decode_png(&stego_bytes).ok()?;
+                    let stego_decoded = decode_png(&stego_bytes)
+                        .unwrap_or_else(|e| panic!("{name}: stego decode failed: {e}"));
 
                     let channel_offset = if cover_decoded.channels >= 3 { 1 } else { 0 };
                     let cover_g: Vec<u8> = (0..total_pixels)
@@ -1179,6 +1205,16 @@ pub mod eval {
                     ))
                 })
                 .collect();
+
+            // An empty result set makes every aggregate below 0.0, which used to
+            // satisfy `|Z0| < 3.0` without measuring anything. Refuse to report
+            // a green run when no carrier produced a measurement.
+            assert!(
+                !results.is_empty(),
+                "bpp={target_bpp}: no evaluation rows were produced from {} image(s); \
+                 every carrier was skipped for zero payload length",
+                images.len()
+            );
 
             println!(
                 "{:<22} {:>9} {:>10} {:>9} {:>11} {:>10} {:>10} {:>8}",
