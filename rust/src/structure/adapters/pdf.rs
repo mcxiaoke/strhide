@@ -173,24 +173,74 @@ struct XRefStreamDict {
 /// `/DecodeParms << /Columns 5 /Predictor 12 >>`, truncating every key after
 /// it (`/Size`, `/Root`, `/Encrypt`). Encrypted documents then look
 /// unencrypted to the incremental writer.
+///
+/// Also handles PDF comments (`%...`) and literal strings (`(...)`) containing
+/// angle brackets, preventing false early termination or underflow.
 fn balanced_dict_end(text: &str) -> Option<usize> {
     let bytes = text.as_bytes();
     let mut i = text.find("<<")?;
     let mut depth = 0usize;
+    let mut in_string = false;
+    let mut str_paren_depth = 0usize;
+    let mut in_comment = false;
+
     while i < bytes.len() {
-        if bytes[i] == b'<' && bytes.get(i + 1) == Some(&b'<') {
+        let b = bytes[i];
+
+        if in_comment {
+            if b == b'\r' || b == b'\n' {
+                in_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_string {
+            if b == b'\\' {
+                // Skip escaped character inside PDF literal string: \(, \), \\, etc.
+                i += 2;
+                continue;
+            }
+            if b == b'(' {
+                str_paren_depth += 1;
+            } else if b == b')' {
+                str_paren_depth = str_paren_depth.saturating_sub(1);
+                if str_paren_depth == 0 {
+                    in_string = false;
+                }
+            }
+            i += 1;
+            continue;
+        }
+
+        if b == b'%' {
+            in_comment = true;
+            i += 1;
+            continue;
+        }
+
+        if b == b'(' {
+            in_string = true;
+            str_paren_depth = 1;
+            i += 1;
+            continue;
+        }
+
+        if b == b'<' && bytes.get(i + 1) == Some(&b'<') {
             depth += 1;
             i += 2;
             continue;
         }
-        if bytes[i] == b'>' && bytes.get(i + 1) == Some(&b'>') {
-            depth -= 1;
+
+        if b == b'>' && bytes.get(i + 1) == Some(&b'>') {
+            depth = depth.saturating_sub(1);
             if depth == 0 {
                 return Some(i + 2);
             }
             i += 2;
             continue;
         }
+
         i += 1;
     }
     None
@@ -1463,5 +1513,42 @@ startxref\n\
         let info = parse_pdf_tail_info(&mut cur).expect("must not panic and succeed");
         assert_eq!(info.new_obj_num, Some(4));
         assert_eq!(info.root_ref.as_deref(), Some("1 0 R"));
+    }
+
+    #[test]
+    fn test_balanced_dict_end_edge_cases() {
+        // 1. Basic nested dict
+        let text1 = "1 0 obj << /Type /XRef /DecodeParms << /Columns 5 >> /Size 10 >> stream";
+        let end1 = balanced_dict_end(text1).unwrap();
+        assert_eq!(
+            &text1[..end1],
+            "1 0 obj << /Type /XRef /DecodeParms << /Columns 5 >> /Size 10 >>"
+        );
+
+        // 2. Dict containing string with unbalanced >>
+        let text2 = "<< /Title (Chapter 1 >> Intro) /Size 20 >> tail";
+        let end2 = balanced_dict_end(text2).unwrap();
+        assert_eq!(&text2[..end2], "<< /Title (Chapter 1 >> Intro) /Size 20 >>");
+
+        // 3. Dict containing escaped parentheses in string
+        let text3 = r"<< /Title (Nested \( >> \) paren) /Root 1 0 R >>";
+        let end3 = balanced_dict_end(text3).unwrap();
+        assert_eq!(&text3[..end3], text3);
+
+        // 4. Dict containing comment with >>
+        let text4 = "<< /Size 5\n% Comment with >> marker\n/Root 2 0 R\n>>";
+        let end4 = balanced_dict_end(text4).unwrap();
+        assert_eq!(&text4[..end4], text4);
+
+        // 5. Malformed text without <<
+        assert_eq!(balanced_dict_end("no dictionary here"), None);
+
+        // 6. Malformed text with premature unclosed <<
+        assert_eq!(balanced_dict_end("<< /Size 5 /Root 1 0 R"), None);
+
+        // 7. Extra >> before << should not cause underflow or panic
+        let text7 = ">> >> << /Size 1 >>";
+        let end7 = balanced_dict_end(text7).unwrap();
+        assert_eq!(&text7[..end7], ">> >> << /Size 1 >>");
     }
 }

@@ -447,12 +447,8 @@ impl Drop for HeaderLocatorKeys {
     fn drop(&mut self) {
         crate::core::crypto::zero_bytes(&mut self.locate_seed);
         crate::core::crypto::zero_bytes(&mut self.magic4);
-        // Volatile stores: a plain `= 0` may be dropped as a dead write.
-        // SAFETY: both fields are valid, aligned, uniquely borrowed `u64`s.
-        unsafe {
-            core::ptr::write_volatile(&mut self.header_stc_seed, 0);
-            core::ptr::write_volatile(&mut self.ext_stc_seed, 0);
-        }
+        zeroize::Zeroize::zeroize(&mut self.header_stc_seed);
+        zeroize::Zeroize::zeroize(&mut self.ext_stc_seed);
     }
 }
 
@@ -474,8 +470,7 @@ impl Drop for SessionKeys {
     fn drop(&mut self) {
         crate::core::crypto::zero_bytes(&mut self.enc_key);
         crate::core::crypto::zero_bytes(&mut self.perm_seed);
-        // SAFETY: the field is a valid, aligned, uniquely borrowed `u64`.
-        unsafe { core::ptr::write_volatile(&mut self.stc_seed, 0) };
+        zeroize::Zeroize::zeroize(&mut self.stc_seed);
     }
 }
 

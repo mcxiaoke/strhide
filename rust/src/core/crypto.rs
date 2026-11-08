@@ -43,6 +43,7 @@ use flate2::{
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use unicode_normalization::UnicodeNormalization;
+pub use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::errors::StrHideError;
 
@@ -207,12 +208,12 @@ pub(crate) fn pbkdf2_calls() -> usize {
 /// This is the one expensive step of the whole envelope (100k HMAC-SHA256
 /// iterations, 30–60 ms), and every consumer below shares the same
 /// (password, salt) pair — so it is computed exactly once per pair.
-fn derive_ikm(password: &str, salt: &[u8]) -> [u8; 32] {
+fn derive_ikm(password: &str, salt: &[u8]) -> Zeroizing<[u8; 32]> {
     #[cfg(test)]
     PBKDF2_CALLS.with(|c| c.set(c.get() + 1));
-    let norm_pwd = normalize_nfc(password);
-    let mut ikm = [0u8; 32];
-    pbkdf2::pbkdf2_hmac::<Sha256>(norm_pwd.as_bytes(), salt, PBKDF2_ITERATIONS, &mut ikm);
+    let norm_pwd = Zeroizing::new(normalize_nfc(password));
+    let mut ikm = Zeroizing::new([0u8; 32]);
+    pbkdf2::pbkdf2_hmac::<Sha256>(norm_pwd.as_bytes(), salt, PBKDF2_ITERATIONS, &mut *ikm);
     ikm
 }
 
@@ -243,22 +244,17 @@ impl Drop for PasswordSecrets {
     /// All three buffers are expansions of one PBKDF2 output, so a heap dump
     /// that still holds them hands over the entire hierarchy for that carrier.
     fn drop(&mut self) {
-        zero_bytes(&mut self.payload_key);
-        zero_bytes(&mut self.meta_key);
-        zero_bytes(&mut self.header_mask);
+        self.payload_key.zeroize();
+        self.meta_key.zeroize();
+        self.header_mask.zeroize();
     }
 }
 
 /// Overwrite `buf` in place so the zeroing cannot be optimised away.
 ///
-/// `write_volatile` keeps the store observable; the fence stops the compiler
-/// from sinking later writes in front of it.
+/// Backed by [`Zeroize::zeroize`], preventing compiler dead-store elimination.
 pub(crate) fn zero_bytes(buf: &mut [u8]) {
-    for byte in buf.iter_mut() {
-        // SAFETY: `byte` is a valid, aligned, uniquely borrowed `u8`.
-        unsafe { core::ptr::write_volatile(byte, 0) };
-    }
-    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    buf.zeroize();
 }
 
 /// Derive the 32-byte payload and metadata keys from a password and salt.
@@ -267,7 +263,7 @@ pub(crate) fn zero_bytes(buf: &mut [u8]) {
 /// twice with distinct info labels so the two keys are independent.
 pub fn derive_keys(password: &str, salt: &[u8]) -> Result<([u8; 32], [u8; 32]), StrHideError> {
     let ikm = derive_ikm(password, salt);
-    let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm);
+    let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm[..]);
     let mut payload_key = [0u8; 32];
     let mut meta_key = [0u8; 32];
 
@@ -283,7 +279,7 @@ pub fn derive_keys(password: &str, salt: &[u8]) -> Result<([u8; 32], [u8; 32]), 
 #[doc(hidden)]
 pub fn derive_all(password: &str, salt: &[u8]) -> Result<PasswordSecrets, StrHideError> {
     let ikm = derive_ikm(password, salt);
-    let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm);
+    let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm[..]);
     let mut secrets = PasswordSecrets {
         payload_key: [0u8; 32],
         meta_key: [0u8; 32],
@@ -315,7 +311,7 @@ pub fn derive_stealth_magics(
     salt: &[u8],
 ) -> Result<([u8; 8], [u8; 4]), StrHideError> {
     let ikm = derive_ikm(password, salt);
-    let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm);
+    let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm[..]);
     let mut header_magic = [0u8; 8];
     let mut trailer_magic = [0u8; 4];
 
@@ -332,7 +328,7 @@ pub fn derive_stealth_magics(
 #[doc(hidden)]
 pub fn derive_header_mask(password: &str, salt: &[u8]) -> Result<[u8; 76], StrHideError> {
     let ikm = derive_ikm(password, salt);
-    let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm);
+    let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm[..]);
     let mut mask = [0u8; 76];
     hk.expand(b"strhide-header-mask-v1", &mut mask)
         .map_err(|e| StrHideError::General(format!("HKDF expand header mask error: {e}")))?;

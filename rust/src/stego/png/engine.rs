@@ -4629,7 +4629,7 @@ mod tests {
                 stc_label: b"private-stc-label-xyz",
                 hdr_stc_label: b"private-hdr-stc-label",
                 ext_stc_label: b"private-ext-stc-label",
-                aad_prefix: b"private-aad-prefix ",
+                aad_prefix: b"private-aad-prefix\0",
                 default_suite: crate::crypto::CipherSuiteId::Aes256Gcm,
             };
         let private_spatial = crate::stego::format::PngFormatProfile {
