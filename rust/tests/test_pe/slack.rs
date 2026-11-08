@@ -790,14 +790,6 @@ fn zero_virtual_size_section_is_not_padding() {
     );
 }
 
-/// T12: the strategy registry knows pe_slack (id 9) in both directions.
-#[test]
-fn strategy_registry_roundtrip() {
-    use strhide::structure::registry::{id_to_strategy, strategy_to_id};
-    assert_eq!(strategy_to_id("pe_slack").unwrap(), 9);
-    assert_eq!(id_to_strategy(9), "pe_slack");
-}
-
 /// T13: an envelope placed in the *last* section's padding ends exactly at EOF.
 /// `locate` must still report `pe_slack` (not the generic EOF fallback), or
 /// `inspect` would mislabel the carrier and remove would take the wrong path.

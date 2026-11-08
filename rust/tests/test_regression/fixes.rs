@@ -4,7 +4,6 @@
 
 use crate::common::*;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "cli")]
 use std::process::Stdio;
@@ -21,7 +20,6 @@ use strhide::crypto::{compute_sha256, decrypt_metadata, derive_keys, encrypt_met
 use strhide::errors::StrHideError;
 use strhide::params::{LocalParams, MagicPair};
 use strhide::stego::{EmbedOptions, embed_carrier};
-use strhide::structure::adapters::zip::find_eocd_offset;
 use strhide::structure::envelope::{
     EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE as ENVELOPE_HEADER_SIZE, MAX_HINT_LEN,
     MAX_META_LEN,
@@ -539,22 +537,6 @@ fn explicit_oversize_strategy_rejected_without_tmp() {
     );
     assert!(!out.with_extension("jpg.strhide.tmp").exists());
     assert!(!PathBuf::from(format!("{}.strhide.tmp", out.display())).exists());
-}
-
-#[test]
-fn zip_fake_eocd_comment_located_correctly() {
-    let dir = scratch("zip_fake");
-    let carrier = dir.join("fc.zip");
-    fs::write(&carrier, make_zip_with_fake_eocd_comment()).unwrap();
-    let mut f = fs::File::open(&carrier).unwrap();
-    let (eocd_pos, cd_offset, cd_size) = find_eocd_offset(&mut f).unwrap();
-    let size = fs::metadata(&carrier).unwrap().len();
-    f.seek(SeekFrom::Start(eocd_pos + 20)).unwrap();
-    let mut cl = [0u8; 2];
-    f.read_exact(&mut cl).unwrap();
-    let comment_len = u16::from_le_bytes(cl) as u64;
-    assert_eq!(eocd_pos + 22 + comment_len, size);
-    assert!(cd_offset + cd_size <= eocd_pos);
 }
 
 #[test]

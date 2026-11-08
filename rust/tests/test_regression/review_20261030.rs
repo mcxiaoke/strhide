@@ -122,6 +122,10 @@ fn zip_decoy_eocd_does_not_win_over_the_real_one() {
         "the first (genuine) EOCD record must be the one adopted"
     );
     assert!(cd_offset + cd_size <= eocd_pos);
+    // The adopted record must account for the whole comment up to EOF.
+    let comment_len =
+        u16::from_le_bytes([zip[eocd_pos as usize + 20], zip[eocd_pos as usize + 21]]) as usize;
+    assert_eq!(eocd_pos as usize + 22 + comment_len, zip.len());
 }
 
 #[test]

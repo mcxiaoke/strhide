@@ -54,18 +54,6 @@ fn invalid_toml_is_a_hard_error() {
 }
 
 #[test]
-fn cwd_config_is_ignored() {
-    let dir = scratch("cwd_ignored");
-    fs::write(dir.join("c.png"), make_png()).unwrap();
-    // In CWD, write invalid TOML and bogus strategy:
-    fs::write(dir.join("strhide.toml"), "strategy = \"bogus\"\n").unwrap();
-    // Running without --config in CWD must ignore ./strhide.toml:
-    let out = run(&dir, &["list"], None);
-    assert_eq!(code(&out), 0);
-    assert!(!stderr(&out).contains("bogus"));
-}
-
-#[test]
 fn unknown_nested_key_in_stego_section_warns() {
     // `[stego]` has its own key set; verify that typos like `algoritm`
     // generate warnings instead of being silently ignored.

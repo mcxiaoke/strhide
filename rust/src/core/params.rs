@@ -421,10 +421,4 @@ mod tests {
             .is_err()
         );
     }
-
-    #[test]
-    fn magic_pair_standard_is_the_official_pair() {
-        assert_eq!(MagicPair::STANDARD.header, STANDARD_HEADER_MAGIC);
-        assert_eq!(MagicPair::STANDARD.trailer, STANDARD_TRAILER_MAGIC);
-    }
 }

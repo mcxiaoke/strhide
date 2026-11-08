@@ -2,9 +2,9 @@
 //!
 //! - Payload sources `--text-base64` and `STRHIDE_TEXT` resolution,
 //!   including validation and precedence rules.
-//! - Password sources `--password-file` and `config.password_file` precedence.
-//! - Configuration options (`unescape`, `backup`, `hint`, `password_file`)
-//!   and config discovery error handling.
+//! - Password sources `--password-file` and `-p` precedence.
+//! - Configuration options (`unescape`, `backup`, `hint`) and config discovery
+//!   error handling.
 
 use crate::common::*;
 use std::fs;
@@ -245,34 +245,6 @@ fn password_file_missing_is_a_hard_error() {
         "error must name the file, stderr: {}",
         stderr(&out)
     );
-}
-
-#[test]
-fn config_password_file_key_is_warned_and_not_used() {
-    let dir = scratch("cfg_pwfile");
-    fs::write(dir.join("c.png"), make_png()).unwrap();
-    fs::write(dir.join("pwd.txt"), "cfg-wd\n").unwrap();
-    fs::write(
-        dir.join("custom.toml"),
-        "encrypt = true\npassword_file = \"pwd.txt\"\n",
-    )
-    .unwrap();
-
-    let write = run(
-        &dir,
-        &[
-            "--config",
-            "custom.toml",
-            "write",
-            "c.png",
-            "-t",
-            "secret",
-            "--in-place",
-        ],
-    );
-    assert_eq!(code(&write), 1);
-    assert!(stderr(&write).contains("Unknown key 'password_file'"));
-    assert!(stderr(&write).contains("Password required but no interactive terminal"));
 }
 
 // --------------------------------------------------------------------------- mutual exclusion

@@ -87,28 +87,6 @@ fn test_pe_authenticode_rejection() {
     assert!(check_pe_authenticode(&mut clean_stream).unwrap().is_none());
 }
 
-#[test]
-fn test_jar_signature_rejection() {
-    // Synthetic clean ZIP (no META-INF signatures)
-    let clean_zip = make_zip_with_entries(&[("content.txt", b"regular text")]);
-    let mut clean_cursor = Cursor::new(clean_zip);
-    assert!(
-        check_jar_signature(&mut clean_cursor, Some("archive.zip"))
-            .unwrap()
-            .is_none()
-    );
-
-    // Synthetic signed JAR with META-INF/SIGN.SF
-    let signed_jar = make_zip_with_entries(&[
-        ("content.txt", b"regular text"),
-        ("META-INF/SIGN.SF", b"Signature-Version: 1.0"),
-    ]);
-    let mut signed_cursor = Cursor::new(signed_jar);
-    let jar_err = check_jar_signature(&mut signed_cursor, Some("app.jar")).unwrap();
-    assert!(jar_err.is_some());
-    assert!(jar_err.unwrap().contains("signature"));
-}
-
 /// Garbage trailing an archive may itself contain `PK\x05\x06`; taking the
 /// last magic match as THE EOCD would read cd_offset from the garbage and
 /// miss the signature file. The scan must keep walking until

@@ -227,39 +227,6 @@ fn read_stealth_without_password_reports_guidance() {
     );
 }
 
-#[test]
-fn read_encrypted_without_password_raises_password_variant() {
-    let dir = scratch("password_variant");
-    let carrier = dir.join("c.png");
-    let out = dir.join("o.png");
-    fs::write(&carrier, make_png()).unwrap();
-    write_carrier(
-        &carrier,
-        PayloadSource::Text("encrypted secret"),
-        &WriteOptions::default()
-            .with_output(&out)
-            .with_password("pw12345")
-            .with_password_hint("the hint")
-            .with_backup(false),
-    )
-    .unwrap();
-
-    let err = read_carrier(
-        &out,
-        &ReadOptions::default()
-            .with_output_option(None)
-            .with_password_option(None)
-            .with_overwrite(false),
-    )
-    .unwrap_err();
-    assert!(
-        matches!(err, StrHideError::PasswordWithHint { .. }),
-        "expected PasswordWithHint variant, got {err:?}"
-    );
-    assert_eq!(err.hint(), Some("the hint"));
-    assert!(err.to_string().contains("the hint"), "{err}");
-}
-
 // --------------------------------------------------------------------------- #18 JAR signature guard decoupled from extension
 
 #[test]

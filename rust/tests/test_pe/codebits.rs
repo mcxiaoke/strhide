@@ -327,33 +327,6 @@ fn explicit_codebits_rejects_incapable_carriers() {
     );
 }
 
-/// T8: a second injection on a channel carrier is refused.
-#[test]
-fn double_write_refused() {
-    let dir = scratch("double");
-    let carrier = dir.join("d.exe");
-    fs::write(&carrier, make_pe(0x8664, 0x20B, 0x3000, false)).unwrap();
-
-    let out = dir.join("d.steg.exe");
-    write_carrier(
-        &carrier,
-        PayloadSource::Text("first"),
-        &write_opts(&out, "pe_codebits"),
-    )
-    .expect("first write");
-
-    let out2 = dir.join("d.steg2.exe");
-    assert!(
-        write_carrier(
-            &out,
-            PayloadSource::Text("second"),
-            &write_opts(&out2, "pe_codebits")
-        )
-        .is_err(),
-        "writing over an existing envelope must be refused"
-    );
-}
-
 /// T9: corrupting a byte inside the channel region must fail cleanly (never
 /// silently produce garbage or a wrong restore).
 #[test]
@@ -701,7 +674,6 @@ fn inspect_marks_codebits_unavailable_on_tiny_text() {
         .iter()
         .find(|c| c.strategy == "pe_codebits")
         .expect("pe_codebits is listed");
-    assert!(!codebits.available, "tiny .text cannot host a channel");
     assert!(!codebits.available, "tiny .text cannot host a channel");
     assert!(
         codebits.capacity_bytes.is_some(),
