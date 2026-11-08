@@ -17,6 +17,7 @@ use crate::formats::FileFormat;
 
 /// Detailed metadata describing a content-domain steganography algorithm.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct StegoAlgorithmInfo {
     /// Unique algorithm identifier (e.g. "hill", "uerd", "hevc", "wav_pcm", "flac_residual").
     pub id: String,

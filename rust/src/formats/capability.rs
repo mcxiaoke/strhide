@@ -64,6 +64,7 @@ impl StegoKind {
 
 /// One carrier format's capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct Capability {
     pub format: FileFormat,
     /// Structure-domain strategies, in the adapter's priority order. Empty for

@@ -73,6 +73,7 @@ impl BatchPlan {
 
 /// Execution outcome for a single carrier item in a batch run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ItemOutcome<R> {
     pub index: usize,
     pub item: PathBuf,
@@ -82,6 +83,7 @@ pub struct ItemOutcome<R> {
 
 /// Aggregated outcome of a completed or cancelled batch run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct BatchOutcome<R> {
     pub items: Vec<ItemOutcome<R>>,
     pub succeeded: usize,

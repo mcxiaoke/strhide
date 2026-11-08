@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 /// carries it: a PNG has no frame rate, an Annex-B H.265 stream has no declared
 /// duration.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MediaInfo {
     /// Frame width in pixels.
     pub width: u32,

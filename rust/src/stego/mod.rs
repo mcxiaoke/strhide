@@ -360,6 +360,7 @@ pub fn verify_carrier_with_dialect(
 
 /// Capacity information for content-adaptive steganography.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct StegoCapacityInfo {
     pub format: String,
     pub algorithm: String,
