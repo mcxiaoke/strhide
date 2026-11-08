@@ -459,44 +459,6 @@ fn test_hevc_v4_truncated_body_is_rejected() {
     assert!(res.is_err(), "truncated carrier must not extract");
 }
 
-/// The capacity report an embed returns must come from the same whole-carrier
-/// pool as the probe. The write window stops recording once the payload fits,
-/// so reporting that window made a 59-byte payload on a 12 MB MKV claim
-/// 117,000 slots / 1.40 KiB safe against a real 13,141,628 slots / 70.04 KiB
-/// (112x under-report), and let `--enforce-safety` reject payloads the carrier
-/// could hold.
-#[test]
-fn test_hevc_embed_capacity_report_matches_probe() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/assets/small.heic");
-    let carrier = fs::read(&path).expect("read small.heic");
-    let fmt = &DEFAULT_HEVC_FORMAT;
-    let policy = SafetyPolicy::new();
-
-    let probe = probe_hevc_capacity_info(&carrier, &[], fmt, policy.level, false, &Control::none())
-        .expect("probe capacity");
-
-    let payload = b"abc";
-    let (_, info, _stats) = embed_hevc_with_info_v4(
-        &carrier,
-        &Payload::bytes(payload),
-        Credential::Password("l02-pw"),
-        None,
-        fmt.cipher.default_suite.as_u16(),
-        &[],
-        fmt,
-        Freshness::Random,
-        policy,
-        &Control::none(),
-    )
-    .expect("embed");
-
-    assert_eq!(info.total_elements, probe.total_elements);
-    assert_eq!(info.available_slots, probe.available_slots);
-    assert_eq!(info.max_raw_payload_bytes, probe.max_raw_payload_bytes);
-    assert_eq!(info.tier_limits, probe.tier_limits);
-    assert_eq!(info.recommended_max_bytes, probe.recommended_max_bytes);
-}
-
 /// Verifies the writer's decode window does not stop below the reader's fixed
 /// `HEVC_SUPERBLOCK_POOL_SLOTS` (2048) header pool on small payloads.
 ///
@@ -541,11 +503,21 @@ fn test_hevc_balanced_small_payload_roundtrip() {
     assert_eq!(extracted.as_bytes(), payload);
 }
 
-/// N-01: the file-level MP4/Annex-B patch branch must apply the same
-/// filename-safe capacity adjustment as the unified `probe` entry, otherwise
-/// `sth embed x.mp4` and `sth capacity x.mp4` disagree by 256 bytes.
+/// N-01: the embed capacity report must agree with the unified `probe` entry.
+///
+/// File level: the MP4/Annex-B patch branch must apply the same filename-safe
+/// capacity adjustment as `probe`, otherwise `sth embed x.mp4` and
+/// `sth capacity x.mp4` disagree by 256 bytes.
+///
+/// The same check guards the whole-carrier pool: the writer window stops
+/// recording once the payload fits, so reporting that window made a 59-byte
+/// payload on a 12 MB MKV claim 117,000 slots / 1.40 KiB safe against a real
+/// 13,141,628 slots / 70.04 KiB (112x under-report). A single still image
+/// cannot stop the window early at all, so the file-level case uses a
+/// multi-picture Annex-B carrier where the early stop is reachable; the HEIC
+/// case below keeps the image-container path covered.
 #[test]
-fn file_level_patch_capacity_matches_the_unified_probe() {
+fn embed_capacity_report_matches_probe_for_annex_b_and_heic() {
     use strhide::commit::FileTarget;
     use strhide::core::payload::Payload;
     use strhide::stego::io::embed_carrier_file;
@@ -582,8 +554,43 @@ fn file_level_patch_capacity_matches_the_unified_probe() {
     )
     .expect("embed");
     let reported = res.capacity.expect("capacity report");
+    assert_eq!(reported.total_elements, probe.total_elements);
+    assert_eq!(reported.available_slots, probe.available_slots);
     assert_eq!(reported.max_raw_payload_bytes, probe.max_raw_payload_bytes);
+    assert_eq!(reported.tier_limits, probe.tier_limits);
     assert_eq!(reported.recommended_max_bytes, probe.recommended_max_bytes);
+
+    // HEIC image container: the report must match the probe here too.
+    let heic = fs::read(asset("small.heic")).expect("read small.heic");
+    let fmt = &DEFAULT_HEVC_FORMAT;
+    let policy = SafetyPolicy::new();
+    let probed_heic =
+        probe_hevc_capacity_info(&heic, &[], fmt, policy.level, false, &Control::none())
+            .expect("probe heic");
+    let (_, embedded_heic, _stats) = embed_hevc_with_info_v4(
+        &heic,
+        &Payload::bytes(b"abc"),
+        Credential::Password("l02-pw"),
+        None,
+        fmt.cipher.default_suite.as_u16(),
+        &[],
+        fmt,
+        Freshness::Random,
+        policy,
+        &Control::none(),
+    )
+    .expect("embed heic");
+    assert_eq!(embedded_heic.total_elements, probed_heic.total_elements);
+    assert_eq!(embedded_heic.available_slots, probed_heic.available_slots);
+    assert_eq!(
+        embedded_heic.max_raw_payload_bytes,
+        probed_heic.max_raw_payload_bytes
+    );
+    assert_eq!(embedded_heic.tier_limits, probed_heic.tier_limits);
+    assert_eq!(
+        embedded_heic.recommended_max_bytes,
+        probed_heic.recommended_max_bytes
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }

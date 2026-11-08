@@ -500,11 +500,14 @@ fn strategy_ask_selects_the_chosen_entry() {
     assert_eq!(read.data, b"asked payload");
 }
 
+/// Any unusable `strategy_ask` answer (out of range, non-numeric, or empty)
+/// falls back to the first strategy.
 #[test]
-fn strategy_ask_out_of_range_and_non_numeric_fall_back_to_first() {
+fn strategy_ask_unusable_answers_fall_back_to_first() {
     for (label, answer) in [
         ("out-of-range", b"99\n".as_slice()),
         ("non-numeric", b"abc\n".as_slice()),
+        ("empty", b"\n".as_slice()),
     ] {
         let dir = scratch(&format!("ask_{label}"));
         fs::write(dir.join("c.png"), make_png()).unwrap();
@@ -550,32 +553,6 @@ fn strategy_ask_out_of_range_and_non_numeric_fall_back_to_first() {
         .expect("remove");
         assert_eq!(fs::read(&restored).unwrap(), make_png());
     }
-}
-
-#[test]
-fn strategy_ask_empty_answer_defaults_to_first() {
-    let dir = scratch("ask_empty");
-    fs::write(dir.join("c.png"), make_png()).unwrap();
-
-    let out = run_with_stdin(
-        &dir,
-        &[
-            "write",
-            "c.png",
-            "-t",
-            "x",
-            "--strategy",
-            "ask",
-            "--in-place",
-        ],
-        b"\n",
-    );
-    assert_eq!(code(&out), 0, "stderr: {}", stderr(&out));
-    assert!(
-        stdout(&out).contains("using strategy 'chunk'"),
-        "stdout: {}",
-        stdout(&out)
-    );
 }
 
 // --------------------------------------------------------------------------- misc engine branch

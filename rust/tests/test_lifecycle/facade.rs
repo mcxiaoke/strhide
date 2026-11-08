@@ -13,7 +13,6 @@ use strhide::core::payload::Payload;
 use strhide::facade::{Dialect, DualOptions, StrHide};
 use strhide::stego::params::StegoProfile;
 use strhide::stego::{EmbedOptions, ExtractOptions, ProbeOptions};
-use strhide::structure::params::StructureProfile;
 use strhide::structure::{PayloadSource, ReadOptions, RestoreOptions, WriteOptions};
 
 use crate::common::scratch;
@@ -311,64 +310,39 @@ fn extract_file_refuses_to_write_over_its_carrier() {
 
 // ───────────────────────── private dialect isolation ────────────────────────
 
+/// `Dialect::with_default_secret` is the one-line private deployment knob: it
+/// keys both halves, so neither the envelope nor the image carrier written by
+/// the private engine is readable by an official build. The two halves stay
+/// independently configurable.
 #[test]
-fn private_dialect_engine_is_isolated_from_official() {
-    const PRIVATE_ENGINE: StrHide =
-        StrHide::new().with_dialect(Dialect::new().with_structure_profile(
-            StructureProfile::new().with_default_secret("facade-private-key"),
-        ));
-    assert!(!PRIVATE_ENGINE.dialect().structure.is_official());
-
-    let options = WriteOptions::default();
-    let (stego, _) = PRIVATE_ENGINE
-        .structure()
-        .write_bytes(PNG, PayloadSource::Bytes(STRUCT_PAYLOAD), &options)
-        .expect("private write");
-
-    // The official engine cannot read a carrier written under the private dialect.
-    let official = StrHide::new();
-    assert!(
-        official.structure().read_bytes(&stego, None).is_err(),
-        "official engine must not read a private carrier"
-    );
-
-    // The private engine still reads its own carrier.
-    let read = PRIVATE_ENGINE
-        .structure()
-        .read_bytes(&stego, None)
-        .expect("private read");
-    assert_eq!(read.data, STRUCT_PAYLOAD);
-}
-
-#[test]
-fn one_dialect_secret_applies_to_both_domains() {
-    // `Dialect::with_default_secret` is the one-line private deployment knob:
-    // it must key both halves, so neither the envelope nor the image carrier is
-    // readable with an official build.
+fn private_dialect_isolates_official_engine_in_both_domains() {
     let dialect = Dialect::new().with_default_secret("one-key-both-domains");
     assert!(!dialect.is_official());
+    assert!(!dialect.structure.is_official());
     assert_eq!(dialect.structure.secret(), "one-key-both-domains");
     assert_eq!(dialect.stego.secret(), Some("one-key-both-domains"));
-
     let private = StrHide::new().with_dialect(dialect);
 
-    // Structure half: unreadable by the official engine.
+    // Structure half: unreadable by the official engine, readable by its own.
+    let options = WriteOptions::default();
     let (stego_png, _) = private
         .structure()
-        .write_bytes(
-            PNG,
-            PayloadSource::Bytes(STRUCT_PAYLOAD),
-            &WriteOptions::default(),
-        )
+        .write_bytes(PNG, PayloadSource::Bytes(STRUCT_PAYLOAD), &options)
         .expect("private structure write");
     assert!(
         StrHide::new()
             .structure()
             .read_bytes(&stego_png, None)
-            .is_err()
+            .is_err(),
+        "official engine must not read a private carrier"
     );
+    let read = private
+        .structure()
+        .read_bytes(&stego_png, None)
+        .expect("private structure read");
+    assert_eq!(read.data, STRUCT_PAYLOAD);
 
-    // Content half: unreadable by the official engine.
+    // Content half: same isolation in the other domain.
     let options = EmbedOptions::default();
     let stego_jpg = private
         .stego()
@@ -430,6 +404,8 @@ fn run_cli_from_help_returns_zero() {
 #[cfg(feature = "cli")]
 #[test]
 fn run_cli_from_private_dialect_isolation() {
+    use strhide::structure::params::StructureProfile;
+
     let dir = scratch("facade_cli_private");
     let carrier = dir.join("carrier.png");
     std::fs::write(&carrier, PNG).expect("seed carrier");

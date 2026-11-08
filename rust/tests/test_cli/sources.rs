@@ -118,6 +118,8 @@ fn cli_text_base64_non_utf8_is_rejected() {
     assert_eq!(fs::read(dir.join("c.png")).unwrap(), make_png());
 }
 
+/// `STRHIDE_TEXT` is the payload fallback when no CLI source is given; it still
+/// applies after the payload-source mutex group was introduced.
 #[test]
 fn env_text_is_used_as_payload_source() {
     let dir = scratch("env_text");
@@ -157,26 +159,42 @@ fn cli_text_wins_over_env_text() {
     assert_eq!(read_stdout(&dir, "c.png"), "来自 -t");
 }
 
+/// Payload-source absence: both an unset and an empty `STRHIDE_TEXT` must keep
+/// the runtime `Must provide either ...` error (the mutex group does not make
+/// the env fallback mandatory), and the carrier stays untouched.
 #[test]
-fn empty_env_text_still_rejected() {
-    let dir = scratch("env_empty");
-    fs::write(dir.join("c.png"), make_png()).unwrap();
+fn missing_payload_sources_report_the_same_error() {
+    for (label, text) in [("unset", None), ("empty", Some(""))] {
+        let dir = scratch(&format!("env_absent_{label}"));
+        fs::write(dir.join("c.png"), make_png()).unwrap();
 
-    let out = base_cmd()
-        .args(["write", "c.png"])
-        .current_dir(&dir)
-        .env("USERPROFILE", &dir)
-        .env("HOME", &dir)
-        .env("STRHIDE_PASSWORD", "")
-        .env("STRHIDE_TEXT", "")
-        .output()
-        .unwrap();
-    assert_eq!(code(&out), 1);
-    assert!(
-        stderr(&out).contains("Must provide either"),
-        "stderr: {}",
-        stderr(&out)
-    );
+        let mut cmd = base_cmd();
+        cmd.args(["write", "c.png"])
+            .current_dir(&dir)
+            .env("USERPROFILE", &dir)
+            .env("HOME", &dir)
+            .env("STRHIDE_PASSWORD", "");
+        match text {
+            Some(value) => {
+                cmd.env("STRHIDE_TEXT", value);
+            }
+            None => {
+                cmd.env_remove("STRHIDE_TEXT");
+            }
+        }
+        let out = cmd.output().expect("failed to run strhide binary");
+        assert_eq!(code(&out), 1, "{label}: stderr: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("Must provide either"),
+            "{label}: stderr: {}",
+            stderr(&out)
+        );
+        assert_eq!(
+            fs::read(dir.join("c.png")).unwrap(),
+            make_png(),
+            "{label}: failed write must leave the carrier untouched"
+        );
+    }
 }
 
 // --------------------------------------------------------------------------- password sources
@@ -336,44 +354,6 @@ fn read_output_routing_rejects_conflicting_input() {
     );
     // No file may have been created by the rejected invocation.
     assert!(!dir.join("out.bin").exists());
-}
-
-/// The STRHIDE_TEXT fallback must survive the payload-source mutex group:
-/// with no CLI payload source at all, the env var is still the last resort.
-#[test]
-fn env_text_fallback_after_mutex_introduced() {
-    let dir = scratch("mutex_env_fallback");
-    fs::write(dir.join("c.png"), make_png()).unwrap();
-    let secret = "mutex 互斥组不影响 STRHIDE_TEXT 兜底";
-
-    let out = base_cmd()
-        .args(["write", "c.png", "--in-place"])
-        .current_dir(&dir)
-        .env("USERPROFILE", &dir)
-        .env("HOME", &dir)
-        .env("STRHIDE_PASSWORD", "")
-        .env("STRHIDE_TEXT", secret)
-        .output()
-        .unwrap();
-    assert_ok(&out, &["write via STRHIDE_TEXT"]);
-    assert_eq!(read_stdout(&dir, "c.png"), secret);
-}
-
-/// A missing payload source still fails at runtime with the same message as
-/// before (the mutex group is not required, so `handle_write` keeps reporting
-/// "Must provide either ..." when neither CLI args nor STRHIDE_TEXT supplied).
-#[test]
-fn missing_payload_source_message_unchanged() {
-    let dir = scratch("mutex_none");
-    fs::write(dir.join("c.png"), make_png()).unwrap();
-
-    let out = run(&dir, &["write", "c.png"]);
-    assert_eq!(code(&out), 1);
-    assert!(
-        stderr(&out).contains("Must provide either"),
-        "stderr: {}",
-        stderr(&out)
-    );
 }
 
 // --------------------------------------------------------------------------- global -q/--quiet
@@ -608,68 +588,35 @@ fn config_unescape_key_applies() {
     assert_eq!(read_stdout(&dir, "c.png"), "中文ABC");
 }
 
+/// `config backup` and `--no-backup` precedence: config `false` suppresses the
+/// backup, `true` keeps it, and the CLI flag always wins.
 #[test]
-fn config_backup_false_keeps_no_bak_file() {
-    let dir = seeded_dir("cfg_backup", "backup = false\n");
-    let write = run(
-        &dir,
-        &[
-            "--config",
-            "custom.toml",
-            "write",
-            "c.png",
-            "-t",
-            "x",
-            "--in-place",
-        ],
-    );
-    assert_ok(&write, &["write backup=false"]);
-    assert!(
-        !dir.join("c.png.bak").exists(),
-        "config backup=false must suppress the .bak file"
-    );
-}
-
-#[test]
-fn config_backup_false_is_overridden_by_no_cli_flag() {
-    let dir = seeded_dir("cfg_backup_pre", "backup = true\n");
-    let write = run(
-        &dir,
-        &[
-            "--config",
-            "custom.toml",
-            "write",
-            "c.png",
-            "-t",
-            "x",
-            "--no-backup",
-            "--in-place",
-        ],
-    );
-    assert_ok(&write, &["write --no-backup"]);
-    assert!(!dir.join("c.png.bak").exists());
-}
-
-#[test]
-fn config_backup_true_creates_bak_file() {
-    let dir = seeded_dir("cfg_backup_on", "backup = true\n");
-    let write = run(
-        &dir,
-        &[
-            "--config",
-            "custom.toml",
-            "write",
-            "c.png",
-            "-t",
-            "x",
-            "--in-place",
-        ],
-    );
-    assert_ok(&write, &["write backup=true"]);
-    assert!(
-        dir.join("c.png.bak").exists(),
-        "config backup=true must keep the .bak backup"
-    );
+fn config_backup_and_cli_override_matrix() {
+    let cases = [
+        ("cfg_backup", "backup = false\n", None, false),
+        (
+            "cfg_backup_pre",
+            "backup = true\n",
+            Some("--no-backup"),
+            false,
+        ),
+        ("cfg_backup_on", "backup = true\n", None, true),
+    ];
+    for (name, config, flag, expect_bak) in cases {
+        let dir = seeded_dir(name, config);
+        let mut args = vec!["--config", "custom.toml", "write", "c.png", "-t", "x"];
+        if let Some(flag) = flag {
+            args.push(flag);
+        }
+        args.push("--in-place");
+        let write = run(&dir, &args);
+        assert_ok(&write, &[name]);
+        assert_eq!(
+            dir.join("c.png.bak").exists(),
+            expect_bak,
+            "{name}: backup file presence mismatch"
+        );
+    }
 }
 
 #[test]

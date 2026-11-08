@@ -608,10 +608,11 @@ fn global_config_short_option() {
 /// The stego credential flags were removed from the CLI surface: a private
 /// no-password dialect is compile-time `Profile` territory, and the password
 /// is the only credential the extract side must remember. The flags must be
-/// rejected on every verb that used to accept them, and a no-password embed
-/// must round-trip with no credentials at all.
+/// rejected on every verb that used to accept them, a no-password embed must
+/// round-trip with no credentials, and leftover `stego_secret`/`stego_domain`
+/// config keys or env vars must be inert.
 #[test]
-fn stego_credential_flags_are_rejected_and_no_password_roundtrips() {
+fn stego_credential_sources_are_inert_and_no_password_roundtrips() {
     let dir = scratch("unify_stego_credential_flags_removed");
     seed_stego(&dir, &["carrier.png"]);
     let payload = "public constant payload 2026";
@@ -653,50 +654,42 @@ fn stego_credential_flags_are_rejected_and_no_password_roundtrips() {
     let ok = run(&dir, &["extract", "carrier.png", "--stdout"]);
     assert_eq!(code(&ok), 0, "stderr: {}", stderr(&ok));
     assert_eq!(stdout(&ok), payload);
-}
 
-/// `stego_secret` / `stego_domain` config keys and `STRHIDE_STEGO_SECRET` /
-/// `STRHIDE_STEGO_DOMAIN` environment variables are no longer part of the CLI
-/// surface: leftover config keys warn as unknown and are ignored, the env vars
-/// are inert, and a no-password embed stays readable regardless of both.
-#[test]
-fn removed_stego_credential_sources_are_inert() {
-    let dir = scratch("unify_stego_credential_sources_inert");
-    seed_stego(&dir, &["carrier.png"]);
-    let payload = "inert sources payload 2026";
-    fs::write(dir.join("data.txt"), payload).unwrap();
+    // Leftover credential sources (config keys and env vars) are inert too:
+    // a second carrier embeds with the leftovers present and still extracts
+    // using the public constant.
+    seed_stego(&dir, &["inert.png"]);
+    let inert_payload = "inert sources payload 2026";
+    fs::write(dir.join("data2.txt"), inert_payload).unwrap();
     fs::write(
         dir.join("strhide.toml"),
         "stego_secret = \"leftover-secret\"\nstego_domain = \"leftover-domain\"\n",
     )
     .unwrap();
 
-    // Embed ignores the leftover keys (unknown-key warning) and uses the
-    // public constant.
-    let embed = run(
+    let embed_inert = run(
         &dir,
         &[
             "--config",
             "strhide.toml",
             "embed",
-            "carrier.png",
+            "inert.png",
             "-d",
-            "data.txt",
+            "data2.txt",
             "--in-place",
             "--no-backup",
         ],
     );
-    assert_eq!(code(&embed), 0, "stderr: {}", stderr(&embed));
+    assert_eq!(code(&embed_inert), 0, "stderr: {}", stderr(&embed_inert));
     assert!(
-        stderr(&embed).contains("stego_secret") && stderr(&embed).contains("stego_domain"),
+        stderr(&embed_inert).contains("stego_secret")
+            && stderr(&embed_inert).contains("stego_domain"),
         "leftover keys must be named in the unknown-key warning: {}",
-        stderr(&embed)
+        stderr(&embed_inert)
     );
 
-    // Extraction ignores the env vars too: the same public constant applies,
-    // so the payload reads back with no credential at all.
-    let out = base_cmd()
-        .args(["extract", "carrier.png", "--stdout"])
+    let extract_inert = base_cmd()
+        .args(["extract", "inert.png", "--stdout"])
         .current_dir(&dir)
         .env("USERPROFILE", &dir)
         .env("HOME", &dir)
@@ -706,12 +699,12 @@ fn removed_stego_credential_sources_are_inert() {
         .output()
         .expect("failed to run strhide binary");
     assert_eq!(
-        code(&out),
+        code(&extract_inert),
         0,
         "env vars must be inert: stderr: {}",
-        stderr(&out)
+        stderr(&extract_inert)
     );
-    assert_eq!(stdout(&out), payload);
+    assert_eq!(stdout(&extract_inert), inert_payload);
 }
 
 /// Test CLI --safety and --enforce-safety flags on probe and embed.
