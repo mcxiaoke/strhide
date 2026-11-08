@@ -89,7 +89,7 @@
 | E7 | HEIF item 有 mime/hidden 标志 | 只写 `infe` v2/v3、`item_type="resv"`、空名、protection_index 0（`isobmff.rs:961-984`） | STRUCTURE-ISOBMFF §4 | 已修正 |
 | E8 | ZIP 默认 `pre_cd_inject`，空档案/ ZIP64/缺 EOCD 退 eof | 还包含 `cd_offset==0`、ZIP64 locator、32 位溢出（`zip.rs:145-171`）；ZIP64 只探测 locator，不解析 EOCD64 | STRUCTURE-ZIP §3-5 | 已修正 |
 | E9 | PDF 增量段固定写经典 `xref`/`trailer` | XRef 流方言写 `/Type /XRef` 流对象（`pdf.rs:787-830`） | STRUCTURE-PDF §4 | 已修正 |
-| E10 | PDF `offset_delta` 未列 | `46 + digits(N) + digits(L)`；最大值 66 > `MAX_OFFSET_DELTA=64`，此时 auto 退 `eof`（`pdf.rs:589-591,697-705`） | STRUCTURE-PDF §4 | 已修正 |
+| E10 | PDF `offset_delta` 未列 | `46 + digits(N) + digits(L)`；两个 10 位数即 66 > 旧上限 64，故 1.0 前把 `MAX_OFFSET_DELTA` 提到 128（现 `pdf.rs:589-591,697-705` 的 auto 分支按 128 判定） | STRUCTURE-PDF §4 | 已修正 |
 | E11 | PE codebits 含 ModR/M 内存/SIB 变换 | 仅 `mod=11` 寄存器-寄存器语义对与 TEST 操作数交换（`pe_codebits.rs:239-243`） | STRUCTURE-PE §5.1 | 已修正 |
 | E12 | `pe_slack` 属散落策略、经 ChannelHeader | 连续覆盖写入 padding，无 ChannelHeader/diff（`pe_slack.rs:52-92`） | STRUCTURE-PE §6 | 已修正 |
 | E13 | PE 还原 diff 为“紧凑二进制列表” | 无头定长稠密位图，长度 `14+ube_len`、MSB-first（`pe_codebits.rs:344-350,446-448`） | STRUCTURE-PE §5.3 | 已修正 |

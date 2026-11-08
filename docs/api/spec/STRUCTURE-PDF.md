@@ -45,7 +45,7 @@
 | `incremental` | 6 | 在旧 `%%EOF` 之后追加流对象、增量 xref 段与新 `%%EOF`，信封作为流载荷 | `pdf.rs:742-877`；`registry.rs:96` |
 | `eof` | 1 | 委托 `EofAdapter`，UBE 追加在整个文件物理末尾（脏尾之后） | `pdf.rs:749-751`；`eof.rs:35-56`；`registry.rs:91` |
 
-`auto` 只调用一次 `choose_auto_strategy(host, exact_ube_size)`，不重试（`engine.rs:1242-1246`）：`parse_pdf_trailer_info` 成功且 `pdf_obj_header(new_obj_num, ube_size).len() <= MAX_OFFSET_DELTA(64)` → `incremental`；其余（含解析失败、加密、头长度超 64）→ `eof`（`pdf.rs:690-706`；`envelope.rs:81`）。显式策略必须属于 `supported_strategies`（`pdf.rs:686-688`、`engine.rs:1248-1253`），否则引擎报 `UnsupportedFormat`。
+`auto` 只调用一次 `choose_auto_strategy(host, exact_ube_size)`，不重试（`engine.rs:1242-1246`）：`parse_pdf_trailer_info` 成功且 `pdf_obj_header(new_obj_num, ube_size).len() <= MAX_OFFSET_DELTA(128)` → `incremental`；其余（含解析失败、加密、头长度超 128）→ `eof`（`pdf.rs:690-706`；`envelope.rs:81`）。显式策略必须属于 `supported_strategies`（`pdf.rs:686-688`、`engine.rs:1248-1253`），否则引擎报 `UnsupportedFormat`。
 
 ## 4 注入布局
 

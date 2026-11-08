@@ -58,7 +58,7 @@
 
 - VINT 规则：对 `len ∈ 1..=8`，长度标记位为 `1 << (7*len)`；当 `val < (1<<(7*len)) - 1` 时输出 `len` 字节大端 `(marker | val)`（`ebml.rs:26-34`）。首个 1 位之前的高位为长度标记，其余 `7*len` 位为数据。
 - 边界值必须进位：`126` 仍为 1 字节，`127` 必须编码为 `40 7F`，否则会撞上“所有数据位为 1 = 大小未知”的保留值（`ebml.rs:28-31`、测试 `ebml.rs:111-127`）。`val >= 2^56 - 1` 返回 `None`，调用方按失败处理（`ebml.rs:36`）。
-- `offset_delta` 由同一 VINT 推导（`mkv.rs:292-306`），写入前参与 AAD（`engine.rs:1267-1278`），上限 `MAX_OFFSET_DELTA = 64`（`rust/src/structure/envelope.rs:74-81`）；本策略最大 9，天然满足。
+- `offset_delta` 由同一 VINT 推导（`mkv.rs:292-306`），写入前参与 AAD（`engine.rs:1267-1278`），上限 `MAX_OFFSET_DELTA = 128`（`rust/src/structure/envelope.rs:74-88`）；本策略最大 9，天然满足。`ebml_void` 属于允许整体平移的策略之一：remux 改变 Segment 尺寸后信封位置会移动，`locate` 从尾部反推，`verify`/`strip` 亦按平移量修正 `inject_offset`（`engine.rs` 的 `relocatable_strategy`）。
 - `inject` 返回 `(host_len, 1 + vint_len + ube_total_size, 0, 0)`（`mkv.rs:86-99`）：`patch_offset = 0`，不改写宿主任何字段。Void 数据长度恰为 UBE 长度，**无补位、无尾部填充**。
 
 具体字节示例（UBE 起点在 `host_len + offset_delta`）：

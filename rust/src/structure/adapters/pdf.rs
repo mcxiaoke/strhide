@@ -1164,25 +1164,30 @@ mod tests {
         }
     }
 
-    /// Auto must fall back to the lossless EOF overlay when the incremental
-    /// object header would shift the envelope past `MAX_OFFSET_DELTA`, instead
-    /// of selecting a strategy the writer rejects later.
+    /// A 10-digit object number plus a 9-digit `/Length` makes the incremental
+    /// object header 65 bytes, which the old 64-byte limit could not record.
+    /// `MAX_OFFSET_DELTA` is 128 now, so the reachable worst case fits and auto
+    /// must pick the lossless-in-place strategy instead of the EOF overlay.
+    ///
+    /// The template is `46 + digits(N) + digits(L)`; both inputs are `u64`, so
+    /// no parseable PDF can produce a header longer than 86 bytes. Asserting
+    /// that keeps the limit and the template from drifting apart again.
     #[test]
-    fn auto_falls_back_to_eof_when_object_header_exceeds_offset_delta() {
-        // 10-digit object number + 9-digit /Length + the fixed template:
-        // 46 + 10 + 9 = 65 > 64.
+    fn ten_digit_object_numbers_fit_the_recordable_shift() {
         let host = minimal_pdf_with_size(1_000_000_001);
         let mut cursor = Cursor::new(&host);
         assert_eq!(
             PdfAdapter.choose_auto_strategy(&mut cursor, 100_000_000),
-            "eof"
+            "incremental",
+            "65 bytes of shift must be recordable under MAX_OFFSET_DELTA = 128"
         );
 
-        let mut cursor = Cursor::new(&host);
-        assert_eq!(
-            PdfAdapter.choose_auto_strategy(&mut cursor, 1_000),
-            "incremental",
-            "a short /Length keeps the shift within the recordable range"
+        let worst = pdf_obj_header(u64::MAX, u64::MAX);
+        assert!(
+            worst.len() <= crate::structure::envelope::MAX_OFFSET_DELTA as usize,
+            "the longest representable object header is {} bytes, over the {}-byte limit",
+            worst.len(),
+            crate::structure::envelope::MAX_OFFSET_DELTA
         );
     }
 

@@ -111,7 +111,7 @@ payload    = framed_len(n, chunk_size) = n + chunks*20, chunks = ceil(n/chunk_si
 `auto` 由各适配器的 `choose_auto_strategy(reader, exact_ube_size)` 一次性决定；适配器内部可因探测结果改选 `eof`，但引擎**不会**在注入失败后再换策略重试（`rust/src/structure/engine.rs:1242-1246`）。因此：
 
 - PNG：`ube > 0x7FFFFFFF` 才退 `eof`；JPEG：`ube > 64 MiB`、`ube > app_segment_payload_capacity(sos)` 或 SOS 扫描失败退 `eof`。
-- PDF：对象头长度 `> MAX_OFFSET_DELTA(64)` 退 `eof`；这不是容量上限，而是信封头无法记录的位移。
+- PDF：对象头长度 `> MAX_OFFSET_DELTA(128)` 退 `eof`；这不是容量上限，而是信封头无法记录的位移。
 - HEIF：仅当 `ube <= u32::MAX-8` 且 `isobmff_can_item_hidden` 才选 `item_hidden`，否则 `box_uuid`（`heif.rs:57-68`）。
 - PE：优先级 `pe_slack → pe_overlay`（`pe.rs:176-210`）；`pe_codebits` 是显式策略（`-s pe_codebits`），`auto` 不会选它。
 - ZIP：`cd_offset==0`、ZIP64 locator、`patch_limit + ube >= 0xFFFFFFFF`、EOCD 缺失均退 `eof`。
@@ -132,7 +132,7 @@ payload    = framed_len(n, chunk_size) = n + chunks*20, chunks = ceil(n/chunk_si
 | 结构头 / 尾 | `112 B` / `24 B` | `rust/src/structure/envelope.rs:83`、`:89` |
 | `MAX_HINT_LEN` | `1024` | `rust/src/structure/envelope.rs:90` |
 | `MAX_META_LEN` | `256 KiB = 262,144` | `rust/src/structure/envelope.rs:100` |
-| `MAX_OFFSET_DELTA` | `64` | `rust/src/structure/envelope.rs:81` |
+| `MAX_OFFSET_DELTA` | `128` | `rust/src/structure/envelope.rs:74-88` |
 | `CHUNK_OVERHEAD` | `20 B/块` | `rust/src/core/crypto.rs:61-64` |
 | `CHUNK_SIZE` / `MAX_CHUNK_SIZE` | `2 MiB` / `64 MiB` | `rust/src/core/crypto.rs:96`、`:101` |
 | `MAX_VERIFY_PAYLOAD_SIZE` | `1 GiB` | `rust/src/core/crypto.rs:786` |

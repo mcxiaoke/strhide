@@ -76,9 +76,16 @@ pub const FLAG_COMPACT_META: u8 = 0x20;
 ///
 /// The writers need 4 (JPEG APP15 segment header), 8 (PNG chunk header,
 /// ISO-BMFF `meta`/`free` box header), 9 (EBML Void ID + 9-byte VINT) or 24/32
-/// (ISO-BMFF `uuid` box header). 64 leaves room for a future strategy while
-/// keeping the "is this plausibly our header?" gate tight.
-pub const MAX_OFFSET_DELTA: u8 = 64;
+/// (ISO-BMFF `uuid` box header). The one payload-dependent case is PDF's
+/// `incremental` object header, whose length is `46 + digits(N) + digits(L)`
+/// bytes: two 10-digit numbers already reach 66.
+///
+/// 128 keeps the field one byte wide while covering that case with room to
+/// spare. Raising the limit only *widens* what a reader accepts, so a 1.0
+/// reader built against 128 stays compatible with anything an earlier build
+/// wrote; leaving it at 64 would have made this a one-way door for every
+/// later release.
+pub const MAX_OFFSET_DELTA: u8 = 128;
 
 pub const HEADER_SIZE: usize = 112;
 /// Bytes of the header that are known before the envelope is sealed.

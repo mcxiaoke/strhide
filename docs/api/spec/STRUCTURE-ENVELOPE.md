@@ -41,7 +41,7 @@ chunk_count     = max(1, ceil(compressed_plain_len / chunk_size))
 | 8 | 1 | `version` | u8 | 前缀 | 必须为 `0x02` |
 | 9 | 1 | `flags` | u8 | 前缀 | §4 |
 | 10 | 1 | `strategy_id` | u8 | 前缀 | §14 |
-| 11 | 1 | `offset_delta` | u8 | 前缀 | 注入点位移，≤64（§12） |
+| 11 | 1 | `offset_delta` | u8 | 前缀 | 注入点位移，≤128（§12） |
 | 12 | 16 | `salt` | `[u8;16]` | 前缀 | KDF 随机盐，先于解掩码可读 |
 | 28 | 12 | `base_nonce` | `[u8;12]` | 前缀 | 随机基准 nonce |
 | 40 | 8 | `orig_host_size` | u64 LE | 前缀 | 原始载体字节数 |
@@ -69,7 +69,7 @@ chunk_count     = max(1, ceil(compressed_plain_len / chunk_size))
 4. `hint_len + meta_len + (112+24) ≤ ube_total_size`（`:284-291`）。
 5. `strategy_id` 必须存在于 `STRATEGY_REGISTRY`（`:294-302`）；0 与未注册值一律拒绝。
 6. `inject_size == 0`，或 `inject_size ≥ 136` 且 `inject_offset + inject_size` 不溢出（`:308-316`）。
-7. `offset_delta ≤ MAX_OFFSET_DELTA = 64`（`:321-326`，`:81`）。
+7. `offset_delta ≤ MAX_OFFSET_DELTA = 128`（`:321-326`，`:81`）。
 8. `patch_offset == 0` 或 `patch_offset ≥ 4`（4 字节字段无法放在 1..=3）（`:329-334`）。
 9. `patch_offset != 0` 时 `patch_offset + 4 ≤ host_len`（物理载体长度，`:338-346`）。
 
@@ -193,16 +193,17 @@ AAD = header[0..80] | u32le(meta_len) | u32le(hint_len) | hint(hint_len)
 - 读侧识别顺序（`envelope.rs:559-662`）：
   1. 有密码且密码派生的 8B 头魔数匹配 → 用密码掩码还原，要求 `version=0x02` 且 `FLAG_STEALTH` 置位（`:580-607`）。
   2. 裸 `FLAG_ENCRYPTED` 信封：`version=0x02`、`FLAG_ENCRYPTED` 置位且通过完整裸头可信门槛（`:615-620`）。
-  3. `Profile.secret()` 去掩码：要求 `FLAG_ENCRYPTED` 为 0、`strategy_id ∈ 1..=MAX_KNOWN_STRATEGY_ID`、`offset_delta ≤64`；**本层不校验 version**（由上层 `validate_against` 报“不支持版本”）（`:622-648`）。
-  4. 裸头可信门槛：`version=0x02`、`flags & !0x3F == 0`、`strategy_id ∈ 1..=13`、`offset_delta ≤64`、`meta_len ≤256 KiB`、`hint_len ≤1024`（`:675-689`）。
+  3. `Profile.secret()` 去掩码：要求 `FLAG_ENCRYPTED` 为 0、`strategy_id ∈ 1..=MAX_KNOWN_STRATEGY_ID`、`offset_delta ≤128`；**本层不校验 version**（由上层 `validate_against` 报“不支持版本”）（`:622-648`）。
+  4. 裸头可信门槛：`version=0x02`、`flags & !0x3F == 0`、`strategy_id ∈ 1..=13`、`offset_delta ≤128`、`meta_len ≤256 KiB`、`hint_len ≤1024`（`:675-689`）。
   全部失败返回 `CorruptedData`；`inspect` 将其视为“无数据”以维持私有方言不可见性（`engine.rs:2630-2656`）。
 
 ## 12. `offset_delta` 与注入后坐标
 
-- 语义：信封首字节位于 `inject_offset + offset_delta`。策略在信封前写的容器头使位移非零（PNG 8B、JPEG APP15 4B、ISO-BMFF box 头 8B 或 uuid 头 24/32B、EBML Void+VINT 最多 9B），上限 64（`envelope.rs:74-81`；`engine.rs:1267-1278`）。
+- 语义：信封首字节位于 `inject_offset + offset_delta`。策略在信封前写的容器头使位移非零（PNG 8B、JPEG APP15 4B、ISO-BMFF box 头 8B 或 uuid 头 24/32B、EBML Void+VINT 最多 9B；PDF `incremental` 的对象头为 `46 + digits(N) + digits(L)`，两个 10 位数即达 66B），上限 128（`envelope.rs:74-88`；`engine.rs:1267-1278`）。
+- 上限只影响**读取接受面**：放宽不会让已写出的载体失效，故 1.0 冻结在 128 不封死后续版本（64 会让 10 位 PDF 对象号触发写侧硬错误）。
 - 写入时机：在封装 header **之前**由适配器求得，因此位于 AAD（offset 11 < 80），可被认证；注入后只把四个坐标写回（`engine.rs:1397-1412`）。
 - 注入后坐标的物理约束（连续策略，`engine.rs:2828-2902`）：
-  1. `inject_offset + offset_delta == trailer.ube_offset`；其中 `chunk`/`eof` 允许内容域重写导致整体平移，按平移量修正 `inject_offset`（`engine.rs:2860-2874,2268-2296`），其余策略不一致即损坏。
+  1. `inject_offset + offset_delta == trailer.ube_offset`；其中 `chunk`/`eof`/`ebml_void` 允许整体平移（内容域重编码会改变信封前缀长度；MKV 的 `locate` 本就从尾部反推 Void 块，以容忍前置 Segment 尺寸变化），按平移量修正 `inject_offset`（`engine.rs:2860-2874,2268-2296`；`relocatable_strategy`），其余策略不一致即损坏。
   2. `ube_total_size ≤ inject_size`（容器头只会让注入区域更大）。
   3. `inject_offset + inject_size ≤ 文件长度`；平移时按 `ube_offset + (inject_size - offset_delta) ≤ 文件长度` 计算（`:2881-2900`）。
 - 另有形状约束：`inject_size == 0` 或 ≥136；`patch_offset ∈ {0} ∪ [4, …]` 且 `patch_offset+4 ≤ host_len`（§3.2）。
@@ -243,7 +244,7 @@ AAD = header[0..80] | u32le(meta_len) | u32le(hint_len) | hint(hint_len)
 | 7 | pe_overlay | — | — |
 
 - `MAX_KNOWN_STRATEGY_ID = MAX_STRATEGY_ID = 13`，由注册表计算而非手写（`registry.rs:200-216`；`envelope.rs:45-52`）；新增策略必须同步注册表，否则新载体会被识别门槛拒绝。
-- “这像不像我们的信封”至少要求：`version=0x02`、`strategy_id` 已注册（1..=13）、`offset_delta ≤64`、`hint_len ≤1024`、`meta_len ≤256 KiB`（§3.2、§11）。`validate_against` 失败在 `inspect` 中按“无数据”处理（`engine.rs:2644-2656`）。
+- “这像不像我们的信封”至少要求：`version=0x02`、`strategy_id` 已注册（1..=13）、`offset_delta ≤128`、`hint_len ≤1024`、`meta_len ≤256 KiB`（§3.2、§11）。`validate_against` 失败在 `inspect` 中按“无数据”处理（`engine.rs:2644-2656`）。
 - 私有方言（自定义魔数/默认密钥/stealth 域）对官方读者表现为无信封，不可互读（`engine.rs:101-116`；`params.rs:112-121`）。
 
 ## 15. 实现自检清单

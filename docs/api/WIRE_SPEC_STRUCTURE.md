@@ -108,7 +108,7 @@ ube_total_size = HEADER_SIZE(112)
 | 8 | 1 | `version` | `u8` | 信封版本，当前 `0x02` |
 | 9 | 1 | `flags` | `u8` | 标志位（§4） |
 | 10 | 1 | `strategy_id` | `u8` | 策略 ID（§7 适配器表） |
-| 11 | 1 | `offset_delta` | `u8` | 注入点到信封首字节的位移（§3.3），≤ `MAX_OFFSET_DELTA = 64` |
+| 11 | 1 | `offset_delta` | `u8` | 注入点到信封首字节的位移（§3.3），≤ `MAX_OFFSET_DELTA = 128` |
 | 12 | 16 | `salt` | `[u8; 16]` | KDF 随机盐 |
 | 28 | 12 | `base_nonce` | `[u8; 12]` | 随机基准 nonce |
 | 40 | 8 | `orig_host_size` | `u64` | 原始载体尺寸 |
@@ -136,7 +136,7 @@ ube_total_size = HEADER_SIZE(112)
 - `hint_len` 不得超过 `MAX_HINT_LEN = 1024`；
 - `meta_len` 不得超过 `MAX_META_LEN = 256 KiB`（元数据块最大是"文件名 + 定长尾巴"，这个上限让读取侧不必按不可信字段申请大缓冲）；
 - `hint_len + meta_len + (112 + 24)` 不得超过 `ube_total_size`；
-- `offset_delta` 不得超过 `MAX_OFFSET_DELTA = 64`；
+- `offset_delta` 不得超过 `MAX_OFFSET_DELTA = 128`；
 - `patch_offset` 为 0（无补丁）或 ≥ 4（补丁覆盖一个 4 字节字段）。
 
 ### 3.3 `offset_delta`（注入点位移）
@@ -414,7 +414,7 @@ trailer_crc32(stealth) = raw_crc XOR mask
 `EnvelopeHeader::unpack_with_profile` 按序尝试：
 
 1. **密码 + stealth**：若密码派生的 header 魔数匹配（先认证密码），用密码去掩码，要求 `version = 0x02` 且 `FLAG_STEALTH` 置位；
-2. **Profile 默认密钥去掩码**：要求 `version = 0x02`、无 `FLAG_ENCRYPTED`、`strategy_id ≤ MAX_KNOWN_STRATEGY_ID`（当前 13）、`offset_delta ≤ 64`；
+2. **Profile 默认密钥去掩码**：要求 `version = 0x02`、无 `FLAG_ENCRYPTED`、`strategy_id ≤ MAX_KNOWN_STRATEGY_ID`（当前 13）、`offset_delta ≤ 128`；
 3. **裸 header**：直接解析（`FLAG_ENCRYPTED` 信封不掩码，理由见 §11.3）。
 
 ---

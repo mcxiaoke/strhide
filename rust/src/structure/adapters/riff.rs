@@ -497,6 +497,26 @@ fn riff_chunk_headroom(reader: &mut dyn SeekRead) -> Option<u64> {
     )
 }
 
+/// Apply the RIFF 4 GiB headroom to a `riff_chunk` capacity entry.
+///
+/// `capacity_bytes` is envelope headroom, so the real floor is the smallest
+/// envelope that can ever be written (a zero-byte payload). A carrier with less
+/// room than that cannot take anything: claiming `available = true` with a
+/// sub-envelope capacity promised a write `riff_inject` must refuse.
+fn apply_riff_headroom(chunk: &mut StrategyCapacity, headroom: u64) {
+    let min_envelope = crate::structure::envelope::min_ube_len(0);
+    if headroom < min_envelope {
+        chunk.available = false;
+        chunk.capacity_bytes = None;
+        chunk.note = Some(format!(
+            "only {headroom} B of RIFF headroom, below the {min_envelope} B minimum \
+             envelope; auto falls back to eof"
+        ));
+    } else {
+        chunk.capacity_bytes = Some(headroom);
+    }
+}
+
 pub fn riff_strategy_capacities(
     format_name: &str,
     reader: Option<&mut dyn SeekRead>,
@@ -524,14 +544,7 @@ pub fn riff_strategy_capacities(
         // The 4 GiB headroom *is* payload-dependent: report the exact value so a
         // near-limit carrier cannot advertise more than `riff_inject` accepts.
         if let Some(headroom) = riff_chunk_headroom(r) {
-            chunk.capacity_bytes = Some(headroom);
-            if headroom == 0 {
-                chunk.available = false;
-                chunk.note = Some(
-                    "the declared RIFF size is already at the 4 GiB ceiling; auto falls back to eof"
-                        .into(),
-                );
-            }
+            apply_riff_headroom(&mut chunk, headroom);
         }
         if let Some(p) = start {
             let _ = r.seek(SeekFrom::Start(p));
@@ -547,4 +560,55 @@ pub fn riff_strategy_capacities(
             note: Some(format!("Appended after {format_name} EOF (EOF overlay)")),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunk_capacity() -> StrategyCapacity {
+        StrategyCapacity {
+            strategy: "riff_chunk".into(),
+            capacity_bytes: None,
+            available: true,
+            limit: String::new(),
+            note: None,
+        }
+    }
+
+    /// A carrier within 4 GiB minus a few hundred bytes advertises `available`
+    /// while it cannot hold even the smallest envelope. The write then fails
+    /// after `inspect` said yes, which is the one answer a capacity report must
+    /// never give.
+    #[test]
+    fn sub_envelope_headroom_is_reported_unavailable() {
+        let min_envelope = crate::structure::envelope::min_ube_len(0);
+
+        let mut below = chunk_capacity();
+        apply_riff_headroom(&mut below, min_envelope - 1);
+        assert!(
+            !below.available,
+            "less room than one envelope must not be advertised as writable"
+        );
+        assert_eq!(below.capacity_bytes, None);
+        assert!(
+            below.note.as_deref().unwrap_or("").contains("minimum"),
+            "the note must explain why: {:?}",
+            below.note
+        );
+
+        let mut empty = chunk_capacity();
+        apply_riff_headroom(&mut empty, 0);
+        assert!(!empty.available, "the 4 GiB ceiling itself is unusable");
+
+        let mut roomy = chunk_capacity();
+        apply_riff_headroom(&mut roomy, 4096);
+        assert!(roomy.available, "a normal carrier stays available");
+        assert_eq!(roomy.capacity_bytes, Some(4096));
+
+        let mut exactly = chunk_capacity();
+        apply_riff_headroom(&mut exactly, min_envelope);
+        assert!(exactly.available, "exactly one envelope still fits");
+        assert_eq!(exactly.capacity_bytes, Some(min_envelope));
+    }
 }
