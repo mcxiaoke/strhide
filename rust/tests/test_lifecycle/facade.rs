@@ -192,12 +192,10 @@ fn content_file_embed_and_extract_roundtrip() {
     let engine = StrHide::new();
     let options = EmbedOptions::default();
 
-    let target_cfg = strhide::commit::FileTarget {
-        output_path: None,
-        backup: false,
-        preserve_time: true,
-        overwrite: true,
-    };
+    let target_cfg = strhide::commit::FileTarget::new()
+        .with_backup(false)
+        .with_preserve_time(true)
+        .with_overwrite(true);
     engine
         .stego()
         .embed_file(
@@ -227,12 +225,11 @@ fn content_file_embed_to_target_leaves_original_untouched() {
 
     let engine = StrHide::new();
     let options = EmbedOptions::default();
-    let target_cfg = strhide::commit::FileTarget {
-        output_path: Some(&target),
-        backup: false,
-        preserve_time: true,
-        overwrite: true,
-    };
+    let target_cfg = strhide::commit::FileTarget::new()
+        .with_output_path_option(Some(&target))
+        .with_backup(false)
+        .with_preserve_time(true)
+        .with_overwrite(true);
     engine
         .stego()
         .embed_file(
@@ -257,12 +254,11 @@ fn explicit_same_path_output_is_an_in_place_embed() {
     std::fs::write(&carrier, JPG).expect("seed carrier");
 
     let engine = StrHide::new();
-    let target_cfg = strhide::commit::FileTarget {
-        output_path: Some(&carrier),
-        backup: false,
-        preserve_time: true,
-        overwrite: false,
-    };
+    let target_cfg = strhide::commit::FileTarget::new()
+        .with_output_path_option(Some(&carrier))
+        .with_backup(false)
+        .with_preserve_time(true)
+        .with_overwrite(false);
     engine
         .stego()
         .embed_file(
@@ -291,12 +287,10 @@ fn extract_file_refuses_to_write_over_its_carrier() {
     std::fs::write(&carrier, JPG).expect("seed carrier");
 
     let engine = StrHide::new();
-    let target_cfg = strhide::commit::FileTarget {
-        output_path: None,
-        backup: false,
-        preserve_time: true,
-        overwrite: true,
-    };
+    let target_cfg = strhide::commit::FileTarget::new()
+        .with_backup(false)
+        .with_preserve_time(true)
+        .with_overwrite(true);
     engine
         .stego()
         .embed_file(
@@ -885,12 +879,10 @@ fn facade_embed_stats_populated() {
     std::fs::write(&carrier, JPG).expect("write carrier");
 
     let options = EmbedOptions::default().with_password("pw");
-    let target = strhide::core::commit::FileTarget {
-        output_path: None,
-        backup: false,
-        preserve_time: false,
-        overwrite: true,
-    };
+    let target = strhide::core::commit::FileTarget::new()
+        .with_backup(false)
+        .with_preserve_time(false)
+        .with_overwrite(true);
 
     let res = engine
         .stego()

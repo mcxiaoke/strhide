@@ -32,6 +32,7 @@ pub enum MemoryProfile {
 }
 
 /// The content-domain engines, as advertised to users and dispatch.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StegoKind {

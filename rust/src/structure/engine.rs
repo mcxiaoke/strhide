@@ -60,6 +60,7 @@ use crate::structure::rejection::run_rejection_checks;
 /// This is the metadata that survives `read`: the original filename, the
 /// uncompressed payload size, its SHA-256, and a write timestamp. On extract,
 /// `raw_sha256` is re-computed over the decrypted payload and must match.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CarrierMetadata {
     pub filename: String,
@@ -269,6 +270,47 @@ fn hex_to_digest32(hex: &str) -> Option<[u8; 32]> {
 }
 
 impl CarrierMetadata {
+    /// Build a metadata record.
+    ///
+    /// All four fields are required: the digest is re-checked on read and the
+    /// timestamp is part of the sealed metadata block, so there is no sensible
+    /// partial default.
+    pub fn new(
+        filename: impl Into<String>,
+        raw_size: u64,
+        raw_sha256: impl Into<String>,
+        created_at: u64,
+    ) -> Self {
+        Self {
+            filename: filename.into(),
+            raw_size,
+            raw_sha256: raw_sha256.into(),
+            created_at,
+        }
+    }
+
+    /// Replace the recorded filename.
+    pub fn with_filename(mut self, filename: impl Into<String>) -> Self {
+        self.filename = filename.into();
+        self
+    }
+
+    /// Replace the recorded size and digest together.
+    ///
+    /// They travel as a pair: a size that does not match the digest is exactly
+    /// the corruption `read` refuses.
+    pub fn with_content(mut self, raw_size: u64, raw_sha256: impl Into<String>) -> Self {
+        self.raw_size = raw_size;
+        self.raw_sha256 = raw_sha256.into();
+        self
+    }
+
+    /// Replace the recorded write timestamp (seconds since the Unix epoch).
+    pub fn with_created_at(mut self, created_at: u64) -> Self {
+        self.created_at = created_at;
+        self
+    }
+
     /// Compact encoding, or `None` when this metadata cannot be represented
     /// (over-long filename, malformed digest). This is the only metadata
     /// layout in the wire format; a `None` is a writer-side error, not a

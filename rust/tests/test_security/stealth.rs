@@ -163,12 +163,12 @@ fn test_pre_v2_stealth_unmasked_envelope_is_rejected() {
     let (payload_key, meta_key) = derive_keys(password, &salt).unwrap();
 
     let flags = FLAG_ENCRYPTED | FLAG_STEALTH;
-    let meta_obj = CarrierMetadata {
-        filename: String::new(),
-        raw_size: 14,
-        raw_sha256: "57c686be41c66320bb8f451068c4176d51c708594aa82f9ec3e324194fae11e6".into(),
-        created_at: 1773719840,
-    };
+    let meta_obj = CarrierMetadata::new(
+        String::new(),
+        14,
+        "57c686be41c66320bb8f451068c4176d51c708594aa82f9ec3e324194fae11e6",
+        1773719840,
+    );
     let meta_raw = serde_json::to_vec(&meta_obj).unwrap();
 
     let mut header = EnvelopeHeader {
@@ -351,15 +351,15 @@ fn test_pre_v2_plaintext_metadata_envelope_is_rejected() {
     let host_size = raw_png.len() as u64;
 
     let payload = b"Legacy unencrypted plaintext payload 9876543210";
-    let meta_obj = CarrierMetadata {
-        filename: "legacy.txt".into(),
-        raw_size: payload.len() as u64,
-        raw_sha256: strhide::crypto::compute_sha256(payload)
+    let meta_obj = CarrierMetadata::new(
+        "legacy.txt",
+        payload.len() as u64,
+        strhide::crypto::compute_sha256(payload)
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<String>(),
-        created_at: 1770000000,
-    };
+        1770000000,
+    );
     let meta_raw = meta_obj.encode_compact().unwrap();
 
     let ube_total_size = HEADER_SIZE as u64 + meta_raw.len() as u64 + payload.len() as u64 + 24;

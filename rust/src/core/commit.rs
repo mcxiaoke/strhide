@@ -14,6 +14,7 @@ use crate::errors::StrHideError;
 
 /// Target file commit configuration shared across structure and content domains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileTarget<'a> {
     /// None = overwrite carrier in place; Some(path) = write to destination path.
     pub output_path: Option<&'a Path>,
@@ -27,12 +28,49 @@ pub struct FileTarget<'a> {
 
 impl Default for FileTarget<'_> {
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> FileTarget<'a> {
+    /// In-place commit that keeps a `.bak` copy and preserves timestamps.
+    pub const fn new() -> Self {
         Self {
             output_path: None,
             backup: true,
             preserve_time: true,
             overwrite: false,
         }
+    }
+
+    /// Write to `path` instead of overwriting the carrier in place.
+    pub const fn with_output_path(mut self, path: &'a Path) -> Self {
+        self.output_path = Some(path);
+        self
+    }
+
+    /// Set the destination from an optional value (`None` means in place).
+    pub const fn with_output_path_option(mut self, path: Option<&'a Path>) -> Self {
+        self.output_path = path;
+        self
+    }
+
+    /// Keep or drop the `<carrier>.bak` copy on in-place commits.
+    pub const fn with_backup(mut self, backup: bool) -> Self {
+        self.backup = backup;
+        self
+    }
+
+    /// Clone or ignore the original carrier's atime/mtime.
+    pub const fn with_preserve_time(mut self, preserve_time: bool) -> Self {
+        self.preserve_time = preserve_time;
+        self
+    }
+
+    /// Allow or refuse overwriting an existing destination file.
+    pub const fn with_overwrite(mut self, overwrite: bool) -> Self {
+        self.overwrite = overwrite;
+        self
     }
 }
 

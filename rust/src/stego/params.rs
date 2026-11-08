@@ -24,6 +24,7 @@ use crate::errors::StrHideError;
 /// The choice is **not** self-describing: it is recorded in two spare bits of
 /// the envelope header (see `png::engine`), so extraction never needs to be
 /// told which one was used.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StegoCodec {
@@ -76,6 +77,7 @@ impl StegoCodec {
 pub use crate::params::{SafetyLevel, VideoBudget};
 
 /// Safety policy enforcement mode for embedding operations.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SafetyEnforcement {

@@ -209,12 +209,12 @@ fn path_traversal_sanitized() {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    let evil_meta = strhide::structure::CarrierMetadata {
-        filename: "../EVIL.txt".into(),
-        raw_size: b"poc-data".len() as u64,
-        raw_sha256: sha_hex,
-        created_at: 1_700_000_000,
-    };
+    let evil_meta = strhide::structure::CarrierMetadata::new(
+        "../EVIL.txt",
+        b"poc-data".len() as u64,
+        sha_hex,
+        1_700_000_000,
+    );
     let evil_compact = evil_meta.encode_compact().unwrap();
     let hint_start = offset as usize + strhide::structure::envelope::HEADER_SIZE;
     let hint = &data[hint_start..hint_start + header.hint_len as usize];

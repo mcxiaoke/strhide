@@ -76,6 +76,7 @@ pub const SNIFF_PREFIX_BYTES: usize = 64 * 1024;
 /// This is the classification used by the capability table
 /// ([`crate::formats::capability`]), the CLI `list` output and both domains'
 /// dispatch.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileFormat {
     Png,

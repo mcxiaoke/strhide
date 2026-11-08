@@ -622,12 +622,10 @@ fn embed_capacity_report_matches_probe_for_annex_b_and_heic() {
     let probe = probe_carrier_capacity_with_dialect(&orig, &ProbeOptions::default(), &dialect)
         .expect("probe");
 
-    let target = FileTarget {
-        output_path: None,
-        backup: false,
-        preserve_time: false,
-        overwrite: true,
-    };
+    let target = FileTarget::new()
+        .with_backup(false)
+        .with_preserve_time(false)
+        .with_overwrite(true);
     let res = embed_carrier_file(
         &carrier,
         &Payload::bytes(b"n-01"),

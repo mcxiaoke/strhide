@@ -988,12 +988,10 @@ fn content_io_cell(
     .0;
     let embed_opts = embed_options((scenario.tuning)(), level);
     let extract_opts = ExtractOptions::default().with_password(PASSWORD);
-    let target = FileTarget {
-        output_path: Some(&out),
-        backup: false,
-        overwrite: true,
-        ..Default::default()
-    };
+    let target = FileTarget::new()
+        .with_output_path(&out)
+        .with_backup(false)
+        .with_overwrite(true);
 
     let mut write_ms = Vec::with_capacity(reps);
     let mut read_ms = Vec::with_capacity(reps);

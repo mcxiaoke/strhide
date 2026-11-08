@@ -127,6 +127,7 @@ pub enum Credential<'a> {
 }
 
 /// Wire ids for the content-domain AEAD suite table (append-only).
+#[non_exhaustive]
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CipherSuiteId {

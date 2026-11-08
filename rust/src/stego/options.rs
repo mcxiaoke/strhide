@@ -1141,6 +1141,7 @@ impl<'a> ExtractOptions<'a> {
 /// always tries Scheme C first.
 #[cfg(feature = "content-heif-bridge")]
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct BridgeOptions<'a> {
     /// Private-dialect wire-format identities and no-password secret.
     pub dialect: &'a StegoProfile,
@@ -1275,6 +1276,24 @@ impl<'a> BridgeOptions<'a> {
         self
     }
 
+    /// Replace the capacity safety policy.
+    pub fn with_safety(mut self, safety: SafetyPolicy) -> Self {
+        self.safety = safety;
+        self
+    }
+
+    /// Replace the salt/nonce source (unused on the read path).
+    pub fn with_freshness(mut self, freshness: Freshness) -> Self {
+        self.freshness = freshness;
+        self
+    }
+
+    /// Omit the original filename from the micro-header.
+    pub fn with_no_filename(mut self, no_filename: bool) -> Self {
+        self.no_filename = no_filename;
+        self
+    }
+
     /// Credential actually used (see [`EmbedOptions::secret`]).
     pub fn resolved_secret<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
     where
@@ -1357,6 +1376,7 @@ impl EmbedOutput {
 }
 
 /// Advisory warnings produced during steganographic embedding.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StegoWarning {
@@ -1513,6 +1533,7 @@ impl<'a> InspectOptions<'a> {
 }
 
 /// Status of one verification tier.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VerifyLevel {
     pub level: u8,

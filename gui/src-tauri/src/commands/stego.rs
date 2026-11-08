@@ -174,12 +174,10 @@ pub async fn embed_stego_file_impl(
             }
         };
 
-        let target = FileTarget {
-            output_path: req.output_path.as_deref(),
-            backup: req.backup,
-            preserve_time: true,
-            overwrite: req.overwrite,
-        };
+        let target = FileTarget::new()
+            .with_output_path_option(req.output_path.as_deref())
+            .with_backup(req.backup)
+            .with_overwrite(req.overwrite);
 
         let enforcement = if req.enforce_safety {
             SafetyEnforcement::Enforced

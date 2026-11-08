@@ -91,6 +91,7 @@ const CALIBRATION_FLAG_RATE: f64 = 0.05;
 const CALIBRATION_STRONG_RATE: f64 = 0.15;
 
 /// How strongly a single finding points at embedded data.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -113,6 +114,7 @@ pub struct Finding {
 }
 
 /// Quantitative measurement and status for one individual detector.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectorMetric {
     /// Detector id (e.g. "dct:calibration", "dct:chi2", "spatial:ws", "spatial:rs", "jpeg:structure")

@@ -244,6 +244,7 @@ impl LocalParams {
 }
 
 /// Capacity safety tier controlling the maximum recommended bits per pixel (bpp).
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SafetyLevel {

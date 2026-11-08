@@ -293,12 +293,10 @@ fn run_single_coexistence_case(
     match job.order {
         InjectionOrder::ContentThenStructure => {
             // Step 1: Content domain embed (in-place)
-            let embed_target = FileTarget {
-                output_path: None,
-                backup: false,
-                preserve_time: false,
-                overwrite: true,
-            };
+            let embed_target = FileTarget::new()
+                .with_backup(false)
+                .with_preserve_time(false)
+                .with_overwrite(true);
             let embed_opts = EmbedOptions::default()
                 .with_password(&pass_content)
                 .with_safety_policy(SafetyPolicy::default().with_level(SafetyLevel::Balanced));
@@ -335,12 +333,10 @@ fn run_single_coexistence_case(
                 .map_err(|e| format!("[{}] Step 1 write failed: {e}", job.order.label()))?;
 
             // Step 2: Content domain embed (in-place)
-            let embed_target = FileTarget {
-                output_path: None,
-                backup: false,
-                preserve_time: false,
-                overwrite: true,
-            };
+            let embed_target = FileTarget::new()
+                .with_backup(false)
+                .with_preserve_time(false)
+                .with_overwrite(true);
             let embed_opts = EmbedOptions::default()
                 .with_password(&pass_content)
                 .with_safety_policy(SafetyPolicy::default().with_level(SafetyLevel::Balanced));
