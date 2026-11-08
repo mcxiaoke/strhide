@@ -56,3 +56,31 @@ mod stego_credentials;
 mod stego_jpeg_v4;
 #[path = "test_lifecycle/unicode_and_binary.rs"]
 mod unicode_and_binary;
+
+// Shared-fixture self-checks run exactly once for the whole suite. They used to
+// live in `common/mod.rs`, which is `#[path]`-included by seven targets, so each
+// check executed seven times; CI runs all targets in one command, so a single
+// execution is enough.
+#[test]
+fn make_png_fixture_is_decodable_as_1x1() {
+    let png = common::make_png();
+    let image = strhide::stego::png::decode_png(&png).expect("fixture must decode");
+    assert_eq!((image.width, image.height), (1, 1));
+    assert_eq!(image.channels, 3);
+    assert_eq!(image.pixels, vec![255, 255, 255]);
+}
+
+#[test]
+fn verify_test_threads_limit() {
+    if let Ok(threads) = std::env::var("RUST_TEST_THREADS") {
+        assert_eq!(threads, "8", "RUST_TEST_THREADS should be set to 8");
+    }
+    if let Ok(rayon_threads) = std::env::var("RAYON_NUM_THREADS") {
+        assert_eq!(rayon_threads, "8", "RAYON_NUM_THREADS should be set to 8");
+    }
+    assert!(
+        rayon::current_num_threads() <= 8,
+        "Rayon thread pool exceeds 8: {}",
+        rayon::current_num_threads()
+    );
+}

@@ -48,6 +48,10 @@
   - W13 恒真 `!err.to_string().is_empty()` 改为具体失败文案；实测容量不足报 `UnsupportedFormat("insufficient .text steganographic capacity ...")`，与错误模型注释的 `PayloadTooLarge` 不一致，属生产语义，本批不改。
   - O03/F04 改用仓库内 `tests/assets/small.mp4`（实测 1920x1080 / 50 fps / 1000 ms），缺 fixture 即失败；O01 的伪造头改用官方常量；O04 的运行命令注释全部指向 `--test local_tests` / `--test heavy_tests`。
   - 套件总数 1093、默认执行 1058、`#[ignore]` 35 均不变；门禁全绿，详见 `docs/CHANGES-20261108.md`。
+- **批次 6（2026-11-08）已完成**：R16 两个共享自检（`make_png_fixture_is_decodable_as_1x1`、`verify_test_threads_limit`）从 `common/mod.rs` 移到 `test_lifecycle.rs` 顶层。
+  - CI（`.github/workflows/ci.yml:54`）用一条 `cargo test --all-features --all-targets` 跑全部目标，不存在“单跑某目标”的流水线，因此每套件执行一次即可。
+  - 计数净减 11：`test_cli` 137→135、`test_media` 14→12、`test_pe` 40→38、`test_regression` 117→115、`test_security` 24→22、`local_tests` 20→19；`test_lifecycle` 移出 2/移入 2 持平 156；`heavy_tests` 未引用 `common` 不变；`lib` 571 不变。
+  - 断言与 fixture 逐字保留，覆盖未下降；`--all-features --all-targets` 与默认全量、两种 clippy、fmt、import_lint 全绿。
 - **O02 前提修订**：实测裸写掩码字节后解出的逻辑值分别为 `46400133` 与 `2066267854`，**确实会命中** `MAX_META_LEN` / `MAX_HINT_LEN` 上限错误；但取值由随机盐派生的掩码决定，属于概率性命中。因此未按原建议删除，改为逻辑重打包并断言具体上限文案，保留读路径集成覆盖。
 
 ## 2. 全景表
@@ -95,7 +99,7 @@
 | R13 | [hevc_stego.rs:469](file:///c:/Home/Projects/strhide/rust/tests/test_media/hevc_stego.rs#L469) `test_hevc_embed_capacity_report_matches_probe` vs [548](file:///c:/Home/Projects/strhide/rust/tests/test_media/hevc_stego.rs#L548) `file_level_patch_capacity_matches_the_unified_probe` | 都验证 embed 报告容量与 probe 一致 | 548 是文件级封装，覆盖面更大；469 只差一层 API | **合并到 548**，保留文件级断言 → **已合并（批次 3）**：文件级断言扩到 5 个字段，HEIC 容器一致性断言并入同一用例 |
 | R14 | [codebits.rs:332](file:///c:/Home/Projects/strhide/rust/tests/test_pe/codebits.rs#L332) `double_write_refused` | 与 [slack.rs:571](file:///c:/Home/Projects/strhide/rust/tests/test_pe/slack.rs#L571) 同名用例、matrix 的重复写入检查同结论 | slack 版本断言具体错误消息；codebits 版本只断言失败 | **删除 codebits 版本** → **已删除（批次 2）** |
 | R15 | [codebits.rs:704-705](file:///c:/Home/Projects/strhide/rust/tests/test_pe/codebits.rs#L704-L705) | 同一用例内对同一 `available` 连写两条重复断言 | 无 | 折叠为一条（用例保留）→ **已折叠（批次 2）** |
-| R16 | [common/mod.rs:425](file:///c:/Home/Projects/strhide/rust/tests/common/mod.rs#L425) `verify_test_threads_limit` + [79](file:///c:/Home/Projects/strhide/rust/tests/common/mod.rs#L79) `make_png_fixture_is_decodable_as_1x1` | `common/mod.rs` 被 7 个目标 `#[path]` 引入，两项各执行 7 次 | 线程上限检查是环境属性，与具体目标无关；fixture 自检只需一处 | **上移到 CI preflight 或只保留在 `test_lifecycle`**；若 CI 会单跑各目标则保留并在报告中注明“有意重复”。**批次 2 暂缓（涉及跨目标结构）** |
+| R16 | [common/mod.rs:425](file:///c:/Home/Projects/strhide/rust/tests/common/mod.rs#L425) `verify_test_threads_limit` + [79](file:///c:/Home/Projects/strhide/rust/tests/common/mod.rs#L79) `make_png_fixture_is_decodable_as_1x1` | `common/mod.rs` 被 7 个目标 `#[path]` 引入，两项各执行 7 次 | 线程上限检查是环境属性，与具体目标无关；fixture 自检只需一处 | **上移到 CI preflight 或只保留在 `test_lifecycle`**；若 CI 会单跑各目标则保留并在报告中注明“有意重复”。**已修复（批次 6）**：CI 一次命令跑全部目标，故两个自检移到 `test_lifecycle` 顶层，每套件执行一次，净减 11 |
 | R17 | [test_security/rejection.rs:91](file:///c:/Home/Projects/strhide/rust/tests/test_security/rejection.rs#L91) `test_jar_signature_rejection` | 与 [test_cli/p2.rs:266](file:///c:/Home/Projects/strhide/rust/tests/test_cli/p2.rs#L266) `signed_zip_renamed_to_zip_is_rejected` + [p2.rs:296](file:///c:/Home/Projects/strhide/rust/tests/test_cli/p2.rs#L296) `clean_zip_is_still_accepted` 同覆盖“JAR 签名守卫与扩展名解耦” | p2 版本走完整 `write_carrier` 路径，断言 `Rejection` 变体与 `digital signature`/`META-INF` 文案，clean 版本断言写入+读取往返；均强于直接调用 `check_jar_signature` | **已删除（批次 2）** |
 
 ### 3.2 弱断言（W）
@@ -170,9 +174,9 @@
 
 ## 4. 重组方案（按 crate / 模块）
 
-> 计数取自 `--list`，包含 `common/mod.rs` 在 7 个目标中的重复项。下表的“去重后”方案把 `common` 的两项辅助测试上移/只保留一处；若暂不动 `common`，总数取括号内的值。
-> **批次 2、3 已完成（见 §1.1）**：当前为 `lib` 571、`test_cli` 137、`test_lifecycle` 156、`test_media` 14、`test_pe` 40、`test_regression` 117、`test_security` 24。下表“现状/预计”保留原计划值，其余动作按批次 4+ 执行。
-> **批次 4、5 已完成（见 §1.1）**：断言/依赖修复不改变用例数，上表计数不变；批次 6 仅剩 R16（`common/mod.rs` 跨目标重复）。
+> 计数取自 `--list`。下表“现状/预计”是**批次开始前的快照**，其中包含 `common/mod.rs` 两项辅助测试在多个目标中的重复；批次 6 已把这两项收敛到 `test_lifecycle` 各执行一次。
+> **批次 2、3 已完成（见 §1.1）**：当前为 `lib` 571、`test_cli` 135、`test_lifecycle` 156、`test_media` 12、`test_pe` 38、`test_regression` 115、`test_security` 22、`local_tests` 19、`heavy_tests` 5（批次 6 又净减 11）。下表“现状/预计”保留原计划值。
+> **批次 4、5、6 已完成（见 §1.1）**：批次 4/5 不改变用例数；批次 6 完成 R16，两个共享自检只在 `test_lifecycle` 执行一次。
 
 | 目标 | 现状 | 删除 | 合并 | 改断言/修 fixture | 预计 | 预计耗时变化 |
 |---|---|---|---|---|---|---|

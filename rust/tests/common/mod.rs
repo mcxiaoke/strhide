@@ -38,7 +38,8 @@ pub fn scratch(name: &str) -> PathBuf {
 /// 16,777,216 — and raw-deflate IDAT. The two errors cancelled out: no decoder
 /// could ever reach the pixel data, so the broken dimensions were never
 /// exposed. A fixture that cannot be decoded by the code under test proves
-/// nothing, so this one asserts itself.
+/// nothing, so `test_lifecycle` decodes it once (see
+/// `make_png_fixture_is_decodable_as_1x1`).
 pub fn make_png() -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
@@ -67,21 +68,6 @@ pub fn make_png() -> Vec<u8> {
 
     out.extend_from_slice(b"\x00\x00\x00\x00IEND\xaeB`\x82");
     out
-}
-
-/// The `make_png` fixture must be decodable by the code under test, with the
-/// geometry it claims.
-///
-/// `decode_png` lives in the stego module, so the assertion is an integration
-/// test rather than a unit test next to the fixture: a fixture that silently
-/// stopped decoding would let every carrier test pass against garbage.
-#[test]
-fn make_png_fixture_is_decodable_as_1x1() {
-    let png = make_png();
-    let image = strhide::stego::png::decode_png(&png).expect("fixture must decode");
-    assert_eq!((image.width, image.height), (1, 1));
-    assert_eq!(image.channels, 3);
-    assert_eq!(image.pixels, vec![255, 255, 255]);
 }
 
 /// Minimal JPEG: SOI, JFIF APP0, DQT, SOF0, SOS, entropy data, EOI.
@@ -417,22 +403,4 @@ pub fn make_pe_custom(machine: u16, opt_magic: u16, text_len: usize, tight: bool
     img.extend_from_slice(&text);
     img.resize(raw_ptr as usize + raw_size as usize, 0);
     img
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn verify_test_threads_limit() {
-        if let Ok(threads) = std::env::var("RUST_TEST_THREADS") {
-            assert_eq!(threads, "8", "RUST_TEST_THREADS should be set to 8");
-        }
-        if let Ok(rayon_threads) = std::env::var("RAYON_NUM_THREADS") {
-            assert_eq!(rayon_threads, "8", "RAYON_NUM_THREADS should be set to 8");
-        }
-        assert!(
-            rayon::current_num_threads() <= 8,
-            "Rayon thread pool exceeds 8: {}",
-            rayon::current_num_threads()
-        );
-    }
 }
