@@ -223,7 +223,11 @@ fn derive_ikm(password: &str, salt: &[u8]) -> [u8; 32] {
 /// `read` ran PBKDF2 four to five times over the same pair (twice for the
 /// stealth magics, once for the keys, twice for the header mask), which is
 /// 100–250 ms of pure waste per operation.
-#[derive(Clone, Copy)]
+///
+/// Deliberately not `Copy`: a `Copy` secret cannot carry a destructor, and
+/// removing `Copy` after 1.0 would itself be a breaking change. Callers that
+/// need a second owner ask for `clone()`.
+#[derive(Clone)]
 pub struct PasswordSecrets {
     /// AES-256-GCM key for the chunked payload.
     pub payload_key: [u8; 32],
@@ -231,6 +235,30 @@ pub struct PasswordSecrets {
     pub meta_key: [u8; 32],
     /// 76-byte keystream masking the sensitive header fields.
     pub header_mask: [u8; 76],
+}
+
+impl Drop for PasswordSecrets {
+    /// Overwrite the key material when the last owner goes away.
+    ///
+    /// All three buffers are expansions of one PBKDF2 output, so a heap dump
+    /// that still holds them hands over the entire hierarchy for that carrier.
+    fn drop(&mut self) {
+        zero_bytes(&mut self.payload_key);
+        zero_bytes(&mut self.meta_key);
+        zero_bytes(&mut self.header_mask);
+    }
+}
+
+/// Overwrite `buf` in place so the zeroing cannot be optimised away.
+///
+/// `write_volatile` keeps the store observable; the fence stops the compiler
+/// from sinking later writes in front of it.
+pub(crate) fn zero_bytes(buf: &mut [u8]) {
+    for byte in buf.iter_mut() {
+        // SAFETY: `byte` is a valid, aligned, uniquely borrowed `u8`.
+        unsafe { core::ptr::write_volatile(byte, 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
 /// Derive the 32-byte payload and metadata keys from a password and salt.
@@ -905,6 +933,40 @@ pub fn compute_file_sha256(path: &std::path::Path) -> Result<[u8; 32], StrHideEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `zero_bytes` backs the `Drop` impls that wipe the derived keys; if it
+    /// silently skipped bytes, those impls would be decorative.
+    #[test]
+    fn zero_bytes_clears_every_byte_without_touching_neighbours() {
+        let mut buf = [0u8; 40];
+        buf[..32].fill(0xAA);
+        zero_bytes(&mut buf[..32]);
+        assert_eq!(buf[..32], [0u8; 32], "the whole slice must be cleared");
+        assert_eq!(
+            buf[32..],
+            [0u8; 8],
+            "bytes outside the slice stay untouched"
+        );
+
+        let mut empty: [u8; 0] = [];
+        zero_bytes(&mut empty);
+    }
+
+    /// A cloned secret must be independently owned: dropping one copy may not
+    /// leave the other's bytes cleared (that is what `Copy` used to hide).
+    #[test]
+    fn cloned_password_secrets_survive_dropping_the_original() {
+        let original = PasswordSecrets {
+            payload_key: [1u8; 32],
+            meta_key: [2u8; 32],
+            header_mask: [3u8; 76],
+        };
+        let copy = original.clone();
+        drop(original);
+        assert_eq!(copy.payload_key, [1u8; 32]);
+        assert_eq!(copy.meta_key, [2u8; 32]);
+        assert_eq!(&copy.header_mask[..], &[3u8; 76][..]);
+    }
 
     #[test]
     fn compression_probe_rejects_short_input_in_release_too() {

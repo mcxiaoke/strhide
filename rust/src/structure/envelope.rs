@@ -688,7 +688,7 @@ impl EnvelopeHeader {
 /// the password, the header mask for the profile default — which is derived
 /// even when the password branch already matched — and the payload/metadata
 /// keys. That is four to five PBKDF2 runs where one or two suffice.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct UnpackSecrets {
     /// Material for the caller's password, when one was supplied.
     pub password: Option<crate::crypto::PasswordSecrets>,

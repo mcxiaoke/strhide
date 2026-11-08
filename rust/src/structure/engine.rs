@@ -1839,11 +1839,15 @@ fn open_authenticated_at<'a>(
     let mut header_bytes = [0u8; HEADER_SIZE];
     ube_stream.read_exact(&mut header_bytes)?;
 
+    // `UnpackSecrets` is not `Copy` (it wipes the derived keys on drop), so
+    // borrow the caller's material when there is any and keep this frame's own
+    // derivation in a local that dies with the call.
+    let derived;
     let secrets = match precomputed {
-        Some(s) => *s,
+        Some(s) => s,
         None => {
             let salt = EnvelopeHeader::salt_of(&header_bytes).unwrap_or([0u8; 16]);
-            UnpackSecrets {
+            derived = UnpackSecrets {
                 password: match password {
                     Some(pwd) => Some(derive_all(pwd, &salt)?),
                     None => None,
@@ -1854,10 +1858,11 @@ fn open_authenticated_at<'a>(
                     None
                 },
                 stealth_header_magic,
-            }
+            };
+            &derived
         }
     };
-    let header = EnvelopeHeader::unpack_with_secrets(&header_bytes, password, profile, &secrets)?;
+    let header = EnvelopeHeader::unpack_with_secrets(&header_bytes, password, profile, secrets)?;
     header.validate_against(ube_total_size, host_len)?;
 
     // `hint_len` is capped at `MAX_HINT_LEN` by `validate_against`, so this
@@ -3031,7 +3036,9 @@ fn verify_core(
                         },
                         stealth_header_magic,
                     };
-                    secrets = Some(built);
+                    // Cloned once: `UnpackSecrets` is not `Copy` any more, and
+                    // the verify path keeps its own copy for Level 3.
+                    secrets = Some(built.clone());
 
                     match EnvelopeHeader::unpack_with_secrets(
                         &header_bytes,

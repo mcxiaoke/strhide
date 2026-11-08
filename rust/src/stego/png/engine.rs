@@ -1997,7 +1997,11 @@ fn extract_png_with_keys(
 ) -> Result<Payload<'static>, StrHideError> {
     params.validate()?;
     let no_hidden = || StrHideError::NoHiddenData("No valid payload found".into());
-    let PngKeys { master, locator } = *keys;
+    // `HeaderLocatorKeys` is not `Copy` (it wipes itself on drop), so borrow it
+    // instead of moving it out of the shared reference. `master` is a plain
+    // array and stays a value copy.
+    let master = keys.master;
+    let locator = &keys.locator;
 
     let w = image.width as usize;
     let h = image.height as usize;

@@ -425,7 +425,11 @@ pub const OFFICIAL_HEVC_CIPHER: WireCipherProfile = WireCipherProfile {
 };
 
 /// Keys derived before the header is located (L2).
-#[derive(Clone, Copy, PartialEq, Eq)]
+///
+/// Deliberately not `Copy`, so a destructor can wipe the seeds: `Copy` and
+/// `Drop` are mutually exclusive in Rust, and dropping `Copy` after 1.0 would
+/// be a breaking change in its own right.
+#[derive(Clone, PartialEq, Eq)]
 pub struct HeaderLocatorKeys {
     /// Slot permutation seed for the header block.
     pub locate_seed: [u8; 32],
@@ -437,8 +441,26 @@ pub struct HeaderLocatorKeys {
     pub magic4: [u8; 4],
 }
 
+impl Drop for HeaderLocatorKeys {
+    /// Wipe the seeds once the last owner goes away; they locate and unmask the
+    /// header, so a stale copy is as good as the key itself.
+    fn drop(&mut self) {
+        crate::core::crypto::zero_bytes(&mut self.locate_seed);
+        crate::core::crypto::zero_bytes(&mut self.magic4);
+        // Volatile stores: a plain `= 0` may be dropped as a dead write.
+        // SAFETY: both fields are valid, aligned, uniquely borrowed `u64`s.
+        unsafe {
+            core::ptr::write_volatile(&mut self.header_stc_seed, 0);
+            core::ptr::write_volatile(&mut self.ext_stc_seed, 0);
+        }
+    }
+}
+
 /// Per-carrier payload keys (L3).
-#[derive(Clone, Copy, PartialEq, Eq)]
+///
+/// Same rule as [`HeaderLocatorKeys`]: not `Copy`, so the AEAD key and the two
+/// seeds are wiped when the last owner goes away.
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SessionKeys {
     /// AEAD key.
     pub enc_key: [u8; 32],
@@ -446,6 +468,15 @@ pub(crate) struct SessionKeys {
     pub perm_seed: [u8; 32],
     /// Body trellis seed.
     pub stc_seed: u64,
+}
+
+impl Drop for SessionKeys {
+    fn drop(&mut self) {
+        crate::core::crypto::zero_bytes(&mut self.enc_key);
+        crate::core::crypto::zero_bytes(&mut self.perm_seed);
+        // SAFETY: the field is a valid, aligned, uniquely borrowed `u64`.
+        unsafe { core::ptr::write_volatile(&mut self.stc_seed, 0) };
+    }
 }
 
 fn hkdf_expand(salt: Option<&[u8]>, ikm: &[u8], info: &[u8], out: &mut [u8]) {
