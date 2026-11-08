@@ -136,16 +136,18 @@ fn codebits_encrypted_roundtrip() {
         .with_backup(false);
     write_carrier(&carrier, PayloadSource::Text("encrypted secret"), &opts).expect("write");
 
-    // Wrong password must fail cleanly.
+    // Wrong password must fail cleanly with the password variant.
+    let err = read_carrier(
+        &out,
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("wrong pw")
+            .with_overwrite(false),
+    )
+    .expect_err("wrong password must fail");
     assert!(
-        read_carrier(
-            &out,
-            &ReadOptions::default()
-                .with_output_option(None)
-                .with_password("wrong pw")
-                .with_overwrite(false)
-        )
-        .is_err()
+        matches!(err, strhide::errors::StrHideError::Password(_)),
+        "wrong password must report Password, got: {err:?}"
     );
     // Right password round-trips.
     let read = read_carrier(
@@ -202,16 +204,18 @@ fn codebits_stealth_denies_without_password() {
         matches!(err, strhide::errors::StrHideError::NoHiddenData(_)),
         "expected NoHiddenData, got {err:?}"
     );
-    // Wrong password: same.
+    // Wrong password: same as no password, i.e. plausible deniability.
+    let err = read_carrier(
+        &out,
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("nope")
+            .with_overwrite(false),
+    )
+    .expect_err("wrong password must fail");
     assert!(
-        read_carrier(
-            &out,
-            &ReadOptions::default()
-                .with_output_option(None)
-                .with_password("nope")
-                .with_overwrite(false)
-        )
-        .is_err()
+        matches!(err, strhide::errors::StrHideError::NoHiddenData(_)),
+        "stealth wrong password must report NoHiddenData, got: {err:?}"
     );
 
     // Right password: full round-trip and byte-exact restore.
@@ -1308,7 +1312,14 @@ fn codebits_zero_payload_capacity_is_not_available() {
         &write_opts(&out, "pe_codebits"),
     )
     .unwrap_err();
-    assert!(!err.to_string().is_empty(), "{err}");
+    assert!(
+        matches!(
+            &err,
+            strhide::errors::StrHideError::UnsupportedFormat(msg)
+                if msg.contains("insufficient .text steganographic capacity")
+        ),
+        "a one-byte write into a 213 B channel must be refused for insufficient capacity, got: {err:?}"
+    );
 }
 
 /// Guard for the 2026-11-07 policy change: `auto` must never rewrite `.text`.
@@ -1336,11 +1347,6 @@ fn auto_never_selects_the_instruction_channel() {
         )
         .expect("write");
         let chosen = result.strategy.name();
-        assert_ne!(
-            chosen, "pe_codebits",
-            "auto must not touch .text: {:?}",
-            result.strategy_note
-        );
         assert!(
             matches!(chosen, "pe_slack" | "pe_overlay"),
             "unexpected auto strategy {chosen}"

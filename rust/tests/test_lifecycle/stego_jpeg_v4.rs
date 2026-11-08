@@ -64,8 +64,12 @@ fn v4_chacha_suite_roundtrip_and_tamper_rejected() {
     let mut flipped = stego;
     let idx = (flipped_sos_offset(&flipped) + 16).min(flipped.len() - 1);
     flipped[idx] ^= 0x01;
-    let result = extract_carrier(&flipped, &ExtractOptions::default().with_password(PASSWORD));
-    assert!(result.is_err());
+    let err = extract_carrier(&flipped, &ExtractOptions::default().with_password(PASSWORD))
+        .expect_err("scan-data flip must fail");
+    assert!(
+        matches!(err, StrHideError::CorruptedData(_)),
+        "a corrupted scan must report CorruptedData, got: {err:?}"
+    );
 }
 
 #[test]
@@ -235,7 +239,8 @@ fn v4_tampered_carrier_never_panics() {
             truncated,
             &ExtractOptions::default().with_password(PASSWORD),
         )
-        .is_err()
+        .is_err(),
+        "a truncated carrier must not extract"
     );
 
     // A one-byte flip in the entropy-coded scan must not yield the payload.
@@ -247,7 +252,11 @@ fn v4_tampered_carrier_never_panics() {
     let idx = (sos + 16).min(flipped.len() - 1);
     flipped[idx] ^= 0x01;
     let result = extract_carrier(&flipped, &ExtractOptions::default().with_password(PASSWORD));
-    assert!(result.is_err());
+    let err = result.expect_err("one-byte scan flip must fail");
+    assert!(
+        matches!(err, StrHideError::CorruptedData(_)),
+        "a corrupted scan must report CorruptedData, got: {err:?}"
+    );
 }
 
 /// Byte offset of the first SOS (`FF DA`) marker, i.e. the start of the

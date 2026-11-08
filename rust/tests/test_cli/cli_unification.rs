@@ -211,7 +211,12 @@ fn key_file_and_max_payload_round_trip() {
             "--stdout",
         ],
     );
-    assert_ne!(code(&out), 0);
+    assert_eq!(code(&out), 2, "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("cannot be used with"),
+        "the parser must name the conflict, stderr: {}",
+        stderr(&out)
+    );
 
     // A ceiling below the payload size refuses to emit it.
     let out = run(

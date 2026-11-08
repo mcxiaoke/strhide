@@ -126,7 +126,15 @@ fn cancelling_during_the_run_stops_the_embed() {
     // returns Cancelled or, if the encode finished first, a valid carrier.
     match embed_carrier(&png, &Payload::bytes(b"payload"), &options) {
         Err(StrHideError::Cancelled) => {}
-        Ok(_) => {}
+        Ok(stego) => {
+            // Losing the race must still leave a complete, readable carrier;
+            // a partial write would fail here. Extract with a fresh control:
+            // the embed token is already cancelled and would abort the read.
+            let read_options = ExtractOptions::default().with_password("pw");
+            let extracted =
+                extract_carrier(&stego, &read_options).expect("a completed embed must round-trip");
+            assert_eq!(extracted, b"payload");
+        }
         other => panic!("unexpected result: {other:?}"),
     }
 }

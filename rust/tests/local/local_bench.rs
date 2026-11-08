@@ -10,7 +10,7 @@
 //! busy machine cannot be mistaken for a regression.
 //!
 //! ```text
-//! cargo test --release --test stc_kernel_bench -- --ignored --nocapture
+//! cargo test --release --test local_tests local_bench -- --ignored --nocapture
 //! ```
 //!
 //! Environment knobs:

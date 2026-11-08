@@ -68,11 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Official dialect: must fail, and must fail as "nothing here" rather than
     // as "an envelope is here but you used the wrong dialect".
     match read_carrier_bytes(&stego, None, &StructureProfile::default()) {
-        Ok(_) => println!("UNEXPECTED: the official dialect read a private carrier"),
-        Err(e @ StrHideError::NoHiddenData(_)) => {
-            println!("official dialect correctly reports no data: {e}");
-        }
-        Err(e) => println!("official dialect failed as expected, but differently: {e}"),
+        Err(StrHideError::NoHiddenData(_)) => {}
+        Ok(_) => panic!("the official dialect read a private carrier"),
+        Err(e) => panic!("official dialect failed as expected, but differently: {e}"),
     }
 
     Ok(())

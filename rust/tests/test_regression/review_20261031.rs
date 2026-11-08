@@ -168,11 +168,11 @@ fn content_domain_refuses_a_png_without_iend() {
 /// bounded the envelope against the real file length.
 #[cfg(feature = "cli")]
 fn mp4_with_forged_trailer() -> Vec<u8> {
-    const MAGIC: [u8; 4] = [0x78, 0xe6, 0x66, 0xd2];
-    const UUID: [u8; 16] = [
-        0xd4, 0x1a, 0x8e, 0x9c, 0x4f, 0x21, 0x4e, 0x87, 0x9a, 0x33, 0x5b, 0x6d, 0x12, 0x84, 0xef,
-        0x70,
-    ];
+    use strhide::core::params::{STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC};
+    use strhide::structure::adapters::isobmff::MP4_UUID_NEUTRAL;
+    use strhide::structure::envelope::CURRENT_VERSION;
+    use strhide::structure::registry::strategy_to_id;
+
     let total: u64 = 1 << 40;
 
     let mut host = Vec::new();
@@ -187,12 +187,12 @@ fn mp4_with_forged_trailer() -> Vec<u8> {
     box_header.extend_from_slice(&1u32.to_be_bytes()); // 64-bit size follows
     box_header.extend_from_slice(b"uuid");
     box_header.extend_from_slice(&(32 + total).to_be_bytes());
-    box_header.extend_from_slice(&UUID);
+    box_header.extend_from_slice(&MP4_UUID_NEUTRAL);
 
     let mut header = [0u8; 112];
-    header[0..8].copy_from_slice(b"STRHIDE\0");
-    header[8] = 0x02; // CURRENT_VERSION
-    header[10] = 3; // strategy: box_uuid
+    header[0..8].copy_from_slice(&STANDARD_HEADER_MAGIC);
+    header[8] = CURRENT_VERSION;
+    header[10] = strategy_to_id("box_uuid").expect("box_uuid is a registered strategy");
     header[40..48].copy_from_slice(&40u64.to_le_bytes());
     header[80..88].copy_from_slice(&envelope_offset.to_le_bytes());
     header[88..96].copy_from_slice(&total.to_le_bytes());
@@ -203,7 +203,7 @@ fn mp4_with_forged_trailer() -> Vec<u8> {
     trailer.extend_from_slice(&total.to_le_bytes());
     let crc = crc32fast::hash(&trailer);
     trailer.extend_from_slice(&crc.to_le_bytes());
-    trailer.extend_from_slice(&MAGIC);
+    trailer.extend_from_slice(&STANDARD_TRAILER_MAGIC);
 
     [host, box_header, header.to_vec(), trailer].concat()
 }

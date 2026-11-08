@@ -368,7 +368,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn write_defaults_match_the_cli() {
+    fn write_defaults_are_stable() {
         let opts = WriteOptions::default();
         assert_eq!(opts.strategy, "auto");
         assert!(opts.preserve_time);

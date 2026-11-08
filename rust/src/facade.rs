@@ -48,8 +48,8 @@
 //! let tuned = engine.with_local_params(
 //!     LocalParams::new().with_compression(CompressionStrategy::Never),
 //! );
-//! // use `tuned` for this call; `engine` is unchanged.
-//! let _ = tuned;
+//! assert_ne!(tuned.local_params(), engine.local_params());
+//! // `engine` is unchanged.
 //! ```
 
 #[cfg(feature = "cli")]

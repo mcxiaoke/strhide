@@ -163,6 +163,21 @@ fn content_bytes_probe_reports_capacity() {
     let options = ProbeOptions::default();
     let cap = engine.stego().probe(JPG, &options).expect("probe");
     assert!(cap.recommended_max_bytes > 0);
+    assert!(cap.recommended_max_bytes <= cap.max_raw_payload_bytes);
+    assert!(cap.available_slots > 0);
+
+    // The recommendation must be attainable: a payload at the advertised
+    // bound embeds and extracts back byte-exactly.
+    let payload = vec![0x5A; cap.recommended_max_bytes];
+    let stego = engine
+        .stego()
+        .embed(JPG, &Payload::bytes(&payload), &EmbedOptions::default())
+        .expect("embed at the recommended capacity");
+    let extracted = engine
+        .stego()
+        .extract(&stego, &EmbedOptions::default().extract_options())
+        .expect("extract at the recommended capacity");
+    assert_eq!(extracted.data.as_ref(), payload.as_slice());
 }
 
 // ───────────────────────── content domain · file ────────────────────────────
@@ -752,21 +767,25 @@ fn test_verify_any_clean_and_stego() {
 
 #[test]
 fn test_hevc_mp4_inspect_media_info_and_has_inter() {
-    let mp4_path = std::path::PathBuf::from("../temp/testhevc/TSU_640x360.mp4");
-    if !mp4_path.is_file() {
-        return;
-    }
+    let mp4_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/assets/small.mp4");
+    assert!(
+        mp4_path.is_file(),
+        "fixture missing: {} (the media-info assertions need a real MP4)",
+        mp4_path.display()
+    );
     let engine = StrHide::new();
     let diag = engine
         .inspect_any(&mp4_path, &strhide::facade::DualOptions::default())
         .expect("inspect_any on mp4");
     assert!(!diag.structure.has_hidden_data);
-    assert!(diag.media_info.is_some());
-    let media = diag.media_info.as_ref().unwrap();
-    assert_eq!(media.width, 640);
-    assert_eq!(media.height, 360);
-    assert!(media.fps.is_some());
-    assert!(media.duration_ms.is_some());
+    let media = diag
+        .media_info
+        .as_ref()
+        .expect("a real MP4 must report media info");
+    assert_eq!(media.width, 1920, "actual media info: {media:?}");
+    assert_eq!(media.height, 1080, "actual media info: {media:?}");
+    assert!(media.fps.is_some(), "actual media info: {media:?}");
+    assert!(media.duration_ms.is_some(), "actual media info: {media:?}");
 }
 
 #[test]

@@ -28,8 +28,8 @@
 //! and per payload size.
 //!
 //! ```text
-//! cargo test --release --test batch_corpus -- --ignored --nocapture
-//! STRHIDE_CORPUS=/path/to/corpus cargo test --release --test batch_corpus -- --ignored --nocapture
+//! cargo test --release --test local_tests local_batch_corpus -- --ignored --nocapture
+//! STRHIDE_CORPUS=/path/to/corpus cargo test --release --test local_tests local_batch_corpus -- --ignored --nocapture
 //! ```
 //!
 //! Every carrier is copied into a per-run temp directory first; the corpus is
@@ -402,7 +402,7 @@ fn first_line(msg: &str) -> String {
 // --------------------------------------------------------------------------- test
 
 #[test]
-#[ignore = "corpus sweep over temp/testfiles: run with --release --test batch_corpus -- --ignored --nocapture"]
+#[ignore = "corpus sweep over temp/testfiles: run with --release --test local_tests local_batch_corpus -- --ignored --nocapture"]
 fn local_batch_corpus_all_modes() {
     let corpus = corpus_dir().unwrap_or_else(|| {
         panic!(

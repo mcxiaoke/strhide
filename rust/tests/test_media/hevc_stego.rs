@@ -104,9 +104,10 @@ fn test_hevc_capacity_and_roundtrip_small_heic() {
             &strhide::stego::format::DEFAULT_HEVC_FORMAT,
             &Control::none(),
         );
+        let err = wrong_res.expect_err("Extraction with wrong password must fail");
         assert!(
-            wrong_res.is_err(),
-            "Extraction with wrong password must fail!"
+            matches!(err, StrHideError::NoHiddenData(_)),
+            "wrong password must be indistinguishable from no payload, got: {err:?}"
         );
 
         // D. Verify stego carrier decodes cleanly to video frame without crashing
@@ -182,7 +183,11 @@ fn test_hevc_annexb_roundtrip_from_heic_nals() {
         &strhide::stego::format::DEFAULT_HEVC_FORMAT,
         &Control::none(),
     );
-    assert!(wrong.is_err(), "wrong password must be rejected");
+    let err = wrong.expect_err("wrong password must be rejected");
+    assert!(
+        matches!(err, StrHideError::NoHiddenData(_)),
+        "wrong password must be indistinguishable from no payload, got: {err:?}"
+    );
 }
 
 /// Verifies Annex-B cover-digest stability on short slice segment headers
@@ -306,8 +311,16 @@ fn test_hevc_capacity_safety_scaling_and_sps_dimensions() {
                 .expect("probe capacity info");
 
         assert_eq!(info.total_elements, 320 * 240);
-        assert!(info.available_slots > 0);
-        assert!(info.max_raw_payload_bytes > 0);
+        assert!(
+            info.available_slots > 2048,
+            "a 320x240 HEIC must expose more than the reader's 2048-slot header pool, got {}",
+            info.available_slots
+        );
+        assert!(
+            info.max_raw_payload_bytes >= 120,
+            "small.heic must hold the 120-byte payload exercised above, got {}",
+            info.max_raw_payload_bytes
+        );
         assert!(info.recommended_max_bytes <= info.max_raw_payload_bytes);
         assert!(info.recommended_max_bytes >= prev_rec);
         prev_rec = info.recommended_max_bytes;
@@ -382,7 +395,10 @@ fn test_hevc_v4_extension_probe_matches_embed() {
     }];
 
     let cap = probe_hevc_capacity_ext(&carrier, &extensions, fmt).expect("probe with ext");
-    assert!(cap > 0);
+    assert!(
+        cap > 120,
+        "probed capacity must cover the payload used below, got {cap}"
+    );
 
     let payload = vec![0x5A; cap];
     let suite = fmt.cipher.default_suite.as_u16();
@@ -456,7 +472,11 @@ fn test_hevc_v4_truncated_body_is_rejected() {
         &ExtractParams::default(),
         &Control::none(),
     );
-    assert!(res.is_err(), "truncated carrier must not extract");
+    let err = res.expect_err("truncated carrier must not extract");
+    assert!(
+        matches!(&err, StrHideError::UnsupportedFormat(msg) if msg.contains("truncated")),
+        "a truncated carrier must be rejected as unsupported, got: {err:?}"
+    );
 }
 
 /// Verifies the writer's decode window does not stop below the reader's fixed

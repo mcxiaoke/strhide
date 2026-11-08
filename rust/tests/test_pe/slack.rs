@@ -449,26 +449,29 @@ fn slack_encrypted_roundtrip() {
         .with_backup(false);
     write_carrier(&carrier, PayloadSource::Text("encrypted secret"), &opts).expect("write");
 
+    let err = read_carrier(
+        &out,
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
+    )
+    .expect_err("password required");
     assert!(
-        read_carrier(
-            &out,
-            &ReadOptions::default()
-                .with_output_option(None)
-                .with_password_option(None)
-                .with_overwrite(false)
-        )
-        .is_err(),
-        "password required"
+        matches!(err, strhide::errors::StrHideError::PasswordWithHint { .. }),
+        "missing password must report PasswordWithHint, got: {err:?}"
     );
+    let err = read_carrier(
+        &out,
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("wrong pw")
+            .with_overwrite(false),
+    )
+    .expect_err("wrong password must fail");
     assert!(
-        read_carrier(
-            &out,
-            &ReadOptions::default()
-                .with_output_option(None)
-                .with_password("wrong pw")
-                .with_overwrite(false)
-        )
-        .is_err()
+        matches!(err, strhide::errors::StrHideError::Password(_)),
+        "wrong password must report Password, got: {err:?}"
     );
 
     let read = read_carrier(
@@ -529,15 +532,17 @@ fn slack_stealth_denies_without_password() {
             && err.to_string().contains("PE section padding"),
         "the padding trace should be reported: {err}"
     );
+    let err = read_carrier(
+        &out,
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password("nope")
+            .with_overwrite(false),
+    )
+    .expect_err("wrong password must fail");
     assert!(
-        read_carrier(
-            &out,
-            &ReadOptions::default()
-                .with_output_option(None)
-                .with_password("nope")
-                .with_overwrite(false)
-        )
-        .is_err()
+        matches!(err, strhide::errors::StrHideError::NoHiddenData(_)),
+        "stealth wrong password must report NoHiddenData, got: {err:?}"
     );
 
     let read = read_carrier(
@@ -634,16 +639,17 @@ fn tampered_envelope_fails_cleanly() {
     let tampered = dir.join("c.tampered.exe");
     fs::write(&tampered, &bytes).unwrap();
 
+    let err = read_carrier(
+        &tampered,
+        &ReadOptions::default()
+            .with_output_option(None)
+            .with_password_option(None)
+            .with_overwrite(false),
+    )
+    .expect_err("read must fail on tampered ciphertext");
     assert!(
-        read_carrier(
-            &tampered,
-            &ReadOptions::default()
-                .with_output_option(None)
-                .with_password_option(None)
-                .with_overwrite(false)
-        )
-        .is_err(),
-        "read must fail on tampered ciphertext"
+        matches!(err, strhide::errors::StrHideError::CorruptedData(_)),
+        "tampered ciphertext must be rejected as corrupted, got: {err:?}"
     );
     let restored = dir.join("c.tampered.restored.exe");
     let rem = remove_carrier(

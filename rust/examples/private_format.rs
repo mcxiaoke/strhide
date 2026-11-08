@@ -129,16 +129,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         strhide::stego::Freshness::Random,
         &Control::none(),
     )?;
+    let err = extract_jpeg(
+        &official,
+        Credential::Password(password),
+        None,
+        &ACME_FORMAT,
+        &ExtractParams::default(),
+        &Control::none(),
+    )
+    .expect_err("the official dialect must not read an ACME carrier");
     assert!(
-        extract_jpeg(
-            &official,
-            Credential::Password(password),
-            None,
-            &ACME_FORMAT,
-            &ExtractParams::default(),
-            &Control::none(),
-        )
-        .is_err()
+        matches!(err, StrHideError::NoHiddenData(_)),
+        "isolation must look like 'nothing here', got: {err:?}"
     );
     println!("both directions are isolated");
     Ok(())

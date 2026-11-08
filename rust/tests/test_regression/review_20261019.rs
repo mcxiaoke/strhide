@@ -742,11 +742,10 @@ fn a15_unencrypted_corrupted_metadata_reports_corrupted_not_password() {
             .with_output_option(None)
             .with_password_option(None)
             .with_overwrite(false),
+    )
+    .expect_err("unencrypted metadata corruption must fail");
+    assert!(
+        matches!(err_plain, StrHideError::CorruptedData(_)),
+        "unencrypted metadata corruption must report CorruptedData, got: {err_plain:?}"
     );
-    if let Err(e) = err_plain {
-        assert!(
-            !matches!(e, StrHideError::Password(_)),
-            "unencrypted carrier corruption must never yield Password error, got: {e:?}"
-        );
-    }
 }

@@ -53,7 +53,7 @@ pub mod batch_stego {
     //!
     //! Run with:
     //! ```text
-    //! cargo test --release --test batch_stego -- --ignored --nocapture
+    //! cargo test --release --test heavy_tests heavy_batch_stego -- --ignored --nocapture
     //! ```
 
     use std::fs;
@@ -742,7 +742,7 @@ pub mod eval {
     //!
     //! Run with:
     //! ```text
-    //! cargo test --release --test stego_eval -- --ignored --nocapture
+    //! cargo test --release --test heavy_tests heavy_stego_evaluation -- --ignored --nocapture
     //! ```
 
     use std::collections::HashSet;

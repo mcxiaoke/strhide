@@ -238,11 +238,14 @@ fn test_png_hill_content_stego_roundtrip() {
     let extracted = extract_carrier(&stego_png, &opts.extract_options()).expect("extract png");
     assert_eq!(extracted, secret, "extracted payload must match original");
 
-    // 3. Extract with wrong password must fail
+    // 3. Extract with wrong password must fail. Stealth semantics collapse a
+    // wrong key to `NoHiddenData` so the carrier looks untouched.
     opts.password = Some("WrongPassword999!");
+    let err =
+        extract_carrier(&stego_png, &opts.extract_options()).expect_err("wrong password must fail");
     assert!(
-        extract_carrier(&stego_png, &opts.extract_options()).is_err(),
-        "wrong password must fail"
+        matches!(err, strhide::errors::StrHideError::NoHiddenData(_)),
+        "wrong password must be indistinguishable from no payload, got: {err:?}"
     );
 }
 
@@ -320,11 +323,14 @@ fn test_jpeg_uerd_content_stego_roundtrip() {
     let extracted = extract_carrier(&stego_jpeg, &opts.extract_options()).expect("extract jpeg");
     assert_eq!(extracted, secret, "extracted payload must match original");
 
-    // 3. Extract with wrong password must fail
+    // 3. Extract with wrong password must fail. Stealth semantics collapse a
+    // wrong key to `NoHiddenData` so the carrier looks untouched.
     opts.password = Some("WrongPassword!");
+    let err = extract_carrier(&stego_jpeg, &opts.extract_options())
+        .expect_err("wrong password must fail");
     assert!(
-        extract_carrier(&stego_jpeg, &opts.extract_options()).is_err(),
-        "wrong password must fail"
+        matches!(err, strhide::errors::StrHideError::NoHiddenData(_)),
+        "wrong password must be indistinguishable from no payload, got: {err:?}"
     );
 }
 
@@ -864,10 +870,28 @@ fn test_stego_private_default_secret_isolation() {
         secret
     );
     // Neither the private default secret alone nor the official constant may
-    // stand in for the password.
-    assert!(extract_carrier_with_dialect(&pw_stego, &opts.extract_options(), &private).is_err());
-    assert!(extract_carrier_with_dialect(&pw_stego, &opts.extract_options(), &other).is_err());
-    assert!(extract_carrier_with_dialect(&pw_stego, &opts.extract_options(), &official).is_err());
+    // stand in for the password: all three collapse to `NoHiddenData`.
+    let miss_secret = extract_carrier_with_dialect(&pw_stego, &opts.extract_options(), &private)
+        .expect_err("private secret alone must not replace the password");
+    assert!(
+        matches!(miss_secret, strhide::errors::StrHideError::NoHiddenData(_)),
+        "got: {miss_secret:?}"
+    );
+    let miss_other = extract_carrier_with_dialect(&pw_stego, &opts.extract_options(), &other)
+        .expect_err("foreign secret must not replace the password");
+    assert!(
+        matches!(miss_other, strhide::errors::StrHideError::NoHiddenData(_)),
+        "got: {miss_other:?}"
+    );
+    let miss_official = extract_carrier_with_dialect(&pw_stego, &opts.extract_options(), &official)
+        .expect_err("official secret must not replace the password");
+    assert!(
+        matches!(
+            miss_official,
+            strhide::errors::StrHideError::NoHiddenData(_)
+        ),
+        "got: {miss_official:?}"
+    );
 }
 
 /// The legacy `embed_carrier` / `extract_carrier` entries are the official
@@ -890,9 +914,11 @@ fn test_stego_legacy_entries_use_the_official_profile() {
     let private_stego =
         embed_carrier_with_dialect(&png_bytes, &Payload::bytes(secret), &opts, &private)
             .expect("embed private");
+    let err = extract_carrier(&private_stego, &opts.extract_options())
+        .expect_err("the legacy entry must not pick up a private dialect implicitly");
     assert!(
-        extract_carrier(&private_stego, &opts.extract_options()).is_err(),
-        "the legacy entry must not pick up a private dialect implicitly"
+        matches!(err, strhide::errors::StrHideError::NoHiddenData(_)),
+        "legacy extract must report NoHiddenData for a private carrier, got: {err:?}"
     );
 }
 
@@ -1256,8 +1282,11 @@ fn stego_safety_level_and_enforcement_lifecycle() {
     );
     let res_enforced = embed_carrier(&png, &Payload::bytes(&payload), &opts_enforced);
     assert!(
-        res_enforced.is_err(),
-        "Enforced mode must reject payload exceeding safety tier"
+        matches!(
+            res_enforced,
+            Err(strhide::errors::StrHideError::SafetyThreshold { .. })
+        ),
+        "Enforced mode must reject payload exceeding safety tier, got: {res_enforced:?}"
     );
 
     // Advisory mode on Paranoid tier MUST succeed

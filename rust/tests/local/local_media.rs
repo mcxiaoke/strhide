@@ -44,7 +44,7 @@ pub mod heif_hidden_item {
     }
 
     #[test]
-    #[ignore = "requires local temp/testhevc corpus: run with cargo test --test test_heif_hidden_item -- --ignored"]
+    #[ignore = "requires local temp/testhevc corpus: run with cargo test --test local_tests local_heif_item -- --ignored"]
     pub fn local_heif_item_hidden_and_free_box_real_samples() {
         let test_dir = match resolve_hevc_corpus() {
             Some(d) => d,
@@ -282,7 +282,7 @@ pub mod heif_bridge {
     }
 
     #[test]
-    #[ignore = "requires local temp/testhevc corpus: run with cargo test --test test_heif_stego_bridge -- --ignored"]
+    #[ignore = "requires local temp/testhevc corpus: run with cargo test --test local_tests local_heif_jpeg_thumbnail_bridge_lifecycle -- --ignored"]
     pub fn local_heif_jpeg_thumbnail_bridge_lifecycle() {
         let corpus = match resolve_hevc_corpus() {
             Some(d) => d,
@@ -385,7 +385,7 @@ pub mod heif_bridge {
     /// really lives in the CABAC stream -- and the bridge must simultaneously
     /// report nothing, which proves the thumbnail was left alone.
     #[test]
-    #[ignore = "requires local temp/testhevc corpus: run with cargo test --test test_heif_stego_bridge -- --ignored"]
+    #[ignore = "requires local temp/testhevc corpus: run with cargo test --test local_tests local_heif_router_prefers_scheme_c -- --ignored"]
     pub fn local_heif_router_prefers_scheme_c() {
         let corpus = match resolve_hevc_corpus() {
             Some(d) => d,
@@ -440,7 +440,7 @@ pub mod heif_bridge {
     }
 
     #[test]
-    #[ignore = "requires local temp/testhevc corpus: run with cargo test --test test_heif_stego_bridge -- --ignored"]
+    #[ignore = "requires local temp/testhevc corpus: run with cargo test --test local_tests local_heif_jpeg_thumbnail_bridge_multiple_samples -- --ignored"]
     pub fn local_heif_jpeg_thumbnail_bridge_multiple_samples() {
         let corpus = match resolve_hevc_corpus() {
             Some(d) => d,
@@ -493,7 +493,7 @@ pub mod heif_bridge {
     }
 
     #[test]
-    #[ignore = "requires local temp/testhevc corpus and python pylibheif: run with cargo test --test test_heif_stego_bridge -- --ignored"]
+    #[ignore = "requires local temp/testhevc corpus and python pylibheif: run with cargo test --test local_tests local_heif_bridge_bit_exact_primary_decode -- --ignored"]
     pub fn local_heif_bridge_bit_exact_primary_decode() {
         let corpus = match resolve_hevc_corpus() {
             Some(d) => d,
@@ -778,7 +778,7 @@ pub mod hevc_external {
     //! **same geometry** with only a sparse set of visibly changed samples.
     //!
     //! ```text
-    //! cargo test --release --test test_hevc_external -- --ignored --nocapture
+    //! cargo test --release --test local_tests hevc_external -- --ignored --nocapture
     //! ```
 
     use std::fs;

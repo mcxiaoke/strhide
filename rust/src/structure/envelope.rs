@@ -916,7 +916,10 @@ mod tests {
         let mask = crate::crypto::derive_header_mask(profile.secret(), &header.salt).unwrap();
         let packed = header.pack_masked(Some(&mask));
         match EnvelopeHeader::unpack_with_profile(&packed, None, &profile) {
-            Err(_) => {}
+            Err(err) => assert!(
+                matches!(err, StrHideError::CorruptedData(_)),
+                "id 0 must be rejected as CorruptedData, got: {err:?}"
+            ),
             Ok(parsed) => assert_ne!(
                 parsed.strategy_id, 0,
                 "an id of 0 must not be accepted as an envelope"
