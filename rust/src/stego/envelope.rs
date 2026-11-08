@@ -13,9 +13,10 @@
 //! # Where salt and nonce live
 //!
 //! They no longer travel inside the envelope buffer: the carrier's own header
-//! carries them (a 44-byte superblock for JPEG, a 32-byte header for the spatial
-//! codec), and the *whole header* is the AEAD's associated data. That is a
-//! deliberate change from the previous `salt || nonce` AAD:
+//! carries them (a 44-byte superblock for JPEG, a 64-byte header for the spatial
+//! and audio codecs, a 32-byte header for HEVC), and the *whole header* is the
+//! AEAD's associated data. That is a deliberate change from the previous
+//! `salt || nonce` AAD:
 //!
 //! * any header field the decoder acts on (trellis height, group size, suite id,
 //!   extension length) is authenticated, so tampering fails the tag instead of

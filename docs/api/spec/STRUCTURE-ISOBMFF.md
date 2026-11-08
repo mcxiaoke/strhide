@@ -1,6 +1,6 @@
 # ISO-BMFF 结构域适配器：MP4/MOV 与 HEIF/HEIC
 
-本文规定 `format_name = "MP4"`（`Mp4Adapter`）与 `format_name = "HEIF"`（`HeifAdapter`）的结构域（UBE）适配器，两者共用 `isobmff.rs` 的盒流实现。信封的 112B 头、24B 尾标、AAD、`offset_delta` 语义见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) 与 [WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md) §3.3、§14、§15；内容域 HEVC/HEIF 见 [CONTENT-HEVC.md](CONTENT-HEVC.md)，二者互不替代。
+本文规定 `format_name = "MP4"`（`Mp4Adapter`）与 `format_name = "HEIF"`（`HeifAdapter`）的结构域（UBE）适配器，两者共用 `isobmff.rs` 的盒流实现。信封的 112B 头、24B 尾标、AAD、`offset_delta` 语义见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2–§15（`WIRE_SPEC_STRUCTURE.md` 仅为历史对照，冲突以本目录为准）；内容域 HEVC/HEIF 见 [CONTENT-HEVC.md](CONTENT-HEVC.md)，二者互不替代。
 
 ## 1 范围、导航与稳定性
 
@@ -57,7 +57,7 @@ heic heix hevc hevx mif1 msf1 heim heis avif avis
 - HEIF：`ube_total_size <= ITEM_HIDDEN_MAX_ENVELOPE` 且 `isobmff_can_item_hidden(reader)` 为真时选 `item_hidden`，否则选 `box_uuid`（`heif.rs:57-68`）。`ITEM_HIDDEN_MAX_ENVELOPE = u32::MAX - 8 = 4,294,967,287`（`isobmff.rs:19`）。
 - 不存在“主策略失败自动退 `eof`”路径；`eof` 只能显式选择。
 
-容量报告：`box_uuid`/`eof` 报 `capacity_bytes = None`、`limit = "unlimited (file grows)"`；HEIF `item_hidden`/`free_box` 同样报 `None`，但文本写明“up to ~4 GiB envelope”（`isobmff.rs:415-472`）。`inspect` 会把所有 `None` 统一钳到 `structure_payload_limit(host_len) = clamp(256 × host_len, 64 MiB, 1 GiB)`，因此显示值通常为 64 MiB～1 GiB，而非 4 GiB（`engine.rs:1902-1934`、`:2604-2611`）。
+容量报告：`box_uuid`/`eof` 报 `capacity_bytes = None`、`limit = "unlimited (file grows)"`；HEIF `item_hidden`/`free_box` 同样报 `None`，但文本写明“up to ~4 GiB envelope”（`isobmff.rs:415-472`）。`inspect` 会把所有可用策略的 `None` 统一钳到 `structure_payload_limit(host_len) = clamp(256 × host_len, 64 MiB, 1 GiB)`（`engine.rs:1938-1975`、`:2604-2611`；`available = false` 的条目不填数），因此显示值通常为 64 MiB～1 GiB，而非 4 GiB。
 
 ## 4 注入布局、`offset_delta` 与容量
 

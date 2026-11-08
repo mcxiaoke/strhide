@@ -316,8 +316,9 @@ mod tests {
     use super::*;
 
     /// Accuracy is a sanity bound, not a contract: the contract is that the
-    /// three implementations agree bit for bit (checked by
-    /// `scripts/detmath/compare.sh`).
+    /// three implementations agree bit for bit (run `scripts/detmath/detmath.py`
+    /// or `go run scripts/detmath/detmath.go` and compare the printed digests
+    /// with `PINNED`).
     #[test]
     fn stays_close_to_the_platform_libm() {
         for i in -400..=400 {
@@ -349,7 +350,7 @@ mod tests {
     }
 
     /// Digest of the outputs for a fixed input grid. The Go and Python ports
-    /// must produce the same numbers; `scripts/detmath/compare.sh` diffs them.
+    /// must print the same numbers; compare their output with `PINNED`.
     fn digest(which: u8) -> u64 {
         let mut h = 0xcbf2_9ce4_8422_2325u64;
         let mut push = |v: f64| {

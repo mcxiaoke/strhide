@@ -1,6 +1,6 @@
 # ZIP 结构域适配器：中央目录前注入（pre_cd_inject）
 
-本文件规定 `format_name = "ZIP"` 的结构域（UBE）适配器。信头、尾标、AAD、`strategy_id` 等公共布局见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) 与 [WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md) §3.3、§14、§15；容量口径汇总见 [CAPACITY.md](CAPACITY.md)。所有引用写作 `文件:行`（相对仓库根）。
+本文件规定 `format_name = "ZIP"` 的结构域（UBE）适配器。信头、尾标、AAD、`strategy_id` 等公共布局见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2–§15；容量口径汇总见 [CAPACITY.md](CAPACITY.md) §4。所有引用写作 `文件:行`（相对仓库根）。`WIRE_SPEC_STRUCTURE.md` 仅为历史对照，冲突以本目录为准。
 
 ## 1 范围、导航与稳定性
 
@@ -95,9 +95,9 @@ patch_limit + ube_size < 0xFFFFFFFF          // 新 cd_offset 与补丁位置都
 | EOCD 缺失/损坏 | `available = false`，提示改 `eof` | `zip.rs:218-222` |
 | `eof` | `None`（无上限、文件增长） | `zip.rs:230-236` |
 
-静态查询（`reader == None`）只报 `carrier-dependent (4 GiB - EOCD offset)`（`zip.rs:176-185`）。`inspect` 会把两者统一钳到引擎载荷上限 `structure_payload_limit(host_len) = clamp(256 × host_len, 64 MiB, 1 GiB)`（`engine.rs:1902-1907`、`:1916-1934`；`rust/src/core/crypto.rs:786`），故小载体的报告值通常为 67,108,864（基线 `temp/baseline/baseline.json:420-447`，75,238→75,477 的用例两策略均报该值）。
+静态查询（`reader == None`）只报 `carrier-dependent (4 GiB - EOCD offset)`（`zip.rs:176-185`）。`inspect` 会把两者统一钳到引擎载荷上限 `structure_payload_limit(host_len) = clamp(256 × host_len, 64 MiB, 1 GiB)`（`engine.rs:1938-1975`；`rust/src/core/crypto.rs:786`），故小载体的报告值通常为 67,108,864（基线 `temp/baseline/baseline.json:420-447`，75,238→75,477 的用例两策略均报该值）。
 
-UBE 下界：`locate` 要求 `cd_offset >= 112 + 24 = 136`（`zip.rs:323-325`），引擎 `confine_location` 再要求 `ube_total_size >= 136` 且 `ube_offset + ube_total_size <= file_len`（`engine.rs:191-207`）。实际可产出的最小加密信封为 214 B（`WIRE_SPEC_STRUCTURE.md` §14.3）。
+UBE 下界：`locate` 要求 `cd_offset >= 112 + 24 = 136`（`zip.rs:323-325`），引擎 `confine_location` 再要求 `ube_total_size >= 136` 且 `ube_offset + ube_total_size <= file_len`（`engine.rs:191-207`）。实际可产出的最小加密信封为 214 B（`min_ube_len(1)`，`rust/src/structure/envelope.rs:123-140`）。
 
 ## 6 locate 路径与方言提示
 
@@ -120,7 +120,7 @@ UBE 下界：`locate` 要求 `cd_offset >= 112 + 24 = 136`（`zip.rs:323-325`）
 3. 在该逻辑位置写入 `orig_patch_val` 的 4 字节小端，即恢复 EOCD+16 的原 `cd_offset`（`zip.rs:393`）；
 4. 跳过 stego 中被改写的 4 字节字段，复制剩余全部字节（`zip.rs:396-405`）。
 
-前置校验：`validate_against` 要求 `patch_offset ≥ 4` 且 `patch_offset + 4 ≤ host_len`（`STRUCTURE-ENVELOPE.md` §3.2）；`strip_coordinates_for_location` 只允许 `chunk`/`eof` 平移，`pre_cd_inject` 坐标不一致即 `CorruptedData`（`engine.rs:2268-2296`）；`envelope_coordinates_agree` 要求 `ube_total_size <= inject_size`、注入区不越过文件尾（`engine.rs:2828-2902`）。还原后重算大小与 SHA-256，必须等于 `orig_host_size`/`orig_host_sha256`，否则 `RestoreMismatch`（`engine.rs:2299-2311`）。通过后即逐字节还原，含 EOCD 注释与 CD 前的前缀垃圾。
+前置校验：`validate_against` 要求 `patch_offset ≥ 4` 且 `patch_offset + 4 ≤ host_len`（`STRUCTURE-ENVELOPE.md` §3.2）；`strip_coordinates_for_location` 只对 `chunk`/`eof`/`ebml_void` 白名单平移到信封的新位置，`pre_cd_inject` 不在白名单内，坐标不一致即 `CorruptedData`（`engine.rs:2310-2350`）；`envelope_coordinates_agree` 要求 `ube_total_size <= inject_size`、注入区不越过文件尾（`engine.rs:2867-2912`）。还原后重算大小与 SHA-256，必须等于 `orig_host_size`/`orig_host_sha256`，否则 `RestoreMismatch`（`engine.rs:2353-2409`）。通过后即逐字节还原，含 EOCD 注释与 CD 前的前缀垃圾。
 
 ## 8 边界情形
 

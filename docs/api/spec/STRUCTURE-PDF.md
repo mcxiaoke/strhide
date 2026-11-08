@@ -1,6 +1,6 @@
 # PDF 结构域适配器：增量更新（incremental）
 
-本文件规定 `format_name = "PDF"` 的结构域（UBE）适配器。信封布局见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md)，`offset_delta`、策略 ID 与兼容矩阵见 [WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md) §3.3、§14、§15；容量口径汇总见 [CAPACITY.md](CAPACITY.md)。引用写作 `文件:行`（相对仓库根）。
+本文件规定 `format_name = "PDF"` 的结构域（UBE）适配器。信封布局见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md)（`offset_delta` 见其 §12，策略 ID 见其 §14）；容量口径汇总见 [CAPACITY.md](CAPACITY.md) §4。引用写作 `文件:行`（相对仓库根）。`WIRE_SPEC_STRUCTURE.md` 仅为历史对照，冲突以本目录为准。
 
 ## 1 范围、导航与稳定性
 
@@ -79,17 +79,17 @@ eof_offset                               inject_offset
 真实硬约束（按代码）：
 
 ```text
-offset_delta = 46 + digits(N) + digits(L) <= 64        // 否则 auto 退 eof；显式 incremental 报错
+offset_delta = 46 + digits(N) + digits(L) <= 128       // 否则 auto 退 eof；显式 incremental 报错
 N <= 0x7FFF_FFFE                                       // parse 拒绝 >= 0x7FFF_FFFF
 经典 xref：actual_obj_offset <= 9_999_999_999          // 10 位定宽字段，>= 10^10 拒绝
 XRef 流：  xref_offset < 2^32                          // 4 B 定宽偏移，>= 4 GiB 拒绝
 有效载荷 <= clamp(256 × host_len, 64 MiB, 1 GiB)        // 引擎读侧上限
 ```
 
-- 64 B 位移上限约束的是“对象号 + `/Length` 的十进制位数”，不是载荷容量；超出时 `auto` 已选 `eof`，显式 `incremental` 在引擎报 `General("… exceeds the 64 bytes the header can record")`（`engine.rs:1267-1277`）。
+- 128 B 位移上限（`MAX_OFFSET_DELTA`，`envelope.rs:88`）约束的是“对象号 + `/Length` 的十进制位数”，不是载荷容量：两个 10 位十进制数即 66 B，旧值 64 会把这条合法路径打死。超出时 `auto` 退 `eof`（`pdf.rs:692-706`），显式 `incremental` 在引擎报 `General("… exceeds the 128 bytes the header can record")`（`engine.rs:1303-1310`）。
 - 对象号上限与经典 10 位字段分别在解析期与写入期失败：`UnsupportedFormat("… larger than 10 GB …")`（`pdf.rs:839-845`）；XRef 流 4 GB 失败为 `UnsupportedFormat("… larger than 4 GB …")`（`pdf.rs:795-801`）。
-- `inspect` 把 `None` 钳到 `structure_payload_limit(host_len) = clamp(256 × host_len, 64 MiB, 1 GiB)`（`engine.rs:1902-1907`、`:1916-1934`；`crypto.rs:786`），故报告值通常为 1 GiB 或 67,108,864。读侧对 `raw_size` 执行同一上限（`engine.rs:1954-1956`），超过则在读取时拒绝。
-- UBE 下界：`locate` 候选必须满足 `ube_offset >= 8`（`pdf.rs:644-648`）与 `ube_total_size >= 136`（`engine.rs:199-201`）；实际可产出的最小加密信封为 214 B（`WIRE_SPEC_STRUCTURE.md` §14.3）。
+- `inspect` 把 `None` 钳到 `structure_payload_limit(host_len) = clamp(256 × host_len, 64 MiB, 1 GiB)`（`engine.rs:1938-1943`、`:1952-1975`；`crypto.rs:786`），故报告值通常为 1 GiB 或 67,108,864。读侧对 `raw_size` 执行同一上限（`engine.rs:1996`），超过则在读取时拒绝。
+- UBE 下界：`locate` 候选必须满足 `ube_offset >= 8`（`pdf.rs:644-648`）与 `ube_total_size >= 136`（`engine.rs:199-201`）；实际可产出的最小加密信封为 214 B（`min_ube_len(1)`，`STRUCTURE-ENVELOPE.md` §16）。
 
 ## 6 locate 路径与方言提示
 

@@ -60,7 +60,7 @@ echo "hello" | sth embed cover.jpg --stdin -o out.jpg
 | `-p, --password <PWD>` | 命令行快速测试 | 直接明文指定口令（注意避免在多用户主机的 shell 历史中留痕） |
 | `--password-file <FILE>` | 生产/CI 自动化脚本 | 从指定文件第一行读取口令，避免进程列表泄漏 |
 | `-e, --encrypt` | 交互式终端操作 | 终端交互式弹出提示并进行口令二次确认，安全不留痕 |
-| `--key-file <FILE>` | 高安全对称信封 | 接受 32 字节原始二进制密钥或 64 字符 Hex 文本，跳过口令 KDF 派生 |
+| `--key-file <FILE>` | 高安全对称信封（**仅内容域**：`embed`/`extract`/`capacity`/`verify`/`inspect`） | 接受 32 字节原始二进制密钥或 64 字符 Hex 文本，跳过口令 KDF 派生。结构域 `write`/`read`/`restore` 不接受该参数，只支持 `-p` / `--password-file` / `-e`（`rust/src/cli/args.rs:261-270`、`:317`） |
 | `-H, --hint <TEXT>` | 容器写入记忆提示 | 存储口令提示信息（`read` 失败时回显；注意 `--stealth` 模式下禁止携带提示） |
 
 ---
@@ -83,12 +83,14 @@ sth write photo.png -t "机密文本" -p "MyPass123" --in-place --no-backup
 # 潜行模式 (--stealth)：擦除所有明显魔数与公开特征，无密码探测呈现为纯白噪声
 sth write photo.png -d secret.bin -p "StrongPassword" --stealth -o stealth.png
 
-# 指定格式策略 (--strategy)：例如强制 JPEG 使用 APP3 标记段
-sth write photo.jpg -d data.zip -s app3 -o out.jpg
+# 指定格式策略 (--strategy)：JPEG 只支持 app_segment 与 eof，强制改走文件尾
+sth write photo.jpg -d data.zip -s eof -o out.jpg
 
 # 批量写入：多个载体写入至目标目录
 sth write img1.png img2.png -t "批量数据" -o output_dir/
 ```
+
+> **双域前置检查（写前拒绝）**：`write` 在改动任何字节之前会先探测载体是否**已有**隐藏数据——结构域信封或内容域隐写。命中即报 `Rejection`：“already contains structure/content-domain payload; remove it first (restore/extract) or pass --overwrite”。`--overwrite` 只放行“继续叠加”，不会清除已有信封；且叠加后**结构域的 bit-exact 还原承诺失效**：先 `write` 再 `embed` 时，`restore` 会因宿主 SHA-256 不符而报 `RestoreMismatch`（机制见 `docs/smart_file_data_hiding_design.md` §7）。需要还原原始宿主时，请始终先 `restore` 再做内容域操作。
 
 ### 5.2 提取载荷 (`read`)
 ```bash

@@ -35,6 +35,12 @@ body_len   = len(ciphertext)          // 含 tag，不含 salt / nonce
 - `tag = 0x01`：`[0x01][name_len: u8][UTF-8 name][data]`，文件；`name_len ≤ 255`。
 
 写侧执行 NFC、路径清理与 255 字节边界截断（`rust/src/stego/envelope.rs:279-306`），读侧复清理（`:333-365`）；文件微头额外开销上限 256 字节（`:88`）。
+
+边界行为（fail-open，不报错）：
+
+- **写侧静默降级**：文件载荷的文件名经 `sanitize_filename` 清洗后若为空白、`.`、`..`、或清洗结果退化到兜底名（`core::fs::FALLBACK_NAME`），`encode_micro_header` 不抛异常，而是改写 `tag = 0x00` 并放弃文件名，正文不变（`envelope.rs:318-335`、`:283-303`）。因此“声明是文件但没有文件名”的载体是合法产物，读侧不得据此报错。
+- **读侧兜底命名**：解出 `tag = 0x01` 后，若名字再次清洗为空，读侧回退为 `"extracted.bin"`（`envelope.rs:362-363`；`core/fs.rs:59`）。
+- **`--no-filename` 的协议效果**：CLI 传 `--no-filename` 时，即使载荷来自文件（`-d <FILE>`），引擎也先把它包成 `Payload::bytes`，于是写出 `tag = 0x00`，最多省下 256 字节正文空间（`stego/engine.rs:491-496`、`envelope.rs:88`）。这是纯写侧行为，读侧无需感知。
 ### 2.4 信封 flags（明文第 5 字节）
 - 位 0 = `FLAG_COMPRESSED`：载荷已压缩。
 - 位 1..3 = 压缩算法 id：0 = Deflate（唯一实现）。

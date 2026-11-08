@@ -220,10 +220,9 @@ for info in png_algos {
 
 | 命令 | 库入口 | 说明 |
 |---|---|---|
-| `embed` | `embed_carrier_with_dialect` | 日常层：`-t/-d/-p/-o/--in-place/-a/--safety/--enforce-safety`；专家层按格式分成两节——`PNG Spatial Tuning`（`--exclusion-rate/--p1-window/--p2-window`）与 `JPEG DCT Tuning`（`--neighbor-weight/--stc-h`）；隐藏参数：`--slot-budget/--cipher-suite`；`Reproducibility` 节：`--seed`；`--dry-run` 全内存演练不落盘 |
+| `embed` | `embed_carrier_with_dialect` | 日常层：`-t/-d/-p/-o/--in-place/-a/--safety/--enforce-safety`；专家层按格式分成两节——`PNG Spatial Tuning`（`--exclusion-rate/--p1-window/--p2-window`）与 `JPEG DCT Tuning`（`--neighbor-weight/--stc-h`）；`Stego Envelope` 节：`--key-file/--cipher-suite(别名 --suite)/--seed`；隐藏参数（`hide = true`，`--help` 不展示但可解析）：`--slot-budget` 及上述六个调参项；`Reproducibility` 节：`--seed`；`--dry-run` 全内存演练不落盘（`rust/src/cli/args.rs:427-530`） |
 | `extract` | `extract_carrier_with_dialect` | 只有凭据与上限参数：`-p`/`--key-file`/`--max-payload`；PNG 代价图参数、算法、排除率、codec、`h`/`u` 等全部由载体头自描述，`ExtractArgs` **不暴露** `--p1-window`/`--p2-window`，提取端也无需重复；`-a/--auto` 在无内容域载荷时回退结构域 `read`；支持 `CARRIER...` + `-o <DIR>` 批量 |
-| `capacity` | `probe_carrier_capacity_with_dialect` | 独立只读探测子命令（与 `embed --capacity` 同一实现），`--json` 输出 `StegoCapacityInfo`；`--exact` 强制全量精确扫描（长视频默认开启前 20% 样本加权快速估算）；与 embed 共享同一组调参/凭据参数 |
-| `embed --capacity` | 同上 | 别名形式保留，支持 `--exact` |
+| `capacity` | `probe_carrier_capacity_with_dialect` | 独立只读探测子命令（`sth capacity`，别名 `sth c` / `sths c`），`--json` 输出 `StegoCapacityInfo`；`--exact` 强制全量精确扫描（长视频默认开启前 20% 样本加权快速估算）；与 embed 共享同一组调参/凭据参数（同一 `StegoTuningArgs`），因此探测结论可与写入参数逐项对齐 |
 
 **容量口径（`max_raw_payload_bytes`）**：按最小信封开销（`BODY_OVERHEAD = 22`，
 不含文件名；携带文件名额外消耗 `1 + name_len` 字节，见

@@ -1,6 +1,6 @@
 # PNG 结构域适配器：私有块注入（prIv）
 
-本文件规定 `format_name = "PNG"` 的结构域（UBE）适配器。信头、尾标、AAD、策略 ID 等公共布局不在本文重复，见 [WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md) §2–§3、§9、§14；内容域（LSB/像素域）见 [CONTENT-PNG.md](CONTENT-PNG.md)，二者互不替代。
+本文件规定 `format_name = "PNG"` 的结构域（UBE）适配器。信头、尾标、AAD、策略 ID 等公共布局不在本文重复，见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2–§15 与 [CAPACITY.md](CAPACITY.md) §4（[WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md) 仅为历史对照，冲突以本目录为准）；内容域（LSB/像素域）见 [CONTENT-PNG.md](CONTENT-PNG.md)，二者互不替代。
 
 ## 1 范围、导航与稳定性
 
@@ -12,7 +12,7 @@
 | **D** | 无。没有可选块、可选字段或版本分支；`stEg` 仅为读侧兼容别名，不写出 |
 | **I** | 复制缓冲区大小、CRC 计算方式、`strategy_note` 文案、是否额外补块（当前不补）；读侧均不依赖 |
 
-常量来源：签名与块名 `rust/src/structure/adapters/png.rs:11-15`，策略注册表 `rust/src/structure/registry.rs:90-104`，信封尺寸 `docs/api/WIRE_SPEC_STRUCTURE.md` §14。
+常量来源：签名与块名 `rust/src/structure/adapters/png.rs:11-15`，策略注册表 `rust/src/structure/registry.rs:90-104`，信封尺寸见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2。
 
 ## 2 格式识别（detect）
 
@@ -34,7 +34,7 @@
 
 `auto` 只看 UBE 精确尺寸：`ube_total_size > 0x7FFFFFFF` 时选 `eof`，否则选 `chunk`（`png.rs:119-125`）。它不测量载体余量，也不做除上述阈值外的重试/回退（引擎侧选择见 `engine.rs:1242-1255`）。显式策略不在列表内返回 `UnsupportedFormat`（`png.rs:159-163`）。
 
-容量报告（`strategy_capacities`，`png.rs:127-146`）为 `chunk = 0x7FFFFFFF`、`eof = None`（无上限、文件增长）。`inspect` 会把两者统一钳到引擎载荷上限 `structure_payload_limit(host_len) = clamp(256 × host_len, 64 MiB, 1 GiB)`（`engine.rs:1902-1934`、`:2604-2611`），因此实际显示值通常远小于 2 GiB；基线中 stego 为 87,105 B 的 PNG 用例（原载体 86,854 B）两策略均报 `67,108,864`（`temp/baseline/baseline.json:757-777`）。
+容量报告（`strategy_capacities`，`png.rs:127-146`）为 `chunk = 0x7FFFFFFF`、`eof = None`（无上限、文件增长）。`inspect` 会把两者统一钳到引擎载荷上限 `structure_payload_limit(host_len) = clamp(256 × host_len, 64 MiB, 1 GiB)`（`engine.rs:1938-1975`、`:2604-2611`），因此实际显示值通常远小于 2 GiB；基线中 stego 为 87,105 B 的 PNG 用例（原载体 86,854 B）两策略均报 `67,108,864`（`temp/baseline/baseline.json:757-777`）。
 
 ## 4 注入点与块布局
 
@@ -64,7 +64,7 @@ eof:   增长字节数 = ube_total_size；无块长度上限
 注入区域关系: ube_total_size <= inject_size；注入区末尾 <= 文件长度
 ```
 
-容量不来自“可用空隙/填充”：适配器不复用已有零填充或私有块空间，始终新建块，因此没有按载体测量的容量函数（`png.rs:127-146`）。写侧真正生效的是载荷上限：`raw_size <= structure_payload_limit(orig_host_size)`（`engine.rs:1082-1094`）。UBE 下限分两层：`locate`/`confine` 的结构下界为 `112 + 24 = 136`（`engine.rs:199-201`、`png.rs:268`、`:431`）；实际可产出的最小加密信封为 `MIN_UBE_ENCRYPTED = 214`（`WIRE_SPEC_STRUCTURE.md` §14.3）。显式 `chunk` 遇到 `ube_total_size > 2 GiB − 1` 时注入失败并提示改用 `--strategy eof`（`png.rs:168-172`）；`auto` 已在选择阶段改走 `eof`。
+容量不来自“可用空隙/填充”：适配器不复用已有零填充或私有块空间，始终新建块，因此没有按载体测量的容量函数（`png.rs:127-146`）。写侧真正生效的是载荷上限：`raw_size <= structure_payload_limit(orig_host_size)`（`engine.rs:1123`）。UBE 下限分两层：`locate`/`confine` 的结构下界为 `112 + 24 = 136`（`engine.rs:199-201`、`png.rs:268`、`:431`）；实际可产出的最小加密信封为 214 B（`min_ube_len(1)`，`rust/src/structure/envelope.rs:123-140`）。显式 `chunk` 遇到 `ube_total_size > 2 GiB − 1` 时注入失败并提示改用 `--strategy eof`（`png.rs:168-172`）；`auto` 已在选择阶段改走 `eof`。
 
 ## 6 locate 路径与方言提示
 
@@ -106,7 +106,7 @@ eof:   增长字节数 = ube_total_size；无块长度上限
 | 块 CRC 损坏 | `verify_structure` 返回 `(false, "CRC32 mismatch for chunk …")`；写入前被引擎拒绝（`png.rs:399-407`；`engine.rs:1028-1035`） |
 | 尾标魔数匹配但 CRC/解析失败 | 报 `CorruptedData`（`envelope.rs:844-858`），不静默当作无信封 |
 
-其他限制：`locate` 不校验块 CRC，也不认证尾标，只提出候选；安全性由引擎的物理包含、坐标交叉与还原哈希兜底（`WIRE_SPEC_STRUCTURE.md` §3.4、`engine.rs:191-207`、`:2828-2902`）。`prIv`/`stEg` 的存在与大小本身可被结构扫描发现：`suspicious_structures` 对 `length >= 136` 的私有块报警（`png.rs:428-473`），`verify_structure` 在详情中报告块名（`png.rs:421-425`）。串接流的注入落在最后一个 `IEND` 前；若调用方期望写入首个流，需自行拆分。
+其他限制：`locate` 不校验块 CRC，也不认证尾标，只提出候选；安全性由引擎的物理包含、坐标交叉与还原哈希兜底（`STRUCTURE-ENVELOPE.md` §12、`engine.rs:191-207`、`:2867-2912`）。`prIv`/`stEg` 的存在与大小本身可被结构扫描发现：`suspicious_structures` 对 `length >= 136` 的私有块报警（`png.rs:428-473`），`verify_structure` 在详情中报告块名（`png.rs:421-425`）。串接流的注入落在最后一个 `IEND` 前；若调用方期望写入首个流，需自行拆分。
 
 ## 10 自检
 

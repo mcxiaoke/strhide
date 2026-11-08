@@ -8,6 +8,8 @@
 
 适用于 MP4/MOV/MKV 中的 HEVC 视频、Annex-B 裸流，以及 HEIF/HEIC 的主图或 `grid` 瓦片项。HEIF 缩略图桥接不属于 Scheme C，见 §8.5。
 
+**容器解析的防御上限**：读取 MP4/MOV 容器结构（`inspect` 等走 `StegoHeaderInfo` 的路径）时会把整个 `moov` box 读入内存，因此对 `moov` 尺寸设 32 MiB 硬上限，超出即 `UnsupportedFormat("MP4 moov box exceeds 32 MiB")`（`rust/src/stego/hevc/engine.rs:2627-2631`）。该上限只拦异常/恶意容器，正常 `moov`（含 `stsd`/`stbl`）远小于此。
+
 | 内容 | 级别 | 依据 |
 | :--- | :--- | :--- |
 | 槽位语义、分带、线性置换、32B 头、`pre_salt`、session salt | **F** | 改变即读不回既有载体 |

@@ -1,6 +1,6 @@
 # RIFF 容器适配器：WAV / WebP 私有块注入（riff_chunk）
 
-本文件规定 `format_name = "WAV"` 与 `"WEBP"` 的结构域（UBE）适配器。信封、尾标、AAD、`offset_delta` 与策略 ID 的公共定义见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md)、[WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md) §2–§3、§9、§14、§15；本文件只定义 RIFF 容器的 detect、策略选择、块布局、容量与还原。内容域（WAV PCM LSB / FLAC 残差）见 [CONTENT-AUDIO.md](CONTENT-AUDIO.md)，二者互不替代。
+本文件规定 `format_name = "WAV"` 与 `"WEBP"` 的结构域（UBE）适配器。信封、尾标、AAD、`offset_delta` 与策略 ID 的公共定义见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2–§15（`WIRE_SPEC_STRUCTURE.md` 仅为历史对照，冲突以本目录为准）；本文件只定义 RIFF 容器的 detect、策略选择、块布局、容量与还原。内容域（WAV PCM LSB / FLAC 残差）见 [CONTENT-AUDIO.md](CONTENT-AUDIO.md)，二者互不替代。
 
 ## 1 范围、导航与稳定性
 
@@ -40,7 +40,7 @@
 
 `riff_can_chunk` 同时复刻注入的硬检查：`host_len == 8 + old_riff_size`、chunk 表为 `Exact`、`old_riff_size + inject_size <= u32::MAX`（`riff.rs:454-479`）。`auto` 不测量“空隙”，`riff_chunk` 总是让文件增长；显式策略由引擎校验是否在支持列表内（`engine.rs:1242-1255`），`riff_inject` 再次拒绝未知策略（`riff.rs:56-60`）。
 
-容量报告（`riff.rs:481-519`）：`riff_chunk` 的 `capacity_bytes = None`、`limit = "up to 4GB RIFF limit (file grows)"`；`eof` 为无上限。`reader != None` 时若边界谓词失败，`riff_chunk` 置 `available = false` 并附注回退 `eof`；WebP Simple Format 另行置 `available = false`（`webp.rs:38-51`）。`reader == None` 的静态表不区分 WebP 子格式。`inspect` 随后把两者统一钳到引擎载荷上限 `structure_payload_limit(host_len) = clamp(256 × host_len, 64 MiB, 1 GiB)`（`engine.rs:1902-1934`、`:2604-2611`；上限常量见 `rust/src/core/crypto.rs:786`）。
+容量报告（`riff.rs:520-560`）：**动态查询**（`reader != None`）时 `riff_chunk` 上报真实 headroom `capacity_bytes = u32::MAX - old_riff_size - 8`（`riff.rs:483-503`），而非 `None`；若该余量低于最小可写信封 `min_ube_len(0)`，则置 `available = false`、`capacity_bytes = None` 并在 note 说明只能回退 `eof`（`riff.rs:506-518`、`:546-556`）。**静态表**（`reader == None`）仍报 `capacity_bytes = None`、`limit = "up to 4GB RIFF limit (file grows)"`；`eof` 恒为无上限。`reader != None` 时若边界谓词失败，`riff_chunk` 同样置 `available = false` 并附注回退 `eof`；WebP Simple Format 另行置 `available = false`（`webp.rs:38-51`）。`reader == None` 的静态表不区分 WebP 子格式。`inspect` 随后把两者统一钳到引擎载荷上限 `structure_payload_limit(host_len) = clamp(256 × host_len, 64 MiB, 1 GiB)`（`engine.rs:1938-1975`、`:2604-2611`；上限常量见 `rust/src/core/crypto.rs:786`），且不再为 `available = false` 的条目填数。
 
 ## 4 注入布局
 
@@ -89,8 +89,8 @@ R + 8 + N + P <= 0xFFFF_FFFF        ⇔  R + inject_size <= u32::MAX
 
 由此：块长字段（`u32`）最多能记 `N`，但真正先触发的是 RIFF size 上限；`N` 的精确上限为满足 `N + P <= 0xFFFF_FFFF - R - 8` 的最大值，即单块上限受 `R` 挤占，而不是独立的 `u32::MAX`。注入后文件长度最大为 `0xFFFF_FFFF + 8` 字节。
 
-- 结构下界：`locate` 要求块长 `>= 24`（`riff.rs:194`），`confine_location` 要求 `ube_total_size >= 112 + 24 = 136`（`engine.rs:191-207`）。实际可产出的信封从 `min_ube_len(0) = 213` 起（`rust/src/structure/envelope.rs:116-132`、`:1010-1023`）；`MIN_UBE_PLAIN = 178` 仅为保守报告口径，`MIN_UBE_ENCRYPTED = 214`（WIRE_SPEC_STRUCTURE.md §14.3）。
-- 引擎载荷上限另设为 `raw_size <= clamp(256 × orig_host_size, 64 MiB, 1 GiB)`（`engine.rs:1081-1094`、`:1902-1907`）。
+- 结构下界：`locate` 要求块长 `>= 24`（`riff.rs:194`），`confine_location` 要求 `ube_total_size >= 112 + 24 = 136`（`engine.rs:191-207`）。实际可产出的信封为 `min_ube_len(0) = 213`（0 字节载荷）与 `min_ube_len(1) = 214`（CLI 允许的最小载荷，`rust/src/structure/envelope.rs:123-140`）。代码中**没有** `MIN_UBE_PLAIN`/`MIN_UBE_ENCRYPTED` 两个常量，容量报告一律用 `min_ube_len(...)` 计算。
+- 引擎载荷上限另设为 `raw_size <= clamp(256 × orig_host_size, 64 MiB, 1 GiB)`（`engine.rs:1123`、`:1938-1943`）。
 - 超限行为：`auto` 在 `riff_can_chunk` 失败时改走 `eof`；显式 `riff_chunk` 在 size 溢出时报 `General("RIFF 4GB container size overflow")`（`riff.rs:126-133`），在边界/表不匹配时报 `CorruptedData` 并提示 `--strategy eof`（`riff.rs:93-121`）。`eof` 无容器上限，只受引擎载荷上限约束。
 
 ## 7 locate 路径

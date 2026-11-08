@@ -105,7 +105,7 @@ payload    = framed_len(n, chunk_size) = n + chunks*20, chunks = ceil(n/chunk_si
 | PE | 取 codebits 与 slack 的较小者：`min(bits/8 − 14, longest_zero_run − 14)` | `rust/src/structure/adapters/pe.rs:208-283`、`:254-258` |
 | PDF | `incremental` 仅当 trailer/xref 可解析且未加密、对象号 `< 0x7FFF_FFFF`；经典 xref 上限 10 GB、XRef 流上限 4 GB；否则退 `eof` | `rust/src/structure/adapters/pdf.rs:50-96`、`:795-801`、`:839-845` |
 
-所有适配器上限最终被引擎钳到 `structure_payload_limit(host_len)`（`rust/src/structure/engine.rs:1902-1927`）。
+所有适配器上限最终被引擎钳到 `structure_payload_limit(host_len)`（`rust/src/structure/engine.rs:1938-1975`）。
 
 ### 3.3 自动策略选择的影响
 `auto` 由各适配器的 `choose_auto_strategy(reader, exact_ube_size)` 一次性决定；适配器内部可因探测结果改选 `eof`，但引擎**不会**在注入失败后再换策略重试（`rust/src/structure/engine.rs:1242-1246`）。因此：
@@ -116,6 +116,7 @@ payload    = framed_len(n, chunk_size) = n + chunks*20, chunks = ceil(n/chunk_si
 - PE：优先级 `pe_slack → pe_overlay`（`pe.rs:176-210`）；`pe_codebits` 是显式策略（`-s pe_codebits`），`auto` 不会选它。
 - ZIP：`cd_offset==0`、ZIP64 locator、`patch_limit + ube >= 0xFFFFFFFF`、EOCD 缺失均退 `eof`。
 - WAV/WebP：RIFF 声明边界必须等于物理长度且 4 GiB 头寸足够，否则 `eof`（`wav.rs:25-35`、`webp.rs:25-35`）。
+- MP4 恒选 `box_uuid`、MKV 恒选 `ebml_void`：这两个适配器的 `auto` **没有** `eof` 回退（`mp4.rs:66-68`、`mkv.rs:43-45`）。
 
 ## 4. 限额总表
 
@@ -126,6 +127,8 @@ payload    = framed_len(n, chunk_size) = n + chunks*20, chunks = ceil(n/chunk_si
 | `MAX_PLAINTEXT_LEN` | `67,108,841` | `rust/src/stego/envelope.rs:101-102` |
 | `MAX_EXT_BYTES`（PNG/JPEG/WAV/FLAC） | `255` | `rust/src/stego/header.rs:159` |
 | HEVC `ext_len` | `<= 64` | `rust/src/stego/hevc/engine.rs:124` |
+| HEVC MP4 `moov` box | `<= 32 MiB`（超出 `UnsupportedFormat`） | `rust/src/stego/hevc/engine.rs:2627-2631` |
+| PNG `IEND` 后尾随数据 | `<= 16 MiB`（超出 `CorruptedData`） | `rust/src/stego/png/engine.rs:334-341` |
 | `MAX_PNG_PIXELS` | `67,108,864` | `rust/src/stego/png/engine.rs:506` |
 | PNG/JPEG 工作集 | `8 GiB` | `rust/src/stego/png/engine.rs:516`、`rust/src/stego/jpeg/engine.rs:100` |
 | 音频工作集 | `768 MiB` | `rust/src/stego/audio/core.rs:69` |
@@ -136,7 +139,7 @@ payload    = framed_len(n, chunk_size) = n + chunks*20, chunks = ceil(n/chunk_si
 | `CHUNK_OVERHEAD` | `20 B/块` | `rust/src/core/crypto.rs:61-64` |
 | `CHUNK_SIZE` / `MAX_CHUNK_SIZE` | `2 MiB` / `64 MiB` | `rust/src/core/crypto.rs:96`、`:101` |
 | `MAX_VERIFY_PAYLOAD_SIZE` | `1 GiB` | `rust/src/core/crypto.rs:786` |
-| 结构载荷上限 | `clamp(256 * host_len, 64 MiB, 1 GiB)` | `rust/src/structure/engine.rs:1902-1906` |
+| 结构载荷上限 | `clamp(256 * host_len, 64 MiB, 1 GiB)` | `rust/src/structure/engine.rs:1938-1943` |
 | 内容文件名 | `255 B` | `rust/src/stego/envelope.rs:78` |
 
 ## 5. 错误语义

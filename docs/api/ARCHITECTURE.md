@@ -88,7 +88,7 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
 - **结构域**把一个完整的 UBE 信封（有头、有尾、有魔数）放进容器的结构性空隙（私有 chunk、段、盒子、目录前间隙等），入口在 [`structure`]。
 - **内容域**把数据嵌入图像像素（PNG）、DCT 系数（JPEG）或 H.265/HEVC 变换系数旁路符号位（HEIF/HEIC 与 HEVC Annex-B），没有结构化信封，入口在 [`stego`]。
 
-两域共用 [`crypto`]、[`errors`]、[`params`] 与 `core`，但**密钥派生域相互隔离，信封格式本身就是两套不同结构**（结构域 UBE 有头/尾/元数据，内容域是极简伪随机微信封），互不可读。差异清单见 [spec/README.md §1](./spec/README.md)，内容域机制见 [§7.3](#73-内容域隐写)。
+两域共用 [`crypto`]、[`errors`]、[`params`] 与 `core`，但**密钥派生域相互隔离，信封格式本身就是两套不同结构**（结构域 UBE 有头/尾/元数据，内容域是极简伪随机微型信封），互不可读。差异清单见 [spec/README.md §1](./spec/README.md)，内容域机制见 [§7.3](#73-内容域隐写)。
 
 ### 2.1 门面：一个 Dialect，两个子门面
 
@@ -502,7 +502,20 @@ const MY_DIALECT: Dialect = Dialect::new()
 | `PeAdapter` | `PE` | `pe_slack`、`pe_overlay`、`pe_codebits`（仅显式）、`eof` |
 | `MkvAdapter` | `MKV` | `ebml_void`、`eof` |
 
-- `strategy = "auto"`（默认）由 `choose_auto_strategy` 按 UBE 尺寸选主策略，放不下时透明回退 `eof`；回退会在 `strategy_note` 中说明。
+- `strategy = "auto"`（默认）由各适配器的 `choose_auto_strategy` 决定，**并非“放不下就退 `eof`”**：有的没有回退，有的是回退到同格式的另一个零增长策略。判定输入只有 UBE 尺寸与载体结构（`reader, ube_size`），不读用户参数；选择结果与理由记录在 `strategy_note`。逐格式实际行为：
+
+| 格式 | `auto` 决策 | 是否有 `eof` 回退 |
+| :--- | :--- | :--- |
+| PNG | `chunk`；仅当 `ube_size > 2 GiB − 1` 才选 `eof`（`png.rs:119-125`） | 仅超限时 |
+| JPEG | `app_segment`；UBE 超 64 MiB 总容量、或 SOS 不可达/重定位后超出扫描窗口时选 `eof`（`jpeg.rs:252-267`） | 是 |
+| WAV / WebP | `riff_can_chunk` 为真取 `riff_chunk`，否则 `eof`（`wav.rs:25-35`、`webp.rs:25-36`） | 是 |
+| MP4 | 恒 `box_uuid`（`mp4.rs:66-68`） | **否** |
+| HEIF | 放得下且容器允许时 `item_hidden`，否则 `box_uuid`（`heif.rs:57-65`） | 退到 `box_uuid`，不回 `eof` |
+| MKV | 恒 `ebml_void`（`mkv.rs:43-45`） | **否** |
+| ZIP | `pre_cd_inject`；空档案（`cd_offset = 0`）、存在 ZIP64 locator、或 32 位溢出时选 `eof`（`zip.rs:134-158`） | 是 |
+| PDF | `incremental`；trailer 不可解析、或对象头位移 `46 + digits(N) + digits(L)` 超过 `MAX_OFFSET_DELTA(128)` 时选 `eof`（`pdf.rs:689-706`） | 是 |
+| PE | 有足够 slack 时 `pe_slack`，否则 `pe_overlay`（`pe.rs:180-211`）；`pe_codebits` 永不进 `auto` | 退到 `pe_overlay`，不回 `eof`（显式 `-s eof` 仍可用） |
+
 - `EofAdapter` 是各载体共用的兜底策略（在 EOF 后追加），**不在** `ADAPTERS` 中作为格式捕获器；无法识别的文件会被拒绝，而不是被静默追加。
 
 ### 7.2 HostAdapter 能力面

@@ -1,6 +1,6 @@
 # STRUCTURE-PE：Windows PE 适配器（pe_overlay / pe_codebits / pe_slack）
 
-本文件规定 `format_name = "PE"` 的结构域（UBE）适配器。112B 信封头、24B 尾标、AAD、策略 ID 等公共布局不在本文重复，见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md)；线格式速查见 [WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md) §12、§14、§15。本文所有布局与常量均以 `rust/src/structure` 的可执行代码为准。
+本文件规定 `format_name = "PE"` 的结构域（UBE）适配器。112B 信封头、24B 尾标、AAD、策略 ID 等公共布局不在本文重复，见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2–§15；限额速查见 [CAPACITY.md](CAPACITY.md) §4（`WIRE_SPEC_STRUCTURE.md` 仅为历史对照，冲突以本目录为准）。本文所有布局与常量均以 `rust/src/structure` 的可执行代码为准。
 
 ## 1 范围、导航与稳定性
 
@@ -179,7 +179,7 @@ available = capacity >= min_ube_len(1)        （1 字节载荷的最小可写 U
 - `locate_with_hint` 未在 PE 适配器中覆写，因此引擎传入的 `expected_header_magic` 被忽略；PE 只消费 `expected_trailer_magic`（`mod.rs:218-225`、`engine.rs:137-172`）。
 - `pe_codebits` 把该 trailer magic 用作 `ChannelHeader.magic` 的期望值；无密码/官方方言时退回 `CHANNEL_MAGIC`（`pe_codebits.rs:541-553`）。
 - `pe_slack` 在 `expected_magic = None`（官方方言）时额外校验 header 前 8B 等于 `STANDARD_HEADER_MAGIC`；私有方言或 stealth 只依赖尾标魔数 + CRC（`pe_slack.rs:118-121`、`:207-212`）。
-- 伪造尾标无法通过引擎坐标检查：`pe_overlay` 要求 `inject_offset + offset_delta == trailer.ube_offset`，`pe_slack` 同理，二者都不在 `chunk`/`eof` 的“允许平移”白名单内（`engine.rs:2828-2902`）。
+- 伪造尾标无法通过引擎坐标检查：`pe_overlay` 要求 `inject_offset + offset_delta == trailer.ube_offset`，`pe_slack` 同理，二者都不在 `chunk`/`eof`/`ebml_void` 的“允许平移”白名单内（`engine.rs:2867-2912`）。
 
 ## 8 remove 还原顺序与字节级一致性
 

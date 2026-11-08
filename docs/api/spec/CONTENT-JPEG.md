@@ -6,6 +6,12 @@
 
 读侧完整路径：JPEG 解码得到各分量按 MCU 交织排列的量化 DCT 系数（`rust/src/stego/jpeg/engine.rs:223-231`）→ 仅取 component 0 做封面摘要（`:238-261`）→ 定位头槽 → 读 44B 超块 → 读扩展区 → 用密钥置换取正文槽 → 取系数 LSB 做三元 STC 综合。代价模型、方向偏置、重编码与重试均不参与读侧。
 
+**载体准入（写侧与容量探测都在解码前/解码时拦截，拒绝即 `UnsupportedFormat`）**：
+
+- **仅 Baseline JPEG（SOF0）**：遇到 SOF2/渐进式直接拒绝，提示转 Baseline 或用结构域 `write`（`engine.rs:68-75`）。
+- **分量数只能是 1（灰度）或 3（YCbCr）**：4 分量 CMYK 会被拒绝，因为槽位网格、亮度代价表与 `components_mask` 都假定单亮度平面或 Y/Cb/Cr，否则会把 C 分量误当亮度调制（`engine.rs:118-128`）。
+- **三道硬限额**：`MAX_JPEG_MCU_COUNT = 1,048,576`、`MAX_JPEG_TOTAL_BLOCKS = 6,291,456`、整条流水线工作集 `MAX_PIPELINE_BYTES = 8 GiB`（`engine.rs:86-100`，判定见 `:151-166`）。前两项同时用于容量探测与嵌入，避免两条路径对同一载体给出不同结论。
+
 | 级别 | JPEG 内容 |
 | :--- | :--- |
 | **F** | 44B 超块字段与 CRC；基础头 718 槽与扩展区槽数；component 0 / MCU 块序；Grid 与扁平索引；前缀 Fisher-Yates；正文 `body_n = u·(bits+h−1)`；奇偶映射 `c & 1` 与载体 `2|parity`；STC 综合；`codec_id = 0` |

@@ -2,7 +2,8 @@
 
 > 范围：本文件只定义 JPEG 作为**结构域载体**时的检测、策略、注入布局、定位与还原。
 > 信封字段、AAD、加密与 Trailer 语义见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md)；
-> 线格式总表见 [WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md) §3.3、§14、§15；
+> 线格式总表见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2–§15 与 [CAPACITY.md](CAPACITY.md) §4；
+> [WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md) 已冻结为历史对照（非规范），与其冲突时以本目录为准；
 > JPEG 的 DCT 内容域（UERD/J-UNIWARD）见 [CONTENT-JPEG.md](CONTENT-JPEG.md)，两者互不替代。
 > 适配器实现见 `rust/src/structure/adapters/jpeg.rs`，注册名 `JPEG`（`:230-232`），
 > 在 `ADAPTERS` 中排在 PNG 之后（`rust/src/structure/registry.rs:25-36`）。

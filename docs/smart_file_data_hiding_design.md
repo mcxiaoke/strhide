@@ -72,9 +72,9 @@
 | :--- | :--- | :--- | :--- | :--- |
 | `0x00` | `magic_header` | 8B | `bytes` | 标准模式：高熵二进制 `b7 54 2c 82 7e 31 1d 6e`（`SHA-256("strhide-standard-header-v2")[..8]`）；stealth 模式：口令派生的 8 字节伪随机值。**旧版** `89 53 54 52 48 49 44 45`（`\x89STRHIDE`）已于 2026-10-21 移除读取兼容，现仅作为 `analysis` 取证扫描的历史特征；pre-v2 载体一律报「无隐藏数据」。 |
 | `0x08` | `version` | 1B | `uint8` | 协议版本号，当前固定为 `0x02` |
-| `0x09` | `flags` | 1B | `uint8` | `bit 0`: **是否使用用户口令密钥**（`0`=内置密钥模式，落盘加密，读取无需输入口令；`1`=用户口令模式，读取需口令）<br>`bit 1`: 是否压缩（`0`=无, `1`=Deflate）<br>`bit 2`: 载荷类型（`0`=文本, `1`=文件）<br>`bit 3`: stealth 模式（`0`=标准, `1`=Stealth，须与 bit0 同时置位）<br>`bit 4`: 含密码提示<br>`bit 5`: 紧凑二进制元数据（`0`=JSON, `1`=紧凑 v1）<br>`bit 6` / `bit 7`: 保留，必须为 `0`（载荷流始终按块 AEAD 封装，无需标志位） |
+| `0x09` | `flags` | 1B | `uint8` | `bit 0`: **是否使用用户口令密钥**（`0`=内置密钥模式，落盘加密，读取无需输入口令；`1`=用户口令模式，读取需口令）<br>`bit 1`: 是否压缩（`0`=无, `1`=Deflate）<br>`bit 2`: 载荷类型（`0`=文本, `1`=文件）<br>`bit 3`: stealth 模式（`0`=标准, `1`=Stealth，须与 bit0 同时置位）<br>`bit 4`: 含密码提示<br>`bit 5`: 紧凑二进制元数据（`1`=紧凑 v1；`0`=pre-v2 JSON 元数据，**读取端已移除**，直接报不支持）<br>`bit 6` / `bit 7`: 保留，必须为 `0`（载荷流始终按块 AEAD 封装，无需标志位） |
 | `0x0A` | `strategy_id` | 1B | `uint8` | `1`=eof, `2`=chunk, `3`=box_uuid, `4`=pre_cd_inject, `5`=app_segment, `6`=incremental, `7`=pe_overlay, `8`=pe_codebits, `9`=pe_slack, `10`=riff_chunk, `11`=ebml_void, `12`=item_hidden, `13`=free_box（与 `structure/registry.rs::STRATEGY_REGISTRY` 一致） |
-| `0x0B` | `offset_delta` | 1B | `uint8` | 注入点到信封首字节的物理位移（取值范围 0..=64，用于三级坐标校验，如适配器外层容器包装头偏移补偿） |
+| `0x0B` | `offset_delta` | 1B | `uint8` | 注入点到信封首字节的物理位移（取值范围 0..=128，上限 `MAX_OFFSET_DELTA = 128`，用于三级坐标校验，如适配器外层容器包装头偏移补偿） |
 | `0x0C` | `salt` | 16B | `bytes` | CSPRNG 生成的 128 位随机盐 |
 | `0x1C` | `base_nonce` | 12B | `bytes` | CSPRNG 生成的 96 位 Nonce 基础值 |
 | `0x28` | `orig_host_size` | 8B | `uint64` | 原始宿主文件的精确字节大小 |
@@ -95,21 +95,22 @@
 * **约束规则**：明文存储，长度不超过 1024 字节，写入前经 Unicode NFC 规范化。与隐蔽模式互斥（`flags & FLAG_STEALTH` 时 `hint_len` 必须为 0）。
 
 ### 3.4 元数据块（Metadata Block）
-元数据块经 AES-256-GCM 加密，由 `flags & FLAG_COMPACT_META (0x20)` 决定原始格式：
-1. **紧凑二进制布局（v1，默认）**：
+元数据块经 AES-256-GCM 加密，原始格式由 `flags & FLAG_COMPACT_META (0x20)` 决定：
+1. **紧凑二进制布局（v1，唯一可写、唯一可读）**：
    - `0x00`: `version` (1B, 0x01)
    - `0x01`: `name_len` (2B LE, ≤ 65535)
    - `0x03`: `filename` (`name_len` 字节 UTF-8，提取端强制做路径净化)
    - 随附：`raw_size` (LEB128)、`raw_sha256` (32B 二进制)、`created_at` (LEB128 Unix 时间戳)。
-2. **旧版 JSON 布局**：JSON 字典的 UTF-8 字节流。
-3. **加密绑定**：AAD 为 `header[0..80] || meta_len || hint_len || hint`（变长），Tag 占用 16 字节。`meta_len`/`hint_len`/提示正文因此也被认证；只有四个注入后坐标（`inject_offset`/`inject_size`/`patch_offset`/`orig_patch_val`）在 AAD 之外，改由物理边界、坐标交叉与还原 SHA-256 三重结构校验兜底（见 `docs/api/WIRE_SPEC.md` §3.4、§5）。
+2. **加密绑定**：AAD 为 `header[0..80] || meta_len || hint_len || hint`（变长），Tag 占用 16 字节。`meta_len`/`hint_len`/提示正文因此也被认证；只有四个注入后坐标（`inject_offset`/`inject_size`/`patch_offset`/`orig_patch_val`）在 AAD 之外，改由物理边界、坐标交叉与还原 SHA-256 三重结构校验兜底（见 `docs/api/spec/STRUCTURE-ENVELOPE.md` §5、§7、§12）。
+
+> **pre-v2 JSON 布局已彻底移除**：写侧恒定置 `FLAG_COMPACT_META`；读侧遇到该位为 0 直接返回 `CorruptedData("Unsupported metadata layout: pre-v2 JSON metadata blocks are no longer readable")`（`rust/src/structure/engine.rs:391-400`），不做任何 JSON 解码。
 
 ### 3.5 载荷数据流（Payload Stream）
 数据流采用分块 AEAD 封装：
 * **分块规格**：默认分块大小为 2MB (`CHUNK_SIZE = 2,097,152` 字节)，单块硬上限为 64MB (`MAX_CHUNK_SIZE = 67,108,864` 字节)。
 * **分块结构**：`[4B chunk_len (LE)] + [密文 (长度 ≤ 64MB)] + [16B GCM Tag]`。
 * **分块 Nonce**：`chunk_nonce = base_nonce[:8] || ((base_nonce[8:12] as u32) ^ chunk_index).to_le_bytes()`。
-* **分块 AAD**：`chunk_aad = fixed_header_aad (80B) || chunk_index (8B, u64 LE) || is_last (1B, u8)`。
+* **分块 AAD**：$\text{chunk\_aad} = \text{header}[0..80] \parallel \text{meta\_len} \parallel \text{hint\_len} \parallel \text{hint} \parallel \text{chunk\_index}(8\text{B LE}) \parallel \text{is\_last}(1\text{B})$，即“元数据块 AAD + 块序号 + 末块标志”，总长 $97 + \text{hint\_len}$。`meta_len`/`hint_len`/`hint` 不可省略，读侧必须逐字节一致（`rust/src/core/crypto.rs:496-501`、`:536-539`、`:630-633`；`structure/envelope.rs:390-397`、`structure/engine.rs:1333-1365`）。
 * **空载荷边界**：载荷长度为 0 时写入单个 `chunk_index=0, is_last=1` 的空加密块（密文长度 0，尾随 16 字节 Tag）。
 
 ### 3.6 通用定位尾标（Universal Locator Trailer, 24 字节）
@@ -161,23 +162,39 @@
 
 | 适配器 | 支持格式与扩展名 | 支持策略 | 注入机制 |
 | :--- | :--- | :--- | :--- |
-| **PNG** | `.png` | `chunk` (默认), `eof` | 插入私有辅助块 `prIv`（位于末尾 `IEND` 之前）；脏尾数据原样保留 |
-| **JPEG** | `.jpg`, `.jpeg` | `app_segment` (默认), `eof` | 插入 `COM` 标记段（`0xFF 0xFE`，位于 `SOS` 扫描起始标记之前） |
-| **MP4 / MOV** | `.mp4`, `.mov`, `.m4v` | `box_uuid` (默认), `eof` | 追加顶层 `uuid` Box（RFC 4122 v4 UUID，32/64位双模头部） |
+| **PNG** | `.png` | `chunk` (默认), `eof` | 插入私有辅助块 `prIv`（位于末尾 `IEND` 之前）；`IEND` 之后的脏尾数据原样保留 |
+| **JPEG** | `.jpg`, `.jpeg` | `app_segment` (默认), `eof` | 插入 **APP15** 标记段（`0xFF 0xEF`，位于 `SOS` 之前，可多段链）；`COM`（`0xFF 0xFE`）只作为第三方可疑结构提示，绝不用于写入或定位 |
+| **WEBP** | `.webp` | `riff_chunk` (默认，仅 Extended Format/`VP8X`), `eof` | 追加私有 RIFF 块 `SHRD`，并改写 RIFF 头长度字段 |
+| **WAV** | `.wav` | `riff_chunk` (默认), `eof` | 同上（`SHRD` 块追加在 `data` 之后、RIFF 长度内） |
+| **MP4 / MOV** | `.mp4`, `.mov`, `.m4v` | `box_uuid` (默认), `eof` | 追加顶层 `uuid` Box（RFC 4122 v4 UUID，24/32 字节双模头部） |
+| **HEIF / HEIC** | `.heic`, `.heif` | `item_hidden` (默认), `free_box`, `box_uuid`, `eof` | 改写 `meta`（新增孤立项 + `iloc`/`infe`）并在末尾追加第二个 `mdat`；其余策略只追加盒，媒体字节逐字节复制 |
+| **MKV / WebM** | `.mkv`, `.webm` | `ebml_void` (默认), `eof` | 追加一个顶层 EBML `Void` 元素（`EC` + VINT + UBE），不更新 `Segment`/`SeekHead`/`Cues` |
 | **ZIP 归档** | `.zip`, `.jar`, `.docx`, `.xlsx`, `.pptx` | `pre_cd_inject` (默认), `eof` | 在中央目录（Central Directory）前切开插入信封，并修正 EOCD 记录中的 `cd_offset` |
 | **PDF 文档** | `.pdf` | `incremental` (默认), `eof` | ISO 32000-1 增量更新段（追加 Metadata 流对象、增量 xref 表与 trailer） |
 | **PE 可执行文件** | `.exe`, `.dll`, `.sys`, `.scr` | `pe_slack`（默认）, `pe_overlay`, `pe_codebits`（需显式 `-s`）, `eof` | 节尾零填充（零文件增长）/ 镜像尾部 Overlay 追加 / 指令编码置换（改写 `.text`，高级） |
-| **EOF 适配器** | 上述格式超限或损坏时降级 | `eof` | 文件物理末尾追加（不作为未知格式兜底，未知格式直接拒绝） |
+| **EOF 适配器** | 各格式的兜底策略 | `eof` | 文件物理末尾追加（不作为未知格式兜底，未知格式直接拒绝） |
+
+写前安全门（与格式无关，命中即拒绝写入）：`.apk` 载体、独立签名文件（`.sig`/`.asc`/`.p7s`/`.p7b`）、带 Authenticode 证书表的 PE、含 `/ByteRange` + `/Sig` 的签名 PDF、已签名 JAR（`META-INF/*.SF|*.RSA|*.DSA`）（`rust/src/structure/rejection.rs`）。逐格式常量与兼容性以 `docs/api/spec/STRUCTURE-*.md` 为准。
 
 ---
 
 ## 6. 内容域多媒体隐写技术规范
 
-内容域（`strhide::stego`）针对特定媒体格式进行压缩域与采样域自适应隐写，不使用 UBE 结构化容器，而是使用极简高熵伪随机微信封。
+内容域（`strhide::stego`）针对特定媒体格式进行压缩域与采样域自适应隐写，不使用 UBE 结构化容器，而是使用极简高熵伪随机微型信封。
 
-### 6.1 极简高熵微信封
-* **结构**：`[16B salt] + [12B nonce] + [密文 (含 16B GCM Tag)]`。
+### 6.1 极简高熵微型信封（内容域 V4）
+
+* **salt / nonce 不再随密文传输**：它们存放在各载体专属的**基础头**里，整个基础头（含扩展 TLV 区）作为 AEAD 的关联数据（AAD），因此任何被解码器采信的头部字段都在认证范围内。基础头规格：
+
+| 域 | 基础头 | 位置 |
+| :--- | :--- | :--- |
+| 空间域（PNG / WAV / FLAC） | 64 B `SpatialHeaderV4` | 槽位池头部 |
+| JPEG 频域 | 44 B 超块 + 可选 TLV 扩展区 | 头槽 STC 解码结果 |
+| HEVC / HEIF | 32 B 头 | 头部槽位 |
+* **密文内部布局**：`[4B 大端原始未压缩长度][1B flags][微头][载荷][16B AEAD Tag]`；微头为 `0x00`（文本/原始字节，无文件名）或 `0x01`（`[len][UTF-8 文件名]` 的文件）。
+* **AAD**：`"strhide-content-envelope-v4\0"` (28B) ‖ `u8(format_id)` ‖ 基础头 ‖ 扩展区。
 * **特性**：无静态魔数、无明文长度字段、无明文时间戳或文件名；密钥派生与结构域相互隔离；无凭据时整体呈现伪随机分布。
+* 逐字节定义见 `docs/api/spec/CONTENT-ENVELOPE.md` §2–§4。旧版“`[16B salt] + [12B nonce] + 密文`”的拼接式信封（V2/V3）已被 V4 取代，读侧不再接受。
 
 ### 6.2 图像空间域隐写（PNG）
 * **代价模型**：支持 `HILL`（高通与低通联合滤波，默认）、`S-UNIWARD`（二维可分离小波方向滤波器组）与 `MiPOD`（像素方差自适应估计与独立加性噪声模型）。
@@ -192,7 +209,7 @@
 * **原位调制与零膨胀**：解析变换单元（TU）语法元素，在 CABAC 旁路区间调制高频变换系数的符号位（`coeff_sign_flag`）。由于符号位采用旁路等概率编码（Bypass Mode），符号位反转完全保持语法合规，规避防竞争字节（EPB）风险，**实现严格零字节文件膨胀（$\Delta = 0$）**。
 
 ### 6.5 音频域隐写（WAV & FLAC）
-* **WAV PCM 采样域**：针对 16-bit / 24-bit 线性 PCM 音频数据，基于听觉感知掩蔽代价与 STC 编码进行最低有效位（LSB）匹配。
+* **WAV PCM 采样域**：支持 **8 / 16 / 24 / 32-bit 整数 PCM**（每声道分量独立成槽；8-bit 无符号、16/24/32-bit 有符号小端补码，浮点、ADPCM 与 20-bit 打包一律拒绝），基于听觉感知掩蔽代价与 STC 编码进行最低有效位（LSB）匹配（`rust/src/stego/audio/sample.rs:17-78`）。
 * **FLAC 预测残差域**：解析 FLAC 帧结构与多项式预测子帧，在保持残差码字长度不变的前提下对残差数据进行调制嵌入，全流程受 PCM MD5 校验和与漂移预算严格保护。
 
 ### 6.6 安全容量档位与策略（SafetyPolicy）
@@ -215,9 +232,14 @@
    - `Content -> Structure`：先对原始媒体执行内容域嵌入，再将生成的隐写媒体作为宿主注入结构域信封；
    - `Structure -> Content`：先向宿主注入结构域信封，再在媒体流中执行内容域嵌入。
 2. **偏移位移自描述容错**：
-   针对先注入结构域后执行内容域嵌入时容器重新打包导致的绝对物理偏移位移（例如 PNG IDAT 重新 Deflate 压缩），结构域适配器在定位时结合自描述有效性判定（验证块内部是否以合法 Header Magic 起始），消除偏移位移导致的解析失败。
+   针对先注入结构域后执行内容域嵌入时容器重新打包导致的绝对物理偏移位移（例如 PNG IDAT 重新 Deflate 压缩），白名单策略（`chunk`/`eof`/`ebml_void`）的结构域信封允许整体平移：定位时从载体尾部反推信封位置，并按平移量修正 `inject_offset`（`rust/src/structure/engine.rs:2310-2350`、`:2893-2912`）。白名单之外的策略仍然要求写入时的坐标严格成立。
 3. **密钥隔离**：
    结构域与内容域使用相互独立的 KDF 域标签和默认公开密钥，任一域的密码不会导致另一域产生伪阳性解密。
+4. **结构域 bit-exact 还原承诺在跨域叠加后失效**：
+   结构域信封记录的是**注入当时宿主文件的** `orig_host_size` / `orig_host_sha256`。若在注入之后又对载体做了内容域 `embed`（像素微调 + IDAT 重新压缩），结构域信封本身仍可被 `read` 正常解出，但随后 `restore` 重算出的宿主哈希必然与原值不同，引擎以 `RestoreMismatch` **fail-closed 拒绝产出**，并附带“还有残余信封”的诊断（`rust/src/structure/engine.rs:2353-2410`）。因此：
+   - 需要恢复原始宿主时，永远先用 `restore` 剥离结构域信封，再对还原出的文件做内容域操作；
+   - 反向叠加（先内容域、再结构域）是安全方向，此时结构域记录的宿主就是已隐写的媒体，`restore` 能精确回到“内容域隐写后”的状态。
+   多层结构域信封同样只能按注入的**逆序**剥离（`restore` 一次只剥一层）。
 
 ---
 

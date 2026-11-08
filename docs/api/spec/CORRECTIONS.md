@@ -109,7 +109,30 @@
    **已修复（2026-11-08）**：`reader = None` 时 note 明确标注 “Extended Format (VP8X) only”；
    `apply_engine_payload_limit` 跳过 `available = false` 的条目，不再为不可用策略填入引擎上限
    （`webp_static_capacity_table_marks_the_extended_format_requirement`）。
-3. `CAPACITY.md`/`ARCHITECTURE.md` 中若干 auto 策略描述与适配器实际无回退行为不符（E16）。
-4. `detmath.rs:320,352` 注释引用不存在的 `scripts/detmath/compare.sh`。
-5. `mkv.rs:113-117` 注释提到 `ebml_void` 可平移，但引擎只允许 `chunk`/`eof` 平移。
+3. ~~`CAPACITY.md`/`ARCHITECTURE.md` 中若干 auto 策略描述与适配器实际无回退行为不符（E16）。~~
+   **已修正（2026-11-08）**：`ARCHITECTURE.md` §7.1 改为逐格式 `auto` 决策表（MP4 恒 `box_uuid`、MKV 恒 `ebml_void`、HEIF/PE 回退到同格式策略而非 `eof`）；`CAPACITY.md` §3.3 补充 MP4/MKV 无回退说明。
+4. ~~`detmath.rs:320,352` 注释引用不存在的 `scripts/detmath/compare.sh`。~~
+   **已修正（2026-11-08）**：注释改为指向 `scripts/detmath/detmath.py` / `detmath.go` 与 Rust 测试中的 `PINNED` 摘要。
+5. ~~`mkv.rs:113-117` 注释提到 `ebml_void` 可平移，但引擎只允许 `chunk`/`eof` 平移。~~
+   **代码已演进，注释正确**：`relocatable_strategy` 白名单现为 `chunk`/`eof`/`ebml_void`（`engine.rs:2310-2312`），注释与实现一致。
 6. `pe.rs:741-744` 注释提到 legacy `STH!`/`STHC`，实现不接受。
+
+## G. 二轮审计补充勘误（2026-11-08）
+
+按 2026-11-08 的内容域与结构域两份文档—代码审计报告（内部工作稿，复核完成后已归档删除，不入库）逐条复核后修订：
+
+| # | 文档原描述 | 实际实现 | 修订位置 |
+|---|---|---|---|
+| G1 | `CONTENT-AUDIO.md`：`SampleKind` 含 `U16` | 只有 `U8/I16/I24/I32`，`from_bits` 拒绝其余位深（`audio/sample.rs:17-78`） | CONTENT-AUDIO §3.1 |
+| G2 | `STEGO-API.md`：`embed --capacity` 别名保留；`--cipher-suite` 列为隐藏参数 | `--capacity` 已剥离，容量探测是独立 `capacity` 子命令；`--cipher-suite` 是公开参数，隐藏的只有 `--slot-budget` 与六个调参项（`cli/args.rs:427-530`） | STEGO-API §6 |
+| G3 | `smart_file_data_hiding_design.md`：内容域信封仍是 `[salt][nonce][密文]` 旧模型；音频仅 16/24-bit；JPEG 注入写 COM；分块 AAD 公式缺 `meta_len/hint_len/hint`；适配器表缺 WEBP/WAV/HEIF/MKV；保留 pre-v2 JSON 布局；`offset_delta` 写 0..=64 | V4 信封 salt/nonce 存基础头并整体作 AAD；音频 8/16/24/32-bit；注入用 APP15；AAD 总长 97+hint_len；适配器 10 类；JSON 布局读侧直接拒绝；上限 128 | design §3.2/§3.4/§3.5/§5/§6.1/§6.5 |
+| G4 | 双域叠加“顺序无关” | 先结构域后内容域时 `restore` 必然 `RestoreMismatch`（fail-closed）；白名单策略（`chunk`/`eof`/`ebml_void`）才允许平移 | design §7、CLI_GUIDE §5.1、STRUCTURE-MKV §8、STRUCTURE-ENVELOPE §15.11 |
+| G5 | 内容域规范未提 PNG `tRNS`（类型 0/2）拒绝与 `IEND` 后尾随数据保留（16 MiB 上限） | `png/engine.rs:295-311`、`:326-344` | CONTENT-PNG §1、CAPACITY §4 |
+| G6 | 内容域规范未提 JPEG 仅 Baseline、1/3 分量、MCU/Block/8 GiB 限额 | `jpeg/engine.rs:68-128`、`:151-166` | CONTENT-JPEG §1 |
+| G7 | 内容域微头未提“文件名清洗为空→静默降级 0x00 / 读侧兜底 `extracted.bin`”及 `--no-filename` 效果 | `envelope.rs:283-303`、`:318-335`、`:362-363`；`stego/engine.rs:491-496` | CONTENT-ENVELOPE §2.3 |
+| G8 | 未提 MP4 `moov` 32 MiB 上限 | `hevc/engine.rs:2627-2631` | CONTENT-HEVC §1、CAPACITY §4 |
+| G9 | PNG `stc_u=0(auto)` 未说明仅为写侧枚举，线格式必须 1..=3 | `header.rs:365-382` 读侧拒绝 0 | CONTENT-PNG §2 |
+| G10 | `STRUCTURE-PDF.md` 位移上限残留 64 | `MAX_OFFSET_DELTA = 128`（`envelope.rs:88`、`engine.rs:1303-1310`） | STRUCTURE-PDF §5 |
+| G11 | `STRUCTURE-RIFF.md` 容量报告仍写 `capacity_bytes = None`；`MIN_UBE_PLAIN=178` 残留 | 动态查询上报真实 headroom；两常量已不存在，用 `min_ube_len()` | STRUCTURE-RIFF §3、§6 |
+| G12 | 各适配器规范交叉引用把已冻结的 `WIRE_SPEC_STRUCTURE.md` §14/§15 当规范 | 改为指向 `STRUCTURE-ENVELOPE.md` 与 `CAPACITY.md`，旧文明确标注仅历史对照 | STRUCTURE-*.md 各引言 |
+| G13 | 术语笔误：把“微型信封”误写为含某即时通讯软件名的错词（6 处） | 统一为“微型信封” | ARCHITECTURE、STRUCTURE-MKV、WIRE_SPEC_*、design |

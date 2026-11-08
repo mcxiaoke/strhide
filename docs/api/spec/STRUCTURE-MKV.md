@@ -1,6 +1,6 @@
 # EBML/Matroska 容器适配器：Void 注入（ebml_void）
 
-本文件规定 `format_name = "MKV"`（Matroska/WebM）的结构域（UBE）适配器。信封、尾标、AAD、`offset_delta` 与策略 ID 的公共定义见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md)、[WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md) §2–§3、§9、§14、§15；本文只定义 EBML 容器的 detect、策略、Void 布局、容量、定位与还原。内容域 HEVC 视频（含 MKV 封装）见 [CONTENT-HEVC.md](CONTENT-HEVC.md)，二者互不替代。
+本文件规定 `format_name = "MKV"`（Matroska/WebM）的结构域（UBE）适配器。信封、尾标、AAD、`offset_delta` 与策略 ID 的公共定义见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2–§15（`WIRE_SPEC_STRUCTURE.md` 仅为历史对照，冲突以本目录为准）；本文只定义 EBML 容器的 detect、策略、Void 布局、容量、定位与还原。内容域 HEVC 视频（含 MKV 封装）见 [CONTENT-HEVC.md](CONTENT-HEVC.md)，二者互不替代。
 
 ## 1 范围、导航与稳定性
 
@@ -12,7 +12,7 @@
 | **D** | `auto` 恒取 `ebml_void`；显式 `eof`；VINT 字节数由 UBE 大小决定；已知大小 / 未知大小 `Segment`；同一宿主上的 `ebml_void` 与 `eof` 产物的 `offset_delta` 差异 |
 | **I** | 复制缓冲与流式实现、`strategy_note` 文案、错误文本、`suspicious_structures` 的提示措辞；读侧不依赖 |
 
-与内容域 HEVC/MKV 隐写的区别：内容域改写的对象是视频码流中 CABAC bypass `coeff_sign_flag`（TU 内非 DC 系数符号），宿主长度与容器布局不变，信封是内容域微信封（`rust/src/stego/hevc/slot.rs:581-589`、`CONTENT-HEVC.md` §2）。结构域不触碰任何码流位，只在文件尾新增一个 EBML `Void` 顶层元素并把 UBE 放在其中；两套信封派生域与结构互不可读（`WIRE_SPEC_STRUCTURE.md` §1）。
+与内容域 HEVC/MKV 隐写的区别：内容域改写的对象是视频码流中 CABAC bypass `coeff_sign_flag`（TU 内非 DC 系数符号），宿主长度与容器布局不变，信封是内容域微型信封（`rust/src/stego/hevc/slot.rs:581-589`、`CONTENT-HEVC.md` §2）。结构域不触碰任何码流位，只在文件尾新增一个 EBML `Void` 顶层元素并把 UBE 放在其中；两套信封的 KDF 标签与默认密钥互相隔离，任一域的口令都不会让对方解出伪阳性（[CRYPTO.md](CRYPTO.md) §3）。
 
 ## 2 格式识别（detect）
 
@@ -43,7 +43,7 @@
 
 支持列表 `["ebml_void", "eof"]` 即优先级（`mkv.rs:39-41`）；`auto` 无条件返回 `"ebml_void"`，不测量宿主、不考虑 UBE 大小（`mkv.rs:43-45`）。因此 VINT 溢出时 `auto` 不会自动降级到 `eof`，而是按 §2 第 6 条报错。显式策略必须落在支持列表内（`engine.rs:1242-1255`），`inject` 再拒绝一次（`mkv.rs:73-77`）。
 
-容量报告（`mkv.rs:47-64`）：两者均 `capacity_bytes = None`、`limit = "unlimited (file grows)"`，`ebml_void` 附注 `"Embedded into compliant EBML Void element (0 trailing bytes)"`。`inspect` 随后把无上限策略钳到引擎载荷上限（`engine.rs:1916-1934`、`:2604-2611`）：`structure_payload_limit(host_len) = clamp(256 × host_len, 64 MiB, 1 GiB)`（`engine.rs:1902-1907`；`rust/src/core/crypto.rs:786`）。
+容量报告（`mkv.rs:47-64`）：两者均 `capacity_bytes = None`、`limit = "unlimited (file grows)"`，`ebml_void` 附注 `"Embedded into compliant EBML Void element (0 trailing bytes)"`。`inspect` 随后把无上限策略钳到引擎载荷上限（`engine.rs:1938-1975`、`:2604-2611`）：`structure_payload_limit(host_len) = clamp(256 × host_len, 64 MiB, 1 GiB)`（`engine.rs:1938-1943`；`rust/src/core/crypto.rs:786`）。
 
 ## 4 注入布局
 
@@ -97,8 +97,8 @@
 
 - VINT 可表示上限为 `2^56 - 2`（8 字节、数据位不得全 1）；`2^56-1` 是未知大小哨兵，写入端拒绝。
 - Segment 大小不是约束：适配器不读取、不比较、不更新它，因此不存在 32/64 位容器长度上限。
-- 引擎实际约束：写侧 `raw_size <= structure_payload_limit(orig_host_size)`（`engine.rs:1082-1094`），读侧同一函数（`engine.rs:1955-1967`）；`inspect` 报告的容量被钳到同一值。
-- 最小 UBE：`locate` 物理门槛 `HEADER_SIZE + TRAILER_SIZE = 136`（`engine.rs:191-207`、`envelope.rs:870-879`）；实际可产出信封从 1 字节载荷的 `min_ube_len(1) = 214` 起（`envelope.rs:116-132`、`WIRE_SPEC_STRUCTURE.md` §14.3）。
+- 引擎实际约束：写侧 `raw_size <= structure_payload_limit(orig_host_size)`（`engine.rs:1123`），读侧同一函数（`engine.rs:1996`）；`inspect` 报告的容量被钳到同一值。
+- 最小 UBE：`locate` 物理门槛 `HEADER_SIZE + TRAILER_SIZE = 136`（`engine.rs:191-207`、`envelope.rs:870-879`）；实际可产出信封从 1 字节载荷的 `min_ube_len(1) = 214` 起（`envelope.rs:123-140`）。
 - 现有 Void 复用：无。即使宿主尾部已有 Void，也另起一个；旧 Void 内容不变，读侧只按尾标定位最后一个信封。
 
 ## 6 locate 路径
@@ -130,7 +130,7 @@
 - **EBML 头后已有 Void**：可能是宿主自带的 Void；`verify_structure` 正常跳过，注入仍发生在文件尾，不复用、不填充、不删除该 Void。
 - **多 Segment**：只要求至少出现一次 `MATROSKA_SEGMENT_ID`（`mkv.rs:188-189`、`:237-239`），不限制数量与顺序；Void 追加在最后一个 Segment 之后。
 - **WebM**：与 MKV 无差别，DocType 不读、版本不读；检测、注入、定位、还原完全同一路径。
-- **内容域重写后的平移**：`locate_start` 允许信封滑动，但 `envelope_coordinates_agree` 只对 `chunk`/`eof` 放行坐标不一致（`engine.rs:2867-2874`），`strip_coordinates_for_location` 同样只放行这两者（`engine.rs:2280`）。因此 `ebml_void` 信封一旦因前置字节长度变化而滑动，`verify`/`remove` 会报坐标不一致；写侧当前不受影响。
+- **内容域重写后的平移**：`locate_start` 允许信封滑动，`relocatable_strategy` 的白名单是 `chunk`/`eof`/`ebml_void`（`engine.rs:2310-2312`），`ebml_void` 在列——remux 或内容域重编码改变前置字节长度后，`locate` 从尾部反推 Void 块，`envelope_coordinates_agree` 对白名单策略只要求注入区不越过 EOF（`engine.rs:2893-2912`），`strip_coordinates_for_location` 按 `ube_offset - (inject_offset + offset_delta)` 的平移量修正 `inject_offset`（`engine.rs:2321-2350`），故 `verify`/`remove` 照常通过。白名单之外的策略一旦坐标不符即 `CorruptedData`。
 - **损坏/截断**：写前 L1 返回 `(false, 详情)` 即 `CorruptedData` 拒绝写入（`engine.rs:1027-1035`）；`locate` 遇截断只回退 `eof`，不视作错误。
 - **尾部伪造**：`suspicious_structures` 只读末 24 字节并要求 `ube_offset + ube_total_size == file_size`，随后检查 `EC + VINT` 前缀（`mkv.rs:247-290`）；它不校验尾标魔数与 CRC，仅用于“可能已存在信封”的警告。
 

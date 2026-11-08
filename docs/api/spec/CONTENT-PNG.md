@@ -2,6 +2,8 @@
 本文件规定 `format_id = 1` 的 PNG 载体如何选择槽位、如何由三种代价模型构造排序键、如何展开正文通道。公共信封、64 字节基础头、TLV、`locate_seed`/`perm_seed`、ChaCha12/Fisher–Yates、STC 见 [CONTENT-ENVELOPE.md](CONTENT-ENVELOPE.md) §2–§7；初等函数见 [DETMATH.md](DETMATH.md) 与 `rust/src/stego/detmath.rs:3-16`。下文所有 `exp/ln/ln_1p/cos/log2` 均指该实现，不是平台 libm。
 ## 1 范围与稳定性
 - 载体为 8-bit、非隔行、颜色类型 0/2/4/6 的 PNG；隔行、调色板、APNG、16-bit 不属于本规范（`rust/src/stego/png/engine.rs:92-95`、`:245-262`）。
+- **颜色类型 0/2 携带 `tRNS` 块时直接拒绝**：对 0/2 类型，`tRNS` 是单一透明色键（透明色键值，同值像素视为全透明），不是 alpha 通道；类内 `±1` 嵌入会把像素移出或落入色键，使透明背景变黑或实心像素镂空。引擎在解析阶段即报 `UnsupportedFormat`，提示改用 RGBA / 灰度+alpha，或改走结构域 `write`（`rust/src/stego/png/engine.rs:295-311`）。颜色类型 4/6 的 `tRNS` 是真正的 alpha，不受影响。
+- **`IEND` 之后的尾随数据原样保留**：`IEND` 块（含其 4B CRC）之后到文件末尾的所有字节按非 chunk 数据处理，读入 `tail` 并在重编码时逐字节追加回文件尾（`engine.rs:118-121`、`:326-344`、`:794`、`:855`）。长度上限 `MAX_TAIL_BYTES = 16 MiB`，超出报 `CorruptedData`（`engine.rs:334-341`）。这是位保真的必要条件：部分厂商把数字签名/防伪标记放在 `IEND` 之后。
 - `algorithm_id` 1/2/3 与 `hill`/`suniward`/`mipod` 永久绑定；未知 id 不得回落默认模型（`rust/src/stego/png/registry.rs:13-17`、`:57-64`；`rust/src/stego/png/engine.rs:2049-2050`）。
 
 | 级别 | 本域内容 |
@@ -42,7 +44,7 @@
 | `neg_log2_epsilon` | 头 48:2 | `epsilon=2^-k`，k 1..=127；缺省 k=23（`header.rs:30-37`、`:282`；`params.rs:245`） |
 | `exclusion_permille` | 头 50:2 | 0..=900；缺省 300（`header.rs:283`；`params.rs:246`） |
 | `sigma` | 头 52:4，f32le | S-UNIWARD 时是 `sigma`（缺省 1.0）；MiPOD 时是 `alpha`（缺省 `0.20f32`），读侧钳到 `[0.01,0.90]`（`engine.rs:1678-1691`、`:2069-2077`；`mipod.rs:55`） |
-| `codec_id/stc_h/stc_u` | 头 38/39/40 | 只决定正文槽数与编码；缺省 `h=8,u=0(auto)`（`engine.rs:2107-2122`；`params.rs:247-249`） |
+| `codec_id/stc_h/stc_u` | 头 38/39/40 | 只决定正文槽数与编码；写侧缺省 `h=8, u=0(auto)`（`engine.rs:2107-2122`；`params.rs:247-249`）。**`u = 0` 只是写侧运行时枚举值**：写头前必须解析为具体 `1..=3`（连同 `codec_id` 一起由 `auto_select_codec` 按实际承载正文的槽池选出，`engine.rs:1571-1630` 的结果写入 `:1727` 的 `wire_u`）；读侧要求 `codec_id=1` 时 `stc_h ∈ 4..=10` 且 `stc_u ∈ 1..=3`，读到 `u=0` 判 `CorruptedData`（`header.rs:365-382`） |
 | `locate_seed`/`perm_seed` | L2/L3 | 头部/正文置换键（[CONTENT-ENVELOPE.md](CONTENT-ENVELOPE.md) §6） |
 | `kernel_id` | 头 56 | 只接受 0，即内置归一化 KB 核（`hill.rs:15-22`） |
 

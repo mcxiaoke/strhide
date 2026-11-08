@@ -2,7 +2,7 @@
 
 **状态**：规范性。本文定义 `strhide` 中所有**影响字节输出**的浮点初等函数语义。
 **适用范围**：内容域 PNG/JPEG/WAV/FLAC/HEVC 的代价图、代价标定、`epsilon` 量化，以及结构域容量报告。
-**导航**：[规范总览](./README.md) · [内容域信封](./CONTENT-ENVELOPE.md) · [结构域信封](./STRUCTURE-ENVELOPE.md) · [精度审计](../../DETMATH_AUDIT_REPORT_20261107.md) · [容量规范](./CAPACITY.md)
+**导航**：[规范总览](./README.md) · [内容域信封](./CONTENT-ENVELOPE.md) · [结构域信封](./STRUCTURE-ENVELOPE.md) · [容量规范](./CAPACITY.md)。精度审计结论已并入本文 §5 与 §9，不再单独成文。
 
 ---
 

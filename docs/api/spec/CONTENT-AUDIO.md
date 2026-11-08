@@ -27,7 +27,7 @@
 ### 3.1 解析与槽定义
 - 仅接受 `RIFF/WAVE`、`FORMAT_PCM` 或 PCM 子格式的 `WAVE_FORMAT_EXTENSIBLE`；RF64、浮点、ADPCM 拒绝（`rust/src/stego/audio/wav.rs:102-162`）。
 - `block_align` 必须等于 `channels * bytes_per_sample`；`data` 块长度不得越过 EOF（`wav.rs:180-195`）。
-- `SampleKind` 为 `U8/U16/I16/I24/I32`（`rust/src/stego/audio/sample.rs:17-26`、`:64-76`）。槽值 0 表示该采样最低位为 0，1 表示最低位为 1；写入就是把最低位取反（16/24-bit 为带符号整数补码，小端存储，24-bit 符号扩展到 i32 后再运算）(`sample.rs:84-126`、`core.rs:288-320`）。
+- `SampleKind` 为 `U8/I16/I24/I32`（`rust/src/stego/audio/sample.rs:17-26`、`:64-76`）：8-bit 无符号、16/24/32-bit 有符号小端补码，没有 `U16` 变体（WAV 的 16-bit 整数 PCM 恒为有符号，解析分支亦无 `U16`）。`from_bits` 只接受 `bits ∈ {8,16,24,32}`，其余（浮点、ADPCM、20-bit 打包等）报 `UnsupportedFormat`（`sample.rs:64-76`）。槽值 0 表示该采样最低位为 0，1 表示最低位为 1；写入就是把最低位取反（16/24-bit 为带符号整数补码，小端存储，24-bit 符号扩展到 i32 后再运算）(`sample.rs:84-126`、`core.rs:288-320`）。
 
 `total_slots = data_len / bytes_per_sample`，直接按文件中的采样/声道交织顺序编号（`rust/src/stego/audio/wav.rs:60-63`）。16-bit 立体声的两个 16-bit 分量、24-bit 的三个字节分量都各自占一个槽，不以 `block_align` 为槽粒度。
 

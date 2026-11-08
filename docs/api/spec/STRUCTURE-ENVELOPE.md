@@ -259,6 +259,6 @@ AAD = header[0..80] | u32le(meta_len) | u32le(hint_len) | hint(hint_len)
 8. nonce 不得复用：元数据固定 `XOR 0xFFFFFFFF`，块 nonce `低32位 XOR index`。
 9. 无用户密码信封必须用 `Profile.secret()` 掩码；`FLAG_ENCRYPTED` 信封必须不掩码。
 10. stealth 必须要求密码、禁止提示；魔数/掩码/CRC 三者都按密码派生。
-11. 连续策略校验 `inject_offset+offset_delta == ube_offset`、`ube_total_size ≤ inject_size`、注入区不越过文件尾；仅 `chunk`/`eof` 允许平移。
+11. 连续策略校验 `inject_offset+offset_delta == ube_offset`、`ube_total_size ≤ inject_size`、注入区不越过文件尾；仅 `chunk`/`eof`/`ebml_void` 允许平移（`relocatable_strategy`，`engine.rs:2310-2312`；白名单外的策略坐标不符即 `CorruptedData`）。
 12. `pe_codebits` 的 `ChannelHeader` 用 14B + 8B IKM 解掩码，`slack_off` 必须落在 slack 区间；写入端坐标全 0。
 13. 对未知策略 ID、未知 flags 位、越界 `offset_delta` 一律拒绝，不得“尽力解析”。

@@ -8,7 +8,7 @@
 
 > 适用版本：crate `strhide` 0.9.3（Rust 实现，`rust/Cargo.toml`）。
 > **范围**：仅内容域——`embed` / `extract` 在 PNG、JPEG、WAV、FLAC、HEVC/HEIF 载体内部写出的
-> V4 微信封。结构域（UBE 信封，`write` / `restore` 使用）见
+> V4 微型信封。结构域（UBE 信封，`write` / `restore` 使用）见
 > [WIRE_SPEC_STRUCTURE.md](./WIRE_SPEC_STRUCTURE.md)。
 > 两域的信封格式与派生域相互独立、互不可读，差异清单见 [spec/README.md §1](./spec/README.md)。
 
