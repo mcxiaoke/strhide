@@ -112,6 +112,33 @@ pub(crate) fn engine_for(format: FileFormat) -> Option<&'static dyn StegoEngine>
     ENGINES.iter().copied().find(|e| e.format() == format)
 }
 
+/// The carrier formats this build accepts, spelled for a human.
+///
+/// Derived from [`ENGINES`] rather than hard-coded so an "unsupported carrier"
+/// message never claims a format the current feature set does not compile in,
+/// and never omits one it does.
+pub(crate) fn supported_carrier_list() -> String {
+    let labels: Vec<&str> = ENGINES
+        .iter()
+        .map(|engine| match engine.format() {
+            FileFormat::Png => "PNG",
+            FileFormat::Jpeg => "JPEG",
+            FileFormat::Heif => "HEIF/HEIC",
+            FileFormat::Mp4 => "MP4/MOV",
+            FileFormat::HevcAnnexB => "raw Annex-B HEVC",
+            FileFormat::Mkv => "MKV/WebM",
+            FileFormat::Wav => "WAV",
+            FileFormat::Flac => "FLAC",
+            other => other.as_str(),
+        })
+        .collect();
+    match labels.split_last() {
+        None => "no carrier format (this build has no content engine)".to_string(),
+        Some((last, [])) => (*last).to_string(),
+        Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+    }
+}
+
 /// Every carrier format the content domain supports, in registry order.
 ///
 /// `stego::mod` and the capability table both derive from this; a test asserts
@@ -1069,9 +1096,13 @@ impl StegoEngine for FlacEngine {
         opts.tuning.applicable_to(self.format())?;
         let cred = crate::stego::options::resolve_credential(opts.password, opts.key, dialect)?;
         let domain = opts.domain(dialect);
+        // FLAC reads its own profile: `audio_format()` is the WAV profile, and
+        // a caller that customises only `with_flac_format` would otherwise get
+        // WAV's default suite here while `dialect.flac_format()` still drives
+        // every other FLAC parameter below.
         let suite_id = opts
             .suite_id
-            .unwrap_or_else(|| dialect.audio_format().cipher.default_suite.as_u16());
+            .unwrap_or_else(|| dialect.flac_format().cipher.default_suite.as_u16());
         opts.control.check()?;
         let anon_payload;
         let eff_payload = if opts.no_filename && payload.name().is_some() {
@@ -1330,6 +1361,32 @@ mod tests {
             assert!(seen.insert(format), "{:?} is registered twice", format);
         }
         assert_eq!(seen.len(), ENGINES.len());
+    }
+
+    /// The error message must name what this build accepts, and nothing else:
+    /// an omission sends users looking for a converter they do not need, an
+    /// over-claim sends them to a write that cannot work.
+    #[test]
+    fn the_carrier_list_names_every_compiled_engine() {
+        let list = supported_carrier_list();
+        #[cfg(feature = "content-png")]
+        assert!(list.contains("PNG"), "{list}");
+        #[cfg(feature = "content-jpeg")]
+        assert!(list.contains("JPEG"), "{list}");
+        #[cfg(feature = "content-audio")]
+        {
+            assert!(list.contains("WAV"), "{list}");
+            assert!(list.contains("FLAC"), "{list}");
+        }
+        #[cfg(feature = "content-hevc")]
+        {
+            assert!(list.contains("HEIF/HEIC"), "{list}");
+            assert!(list.contains("MP4/MOV"), "{list}");
+            assert!(list.contains("MKV/WebM"), "{list}");
+        }
+        for absent in ["ZIP", "PDF", "WEBP", "Executable"] {
+            assert!(!list.contains(absent), "{absent} is not a content carrier");
+        }
     }
 
     #[test]

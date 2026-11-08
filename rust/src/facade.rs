@@ -242,6 +242,12 @@ impl DualVerify {
 #[non_exhaustive]
 pub struct SmartExtractOptions<'a> {
     pub password: Option<&'a str>,
+    /// 32-byte content-domain file key; ignored by the structure domain.
+    ///
+    /// Without this, a carrier protected by a key file could be *detected* by
+    /// `smart_extract`'s inspect pass but never extracted, because the content
+    /// branch had no way to reach it.
+    pub key: Option<&'a [u8; 32]>,
     pub domain: Option<&'a str>,
     /// Limits PBKDF2 iterations and tried cipher suites to avoid GUI hangs.
     pub limits: crate::stego::ExtractParams,
@@ -272,6 +278,21 @@ impl<'a> SmartExtractOptions<'a> {
     /// [`with_password`](Self::with_password) for an `Option` caller.
     pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
         self.password = password;
+        self
+    }
+
+    /// Content-domain file key; the structure domain ignores it.
+    ///
+    /// Mutually exclusive with a non-empty password, exactly as in
+    /// [`crate::stego::ExtractOptions`].
+    pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    /// [`with_key`](Self::with_key) for an `Option` caller.
+    pub fn with_key_option(mut self, key: Option<&'a [u8; 32]>) -> Self {
+        self.key = key;
         self
     }
 
@@ -328,6 +349,7 @@ impl<'a> SmartExtractOptions<'a> {
 impl PartialEq for SmartExtractOptions<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.password == other.password
+            && self.key == other.key
             && self.domain == other.domain
             && self.limits == other.limits
             && self.prefer == other.prefer
@@ -340,6 +362,7 @@ impl std::fmt::Debug for SmartExtractOptions<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SmartExtractOptions")
             .field("password", &self.password.map(|_| "<redacted>"))
+            .field("key", &self.key.map(|_| "<redacted>"))
             .field("domain", &self.domain)
             .field("limits", &self.limits)
             .field("prefer", &self.prefer)
@@ -752,9 +775,7 @@ impl StrHide {
             carrier,
             &DualOptions {
                 password: opts.password,
-                // `smart_extract` has no file-key input; callers that need one
-                // use the content-domain entry points directly.
-                key: None,
+                key: opts.key,
                 domain: opts.domain,
                 control: opts.control,
             },
@@ -821,7 +842,7 @@ impl StrHide {
             Domain::Content => {
                 let ex_opts = crate::stego::ExtractOptions {
                     password: opts.password,
-                    key: None,
+                    key: opts.key,
                     domain: opts.domain,
                     limits: opts.limits.clone(),
                     control: opts.control,
@@ -835,7 +856,10 @@ impl StrHide {
                 Ok(ExtractOutcome {
                     payload,
                     source: Domain::Content,
+                    // A file key is a credential like a password: a carrier
+                    // extracted with one is never a plaintext envelope.
                     is_encrypted: opts.password.is_some_and(|p| !p.is_empty())
+                        || opts.key.is_some()
                         || self.dialect().stego.secret().is_some(),
                     also_present,
                 })
@@ -1180,19 +1204,24 @@ impl StegoFacade<'_> {
 #[cfg(feature = "analysis")]
 #[derive(Debug, Clone, Copy)]
 pub struct AnalysisFacade<'a> {
-    #[allow(dead_code)]
     engine: &'a StrHide,
 }
 
 #[cfg(feature = "analysis")]
 impl AnalysisFacade<'_> {
+    /// Envelope magics this engine's dialect uses, in addition to the official
+    /// pair the scan already knows.
+    fn magics(&self) -> crate::analysis::ScanMagics {
+        crate::analysis::scan_magics_for(&self.engine.dialect().structure)
+    }
+
     /// Scan raw bytes in memory.
     pub fn scan_bytes(&self, data: &[u8], label: &str) -> crate::analysis::AnalysisReport {
-        crate::analysis::scan_bytes(data, label)
+        crate::analysis::scan_bytes_with_magics(data, label, self.magics())
     }
 
     /// Scan a file at `path`.
     pub fn scan_file(&self, path: &Path) -> Result<crate::analysis::AnalysisReport, StrHideError> {
-        crate::analysis::scan_file(path)
+        crate::analysis::scan_file_with_magics(path, self.magics())
     }
 }

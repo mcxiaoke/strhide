@@ -121,7 +121,8 @@ pub const EMBED_AFTER_HELP_ZH: &str = "\
 
 pub const EXTRACT_AFTER_HELP_EN: &str = "\
 Extracts data embedded via content-adaptive steganography (embed).
-Carrier format (PNG, JPEG, HEIF/HEIC, or HEVC -- Annex-B, MP4 or MOV) is detected automatically.
+Carrier format (PNG, JPEG, WAV, FLAC, HEIF/HEIC, or HEVC -- Annex-B, MP4/MOV or MKV) is detected
+automatically.
 
 Examples:
   strhide extract out.jpg -p \"P@ss!\"               # Print text payload to stdout
@@ -131,7 +132,7 @@ Examples:
 
 pub const EXTRACT_AFTER_HELP_ZH: &str = "\
 从自适应隐写图像（embed 生成）中提取隐藏数据。
-自动识别图像载体格式（PNG、JPEG、HEIF/HEIC 或 HEVC：Annex-B 裸流、MP4/MOV 容器）。
+自动识别载体格式（PNG、JPEG、WAV、FLAC、HEIF/HEIC 或 HEVC：Annex-B 裸流、MP4/MOV/MKV 容器）。
 
 常用示例：
   strhide extract out.jpg -p \"P@ss!\"               # 文本载荷直接输出至终端

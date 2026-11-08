@@ -203,10 +203,10 @@ use crate::stego::params::StegoProfile;
 /// message every entry point shares.
 fn engine_for_carrier(carrier_bytes: &[u8]) -> Result<&'static dyn StegoEngine, StrHideError> {
     let Some(format) = sniff_bytes(carrier_bytes) else {
-        return Err(StrHideError::UnsupportedFormat(
-            "Content-adaptive steganography requires a PNG, JPEG, HEIF/HEIC, or HEVC carrier (Annex-B or MP4/MOV)"
-                .into(),
-        ));
+        return Err(StrHideError::UnsupportedFormat(format!(
+            "Content-adaptive steganography requires a {} carrier",
+            engine::supported_carrier_list()
+        )));
     };
     // A format the sniffer knows but the content domain cannot carry (ZIP, PE,
     // ...) says so by name instead of pretending the bytes are unreadable.
@@ -216,8 +216,8 @@ fn engine_for_carrier(carrier_bytes: &[u8]) -> Result<&'static dyn StegoEngine, 
 /// The unsupported-format error, worded once for every entry point.
 pub(crate) fn unsupported_carrier(format: FileFormat) -> StrHideError {
     StrHideError::UnsupportedFormat(format!(
-        "Content-adaptive steganography requires a PNG, JPEG, HEIF/HEIC, or HEVC carrier \
-         (Annex-B or MP4/MOV); '{}' is not one",
+        "Content-adaptive steganography requires a {} carrier; '{}' is not one",
+        engine::supported_carrier_list(),
         format.as_str()
     ))
 }

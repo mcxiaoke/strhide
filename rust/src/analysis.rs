@@ -276,8 +276,43 @@ fn report_trailing(
 // Public entry points and internal scan dispatcher
 // ---------------------------------------------------------------------------
 
+/// Envelope magics a scan should recognise.
+///
+/// The official constants stay the default, so `scan_bytes`/`scan_file` behave
+/// exactly as before. A private dialect adds its own pair: both are searched,
+/// because a carrier may hold an official envelope or a private one, and a
+/// scan that only knew the official magic would call a private carrier clean.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ScanMagics {
+    /// Private 8-byte envelope header magic.
+    pub header: Option<[u8; 8]>,
+    /// Private 4-byte envelope trailer magic.
+    pub trailer: Option<[u8; 4]>,
+}
+
+/// Envelope magics to add for `profile`, or none when it is the official one.
+///
+/// Only magics that actually differ are returned: handing the official
+/// constants back would make every official carrier look like a
+/// private-dialect hit.
+pub(crate) fn scan_magics_for(profile: &crate::structure::StructureProfile) -> ScanMagics {
+    let header = profile.header_magic();
+    ScanMagics {
+        header: (header != STANDARD_HEADER_MAGIC).then_some(header),
+        trailer: profile
+            .locator_magic()
+            .copied()
+            .filter(|magic| *magic != STANDARD_TRAILER_MAGIC),
+    }
+}
+
 /// Scan raw bytes in memory. Never errors out on "nothing found".
 pub fn scan_bytes(data: &[u8], label: &str) -> ScanReport {
+    scan_bytes_with_magics(data, label, ScanMagics::default())
+}
+
+/// [`scan_bytes`] with a private dialect's envelope magics recognised too.
+pub(crate) fn scan_bytes_with_magics(data: &[u8], label: &str, magics: ScanMagics) -> ScanReport {
     let file_size = data.len() as u64;
     let carrier = label.to_string();
     let view = if file_size <= MAX_FULL_SCAN {
@@ -288,12 +323,20 @@ pub fn scan_bytes(data: &[u8], label: &str) -> ScanReport {
         let tail = &data[tail_offset as usize..];
         ScanView::windowed(prefix, tail_offset, tail, file_size)
     };
-    scan_view_internal(&view, carrier, file_size)
+    scan_view_internal(&view, carrier, file_size, magics)
 }
 
 /// Scan one file end to end. Never errors out on "nothing found"; only real
 /// I/O / unreadable-file problems return `Err`.
 pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
+    scan_file_with_magics(path, ScanMagics::default())
+}
+
+/// [`scan_file`] with a private dialect's envelope magics recognised too.
+pub(crate) fn scan_file_with_magics(
+    path: &Path,
+    magics: ScanMagics,
+) -> Result<ScanReport, StrHideError> {
     let metadata = std::fs::metadata(path)?;
     let file_size = metadata.len();
     let carrier = path.display().to_string();
@@ -325,10 +368,15 @@ pub fn scan_file(path: &Path) -> Result<ScanReport, StrHideError> {
         None => ScanView::whole(&prefix),
     };
 
-    Ok(scan_view_internal(&view, carrier, file_size))
+    Ok(scan_view_internal(&view, carrier, file_size, magics))
 }
 
-fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> ScanReport {
+fn scan_view_internal(
+    view: &ScanView<'_>,
+    carrier: String,
+    file_size: u64,
+    magics: ScanMagics,
+) -> ScanReport {
     let mut findings: Vec<Finding> = Vec::new();
     let mut detectors: Vec<DetectorMetric> = Vec::new();
 
@@ -336,7 +384,7 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
 
     // 1. Signature domain: known tools / envelopes
     let sig_before = findings.len();
-    track_tool_signatures(view, &mut findings);
+    track_tool_signatures(view, &mut findings, magics);
     let sig_alert = findings[sig_before..]
         .iter()
         .any(|f| f.detector == "signature:known-tool");
@@ -473,7 +521,9 @@ fn scan_view_internal(view: &ScanView<'_>, carrier: String, file_size: u64) -> S
                 },
             });
         }
-        Some(FileFormat::Pe) if view.is_whole() => track_pe_structure(view.prefix, &mut findings),
+        Some(FileFormat::Pe) if view.is_whole() => {
+            track_pe_structure(view.prefix, &mut findings, magics)
+        }
         Some(other) if view.is_whole() => {
             track_container_structures(view, other, &mut findings, &mut detectors);
         }
@@ -612,16 +662,16 @@ const KNOWN_TOOL_SIGNATURES: &[KnownSignature] = &[
     },
 ];
 
-fn track_tool_signatures(view: &ScanView, out: &mut Vec<Finding>) {
+fn track_tool_signatures(view: &ScanView, out: &mut Vec<Finding>, magics: ScanMagics) {
     for sig in KNOWN_TOOL_SIGNATURES {
         // An appended envelope lives in the tail of an oversized carrier, so
         // both windows have to be searched.
         let prefix_hit = find_all(view.prefix, sig.pattern)
             .into_iter()
-            .any(|pos| !sig.needs_trailer_context || trailer_context_ok(view, pos as u64));
+            .any(|pos| !sig.needs_trailer_context || trailer_context_ok(view, pos as u64, magics));
         let tail_hit = view.tail.is_some_and(|(offset, bytes)| {
             find_all(bytes, sig.pattern).into_iter().any(|pos| {
-                !sig.needs_trailer_context || trailer_context_ok(view, offset + pos as u64)
+                !sig.needs_trailer_context || trailer_context_ok(view, offset + pos as u64, magics)
             })
         });
         if prefix_hit || tail_hit {
@@ -632,18 +682,42 @@ fn track_tool_signatures(view: &ScanView, out: &mut Vec<Finding>) {
             });
         }
     }
+
+    // A private dialect's header magic is exactly as much a strhide signature
+    // as the official constant above, so a scan asked about that dialect must
+    // report it instead of calling the carrier clean.
+    if let Some(header) = magics.header {
+        let prefix_hit = !find_all(view.prefix, &header).is_empty();
+        let tail_hit = view
+            .tail
+            .is_some_and(|(_, bytes)| !find_all(bytes, &header).is_empty());
+        if prefix_hit || tail_hit {
+            out.push(Finding {
+                detector: "signature:known-tool".into(),
+                severity: Severity::Likely,
+                detail: "Matches known steganography tool signature: strhide (private dialect)"
+                    .into(),
+            });
+        }
+    }
 }
 
 /// Checks whether the 4-byte trailer magic at `magic_pos` is backed by a
 /// self-consistent 24-byte trailer and valid CRC to eliminate accidental false positives.
-fn trailer_context_ok(view: &ScanView<'_>, magic_pos: u64) -> bool {
+fn trailer_context_ok(view: &ScanView<'_>, magic_pos: u64, magics: ScanMagics) -> bool {
     let Some(start) = magic_pos.checked_sub((TRAILER_SIZE - 4) as u64) else {
         return false;
     };
     let Some(bytes) = view.slice(start, TRAILER_SIZE) else {
         return false;
     };
-    let Ok(trailer) = EnvelopeTrailer::unpack(bytes, Some(&STANDARD_TRAILER_MAGIC)) else {
+    let trailer = EnvelopeTrailer::unpack(bytes, Some(&STANDARD_TRAILER_MAGIC)).or_else(|e| {
+        match magics.trailer {
+            Some(magic) => EnvelopeTrailer::unpack(bytes, Some(&magic)).map_err(|_| e),
+            None => Err(e),
+        }
+    });
+    let Ok(trailer) = trailer else {
         return false;
     };
     trailer
@@ -1091,7 +1165,7 @@ fn find_next_jpeg_marker(data: &[u8], start: usize) -> usize {
 /// that is not zero is the password-independent trace of `pe_slack` — and of
 /// any other code-cave embedder. (Appended overlay data is covered separately
 /// by the trailing-entropy and `overlay:high-entropy` checks.)
-fn track_pe_structure(data: &[u8], out: &mut Vec<Finding>) {
+fn track_pe_structure(data: &[u8], out: &mut Vec<Finding>, magics: ScanMagics) {
     let Ok(layout) = pe_layout::pe_slack_layout(data) else {
         return;
     };
@@ -1122,6 +1196,8 @@ fn track_pe_structure(data: &[u8], out: &mut Vec<Finding>) {
     // repetitive compiler padding does not — require both signals.
     let mut header_offset = None;
     let mut distinct = [false; 256];
+    let standard_magic = &STANDARD_HEADER_MAGIC[..];
+    let dialect_magic = magics.header.as_ref().map(|m| &m[..]);
     'ranges: for &(start, end) in &layout.slack_ranges {
         let a = start as usize;
         let b = (end as usize).min(data.len());
@@ -1132,8 +1208,10 @@ fn track_pe_structure(data: &[u8], out: &mut Vec<Finding>) {
         for &byte in range {
             distinct[byte as usize] = true;
         }
-        let magic = &STANDARD_HEADER_MAGIC[..];
-        if let Some(idx) = range.windows(magic.len()).position(|w| w == magic) {
+        let found = range
+            .windows(standard_magic.len())
+            .position(|w| w == standard_magic || dialect_magic.is_some_and(|magic| w == magic));
+        if let Some(idx) = found {
             header_offset = Some(a + idx);
             break 'ranges;
         }
@@ -2188,6 +2266,63 @@ mod tests {
         );
     }
 
+    /// A private dialect's header magic is a strhide signature, but only for a
+    /// scan that was told about that dialect.
+    #[test]
+    fn private_dialect_header_magic_is_reported_only_when_asked() {
+        const PRIVATE_HEADER: [u8; 8] = [0xA7, 0x11, 0x5C, 0x3E, 0x90, 0x2B, 0x64, 0xD8];
+        let mut carrier = vec![0x41u8; 4096];
+        carrier[64..72].copy_from_slice(&PRIVATE_HEADER);
+
+        let plain = scan_bytes(&carrier, "carrier");
+        assert!(
+            !plain
+                .findings
+                .iter()
+                .any(|f| f.detector == "signature:known-tool"),
+            "an unknown header magic must not be reported as a known tool"
+        );
+
+        let magics = ScanMagics {
+            header: Some(PRIVATE_HEADER),
+            trailer: None,
+        };
+        let asked = scan_bytes_with_magics(&carrier, "carrier", magics);
+        assert!(
+            asked
+                .findings
+                .iter()
+                .any(|f| f.detector == "signature:known-tool"),
+            "the dialect header magic must be reported once the scan knows it"
+        );
+    }
+
+    /// The official profile must not contribute extra magics: doing so would
+    /// label every official carrier as a private-dialect hit.
+    #[test]
+    fn scan_magics_are_empty_for_the_official_profile() {
+        let official = crate::structure::StructureProfile::default();
+        let magics = scan_magics_for(&official);
+        assert!(
+            magics.header.is_none(),
+            "official header magic must be None"
+        );
+        assert!(
+            magics.trailer.is_none(),
+            "official trailer magic must be None"
+        );
+
+        let private = crate::structure::StructureProfile::default().with_magic(
+            crate::core::params::MagicPair {
+                header: [1, 2, 3, 4, 5, 6, 7, 8],
+                trailer: *b"PRVT",
+            },
+        );
+        let magics = scan_magics_for(&private);
+        assert_eq!(magics.header, Some([1, 2, 3, 4, 5, 6, 7, 8]));
+        assert_eq!(magics.trailer, Some(*b"PRVT"));
+    }
+
     #[test]
     fn rs_difference_includes_the_trailing_window() {
         // A 4x4 plane has two 3x3 window starts per axis (0 and 1). Ensure
@@ -2290,7 +2425,7 @@ mod tests {
         let mut blob = vec![0u8; 100];
         blob[40..48].copy_from_slice(&[0xb7, 0x54, 0x2c, 0x82, 0x7e, 0x31, 0x1d, 0x6e]);
         let mut f = Vec::new();
-        track_tool_signatures(&ScanView::whole(&blob), &mut f);
+        track_tool_signatures(&ScanView::whole(&blob), &mut f, ScanMagics::default());
         assert!(f.iter().any(|x| x.detector == "signature:known-tool"));
     }
 

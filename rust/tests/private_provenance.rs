@@ -323,3 +323,46 @@ fn legacy_hevc_entry_point_rejects_an_absent_secret() {
         "a provided secret must not be rejected as a credential problem: {err}"
     );
 }
+
+/// FLAC's default AEAD suite must come from the FLAC profile, not the WAV one.
+///
+/// `with_flac_format` and `with_audio_format` are separate knobs, so a dialect
+/// that moves WAV onto a different default suite must not change what a FLAC
+/// embed writes. Restricting the reader to AES-256-GCM is the observable: the
+/// carrier is only readable when the FLAC profile's suite (AES) is the one the
+/// writer chose.
+#[test]
+fn flac_default_suite_comes_from_the_flac_profile() {
+    const WAV_CHACHA_CIPHER: WireCipherProfile = WireCipherProfile {
+        default_suite: CipherSuiteId::ChaCha20Poly1305,
+        ..PRIVATE_CIPHER
+    };
+    const WAV_CHACHA: AudioFormatProfile = AudioFormatProfile {
+        hpos_salt: PRIVATE_WAV.hpos_salt,
+        cipher: &WAV_CHACHA_CIPHER,
+        flac_body_phase_label: PRIVATE_WAV.flac_body_phase_label,
+    };
+    const SPLIT_DIALECT: Dialect = Dialect::new().with_stego_profile(
+        StegoProfile::new()
+            .with_default_secret(PRIVATE_SECRET)
+            .with_stego_domain("acme-domain-v1")
+            .with_audio_format(WAV_CHACHA)
+            .with_flac_format(PRIVATE_FLAC),
+    );
+
+    let options = embed_options(Some(PASSWORD));
+    let stego = StrHide::new()
+        .with_dialect(SPLIT_DIALECT)
+        .stego()
+        .embed(FLAC, &Payload::bytes(PAYLOAD), &options)
+        .expect("flac embed");
+
+    let mut read_opts = options.extract_options();
+    read_opts.limits.allowed_suites = Some(vec![CipherSuiteId::Aes256Gcm.as_u16()]);
+    let read = StrHide::new()
+        .with_dialect(SPLIT_DIALECT)
+        .stego()
+        .extract(&stego, &read_opts)
+        .expect("the FLAC profile default suite (AES-256-GCM) must be the one in use");
+    assert_eq!(read.data.as_ref(), PAYLOAD, "payload mismatch");
+}
