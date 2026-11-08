@@ -96,6 +96,7 @@ use crate::stego::{
 /// Target hiding domain in a carrier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Domain {
     Structure,
     Content,

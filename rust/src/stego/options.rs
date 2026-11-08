@@ -58,11 +58,14 @@ use crate::stego::traits::PngCostModel;
 ///
 /// Replaces the `"hill"` / `"suniward"` strings the old options carried. A typo
 /// is now a compile error or a [`from_name`](Self::from_name) `None`, not a
-/// runtime "unknown algorithm" from inside the engine. The enum is closed: a
-/// private build that needs its own cost model goes through the PNG registry
-/// (`stego::png::registry`) rather than a caller-supplied variant.
+/// runtime "unknown algorithm" from inside the engine. Callers cannot supply
+/// their own variant: a private build that needs its own cost model goes
+/// through the PNG registry (`stego::png::registry`) instead. The variant list
+/// may still grow in a later release (a new `algorithm_id`, never a change to
+/// an existing model's numbers), which is why the enum is `#[non_exhaustive]`.
 #[cfg(feature = "content-png")]
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum SpatialAlgorithm {
     /// HILL (Li et al., ICIP 2014) -- the default.
     #[default]
@@ -112,6 +115,7 @@ impl SpatialAlgorithm {
 /// JPEG DCT-domain cost model selection.
 #[cfg(feature = "content-jpeg")]
 #[derive(Clone, Default)]
+#[non_exhaustive]
 pub enum JpegAlgorithm {
     /// UERD-inspired variant (Q^1, 8-neighbour average; deviates from Guo et al. 2015) -- the default.
     #[default]
@@ -187,6 +191,7 @@ impl Eq for JpegAlgorithm {}
 /// Which HEVC scheme the caller wants for a HEIF carrier.
 #[cfg(feature = "content-hevc")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HevcMode {
     /// Scheme C (CABAC in-place) when the carrier allows it, the thumbnail
     /// bridge when it does not. This is the only mode that ever falls back.
@@ -229,6 +234,7 @@ pub struct HevcParams {}
 /// format pins that half explicitly -- and makes a mismatch (a PNG cost model on
 /// a JPEG carrier) an error instead of a silently ignored field.
 #[derive(Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub enum StegoTuning {
     /// Per-format defaults.
     #[default]
