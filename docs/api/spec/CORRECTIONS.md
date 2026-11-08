@@ -101,8 +101,14 @@
 
 以下问题属于实现一致性/健壮性，不在本次“文档拆分”范围内，仅记录供后续处理：
 
-1. `riff.rs` 容量表在接近 4 GiB 时可能报 `available=true`，但实际注入会因 RIFF 大小溢出失败（E5 相关）。
-2. `webp.rs` 静态容量表对 Simple Format 仍报 `riff_chunk` 可用；`engine.rs` 的 `apply_engine_payload_limit` 不检查 `available`。
+1. ~~`riff.rs` 容量表在接近 4 GiB 时可能报 `available=true`，但实际注入会因 RIFF 大小溢出失败（E5 相关）。~~
+   **已修复（2026-11-08）**：`riff_strategy_capacities` 现在用 `riff_chunk_headroom()` 计算
+   `capacity_bytes = u32::MAX - declared_size - 8`，headroom 为 0 时置 `available=false`，
+   与 `riff_inject` 的实际上限一致（`tests/test_regression/review_20261025.rs::riff_chunk_capacity_reports_the_u32_headroom`）。
+2. ~~`webp.rs` 静态容量表对 Simple Format 仍报 `riff_chunk` 可用；`engine.rs` 的 `apply_engine_payload_limit` 不检查 `available`。~~
+   **已修复（2026-11-08）**：`reader = None` 时 note 明确标注 “Extended Format (VP8X) only”；
+   `apply_engine_payload_limit` 跳过 `available = false` 的条目，不再为不可用策略填入引擎上限
+   （`webp_static_capacity_table_marks_the_extended_format_requirement`）。
 3. `CAPACITY.md`/`ARCHITECTURE.md` 中若干 auto 策略描述与适配器实际无回退行为不符（E16）。
 4. `detmath.rs:320,352` 注释引用不存在的 `scripts/detmath/compare.sh`。
 5. `mkv.rs:113-117` 注释提到 `ebml_void` 可平移，但引擎只允许 `chunk`/`eof` 平移。

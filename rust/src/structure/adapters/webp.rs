@@ -36,6 +36,10 @@ impl HostAdapter for WebpAdapter {
     }
 
     fn strategy_capacities(&self, mut reader: Option<&mut dyn SeekRead>) -> Vec<StrategyCapacity> {
+        // `None` means "no carrier to look at", so the report is format-level and
+        // a Simple Format carrier cannot be ruled out. Say so rather than
+        // implying every WebP accepts the private chunk.
+        let known = reader.is_some();
         let simple = match reader.as_mut() {
             Some(r) => !riff_starts_with(&mut **r, b"VP8X"),
             None => false,
@@ -46,6 +50,12 @@ impl HostAdapter for WebpAdapter {
             caps[0].capacity_bytes = None;
             caps[0].note =
                 Some("Simple Format WebP has no VP8X chunk; auto falls back to eof".into());
+        } else if !known {
+            caps[0].note = Some(
+                "Extended Format (VP8X) only; a Simple Format carrier has no VP8X and falls back \
+                 to eof"
+                    .into(),
+            );
         }
         caps
     }

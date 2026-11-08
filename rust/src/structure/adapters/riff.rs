@@ -472,6 +472,31 @@ pub fn riff_can_chunk(reader: &mut dyn SeekRead, ube_size: u64) -> bool {
     ok
 }
 
+/// Largest envelope a `riff_chunk` injection can still add, from the declared
+/// RIFF size in the header.
+///
+/// The RIFF size field is a `u32` and `riff_inject` rewrites it as
+/// `old_riff_size + 8 + envelope + pad`, so the hard ceiling is
+/// `u32::MAX - old_riff_size - 8`. Reporting this instead of "unknown" keeps a
+/// carrier within 4 GiB of its limit from advertising the (much larger) engine
+/// payload limit and then failing at write time.
+fn riff_chunk_headroom(reader: &mut dyn SeekRead) -> Option<u64> {
+    let start = reader.stream_position().ok()?;
+    if reader.seek(SeekFrom::Start(0)).is_err() {
+        return None;
+    }
+    let mut header = [0u8; 12];
+    let read = reader.read_exact(&mut header);
+    let _ = reader.seek(SeekFrom::Start(start));
+    read.ok()?;
+    let old_riff_size = u32::from_le_bytes(header[4..8].try_into().ok()?) as u64;
+    Some(
+        (u32::MAX as u64)
+            .saturating_sub(old_riff_size)
+            .saturating_sub(8),
+    )
+}
+
 pub fn riff_strategy_capacities(
     format_name: &str,
     reader: Option<&mut dyn SeekRead>,
@@ -488,14 +513,25 @@ pub fn riff_strategy_capacities(
     if let Some(r) = reader {
         let start = r.stream_position().ok();
         // The boundary predicate is payload-independent, so a zero-sized
-        // envelope decides availability; the 4 GiB limit is payload-dependent
-        // and stays as the generic limit text.
+        // envelope decides availability.
         if !riff_can_chunk(r, 0) {
             chunk.available = false;
             chunk.note = Some(
                 "declared RIFF boundary does not match the file length; auto falls back to eof"
                     .into(),
             );
+        }
+        // The 4 GiB headroom *is* payload-dependent: report the exact value so a
+        // near-limit carrier cannot advertise more than `riff_inject` accepts.
+        if let Some(headroom) = riff_chunk_headroom(r) {
+            chunk.capacity_bytes = Some(headroom);
+            if headroom == 0 {
+                chunk.available = false;
+                chunk.note = Some(
+                    "the declared RIFF size is already at the 4 GiB ceiling; auto falls back to eof"
+                        .into(),
+                );
+            }
         }
         if let Some(p) = start {
             let _ = r.seek(SeekFrom::Start(p));

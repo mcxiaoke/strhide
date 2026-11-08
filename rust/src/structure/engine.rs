@@ -1908,6 +1908,11 @@ fn apply_engine_payload_limit(
 ) {
     let engine_limit = structure_payload_limit(host_len);
     for cap in strategies.iter_mut() {
+        // An unavailable strategy has no writable capacity at all; filling in
+        // the engine limit here would advertise a number the writer refuses.
+        if !cap.available {
+            continue;
+        }
         let exceeds = match cap.capacity_bytes {
             Some(native) => native > engine_limit,
             None => true,

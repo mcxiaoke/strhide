@@ -659,6 +659,44 @@ fn wav_webp_auto_probe_reports_eof_but_write_rejects_mismatch() {
 
 // ------------------------------------------------------------------ batch 5
 
+/// The `riff_chunk` capacity is the u32 RIFF headroom, not "unknown".
+///
+/// It used to be `None`, so the engine filled in its own payload limit. A
+/// carrier within 4 GiB of its declared-size ceiling then advertised far more
+/// than `riff_inject` accepts and failed at write time instead of at probe.
+#[test]
+fn riff_chunk_capacity_reports_the_u32_headroom() {
+    let wav = make_wav();
+    let old = u32::from_le_bytes(wav[4..8].try_into().expect("RIFF size field")) as u64;
+    let caps = WavAdapter.strategy_capacities(Some(&mut Cursor::new(&wav)));
+    let chunk = caps
+        .iter()
+        .find(|c| c.strategy == "riff_chunk")
+        .expect("riff_chunk row");
+    assert!(chunk.available);
+    assert_eq!(
+        chunk.capacity_bytes,
+        Some(u32::MAX as u64 - old - 8),
+        "the advertised capacity must be the patched-size headroom"
+    );
+}
+
+/// A format-level table (`reader = None`) cannot tell Extended from Simple
+/// WebP, so the `riff_chunk` row has to say which one it describes.
+#[test]
+fn webp_static_capacity_table_marks_the_extended_format_requirement() {
+    let caps = WebpAdapter.strategy_capacities(None);
+    let chunk = caps
+        .iter()
+        .find(|c| c.strategy == "riff_chunk")
+        .expect("riff_chunk row");
+    let note = chunk.note.as_deref().unwrap_or_default();
+    assert!(
+        note.contains("Extended Format (VP8X) only"),
+        "static table must scope riff_chunk to the Extended Format: {note}"
+    );
+}
+
 /// The APP15 chain is inserted *before* SOS, so a large chain pushes SOS
 /// past the adapter's 16 MiB marker-scan window. Capacity must be measured
 /// against the relocated SOS, and auto must fall back to `eof` instead of
