@@ -367,7 +367,7 @@ println!("Configured stego safety tier: {:?}", cfg.stego.as_ref().and_then(|s| s
 
 ### Error Handling
 
-All library functions return `Result<T, StrHideError>`. Common error variants include:
+All library functions return `Result<T, StrHideError>`. The enum is `#[non_exhaustive]`, so a wildcard arm is required; `StrHideError::kind()` returns a stable `ErrorKind` for callers that branch on behaviour instead of on message text (the CLI and the desktop app both do this):
 
 ```rust
 use strhide::errors::StrHideError;
@@ -375,11 +375,29 @@ use strhide::errors::StrHideError;
 fn handle_errors(err: StrHideError) {
     match err {
         StrHideError::Password(msg) => eprintln!("Authentication failed: {msg}"),
-        StrHideError::PasswordWithHint { hint, .. } => eprintln!("Password required. Hint: {hint}"),
-        StrHideError::CarrierTooSmall { needed, available } => {
-            eprintln!("Payload too large: needed {needed} bytes, available {available} bytes");
+        StrHideError::PasswordWithHint { message, hint } => {
+            eprintln!("{message}");
+            if let Some(hint) = hint {
+                eprintln!("Hint: {hint}");
+            }
         }
-        StrHideError::SignedBinaryRejected(msg) => eprintln!("Security refusal: {msg}"),
+        // The payload does not fit this carrier (or the solve would exceed the
+        // working-memory budget). Never reported as an unsupported format.
+        StrHideError::PayloadTooLarge(detail) => eprintln!("Payload too large: {detail}"),
+        StrHideError::SafetyThreshold { tier, required_bytes, available_bytes } => eprintln!(
+            "Exceeds the '{tier}' tier: {required_bytes} bytes needed, {available_bytes} allowed"
+        ),
+        // Signed carriers (PE Authenticode, PDF ByteRange, signed JAR), read-only
+        // inputs, and unwritable output directories all land here.
+        StrHideError::Rejection(reason) => eprintln!("Refused for safety: {reason}"),
+        StrHideError::NoHiddenData(_) => eprintln!("No hidden payload found"),
+        StrHideError::RestoreMismatch { residual_envelope, .. } => {
+            if residual_envelope {
+                eprintln!("Another envelope is still present: remove envelopes newest-first");
+            } else {
+                eprintln!("The carrier changed after the write; the original is unrecoverable");
+            }
+        }
         StrHideError::General(msg) => eprintln!("Error: {msg}"),
         _ => eprintln!("Operation failed: {err}"),
     }
