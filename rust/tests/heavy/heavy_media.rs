@@ -171,14 +171,13 @@ pub mod mp4_container {
     #[ignore = "requires ffmpeg on PATH and the local temp/testhevc corpus"]
     pub fn heavy_hevc_mp4_corpus_roundtrip() {
         let _lock = FFMPEG_SERIAL_LOCK.lock().unwrap();
-        if !ffmpeg_available() {
-            eprintln!("[SKIP] ffmpeg not found on PATH");
-            return;
-        }
-        let Some(dir) = corpus_dir() else {
-            eprintln!("[SKIP] testhevc corpus not found");
-            return;
-        };
+        assert!(
+            ffmpeg_available(),
+            "ffmpeg is required for the MP4 PSNR gate; install it or skip this ignored test"
+        );
+        let dir = corpus_dir().unwrap_or_else(|| {
+            panic!("HEVC corpus not found (testdata/hevc or temp/testhevc); set STRHIDE_HEVC_DIR")
+        });
 
         let payload: Vec<u8> = (0..2048u32).map(|i| ((i * 37 + 11) % 256) as u8).collect();
         let corpus_files: Vec<&str> = if dir.join("vid_h265_002.mp4").is_file() {
@@ -188,9 +187,11 @@ pub mod mp4_container {
         };
         for (index, name) in corpus_files.iter().enumerate() {
             let cover_path = dir.join(name);
-            if !cover_path.is_file() {
-                continue;
-            }
+            assert!(
+                cover_path.is_file(),
+                "{name}: missing from corpus {}",
+                dir.display()
+            );
             let cover = fs::read(&cover_path).unwrap_or_else(|e| panic!("{name}: {e}"));
             let mut advertised = None;
             if index == 0 {

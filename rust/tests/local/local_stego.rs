@@ -68,19 +68,15 @@ pub mod v3_corpus {
             .join("temp")
             .join("images")
             .join("jpg");
-        let mut files: Vec<PathBuf> = match std::fs::read_dir(&root) {
-            Ok(entries) => entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg")))
-                .collect(),
-            Err(_) => return,
-        };
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&root)
+            .unwrap_or_else(|e| panic!("images corpus {}: {e}", root.display()))
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg")))
+            .collect();
         files.sort();
         files.truncate(20);
-        if files.is_empty() {
-            return;
-        }
+        assert!(!files.is_empty(), "no JPEGs in {}", root.display());
 
         let password = "MatrixGate#2026";
         let opts = EmbedOptions::default()
@@ -122,10 +118,13 @@ pub mod v3_corpus {
     #[test]
     #[ignore]
     pub fn local_v3_huffman_corpus_roundtrips() {
-        let Some(std_dir) = corpus("jpeg_huffman/std") else {
-            return;
-        };
-        let Some(opt_dir) = corpus("jpeg_huffman/opt") else {
+        let (Some(std_dir), Some(opt_dir)) =
+            (corpus("jpeg_huffman/std"), corpus("jpeg_huffman/opt"))
+        else {
+            eprintln!(
+                "[SKIP] jpeg_huffman corpus not found (temp/jpeg_huffman/std and /opt); \
+                 set STRHIDE_CORPUS to point at one"
+            );
             return;
         };
         let payload = incompressible(4096, 0xC0FFEE);

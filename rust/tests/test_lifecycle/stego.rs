@@ -330,16 +330,12 @@ fn test_jpeg_uerd_content_stego_roundtrip() {
 
 #[test]
 fn test_jpeg_uerd_fine_tuning() {
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("temp")
-        .join("testfiles")
-        .join("file-08.jpg");
-
-    if !candidate.exists() {
-        return;
-    }
+    let candidate = fixture_file("carrier.jpg");
+    assert!(
+        candidate.is_file(),
+        "bundled fixture missing: {}",
+        candidate.display()
+    );
 
     let jpeg_bytes = fs::read(&candidate).unwrap();
     let secret = b"Customized UERD neighbor weight test";
@@ -931,8 +927,11 @@ fn test_jpeg_private_default_secret_isolation() {
 /// The calibrated DCT detector must separate a clean JPEG from the same JPEG
 /// carrying a full-capacity payload, and must not fire on the clean one.
 ///
-/// Skipped when the sample corpus is absent, like the other JPEG tests.
+/// Ignored by default because the calibrated estimator needs a camera photo
+/// corpus (the bundled 256x256 synthetic gradient is dominated by IDCT
+/// rounding in the reference).
 #[test]
+#[ignore = "requires the git-ignored temp/images/jpg corpus (0003.jpg); run with --ignored"]
 fn test_jpeg_calibration_detector_clean_vs_loaded() {
     // The calibrated estimator is fitted on camera photos; the bundled fixture
     // is a 256x256 synthetic gradient whose quantization table makes the
@@ -941,9 +940,9 @@ fn test_jpeg_calibration_detector_clean_vs_loaded() {
     // `0003.jpg` is used because its full-capacity signal is unambiguous
     // (measured 0.70 against a 0.05 threshold); `0001.jpg` sits at 0.07, i.e.
     // just above the gate, and the random salt would make the test flaky.
-    let Some(candidate) = find_corpus_file("images/jpg/0003.jpg") else {
-        return;
-    };
+    let candidate = find_corpus_file("images/jpg/0003.jpg").unwrap_or_else(|| {
+        panic!("calibration corpus missing: temp/images/jpg/0003.jpg (set STRHIDE_CORPUS)")
+    });
     let jpeg_bytes = fs::read(&candidate).expect("read carrier");
     let dir = scratch("calibration_detector");
     let clean_path = dir.join("clean.jpg");

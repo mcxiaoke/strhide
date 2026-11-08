@@ -430,13 +430,9 @@ fn run_single_coexistence_case(
 #[test]
 #[ignore = "requires testdata/ corpus: run with cargo test heavy_dual_domain_coexistence_matrix -- --ignored --nocapture"]
 pub fn heavy_dual_domain_coexistence_matrix() {
-    let testdata_dir = match locate_testdata_dir() {
-        Some(d) => d,
-        None => {
-            eprintln!("[SKIP] testdata directory not found, skipping dual-domain coexistence test");
-            return;
-        }
-    };
+    let testdata_dir = locate_testdata_dir().unwrap_or_else(|| {
+        panic!("testdata directory not found (jpg/png/heic/hevc/audio); set STRHIDE_TESTDATA_DIR")
+    });
 
     let thread_count = std::env::var("STRHIDE_THREADS")
         .ok()
@@ -521,6 +517,12 @@ pub fn heavy_dual_domain_coexistence_matrix() {
     }
 
     let total_jobs = all_jobs.len();
+    assert!(
+        total_tested_carriers > 0,
+        "no carriers with >= 32 B stego capacity were found in {}; nothing was tested",
+        testdata_dir.display()
+    );
+    assert!(total_jobs > 0, "no coexistence scenarios were generated");
     println!(
         "\n  Generated {total_jobs} scenarios across {total_tested_carriers} carriers. Dispatching to thread pool...\n"
     );

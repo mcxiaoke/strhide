@@ -103,23 +103,19 @@ fn stealth_write_masks_magic_but_chunk_remains() {
 }
 
 #[test]
-fn scan_real_jpeg_sample_does_not_panic() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let jpg_path = manifest_dir
-        .parent()
-        .unwrap()
-        .join("temp")
-        .join("real_samples")
-        .join("sample.jpg");
-    if !jpg_path.exists() {
-        return;
-    }
-    let dir = scratch("real_jpg_scan");
+fn scan_clean_jpeg_fixture_scores_low() {
+    let jpg_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/assets/small.jpg");
+    assert!(
+        jpg_path.is_file(),
+        "bundled fixture missing: {}",
+        jpg_path.display()
+    );
+    let dir = scratch("clean_jpg_scan");
     let out = run(&dir, &["scan", jpg_path.to_str().unwrap(), "--json"]);
     let v: serde_json::Value = serde_json::from_str(&out).expect("valid json output");
     assert_eq!(v[0]["format"].as_str().unwrap(), "JPEG");
     let score = v[0]["risk_score"].as_u64().unwrap();
-    assert!(score < 30, "clean real JPEG should score low risk: {out}");
+    assert!(score < 30, "clean JPEG should score low risk: {out}");
 }
 
 // --------------------------------------------------------------------------- exit codes & quiet

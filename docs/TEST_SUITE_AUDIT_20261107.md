@@ -38,6 +38,10 @@
   - 套件总数 1101 → 1093；默认执行 1067 → 1059，`#[ignore]` 34 不变。
   - 各目标：`test_cli` 143→137、`test_lifecycle` 157→156、`test_media` 15→14。
   - 合并时原断言全部保留并多数增强：R11 的空回答档新增写入/提取/还原断言；R13 的文件级断言由 2 个字段扩到 5 个，且把 HEIC 容器的报告一致性断言并入同一用例（避免删除 HEIC 路径覆盖）。
+- **批次 4（2026-11-08）已完成**：剩余虚假通过 F02、F03、F06、F09、F10 已修复。
+  - F02 改用仓库内 JPEG fixture；F03 的 fine-tuning 改用 fixture，标定检测器改为 `#[ignore]` + 缺样本 `panic!`；F06/F10 缺语料/空语料改为显式 `panic!`，F10 增加 `total_tested_carriers > 0`、`total_jobs > 0`；F09 的本地语料缺失改为 `panic!`，可选的 `jpeg_huffman` 语料改为带原因的 `[SKIP]` 输出。
+  - 套件总数 1093 不变；默认执行 1059 → 1058，`#[ignore]` 34 → 35（`test_lifecycle` 1→2）。
+  - 实证：空 `STRHIDE_HEVC_DIR` / 空 `STRHIDE_TESTDATA_DIR` 均从“静默通过”变为带文件名的 `FAILED`；正常语料下 heavy MP4 与双域共存（80 场景/10 载体）通过。
 - **O02 前提修订**：实测裸写掩码字节后解出的逻辑值分别为 `46400133` 与 `2066267854`，**确实会命中** `MAX_META_LEN` / `MAX_HINT_LEN` 上限错误；但取值由随机盐派生的掩码决定，属于概率性命中。因此未按原建议删除，改为逻辑重打包并断言具体上限文案，保留读路径集成覆盖。
 
 ## 2. 全景表
@@ -139,15 +143,15 @@
 | ID | 文件:行 / 用例 | 为什么会“永远通过” | 处置 |
 |---|---|---|---|
 | F01 | [real_samples.rs:15](file:///c:/Home/Projects/strhide/rust/tests/test_regression/real_samples.rs#L15) + 7 个用例（26/56/86/153/214/276/338） | `samples_dir()` 返回 `Option`，目录不存在时每个用例直接 `return`；`temp/` 被 gitignore，CI 通常没有样本 | **已修复（批次 1）**：`samples_dir()` 缺目录即 `panic!`，7 个用例加显式 `#[ignore]` 原因；默认运行 7 ignored，`--ignored` 缺语料时明确失败 |
-| F02 | [scan.rs:106](file:///c:/Home/Projects/strhide/rust/tests/test_cli/scan.rs#L106) `scan_real_jpeg_sample_does_not_panic` | 样本缺失时静默返回（本地 0.03 s） | 同上；或改用仓库内 JPEG fixture，从“不 panic”升级为“发现指定 finding” |
-| F03 | [stego.rs:332](file:///c:/Home/Projects/strhide/rust/tests/test_lifecycle/stego.rs#L332) `test_jpeg_uerd_fine_tuning` / [936](file:///c:/Home/Projects/strhide/rust/tests/test_lifecycle/stego.rs#L936) `test_jpeg_calibration_detector_clean_vs_loaded` | 340-341、945 在 `temp/testfiles` 缺失时 `return` | 使用 `tests/assets/carrier.jpg` 或显式 skip 报告 |
+| F02 | [scan.rs:106](file:///c:/Home/Projects/strhide/rust/tests/test_cli/scan.rs#L106) `scan_real_jpeg_sample_does_not_panic` | 样本缺失时静默返回（本地 0.03 s） | 同上；或改用仓库内 JPEG fixture，从“不 panic”升级为“发现指定 finding”。**已修复（批次 4）**：改用 `tests/assets/small.jpg`，断言 `format == JPEG` 且 `risk_score < 30`，fixture 缺失直接失败 |
+| F03 | [stego.rs:332](file:///c:/Home/Projects/strhide/rust/tests/test_lifecycle/stego.rs#L332) `test_jpeg_uerd_fine_tuning` / [936](file:///c:/Home/Projects/strhide/rust/tests/test_lifecycle/stego.rs#L936) `test_jpeg_calibration_detector_clean_vs_loaded` | 340-341、945 在 `temp/testfiles` 缺失时 `return` | 使用 `tests/assets/carrier.jpg` 或显式 skip 报告。**已修复（批次 4）**：fine-tuning 改用 `fixture_file("carrier.jpg")`；标定检测器改为 `#[ignore]` + 缺相机语料时带路径 `panic!` |
 | F04 | [facade.rs:778](file:///c:/Home/Projects/strhide/rust/tests/test_lifecycle/facade.rs#L778) | 同 O03；本地已静默跳过 | 同 O03 |
 | F05 | [heavy_stego.rs:187-194](file:///c:/Home/Projects/strhide/rust/tests/heavy/heavy_stego.rs#L187-L194)、[227-229](file:///c:/Home/Projects/strhide/rust/tests/heavy/heavy_stego.rs#L227-L229) | 缺 corpus / 目录为空时打印 `[SKIP]` 后 `return`，ignored 用例仍算“通过” | **已修复（批次 1）**：改为带诊断信息的 `panic!` |
-| F06 | [heavy_media.rs:175-180](file:///c:/Home/Projects/strhide/rust/tests/heavy/heavy_media.rs#L175-L180) | ffmpeg 缺失或 corpus 缺失即 `return` | 同上 |
+| F06 | [heavy_media.rs:175-180](file:///c:/Home/Projects/strhide/rust/tests/heavy/heavy_media.rs#L175-L180) | ffmpeg 缺失或 corpus 缺失即 `return` | 同上。**已修复（批次 4）**：ffmpeg / corpus / 逐文件缺失均为显式 `panic!`；空 `STRHIDE_HEVC_DIR` 实测 `FAILED` |
 | F07 | [heavy_stego.rs:707](file:///c:/Home/Projects/strhide/rust/tests/heavy/heavy_stego.rs#L707) `heavy_batch_stego_corpus` | `BatchReport.failed` 只由 `Default` 初始化（[149-154](file:///c:/Home/Projects/strhide/rust/tests/heavy/heavy_stego.rs#L149-L154)），全文件无自增；`assert_eq!(report.failed, 0)` 恒真 | **已修复（批次 1）**：聚合后按 `total - (passed_lifecycle + passed_rejection)` 计算；注入“丢弃 1 条 outcome”后断言报 `1 carrier(s) produced none` |
 | F08 | [heavy_stego.rs:1245-1249](file:///c:/Home/Projects/strhide/rust/tests/heavy/heavy_stego.rs#L1245-L1249) `heavy_stego_evaluation_suite` | `filter_map(... .ok()?)` 收集结果；空结果走 [993-994](file:///c:/Home/Projects/strhide/rust/tests/heavy/heavy_stego.rs#L993-L994) 返回 `(0.0,0.0,0.0)`，`m_z0.abs() < 3.0` 必然成立 | **已修复（批次 1）**：读/解码/嵌入失败改为带文件名的 `panic!`，每个 bpp 聚合前断言 `!results.is_empty()`；强制 `payload_len=0` 时断言报 `no evaluation rows were produced` |
-| F09 | [local_corpus.rs:405](file:///c:/Home/Projects/strhide/rust/tests/local/local_corpus.rs#L405)、`local_stego.rs` 的空 corpus 分支 | 无样本时静默返回；ignored 运行仍“成功” | 与 F05 同样改为显式失败或明确的 skip 统计 |
-| F10 | `heavy_coexistence.rs` 全文 | 任务循环在无 carrier/job 时零次迭代；缺少 `tested > 0` / `total_jobs > 0` 断言 | 增加前置断言，避免空跑通过 |
+| F09 | [local_corpus.rs:405](file:///c:/Home/Projects/strhide/rust/tests/local/local_corpus.rs#L405)、`local_stego.rs` 的空 corpus 分支 | 无样本时静默返回；ignored 运行仍“成功” | 与 F05 同样改为显式失败或明确的 skip 统计。**已修复（批次 4）**：`local_corpus`/v3 矩阵缺语料 `panic!`；可选 `jpeg_huffman` 语料输出 `[SKIP]` 原因（实测先 `FAILED`，确认不再静默） |
+| F10 | `heavy_coexistence.rs` 全文 | 任务循环在无 carrier/job 时零次迭代；缺少 `tested > 0` / `total_jobs > 0` 断言 | 增加前置断言，避免空跑通过。**已修复（批次 4）**：缺 testdata `panic!`，新增 `total_tested_carriers > 0`、`total_jobs > 0`；空目录实测 `FAILED` |
 
 ### 3.6 成本（C）
 
@@ -155,7 +159,7 @@
 |---|---|---|---|---|
 | C01 | `heavy_stego_evaluation_suite` | 20.15 s | 与 `local_v3_payload_matrix_twenty_images`（5.24 s）、`stego_profile` example 有部分重叠，但其断言本身是 F08 | 先修 F08；若修完后仍只验证同一结论，再与 local v3 矩阵合并 |
 | C02 | `heavy_all_algorithms_png_jpeg_matrix` | 30.92 s | 覆盖全算法组合，是唯一矩阵 | **保留**；可把重复的 setup 提到循环外 |
-| C03 | `heavy_dual_domain_coexistence_matrix` | 42 s | 唯一双域共存覆盖 | **保留**；只补 `total_jobs > 0` 断言 |
+| C03 | `heavy_dual_domain_coexistence_matrix` | 42 s | 唯一双域共存覆盖 | **保留**；`total_jobs > 0` 断言已补（批次 4） |
 | C04 | `examples/hevc_matrix_bench.rs` | 143.76 s / 5 断言 | 不在 `cargo test` 内；人工性能评测 | 保留为手动工具，不纳入 CI 必需项；若要纳入，先削减轮次 |
 
 ## 4. 重组方案（按 crate / 模块）

@@ -404,13 +404,11 @@ fn first_line(msg: &str) -> String {
 #[test]
 #[ignore = "corpus sweep over temp/testfiles: run with --release --test batch_corpus -- --ignored --nocapture"]
 fn local_batch_corpus_all_modes() {
-    let Some(corpus) = corpus_dir() else {
-        eprintln!(
-            "[SKIP] corpus directory not found (set STRHIDE_CORPUS to point at one); \
-             nothing was tested"
-        );
-        return;
-    };
+    let corpus = corpus_dir().unwrap_or_else(|| {
+        panic!(
+            "corpus directory not found: temp/testfiles is absent (set STRHIDE_CORPUS to point at one)"
+        )
+    });
 
     let mut files: Vec<PathBuf> = fs::read_dir(&corpus)
         .expect("read corpus dir")
