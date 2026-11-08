@@ -176,6 +176,22 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Apache-2.0 §4(a) requires the licence to travel with binary
+      # distributions, and §4(d) extends that to the NOTICE file. Ship them as
+      # one archive instead of four stray files; the checksum step below covers
+      # this archive like any other asset.
+      - name: Assemble license bundle
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          staging="licenses-${version}"
+          mkdir -p "$staging/docs/licenses"
+          cp LICENSE NOTICE THIRD_PARTY_LICENSES.md "$staging/"
+          cp docs/licenses/*.md "$staging/docs/licenses/"
+          ( cd "$staging" && zip -qr "../dist/strhide-${version}-licenses.zip" . )
+          rm -rf "$staging"
+          unzip -l "dist/strhide-${version}-licenses.zip"
+
       - name: Generate checksums
         run: |
           cd dist
