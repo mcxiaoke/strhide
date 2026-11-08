@@ -677,3 +677,38 @@ fn batch_inspect_and_verify_stay_zero_when_all_inputs_exist() {
     let ver = run(&dir, &["verify", "a-out.png", "b-out.png"]);
     assert_eq!(code(&ver), 0, "{}", String::from_utf8_lossy(&ver.stderr));
 }
+
+/// Single file input missing error with `--json` must exit with 1 and report structured error.
+#[test]
+fn single_input_inspect_and_verify_fail_with_json_when_missing() {
+    let dir = scratch("single_missing_json");
+
+    let json_insp = run(&dir, &["inspect", "ghost.png", "--json"]);
+    assert_eq!(
+        code(&json_insp),
+        1,
+        "missing single input must fail inspect"
+    );
+    let v_insp: serde_json::Value = serde_json::from_slice(&json_insp.stdout).expect("valid json");
+    let arr_insp = v_insp.as_array().expect("emits an array");
+    assert_eq!(arr_insp.len(), 1);
+    assert_eq!(
+        arr_insp[0].get("path").and_then(|p| p.as_str()),
+        Some("ghost.png")
+    );
+    assert_eq!(
+        arr_insp[0].get("error").and_then(|e| e.as_str()),
+        Some("file does not exist")
+    );
+
+    let json_ver = run(&dir, &["verify", "ghost.png", "--json"]);
+    assert_eq!(code(&json_ver), 1, "missing single input must fail verify");
+    let v_ver: serde_json::Value = serde_json::from_slice(&json_ver.stdout).expect("valid json");
+    let arr_ver = v_ver.as_array().expect("emits an array");
+    assert_eq!(arr_ver.len(), 1);
+    assert_eq!(
+        arr_ver[0].get("path").and_then(|p| p.as_str()),
+        Some("ghost.png")
+    );
+    assert!(arr_ver[0].get("error").is_some());
+}

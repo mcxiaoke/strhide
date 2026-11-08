@@ -189,15 +189,8 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
           });
         } catch (err) {
           const parsed = parseStrHideError(err, c);
-          const isCapacityOrBudget =
-            parsed.message.toLowerCase().includes("capacity") ||
-            parsed.message.toLowerCase().includes("safety") ||
-            parsed.title.toLowerCase().includes("safety") ||
-            parsed.title.toLowerCase().includes("capacity") ||
-            parsed.message.includes("容量") ||
-            parsed.message.includes("预算");
           queue.update(item.path, {
-            status: isCapacityOrBudget ? "skip" : "error",
+            status: parsed.isCapacityOrSafety ? "skip" : "error",
             message: parsed.message,
           });
         }
