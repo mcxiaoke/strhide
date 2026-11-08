@@ -730,6 +730,20 @@ impl JpegParams {
     }
 }
 
+/// PCM sample-domain knobs for WAV and FLAC carriers.
+///
+/// The audio engines are parameter-free today: capacity, slot ordering and the
+/// drift budget all derive from the carrier's own sample format and the safety
+/// tier, and the extractor never consults a cost model. The struct exists so an
+/// explicit [`StegoTuning::Audio`](crate::stego::StegoTuning::Audio) can name the
+/// domain -- mirroring the PNG / JPEG / HEVC halves -- and so a future knob (a
+/// window width, a drift ladder) becomes a field here instead of a new enum
+/// shape that breaks every caller.
+#[cfg(feature = "content-audio")]
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AudioParams {}
+
 /// Extraction policy.
 ///
 /// Unlike [`JpegParams`] this is **not** part of the offer: it only says how

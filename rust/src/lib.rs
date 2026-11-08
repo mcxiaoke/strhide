@@ -124,7 +124,7 @@
 //!   and WAV/FLAC PCM. Its public surface is re-exported at the crate root:
 //!   [`JpegFormatProfile`] / [`DEFAULT_JPEG_FORMAT`] (wire-format identity),
 //!   [`crypto::CipherSuiteId`] / [`crypto::Credential`] (suite and KDF credential),
-//!   [`JpegParams`] / [`ExtractParams`] (per-call tuning), and
+//!   [`JpegParams`] / [`AudioParams`] / [`ExtractParams`] (per-call tuning), and
 //!   [`embed_carrier`] / [`extract_carrier`] (entry points a private build
 //!   calls with its own [`stego::params::StegoProfile`]).
 //! - [`analysis`] — layer 4: black-box steganalysis.
@@ -266,6 +266,8 @@ pub use stego::format::{OFFICIAL_PNG_FORMAT, PngFormatProfile};
 
 #[cfg(feature = "content-jpeg")]
 pub use stego::jpeg::cost::UerdCostModel;
+#[cfg(feature = "content-audio")]
+pub use stego::params::AudioParams;
 #[cfg(feature = "content-base")]
 pub use stego::params::ExtractParams;
 #[cfg(feature = "content-jpeg")]

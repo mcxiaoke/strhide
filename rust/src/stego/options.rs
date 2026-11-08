@@ -41,6 +41,8 @@ use crate::stego::envelope::Freshness;
 use crate::stego::header::Tlv;
 #[cfg(feature = "content-jpeg")]
 use crate::stego::jpeg::registry as jpeg_registry;
+#[cfg(feature = "content-audio")]
+use crate::stego::params::AudioParams;
 #[cfg(feature = "content-jpeg")]
 use crate::stego::params::JpegParams;
 #[cfg(feature = "content-png")]
@@ -263,6 +265,12 @@ pub enum StegoTuning {
         /// Reserved per-call knobs.
         params: HevcParams,
     },
+    /// Explicit PCM sample-domain tuning; only valid for WAV and FLAC carriers.
+    #[cfg(feature = "content-audio")]
+    Audio {
+        /// Reserved per-call knobs.
+        params: AudioParams,
+    },
 }
 
 impl std::fmt::Debug for StegoTuning {
@@ -284,6 +292,8 @@ impl std::fmt::Debug for StegoTuning {
                 .finish(),
             #[cfg(feature = "content-hevc")]
             StegoTuning::Hevc { mode, .. } => f.debug_struct("Hevc").field("mode", mode).finish(),
+            #[cfg(feature = "content-audio")]
+            StegoTuning::Audio { .. } => f.write_str("Audio"),
         }
     }
 }
@@ -316,6 +326,12 @@ impl StegoTuning {
         }
     }
 
+    /// Explicit PCM sample-domain tuning with the default (empty) params.
+    #[cfg(feature = "content-audio")]
+    pub fn audio(params: AudioParams) -> Self {
+        StegoTuning::Audio { params }
+    }
+
     /// Reject a tuning that cannot apply to `format`.
     ///
     /// Naming one format's tuning while writing another is a caller mistake --
@@ -340,6 +356,8 @@ impl StegoTuning {
             }
             #[cfg(feature = "content-hevc")]
             (StegoTuning::Hevc { .. }, FileFormat::HevcAnnexB) => Ok(()),
+            #[cfg(feature = "content-audio")]
+            (StegoTuning::Audio { .. }, FileFormat::Wav | FileFormat::Flac) => Ok(()),
             #[cfg(feature = "content-png")]
             (StegoTuning::Png { model, .. }, other) => Err(StrHideError::General(format!(
                 "stego algorithm '{}' is a spatial (PNG) model and cannot be used on a {} carrier",
@@ -355,6 +373,11 @@ impl StegoTuning {
             #[cfg(feature = "content-hevc")]
             (StegoTuning::Hevc { .. }, other) => Err(StrHideError::General(format!(
                 "the HEVC engine cannot be used on a {} carrier",
+                other.as_str()
+            ))),
+            #[cfg(feature = "content-audio")]
+            (StegoTuning::Audio { .. }, other) => Err(StrHideError::General(format!(
+                "the audio sample-domain engine cannot be used on a {} carrier",
                 other.as_str()
             ))),
             #[allow(unreachable_patterns)]
@@ -381,6 +404,8 @@ impl StegoTuning {
             }
             #[cfg(feature = "content-hevc")]
             StegoTuning::Hevc { mode, .. } => resolved.hevc_mode = *mode,
+            #[cfg(feature = "content-audio")]
+            StegoTuning::Audio { .. } => {}
         }
         resolved
     }
@@ -1680,6 +1705,20 @@ mod tests {
             assert!(hevc.applicable_to(format).is_ok());
         }
         assert!(hevc.applicable_to(FileFormat::Png).is_err());
+    }
+
+    #[cfg(feature = "content-audio")]
+    #[test]
+    fn audio_tuning_pins_wav_and_flac() {
+        let audio = StegoTuning::audio(AudioParams::default());
+        assert!(audio.applicable_to(FileFormat::Wav).is_ok());
+        assert!(audio.applicable_to(FileFormat::Flac).is_ok());
+        let err = audio.applicable_to(FileFormat::Png).expect_err("mismatch");
+        assert!(
+            err.to_string().contains("audio") && err.to_string().contains("PNG"),
+            "the message must name both sides: {err}"
+        );
+        assert_eq!(format!("{audio:?}"), "Audio");
     }
 
     #[test]

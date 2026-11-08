@@ -33,7 +33,7 @@
 
 | 层 | 内容 | 稳定性承诺 |
 |---|---|---|
-| **稳定面 Stable** | 统一入口 `stego::{embed_carrier, embed_carrier_with_dialect, extract_carrier, extract_carrier_with_dialect, extract_carrier_payload, inspect_carrier[_with_dialect], verify_carrier[_with_dialect], probe_carrier_capacity[_with_dialect], list_stego_algorithms, algorithms_for_format}`；选项 `EmbedOptions` / `ProbeOptions` / `ExtractOptions` / `InspectOptions` / `VerifyOptions` / `StegoTuning` / `SafetyPolicy` / `SafetyLevel` / `SafetyEnforcement` / `PngParams` / `JpegParams` / `StegoCodec` / `ExtractParams` / `Freshness`；凭据 `core::crypto::Credential`（`Password` / `FileKey`）；套件 `core::crypto::CipherSuiteId`；扩展 `stego::Tlv`；方言 `params::StegoProfile`；结果 `StegoCapacityInfo` / `StegoHeaderInfo` / `StegoVerifyResult` / `EmbedOutput` / `StegoAlgorithmInfo` / `core::media::MediaInfo`；格式身份 `format::{JpegFormatProfile, PngFormatProfile, HevcFormatProfile, GridRule, DEFAULT_JPEG_FORMAT, OFFICIAL_PNG_FORMAT, DEFAULT_HEVC_FORMAT}`；`CostModelRegistry`；`traits::{PngCostModel, JpegCostModel, JpegGeometry}`；`io::{embed_carrier_file, extract_carrier_file, extract_carrier_file_payload}`；`facade::StrHide::stego()` | 破坏性变更只随 major |
+| **稳定面 Stable** | 统一入口 `stego::{embed_carrier, embed_carrier_with_dialect, extract_carrier, extract_carrier_with_dialect, extract_carrier_payload, inspect_carrier[_with_dialect], verify_carrier[_with_dialect], probe_carrier_capacity[_with_dialect], list_stego_algorithms, algorithms_for_format}`；选项 `EmbedOptions` / `ProbeOptions` / `ExtractOptions` / `InspectOptions` / `VerifyOptions` / `StegoTuning` / `SafetyPolicy` / `SafetyLevel` / `SafetyEnforcement` / `PngParams` / `JpegParams` / `AudioParams` / `StegoCodec` / `ExtractParams` / `Freshness`；凭据 `core::crypto::Credential`（`Password` / `FileKey`）；套件 `core::crypto::CipherSuiteId`；扩展 `stego::Tlv`；方言 `params::StegoProfile`；结果 `StegoCapacityInfo` / `StegoHeaderInfo` / `StegoVerifyResult` / `EmbedOutput` / `StegoAlgorithmInfo` / `core::media::MediaInfo`；格式身份 `format::{JpegFormatProfile, PngFormatProfile, HevcFormatProfile, GridRule, DEFAULT_JPEG_FORMAT, OFFICIAL_PNG_FORMAT, DEFAULT_HEVC_FORMAT}`；`CostModelRegistry`；`traits::{PngCostModel, JpegCostModel, JpegGeometry}`；`io::{embed_carrier_file, extract_carrier_file, extract_carrier_file_payload}`；`facade::StrHide::stego()` | 破坏性变更只随 major |
 | **专家面 Expert** | 域引擎入口 `png::engine::{embed_png, extract_png, probe_png_capacity}`、`jpeg::engine::{embed_jpeg, extract_jpeg, probe_jpeg_capacity}`、`heif::*`、`hevc::{embed_hevc, extract_hevc, probe_hevc_capacity}`；图像编解码与解析；模型实现 `png::cost::*`、`jpeg::cost::*` | 小版本可演进，CHANGES 公告 |
 | **内部面 Internal**（`#[doc(hidden)]`，无承诺） | `coding`、`envelope`、`header`、`prng`、`wavelet`、`jpeg::{dht, geometry, header_v4, precover, v3_layout}`、`hevc::{bitstream, error, heif_boxes, slot, sniff}` | 路径可达但不入文档；随时可变 |
 
@@ -108,7 +108,7 @@ let probe = ProbeOptions::default()
 的可选量另有 `with_*_option(Option<T>)` 形式。它们均为 `#[non_exhaustive]`，
 下游不要使用结构体字面量构造或穷尽解构。
 
-`StegoTuning` 是 `Auto` 与三个按格式分臂的联合体：
+`StegoTuning` 是 `Auto` 与四个按格式分臂的联合体（`content-*` 特性未启用时对应变体不编译）：
 
 ```rust
 pub enum StegoTuning {
@@ -116,8 +116,14 @@ pub enum StegoTuning {
     Png  { model: SpatialAlgorithm, params: PngParams },
     Jpeg { model: JpegAlgorithm,    params: JpegParams },
     Hevc { mode: HevcMode,          params: HevcParams },
+    Audio { params: AudioParams },
 }
 ```
+
+`AudioParams` 目前是空结构体且为 `#[non_exhaustive]`：音频引擎的容量、槽位顺序与漂移预算全部
+由载体自身的采样格式与安全档位推导，提取端不读代价模型，因此当前没有可调项。变体的作用是
+把音频域显式钉住（与 PNG/JPEG/HEVC 对称），并让后续新增的调优旋钮以**加字段**而非**改变枚举形状**
+的方式落地。用 `StegoTuning::audio(AudioParams::default())` 构造。
 
 `SafetyLevel` 实现 `FromStr`：`paranoid|high|balanced` 或数字别名 `0|1|2`。
 

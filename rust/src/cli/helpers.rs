@@ -684,6 +684,11 @@ pub(crate) fn format_stego_algorithm(
             let name = cap_algo.unwrap_or("HEVC-CABAC-InPlace");
             format!("{name} (safety: {safety_str})")
         }
+        #[cfg(feature = "content-audio")]
+        StegoTuning::Audio { .. } => {
+            let name = cap_algo.unwrap_or("wav_pcm");
+            format!("{name} (safety: {safety_str})")
+        }
         StegoTuning::Auto => match format {
             #[cfg(feature = "content-png")]
             Some(FileFormat::Png) => {

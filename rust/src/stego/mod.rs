@@ -80,6 +80,8 @@ pub use options::{
 #[cfg(feature = "content-hevc")]
 pub use options::{HevcMode, HevcParams};
 
+#[cfg(feature = "content-audio")]
+pub use params::AudioParams;
 #[cfg(feature = "content-jpeg")]
 pub use params::JpegParams;
 #[cfg(feature = "content-png")]
