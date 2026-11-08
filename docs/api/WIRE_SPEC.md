@@ -31,7 +31,7 @@
 
 ## 两域速览
 
-- **结构域（`write` / `restore`）**：UBE v2.2，`112B header` + hint + meta + 分块载荷 + `24B trailer`，支持宿主逐字节还原；字节序小端。
+- **结构域（`write` / `restore`）**：UBE v2，`112B header` + hint + meta + 分块载荷 + `24B trailer`，支持宿主逐字节还原；字节序小端。
 - **内容域（`embed` / `extract`）**：按载体变化的密钥化基础头 + 可选 TLV + 单个 AEAD 正文，槽位经密钥置换后由 STC 编码；多字节字段大端；宿主不可还原。
 
 两域派生域隔离、信封不兼容、不能交叉读取。详细对比见 [spec/README.md §1](./spec/README.md)。

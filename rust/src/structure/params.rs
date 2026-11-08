@@ -5,7 +5,7 @@
 //! lives in [`crate::stego::params::StegoProfile`]. [`crate::facade::Dialect`]
 //! composes the two so a host still stores and passes **one** object.
 //!
-//! Nothing here changes the UBE v2.2 wire format: every field is either
+//! Nothing here changes the UBE v2 wire format: every field is either
 //! writer-only or an input to key/magic derivation whose result is already
 //! stored in (or recoverable from) the envelope.
 

@@ -1,4 +1,4 @@
-# strhide 结构域线格式参考（UBE v2.2）
+# strhide 结构域线格式参考（UBE v2）
 
 > **本文已拆分（2026-11-07），保留为历史参考，非规范。**
 > 新规范见 [`docs/api/spec/`](./spec/README.md)：信封 [STRUCTURE-ENVELOPE.md](./spec/STRUCTURE-ENVELOPE.md)，
@@ -28,7 +28,7 @@
 ## 目录
 
 1. [总览与术语](#1-总览与术语)
-2. [结构域：UBE v2.2 总体布局](#2-结构域ube-v22-总体布局)
+2. [结构域：UBE v2 总体布局](#2-结构域ube-v2-总体布局)
 3. [Envelope Header（112 字节）](#3-envelope-header112-字节)
 4. [标志位（Flags）](#4-标志位flags)
 5. [AAD（认证附加数据）](#5-aad认证附加数据)
@@ -65,11 +65,11 @@
 
 **字节序**：结构域所有多字节整数一律**小端（little-endian）**。
 
-**版本**：`CURRENT_VERSION = 0x02`（UBE v2.2）。
+**版本**：`CURRENT_VERSION = 0x02`（UBE v2）。
 
 ---
 
-## 2. 结构域：UBE v2.2 总体布局
+## 2. 结构域：UBE v2 总体布局
 
 ```text
 偏移区（相对 UBE 起点）
@@ -520,8 +520,8 @@ channel_bytes[4..14] = unmasked[4..14] XOR mask[0..10]
 
 | 读侧能力 \ 写侧产物 | 是否可读 | 结果 |
 |---|---|---|
-| UBE v2.2（当前，compact meta） | ✅ | 正常读取 |
-| UBE v2.2，`FLAG_COMPACT_META` 未置（旧 JSON 元数据） | ❌ | 报不支持的元数据布局 |
+| UBE v2（当前，compact meta） | ✅ | 正常读取 |
+| UBE v2，`FLAG_COMPACT_META` 未置（旧 JSON 元数据） | ❌ | 报不支持的元数据布局 |
 | pre-v2（v0.2/v0.3，ASCII 魔数、明文/JSON 元数据） | ❌ | 报告"无隐藏数据"（旧 ASCII 魔数与明文布局已移除） |
 | 版本号 ≠ `0x02` | ❌ | 报不支持的信封版本 |
 

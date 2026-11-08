@@ -1,6 +1,6 @@
 # strhide 线格式规范（总览与索引）
 
-> 适用范围：`strhide` 0.9.x（线格式：结构域 **UBE v2.2**，内容域 **V4 内容信封**）。
+> 适用范围：`strhide` 0.9.x（线格式：结构域 **UBE v2**，内容域 **V4 内容信封**）。
 > 本目录是**规范性文档**，目标是让第三方在不阅读 Rust 源码的情况下实现可互操作的读写器。
 > 参考实现：`rust/src`；模块职责见 [../ARCHITECTURE.md](../ARCHITECTURE.md)，公开 API 见 [../STEGO-API.md](../STEGO-API.md)。
 
@@ -30,7 +30,7 @@
 
 | 文档 | 主题 |
 |---|---|
-| [STRUCTURE-ENVELOPE.md](./STRUCTURE-ENVELOPE.md) | UBE v2.2：112B header、hint、meta、分块载荷、24B trailer、stealth、PE ChannelHeader |
+| [STRUCTURE-ENVELOPE.md](./STRUCTURE-ENVELOPE.md) | UBE v2：112B header、hint、meta、分块载荷、24B trailer、stealth、PE ChannelHeader |
 | [STRUCTURE-PNG.md](./STRUCTURE-PNG.md) | PNG `prIv` 块注入 |
 | [STRUCTURE-JPEG.md](./STRUCTURE-JPEG.md) | JPEG APP 段注入 |
 | [STRUCTURE-RIFF.md](./STRUCTURE-RIFF.md) | WAV / WebP 的 RIFF chunk 注入 |
@@ -52,7 +52,7 @@ strhide 有**两套互不兼容的信封**，派生域隔离，不能交叉读�
 
 | 维度 | 结构域（`write` / `restore`） | 内容域（`embed` / `extract`） |
 |---|---|---|
-| 信封 | UBE v2.2：`112B header` + hint + meta + 分块载荷 + `24B trailer` | 密钥化基础头（空间 64B / JPEG 44B / HEVC 32B）+ 可选 TLV + 单个 AEAD 正文 |
+| 信封 | UBE v2：`112B header` + hint + meta + 分块载荷 + `24B trailer` | 密钥化基础头（空间 64B / JPEG 44B / HEVC 32B）+ 可选 TLV + 单个 AEAD 正文 |
 | 静态特征 | 有 8B 头魔数 + 4B 尾魔数（stealth 模式为密码派生） | 无固定魔数；`magic4` 由 L2 派生 |
 | 字节序 | **小端** | 多字节字段**大端**（`sigma` 例外：f32 小端） |
 | 载荷 | 分块 AEAD，每块 `u32 LE` 长度前缀，chunk AAD 含 index/is_last | 一次性 AEAD，无分块 |

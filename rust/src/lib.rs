@@ -115,7 +115,7 @@
 //!   `sniff_stream`, and the [`formats::capability`] table ("what can this
 //!   format carry?").
 //! - [`structure`] — layer 3A, the container domain: [`structure::write_carrier`]
-//!   and friends, with [`structure::envelope`] (UBE v2.2 wire format),
+//!   and friends, with [`structure::envelope`] (UBE v2 wire format),
 //!   [`structure::adapters`] (one `HostAdapter` per container),
 //!   [`structure::registry`] (format routing, strategy IDs) and
 //!   [`structure::params::StructureProfile`].

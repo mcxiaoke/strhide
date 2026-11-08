@@ -4,7 +4,7 @@
 > 本文描述模块职责、分层关系、公开 API 与内部数据流转，所有结论均按当前源码核对。
 > 配套文档：
 > - [spec/README.md](./spec/README.md) — 线格式规范总览、术语与两域对比；
-> - [spec/STRUCTURE-ENVELOPE.md](./spec/STRUCTURE-ENVELOPE.md) — 结构域 UBE v2.2 线格式规范；
+> - [spec/STRUCTURE-ENVELOPE.md](./spec/STRUCTURE-ENVELOPE.md) — 结构域 UBE v2 线格式规范；
 > - [spec/CONTENT-ENVELOPE.md](./spec/CONTENT-ENVELOPE.md) — 内容域 V4 信封公共层（稳定性分级、槽位、STC）；
 > - 上层背景：`docs/strhide_facade_api_evaluation_and_industry_standards_20261022.md`（Facade 方案评估与业界标准）、`docs/library_extensibility_and_public_api_audit_20261020.md`、`docs/library_api_practical_plan_20261020.md`。
 
@@ -72,7 +72,7 @@ strhide 的全部架构决策围绕四条支柱，理解它们比记住单个函
         │                                            │
         ▼                                            ▼
 ┌──────────────────────────────┐        ┌───────────────────────────────┐
-│ envelope（UBE v2.2 结构）     │        │ 共用底层                       │
+│ envelope（UBE v2 结构）     │        │ 共用底层                       │
 └───────┬──────────────────────┘        │ crypto（AEAD/KDF/压缩/哈希）   │
         │                               │ params（LocalParams/原语）     │
         │                               │ errors（StrHideError/Detail）  │
@@ -140,7 +140,7 @@ let payload = ENGINE.stego().extract(&stego, &ExtractOptions::default())?;
 | 模块 | 职责 |
 |---|---|
 | [`structure::adapters`] | `HostAdapter` trait 与各格式实现；容器 I/O 辅助（`StrategyCapacity`、`SeekRead`、`SeekWrite`） |
-| [`structure::envelope`] | UBE v2.2 二进制结构与序列化 |
+| [`structure::envelope`] | UBE v2 二进制结构与序列化 |
 | [`structure::registry`] | 适配器路由、策略名 ↔ ID、`StrategyId` |
 | [`structure::rejection`] | 预写安全检查 |
 | [`stego::format`] / [`stego::header`] / [`stego::envelope`] | 内容域线格式标识、64B 特征字、微头 |
@@ -611,7 +611,7 @@ const MY_DIALECT: Dialect = Dialect::new()
   下游应使用 `default()` / `new()` + `with_*` / `with_*_option` 构建入参（`non_exhaustive` 同时禁止跨 crate 的结构体字面量与 `..Default::default()`），结果类型只读字段；未来新增字段或变体不构成破坏性变更。
 - **故意不加护栏的例外**：`PngFormatProfile` / `JpegFormatProfile` / `HevcFormatProfile` / `AudioFormatProfile` / `WireCipherProfile` / `HeaderLocatorKeys` / `GridRule` 是私有方言配方，文档要求以结构体字面量构造（见 [STEGO-API.md](./STEGO-API.md) §3），加 `non_exhaustive` 会使其在 crate 外无法使用；`MagicPair` 是物理定型的 8 字节前后魔数，不扩展。
 - **`#[doc(hidden)]` 模块不构成稳定面**：`structure::{adapters,envelope,rejection,registry}`、`stego::{hevc,jpeg,png,coding,header,wavelet,prng,envelope}` 等实现模块为了支撑 `rust/tests` 的白盒验证仍是 `pub`，但已统一标注 `#[doc(hidden)]`。它们**不属于 SemVer 承诺范围**，1.x 内可自由重构，下游不应依赖这些路径。稳定面以 `lib.rs` 的重导出与 `prelude` 为准。
-- 线格式（UBE v2.2）的稳定性与读写兼容关系见 [spec/STRUCTURE-ENVELOPE.md](./spec/STRUCTURE-ENVELOPE.md)；
+- 线格式（UBE v2）的稳定性与读写兼容关系见 [spec/STRUCTURE-ENVELOPE.md](./spec/STRUCTURE-ENVELOPE.md)；
   内容域（V4 信封）的稳定性分级与兼容矩阵见 [spec/CONTENT-ENVELOPE.md](./spec/CONTENT-ENVELOPE.md)。
 - 可运行示例：`rust/examples/`（`in_memory`、`private_profile`、`codec_bench`）；公共 API 文档中的代码块由 `cargo test --doc` 守护，示例由 `cargo build --examples` 守护。
 - **推荐入口是 `StrHide`（facade）**：新接入的库使用者应构造 `StrHide` 并调用其方法，而非直接调用多个自由函数；facade 是薄转发层，底层自由函数仍公开并长期维护，二者不构成两套互斥的 API。

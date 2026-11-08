@@ -16,7 +16,7 @@
 //! dependency (plan §3.5) while preserving the "one object to store" property
 //! at the facade.
 //!
-//! `LocalParams` never changes the UBE v2.2 wire format: chunk framing and
+//! `LocalParams` never changes the UBE v2 wire format: chunk framing and
 //! compression are self-describing in the envelope.
 
 use serde::{Deserialize, Serialize};

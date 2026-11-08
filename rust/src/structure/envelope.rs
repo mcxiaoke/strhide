@@ -1,4 +1,4 @@
-//! Binary envelope structures and serialization for strhide UBE v2.2.
+//! Binary envelope structures and serialization for strhide UBE v2.
 //!
 //! The "Universal Byte Envelope" (UBE) is the self-contained container strhide
 //! injects into a carrier. It is laid out as:
