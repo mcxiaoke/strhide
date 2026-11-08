@@ -542,15 +542,44 @@ fn flac_body_phase_is_reproducible_and_attempt_sensitive() {
     let base = 0x1234_5678_9ABC_DEF0u64;
     let salt = [1u8; 16];
     let nonce = [2u8; 12];
-    let first = flac_body_phase(base, &salt, &nonce);
-    assert_eq!(first, flac_body_phase(base, &salt, &nonce));
+    let first = flac_body_phase(
+        crate::stego::format::OFFICIAL_FLAC_BODY_PHASE_LABEL,
+        base,
+        &salt,
+        &nonce,
+    );
+    assert_eq!(
+        first,
+        flac_body_phase(
+            crate::stego::format::OFFICIAL_FLAC_BODY_PHASE_LABEL,
+            base,
+            &salt,
+            &nonce
+        )
+    );
 
     let mut salt2 = salt;
     salt2[0] ^= 1;
-    assert_ne!(first, flac_body_phase(base, &salt2, &nonce));
+    assert_ne!(
+        first,
+        flac_body_phase(
+            crate::stego::format::OFFICIAL_FLAC_BODY_PHASE_LABEL,
+            base,
+            &salt2,
+            &nonce
+        )
+    );
     let mut nonce2 = nonce;
     nonce2[0] ^= 1;
-    assert_ne!(first, flac_body_phase(base, &salt, &nonce2));
+    assert_ne!(
+        first,
+        flac_body_phase(
+            crate::stego::format::OFFICIAL_FLAC_BODY_PHASE_LABEL,
+            base,
+            &salt,
+            &nonce2
+        )
+    );
 
     // Two successive attempts with a seeded freshness must not collapse onto
     // the same phase (6 attempts, all distinct on this seed).
@@ -561,7 +590,12 @@ fn flac_body_phase_is_reproducible_and_attempt_sensitive() {
         let s = fresh.salt(attempt, binding);
         let n = fresh.nonce(attempt, binding);
         assert!(
-            seen.insert(flac_body_phase(base, &s, &n)),
+            seen.insert(flac_body_phase(
+                crate::stego::format::OFFICIAL_FLAC_BODY_PHASE_LABEL,
+                base,
+                &s,
+                &n
+            )),
             "attempt {attempt} reused a phase"
         );
     }

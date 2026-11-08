@@ -43,7 +43,7 @@ use crate::errors::StrHideError;
 use crate::stego::StegoCapacityInfo;
 use crate::stego::coding::{MAX_STC_H, Move, StcTrellis};
 use crate::stego::envelope::{
-    BODY_OVERHEAD, Freshness, build_plaintext, build_plaintext_bytes, build_v4_aad,
+    BODY_OVERHEAD, Freshness, build_plaintext, build_plaintext_bytes, build_v4_aad_with,
     encrypt_v4_with_aad, unpack_v4_envelope_parts,
 };
 use crate::stego::format::{
@@ -937,7 +937,12 @@ fn embed_once(
 
     // The extension area is authenticated too: a bit flip there must break the
     // AEAD even when the (untrusted) CRC is recomputed.
-    let aad = build_v4_aad(JPEG_FORMAT_ID, &superblock_bytes, extension_area);
+    let aad = build_v4_aad_with(
+        fmt.cipher.aad_prefix,
+        JPEG_FORMAT_ID,
+        &superblock_bytes,
+        extension_area,
+    );
     let session = derive_l3_session_keys(fmt.cipher, ctx.suite, &ctx.master, &salt, ctx.domain)?;
     let ciphertext = encrypt_v4_with_aad(ctx.suite, &session.enc_key, &nonce, &aad, &plaintext)?;
     debug_assert_eq!(ciphertext.len(), ciphertext_len);
@@ -1337,7 +1342,12 @@ fn extract_jpeg_from(
         return Err(no_hidden());
     }
 
-    let aad = build_v4_aad(JPEG_FORMAT_ID, &superblock.encode(), &extension_area);
+    let aad = build_v4_aad_with(
+        fmt.cipher.aad_prefix,
+        JPEG_FORMAT_ID,
+        &superblock.encode(),
+        &extension_area,
+    );
     let payload = unpack_v4_envelope_parts(
         suite,
         &session.enc_key,
@@ -2088,7 +2098,12 @@ mod v4_regressions {
         )
         .expect("body");
 
-        let aad = build_v4_aad(JPEG_FORMAT_ID, &sb.encode(), &ext);
+        let aad = build_v4_aad_with(
+            crate::stego::format::OFFICIAL_AAD_PREFIX,
+            JPEG_FORMAT_ID,
+            &sb.encode(),
+            &ext,
+        );
         assert!(
             unpack_v4_envelope_parts(
                 suite,
@@ -2110,7 +2125,12 @@ mod v4_regressions {
             parse_extension(&forged_ext).is_ok(),
             "re-encoded extension must carry a valid CRC"
         );
-        let forged_aad = build_v4_aad(JPEG_FORMAT_ID, &sb.encode(), &forged_ext);
+        let forged_aad = build_v4_aad_with(
+            crate::stego::format::OFFICIAL_AAD_PREFIX,
+            JPEG_FORMAT_ID,
+            &sb.encode(),
+            &forged_ext,
+        );
         assert!(
             unpack_v4_envelope_parts(
                 suite,

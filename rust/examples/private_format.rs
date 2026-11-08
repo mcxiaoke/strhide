@@ -33,6 +33,12 @@ use strhide::stego::params::{ExtractParams, JpegParams};
 ///
 /// In a real private build these strings would be yours alone; the geometry is
 /// only repeated here to keep the demo short.
+///
+/// Every label here is a **domain separator**, not a secret: it never appears in
+/// the carrier. Replacing them is what makes an official binary fail on a
+/// private carrier even when the password is known, which is why the whole table
+/// — including the L2 header/extension trellis seeds and the AEAD prefix — is
+/// part of the identity rather than a constant of the crate.
 const ACME_CIPHER: strhide::stego::format::WireCipherProfile =
     strhide::stego::format::WireCipherProfile {
         domain_label: b"acme-domain",
@@ -40,6 +46,11 @@ const ACME_CIPHER: strhide::stego::format::WireCipherProfile =
         enc_label: b"acme-enc",
         perm_label: b"acme-perm",
         stc_label: b"acme-trellis",
+        hdr_stc_label: b"acme-hdr-stc",
+        ext_stc_label: b"acme-ext-stc",
+        // The official prefix ends in a NUL; anything unique works as long as
+        // both ends agree -- it is hashed into every authentication tag.
+        aad_prefix: b"acme-envelope-v4\0",
         default_suite: strhide::core::crypto::CipherSuiteId::Aes256Gcm,
     };
 

@@ -63,6 +63,12 @@ impl GridRule {
     }
 }
 
+/// HKDF label of the FLAC body-phase draw (`strhide-v4-flac-body-phase`).
+pub(crate) const OFFICIAL_FLAC_BODY_PHASE_LABEL: &[u8] = b"strhide-v4-flac-body-phase";
+
+/// Domain separator of the HEVC L3 session salt (`strhide-hevc-session-v4`).
+pub(crate) const OFFICIAL_HEVC_SESSION_LABEL: &[u8] = b"strhide-hevc-session-v4";
+
 /// Identity of the HEVC Scheme C wire format.
 ///
 /// The JPEG and PNG engines derive everything from labelled HKDF inputs and a
@@ -89,6 +95,9 @@ pub struct HevcFormatProfile {
     pub magic_label: &'static [u8],
     /// Prefix mixed into the cover digest (`SHA-256(cover_salt ‖ "hevc-v4" ‖ parameter sets)`).
     pub cover_salt: &'static [u8],
+    /// Domain separator of the L3 session salt
+    /// (`SHA-256(label ‖ nonce)`), derived after the superblock is readable.
+    pub session_salt_label: &'static [u8],
     /// STC constraint height.
     pub stc_h: u8,
     /// STC group size (elements per syndrome row).
@@ -100,6 +109,7 @@ pub const DEFAULT_HEVC_FORMAT: HevcFormatProfile = HevcFormatProfile {
     cipher: &OFFICIAL_HEVC_CIPHER,
     magic_label: b"strhide-hevc-magic-v4",
     cover_salt: b"strhide-hevc-cover-v1",
+    session_salt_label: OFFICIAL_HEVC_SESSION_LABEL,
     stc_h: 7,
     stc_u: 2,
 };
@@ -280,12 +290,21 @@ pub struct AudioFormatProfile {
     pub hpos_salt: &'static [u8],
     /// V4 label table and default suite.
     pub cipher: &'static WireCipherProfile,
+    /// Domain separator of the FLAC body-phase draw
+    /// (`SHA-256(label ‖ base ‖ salt ‖ nonce)`).
+    ///
+    /// Consumed by the FLAC engine only; the WAV engine has no per-attempt body
+    /// phase and ignores it. Both ends of a FLAC carrier must agree, so a
+    /// private value isolates the body slot subset without touching any other
+    /// derivation.
+    pub flac_body_phase_label: &'static [u8],
 }
 
 /// Official WAV profile.
 pub const OFFICIAL_WAV_FORMAT: AudioFormatProfile = AudioFormatProfile {
     hpos_salt: b"strhide-audio-hpos-salt-v1",
     cipher: &OFFICIAL_AUDIO_CIPHER,
+    flac_body_phase_label: OFFICIAL_FLAC_BODY_PHASE_LABEL,
 };
 
 /// Official FLAC profile.
@@ -296,12 +315,23 @@ pub const OFFICIAL_WAV_FORMAT: AudioFormatProfile = AudioFormatProfile {
 pub const OFFICIAL_FLAC_FORMAT: AudioFormatProfile = AudioFormatProfile {
     hpos_salt: b"strhide-flac-hpos-salt-v1",
     cipher: &OFFICIAL_AUDIO_CIPHER,
+    flac_body_phase_label: OFFICIAL_FLAC_BODY_PHASE_LABEL,
 };
+
+/// HKDF label of the L2 header-trellis seed (`strhide-v4-hdr-stc`).
+pub(crate) const OFFICIAL_HDR_STC_LABEL: &[u8] = b"strhide-v4-hdr-stc";
+
+/// HKDF label of the L2 extension-area trellis seed (`strhide-v4-ext-stc`).
+pub(crate) const OFFICIAL_EXT_STC_LABEL: &[u8] = b"strhide-v4-ext-stc";
+
+/// Domain prefix of the V4 AEAD associated data
+/// (`strhide-content-envelope-v4\0`).
+pub(crate) const OFFICIAL_AAD_PREFIX: &[u8] = b"strhide-content-envelope-v4\0";
 
 /// Non-secret cipher identity of a V4 wire format.
 ///
 /// The V4 envelope derives everything from one symbol table: the L1 party label
-/// is the only per-format secret input, and the four remaining labels separate
+/// is the only per-format secret input, and the remaining labels separate
 /// header location, payload key, permutation and trellis. `default_suite` is an
 /// opinion, not a policy: the carrier's `suite_id` always wins when reading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -317,6 +347,23 @@ pub struct WireCipherProfile {
     pub perm_label: &'static [u8],
     /// HKDF label of the trellis seed.
     pub stc_label: &'static [u8],
+    /// HKDF label of the base-header trellis seed (L2, derived before the
+    /// header is readable).
+    ///
+    /// Consumed by the carriers whose header is trellis-coded — JPEG's
+    /// superblock and HEVC's superblock. The PNG and audio engines read their
+    /// base header by direct LSB (`read_slot_bytes`) and never build this
+    /// trellis, so for those two the label is inert: changing it isolates
+    /// nothing. It still has to be part of the table so every format names its
+    /// own seeds.
+    pub hdr_stc_label: &'static [u8],
+    /// HKDF label of the extension-area trellis seed (L2). Same consumer set as
+    /// [`hdr_stc_label`](Self::hdr_stc_label).
+    pub ext_stc_label: &'static [u8],
+    /// Domain prefix of the V4 AEAD associated data. Both ends must agree:
+    /// it is hashed into every header/body authentication tag, so a mismatch
+    /// fails the tag exactly like a wrong password.
+    pub aad_prefix: &'static [u8],
     /// Suite id written when the caller does not override it.
     pub default_suite: CipherSuiteId,
 }
@@ -329,6 +376,9 @@ pub const OFFICIAL_PNG_CIPHER: WireCipherProfile = WireCipherProfile {
     enc_label: b"enc",
     perm_label: b"perm",
     stc_label: b"strhide-stc-trellis-v1",
+    hdr_stc_label: OFFICIAL_HDR_STC_LABEL,
+    ext_stc_label: OFFICIAL_EXT_STC_LABEL,
+    aad_prefix: OFFICIAL_AAD_PREFIX,
     default_suite: CipherSuiteId::Aes256Gcm,
 };
 
@@ -340,6 +390,9 @@ pub const OFFICIAL_AUDIO_CIPHER: WireCipherProfile = WireCipherProfile {
     enc_label: b"audio-enc-v1",
     perm_label: b"audio-perm-v1",
     stc_label: b"audio-stc-trellis-v1",
+    hdr_stc_label: OFFICIAL_HDR_STC_LABEL,
+    ext_stc_label: OFFICIAL_EXT_STC_LABEL,
+    aad_prefix: OFFICIAL_AAD_PREFIX,
     default_suite: CipherSuiteId::Aes256Gcm,
 };
 
@@ -351,6 +404,9 @@ pub const OFFICIAL_JPEG_CIPHER: WireCipherProfile = WireCipherProfile {
     enc_label: b"enc",
     perm_label: b"perm",
     stc_label: b"stc-trellis",
+    hdr_stc_label: OFFICIAL_HDR_STC_LABEL,
+    ext_stc_label: OFFICIAL_EXT_STC_LABEL,
+    aad_prefix: OFFICIAL_AAD_PREFIX,
     default_suite: CipherSuiteId::Aes256Gcm,
 };
 
@@ -362,6 +418,9 @@ pub const OFFICIAL_HEVC_CIPHER: WireCipherProfile = WireCipherProfile {
     enc_label: b"strhide-hevc-enc-v4",
     perm_label: b"strhide-hevc-perm-v4",
     stc_label: b"strhide-hevc-stc-v4",
+    hdr_stc_label: OFFICIAL_HDR_STC_LABEL,
+    ext_stc_label: OFFICIAL_EXT_STC_LABEL,
+    aad_prefix: OFFICIAL_AAD_PREFIX,
     default_suite: CipherSuiteId::Aes256Gcm,
 };
 
@@ -479,8 +538,8 @@ pub fn derive_l2_locator_keys(
     hkdf_expand(None, master, &magic_info, &mut magic4);
     Ok(HeaderLocatorKeys {
         locate_seed,
-        header_stc_seed: hkdf_expand_u64(master, b"strhide-v4-hdr-stc"),
-        ext_stc_seed: hkdf_expand_u64(master, b"strhide-v4-ext-stc"),
+        header_stc_seed: hkdf_expand_u64(master, cipher.hdr_stc_label),
+        ext_stc_seed: hkdf_expand_u64(master, cipher.ext_stc_label),
         magic4,
     })
 }

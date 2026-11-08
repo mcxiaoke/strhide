@@ -714,6 +714,9 @@ const PRIVATE_CIPHER: strhide::stego::format::WireCipherProfile =
         enc_label: b"private-enc",
         perm_label: b"private-perm",
         stc_label: b"private-stc",
+        hdr_stc_label: b"private-hdr-stc",
+        ext_stc_label: b"private-ext-stc",
+        aad_prefix: b"private-envelope-v4 ",
         default_suite: strhide::core::crypto::CipherSuiteId::Aes256Gcm,
     };
 

@@ -44,7 +44,7 @@ use crate::stego::coding::{
     expected_stc_change_rate, required_slots, slots_for_codec,
 };
 use crate::stego::envelope::{
-    BODY_OVERHEAD, Freshness, NONCE_LEN, SALT_LEN, build_plaintext, build_v4_aad,
+    BODY_OVERHEAD, Freshness, NONCE_LEN, SALT_LEN, build_plaintext, build_v4_aad_with,
     encrypt_v4_with_aad, unpack_v4_envelope_parts,
 };
 use crate::stego::format::{
@@ -821,7 +821,7 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
         ext_len: ext_len as u16,
     };
     let header_bytes = header.encode();
-    let aad = build_v4_aad(format_id, &header_bytes, &extension);
+    let aad = build_v4_aad_with(cipher.aad_prefix, format_id, &header_bytes, &extension);
     let ciphertext = encrypt_v4_with_aad(suite, &session.enc_key, &header.nonce, &aad, &plaintext)?;
     debug_assert_eq!(ciphertext.len(), ciphertext_len);
 
@@ -954,7 +954,7 @@ pub(crate) fn extract_with_header<C: SlotCarrier + ?Sized>(
         .map_err(|_| no_hidden())?;
     let ciphertext = trellis.extract(&vals, ciphertext_len * 8);
 
-    let aad = build_v4_aad(format_id, &view.base_bytes, &extension);
+    let aad = build_v4_aad_with(cipher.aad_prefix, format_id, &view.base_bytes, &extension);
     unpack_v4_envelope_parts(
         suite,
         &session.enc_key,

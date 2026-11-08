@@ -101,18 +101,24 @@ pub const BODY_OVERHEAD: usize = 4 + 1 + MICRO_OVERHEAD_MIN + TAG_LEN; // 22 byt
 pub const MAX_PLAINTEXT_LEN: usize =
     (crate::stego::header::HEADER_LEN_MAX as usize).saturating_sub(BODY_OVERHEAD);
 
-/// Domain separator of the V4 associated data.
-const V4_AAD_PREFIX: &[u8] = b"strhide-content-envelope-v4\0";
-
-/// Build the V4 AEAD associated data.
+/// Build the V4 AEAD associated data under `prefix`.
 ///
 /// `AAD = prefix || format_id || base_header || extension` authenticates the
 /// carrier format, every decoded header field and the whole extension area in
 /// one tag; a bit flip anywhere fails decryption rather than yielding a
 /// plausible-but-different decode.
-pub fn build_v4_aad(format_id: u8, base_header: &[u8], extension: &[u8]) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(V4_AAD_PREFIX.len() + 1 + base_header.len() + extension.len());
-    aad.extend_from_slice(V4_AAD_PREFIX);
+///
+/// The prefix is part of the wire identity (`WireCipherProfile::aad_prefix`),
+/// not a constant of this module: a private dialect replaces it, and both ends
+/// must hash the same bytes or every tag fails like a wrong password.
+pub fn build_v4_aad_with(
+    prefix: &[u8],
+    format_id: u8,
+    base_header: &[u8],
+    extension: &[u8],
+) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(prefix.len() + 1 + base_header.len() + extension.len());
+    aad.extend_from_slice(prefix);
     aad.push(format_id);
     aad.extend_from_slice(base_header);
     aad.extend_from_slice(extension);
@@ -805,16 +811,21 @@ mod v4_aad_tests {
     fn aad_prefix_format_and_areas_are_all_covered() {
         let base = [0xAAu8; 64];
         let ext = [0xBBu8; 4];
-        let png = build_v4_aad(1, &base, &ext);
+        let png = build_v4_aad_with(crate::stego::format::OFFICIAL_AAD_PREFIX, 1, &base, &ext);
         assert_eq!(png.len(), 28 + 1 + 64 + 4);
         assert_eq!(&png[..28], b"strhide-content-envelope-v4\0");
         assert_eq!(png[28], 1);
         assert_eq!(&png[29..93], &base);
         assert_eq!(&png[93..], &ext);
 
-        let jpeg = build_v4_aad(4, &base[..44], &ext);
+        let jpeg = build_v4_aad_with(
+            crate::stego::format::OFFICIAL_AAD_PREFIX,
+            4,
+            &base[..44],
+            &ext,
+        );
         assert_ne!(png, jpeg, "format id must separate the AAD");
-        let no_ext = build_v4_aad(1, &base, &[]);
+        let no_ext = build_v4_aad_with(crate::stego::format::OFFICIAL_AAD_PREFIX, 1, &base, &[]);
         assert_ne!(png, no_ext, "extension bytes must be authenticated");
     }
 }

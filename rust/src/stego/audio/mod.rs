@@ -103,9 +103,9 @@ const FLAC_EMBED_ATTEMPTS: u32 = 6;
 /// so the extractor can reproduce the exact slot subset without a new wire
 /// field. Varying them per attempt is what lets a retry escape a `DeadGroup`
 /// caused by an unlucky run of immovable residuals.
-fn flac_body_phase(base: u64, salt: &[u8], nonce: &[u8]) -> u64 {
+fn flac_body_phase(label: &[u8], base: u64, salt: &[u8], nonce: &[u8]) -> u64 {
     let mut h = Sha256::new();
-    h.update(b"strhide-v4-flac-body-phase");
+    h.update(label);
     h.update(base.to_le_bytes());
     h.update(salt);
     h.update(nonce);
@@ -209,7 +209,12 @@ pub(crate) fn embed_flac(
         control.check()?;
         let salt = freshness.salt(attempt, &binding);
         let nonce = freshness.nonce(attempt, &binding);
-        let body_phase = flac_body_phase(body_phase_base, &salt, &nonce);
+        let body_phase = flac_body_phase(
+            profile.flac_body_phase_label,
+            body_phase_base,
+            &salt,
+            &nonce,
+        );
 
         // Fresh clone per attempt: a failed solve leaves header writes behind
         // in `bytes`, and the next attempt must start from the pristine cover.
@@ -315,7 +320,12 @@ pub(crate) fn extract_flac(
     }
 
     // Reuse `scratch` buffer to avoid redundant full-file memory allocations.
-    let body_phase = flac_body_phase(body_phase_base, &view.header.salt, &view.header.nonce);
+    let body_phase = flac_body_phase(
+        profile.flac_body_phase_label,
+        body_phase_base,
+        &view.header.salt,
+        &view.header.nonce,
+    );
     let flac = flac::FlacCarrier::new(
         &mut scratch,
         info,
@@ -463,7 +473,12 @@ pub(crate) fn inspect_flac(
     // A wrong/unreadable header leaves the body phase at its password-derived
     // base; the caller reports "no hidden data" and never reads the body.
     let body_phase = match &view {
-        Ok(v) => flac_body_phase(body_phase, &v.header.salt, &v.header.nonce),
+        Ok(v) => flac_body_phase(
+            profile.flac_body_phase_label,
+            body_phase,
+            &v.header.salt,
+            &v.header.nonce,
+        ),
         Err(e) => {
             log::debug!(
                 target: "stego::inspect",
@@ -581,7 +596,12 @@ pub(crate) fn verify_flac(
     // A wrong/unreadable header leaves the body phase at its password-derived
     // base; the caller reports "no hidden data" and never reads the body.
     let body_phase = match &view {
-        Ok(v) => flac_body_phase(body_phase, &v.header.salt, &v.header.nonce),
+        Ok(v) => flac_body_phase(
+            profile.flac_body_phase_label,
+            body_phase,
+            &v.header.salt,
+            &v.header.nonce,
+        ),
         Err(e) => {
             log::debug!(
                 target: "stego::verify",

@@ -1088,10 +1088,12 @@ mod tests {
         const CUSTOM_WAV: AudioFormatProfile = AudioFormatProfile {
             hpos_salt: b"test-custom-wav-salt",
             cipher: OFFICIAL_WAV_FORMAT.cipher,
+            flac_body_phase_label: OFFICIAL_WAV_FORMAT.flac_body_phase_label,
         };
         const CUSTOM_FLAC: AudioFormatProfile = AudioFormatProfile {
             hpos_salt: b"test-custom-flac-salt",
             cipher: OFFICIAL_FLAC_FORMAT.cipher,
+            flac_body_phase_label: b"test-custom-flac-phase",
         };
 
         let wav_only = StegoProfile::new().with_audio_format(CUSTOM_WAV);

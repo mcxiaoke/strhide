@@ -48,7 +48,7 @@ use crate::stego::coding::{
     write_bit_ternary,
 };
 use crate::stego::envelope::{
-    Freshness, build_plaintext, build_v4_aad, encrypt_v4_with_aad, unpack_v4_envelope_parts,
+    Freshness, build_plaintext, build_v4_aad_with, encrypt_v4_with_aad, unpack_v4_envelope_parts,
 };
 use crate::stego::format::{derive_l2_locator_keys, derive_l3_session_keys, derive_locator_master};
 use crate::stego::header::{
@@ -1738,7 +1738,7 @@ pub(crate) fn embed_png_with_stats<'a>(
         ext_len: ext_len as u16,
     };
     let header_bytes = header.encode();
-    let aad = build_v4_aad(PNG_FORMAT_ID, &header_bytes, &extension);
+    let aad = build_v4_aad_with(cipher.aad_prefix, PNG_FORMAT_ID, &header_bytes, &extension);
 
     // Encrypt last: the whole base header plus extension area is the AEAD's
     // associated data, so a tampered field fails the tag instead of steering
@@ -2180,7 +2180,7 @@ fn extract_png_with_keys(
         }
     };
 
-    let aad = build_v4_aad(PNG_FORMAT_ID, &base_bytes, &extension);
+    let aad = build_v4_aad_with(cipher.aad_prefix, PNG_FORMAT_ID, &base_bytes, &extension);
     // AEAD failure (and every structural failure before it) already collapsed
     // to `NoHiddenData` inside the envelope code. Once the tag verifies the
     // carrier is provably ours, so a broken frame / oversized payload must
@@ -4623,6 +4623,9 @@ mod tests {
                 enc_label: b"private-enc-label",
                 perm_label: b"private-perm-label",
                 stc_label: b"private-stc-label-xyz",
+                hdr_stc_label: b"private-hdr-stc-label",
+                ext_stc_label: b"private-ext-stc-label",
+                aad_prefix: b"private-aad-prefix ",
                 default_suite: crate::crypto::CipherSuiteId::Aes256Gcm,
             };
         let private_spatial = crate::stego::format::PngFormatProfile {

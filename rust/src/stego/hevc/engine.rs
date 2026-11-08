@@ -13,8 +13,8 @@ use crate::core::payload::Payload;
 use crate::errors::StrHideError;
 use crate::stego::coding::{Move, StcTrellis};
 use crate::stego::envelope::{
-    BODY_OVERHEAD, Freshness, PUBLIC_DEFAULT_SECRET, build_plaintext, build_v4_aad,
-    encrypt_v4_with_aad, unpack_v4_envelope_parts,
+    BODY_OVERHEAD, Freshness, build_plaintext, build_v4_aad_with, encrypt_v4_with_aad,
+    unpack_v4_envelope_parts,
 };
 use crate::stego::format::{
     HevcFormatProfile, derive_l2_locator_keys, derive_l3_session_keys, derive_locator_master,
@@ -96,11 +96,23 @@ pub(crate) const HEVC_SUPERBLOCK_MIN_SLOTS: usize = 524;
 /// Format id bound into the V4 AAD (JPEG = 4, HEVC = 5).
 pub(crate) const HEVC_FORMAT_ID: u8 = 5;
 
-/// Legacy `Option<&str>` credential mapping used by the pre-V4 entry points.
-fn legacy_credential(secret: Option<&str>) -> Credential<'_> {
+/// Credential mapping for the pre-V4 `Option<&str>` entry points.
+///
+/// An absent secret is a **hard error**, not a fallback to
+/// [`crate::stego::envelope::PUBLIC_DEFAULT_SECRET`]. These entry points receive a format profile but
+/// no [`crate::stego::params::StegoProfile`], so they cannot honour a private
+/// `default_secret`; silently keying the carrier with the public constant would
+/// produce a file every other strhide build can read, which defeats the point
+/// of a private dialect. Callers must pass the secret explicitly (the facade
+/// resolves it from the dialect before reaching these wrappers).
+fn legacy_credential(secret: Option<&str>) -> Result<Credential<'_>, StrHideError> {
     match secret.filter(|s| !s.is_empty()) {
-        Some(s) => Credential::Password(s),
-        None => Credential::Password(PUBLIC_DEFAULT_SECRET),
+        Some(s) => Ok(Credential::Password(s)),
+        None => Err(StrHideError::General(
+            "HEVC entry points need an explicit password or file key: an absent secret would be \
+             keyed with the public default, making the carrier readable by any strhide build"
+                .into(),
+        )),
     }
 }
 
@@ -449,9 +461,9 @@ fn extension_len(extensions: &[Tlv]) -> Result<usize, StrHideError> {
 }
 
 /// L3 session salt: domain-separated SHA-256 of the header nonce.
-fn hevc_session_salt(nonce: &[u8; 12]) -> [u8; 32] {
+fn hevc_session_salt(label: &[u8], nonce: &[u8; 12]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"strhide-hevc-session-v4");
+    hasher.update(label);
     hasher.update(nonce);
     hasher.finalize().into()
 }
@@ -1041,7 +1053,7 @@ pub fn embed_hevc_with_info(
     embed_hevc_with_info_v4(
         carrier,
         payload,
-        legacy_credential(secret),
+        legacy_credential(secret)?,
         domain,
         fmt.cipher.default_suite.as_u16(),
         &[],
@@ -1163,7 +1175,7 @@ pub fn embed_hevc_patches_with_factor(
     embed_hevc_patches_with_factor_v4(
         carrier,
         payload,
-        legacy_credential(secret),
+        legacy_credential(secret)?,
         domain,
         fmt.cipher.default_suite.as_u16(),
         &[],
@@ -1338,7 +1350,7 @@ pub fn embed_hevc_patches_with_factor_v4(
         fmt.cipher,
         suite,
         &master,
-        &hevc_session_salt(&nonce_bytes),
+        &hevc_session_salt(fmt.session_salt_label, &nonce_bytes),
         domain,
     )?;
 
@@ -1390,7 +1402,7 @@ pub fn embed_hevc_patches_with_factor_v4(
         nonce: nonce_bytes,
     };
     let sb_bytes = sb.encode();
-    let aad = build_v4_aad(HEVC_FORMAT_ID, &sb_bytes, &extension);
+    let aad = build_v4_aad_with(fmt.cipher.aad_prefix, HEVC_FORMAT_ID, &sb_bytes, &extension);
     let ciphertext = encrypt_v4_with_aad(suite, &session.enc_key, &nonce_bytes, &aad, &plaintext)?;
 
     let sb_trellis =
@@ -2006,7 +2018,7 @@ pub fn extract_hevc(
 ) -> Result<Payload<'static>, StrHideError> {
     extract_hevc_v4(
         carrier,
-        legacy_credential(secret),
+        legacy_credential(secret)?,
         domain,
         fmt,
         &ExtractParams::default(),
@@ -2056,7 +2068,7 @@ fn extract_hevc_from_sb_record(
         carrier,
         kind,
         sb_record,
-        legacy_credential(secret),
+        legacy_credential(secret)?,
         domain,
         fmt,
         &ExtractParams::default(),
@@ -2164,7 +2176,7 @@ fn read_hevc_header_v4(
         fmt.cipher,
         suite,
         &master,
-        &hevc_session_salt(&sb.nonce),
+        &hevc_session_salt(fmt.session_salt_label, &sb.nonce),
         domain,
     )
     .map_err(|_| StrHideError::NoHiddenData("No valid payload found".into()))?;
@@ -2271,7 +2283,12 @@ fn extract_hevc_with_header(
     }
     let ciphertext = &ciphertext[..body_msg_len];
 
-    let aad = build_v4_aad(HEVC_FORMAT_ID, &header.sb_bytes, &header.extension);
+    let aad = build_v4_aad_with(
+        fmt.cipher.aad_prefix,
+        HEVC_FORMAT_ID,
+        &header.sb_bytes,
+        &header.extension,
+    );
     let suite = CipherSuiteId::from_u16(header.sb.suite_id).ok_or_else(no_data)?;
     let payload = unpack_v4_envelope_parts(
         suite,
@@ -2422,7 +2439,7 @@ pub(crate) fn inspect_hevc(
 ) -> Result<StegoHeaderInfo, StrHideError> {
     inspect_hevc_v4(
         carrier,
-        legacy_credential(secret),
+        legacy_credential(secret)?,
         domain,
         fmt,
         &ExtractParams::default(),
@@ -2544,7 +2561,7 @@ pub(crate) fn inspect_hevc_mp4_file(
 ) -> Result<StegoHeaderInfo, StrHideError> {
     inspect_hevc_mp4_file_v4(
         carrier_path,
-        legacy_credential(secret),
+        legacy_credential(secret)?,
         domain,
         fmt,
         &ExtractParams::default(),
@@ -2811,7 +2828,7 @@ pub(crate) fn verify_hevc(
 ) -> Result<StegoVerifyResult, StrHideError> {
     verify_hevc_v4(
         carrier,
-        legacy_credential(secret),
+        legacy_credential(secret)?,
         domain,
         fmt,
         &ExtractParams::default(),
@@ -4465,10 +4482,25 @@ mod capture_tests {
     #[test]
     fn extension_area_is_bound_into_the_aad() {
         let header = [0x5Au8; HEVC_SUPERBLOCK_BYTES];
-        let without = build_v4_aad(HEVC_FORMAT_ID, &header, &[]);
-        let with = build_v4_aad(HEVC_FORMAT_ID, &header, &[0x01, 0x02, 0xAA, 0xBB]);
+        let without = build_v4_aad_with(
+            crate::stego::format::OFFICIAL_AAD_PREFIX,
+            HEVC_FORMAT_ID,
+            &header,
+            &[],
+        );
+        let with = build_v4_aad_with(
+            crate::stego::format::OFFICIAL_AAD_PREFIX,
+            HEVC_FORMAT_ID,
+            &header,
+            &[0x01, 0x02, 0xAA, 0xBB],
+        );
         assert_ne!(without, with);
-        let changed = build_v4_aad(HEVC_FORMAT_ID, &header, &[0x01, 0x02, 0xAA, 0xBC]);
+        let changed = build_v4_aad_with(
+            crate::stego::format::OFFICIAL_AAD_PREFIX,
+            HEVC_FORMAT_ID,
+            &header,
+            &[0x01, 0x02, 0xAA, 0xBC],
+        );
         assert_ne!(with, changed);
     }
 
@@ -4502,7 +4534,12 @@ mod capture_tests {
             CipherSuiteId::Aes256Gcm,
             &key,
             &sb.nonce,
-            &build_v4_aad(HEVC_FORMAT_ID, &original, &[]),
+            &build_v4_aad_with(
+                crate::stego::format::OFFICIAL_AAD_PREFIX,
+                HEVC_FORMAT_ID,
+                &original,
+                &[],
+            ),
             &plaintext,
         )
         .expect("encrypt");
@@ -4511,7 +4548,12 @@ mod capture_tests {
             CipherSuiteId::Aes256Gcm,
             &key,
             &sb.nonce,
-            &build_v4_aad(HEVC_FORMAT_ID, &original, &[]),
+            &build_v4_aad_with(
+                crate::stego::format::OFFICIAL_AAD_PREFIX,
+                HEVC_FORMAT_ID,
+                &original,
+                &[],
+            ),
             &ciphertext,
             &ExtractParams::default(),
         )
@@ -4527,7 +4569,12 @@ mod capture_tests {
             CipherSuiteId::Aes256Gcm,
             &key,
             &sb.nonce,
-            &build_v4_aad(HEVC_FORMAT_ID, &forged_bytes, &[]),
+            &build_v4_aad_with(
+                crate::stego::format::OFFICIAL_AAD_PREFIX,
+                HEVC_FORMAT_ID,
+                &forged_bytes,
+                &[],
+            ),
             &ciphertext,
             &ExtractParams::default(),
         );
@@ -4647,22 +4694,27 @@ mod dialect_tests {
         assert_ne!(m1, magic_for("secret-one", Some("org.acme")));
     }
 
-    /// The no-secret fallback is the shared public constant, not a
-    /// HEVC-private string: one public default key per crate, resolved through
-    /// the same chain as PNG/JPEG.
+    /// An absent secret is rejected instead of falling back to the shared
+    /// public constant.
+    ///
+    /// These pre-V4 wrappers cannot see a `StegoProfile`, so a fallback would
+    /// key the carrier with [`crate::stego::envelope::PUBLIC_DEFAULT_SECRET`] and hand
+    /// out a file any
+    /// strhide build can read -- exactly the provenance leak a private dialect
+    /// exists to prevent.
     #[test]
-    fn no_secret_falls_back_to_the_public_constant() {
-        assert!(matches!(
-            legacy_credential(None),
-            Credential::Password(pw) if pw == PUBLIC_DEFAULT_SECRET
-        ));
-        assert!(matches!(
-            legacy_credential(Some("")),
-            Credential::Password(pw) if pw == PUBLIC_DEFAULT_SECRET
-        ));
+    fn absent_secret_is_rejected() {
+        assert!(
+            legacy_credential(None).is_err(),
+            "no secret must not silently fall back to the public key"
+        );
+        assert!(
+            legacy_credential(Some("")).is_err(),
+            "an empty secret is the same as no secret"
+        );
         assert!(matches!(
             legacy_credential(Some("pw")),
-            Credential::Password(pw) if pw != PUBLIC_DEFAULT_SECRET
+            Ok(Credential::Password(pw)) if pw == "pw"
         ));
     }
 

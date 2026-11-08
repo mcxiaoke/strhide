@@ -23,6 +23,11 @@
 //! one **must not** — and the failure is indistinguishable from a wrong
 //! password, because a distinguishable error would tell an attacker that an
 //! envelope exists but the dialect is wrong.
+//!
+//! This example covers the *structure* domain. For a content-domain (PNG /
+//! JPEG / HEVC / audio) private build — the derivation labels, per-carrier
+//! salts, AEAD prefix and the no-password secret — see `docs/PRIVATE_BUILD.md`
+//! and the runnable assertions in `tests/private_provenance.rs`.
 
 use strhide::errors::StrHideError;
 use strhide::facade::Dialect;
