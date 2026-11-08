@@ -266,3 +266,38 @@ fn flipped_sos_offset(jpeg: &[u8]) -> usize {
         .position(|w| w == [0xFF, 0xDA])
         .expect("JPEG has an SOS marker")
 }
+
+#[test]
+fn v4_jpeg_enforced_safety_policy_rejects_over_threshold() {
+    use strhide::stego::{SafetyEnforcement, SafetyLevel};
+
+    let probe = probe_carrier_capacity(
+        CARRIER,
+        &ProbeOptions::default().with_safety(SafetyLevel::High, SafetyEnforcement::Enforced),
+    )
+    .expect("probe");
+    let rec = probe.recommended_max_bytes;
+    assert!(rec > 0);
+
+    // Payload exactly at recommended_max_bytes must succeed
+    let fit_payload = vec![0x42u8; rec];
+    let embed_ok = embed_carrier(
+        CARRIER,
+        &Payload::bytes(&fit_payload),
+        &credits().with_safety(SafetyLevel::High, SafetyEnforcement::Enforced),
+    );
+    assert!(embed_ok.is_ok(), "recommended payload must embed");
+
+    // Payload at recommended_max_bytes + 1 must be refused with SafetyThreshold
+    let over_payload = vec![0x42u8; rec + 1];
+    let embed_err = embed_carrier(
+        CARRIER,
+        &Payload::bytes(&over_payload),
+        &credits().with_safety(SafetyLevel::High, SafetyEnforcement::Enforced),
+    )
+    .expect_err("over-threshold payload must be refused when enforced");
+    assert!(
+        matches!(embed_err, StrHideError::SafetyThreshold { .. }),
+        "expected SafetyThreshold error, got: {embed_err:?}"
+    );
+}

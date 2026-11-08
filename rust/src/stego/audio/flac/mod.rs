@@ -1497,6 +1497,47 @@ mod tests {
     }
 
     #[test]
+    fn flac_metadata_malformed_branches_are_rejected() {
+        // Helper to construct a valid 34-byte STREAMINFO block
+        let make_streaminfo = |min_bs: u16, max_bs: u16, bps: u8| -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(b"fLaC");
+            v.push(0x80); // STREAMINFO, last
+            v.extend_from_slice(&[0, 0, 34]);
+            let mut info = [0u8; 34];
+            info[0..2].copy_from_slice(&min_bs.to_be_bytes());
+            info[2..4].copy_from_slice(&max_bs.to_be_bytes());
+            // packed: sample_rate (20), channels - 1 (3), bps - 1 (5), samples (36)
+            let sample_rate = 44100u64;
+            let channels = 2u64;
+            let bits = bps.saturating_sub(1) as u64;
+            let packed = (sample_rate << 44) | ((channels - 1) << 41) | (bits << 36) | 1000;
+            info[10..18].copy_from_slice(&packed.to_be_bytes());
+            v.extend_from_slice(&info);
+            v
+        };
+
+        // 1. Block runs past the end of file (second block declared 100 bytes, only 5 present)
+        let mut past_eof = make_streaminfo(4096, 4096, 16);
+        past_eof[4] &= 0x7F; // STREAMINFO not last
+        past_eof.push(0x84); // VORBIS_COMMENT, last
+        past_eof.extend_from_slice(&[0, 0, 100]); // declared 100 bytes
+        past_eof.extend_from_slice(&[0u8; 5]); // only 5 bytes
+        let err = parse_stream_info(&past_eof).expect_err("block past EOF");
+        assert!(matches!(err, StrHideError::CorruptedData(_)));
+
+        // 2. Zero block size
+        let zero_bs = make_streaminfo(0, 4096, 16);
+        let err = parse_stream_info(&zero_bs).expect_err("zero min block size");
+        assert!(matches!(err, StrHideError::CorruptedData(_)));
+
+        // 3. Invalid bit depth (< 4 or > 32)
+        let invalid_bps = make_streaminfo(4096, 4096, 2);
+        let err = parse_stream_info(&invalid_bps).expect_err("bps < 4");
+        assert!(matches!(err, StrHideError::UnsupportedFormat(_)));
+    }
+
+    #[test]
     fn md5_matches_known_vectors() {
         assert_eq!(md5_of(b""), "d41d8cd98f00b204e9800998ecf8427e");
         assert_eq!(md5_of(b"abc"), "900150983cd24fb0d6963f7d28e17f72");

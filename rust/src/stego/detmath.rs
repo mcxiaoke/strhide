@@ -410,6 +410,55 @@ mod tests {
         assert_eq!(digest(4), PINNED[4], "log2 digest moved");
     }
 
+    #[test]
+    fn special_values_and_extreme_boundaries() {
+        // exp edge cases
+        assert!(exp(f64::NAN).is_nan());
+        assert_eq!(exp(EXP_HI + 1.0), f64::INFINITY);
+        assert_eq!(exp(EXP_LO - 1.0), 0.0);
+        assert_eq!(exp(0.0), 1.0);
+        assert_eq!(exp(-0.0), 1.0);
+
+        // ln edge cases
+        assert!(ln(f64::NAN).is_nan());
+        assert!(ln(-1.0).is_nan());
+        assert!(ln(-0.5).is_nan());
+        assert_eq!(ln(0.0), f64::NEG_INFINITY);
+        assert_eq!(ln(-0.0), f64::NEG_INFINITY);
+        assert_eq!(ln(f64::INFINITY), f64::INFINITY);
+        assert_eq!(ln(1.0), 0.0);
+
+        // ln on subnormals
+        let subnormal = f64::from_bits(0x0000_0000_0000_0001);
+        let gl = ln(subnormal);
+        let wl = subnormal.ln();
+        assert!((gl - wl).abs() <= 8e-16 * wl.abs(), "ln(subnormal)");
+
+        // ln_1p edge cases
+        assert!(ln_1p(f64::NAN).is_nan());
+        assert!(ln_1p(-2.0).is_nan());
+        assert_eq!(ln_1p(-1.0), f64::NEG_INFINITY);
+        assert_eq!(ln_1p(0.0), 0.0);
+
+        // log2 edge cases
+        assert!(log2(f64::NAN).is_nan());
+        assert!(log2(-1.0).is_nan());
+        assert_eq!(log2(0.0), f64::NEG_INFINITY);
+        assert_eq!(log2(1.0), 0.0);
+
+        // frexp edge cases
+        assert_eq!(frexp(0.0), (0.0, 0));
+        let (m, e) = frexp(subnormal);
+        assert!((0.5..1.0).contains(&m), "subnormal frexp mantissa in range");
+        assert_eq!(ldexp(m, e), subnormal, "subnormal reconstructs");
+
+        // cos edge cases
+        assert!(cos(f64::NAN).is_nan());
+        assert!(cos(f64::INFINITY).is_nan());
+        assert_eq!(cos(0.0), 1.0);
+        assert!(cos(1e6).abs() <= 1.0 + 1e-15);
+    }
+
     /// Pinned so a change to the arithmetic cannot slip through: the Go and
     /// Python ports in `scripts/detmath/` carry the same four numbers.
     const PINNED: [u64; 5] = [

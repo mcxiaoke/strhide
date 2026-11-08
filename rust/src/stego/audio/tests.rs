@@ -5,6 +5,7 @@
 //! PCM payload. The real-file corpus lives in the ignored `local_` tests, which
 //! need `temp/testaudio/`.
 
+use crate::SafetyEnforcement;
 use crate::SafetyPolicy;
 use crate::core::control::Control;
 use crate::core::payload::Payload;
@@ -254,6 +255,112 @@ fn probe_reports_a_capacity_the_embedder_can_actually_fill() {
     )
     .expect("the carrier written at full capacity must extract");
     assert_eq!(extracted, raw);
+}
+
+#[test]
+fn wav_enforced_safety_policy_rejects_over_threshold() {
+    let cover = wav_carrier(20_000);
+    let control = ctl();
+    let info = probe_wav(
+        &cover,
+        cred(None),
+        None,
+        &[],
+        SafetyLevel::High,
+        profile(),
+        &control,
+    )
+    .expect("probe");
+    let rec = info.recommended_max_bytes;
+    assert!(rec > 0);
+
+    let safety = SafetyPolicy::new()
+        .with_level(SafetyLevel::High)
+        .with_enforcement(SafetyEnforcement::Enforced);
+
+    // Recommended size fits
+    let fit_raw = vec![0x33u8; rec];
+    let (stego, _, _) = embed_wav(
+        &cover,
+        &Payload::bytes(&fit_raw),
+        cred(None),
+        None,
+        suite(),
+        &[],
+        profile(),
+        safety,
+        Freshness::default(),
+        &control,
+    )
+    .expect("recommended payload must embed");
+
+    let extracted = extract_wav(
+        &stego,
+        cred(None),
+        None,
+        profile(),
+        &ExtractParams::default(),
+        &control,
+    )
+    .expect("extract must succeed");
+    assert_eq!(extracted, fit_raw);
+
+    // Recommended size + 1 is rejected with SafetyThreshold
+    let over_raw = vec![0x33u8; rec + 1];
+    let err = embed_wav(
+        &cover,
+        &Payload::bytes(&over_raw),
+        cred(None),
+        None,
+        suite(),
+        &[],
+        profile(),
+        safety,
+        Freshness::default(),
+        &control,
+    )
+    .expect_err("over-recommended payload must be rejected when enforced");
+
+    assert!(
+        matches!(err, StrHideError::SafetyThreshold { .. }),
+        "expected SafetyThreshold, got {err:?}"
+    );
+}
+
+#[test]
+fn wav_low_pbkdf2_iterations_ceiling_refuses_read() {
+    let cover = wav_carrier(20_000);
+    let control = ctl();
+    let payload = Payload::bytes(b"pbkdf2-ceiling-test");
+    let (stego, _, _) = embed_wav(
+        &cover,
+        &payload,
+        cred(Some("test-pw")),
+        None,
+        suite(),
+        &[],
+        profile(),
+        SafetyPolicy::new(),
+        Freshness::default(),
+        &control,
+    )
+    .expect("embed");
+
+    let low_kdf = ExtractParams::default().with_max_pbkdf2_iterations(1_000);
+    let err = extract_wav(
+        &stego,
+        cred(Some("test-pw")),
+        None,
+        profile(),
+        &low_kdf,
+        &control,
+    )
+    .expect_err("low pbkdf2 iterations must refuse extract");
+
+    assert!(
+        matches!(err, StrHideError::NoHiddenData(_)),
+        "expected NoHiddenData with low KDF ceiling, got: {err:?}"
+    );
 }
 
 #[test]

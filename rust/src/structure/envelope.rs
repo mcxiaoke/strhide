@@ -1002,4 +1002,73 @@ mod tests {
             "a varint boundary and a payload byte each add one byte"
         );
     }
+
+    #[test]
+    fn validate_against_rejects_malformed_fields() {
+        let valid_header = EnvelopeHeader {
+            version: CURRENT_VERSION,
+            strategy_id: crate::structure::registry::STRATEGY_REGISTRY[0].1,
+            hint_len: 0,
+            meta_len: 0,
+            inject_offset: 100,
+            inject_size: 200,
+            offset_delta: 0,
+            patch_offset: 0,
+            ..Default::default()
+        };
+        let fixed = HEADER_SIZE as u64 + 24;
+        let total_size = 300;
+        let host_len = 1000;
+
+        assert!(valid_header.validate_against(total_size, host_len).is_ok());
+
+        // 1. Wrong version
+        let mut h = valid_header.clone();
+        h.version = 0xFF;
+        assert!(h.validate_against(total_size, host_len).is_err());
+
+        // 2. hint_len overflow
+        let mut h = valid_header.clone();
+        h.hint_len = MAX_HINT_LEN + 1;
+        assert!(h.validate_against(total_size, host_len).is_err());
+
+        // 3. meta_len overflow
+        let mut h = valid_header.clone();
+        h.meta_len = MAX_META_LEN + 1;
+        assert!(h.validate_against(total_size, host_len).is_err());
+
+        // 4. variable + fixed > ube_total_size
+        let h = valid_header.clone();
+        assert!(h.validate_against(fixed - 1, host_len).is_err());
+
+        // 5. Unknown strategy id
+        let mut h = valid_header.clone();
+        h.strategy_id = 255;
+        assert!(h.validate_against(total_size, host_len).is_err());
+
+        // 6. Inconsistent inject size
+        let mut h = valid_header.clone();
+        h.inject_size = 10;
+        assert!(h.validate_against(total_size, host_len).is_err());
+
+        let mut h = valid_header.clone();
+        h.inject_offset = u64::MAX - 10;
+        h.inject_size = 100;
+        assert!(h.validate_against(total_size, host_len).is_err());
+
+        // 7. offset_delta overflow
+        let mut h = valid_header.clone();
+        h.offset_delta = MAX_OFFSET_DELTA + 1;
+        assert!(h.validate_against(total_size, host_len).is_err());
+
+        // 8. patch_offset < 4 (and non-zero)
+        let mut h = valid_header.clone();
+        h.patch_offset = 2;
+        assert!(h.validate_against(total_size, host_len).is_err());
+
+        // 9. patch_offset + 4 > host_len
+        let mut h = valid_header.clone();
+        h.patch_offset = host_len as u32;
+        assert!(h.validate_against(total_size, host_len).is_err());
+    }
 }

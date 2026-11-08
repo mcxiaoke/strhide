@@ -278,6 +278,69 @@ fn test_hevc_capacity_is_reachable() {
 }
 
 #[test]
+fn test_hevc_capacity_incompressible_boundary_rejection() {
+    let file_path = asset("minimal.heic");
+    let carrier = fs::read(&file_path).expect("read fixture");
+    let cap = probe_hevc_capacity(&carrier, &strhide::stego::format::DEFAULT_HEVC_FORMAT)
+        .expect("probe capacity");
+    assert_eq!(cap, 260);
+
+    // Incompressible payload using SHA-256 blocks so Deflate cannot shrink it.
+    let make_incompressible = |len: usize| -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        let mut out = Vec::with_capacity(len);
+        let mut counter = 0u64;
+        while out.len() < len {
+            let mut hasher = Sha256::new();
+            hasher.update(b"incompressible-boundary-seed");
+            hasher.update(counter.to_le_bytes());
+            let hash = hasher.finalize();
+            let take = (len - out.len()).min(hash.len());
+            out.extend_from_slice(&hash[..take]);
+            counter += 1;
+        }
+        out
+    };
+
+    // Exactly advertised raw cap: fits and roundtrips
+    let payload = make_incompressible(cap);
+    let stego = embed_hevc(
+        &carrier,
+        &payload,
+        Some("hevc-boundary-check"),
+        None,
+        &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+        strhide::stego::Freshness::Random,
+    )
+    .expect("advertised cap of incompressible payload must fit");
+    let back = extract_hevc(
+        &stego,
+        Some("hevc-boundary-check"),
+        None,
+        &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+        &Control::none(),
+    )
+    .expect("extract must succeed");
+    assert_eq!(back, payload);
+
+    // Advertised cap + 1: must be rejected with capacity exceeded (PayloadTooLarge)
+    let too_large = make_incompressible(cap + 1);
+    let err = embed_hevc(
+        &carrier,
+        &too_large,
+        Some("hevc-boundary-check"),
+        None,
+        &strhide::stego::format::DEFAULT_HEVC_FORMAT,
+        strhide::stego::Freshness::Random,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, StrHideError::PayloadTooLarge(_)),
+        "expected PayloadTooLarge on cap + 1 incompressible, got: {err:?}"
+    );
+}
+
+#[test]
 fn test_hevc_capacity_safety_scaling_and_sps_dimensions() {
     let file_path = asset("small.heic");
     let orig_carrier = fs::read(&file_path).expect("read small.heic");
