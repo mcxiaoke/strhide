@@ -15,6 +15,7 @@ use thiserror::Error;
 /// while library callers can match on the discriminant and attach their own
 /// context.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum StrHideError {
     /// An underlying I/O failure (missing file, permission denied, disk full,
     /// broken pipe). Wraps [`std::io::Error`] via `From`.
@@ -318,6 +319,7 @@ impl StrHideError {
 /// Machine-readable stable error kinds for GUI and IPC dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ErrorKind {
     Io,
     CorruptedData,
@@ -340,6 +342,7 @@ pub enum ErrorKind {
 /// The parts of an [`StrHideError`], separated so a non-English front end can
 /// render it instead of scraping [`Display`](std::fmt::Display).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ErrorDetail {
     /// Machine-readable stable classification.
     pub kind: ErrorKind,
