@@ -14,7 +14,6 @@ use clap::{Args, Parser, Subcommand};
 pub const STRHIDE_VERSION_INFO: &str = env!("STRHIDE_VERSION_INFO");
 pub const STRHIDE_GIT_HASH: &str = env!("STRHIDE_GIT_HASH");
 pub const STRHIDE_BUILD_TIME: &str = env!("STRHIDE_BUILD_TIME");
-pub const BANNER: &str = concat!("sth ", env!("STRHIDE_VERSION_INFO"));
 
 /// Global options shared by the full entry point and every domain entry point.
 ///

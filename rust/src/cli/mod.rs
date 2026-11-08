@@ -27,19 +27,40 @@ pub mod render;
 // keep working: the split into submodules is an internal reorganisation.
 #[doc(hidden)]
 pub use args::{
-    BANNER, Cli, Commands, ContainerCommands, DiagCli, DiagCommands, GlobalArgs,
-    STRHIDE_BUILD_TIME, STRHIDE_GIT_HASH, STRHIDE_VERSION_INFO, StegoCli, StegoCommands, StructCli,
+    Cli, Commands, ContainerCommands, DiagCli, DiagCommands, GlobalArgs, STRHIDE_BUILD_TIME,
+    STRHIDE_GIT_HASH, STRHIDE_VERSION_INFO, StegoCli, StegoCommands, StructCli,
 };
 pub use helpers::resolve_password;
 use render::print_error;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use clap::{CommandFactory, FromArgMatches};
 
-/// Which command tree a binary exposes.
+/// Program name taken from `argv[0]`, so `--version`, usage lines and the JSON
+/// banner match the binary the user actually ran (`strhide.exe` vs `sth.exe`).
 ///
+/// Set once per process by [`run_domain_cli_with`]. In-process callers that pass
+/// a synthetic argv keep whatever they set; with nothing set it falls back to
+/// `sth`, the historical short name.
+static PROGRAM: OnceLock<String> = OnceLock::new();
+
+pub(crate) fn set_program_name(name: &str) {
+    let _ = PROGRAM.set(name.to_owned());
+}
+
+pub(crate) fn program_name() -> &'static str {
+    PROGRAM.get().map(String::as_str).unwrap_or("sth")
+}
+
+/// `"<program> <version> (commit: …, built: …)"`.
+pub(crate) fn banner() -> String {
+    format!("{} {}", program_name(), env!("STRHIDE_VERSION_INFO"))
+}
+
+/// Which command tree a binary exposes.///
 /// The full entry point keeps all ten verbs; the three domain entry points
 /// expose only their own group. All four share the same handlers: a domain's
 /// parsed command is converted back into the full [`Commands`] enum before
@@ -77,9 +98,9 @@ impl Domain {
         }
     }
 
-    /// Banner line (`--version` and normal status output).
-    fn banner(self) -> String {
-        format!("{} {}", self.name(), env!("STRHIDE_VERSION_INFO"))
+    /// `command()` with the runtime program name applied to help/version output.
+    fn command_for(self, program: &'static str) -> clap::Command {
+        self.command().name(program).bin_name(program)
     }
 }
 
@@ -161,7 +182,7 @@ fn render_early_error(e: clap::Error, argv: &[std::ffi::OsString], domain: Domai
 
     match e.kind() {
         DisplayHelp | DisplayHelpOnMissingArgumentOrSubcommand | MissingSubcommand => {
-            let mut cmd = crate::cli_i18n::localize(domain.command(), lang);
+            let mut cmd = crate::cli_i18n::localize(domain.command_for(program_name()), lang);
             if let Some(target) = scan_subcommand(argv)
                 && let Some(sub) = cmd.find_subcommand_mut(target)
             {
@@ -174,11 +195,11 @@ fn render_early_error(e: clap::Error, argv: &[std::ffi::OsString], domain: Domai
             e.exit_code()
         }
         DisplayVersion => {
-            println!("{}", domain.banner());
+            println!("{}", banner());
             0
         }
         _ => {
-            let mut cmd = crate::cli_i18n::localize(domain.command(), lang);
+            let mut cmd = crate::cli_i18n::localize(domain.command_for(program_name()), lang);
             if let Err(loc_err) = cmd.try_get_matches_from_mut(argv.to_vec()) {
                 let _ = loc_err.print();
                 loc_err.exit_code()
@@ -203,8 +224,23 @@ pub fn run_domain_cli(domain: Domain, argv: Vec<OsString>) -> i32 {
 }
 
 pub(crate) fn run_domain_cli_with(engine: &StrHide, domain: Domain, argv: Vec<OsString>) -> i32 {
+    // 0) Program name from argv[0]. Five binaries share this dispatcher, so the
+    //    compile-time `name = "sth"` in the clap derive would otherwise make
+    //    `strhide --version` print `sth 0.9.3`.
+    if let Some(name) = argv
+        .first()
+        .map(std::path::Path::new)
+        .and_then(|path| path.file_stem())
+        .and_then(|stem| stem.to_str())
+    {
+        set_program_name(name);
+    }
+
     // 1) 预解析（英文模板，仅用于取得 matches；不触发任何输出）
-    let pre = match domain.command().try_get_matches_from(argv.clone()) {
+    let pre = match domain
+        .command_for(program_name())
+        .try_get_matches_from(argv.clone())
+    {
         Ok(m) => m,
         Err(e) => return render_early_error(e, &argv, domain),
     };
@@ -279,7 +315,7 @@ pub(crate) fn run_domain_cli_with(engine: &StrHide, domain: Domain, argv: Vec<Os
     };
 
     if should_print_banner(quiet, &command) {
-        println!("{}", domain.banner());
+        println!("{}", banner());
         if let Some(path) = &cfg.loaded_from {
             println!("Loaded config: {}", path.display());
         }

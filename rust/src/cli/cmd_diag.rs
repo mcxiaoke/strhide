@@ -13,6 +13,7 @@ use crate::structure::registry::ADAPTERS;
 use crate::t;
 
 use super::args::*;
+use super::banner;
 use super::helpers::*;
 use super::render::*;
 
@@ -763,7 +764,7 @@ pub(crate) fn handle_list(args: ListArgs) -> Result<(), StrHideError> {
         }
 
         let report = ListReport {
-            banner: BANNER.to_string(),
+            banner: banner(),
             formats,
             stego_algorithms,
         };

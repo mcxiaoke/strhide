@@ -148,16 +148,38 @@ fn domain_help_honours_lang_and_global_options() {
 #[test]
 fn domain_and_full_entry_share_behaviour() {
     // `list --json` is read-only and deterministic: both entry points route
-    // through the same handler and must produce byte-identical output.
+    // through the same handler and must produce identical output *apart from
+    // the banner*, which now names the binary that actually ran.
     let full = base_cmd()
         .args(["list", "--json"])
         .output()
         .expect("run strhide");
     let domain = run_domain("sthv", &["list", "--json"]);
     assert_eq!(full.status.code(), domain.status.code());
+
+    let without_banner = |raw: &[u8]| -> String {
+        String::from_utf8_lossy(raw)
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("\"banner\""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     assert_eq!(
-        full.stdout, domain.stdout,
-        "domain and full entry must render the same JSON"
+        without_banner(&full.stdout),
+        without_banner(&domain.stdout),
+        "domain and full entry must render the same JSON apart from the banner"
+    );
+
+    // Each entry point must name itself, not a hard-coded short name.
+    let full_json = String::from_utf8_lossy(&full.stdout);
+    assert!(
+        full_json.contains("\"banner\": \"sth "),
+        "full entry banner must name its own binary\n{full_json}"
+    );
+    let domain_json = String::from_utf8_lossy(&domain.stdout);
+    assert!(
+        domain_json.contains("\"banner\": \"sthv "),
+        "domain banner must name its own binary\n{domain_json}"
     );
 }
 

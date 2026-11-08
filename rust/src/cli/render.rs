@@ -11,7 +11,7 @@ use crate::errors::StrHideError;
 use crate::structure::{RemoveResult, WriteResult};
 use crate::t;
 
-use super::args::BANNER;
+use super::banner;
 
 pub(crate) fn print_error(e: &StrHideError) {
     // One renderer, shared with every other front end: `detail_i18n` returns the
@@ -85,18 +85,12 @@ pub(crate) fn print_json<T: serde::Serialize>(val: &T) -> Result<(), StrHideErro
     let mut v = serde_json::to_value(val)?;
     match &mut v {
         serde_json::Value::Object(map) => {
-            map.insert(
-                "banner".to_string(),
-                serde_json::Value::String(BANNER.to_string()),
-            );
+            map.insert("banner".to_string(), serde_json::Value::String(banner()));
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
                 if let serde_json::Value::Object(map) = item {
-                    map.insert(
-                        "banner".to_string(),
-                        serde_json::Value::String(BANNER.to_string()),
-                    );
+                    map.insert("banner".to_string(), serde_json::Value::String(banner()));
                 }
             }
         }
