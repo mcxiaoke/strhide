@@ -185,7 +185,7 @@ fn domain_and_full_entry_share_behaviour() {
 
 #[test]
 fn engine_run_domain_cli_from_in_process() {
-    use strhide::cli::Domain;
+    use strhide::cli::CliDomain;
     use strhide::facade::{Dialect, StrHide};
     use strhide::stego::params::StegoProfile;
 
@@ -195,10 +195,10 @@ fn engine_run_domain_cli_from_in_process() {
         ));
 
     // Run domain help in-process
-    let code = engine.run_domain_cli_from(Domain::Stego, ["my-host", "--help"]);
+    let code = engine.run_domain_cli_from(CliDomain::Stego, ["my-host", "--help"]);
     assert_eq!(code, 0);
 
     // Cross-domain command must be rejected
-    let code = engine.run_domain_cli_from(Domain::Stego, ["my-host", "write"]);
+    let code = engine.run_domain_cli_from(CliDomain::Stego, ["my-host", "write"]);
     assert_ne!(code, 0);
 }

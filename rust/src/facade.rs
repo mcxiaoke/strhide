@@ -869,21 +869,17 @@ impl StrHide {
 
     // ─────────────────────────────── command line ────────────────────────────
 
-    /// Run the command-line interface bound to this engine, returning the
-    /// process exit code **without** calling [`std::process::exit`].
+    /// Run a domain-restricted command tree with this engine's dialect and
+    /// baseline parameters, returning the process exit code **without** calling
+    /// [`std::process::exit`].
     ///
-    /// The dialect and writer-behaviour baseline bound on this engine replace
-    /// the hard-coded official defaults inside the CLI, so an embedding host
-    /// can drive its own private command line. Explicit CLI flags still take
-    /// precedence over the bound configuration.
-    ///
-    /// `argv` must include the program name as its first element, exactly as
-    /// [`std::env::args_os`] returns it; clap uses that element for help and
-    /// error output, so callers assembling arguments manually must supply one.
-    /// Run a domain-restricted command tree ([`Domain::Structure`],
-    /// [`Domain::Content`], or [`crate::cli::Domain::All`]) with
-    /// this engine's dialect and baseline parameters, returning the process
-    /// exit code **without** calling [`std::process::exit`].
+    /// `domain` picks which verbs the tree contains:
+    /// [`CliDomain::Structure`](crate::cli::CliDomain::Structure) (`sthc`),
+    /// [`CliDomain::Stego`](crate::cli::CliDomain::Stego) (`sths`),
+    /// [`CliDomain::Diagnostics`](crate::cli::CliDomain::Diagnostics) (`sthv`)
+    /// or [`CliDomain::All`](crate::cli::CliDomain::All) (`sth`). It is
+    /// unrelated to [`Domain`], which says which *storage* domain a
+    /// payload lives in.
     ///
     /// The dialect and writer-behaviour baseline bound on this engine replace
     /// the hard-coded official defaults inside the CLI, so an embedding host
@@ -897,20 +893,22 @@ impl StrHide {
     #[cfg(feature = "cli")]
     pub fn run_domain_cli_from(
         &self,
-        domain: crate::cli::Domain,
+        domain: crate::cli::CliDomain,
         argv: impl IntoIterator<Item = impl Into<OsString>>,
     ) -> i32 {
         let argv: Vec<OsString> = argv.into_iter().map(Into::into).collect();
         crate::cli::run_domain_cli_with(self, domain, argv)
     }
 
-    /// Run the full command-line interface (`Domain::All`) bound to this engine,
-    /// returning the process exit code **without** calling [`std::process::exit`].
+    /// Run the full command-line interface
+    /// ([`CliDomain::All`](crate::cli::CliDomain::All)) bound to this engine,
+    /// returning the process exit code **without** calling
+    /// [`std::process::exit`].
     ///
-    /// Equivalent to `self.run_domain_cli_from(crate::cli::Domain::All, argv)`.
+    /// Equivalent to `self.run_domain_cli_from(crate::cli::CliDomain::All, argv)`.
     #[cfg(feature = "cli")]
     pub fn run_cli_from(&self, argv: impl IntoIterator<Item = impl Into<OsString>>) -> i32 {
-        self.run_domain_cli_from(crate::cli::Domain::All, argv)
+        self.run_domain_cli_from(crate::cli::CliDomain::All, argv)
     }
 }
 

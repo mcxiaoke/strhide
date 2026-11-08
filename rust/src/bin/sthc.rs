@@ -6,9 +6,9 @@
 
 use std::ffi::OsString;
 
-use strhide::cli::{Domain, run_domain_cli};
+use strhide::cli::{CliDomain, run_domain_cli};
 
 fn main() {
     let argv: Vec<OsString> = std::env::args_os().collect();
-    std::process::exit(run_domain_cli(Domain::Structure, argv));
+    std::process::exit(run_domain_cli(CliDomain::Structure, argv));
 }

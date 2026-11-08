@@ -60,13 +60,26 @@ pub(crate) fn banner() -> String {
     format!("{} {}", program_name(), env!("STRHIDE_VERSION_INFO"))
 }
 
-/// Which command tree a binary exposes.///
+/// Which command tree a binary exposes.
+///
 /// The full entry point keeps all ten verbs; the three domain entry points
 /// expose only their own group. All four share the same handlers: a domain's
 /// parsed command is converted back into the full [`Commands`] enum before
 /// dispatch, so there is exactly one implementation of each verb.
+///
+/// Named `CliDomain`, not `Domain`, because it appears in the public
+/// [`StrHide::run_domain_cli_from`](crate::StrHide::run_domain_cli_from)
+/// signature next to [`crate::facade::Domain`]. Two different enums called
+/// `Domain` on one page — one `Structure`/`Content`, the other
+/// `All`/`Structure`/`Stego`/`Diagnostics` — is a trap for anyone reading the
+/// docs or trusting IDE completion; the qualifier says which question each one
+/// answers.
+///
+/// `#[non_exhaustive]` so a fifth binary (say, a content-only `sthg`) can be
+/// added without a breaking change.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Domain {
+#[non_exhaustive]
+pub enum CliDomain {
     /// `sth` — all ten subcommands.
     All,
     /// `sthc` — `write`, `read`, `restore`.
@@ -77,24 +90,24 @@ pub enum Domain {
     Diagnostics,
 }
 
-impl Domain {
+impl CliDomain {
     /// Program name used in help, version and error output.
     pub fn name(self) -> &'static str {
         match self {
-            Domain::All => "sth",
-            Domain::Structure => "sthc",
-            Domain::Stego => "sths",
-            Domain::Diagnostics => "sthv",
+            CliDomain::All => "sth",
+            CliDomain::Structure => "sthc",
+            CliDomain::Stego => "sths",
+            CliDomain::Diagnostics => "sthv",
         }
     }
 
     /// Fresh clap `Command` for this entry point (clap consumes it on parse).
     fn command(self) -> clap::Command {
         match self {
-            Domain::All => Cli::command(),
-            Domain::Structure => StructCli::command(),
-            Domain::Stego => StegoCli::command(),
-            Domain::Diagnostics => DiagCli::command(),
+            CliDomain::All => Cli::command(),
+            CliDomain::Structure => StructCli::command(),
+            CliDomain::Stego => StegoCli::command(),
+            CliDomain::Diagnostics => DiagCli::command(),
         }
     }
 
@@ -175,7 +188,7 @@ fn scan_subcommand(argv: &[std::ffi::OsString]) -> Option<&str> {
     None
 }
 
-fn render_early_error(e: clap::Error, argv: &[std::ffi::OsString], domain: Domain) -> i32 {
+fn render_early_error(e: clap::Error, argv: &[std::ffi::OsString], domain: CliDomain) -> i32 {
     use clap::error::ErrorKind::*;
     let lang = i18n::locale::detect(scan_lang_flag(argv), None);
     i18n::set_lang(lang);
@@ -219,11 +232,11 @@ pub fn run_cli() -> i32 {
 ///
 /// `argv` must include the program name as its first element, exactly as
 /// [`std::env::args_os`] returns it.
-pub fn run_domain_cli(domain: Domain, argv: Vec<OsString>) -> i32 {
+pub fn run_domain_cli(domain: CliDomain, argv: Vec<OsString>) -> i32 {
     StrHide::new().run_domain_cli_from(domain, argv)
 }
 
-pub(crate) fn run_domain_cli_with(engine: &StrHide, domain: Domain, argv: Vec<OsString>) -> i32 {
+pub(crate) fn run_domain_cli_with(engine: &StrHide, domain: CliDomain, argv: Vec<OsString>) -> i32 {
     // 0) Program name from argv[0]. Five binaries share this dispatcher, so the
     //    compile-time `name = "sth"` in the clap derive would otherwise make
     //    `strhide --version` print `sth 0.9.3`.
@@ -284,28 +297,28 @@ pub(crate) fn run_domain_cli_with(engine: &StrHide, domain: Domain, argv: Vec<Os
     // 4) 从 matches 构造本入口的 Cli，并归一化为全量 Commands + quiet。
     //    之后所有分派复用同一份实现，域入口不复制任何行为。
     let (command, quiet): (Commands, bool) = match domain {
-        Domain::All => match Cli::from_arg_matches(&pre) {
+        CliDomain::All => match Cli::from_arg_matches(&pre) {
             Ok(c) => (c.command, c.global.quiet),
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 return 2;
             }
         },
-        Domain::Structure => match StructCli::from_arg_matches(&pre) {
+        CliDomain::Structure => match StructCli::from_arg_matches(&pre) {
             Ok(c) => (c.command.into(), c.global.quiet),
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 return 2;
             }
         },
-        Domain::Stego => match StegoCli::from_arg_matches(&pre) {
+        CliDomain::Stego => match StegoCli::from_arg_matches(&pre) {
             Ok(c) => (c.command.into(), c.global.quiet),
             Err(e) => {
                 eprintln!("[ERROR] {e}");
                 return 2;
             }
         },
-        Domain::Diagnostics => match DiagCli::from_arg_matches(&pre) {
+        CliDomain::Diagnostics => match DiagCli::from_arg_matches(&pre) {
             Ok(c) => (c.command.into(), c.global.quiet),
             Err(e) => {
                 eprintln!("[ERROR] {e}");
