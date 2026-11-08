@@ -3,7 +3,7 @@
 `strhide` ships as a single static binary per platform, as a Rust crate, and as a desktop app (`StrHide Studio`). Pick the path that matches what you need.
 
 > [!WARNING]
-> This tool rewrites the bytes of the files you feed it, and its content-domain edits are irreversible. Read the [DISCLAIMER](DISCLAIMER.md) first — in particular the backup obligation in §4 — and keep your own copy of every carrier.
+> This tool rewrites the bytes of the files you feed it, and its content-domain edits are irreversible. Read the [DISCLAIMER](legal/DISCLAIMER.md) first — in particular the backup obligation in §4 — and keep your own copy of every carrier.
 
 - [1. Prebuilt binaries](#1-prebuilt-binaries)
 - [2. Verify the download](#2-verify-the-download)
@@ -88,7 +88,7 @@ strhide restore hidden.png -p "test-pass" -o restored.png
 cmp small.png restored.png && echo "bit-exact restore OK"
 ```
 
-No `testdata` checkout handy? Any PNG works. Note that `restore` only guarantees bit-exactness for structure-domain writes, and only while the file is untouched afterwards — see [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+No `testdata` checkout handy? Any PNG works. Note that `restore` only guarantees bit-exactness for structure-domain writes, and only while the file is untouched afterwards — see [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## 4. Install as a Rust crate
 
@@ -104,7 +104,7 @@ CLI binaries from crates.io:
 cargo install strhide --features cli      # installs strhide, sth, sthc, sths, sthv
 ```
 
-Feature selection matters: the default feature set is `structure + content + analysis` with **no** `cli`. A plain `cargo build` in `rust/` compiles the library only and will **not** refresh `target/release/strhide.exe` — always pass `--all-features` (or `--features cli`) when you intend to run the CLI. The full matrix is in [rust/README.md](rust/README.md#feature-matrix).
+Feature selection matters: the default feature set is `structure + content + analysis` with **no** `cli`. A plain `cargo build` in `rust/` compiles the library only and will **not** refresh `target/release/strhide.exe` — always pass `--all-features` (or `--features cli`) when you intend to run the CLI. The full matrix is in [../rust/README.md](../rust/README.md#feature-matrix).
 
 ## 5. Build from source
 
@@ -138,7 +138,7 @@ cargo test --all-features --all-targets
 python ../scripts/baseline_hash.py --check    # default-parameter byte output unchanged
 ```
 
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full contributor workflow and the vendored HEVC sources.
+See [DEVELOPMENT.md](DEVELOPMENT.md) for the full contributor workflow and the vendored HEVC sources.
 
 ## 6. Desktop app
 
@@ -155,7 +155,7 @@ pnpm tauri dev      # development, hot reload
 pnpm tauri build    # production bundle under gui/src-tauri/target/release/bundle/
 ```
 
-Linux build prerequisites: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf`. The GUI uses the OS webview (WebView2 on Windows, WKWebView on macOS, WebKitGTK on Linux); nothing else is bundled. Usage is documented in [docs/GUI_GUIDE.md](docs/GUI_GUIDE.md).
+Linux build prerequisites: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf`. The GUI uses the OS webview (WebView2 on Windows, WKWebView on macOS, WebKitGTK on Linux); nothing else is bundled. Usage is documented in [GUI_GUIDE.md](GUI_GUIDE.md).
 
 ## 7. Troubleshooting
 
@@ -169,4 +169,4 @@ Linux build prerequisites: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `lib
 | `Restore verification failed` | the carrier changed after writing, or two envelopes are layered | remove envelopes in reverse order, or accept that the host is gone |
 | `Payload too large` | payload exceeds the selected safety tier | lower the payload, raise the tier, or pick a bigger carrier |
 
-More in [docs/FAQ.md](docs/FAQ.md). If none of it helps, see [SUPPORT.md](SUPPORT.md).
+More in [FAQ.md](FAQ.md). If none of it helps, see [../.github/SUPPORT.md](../.github/SUPPORT.md).

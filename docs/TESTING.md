@@ -105,7 +105,7 @@ python scripts/gen_third_party_licenses.py --check   # 依赖变动后许可证�
 | 基线不一致，但往返测试通过 | 输出字节变了，语义没变 | 确认是否预期；是则 `--write` + CHANGELOG |
 | 往返测试失败 | 读写不对称，真 bug | 不要动基线，先修 |
 | `private_provenance` 失败 | 方言隔离被削弱（某个标签/盐漏改或复用） | 见 [PRIVATE_BUILD.md](PRIVATE_BUILD.md) §4 的三个常见错误 |
-| `test_security::forge` 失败 | 伪造的长度字段被用于分配 | 视为安全问题，按 [SECURITY.md](../SECURITY.md) 处理 |
+| `test_security::forge` 失败 | 伪造的长度字段被用于分配 | 视为安全问题，按 [SECURITY.md](../.github/SECURITY.md) 处理 |
 | 压力测试偶发失败 | 并发或密钥轮换下的竞态 | 记录线程数/填充率/算法，最小化复现 |
 
 ## 7. 已知未覆盖

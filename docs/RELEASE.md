@@ -30,19 +30,19 @@
 | `strhide-linux-x86_64-avx2` | 同上 + v3 | 全静态 |
 | `strhide-linux-aarch64` | `aarch64-unknown-linux-musl` | 全静态 |
 | `strhide-macos-universal2` | `lipo` 合并 aarch64 + x86_64 | 通用二进制 |
-| `strhide-<version>-licenses.zip` | — | `LICENSE` + `NOTICE` + `THIRD_PARTY_LICENSES.md` + `docs/licenses/*.md`，由 release job 自动打包 |
+| `strhide-<version>-licenses.zip` | — | `LICENSE` + `NOTICE` + `docs/licenses/THIRD_PARTY_LICENSES.md` + `docs/licenses/*.md`，由 release job 自动打包 |
 | `SHA256SUMS.txt` | — | 上面所有资产的校验和 |
 
 发布前必读的两点：
 
 - **只发 `strhide` / `strhide.exe`**。`sth`、`sthc`、`sths`、`sthv` 由源码构建产出，预编译包不含它们。
-- **产物未签名**。CI 里没有 Apple 证书、没有 Windows 代码签名、也没有 Tauri updater 密钥。`INSTALL.md` 已写明 SmartScreen/Gatekeeper 的处理方式；不要在没有证书的前提下宣称"已签名"。
+- **产物未签名**。CI 里没有 Apple 证书、没有 Windows 代码签名、也没有 Tauri updater 密钥。[INSTALL.md](INSTALL.md) 已写明 SmartScreen/Gatekeeper 的处理方式；不要在没有证书的前提下宣称"已签名"。
 
 `SHA256SUMS.txt` 由 `release.yml` 自动生成（对 `dist/` 下除自身外的文件排序后 `sha256sum`），许可证包也包含在内。
 
-许可证包是 Apache-2.0 §4(a)/(d) 的履约动作：二进制分发必须附带许可证与 `NOTICE`。它由 release job 在发布前从仓库现取的 `LICENSE`、`NOTICE`、`THIRD_PARTY_LICENSES.md` 与 `docs/licenses/` 组装，**不要手工上传**，否则会和代码里的许可清单脱节。
+许可证包是 Apache-2.0 §4(a)/(d) 的履约动作：二进制分发必须附带许可证与 `NOTICE`。它由 release job 在发布前从仓库现取的 `LICENSE`、`NOTICE`、`docs/licenses/THIRD_PARTY_LICENSES.md` 与 `docs/licenses/` 组装，**不要手工上传**，否则会和代码里的许可清单脱节。
 
-桌面端安装包目前**不内嵌**这些文件，桌面端也**不带**校验和清单：`gui-v*` 单独发布时，许可证以同版本 `v*` Release 里的 licenses 包为准。这是已知缺口，记录在 [ROADMAP.md](../ROADMAP.md)。
+桌面端安装包目前**不内嵌**这些文件，桌面端也**不带**校验和清单：`gui-v*` 单独发布时，许可证以同版本 `v*` Release 里的 licenses 包为准。这是已知缺口，记录在 [ROADMAP.md](ROADMAP.md)。
 
 ## 3. 发布前检查清单
 

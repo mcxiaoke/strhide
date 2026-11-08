@@ -3,7 +3,7 @@
 Desktop client for `strhide`. Tauri 2 shell + React 18 + TypeScript + Tailwind, with the engine linked directly as a Rust dependency (`path = "../../rust"`) — no sidecar process, no CLI invocation.
 
 - **User manual** — [docs/GUI_GUIDE.md](../docs/GUI_GUIDE.md) (Chinese; includes the UI↔CLI terminology mapping, which is not intuitive).
-- **Install / build** — [INSTALL.md](../INSTALL.md) §6.
+- **Install / build** — [INSTALL.md](../docs/INSTALL.md) §6.
 - **Engine docs** — [docs/api/ARCHITECTURE.md](../docs/api/ARCHITECTURE.md), [rust/README.md](../rust/README.md).
 
 ## Layout
@@ -57,4 +57,4 @@ These are deliberate, and they surprise people:
 
 ## Security posture
 
-The webview runs with `default-src 'self'` CSP, `withGlobalTauri: false`, and a capability set limited to `dialog` and `opener` (no filesystem or shell plugin). The app makes no network requests. Logs stay local but do contain paths and error context — scrub them before pasting into an issue. See [SECURITY.md](../SECURITY.md) and [docs/THREAT_MODEL.md](../docs/THREAT_MODEL.md).
+The webview runs with `default-src 'self'` CSP, `withGlobalTauri: false`, and a capability set limited to `dialog` and `opener` (no filesystem or shell plugin). The app makes no network requests. Logs stay local but do contain paths and error context — scrub them before pasting into an issue. See [SECURITY.md](../.github/SECURITY.md) and [docs/THREAT_MODEL.md](../docs/THREAT_MODEL.md).

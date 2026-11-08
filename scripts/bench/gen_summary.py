@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the root-level BENCHMARK.md (short, two tables) from the raw
+"""Generate docs/BENCHMARK.md (short, two tables) from the raw
 benchmark JSON produced by `rust/examples/perf_bench.rs`.
 
 Usage:
@@ -18,7 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 RESULTS = ROOT / "temp" / "bench" / "results"
-OUT = ROOT / "BENCHMARK.md"
+OUT = ROOT / "docs" / "BENCHMARK.md"
 
 STRUCTURE_SIZES = [4, 64, 256, 1024, 4096]  # KiB
 CONTENT_SIZES = [1, 8, 32, 128]  # KiB
@@ -198,8 +198,8 @@ def main() -> int:
     add("")
     add("> 简明基线。**单位毫秒（ms），表中为 20 次采样的中位数**；"
         "详细方法、逐格方差与原始数据见 "
-        "[结构域报告](docs/BENCH_STRUCTURE_20261107.md) 与 "
-        "[内容域报告](docs/BENCH_CONTENT_20261107.md)。")
+        "[结构域报告](BENCH_STRUCTURE_20261107.md) 与 "
+        "[内容域报告](BENCH_CONTENT_20261107.md)。")
     add("")
     add("环境：Intel i7-11700（8C/16T）· 32 GiB · Windows 10 · Rust 1.99.1 · "
         "`strhide 0.9.2/0.9.3` · `--release`（LTO）。"

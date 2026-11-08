@@ -8,8 +8,8 @@
 
 ### A. 我只要用它
 
-0. [免责声明](../DISCLAIMER.zh.md) / [DISCLAIMER](../DISCLAIMER.md) — **先读**：研究用途、禁止用途、备份义务、无担保与责任限制
-1. [INSTALL.md](../INSTALL.md) — 下载、校验、首次运行
+0. [免责声明](legal/DISCLAIMER.zh.md) / [DISCLAIMER](legal/DISCLAIMER.md) — **先读**：研究用途、禁止用途、备份义务、无担保与责任限制
+1. [INSTALL.md](INSTALL.md) — 下载、校验、首次运行
 2. [CLI_GUIDE.md](CLI_GUIDE.md) — 十个子命令与常用参数组合
 3. [GUI_GUIDE.md](GUI_GUIDE.md) — 桌面端（先看术语映射表，"隐写"与"嵌入"是交叉的）
 4. [FAQ.md](FAQ.md) — 提取失败、容量、性能、备份
@@ -35,7 +35,7 @@
 
 1. [DEVELOPMENT.md](DEVELOPMENT.md) — 环境、布局、feature 组合、vendor 源码
 2. [TESTING.md](TESTING.md) — 测试分层与各类门禁
-3. [../CONTRIBUTING.md](../CONTRIBUTING.md) — 提交与评审约定
+3. [../.github/CONTRIBUTING.md](../.github/CONTRIBUTING.md) — 提交与评审约定
 4. [RELEASE.md](RELEASE.md) — 发布流程与产物
 5. [api/spec/README.md](api/spec/README.md) §5 — 改线格式时必须同步改哪些文档
 
@@ -45,20 +45,20 @@
 
 ### 2.1 上手与治理
 
-除 `THREAT_MODEL.md`（在 `docs/` 下）外，本表文件都在仓库根目录。
+社区健康文件位于 `.github/`，法律与许可位于 `docs/legal/` 及 `docs/licenses/`，通用指引位于 `docs/`，根目录保留核心门面（README/CHANGELOG/LICENSE/NOTICE）。
 
 | 文档 | 内容 | 语言 |
 | :--- | :--- | :--- |
 | [README.md](../README.md) / [README.zh.md](../README.zh.md) | 项目总览、能力矩阵、CLI 速查 | EN / ZH |
-| [INSTALL.md](../INSTALL.md) | 安装、校验、未签名产物的处理、排错 | EN |
-| [SECURITY.md](../SECURITY.md) | 漏洞披露、支持版本、**已知设计边界**、安全属性 | EN |
+| [INSTALL.md](INSTALL.md) | 安装、校验、未签名产物的处理、排错 | EN |
+| [SECURITY.md](../.github/SECURITY.md) | 漏洞披露、支持版本、**已知设计边界**、安全属性 | EN |
 | [THREAT_MODEL.md](THREAT_MODEL.md) | 对手模型、失效条件表、侧信道清单、威胁→对策 | ZH |
-| [DISCLAIMER.md](../DISCLAIMER.md) / [DISCLAIMER.zh.md](../DISCLAIMER.zh.md) | **使用风险与责任限制**：研究用途、禁止用途、备份义务、无担保、责任限制、赔偿、条款变更 | EN / ZH |
-| [LEGAL.md](../LEGAL.md) | 许可证、HEVC 专利、出口管制、商标、第三方组件 | EN |
-| [THIRD_PARTY_LICENSES.md](../THIRD_PARTY_LICENSES.md) | 依赖许可汇总与再分发义务 | EN |
-| [CONTRIBUTING.md](../CONTRIBUTING.md) / [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) | 贡献流程、门禁、行为准则 | EN |
-| [SUPPORT.md](../SUPPORT.md) | 提问渠道与"先看这里"清单 | EN |
-| [ROADMAP.md](../ROADMAP.md) | 1.0 前后的方向与兼容性承诺 | EN |
+| [DISCLAIMER.md](legal/DISCLAIMER.md) / [DISCLAIMER.zh.md](legal/DISCLAIMER.zh.md) | **使用风险与责任限制**：研究用途、禁止用途、备份义务、无担保、责任限制、赔偿、条款变更 | EN / ZH |
+| [LEGAL.md](legal/LEGAL.md) | 许可证、HEVC 专利、出口管制、商标、第三方组件 | EN |
+| [THIRD_PARTY_LICENSES.md](licenses/THIRD_PARTY_LICENSES.md) | 依赖许可汇总与再分发义务 | EN |
+| [CONTRIBUTING.md](../.github/CONTRIBUTING.md) / [CODE_OF_CONDUCT.md](../.github/CODE_OF_CONDUCT.md) | 贡献流程、门禁、行为准则 | EN |
+| [SUPPORT.md](../.github/SUPPORT.md) | 提问渠道与"先看这里"清单 | EN |
+| [ROADMAP.md](ROADMAP.md) | 1.0 前后的方向与兼容性承诺 | EN |
 | [CHANGELOG.md](../CHANGELOG.md) | 版本变更（Keep a Changelog） | EN |
 
 ### 2.2 使用指南
@@ -106,7 +106,7 @@
 
 | 文档 | 内容 |
 | :--- | :--- |
-| [../BENCHMARK.md](../BENCHMARK.md) | 两域汇总表与主导因素 |
+| [BENCHMARK.md](BENCHMARK.md) | 两域汇总表与主导因素 |
 | [BENCH_STRUCTURE_20261107.md](BENCH_STRUCTURE_20261107.md) | 结构域完整方法论、逐格方差、原始样本（含 SVG） |
 | [BENCH_CONTENT_20261107.md](BENCH_CONTENT_20261107.md) | 内容域同上 |
 
@@ -124,7 +124,7 @@
 
 ## 3. 语言策略
 
-- **仓库根目录的对外文件用英文**（README、INSTALL、SECURITY、LEGAL、CONTRIBUTING、SUPPORT、ROADMAP、CHANGELOG），因为它们是国际读者与 GitHub 社区界面的入口。
+- **仓库根目录与社区健康文件用英文**（README、INSTALL、SECURITY、LEGAL、CONTRIBUTING、SUPPORT、ROADMAP、CHANGELOG），因为它们是国际读者与 GitHub 社区界面的入口。
 - **`docs/` 下的技术文档以中文为主**，与现有规范保持一致；代码注释、commit message、日志输出一律英文。
 - 中文总览见 [README.zh.md](../README.zh.md)。
 

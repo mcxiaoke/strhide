@@ -11,7 +11,7 @@
 | `0.9.x` (latest patch only) | Yes |
 | earlier than `0.9` | No |
 
-Before `1.0`, security fixes land on the latest release line only, and there are no backports. Wire formats may still change between releases, so carriers written by an older version may become unreadable after an upgrade — see [CHANGELOG.md](CHANGELOG.md) and the stability classes in [docs/api/spec/README.md](docs/api/spec/README.md).
+Before `1.0`, security fixes land on the latest release line only, and there are no backports. Wire formats may still change between releases, so carriers written by an older version may become unreadable after an upgrade — see [CHANGELOG.md](../CHANGELOG.md) and the stability classes in [docs/api/spec/README.md](../docs/api/spec/README.md).
 
 ## Reporting a vulnerability
 
@@ -38,7 +38,7 @@ Never attach real secrets or real confidential payloads.
 | Fix or written mitigation plan | after triage, timeline agreed in the advisory |
 | Coordinated disclosure | 90 days from the report (sooner if the issue is exploited in the wild) |
 
-These are best-effort targets, not contractual SLAs. Reporters are credited in [CHANGELOG.md](CHANGELOG.md) unless they ask to stay anonymous.
+These are best-effort targets, not contractual SLAs. Reporters are credited in [CHANGELOG.md](../CHANGELOG.md) unless they ask to stay anonymous.
 
 ## In scope
 
@@ -57,7 +57,7 @@ These are documented, intentional behaviours. Reporting them as vulnerabilities 
 | Boundary | Why it is by design |
 | :--- | :--- |
 | **Password-less envelopes are readable by any build.** Both domains fall back to public constants (`PUBLIC_DEFAULT_SECRET` for content, `BUILTIN_DEFAULT_KEY` for structure) when no password, key file, or profile secret is supplied. | Interoperability between stock binaries. Supply a password or a private dialect by default. |
-| **`--stealth` does not improve steganalysis resistance.** It derives the header/trailer magic and masks header fields from the password, so a no-password probe sees noise; the statistical detectability of the payload is unchanged. | It is an attribution/plausible-deniability feature, not a detection-resistance feature. See [docs/PRIVATE_BUILD.md](docs/PRIVATE_BUILD.md) §6. |
+| **`--stealth` does not improve steganalysis resistance.** It derives the header/trailer magic and masks header fields from the password, so a no-password probe sees noise; the statistical detectability of the payload is unchanged. | It is an attribution/plausible-deniability feature, not a detection-resistance feature. See [docs/PRIVATE_BUILD.md](../docs/PRIVATE_BUILD.md) §6. |
 | **Structure-domain markers are visible in non-stealth mode.** `prIv` (PNG), `stEg`/`SHRD`, `MP4_UUID_NEUTRAL`, and the JPEG APP15 marker can be found by static scanners. | Cost-free bit-exact restoration is built on format-legal structure, which must sit somewhere in the container. |
 | **Content-domain embeds are irreversible.** The bytes of the media itself change, so no pre-write host can be recovered. | Fundamental to content-adaptive steganography. |
 | **Extraction failure is indistinguishable from a wrong password.** The content domain returns the same "no hidden data" result for a wrong key, a wrong dialect, and an absent payload. | Not leaking whether a carrier holds a payload is the point. Do not expect a more specific error. |
@@ -67,7 +67,7 @@ These are documented, intentional behaviours. Reporting them as vulnerabilities 
 
 ## Security-relevant implementation properties
 
-Documented for reviewers; the normative source is [docs/api/spec/CRYPTO.md](docs/api/spec/CRYPTO.md).
+Documented for reviewers; the normative source is [docs/api/spec/CRYPTO.md](../docs/api/spec/CRYPTO.md).
 
 - **Primitives** — PBKDF2-HMAC-SHA256 (structure domain: 100 000 iterations; content domain: 200 000 for passwords, skipped for 32-byte file keys), HKDF-SHA256, AES-256-GCM (both domains, default suite) and ChaCha20-Poly1305 (content domain, suite 2; readers cross-reject the wrong suite).
 - **Nonces** — structure domain derives per-chunk nonces from a base nonce by XOR-ing the chunk index into the last 4 bytes, with `0xFFFFFFFF` reserved for the metadata block; chunk index and `is_last` are bound in the AAD.
@@ -86,5 +86,5 @@ The implementation has not been through an independent third-party cryptographic
 - Prefer `--password-file` or `STRHIDE_PASSWORD` over `-p`: a password passed as an argument is visible in the process list and may land in shell history.
 - Remember that `--in-place` writes a `.bak` next to the carrier by default; that backup is an unencrypted copy of the original, and deleting it is on you.
 - Keep the original stego carrier. Any lossy re-encode, crop, resize, or recompression destroys content-domain payloads permanently.
-- If you need isolation from stock builds rather than confidentiality with the maintainers, build a private dialect as described in [docs/PRIVATE_BUILD.md](docs/PRIVATE_BUILD.md).
-- Legal and dual-use considerations are in [LEGAL.md](LEGAL.md); the risk and liability statement is in the [DISCLAIMER](DISCLAIMER.md) ([中文](DISCLAIMER.zh.md)).
+- If you need isolation from stock builds rather than confidentiality with the maintainers, build a private dialect as described in [docs/PRIVATE_BUILD.md](../docs/PRIVATE_BUILD.md).
+- Legal and dual-use considerations are in [LEGAL.md](../docs/legal/LEGAL.md); the risk and liability statement is in the [DISCLAIMER](../docs/legal/DISCLAIMER.md) ([中文](../docs/legal/DISCLAIMER.zh.md)).

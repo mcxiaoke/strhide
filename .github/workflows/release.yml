@@ -186,7 +186,7 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           staging="licenses-${version}"
           mkdir -p "$staging/docs/licenses"
-          cp LICENSE NOTICE THIRD_PARTY_LICENSES.md "$staging/"
+          cp LICENSE NOTICE docs/licenses/THIRD_PARTY_LICENSES.md "$staging/"
           cp docs/licenses/*.md "$staging/docs/licenses/"
           ( cd "$staging" && zip -qr "../dist/strhide-${version}-licenses.zip" . )
           rm -rf "$staging"

@@ -4,7 +4,7 @@
 
 > [!WARNING]
 > **本项目是技术研究工具，不是产品，它会改写你文件的真实字节。**
-> 内容域修改不可逆；结构域还原仅在载体未被改动时成立；软件按"现状"提供、不附带任何担保——作者不对数据丢失、文件损坏或你使用本项目的任何后果负责，禁止用于违法用途。**使用前请自行备份原件**，并先读完整的[免责声明](DISCLAIMER.zh.md) / [DISCLAIMER](DISCLAIMER.md)。
+> 内容域修改不可逆；结构域还原仅在载体未被改动时成立；软件按"现状"提供、不附带任何担保——作者不对数据丢失、文件损坏或你使用本项目的任何后果负责，禁止用于违法用途。**使用前请自行备份原件**，并先读完整的[免责声明](docs/legal/DISCLAIMER.zh.md) / [DISCLAIMER](docs/legal/DISCLAIMER.md)。
 
 ---
 
@@ -102,7 +102,7 @@ sth list                                                            # 列出受�
   嵌入 **0.06–14.6 s**，提取约为嵌入的 16–73 %。**引擎/容器路径决定数量级**，载荷大小决定同一引擎内的斜率；
   载体大小、分辨率、时长单独都不能预测跨引擎耗时。
 
-两张汇总表见 [BENCHMARK.md](BENCHMARK.md)；完整方法、逐格方差与原始样本见
+两张汇总表见 [BENCHMARK.md](docs/BENCHMARK.md)；完整方法、逐格方差与原始样本见
 [结构域报告](docs/BENCH_STRUCTURE_20261107.md) 与 [内容域报告](docs/BENCH_CONTENT_20261107.md)。
 
 ---
@@ -126,7 +126,7 @@ sth list                                                            # 列出受�
 
 ## 6. 关联技术文档
 
-* [性能基线（简明版）](BENCHMARK.md)：两张汇总表与主要耗时因素。
+* [性能基线（简明版）](docs/BENCHMARK.md)：两张汇总表与主要耗时因素。
 * [结构域基准报告](docs/BENCH_STRUCTURE_20261107.md) / [内容域基准报告](docs/BENCH_CONTENT_20261107.md)：完整方法、逐格统计与原始样本。
 * [技术实现综合规范](docs/smart_file_data_hiding_design.md)：协议细节、适配器算法、预检拦截矩阵与还原流水线。
 * [系统架构与公开 API 说明](docs/api/ARCHITECTURE.md)：分层拓扑、统一门面、方言机制与管线设计。
@@ -147,4 +147,4 @@ sth list                                                            # 列出受�
 * **后果自负。** 动手前请确认你的法律处境、你对每个载体的修改权限，以及所在组织的授权。
 * **签名与哈希必然变化。** 已签名载体因此被拒绝处理；依赖哈希比对的系统会将该文件判定为"已改动"。
 
-使用前请阅读完整声明：**[免责声明](DISCLAIMER.zh.md)**（中文）· **[DISCLAIMER.md](DISCLAIMER.md)**（English，如有不一致以中文版为准）。
+使用前请阅读完整声明：**[免责声明](docs/legal/DISCLAIMER.zh.md)**（中文）· **[DISCLAIMER.md](docs/legal/DISCLAIMER.md)**（English，如有不一致以中文版为准）。

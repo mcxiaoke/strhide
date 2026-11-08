@@ -4,17 +4,17 @@
 
 Most questions are already answered. In this order:
 
-1. [docs/FAQ.md](docs/FAQ.md) — extraction failures, capacity, performance, backups, platform warnings.
-2. [INSTALL.md](INSTALL.md) — installation, checksum verification, unsigned-binary warnings, build errors.
-3. [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) — what the tool does and does not promise. A "why can't I read my file after sending it through a chat app" question is answered in §4.
-4. [docs/CLI_GUIDE.md](docs/CLI_GUIDE.md) / [docs/GUI_GUIDE.md](docs/GUI_GUIDE.md) — parameters and UI behaviour.
+1. [docs/FAQ.md](../docs/FAQ.md) — extraction failures, capacity, performance, backups, platform warnings.
+2. [INSTALL.md](../docs/INSTALL.md) — installation, checksum verification, unsigned-binary warnings, build errors.
+3. [docs/THREAT_MODEL.md](../docs/THREAT_MODEL.md) — what the tool does and does not promise. A "why can't I read my file after sending it through a chat app" question is answered in §4.
+4. [docs/CLI_GUIDE.md](../docs/CLI_GUIDE.md) / [docs/GUI_GUIDE.md](../docs/GUI_GUIDE.md) — parameters and UI behaviour.
 
 ## Where to ask
 
 | Kind | Where |
 | :--- | :--- |
 | Bug | [GitHub Issues](https://github.com/mcxiaoke/strhide/issues) — use the bug template |
-| Feature request | Issues, feature template. Read [ROADMAP.md](ROADMAP.md) first; out-of-scope items are listed there |
+| Feature request | Issues, feature template. Read [ROADMAP.md](../docs/ROADMAP.md) first; out-of-scope items are listed there |
 | Usage question | Issues with the `question` label |
 | **Security vulnerability** | **Not an issue** — follow [SECURITY.md](SECURITY.md) |
 | Licensing / legal | `mcxiaoke@live.com` |
@@ -39,7 +39,7 @@ For desktop-app issues, attach the relevant log entries from the `日志` panel 
 - **Recovering the original host after a content-domain embed.** By design irreversible.
 - **Diagnosing a custom build.** If you changed feature flags, patched the engine, or built a private dialect, we can help with build errors but cannot reason about your wire format.
 - **Production SLAs.** This is a volunteer project; there is no guaranteed response time. Security reports have the targets in [SECURITY.md](SECURITY.md).
-- **Requests to help hide data from a specific person, employer, or investigation**, or to bypass DRM. See [LEGAL.md](LEGAL.md) §2.
+- **Requests to help hide data from a specific person, employer, or investigation**, or to bypass DRM. See [LEGAL.md](../docs/legal/LEGAL.md) §2.
 
 ## Response expectations
 

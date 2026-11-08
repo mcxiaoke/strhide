@@ -6,7 +6,7 @@
 
 ## 1. License, warranty, and liability
 
-The source code is licensed under the **Apache License 2.0** — see [LICENSE](LICENSE). Third-party components and their licenses are listed in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+The source code is licensed under the **Apache License 2.0** — see [LICENSE](../../LICENSE). Third-party components and their licenses are listed in [THIRD_PARTY_LICENSES.md](../licenses/THIRD_PARTY_LICENSES.md).
 
 The software is provided **"AS IS", without warranties or conditions of any kind**, express or implied (Apache-2.0 §7), and the authors are not liable for any claim, damage, or other liability arising from the software or its use (Apache-2.0 §8).
 
@@ -30,12 +30,12 @@ The content-domain HEVC engine parses and rewrites H.265/HEVC bitstreams, using 
 
 ## 5. Names and marks
 
-`strhide`, `sth`, `sthc`, `sths`, `sthv`, and `StrHide Studio` identify this project. Forks and derivative distributions are welcome under the license, but they must not imply that they are the official project or that the maintainers endorse them. In line with the upstream fork rules recorded in [docs/CRATES_PUBLISH.md](docs/CRATES_PUBLISH.md): keep the original copyright notices, state the fork origin in the package metadata and README, and use a distinct package name.
+`strhide`, `sth`, `sthc`, `sths`, `sthv`, and `StrHide Studio` identify this project. Forks and derivative distributions are welcome under the license, but they must not imply that they are the official project or that the maintainers endorse them. In line with the upstream fork rules recorded in [docs/CRATES_PUBLISH.md](../CRATES_PUBLISH.md): keep the original copyright notices, state the fork origin in the package metadata and README, and use a distinct package name.
 
 ## 6. Third-party components
 
-Rust dependencies, the two vendored HEVC implementations, and the GUI's JavaScript dependencies are enumerated — with versions and licenses — in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) and the generated lists under [`docs/licenses/`](docs/licenses/). Binary releases additionally bundle the platform webview runtime provided by the operating system, which is not redistributed by this project.
+Rust dependencies, the two vendored HEVC implementations, and the GUI's JavaScript dependencies are enumerated — with versions and licenses — in [THIRD_PARTY_LICENSES.md](../licenses/THIRD_PARTY_LICENSES.md) and the generated lists under [`docs/licenses/`](../licenses/). Binary releases additionally bundle the platform webview runtime provided by the operating system, which is not redistributed by this project.
 
 ## 7. Reporting a legal concern
 
-If you believe this project infringes your rights, contact `mcxiaoke@live.com` with the specifics before taking other action. Security issues go through [SECURITY.md](SECURITY.md) instead.
+If you believe this project infringes your rights, contact `mcxiaoke@live.com` with the specifics before taking other action. Security issues go through [SECURITY.md](../../.github/SECURITY.md) instead.

@@ -141,6 +141,6 @@
 | `内容超出所选隐蔽强度的容量上限` | 载荷大于档位上限 | 降载荷、升档位（降到 `中`）、或换更大的载体 |
 | `格式不支持` + 建议页签 | 把文件加到了错误的页签 | 按提示切到「嵌入」或「隐写」 |
 | `还原校验未通过` | 载体已被二次处理 | 见 [THREAT_MODEL.md](THREAT_MODEL.md) §4，原宿主已不可恢复 |
-| 启动即被杀软/SmartScreen 拦 | 产物未签名 | 见 [INSTALL.md](../INSTALL.md) §1 |
+| 启动即被杀软/SmartScreen 拦 | 产物未签名 | 见 [INSTALL.md](INSTALL.md) §1 |
 
 更多问题见 [FAQ.md](FAQ.md)。

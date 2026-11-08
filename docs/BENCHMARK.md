@@ -1,6 +1,6 @@
 # 性能基线 / Performance
 
-> 简明基线。**单位毫秒（ms），表中为 20 次采样的中位数**；详细方法、逐格方差与原始数据见 [结构域报告](docs/BENCH_STRUCTURE_20261107.md) 与 [内容域报告](docs/BENCH_CONTENT_20261107.md)。
+> 简明基线。**单位毫秒（ms），表中为 20 次采样的中位数**；详细方法、逐格方差与原始数据见 [结构域报告](BENCH_STRUCTURE_20261107.md) 与 [内容域报告](BENCH_CONTENT_20261107.md)。
 
 环境：Intel i7-11700（8C/16T）· 32 GiB · Windows 10 · Rust 1.99.1 · `strhide 0.9.2/0.9.3` · `--release`（LTO）。内存 API 计时：固定密码/固定 seed/固定随机载荷，**含 PBKDF2，不含磁盘 I/O**。每格 2 次预热 + 20 次采样，写入后逐字节校验读回。
 

@@ -1,14 +1,14 @@
 # Third-Party Licenses
 
-`strhide` is Apache-2.0 (see [LICENSE](LICENSE)). It bundles or links third-party code under permissive licenses; the complete inventories are generated from package metadata, not maintained by hand.
+`strhide` is Apache-2.0 (see [LICENSE](../../LICENSE)). It bundles or links third-party code under permissive licenses; the complete inventories are generated from package metadata, not maintained by hand.
 
 ## Inventories
 
 | Scope | File | Count | Source |
 | :--- | :--- | ---: | :--- |
-| Core crate + CLI binaries | [`docs/licenses/rust-core.md`](docs/licenses/rust-core.md) | 87 crates | `rust/Cargo.toml`, all features, build deps included, dev-deps excluded |
-| Desktop app backend (Tauri) | [`docs/licenses/gui-backend.md`](docs/licenses/gui-backend.md) | 503 crates | `gui/src-tauri/Cargo.toml`, all features |
-| Desktop app frontend | [`docs/licenses/gui-frontend.md`](docs/licenses/gui-frontend.md) | 11 packages | runtime `dependencies` of `gui/package.json` |
+| Core crate + CLI binaries | [`rust-core.md`](rust-core.md) | 87 crates | `rust/Cargo.toml`, all features, build deps included, dev-deps excluded |
+| Desktop app backend (Tauri) | [`gui-backend.md`](gui-backend.md) | 503 crates | `gui/src-tauri/Cargo.toml`, all features |
+| Desktop app frontend | [`gui-frontend.md`](gui-frontend.md) | 11 packages | runtime `dependencies` of `gui/package.json` |
 
 Regenerate and verify:
 
@@ -34,8 +34,8 @@ The license identifiers come from each package's own metadata (`cargo metadata`,
 | `memchr` | `Unlicense OR MIT` | The MIT arm applies. |
 | `unicode-ident`, `unicode-normalization` | `(MIT OR Apache-2.0) AND Unicode-3.0` | Both arms are obligations: keep the crate license **and** the [Unicode License v3](https://www.unicode.org/license.txt). |
 | `brotli`, `alloc-no-stdlib`, `alloc-stdlib` | BSD-3-Clause (+MIT) | GUI backend only; keep the copyright notice and do not use the names of the copyright holders to endorse derivatives. |
-| `strhide-rusty-h265` (package of the `rusty_h265` dependency) | Apache-2.0 | This project's fork of [`rusty_h265`](https://github.com/Remade-With-Rust/rusty_h265). Upstream copyright notices are retained; the fork origin and the scope of local changes are documented in [docs/CRATES_PUBLISH.md](docs/CRATES_PUBLISH.md). |
-| `oxideav-h265` | MIT | Upstream, unpatched. See the HEVC patent notice in [LEGAL.md](LEGAL.md) §4 — a copyright license is not a patent license. |
+| `strhide-rusty-h265` (package of the `rusty_h265` dependency) | Apache-2.0 | This project's fork of [`rusty_h265`](https://github.com/Remade-With-Rust/rusty_h265). Upstream copyright notices are retained; the fork origin and the scope of local changes are documented in [../CRATES_PUBLISH.md](../CRATES_PUBLISH.md). |
+| `oxideav-h265` | MIT | Upstream, unpatched. See the HEVC patent notice in [../legal/LEGAL.md](../legal/LEGAL.md) §4 — a copyright license is not a patent license. |
 
 ## What a binary release must carry
 

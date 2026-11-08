@@ -1,7 +1,7 @@
 # 常见问题 (FAQ)
 
 > 只记录有确定答案的问题。每条结论都能在代码或规范里找到出处；猜测性的建议不写进来。
-> 相关文档：[CLI_GUIDE.md](CLI_GUIDE.md) · [GUI_GUIDE.md](GUI_GUIDE.md) · [THREAT_MODEL.md](THREAT_MODEL.md) · [INSTALL.md](../INSTALL.md)
+> 相关文档：[CLI_GUIDE.md](CLI_GUIDE.md) · [GUI_GUIDE.md](GUI_GUIDE.md) · [THREAT_MODEL.md](THREAT_MODEL.md) · [INSTALL.md](INSTALL.md)
 
 ---
 
@@ -36,7 +36,7 @@
 三个因素：① 信封框架（基础头 + 微头 + AEAD tag，`BODY_OVERHEAD = 22` 起）；② 安全档位限制载荷率（`paranoid < high < balanced`）；③ 工作内存预算——引擎会拒绝超出预算的写入，所以报告的上限是"一定能写成"的值。容量报告不含文件名；带文件名还要多 `1 + name_len` 字节。
 
 **Q9. 为什么一张 12 MP 的 PNG 要 1.8 秒？**
-内容域 PNG 需要重算整张图的代价图（HILL/S-UNIWARD/MiPOD 都是小波域滤波），成本与像素数成正比，与载荷大小几乎无关。对比：12 MP 的 HEIC 只需约 0.24 秒，因为走的是码流符号位而不是像素。完整数据见 [BENCHMARK.md](../BENCHMARK.md)。
+内容域 PNG 需要重算整张图的代价图（HILL/S-UNIWARD/MiPOD 都是小波域滤波），成本与像素数成正比，与载荷大小几乎无关。对比：12 MP 的 HEIC 只需约 0.24 秒，因为走的是码流符号位而不是像素。完整数据见 [BENCHMARK.md](BENCHMARK.md)。
 
 **Q10. FLAC 为什么比其他引擎慢一个数量级？**
 FLAC 要在残差域改值并且**保持 Rice 码字长度不变**，否则文件体积和帧结构都会变。这需要逐帧解析与重编码验证，成本远高于 PCM 采样位翻转。见 [CONTENT-AUDIO.md](api/spec/CONTENT-AUDIO.md)。
@@ -78,7 +78,7 @@ CLI 默认拒绝，报 `Refusing to overwrite existing file`，除非 `--overwri
 ## 平台与安装
 
 **Q21. Windows 提示"Windows 保护了你的电脑"，macOS 说"无法验证开发者"。**
-产物未做代码签名。绕过步骤见 [INSTALL.md](../INSTALL.md) §1。需要可验证来源就自己从源码构建。
+产物未做代码签名。绕过步骤见 [INSTALL.md](INSTALL.md) §1。需要可验证来源就自己从源码构建。
 
 **Q22. Linux 版是静态的吗？需要 glibc 吗？**
 发布页的 Linux 产物是 musl 静态链接，不依赖 glibc；但如果从 `noexec` 挂载点（常见于 `/tmp`）运行会报 `Permission denied`，装到 `~/.local/bin` 即可。
@@ -92,7 +92,7 @@ CLI 默认拒绝，报 `Refusing to overwrite existing file`，除非 `--overwri
 ## 合法性与边界
 
 **Q25. 我用它做 XX 合法吗？**
-项目不做背书也不做限制，但明确列出了不接受的使用方式（非法内容、绕过 DRM、干扰取证、篡改你无权修改的文件）。见 [LEGAL.md](../LEGAL.md) §2。涉及 HEVC 的分发还要看专利提示（同文件 §4）。
+项目不做背书也不做限制，但明确列出了不接受的使用方式（非法内容、绕过 DRM、干扰取证、篡改你无权修改的文件）。见 [LEGAL.md](legal/LEGAL.md) §2。涉及 HEVC 的分发还要看专利提示（同文件 §4）。
 
 **Q26. 发现安全问题怎么办？**
-不要开 issue，走 [SECURITY.md](../SECURITY.md) 的私密渠道。
+不要开 issue，走 [SECURITY.md](../.github/SECURITY.md) 的私密渠道。

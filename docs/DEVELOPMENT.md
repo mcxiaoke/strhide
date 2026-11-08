@@ -1,6 +1,6 @@
 # 开发指南 (Development)
 
-> 面向要改这个仓库的人。提交前必须过的门禁见 [../CONTRIBUTING.md](../CONTRIBUTING.md)，测试细节见 [TESTING.md](TESTING.md)，规范维护见 [api/spec/README.md](api/spec/README.md) §5。
+> 面向要改这个仓库的人。提交前必须过的门禁见 [../.github/CONTRIBUTING.md](../.github/CONTRIBUTING.md)，测试细节见 [TESTING.md](TESTING.md)，规范维护见 [api/spec/README.md](api/spec/README.md) §5。
 
 ---
 
@@ -127,4 +127,4 @@ core  ←  formats  ←  structure / stego / analysis  ←  cli  ←  二进制
 
 ## 10. 提交前
 
-按 [../CONTRIBUTING.md](../CONTRIBUTING.md) §"The gates every change must pass" 逐条跑，一条都别跳。改线格式的额外要求见 [api/spec/README.md](api/spec/README.md) §5 与 [RELEASE.md](RELEASE.md)。
+按 [../.github/CONTRIBUTING.md](../.github/CONTRIBUTING.md) §"The gates every change must pass" 逐条跑，一条都别跳。改线格式的额外要求见 [api/spec/README.md](api/spec/README.md) §5 与 [RELEASE.md](RELEASE.md)。

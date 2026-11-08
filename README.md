@@ -4,7 +4,7 @@
 
 > [!WARNING]
 > **Research and engineering tool, not a product — it rewrites the bytes of your files.**
-> Content-domain edits are irreversible, structure-domain restore only works while the carrier is untouched, and the software is provided "as is" with no warranty: the authors are not responsible for data loss, file corruption, or any consequence of your use, and use for unlawful purposes is prohibited. **Back up your originals** and read the full [DISCLAIMER.md](DISCLAIMER.md) / [免责声明](DISCLAIMER.zh.md) before you start.
+> Content-domain edits are irreversible, structure-domain restore only works while the carrier is untouched, and the software is provided "as is" with no warranty: the authors are not responsible for data loss, file corruption, or any consequence of your use, and use for unlawful purposes is prohibited. **Back up your originals** and read the full [DISCLAIMER.md](docs/legal/DISCLAIMER.md) / [免责声明](docs/legal/DISCLAIMER.zh.md) before you start.
 
 ---
 
@@ -121,7 +121,7 @@ fixed password, fixed seed, 20 samples per cell, **includes PBKDF2, excludes dis
   payload size sets the slope within one engine. Carrier size, resolution and duration alone do **not** predict
   cross-engine cost.
 
-See [BENCHMARK.md](BENCHMARK.md) for the two summary tables, plus the full
+See [BENCHMARK.md](docs/BENCHMARK.md) for the two summary tables, plus the full
 [structure](docs/BENCH_STRUCTURE_20261107.md) and [content](docs/BENCH_CONTENT_20261107.md) reports
 for methodology, variance and raw samples.
 
@@ -146,7 +146,7 @@ The desktop client is located in `gui/`, developed with **Tauri 2**, **React**, 
 
 ## 6. Further Documentation
 
-* [Performance Baseline (short)](BENCHMARK.md): Two summary tables + the dominant cost factors.
+* [Performance Baseline (short)](docs/BENCHMARK.md): Two summary tables + the dominant cost factors.
 * [Structure Domain Benchmark](docs/BENCH_STRUCTURE_20261107.md) / [Content Domain Benchmark](docs/BENCH_CONTENT_20261107.md): Full methodology, per-cell statistics and raw samples.
 * [Technical Implementation Specification](docs/smart_file_data_hiding_design.md): In-depth protocol specification, adapter algorithms, and safety matrices.
 * [System Architecture & Public API](docs/api/ARCHITECTURE.md): Crate module topology, facade APIs, and pipeline designs.
@@ -168,4 +168,4 @@ The desktop client is located in `gui/`, developed with **Tauri 2**, **React**, 
 - **You own the consequences.** Confirm your legal position, your right to modify each carrier, and your organization's approval before you start.
 - **Signatures and hashes will change.** Signed carriers are refused for this reason; downstream systems that compare hashes will see a modified file.
 
-Read the full statement before use: **[DISCLAIMER.md](DISCLAIMER.md)** (English) · **[DISCLAIMER.zh.md](DISCLAIMER.zh.md)** (中文，如有不一致以中文版为准).
+Read the full statement before use: **[DISCLAIMER.md](docs/legal/DISCLAIMER.md)** (English) · **[DISCLAIMER.zh.md](docs/legal/DISCLAIMER.zh.md)** (中文，如有不一致以中文版为准).

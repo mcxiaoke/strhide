@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/mcxiaoke/strhide/security/advisories/new
     about: Report privately through a GitHub Security Advisory. Never open a public issue for a security problem.
   - name: Usage question / troubleshooting
-    url: https://github.com/mcxiaoke/strhide/blob/main/SUPPORT.md
+    url: https://github.com/mcxiaoke/strhide/blob/main/.github/SUPPORT.md
     about: Check the FAQ, install guide, and threat model before opening an issue.

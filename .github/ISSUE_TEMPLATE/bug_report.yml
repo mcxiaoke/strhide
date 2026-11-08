@@ -12,7 +12,7 @@ body:
         Do **not** paste real passwords or confidential payloads. A synthetic reproducer
         (any PNG/JPEG plus a short message) is enough.
 
-        Security issues go to [SECURITY.md](https://github.com/mcxiaoke/strhide/blob/main/SECURITY.md), not here.
+        Security issues go to [SECURITY.md](https://github.com/mcxiaoke/strhide/blob/main/.github/SECURITY.md), not here.
 
   - type: textarea
     id: version

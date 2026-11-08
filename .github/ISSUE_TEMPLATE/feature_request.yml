@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Read [ROADMAP.md](https://github.com/mcxiaoke/strhide/blob/main/ROADMAP.md) first — mobile apps,
+        Read [ROADMAP.md](https://github.com/mcxiaoke/strhide/blob/main/docs/ROADMAP.md) first — mobile apps,
         hosted services, network features, and "resistance to targeted forensics" are explicitly out of scope.
 
         Describe the **problem**, not the implementation. Anything touching the wire format needs

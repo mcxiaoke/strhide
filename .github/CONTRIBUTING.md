@@ -20,7 +20,7 @@ Thanks for taking the time. This project touches cryptographic key derivation, w
 | report a bug | open an issue using the bug template — include version, platform, command, and whether the carrier survives |
 | report a **security** problem | **not** an issue: follow [SECURITY.md](SECURITY.md) |
 | propose a feature | open an issue first; anything touching the wire format needs agreement before code |
-| ask a usage question | [docs/FAQ.md](docs/FAQ.md) and [SUPPORT.md](SUPPORT.md) |
+| ask a usage question | [docs/FAQ.md](../docs/FAQ.md) and [SUPPORT.md](SUPPORT.md) |
 | fix a typo / improve docs | just open the PR, no issue needed |
 
 Skip the issue only for documentation and obvious one-line fixes.
@@ -36,8 +36,8 @@ cargo test --all-features --all-targets
 
 Two prerequisites worth reading before your first patch:
 
-- **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** — repository layout, feature flags, the vendored HEVC sources, and why a plain `cargo build` does not refresh the CLI binary.
-- **[docs/TESTING.md](docs/TESTING.md)** — what each test suite covers, how the byte-level baseline works, and which suites are `#[ignore]`d by default.
+- **[docs/DEVELOPMENT.md](../docs/DEVELOPMENT.md)** — repository layout, feature flags, the vendored HEVC sources, and why a plain `cargo build` does not refresh the CLI binary.
+- **[docs/TESTING.md](../docs/TESTING.md)** — what each test suite covers, how the byte-level baseline works, and which suites are `#[ignore]`d by default.
 
 ## The gates every change must pass
 
@@ -82,7 +82,7 @@ Optional stress runs for the stego engines (`examples/jpg_stress`, `png_stress`,
 
 ## Changing the wire format
 
-The specification in [`docs/api/spec/`](docs/api/spec/README.md) is normative, and its stability classes (**F** frozen / **D** dialect / **I** implementation-free) decide what a change costs. If you touch any of the following, the PR must include the corresponding spec update in the same commit:
+The specification in [`docs/api/spec/`](../docs/api/spec/README.md) is normative, and its stability classes (**F** frozen / **D** dialect / **I** implementation-free) decide what a change costs. If you touch any of the following, the PR must include the corresponding spec update in the same commit:
 
 - `format_id`, `strategy_id`, `algorithm_id`, cipher-suite ids, TLV `type_id` (append-only — never re-purpose an existing value);
 - version fields, header/trailer layout, chunking, AAD composition, nonce derivation;
@@ -92,7 +92,7 @@ The specification in [`docs/api/spec/`](docs/api/spec/README.md) is normative, a
 Plus:
 
 1. `python ../scripts/baseline_hash.py --check` must pass, or `--write` must be justified as an intentional format change.
-2. [CHANGELOG.md](CHANGELOG.md) gets an entry that says plainly whether existing carriers stop being readable.
+2. [CHANGELOG.md](../CHANGELOG.md) gets an entry that says plainly whether existing carriers stop being readable.
 3. `docs/api/spec/CORRECTIONS.md` is updated when the change corrects previously documented behaviour.
 
 Before 1.0 there is no requirement to read old formats, but silently breaking them is not acceptable: it must be recorded.
@@ -108,7 +108,7 @@ python scripts/gen_third_party_licenses.py           # rewrite docs/licenses/*
 python scripts/gen_third_party_licenses.py --check   # verify they are current
 ```
 
-- Anything that changes the engine's output requires the baseline check (above), and anything HEVC-related should note the patent considerations in [LEGAL.md](LEGAL.md) §4.
+- Anything that changes the engine's output requires the baseline check (above), and anything HEVC-related should note the patent considerations in [LEGAL.md](../docs/legal/LEGAL.md) §4.
 
 ## What will not be merged
 
@@ -120,6 +120,6 @@ python scripts/gen_third_party_licenses.py --check   # verify they are current
 
 ## Licensing of contributions
 
-No CLA is required. By submitting a pull request you agree that your contribution is licensed under the Apache License 2.0, the same terms as the project (see [LICENSE](LICENSE)). Only contribute code you have the right to submit; if you port an algorithm from a paper, cite it in the commit message and in the relevant spec document.
+No CLA is required. By submitting a pull request you agree that your contribution is licensed under the Apache License 2.0, the same terms as the project (see [LICENSE](../LICENSE)). Only contribute code you have the right to submit; if you port an algorithm from a paper, cite it in the commit message and in the relevant spec document.
 
 By participating you also agree to the [Code of Conduct](CODE_OF_CONDUCT.md).

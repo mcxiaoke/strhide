@@ -28,7 +28,7 @@ If you do not agree with any part of this disclaimer, do not download, install, 
 
 1.3 **Explicitly outside the intended scope**: long-term storage of confidential data in production; the only copy of a credential or key; archives that must pass a compliance audit; and any high-risk setting involving life safety, medical care, financial transactions, judicial evidence, or industrial control. For those, use a purpose-built, audited solution.
 
-1.4 **This is not a secure communication system.** Steganography is not encryption: without a password, any official build can read the payload (see the design boundaries in [SECURITY.md](SECURITY.md)); and even with a password, `--stealth` and private dialects do not improve resistance to statistical steganalysis. If you need confidentiality, use a mature encryption scheme and evaluate your own threat model ([docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)).
+1.4 **This is not a secure communication system.** Steganography is not encryption: without a password, any official build can read the payload (see the design boundaries in [SECURITY.md](../../.github/SECURITY.md)); and even with a password, `--stealth` and private dialects do not improve resistance to statistical steganalysis. If you need confidentiality, use a mature encryption scheme and evaluate your own threat model ([docs/THREAT_MODEL.md](../THREAT_MODEL.md)).
 
 ---
 
@@ -75,7 +75,7 @@ If we become aware that this project is being used for such purposes, we reserve
 
 3.3 If you use this project on behalf of an organization, you confirm that you are authorized to do so and that you have completed the applicable compliance and security review yourself.
 
-3.4 We **do not control, monitor, or have visibility into** how you use the software. The project contains no telemetry and transmits nothing (see the implementation properties in [SECURITY.md](SECURITY.md)), so we are neither informed about nor able to intervene in your specific use.
+3.4 We **do not control, monitor, or have visibility into** how you use the software. The project contains no telemetry and transmits nothing (see the implementation properties in [SECURITY.md](../../.github/SECURITY.md)), so we are neither informed about nor able to intervene in your specific use.
 
 ---
 
@@ -111,7 +111,7 @@ If we become aware that this project is being used for such purposes, we reserve
 
 ## 6. No warranty
 
-The software is provided **"AS IS"**, without warranty or condition of any kind, express or implied, including merchantability, fitness for a particular purpose, title, non-infringement, and error-free operation (see also Apache-2.0 §§7–8 in [LICENSE](LICENSE)).
+The software is provided **"AS IS"**, without warranty or condition of any kind, express or implied, including merchantability, fitness for a particular purpose, title, non-infringement, and error-free operation (see also Apache-2.0 §§7–8 in [LICENSE](../../LICENSE)).
 
 We do not warrant that: the software is available or free of defects; results are correct; a hidden payload will be extractable; a failed extraction means a wrong password; a carrier is undetectable; performance matches any expectation; the software interoperates with any particular tool, platform, or file-format version; or that wire formats will remain readable across releases.
 
@@ -133,7 +133,7 @@ To the extent permitted by applicable law, you agree to indemnify and hold us ha
 
 ## 9. No support obligation
 
-This project is maintained by volunteers. We make no commitment regarding response times, fix deadlines, continued availability of any feature, or answers to any particular question. Security reports follow [SECURITY.md](SECURITY.md); general channels are listed in [SUPPORT.md](SUPPORT.md). Support is offered in good faith and is not a contractual obligation.
+This project is maintained by volunteers. We make no commitment regarding response times, fix deadlines, continued availability of any feature, or answers to any particular question. Security reports follow [SECURITY.md](../../.github/SECURITY.md); general channels are listed in [SUPPORT.md](../../.github/SUPPORT.md). Support is offered in good faith and is not a contractual obligation.
 
 ---
 
@@ -143,7 +143,7 @@ This project is maintained by volunteers. We make no commitment regarding respon
 
 10.2 **H.265/HEVC is subject to standard-essential patents.** MIT/Apache-2.0 grant copyright licenses, not patent licenses. Assess that before distributing a build with `content-hevc` enabled. See [LEGAL.md](LEGAL.md) §4.
 
-10.3 Third-party components and their licenses are listed in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) and under [`docs/licenses/`](docs/licenses/).
+10.3 Third-party components and their licenses are listed in [THIRD_PARTY_LICENSES.md](../licenses/THIRD_PARTY_LICENSES.md) and under [`docs/licenses/`](../licenses/).
 
 10.4 Third-party product names, formats, and trademarks mentioned here (PNG, JPEG, H.265/HEVC, Tauri, …) belong to their respective owners and are used only for technical description and interoperability. No affiliation, sponsorship, or endorsement is implied.
 
@@ -159,7 +159,7 @@ The project contains cryptographic functionality (PBKDF2, HKDF, AES-256-GCM, Cha
 
 12.1 **Downloading, installing, copying, modifying, or otherwise using this project constitutes acceptance of this disclaimer in full.**
 
-12.2 We may update this disclaimer at any time. Material changes are recorded in [CHANGELOG.md](CHANGELOG.md) and reflected in the date at the top of this file. Continued use after a change constitutes acceptance; re-read it before relying on the tool.
+12.2 We may update this disclaimer at any time. Material changes are recorded in [CHANGELOG.md](../../CHANGELOG.md) and reflected in the date at the top of this file. Continued use after a change constitutes acceptance; re-read it before relying on the tool.
 
 12.3 If any clause is held invalid or unenforceable by a competent authority, that clause is restricted or removed to the minimum extent necessary and the remaining clauses remain in full force.
 
@@ -172,4 +172,4 @@ The project contains cryptographic functionality (PBKDF2, HKDF, AES-256-GCM, Cha
 ## 13. Contact
 
 - Legal, licensing, or content-removal requests: `mcxiaoke@live.com`
-- Security vulnerabilities: **do not** open a public issue — use the private channel in [SECURITY.md](SECURITY.md).
+- Security vulnerabilities: **do not** open a public issue — use the private channel in [SECURITY.md](../../.github/SECURITY.md).
