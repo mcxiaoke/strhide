@@ -202,3 +202,109 @@ fn every_localized_argument_has_non_empty_help() {
         );
     }
 }
+
+#[test]
+fn newly_added_options_have_chinese_help() {
+    let cmd = cli_i18n::localize(Cli::command(), Lang::Zh);
+    let read_cmd = cmd.find_subcommand("read").expect("read subcommand");
+    let auto_arg = read_cmd
+        .get_arguments()
+        .find(|a| a.get_id() == "auto")
+        .expect("read --auto");
+    assert_eq!(
+        auto_arg.get_help().unwrap().to_string(),
+        "若未发现结构域隐藏数据，自动回退到自适应隐写提取"
+    );
+
+    let embed_cmd = cmd.find_subcommand("embed").expect("embed subcommand");
+    let no_fn_arg = embed_cmd
+        .get_arguments()
+        .find(|a| a.get_id() == "no_filename")
+        .expect("embed --no-filename");
+    assert_eq!(
+        no_fn_arg.get_help().unwrap().to_string(),
+        "不在载体中记录原始文件名"
+    );
+
+    let seed_arg = embed_cmd
+        .get_arguments()
+        .find(|a| a.get_id() == "seed")
+        .expect("embed --seed");
+    assert_eq!(
+        seed_arg.get_help().unwrap().to_string(),
+        "用于可重现隐写的确定性 64 位十六进制种子（32 字节）"
+    );
+
+    let scan_cmd = cmd.find_subcommand("scan").expect("scan subcommand");
+    let fail_on_arg = scan_cmd
+        .get_arguments()
+        .find(|a| a.get_id() == "fail_on")
+        .expect("scan --fail-on");
+    assert_eq!(
+        fail_on_arg.get_help().unwrap().to_string(),
+        "当任意扫描报告达到或高于此评级时退出码非零（low, suspicious, likely）"
+    );
+}
+
+#[test]
+fn missing_payload_data_file_reports_friendly_error() {
+    let dir = scratch("missing_payload");
+    let carrier = dir.join("carrier.png");
+    fs::write(&carrier, make_png()).unwrap();
+
+    let out = Command::new(bin())
+        .args([
+            "--lang",
+            "zh",
+            "e",
+            "-d",
+            "non_existent_file.bin",
+            carrier.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run strhide");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("载荷文件 'non_existent_file.bin' 不存在") && stderr.contains("-t/--text"),
+        "stderr should provide friendly payload error: {stderr}"
+    );
+}
+
+#[test]
+fn missing_multiple_carriers_reported_together_in_chinese() {
+    let out = Command::new(bin())
+        .args([
+            "--lang",
+            "zh",
+            "e",
+            "-t",
+            "hello",
+            "missing1.png",
+            "missing2.png",
+        ])
+        .output()
+        .expect("run strhide");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("找不到以下 2 个载体文件:")
+            && stderr.contains("missing1.png")
+            && stderr.contains("missing2.png"),
+        "stderr should list all missing carriers: {stderr}"
+    );
+}
+
+#[test]
+fn verbose_logging_prints_diagnostics_to_stderr() {
+    let out = Command::new(bin())
+        .args(["-v", "--lang", "zh", "e", "-t", "hello", "missing1.png"])
+        .output()
+        .expect("run strhide");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("[INFO]") && stderr.contains("Diagnostic logging active"),
+        "stderr should contain verbose diagnostic logging: {stderr}"
+    );
+}

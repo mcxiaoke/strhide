@@ -775,3 +775,29 @@ fn cli_multiline_password_file_reads_first_line() {
     );
     assert_eq!(stdout(&read_ok), "hidden_text");
 }
+
+#[test]
+fn embed_key_file_and_prompt_password_are_mutually_exclusive() {
+    let dir = scratch("embed_key_conflict");
+    fs::write(dir.join("c.png"), make_png()).unwrap();
+    fs::write(dir.join("key.bin"), [42u8; 32]).unwrap();
+
+    let out = run(
+        &dir,
+        &[
+            "embed",
+            "c.png",
+            "-t",
+            "data",
+            "--key-file",
+            "key.bin",
+            "-e",
+        ],
+    );
+    assert_ne!(code(&out), 0);
+    let err = stderr(&out);
+    assert!(
+        err.contains("cannot be used with") || err.contains("conflict"),
+        "stderr must report clap conflict: {err}"
+    );
+}

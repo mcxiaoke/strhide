@@ -300,6 +300,23 @@ crate::i18n_messages! {
         en = "[INFO] Password hint: {hint}",
         zh = "[INFO] 密码提示: {hint}";
 
+    // ---- Carrier & Payload validation errors ----
+    ErrCarrierNotFoundSingle:
+        en = "Carrier file '{path}' not found",
+        zh = "载体文件 '{path}' 不存在";
+    ErrCarrierNotFoundMulti:
+        en = "Carrier files not found ({count}):\n{list}",
+        zh = "找不到以下 {count} 个载体文件:\n{list}";
+    ErrCarrierIsDirectory:
+        en = "'{path}' is a directory, not a carrier file",
+        zh = "'{path}' 是目录，不是合法的载体文件";
+    ErrPayloadFileNotFound:
+        en = "Payload file '{path}' not found. (To hide text directly, use -t/--text instead of -d/--data)",
+        zh = "载荷文件 '{path}' 不存在。（若需直接隐藏文本内容，请使用 -t/--text 代替 -d/--data）";
+    ErrPayloadFileIsDirectory:
+        en = "Payload path '{path}' is a directory, not a file. Compress it to a ZIP/tar archive first.",
+        zh = "载荷路径 '{path}' 是目录而不是文件。请先将其打包压缩为 ZIP 或 tar 归档。";
+
     // ---- Commands about (subcommands) ----
     CmdRoot:
         en = "Format-preserving lossless data hiding and steganography tool",
@@ -472,6 +489,9 @@ Run `strhide <COMMAND> --help` for the options of one command.",
     HelpReadOverwrite:
         en = "Overwrite existing destination file without confirmation",
         zh = "覆盖已存在的目标文件而不提示确认";
+    HelpReadAuto:
+        en = "Automatically fall back to content steganography extraction if no structure envelope is found",
+        zh = "若未发现结构域隐藏数据，自动回退到自适应隐写提取";
 
     // restore
     HelpRestoreCarrier:
@@ -522,6 +542,9 @@ Run `strhide <COMMAND> --help` for the options of one command.",
     HelpScanJson:
         en = "Print machine-readable JSON array of scan findings",
         zh = "以结构化 JSON 数组输出扫描报告";
+    HelpScanFailOn:
+        en = "Exit non-zero when any report reaches this verdict or higher (low, suspicious, likely)",
+        zh = "当任意扫描报告达到或高于此评级时退出码非零（low, suspicious, likely）";
 
     // embed
     HelpEmbedCarrier:
@@ -551,6 +574,9 @@ Run `strhide <COMMAND> --help` for the options of one command.",
     HelpEmbedExclusionRate:
         en = "Fraction of smoothest regions excluded from embedding (0.00-0.80, default: 0.30)",
         zh = "排除在嵌入之外的最平滑区域比例（0.00-0.80，默认: 0.30；越高越抗检，但容量越低）";
+    HelpEmbedNoFilename:
+        en = "Do not store original filename in the carrier",
+        zh = "不在载体中记录原始文件名";
 
     // extract
     HelpExtractCarrier:
@@ -565,6 +591,9 @@ Run `strhide <COMMAND> --help` for the options of one command.",
     HelpExtractOverwrite:
         en = "Overwrite existing destination file without confirmation",
         zh = "覆盖已存在的目标文件而不提示确认";
+    HelpExtractAuto:
+        en = "Automatically fall back to structure-domain read if no content steganography is found",
+        zh = "若未发现自适应隐写载荷，自动回退到结构域提取";
 
     // list
     HelpListJson:
@@ -596,6 +625,9 @@ Run `strhide <COMMAND> --help` for the options of one command.",
     HelpStegoKeyFile:
         en = "32-byte content-envelope file key: raw 32 bytes or 64 hex characters (mutually exclusive with -p/--password-file)",
         zh = "32 字节内容信封文件密钥：32 个原始字节或 64 位十六进制（与 -p/--password-file 互斥）";
+    HelpStegoSeed:
+        en = "Deterministic embedding seed as 64 hex digits (32 bytes)",
+        zh = "用于可重现隐写的确定性 64 位十六进制种子（32 字节）";
     HelpExtractMaxPayload:
         en = "Refuse to recover a payload larger than this many bytes",
         zh = "拒绝恢复大于该字节数的载荷";

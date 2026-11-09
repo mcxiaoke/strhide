@@ -266,6 +266,21 @@ pub struct PasswordArgs {
     pub password_file: Option<PathBuf>,
 }
 
+impl PasswordArgs {
+    pub fn resolve(
+        &self,
+        encrypt_flag: bool,
+        confirm: bool,
+    ) -> Result<Option<String>, crate::errors::StrHideError> {
+        super::helpers::resolve_password(
+            self.password.as_deref(),
+            self.password_file.as_deref(),
+            encrypt_flag,
+            confirm,
+        )
+    }
+}
+
 /// `write` payload sources, isolated in their own ArgGroup so clap rejects two
 /// sources at once with a parse error. The lookup chain in `handle_write` used
 /// to pick the first match silently, which hid one of two supplied sources.
@@ -406,6 +421,9 @@ pub struct EmbedArgs {
     #[arg(long = "overwrite")]
     pub overwrite: bool,
 
+    #[arg(long = "no-preserve-time", hide = true, default_value_t = true, action = clap::ArgAction::SetFalse)]
+    pub preserve_time: bool,
+
     #[arg(long = "no-backup")]
     pub no_backup: bool,
 
@@ -415,7 +433,7 @@ pub struct EmbedArgs {
         short = 'e',
         long = "prompt-password",
         help = "Prompt interactively for a password",
-        conflicts_with_all = ["password", "password_file"]
+        conflicts_with_all = ["password", "password_file", "key_file"]
     )]
     pub prompt_password: bool,
 
@@ -562,7 +580,7 @@ pub struct ExtractArgs {
         short = 'e',
         long = "prompt-password",
         help = "Prompt interactively for a password",
-        conflicts_with_all = ["password", "password_file"]
+        conflicts_with_all = ["password", "password_file", "key_file"]
     )]
     pub prompt_password: bool,
 
@@ -572,7 +590,7 @@ pub struct ExtractArgs {
         long = "key-file",
         value_name = "FILE",
         help_heading = "Stego Envelope",
-        conflicts_with_all = ["password", "password_file", "prompt_password"]
+        conflicts_with_all = ["password", "password_file"]
     )]
     pub key_file: Option<PathBuf>,
 

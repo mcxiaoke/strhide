@@ -26,8 +26,8 @@
 | 参数 | 简写 | 说明与用法 |
 | :--- | :--- | :--- |
 | `--config <FILE>` | `-c` | 指定 TOML 配置文件。未指定时依次检索 `<exe_dir>`、用户配置目录、系统配置目录 |
-| `--quiet` | `-q` | 静默模式。隐藏 Banner 与普通信息输出，仅在发生严重错误时输出并退出 |
-| `--verbose` | `-v` | 提高诊断日志级别。`-v` 开启 DEBUG 级别，`-vv` 开启 TRACE 级别（输出至 stderr，不污染重定向） |
+| `--quiet` | `-q` | 静默模式。隐藏 Banner 与普通信息输出，仅在发生严重错误时输出并退出；优先级高于 `-v` |
+| `--verbose` | `-v` | 提高诊断日志级别。可重复叠加：`-v` 为 INFO 诊断级别（输出阶段关键流程），`-vv` 为 DEBUG 级别，`-vvv` 为 TRACE 级别（输出至 stderr，不污染重定向与 `--json`） |
 | `--lang <LANG>` | 无 | 强制界面语言：`zh`（简体中文）或 `en`（英文）。未指定时按系统 Locale 自动检测 |
 
 ---
@@ -38,6 +38,7 @@
 
 ```bash
 # 1. 文件载荷 (-d / --data)：最常用的二进制/大文件输入
+# 若文件不存在，会提示具体文件名并提醒是否误将普通文本传给 -d（建议改用 -t）
 sth write carrier.png -d secret.zip -o out.png
 
 # 2. 文本载荷 (-t / --text)：快速隐藏短文本或机密凭据
@@ -46,10 +47,14 @@ sth write carrier.png -t "my-secret-token" -o out.png
 # 2.1 文本转义 (--unescape)：支持解析 \n, \t, \xHH 等转义字符
 sth write carrier.png -t "line1\nline2\x20end" --unescape -o out.png
 
-# 3. 管道流 (--stdin)：标准输入管道串联
+# 3. 管道流 (--stdin)：标准输入管道串联（CLI 设有 1 GiB 防爆保护）
 cat payload.txt | sth write carrier.png --stdin -o out.png
 echo "hello" | sth embed cover.jpg --stdin -o out.jpg
 ```
+
+> **载体与参数友好校验**：
+> - 传入一个或多个载体文件时，系统会在预检阶段统一核对文件存在性。如果传入的多个载体中存在多个无效路径，将一次性完整列出所有不存在的文件清单，并提供多语言本地化错误信息。
+> - 载荷与载体均支持目录检测，如误将目录作为载荷或载体，会明确提示打包压缩或指定有效文件。
 
 ---
 
@@ -88,6 +93,9 @@ sth write photo.jpg -d data.zip -s eof -o out.jpg
 
 # 批量写入：多个载体写入至目标目录
 sth write img1.png img2.png -t "批量数据" -o output_dir/
+
+# 时间戳控制：覆盖配置文件中的 preserve_time 默认项，强制更新修改时间
+sth write photo.png -t "机密文本" --no-preserve-time -o out.png
 ```
 
 > **双域前置检查（写前拒绝）**：`write` 在改动任何字节之前会先探测载体是否**已有**隐藏数据——结构域信封或内容域隐写。命中即报 `Rejection`：“already contains structure/content-domain payload; remove it first (restore/extract) or pass --overwrite”。`--overwrite` 只放行“继续叠加”，不会清除已有信封；且叠加后**结构域的 bit-exact 还原承诺失效**：先 `write` 再 `embed` 时，`restore` 会因宿主 SHA-256 不符而报 `RestoreMismatch`（机制见 `docs/smart_file_data_hiding_design.md` §7）。需要还原原始宿主时，请始终先 `restore` 再做内容域操作。
@@ -160,6 +168,9 @@ sth embed photo.jpg -d secret.bin --dry-run
 
 # 确定性重现 (--seed)：传入 64 位十六进制种子，生成字节级完全固定的产物（回归测试专用）
 sth embed photo.png -t "test" --seed 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -o out.png
+
+# 时间戳控制：覆盖配置文件中的 preserve_time 默认项，强制更新修改时间
+sth embed photo.jpg -t "test" --no-preserve-time -o out.jpg
 ```
 
 ### 6.3 内容隐写提取 (`extract`)

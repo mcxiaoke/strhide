@@ -81,12 +81,7 @@ pub(crate) fn handle_inspect(
     quiet: bool,
     engine: &StrHide,
 ) -> Result<i32, StrHideError> {
-    let password = resolve_password(
-        args.passwords.password.as_deref(),
-        args.passwords.password_file.as_deref(),
-        false,
-        false,
-    )?;
+    let password = args.passwords.resolve(false, false)?;
     let key = resolve_key_file(args.key_file.as_deref())?;
 
     let is_batch = args.carrier.len() > 1 || args.carrier.iter().any(|p| p.is_dir());
@@ -252,12 +247,7 @@ pub(crate) fn handle_verify(
     quiet: bool,
     engine: &StrHide,
 ) -> Result<i32, StrHideError> {
-    let password = resolve_password(
-        args.passwords.password.as_deref(),
-        args.passwords.password_file.as_deref(),
-        false,
-        false,
-    )?;
+    let password = args.passwords.resolve(false, false)?;
     let key = resolve_key_file(args.key_file.as_deref())?;
 
     let is_batch = args.carrier.len() > 1 || args.carrier.iter().any(|p| p.is_dir());
@@ -791,7 +781,7 @@ pub(crate) fn handle_list(args: ListArgs) -> Result<(), StrHideError> {
     println!("{:<8} {:<15} Description", "Algorithm", "Target Domain");
     println!("{:-<8} {:-<15} {:-<48}", "", "", "");
     for (id, domain, desc) in crate::stego::CostModelRegistry::list_algorithms() {
-        println!("{id:<8} {:<15} {desc}", domain);
+        println!("{id:<8} {domain:<15} {desc}");
     }
     println!();
 

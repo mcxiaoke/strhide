@@ -12,6 +12,7 @@ use crate::core::control::Control;
 use crate::core::i18n::Msg;
 use crate::core::pipeline::{
     BatchPreflight, batch_output_dir, check_overwrite, preflight_batch, resolve_carrier_target,
+    validate_carriers_exist,
 };
 use crate::errors::StrHideError;
 use crate::facade::{DualOptions, StrHide};
@@ -33,17 +34,15 @@ pub(crate) fn handle_write(
     quiet: bool,
     engine: &StrHide,
 ) -> Result<(), StrHideError> {
+    validate_carriers_exist(&args.carrier)?;
+    log::info!("Starting write: {} carrier(s)", args.carrier.len());
+
     // Config values act as defaults; explicit CLI flags win. --stealth implies
     // encryption (its magics are password-derived); prompt for a password when
     // neither -p nor a password source was supplied.
     let stealth = args.stealth || cfg.stealth.unwrap_or(false);
     let encrypt = args.prompt_password || cfg.encrypt.unwrap_or(false);
-    let password = resolve_password(
-        args.passwords.password.as_deref(),
-        args.passwords.password_file.as_deref(),
-        encrypt || stealth,
-        true,
-    )?;
+    let password = args.passwords.resolve(encrypt || stealth, true)?;
 
     let multi = args.carrier.len() > 1;
     // A single file path cannot name every output, so with several carriers
@@ -224,6 +223,9 @@ pub(crate) fn handle_read(
     engine: &StrHide,
     shared_batch: Option<&mut BatchOutputs<'_>>,
 ) -> Result<(), StrHideError> {
+    validate_carriers_exist(&args.carrier)?;
+    log::info!("Starting read: {} carrier(s)", args.carrier.len());
+
     let multi = args.carrier.len() > 1;
     if multi && args.stdout {
         return Err(StrHideError::General(
@@ -240,12 +242,7 @@ pub(crate) fn handle_read(
         ));
     }
 
-    let mut password = resolve_password(
-        args.passwords.password.as_deref(),
-        args.passwords.password_file.as_deref(),
-        args.prompt_password,
-        false,
-    )?;
+    let mut password = args.passwords.resolve(args.prompt_password, false)?;
 
     // Track the outputs this batch already produced: two carriers may record
     // the same payload filename, and writing both to one path would overwrite
@@ -335,7 +332,12 @@ fn read_one(
                 &engine.dialect().structure,
             )?
         }
-        Err(e @ StrHideError::NoHiddenData(_)) => {
+        Err(e)
+            if matches!(
+                e,
+                StrHideError::NoHiddenData(_) | StrHideError::UnsupportedFormat(_)
+            ) =>
+        {
             #[cfg(feature = "content")]
             {
                 let inspect_opts = crate::stego::InspectOptions::new()
@@ -477,12 +479,10 @@ pub(crate) fn handle_restore(
     quiet: bool,
     engine: &StrHide,
 ) -> Result<(), StrHideError> {
-    let password = resolve_password(
-        args.passwords.password.as_deref(),
-        args.passwords.password_file.as_deref(),
-        false,
-        false,
-    )?;
+    validate_carriers_exist(&args.carrier)?;
+    log::info!("Starting restore: {} carrier(s)", args.carrier.len());
+
+    let password = args.passwords.resolve(false, false)?;
 
     let multi = args.carrier.len() > 1;
     let output_dir = batch_output_dir(args.output.as_deref(), multi, "removing hidden data from")?;

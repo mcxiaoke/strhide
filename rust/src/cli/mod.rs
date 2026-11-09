@@ -291,6 +291,10 @@ pub(crate) fn run_domain_cli_with(engine: &StrHide, domain: CliDomain, argv: Vec
         cfg.lang.as_deref(),
     );
     i18n::set_lang(lang);
+    log::debug!(
+        "CLI domain={domain:?}, program={}, lang={lang:?}",
+        program_name()
+    );
 
     // `-q` means "no output unless an operation fails"; config warnings are
     // informational, so they must respect it like every other non-error line.

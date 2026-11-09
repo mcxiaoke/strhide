@@ -72,7 +72,8 @@ pub(crate) fn level_for(quiet: bool, verbose: u8) -> LevelFilter {
     }
     match verbose {
         0 => LevelFilter::Warn,
-        1 => LevelFilter::Debug,
+        1 => LevelFilter::Info,
+        2 => LevelFilter::Debug,
         _ => LevelFilter::Trace,
     }
 }
@@ -82,17 +83,16 @@ pub(crate) fn level_for(quiet: bool, verbose: u8) -> LevelFilter {
 /// Without `-v` the level stays at `WARN`, so "this fallback/cleanup step
 /// failed" is visible on a normal run without drowning it in debug output.
 ///
-/// Installation failure is reported instead of ignored: it only happens when a
-/// host application already owns the global logger, and in that case every
-/// diagnostic the engines emit is being dropped.
+/// If a logger was already installed (e.g. in in-process integration tests),
+/// the filter and max level are still updated to match the current invocation.
 pub fn install(quiet: bool, verbose: u8) {
     let level = level_for(quiet, verbose);
     FILTER.store(level as usize, Ordering::Relaxed);
-    if log::set_logger(&LOGGER).is_err() {
-        eprintln!("[WARN] a global logger is already installed; CLI diagnostics stay disabled");
-        return;
-    }
+    let _ = log::set_logger(&LOGGER);
     log::set_max_level(level);
+    if level >= LevelFilter::Info {
+        log::info!("Diagnostic logging active: level={level}");
+    }
 }
 
 #[cfg(test)]
@@ -103,7 +103,9 @@ mod tests {
     fn quiet_overrides_verbose() {
         assert_eq!(level_for(true, 2), LevelFilter::Off);
         assert_eq!(level_for(false, 0), LevelFilter::Warn);
-        assert_eq!(level_for(false, 1), LevelFilter::Debug);
+        assert_eq!(level_for(false, 1), LevelFilter::Info);
+        assert_eq!(level_for(false, 2), LevelFilter::Debug);
+        assert_eq!(level_for(false, 3), LevelFilter::Trace);
         assert_eq!(level_for(false, 5), LevelFilter::Trace);
     }
 }

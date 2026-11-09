@@ -16,7 +16,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::core::i18n::Msg;
 use crate::errors::StrHideError;
+use crate::t;
 
 /// Batch `-o` rule: with more than one carrier the target must be an existing
 /// directory, because one file path cannot name several outputs.
@@ -160,6 +162,53 @@ fn canonical_identity(path: &Path) -> PathBuf {
     }
 }
 
+/// Validate existence and non-directory properties across all carriers at once.
+///
+/// Collects all non-existent carriers into one message so the user sees every typo
+/// immediately instead of fixing one at a time.
+#[allow(dead_code)]
+pub(crate) fn validate_carriers_exist(carriers: &[PathBuf]) -> Result<(), StrHideError> {
+    let mut missing = Vec::new();
+    let mut dirs = Vec::new();
+
+    for c in carriers {
+        if !c.exists() {
+            missing.push(c);
+        } else if c.is_dir() {
+            dirs.push(c);
+        }
+    }
+
+    if !missing.is_empty() {
+        if missing.len() == 1 {
+            return Err(StrHideError::General(t!(
+                Msg::ErrCarrierNotFoundSingle,
+                path = missing[0].display()
+            )));
+        } else {
+            let list = missing
+                .iter()
+                .map(|p| format!("  - '{}'", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(StrHideError::General(t!(
+                Msg::ErrCarrierNotFoundMulti,
+                count = missing.len(),
+                list = list
+            )));
+        }
+    }
+
+    if let Some(first_dir) = dirs.first() {
+        return Err(StrHideError::General(t!(
+            Msg::ErrCarrierIsDirectory,
+            path = first_dir.display()
+        )));
+    }
+
+    Ok(())
+}
+
 /// Validate a whole batch before the first carrier is modified: every carrier
 /// must exist, be a regular file, pass the caller's validation, and resolve to a
 /// unique output that is not another carrier in the same batch.
@@ -170,21 +219,11 @@ fn canonical_identity(path: &Path) -> PathBuf {
 /// rejected; an output that equals its own carrier is an in-place write.
 #[allow(dead_code)]
 pub(crate) fn preflight_batch(batch: BatchPreflight<'_>) -> Result<(), StrHideError> {
+    validate_carriers_exist(batch.carriers)?;
+
     let mut seen_carriers = HashSet::new();
     let mut carrier_identities = Vec::with_capacity(batch.carriers.len());
     for carrier in batch.carriers {
-        if !carrier.exists() {
-            return Err(StrHideError::General(format!(
-                "Carrier file '{}' not found",
-                carrier.display()
-            )));
-        }
-        if carrier.is_dir() {
-            return Err(StrHideError::General(format!(
-                "'{}' is a directory, not a carrier file",
-                carrier.display()
-            )));
-        }
         if let Some(validate) = batch.validate {
             validate(carrier)?;
         }

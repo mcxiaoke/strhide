@@ -154,6 +154,18 @@ pub(crate) fn resolve_payload(
         return Ok(ResolvedPayload::Stdin);
     }
     if let Some(ref df) = payload.data {
+        if !df.exists() {
+            return Err(StrHideError::General(t!(
+                Msg::ErrPayloadFileNotFound,
+                path = df.display()
+            )));
+        }
+        if df.is_dir() {
+            return Err(StrHideError::General(t!(
+                Msg::ErrPayloadFileIsDirectory,
+                path = df.display()
+            )));
+        }
         return Ok(ResolvedPayload::File(df.clone()));
     }
     if let Some(ref t) = payload.text {

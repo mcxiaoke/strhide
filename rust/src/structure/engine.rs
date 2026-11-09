@@ -451,8 +451,16 @@ impl<'a> PayloadSource<'a> {
                 false,
             ),
             PayloadSource::Stdin => {
+                const MAX_STDIN_PAYLOAD: u64 = 1 << 30; // 1 GiB
                 let mut b = Vec::new();
-                std::io::stdin().read_to_end(&mut b)?;
+                let read = std::io::stdin()
+                    .take(MAX_STDIN_PAYLOAD + 1)
+                    .read_to_end(&mut b)?;
+                if read as u64 > MAX_STDIN_PAYLOAD {
+                    return Err(StrHideError::General(
+                        "Payload from standard input exceeds the 1 GiB limit".into(),
+                    ));
+                }
                 (Cow::Owned(b), String::new(), false)
             }
             PayloadSource::Buffered {

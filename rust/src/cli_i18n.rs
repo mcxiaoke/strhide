@@ -111,6 +111,8 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         (_, "key-file") => Msg::HelpStegoKeyFile,
         (_, "max-payload") => Msg::HelpExtractMaxPayload,
         ("embed", "dry-run") => Msg::HelpEmbedDryRun,
+        ("embed", "no-filename") => Msg::HelpEmbedNoFilename,
+        (_, "seed") => Msg::HelpStegoSeed,
         ("capacity", "carrier") => Msg::HelpCapacityCarrier,
         ("capacity", "json") => Msg::HelpCapacityJson,
 
@@ -123,8 +125,8 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         ("write", "stealth") => Msg::HelpWriteStealth,
         ("write", "no-encrypt") => Msg::HelpWriteNoEncrypt,
         ("write", "hint") => Msg::HelpWriteHint,
-        ("write", "preserve-time") => Msg::HelpWritePreserveTime,
-        ("write", "no-preserve-time") => Msg::HelpWriteNoPreserveTime,
+        (_, "preserve-time") => Msg::HelpWritePreserveTime,
+        (_, "no-preserve-time") => Msg::HelpWriteNoPreserveTime,
         ("write", "no-backup") => Msg::HelpWriteNoBackup,
         (_, "unescape") => Msg::HelpWriteUnescape,
         (_, "exact") => Msg::HelpExact,
@@ -135,6 +137,7 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         ("read", "output") => Msg::HelpReadOutput,
         ("read", "stdout") => Msg::HelpReadStdout,
         ("read", "overwrite") => Msg::HelpReadOverwrite,
+        ("read", "auto") => Msg::HelpReadAuto,
 
         // restore
         ("restore", "carrier") => Msg::HelpRestoreCarrier,
@@ -157,6 +160,7 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         ("scan", "input") => Msg::HelpScanInput,
         ("scan", "recursive") => Msg::HelpScanRecursive,
         ("scan", "json") => Msg::HelpScanJson,
+        ("scan", "fail-on") => Msg::HelpScanFailOn,
 
         // embed
         ("embed", "carrier") => Msg::HelpEmbedCarrier,
@@ -170,6 +174,7 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         ("extract", "output") => Msg::HelpExtractOutput,
         ("extract", "stdout") => Msg::HelpExtractStdout,
         ("extract", "overwrite") => Msg::HelpExtractOverwrite,
+        ("extract", "auto") => Msg::HelpExtractAuto,
 
         // list
         ("list", "json") => Msg::HelpListJson,

@@ -12,6 +12,7 @@ use crate::core::i18n::Msg;
 use crate::core::payload::Payload;
 use crate::core::pipeline::{
     BatchPreflight, batch_output_dir, check_overwrite, preflight_batch, resolve_carrier_target,
+    validate_carriers_exist,
 };
 use crate::errors::StrHideError;
 use crate::facade::{DualOptions, StrHide};
@@ -35,12 +36,12 @@ fn run_capacity_probe(
     engine: &StrHide,
     json: bool,
 ) -> Result<(), StrHideError> {
-    let password = resolve_password(
-        tuning.passwords.password.as_deref(),
-        tuning.passwords.password_file.as_deref(),
-        false,
-        false,
-    )?;
+    if !json {
+        validate_carriers_exist(&carriers)?;
+    }
+    log::info!("Starting capacity probe: {} carrier(s)", carriers.len());
+
+    let password = tuning.passwords.resolve(false, false)?;
     let key = resolve_key_file(tuning.key_file.as_deref())?;
     let is_batch = carriers.len() > 1;
     let mut failures = 0usize;
@@ -254,14 +255,12 @@ pub(crate) fn handle_embed(
     quiet: bool,
     engine: &StrHide,
 ) -> Result<(), StrHideError> {
+    validate_carriers_exist(&args.carrier)?;
+    log::info!("Starting embed: {} carrier(s)", args.carrier.len());
+
     // 1. Resolve password
     let encrypt = args.prompt_password || cfg.encrypt.unwrap_or(false);
-    let password = resolve_password(
-        args.tuning.passwords.password.as_deref(),
-        args.tuning.passwords.password_file.as_deref(),
-        encrypt,
-        true,
-    )?;
+    let password = args.tuning.passwords.resolve(encrypt, true)?;
     let key = resolve_key_file(args.tuning.key_file.as_deref())?;
     // The content half of the dialect is bound on the engine; both halves are
     // `Copy`, so taking a local copy keeps the call sites below simple.
@@ -332,19 +331,8 @@ pub(crate) fn handle_embed(
             validate: Some(&carrier_ready),
         })?;
     } else {
+        validate_carriers_exist(&args.carrier)?;
         let carrier = &args.carrier[0];
-        if !carrier.exists() {
-            return Err(StrHideError::General(format!(
-                "Carrier file '{}' not found",
-                carrier.display()
-            )));
-        }
-        if carrier.is_dir() {
-            return Err(StrHideError::General(format!(
-                "'{}' is a directory, not a carrier file",
-                carrier.display()
-            )));
-        }
         carrier_ready(carrier)?;
         if !args.dry_run {
             let target =
@@ -480,10 +468,11 @@ pub(crate) fn handle_embed(
         let target =
             resolve_carrier_target(carrier, args.in_place, args.output.as_deref(), output_dir)?;
         let backup = !args.no_backup && cfg.backup.unwrap_or(true);
+        let preserve_time = args.preserve_time && cfg.preserve_time.unwrap_or(true);
         let file_target = crate::commit::FileTarget {
             output_path: target.as_deref(),
             backup,
-            preserve_time: true,
+            preserve_time,
             overwrite: args.overwrite,
         };
 
@@ -583,6 +572,9 @@ pub(crate) fn handle_extract(
     engine: &StrHide,
     shared_batch: Option<&mut BatchOutputs<'_>>,
 ) -> Result<(), StrHideError> {
+    validate_carriers_exist(&args.carrier)?;
+    log::info!("Starting extract: {} carrier(s)", args.carrier.len());
+
     let multi = args.carrier.len() > 1;
     if multi && args.stdout {
         return Err(StrHideError::General(
@@ -597,12 +589,7 @@ pub(crate) fn handle_extract(
         ));
     }
 
-    let password = resolve_password(
-        args.passwords.password.as_deref(),
-        args.passwords.password_file.as_deref(),
-        args.prompt_password,
-        false,
-    )?;
+    let password = args.passwords.resolve(args.prompt_password, false)?;
     let key = resolve_key_file(args.key_file.as_deref())?;
 
     // Two carriers may record the same payload filename; keep this batch's
