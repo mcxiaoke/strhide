@@ -26,15 +26,20 @@ use crate::t;
 use super::args::{PayloadSourceArgs, StegoTuningArgs};
 
 pub(crate) fn prompt_password(confirm: bool) -> Result<String, StrHideError> {
+    use std::io::Write;
     let p1 = t!(Msg::PromptEnterPassword);
-    let pwd = rpassword::prompt_password(&p1)
+    eprint!("{p1}");
+    let _ = std::io::stderr().flush();
+    let pwd = rpassword::read_password()
         .map_err(|e| StrHideError::General(format!("Failed to read password: {e}")))?;
     if pwd.is_empty() {
         return Err(StrHideError::Password("Password cannot be empty".into()));
     }
     if confirm {
         let p2 = t!(Msg::PromptConfirmPassword);
-        let pwd2 = rpassword::prompt_password(&p2).map_err(|e| {
+        eprint!("{p2}");
+        let _ = std::io::stderr().flush();
+        let pwd2 = rpassword::read_password().map_err(|e| {
             StrHideError::General(format!("Failed to read password confirmation: {e}"))
         })?;
         if pwd != pwd2 {

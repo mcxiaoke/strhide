@@ -255,7 +255,7 @@ pub(crate) fn handle_embed(
     engine: &StrHide,
 ) -> Result<(), StrHideError> {
     // 1. Resolve password
-    let encrypt = args.encrypt || cfg.encrypt.unwrap_or(false);
+    let encrypt = args.prompt_password || cfg.encrypt.unwrap_or(false);
     let password = resolve_password(
         args.tuning.passwords.password.as_deref(),
         args.tuning.passwords.password_file.as_deref(),
@@ -600,7 +600,7 @@ pub(crate) fn handle_extract(
     let password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
-        false,
+        args.prompt_password,
         false,
     )?;
     let key = resolve_key_file(args.key_file.as_deref())?;
@@ -681,14 +681,18 @@ fn extract_one(
                             "No content stego found; auto-redirecting to structure-domain read..."
                         );
                     }
-                    let read_args = ReadArgs {
+                    let mut read_args = ReadArgs {
                         carrier: vec![carrier.to_path_buf()],
                         output: args.output.clone(),
                         passwords: args.passwords.clone(),
+                        prompt_password: false,
                         stdout: args.stdout,
                         overwrite: args.overwrite,
                         auto: false,
                     };
+                    if read_args.passwords.password.is_none() {
+                        read_args.passwords.password = password.map(str::to_string);
+                    }
                     return handle_read(read_args, cfg, quiet, engine, Some(batch));
                 } else {
                     return Err(StrHideError::NoHiddenData(format!(

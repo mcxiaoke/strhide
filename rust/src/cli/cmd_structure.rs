@@ -37,7 +37,7 @@ pub(crate) fn handle_write(
     // encryption (its magics are password-derived); prompt for a password when
     // neither -p nor a password source was supplied.
     let stealth = args.stealth || cfg.stealth.unwrap_or(false);
-    let encrypt = args.encrypt || cfg.encrypt.unwrap_or(false);
+    let encrypt = args.prompt_password || cfg.encrypt.unwrap_or(false);
     let password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
@@ -243,7 +243,7 @@ pub(crate) fn handle_read(
     let mut password = resolve_password(
         args.passwords.password.as_deref(),
         args.passwords.password_file.as_deref(),
-        false,
+        args.prompt_password,
         false,
     )?;
 
@@ -355,6 +355,7 @@ fn read_one(
                             stdout: args.stdout,
                             overwrite: args.overwrite,
                             passwords: args.passwords.clone(),
+                            prompt_password: false,
                             key_file: None,
                             max_payload: None,
                             auto: false,

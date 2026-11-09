@@ -317,11 +317,11 @@ pub struct WriteArgs {
     pub passwords: PasswordArgs,
     #[arg(
         short = 'e',
-        long = "encrypt",
-        alias = "prompt-password",
-        help = "Prompt interactively for an encryption password"
+        long = "prompt-password",
+        help = "Prompt interactively for a password",
+        conflicts_with_all = ["password", "password_file"]
     )]
-    pub encrypt: bool,
+    pub prompt_password: bool,
 
     #[arg(
         short = 'H',
@@ -360,6 +360,14 @@ pub struct ReadArgs {
 
     #[command(flatten)]
     pub passwords: PasswordArgs,
+
+    #[arg(
+        short = 'e',
+        long = "prompt-password",
+        help = "Prompt interactively for a password",
+        conflicts_with_all = ["password", "password_file"]
+    )]
+    pub prompt_password: bool,
 
     #[arg(long = "stdout", conflicts_with = "output")]
     pub stdout: bool,
@@ -405,11 +413,11 @@ pub struct EmbedArgs {
     pub dry_run: bool,
     #[arg(
         short = 'e',
-        long = "encrypt",
-        alias = "prompt-password",
-        help = "Prompt interactively for an encryption password"
+        long = "prompt-password",
+        help = "Prompt interactively for a password",
+        conflicts_with_all = ["password", "password_file"]
     )]
-    pub encrypt: bool,
+    pub prompt_password: bool,
 
     #[arg(long = "unescape")]
     pub unescape: bool,
@@ -550,13 +558,21 @@ pub struct ExtractArgs {
     #[command(flatten)]
     pub passwords: PasswordArgs,
 
+    #[arg(
+        short = 'e',
+        long = "prompt-password",
+        help = "Prompt interactively for a password",
+        conflicts_with_all = ["password", "password_file"]
+    )]
+    pub prompt_password: bool,
+
     /// 32-byte content-envelope file key: raw binary, or 64 hex characters.
     /// Mutually exclusive with `-p` / `--password-file`.
     #[arg(
         long = "key-file",
         value_name = "FILE",
         help_heading = "Stego Envelope",
-        conflicts_with_all = ["password", "password_file"]
+        conflicts_with_all = ["password", "password_file", "prompt_password"]
     )]
     pub key_file: Option<PathBuf>,
 

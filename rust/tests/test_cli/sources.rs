@@ -271,6 +271,16 @@ fn password_sources_reject_conflicting_input() {
         vec!["restore", "c.png", "-p", "a", "--password-file", "b"],
         vec!["inspect", "c.png", "-p", "a", "--password-file", "b"],
         vec!["verify", "c.png", "-p", "a", "--password-file", "b"],
+        vec!["extract", "c.png", "-p", "a", "--password-file", "b"],
+        vec!["extract", "c.png", "-e", "-p", "a"],
+        vec!["read", "c.png", "-e", "-p", "a"],
+        vec!["write", "c.png", "-t", "x", "-e", "-p", "a"],
+        vec!["embed", "c.png", "-t", "x", "-e", "-p", "a"],
+        vec!["extract", "c.png", "-e", "--password-file", "b"],
+        vec!["read", "c.png", "-e", "--password-file", "b"],
+        vec!["write", "c.png", "-t", "x", "-e", "--password-file", "b"],
+        vec!["embed", "c.png", "-t", "x", "-e", "--password-file", "b"],
+        vec!["embed", "c.png", "-t", "x", "--prompt-password", "-p", "a"],
     ] {
         let out = run(&dir, &args);
         assert_eq!(
@@ -305,6 +315,67 @@ fn read_output_routing_rejects_conflicting_input() {
     );
     // No file may have been created by the rejected invocation.
     assert!(!dir.join("out.bin").exists());
+}
+
+#[test]
+fn prompt_password_without_terminal_reports_error() {
+    let dir = scratch("prompt_no_tty");
+    fs::write(dir.join("c.png"), make_png()).unwrap();
+
+    let out1 = run(&dir, &["extract", "c.png", "-e"]);
+    assert_eq!(code(&out1), 1);
+    assert!(
+        stderr(&out1).contains("Password required but no interactive terminal is available"),
+        "stderr: {}",
+        stderr(&out1)
+    );
+
+    let out2 = run(&dir, &["read", "c.png", "-e"]);
+    assert_eq!(code(&out2), 1);
+    assert!(
+        stderr(&out2).contains("Password required but no interactive terminal is available"),
+        "stderr: {}",
+        stderr(&out2)
+    );
+
+    let out3 = run(&dir, &["embed", "c.png", "-t", "x", "--prompt-password"]);
+    assert_eq!(code(&out3), 1);
+    assert!(
+        stderr(&out3).contains("Password required but no interactive terminal is available"),
+        "stderr: {}",
+        stderr(&out3)
+    );
+}
+
+#[test]
+fn extract_with_wrong_password_does_not_fallback_to_default_secret() {
+    let dir = scratch("extract_no_fallback");
+    let asset = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/assets/small.png");
+    fs::copy(&asset, dir.join("c.png")).unwrap();
+
+    // Embed without password (uses public default secret)
+    let out = run(
+        &dir,
+        &[
+            "embed",
+            "c.png",
+            "-t",
+            "public_payload",
+            "-o",
+            "s.png",
+            "--overwrite",
+        ],
+    );
+    assert_ok(&out, &["embed default"]);
+
+    // Extract with wrong password must FAIL and NOT recover the payload via default secret
+    let out = run(&dir, &["extract", "s.png", "-p", "wrong_pwd"]);
+    assert_eq!(code(&out), 1, "extract with wrong password must fail");
+    assert!(
+        stderr(&out).contains("No valid payload found"),
+        "stderr: {}",
+        stderr(&out)
+    );
 }
 
 // --------------------------------------------------------------------------- global -q/--quiet

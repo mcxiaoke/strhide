@@ -607,7 +607,7 @@ dependencies = [
 
 [[package]]
 name = "strhide"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "aes-gcm",
  "chacha20poly1305",

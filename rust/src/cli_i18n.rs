@@ -121,7 +121,6 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         ("write", "overwrite") => Msg::HelpWriteOverwrite,
         ("write", "strategy") => Msg::HelpWriteStrategy,
         ("write", "stealth") => Msg::HelpWriteStealth,
-        ("write", "encrypt") => Msg::HelpWriteEncrypt,
         ("write", "no-encrypt") => Msg::HelpWriteNoEncrypt,
         ("write", "hint") => Msg::HelpWriteHint,
         ("write", "preserve-time") => Msg::HelpWritePreserveTime,
@@ -129,6 +128,7 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         ("write", "no-backup") => Msg::HelpWriteNoBackup,
         (_, "unescape") => Msg::HelpWriteUnescape,
         (_, "exact") => Msg::HelpExact,
+        (_, "prompt-password") => Msg::HelpPromptPassword,
 
         // read
         ("read", "carrier") => Msg::HelpReadCarrier,
@@ -164,7 +164,6 @@ fn arg_help(cmd: &str, raw_id: &str, lang: Lang) -> Option<&'static str> {
         ("embed", "in-place") => Msg::HelpEmbedInPlace,
         ("embed", "overwrite") => Msg::HelpEmbedOverwrite,
         ("embed", "no-backup") => Msg::HelpEmbedNoBackup,
-        ("embed", "encrypt") => Msg::HelpEmbedEncrypt,
 
         // extract
         ("extract", "carrier") => Msg::HelpExtractCarrier,

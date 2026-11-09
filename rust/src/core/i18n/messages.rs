@@ -434,6 +434,9 @@ Run `strhide <COMMAND> --help` for the options of one command.",
     HelpWriteEncrypt:
         en = "Require password (prompts in an interactive terminal; fails instead when no terminal is available)",
         zh = "要求密码加密（在交互终端下提示输入；无可用终端时直接失败）";
+    HelpPromptPassword:
+        en = "Prompt interactively for a password",
+        zh = "在交互终端下提示输入密码";
     HelpWriteNoEncrypt:
         en = "Do not encrypt payload (allows writing without personal password)",
         zh = "不使用密码加密（允许直接写入未设置个人密码的数据）";
