@@ -3,7 +3,6 @@ name: Release Desktop GUI
 on:
   push:
     tags:
-      - "v*"
       - "gui-v*"
   workflow_dispatch:
 
@@ -23,8 +22,9 @@ jobs:
         include:
           - platform: "macos-latest"
             args: "--target aarch64-apple-darwin"
-          - platform: "ubuntu-22.04"
-            args: ""
+          # Linux GUI 已暂时禁用以加快构建速度（Linux 用户优先使用 CLI 二进制）
+          # - platform: "ubuntu-22.04"
+          #   args: ""
           - platform: "windows-latest"
             args: ""
 
@@ -47,11 +47,11 @@ jobs:
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      # - name: Install Linux dependencies
+      #   if: matrix.platform == 'ubuntu-22.04'
+      #   run: |
+      #     sudo apt-get update
+      #     sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Install frontend dependencies
         working-directory: gui
@@ -63,9 +63,54 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: "./gui"
-          tagName: ${{ github.ref_name }}
-          releaseName: "StrHide Studio ${{ github.ref_name }}"
-          releaseBody: "Automated desktop GUI release for ${{ github.ref_name }}"
+          tagName: gui-v__VERSION__
+          releaseName: "StrHide Studio v__VERSION__"
+          releaseBody: "Automated desktop GUI release for StrHide Studio v__VERSION__"
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Package and upload portable zip (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $json = Get-Content gui/src-tauri/tauri.conf.json | ConvertFrom-Json
+          $version = $json.version
+          $tagName = "gui-v${version}"
+          $stageDir = "StrHideStudio_${version}_windows-x64-portable"
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+          Copy-Item "gui/src-tauri/target/release/StrHideStudio.exe" "$stageDir/"
+          Copy-Item "LICENSE" "$stageDir/"
+          Copy-Item "NOTICE" "$stageDir/"
+          Compress-Archive -Path $stageDir -DestinationPath "${stageDir}.zip" -Force
+          gh release upload "$tagName" "${stageDir}.zip" --clobber
+
+      - name: Package and upload portable zip (macOS)
+        if: matrix.platform == 'macos-latest'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(jq -r '.version' gui/src-tauri/tauri.conf.json)
+          tag_name="gui-v${version}"
+          app_path="gui/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/StrHideStudio.app"
+          if [ -d "$app_path" ]; then
+            zip_name="StrHideStudio_${version}_macos-aarch64-portable.zip"
+            ditto -c -k --keepParent "$app_path" "$zip_name"
+            gh release upload "$tag_name" "$zip_name" --clobber
+          fi
+
+      # - name: Package and upload portable archive (Linux)
+      #   if: matrix.platform == 'ubuntu-22.04'
+      #   env:
+      #     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #   run: |
+      #     version=$(jq -r '.version' gui/src-tauri/tauri.conf.json)
+      #     tag_name="gui-v${version}"
+      #     stage_dir="StrHideStudio_${version}_linux-x64-portable"
+      #     mkdir -p "$stage_dir"
+      #     cp "gui/src-tauri/target/release/StrHideStudio" "$stage_dir/"
+      #     cp LICENSE NOTICE "$stage_dir/"
+      #     tar -czf "${stage_dir}.tar.gz" "$stage_dir"
+      #     gh release upload "$tag_name" "${stage_dir}.tar.gz" --clobber
