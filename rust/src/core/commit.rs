@@ -121,7 +121,7 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
 /// input carrier) truncates the carrier before the payload is written, which
 /// destroys the only copy of the hidden data. `same_file` normalises symlinks,
 /// relative paths and Windows case differences, so all of them are covered.
-pub(crate) fn reject_carrier_output(dest: &Path, carriers: &[PathBuf]) -> Result<(), StrHideError> {
+pub fn reject_carrier_output(dest: &Path, carriers: &[PathBuf]) -> Result<(), StrHideError> {
     for carrier in carriers {
         if same_file(dest, carrier) {
             return Err(StrHideError::Rejection(format!(

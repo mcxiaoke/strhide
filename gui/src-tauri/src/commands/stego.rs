@@ -4,10 +4,10 @@ use std::sync::Arc;
 use tauri::State;
 use tauri::ipc::Channel;
 
-use strhide::core::commit::{FileTarget, write_bytes_atomic};
+use strhide::core::commit::{FileTarget, reject_carrier_output, write_bytes_atomic};
 use strhide::core::payload::{Payload, PayloadKind};
 use strhide::core::pipeline::check_overwrite;
-use strhide::errors::ErrorDetail;
+use strhide::errors::{ErrorDetail, StrHideError};
 use strhide::facade::{Domain, SmartExtractOptions};
 use strhide::stego::io::extract_carrier_file_payload;
 use strhide::stego::options::{
@@ -28,26 +28,37 @@ pub fn get_stego_algorithms_cmd() -> Vec<StegoAlgorithmInfo> {
     strhide::stego::list_stego_algorithms()
 }
 
-fn resolve_tuning(algo: Option<&str>) -> StegoTuning {
-    if let Some(name) = algo {
-        let name = name.trim();
-        if let Some(m) = SpatialAlgorithm::from_name(name) {
-            return StegoTuning::Png {
-                model: m,
-                params: PngParams::default(),
-            };
-        }
-        if let Some(m) = JpegAlgorithm::from_name(name) {
-            return StegoTuning::Jpeg {
-                model: m,
-                params: JpegParams::default(),
-            };
-        }
-        if let Some(mode) = HevcMode::from_name(name) {
-            return StegoTuning::hevc(mode);
-        }
+/// Resolve an explicit algorithm name to a tuning arm.
+///
+/// Keep the accepted names in sync with `cli::helpers::stego_tuning`: an
+/// unknown name used to fall through to `Auto`, so a typo silently embedded
+/// with an algorithm the user did not select.
+fn resolve_tuning(algo: Option<&str>) -> Result<StegoTuning, StrHideError> {
+    let Some(name) = algo.map(str::trim) else {
+        return Ok(StegoTuning::Auto);
+    };
+    if name.is_empty() || matches!(name, "auto" | "audio" | "wav_pcm" | "flac_residual") {
+        return Ok(StegoTuning::Auto);
     }
-    StegoTuning::Auto
+    if let Some(m) = SpatialAlgorithm::from_name(name) {
+        return Ok(StegoTuning::Png {
+            model: m,
+            params: PngParams::default(),
+        });
+    }
+    if let Some(m) = JpegAlgorithm::from_name(name) {
+        return Ok(StegoTuning::Jpeg {
+            model: m,
+            params: JpegParams::default(),
+        });
+    }
+    if let Some(mode) = HevcMode::from_name(name) {
+        return Ok(StegoTuning::hevc(mode));
+    }
+    Err(StrHideError::General(format!(
+        "Unknown algorithm '{name}'. Supported: hill, suniward, mipod (PNG), uerd, juniward, \
+         jmipod (JPEG), hevc, cabac (HEIF/HEVC), wav_pcm, flac_residual (Audio), auto"
+    )))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -98,7 +109,7 @@ pub async fn probe_stego_capacity_cmd(
         task_id,
         on_progress,
         move |engine, pool, ctrl, _| {
-            let tuning = resolve_tuning(algorithm.as_deref());
+            let tuning = resolve_tuning(algorithm.as_deref())?;
             let safety = SafetyPolicy::default().with_level(safety_level).with_enforcement(SafetyEnforcement::Advisory);
 
             let probe_opts = ProbeOptions::default().with_password_option(password.as_deref()).with_key_option(None).with_domain_option(domain.as_deref()).with_extensions(Vec::new()).with_safety_policy(safety).with_tuning(tuning).with_exact(exact).with_control(ctrl).with_pool(Arc::clone(&pool));
@@ -185,7 +196,7 @@ pub async fn embed_stego_file_impl(
             SafetyEnforcement::Advisory
         };
 
-        let embed_opts = EmbedOptions::default().with_password_option(req.password.as_deref()).with_domain_option(req.domain.as_deref()).with_safety_policy(SafetyPolicy::default().with_level(req.safety_level).with_enforcement(enforcement)).with_tuning(resolve_tuning(req.algorithm.as_deref())).with_control(ctrl).with_pool(Arc::clone(&pool));
+        let embed_opts = EmbedOptions::default().with_password_option(req.password.as_deref()).with_domain_option(req.domain.as_deref()).with_safety_policy(SafetyPolicy::default().with_level(req.safety_level).with_enforcement(enforcement)).with_tuning(resolve_tuning(req.algorithm.as_deref())?).with_control(ctrl).with_pool(Arc::clone(&pool));
 
         let res = engine
             .stego()
@@ -257,6 +268,7 @@ pub async fn extract_stego_file_cmd(
             let raw_size = payload.data.len() as u64;
 
             if let Some(ref dest) = output_path {
+                reject_carrier_output(dest, std::slice::from_ref(&path))?;
                 write_bytes_atomic(dest, &payload.data)?;
                 Ok(ReadSummary::new(path, is_file, is_encrypted, filename, raw_size)
                     .with_written_file(Some(dest.clone())))
@@ -438,6 +450,7 @@ pub async fn smart_extract_impl(
                 } else {
                     dest.clone()
                 };
+                reject_carrier_output(&target_file, std::slice::from_ref(&path))?;
                 write_bytes_atomic(&target_file, &payload.data)?;
                 ReadSummary::new(path, is_file, is_encrypted, filename, raw_size)
                     .with_written_file(Some(target_file))
@@ -512,8 +525,9 @@ pub async fn smart_extract_cmd(
 
 #[cfg(test)]
 mod tests {
-    use super::{overwrite_target, safe_output_filename};
+    use super::{overwrite_target, resolve_tuning, safe_output_filename};
     use std::path::Path;
+    use strhide::stego::options::StegoTuning;
 
     /// Verifies in-place embed targets do not trigger destination overwrite checks
     /// against the carrier itself when overwrite is false.
@@ -526,6 +540,24 @@ mod tests {
             overwrite_target(Some(Path::new("other.png")), carrier),
             Some(Path::new("other.png"))
         );
+    }
+
+    #[test]
+    fn unknown_algorithm_is_rejected_not_silently_auto() {
+        assert!(resolve_tuning(Some("definitely-not-an-algorithm")).is_err());
+        assert!(matches!(resolve_tuning(None), Ok(StegoTuning::Auto)));
+        assert!(matches!(
+            resolve_tuning(Some("auto")),
+            Ok(StegoTuning::Auto)
+        ));
+        assert!(matches!(
+            resolve_tuning(Some("audio")),
+            Ok(StegoTuning::Auto)
+        ));
+        assert!(matches!(
+            resolve_tuning(Some("hill")),
+            Ok(StegoTuning::Png { .. })
+        ));
     }
 
     #[test]
