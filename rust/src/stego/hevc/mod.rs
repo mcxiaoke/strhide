@@ -23,6 +23,7 @@ pub mod mp4_boxes;
 pub mod slot;
 #[doc(hidden)]
 pub mod sniff;
+pub(crate) mod superblock;
 
 #[allow(unused_imports)]
 pub(crate) use engine::{
