@@ -9,7 +9,7 @@ use crate::stego::envelope::BODY_OVERHEAD;
 use crate::stego::format::HevcFormatProfile;
 use crate::stego::header::{TLV_CRITICAL, Tlv, encode_extension_for_write};
 use crate::stego::hevc::superblock::{
-    HEVC_MAX_EXT_BYTES, HEVC_SUPERBLOCK_POOL_SLOTS, hevc_header_slots,
+    HEVC_MAX_EXT_BYTES, HEVC_SUPERBLOCK_POOL_SLOTS, hevc_header_slots, keyed_band_params,
 };
 use crate::stego::params::ExtractParams;
 
@@ -230,4 +230,54 @@ pub(super) fn hevc_max_raw_payload(
     let body_slots = total_slots - hdr_slots;
     let available_bits = trellis.message_bits(body_slots);
     Ok((available_bits / 8).saturating_sub(BODY_OVERHEAD))
+}
+
+/// Keyed stride permutation of each drift band, consumed band by band.
+///
+/// Element `i` maps to slot `band.start + (j * stride) mod len` where `j` is the
+/// element's index inside that band. `stride` is derived per band from the
+/// payload key (SplitMix64, see `keyed_band_params`); the fixed Weyl step of
+/// earlier builds was removed. Consecutive elements therefore land in
+/// different slices, different pictures and different corners of the frame.
+/// Consuming slots in recording order
+/// instead concentrates the whole payload on the first item -- for a burst
+/// `.heic` (dozens of independent pictures in one file) that flattens the
+/// primary image while the other 40-odd pictures stay pristine.
+///
+/// Two properties matter:
+///
+/// * `count` only decides how many elements are produced; the mapping of element
+///   `i` never depends on it, which is what lets the extractor read the header
+///   prefix and then the full message with the same mapping.
+/// * Bands are never interleaved. A payload that fits in band 0 (pictures
+///   nothing predicts from) never reaches band 1, so the drift-free rung is
+///   exhausted before any reference picture is touched.
+pub(super) fn band_positions(
+    bands: &[std::ops::Range<usize>],
+    count: usize,
+    perm_seed: &[u8; 32],
+) -> Vec<usize> {
+    let mut out = Vec::with_capacity(count);
+    for band in bands {
+        if out.len() >= count {
+            break;
+        }
+        let len = band.len();
+        if len == 0 {
+            continue;
+        }
+        let (start, stride) = keyed_band_params(len, perm_seed, band.start);
+        for i in 0..len {
+            if out.len() >= count {
+                break;
+            }
+            // `i * stride` overflows `usize` on 32-bit targets once a burst
+            // HEIC exposes a few billion slots; the modulus only needs the
+            // product's low bits, so the multiply runs in `u64`.
+            out.push(
+                band.start + ((start as u64 + i as u64 * stride as u64) % len as u64) as usize,
+            );
+        }
+    }
+    out
 }
