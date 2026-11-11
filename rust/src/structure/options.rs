@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use crate::core::control::Control;
+use crate::core::fmt_macros::redacted_debug;
 use crate::errors::StrHideError;
 use crate::structure::registry::StrategyId;
 
@@ -80,21 +81,19 @@ pub struct WriteOptions<'a> {
     pub control: Control<'a>,
 }
 
-impl std::fmt::Debug for WriteOptions<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WriteOptions")
-            .field("output_path", &self.output_path)
-            .field("password", &self.password.map(|_| "<redacted>"))
-            .field("password_hint", &self.password_hint)
-            .field("strategy", &self.strategy)
-            .field("stealth", &self.stealth)
-            .field("preserve_time", &self.preserve_time)
-            .field("backup", &self.backup)
-            .field("overwrite", &self.overwrite)
-            .field("control", &self.control)
-            .finish()
-    }
-}
+redacted_debug!(
+    WriteOptions<'_>,
+    "WriteOptions",
+    output_path: plain,
+    password: secret,
+    password_hint: plain,
+    strategy: plain,
+    stealth: plain,
+    preserve_time: plain,
+    backup: plain,
+    overwrite: plain,
+    control: plain,
+);
 
 impl Default for WriteOptions<'_> {
     fn default() -> Self {
@@ -216,16 +215,14 @@ pub struct ReadOptions<'a> {
     pub control: Control<'a>,
 }
 
-impl std::fmt::Debug for ReadOptions<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReadOptions")
-            .field("output_path", &self.output_path)
-            .field("password", &self.password.map(|_| "<redacted>"))
-            .field("overwrite", &self.overwrite)
-            .field("control", &self.control)
-            .finish()
-    }
-}
+redacted_debug!(
+    ReadOptions<'_>,
+    "ReadOptions",
+    output_path: plain,
+    password: secret,
+    overwrite: plain,
+    control: plain,
+);
 
 impl<'a> ReadOptions<'a> {
     /// Default options: in-memory payload, no password, no overwrite.
@@ -295,17 +292,15 @@ pub struct RestoreOptions<'a> {
     pub control: Control<'a>,
 }
 
-impl std::fmt::Debug for RestoreOptions<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RestoreOptions")
-            .field("output_path", &self.output_path)
-            .field("password", &self.password.map(|_| "<redacted>"))
-            .field("backup", &self.backup)
-            .field("overwrite", &self.overwrite)
-            .field("control", &self.control)
-            .finish()
-    }
-}
+redacted_debug!(
+    RestoreOptions<'_>,
+    "RestoreOptions",
+    output_path: plain,
+    password: secret,
+    backup: plain,
+    overwrite: plain,
+    control: plain,
+);
 
 impl<'a> RestoreOptions<'a> {
     /// Default options: in place, no password, no backup, no overwrite.

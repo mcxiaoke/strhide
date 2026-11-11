@@ -22,6 +22,7 @@ pub mod commit;
 pub mod control;
 pub mod crypto;
 pub mod errors;
+pub(crate) mod fmt_macros;
 pub mod fs;
 pub mod i18n;
 pub mod media;

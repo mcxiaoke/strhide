@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::control::Control;
 use crate::core::crypto::Credential;
+use crate::core::fmt_macros::{option_partial_eq, redacted_debug};
 use crate::errors::StrHideError;
 use crate::formats::FileFormat;
 use crate::stego::StegoCapacityInfo;
@@ -709,45 +710,38 @@ pub struct EmbedOptions<'a> {
     pub no_filename: bool,
 }
 
-impl PartialEq for EmbedOptions<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.password == other.password
-            && self.key == other.key
-            && self.domain == other.domain
-            && self.suite_id == other.suite_id
-            && self.extensions == other.extensions
-            && self.safety == other.safety
-            && self.tuning == other.tuning
-            && self.freshness == other.freshness
-            && self.exact == other.exact
-            && self.control == other.control
-            && self.no_filename == other.no_filename
-            && match (&self.pool, &other.pool) {
-                (None, None) => true,
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                _ => false,
-            }
-    }
-}
+option_partial_eq!(
+    EmbedOptions<'_>,
+    password,
+    key,
+    domain,
+    suite_id,
+    extensions,
+    safety,
+    tuning,
+    freshness,
+    exact,
+    control,
+    no_filename;
+    pool_ptr_eq
+);
 
-impl std::fmt::Debug for EmbedOptions<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EmbedOptions")
-            .field("password", &self.password.map(|_| "<redacted>"))
-            .field("key", &self.key.map(|_| "<redacted>"))
-            .field("domain", &self.domain)
-            .field("suite_id", &self.suite_id)
-            .field("extensions", &self.extensions)
-            .field("safety", &self.safety)
-            .field("tuning", &self.tuning)
-            .field("freshness", &self.freshness)
-            .field("exact", &self.exact)
-            .field("control", &self.control)
-            .field("pool", &self.pool.as_ref().map(|_| "<ThreadPool>"))
-            .field("no_filename", &self.no_filename)
-            .finish()
-    }
-}
+redacted_debug!(
+    EmbedOptions<'_>,
+    "EmbedOptions",
+    password: secret,
+    key: secret,
+    domain: plain,
+    suite_id: plain,
+    extensions: plain,
+    safety: plain,
+    tuning: plain,
+    freshness: plain,
+    exact: plain,
+    control: plain,
+    pool: pool,
+    no_filename: plain,
+);
 
 impl<'a> EmbedOptions<'a> {
     /// Every knob at its default.
@@ -874,39 +868,32 @@ pub struct ProbeOptions<'a> {
     pub pool: Option<Arc<rayon::ThreadPool>>,
 }
 
-impl PartialEq for ProbeOptions<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.password == other.password
-            && self.key == other.key
-            && self.domain == other.domain
-            && self.extensions == other.extensions
-            && self.safety == other.safety
-            && self.tuning == other.tuning
-            && self.exact == other.exact
-            && self.control == other.control
-            && match (&self.pool, &other.pool) {
-                (None, None) => true,
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                _ => false,
-            }
-    }
-}
+option_partial_eq!(
+    ProbeOptions<'_>,
+    password,
+    key,
+    domain,
+    extensions,
+    safety,
+    tuning,
+    exact,
+    control;
+    pool_ptr_eq
+);
 
-impl std::fmt::Debug for ProbeOptions<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProbeOptions")
-            .field("password", &self.password.map(|_| "<redacted>"))
-            .field("key", &self.key.map(|_| "<redacted>"))
-            .field("domain", &self.domain)
-            .field("extensions", &self.extensions)
-            .field("safety", &self.safety)
-            .field("tuning", &self.tuning)
-            .field("exact", &self.exact)
-            .field("control", &self.control)
-            .field("pool", &self.pool.as_ref().map(|_| "<ThreadPool>"))
-            .finish()
-    }
-}
+redacted_debug!(
+    ProbeOptions<'_>,
+    "ProbeOptions",
+    password: secret,
+    key: secret,
+    domain: plain,
+    extensions: plain,
+    safety: plain,
+    tuning: plain,
+    exact: plain,
+    control: plain,
+    pool: pool,
+);
 
 impl<'a> ProbeOptions<'a> {
     /// Every knob at its default.
@@ -945,33 +932,26 @@ pub struct ExtractOptions<'a> {
     pub pool: Option<Arc<rayon::ThreadPool>>,
 }
 
-impl PartialEq for ExtractOptions<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.password == other.password
-            && self.key == other.key
-            && self.domain == other.domain
-            && self.limits == other.limits
-            && self.control == other.control
-            && match (&self.pool, &other.pool) {
-                (None, None) => true,
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                _ => false,
-            }
-    }
-}
+option_partial_eq!(
+    ExtractOptions<'_>,
+    password,
+    key,
+    domain,
+    limits,
+    control;
+    pool_ptr_eq
+);
 
-impl std::fmt::Debug for ExtractOptions<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ExtractOptions")
-            .field("password", &self.password.map(|_| "<redacted>"))
-            .field("key", &self.key.map(|_| "<redacted>"))
-            .field("domain", &self.domain)
-            .field("limits", &self.limits)
-            .field("control", &self.control)
-            .field("pool", &self.pool.as_ref().map(|_| "<ThreadPool>"))
-            .finish()
-    }
-}
+redacted_debug!(
+    ExtractOptions<'_>,
+    "ExtractOptions",
+    password: secret,
+    key: secret,
+    domain: plain,
+    limits: plain,
+    control: plain,
+    pool: pool,
+);
 
 impl<'a> ExtractOptions<'a> {
     /// Every knob at its default.
@@ -1049,22 +1029,20 @@ pub struct BridgeOptions<'a> {
 }
 
 #[cfg(feature = "content-heif-bridge")]
-impl std::fmt::Debug for BridgeOptions<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BridgeOptions")
-            .field("dialect", &self.dialect)
-            .field("password", &self.password.map(|_| "<redacted>"))
-            .field("key", &self.key.map(|_| "<redacted>"))
-            .field("domain", &self.domain)
-            .field("suite_id", &self.suite_id)
-            .field("extensions", &self.extensions)
-            .field("tuning", &self.tuning)
-            .field("safety", &self.safety)
-            .field("freshness", &self.freshness)
-            .field("no_filename", &self.no_filename)
-            .finish()
-    }
-}
+redacted_debug!(
+    BridgeOptions<'_>,
+    "BridgeOptions",
+    dialect: plain,
+    password: secret,
+    key: secret,
+    domain: plain,
+    suite_id: plain,
+    extensions: plain,
+    tuning: plain,
+    safety: plain,
+    freshness: plain,
+    no_filename: plain,
+);
 
 #[cfg(feature = "content-heif-bridge")]
 impl Default for BridgeOptions<'_> {
@@ -1270,17 +1248,15 @@ pub struct InspectOptions<'a> {
     pub control: Control<'a>,
 }
 
-impl std::fmt::Debug for InspectOptions<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InspectOptions")
-            .field("password", &self.password.map(|_| "<redacted>"))
-            .field("key", &self.key.map(|_| "<redacted>"))
-            .field("domain", &self.domain)
-            .field("limits", &self.limits)
-            .field("control", &self.control)
-            .finish()
-    }
-}
+redacted_debug!(
+    InspectOptions<'_>,
+    "InspectOptions",
+    password: secret,
+    key: secret,
+    domain: plain,
+    limits: plain,
+    control: plain,
+);
 
 impl<'a> InspectOptions<'a> {
     pub fn new() -> Self {
@@ -1364,17 +1340,15 @@ pub struct VerifyOptions<'a> {
     pub control: Control<'a>,
 }
 
-impl std::fmt::Debug for VerifyOptions<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VerifyOptions")
-            .field("password", &self.password.map(|_| "<redacted>"))
-            .field("key", &self.key.map(|_| "<redacted>"))
-            .field("domain", &self.domain)
-            .field("limits", &self.limits)
-            .field("control", &self.control)
-            .finish()
-    }
-}
+redacted_debug!(
+    VerifyOptions<'_>,
+    "VerifyOptions",
+    password: secret,
+    key: secret,
+    domain: plain,
+    limits: plain,
+    control: plain,
+);
 
 impl<'a> VerifyOptions<'a> {
     pub fn new() -> Self {

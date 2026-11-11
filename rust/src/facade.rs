@@ -61,6 +61,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::core::control::Control;
+#[cfg(all(feature = "structure-base", feature = "content-base"))]
+use crate::core::fmt_macros::option_partial_eq;
+use crate::core::fmt_macros::redacted_debug;
 #[cfg(feature = "content-base")]
 use crate::core::payload::Payload;
 #[cfg(feature = "content-base")]
@@ -162,16 +165,14 @@ impl<'a> DualOptions<'a> {
     }
 }
 
-impl std::fmt::Debug for DualOptions<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DualOptions")
-            .field("password", &self.password.map(|_| "<redacted>"))
-            .field("key", &self.key.map(|_| "<redacted>"))
-            .field("domain", &self.domain)
-            .field("control", &self.control)
-            .finish()
-    }
-}
+redacted_debug!(
+    DualOptions<'_>,
+    "DualOptions",
+    password: secret,
+    key: secret,
+    domain: plain,
+    control: plain,
+);
 
 /// Cross-domain inspection diagnosis.
 #[derive(Debug, Serialize)]
@@ -346,31 +347,28 @@ impl<'a> SmartExtractOptions<'a> {
 }
 
 #[cfg(all(feature = "structure-base", feature = "content-base"))]
-impl PartialEq for SmartExtractOptions<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.password == other.password
-            && self.key == other.key
-            && self.domain == other.domain
-            && self.limits == other.limits
-            && self.prefer == other.prefer
-            && self.control == other.control
-    }
-}
+option_partial_eq!(
+    SmartExtractOptions<'_>,
+    password,
+    key,
+    domain,
+    limits,
+    prefer,
+    control,
+);
 
 #[cfg(all(feature = "structure-base", feature = "content-base"))]
-impl std::fmt::Debug for SmartExtractOptions<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SmartExtractOptions")
-            .field("password", &self.password.map(|_| "<redacted>"))
-            .field("key", &self.key.map(|_| "<redacted>"))
-            .field("domain", &self.domain)
-            .field("limits", &self.limits)
-            .field("prefer", &self.prefer)
-            .field("control", &self.control)
-            .field("pool", &self.pool.is_some())
-            .finish()
-    }
-}
+redacted_debug!(
+    SmartExtractOptions<'_>,
+    "SmartExtractOptions",
+    password: secret,
+    key: secret,
+    domain: plain,
+    limits: plain,
+    prefer: plain,
+    control: plain,
+    pool: pool_present,
+);
 
 /// Structured outcome of automatic domain selection extraction.
 #[cfg(all(feature = "structure-base", feature = "content-base"))]
