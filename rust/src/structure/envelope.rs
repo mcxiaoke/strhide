@@ -706,6 +706,35 @@ pub struct UnpackSecrets {
     pub stealth_header_magic: Option<[u8; 8]>,
 }
 
+impl UnpackSecrets {
+    /// Derive the credential ladder for one header salt: the caller's password
+    /// when supplied, otherwise the profile's default secret.
+    ///
+    /// `read` and `verify` both go through this function so the fallback order
+    /// cannot drift between "can I read this carrier" and "is this carrier
+    /// authentic". Deriving both branches (as an earlier version did) would
+    /// also run PBKDF2 for a secret that can never be used.
+    pub fn derive_attempts(
+        password: Option<&str>,
+        salt: &[u8],
+        profile: &StructureProfile,
+        stealth_header_magic: Option<[u8; 8]>,
+    ) -> Result<Self, StrHideError> {
+        Ok(Self {
+            password: match password {
+                Some(pwd) => Some(crate::crypto::derive_all(pwd, salt)?),
+                None => None,
+            },
+            default: if password.is_none() {
+                Some(crate::crypto::derive_all(profile.secret(), salt)?)
+            } else {
+                None
+            },
+            stealth_header_magic,
+        })
+    }
+}
+
 /// 24-byte trailer at the end of the envelope, giving readers a way to find
 /// the envelope backwards from the carrier's EOF.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -910,6 +939,30 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// `read` and `verify` both derive their credentials through this ladder;
+    /// if it regresses, one path could accept a password the other rejects.
+    #[test]
+    fn unpack_secrets_ladder_is_password_else_profile_default() {
+        let profile = StructureProfile::default();
+        let salt = [7u8; 16];
+        let magic = Some([9u8; 8]);
+
+        let with_password = UnpackSecrets::derive_attempts(Some("pw"), &salt, &profile, magic)
+            .expect("derive with password");
+        assert!(with_password.password.is_some());
+        assert!(
+            with_password.default.is_none(),
+            "a password must not also derive the profile default"
+        );
+        assert_eq!(with_password.stealth_header_magic, magic);
+
+        let without_password = UnpackSecrets::derive_attempts(None, &salt, &profile, magic)
+            .expect("derive with the profile default");
+        assert!(without_password.password.is_none());
+        assert!(without_password.default.is_some());
+        assert_eq!(without_password.stealth_header_magic, magic);
     }
 
     /// Verifies that default de-mask rejects unregistered strategy ID 0.

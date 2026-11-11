@@ -1867,18 +1867,8 @@ fn open_authenticated_at<'a>(
         Some(s) => s,
         None => {
             let salt = EnvelopeHeader::salt_of(&header_bytes).unwrap_or([0u8; 16]);
-            derived = UnpackSecrets {
-                password: match password {
-                    Some(pwd) => Some(derive_all(pwd, &salt)?),
-                    None => None,
-                },
-                default: if password.is_none() {
-                    Some(derive_all(profile.secret(), &salt)?)
-                } else {
-                    None
-                },
-                stealth_header_magic,
-            };
+            derived =
+                UnpackSecrets::derive_attempts(password, &salt, profile, stealth_header_magic)?;
             &derived
         }
     };
@@ -3062,18 +3052,12 @@ fn verify_core(
                     // Level 3; `open_authenticated_at` would otherwise repeat
                     // PBKDF2 over the identical (password, salt) pair.
                     let salt = EnvelopeHeader::salt_of(&header_bytes).unwrap_or([0u8; 16]);
-                    let built = UnpackSecrets {
-                        password: match password {
-                            Some(pwd) => Some(derive_all(pwd, &salt)?),
-                            None => None,
-                        },
-                        default: if password.is_none() {
-                            Some(derive_all(profile.secret(), &salt)?)
-                        } else {
-                            None
-                        },
+                    let built = UnpackSecrets::derive_attempts(
+                        password,
+                        &salt,
+                        profile,
                         stealth_header_magic,
-                    };
+                    )?;
                     // Cloned once: `UnpackSecrets` is not `Copy` any more, and
                     // the verify path keeps its own copy for Level 3.
                     secrets = Some(built.clone());
