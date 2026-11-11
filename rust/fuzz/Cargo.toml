@@ -1,0 +1,33 @@
+[package]
+name = "strhide-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+strhide = { path = "..", default-features = false, features = ["structure", "content", "analysis"] }
+
+[[bin]]
+name = "structure_inspect"
+path = "fuzz_targets/structure_inspect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "structure_read_restore"
+path = "fuzz_targets/structure_read_restore.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "content_inspect_extract"
+path = "fuzz_targets/content_inspect_extract.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,51 @@
+name: fuzz
+
+# The parsers in `strhide` consume attacker-controlled container bytes before
+# any credential is checked. These targets exercise the in-memory paths that the
+# CLI and GUI wrappers call; they run weekly because a nightly libFuzzer build
+# is too slow for the per-push CI matrix.
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - structure_inspect
+          - structure_read_restore
+          - content_inspect_extract
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run ${{ matrix.target }}
+        working-directory: rust
+        run: >
+          cargo fuzz run ${{ matrix.target }} --
+          -max_total_time=180
+          -max_len=1048576
+          -timeout=30
+
+      # The artifact name includes the target so three failing matrix legs do
+      # not overwrite each other's crash file.
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: rust/fuzz/artifacts/
+          if-no-files-found: ignore
