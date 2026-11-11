@@ -110,10 +110,11 @@ fn zip_tampered_patch_offset_returns_corrupted_data() {
     );
     let mut raw = fs::read(&stego).unwrap();
     let mut cur = std::io::Cursor::new(&raw);
-    let (off, _, _) = strhide::structure::adapters::zip::ZipAdapter
+    let off = strhide::structure::adapters::zip::ZipAdapter
         .locate(&mut cur, None)
         .unwrap()
-        .expect("envelope");
+        .expect("envelope")
+        .offset;
     raw[off as usize + 96..off as usize + 100].copy_from_slice(&0u32.to_le_bytes());
     fs::write(&stego, &raw).unwrap();
 

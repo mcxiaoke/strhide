@@ -6,7 +6,9 @@ use crate::structure::adapters::isobmff::{
     calc_prefix_len, isobmff_inject, isobmff_locate, isobmff_strategy_capacities,
     isobmff_suspicious_structures, isobmff_verify_structure,
 };
-use crate::structure::adapters::{HostAdapter, SeekRead, StrategyCapacity};
+use crate::structure::adapters::{
+    HostAdapter, InjectCoordinates, LocatedEnvelope, SeekRead, StrategyCapacity,
+};
 use std::io::SeekFrom;
 
 pub struct Mp4Adapter;
@@ -77,7 +79,7 @@ impl HostAdapter for Mp4Adapter {
         ube_in: &mut dyn SeekRead,
         out: &mut dyn Write,
         strategy: &str,
-    ) -> Result<(u64, u64, u32, u32), StrHideError> {
+    ) -> Result<InjectCoordinates, StrHideError> {
         isobmff_inject(self.format_name(), host_in, ube_in, out, strategy)
     }
 
@@ -85,7 +87,7 @@ impl HostAdapter for Mp4Adapter {
         &self,
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
-    ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    ) -> Result<Option<LocatedEnvelope>, StrHideError> {
         isobmff_locate(stego_in, expected_trailer_magic)
     }
 

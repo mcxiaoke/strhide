@@ -5,7 +5,7 @@
 use std::io::{SeekFrom, Write};
 
 use crate::errors::StrHideError;
-use crate::structure::adapters::{SeekRead, StrategyCapacity};
+use crate::structure::adapters::{InjectCoordinates, LocatedEnvelope, SeekRead, StrategyCapacity};
 use crate::structure::envelope::EnvelopeTrailer;
 
 pub const RIFF_CHUNK_FOURCC: [u8; 4] = *b"SHRD";
@@ -52,7 +52,7 @@ pub fn riff_inject(
     ube_in: &mut dyn SeekRead,
     out: &mut dyn Write,
     strategy: &str,
-) -> Result<(u64, u64, u32, u32), StrHideError> {
+) -> Result<InjectCoordinates, StrHideError> {
     if strategy != "riff_chunk" && strategy != "eof" {
         return Err(StrHideError::UnsupportedFormat(format!(
             "Strategy '{strategy}' not supported by {format_name} adapter"
@@ -75,7 +75,12 @@ pub fn riff_inject(
         let host_len = crate::structure::adapters::io::copy_stream(host_in, out)?;
         let inject_offset = host_len;
         crate::structure::adapters::io::copy_exact(ube_in, out, ube_size)?;
-        return Ok((inject_offset, ube_size, 0, 0));
+        return Ok(InjectCoordinates {
+            offset: inject_offset,
+            size: ube_size,
+            patch_offset: 0,
+            original_patch_value: 0,
+        });
     }
 
     // strategy == "riff_chunk"
@@ -153,13 +158,18 @@ pub fn riff_inject(
     }
 
     // Patch record: offset 4 was modified from old_riff_size
-    Ok((inject_offset, inject_size, 4, old_riff_size))
+    Ok(InjectCoordinates {
+        offset: inject_offset,
+        size: inject_size,
+        patch_offset: 4,
+        original_patch_value: old_riff_size,
+    })
 }
 
 pub fn riff_locate(
     stego_in: &mut dyn SeekRead,
     expected_trailer_magic: Option<&[u8; 4]>,
-) -> Result<Option<(u64, u64, String)>, StrHideError> {
+) -> Result<Option<LocatedEnvelope>, StrHideError> {
     let file_size = stego_in.seek(SeekFrom::End(0))?;
     if file_size < 12 {
         return Ok(None);
@@ -197,11 +207,11 @@ pub fn riff_locate(
                         .and_then(|()| EnvelopeTrailer::unpack(&tail, expected_trailer_magic).ok())
                         .filter(|t| t.ube_offset == offset + 8 && t.ube_total_size == chunk_size);
                     if let Some(trailer) = matched {
-                        return Ok(Some((
-                            trailer.ube_offset,
-                            trailer.ube_total_size,
-                            "riff_chunk".into(),
-                        )));
+                        return Ok(Some(LocatedEnvelope {
+                            offset: trailer.ube_offset,
+                            size: trailer.ube_total_size,
+                            strategy: "riff_chunk".into(),
+                        }));
                     }
                 }
             }
@@ -217,7 +227,11 @@ pub fn riff_locate(
     if let Some(trailer) = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)?
         && let Some(start) = trailer.locate_start(file_size)
     {
-        return Ok(Some((start, trailer.ube_total_size, "eof".into())));
+        return Ok(Some(LocatedEnvelope {
+            offset: start,
+            size: trailer.ube_total_size,
+            strategy: "eof".into(),
+        }));
     }
 
     Ok(None)

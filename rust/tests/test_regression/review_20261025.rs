@@ -8,7 +8,8 @@ use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 use strhide::structure::adapters::{
-    HeifAdapter, HostAdapter, JpegAdapter, PdfAdapter, WavAdapter, WebpAdapter, ZipAdapter,
+    HeifAdapter, HostAdapter, InjectCoordinates, JpegAdapter, LocatedEnvelope, PdfAdapter,
+    WavAdapter, WebpAdapter, ZipAdapter,
 };
 use strhide::structure::envelope::{EnvelopeTrailer, STANDARD_TRAILER_MAGIC};
 use strhide::structure::{
@@ -151,7 +152,12 @@ fn wav_riff_chunk_rejected_when_declared_boundary_mismatches() {
         &EnvelopeTrailer::create(clean.len() as u64 + 8, ube_total, STANDARD_TRAILER_MAGIC).pack(),
     );
     let mut out = Vec::new();
-    let (off, size, patch_off, orig) = WavAdapter
+    let InjectCoordinates {
+        offset: off,
+        size,
+        patch_offset,
+        original_patch_value,
+    } = WavAdapter
         .inject(
             &mut Cursor::new(clean.clone()),
             &mut Cursor::new(ube),
@@ -160,11 +166,18 @@ fn wav_riff_chunk_rejected_when_declared_boundary_mismatches() {
         )
         .unwrap();
     assert_eq!(off, clean.len() as u64);
-    assert_eq!(patch_off, 4, "the RIFF size field at offset 4 is patched");
-    assert_eq!(orig, (clean.len() - 8) as u32);
+    assert_eq!(
+        patch_offset, 4,
+        "the RIFF size field at offset 4 is patched"
+    );
+    assert_eq!(original_patch_value, (clean.len() - 8) as u32);
     assert_eq!(size, 8 + ube_total);
 
-    let (lo, ls, strat) = WavAdapter
+    let LocatedEnvelope {
+        offset: lo,
+        size: ls,
+        strategy: strat,
+    } = WavAdapter
         .locate(&mut Cursor::new(out), None)
         .unwrap()
         .unwrap();
@@ -405,7 +418,11 @@ fn pdf_locate_tolerates_eol_terminated_trailer_magic() {
     for last in [0x0Au8, 0x0Du8] {
         let magic = [0xD2, 0x33, 0x44, last];
         let stego = craft_incremental_stego(magic);
-        let (lo, ls, strat) = PdfAdapter
+        let LocatedEnvelope {
+            offset: lo,
+            size: ls,
+            strategy: strat,
+        } = PdfAdapter
             .locate(&mut Cursor::new(stego), Some(&magic))
             .unwrap()
             .unwrap_or_else(|| panic!("magic ending in 0x{last:02X} must still locate"));
@@ -416,7 +433,11 @@ fn pdf_locate_tolerates_eol_terminated_trailer_magic() {
 
     // Control: the standard magic keeps locating through the same code path.
     let stego = craft_incremental_stego(STANDARD_TRAILER_MAGIC);
-    let (lo, _, strat) = PdfAdapter
+    let LocatedEnvelope {
+        offset: lo,
+        strategy: strat,
+        ..
+    } = PdfAdapter
         .locate(&mut Cursor::new(stego), None)
         .unwrap()
         .unwrap();

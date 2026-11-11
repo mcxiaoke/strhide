@@ -1,7 +1,9 @@
 //! PDF format adapter for strhide with compliant Incremental Update object stream hiding.
 
 use crate::errors::StrHideError;
-use crate::structure::adapters::{HostAdapter, SeekRead, StrategyCapacity, eof::EofAdapter};
+use crate::structure::adapters::{
+    HostAdapter, InjectCoordinates, LocatedEnvelope, SeekRead, StrategyCapacity, eof::EofAdapter,
+};
 use crate::structure::envelope::{EnvelopeTrailer, TRAILER_SIZE};
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -663,7 +665,7 @@ fn try_locate_endstream(
     stego_in: &mut dyn SeekRead,
     endstream_pos: u64,
     expected_trailer_magic: Option<&[u8; 4]>,
-) -> Result<Option<(u64, u64, String)>, StrHideError> {
+) -> Result<Option<LocatedEnvelope>, StrHideError> {
     const EOL_SLACK: usize = 3;
     let Some(window_start) = endstream_pos.checked_sub((TRAILER_SIZE + EOL_SLACK) as u64) else {
         return Ok(None);
@@ -702,11 +704,11 @@ fn try_locate_endstream(
                 || prefix.ends_with(b"stream\n")
                 || prefix.ends_with(b"stream"))
         {
-            return Ok(Some((
-                trailer.ube_offset,
-                trailer.ube_total_size,
-                "incremental".into(),
-            )));
+            return Ok(Some(LocatedEnvelope {
+                offset: trailer.ube_offset,
+                size: trailer.ube_total_size,
+                strategy: "incremental".into(),
+            }));
         }
     }
 
@@ -794,7 +796,7 @@ impl HostAdapter for PdfAdapter {
         ube_in: &mut dyn SeekRead,
         out: &mut dyn Write,
         strategy: &str,
-    ) -> Result<(u64, u64, u32, u32), StrHideError> {
+    ) -> Result<InjectCoordinates, StrHideError> {
         if strategy == "eof" {
             return EofAdapter.inject(host_in, ube_in, out, strategy);
         }
@@ -922,14 +924,19 @@ impl HostAdapter for PdfAdapter {
         host_in.seek(SeekFrom::Start(info.eof_offset))?;
         crate::structure::adapters::io::copy_stream(host_in, out)?;
 
-        Ok((inject_offset, inject_size, 0, 0))
+        Ok(InjectCoordinates {
+            offset: inject_offset,
+            size: inject_size,
+            patch_offset: 0,
+            original_patch_value: 0,
+        })
     }
 
     fn locate(
         &self,
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
-    ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    ) -> Result<Option<LocatedEnvelope>, StrHideError> {
         stego_in.seek(SeekFrom::Start(0))?;
         let mut magic = [0u8; 5];
         if stego_in.read_exact(&mut magic).is_err() || magic != PDF_MAGIC {
@@ -976,7 +983,11 @@ impl HostAdapter for PdfAdapter {
         if let Some(t) = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {
             let file_size = stego_in.seek(SeekFrom::End(0))?;
             if t.ube_offset.checked_add(t.ube_total_size) == Some(file_size) {
-                return Ok(Some((t.ube_offset, t.ube_total_size, "eof".into())));
+                return Ok(Some(LocatedEnvelope {
+                    offset: t.ube_offset,
+                    size: t.ube_total_size,
+                    strategy: "eof".into(),
+                }));
             }
         }
 
@@ -1180,7 +1191,11 @@ mod tests {
             );
 
             let mut out = Vec::new();
-            let (inject_offset, inject_size, _, _) = PdfAdapter
+            let InjectCoordinates {
+                offset: inject_offset,
+                size: inject_size,
+                ..
+            } = PdfAdapter
                 .inject(
                     &mut Cursor::new(host.clone()),
                     &mut Cursor::new(ube.clone()),
@@ -1262,7 +1277,10 @@ mod tests {
             );
 
             let mut out = Vec::new();
-            let (inject_offset, _, _, _) = PdfAdapter
+            let InjectCoordinates {
+                offset: inject_offset,
+                ..
+            } = PdfAdapter
                 .inject(
                     &mut Cursor::new(prev.clone()),
                     &mut Cursor::new(ube.clone()),

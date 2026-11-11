@@ -1,6 +1,6 @@
 use super::boxes::{patch_sized_uint, write_sized_uint};
 use super::*;
-use crate::structure::adapters::{HeifAdapter, HostAdapter};
+use crate::structure::adapters::{HeifAdapter, HostAdapter, InjectCoordinates, LocatedEnvelope};
 use crate::structure::envelope::{EnvelopeHeader, STANDARD_TRAILER_MAGIC, TRAILER_SIZE};
 use std::io::Cursor;
 
@@ -27,7 +27,7 @@ fn inject_writes_exactly_calc_prefix_len_header_bytes() {
         let host = b"....ftypisom....mdat".to_vec();
         let ube = vec![0x5Au8; ube_size];
         let mut out = Vec::new();
-        let (offset, size, _, _) = isobmff_inject(
+        let InjectCoordinates { offset, size, .. } = isobmff_inject(
             "MP4",
             &mut Cursor::new(host.clone()),
             &mut Cursor::new(ube.clone()),
@@ -101,7 +101,11 @@ fn locate_and_verify_accept_a_64_bit_box() {
 
     let mut cursor = Cursor::new(stego.clone());
     let found = isobmff_locate(&mut cursor, None).unwrap();
-    let (offset, size, strategy) = found.expect("64-bit box must be located");
+    let LocatedEnvelope {
+        offset,
+        size,
+        strategy,
+    } = found.expect("64-bit box must be located");
     assert_eq!(strategy, "box_uuid");
     assert_eq!(offset, host.len() as u64 + 32);
     assert_eq!(size, ube.len() as u64 + 24);
@@ -146,7 +150,9 @@ fn suspicious_structures_distinguishes_the_two_header_forms() {
     assert!(!warnings[0].contains("64-bit"));
 
     let mut cursor = Cursor::new(stego);
-    let (offset, _, strategy) = isobmff_locate(&mut cursor, None).unwrap().unwrap();
+    let LocatedEnvelope {
+        offset, strategy, ..
+    } = isobmff_locate(&mut cursor, None).unwrap().unwrap();
     assert_eq!(strategy, "box_uuid");
     assert_eq!(offset, ube_offset);
 }
@@ -477,7 +483,12 @@ fn item_hidden_roundtrips_on_a_synthetic_meta_heif() {
     );
 
     let mut out = Vec::new();
-    let (offset, size, patch_off, orig) = isobmff_inject(
+    let InjectCoordinates {
+        offset,
+        size,
+        patch_offset,
+        original_patch_value,
+    } = isobmff_inject(
         "HEIF",
         &mut Cursor::new(host.clone()),
         &mut Cursor::new(ube.clone()),
@@ -487,10 +498,14 @@ fn item_hidden_roundtrips_on_a_synthetic_meta_heif() {
     .unwrap();
     assert_eq!(offset, inject_offset);
     assert_eq!(size, 8 + ube_total);
-    assert_eq!((patch_off, orig), (0, 0));
+    assert_eq!((patch_offset, original_patch_value), (0, 0));
 
     let mut cur = Cursor::new(out.clone());
-    let (lo, ls, strat) = isobmff_locate(&mut cur, None).unwrap().unwrap();
+    let LocatedEnvelope {
+        offset: lo,
+        size: ls,
+        strategy: strat,
+    } = isobmff_locate(&mut cur, None).unwrap().unwrap();
     assert_eq!(strat, "item_hidden");
     assert_eq!(
         lo,
@@ -572,7 +587,7 @@ fn item_hidden_walks_reject_iloc_count_beyond_data() {
     // Strip side: take a valid stego and inflate the item count.
     let host = synthetic_meta_heif(1, 2);
     let mut stego = Vec::new();
-    let (offset, size, _, _) = isobmff_inject(
+    let InjectCoordinates { offset, size, .. } = isobmff_inject(
         "HEIF",
         &mut Cursor::new(host),
         &mut Cursor::new(vec![0u8; 200]),

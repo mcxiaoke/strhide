@@ -1,5 +1,7 @@
 use crate::errors::StrHideError;
-use crate::structure::adapters::{HostAdapter, SeekRead, SeekWrite, StrategyCapacity};
+use crate::structure::adapters::{
+    HostAdapter, InjectCoordinates, LocatedEnvelope, SeekRead, SeekWrite, StrategyCapacity,
+};
 use crate::structure::envelope::{EnvelopeHeader, EnvelopeTrailer};
 use std::io::{SeekFrom, Write};
 
@@ -38,7 +40,7 @@ impl HostAdapter for EofAdapter {
         ube_in: &mut dyn SeekRead,
         out: &mut dyn Write,
         strategy: &str,
-    ) -> Result<(u64, u64, u32, u32), StrHideError> {
+    ) -> Result<InjectCoordinates, StrHideError> {
         if strategy != "eof" {
             return Err(StrHideError::UnsupportedFormat(format!(
                 "Strategy '{strategy}' not supported by EOF adapter"
@@ -52,14 +54,19 @@ impl HostAdapter for EofAdapter {
         ube_in.seek(SeekFrom::Start(0))?;
         let ube_len = crate::structure::adapters::io::copy_stream(ube_in, out)?;
 
-        Ok((inject_offset, ube_len, 0, 0))
+        Ok(InjectCoordinates {
+            offset: inject_offset,
+            size: ube_len,
+            patch_offset: 0,
+            original_patch_value: 0,
+        })
     }
 
     fn locate(
         &self,
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
-    ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    ) -> Result<Option<LocatedEnvelope>, StrHideError> {
         let trailer = match EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {
             Some(t) => t,
             None => return Ok(None),
@@ -68,7 +75,11 @@ impl HostAdapter for EofAdapter {
         let file_size = stego_in.seek(SeekFrom::End(0))?;
         Ok(trailer
             .locate_start(file_size)
-            .map(|start| (start, trailer.ube_total_size, "eof".into())))
+            .map(|start| LocatedEnvelope {
+                offset: start,
+                size: trailer.ube_total_size,
+                strategy: "eof".into(),
+            }))
     }
 
     fn strip(

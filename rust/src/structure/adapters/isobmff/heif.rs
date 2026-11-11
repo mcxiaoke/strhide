@@ -3,7 +3,7 @@
 use std::io::{SeekFrom, Write};
 
 use crate::errors::StrHideError;
-use crate::structure::adapters::{SeekRead, SeekWrite};
+use crate::structure::adapters::{InjectCoordinates, SeekRead, SeekWrite};
 use crate::structure::envelope::EnvelopeHeader;
 
 use super::boxes::{
@@ -15,7 +15,7 @@ pub(super) fn heif_item_hidden_inject(
     host_in: &mut dyn SeekRead,
     ube_in: &mut dyn SeekRead,
     out: &mut dyn Write,
-) -> Result<(u64, u64, u32, u32), StrHideError> {
+) -> Result<InjectCoordinates, StrHideError> {
     host_in.seek(SeekFrom::End(0))?;
     let host_size = host_in.stream_position()?;
     let ube_size = ube_in.seek(SeekFrom::End(0))?;
@@ -370,7 +370,12 @@ pub(super) fn heif_item_hidden_inject(
     let inject_offset = host_size + delta_meta as u64;
     let inject_size = 8 + ube_size;
 
-    Ok((inject_offset, inject_size, 0, 0))
+    Ok(InjectCoordinates {
+        offset: inject_offset,
+        size: inject_size,
+        patch_offset: 0,
+        original_patch_value: 0,
+    })
 }
 
 pub(super) fn heif_item_hidden_strip(

@@ -198,7 +198,7 @@ fn path_traversal_sanitized() {
     let mut data = fs::read(&stego).unwrap();
     let mut cf = std::io::Cursor::new(&data);
     let adapter = strhide::structure::adapters::zip::ZipAdapter;
-    let (offset, _, _) = adapter.locate(&mut cf, None).unwrap().unwrap();
+    let offset = adapter.locate(&mut cf, None).unwrap().unwrap().offset;
     let hdr_bytes =
         &data[offset as usize..offset as usize + strhide::structure::envelope::HEADER_SIZE];
     let header = EnvelopeHeader::unpack_with_password(hdr_bytes, None).unwrap();

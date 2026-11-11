@@ -2,7 +2,8 @@
 
 use crate::errors::StrHideError;
 use crate::structure::adapters::{
-    HostAdapter, SeekRead, SeekWrite, StrategyCapacity, eof::EofAdapter, format_bytes,
+    HostAdapter, InjectCoordinates, LocatedEnvelope, SeekRead, SeekWrite, StrategyCapacity,
+    eof::EofAdapter, format_bytes,
 };
 use crate::structure::envelope::{EnvelopeHeader, EnvelopeTrailer};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -232,7 +233,7 @@ impl HostAdapter for ZipAdapter {
         ube_in: &mut dyn SeekRead,
         out: &mut dyn Write,
         strategy: &str,
-    ) -> Result<(u64, u64, u32, u32), StrHideError> {
+    ) -> Result<InjectCoordinates, StrHideError> {
         if strategy == "eof" {
             return EofAdapter.inject(host_in, ube_in, out, strategy);
         }
@@ -300,14 +301,19 @@ impl HostAdapter for ZipAdapter {
         // 5. Write remaining part of EOCD (comment length and comment data)
         crate::structure::adapters::io::copy_stream(host_in, out)?;
 
-        Ok((inject_offset, inject_size, patch_offset, orig_patch_val))
+        Ok(InjectCoordinates {
+            offset: inject_offset,
+            size: inject_size,
+            patch_offset,
+            original_patch_value: orig_patch_val,
+        })
     }
 
     fn locate(
         &self,
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
-    ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    ) -> Result<Option<LocatedEnvelope>, StrHideError> {
         // 1. Try finding UBE before Central Directory
         if let Ok((_, cd_offset, _)) = find_eocd_offset(stego_in)
             && cd_offset >= 112 + 24
@@ -318,11 +324,11 @@ impl HostAdapter for ZipAdapter {
                 && let Ok(trailer) = EnvelopeTrailer::unpack(&trailer_bytes, expected_trailer_magic)
                 && trailer.ube_offset.checked_add(trailer.ube_total_size) == Some(cd_offset)
             {
-                return Ok(Some((
-                    trailer.ube_offset,
-                    trailer.ube_total_size,
-                    "pre_cd_inject".into(),
-                )));
+                return Ok(Some(LocatedEnvelope {
+                    offset: trailer.ube_offset,
+                    size: trailer.ube_total_size,
+                    strategy: "pre_cd_inject".into(),
+                }));
             }
         }
 
@@ -330,7 +336,11 @@ impl HostAdapter for ZipAdapter {
         if let Some(t) = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {
             let file_size = stego_in.seek(SeekFrom::End(0))?;
             if t.ube_offset.checked_add(t.ube_total_size) == Some(file_size) {
-                return Ok(Some((t.ube_offset, t.ube_total_size, "eof".into())));
+                return Ok(Some(LocatedEnvelope {
+                    offset: t.ube_offset,
+                    size: t.ube_total_size,
+                    strategy: "eof".into(),
+                }));
             }
         }
 

@@ -5,7 +5,9 @@
 use std::io::{SeekFrom, Write};
 
 use crate::errors::StrHideError;
-use crate::structure::adapters::{SeekRead, SeekWrite, StrategyCapacity};
+use crate::structure::adapters::{
+    InjectCoordinates, LocatedEnvelope, SeekRead, SeekWrite, StrategyCapacity,
+};
 use crate::structure::envelope::{EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE, TRAILER_SIZE};
 
 pub const MP4_UUID_NEUTRAL: [u8; 16] = [
@@ -72,7 +74,7 @@ pub fn isobmff_inject(
     ube_in: &mut dyn SeekRead,
     out: &mut dyn Write,
     strategy: &str,
-) -> Result<(u64, u64, u32, u32), StrHideError> {
+) -> Result<InjectCoordinates, StrHideError> {
     if strategy == "item_hidden" {
         return heif_item_hidden_inject(host_in, ube_in, out);
     }
@@ -122,13 +124,18 @@ pub fn isobmff_inject(
 
     crate::structure::adapters::io::copy_stream(ube_in, out)?;
 
-    Ok((inject_offset, inject_size, 0, 0))
+    Ok(InjectCoordinates {
+        offset: inject_offset,
+        size: inject_size,
+        patch_offset: 0,
+        original_patch_value: 0,
+    })
 }
 
 pub fn isobmff_locate(
     stego_in: &mut dyn SeekRead,
     expected_trailer_magic: Option<&[u8; 4]>,
-) -> Result<Option<(u64, u64, String)>, StrHideError> {
+) -> Result<Option<LocatedEnvelope>, StrHideError> {
     let trailer = match EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {
         Some(t) => t,
         None => return Ok(None),
@@ -160,11 +167,11 @@ pub fn isobmff_locate(
                 && box_uuid == MP4_UUID_NEUTRAL
                 && box_size == 24 + trailer.ube_total_size
             {
-                return Ok(Some((
-                    trailer.ube_offset,
-                    trailer.ube_total_size,
-                    "box_uuid".into(),
-                )));
+                return Ok(Some(LocatedEnvelope {
+                    offset: trailer.ube_offset,
+                    size: trailer.ube_total_size,
+                    strategy: "box_uuid".into(),
+                }));
             }
         }
     }
@@ -184,11 +191,11 @@ pub fn isobmff_locate(
                 && box_uuid == MP4_UUID_NEUTRAL
                 && large_size == 32 + trailer.ube_total_size
             {
-                return Ok(Some((
-                    trailer.ube_offset,
-                    trailer.ube_total_size,
-                    "box_uuid".into(),
-                )));
+                return Ok(Some(LocatedEnvelope {
+                    offset: trailer.ube_offset,
+                    size: trailer.ube_total_size,
+                    strategy: "box_uuid".into(),
+                }));
             }
         }
     }
@@ -202,20 +209,20 @@ pub fn isobmff_locate(
             let box_type = &hdr8[4..8];
             if box_size == 8 + trailer.ube_total_size {
                 if box_type == b"free" || box_type == b"skip" {
-                    return Ok(Some((
-                        trailer.ube_offset,
-                        trailer.ube_total_size,
-                        "free_box".into(),
-                    )));
+                    return Ok(Some(LocatedEnvelope {
+                        offset: trailer.ube_offset,
+                        size: trailer.ube_total_size,
+                        strategy: "free_box".into(),
+                    }));
                 }
                 if box_type == b"mdat"
                     && isobmff_has_iloc_item(stego_in, trailer.ube_offset, trailer.ube_total_size)?
                 {
-                    return Ok(Some((
-                        trailer.ube_offset,
-                        trailer.ube_total_size,
-                        "item_hidden".into(),
-                    )));
+                    return Ok(Some(LocatedEnvelope {
+                        offset: trailer.ube_offset,
+                        size: trailer.ube_total_size,
+                        strategy: "item_hidden".into(),
+                    }));
                 }
             }
         }
@@ -224,7 +231,11 @@ pub fn isobmff_locate(
     // 4. Fallback to EOF
     let file_size = stego_in.seek(SeekFrom::End(0))?;
     if let Some(start) = trailer.locate_start(file_size) {
-        return Ok(Some((start, trailer.ube_total_size, "eof".into())));
+        return Ok(Some(LocatedEnvelope {
+            offset: start,
+            size: trailer.ube_total_size,
+            strategy: "eof".into(),
+        }));
     }
 
     Ok(None)

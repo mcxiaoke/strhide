@@ -2,8 +2,8 @@
 
 use crate::errors::StrHideError;
 use crate::structure::adapters::{
-    FinalizeCtx, HostAdapter, SeekRead, SeekReadWrite, StrategyCapacity, eof::EofAdapter,
-    format_bytes,
+    FinalizeCtx, HostAdapter, InjectCoordinates, LocatedEnvelope, SeekRead, SeekReadWrite,
+    StrategyCapacity, eof::EofAdapter, format_bytes,
 };
 use crate::structure::envelope::EnvelopeTrailer;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -151,7 +151,7 @@ impl HostAdapter for PngAdapter {
         ube_in: &mut dyn SeekRead,
         out: &mut dyn Write,
         strategy: &str,
-    ) -> Result<(u64, u64, u32, u32), StrHideError> {
+    ) -> Result<InjectCoordinates, StrHideError> {
         if strategy == "eof" {
             return EofAdapter.inject(host_in, ube_in, out, strategy);
         }
@@ -211,14 +211,19 @@ impl HostAdapter for PngAdapter {
         host_in.seek(SeekFrom::Start(iend_offset))?;
         crate::structure::adapters::io::copy_stream(host_in, out)?;
 
-        Ok((inject_offset, inject_size, 0, 0))
+        Ok(InjectCoordinates {
+            offset: inject_offset,
+            size: inject_size,
+            patch_offset: 0,
+            original_patch_value: 0,
+        })
     }
 
     fn locate(
         &self,
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
-    ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    ) -> Result<Option<LocatedEnvelope>, StrHideError> {
         self.locate_with_hint(stego_in, expected_trailer_magic, None)
     }
 
@@ -227,7 +232,7 @@ impl HostAdapter for PngAdapter {
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
         expected_header_magic: Option<&[u8; 8]>,
-    ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    ) -> Result<Option<LocatedEnvelope>, StrHideError> {
         // Stealth and custom-magic dialects use a derived header magic.
         // Fall back to standard header magic when none is supplied.
         let expected_header_magic = expected_header_magic
@@ -293,7 +298,11 @@ impl HostAdapter for PngAdapter {
                         };
 
                         if is_exact || is_valid_shifted {
-                            return Ok(Some((chunk_data_offset, length, "chunk".into())));
+                            return Ok(Some(LocatedEnvelope {
+                                offset: chunk_data_offset,
+                                size: length,
+                                strategy: "chunk".into(),
+                            }));
                         }
                     }
                 }
@@ -327,7 +336,11 @@ impl HostAdapter for PngAdapter {
                     stego_in.read_exact(&mut hdr).is_ok() && hdr == expected_header_magic
                 };
                 if magic_ok {
-                    return Ok(Some((start, t.ube_total_size, "eof".into())));
+                    return Ok(Some(LocatedEnvelope {
+                        offset: start,
+                        size: t.ube_total_size,
+                        strategy: "eof".into(),
+                    }));
                 }
             }
         }
@@ -572,7 +585,7 @@ mod tests {
             .locate(&mut cursor, Some(&STANDARD_TRAILER_MAGIC))
             .expect("locate must not error")
             .expect("a self-describing trailer must be found");
-        assert_eq!(located.0, chunk_data_offset as u64);
-        assert_eq!(located.1, data_len as u64);
+        assert_eq!(located.offset, chunk_data_offset as u64);
+        assert_eq!(located.size, data_len as u64);
     }
 }

@@ -5,7 +5,9 @@ use crate::structure::adapters::riff::{
     riff_can_chunk, riff_detect, riff_inject, riff_locate, riff_strategy_capacities,
     riff_suspicious_structures, riff_verify_structure,
 };
-use crate::structure::adapters::{HostAdapter, SeekRead, StrategyCapacity};
+use crate::structure::adapters::{
+    HostAdapter, InjectCoordinates, LocatedEnvelope, SeekRead, StrategyCapacity,
+};
 
 pub struct WavAdapter;
 
@@ -42,7 +44,7 @@ impl HostAdapter for WavAdapter {
         ube_in: &mut dyn SeekRead,
         out: &mut dyn Write,
         strategy: &str,
-    ) -> Result<(u64, u64, u32, u32), StrHideError> {
+    ) -> Result<InjectCoordinates, StrHideError> {
         riff_inject(self.format_name(), host_in, ube_in, out, strategy)
     }
 
@@ -50,7 +52,7 @@ impl HostAdapter for WavAdapter {
         &self,
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
-    ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    ) -> Result<Option<LocatedEnvelope>, StrHideError> {
         riff_locate(stego_in, expected_trailer_magic)
     }
 

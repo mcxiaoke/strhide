@@ -5,7 +5,9 @@ use crate::structure::adapters::riff::{
     riff_can_chunk, riff_detect, riff_inject, riff_locate, riff_starts_with,
     riff_strategy_capacities, riff_suspicious_structures, riff_verify_structure,
 };
-use crate::structure::adapters::{HostAdapter, SeekRead, StrategyCapacity};
+use crate::structure::adapters::{
+    HostAdapter, InjectCoordinates, LocatedEnvelope, SeekRead, StrategyCapacity,
+};
 
 pub struct WebpAdapter;
 
@@ -66,7 +68,7 @@ impl HostAdapter for WebpAdapter {
         ube_in: &mut dyn SeekRead,
         out: &mut dyn Write,
         strategy: &str,
-    ) -> Result<(u64, u64, u32, u32), StrHideError> {
+    ) -> Result<InjectCoordinates, StrHideError> {
         if strategy == "riff_chunk" && !riff_starts_with(host_in, b"VP8X") {
             return Err(StrHideError::UnsupportedFormat(
                 "Simple Format WebP has no VP8X chunk; a private RIFF chunk would be invalid \
@@ -81,7 +83,7 @@ impl HostAdapter for WebpAdapter {
         &self,
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
-    ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    ) -> Result<Option<LocatedEnvelope>, StrHideError> {
         riff_locate(stego_in, expected_trailer_magic)
     }
 

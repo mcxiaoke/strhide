@@ -4,7 +4,9 @@ use crate::errors::StrHideError;
 use crate::structure::adapters::ebml::{
     EBML_HEADER_ID, EBML_VOID_ID, MATROSKA_SEGMENT_ID, encode_vint, read_element_id, read_vint_size,
 };
-use crate::structure::adapters::{HostAdapter, SeekRead, StrategyCapacity};
+use crate::structure::adapters::{
+    HostAdapter, InjectCoordinates, LocatedEnvelope, SeekRead, StrategyCapacity,
+};
 use crate::structure::envelope::EnvelopeTrailer;
 
 pub struct MkvAdapter;
@@ -69,7 +71,7 @@ impl HostAdapter for MkvAdapter {
         ube_in: &mut dyn SeekRead,
         out: &mut dyn Write,
         strategy: &str,
-    ) -> Result<(u64, u64, u32, u32), StrHideError> {
+    ) -> Result<InjectCoordinates, StrHideError> {
         if strategy != "ebml_void" && strategy != "eof" {
             return Err(StrHideError::UnsupportedFormat(format!(
                 "Strategy '{strategy}' not supported by MKV adapter"
@@ -96,14 +98,19 @@ impl HostAdapter for MkvAdapter {
 
         crate::structure::adapters::io::copy_exact(ube_in, out, ube_size)?;
 
-        Ok((inject_offset, inject_size, 0, 0))
+        Ok(InjectCoordinates {
+            offset: inject_offset,
+            size: inject_size,
+            patch_offset: 0,
+            original_patch_value: 0,
+        })
     }
 
     fn locate(
         &self,
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
-    ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    ) -> Result<Option<LocatedEnvelope>, StrHideError> {
         let file_size = stego_in.seek(SeekFrom::End(0))?;
         let trailer = match EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {
             Some(t) => t,
@@ -124,13 +131,21 @@ impl HostAdapter for MkvAdapter {
                     && prefix[0] == EBML_VOID_ID
                     && prefix[1..] == *vint
                 {
-                    return Ok(Some((start, trailer.ube_total_size, "ebml_void".into())));
+                    return Ok(Some(LocatedEnvelope {
+                        offset: start,
+                        size: trailer.ube_total_size,
+                        strategy: "ebml_void".into(),
+                    }));
                 }
             }
         }
 
         // 2. Fallback to EOF
-        Ok(Some((start, trailer.ube_total_size, "eof".into())))
+        Ok(Some(LocatedEnvelope {
+            offset: start,
+            size: trailer.ube_total_size,
+            strategy: "eof".into(),
+        }))
     }
 
     fn verify_structure(

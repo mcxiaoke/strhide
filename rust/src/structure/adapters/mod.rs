@@ -154,6 +154,35 @@ pub fn format_bytes(n: u64) -> String {
     out
 }
 
+/// Placement and patch information returned by [`HostAdapter::inject`].
+///
+/// The old tuple `(u64, u64, u32, u32)` relied on positional convention at
+/// every call site; naming the fields makes the two offsets impossible to
+/// swap silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InjectCoordinates {
+    /// Offset of the first envelope byte in the output container.
+    pub offset: u64,
+    /// Total envelope size in bytes.
+    pub size: u64,
+    /// Host field patched with the envelope size (`0` when the strategy needs
+    /// no patch).
+    pub patch_offset: u32,
+    /// Value the patched field held before injection.
+    pub original_patch_value: u32,
+}
+
+/// An envelope located by [`HostAdapter::locate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatedEnvelope {
+    /// Offset of the first envelope byte in the carrier stream.
+    pub offset: u64,
+    /// Total envelope size in bytes.
+    pub size: u64,
+    /// Strategy that placed the envelope.
+    pub strategy: String,
+}
+
 pub trait HostAdapter: Send + Sync {
     fn format_name(&self) -> &'static str;
     fn detect(&self, reader: &mut dyn SeekRead) -> bool;
@@ -184,14 +213,13 @@ pub trait HostAdapter: Send + Sync {
     }
 
     /// Injects UBE data into host stream, writing the resulting container to out.
-    /// Returns (inject_offset, inject_size, patch_offset, orig_patch_val).
     fn inject(
         &self,
         host_in: &mut dyn SeekRead,
         ube_in: &mut dyn SeekRead,
         out: &mut dyn Write,
         strategy: &str,
-    ) -> Result<(u64, u64, u32, u32), StrHideError>;
+    ) -> Result<InjectCoordinates, StrHideError>;
 
     /// Whether `strategy` embeds the envelope in a scattered (non-contiguous)
     /// form. For scattered strategies (currently only `pe_codebits`), `inject`
@@ -203,12 +231,11 @@ pub trait HostAdapter: Send + Sync {
     }
 
     /// Locates embedded UBE envelope in the carrier stream.
-    /// Returns (ube_offset, ube_total_size, strategy_name).
     fn locate(
         &self,
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
-    ) -> Result<Option<(u64, u64, String)>, StrHideError>;
+    ) -> Result<Option<LocatedEnvelope>, StrHideError>;
 
     /// Like [`locate`](Self::locate), but with the header magic expected for
     /// this dialect. Adapters that accept a relocated envelope (PNG `chunk`
@@ -220,7 +247,7 @@ pub trait HostAdapter: Send + Sync {
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
         _expected_header_magic: Option<&[u8; 8]>,
-    ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    ) -> Result<Option<LocatedEnvelope>, StrHideError> {
         self.locate(stego_in, expected_trailer_magic)
     }
 

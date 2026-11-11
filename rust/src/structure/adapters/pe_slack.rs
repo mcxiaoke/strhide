@@ -18,7 +18,7 @@
 //! file is touched.
 
 use crate::errors::StrHideError;
-use crate::structure::adapters::{SeekRead, SeekWrite, format_bytes, pe_layout};
+use crate::structure::adapters::{InjectCoordinates, SeekRead, SeekWrite, format_bytes, pe_layout};
 use crate::structure::envelope::{
     EnvelopeHeader, EnvelopeTrailer, HEADER_SIZE, STANDARD_HEADER_MAGIC, STANDARD_TRAILER_MAGIC,
     TRAILER_SIZE,
@@ -53,7 +53,7 @@ pub fn inject(
     host_in: &mut dyn SeekRead,
     ube_in: &mut dyn SeekRead,
     out: &mut dyn Write,
-) -> Result<(u64, u64, u32, u32), StrHideError> {
+) -> Result<InjectCoordinates, StrHideError> {
     let ube_size = ube_in.seek(SeekFrom::End(0))?;
     ube_in.seek(SeekFrom::Start(0))?;
     if ube_size == 0 {
@@ -88,7 +88,12 @@ pub fn inject(
     crate::structure::adapters::io::copy_exact(ube_in, out, ube_size)?;
     copy_range(host_in, out, off + ube_size, layout.host_size)?;
 
-    Ok((off, ube_size, 0, 0))
+    Ok(InjectCoordinates {
+        offset: off,
+        size: ube_size,
+        patch_offset: 0,
+        original_patch_value: 0,
+    })
 }
 
 /// Locates a `pe_slack` envelope inside the carrier's padding.

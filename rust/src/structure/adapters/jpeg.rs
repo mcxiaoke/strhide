@@ -2,8 +2,8 @@
 
 use crate::errors::StrHideError;
 use crate::structure::adapters::{
-    HostAdapter, SeekRead, SegmentedSubStream, StrategyCapacity, SubStream, TrailerCtx,
-    eof::EofAdapter, format_bytes,
+    HostAdapter, InjectCoordinates, LocatedEnvelope, SeekRead, SegmentedSubStream,
+    StrategyCapacity, SubStream, TrailerCtx, eof::EofAdapter, format_bytes,
 };
 use crate::structure::envelope::EnvelopeTrailer;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
@@ -325,7 +325,7 @@ impl HostAdapter for JpegAdapter {
         ube_in: &mut dyn SeekRead,
         out: &mut dyn Write,
         strategy: &str,
-    ) -> Result<(u64, u64, u32, u32), StrHideError> {
+    ) -> Result<InjectCoordinates, StrHideError> {
         if strategy == "eof" {
             return EofAdapter.inject(host_in, ube_in, out, strategy);
         }
@@ -372,14 +372,19 @@ impl HostAdapter for JpegAdapter {
         host_in.seek(SeekFrom::Start(sos_offset))?;
         crate::structure::adapters::io::copy_stream(host_in, out)?;
 
-        Ok((inject_offset, inject_size, 0, 0))
+        Ok(InjectCoordinates {
+            offset: inject_offset,
+            size: inject_size,
+            patch_offset: 0,
+            original_patch_value: 0,
+        })
     }
 
     fn locate(
         &self,
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
-    ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    ) -> Result<Option<LocatedEnvelope>, StrHideError> {
         stego_in.seek(SeekFrom::Start(0))?;
         let mut soi = [0u8; 2];
         if stego_in.read_exact(&mut soi).is_err() || soi != JPEG_SOI {
@@ -400,7 +405,7 @@ impl HostAdapter for JpegAdapter {
         // Helper to check a chain of candidate segments
         let try_locate_chain = |segments: &[(u64, u64)],
                                 stego_in: &mut dyn SeekRead|
-         -> Result<Option<(u64, u64, String)>, StrHideError> {
+         -> Result<Option<LocatedEnvelope>, StrHideError> {
             for (k, &(seg_payload_offset, seg_payload_len)) in segments.iter().enumerate().rev() {
                 if seg_payload_len < 24 {
                     continue;
@@ -421,11 +426,11 @@ impl HostAdapter for JpegAdapter {
                 if trailer.ube_offset == seg_payload_offset
                     && trailer.ube_total_size == seg_payload_len
                 {
-                    return Ok(Some((
-                        trailer.ube_offset,
-                        trailer.ube_total_size,
-                        "app_segment".into(),
-                    )));
+                    return Ok(Some(LocatedEnvelope {
+                        offset: trailer.ube_offset,
+                        size: trailer.ube_total_size,
+                        strategy: "app_segment".into(),
+                    }));
                 }
 
                 // Multi-segment chain match: trace backwards from segment k
@@ -453,11 +458,11 @@ impl HostAdapter for JpegAdapter {
                     }
 
                     if start_idx.is_some() {
-                        return Ok(Some((
-                            trailer.ube_offset,
-                            trailer.ube_total_size,
-                            "app_segment".into(),
-                        )));
+                        return Ok(Some(LocatedEnvelope {
+                            offset: trailer.ube_offset,
+                            size: trailer.ube_total_size,
+                            strategy: "app_segment".into(),
+                        }));
                     }
                 }
             }
@@ -473,7 +478,11 @@ impl HostAdapter for JpegAdapter {
         if let Some(t) = EnvelopeTrailer::read_from_tail(stego_in, expected_trailer_magic)? {
             let file_size = stego_in.seek(SeekFrom::End(0))?;
             if let Some(start) = t.locate_start(file_size) {
-                return Ok(Some((start, t.ube_total_size, "eof".into())));
+                return Ok(Some(LocatedEnvelope {
+                    offset: start,
+                    size: t.ube_total_size,
+                    strategy: "eof".into(),
+                }));
             }
         }
 

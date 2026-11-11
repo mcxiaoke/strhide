@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commit::{TmpGuard, temp_path_for};
 use crate::structure::adapters::{
-    FinalizeCtx, HostAdapter, SeekRead, SeekWrite, StrategyCapacity, TrailerCtx,
+    FinalizeCtx, HostAdapter, LocatedEnvelope, SeekRead, SeekWrite, StrategyCapacity, TrailerCtx,
 };
 
 pub use crate::commit::same_file;
@@ -112,14 +112,14 @@ fn locate_envelope(
     adapter: &dyn HostAdapter,
     password: Option<&str>,
     profile: &StructureProfile,
-) -> Result<Option<(u64, u64, String)>, StrHideError> {
+) -> Result<Option<LocatedEnvelope>, StrHideError> {
     Ok(locate_envelope_with_magic(carrier, adapter, password, profile)?.location)
 }
 
 /// Outcome of a locate scan: where the envelope is, plus the stealth magics the
 /// scan derived on the way (if a password was supplied).
 struct Located {
-    location: Option<(u64, u64, String)>,
+    location: Option<LocatedEnvelope>,
     /// Header magic derived from password + profile domain.
     stealth_header_magic: Option<[u8; 8]>,
     /// Trailer magic derived from the same PBKDF2 run. Level 1 and Level 2
@@ -186,20 +186,20 @@ fn locate_envelope_with_magic(
 /// padding strategies are followed by the rest of the container.
 fn confine_location(
     carrier: &mut dyn SeekRead,
-    location: Option<(u64, u64, String)>,
-) -> Result<Option<(u64, u64, String)>, StrHideError> {
-    let Some((ube_offset, ube_total_size, strategy)) = location else {
+    location: Option<LocatedEnvelope>,
+) -> Result<Option<LocatedEnvelope>, StrHideError> {
+    let Some(location) = location else {
         return Ok(None);
     };
     let file_len = carrier.seek(SeekFrom::End(0))?;
     let min_envelope = (HEADER_SIZE + TRAILER_SIZE) as u64;
-    let end = ube_offset.checked_add(ube_total_size);
-    if ube_total_size < min_envelope || end.is_none_or(|end| end > file_len) {
+    let end = location.offset.checked_add(location.size);
+    if location.size < min_envelope || end.is_none_or(|end| end > file_len) {
         // Not an error: a trailer-shaped tail that points outside the file is
         // exactly what a carrier without a (readable) envelope looks like.
         return Ok(None);
     }
-    Ok(Some((ube_offset, ube_total_size, strategy)))
+    Ok(Some(location))
 }
 
 /// Version of the compact (binary) metadata block. The JSON form carries no
@@ -1333,11 +1333,14 @@ where
 
     // 9. Inject into `out`. Where that is (temp file vs memory buffer, and the
     // atomic-rename dance around it) is the caller's business.
-    let (inject_offset, inject_size, patch_offset, orig_patch_val) = {
+    let coordinates = {
         host.seek(SeekFrom::Start(0))?;
         let mut ube_cursor = Cursor::new(&tmp_ube);
         adapter.inject(host, &mut ube_cursor, out, &selected_strategy)?
     };
+    let (inject_offset, inject_size) = (coordinates.offset, coordinates.size);
+    let (patch_offset, orig_patch_val) =
+        (coordinates.patch_offset, coordinates.original_patch_value);
 
     // 10. Update real ube_offset in Header and Trailer.
     //
@@ -1630,7 +1633,7 @@ where
     // `Some` alone is not enough: a second envelope with the same trailer magic
     // could satisfy `locate` while `read` / `remove` would then reach the *old*
     // one. Require the coordinates this very write sealed into the trailer.
-    let located_at = self_located.as_ref().map(|(o, s, _)| (*o, *s));
+    let located_at = self_located.as_ref().map(|loc| (loc.offset, loc.size));
     if located_at != Some((actual_ube_offset, ube_total_size)) {
         return Err(StrHideError::General(format!(
             "Post-write self-check failed: strategy '{}' wrote the envelope at {} ({} bytes), but locate returned {:?}; aborting so no unreadable stego is committed",
@@ -1942,13 +1945,17 @@ fn open_and_authenticate_envelope<'a>(
 fn open_authenticated_at<'a>(
     host: &'a mut dyn SeekRead,
     adapter: &dyn HostAdapter,
-    location: (u64, u64, String),
+    location: LocatedEnvelope,
     password: Option<&str>,
     profile: &StructureProfile,
     stealth_header_magic: Option<[u8; 8]>,
     precomputed: Option<&UnpackSecrets>,
 ) -> Result<AuthenticatedEnvelope<'a>, StrHideError> {
-    let (ube_offset, ube_total_size, strategy_name) = location;
+    let LocatedEnvelope {
+        offset: ube_offset,
+        size: ube_total_size,
+        strategy: strategy_name,
+    } = location;
 
     // Captured before the envelope reader borrows `host`; the strip path needs
     // the physical carrier bound to reject out-of-range header coordinates.
@@ -2356,7 +2363,11 @@ fn remove_core(
     let host_len = host.seek(SeekFrom::End(0))?;
     let adapter = find_adapter_or_reject(host, label)?;
     let located = locate_envelope_with_magic(host, adapter, password, profile)?;
-    let (ube_offset, ube_total_size, strategy_name) = match located.location {
+    let LocatedEnvelope {
+        offset: ube_offset,
+        size: ube_total_size,
+        strategy: strategy_name,
+    } = match located.location {
         Some(l) => l,
         None => {
             return Err(no_hidden_data_error(
@@ -2378,7 +2389,11 @@ fn remove_core(
         let env = open_authenticated_at(
             host,
             adapter,
-            (ube_offset, ube_total_size, strategy_name.clone()),
+            LocatedEnvelope {
+                offset: ube_offset,
+                size: ube_total_size,
+                strategy: strategy_name.clone(),
+            },
             password,
             profile,
             located.stealth_header_magic,
@@ -2778,10 +2793,12 @@ fn inspect_core(
 
     let loc = locate_envelope(host, adapter, password, profile)?;
 
-    let (ube_offset, ube_total_size, strategy_name) = match loc {
+    let located = match loc {
         Some(l) => l,
         None => return empty_inspect_result(host, adapter, label, strategies),
     };
+    let (ube_offset, ube_total_size, strategy_name) =
+        (located.offset, located.size, located.strategy);
 
     let mut ube_stream =
         adapter.open_ube_reader(host, ube_offset, ube_total_size, &strategy_name)?;
@@ -3123,7 +3140,11 @@ fn verify_core(
     let (l1_ok, l1_msg) =
         verify_structure_for_dialects(host, adapter, password, profile, stealth_trailer_magic)?;
 
-    let (ube_offset, ube_total_size, strategy_name) = match location {
+    let LocatedEnvelope {
+        offset: ube_offset,
+        size: ube_total_size,
+        strategy: strategy_name,
+    } = match location {
         Some(l) => l,
         None => {
             return Ok(VerifyResult {
@@ -3264,7 +3285,11 @@ fn verify_core(
         match open_authenticated_at(
             host,
             adapter,
-            (ube_offset, ube_total_size, strategy_name),
+            LocatedEnvelope {
+                offset: ube_offset,
+                size: ube_total_size,
+                strategy: strategy_name,
+            },
             password,
             profile,
             stealth_header_magic,

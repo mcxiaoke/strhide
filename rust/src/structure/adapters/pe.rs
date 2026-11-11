@@ -6,7 +6,8 @@ use crate::structure::adapters::pe_codebits;
 use crate::structure::adapters::pe_layout;
 use crate::structure::adapters::pe_slack;
 use crate::structure::adapters::{
-    HostAdapter, SeekRead, SeekWrite, StrategyCapacity, SubStream, format_bytes,
+    HostAdapter, InjectCoordinates, LocatedEnvelope, SeekRead, SeekWrite, StrategyCapacity,
+    SubStream, format_bytes,
 };
 use crate::structure::envelope::EnvelopeTrailer;
 #[cfg(feature = "structure-pe")]
@@ -386,7 +387,7 @@ impl HostAdapter for PeAdapter {
         ube_in: &mut dyn SeekRead,
         out: &mut dyn Write,
         strategy: &str,
-    ) -> Result<(u64, u64, u32, u32), StrHideError> {
+    ) -> Result<InjectCoordinates, StrHideError> {
         if !self.supported_strategies().contains(&strategy) {
             return Err(StrHideError::UnsupportedFormat(format!(
                 "Strategy '{strategy}' not supported by PE adapter"
@@ -426,14 +427,19 @@ impl HostAdapter for PeAdapter {
         ube_in.seek(SeekFrom::Start(0))?;
         crate::structure::adapters::io::copy_exact(ube_in, out, ube_size)?;
 
-        Ok((inject_offset, ube_size, 0, 0))
+        Ok(InjectCoordinates {
+            offset: inject_offset,
+            size: ube_size,
+            patch_offset: 0,
+            original_patch_value: 0,
+        })
     }
 
     fn locate(
         &self,
         stego_in: &mut dyn SeekRead,
         expected_trailer_magic: Option<&[u8; 4]>,
-    ) -> Result<Option<(u64, u64, String)>, StrHideError> {
+    ) -> Result<Option<LocatedEnvelope>, StrHideError> {
         // Code-bit channel first (design doc §8.1): a channel carrier has no
         // trailer at EOF and a trailer carrier has no channel, so the two
         // checks are mutually exclusive and the order only affects cost.
@@ -455,11 +461,11 @@ impl HostAdapter for PeAdapter {
             && trailer.ube_offset >= pe_info.pe_image_end
             && trailer.ube_offset.checked_add(trailer.ube_total_size) == Some(file_size)
         {
-            return Ok(Some((
-                trailer.ube_offset,
-                trailer.ube_total_size,
-                "pe_overlay".into(),
-            )));
+            return Ok(Some(LocatedEnvelope {
+                offset: trailer.ube_offset,
+                size: trailer.ube_total_size,
+                strategy: "pe_overlay".into(),
+            }));
         }
 
         // Envelope inside the section alignment padding (file size unchanged).
@@ -469,17 +475,21 @@ impl HostAdapter for PeAdapter {
         if let Some((ube_offset, ube_total_size)) =
             pe_slack::locate(stego_in, expected_trailer_magic)?
         {
-            return Ok(Some((ube_offset, ube_total_size, "pe_slack".into())));
+            return Ok(Some(LocatedEnvelope {
+                offset: ube_offset,
+                size: ube_total_size,
+                strategy: "pe_slack".into(),
+            }));
         }
 
         if let Some(trailer) = &trailer
             && trailer.ube_offset.checked_add(trailer.ube_total_size) == Some(file_size)
         {
-            return Ok(Some((
-                trailer.ube_offset,
-                trailer.ube_total_size,
-                "eof".into(),
-            )));
+            return Ok(Some(LocatedEnvelope {
+                offset: trailer.ube_offset,
+                size: trailer.ube_total_size,
+                strategy: "eof".into(),
+            }));
         }
 
         Ok(None)
@@ -665,7 +675,7 @@ fn inject_codebits(
     host_in: &mut dyn SeekRead,
     ube_in: &mut dyn SeekRead,
     out: &mut dyn Write,
-) -> Result<(u64, u64, u32, u32), StrHideError> {
+) -> Result<InjectCoordinates, StrHideError> {
     let layout = pe_codebits::parse_pe_code_layout_streaming(host_in)?;
     let mut text = pe_codebits::read_text_range(host_in, &layout)?;
 
@@ -733,7 +743,12 @@ fn inject_codebits(
             (slack_off, slack_off + need_slack as u64, diff.as_slice()),
         ],
     )?;
-    Ok((0, 0, 0, 0))
+    Ok(InjectCoordinates {
+        offset: 0,
+        size: 0,
+        patch_offset: 0,
+        original_patch_value: 0,
+    })
 }
 
 /// `pe_codebits` location: read the channel header from `.text` and validate
@@ -744,7 +759,7 @@ fn inject_codebits(
 fn locate_codebits(
     stego_in: &mut dyn SeekRead,
     expected_trailer_magic: Option<&[u8; 4]>,
-) -> Result<Option<(u64, u64, String)>, StrHideError> {
+) -> Result<Option<LocatedEnvelope>, StrHideError> {
     let layout = match pe_codebits::parse_pe_code_layout_streaming(stego_in) {
         Ok(l) => l,
         Err(
@@ -756,7 +771,11 @@ fn locate_codebits(
     };
     let text = pe_codebits::read_text_range(stego_in, &layout)?;
     match pe_codebits::read_channel_header(&text, layout.bitness, expected_trailer_magic.copied()) {
-        Ok(header) => Ok(Some((0, header.ube_len as u64, "pe_codebits".to_string()))),
+        Ok(header) => Ok(Some(LocatedEnvelope {
+            offset: 0,
+            size: header.ube_len as u64,
+            strategy: "pe_codebits".to_string(),
+        })),
         Err(pe_codebits::CodebitsError::ChannelNotFound) => Ok(None),
         Err(e) => Err(e.into()),
     }
