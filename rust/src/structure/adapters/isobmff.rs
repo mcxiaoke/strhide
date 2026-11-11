@@ -689,6 +689,13 @@ fn read_stream_box_header(
     } else {
         (size32 as u64, 8)
     };
+    // A 32-bit size below the header length (8 bytes) would make the three
+    // streaming callers advance `pos` by 2..7 bytes and re-parse the same
+    // region. Reject it here so all of them share one rule; the 64-bit and
+    // size==0 arms already guarantee size >= header_len.
+    if size < header_len as u64 {
+        return Err(StrHideError::CorruptedData("Invalid box size".into()));
+    }
     if size > file_size - pos {
         return Err(StrHideError::CorruptedData("Invalid box size".into()));
     }

@@ -435,9 +435,21 @@ impl<'a> PayloadSource<'a> {
         Ok(match self {
             PayloadSource::Bytes(b) => (Cow::Borrowed(b), "payload.bin".to_string(), true),
             PayloadSource::File(p) => {
+                // Cap the read itself: every write path rejects payloads above
+                // `structure_payload_limit` (<= MAX_VERIFY_PAYLOAD_SIZE), so a
+                // larger file can never be embedded. Reading it in full first
+                // would allocate arbitrary amounts of memory before the limit
+                // check in `write_core` runs. Same bounded-read shape as the
+                // `Stdin` arm below.
+                const MAX_FILE_PAYLOAD: u64 = crate::crypto::MAX_VERIFY_PAYLOAD_SIZE;
                 let mut f = File::open(p)?;
                 let mut b = Vec::new();
-                f.read_to_end(&mut b)?;
+                let read = std::io::Read::take(&mut f, MAX_FILE_PAYLOAD + 1).read_to_end(&mut b)?;
+                if read as u64 > MAX_FILE_PAYLOAD {
+                    return Err(StrHideError::PayloadTooLarge(format!(
+                        "Payload file exceeds the {MAX_FILE_PAYLOAD} byte limit"
+                    )));
+                }
                 let name = p
                     .file_name()
                     .and_then(|s| s.to_str())
