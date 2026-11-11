@@ -1957,6 +1957,100 @@ fn l1_allowed(cred: &Credential<'_>, limits: &ExtractParams) -> bool {
         || limits.max_pbkdf2_iterations >= crate::crypto::CONTENT_L1_PBKDF2_ITERATIONS
 }
 
+/// Base header and extension area every PNG reader must decode first.
+struct OpenedPngHeader {
+    header: SpatialHeaderV4,
+    base_bytes: [u8; PNG_AUDIO_BASE_HEADER_BYTES],
+    extension: Vec<u8>,
+    /// The cost-free header permutation prefix. `extract` reuses it for a
+    /// debug assertion that the body plan agrees with the header layout.
+    base_layout: Vec<usize>,
+}
+
+/// Why the shared header bootstrap stopped.
+enum OpenedPngHeaderError {
+    /// The pool is large enough but the keyed slot read came back short: an
+    /// anomaly worth a diagnostic note in `inspect`, not the ordinary
+    /// "nothing hidden here" answer.
+    HeaderSlotsShort { carrier_slots: usize, needed: usize },
+    /// Everything else: no readable header, a malformed extension, or a
+    /// digit that violates the caller's policy. Readers fold this into their
+    /// own "no payload" / empty-info semantics.
+    Rejected,
+}
+
+/// Read and validate the base header + extension area.
+///
+/// `extract_png_with_keys` and `inspect_png_with_keys` used to carry two
+/// copies of this bootstrap (base header, extension decode, critical-TLV
+/// rejection, policy limits). Keeping one implementation is what makes
+/// "inspect says readable" and "extract says no payload" unable to disagree.
+fn open_png_header(
+    image: &RawImage,
+    locator: &crate::stego::format::HeaderLocatorKeys,
+    limits: &ExtractParams,
+) -> Result<OpenedPngHeader, OpenedPngHeaderError> {
+    let carrier_slots = header_pool(image).len();
+    if carrier_slots < PNG_AUDIO_BASE_SLOTS {
+        return Err(OpenedPngHeaderError::Rejected);
+    }
+
+    let base_layout = header_layout(image, &locator.locate_seed, 0);
+    let base_bytes: [u8; PNG_AUDIO_BASE_HEADER_BYTES] =
+        read_slot_bytes(image, &base_layout[..PNG_AUDIO_BASE_SLOTS], 64)
+            .try_into()
+            .map_err(|_| OpenedPngHeaderError::HeaderSlotsShort {
+                carrier_slots,
+                needed: PNG_AUDIO_BASE_SLOTS,
+            })?;
+    let header = SpatialHeaderV4::decode(&base_bytes, PNG_FORMAT_ID)
+        .map_err(|_| OpenedPngHeaderError::Rejected)?;
+
+    let ext_len = header.ext_len as usize;
+    let header_slot_count = PNG_AUDIO_BASE_SLOTS + 8 * ext_len;
+    if header_slot_count > carrier_slots {
+        return Err(OpenedPngHeaderError::Rejected);
+    }
+    let full_layout = header_layout(image, &locator.locate_seed, ext_len);
+    let extension = read_slot_bytes(
+        image,
+        &full_layout[PNG_AUDIO_BASE_SLOTS..header_slot_count],
+        ext_len,
+    );
+
+    // The extension area is authenticated by the AAD, but its structure must
+    // be sane first: an unknown critical TLV is fatal, non-critical ones are
+    // ignored. `validate_ext_critical` also cross-checks the flags.
+    header
+        .validate_ext_critical(&extension)
+        .map_err(|_| OpenedPngHeaderError::Rejected)?;
+    let records = parse_extension(&extension).map_err(|_| OpenedPngHeaderError::Rejected)?;
+    if records
+        .iter()
+        .any(|(type_id, _)| type_id & TLV_CRITICAL != 0)
+    {
+        return Err(OpenedPngHeaderError::Rejected);
+    }
+
+    // Policy checks run after the base header and extension are decoded but
+    // before any body slot is computed or allocated.
+    limits
+        .validate_header(
+            header.suite_id,
+            header.body_len,
+            header_slot_count,
+            carrier_slots,
+        )
+        .map_err(|_| OpenedPngHeaderError::Rejected)?;
+
+    Ok(OpenedPngHeader {
+        header,
+        base_bytes,
+        extension,
+        base_layout,
+    })
+}
+
 /// Body of [`extract_png`] for an already-decoded image.
 ///
 /// `verify_png` decodes once and reuses the pixels across all three levels
@@ -2006,56 +2100,14 @@ fn extract_png_with_keys(
     let w = image.width as usize;
     let h = image.height as usize;
     let cipher = spatial.cipher;
-    let carrier_slots = header_pool(image).len();
-    if carrier_slots < PNG_AUDIO_BASE_SLOTS {
-        return Err(no_hidden());
-    }
 
-    // Read the 64-byte base header from the first 512 keyed slots. The
-    // prefix is stable, so this is the same permutation the writer used.
-    let base_layout = header_layout(image, &locator.locate_seed, 0);
-    let base_bytes: [u8; PNG_AUDIO_BASE_HEADER_BYTES] =
-        read_slot_bytes(image, &base_layout[..PNG_AUDIO_BASE_SLOTS], 64)
-            .try_into()
-            .map_err(|_| no_hidden())?;
-    let header = SpatialHeaderV4::decode(&base_bytes, PNG_FORMAT_ID).map_err(|_| no_hidden())?;
-
+    let OpenedPngHeader {
+        header,
+        base_bytes,
+        extension,
+        base_layout,
+    } = open_png_header(image, locator, limits).map_err(|_| no_hidden())?;
     let ext_len = header.ext_len as usize;
-    let header_slot_count = PNG_AUDIO_BASE_SLOTS + 8 * ext_len;
-    if header_slot_count > carrier_slots {
-        return Err(no_hidden());
-    }
-    let full_layout = header_layout(image, &locator.locate_seed, ext_len);
-    let extension = read_slot_bytes(
-        image,
-        &full_layout[PNG_AUDIO_BASE_SLOTS..header_slot_count],
-        ext_len,
-    );
-
-    // The extension area is authenticated by the AAD, but its structure must
-    // be sane first: an unknown critical TLV is fatal, non-critical ones are
-    // ignored. `validate_ext_critical` also cross-checks the flags.
-    header
-        .validate_ext_critical(&extension)
-        .map_err(|_| no_hidden())?;
-    let records = parse_extension(&extension).map_err(|_| no_hidden())?;
-    if records
-        .iter()
-        .any(|(type_id, _)| type_id & TLV_CRITICAL != 0)
-    {
-        return Err(no_hidden());
-    }
-
-    // Policy checks run after the base header and extension are decoded but
-    // before any body slot is computed or allocated.
-    limits
-        .validate_header(
-            header.suite_id,
-            header.body_len,
-            header_slot_count,
-            carrier_slots,
-        )
-        .map_err(|_| no_hidden())?;
 
     // The carrier names its cost model. An id this build does not know means a
     // carrier written by a newer tool -- reported exactly like "no payload",
@@ -2260,72 +2312,29 @@ fn inspect_png_with_keys(
     let mut empty_info = StegoHeaderInfo::empty("PNG");
     empty_info.media_info = media_info;
 
-    let locator = &keys.locator;
-    let carrier_slots = header_pool(image).len();
-    if carrier_slots < PNG_AUDIO_BASE_SLOTS {
-        return Ok(empty_info);
-    }
-
-    let base_layout = header_layout(image, &locator.locate_seed, 0);
-    let base_bytes: [u8; PNG_AUDIO_BASE_HEADER_BYTES] = match read_slot_bytes(
-        image,
-        &base_layout[..PNG_AUDIO_BASE_SLOTS],
-        64,
-    )
-    .try_into()
-    {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            // The pool length was checked above, so a short read means the
-            // slot mapping disagrees with the image — an anomaly, not the
-            // "no header here" answer every clean PNG gives below.
+    let opened = match open_png_header(image, &keys.locator, limits) {
+        Ok(opened) => opened,
+        Err(OpenedPngHeaderError::HeaderSlotsShort {
+            carrier_slots,
+            needed,
+        }) => {
+            // The pool length was checked inside the bootstrap, so a short read
+            // means the slot mapping disagrees with the image — an anomaly, not
+            // the "no header here" answer every clean PNG gives below.
             log::debug!(
                 target: "stego::inspect",
                 "png header slots could not be read (pool {} slots, need {})",
                 carrier_slots,
-                PNG_AUDIO_BASE_SLOTS
+                needed
             );
             empty_info.note = Some(format!(
-                "Header slots could not be read: pool has {carrier_slots} slots, the header needs {PNG_AUDIO_BASE_SLOTS}"
+                "Header slots could not be read: pool has {carrier_slots} slots, the header needs {needed}"
             ));
             return Ok(empty_info);
         }
+        Err(OpenedPngHeaderError::Rejected) => return Ok(empty_info),
     };
-    let Ok(header) = SpatialHeaderV4::decode(&base_bytes, PNG_FORMAT_ID) else {
-        return Ok(empty_info);
-    };
-
-    let ext_len = header.ext_len as usize;
-    let header_slot_count = PNG_AUDIO_BASE_SLOTS + 8 * ext_len;
-    if header_slot_count > carrier_slots {
-        return Ok(empty_info);
-    }
-    let full_layout = header_layout(image, &locator.locate_seed, ext_len);
-    let extension = read_slot_bytes(
-        image,
-        &full_layout[PNG_AUDIO_BASE_SLOTS..header_slot_count],
-        ext_len,
-    );
-    if header.validate_ext_critical(&extension).is_err() {
-        return Ok(empty_info);
-    }
-    if parse_extension(&extension)
-        .map(|records| records.iter().any(|(t, _)| t & TLV_CRITICAL != 0))
-        .unwrap_or(true)
-    {
-        return Ok(empty_info);
-    }
-    if limits
-        .validate_header(
-            header.suite_id,
-            header.body_len,
-            header_slot_count,
-            carrier_slots,
-        )
-        .is_err()
-    {
-        return Ok(empty_info);
-    }
+    let header = opened.header;
 
     let algo_name = crate::stego::png::registry::spatial_model_from_wire_id(header.algorithm_id)
         .map(|m| m.id().to_string())
