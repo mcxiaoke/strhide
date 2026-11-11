@@ -150,6 +150,26 @@ pub enum StrHideError {
     #[error("Operation cancelled")]
     Cancelled,
 
+    /// A caller-supplied parameter is out of range, inconsistent, or otherwise
+    /// invalid. Split out of [`General`](Self::General) so callers can tell a
+    /// validation failure from an internal invariant without string matching.
+    #[error("{0}")]
+    InvalidArgument(String),
+
+    /// A configuration file is missing, unreadable, or malformed.
+    #[error("{0}")]
+    ConfigError(String),
+
+    /// Key derivation, AEAD setup, or encryption/decryption failed. The
+    /// underlying cipher error is preserved in the message.
+    #[error("{0}")]
+    CryptoError(String),
+
+    /// A size or offset does not fit the destination buffer, or a length field
+    /// exceeds its container.
+    #[error("{0}")]
+    BufferOverflow(String),
+
     /// Any other user-facing failure: internal invariants, invalid arguments,
     /// unsupported strategy for the detected format, output path problems.
     #[error("{0}")]
@@ -202,6 +222,10 @@ impl StrHideError {
             StrHideError::NoHiddenData(_) => ErrorKind::NoHiddenData,
             StrHideError::UnsupportedVersion(_) => ErrorKind::UnsupportedVersion,
             StrHideError::Cancelled => ErrorKind::Cancelled,
+            StrHideError::InvalidArgument(_) => ErrorKind::InvalidArgument,
+            StrHideError::ConfigError(_) => ErrorKind::Config,
+            StrHideError::CryptoError(_) => ErrorKind::Crypto,
+            StrHideError::BufferOverflow(_) => ErrorKind::BufferOverflow,
             StrHideError::General(_) => ErrorKind::General,
         }
     }
@@ -231,7 +255,12 @@ impl StrHideError {
             // A cancellation is the caller's own decision, not an error class:
             // there is nothing to translate and nothing went wrong.
             StrHideError::Cancelled => None,
-            StrHideError::NoHiddenData(_) | StrHideError::General(_) => None,
+            StrHideError::InvalidArgument(_)
+            | StrHideError::ConfigError(_)
+            | StrHideError::CryptoError(_)
+            | StrHideError::BufferOverflow(_)
+            | StrHideError::NoHiddenData(_)
+            | StrHideError::General(_) => None,
         }
     }
 
@@ -246,6 +275,10 @@ impl StrHideError {
             | StrHideError::UnsupportedFormat(s)
             | StrHideError::UnsupportedVersion(s)
             | StrHideError::NoHiddenData(s)
+            | StrHideError::InvalidArgument(s)
+            | StrHideError::ConfigError(s)
+            | StrHideError::CryptoError(s)
+            | StrHideError::BufferOverflow(s)
             | StrHideError::General(s) => s.clone(),
             StrHideError::AlreadyExists(p) => {
                 format!(
@@ -336,6 +369,10 @@ pub enum ErrorKind {
     NoHiddenData,
     UnsupportedVersion,
     Cancelled,
+    InvalidArgument,
+    Config,
+    Crypto,
+    BufferOverflow,
     General,
 }
 

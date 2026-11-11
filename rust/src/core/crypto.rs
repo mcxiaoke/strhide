@@ -268,9 +268,9 @@ pub fn derive_keys(password: &str, salt: &[u8]) -> Result<([u8; 32], [u8; 32]), 
     let mut meta_key = [0u8; 32];
 
     hk.expand(b"strhide-payload", &mut payload_key)
-        .map_err(|e| StrHideError::General(format!("HKDF expand payload error: {e}")))?;
+        .map_err(|e| StrHideError::CryptoError(format!("HKDF expand payload error: {e}")))?;
     hk.expand(b"strhide-metadata", &mut meta_key)
-        .map_err(|e| StrHideError::General(format!("HKDF expand metadata error: {e}")))?;
+        .map_err(|e| StrHideError::CryptoError(format!("HKDF expand metadata error: {e}")))?;
 
     Ok((payload_key, meta_key))
 }
@@ -287,11 +287,11 @@ pub fn derive_all(password: &str, salt: &[u8]) -> Result<PasswordSecrets, StrHid
     };
 
     hk.expand(b"strhide-payload", &mut secrets.payload_key)
-        .map_err(|e| StrHideError::General(format!("HKDF expand payload error: {e}")))?;
+        .map_err(|e| StrHideError::CryptoError(format!("HKDF expand payload error: {e}")))?;
     hk.expand(b"strhide-metadata", &mut secrets.meta_key)
-        .map_err(|e| StrHideError::General(format!("HKDF expand metadata error: {e}")))?;
+        .map_err(|e| StrHideError::CryptoError(format!("HKDF expand metadata error: {e}")))?;
     hk.expand(b"strhide-header-mask-v1", &mut secrets.header_mask)
-        .map_err(|e| StrHideError::General(format!("HKDF expand header mask error: {e}")))?;
+        .map_err(|e| StrHideError::CryptoError(format!("HKDF expand header mask error: {e}")))?;
 
     Ok(secrets)
 }
@@ -316,9 +316,11 @@ pub fn derive_stealth_magics(
     let mut trailer_magic = [0u8; 4];
 
     hk.expand(b"strhide-stealth-header", &mut header_magic)
-        .map_err(|e| StrHideError::General(format!("HKDF expand stealth header error: {e}")))?;
+        .map_err(|e| StrHideError::CryptoError(format!("HKDF expand stealth header error: {e}")))?;
     hk.expand(b"strhide-stealth-trailer", &mut trailer_magic)
-        .map_err(|e| StrHideError::General(format!("HKDF expand stealth trailer error: {e}")))?;
+        .map_err(|e| {
+            StrHideError::CryptoError(format!("HKDF expand stealth trailer error: {e}"))
+        })?;
 
     Ok((header_magic, trailer_magic))
 }
@@ -331,7 +333,7 @@ pub fn derive_header_mask(password: &str, salt: &[u8]) -> Result<[u8; 76], StrHi
     let hk = hkdf::Hkdf::<Sha256>::new(Some(salt), &ikm[..]);
     let mut mask = [0u8; 76];
     hk.expand(b"strhide-header-mask-v1", &mut mask)
-        .map_err(|e| StrHideError::General(format!("HKDF expand header mask error: {e}")))?;
+        .map_err(|e| StrHideError::CryptoError(format!("HKDF expand header mask error: {e}")))?;
     Ok(mask)
 }
 
@@ -408,14 +410,14 @@ pub fn encrypt_metadata(
 ) -> Result<Vec<u8>, StrHideError> {
     let nonce = make_meta_nonce(base_nonce);
     let cipher = Aes256Gcm::new_from_slice(meta_key)
-        .map_err(|e| StrHideError::General(format!("Invalid key for AES-GCM: {e}")))?;
+        .map_err(|e| StrHideError::CryptoError(format!("Invalid key for AES-GCM: {e}")))?;
     let payload = Payload {
         msg: meta_bytes,
         aad,
     };
     cipher
         .encrypt(&Nonce::from(nonce), payload)
-        .map_err(|e| StrHideError::General(format!("Metadata encryption failed: {e}")))
+        .map_err(|e| StrHideError::CryptoError(format!("Metadata encryption failed: {e}")))
 }
 
 /// Open the metadata block. The AEAD tag authenticates both the key and the
@@ -432,7 +434,7 @@ pub fn decrypt_metadata(
 ) -> Result<Vec<u8>, StrHideError> {
     let nonce = make_meta_nonce(base_nonce);
     let cipher = Aes256Gcm::new_from_slice(meta_key)
-        .map_err(|e| StrHideError::General(format!("Invalid key for AES-GCM: {e}")))?;
+        .map_err(|e| StrHideError::CryptoError(format!("Invalid key for AES-GCM: {e}")))?;
     let payload = Payload {
         msg: meta_ciphertext,
         aad,
@@ -465,12 +467,12 @@ pub fn encrypt_stream_to_chunks<R: Read, W: Write>(
         // A `debug_assert!` here was the only check: release builds silently
         // emitted one empty chunk for `chunk_size == 0` and wrote an unreadable
         // stream for an oversized one.
-        return Err(StrHideError::General(format!(
+        return Err(StrHideError::InvalidArgument(format!(
             "chunk_size must be in 1..={MAX_CHUNK_SIZE} bytes, got {chunk_size}"
         )));
     }
     let cipher = Aes256Gcm::new_from_slice(payload_key)
-        .map_err(|e| StrHideError::General(format!("Invalid key for AES-GCM: {e}")))?;
+        .map_err(|e| StrHideError::CryptoError(format!("Invalid key for AES-GCM: {e}")))?;
 
     let mut current_chunk = Vec::with_capacity(chunk_size);
     let mut buf = [0u8; 64 * 1024];
@@ -504,7 +506,7 @@ pub fn encrypt_stream_to_chunks<R: Read, W: Write>(
                     aad: &chunk_aad,
                 },
             )
-            .map_err(|e| StrHideError::General(format!("AEAD encryption failed: {e}")))?;
+            .map_err(|e| StrHideError::CryptoError(format!("AEAD encryption failed: {e}")))?;
 
         let chunk_len = encrypted.len() as u32;
         writer.write_all(&chunk_len.to_le_bytes())?;
@@ -542,7 +544,7 @@ pub fn encrypt_stream_to_chunks<R: Read, W: Write>(
                     aad: &chunk_aad,
                 },
             )
-            .map_err(|e| StrHideError::General(format!("AEAD encryption failed: {e}")))?;
+            .map_err(|e| StrHideError::CryptoError(format!("AEAD encryption failed: {e}")))?;
 
         let chunk_len = encrypted.len() as u32;
         writer.write_all(&chunk_len.to_le_bytes())?;
@@ -582,7 +584,7 @@ pub fn decrypt_stream_from_chunks<R: Read, W: Write>(
     total_payload_bytes: u64,
 ) -> Result<u64, StrHideError> {
     let cipher = Aes256Gcm::new_from_slice(payload_key)
-        .map_err(|e| StrHideError::General(format!("Invalid key for AES-GCM: {e}")))?;
+        .map_err(|e| StrHideError::CryptoError(format!("Invalid key for AES-GCM: {e}")))?;
 
     let mut chunk_index: usize = 0;
     let mut bytes_consumed: u64 = 0;
@@ -723,7 +725,7 @@ pub(crate) fn probe_compressibility(
     // A real check, not a debug_assert: release builds would otherwise underflow
     // `span` and slice out of bounds if a future caller passes a short payload.
     if payload.len() <= COMPRESSION_PROBE_MIN_BYTES {
-        return Err(StrHideError::General(format!(
+        return Err(StrHideError::InvalidArgument(format!(
             "compression probe needs more than {} bytes, got {}",
             COMPRESSION_PROBE_MIN_BYTES,
             payload.len()
@@ -852,13 +854,13 @@ pub fn verify_payload_stream<R: Read>(
     limit: u64,
 ) -> Result<u64, StrHideError> {
     if limit == 0 {
-        return Err(StrHideError::General(
+        return Err(StrHideError::InvalidArgument(
             "Verification limit must be greater than zero".into(),
         ));
     }
     let limit = limit.min(MAX_VERIFY_PAYLOAD_SIZE);
     if total_payload_bytes > limit || expected_raw_size > limit {
-        return Err(StrHideError::General(format!(
+        return Err(StrHideError::InvalidArgument(format!(
             "Payload size (declared raw: {expected_raw_size}B, encrypted: {total_payload_bytes}B) exceeds verification limit ({limit}B)"
         )));
     }

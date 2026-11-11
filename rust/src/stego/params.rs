@@ -328,7 +328,7 @@ impl PngParams {
     pub fn validate(&self) -> Result<(), StrHideError> {
         for (name, window) in [("p1_window", self.p1_window), ("p2_window", self.p2_window)] {
             if window == 0 || window % 2 == 0 {
-                return Err(StrHideError::General(format!(
+                return Err(StrHideError::InvalidArgument(format!(
                     "HILL parameter '{name}' must be a positive odd number, got {window}"
                 )));
             }
@@ -336,13 +336,13 @@ impl PngParams {
             // bounded; anything larger is a configuration mistake, not a
             // tuning choice.
             if window > 63 {
-                return Err(StrHideError::General(format!(
+                return Err(StrHideError::InvalidArgument(format!(
                     "HILL parameter '{name}' must be <= 63, got {window}"
                 )));
             }
         }
         if !self.epsilon.is_finite() || self.epsilon <= 0.0 {
-            return Err(StrHideError::General(format!(
+            return Err(StrHideError::InvalidArgument(format!(
                 "HILL parameter 'epsilon' must be a finite positive number, got {}",
                 self.epsilon
             )));
@@ -354,7 +354,7 @@ impl PngParams {
         if let Some(&sigma) = self.algorithm_options.get("sigma")
             && (!sigma.is_finite() || !(0.1..=10.0).contains(&sigma))
         {
-            return Err(StrHideError::General(format!(
+            return Err(StrHideError::InvalidArgument(format!(
                 "PNG cost model parameter 'sigma' must be finite and in 0.1..=10.0, got {sigma}"
             )));
         }
@@ -364,7 +364,7 @@ impl PngParams {
         if !self.exclusion_percentile.is_finite()
             || !(0.0..=0.9).contains(&self.exclusion_percentile)
         {
-            return Err(StrHideError::General(format!(
+            return Err(StrHideError::InvalidArgument(format!(
                 "HILL parameter 'exclusion_percentile' must be in 0.0..=0.9, got {}",
                 self.exclusion_percentile
             )));
@@ -490,12 +490,12 @@ fn validate_algorithm_options(
 ) -> Result<(), StrHideError> {
     for (key, value) in bag {
         if key.trim().is_empty() {
-            return Err(StrHideError::General(format!(
+            return Err(StrHideError::InvalidArgument(format!(
                 "{family} parameter 'algorithm_options' contains an empty key"
             )));
         }
         if !value.is_finite() {
-            return Err(StrHideError::General(format!(
+            return Err(StrHideError::InvalidArgument(format!(
                 "{family} parameter 'algorithm_options.{key}' must be finite, got {value}"
             )));
         }
@@ -658,13 +658,13 @@ impl JpegParams {
     /// search or a header field the decoder rejects.
     pub fn validate(&self) -> Result<(), StrHideError> {
         if !self.neighbor_weight.is_finite() || self.neighbor_weight < 0.0 {
-            return Err(StrHideError::General(format!(
+            return Err(StrHideError::InvalidArgument(format!(
                 "UERD parameter 'neighbor_weight' must be a finite non-negative number, got {}",
                 self.neighbor_weight
             )));
         }
         if !self.wet_cost.is_finite() || self.wet_cost <= 0.0 {
-            return Err(StrHideError::General(format!(
+            return Err(StrHideError::InvalidArgument(format!(
                 "UERD parameter 'wet_cost' must be a finite positive number, got {}",
                 self.wet_cost
             )));
@@ -673,12 +673,12 @@ impl JpegParams {
         if let Some(budget) = self.slot_budget
             && budget < 8
         {
-            return Err(StrHideError::General(format!(
+            return Err(StrHideError::InvalidArgument(format!(
                 "JPEG parameter 'slot_budget' must be >= 8, got {budget}"
             )));
         }
         if !self.polarize_weight.is_finite() || self.polarize_weight <= 0.0 {
-            return Err(StrHideError::General(format!(
+            return Err(StrHideError::InvalidArgument(format!(
                 "JPEG parameter 'polarize_weight' must be a finite positive number, got {}",
                 self.polarize_weight
             )));
@@ -687,7 +687,7 @@ impl JpegParams {
         // discounting it, which inverts the meaning of the setting. Reject it
         // rather than silently doing the opposite of what the name says.
         if self.polarize_weight > 1.0 {
-            return Err(StrHideError::General(format!(
+            return Err(StrHideError::InvalidArgument(format!(
                 "JPEG parameter 'polarize_weight' must be <= 1.0 (1.0 disables polarization), got {}",
                 self.polarize_weight
             )));

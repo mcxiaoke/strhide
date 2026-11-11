@@ -18,6 +18,10 @@ export type ErrorKind =
   | "no_hidden_data"
   | "unsupported_version"
   | "cancelled"
+  | "invalid_argument"
+  | "config"
+  | "crypto"
+  | "buffer_overflow"
   | "general";
 
 export interface ErrorDetail {

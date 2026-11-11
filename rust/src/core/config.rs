@@ -177,7 +177,7 @@ fn to_absolute_path(p: &Path) -> PathBuf {
 
 fn parse_config(text: &str, origin: &Path) -> Result<FileConfig, StrHideError> {
     let table: toml::Table = toml::from_str(text).map_err(|e| {
-        StrHideError::General(format!(
+        StrHideError::ConfigError(format!(
             "Invalid TOML in config file '{}': {e}",
             origin.display()
         ))
@@ -221,7 +221,7 @@ fn parse_config(text: &str, origin: &Path) -> Result<FileConfig, StrHideError> {
     // parsing the same text a second time: two independent parses can disagree
     // (and used to report two different messages for one syntax error).
     let mut cfg: FileConfig = table.try_into().map_err(|e| {
-        StrHideError::General(format!("Invalid config file '{}': {e}", origin.display()))
+        StrHideError::ConfigError(format!("Invalid config file '{}': {e}", origin.display()))
     })?;
 
     cfg.warnings = warnings;
@@ -235,7 +235,7 @@ fn parse_config(text: &str, origin: &Path) -> Result<FileConfig, StrHideError> {
 pub fn load(explicit: Option<&Path>) -> Result<FileConfig, StrHideError> {
     if let Some(p) = explicit {
         let text = std::fs::read_to_string(p).map_err(|e| {
-            StrHideError::General(format!("Failed to read config file '{}': {e}", p.display()))
+            StrHideError::ConfigError(format!("Failed to read config file '{}': {e}", p.display()))
         })?;
         return parse_config(&text, p);
     }
@@ -246,7 +246,7 @@ pub fn load(explicit: Option<&Path>) -> Result<FileConfig, StrHideError> {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
-                return Err(StrHideError::General(format!(
+                return Err(StrHideError::ConfigError(format!(
                     "Failed to read config file '{}': {e}",
                     cand.display()
                 )));

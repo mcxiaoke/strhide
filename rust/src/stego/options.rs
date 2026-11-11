@@ -556,24 +556,26 @@ impl StegoTuning {
             #[cfg(feature = "content-audio")]
             (StegoTuning::Audio { .. }, FileFormat::Wav | FileFormat::Flac) => Ok(()),
             #[cfg(feature = "content-png")]
-            (StegoTuning::Png { model, .. }, other) => Err(StrHideError::General(format!(
+            (StegoTuning::Png { model, .. }, other) => Err(StrHideError::InvalidArgument(format!(
                 "stego algorithm '{}' is a spatial (PNG) model and cannot be used on a {} carrier",
                 model.id(),
                 other.as_str()
             ))),
             #[cfg(feature = "content-jpeg")]
-            (StegoTuning::Jpeg { model, .. }, other) => Err(StrHideError::General(format!(
-                "stego algorithm '{}' is a JPEG DCT model and cannot be used on a {} carrier",
-                model.id(),
-                other.as_str()
-            ))),
+            (StegoTuning::Jpeg { model, .. }, other) => {
+                Err(StrHideError::InvalidArgument(format!(
+                    "stego algorithm '{}' is a JPEG DCT model and cannot be used on a {} carrier",
+                    model.id(),
+                    other.as_str()
+                )))
+            }
             #[cfg(feature = "content-hevc")]
-            (StegoTuning::Hevc { .. }, other) => Err(StrHideError::General(format!(
+            (StegoTuning::Hevc { .. }, other) => Err(StrHideError::InvalidArgument(format!(
                 "the HEVC engine cannot be used on a {} carrier",
                 other.as_str()
             ))),
             #[cfg(feature = "content-audio")]
-            (StegoTuning::Audio { .. }, other) => Err(StrHideError::General(format!(
+            (StegoTuning::Audio { .. }, other) => Err(StrHideError::InvalidArgument(format!(
                 "the audio sample-domain engine cannot be used on a {} carrier",
                 other.as_str()
             ))),
@@ -653,7 +655,7 @@ pub(crate) fn resolve_credential<'a>(
 ) -> Result<Credential<'a>, StrHideError> {
     let password = password.filter(|s| !s.is_empty());
     if key.is_some() && password.is_some() {
-        return Err(StrHideError::General(
+        return Err(StrHideError::InvalidArgument(
             "password and key are mutually exclusive".into(),
         ));
     }

@@ -103,7 +103,7 @@ pub(super) fn write_sized_uint(
         )),
         4 => {
             let v32 = u32::try_from(val).map_err(|_| {
-                StrHideError::General(format!("Offset {val} overflows 32-bit iloc field"))
+                StrHideError::BufferOverflow(format!("Offset {val} overflows 32-bit iloc field"))
             })?;
             buf.extend_from_slice(&v32.to_be_bytes());
             Ok(())
@@ -131,7 +131,7 @@ pub(super) fn patch_sized_uint(
         )),
         4 => {
             let v32 = u32::try_from(val).map_err(|_| {
-                StrHideError::General(format!("Offset {val} overflows 32-bit iloc field"))
+                StrHideError::BufferOverflow(format!("Offset {val} overflows 32-bit iloc field"))
             })?;
             buf[pos..pos + 4].copy_from_slice(&v32.to_be_bytes());
             Ok(())

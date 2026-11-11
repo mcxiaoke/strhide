@@ -44,7 +44,7 @@ impl TryFrom<&str> for StrategyChoice {
         StrategyId::from_name(trimmed)
             .map(Self::Named)
             .ok_or_else(|| {
-                StrHideError::General(format!(
+                StrHideError::InvalidArgument(format!(
                     "unknown strategy '{trimmed}'; expected 'auto' or a supported strategy name"
                 ))
             })

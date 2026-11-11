@@ -216,18 +216,18 @@ impl LocalParams {
     /// above 9, and a zero chunk size would divide by zero).
     pub fn validate(&self) -> Result<(), crate::errors::StrHideError> {
         if self.chunk_size == 0 {
-            return Err(crate::errors::StrHideError::General(
+            return Err(crate::errors::StrHideError::InvalidArgument(
                 "chunk_size must be greater than zero".into(),
             ));
         }
         if self.chunk_size < MIN_CHUNK_SIZE {
-            return Err(crate::errors::StrHideError::General(format!(
+            return Err(crate::errors::StrHideError::InvalidArgument(format!(
                 "chunk_size {} is below the {} byte minimum (framing overhead would dominate)",
                 self.chunk_size, MIN_CHUNK_SIZE
             )));
         }
         if self.chunk_size > MAX_CHUNK_SIZE {
-            return Err(crate::errors::StrHideError::General(format!(
+            return Err(crate::errors::StrHideError::InvalidArgument(format!(
                 "chunk_size {} exceeds the {} byte maximum",
                 self.chunk_size, MAX_CHUNK_SIZE
             )));
@@ -235,7 +235,7 @@ impl LocalParams {
         if let CompressionStrategy::Always { level } = self.compression
             && level > MAX_COMPRESSION_LEVEL
         {
-            return Err(crate::errors::StrHideError::General(format!(
+            return Err(crate::errors::StrHideError::InvalidArgument(format!(
                 "compression level {level} exceeds the maximum {MAX_COMPRESSION_LEVEL}"
             )));
         }
@@ -267,7 +267,7 @@ impl std::str::FromStr for SafetyLevel {
             "0" | "paranoid" | "Paranoid" | "PARANOID" => Ok(SafetyLevel::Paranoid),
             "1" | "high" | "High" | "HIGH" => Ok(SafetyLevel::High),
             "2" | "balanced" | "Balanced" | "BALANCED" => Ok(SafetyLevel::Balanced),
-            other => Err(crate::errors::StrHideError::General(format!(
+            other => Err(crate::errors::StrHideError::InvalidArgument(format!(
                 "Invalid safety level '{other}'. Supported: 'paranoid' (0), 'high' (1, default), 'balanced' (2)"
             ))),
         }

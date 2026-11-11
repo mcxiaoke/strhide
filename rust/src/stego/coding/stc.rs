@@ -496,7 +496,7 @@ impl StcTrellis {
     ) -> Result<usize, StrHideError> {
         let n = vals.len();
         if moves.len() < n || rho_plus.len() < n || rho_minus.len() < n {
-            return Err(StrHideError::General(
+            return Err(StrHideError::InvalidArgument(
                 "STC cost/legality arrays disagree with the element count".into(),
             ));
         }
@@ -529,18 +529,18 @@ impl StcTrellis {
         let m = self.message_bits(n);
         let bits = message.len() * 8;
         if bits < m || bits - m >= 8 {
-            return Err(StrHideError::General(format!(
+            return Err(StrHideError::InvalidArgument(format!(
                 "STC message size mismatch: {bits} bits for {n} elements (h={}, u={}), expected {m}",
                 self.h, self.u
             )));
         }
         if moves.len() < n {
-            return Err(StrHideError::General(
+            return Err(StrHideError::InvalidArgument(
                 "STC moves array disagrees with the element count".into(),
             ));
         }
         if deltas.len() < n {
-            return Err(StrHideError::General(
+            return Err(StrHideError::InvalidArgument(
                 "STC delta buffer is shorter than the element count".into(),
             ));
         }
@@ -548,7 +548,7 @@ impl StcTrellis {
             return Ok(0);
         }
         if !n.is_multiple_of(u) {
-            return Err(StrHideError::General(format!(
+            return Err(StrHideError::InvalidArgument(format!(
                 "STC element count {n} is not a multiple of the group size u={u}"
             )));
         }
@@ -828,7 +828,7 @@ pub fn backtrack_bitmap_bytes(n: usize, h: u8) -> u64 {
 /// Validate an STC constraint height at the API boundary.
 pub fn validate_h(h: u8) -> Result<(), StrHideError> {
     if !(MIN_STC_H..=MAX_STC_H).contains(&h) {
-        return Err(StrHideError::General(format!(
+        return Err(StrHideError::InvalidArgument(format!(
             "STC constraint height must be in {}..={}, got {h}",
             MIN_STC_H, MAX_STC_H
         )));
@@ -839,7 +839,7 @@ pub fn validate_h(h: u8) -> Result<(), StrHideError> {
 /// Validate a group size for the spatial codec, whose header has two bits.
 pub fn validate_u(u: u8) -> Result<(), StrHideError> {
     if !(1..=MAX_STC_U).contains(&u) {
-        return Err(StrHideError::General(format!(
+        return Err(StrHideError::InvalidArgument(format!(
             "STC group size must be in 1..={MAX_STC_U}, got {u}"
         )));
     }
@@ -849,7 +849,7 @@ pub fn validate_u(u: u8) -> Result<(), StrHideError> {
 /// Validate a group size for the JPEG superblock, which carries a full byte.
 pub fn validate_u_wide(u: u8) -> Result<(), StrHideError> {
     if !(1..=KERNEL_MAX_U).contains(&u) {
-        return Err(StrHideError::General(format!(
+        return Err(StrHideError::InvalidArgument(format!(
             "STC group size must be in 1..={KERNEL_MAX_U}, got {u}"
         )));
     }

@@ -856,7 +856,7 @@ pub(super) fn write_chunk(
     // A chunk over 4 GiB used to be truncated by `as u32`, writing a length
     // field that disagreed with the bytes that followed.
     let len = u32::try_from(data.len()).map_err(|_| {
-        StrHideError::General(format!(
+        StrHideError::BufferOverflow(format!(
             "PNG chunk '{}' is {} bytes, more than the format's 4 GiB length field",
             String::from_utf8_lossy(chunk_type),
             data.len()

@@ -618,7 +618,7 @@ fn invalid_local_params_fail_before_touching_the_carrier() {
             &StructureProfile::default(),
         )
         .unwrap_err();
-        assert!(matches!(err, StrHideError::General(_)), "{err}");
+        assert!(matches!(err, StrHideError::InvalidArgument(_)), "{err}");
         assert_eq!(
             fs::read(&carrier).unwrap(),
             original,
