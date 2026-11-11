@@ -104,7 +104,7 @@ fn remove_core(
     // what stops a forged `inject_offset`/`inject_size` from driving `strip`
     // past EOF. `envelope_coordinates_agree` also accepts the legitimate shift
     // of a PNG `chunk` envelope moved by content re-compression.
-    super::envelope_coordinates_agree(
+    super::verify::envelope_coordinates_agree(
         &header,
         &strategy_name,
         ube_offset,
