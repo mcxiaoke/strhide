@@ -10,43 +10,26 @@ payload, and restore bit-for-bit. Unit tests cover behaviour; this harness
 freezes the observable numbers of every local corpus file so a silent byte
 regression shows up as a diff.
 
-What is recorded (all deterministic)
-------------------------------------
-Per case, for both domains:
-  * original size + sha256
-  * structure domain: chosen strategy, envelope size, stego size, extracted
-    payload sha256, restored sha256 (must equal the original), per-strategy
-    capacity numbers from `inspect --json`
-  * content domain: capacity (max / recommended), stego size, extracted payload
-    sha256
-
-Every content-domain embed is driven with a fixed `--seed`, so its salt/nonce
-come from the seed instead of fresh randomness: the stego bytes are
-reproducible and ARE hashed. A parsing/encoding change that moves a single
-coefficient then shows up as a hash diff, not just as a size diff.
-
-The structure domain has no seed knob (the UBE envelope nonce is always
-random), so there only the envelope size, the chosen strategy, the per-strategy
-capacity numbers and bit-exact restoration are compared.
+Schema 4 (Compact Git-friendly Baseline)
+---------------------------------------
+Schema 4 stores a clean, deterministic contract of assertions in `scripts/baseline.json`:
+  * Carrier filename, original size, and 16-hex short SHA-256
+  * Structure domain: chosen strategy, stego size, and UBE size (when applicable)
+  * Content domain: max and recommended capacity, and per-algorithm stego size + 16-hex short hash
+All machine-specific metadata (binary paths, compilation timestamps, elapsed time)
+and redundant fields are omitted so the file stays small (~10 KB) and produces
+clean, conflict-free git diffs.
 
 Usage
 -----
-    # freeze the current behaviour (run this before touching the code)
-    python scripts/baseline_hash.py --write
-
-    # after a refactor step: recompute and diff against the frozen file
+    # check against the committed compact baseline (default)
     python scripts/baseline_hash.py --check
 
-    # cheap smoke test on the first few cases
-    python scripts/baseline_hash.py --only fixtures --limit 3
+    # freeze/update the compact baseline (writes to scripts/baseline.json)
+    python scripts/baseline_hash.py --write
 
-    # reproducibility check is on by default (fixed --seed); `--no-seed` falls
-    # back to random salt and then only sizes/capacities are compared
-
-HEVC content-domain embeds are opt-in (`--include-content-hevc`): a single
-1080p60 clip costs ~100 s and ~12 GB of RSS, which is fine locally but not as a
-default gate. The HEIF/MP4 *structure* paths always run — they are the ones the
-ISOBMFF merge touches — and they are cheap.
+    # smoke test on the first few cases
+    python scripts/baseline_hash.py --check --limit 3
 """
 
 from __future__ import annotations
@@ -63,16 +46,15 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-DEFAULT_OUT = REPO / "temp" / "baseline"
+DEFAULT_BASELINE = REPO / "scripts" / "baseline.json"
+LEGACY_BASELINE = REPO / "temp" / "baseline" / "baseline.json"
+DEFAULT_WORK_DIR = REPO / "temp" / "baseline" / "work"
 
-# Payloads are short and fixed. The content domain is capacity-bound, so a tiny
-# payload keeps every carrier eligible; capacity itself is recorded separately.
 PAYLOAD_STRUCTURE = "strhide-baseline-structure"
+PAYLOAD_STRUCTURE_SHA256 = hashlib.sha256(PAYLOAD_STRUCTURE.encode("utf-8")).hexdigest()
 PAYLOAD_CONTENT = "sb1"
+PAYLOAD_CONTENT_SHA256 = hashlib.sha256(PAYLOAD_CONTENT.encode("utf-8")).hexdigest()
 
-# Fixed content-domain seed: makes embed byte-reproducible (see `--seed` on
-# `strhide embed`). Changing it changes every content hash in the baseline, so
-# treat it as part of the baseline format, not a knob.
 SEED_HEX = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 
 STRUCTURE_EXTS = {
@@ -80,11 +62,6 @@ STRUCTURE_EXTS = {
     "mp4", "mov", "m4v", "mkv", "webm", "zip", "jar", "pdf", "exe", "dll",
 }
 
-# Content-domain algorithms matrix:
-# PNG: HILL (default), S-UNIWARD, MiPOD
-# JPEG: UERD (default), J-UNIWARD, J-MiPOD
-# HEVC: CABAC in-place steganography
-# Audio: PCM / residual steganography
 CONTENT_ALGORITHMS: dict[str, list[str]] = {
     "png": ["hill", "suniward", "mipod"],
     "jpg": ["uerd", "juniward", "jmipod"],
@@ -168,8 +145,14 @@ def get_binary_version(bin_path: Path) -> str:
     return "unknown"
 
 
+def get_git_commit() -> str:
+    code, out, _ = run(["git", "rev-parse", "--short", "HEAD"], timeout=5)
+    if code == 0 and out.strip():
+        return out.strip()
+    return "unknown"
+
+
 def extract_version_hash(version_str: str) -> str | None:
-    # Matches commit: <hash>, e.g. "sth 0.9.0 (commit: 4371dab, built: 2026-11-05T11:41:56Z)"
     m = re.search(r"commit:\s*([^\s,\)]+)", version_str)
     if m:
         val = m.group(1).strip()
@@ -193,19 +176,7 @@ def is_unsupported(err: str) -> bool:
     return "supported carrier format" in low or "not supported" in low or "unsupported" in low
 
 
-def load_json_line(stdout: str) -> dict | None:
-    for line in stdout.splitlines():
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                return json.loads(line)
-            except json.JSONDecodeError:
-                continue
-    return None
-
-
 def load_json_block(stdout: str) -> dict | None:
-    """Parse a pretty-printed single JSON object (inspect --json)."""
     text = stdout.strip()
     start = text.find("{")
     if start < 0:
@@ -217,11 +188,6 @@ def load_json_block(stdout: str) -> dict | None:
 
 
 def strategy_name(value) -> str | None:
-    """The strategy's registry name, whatever shape the CLI reports.
-
-    Stage 4 turned `strategy` from a bare string into `{id, name}`; the baseline
-    records the *name* either way, so a frozen baseline stays comparable.
-    """
     if isinstance(value, dict):
         return value.get("name")
     return value
@@ -298,7 +264,9 @@ def structure_pass(bin_path: Path, orig: Path, work: Path, timeout: int) -> dict
         result["status"] = "read_failed"
         result["note"] = first_error(err)
         return result
+
     result["payload_sha256"] = sha256_file(payload_out)
+    result["payload_matches"] = (result["payload_sha256"] == PAYLOAD_STRUCTURE_SHA256)
 
     code, out, err = run(
         [str(bin_path), "restore", str(stego), "-o", str(restored),
@@ -328,8 +296,6 @@ def content_pass(
             return {"status": "unsupported", "note": first_error(err)}
         return {"status": "failed", "note": first_error(err)}
 
-    # `capacity --json` is a pretty-printed single document (same printer as the
-    # other diagnostics); parsing it as a one-line record silently yielded None.
     cap = load_json_block(out)
     result: dict = {"status": "ok"}
     if cap:
@@ -405,7 +371,7 @@ def build_report(bin_path: Path, args) -> dict:
     cases = collect_cases(args.only)
     if args.limit:
         cases = cases[: args.limit]
-    work_root = args.out / "work"
+    work_root = Path(args.work_dir)
     if not args.keep_work and work_root.exists():
         shutil.rmtree(work_root, ignore_errors=True)
     work_root.mkdir(parents=True, exist_ok=True)
@@ -469,7 +435,53 @@ def build_report(bin_path: Path, args) -> dict:
     return report
 
 
-# Volatile or informational keys that must not fail a `--check`.
+def to_compact_schema4(report: dict, generated_at: str | None = None, git_commit: str | None = None) -> dict:
+    """Convert full raw report into concise, Git-friendly Schema 4 dictionary."""
+    compact = {
+        "schema": 4,
+        "generated_at": generated_at or report.get("generated_at"),
+        "git_commit": git_commit or report.get("git_commit"),
+        "seed": report.get("seed"),
+        "cases": {},
+    }
+    for c in report["cases"]:
+        fname = Path(c["file"]).name
+        entry: dict = {
+            "orig_size": c["orig_size"],
+            "orig_sha256": c["orig_sha256"][:16],
+        }
+        st = c.get("structure", {})
+        if st.get("status") == "ok":
+            st_entry = {
+                "strategy": st.get("strategy"),
+                "stego_size": st.get("stego_size"),
+            }
+            if st.get("ube_total_size") is not None:
+                st_entry["ube_size"] = st.get("ube_total_size")
+            entry["struct"] = st_entry
+
+        ct = c.get("content", {})
+        if ct.get("status") == "ok":
+            ct_entry = {
+                "cap_max": ct.get("capacity_max_bytes"),
+                "cap_rec": ct.get("capacity_recommended_bytes"),
+            }
+            algos = {}
+            for aname, ares in sorted(ct.get("algorithms", {}).items()):
+                if ares.get("status") == "ok":
+                    algo_item: dict = {"size": ares.get("stego_size")}
+                    if ares.get("stego_sha256"):
+                        algo_item["hash"] = ares.get("stego_sha256")[:16]
+                    algos[aname] = algo_item
+            if algos:
+                ct_entry["algos"] = algos
+            entry["content"] = ct_entry
+
+        compact["cases"][fname] = entry
+    return compact
+
+
+# Volatile or informational keys that must not fail a Schema-3 `--check`.
 IGNORED_KEYS = {"elapsed_ms", "note", "unsupported", "reason"}
 
 
@@ -492,7 +504,7 @@ def flatten(obj: dict, is_seeded: bool, prefix: str = "") -> dict:
     return flat
 
 
-def check(report: dict, baseline: dict) -> int:
+def check_schema3(report: dict, baseline: dict) -> int:
     if baseline.get("seed") != report.get("seed"):
         print(
             f"error: seed mismatch (baseline {baseline.get('seed')!r} vs current "
@@ -526,13 +538,138 @@ def check(report: dict, baseline: dict) -> int:
     return 0
 
 
+def check_schema4(report: dict, baseline: dict, is_filtered: bool = False) -> int:
+    """Validate report against compact Schema 4 baseline."""
+    if baseline.get("seed") != report.get("seed"):
+        print(
+            f"error: seed mismatch (baseline {baseline.get('seed')!r} vs current "
+            f"{report.get('seed')!r}); the content hashes are not comparable"
+        )
+        return 2
+
+    current = to_compact_schema4(report)
+    base_cases = baseline.get("cases", {})
+    curr_cases = current.get("cases", {})
+
+    diffs = 0
+    raw_by_fname = {Path(c["file"]).name: c for c in report.get("cases", [])}
+
+    if not is_filtered:
+        for fname in sorted(set(base_cases) - set(curr_cases)):
+            print(f"MISSING  {fname}")
+            diffs += 1
+    for fname in sorted(set(curr_cases) - set(base_cases)):
+        print(f"EXTRA    {fname}")
+        diffs += 1
+
+    for fname in sorted(set(base_cases) & set(curr_cases)):
+        b_case = base_cases[fname]
+        c_case = curr_cases[fname]
+        raw_case = raw_by_fname.get(fname, {})
+
+        # Carrier original properties
+        if b_case.get("orig_size") != c_case.get("orig_size"):
+            print(f"DIFF     {fname} :: orig_size: {b_case.get('orig_size')} -> {c_case.get('orig_size')}")
+            diffs += 1
+        if b_case.get("orig_sha256") != c_case.get("orig_sha256"):
+            print(f"DIFF     {fname} :: orig_sha256: {b_case.get('orig_sha256')} -> {c_case.get('orig_sha256')}")
+            diffs += 1
+
+        # Structure domain assertions
+        b_struct = b_case.get("struct")
+        c_struct = c_case.get("struct")
+        raw_st = raw_case.get("structure", {})
+
+        if b_struct is not None:
+            if c_struct is None:
+                print(f"DIFF     {fname} :: struct status: expected ok, got {raw_st.get('status')}")
+                diffs += 1
+            else:
+                if not raw_st.get("restored_equals_original", False):
+                    print(f"FAIL     {fname} :: structure restoration mismatch (restored != original)")
+                    diffs += 1
+                if not raw_st.get("payload_matches", True):
+                    print(f"FAIL     {fname} :: structure payload extraction mismatch")
+                    diffs += 1
+                if b_struct.get("strategy") != c_struct.get("strategy"):
+                    print(f"DIFF     {fname} :: struct.strategy: {b_struct.get('strategy')} -> {c_struct.get('strategy')}")
+                    diffs += 1
+                if b_struct.get("stego_size") != c_struct.get("stego_size"):
+                    print(f"DIFF     {fname} :: struct.stego_size: {b_struct.get('stego_size')} -> {c_struct.get('stego_size')}")
+                    diffs += 1
+                if b_struct.get("ube_size") != c_struct.get("ube_size"):
+                    print(f"DIFF     {fname} :: struct.ube_size: {b_struct.get('ube_size')} -> {c_struct.get('ube_size')}")
+                    diffs += 1
+        elif c_struct is not None:
+            print(f"DIFF     {fname} :: struct: unexpected structure domain result")
+            diffs += 1
+
+        # Content domain assertions
+        b_content = b_case.get("content")
+        c_content = c_case.get("content")
+        raw_ct = raw_case.get("content", {})
+
+        if b_content is not None:
+            if c_content is None:
+                print(f"DIFF     {fname} :: content status: expected ok, got {raw_ct.get('status')}")
+                diffs += 1
+            else:
+                if b_content.get("cap_max") != c_content.get("cap_max"):
+                    print(f"DIFF     {fname} :: content.cap_max: {b_content.get('cap_max')} -> {c_content.get('cap_max')}")
+                    diffs += 1
+                if b_content.get("cap_rec") != c_content.get("cap_rec"):
+                    print(f"DIFF     {fname} :: content.cap_rec: {b_content.get('cap_rec')} -> {c_content.get('cap_rec')}")
+                    diffs += 1
+
+                b_algos = b_content.get("algos", {})
+                c_algos = c_content.get("algos", {})
+                raw_algos = raw_ct.get("algorithms", {})
+
+                for aname in sorted(set(b_algos) | set(c_algos)):
+                    if aname not in c_algos:
+                        print(f"DIFF     {fname} :: missing content algo {aname}")
+                        diffs += 1
+                        continue
+                    if aname not in b_algos:
+                        print(f"DIFF     {fname} :: extra content algo {aname}")
+                        diffs += 1
+                        continue
+
+                    ba = b_algos[aname]
+                    ca = c_algos[aname]
+                    raw_a = raw_algos.get(aname, {})
+                    if not raw_a.get("payload_matches", True):
+                        print(f"FAIL     {fname} :: content.{aname} payload extraction mismatch")
+                        diffs += 1
+                    if ba.get("size") != ca.get("size"):
+                        print(f"DIFF     {fname} :: content.{aname}.size: {ba.get('size')} -> {ca.get('size')}")
+                        diffs += 1
+                    if ba.get("hash") != ca.get("hash"):
+                        print(f"DIFF     {fname} :: content.{aname}.hash: {ba.get('hash')} -> {ca.get('hash')}")
+                        diffs += 1
+        elif c_content is not None:
+            print(f"DIFF     {fname} :: content: unexpected content domain result")
+            diffs += 1
+
+    if diffs:
+        print(f"\ncheck FAILED: {diffs} difference(s) vs baseline")
+        return 1
+    print(f"\ncheck OK: {len(curr_cases)} cases identical to baseline")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--write", action="store_true",
-                    help="freeze the current behaviour into baseline.json (full corpus only)")
+                    help="freeze the current behaviour into baseline (compact by default)")
     ap.add_argument("--check", action="store_true", help="recompute and diff against baseline.json")
     ap.add_argument("--bin", default=None, help="path to the strhide binary")
-    ap.add_argument("--out", default=str(DEFAULT_OUT), help="baseline directory (default: temp/baseline)")
+    ap.add_argument("--baseline", "-f", default=None,
+                    help="path to baseline.json (default: scripts/baseline.json)")
+    ap.add_argument("--out", default=None,
+                    help="legacy: baseline output directory (default: temp/baseline)")
+    ap.add_argument("--legacy", action="store_true",
+                    help="use legacy verbose Schema 3 format and copy binary to temp/baseline")
     ap.add_argument("--only", default=None, help="only corpora whose name contains this substring")
     ap.add_argument("--limit", type=int, default=0, help="only the first N cases (smoke test)")
     ap.add_argument("--skip-content-hevc", action="store_true",
@@ -546,6 +683,7 @@ def main() -> int:
     ap.add_argument("--no-seed", action="store_true",
                     help="do not seed embeds; content size/bytes are then not compared")
     ap.add_argument("--timeout", type=int, default=900, help="per-command timeout in seconds")
+    ap.add_argument("--work-dir", default=str(DEFAULT_WORK_DIR), help="temp directory for carrier operations")
     ap.add_argument("--keep-work", action="store_true", help="keep the per-case work directories")
     args = ap.parse_args()
 
@@ -553,8 +691,6 @@ def main() -> int:
         ap.print_help()
         return 2
 
-    # A filtered run only knows a subset of the corpus; freezing it would
-    # replace the full baseline and make every other case look "missing".
     if args.write and (args.only or args.limit):
         ap.error(
             "--write cannot be combined with --only/--limit: it would replace "
@@ -563,16 +699,28 @@ def main() -> int:
 
     if args.no_seed:
         args.seed = ""
-    args.out = Path(args.out)
-    args.out.mkdir(parents=True, exist_ok=True)
+
+    # Determine baseline path
+    if args.baseline:
+        baseline_path = Path(args.baseline)
+    elif args.out:
+        baseline_path = Path(args.out) / "baseline.json"
+    else:
+        # Default target
+        if args.legacy:
+            baseline_path = LEGACY_BASELINE
+        else:
+            baseline_path = DEFAULT_BASELINE
+
     bin_path = find_bin(args.bin)
     bin_sha256 = sha256_file(bin_path)
     bin_version = get_binary_version(bin_path)
     version_hash = extract_version_hash(bin_version)
 
-    print(f"binary:  {bin_path}")
-    print(f"version: {bin_version}")
-    print(f"sha256:  {bin_sha256}")
+    print(f"binary:   {bin_path}")
+    print(f"version:  {bin_version}")
+    print(f"sha256:   {bin_sha256}")
+    print(f"baseline: {baseline_path}")
 
     src_mtime = newest_source_mtime()
     if bin_path.stat().st_mtime < src_mtime:
@@ -580,29 +728,24 @@ def main() -> int:
 
     baseline = None
     if args.check:
-        target = args.out / "baseline.json"
+        target = baseline_path
+        if not target.exists() and not args.baseline and not args.out:
+            # Fallback to legacy if default not found
+            if LEGACY_BASELINE.exists():
+                print(f"note: {target} not found; falling back to legacy {LEGACY_BASELINE}")
+                target = LEGACY_BASELINE
+
         if not target.exists():
-            print(f"error: {target} not found; run --write first")
+            print(f"error: baseline not found at {target}; run --write first")
             return 2
         baseline = json.loads(target.read_text(encoding="utf-8"))
-        base_bin = baseline.get("binary")
-        base_path = baseline.get("binary_path") or (base_bin.get("path") if isinstance(base_bin, dict) else base_bin)
-        base_sha = baseline.get("binary_sha256") or (base_bin.get("sha256") if isinstance(base_bin, dict) else None)
-        base_ver = baseline.get("binary_version") or (base_bin.get("version") if isinstance(base_bin, dict) else None)
-        base_copy = baseline.get("binary_copy") or (base_bin.get("copy") if isinstance(base_bin, dict) else None)
-        if base_ver:
-            print(f"baseline version: {base_ver}")
-        if base_sha:
-            print(f"baseline sha256:  {base_sha}")
-        if base_copy:
-            copy_path = args.out / base_copy
-            exists_tag = "present" if copy_path.exists() else "not found"
-            print(f"baseline copy:    {base_copy} ({exists_tag})")
-        if base_sha and base_sha != bin_sha256:
-            print("note: current binary differs from baseline binary (expected when testing refactors)")
 
-        # Fail before spending a minute on the corpus: content hashes recorded
-        # under a different seed are not comparable at all.
+        if baseline.get("generated_at"):
+            print(f"baseline time:    {baseline.get('generated_at')}")
+        if baseline.get("git_commit"):
+            print(f"baseline commit:  {baseline.get('git_commit')}")
+
+        # Fail early on seed mismatch
         if baseline.get("seed") != (args.seed or None):
             print(
                 f"error: seed mismatch (baseline {baseline.get('seed')!r} vs current "
@@ -613,39 +756,52 @@ def main() -> int:
     report = build_report(bin_path, args)
 
     if args.write:
-        report["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-        try:
-            rel_path = bin_path.relative_to(REPO).as_posix()
-        except ValueError:
-            rel_path = str(bin_path)
+        if args.legacy or baseline_path.parent == DEFAULT_OUT_DIR:
+            # Legacy Schema 3 writer
+            out_dir = baseline_path.parent
+            out_dir.mkdir(parents=True, exist_ok=True)
+            report["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            try:
+                rel_path = bin_path.relative_to(REPO).as_posix()
+            except ValueError:
+                rel_path = str(bin_path)
 
-        hash_tag = version_hash or bin_sha256[:8]
-        ext = bin_path.suffix if bin_path.suffix else (".exe" if os.name == "nt" else "")
-        copy_name = f"strhide-{hash_tag}{ext}"
-        copy_dest = args.out / copy_name
-        if bin_path.resolve() != copy_dest.resolve():
-            shutil.copy2(bin_path, copy_dest)
-            print(f"copied binary to {copy_dest}")
+            hash_tag = version_hash or bin_sha256[:8]
+            ext = bin_path.suffix if bin_path.suffix else (".exe" if os.name == "nt" else "")
+            copy_name = f"strhide-{hash_tag}{ext}"
+            copy_dest = out_dir / copy_name
+            if bin_path.resolve() != copy_dest.resolve():
+                shutil.copy2(bin_path, copy_dest)
+                print(f"copied binary to {copy_dest}")
+            report["binary_path"] = rel_path
+            report["binary_sha256"] = bin_sha256
+            report["binary_version"] = bin_version
+            report["binary_copy"] = copy_name
+            report["binary"] = {
+                "copy": copy_name,
+                "hash": hash_tag,
+                "path": rel_path,
+                "sha256": bin_sha256,
+                "version": bin_version,
+            }
+            baseline_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            print(f"\nwrote legacy baseline to {baseline_path} ({len(report['cases'])} cases)")
+            return 0
         else:
-            print(f"binary already at {copy_dest}")
+            # Compact Schema 4 writer
+            baseline_path.parent.mkdir(parents=True, exist_ok=True)
+            gen_time = time.strftime("%Y-%m-%dT%H:%M:%S")
+            commit = version_hash or get_git_commit()
+            compact = to_compact_schema4(report, generated_at=gen_time, git_commit=commit)
+            content = json.dumps(compact, indent=2, sort_keys=True) + "\n"
+            baseline_path.write_bytes(content.encode("utf-8"))
+            print(f"\nwrote compact baseline to {baseline_path} ({len(compact['cases'])} cases, {len(content)} bytes)")
+            return 0
 
-        report["binary_path"] = rel_path
-        report["binary_sha256"] = bin_sha256
-        report["binary_version"] = bin_version
-        report["binary_copy"] = copy_name
-        report["binary"] = {
-            "copy": copy_name,
-            "hash": hash_tag,
-            "path": rel_path,
-            "sha256": bin_sha256,
-            "version": bin_version,
-        }
-        target = args.out / "baseline.json"
-        target.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        print(f"\nwrote {target} ({len(report['cases'])} cases)")
-        return 0
-
-    return check(report, baseline)
+    schema_ver = baseline.get("schema", 3) if isinstance(baseline, dict) else 3
+    if schema_ver >= 4:
+        return check_schema4(report, baseline, is_filtered=bool(args.only or args.limit))
+    return check_schema3(report, baseline)
 
 
 if __name__ == "__main__":

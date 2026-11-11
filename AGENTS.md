@@ -26,8 +26,10 @@ cargo test local_ --all-features -- --ignored  # 单独运行本地快速批量�
 # 下面的heavy test 可选运行，平时小改动可以不运行
 cargo test heavy_ --all-features -- --ignored  # 单独运行耗时评测与矩阵测试（约 2 分钟）
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings   # 提交前格式化并修复所有 lint
-python ../scripts/import_lint.py       # 架构依赖边界检查（CI quality 必跑项，防止违规跨层引用）
-python ../scripts/check_feature_matrix.py  # 特性矩阵编译（改动 cfg/feature 门控或模块结构必跑）
+# 以下脚本在根目录运行
+python scripts/import_lint.py       # 架构依赖边界检查（CI quality 必跑项，防止违规跨层引用）
+python scripts/check_feature_matrix.py  # 特性矩阵编译（改动 cfg/feature 门控或模块结构必跑）
+python scripts/baseline_hash.py --check   # 与 scripts/baseline.json 逐例比对
 ```
 
 ### 隐写引擎全量并发压力测试 (Stress Tests)
@@ -65,10 +67,10 @@ pnpm test:e2e:real                             # 真实进程与真实数据端�
 ### 字节级基线（架构重构期间必跑）
 
 ```bash
-python scripts/baseline_hash.py --check   # 与 temp/baseline/baseline.json 逐例比对
+python scripts/baseline_hash.py --check   # 与 scripts/baseline.json 逐例比对
 ```
 
-冻结/重建基线用 `--write`。改动任何解析/注入路径后必须 `--check` 全绿。
+除非用户明确要求，不得用 `--write` 重建基线。改动任何解析/注入路径后必须 `--check` 全绿。
 
 ### 通用约定
 

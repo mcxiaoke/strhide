@@ -1,0 +1,432 @@
+{
+  "cases": {
+    "01_Sphere.flac": {
+      "content": {
+        "algos": {
+          "flac_residual": {
+            "hash": "407d87e563d7552a",
+            "size": 9780489
+          }
+        },
+        "cap_max": 32820,
+        "cap_rec": 6457
+      },
+      "orig_sha256": "466558584176b48b",
+      "orig_size": 9780489
+    },
+    "ASN1.webp": {
+      "orig_sha256": "10d06bb82e952475",
+      "orig_size": 8932,
+      "struct": {
+        "stego_size": 9171,
+        "strategy": "eof",
+        "ube_size": 239
+      }
+    },
+    "Dawn of Kagura bgm15b.wav": {
+      "content": {
+        "algos": {
+          "wav_pcm": {
+            "hash": "7a36d975eda5be24",
+            "size": 11442204
+          }
+        },
+        "cap_max": 714792,
+        "cap_rec": 46617
+      },
+      "orig_sha256": "827d702b418fa121",
+      "orig_size": 11442204,
+      "struct": {
+        "stego_size": 11442452,
+        "strategy": "riff_chunk",
+        "ube_size": 239
+      }
+    },
+    "FFConv.dll": {
+      "orig_sha256": "e17f5353ca0e2c23",
+      "orig_size": 455168,
+      "struct": {
+        "stego_size": 455168,
+        "strategy": "pe_slack",
+        "ube_size": 239
+      }
+    },
+    "FFConv.exe": {
+      "orig_sha256": "21d24107b774ca0f",
+      "orig_size": 161792,
+      "struct": {
+        "stego_size": 161792,
+        "strategy": "pe_slack",
+        "ube_size": 239
+      }
+    },
+    "HDRSample.mkv": {
+      "content": {
+        "algos": {
+          "cabac": {
+            "hash": "7daf2169d4d63015",
+            "size": 2696454
+          }
+        },
+        "cap_max": 145273,
+        "cap_rec": 8209
+      },
+      "orig_sha256": "38c7daf79cf19856",
+      "orig_size": 2696454,
+      "struct": {
+        "stego_size": 2696696,
+        "strategy": "ebml_void",
+        "ube_size": 239
+      }
+    },
+    "IMG_0033.MOV": {
+      "content": {
+        "algos": {
+          "cabac": {
+            "hash": "28541bfde8c07402",
+            "size": 10427604
+          }
+        },
+        "cap_max": 346160,
+        "cap_rec": 20067
+      },
+      "orig_sha256": "c79d7fa93676a055",
+      "orig_size": 10427604,
+      "struct": {
+        "stego_size": 10427867,
+        "strategy": "box_uuid",
+        "ube_size": 239
+      }
+    },
+    "IMG_5887.HEIC": {
+      "content": {
+        "algos": {
+          "cabac": {
+            "hash": "26b9d86690370242",
+            "size": 151524
+          }
+        },
+        "cap_max": 8708,
+        "cap_rec": 2592
+      },
+      "orig_sha256": "38871bb482bf30cf",
+      "orig_size": 151524,
+      "struct": {
+        "stego_size": 151812,
+        "strategy": "item_hidden",
+        "ube_size": 239
+      }
+    },
+    "SDRSample.mkv": {
+      "content": {
+        "algos": {
+          "cabac": {
+            "hash": "cfd1c5aea1ee469b",
+            "size": 3371043
+          }
+        },
+        "cap_max": 188274,
+        "cap_rec": 9208
+      },
+      "orig_sha256": "6ec47a3209dcebe3",
+      "orig_size": 3371043,
+      "struct": {
+        "stego_size": 3371285,
+        "strategy": "ebml_void",
+        "ube_size": 239
+      }
+    },
+    "Splash.avif": {
+      "orig_sha256": "c57549e22d8db029",
+      "orig_size": 179878,
+      "struct": {
+        "stego_size": 180164,
+        "strategy": "item_hidden",
+        "ube_size": 239
+      }
+    },
+    "bbb.hevc": {
+      "content": {
+        "algos": {
+          "cabac": {
+            "hash": "85c05e415b05c1e9",
+            "size": 20503
+          }
+        },
+        "cap_max": 371,
+        "cap_rec": 107
+      },
+      "orig_sha256": "964f0b68d910d0de",
+      "orig_size": 20503
+    },
+    "bear.hevc": {
+      "content": {
+        "algos": {
+          "cabac": {
+            "hash": "dda3685309222acc",
+            "size": 14428
+          }
+        },
+        "cap_max": 206,
+        "cap_rec": 74
+      },
+      "orig_sha256": "0142292759884569",
+      "orig_size": 14428
+    },
+    "chenleicover_4.jpg": {
+      "content": {
+        "algos": {
+          "jmipod": {
+            "hash": "dc388c4e0178d80a",
+            "size": 69185
+          },
+          "juniward": {
+            "hash": "63c11d4a666c7563",
+            "size": 69179
+          },
+          "uerd": {
+            "hash": "a2b57f8d17f8353c",
+            "size": 69190
+          }
+        },
+        "cap_max": 10108,
+        "cap_rec": 3153
+      },
+      "orig_sha256": "f961aa4f428e9de0",
+      "orig_size": 69067,
+      "struct": {
+        "stego_size": 69310,
+        "strategy": "app_segment",
+        "ube_size": 239
+      }
+    },
+    "dismal_rain.flac": {
+      "content": {
+        "algos": {
+          "flac_residual": {
+            "hash": "af4d8417d5347f1c",
+            "size": 15036405
+          }
+        },
+        "cap_max": 48266,
+        "cap_rec": 9480
+      },
+      "orig_sha256": "9530751cf934dd9a",
+      "orig_size": 15036405
+    },
+    "docsexport.pdf": {
+      "orig_sha256": "1e4c19f76759cba4",
+      "orig_size": 339834,
+      "struct": {
+        "stego_size": 340259,
+        "strategy": "incremental",
+        "ube_size": 239
+      }
+    },
+    "file-00.mp4": {
+      "orig_sha256": "7a3e8435aa338357",
+      "orig_size": 1008404,
+      "struct": {
+        "stego_size": 1008667,
+        "strategy": "box_uuid",
+        "ube_size": 239
+      }
+    },
+    "file-17.zip": {
+      "orig_sha256": "c22fb33f09086be0",
+      "orig_size": 75238,
+      "struct": {
+        "stego_size": 75477,
+        "strategy": "pre_cd_inject",
+        "ube_size": 239
+      }
+    },
+    "remake02.wav": {
+      "content": {
+        "algos": {
+          "wav_pcm": {
+            "hash": "b8c6532916266a5f",
+            "size": 5629844
+          }
+        },
+        "cap_max": 351519,
+        "cap_rec": 22925
+      },
+      "orig_sha256": "92cee3af9cbf98ac",
+      "orig_size": 5629844,
+      "struct": {
+        "stego_size": 5630092,
+        "strategy": "riff_chunk",
+        "ube_size": 239
+      }
+    },
+    "sample.mp4": {
+      "orig_sha256": "77ccbce8f4364420",
+      "orig_size": 986938,
+      "struct": {
+        "stego_size": 987201,
+        "strategy": "box_uuid",
+        "ube_size": 239
+      }
+    },
+    "sample.pdf": {
+      "orig_sha256": "74bc5b9faba00105",
+      "orig_size": 2530,
+      "struct": {
+        "stego_size": 2949,
+        "strategy": "incremental",
+        "ube_size": 239
+      }
+    },
+    "sample.png": {
+      "content": {
+        "algos": {
+          "hill": {
+            "hash": "f2c83d011d930f5b",
+            "size": 85189
+          },
+          "mipod": {
+            "hash": "b7891ef573e753e6",
+            "size": 85183
+          },
+          "suniward": {
+            "hash": "915034ef6a380fc4",
+            "size": 85267
+          }
+        },
+        "cap_max": 31289,
+        "cap_rec": 842
+      },
+      "orig_sha256": "1fd3035c968603f5",
+      "orig_size": 86854,
+      "struct": {
+        "stego_size": 87105,
+        "strategy": "chunk",
+        "ube_size": 239
+      }
+    },
+    "sample.zip": {
+      "orig_sha256": "33b055ccb97ec922",
+      "orig_size": 1089180,
+      "struct": {
+        "stego_size": 1089419,
+        "strategy": "pre_cd_inject",
+        "ube_size": 239
+      }
+    },
+    "small.png": {
+      "content": {
+        "algos": {
+          "hill": {
+            "hash": "89cd482b7a8b1a5b",
+            "size": 6590
+          },
+          "mipod": {
+            "hash": "0c88a9c3de137e6f",
+            "size": 6650
+          },
+          "suniward": {
+            "hash": "8575dbcf8dc237cd",
+            "size": 6604
+          }
+        },
+        "cap_max": 10400,
+        "cap_rec": 690
+      },
+      "orig_sha256": "1c3a2c67a5595563",
+      "orig_size": 7908,
+      "struct": {
+        "stego_size": 8159,
+        "strategy": "chunk",
+        "ube_size": 239
+      }
+    },
+    "small.webp": {
+      "orig_sha256": "162bd98cde23297b",
+      "orig_size": 6156,
+      "struct": {
+        "stego_size": 6395,
+        "strategy": "eof",
+        "ube_size": 239
+      }
+    },
+    "test.heic": {
+      "content": {
+        "algos": {
+          "cabac": {
+            "hash": "6376abaf44e7dccf",
+            "size": 262342
+          }
+        },
+        "cap_max": 16347,
+        "cap_rec": 4806
+      },
+      "orig_sha256": "f0175f37bce15308",
+      "orig_size": 262342,
+      "struct": {
+        "stego_size": 262628,
+        "strategy": "item_hidden",
+        "ube_size": 239
+      }
+    },
+    "test_nclx.avif": {
+      "orig_sha256": "7f3d10e8050a8485",
+      "orig_size": 355257,
+      "struct": {
+        "stego_size": 355543,
+        "strategy": "item_hidden",
+        "ube_size": 239
+      }
+    },
+    "textures14.jpg": {
+      "content": {
+        "algos": {
+          "jmipod": {
+            "hash": "8f433e21b91f633e",
+            "size": 58527
+          },
+          "juniward": {
+            "hash": "f660b2c2239bd310",
+            "size": 58518
+          },
+          "uerd": {
+            "hash": "9982c46b50e53791",
+            "size": 58524
+          }
+        },
+        "cap_max": 10108,
+        "cap_rec": 3153
+      },
+      "orig_sha256": "f3a6812abd87cd22",
+      "orig_size": 58474,
+      "struct": {
+        "stego_size": 58717,
+        "strategy": "app_segment",
+        "ube_size": 239
+      }
+    },
+    "vid_h265_001.MOV": {
+      "content": {
+        "algos": {
+          "cabac": {
+            "hash": "1a39e1ff0529dcad",
+            "size": 5818035
+          }
+        },
+        "cap_max": 195325,
+        "cap_rec": 11760
+      },
+      "orig_sha256": "ae35994f1df9b44d",
+      "orig_size": 5818035,
+      "struct": {
+        "stego_size": 5818298,
+        "strategy": "box_uuid",
+        "ube_size": 239
+      }
+    }
+  },
+  "generated_at": "2026-11-11T13:20:00",
+  "git_commit": "16c16f9",
+  "schema": 4,
+  "seed": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+}
