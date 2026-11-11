@@ -31,6 +31,7 @@
 
 use crate::stego::hevc::error::{HevcError, Result};
 use crate::stego::hevc::heif_boxes::{PhysicalNalSpan, be_u16, be_u32, be_u64, parse_hvcc_record};
+use crate::stego::hevc::isobmff;
 
 /// Sample entry box types that carry an HEVC decoder configuration record.
 const HEVC_SAMPLE_ENTRIES: [&[u8; 4]; 2] = [b"hvc1", b"hev1"];
@@ -787,30 +788,15 @@ pub(crate) fn collect_sample_slice_spans(
 fn top_level_has_moof(bytes: &[u8]) -> bool {
     let mut pos = 0usize;
     while pos + 8 <= bytes.len() {
-        let Some(size32) = be_u32(bytes, pos) else {
+        let Ok(header) =
+            isobmff::read_box_header(bytes, pos, bytes.len(), isobmff::ZeroSize::Reject)
+        else {
             return false;
         };
-        if &bytes[pos + 4..pos + 8] == b"moof" {
+        if &header.tag == b"moof" {
             return true;
         }
-        let (header_len, total_size) = if size32 == 1 {
-            match be_u64(bytes, pos + 8) {
-                Some(size64) => (16usize, usize::try_from(size64).unwrap_or(0)),
-                None => return false,
-            }
-        } else if size32 == 0 {
-            return false;
-        } else {
-            (8usize, size32 as usize)
-        };
-        if total_size < header_len
-            || pos
-                .checked_add(total_size)
-                .is_none_or(|end| end > bytes.len())
-        {
-            return false;
-        }
-        pos += total_size;
+        pos += header.total_size;
     }
     false
 }
@@ -825,38 +811,13 @@ fn boxes_in(bytes: &[u8], start: usize, end: usize) -> Result<Vec<BoxRef>> {
     let mut pos = start;
     let limit = end.min(bytes.len());
     while pos + 8 <= limit {
-        let size32 = be_u32(bytes, pos).ok_or(HevcError::Truncated)?;
-        let mut tag = [0u8; 4];
-        tag.copy_from_slice(&bytes[pos + 4..pos + 8]);
-        let (header_len, total_size) = if size32 == 1 {
-            let Some(size64) = be_u64(bytes, pos + 8) else {
-                return Err(HevcError::Truncated);
-            };
-            (
-                16usize,
-                usize::try_from(size64).map_err(|_| {
-                    HevcError::ContainerMalformed("64-bit box size does not fit in usize")
-                })?,
-            )
-        } else if size32 == 0 {
-            // `size == 0` means "extends to the end of the enclosing box".
-            (8usize, limit - pos)
-        } else {
-            (8usize, size32 as usize)
-        };
-        if total_size < header_len
-            || pos
-                .checked_add(total_size)
-                .is_none_or(|box_end| box_end > limit)
-        {
-            return Err(HevcError::ContainerMalformed("invalid box size"));
-        }
+        let header = isobmff::read_box_header(bytes, pos, limit, isobmff::ZeroSize::ExtendToLimit)?;
         out.push(BoxRef {
-            tag,
-            payload_start: pos + header_len,
-            end: pos + total_size,
+            tag: header.tag,
+            payload_start: pos + header.header_len,
+            end: pos + header.total_size,
         });
-        pos += total_size;
+        pos += header.total_size;
     }
     Ok(out)
 }

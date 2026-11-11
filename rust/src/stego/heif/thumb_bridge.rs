@@ -1128,32 +1128,17 @@ fn parse_pitm_and_iref(
     (primary_item_id, thumbnail_ids)
 }
 
+/// Read an ISOBMFF box header.
+///
+/// Delegates the 32/64-bit/zero-size grammar to `stego::hevc::isobmff` so the
+/// bridge, the HEIF property parser and the MP4 sample-table parser cannot
+/// disagree about `largesize` or "size 0 means to the end". The unchecked
+/// variant is intentional: this parser tolerates a truncated tail and applies
+/// its own `size > remaining` check at each call site.
 fn read_box_header(bytes: &[u8], pos: usize) -> Result<(usize, usize), StrHideError> {
-    if pos + 8 > bytes.len() {
-        return Err(StrHideError::CorruptedData(
-            "Truncated box header in ISO BMFF".into(),
-        ));
-    }
-    let size_32 = u32::from_be_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-    if size_32 == 1 {
-        if pos + 16 > bytes.len() {
-            return Err(StrHideError::CorruptedData("Truncated 64-bit box".into()));
-        }
-        let size_64 = u64::from_be_bytes(bytes[pos + 8..pos + 16].try_into().unwrap());
-        // A 64-bit size must at least cover its own 16-byte header. Anything
-        // smaller (including 0, which the 32-bit form uses for "to end of
-        // file") is malformed and would make the callers' `size > remaining`
-        // comparison meaningless.
-        let size_64 = usize::try_from(size_64)
-            .ok()
-            .filter(|&s| s >= 16)
-            .ok_or_else(|| StrHideError::CorruptedData("Invalid 64-bit box size".into()))?;
-        Ok((size_64, 16))
-    } else if size_32 == 0 {
-        Ok((bytes.len() - pos, 8))
-    } else {
-        Ok((size_32, 8))
-    }
+    let raw = crate::stego::hevc::isobmff::read_box_size_unchecked(bytes, pos, bytes.len())
+        .map_err(|e| StrHideError::CorruptedData(format!("ISO BMFF box header: {e}")))?;
+    Ok((raw.total_size, raw.header_len))
 }
 
 #[cfg(test)]

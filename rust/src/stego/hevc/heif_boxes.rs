@@ -14,6 +14,7 @@
 //! integers out of a byte slice, and they return `Option` / saturate.
 
 use crate::stego::hevc::error::{HevcError, Result};
+use crate::stego::hevc::isobmff;
 
 /// A physical byte span in the file containing a single NAL unit (excluding length prefix).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,43 +50,13 @@ pub fn parse_heif_targets<'a>(bytes: &'a [u8]) -> Result<HeifHevcTarget<'a>> {
 
     // 1. Walk top-level boxes to locate `meta`
     while pos + 8 <= bytes.len() {
-        let Some(size32) = be_u32(bytes, pos) else {
-            return Err(HevcError::Truncated);
-        };
-        let tag = &bytes[pos + 4..pos + 8];
-        let (hdr_len, total_size) = if size32 == 1 {
-            if pos + 16 > bytes.len() {
-                return Err(HevcError::Truncated);
-            }
-            let Some(s64) = be_u64(bytes, pos + 8) else {
-                return Err(HevcError::Truncated);
-            };
-            (
-                16usize,
-                usize::try_from(s64).map_err(|_| {
-                    HevcError::ContainerMalformed("64-bit box size does not fit in usize")
-                })?,
-            )
-        } else if size32 == 0 {
-            (8usize, bytes.len() - pos)
-        } else {
-            (8usize, size32 as usize)
-        };
-
-        if total_size < hdr_len
-            || pos
-                .checked_add(total_size)
-                .is_none_or(|end| end > bytes.len())
-        {
-            return Err(HevcError::ContainerMalformed("invalid top-level box size"));
-        }
-
-        if tag == b"meta" {
-            meta_span = Some((pos + hdr_len, pos + total_size));
+        let header =
+            isobmff::read_box_header(bytes, pos, bytes.len(), isobmff::ZeroSize::ExtendToLimit)?;
+        if &header.tag == b"meta" {
+            meta_span = Some((pos + header.header_len, pos + header.total_size));
             break;
         }
-
-        pos += total_size;
+        pos += header.total_size;
     }
 
     let (meta_start, meta_end) =
@@ -107,37 +78,17 @@ pub fn parse_heif_targets<'a>(bytes: &'a [u8]) -> Result<HeifHevcTarget<'a>> {
 
     let mut cpos = 0usize;
     while cpos + 8 <= meta_payload.len() {
-        let Some(size32) = be_u32(meta_payload, cpos) else {
+        let Ok(header) = isobmff::read_box_header(
+            meta_payload,
+            cpos,
+            meta_payload.len(),
+            isobmff::ZeroSize::ExtendToLimit,
+        ) else {
             break;
         };
-        let tag = &meta_payload[cpos + 4..cpos + 8];
-        let (hdr_len, total_size) = if size32 == 1 {
-            if cpos + 16 > meta_payload.len() {
-                break;
-            }
-            let Some(s64) = be_u64(meta_payload, cpos + 8) else {
-                break;
-            };
-            match usize::try_from(s64) {
-                Ok(v) => (16usize, v),
-                Err(_) => break,
-            }
-        } else if size32 == 0 {
-            (8usize, meta_payload.len() - cpos)
-        } else {
-            (8usize, size32 as usize)
-        };
 
-        if total_size < hdr_len
-            || cpos
-                .checked_add(total_size)
-                .is_none_or(|end| end > meta_payload.len())
-        {
-            break;
-        }
-
-        let child_data = &meta_payload[cpos + hdr_len..cpos + total_size];
-        match tag {
+        let child_data = &meta_payload[cpos + header.header_len..cpos + header.total_size];
+        match &header.tag {
             b"pitm" => {
                 let version = child_data.first().copied().unwrap_or(0);
                 if version == 0 {
@@ -155,7 +106,7 @@ pub fn parse_heif_targets<'a>(bytes: &'a [u8]) -> Result<HeifHevcTarget<'a>> {
             _ => {}
         }
 
-        cpos += total_size;
+        cpos += header.total_size;
     }
 
     let pid = primary_id.unwrap_or(1);
@@ -311,14 +262,13 @@ fn check_is_grid(iinf: &[u8], target_id: u32) -> bool {
 
     let mut found_count = 0;
     while pos + 8 <= iinf.len() && found_count < entry_count {
-        let Some(size) = be_u32(iinf, pos).map(|v| v as usize) else {
+        let Some(header) =
+            isobmff::read_box_header(iinf, pos, iinf.len(), isobmff::ZeroSize::Reject).ok()
+        else {
             break;
         };
-        let tag = &iinf[pos + 4..pos + 8];
-        if size < 8 || pos.checked_add(size).is_none_or(|end| end > iinf.len()) {
-            break;
-        }
-        if tag == b"infe" && size >= 12 {
+        let size = header.total_size;
+        if &header.tag == b"infe" && size >= 12 {
             let infe_ver = iinf[pos + 8];
             let ipos = pos + 12;
             let (item_id, item_type) = if infe_ver == 2 {
@@ -365,14 +315,13 @@ fn parse_dimg_tiles(iref: &[u8], grid_id: u32) -> Vec<u32> {
     let version = iref[0];
     let mut pos = 4usize;
     while pos + 8 <= iref.len() {
-        let Some(size) = be_u32(iref, pos).map(|v| v as usize) else {
+        let Some(header) =
+            isobmff::read_box_header(iref, pos, iref.len(), isobmff::ZeroSize::Reject).ok()
+        else {
             break;
         };
-        let tag = &iref[pos + 4..pos + 8];
-        if size < 8 || pos.checked_add(size).is_none_or(|end| end > iref.len()) {
-            break;
-        }
-        if tag == b"dimg" {
+        let size = header.total_size;
+        if &header.tag == b"dimg" {
             let body = &iref[pos + 8..pos + size];
             if version == 0 {
                 // from_item_ID(16) + reference_count(16) + to_item_ID(16)*
@@ -421,16 +370,15 @@ fn parse_hvcc_from_iprp<'a>(
     let mut ipma_data = None;
 
     while pos + 8 <= iprp.len() {
-        let Some(size) = be_u32(iprp, pos).map(|v| v as usize) else {
+        let Some(header) =
+            isobmff::read_box_header(iprp, pos, iprp.len(), isobmff::ZeroSize::Reject).ok()
+        else {
             break;
         };
-        let tag = &iprp[pos + 4..pos + 8];
-        if size < 8 || pos.checked_add(size).is_none_or(|end| end > iprp.len()) {
-            break;
-        }
-        if tag == b"ipco" && ipco_data.is_none() {
+        let size = header.total_size;
+        if &header.tag == b"ipco" && ipco_data.is_none() {
             ipco_data = Some(&iprp[pos + 8..pos + size]);
-        } else if tag == b"ipma" && ipma_data.is_none() {
+        } else if &header.tag == b"ipma" && ipma_data.is_none() {
             ipma_data = Some(&iprp[pos + 8..pos + size]);
         }
         pos += size;
@@ -442,15 +390,18 @@ fn parse_hvcc_from_iprp<'a>(
     let mut properties: Vec<(u32, &[u8], &[u8])> = Vec::new();
     let mut ppos = 0usize;
     while ppos + 8 <= ipco.len() {
-        let Some(size) = be_u32(ipco, ppos).map(|v| v as usize) else {
+        let Some(header) =
+            isobmff::read_box_header(ipco, ppos, ipco.len(), isobmff::ZeroSize::Reject).ok()
+        else {
             break;
         };
-        let tag = &ipco[ppos + 4..ppos + 8];
-        if size < 8 || ppos.checked_add(size).is_none_or(|end| end > ipco.len()) {
-            break;
-        }
+        let size = header.total_size;
         let index = (properties.len() + 1) as u32;
-        properties.push((index, tag, &ipco[ppos + 8..ppos + size]));
+        properties.push((
+            index,
+            &ipco[ppos + 4..ppos + 8],
+            &ipco[ppos + 8..ppos + size],
+        ));
         ppos += size;
     }
 

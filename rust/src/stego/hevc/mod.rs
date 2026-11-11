@@ -14,6 +14,7 @@ pub mod engine;
 pub mod error;
 #[doc(hidden)]
 pub mod heif_boxes;
+pub(crate) mod isobmff;
 #[doc(hidden)]
 pub mod mkv_boxes;
 #[doc(hidden)]
