@@ -18,6 +18,7 @@
 4. **架构分层总体健康**，但 `structure/engine.rs`（3585 行）、`stego/hevc/engine.rs`（5260 行）、`stego/png/engine.rs`（5146 行）把过多职责塞进单个文件；GUI 又直接依赖 `structure::engine`、`stego::io` 等内部模块，削弱了公共 API 边界。
 5. **测试与发布体系的主要缺口不在数量，而在"不可信输入、GUI CI 与可复现性"**：没有 fuzz/property 测试；GUI 的 4 套测试与 clippy 完全不在 CI；`check_feature_matrix.py` 漏掉 `content-audio`/`content-heif-bridge`/`structure-pe` 单域组合；`gui-release.yml` 是唯一不复用 CI 质量门禁的发布流；`testdata/`、DL 模型、`temp/` 基线均被 `.gitignore` 排除，格式/评估类用例无法在新克隆上复现（M-21~M-24）。
 6. **本批已实施修复**：按"确定是 bug、改动小、收益大、风险低"筛出 H-1、H-2、M-6、L-2，已修复并分两批提交（`cf9b2a7`、`0e138bf`），改法与验证结果见 §10；`.github/` 下的 CI 相关项按要求留待后续处理。
+7. **修复状态统计（截至 2026-11-11 第二轮整改）**：37 项问题中**已修复 15 项**（H-1、H-2、M-3、M-4、M-5、M-6、M-10、M-11、M-14、M-15、M-17、M-19、M-20、M-22、L-2；共 10 个提交，见 §11），**未修复 22 项**（M-1、M-2、M-7、M-8、M-9、M-12、M-13、M-16、M-18、M-21、M-23、M-24，以及 L-1、L-3~L-11）。各条目标题已加 ✅ 与对应批次/提交短哈希；未修复条目保持原状。
 
 ---
 
@@ -139,14 +140,18 @@
 - **严重程度**：中
 - **修复方向**：把"进程级内存配额"下沉到库（如 `MemoryBudget` 可注入），GUI 只负责申报/释放；峰值按引擎/容器类型估算，而不是单一常量。
 
-#### M-3｜PNG/音频的 extract 与 inspect 复制同一段信封引导代码
+#### M-3｜PNG/音频的 extract 与 inspect 复制同一段信封引导代码 ✅ 已修复（批次 2，`1fc17d2`）
+
+> 修复：`stego/png/engine.rs` 新增 `open_png_header` + `OpenedPngHeader`/`OpenedPngHeaderError`，extract 与 inspect 共用同一段 header 槽位解析、`validate_ext_critical` 与 limits 检查；extract 把"槽位不足"映射为 `no_hidden()`，inspect 映射为空信息并保留 `log::debug!` 与 note。音频侧复核确认早已通过 `read_base`/`read_extension`/`extract_with_header`/`inspect_with_header` 共享，未改。
 
 - **证据**：`rust/src/stego/png/engine.rs:1988-2062`（extract 中 decode header + `validate_ext_critical` + limits）与 `:2252-2330`（inspect 中几乎相同的一段）；`rust/src/stego/audio/core.rs:500` 附近也有 inspect/extract 两份引导逻辑。
 - **影响**：PBKDF2 次数上限、扩展记录校验、容量限制这些安全相关判断有两份实现；只改一处会造成 "inspect 说可读、extract 报错" 或反向的不一致。
 - **严重程度**：中
 - **修复方向**：抽出 `open_header_bootstrap(bytes, keys, limits) -> Result<OpenedHeader>`，extract/inspect/verify 只负责把错误映射成各自语义。
 
-#### M-4｜ISOBMFF box 解析存在 4 套实现，校验规则不一致
+#### M-4｜ISOBMFF box 解析存在 4 套实现，校验规则不一致 ✅ 已修复（批次 3，`ed989d0`）
+
+> 修复：新增 `stego/hevc/isobmff.rs`（`read_box_header`/`read_box_size_unchecked` + `BoxHeader`/`RawBoxSize`/`ZeroSize`），统一 size32==1/0/>1、64 位溢出与 `total < header_len` 判定；`mp4_boxes.rs`、`heif_boxes.rs`（`meta`/`iinf`/`iref`/`iprp`/`ipco` 遍历）、`heif/thumb_bridge.rs` 三处改用它。结构域因分层红线保留独立实现。
 
 - **证据**：
   - `rust/src/structure/adapters/isobmff.rs:631`（`read_box_size`）、`:830`（`read_stream_box_header`）；
@@ -158,7 +163,9 @@
 - **严重程度**：中
 - **修复方向**：内容域内提取一个共享的 `isobmff` reader（mp4/heif/thumb 共用）；结构域因分层红线保留独立实现，但用同一组测试向量约束行为。
 
-#### M-5｜6 套选项类型 + 80 个 `with_*` 的复制式 builder
+#### M-5｜6 套选项类型 + 80 个 `with_*` 的复制式 builder ✅ 已修复（批次 4，`d906c5f`）
+
+> 修复：`stego/options.rs` 顶部新增声明式宏（`credential_builders!`、`control_builder!`、`pool_builders!`、`suite_builders!`、`extensions_builder!`、`safety_builders!`、`tuning_builders!`、`freshness_builder!`、`no_filename_builder!`、`exact_builder!`），6 个 impl 改为宏调用；仅保留有语义差异的手写方法（`png_params_mut`/`jpeg_params_mut`/`extract_options`/`probe_options`、Bridge 的 `with_safety` 与 `resolved_*`、limits 系列）。净删除约 515 行、新增 236 行，公共 API 不变。
 
 - **证据**：`rust/src/stego/options.rs:485`（Embed）、`:792`（Probe）、`:983`（Extract）、`:1145`（Bridge）、`:1448`（Inspect）、`:1594`（Verify）；全文件 1900 行，`pub fn with_` 共 80 个（`structure/options.rs` 另有 15 个）。
 - **问题**：每个结构体都重复声明 `password/key/domain/limits/control/pool/safety/tuning/extensions` 等字段，并各自实现 `Debug/PartialEq/builder`。`BridgeOptions` 等还出现了字段集合不完全一致。
@@ -197,14 +204,18 @@
 - **严重程度**：中
 - **修复方向**：补三行（`content-audio`、`content-heif-bridge`、`structure-pe`）；如果某些组合有意不支持，在脚本里显式注释原因。
 
-#### M-10｜没有 fuzz/property 测试，手写解析器多
+#### M-10｜没有 fuzz/property 测试，手写解析器多 ✅ 已修复（批次 5，`53b6fd1`）
+
+> 修复：新增独立 `rust/fuzz/` cargo-fuzz crate（不参与普通构建）与三个 target（`structure_inspect`、`structure_read_restore`、`content_inspect_extract`，输入上限 4 MiB），以及每周定时 + 手动触发的 `.github/workflows/fuzz.yml`（nightly + libfuzzer，失败上传 artifacts）。
 
 - **证据**：`rust/Cargo.toml` 无 `proptest`/`quickcheck`/`cargo-fuzz` 依赖；`rust/tests` 与 `src` 内均为示例驱动测试。手写解析器覆盖 PDF/ZIP/MKV/PE/ISOBMFF/H.264/HEVC。
 - **影响**：恶意或损坏载体是最现实的外部输入；当前只能靠人肉构造用例，越界/死循环/巨额分配类问题容易被漏掉。
 - **严重程度**：中
 - **修复方向**：对 `inspect/extract/restore` 入口建立 `cargo-fuzz` target（用现成 testdata 做种子），至少覆盖 `structure/adapters/*` 与 `stego::*::inspect`。
 
-#### M-11｜verify 与 read 复制了同一段 KDF/凭据阶梯（加密关键逻辑）
+#### M-11｜verify 与 read 复制了同一段 KDF/凭据阶梯（加密关键逻辑） ✅ 已修复（批次 1，`89064bc`）
+
+> 修复：`structure/envelope.rs` 新增 `UnpackSecrets::derive_attempts(password, salt, profile, stealth_header_magic)`，read 路径与 `verify_core` 均改为调用它；新增单测断言"有密码时只走密码、无密码时只走 profile 默认密钥"。
 
 - **证据**：`rust/src/structure/engine.rs:1853-1869`（`open_and_authenticate_envelope`）与 `:3049-3065`（`verify_core`）各自实现 `password -> derive_all`、`profile.secret() -> derive_all` 的回退顺序。
 - **影响**：以后调整 stealth/默认凭据策略时，只要漏改一处，就会出现"verify 通过但 read 失败"或相反；这类问题很难在常规测试里暴露。
@@ -230,14 +241,18 @@
 - **严重程度**：中
 - **修复方向**：上限同时考虑压缩比上限与当前可用内存；读路径可考虑"解压到临时文件/流式输出"；至少在文档/GUI 中明示峰值。
 
-#### M-14｜前端 4 个视图各写一份串行任务循环
+#### M-14｜前端 4 个视图各写一份串行任务循环 ✅ 已修复（批次 8，`f3c05e9`）
+
+> 修复：新增 `gui/src/hooks/useSequentialJob.ts`（`run(items, spec)` 统一任务 id、`startTask`/`finishTask`、`running` 生命周期、逐项 `runOne`/`onError`、可选 `onBegin`），`HideStructureView`/`ExtractView`/`ScanView`/`StegoEmbedView` 四处手写循环替换为 `job.run(...)`，各视图只保留文案与单项执行函数。
 
 - **证据**：`gui/src/views/HideStructureView.tsx:70-102`、`ExtractView.tsx:54-85`、`ScanView.tsx:99-130`、`StegoEmbedView.tsx:123-221`：都是 `for` 循环 + `startTask`/`queue.update`/`finishTask` + 错误分类。
 - **影响**：新增"取消/重试/并行/进度合并"能力要改 4 处；各视图的错误处理已经出现细节差异。
 - **严重程度**：中
 - **修复方向**：抽 `useSequentialJob({ runOne, onItem })` hook，视图只提供单项执行函数与文案。
 
-#### M-15｜输出文件名去重有三份实现，前端还逐次 IPC
+#### M-15｜输出文件名去重有三份实现，前端还逐次 IPC ✅ 已修复（批次 8，`f3c05e9`）
+
+> 修复：`core/fs.rs` 抽出唯一命名规则 `numbered_name` 并新增公开 `unique_free_path(dir, desired)`（含初始名的磁盘占用检查），`unique_batch_path` 复用同一规则；`gui/.../commands/stego.rs` 的内联 `(i)` 循环改调它；新增 IPC `unique_output_path_cmd`，前端 `queue.ts` 删除逐候选 `get_file_metadata_cmd` 往返，三处视图改为一次调用。
 
 - **证据**：`rust/src/core/fs.rs:107`（`unique_batch_path`，`pub(crate)`，GUI 用不到）、`gui/src/lib/queue.ts:80-101`（`pathExists` + `uniqueOutputPath`，逐个候选调用 `getFileMetadata` IPC）、`gui/src-tauri/src/commands/stego.rs:418-437`（后端自己的 `(i)` 循环）。
 - **影响**：三处命名规则（`stem (i).ext`）可能漂移；1000 个重名文件会产生 1000 次 IPC + `metadata` 往返。
@@ -251,7 +266,9 @@
 - **严重程度**：中
 - **修复方向**：在 PNG 行扫描、JPEG 系数遍历、音频帧循环内按固定步长 `report`；或在统一 IO 层按"解码/嵌入/写盘"阶段发粗粒度事件。
 
-#### M-17｜4 个 stress example 高度复制，且硬编码本机路径
+#### M-17｜4 个 stress example 高度复制，且硬编码本机路径 ✅ 已修复（批次 6，`91a7343`）
+
+> 修复：新增 `examples/common/stress.rs`（`Args`/`Job`/`Round`/`ProbeVerdict` + `trait StressCase` + `run<C>`，统一探测、任务展开、rayon 并行、错误密码校验、报告与退出码），四个 example 重写为只描述载体（约 100~180 行），并保留各自原有的算法集、填充余量、长度不变与 HEIF 解码检查等行为。
 
 - **证据（已复核）**：`rust/examples/{jpg,png,hevc,audio}_stress.rs` 去重行集合重合度为 75.8%–89.6%（jpg↔png 89.2%、hevc↔audio 89.6%、png↔hevc 75.8%，完整六对见 §8.4）；硬编码绝对路径计数 jpg 2、png 2、hevc 1、audio 0，即 **3/4 文件**含本机路径（如 `png_stress.rs` 中的 `C:/Home/Projects/strhide/testdata/...`）。
 - **影响**：并发/密钥轮换/填充深度逻辑改一处漏三处；换机器或 CI 上无法直接运行。
@@ -265,14 +282,18 @@
 - **严重程度**：中
 - **修复方向**：缓存用 `Arc<[u8]>`/按需重新读取；写盘完成后显式清空缓存，或仅在"预览→保存"两步之间短时保留。
 
-#### M-19｜GUI 生产代码多处 `lock().unwrap()`，poison 即 panic
+#### M-19｜GUI 生产代码多处 `lock().unwrap()`，poison 即 panic ✅ 已修复（批次 7，`e571458`）
+
+> 修复：`state.rs` 新增 `lock_unpoisoned(&Mutex<T>)`（`unwrap_or_else(|e| e.into_inner())`），替换 `state.rs`、`logger.rs`、`commands/batch.rs` 中 7 处生产代码 `lock().unwrap()`；日志模块不再因 poison 二次 panic。
 
 - **证据**：`gui/src-tauri/src/state.rs:215`、`:346`；`gui/src-tauri/src/logger.rs:76`、`:164`、`:180`、`:186`；`gui/src-tauri/src/commands/batch.rs:31`。
 - **影响**：任一持锁线程 panic 后，后续日志/任务取消/语言切换全部 panic；`run_cancellable_task` 的 `catch_unwind` 只能兜住工作闭包，兜不住这些命令线程。
 - **严重程度**：中
 - **修复方向**：使用 `parking_lot::Mutex`，或统一 `unwrap_or_else(|e| e.into_inner())`；日志模块应保证永不 panic。
 
-#### M-20｜diag 命令手写三份 spawn_blocking/catch_unwind 模板，且没有取消
+#### M-20｜diag 命令手写三份 spawn_blocking/catch_unwind 模板，且没有取消 ✅ 已修复（批次 7，`e571458`）
+
+> 修复：`state.rs` 新增 `run_blocking_task(state, task_id, target, worker)`，统一"异步线程 + 共享 rayon pool + `catch_unwind` + 本地化 + join 错误映射"，`task_id` 存在时注册/注销 `CancelToken` 并传入 `Control`；diag 的 inspect/verify/scan 三处模板全部改走它，三个命令新增可选 `task_id`。scan 的分析遍历本身无检查点，取消仅在读取开始前生效。
 
 - **证据**：`gui/src-tauri/src/commands/diag.rs:38-70`、`:179-205`、`:219-240` 三处 `spawn_blocking + catch_unwind + pool.install`；而 `state.rs` 已有 `run_cancellable_task`（被 stego/structure 使用）。
 - **影响**：inspect/verify/scan 没有 `Control` 取消能力，批量扫描无法中断；模板复制导致错误映射不一致。
@@ -289,7 +310,9 @@
 - **严重程度**：中（工程链路，触发于发布时）
 - **修复方向**：给 `gui-release.yml` 加 `quality: uses: ./.github/workflows/ci.yml` 并 `needs: quality`；至少补 `pnpm build` + Tauri clippy + `test:unit` + `test:cross`；改 `pnpm install --frozen-lockfile`、固定 action 版本、先发 draft 再由人工转正。
 
-#### M-22｜pre-commit 的 clippy 参数与 CI/AGENTS 不一致，注释与行为矛盾
+#### M-22｜pre-commit 的 clippy 参数与 CI/AGENTS 不一致，注释与行为矛盾 ✅ 已修复（批次 5，`53b6fd1`）
+
+> 修复：`.pre-commit-config.yaml` 的 cargo-clippy entry 补 `--all-features`，与 `ci.yml:43`、`AGENTS.md` 一致。
 
 - **证据**：`.pre-commit-config.yaml:13` 是 `cargo clippy --all-targets -- -D warnings`（**缺 `--all-features`**）；`ci.yml:43` 与 `AGENTS.md:28` 均为 `cargo clippy --all-targets --all-features -- -D warnings`；`.pre-commit-config.yaml:18-21` 注释写 "run it by hand when editing `cfg` attributes"，但 :22-27 的 `check-feature-matrix` hook 实际对 `types: [rust]` 自动执行。
 - **影响**：本地 hook 不编译 `cli`/`content-*` 等 feature-gated 代码，开发者"pre-commit 通过"不等于 CI 通过；注释会让维护者误以为 feature matrix 只手动跑。
@@ -548,3 +571,38 @@ M-21（GUI 发布流绕过 CI 质量门禁、`pnpm install` 未冻结 lockfile�
 - H-2 证据：补注两处命令函数开头**已有** `check_overwrite`，真正缺口是 `same_file` 护栏；
 - L-2 位置：由错误的 `:830-860` 修正为 `isobmff.rs:657-696`；
 - §0 新增第 6 条修复状态；4 个条目标题加 ✅ 与提交短哈希。
+
+---
+
+## 11. 修复实施记录（2026-11-11 第二轮）
+
+### 11.1 范围与批次
+
+第二轮按用户指定清单修复 11 项（M-3、M-4、M-5、M-10、M-11、M-14、M-15、M-17、M-19、M-20、M-22），按主题与依赖切为 8 批；每批独立编译、独立跑门禁后单独提交。硬约束：不改核心算法行为，`scripts/baseline.json` 原样保留，`baseline_hash.py --check` 全绿且不使用 `--write`。
+
+| 批次 | 问题 | 提交 | 改动要点 |
+|---|---|---|---|
+| 1 | M-11 | `89064bc` | `UnpackSecrets::derive_attempts` 统一 read/verify 的 KDF/凭据阶梯，新增阶梯单测 |
+| 2 | M-3 | `1fc17d2` | PNG extract/inspect 共用 `open_png_header`（`OpenedPngHeader`/`OpenedPngHeaderError`） |
+| 3 | M-4 | `ed989d0` | 新增 `stego/hevc/isobmff.rs`，mp4/heif/thumb 三处 box header 解析统一 |
+| 4 | M-5 | `d906c5f` | 内容域 6 类 Options builder 宏化（净 -279 行），公共 API 不变 |
+| 5 | M-10 + M-22 | `53b6fd1` | 独立 `rust/fuzz/` crate（3 target）+ 每周 fuzz workflow；pre-commit clippy 补 `--all-features` |
+| 6 | M-17 | `91a7343` | `examples/common/stress.rs` + `StressCase`，四个 stress example 只描述载体 |
+| 7 | M-19 + M-20 | `e571458` | `lock_unpoisoned` 替换 7 处生产锁；`run_blocking_task` 统一 diag 三处模板并接入取消 |
+| 8 | M-14 + M-15 | `f3c05e9` | `useSequentialJob` 统一 4 视图循环；`core::fs::unique_free_path` + `unique_output_path_cmd` 统一命名 |
+
+### 11.2 验证结果（每批均执行）
+
+| 检查 | 结果 |
+|---|---|
+| `cargo fmt`、`cargo clippy --all-targets --all-features -- -D warnings` | 通过 |
+| `cargo test --all-features --all-targets` | 通过（587 lib + 全部分组） |
+| `python scripts/import_lint.py` | `OK: all architectural boundaries intact` |
+| `cargo build --release --all-features` + `python scripts/baseline_hash.py --check` | 28/28 与基线逐字节一致 |
+| GUI：`pnpm build`、src-tauri clippy、`cargo test --manifest-path src-tauri/Cargo.toml --lib`、`pnpm test:unit`、`pnpm test:e2e` | 通过（12 / 24 / 25 用例） |
+| 四个 stress example smoke（1 轮、0.2 填充） | 全部 exit 0、0 failed |
+
+### 11.3 遗留说明
+
+- M-20 的 scan 取消：analysis 遍历本身没有检查点（属 M-16 范围），取消只在读取开始前生效，与批量扫描的中断粒度一致。
+- 本轮未触碰其余 22 项（含 H-1/H-2 之外的 M-1、M-2、M-7、M-8、M-9、M-12、M-13、M-16、M-18、M-21、M-23、M-24 与 L-1、L-3~L-11）。
