@@ -212,7 +212,7 @@ impl Progress for ThrottledChannelProgress {
             || ev.total.is_some_and(|t| ev.done >= t);
         let now_ms = self.start_instant.elapsed().as_millis() as u64;
 
-        let mut prev_stage = self.last_stage.lock().unwrap();
+        let mut prev_stage = lock_unpoisoned(&self.last_stage);
         let stage_changed = *prev_stage != stage_str;
         if stage_changed {
             *prev_stage = stage_str;
@@ -291,6 +291,69 @@ pub fn panic_error(payload: &(dyn std::any::Any + Send), target: &str) -> StrHid
     StrHideError::General(format!("Internal engine panic: {msg}"))
 }
 
+/// Lock a mutex and recover the guarded value if a holder panicked.
+///
+/// These locks guard independent bookkeeping (the task map, the log ring, the
+/// current progress stage). Once one holder panics, `unwrap()` turns every
+/// later log line, progress report or cancel request into another panic on the
+/// IPC thread; the value itself is still perfectly usable, so recover it.
+pub fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Run one blocking engine call off the async runtime, on the shared pool,
+/// with panic isolation and localized error mapping.
+///
+/// This is the single implementation of the "spawn_blocking + catch_unwind +
+/// pool.install" template that the diagnostic commands used to spell out three
+/// times, each with its own panic target and error mapping. When `task_id` is
+/// given, a cancellation token is registered for it for the duration of the
+/// call, so `cancel_task_cmd` can stop inspect/verify/scan the same way it
+/// stops the embed/read jobs.
+pub async fn run_blocking_task<T, F>(
+    state: &GuiState,
+    task_id: Option<String>,
+    target: &'static str,
+    worker: F,
+) -> Result<T, ErrorDetail>
+where
+    T: Send + 'static,
+    F: FnOnce(StrHide, Control<'_>) -> Result<T, StrHideError> + Send + 'static,
+{
+    let engine = state.engine;
+    let pool = Arc::clone(&state.pool);
+    let token = Arc::new(CancelToken::new());
+    if let Some(id) = task_id.as_deref() {
+        lock_unpoisoned(&state.tasks).insert(id.to_string(), Arc::clone(&token));
+    }
+
+    let join_res = tauri::async_runtime::spawn_blocking(move || {
+        let unwind_res = catch_unwind(AssertUnwindSafe(|| {
+            let ctrl = Control::with_cancel(token.as_ref());
+            pool.install(|| worker(engine, ctrl))
+        }));
+        match unwind_res {
+            Ok(res) => res,
+            Err(payload) => Err(panic_error(payload.as_ref(), target)),
+        }
+    })
+    .await;
+
+    if let Some(id) = task_id.as_deref() {
+        lock_unpoisoned(&state.tasks).remove(id);
+    }
+
+    let ctx = RenderCtx::new(i18n::lang());
+    match join_res {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(err.detail_i18n_with_ctx(ctx)),
+        Err(join_err) => Err(StrHideError::General(format!(
+            "Worker thread join error: {join_err}"
+        ))
+        .detail_i18n_with_ctx(ctx)),
+    }
+}
+
 /// Unified cancellable background task executor:
 /// registers/unregisters CancelToken, executes with catch_unwind protection,
 /// and localizes StrHideError to ErrorDetail.
@@ -317,10 +380,7 @@ where
     let start_time = Instant::now();
     log::info!(target: "engine::task", "Task [{}] started", task_id);
 
-    state
-        .tasks
-        .lock()
-        .unwrap()
+    lock_unpoisoned(&state.tasks)
         .insert(task_id.clone(), Arc::clone(&token));
 
     let task_id_clone = task_id.clone();
@@ -343,7 +403,7 @@ where
     })
     .await;
 
-    state.tasks.lock().unwrap().remove(&task_id);
+    lock_unpoisoned(&state.tasks).remove(&task_id);
 
     match &join_res {
         Ok(Ok(_)) => {

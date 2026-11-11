@@ -9,7 +9,7 @@ use strhide::errors::ErrorDetail;
 use strhide::facade::DualOptions;
 use strhide::structure::options::RestoreOptions;
 
-use crate::state::{GuiState, ProgressEvent, run_cancellable_task};
+use crate::state::{GuiState, ProgressEvent, lock_unpoisoned, run_cancellable_task};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BatchJobSpec {
@@ -28,7 +28,7 @@ pub fn set_ui_language_cmd(lang: Lang) -> Lang {
 
 #[tauri::command]
 pub fn cancel_task_cmd(state: State<'_, GuiState>, task_id: String) -> bool {
-    let tasks = state.tasks.lock().unwrap();
+    let tasks = lock_unpoisoned(&state.tasks);
     if let Some(token) = tasks.get(&task_id) {
         token.cancel();
         true

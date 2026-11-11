@@ -31,8 +31,9 @@ export async function inspectCarrier(
   path: string,
   password?: string,
   domain?: string,
+  taskId?: string,
 ): Promise<DualInspect> {
-  return invoke<DualInspect>("inspect_carrier_cmd", { path, password, domain });
+  return invoke<DualInspect>("inspect_carrier_cmd", { path, password, domain, taskId });
 }
 
 export async function writeStructureFile(

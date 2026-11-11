@@ -103,7 +103,7 @@ export const ScanView: React.FC<{ active: boolean }> = ({ active }) => {
         queue.update(item.path, { status: "running", message: c.scan.reading, outputPath: undefined });
 
         try {
-          const info = await inspectCarrier(item.path);
+          const info = await inspectCarrier(item.path, undefined, undefined, taskId);
           const row = toRow(info);
           setRows((prev) => ({ ...prev, [item.path]: row }));
           queue.update(item.path, {

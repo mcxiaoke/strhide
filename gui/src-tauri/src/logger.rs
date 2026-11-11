@@ -7,6 +7,8 @@ use log::{LevelFilter, Metadata, Record};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
+use crate::state::lock_unpoisoned;
+
 pub const MAX_LOG_ENTRIES: usize = 2000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,7 +75,7 @@ impl log::Log for RingBufferLogger {
         }
 
         {
-            let mut buf = state.buffer.lock().unwrap();
+            let mut buf = lock_unpoisoned(&state.buffer);
             if buf.len() >= MAX_LOG_ENTRIES {
                 buf.pop_front();
             }
@@ -161,7 +163,7 @@ pub fn record_custom_log(
     }
 
     {
-        let mut buf = state.buffer.lock().unwrap();
+        let mut buf = lock_unpoisoned(&state.buffer);
         if buf.len() >= MAX_LOG_ENTRIES {
             buf.pop_front();
         }
@@ -177,13 +179,13 @@ pub fn record_custom_log(
 
 pub fn get_recent_logs() -> Vec<LogEntryDto> {
     let state = get_state();
-    let buf = state.buffer.lock().unwrap();
+    let buf = lock_unpoisoned(&state.buffer);
     buf.iter().cloned().collect()
 }
 
 pub fn clear_logs() {
     let state = get_state();
-    let mut buf = state.buffer.lock().unwrap();
+    let mut buf = lock_unpoisoned(&state.buffer);
     buf.clear();
 }
 

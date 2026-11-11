@@ -1,15 +1,13 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 use tauri::State;
 
 use strhide::analysis::ScanReport;
-use strhide::core::control::Control;
 use strhide::core::i18n::{self, RenderCtx};
 use strhide::errors::ErrorDetail;
 use strhide::facade::{DualInspect, DualOptions, DualVerify};
 use strhide::formats::capability::{CAPABILITIES, Capability};
 
-use crate::state::GuiState;
+use crate::state::{GuiState, run_blocking_task};
 
 #[tauri::command]
 pub fn get_capabilities_cmd() -> Vec<Capability> {
@@ -22,6 +20,17 @@ pub async fn inspect_carrier_impl(
     password: Option<String>,
     domain: Option<String>,
 ) -> Result<DualInspect, ErrorDetail> {
+    inspect_carrier_with_task(state, path, password, domain, None).await
+}
+
+/// [`inspect_carrier_impl`] with a cancellation token bound to `task_id`.
+pub async fn inspect_carrier_with_task(
+    state: &GuiState,
+    path: PathBuf,
+    password: Option<String>,
+    domain: Option<String>,
+    task_id: Option<String>,
+) -> Result<DualInspect, ErrorDetail> {
     let start = std::time::Instant::now();
     let path_display = path.display().to_string();
     log::info!(
@@ -32,42 +41,25 @@ pub async fn inspect_carrier_impl(
     );
 
     let ctx = RenderCtx::new(i18n::lang());
-    let engine = state.engine;
-    let pool = Arc::clone(&state.pool);
+    let res = run_blocking_task(state, task_id, "ipc::inspect", move |engine, ctrl| {
+        // `inspect_any` already exempts content-only carriers (Annex-B HEVC has
+        // no structure adapter) and reports content-domain failures through
+        // `content_error`. The hand-rolled Annex-B branch that used to live here
+        // duplicated that logic and silently dropped the error.
+        let opts = DualOptions::new()
+            .with_password_option(password.as_deref())
+            .with_domain_option(domain.as_deref())
+            .with_control(ctrl);
+        let mut dual = engine.inspect_any(&path, &opts)?;
 
-    let res: Result<DualInspect, ErrorDetail> = tauri::async_runtime::spawn_blocking(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            pool.install(|| {
-                // `inspect_any` already exempts content-only carriers (Annex-B HEVC has
-                // no structure adapter) and reports content-domain failures through
-                // `content_error`. The hand-rolled Annex-B branch that used to live here
-                // duplicated that logic and silently dropped the error.
-                let opts = DualOptions::new()
-                    .with_password_option(password.as_deref())
-                    .with_domain_option(domain.as_deref())
-                    .with_control(Control::none());
-                let mut dual = engine
-                    .inspect_any(&path, &opts)
-                    .map_err(|e| e.detail_i18n_with_ctx(ctx))?;
+        // Localize strategy capacity limits
+        for strat in &mut dual.structure.strategies {
+            strat.limit = strat.render_limit(ctx);
+        }
 
-                // Localize strategy capacity limits
-                for strat in &mut dual.structure.strategies {
-                    strat.limit = strat.render_limit(ctx);
-                }
-
-                Ok(dual)
-            })
-        }))
-        .unwrap_or_else(|payload| {
-            Err(crate::state::panic_error(payload.as_ref(), "ipc::inspect")
-                .detail_i18n_with_ctx(ctx))
-        })
+        Ok(dual)
     })
-    .await
-    .map_err(|join_err| {
-        strhide::errors::StrHideError::General(format!("Worker thread join error: {join_err}"))
-            .detail_i18n_with_ctx(ctx)
-    })?;
+    .await;
 
     match &res {
         Ok(dual) => {
@@ -104,8 +96,9 @@ pub async fn inspect_carrier_cmd(
     path: PathBuf,
     password: Option<String>,
     domain: Option<String>,
+    task_id: Option<String>,
 ) -> Result<DualInspect, ErrorDetail> {
-    inspect_carrier_impl(&state, path, password, domain).await
+    inspect_carrier_with_task(&state, path, password, domain, task_id).await
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -171,70 +164,39 @@ pub async fn verify_carrier_cmd(
     path: PathBuf,
     password: Option<String>,
     domain: Option<String>,
+    task_id: Option<String>,
 ) -> Result<DualVerify, ErrorDetail> {
-    let ctx = RenderCtx::new(i18n::lang());
-    let engine = state.engine;
-    let pool = Arc::clone(&state.pool);
-
-    tauri::async_runtime::spawn_blocking(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            pool.install(|| {
-                // Same content-only exemption as `inspect_carrier_cmd`: `verify_any`
-                // returns `VerifyResult::not_applicable` for Annex-B HEVC and keeps the
-                // content-domain failure in `content_error`.
-                let opts = DualOptions::new()
-                    .with_password_option(password.as_deref())
-                    .with_domain_option(domain.as_deref())
-                    .with_control(Control::none());
-                engine
-                    .verify_any(&path, &opts)
-                    .map_err(|e| e.detail_i18n_with_ctx(ctx))
-            })
-        }))
-        .unwrap_or_else(|payload| {
-            Err(crate::state::panic_error(payload.as_ref(), "ipc::verify")
-                .detail_i18n_with_ctx(ctx))
-        })
+    run_blocking_task(&state, task_id, "ipc::verify", move |engine, ctrl| {
+        // Same content-only exemption as `inspect_carrier_cmd`: `verify_any`
+        // returns `VerifyResult::not_applicable` for Annex-B HEVC and keeps the
+        // content-domain failure in `content_error`.
+        let opts = DualOptions::new()
+            .with_password_option(password.as_deref())
+            .with_domain_option(domain.as_deref())
+            .with_control(ctrl);
+        engine.verify_any(&path, &opts)
     })
     .await
-    .map_err(|join_err| {
-        strhide::errors::StrHideError::General(format!("Worker thread join error: {join_err}"))
-            .detail_i18n_with_ctx(ctx)
-    })?
 }
 
 #[tauri::command]
 pub async fn scan_carrier_cmd(
     state: State<'_, GuiState>,
     path: PathBuf,
+    task_id: Option<String>,
 ) -> Result<ScanReport, ErrorDetail> {
     let start = std::time::Instant::now();
     let path_display = path.display().to_string();
     log::info!(target: "ipc::scan", "Scanning carrier: path={}", path_display);
 
-    let ctx = RenderCtx::new(i18n::lang());
-    let engine = state.engine;
-    let pool = Arc::clone(&state.pool);
-
-    let res: Result<ScanReport, ErrorDetail> = tauri::async_runtime::spawn_blocking(move || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            pool.install(|| {
-                engine
-                    .analysis()
-                    .scan_file(&path)
-                    .map_err(|e| e.detail_i18n_with_ctx(ctx))
-            })
-        }))
-        .unwrap_or_else(|payload| {
-            Err(crate::state::panic_error(payload.as_ref(), "ipc::scan")
-                .detail_i18n_with_ctx(ctx))
-        })
+    let res = run_blocking_task(&state, task_id, "ipc::scan", move |engine, ctrl| {
+        // The analysis pass has no internal checkpoints, so cancellation is
+        // observed before the (bounded, 64 MiB) read starts: enough to drop a
+        // scan that was queued behind other pool work.
+        ctrl.check()?;
+        engine.analysis().scan_file(&path)
     })
-    .await
-    .map_err(|join_err| {
-        strhide::errors::StrHideError::General(format!("Worker thread join error: {join_err}"))
-            .detail_i18n_with_ctx(ctx)
-    })?;
+    .await;
 
     match &res {
         Ok(report) => {
