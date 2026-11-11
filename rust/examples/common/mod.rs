@@ -3,6 +3,8 @@
 
 //! Shared utilities for strhide examples and stress test harnesses.
 
+pub mod stress;
+
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
