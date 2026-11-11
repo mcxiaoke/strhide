@@ -94,6 +94,43 @@ pub(crate) fn batch_payload_name(
     format!("{stem}.{ext}")
 }
 
+/// `desired` with ` (n)` inserted before its extension (`stem (n).ext`).
+///
+/// The one place the "numbered alternative" spelling is defined: the CLI batch
+/// and the GUI's save path both build their candidates from it, so the two
+/// cannot drift into `stem(n).ext` / `stem (n) (n).ext`.
+fn numbered_name(desired: &str, n: u32) -> String {
+    let split = desired
+        .rfind('.')
+        .filter(|&i| i > 0)
+        .unwrap_or(desired.len());
+    let (stem, ext) = desired.split_at(split);
+    format!("{stem} ({n}){ext}")
+}
+
+/// Pick a destination under `dir` for `desired` without colliding with a file
+/// already on disk.
+///
+/// Unlike [`unique_batch_path`], the desired name itself is checked too: the
+/// GUI writes next to the carrier and must never overwrite an unrelated file
+/// silently. Used by the GUI's save path for structure writes, content embeds
+/// and extraction, so all of them share the numbering rule.
+pub fn unique_free_path(dir: &std::path::Path, desired: &str) -> std::path::PathBuf {
+    let initial = dir.join(desired);
+    if !initial.exists() {
+        return initial;
+    }
+    for n in 1u32..=9999 {
+        let candidate = dir.join(numbered_name(desired, n));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    // Every alternative is taken; fall back to the caller's choice so the
+    // overwrite guard (not the namer) decides what happens next.
+    initial
+}
+
 /// Pick a destination under `dir` for `desired` without colliding with an
 /// output this batch already produced.
 ///
@@ -113,14 +150,9 @@ pub(crate) fn unique_batch_path(
     if !used.contains(&initial) {
         return initial;
     }
-    let split = desired
-        .rfind('.')
-        .filter(|&i| i > 0)
-        .unwrap_or(desired.len());
-    let (stem, ext) = desired.split_at(split);
     let mut n = 1u32;
     loop {
-        let candidate = dir.join(format!("{stem} ({n}){ext}"));
+        let candidate = dir.join(numbered_name(desired, n));
         if !used.contains(&candidate) && !candidate.exists() {
             return candidate;
         }
@@ -276,6 +308,39 @@ mod tests {
         assert_eq!(escape_control_chars("a\tb"), "a\tb");
         // A right-to-left override is a formatting control, not `is_control()`.
         assert_eq!(escape_control_chars("\u{202e}gpj.exe"), "\\u{202e}gpj.exe");
+    }
+
+    #[test]
+    fn numbered_names_insert_the_counter_before_the_extension() {
+        assert_eq!(numbered_name("report.pdf", 2), "report (2).pdf");
+        assert_eq!(numbered_name("archive.tar.gz", 1), "archive.tar (1).gz");
+        // A leading dot is part of the name, not an extension.
+        assert_eq!(numbered_name(".env", 1), ".env (1)");
+        assert_eq!(numbered_name("README", 7), "README (7)");
+    }
+
+    #[test]
+    fn free_path_skips_files_already_on_disk() {
+        let dir = std::env::temp_dir().join(format!(
+            "strhide-fs-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("report.pdf"), b"x").unwrap();
+        std::fs::write(dir.join("report (1).pdf"), b"x").unwrap();
+
+        assert_eq!(
+            unique_free_path(&dir, "report.pdf"),
+            dir.join("report (2).pdf")
+        );
+        assert_eq!(unique_free_path(&dir, "fresh.pdf"), dir.join("fresh.pdf"));
+        assert_eq!(unique_free_path(&dir, "README"), dir.join("README"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

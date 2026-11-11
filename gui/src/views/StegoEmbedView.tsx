@@ -4,13 +4,13 @@ import { useCapabilities } from "../hooks/useCapabilities";
 import { useFileQueue } from "../hooks/useFileQueue";
 import { useFileDrop } from "../hooks/useFileDrop";
 import { useT } from "../hooks/useT";
+import { useSequentialJob } from "../hooks/useSequentialJob";
 import { useOutputDir } from "../hooks/useOutputDir";
 import { useTaskStore } from "../store/taskStore";
-import { embedStegoFile, probeStegoCapacity } from "../api/commands";
+import { embedStegoFile, probeStegoCapacity, uniqueOutputPath } from "../api/commands";
 import { parseStrHideError } from "../lib/errorHandler";
 import { formatBytes, withSuffix } from "../lib/format";
 import { fmt } from "../lib/i18n";
-import { uniqueOutputPath } from "../lib/queue";
 import { SAFETY_LEVELS, tierLimit } from "../lib/stego";
 import { useStegoAlgorithms } from "../hooks/useStegoAlgorithms";
 import { FileQueue } from "../components/common/FileQueue";
@@ -23,7 +23,8 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
   const c = useT();
   const { capabilities } = useCapabilities();
   const queue = useFileQueue("stego", capabilities);
-  const { startTask, updateProgress, finishTask } = useTaskStore();
+  const { updateProgress } = useTaskStore();
+  const job = useSequentialJob();
 
   const [payloadKind, setPayloadKind] = useState<PayloadKind>("text");
   const [text, setText] = useState("");
@@ -36,7 +37,6 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
   const [outputDir, setOutputDir] = useOutputDir();
   const [algorithm, setAlgorithm] = useState("auto");
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const capacityCache = useRef(new Map<string, StegoCapacityFullDto>());
@@ -116,16 +116,14 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
     }
 
     setError(null);
-    setRunning(true);
     queue.resetStatus();
 
-    try {
-      for (let i = 0; i < targets.length; i += 1) {
-        const item = targets[i];
-        const taskId = `stego-${Date.now()}-${i}`;
-        startTask(taskId, fmt(c.stego.progress, { i: i + 1, n: targets.length, name: item.name }));
-        queue.update(item.path, { status: "running", message: c.stego.working, outputPath: undefined });
-
+    await job.run(targets, {
+      taskIdPrefix: "stego",
+      statusText: (i, n, item) => fmt(c.stego.progress, { i: i + 1, n, name: item.name }),
+      markRunning: (item) =>
+        queue.update(item.path, { status: "running", message: c.stego.working, outputPath: undefined }),
+      runOne: async (item, taskId) => {
         let capacity: StegoCapacityFullDto;
         try {
           const cacheKey = `${item.path}|${password}|${algorithm}`;
@@ -146,7 +144,7 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
           }
         } catch (err) {
           queue.update(item.path, { status: "skip", message: parseStrHideError(err, c).message });
-          continue;
+          return;
         }
 
         const limit = tierLimit(capacity, safety);
@@ -160,7 +158,7 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
               cap: formatBytes(capacity.max_raw_payload_bytes),
             }),
           });
-          continue;
+          return;
         }
 
         try {
@@ -194,18 +192,18 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
             message: parsed.message,
           });
         }
-      }
-    } finally {
-      finishTask();
-      setRunning(false);
-    }
+      },
+      onError: (item, err) => {
+        queue.update(item.path, { status: "error", message: parseStrHideError(err, c).message });
+      },
+    });
   };
 
   return (
     <div className="space-y-3">
       <p className="text-xs text-slate-400">{c.stego.desc}</p>
 
-      <FileQueue api={queue} disabled={running} showCapacity hint={c.stego.fileHint} />
+      <FileQueue api={queue} disabled={job.running} showCapacity hint={c.stego.fileHint} />
 
       <PayloadEditor
         label={c.stego.payloadLabel}
@@ -220,7 +218,7 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
           setPayloadPath(path);
           setPayloadSize(size);
         }}
-        disabled={running}
+        disabled={job.running}
       />
 
       <div className="space-y-2.5 rounded-xl border border-slate-800 bg-slate-900/60 p-3">
@@ -231,7 +229,7 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
             clearCapacities();
           }}
           placeholder={c.stego.passwordPlaceholder}
-          disabled={running}
+          disabled={job.running}
         />
 
         <div className="flex flex-wrap items-center gap-3">
@@ -242,7 +240,7 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
               setSafety(e.target.value as SafetyLevel);
               clearCapacities();
             }}
-            disabled={running}
+            disabled={job.running}
             className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-200 focus:border-cyan-500 focus:outline-none disabled:opacity-50"
           >
             {SAFETY_LEVELS.map((level) => (
@@ -256,7 +254,7 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
               type="checkbox"
               checked={enforce}
               onChange={(e) => setEnforce(e.target.checked)}
-              disabled={running}
+              disabled={job.running}
               className="h-3.5 w-3.5 rounded border-slate-700 bg-slate-800 text-cyan-500 focus:ring-0"
             />
             {c.stego.skipOver}
@@ -281,7 +279,7 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
                   setAlgorithm(e.target.value);
                   clearCapacities();
                 }}
-                disabled={running || isMultiFormat}
+                disabled={job.running || isMultiFormat}
                 className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-200 focus:border-cyan-500 focus:outline-none disabled:opacity-50"
               >
                 <option value="auto">{c.stego.algoAuto}</option>
@@ -305,7 +303,7 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
           </div>
         )}
 
-        <DirRow value={outputDir} onChange={setOutputDir} disabled={running} />
+        <DirRow value={outputDir} onChange={setOutputDir} disabled={job.running} />
       </div>
 
       {error && (
@@ -320,7 +318,7 @@ export const StegoEmbedView: React.FC<{ active: boolean }> = ({ active }) => {
         <button
           type="button"
           onClick={run}
-          disabled={running || payloadBytes === 0 || queue.items.length === 0}
+          disabled={job.running || payloadBytes === 0 || queue.items.length === 0}
           className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-700 px-4 py-2 text-xs font-semibold text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
         >
           <Play className="h-3.5 w-3.5" />

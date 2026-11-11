@@ -109,6 +109,14 @@ export function createTauriMockScript(opts: MockDataOptions = {}) {
         };
       }
 
+      if (cmd === "unique_output_path_cmd") {
+        // Mirrors core::fs::unique_free_path's join; the seed files live
+        // outside the output directory, so the first candidate is always free.
+        const sep = args.dir.includes(String.fromCharCode(92)) ? String.fromCharCode(92) : "/";
+        const tail = args.dir.endsWith(sep) ? "" : sep;
+        return args.dir + tail + args.filename;
+      }
+
       if (cmd === "probe_stego_capacity_cmd") {
         if (${opts.capacityError ? "true" : "false"}) {
           throw { kind: "unsupported_format", detail: "${opts.capacityError || ""}" };

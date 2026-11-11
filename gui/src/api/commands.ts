@@ -27,6 +27,17 @@ export async function getFileMetadata(path: string): Promise<FileMetadataDto> {
   return invoke<FileMetadataDto>("get_file_metadata_cmd", { path });
 }
 
+/**
+ * Ask the backend for a non-colliding output path (`stem (n).ext`).
+ *
+ * The numbering rule and the existence checks live in one place so the GUI
+ * views, smart-extract's directory mode and the CLI batch agree; doing it in
+ * one IPC call also removes the per-candidate `getFileMetadata` round trips.
+ */
+export async function uniqueOutputPath(dir: string, filename: string): Promise<string> {
+  return invoke<string>("unique_output_path_cmd", { dir, filename });
+}
+
 export async function inspectCarrier(
   path: string,
   password?: string,

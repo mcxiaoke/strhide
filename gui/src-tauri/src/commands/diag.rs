@@ -101,6 +101,19 @@ pub async fn inspect_carrier_cmd(
     inspect_carrier_with_task(&state, path, password, domain, task_id).await
 }
 
+/// Pick a non-colliding output path under `dir` for `filename`.
+///
+/// The numbering rule (`stem (n).ext`) lives in the library so the GUI views,
+/// smart-extract's directory mode and the CLI batch cannot drift apart; one IPC
+/// call also replaces the frontend's per-candidate `get_file_metadata_cmd`
+/// round trip.
+#[tauri::command]
+pub fn unique_output_path_cmd(dir: PathBuf, filename: String) -> String {
+    strhide::core::fs::unique_free_path(&dir, &filename)
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FileMetadataDto {
     pub path: String,

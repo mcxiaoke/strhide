@@ -429,24 +429,7 @@ pub async fn smart_extract_impl(
                     .with_text_preview(text_preview)
             } else {
                 let target_file = if dest.is_dir() {
-                    let mut candidate = dest.join(&filename);
-                    if candidate.exists() {
-                        let path = std::path::Path::new(&filename);
-                        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(&filename);
-                        let ext = path.extension().and_then(|s| s.to_str());
-                        for i in 1..=9999 {
-                            let name = match ext {
-                                Some(e) => format!("{stem} ({i}).{e}"),
-                                None => format!("{stem} ({i})"),
-                            };
-                            let next = dest.join(name);
-                            if !next.exists() {
-                                candidate = next;
-                                break;
-                            }
-                        }
-                    }
-                    candidate
+                    strhide::core::fs::unique_free_path(dest, &filename)
                 } else {
                     dest.clone()
                 };

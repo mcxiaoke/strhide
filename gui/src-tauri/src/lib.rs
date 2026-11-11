@@ -20,6 +20,7 @@ pub fn run() {
             commands::diag::get_capabilities_cmd,
             commands::stego::get_stego_algorithms_cmd,
             commands::diag::get_file_metadata_cmd,
+            commands::diag::unique_output_path_cmd,
             commands::diag::inspect_carrier_cmd,
             commands::diag::verify_carrier_cmd,
             commands::diag::scan_carrier_cmd,
