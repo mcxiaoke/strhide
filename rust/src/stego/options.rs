@@ -56,6 +56,203 @@ use crate::stego::traits::JpegCostModel;
 #[cfg(feature = "content-png")]
 use crate::stego::traits::PngCostModel;
 
+// The six option structs share a credential core (and, for some of them, a
+// control/pool/safety/tuning core). Those builders used to be copy-pasted per
+// struct -- six places for `with_password`, five for `with_control`, and so on.
+// Generating them keeps "empty password means not supplied" and the
+// `secret`/`domain` fallbacks from drifting between call sites.
+macro_rules! credential_builders {
+    () => {
+        /// Set the password.
+        pub fn with_password(mut self, password: &'a str) -> Self {
+            self.password = Some(password);
+            self
+        }
+
+        /// Set the password from an optional value (`None` clears it).
+        pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
+            self.password = password;
+            self
+        }
+
+        /// Set the 32-byte file key (mutually exclusive with a non-empty password).
+        pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
+            self.key = Some(key);
+            self
+        }
+
+        /// Set the file key from an optional value (`None` clears it).
+        pub fn with_key_option(mut self, key: Option<&'a [u8; 32]>) -> Self {
+            self.key = key;
+            self
+        }
+
+        /// Set the HKDF domain-isolation tag.
+        pub fn with_domain(mut self, domain: &'a str) -> Self {
+            self.domain = Some(domain);
+            self
+        }
+
+        /// Set the domain tag from an optional value (`None` clears it).
+        pub fn with_domain_option(mut self, domain: Option<&'a str>) -> Self {
+            self.domain = domain;
+            self
+        }
+
+        /// Credential actually used: the non-empty password, else the dialect secret.
+        pub fn secret<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
+        where
+            'a: 's,
+        {
+            self.password
+                .filter(|s| !s.is_empty())
+                .or_else(|| dialect.secret())
+        }
+
+        /// Custom stego domain tag, falling back to the dialect's.
+        pub fn domain<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
+        where
+            'a: 's,
+        {
+            self.domain
+                .filter(|s| !s.is_empty())
+                .or_else(|| dialect.stego_domain())
+        }
+    };
+}
+
+macro_rules! control_builder {
+    () => {
+        /// Attach a progress sink and cancellation token.
+        pub fn with_control(mut self, control: Control<'a>) -> Self {
+            self.control = control;
+            self
+        }
+    };
+}
+
+macro_rules! pool_builders {
+    () => {
+        /// Run the engine on `pool` instead of the global rayon pool.
+        pub fn with_pool(mut self, pool: Arc<rayon::ThreadPool>) -> Self {
+            self.pool = Some(pool);
+            self
+        }
+
+        /// Set the rayon pool from an optional value (`None` uses the global pool).
+        pub fn with_pool_option(mut self, pool: Option<Arc<rayon::ThreadPool>>) -> Self {
+            self.pool = pool;
+            self
+        }
+    };
+}
+
+macro_rules! suite_builders {
+    () => {
+        /// Override the V4 cipher suite id.
+        pub fn with_suite_id(mut self, suite_id: u16) -> Self {
+            self.suite_id = Some(suite_id);
+            self
+        }
+
+        /// Override the cipher suite from an optional value (`None` keeps the default).
+        pub fn with_suite_id_option(mut self, suite_id: Option<u16>) -> Self {
+            self.suite_id = suite_id;
+            self
+        }
+    };
+}
+
+macro_rules! extensions_builder {
+    () => {
+        /// Replace the extension TLVs written into the V4 header area.
+        pub fn with_extensions(mut self, extensions: Vec<Tlv>) -> Self {
+            self.extensions = extensions;
+            self
+        }
+    };
+}
+
+macro_rules! safety_builders {
+    () => {
+        /// Set the capacity safety tier and its enforcement.
+        pub fn with_safety(
+            mut self,
+            level: crate::stego::params::SafetyLevel,
+            enforcement: crate::stego::params::SafetyEnforcement,
+        ) -> Self {
+            self.safety = SafetyPolicy { level, enforcement };
+            self
+        }
+
+        /// Replace the whole safety policy.
+        pub fn with_safety_policy(mut self, policy: SafetyPolicy) -> Self {
+            self.safety = policy;
+            self
+        }
+    };
+}
+
+macro_rules! tuning_builder {
+    () => {
+        /// Replace the tuning.
+        pub fn with_tuning(mut self, tuning: StegoTuning) -> Self {
+            self.tuning = tuning;
+            self
+        }
+    };
+}
+
+macro_rules! tuning_builders {
+    () => {
+        tuning_builder!();
+
+        /// Replace the PNG tuning, keeping the default model.
+        #[cfg(feature = "content-png")]
+        pub fn with_png_tuning(mut self, params: PngParams) -> Self {
+            self.tuning = StegoTuning::png(params);
+            self
+        }
+
+        /// Replace the JPEG tuning, keeping the default model.
+        #[cfg(feature = "content-jpeg")]
+        pub fn with_jpeg_tuning(mut self, params: JpegParams) -> Self {
+            self.tuning = StegoTuning::jpeg(params);
+            self
+        }
+    };
+}
+
+macro_rules! freshness_builder {
+    () => {
+        /// Set the salt/nonce source.
+        pub fn with_freshness(mut self, freshness: Freshness) -> Self {
+            self.freshness = freshness;
+            self
+        }
+    };
+}
+
+macro_rules! no_filename_builder {
+    () => {
+        /// Omit the original filename from the micro-header.
+        pub fn with_no_filename(mut self, no_filename: bool) -> Self {
+            self.no_filename = no_filename;
+            self
+        }
+    };
+}
+
+macro_rules! exact_builder {
+    () => {
+        /// Force (or stop forcing) an exact capacity scan.
+        pub fn with_exact(mut self, exact: bool) -> Self {
+            self.exact = exact;
+            self
+        }
+    };
+}
+
 /// Spatial-domain cost model selection.
 ///
 /// Replaces the `"hill"` / `"suniward"` strings the old options carried. A typo
@@ -561,125 +758,16 @@ impl<'a> EmbedOptions<'a> {
         self.no_filename = no_filename;
         self
     }
-    /// Set the password.
-    pub fn with_password(mut self, password: &'a str) -> Self {
-        self.password = Some(password);
-        self
-    }
 
-    /// Set the password from an optional value (`None` clears it).
-    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
-        self.password = password;
-        self
-    }
-
-    /// Set the 32-byte file key (mutually exclusive with a non-empty password).
-    pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
-        self.key = Some(key);
-        self
-    }
-
-    /// Set the file key from an optional value (`None` clears it).
-    pub fn with_key_option(mut self, key: Option<&'a [u8; 32]>) -> Self {
-        self.key = key;
-        self
-    }
-
-    /// Set the HKDF domain-isolation tag.
-    pub fn with_domain(mut self, domain: &'a str) -> Self {
-        self.domain = Some(domain);
-        self
-    }
-
-    /// Set the domain tag from an optional value (`None` clears it).
-    pub fn with_domain_option(mut self, domain: Option<&'a str>) -> Self {
-        self.domain = domain;
-        self
-    }
-
-    /// Override the V4 cipher suite id.
-    pub fn with_suite_id(mut self, suite_id: u16) -> Self {
-        self.suite_id = Some(suite_id);
-        self
-    }
-
-    /// Override the cipher suite from an optional value (`None` keeps the default).
-    pub fn with_suite_id_option(mut self, suite_id: Option<u16>) -> Self {
-        self.suite_id = suite_id;
-        self
-    }
-
-    /// Replace the extension TLVs written into the V4 header area.
-    pub fn with_extensions(mut self, extensions: Vec<Tlv>) -> Self {
-        self.extensions = extensions;
-        self
-    }
-
-    /// Set the capacity safety tier and its enforcement.
-    pub fn with_safety(
-        mut self,
-        level: crate::stego::params::SafetyLevel,
-        enforcement: crate::stego::params::SafetyEnforcement,
-    ) -> Self {
-        self.safety = SafetyPolicy { level, enforcement };
-        self
-    }
-
-    /// Replace the whole safety policy.
-    pub fn with_safety_policy(mut self, policy: SafetyPolicy) -> Self {
-        self.safety = policy;
-        self
-    }
-
-    /// Replace the tuning.
-    pub fn with_tuning(mut self, tuning: StegoTuning) -> Self {
-        self.tuning = tuning;
-        self
-    }
-
-    /// Replace the PNG tuning, keeping the default model.
-    #[cfg(feature = "content-png")]
-    pub fn with_png_tuning(mut self, params: PngParams) -> Self {
-        self.tuning = StegoTuning::png(params);
-        self
-    }
-
-    /// Replace the JPEG tuning, keeping the default model.
-    #[cfg(feature = "content-jpeg")]
-    pub fn with_jpeg_tuning(mut self, params: JpegParams) -> Self {
-        self.tuning = StegoTuning::jpeg(params);
-        self
-    }
-
-    /// Set the salt/nonce source.
-    pub fn with_freshness(mut self, freshness: Freshness) -> Self {
-        self.freshness = freshness;
-        self
-    }
-
-    /// Force (or stop forcing) an exact capacity scan.
-    pub fn with_exact(mut self, exact: bool) -> Self {
-        self.exact = exact;
-        self
-    }
-
-    /// Attach a progress sink and cancellation token.
-    pub fn with_control(mut self, control: Control<'a>) -> Self {
-        self.control = control;
-        self
-    }
-
-    /// Run the engine on `pool` instead of the global rayon pool.
-    pub fn with_pool(mut self, pool: Arc<rayon::ThreadPool>) -> Self {
-        self.pool = Some(pool);
-        self
-    }
-
-    /// Set the rayon pool from an optional value (`None` uses the global pool).
-    pub fn with_pool_option(mut self, pool: Option<Arc<rayon::ThreadPool>>) -> Self {
-        self.pool = pool;
-        self
-    }
+    credential_builders!();
+    suite_builders!();
+    extensions_builder!();
+    safety_builders!();
+    tuning_builders!();
+    freshness_builder!();
+    exact_builder!();
+    control_builder!();
+    pool_builders!();
 
     /// Mutable PNG parameters, switching the tuning to the PNG arm first.
     ///
@@ -714,32 +802,6 @@ impl<'a> EmbedOptions<'a> {
             StegoTuning::Jpeg { params, .. } => params,
             _ => unreachable!("the arm was just installed"),
         }
-    }
-
-    /// Credential actually used: the explicit password wins, the dialect's
-    /// private secret is the fallback, `None` means the public constant.
-    ///
-    /// An empty password is treated as "not supplied" and does **not** mask the
-    /// dialect secret -- joining the two with `or` and filtering afterwards made
-    /// `password = Some("")` silently drop the private secret.
-    pub fn secret<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
-    where
-        'a: 's,
-    {
-        self.password
-            .filter(|s| !s.is_empty())
-            .or_else(|| dialect.secret())
-    }
-
-    /// Custom stego domain tag: the explicit one wins, the dialect's is the
-    /// fallback.
-    pub fn domain<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
-    where
-        'a: 's,
-    {
-        self.domain
-            .filter(|s| !s.is_empty())
-            .or_else(|| dialect.stego_domain())
     }
 
     /// A read-side option set that reuses this write's credentials.
@@ -850,127 +912,13 @@ impl<'a> ProbeOptions<'a> {
         Self::default()
     }
 
-    /// Set the password.
-    pub fn with_password(mut self, password: &'a str) -> Self {
-        self.password = Some(password);
-        self
-    }
-
-    /// Set the password from an optional value (`None` clears it).
-    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
-        self.password = password;
-        self
-    }
-
-    /// Set the 32-byte file key (mutually exclusive with a non-empty password).
-    pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
-        self.key = Some(key);
-        self
-    }
-
-    /// Set the file key from an optional value (`None` clears it).
-    pub fn with_key_option(mut self, key: Option<&'a [u8; 32]>) -> Self {
-        self.key = key;
-        self
-    }
-
-    /// Set the HKDF domain-isolation tag.
-    pub fn with_domain(mut self, domain: &'a str) -> Self {
-        self.domain = Some(domain);
-        self
-    }
-
-    /// Set the domain tag from an optional value (`None` clears it).
-    pub fn with_domain_option(mut self, domain: Option<&'a str>) -> Self {
-        self.domain = domain;
-        self
-    }
-
-    /// Replace the extension TLVs the caller plans to write.
-    pub fn with_extensions(mut self, extensions: Vec<Tlv>) -> Self {
-        self.extensions = extensions;
-        self
-    }
-
-    /// Set the capacity safety tier and its enforcement.
-    pub fn with_safety(
-        mut self,
-        level: crate::stego::params::SafetyLevel,
-        enforcement: crate::stego::params::SafetyEnforcement,
-    ) -> Self {
-        self.safety = SafetyPolicy { level, enforcement };
-        self
-    }
-
-    /// Replace the whole safety policy.
-    pub fn with_safety_policy(mut self, policy: SafetyPolicy) -> Self {
-        self.safety = policy;
-        self
-    }
-
-    /// Replace the tuning.
-    pub fn with_tuning(mut self, tuning: StegoTuning) -> Self {
-        self.tuning = tuning;
-        self
-    }
-
-    /// Replace the PNG tuning, keeping the default model.
-    #[cfg(feature = "content-png")]
-    pub fn with_png_tuning(mut self, params: PngParams) -> Self {
-        self.tuning = StegoTuning::png(params);
-        self
-    }
-
-    /// Replace the JPEG tuning, keeping the default model.
-    #[cfg(feature = "content-jpeg")]
-    pub fn with_jpeg_tuning(mut self, params: JpegParams) -> Self {
-        self.tuning = StegoTuning::jpeg(params);
-        self
-    }
-
-    /// Force (or stop forcing) an exact capacity scan.
-    pub fn with_exact(mut self, exact: bool) -> Self {
-        self.exact = exact;
-        self
-    }
-
-    /// Attach a progress sink and cancellation token.
-    pub fn with_control(mut self, control: Control<'a>) -> Self {
-        self.control = control;
-        self
-    }
-
-    /// Credential actually used (see [`EmbedOptions::secret`]).
-    pub fn secret<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
-    where
-        'a: 's,
-    {
-        self.password
-            .filter(|s| !s.is_empty())
-            .or_else(|| dialect.secret())
-    }
-
-    /// Custom stego domain tag (see [`EmbedOptions::domain`]).
-    pub fn domain<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
-    where
-        'a: 's,
-    {
-        self.domain
-            .filter(|s| !s.is_empty())
-            .or_else(|| dialect.stego_domain())
-    }
-
-    /// Run the probe on `pool` instead of the global rayon pool.
-    pub fn with_pool(mut self, pool: Arc<rayon::ThreadPool>) -> Self {
-        self.pool = Some(pool);
-        self
-    }
-
-    /// Set the rayon pool from an optional value (`None` uses the global pool).
-    pub fn with_pool_option(mut self, pool: Option<Arc<rayon::ThreadPool>>) -> Self {
-        self.pool = pool;
-        self
-    }
+    credential_builders!();
+    extensions_builder!();
+    safety_builders!();
+    tuning_builders!();
+    exact_builder!();
+    control_builder!();
+    pool_builders!();
 }
 
 /// Options for reading a payload back out.
@@ -1029,41 +977,7 @@ impl<'a> ExtractOptions<'a> {
         Self::default()
     }
 
-    /// Set the password.
-    pub fn with_password(mut self, password: &'a str) -> Self {
-        self.password = Some(password);
-        self
-    }
-
-    /// Set the password from an optional value (`None` clears it).
-    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
-        self.password = password;
-        self
-    }
-
-    /// Set the 32-byte file key (mutually exclusive with a non-empty password).
-    pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
-        self.key = Some(key);
-        self
-    }
-
-    /// Set the file key from an optional value (`None` clears it).
-    pub fn with_key_option(mut self, key: Option<&'a [u8; 32]>) -> Self {
-        self.key = key;
-        self
-    }
-
-    /// Set the HKDF domain-isolation tag.
-    pub fn with_domain(mut self, domain: &'a str) -> Self {
-        self.domain = Some(domain);
-        self
-    }
-
-    /// Set the domain tag from an optional value (`None` clears it).
-    pub fn with_domain_option(mut self, domain: Option<&'a str>) -> Self {
-        self.domain = domain;
-        self
-    }
+    credential_builders!();
 
     /// Replace the extraction policy.
     pub fn with_limits(mut self, limits: ExtractParams) -> Self {
@@ -1089,43 +1003,8 @@ impl<'a> ExtractOptions<'a> {
         self
     }
 
-    /// Attach a progress sink and cancellation token.
-    pub fn with_control(mut self, control: Control<'a>) -> Self {
-        self.control = control;
-        self
-    }
-
-    /// Credential actually used (see [`EmbedOptions::secret`]).
-    pub fn secret<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
-    where
-        'a: 's,
-    {
-        self.password
-            .filter(|s| !s.is_empty())
-            .or_else(|| dialect.secret())
-    }
-
-    /// Custom stego domain tag (see [`EmbedOptions::domain`]).
-    pub fn domain<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
-    where
-        'a: 's,
-    {
-        self.domain
-            .filter(|s| !s.is_empty())
-            .or_else(|| dialect.stego_domain())
-    }
-
-    /// Run the extraction on `pool` instead of the global rayon pool.
-    pub fn with_pool(mut self, pool: Arc<rayon::ThreadPool>) -> Self {
-        self.pool = Some(pool);
-        self
-    }
-
-    /// Set the rayon pool from an optional value (`None` uses the global pool).
-    pub fn with_pool_option(mut self, pool: Option<Arc<rayon::ThreadPool>>) -> Self {
-        self.pool = pool;
-        self
-    }
+    control_builder!();
+    pool_builders!();
 }
 
 /// Options for the HEIF thumbnail bridge.
@@ -1216,65 +1095,10 @@ impl<'a> BridgeOptions<'a> {
         }
     }
 
-    /// Set the password.
-    pub fn with_password(mut self, password: &'a str) -> Self {
-        self.password = Some(password);
-        self
-    }
-
-    /// Set the password from an optional value (`None` clears it).
-    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
-        self.password = password;
-        self
-    }
-
-    /// Set the 32-byte file key (mutually exclusive with a non-empty password).
-    pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
-        self.key = Some(key);
-        self
-    }
-
-    /// Set the file key from an optional value (`None` clears it).
-    pub fn with_key_option(mut self, key: Option<&'a [u8; 32]>) -> Self {
-        self.key = key;
-        self
-    }
-
-    /// Set the HKDF domain-isolation tag.
-    pub fn with_domain(mut self, domain: &'a str) -> Self {
-        self.domain = Some(domain);
-        self
-    }
-
-    /// Set the domain tag from an optional value (`None` clears it).
-    pub fn with_domain_option(mut self, domain: Option<&'a str>) -> Self {
-        self.domain = domain;
-        self
-    }
-
-    /// Override the V4 cipher suite id.
-    pub fn with_suite_id(mut self, suite_id: u16) -> Self {
-        self.suite_id = Some(suite_id);
-        self
-    }
-
-    /// Override the cipher suite from an optional value (`None` keeps the default).
-    pub fn with_suite_id_option(mut self, suite_id: Option<u16>) -> Self {
-        self.suite_id = suite_id;
-        self
-    }
-
-    /// Replace the extension TLVs written into the V4 header area.
-    pub fn with_extensions(mut self, extensions: Vec<Tlv>) -> Self {
-        self.extensions = extensions;
-        self
-    }
-
-    /// Replace the tuning.
-    pub fn with_tuning(mut self, tuning: StegoTuning) -> Self {
-        self.tuning = tuning;
-        self
-    }
+    credential_builders!();
+    suite_builders!();
+    extensions_builder!();
+    tuning_builder!();
 
     /// Replace the capacity safety policy.
     pub fn with_safety(mut self, safety: SafetyPolicy) -> Self {
@@ -1282,17 +1106,8 @@ impl<'a> BridgeOptions<'a> {
         self
     }
 
-    /// Replace the salt/nonce source (unused on the read path).
-    pub fn with_freshness(mut self, freshness: Freshness) -> Self {
-        self.freshness = freshness;
-        self
-    }
-
-    /// Omit the original filename from the micro-header.
-    pub fn with_no_filename(mut self, no_filename: bool) -> Self {
-        self.no_filename = no_filename;
-        self
-    }
+    freshness_builder!();
+    no_filename_builder!();
 
     /// Credential actually used (see [`EmbedOptions::secret`]).
     pub fn resolved_secret<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
@@ -1470,66 +1285,14 @@ impl<'a> InspectOptions<'a> {
         Self::default()
     }
 
-    pub fn with_password(mut self, password: &'a str) -> Self {
-        self.password = Some(password);
-        self
-    }
-
-    /// Set the password from an optional value (`None` clears it).
-    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
-        self.password = password;
-        self
-    }
-
-    pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
-        self.key = Some(key);
-        self
-    }
-
-    /// Set the file key from an optional value (`None` clears it).
-    pub fn with_key_option(mut self, key: Option<&'a [u8; 32]>) -> Self {
-        self.key = key;
-        self
-    }
-
-    pub fn with_domain(mut self, domain: &'a str) -> Self {
-        self.domain = Some(domain);
-        self
-    }
-
-    /// Set the domain tag from an optional value (`None` clears it).
-    pub fn with_domain_option(mut self, domain: Option<&'a str>) -> Self {
-        self.domain = domain;
-        self
-    }
+    credential_builders!();
 
     pub fn with_limits(mut self, limits: ExtractParams) -> Self {
         self.limits = limits;
         self
     }
 
-    pub fn with_control(mut self, control: Control<'a>) -> Self {
-        self.control = control;
-        self
-    }
-
-    pub fn secret<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
-    where
-        'a: 's,
-    {
-        self.password
-            .filter(|s| !s.is_empty())
-            .or_else(|| dialect.secret())
-    }
-
-    pub fn domain<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
-    where
-        'a: 's,
-    {
-        self.domain
-            .filter(|s| !s.is_empty())
-            .or_else(|| dialect.stego_domain())
-    }
+    control_builder!();
 }
 
 /// Status of one verification tier.
@@ -1616,66 +1379,14 @@ impl<'a> VerifyOptions<'a> {
         Self::default()
     }
 
-    pub fn with_password(mut self, password: &'a str) -> Self {
-        self.password = Some(password);
-        self
-    }
-
-    /// Set the password from an optional value (`None` clears it).
-    pub fn with_password_option(mut self, password: Option<&'a str>) -> Self {
-        self.password = password;
-        self
-    }
-
-    pub fn with_key(mut self, key: &'a [u8; 32]) -> Self {
-        self.key = Some(key);
-        self
-    }
-
-    /// Set the file key from an optional value (`None` clears it).
-    pub fn with_key_option(mut self, key: Option<&'a [u8; 32]>) -> Self {
-        self.key = key;
-        self
-    }
-
-    pub fn with_domain(mut self, domain: &'a str) -> Self {
-        self.domain = Some(domain);
-        self
-    }
-
-    /// Set the domain tag from an optional value (`None` clears it).
-    pub fn with_domain_option(mut self, domain: Option<&'a str>) -> Self {
-        self.domain = domain;
-        self
-    }
+    credential_builders!();
 
     pub fn with_limits(mut self, limits: ExtractParams) -> Self {
         self.limits = limits;
         self
     }
 
-    pub fn with_control(mut self, control: Control<'a>) -> Self {
-        self.control = control;
-        self
-    }
-
-    pub fn secret<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
-    where
-        'a: 's,
-    {
-        self.password
-            .filter(|s| !s.is_empty())
-            .or_else(|| dialect.secret())
-    }
-
-    pub fn domain<'s>(&'s self, dialect: &'s StegoProfile) -> Option<&'s str>
-    where
-        'a: 's,
-    {
-        self.domain
-            .filter(|s| !s.is_empty())
-            .or_else(|| dialect.stego_domain())
-    }
+    control_builder!();
 }
 
 #[cfg(test)]
