@@ -1079,125 +1079,23 @@ where
     } else {
         profile.locator_magic()
     };
-    host.seek(SeekFrom::Start(0))?;
-    let (structure_ok, detail) = adapter.verify_structure_with_magic(host, write_trailer_magic)?;
-    if !structure_ok {
-        return Err(StrHideError::CorruptedData(format!(
-            "Refusing to write into a malformed {} carrier: {}",
-            adapter.format_name(),
-            detail
-        )));
-    }
-
-    // Reject carriers that already contain an envelope. A standard-magic
-    // scan catches plain/standard-encrypted envelopes; when a password is
-    // available, a second scan with the derived stealth magic also catches
-    // stealth envelopes (which are intentionally invisible without it).
-    //
-    // Under a private magic both scans matter: one for the dialect's own
-    // envelopes, one for official ones (a second envelope would stack on
-    // top regardless of dialect). With the official profile there is only
-    // one scan, exactly as before.
-    let mut occupied = {
-        host.seek(SeekFrom::Start(0))?;
-        adapter.locate(host, profile.locator_magic())?.is_some()
-    };
-    if !occupied && profile.locator_magic().is_some() {
-        host.seek(SeekFrom::Start(0))?;
-        occupied = adapter.locate(host, None)?.is_some();
-    }
-    if occupied {
-        return Err(StrHideError::General(
-            "Carrier already contains hidden data. Use remove first or specify another file."
-                .into(),
-        ));
-    }
-    if let Some((_, ref tr_magic)) = stealth_magics {
-        host.seek(SeekFrom::Start(0))?;
-        if adapter.locate(host, Some(tr_magic))?.is_some() {
-            return Err(StrHideError::General(
-                "Carrier already contains hidden data (stealth envelope). Use remove first or specify another file.".into(),
-            ));
-        }
-    }
-
-    // Neither magic scan matched. A stealth envelope written with an unknown
-    // password is undetectable by magic; scan structurally and warn (not
-    // refuse) when the carrier shows an envelope-shaped container, so the user
-    // learns a second envelope would stack on top.
-    let structural_warnings = {
-        host.seek(SeekFrom::Start(0))?;
-        adapter.suspicious_structures(host)
-    };
+    let structural_warnings = ensure_writable_host(
+        host,
+        adapter,
+        profile,
+        stealth_magics.as_ref(),
+        write_trailer_magic,
+    )?;
 
     // 4. Prepare data payload stream
-    let (payload_raw_bytes, filename, is_file) = source.into_buffered()?;
-
-    let raw_size = payload_raw_bytes.len() as u64;
-    // The reader rejects any declared `raw_size` above `structure_payload_limit`
-    // before decrypting. Applying the same bound here (with the same function)
-    // means a payload that would be unreadable forever is refused up front
-    // instead of producing a carrier that `read` can never extract. The input
-    // host is at most as large as the post-injection carrier, so its limit is
-    // the stricter of the two and the read path is guaranteed to pass.
-    let max_payload = structure_payload_limit(orig_host_size);
-    if raw_size > max_payload {
-        return Err(StrHideError::PayloadTooLarge(format!(
-            "Payload ({} bytes) exceeds the maximum supported by this carrier ({} bytes for a {} byte host); use a larger carrier or a smaller payload",
-            raw_size, max_payload, orig_host_size
-        )));
-    }
-    let raw_sha256 = {
-        let h = crate::crypto::compute_sha256(&payload_raw_bytes);
-        h.iter().map(|b| format!("{b:02x}")).collect::<String>()
-    };
-
-    // 5. Compress data with Deflate. `CompressionStrategy::Auto` keeps the
-    // historical integer criterion (cross-language identical: keep compression
-    // only when it saves at least 2%: comp_len * 100 < raw_size * 98). The
-    // level and the decision are writer-only; the reader just inflates raw
-    // deflate when FLAG_COMPRESSED is set.
-    //
-    // Large payloads are probed first: a full deflate pass over incompressible
-    // data costs ~17 ms/MiB and is discarded, so a fixed 256 KiB stratified
-    // sample decides whether the full pass is worth starting. The same
-    // `should_compress` rule is applied to the sample, so the flag written
-    // below always reflects the bytes actually kept.
-    let (to_encrypt_bytes, is_compressed) = match local.compression {
-        crate::params::CompressionStrategy::Never => (payload_raw_bytes, false),
-        strategy => {
-            let level = strategy.level();
-            let worth_full_pass =
-                if payload_raw_bytes.len() > crate::crypto::COMPRESSION_PROBE_MIN_BYTES {
-                    let (sample_raw, sample_comp) =
-                        crate::crypto::probe_compressibility(&payload_raw_bytes, level)?;
-                    strategy.should_compress(sample_raw, sample_comp)
-                } else {
-                    true
-                };
-
-            if !worth_full_pass {
-                (payload_raw_bytes, false)
-            } else {
-                let mut compressed_buf = Vec::new();
-                let (_, comp_len) = compress_stream(
-                    &mut Cursor::new(&payload_raw_bytes),
-                    &mut compressed_buf,
-                    level,
-                )?;
-
-                if strategy.should_compress(raw_size, comp_len) {
-                    // Keep the compressed stream and release the raw payload buffer early.
-                    drop(payload_raw_bytes);
-                    (Cow::Owned(compressed_buf), true)
-                } else {
-                    // Keep the raw payload and release the compressed buffer early.
-                    drop(compressed_buf);
-                    (payload_raw_bytes, false)
-                }
-            }
-        }
-    };
+    let PreparedPayload {
+        bytes: to_encrypt_bytes,
+        filename,
+        is_file,
+        raw_size,
+        raw_sha256,
+        is_compressed,
+    } = prepare_write_payload(source, local, orig_host_size)?;
 
     // 6. Keys and Magics
     // `FLAG_ENCRYPTED` means "a user password is required", not "the payload is
@@ -1474,54 +1372,21 @@ where
     // was assembled with ube_offset = 0, so there is nothing to patch at file
     // offsets. Patching anyway would overwrite host bytes (offset 0 is the MZ
     // header of a PE).
-    let scattered = adapter.is_scattered_strategy(&selected_strategy);
-    if !scattered {
-        // Patch header
-        out.seek(SeekFrom::Start(actual_ube_offset))?;
-        out.write_all(&header.pack_masked(header_mask.as_ref()))?;
-
-        // Patch trailer at end of UBE
-        let trailer_ctx = TrailerCtx {
-            actual_ube_offset,
-            ube_total_size,
-            inject_offset,
-            inject_size,
-            strategy: &selected_strategy,
-        };
-        let trailer_pos = adapter.trailer_offset(&trailer_ctx);
-        out.seek(SeekFrom::Start(trailer_pos))?;
-        out.write_all(&final_trailer.pack())?;
-
-        // Post-write finalization (e.g. recalculating chunk CRCs)
-        let fin_ctx = FinalizeCtx {
-            ube_offset: actual_ube_offset,
-            ube_total_size,
-            inject_offset,
-            inject_size,
-            strategy: &selected_strategy,
-        };
-        adapter.finalize(out, &fin_ctx)?;
-    }
-
-    // Post-write self-check: inject and locate must agree on
-    // where the envelope landed, or the write reports success for data that
-    // read/inspect/remove can never reach. Matching against the trailer magic
-    // this write produced is exactly what the read path demands, so a fresh
-    // output its own locate cannot find aborts here instead of orphaning the
-    // envelope. Cost: one streaming locate pass over the output.
-    out.flush()?;
-    out.seek(SeekFrom::Start(0))?;
-    let self_located = adapter.locate(out, Some(&trailer_magic))?;
-    // `Some` alone is not enough: a second envelope with the same trailer magic
-    // could satisfy `locate` while `read` / `remove` would then reach the *old*
-    // one. Require the coordinates this very write sealed into the trailer.
-    let located_at = self_located.as_ref().map(|(o, s, _)| (*o, *s));
-    if located_at != Some((actual_ube_offset, ube_total_size)) {
-        return Err(StrHideError::General(format!(
-            "Post-write self-check failed: strategy '{}' wrote the envelope at {} ({} bytes), but locate returned {:?}; aborting so no unreadable stego is committed",
-            selected_strategy, actual_ube_offset, ube_total_size, located_at
-        )));
-    }
+    finish_injection(
+        out,
+        adapter,
+        &header,
+        header_mask.as_ref(),
+        &final_trailer,
+        &selected_strategy,
+        actual_ube_offset,
+        ube_total_size,
+        InjectionPlacement {
+            offset: inject_offset,
+            size: inject_size,
+        },
+        &trailer_magic,
+    )?;
 
     let strategy_note = adapter.strategy_note(&selected_strategy, strategy == "auto");
 
@@ -1537,6 +1402,242 @@ where
         is_stealth: (flags & FLAG_STEALTH) != 0,
         warnings,
     })
+}
+
+/// Verify that `host` is a well-formed carrier with no existing envelope.
+///
+/// Runs the adapter's structural verification, both magic scans (the
+/// profile's own magic, then the official one for a private dialect, then the
+/// password-derived stealth magic when available) and finally the structural
+/// hints. Returns those hints; they are warnings, not refusals, because a
+/// stealth envelope written with an unknown password is invisible to a magic
+/// scan.
+fn ensure_writable_host<H>(
+    host: &mut H,
+    adapter: &dyn HostAdapter,
+    profile: &StructureProfile,
+    stealth_magics: Option<&([u8; 8], [u8; 4])>,
+    write_trailer_magic: Option<&[u8; 4]>,
+) -> Result<Vec<String>, StrHideError>
+where
+    H: Read + Seek,
+{
+    host.seek(SeekFrom::Start(0))?;
+    let (structure_ok, detail) = adapter.verify_structure_with_magic(host, write_trailer_magic)?;
+    if !structure_ok {
+        return Err(StrHideError::CorruptedData(format!(
+            "Refusing to write into a malformed {} carrier: {}",
+            adapter.format_name(),
+            detail
+        )));
+    }
+
+    let mut occupied = {
+        host.seek(SeekFrom::Start(0))?;
+        adapter.locate(host, profile.locator_magic())?.is_some()
+    };
+    if !occupied && profile.locator_magic().is_some() {
+        host.seek(SeekFrom::Start(0))?;
+        occupied = adapter.locate(host, None)?.is_some();
+    }
+    if occupied {
+        return Err(StrHideError::General(
+            "Carrier already contains hidden data. Use remove first or specify another file."
+                .into(),
+        ));
+    }
+    if let Some((_, tr_magic)) = stealth_magics {
+        host.seek(SeekFrom::Start(0))?;
+        if adapter.locate(host, Some(tr_magic))?.is_some() {
+            return Err(StrHideError::General(
+                "Carrier already contains hidden data (stealth envelope). Use remove first or specify another file.".into(),
+            ));
+        }
+    }
+
+    host.seek(SeekFrom::Start(0))?;
+    Ok(adapter.suspicious_structures(host))
+}
+
+/// Payload bytes after size validation and the compression decision.
+struct PreparedPayload<'a> {
+    bytes: Cow<'a, [u8]>,
+    filename: String,
+    is_file: bool,
+    raw_size: u64,
+    raw_sha256: String,
+    is_compressed: bool,
+}
+
+/// Normalise the payload, enforce the carrier's size limit and decide whether
+/// the configured compression strategy actually keeps the compressed stream.
+///
+/// The reader rejects any declared `raw_size` above `structure_payload_limit`
+/// before decrypting. Applying the same bound here (with the same function)
+/// means a payload that would be unreadable forever is refused up front
+/// instead of producing a carrier that `read` can never extract. The input
+/// host is at most as large as the post-injection carrier, so its limit is
+/// the stricter of the two and the read path is guaranteed to pass.
+fn prepare_write_payload<'a>(
+    source: PayloadSource<'a>,
+    local: &LocalParams,
+    orig_host_size: u64,
+) -> Result<PreparedPayload<'a>, StrHideError> {
+    let (payload_raw_bytes, filename, is_file) = source.into_buffered()?;
+    let raw_size = payload_raw_bytes.len() as u64;
+    let max_payload = structure_payload_limit(orig_host_size);
+    if raw_size > max_payload {
+        return Err(StrHideError::PayloadTooLarge(format!(
+            "Payload ({} bytes) exceeds the maximum supported by this carrier ({} bytes for a {} byte host); use a larger carrier or a smaller payload",
+            raw_size, max_payload, orig_host_size
+        )));
+    }
+    let raw_sha256 = {
+        let h = crate::crypto::compute_sha256(&payload_raw_bytes);
+        h.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+
+    // `CompressionStrategy::Auto` keeps the historical integer criterion
+    // (cross-language identical: keep compression only when it saves at least
+    // 2%: comp_len * 100 < raw_size * 98). The level and the decision are
+    // writer-only; the reader just inflates raw deflate when FLAG_COMPRESSED
+    // is set.
+    //
+    // Large payloads are probed first: a full deflate pass over incompressible
+    // data costs ~17 ms/MiB and is discarded, so a fixed 256 KiB stratified
+    // sample decides whether the full pass is worth starting. The same
+    // `should_compress` rule is applied to the sample, so the flag written
+    // below always reflects the bytes actually kept.
+    let (bytes, is_compressed) = match local.compression {
+        crate::params::CompressionStrategy::Never => (payload_raw_bytes, false),
+        strategy => {
+            let level = strategy.level();
+            let worth_full_pass =
+                if payload_raw_bytes.len() > crate::crypto::COMPRESSION_PROBE_MIN_BYTES {
+                    let (sample_raw, sample_comp) =
+                        crate::crypto::probe_compressibility(&payload_raw_bytes, level)?;
+                    strategy.should_compress(sample_raw, sample_comp)
+                } else {
+                    true
+                };
+
+            if !worth_full_pass {
+                (payload_raw_bytes, false)
+            } else {
+                let mut compressed_buf = Vec::new();
+                let (_, comp_len) = compress_stream(
+                    &mut Cursor::new(&payload_raw_bytes),
+                    &mut compressed_buf,
+                    level,
+                )?;
+
+                if strategy.should_compress(raw_size, comp_len) {
+                    // Keep the compressed stream and release the raw payload buffer early.
+                    drop(payload_raw_bytes);
+                    (Cow::Owned(compressed_buf), true)
+                } else {
+                    // Keep the raw payload and release the compressed buffer early.
+                    drop(compressed_buf);
+                    (payload_raw_bytes, false)
+                }
+            }
+        }
+    };
+
+    Ok(PreparedPayload {
+        bytes,
+        filename,
+        is_file,
+        raw_size,
+        raw_sha256,
+        is_compressed,
+    })
+}
+
+/// Where the adapter put the envelope and what it patched in the host.
+struct InjectionPlacement {
+    offset: u64,
+    size: u64,
+}
+
+/// Patch the real coordinates into the header and trailer, run the adapter's
+/// finalization, and require that `locate` finds exactly this write.
+///
+/// Scattered strategies (pe_codebits) embed the final envelope bytes during
+/// `inject()`: `inject_offset`/`inject_size` are 0 by definition and the
+/// trailer was assembled with `ube_offset = 0`, so there is nothing to patch at
+/// file offsets. Patching anyway would overwrite host bytes (offset 0 is the MZ
+/// header of a PE).
+#[allow(clippy::too_many_arguments)]
+fn finish_injection<W>(
+    out: &mut W,
+    adapter: &dyn HostAdapter,
+    header: &EnvelopeHeader,
+    header_mask: Option<&[u8; 76]>,
+    final_trailer: &EnvelopeTrailer,
+    strategy: &str,
+    actual_ube_offset: u64,
+    ube_total_size: u64,
+    placement: InjectionPlacement,
+    trailer_magic: &[u8; 4],
+) -> Result<(), StrHideError>
+where
+    W: Read + Write + Seek,
+{
+    let InjectionPlacement {
+        offset: inject_offset,
+        size: inject_size,
+        ..
+    } = placement;
+
+    if !adapter.is_scattered_strategy(strategy) {
+        // Patch header
+        out.seek(SeekFrom::Start(actual_ube_offset))?;
+        out.write_all(&header.pack_masked(header_mask))?;
+
+        // Patch trailer at end of UBE
+        let trailer_ctx = TrailerCtx {
+            actual_ube_offset,
+            ube_total_size,
+            inject_offset,
+            inject_size,
+            strategy,
+        };
+        let trailer_pos = adapter.trailer_offset(&trailer_ctx);
+        out.seek(SeekFrom::Start(trailer_pos))?;
+        out.write_all(&final_trailer.pack())?;
+
+        // Post-write finalization (e.g. recalculating chunk CRCs)
+        let fin_ctx = FinalizeCtx {
+            ube_offset: actual_ube_offset,
+            ube_total_size,
+            inject_offset,
+            inject_size,
+            strategy,
+        };
+        adapter.finalize(out, &fin_ctx)?;
+    }
+
+    // Post-write self-check: inject and locate must agree on where the
+    // envelope landed, or the write reports success for data that
+    // read/inspect/remove can never reach. Matching against the trailer magic
+    // this write produced is exactly what the read path demands, so a fresh
+    // output its own locate cannot find aborts here instead of orphaning the
+    // envelope. Cost: one streaming locate pass over the output.
+    out.flush()?;
+    out.seek(SeekFrom::Start(0))?;
+    let self_located = adapter.locate(out, Some(trailer_magic))?;
+    // `Some` alone is not enough: a second envelope with the same trailer magic
+    // could satisfy `locate` while `read` / `remove` would then reach the *old*
+    // one. Require the coordinates this very write sealed into the trailer.
+    let located_at = self_located.as_ref().map(|(o, s, _)| (*o, *s));
+    if located_at != Some((actual_ube_offset, ube_total_size)) {
+        return Err(StrHideError::General(format!(
+            "Post-write self-check failed: strategy '{}' wrote the envelope at {} ({} bytes), but locate returned {:?}; aborting so no unreadable stego is committed",
+            strategy, actual_ube_offset, ube_total_size, located_at
+        )));
+    }
+    Ok(())
 }
 
 /// Inject `source` into `carrier_path`, staging through a temp file and an
@@ -3214,368 +3315,13 @@ pub fn verify_passed(res: &VerifyResult) -> bool {
 }
 
 #[cfg(test)]
-mod compact_meta_tests {
-    use super::*;
-
-    fn meta(name: &str, size: u64, ts: u64) -> CarrierMetadata {
-        CarrierMetadata {
-            filename: name.to_string(),
-            raw_size: size,
-            raw_sha256: "ab".repeat(32),
-            created_at: ts,
-        }
-    }
-
-    fn assert_same(actual: &CarrierMetadata, expected: &CarrierMetadata) {
-        assert_eq!(actual.filename, expected.filename);
-        assert_eq!(actual.raw_size, expected.raw_size);
-        assert_eq!(actual.raw_sha256, expected.raw_sha256);
-        assert_eq!(actual.created_at, expected.created_at);
-    }
-
-    #[test]
-    fn compact_roundtrip_covers_width_and_text_edges() {
-        let cases = [
-            ("a", 0u64, 0u64),
-            ("x.txt", 1, 1_700_000_000),
-            ("目录/长文件名-测试.bin", u32::MAX as u64, u64::MAX / 2),
-            ("n", u64::MAX, 127),
-        ];
-        for (name, size, ts) in cases {
-            let original = meta(name, size, ts);
-            let encoded = original.encode_compact().expect("encodable");
-            let decoded = CarrierMetadata::decode_compact(&encoded).expect("decodable");
-            assert_same(&decoded, &original);
-        }
-        // 300-byte name still fits the u16 length field
-        let long = meta(&"n".repeat(300), 7, 7);
-        let encoded = long.encode_compact().expect("encodable");
-        assert_same(&CarrierMetadata::decode_compact(&encoded).unwrap(), &long);
-    }
-
-    #[test]
-    fn compact_block_is_much_smaller_than_json() {
-        let m = meta("s.txt", 1, 1_700_000_000);
-        let compact = m.encode_compact().unwrap();
-        let json = serde_json::to_vec(&m).unwrap();
-        assert!(
-            compact.len() + 80 < json.len(),
-            "compact {} json {}",
-            compact.len(),
-            json.len()
-        );
-        // 1 version + 2 name_len + 5 name + 1 size + 32 digest + 5 timestamp
-        assert_eq!(compact.len(), 46);
-    }
-
-    #[test]
-    fn varint_rejects_values_that_overflow_u64() {
-        // 9 continuation bytes followed by 0x02: bits past 63 must trigger an error.
-        let mut overflowing = vec![0x80u8; 9];
-        overflowing.push(0x02);
-        let mut pos = 0;
-        assert!(matches!(
-            take_varint(&overflowing, &mut pos),
-            Err(StrHideError::CorruptedData(_))
-        ));
-
-        // The canonical 10-byte encoding of u64::MAX still parses.
-        let mut max = vec![0xffu8; 9];
-        max.push(0x01);
-        let mut pos = 0;
-        assert_eq!(take_varint(&max, &mut pos).unwrap(), u64::MAX);
-
-        // A 10th byte with the continuation bit set is "too long": it must not
-        // be silently accepted either.
-        let too_long = vec![0xffu8; 10];
-        let mut pos = 0;
-        assert!(take_varint(&too_long, &mut pos).is_err());
-    }
-
-    #[test]
-    fn compact_rejects_corrupt_input() {
-        assert!(CarrierMetadata::decode_compact(&[]).is_err());
-        assert!(CarrierMetadata::decode_compact(&[0x01]).is_err());
-        // unsupported version
-        assert!(CarrierMetadata::decode_compact(&[0x02, 0x00, 0x00]).is_err());
-        // truncated filename
-        assert!(CarrierMetadata::decode_compact(&[0x01, 0x05, 0x00, b'a']).is_err());
-        // truncated digest
-        let mut v = vec![0x01, 0x01, 0x00, b'a'];
-        put_varint(&mut v, 1);
-        v.extend_from_slice(&[0u8; 10]);
-        assert!(CarrierMetadata::decode_compact(&v).is_err());
-        // invalid UTF-8 filename
-        assert!(CarrierMetadata::decode_compact(&[0x01, 0x01, 0x00, 0xff]).is_err());
-    }
-
-    #[test]
-    fn pre_v2_json_metadata_is_rejected() {
-        let m = meta("legacy.bin", 42, 1_600_000_000);
-        let json = serde_json::to_vec(&m).unwrap();
-        // A pre-v2 carrier stores JSON with FLAG_COMPACT_META clear. That
-        // combination is now a hard error rather than a second decode path.
-        assert!(decode_metadata(&json, false).is_err());
-        // The compact path must not accept JSON either.
-        assert!(decode_metadata(&json, true).is_err());
-        // And the compact layout still round-trips.
-        let compact = m.encode_compact().unwrap();
-        assert_same(&decode_metadata(&compact, true).unwrap(), &m);
-    }
-
-    #[test]
-    fn unencodable_metadata_is_a_writer_error() {
-        let long_name = meta(&"n".repeat(COMPACT_META_MAX_NAME + 1), 1, 1);
-        assert!(long_name.encode_compact().is_none());
-        assert!(encode_metadata(&long_name).is_err());
-
-        let mut bad_digest = meta("x", 1, 1);
-        bad_digest.raw_sha256 = "zz".repeat(32);
-        assert!(bad_digest.encode_compact().is_none());
-        assert!(encode_metadata(&bad_digest).is_err());
-    }
-
-    #[test]
-    fn test_warning_render_bilingual() {
-        use crate::core::i18n::{Lang, RenderCtx};
-
-        let w1 = Warning::SizeInflation {
-            ube_size: 1000,
-            host_size: 1500,
-            ratio_pct: 66.7,
-        };
-        assert_eq!(w1.render(RenderCtx::new(Lang::En)), w1.message());
-        assert!(w1.render(RenderCtx::new(Lang::Zh)).contains("隐藏数据信封"));
-
-        let w2 = Warning::SuspiciousStructures {
-            hints: vec!["prIv chunk".into()],
-        };
-        assert_eq!(w2.render(RenderCtx::new(Lang::En)), w2.message());
-        assert!(
-            w2.render(RenderCtx::new(Lang::Zh))
-                .contains("载体呈现与隐藏信封一致的结构")
-        );
-    }
-
-    #[test]
-    fn test_read_summary_and_metadata_inspection() {
-        let read = ReadResult {
-            carrier: PathBuf::from("test.png"),
-            data: b"hello world".to_vec(),
-            is_file: false,
-            is_encrypted: false,
-            filename: String::new(),
-            raw_size: 11,
-            written_file: None,
-        };
-        let summary = read.summary();
-        assert_eq!(summary.raw_size, 11);
-        assert_eq!(summary.text_preview, Some("hello world".into()));
-
-        let meta = CarrierMetadata {
-            filename: "secret.txt".into(),
-            raw_size: 100,
-            raw_sha256: "0".repeat(64),
-            created_at: 12345678,
-        };
-        let inspection = MetadataInspection::Decrypted(meta.clone());
-        let json = serde_json::to_string(&inspection).expect("serialize");
-        assert!(json.contains("secret.txt"));
-
-        let fail = MetadataInspection::DecryptFailed {
-            error: "Invalid password".into(),
-        };
-        let json_fail = serde_json::to_string(&fail).expect("serialize");
-        assert!(json_fail.contains("Invalid password"));
-    }
-}
+#[path = "engine_tests/compact_meta_tests.rs"]
+mod compact_meta_tests;
 
 #[cfg(test)]
-mod envelope_coordinate_tests {
-    use super::*;
-
-    /// `inject_size` lives in the header but outside the AEAD's AAD, so a zero
-    /// in that field must not be read as "this is a scattered strategy". Before
-    /// the fix, any contiguous strategy (`eof`, `chunk`, `box_uuid`) with the
-    /// field flipped to 0 skipped Level 2 entirely and `verify` passed a carrier
-    /// whose coordinates disagreed with its body.
-    #[test]
-    fn zero_inject_size_only_exempts_pe_codebits() {
-        let ube_total = 256u64;
-        let file_len = 4096u64;
-
-        let header = EnvelopeHeader {
-            strategy_id: crate::structure::registry::strategy_to_id("eof").expect("eof id"),
-            inject_offset: 0,
-            offset_delta: 0,
-            inject_size: 0,
-            ..Default::default()
-        };
-
-        assert!(
-            envelope_coordinates_agree(&header, "eof", 0, ube_total, file_len).is_err(),
-            "a zeroed inject_size on a contiguous strategy must be rejected"
-        );
-
-        // `pe_codebits` is the one strategy that records 0/0 by construction.
-        let header = EnvelopeHeader {
-            strategy_id: crate::structure::registry::strategy_to_id("pe_codebits")
-                .expect("codebits id"),
-            ..header
-        };
-        assert!(
-            envelope_coordinates_agree(&header, "pe_codebits", 0, ube_total, file_len).is_ok(),
-            "the scattered strategy must still be exempt"
-        );
-    }
-
-    /// An MKV `ebml_void` envelope moves when a remux resizes the Segment in
-    /// front of the appended Void block. `MkvAdapter::locate` resolves that
-    /// block from the tail precisely to survive the shift, so the coordinate
-    /// check must accept it — otherwise `read` succeeds while `verify`/`restore`
-    /// call the same carrier corrupt.
-    #[test]
-    fn ebml_void_tolerates_a_relocated_envelope() {
-        let ube_total = 256u64;
-        let file_len = 8192u64;
-        let offset_delta = 3u8; // EBML Void ID + 2-byte VINT
-        let header = EnvelopeHeader {
-            strategy_id: crate::structure::registry::strategy_to_id("ebml_void").expect("id"),
-            inject_offset: 4096,
-            offset_delta,
-            inject_size: ube_total + offset_delta as u64,
-            ..Default::default()
-        };
-
-        let at_write_time = header.inject_offset + offset_delta as u64;
-        assert!(
-            envelope_coordinates_agree(&header, "ebml_void", at_write_time, ube_total, file_len)
-                .is_ok(),
-            "an unmoved envelope must pass unchanged"
-        );
-
-        let shifted = at_write_time + 100;
-        assert!(
-            envelope_coordinates_agree(&header, "ebml_void", shifted, ube_total, file_len).is_ok(),
-            "a shifted ebml_void envelope must be accepted, not called corrupt"
-        );
-        let relocated = strip_coordinates_for_location(&header, shifted, "ebml_void")
-            .expect("strip must follow the located position");
-        assert_eq!(
-            relocated.inject_offset,
-            header.inject_offset + 100,
-            "strip must be told where the envelope really is"
-        );
-
-        // A strategy anchored at write time keeps refusing the same shift.
-        let anchored = EnvelopeHeader {
-            strategy_id: crate::structure::registry::strategy_to_id("box_uuid").expect("id"),
-            ..header.clone()
-        };
-        assert!(
-            envelope_coordinates_agree(&anchored, "box_uuid", shifted, ube_total, file_len)
-                .is_err(),
-            "box_uuid is pinned to its write-time offset"
-        );
-    }
-}
+#[path = "engine_tests/envelope_coordinate_tests.rs"]
+mod envelope_coordinate_tests;
 
 #[cfg(test)]
-mod pbkdf2_budget_tests {
-    use super::*;
-
-    fn stego(payload: PayloadSource<'_>, password: Option<&str>, stealth: bool) -> Vec<u8> {
-        let carrier = include_bytes!("../../tests/assets/minimal.png").to_vec();
-        let (bytes, _) = write_carrier_bytes(
-            &carrier,
-            payload,
-            &WriteOptions::default()
-                .with_password_option(password)
-                .with_stealth(stealth),
-            &LocalParams::default(),
-            &StructureProfile::new(),
-        )
-        .unwrap();
-        bytes
-    }
-
-    /// Verifies that verification derives password secrets once and reuses them
-    /// across Level 2 and Level 3 checks.
-    #[test]
-    fn verify_derives_the_password_pair_once_beyond_the_locator() {
-        let bytes = stego(PayloadSource::Text("p1-7"), Some("pw"), true);
-        crate::crypto::reset_pbkdf2_calls();
-        let res = verify_carrier_bytes(&bytes, Some("pw"), &StructureProfile::new()).unwrap();
-        assert!(verify_passed(&res), "{res:?}");
-        assert_eq!(crate::crypto::pbkdf2_calls(), 2, "unexpected PBKDF2 count");
-    }
-
-    /// Verifies that an empty password string does not create a stealth envelope.
-    #[test]
-    fn empty_password_does_not_create_a_stealth_envelope() {
-        let carrier = include_bytes!("../../tests/assets/minimal.png").to_vec();
-        let err = write_carrier_bytes(
-            &carrier,
-            PayloadSource::Text("p2-12"),
-            &WriteOptions::default().with_password("").with_stealth(true),
-            &LocalParams::default(),
-            &StructureProfile::new(),
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("Stealth mode requires a password"),
-            "unexpected error: {err}"
-        );
-    }
-
-    /// Verifies that the unencrypted path derives default secrets once across checks.
-    #[test]
-    fn verify_derives_the_default_pair_once() {
-        let bytes = stego(PayloadSource::Text("p1-7"), None, false);
-        crate::crypto::reset_pbkdf2_calls();
-        let res = verify_carrier_bytes(&bytes, None, &StructureProfile::new()).unwrap();
-        assert!(verify_passed(&res), "{res:?}");
-        assert_eq!(crate::crypto::pbkdf2_calls(), 1, "unexpected PBKDF2 count");
-    }
-
-    /// Verifies that advertised strategy capacities never exceed the payload limit
-    /// enforced by the engine for the host format.
-    #[test]
-    fn strategy_capacities_never_exceed_engine_payload_limit() {
-        use crate::structure::adapters::StrategyCapacity;
-
-        let mk = |capacity_bytes: Option<u64>| StrategyCapacity {
-            strategy: "x".into(),
-            capacity_bytes,
-            available: true,
-            limit: "native".into(),
-            note: None,
-        };
-
-        // 86,854-byte host: 256x is below the 64 MiB floor, so every strategy
-        // is capped at 64 MiB; lower native ceilings keep their own text.
-        let mut caps = vec![mk(None), mk(Some(u32::MAX as u64)), mk(Some(100))];
-        apply_engine_payload_limit(&mut caps, 86_854);
-        assert_eq!(caps[0].capacity_bytes, Some(64 * 1024 * 1024));
-        assert_eq!(caps[1].capacity_bytes, Some(64 * 1024 * 1024));
-        assert_eq!(caps[2].capacity_bytes, Some(100), "lower native stays");
-        assert!(caps[0].limit.contains("67,108,864"), "{}", caps[0].limit);
-        assert_eq!(caps[2].limit, "native");
-
-        // 8 MiB host: 256x = 2 GiB, clamped to the 1 GiB ceiling.
-        let mut caps = vec![mk(None)];
-        apply_engine_payload_limit(&mut caps, 8 * 1024 * 1024);
-        assert_eq!(
-            caps[0].capacity_bytes,
-            Some(crate::crypto::MAX_VERIFY_PAYLOAD_SIZE)
-        );
-
-        // 8 GiB host: 256x is above the ceiling; still the ceiling.
-        let mut caps = vec![mk(None)];
-        apply_engine_payload_limit(&mut caps, 8u64 << 30);
-        assert_eq!(
-            caps[0].capacity_bytes,
-            Some(crate::crypto::MAX_VERIFY_PAYLOAD_SIZE)
-        );
-    }
-}
+#[path = "engine_tests/pbkdf2_budget_tests.rs"]
+mod pbkdf2_budget_tests;
