@@ -4,13 +4,25 @@ use flate2::Compression;
 use flate2::write::ZlibEncoder;
 
 use super::*;
-use crate::stego::params::PngParams;
+use crate::core::control::Control;
+use crate::core::crypto::Credential;
+use crate::core::payload::Payload;
+use crate::errors::StrHideError;
+use crate::stego::envelope::Freshness;
+use crate::stego::format::{derive_l2_locator_keys, derive_locator_master};
+use crate::stego::header::{PNG_AUDIO_BASE_SLOTS, SpatialHeaderV4, Tlv};
+use crate::stego::params::{ExtractParams, PngParams, SafetyPolicy};
 use crate::stego::png::cost::HillCostModel;
+use crate::stego::traits::PngCostModel;
+use crate::stego::{StegoCapacityInfo, StegoCodec};
 
 #[test]
 fn trace_call_sites_do_not_format_eagerly() {
     // Verifies trace call sites pass `format_args!` rather than allocating eagerly with `format!`.
-    let source = include_str!("engine.rs");
+    let source = concat!(
+        include_str!("engine/embed.rs"),
+        include_str!("engine/extract.rs"),
+    );
     // Split so this test's own source does not contain the needle.
     let eager_pattern = concat!("trace", "(&format!(");
     assert!(
