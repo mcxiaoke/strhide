@@ -299,7 +299,7 @@ pub fn probe_jpeg_capacity(
 /// Layout information for diagnostics and tests: the resolved group size and
 /// body slot count for a given payload.
 ///
-/// Takes the payload bytes, not just its length: [`build_plaintext`] deflates
+/// Takes the payload bytes, not just its length: [`crate::stego::envelope::build_plaintext`] deflates
 /// the payload whenever that is smaller, and the ciphertext length (plaintext +
 /// AEAD tag, the suite comes from `params.cipher_suite`) is what actually
 /// decides `u`. A length-only API reported the layout of an uncompressed

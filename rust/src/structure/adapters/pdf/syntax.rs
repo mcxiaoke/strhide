@@ -629,7 +629,7 @@ fn scan_max_object_number(text: &str) -> Option<u64> {
 /// Header of the incremental-update object that carries the envelope stream.
 ///
 /// The leading `\n` separates the new object from the previous `%%EOF`, and
-/// its length is exactly what [`PdfAdapter::calc_prefix_len`] reports so the
+/// its length is exactly what [`super::PdfAdapter::calc_prefix_len`] reports so the
 /// engine can point the trailer at the stream instead of at the object
 /// keyword. Writer and accounting must use this one function: two hand-written
 /// format strings drifting apart would put `ube_offset` a few bytes off, which

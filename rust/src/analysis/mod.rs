@@ -32,8 +32,8 @@
 //! out", not "no hidden data exists".
 //!
 //! Layout: this module owns the report types, the scanned-bytes view and the
-//! entry points; [`structural`] walks container/signature structure, [`spatial`]
-//! holds the pixel-domain estimators and [`dct`] the JPEG calibration track.
+//! entry points; `structural` walks container/signature structure, `spatial`
+//! holds the pixel-domain estimators and `dct` the JPEG calibration track.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};

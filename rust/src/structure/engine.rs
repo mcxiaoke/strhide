@@ -51,7 +51,7 @@ pub use write::{write_carrier, write_carrier_bytes, write_carrier_with};
 /// Stealth mode password derivation domain separation string.
 ///
 /// Re-exported from [`crate::params`] for the public API: the constant lives
-/// next to [`StructureProfile::stealth_domain`], which is what actually drives
+/// next to [`crate::structure::params::StructureProfile::stealth_domain`], which is what actually drives
 /// derivation.
 pub use crate::params::STEALTH_DOMAIN;
 

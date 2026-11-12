@@ -43,7 +43,7 @@ pub(crate) const HEVC_V4_CRC_SPAN: usize = 28;
 /// 32-byte content header of an HEVC carrier.
 ///
 /// `format_id = 5`, `total_windows = 1` and `stc_h` (from
-/// [`HevcFormatProfile`]) are implied by the carrier and bound through the AAD
+/// [`crate::stego::format::HevcFormatProfile`]) are implied by the carrier and bound through the AAD
 /// prefix; they are not stored.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HevcSuperblockV4 {

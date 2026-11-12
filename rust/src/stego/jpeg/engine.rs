@@ -22,7 +22,7 @@
 //! # Ternary matching and write-back
 //!
 //! The trellis works on parity carriers (`2`/`3`), but a coefficient is an
-//! `i16`. [`StcTrellis::embed_with_deltas`] therefore returns one `-1/0/+1` per
+//! `i16`. [`crate::stego::coding::StcTrellis::embed_with_deltas`] therefore returns one `-1/0/+1` per
 //! slot and the engine applies exactly that to the coefficient, which lets a
 //! single coefficient both keep its magnitude relationship with its neighbours
 //! and land on the cheapest side.

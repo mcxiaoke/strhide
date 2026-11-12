@@ -18,6 +18,7 @@
 ```bash
 cd rust
 cargo build --release --all-features   # 编译，产物在 target/release/strhide
+cargo doc --all-features --no-deps # 验证doc没有问题
 # 注意：默认 feature 不含 cli，`cargo build --release` 只编库、**不会**更新
 # target/release/strhide(.exe)，跑 CLI 与 baseline_hash 前必须带 --all-features
 # （或 --features cli），否则会拿旧二进制验证新代码。

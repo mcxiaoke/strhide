@@ -111,7 +111,7 @@ fn numbered_name(desired: &str, n: u32) -> String {
 /// Pick a destination under `dir` for `desired` without colliding with a file
 /// already on disk.
 ///
-/// Unlike [`unique_batch_path`], the desired name itself is checked too: the
+/// Unlike `unique_batch_path`, the desired name itself is checked too: the
 /// GUI writes next to the carrier and must never overwrite an unrelated file
 /// silently. Used by the GUI's save path for structure writes, content embeds
 /// and extraction, so all of them share the numbering rule.
