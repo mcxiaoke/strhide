@@ -19,6 +19,7 @@
 pub mod batch;
 #[cfg(any(feature = "structure-base", feature = "content-base"))]
 pub mod commit;
+pub mod compress;
 pub mod control;
 pub mod crypto;
 pub mod errors;
