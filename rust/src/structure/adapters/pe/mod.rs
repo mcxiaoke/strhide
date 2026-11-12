@@ -1,10 +1,16 @@
 //! Windows Portable Executable (PE) adapter for strhide.
 
-use crate::errors::StrHideError;
 #[cfg(feature = "structure-pe")]
-use crate::structure::adapters::pe_codebits;
-use crate::structure::adapters::pe_layout;
-use crate::structure::adapters::pe_slack;
+pub mod codebits;
+pub mod layout;
+pub mod slack;
+
+#[cfg(feature = "structure-pe")]
+pub use codebits as pe_codebits;
+pub use layout as pe_layout;
+pub use slack as pe_slack;
+
+use crate::errors::StrHideError;
 use crate::structure::adapters::{
     HostAdapter, InjectCoordinates, LocatedEnvelope, SeekRead, SeekWrite, StrategyCapacity,
     SubStream, format_bytes,
