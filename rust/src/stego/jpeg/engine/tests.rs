@@ -1,12 +1,22 @@
 use super::*;
+use crate::core::control::Control;
+use crate::core::crypto::{CipherSuiteId, Credential};
+use crate::core::payload::Payload;
+use crate::stego::envelope::{Freshness, build_v4_aad_with, unpack_v4_envelope_parts};
+use crate::stego::format::{derive_l2_locator_keys, derive_l3_session_keys, derive_locator_master};
+use crate::stego::header::{Tlv, parse_extension};
+use crate::stego::jpeg::header_v4::JpegSuperblockV4;
+use crate::stego::jpeg::v3_layout;
 use crate::stego::params::{ExtractParams, JpegParams, SafetyPolicy};
+use crate::stego::prng::{ChaCha12Stream, fisher_yates_prefix_from, permute_prefix};
+use dct_io::JpegCoefficients;
 
-const CARRIER: &[u8] = include_bytes!("../../../tests/assets/small.jpg");
+const CARRIER: &[u8] = include_bytes!("../../../../tests/assets/small.jpg");
 
 #[test]
 fn trace_call_sites_do_not_format_eagerly() {
     // Verifies trace call sites pass `format_args!` rather than allocating eagerly with `format!`.
-    let source = include_str!("engine.rs");
+    let source = include_str!("embed.rs");
     // Split so this test's own source does not contain the needle.
     let eager_pattern = concat!("trace", "(&format!(");
     assert!(
