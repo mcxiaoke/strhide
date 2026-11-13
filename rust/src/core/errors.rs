@@ -125,6 +125,10 @@ pub enum StrHideError {
     #[error("Unsupported format: {0}")]
     UnsupportedFormat(String),
 
+    /// An operation or capability is not supported by the compiled feature set or configuration.
+    #[error("Unsupported: {0}")]
+    Unsupported(String),
+
     /// The carrier looks like a valid format but no envelope (standard or
     /// stealth-with-the-supplied-password) was located. The message may carry
     /// a structural hint when [`crate::structure::adapters::HostAdapter::suspicious_structures`]
@@ -219,6 +223,7 @@ impl StrHideError {
             StrHideError::RestoreMismatch { .. } => ErrorKind::RestoreMismatch,
             StrHideError::PayloadTooLarge(_) => ErrorKind::PayloadTooLarge,
             StrHideError::UnsupportedFormat(_) => ErrorKind::UnsupportedFormat,
+            StrHideError::Unsupported(_) => ErrorKind::Unsupported,
             StrHideError::NoHiddenData(_) => ErrorKind::NoHiddenData,
             StrHideError::UnsupportedVersion(_) => ErrorKind::UnsupportedVersion,
             StrHideError::Cancelled => ErrorKind::Cancelled,
@@ -248,9 +253,9 @@ impl StrHideError {
                 Some(crate::core::i18n::Msg::ErrRestoreMismatch)
             }
             StrHideError::PayloadTooLarge(_) => Some(crate::core::i18n::Msg::ErrCapacity),
-            StrHideError::UnsupportedFormat(_) | StrHideError::UnsupportedVersion(_) => {
-                Some(crate::core::i18n::Msg::ErrUnsupported)
-            }
+            StrHideError::UnsupportedFormat(_)
+            | StrHideError::UnsupportedVersion(_)
+            | StrHideError::Unsupported(_) => Some(crate::core::i18n::Msg::ErrUnsupported),
             StrHideError::TrellisInfeasible { .. } => Some(crate::core::i18n::Msg::ErrUnsupported),
             // A cancellation is the caller's own decision, not an error class:
             // there is nothing to translate and nothing went wrong.
@@ -274,6 +279,7 @@ impl StrHideError {
             | StrHideError::PayloadTooLarge(s)
             | StrHideError::UnsupportedFormat(s)
             | StrHideError::UnsupportedVersion(s)
+            | StrHideError::Unsupported(s)
             | StrHideError::NoHiddenData(s)
             | StrHideError::InvalidArgument(s)
             | StrHideError::ConfigError(s)
@@ -366,6 +372,7 @@ pub enum ErrorKind {
     RestoreMismatch,
     PayloadTooLarge,
     UnsupportedFormat,
+    Unsupported,
     NoHiddenData,
     UnsupportedVersion,
     Cancelled,

@@ -1,13 +1,13 @@
 //! Remove/restore pipeline: strip the envelope and verify the restored host.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Cursor, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use super::locate::{locate_envelope_with_magic, no_hidden_data_error};
 use super::read::open_authenticated_at;
 use super::report::RemoveResult;
-use crate::commit::{TmpGuard, temp_path_for};
+use crate::commit::{TmpGuard, create_temp_file_for};
 use crate::crypto::derive_stealth_magics;
 use crate::errors::StrHideError;
 use crate::structure::adapters::{LocatedEnvelope, SeekRead, SeekWrite};
@@ -276,17 +276,11 @@ pub fn remove_carrier_with_dialect(
     let _target_lock = crate::commit::TargetLock::acquire(target_path)?;
 
     let label = carrier_path.display().to_string();
-    let tmp_target = temp_path_for(target_path);
+    let (tmp_target, mut out_f) = create_temp_file_for(target_path, true)?;
     let mut tmp_guard = TmpGuard::new(tmp_target.clone());
 
     let header = {
         let mut cf = File::open(carrier_path)?;
-        let mut out_f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_target)?;
         let mut pw = crate::core::control::ProgressWriter::new(
             &mut out_f,
             options.control,

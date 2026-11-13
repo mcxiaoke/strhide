@@ -256,6 +256,54 @@ pub(crate) fn create_carrier_backup(carrier: &Path) -> Result<PathBuf, StrHideEr
     ))
 }
 
+/// Create a unique temporary file alongside `target` using `create_new(true)`.
+///
+/// Retries with a new salt when a collision occurs (up to 16 attempts),
+/// preventing local symlink pre-creation attacks and race conditions.
+/// When `read` is true, the handle is opened for read+write.
+pub(crate) fn create_temp_file_for(
+    target: &Path,
+    read: bool,
+) -> Result<(PathBuf, std::fs::File), StrHideError> {
+    use std::fs::OpenOptions;
+    for _ in 0..16 {
+        let tmp_path = temp_path_for(target);
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        if read {
+            opts.read(true);
+        }
+        match opts.open(&tmp_path) {
+            Ok(file) => return Ok((tmp_path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(StrHideError::Io(e)),
+        }
+    }
+    Err(StrHideError::General(format!(
+        "could not allocate a unique temporary file for '{}'",
+        target.display()
+    )))
+}
+
+/// Copy `carrier` into a freshly created unique temporary file alongside `target`.
+///
+/// Uses `create_new(true)` to avoid following pre-existing files or symlinks,
+/// retrying with fresh salt if a temporary path collision occurs.
+pub(crate) fn copy_file_to_temp(carrier: &Path, target: &Path) -> Result<PathBuf, StrHideError> {
+    for _ in 0..16 {
+        let tmp_path = temp_path_for(target);
+        match copy_file_to_new(carrier, &tmp_path) {
+            Ok(()) => return Ok(tmp_path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(StrHideError::Io(e)),
+        }
+    }
+    Err(StrHideError::General(format!(
+        "could not allocate a unique temporary copy for '{}'",
+        target.display()
+    )))
+}
+
 /// Refuse a target the OS marks read-only before a temp copy is built.
 ///
 /// On Windows renaming over a read-only file fails with `ERROR_ACCESS_DENIED`
@@ -587,11 +635,10 @@ pub fn commit_carrier_patches(
         backup_path = Some(create_carrier_backup(carrier_path)?);
     }
 
-    let tmp_path = temp_path_for(target_path);
+    // 1. Copy to fresh temporary file with create_new(true) (refusing pre-existing symlinks)
+    let tmp_path = copy_file_to_temp(carrier_path, target_path)?;
     let mut guard = TmpGuard::new(tmp_path.clone());
 
-    // 1. Kernel-level stream copy (zero user-space heap allocation)
-    std::fs::copy(carrier_path, &tmp_path)?;
     // The copy inherits the carrier's read-only bits; the patch step needs to
     // write it, and the original permissions are restored after the rename.
     make_writable(&tmp_path)?;
@@ -662,14 +709,13 @@ pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), StrHideError>
     use std::io::Write as _;
 
     reject_read_only_target(path)?;
-    let tmp_path = temp_path_for(path);
+    let (tmp_path, mut file) = create_temp_file_for(path, false)?;
     let mut guard = TmpGuard::new(tmp_path.clone());
 
-    {
-        let mut file = std::fs::File::create(&tmp_path)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+
     rename_with_retry(&tmp_path, path)?;
     guard.commit();
     sync_parent_dir(path);
@@ -998,6 +1044,23 @@ mod tests {
 
         let err = TargetLock::acquire(&target).expect_err("unknown marker stays");
         assert!(matches!(err, StrHideError::TargetBusy(_)), "got: {err}");
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn create_temp_file_for_creates_new_file_and_retries_on_collision() {
+        let temp_dir = scratch_dir("temp_file_create_new");
+        let target = temp_dir.join("test.bin");
+        let (tmp_path, file) = create_temp_file_for(&target, true).unwrap();
+        assert!(tmp_path.exists());
+        drop(file);
+
+        // Pre-create the temp path so create_new encounters an existing file
+        let (tmp_path_2, file_2) = create_temp_file_for(&target, false).unwrap();
+        assert!(tmp_path_2.exists());
+        assert_ne!(tmp_path, tmp_path_2);
+        drop(file_2);
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }

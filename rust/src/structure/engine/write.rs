@@ -5,7 +5,7 @@
 //! protocol itself is [`write_core`], which knows nothing about paths.
 
 use std::borrow::Cow;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,7 +15,7 @@ use rand::RngExt;
 use super::capacity::structure_payload_limit;
 use super::metadata::{CarrierMetadata, encode_metadata};
 use super::report::{PayloadSource, Warning, WriteResult};
-use crate::commit::{TmpGuard, temp_path_for};
+use crate::commit::{TmpGuard, create_temp_file_for};
 use crate::crypto::{
     compress_stream, derive_all, derive_stealth_magics, encrypt_metadata, encrypt_stream_to_chunks,
     normalize_nfc,
@@ -814,37 +814,33 @@ pub fn write_carrier_with(
     // Collision-free temp file guard prevents races under concurrent execution.
     // TmpGuard removes the half-written file on any early return unless `commit()`
     // runs after the rename succeeded.
-    let tmp_target = temp_path_for(target_path);
+    // Read+write, not write-only: the patch/finalize step seeks back into the
+    // staged output and adapter `finalize` implementations may read what they
+    // just wrote (a write-only handle fails with "access denied" on Windows).
+    let (tmp_target, mut out_file) = match create_temp_file_for(target_path, true) {
+        Ok(pair) => pair,
+        Err(StrHideError::Io(e)) => {
+            let dir = match target_path.parent() {
+                Some(p) if !p.as_os_str().is_empty() => p,
+                _ => Path::new("."),
+            };
+            let reason = match e.kind() {
+                std::io::ErrorKind::NotFound => "the output directory does not exist",
+                std::io::ErrorKind::PermissionDenied => "the output directory is not writable",
+                _ => "the output file could not be created",
+            };
+            return Err(StrHideError::General(format!(
+                "Cannot create '{}' in '{}': {reason} [{e}]",
+                target_path.display(),
+                dir.display()
+            )));
+        }
+        Err(e) => return Err(e),
+    };
     let mut tmp_guard = TmpGuard::new(tmp_target.clone());
 
     let core = {
         let mut host = File::open(carrier_path)?;
-        // Read+write, not `File::create`: the patch/finalize step seeks back
-        // into the staged output and adapter `finalize` implementations may
-        // read what they just wrote (a write-only handle fails with
-        // "access denied" on Windows).
-        let mut out_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_target)
-            .map_err(|e| {
-                let dir = match target_path.parent() {
-                    Some(p) if !p.as_os_str().is_empty() => p,
-                    _ => Path::new("."),
-                };
-                let reason = match e.kind() {
-                    std::io::ErrorKind::NotFound => "the output directory does not exist",
-                    std::io::ErrorKind::PermissionDenied => "the output directory is not writable",
-                    _ => "the output file could not be created",
-                };
-                StrHideError::General(format!(
-                    "Cannot create '{}' in '{}': {reason} [{e}]",
-                    target_path.display(),
-                    dir.display()
-                ))
-            })?;
         let mut pw = crate::core::control::ProgressWriter::new(
             &mut out_file,
             options.control,

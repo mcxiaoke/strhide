@@ -425,6 +425,10 @@ pub struct Dialect {
     /// Content-domain (pixel / DCT / CABAC) dialect.
     #[cfg(feature = "content-base")]
     pub stego: StegoProfile,
+    /// Preserves private secret status when neither domain is compiled in,
+    /// preventing silent security degradation in minimal `--no-default-features` builds.
+    #[cfg(not(any(feature = "structure-base", feature = "content-base")))]
+    pub(crate) custom_secret: Option<&'static str>,
 }
 
 impl Dialect {
@@ -435,6 +439,8 @@ impl Dialect {
             structure: StructureProfile::new(),
             #[cfg(feature = "content-base")]
             stego: StegoProfile::new(),
+            #[cfg(not(any(feature = "structure-base", feature = "content-base")))]
+            custom_secret: None,
         }
     }
 
@@ -452,6 +458,10 @@ impl Dialect {
         #[cfg(feature = "content-base")]
         {
             self.stego.default_secret = Some(secret);
+        }
+        #[cfg(not(any(feature = "structure-base", feature = "content-base")))]
+        {
+            self.custom_secret = Some(secret);
         }
         self
     }
@@ -488,6 +498,10 @@ impl Dialect {
         #[cfg(feature = "content-base")]
         {
             ok = ok && self.stego.is_official();
+        }
+        #[cfg(not(any(feature = "structure-base", feature = "content-base")))]
+        {
+            ok = ok && self.custom_secret.is_none();
         }
         ok
     }
@@ -573,6 +587,15 @@ impl StrHide {
         carrier: &Path,
         opts: &DualOptions<'_>,
     ) -> Result<DualInspect, StrHideError> {
+        #[cfg(not(any(feature = "structure-base", feature = "content-base")))]
+        {
+            let _ = (carrier, opts);
+            return Err(StrHideError::Unsupported(
+                "Neither structure nor content steganography domain is enabled in this build"
+                    .into(),
+            ));
+        }
+
         #[allow(unused_variables)]
         let _ = (carrier, opts);
 
@@ -709,6 +732,15 @@ impl StrHide {
         carrier: &Path,
         opts: &DualOptions<'_>,
     ) -> Result<DualVerify, StrHideError> {
+        #[cfg(not(any(feature = "structure-base", feature = "content-base")))]
+        {
+            let _ = (carrier, opts);
+            return Err(StrHideError::Unsupported(
+                "Neither structure nor content steganography domain is enabled in this build"
+                    .into(),
+            ));
+        }
+
         #[allow(unused_variables)]
         let _ = (carrier, opts);
 
@@ -1219,5 +1251,49 @@ impl AnalysisFacade<'_> {
     /// Scan a file at `path`.
     pub fn scan_file(&self, path: &Path) -> Result<crate::analysis::AnalysisReport, StrHideError> {
         crate::analysis::scan_file_with_magics(path, self.magics())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dialect_secret_affects_is_official() {
+        let official = Dialect::new();
+        assert!(official.is_official());
+
+        let custom = Dialect::new().with_default_secret("test-private-key");
+        assert!(
+            !custom.is_official(),
+            "Custom secret must make dialect non-official regardless of enabled features"
+        );
+    }
+
+    #[test]
+    fn test_inspect_and_verify_contract_when_domains_disabled() {
+        let engine = StrHide::new();
+        let opts = DualOptions::default();
+        let dummy_path = Path::new("dummy_carrier.bin");
+
+        #[cfg(not(any(feature = "structure-base", feature = "content-base")))]
+        {
+            let inspect_res = engine.inspect_any(dummy_path, &opts);
+            assert!(
+                matches!(inspect_res, Err(StrHideError::Unsupported(_))),
+                "inspect_any must return Unsupported when neither domain is compiled in: {inspect_res:?}"
+            );
+
+            let verify_res = engine.verify_any(dummy_path, &opts);
+            assert!(
+                matches!(verify_res, Err(StrHideError::Unsupported(_))),
+                "verify_any must return Unsupported when neither domain is compiled in: {verify_res:?}"
+            );
+        }
+
+        #[cfg(any(feature = "structure-base", feature = "content-base"))]
+        {
+            let _ = (engine, opts, dummy_path);
+        }
     }
 }

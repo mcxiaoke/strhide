@@ -4,11 +4,11 @@
 """Architectural boundary linter for strhide.
 
 Enforces these modularity invariants:
-1. structure ↛ stego.
-2. stego ↛ structure.
-3. core ↛ {formats, structure, stego, cli, analysis}.
-4. formats ↛ {structure, stego, cli, analysis} (formats sits above core only).
-5. analysis ↛ cli.
+1. structure ↛ {stego, analysis, cli, facade}.
+2. stego ↛ {structure, analysis, cli, facade}.
+3. core ↛ {formats, structure, stego, analysis, cli, facade}.
+4. formats ↛ {structure, stego, analysis, cli, facade} (formats sits above core only).
+5. analysis ↛ {stego, cli, facade}.
 
 Absolute paths (`crate::x`, `strhide::x`) and cross-layer relative paths
 (`super::x`) are both checked. Strings, raw strings, char literals and byte
@@ -167,6 +167,23 @@ def rust_files(root: Path) -> list[Path]:
     return sorted(root.rglob("*.rs"))
 
 
+def check_module_uniqueness(src_root: Path) -> list[str]:
+    """Flag directories where both `foo.rs` and `foo/mod.rs` coexist (E0761)."""
+    conflicts: list[str] = []
+    for rs_file in src_root.rglob("*.rs"):
+        if rs_file.stem in {"mod", "lib", "main"}:
+            continue
+        peer_dir = rs_file.parent / rs_file.stem
+        mod_file = peer_dir / "mod.rs"
+        if mod_file.is_file():
+            conflicts.append(
+                f"Module file conflict: both '{rs_file.relative_to(src_root).as_posix()}' and "
+                f"'{mod_file.relative_to(src_root).as_posix()}' exist "
+                "(causes rustc E0761 and breaks lint rule targeting)"
+            )
+    return sorted(conflicts)
+
+
 def check_tree(
     src_root: Path,
     root: Path,
@@ -225,7 +242,7 @@ def run_self_tests() -> int:
         def setUp(self) -> None:
             self._tmp = tempfile.TemporaryDirectory()
             self.src = Path(self._tmp.name) / "src"
-            for layer in ("core", "structure", "stego", "formats"):
+            for layer in ("core", "structure", "stego", "formats", "analysis"):
                 (self.src / layer).mkdir(parents=True)
 
         def tearDown(self) -> None:
@@ -279,8 +296,8 @@ def run_self_tests() -> int:
             self.assertEqual(len(found), 1)
 
         def test_analysis_cannot_reach_cli(self) -> None:
-            self.write("analysis.rs", "use crate::cli::args;\n")
-            found = check_tree(self.src, self.src / "analysis.rs", {"cli"}, "analysis !-> cli")
+            self.write("analysis/mod.rs", "use crate::cli::args;\n")
+            found = check_tree(self.src, self.src / "analysis", {"cli"}, "analysis !-> cli")
             self.assertEqual(len(found), 1)
 
         def test_comments_and_strings_are_ignored(self) -> None:
@@ -312,8 +329,8 @@ def run_self_tests() -> int:
             self.assertEqual(len(found), 1)
 
         def test_strhide_prefix_brace_group_is_flagged(self) -> None:
-            self.write("analysis.rs", "use strhide::{cli::args};\n")
-            found = check_tree(self.src, self.src / "analysis.rs", {"cli"}, "analysis !-> cli")
+            self.write("analysis/mod.rs", "use strhide::{cli::args};\n")
+            found = check_tree(self.src, self.src / "analysis", {"cli"}, "analysis !-> cli")
             self.assertEqual(len(found), 1)
 
         def test_brace_group_without_forbidden_layer_is_allowed(self) -> None:
@@ -323,6 +340,18 @@ def run_self_tests() -> int:
             )
             found = check_tree(self.src, self.src / "core", {"stego"}, "core !-> stego")
             self.assertEqual(found, [])
+
+        def test_module_uniqueness_flags_conflict(self) -> None:
+            self.write("foo.rs", "pub fn a() {}\n")
+            self.write("foo/mod.rs", "pub fn b() {}\n")
+            conflicts = check_module_uniqueness(self.src)
+            self.assertEqual(len(conflicts), 1)
+            self.assertIn("foo.rs", conflicts[0])
+            self.assertIn("foo/mod.rs", conflicts[0])
+
+        def test_fail_open_protection_flags_empty_root(self) -> None:
+            files = rust_files(self.src / "nonexistent")
+            self.assertEqual(files, [])
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(ImportLintSelfTest)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
@@ -340,33 +369,49 @@ def main() -> int:
         print(f"Error: Rust src directory not found at {rust_src}", file=sys.stderr)
         return 1
 
+    module_conflicts = check_module_uniqueness(rust_src)
+    if module_conflicts:
+        print(f"Found {len(module_conflicts)} module file conflict(s):", file=sys.stderr)
+        for conflict in module_conflicts:
+            print(f"  {conflict}", file=sys.stderr)
+        return 1
+
     rules = [
         (
             rust_src / "structure",
-            {"stego"},
-            "structure !-> stego",
+            {"stego", "analysis", "cli", "facade"},
+            "structure !-> {stego, analysis, cli, facade}",
         ),
         (
             rust_src / "stego",
-            {"structure"},
-            "stego !-> structure",
+            {"structure", "analysis", "cli", "facade"},
+            "stego !-> {structure, analysis, cli, facade}",
         ),
         (
             rust_src / "core",
-            {"formats", "structure", "stego", "cli", "analysis"},
-            "core !-> {formats, structure, stego, cli, analysis}",
+            {"formats", "structure", "stego", "analysis", "cli", "facade"},
+            "core !-> {formats, structure, stego, analysis, cli, facade}",
         ),
         (
             rust_src / "formats",
-            {"structure", "stego", "cli", "analysis"},
-            "formats !-> {structure, stego, cli, analysis}",
+            {"structure", "stego", "analysis", "cli", "facade"},
+            "formats !-> {structure, stego, analysis, cli, facade}",
         ),
         (
-            rust_src / "analysis.rs",
-            {"cli"},
-            "analysis !-> cli",
+            rust_src / "analysis",
+            {"stego", "cli", "facade"},
+            "analysis !-> {stego, cli, facade}",
         ),
     ]
+
+    for root, _, desc in rules:
+        files = rust_files(root)
+        if not files:
+            print(
+                f"Error: Rule target '{root}' matched no Rust source files for rule '{desc}' (fail-open protection)",
+                file=sys.stderr,
+            )
+            return 1
 
     violations: list[str] = []
     for root, forbidden, desc in rules:
@@ -380,9 +425,11 @@ def main() -> int:
 
     print(
         "OK: all architectural boundaries intact "
-        "(structure !-> stego, stego !-> structure, "
-        "core !-> {formats, structure, stego, cli, analysis}, "
-        "formats !-> {structure, stego, cli, analysis}, analysis !-> cli)"
+        "(structure !-> {stego, analysis, cli, facade}, "
+        "stego !-> {structure, analysis, cli, facade}, "
+        "core !-> {formats, structure, stego, analysis, cli, facade}, "
+        "formats !-> {structure, stego, analysis, cli, facade}, "
+        "analysis !-> {stego, cli, facade})"
     )
     return 0
 

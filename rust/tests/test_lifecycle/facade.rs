@@ -905,3 +905,12 @@ fn facade_embed_stats_populated() {
         "modified slots cannot exceed candidate slots"
     );
 }
+
+#[test]
+fn facade_dialect_official_contract() {
+    let official = Dialect::new();
+    assert!(official.is_official());
+
+    let custom = Dialect::new().with_default_secret("deployment-private-key");
+    assert!(!custom.is_official());
+}
