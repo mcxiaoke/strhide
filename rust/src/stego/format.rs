@@ -59,7 +59,11 @@ impl GridRule {
 
     /// Positions per block carried by this rule.
     pub const fn slots_per_block(&self) -> usize {
-        (self.k_max - self.k_min + 1) as usize
+        if self.k_max < self.k_min {
+            0
+        } else {
+            (self.k_max - self.k_min + 1) as usize
+        }
     }
 }
 
@@ -671,6 +675,27 @@ mod tests {
             k_max: 10,
         };
         assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn grid_rule_slots_per_block_underflow_safety() {
+        let rule = GridRule {
+            k_min: 1,
+            k_max: 63,
+        };
+        assert_eq!(rule.slots_per_block(), 63);
+
+        let equal = GridRule {
+            k_min: 10,
+            k_max: 10,
+        };
+        assert_eq!(equal.slots_per_block(), 1);
+
+        let inverted = GridRule {
+            k_min: 63,
+            k_max: 1,
+        };
+        assert_eq!(inverted.slots_per_block(), 0);
     }
 
     #[test]

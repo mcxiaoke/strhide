@@ -277,7 +277,7 @@ pub fn isobmff_verify_structure(
         }
         let size = u32::from_be_bytes(hdr[0..4].try_into().unwrap());
         let box_type = &hdr[4..8];
-        if box_type == *b"ftyp" {
+        if box_type == *b"ftyp" || box_type == *b"styp" {
             has_ftyp = true;
         }
 

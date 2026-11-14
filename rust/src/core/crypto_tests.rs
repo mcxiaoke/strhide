@@ -264,3 +264,45 @@ fn test_chunk_size_max_boundary() {
     assert_eq!(total_plain_len, orig_size as u64);
     assert_eq!(plain_stream.into_inner(), original_data);
 }
+
+#[test]
+fn decrypt_stream_from_chunks_rejects_zero_or_too_short_payload() {
+    let payload_key = [0x55u8; 32];
+    let base_nonce = [0xAAu8; 12];
+    let aad = [0x11u8; 16];
+
+    let mut in_stream = std::io::Cursor::new(Vec::new());
+    let mut out_stream = std::io::Cursor::new(Vec::new());
+
+    // 0 bytes declared must fail closed with CorruptedData, never Ok(0)
+    let res = decrypt_stream_from_chunks(
+        &mut in_stream,
+        &mut out_stream,
+        &payload_key,
+        &base_nonce,
+        &aad,
+        0,
+    );
+    assert!(
+        matches!(res, Err(StrHideError::CorruptedData(_))),
+        "0-byte payload stream must be rejected as CorruptedData, got {res:?}"
+    );
+
+    // Declaring less than 4 + AEAD_TAG_LEN (20 bytes) must also be rejected
+    for len in 1..20 {
+        in_stream.set_position(0);
+        out_stream.set_position(0);
+        let res = decrypt_stream_from_chunks(
+            &mut in_stream,
+            &mut out_stream,
+            &payload_key,
+            &base_nonce,
+            &aad,
+            len,
+        );
+        assert!(
+            matches!(res, Err(StrHideError::CorruptedData(_))),
+            "{len}-byte payload stream must be rejected as CorruptedData, got {res:?}"
+        );
+    }
+}

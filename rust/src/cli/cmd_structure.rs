@@ -438,23 +438,29 @@ fn read_one(
         } else {
             crate::structure::sanitize_filename(&res.filename)
         };
+        let dest = PathBuf::from(fn_to_use);
+        crate::core::commit::reject_carrier_output(&dest, &args.carrier)?;
         // Same overwrite protection as the explicit-output path: never truncate
         // a file the user did not name.
-        if Path::new(&fn_to_use).exists() && !args.overwrite {
+        if dest.exists() && !args.overwrite {
             return Err(StrHideError::Rejection(format!(
-                "Refusing to overwrite existing file '{fn_to_use}'. Choose another -o path or pass --overwrite."
+                "Refusing to overwrite existing file '{}'. Choose another -o path or pass --overwrite.",
+                dest.display()
             )));
         }
         // Use atomic commit: avoids partial writes on disk full / process abort,
         // and safely replaces existing symlinks instead of following them.
-        crate::core::commit::write_bytes_atomic(Path::new(&fn_to_use), &res.data).map_err(|e| {
+        crate::core::commit::write_bytes_atomic(&dest, &res.data).map_err(|e| {
             let reason = match &e {
                 StrHideError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied => {
                     "permission denied"
                 }
                 _ => "the file could not be created",
             };
-            StrHideError::General(format!("Cannot create '{fn_to_use}': {reason} [{e}]"))
+            StrHideError::General(format!(
+                "Cannot create '{}': {reason} [{e}]",
+                dest.display()
+            ))
         })?;
         if !quiet {
             let elapsed_str = format_duration(t_start.elapsed());
@@ -462,7 +468,7 @@ fn read_one(
                 "{}",
                 t!(
                     Msg::ReadOkExtracted,
-                    path = fn_to_use,
+                    path = dest.display(),
                     bytes = format_size(res.raw_size),
                     elapsed = elapsed_str
                 )

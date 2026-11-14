@@ -41,7 +41,7 @@ pub enum StrHideError {
     /// The hint is a **field**, not part of the message: the CLI prints it and
     /// then prompts. Extracting it from the rendered text (`split_once("Hint: '")`)
     /// meant any wording change in the engine silently broke the feature.
-    #[error("Password error: {message}")]
+    #[error("Password error: {message}{}", match hint { Some(h) => format!(". Hint: '{}'", crate::core::fs::escape_control_chars(h)), None => String::new() })]
     PasswordWithHint {
         /// What went wrong, without the hint appended.
         message: String,
@@ -103,7 +103,7 @@ pub enum StrHideError {
     /// usually means a second envelope was layered on top and must be removed
     /// first, most-recently-written first, or that the carrier was re-encoded
     /// after the write (for example by a content-domain embed).
-    #[error("Restore verification failed: restored size {restored_size} (expected {expected_size}) or SHA256 mismatch{}", if *.residual_envelope { "\nDiagnosis: the restored file still contains another hidden envelope. Remove envelopes in reverse order of injection (most recently written first)." } else { "\nDiagnosis: the carrier bytes changed after the envelope was written (for example a content-domain embed re-encodes the media), so the pre-write host cannot be recovered. Restore refuses to emit a non-matching file." })]
+    #[error("Restore verification failed: restored size {restored_size} (expected {expected_size}), restored SHA256: {restored_sha256}, expected SHA256: {expected_sha256}{}", if *.residual_envelope { "\nDiagnosis: the restored file still contains another hidden envelope. Remove envelopes in reverse order of injection (most recently written first)." } else { "\nDiagnosis: the carrier bytes changed after the envelope was written (for example a content-domain embed re-encodes the media), so the pre-write host cannot be recovered. Restore refuses to emit a non-matching file." })]
     RestoreMismatch {
         restored_size: u64,
         expected_size: u64,
@@ -323,7 +323,10 @@ impl StrHideError {
             StrHideError::TrellisInfeasible { detail, .. } => detail.clone(),
             StrHideError::Cancelled => "Operation cancelled".into(),
             StrHideError::PasswordWithHint { message, hint } => match hint {
-                Some(h) => format!("{message}. Hint: '{h}'."),
+                Some(h) => {
+                    let safe = crate::core::fs::escape_control_chars(h);
+                    format!("{message}. Hint: '{safe}'.")
+                }
                 None => message.clone(),
             },
         }

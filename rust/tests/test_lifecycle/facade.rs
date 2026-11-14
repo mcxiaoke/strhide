@@ -760,6 +760,32 @@ fn test_verify_any_clean_and_stego() {
 }
 
 #[test]
+fn test_inspect_and_verify_any_propagate_cancellation() {
+    let dir = scratch("facade_cancel_propagate");
+    let carrier = dir.join("carrier.png");
+    std::fs::write(&carrier, PNG).expect("seed png");
+
+    let engine = StrHide::new();
+    let token = strhide::core::control::CancelToken::new();
+    token.cancel(); // Pre-cancelled token
+
+    let control = strhide::core::control::Control::with_cancel(&token);
+    let opts = strhide::facade::DualOptions::default().with_control(control);
+
+    let insp_res = engine.inspect_any(&carrier, &opts);
+    assert!(
+        matches!(insp_res, Err(strhide::StrHideError::Cancelled)),
+        "inspect_any must return Cancelled error, got {insp_res:?}"
+    );
+
+    let ver_res = engine.verify_any(&carrier, &opts);
+    assert!(
+        matches!(ver_res, Err(strhide::StrHideError::Cancelled)),
+        "verify_any must return Cancelled error, got {ver_res:?}"
+    );
+}
+
+#[test]
 fn test_hevc_mp4_inspect_media_info_and_has_inter() {
     let mp4_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/assets/small.mp4");
     assert!(

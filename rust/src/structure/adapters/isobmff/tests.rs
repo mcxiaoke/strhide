@@ -94,6 +94,21 @@ fn verify_rejects_a_forged_24_byte_trailer_tail() {
 }
 
 #[test]
+fn verify_accepts_fragmented_boxes_without_ftyp() {
+    // Fragmented MP4 / CMAF media can begin with `styp` (segment type box)
+    // without an explicit `ftyp` box.
+    let mut fragment = Vec::new();
+    // 8-byte box header: length 16, FourCC 'styp'
+    fragment.extend_from_slice(&16u32.to_be_bytes());
+    fragment.extend_from_slice(b"styp");
+    fragment.extend_from_slice(&[0u8; 8]); // payload
+
+    let mut cursor = Cursor::new(fragment);
+    let (ok, detail) = isobmff_verify_structure("MP4", &mut cursor, None).unwrap();
+    assert!(ok, "container starting with styp must verify: {detail}");
+}
+
+#[test]
 fn locate_and_verify_accept_a_64_bit_box() {
     let host = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomiso2".to_vec();
     let ube = vec![0xA5u8; 128];

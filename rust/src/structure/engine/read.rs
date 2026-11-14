@@ -160,12 +160,8 @@ pub(super) fn open_authenticated_at<'a>(
     let (payload_key, meta_key) = if header.is_encrypted() {
         secrets.password.as_ref().map_or_else(
             || {
-                let message = match &hint_str {
-                    Some(h) => format!("Password required to extract hidden data. Hint: '{h}'."),
-                    None => "Password required to extract hidden data".into(),
-                };
                 Err(StrHideError::PasswordWithHint {
-                    message,
+                    message: "Password required to extract hidden data".into(),
                     hint: hint_str.clone(),
                 })
             },

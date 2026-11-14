@@ -318,6 +318,40 @@ fn read_output_routing_rejects_conflicting_input() {
 }
 
 #[test]
+fn read_default_filename_rejects_self_overwrite() {
+    let dir = scratch("read_self_ovw");
+    // Write a carrier 'c.png' that embeds data with filename 'c.png'
+    fs::write(dir.join("c.png"), make_png()).unwrap();
+    fs::write(dir.join("payload.txt"), b"secret content").unwrap();
+
+    let out = run(
+        &dir,
+        &[
+            "write",
+            "c.png",
+            "-d",
+            "payload.txt",
+            "-o",
+            "carrier.png",
+            "--no-backup",
+        ],
+    );
+    assert_eq!(code(&out), 0, "write must succeed: {}", stderr(&out));
+
+    // Rename carrier.png to payload.txt, so extracted default name 'payload.txt' collides with carrier
+    fs::rename(dir.join("carrier.png"), dir.join("payload.txt")).unwrap();
+
+    // Now reading 'payload.txt' without -o would attempt to extract into 'payload.txt'
+    let read_out = run(&dir, &["read", "payload.txt", "--overwrite"]);
+    assert_eq!(code(&read_out), 1);
+    assert!(
+        stderr(&read_out).contains("Refusing to write the extracted payload over carrier"),
+        "stderr must report self-overwrite rejection: {}",
+        stderr(&read_out)
+    );
+}
+
+#[test]
 fn prompt_password_without_terminal_reports_error() {
     let dir = scratch("prompt_no_tty");
     fs::write(dir.join("c.png"), make_png()).unwrap();

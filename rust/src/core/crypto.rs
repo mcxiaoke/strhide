@@ -579,6 +579,12 @@ pub fn decrypt_stream_from_chunks<R: Read, W: Write>(
     fixed_header_aad: &[u8],
     total_payload_bytes: u64,
 ) -> Result<u64, StrHideError> {
+    if total_payload_bytes < (4 + AEAD_TAG_LEN as u64) {
+        return Err(StrHideError::CorruptedData(
+            "Payload stream is too short to contain a valid AEAD chunk".into(),
+        ));
+    }
+
     let cipher = Aes256Gcm::new_from_slice(payload_key)
         .map_err(|e| StrHideError::CryptoError(format!("Invalid key for AES-GCM: {e}")))?;
 
@@ -645,7 +651,7 @@ pub fn decrypt_stream_from_chunks<R: Read, W: Write>(
         chunk_index += 1;
     }
 
-    if !seen_final && total_payload_bytes > 0 {
+    if !seen_final {
         return Err(StrHideError::CorruptedData(
             "Payload stream was truncated before final chunk".into(),
         ));

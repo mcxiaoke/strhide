@@ -638,6 +638,7 @@ impl StrHide {
                         let mi = info.media_info;
                         (Some(info), None, mi)
                     }
+                    Err(StrHideError::Cancelled) => return Err(StrHideError::Cancelled),
                     Err(e) => (None, Some(e.detail_i18n()), None),
                 }
             } else {
@@ -777,6 +778,7 @@ impl StrHide {
                 // "no payload found" from "verifier could not execute".
                 match self.stego().verify_file(carrier, &ver_opts) {
                     Ok(v) => (Some(v), None),
+                    Err(StrHideError::Cancelled) => return Err(StrHideError::Cancelled),
                     Err(e) => (None, Some(e.detail_i18n())),
                 }
             } else {
