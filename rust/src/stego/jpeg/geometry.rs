@@ -129,16 +129,18 @@ mod tests {
         // 64x64, one component, no subsampling: MCU == block.
         let g = component_geometry(&info(64, 64, &[(1, 1)]), 0, 64);
         assert_eq!((g.grid_w, g.grid_h), (8, 8));
-        for bi in 0..64 {
-            assert_eq!(g.positions[bi], (bi / 8, bi % 8));
+        assert_eq!(g.positions.len(), 64);
+        for (bi, &pos) in g.positions.iter().enumerate() {
+            assert_eq!(pos, (bi / 8, bi % 8));
         }
     }
 
     #[test]
     fn yuv_444_is_plain_raster() {
         let g = component_geometry(&info(64, 64, &[(1, 1), (1, 1), (1, 1)]), 0, 64);
-        for bi in 0..64 {
-            assert_eq!(g.positions[bi], (bi / 8, bi % 8));
+        assert_eq!(g.positions.len(), 64);
+        for (bi, &pos) in g.positions.iter().enumerate() {
+            assert_eq!(pos, (bi / 8, bi % 8));
         }
     }
 
@@ -146,8 +148,9 @@ mod tests {
     fn yuv_422_is_plain_raster() {
         // v_samp == 1 makes MCU-interleaved order coincide with raster order.
         let g = component_geometry(&info(64, 64, &[(2, 1), (1, 1), (1, 1)]), 0, 64);
-        for bi in 0..64 {
-            assert_eq!(g.positions[bi], (bi / 8, bi % 8));
+        assert_eq!(g.positions.len(), 64);
+        for (bi, &pos) in g.positions.iter().enumerate() {
+            assert_eq!(pos, (bi / 8, bi % 8));
         }
     }
 
