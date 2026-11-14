@@ -1,118 +1,138 @@
-# PNG 结构域适配器：私有块注入（prIv）
+# PNG Structural Domain Adapter: Private Chunk Injection (`prIv`)
 
-本文件规定 `format_name = "PNG"` 的结构域（UBE）适配器。信头、尾标、AAD、策略 ID 等公共布局不在本文重复，见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2–§15 与 [CAPACITY.md](CAPACITY.md) §4（[WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md) 仅为历史对照，冲突以本目录为准）；内容域（LSB/像素域）见 [CONTENT-PNG.md](CONTENT-PNG.md)，二者互不替代。
+This document specifies the structural domain (UBE) adapter for `format_name = "PNG"`. Common envelope layouts, trailers, AAD, and strategy IDs are defined in [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2–§15 and [CAPACITY.md](CAPACITY.md) §4; content domain (spatial/pixel LSB) is specified in [CONTENT-PNG.md](CONTENT-PNG.md); the two domains are mutually exclusive and non-interchangeable.
 
-## 1 范围、导航与稳定性
+---
 
-载体为以标准 8 字节 PNG 签名开头的文件；适配器只读写块流，不解码像素。
+## 1. Scope, Navigation, and Stability
 
-| 级别 | 本域内容 |
+Carriers must begin with the standard 8-byte PNG signature; this adapter operates strictly on chunk streams without decoding pixel data.
+
+| Tier | PNG Structural Scope |
 | --- | --- |
-| **F** | 8 字节签名 `89 50 4E 47 0D 0A 1A 0A`；策略名 `chunk`/`eof` 与 `strategy_id` 2/1；私有块类型 `prIv`；`[u32be len][type][data][u32be crc32]` 布局；注入点=最后一个 `IEND` 块起始；`offset_delta = 8`；CRC32 覆盖 `type‖data`；locate 的候选/位移接受规则 |
-| **D** | 无。没有可选块、可选字段或版本分支；`stEg` 仅为读侧兼容别名，不写出 |
-| **I** | 复制缓冲区大小、CRC 计算方式、`strategy_note` 文案、是否额外补块（当前不补）；读侧均不依赖 |
+| **F** | 8-byte signature `89 50 4E 47 0D 0A 1A 0A`; strategy names `chunk` / `eof` with `strategy_id` 2 / 1; private chunk type `prIv`; `[u32be len][type][data][u32be crc32]` layout; injection point = start of final `IEND` chunk; `offset_delta = 8`; CRC32 covering `type ‖ data`; locator candidate/displacement admission rules |
+| **D** | None. No optional chunks, optional fields, or version branches; `stEg` is a legacy reader-compatibility alias only and is never emitted |
+| **I** | Copy buffer sizes, CRC calculation paths, `strategy_note` phrasing, padding chunks (currently none); readers depend on none of these |
 
-常量来源：签名与块名 `rust/src/structure/adapters/png.rs:11-15`，策略注册表 `rust/src/structure/registry.rs:90-104`，信封尺寸见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2。
+Constants: signature and chunk identifier `rust/src/structure/adapters/png.rs:11-15`, strategy registry `rust/src/structure/registry.rs:90-104`, envelope dimensions in [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2.
 
-## 2 格式识别（detect）
+---
 
-`detect` 只比较前 8 字节签名，成功与否返回 `bool`，不产生错误；它会恢复调用前的流位置（`rust/src/structure/adapters/png.rs:101-113`）。因此 8 字节短文件也能通过 detect，真正的结构门槛在注入前由 `find_iend_offset` 把关（`png.rs:27-92`）：
+## 2. Format Detection (`detect`)
 
-1. 文件长度 ≥ 8 + 12 = 20 B，否则 `CorruptedData("File too small to be a valid PNG")`（`png.rs:31-35`）；
-2. 前 8 字节必须等于签名，否则 `UnsupportedFormat("Invalid PNG magic signature")`（`png.rs:39-43`）；
-3. 从偏移 8 起按块头 4 字节大端长度跳跃；块头截断、`length > 0x7FFFFFFF`、加法溢出或下一块越过文件尾即停止扫描（`png.rs:48-76`）；
-4. 只把 `length == 0` 的 `IEND` 记为候选并保留**最后一个**（`png.rs:78-83`）；扫完仍无候选则 `CorruptedData("Valid PNG IEND chunk not found")`（`png.rs:85-91`）。
+`detect` compares only the first 8 bytes against the PNG magic signature, returning `bool` without raising errors; it restores stream position upon completion (`rust/src/structure/adapters/png.rs:101-113`). Short 8-byte files pass detect; true structural admission is enforced prior to injection via `find_iend_offset` (`png.rs:27-92`):
 
-若扫描在破坏点之前已记录过 `IEND`，函数会返回该较早偏移而不报错，其余字节按脏尾保留；这是有意的宽松行为。写入路径在调用注入前还会做一次全块 CRC 校验，非法宿主直接 `CorruptedData`（`rust/src/structure/engine.rs:1028-1035`、`png.rs:342-426`）。
+1. File length $\ge 8 + 12 = 20\text{ B}$, else `CorruptedData("File too small to be a valid PNG")` (`png.rs:31-35`);
+2. First 8 bytes MUST equal the PNG signature, else `UnsupportedFormat("Invalid PNG magic signature")` (`png.rs:39-43`);
+3. Beginning at offset 8, skip through chunks by reading the 4-byte Big-Endian length; truncated chunk headers, `length > 0x7FFFFFFF`, arithmetic overflow, or chunks extending past EOF abort scanning (`png.rs:48-76`);
+4. Only `IEND` chunks with `length == 0` are recorded as candidates, keeping the **last** one (`png.rs:78-83`); if no valid `IEND` is found, return `CorruptedData("Valid PNG IEND chunk not found")` (`png.rs:85-91`).
 
-## 3 支持策略与 auto
+If scanning encounters corruption after having already logged an `IEND`, the function returns that earlier offset without error, retaining trailing bytes as dirty tail data; this lenient behavior is intentional. Injection paths execute a full chunk CRC check prior to writing, rejecting malformed carriers with `CorruptedData` (`rust/src/structure/engine.rs:1028-1035`, `png.rs:342-426`).
 
-| 名称 | `strategy_id` | 行为 | 出处 |
+---
+
+## 3. Supported Strategies and `auto`
+
+| Strategy | `strategy_id` | Behavior | Reference |
 | --- | --- | --- | --- |
-| `chunk` | 2 | 在最后 `IEND` 前新建 `prIv` 辅助块，UBE 作为块数据 | `png.rs:13`、`:148-215`；`registry.rs:92` |
-| `eof` | 1 | 委托 `EofAdapter`，在文件 EOF 后追加 UBE（含 IEND 后的脏尾之后） | `png.rs:155-157`；`eof.rs:48-55`；`registry.rs:91` |
+| `chunk` | 2 | Inserts a new `prIv` ancillary chunk before the final `IEND`, placing UBE as chunk data | `png.rs:13`, `:148-215`; `registry.rs:92` |
+| `eof` | 1 | Delegates to `EofAdapter`, appending UBE at physical EOF (after any post-IEND trailing data) | `png.rs:155-157`; `eof.rs:48-55`; `registry.rs:91` |
 
-`auto` 只看 UBE 精确尺寸：`ube_total_size > 0x7FFFFFFF` 时选 `eof`，否则选 `chunk`（`png.rs:119-125`）。它不测量载体余量，也不做除上述阈值外的重试/回退（引擎侧选择见 `engine.rs:1242-1255`）。显式策略不在列表内返回 `UnsupportedFormat`（`png.rs:159-163`）。
+`auto` evaluates UBE exact dimensions exclusively: if $ube\_total\_size > \text{0x7FFFFFFF}$, it selects `eof`; otherwise it selects `chunk` (`png.rs:119-125`). It does not measure carrier headroom or perform fallbacks beyond this threshold (`engine.rs:1242-1255`). Explicit unsupported strategies return `UnsupportedFormat` (`png.rs:159-163`).
 
-容量报告（`strategy_capacities`，`png.rs:127-146`）为 `chunk = 0x7FFFFFFF`、`eof = None`（无上限、文件增长）。`inspect` 会把两者统一钳到引擎载荷上限 `structure_payload_limit(host_len) = clamp(256 × host_len, 64 MiB, 1 GiB)`（`engine.rs:1938-1975`、`:2604-2611`），因此实际显示值通常远小于 2 GiB；基线中 stego 为 87,105 B 的 PNG 用例（原载体 86,854 B）两策略均报 `67,108,864`（`temp/baseline/baseline.json:757-777`）。
+Capacity reporting (`strategy_capacities`, `png.rs:127-146`) reports `chunk = 0x7FFFFFFF`, `eof = None` (unbounded / file expands). `inspect` clamps both to the engine ceiling $\text{structure\_payload\_limit}(host\_len) = \text{clamp}(256 \times host\_len, 64\text{ MiB}, 1\text{ GiB})$ (`engine.rs:1938-1975`, `:2604-2611`), making displayed values substantially smaller than 2 GiB; for an 87,105B stego PNG (original 86,854B), both strategies report `67,108,864` (`temp/baseline/baseline.json:757-777`).
 
-## 4 注入点与块布局
+---
 
-`chunk` 的注入区域紧接在最后一个 `IEND` 块头之前，即该 `IEND` 的全部字节（含其后的脏尾）原样后移（`png.rs:174-180`、`:211-212`）：
+## 4. Injection Point and Chunk Layout
+
+Under `chunk`, injection occurs directly before the final `IEND` chunk header, displacing the entire `IEND` (and any subsequent trailing data) backward (`png.rs:174-180`, `:211-212`):
 
 ```text
-偏移 inject_offset
+Offset inject_offset:
   +0   u32be  length = ube_total_size
   +4   "prIv" (70 72 49 76)
   +8   UBE[0 .. ube_total_size)        ← offset_delta = 8
   +8+ube_total_size  u32be CRC32(type ‖ data)
 ```
 
-- 块总长为 `ube_total_size + 12`，`inject` 返回的 `inject_size = 4 + 4 + ube_total_size + 4`（`png.rs:189-208`、`:214`）。
-- CRC32-IEEE 覆盖 4 字节类型与块数据，大端写在数据之后；`inject` 边写边算（`png.rs:186-206`），`finalize` 在信头/尾标回填后再按同一范围重算（`png.rs:484-508`）。
-- UBE 首字节相对注入点位移固定为 8（`chunk`），`eof` 为 0（`png.rs:475-482`），该值写入 header 的 `offset_delta` 并进入 AAD（`engine.rs:1267-1278`）。
-- `prIv` 的 4 个类型字节为 `70 72 49 76`；按 PNG 大小写位：首字母小写 = ancillary(1)，第二字母小写 = public(0)，第三字母大写 = reserved bit 0，末字母小写 = safe-to-copy(1)。代码与 CLI 文案称其为 “private ancillary chunk” 属功能性称呼，不改变上述位值。
-- 其余块不重排、不重编码；IEND 及其后的任意字节逐字节复制（`png.rs:211-212`）。`eof` 策略下 IEND 与脏尾保持在原位置，UBE 追加在文件末尾（`eof.rs:48-55`）。
+- Total chunk length is $ube\_total\_size + 12$; `inject` returns $inject\_size = 4 + 4 + ube\_total\_size + 4$ (`png.rs:189-208`, `:214`).
+- CRC32-IEEE covers the 4-byte chunk type and chunk data, written as Big-Endian following payload data; calculated streaming during `inject` (`png.rs:186-206`), and recomputed over the same range in `finalize` after header/trailer backfilling (`png.rs:484-508`).
+- Offset of UBE origin relative to injection point is fixed to 8 (`chunk`) or 0 (`eof`) (`png.rs:475-482`); encoded into header `offset_delta` and covered by AAD (`engine.rs:1267-1278`).
+- Chunk type bytes for `prIv` are `70 72 49 76`; under PNG casing rules: first byte lowercase = ancillary (1), second byte lowercase = public (0), third byte uppercase = reserved bit 0, fourth byte lowercase = safe-to-copy (1). Describing it as a "private ancillary chunk" in code/CLI is functional terminology and does not alter these bit patterns.
+- Existing chunks are never reordered or re-encoded; `IEND` and subsequent trailing bytes are copied verbatim (`png.rs:211-212`). Under `eof`, `IEND` and trailing bytes remain untouched at their original offsets, and UBE appends at file EOF (`eof.rs:48-55`).
 
-## 5 信封偏移、容量与下界
+---
 
-`actual_ube_offset = inject_offset + offset_delta`（`engine.rs:1407`）；`trailer_offset` 使用默认实现 `ube_offset + ube_total_size - 24`，即尾标位于 `prIv` 数据区最后 24 字节（`adapters/mod.rs:357-359`、`engine.rs:1432-1441`）。写后自检要求 `locate` 必须返回 `(actual_ube_offset, ube_total_size)`，否则中止写入（`engine.rs:1454-1472`）。
+## 5. Envelope Offsets, Capacity, and Lower Bounds
+
+$actual\_ube\_offset = inject\_offset + offset\_delta$ (`engine.rs:1407`); `trailer_offset` uses default $ube\_offset + ube\_total\_size - 24$, positioning the trailer within the final 24 bytes of `prIv` data (`adapters/mod.rs:357-359`, `engine.rs:1432-1441`). Post-injection self-verification requires `locate` to return $(actual\_ube\_offset, ube\_total\_size)$; failure aborts the write (`engine.rs:1454-1472`).
 
 ```text
-chunk: 增长字节数 = 12 + ube_total_size；单块上限 0x7FFFFFFF
-eof:   增长字节数 = ube_total_size；无块长度上限
-注入区域关系: ube_total_size <= inject_size；注入区末尾 <= 文件长度
+chunk: File expansion = 12 + ube_total_size; single-chunk bound 0x7FFFFFFF
+eof:   File expansion = ube_total_size; no chunk length bound
+Injection containment: ube_total_size <= inject_size; injection_end <= file_length
 ```
 
-容量不来自“可用空隙/填充”：适配器不复用已有零填充或私有块空间，始终新建块，因此没有按载体测量的容量函数（`png.rs:127-146`）。写侧真正生效的是载荷上限：`raw_size <= structure_payload_limit(orig_host_size)`（`engine.rs:1123`）。UBE 下限分两层：`locate`/`confine` 的结构下界为 `112 + 24 = 136`（`engine.rs:199-201`、`png.rs:268`、`:431`）；实际可产出的最小加密信封为 214 B（`min_ube_len(1)`，`rust/src/structure/envelope.rs:123-140`）。显式 `chunk` 遇到 `ube_total_size > 2 GiB − 1` 时注入失败并提示改用 `--strategy eof`（`png.rs:168-172`）；`auto` 已在选择阶段改走 `eof`。
+Capacity does not originate from pre-existing padding: adapters never reuse zero-padding or existing private chunk payloads, always creating a new chunk; hence no carrier-measured capacity function exists (`png.rs:127-146`). The effective limit is the engine payload ceiling: $raw\_size \le \text{structure\_payload\_limit}(orig\_host\_size)$ (`engine.rs:1123`). Structural lower bound for `locate`/`confine` is $112 + 24 = 136$ (`engine.rs:199-201`, `png.rs:268`, `:431`); minimum possible encrypted envelope is 214B (`min_ube_len(1)`, `rust/src/structure/envelope.rs:123-140`). Explicitly selecting `chunk` with $ube\_total\_size > 2\text{ GiB} - 1$ fails injection, prompting switch to `--strategy eof` (`png.rs:168-172`); `auto` switches to `eof` during strategy resolution.
 
-## 6 locate 路径与方言提示
+---
 
-`locate_with_hint` 按三条路径依次尝试（`png.rs:225-340`）：
+## 6. Locator Paths and Dialect Hints
 
-1. **正向块扫描**：签名校验后从偏移 8 逐块读取 8 字节块头，不做 CRC 校验（`png.rs:238-268`）。对类型为 `prIv` 或 `stEg` 且 `length >= 136` 的块，读取 `data_offset + length - 24` 处的 24 字节尾标，用期望 trailer 魔数解包（`png.rs:268-275`）。
-2. **自描述确认**：仅当 `trailer.ube_total_size == length` 且满足下列之一才接受：`trailer.ube_offset == data_offset`（精确）；或该块数据前 8 字节等于期望 header 魔数（内容域 IDAT 重压缩导致的物理位移）。返回 `(data_offset, length, "chunk")`（`png.rs:283-299`）。仅凭尾标而不核对块自身的旧实现在此处被拒绝。
-3. **EOF 回退**：从文件尾读 24 字节尾标，`locate_start(file_size)` 在尾对齐时返回记录偏移，否则返回 `file_size - ube_total_size`；同样要求精确或魔数匹配（`png.rs:319-337`；`envelope.rs:870-879`）。返回 `(start, ube_total_size, "eof")`。
+`locate_with_hint` evaluates three paths sequentially (`png.rs:225-340`):
 
-魔数提示（hint）没有版本字段：入口是 `expected_header_magic: Option<[u8; 8]>` 与 `expected_trailer_magic: Option<&[u8; 4]>`；未提供头提示时默认 `STANDARD_HEADER_MAGIC`（`png.rs:235-237`；`adapters/mod.rs:218-225`）。引擎在持密码时先试 stealth 派生魔数、再试 profile 魔数（`engine.rs:145-166`）。`confine_location` 统一再校验 `ube_total_size >= 136` 且 `ube_offset + ube_total_size <= 文件长度`（`engine.rs:191-207`）。
+1. **Forward Chunk Scan**: After signature verification, scan sequentially from offset 8 reading 8-byte chunk headers, skipping CRC checks (`png.rs:238-268`). On encountering chunk types `prIv` or `stEg` with $length \ge 136$, read 24 bytes of trailer at $data\_offset + length - 24$, unpacking with expected trailer magic (`png.rs:268-275`).
+2. **Self-Describing Confirmation**: Accepted only if $trailer.ube\_total\_size == length$ and either: $trailer.ube\_offset == data\_offset$ (exact match); or the first 8 bytes of chunk data equal expected header magic (accommodating physical relocation from content domain IDAT recompression). Returns `(data_offset, length, "chunk")` (`png.rs:283-299`).
+3. **EOF Fallback**: Reads 24 bytes of trailer from EOF; `locate_start(file_size)` returns the recorded offset if trailer is EOF-aligned, else $file\_size - ube\_total\_size$; requires exact match or header magic match (`png.rs:319-337`, `envelope.rs:870-879`). Returns `(start, ube_total_size, "eof")`.
 
-特殊结构：串接 PNG 流在块头位置出现签名时被跳过（`png.rs:56-59`、`:305-315`）；`locate` 遇到 `IEND` 时若其后 8 字节仍是签名则继续扫描，否则停止，因此写在**最后一个** `IEND` 前的信封总能被找到。CgBI（Apple 私有块位于 IHDR 前）、APNG（`acTL`/`fcTL`/`fdAT`）、颜色类型、位深与隔行方式均不做特判：适配器把它们当作普通块顺序遍历，只依赖长度与 `IEND`。APNG 等内容域限制属 [CONTENT-PNG.md](CONTENT-PNG.md)，不约束结构域注入。
+Magic hints carry no version field: input is `expected_header_magic: Option<[u8; 8]>` and `expected_trailer_magic: Option<&[u8; 4]>`; defaulting to `STANDARD_HEADER_MAGIC` when omitted (`png.rs:235-237`, `adapters/mod.rs:218-225`). When a password is provided, the engine tries stealth-derived magic first, then profile magic (`engine.rs:145-166`). `confine_location` enforces $ube\_total\_size \ge 136$ and $ube\_offset + ube\_total\_size \le \text{file\_length}$ (`engine.rs:191-207`).
 
-## 7 remove 还原
+Concatenated PNG streams encountering signatures at chunk boundaries are skipped (`png.rs:56-59`, `:305-315`); `locate` encountering `IEND` continues scanning if followed by a PNG signature, guaranteeing discovery of envelopes placed before the **final** `IEND`. CgBI (Apple proprietary chunk before IHDR), APNG (`acTL` / `fcTL` / `fdAT`), color types, bit depths, and interlacing are handled transparently: the adapter traverses them as standard chunks relying strictly on length and `IEND`.
 
-`remove` 使用 `HostAdapter::strip` 的默认实现：复制 `[0, inject_offset)`，跳过 `inject_size` 字节，再复制其余全部字节（`adapters/mod.rs:236-260`）。对 `chunk` 而言，跳过的正是 `[len][prIv][UBE][crc]` 整个块，后移的 IEND 与脏尾回到原始位置，其他块逐字节不变。
+---
 
-- 若内容域重压缩使块位移，`strip_coordinates_for_location` 仅对 `chunk`/`eof` 按定位结果平移 `inject_offset`（`engine.rs:2268-2296`）；平移后的注入区仍受 `envelope_coordinates_agree` 约束：`ube_total_size <= inject_size`、区域不越过文件尾（`engine.rs:2828-2902`）。
-- 还原结果重新计算大小与 SHA-256，必须等于信头中的 `orig_host_size` 与 `orig_host_sha256`，否则返回 `RestoreMismatch`；若检测到残留信封或信封形状结构，会置 `residual_envelope` 提示需按逆序删除（`engine.rs:2299-2360`）。
-- 校验通过即“逐比特还原”，包括 IEND 后的脏尾；原文件 SHA-256 是最终判据。
+## 7. `remove` and Cover Restoration
 
-## 8 写侧 I 级（非规范）
+`remove` leverages `HostAdapter::strip`: copies $[0, inject\_offset)$, skips $inject\_size$ bytes, then copies remaining bytes to EOF (`adapters/mod.rs:236-260`). For `chunk`, this strips the entire `[len][prIv][UBE][crc]` chunk, restoring `IEND` and trailing dirty data to their original coordinates.
 
-- **不重编码像素**：结构域写入不改变 IDAT 的 deflate 级别、行滤波器或块内数据，只复制原始字节（`png.rs:177-179`、`:211-212`）；这些细节属于内容域写入（见 [CONTENT-PNG.md](CONTENT-PNG.md) §8），读侧不依赖本域。
-- **块顺序**：`prIv` 固定紧邻最后一个 `IEND` 之前；不插入填充块，不合并/拆分既有块。
-- **CRC 重算**：由于信头与尾标在 `inject` 后才回填，`finalize` 必须重算 CRC，读取起点为 `ube_offset - 4`（块类型），长度为 `4 + ube_total_size`（`png.rs:490-506`；调用点 `engine.rs:1443-1451`）。
-- **重试**：适配器没有信封级重试；写后 `locate` 自检失败即整体失败，不提交半成品（`engine.rs:1454-1472`）。文件落盘的 `rename_with_retry` 与信封无关（`engine.rs:1601`）。
+- If content recompression displaced the chunk, `strip_coordinates_for_location` adjusts $inject\_offset$ for `chunk` / `eof` according to locate results (`engine.rs:2268-2296`); relocated spans remain bounded by $ube\_total\_size \le inject\_size$ and file length (`engine.rs:2828-2902`).
+- The restored file size and SHA-256 are computed and validated against $orig\_host\_size$ and $orig\_host\_sha256$ in the header; discrepancies emit `RestoreMismatch`; if residual envelope signatures are detected, `residual_envelope` is set, indicating reverse-order removal is required (`engine.rs:2299-2360`).
+- Bit-for-bit restoration includes post-IEND dirty tails; original SHA-256 is the final test of correctness.
 
-## 9 已知限制与错误语义
+---
 
-| 情形 | 结果 |
+## 8. Writer-Side Tier I (Non-Normative)
+
+- **No Pixel Re-encoding**: Structural writing never alters IDAT Deflate levels, row filters, or raster data, copying bytes verbatim (`png.rs:177-179`, `:211-212`).
+- **Chunk Placement**: `prIv` is fixed directly preceding the final `IEND`; no padding chunks are inserted, and existing chunks are not merged or split.
+- **CRC Recomputation**: Because headers and trailers are backfilled after `inject`, `finalize` recomputes chunk CRC across offset $ube\_offset - 4$ for length $4 + ube\_total\_size$ (`png.rs:490-506`, `engine.rs:1443-1451`).
+- **Retries**: No envelope-level retries exist in the adapter; post-write `locate` failure aborts the entire transaction (`engine.rs:1454-1472`).
+
+---
+
+## 9. Known Limitations and Error Semantics
+
+| Condition | Outcome |
 | --- | --- |
-| 文件 < 20 B / 签名错误 / 无零长度 IEND | `CorruptedData` / `UnsupportedFormat` / `CorruptedData`（`png.rs:31-35`、`:39-43`、`:85-91`） |
-| 块流中途截断或长度越界 | 扫描停止；若此前已有 IEND 则以其为注入点，否则报“未找到 IEND”（`png.rs:48-83`） |
-| `ube_total_size > 0x7FFFFFFF` 且显式 `chunk` | `UnsupportedFormat`，提示改用 `eof`（`png.rs:168-172`） |
-| 未知策略名 | `UnsupportedFormat`（`png.rs:159-163`） |
-| UBE 流短于声明长度 | `CorruptedData("Envelope stream ended before its declared size")`（`png.rs:196-201`） |
-| 非 PNG 载体调 `locate` | `Ok(None)`，非错误（`png.rs:240-243`） |
-| 块 CRC 损坏 | `verify_structure` 返回 `(false, "CRC32 mismatch for chunk …")`；写入前被引擎拒绝（`png.rs:399-407`；`engine.rs:1028-1035`） |
-| 尾标魔数匹配但 CRC/解析失败 | 报 `CorruptedData`（`envelope.rs:844-858`），不静默当作无信封 |
+| File $< 20\text{ B}$ / Invalid signature / No zero-length `IEND` | `CorruptedData` / `UnsupportedFormat` / `CorruptedData` (`png.rs:31-35`, `:39-43`, `:85-91`) |
+| Truncated chunk stream or out-of-bounds length | Scan halts; uses previously logged `IEND` if available, else reports "IEND not found" (`png.rs:48-83`) |
+| $ube\_total\_size > \text{0x7FFFFFFF}$ under explicit `chunk` | `UnsupportedFormat`, prompting switch to `eof` (`png.rs:168-172`) |
+| Unrecognized strategy name | `UnsupportedFormat` (`png.rs:159-163`) |
+| UBE stream shorter than declared size | `CorruptedData("Envelope stream ended before its declared size")` (`png.rs:196-201`) |
+| Non-PNG carrier passed to `locate` | `Ok(None)` (not an error) (`png.rs:240-243`) |
+| Chunk CRC corrupted in cover | `verify_structure` returns `(false, "CRC32 mismatch...")`; rejected before write (`png.rs:399-407`, `engine.rs:1028-1035`) |
+| Trailer magic matches but CRC fails | Emits `CorruptedData` (`envelope.rs:844-858`), never silently ignored |
 
-其他限制：`locate` 不校验块 CRC，也不认证尾标，只提出候选；安全性由引擎的物理包含、坐标交叉与还原哈希兜底（`STRUCTURE-ENVELOPE.md` §12、`engine.rs:191-207`、`:2867-2912`）。`prIv`/`stEg` 的存在与大小本身可被结构扫描发现：`suspicious_structures` 对 `length >= 136` 的私有块报警（`png.rs:428-473`），`verify_structure` 在详情中报告块名（`png.rs:421-425`）。串接流的注入落在最后一个 `IEND` 前；若调用方期望写入首个流，需自行拆分。
+The presence of `prIv` / `stEg` is detectable via structural audits: `suspicious_structures` flags private chunks with $length \ge 136$ (`png.rs:428-473`).
 
-## 10 自检
+---
 
-- 单元测试（`png.rs:526-583`）：`locate_rejects_a_trailer_that_describes_another_region`（外来尾标必须拒绝）、`locate_accepts_a_trailer_that_describes_its_chunk`（自描述尾标返回块数据偏移与长度）。
-- 回归：`tests/test_regression/review_20261030.rs:233-252` 固定 `chunk` 的 `offset_delta == 8`、`inject_offset == 块数据偏移 − 8`，`eof` 为 0 且等于原文件长度；`tests/test_regression/fixes.rs:947-969` 覆盖内容域重压缩后 `prIv` 位移仍可读；`tests/test_security/stealth.rs:223-228` 构造伪造 `prIv` 块。
-- 字节基线：`scripts/baseline_hash.py:263-314` 的 `structure_pass` 对每个含结构域的 PNG 执行 `write -t <固定载荷> → inspect --json → read → restore`，`--check` 按 `id` 与展平键逐项比较（忽略 `elapsed_ms`/`note`，`scripts/baseline_hash.py:470-524`）。PNG 用例定位方式：`ext == "png"` 的条目读取 `structure.strategy`（应为 `chunk`）、`ube_total_size`、`strategy_capacities`、`payload_sha256`、`restored_equals_original`；样例见 `temp/baseline/baseline.json:757-777`（`stego_size 87,105 = 86,854 + 239 + 12`）。
+## 10. Self-Verification
+
+- Unit tests (`png.rs:526-583`): `locate_rejects_a_trailer_that_describes_another_region`, `locate_accepts_a_trailer_that_describes_its_chunk`.
+- Regression: `tests/test_regression/review_20261030.rs:233-252` validates `chunk` with $offset\_delta == 8$ and $inject\_offset == \text{chunk\_data\_offset} - 8$; `tests/test_regression/fixes.rs:947-969` validates readability after IDAT recompression displacement; `tests/test_security/stealth.rs:223-228` tests forged `prIv` rejection.
+- Baseline: `scripts/baseline_hash.py:263-314` validates PNG structural writing: `write -t <payload> → inspect --json → read → restore`.
 
 ```bash
 cargo test --all-features --lib structure::adapters::png

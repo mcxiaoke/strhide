@@ -1,165 +1,176 @@
-# CAPACITY — 容量公式与限额规范
+# CAPACITY — Capacity Formulas and Operational Limits Specification
 
-**状态**：规范性（normative）。本文汇总内容域与结构域的容量口径、工作集预算和硬限额。
-**适用范围**：`probe`/`inspect` 上报的容量、`embed`/`write` 的容量门、`PayloadTooLarge` 判定。
-**导航**：[规范总览](./README.md) · [内容域信封](./CONTENT-ENVELOPE.md) · [结构域信封](./STRUCTURE-ENVELOPE.md) · [确定性数学](./DETMATH.md)
+**Status**: Normative. This document specifies capacity metrics, working set budgets, and hard limits across both content and structural domains in `strhide`.  
+**Scope**: Capacities reported by `probe` / `inspect`, capacity admission gates in `embed` / `write`, and `PayloadTooLarge` error criteria.  
+**Navigation**: [Specification Overview](./README.md) · [Content Domain Envelope](./CONTENT-ENVELOPE.md) · [Structural Domain Envelope](./STRUCTURE-ENVELOPE.md) · [Deterministic Math](./DETMATH.md).
 
-分级：容量公式与结构开销为 **F**；实现预算门为 **F**（probe 与 embed 必须同口径）；纯报告型适配器上限为 **I**；长视频估算精度为 **I**。
+Tiers: Capacity formulas and structural overheads are **Tier F**; working set budget gates are **Tier F** (`probe` and `embed` MUST share the exact same evaluation metrics); pure reporting-level adapter maximums are **Tier I**; long-video estimation accuracy is **Tier I**.
 
-## 1. 内容域统一公式
+---
+
+## 1. Unified Content Domain Formula
 
 ```text
 header_slots = base_slots + ext_slots
-body_slots   = total_slots - header_slots          (不足则 0)
-message_bits = floor(body_slots / u) - (h - 1)     (STC；见 coding/stc.rs:390-392)
+body_slots   = total_slots - header_slots          (0 if total_slots < header_slots)
+message_bits = floor(body_slots / u) - (h - 1)     (STC; see coding/stc.rs:390-392)
 max_payload  = floor(message_bits / 8) - 22        (BODY_OVERHEAD)
 ```
 
-- `BODY_OVERHEAD = 22 = 4 字节长度 + 1 flags + 1 最小微头 + 16 AEAD tag`（`rust/src/stego/envelope.rs:90-97`）。
-- 26 位 `body_len` 上限 `HEADER_LEN_MAX = 67,108,863`（`rust/src/stego/header.rs:16-20`）。
-- 明文上限 `MAX_PLAINTEXT_LEN = HEADER_LEN_MAX - 22 = 67,108,841`（`rust/src/stego/envelope.rs:99-102`）。
-- 所有 `probe` 报告值都是**原始载荷字节**，不含文件微头。引擎内部先按 `22 B` 计价；公共入口 `probe`/`embed` 随后经 `filename_safe_capacity` 再减 `MAX_FILENAME_OVERHEAD = 1 + 255 = 256`，使上报值对“最长文件名”的文件载荷也安全（`rust/src/stego/mod.rs:276-290`、`:503`、`:267`；`rust/src/stego/io.rs:102-106`）。
-- 因此同一载体有两个数：引擎内 `max_raw_payload_bytes`（减 22）与公共 API 报告值（再减 256）。规范要求**同一入口族**内 `probe` 与 `embed` 使用相同口径，不得混用。
+- `BODY_OVERHEAD = 22 = 4 bytes length + 1 flags + 1 minimum micro-header + 16 AEAD tag` (`rust/src/stego/envelope.rs:90-97`).
+- 26-bit `body_len` maximum: `HEADER_LEN_MAX = 67,108,863` (`rust/src/stego/header.rs:16-20`).
+- Plaintext upper bound: `MAX_PLAINTEXT_LEN = HEADER_LEN_MAX - 22 = 67,108,841` (`rust/src/stego/envelope.rs:99-102`).
+- All `probe` reported values represent **raw payload bytes**, excluding the file micro-header. Internally, engines debit `22 B`; public entry points `probe` / `embed` subsequently deduct `MAX_FILENAME_OVERHEAD = 1 + 255 = 256` via `filename_safe_capacity`, ensuring reported capacity remains safe even for payloads with the maximum possible filename length (`rust/src/stego/mod.rs:276-290`, `:503`, `:267`; `rust/src/stego/io.rs:102-106`).
+- Consequently, a given carrier has two distinct metrics: engine-internal `max_raw_payload_bytes` (deducts 22) and the public API reported capacity (deducts an additional 256). The specification mandates that within the **same API entry point family**, `probe` and `embed` MUST use identical metrics and MUST NOT be mixed.
 
-**同口径要求**：`probe` 与 `embed` 必须复用同一函数、同一 `ext_len`、同一 `stc_h/u`、同一工作集预算门、同一 `filename_safe_capacity` 后处理。否则上报值会被写入端拒绝。
+**Uniform Evaluation Requirement**: `probe` and `embed` MUST reuse the identical calculation function, identical `ext_len`, identical `stc_h / u`, identical working set budget gate, and identical `filename_safe_capacity` post-processing. Otherwise, capacities reported by `probe` will be rejected at embed time.
 
-## 2. 逐载体（内容域）
+---
+
+## 2. Carrier-Specific Rules (Content Domain)
 
 ### 2.1 PNG
-- `total_slots`：按代价模型候选集与 `class_rule = 1` 过滤后的可写像素槽。先试绿色单通道池；载荷放不下再试 RGB 三通道池（Alpha 永不触碰）。见 `rust/src/stego/png/engine.rs:1370-1377`、`:1613-1618`、`:2569-2573`。
-- `base_slots = 512`（64 字节基础头，1 slot = 1 bit）；`ext_slots = 8 * ext_len`（`rust/src/stego/header.rs:153-156`、`rust/src/stego/png/engine.rs:1197`、`:1283`）。
-- `h/u`：STC `h ∈ 4..=10`、空间 `u ∈ 1..=3`（`rust/src/stego/coding/stc.rs:78-91`）；默认 `h = 8`，`Auto` 按槽/比特比选 `u`；Hamming 固定 `k = 3`。
-- 最大像素数 `MAX_PNG_PIXELS = 64 * 1024 * 1024`（`rust/src/stego/png/engine.rs:506`）。
-- `max_payload` 由二分搜索 `body_payload_fits` 得到，直接按真实 codec/`u` 计价（`rust/src/stego/png/engine.rs:2472-2513`）。
+- `total_slots`: Modifiable pixel slots satisfying cost model candidate selection and `class_rule = 1` filtering. Evaluates green channel single-channel pool first; if payload exceeds capacity, falls back to RGB triple-channel pool (Alpha channel is never touched). See `rust/src/stego/png/engine.rs:1370-1377`, `:1613-1618`, `:2569-2573`.
+- `base_slots = 512` (64-byte base header, 1 slot = 1 bit); `ext_slots = 8 * ext_len` (`rust/src/stego/header.rs:153-156`, `rust/src/stego/png/engine.rs:1197`, `:1283`).
+- `h / u`: STC constraint $h \in [4, 10]$, spatial $u \in [1, 3]$ (`rust/src/stego/coding/stc.rs:78-91`); defaults to $h = 8$, while `Auto` selects $u$ based on slot-to-bit ratio; Hamming coding fixes $k = 3$.
+- Maximum pixel limit: `MAX_PNG_PIXELS = 64 * 1024 * 1024` (`rust/src/stego/png/engine.rs:506`).
+- `max_payload` is obtained via binary search using `body_payload_fits`, debited directly against actual codec / $u$ values (`rust/src/stego/png/engine.rs:2472-2513`).
 
 ### 2.2 JPEG
-- `total_slots = block_count * grid_rule.slots_per_block()`；默认 `GridRule::ALL_AC` 即每块 `k = 1..=63`，共 63 槽（`rust/src/stego/jpeg/engine.rs:1819-1821`、`rust/src/stego/format.rs:53-63`）。
-- `base_slots = 718 = 2 * (44*8 + 8 - 1)`（`rust/src/stego/format.rs:156-159`）；`ext_slots = 4 * (8*ext_len + 8 - 1) = 4*(8*ext_len + 7)`（`rust/src/stego/format.rs:161-168`、默认剖面 `:240-248`）。
-- `h/u`：头部 `sb_h = 8, sb_u = 2`，扩展 `ext_h = 8, ext_u = 4`；同时 `h ∈ 4..=10`、`u ∈ 1..=64`（`rust/src/stego/format.rs:181-191`）。
-- 若 Huffman 表过度优化（`has_incomplete_table`），`u = 3` 的 grouped 上限替代几何上限（`rust/src/stego/jpeg/engine.rs:1837-1854`）。
-- `max_payload = max_bits/8 - 22`（`rust/src/stego/jpeg/engine.rs:1837-1856`）。
+- `total_slots = block_count * grid_rule.slots_per_block()`; defaults to `GridRule::ALL_AC`, i.e., $k = 1 \dots 63$ per block, yielding 63 slots per block (`rust/src/stego/jpeg/engine.rs:1819-1821`, `rust/src/stego/format.rs:53-63`).
+- `base_slots = 718 = 2 * (44 * 8 + 8 - 1)` (`rust/src/stego/format.rs:156-159`); `ext_slots = 4 * (8 * ext_len + 8 - 1) = 4 * (8 * ext_len + 7)` (`rust/src/stego/format.rs:161-168`, default profile `:240-248`).
+- `h / u`: Base header uses $sb\_h = 8, sb\_u = 2$; extension uses $ext\_h = 8, ext\_u = 4$; body allows $h \in [4, 10], u \in [1, 64]$ (`rust/src/stego/format.rs:181-191`).
+- If Huffman tables are over-optimized (`has_incomplete_table`), the grouped upper bound at $u = 3$ replaces geometric bounds (`rust/src/stego/jpeg/engine.rs:1837-1854`).
+- `max_payload = max_bits / 8 - 22` (`rust/src/stego/jpeg/engine.rs:1837-1856`).
 
 ### 2.3 WAV
-- `total_slots = data_len / bytes_per_sample`，即 `data` chunk 内全部 PCM 采样分量（`rust/src/stego/audio/wav.rs:59-63`、`:240-243`）。
-- `base_slots = 512`；`ext_slots = 8 * ext_len`（`rust/src/stego/audio/core.rs:568`、`:711`）。
-- `h = 8`（`DEFAULT_STC_H`，`rust/src/stego/coding/stc.rs:78`）；`u >= 1`，`Auto` 选 `u ∈ 1..=3`。
-- `max_payload` 由 `payload_bytes_from_slots` 闭式反算，且被 768 MiB 工作集上限截断（`rust/src/stego/audio/core.rs:349-373`、`:388-402`）。
+- `total_slots = data_len / bytes_per_sample`, representing all PCM sample components inside the `data` chunk (`rust/src/stego/audio/wav.rs:59-63`, `:240-243`).
+- `base_slots = 512`; `ext_slots = 8 * ext_len` (`rust/src/stego/audio/core.rs:568`, `:711`).
+- $h = 8$ (`DEFAULT_STC_H`, `rust/src/stego/coding/stc.rs:78`); $u \ge 1$, `Auto` selects $u \in [1, 3]$.
+- `max_payload` is calculated analytically via closed-form `payload_bytes_from_slots`, bounded by the 768 MiB working set limit (`rust/src/stego/audio/core.rs:349-373`, `:388-402`).
 
 ### 2.4 FLAC
-- `total_slots = total_usable + 512`：`total_usable` 是逐帧解码后统计的**可移动残差槽**，不是全部采样（`rust/src/stego/audio/flac/mod.rs:886-892`、`:1026-1028`）。
-- body 只扣 `512`；扩展的 `8 * ext_len` 占 subframe tail，不占残差池（`rust/src/stego/audio/core.rs:1023-1026`）；`h = 8`，`min_group = 3`，即 `u >= 3`（`rust/src/stego/audio/flac/mod.rs:894-896`）。
-- 容量报告与写入共用 `capacity_info`（`rust/src/stego/audio/core.rs:388-451`）。
+- `total_slots = total_usable + 512`: `total_usable` represents **movable residual slots** tallied after frame-by-frame decoding, not total samples (`rust/src/stego/audio/flac/mod.rs:886-892`, `:1026-1028`).
+- Body debits only `512`; extension bytes ($8 \times \text{ext\_len}$) occupy subframe tails without consuming residual pool capacity (`rust/src/stego/audio/core.rs:1023-1026`); $h = 8$, `min_group = 3`, meaning $u \ge 3$ (`rust/src/stego/audio/flac/mod.rs:894-896`).
+- Capacity reporting and embedding share identical `capacity_info` logic (`rust/src/stego/audio/core.rs:388-451`).
 
 ### 2.5 HEVC
-- `total_slots`：选定 slice 内 CABAC 可吸收 bin 的总数（`rust/src/stego/hevc/engine.rs:818`、`:856`）；精确模式由 `scan_hevc_slot_count` 全量扫描（`:522-523`）。
-- `base_slots = 524 = 2*(32*8 + 7 - 1)`（`rust/src/stego/hevc/engine.rs:89-94`）；`ext_slots = 2*(8*ext_len + 6)`，`ext_len = 0` 时为 0（`:130-142`、`:316`、`:427`）。
-- `h = 7, u = 2` 固定（`rust/src/stego/hevc/engine.rs:130-134`）；扩展长度上限 64 字节（`:123-124`）。
-- `max_payload` 使用 `hevc_max_raw_payload`，嵌入端同一函数（`rust/src/stego/hevc/engine.rs:470-500`、`:860`）。
+- `total_slots`: Total count of CABAC-absorbable bins within selected slices (`rust/src/stego/hevc/engine.rs:818`, `:856`); exact mode scans comprehensively via `scan_hevc_slot_count` (`:522-523`).
+- `base_slots = 524 = 2 * (32 * 8 + 7 - 1)` (`rust/src/stego/hevc/engine.rs:89-94`); `ext_slots = 2 * (8 * ext_len + 6)`, or 0 when $\text{ext\_len} = 0$ (`:130-142`, `:316`, `:427`).
+- $h = 7, u = 2$ fixed (`rust/src/stego/hevc/engine.rs:130-134`); extension length maximum is 64 bytes (`:123-124`).
+- `max_payload` uses `hevc_max_raw_payload`, identical across probe and embed (`rust/src/stego/hevc/engine.rs:470-500`, `:860`).
 
-### 2.6 工作内存预算（容量门的一部分）
+### 2.6 Working Memory Budgets (Capacity Gate Requirement)
 
-| 载体 | 预算 | 计价 |
+| Carrier | Budget | Sizing Formula |
 |---|---|---|
-| PNG | 8 GiB | `64 MiB + 61 B/像素`，每 body slot 再加 `24 B`（STC 另加 backtrack bitmap），`rust/src/stego/png/engine.rs:516-534`、`:558-560` |
-| JPEG | 8 GiB | 基础字节 + 每槽 `ceil(2^min(h,10)/64)*8 B`，`rust/src/stego/jpeg/engine.rs:100`、`:196-201`、`:1833` |
-| WAV/FLAC | 768 MiB | `n * (ceil(2^((h-1)+(u>1))/64)*8 + 1 + 1 + 1 + 8)`，`rust/src/stego/audio/core.rs:69`、`:337-342`、`:371-373` |
-| HEVC | 无独立预算 | 由 CABAC 槽数与分带策略门限定，`rust/src/stego/hevc/engine.rs:895-898` |
+| PNG | 8 GiB | `64 MiB + 61 B / pixel`, plus `24 B` per body slot (STC adds backtrack bitmap), `rust/src/stego/png/engine.rs:516-534`, `:558-560` |
+| JPEG | 8 GiB | Base bytes + $\lceil 2^{\min(h, 10)} / 64 \rceil \times 8 \text{ B}$ per slot, `rust/src/stego/jpeg/engine.rs:100`, `:196-201`, `:1833` |
+| WAV / FLAC | 768 MiB | $n \times (\lceil 2^{(h-1) + (u > 1)} / 64 \rceil \times 8 + 1 + 1 + 1 + 8)$, `rust/src/stego/audio/core.rs:69`, `:337-342`, `:371-373` |
+| HEVC | No standalone budget | Gated by CABAC slot counts and banding strategy bounds, `rust/src/stego/hevc/engine.rs:895-898` |
 
-超预算一律按容量不足拒绝（PNG `PayloadTooLarge`，`rust/src/stego/png/engine.rs:536-549`；JPEG `PayloadTooLarge`，`rust/src/stego/jpeg/engine.rs:164-190`）。
+Exceeding budget MUST be rejected as insufficient capacity (PNG: `PayloadTooLarge`, `rust/src/stego/png/engine.rs:536-549`; JPEG: `PayloadTooLarge`, `rust/src/stego/jpeg/engine.rs:164-190`).
 
-### 2.7 长视频 HEVC 的 20% 估算
-- `exact = false` 且载体为 MP4 容器：可选择一个 slice 数 `<= 150` 时**全量扫描**（0% 估算误差）；否则 `sample_limit = round(selectable * 0.20).clamp(150, 1000)`，按参考片/非参考片两个 band 各用自己的“采样字节→槽”密度外推到总字节（`rust/src/stego/hevc/engine.rs:727-735`、`:803-823`）。
-- 这是“抽取 20% 的 slice 样本”而不是“前 20% 时间窗口”；`exact=true` / `--exact` 才全量扫描（`:681-685`）。
-- 估算是 **I**：只影响上报值，不影响 `embed` 的精确门；`embed` 始终按实际槽数。
+### 2.7 20% Estimation for Long HEVC Videos
+- When `exact = false` and carrier is an MP4 container: if selectable slice count $\le 150$, a **full scan** is performed (0% estimation error); otherwise $\text{sample\_limit} = \text{round}(\text{selectable} \times 0.20).\text{clamp}(150, 1000)$, extrapolating total slots across reference and non-reference bands according to their respective sampled byte-to-slot densities (`rust/src/stego/hevc/engine.rs:727-735`, `:803-823`).
+- This samples a 20% slice subset, not the first 20% of the timeline window; setting `exact = true` / `--exact` forces a full scan (`:681-685`).
+- Estimation belongs to **Tier I**: it affects reported probe capacity only, without altering the exact gate in `embed`, which always enforces true slot counts.
 
-## 3. 结构域
+---
 
-### 3.1 最小信封与 UBE 组成
+## 3. Structural Domain
+
+### 3.1 Minimum Envelope and UBE Composition
 
 ```text
 UBE = header(112) + hint_len + meta_len + trailer(24)        (engine.rs:1231-1240)
-meta_len   = 紧凑元数据密文 + AEAD tag(16)
-紧凑元数据 = version(1) + name_len(2) + name + varint(raw_size) + digest(32) + varint(created_at)
-payload    = framed_len(n, chunk_size) = n + chunks*20, chunks = ceil(n/chunk_size) >= 1
+meta_len   = compact_meta_ciphertext + AEAD tag(16)
+compact_meta = version(1) + name_len(2) + name + varint(raw_size) + digest(32) + varint(created_at)
+payload    = framed_len(n, chunk_size) = n + chunks * 20, chunks = ceil(n / chunk_size) >= 1
 ```
 
-- 最小信封由 `min_ube_len(payload_len)` 给出：`112 + meta_len + framed_len(payload_len, CHUNK_SIZE) + 24`。
-  当前时间戳下次方 7 位 varint 为 5 字节、空文件名时 `meta_len = 1+2+32+varint(payload_len)+5+16`。
-  因此 `min_ube_len(0) = 213`、`min_ube_len(1) = 214`（`rust/src/structure/envelope.rs:102-132`）。旧文 `MIN_UBE_PLAIN=178 / MIN_UBE_ENCRYPTED=214` 中前者不对，且代码中没有这两个常量。
-- `41 B` 的紧凑 meta = `1 + 2 + 32 + 1(byte 的 raw_size varint) + 5(当前秒级 created_at varint)`；`hint` 上限 1024，`meta` 上限 256 KiB。
-- 每块开销固定 **20 B**（4 字节长度 + 16 字节 tag，`rust/src/core/crypto.rs:61-64`）；默认块 `CHUNK_SIZE = 2 MiB`，最大 `64 MiB`（`:96`、`:101`）。
+- Minimum envelope size is given by `min_ube_len(payload_len)`: `112 + meta_len + framed_len(payload_len, CHUNK_SIZE) + 24`. Under current timestamps where the 7-bit varint takes 5 bytes, with an empty filename: `meta_len = 1 + 2 + 32 + varint(payload_len) + 5 + 16`. Hence `min_ube_len(0) = 213`, `min_ube_len(1) = 214` (`rust/src/structure/envelope.rs:102-132`). Legacy claims of `MIN_UBE_PLAIN=178 / MIN_UBE_ENCRYPTED=214` are inaccurate; these constants do not exist in code.
+- 41B compact meta = $1 + 2 + 32 + 1 \text{ (1-byte varint for raw\_size)} + 5 \text{ (5-byte second-precision timestamp varint)}$; `hint` is capped at 1024 bytes; `meta` is capped at 256 KiB.
+- Per-chunk framing overhead is strictly **20 B** (4B length prefix + 16B tag, `rust/src/core/crypto.rs:61-64`); default `CHUNK_SIZE = 2 MiB`, maximum `64 MiB` (`:96`, `:101`).
 
-### 3.2 各适配器容量口径
+### 3.2 Capacity Metrics by Adapter
 
-| 格式 | 口径（以 `strategy_capacities` 为准） | 出处 |
+| Format | Capacity Metric (governed by `strategy_capacities`) | Reference |
 |---|---|---|
-| 通用 EOF | 无上限（文件增长） | `rust/src/structure/adapters/eof.rs:25-33` |
-| PNG | `chunk` 上限 `0x7FFFFFFF`；超过则 `eof` | `rust/src/structure/adapters/png.rs:119-129` |
-| JPEG | `app_segment` 的名义上限 `JPEG_MAX_TOTAL_CAPACITY=64 MiB`，但实际受 `MAX_JPEG_HEADER_SCAN=16 MiB` 与 SOS 位移约束：`p + 4*ceil(p/65533) ≤ 16 MiB − sos`；SOS 扫描失败同样退 `eof` | `rust/src/structure/adapters/jpeg.rs:16-18`、`:198-216`、`:252-269` |
-| WAV | 私有 `SHRD` RIFF chunk，受 `R + 8 + N + (N&1) ≤ u32::MAX` 与声明边界约束 | `rust/src/structure/adapters/wav.rs:25-38`、`riff.rs:126-133`、`:468-473` |
-| WebP | 仅扩展格式（VP8X）可用 `SHRD` chunk，否则 `eof` | `rust/src/structure/adapters/webp.rs:25-50` |
-| MKV | `ebml_void` 或 `eof`，报告"无上限"，实际受 VINT 上限与引擎钳制 | `rust/src/structure/adapters/mkv.rs:43-64` |
-| MP4 | `box_uuid` / `eof`，报告"无上限"，实际受引擎钳制 | `rust/src/structure/adapters/mp4.rs:66-72`、`isobmff.rs:415-435` |
-| HEIF | 优先 `item_hidden`（要求 `meta`/`iinf`/`iloc` 可解析），否则 `free_box`/`box_uuid`/`eof`；容量口径 `~4 GiB` 后由引擎钳到 64 MiB–1 GiB | `rust/src/structure/adapters/heif.rs:57-72`、`isobmff.rs:437-472` |
-| ZIP | `pre_cd_inject` ≤ `0xFFFFFFFE − max(cd_offset, eocd+16)`；`cd_offset==0`、ZIP64 locator、32 位溢出、EOCD 缺失均退 `eof` | `rust/src/structure/adapters/zip.rs:145-171`、`:173-235` |
-| PE | 取 codebits 与 slack 的较小者：`min(bits/8 − 14, longest_zero_run − 14)` | `rust/src/structure/adapters/pe.rs:208-283`、`:254-258` |
-| PDF | `incremental` 仅当 trailer/xref 可解析且未加密、对象号 `< 0x7FFF_FFFF`；经典 xref 上限 10 GB、XRef 流上限 4 GB；否则退 `eof` | `rust/src/structure/adapters/pdf.rs:50-96`、`:795-801`、`:839-845` |
+| Generic EOF | Unbounded (file expands) | `rust/src/structure/adapters/eof.rs:25-33` |
+| PNG | `chunk` maximum `0x7FFFFFFF`; if exceeded, falls back to `eof` | `rust/src/structure/adapters/png.rs:119-129` |
+| JPEG | Nominal `app_segment` bound `JPEG_MAX_TOTAL_CAPACITY = 64 MiB`, further bounded by `MAX_JPEG_HEADER_SCAN = 16 MiB` and SOS displacement: $p + 4 \times \lceil p / 65533 \rceil \le 16 \text{ MiB} - \text{sos}$; SOS scan failure falls back to `eof` | `rust/src/structure/adapters/jpeg.rs:16-18`, `:198-216`, `:252-269` |
+| WAV | Private `SHRD` RIFF chunk, bounded by $R + 8 + N + (N \& 1) \le \text{u32::MAX}$ and declared RIFF boundaries | `rust/src/structure/adapters/wav.rs:25-38`, `riff.rs:126-133`, `:468-473` |
+| WebP | `SHRD` chunk permitted only in extended format (VP8X); otherwise falls back to `eof` | `rust/src/structure/adapters/webp.rs:25-50` |
+| MKV | `ebml_void` or `eof`; reports "unbounded", but practically bounded by VINT limit and engine clamp | `rust/src/structure/adapters/mkv.rs:43-64` |
+| MP4 | `box_uuid` / `eof`; reports "unbounded", practically bounded by engine clamp | `rust/src/structure/adapters/mp4.rs:66-72`, `isobmff.rs:415-435` |
+| HEIF | Prefers `item_hidden` (requires parsable `meta` / `iinf` / `iloc`); otherwise `free_box` / `box_uuid` / `eof`; capacity metric $\sim 4 \text{ GiB}$, subsequently clamped by engine to 64 MiB–1 GiB | `rust/src/structure/adapters/heif.rs:57-72`, `isobmff.rs:437-472` |
+| ZIP | `pre_cd_inject` $\le \text{0xFFFFFFFE} - \max(\text{cd\_offset}, \text{eocd} + 16)$; `cd_offset == 0`, ZIP64 locator, 32-bit overflow, or missing EOCD fall back to `eof` | `rust/src/structure/adapters/zip.rs:145-171`, `:173-235` |
+| PE | Minimum of codebits and slack: $\min(\text{bits}/8 - 14, \text{longest\_zero\_run} - 14)$ | `rust/src/structure/adapters/pe.rs:208-283`, `:254-258` |
+| PDF | `incremental` allowed only if trailer/xref are parsable, unencrypted, and object ID $< \text{0x7FFF\_FFFF}$; classic xref capped at 10 GB, XRef stream capped at 4 GB; otherwise falls back to `eof` | `rust/src/structure/adapters/pdf.rs:50-96`, `:795-801`, `:839-845` |
 
-所有适配器上限最终被引擎钳到 `structure_payload_limit(host_len)`（`rust/src/structure/engine.rs:1938-1975`）。
+All adapter limits are clamped by the engine to `structure_payload_limit(host_len)` (`rust/src/structure/engine.rs:1938-1975`).
 
-### 3.3 自动策略选择的影响
-`auto` 由各适配器的 `choose_auto_strategy(reader, exact_ube_size)` 一次性决定；适配器内部可因探测结果改选 `eof`，但引擎**不会**在注入失败后再换策略重试（`rust/src/structure/engine.rs:1242-1246`）。因此：
+### 3.3 Implications of Auto Strategy Selection
 
-- PNG：`ube > 0x7FFFFFFF` 才退 `eof`；JPEG：`ube > 64 MiB`、`ube > app_segment_payload_capacity(sos)` 或 SOS 扫描失败退 `eof`。
-- PDF：对象头长度 `> MAX_OFFSET_DELTA(128)` 退 `eof`；这不是容量上限，而是信封头无法记录的位移。
-- HEIF：仅当 `ube <= u32::MAX-8` 且 `isobmff_can_item_hidden` 才选 `item_hidden`，否则 `box_uuid`（`heif.rs:57-68`）。
-- PE：优先级 `pe_slack → pe_overlay`（`pe.rs:176-210`）；`pe_codebits` 是显式策略（`-s pe_codebits`），`auto` 不会选它。
-- ZIP：`cd_offset==0`、ZIP64 locator、`patch_limit + ube >= 0xFFFFFFFF`、EOCD 缺失均退 `eof`。
-- WAV/WebP：RIFF 声明边界必须等于物理长度且 4 GiB 头寸足够，否则 `eof`（`wav.rs:25-35`、`webp.rs:25-35`）。
-- MP4 恒选 `box_uuid`、MKV 恒选 `ebml_void`：这两个适配器的 `auto` **没有** `eof` 回退（`mp4.rs:66-68`、`mkv.rs:43-45`）。
+`auto` is determined once via `choose_auto_strategy(reader, exact_ube_size)` in each adapter; while adapters may internally switch to `eof` based on probing, the engine **will not** retry alternative strategies if injection fails (`rust/src/structure/engine.rs:1242-1246`). Therefore:
 
-## 4. 限额总表
+- PNG: Falls back to `eof` only if `ube > 0x7FFFFFFF`; JPEG: falls back to `eof` if `ube > 64 MiB`, `ube > app_segment_payload_capacity(sos)`, or SOS scan fails.
+- PDF: Falls back to `eof` if object header length exceeds `MAX_OFFSET_DELTA (128)`; this is an offset delta limitation of the envelope header, not a carrier capacity limit.
+- HEIF: Selects `item_hidden` only if `ube <= u32::MAX - 8` and `isobmff_can_item_hidden` holds; otherwise uses `box_uuid` (`heif.rs:57-68`).
+- PE: Precedence is `pe_slack → pe_overlay` (`pe.rs:176-210`); `pe_codebits` requires explicit selection (`-s pe_codebits`) and is never picked by `auto`.
+- ZIP: `cd_offset == 0`, ZIP64 locator presence, $\text{patch\_limit} + \text{ube} \ge \text{0xFFFFFFFF}$, or missing EOCD all trigger fallback to `eof`.
+- WAV / WebP: Declared RIFF boundary must equal physical length and leave sufficient headroom under 4 GiB; otherwise falls back to `eof` (`wav.rs:25-35`, `webp.rs:25-35`).
+- MP4 always chooses `box_uuid`; MKV always chooses `ebml_void`: neither adapter features `eof` fallback in `auto` (`mp4.rs:66-68`, `mkv.rs:43-45`).
 
-| 限额 | 值 | 出处 |
+---
+
+## 4. Master Limits Table
+
+| Limit Parameter | Value | Reference |
 |---|---|---|
-| `HEADER_LEN_MAX` | `67,108,863`（26 位） | `rust/src/stego/header.rs:16-20` |
+| `HEADER_LEN_MAX` | `67,108,863` (26-bit) | `rust/src/stego/header.rs:16-20` |
 | `BODY_OVERHEAD` | `22` | `rust/src/stego/envelope.rs:97` |
 | `MAX_PLAINTEXT_LEN` | `67,108,841` | `rust/src/stego/envelope.rs:101-102` |
-| `MAX_EXT_BYTES`（PNG/JPEG/WAV/FLAC） | `255` | `rust/src/stego/header.rs:159` |
-| HEVC `ext_len` | `<= 64` | `rust/src/stego/hevc/engine.rs:124` |
-| HEVC MP4 `moov` box | `<= 32 MiB`（超出 `UnsupportedFormat`） | `rust/src/stego/hevc/engine.rs:2627-2631` |
-| PNG `IEND` 后尾随数据 | `<= 16 MiB`（超出 `CorruptedData`） | `rust/src/stego/png/engine.rs:334-341` |
+| `MAX_EXT_BYTES` (PNG / JPEG / WAV / FLAC) | `255` | `rust/src/stego/header.rs:159` |
+| HEVC `ext_len` | $\le 64$ | `rust/src/stego/hevc/engine.rs:124` |
+| HEVC MP4 `moov` box | $\le 32 \text{ MiB}$ (exceeding returns `UnsupportedFormat`) | `rust/src/stego/hevc/engine.rs:2627-2631` |
+| PNG trailing data after `IEND` | $\le 16 \text{ MiB}$ (exceeding returns `CorruptedData`) | `rust/src/stego/png/engine.rs:334-341` |
 | `MAX_PNG_PIXELS` | `67,108,864` | `rust/src/stego/png/engine.rs:506` |
-| PNG/JPEG 工作集 | `8 GiB` | `rust/src/stego/png/engine.rs:516`、`rust/src/stego/jpeg/engine.rs:100` |
-| 音频工作集 | `768 MiB` | `rust/src/stego/audio/core.rs:69` |
-| 结构头 / 尾 | `112 B` / `24 B` | `rust/src/structure/envelope.rs:83`、`:89` |
+| PNG / JPEG Working Set | `8 GiB` | `rust/src/stego/png/engine.rs:516`, `rust/src/stego/jpeg/engine.rs:100` |
+| Audio Working Set | `768 MiB` | `rust/src/stego/audio/core.rs:69` |
+| Structural Header / Trailer | `112 B` / `24 B` | `rust/src/structure/envelope.rs:83`, `:89` |
 | `MAX_HINT_LEN` | `1024` | `rust/src/structure/envelope.rs:90` |
-| `MAX_META_LEN` | `256 KiB = 262,144` | `rust/src/structure/envelope.rs:100` |
+| `MAX_META_LEN` | $256 \text{ KiB} = 262,144$ | `rust/src/structure/envelope.rs:100` |
 | `MAX_OFFSET_DELTA` | `128` | `rust/src/structure/envelope.rs:74-88` |
-| `CHUNK_OVERHEAD` | `20 B/块` | `rust/src/core/crypto.rs:61-64` |
-| `CHUNK_SIZE` / `MAX_CHUNK_SIZE` | `2 MiB` / `64 MiB` | `rust/src/core/crypto.rs:96`、`:101` |
+| `CHUNK_OVERHEAD` | `20 B / chunk` | `rust/src/core/crypto.rs:61-64` |
+| `CHUNK_SIZE` / `MAX_CHUNK_SIZE` | `2 MiB` / `64 MiB` | `rust/src/core/crypto.rs:96`, `:101` |
 | `MAX_VERIFY_PAYLOAD_SIZE` | `1 GiB` | `rust/src/core/crypto.rs:786` |
-| 结构载荷上限 | `clamp(256 * host_len, 64 MiB, 1 GiB)` | `rust/src/structure/engine.rs:1938-1943` |
-| 内容文件名 | `255 B` | `rust/src/stego/envelope.rs:78` |
+| Structural Payload Clamp | $\text{clamp}(256 \times \text{host\_len}, 64 \text{ MiB}, 1 \text{ GiB})$ | `rust/src/structure/engine.rs:1938-1943` |
+| Content Domain Filename | `255 B` | `rust/src/stego/envelope.rs:78` |
 
-## 5. 错误语义
+---
 
-- **容量不足必须返回 `PayloadTooLarge`，而不是 `UnsupportedFormat`。** `UnsupportedFormat` 只用于“载体不是本引擎认识的格式/结构”，不得用于“载体太小”。
-- PNG：槽不足、预算超限均为 `PayloadTooLarge`（`rust/src/stego/png/engine.rs:544`、`:1582`、`:1596`、`:1620`、`:1629`）。
-- JPEG：网格小于头、预算超限均为 `PayloadTooLarge`（`rust/src/stego/jpeg/engine.rs:1825`、`:164-190`）。
-- HEVC：槽不足为 `PayloadTooLarge`（`rust/src/stego/hevc/engine.rs:1295`）。
-- 结构域：写入前按 `structure_payload_limit` 拒绝，返回 `PayloadTooLarge`（`rust/src/structure/engine.rs:1088-1093`）。
-- **实现偏差**：WAV/FLAC 的槽不足目前返回 `General`（`rust/src/stego/audio/core.rs:753-769`），与上述规范性要求不符；调用方不应把 `UnsupportedFormat` 当作容量不足的替代信号。
+## 5. Error Semantics
 
-## 6. 稳定性分级
+- **Insufficient carrier capacity MUST return `PayloadTooLarge`, never `UnsupportedFormat`.** `UnsupportedFormat` is reserved exclusively for "carrier format/structure is unrecognized by the engine", and MUST NOT be returned when a recognized carrier is simply too small.
+- PNG: Slot exhaustion or budget overflow both return `PayloadTooLarge` (`rust/src/stego/png/engine.rs:544`, `:1582`, `:1596`, `:1620`, `:1629`).
+- JPEG: Grid smaller than base header or budget overflow both return `PayloadTooLarge` (`rust/src/stego/jpeg/engine.rs:1825`, `:164-190`).
+- HEVC: Slot exhaustion returns `PayloadTooLarge` (`rust/src/stego/hevc/engine.rs:1295`).
+- Structural Domain: Rejection prior to writing under `structure_payload_limit` returns `PayloadTooLarge` (`rust/src/structure/engine.rs:1088-1093`).
+- **Implementation Deviation**: WAV / FLAC slot exhaustion currently returns `General` (`rust/src/stego/audio/core.rs:753-769`), deviating from normative requirements; callers MUST NOT treat `UnsupportedFormat` as a proxy for capacity exhaustion.
 
-| 内容 | 级别 | 说明 |
+---
+
+## 6. Stability Tiers
+
+| Content | Tier | Justification |
 |---|---|---|
-| §1 统一公式、`BODY_OVERHEAD`、`HEADER_LEN_MAX` | **F** | 改变即改变可写边界与字节布局 |
-| §2 各载体 `total/base/ext` 与 `h/u` | **F** | `probe`/`embed` 必须同口径；改动需重建基线 |
-| §2.6 预算门 | **F** | 影响 `max_raw_payload_bytes` 与 `PayloadTooLarge` 判定 |
-| §2.7 长视频 20% 估算 | **I** | 只影响上报精度，不改变写入 |
-| §3.1 结构头/尾/块开销 | **F** | 已写 UBE 依赖 |
-| §3.2 适配器容量文本 | **I** | 报告型上限；真正门是引擎钳制 |
-| §4 限额数值 | **F** | 解析端按同值拒绝 |
-| §5 错误分类 | **F** | 接口契约 |
+| §1 Unified Formula, `BODY_OVERHEAD`, `HEADER_LEN_MAX` | **F** | Alterations change writable boundaries and byte layouts |
+| §2 Per-carrier `total/base/ext` and `h/u` | **F** | `probe` and `embed` must share exact metrics; changes invalidate baselines |
+| §2.6 Budget Gates | **F** | Directly governs `max_raw_payload_bytes` and `PayloadTooLarge` decisions |
+| §2.7 Long-video 20% Estimation | **I** | Affects reporting accuracy only without changing embedding logic |
+| §3.1 Structural Header/Trailer/Chunk Overhead | **F** | Existing UBE carriers depend on these dimensions |
+| §3.2 Adapter Capacity Text | **I** | Informational reporting ceilings; true gates are enforced by engine clamping |
+| §4 Limits Table Numerical Values | **F** | Parsing engines reject values using matching thresholds |
+| §5 Error Classification | **F** | Contractual API behavior |

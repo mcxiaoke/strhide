@@ -1,28 +1,28 @@
-# DETMATH — 确定性浮点数学规范
+# DETMATH — Deterministic Floating-Point Mathematics Specification
 
-**状态**：规范性。本文定义 `strhide` 中所有**影响字节输出**的浮点初等函数语义。
-**适用范围**：内容域 PNG/JPEG/WAV/FLAC/HEVC 的代价图、代价标定、`epsilon` 量化，以及结构域容量报告。
-**导航**：[规范总览](./README.md) · [内容域信封](./CONTENT-ENVELOPE.md) · [结构域信封](./STRUCTURE-ENVELOPE.md) · [容量规范](./CAPACITY.md)。精度审计结论已并入本文 §5 与 §9，不再单独成文。
-
----
-
-## 1. 规范性声明
-
-凡影响字节输出的浮点运算，其**语义由本文件定义，不由宿主 libm 定义**。不得以“平台 `libm` 一致”作为正确性依据：IEEE-754 只约束 `+ - * /` 与 `sqrt`，超越函数不在其内。审计实测三语言 52,153 条输入中 20 条不一致（18 条 Go NaN 载荷 + 2 条 `cos(±1e15)` 越界）；Go 启用 FMA 后扩大到 2,176/2,397 条（审计 §0、§3、§5）。允许的原语只有 `+ - * /` 与 `to_bits`/`from_bits`。每个函数必须按给定顺序、项数、常数逐字实现；精度声明**不是正确舍入**。
-
-调用点（Rust 参考实现）：
-
-- `rust/src/stego/cost_calibration.rs:68`（`ln_1p`）、`:70`（`exp`）、`:87`（`exp`）、`:99`（`ln_1p`+`exp`）、`:101`（`exp`）、`:102`（`exp`）、`:163`（`exp`）、`:174`（`exp`）、`:216`（`ln`）。
-- `rust/src/stego/spatial_variance.rs:70`、`:86`（`cos`，8×8 DCT 基）；`rust/src/stego/jpeg/cost/precover.rs:61`（`cos`）。
-- `rust/src/stego/header.rs:34`、`rust/src/stego/audio/core.rs:381`（`log2`，`epsilon` 量化）。
-
-上述输出经 `quantize_cost` 截断低 20 位（量子 `2^-32`，`rust/src/stego/cost_calibration.rs:369-379`）后，只以 `f64::to_bits()` 参与排序。本文锁定的正是排序键的每一位。
+**Status**: Normative. This document specifies the exact semantics of all elementary floating-point functions that **affect byte-level output** in `strhide`.  
+**Scope**: Cost maps, cost calibration, and `epsilon` quantization across the content domain (PNG / JPEG / WAV / FLAC / HEVC), as well as structural domain capacity reporting.  
+**Navigation**: [Specification Overview](./README.md) · [Content Domain Envelope](./CONTENT-ENVELOPE.md) · [Structural Domain Envelope](./STRUCTURE-ENVELOPE.md) · [Capacity Specification](./CAPACITY.md). Precision audit conclusions have been merged into §5 and §9 of this document and are no longer maintained separately.
 
 ---
 
-## 2. 常数表（逐字）
+## 1. Normative Declaration
 
-| 常数 | 十进制字面量 | 位模式 |
+For any floating-point operation affecting byte-level output, **semantics are defined by this document, not by the host `libm`**. Conformance cannot rely on "host `libm` consistency": IEEE-754 mandates exact behavior only for `+ - * /` and `sqrt`; transcendental functions are explicitly excluded. Empirical audits across three languages on 52,153 inputs revealed 20 discrepancies (18 Go NaN payload differences + 2 `cos(±1e15)` boundary issues); when Go enabled FMA, divergence expanded to 2,176/2,397 inputs (Audit §0, §3, §5). Permitted primitives are strictly limited to `+ - * /` and `to_bits` / `from_bits`. Every function MUST be implemented verbatim following the specified evaluation order, number of terms, and constants; precision declarations **do not guarantee correct rounding**.
+
+Call sites (Rust reference implementation):
+
+- `rust/src/stego/cost_calibration.rs:68` (`ln_1p`), `:70` (`exp`), `:87` (`exp`), `:99` (`ln_1p` + `exp`), `:101` (`exp`), `:102` (`exp`), `:163` (`exp`), `:174` (`exp`), `:216` (`ln`).
+- `rust/src/stego/spatial_variance.rs:70`, `:86` (`cos`, 8×8 DCT basis); `rust/src/stego/jpeg/cost/precover.rs:61` (`cos`).
+- `rust/src/stego/header.rs:34`, `rust/src/stego/audio/core.rs:381` (`log2`, `epsilon` quantization).
+
+The outputs above, after truncating the lower 20 bits via `quantize_cost` (quantum $2^{-32}$, `rust/src/stego/cost_calibration.rs:369-379`), participate in sorting strictly via `f64::to_bits()`. This document locks down every bit of those sorting keys.
+
+---
+
+## 2. Constant Table (Verbatim)
+
+| Constant | Decimal Literal | Bit Pattern |
 |---|---|---|
 | `LN2_HI` | `6.931_471_803_691_238e-1` | `0x3FE62E42FEE00000` |
 | `LN2_LO` | `1.908_214_929_270_587_7e-10` | `0x3DEA39EF35793C76` |
@@ -35,71 +35,96 @@
 | `EXP_HI` | `709.782_712_893_384` | `0x40862E42FEFA39EF` |
 | `EXP_LO` | `-745.133_219_101_941_1` | `0xC0874910D52D3051` |
 
-`EXP_C[14]`（`1/1!..1/14!`，全部正确舍入）：
-`1.0, 0.5, 1.0/6.0, 1.0/24.0, 1.0/120.0, 1.0/720.0, 1.0/5040.0, 1.0/40320.0, 1.0/362880.0, 1.0/3628800.0, 1.0/39916800.0, 1.0/479001600.0, 1.0/6227020800.0, 1.0/87178291200.0`。
+`EXP_C[14]` ($1/1! \dots 1/14!$, all correctly rounded):  
+`1.0, 0.5, 1.0/6.0, 1.0/24.0, 1.0/120.0, 1.0/720.0, 1.0/5040.0, 1.0/40320.0, 1.0/362880.0, 1.0/3628800.0, 1.0/39916800.0, 1.0/479001600.0, 1.0/6227020800.0, 1.0/87178291200.0`.
 
-`SIN_C[8]`：`-1/6, 1/120, -1/5040, 1/362880, -1/39916800, 1/6227020800, -1/1307674368000, 1/355687428096000`。
-`COS_C[8]`：`-0.5, 1/24, -1/720, 1/40320, -1/3628800, 1/479001600, -1/87178291200, 1/20922789888000`。
-`LN_3 = 1.098_612_288_668_109_8`（`rust/src/stego/cost_calibration.rs:48`）。
+`SIN_C[8]`: `-1/6, 1/120, -1/5040, 1/362880, -1/39916800, 1/6227020800, -1/1307674368000, 1/355687428096000`.  
+`COS_C[8]`: `-0.5, 1/24, -1/720, 1/40320, -1/3628800, 1/479001600, -1/87178291200, 1/20922789888000`.  
+`LN_3 = 1.098_612_288_668_109_8` (`rust/src/stego/cost_calibration.rs:48`).
 
 ---
 
 ## 3. `exp(x)`
 
-参考 `rust/src/stego/detmath.rs:154-176`。① NaN 原样返回（保载荷）；`x > EXP_HI → +inf`，`x < EXP_LO → +0.0`。② `k = round_i32(x * INV_LN2)`；`round_i32` 为半数远离零：`x >= 0` 取 `(x+0.5) as i32`，否则 `(x-0.5) as i32`（`detmath.rs:143-151`），`as i32` 为饱和转换。③ `r = (x - k*LN2_HI) - k*LN2_LO`（严格左结合）。④ Horner：`p = EXP_C[13]`；`i = 12..1` 逐次 `p = EXP_C[i] + r*p`；最后 `p = EXP_C[0] + r*p`。⑤ 返回 `ldexp(1.0 + r*p, k)`；`ldexp` 在 `k > 1023` 时乘 `2^1023` 并减 1023，在 `k < -1022` 时乘 `2^-1022` 并加 1022，最后乘 `from_bits((1023+k)<<52)`（`:105-116`）。
+Reference: `rust/src/stego/detmath.rs:154-176`.  
+1. If NaN, return input NaN verbatim (preserving payload); if $x > \text{EXP\_HI} \to +\infty$; if $x < \text{EXP\_LO} \to +0.0$.  
+2. $k = \text{round\_i32}(x \cdot \text{INV\_LN2})$; `round_i32` rounds half away from zero: if $x \ge 0$, take $(x+0.5) \text{ as i32}$, else $(x-0.5) \text{ as i32}$ (`detmath.rs:143-151`), where `as i32` is saturating conversion.  
+3. $r = (x - k \cdot \text{LN2\_HI}) - k \cdot \text{LN2\_LO}$ (strictly left-associative).  
+4. Horner's method: initialize $p = \text{EXP\_C}[13]$; for $i = 12 \dots 1$ sequentially compute $p = \text{EXP\_C}[i] + r \cdot p$; finally $p = \text{EXP\_C}[0] + r \cdot p$.  
+5. Return $\text{ldexp}(1.0 + r \cdot p, k)$; `ldexp` multiplies by $2^{1023}$ and subtracts 1023 when $k > 1023$, multiplies by $2^{-1022}$ and adds 1022 when $k < -1022$, and finally multiplies by $\text{from\_bits}((1023 + k) \ll 52)$ (`:105-116`).
 
-项数 14，`|r| <= ln2/2`，截断 `r^15/15! ≈ 9.5e-20`。精度：审计语料最大 **1.00 ulp**，密集样本 **1.1098 ulp**；不是正确舍入。
+Term count is 14; $|r| \le \ln(2)/2$; truncation remainder is $r^{15}/15! \approx 9.5 \times 10^{-20}$. Precision: audit corpus maximum **1.00 ulp**, dense sample maximum **1.1098 ulp**; not correctly rounded.
 
 ---
 
 ## 4. `ln(x)`
 
-参考 `detmath.rs:179-210`。① NaN 或 `x < 0` → canonical NaN；`x == 0`（含 `-0.0`）→ `-inf`；`+inf` → `+inf`。② `frexp` 得 `m ∈ [0.5,1)`、`e`；`m *= 2.0; e -= 1`；若 `m > SQRT2` 再 `m *= 0.5; e += 1`。③ `s = (m-1.0)/(m+1.0)`，`z = s*s`。④ `p = 1.0/23.0`；`d = 21.0`，当 `d > 1.0` 依次 `p = 1.0/d + z*p; d -= 2.0`（`d = 21,19,...,3`）。⑤ `p = 1.0 + z*p`；`ln_m = 2.0*s*p`；`ef = e as f64`。⑥ 返回 `ef*LN2_HI + (ef*LN2_LO + ln_m)`（按括号顺序）。
+Reference: `detmath.rs:179-210`.  
+1. If NaN or $x < 0 \to \text{canonical NaN}$; if $x == 0$ (including $-0.0$) $\to -\infty$; if $+\infty \to +\infty$.  
+2. Decompose via `frexp` into $m \in [0.5, 1)$ and $e$; $m \leftarrow m \cdot 2.0; e \leftarrow e - 1$; if $m > \text{SQRT2}$, then $m \leftarrow m \cdot 0.5; e \leftarrow e + 1$.  
+3. $s = (m - 1.0) / (m + 1.0)$, $z = s \cdot s$.  
+4. Initialize $p = 1.0 / 23.0$; set $d = 21.0$; while $d > 1.0$, iteratively update $p = 1.0/d + z \cdot p; d \leftarrow d - 2.0$ (for $d = 21, 19, \dots, 3$).  
+5. $p = 1.0 + z \cdot p$; $\ln\_m = 2.0 \cdot s \cdot p$; $ef = e \text{ as f64}$.  
+6. Return $ef \cdot \text{LN2\_HI} + (ef \cdot \text{LN2\_LO} + \ln\_m)$ (strictly following parenthesized order).
 
-级数实际到 `z^11/23`（注释写 `z^10/21`，差一项），截断约 `1.7e-20`。精度：语料最大 **1.12 ulp**，密集样本 **2.74 ulp**；不是正确舍入。`frexp` 定义见 `detmath.rs:126-141`：指数域 0 且 `x == 0` 返回 `(0.0,0)`，否则乘 `2^54` 递归并减 54；常规数掩码 `0x800FFFFFFFFFFFFF`、注入 `0x3FE0000000000000`、指数 `exp-1022`。
+The series evaluates up to $z^{11}/23$ (source comment says $z^{10}/21$, off by one term), with truncation error $\approx 1.7 \times 10^{-20}$. Precision: corpus maximum **1.12 ulp**, dense sample maximum **2.74 ulp**; not correctly rounded. `frexp` specification is in `detmath.rs:126-141`: exponent field 0 and $x == 0$ returns $(0.0, 0)$, otherwise multiply by $2^{54}$ recursively and subtract 54; normal numbers masked with `0x800FFFFFFFFFFFFF`, injected with `0x3FE0000000000000`, exponent $\text{exp} - 1022$.
 
 ---
 
 ## 5. `ln_1p(x)`
 
-参考 `detmath.rs:213-234`。① NaN 或 `x < -1.0` → canonical NaN；`x == -1.0` → `-inf`。② `|x| < 0.0625`：`term = x`，`sum = 0.0`，`n = 1.0`；当 `n <= 12.0`，`odd = ((n as i32)&1) == 1`，`sum += odd ? term/n : -(term/n)`，然后 `term *= x; n += 1.0`；返回 `sum`。③ 否则返回 `ln(1.0 + x)`。
+Reference: `detmath.rs:213-234`.  
+1. If NaN or $x < -1.0 \to \text{canonical NaN}$; if $x == -1.0 \to -\infty$.  
+2. If $|x| < 0.0625$: $\text{term} = x$, $\text{sum} = 0.0$, $n = 1.0$; while $n \le 12.0$, check $\text{odd} = ((n \text{ as i32}) \& 1) == 1$, accumulate $\text{sum} \mathrel{+}= \text{odd} \mathbin{?} \text{term}/n \mathbin{:} -(\text{term}/n)$, then $\text{term} \leftarrow \text{term} \cdot x; n \leftarrow n + 1.0$; return $\text{sum}$.  
+3. Otherwise return $\ln(1.0 + x)$.
 
-`ln_1p(-0.0)` 走级数分支，结果为 **`+0.0`**（不是 `-0.0`）。精度：本文语料最大 **6.91 ulp**，项目 256 位密集样本最大 **16.6360 ulp**（回落分支），远差于旧文档 “~1 ulp”。这是精度事实，不是正确舍入承诺。
+`ln_1p(-0.0)` enters the series branch, yielding **`+0.0`** (not `-0.0`). Precision: audit corpus maximum **6.91 ulp**, project 256-bit dense sample maximum **16.6360 ulp** (fallback branch), significantly worse than older claims of "~1 ulp". This is an empirical precision fact, not a correct rounding contract.
 
 ---
 
-## 6. `cos(x)`、`sin_small`、`cos_small`
+## 6. `cos(x)`, `sin_small`, `cos_small`
 
-参考 `detmath.rs:298-312`、`:238-262`。① 非有限 → canonical NaN。② `n = round_i32(x*TWO_OVER_PI)`，`nf = n as f64`。③ `r = ((x - nf*PIO2_1) - nf*PIO2_2) - nf*PIO2_3`（严格左结合）。④ `n & 3`：`0 → cos_small(r)`，`1 → -sin_small(r)`，`2 → -cos_small(r)`，`3 → sin_small(r)`。
+Reference: `detmath.rs:298-312`, `:238-262`.  
+1. Non-finite values $\to \text{canonical NaN}$.  
+2. $n = \text{round\_i32}(x \cdot \text{TWO\_OVER\_PI})$, $nf = n \text{ as f64}$.  
+3. $r = ((x - nf \cdot \text{PIO2\_1}) - nf \cdot \text{PIO2\_2}) - nf \cdot \text{PIO2\_3}$ (strictly left-associative).  
+4. Based on $n \& 3$:  
+   - `0` $\to \text{cos\_small}(r)$  
+   - `1` $\to -\text{sin\_small}(r)$  
+   - `2` $\to -\text{cos\_small}(r)$  
+   - `3` $\to \text{sin\_small}(r)$
 
-`sin_small`：`z = r*r`，`p = SIN_C[7]`，`i = 6..1` 逐次 `p = SIN_C[i] + z*p`；`p = SIN_C[0] + z*p`；返回 `r*(1.0 + z*p)`。`cos_small`：`z = r*r`，`q = COS_C[7]`，`i = 6..1` 逐次 `q = COS_C[i] + z*q`；`q = COS_C[0] + z*q`；返回 `1.0 + z*q`。
+`sin_small`: $z = r \cdot r$, $p = \text{SIN\_C}[7]$; for $i = 6 \dots 1$ sequentially compute $p = \text{SIN\_C}[i] + z \cdot p$; $p = \text{SIN\_C}[0] + z \cdot p$; return $r \cdot (1.0 + z \cdot p)$.  
+`cos_small`: $z = r \cdot r$, $q = COS\_C[7]$; for $i = 6 \dots 1$ sequentially compute $q = \text{COS\_C}[i] + z \cdot q$; $q = \text{COS\_C}[0] + z \cdot q$; return $1.0 + z \cdot q$.
 
-声明域 `|x| < 2^20·π/2 ≈ 1.65e6`（此时 `|n| < 2^20`，`nf*PIO2_1` 精确）；管线内只调用 `x ∈ [0, π]`。精度：`|x| <= π` 最大 **1.7633 ulp**，`<= 2^20·π/2` 最大 **2.24 ulp**。`|x| >= ~1e7` 精度断崖；`|x| >= 2^31·π/2 ≈ 3.37e9` 时 `round_i32` 饱和导致三语言分歧，不得依赖域外结果。
+Declared operational domain: $|x| < 2^{20} \cdot \pi/2 \approx 1.65 \times 10^6$ (at which $|n| < 2^{20}$, making $nf \cdot \text{PIO2\_1}$ exact); in pipeline use, calls are strictly within $x \in [0, \pi]$. Precision: $|x| \le \pi$ maximum **1.7633 ulp**, $\le 2^{20} \cdot \pi/2$ maximum **2.24 ulp**. Precision collapses sharply beyond $|x| \ge \sim 10^7$; at $|x| \ge 2^{31} \cdot \pi/2 \approx 3.37 \times 10^9$, `round_i32` saturation causes divergence across languages; implementations MUST NOT rely on out-of-domain results.
 
 ---
 
 ## 7. `log2(x)`
 
-参考 `detmath.rs:270-281`。① NaN 或 `x < 0` → canonical NaN；`x == 0`（含 `-0.0`）→ `-inf`；`+inf` → `+inf`。② 返回 `ln(x) * LOG2_E`（`LOG2_E = INV_LN2 = 1.4426950408889634`）。
+Reference: `detmath.rs:270-281`.  
+1. If NaN or $x < 0 \to \text{canonical NaN}$; if $x == 0$ (including $-0.0$) $\to -\infty$; if $+\infty \to +\infty$.  
+2. Return $\ln(x) \cdot \text{LOG2\_E}$ ($\text{LOG2\_E} = \text{INV\_LN2} = 1.4426950408889634$).
 
-只用于 `epsilon` 指数域量化，调用后立即 `.round()` 并 `clamp(1.0,127.0)`（`rust/src/stego/header.rs:34`、`rust/src/stego/audio/core.rs:381`）。精度最大 **1.79 ulp**（密集样本 2.31）；末位差不改变整数，除非恰好落在半整数上。
-
----
-
-## 8. 求值纪律
-
-- **禁止 FMA/收缩/重结合**：不得把 `a*b + c` 融合为 `fma`，不得启用 `fp-contract`，不得在 `--target-cpu=native` 下允许收缩。Rust 默认不收缩；Go 在 `GOAMD64=v3`/arm64 会生成 `FMADDD`，实测与 Rust 差 2176–2397 条（审计 §3.4、§5.3）。Go 移植须用 `//go:noinline` 包装乘法后再相加；Python/CPython 无 FMA，无需屏障。
-- **排序键**：代价量化后只以 `f64::to_bits()` 的整数序排序；禁止用浮点比较作最终全序，禁止 NaN 进入候选集。
-- **NaN**：`exp` 保留输入 NaN 载荷；其余函数返回 canonical NaN。Go 必须把 `math.NaN()` 改为 `math.Float64frombits(0x7FF8000000000000)`（Rust/Python 已为 `0x7FF8000000000000`）。
-- **无 `sqrt`、无 libm、无扩展精度**：不得用 80 位 x87、`f128` 或 double-double 替代。
+Exclusively used for `epsilon` exponential domain quantization, immediately followed by `.round()` and `clamp(1.0, 127.0)` (`rust/src/stego/header.rs:34`, `rust/src/stego/audio/core.rs:381`). Maximum precision error: **1.79 ulp** (dense sample 2.31); lower-bit variations do not affect the rounded integer output unless the value falls precisely on a half-integer boundary.
 
 ---
 
-## 9. 自检与摘要
+## 8. Evaluation Discipline
 
-摘要算法：每个输出取 `f64::to_bits()`，按小端字节序做 FNV-1a 64：初值 `0xCBF29CE484222325`，每字节 `h ^= b; h = h * 0x00000100000001B3`（`rust/src/stego/detmath.rs:353-402`；`scripts/detmath/detmath.py:238-255`、`detmath.go:231-287`）。打印为 16 位十六进制、前导零补齐。
+- **FMA / Contraction / Reassociation Forbidden**: Never fuse $a \cdot b + c$ into `fma`, never enable `fp-contract`, and do not permit contraction under `--target-cpu=native`. Rust defaults to no contraction; Go emits `FMADDD` under `GOAMD64=v3`/arm64, producing 2,176–2,397 divergences compared to Rust (Audit §3.4, §5.3). Go ports MUST wrap multiplications with `//go:noinline` before addition; Python/CPython does not use FMA, requiring no barriers.
+- **Sorting Keys**: After cost quantization, sorting MUST proceed strictly using integer ordering on `f64::to_bits()`; floating-point comparisons MUST NOT be used for total ordering, and NaNs MUST NOT enter candidate sets.
+- **NaN Handling**: `exp` preserves input NaN payloads; all other functions return canonical NaN. Go MUST replace `math.NaN()` with `math.Float64frombits(0x7FF8000000000000)` (matching Rust and Python defaults of `0x7FF8000000000000`).
+- **No `sqrt`, No libm, No Extended Precision**: 80-bit x87, `f128`, or double-double arithmetic MUST NOT be substituted.
 
-| 函数 | 摘要 |
+---
+
+## 9. Self-Verification and Digest Values
+
+Digest algorithm: Take `f64::to_bits()` of each output, and compute FNV-1a 64 over little-endian bytes: initial state `0xCBF29CE484222325`, per byte $h \leftarrow h \oplus b; h \leftarrow h \cdot \text{0x00000100000001B3}$ (`rust/src/stego/detmath.rs:353-402`; `scripts/detmath/detmath.py:238-255`, `detmath.go:231-287`). Formatted as a 16-character hexadecimal string with leading zeros.
+
+| Function | Digest |
 |---|---|
 | `exp` | `68107bf871d53df2` |
 | `ln` | `6021ef64db0e27ef` |
@@ -107,7 +132,12 @@
 | `ln_1p` | `23e6e71dccf69b20` |
 | `log2` | `d97b86f58ee1dfba` |
 
-网格（必须逐字相同）：`exp` 为 `i=-240..=240` 的 `i*0.37` 加 `i=0..120` 的 `1e-6*i`；`ln` 为 `i=1..=400` 的 `i*0.71` 加 `i=0..60` 的 `1e-12*(i+1)`；`cos` 为 `k=0..9`、`a=0..9` 的 `PI*k*(2a+1)/18`；`ln_1p` 为 `i=0..200` 的 `i*0.003`；`log2` 为 `k=1..=60` 的 `2^-k` 加 `i=1..=200` 的 `i*0.37`。
+Evaluation grids (must match verbatim):  
+- `exp`: $i \cdot 0.37$ for $i = -240 \dots 240$, plus $10^{-6} \cdot i$ for $i = 0 \dots 120$;  
+- `ln`: $i \cdot 0.71$ for $i = 1 \dots 400$, plus $10^{-12} \cdot (i + 1)$ for $i = 0 \dots 60$;  
+- `cos`: $\pi \cdot k \cdot (2a + 1)/18$ for $k = 0 \dots 9, a = 0 \dots 9$;  
+- `ln_1p`: $i \cdot 0.003$ for $i = 0 \dots 200$;  
+- `log2`: $2^{-k}$ for $k = 1 \dots 60$, plus $i \cdot 0.37$ for $i = 1 \dots 200$.
 
 ```bash
 cd rust
@@ -116,22 +146,22 @@ python ../scripts/detmath/detmath.py
 go run ../scripts/detmath/detmath.go
 ```
 
-代码注释（`detmath.rs:320`、`:352`）引用的 `scripts/detmath/compare.sh` **不存在**（审计 P0-4）；上表五个摘要才是当前可执行的闭环。
+The script `scripts/detmath/compare.sh` referenced in code comments (`detmath.rs:320`, `:352`) **does not exist** (Audit P0-4); the five digest values in the table above represent the executable closed loop.
 
 ---
 
-## 10. 仍使用宿主 libm 的域
+## 10. Domains Retaining Host libm
 
-`analysis` 域保留 libm，唯一实测调用是 `rust/src/analysis/calibration.rs:90` 的 `cos`（DCT 基）。它属于检测分析，不参与写入、不产生槽位排序、不进入认证域或头字段，故其 ulp 级差异不改变字节输出。`rust/src/stego/**` 中所有影响输出的超越函数必须走本文实现；新增调用点必须同时扩充 §9 摘要网格。
+The `analysis` module retains `libm`, with its sole active call site being `cos` (DCT basis) at `rust/src/analysis/calibration.rs:90`. Because this belongs to steganalysis and does not participate in payload embedding, slot ordering, authenticated data, or header fields, ulp-level variations cannot alter byte-level output. All transcendental functions within `rust/src/stego/**` that influence output MUST use the implementations in this document; any newly added call sites MUST expand the §9 test grid simultaneously.
 
 ---
 
-## 11. 稳定性分级
+## 11. Stability Tiers
 
-| 内容 | 级别 | 理由 |
+| Content | Tier | Justification |
 |---|---|---|
-| §2 常数、§3–§7 归约/项数/顺序 | **F** | 改动会改变排序键与 `epsilon`；已写载体可能读不回，必须重建 `baseline_hash.py` 基线 |
-| §8 FMA/NaN/排序纪律 | **F** | 跨构建逐位复现的前提 |
-| §9 摘要值 | **F** | 摘要漂移即算法漂移，只能随格式评审更新 |
-| §10 libm 边界 | **I** | 只约束检测分析，随改随测 |
-| 各函数“实测 ulp” | **I** | 观测结论，不是契约；契约是逐位复现，不是正确舍入 |
+| §2 Constants, §3–§7 Reductions / Terms / Order | **F** | Any change alters sorting keys and `epsilon`; existing carriers become unreadable; requires rebuilding `baseline_hash.py` baselines |
+| §8 FMA / NaN / Ordering Discipline | **F** | Prerequisite for cross-build bit-for-bit reproducibility |
+| §9 Digest Values | **F** | Digest drift indicates algorithm drift, permissible only with wire format revision reviews |
+| §10 libm Scope Boundary | **I** | Constrains steganalysis only; test-as-modified |
+| Function "Observed ulp" | **I** | Empirical observation, not a contract; contract is bit-for-bit reproducibility, not correct rounding |

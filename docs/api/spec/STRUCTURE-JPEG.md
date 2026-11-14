@@ -1,128 +1,150 @@
-# JPEG 结构域适配器规范（APP 段注入）
+# JPEG Structural Domain Adapter Specification (APP Segment Injection)
 
-> 范围：本文件只定义 JPEG 作为**结构域载体**时的检测、策略、注入布局、定位与还原。
-> 信封字段、AAD、加密与 Trailer 语义见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md)；
-> 线格式总表见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2–§15 与 [CAPACITY.md](CAPACITY.md) §4；
-> [WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md) 已冻结为历史对照（非规范），与其冲突时以本目录为准；
-> JPEG 的 DCT 内容域（UERD/J-UNIWARD）见 [CONTENT-JPEG.md](CONTENT-JPEG.md)，两者互不替代。
-> 适配器实现见 `rust/src/structure/adapters/jpeg.rs`，注册名 `JPEG`（`:230-232`），
-> 在 `ADAPTERS` 中排在 PNG 之后（`rust/src/structure/registry.rs:25-36`）。
+> Scope: This document defines format detection, strategies, injection layout, locating, and restoration when JPEG serves as a **structural domain carrier**.  
+> Envelope fields, AAD, encryption, and trailer semantics are specified in [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md);  
+> Complete wire layout tables are in [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2–§15 and [CAPACITY.md](CAPACITY.md) §4;  
+> DCT content domain steganography (UERD / J-UNIWARD / J-MiPOD) is specified in [CONTENT-JPEG.md](CONTENT-JPEG.md); the two domains are mutually exclusive and non-interchangeable.  
+> Adapter implementation: `rust/src/structure/adapters/jpeg.rs`, registered as `JPEG` (`:230-232`), ordered following PNG in `ADAPTERS` (`rust/src/structure/registry.rs:25-36`).
 
-## 1. 导航与术语
+---
 
-- **注入点** `inject_offset`：本适配器为第一个 SOS 的 `0xFF` 字节偏移（`jpeg.rs:344-356`）。
-- **UBE 起点** = `inject_offset + offset_delta`；本策略 `offset_delta = 4`（`jpeg.rs:553-564`，引擎在密封前写入并纳入 AAD，`rust/src/structure/engine.rs:1267-1278`）。
-- **链**：多个 APP15 段按文件顺序串联，逻辑 UBE 跨段连续，段间空出 4 字节段头。
-- **首 SOS**：标记流扫描的终点；SOS 之后的熵编码数据不参与任何解析（`jpeg.rs:108-116`）。
+## 1. Navigation and Terminology
 
-## 2. 稳定性分级（F / D / I）
+- **Injection Point** `inject_offset`: Byte offset of the `0xFF` marker of the first Start-of-Scan (SOS) marker (`jpeg.rs:344-356`).
+- **UBE Origin** = $inject\_offset + offset\_delta$; for this adapter, $offset\_delta = 4$ (`jpeg.rs:553-564`; sealed into header AAD prior to injection, `rust/src/structure/engine.rs:1267-1278`).
+- **Chain**: Multiple APP15 segments linked in file order, forming a contiguous logical UBE payload across segments, punctuated by 4-byte segment headers.
+- **First SOS**: Terminal boundary for marker stream scanning; entropy-coded scan data following SOS never participates in parsing (`jpeg.rs:108-116`).
 
-| 级别 | 内容 |
+---
+
+## 2. Stability Tiers (F / D / I)
+
+| Tier | Scope |
 | :--- | :--- |
-| **F** | APP15 标记 `FF EF`、段长字段语义与 65533 上限、插入点=首个 SOS、`offset_delta=4`、链邻接关系（下段载荷 = 上段载荷尾 + 4）、Trailer 位于末段载荷尾部、`partition_jpeg_payload_lengths` 分段函数、locate 只认 APP15 与 EOF 尾标 |
-| **D** | 无。本适配器没有可替换的私有字段或方言参数 |
-| **I** | `auto` 策略选择与回退、容量报告文案、`JPEG_MAX_TOTAL_CAPACITY` 快路径、`suspicious_structures` 的 136 字节阈值、`verify_structure` 文案、64 KiB 读取缓冲 |
+| **F** | APP15 marker `FF EF`, segment length field semantics and 65,533 payload bound, insertion point = first SOS, $offset\_delta = 4$, segment chain adjacency (next payload start = prev payload end + 4), trailer placement at end of final segment payload, `partition_jpeg_payload_lengths` splitting function, locator admitting only APP15 and EOF trailers |
+| **D** | None. This adapter defines no substitutable private fields or dialect parameters |
+| **I** | `auto` strategy selection and fallback, capacity reporting text, `JPEG_MAX_TOTAL_CAPACITY` fast path, `suspicious_structures` 136-byte threshold, `verify_structure` phrasing, 64 KiB buffer sizes |
 
-F 级中的 16 MiB 扫描上限（`jpeg.rs:18`）决定"写出的载体是否还能被本实现定位"，改动会使既有大载体不可读，按 F 对待。
+The 16 MiB header scan limit (`jpeg.rs:18`) determines whether written carriers remain discoverable by this implementation; altering it breaks readability on large files and is treated as Tier F.
 
-## 3. detect
+---
 
-`detect` 只做一件事：定位到偏移 0，读取 2 字节并比较 `FF D8`（`jpeg.rs:234-246`）。读完恢复调用前位置（`:244`）。
+## 3. Format Detection (`detect`)
 
-- 不检查 EOI（`FF D9` 常量仅定义于 `:13`，检测与结构校验都不使用它）。
-- 不要求 APP0/JFIF、不要求 EXIF、不检查扩展名。
-- 只要文件前两字节是 `FF D8` 即被识别为 JPEG；格式路由按 `registry.rs:25-36` 顺序，PNG 先于 JPEG。
-- 读/定位失败返回 `false`，不返回错误。
+`detect` performs a single check: seeks to offset 0, reads 2 bytes, and verifies `FF D8` (`jpeg.rs:234-246`), restoring stream position before returning (`:244`).
 
-## 4. 支持策略与 auto
+- Does not check for EOI (`FF D9`).
+- Requires no APP0 / JFIF or EXIF headers, and does not check file extensions.
+- Any stream beginning with `FF D8` is classified as JPEG; routing evaluates in `registry.rs:25-36` order (PNG before JPEG).
+- Read or seek failures return `false` without raising errors.
 
-`supported_strategies = ["app_segment", "eof"]`（`jpeg.rs:248-250`），线上 ID 分别为 5 与 1（`registry.rs:90-104`）。
+---
 
-`auto` 是**单次判定、不回退重试**（`engine.rs:1242-1255`），顺序如下（`jpeg.rs:252-269`）：
+## 4. Supported Strategies and `auto`
 
-1. `ube_size > 64 MiB` → `eof`（`:253-254`）。
-2. `find_jpeg_sos_offset` 失败（无 SOS、段长损坏、16 MiB 扫描超限、连续非标记字节超限）→ `eof`（`:260-262`）。
-3. `ube_size > app_segment_payload_capacity(sos_offset)` → `eof`（`:265-267`）。
-4. 否则 `app_segment`。
+`supported_strategies = ["app_segment", "eof"]` (`jpeg.rs:248-250`), with wire IDs 5 and 1 respectively (`registry.rs:90-104`).
 
-容量报告（`jpeg.rs:271-322`）：`app_segment` 给出精确字节数；`eof` 为无上限、文件增长。注意物理追加在文件末尾，正常 JPEG 即 EOI 之后；但 EOF 策略不解析 EOI 位置（`rust/src/structure/adapters/eof.rs:48-55`）。
+`auto` performs a **single-pass decision without retry** (`engine.rs:1242-1255`) following this precedence (`jpeg.rs:252-269`):
 
-**APPn 选择（以代码为准）**：写入固定使用 APP15（`JPEG_APP15 = FF EF`，`jpeg.rs:14`）；不存在 APP2–APP14 的轮选或回退逻辑。`JPEG_COM`（`:15`）只在 `suspicious_structures` 中作为"可疑旧信封"被读取（`:542-547`），`locate` 明确不把 COM 当作通道（回归测试 `tests/test_lifecycle/jpeg_multisegment.rs:156-187`）。因此 COM 与其它 APPn 均不是本实现的写通道。
+1. If $ube\_size > 64\text{ MiB} \to \text{eof}$ (`:253-254`).
+2. If `find_jpeg_sos_offset` fails (missing SOS, corrupted segment length, 16 MiB scan overflow, or non-marker run overflow) $\to \text{eof}$ (`:260-262`).
+3. If $ube\_size > \text{app\_segment\_payload\_capacity}(sos\_offset) \to \text{eof}$ (`:265-267`).
+4. Otherwise select `app_segment`.
 
-## 5. 注入布局
+Capacity reporting (`jpeg.rs:271-322`): `app_segment` reports an exact usable byte count; `eof` reports unbounded (file expansion). EOF appends at physical EOF (past EOI in standard JPEGs), without parsing EOI coordinates (`rust/src/structure/adapters/eof.rs:48-55`).
 
-在 `sos_offset` 处依次写出（`jpeg.rs:352-371`）：
+**APPn Selection**: Writers fixedly emit APP15 (`JPEG_APP15 = FF EF`, `jpeg.rs:14`); no round-robin or fallback across APP2–APP14 exists. `JPEG_COM` (`:15`) is read solely by `suspicious_structures` to flag legacy envelopes (`:542-547`); `locate` explicitly rejects COM segments (`tests/test_lifecycle/jpeg_multisegment.rs:156-187`).
+
+---
+
+## 5. Injection Layout
+
+Written directly preceding `sos_offset` (`jpeg.rs:352-371`):
 
 ```text
-FF EF | len_hi len_lo（大端 u16，含长度字段自身 2 字节）| payload[len-2]
+FF EF | len_hi len_lo (Big-Endian u16, including 2 bytes of length field) | payload[len - 2]
 ```
 
-- 段最大长度字段 `65535` ⇒ 单段载荷上限 `65533`（`jpeg.rs:16`、`:122-127`、`:363-366`）。
-- `inject_size = Σ(4 + payload_len)`（`:366`）；引擎按 `inject_offset + 4` 写入 Header（`engine.rs:1407`、`:1428-1429`）。
-- 后续段从前一载荷末尾**再前进 4 字节**开始；逻辑 UBE 读取器据此跨段拼接（`jpeg.rs:500-514`、`adapters/mod.rs:403-470`）。
-- 全链 Trailer 位于最后一个载荷的末 24 字节：`inject_offset + inject_size - 24`（`jpeg.rs:566-572`）。
+- Maximum segment length field is 65,535 $\implies$ single-segment payload bound is 65,533 (`jpeg.rs:16`, `:122-127`, `:363-366`).
+- Total injected footprint is $inject\_size = \sum (4 + payload\_len)$ (`:366`); headers are positioned at $inject\_offset + 4$ (`engine.rs:1407`, `:1428-1429`).
+- Consecutive segments start **4 bytes past the end of the previous segment's payload**; logical UBE readers chain segments across this 4-byte header gap (`jpeg.rs:500-514`, `adapters/mod.rs:403-470`).
+- The UBE trailer resides in the final 24 bytes of the last segment payload: $inject\_offset + inject\_size - 24$ (`jpeg.rs:566-572`).
 
-**超过 65533 的处理**：不拒绝，改为多段链。`partition_jpeg_payload_lengths` 每段尽量取 65533；若最后余量 `< 24`，从当前段借 1024 字节，使末段 ≥ 1024（`jpeg.rs:172-195`；函数上方注释写"≥24"，代码实际为 1024，以代码为准）。不存在"超限即改 eof"的隐式回落：`inject` 只接受 `app_segment`，容量不足返回 `UnsupportedFormat` 并建议 `--strategy eof`（`:344-350`）。
+**Payloads Exceeding 65,533 Bytes**: Partitioned into multi-segment chains. `partition_jpeg_payload_lengths` fills segments up to 65,533 bytes; if the trailing remainder $< 24$ bytes, it borrows 1,024 bytes from the preceding segment, ensuring the final segment has $\ge 1024$ bytes (`jpeg.rs:172-195`). `inject` strictly expects `app_segment`; insufficient capacity returns `UnsupportedFormat` suggesting `--strategy eof` (`:344-350`).
 
-## 6. 容量口径
+---
 
-`app_segment_payload_capacity(sos)`（`jpeg.rs:205-225`）要求注入后首 SOS 仍落在 16 MiB 扫描窗口内：
+## 6. Capacity Metric
+
+`app_segment_payload_capacity(sos)` (`jpeg.rs:205-225`) requires that the first SOS remains within the 16 MiB scan window after injection:
 
 ```text
 budget = 16 MiB - sos_offset
 fits(p) = p + 4 * ceil(p / 65533) <= budget
-capacity = max{ p ≤ min(budget, 64 MiB) | fits(p) }
+capacity = max{ p <= min(budget, 64 MiB) | fits(p) }
 ```
 
-因此 `app_segment` 的实际上限通常略小于 `16 MiB - sos_offset`（链头开销约 1 KiB/16 MiB），**永远不会达到 64 MiB**；64 MiB 只在 `auto` 快路径与二分上界中出现（`jpeg.rs:17`、`:215`）。`sos_offset` 越大，容量越小。
+Practical capacity is slightly less than $16\text{ MiB} - sos\_offset$ (chain header overhead is $\approx 1\text{ KiB} / 16\text{ MiB}$) and **never reaches 64 MiB**; 64 MiB serves as a fast-path ceiling in `auto` (`jpeg.rs:17`, `:215`). As `sos_offset` increases, usable capacity decreases.
 
-## 7. 段插入位置与既有段
+---
 
-- 插入点是**第一个 SOS 之前**，不是 SOI 之后（`jpeg.rs:352-356`）。因此 APP0/JFIF、APP1/EXIF、其它 APPn、DQT/DHT/SOF、既有 COM/APP15 全部原样保留在注入链之前。
-- 不重排、不合并、不替换既有 APP15；新链紧贴首 SOS。
-- 首 SOS 起的全部字节（含熵编码数据与后续扫描）原样复制（`:373-375`），渐进式/多扫描 JPEG 的后续 SOS 不受影响。
-- 重复写入：正常 API 在写前用 `locate` 检查，已有信封会被拒绝（`engine.rs:1046-1058`）；若通过其他手段叠加，`locate` 从后向前遍历候选，靠近 SOS 的较晚链优先命中（`jpeg.rs:406`），移除必须按注入逆序进行。
+## 7. Insertion Point and Existing Markers
 
-## 8. locate
+- Insertion occurs **immediately preceding the first SOS**, not following SOI (`jpeg.rs:352-356`). APP0/JFIF, APP1/EXIF, other APPn markers, DQT/DHT/SOF, and existing COM/APP15 markers precede the injection point untouched.
+- Existing APP15 segments are neither reordered nor merged; the new chain is placed flush against the first SOS.
+- All bytes starting from the first SOS (entropy-coded scan data and subsequent scans) are copied verbatim (`:373-375`), leaving progressive / multi-scan streams undamaged.
+- Stacking envelopes: Public APIs check via `locate` prior to write, rejecting files with existing envelopes (`engine.rs:1046-1058`). If stacked manually, `locate` scans backward, matching the chain closest to SOS first (`jpeg.rs:406`); removal must execute in reverse order of injection.
 
-1. 偏移 0 校验 `FF D8`，否则返回 `None`（`jpeg.rs:385-389`）。
-2. 扫描首个 SOS 之前的所有段，收集每个 APP15 的 `(载荷偏移, 载荷长度)`（`:391-400`）。
-3. 候选从最后一个向前（`:406`）：载荷 `< 24` 跳过（`:407-409`）；读取末 24 字节并用期望的 Trailer 魔数解包（`:410-420`）。
-4. 单段命中：`trailer.ube_offset == 载荷偏移` 且 `ube_total_size == 载荷长度`（`:423-431`）。
-5. 多段命中：从当前段向前累加，要求 `curr_off + curr_len == next_off - 4`（段头 4 字节），累加和等于 `ube_total_size`，且起点等于 `trailer.ube_offset`（`:434-464`）。
-6. APP15 未命中时回退 EOF 尾标 `read_from_tail`，按 `locate_start(file_size)` 定位，策略名 `eof`（`:474-480`）。
-7. 引擎统一做物理包含校验：`ube_total_size ≥ 112 + 24` 且 `ube_offset + ube_total_size ≤ 文件长度`（`engine.rs:191-207`）；APP15 不要求贴住文件尾。
+---
 
-**hint 交叉**：`locate` 只接收 `expected_trailer_magic`；`locate_with_hint` 对 JPEG 使用默认实现，忽略 header magic hint（`adapters/mod.rs:218-225`）。引擎先试密码派生的 stealth trailer magic，再试方言 magic（`engine.rs:145-166`）。返回的策略名来自实际通道；`inspect` 优先展示 header 内的 `strategy_id`（`:2726-2730`），该字段不在 AAD 内，只用于报告。`remove`/`verify` 要求 `inject_offset + offset_delta == trailer.ube_offset`，`app_segment` 不属于可重定位策略（`engine.rs:2828-2873`）；只有 `pe_codebits` 按 ID 豁免（`:2845-2850`）。
+## 8. Locator (`locate`)
 
-## 9. remove 还原
+1. Verify `FF D8` at offset 0, returning `None` on mismatch (`jpeg.rs:385-389`).
+2. Scan all segments preceding the first SOS, collecting `(payload_offset, payload_length)` for each APP15 marker (`:391-400`).
+3. Iterate candidates backward from the last segment (`:406`): skip segments where $payload < 24$ (`:407-409`); read the trailing 24 bytes and unpack using expected trailer magic (`:410-420`).
+4. Single-segment match: $trailer.ube\_offset == payload\_offset$ and $ube\_total\_size == payload\_length$ (`:423-431`).
+5. Multi-segment match: Accumulate backward across segments, verifying $curr\_off + curr\_len == next\_off - 4$ (accounting for 4-byte segment headers), total accumulated length equals $ube\_total\_size$, and starting offset equals $trailer.ube\_offset$ (`:434-464`).
+6. Fallback to EOF trailer via `read_from_tail` if no APP15 matches, resolving via `locate_start(file_size)` with strategy name `eof` (`:474-480`).
+7. Enforce physical containment: $ube\_total\_size \ge 112 + 24$ and $ube\_offset + ube\_total\_size \le \text{file\_size}$ (`engine.rs:191-207`).
 
-JPEG 未覆盖 `strip`，使用默认实现（`adapters/mod.rs:236-290`）：
+**Hint Handling**: `locate` receives `expected_trailer_magic` only, ignoring header magic hints (`adapters/mod.rs:218-225`). The engine tries stealth trailer magic first, followed by dialect magic (`engine.rs:145-166`). `remove` and `verify` require $inject\_offset + offset\_delta == trailer.ube\_offset$; `app_segment` is not relocatable (`engine.rs:2828-2873`).
 
-1. 复制 `[0, inject_offset)`；
-2. 跳过 `[inject_offset, inject_offset + inject_size)`，即整条 APP15 链（段头 + 载荷）；
-3. 复制其余全部字节。
+---
 
-由于链路之外没有任何字节被改写、`patch_offset = 0`，还原结果就是原始 JPEG 字节。随后引擎比对 `orig_host_size` 与 `orig_host_sha256`（`engine.rs:2299-2311`），不一致返回 `RestoreMismatch`（`:2354-2360`）。`eof` 产物同样走默认 `strip`（注入点=原文件长度，跳过量=UBE 长度），结果等价于直接截断。
+## 9. `remove` and Cover Restoration
 
-## 10. 边界与拒绝条件
+JPEG uses standard `strip` (`adapters/mod.rs:236-290`):
 
-- **EXIF/JFIF 共存**：既有 APP0/APP1 原样保留；扫描按段长直接跳过 APP1 载荷（`jpeg.rs:135-140`），因此 EXIF 缩略图内部的 `FF D8` 不会被当作新 JPEG，也不会被收集。`detect` 只看文件偏移 0，内嵌缩略图无法触发适配器。
-- **既有大 APP15/COM**：载荷 ≥ `112 + 24 = 136` 字节时仅产生可疑提示，不拒绝写入（`jpeg.rs:530-551`）。
-- **段损坏**：段长 `< 2` 返回 `MalformedLength`，`find_jpeg_sos_offset` 转为 `CorruptedData`（`:122-125`、`:162-167`）；段声明长度越过文件末尾会在后续读取时以 `Eof` 结束扫描（`:118-121`、`:135-140`）。
-- **扫描拒绝**：首个 SOS 前连续非 `0xFF` 字节超过 4096 → `NonMarkerRun`（`:80-85`）；标记流越过 16 MiB → `HeaderScanLimit`（`:72-75`）；找不到 SOS → `CorruptedData`（`:166`）。
-- **渐进式/多扫描**：不做特殊处理，也不因此拒绝；只要求首个 SOS 可达，后续扫描字节整体平移后保持不变。
-- **写前结构校验**：无论 `auto` 最终选 `eof` 还是显式 `eof`，引擎都会先调用 `verify_structure`（即 `find_jpeg_sos_offset`），SOS 不可达的 JPEG 一律拒绝写入（`engine.rs:1027-1035`，`jpeg.rs:517-528`）。
-- **64 MiB 常量**：在 16 MiB 扫描窗口下对 `app_segment` 不可达，不构成实际边界。
+1. Copy $[0, inject\_offset)$;
+2. Skip $[inject\_offset, inject\_offset + inject\_size)$ (the entire APP15 chain: headers + payloads);
+3. Copy all remaining bytes to EOF.
 
-## 11. I 级写侧行为
+Because no bytes outside the chain are modified ($patch\_offset = 0$), stripping restores original JPEG bytes bit-for-bit. The engine validates restored file size and SHA-256 against $orig\_host\_size$ and $orig\_host\_sha256$ (`engine.rs:2299-2311`), returning `RestoreMismatch` on discrepancy (`:2354-2360`). Under `eof`, stripping truncates the appended UBE stream.
 
-- `auto` 只判定一次；探测失败选 `eof`，但随后写前校验仍可能拒绝损坏载体，不会"成功写入却读不回"（`jpeg.rs:252-269`、`engine.rs:1027-1035`）。
-- 容量文案、`available` 标记与 `limit` 文本为报告行为（`jpeg.rs:271-322`）。
-- 可疑结构阈值、`verify_structure` 文案、错误消息、64 KiB `BufReader` 均为实现细节，不进入线格式（`:63-69`、`:530-551`、`:517-528`）。
-- 分段尾段借用 1024 字节属 F 级分段函数的一部分；第三方写多段链若要被本实现读取，必须复现该函数（`jpeg.rs:172-195`、`:500-514`）。
+---
 
-## 12. 自检方式
+## 10. Boundary and Rejection Conditions
+
+- **EXIF / JFIF Coexistence**: Pre-existing APP0/APP1 markers are preserved; marker scanning skips APP1 payloads based on segment length (`jpeg.rs:135-140`), preventing thumbnail `FF D8` markers from being mistaken for file headers.
+- **Pre-existing Large APP15 / COM**: Segments with payloads $\ge 136$ bytes trigger suspicious warnings without blocking writes (`jpeg.rs:530-551`).
+- **Segment Corruption**: Segment length $< 2$ returns `MalformedLength`, converted by `find_jpeg_sos_offset` to `CorruptedData` (`:122-125`, `:162-167`); segment lengths extending past EOF terminate scanning (`:118-121`, `:135-140`).
+- **Scan Abort Criteria**: More than 4,096 consecutive non-`0xFF` bytes preceding the first SOS $\to$ `NonMarkerRun` (`:80-85`); marker stream exceeding 16 MiB $\to$ `HeaderScanLimit` (`:72-75`); missing SOS $\to$ `CorruptedData` (`:166`).
+- **Progressive / Multi-Scan**: Fully supported; requires that the first SOS is reachable; subsequent scans are shifted intact.
+- **Pre-write Validation**: Whether `auto` resolves to `eof` or `app_segment`, `verify_structure` (`find_jpeg_sos_offset`) runs first, rejecting JPEGs with unreachable SOS markers (`engine.rs:1027-1035`, `jpeg.rs:517-528`).
+- **64 MiB Constant**: Unreachable under the 16 MiB scan window, serving as an upper bound only.
+
+---
+
+## 11. Tier I Writer-Side Behaviors
+
+- `auto` makes a single evaluation without retry (`jpeg.rs:252-269`, `engine.rs:1027-1035`).
+- Capacity text, `available` flags, and limit strings are reporting artifacts (`jpeg.rs:271-322`).
+- 136-byte suspicious structure thresholds, `verify_structure` log formatting, error messages, and 64 KiB buffer sizes are non-normative implementation details (`:63-69`, `:530-551`, `:517-528`).
+- Segment length partitioning borrowing 1,024 bytes for final segments is part of the normative partitioning function; third-party writers constructing chains readable by this implementation must reproduce this logic (`jpeg.rs:172-195`, `:500-514`).
+
+---
+
+## 12. Self-Verification
 
 ```bash
 cd rust
@@ -132,4 +154,4 @@ cargo test jpeg_app_segment_capacity_keeps_relocated_sos_in_scan_window --all-fe
 python ../scripts/baseline_hash.py --check
 ```
 
-人工核对：用 `strhide inspect` 确认策略为 `app_segment`、`ube_offset` 前 4 字节为 `FF EF`；`strhide restore` 后与原始 JPEG 做 SHA-256 比对；对多段链分别验证 `x + len == next - 4` 与末段尾部 Trailer。内容域回归见 [CONTENT-JPEG.md](CONTENT-JPEG.md)。
+Manual checks: verify `strhide inspect` reports strategy `app_segment` with `FF EF` preceding `ube_offset`; verify `strhide restore` recovers the original SHA-256; for multi-segment chains, verify $x + len == next - 4$ across segment boundaries.

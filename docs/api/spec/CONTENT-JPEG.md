@@ -1,127 +1,141 @@
-# JPEG 内容域规范（V4）
+# JPEG Content Domain Specification (V4)
 
-本文件定义 JPEG（`format_id = 4`）内容域的槽位几何、三元 STC 接口与三套代价模型，供第三方独立实现。信封、字节头布局、AAD、ChaCha12、Fisher-Yates、STC 矩阵与 KDF 见 [CONTENT-ENVELOPE.md](CONTENT-ENVELOPE.md)；DCT 超越函数的逐位纪律见 [DETMATH.md](DETMATH.md)。本文只描述 JPEG 特有的部分。
+This document specifies the slot geometry, ternary STC interface, and three cost models for the JPEG content domain (`format_id = 4`) for independent third-party implementations. Envelopes, header byte layouts, AAD, ChaCha12, Fisher–Yates, STC matrix generation, and KDF are defined in [CONTENT-ENVELOPE.md](CONTENT-ENVELOPE.md); bit-for-bit evaluation rules for DCT transcendental functions are defined in [DETMATH.md](DETMATH.md). This document focuses exclusively on JPEG-specific specifications.
 
-## 1. 适用范围与稳定性分级
+---
 
-读侧完整路径：JPEG 解码得到各分量按 MCU 交织排列的量化 DCT 系数（`rust/src/stego/jpeg/engine.rs:223-231`）→ 仅取 component 0 做封面摘要（`:238-261`）→ 定位头槽 → 读 44B 超块 → 读扩展区 → 用密钥置换取正文槽 → 取系数 LSB 做三元 STC 综合。代价模型、方向偏置、重编码与重试均不参与读侧。
+## 1. Scope and Stability Tiers
 
-**载体准入（写侧与容量探测都在解码前/解码时拦截，拒绝即 `UnsupportedFormat`）**：
+Complete Reader Execution Path: JPEG decode extracts quantized DCT coefficients interleaved across MCUs for each component (`rust/src/stego/jpeg/engine.rs:223-231`) $\to$ component 0 is extracted exclusively to compute the cover digest (`:238-261`) $\to$ locate header slots $\to$ decode 44B superblock $\to$ decode extension region $\to$ derive body slots via keyed permutation $\to$ extract coefficient LSBs for ternary STC syndrome decoding. Cost models, directional bias, re-encoding, and retries play no role in reading.
 
-- **仅 Baseline JPEG（SOF0）**：遇到 SOF2/渐进式直接拒绝，提示转 Baseline 或用结构域 `write`（`engine.rs:68-75`）。
-- **分量数只能是 1（灰度）或 3（YCbCr）**：4 分量 CMYK 会被拒绝，因为槽位网格、亮度代价表与 `components_mask` 都假定单亮度平面或 Y/Cb/Cr，否则会把 C 分量误当亮度调制（`engine.rs:118-128`）。
-- **三道硬限额**：`MAX_JPEG_MCU_COUNT = 1,048,576`、`MAX_JPEG_TOTAL_BLOCKS = 6,291,456`、整条流水线工作集 `MAX_PIPELINE_BYTES = 8 GiB`（`engine.rs:86-100`，判定见 `:151-166`）。前两项同时用于容量探测与嵌入，避免两条路径对同一载体给出不同结论。
+**Carrier Admission Criteria (Enforced during probing and embedding; violations return `UnsupportedFormat`)**:
 
-| 级别 | JPEG 内容 |
+- **Baseline JPEG (SOF0) Exclusively**: SOF2 / progressive JPEGs are rejected immediately, prompting conversion to Baseline or routing to structural domain `write` (`engine.rs:68-75`).
+- **Component Count MUST be 1 (Grayscale) or 3 (YCbCr)**: 4-component CMYK is rejected because slot grids, luminance cost tables, and `components_mask` assume a single luminance plane or Y/Cb/Cr; otherwise chrominance components would be modulated as luminance (`engine.rs:118-128`).
+- **Three Hard Pipeline Limits**: `MAX_JPEG_MCU_COUNT = 1,048,576`, `MAX_JPEG_TOTAL_BLOCKS = 6,291,456`, and pipeline working set `MAX_PIPELINE_BYTES = 8 GiB` (`engine.rs:86-100`, evaluated at `:151-166`). The first two limits are shared identically between capacity probing and embedding to prevent divergent decisions.
+
+| Tier | JPEG Domain Scope |
 | :--- | :--- |
-| **F** | 44B 超块字段与 CRC；基础头 718 槽与扩展区槽数；component 0 / MCU 块序；Grid 与扁平索引；前缀 Fisher-Yates；正文 `body_n = u·(bits+h−1)`；奇偶映射 `c & 1` 与载体 `2|parity`；STC 综合；`codec_id = 0` |
-| **D** | `JpegFormatProfile` 的 `sb_h/sb_u/ext_h/ext_u/grid_rule` 及 KDF 标签；官方值固定为本文数值，替换即产生独立格式（`rust/src/stego/format.rs:115-148`、`:238-249`） |
-| **I** | 代价模型选择与全部代价常数；方向偏置与 `polarize_weight`；重编码实现；确定性开关；重试轮数；deflate 级别；`slot_budget`/容量策略 |
+| **F** | 44B superblock fields and CRC; base header 718 slots and extension slot formulas; component 0 / MCU block ordering; Grid and flat indexing; prefix Fisher–Yates; body slots $body\_n = u \cdot (bits + h - 1)$; parity mapping $c \& 1$ and carrier $2 \mid parity$; STC syndrome decoding; $codec\_id = 0$ |
+| **D** | `JpegFormatProfile` configuration ($sb\_h / sb\_u / ext\_h / ext\_u / grid\_rule$) and KDF labels; official builds fix these to this document's constants; substituting them yields an isolated dialect (`rust/src/stego/format.rs:115-148`, `:238-249`) |
+| **I** | Cost model selection and tuning constants; directional bias and `polarize_weight`; re-encoding implementation; deterministic switches; retry attempts; Deflate compression levels; `slot_budget` / capacity policy |
 
-I 级项只决定"写成哪些系数"。任何满足同一综合方程的三元改动集都可被读侧解出，因此第三方写入器可以使用不同的代价模型或搜索顺序；若要逐字节复现基线，则必须逐位复现第 4–8 节。
+Tier I items govern which coefficients are modified. Any ternary modification set satisfying the identical syndrome equation decodes correctly; third-party writers may utilize alternative cost models or search heuristics. To reproduce repository test baselines bit-for-bit, §§4–8 MUST be implemented verbatim.
 
-## 2. 第三方必须读出的超块字段（F）
+---
 
-44B 超块布局逐字见 `rust/src/stego/jpeg/header_v4.rs:1-16`，编码 `:74-89`，解码 `:92-169`。
+## 2. Superblock Fields Required for Third-Party Readers (Tier F)
 
-| off:size | 字段 | 类型 | 读侧校验 |
+The 44B superblock layout: `rust/src/stego/jpeg/header_v4.rs:1-16`, encoding: `:74-89`, decoding: `:92-169`.
+
+| off:size | Field | Type | Reader Validation |
 | :--- | :--- | :--- | :--- |
-| 0:1 / 1:1 | version / flags | u8 | major 必须 4；flags 只允许 bit0/bit1 |
-| 2:2 | suite_id | u16be | 已知 AEAD 套件（1 或 2） |
-| 4:16 / 20:12 | salt / nonce | — | L3 salt；AEAD nonce |
-| 32:4 | body_len | u32be | 22..=2^26−1，密文长度含 16B tag |
-| 36:1 | codec_id | u8 | 必须 0（三元 STC） |
-| 37:1 | stc_h | u8 | 4..=10 |
-| 38:1 | stc_u | u8 | 1..=64（JPEG 专用宽字段） |
-| 39:1 | ext_len | u8 | 0..=255；必须与 `FLAG_EXT_PRESENT` 一致 |
+| 0:1 / 1:1 | version / flags | u8 | major MUST be 4; flags permits bits 0 and 1 only |
+| 2:2 | suite_id | u16be | Known AEAD suite (1 or 2) |
+| 4:16 / 20:12 | salt / nonce | — | L3 salt; AEAD nonce |
+| 32:4 | body_len | u32be | $22 \dots 2^{26}-1$, ciphertext length including 16B tag |
+| 36:1 | codec_id | u8 | MUST be 0 (ternary STC) |
+| 37:1 | stc_h | u8 | $4 \dots 10$ |
+| 38:1 | stc_u | u8 | $1 \dots 64$ (JPEG-specific wide parameter) |
+| 39:1 | ext_len | u8 | $0 \dots 255$; MUST match `FLAG_EXT_PRESENT` |
 | 40:4 | crc32 | u32be | CRC32-IEEE over bytes[0..40] |
 
-`format_id = 4`、仅亮度分量、无 Hamming 路径均由载体隐含，不写入头（`header_v4.rs:43-70`）。超块本身是头槽前 718 槽的 STC 解码结果，见 §3。
+Implicit carrier properties: `format_id = 4`, luminance component modulation only, no Hamming path (`header_v4.rs:43-70`). The superblock is decoded via STC from the first 718 header slots (§3).
 
-## 3. 槽位几何（F）
+---
 
-### 3.1 块与系数编号
+## 3. Slot Geometry (Tier F)
 
-`block_count = coeffs.components[0].blocks.len()`，含 JPEG 的 MCU 填充块，不是可见像素块数（`engine.rs:223-231`）。块序是 **MCU 交织序**，不是分量内光栅序（`rust/src/stego/jpeg/geometry.rs` 的 `positions` 由 MCU 遍历生成）。每个块内系数按自然序（row-major）编号，`k = 0` 为 DC，`k = 1..=63` 为 AC。
+### 3.1 Blocks and Coefficient Indexing
 
-官方 `GridRule::ALL_AC` 为 `k_min = 1, k_max = 63`（`format.rs:55-58`）。扁平槽索引 `idx = bi*slots_per_block + (k-k_min)`，`slots_per_block = k_max-k_min+1`；官方即 `Grid = { bi*63 + (k-1) | 0 ≤ bi < block_count, 1 ≤ k ≤ 63 }`（`rust/src/stego/jpeg/v3_layout.rs:29`、`:134-143`、`:196-200`）。DC 永不进入网格：它是头定位 KDF 的摘要输入，必须保持不变（`format.rs:39-51`）。
+`block_count = coeffs.components[0].blocks.len()`, which includes MCU padding blocks rather than visible pixel blocks alone (`engine.rs:223-231`). Blocks are ordered in **MCU-interleaved order**, not per-component raster order (`positions` in `rust/src/stego/jpeg/geometry.rs` are generated via MCU iteration). Within each block, coefficients follow natural row-major order: $k = 0$ is DC, and $k = 1 \dots 63$ are AC.
 
-### 3.2 头槽与扩展槽
+The official `GridRule::ALL_AC` defines $k_{\min} = 1, k_{\max} = 63$ (`format.rs:55-58`). Flat slot index is $idx = bi \times slots\_per\_block + (k - k_{\min})$, where $slots\_per\_block = k_{\max} - k_{\min} + 1$; officially, $Grid = \{ bi \times 63 + (k - 1) \mid 0 \le bi < block\_count, 1 \le k \le 63 \}$ (`rust/src/stego/jpeg/v3_layout.rs:29`, `:134-143`, `:196-200`). DC coefficients never enter the grid: they serve as input to the cover digest for header locating KDF and MUST remain invariant (`format.rs:39-51`).
 
-`hdr_n = sb_u*(sb_bytes*8+sb_h−1) + ext_u*(8*ext_len+ext_h−1)`。官方 `sb_bytes=44, sb_h=8, sb_u=2, ext_h=8, ext_u=4`：基础头 `2*(352+7)=718` 槽，扩展区 `4*(8*ext_len+7)=32*ext_len+28` 槽（`format.rs:156-169`、`:238-249`）。**即使 `ext_len = 0`，扩展区仍占 28 槽**，故此时 `hdr_n = 746`（一般式 `746 + 32*ext_len`；`CONTENT-ENVELOPE.md:116`、`engine.rs:833`）。
+### 3.2 Header and Extension Slots
 
-1. `slots_buf = grid_indices(block_count, grid_rule)`，按扁平索引升序生成（`v3_layout.rs:134-143`）。
-2. `permute_prefix(slots_buf, hdr_n, locate_seed)`：对全 Grid 做前向 Fisher-Yates 的前 `hdr_n` 步，取前 `hdr_n` 个为头槽（`engine.rs:856-858`；`prng.rs:219-248`）。前向交换保证前缀稳定，读侧可先算 `hdr_min = header_slots(0)` 读完超块后再续算到实际 `hdr_n`（`engine.rs:1257-1269`）。
-3. 头槽 `[0..718)` 承载 352 bit，经 `STC(sb_h=8, sb_u=2)`；`[718..hdr_n)` 承载 `8*ext_len` bit，经 `STC(ext_h=8, ext_u=4)`（`engine.rs:951-1003`）。`ext_len = 0` 时后 28 槽不写，但仍被占用、不再分给正文。
-4. `BodyGrid = Grid \ HdrSlots`，仍按扁平索引升序构造（排序排除，禁止哈希集合序；`v3_layout.rs:146-193`）。
-5. `bits = 8*body_len`；`window = bits + stc_h − 1`；`body_n = u*window`（`v3_layout.rs:98-108`）。
-6. `permute_prefix(BodyGrid, body_n, perm_seed)`，再截断到 `body_n`（`engine.rs:1007-1008`、`:1330`）。这是"对全 BodyGrid 的均匀随机有序子样本"，**不是先按代价排序取前 N**；文档旧表述若说"先取 N 再置换"应按代码修正（`v3_layout.rs:22-24`）。
+$hdr\_n = sb\_u \cdot (sb\_bytes \cdot 8 + sb\_h - 1) + ext\_u \cdot (8 \cdot ext\_len + ext\_h - 1)$. Under official defaults ($sb\_bytes = 44, sb\_h = 8, sb\_u = 2, ext\_h = 8, ext\_u = 4$): base header requires $2 \cdot (352 + 7) = 718$ slots; extension requires $4 \cdot (8 \cdot ext\_len + 7) = 32 \cdot ext\_len + 28$ slots (`format.rs:156-169`, `:238-249`). **Even when $ext\_len = 0$, the extension region occupies 28 slots**, resulting in $hdr\_n = 746$ (general formula $746 + 32 \cdot ext\_len$; `CONTENT-ENVELOPE.md:116`, `engine.rs:833`).
 
-写侧 `u = min(⌊body_grid_len/window⌋, ⌊slot_budget/window⌋, 64)`，且 ≥1；`slot_budget` 是 I 级性能旋钮（`v3_layout.rs:98-107`）。读侧不信预算，只信超块的 `stc_u` 并校验容量（`v3_layout.rs:60-68`）。
+1. `slots_buf = grid_indices(block_count, grid_rule)`, generated in ascending order of flat indices (`v3_layout.rs:134-143`).
+2. `permute_prefix(slots_buf, hdr_n, locate_seed)`: Executes the first $hdr\_n$ steps of forward Fisher–Yates over the entire Grid, taking the first $hdr\_n$ entries as header slots (`engine.rs:856-858`; `prng.rs:219-248`). Forward swapping ensures prefix stability, enabling readers to compute $hdr\_min = header\_slots(0)$ to decode the superblock before extending the permutation to actual $hdr\_n$ (`engine.rs:1257-1269`).
+3. Header slots $[0, 718)$ carry 352 bits decoded via $\text{STC}(sb\_h = 8, sb\_u = 2)$; $[718, hdr\_n)$ carry $8 \cdot ext\_len$ bits decoded via $\text{STC}(ext\_h = 8, ext\_u = 4)$ (`engine.rs:951-1003`). When $ext\_len = 0$, the trailing 28 slots are unwritten but remain reserved, never allocated to body data.
+4. $BodyGrid = Grid \setminus HdrSlots$, constructed in ascending order of flat indices (via sorted exclusion, prohibiting hash-set ordering; `v3_layout.rs:146-193`).
+5. $bits = 8 \cdot body\_len$; $window = bits + stc\_h - 1$; $body\_n = u \cdot window$ (`v3_layout.rs:98-108`).
+6. `permute_prefix(BodyGrid, body_n, perm_seed)`, then truncated to $body\_n$ (`engine.rs:1007-1008`, `:1330`). This generates a "uniformly random ordered sample of the full BodyGrid", **NOT a selection based on sorted costs**; legacy descriptions suggesting "select $N$ candidates then permute" are incorrect (`v3_layout.rs:22-24`).
 
-### 3.3 奇偶映射
-```text
-parity(c)     = c & 1              // 0 或 1
-carrier(c)    = 2 | parity(c)      // 写侧三元字母表 2/3
-```
+Writers select $u = \min(\lfloor body\_grid\_len / window \rfloor, \lfloor slot\_budget / window \rfloor, 64) \ge 1$; `slot_budget` is a Tier I performance tuning knob (`v3_layout.rs:98-107`). Readers evaluate the superblock's `stc_u` directly and verify capacity (`v3_layout.rs:60-68`).
 
-写侧先以 `2|parity` 送入 STC，再把 `−1/0/+1` 增量施加到原系数（`engine.rs:278-298`、`:482-483`）。读侧只取 `(c & 1)`，不区分 2 与 3（`engine.rs:1405-1410`）。
-
-## 4. 候选、排序与三元 STC（F/I）
-JPEG **没有**按代价的候选排序，也 **没有** `exclusion_permille`：44B 超块不携带该字段，引擎不读取它。正文槽顺序就是 §3.2 的置换顺序；代价只进入 STC trellis 的边权。因此第 4–7 节的代价全部是 I 级；"排序键"与 PNG 的 `exclusion_permille` 截断均不适用于 JPEG，不得移植。
-
-- 代价数组按 `bi*64 + k` 索引，分配 64 项/块；DC 固定为 `wet_cost`。
-- `plan_slots` 把代价截到 `min(cost, wet_cost)`，并按方向偏置拆分：偏置 `>0` 时 plus 价为 `base*polarize_weight`、minus 为 `base`；偏置 `<0` 反之（`engine.rs:445-453`）。
-- 方向选择：`rho_plus <= rho_minus` 取 `+1`，否则取 `−1`；平局取 `+1`（`rust/src/stego/coding/stc.rs:147-155`）。`0` 表示保留。
-- 两个方向都被 Huffman 表关闭时，`Move::Both` 但两价均为无穷，只剩"保留"可达（`engine.rs:454-478`）。
-
-三元 STC 写侧求解 `H·(c mod 2) = message`，增量 `δ ∈ {−1,0,+1}`（`stc.rs:515-809`、`:488-514`）。读侧综合逐位为：
+### 3.3 Parity Mapping
 
 ```text
-s(r) = XOR{ (col[si] >> (r-g)) & 1 ? (v[g*u+si] & 1) : 0 }
-       g ∈ [max(0, r-(h-1)), r], si ∈ [0, u)
-bit_b = s(b + h − 1)
+parity(c)  = c & 1              // 0 or 1
+carrier(c) = 2 | parity(c)      // Writer ternary alphabet 2 or 3
 ```
 
-（`stc.rs:408-449`）。前 `h−1` 行是 warm-up，不承载消息位。第三方读侧只需 `c & 1`，不需要知道代价、方向或 `2|parity`。
+Writers submit `2 | parity` into STC encoding, then apply $\delta \in \{-1, 0, +1\}$ modifications to original coefficients (`engine.rs:278-298`, `:482-483`). Readers extract `(c & 1)` directly, without distinguishing between 2 and 3 (`engine.rs:1405-1410`).
 
-## 5. UERD 代价模型（I）
+---
 
-入口 `UerdCostModel::compute_cost`，`rust/src/stego/jpeg/cost/uerd.rs:94-196`。
+## 4. Candidates, Sorting, and Ternary STC (Tier F/I)
 
-**系数口径**：输入是量化系数 `c[b][k]`；亮度量化表 `Q[k]` 取自文件 DQT 自然序，缺失时由引擎用 Annex K 回退，并逐项 `max(1)`（`uerd.rs:96`）。
+JPEG features **NO cost-based candidate sorting** and **NO `exclusion_permille`**: the 44B superblock contains no such field, and the engine never parses one. The sequence of body slots is governed strictly by the permutation in §3.2; costs feed exclusively into STC trellis edge weights. Consequently, costs in §§4–7 are Tier I; candidate sorting keys and PNG-style `exclusion_permille` truncation MUST NOT be applied to JPEG.
 
-**块能量**，对 `k = 1..63` 按升序累加：
+- The cost array is indexed via $bi \times 64 + k$, allocating 64 entries per block; DC entries are fixed to `wet_cost`.
+- `plan_slots` clamps costs to $\min(cost, wet\_cost)$ and splits directional costs: when bias $> 0$, the plus cost is $base \cdot polarize\_weight$ and minus cost is $base$; when bias $< 0$, costs invert (`engine.rs:445-453`).
+- Direction selection: if $\rho_{\text{plus}} \le \rho_{\text{minus}}$, pick $+1$; else pick $-1$; ties resolve to $+1$ (`rust/src/stego/coding/stc.rs:147-155`). $0$ signifies no modification.
+- If Huffman tables disallow both directions, both costs are set to infinity (`Move::Both`), leaving only "retain unmodified" reachable (`engine.rs:454-478`).
+
+Ternary STC encoding solves $H \cdot (c \bmod 2) = message$ with $\delta \in \{-1, 0, +1\}$ (`stc.rs:515-809`, `:488-514`). Reader syndrome extraction evaluates bit-by-bit:
+
+```text
+s(r) = XOR{ (col[si] >> (r - g)) & 1 ? (v[g * u + si] & 1) : 0 }
+       for g ∈ [max(0, r - (h - 1)), r], si ∈ [0, u)
+bit_b = s(b + h - 1)
+```
+
+(`stc.rs:408-449`). The first $h - 1$ rows represent warm-up states. Third-party readers require only `c & 1` and need no knowledge of costs, bias, or `2 | parity`.
+
+---
+
+## 5. UERD Cost Model (Tier I)
+
+Entry point: `UerdCostModel::compute_cost`, `rust/src/stego/jpeg/cost/uerd.rs:94-196`.
+
+**Coefficient Inputs**: Inputs are quantized coefficients $c[b][k]$; luminance quantization table $Q[k]$ is sourced from the file's DQT in natural order, falling back to Annex K defaults if missing, with each entry bounded by $\max(1)$ (`uerd.rs:96`).
+
+**Block Energy**, accumulated for $k = 1 \dots 63$ in ascending order:
 
 ```text
 E_b = Σ_{k=1}^{63} (|c[b][k]| & ~1) * Q[k]
 ```
 
-`& ~1` 把量化贡献变成 `|c|` 的阶梯函数（`|1|=0, |2|=2, |3|=2, |4|=4`），使一次 ±1 最多改变一个阶梯；并非"±1 不变"（`uerd.rs:98-116`）。
+`& ~1` maps quantization contributions into step functions of $|c|$ ($|1|=0, |2|=2, |3|=2, |4|=4$), ensuring a single $\pm 1$ alteration changes at most one step (`uerd.rs:98-116`).
 
-**块邻域**：块间用 component 0 在 MCU 填充网格上的 8 邻域（含对角），按 `dr ∈ {-1,0,1}`、`dc ∈ {-1,0,1}` 的固定顺序累加，跳过中心；越界或无对应块的填充格跳过，零能量块仍计入；邻居数 `n>0` 时：
+**Block Neighborhood**: Neighborhoods evaluate 8-connected neighbors of component 0 across MCU padding grids, accumulated in fixed order $dr \in \{-1, 0, 1\}, dc \in \{-1, 0, 1\}$, skipping the center; out-of-bounds cells or padding cells lacking corresponding blocks are skipped; zero-energy blocks are tallied. When neighbor count $n > 0$:
 
 ```text
 Ē_b = E_b + neighbor_weight * (Σ_{neighbors} E_n / n)
 ```
 
-无邻居时 `Ē_b = E_b`（`uerd.rs:131-167`）。默认 `neighbor_weight = 0.25`（`rust/src/stego/params.rs:594-604`）。
+When $n = 0$, $\bar{E}_b = E_b$ (`uerd.rs:131-167`). Default is $neighbor\_weight = 0.25$ (`rust/src/stego/params.rs:594-604`).
 
-**代价**：块平滑能量 `≤ 0` 时该块全部 AC 置 `wet_cost`；否则对 `k = 1..63`：
+**Cost Assignment**: If smoothed block energy $\le 0$, all AC coefficients in that block receive `wet_cost`; otherwise, for $k = 1 \dots 63$:
 
 ```text
 ρ[b][k] = min( Q[k] / Ē_b , wet_cost )
 ```
 
-`wet_cost` 默认 `1e13`（`params.rs:594-604`；`uerd.rs:177-193`）。全部数值为 f64，仅 `+ − * /`，无超越函数。
+`wet_cost` defaults to $10^{13}$ (`params.rs:594-604`; `uerd.rs:177-193`). Arithmetic is evaluated in f64 using only $+ - * /$, with no transcendental functions.
 
-## 6. J-UNIWARD 代价模型（I）
+---
 
-入口 `JuniwardCostModel::compute_cost`，`rust/src/stego/jpeg/cost/juniward.rs:112-179`。
+## 6. J-UNIWARD Cost Model (Tier I)
 
-**预处理**：按 `c*Q` 反量化并对每块做 8×8 IDCT，得到 MCU 填充的亮度平面（跳过 +128；`precover.rs:185-240`）。量化步长 `Q[k]` 取 `max(1)` 后转 f32（`juniward.rs:133-137`）。
+Entry point: `JuniwardCostModel::compute_cost`, `rust/src/stego/jpeg/cost/juniward.rs:112-179`.
 
-**方向滤波**：DB8 分解滤波逐字硬编码 10 位小数：
+**Preprocessing**: Coefficients are dequantized ($c \cdot Q$) and transformed via $8 \times 8$ IDCT for each block to yield an MCU-padded spatial luminance plane (skipping $+128$ level shift; `precover.rs:185-240`). Quantization steps $Q[k]$ take $\max(1)$ converted to f32 (`juniward.rs:133-137`).
+
+**Directional Wavelet Filters**: Daubechies 8 (DB8) decomposition filter taps are hardcoded to 10 decimal places:
 
 ```text
 −0.0544158422,  0.3128715909, −0.6756307363,  0.5853546837,
@@ -130,96 +144,104 @@ E_b = Σ_{k=1}^{63} (|c[b][k]| & ~1) * Q[k]
  0.0048703530, −0.0003917404, −0.0006754494, −0.0001174768
 ```
 
-（`rust/src/stego/wavelet.rs:23-40`）。平滑滤波 `lpdf[i] = (−1)^i * HPDF[15−i]`（`:42-53`）。三个子带按论文顺序 `(l,h) = 水平、(h,l) = 垂直、(h,h) = 对角`（`:61-68`）。
+(`rust/src/stego/wavelet.rs:23-40`). Smoothing filter evaluates $lpdf[i] = (-1)^i \cdot HPDF[15 - i]$ (`:42-53`). The three subbands evaluate in standard literature order: $(l, h)$ = Horizontal, $(h, l)$ = Vertical, $(h, h)$ = Diagonal (`:61-68`).
 
-**可分离残差**：对每个子带，先做水平卷积（`f2`，在 x 方向），再对水平结果做垂直卷积（`f1`，在 y 方向）：
+**Separable Residuals**: For each subband, evaluate horizontal convolution ($f_2$ along x-axis), followed by vertical convolution ($f_1$ along y-axis):
 
 ```text
-R[y][x] = Σ_{a=0..15} f1[a] * ( Σ_{b=0..15} f2[b] * plane[y+a−8][x+b−8] )
+R[y][x] = Σ_{a=0..15} f1[a] * ( Σ_{b=0..15} f2[b] * plane[y + a - 8][x + b - 8] )
 ```
 
-边界索引 `clamp(0, w−1)` / `clamp(0, h−1)`；两趟均按 `a` / `b` 升序与 `x` 升序累加（`juniward.rs:426-472`）。方向权重 `1/(|R|+σ)` 写成带 PAD 的 f32 平面，边界复制而非置零（`:474-517`）。
+Boundary indices clamp via $\text{clamp}(0, w - 1)$ / $\text{clamp}(0, h - 1)$; both passes accumulate ascendingly over $a, b$ and $x$ (`juniward.rs:426-472`). Directional weights $1 / (|R| + \sigma)$ form a padded f32 plane, repeating boundary values (`:474-517`).
 
-`σ` 默认 `2^-6 = 1/64 = 0.015625`，可由 `params.model_option("sigma", ...)` 覆盖，且 `max(MIN_POSITIVE)`（`juniward.rs:57-58`、`:133-136`）。
+$\sigma$ defaults to $2^{-6} = 1/64 = 0.015625$, overridable via `params.model_option("sigma", ...)`, bounded by $\max(\text{MIN\_POSITIVE})$ (`juniward.rs:57-58`, `:133-136`).
 
-**足迹与代价**：对块内 `(i,j)`，用同一对 `f1/f2` 与 DCT 基 `C` 生成 23-tap 一维响应：
+**Spatial Footprints and Costs**: For block coordinates $(i, j)$, evaluate 23-tap 1D responses against DCT basis $C$:
 
 ```text
-u_i[ky] = |Σ_a f1[a] * C[ky+a−15][i]|      // 仅 0 ≤ idx < 8 的项
-v_j[kx] = |Σ_b f2[b] * C[kx+b−15][j]|
+u_i[ky] = |Σ_a f1[a] * C[ky + a - 15][i]|      // For terms where 0 <= idx < 8
+v_j[kx] = |Σ_b f2[b] * C[kx + b - 15][j]|
 T_j[ky] = Σ_kx patch[ky][kx] * v_j[kx]
 S_i,j   = Σ_ky u_i[ky] * T_j[ky]
-ρ[bi][k=i*8+j] += Q[k] * S_i,j             // 每子带累加
+ρ[bi][k = i * 8 + j] += Q[k] * S_i,j           // Accumulated per subband
 ```
 
-`SUPPORT = 8+16−1 = 23`，`BASIS_SHIFT = 15`，`PAD = 24`；`i`、`j` 升序，k=0 跳过（`juniward.rs:61-101`、`:264-306`、`:544-576`）。三个子带固定按 `(l,h),(h,l),(h,h)` 顺序累加（`:206-209`）。最终 DC、非有限、`≤0` 或 `> wet_cost` 置湿（`:167-172`）。
+Parameters: $\text{SUPPORT} = 8 + 16 - 1 = 23$, $\text{BASIS\_SHIFT} = 15$, $\text{PAD} = 24$; $i, j$ ascending, skipping $k = 0$ (`juniward.rs:61-101`, `:264-306`, `:544-576`). Subbands accumulate in order $(l, h), (h, l), (h, h)$ (`:206-209`). Finally, DC, non-finite, $\le 0$, or $> wet\_cost$ entries are set to $wet\_cost$ (`:167-172`).
 
-**确定性**：`params.deterministic == true` 时强制标量 dot（4 个累加槽、`PAD` 升序，无 SIMD）；否则 x86 上可走 AVX2+FMA `sweep_avx2`（`juniward.rs:148-152`、`:332-423`）。逐位基线与平台迁移必须使用确定性路径。
+**Determinism**: When `params.deterministic == true`, a scalar dot-product loop is enforced (4 accumulation registers, ascending `PAD`, no SIMD); otherwise AVX2+FMA `sweep_avx2` may run on x86 (`juniward.rs:148-152`, `:332-423`). Baselines and cross-platform verification MUST use the deterministic scalar path.
 
-## 7. J-MiPOD 代价模型（I）
+---
 
-入口 `JmipodCostModel::compute_cost`，`rust/src/stego/jpeg/cost/jmipod.rs:77-160`。
+## 7. J-MiPOD Cost Model (Tier I)
 
-**空间方差**：`estimate_variance(plane, pw, ph, p=3, degree=3, wiener_window=2, floor=1e-6)`；Wiener 残差采用 Matlab `wiener2` 的偶数窗、左上锚定、零填充语义。`dof = 3*3 − 3*4/2 = 3`，逐像素 `σ² = max(1e-6, ‖P⊥r‖²/dof)`（`jmipod.rs:48-58`、`rust/src/stego/spatial_variance.rs:371-405`）。
+Entry point: `JmipodCostModel::compute_cost`, `rust/src/stego/jpeg/cost/jmipod.rs:77-160`.
 
-**DCT 方差传播**：
+**Spatial Variance**: Evaluates $\text{estimate\_variance}(plane, pw, ph, p=3, degree=3, wiener\_window=2, floor=10^{-6})$; Wiener residuals adhere to Matlab `wiener2` semantics (even window, top-left anchor, zero-padding). With $dof = 3 \times 3 - 3 \times 4 / 2 = 3$, per-pixel $\sigma^2 = \max(10^{-6}, \|P_\perp r\|^2 / dof)$ (`jmipod.rs:48-58`, `rust/src/stego/spatial_variance.rs:371-405`).
+
+**DCT Variance Propagation**:
 
 ```text
-Var_dct[v,u]   = Σ_{y,x} C[y,v]² * C[x,u]² * σ²[y,x]
-Var_q[k]       = max( Var_dct[k] / Q[k]², 1e-5 )
-Fisher[k]      = 2 / Var_q[k]²                  // k = 1..63；DC 不活跃
+Var_dct[v, u] = Σ_{y, x} C[y, v]^2 * C[x, u]^2 * σ^2[y, x]
+Var_q[k]      = max( Var_dct[k] / Q[k]^2, 1e-5 )
+Fisher[k]     = 2 / Var_q[k]^2                  // k = 1..63; DC is inactive
 ```
 
-（`jmipod.rs:109-131`、`:175-210`）。`Q[k]` 为 `max(1)` 的 DQT 值，`Q²` 逐项平方（`:117`）。
+(`jmipod.rs:109-131`, `:175-210`). $Q[k]$ uses $\max(1)$ DQT values; $Q^2$ squares term-by-term (`:117`).
 
-**参考载荷**：`nz_ac` = component 0 全部非零 AC 数；为 0 时回退 `total_blocks*63`。`α` 默认 `0.20` bit/non-zero-AC，可在 `[0.01,0.90]` 覆盖；`target_bits = α*nz_ac`（`jmipod.rs:133-149`）。
+**Reference Payload**: $nz\_ac$ counts non-zero AC coefficients in component 0; if 0, falls back to $total\_blocks \times 63$. Target rate $\alpha$ defaults to $0.20$ bits per non-zero AC, overridable within $[0.01, 0.90]$; $target\_bits = \alpha \cdot nz\_ac$ (`jmipod.rs:133-149`).
 
-**标定与量化**：`fisher_to_costs(fisher, target_bits)`（`rust/src/stego/cost_calibration.rs:206-338`）：
+**Calibration and Quantization**: `fisher_to_costs(fisher, target_bits)` (`rust/src/stego/cost_calibration.rs:206-338`):
 
-1. `ln(Fisher)`，非有限/`≤0` 记为 `−∞`（inactive）；`REDUCTION_CHUNK = 2^18` 保证分块归约逐位一致（`cost_calibration.rs:55-57`、`:214-241`）。
-2. 三元容量 `active*ln 3`，目标 `target = min(target_bits*ln 2, capacity*0.999)`；`LN_3 = 1.0986122886681098`（`:48`、`:249-251`）。
-3. 在 `[u_min,u_max]` 建 `BINS = 32768` 的均匀 log-Fisher 直方图（`:50-53`、`:106-124`）。
-4. 求根 `ρ*(e^ρ+2) = x` 用 Newton：初值 `ln_1p(x)`、32 轮、停机 `1e-14*(1+|ρ|)`、步长截到 `ρ≥0`、`x` 上限 `1e300`（`:59-81`）。
-5. 外层 Lagrange 乘子用 Illinois：初始括区 `t_lo = −max_log−30`，`t_hi = −min_log+5`，各方向最多 100 次 `±10` 扩张；80 轮，停机 `1e-12*max(target,1)`，最终插值（`:259-326`）。
-6. `quantize_cost` 清低 20 位尾数（量子 `2^-32`），`0/负/非有限` 原样返回（`:340-379`）。
+1. Compute $\ln(Fisher)$; non-finite / $\le 0$ entries are marked $-\infty$ (inactive); chunked reduction (`REDUCTION_CHUNK = 2^18`) ensures bit-for-bit consistency (`cost_calibration.rs:55-57`, `:214-241`).
+2. Ternary capacity evaluates as $active \cdot \ln(3)$; $target = \min(target\_bits \cdot \ln(2), capacity \cdot 0.999)$; $LN\_3 = 1.0986122886681098$ (`:48`, `:249-251`).
+3. Construct uniform log-Fisher histogram over $[u_{\min}, u_{\max}]$ with $BINS = 32768$ (`:50-53`, `:106-124`).
+4. Root finding for $\rho \cdot (e^\rho + 2) = x$ uses Newton's method: initial value $\ln\_1p(x)$, 32 iterations, termination tolerance $10^{-14} \cdot (1 + |\rho|)$, step clamped to $\rho \ge 0$, $x$ capped at $10^{300}$ (`:59-81`).
+5. Lagrange multiplier search uses Illinois method: initial brackets $t_{\text{lo}} = -max\_log - 30, t_{\text{hi}} = -min\_log + 5$, up to 100 expansions by $\pm 10$; 80 iterations, tolerance $10^{-12} \cdot \max(target, 1)$, final interpolation (`:259-326`).
+6. `quantize_cost` clears lower 20 mantissa bits (quantum $2^{-32}$); zero, negative, and non-finite values return unmodified (`:340-379`).
 
-代价返回后再做：DC、非有限、`≤0`、`> wet_cost` 全部置为 `wet_cost`（`jmipod.rs:154-158`）。本模型的超越函数只经 `detmath`：DCT 基用 `cos`（§8），标定用 `ln`/`ln_1p`/`exp`（`cost_calibration.rs:214-220`、`:68-72`、`:99-102`）。J-MiPOD 的量化代价**直接作为 trellis 边权**，不经过排序；DETMATH.md 中"只参与排序"的表述不适用于 JPEG。
+Post-calibration: DC, non-finite, $\le 0$, and $> wet\_cost$ entries are forced to $wet\_cost$ (`jmipod.rs:154-158`). Transcendental functions evaluate strictly via `detmath`: DCT basis uses `cos` (§8); calibration uses `ln / ln_1p / exp` (`cost_calibration.rs:214-220`, `:68-72`, `:99-102`). Under J-MiPOD, quantized costs **serve directly as STC trellis edge weights** without candidate sorting; notes in `DETMATH.md` regarding "sorting only" do not apply to JPEG.
 
-**方向偏置**：仅当 `polarize_weight != 1.0` 时返回 `precover::bias(..., dead_zone=0.0)`；偏置来自反量化→Wiener 3×3→前向 DCT→再量化的估计差（`jmipod.rs:162-172`；`precover.rs:126-150`、`:281-300`）。
+**Directional Bias**: Generated via `precover::bias(..., dead_zone=0.0)` only when $polarize\_weight \ne 1.0$; bias is computed from differences in dequantization $\to$ Wiener $3 \times 3 \to$ forward DCT $\to$ requantization (`jmipod.rs:162-172`; `precover.rs:126-150`, `:281-300`).
 
-**与空间域 MiPOD 的差异**：JPEG 在亮度平面上估计空间方差后传播到 DCT 域，并除以 `Q[k]²`；空间域直接在像素上估计并用 `p=9/l=9`、`floor=0.01`。J-MiPOD 用 `p=3/l=3`、仅 `1e-6` 数值下限；不做空间域的 FI 图平滑（连 3×3 后滤波也不做）；参考速率是 bit/non-zero-AC（`jmipod.rs:30-34`、`:47-58`），空间域是 bit/可嵌入像素。
+**Differences from Spatial MiPOD**: JPEG estimates spatial variance on the luminance plane before projecting into the DCT domain and dividing by $Q[k]^2$; Spatial MiPOD operates on pixels directly with $p = 9, l = 9, floor = 0.01$. J-MiPOD uses $p = 3, l = 3, floor = 10^{-6}$; it omits spatial Fisher smoothing entirely (no $3 \times 3$ post-filter); reference rate is bits per non-zero AC (`jmipod.rs:30-34`, `:47-58`), whereas spatial domain uses bits per embeddable pixel.
 
-## 8. precover 与 DCT 基（I）
+---
 
-`dct_basis()[x][u] = 0.5 * c_u * cos((2x+1)uπ/16)`，`c_0 = 1/√2`，其余 `c_u = 1`；`x` 外层、`u` 内层升序生成（`precover.rs:46-64`）。`cos` 必须走 `detmath::cos`（Cody–Waite 三段 `π/2` 归约 + 多项式），不得调用 libm；这是 `rust/src/stego/detmath.rs:298-312` 的逐位实现，摘要见 DETMATH.md §6。
+## 8. Precover and DCT Basis (Tier I)
 
-- **硬编码表**：只有 DB8 的 16 个 tap（§6）按 10 位小数逐字冻结；`lpdf` 由它反序变号生成，不另存表。DCT 基没有 64 项硬编码表，运行时由 `detmath::cos` 生成。
-- **IDCT**：`idct_block` 按 `B = C·F·C^T` 的两趟矩阵乘实现（前向为 `F = C^T·B·C`），`sum` 顺序为 `v` / `u` 升序（`precover.rs:67-118`）。`decompress_luma` 对每块 64 个系数全部反量化后 IDCT，跳过 +128 level shift（`:185-240`）。
-- **禁止 FMA**：标量与确定性路径禁止 `a*b+c` 收缩、禁止重结合、禁止 `fp-contract`（DETMATH.md §8）。J-UNIWARD 的 AVX2+FMA 只在 `deterministic == false` 时可选；基线必须走标量。
-- 若第三方不追求逐字节复现，只要求互读，则代价模型整体为 I 级，可完全不实现本节；只要写出的系数满足 §4 的综合方程即可。
+$dct\_basis()[x][u] = 0.5 \cdot c_u \cdot \cos((2x + 1)u\pi / 16)$, where $c_0 = 1/\sqrt{2}$ and $c_u = 1$ otherwise; generated with outer $x$ and inner $u$ ascending (`precover.rs:46-64`). $\cos$ MUST invoke `detmath::cos` (Cody–Waite 3-stage $\pi/2$ reduction + polynomial), never host `libm` (`rust/src/stego/detmath.rs:298-312`; digests in DETMATH.md §6).
 
-## 9. 写侧非规范性约束（I）
+- **Hardcoded Constants**: Only the 16 taps of DB8 (§6) are frozen to 10 decimal places; `lpdf` is generated dynamically by reversing and alternating signs. The DCT basis has no hardcoded 64-element table; it is generated dynamically via `detmath::cos`.
+- **IDCT**: `idct_block` implements two-pass matrix multiplication $B = C \cdot F \cdot C^T$ (forward is $F = C^T \cdot B \cdot C$), accumulating over $v$ then $u$ ascending (`precover.rs:67-118`). `decompress_luma` dequantizes and evaluates IDCT over all 64 coefficients per block, skipping $+128$ level shifts (`:185-240`).
+- **FMA Prohibited**: Scalar and deterministic paths forbid $a \cdot b + c$ contraction, reassociation, and `fp-contract` (DETMATH.md §8). AVX2+FMA in J-UNIWARD is permitted only when `deterministic == false`; baseline checks must run scalar.
+- Third parties seeking interoperability without bit-for-bit baseline replication may treat cost models as Tier I and omit this section, provided output coefficients satisfy §4.
 
-- **模型选择**：默认 UERD；J-UNIWARD、J-MiPOD 由调用者选择，不写入任何头字段（`engine.rs:1195-1216` 的读路径无模型参数）。
-- **质量与表选择**：不做转码或重压缩，不选择新质量因子。`dct_io::write_coefficients` 用原文件的 Huffman 表重编码熵编码扫描段，EXIF/ICC/DQT/DHT 等所有非熵编码段逐字节保留（`dct-io-0.1.1/src/lib.rs:179-207`；`engine.rs:1057`）。
-- **"原 JPEG 还原"**：非扫描段与输入逐字节相同；系数值不变时像素完全相同，但熵编码扫描段由本实现重新写出，**不保证与原文件扫描字节逐字节相同**。内容域不提供 bit-exact restore（restore 属结构域，`rust/src/cli/args.rs:93`），第三方若需原扫描字节必须另存。基线在 seed 模式比较整个 stego 的 SHA-256（`scripts/baseline_hash.py:368`）与提取载荷文本（`:380-382`），不比较原扫描字节。
-- **确定性**：`Freshness::Seeded` 使同一载体与同一参数逐字节可复现；`deterministic` 禁用 SIMD 选择（`engine.rs:586-589`）。重试第 1..6 轮（`EMBED_ATTEMPTS = 6`，`engine.rs:562`）；仅"缺失 Huffman 符号"可重试，失败轮用 `applied` 回滚系数（`:773-806`、`:1160`）。每轮 salt/nonce 由 attempt 派生，故重试后头字段不同；读侧从实际超块读取，不依赖轮数。
-- **deflate**：载荷可压缩时用 Deflate（唯一算法），级别为 `Compression::default()`（level 6）；仅在更小时使用，读侧按 flags 总是解压（`rust/src/stego/envelope.rs:372-401`）。
-- **Huffman 交叉零惩罚**：表存在时，跨零 `0↔±1` 的重复 run 乘 `CROSS_ZERO_REPEAT_PENALTY = 1000`；同块已有该 run 时置 `wet_cost*1000`，并禁止擦除 `±1`（`engine.rs:303`、`:407-442`）。此为写侧启发式，不影响可读性。
-- **扩展区 critical**：写侧拒绝 critical TLV；读侧遇到 critical 降级为无隐藏数据（`CONTENT-ENVELOPE.md:107-110`）。
+---
 
-## 10. 自检
+## 9. Writer-Only Non-Normative Implementation Constraints (Tier I)
+
+- **Model Selection**: Defaults to UERD; J-UNIWARD and J-MiPOD are selected by callers and unrecorded in headers (`engine.rs:1195-1216` read path contains no model parameters).
+- **Quality and Table Preservation**: No transcoding or recompression is performed, and no new quality factor is selected. `dct_io::write_coefficients` re-encodes entropy scan segments using the file's original Huffman tables; non-entropy markers (EXIF, ICC, DQT, DHT) are preserved byte-for-byte (`dct-io-0.1.1/src/lib.rs:179-207`; `engine.rs:1057`).
+- **"Original JPEG Restoration"**: Non-scan segments match input byte-for-byte; unedited coefficients yield identical pixel values, but rewritten entropy-coded scan bytes **are not guaranteed to match original scan bytes bit-for-bit**. Content domain does not support bit-exact restoration (restoration is exclusive to structural domain, `rust/src/cli/args.rs:93`). Baselines compare full stego SHA-256 (`scripts/baseline_hash.py:368`) and extracted payload text (`:380-382`), not original scan bytes.
+- **Determinism**: `Freshness::Seeded` guarantees bit-for-bit reproducibility for identical carriers and parameters; `deterministic` disables SIMD paths (`engine.rs:586-589`). Retries execute attempts 1..6 (`EMBED_ATTEMPTS = 6`, `engine.rs:562`); only missing Huffman symbols trigger retries, rolling back coefficients on failure (`:773-806`, `:1160`). Salt and nonce are derived per attempt, altering header bytes; readers decode actual header bytes independently of retry counts.
+- **Deflate**: Compresses payload via Deflate when advantageous, using `Compression::default()` (level 6); used only when strictly smaller; readers always decompress according to flags (`rust/src/stego/envelope.rs:372-401`).
+- **Huffman Cross-Zero Penalty**: When Huffman tables exist, repeated zero-crossing runs ($0 \leftrightarrow \pm 1$) are penalized via $CROSS\_ZERO\_REPEAT\_PENALTY = 1000$; duplicate runs within a block receive $wet\_cost \times 1000$ and disallow erasing $\pm 1$ (`engine.rs:303`, `:407-442`). This is a writer heuristic transparent to readers.
+- **Extension Region Critical Flag**: Writers reject critical TLVs; readers degrade critical TLVs to `NoHiddenData` (`CONTENT-ENVELOPE.md:107-110`).
+
+---
+
+## 10. Self-Verification
 
 ```bash
 cd rust
-cargo build --release --all-features          # 更新 target/release/strhide
-cargo test --all-features --all-targets       # JPEG 槽位、STC、代价、往返
-cargo test --all-features jpeg                # 仅 JPEG 相关用例
-python ../scripts/import_lint.py              # 分层依赖
-python ../scripts/cost_vectors_check.py       # 仅覆盖空间域 MiPOD，无 JPEG 向量
+cargo build --release --all-features          # Updates target/release/strhide
+cargo test --all-features --all-targets       # Tests JPEG slots, STC, costs, round-trips
+cargo test --all-features jpeg                # Runs JPEG-specific test cases
+python ../scripts/import_lint.py              # Architecture dependency boundary check
+python ../scripts/cost_vectors_check.py       # Validates spatial MiPOD vectors (no JPEG vectors)
 python ../scripts/baseline_hash.py --check --only jpg
 ```
 
-- `cost-vectors`：当前 `docs/api/cost-vectors.json` 只有空间域 MiPOD 的固定向量，JPEG 三套模型没有对外向量文件；第三方逐位复现必须依赖本文公式、`detmath` 摘要与基线，而不是该文件。
-- 基线：`baseline_hash.py` 的 JPEG 语料为 `uerd` / `juniward` / `jmipod` 三组（`scripts/baseline_hash.py:85-91`），`--only jpg` 可过滤；`--write` 只能全量冻结（`:528-560`）。
-- 确定性数值：`detmath` 的 `exp/ln/cos/ln_1p/log2` 摘要必须匹配 DETMATH.md §9；任何采样、置换、STC 或代价常数改动都要重建 JPEG 基线。
+- `cost-vectors`: `docs/api/cost-vectors.json` contains fixed vectors for spatial MiPOD only; JPEG cost models do not maintain external vector files. Third parties replicating bit-for-bit output must verify against formulas, `detmath` digests, and baselines.
+- Baseline: `baseline_hash.py` covers JPEG across `uerd` / `juniward` / `jmipod` (`scripts/baseline_hash.py:85-91`); filterable via `--only jpg`.
+- Numerical Determinism: `detmath` digests for `exp / ln / cos / ln_1p / log2` MUST match DETMATH.md §9; modifying sampling, permutations, STC, or cost parameters requires rebuilding JPEG baselines.

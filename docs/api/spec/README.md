@@ -1,136 +1,134 @@
-# strhide 线格式规范（总览与索引）
+# strhide Wire Format Specification (Overview and Index)
 
-> 适用范围：`strhide` 0.9.x（线格式：结构域 **UBE v2**，内容域 **V4 内容信封**）。
-> 本目录是**规范性文档**，目标是让第三方在不阅读 Rust 源码的情况下实现可互操作的读写器。
-> 参考实现：`rust/src`；模块职责见 [../ARCHITECTURE.md](../ARCHITECTURE.md)，公开 API 见 [../STEGO-API.md](../STEGO-API.md)。
+> Scope: `strhide` 0.9.x (Wire format: Structural domain **UBE v2**, Content domain **V4 Content Envelope**).  
+> This directory contains **normative specifications**, intended to enable third parties to implement fully interoperable readers and writers without inspecting the Rust source code.  
+> Reference implementation: `rust/src`; see [../ARCHITECTURE.md](../ARCHITECTURE.md) for module responsibilities, and [../STEGO-API.md](../STEGO-API.md) for public APIs.
 
 ---
 
-## 0. 文档地图
+## 0. Document Map
 
-### 公共层
+### Common Layer
 
-| 文档 | 主题 |
+| Document | Topic |
 |---|---|
-| [CRYPTO.md](./CRYPTO.md) | 两域密钥派生、HKDF 标签、AEAD、AAD、stealth 掩码、PE 信道头掩码 |
-| [DETMATH.md](./DETMATH.md) | 确定性浮点数学库（`exp`/`ln`/`ln_1p`/`cos`/`log2`）的规范性定义 |
-| [CAPACITY.md](./CAPACITY.md) | 两域容量公式、扩展槽、工作内存预算与全部限额 |
+| [CRYPTO.md](./CRYPTO.md) | Dual-domain key derivation, HKDF labels, AEAD, AAD, stealth masks, PE channel header mask |
+| [DETMATH.md](./DETMATH.md) | Normative definitions of deterministic floating-point math library (`exp`/`ln`/`ln_1p`/`cos`/`log2`) |
+| [CAPACITY.md](./CAPACITY.md) | Dual-domain capacity formulas, extension slots, working memory budgets, and all operational limits |
 
-### 内容域（`embed` / `extract`）
+### Content Domain (`embed` / `extract`)
 
-| 文档 | 主题 |
+| Document | Topic |
 |---|---|
-| [CONTENT-ENVELOPE.md](./CONTENT-ENVELOPE.md) | 微头、三套基础头、flags/TLV、槽位模型、ChaCha12/置换、STC、失败语义 |
-| [CONTENT-PNG.md](./CONTENT-PNG.md) | PNG 像素槽位、HILL / S-UNIWARD / MiPOD 代价模型、候选排序 |
-| [CONTENT-JPEG.md](./CONTENT-JPEG.md) | JPEG DCT 网格、超块、UERD / J-UNIWARD / J-MiPOD、三元 STC |
-| [CONTENT-HEVC.md](./CONTENT-HEVC.md) | HEVC/HEIF CABAC 符号位槽位、分带、线性置换、窗口与防竞争 |
-| [CONTENT-AUDIO.md](./CONTENT-AUDIO.md) | WAV PCM 采样域、FLAC 残差域、Feistel 置换、thin_pick、重试 |
+| [CONTENT-ENVELOPE.md](./CONTENT-ENVELOPE.md) | Micro-header, three base header layouts, flags/TLV, slot model, ChaCha12/permutation, STC, failure semantics |
+| [CONTENT-PNG.md](./CONTENT-PNG.md) | PNG pixel slots, HILL / S-UNIWARD / MiPOD cost models, candidate sorting |
+| [CONTENT-JPEG.md](./CONTENT-JPEG.md) | JPEG DCT grid, superblocks, UERD / J-UNIWARD / J-MiPOD, ternary STC |
+| [CONTENT-HEVC.md](./CONTENT-HEVC.md) | HEVC/HEIF CABAC sign bit slots, banding, linear permutation, windows, and race prevention |
+| [CONTENT-AUDIO.md](./CONTENT-AUDIO.md) | WAV PCM sample domain, FLAC residual domain, Feistel permutation, thin_pick, retry loop |
 
-### 结构域（`write` / `restore`）
+### Structural Domain (`write` / `restore`)
 
-| 文档 | 主题 |
+| Document | Topic |
 |---|---|
-| [STRUCTURE-ENVELOPE.md](./STRUCTURE-ENVELOPE.md) | UBE v2：112B header、hint、meta、分块载荷、24B trailer、stealth、PE ChannelHeader |
-| [STRUCTURE-PNG.md](./STRUCTURE-PNG.md) | PNG `prIv` 块注入 |
-| [STRUCTURE-JPEG.md](./STRUCTURE-JPEG.md) | JPEG APP 段注入 |
-| [STRUCTURE-RIFF.md](./STRUCTURE-RIFF.md) | WAV / WebP 的 RIFF chunk 注入 |
-| [STRUCTURE-ISOBMFF.md](./STRUCTURE-ISOBMFF.md) | MP4/MOV 与 HEIF/HEIC 的 box / item 注入 |
-| [STRUCTURE-ZIP.md](./STRUCTURE-ZIP.md) | ZIP 中央目录前注入 |
-| [STRUCTURE-PDF.md](./STRUCTURE-PDF.md) | PDF 增量更新注入 |
+| [STRUCTURE-ENVELOPE.md](./STRUCTURE-ENVELOPE.md) | UBE v2: 112B header, hint, meta, chunked payload, 24B trailer, stealth, PE ChannelHeader |
+| [STRUCTURE-PNG.md](./STRUCTURE-PNG.md) | PNG `prIv` chunk injection |
+| [STRUCTURE-JPEG.md](./STRUCTURE-JPEG.md) | JPEG APP segment injection |
+| [STRUCTURE-RIFF.md](./STRUCTURE-RIFF.md) | WAV / WebP RIFF chunk injection |
+| [STRUCTURE-ISOBMFF.md](./STRUCTURE-ISOBMFF.md) | MP4/MOV and HEIF/HEIC box / item injection |
+| [STRUCTURE-ZIP.md](./STRUCTURE-ZIP.md) | ZIP injection before Central Directory |
+| [STRUCTURE-PDF.md](./STRUCTURE-PDF.md) | PDF incremental update injection |
 | [STRUCTURE-PE.md](./STRUCTURE-PE.md) | PE overlay / codebits / slack |
-| [STRUCTURE-MKV.md](./STRUCTURE-MKV.md) | Matroska/WebM 的 EBML Void 注入 |
+| [STRUCTURE-MKV.md](./STRUCTURE-MKV.md) | Matroska/WebM EBML Void injection |
 
-历史文档（**非规范**，仅保留链接与旧编号）：[../WIRE_SPEC_CONTENT.md](../WIRE_SPEC_CONTENT.md)、
-[../WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md)。规范与旧文冲突时**以本目录为准**；
-已知差异汇总见 [CORRECTIONS.md](./CORRECTIONS.md)。
+Historical documents (**non-normative**, links and old section numbering preserved for reference): [../WIRE_SPEC_CONTENT.md](../WIRE_SPEC_CONTENT.md), [../WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md). When this specification conflicts with older documents, **this directory takes precedence**; see [CORRECTIONS.md](./CORRECTIONS.md) for a summary of known differences.
 
 ---
 
-## 1. 两个隐写域
+## 1. The Two Steganographic Domains
 
-strhide 有**两套互不兼容的信封**，派生域隔离，不能交叉读取。
+`strhide` defines **two mutually incompatible envelope schemes** with isolated key derivation domains that cannot be cross-read.
 
-| 维度 | 结构域（`write` / `restore`） | 内容域（`embed` / `extract`） |
+| Dimension | Structural Domain (`write` / `restore`) | Content Domain (`embed` / `extract`) |
 |---|---|---|
-| 信封 | UBE v2：`112B header` + hint + meta + 分块载荷 + `24B trailer` | 密钥化基础头（空间 64B / JPEG 44B / HEVC 32B）+ 可选 TLV + 单个 AEAD 正文 |
-| 静态特征 | 有 8B 头魔数 + 4B 尾魔数（stealth 模式为密码派生） | 无固定魔数；`magic4` 由 L2 派生 |
-| 字节序 | **小端** | 多字节字段**大端**（`sigma` 例外：f32 小端） |
-| 载荷 | 分块 AEAD，每块 `u32 LE` 长度前缀，chunk AAD 含 index/is_last | 一次性 AEAD，无分块 |
-| 元数据 | 文件名、原始大小、SHA-256、创建时间（独立 AEAD 块） | 密文内微头：4B 原始长度 + 1B flags + 文件名 |
-| 宿主还原 | 支持 bit-for-bit `restore`（记录宿主 size + SHA-256） | **不可逆**，像素/系数被改即不可恢复 |
-| 无密码默认密钥 | `BUILTIN_DEFAULT_KEY` | `PUBLIC_DEFAULT_SECRET` |
-| 压缩 | raw deflate；`Auto` 需节省 ≥2% | raw deflate；压缩后严格小于原文才保留 |
+| Envelope | UBE v2: `112B header` + hint + meta + chunked payload + `24B trailer` | Key-derived base header (Spatial 64B / JPEG 44B / HEVC 32B) + optional TLV + single AEAD body |
+| Static Signatures | Fixed 8B header magic + 4B trailer magic (password-derived in stealth mode) | No fixed magic; `magic4` is derived via L2 |
+| Endianness | **Little-endian** | Multi-byte fields are **Big-endian** (`sigma` is the exception: f32 LE) |
+| Payload | Chunked AEAD; each chunk has a `u32 LE` length prefix; chunk AAD contains index/is_last | One-shot AEAD, unchunked |
+| Metadata | Filename, original size, SHA-256, creation time (independent AEAD block) | Micro-header inside ciphertext: 4B original length + 1B flags + filename |
+| Cover Restoration | Supports bit-for-bit `restore` (records cover size + SHA-256) | **Irreversible**; cover pixels/coefficients are altered and cannot be recovered |
+| Passwordless Default Key | `BUILTIN_DEFAULT_KEY` | `PUBLIC_DEFAULT_SECRET` |
+| Compression | raw deflate; `Auto` requires saving ≥ 2% | raw deflate; retained only if strictly smaller than plaintext |
 
-两域不得混用派生标签、AAD 或默认密钥；任何交叉读取都应返回“无隐藏数据”。
+Derivation labels, AADs, or default keys must never be mixed across the two domains. Any cross-read must return "no hidden data".
 
 ---
 
-## 2. 规范性约定
+## 2. Normative Conventions
 
-### 2.1 语言
+### 2.1 Language and Conformance
 
-- **必须 / 禁止**：实现为通过一致性所需的最低要求；**应当**：推荐但可偏离，偏离需在实现说明中注明。
-- 所有常量、字段偏移、公式都尽量给出参考实现的位置（`rust/src/...:行`）。这些位置是**证据**，不是规范的一部分；行号随代码演进可能漂移。
-- “当前实现的事实标准”会显式标注 **I 级**（见 §2.3）：它描述参考实现如何写出字节，但读侧不依赖它。
+- **MUST / MUST NOT**: Strict requirements necessary for interoperability; **SHOULD / SHOULD NOT**: Recommended defaults from which implementations may deviate if documented.
+- All constants, field offsets, and formulas provide references to the reference implementation (`rust/src/...:line`). These locations serve as **evidence**, not normative specifications; line numbers may drift as the codebase evolves.
+- De facto behaviors of the current reference implementation are explicitly labeled **Tier I** (see §2.3): they describe how the reference implementation writes bytes, but reader implementations MUST NOT depend on them.
 
-### 2.2 字节序与位序
+### 2.2 Endianness and Bit Ordering
 
-- 结构域：除特别注明外一律**小端**（header/trailer/meta/chunk 长度）。
-- 内容域：基础头与 HKDF info 中的多字节字段一律**大端**；`sigma` 字段是 **f32 小端**。
-- 位打包：字节内 **MSB-first**（bit 7 是第一个槽/消息位），除非某个结构显式说明按低位优先。
-- CRC：两域均用 **CRC32-IEEE**（反射多项式 `0xEDB88320`，初值 `0xFFFFFFFF`，结果取反）。
+- Structural Domain: **Little-endian** across all fields unless explicitly noted otherwise (header / trailer / meta / chunk lengths).
+- Content Domain: Base header and HKDF info multi-byte fields are **Big-endian**; the `sigma` field is **f32 little-endian**.
+- Bit Packing: Byte-internal bit ordering is **MSB-first** (bit 7 is the first slot/message bit), unless a structure explicitly specifies LSB-first.
+- CRC: Both domains use **CRC32-IEEE** (reflected polynomial `0xEDB88320`, initial value `0xFFFFFFFF`, inverted output).
 
-### 2.3 稳定性分级
+### 2.3 Stability Tiers
 
-| 级别 | 含义 | 改动后果 |
+| Tier | Meaning | Impact of Changes |
 |---|---|---|
-| **F 冻结** | 已写出的载体依赖它 | 改动使旧载体不可读；1.0 前仍可能变更，但必须记录为不兼容变更 |
-| **D 方言** | 可通过编译期 Profile/标签替换 | 不破坏官方载体，但产生独立方言；官方实现读不回 |
-| **I 实现自由** | 只影响“写成什么样”，不影响“能否读出” | 读侧不依赖；可随实现优化，需由字节级基线守住本仓库的输出 |
+| **F (Frozen)** | Written carriers depend on it | Any change renders existing carriers unreadable; changes before 1.0 require explicit tracking as breaking changes |
+| **D (Dialect)** | Substitutable via compile-time profiles/labels | Does not corrupt official carriers, but produces an isolated dialect unreadable by official builds |
+| **I (Implementation Freedom)** | Affects writing behavior only, not readability | Readers do not depend on it; free to optimize as long as byte-level baselines protect repository output |
 
-**1.0 之前，任何 F 级内容仍可能变动。** 版本策略：
+**Prior to 1.0, any Tier F specification remains subject to change.** Versioning policy:
 
-- `CipherSuiteId`、`strategy_id`、`format_id`、`algorithm_id`、TLV `type_id` 均为 **append-only**：只能新增值，不能改变既有值的语义。
-- 版本字段（`version`、`CURRENT_VERSION`、`compact meta version`、`CHANNEL_VERSION`）只升不降；未知版本 fail-closed。
-- 不提供旧版本读路径（项目尚未发布）。读到旧版本应返回明确的“不支持版本”或无数据，而不是猜测布局。
+- `CipherSuiteId`, `strategy_id`, `format_id`, `algorithm_id`, and TLV `type_id` are **append-only**: new values may be added, but existing semantics cannot be altered.
+- Version fields (`version`, `CURRENT_VERSION`, `compact meta version`, `CHANNEL_VERSION`) are strictly monotonically increasing; unrecognized versions fail-closed.
+- No legacy read paths are provided (pre-release project). Reading an unsupported version MUST return an explicit "unsupported version" or absence of data rather than guessing layouts.
 
-### 2.4 参考实现的边界
+### 2.4 Reference Implementation Scope
 
-- `analysis` 域的检测/估计仍使用宿主 `libm`，**不参与字节输出**；所有影响输出的浮点运算必须遵循 [DETMATH.md](./DETMATH.md)。
-- 参考实现中的 SIMD、并行、压缩级别、重试轮数属于 I 级；读侧不得依赖其具体选择。
-- 本规范不承诺“与参考实现逐位一致”即可互操作；互操作的判据是**能读取对方写出的合法载体**。字节级基线仅用于守护本仓库自身输出。
-
----
-
-## 3. 第三方实现路线（建议顺序）
-
-1. 读 [CRYPTO.md](./CRYPTO.md)，实现 NFC、PBKDF2、HKDF、AES-256-GCM / ChaCha20-Poly1305。
-2. 选择目标域：
-   - 内容域：读 [CONTENT-ENVELOPE.md](./CONTENT-ENVELOPE.md) → 对应载体文档 → [DETMATH.md](./DETMATH.md) → [CAPACITY.md](./CAPACITY.md)；
-   - 结构域：读 [STRUCTURE-ENVELOPE.md](./STRUCTURE-ENVELOPE.md) → 对应适配器文档 → [CAPACITY.md](./CAPACITY.md)。
-3. 先实现**提取**（只需重建密钥、槽位与 syndrome），再实现写入。
-4. 用文档给出的已知答案自检：ChaCha12 参考向量、detmath 五个摘要、各载体槽位/代价向量（若有）。
+- Carrier quality evaluation and estimation in the `analysis` module still use host `libm`, and **do not participate in byte-level output**; all floating-point math affecting output bytes MUST follow [DETMATH.md](./DETMATH.md).
+- SIMD utilization, parallelization strategies, compression levels, and retry loops in the reference implementation belong to Tier I; readers MUST NOT rely on specific choices.
+- This specification does not claim that bit-for-bit equivalence with the reference implementation is required for interoperability; the test for interoperability is **the ability to correctly read and extract legitimate carriers written by the counterpart**. Byte-level baselines exist strictly to guard this repository's own consistency.
 
 ---
 
-## 4. 术语
+## 3. Third-Party Implementation Roadmap (Recommended Order)
 
-| 术语 | 含义 |
+1. Read [CRYPTO.md](./CRYPTO.md); implement Unicode NFC normalization, PBKDF2, HKDF, AES-256-GCM, and ChaCha20-Poly1305.
+2. Select target domain:
+   - Content domain: Read [CONTENT-ENVELOPE.md](./CONTENT-ENVELOPE.md) → Carrier-specific document → [DETMATH.md](./DETMATH.md) → [CAPACITY.md](./CAPACITY.md);
+   - Structural domain: Read [STRUCTURE-ENVELOPE.md](./STRUCTURE-ENVELOPE.md) → Format adapter document → [CAPACITY.md](./CAPACITY.md).
+3. Implement **extraction** first (reconstruct keys, slots, and syndrome decoding), followed by embedding/writing.
+4. Verify using known test vectors: ChaCha12 reference vectors, the five detmath digest values, and carrier slot/cost test vectors (where provided).
+
+---
+
+## 4. Terminology
+
+| Term | Meaning |
 |---|---|
-| UBE | Unified Binary Envelope，结构域信封 |
-| 基础头 / superblock | 内容域随载体变化的头部（空间 64B、JPEG 44B、HEVC 32B） |
-| 槽位 / slot | 载体中一个可翻转的奇偶位（字节 bit、DCT 系数奇偶、PCM LSB、CABAC 符号位等） |
-| 候选池 | 满足载体规则、可承载槽位的位置集合 |
-| 置换 | 由密钥种子确定的槽位重排；不是加密，但无密钥不可预测 |
-| STC | Syndrome Trellis Coding，矩阵编码；读侧只需计算 syndrome |
-| 预盐 / `pre_salt` | 只用嵌入前后不变元数据构造的 KDF salt |
-| 方言 / profile | 编译期替换标签、盐或参数后产生的独立线格式 |
-| L1 / L2 / L3 | 内容域三层密钥：定位主密钥、定位密钥、会话密钥 |
+| UBE | Unified Binary Envelope (Structural domain envelope) |
+| Base Header / Superblock | Carrier-dependent header in content domain (Spatial 64B, JPEG 44B, HEVC 32B) |
+| Slot | A mutable parity bit in the carrier (byte bit, DCT coefficient parity, PCM LSB, CABAC sign bit, etc.) |
+| Candidate Pool | The set of carrier positions satisfying eligibility rules to carry slots |
+| Permutation | Slot pseudorandom reordering keyed by seed; not encryption, but unpredictable without key |
+| STC | Syndrome Trellis Coding, matrix coding; reading side only computes syndromes |
+| Pre-salt (`pre_salt`) | KDF salt constructed solely from invariant carrier metadata (before and after embedding) |
+| Dialect / Profile | An isolated wire format generated by substituting labels, salts, or parameters at compile time |
+| L1 / L2 / L3 | Three-tier content domain keys: Locating Master Key, Locating Key, and Session Key |
 
 ---
 
-## 5. 文档维护规则
+## 5. Documentation Maintenance Rules
 
-- 新增 `format_id`、`strategy_id`、TLV、派生标签、槽位规则或代价模型时，必须同步更新对应专题文档与 [CORRECTIONS.md](./CORRECTIONS.md) 的勘误状态。
-- 任何 F 级算法改动都属于线格式变更，必须同步更新字节级基线与变更记录。
-- 文档中的 `文件:行` 以参考实现为准；若代码与文档冲突，先按代码修正文档，并在 [CORRECTIONS.md](./CORRECTIONS.md) 记录。
+- Whenever adding `format_id`, `strategy_id`, TLV, derivation labels, slot rules, or cost models, update the corresponding topic specification and errata status in [CORRECTIONS.md](./CORRECTIONS.md).
+- Any change to Tier F algorithms constitutes a wire format change, requiring synchronized updates to byte-level baselines and changelogs.
+- `file:line` citations reflect the reference implementation; if code and documentation conflict, update the documentation to match code and record the deviation in [CORRECTIONS.md](./CORRECTIONS.md).

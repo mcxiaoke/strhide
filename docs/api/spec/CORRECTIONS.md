@@ -1,138 +1,146 @@
-# 旧 WIRE_SPEC 勘误与迁移记录（2026-11-07）
+# Errata and Migration Log for Legacy WIRE_SPEC (2026-11-07)
 
-本文件记录拆分 `docs/api/WIRE_SPEC*.md` 时，按**当前 `rust/src` 实现**核对出的旧描述错误。
-新规范以 `docs/api/spec/` 为准；旧文档保留作历史参考，但不再维护。
+This document records inaccuracies identified in legacy documentation against the **current `rust/src` implementation** during the modularization of `docs/api/WIRE_SPEC*.md`.  
+The specifications located in `docs/api/spec/` are normative; older documents are retained strictly for historical reference and are no longer maintained.
 
-- 旧 [WIRE_SPEC_CONTENT.md](../WIRE_SPEC_CONTENT.md) / [WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md) 已加“已拆分”横幅。
-- 状态列中“已修正”表示新规范已按代码写入正确描述；“记录”表示属于实现事实或限制，新规范以说明性文字收录。
+- Legacy [WIRE_SPEC_CONTENT.md](../WIRE_SPEC_CONTENT.md) and [WIRE_SPEC_STRUCTURE.md](../WIRE_SPEC_STRUCTURE.md) have been flagged with deprecation banners.
+- In the Status column, "Corrected" indicates that the new specification describes the actual code behavior; "Recorded" indicates an implementation characteristic or limitation documented informatively.
 
-## A. 内容域：密钥派生与信封
+---
 
-| # | 旧描述 | 实际实现 | 新位置 | 状态 |
+## A. Content Domain: Key Derivation and Envelope
+
+| # | Legacy Description | Actual Implementation | New Location | Status |
 |---|---|---|---|---|
-| A1 | HEVC `session_salt` = 基础头 12B `nonce`（CONTENT:250） | `SHA-256("strhide-hevc-session-v4" ‖ nonce)`（32B）`hevc/engine.rs:452-457` | CRYPTO §1.6 | 已修正 |
-| A2 | HEVC `pre_salt = cover_salt‖"hevc-v4"‖parameter_sets`，指向 `carrier_identity`（CONTENT:208） | 容器：`…‖u64be(ps_count)‖Σ(u64be(len)‖bytes)`；Annex-B：`…‖u64be(span_count)‖参数集 NAL / VCL 2B 头 + u64be(nal_len)`（`hevc/engine.rs:4272-4288`、`bitstream.rs:192-211`） | CRYPTO §1.4 / CONTENT-HEVC §7 | 已修正 |
-| A3 | JPEG `pre_salt` 的 `block_count` 未定义（CONTENT:205） | component 0 的 8×8 块数（`jpeg/engine.rs:246`） | CRYPTO §1.4 | 已修正 |
-| A4 | 域回落顺序“显式 > Profile > 官方默认字符串”（CONTENT:140） | 第三档为 `None`，info 只含 label（`stego/params.rs:987-989`、`format.rs:521-533`） | CRYPTO §1.2 | 已修正 |
-| A5 | “salt(16B)/nonce(12B) 只存在载体头中”（CONTENT:156） | HEVC 32B 头只有 12B nonce、无 16B salt（salt 为哈希派生） | CONTENT-ENVELOPE §3.3 | 已修正 |
-| A6 | “`format_id` 与部分隐含字段不存储”（CONTENT:519） | PNG/WAV/FLAC 头 offset 34 存储并校验 `1..=3`；仅 JPEG/HEVC 隐含（`stego/header.rs:190,271,306,326-330`） | CONTENT-ENVELOPE §3 | 已修正 |
-| A7 | 信封 flags 未提强制校验（CONTENT:152） | 位 4..7 必须 0；未压缩时压缩算法 id 必须 0（`stego/envelope.rs:504-552`） | CONTENT-ENVELOPE §2 | 已修正 |
-| A8 | 头校验只列“长度/版本/CRC/suite”（CONTENT:803） | 还要求 `format_id` 匹配、`algorithm_id` 范围、`codec_id` 0/1、音频 `channel_mode/class_rule=0`、`body_len ≥ 22`（`header.rs:326-362`） | CONTENT-ENVELOPE §3 | 已修正 |
-| A9 | type 0 padding “值必须全 0 且跳过”（CONTENT:591） | 自 type 0 起必须全 0至扩展区末尾并终止，否则 `CorruptedData`（`header.rs:117-146`） | CONTENT-ENVELOPE §4.2 | 已修正 |
+| A1 | HEVC `session_salt` = 12B base header `nonce` (CONTENT:250) | `SHA-256("strhide-hevc-session-v4" ‖ nonce)` (32B) `hevc/engine.rs:452-457` | CRYPTO §1.6 | Corrected |
+| A2 | HEVC `pre_salt = cover_salt ‖ "hevc-v4" ‖ parameter_sets`, pointing to `carrier_identity` (CONTENT:208) | Container: `... ‖ u64be(ps_count) ‖ Σ(u64be(len) ‖ bytes)`; Annex-B: `... ‖ u64be(span_count) ‖ parameter set NAL / VCL 2B header + u64be(nal_len)` (`hevc/engine.rs:4272-4288`, `bitstream.rs:192-211`) | CRYPTO §1.4 / CONTENT-HEVC §7 | Corrected |
+| A3 | JPEG `pre_salt` `block_count` left undefined (CONTENT:205) | Number of 8×8 blocks in component 0 (`jpeg/engine.rs:246`) | CRYPTO §1.4 | Corrected |
+| A4 | Domain fallback precedence: "Explicit > Profile > Official default string" (CONTENT:140) | Third tier is `None`, info contains label only (`stego/params.rs:987-989`, `format.rs:521-533`) | CRYPTO §1.2 | Corrected |
+| A5 | "`salt(16B) / nonce(12B)` reside exclusively in carrier header" (CONTENT:156) | HEVC 32B header only stores 12B nonce, without 16B salt (salt is hash-derived) | CONTENT-ENVELOPE §3.3 | Corrected |
+| A6 | "`format_id` and certain implicit fields are not stored" (CONTENT:519) | PNG/WAV/FLAC headers store and validate `1..=3` at offset 34; only JPEG/HEVC omit it implicitly (`stego/header.rs:190, 271, 306, 326-330`) | CONTENT-ENVELOPE §3 | Corrected |
+| A7 | Envelope flags omit mandatory validation checks (CONTENT:152) | Bits 4..7 MUST be 0; compression algorithm ID MUST be 0 when uncompressed (`stego/envelope.rs:504-552`) | CONTENT-ENVELOPE §2 | Corrected |
+| A8 | Header validation lists only "length / version / CRC / suite" (CONTENT:803) | Also enforces `format_id` match, `algorithm_id` range, `codec_id` 0/1, audio `channel_mode / class_rule = 0`, and `body_len ≥ 22` (`header.rs:326-362`) | CONTENT-ENVELOPE §3 | Corrected |
+| A9 | Type 0 padding: "values MUST be all zeros and are skipped" (CONTENT:591) | From type 0 onward, remaining extension bytes MUST be strictly 0 to the end and terminate; otherwise `CorruptedData` (`header.rs:117-146`) | CONTENT-ENVELOPE §4.2 | Corrected |
 
-## B. 内容域：PRNG、置换、STC、槽位
+---
 
-| # | 旧描述 | 实际实现 | 新位置 | 状态 |
+## B. Content Domain: PRNG, Permutations, STC, and Slots
+
+| # | Legacy Description | Actual Implementation | New Location | Status |
 |---|---|---|---|---|
-| B1 | STC 列向量 `splitmix64(seed XOR idx)`（CONTENT:484） | `splitmix64(seed.wrapping_add(idx))`（`coding/stc.rs:355`） | CONTENT-ENVELOPE §7.2 | 已修正 |
-| B2 | ChaCha 参考向量首 16 字节写成 `12 05 6e 59 5d 56 b0 f6 …`、种子说明“首字节 1”但示例写成 `00 01…`（CONTENT:290-300） | 正确首行 `12 05 6e 59 d5 65 05 6b ef 0e 0f 09 df 5c 22 9a`；种子= `01 00…00`（`prng.rs:301-327`） | CONTENT-ENVELOPE §6.1 | 已修正 |
-| B3 | 正文槽位统一“先取 N 候选再置换，禁止整池置换后取前 N”（CONTENT:384） | 逐载体不同：PNG 先取 N 后 `permute_indices`；JPEG 对全 BodyGrid `permute_prefix` 后截断；音频用整体/正文池 `KeyedPermutation` | CONTENT-ENVELOPE §5、各载体文档 | 已修正 |
-| B4 | FLAC 正文置换用 L3 `perm_seed`（CONTENT:459） | 用 L2 `locate_seed`；`perm_seed` 只作方向盐（`audio/core.rs:224-253,831-855`） | CONTENT-AUDIO §4.4 | 已修正 |
-| B5 | FLAC 容量按 `total_slots-(512+8*ext_len)`（CONTENT:615） | 扩展槽不挤占正文残差池；容量按 `total_usable+512`（`flac/mod.rs:886-892`） | CAPACITY §2.4 | 已修正 |
-| B6 | WAV “槽 = 一个 PCM 采样”（CONTENT:433） | 每个声道分量独立成槽（16/24-bit 各分量） | CONTENT-AUDIO §3 | 已修正 |
-| B7 | 音频只支持 16/24-bit（CONTENT:813） | WAV 8/16/24/32-bit；FLAC 4..=24-bit | CONTENT-AUDIO §1 | 已修正 |
-| B8 | HEVC 正文参数固定 `h=7,u=2`，头 `stc_u` 冗余（CONTENT:420,869） | 读侧以头内 `stc_u` 构造 trellis（`hevc/engine.rs:2249`）；`stc_h` 才来自 profile | CONTENT-HEVC §6 | 已修正 |
-| B9 | HEVC 分带按“不可预测标记”（CONTENT:424） | 按 `nal_unit_type` + `has_inter`；IRAP/RASL 不承载槽位（`hevc/engine.rs:4109-4119`） | CONTENT-HEVC §4 | 已修正 |
-| B10 | HEVC 槽位统一按解码顺序编号 | 头部池是原始解码序前缀；正文池按 band0+band1 重编号（`band.start`） | CONTENT-HEVC §3-4 | 已修正 |
-| B11 | `max_payload = message_bits/8-22`，漏 `u`（CONTENT:611） | `m = n/u-(h-1)`（`coding/stc.rs:390-392`） | CAPACITY §1 | 已修正 |
-| B12 | 工作内存预算只列 PNG 8 GiB（CONTENT:627） | JPEG 同 8 GiB；WAV/FLAC 768 MiB（`jpeg/engine.rs:100`、`audio/core.rs:69`） | CAPACITY §2.6 | 已修正 |
-| B13 | 长视频“前 20% 窗口加权估算”（CONTENT:631） | 对可选 picture 抽 20% 样本并 `clamp(150,1000)`；≤150 时全量（`hevc/engine.rs:727-735`） | CAPACITY §2.7 | 已修正 |
+| B1 | STC column vector uses `splitmix64(seed XOR idx)` (CONTENT:484) | `splitmix64(seed.wrapping_add(idx))` (`coding/stc.rs:355`) | CONTENT-ENVELOPE §7.2 | Corrected |
+| B2 | ChaCha test vector first 16 bytes written as `12 05 6e 59 5d 56 b0 f6 ...`; seed stated as "first byte 1" but example wrote `00 01 ...` (CONTENT:290-300) | Correct first row is `12 05 6e 59 d5 65 05 6b ef 0e 0f 09 df 5c 22 9a`; seed = `01 00 ... 00` (`prng.rs:301-327`) | CONTENT-ENVELOPE §6.1 | Corrected |
+| B3 | Uniform slot ordering: "select N candidates then permute; permuting whole pool then taking prefix forbidden" (CONTENT:384) | Differs per carrier: PNG selects N then calls `permute_indices`; JPEG calls `permute_prefix` over full BodyGrid then truncates; Audio applies `KeyedPermutation` over whole/body pool | CONTENT-ENVELOPE §5, carrier specs | Corrected |
+| B4 | FLAC body permutation uses L3 `perm_seed` (CONTENT:459) | Uses L2 `locate_seed`; `perm_seed` serves solely as direction salt (`audio/core.rs:224-253, 831-855`) | CONTENT-AUDIO §4.4 | Corrected |
+| B5 | FLAC capacity debited as `total_slots - (512 + 8 * ext_len)` (CONTENT:615) | Extension slots do not preempt residual pool; capacity evaluates as `total_usable + 512` (`flac/mod.rs:886-892`) | CAPACITY §2.4 | Corrected |
+| B6 | WAV "slot = one PCM sample" (CONTENT:433) | Each audio channel component forms an independent slot (16/24-bit per-channel components) | CONTENT-AUDIO §3 | Corrected |
+| B7 | Audio supports only 16/24-bit (CONTENT:813) | WAV supports 8/16/24/32-bit; FLAC supports 4..=24-bit | CONTENT-AUDIO §1 | Corrected |
+| B8 | HEVC body parameters fixed to $h=7, u=2$; header `stc_u` redundant (CONTENT:420, 869) | Reader constructs trellis using header `stc_u` (`hevc/engine.rs:2249`); only `stc_h` comes from profile | CONTENT-HEVC §6 | Corrected |
+| B9 | HEVC banding determined by "unpredictable markers" (CONTENT:424) | Determined by `nal_unit_type` + `has_inter`; IRAP/RASL carry zero slots (`hevc/engine.rs:4109-4119`) | CONTENT-HEVC §4 | Corrected |
+| B10 | HEVC slots indexed uniformly by decode order | Header pool uses decode-order prefix; body pool is reindexed per band0 + band1 (`band.start`) | CONTENT-HEVC §3-4 | Corrected |
+| B11 | `max_payload = message_bits / 8 - 22`, omitting $u$ factor (CONTENT:611) | $m = \lfloor n/u \rfloor - (h - 1)$ (`coding/stc.rs:390-392`) | CAPACITY §1 | Corrected |
+| B12 | Working memory budget lists only PNG 8 GiB (CONTENT:627) | JPEG also has 8 GiB; WAV/FLAC has 768 MiB (`jpeg/engine.rs:100`, `audio/core.rs:69`) | CAPACITY §2.6 | Corrected |
+| B13 | Long video "weighted estimate across first 20% window" (CONTENT:631) | Samples 20% across selectable pictures and clamps to `[150, 1000]`; $\le 150$ performs full scan (`hevc/engine.rs:727-735`) | CAPACITY §2.7 | Corrected |
 
-## C. 内容域：代价模型与 detmath
+---
 
-| # | 旧描述 | 实际实现 | 新位置 | 状态 |
+## C. Content Domain: Cost Models and detmath
+
+| # | Legacy Description | Actual Implementation | New Location | Status |
 |---|---|---|---|---|
-| C1 | 灰度化直接 `0.299R+…`（CONTENT:656） | 三个通道先 `& 0xF8` 再加权（`png/cost/hill.rs:68-71` 等） | CONTENT-PNG §5 | 已修正 |
-| C2 | `val mod 8 ∈[1,6]` 无条件（CONTENT:398） | 读侧按头 `class_rule`，仅 `=1` 执行；写侧恒 1（`png/engine.rs:1359,1721,2141`） | CONTENT-PNG §3 | 已修正 |
-| C3 | `sigma` 只用于 S-UNIWARD（CONTENT:684） | MiPOD 时同字段承载 `alpha`，写侧钳 `[0.01,0.90]`、缺省 `0.20f32`（`png/engine.rs:1678-1691,2069-2077`） | CONTENT-PNG §2/§7 | 已修正 |
-| C4 | 正文槽数用 `slots_for`，忽略 `codec_id`（CONTENT:400） | `slots_for_codec(...)`，Hamming/STC 槽数不同（`png/engine.rs:1577,2117-2122`） | CONTENT-PNG §3 | 已修正 |
-| C5 | “`u=1` 与 Hamming 不吃代价”（CONTENT:743） | 候选集仍由代价排序/截断产生；只是 trellis 不消费方向代价 | CONTENT-PNG §8 | 已修正 |
-| C6 | 管线依赖 libm `cos/exp/ln`（CONTENT:723），与 §13.11.5 自相矛盾 | 全部走 `stego::detmath`（`cost_calibration.rs:163-174,216`） | DETMATH §1 | 已修正 |
-| C7 | `ln` 级数到 `z^10/21`（CONTENT:757） | 到 `z^11/23`（`detmath.rs:197-207`） | DETMATH §4 | 已修正 |
-| C8 | `ln_1p` 约 1 ulp（CONTENT:758） | 审计实测语料最大 6.91 ulp、密集样本 16.6360 ulp | DETMATH §5 | 已修正 |
-| C9 | “四组摘要”（CONTENT:785） | 实际五项：`exp/ln/cos/ln_1p/log2`（`detmath.rs:415-421`） | DETMATH §9 | 已修正 |
-| C10 | Python/Go 只移植四函数（CONTENT:984） | 两脚本均含 `log2` 摘要 | DETMATH §9 | 已修正 |
-| C11 | 三平台全部逐位一致（CONTENT:765,785） | 审计：52,153 条中 20 条不一致；Go 开 FMA 后大量不一致 | DETMATH §9 | 已修正 |
-| C12 | JPEG 头槽固定 718（CONTENT:413） | `header_slots(ext_len)=718+4*(8*ext_len+7)`；`ext_len=0` 时仍 746（`jpeg/engine.rs:833`、`format.rs:156-169`） | CONTENT-JPEG §3 | 已修正 |
-| C13 | JPEG 块按“分量内光栅顺序” | `dct_io` 返回 MCU 交织序（4:2:0 下索引 2 在 1 下方） | CONTENT-JPEG §3 | 已修正 |
-| C14 | JPEG 有 `exclusion_permille` 排序截断 | JPEG 44B 头无该字段，代价只进 trellis 边权 | CONTENT-JPEG §4 | 已修正 |
-| C15 | J-MiPOD 与空间 MiPOD 参数相同 | JPEG 为 `p=3/l=3`、`floor=1e-6`、不做 7×7 FI 平滑（`jmipod.rs:30-34`） | CONTENT-JPEG §7 | 已修正 |
-| C16 | 内容域支持“原 JPEG 字节级恢复” | 结构域才支持 restore；JPEG 熵编码扫描段会重写（`dct-io`） | CONTENT-JPEG §9 | 已修正 |
+| C1 | Grayscale conversion evaluates directly as `0.299R + ...` (CONTENT:656) | All three channels masked with `& 0xF8` prior to weighting (`png/cost/hill.rs:68-71`, etc.) | CONTENT-PNG §5 | Corrected |
+| C2 | `val mod 8 ∈ [1, 6]` applied unconditionally (CONTENT:398) | Reader checks header `class_rule`, executing only when `= 1`; writer sets 1 (`png/engine.rs:1359, 1721, 2141`) | CONTENT-PNG §3 | Corrected |
+| C3 | `sigma` used exclusively by S-UNIWARD (CONTENT:684) | Under MiPOD, same field conveys `alpha`; writer clamps to `[0.01, 0.90]`, default `0.20f32` (`png/engine.rs:1678-1691, 2069-2077`) | CONTENT-PNG §2 / §7 | Corrected |
+| C4 | Body slot count uses `slots_for`, ignoring `codec_id` (CONTENT:400) | `slots_for_codec(...)`; Hamming and STC require different slot counts (`png/engine.rs:1577, 2117-2122`) | CONTENT-PNG §3 | Corrected |
+| C5 | "$u=1$ and Hamming consume no cost" (CONTENT:743) | Candidate set is still selected and truncated via cost sorting; only the trellis omits directional edge costs | CONTENT-PNG §8 | Corrected |
+| C6 | Pipeline depends on host libm `cos/exp/ln` (CONTENT:723), contradicting §13.11.5 | All operations invoke `stego::detmath` (`cost_calibration.rs:163-174, 216`) | DETMATH §1 | Corrected |
+| C7 | `ln` series evaluated to $z^{10}/21$ (CONTENT:757) | Evaluated to $z^{11}/23$ (`detmath.rs:197-207`) | DETMATH §4 | Corrected |
+| C8 | `ln_1p` precision claimed as ~1 ulp (CONTENT:758) | Audit found corpus maximum 6.91 ulp, dense sample maximum 16.6360 ulp | DETMATH §5 | Corrected |
+| C9 | "Four digest groups" (CONTENT:785) | Five items: `exp / ln / cos / ln_1p / log2` (`detmath.rs:415-421`) | DETMATH §9 | Corrected |
+| C10 | Python and Go port only four functions (CONTENT:984) | Both scripts implement all five including `log2` | DETMATH §9 | Corrected |
+| C11 | Bit-for-bit consistency claimed across all three platforms (CONTENT:765, 785) | Audit: 20 mismatches out of 52,153 inputs; substantial divergence when Go enables FMA | DETMATH §9 | Corrected |
+| C12 | JPEG base header slots fixed at 718 (CONTENT:413) | `header_slots(ext_len) = 718 + 4 * (8 * ext_len + 7)`; even with $\text{ext\_len} = 0$, evaluates to 746 (`jpeg/engine.rs:833`, `format.rs:156-169`) | CONTENT-JPEG §3 | Corrected |
+| C13 | JPEG blocks ordered by "raster order within component" | `dct_io` returns MCU interleaved order (in 4:2:0, block index 2 lies below index 1) | CONTENT-JPEG §3 | Corrected |
+| C14 | JPEG uses `exclusion_permille` sorting truncation | JPEG 44B header has no such field; costs feed solely into trellis edge weights | CONTENT-JPEG §4 | Corrected |
+| C15 | J-MiPOD shares identical parameters with Spatial MiPOD | JPEG uses $p=3, l=3$, $\text{floor}=10^{-6}$, and skips 7×7 FI smoothing (`jmipod.rs:30-34`) | CONTENT-JPEG §7 | Corrected |
+| C16 | Content domain supports "bit-for-bit JPEG restoration" | Only the structural domain supports restore; JPEG entropy-coded scan segments are rewritten (`dct-io`) | CONTENT-JPEG §9 | Corrected |
 
-## D. 结构域：UBE 信封
+---
 
-| # | 旧描述 | 实际实现 | 新位置 | 状态 |
+## D. Structural Domain: UBE Envelope
+
+| # | Legacy Description | Actual Implementation | New Location | Status |
 |---|---|---|---|---|
-| D1 | header 校验只列版本/长度/位移（STRUCT:125-132） | 另要求 `strategy_id` 已注册、`inject_size` 形状、`patch_offset+4≤host_len`（`envelope.rs:294-346`） | STRUCTURE-ENVELOPE §3.2 | 已修正 |
-| D2 | 追加型策略必须 `ube_offset+size == 文件长度`（STRUCT:154） | `confine_location` 只要求 `<=`；`locate_start` 允许整体平移（`engine.rs:191-207,870-879`） | STRUCTURE-ENVELOPE §12 | 已修正 |
-| D3 | 保留位必须为 0 由 `validate_against` 校验（STRUCT:176） | 只由裸头识别门槛检查 `flags & !0x3F`（`envelope.rs:675-689`） | STRUCTURE-ENVELOPE §4 | 已修正 |
-| D4 | 读侧“三层识别”（STRUCT:404） | 实际四层，且裸加密头在默认去掩码前判断（`envelope.rs:615-648`） | STRUCTURE-ENVELOPE §11 | 已修正 |
-| D5 | 默认去掩码层要求 `version=0x02`（STRUCT:409） | 该层不校验 version；`strategy_id` 要求 `1..=13`（`envelope.rs:622-648`） | STRUCTURE-ENVELOPE §11 | 已修正 |
-| D6 | 单块上限 `min(剩余, MAX_CHUNK_SIZE)`（STRUCT:301） | `MIN(剩余, MAX_CHUNK_SIZE+16)`（chunk_len 含 tag）（`crypto.rs:581-588`） | STRUCTURE-ENVELOPE §8 | 已修正 |
-| D7 | trailer 不合法一律“无信封”（STRUCT:318） | 魔数匹配但 CRC 错返回 `CorruptedData`（`envelope.rs:844-858`） | STRUCTURE-ENVELOPE §9 | 已修正 |
-| D8 | `MIN_UBE_PLAIN=178` / `MIN_UBE_ENCRYPTED=214`（STRUCT:502） | 常量不存在；`min_ube_len(0)=213`、`min_ube_len(1)=214`（`envelope.rs:116-132`） | STRUCTURE-ENVELOPE §2 | 已修正 |
-| D9 | stealth 头部掩码 HKDF 未写 salt（STRUCT:379-381） | `HKDF-SHA256(salt=Some(信封 salt), ikm=PBKDF2(...))`（`crypto.rs:305-312`） | CRYPTO §2.4 | 已修正 |
-| D10 | 散落策略以 `inject_size==0` 跳过坐标校验（STRUCT:146） | 要求调用方策略名与 header `strategy_id` 同时为 `pe_codebits`（`engine.rs:2835-2850`） | STRUCTURE-ENVELOPE §12 | 已修正 |
-| D11 | hint 读侧未说明 | 只按 `hint_len` 读取，不校验 `FLAG_HAS_HINT`（`engine.rs:1836-1844`） | STRUCTURE-ENVELOPE §6 | 已修正 |
-| D12 | compact meta 未列强制校验 | `version=0x01`、文件名合法 UTF-8、截断/越界立即报错（`engine.rs:302-330`） | STRUCTURE-ENVELOPE §7 | 已修正 |
+| D1 | Header validation lists only version / length / displacement (STRUCT:125-132) | Also checks registered `strategy_id`, valid `inject_size` shape, and $\text{patch\_offset} + 4 \le \text{host\_len}$ (`envelope.rs:294-346`) | STRUCTURE-ENVELOPE §3.2 | Corrected |
+| D2 | Append strategies require $\text{ube\_offset} + \text{size} == \text{file length}$ (STRUCT:154) | `confine_location` checks $\le$; `locate_start` allows global relocation (`engine.rs:191-207, 870-879`) | STRUCTURE-ENVELOPE §12 | Corrected |
+| D3 | Reserved bits must be 0 enforced by `validate_against` (STRUCT:176) | Enforced solely by raw header gate checking `flags & !0x3F` (`envelope.rs:675-689`) | STRUCTURE-ENVELOPE §4 | Corrected |
+| D4 | Reader uses "three-tier recognition" (STRUCT:404) | Uses four tiers; raw encrypted header is evaluated prior to default unmasking (`envelope.rs:615-648`) | STRUCTURE-ENVELOPE §11 | Corrected |
+| D5 | Default unmasking tier requires `version = 0x02` (STRUCT:409) | Does not check version at that stage; requires `strategy_id` $\in [1, 13]$ (`envelope.rs:622-648`) | STRUCTURE-ENVELOPE §11 | Corrected |
+| D6 | Single chunk capped at $\min(\text{remaining}, \text{MAX\_CHUNK\_SIZE})$ (STRUCT:301) | $\min(\text{remaining}, \text{MAX\_CHUNK\_SIZE} + 16)$ (chunk length includes tag) (`crypto.rs:581-588`) | STRUCTURE-ENVELOPE §8 | Corrected |
+| D7 | Invalid trailer uniformly signals "no envelope" (STRUCT:318) | If magic matches but CRC fails, returns `CorruptedData` (`envelope.rs:844-858`) | STRUCTURE-ENVELOPE §9 | Corrected |
+| D8 | `MIN_UBE_PLAIN = 178` / `MIN_UBE_ENCRYPTED = 214` (STRUCT:502) | Constants do not exist; `min_ube_len(0) = 213`, `min_ube_len(1) = 214` (`envelope.rs:116-132`) | STRUCTURE-ENVELOPE §2 | Corrected |
+| D9 | Stealth header mask HKDF omits salt (STRUCT:379-381) | `HKDF-SHA256(salt=Some(envelope_salt), ikm=PBKDF2(...))` (`crypto.rs:305-312`) | CRYPTO §2.4 | Corrected |
+| D10 | Scattered strategy skips coordinate checks when `inject_size == 0` (STRUCT:146) | Requires caller strategy name and header `strategy_id` to both be `pe_codebits` (`engine.rs:2835-2850`) | STRUCTURE-ENVELOPE §12 | Corrected |
+| D11 | Hint read handling left unspecified | Read strictly according to `hint_len`, without validating `FLAG_HAS_HINT` (`engine.rs:1836-1844`) | STRUCTURE-ENVELOPE §6 | Corrected |
+| D12 | Compact metadata lacks explicit validation list | `version = 0x01`, valid UTF-8 filename, immediate failure on truncation/out-of-bounds (`engine.rs:302-330`) | STRUCTURE-ENVELOPE §7 | Corrected |
 
-## E. 结构域：适配器
+---
 
-| # | 旧描述 | 实际实现 | 新位置 | 状态 |
+## E. Structural Domain: Adapters
+
+| # | Legacy Description | Actual Implementation | New Location | Status |
 |---|---|---|---|---|
-| E1 | PNG 注入块位移漏列 | `prIv` 块头 8B；`inject_size=8+ube+4`（含 CRC）（`png.rs:189-214`） | STRUCTURE-PNG §4-5 | 已修正 |
-| E2 | JPEG 结构域用 COM 段（design 文档） | 固定 APP15；COM 不参与注入/定位（`jpeg.rs:14-15,530-551`） | STRUCTURE-JPEG §5 | 已修正 |
-| E3 | JPEG 单段 65,535 / 256 KiB 必退 eof | 单段载荷 65,533；多段链可远超 256 KiB；容量受 16 MiB 扫描窗口与 SOS 约束 | STRUCTURE-JPEG §6 | 已修正 |
-| E4 | RIFF `offset_delta` 漏列 | 8B `SHRD` 块头（`wav.rs:100-104`、`webp.rs:118-122`） | STRUCTURE-RIFF §4 | 已修正 |
-| E5 | RIFF 容量“4GB 上限”表述 | 实际受 `R+8+N+(N&1) ≤ u32::MAX` 约束（`riff.rs:126-133`） | STRUCTURE-RIFF §6 | 已修正 |
-| E6 | ISO-BMFF 注入位置“moov 后 / mdat 前” | 实际写入文件 EOF；`item_hidden` 用第二个 `mdat`（`isobmff.rs:85-88,1183-1192`） | STRUCTURE-ISOBMFF §4 | 已修正 |
-| E7 | HEIF item 有 mime/hidden 标志 | 只写 `infe` v2/v3、`item_type="resv"`、空名、protection_index 0（`isobmff.rs:961-984`） | STRUCTURE-ISOBMFF §4 | 已修正 |
-| E8 | ZIP 默认 `pre_cd_inject`，空档案/ ZIP64/缺 EOCD 退 eof | 还包含 `cd_offset==0`、ZIP64 locator、32 位溢出（`zip.rs:145-171`）；ZIP64 只探测 locator，不解析 EOCD64 | STRUCTURE-ZIP §3-5 | 已修正 |
-| E9 | PDF 增量段固定写经典 `xref`/`trailer` | XRef 流方言写 `/Type /XRef` 流对象（`pdf.rs:787-830`） | STRUCTURE-PDF §4 | 已修正 |
-| E10 | PDF `offset_delta` 未列 | `46 + digits(N) + digits(L)`；两个 10 位数即 66 > 旧上限 64，故 1.0 前把 `MAX_OFFSET_DELTA` 提到 128（现 `pdf.rs:589-591,697-705` 的 auto 分支按 128 判定） | STRUCTURE-PDF §4 | 已修正 |
-| E11 | PE codebits 含 ModR/M 内存/SIB 变换 | 仅 `mod=11` 寄存器-寄存器语义对与 TEST 操作数交换（`pe_codebits.rs:239-243`） | STRUCTURE-PE §5.1 | 已修正 |
-| E12 | `pe_slack` 属散落策略、经 ChannelHeader | 连续覆盖写入 padding，无 ChannelHeader/diff（`pe_slack.rs:52-92`） | STRUCTURE-PE §6 | 已修正 |
-| E13 | PE 还原 diff 为“紧凑二进制列表” | 无头定长稠密位图，长度 `14+ube_len`、MSB-first（`pe_codebits.rs:344-350,446-448`） | STRUCTURE-PE §5.3 | 已修正 |
-| E14 | MKV 插入 SeekHead 后、更新 Segment 大小 | 固定写物理 EOF，新建顶层 Void，不更新 Segment/SeekHead/Cues（`mkv.rs:79-99`） | STRUCTURE-MKV §4 | 已修正 |
-| E15 | EBML Void VINT 最多 9 字节 | 实际 1B Void ID + 最多 8B VINT，`offset_delta ≤ 9`（`ebml.rs:28-36`、`mkv.rs:292-306`） | STRUCTURE-MKV §4 | 已修正 |
-| E16 | auto “放不下时透明回退 eof” | 多个适配器无回退：MP4 恒 `box_uuid`，HEIF `item_hidden→box_uuid`，PNG 仅超 2 GiB−1 退 eof | STRUCTURE-ISOBMFF §3、STRUCTURE-PNG §3 | 已修正 |
+| E1 | PNG injection offset omitted | `prIv` chunk header is 8B; `inject_size = 8 + ube + 4` (including CRC) (`png.rs:189-214`) | STRUCTURE-PNG §4-5 | Corrected |
+| E2 | JPEG structural domain uses COM segment (design doc) | Fixed to APP15; COM plays no role in injection or locating (`jpeg.rs:14-15, 530-551`) | STRUCTURE-JPEG §5 | Corrected |
+| E3 | JPEG single segment 65,535 / 256 KiB forces eof | Single segment carries 65,533 payload; chained segments can exceed 256 KiB; capacity bounded by 16 MiB window and SOS | STRUCTURE-JPEG §6 | Corrected |
+| E4 | RIFF `offset_delta` omitted | 8B `SHRD` chunk header (`wav.rs:100-104`, `webp.rs:118-122`) | STRUCTURE-RIFF §4 | Corrected |
+| E5 | RIFF capacity expressed as "4GB limit" | Practically bounded by $R + 8 + N + (N \& 1) \le \text{u32::MAX}$ (`riff.rs:126-133`) | STRUCTURE-RIFF §6 | Corrected |
+| E6 | ISO-BMFF injection point "after moov / before mdat" | Injected at physical EOF; `item_hidden` introduces a second `mdat` (`isobmff.rs:85-88, 1183-1192`) | STRUCTURE-ISOBMFF §4 | Corrected |
+| E7 | HEIF item contains mime / hidden flags | Writes `infe` v2/v3, `item_type = "resv"`, empty name, protection index 0 (`isobmff.rs:961-984`) | STRUCTURE-ISOBMFF §4 | Corrected |
+| E8 | ZIP defaults to `pre_cd_inject`; empty archive / ZIP64 / missing EOCD falls back to eof | Also falls back on `cd_offset == 0`, ZIP64 locator, or 32-bit overflow (`zip.rs:145-171`); detects locator without parsing EOCD64 | STRUCTURE-ZIP §3-5 | Corrected |
+| E9 | PDF incremental segment always writes classic `xref` / `trailer` | XRef stream dialect writes `/Type /XRef` stream object (`pdf.rs:787-830`) | STRUCTURE-PDF §4 | Corrected |
+| E10 | PDF `offset_delta` omitted | $46 + \text{digits}(N) + \text{digits}(L)$; two 10-digit numbers yield $66 > 64$, so `MAX_OFFSET_DELTA` was raised to 128 prior to 1.0 (`pdf.rs:589-591, 697-705`) | STRUCTURE-PDF §4 | Corrected |
+| E11 | PE codebits covers ModR/M memory/SIB mutations | Restricted to $\text{mod} = 11$ register-to-register pairs and TEST operand swapping (`pe_codebits.rs:239-243`) | STRUCTURE-PE §5.1 | Corrected |
+| E12 | `pe_slack` treated as scattered strategy with ChannelHeader | Sequential overwrite of section padding, with no ChannelHeader or diff bitmap (`pe_slack.rs:52-92`) | STRUCTURE-PE §6 | Corrected |
+| E13 | PE restoration diff stored as "compact binary list" | Headerless fixed-length dense bitmap of size $14 + \text{ube\_len}$, MSB-first (`pe_codebits.rs:344-350, 446-448`) | STRUCTURE-PE §5.3 | Corrected |
+| E14 | MKV inserts Void after SeekHead and updates Segment size | Appends top-level Void at physical EOF without modifying Segment, SeekHead, or Cues (`mkv.rs:79-99`) | STRUCTURE-MKV §4 | Corrected |
+| E15 | EBML Void VINT spans up to 9 bytes | 1B Void ID + up to 8B VINT, hence $\text{offset\_delta} \le 9$ (`ebml.rs:28-36`, `mkv.rs:292-306`) | STRUCTURE-MKV §4 | Corrected |
+| E16 | auto "transparently falls back to eof when capacity is insufficient" | Several adapters do not fall back: MP4 is always `box_uuid`, HEIF falls back from `item_hidden` to `box_uuid`, PNG falls back only beyond $2 \text{ GiB} - 1$ | STRUCTURE-ISOBMFF §3, STRUCTURE-PNG §3 | Corrected |
 
-## F. 记录但不修改的范围外问题
+---
 
-以下问题属于实现一致性/健壮性，不在本次“文档拆分”范围内，仅记录供后续处理：
+## F. Out-of-Scope Issues (Recorded / Resolved)
 
-1. ~~`riff.rs` 容量表在接近 4 GiB 时可能报 `available=true`，但实际注入会因 RIFF 大小溢出失败（E5 相关）。~~
-   **已修复（2026-11-08）**：`riff_strategy_capacities` 现在用 `riff_chunk_headroom()` 计算
-   `capacity_bytes = u32::MAX - declared_size - 8`，headroom 为 0 时置 `available=false`，
-   与 `riff_inject` 的实际上限一致（`tests/test_regression/review_20261025.rs::riff_chunk_capacity_reports_the_u32_headroom`）。
-2. ~~`webp.rs` 静态容量表对 Simple Format 仍报 `riff_chunk` 可用；`engine.rs` 的 `apply_engine_payload_limit` 不检查 `available`。~~
-   **已修复（2026-11-08）**：`reader = None` 时 note 明确标注 “Extended Format (VP8X) only”；
-   `apply_engine_payload_limit` 跳过 `available = false` 的条目，不再为不可用策略填入引擎上限
-   （`webp_static_capacity_table_marks_the_extended_format_requirement`）。
-3. ~~`CAPACITY.md`/`ARCHITECTURE.md` 中若干 auto 策略描述与适配器实际无回退行为不符（E16）。~~
-   **已修正（2026-11-08）**：`ARCHITECTURE.md` §7.1 改为逐格式 `auto` 决策表（MP4 恒 `box_uuid`、MKV 恒 `ebml_void`、HEIF/PE 回退到同格式策略而非 `eof`）；`CAPACITY.md` §3.3 补充 MP4/MKV 无回退说明。
-4. ~~`detmath.rs:320,352` 注释引用不存在的 `scripts/detmath/compare.sh`。~~
-   **已修正（2026-11-08）**：注释改为指向 `scripts/detmath/detmath.py` / `detmath.go` 与 Rust 测试中的 `PINNED` 摘要。
-5. ~~`mkv.rs:113-117` 注释提到 `ebml_void` 可平移，但引擎只允许 `chunk`/`eof` 平移。~~
-   **代码已演进，注释正确**：`relocatable_strategy` 白名单现为 `chunk`/`eof`/`ebml_void`（`engine.rs:2310-2312`），注释与实现一致。
-6. `pe.rs:741-744` 注释提到 legacy `STH!`/`STHC`，实现不接受。
+1. ~~`riff.rs` capacity reporting indicated `available = true` near 4 GiB despite actual injection failing due to RIFF size overflow (related to E5).~~  
+   **Fixed (2026-11-08)**: `riff_strategy_capacities` computes `capacity_bytes = u32::MAX - declared_size - 8` via `riff_chunk_headroom()`, setting `available = false` when headroom is 0 (`tests/test_regression/review_20261025.rs::riff_chunk_capacity_reports_the_u32_headroom`).
+2. ~~`webp.rs` static capacity table reported `riff_chunk` available for Simple Format; `engine.rs` did not verify `available`.~~  
+   **Fixed (2026-11-08)**: When `reader = None`, note explicitly specifies "Extended Format (VP8X) only"; `apply_engine_payload_limit` skips entries with `available = false` (`webp_static_capacity_table_marks_the_extended_format_requirement`).
+3. ~~`CAPACITY.md` and `ARCHITECTURE.md` auto strategy descriptions conflicted with non-fallback behaviors (E16).~~  
+   **Corrected (2026-11-08)**: `ARCHITECTURE.md` §7.1 updated with format-specific `auto` decision table; `CAPACITY.md` §3.3 updated with MP4/MKV non-fallback clarifications.
+4. ~~Comments at `detmath.rs:320, 352` referenced non-existent `scripts/detmath/compare.sh`.~~  
+   **Corrected (2026-11-08)**: Comments updated to reference `scripts/detmath/detmath.py` / `detmath.go` and pinned Rust digests.
+5. ~~Comments at `mkv.rs:113-117` stated `ebml_void` was relocatable while engine permitted only `chunk` / `eof`.~~  
+   **Code evolved, comment verified**: `relocatable_strategy` whitelist includes `chunk` / `eof` / `ebml_void` (`engine.rs:2310-2312`).
+6. Comments at `pe.rs:741-744` mention legacy `STH!` / `STHC`, which the implementation does not accept.
 
-## G. 二轮审计补充勘误（2026-11-08）
+---
 
-按 2026-11-08 的内容域与结构域两份文档—代码审计报告（内部工作稿，复核完成后已归档删除，不入库）逐条复核后修订：
+## G. Second-Round Audit Errata (2026-11-08)
 
-| # | 文档原描述 | 实际实现 | 修订位置 |
+Audited item-by-item against code and documented revisions:
+
+| # | Document Description Prior to Revision | Actual Implementation | Revision Target |
 |---|---|---|---|
-| G1 | `CONTENT-AUDIO.md`：`SampleKind` 含 `U16` | 只有 `U8/I16/I24/I32`，`from_bits` 拒绝其余位深（`audio/sample.rs:17-78`） | CONTENT-AUDIO §3.1 |
-| G2 | `STEGO-API.md`：`embed --capacity` 别名保留；`--cipher-suite` 列为隐藏参数 | `--capacity` 已剥离，容量探测是独立 `capacity` 子命令；`--cipher-suite` 是公开参数，隐藏的只有 `--slot-budget` 与六个调参项（`cli/args.rs:427-530`） | STEGO-API §6 |
-| G3 | `smart_file_data_hiding_design.md`：内容域信封仍是 `[salt][nonce][密文]` 旧模型；音频仅 16/24-bit；JPEG 注入写 COM；分块 AAD 公式缺 `meta_len/hint_len/hint`；适配器表缺 WEBP/WAV/HEIF/MKV；保留 pre-v2 JSON 布局；`offset_delta` 写 0..=64 | V4 信封 salt/nonce 存基础头并整体作 AAD；音频 8/16/24/32-bit；注入用 APP15；AAD 总长 97+hint_len；适配器 10 类；JSON 布局读侧直接拒绝；上限 128 | design §3.2/§3.4/§3.5/§5/§6.1/§6.5 |
-| G4 | 双域叠加“顺序无关” | 先结构域后内容域时 `restore` 必然 `RestoreMismatch`（fail-closed）；白名单策略（`chunk`/`eof`/`ebml_void`）才允许平移 | design §7、CLI_GUIDE §5.1、STRUCTURE-MKV §8、STRUCTURE-ENVELOPE §15.11 |
-| G5 | 内容域规范未提 PNG `tRNS`（类型 0/2）拒绝与 `IEND` 后尾随数据保留（16 MiB 上限） | `png/engine.rs:295-311`、`:326-344` | CONTENT-PNG §1、CAPACITY §4 |
-| G6 | 内容域规范未提 JPEG 仅 Baseline、1/3 分量、MCU/Block/8 GiB 限额 | `jpeg/engine.rs:68-128`、`:151-166` | CONTENT-JPEG §1 |
-| G7 | 内容域微头未提“文件名清洗为空→静默降级 0x00 / 读侧兜底 `extracted.bin`”及 `--no-filename` 效果 | `envelope.rs:283-303`、`:318-335`、`:362-363`；`stego/engine.rs:491-496` | CONTENT-ENVELOPE §2.3 |
-| G8 | 未提 MP4 `moov` 32 MiB 上限 | `hevc/engine.rs:2627-2631` | CONTENT-HEVC §1、CAPACITY §4 |
-| G9 | PNG `stc_u=0(auto)` 未说明仅为写侧枚举，线格式必须 1..=3 | `header.rs:365-382` 读侧拒绝 0 | CONTENT-PNG §2 |
-| G10 | `STRUCTURE-PDF.md` 位移上限残留 64 | `MAX_OFFSET_DELTA = 128`（`envelope.rs:88`、`engine.rs:1303-1310`） | STRUCTURE-PDF §5 |
-| G11 | `STRUCTURE-RIFF.md` 容量报告仍写 `capacity_bytes = None`；`MIN_UBE_PLAIN=178` 残留 | 动态查询上报真实 headroom；两常量已不存在，用 `min_ube_len()` | STRUCTURE-RIFF §3、§6 |
-| G12 | 各适配器规范交叉引用把已冻结的 `WIRE_SPEC_STRUCTURE.md` §14/§15 当规范 | 改为指向 `STRUCTURE-ENVELOPE.md` 与 `CAPACITY.md`，旧文明确标注仅历史对照 | STRUCTURE-*.md 各引言 |
-| G13 | 术语笔误：把“微型信封”误写为含某即时通讯软件名的错词（6 处） | 统一为“微型信封” | ARCHITECTURE、STRUCTURE-MKV、WIRE_SPEC_*、design |
+| G1 | `CONTENT-AUDIO.md`: `SampleKind` included `U16` | Only `U8 / I16 / I24 / I32`; `from_bits` rejects all other bit depths (`audio/sample.rs:17-78`) | CONTENT-AUDIO §3.1 |
+| G2 | `STEGO-API.md`: Retained `embed --capacity` alias; listed `--cipher-suite` as hidden | `--capacity` removed; capacity probing is a standalone `capacity` subcommand; `--cipher-suite` is public, with only `--slot-budget` and six tuning options hidden (`cli/args.rs:427-530`) | STEGO-API §6 |
+| G3 | `smart_file_data_hiding_design.md`: Content envelope still described as `[salt][nonce][ciphertext]`; audio limited to 16/24-bit; JPEG injection wrote COM; chunked AAD formula missed `meta_len / hint_len / hint`; adapter table missed WEBP/WAV/HEIF/MKV; pre-v2 JSON layout retained; `offset_delta` written as 0..=64 | V4 envelope stores salt/nonce in base header and signs entire header as AAD; audio supports 8/16/24/32-bit; JPEG injects APP15; AAD total length is 97 + hint_len; 10 adapter classes; JSON layout rejected by reader; offset delta upper bound is 128 | design §3.2, §3.4, §3.5, §5, §6.1, §6.5 |
+| G4 | Dual-domain stacking claimed "order-independent" | Stacking structural domain before content domain causes `restore` to fail with `RestoreMismatch` (fail-closed); only whitelisted strategies (`chunk` / `eof` / `ebml_void`) permit relocation | design §7, CLI_GUIDE §5.1, STRUCTURE-MKV §8, STRUCTURE-ENVELOPE §15.11 |
+| G5 | Content domain spec omitted PNG `tRNS` (type 0/2) rejection and trailing data retention after `IEND` (16 MiB limit) | `png/engine.rs:295-311`, `:326-344` | CONTENT-PNG §1, CAPACITY §4 |
+| G6 | Content domain spec omitted JPEG constraints: Baseline only, 1/3 components, MCU / Block / 8 GiB limits | `jpeg/engine.rs:68-128`, `:151-166` | CONTENT-JPEG §1 |
+| G7 | Content micro-header omitted filename sanitization fallback to 0x00 / reader fallback to `extracted.bin`, and `--no-filename` effect | `envelope.rs:283-303`, `:318-335`, `:362-363`; `stego/engine.rs:491-496` | CONTENT-ENVELOPE §2.3 |
+| G8 | Omitted MP4 `moov` 32 MiB limit | `hevc/engine.rs:2627-2631` | CONTENT-HEVC §1, CAPACITY §4 |
+| G9 | PNG `stc_u=0(auto)` not clarified as writer-only enum; wire format requires `1..=3` | `header.rs:365-382` reader rejects 0 | CONTENT-PNG §2 |
+| G10 | `STRUCTURE-PDF.md` retained legacy offset delta upper bound of 64 | `MAX_OFFSET_DELTA = 128` (`envelope.rs:88`, `engine.rs:1303-1310`) | STRUCTURE-PDF §5 |
+| G11 | `STRUCTURE-RIFF.md` capacity reporting retained `capacity_bytes = None`; residual `MIN_UBE_PLAIN = 178` | Reports actual headroom dynamically; obsolete constants removed and replaced with `min_ube_len()` | STRUCTURE-RIFF §3, §6 |
+| G12 | Cross-references in adapter specs cited frozen `WIRE_SPEC_STRUCTURE.md` §14/§15 as normative | Replaced with references to `STRUCTURE-ENVELOPE.md` and `CAPACITY.md` | Introductions of all STRUCTURE-*.md |
+| G13 | Typographical error in Chinese terminology referring to micro-envelopes | Corrected across all affected documents | ARCHITECTURE, STRUCTURE-MKV, WIRE_SPEC_*, design |

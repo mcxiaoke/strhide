@@ -1,130 +1,150 @@
-# RIFF 容器适配器：WAV / WebP 私有块注入（riff_chunk）
+# RIFF Container Adapter: WAV / WebP Private Chunk Injection (`riff_chunk`)
 
-本文件规定 `format_name = "WAV"` 与 `"WEBP"` 的结构域（UBE）适配器。信封、尾标、AAD、`offset_delta` 与策略 ID 的公共定义见 [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2–§15（`WIRE_SPEC_STRUCTURE.md` 仅为历史对照，冲突以本目录为准）；本文件只定义 RIFF 容器的 detect、策略选择、块布局、容量与还原。内容域（WAV PCM LSB / FLAC 残差）见 [CONTENT-AUDIO.md](CONTENT-AUDIO.md)，二者互不替代。
+This document specifies the structural domain (UBE) adapters for `format_name = "WAV"` and `"WEBP"`. Common definitions for envelopes, trailers, AAD, `offset_delta`, and strategy IDs are defined in [STRUCTURE-ENVELOPE.md](STRUCTURE-ENVELOPE.md) §2–§15; this document focuses on RIFF container detection, strategy selection, chunk layout, capacity, and cover restoration. Content domain steganography (WAV PCM LSB / FLAC residuals) is defined in [CONTENT-AUDIO.md](CONTENT-AUDIO.md); the two domains are mutually exclusive and non-interchangeable.
 
-## 1 范围、导航与稳定性
+---
 
-载体是以 12 字节 RIFF 头开始的 `WAVE` 或 `WEBP` 容器。适配器只读写顶层 chunk 流：不解码 PCM、不解码 WebP 图像、不重编码任何内容，信封只以新增顶层 chunk 的形式追加。
+## 1. Scope, Navigation, and Stability
 
-| 级别 | 本域内容 |
+Carriers are `WAVE` or `WEBP` containers starting with a 12-byte RIFF header. Adapters operate strictly on top-level chunk streams: no PCM audio decoding, no WebP image decoding, and no re-encoding; envelopes are appended exclusively as newly constructed top-level chunks.
+
+| Tier | RIFF Structural Scope |
 | --- | --- |
-| **F** | `"RIFF"` + `u32le` size + form type（`WAVE`/`WEBP`）；块名 `"SHRD"`；块长字段 `u32le`；UBE 前置 8 字节块头；物理文件末尾追加；奇数字节补 `0x00`；`riff_chunk` 的 `offset_delta = 8`、`patch_offset = 4`；`inject_size = 8 + ube_total_size + (ube_total_size & 1)`；RIFF size 字段按 §4.3 更新；locate 的坐标交叉规则 |
-| **D** | 载体分支：WebP Extended（12 字节后首块为 `VP8X`）才允许 `riff_chunk`，Simple Format 只能 `eof`；RIFF 声明边界是否等于物理末尾、chunk 表是否精确铺满决定 `riff_chunk` 可用性；UBE 奇偶决定补位 |
-| **I** | 缓冲/流式复制方式、扫描实现、`strategy_note` 文案、错误文本、`auto` 谓词调用次数；读侧均不依赖 |
+| **F** | `"RIFF"` + `u32le` size + form type (`WAVE` / `WEBP`); chunk identifier `"SHRD"`; chunk length field `u32le`; 8-byte chunk header prepended to UBE; append at physical EOF; 1-byte `0x00` padding on odd byte counts; `riff_chunk` parameters: $offset\_delta = 8$, $patch\_offset = 4$, $inject\_size = 8 + ube\_total\_size + (ube\_total\_size \& 1)$; RIFF size field updated per §4.2; coordinate cross-verification in locator |
+| **D** | Carrier branching: WebP Extended Format (first chunk following 12B header is `VP8X`) permits `riff_chunk`, while Simple Format allows `eof` only; whether declared RIFF boundary equals physical EOF and whether chunk tables span the boundary precisely determine `riff_chunk` availability; UBE oddness dictates padding byte |
+| **I** | Copy buffering / streaming methods, scanner implementation, `strategy_note` phrasing, error messages, `auto` predicate invocation frequency; readers depend on none of these |
 
-与内容域 WAV/FLAC 的区别：本域只增加 RIFF chunk，`data` chunk 内的 PCM 采样、FLAC 残差帧逐字节不变；PCM LSB / 残差修改属于内容域（CONTENT-AUDIO.md），其信封、容量与校验不进入本文件。
+Difference from Content Domain WAV/FLAC: Structural domain operations append a RIFF chunk, leaving PCM samples inside `data` and FLAC residual frames byte-for-byte untouched; PCM LSB and residual mutations belong to [CONTENT-AUDIO.md](CONTENT-AUDIO.md).
 
-## 2 格式识别（detect）
+---
 
-`detect` 只读前 12 字节：`buf[0..4] == "RIFF"` 且 `buf[8..12]` 等于期望 form type（WAV 用 `b"WAVE"`，WebP 用 `b"WEBP"`），成功返回 `true`，失败返回 `false`，不产生错误，并恢复调用前的流位置（`rust/src/structure/adapters/riff.rs:13-31`、`wav.rs:18`、`webp.rs:18`）。它不校验 size 字段、chunk 表、最小文件长度或 WebP 的 `VP8X`，因此 12 字节的伪 RIFF 文件也能通过 detect。适配器按 `registry.rs:25-36` 的顺序尝试，`WEBP` 在 `WAV` 之前，但 form type 不同不会互相误判。
+## 2. Format Detection (`detect`)
 
-结构门槛发生在写前校验与注入：
+`detect` inspects the first 12 bytes exclusively: `buf[0..4] == "RIFF"` and `buf[8..12]` equals the expected form type (`b"WAVE"` for WAV, `b"WEBP"` for WebP), returning `true` on match and `false` otherwise without raising errors, restoring stream position before returning (`rust/src/structure/adapters/riff.rs:13-31`, `wav.rs:18`, `webp.rs:18`). It does not validate the size field, chunk table, minimum file length, or WebP `VP8X`. Registration evaluates in `registry.rs:25-36` order (`WEBP` precedes `WAV`), with distinct form types preventing misclassification.
 
-1. 文件长度 < 12 → `CorruptedData("<format> file too small for a valid RIFF header")`（`riff.rs:62-68`）。
-2. `host_len != 8 + old_riff_size`（size 字段为 0 或 `0xFFFFFFFF` 的流式 WAV、尾部垃圾）→ `CorruptedData`，提示改用 `--strategy eof`（`riff.rs:93-99`）。
-3. chunk 表不能精确铺满声明边界 → `CorruptedData`；末块奇数长但缺 pad 单独报 `MissingFinalPad`（`riff.rs:107-121`、`:389-446`）。
-4. WebP Simple Format 显式请求 `riff_chunk` → `UnsupportedFormat`，提示改用 `--strategy eof`（`webp.rs:53-68`）。
-5. 写路径还会先跑 L1：WAV 要求存在 `fmt ` 与 `data` 块，WebP 要求存在 `VP8 `、`VP8L` 或 `VP8X` 之一（`wav.rs:77-85`、`webp.rs:96-104`、`engine.rs:1027-1035`）；不满足即 `CorruptedData` 拒绝写入。
+Structural validation gates occur during pre-write verification and injection:
 
-## 3 策略、auto 与容量报告
+1. File length $< 12 \to \text{CorruptedData}("<format>\text{ file too small for a valid RIFF header}")$ (`riff.rs:62-68`).
+2. $host\_len \ne 8 + old\_riff\_size$ (streaming WAV with size 0 or `0xFFFFFFFF`, trailing garbage) $\to$ `CorruptedData`, prompting switch to `--strategy eof` (`riff.rs:93-99`).
+3. Chunk table does not span declared boundary precisely $\to$ `CorruptedData`; trailing odd-length chunk missing pad returns `MissingFinalPad` (`riff.rs:107-121`, `:389-446`).
+4. WebP Simple Format explicitly requesting `riff_chunk` $\to$ `UnsupportedFormat`, prompting switch to `--strategy eof` (`webp.rs:53-68`).
+5. Pre-write checks enforce Tier 1 prerequisites: WAV requires `fmt ` and `data` chunks; WebP requires one of `VP8 `, `VP8L`, or `VP8X` (`wav.rs:77-85`, `webp.rs:96-104`, `engine.rs:1027-1035`).
 
-| 名称 | `strategy_id` | 行为 | 出处 |
+---
+
+## 3. Strategies, `auto`, and Capacity Reporting
+
+| Strategy | `strategy_id` | Behavior | Reference |
 | --- | --- | --- | --- |
-| `riff_chunk` | 10 | 在物理文件末尾新建 `SHRD` 顶层 chunk，UBE 作为块数据 | `registry.rs:90-104`；`riff.rs:81-161` |
-| `eof` | 1 | 在文件 EOF 后追加 UBE，不改 RIFF 头 | `registry.rs:91`；`riff.rs:73-78` |
+| `riff_chunk` | 10 | Appends a new `SHRD` top-level chunk at physical EOF with UBE as chunk data | `registry.rs:90-104`; `riff.rs:81-161` |
+| `eof` | 1 | Appends UBE after EOF without modifying RIFF headers | `registry.rs:91`; `riff.rs:73-78` |
 
-两个适配器的支持列表均为 `["riff_chunk", "eof"]`，顺序即优先级（`wav.rs:21-23`、`webp.rs:21-23`）。`auto` 规则：
+Both adapters list `["riff_chunk", "eof"]` in order of precedence (`wav.rs:21-23`, `webp.rs:21-23`). `auto` resolution rules:
 
-- WAV：`riff_can_chunk(reader, ube_size)` 为真取 `riff_chunk`，否则 `eof`（`wav.rs:25-35`）。
-- WebP：仅当 12 字节后首块是 `VP8X` **且** `riff_can_chunk` 为真取 `riff_chunk`，否则 `eof`（`webp.rs:25-36`）。
+- WAV: If `riff_can_chunk(reader, ube_size)` is true, select `riff_chunk`; otherwise select `eof` (`wav.rs:25-35`).
+- WebP: If the first chunk following 12B header is `VP8X` **and** `riff_can_chunk` is true, select `riff_chunk`; otherwise select `eof` (`webp.rs:25-36`).
 
-`riff_can_chunk` 同时复刻注入的硬检查：`host_len == 8 + old_riff_size`、chunk 表为 `Exact`、`old_riff_size + inject_size <= u32::MAX`（`riff.rs:454-479`）。`auto` 不测量“空隙”，`riff_chunk` 总是让文件增长；显式策略由引擎校验是否在支持列表内（`engine.rs:1242-1255`），`riff_inject` 再次拒绝未知策略（`riff.rs:56-60`）。
+`riff_can_chunk` enforces injection requirements: $host\_len == 8 + old\_riff\_size$, chunk table is `Exact`, and $old\_riff\_size + inject\_size \le \text{u32::MAX}$ (`riff.rs:454-479`). `riff_chunk` always causes the file to expand.
 
-容量报告（`riff.rs:520-560`）：**动态查询**（`reader != None`）时 `riff_chunk` 上报真实 headroom `capacity_bytes = u32::MAX - old_riff_size - 8`（`riff.rs:483-503`），而非 `None`；若该余量低于最小可写信封 `min_ube_len(0)`，则置 `available = false`、`capacity_bytes = None` 并在 note 说明只能回退 `eof`（`riff.rs:506-518`、`:546-556`）。**静态表**（`reader == None`）仍报 `capacity_bytes = None`、`limit = "up to 4GB RIFF limit (file grows)"`；`eof` 恒为无上限。`reader != None` 时若边界谓词失败，`riff_chunk` 同样置 `available = false` 并附注回退 `eof`；WebP Simple Format 另行置 `available = false`（`webp.rs:38-51`）。`reader == None` 的静态表不区分 WebP 子格式。`inspect` 随后把两者统一钳到引擎载荷上限 `structure_payload_limit(host_len) = clamp(256 × host_len, 64 MiB, 1 GiB)`（`engine.rs:1938-1975`、`:2604-2611`；上限常量见 `rust/src/core/crypto.rs:786`），且不再为 `available = false` 的条目填数。
+Capacity reporting (`riff.rs:520-560`): Under **dynamic inspection** (`reader != None`), `riff_chunk` reports actual usable headroom $capacity\_bytes = \text{u32::MAX} - old\_riff\_size - 8$ (`riff.rs:483-503`); if this headroom falls below `min_ube_len(0)`, it sets `available = false`, `capacity_bytes = None`, noting fallback to `eof` (`riff.rs:506-518`, `:546-556`). Under **static inspection** (`reader == None`), it reports `capacity_bytes = None` and `limit = "up to 4GB RIFF limit (file grows)"`; `eof` is unbounded. `inspect` clamps both to the engine ceiling $\text{structure\_payload\_limit}(host\_len) = \text{clamp}(256 \times host\_len, 64\text{ MiB}, 1\text{ GiB})$ (`engine.rs:1938-1975`, `:2604-2611`), omitting values when `available = false`.
 
-## 4 注入布局
+---
+
+## 4. Injection Layout
 
 ### 4.1 `riff_chunk`
 
 ```text
-偏移 inject_offset = host_len（原载体物理末尾）
+Offset inject_offset = host_len (Original Physical EOF)
   +0                "SHRD" (53 48 52 44)
   +4                u32le chunk_size = ube_total_size
   +8                UBE[0 .. ube_total_size)        ← offset_delta = 8
-  +8+ube_total_size 0x00（仅当 ube_total_size 为奇数）
+  +8+ube_total_size 0x00 (Only if ube_total_size is odd)
 ```
 
-- 块名常量逐字为 `SHRD`（`riff.rs:11`）；块长字段只计块数据，**不含**自身 8 字节块头，也**不含**补位字节（`riff.rs:147-157`）。
-- 块固定追加在所有现有 chunk 之后，不插入 `data` 前、不插到 `LIST` 后、不重排任何既有块（`riff.rs:142-145`）。
-- `inject_size = 8 + ube_total_size + (ube_total_size & 1)`（`riff.rs:123-124`）；`inject` 返回 `(host_len, inject_size, 4, old_riff_size)`（`riff.rs:160`），即补丁覆盖 stego 偏移 4 的 4 字节字段。
+- Chunk identifier literal is `SHRD` (`riff.rs:11`); length field counts chunk data only, **excluding** its 8-byte header and **excluding** the padding byte (`riff.rs:147-157`).
+- Appended strictly after all existing chunks without reordering (`riff.rs:142-145`).
+- $inject\_size = 8 + ube\_total\_size + (ube\_total\_size \& 1)$ (`riff.rs:123-124`); `inject` returns $(host\_len, inject\_size, 4, old\_riff\_size)$ (`riff.rs:160`), indicating a 4-byte patch at offset 4.
 
-### 4.2 RIFF 总长度字段
+### 4.2 RIFF Total Size Field
 
-`new_riff_size = old_riff_size + inject_size`，越界检查 `new_riff_size <= u32::MAX`（`riff.rs:126-133`）；随后写出 `"RIFF" + u32le(new_riff_size) + form type`（`riff.rs:136-138`）。RIFF size 的语义是“文件长度 − 8”（form type 与全部 chunk 区域），因此注入后文件长度为 `8 + new_riff_size`。除偏移 4 的 size 字段外，原 12 字节头其余部分与所有原 chunk 字节逐字节复制（`riff.rs:142-143`）。
+$new\_riff\_size = old\_riff\_size + inject\_size$, validated against $new\_riff\_size \le \text{u32::MAX}$ (`riff.rs:126-133`); writes `"RIFF" + u32le(new_riff_size) + form_type` (`riff.rs:136-138`). The RIFF size field represents "file length - 8"; hence post-injection file length is $8 + new\_riff\_size$. Outside offset 4, all other bytes of the 12-byte header and existing chunks are copied verbatim (`riff.rs:142-143`).
 
 ### 4.3 `eof`
 
-RIFF 头完全不变；`inject_size = ube_total_size`、`inject_offset = host_len`、`offset_delta = 0`、无补丁（`riff.rs:73-78`、`wav.rs:100-104`、`webp.rs:118-122`）。信封首尾坐标由引擎按 `actual_ube_offset = inject_offset + offset_delta` 和默认 trailer 位置 `ube_offset + ube_total_size - 24` 回填（`engine.rs:1407`、`:1428-1441`；`adapters/mod.rs:356-359`）。
+RIFF headers remain unmodified; $inject\_size = ube\_total\_size$, $inject\_offset = host\_len$, $offset\_delta = 0$, with no patch ($patch\_offset = 0$) (`riff.rs:73-78`, `wav.rs:100-104`, `webp.rs:118-122`).
 
-## 5 WAV 与 WebP 的差异
+---
 
-| 项 | WAV | WebP |
+## 5. Differences between WAV and WebP
+
+| Feature | WAV | WebP |
 | --- | --- | --- |
-| form type | `WAVE` | `WEBP` |
-| 私有块名 | `SHRD` | `SHRD`（同一常量） |
-| `riff_chunk` 前置条件 | 任意满足 §2 的 `RIFF/WAVE` | 必须是 Extended Format：12 字节后首块为 `VP8X`（`webp.rs:25-36`、`:53-68`） |
-| L1 必需块 | `fmt ` 与 `data`（`wav.rs:77-85`） | `VP8 ` / `VP8L` / `VP8X` 任一（`webp.rs:96-104`） |
-| 容量不可用注记 | 边界不匹配 → “auto falls back to eof”（`riff.rs:499-505`） | 另加 Simple Format 无 `VP8X` 的注记（`webp.rs:44-49`） |
-| 追加位置 | 物理 EOF（通常在 `data`/`LIST` 之后） | 物理 EOF（所有顶层 chunk 之后） |
+| Form Type | `WAVE` | `WEBP` |
+| Chunk FourCC | `SHRD` | `SHRD` (shared constant) |
+| `riff_chunk` Prerequisite | Any valid `RIFF/WAVE` per §2 | Extended Format: first chunk after 12B header MUST be `VP8X` (`webp.rs:25-36`, `:53-68`) |
+| L1 Mandatory Chunks | `fmt ` and `data` (`wav.rs:77-85`) | Any one of `VP8 `, `VP8L`, or `VP8X` (`webp.rs:96-104`) |
+| Capacity Note | Boundary mismatch notes "auto falls back to eof" (`riff.rs:499-505`) | Notes Simple Format lacking `VP8X` (`webp.rs:44-49`) |
+| Append Location | Physical EOF (after `data` / `LIST`) | Physical EOF (after all top-level chunks) |
 
-## 6 容量公式、上下界与超限行为
+---
 
-记 `H = host_len`、`R = old_riff_size`（`u32le`）、`N = ube_total_size`、`P = N & 1`。`riff_chunk` 可写当且仅当：
+## 6. Capacity Formulas, Bounds, and Overflow Behaviors
+
+Let $H = host\_len$, $R = old\_riff\_size$ (u32le), $N = ube\_total\_size$, and $P = N \& 1$. `riff_chunk` is eligible if and only if:
 
 ```text
 H == 8 + R
-chunk 表精确铺满 H
-R + 8 + N + P <= 0xFFFF_FFFF        ⇔  R + inject_size <= u32::MAX
+Chunk table spans H precisely
+R + 8 + N + P <= 0xFFFF_FFFF        <=>  R + inject_size <= u32::MAX
 ```
 
-由此：块长字段（`u32`）最多能记 `N`，但真正先触发的是 RIFF size 上限；`N` 的精确上限为满足 `N + P <= 0xFFFF_FFFF - R - 8` 的最大值，即单块上限受 `R` 挤占，而不是独立的 `u32::MAX`。注入后文件长度最大为 `0xFFFF_FFFF + 8` 字节。
+The chunk size field can theoretically record $N$, but container size triggers first: maximum $N$ satisfies $N + P \le \text{0xFFFF\_FFFF} - R - 8$, meaning capacity is bounded by $R$ rather than an independent 4 GiB. Maximum post-injection file size is $\text{0xFFFF\_FFFF} + 8$ bytes.
 
-- 结构下界：`locate` 要求块长 `>= 24`（`riff.rs:194`），`confine_location` 要求 `ube_total_size >= 112 + 24 = 136`（`engine.rs:191-207`）。实际可产出的信封为 `min_ube_len(0) = 213`（0 字节载荷）与 `min_ube_len(1) = 214`（CLI 允许的最小载荷，`rust/src/structure/envelope.rs:123-140`）。代码中**没有** `MIN_UBE_PLAIN`/`MIN_UBE_ENCRYPTED` 两个常量，容量报告一律用 `min_ube_len(...)` 计算。
-- 引擎载荷上限另设为 `raw_size <= clamp(256 × orig_host_size, 64 MiB, 1 GiB)`（`engine.rs:1123`、`:1938-1943`）。
-- 超限行为：`auto` 在 `riff_can_chunk` 失败时改走 `eof`；显式 `riff_chunk` 在 size 溢出时报 `General("RIFF 4GB container size overflow")`（`riff.rs:126-133`），在边界/表不匹配时报 `CorruptedData` 并提示 `--strategy eof`（`riff.rs:93-121`）。`eof` 无容器上限，只受引擎载荷上限约束。
+- Structural lower bound: `locate` requires chunk length $\ge 24$ (`riff.rs:194`); `confine_location` requires $ube\_total\_size \ge 112 + 24 = 136$ (`engine.rs:191-207`). Practical minimum envelopes are `min_ube_len(0) = 213` and `min_ube_len(1) = 214` (`rust/src/structure/envelope.rs:123-140`).
+- Engine payload limit: $raw\_size \le \text{clamp}(256 \times orig\_host\_size, 64\text{ MiB}, 1\text{ GiB})$ (`engine.rs:1123`, `:1938-1943`).
+- Overflow behavior: `auto` falls back to `eof` when `riff_can_chunk` fails; explicit `riff_chunk` with overflowing size returns `General("RIFF 4GB container size overflow")` (`riff.rs:126-133`), and boundary/table errors return `CorruptedData` suggesting `--strategy eof` (`riff.rs:93-121`).
 
-## 7 locate 路径
+---
 
-`riff_locate` 按以下顺序（`riff.rs:163-228`）：
+## 7. Locator Pipeline (`locate`)
 
-1. 文件 < 12 或前 4 字节不是 `"RIFF"` → `Ok(None)`；**不**校验 form type 与 size 字段（`riff.rs:167-176`）。
-2. 从偏移 12 正向扫描顶层 chunk：读 `[4CC][u32le size]`，按 `8 + size + (size & 1)` 前进，加法溢出即停（`riff.rs:180-218`）。
-3. 命中 `SHRD` 且 `size >= 24`、块数据不越过文件尾时，读取 `块数据末尾 − 24` 的 24 字节尾标，用期望 trailer 魔数解包；仅当 `trailer.ube_offset == 块数据偏移` 且 `trailer.ube_total_size == size` 才返回 `(块数据偏移, size, "riff_chunk")`（`riff.rs:192-210`）。
-4. 扫描不中则做 EOF 回退：从文件尾读 24 字节尾标，`locate_start(file_size)` 在尾对齐时返回记录的 `ube_offset`，否则返回 `file_size - ube_total_size`（要求 `>= 136`），返回 `("eof")`（`riff.rs:221-225`；`envelope.rs:870-879`）。
-5. 提示：适配器未覆写 `locate_with_hint`，`expected_header_magic` 被忽略，只使用 `expected_trailer_magic`（`adapters/mod.rs:218-225`、`wav.rs:51-57`）。引擎持密码时先试 stealth 尾魔数、再试 profile 魔数（`engine.rs:145-166`）。
-6. 引擎统一收紧：`ube_total_size >= 136` 且 `ube_offset + ube_total_size <= 文件长度`（`engine.rs:191-207`）；随后用 `offset_delta` 与 trailer 坐标交叉核对（`engine.rs:2828-2902`）。`riff_chunk` 不允许像 PNG `chunk` 那样按定位结果平移 `inject_offset`，坐标不符即 `CorruptedData`（`engine.rs:2268-2296`）。
+`riff_locate` executes in this order (`riff.rs:163-228`):
 
-## 8 remove 还原
+1. File $< 12\text{B}$ or first 4 bytes $\ne \text{"RIFF"} \to \text{Ok(None)}$; does NOT check form type or size fields at this step (`riff.rs:167-176`).
+2. Scan top-level chunks forward from offset 12: read `[4CC][u32le size]`, advancing by $8 + size + (size \& 1)$ (`riff.rs:180-218`).
+3. On finding `SHRD` with $size \ge 24$ contained within EOF: read 24B trailer from $data\_end - 24$ and unpack with expected trailer magic; if $trailer.ube\_offset == data\_offset$ and $trailer.ube\_total\_size == size$, return `(data_offset, size, "riff_chunk")` (`riff.rs:192-210`).
+4. Fallback to EOF trailer if not found in chunk scan: read 24B trailer from EOF, evaluating `locate_start(file_size)` to return `(start, ube_total_size, "eof")` (`riff.rs:221-225`, `envelope.rs:870-879`).
+5. Hints: `expected_header_magic` is ignored; uses `expected_trailer_magic` only (`adapters/mod.rs:218-225`). Stealth trailer magic takes precedence over profile magic (`engine.rs:145-166`).
+6. Containment check: $ube\_total\_size \ge 136$ and $ube\_offset + ube\_total\_size \le \text{file\_size}$ (`engine.rs:191-207`), followed by coordinate cross-check with $offset\_delta$ (`engine.rs:2828-2902`). `riff_chunk` does not permit relocation; coordinate desynchronization returns `CorruptedData` (`engine.rs:2268-2296`).
 
-`WavAdapter`/`WebpAdapter` 不覆写 `strip`，使用默认实现：复制 `[0, inject_offset)`，跳过 `inject_size` 字节，再复制其余全部字节；若 `patch_offset != 0`，在输出流 `patch_offset` 处写回 `orig_patch_val`（`adapters/mod.rs:236-289`）。
+---
 
-- `riff_chunk`：跳过的是完整 `SHRD` 块（8 字节头 + UBE + 可能的补位）。注入时写入偏移 4 的 `new_riff_size` 已随 `[0, inject_offset)` 被复制，随后默认实现因 `4 < inject_offset` 在输出偏移 4 写回 `old_riff_size`，RIFF 总长度恢复原值；其余块与字节逐字不变。
-- `eof`：只复制 `[0, host_len)`，`patch_offset = 0`，不存在需要修正的字段。
-- 还原结果由 `verify_restored` 重新计算长度与 SHA-256，必须等于 header 中的 `orig_host_size` 与 `orig_host_sha256`，否则 `RestoreMismatch`（`engine.rs:2298-2312`）；失败时还会检查残留信封并提示按注入逆序删除。
+## 8. `remove` and Cover Restoration
 
-## 9 边界与异常结构
+WAV and WebP adapters use default `strip`: copies $[0, inject\_offset)$, skips $inject\_size$ bytes, copies remainder to EOF; if $patch\_offset \ne 0$, writes $orig\_patch\_val$ at output stream offset $patch\_offset$ (`adapters/mod.rs:236-289`).
 
-- `LIST`/`INFO`：按普通顶层 chunk 处理，只读外层 4CC 与长度，不解析子块；`INFO` 子块与 `LIST` 内嵌结构原样保留，补位按外层长度判定（`riff.rs:180-218`、`:406-446`）。
-- `fact`：不检查、不要求；WAV 的 L1 只要求 `fmt ` 与 `data`，`fact` 缺失不影响写入或定位。
-- `data`：结构域不读取、不修改其内容；`SHRD` 总是追加在 `data` 之后。PCM 采样改动属内容域，不影响 `riff_chunk` 的偏移（音频内容域保持长度不变）。
-- WebP `VP8X`：代码只比较 12 字节后的 4CC 是否为 `VP8X`（`riff.rs:36-47`），不解析 flags、canvas 尺寸、保留位或 `VP8X` 块长；损坏但标签正确的 `VP8X` 仍可进入 `riff_chunk`，L1 只按“存在图像块”兜底。
-- 损坏 chunk：注入前 `riff_chunk_table` 返回 `None` 或 `MissingFinalPad` 即拒绝；`verify_structure` 对截断、越界、缺 pad 返回 `(false, 详情)`（`riff.rs:292-336`）；`locate` 扫描遇错只停止并尝试 EOF 回退，不报错。
-- 流式 WAV（size = 0 / `0xFFFFFFFF`）：`riff_chunk` 拒绝，`auto` → `eof`；`verify_structure` 允许在 chunk 边界处的 EOF overlay，不要求声明边界等于物理末尾（`riff.rs:263-290`）。
-- `suspicious_structures` 对任意长度的 `SHRD` 都报告（`riff.rs:348-386`），不设大小门槛，因此与 PNG 私有块的判定口径不同。
+- `riff_chunk`: Skips the entire `SHRD` chunk (8B header + UBE + padding). Because offset 4 falls within $[0, inject\_offset)$, the modified size was initially copied, but `patch_offset = 4` immediately restores $old\_riff\_size$, reverting the RIFF size field to its original value; all other chunks are untouched.
+- `eof`: Copies $[0, host\_len)$, with $patch\_offset = 0$.
+- `verify_restored` recomputes restored file size and SHA-256 against $orig\_host\_size$ and $orig\_host\_sha256$, returning `RestoreMismatch` on discrepancy (`engine.rs:2298-2312`).
 
-## 10 I 级写侧与自检
+---
 
-- **I 级**：复制缓冲区大小、是否边读边写、扫描是否缓存、`strategy_note` 文案与错误文本可由实现决定；写入的字节布局、块名、补位、size 更新与 `offset_delta` 不由实现更改。
-- 写序列：写前 L1 校验（`engine.rs:1027-1035`）→ `riff_inject` 写新 RIFF 头、复制原 chunk 区、追加 `SHRD` → 引擎在 `actual_ube_offset` 回填 header、在默认 trailer 位置回填尾标（`engine.rs:1428-1441`）。RIFF 不覆写 `finalize`，无 CRC 类后处理（`adapters/mod.rs:364-370`）。
-- 写后自检：`locate` 必须返回本次写入的精确坐标 `(actual_ube_offset, ube_total_size)`，否则中止且不提交半成品（`engine.rs:1454-1472`）；文件落盘为临时文件 + 原子重命名（`engine.rs:1601`）。
-- 回归测试：`tests/test_regression/review_20261025.rs:123-175` 固定 `inject_offset = host_len`、`patch_offset = 4`、`inject_size = 8 + ube_total_size` 与 locate 返回 `(host_len + 8, ube_total_size)`；`:186-` 覆盖末块缺 pad 的写前拒绝。`tests/test_lifecycle/matrix.rs:734-793` 覆盖 Simple WebP 的 `auto → eof` 与显式 `riff_chunk` 拒绝；`:798-` 覆盖流式 WAV 哨兵 size 经 `eof` 后 L1 仍通过。
+## 9. Boundary and Abnormal Structures
+
+- `LIST` / `INFO`: Handled as standard top-level chunks based on outer length, without parsing sub-chunks (`riff.rs:180-218`, `:406-446`).
+- `fact`: Neither checked nor required.
+- `data`: Structural adapters neither parse nor modify sample data; `SHRD` appends past `data`.
+- WebP `VP8X`: Checks only that FourCC at offset 12 is `VP8X` (`riff.rs:36-47`), without parsing canvas dimensions or flags.
+- Corrupted Chunks: If `riff_chunk_table` returns `None` or `MissingFinalPad`, writing is rejected; `verify_structure` returns `(false, details)` (`riff.rs:292-336`).
+- Streaming WAVs (size = 0 or `0xFFFFFFFF`): `riff_chunk` rejects, `auto` routes to `eof`; `verify_structure` permits EOF overlays on chunk boundaries (`riff.rs:263-290`).
+- `suspicious_structures` flags any `SHRD` chunk regardless of length (`riff.rs:348-386`).
+
+---
+
+## 10. Tier I Writer Details and Self-Verification
+
+- Writer details: Copy buffer sizes, streaming strategies, scan caching, and message phrasing are non-normative.
+- Injection Sequence: Pre-write validation $\to$ `riff_inject` writes new RIFF header, copies chunks, appends `SHRD` $\to$ engine backfills header at `actual_ube_offset` and trailer at default trailer offset (`engine.rs:1428-1441`). RIFF does not override `finalize`.
+- Post-write verification: `locate` MUST recover the written coordinates $(actual\_ube\_offset, ube\_total\_size)$ exactly; failures abort and clean up temporary files (`engine.rs:1454-1472`, `:1601`).
+- Regression tests: `tests/test_regression/review_20261025.rs:123-175` validates $inject\_offset = host\_len$, $patch\_offset = 4$, $inject\_size = 8 + ube\_total\_size$; `tests/test_lifecycle/matrix.rs:734-793` covers Simple WebP `auto -> eof` and explicit `riff_chunk` rejection.

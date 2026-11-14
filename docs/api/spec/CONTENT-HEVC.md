@@ -1,68 +1,78 @@
-# HEVC / HEIF 内容载体规范（V4）
+# HEVC / HEIF Content Carrier Specification (V4)
 
-导航：[公共信封与 STC](CONTENT-ENVELOPE.md) ｜ [容量](CAPACITY.md) ｜ [密码学](CRYPTO.md) ｜ [总规范](../WIRE_SPEC_CONTENT.md)
+Navigation: [Common Envelope and STC](CONTENT-ENVELOPE.md) | [Capacity](CAPACITY.md) | [Cryptography](CRYPTO.md) | [Overview](README.md)
 
-本文只定义 HEVC 视频与 HEIF/HEIC 图像特有的槽位、分带、置换、32B 头、`pre_salt` 与写侧边界。信封、微头、AAD、L1/L2/L3、TLV、STC 定义见公共规范。
+This document specifies the slot geometry, banding, keyed linear permutation, 32B base header, `pre_salt`, and writer constraints specific to HEVC video and HEIF/HEIC images. Common envelopes, micro-headers, AAD, L1/L2/L3 derivation, TLV rules, and STC are specified in the common layer documents.
 
-## 1. 适用范围与稳定性
+---
 
-适用于 MP4/MOV/MKV 中的 HEVC 视频、Annex-B 裸流，以及 HEIF/HEIC 的主图或 `grid` 瓦片项。HEIF 缩略图桥接不属于 Scheme C，见 §8.5。
+## 1. Scope and Stability
 
-**容器解析的防御上限**：读取 MP4/MOV 容器结构（`inspect` 等走 `StegoHeaderInfo` 的路径）时会把整个 `moov` box 读入内存，因此对 `moov` 尺寸设 32 MiB 硬上限，超出即 `UnsupportedFormat("MP4 moov box exceeds 32 MiB")`（`rust/src/stego/hevc/engine.rs:2627-2631`）。该上限只拦异常/恶意容器，正常 `moov`（含 `stsd`/`stbl`）远小于此。
+Applies to HEVC video streams packaged within MP4 / MOV / MKV containers, raw Annex-B byte streams, and primary or `grid` image items in HEIF / HEIC files. HEIF thumbnail bridging operates outside Scheme C; see §8.5.
 
-| 内容 | 级别 | 依据 |
+**Container Parsing Defensive Ceiling**: Inspecting MP4/MOV container structures (via `inspect` and paths constructing `StegoHeaderInfo`) loads the entire `moov` box into memory. A hard ceiling of 32 MiB is enforced; exceeding this returns `UnsupportedFormat("MP4 moov box exceeds 32 MiB")` (`rust/src/stego/hevc/engine.rs:2627-2631`). This protects against malformed or malicious container structures; normal `moov` boxes (including `stsd` / `stbl`) are far smaller.
+
+| Content | Tier | Justification |
 | :--- | :--- | :--- |
-| 槽位语义、分带、线性置换、32B 头、`pre_salt`、session salt | **F** | 改变即读不回既有载体 |
-| `HevcFormatProfile` 的标签与 `stc_h`/`stc_u` | **D** | 换标签或参数即产生独立方言 |
-| 重编码、补零、并行、SIMD、防竞争排除策略 | **I** | 只影响写侧字节，由基线把关 |
+| Slot semantics, banding, linear permutation, 32B base header, `pre_salt`, session salt | **F** | Changes render existing carriers permanently unreadable |
+| `HevcFormatProfile` labels and default $stc\_h / stc\_u$ | **D** | Modifying labels or parameters produces an isolated format dialect |
+| Re-encoding, zero-padding, multi-threading, SIMD, race prevention strategies | **I** | Affects writer output bytes only; guarded by byte-level baselines |
 
-官方 profile：`magic_label = b"strhide-hevc-magic-v4"`、`cover_salt = b"strhide-hevc-cover-v1"`、`stc_h = 7`、`stc_u = 2`（`rust/src/stego/format.rs:98-105`）。
+Official profile: `magic_label = b"strhide-hevc-magic-v4"`, `cover_salt = b"strhide-hevc-cover-v1"`, $stc\_h = 7$, $stc\_u = 2$ (`rust/src/stego/format.rs:98-105`).
 
-## 2. 唯一切片/调制点
+---
 
-唯一被修改的语法元素是 TU 内 CABAC bypass `coeff_sign_flag`（非 DC 系数符号）。DC 系数（`x_c == y_c == 0`）永久排除（`rust/src/stego/hevc/slot.rs:581-589`），记录点见 `:615-626`。一个槽位记录为 16B（`rust/src/stego/hevc/slot.rs:143-159`）：
+## 2. Modulation Point: Syntax Element
 
-| 字段 | 类型 | 含义 |
+The sole modified syntax element is the TU-level CABAC bypass `coeff_sign_flag` (sign of non-DC transform coefficients). DC coefficients ($x_c == y_c == 0$) are permanently excluded (`rust/src/stego/hevc/slot.rs:581-589`; logged at `:615-626`). Each slot is recorded as a 16-byte structure (`rust/src/stego/hevc/slot.rs:143-159`):
+
+| Field | Type | Meaning |
 | :--- | :--- | :--- |
-| `cost` | f32 | 符号翻转的感知失真代价 |
-| `op_idx` | u32 | 所属 slice 的 `BinOp` 日志序号 |
-| `slice_idx` | u32 | 载体内的 0 基切片号 |
-| `substream_idx` | u16 | 切片内的 WPP/tile substream 号 |
-| `original_bit` | u8 | 原始符号位：0 = 正，1 = 负（槽值奇偶） |
+| `cost` | f32 | Perceptual distortion cost of flipping coefficient sign |
+| `op_idx` | u32 | Index in the slice's `BinOp` trace log |
+| `slice_idx` | u32 | 0-based slice index within carrier |
+| `substream_idx` | u16 | WPP / tile substream index within slice |
+| `original_bit` | u8 | Original sign bit: 0 = positive, 1 = negative (slot parity) |
 
-写侧只把 `original_bit` 取反并按原日志重放同一 CABAC 子流；重编码 NAL 长度必须等于覆盖跨度，否则拒绝（`rust/src/stego/hevc/engine.rs:1909-1920`）。因此码流尺寸、参数集、切片头与解码结果均不变（`rust/src/stego/hevc/bitstream.rs:178-191`）。
+Writers invert `original_bit` and re-encode the identical CABAC substream along the logged trace; rewritten NAL length MUST exactly match the original span, otherwise the operation is rejected (`rust/src/stego/hevc/engine.rs:1909-1920`). Stream dimensions, parameter sets, slice headers, and decoded visual geometry remain unaltered (`rust/src/stego/hevc/bitstream.rs:178-191`).
 
-## 3. 槽位池与头部定位
+---
 
-候选槽只来自可承载槽位的 VCL 切片（§8.2），按解码顺序追加到记录数组；数组前缀构成头部候选池。
+## 3. Slot Pool and Header Locating
 
-- 头部池大小：`pool_size = min(total_window_slots, 2048)`（`rust/src/stego/hevc/engine.rs:91-92`、`:2236-2237`）。
-- 头部槽位数：`524 + ext_slots`，`ext_slots = 2 * (8 * ext_len + 6)`，`ext_len = 0` 时为 0（`rust/src/stego/hevc/engine.rs:94`、`:137-142`）。
-- 头部第 `i` 槽：`pos_i = (start + i * stride) mod pool_size`，`i ∈ [0, 524 + ext_slots)`，`band_start = 0`（`rust/src/stego/hevc/engine.rs:304-338`）。
+Candidate slots originate strictly from VCL slices capable of carrying payload (§8.2), appended in decode order to the slot buffer; the prefix of this buffer forms the header candidate pool.
 
-`start`/`stride` 由 L2 `locate_seed` 按 §5 推导。同一置换的前 524 项是基础头，后续项是扩展区，故读取方先解基础头、再按 `ext_len` 续读。`524 = 2 * (256 + 6)` 对应官方 `h = 7, u = 2`；`stc_h` 不存入头中（`rust/src/stego/hevc/engine.rs:148-152`）。
+- Header pool size: $pool\_size = \min(total\_window\_slots, 2048)$ (`rust/src/stego/hevc/engine.rs:91-92`, `:2236-2237`).
+- Header slot count: $524 + ext\_slots$, where $ext\_slots = 2 \cdot (8 \cdot ext\_len + 6)$, or 0 when $ext\_len = 0$ (`rust/src/stego/hevc/engine.rs:94`, `:137-142`).
+- Header slot $i$: $pos_i = (start + i \cdot stride) \bmod pool\_size$, for $i \in [0, 524 + ext\_slots)$, with $band\_start = 0$ (`rust/src/stego/hevc/engine.rs:304-338`).
 
-写侧窗口目标：`target_slots = max(524 + ext_slots + desired_body_slots + 128, 2048)`（`rust/src/stego/hevc/engine.rs:430-438`）。第一遍至少记录 2048 槽（`MinSlots`），再按 `TargetSlots(target_slots)` 继续，直到满足正文需求或载体耗尽（`:1229-1257`）。
+`start` and `stride` are derived from L2 `locate_seed` per §5. The first 524 items of this permutation carry the base header, and subsequent items carry the extension region, allowing readers to decode the base header first and resume decoding extension bytes based on decoded `ext_len`. $524 = 2 \cdot (256 + 6)$ corresponds to official defaults $h = 7, u = 2$; $stc\_h$ is not encoded into headers (`rust/src/stego/hevc/engine.rs:148-152`).
 
-## 4. 正文分带
+Writer window target: $target\_slots = \max(524 + ext\_slots + desired\_body\_slots + 128, 2048)$ (`rust/src/stego/hevc/engine.rs:430-438`). The first pass records at least 2048 slots (`MinSlots`), continuing with `TargetSlots(target_slots)` until the payload target is met or the carrier is exhausted (`:1229-1257`).
 
-分带只依赖 `nal_unit_type` 序列与"载体是否存在帧间图像"，嵌入不改变二者（`rust/src/stego/hevc/engine.rs:4098-4120`）：
+---
 
-- 无任何帧间图像（静态图、全 intra）：所有图像为 band 0。
-- 存在帧间图像时：非参考图像为 band 0；参考且非 IRAP 图像为 band 1；IRAP（BLA/IDR/CRA，`16..=23`）与 RASL_N/RASL_R 不承载槽位。
+## 4. Body Banding
 
-正文池构造（`rust/src/stego/hevc/engine.rs:376-414`）：在 `pool_size` 前缀内剔除全部头部位置；其余槽按解码顺序追加到 band 0 或 band 1；超出 `pool_size` 的槽直接按所属带追加（头部只可能在前缀内）。最终 `bands = [0..band0.len(), band0.len()..total_body]`（`:4014-4026`）。正文第 `i` 槽：
+Banding depends strictly on the `nal_unit_type` sequence and whether inter-frame pictures exist in the carrier; embedding modifications alter neither property (`rust/src/stego/hevc/engine.rs:4098-4120`):
+
+- Carriers with no inter-frame pictures (still images, all-intra): all pictures belong to Band 0.
+- Carriers with inter-frame pictures: non-reference pictures belong to Band 0; reference non-IRAP pictures belong to Band 1; IRAP pictures (BLA / IDR / CRA, types $16 \dots 23$) and RASL pictures carry zero slots.
+
+Body pool construction (`rust/src/stego/hevc/engine.rs:376-414`): within the `pool_size` prefix, all header positions are eliminated; remaining slots are appended in decode order to Band 0 or Band 1; slots beyond `pool_size` are appended directly to their respective band (header slots exist exclusively within the prefix). Final band ranges: $bands = [0 \dots band0.len(), band0.len() \dots total\_body]$ (`:4014-4026`). Body slot $i$:
 
 ```text
 (start, stride) = params(band.len(), perm_seed, band.start)
 pos_i = band.start + ((start + i * stride) mod band.len())
 ```
 
-先耗尽 band 0，未满 `body_n` 才进入 band 1；两个带永不交错（`rust/src/stego/hevc/engine.rs:1955-1988`）。`body_n` 由 `body_len * 8` 经头部 `(stc_h, stc_u)` 的 `slots_for` 求得（`:2248-2251`）。
+Band 0 is exhausted first; Band 1 is entered only when $body\_n > band0.len()$; the two bands never interleave (`rust/src/stego/hevc/engine.rs:1955-1988`). $body\_n$ is computed from $body\_len \times 8$ using $\text{slots\_for}(8 \cdot body\_len, stc\_h, stc\_u)$ (`:2248-2251`).
 
-## 5. 线性置换完整定义
+---
 
-`params(len, perm_seed, band_start)`（`rust/src/stego/hevc/engine.rs:344-373`）：
+## 5. Keyed Linear Permutation Complete Definition
+
+`params(len, perm_seed, band_start)` (`rust/src/stego/hevc/engine.rs:344-373`):
 
 ```text
 seed = 0x243F6A8885A308D3
@@ -83,59 +93,65 @@ splitmix64(x):
     return z XOR (z >> 31)
 ```
 
-头部用 L2 `locate_seed`，正文用 L3 32B `perm_seed`。逐 8 字节 `u64le` 折入（不做并行异或），避免低熵种子坍缩（`:345-351`）。边界：`len == 0` 返回空；`len == 1` 时 `start = 0`、`stride = 1`；`stride` 始终与 `len` 互质；前缀项不因请求 `count` 改变（`:327-337`）。乘法在 u64 内完成，避免大 HEIC 的 `usize` 溢出（`:1979-1984`）。
+Header uses L2 `locate_seed`; body uses L3 32B `perm_seed`. Chunks of 8 bytes are folded sequentially as `u64le` (avoiding parallel XOR) to prevent entropy collapse (`:345-351`). Boundary conditions: $len = 0$ returns empty; $len = 1$ sets $start = 0, stride = 1$; $stride$ is coprime to $len$; prefix elements are independent of requested count (`:327-337`). Multiplications evaluate in u64 to avoid overflow on large HEIC carriers (`:1979-1984`).
 
-## 6. 32B 基础头
+---
 
-布局/编码见 `rust/src/stego/hevc/engine.rs:148-190`，解码校验见 `:193-278`。
+## 6. 32B Base Header
 
-| off | size | 字段 | 说明 |
+Layout and encoding: `rust/src/stego/hevc/engine.rs:148-190`, decoding and validation: `:193-278`.
+
+| Offset | Size | Field | Description |
 | :--- | :--- | :--- | :--- |
-| 0 | 4 | `magic` | L2 派生 |
-| 4 | 1 | `version` | `0x40`（major 4） |
-| 5 | 1 | `flags` | `EXT_PRESENT`/`EXT_CRITICAL`，其余位必须 0 |
-| 6 | 1 | `stc_u` | 正文字典宽度，1..=64 |
-| 7 | 2 | `window_slices` | 写侧主窗口记录的切片数，≥ 1 |
-| 9 | 1 | `ext_len` | 扩展 TLV 字节数，0..=64 |
-| 10 | 2 | `suite_id` | AEAD 套件 |
-| 12 | 4 | `body_len` | 密文长度（含 16B tag） |
-| 16 | 12 | `nonce` | AEAD nonce，同时进入 session salt |
-| 28 | 4 | CRC32-IEEE | 覆盖 `bytes[0..28]`，大端 |
+| 0 | 4 | `magic` | L2-derived 4-byte signature |
+| 4 | 1 | `version` | `0x40` (major version 4) |
+| 5 | 1 | `flags` | `EXT_PRESENT` / `EXT_CRITICAL`, other bits MUST be 0 |
+| 6 | 1 | `stc_u` | STC constraint width, $1 \dots 64$ |
+| 7 | 2 | `window_slices` | Slices recorded in writer's primary window, $\ge 1$ |
+| 9 | 1 | `ext_len` | Extension TLV byte length, $0 \dots 64$ |
+| 10 | 2 | `suite_id` | AEAD cipher suite identifier |
+| 12 | 4 | `body_len` | Ciphertext length (including 16B tag) |
+| 16 | 12 | `nonce` | AEAD nonce; input to session salt derivation |
+| 28 | 4 | CRC32-IEEE | CRC over `bytes[0..28]`, Big-Endian |
 
-隐含字段：`format_id = 5`、`total_windows = 1`、`stc_h`（来自 profile，官方 7）。三者不存头中，由 AAD 与 STC 参数绑定（`:148-152`、`:1393`）。
+Implicit constants: `format_id = 5`, `total_windows = 1`, and `stc_h` (from profile, official default 7). These are bound cryptographically via AAD and STC parameters (`:148-152`, `:1393`).
 
-`stc_u` 是 profile 值的冗余副本且自描述：写侧写入 `fmt.stc_u`（`:1385-1390`），读侧校验 `1..=64` 并以头为准构造正文 trellis（`:231-235`、`:2248-2249`）；`stc_h` 只来自 profile，头几何仍按官方 `h=7, u=2` 的 524 槽布局。`flags`/`ext_len` 一致性、suite 合法性、`body_len ∈ BODY_OVERHEAD..=HEADER_LEN_MAX` 均在读正文前拒绝（`:221-257`）。
+`stc_u` is self-describing: writers emit `fmt.stc_u` (`:1385-1390`), and readers validate $1 \dots 64$ and construct the trellis using this header value (`:231-235`, `:2248-2249`). $stc\_h$ is sourced strictly from profile; header geometry assumes official $h=7, u=2$ (524 slots). `flags` / `ext_len` consistency, suite validity, and $body\_len \in [BODY\_OVERHEAD, HEADER\_LEN\_MAX]$ are validated prior to reading payload bytes (`:221-257`).
 
-session salt（F）：`session_salt = SHA-256("strhide-hevc-session-v4" ‖ nonce[0..12])`（`rust/src/stego/hevc/engine.rs:451-456`）。`salt`/`nonce` 的生成与轮换遵循公共信封。
+Session Salt (Tier F): `session_salt = SHA-256("strhide-hevc-session-v4" ‖ nonce[0..12])` (`rust/src/stego/hevc/engine.rs:451-456`). Generation of nonce follows the common envelope.
 
-## 7. `pre_salt` 与载体身份
+---
 
-`pre_salt` 只取嵌入前后不变的参数集/切片头信息，写读两端必须得到相同密钥。统一前缀 `salt_prefix = cover_salt ‖ "hevc-v4"`（`rust/src/stego/hevc/engine.rs:4265-4270`）。
+## 7. `pre_salt` and Carrier Identity
 
-容器路径 `DigestInputs::ParameterSets`（`:4272-4287`）：
+`pre_salt` incorporates invariant parameter sets and slice headers, guaranteeing identical keys across writers and readers. Common prefix: $salt\_prefix = cover\_salt \mathbin{\Vert} \text{"hevc-v4"}$ (`rust/src/stego/hevc/engine.rs:4265-4270`).
+
+Container Path `DigestInputs::ParameterSets` (`:4272-4287`):
 
 ```text
 pre_salt = SHA-256(salt_prefix ‖ u64be(P)
                    ‖ for each ps[0..P]: u64be(len(ps)) ‖ ps)
 ```
 
-`P` 为 VPS/SPS/PPS 数组项数，`ps` 含 2B NAL 头；非参数集数组（如 SEI）在解析时丢弃（`rust/src/stego/hevc/heif_boxes.rs:515-560`）。
+`P` is the total count of VPS / SPS / PPS NAL units, each including its 2B NAL header; non-parameter sets (e.g. SEI) are stripped (`rust/src/stego/hevc/heif_boxes.rs:515-560`).
 
-Annex-B 路径调用 `compute_hevc_cover_digest`（`:4289`；定义见 `rust/src/stego/hevc/bitstream.rs:192-211`）：
+Annex-B Path via `compute_hevc_cover_digest` (`:4289`; defined in `rust/src/stego/hevc/bitstream.rs:192-211`):
 
 ```text
 pre_salt = SHA-256(salt_prefix ‖ u64be(N)
                    ‖ for each physical NAL span:
-                       参数集: 完整 NAL 字节（header_offset..end）
-                       VCL:    2B NAL 头 ‖ u64be(nal_len))
+                       Parameter Set: Full NAL bytes (header_offset..end)
+                       VCL Slice:     2B NAL header ‖ u64be(nal_len))
 ```
 
-VCL 切片头之后的首个 CABAC 字节可被改写，禁止进入摘要；NAL 长度因长度保持而不变（`bitstream.rs:178-191`）。
+The first CABAC byte following a VCL slice header may be altered during embedding and MUST NOT enter the digest; NAL length is preserved and invariant (`bitstream.rs:178-191`).
 
-## 8. 扩展区、容量、窗口与 HEIF
+---
 
-### 8.1 扩展区与容量
-`ext_len ≤ 64`（`rust/src/stego/hevc/engine.rs:123-124`、`:441-448`）；TLV 规则同公共信封；扩展槽固定 `2 * (8 * ext_len + 6)`（`:136-142`）。
+## 8. Extension Region, Capacity, Windows, and HEIF
+
+### 8.1 Extension Region and Capacity
+$ext\_len \le 64$ (`rust/src/stego/hevc/engine.rs:123-124`, `:441-448`); TLV syntax follows common envelope; extension slots equal $2 \cdot (8 \cdot ext\_len + 6)$ (`:136-142`).
 
 ```text
 hdr_slots   = 524 + ext_slots
@@ -143,30 +159,32 @@ body_slots  = total_slots - hdr_slots
 max_payload = message_bits(body_slots, stc_h, stc_u) / 8 - BODY_OVERHEAD
 ```
 
-`BODY_OVERHEAD = 22`；`body_len` 已含 tag，不再额外减 tag（`:468-500`）。`total_slots` 是主窗口记录到的全部候选槽。容量探测与写侧预算用 profile 的 `stc_u`，正文解码用头内值；官方均为 2。
+$BODY\_OVERHEAD = 22$; `body_len` includes tag (`:468-500`). `total_slots` counts all eligible candidate slots recorded across the window. Probing uses profile $stc\_u$; body decoding uses header $stc\_u$; both equal 2 under official defaults.
 
-### 8.2 窗口与切片选择
-- 候选切片按解码顺序记录；只有 `picture_band` 返回 `Some` 的 VCL 进入槽位池，IRAP 与 RASL 跳过（`:4098-4120`）。
-- `window_slices` 写入写窗口实际记录的切片数（`:1364-1370`）。
-- 读侧第一遍只记录 `MinSlots(2048)`；若 `recorded_slices < window_slices`，再以 `TargetSlices(window_slices)` 重录（`:2038-2042`、`:2222-2234`）。两遍的 `pool_size` 都取 `min(total_window_slots, 2048)`。
+### 8.2 Windows and Slice Selection
+- Candidate slices evaluate in decode order; only VCL slices where `picture_band` returns `Some` enter the pool; IRAP and RASL are skipped (`:4098-4120`).
+- `window_slices` records the actual count of slices scanned during embedding (`:1364-1370`).
+- Readers record `MinSlots(2048)` on the first pass; if $recorded\_slices < window\_slices$, they rescan via `TargetSlices(window_slices)` (`:2038-2042`, `:2222-2234`). In both passes, $pool\_size = \min(total\_window\_slots, 2048)$.
 
-### 8.3 防竞争
-写侧最多 24 轮（`:81`、`:1407`）：分别求解头/扩展/正文 STC；仅重编码被翻转的切片/substream；回放须与覆盖逐字节一致（尾部最多 4 个 0，见 §9）。若产生新的 `00 00 xx<=3` EPB 窗口或重编码失败，相关槽加入 `forbidden`，代价加 `FORBIDDEN_SLOT_SURCHARGE = 1e9`，下一轮重解。EPB 冲突排除半径 `8 << min(round, 3)`；无可排除项时排除窗口之前最近的翻转槽；仍无进展则报错（`:1631-1687`）。
+### 8.3 Emulation Prevention Byte (EPB) Conflict Resolution
+Writers execute up to 24 retry rounds (`:81`, `:1407`): solving base header, extension, and body STC separately; re-encoding only modified slices/substreams; verifying that replay matches original spans (with up to 4 trailing zero bytes, §9). If re-encoding produces a new `00 00 xx <= 3` sequence requiring EPB insertion, or re-encoding fails, the affected slots enter `forbidden` with cost penalty $FORBIDDEN\_SLOT\_SURCHARGE = 10^9$, triggering another solve round. EPB exclusion radius is $8 \ll \min(round, 3)$; if no slot falls within radius, the nearest flipped slot prior to the window is excluded; persistent failures abort (`:1631-1687`).
 
 ### 8.4 HEIF Scheme C
-- 主项非 `grid`：目标项 = `pitm` 主项；主项是 `grid`：目标项 = `iref/dimg` 瓦片，无 `dimg` 时退回主项（`rust/src/stego/hevc/heif_boxes.rs:161-184`）。
-- `hvcC` 通过 `ipma` 选择目标项真正关联的属性，缺失 `hvcC` 即拒绝；`iloc` 单 extent 拆分 NAL，重叠 extent 拒绝（`:440-488`、`:193-223`）。
+- Primary item is not `grid`: target = `pitm` primary item; primary item is `grid`: target = `iref/dimg` tile items, falling back to primary item if `dimg` is missing (`rust/src/stego/hevc/heif_boxes.rs:161-184`).
+- `hvcC` is resolved via `ipma` linking target items; missing `hvcC` causes rejection; `iloc` single-extent spans are parsed; overlapping extents are rejected (`:440-488`, `:193-223`).
 
-### 8.5 HEIF 桥接（独立于 Scheme C）
-仅 `FileFormat::Heif` 且直接 Scheme C 失败后尝试。可触发：`NoHiddenData`、`UnsupportedFormat`、`TrellisInfeasible`；`Cancelled`、凭据/策略/版本/容器解析错误不触发；`HevcMode::Cabac` 禁止回退；编译特性 `content-heif-bridge` 未启用时不回退（`rust/src/stego/engine.rs:426-447`、`:497-540`、`:569-597`）。
+### 8.5 HEIF Thumbnail Bridging (Independent of Scheme C)
+Attempted exclusively on `FileFormat::Heif` after Scheme C fails. Triggers include `NoHiddenData`, `UnsupportedFormat`, `TrellisInfeasible`; does not trigger on `Cancelled`, credential mismatch, policy, or container parse errors; disallowed under `HevcMode::Cabac`; disabled when feature `content-heif-bridge` is off (`rust/src/stego/engine.rs:426-447`, `:497-540`, `:569-597`).
 
-桥接目标（`rust/src/stego/heif/thumb_bridge.rs:651-741`）：`thmb` 引用的 JPEG 项，或任一非主项单 extent JPEG 项；其次 `Exif` 项内嵌 JPEG 缩略图。主项永久不作为目标并保持逐位不变。`unci`（未压缩）项不支持；错误文案中的 "uncompressed item" 为遗留措辞，实现会拒绝。桥接使用 JPEG 载体自己的 V4 信封（`format_id = 4`），不适用本文件的 32B 头与 HEVC 槽位规则。
+Bridging targets (`rust/src/stego/heif/thumb_bridge.rs:651-741`): `thmb`-referenced JPEG items, or any non-primary single-extent JPEG item; secondarily Exif embedded JPEG thumbnails. Primary items are never targeted and remain untouched. Uncompressed (`unci`) items are unsupported and rejected. Bridging uses JPEG V4 envelope (`format_id = 4`), bypassing 32B HEVC headers and CABAC slots.
 
-## 9. 写侧 I 级实现边界
+---
 
-- **重编码/重打包**：按 `BinOp` 日志重放并重打包 CABAC 子流；上下文初值取 `SubstreamRecord.init_contexts`；中途 substream 按 H.265 §9.3.2.6 补终止位（`rust/src/stego/hevc/engine.rs:1739-1817`）。
-- **长度保持**：等长直接替换；短 1–4 字节尾部补 0；更长或其他差值判 `BadSubstream`（`:1858-1880`）。
-- **回放校验**：未翻转时重放须与覆盖一致，允许覆盖多最多 4 个尾部 0（`cabac_zero_word`）（`:1924-1934`）。
-- **并行**：仅按切片用 rayon 并行重编码，不参与归约（`:1565-1588`）。
-- **SIMD**：规范不规定指令集；任何 SIMD 路径须与标量路径逐位等价，基线是唯一判据。
-- **基线**：写侧改动后运行 `python scripts/baseline_hash.py --check`；压力测试 `cargo run --release --all-features --example hevc_stress`。
+## 9. Writer-Only Tier I Scope
+
+- **Re-encoding / Re-packetization**: CABAC substreams are re-encoded along `BinOp` traces; context initial states are loaded from `SubstreamRecord.init_contexts`; intermediate substreams append termination bits per ITU-T H.265 §9.3.2.6 (`rust/src/stego/hevc/engine.rs:1739-1817`).
+- **Length Invariance**: Exact-length matches replace in-place; 1–4 bytes short pad trailing zeros; length increases return `BadSubstream` (`:1858-1880`).
+- **Replay Verification**: Unflipped streams must replay identically, tolerating up to 4 trailing zero padding bytes (`cabac_zero_word`) (`:1924-1934`).
+- **Parallelization**: Multi-threading via Rayon operates on independent slices, with no cross-slice reduction (`:1565-1588`).
+- **SIMD**: Any SIMD paths must match scalar execution bit-for-bit, verified via baselines.
+- **Verification**: Changes require running `python scripts/baseline_hash.py --check` and `cargo run --release --all-features --example hevc_stress`.
