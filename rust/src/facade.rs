@@ -113,6 +113,9 @@ pub struct DualOptions<'a> {
     /// Content-domain file key; ignored by the structure domain.
     pub key: Option<&'a [u8; 32]>,
     pub domain: Option<&'a str>,
+    /// Work limits for the content-domain inspector and verifier.
+    #[cfg(feature = "content-base")]
+    pub limits: Option<crate::stego::ExtractParams>,
     pub control: Control<'a>,
 }
 
@@ -158,6 +161,20 @@ impl<'a> DualOptions<'a> {
         self
     }
 
+    /// Work limits for the content-domain inspector and verifier.
+    #[cfg(feature = "content-base")]
+    pub fn with_limits(mut self, limits: crate::stego::ExtractParams) -> Self {
+        self.limits = Some(limits);
+        self
+    }
+
+    /// [`with_limits`](Self::with_limits) for an `Option` caller.
+    #[cfg(feature = "content-base")]
+    pub fn with_limits_option(mut self, limits: Option<crate::stego::ExtractParams>) -> Self {
+        self.limits = limits;
+        self
+    }
+
     /// Cancellation and progress channel shared with the caller.
     pub fn with_control(mut self, control: Control<'a>) -> Self {
         self.control = control;
@@ -165,6 +182,18 @@ impl<'a> DualOptions<'a> {
     }
 }
 
+#[cfg(feature = "content-base")]
+redacted_debug!(
+    DualOptions<'_>,
+    "DualOptions",
+    password: secret,
+    key: secret,
+    domain: plain,
+    limits: plain,
+    control: plain,
+);
+
+#[cfg(not(feature = "content-base"))]
 redacted_debug!(
     DualOptions<'_>,
     "DualOptions",
@@ -596,6 +625,7 @@ impl StrHide {
             ));
         }
 
+        #[cfg(any(feature = "structure-base", feature = "content-base"))]
         #[allow(unused_variables)]
         let _ = (carrier, opts);
 
@@ -630,7 +660,7 @@ impl StrHide {
                     password: opts.password,
                     key: opts.key,
                     domain: opts.domain,
-                    limits: crate::stego::ExtractParams::default(),
+                    limits: opts.limits.clone().unwrap_or_default(),
                     control: opts.control,
                 };
                 match self.stego().inspect_file(carrier, &stego_opts) {
@@ -742,6 +772,7 @@ impl StrHide {
             ));
         }
 
+        #[cfg(any(feature = "structure-base", feature = "content-base"))]
         #[allow(unused_variables)]
         let _ = (carrier, opts);
 
@@ -771,7 +802,7 @@ impl StrHide {
                     password: opts.password,
                     key: opts.key,
                     domain: opts.domain,
-                    limits: crate::stego::ExtractParams::default(),
+                    limits: opts.limits.clone().unwrap_or_default(),
                     control: opts.control,
                 };
                 // Preserve the failure error detail so callers can distinguish
@@ -809,6 +840,7 @@ impl StrHide {
                 password: opts.password,
                 key: opts.key,
                 domain: opts.domain,
+                limits: Some(opts.limits.clone()),
                 control: opts.control,
             },
         )?;
@@ -830,11 +862,7 @@ impl StrHide {
                 // Propagate content inspection failure rather than reporting
                 // that no hidden data was found (e.g. unsupported layout or engine errors).
                 if let Some(err) = &diag.content_error {
-                    return Err(StrHideError::General(format!(
-                        "Content-domain inspection of '{}' failed: {}",
-                        carrier.display(),
-                        err.detail
-                    )));
+                    return Err(err.to_error());
                 }
                 return Err(StrHideError::NoHiddenData(format!(
                     "No hidden data found in '{}'",

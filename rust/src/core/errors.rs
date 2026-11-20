@@ -423,6 +423,41 @@ impl ErrorDetail {
     pub fn category_text(&self, lang: crate::core::i18n::Lang) -> Option<&'static str> {
         self.category.map(|cat| cat.text(lang))
     }
+
+    /// Reconstitute an approximate [`StrHideError`] with the preserved [`ErrorKind`].
+    pub fn to_error(&self) -> StrHideError {
+        match self.kind {
+            ErrorKind::Io => StrHideError::Io(std::io::Error::other(self.detail.clone())),
+            ErrorKind::CorruptedData => StrHideError::CorruptedData(self.detail.clone()),
+            ErrorKind::Password => StrHideError::Password(self.detail.clone()),
+            ErrorKind::PasswordWithHint => StrHideError::PasswordWithHint {
+                message: self.detail.clone(),
+                hint: self.hint.clone(),
+            },
+            ErrorKind::TrellisInfeasible => StrHideError::TrellisInfeasible {
+                cause: TrellisCause::DeadElement,
+                detail: self.detail.clone(),
+            },
+            ErrorKind::Rejection => StrHideError::Rejection(self.detail.clone()),
+            ErrorKind::AlreadyExists => {
+                StrHideError::AlreadyExists(std::path::PathBuf::from(&self.detail))
+            }
+            ErrorKind::TargetBusy => {
+                StrHideError::TargetBusy(std::path::PathBuf::from(&self.detail))
+            }
+            ErrorKind::PayloadTooLarge => StrHideError::PayloadTooLarge(self.detail.clone()),
+            ErrorKind::UnsupportedFormat => StrHideError::UnsupportedFormat(self.detail.clone()),
+            ErrorKind::Unsupported => StrHideError::Unsupported(self.detail.clone()),
+            ErrorKind::NoHiddenData => StrHideError::NoHiddenData(self.detail.clone()),
+            ErrorKind::UnsupportedVersion => StrHideError::UnsupportedVersion(self.detail.clone()),
+            ErrorKind::Cancelled => StrHideError::Cancelled,
+            ErrorKind::InvalidArgument => StrHideError::InvalidArgument(self.detail.clone()),
+            ErrorKind::Config => StrHideError::ConfigError(self.detail.clone()),
+            ErrorKind::Crypto => StrHideError::CryptoError(self.detail.clone()),
+            ErrorKind::BufferOverflow => StrHideError::BufferOverflow(self.detail.clone()),
+            _ => StrHideError::General(self.detail.clone()),
+        }
+    }
 }
 
 /// The `"[ERROR] {prefix}: {detail}"` template in `lang`.

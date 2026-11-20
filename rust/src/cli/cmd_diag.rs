@@ -101,6 +101,8 @@ pub(crate) fn handle_inspect(
                 password: password.as_deref(),
                 key: key.as_ref(),
                 domain: engine.dialect().stego.stego_domain(),
+                #[cfg(feature = "content-base")]
+                limits: None,
                 control: crate::core::control::Control::none(),
             },
         )?;
@@ -128,6 +130,8 @@ pub(crate) fn handle_inspect(
                 password: password.as_deref(),
                 key: key.as_ref(),
                 domain: engine.dialect().stego.stego_domain(),
+                #[cfg(feature = "content-base")]
+                limits: None,
                 control: crate::core::control::Control::none(),
             },
         ) {
@@ -267,6 +271,8 @@ pub(crate) fn handle_verify(
                 password: password.as_deref(),
                 key: key.as_ref(),
                 domain: engine.dialect().stego.stego_domain(),
+                #[cfg(feature = "content-base")]
+                limits: None,
                 control: crate::core::control::Control::none(),
             },
         )?;
@@ -344,6 +350,8 @@ pub(crate) fn handle_verify(
                 password: password.as_deref(),
                 key: key.as_ref(),
                 domain: engine.dialect().stego.stego_domain(),
+                #[cfg(feature = "content-base")]
+                limits: None,
                 control: crate::core::control::Control::none(),
             },
         ) {
@@ -461,10 +469,17 @@ pub(crate) fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideErr
     // Expand inputs: directories become file lists.
     let ExpandedInputs { files, missing } = expand_input_paths(&args.input, args.recursive, quiet)?;
 
-    if files.is_empty() && missing.is_empty() {
-        return Err(StrHideError::General(
-            "No files to scan (empty input or empty directory)".into(),
-        ));
+    if files.is_empty() {
+        if missing.is_empty() {
+            return Err(StrHideError::General(
+                "No files to scan (empty input or empty directory)".into(),
+            ));
+        } else {
+            return Err(StrHideError::General(format!(
+                "None of the specified input files exist ({} missing)",
+                missing.len()
+            )));
+        }
     }
 
     let t_start = std::time::Instant::now();
@@ -521,7 +536,9 @@ pub(crate) fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideErr
                     let tag = match d.status.as_str() {
                         "ALERT" => "!",
                         "INFO" => "-",
-                        _ => "✓",
+                        "SKIPPED" => "~",
+                        "PASS" => "✓",
+                        _ => "?",
                     };
                     let thresh_info = match &d.threshold {
                         Some(t) => format!(" (threshold: {t})"),
@@ -584,6 +601,9 @@ pub(crate) fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideErr
         .map(|r| verdict_rank(&r.verdict))
         .max()
         .unwrap_or(0);
+    if reports.is_empty() && failures > 0 {
+        return Ok(1);
+    }
     Ok(if worst >= fail_rank { 1 } else { 0 })
 }
 

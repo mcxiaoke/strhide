@@ -130,6 +130,8 @@ pub(crate) fn handle_write(
         // Same rule as `embed`: a private content dialect bound to this engine
         // owns the preflight's content-domain probe.
         domain: engine.dialect().stego.stego_domain(),
+        #[cfg(feature = "content-base")]
+        limits: None,
         control: Control::none(),
     };
     let carrier_ready = |carrier: &Path| -> Result<(), StrHideError> {
