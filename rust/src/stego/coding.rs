@@ -454,8 +454,9 @@ pub fn hamming_embed_ternary(
     if k <= 1 {
         let mut flips = 0;
         for i in 0..total_bits {
-            if (vals[i] & 1) != bit_at(payload, i) {
-                flip_with_cost(&mut vals[i], moves[i], rho_plus[i], rho_minus[i]);
+            if (vals[i] & 1) != bit_at(payload, i)
+                && flip_with_cost(&mut vals[i], moves[i], rho_plus[i], rho_minus[i]) != Move::None
+            {
                 flips += 1;
             }
         }
@@ -484,21 +485,25 @@ pub fn hamming_embed_ternary(
         let diff = syndrome ^ msg;
         if diff != 0 {
             let idx = base + (diff as usize) - 1;
-            flip_with_cost(&mut vals[idx], moves[idx], rho_plus[idx], rho_minus[idx]);
-            flips += 1;
+            if flip_with_cost(&mut vals[idx], moves[idx], rho_plus[idx], rho_minus[idx])
+                != Move::None
+            {
+                flips += 1;
+            }
         }
         slot_cursor = base + n;
     }
 
     let tail_start = full_blocks * k;
     for bit_idx in tail_start..total_bits {
-        if (vals[slot_cursor] & 1) != bit_at(payload, bit_idx) {
-            flip_with_cost(
+        if (vals[slot_cursor] & 1) != bit_at(payload, bit_idx)
+            && flip_with_cost(
                 &mut vals[slot_cursor],
                 moves[slot_cursor],
                 rho_plus[slot_cursor],
                 rho_minus[slot_cursor],
-            );
+            ) != Move::None
+        {
             flips += 1;
         }
         slot_cursor += 1;

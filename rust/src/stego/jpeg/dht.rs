@@ -336,7 +336,18 @@ impl BlockZigzagState {
                 };
                 let merged = run_before + 1 + run_after;
                 match self.next_nonzero(z) {
-                    Some(next) => symbol_ok(merged, self.zz_cat[next], table),
+                    Some(next) => {
+                        let next_cat = self.zz_cat[next];
+                        if !symbol_ok(merged, next_cat, table) {
+                            return false;
+                        }
+                        if slots_in_block.is_some_and(|m| m & (1u64 << next) != 0)
+                            && !category_variants_ok(merged, next_cat, table)
+                        {
+                            return false;
+                        }
+                        true
+                    }
                     // Everything after the removed coefficient is zero, so the
                     // block ends with an EOB.
                     None => table.has(SYMBOL_EOB),

@@ -523,8 +523,14 @@ pub(crate) const DEFAULT_SLOT_BUDGET: usize = 1_200_000;
 ///   `h = 8`, 128 B at `h = 10`), so 4 GiB allows 134M slots at `h = 8`;
 /// * time -- bytes per slot and states per slot are the same power of two, so
 ///   they cancel and the worst case is ~1 s of kernel time for *any* `h`.
+const FOUR_GIB: u64 = 4u64 << 30;
+
 #[allow(dead_code)]
-pub(crate) const MAX_AUTO_BACKTRACK_BYTES: usize = 4 << 30; // 4 GiB
+pub(crate) const MAX_AUTO_BACKTRACK_BYTES: usize = if FOUR_GIB < usize::MAX as u64 {
+    FOUR_GIB as usize
+} else {
+    usize::MAX
+};
 
 /// Ceiling on the STC backtracking bitmap for the *correctness-driven* group
 /// size on carriers whose Huffman table is over-optimised.
@@ -534,7 +540,11 @@ pub(crate) const MAX_AUTO_BACKTRACK_BYTES: usize = 4 << 30; // 4 GiB
 /// carrying large payloads (512 KiB .. 4+ MiB) need room for `u >= 3` without
 /// arbitrary artificial ceilings. At `h = 8` (32 B/slot) 4 GiB accommodates
 /// 134M slots, fully unlocking the geometric capacity of massive carriers.
-pub(crate) const MAX_GROUPED_BACKTRACK_BYTES: usize = 4 << 30; // 4 GiB
+pub(crate) const MAX_GROUPED_BACKTRACK_BYTES: usize = if FOUR_GIB < usize::MAX as u64 {
+    FOUR_GIB as usize
+} else {
+    usize::MAX
+};
 
 /// Slot ceiling implied by [`MAX_GROUPED_BACKTRACK_BYTES`] at height `h`.
 ///

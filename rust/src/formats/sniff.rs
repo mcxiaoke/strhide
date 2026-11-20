@@ -21,8 +21,7 @@ use crate::formats::annexb::is_hevc_annexb;
 /// ISO-BMFF `ftyp` brands that identify an HEIF/HEIC (or AVIF) image file.
 #[doc(hidden)]
 pub const HEIF_BRANDS: &[[u8; 4]] = &[
-    *b"heic", *b"heix", *b"hevc", *b"hevx", *b"mif1", *b"msf1", *b"heim", *b"heis", *b"avif",
-    *b"avis",
+    *b"heic", *b"heix", *b"hevx", *b"mif1", *b"msf1", *b"heim", *b"heis", *b"avif", *b"avis",
 ];
 
 /// PNG magic (8-byte signature).

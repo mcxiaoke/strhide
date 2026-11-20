@@ -253,7 +253,7 @@ fn parse_video_trak_stream<'a>(
         .iter()
         .find(|b| &b.tag == b"stsz")
         .ok_or(HevcError::ContainerMalformed("missing stsz box"))?;
-    let sizes = parse_sample_sizes(bytes, stsz)?;
+    let sizes = parse_sample_sizes(bytes, stsz, Some(file_len))?;
     let sample_count = sizes.len();
 
     let chunk_offsets = if let Some(co64) = kids.iter().find(|b| &b.tag == b"co64") {
@@ -371,7 +371,7 @@ fn parse_stbl<'a>(bytes: &'a [u8], stbl: &BoxRef) -> Result<(Mp4HevcTarget<'a>, 
         .iter()
         .find(|b| &b.tag == b"stsz")
         .ok_or(HevcError::ContainerMalformed("missing stsz box"))?;
-    let sizes = parse_sample_sizes(bytes, stsz)?;
+    let sizes = parse_sample_sizes(bytes, stsz, None)?;
     let sample_count = sizes.len();
 
     // 64-bit offsets win when both are present: a file that had to grow past
@@ -510,7 +510,7 @@ fn parse_sample_description<'a>(
 }
 
 /// Parse `stsz` (Sample Size Box): either one fixed size or a per-sample table.
-fn parse_sample_sizes(bytes: &[u8], stsz: &BoxRef) -> Result<Vec<u32>> {
+fn parse_sample_sizes(bytes: &[u8], stsz: &BoxRef, file_len: Option<usize>) -> Result<Vec<u32>> {
     // FullBox: version/flags (4) + sample_size (4) + sample_count (4) + table.
     let payload = bytes
         .get(stsz.payload_start..stsz.end)
@@ -530,8 +530,9 @@ fn parse_sample_sizes(bytes: &[u8], stsz: &BoxRef) -> Result<Vec<u32>> {
         // total exceeds the whole file cannot be real. This also replaces the
         // 16 M-sample ceiling (64 MiB) as the allocation bound: a 20-byte
         // `stsz` in a small file must not request a 64 MiB buffer.
+        let max_len = file_len.unwrap_or(bytes.len()) as u64;
         let implied_total = (fixed as u64).saturating_mul(count as u64);
-        if implied_total > bytes.len() as u64 {
+        if implied_total > max_len {
             return Err(HevcError::ContainerMalformed(
                 "stsz sample sizes exceed the file size",
             ));
@@ -963,7 +964,7 @@ mod tests {
             end: box_bytes.len(),
         };
 
-        let err = parse_sample_sizes(&box_bytes, &stsz_ref).unwrap_err();
+        let err = parse_sample_sizes(&box_bytes, &stsz_ref, None).unwrap_err();
         assert!(
             matches!(err, HevcError::ContainerMalformed(_)),
             "a table larger than the file must be refused: {err:?}"
@@ -981,7 +982,7 @@ mod tests {
         // Padding stands in for the mdat so the implied total fits the file.
         let file = [small_box, vec![0u8; 32]].concat();
         assert_eq!(
-            parse_sample_sizes(&file, &small_ref).unwrap(),
+            parse_sample_sizes(&file, &small_ref, None).unwrap(),
             vec![8u32, 8]
         );
     }
