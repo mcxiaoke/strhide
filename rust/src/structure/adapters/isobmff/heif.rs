@@ -574,7 +574,8 @@ pub(super) fn heif_item_hidden_strip(
         } else {
             u32::from_be_bytes(iloc_buf[14..18].try_into().unwrap())
         };
-        if iloc_cnt == 0 || iloc_buf.len() < iloc_item_len {
+        let header_len = if iloc_ver < 2 { 16 } else { 18 };
+        if iloc_cnt == 0 || iloc_buf.len() < header_len + iloc_item_len {
             return Err(StrHideError::CorruptedData("Invalid iloc for strip".into()));
         }
 

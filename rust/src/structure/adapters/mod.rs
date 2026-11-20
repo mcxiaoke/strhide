@@ -500,14 +500,14 @@ impl Seek for SegmentedSubStream<'_> {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         use std::io::SeekFrom;
         let new_pos = match pos {
-            SeekFrom::Start(p) => p as i64,
-            SeekFrom::Current(p) => self.logical_pos as i64 + p,
-            SeekFrom::End(p) => self.total_size as i64 + p,
+            SeekFrom::Start(p) => i128::from(p),
+            SeekFrom::Current(p) => i128::from(self.logical_pos) + i128::from(p),
+            SeekFrom::End(p) => i128::from(self.total_size) + i128::from(p),
         };
-        if new_pos < 0 {
+        if new_pos < 0 || new_pos > i128::from(u64::MAX) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "Invalid seek to negative position",
+                "Invalid seek to negative or overflowing position",
             ));
         }
         self.logical_pos = new_pos as u64;

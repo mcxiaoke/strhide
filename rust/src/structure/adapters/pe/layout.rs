@@ -114,7 +114,10 @@ pub(crate) fn pe_geometry(data: &[u8]) -> Result<PeGeometry, CodebitsError> {
         return Err(CodebitsError::NotPe);
     }
     let e_lfanew = u32::from_le_bytes(data[0x3C..0x40].try_into().unwrap()) as usize;
-    if e_lfanew < 0x40 || e_lfanew + 24 > data.len() || &data[e_lfanew..e_lfanew + 4] != b"PE\0\0" {
+    let Some(header_end) = e_lfanew.checked_add(24) else {
+        return Err(CodebitsError::NotPe);
+    };
+    if e_lfanew < 0x40 || header_end > data.len() || &data[e_lfanew..e_lfanew + 4] != b"PE\0\0" {
         return Err(CodebitsError::NotPe);
     }
     let coff = e_lfanew + 4;
@@ -131,11 +134,21 @@ pub(crate) fn pe_geometry(data: &[u8]) -> Result<PeGeometry, CodebitsError> {
         return Err(CodebitsError::NotPe);
     }
 
-    let sec_table = opt + size_of_opt;
+    let Some(sec_table) = opt.checked_add(size_of_opt) else {
+        return Err(CodebitsError::NotPe);
+    };
     let mut sections: Vec<(String, u32, u32, u32)> = Vec::new(); // (name, vsize, rawsize, rawptr)
     for i in 0..num_sections {
-        let off = sec_table + i * 40;
-        if off + 40 > data.len() {
+        let Some(step) = i.checked_mul(40) else {
+            return Err(CodebitsError::NotPe);
+        };
+        let Some(off) = sec_table.checked_add(step) else {
+            return Err(CodebitsError::NotPe);
+        };
+        if match off.checked_add(40) {
+            Some(end) => end > data.len(),
+            None => true,
+        } {
             return Err(CodebitsError::NotPe);
         }
         let name = String::from_utf8_lossy(&data[off..off + 8])

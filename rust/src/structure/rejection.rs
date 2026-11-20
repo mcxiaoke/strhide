@@ -211,6 +211,8 @@ pub fn check_pdf_signature<R: Read + Seek + ?Sized>(
     let overlap = 1024;
     let mut prev_tail = Vec::new();
     let mut buf = vec![0u8; chunk_size];
+    let mut seen_byterange = false;
+    let mut seen_sig = false;
 
     loop {
         let bytes_read = reader.read(&mut buf)?;
@@ -222,12 +224,13 @@ pub fn check_pdf_signature<R: Read + Seek + ?Sized>(
         window.extend_from_slice(&prev_tail);
         window.extend_from_slice(&buf[..bytes_read]);
 
-        let window_has_byterange = has_pdf_name_token(&window, b"/ByteRange");
-        let window_has_sig = has_pdf_name_token(&window, b"/Sig")
+        seen_byterange |= has_pdf_name_token(&window, b"/ByteRange");
+        seen_sig |= has_pdf_name_token(&window, b"/Sig")
             || find_subsequence(&window, b"/Type /Sig").is_some()
-            || find_subsequence(&window, b"/Type/Sig").is_some();
+            || find_subsequence(&window, b"/Type/Sig").is_some()
+            || has_pdf_name_token(&window, b"/DocTimeStamp");
 
-        if window_has_byterange && window_has_sig {
+        if seen_byterange && seen_sig {
             reader.seek(SeekFrom::Start(start_pos))?;
             return Ok(Some(
                 "PDF document contains a cryptographic digital signature. Modifying it will invalidate the signature.".into(),
@@ -335,11 +338,28 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
             unresolved = true;
             continue;
         }
-        if cd_size == 0 {
-            // No central directory to inspect: either an empty archive or a
-            // decoy record. Keep looking at earlier candidates.
+        if cd_size == 0 || cd_size > 64 * 1024 * 1024 {
+            // No central directory to inspect or oversized (>64 MiB): keep looking.
+            unresolved = cd_size > 64 * 1024 * 1024;
             continue;
         }
+
+        // Check for APK Signature Scheme v2/v3 signing block immediately preceding the CD.
+        if cd_offset >= 24 && reader.seek(SeekFrom::Start(cd_offset - 24)).is_ok() {
+            let mut magic_buf = [0u8; 16];
+            // The 16-byte magic is at the end of the 24-byte footer: [8B size, 16B magic]
+            if reader.seek(SeekFrom::Start(cd_offset - 16)).is_ok()
+                && reader.read_exact(&mut magic_buf).is_ok()
+                && &magic_buf == b"APK Sig Block 42"
+            {
+                reader.seek(SeekFrom::Start(start_pos))?;
+                return Ok(Some(
+                    "ZIP/APK container carries an APK Signing Block (v2/v3/v4 signature). Modifying it will break Android package verification.".into(),
+                ));
+            }
+            let _ = reader.seek(SeekFrom::Start(cd_offset));
+        }
+
         let mut cd_buf = vec![0u8; cd_size as usize];
         if reader.read_exact(&mut cd_buf).is_err() {
             unresolved = true;
@@ -372,7 +392,10 @@ pub fn check_jar_signature<R: Read + Seek + ?Sized>(
             let name = String::from_utf8_lossy(&cd_buf[name_start..name_start + name_len]);
             let upper = name.to_uppercase();
             if upper.starts_with("META-INF/")
-                && (upper.ends_with(".SF") || upper.ends_with(".RSA") || upper.ends_with(".DSA"))
+                && (upper.ends_with(".SF")
+                    || upper.ends_with(".RSA")
+                    || upper.ends_with(".DSA")
+                    || upper.ends_with(".EC"))
             {
                 reader.seek(SeekFrom::Start(start_pos))?;
                 return Ok(Some(format!(

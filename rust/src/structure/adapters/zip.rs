@@ -430,6 +430,45 @@ impl HostAdapter for ZipAdapter {
         }
     }
 
+    fn verify_structure_with_magic(
+        &self,
+        stego_in: &mut dyn SeekRead,
+        locator_magic: Option<&[u8; 4]>,
+    ) -> Result<(bool, String), StrHideError> {
+        let res = self.verify_structure(stego_in);
+        if let Ok((true, _)) = &res {
+            return res;
+        }
+
+        // If the normal scan failed, check if an EOF envelope (>64 KiB) was appended
+        let file_size = match stego_in.seek(std::io::SeekFrom::End(0)) {
+            Ok(s) => s,
+            Err(_) => return res,
+        };
+        let tail_envelope =
+            crate::structure::envelope::EnvelopeTrailer::read_from_tail(stego_in, locator_magic)
+                .ok()
+                .flatten();
+
+        if let Some(trailer) = tail_envelope
+            && let Some(start) = trailer.locate_start(file_size)
+            && start > 0
+            && start <= file_size
+            && let Ok(mut sub) = crate::structure::adapters::SubStream::new(stego_in, 0, start)
+            && let Ok((eocd_pos, cd_offset, cd_size)) = find_eocd_offset(&mut sub)
+        {
+            return Ok((
+                true,
+                format!(
+                    "Valid ZIP archive (EOCD at {eocd_pos}, Central Directory at {cd_offset}, size {cd_size}, with {} bytes EOF envelope)",
+                    trailer.ube_total_size
+                ),
+            ));
+        }
+
+        res
+    }
+
     fn suspicious_structures(&self, stego_in: &mut dyn SeekRead) -> Vec<String> {
         let mut found = Vec::new();
         let file_size = match stego_in.seek(SeekFrom::End(0)) {
