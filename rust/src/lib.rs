@@ -194,7 +194,9 @@ pub mod cli_i18n;
 pub mod facade;
 
 // ── Facade (always compiled; methods are gated per domain) ──────────────────
-pub use facade::{Dialect, DualInspect, DualVerify, StrHide};
+pub use facade::{Dialect, DualInspect, DualOptions, DualVerify, StrHide};
+#[cfg(all(feature = "structure-base", feature = "content-base"))]
+pub use facade::{Domain, ExtractOutcome, SmartExtractOptions};
 
 // ── Errors ─────────────────────────────────────────────────────────────────
 pub use errors::{ErrorDetail, ErrorKind, StrHideError, TrellisCause};

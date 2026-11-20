@@ -317,9 +317,9 @@ pub fn estimate_with_coefficients(
     // F5 beta (reference only; see the field docs for why it stays flat here).
     let mut f5_modes = [0.0f64; 3];
     for (mi, &mode) in CALIBRATION_MODES.iter().enumerate() {
-        let h0 = calib_hist[mode][0] as f64;
-        let h1 = calib_hist[mode][1] as f64;
-        let h2 = calib_hist[mode][2] as f64;
+        let h0 = calib_hist[mode][0] as f64 * calib_scale;
+        let h1 = calib_hist[mode][1] as f64 * calib_scale;
+        let h2 = calib_hist[mode][2] as f64 * calib_scale;
         let b0 = luma_hist[mode][0] as f64;
         let b1 = luma_hist[mode][1] as f64;
         let denom = h1 * h1 + (h2 - h1) * (h2 - h1);

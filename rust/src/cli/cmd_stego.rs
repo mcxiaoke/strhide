@@ -311,6 +311,8 @@ pub(crate) fn handle_embed(
         // caller-supplied private dialect must be able to detect its own
         // payload in the cross-domain occupancy preflight.
         domain: engine.dialect().stego.stego_domain(),
+        #[cfg(feature = "content-base")]
+        limits: None,
         control: Control::none(),
     };
     let carrier_ready = |carrier: &Path| -> Result<(), StrHideError> {

@@ -129,6 +129,21 @@ pub(super) fn check_pipeline_budget(
     Ok(())
 }
 
+pub(super) fn check_extract_pipeline_budget(
+    base_bytes: u64,
+    ciphertext_len: usize,
+) -> Result<(), StrHideError> {
+    let total = base_bytes.saturating_add(ciphertext_len as u64);
+    if total > MAX_PIPELINE_BYTES {
+        return Err(StrHideError::PayloadTooLarge(format!(
+            "This payload needs about {} MiB of working memory; the {} MiB budget would be exceeded",
+            total >> 20,
+            MAX_PIPELINE_BYTES >> 20
+        )));
+    }
+    Ok(())
+}
+
 /// Body slots whose backtracking bitmap still fits the pipeline budget.
 ///
 /// The probe has to subtract the same bitmap cost `check_pipeline_budget`

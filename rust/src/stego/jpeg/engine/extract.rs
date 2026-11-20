@@ -20,7 +20,7 @@ use crate::stego::params::ExtractParams;
 use crate::stego::prng::{ChaCha12Stream, fisher_yates_prefix_from, permute_prefix};
 
 use super::capacity::{
-    PIPELINE_BYTES_PER_BLOCK, PIPELINE_FIXED_BYTES, check_pipeline_budget, preflight_jpeg,
+    PIPELINE_BYTES_PER_BLOCK, PIPELINE_FIXED_BYTES, check_extract_pipeline_budget, preflight_jpeg,
 };
 use super::layout::{CoverFrame, jpeg_pre_salt};
 use super::{JPEG_FORMAT_ID, map_dct_error};
@@ -155,11 +155,12 @@ pub(super) fn extract_jpeg_from(
     if body_n > body_grid_len || superblock.stc_h > MAX_STC_H {
         return Err(no_hidden());
     }
-    // Enforce the same pipeline budget checks during extraction to prevent unbounded memory allocation.
+    // Enforce pipeline memory budget during extraction to prevent unbounded allocation on untrusted headers.
     let total_blocks: usize = coeffs.components.iter().map(|c| c.blocks.len()).sum();
     let base_bytes =
         PIPELINE_FIXED_BYTES.saturating_add(total_blocks as u64 * PIPELINE_BYTES_PER_BLOCK);
-    check_pipeline_budget(base_bytes, body_n, superblock.stc_h)?;
+    check_extract_pipeline_budget(base_bytes, superblock.body_len as usize)
+        .map_err(|_| no_hidden())?;
     let session = derive_l3_session_keys(fmt.cipher, suite, &master, &superblock.salt, domain)
         .map_err(|_| no_hidden())?;
     permute_prefix(&mut slots_buf, body_n, &session.perm_seed);

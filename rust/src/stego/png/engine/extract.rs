@@ -261,7 +261,7 @@ pub(super) fn extract_png_with_keys(
             .algorithm_options
             .insert("alpha".to_string(), (header.sigma as f64).clamp(0.01, 0.90));
     }
-    effective_params.validate()?;
+    effective_params.validate().map_err(|_| no_hidden())?;
 
     // Distortion cost map of the declared model. Identical to what the embedder
     // computed, because header/feature pixels never leave their eight-value
@@ -276,7 +276,8 @@ pub(super) fn extract_png_with_keys(
         &locator.locate_seed,
         ext_len,
         header.exclusion_permille,
-    )?;
+    )
+    .map_err(|_| no_hidden())?;
     debug_assert_eq!(
         plan.permuted.get(..PNG_AUDIO_BASE_SLOTS),
         Some(&base_layout[..PNG_AUDIO_BASE_SLOTS]),
