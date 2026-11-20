@@ -429,6 +429,14 @@ fn reclaim_if_stale(path: &Path) -> bool {
         );
         return false;
     }
+    // Verify that the quarantined file actually contains the stale PID we observed.
+    // If another reclaimer already moved the stale marker and created a fresh active
+    // lock before our rename, our rename moved their live lock by mistake! Put it back.
+    let quarantined_pid = read_lock_pid(&quarantine);
+    if quarantined_pid != Some(pid) {
+        let _ = std::fs::rename(&quarantine, path);
+        return false;
+    }
     if let Err(e) = std::fs::remove_file(&quarantine) {
         log::debug!(
             target: "core::commit",
@@ -497,6 +505,13 @@ fn process_is_alive(pid: u32) -> bool {
     const EPERM: i32 = 1;
     const SIG_NONE: i32 = 0;
 
+    let Ok(pid_i32) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid_i32 <= 0 {
+        return false;
+    }
+
     #[link(name = "c")]
     unsafe extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
@@ -504,7 +519,7 @@ fn process_is_alive(pid: u32) -> bool {
 
     // SAFETY: signal 0 performs permission/existence checking only; it never
     // delivers a signal.
-    if unsafe { kill(pid as i32, SIG_NONE) } == 0 {
+    if unsafe { kill(pid_i32, SIG_NONE) } == 0 {
         return true;
     }
     std::io::Error::last_os_error().raw_os_error() == Some(EPERM)

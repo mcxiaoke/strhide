@@ -161,7 +161,11 @@ pub use core::crypto;
 pub use core::errors;
 pub use core::params;
 
-#[cfg(any(feature = "structure-base", feature = "content-base"))]
+#[cfg(any(
+    feature = "core-io",
+    feature = "structure-base",
+    feature = "content-base"
+))]
 pub use core::commit;
 
 /// Historical path: the message catalogue used to live at `strhide::i18n`.

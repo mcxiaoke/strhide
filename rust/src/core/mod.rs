@@ -17,7 +17,11 @@
 //! - `config` — the TOML settings model (feature `config`).
 
 pub mod batch;
-#[cfg(any(feature = "structure-base", feature = "content-base"))]
+#[cfg(any(
+    feature = "core-io",
+    feature = "structure-base",
+    feature = "content-base"
+))]
 pub mod commit;
 pub mod compress;
 pub mod control;

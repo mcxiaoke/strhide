@@ -122,6 +122,7 @@ toml = { version = "0.9", optional = true }
 
 [dev-dependencies]
 rayon = "1.10"
+serde_json = "1.0.154"
 
 [profile.test]
 opt-level = 2

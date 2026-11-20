@@ -4,6 +4,29 @@ use crate::errors::StrHideError;
 use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 use std::io::{Read, Write};
 
+struct CountingWriter<W> {
+    inner: W,
+    written: u64,
+}
+
+impl<W: Write> CountingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, written: 0 }
+    }
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// readable. `level` is validated by the caller
 /// ([`crate::params::LocalParams::validate`]).
 /// Returns (raw_size, compressed_size).
@@ -12,7 +35,8 @@ pub fn compress_stream<R: Read, W: Write>(
     writer: &mut W,
     level: u32,
 ) -> Result<(u64, u64), StrHideError> {
-    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(level));
+    let counting = CountingWriter::new(writer);
+    let mut encoder = DeflateEncoder::new(counting, Compression::new(level));
     let mut buf = [0u8; 64 * 1024];
     let mut raw_size: u64 = 0;
 
@@ -25,9 +49,8 @@ pub fn compress_stream<R: Read, W: Write>(
         encoder.write_all(&buf[..n])?;
     }
 
-    let compressed = encoder.finish()?;
-    let comp_size = compressed.len() as u64;
-    writer.write_all(&compressed)?;
+    let counting = encoder.finish()?;
+    let comp_size = counting.written;
 
     Ok((raw_size, comp_size))
 }
@@ -104,9 +127,19 @@ pub fn decompress_stream<R: Read, W: Write>(
     let mut total_decompressed: u64 = 0;
 
     loop {
-        let n = decoder.read(&mut buf).map_err(|e| {
-            StrHideError::CorruptedData(format!("Deflate decompression error: {e}"))
-        })?;
+        let n = match decoder.read(&mut buf) {
+            Ok(n) => n,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::UnexpectedEof
+                    || e.kind() == std::io::ErrorKind::InvalidData
+                    || e.kind() == std::io::ErrorKind::InvalidInput =>
+            {
+                return Err(StrHideError::CorruptedData(format!(
+                    "Deflate decompression error: {e}"
+                )));
+            }
+            Err(e) => return Err(StrHideError::Io(e)),
+        };
         if n == 0 {
             break;
         }

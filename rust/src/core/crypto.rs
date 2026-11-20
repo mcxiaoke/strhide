@@ -371,6 +371,9 @@ pub fn derive_channel_header_mask(envelope_header_magic: &[u8; 8]) -> [u8; 10] {
 /// chunks is safe because every resulting nonce is distinct.
 #[doc(hidden)]
 pub fn make_chunk_nonce(base_nonce: &[u8; 12], chunk_index: usize) -> [u8; 12] {
+    if chunk_index >= 0xFFFF_FFFF {
+        panic!("chunk_index {chunk_index} exceeds maximum allowable chunk index (0xFFFF_FFFE)");
+    }
     let counter_bytes: [u8; 4] = base_nonce[8..12].try_into().unwrap();
     let counter = u32::from_le_bytes(counter_bytes) ^ (chunk_index as u32);
     let mut nonce = [0u8; 12];
@@ -595,8 +598,12 @@ pub fn decrypt_stream_from_chunks<R: Read, W: Write>(
 
     while bytes_consumed < total_payload_bytes {
         let mut header_data = [0u8; 4];
-        reader.read_exact(&mut header_data).map_err(|_| {
-            StrHideError::CorruptedData("Unexpected EOF reading chunk header".into())
+        reader.read_exact(&mut header_data).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                StrHideError::CorruptedData("Unexpected EOF reading chunk header".into())
+            } else {
+                StrHideError::Io(e)
+            }
         })?;
         bytes_consumed += 4;
         let chunk_len = u32::from_le_bytes(header_data) as usize;
@@ -616,8 +623,12 @@ pub fn decrypt_stream_from_chunks<R: Read, W: Write>(
         }
 
         let mut cipher_chunk = vec![0u8; chunk_len];
-        reader.read_exact(&mut cipher_chunk).map_err(|_| {
-            StrHideError::CorruptedData("Unexpected EOF reading ciphertext chunk".into())
+        reader.read_exact(&mut cipher_chunk).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                StrHideError::CorruptedData("Unexpected EOF reading ciphertext chunk".into())
+            } else {
+                StrHideError::Io(e)
+            }
         })?;
         bytes_consumed += chunk_len as u64;
 
