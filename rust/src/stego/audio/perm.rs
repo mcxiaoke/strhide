@@ -135,10 +135,10 @@ impl KeyedPermutation {
             x = y;
             y = self.permute_block(x);
             guard += 1;
-            if guard > 64 {
-                // Unreachable for a true bijection; returning the folded index
-                // keeps a hypothetical defect from hanging an embed.
-                return (i as u64 % self.n) as usize;
+            if guard > 2048 {
+                panic!(
+                    "KeyedPermutation cycle-walking loop exceeded guard bound (broken bijection)"
+                );
             }
         }
         y as usize

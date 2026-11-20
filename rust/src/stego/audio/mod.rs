@@ -280,6 +280,9 @@ pub(crate) fn extract_flac(
         return Err(core::no_hidden_data());
     }
     let info = flac::parse_stream_info(carrier)?;
+    if info.bits_per_sample > 24 {
+        return Err(core::no_hidden_data());
+    }
     let (analysis, tails) = flac::analyse_with_tails(carrier, &info)?;
     let pre_salt = flac_pre_salt(&info, profile.hpos_salt);
     let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
@@ -417,6 +420,9 @@ pub(crate) fn inspect_flac(
     }
     control.check()?;
     let info = flac::parse_stream_info(carrier)?;
+    if info.bits_per_sample > 24 {
+        return Ok(StegoHeaderInfo::empty("FLAC"));
+    }
     let (analysis, tails) = flac::analyse_with_tails(carrier, &info)?;
     let pre_salt = flac_pre_salt(&info, profile.hpos_salt);
     let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;
@@ -548,6 +554,9 @@ pub(crate) fn verify_flac(
         return Ok(core::policy_failure_result("FLAC"));
     }
     let info = flac::parse_stream_info(carrier)?;
+    if info.bits_per_sample > 24 {
+        return Ok(flac_unreadable());
+    }
     let (analysis, tails) = flac::analyse_with_tails(carrier, &info)?;
     let pre_salt = flac_pre_salt(&info, profile.hpos_salt);
     let prepared = core::prepare(cred, domain, profile.cipher, &pre_salt)?;

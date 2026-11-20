@@ -470,8 +470,9 @@ fn decode_subframe(
     };
 
     if wasted > 0 {
+        let shift = wasted.min(63);
         for sample in &mut samples {
-            *sample *= 1i64 << wasted;
+            *sample = sample.wrapping_shl(shift);
         }
     }
     Ok((samples, wasted as u8))
@@ -851,7 +852,7 @@ pub(crate) fn fold(value: i64) -> u64 {
     if value >= 0 {
         (value as u64) << 1
     } else {
-        ((-value) as u64) * 2 - 1
+        value.unsigned_abs().wrapping_mul(2).wrapping_sub(1)
     }
 }
 
@@ -871,7 +872,11 @@ fn undo_stereo(assignment: u8, mut planes: Vec<Vec<i64>>, _bps: u32) -> Vec<Vec<
         8 => {
             let left = first;
             let side = second;
-            let right: Vec<i64> = left.iter().zip(side.iter()).map(|(l, s)| l - s).collect();
+            let right: Vec<i64> = left
+                .iter()
+                .zip(side.iter())
+                .map(|(l, s)| l.wrapping_sub(*s))
+                .collect();
             (left, right)
         }
         // right + side: the stream order is (side, right), so `primary` here is
@@ -882,7 +887,7 @@ fn undo_stereo(assignment: u8, mut planes: Vec<Vec<i64>>, _bps: u32) -> Vec<Vec<
             let left: Vec<i64> = right
                 .iter()
                 .zip(difference.iter())
-                .map(|(r, d)| r + d)
+                .map(|(r, d)| r.wrapping_add(*d))
                 .collect();
             (left, right)
         }
@@ -895,9 +900,9 @@ fn undo_stereo(assignment: u8, mut planes: Vec<Vec<i64>>, _bps: u32) -> Vec<Vec<
             let mut left = Vec::with_capacity(mid.len());
             let mut right = Vec::with_capacity(mid.len());
             for (mid, s) in mid.iter().zip(side.iter()) {
-                let mid2 = (mid << 1) | (s & 1);
-                left.push((mid2 + s) >> 1);
-                right.push((mid2 - s) >> 1);
+                let mid2 = mid.wrapping_shl(1) | (s & 1);
+                left.push(mid2.wrapping_add(*s) >> 1);
+                right.push(mid2.wrapping_sub(*s) >> 1);
             }
             (left, right)
         }

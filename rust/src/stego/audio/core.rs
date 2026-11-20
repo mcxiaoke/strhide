@@ -770,14 +770,17 @@ pub(crate) fn embed<C: SlotCarrier + ?Sized>(
     }
 
     // Safety tier: refuse (or warn by returning the info) before touching bytes.
+    let available = capacity_total.saturating_sub(body_header_slots);
+    let (probe_codec, probe_u) = auto_select_codec(available, available.max(1));
+    let probe_u = probe_u.max(carrier.min_group());
     let info = capacity_info(
         capacity_total,
         body_header_slots,
         carrier.format_label(),
         safety.level,
         shape.h,
-        shape.u,
-        shape.codec,
+        probe_u,
+        probe_codec,
         carrier.min_group(),
     );
     if safety.is_enforced() && payload.as_bytes().len() > info.recommended_max_bytes {

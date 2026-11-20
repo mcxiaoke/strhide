@@ -75,13 +75,32 @@ impl<'a> BitReader<'a> {
         Ok(value)
     }
 
-    /// Read `bits` as a two's-complement signed value.
+    /// Read `bits` (0..=64) MSB-first as a 64-bit unsigned integer.
+    #[inline]
+    pub(crate) fn read_u64(&mut self, bits: u32) -> Result<u64, BitEof> {
+        debug_assert!(bits <= 64);
+        if bits == 0 {
+            return Ok(0);
+        }
+        let mut value = 0u64;
+        for _ in 0..bits {
+            value = (value << 1) | self.bit_at(self.pos).ok_or_else(|| eof(self.pos))? as u64;
+            self.pos += 1;
+        }
+        Ok(value)
+    }
+
+    /// Read `bits` as a two's-complement signed value (up to 64 bits).
     #[inline]
     pub(crate) fn read_signed(&mut self, bits: u32) -> Result<i64, BitEof> {
         if bits == 0 {
             return Ok(0);
         }
-        let raw = self.read(bits)? as u64;
+        let raw = if bits <= 32 {
+            self.read(bits)? as u64
+        } else {
+            self.read_u64(bits)?
+        };
         let shift = 64 - bits;
         Ok(((raw << shift) as i64) >> shift)
     }
