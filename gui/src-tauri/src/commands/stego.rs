@@ -37,8 +37,13 @@ fn resolve_tuning(algo: Option<&str>) -> Result<StegoTuning, StrHideError> {
     let Some(name) = algo.map(str::trim) else {
         return Ok(StegoTuning::Auto);
     };
-    if name.is_empty() || matches!(name, "auto" | "audio" | "wav_pcm" | "flac_residual") {
+    if name.is_empty() || matches!(name, "auto" | "audio") {
         return Ok(StegoTuning::Auto);
+    }
+    if matches!(name, "wav_pcm" | "flac_residual") {
+        return Ok(StegoTuning::audio(
+            strhide::stego::params::AudioParams::default(),
+        ));
     }
     if let Some(m) = SpatialAlgorithm::from_name(name) {
         return Ok(StegoTuning::Png {
@@ -110,9 +115,20 @@ pub async fn probe_stego_capacity_cmd(
         on_progress,
         move |engine, pool, ctrl, _| {
             let tuning = resolve_tuning(algorithm.as_deref())?;
-            let safety = SafetyPolicy::default().with_level(safety_level).with_enforcement(SafetyEnforcement::Advisory);
+            let safety = SafetyPolicy::default()
+                .with_level(safety_level)
+                .with_enforcement(SafetyEnforcement::Advisory);
 
-            let probe_opts = ProbeOptions::default().with_password_option(password.as_deref()).with_key_option(None).with_domain_option(domain.as_deref()).with_extensions(Vec::new()).with_safety_policy(safety).with_tuning(tuning).with_exact(exact).with_control(ctrl).with_pool(Arc::clone(&pool));
+            let probe_opts = ProbeOptions::default()
+                .with_password_option(password.as_deref())
+                .with_key_option(None)
+                .with_domain_option(domain.as_deref())
+                .with_extensions(Vec::new())
+                .with_safety_policy(safety)
+                .with_tuning(tuning)
+                .with_exact(exact)
+                .with_control(ctrl)
+                .with_pool(Arc::clone(&pool));
 
             let info = engine.stego().probe_file(&path, &probe_opts)?;
 
@@ -162,7 +178,9 @@ pub async fn embed_stego_file_impl(
     // is an OOM abort rather than a message the user can act on.
     let _embed_slot =
         crate::state::reserve_embed_slot(&state.embed_reserved).map_err(|e| e.detail_i18n())?;
-    run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
+    let carrier = req.carrier.clone();
+    let output_path = req.output_path.clone();
+    let res = run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
         // An omitted `-o` means "write in place": the carrier is the
         // destination, and `overwrite=false` must not reject the user's
         // in-place embed. Only an explicit different destination is checked.
@@ -196,7 +214,17 @@ pub async fn embed_stego_file_impl(
             SafetyEnforcement::Advisory
         };
 
-        let embed_opts = EmbedOptions::default().with_password_option(req.password.as_deref()).with_domain_option(req.domain.as_deref()).with_safety_policy(SafetyPolicy::default().with_level(req.safety_level).with_enforcement(enforcement)).with_tuning(resolve_tuning(req.algorithm.as_deref())?).with_control(ctrl).with_pool(Arc::clone(&pool));
+        let embed_opts = EmbedOptions::default()
+            .with_password_option(req.password.as_deref())
+            .with_domain_option(req.domain.as_deref())
+            .with_safety_policy(
+                SafetyPolicy::default()
+                    .with_level(req.safety_level)
+                    .with_enforcement(enforcement),
+            )
+            .with_tuning(resolve_tuning(req.algorithm.as_deref())?)
+            .with_control(ctrl)
+            .with_pool(Arc::clone(&pool));
 
         let res = engine
             .stego()
@@ -216,7 +244,14 @@ pub async fn embed_stego_file_impl(
 
         Ok(res)
     })
-    .await
+    .await;
+    if res.is_ok() {
+        state.invalidate_extract_cache(&carrier);
+        if let Some(ref out) = output_path {
+            state.invalidate_extract_cache(out);
+        }
+    }
+    res
 }
 
 #[tauri::command]
@@ -250,7 +285,13 @@ pub async fn extract_stego_file_cmd(
                 check_overwrite(dest, overwrite)?;
             }
 
-            let ex_opts = ExtractOptions::default().with_password_option(password.as_deref()).with_key_option(None).with_domain_option(domain.as_deref()).with_limits(strhide::stego::ExtractParams::default()).with_control(ctrl).with_pool(Arc::clone(&pool));
+            let ex_opts = ExtractOptions::default()
+                .with_password_option(password.as_deref())
+                .with_key_option(None)
+                .with_domain_option(domain.as_deref())
+                .with_limits(strhide::stego::ExtractParams::default())
+                .with_control(ctrl)
+                .with_pool(Arc::clone(&pool));
 
             let payload = extract_carrier_file_payload(&path, &ex_opts, &engine.dialect().stego)?;
 
@@ -270,8 +311,10 @@ pub async fn extract_stego_file_cmd(
             if let Some(ref dest) = output_path {
                 reject_carrier_output(dest, std::slice::from_ref(&path))?;
                 write_bytes_atomic(dest, &payload.data)?;
-                Ok(ReadSummary::new(path, is_file, is_encrypted, filename, raw_size)
-                    .with_written_file(Some(dest.clone())))
+                Ok(
+                    ReadSummary::new(path, is_file, is_encrypted, filename, raw_size)
+                        .with_written_file(Some(dest.clone())),
+                )
             } else {
                 let text_preview = if payload.data.len() <= 64 * 1024 {
                     std::str::from_utf8(&payload.data)
@@ -280,9 +323,11 @@ pub async fn extract_stego_file_cmd(
                 } else {
                     None
                 };
-                Ok(ReadSummary::new(path, is_file, is_encrypted, filename, raw_size)
-                    .with_written_file(None)
-                    .with_text_preview(text_preview))
+                Ok(
+                    ReadSummary::new(path, is_file, is_encrypted, filename, raw_size)
+                        .with_written_file(None)
+                        .with_text_preview(text_preview),
+                )
             }
         },
     )
@@ -335,22 +380,24 @@ pub async fn smart_extract_impl(
     on_progress: Channel<ProgressEvent>,
 ) -> Result<SmartExtractSummaryDto, ErrorDetail> {
     let cache = Arc::clone(&state.extract_cache);
-    run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
-        if let Some(ref dest) = output_path {
+    let res = run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
+        if let Some(ref dest) = output_path
+            && !dest.is_dir()
+        {
             check_overwrite(dest, overwrite)?;
         }
 
-        let mtime = match std::fs::metadata(&path).and_then(|m| m.modified()) {
-            Ok(m) => Some(m),
+        let (mtime, file_size) = match std::fs::metadata(&path) {
+            Ok(m) => (m.modified().ok(), Some(m.len())),
             Err(e) => {
-                // Without an mtime the cache key is weaker, not invalid: the
+                // Without metadata the cache key is weaker, not invalid: the
                 // extract below reports any real file problem.
                 log::debug!(
                     target: "ipc::smart_extract",
-                    "carrier mtime unavailable for {}: {e}",
+                    "carrier metadata unavailable for {}: {e}",
                     path.display()
                 );
-                None
+                (None, None)
             }
         };
         let cached_hit = {
@@ -368,7 +415,7 @@ pub async fn smart_extract_impl(
                 }
             };
             guard.as_ref().and_then(|c| {
-                if c.matches(&path, mtime, &password, &domain, prefer) {
+                if c.matches(&path, mtime, file_size, &password, &domain, prefer) {
                     Some(c.outcome.clone())
                 } else {
                     None
@@ -387,7 +434,7 @@ pub async fn smart_extract_impl(
                 .with_control(ctrl)
                 .with_pool(Arc::clone(&pool));
             let fresh = engine.smart_extract(&path, &smart_opts)?;
-            {
+            if fresh.payload.data.len() <= crate::state::EXTRACT_CACHE_MAX_BYTES {
                 let mut guard = match cache.lock() {
                     Ok(g) => g,
                     Err(poisoned) => poisoned.into_inner(),
@@ -395,6 +442,7 @@ pub async fn smart_extract_impl(
                 *guard = Some(crate::state::CachedExtract {
                     path: path.clone(),
                     mtime,
+                    file_size,
                     password: password.clone(),
                     domain: domain.clone(),
                     prefer,
@@ -415,7 +463,9 @@ pub async fn smart_extract_impl(
 
         let is_text = !is_file && payload.data.len() <= 64 * 1024;
         let text_preview = if is_text {
-            std::str::from_utf8(&payload.data).ok().map(|s| s.to_string())
+            std::str::from_utf8(&payload.data)
+                .ok()
+                .map(|s| s.to_string())
         } else {
             None
         };
@@ -433,6 +483,7 @@ pub async fn smart_extract_impl(
                 } else {
                     dest.clone()
                 };
+                check_overwrite(&target_file, overwrite)?;
                 reject_carrier_output(&target_file, std::slice::from_ref(&path))?;
                 write_bytes_atomic(&target_file, &payload.data)?;
                 ReadSummary::new(path, is_file, is_encrypted, filename, raw_size)
@@ -467,16 +518,20 @@ pub async fn smart_extract_impl(
             "ipc::smart_extract",
             &format!(
                 "Smart extract succeeded from {:?}: is_file={}, size={}",
-                res.source,
-                res.summary.is_file,
-                res.summary.raw_size
+                res.source, res.summary.is_file, res.summary.raw_size
             ),
             Some(log_data),
         );
 
         Ok(res)
     })
-    .await
+    .await;
+    if let Ok(ref ok) = res
+        && let Some(ref written) = ok.summary.written_file
+    {
+        state.invalidate_extract_cache(written);
+    }
+    res
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -541,6 +596,33 @@ mod tests {
             resolve_tuning(Some("hill")),
             Ok(StegoTuning::Png { .. })
         ));
+        assert!(matches!(
+            resolve_tuning(Some("wav_pcm")),
+            Ok(StegoTuning::Audio { .. })
+        ));
+        assert!(matches!(
+            resolve_tuning(Some("flac_residual")),
+            Ok(StegoTuning::Audio { .. })
+        ));
+    }
+
+    #[test]
+    fn smart_extract_dir_destination_allowed_when_overwrite_false() {
+        let dir =
+            std::env::temp_dir().join(format!("strhide_extract_dir_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Pre-flight check must skip existing directories when overwrite=false.
+        let preflight = if !dir.is_dir() {
+            super::check_overwrite(&dir, false)
+        } else {
+            Ok(())
+        };
+        assert!(preflight.is_ok());
+        // Existing non-dir file must still fail check_overwrite when overwrite=false.
+        let file = dir.join("existing.bin");
+        std::fs::write(&file, b"hi").unwrap();
+        assert!(super::check_overwrite(&file, false).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

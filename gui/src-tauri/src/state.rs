@@ -12,10 +12,15 @@ use strhide::core::i18n::{self, RenderCtx};
 use strhide::errors::{ErrorDetail, StrHideError};
 use strhide::facade::StrHide;
 
+/// Maximum payload size retained in [`GuiState::extract_cache`] (16 MiB) so
+/// large file extractions do not stay pinned in RAM for the rest of the session.
+pub const EXTRACT_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct CachedExtract {
     pub path: std::path::PathBuf,
     pub mtime: Option<std::time::SystemTime>,
+    pub file_size: Option<u64>,
     pub password: Option<String>,
     /// The extraction parameters are part of the key: a probe made for one
     /// domain or preference must not answer a different request on the same
@@ -27,20 +32,22 @@ pub struct CachedExtract {
 
 impl CachedExtract {
     /// The cache is only reusable when every input that changes the result is
-    /// identical. `domain` and `prefer` are part of that input: without them a
-    /// result probed for one domain answers a different request on the same
-    /// unchanged carrier.
+    /// identical. `domain`, `prefer`, and `file_size` are part of that input:
+    /// without them a result probed for one domain or a file modified within
+    /// timestamp granularity / with `preserve_time` answers a stale request.
     #[allow(clippy::too_many_arguments)]
     pub fn matches(
         &self,
         path: &std::path::Path,
         mtime: Option<std::time::SystemTime>,
+        file_size: Option<u64>,
         password: &Option<String>,
         domain: &Option<String>,
         prefer: Option<strhide::facade::Domain>,
     ) -> bool {
         self.path == path
             && self.mtime == mtime
+            && self.file_size == file_size
             && &self.password == password
             && &self.domain == domain
             && self.prefer == prefer
@@ -56,6 +63,19 @@ pub struct GuiState {
     /// [`embed_concurrency_limit`] so a burst of large JPEGs cannot exhaust
     /// the machine before the allocator reports it.
     pub embed_reserved: AtomicUsize,
+}
+
+impl GuiState {
+    /// Drop any cached extraction whose path refers to `path`, so subsequent
+    /// extractions after an in-place or `preserve_time` write cannot see stale data.
+    pub fn invalidate_extract_cache(&self, path: &std::path::Path) {
+        let mut guard = lock_unpoisoned(&self.extract_cache);
+        if let Some(cached) = guard.as_ref()
+            && (cached.path == path || strhide::core::commit::same_file(&cached.path, path))
+        {
+            *guard = None;
+        }
+    }
 }
 
 impl Default for GuiState {
@@ -298,7 +318,9 @@ pub fn panic_error(payload: &(dyn std::any::Any + Send), target: &str) -> StrHid
 /// later log line, progress report or cancel request into another panic on the
 /// IPC thread; the value itself is still perfectly usable, so recover it.
 pub fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Run one blocking engine call off the async runtime, on the shared pool,
@@ -380,8 +402,7 @@ where
     let start_time = Instant::now();
     log::info!(target: "engine::task", "Task [{}] started", task_id);
 
-    lock_unpoisoned(&state.tasks)
-        .insert(task_id.clone(), Arc::clone(&token));
+    lock_unpoisoned(&state.tasks).insert(task_id.clone(), Arc::clone(&token));
 
     let task_id_clone = task_id.clone();
     let token_clone = Arc::clone(&token);
@@ -461,6 +482,7 @@ mod tests {
         let cached = CachedExtract {
             path: path.clone(),
             mtime: None,
+            file_size: Some(128),
             password: None,
             domain: Some("structure".to_string()),
             prefer: Some(Domain::Structure),
@@ -469,6 +491,7 @@ mod tests {
         assert!(cached.matches(
             &path,
             None,
+            Some(128),
             &None,
             &Some("structure".to_string()),
             Some(Domain::Structure)
@@ -476,6 +499,15 @@ mod tests {
         assert!(!cached.matches(
             &path,
             None,
+            Some(256),
+            &None,
+            &Some("structure".to_string()),
+            Some(Domain::Structure)
+        ));
+        assert!(!cached.matches(
+            &path,
+            None,
+            Some(128),
             &None,
             &Some("content".to_string()),
             Some(Domain::Structure)
@@ -483,10 +515,16 @@ mod tests {
         assert!(!cached.matches(
             &path,
             None,
+            Some(128),
             &None,
             &Some("structure".to_string()),
             Some(Domain::Content)
         ));
+
+        let state = GuiState::default();
+        *state.extract_cache.lock().unwrap() = Some(cached);
+        state.invalidate_extract_cache(&path);
+        assert!(state.extract_cache.lock().unwrap().is_none());
     }
 
     /// The panic payload used to be discarded at every worker boundary, so a

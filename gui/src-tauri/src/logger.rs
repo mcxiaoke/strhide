@@ -19,6 +19,7 @@ pub struct LogEntryDto {
     pub level: String, // "DEBUG" | "INFO" | "WARN" | "ERROR" | "TRACE"
     pub target: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
 }
 
@@ -68,10 +69,7 @@ impl log::Log for RingBufferLogger {
 
         #[cfg(debug_assertions)]
         {
-            eprintln!(
-                "[{}] [{}] {}",
-                entry.level, entry.target, entry.message
-            );
+            eprintln!("[{}] [{}] {}", entry.level, entry.target, entry.message);
         }
 
         {
@@ -156,10 +154,7 @@ pub fn record_custom_log(
 
     #[cfg(debug_assertions)]
     {
-        eprintln!(
-            "[{}] [{}] {}",
-            entry.level, entry.target, entry.message
-        );
+        eprintln!("[{}] [{}] {}", entry.level, entry.target, entry.message);
     }
 
     {
@@ -220,13 +215,9 @@ mod tests {
         assert_eq!(logs[0].level, "INFO");
         assert_eq!(logs[0].target, "test::target");
         assert_eq!(logs[0].message, "hello world");
-        assert_eq!(
-            logs[0].data.as_ref().unwrap()["foo"],
-            "bar"
-        );
+        assert_eq!(logs[0].data.as_ref().unwrap()["foo"], "bar");
 
         clear_logs();
         assert!(get_recent_logs().is_empty());
     }
 }
-

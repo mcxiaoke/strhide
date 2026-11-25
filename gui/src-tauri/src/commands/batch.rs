@@ -80,19 +80,23 @@ pub async fn run_batch_job_impl(
                     batch_ctrl.progress,
                     |_idx, path, ctrl| match job_type.as_str() {
                         "inspect" => {
-                        let opts = DualOptions::new()
-                            .with_password_option(password.as_deref())
-                            .with_domain_option(domain.as_deref())
-                            .with_control(*ctrl);
-                            let res = engine.inspect_any(path, &opts)?;
+                            let ctx = RenderCtx::new(i18n::lang());
+                            let opts = DualOptions::new()
+                                .with_password_option(password.as_deref())
+                                .with_domain_option(domain.as_deref())
+                                .with_control(*ctrl);
+                            let mut res = engine.inspect_any(path, &opts)?;
+                            for strat in &mut res.structure.strategies {
+                                strat.limit = strat.render_limit(ctx);
+                            }
                             serde_json::to_value(res)
                                 .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))
                         }
                         "verify" => {
-                        let opts = DualOptions::new()
-                            .with_password_option(password.as_deref())
-                            .with_domain_option(domain.as_deref())
-                            .with_control(*ctrl);
+                            let opts = DualOptions::new()
+                                .with_password_option(password.as_deref())
+                                .with_domain_option(domain.as_deref())
+                                .with_control(*ctrl);
                             let res = engine.verify_any(path, &opts)?;
                             serde_json::to_value(res)
                                 .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))
@@ -103,7 +107,12 @@ pub async fn run_batch_job_impl(
                                 .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))
                         }
                         "restore" => {
-                            let opts = RestoreOptions::default().with_output_option(None).with_password_option(password.as_deref()).with_backup(true).with_overwrite(true).with_control(*ctrl);
+                            let opts = RestoreOptions::default()
+                                .with_output_option(None)
+                                .with_password_option(password.as_deref())
+                                .with_backup(true)
+                                .with_overwrite(true)
+                                .with_control(*ctrl);
                             let res = engine.structure().restore_file(path, &opts)?;
                             serde_json::to_value(res)
                                 .map_err(|e| strhide::errors::StrHideError::General(e.to_string()))

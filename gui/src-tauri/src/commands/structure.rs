@@ -36,12 +36,13 @@ pub async fn write_structure_file_impl(
     // destination, and `overwrite=false` must not reject the user's in-place
     // write. Only a different explicit destination is checked.
     let overwrite = req.overwrite;
+    let carrier = req.carrier.clone();
+    let output_path = req.output_path.clone();
 
-    run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
-        if let Some(dest) = crate::commands::stego::overwrite_target(
-            req.output_path.as_deref(),
-            &req.carrier,
-        ) {
+    let res = run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
+        if let Some(dest) =
+            crate::commands::stego::overwrite_target(req.output_path.as_deref(), &req.carrier)
+        {
             check_overwrite(dest, overwrite)?;
         }
 
@@ -93,7 +94,14 @@ pub async fn write_structure_file_impl(
 
         Ok(res)
     })
-    .await
+    .await;
+    if res.is_ok() {
+        state.invalidate_extract_cache(&carrier);
+        if let Some(ref out) = output_path {
+            state.invalidate_extract_cache(out);
+        }
+    }
+    res
 }
 
 #[tauri::command]
@@ -116,7 +124,11 @@ pub async fn read_structure_file_impl(
     on_progress: Channel<ProgressEvent>,
 ) -> Result<ReadSummary, ErrorDetail> {
     run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
-        let opts = ReadOptions::default().with_output_option(output_path.as_deref()).with_password_option(password.as_deref()).with_overwrite(overwrite).with_control(ctrl);
+        let opts = ReadOptions::default()
+            .with_output_option(output_path.as_deref())
+            .with_password_option(password.as_deref())
+            .with_overwrite(overwrite)
+            .with_control(ctrl);
         let res = pool.install(|| engine.structure().read_file(&path, &opts))?;
         let summary = res.summary();
 
@@ -178,11 +190,25 @@ pub async fn restore_structure_file_impl(
     overwrite: bool,
     on_progress: Channel<ProgressEvent>,
 ) -> Result<RemoveResult, ErrorDetail> {
-    run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
-        let opts = RestoreOptions::default().with_output_option(output_path.as_deref()).with_password_option(password.as_deref()).with_backup(backup).with_overwrite(overwrite).with_control(ctrl);
+    let carrier = path.clone();
+    let out_clone = output_path.clone();
+    let res = run_cancellable_task(state, task_id, on_progress, move |engine, pool, ctrl, _| {
+        let opts = RestoreOptions::default()
+            .with_output_option(output_path.as_deref())
+            .with_password_option(password.as_deref())
+            .with_backup(backup)
+            .with_overwrite(overwrite)
+            .with_control(ctrl);
         pool.install(|| engine.structure().restore_file(&path, &opts))
     })
-    .await
+    .await;
+    if res.is_ok() {
+        state.invalidate_extract_cache(&carrier);
+        if let Some(ref out) = out_clone {
+            state.invalidate_extract_cache(out);
+        }
+    }
+    res
 }
 
 #[allow(clippy::too_many_arguments)]
