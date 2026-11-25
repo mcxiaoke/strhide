@@ -293,6 +293,11 @@ fn hevc_inspect(
         if bridge_info.has_hidden_data {
             return Ok(bridge_info);
         }
+        if primary_info.note.is_none() && bridge_info.note.is_some() {
+            let mut info = primary_info;
+            info.note = bridge_info.note;
+            return Ok(info);
+        }
     }
 
     Ok(primary_info)
@@ -342,9 +347,27 @@ fn hevc_verify(
         if bridge_ver.is_all_ok() {
             return Ok(bridge_ver);
         }
+        // Surface a detected-but-broken bridge envelope (e.g. wrong password or
+        // corrupted L3) instead of discarding it and falling back to an empty
+        // Scheme C result.
+        let primary_l2_ok = primary_ver.levels.iter().any(|l| l.level == 2 && l.ok);
+        let bridge_l2_ok = bridge_ver.levels.iter().any(|l| l.level == 2 && l.ok);
+        if !primary_l2_ok && bridge_l2_ok {
+            return Ok(bridge_ver);
+        }
     }
 
     Ok(primary_ver)
+}
+
+#[cfg(feature = "content-hevc")]
+fn check_heif_tuning(tuning: &crate::stego::options::StegoTuning) -> Result<(), StrHideError> {
+    #[cfg(feature = "content-audio")]
+    if matches!(tuning, crate::stego::options::StegoTuning::Audio { .. }) {
+        return tuning.applicable_to(FileFormat::Heif);
+    }
+    let _ = tuning;
+    Ok(())
 }
 
 /// HEIF/HEIC still image: Scheme C, with the thumbnail bridge as fallback.
@@ -363,6 +386,7 @@ impl StegoEngine for HeifEngine {
         opts: &ProbeOptions<'_>,
         dialect: &StegoProfile,
     ) -> Result<StegoCapacityInfo, StrHideError> {
+        check_heif_tuning(&opts.tuning)?;
         // A PNG or JPEG tuning is legitimate here: the bridge may write through
         // a PNG auxiliary item or a JPEG thumbnail, and the tuning names which
         // cost model that half should use.
@@ -376,6 +400,7 @@ impl StegoEngine for HeifEngine {
         opts: &EmbedOptions<'_>,
         dialect: &StegoProfile,
     ) -> Result<EmbedOutput, StrHideError> {
+        check_heif_tuning(&opts.tuning)?;
         hevc_embed(self.format(), carrier, payload, opts, dialect)
     }
 

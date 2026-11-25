@@ -120,13 +120,15 @@ pub fn resolve_password(
 /// first (or aborting the batch).
 pub(crate) struct BatchOutputs<'a> {
     pub dir: Option<&'a Path>,
+    pub carriers: &'a [PathBuf],
     pub used: HashSet<PathBuf>,
 }
 
 impl<'a> BatchOutputs<'a> {
-    pub(crate) fn new(dir: Option<&'a Path>) -> Self {
+    pub(crate) fn new(dir: Option<&'a Path>, carriers: &'a [PathBuf]) -> Self {
         Self {
             dir,
+            carriers,
             used: HashSet::new(),
         }
     }

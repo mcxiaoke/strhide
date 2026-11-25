@@ -1,6 +1,6 @@
 //! Extraction: locate the V4 header, authenticate it, then read the body.
 //!
-//! The header read is shared with inspect and erify, because all three
+//! The header read is shared with inspect and verify, because all three
 //! must derive the same locator keys and report the same verdict for a wrong
 //! password and a tampered header.
 

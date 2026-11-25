@@ -37,6 +37,7 @@ pub struct StegoAlgorithmInfo {
 
 /// Return structured metadata for all available content-domain steganography algorithms.
 pub fn list_stego_algorithms() -> Vec<StegoAlgorithmInfo> {
+    #[allow(unused_mut)]
     let mut out = Vec::new();
 
     #[cfg(feature = "content-png")]
@@ -169,6 +170,7 @@ pub fn algorithms_for_format(format: FileFormat) -> Vec<StegoAlgorithmInfo> {
 /// Return list of available algorithm names and descriptions for CLI listing.
 #[allow(clippy::vec_init_then_push)]
 pub fn list_algorithms() -> Vec<(&'static str, &'static str, &'static str)> {
+    #[allow(unused_mut)]
     let mut out = Vec::new();
     #[cfg(feature = "content-png")]
     out.extend(crate::stego::png::registry::list());

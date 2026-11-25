@@ -15,7 +15,7 @@
 pub(crate) mod audio;
 #[doc(hidden)]
 pub mod coding;
-#[cfg(feature = "content-base")]
+#[cfg(any(feature = "content-png", feature = "content-jpeg"))]
 pub(crate) mod cost_calibration;
 
 /// Deterministic elementary functions for the cost pipeline (`exp`, `ln`,
@@ -49,7 +49,7 @@ pub mod png;
 #[doc(hidden)]
 pub mod prng;
 pub mod registry;
-#[cfg(feature = "content-base")]
+#[cfg(any(feature = "content-png", feature = "content-jpeg"))]
 pub(crate) mod spatial_variance;
 pub mod traits;
 #[cfg(any(feature = "content-png", feature = "content-jpeg"))]

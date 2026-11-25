@@ -204,7 +204,11 @@ impl<'a> From<&'a str> for Payload<'a> {
 
 impl<'a> From<&'a Payload<'a>> for Payload<'a> {
     fn from(p: &'a Payload<'a>) -> Self {
-        p.clone()
+        Self {
+            data: Cow::Borrowed(p.as_bytes()),
+            kind: p.kind,
+            name: p.name.clone(),
+        }
     }
 }
 

@@ -616,7 +616,7 @@ pub(crate) fn handle_extract(
         Some(batch) => run(batch),
         None => {
             let output_dir = batch_output_dir(args.output.as_deref(), multi, "extracting from")?;
-            run(&mut BatchOutputs::new(output_dir))
+            run(&mut BatchOutputs::new(output_dir, &args.carrier))
         }
     }
 }
@@ -716,7 +716,7 @@ fn extract_one(
         } else {
             out_path.clone()
         };
-        crate::core::commit::reject_carrier_output(&dest, &args.carrier)?;
+        crate::core::commit::reject_carrier_output(&dest, batch.carriers)?;
         check_overwrite(&dest, args.overwrite)?;
         crate::core::commit::write_bytes_atomic(&dest, payload.as_bytes())?;
         batch.used.insert(dest.clone());
@@ -737,7 +737,7 @@ fn extract_one(
     } else if let Some(raw_name) = payload.name() {
         let clean_name = crate::core::fs::sanitize_filename(raw_name);
         let dest = PathBuf::from(clean_name);
-        crate::core::commit::reject_carrier_output(&dest, &args.carrier)?;
+        crate::core::commit::reject_carrier_output(&dest, batch.carriers)?;
         check_overwrite(&dest, args.overwrite)?;
         crate::core::commit::write_bytes_atomic(&dest, payload.as_bytes())?;
         if !quiet {
@@ -762,7 +762,7 @@ fn extract_one(
         }
     } else {
         let dest = PathBuf::from("extracted.bin");
-        crate::core::commit::reject_carrier_output(&dest, &args.carrier)?;
+        crate::core::commit::reject_carrier_output(&dest, batch.carriers)?;
         check_overwrite(&dest, args.overwrite)?;
         crate::core::commit::write_bytes_atomic(&dest, payload.as_bytes())?;
         if !quiet {

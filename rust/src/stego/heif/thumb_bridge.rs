@@ -190,6 +190,14 @@ pub fn probe_heif_bridge_capacity(
     control: &Control<'_>,
 ) -> Result<StegoCapacityInfo, StrHideError> {
     let target = find_bridge_target(carrier_bytes)?;
+    let isobmff = parse_isobmff(carrier_bytes)?;
+    if has_relocatable_track_tables(&isobmff, carrier_bytes) {
+        return Err(StrHideError::Rejection(
+            "HEIF bridge cannot resize a carrier with media tracks: `stco`/`co64`/`saio` \
+             offsets outside the replaced item would become stale"
+                .into(),
+        ));
+    }
     let carrier_slice = &carrier_bytes[target.file_offset..target.file_offset + target.length];
     let tuning = bridge.tuning.resolve();
     // Resolve the credential even though the JPEG probe does not take one:
@@ -495,7 +503,7 @@ fn reconstruct_heif(
                 )?;
             } else {
                 for ext in &item.extents {
-                    let abs_off = item.base_offset + ext.offset;
+                    let abs_off = item.base_offset.saturating_add(ext.offset);
                     if abs_off >= target_end_orig && ext.offset_sz > 0 {
                         let new_ext_off = ((ext.offset as i64) + delta).max(0) as u64;
                         patch_uint(&mut out, map(ext.offset_pos)?, ext.offset_sz, new_ext_off)?;

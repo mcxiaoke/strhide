@@ -236,37 +236,9 @@ impl StrHideError {
     }
 
     /// Error category (used to translate category prefixes during CLI rendering).
-    /// `NoHiddenData` and `General` do not carry a prefix and return `None`.
+    /// Variants without a dedicated category prefix return `None`.
     pub fn category(&self) -> Option<crate::core::i18n::Msg> {
-        match self {
-            StrHideError::Io(_) => Some(crate::core::i18n::Msg::ErrIo),
-            StrHideError::CorruptedData(_) => Some(crate::core::i18n::Msg::ErrCorrupted),
-            StrHideError::Password(_) | StrHideError::PasswordWithHint { .. } => {
-                Some(crate::core::i18n::Msg::ErrPassword)
-            }
-            StrHideError::Rejection(_) | StrHideError::SafetyThreshold { .. } => {
-                Some(crate::core::i18n::Msg::ErrRejection)
-            }
-            StrHideError::AlreadyExists(_) => Some(crate::core::i18n::Msg::ErrRejection),
-            StrHideError::TargetBusy(_) => Some(crate::core::i18n::Msg::ErrIo),
-            StrHideError::RestoreMismatch { .. } => {
-                Some(crate::core::i18n::Msg::ErrRestoreMismatch)
-            }
-            StrHideError::PayloadTooLarge(_) => Some(crate::core::i18n::Msg::ErrCapacity),
-            StrHideError::UnsupportedFormat(_)
-            | StrHideError::UnsupportedVersion(_)
-            | StrHideError::Unsupported(_) => Some(crate::core::i18n::Msg::ErrUnsupported),
-            StrHideError::TrellisInfeasible { .. } => Some(crate::core::i18n::Msg::ErrUnsupported),
-            // A cancellation is the caller's own decision, not an error class:
-            // there is nothing to translate and nothing went wrong.
-            StrHideError::Cancelled => None,
-            StrHideError::InvalidArgument(_)
-            | StrHideError::ConfigError(_)
-            | StrHideError::CryptoError(_)
-            | StrHideError::BufferOverflow(_)
-            | StrHideError::NoHiddenData(_)
-            | StrHideError::General(_) => None,
-        }
+        self.kind().category()
     }
 
     /// Extracted detail text without the English category prefix.
@@ -386,6 +358,35 @@ pub enum ErrorKind {
     General,
 }
 
+impl ErrorKind {
+    /// Localizable category key associated with this error kind, if any.
+    pub fn category(self) -> Option<crate::core::i18n::Msg> {
+        match self {
+            ErrorKind::Io | ErrorKind::TargetBusy => Some(crate::core::i18n::Msg::ErrIo),
+            ErrorKind::CorruptedData => Some(crate::core::i18n::Msg::ErrCorrupted),
+            ErrorKind::Password | ErrorKind::PasswordWithHint => {
+                Some(crate::core::i18n::Msg::ErrPassword)
+            }
+            ErrorKind::Rejection | ErrorKind::SafetyThreshold | ErrorKind::AlreadyExists => {
+                Some(crate::core::i18n::Msg::ErrRejection)
+            }
+            ErrorKind::RestoreMismatch => Some(crate::core::i18n::Msg::ErrRestoreMismatch),
+            ErrorKind::PayloadTooLarge => Some(crate::core::i18n::Msg::ErrCapacity),
+            ErrorKind::UnsupportedFormat
+            | ErrorKind::UnsupportedVersion
+            | ErrorKind::Unsupported
+            | ErrorKind::TrellisInfeasible => Some(crate::core::i18n::Msg::ErrUnsupported),
+            ErrorKind::Cancelled
+            | ErrorKind::InvalidArgument
+            | ErrorKind::Config
+            | ErrorKind::Crypto
+            | ErrorKind::BufferOverflow
+            | ErrorKind::NoHiddenData
+            | ErrorKind::General => None,
+        }
+    }
+}
+
 /// The parts of an [`StrHideError`], separated so a non-English front end can
 /// render it instead of scraping [`Display`](std::fmt::Display).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -410,7 +411,7 @@ pub struct ErrorDetail {
 impl ErrorDetail {
     /// Render the same single line the CLI prints, in `lang`.
     pub fn render(&self, lang: crate::core::i18n::Lang) -> String {
-        match self.category {
+        match self.category.or_else(|| self.kind.category()) {
             Some(cat) => crate::core::i18n::format_msg(
                 cat_line(lang),
                 &[("prefix", &cat.text(lang)), ("detail", &self.detail)],
@@ -421,7 +422,9 @@ impl ErrorDetail {
 
     /// The translated category label, for a front end that owns its own layout.
     pub fn category_text(&self, lang: crate::core::i18n::Lang) -> Option<&'static str> {
-        self.category.map(|cat| cat.text(lang))
+        self.category
+            .or_else(|| self.kind.category())
+            .map(|cat| cat.text(lang))
     }
 
     /// Reconstitute an approximate [`StrHideError`] with the preserved [`ErrorKind`].
@@ -430,20 +433,76 @@ impl ErrorDetail {
             ErrorKind::Io => StrHideError::Io(std::io::Error::other(self.detail.clone())),
             ErrorKind::CorruptedData => StrHideError::CorruptedData(self.detail.clone()),
             ErrorKind::Password => StrHideError::Password(self.detail.clone()),
-            ErrorKind::PasswordWithHint => StrHideError::PasswordWithHint {
-                message: self.detail.clone(),
-                hint: self.hint.clone(),
-            },
+            ErrorKind::PasswordWithHint => {
+                let message = match &self.hint {
+                    Some(h) => {
+                        let safe = crate::core::fs::escape_control_chars(h);
+                        let suffix = format!(". Hint: '{safe}'.");
+                        self.detail
+                            .strip_suffix(&suffix)
+                            .unwrap_or(&self.detail)
+                            .to_string()
+                    }
+                    None => self.detail.clone(),
+                };
+                StrHideError::PasswordWithHint {
+                    message,
+                    hint: self.hint.clone(),
+                }
+            }
             ErrorKind::TrellisInfeasible => StrHideError::TrellisInfeasible {
                 cause: TrellisCause::DeadElement,
                 detail: self.detail.clone(),
             },
             ErrorKind::Rejection => StrHideError::Rejection(self.detail.clone()),
             ErrorKind::AlreadyExists => {
-                StrHideError::AlreadyExists(std::path::PathBuf::from(&self.detail))
+                let path = self
+                    .detail
+                    .strip_prefix("Refusing to overwrite existing file '")
+                    .and_then(|s| s.strip_suffix("'. Choose another -o path or pass --overwrite."))
+                    .unwrap_or(&self.detail);
+                StrHideError::AlreadyExists(std::path::PathBuf::from(path))
             }
             ErrorKind::TargetBusy => {
-                StrHideError::TargetBusy(std::path::PathBuf::from(&self.detail))
+                let path = self
+                    .detail
+                    .strip_prefix("Target file '")
+                    .and_then(|s| s.strip_suffix("' is in use by another process"))
+                    .unwrap_or(&self.detail);
+                StrHideError::TargetBusy(std::path::PathBuf::from(path))
+            }
+            ErrorKind::SafetyThreshold => {
+                if let Some((required_bytes, available_bytes, tier)) =
+                    parse_safety_threshold_detail(&self.detail)
+                {
+                    StrHideError::SafetyThreshold {
+                        tier,
+                        required_bytes,
+                        available_bytes,
+                    }
+                } else {
+                    StrHideError::General(self.detail.clone())
+                }
+            }
+            ErrorKind::RestoreMismatch => {
+                if let Some((
+                    restored_size,
+                    expected_size,
+                    restored_sha256,
+                    expected_sha256,
+                    residual_envelope,
+                )) = parse_restore_mismatch_detail(&self.detail)
+                {
+                    StrHideError::RestoreMismatch {
+                        restored_size,
+                        expected_size,
+                        restored_sha256,
+                        expected_sha256,
+                        residual_envelope,
+                    }
+                } else {
+                    StrHideError::General(self.detail.clone())
+                }
             }
             ErrorKind::PayloadTooLarge => StrHideError::PayloadTooLarge(self.detail.clone()),
             ErrorKind::UnsupportedFormat => StrHideError::UnsupportedFormat(self.detail.clone()),
@@ -455,9 +514,47 @@ impl ErrorDetail {
             ErrorKind::Config => StrHideError::ConfigError(self.detail.clone()),
             ErrorKind::Crypto => StrHideError::CryptoError(self.detail.clone()),
             ErrorKind::BufferOverflow => StrHideError::BufferOverflow(self.detail.clone()),
-            _ => StrHideError::General(self.detail.clone()),
+            ErrorKind::General => StrHideError::General(self.detail.clone()),
         }
     }
+}
+
+fn parse_safety_threshold_detail(
+    detail: &str,
+) -> Option<(usize, usize, crate::params::SafetyLevel)> {
+    let rest = detail.strip_prefix("Payload (")?;
+    let (req_str, rest) = rest.split_once(" bytes) exceeds recommended safety threshold (")?;
+    let (avail_str, rest) = rest.split_once(" bytes, tier: '")?;
+    let tier_str = rest.strip_suffix("').")?;
+    let required_bytes = req_str.parse::<usize>().ok()?;
+    let available_bytes = avail_str.parse::<usize>().ok()?;
+    let tier = match tier_str {
+        "paranoid" => crate::params::SafetyLevel::Paranoid,
+        "high" => crate::params::SafetyLevel::High,
+        "balanced" => crate::params::SafetyLevel::Balanced,
+        _ => return None,
+    };
+    Some((required_bytes, available_bytes, tier))
+}
+
+fn parse_restore_mismatch_detail(detail: &str) -> Option<(u64, u64, String, String, bool)> {
+    let mut lines = detail.lines();
+    let size_line = lines.next()?.strip_prefix("Restored size: ")?;
+    let (restored_str, expected_part) = size_line.split_once(" (expected ")?;
+    let expected_str = expected_part.strip_suffix(')')?;
+    let restored_size = restored_str.parse::<u64>().ok()?;
+    let expected_size = expected_str.parse::<u64>().ok()?;
+    let restored_sha256 = lines.next()?.strip_prefix("Restored SHA256: ")?.to_string();
+    let expected_sha256 = lines.next()?.strip_prefix("Expected SHA256: ")?.to_string();
+    let diag = lines.next()?;
+    let residual_envelope = diag.contains("another hidden envelope");
+    Some((
+        restored_size,
+        expected_size,
+        restored_sha256,
+        expected_sha256,
+        residual_envelope,
+    ))
 }
 
 /// The `"[ERROR] {prefix}: {detail}"` template in `lang`.
@@ -529,5 +626,51 @@ mod tests {
         let en_ctx = crate::core::i18n::RenderCtx::new(crate::core::i18n::Lang::En);
         let detail_en = err.detail_i18n_with_ctx(en_ctx);
         assert_eq!(detail_en.category_label, Some("Password error"));
+    }
+
+    #[test]
+    fn test_error_detail_to_error_and_deserialized_render_roundtrip() {
+        let cases = vec![
+            StrHideError::AlreadyExists(PathBuf::from("secret.png")),
+            StrHideError::TargetBusy(PathBuf::from("video.mp4")),
+            StrHideError::PasswordWithHint {
+                message: "Password required to extract hidden data".into(),
+                hint: Some("my birth year".into()),
+            },
+            StrHideError::SafetyThreshold {
+                tier: crate::params::SafetyLevel::High,
+                required_bytes: 1000,
+                available_bytes: 500,
+            },
+            StrHideError::RestoreMismatch {
+                restored_size: 100,
+                expected_size: 200,
+                restored_sha256: "aaa".into(),
+                expected_sha256: "bbb".into(),
+                residual_envelope: true,
+            },
+        ];
+
+        for err in cases {
+            let expected_kind = err.kind();
+            let expected_detail = err.detail();
+            let detail_struct = err.detail_i18n();
+            let roundtrip = detail_struct.to_error();
+            assert_eq!(roundtrip.kind(), expected_kind);
+            assert_eq!(roundtrip.detail(), expected_detail);
+
+            // JSON deserialization drops skipped `category`/`category_label`,
+            // yet `render` and `category_text` must preserve the category prefix.
+            let json = serde_json::to_string(&detail_struct).expect("serialize");
+            let deser: ErrorDetail = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(
+                deser.render(crate::core::i18n::Lang::En),
+                detail_struct.render(crate::core::i18n::Lang::En)
+            );
+            assert_eq!(
+                deser.category_text(crate::core::i18n::Lang::En),
+                detail_struct.category_text(crate::core::i18n::Lang::En)
+            );
+        }
     }
 }

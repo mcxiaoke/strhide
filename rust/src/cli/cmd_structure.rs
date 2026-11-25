@@ -260,7 +260,7 @@ pub(crate) fn handle_read(
     };
     match shared_batch {
         Some(batch) => run(batch),
-        None => run(&mut BatchOutputs::new(output_dir)),
+        None => run(&mut BatchOutputs::new(output_dir, &args.carrier)),
     }
 }
 
@@ -342,8 +342,8 @@ fn read_one(
         {
             #[cfg(feature = "content")]
             {
-                let inspect_opts = crate::stego::InspectOptions::new()
-                    .with_password(password.as_deref().unwrap_or_default());
+                let inspect_opts =
+                    crate::stego::InspectOptions::new().with_password_option(password.as_deref());
                 if let Ok(stego_info) = engine.stego().inspect_file(carrier, &inspect_opts)
                     && stego_info.has_hidden_data
                 {
@@ -397,7 +397,7 @@ fn read_one(
         // The batch output name may match any carrier in the batch, not just
         // this one; overwriting a carrier before all reads finish would destroy
         // a payload that is still scheduled for extraction.
-        crate::core::commit::reject_carrier_output(&dest, &args.carrier)?;
+        crate::core::commit::reject_carrier_output(&dest, batch.carriers)?;
         check_overwrite(&dest, args.overwrite)?;
         crate::core::commit::write_bytes_atomic(&dest, &res.data)?;
         batch.used.insert(dest.clone());
@@ -441,7 +441,7 @@ fn read_one(
             crate::structure::sanitize_filename(&res.filename)
         };
         let dest = PathBuf::from(fn_to_use);
-        crate::core::commit::reject_carrier_output(&dest, &args.carrier)?;
+        crate::core::commit::reject_carrier_output(&dest, batch.carriers)?;
         // Same overwrite protection as the explicit-output path: never truncate
         // a file the user did not name.
         if dest.exists() && !args.overwrite {

@@ -75,34 +75,6 @@ pub fn write_carrier(
     )
 }
 
-/// Inject `source` into `carrier_path` with library-level tuning.
-///
-/// Same as [`write_carrier`], plus:
-///
-/// - `local`: writer-only knobs ([`LocalParams`]) that the reader never needs.
-///   Passing different values than the reader uses is safe.
-/// - `dialect`: the private dialect ([`StructureProfile`]). The reader must be
-///   given the same dialect; `StructureProfile::default()` is the official one.
-///
-/// ```no_run
-/// use strhide::structure::params::StructureProfile;
-/// use strhide::structure::{PayloadSource, WriteOptions, write_carrier_with};
-/// use strhide::params::{CompressionStrategy, LocalParams};
-/// # fn main() -> Result<(), strhide::errors::StrHideError> {
-/// // Both types are `#[non_exhaustive]`: build from `default()` with setters.
-/// let dialect = StructureProfile::default().with_default_secret("my-private-dialect");
-/// let local = LocalParams::default()
-///     .with_chunk_size(64 * 1024)
-///     .with_compression(CompressionStrategy::Never);
-/// write_carrier_with(
-///     std::path::Path::new("photo.png"),
-///     PayloadSource::Text("secret"),
-///     &WriteOptions::default(),
-///     &local,
-///     &dialect,
-/// )?;
-/// # Ok(()) }
-/// ```
 /// Everything a write produces that does not depend on a path.
 struct WriteCoreResult {
     format: FileFormat,
@@ -770,13 +742,40 @@ where
     Ok(())
 }
 
-/// Inject `source` into `carrier_path`, staging through a temp file and an
-/// atomic rename.
+/// Inject `source` into `carrier_path` with library-level tuning, staging
+/// through a temp file and an atomic rename.
+///
+/// Same as [`write_carrier`], plus:
+///
+/// - `local`: writer-only knobs ([`LocalParams`]) that the reader never needs.
+///   Passing different values than the reader uses is safe.
+/// - `dialect`: the private dialect ([`StructureProfile`]). The reader must be
+///   given the same dialect; `StructureProfile::default()` is the official one.
 ///
 /// Everything path-shaped lives here: rejection checks, permission probing, the
 /// `.bak` backup, the rename, and timestamp cloning. The protocol itself is in
 /// `write_core`, which is why [`write_carrier_bytes`] can offer the same
 /// guarantees minus the filesystem ones.
+///
+/// ```no_run
+/// use strhide::structure::params::StructureProfile;
+/// use strhide::structure::{PayloadSource, WriteOptions, write_carrier_with};
+/// use strhide::params::{CompressionStrategy, LocalParams};
+/// # fn main() -> Result<(), strhide::errors::StrHideError> {
+/// // Both types are `#[non_exhaustive]`: build from `default()` with setters.
+/// let dialect = StructureProfile::default().with_default_secret("my-private-dialect");
+/// let local = LocalParams::default()
+///     .with_chunk_size(64 * 1024)
+///     .with_compression(CompressionStrategy::Never);
+/// write_carrier_with(
+///     std::path::Path::new("photo.png"),
+///     PayloadSource::Text("secret"),
+///     &WriteOptions::default(),
+///     &local,
+///     &dialect,
+/// )?;
+/// # Ok(()) }
+/// ```
 pub fn write_carrier_with(
     carrier_path: &Path,
     source: PayloadSource,
