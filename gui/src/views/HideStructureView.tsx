@@ -9,7 +9,7 @@ import { useOutputDir } from "../hooks/useOutputDir";
 import { useTaskStore } from "../store/taskStore";
 import { uniqueOutputPath, writeStructureFile } from "../api/commands";
 import { parseStrHideError } from "../lib/errorHandler";
-import { withSuffix } from "../lib/format";
+import { formatBytes, withSuffix } from "../lib/format";
 import { fmt } from "../lib/i18n";
 import { FileQueue } from "../components/common/FileQueue";
 import { PasswordRow } from "../components/common/PasswordRow";
@@ -21,8 +21,9 @@ export const HideStructureView: React.FC<{ active: boolean }> = ({ active }) => 
   const c = useT();
   const { capabilities } = useCapabilities();
   const queue = useFileQueue("structure", capabilities);
-  const { updateProgress } = useTaskStore();
+  const { isRunning: globalRunning, updateProgress } = useTaskStore();
   const job = useSequentialJob();
+  const busy = job.running || globalRunning;
 
   const [payloadKind, setPayloadKind] = useState<PayloadKind>("text");
   const [text, setText] = useState("");
@@ -36,10 +37,10 @@ export const HideStructureView: React.FC<{ active: boolean }> = ({ active }) => 
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useFileDrop(active, queue.addPaths);
+  useFileDrop(active && !busy, queue.addPaths);
 
-  const payloadBytes =
-    payloadKind === "text" ? new TextEncoder().encode(text).length : payloadSize ?? 0;
+  const hasPayload = payloadKind === "text" ? text.length > 0 : payloadPath !== null;
+  const hasTargets = queue.items.some((item) => item.supported);
 
   const run = async () => {
     let payload: PayloadInputDto | null = null;
@@ -88,9 +89,18 @@ export const HideStructureView: React.FC<{ active: boolean }> = ({ active }) => 
           },
           updateProgress,
         );
+        const warningText = res.warnings?.length
+          ? res.warnings
+              .map((w) =>
+                w.kind === "size_inflation"
+                  ? `${w.kind}: +${w.ratio_pct}% (${formatBytes(w.ube_size)} / ${formatBytes(w.host_size)})`
+                  : w.hints.join(", "),
+              )
+              .join("; ")
+          : undefined;
         queue.update(item.path, {
           status: "ok",
-          message: undefined,
+          message: warningText,
           outputPath: res.carrier,
         });
       },
@@ -104,7 +114,7 @@ export const HideStructureView: React.FC<{ active: boolean }> = ({ active }) => 
     <div className="space-y-3">
       <p className="text-xs text-slate-400">{c.hide.desc}</p>
 
-      <FileQueue api={queue} disabled={job.running} hint={c.hide.fileHint} />
+      <FileQueue api={queue} disabled={busy} hint={c.hide.fileHint} />
 
       <PayloadEditor
         label={c.hide.payloadLabel}
@@ -119,15 +129,18 @@ export const HideStructureView: React.FC<{ active: boolean }> = ({ active }) => 
           setPayloadPath(path);
           setPayloadSize(size);
         }}
-        disabled={job.running}
+        disabled={busy}
       />
 
       <div className="space-y-2.5 rounded-xl border border-slate-800 bg-slate-900/60 p-3">
         <PasswordRow
           value={password}
-          onChange={setPassword}
+          onChange={(v) => {
+            setPassword(v);
+            if (!v) setStealth(false);
+          }}
           placeholder={c.hide.passwordPlaceholder}
-          disabled={job.running}
+          disabled={busy}
           extra={
             <button
               type="button"
@@ -147,7 +160,7 @@ export const HideStructureView: React.FC<{ active: boolean }> = ({ active }) => 
             value={passwordHint}
             onChange={setPasswordHint}
             placeholder={c.hide.hintPlaceholder}
-            disabled={job.running}
+            disabled={busy}
           />
         )}
 
@@ -157,14 +170,14 @@ export const HideStructureView: React.FC<{ active: boolean }> = ({ active }) => 
               type="checkbox"
               checked={stealth}
               onChange={(e) => setStealth(e.target.checked)}
-              disabled={job.running || !password}
+              disabled={busy || !password}
               className="h-3.5 w-3.5 rounded border-slate-700 bg-slate-800 text-cyan-500 focus:ring-0 disabled:opacity-40"
             />
             {c.hide.stealth}
           </label>
         )}
 
-        <DirRow value={outputDir} onChange={setOutputDir} disabled={job.running} />
+        <DirRow value={outputDir} onChange={setOutputDir} disabled={busy} />
       </div>
 
       {error && (
@@ -179,7 +192,7 @@ export const HideStructureView: React.FC<{ active: boolean }> = ({ active }) => 
         <button
           type="button"
           onClick={run}
-          disabled={job.running || payloadBytes === 0 || queue.items.length === 0}
+          disabled={busy || !hasPayload || !hasTargets}
           className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-700 px-4 py-2 text-xs font-semibold text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
         >
           <Play className="h-3.5 w-3.5" />

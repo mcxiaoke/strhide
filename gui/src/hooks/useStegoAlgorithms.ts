@@ -14,18 +14,25 @@ export function useStegoAlgorithms(): StegoAlgorithmInfo[] {
       setAlgos(cached);
       return;
     }
+    let alive = true;
     if (!pending) {
       pending = getStegoAlgorithms().catch((err) => {
+        pending = null;
         console.error("Failed to load stego algorithms:", err);
-        return [] as StegoAlgorithmInfo[];
+        throw err;
       });
     }
-    let alive = true;
-    pending.then((res) => {
-      const safeList = Array.isArray(res) ? res : [];
-      cached = safeList;
-      if (alive) setAlgos(safeList);
-    });
+    pending
+      .then((res) => {
+        const safeList = Array.isArray(res) ? res : [];
+        if (safeList.length > 0) {
+          cached = safeList;
+        }
+        if (alive) setAlgos(safeList);
+      })
+      .catch(() => {
+        // Error already logged; keep cached null so next mount retries.
+      });
     return () => {
       alive = false;
     };

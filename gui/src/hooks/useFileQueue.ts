@@ -69,17 +69,40 @@ export function useFileQueue(
         fresh.map(async (item) => {
           try {
             const meta = await getFileMetadata(item.path);
-            return { path: item.path, size: Number(meta.size_bytes) };
+            if (meta.exists === false || meta.is_file === false) {
+              return { path: item.path, invalid: true, size: null as number | null, modifiedMs: undefined as number | undefined };
+            }
+            return {
+              path: item.path,
+              invalid: false,
+              size: Number(meta.size_bytes),
+              modifiedMs: meta.modified_ms ?? undefined,
+            };
           } catch {
-            return { path: item.path, size: null as number | null };
+            return { path: item.path, invalid: false, size: null as number | null, modifiedMs: undefined as number | undefined };
           }
         }),
       );
+      const invalidPaths = new Set(metas.filter((m) => m.invalid).map((m) => m.path));
+      if (invalidPaths.size > 0) {
+        setSkipped((prev) => [
+          ...prev,
+          ...metas
+            .filter((m) => m.invalid)
+            .map((m) => ({
+              name: m.path.split(/[\\/]/).pop() || m.path,
+              reason: "formatUnsupported" as ReasonKey,
+            })),
+        ]);
+      }
       commit(
-        itemsRef.current.map((item) => {
-          const hit = metas.find((m) => m.path === item.path);
-          return hit && hit.size !== null ? { ...item, size: hit.size } : item;
-        }),
+        itemsRef.current
+          .filter((item) => !invalidPaths.has(item.path))
+          .map((item) => {
+            const hit = metas.find((m) => m.path === item.path);
+            if (!hit || hit.size === null) return item;
+            return { ...item, size: hit.size, modifiedMs: hit.modifiedMs };
+          }),
       );
     },
     [commit, need],

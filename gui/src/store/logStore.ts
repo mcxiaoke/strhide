@@ -42,6 +42,14 @@ function normalizeEntry(entry: Omit<LogEntry, "id"> & { id?: string | number }):
   };
 }
 
+export function safeJsonStringify(value: unknown, pretty = false): string {
+  try {
+    return JSON.stringify(value, null, pretty ? 2 : undefined) ?? String(value);
+  } catch {
+    return "[Unserializable]";
+  }
+}
+
 export const useLogStore = create<LogState>((set, get) => ({
   entries: [],
   filterSource: "all",
@@ -71,16 +79,23 @@ export const useLogStore = create<LogState>((set, get) => ({
   addEntries: (rawList) => {
     if (!rawList || rawList.length === 0) return;
     const normalized = rawList.map(normalizeEntry);
+    const { isModalOpen } = get();
 
     set((state) => {
       const existingIds = new Set(state.entries.map((e) => e.id));
       const deduplicated = normalized.filter((e) => !existingIds.has(e.id));
+      const addedErrors = isModalOpen
+        ? 0
+        : deduplicated.filter((e) => e.level === "error").length;
       const combined = [...state.entries, ...deduplicated];
       combined.sort((a, b) => a.timestamp - b.timestamp);
       if (combined.length > MAX_STORE_LOGS) {
         combined.splice(0, combined.length - MAX_STORE_LOGS);
       }
-      return { entries: combined };
+      return {
+        entries: combined,
+        unreadErrorCount: state.unreadErrorCount + addedErrors,
+      };
     });
   },
 
@@ -121,7 +136,7 @@ export const useLogStore = create<LogState>((set, get) => ({
         if (query) {
           const matchMsg = e.message.toLowerCase().includes(query);
           const matchTarget = e.target.toLowerCase().includes(query);
-          const matchData = e.data ? JSON.stringify(e.data).toLowerCase().includes(query) : false;
+          const matchData = e.data ? safeJsonStringify(e.data).toLowerCase().includes(query) : false;
           if (!matchMsg && !matchTarget && !matchData) return false;
         }
         return true;

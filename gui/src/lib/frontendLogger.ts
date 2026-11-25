@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useLogStore } from "../store/logStore";
-import { getRecentLogs } from "../api/commands";
+import { getRecentLogs, type RustLogEntryDto } from "../api/commands";
 import type { LogLevel } from "../types/strhide";
 
 let isInitialized = false;
@@ -50,13 +50,20 @@ export function initFrontendLogging() {
       orig(...args);
       try {
         const { message, data } = formatArgs(args);
-        useLogStore.getState().addEntry({
-          source: "frontend",
+        const entry = {
+          source: "frontend" as const,
           level,
           target: "console",
           message,
           data,
           timestamp: Date.now(),
+        };
+        queueMicrotask(() => {
+          try {
+            useLogStore.getState().addEntry(entry);
+          } catch {
+            // Ignore store errors inside deferred logger
+          }
         });
       } catch {
         // Ignore errors inside logger
@@ -98,10 +105,11 @@ export function initFrontendLogging() {
 
     // 3. Listen to Rust backend logs via Tauri event
     try {
-      listen<any>("app:log", (event) => {
+      listen<RustLogEntryDto>("app:log", (event) => {
         if (event.payload) {
           useLogStore.getState().addEntry({
             ...event.payload,
+            level: (event.payload.level.toLowerCase() as LogLevel) || "info",
             source: "rust",
           });
         }
@@ -116,6 +124,7 @@ export function initFrontendLogging() {
             useLogStore.getState().addEntries(
               backlog.map((item) => ({
                 ...item,
+                level: (item.level.toLowerCase() as LogLevel) || "info",
                 source: "rust",
               })),
             );

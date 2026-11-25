@@ -24,6 +24,15 @@ export interface SequentialJobSpec<T> {
   onBegin?: () => void;
 }
 
+function isCancelledErr(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "kind" in error &&
+    (error as { kind?: unknown }).kind === "cancelled"
+  );
+}
+
 /**
  * Run `items` one after another, with the shared task/queue bookkeeping.
  *
@@ -31,14 +40,17 @@ export interface SequentialJobSpec<T> {
  * matching what the "start" buttons previously tracked by hand.
  */
 export function useSequentialJob() {
-  const { startTask, finishTask } = useTaskStore();
+  const { startTask, finishTask, clearCancel } = useTaskStore();
   const [running, setRunning] = useState(false);
 
   const run = async <T,>(items: T[], spec: SequentialJobSpec<T>): Promise<void> => {
+    if (useTaskStore.getState().isRunning) return;
+    clearCancel();
     spec.onBegin?.();
     setRunning(true);
     try {
       for (let i = 0; i < items.length; i += 1) {
+        if (useTaskStore.getState().cancelRequested) break;
         const item = items[i];
         const taskId = `${spec.taskIdPrefix}-${Date.now()}-${i}`;
         startTask(taskId, spec.statusText(i, items.length, item));
@@ -47,7 +59,11 @@ export function useSequentialJob() {
           await spec.runOne(item, taskId, i);
         } catch (error) {
           spec.onError(item, error);
+          if (isCancelledErr(error) || useTaskStore.getState().cancelRequested) {
+            break;
+          }
         }
+        if (useTaskStore.getState().cancelRequested) break;
       }
     } finally {
       finishTask();

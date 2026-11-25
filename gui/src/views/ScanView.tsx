@@ -5,6 +5,7 @@ import { useFileQueue } from "../hooks/useFileQueue";
 import { useFileDrop } from "../hooks/useFileDrop";
 import { useT } from "../hooks/useT";
 import { useSequentialJob } from "../hooks/useSequentialJob";
+import { useTaskStore } from "../store/taskStore";
 import { inspectCarrier } from "../api/commands";
 import { parseStrHideError } from "../lib/errorHandler";
 import { formatBytes } from "../lib/format";
@@ -58,7 +59,7 @@ function toRow(info: DualInspect): ScanRow {
     capacityBytes: capacities.length > 0 ? Math.max(...capacities) : undefined,
     appended,
     embedded,
-    encrypted: !!info.is_encrypted || !!info.content_stego?.has_hidden_data,
+    encrypted: !!info.is_encrypted,
     payloadBytes,
     inconclusive,
   };
@@ -68,12 +69,27 @@ export const ScanView: React.FC<{ active: boolean }> = ({ active }) => {
   const c = useT();
   const { capabilities } = useCapabilities();
   const queue = useFileQueue("any", capabilities);
+  const { isRunning: globalRunning } = useTaskStore();
   const job = useSequentialJob();
+  const busy = job.running || globalRunning;
 
   const [rows, setRows] = useState<Record<string, ScanRow>>({});
   const [error, setError] = useState<string | null>(null);
 
-  useFileDrop(active, queue.addPaths);
+  useFileDrop(active && !busy, queue.addPaths);
+
+  React.useEffect(() => {
+    const activePaths = new Set(queue.items.map((item) => item.path));
+    setRows((prev) => {
+      const keys = Object.keys(prev);
+      if (keys.every((k) => activePaths.has(k))) return prev;
+      const next: Record<string, ScanRow> = {};
+      for (const k of keys) {
+        if (activePaths.has(k)) next[k] = prev[k];
+      }
+      return next;
+    });
+  }, [queue.items]);
 
   const hiddenText = (row: ScanRow) => {
     if (row.appended && row.embedded) return c.scan.hiddenBoth;
@@ -120,7 +136,7 @@ export const ScanView: React.FC<{ active: boolean }> = ({ active }) => {
     <div className="space-y-3">
       <p className="text-xs text-slate-400">{c.scan.desc}</p>
 
-      <FileQueue api={queue} disabled={job.running} hint={c.scan.fileHint} />
+      <FileQueue api={queue} disabled={busy} hint={c.scan.fileHint} />
 
       {error && (
         <div className="flex items-center gap-2 rounded-lg border border-rose-800/80 bg-rose-950/40 px-3 py-2 text-xs text-rose-300">
@@ -134,7 +150,7 @@ export const ScanView: React.FC<{ active: boolean }> = ({ active }) => {
         <button
           type="button"
           onClick={run}
-          disabled={job.running || queue.items.length === 0}
+          disabled={busy || !queue.items.some((item) => item.supported)}
           className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-700 px-4 py-2 text-xs font-semibold text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
         >
           <Play className="h-3.5 w-3.5" />

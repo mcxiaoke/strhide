@@ -34,15 +34,22 @@ export const PayloadEditor: React.FC<PayloadEditorProps> = ({
 }) => {
   const c = useT();
 
+  const pickReqRef = React.useRef(0);
+
   const pickFile = async () => {
+    const reqId = ++pickReqRef.current;
     try {
       const selected = await open({ multiple: false, title: c.common.chooseFile });
       if (!selected || typeof selected !== "string") return;
       try {
         const meta = await getFileMetadata(selected);
-        onFilePath(selected, Number(meta.size_bytes));
+        if (reqId === pickReqRef.current) {
+          onFilePath(selected, Number(meta.size_bytes));
+        }
       } catch {
-        onFilePath(selected, null);
+        if (reqId === pickReqRef.current) {
+          onFilePath(selected, null);
+        }
       }
     } catch (err) {
       console.error("Payload pick error:", err);

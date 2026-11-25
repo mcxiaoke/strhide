@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { parseStrHideError } from "../../src/lib/errorHandler";
+import { dirName } from "../../src/lib/format";
 import { t } from "../../src/lib/i18n";
 import type { ErrorDetail } from "../../src/types/strhide";
 
@@ -149,6 +150,25 @@ test.describe("GUI parseStrHideError & Structured Error Classification (I6)", ()
 
       const parsedThreshold = parseStrHideError(new Error("Safety threshold limit reached"), dictZh);
       expect(parsedThreshold.isCapacityOrSafety).toBe(true);
+    });
+
+    test("already_exists extracts quoted path from backend message", () => {
+      const err: ErrorDetail = {
+        kind: "already_exists",
+        detail: "Refusing to overwrite existing file 'C:/out/a.png'. Choose another -o path or pass --overwrite.",
+      };
+      const parsed = parseStrHideError(err, dictZh);
+      expect(parsed.isAlreadyExists).toBe(true);
+      expect(parsed.message).toContain("C:/out/a.png");
+      expect(parsed.message).not.toContain("Refusing to overwrite");
+    });
+
+    test("dirName preserves UNIX and Windows drive roots", () => {
+      expect(dirName("/foo.txt")).toBe("/");
+      expect(dirName("C:\\foo.txt")).toBe("C:\\");
+      expect(dirName("C:/foo.txt")).toBe("C:/");
+      expect(dirName("C:\\a\\b.txt")).toBe("C:\\a");
+      expect(dirName("foo.txt")).toBe("");
     });
   });
 });

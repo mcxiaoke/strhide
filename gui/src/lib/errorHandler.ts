@@ -35,10 +35,13 @@ export function parseStrHideError(err: unknown, dict: Dict): ParsedError {
     let message = detail.detail;
 
     switch (detail.kind) {
-      case "already_exists":
+      case "already_exists": {
         title = e.alreadyExistsTitle;
-        message = fmt(e.alreadyExists, { path: detail.detail });
+        const m = detail.detail.match(/'([^']+)'/);
+        const path = m ? m[1] : detail.detail;
+        message = fmt(e.alreadyExists, { path });
         break;
+      }
       case "target_busy":
         title = e.targetBusyTitle;
         message = e.targetBusy;

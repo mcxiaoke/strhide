@@ -41,6 +41,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   setLang: async (lang) => {
     try {
       await setUiLanguage(lang);
+      if (typeof document !== "undefined") {
+        document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+      }
       set({ lang });
     } catch (err) {
       console.error("Failed to set UI language:", err);
@@ -64,3 +67,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setAutoBackup: (autoBackup) => set({ autoBackup }),
 }));
+
+export async function syncInitialLang(): Promise<void> {
+  const lang = useSettingsStore.getState().lang;
+  if (typeof document !== "undefined") {
+    document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+  }
+  try {
+    await setUiLanguage(lang);
+  } catch {
+    // Unit tests or non-Tauri contexts may not provide invoke.
+  }
+}

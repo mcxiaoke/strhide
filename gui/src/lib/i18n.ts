@@ -55,7 +55,7 @@ const zh = {
   },
   stego: {
     desc: "将文字或文件隐写进图片、视频的画面数据。文件外观不变，但无法还原为原文件。",
-    fileHint: "支持 PNG、JPG、WebP、MP4（HEVC）",
+    fileHint: "支持 PNG、JPG、HEIC/HEIF、MP4/MOV/MKV（HEVC）、WAV、FLAC",
     payloadLabel: "要隐藏的内容",
     textTab: "文字",
     fileTab: "文件",
@@ -184,6 +184,8 @@ const zh = {
     collapseData: "收起原始输出",
     copyJson: "复制 JSON",
     entriesCount: "共 {n} 条",
+    maximizeWindow: "最大化",
+    restoreWindow: "还原",
   },
 };
 
@@ -227,7 +229,7 @@ const en: typeof zh = {
   },
   stego: {
     desc: "Writes text or files into the picture data of an image or video. The file looks unchanged, but cannot be restored.",
-    fileHint: "PNG, JPG, WebP, MP4 (HEVC)",
+    fileHint: "PNG, JPG, HEIC/HEIF, MP4/MOV/MKV (HEVC), WAV, FLAC",
     payloadLabel: "Content to hide",
     textTab: "Text",
     fileTab: "File",
@@ -356,6 +358,8 @@ const en: typeof zh = {
     collapseData: "Collapse Raw Output",
     copyJson: "Copy JSON",
     entriesCount: "{n} entries",
+    maximizeWindow: "Maximize",
+    restoreWindow: "Restore",
   },
 };
 

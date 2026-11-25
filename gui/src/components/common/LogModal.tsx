@@ -13,7 +13,7 @@ import {
   ChevronRight,
   FileCode,
 } from "lucide-react";
-import { useLogStore } from "../../store/logStore";
+import { useLogStore, safeJsonStringify } from "../../store/logStore";
 import { useT } from "../../hooks/useT";
 import type { LogEntry } from "../../types/strhide";
 
@@ -66,7 +66,7 @@ export const LogModal: React.FC = () => {
       if (q) {
         const matchMsg = e.message.toLowerCase().includes(q);
         const matchTarget = e.target.toLowerCase().includes(q);
-        const matchData = e.data ? JSON.stringify(e.data).toLowerCase().includes(q) : false;
+        const matchData = e.data ? safeJsonStringify(e.data).toLowerCase().includes(q) : false;
         if (!matchMsg && !matchTarget && !matchData) return false;
       }
       return true;
@@ -95,7 +95,7 @@ export const LogModal: React.FC = () => {
     setTimeout(() => {
       isAutoScrollingRef.current = false;
     }, 50);
-  }, [filteredEntries.length, autoScroll, isModalOpen]);
+  }, [filteredEntries[filteredEntries.length - 1]?.id, autoScroll, isModalOpen]);
 
   // Detect manual user scroll
   const handleScroll = () => {
@@ -121,8 +121,8 @@ export const LogModal: React.FC = () => {
     const d = new Date(e.timestamp);
     const timeStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}.${String(d.getMilliseconds()).padStart(3, "0")}`;
     let text = `[${timeStr}] [${e.source.toUpperCase()}] [${e.level.toUpperCase()}] [${e.target}] ${e.message}`;
-    if (e.data !== undefined) {
-      text += `\n${JSON.stringify(e.data, null, 2)}`;
+    if (e.data !== undefined && e.data !== null) {
+      text += `\n${safeJsonStringify(e.data, true)}`;
     }
 
     try {
@@ -185,7 +185,7 @@ export const LogModal: React.FC = () => {
             <button
               type="button"
               onClick={() => setIsMaximized(!isMaximized)}
-              title={isMaximized ? "Restore" : "Maximize"}
+              title={isMaximized ? c.logs.restoreWindow : c.logs.maximizeWindow}
               className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
             >
               {isMaximized ? (
@@ -380,12 +380,12 @@ export const LogModal: React.FC = () => {
                         {timeStr}
                       </span>
                       <span
-                        className={`shrink-0 rounded px-1.5 py-0.2 text-[10px] font-semibold uppercase ${sourceBadgeClass}`}
+                        className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${sourceBadgeClass}`}
                       >
                         {e.source === "rust" ? "RUST" : "GUI"}
                       </span>
                       <span
-                        className={`shrink-0 rounded px-1.5 py-0.2 text-[10px] uppercase ${levelBadgeClass}`}
+                        className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase ${levelBadgeClass}`}
                       >
                         {e.level}
                       </span>
@@ -438,7 +438,7 @@ export const LogModal: React.FC = () => {
                             onClick={async () => {
                               try {
                                 await navigator.clipboard.writeText(
-                                  JSON.stringify(e.data, null, 2),
+                                  safeJsonStringify(e.data, true),
                                 );
                                 setCopiedEntryId(e.id);
                                 setCopyFailedId(null);
@@ -463,7 +463,7 @@ export const LogModal: React.FC = () => {
                           </button>
                         </div>
                         <pre className="overflow-x-auto text-[11px] text-emerald-300 select-text leading-tight">
-                          {JSON.stringify(e.data, null, 2)}
+                          {safeJsonStringify(e.data, true)}
                         </pre>
                       </div>
                     )}

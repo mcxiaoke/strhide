@@ -25,15 +25,24 @@ export const ExtractView: React.FC<{ active: boolean }> = ({ active }) => {
   const c = useT();
   const { capabilities } = useCapabilities();
   const queue = useFileQueue("any", capabilities);
-  const { updateProgress } = useTaskStore();
+  const { isRunning: globalRunning, updateProgress } = useTaskStore();
   const job = useSequentialJob();
+  const busy = job.running || globalRunning;
 
   const [password, setPassword] = useState("");
+  const [passwordHint, setPasswordHint] = useState<string | undefined>(undefined);
   const [outputDir, setOutputDir] = useOutputDir();
   const [error, setError] = useState<string | null>(null);
   const [textResults, setTextResults] = useState<TextResult[]>([]);
 
-  useFileDrop(active, queue.addPaths);
+  useFileDrop(active && !busy, queue.addPaths);
+
+  React.useEffect(() => {
+    if (queue.items.length === 0) {
+      setTextResults([]);
+      setPasswordHint(undefined);
+    }
+  }, [queue.items.length]);
 
   const sourceLabel = (domain: string) =>
     domain === "content" ? c.extract.fromContent : c.extract.fromStructure;
@@ -53,7 +62,10 @@ export const ExtractView: React.FC<{ active: boolean }> = ({ active }) => {
       statusText: (i, n, item) => fmt(c.extract.progress, { i: i + 1, n, name: item.name }),
       markRunning: (item) =>
         queue.update(item.path, { status: "running", message: c.extract.reading, outputPath: undefined }),
-      onBegin: () => setTextResults([]),
+      onBegin: () => {
+        setTextResults([]);
+        setPasswordHint(undefined);
+      },
       runOne: async (item, taskId) => {
         const first = await smartExtract(
           taskId,
@@ -71,7 +83,7 @@ export const ExtractView: React.FC<{ active: boolean }> = ({ active }) => {
           ? fmt(c.extract.alsoPresent, { from: sourceLabel(first.also_present) })
           : "";
 
-        if (!summary.is_file && summary.text_preview) {
+        if (!summary.is_file && summary.text_preview !== undefined && summary.text_preview !== null) {
           setTextResults((prev) => [
             ...prev,
             { carrier: item.path, filename: summary.filename, text: summary.text_preview! },
@@ -108,7 +120,11 @@ export const ExtractView: React.FC<{ active: boolean }> = ({ active }) => {
         });
       },
       onError: (item, err) => {
-        queue.update(item.path, { status: "error", message: parseStrHideError(err, c).message });
+        const parsed = parseStrHideError(err, c);
+        if (parsed.isPasswordError && parsed.hint) {
+          setPasswordHint(parsed.hint);
+        }
+        queue.update(item.path, { status: "error", message: parsed.message });
       },
     });
   };
@@ -117,16 +133,17 @@ export const ExtractView: React.FC<{ active: boolean }> = ({ active }) => {
     <div className="space-y-3">
       <p className="text-xs text-slate-400">{c.extract.desc}</p>
 
-      <FileQueue api={queue} disabled={job.running} hint={c.extract.fileHint} />
+      <FileQueue api={queue} disabled={busy} hint={c.extract.fileHint} />
 
       <div className="space-y-2.5 rounded-xl border border-slate-800 bg-slate-900/60 p-3">
         <PasswordRow
           value={password}
           onChange={setPassword}
+          hint={passwordHint}
           placeholder={c.extract.passwordPlaceholder}
-          disabled={job.running}
+          disabled={busy}
         />
-        <DirRow value={outputDir} onChange={setOutputDir} disabled={job.running} />
+        <DirRow value={outputDir} onChange={setOutputDir} disabled={busy} />
       </div>
 
       {error && (
@@ -141,7 +158,7 @@ export const ExtractView: React.FC<{ active: boolean }> = ({ active }) => {
         <button
           type="button"
           onClick={run}
-          disabled={job.running || queue.items.length === 0}
+          disabled={busy || !queue.items.some((item) => item.supported)}
           className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-700 px-4 py-2 text-xs font-semibold text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
         >
           <Play className="h-3.5 w-3.5" />
@@ -161,7 +178,14 @@ export const ExtractView: React.FC<{ active: boolean }> = ({ active }) => {
                 </span>
                 <button
                   type="button"
-                  onClick={() => navigator.clipboard.writeText(res.text)}
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(res.text);
+                    } catch (copyErr) {
+                      console.error("Clipboard write failed:", copyErr);
+                      setError(c.logs.copyError);
+                    }
+                  }}
                   className="inline-flex shrink-0 items-center gap-1 text-slate-400 hover:text-cyan-300"
                 >
                   <Copy className="h-3.5 w-3.5" />

@@ -139,8 +139,17 @@ export async function cancelTask(taskId: string): Promise<boolean> {
   return invoke<boolean>("cancel_task_cmd", { taskId });
 }
 
-export async function getRecentLogs(): Promise<any[]> {
-  return invoke<any[]>("get_recent_logs_cmd");
+export interface RustLogEntryDto {
+  id: number;
+  timestamp: number;
+  level: string;
+  target: string;
+  message: string;
+  data?: unknown;
+}
+
+export async function getRecentLogs(): Promise<RustLogEntryDto[]> {
+  return invoke<RustLogEntryDto[]>("get_recent_logs_cmd");
 }
 
 export async function clearLogs(): Promise<void> {

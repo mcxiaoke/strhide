@@ -12,6 +12,7 @@ export interface QueueItem {
   dir: string;
   ext: string;
   size: number | null;
+  modifiedMs?: number;
   format: string | null;
   supported: boolean;
   reason?: ReasonKey;

@@ -20,7 +20,10 @@ export function baseName(path: string): string {
 
 export function dirName(path: string): string {
   const idx = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return idx > 0 ? path.slice(0, idx) : "";
+  if (idx < 0) return "";
+  if (idx === 0) return path.slice(0, 1);
+  if (idx === 2 && /^[A-Za-z]:[\\/]/.test(path)) return path.slice(0, 3);
+  return path.slice(0, idx);
 }
 
 export function extOf(name: string): string {

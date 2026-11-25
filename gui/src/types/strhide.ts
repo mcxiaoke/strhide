@@ -16,6 +16,7 @@ export type ErrorKind =
   | "payload_too_large"
   | "unsupported_format"
   | "no_hidden_data"
+  | "unsupported"
   | "unsupported_version"
   | "cancelled"
   | "invalid_argument"
@@ -104,6 +105,7 @@ export interface StegoCapacityInfo {
   safety_level: SafetyLevel;
   safety_bpp_limit: number;
   is_estimated: boolean;
+  tier_limits?: [number, number, number];
   media_info?: MediaInfo;
 }
 
