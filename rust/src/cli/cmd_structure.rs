@@ -59,7 +59,7 @@ pub(crate) fn handle_write(
             // The prompt answers for one carrier; asking once per file is
             // almost never what a batch user means, so refuse up front rather
             // than interleaving prompts with writes.
-            return Err(StrHideError::General(
+            return Err(StrHideError::InvalidArgument(
                 "Interactive strategy selection (--strategy ask) cannot be combined with multiple carriers. Use --strategy auto or name a strategy explicitly.".into(),
             ));
         }
@@ -67,7 +67,7 @@ pub(crate) fn handle_write(
         // The prompt and `--stdin` both read standard input, which would cause
         // race conditions and payload truncation. Refuse this combination outright.
         if args.payload.stdin {
-            return Err(StrHideError::General(
+            return Err(StrHideError::InvalidArgument(
                 "`--strategy ask` reads the choice from standard input, which `--stdin` is already \
                  using for the payload. Name a strategy explicitly (or use `--strategy auto`) when \
                  piping the payload in."
@@ -230,7 +230,7 @@ pub(crate) fn handle_read(
 
     let multi = args.carrier.len() > 1;
     if multi && args.stdout {
-        return Err(StrHideError::General(
+        return Err(StrHideError::InvalidArgument(
             "`--stdout` prints a single payload and cannot be combined with multiple carriers. Use `-o <DIR>` instead."
                 .into(),
         ));
@@ -238,7 +238,7 @@ pub(crate) fn handle_read(
     // `-o` names one output; with several carriers it must be a directory.
     let output_dir = batch_output_dir(args.output.as_deref(), multi, "reading")?;
     if multi && args.output.is_none() {
-        return Err(StrHideError::General(
+        return Err(StrHideError::InvalidArgument(
             "Reading several carriers needs `-o <DIR>`: the payload filenames recorded in the carriers can collide."
                 .into(),
         ));

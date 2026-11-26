@@ -230,10 +230,7 @@ fn run_capacity_probe(
                 carriers.len()
             )));
         } else if let Some(e) = last_error {
-            return Err(StrHideError::General(format!(
-                "{}: {e}",
-                carriers[0].display()
-            )));
+            return Err(e);
         }
     }
     Ok(())
@@ -295,7 +292,9 @@ pub(crate) fn handle_embed(
     };
 
     if payload.is_empty() {
-        return Err(StrHideError::General("Payload cannot be empty".into()));
+        return Err(StrHideError::InvalidArgument(
+            "Payload cannot be empty".into(),
+        ));
     }
     let payload_len = payload.len();
 
@@ -579,13 +578,13 @@ pub(crate) fn handle_extract(
 
     let multi = args.carrier.len() > 1;
     if multi && args.stdout {
-        return Err(StrHideError::General(
+        return Err(StrHideError::InvalidArgument(
             "`--stdout` prints a single payload and cannot be combined with multiple carriers. Use `-o <DIR>` instead."
                 .into(),
         ));
     }
     if multi && args.output.is_none() {
-        return Err(StrHideError::General(
+        return Err(StrHideError::InvalidArgument(
             "Extracting from several carriers needs `-o <DIR>`: the payload filenames can collide."
                 .into(),
         ));

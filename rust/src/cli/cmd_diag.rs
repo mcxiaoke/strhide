@@ -88,7 +88,7 @@ pub(crate) fn handle_inspect(
     let ExpandedInputs { files, missing } =
         expand_input_paths(&args.carrier, args.recursive, quiet)?;
     if files.is_empty() && missing.is_empty() {
-        return Err(StrHideError::General(
+        return Err(StrHideError::InvalidArgument(
             "No files to inspect (empty input or empty directory)".into(),
         ));
     }
@@ -258,7 +258,7 @@ pub(crate) fn handle_verify(
     let ExpandedInputs { files, missing } =
         expand_input_paths(&args.carrier, args.recursive, quiet)?;
     if files.is_empty() && missing.is_empty() {
-        return Err(StrHideError::General(
+        return Err(StrHideError::InvalidArgument(
             "No files to verify (empty input or empty directory)".into(),
         ));
     }
@@ -471,7 +471,7 @@ pub(crate) fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideErr
 
     if files.is_empty() {
         if missing.is_empty() {
-            return Err(StrHideError::General(
+            return Err(StrHideError::InvalidArgument(
                 "No files to scan (empty input or empty directory)".into(),
             ));
         } else {

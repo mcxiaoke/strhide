@@ -157,13 +157,13 @@ pub(crate) fn resolve_payload(
     }
     if let Some(ref df) = payload.data {
         if !df.exists() {
-            return Err(StrHideError::General(t!(
+            return Err(StrHideError::InvalidArgument(t!(
                 Msg::ErrPayloadFileNotFound,
                 path = df.display()
             )));
         }
         if df.is_dir() {
-            return Err(StrHideError::General(t!(
+            return Err(StrHideError::InvalidArgument(t!(
                 Msg::ErrPayloadFileIsDirectory,
                 path = df.display()
             )));
@@ -181,7 +181,7 @@ pub(crate) fn resolve_payload(
     {
         return Ok(ResolvedPayload::Text(env_text));
     }
-    Err(StrHideError::General(MISSING.to_string()))
+    Err(StrHideError::InvalidArgument(MISSING.to_string()))
 }
 
 /// Whether any per-format tuning flag was given.
@@ -234,7 +234,7 @@ pub(crate) fn stego_tuning(
             if matches!(name, "audio" | "wav_pcm" | "flac_residual") {
                 return Ok(StegoTuning::Auto);
             }
-            return Err(StrHideError::General(format!(
+            return Err(StrHideError::InvalidArgument(format!(
                 "Unknown algorithm '{name}'. Supported: hill, suniward, mipod (PNG), uerd, juniward, \
                  jmipod (JPEG), hevc, cabac (HEIF/HEVC), wav_pcm, flac_residual (Audio), auto"
             )));
@@ -322,7 +322,7 @@ pub(crate) fn stego_safety(
         Some(s) => match SafetyLevel::parse(s) {
             Some(lvl) => lvl,
             None => {
-                return Err(StrHideError::General(format!(
+                return Err(StrHideError::InvalidArgument(format!(
                     "Invalid safety level '{s}'. Supported: 'paranoid', 'high', 'balanced'"
                 )));
             }
@@ -365,7 +365,7 @@ pub(crate) fn resolve_key_file(path: Option<&Path>) -> Result<Option<[u8; 32]>, 
     }
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| {
-            StrHideError::General(format!(
+            StrHideError::InvalidArgument(format!(
                 "Key file '{}' is neither 32 raw bytes nor hexadecimal text",
                 path.display()
             ))
@@ -375,12 +375,13 @@ pub(crate) fn resolve_key_file(path: Option<&Path>) -> Result<Option<[u8; 32]>, 
     if digits.len() == 64 && digits.bytes().all(|b| b.is_ascii_hexdigit()) {
         let mut key = [0u8; 32];
         for (i, slot) in key.iter_mut().enumerate() {
-            *slot = u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16)
-                .map_err(|e| StrHideError::General(format!("Key file is not valid hex: {e}")))?;
+            *slot = u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16).map_err(|e| {
+                StrHideError::InvalidArgument(format!("Key file is not valid hex: {e}"))
+            })?;
         }
         return Ok(Some(key));
     }
-    Err(StrHideError::General(format!(
+    Err(StrHideError::InvalidArgument(format!(
         "Key file '{}' must hold exactly 32 raw bytes or 64 hex characters, found {} bytes",
         path.display(),
         bytes.len()
@@ -445,7 +446,7 @@ pub(crate) fn parse_seed_hex(text: &str) -> Result<[u8; 32], StrHideError> {
     let digits = text.trim();
     let digits = digits.strip_prefix("0x").unwrap_or(digits);
     if digits.len() != 64 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(StrHideError::General(
+        return Err(StrHideError::InvalidArgument(
             "--seed must be exactly 64 hex digits (32 bytes), e.g. \
              --seed 000102...3e3f"
                 .into(),
@@ -454,7 +455,7 @@ pub(crate) fn parse_seed_hex(text: &str) -> Result<[u8; 32], StrHideError> {
     let mut out = [0u8; 32];
     for (i, slot) in out.iter_mut().enumerate() {
         *slot = u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16)
-            .map_err(|e| StrHideError::General(format!("--seed is not valid hex: {e}")))?;
+            .map_err(|e| StrHideError::InvalidArgument(format!("--seed is not valid hex: {e}")))?;
     }
     Ok(out)
 }
