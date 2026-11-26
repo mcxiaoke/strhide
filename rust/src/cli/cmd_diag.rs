@@ -475,10 +475,13 @@ pub(crate) fn handle_scan(args: ScanArgs, quiet: bool) -> Result<i32, StrHideErr
                 "No files to scan (empty input or empty directory)".into(),
             ));
         } else {
-            return Err(StrHideError::General(format!(
-                "None of the specified input files exist ({} missing)",
-                missing.len()
-            )));
+            return Err(super::helpers::io_with_context(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "None of the specified input files exist ({} missing)",
+                    missing.len()
+                ),
+            ));
         }
     }
 

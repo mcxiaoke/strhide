@@ -275,7 +275,7 @@ pub(crate) fn handle_embed(
                 .take(MAX_STDIN_PAYLOAD + 1)
                 .read_to_end(&mut buf)?;
             if read as u64 > MAX_STDIN_PAYLOAD {
-                return Err(StrHideError::General(
+                return Err(StrHideError::PayloadTooLarge(
                     "Payload from --stdin exceeds the 1 GiB limit".into(),
                 ));
             }

@@ -1302,3 +1302,65 @@ fn extract_refuses_to_overwrite_its_own_carrier() {
     assert_eq!(code(&after), 0, "stderr: {}", stderr(&after));
     assert_eq!(stdout(&after).trim(), "content payload");
 }
+
+#[test]
+fn cli_error_categories_preserve_semantic_prefixes() {
+    let dir = scratch("typed_cli_errors");
+    fs::write(dir.join("notes.txt"), b"plain text").unwrap();
+
+    // Single-carrier `capacity` on unsupported format preserves UnsupportedFormat prefix.
+    let cap_en = run(&dir, &["--lang", "en", "capacity", "notes.txt"]);
+    assert_eq!(code(&cap_en), 1);
+    assert!(
+        stderr(&cap_en).contains("[ERROR] Unsupported format:"),
+        "stderr: {}",
+        stderr(&cap_en)
+    );
+    let cap_zh = run(&dir, &["--lang", "zh", "capacity", "notes.txt"]);
+    assert_eq!(code(&cap_zh), 1);
+    assert!(
+        stderr(&cap_zh).contains("[ERROR] 不支持的文件格式:"),
+        "stderr: {}",
+        stderr(&cap_zh)
+    );
+
+    // `scan` with missing-only inputs surfaces structured Io prefix.
+    let scan_en = run(&dir, &["--lang", "en", "scan", "does_not_exist.png"]);
+    assert_eq!(code(&scan_en), 1);
+    assert!(
+        stderr(&scan_en).contains("[ERROR] I/O error:"),
+        "stderr: {}",
+        stderr(&scan_en)
+    );
+    let scan_zh = run(&dir, &["--lang", "zh", "scan", "does_not_exist.png"]);
+    assert_eq!(code(&scan_zh), 1);
+    assert!(
+        stderr(&scan_zh).contains("[ERROR] I/O 错误:"),
+        "stderr: {}",
+        stderr(&scan_zh)
+    );
+
+    // Unknown algorithm uses InvalidArgument (no misleading UnsupportedFormat prefix).
+    let algo_zh = run(
+        &dir,
+        &[
+            "--lang",
+            "zh",
+            "capacity",
+            "notes.txt",
+            "-a",
+            "unknown_algo",
+        ],
+    );
+    assert_eq!(code(&algo_zh), 1);
+    assert!(
+        stderr(&algo_zh).contains("[ERROR] Unknown algorithm 'unknown_algo'"),
+        "stderr: {}",
+        stderr(&algo_zh)
+    );
+    assert!(
+        !stderr(&algo_zh).contains("不支持的文件格式"),
+        "stderr: {}",
+        stderr(&algo_zh)
+    );
+}

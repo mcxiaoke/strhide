@@ -25,13 +25,17 @@ use crate::t;
 
 use super::args::{PayloadSourceArgs, StegoTuningArgs};
 
+pub(crate) fn io_with_context(kind: std::io::ErrorKind, msg: String) -> StrHideError {
+    StrHideError::Io(std::io::Error::new(kind, msg))
+}
+
 pub(crate) fn prompt_password(confirm: bool) -> Result<String, StrHideError> {
     use std::io::Write;
     let p1 = t!(Msg::PromptEnterPassword);
     eprint!("{p1}");
     let _ = std::io::stderr().flush();
     let pwd = rpassword::read_password()
-        .map_err(|e| StrHideError::General(format!("Failed to read password: {e}")))?;
+        .map_err(|e| io_with_context(e.kind(), format!("Failed to read password: {e}")))?;
     if pwd.is_empty() {
         return Err(StrHideError::Password("Password cannot be empty".into()));
     }
@@ -40,7 +44,10 @@ pub(crate) fn prompt_password(confirm: bool) -> Result<String, StrHideError> {
         eprint!("{p2}");
         let _ = std::io::stderr().flush();
         let pwd2 = rpassword::read_password().map_err(|e| {
-            StrHideError::General(format!("Failed to read password confirmation: {e}"))
+            io_with_context(
+                e.kind(),
+                format!("Failed to read password confirmation: {e}"),
+            )
         })?;
         if pwd != pwd2 {
             return Err(StrHideError::Password(t!(Msg::PasswordMismatch)));
@@ -71,18 +78,18 @@ pub fn resolve_password(
         // whole thing into memory (and demand it be valid UTF-8).
         const MAX_PASSWORD_LINE: u64 = 4096;
         let file = std::fs::File::open(pf).map_err(|e| {
-            StrHideError::General(format!(
-                "Failed to read password file '{}': {e}",
-                pf.display()
-            ))
+            io_with_context(
+                e.kind(),
+                format!("Failed to read password file '{}': {e}", pf.display()),
+            )
         })?;
         let mut first_line = String::new();
         let mut reader = std::io::BufReader::new(std::io::Read::take(file, MAX_PASSWORD_LINE));
         std::io::BufRead::read_line(&mut reader, &mut first_line).map_err(|e| {
-            StrHideError::General(format!(
-                "Failed to read password file '{}': {e}",
-                pf.display()
-            ))
+            io_with_context(
+                e.kind(),
+                format!("Failed to read password file '{}': {e}", pf.display()),
+            )
         })?;
         let first_line = first_line.trim_end_matches(&['\r', '\n'][..]);
         if first_line.is_empty() {
@@ -106,7 +113,7 @@ pub fn resolve_password(
         {
             return Ok(Some(prompt_password(confirm)?));
         }
-        return Err(StrHideError::General(
+        return Err(StrHideError::Password(
             "Password required but no interactive terminal is available. Use -p/--password, --password-file, or STRHIDE_PASSWORD.".into(),
         ));
     }
@@ -251,7 +258,7 @@ pub(crate) fn stego_tuning(
     }
 
     let Some(format) = format else {
-        return Err(StrHideError::General(
+        return Err(StrHideError::UnsupportedFormat(
             "Tuning flags such as --stc-h need to know the carrier format, and this file \
              could not be recognised as a PNG, JPEG, HEIF/HEIC, or HEVC carrier"
                 .into(),
@@ -356,7 +363,10 @@ pub(crate) fn resolve_key_file(path: Option<&Path>) -> Result<Option<[u8; 32]>, 
         return Ok(None);
     };
     let bytes = std::fs::read(path).map_err(|e| {
-        StrHideError::General(format!("Failed to read key file '{}': {e}", path.display()))
+        io_with_context(
+            e.kind(),
+            format!("Failed to read key file '{}': {e}", path.display()),
+        )
     })?;
     if bytes.len() == 32 {
         let mut key = [0u8; 32];
@@ -852,5 +862,105 @@ mod tests {
             vec![PathBuf::from("a"), PathBuf::from("b")],
             "carriers after the failure must not run"
         );
+    }
+
+    #[test]
+    fn helpers_return_typed_errors_instead_of_general() {
+        use crate::errors::ErrorKind;
+
+        let missing_payload = PayloadSourceArgs {
+            data: Some(PathBuf::from("__nonexistent_payload_file__.bin")),
+            text: None,
+            stdin: false,
+        };
+        let cfg = FileConfig::default();
+        assert_eq!(
+            resolve_payload(&missing_payload, false, &cfg)
+                .err()
+                .unwrap()
+                .kind(),
+            ErrorKind::InvalidArgument
+        );
+
+        let empty_args = PayloadSourceArgs {
+            data: None,
+            text: None,
+            stdin: false,
+        };
+        if std::env::var("STRHIDE_TEXT").map_or(true, |v| v.is_empty()) {
+            let err = resolve_payload(&empty_args, false, &cfg).err().unwrap();
+            assert_eq!(err.kind(), ErrorKind::InvalidArgument);
+        }
+
+        let missing_key = Path::new("__nonexistent_key_file_for_test__.bin");
+        let key_err = resolve_key_file(Some(missing_key)).unwrap_err();
+        assert_eq!(key_err.kind(), ErrorKind::Io);
+        assert!(
+            key_err
+                .detail()
+                .contains("__nonexistent_key_file_for_test__.bin")
+        );
+        assert!(matches!(
+            key_err,
+            StrHideError::Io(ref io) if io.kind() == std::io::ErrorKind::NotFound
+        ));
+
+        let bad_hex_dir =
+            std::env::temp_dir().join(format!("strhide_bad_key_{}.txt", std::process::id()));
+        std::fs::write(&bad_hex_dir, b"not-valid-hex").unwrap();
+        let bad_key_err = resolve_key_file(Some(&bad_hex_dir)).unwrap_err();
+        let _ = std::fs::remove_file(&bad_hex_dir);
+        assert_eq!(bad_key_err.kind(), ErrorKind::InvalidArgument);
+
+        let mut tuning_args = StegoTuningArgs {
+            passwords: crate::cli::args::PasswordArgs {
+                password: None,
+                password_file: None,
+            },
+            key_file: None,
+            cipher_suite: None,
+            algorithm: Some("bad_algo".into()),
+            safety: None,
+            enforce_safety: false,
+            exact: false,
+            exclusion_rate: None,
+            neighbor_weight: None,
+            slot_budget: None,
+            p1_window: None,
+            p2_window: None,
+            stc_h: None,
+            seed: None,
+        };
+        assert_eq!(
+            stego_tuning(&tuning_args, None, &cfg).unwrap_err().kind(),
+            ErrorKind::InvalidArgument
+        );
+
+        tuning_args.algorithm = None;
+        tuning_args.stc_h = Some(10);
+        assert_eq!(
+            stego_tuning(&tuning_args, None, &cfg).unwrap_err().kind(),
+            ErrorKind::UnsupportedFormat
+        );
+
+        tuning_args.safety = Some("bogus".into());
+        assert_eq!(
+            stego_safety(&tuning_args, &cfg).unwrap_err().kind(),
+            ErrorKind::InvalidArgument
+        );
+
+        assert_eq!(
+            parse_seed_hex("zz").unwrap_err().kind(),
+            ErrorKind::InvalidArgument
+        );
+
+        let pwd_err = resolve_password(
+            None,
+            Some(Path::new("__nonexistent_pwd_file__.txt")),
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(pwd_err.kind(), ErrorKind::Io);
     }
 }

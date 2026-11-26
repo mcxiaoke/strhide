@@ -452,17 +452,19 @@ fn read_one(
         }
         // Use atomic commit: avoids partial writes on disk full / process abort,
         // and safely replaces existing symlinks instead of following them.
-        crate::core::commit::write_bytes_atomic(&dest, &res.data).map_err(|e| {
-            let reason = match &e {
-                StrHideError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied => {
-                    "permission denied"
-                }
-                _ => "the file could not be created",
-            };
-            StrHideError::General(format!(
-                "Cannot create '{}': {reason} [{e}]",
-                dest.display()
-            ))
+        crate::core::commit::write_bytes_atomic(&dest, &res.data).map_err(|e| match e {
+            StrHideError::Io(io) => {
+                let kind = io.kind();
+                let reason = match kind {
+                    std::io::ErrorKind::PermissionDenied => "permission denied",
+                    _ => "the file could not be created",
+                };
+                super::helpers::io_with_context(
+                    kind,
+                    format!("Cannot create '{}': {reason} [{io}]", dest.display()),
+                )
+            }
+            other => other,
         })?;
         if !quiet {
             let elapsed_str = format_duration(t_start.elapsed());
